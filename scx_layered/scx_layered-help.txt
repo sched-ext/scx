@@ -1,0 +1,205 @@
+scx_layered: A highly configurable multi-layer sched_ext scheduler
+
+scx_layered allows classifying tasks into multiple layers and applying
+different scheduling policies to them. The configuration is specified in
+json and composed of two parts - matches and policies.
+
+Matches
+=======
+
+Whenever a task is forked or its attributes are changed, the task goes
+through a series of matches to determine the layer it belongs to. A
+match set is composed of OR groups of AND blocks. An example:
+
+  "matches": [
+    [
+      {
+        "CgroupPrefix": "system.slice/"
+      }
+    ],
+    [
+      {
+        "CommPrefix": "fbagent"
+      },
+      {
+        "NiceAbove": 0
+      }
+    ]
+  ],
+
+The outer array contains the OR groups and the inner AND blocks, so the
+above matches:
+
+* Tasks which are in the cgroup sub-hierarchy under "system.slice".
+* Or tasks whose comm starts with "fbagent" and have a nice value > 0.
+
+Currently, the following matches are supported:
+
+* CgroupPrefix: Matches the prefix of the cgroup that the task belongs
+  to. As this is a string match, whether the pattern has the trailing
+  '/' makes a difference. For example, "TOP/CHILD/" only matches tasks
+  which are under that particular cgroup while "TOP/CHILD" also matches
+  tasks under "TOP/CHILD0/" or "TOP/CHILD1/".
+
+* CommPrefix: Matches the task's comm prefix.
+
+* NiceAbove: Matches if the task's nice value is greater than the
+  pattern.
+
+* NiceBelow: Matches if the task's nice value is smaller than the
+  pattern.
+
+While there are complexity limitations as the matches are performed in
+BPF, it is straightforward to add more types of matches.
+
+Policies
+========
+
+The following is an example policy configuration for a layer.
+
+  "kind": {
+    "Confined": {
+      "cpus_range": [1, 8],
+      "util_range": [0.8, 0.9]
+    }
+  }
+
+It's of "Confined" kind, which tries to concentrate the layer's tasks
+into a limited number of CPUs. In the above case, the number of CPUs
+assigned to the layer is scaled between 1 and 8 so that the per-cpu
+utilization is kept between 80% and 90%. If the CPUs are loaded higher
+than 90%, more CPUs are allocated to the layer. If the utilization drops
+below 80%, the layer loses CPUs.
+
+Currently, the following policy kinds are supported:
+
+* Confined: Tasks are restricted to the allocated CPUs. The number of
+  CPUs allocated is modulated to keep the per-CPU utilization in
+  "util_range". The range can optionally be restricted with the
+  "cpus_range" property.
+
+* Grouped: Similar to Confined but tasks may spill outside if there are
+  idle CPUs outside the allocated ones. If "preempt" is true, tasks in
+  this layer will preempt tasks which belong to other non-preempting
+  layers when no idle CPUs are available.
+
+* Open: Prefer the CPUs which are not occupied by Confined or Grouped
+  layers. Tasks in this group will spill into occupied CPUs if there are
+  no unoccupied idle CPUs. If "preempt" is true, tasks in this layer
+  will preempt tasks which belong to other non-preempting layers when no
+  idle CPUs are available.
+
+Similar to matches, adding new policies and extending existing ones
+should be relatively straightforward.
+
+Configuration example and running scx_layered
+=============================================
+
+A scx_layered config is composed of layer configs and a layer config is
+composed of a name, a set of matches and a policy block. Running the
+following will write an example configuration into example.json.
+
+  $ scx_layered -e example.json
+
+Note that the last layer in the configuration must have an empty match
+set as it must match all tasks which haven't been matched into previous
+layers.
+
+The configuration can be specified in multiple json files and command
+line arguments. Each must contain valid layer configurations and they're
+concatenated in the specified order. In most cases, something like the
+following should do.
+
+  $ scx_layered file:example.json
+
+Statistics
+==========
+
+scx_layered will print out a set of statistics every monitoring
+interval.
+
+  tot= 117909 local=86.20 open_idle= 0.21 affn_viol= 1.37 tctx_err=9 proc=6ms
+  busy= 34.2 util= 1733.6 load=  21744.1 fallback_cpu=  1
+    batch    : util/frac=   11.8/  0.7 load/frac=     29.7:  0.1 tasks=  2597
+               tot=   3478 local=67.80 open_idle= 0.00 preempt= 0.00 affn_viol= 0.00
+               cpus=  2 [  2,  2] 04000001 00000000
+    immediate: util/frac= 1218.8/ 70.3 load/frac=  21399.9: 98.4 tasks=  1107
+               tot=  68997 local=90.57 open_idle= 0.26 preempt= 9.36 affn_viol= 0.00
+               cpus= 50 [ 50, 50] fbfffffe 000fffff
+    normal   : util/frac=  502.9/ 29.0 load/frac=    314.5:  1.4 tasks=  3512
+               tot=  45434 local=80.97 open_idle= 0.16 preempt= 0.00 affn_viol= 3.56
+               cpus= 50 [ 50, 50] fbfffffe 000fffff
+
+Global statistics:
+
+- tot: Total scheduling events in the period.
+
+- local: % that got scheduled directly into an idle CPU.
+
+- open_idle: % of open layer tasks scheduled into occupied idle CPUs.
+
+- affn_viol: % which violated configured policies due to CPU affinity
+  restrictions.
+
+- proc: CPU time this binary consumed during the period.
+
+- busy: CPU busy % (100% means all CPUs were fully occupied)
+
+- util: CPU utilization % (100% means one CPU was fully occupied)
+
+- load: Sum of weight * duty_cycle for all tasks
+
+Per-layer statistics:
+
+- util/frac: CPU utilization and fraction % (sum of fractions across
+  layers is always 100%).
+
+- load/frac: Load sum and fraction %.
+
+- tasks: Number of tasks.
+
+- tot: Total scheduling events.
+
+- open_idle: % of tasks scheduled into idle CPUs occupied by other layers.
+
+- preempt: % of tasks that preempted other tasks.
+
+- affn_viol: % which violated configured policies due to CPU affinity
+  restrictions.
+
+- cpus: CUR_NR_CPUS [MIN_NR_CPUS, MAX_NR_CPUS] CUR_CPU_MASK
+
+Usage: scx_layered [OPTIONS] [SPECS]...
+
+Arguments:
+  [SPECS]...
+          Layer specification. See --help
+
+Options:
+  -s, --slice-us <SLICE_US>
+          Scheduling slice duration in microseconds
+          
+          [default: 20000]
+
+  -i, --interval <INTERVAL>
+          Scheduling interval in seconds
+          
+          [default: 0.1]
+
+  -m, --monitor <MONITOR>
+          Monitoring interval in seconds
+          
+          [default: 2.0]
+
+  -n, --no-load-frac-limit
+          Disable load-fraction based max layer CPU limit. ***NOTE*** load-fraction calculation is
+          currently broken due to lack of infeasible weight adjustments. Setting this option is recommended
+
+  -v, --verbose...
+          Enable verbose output including libbpf details. Specify multiple times to increase verbosity
+
+  -e, --example <EXAMPLE>
+          Write example layer specifications into the file and exit
+
+  -h, --help
+          Print help (see a summary with '-h')

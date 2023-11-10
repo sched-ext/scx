@@ -1,0 +1,66 @@
+[
+  {
+    "name": "batch",
+    "comment": "tasks under system.slice or tasks with nice value > 0",
+    "matches": [
+      [
+        {
+          "CgroupPrefix": "system.slice/"
+        }
+      ],
+      [
+        {
+          "NiceAbove": 0
+        }
+      ]
+    ],
+    "kind": {
+      "Confined": {
+        "cpus_range": [
+          0,
+          16
+        ],
+        "util_range": [
+          0.8,
+          0.9
+        ]
+      }
+    }
+  },
+  {
+    "name": "immediate",
+    "comment": "tasks under workload.slice with nice value < 0",
+    "matches": [
+      [
+        {
+          "CgroupPrefix": "workload.slice/"
+        },
+        {
+          "NiceBelow": 0
+        }
+      ]
+    ],
+    "kind": {
+      "Open": {
+        "preempt": true
+      }
+    }
+  },
+  {
+    "name": "normal",
+    "comment": "the rest",
+    "matches": [
+      []
+    ],
+    "kind": {
+      "Grouped": {
+        "cpus_range": null,
+        "util_range": [
+          0.5,
+          0.6
+        ],
+        "preempt": false
+      }
+    }
+  }
+]
