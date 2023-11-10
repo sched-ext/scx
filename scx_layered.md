@@ -1,8 +1,9 @@
+#scx_case_study
 # sched_ext case study on a production workload
 
 Tejun Heo (tj@kernel.org), Nov 10th, 2023
 
-This is a case study of using [sched_ext](http://lkml.kernel.org/r/20230711011412.100319-1-tj@kernel.org) to quickly develop and iterate a scheduler for a latency sensitive workload at Meta.
+This is a case study of using [sched_ext](http://lkml.kernel.org/r/20230711011412.100319-1-tj@kernel.org) ([documentation](https://github.com/sched-ext/sched_ext/blob/sched_ext-v5/Documentation/scheduler/sched-ext.rst)) to quickly develop and iterate a scheduler for a latency sensitive workload at Meta.
 
 This is one of the largest workloads in Meta's fleet. For this workload, how much work a machine can perform is determined by the 99th percentile request-response latency. Usually, the CPU utilization swings around 40%. With so much CPU time unused, it looked like there was plenty of room for scheduling optimizations.
 
@@ -15,17 +16,17 @@ There are several avenues that I wanted to explore:
 
 ## Work-conservation and idle CPU selection
 
-It's easy to implement work-conservation in sched_ext, especially on single socket machines. As `dsq`'s can be shared across multiple CPUs, I can simply let all CPUs share one `dsq`. Any CPU which becomes available will execute any thread which is ready to run making the scheduling behavior fully work-conserving. A similar behavior can be achieved in the builtin CFS (or EEVDF) kernel scheduler with [David Vernet](https://github.com/Decave)'s [shared runqueue patchset](https://lore.kernel.org/lkml/20230710200342.358255-1-void@manifault.com/). In fact, a variant of that patchset was already deployed in production showing ~1% bandwidth gain. As we will see, [`scx_simple`](https://github.com/sched-ext/sched_ext/blob/sched_ext/tools/sched_ext/scx_simple.bpf.c) without idle CPU selection improvements closely matches its performance.
+It's easy to implement work-conservation in sched_ext, especially on single socket machines. As a [dispatch queue (`dsq`)](https://github.com/sched-ext/sched_ext/blob/sched_ext-v5/Documentation/scheduler/sched-ext.rst#dispatch-queues) can be shared across multiple CPUs, I can simply let all CPUs share one `dsq`. Any CPU which becomes available will execute any thread which is ready to run making the scheduling behavior fully work-conserving. A similar behavior can be achieved in the builtin CFS (or EEVDF) kernel scheduler with [David Vernet](https://github.com/Decave)'s [shared runqueue patchset](https://lore.kernel.org/lkml/20230710200342.358255-1-void@manifault.com/) which was developed based on early sched_ext experiments. In fact, a variant of that patchset was already deployed in production showing ~1% throughput gain. As we will see, a simple sched_ext example scheduler, [`scx_simple`](https://github.com/sched-ext/sched_ext/blob/sched_ext/tools/sched_ext/scx_simple.bpf.c), without idle CPU selection improvements closely matches its performance.
 
 Past experiences have indicated that, for many workloads, L1/2 cache locality didn't mean all that much across scheduling boundaries. The suspicion is that the temporal locality decays too quickly while running something else, so what may remain in the cache isn't significant enough to make a meaningful difference. This means that it usually isn't beneficial to wait for a thread's previous CPU if there are idle CPUs, partly explaining the gains from work-conservation. Also, if L2 locality doesn't matter, there is no reason to prefer hyper-thread sibling of the previous CPU over fully an idle core (both siblings idle).
 
-In other words, given the choice between temporal locality and more hardware (full CPU with its own L1/2 cache), picking more hardware is likely to lead to better performance, albeit at a higher power cost.
+In other words, given the choice between temporal locality and more hardware (full CPU with its own L1/2 cache), picking more hardware is likely to lead to better performance on this particular workload, albeit at a higher power cost.
 
 [`scx_simple`](https://github.com/sched-ext/sched_ext/blob/sched_ext/tools/sched_ext/scx_simple.bpf.c) uses sched_ext's default idle CPU selection implementation - [`scx_select_cpu_dfl()`](https://github.com/sched-ext/sched_ext/blob/sched_ext-v5/kernel/sched/ext.c#L1990) which already always prefers fully idle cores. Testing on an ~1000 machine cluster and comparing against two control clusters was showing ~3.5% gain.
 
 <p align="center"><img width="80%" src="https://github.com/sched-ext/sched_ext/blob/case-studies/scx_layered/scx_simple-exp.png?raw=true"></p>
 
-The solid lines are from the test set. Dotted, controls. Both the upper and lower line groups capture the same signal but from different points. Before the red vertical line, the test systems are running the default CFS scheduler. At the red marker, I simply copied the `scx_simple` binary to the machines and ran it.
+The solid lines are from the test set. Dotted, controls. Both the upper and lower line groups capture the same signal but from different points. The lower group is the actual throughput measurement and are showing ~3.5% gain. Before the red vertical line, the test systems are running the default CFS scheduler. At the red marker, I simply copied the `scx_simple` binary to the machines and ran it.
 
 While I had my suspicion, I wanted to verify that the idle core selection actually is the main contributor, so I copied `scx_select_cpu_dfl()` and BPF'ied it to make a custom [`simple_select_cpu()`](https://github.com/sched-ext/sched_ext/blob/case-studies/scx_layered/modified-scx_simple.bpf.c#L63) implementation. This is the exact same logic just in BPF.
 
@@ -70,11 +71,11 @@ and then prevent them from jumping around across the whole system.
 }
 ```
 
-The above says the the layer can occupy upto 16 CPUs and the number of CPUs allocated will be dynamically adjusted to keep the average per-CPU utilization between 80% and 90%. This allows confining these low priority workloads to as few CPUs as possible for running them reasonably so that they don't walk around all over the system polluting caches and causing scheduling latencies.
+The above says the the layer can occupy up to 16 CPUs and the number of CPUs allocated will be dynamically adjusted to keep the average per-CPU utilization between 80% and 90%. This allows confining these low priority workloads to as few CPUs as possible for running them reasonably so that they don't walk around all over the system polluting caches and causing scheduling latencies.
 
 Note that we don't want to set a low fixed number limit. They are low priority but still need to run, and, depending on what's happening on the system, some managerial workloads may need quite a bit of CPU cycles.
 
-If you want to learn more about `scx_layered` and its configuration. Please read the [help message](https://github.com/sched-ext/sched_ext/blob/case-studies/scx_layered/scx_layered-help.txt) and take a look at an [example configuration file](https://github.com/sched-ext/sched_ext/blob/case-studies/scx_layered/scx_layered-example-config.json).
+If you want to learn more about `scx_layered` and its configuration. Please read the [help message](https://github.com/sched-ext/sched_ext/blob/case-studies/scx_layered/scx_layered-help.txt) and take a look at the 66-line [example configuration file](https://github.com/sched-ext/sched_ext/blob/case-studies/scx_layered/scx_layered-example-config.json).
 
 The following is from one afternoon that I spent iterating on `scx_layered` implementation and different configurations.
 
@@ -92,10 +93,10 @@ Speaking of bugs and crashes, I did make a mistake and the scheduler I was testi
 
 Two days later, I checked the graph and noticed that the performance gain went away in the morning (the rightmost CFS red line). I investigated and it turned out `scx_layered` failed in all machines in a pretty short time frame. Deploying a scheduler with a latent bug would usually mean disaster. However, here, all that happened was that the machines seamlessly switched back to CFS and the performance gain went away. No machines crashed. No drama.
 
-We are currently in the process of setting up a larger scale testing to obtain more reliable result but the results up until now is indicating combined >5% bandwidth gain compared to CFS with shared queue, which is a staggering amount.
+We are currently in the process of setting up a larger scale testing to obtain more reliable result but the results up until now is indicating combined >5% throughput gain compared to CFS with shared queue, which is a staggering amount.
 ## Conclusion
 
-This experience has clearly confirmed the benefits of sched_ext to us. There is no way we could have experimented with scheduler changes this significant with production workload. It would have taken too long, and too much coordination and pain. Even if we could experiment and obtain the same results, the path to deployment would be too uncertain and arduous.
+This experience has clearly confirmed the benefits of sched_ext to us. There is no way we could have experimented with an in-kernel scheduler change this significant in production. It would have taken too long, and too much coordination and pain. Even if we could experiment and obtain the same results, the path to deployment would be too uncertain and arduous.
 
 With sched_ext, I spent a couple weeks writing `scx_layered`, and another week testing it on the live production workload while continuously tinkering to obtain the result. Also, because it's so safe, we can easily expand the testing to wider scale and deploy as-is.
 
