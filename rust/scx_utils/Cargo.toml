@@ -1,0 +1,12 @@
+[package]
+name = "scx_utils"
+version = "0.1.0"
+edition = "2021"
+authors = ["Tejun Heo <tj@kernel.org>"]
+license = "GPL-2.0"
+repository = "https://github.com/sched-ext/scx"
+description = "Utilities for sched_ext schedulers"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
