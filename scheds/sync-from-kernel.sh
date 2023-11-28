@@ -1,12 +1,12 @@
 #!/bin/bash
 
 if [ $# -ne 1 ]; then
-    echo "Usage: sync-from-kernel.sh KERNEL_DIR_TO_SYNC_FROM" 1>&2
+    echo "Usage: sync-from-kernel.sh KERNEL_TREE_TO_SYNC_FROM" 1>&2
     exit 1
 fi
 
 kernel="$1/tools/sched_ext"
-files=(scheds/include/common/* scheds/kernel-examples/*.[hc])
+files=(include/common/* kernel-examples/*.[hc])
 
 echo "Syncing ${#files[@]} files from \"$1\""
 
@@ -14,7 +14,7 @@ nr_missing=0
 for i in "${files[@]}"; do
     base=$(basename "$i")
     if [ ! -f "$kernel/$base" ]; then
-	echo "$base does not exist in $kernel" 1>&2
+	echo "ERROR: $base does not exist in $kernel" 1>&2
 	nr_missing=$((nr_missing+1))
     fi
 done
