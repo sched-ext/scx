@@ -19,7 +19,10 @@ if get_option('libbpf_a') != ''
     cc.find_library('elf'),
     cc.find_library('z')]
 else
-  libbpf_dep = [dependency('libbpf', version: '>=1.2.2')]
+  libbpf_dep = dependency('libbpf', version: '>=1.2.2')
+  if libbpf_dep.version().version_compare('<1.3')
+    warning('libbpf <1.3 does not support RESIZE_ARRAY(), expect breakages in schedulers that use them')
+  endif
 endif
 
 #
