@@ -1,0 +1,19 @@
+#!/bin/bash
+
+set -e
+
+bpftool="$1"
+input="$2"
+skel="$3"
+subskel="$4"
+
+stem="${input%.o}"
+name="${input%.bpf.o}"
+name="${name##*/}"
+
+"$bpftool" gen object "$stem".l1o "$input"
+"$bpftool" gen object "$stem".l2o "$stem".l1o
+"$bpftool" gen object "$stem".l3o "$stem".l2o
+cmp "$stem".l2o "$stem".l3o
+"$bpftool" gen skeleton "$stem".l3o name "$name" > "$skel"
+"$bpftool" gen subskeleton "$stem".l3o name "$name" > "$subskel"
