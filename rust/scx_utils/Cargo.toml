@@ -7,6 +7,12 @@ license = "GPL-2.0"
 repository = "https://github.com/sched-ext/scx"
 description = "Utilities for sched_ext schedulers"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
+anyhow = "1.0"
+regex = "1.10"
+sscanf = "0.4"
+tar = "0.4"
+
+[build-dependencies]
+tar = "0.4"
+walkdir = "2.4"
