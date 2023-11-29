@@ -3,10 +3,43 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use anyhow::Result;
 use glob::glob;
 use libbpf_cargo::SkeletonBuilder;
+use sscanf::sscanf;
 use std::env;
+use std::path::Path;
 use std::path::PathBuf;
+
+const BPF_H_TAR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bpf_h.tar"));
+
+pub fn install_bpf_h<P: AsRef<Path>>(dest: P) -> Result<()> {
+    let mut ar = tar::Archive::new(BPF_H_TAR);
+    ar.unpack(dest)?;
+    Ok(())
+}
+
+pub fn vmlinux_h_version() -> (String, String) {
+    let mut ar = tar::Archive::new(BPF_H_TAR);
+
+    for file in ar.entries().unwrap() {
+        let file = file.unwrap();
+        if file.header().path().unwrap() != Path::new("vmlinux/vmlinux.h") {
+            continue;
+        }
+
+        let name = file
+            .link_name()
+            .unwrap()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+
+        return sscanf!(name, "vmlinux-v{String}-g{String}.h").unwrap();
+    }
+
+    panic!("vmlinux/vmlinux.h not found");
+}
 
 pub fn bindgen_bpf_intf(bpf_intf_rs: Option<&str>, intf_h: Option<&str>) {
     let intf_h = intf_h.unwrap_or("src/bpf/intf.h");
@@ -77,5 +110,40 @@ pub fn gen_bpf_skel(skel_name: Option<&str>, main_bpf_c: Option<&str>, deps: Opt
                 println!("cargo:rerun-if-changed={}", path.to_str().unwrap());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+    use std::io::BufRead;
+    use std::io::BufReader;
+
+    #[test]
+    fn test_install_bpf_h() {
+        let dir = concat!(env!("OUT_DIR"), "/test_install_bpf_h");
+        super::install_bpf_h(dir).unwrap();
+
+        let vmlinux_h = File::open(format!("{}/vmlinux/vmlinux.h", dir)).unwrap();
+        assert_eq!(
+            BufReader::new(vmlinux_h).lines().next().unwrap().unwrap(),
+            "#ifndef __VMLINUX_H__"
+        );
+    }
+
+    #[test]
+    fn test_vmlinux_h_version() {
+        let (ver, sha1) = super::vmlinux_h_version();
+
+        println!("test_vmlinux_h_version: ver={:?} sha1={:?}", &ver, &sha1,);
+
+        assert!(
+            regex::Regex::new(r"^[1-9][0-9]*\.[1-9][0-9]*(\.[1-9][0-9]*)?$")
+                .unwrap()
+                .is_match(&ver)
+        );
+        assert!(regex::Regex::new(r"^[0-9a-z]{12}$")
+            .unwrap()
+            .is_match(&sha1));
     }
 }
