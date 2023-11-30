@@ -11,10 +11,12 @@ description = "Utilities for sched_ext schedulers"
 anyhow = "1.0"
 bindgen = "0.69"
 glob = "0.3"
+lazy_static = "1.4"
 libbpf-cargo = "0.21"
 regex = "1.10"
 sscanf = "0.4"
 tar = "0.4"
+version-compare = "0.1"
 
 [build-dependencies]
 tar = "0.4"
