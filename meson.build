@@ -40,8 +40,8 @@ else
 endif
 
 #
-# Determine bpf_common_cflags which will be used to compile all .bpf.o
-# files. Note that "-target bpf" is not included to accommodate
+# Determine bpf_base_cflags which will be used to compile all .bpf.o files.
+# Note that "-target bpf" is not included to accommodate
 # libbpf_cargo::SkeletonBuilder.
 #
 # Map https://mesonbuild.com/Reference-tables.html#cpu-families to the
@@ -72,24 +72,30 @@ endif
 
 sys_incls = run_command(get_sys_incls, bpf_clang, check: true).stdout().splitlines()
 
-bpf_common_cflags = ['-g', '-O2', '-Wall', '-Wno-compare-distinct-pointer-types',
-                     '-D__TARGET_ARCH_' + arch_dict[cpu], '-mcpu=v3',
-                     '-m@0@-endian'.format(host_machine.endian())] + sys_incls
+bpf_base_cflags = ['-g', '-O2', '-Wall', '-Wno-compare-distinct-pointer-types',
+                   '-D__TARGET_ARCH_' + arch_dict[cpu], '-mcpu=v3',
+                   '-m@0@-endian'.format(host_machine.endian())] + sys_incls
 
-message('cpu=@0@ bpf_common_cflags=@1@'.format(cpu, bpf_common_cflags))
+message('cpu=@0@ bpf_base_cflags=@1@'.format(cpu, bpf_base_cflags))
 
 #
 # Generators to build BPF skel file
 #
 gen_bpf_o = generator(bpf_clang,
                       output: '@BASENAME@.o',
-                      arguments: [bpf_common_cflags, '-target', 'bpf',
-                                  '@EXTRA_ARGS@', '-c', '@INPUT@', '-o', '@OUTPUT@'])
+                      arguments: [bpf_base_cflags, '-target', 'bpf', '@EXTRA_ARGS@',
+                                  '-c', '@INPUT@', '-o', '@OUTPUT@'])
 gen_bpf_skel = generator(bpftool_build_skel,
                          output: ['@BASENAME@.skel.h', '@BASENAME@.subskel.h' ],
                          arguments: [bpftool.full_path(), '@INPUT@', '@OUTPUT0@', '@OUTPUT1@'])
 
+#
+# For rust sub-projects.
+#
 cargo_extra_args = ['--quiet']
+if get_option('buildtype') == 'release'
+  cargo_extra_args += '--release'
+endif
 
 subdir('rust')
 subdir('scheds')
