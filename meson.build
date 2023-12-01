@@ -7,10 +7,23 @@ fs = import('fs')
 
 bpf_clang = find_program(get_option('bpf_clang'))
 bpftool = find_program(get_option('bpftool'))
+get_clang_ver = find_program(join_paths(meson.current_source_dir(),
+                                        'meson-scripts/get_clang_ver'))
 bpftool_build_skel = find_program(join_paths(meson.current_source_dir(),
                                              'meson-scripts/bpftool_build_skel'))
 get_sys_incls = find_program(join_paths(meson.current_source_dir(),
                                         'meson-scripts/get_sys_incls'))
+
+bpf_clang_ver = run_command(get_clang_ver, bpf_clang, check: true).stdout().strip()
+bpf_clang_maj = bpf_clang_ver.split('.')[0].to_int()
+
+if bpf_clang_maj < 16
+  error('clang < 16 loses high 32 bits of 64 bit enums when compiling BPF (@0@ ver=@1@)'
+        .format(bpf_clang.full_path(), bpf_clang_ver))
+elif bpf_clang_maj < 17
+  warning('clang >= 17 recommended (@0@ ver=@1@)'
+          .format(bpf_clang.full_path(), bpf_clang_ver))
+endif
 
 if get_option('libbpf_a') != ''
   libbpf_dep = [declare_dependency(

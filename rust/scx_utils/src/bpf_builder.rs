@@ -79,7 +79,11 @@ impl BpfBuilder {
         );
 
         if version_compare::compare(&ver, "16") == Ok(version_compare::Cmp::Lt) {
-            bail!("clang < 16 loses high 32 bits of 64 bit enums when compiling BPF");
+            bail!(
+                "clang < 16 loses high 32 bits of 64 bit enums when compiling BPF ({:?} ver={:?})",
+                &clang,
+                &ver
+            );
         }
         if version_compare::compare(&ver, "17") == Ok(version_compare::Cmp::Lt) {
             println!(
@@ -362,6 +366,11 @@ impl BpfBuilder {
         self.bindgen_bpf_intf(&mut deps)?;
         self.gen_bpf_skel(&mut deps)?;
 
+	println!("cargo:rerun-if-env-changed=BPF_CLANG");
+	println!("cargo:rerun-if-env-changed=BPF_CFLAGS");
+	println!("cargo:rerun-if-env-changed=BPF_BASE_CFLAGS");
+	println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_PRE_INCL");
+	println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_POST_INCL");
         for dep in deps.iter() {
             println!("cargo:rerun-if-changed={}", dep);
         }
