@@ -8,3 +8,4 @@ bpf_includes = ['-I', join_paths(meson.current_source_dir(), 'include/common'),
 user_c_includes = include_directories('include/common')
 
 subdir('kernel-examples')
+subdir('rust-user')

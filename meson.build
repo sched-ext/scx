@@ -3,10 +3,11 @@ project('sched_ext schedulers', 'c',
         license: 'GPL2')
 
 cc = meson.get_compiler('c')
-fs = import('fs')
 
 bpf_clang = find_program(get_option('bpf_clang'))
 bpftool = find_program(get_option('bpftool'))
+cargo = find_program(get_option('cargo'))
+
 get_clang_ver = find_program(join_paths(meson.current_source_dir(),
                                         'meson-scripts/get_clang_ver'))
 bpftool_build_skel = find_program(join_paths(meson.current_source_dir(),
@@ -88,4 +89,7 @@ gen_bpf_skel = generator(bpftool_build_skel,
                          output: ['@BASENAME@.skel.h', '@BASENAME@.subskel.h' ],
                          arguments: [bpftool.full_path(), '@INPUT@', '@OUTPUT0@', '@OUTPUT1@'])
 
+cargo_extra_args = ['--quiet']
+
+subdir('rust')
 subdir('scheds')
