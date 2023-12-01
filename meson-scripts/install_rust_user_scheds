@@ -1,0 +1,17 @@
+#!/bin/bash
+
+set -e
+
+for manifest in "$MESON_SOURCE_ROOT"/scheds/rust-user/*/Cargo.toml; do
+    source_dir="${manifest%/Cargo.toml}"
+    target_dir="${MESON_BUILD_ROOT}${source_dir#${MESON_SOURCE_ROOT}}"
+    name="${target_dir##*/}"
+
+    bins=("${target_dir}/"*"/${name}")
+    if [ ${#bins[@]} -gt 1 ]; then
+	echo "Multiple binaries for $name under $target_dir" 1>&2
+	exit 1
+    fi
+
+    install -D "${bins[0]}" "${DESTDIR}/${MESON_INSTALL_PREFIX}/bin/${name}"
+done

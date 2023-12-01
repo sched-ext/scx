@@ -97,5 +97,7 @@ if get_option('buildtype') == 'release'
   cargo_extra_args += '--release'
 endif
 
+meson.add_install_script('meson-scripts/install_rust_user_scheds')
+
 subdir('rust')
 subdir('scheds')
