@@ -5,6 +5,6 @@ option('bpftool', type: 'string', value: 'bpftool',
 option('libbpf_a', type: 'string',
        description: 'Static libbpf.a to use')
 option('libbpf_h', type: 'array',
-       description: 'libbpf header directories, only meaning with libbpf_a option')
+       description: 'libbpf header directories, only meaningful with libbpf_a option')
 option('cargo', type: 'string', value: 'cargo',
        description: 'cargo to use when building rust sub-projects')

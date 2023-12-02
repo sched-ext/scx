@@ -92,6 +92,19 @@ gen_bpf_skel = generator(bpftool_build_skel,
 #
 # For rust sub-projects.
 #
+cargo_env = environment()
+cargo_env.set('BPF_CLANG', bpf_clang.full_path())
+
+foreach flag: bpf_base_cflags
+  cargo_env.append('BPF_BASE_CFLAGS', flag, separator: ' ')
+endforeach
+
+if get_option('libbpf_a') != ''
+  foreach header: get_option('libbpf_h')
+    cargo_env.append('BPF_EXTRA_CFLAGS_PRE_INCL', '-I' + header, separator: ' ')
+  endforeach
+endif
+
 cargo_extra_args = ['--quiet']
 if get_option('buildtype') == 'release'
   cargo_extra_args += '--release'
