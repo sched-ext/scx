@@ -2,6 +2,10 @@ project('sched_ext schedulers', 'c',
         version: '0.0.1',
         license: 'GPL2')
 
+if meson.version().version_compare('<1.2')
+  error('meson >= 1.2 required')
+endif
+
 fs = import('fs')
 
 cc = meson.get_compiler('c')
@@ -74,7 +78,6 @@ if cpu not in arch_dict
 endif
 
 sys_incls = run_command(get_sys_incls, bpf_clang, check: true).stdout().splitlines()
-
 bpf_base_cflags = ['-g', '-O2', '-Wall', '-Wno-compare-distinct-pointer-types',
                    '-D__TARGET_ARCH_' + arch_dict[cpu], '-mcpu=v3',
                    '-m@0@-endian'.format(host_machine.endian())] + sys_incls
@@ -82,7 +85,7 @@ bpf_base_cflags = ['-g', '-O2', '-Wall', '-Wno-compare-distinct-pointer-types',
 message('cpu=@0@ bpf_base_cflags=@1@'.format(cpu, bpf_base_cflags))
 
 #
-# Generators to build BPF skel file
+# Generators to build BPF skel file for C schedulers.
 #
 gen_bpf_o = generator(bpf_clang,
                       output: '@BASENAME@.o',
