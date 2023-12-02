@@ -2,6 +2,8 @@ project('sched_ext schedulers', 'c',
         version: '0.0.1',
         license: 'GPL2')
 
+fs = import('fs')
+
 cc = meson.get_compiler('c')
 
 bpf_clang = find_program(get_option('bpf_clang'))
@@ -31,7 +33,8 @@ if get_option('libbpf_a') != ''
     link_args: get_option('libbpf_a'),
     include_directories: get_option('libbpf_h')),
     cc.find_library('elf'),
-    cc.find_library('z')]
+    cc.find_library('z'),
+    cc.find_library('zstd')]
 else
   libbpf_dep = dependency('libbpf', version: '>=1.2.2')
   if libbpf_dep.version().version_compare('<1.3')
@@ -92,6 +95,11 @@ gen_bpf_skel = generator(bpftool_build_skel,
 #
 # For rust sub-projects.
 #
+cargo_build_args = ['--quiet']
+if get_option('buildtype') == 'release'
+  cargo_build_args += '--release'
+endif
+
 cargo_env = environment()
 cargo_env.set('BPF_CLANG', bpf_clang.full_path())
 
@@ -103,11 +111,20 @@ if get_option('libbpf_a') != ''
   foreach header: get_option('libbpf_h')
     cargo_env.append('BPF_EXTRA_CFLAGS_PRE_INCL', '-I' + header, separator: ' ')
   endforeach
-endif
 
-cargo_extra_args = ['--quiet']
-if get_option('buildtype') == 'release'
-  cargo_extra_args += '--release'
+  cargo_env.append('RUSTFLAGS',
+                   '-C link-args=-lelf -C link-args=-lz -C link-args=-lzstd -L '
+                   + fs.parent(get_option('libbpf_a')))
+
+  #
+  # XXX - scx_rusty's original Cargo.toml contained a dependency matching
+  # the following. However, it doesn't seem necessary to enable linking to
+  # libbpf.a. Ask Dan Schatzberg about the role the dependency line plays.
+  #
+  #cargo_build_args += ['--config',
+  #                     'dependencies.libbpf-sys.version="1.2"',
+  #                     '--config',
+  #                     'dependencies.libbpf-sys.features=["novendor", "static"]']
 endif
 
 meson.add_install_script('meson-scripts/install_rust_user_scheds')
