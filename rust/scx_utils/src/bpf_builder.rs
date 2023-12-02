@@ -304,7 +304,11 @@ impl BpfBuilder {
         // you build up options for the resulting bindings.
         let bindings = bindgen::Builder::default()
             // Should run clang with the same -I options as BPF compilation.
-            .clang_args(&self.cflags)
+            .clang_args(
+                self.cflags
+                    .iter()
+                    .chain(["-target".into(), "bpf".into()].iter()),
+            )
             // The input header we would like to generate bindings for.
             .header(input)
             // Tell cargo to invalidate the built crate whenever any of the
@@ -366,11 +370,11 @@ impl BpfBuilder {
         self.bindgen_bpf_intf(&mut deps)?;
         self.gen_bpf_skel(&mut deps)?;
 
-	println!("cargo:rerun-if-env-changed=BPF_CLANG");
-	println!("cargo:rerun-if-env-changed=BPF_CFLAGS");
-	println!("cargo:rerun-if-env-changed=BPF_BASE_CFLAGS");
-	println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_PRE_INCL");
-	println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_POST_INCL");
+        println!("cargo:rerun-if-env-changed=BPF_CLANG");
+        println!("cargo:rerun-if-env-changed=BPF_CFLAGS");
+        println!("cargo:rerun-if-env-changed=BPF_BASE_CFLAGS");
+        println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_PRE_INCL");
+        println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_POST_INCL");
         for dep in deps.iter() {
             println!("cargo:rerun-if-changed={}", dep);
         }
