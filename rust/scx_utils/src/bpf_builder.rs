@@ -234,6 +234,7 @@ impl BpfBuilder {
 
         cflags.push(format!("-I{}/vmlinux", &bpf_h));
         cflags.push(format!("-I{}/common", &bpf_h));
+        cflags.push(format!("-I{}/bpf-compat", &bpf_h));
 
         cflags.append(&mut match env::var("BPF_EXTRA_CFLAGS_POST_INCL") {
             Ok(v) => v.split_whitespace().map(|x| x.into()).collect(),
