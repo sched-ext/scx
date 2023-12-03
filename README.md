@@ -13,7 +13,6 @@ environments.
 - The [scx_layered case
   study](https://github.com/sched-ext/scx/blob/case-studies/case-studies/scx_layered.md)
   concretely demonstrates the power and benefits of sched_ext.
-
 - For more detailed high-level discussion, please refer to the [overview
   document](OVERVIEW.md).
 
@@ -51,14 +50,10 @@ followings are the dependencies and version requirements.
 
 - `meson`: >=1.2, build scripts under `meson-scripts/` use `bash` and
   standard utilities including `awk`.
-
 - `clang`: >=16 required, >=17 recommended
-
 - `libbpf`: >=1.2.2 required, >=1.3 recommended (`RESIZE_ARRAY` support is
   new in 1.3)
-
 - Rust toolchain: >=1.72
-
 - `libelf`, `libz`, `libzstd` if linking against staic `libbpf.a`
 
 
@@ -135,13 +130,9 @@ override some of the toolchains and dependencies - e.g. to directly use
 options can be used in such cases.
 
 - `bpf_clang`: `clang` to use when compiling `.bpf.c`
-
 - `bpftool`: `bpftool` to use when generating `.bpf.skel.h`
-
 - `libbpf_a`: Static `libbpf.a` to use
-
 - `libbpf_h`: `libbpf` header directories, only meaningful with `libbpf_a` option
-
 - `cargo`: `cargo` to use when building rust sub-projects
 
 For example, let's say you want to use `bpftool` and `libbpf` shipped in the
@@ -211,29 +202,20 @@ followings are important branches:
   branch. This branch periodically pulls from the
   [bpf-next](https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git/)
   tree to stay in sync with the kernel and BPF developments.
-
 - `sched_ext-release-*`: sched_ext backports on top of released kernels. We
   plan to maintain backports for a few recent kernel releases until
   sched_ext is merged upstream. Currently maintained backports:
-
-  - [`sched_ext-release-v6.6`]
-    (https://github.com/sched-ext/sched_ext/tree/sched_ext-release-v6.6)
-
+  - [`sched_ext-release-v6.6`](https://github.com/sched-ext/sched_ext/tree/sched_ext-release-v6.6)
 - `sched_ext-vN`: Patchsets posted upstream. The v4 LKML thread has
   high-level discussions.
-
   - [RFC](https://github.com/htejun/sched_ext):
     [LMKL thread](http://lkml.kernel.org/r/20221130082313.3241517-1-tj@kernel.org)
-
   - [`sched_ext-v2'](https://github.com/sched-ext/sched_ext/tree/sched_ext-v2):
     [LKML thread](http://lkml.kernel.org/r/20230128001639.3510083-1-tj@kernel.org)
-
   - [`sched_ext-v3'](https://github.com/sched-ext/sched_ext/tree/sched_ext-v3):
     [LKML thread](http://lkml.kernel.org/r/20230317213333.2174969-1-tj@kernel.org)
-
   - [`sched_ext-v4'](https://github.com/sched-ext/sched_ext/tree/sched_ext-v4):
     [LKML thread](http://lkml.kernel.org/r/20230711011412.100319-1-tj@kernel.org)
-
   - [`sched_ext-v5'](https://github.com/sched-ext/sched_ext/tree/sched_ext-v5):
     [LKML thread](http://lkml.kernel.org/r/20231111024835.2164816-1-tj@kernel.org)
 
@@ -244,9 +226,7 @@ We want to build a friendly and approachable community around sched_ext. You
 can reach us in the following channels:
 
 - github: https://github.com/sched-ext/scx
-
 - Slack: https://schedextworkspace.slack.com
-
 - Reddit: https://reddit.com/r/sched_ext
 
 We also hold weekly office hours every monday. Please see the #office-hours
