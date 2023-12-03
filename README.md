@@ -86,8 +86,8 @@ $ meson configure -Dbuildtype=release
 
 Running `meson configure` without any argument shows all current build
 options. For more information on `meson` arguments and built-in options,
-please refer to `meson --help` and [`meson`
-documentation](https://mesonbuild.com/Builtin-options.html).
+please refer to `meson --help` and its
+[documentation](https://mesonbuild.com/Builtin-options.html).
 
 
 ### Building Specific Schedulers and Binary Locations
@@ -222,8 +222,8 @@ followings are important branches:
 
 ## Getting in Touch
 
-We want to build a friendly and approachable community around sched_ext. You
-can reach us in the following channels:
+We aim to build a friendly and approachable community around sched_ext. You
+can reach us through the following channels:
 
 - github: https://github.com/sched-ext/scx
 - Slack: https://schedextworkspace.slack.com
