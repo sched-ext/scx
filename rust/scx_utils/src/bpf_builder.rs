@@ -196,15 +196,15 @@ lazy_static::lazy_static! {
 ///
 /// ```test
 /// $ cd $KERNEL
-/// $ make -C tools/lib/bpf
+/// $ make -C tools/bpf/bpftool
 /// ```
 ///
 /// To link the scheduler against the resulting `libbpf`:
 ///
 /// ```test
-/// $ env BPF_EXTRA_CFLAGS_POST_INCL=$KERNEL/tools/lib/bpf \
+/// $ env BPF_EXTRA_CFLAGS_POST_INCL=$KERNEL/tools/bpf/bpftool/libbpf/include \
 ///   RUSTFLAGS="-C link-args=-lelf -C link-args=-lz -C link-args=-lzstd \
-///   -L$KERNEL/tools/lib/bpf" cargo build --release
+///   -L$KERNEL/tools/bpf/bpftool/libbpf" cargo build --release
 /// ```
 pub struct BpfBuilder {
     clang: (String, String, String), // (clang, ver, arch)
