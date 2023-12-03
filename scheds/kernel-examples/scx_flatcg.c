@@ -12,7 +12,7 @@
 #include <fcntl.h>
 #include <time.h>
 #include <bpf/bpf.h>
-#include "scx_common.h"
+#include <scx/common.h>
 #include "scx_flatcg.h"
 #include "scx_flatcg.bpf.skel.h"
 

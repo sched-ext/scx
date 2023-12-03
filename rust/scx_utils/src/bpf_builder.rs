@@ -399,8 +399,8 @@ impl BpfBuilder {
             _ => vec![],
         });
 
+        cflags.push(format!("-I{}", &bpf_h));
         cflags.push(format!("-I{}/vmlinux", &bpf_h));
-        cflags.push(format!("-I{}/common", &bpf_h));
         cflags.push(format!("-I{}/bpf-compat", &bpf_h));
 
         cflags.append(&mut match env::var("BPF_EXTRA_CFLAGS_POST_INCL") {

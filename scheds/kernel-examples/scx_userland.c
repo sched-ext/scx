@@ -27,7 +27,7 @@
 #include <sys/queue.h>
 #include <sys/syscall.h>
 
-#include "scx_common.h"
+#include <scx/common.h>
 #include "scx_userland.h"
 #include "scx_userland.bpf.skel.h"
 

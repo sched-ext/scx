@@ -22,7 +22,7 @@
  * Copyright (c) 2022 Tejun Heo <tj@kernel.org>
  * Copyright (c) 2022 David Vernet <dvernet@meta.com>
  */
-#include "scx_common.bpf.h"
+#include <scx/common.bpf.h>
 
 char _license[] SEC("license") = "GPL";
 

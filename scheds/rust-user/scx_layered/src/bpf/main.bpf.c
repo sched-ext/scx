@@ -1,5 +1,6 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates. */
-#include "scx_common.bpf.h"
+#include <scx/common.bpf.h>
+#include <scx/ravg_impl.bpf.h>
 #include "intf.h"
 
 #include <errno.h>
@@ -27,7 +28,6 @@ static u32 preempt_cursor;
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
 
 #include "util.bpf.c"
-#include "ravg_impl.bpf.h"
 
 struct user_exit_info uei;
 

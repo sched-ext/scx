@@ -18,7 +18,7 @@ typedef unsigned long long u64;
 typedef long long s64;
 #endif
 
-#include "ravg.bpf.h"
+#include <scx/ravg.bpf.h>
 
 enum consts {
 	MAX_CPUS_SHIFT		= 9,
