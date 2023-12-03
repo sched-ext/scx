@@ -1,11 +1,27 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
-
+//
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-/// ravg_read() implementation for rust userland.
+//! # Running Average Utilities
+//!
+//! Rust userland utilities to access running averages tracked by BPF
+//! ravg_data. See
+//! [ravg.bpf.h](https://github.com/sched-ext/scx/blob/main/scheds/include/common/ravg.bpf.h)
+//! and
+//! [ravg_impl.bpf.h](https://github.com/sched-ext/scx/blob/main/scheds/include/common/ravg_impl.bpf.h)
+//! for details.
+
+/// Read the current running average
 ///
-/// See C ravg_read() in ravg_impl.bpf.h.
+/// Read the running average value at `@now` of ravg_data (`@val`,
+/// `@val_at`, `@old`, `@cur`) given `@half_life` and `@frac_bits`. This is
+/// equivalent to C `ravg_read()`.
+///
+/// There currently is no way to make `bindgen` and `libbpf_cargo` generated
+/// code to use a pre-existing type, so this function takes each field of
+/// struct ravg_data as a separate argument. This works but is ugly and
+/// error-prone. Something to improve in the future.
 pub fn ravg_read(
     val: u64,
     val_at: u64,
