@@ -44,7 +44,6 @@
  * cgroup-internal scheduling can be switched to FIFO with the -f option.
  */
 #include <scx/common.bpf.h>
-#include <scx/user_exit_info.h>
 #include "scx_flatcg.h"
 
 char _license[] SEC("license") = "GPL";

@@ -1,11 +1,17 @@
 #!/bin/bash
 
+set -e
+
 if [ $# -ne 1 ]; then
-    echo "Usage: sync-from-kernel.sh KERNEL_TREE_TO_SYNC_FROM" 1>&2
+    echo "Usage: sync-to-kernel.sh KERNEL_TREE_TO_SYNC_TO" 1>&2
     exit 1
 fi
 
+headers="
+
 kernel="$1/tools/sched_ext"
+headers="$kernel/include"
+c_scheds="$kernel/*.[hc]"
 files=(include/common/* kernel-examples/*.[hc])
 
 echo "Syncing ${#files[@]} files from \"$1\""
