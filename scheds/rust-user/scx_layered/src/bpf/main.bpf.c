@@ -250,10 +250,20 @@ struct layer *lookup_layer(int idx)
 	return &layers[idx];
 }
 
+/*
+ * Because the layer membership is by the default hierarchy cgroups rather than
+ * the CPU controller membership, we can't use ops.cgroup_move(). Let's iterate
+ * the tasks manually and set refresh_layer.
+ *
+ * The iteration isn't synchronized and may fail spuriously. It's not a big
+ * practical problem as process migrations are very rare in most modern systems.
+ * That said, we eventually want this to be based on CPU controller membership.
+ */
 SEC("tp_btf/cgroup_attach_task")
 int BPF_PROG(tp_cgroup_attach_task, struct cgroup *cgrp, const char *cgrp_path,
 	     struct task_struct *leader, bool threadgroup)
 {
+	struct list_head *thread_head;
 	struct task_struct *next;
 	struct task_ctx *tctx;
 	int leader_pid = leader->pid;
@@ -265,6 +275,8 @@ int BPF_PROG(tp_cgroup_attach_task, struct cgroup *cgrp, const char *cgrp_path,
 	if (!threadgroup)
 		return 0;
 
+	thread_head = &leader->signal->thread_head;
+
 	if (!(next = bpf_task_acquire(leader))) {
 		scx_bpf_error("failed to acquire leader");
 		return 0;
@@ -274,18 +286,18 @@ int BPF_PROG(tp_cgroup_attach_task, struct cgroup *cgrp, const char *cgrp_path,
 		struct task_struct *p;
 		int pid;
 
-		p = container_of(next->thread_group.next, struct task_struct, thread_group);
+		p = container_of(next->thread_node.next, struct task_struct, thread_node);
 		bpf_task_release(next);
 
-		pid = BPF_CORE_READ(p, pid);
-		if (pid == leader_pid) {
+		if (&p->thread_node == thread_head) {
 			next = NULL;
 			break;
 		}
 
+		pid = BPF_CORE_READ(p, pid);
 		next = bpf_task_from_pid(pid);
 		if (!next) {
-			scx_bpf_error("thread iteration failed");
+			bpf_printk("scx_layered: tp_cgroup_attach_task: thread iteration failed");
 			break;
 		}
 
