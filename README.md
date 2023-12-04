@@ -1,4 +1,4 @@
-# sched_ext Scheduler Repository
+# Sched_ext Schedulers and Tools
 
 [sched_ext](https://github.com/sched-ext/scx) is a Linux kernel feature
 which enables implementing kernel thread schedulers in BPF and dynamically
