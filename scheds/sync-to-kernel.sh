@@ -1,7 +1,6 @@
 #!/bin/bash
 
 set -e
-shopt -s globstar
 
 if [ $# -ne 1 ]; then
     echo "Usage: sync-to-kernel.sh KERNEL_TREE_TO_SYNC_TO" 1>&2
