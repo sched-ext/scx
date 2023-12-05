@@ -30,6 +30,8 @@ const volatile bool switch_partial;
 static u64 vtime_now;
 struct user_exit_info uei;
 
+#define SHARED_DSQ 0
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(key_size, sizeof(u32));
@@ -65,7 +67,7 @@ void BPF_STRUCT_OPS(simple_enqueue, struct task_struct *p, u64 enq_flags)
 	stat_inc(1);	/* count global queueing */
 
 	if (fifo_sched) {
-		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, enq_flags);
+		scx_bpf_dispatch(p, SHARED_DSQ, SCX_SLICE_DFL, enq_flags);
 	} else {
 		u64 vtime = p->scx.dsq_vtime;
 
@@ -76,9 +78,14 @@ void BPF_STRUCT_OPS(simple_enqueue, struct task_struct *p, u64 enq_flags)
 		if (vtime_before(vtime, vtime_now - SCX_SLICE_DFL))
 			vtime = vtime_now - SCX_SLICE_DFL;
 
-		scx_bpf_dispatch_vtime(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, vtime,
+		scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, vtime,
 				       enq_flags);
 	}
+}
+
+void BPF_STRUCT_OPS(simple_dispatch, s32 cpu, struct task_struct *prev)
+{
+	scx_bpf_consume(SHARED_DSQ);
 }
 
 void BPF_STRUCT_OPS(simple_running, struct task_struct *p)
@@ -119,11 +126,12 @@ void BPF_STRUCT_OPS(simple_enable, struct task_struct *p,
 	p->scx.dsq_vtime = vtime_now;
 }
 
-s32 BPF_STRUCT_OPS(simple_init)
+s32 BPF_STRUCT_OPS_SLEEPABLE(simple_init)
 {
 	if (!switch_partial)
 		scx_bpf_switch_all();
-	return 0;
+
+	return scx_bpf_create_dsq(SHARED_DSQ, -1);
 }
 
 void BPF_STRUCT_OPS(simple_exit, struct scx_exit_info *ei)
@@ -134,6 +142,7 @@ void BPF_STRUCT_OPS(simple_exit, struct scx_exit_info *ei)
 SEC(".struct_ops.link")
 struct sched_ext_ops simple_ops = {
 	.enqueue		= (void *)simple_enqueue,
+	.dispatch		= (void *)simple_dispatch,
 	.running		= (void *)simple_running,
 	.stopping		= (void *)simple_stopping,
 	.enable			= (void *)simple_enable,
