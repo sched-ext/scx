@@ -98,6 +98,9 @@ int main(int argc, char **argv)
 	link = bpf_map__attach_struct_ops(skel->maps.central_ops);
 	SCX_BUG_ON(!link, "Failed to attach struct_ops");
 
+	if (!skel->data->timer_pinned)
+		printf("WARNING : BPF_F_TIMER_CPU_PIN not available, timer not pinned to central\n");
+
 	while (!exit_req && !uei_exited(&skel->bss->uei)) {
 		printf("[SEQ %llu]\n", seq++);
 		printf("total   :%10lu    local:%10lu   queued:%10lu  lost:%10lu\n",
