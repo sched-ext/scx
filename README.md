@@ -60,8 +60,8 @@ Above, we switch the whole system to use `scx_simple` by running the binary,
 suspend it with `ctrl-z` to confirm that it's loaded, and then switch back
 to the kernel default scheduler by terminating the process with `ctrl-c`.
 For `scx_simple`, suspending the scheduler process doesn't affect scheduling
-behavior because all that the userspace component does is printing
-statistics. This doesn't hold for all schedulers.
+behavior because all that the userspace component does is print statistics.
+This doesn't hold for all schedulers.
 
 In addition to terminating the program, there are two more ways to disable a
 sched_ext scheduler - `sysrq-S` and the watchdog timer. Ignoring kernel
@@ -114,7 +114,7 @@ be usable.
 
 #### Setting Up Dev Environment
 
-In addition to the packages from the previous step, install the followings.
+In addition to the packages from the previous step, install the following.
 
 ```
 pacman -Sy scx/linux-headers scx/clang-github-bin meson cargo bpf pahole
