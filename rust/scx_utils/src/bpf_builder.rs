@@ -341,7 +341,7 @@ impl BpfBuilder {
         Ok(cflags)
     }
 
-    const BPF_H_TAR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bpf_h.tar"));
+    const BPF_H_TAR: &'static [u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bpf_h.tar"));
 
     fn install_bpf_h<P: AsRef<Path>>(dest: P) -> Result<()> {
         let mut ar = tar::Archive::new(Self::BPF_H_TAR);
