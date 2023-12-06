@@ -5,16 +5,17 @@ which enables implementing kernel thread schedulers in BPF and dynamically
 loading them. This repository contains various scheduler implementations and
 support utilities.
 
-sched_ext enables safe and rapid iterations of scheduler implementations
-radically widening the scope of scheduling strategies that can be
-experimented with and deployed even in massive and complex production
-environments.
+sched_ext enables safe and rapid iterations of scheduler implementations, thus
+radically widening the scope of scheduling strategies that can be experimented
+with and deployed; even in massive and complex production environments.
 
 - The [scx_layered case
   study](https://github.com/sched-ext/scx/blob/case-studies/case-studies/scx_layered.md)
   concretely demonstrates the power and benefits of sched_ext.
-- For more detailed high-level discussion, please refer to the [overview
-  document](OVERVIEW.md).
+- For a high-level but thorough overview of the sched_ext (especially its
+  motivation), please refer to the [overview document](OVERVIEW.md).
+- For a description of the schedulers shipped with this tree, please refer to
+  the [schedulers document](scheds/README.md).
 
 While the kernel feature is not upstream yet, we believe sched_ext has a
 reasonable chance of landing upstream in the foreseeable future. Both Meta
@@ -327,4 +328,5 @@ can reach us through the following channels:
 - Reddit: https://reddit.com/r/sched_ext
 
 We also hold weekly office hours every monday. Please see the #office-hours
-channel on slack for details.
+channel on slack for details. To join the slack community, you can use [this
+link](https://bit.ly/scx_slack).
