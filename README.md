@@ -26,7 +26,104 @@ In all example shell commands, `$SCX` refers to the root of this repository.
 
 ## Getting Started
 
-TO BE WRITTEN.
+All that's necessary for running sched_ext schedulers is a kernel with
+sched_ext support and the scheduler binaries along with the libraries they
+depend on. Switching to a sched_ext scheduler is as simple as running a
+sched_ext binary:
+
+```
+root@test ~# head -2 /sys/kernel/debug/sched/ext
+ops                           :
+enabled                       : 0
+root@test ~# scx_simple
+local=1 global=0
+local=74 global=15
+local=78 global=32
+local=82 global=42
+local=86 global=54
+^Zfish: Job 1, 'scx_simple' has stopped
+root@test ~# head -2 /sys/kernel/debug/sched/ext
+ops                           : simple
+enabled                       : 1
+root@test ~# fg
+Send job 1 (scx_simple) to foreground
+local=635 global=179
+local=696 global=192
+^CEXIT: BPF scheduler unregistered
+```
+
+[`scx_simple`](https://github.com/sched-ext/scx/blob/main/scheds/kernel-examples/scx_simple.bpf.c)
+is a very simple global vtime scheduler which can behave acceptably on CPUs
+with a simple topology (single socket and single L3 cache domain).
+
+Above, we switch the whole system to use `scx_simple` by running the binary,
+suspend it with `ctrl-z` to confirm that it's loaded, and then switch back
+to the kernel default scheduler by terminating the process with `ctrl-c`.
+For `scx_simple`, suspending the scheduler process doesn't affect scheduling
+behavior because all that the userspace component does is print statistics.
+This doesn't hold for all schedulers.
+
+In addition to terminating the program, there are two more ways to disable a
+sched_ext scheduler - `sysrq-S` and the watchdog timer. Ignoring kernel
+bugs, the worst damage a sched_ext scheduler can do to a system is starving
+some threads until the watchdog timer triggers.
+
+As illustrated, once the kernel and binaries are in place, using sched_ext
+schedulers is straightforward and safe. While developing and building
+schedulers in this repository isn't complicated either, sched_ext makes use
+of many new BPF features, some of which require build tools which are newer
+than what many distros are currently shipping. This should become less of an
+issue in the future. For the time being, the following custom repositories
+are provided for select distros.
+
+### Arch Linux
+
+#### Adding the Repository
+
+Import and locally sign the packager's GPG key. This can be skipped if the
+signature checking is disabled when adding the repo.
+
+```
+pacman-key --recv-keys 697C63013E65270255EBC2608744DC1EB26B5A9A
+pacman-key --lsign-key 697C63013E65270255EBC2608744DC1EB26B5A9A
+```
+
+Add the following custom repository section to `/etc/pacman.conf`.
+
+```
+[scx]
+Server = https://github.com/sched-ext/scx-packaging-arch/releases/download/repo
+```
+
+If you haven't imported the GPG key, append the following line.
+
+```
+SigLevel = Never
+```
+
+#### Installing the Kernel and Schedulers
+
+```
+pacman -Sy scx/linux scx/libbpf scx/scx-scheds
+```
+
+Note that the above replaces the default kernel and libbpf packages. The
+latter won't be unnecessary once libbpf is updated to >=1.3.0 in the Arch
+repository. After a reboot, the scheduler binaries `/usr/bin/scx_*` should
+be usable.
+
+#### Setting Up Dev Environment
+
+In addition to the packages from the previous step, install the following.
+
+```
+pacman -Sy scx/linux-headers scx/clang-github-bin meson cargo bpf pahole
+```
+
+`clang-github-bin` is necessary because the recommended `clang` version is
+17 while Arch is still shipping 16. It's built from the [AUR
+package](https://aur.archlinux.org/packages/clang-github-bin) of the same
+name. This is a repackage of the official LLVM release in `.deb` format.
 
 
 ## Repository Structure
