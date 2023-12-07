@@ -22,6 +22,8 @@ of schedulers:
   schedulers that are also shipped with the Linux kernel tree.
 - [rust-user](rust-user/README.md) describes all of the schedulers with rust
   user space components. All of these schedulers are production ready.
+- [c-user](c-user/README.md) describes all of the schedulers with C user space
+  components. All of these schedulers are production ready.
 
 ## Note on syncing
 
