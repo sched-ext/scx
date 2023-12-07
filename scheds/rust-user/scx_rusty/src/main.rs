@@ -191,17 +191,6 @@ fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
     match (curr, prev) {
         (
             procfs::CpuStat {
-                user_usec: Some(prev_user),
-                nice_usec: Some(prev_nice),
-                system_usec: Some(prev_system),
-                idle_usec: Some(prev_idle),
-                iowait_usec: Some(prev_iowait),
-                irq_usec: Some(prev_irq),
-                softirq_usec: Some(prev_softirq),
-                stolen_usec: Some(prev_stolen),
-                ..
-            },
-            procfs::CpuStat {
                 user_usec: Some(curr_user),
                 nice_usec: Some(curr_nice),
                 system_usec: Some(curr_system),
@@ -210,6 +199,17 @@ fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
                 irq_usec: Some(curr_irq),
                 softirq_usec: Some(curr_softirq),
                 stolen_usec: Some(curr_stolen),
+                ..
+            },
+            procfs::CpuStat {
+                user_usec: Some(prev_user),
+                nice_usec: Some(prev_nice),
+                system_usec: Some(prev_system),
+                idle_usec: Some(prev_idle),
+                iowait_usec: Some(prev_iowait),
+                irq_usec: Some(prev_irq),
+                softirq_usec: Some(prev_softirq),
+                stolen_usec: Some(prev_stolen),
                 ..
             },
         ) => {
