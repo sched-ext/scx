@@ -10,3 +10,4 @@ user_c_includes = include_directories('include')
 
 subdir('kernel-examples')
 subdir('rust-user')
+subdir('c-user')
