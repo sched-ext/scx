@@ -217,6 +217,14 @@ pub struct BpfBuilder {
 }
 
 impl BpfBuilder {
+    fn skip_clang_version_prefix(line: &str) -> &str {
+        if let Some(index) = line.find("clang version") {
+            &line[index..]
+        } else {
+            line
+        }
+    }
+
     fn find_clang() -> Result<(String, String, String)> {
         let clang = env::var("BPF_CLANG").unwrap_or("clang".into());
         let output = Command::new(&clang)
@@ -227,7 +235,10 @@ impl BpfBuilder {
         let stdout = String::from_utf8(output.stdout)?;
         let (mut ver, mut arch) = (None, None);
         for line in stdout.lines() {
-            if let Ok(v) = sscanf!(line, "clang version {String}") {
+            if let Ok(v) = sscanf!(
+                Self::skip_clang_version_prefix(line),
+                "clang version {String}"
+            ) {
                 // Version could be followed by (URL SHA1). Only take
                 // the first word.
                 ver = Some(v.split_whitespace().next().unwrap().to_string());
