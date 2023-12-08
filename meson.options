@@ -8,3 +8,7 @@ option('libbpf_h', type: 'array',
        description: 'libbpf header directories, only meaningful with libbpf_a option')
 option('cargo', type: 'string', value: 'cargo',
        description: 'cargo to use when building rust sub-projects')
+option('cargo_home', type: 'string',
+       description: 'CARGO_HOME env to use when invoking cargo')
+option('offline', type: 'boolean', value: 'false',
+       description: 'Compilation step should not access the internet')

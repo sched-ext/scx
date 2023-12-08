@@ -168,9 +168,8 @@ commands in the root of the tree builds and installs all schedulers under
 ```
 $ cd $SCX
 $ meson setup build --prefix ~
-$ cd build
-$ meson compile
-$ meson install
+$ meson compile -C build
+$ meson install -C build
 ```
 
 Note that `meson compile` step is not strictly necessary as `install`
@@ -203,14 +202,13 @@ want to build the simple example scheduler
 ```
 $ cd $SCX
 $ meson setup build -Dbuildtype=release
-$ cd build
-$ meson compile -v scx_simple scx_rusty
+$ meson compile -C build scx_simple scx_rusty
 ```
 
 You can also specify `-v` if you want to see the commands being used:
 
 ```
-$ meson compile -v scx_pair
+$ meson compile -C build -v scx_pair
 ```
 
 For C userspace schedulers such as the ones under `scheds/kernel-examples`,
@@ -236,6 +234,8 @@ options can be used in such cases.
 - `libbpf_a`: Static `libbpf.a` to use
 - `libbpf_h`: `libbpf` header directories, only meaningful with `libbpf_a` option
 - `cargo`: `cargo` to use when building rust sub-projects
+- 'cargo_home': 'CARGO_HOME env to use when invoking cargo'
+- `offline`: 'Compilation step should not access the internet'
 
 For example, let's say you want to use `bpftool` and `libbpf` shipped in the
 kernel tree located at `$KERNEL`. We need to build `bpftool` in the kernel
@@ -251,14 +251,40 @@ $ meson setup build -Dbuildtype=release -Dprefix=~/bin \
     -Dbpftool=$BPFTOOL/bpftool \
     -Dlibbpf_a=$BPFTOOL/libbpf/libbpf.a \
     -Dlibbpf_h=$BPFTOOL/libbpf/include
-$ cd build
-$ meson install
+$ meson install -C build
 ```
 
 Note that we use `libbpf` which was produced as a part of `bpftool` build
 process rather than buliding `libbpf` directly. This is necessary because
 `libbpf` header files need to be installed for them to be in the expected
 relative locations.
+
+
+### Offline Compilation
+
+Rust builds automatically download dependencies from crates.io; however,
+some build environments might not allow internet access requiring all
+dependencies to be available offline. The `fetch` target and `offline`
+option are provided for such cases.
+
+The following downloads all Rust dependencies into `$HOME/cargo-deps`.
+
+```
+$ cd $SCX
+$ meson setup build -Dcargo_home=$HOME/cargo-deps
+$ meson compile -C build fetch
+```
+
+The following builds the schedulers without accessing the internet. The
+`build` directory doesn't have to be the same one. The only requirement is
+that the `cargo_home` option points to a directory which contains the
+content generated from the previous step.
+
+```
+$ cd $SCX
+$ meson setup build -Dcargo_home=$HOME/cargo-deps -Doffline=true -Dbuildtype=release
+$ meson compile -C build
+```
 
 
 ### Working with Rust Sub-projects
