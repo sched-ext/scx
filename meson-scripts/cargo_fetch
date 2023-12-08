@@ -1,0 +1,17 @@
+#!/bin/bash
+
+shopt -s globstar
+set -e
+
+cargo="$1"
+
+#
+# Run `cargo fetch` for each Cargo.toml found in the source directory. This
+# can lead to fetching unnecessary packages if the source directory contains
+# past cargo build artifacts. While not ideal, this is a lot simpler and
+# shouldn't cause problems in practice.
+#
+for manifest in ${MESON_SOURCE_ROOT}/**/Cargo.toml; do
+    echo "Fetching for $manifest"
+    "$cargo" fetch --manifest-path="$manifest"
+done

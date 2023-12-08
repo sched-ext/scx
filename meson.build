@@ -20,6 +20,8 @@ bpftool_build_skel = find_program(join_paths(meson.current_source_dir(),
                                              'meson-scripts/bpftool_build_skel'))
 get_sys_incls = find_program(join_paths(meson.current_source_dir(),
                                         'meson-scripts/get_sys_incls'))
+cargo_fetch = find_program(join_paths(meson.current_source_dir(),
+                                      'meson-scripts/cargo_fetch'))
 
 bpf_clang_ver = run_command(get_clang_ver, bpf_clang, check: true).stdout().strip()
 bpf_clang_maj = bpf_clang_ver.split('.')[0].to_int()
@@ -103,6 +105,10 @@ if get_option('buildtype') == 'release'
   cargo_build_args += '--release'
 endif
 
+if get_option('offline')
+  cargo_build_args += '--offline'
+endif
+
 cargo_env = environment()
 cargo_env.set('BPF_CLANG', bpf_clang.full_path())
 
@@ -130,7 +136,13 @@ if get_option('libbpf_a') != ''
   #                     'dependencies.libbpf-sys.features=["novendor", "static"]']
 endif
 
+if get_option('cargo_home') != ''
+  cargo_env.set('CARGO_HOME', get_option('cargo_home'))
+endif
+
 meson.add_install_script('meson-scripts/install_rust_user_scheds')
+
+run_target('fetch', command: [cargo_fetch, cargo], env: cargo_env)
 
 subdir('rust')
 subdir('scheds')
