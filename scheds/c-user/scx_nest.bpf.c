@@ -414,6 +414,12 @@ void BPF_STRUCT_OPS(nest_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
+	pcpu_ctx = bpf_map_lookup_elem(&pcpu_ctxs, &key);
+	if (!pcpu_ctx) {
+		scx_bpf_error("Failed to lookup pcpu ctx");
+		return;
+	}
+
 	if (!scx_bpf_consume(FALLBACK_DSQ_ID)) {
 		in_primary = bpf_cpumask_test_cpu(cpu, cast_mask(primary));
 
@@ -424,12 +430,6 @@ void BPF_STRUCT_OPS(nest_dispatch, s32 cpu, struct task_struct *prev)
 
 		stat_inc(NEST_STAT(NOT_CONSUMED));
 		if (in_primary) {
-			pcpu_ctx = bpf_map_lookup_elem(&pcpu_ctxs, &key);
-			if (!pcpu_ctx) {
-				scx_bpf_error("Failed to lookup pcpu ctx");
-				return;
-			}
-
 			/*
 			 * Immediately demote a primary core if:
 			 * - It's been scheduled for compaction at least
@@ -465,6 +465,7 @@ void BPF_STRUCT_OPS(nest_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 	stat_inc(NEST_STAT(CONSUMED));
+	pcpu_ctx->num_schedulings = 0;
 }
 
 void BPF_STRUCT_OPS(nest_running, struct task_struct *p)
