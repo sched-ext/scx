@@ -123,7 +123,7 @@ struct {
 } task_ctx SEC(".maps");
 
 /* gets inc'd on weight tree changes to expire the cached hweights */
-unsigned long hweight_gen = 1;
+u64 hweight_gen = 1;
 
 static u64 div_round_up(u64 dividend, u64 divisor)
 {

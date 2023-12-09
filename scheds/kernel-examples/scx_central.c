@@ -8,6 +8,7 @@
 #include <sched.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <inttypes.h>
 #include <signal.h>
 #include <libgen.h>
 #include <bpf/bpf.h>
@@ -103,17 +104,17 @@ int main(int argc, char **argv)
 
 	while (!exit_req && !uei_exited(&skel->bss->uei)) {
 		printf("[SEQ %llu]\n", seq++);
-		printf("total   :%10lu    local:%10lu   queued:%10lu  lost:%10lu\n",
+		printf("total   :%10" PRIu64 "    local:%10" PRIu64 "   queued:%10" PRIu64 "  lost:%10" PRIu64 "\n",
 		       skel->bss->nr_total,
 		       skel->bss->nr_locals,
 		       skel->bss->nr_queued,
 		       skel->bss->nr_lost_pids);
-		printf("timer   :%10lu dispatch:%10lu mismatch:%10lu retry:%10lu\n",
+		printf("timer   :%10" PRIu64 " dispatch:%10" PRIu64 " mismatch:%10" PRIu64 " retry:%10" PRIu64 "\n",
 		       skel->bss->nr_timers,
 		       skel->bss->nr_dispatches,
 		       skel->bss->nr_mismatches,
 		       skel->bss->nr_retries);
-		printf("overflow:%10lu\n",
+		printf("overflow:%10" PRIu64 "\n",
 		       skel->bss->nr_overflows);
 		fflush(stdout);
 		sleep(1);

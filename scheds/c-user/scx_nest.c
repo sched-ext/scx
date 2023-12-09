@@ -6,6 +6,7 @@
  */
 #include <stdio.h>
 #include <unistd.h>
+#include <inttypes.h>
 #include <signal.h>
 #include <libgen.h>
 #include <bpf/bpf.h>
@@ -143,7 +144,7 @@ static void print_active_nests(const struct scx_nest *skel)
 				total++;
 			}
 		}
-		printf("%-9s(%2lu): | %s |\n", mask_str, total, cpus);
+		printf("%-9s(%2" PRIu64 "): | %s |\n", mask_str, total, cpus);
 	}
 }
 
@@ -209,7 +210,7 @@ int main(int argc, char **argv)
 				print_stat_grp(nest_stat->group);
 				last_grp = nest_stat->group;
 			}
-			printf("%s=%lu\n", nest_stat->label, stats[nest_stat->idx]);
+			printf("%s=%" PRIu64 "\n", nest_stat->label, stats[nest_stat->idx]);
 		}
 		printf("\n");
 		print_active_nests(skel);
