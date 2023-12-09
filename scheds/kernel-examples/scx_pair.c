@@ -6,6 +6,7 @@
  */
 #include <stdio.h>
 #include <unistd.h>
+#include <inttypes.h>
 #include <signal.h>
 #include <libgen.h>
 #include <bpf/bpf.h>
@@ -142,18 +143,18 @@ int main(int argc, char **argv)
 
 	while (!exit_req && !uei_exited(&skel->bss->uei)) {
 		printf("[SEQ %llu]\n", seq++);
-		printf(" total:%10lu dispatch:%10lu   missing:%10lu\n",
+		printf(" total:%10" PRIu64 " dispatch:%10" PRIu64 "   missing:%10" PRIu64 "\n",
 		       skel->bss->nr_total,
 		       skel->bss->nr_dispatched,
 		       skel->bss->nr_missing);
-		printf(" kicks:%10lu preemptions:%7lu\n",
+		printf(" kicks:%10" PRIu64 " preemptions:%7" PRIu64 "\n",
 		       skel->bss->nr_kicks,
 		       skel->bss->nr_preemptions);
-		printf("   exp:%10lu exp_wait:%10lu exp_empty:%10lu\n",
+		printf("   exp:%10" PRIu64 " exp_wait:%10" PRIu64 " exp_empty:%10" PRIu64 "\n",
 		       skel->bss->nr_exps,
 		       skel->bss->nr_exp_waits,
 		       skel->bss->nr_exp_empty);
-		printf("cgnext:%10lu   cgcoll:%10lu   cgempty:%10lu\n",
+		printf("cgnext:%10" PRIu64 "   cgcoll:%10" PRIu64 "   cgempty:%10" PRIu64 "\n",
 		       skel->bss->nr_cgrp_next,
 		       skel->bss->nr_cgrp_coll,
 		       skel->bss->nr_cgrp_empty);
