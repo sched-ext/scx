@@ -9,5 +9,7 @@ bpf_includes = ['-I', join_paths(meson.current_source_dir(), 'include'),
 user_c_includes = include_directories('include')
 
 subdir('kernel-examples')
-subdir('rust-user')
+if get_option('enable_rust')
+  subdir('rust-user')
+endif
 subdir('c-user')

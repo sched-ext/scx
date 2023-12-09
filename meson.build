@@ -140,9 +140,13 @@ if get_option('cargo_home') != ''
   cargo_env.set('CARGO_HOME', get_option('cargo_home'))
 endif
 
-meson.add_install_script('meson-scripts/install_rust_user_scheds')
+if get_option('enable_rust')
+  meson.add_install_script('meson-scripts/install_rust_user_scheds')
+endif
 
 run_target('fetch', command: [cargo_fetch, cargo], env: cargo_env)
 
-subdir('rust')
+if get_option('enable_rust')
+  subdir('rust')
+endif
 subdir('scheds')
