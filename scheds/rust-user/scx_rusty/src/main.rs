@@ -187,6 +187,15 @@ fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
         .ok_or_else(|| anyhow!("Could not read total cpu stat in proc"))
 }
 
+fn sub_or_zero(curr: &u64, prev: &u64) -> u64
+{
+    if let Some(res) = curr.checked_sub(*prev) {
+        res
+    } else {
+        0
+    }
+}
+
 fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
     match (curr, prev) {
         (
@@ -213,14 +222,14 @@ fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
                 ..
             },
         ) => {
-            let idle_usec = curr_idle - prev_idle;
-            let iowait_usec = curr_iowait - prev_iowait;
-            let user_usec = curr_user - prev_user;
-            let system_usec = curr_system - prev_system;
-            let nice_usec = curr_nice - prev_nice;
-            let irq_usec = curr_irq - prev_irq;
-            let softirq_usec = curr_softirq - prev_softirq;
-            let stolen_usec = curr_stolen - prev_stolen;
+            let idle_usec = sub_or_zero(curr_idle, prev_idle);
+            let iowait_usec = sub_or_zero(curr_iowait, prev_iowait);
+            let user_usec = sub_or_zero(curr_user, prev_user);
+            let system_usec = sub_or_zero(curr_system, prev_system);
+            let nice_usec = sub_or_zero(curr_nice, prev_nice);
+            let irq_usec = sub_or_zero(curr_irq, prev_irq);
+            let softirq_usec = sub_or_zero(curr_softirq, prev_softirq);
+            let stolen_usec = sub_or_zero(curr_stolen, prev_stolen);
 
             let busy_usec =
                 user_usec + system_usec + nice_usec + irq_usec + softirq_usec + stolen_usec;
@@ -994,14 +1003,14 @@ impl<'a> Scheduler<'a> {
                     guest_nice_usec: _,
                 },
             ) => {
-                let idle_usec = curr_idle - prev_idle;
-                let iowait_usec = curr_iowait - prev_iowait;
-                let user_usec = curr_user - prev_user;
-                let system_usec = curr_system - prev_system;
-                let nice_usec = curr_nice - prev_nice;
-                let irq_usec = curr_irq - prev_irq;
-                let softirq_usec = curr_softirq - prev_softirq;
-                let stolen_usec = curr_stolen - prev_stolen;
+                let idle_usec = sub_or_zero(curr_idle, prev_idle);
+                let iowait_usec = sub_or_zero(curr_iowait, prev_iowait);
+                let user_usec = sub_or_zero(curr_user, prev_user);
+                let system_usec = sub_or_zero(curr_system, prev_system);
+                let nice_usec = sub_or_zero(curr_nice, prev_nice);
+                let irq_usec = sub_or_zero(curr_irq, prev_irq);
+                let softirq_usec = sub_or_zero(curr_softirq, prev_softirq);
+                let stolen_usec = sub_or_zero(curr_stolen, prev_stolen);
 
                 let busy_usec =
                     user_usec + system_usec + nice_usec + irq_usec + softirq_usec + stolen_usec;
