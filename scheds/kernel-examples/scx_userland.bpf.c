@@ -20,7 +20,6 @@
  * Copyright (c) 2022 Tejun Heo <tj@kernel.org>
  * Copyright (c) 2022 David Vernet <dvernet@meta.com>
  */
-#include <string.h>
 #include <scx/common.bpf.h>
 #include "scx_userland.h"
 
@@ -146,9 +145,8 @@ static void dispatch_user_scheduler(void)
 
 static void enqueue_task_in_user_space(struct task_struct *p, u64 enq_flags)
 {
-	struct scx_userland_enqueued_task task;
+	struct scx_userland_enqueued_task task = {};
 
-	memset(&task, 0, sizeof(task));
 	task.pid = p->pid;
 	task.sum_exec_runtime = p->se.sum_exec_runtime;
 	task.weight = p->scx.weight;
