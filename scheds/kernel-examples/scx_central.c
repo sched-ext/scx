@@ -103,17 +103,17 @@ int main(int argc, char **argv)
 
 	while (!exit_req && !uei_exited(&skel->bss->uei)) {
 		printf("[SEQ %llu]\n", seq++);
-		printf("total   :%10lu    local:%10lu   queued:%10lu  lost:%10lu\n",
+		printf("total   :%10llu    local:%10llu   queued:%10llu  lost:%10llu\n",
 		       skel->bss->nr_total,
 		       skel->bss->nr_locals,
 		       skel->bss->nr_queued,
 		       skel->bss->nr_lost_pids);
-		printf("timer   :%10lu dispatch:%10lu mismatch:%10lu retry:%10lu\n",
+		printf("timer   :%10llu dispatch:%10llu mismatch:%10llu retry:%10llu\n",
 		       skel->bss->nr_timers,
 		       skel->bss->nr_dispatches,
 		       skel->bss->nr_mismatches,
 		       skel->bss->nr_retries);
-		printf("overflow:%10lu\n",
+		printf("overflow:%10llu\n",
 		       skel->bss->nr_overflows);
 		fflush(stdout);
 		sleep(1);
