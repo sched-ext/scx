@@ -59,7 +59,7 @@ endif
 arch_dict = {
   'x86': 'x86',
   'x86_64': 'x86',
-  's390': 's390',
+  's390x': 's390',
   'arm': 'arm',
   'aarch64': 'arm64',
   'mips': 'mips',
