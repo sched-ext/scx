@@ -77,6 +77,36 @@ than what many distros are currently shipping. This should become less of an
 issue in the future. For the time being, the following custom repositories
 are provided for select distros.
 
+### Ubuntu
+
+Ubuntu is supported through the following launchpad project.
+
+ https://launchpad.net/~arighi/+archive/ubuntu/sched-ext
+
+#### Upgrading to 24.04 (NobleNumbat)
+
+Currently, only the 24.04 release is supported. Upgrade to 24.04.
+
+```
+$ sudo do-release-upgrade -d
+```
+
+#### Installing the Kernel and Schedulers
+
+```
+$ sudo add-apt-repository -y --enable-source ppa:arighi/sched-ext
+$ sudo apt install -y linux-generic-wip scx
+```
+
+After a reboot, the scheduler binaries `/usr/sbin/scx_*` should be usable.
+
+#### Setting up Dev Environment
+
+```
+$ apt source scx
+$ sudo apt build-dep scx
+```
+
 ### Arch Linux
 
 #### Adding the Repository
@@ -85,8 +115,8 @@ Import and locally sign the packager's GPG key. This can be skipped if the
 signature checking is disabled when adding the repo.
 
 ```
-pacman-key --recv-keys 697C63013E65270255EBC2608744DC1EB26B5A9A
-pacman-key --lsign-key 697C63013E65270255EBC2608744DC1EB26B5A9A
+$ sudo pacman-key --recv-keys 697C63013E65270255EBC2608744DC1EB26B5A9A
+$ sudo pacman-key --lsign-key 697C63013E65270255EBC2608744DC1EB26B5A9A
 ```
 
 Add the following custom repository section to `/etc/pacman.conf`.
@@ -105,7 +135,7 @@ SigLevel = Never
 #### Installing the Kernel and Schedulers
 
 ```
-pacman -Sy scx/linux scx/libbpf scx/scx-scheds
+$ sudo pacman -Sy scx/linux scx/libbpf scx/scx-scheds
 ```
 
 Note that the above replaces the default kernel and libbpf packages. The
@@ -118,7 +148,7 @@ be usable.
 In addition to the packages from the previous step, install the following.
 
 ```
-pacman -Sy scx/linux-headers scx/clang-github-bin meson cargo bpf pahole
+$ sudo pacman -Sy scx/linux-headers scx/clang-github-bin meson cargo bpf pahole
 ```
 
 `clang-github-bin` is necessary because the recommended `clang` version is
