@@ -79,13 +79,15 @@ are provided for select distros.
 
 ### Ubuntu
 
-Ubuntu is supported through the following launchpad project.
+Experimental sched_ext support for Ubuntu is provided by the following
+launchpad project:
 
  https://launchpad.net/~arighi/+archive/ubuntu/sched-ext
 
 #### Upgrading to 24.04 (NobleNumbat)
 
-Currently, only the 24.04 release is supported. Upgrade to 24.04.
+Currently, only the 24.04 release is supported. You can upgrade to 24.04
+using the following command:
 
 ```
 $ sudo do-release-upgrade -d
