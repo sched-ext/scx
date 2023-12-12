@@ -1,6 +1,6 @@
 [package]
 name = "scx_rusty"
-version = "0.5.0"
+version = "0.5.1"
 authors = ["Dan Schatzberg <dschatzberg@meta.com>", "Meta"]
 edition = "2021"
 description = "Userspace scheduling with BPF"

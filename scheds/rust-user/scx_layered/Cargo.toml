@@ -1,6 +1,6 @@
 [package]
 name = "scx_layered"
-version = "0.0.1"
+version = "0.0.2"
 authors = ["Tejun Heo <htejun@meta.com>", "Meta"]
 edition = "2021"
 description = "Userspace scheduling with BPF for Ads"
