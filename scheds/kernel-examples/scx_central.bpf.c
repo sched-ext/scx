@@ -161,6 +161,14 @@ static bool dispatch_to_cpu(s32 cpu)
 			__sync_fetch_and_add(&nr_mismatches, 1);
 			scx_bpf_dispatch(p, FALLBACK_DSQ_ID, SCX_SLICE_INF, 0);
 			bpf_task_release(p);
+			/*
+			 * We might run out of dispatch buffer slots if we continue dispatching
+			 * to the fallback DSQ, without dispatching to the local DSQ of the
+			 * target CPU. In such a case, break the loop now as will fail the
+			 * next dispatch operation.
+			 */
+			if (!scx_bpf_dispatch_nr_slots())
+				break;
 			continue;
 		}
 
