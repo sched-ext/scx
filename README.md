@@ -98,9 +98,11 @@ $ sudo do-release-upgrade -d
 ```
 $ sudo add-apt-repository -y --enable-source ppa:arighi/sched-ext
 $ sudo apt install -y linux-generic-wip scx
+$ sudo reboot
 ```
 
-After a reboot, the scheduler binaries `/usr/sbin/scx_*` should be usable.
+After the reboot, the scheduler binaries in `/usr/sbin/scx_*` should be usable.
+Note: they must be called with `sudo` like other BPF programs e.g. `sudo scx_simple`.
 
 #### Setting up Dev Environment
 
