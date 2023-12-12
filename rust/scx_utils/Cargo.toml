@@ -3,7 +3,7 @@ name = "scx_utils"
 version = "0.3.2"
 edition = "2021"
 authors = ["Tejun Heo <tj@kernel.org>"]
-license = "GPL-2.0"
+license = "GPL-2.0-only"
 repository = "https://github.com/sched-ext/scx"
 description = "Utilities for sched_ext schedulers"
 
