@@ -4,8 +4,6 @@
 #ifndef __SCX_USERLAND_COMMON_H
 #define __SCX_USERLAND_COMMON_H
 
-#define USERLAND_MAX_TASKS 8192
-
 /*
  * An instance of a task that has been enqueued by the kernel for consumption
  * by a user space global scheduler thread.

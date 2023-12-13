@@ -23,6 +23,11 @@
 #include <scx/common.bpf.h>
 #include "scx_userland.h"
 
+/*
+ * Maximum amount of tasks enqueued/dispatched between kernel and user-space.
+ */
+#define MAX_ENQUEUED_TASKS 8192
+
 char _license[] SEC("license") = "GPL";
 
 const volatile bool switch_partial;
@@ -49,7 +54,7 @@ static bool usersched_needed;
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_QUEUE);
-	__uint(max_entries, USERLAND_MAX_TASKS);
+	__uint(max_entries, MAX_ENQUEUED_TASKS);
 	__type(value, struct scx_userland_enqueued_task);
 } enqueued SEC(".maps");
 
@@ -60,7 +65,7 @@ struct {
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_QUEUE);
-	__uint(max_entries, USERLAND_MAX_TASKS);
+	__uint(max_entries, MAX_ENQUEUED_TASKS);
 	__type(value, s32);
 } dispatched SEC(".maps");
 

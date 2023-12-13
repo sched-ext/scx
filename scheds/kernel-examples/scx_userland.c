@@ -36,6 +36,8 @@ const char help_fmt[] =
 "\n"
 "See the top-level comment in .bpf.c for more details.\n"
 "\n"
+"Try to reduce `sysctl kernel.pid_max` if this program triggers OOMs.\n"
+"\n"
 "Usage: %s [-b BATCH] [-p]\n"
 "\n"
 "  -b BATCH      The number of tasks to batch when dispatching (default: 8)\n"
@@ -80,19 +82,56 @@ LIST_HEAD(listhead, enqueued_task);
 static struct listhead vruntime_head = LIST_HEAD_INITIALIZER(vruntime_head);
 
 /*
- * The statically allocated array of tasks. We use a statically allocated list
- * here to avoid having to allocate on the enqueue path, which could cause a
+ * The main array of tasks. The array is allocated all at once during
+ * initialization, based on /proc/sys/kernel/pid_max, to avoid having to
+ * dynamically allocate memory on the enqueue path, which could cause a
  * deadlock. A more substantive user space scheduler could e.g. provide a hook
  * for newly enabled tasks that are passed to the scheduler from the
  * .prep_enable() callback to allows the scheduler to allocate on safe paths.
  */
-struct enqueued_task tasks[USERLAND_MAX_TASKS];
+struct enqueued_task *tasks;
+static int pid_max;
 
 static double min_vruntime;
 
 static void sigint_handler(int userland)
 {
 	exit_req = 1;
+}
+
+static int get_pid_max(void)
+{
+	FILE *fp;
+	int pid_max;
+
+	fp = fopen("/proc/sys/kernel/pid_max", "r");
+	if (fp == NULL) {
+		fprintf(stderr, "Error opening /proc/sys/kernel/pid_max\n");
+		return -1;
+	}
+	if (fscanf(fp, "%d", &pid_max) != 1) {
+		fprintf(stderr, "Error reading from /proc/sys/kernel/pid_max\n");
+		fclose(fp);
+		return -1;
+	}
+	fclose(fp);
+
+	return pid_max;
+}
+
+static int init_tasks(void)
+{
+	pid_max = get_pid_max();
+	if (pid_max < 0)
+		return pid_max;
+
+	tasks = calloc(pid_max, sizeof(*tasks));
+	if (!tasks) {
+		fprintf(stderr, "Error allocating tasks array\n");
+		return -ENOMEM;
+	}
+
+	return 0;
 }
 
 static __u32 task_pid(const struct enqueued_task *task)
@@ -117,7 +156,7 @@ static int dispatch_task(__s32 pid)
 
 static struct enqueued_task *get_enqueued_task(__s32 pid)
 {
-	if (pid >= USERLAND_MAX_TASKS)
+	if (pid >= pid_max)
 		return NULL;
 
 	return &tasks[pid];
@@ -271,6 +310,10 @@ static void bootstrap(int argc, char **argv)
 		.sched_priority = sched_get_priority_max(SCHED_EXT),
 	};
 	bool switch_partial = false;
+
+	err = init_tasks();
+	if (err)
+		exit(err);
 
 	signal(SIGINT, sigint_handler);
 	signal(SIGTERM, sigint_handler);
