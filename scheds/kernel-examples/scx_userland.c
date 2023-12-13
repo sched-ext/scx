@@ -57,7 +57,7 @@ static struct scx_userland *skel;
 static struct bpf_link *ops_link;
 
 /* Stats collected in user space. */
-static __u64 nr_vruntime_enqueues, nr_vruntime_dispatches;
+static __u64 nr_vruntime_enqueues, nr_vruntime_dispatches, nr_vruntime_failed;
 
 /* The data structure containing tasks that are enqueued in user space. */
 struct enqueued_task {
@@ -145,8 +145,7 @@ static int dispatch_task(__s32 pid)
 
 	err = bpf_map_update_elem(dispatched_fd, NULL, &pid, 0);
 	if (err) {
-		fprintf(stderr, "Failed to dispatch task %d\n", pid);
-		exit_req = 1;
+		nr_vruntime_failed++;
 	} else {
 		nr_vruntime_dispatches++;
 	}
@@ -256,8 +255,12 @@ static void dispatch_batch(void)
 		LIST_REMOVE(task, entries);
 		err = dispatch_task(pid);
 		if (err) {
-			fprintf(stderr, "Failed to dispatch task %d in %u\n",
-				pid, i);
+			/*
+			 * If we fail to dispatch, put the task back to the
+			 * vruntime_head list and stop dispatching additional
+			 * tasks in this batch.
+			 */
+			LIST_INSERT_HEAD(&vruntime_head, task, entries);
 			return;
 		}
 	}
@@ -287,6 +290,7 @@ static void *run_stats_printer(void *arg)
 		printf("|-----------------------|\n");
 		printf("|  enq:      %10llu |\n", nr_vruntime_enqueues);
 		printf("|  disp:     %10llu |\n", nr_vruntime_dispatches);
+		printf("|  failed:   %10llu |\n", nr_vruntime_failed);
 		printf("o-----------------------o\n");
 		printf("\n\n");
 		sleep(1);
