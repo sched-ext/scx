@@ -908,7 +908,7 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 		if (cpumask_intersects_domain(cpumask, dom)) {
 			taskc->dom_mask |= 1LLU << dom;
 			/*
-			 * AsThe starting point is round-robin'd and the first
+			 * The starting point is round-robin'd and the first
 			 * match should be spread across all the domains.
 			 */
 			if (first_dom == MAX_DOMS)

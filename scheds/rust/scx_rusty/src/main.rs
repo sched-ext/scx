@@ -815,7 +815,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
             loop {
                 let last_pushed = pushed;
 
-                // Pull from the most imbalaned to least.
+                // Pull from the most imbalanced to least.
                 let mut doms_to_pull = BTreeMap::<_, _>::new();
                 std::mem::swap(&mut self.doms_to_pull, &mut doms_to_pull);
                 let mut pull_doms = doms_to_pull.into_iter().rev().collect::<Vec<(_, _)>>();

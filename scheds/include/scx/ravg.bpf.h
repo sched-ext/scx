@@ -34,7 +34,7 @@ struct ravg_data {
 
 	/*
 	 * Accumulated value of the current period. Input value is 48bits and we
-	 * normalize half-life to 16bit, so it should fit in an u64.
+	 * normalize half-life to 16bit, so it should fit in a u64.
 	 */
 	u64			cur;
 };
