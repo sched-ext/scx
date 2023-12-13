@@ -26,7 +26,7 @@
 /*
  * Maximum amount of tasks enqueued/dispatched between kernel and user-space.
  */
-#define MAX_ENQUEUED_TASKS 8192
+#define MAX_ENQUEUED_TASKS 4096
 
 char _license[] SEC("license") = "GPL";
 
@@ -197,7 +197,7 @@ void BPF_STRUCT_OPS(userland_dispatch, s32 cpu, struct task_struct *prev)
 	if (usersched_needed)
 		dispatch_user_scheduler();
 
-	bpf_repeat(4096) {
+	bpf_repeat(MAX_ENQUEUED_TASKS) {
 		s32 pid;
 		struct task_struct *p;
 
