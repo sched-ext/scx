@@ -178,10 +178,12 @@ scx
 
 `meson` is the main build system but each Rust sub-project is its own
 self-contained cargo project and can be built and published separately. The
-followings are the dependencies and version requirements. **Note**: many distros
-only have earlier versions of `meson`, in that case just [clone the meson
+followings are the dependencies and version requirements. 
+
+**Note**: Many distros only have earlier versions of `meson`, in that case just [clone the meson
 repo](https://mesonbuild.com/Quick-guide.html#installation-from-source) and call 
-the `meson.py` from within the repo source (no extra building or deps required).
+`meson.py` e.g. `/path/to/meson/repo/meson.py compile -C build`. Alternatively, use `pip` e.g.
+`pip install meson` or `pip install meson --break-system-packages` (if needed).
 
 - `meson`: >=1.2, build scripts under `meson-scripts/` use `bash` and
   standard utilities including `awk`.
