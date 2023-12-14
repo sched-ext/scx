@@ -1122,10 +1122,10 @@ struct Scheduler<'a> {
 
 impl<'a> Scheduler<'a> {
     fn init_layers(skel: &mut OpenBpfSkel, specs: &Vec<LayerSpec>) -> Result<()> {
-        skel.rodata().nr_layers = specs.len() as u32;
+        skel.rodata_mut().nr_layers = specs.len() as u32;
 
         for (spec_i, spec) in specs.iter().enumerate() {
-            let layer = &mut skel.bss().layers[spec_i];
+            let layer = &mut skel.bss_mut().layers[spec_i];
 
             for (or_i, or) in spec.matches.iter().enumerate() {
                 for (and_i, and) in or.iter().enumerate() {
@@ -1176,12 +1176,12 @@ impl<'a> Scheduler<'a> {
         let mut skel = skel_builder.open().context("Failed to open BPF program")?;
 
         // Initialize skel according to @opts.
-        skel.rodata().debug = opts.verbose as u32;
-        skel.rodata().slice_ns = opts.slice_us * 1000;
-        skel.rodata().nr_possible_cpus = *NR_POSSIBLE_CPUS as u32;
-        skel.rodata().smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
+        skel.rodata_mut().debug = opts.verbose as u32;
+        skel.rodata_mut().slice_ns = opts.slice_us * 1000;
+        skel.rodata_mut().nr_possible_cpus = *NR_POSSIBLE_CPUS as u32;
+        skel.rodata_mut().smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
         for cpu in cpu_pool.all_cpus.iter_ones() {
-            skel.rodata().all_cpus[cpu / 8] |= 1 << (cpu % 8);
+            skel.rodata_mut().all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
         Self::init_layers(&mut skel, &layer_specs)?;
 
@@ -1274,7 +1274,7 @@ impl<'a> Scheduler<'a> {
                     {
                         Self::update_bpf_layer_cpumask(
                             &self.layers[idx],
-                            &mut self.skel.bss().layers[idx],
+                            &mut self.skel.bss_mut().layers[idx],
                         );
                         updated = true;
                     }
@@ -1288,7 +1288,7 @@ impl<'a> Scheduler<'a> {
             let nr_available_cpus = available_cpus.count_ones();
             for idx in 0..self.layers.len() {
                 let layer = &mut self.layers[idx];
-                let bpf_layer = &mut self.skel.bss().layers[idx];
+                let bpf_layer = &mut self.skel.bss_mut().layers[idx];
                 match &layer.kind {
                     LayerKind::Open { .. } => {
                         layer.cpus.copy_from_bitslice(&available_cpus);
@@ -1299,7 +1299,7 @@ impl<'a> Scheduler<'a> {
                 }
             }
 
-            self.skel.bss().fallback_cpu = self.cpu_pool.fallback_cpu as u32;
+            self.skel.bss_mut().fallback_cpu = self.cpu_pool.fallback_cpu as u32;
 
             for (lidx, layer) in self.layers.iter().enumerate() {
                 self.nr_layer_cpus_min_max[lidx] = (
