@@ -435,7 +435,7 @@ impl Tuner {
             .read_stat()?
             .cpus_map
             .ok_or_else(|| anyhow!("Expected cpus_map to exist"))?;
-        let ti = &mut skel.bss().tune_input;
+        let ti = &mut skel.bss_mut().tune_input;
         let mut dom_nr_cpus = vec![0; self.top.nr_doms];
         let mut dom_util_sum = vec![0.0; self.top.nr_doms];
 
@@ -629,7 +629,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
         // XXX - We can't read task_ctx inline because self.skel.bss()
         // borrows mutably and thus conflicts with self.skel.maps().
         const MAX_PIDS: u64 = bpf_intf::consts_MAX_DOM_ACTIVE_PIDS as u64;
-        let active_pids = &mut self.skel.bss().dom_active_pids[dom as usize];
+        let active_pids = &mut self.skel.bss_mut().dom_active_pids[dom as usize];
         let mut pids = vec![];
 
         let (mut ridx, widx) = (active_pids.read_idx, active_pids.write_idx);
@@ -910,16 +910,16 @@ impl<'a> Scheduler<'a> {
             Topology::from_cache_level(opts.cache_level, nr_cpus)?
         });
 
-        skel.rodata().nr_doms = top.nr_doms as u32;
-        skel.rodata().nr_cpus = top.nr_cpus as u32;
+        skel.rodata_mut().nr_doms = top.nr_doms as u32;
+        skel.rodata_mut().nr_cpus = top.nr_cpus as u32;
 
         for (cpu, dom) in top.cpu_dom.iter().enumerate() {
-            skel.rodata().cpu_dom_id_map[cpu] = dom.unwrap_or(0) as u32;
+            skel.rodata_mut().cpu_dom_id_map[cpu] = dom.unwrap_or(0) as u32;
         }
 
         for (dom, cpus) in top.dom_cpus.iter().enumerate() {
             let raw_cpus_slice = cpus.as_raw_slice();
-            let dom_cpumask_slice = &mut skel.rodata().dom_cpumasks[dom];
+            let dom_cpumask_slice = &mut skel.rodata_mut().dom_cpumasks[dom];
             let (left, _) = dom_cpumask_slice.split_at_mut(raw_cpus_slice.len());
             left.clone_from_slice(cpus.as_raw_slice());
             info!(
@@ -930,13 +930,13 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        skel.rodata().slice_ns = opts.slice_us * 1000;
-        skel.rodata().load_half_life = (opts.load_half_life * 1000000000.0) as u32;
-        skel.rodata().kthreads_local = opts.kthreads_local;
-        skel.rodata().fifo_sched = opts.fifo_sched;
-        skel.rodata().switch_partial = opts.partial;
-        skel.rodata().greedy_threshold = opts.greedy_threshold;
-        skel.rodata().debug = opts.verbose as u32;
+        skel.rodata_mut().slice_ns = opts.slice_us * 1000;
+        skel.rodata_mut().load_half_life = (opts.load_half_life * 1000000000.0) as u32;
+        skel.rodata_mut().kthreads_local = opts.kthreads_local;
+        skel.rodata_mut().fifo_sched = opts.fifo_sched;
+        skel.rodata_mut().switch_partial = opts.partial;
+        skel.rodata_mut().greedy_threshold = opts.greedy_threshold;
+        skel.rodata_mut().debug = opts.verbose as u32;
 
         // Attach.
         let mut skel = skel.load().context("Failed to load BPF program")?;
