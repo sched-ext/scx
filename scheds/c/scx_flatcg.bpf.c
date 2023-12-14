@@ -100,6 +100,7 @@ struct cgv_node {
 	struct bpf_rb_node	rb_node;
 	__u64			cvtime;
 	__u64			cgid;
+	struct bpf_refcount	refcount;
 };
 
 private(CGV_TREE) struct bpf_spin_lock cgv_tree_lock;
@@ -289,14 +290,17 @@ static void cgrp_enqueued(struct cgroup *cgrp, struct fcg_cgrp_ctx *cgc)
 	}
 
 	stash = bpf_map_lookup_elem(&cgv_node_stash, &cgid);
-	if (!stash) {
+	if (!stash || !stash->node) {
 		scx_bpf_error("cgv_node lookup failed for cgid %llu", cgid);
 		return;
 	}
 
-	/* NULL if the node is already on the rbtree */
-	cgv_node = bpf_kptr_xchg(&stash->node, NULL);
+	cgv_node = bpf_refcount_acquire(stash->node);
 	if (!cgv_node) {
+		/*
+		 * Node never leaves cgv_node_stash, this should only happen if
+		 * fcg_cgroup_exit deletes the stashed node
+		 */
 		stat_inc(FCG_STAT_ENQ_RACE);
 		return;
 	}
@@ -609,7 +613,6 @@ void BPF_STRUCT_OPS(fcg_cgroup_set_weight, struct cgroup *cgrp, u32 weight)
 static bool try_pick_next_cgroup(u64 *cgidp)
 {
 	struct bpf_rb_node *rb_node;
-	struct cgv_node_stash *stash;
 	struct cgv_node *cgv_node;
 	struct fcg_cgrp_ctx *cgc;
 	struct cgroup *cgrp;
@@ -693,12 +696,6 @@ static bool try_pick_next_cgroup(u64 *cgidp)
 	return true;
 
 out_stash:
-	stash = bpf_map_lookup_elem(&cgv_node_stash, &cgid);
-	if (!stash) {
-		stat_inc(FCG_STAT_PNC_GONE);
-		goto out_free;
-	}
-
 	/*
 	 * Paired with cmpxchg in cgrp_enqueued(). If they see the following
 	 * transition, they'll enqueue the cgroup. If they are earlier, we'll
@@ -711,15 +708,8 @@ out_stash:
 		bpf_rbtree_add(&cgv_tree, &cgv_node->rb_node, cgv_node_less);
 		bpf_spin_unlock(&cgv_tree_lock);
 		stat_inc(FCG_STAT_PNC_RACE);
-	} else {
-		cgv_node = bpf_kptr_xchg(&stash->node, cgv_node);
-		if (cgv_node) {
-			scx_bpf_error("unexpected !NULL cgv_node stash");
-			goto out_free;
-		}
+		return false;
 	}
-
-	return false;
 
 out_free:
 	bpf_obj_drop(cgv_node);

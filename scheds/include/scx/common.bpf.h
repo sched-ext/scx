@@ -200,6 +200,9 @@ int bpf_rbtree_add_impl(struct bpf_rb_root *root, struct bpf_rb_node *node,
 
 struct bpf_rb_node *bpf_rbtree_first(struct bpf_rb_root *root) __ksym;
 
+extern void *bpf_refcount_acquire_impl(void *kptr, void *meta) __ksym;
+#define bpf_refcount_acquire(kptr) bpf_refcount_acquire_impl(kptr, NULL)
+
 /* task */
 struct task_struct *bpf_task_from_pid(s32 pid) __ksym;
 struct task_struct *bpf_task_acquire(struct task_struct *p) __ksym;
