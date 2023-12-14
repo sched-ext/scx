@@ -425,10 +425,13 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (!(taskc = lookup_task_ctx(p)) || !(p_cpumask = taskc->cpumask))
 		goto enoent;
 
-	if (kthreads_local &&
-	    (p->flags & PF_KTHREAD) && p->nr_cpus_allowed == 1) {
+	if (p->nr_cpus_allowed == 1) {
 		cpu = prev_cpu;
-		stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
+		if (kthreads_local && (p->flags & PF_KTHREAD)) {
+			stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
+		} else {
+			stat_add(RUSTY_STAT_PINNED, 1);
+		}
 		goto direct;
 	}
 
@@ -436,7 +439,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * If WAKE_SYNC and the machine isn't fully saturated, wake up @p to the
 	 * local dsq of the waker.
 	 */
-	if (p->nr_cpus_allowed > 1 && (wake_flags & SCX_WAKE_SYNC)) {
+	if (wake_flags & SCX_WAKE_SYNC) {
 		struct task_struct *current = (void *)bpf_get_current_task();
 
 		if (!(BPF_CORE_READ(current, flags) & PF_EXITING) &&
@@ -473,13 +476,6 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 				}
 			}
 		}
-	}
-
-	/* If only one CPU is allowed, dispatch */
-	if (p->nr_cpus_allowed == 1) {
-		stat_add(RUSTY_STAT_PINNED, 1);
-		cpu = prev_cpu;
-		goto direct;
 	}
 
 	has_idle_cores = !bpf_cpumask_empty(idle_smtmask);
