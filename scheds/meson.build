@@ -8,8 +8,7 @@ bpf_includes = ['-I', join_paths(meson.current_source_dir(), 'include'),
 # passed in as executable::include_directories.
 user_c_includes = include_directories('include')
 
-subdir('kernel-examples')
 if get_option('enable_rust')
-  subdir('rust-user')
+  subdir('rust')
 endif
-subdir('c-user')
+subdir('c')

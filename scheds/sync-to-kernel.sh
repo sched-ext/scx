@@ -7,13 +7,16 @@ if [ $# -ne 1 ]; then
     exit 1
 fi
 
-# We sync all schedulers under kernel-examples but only the following ones
-# under rust-user.
+# We sync these schedulers
 rust_scheds=(scx_rusty scx_layered)
+c_scheds=(scx_simple scx_qmap scx_central scx_pair scx_flatcg scx_userland)
 
 headers=($(git ls-files include | grep -v include/vmlinux))
-scheds=($(git ls-files kernel-examples ${rust_scheds[@]/#/rust-user/} | grep -v meson.build))
+scheds=($(git ls-files ${rust_scheds[@]/#/rust/} | grep -Ev 'meson.build|LICENSE'))
 kernel="$1/tools/sched_ext"
+for c_sched in ${c_scheds[@]}; do
+    scheds+=($(git ls-files c/${c_sched}*))
+done
 
 echo "Syncing ${#headers[@]} headers and ${#scheds[@]} scheduler source files to $kernel"
 
@@ -26,16 +29,16 @@ for file in ${headers[@]}; do
 done
 
 # Sched files should drop the first directory component. ie.
-# kernel-examples/scx_simple.bpf.c should be synced to
+# c/scx_simple.bpf.c should be synced to
 # $kernel/scx_simple.bpf.c.
 for file in ${scheds[@]}; do
     dsts+=("$kernel/${file#*/}")
 done
 	    
 ## debug
-#for ((i=0;i<${#srcs[@]};i++)); do
+# for ((i=0;i<${#srcs[@]};i++)); do
 #    echo "${srcs[i]} -> ${dsts[i]}"
-#done
+# done
 
 nr_missing=0
 for dst in "${dsts[@]}"; do
@@ -56,7 +59,7 @@ for ((i=0;i<${#srcs[@]};i++)); do
     orig="$src"
 
     #
-    # As scx_utils is in this repo, rust-user schedulers point directly to
+    # As scx_utils is in this repo, rust schedulers point directly to
     # the source in the tree. As they break outside this tree, drop them
     # before syncing Cargo.toml files.
     #

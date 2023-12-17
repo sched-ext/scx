@@ -2,7 +2,7 @@
 
 set -e
 
-for manifest in "$MESON_SOURCE_ROOT"/scheds/rust-user/*/Cargo.toml; do
+for manifest in "$MESON_SOURCE_ROOT"/scheds/rust/*/Cargo.toml; do
     source_dir="${manifest%/Cargo.toml}"
     target_dir="${MESON_BUILD_ROOT}${source_dir#${MESON_SOURCE_ROOT}}"
     name="${target_dir##*/}"
