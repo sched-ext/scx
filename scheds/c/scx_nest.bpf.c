@@ -209,6 +209,15 @@ s32 BPF_STRUCT_OPS(nest_select_cpu, struct task_struct *p, s32 prev_cpu,
 	struct pcpu_ctx *pcpu_ctx;
 	bool direct_to_primary = false, reset_impatient = true;
 
+	/*
+	 * Don't bother trying to find an idle core if a task is doing an
+	 * exec(). We would have already tried to find a core on fork(), and if
+	 * we were successful in doing so, the task will already be running on
+	 * what was previously an idle core.
+	 */
+	if (wake_flags & SCX_WAKE_EXEC)
+		return prev_cpu;
+
 	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!tctx)
 		return -ENOENT;
