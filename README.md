@@ -53,7 +53,7 @@ local=696 global=192
 ^CEXIT: BPF scheduler unregistered
 ```
 
-[`scx_simple`](https://github.com/sched-ext/scx/blob/main/scheds/kernel-examples/scx_simple.bpf.c)
+[`scx_simple`](https://github.com/sched-ext/scx/blob/main/scheds/c/scx_simple.bpf.c)
 is a very simple global vtime scheduler which can behave acceptably on CPUs
 with a simple topology (single socket and single L3 cache domain).
 
@@ -167,10 +167,10 @@ name. This is a repackage of the official LLVM release in `.deb` format.
 scx
 |-- scheds               : Sched_ext scheduler implementations
 |   |-- include          : Shared BPF and user C include files including vmlinux.h
-|   |-- kernel-examples  : Example schedulers from kernel tree (tools/sched_ext)
-|   \-- rust-user        : Schedulers that use Rust for userspace component
+|   |-- c                : Example schedulers - userspace code written C
+|   \-- rust             : Example schedulers - userspace code written Rust
 \-- rust                 : Rust support code
-    \-- scx_utils        : Common utility library for rust-user schedulers
+    \-- scx_utils        : Common utility library for rust schedulers
 ```
 
 
@@ -232,8 +232,8 @@ please refer to `meson --help` and its
 If you just want to build a subset of schedulers, you can specify the
 scheduler names as arguments to `meson compile`. For example, if we just
 want to build the simple example scheduler
-`scheds/kernel-examples/scx_simple` and the Rust userspace scheduler
-`scheds/rust-user/scx_rusty`:
+`scheds/c/scx_simple` and the Rust userspace scheduler
+`scheds/rust/scx_rusty`:
 
 ```
 $ cd $SCX
@@ -247,15 +247,15 @@ You can also specify `-v` if you want to see the commands being used:
 $ meson compile -C build -v scx_pair
 ```
 
-For C userspace schedulers such as the ones under `scheds/kernel-examples`,
+For C userspace schedulers such as the ones under `scheds/c`,
 the built binaries are located in the same directory under the build root.
 For example, here, the `scx_simple` binary can be found at
-`$SCX/build/scheds/kernel-examples/scx_simple`.
+`$SCX/build/scheds/c/scx_simple`.
 
-For Rust userspace schedulers such as the ones under `scheds/rust-user`, the
+For Rust userspace schedulers such as the ones under `scheds/rust`, the
 same directory under the build root is used as the cargo build target
 directory. Thus, here, the `scx_rusty` binary can be found at
-`$SCX/build/scheds/rust-user/scx_rusty/release/scx_rusty`.
+`$SCX/build/scheds/rust/scx_rusty/release/scx_rusty`.
 
 
 ### SCX specific build options
@@ -338,7 +338,7 @@ documentation for details.
 For example, the following builds and runs the `scx_rusty` scheduler:
 
 ```
-$ cd $SCX/scheds/rust-user/scx_rusty
+$ cd $SCX/scheds/rust/scx_rusty
 $ cargo build --release
 $ cargo run --release
 ```

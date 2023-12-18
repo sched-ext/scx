@@ -80,7 +80,7 @@ lazy_static::lazy_static! {
 ///
 /// This section shows how `BpfBuilder` can be used in an example project.
 /// For a concrete example, take a look at
-/// [`scx_rusty`](https://github.com/sched-ext/scx/tree/main/scheds/rust-user/scx_rusty).
+/// [`scx_rusty`](https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_rusty).
 ///
 /// A minimal source tree using all features would look like the following:
 ///
