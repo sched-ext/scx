@@ -207,7 +207,16 @@ s32 BPF_STRUCT_OPS(nest_select_cpu, struct task_struct *p, s32 prev_cpu,
 	s32 cpu;
 	struct task_ctx *tctx;
 	struct pcpu_ctx *pcpu_ctx;
-	bool direct_to_primary = false;
+	bool direct_to_primary = false, reset_impatient = true;
+
+	/*
+	 * Don't bother trying to find an idle core if a task is doing an
+	 * exec(). We would have already tried to find a core on fork(), and if
+	 * we were successful in doing so, the task will already be running on
+	 * what was previously an idle core.
+	 */
+	if (wake_flags & SCX_WAKE_EXEC)
+		return prev_cpu;
 
 	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!tctx)
@@ -232,7 +241,6 @@ s32 BPF_STRUCT_OPS(nest_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (bpf_cpumask_test_cpu(tctx->attached_core, cast_mask(p_mask)) &&
 	    scx_bpf_test_and_clear_cpu_idle(tctx->attached_core)) {
 		cpu = tctx->attached_core;
-		tctx->prev_misses = 0;
 		stat_inc(NEST_STAT(WAKEUP_ATTACHED));
 		goto migrate_primary;
 	}
@@ -246,16 +254,8 @@ s32 BPF_STRUCT_OPS(nest_select_cpu, struct task_struct *p, s32 prev_cpu,
 	    bpf_cpumask_test_cpu(prev_cpu, cast_mask(p_mask)) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu = prev_cpu;
-		tctx->prev_misses = 0;
 		stat_inc(NEST_STAT(WAKEUP_PREV_PRIMARY));
 		goto migrate_primary;
-	}
-
-	if (r_impatient > 0 && ++tctx->prev_misses >= r_impatient) {
-		direct_to_primary = true;
-		tctx->prev_misses = 0;
-		stat_inc(NEST_STAT(TASK_IMPATIENT));
-		goto search_reserved;
 	}
 
 	if (find_fully_idle) {
@@ -275,7 +275,14 @@ s32 BPF_STRUCT_OPS(nest_select_cpu, struct task_struct *p, s32 prev_cpu,
 		goto migrate_primary;
 	}
 
-search_reserved:
+	if (r_impatient > 0 && ++tctx->prev_misses >= r_impatient) {
+		direct_to_primary = true;
+		tctx->prev_misses = 0;
+		stat_inc(NEST_STAT(TASK_IMPATIENT));
+	}
+
+	reset_impatient = false;
+
 	/* Then try any fully idle core in reserve. */
 	bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(reserve));
 	if (find_fully_idle) {
@@ -336,6 +343,8 @@ search_reserved:
 promote_to_primary:
 	stat_inc(NEST_STAT(PROMOTED_TO_PRIMARY));
 migrate_primary:
+	if (reset_impatient)
+		tctx->prev_misses = 0;
 	pcpu_ctx = bpf_map_lookup_elem(&pcpu_ctxs, &cpu);
 	if (pcpu_ctx) {
 		if (pcpu_ctx->scheduled_compaction) {
