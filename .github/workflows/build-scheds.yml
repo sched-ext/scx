@@ -1,0 +1,49 @@
+name: build-scheds
+run-name: ${{ github.actor }} PR run
+on: [pull_request]
+jobs:
+  build-schedulers:
+    runs-on: ubuntu-20.04
+    steps:
+
+      ### DOWNLOAD AND INSTALL DEPENDENCIES ###
+
+      # Download dependencies packaged by Ubuntu
+      - run: sudo apt update
+      - run: sudo apt -y install cmake cargo elfutils libelf-dev linux-headers-generic linux-tools-common ninja-build
+
+      # clang 17
+      - run: wget https://apt.llvm.org/llvm.sh
+      - run: chmod +x llvm.sh
+      - run: sudo ./llvm.sh all
+      - run: sudo ln -sf /usr/bin/clang-17 /usr/bin/clang
+      - run: sudo ln -sf /usr/bin/llvm-strip-17 /usr/bin/llvm-strip
+
+      # bpftool
+      - run: git clone --recurse-submodules --branch v7.3.0 https://github.com/libbpf/bpftool.git
+      - run: make -j -C bpftool/src
+      - run: sudo make -j -C bpftool/src install
+
+      # zstd
+      - run: git clone --branch zstd-0.4.2 https://github.com/facebook/zstd.git
+      - run: make -j -C zstd
+      - run: sudo make -j -C zstd install
+
+      # asm headers
+      - run: sudo ln -s /usr/include/asm-generic /usr/include/asm
+
+      - uses: actions/checkout@v4
+
+      # libbpf
+      - run: git clone --recurse-submodules --branch v1.3.0 https://github.com/libbpf/libbpf.git
+      - run: make -j -C libbpf/src
+      - run: sudo make -j -C libbpf/src install
+
+      # meson
+      - run: pip install meson
+
+      ### END DEPENDENCIES ###
+
+      # The actual build:
+      - run: meson setup build -Dlibbpf_a=`pwd`/libbpf/src/libbpf.a --prefix ~
+      - run: meson compile -C build
