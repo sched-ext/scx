@@ -1,19 +1,31 @@
 name: build-scheds
 run-name: ${{ github.actor }} PR run
-on: [pull_request]
+on: [pull_request, push]
 jobs:
   build-schedulers:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
+      ### OTHER REPOS ####
+
+      # virtme-ng isn't used yet, but let's incorporate installing it in our environment
+      # as we have plans to use it in the future.
+      - run: sudo add-apt-repository -y ppa:arighi/virtme-ng
+      - run: sudo apt update
+
+      # Hard turn-off interactive mode
+      - run: echo 'debconf debconf/frontend select Noninteractive' | sudo debconf-set-selections
 
       ### DOWNLOAD AND INSTALL DEPENDENCIES ###
 
       # Download dependencies packaged by Ubuntu
-      - run: sudo apt update
-      - run: sudo apt -y install cmake cargo elfutils libelf-dev linux-headers-generic linux-tools-common ninja-build
+      - run: sudo apt -y install cmake cargo elfutils libelf-dev libunwind-dev libzstd-dev linux-headers-generic linux-tools-common linux-tools-generic ninja-build virtme-ng
 
       # clang 17
-      - run: wget https://apt.llvm.org/llvm.sh
+      # Use a custom llvm.sh script which includes the -y flag for
+      # add-apt-repository. Otherwise, the CI job will hang. If and when
+      # https://github.com/opencollab/llvm-jenkins.debian.net/pull/26 is
+      # merged, we can go back to using https://apt.llvm.org/llvm.sh.
+      - run: wget https://raw.githubusercontent.com/Decave/llvm-jenkins.debian.net/fix_llvmsh/llvm.sh
       - run: chmod +x llvm.sh
       - run: sudo ./llvm.sh all
       - run: sudo ln -sf /usr/bin/clang-17 /usr/bin/clang
@@ -23,11 +35,6 @@ jobs:
       - run: git clone --recurse-submodules --branch v7.3.0 https://github.com/libbpf/bpftool.git
       - run: make -j -C bpftool/src
       - run: sudo make -j -C bpftool/src install
-
-      # zstd
-      - run: git clone --branch zstd-0.4.2 https://github.com/facebook/zstd.git
-      - run: make -j -C zstd
-      - run: sudo make -j -C zstd install
 
       # asm headers
       - run: sudo ln -s /usr/include/asm-generic /usr/include/asm
@@ -45,5 +52,8 @@ jobs:
       ### END DEPENDENCIES ###
 
       # The actual build:
-      - run: meson setup build -Dlibbpf_a=`pwd`/libbpf/src/libbpf.a --prefix ~
+      - run: meson setup build -Dlibbpf_a=`pwd`/libbpf/src/libbpf.a
       - run: meson compile -C build
+
+      # TODO: Run the schedulers using virtme-ng (currently blocked on being able
+      #       to use virtme-ng in a Docker container).
