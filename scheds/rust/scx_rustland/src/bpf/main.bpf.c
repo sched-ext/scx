@@ -1,6 +1,6 @@
 /* Copyright (c) Andrea Righi <andrea.righi@canonical.com> */
 /*
- * scx_rustlite: simple user-space scheduler written in Rust
+ * scx_rustland: simple user-space scheduler written in Rust
  *
  * The main goal of this scheduler is be an "easy to read" template that can be
  * used to quickly test more complex scheduling policies. For this reason this
@@ -198,7 +198,7 @@ dispatch_task_global(struct task_struct *p, u64 payload, u64 enq_flags)
  * In the future we may want to improve this part and figure out a way to move
  * this logic into the user-space scheduler as well.
  */
-s32 BPF_STRUCT_OPS(rustlite_select_cpu, struct task_struct *p, s32 prev_cpu,
+s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
 	s32 cpu;
@@ -289,7 +289,7 @@ get_task_info(struct queued_task_ctx *task, const struct task_struct *p)
 /*
  * Task @p becomes ready to run.
  */
-void BPF_STRUCT_OPS(rustlite_enqueue, struct task_struct *p, u64 enq_flags)
+void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 {
         struct queued_task_ctx task;
 
@@ -356,7 +356,7 @@ static void dispatch_user_scheduler(void)
 /*
  * Dispatch tasks that are ready to run.
  */
-void BPF_STRUCT_OPS(rustlite_dispatch, s32 cpu, struct task_struct *prev)
+void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/* Check if the user-space scheduler needs to run */
 	dispatch_user_scheduler();
@@ -383,21 +383,21 @@ void BPF_STRUCT_OPS(rustlite_dispatch, s32 cpu, struct task_struct *prev)
 }
 
 /* Task @p starts on a CPU */
-void BPF_STRUCT_OPS(rustlite_running, struct task_struct *p)
+void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 {
 	dbg_msg("start: pid=%d (%s)", p->pid, p->comm);
 	__sync_fetch_and_add(&nr_tasks_running, 1);
 }
 
 /* Task @p releases a CPU */
-void BPF_STRUCT_OPS(rustlite_stopping, struct task_struct *p, bool runnable)
+void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 {
 	dbg_msg("stop: pid=%d (%s)", p->pid, p->comm);
 	__sync_fetch_and_sub(&nr_tasks_running, 1);
 }
 
 /* Task @p is created */
-s32 BPF_STRUCT_OPS(rustlite_prep_enable, struct task_struct *p,
+s32 BPF_STRUCT_OPS(rustland_prep_enable, struct task_struct *p,
 		   struct scx_enable_args *args)
 {
 	/* Allocate task's local storage */
@@ -452,7 +452,7 @@ static int usersched_timer_init(void)
 /*
  * Initialize the scheduling class.
  */
-s32 BPF_STRUCT_OPS_SLEEPABLE(rustlite_init)
+s32 BPF_STRUCT_OPS_SLEEPABLE(rustland_init)
 {
 	int err;
 
@@ -467,7 +467,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rustlite_init)
 /*
  * Unregister the scheduling class.
  */
-void BPF_STRUCT_OPS(rustlite_exit, struct scx_exit_info *ei)
+void BPF_STRUCT_OPS(rustland_exit, struct scx_exit_info *ei)
 {
 	bpf_probe_read_kernel_str(exit_msg, sizeof(exit_msg), ei->msg);
 	exit_kind = ei->kind;
@@ -477,15 +477,15 @@ void BPF_STRUCT_OPS(rustlite_exit, struct scx_exit_info *ei)
  * Scheduling class declaration.
  */
 SEC(".struct_ops.link")
-struct sched_ext_ops rustlite = {
-	.select_cpu		= (void *)rustlite_select_cpu,
-	.enqueue		= (void *)rustlite_enqueue,
-	.dispatch		= (void *)rustlite_dispatch,
-	.running		= (void *)rustlite_running,
-	.stopping		= (void *)rustlite_stopping,
-	.prep_enable		= (void *)rustlite_prep_enable,
-	.init			= (void *)rustlite_init,
-	.exit			= (void *)rustlite_exit,
+struct sched_ext_ops rustland = {
+	.select_cpu		= (void *)rustland_select_cpu,
+	.enqueue		= (void *)rustland_enqueue,
+	.dispatch		= (void *)rustland_dispatch,
+	.running		= (void *)rustland_running,
+	.stopping		= (void *)rustland_stopping,
+	.prep_enable		= (void *)rustland_prep_enable,
+	.init			= (void *)rustland_init,
+	.exit			= (void *)rustland_exit,
 	.timeout_ms		= 5000,
-	.name			= "rustlite",
+	.name			= "rustland",
 };

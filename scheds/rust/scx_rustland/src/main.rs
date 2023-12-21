@@ -29,12 +29,12 @@ use log::warn;
 
 use libc::{sched_param, sched_setscheduler};
 
-const SCHEDULER_NAME: &'static str = "RustLite";
+const SCHEDULER_NAME: &'static str = "RustLand";
 
 // Defined in UAPI
 const SCHED_EXT: i32 = 7;
 
-/// scx_rustlite: simple user-space scheduler written in Rust
+/// scx_rustland: simple user-space scheduler written in Rust
 ///
 /// The main goal of this scheduler is be an "easy to read" template that can be used to quickly
 /// test more complex scheduling policies. For this reason this scheduler is mostly focused on
@@ -251,7 +251,7 @@ impl<'a> Scheduler<'a> {
         skel.attach().context("Failed to attach BPF program")?;
         let struct_ops = Some(
             skel.maps_mut()
-                .rustlite()
+                .rustland()
                 .attach_struct_ops()
                 .context("Failed to attach struct ops")?,
         );

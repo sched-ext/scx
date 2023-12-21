@@ -1,4 +1,4 @@
-custom_target('scx_rustlite',
+custom_target('scx_rustland',
               output: '@PLAINNAME@.__PHONY__',
               input: 'Cargo.toml',
               command: [cargo, 'build', '--manifest-path=@INPUT@', '--target-dir=@OUTDIR@',

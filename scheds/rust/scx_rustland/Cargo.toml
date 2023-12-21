@@ -1,5 +1,5 @@
 [package]
-name = "scx_rustlite"
+name = "scx_rustland"
 version = "0.0.1"
 authors = ["Andrea Righi <andrea.righi@canonical.com>", "Canonical"]
 edition = "2021"
