@@ -137,6 +137,11 @@ struct Opts {
     #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
     fifo_sched: bool,
 
+    /// Disable preemption to prioritize lower vtime waking tasks.
+    /// fifo_sched needs to be set to false for preemption to work.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    no_preemption: bool,
+
     /// Idle CPUs with utilization lower than this will get remote tasks
     /// directly pushed on them. 0 disables, 100 enables always.
     #[clap(short = 'D', long, default_value = "90.0")]
@@ -1109,6 +1114,7 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().kthreads_local = opts.kthreads_local;
         skel.rodata_mut().fifo_sched = opts.fifo_sched;
         skel.rodata_mut().switch_partial = opts.partial;
+        skel.rodata_mut().enable_preemption = !(opts.no_preemption || opts.fifo_sched);
         skel.rodata_mut().greedy_threshold = opts.greedy_threshold;
         skel.rodata_mut().debug = opts.verbose as u32;
 
