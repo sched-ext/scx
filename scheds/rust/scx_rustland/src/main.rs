@@ -275,17 +275,17 @@ impl<'a> Scheduler<'a> {
 
     // Called on exit to get exit code and exit message from the BPF part.
     fn report_bpf_exit_kind(&mut self) -> Result<()> {
+        let cstr = unsafe { CStr::from_ptr(self.skel.bss().exit_msg.as_ptr() as *const _) };
+        let msg = cstr
+            .to_str()
+            .context("Failed to convert exit msg to string")
+            .unwrap();
+        if !msg.is_empty() {
+            warn!("EXIT: {}", msg);
+        }
         match self.read_bpf_exit_kind() {
             0 => Ok(()),
-            etype => {
-                let cstr = unsafe { CStr::from_ptr(self.skel.bss().exit_msg.as_ptr() as *const _) };
-                let msg = cstr
-                    .to_str()
-                    .context("Failed to convert exit msg to string")
-                    .unwrap();
-                info!("BPF exit_kind={} msg={}", etype, msg);
-                Ok(())
-            }
+            err => bail!("BPF error code: {}", err),
         }
     }
 
