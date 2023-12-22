@@ -33,6 +33,7 @@ typedef long long s64;
  */
 struct queued_task_ctx {
 	s32 pid;
+	s32 cpu; /* CPU where the task is running */
 	u64 sum_exec_runtime; /* Total cpu time */
 	u64 weight; /* Task static priority */
 };
@@ -49,6 +50,7 @@ struct queued_task_ctx {
  */
 struct dispatched_task_ctx {
 	s32 pid;
+	s32 cpu; /* CPU where the task should be dispatched */
 	u64 payload; /* Task payload */
 };
 
