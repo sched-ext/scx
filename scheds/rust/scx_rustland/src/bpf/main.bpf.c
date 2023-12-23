@@ -35,6 +35,8 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 
+#define MAX_CPUS 1024
+
 char _license[] SEC("license") = "GPL";
 
 /*
@@ -52,8 +54,7 @@ const volatile bool switch_partial; /* Switch all tasks or SCHED_EXT tasks */
 const volatile u64 slice_ns = SCX_SLICE_DFL; /* Base time slice duration */
 
 /* Statistics */
-u64 nr_enqueues, nr_user_dispatches, nr_kernel_dispatches;
-u64 nr_sched_congested, nr_tasks_running;
+u64 nr_enqueues, nr_user_dispatches, nr_kernel_dispatches, nr_sched_congested;
 
  /* Report additional debugging information */
 const volatile bool debug;
@@ -139,6 +140,16 @@ struct {
 } usersched_timer SEC(".maps");
 
 /*
+ * Map of allocated CPUs.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, MAX_CPUS);
+	__type(key, u32);
+	__type(value, u32);
+} cpu_map SEC(".maps");
+
+/*
  * Return true if the target task @p is the user-space scheduler.
  */
 static inline bool is_usersched_task(const struct task_struct *p)
@@ -155,33 +166,31 @@ static inline bool is_kthread(const struct task_struct *p)
 }
 
 /*
- * Dispatch a task on the local per-CPU FIFO.
+ * Dispatch a task on its local per-CPU FIFO.
  */
-static void
-dispatch_task_local(struct task_struct *p, u64 enq_flags)
+static void dispatch_local(struct task_struct *p, u64 enq_flags)
 {
-	dbg_msg("dispatch (local): pid=%d", p->pid);
+	dbg_msg("%s: pid=%d", __func__, p->pid);
 	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags | SCX_ENQ_LOCAL);
-	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+}
+
+/*
+ * Dispatch a task on a target per-CPU FIFO.
+ */
+static void dispatch_on_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
+{
+	dbg_msg("%s: pid=%d cpu=%ld", __func__, p->pid, cpu);
+	scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns,
+			 enq_flags | SCX_ENQ_LOCAL);
 }
 
 /*
  * Dispatch a task on the global FIFO.
  */
-static void
-dispatch_task_global(struct task_struct *p, u64 payload, u64 enq_flags)
+static void dispatch_global(struct task_struct *p, u64 enq_flags)
 {
-	/*
-	 * Tasks without a payload are dispatched directly by the kernel, tasks
-	 * with payload are dispatched by the user-space scheduler.
-	 */
-	if (!payload)
-		dbg_msg("dispatch (global): pid=%d", p->pid);
-	else
-		dbg_msg("dispatch (user): pid=%d payload=%llu", p->pid, payload);
-
+	dbg_msg("%s: pid=%d", __func__, p->pid);
 	scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice_ns, enq_flags);
-	__sync_fetch_and_add(&nr_user_dispatches, 1);
 }
 
 /*
@@ -201,7 +210,6 @@ dispatch_task_global(struct task_struct *p, u64 payload, u64 enq_flags)
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	s32 cpu;
 	struct task_ctx *tctx;
 
 	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
@@ -209,29 +217,16 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		scx_bpf_error("Failed to look up task-local storage for %s", p->comm);
 		return -ESRCH;
 	}
-
 	/*
-	 * Check if the previously used CPU is still idle, in this case we can
-	 * dispatch directly in .enqueue() bypassing the scheduler.
+	 * Always try to keep the tasks on the same CPU (unless the user-space
+	 * scheduler decides otherwise).
+	 *
+	 * Then check if the previously used CPU is still idle, in this case we
+	 * can dispatch directly from .enqueue() bypassing the user-space
+	 * scheduler.
 	 */
-	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		tctx->force_local = true;
-		return prev_cpu;
-	}
+	tctx->force_local = scx_bpf_test_and_clear_cpu_idle(prev_cpu);
 
-	/*
-	 * Otherwise try to find another idle CPU in the system, but in this
-	 * case do not bypass the user-space scheduler (to prevent having too
-	 * much migration overhead).
-	 */
-	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-	if (cpu >= 0)
-		return cpu;
-
-	/*
-	* If we cannot find an idle CPU keep using the same one and pass
-	* through the user-space scheduler.
-	*/
 	return prev_cpu;
 }
 
@@ -266,12 +261,7 @@ static bool is_task_cpu_available(struct task_struct *p)
 		scx_bpf_error("Failed to lookup task ctx for %s", p->comm);
 		return false;
 	}
-	if (tctx->force_local) {
-		tctx->force_local = false;
-		return true;
-	}
-
-	return false;
+	return tctx->force_local;
 }
 
 /*
@@ -281,9 +271,10 @@ static bool is_task_cpu_available(struct task_struct *p)
 static void
 get_task_info(struct queued_task_ctx *task, const struct task_struct *p)
 {
-        task->pid = p->pid;
-        task->sum_exec_runtime = p->se.sum_exec_runtime;
-        task->weight = p->scx.weight;
+	task->pid = p->pid;
+	task->sum_exec_runtime = p->se.sum_exec_runtime;
+	task->weight = p->scx.weight;
+	task->cpu = scx_bpf_task_cpu(p);
 }
 
 /*
@@ -305,7 +296,8 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * CPU is available (no scheduling decision required).
 	 */
 	if (is_task_cpu_available(p)) {
-		dispatch_task_local(p, enq_flags);
+		dispatch_local(p, enq_flags);
+		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
 
@@ -321,7 +313,8 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (bpf_map_push_elem(&queued, &task, 0)) {
 		dbg_msg("scheduler congested: pid=%d", task.pid);
 		__sync_fetch_and_add(&nr_sched_congested, 1);
-		dispatch_task_global(p, 0, enq_flags);
+		dispatch_global(p, enq_flags);
+		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
 	__sync_fetch_and_add(&nr_enqueues, 1);
@@ -349,7 +342,8 @@ static void dispatch_user_scheduler(void)
 		scx_bpf_error("Failed to find usersched task %d", usersched_pid);
 		return;
 	}
-	dispatch_task_global(p, 0, 0);
+	dispatch_global(p, 0);
+	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	bpf_task_release(p);
 }
 
@@ -369,6 +363,7 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	bpf_repeat(MAX_ENQUEUED_TASKS) {
 		struct task_struct *p;
 		struct dispatched_task_ctx task;
+		s32 prev_cpu;
 
 		if (!scx_bpf_dispatch_nr_slots())
 			break;
@@ -377,7 +372,18 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		p = bpf_task_from_pid(task.pid);
 		if (!p)
 			continue;
-		dispatch_task_global(p, task.payload, 0);
+		/*
+		 * Check if the scheduler assigned a different CPU to the task
+		 * and migrate, otherwise dispatch on the global DSQ.
+		 */
+		prev_cpu = scx_bpf_task_cpu(p);
+		dbg_msg("usersched: pid=%d prev_cpu=%d cpu=%d payload=%llu",
+			task.pid, task.cpu, task.payload);
+		if (task.cpu != prev_cpu)
+			dispatch_on_cpu(p, task.cpu, 0);
+		else
+			dispatch_global(p, 0);
+		__sync_fetch_and_add(&nr_user_dispatches, 1);
 		bpf_task_release(p);
 	}
 }
@@ -385,15 +391,25 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 /* Task @p starts on a CPU */
 void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 {
+	u32 key = scx_bpf_task_cpu(p);
+	u32 *value;
+
 	dbg_msg("start: pid=%d (%s)", p->pid, p->comm);
-	__sync_fetch_and_add(&nr_tasks_running, 1);
+	value = bpf_map_lookup_elem(&cpu_map, &key);
+	if (value)
+		*value = p->pid;
 }
 
 /* Task @p releases a CPU */
 void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 {
+	u32 key = scx_bpf_task_cpu(p);
+	u32 *value;
+
 	dbg_msg("stop: pid=%d (%s)", p->pid, p->comm);
-	__sync_fetch_and_sub(&nr_tasks_running, 1);
+	value = bpf_map_lookup_elem(&cpu_map, &key);
+	if (value)
+		*value = 0;
 }
 
 /* Task @p is created */

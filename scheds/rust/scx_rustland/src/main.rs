@@ -113,6 +113,7 @@ impl DispatchedMessage {
     fn from_task(task: &Task) -> Self {
         let dispatched_task_struct = bpf_intf::dispatched_task_ctx {
             pid: task.pid,
+            cpu: task.cpu,
             payload: task.vruntime,
         };
         DispatchedMessage {
@@ -168,7 +169,8 @@ impl TaskInfoMap {
 // Basic task item stored in the task pool.
 #[derive(Debug, PartialEq, Eq, PartialOrd)]
 struct Task {
-    pid: i32,      // pid that uniquely identifies  a task
+    pid: i32,      // pid that uniquely identifies a task
+    cpu: i32,      // CPU where the task is running
     vruntime: u64, // total vruntime (that determines the order how tasks are dispatched)
 }
 
@@ -197,8 +199,8 @@ impl TaskTree {
 
     // Add an item to the pool (item will be placed in the tree depending on its vruntime, items
     // with the same vruntime will be sorted by pid).
-    fn push(&mut self, pid: i32, vruntime: u64) {
-        let task = Task { pid, vruntime };
+    fn push(&mut self, pid: i32, cpu: i32, vruntime: u64) {
+        let task = Task { pid, cpu, vruntime };
         self.tasks.insert(task);
     }
 
@@ -275,18 +277,65 @@ impl<'a> Scheduler<'a> {
 
     // Called on exit to get exit code and exit message from the BPF part.
     fn report_bpf_exit_kind(&mut self) -> Result<()> {
+        let cstr = unsafe { CStr::from_ptr(self.skel.bss().exit_msg.as_ptr() as *const _) };
+        let msg = cstr
+            .to_str()
+            .context("Failed to convert exit msg to string")
+            .unwrap();
+        if !msg.is_empty() {
+            warn!("EXIT: {}", msg);
+        }
         match self.read_bpf_exit_kind() {
             0 => Ok(()),
-            etype => {
-                let cstr = unsafe { CStr::from_ptr(self.skel.bss().exit_msg.as_ptr() as *const _) };
-                let msg = cstr
-                    .to_str()
-                    .context("Failed to convert exit msg to string")
-                    .unwrap();
-                info!("BPF exit_kind={} msg={}", etype, msg);
-                Ok(())
+            err => bail!("BPF error code: {}", err),
+        }
+    }
+
+    // Get the pid running on a certain CPU, if no tasks are running return 0
+    fn get_cpu_pid(&self, cpu: u32) -> u32 {
+        let maps = self.skel.maps();
+        let cpu_map = maps.cpu_map();
+
+        let key = cpu.to_ne_bytes();
+        let value = cpu_map.lookup(&key, libbpf_rs::MapFlags::ANY).unwrap();
+        let pid = value.map_or(0u32, |vec| {
+            let mut array: [u8; 4] = Default::default();
+            array.copy_from_slice(&vec[..std::cmp::min(4, vec.len())]);
+            u32::from_le_bytes(array)
+        });
+
+        pid
+    }
+
+    // Return the amount of idle CPUs in the system.
+    fn get_idle_cpus(&self) -> u32 {
+        let mut count = 0;
+        for cpu in 0..self.nr_cpus_online {
+            let pid = self.get_cpu_pid(cpu as u32);
+            if pid == 0 {
+                count += 1;
             }
         }
+        return count;
+    }
+
+    // Search for an idle CPU in the system.
+    //
+    // First check the previously used CPU, that is always the best choice (to mitigate migration
+    // overhead), otherwise check all the others in order.
+    //
+    // If all the CPUs are busy return the previouly used CPU.
+    fn select_task_cpu(&self, prev_cpu: i32) -> i32 {
+        if self.get_cpu_pid(prev_cpu as u32) != 0 {
+            for cpu in 0..self.nr_cpus_online {
+                let pid = self.get_cpu_pid(cpu as u32);
+                if pid == 0 {
+                    return cpu as i32;
+                }
+            }
+        }
+
+        prev_cpu
     }
 
     // Update task's vruntime based on the information collected from the kernel part.
@@ -327,14 +376,15 @@ impl<'a> Scheduler<'a> {
                             task.weight,
                             self.min_vruntime,
                         );
-                        self.task_pool.push(task.pid, task_info.vruntime);
+                        self.task_pool.push(task.pid, task.cpu, task_info.vruntime);
                     } else {
                         let task_info = TaskInfo {
                             sum_exec_runtime: task.sum_exec_runtime,
                             vruntime: self.min_vruntime,
                         };
+                        let cpu = self.select_task_cpu(task.cpu);
                         self.task_map.insert(task.pid, task_info);
-                        self.task_pool.push(task.pid, self.min_vruntime);
+                        self.task_pool.push(task.pid, cpu, self.min_vruntime);
                     }
                 }
                 Ok(None) => break,
@@ -351,7 +401,12 @@ impl<'a> Scheduler<'a> {
         let maps = self.skel.maps();
         let dispatched = maps.dispatched();
 
-        loop {
+        // Dispatch only a batch of tasks equal to the amount of idle CPUs in the system.
+        //
+        // This allows to have more tasks sitting in the task pool, reducing the pressure on the
+        // dispatcher queues and giving a chance to higher priority tasks to come in and get
+        // dispatched earlier, mitigating potential priority inversion issues.
+        for _ in 0..self.get_idle_cpus() {
             match self.task_pool.pop() {
                 Some(task) => {
                     // Update global minimum vruntime.
@@ -366,7 +421,7 @@ impl<'a> Scheduler<'a> {
                              * Re-add the task to the dispatched list in case of failure and stop
                              * dispatching.
                              */
-                            self.task_pool.push(task.pid, task.vruntime);
+                            self.task_pool.push(task.pid, task.cpu, task.vruntime);
                             break;
                         }
                     }
@@ -376,26 +431,11 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    // Check if there's at least a CPU that can accept tasks.
-    fn is_dispatcher_needed(&self) -> bool {
-        let nr_tasks_running = self.skel.bss().nr_tasks_running as u64;
-        return nr_tasks_running < self.nr_cpus_online;
-    }
-
     // Main scheduling function (called in a loop to periodically drain tasks from the queued list
     // and dispatch them to the BPF part via the dispatched list).
     fn schedule(&mut self) {
         self.drain_queued_tasks();
-        // Instead of immediately dispatching all the tasks check if there is at least an idle CPU.
-        // This logic can be improved, because in this way we are going to add more scheduling
-        // overhead when the system is already overloaded (no idle CPUs).
-        //
-        // Probably a better solution could be to have a reasonable batch size (i.e., as a function
-        // of the CPUs and slice duration) and dispatch up to a maximum of BATCH_SIZE tasks each
-        // time.
-        if self.is_dispatcher_needed() {
-            self.dispatch_tasks();
-        }
+        self.dispatch_tasks();
 
         // Yield to avoid using too much CPU from the scheduler itself.
         thread::yield_now();
@@ -407,12 +447,16 @@ impl<'a> Scheduler<'a> {
         let nr_user_dispatches = self.skel.bss().nr_user_dispatches as u64;
         let nr_kernel_dispatches = self.skel.bss().nr_kernel_dispatches as u64;
         let nr_sched_congested = self.skel.bss().nr_sched_congested as u64;
-        let nr_tasks_running = self.skel.bss().nr_tasks_running as u64;
 
         info!(
-            "min_vtime={} nr_tasks_running={} nr_enqueues={} nr_user_dispatched={} nr_kernel_dispatches={} nr_sched_congested={}",
-            self.min_vruntime, nr_tasks_running, nr_enqueues, nr_user_dispatches, nr_kernel_dispatches, nr_sched_congested
+            "min_vtime={} nr_enqueues={} nr_user_dispatched={} nr_kernel_dispatches={} nr_sched_congested={}",
+            self.min_vruntime, nr_enqueues, nr_user_dispatches, nr_kernel_dispatches, nr_sched_congested
         );
+        for cpu in 0..self.nr_cpus_online {
+            let pid = self.get_cpu_pid(cpu as u32);
+            info!("cpu={} pid={}", cpu, pid);
+        }
+
         log::logger().flush();
     }
 
