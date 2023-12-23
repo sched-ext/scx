@@ -307,15 +307,16 @@ impl<'a> Scheduler<'a> {
         pid
     }
 
-    // Check if there's at least a CPU that can accept tasks.
-    fn is_dispatcher_needed(&self) -> bool {
+    // Return the amount of idle CPUs in the system.
+    fn get_idle_cpus(&self) -> u32 {
+        let mut count = 0;
         for cpu in 0..self.nr_cpus_online {
             let pid = self.get_cpu_pid(cpu as u32);
             if pid == 0 {
-                return true;
+                count += 1;
             }
         }
-        return false;
+        return count;
     }
 
     // Search for an idle CPU in the system.
@@ -400,7 +401,12 @@ impl<'a> Scheduler<'a> {
         let maps = self.skel.maps();
         let dispatched = maps.dispatched();
 
-        loop {
+        // Dispatch only a batch of tasks equal to the amount of idle CPUs in the system.
+        //
+        // This allows to have more tasks sitting in the task pool, reducing the pressure on the
+        // dispatcher queues and giving a chance to higher priority tasks to come in and get
+        // dispatched earlier, mitigating potential priority inversion issues.
+        for _ in 0..self.get_idle_cpus() {
             match self.task_pool.pop() {
                 Some(task) => {
                     // Update global minimum vruntime.
@@ -429,16 +435,7 @@ impl<'a> Scheduler<'a> {
     // and dispatch them to the BPF part via the dispatched list).
     fn schedule(&mut self) {
         self.drain_queued_tasks();
-        // Instead of immediately dispatching all the tasks check if there is at least an idle CPU.
-        // This logic can be improved, because in this way we are going to add more scheduling
-        // overhead when the system is already overloaded (no idle CPUs).
-        //
-        // Probably a better solution could be to have a reasonable batch size (i.e., as a function
-        // of the CPUs and slice duration) and dispatch up to a maximum of BATCH_SIZE tasks each
-        // time.
-        if self.is_dispatcher_needed() {
-            self.dispatch_tasks();
-        }
+        self.dispatch_tasks();
 
         // Yield to avoid using too much CPU from the scheduler itself.
         thread::yield_now();
