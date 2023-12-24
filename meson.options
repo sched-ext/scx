@@ -14,3 +14,5 @@ option('offline', type: 'boolean', value: 'false',
        description: 'Compilation step should not access the internet')
 option('enable_rust', type: 'boolean', value: 'true',
        description: 'Enable rust sub-projects')
+option('kernel', type: 'string', value: 'vmlinuz',
+       description: 'kernel image used to test schedulers')

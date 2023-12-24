@@ -7,18 +7,20 @@ jobs:
     steps:
       ### OTHER REPOS ####
 
-      # virtme-ng isn't used yet, but let's incorporate installing it in our environment
-      # as we have plans to use it in the future.
-      - run: sudo add-apt-repository -y ppa:arighi/virtme-ng
-      - run: sudo apt update
-
       # Hard turn-off interactive mode
       - run: echo 'debconf debconf/frontend select Noninteractive' | sudo debconf-set-selections
+
+      # Add sched-ext external ppa to get the latest sched-ext kernel
+      - run: sudo add-apt-repository -n -y ppa:arighi/sched-ext
+      - run: sudo sed -i s/jammy/noble/ /etc/apt/sources.list.d/arighi-ubuntu-sched-ext-jammy.list
+
+      # Refresh packages list
+      - run: sudo apt update
 
       ### DOWNLOAD AND INSTALL DEPENDENCIES ###
 
       # Download dependencies packaged by Ubuntu
-      - run: sudo apt -y install cmake cargo elfutils libelf-dev libunwind-dev libzstd-dev linux-headers-generic linux-tools-common linux-tools-generic ninja-build virtme-ng
+      - run: sudo apt -y install coreutils cmake cargo elfutils libelf-dev libunwind-dev libzstd-dev linux-headers-generic linux-tools-common linux-tools-generic ninja-build python3-pip python3-requests qemu-kvm udev iproute2 busybox-static libvirt-clients kbd kmod file rsync zstd
 
       # clang 17
       # Use a custom llvm.sh script which includes the -y flag for
@@ -49,11 +51,19 @@ jobs:
       # meson
       - run: pip install meson
 
+      # Install virtme-ng
+      - run: pip install virtme-ng
+
+      # Download a sched-ext enabled kernel
+      - run: apt download linux-image-unsigned-6.7.0-3-generic linux-modules-6.7.0-3-generic
+      - run: mkdir -p kernel
+      - run: for f in *.deb; do dpkg -x $f kernel; done
+
       ### END DEPENDENCIES ###
 
       # The actual build:
-      - run: meson setup build -Dlibbpf_a=`pwd`/libbpf/src/libbpf.a
+      - run: meson setup build -Dlibbpf_a=`pwd`/libbpf/src/libbpf.a -Dkernel=$(pwd)/$(ls -c1 kernel/boot/vmlinuz* | tail -1)
       - run: meson compile -C build
 
-      # TODO: Run the schedulers using virtme-ng (currently blocked on being able
-      #       to use virtme-ng in a Docker container).
+      # Test schedulers
+      - run: meson compile -C build test_sched
