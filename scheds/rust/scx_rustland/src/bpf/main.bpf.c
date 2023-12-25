@@ -149,6 +149,40 @@ struct {
 } cpu_map SEC(".maps");
 
 /*
+ * Assign a task to a CPU (used in .running() and .stopping()).
+ *
+ * If pid == 0 the CPU will be considered idle.
+ */
+static void set_cpu_owner(u32 cpu, u32 pid)
+{
+	u32 *owner;
+
+	owner = bpf_map_lookup_elem(&cpu_map, &cpu);
+	if (!owner) {
+		scx_bpf_error("Failed to look up cpu_map for cpu %u", cpu);
+		return;
+	}
+	*owner= pid;
+}
+
+/*
+ * Get the pid of the task that is currently running on @cpu.
+ *
+ * Return 0 if the CPU is idle.
+ */
+static u32 get_cpu_owner(u32 cpu)
+{
+	u32 *owner;
+
+	owner = bpf_map_lookup_elem(&cpu_map, &cpu);
+	if (!owner) {
+		scx_bpf_error("Failed to look up cpu_map for cpu %u", cpu);
+		return 0;
+	}
+	return *owner;
+}
+
+/*
  * Return true if the target task @p is the user-space scheduler.
  */
 static inline bool is_usersched_task(const struct task_struct *p)
@@ -225,9 +259,6 @@ static void dispatch_global(struct task_struct *p, u64 enq_flags)
  * If the CPU where the task was running is still idle, then the task can be
  * dispatched immediately on the same CPU from .enqueue(), without having to
  * call the scheduler.
- *
- * In the future we may want to improve this part and figure out a way to move
- * this logic into the user-space scheduler as well.
  */
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
@@ -243,11 +274,11 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * Always try to keep the tasks on the same CPU (unless the user-space
 	 * scheduler decides otherwise).
 	 *
-	 * Then check if the previously used CPU is still idle, in this case we
-	 * can dispatch directly from .enqueue() bypassing the user-space
+	 * Check if the previously used CPU is idle, in this case we can
+	 * dispatch directly from .enqueue(), bypassing the user-space
 	 * scheduler.
 	 */
-	tctx->force_local = scx_bpf_test_and_clear_cpu_idle(prev_cpu);
+	tctx->force_local = get_cpu_owner(prev_cpu) == 0;
 
 	return prev_cpu;
 }
@@ -412,25 +443,15 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 /* Task @p starts on a CPU */
 void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 {
-	u32 key = scx_bpf_task_cpu(p);
-	u32 *value;
-
 	dbg_msg("start: pid=%d (%s)", p->pid, p->comm);
-	value = bpf_map_lookup_elem(&cpu_map, &key);
-	if (value)
-		*value = p->pid;
+	set_cpu_owner(scx_bpf_task_cpu(p), p->pid);
 }
 
 /* Task @p releases a CPU */
 void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 {
-	u32 key = scx_bpf_task_cpu(p);
-	u32 *value;
-
 	dbg_msg("stop: pid=%d (%s)", p->pid, p->comm);
-	value = bpf_map_lookup_elem(&cpu_map, &key);
-	if (value)
-		*value = 0;
+	set_cpu_owner(scx_bpf_task_cpu(p), 0);
 }
 
 /* Task @p is created */
