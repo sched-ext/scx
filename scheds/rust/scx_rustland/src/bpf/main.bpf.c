@@ -49,7 +49,6 @@ char exit_msg[SCX_EXIT_MSG_LEN];
  * Scheduler attributes and statistics.
  */
 u32 usersched_pid; /* User-space scheduler PID */
-static volatile bool usersched_needed; /* Used to wake-up the user-space scheduler */
 const volatile bool switch_partial; /* Switch all tasks or SCHED_EXT tasks */
 const volatile u64 slice_ns = SCX_SLICE_DFL; /* Base time slice duration */
 
@@ -163,6 +162,29 @@ static inline bool is_usersched_task(const struct task_struct *p)
 static inline bool is_kthread(const struct task_struct *p)
 {
 	return !!(p->flags & PF_KTHREAD);
+}
+
+/*
+ * Flag used to wake-up the user-space scheduler.
+ */
+static volatile u32 usersched_needed;
+
+/*
+ * Set user-space scheduler wake-up flag (equivalent to an atomic release
+ * operation).
+ */
+static void set_usersched_needed(void)
+{
+	__sync_fetch_and_or(&usersched_needed, 1);
+}
+
+/*
+ * Check and clear user-space scheduler wake-up flag (equivalent to an atomic
+ * acquire operation).
+ */
+static bool test_and_clear_usersched_needed(void)
+{
+	return __sync_fetch_and_and(&usersched_needed, 0) == 1;
 }
 
 /*
@@ -323,7 +345,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Task was sent to user-space correctly, now we can wake-up the
 	 * user-space scheduler.
 	 */
-	usersched_needed = true;
+	set_usersched_needed();
 }
 
 /*
@@ -333,9 +355,8 @@ static void dispatch_user_scheduler(void)
 {
 	struct task_struct *p;
 
-	if (!usersched_needed)
+	if (!test_and_clear_usersched_needed())
 		return;
-	usersched_needed = false;
 
 	p = bpf_task_from_pid(usersched_pid);
 	if (!p) {
@@ -432,7 +453,7 @@ static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
 	int err = 0;
 
 	/* Kick the scheduler */
-	usersched_needed = true;
+	set_usersched_needed();
 
 	/* Re-arm the timer */
 	err = bpf_timer_start(timer, NSEC_PER_SEC, 0);
