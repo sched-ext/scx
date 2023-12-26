@@ -53,7 +53,7 @@ const volatile bool switch_partial; /* Switch all tasks or SCHED_EXT tasks */
 const volatile u64 slice_ns = SCX_SLICE_DFL; /* Base time slice duration */
 
 /* Statistics */
-u64 nr_enqueues, nr_user_dispatches, nr_kernel_dispatches, nr_sched_congested;
+u64 nr_queued, nr_user_dispatches, nr_kernel_dispatches, nr_sched_congested;
 
  /* Report additional debugging information */
 const volatile bool debug;
@@ -370,13 +370,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
-	__sync_fetch_and_add(&nr_enqueues, 1);
-
-	/*
-	 * Task was sent to user-space correctly, now we can wake-up the
-	 * user-space scheduler.
-	 */
-	set_usersched_needed();
+	__sync_fetch_and_add(&nr_queued, 1);
 }
 
 /*
@@ -419,8 +413,13 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 
 		if (!scx_bpf_dispatch_nr_slots())
 			break;
+
+		/* Pop first task from the dispatched queue */
 		if (bpf_map_pop_elem(&dispatched, &task))
 			break;
+		__sync_fetch_and_sub(&nr_queued, 1);
+
+		/* Ignore entry if the task doesn't exist anymore */
 		p = bpf_task_from_pid(task.pid);
 		if (!p)
 			continue;
@@ -444,6 +443,9 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 {
 	dbg_msg("start: pid=%d (%s)", p->pid, p->comm);
+	/*
+	 * Mark the CPU as busy by setting the pid as owner.
+	 */
 	set_cpu_owner(scx_bpf_task_cpu(p), p->pid);
 }
 
@@ -451,7 +453,17 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 {
 	dbg_msg("stop: pid=%d (%s)", p->pid, p->comm);
+	/*
+	 * Mark the CPU as idle by setting the owner to 0
+	 */
 	set_cpu_owner(scx_bpf_task_cpu(p), 0);
+	/*
+	 * A CPU is now available, notify the user-space scheduler that tasks
+	 * can be dispatched, if there is at least one task queued (ready to be
+	 * scheduled).
+	 */
+	if (nr_queued > 0)
+		set_usersched_needed();
 }
 
 /* Task @p is created */
