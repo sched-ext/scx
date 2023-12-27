@@ -297,12 +297,12 @@ static bool is_task_cpu_available(struct task_struct *p)
 	struct task_ctx *tctx;
 
 	/*
-	 * Always dispatch per-CPU kthread on the same CPU, bypassing the
-	 * user-space scheduler (in this way we can to prioritize critical
-	 * kernel threads that may potentially slow down the entire system if
-	 * they are blocked for too long).
+	 * Always dispatch kthread on the same CPU, bypassing the user-space
+	 * scheduler (in this way we can to prioritize critical kernel threads
+	 * that may potentially slow down the entire system if they are blocked
+	 * for too long).
 	 */
-	if (is_kthread(p) && p->nr_cpus_allowed == 1)
+	if (is_kthread(p))
 		return true;
 
 	/*
