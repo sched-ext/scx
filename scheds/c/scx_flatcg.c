@@ -211,6 +211,7 @@ int main(int argc, char **argv)
 		       stats[FCG_STAT_PNC_GONE]);
 		printf("BAD remove:%6llu\n",
 		       acc_stats[FCG_STAT_BAD_REMOVAL]);
+		fflush(stdout);
 
 		nanosleep(&intv_ts, NULL);
 	}
