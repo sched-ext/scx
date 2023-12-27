@@ -49,12 +49,11 @@ char exit_msg[SCX_EXIT_MSG_LEN];
  * Scheduler attributes and statistics.
  */
 u32 usersched_pid; /* User-space scheduler PID */
-static volatile bool usersched_needed; /* Used to wake-up the user-space scheduler */
 const volatile bool switch_partial; /* Switch all tasks or SCHED_EXT tasks */
 const volatile u64 slice_ns = SCX_SLICE_DFL; /* Base time slice duration */
 
 /* Statistics */
-u64 nr_enqueues, nr_user_dispatches, nr_kernel_dispatches, nr_sched_congested;
+u64 nr_queued, nr_user_dispatches, nr_kernel_dispatches, nr_sched_congested;
 
  /* Report additional debugging information */
 const volatile bool debug;
@@ -150,6 +149,40 @@ struct {
 } cpu_map SEC(".maps");
 
 /*
+ * Assign a task to a CPU (used in .running() and .stopping()).
+ *
+ * If pid == 0 the CPU will be considered idle.
+ */
+static void set_cpu_owner(u32 cpu, u32 pid)
+{
+	u32 *owner;
+
+	owner = bpf_map_lookup_elem(&cpu_map, &cpu);
+	if (!owner) {
+		scx_bpf_error("Failed to look up cpu_map for cpu %u", cpu);
+		return;
+	}
+	*owner= pid;
+}
+
+/*
+ * Get the pid of the task that is currently running on @cpu.
+ *
+ * Return 0 if the CPU is idle.
+ */
+static u32 get_cpu_owner(u32 cpu)
+{
+	u32 *owner;
+
+	owner = bpf_map_lookup_elem(&cpu_map, &cpu);
+	if (!owner) {
+		scx_bpf_error("Failed to look up cpu_map for cpu %u", cpu);
+		return 0;
+	}
+	return *owner;
+}
+
+/*
  * Return true if the target task @p is the user-space scheduler.
  */
 static inline bool is_usersched_task(const struct task_struct *p)
@@ -163,6 +196,29 @@ static inline bool is_usersched_task(const struct task_struct *p)
 static inline bool is_kthread(const struct task_struct *p)
 {
 	return !!(p->flags & PF_KTHREAD);
+}
+
+/*
+ * Flag used to wake-up the user-space scheduler.
+ */
+static volatile u32 usersched_needed;
+
+/*
+ * Set user-space scheduler wake-up flag (equivalent to an atomic release
+ * operation).
+ */
+static void set_usersched_needed(void)
+{
+	__sync_fetch_and_or(&usersched_needed, 1);
+}
+
+/*
+ * Check and clear user-space scheduler wake-up flag (equivalent to an atomic
+ * acquire operation).
+ */
+static bool test_and_clear_usersched_needed(void)
+{
+	return __sync_fetch_and_and(&usersched_needed, 0) == 1;
 }
 
 /*
@@ -203,9 +259,6 @@ static void dispatch_global(struct task_struct *p, u64 enq_flags)
  * If the CPU where the task was running is still idle, then the task can be
  * dispatched immediately on the same CPU from .enqueue(), without having to
  * call the scheduler.
- *
- * In the future we may want to improve this part and figure out a way to move
- * this logic into the user-space scheduler as well.
  */
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
@@ -221,11 +274,11 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * Always try to keep the tasks on the same CPU (unless the user-space
 	 * scheduler decides otherwise).
 	 *
-	 * Then check if the previously used CPU is still idle, in this case we
-	 * can dispatch directly from .enqueue() bypassing the user-space
+	 * Check if the previously used CPU is idle, in this case we can
+	 * dispatch directly from .enqueue(), bypassing the user-space
 	 * scheduler.
 	 */
-	tctx->force_local = scx_bpf_test_and_clear_cpu_idle(prev_cpu);
+	tctx->force_local = get_cpu_owner(prev_cpu) == 0;
 
 	return prev_cpu;
 }
@@ -244,12 +297,12 @@ static bool is_task_cpu_available(struct task_struct *p)
 	struct task_ctx *tctx;
 
 	/*
-	 * Always dispatch per-CPU kthread on the same CPU, bypassing the
-	 * user-space scheduler (in this way we can to prioritize critical
-	 * kernel threads that may potentially slow down the entire system if
-	 * they are blocked for too long).
+	 * Always dispatch kthread on the same CPU, bypassing the user-space
+	 * scheduler (in this way we can to prioritize critical kernel threads
+	 * that may potentially slow down the entire system if they are blocked
+	 * for too long).
 	 */
-	if (is_kthread(p) && p->nr_cpus_allowed == 1)
+	if (is_kthread(p))
 		return true;
 
 	/*
@@ -317,13 +370,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
-	__sync_fetch_and_add(&nr_enqueues, 1);
-
-	/*
-	 * Task was sent to user-space correctly, now we can wake-up the
-	 * user-space scheduler.
-	 */
-	usersched_needed = true;
+	__sync_fetch_and_add(&nr_queued, 1);
 }
 
 /*
@@ -333,9 +380,8 @@ static void dispatch_user_scheduler(void)
 {
 	struct task_struct *p;
 
-	if (!usersched_needed)
+	if (!test_and_clear_usersched_needed())
 		return;
-	usersched_needed = false;
 
 	p = bpf_task_from_pid(usersched_pid);
 	if (!p) {
@@ -367,8 +413,13 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 
 		if (!scx_bpf_dispatch_nr_slots())
 			break;
+
+		/* Pop first task from the dispatched queue */
 		if (bpf_map_pop_elem(&dispatched, &task))
 			break;
+		__sync_fetch_and_sub(&nr_queued, 1);
+
+		/* Ignore entry if the task doesn't exist anymore */
 		p = bpf_task_from_pid(task.pid);
 		if (!p)
 			continue;
@@ -391,25 +442,28 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 /* Task @p starts on a CPU */
 void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 {
-	u32 key = scx_bpf_task_cpu(p);
-	u32 *value;
-
 	dbg_msg("start: pid=%d (%s)", p->pid, p->comm);
-	value = bpf_map_lookup_elem(&cpu_map, &key);
-	if (value)
-		*value = p->pid;
+	/*
+	 * Mark the CPU as busy by setting the pid as owner.
+	 */
+	set_cpu_owner(scx_bpf_task_cpu(p), p->pid);
 }
 
 /* Task @p releases a CPU */
 void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 {
-	u32 key = scx_bpf_task_cpu(p);
-	u32 *value;
-
 	dbg_msg("stop: pid=%d (%s)", p->pid, p->comm);
-	value = bpf_map_lookup_elem(&cpu_map, &key);
-	if (value)
-		*value = 0;
+	/*
+	 * Mark the CPU as idle by setting the owner to 0
+	 */
+	set_cpu_owner(scx_bpf_task_cpu(p), 0);
+	/*
+	 * A CPU is now available, notify the user-space scheduler that tasks
+	 * can be dispatched, if there is at least one task queued (ready to be
+	 * scheduled).
+	 */
+	if (nr_queued > 0)
+		set_usersched_needed();
 }
 
 /* Task @p is created */
@@ -432,7 +486,7 @@ static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
 	int err = 0;
 
 	/* Kick the scheduler */
-	usersched_needed = true;
+	set_usersched_needed();
 
 	/* Re-arm the timer */
 	err = bpf_timer_start(timer, NSEC_PER_SEC, 0);

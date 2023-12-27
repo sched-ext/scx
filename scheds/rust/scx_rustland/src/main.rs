@@ -443,14 +443,14 @@ impl<'a> Scheduler<'a> {
 
     // Print internal scheduler statistics (fetched from the BPF part)
     fn print_stats(&mut self) {
-        let nr_enqueues = self.skel.bss().nr_enqueues as u64;
+        let nr_queued = self.skel.bss().nr_queued as u64;
         let nr_user_dispatches = self.skel.bss().nr_user_dispatches as u64;
         let nr_kernel_dispatches = self.skel.bss().nr_kernel_dispatches as u64;
         let nr_sched_congested = self.skel.bss().nr_sched_congested as u64;
 
         info!(
-            "min_vtime={} nr_enqueues={} nr_user_dispatched={} nr_kernel_dispatches={} nr_sched_congested={}",
-            self.min_vruntime, nr_enqueues, nr_user_dispatches, nr_kernel_dispatches, nr_sched_congested
+            "min_vtime={} nr_queued={} nr_user_dispatched={} nr_kernel_dispatches={} nr_sched_congested={}",
+            self.min_vruntime, nr_queued, nr_user_dispatches, nr_kernel_dispatches, nr_sched_congested
         );
         for cpu in 0..self.nr_cpus_online {
             let pid = self.get_cpu_pid(cpu as u32);
