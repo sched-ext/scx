@@ -9,7 +9,7 @@ description = "Utilities for sched_ext schedulers"
 
 [dependencies]
 anyhow = "1.0"
-bindgen = "0.69"
+bindgen = ">=0.68, <0.70"
 glob = "0.3"
 lazy_static = "1.4"
 libbpf-cargo = "0.22"

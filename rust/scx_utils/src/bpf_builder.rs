@@ -506,7 +506,7 @@ impl BpfBuilder {
             .header(input)
             // Tell cargo to invalidate the built crate whenever any of the
             // included header files changed.
-            .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+            .parse_callbacks(Box::new(bindgen::CargoCallbacks))
             .generate()
             .context("Unable to generate bindings")?;
 
