@@ -293,6 +293,7 @@ static void *run_stats_printer(void *arg)
 		printf("|  failed:   %10llu |\n", nr_vruntime_failed);
 		printf("o-----------------------o\n");
 		printf("\n\n");
+		fflush(stdout);
 		sleep(1);
 	}
 
