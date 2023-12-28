@@ -162,7 +162,7 @@ static void set_cpu_owner(u32 cpu, u32 pid)
 		scx_bpf_error("Failed to look up cpu_map for cpu %u", cpu);
 		return;
 	}
-	*owner= pid;
+	*owner = pid;
 }
 
 /*
@@ -444,9 +444,11 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 {
 	dbg_msg("start: pid=%d (%s)", p->pid, p->comm);
 	/*
-	 * Mark the CPU as busy by setting the pid as owner.
+	 * Mark the CPU as busy by setting the pid as owner (ignoring the
+	 * user-space scheduler).
 	 */
-	set_cpu_owner(scx_bpf_task_cpu(p), p->pid);
+	if (!is_usersched_task(p))
+		set_cpu_owner(scx_bpf_task_cpu(p), p->pid);
 }
 
 /* Task @p releases a CPU */
@@ -456,7 +458,8 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Mark the CPU as idle by setting the owner to 0.
 	 */
-	set_cpu_owner(scx_bpf_task_cpu(p), 0);
+	if (!is_usersched_task(p))
+		set_cpu_owner(scx_bpf_task_cpu(p), 0);
 }
 
 /*
@@ -486,7 +489,7 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 	 * Moreover, kick the CPU to make it immediately ready to accept
 	 * dispatched tasks.
 	 */
-	if (nr_queued > 0) {
+	if (__sync_fetch_and_add(&nr_queued, 0)) {
 		scx_bpf_kick_cpu(cpu, 0);
 		set_usersched_needed();
 	}
