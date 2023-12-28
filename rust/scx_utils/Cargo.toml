@@ -1,6 +1,6 @@
 [package]
 name = "scx_utils"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 authors = ["Tejun Heo <tj@kernel.org>"]
 license = "GPL-2.0-only"
@@ -9,6 +9,8 @@ description = "Utilities for sched_ext schedulers"
 
 [dependencies]
 anyhow = "1.0"
+# FIXME - We need to allow both 0.68 and 0.69 to accommodate fedora. See the
+# comment in BpfBuilder::bindgen_bpf_intf() for details.
 bindgen = ">=0.68, <0.70"
 glob = "0.3"
 lazy_static = "1.4"
