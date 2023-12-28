@@ -454,16 +454,42 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 {
 	dbg_msg("stop: pid=%d (%s)", p->pid, p->comm);
 	/*
-	 * Mark the CPU as idle by setting the owner to 0
+	 * Mark the CPU as idle by setting the owner to 0.
 	 */
 	set_cpu_owner(scx_bpf_task_cpu(p), 0);
+}
+
+/*
+ * A CPU is about to change its idle state.
+ *
+ * NOTE: implementing an update_idle() callback automatically disables the
+ * built-in idle tracking, so we need to rely on the internal CPU ownership
+ * (get_cpu_owner() / set_cpu_owner()) to determine if a CPU is available or
+ * not.
+ *
+ * The same information can be shared with the user-space scheduler via the
+ * BPF_MAP_TYPE_ARRAY cpu_map.
+ */
+void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
+{
+	/*
+	 * Don't do anything if we exit from and idle state, a CPU owner will
+	 * be assigned in .running().
+	 */
+	if (!idle)
+		return;
 	/*
 	 * A CPU is now available, notify the user-space scheduler that tasks
 	 * can be dispatched, if there is at least one task queued (ready to be
 	 * scheduled).
+	 *
+	 * Moreover, kick the CPU to make it immediately ready to accept
+	 * dispatched tasks.
 	 */
-	if (nr_queued > 0)
+	if (nr_queued > 0) {
+		scx_bpf_kick_cpu(cpu, 0);
 		set_usersched_needed();
+	}
 }
 
 /* Task @p is created */
@@ -553,6 +579,7 @@ struct sched_ext_ops rustland = {
 	.dispatch		= (void *)rustland_dispatch,
 	.running		= (void *)rustland_running,
 	.stopping		= (void *)rustland_stopping,
+	.update_idle		= (void *)rustland_update_idle,
 	.prep_enable		= (void *)rustland_prep_enable,
 	.init			= (void *)rustland_init,
 	.exit			= (void *)rustland_exit,
