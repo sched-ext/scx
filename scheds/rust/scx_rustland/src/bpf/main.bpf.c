@@ -52,8 +52,25 @@ u32 usersched_pid; /* User-space scheduler PID */
 const volatile bool switch_partial; /* Switch all tasks or SCHED_EXT tasks */
 const volatile u64 slice_ns = SCX_SLICE_DFL; /* Base time slice duration */
 
-/* Statistics */
-u64 nr_queued, nr_user_dispatches, nr_kernel_dispatches, nr_sched_congested;
+/*
+ * Number of tasks that are queued for scheduling.
+ *
+ * This number is incremented by the BPF component when a task is queued to the
+ * user-space scheduler and it must be decremented by the user-space scheduler
+ * when a task is consumed.
+ */
+volatile u64 nr_queued;
+
+/*
+ * Number of tasks that are waiting for scheduling.
+ *
+ * This number must be updated by the user-space scheduler to keep track if
+ * there is still some scheduling work to do.
+ */
+volatile u64 nr_scheduled;
+
+/* Misc statistics */
+volatile u64 nr_user_dispatches, nr_kernel_dispatches, nr_sched_congested;
 
  /* Report additional debugging information */
 const volatile bool debug;
@@ -162,7 +179,7 @@ static void set_cpu_owner(u32 cpu, u32 pid)
 		scx_bpf_error("Failed to look up cpu_map for cpu %u", cpu);
 		return;
 	}
-	*owner= pid;
+	*owner = pid;
 }
 
 /*
@@ -417,7 +434,6 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		/* Pop first task from the dispatched queue */
 		if (bpf_map_pop_elem(&dispatched, &task))
 			break;
-		__sync_fetch_and_sub(&nr_queued, 1);
 
 		/* Ignore entry if the task doesn't exist anymore */
 		p = bpf_task_from_pid(task.pid);
@@ -444,9 +460,11 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 {
 	dbg_msg("start: pid=%d (%s)", p->pid, p->comm);
 	/*
-	 * Mark the CPU as busy by setting the pid as owner.
+	 * Mark the CPU as busy by setting the pid as owner (ignoring the
+	 * user-space scheduler).
 	 */
-	set_cpu_owner(scx_bpf_task_cpu(p), p->pid);
+	if (!is_usersched_task(p))
+		set_cpu_owner(scx_bpf_task_cpu(p), p->pid);
 }
 
 /* Task @p releases a CPU */
@@ -456,7 +474,8 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Mark the CPU as idle by setting the owner to 0.
 	 */
-	set_cpu_owner(scx_bpf_task_cpu(p), 0);
+	if (!is_usersched_task(p))
+		set_cpu_owner(scx_bpf_task_cpu(p), 0);
 }
 
 /*
@@ -480,13 +499,35 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 		return;
 	/*
 	 * A CPU is now available, notify the user-space scheduler that tasks
-	 * can be dispatched, if there is at least one task queued (ready to be
-	 * scheduled).
+	 * can be dispatched, if there is at least one task waiting to be
+	 * scheduled, either queued (accounted in nr_queued) or scheduled
+	 * (accounted in nr_scheduled).
 	 *
-	 * Moreover, kick the CPU to make it immediately ready to accept
-	 * dispatched tasks.
+	 * NOTE: nr_queued is incremented by the BPF component, more exactly in
+	 * enqueue(), when a task is sent to the user-space scheduler, then
+	 * the scheduler drains the queued tasks (updating nr_queued) and adds
+	 * them to its internal data structures / state; at this point tasks
+	 * become "scheduled" and the user-space scheduler will take care of
+	 * updating nr_scheduled accordingly; lastly tasks will be dispatched
+	 * and the user-space scheduler will update nr_scheduled again.
+	 *
+	 * Checking both counters allows to determine if there is still some
+	 * pending work to do for the scheduler: new tasks have been queued
+	 * since last check, or there are still tasks "queued" or "scheduled"
+	 * since the previous user-space scheduler run. If the counters are
+	 * both zero it is pointless to wake-up the scheduler (even if a CPU
+	 * becomes idle), because there is nothing to do.
+	 *
+	 * Keep in mind that update_idle() doesn't run concurrently with the
+	 * user-space scheduler (that is single-threaded): this function is
+	 * naturally serialized with the user-space scheduler code, therefore
+	 * this check here is also safe from a concurrency perspective.
 	 */
-	if (nr_queued > 0) {
+	if (nr_queued || nr_scheduled) {
+		/*
+		 * Kick the CPU to make it immediately ready to accept
+		 * dispatched tasks.
+		 */
 		scx_bpf_kick_cpu(cpu, 0);
 		set_usersched_needed();
 	}
