@@ -387,7 +387,14 @@ impl<'a> Scheduler<'a> {
                         self.task_pool.push(task.pid, cpu, self.min_vruntime);
                     }
                 }
-                Ok(None) => break,
+                Ok(None) => {
+                    // Reset nr_queued and update nr_scheduled, to notify the dispatcher that
+                    // queued tasks are drained, but there is still some work left to do in the
+                    // scheduler.
+                    self.skel.bss_mut().nr_queued = 0;
+                    self.skel.bss_mut().nr_scheduled = self.task_pool.tasks.len() as u64;
+                    break;
+                }
                 Err(err) => {
                     warn!("Error: {}", err);
                     break;
@@ -429,6 +436,10 @@ impl<'a> Scheduler<'a> {
                 None => break,
             }
         }
+        // Reset nr_scheduled to notify the dispatcher that all the tasks received by the scheduler
+        // has been dispatched, so there is no reason to re-activate the scheduler, unless more
+        // tasks are queued.
+        self.skel.bss_mut().nr_scheduled = self.task_pool.tasks.len() as u64;
     }
 
     // Main scheduling function (called in a loop to periodically drain tasks from the queued list
@@ -443,18 +454,32 @@ impl<'a> Scheduler<'a> {
 
     // Print internal scheduler statistics (fetched from the BPF part)
     fn print_stats(&mut self) {
-        let nr_queued = self.skel.bss().nr_queued as u64;
+        // Show minimum vruntime (this should be constantly incrementing).
+        info!("vruntime={}", self.min_vruntime);
+
+        // Show general statistics.
         let nr_user_dispatches = self.skel.bss().nr_user_dispatches as u64;
         let nr_kernel_dispatches = self.skel.bss().nr_kernel_dispatches as u64;
         let nr_sched_congested = self.skel.bss().nr_sched_congested as u64;
-
         info!(
-            "min_vtime={} nr_queued={} nr_user_dispatched={} nr_kernel_dispatches={} nr_sched_congested={}",
-            self.min_vruntime, nr_queued, nr_user_dispatches, nr_kernel_dispatches, nr_sched_congested
+            "  nr_user_dispatched={} nr_kernel_dispatches={} nr_sched_congested={}",
+            nr_user_dispatches, nr_kernel_dispatches, nr_sched_congested
         );
+
+        // Show tasks that are waiting to be dispatched.
+        let nr_queued = self.skel.bss().nr_queued as u64;
+        let nr_scheduled = self.skel.bss().nr_scheduled as u64;
+        let nr_waiting = nr_queued + nr_scheduled;
+        info!(
+            "  nr_waiting={} [nr_queued={} + nr_scheduled={}]",
+            nr_waiting, nr_queued, nr_scheduled
+        );
+
+        // Show tasks that are currently running.
+        info!("Running tasks:");
         for cpu in 0..self.nr_cpus_online {
             let pid = self.get_cpu_pid(cpu as u32);
-            info!("cpu={} pid={}", cpu, pid);
+            info!("  cpu={} pid={}", cpu, pid);
         }
 
         log::logger().flush();
