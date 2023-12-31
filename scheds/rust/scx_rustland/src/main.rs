@@ -17,6 +17,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use std::fs::metadata;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -158,15 +159,34 @@ impl TaskInfoMap {
         }
     }
 
-    // Get an item (as mutable) from the HashMap (by pid)
+    // Get an item (as mutable) from the HashMap (by pid).
     fn get_mut(&mut self, pid: i32) -> Option<&mut TaskInfo> {
         self.tasks.get_mut(&pid)
     }
 
     // Add or update an item in the HashMap (by pid), if the pid is already present the item will
-    // be replaced (updated)
+    // be replaced (updated).
     fn insert(&mut self, pid: i32, task: TaskInfo) {
         self.tasks.insert(pid, task);
+    }
+
+    // Return the amount of tasks stored in the TaskInfoMap.
+    fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    // Clean up old entries (pids that don't exist anymore).
+    fn gc(&mut self) {
+        fn is_pid_running(pid: i32) -> bool {
+            let path = format!("/proc/{}", pid);
+            metadata(path).is_ok()
+        }
+        let pids: Vec<i32> = self.tasks.keys().cloned().collect();
+        for pid in pids {
+            if !is_pid_running(pid) {
+                self.tasks.remove(&pid);
+            }
+        }
     }
 }
 
@@ -484,10 +504,10 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    // Print internal scheduler statistics (fetched from the BPF part)
+    // Print internal scheduler statistics (fetched from the BPF part).
     fn print_stats(&mut self) {
         // Show minimum vruntime (this should be constantly incrementing).
-        info!("vruntime={}", self.min_vruntime);
+        info!("vruntime={} tasks={}", self.min_vruntime, self.task_map.len());
 
         // Show general statistics.
         let nr_user_dispatches = self.skel.bss().nr_user_dispatches as u64;
@@ -538,7 +558,11 @@ impl<'a> Scheduler<'a> {
 
             // Print scheduler statistics every second.
             if elapsed > Duration::from_secs(1) {
+                // Free up unused scheduler resources.
+                self.task_map.gc();
+                // Print scheduler statistics.
                 self.print_stats();
+
                 prev_ts = curr_ts;
             }
         }
