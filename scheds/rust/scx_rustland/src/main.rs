@@ -17,6 +17,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use std::fs::File;
+use std::io::{self, Read};
+use std::path::Path;
+
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
@@ -449,6 +453,37 @@ impl<'a> Scheduler<'a> {
         thread::yield_now();
     }
 
+    // Get the current CPU where the scheduler is running.
+    fn get_current_cpu() -> io::Result<i32> {
+        // Open /proc/self/stat file
+        let path = Path::new("/proc/self/stat");
+        let mut file = File::open(path)?;
+
+        // Read the content of the file into a String
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+
+        // Split the content into fields using whitespace as the delimiter
+        let fields: Vec<&str> = content.split_whitespace().collect();
+
+        // Parse the 39th field as an i32 and return it.
+        if let Some(field) = fields.get(38) {
+            if let Ok(value) = field.parse::<i32>() {
+                Ok(value)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Unable to parse current CPU information as i32",
+                ))
+            }
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Unable to get current CPU information",
+            ))
+        }
+    }
+
     // Print internal scheduler statistics (fetched from the BPF part)
     fn print_stats(&mut self) {
         // Show minimum vruntime (this should be constantly incrementing).
@@ -473,9 +508,17 @@ impl<'a> Scheduler<'a> {
         );
 
         // Show tasks that are currently running.
+        let sched_cpu = match Self::get_current_cpu() {
+            Ok(cpu_info) => cpu_info,
+            Err(_) => -1,
+        };
         info!("Running tasks:");
         for cpu in 0..self.nr_cpus_online {
-            let pid = self.get_cpu_pid(cpu);
+            let pid = if cpu == sched_cpu {
+                "[self]".to_string()
+            } else {
+                self.get_cpu_pid(cpu).to_string()
+            };
             info!("  cpu={} pid={}", cpu, pid);
         }
 

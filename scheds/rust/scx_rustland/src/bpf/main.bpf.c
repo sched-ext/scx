@@ -309,17 +309,36 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
  * .select_cpu()), since this function may be called on a different CPU (so we
  * cannot check the current CPU directly).
  */
-static bool is_task_cpu_available(struct task_struct *p)
+static bool is_task_cpu_available(struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
 
 	/*
-	 * Always dispatch per-CPU kthread on the same CPU, bypassing the
+	 * Always dispatch per-CPU kthreads on the same CPU, bypassing the
 	 * user-space scheduler (in this way we can to prioritize critical
 	 * kernel threads that may potentially slow down the entire system if
 	 * they are blocked for too long).
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1)
+		return true;
+
+	/*
+	 * Moreover, immediately dispatch kthreads that still have more than
+	 * half of their runtime budget. As they are likely to release the CPU
+	 * soon, granting them a substantial priority boost can enhance the
+	 * overall system performance.
+	 *
+	 * In the event that one of these kthreads turns into a CPU hog, it
+	 * will deplete its runtime budget and therefore it will be scheduled
+	 * like any other normal task.
+	 */
+	if (is_kthread(p) && p->scx.slice > slice_ns / 2)
+		return true;
+
+	/*
+	 * No scheduling required if it's the last task running.
+	 */
+        if (enq_flags & SCX_ENQ_LAST)
 		return true;
 
 	/*
@@ -365,7 +384,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Dispatch the task on the local FIFO directly if the selected task's
 	 * CPU is available (no scheduling decision required).
 	 */
-	if (is_task_cpu_available(p)) {
+	if (is_task_cpu_available(p, enq_flags)) {
 		dispatch_local(p, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
@@ -444,11 +463,9 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		 * task and migrate (if possible); otherwise, dispatch on the
 		 * global DSQ.
 		 */
-		prev_cpu = scx_bpf_task_cpu(p);
-		dbg_msg("usersched: pid=%d prev_cpu=%d cpu=%d payload=%llu",
+		dbg_msg("usersched: pid=%d cpu=%d payload=%llu",
 			task.pid, task.cpu, task.payload);
-		if ((task.cpu != prev_cpu) &&
-		   bpf_cpumask_test_cpu(task.cpu, p->cpus_ptr))
+		if (bpf_cpumask_test_cpu(task.cpu, p->cpus_ptr))
 			dispatch_on_cpu(p, task.cpu, 0);
 		else
 			dispatch_global(p, 0);
@@ -626,6 +643,7 @@ struct sched_ext_ops rustland = {
 	.prep_enable		= (void *)rustland_prep_enable,
 	.init			= (void *)rustland_init,
 	.exit			= (void *)rustland_exit,
+	.flags			= SCX_OPS_ENQ_LAST,
 	.timeout_ms		= 5000,
 	.name			= "rustland",
 };
