@@ -389,14 +389,14 @@ impl<'a> Scheduler<'a> {
     fn dispatch_tasks(&mut self) {
         let maps = self.skel.maps();
         let dispatched = maps.dispatched();
-        let idle_cpus = self.get_idle_cpus();
+        let mut idle_cpus = self.get_idle_cpus();
 
         // Dispatch only a batch of tasks equal to the amount of idle CPUs in the system.
         //
         // This allows to have more tasks sitting in the task pool, reducing the pressure on the
         // dispatcher queues and giving a chance to higher priority tasks to come in and get
         // dispatched earlier, mitigating potential priority inversion issues.
-        for cpu in &idle_cpus {
+        while !idle_cpus.is_empty() {
             match self.task_pool.pop() {
                 Some(mut task) => {
                     // Update global minimum vruntime.
@@ -406,8 +406,14 @@ impl<'a> Scheduler<'a> {
                     //
                     // Use the previously used CPU if idle, that is always the best choice (to
                     // mitigate migration overhead), otherwise pick the next idle CPU available.
-                    if !idle_cpus.contains(&task.cpu) {
-                        task.cpu =  *cpu;
+                    if let Some(id) = idle_cpus.iter().position(|&x| x == task.cpu) {
+                        // The CPU assigned to the task is in idle_cpus, keep the assignment and
+                        // remove the CPU from idle_cpus.
+                        idle_cpus.remove(id);
+                    } else {
+                        // The CPU assigned to the task is not in idle_cpus, pop the first CPU from
+                        // idle_cpus and assign it to the task.
+                        task.cpu = idle_cpus.pop().unwrap();
                     }
 
                     // Send task to the dispatcher.
