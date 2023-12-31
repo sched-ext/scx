@@ -309,7 +309,7 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
  * .select_cpu()), since this function may be called on a different CPU (so we
  * cannot check the current CPU directly).
  */
-static bool is_task_cpu_available(struct task_struct *p)
+static bool is_task_cpu_available(struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
 
@@ -320,6 +320,12 @@ static bool is_task_cpu_available(struct task_struct *p)
 	 * they are blocked for too long).
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1)
+		return true;
+
+	/*
+	 * No scheduling required if it's the last task running.
+	 */
+        if (enq_flags & SCX_ENQ_LAST)
 		return true;
 
 	/*
@@ -365,7 +371,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Dispatch the task on the local FIFO directly if the selected task's
 	 * CPU is available (no scheduling decision required).
 	 */
-	if (is_task_cpu_available(p)) {
+	if (is_task_cpu_available(p, enq_flags)) {
 		dispatch_local(p, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
@@ -626,6 +632,7 @@ struct sched_ext_ops rustland = {
 	.prep_enable		= (void *)rustland_prep_enable,
 	.init			= (void *)rustland_init,
 	.exit			= (void *)rustland_exit,
+	.flags			= SCX_OPS_ENQ_LAST,
 	.timeout_ms		= 5000,
 	.name			= "rustland",
 };
