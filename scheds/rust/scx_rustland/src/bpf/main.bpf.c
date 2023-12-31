@@ -450,11 +450,9 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		 * task and migrate (if possible); otherwise, dispatch on the
 		 * global DSQ.
 		 */
-		prev_cpu = scx_bpf_task_cpu(p);
-		dbg_msg("usersched: pid=%d prev_cpu=%d cpu=%d payload=%llu",
+		dbg_msg("usersched: pid=%d cpu=%d payload=%llu",
 			task.pid, task.cpu, task.payload);
-		if ((task.cpu != prev_cpu) &&
-		   bpf_cpumask_test_cpu(task.cpu, p->cpus_ptr))
+		if (bpf_cpumask_test_cpu(task.cpu, p->cpus_ptr))
 			dispatch_on_cpu(p, task.cpu, 0);
 		else
 			dispatch_global(p, 0);
