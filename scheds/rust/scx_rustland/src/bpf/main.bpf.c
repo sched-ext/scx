@@ -314,12 +314,25 @@ static bool is_task_cpu_available(struct task_struct *p, u64 enq_flags)
 	struct task_ctx *tctx;
 
 	/*
-	 * Always dispatch per-CPU kthread on the same CPU, bypassing the
+	 * Always dispatch per-CPU kthreads on the same CPU, bypassing the
 	 * user-space scheduler (in this way we can to prioritize critical
 	 * kernel threads that may potentially slow down the entire system if
 	 * they are blocked for too long).
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1)
+		return true;
+
+	/*
+	 * Moreover, immediately dispatch kthreads that still have more than
+	 * half of their runtime budget. As they are likely to release the CPU
+	 * soon, granting them a substantial priority boost can enhance the
+	 * overall system performance.
+	 *
+	 * In the event that one of these kthreads turns into a CPU hog, it
+	 * will deplete its runtime budget and therefore it will be scheduled
+	 * like any other normal task.
+	 */
+	if (is_kthread(p) && p->scx.slice > slice_ns / 2)
 		return true;
 
 	/*
