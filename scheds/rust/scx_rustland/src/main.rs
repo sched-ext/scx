@@ -362,9 +362,8 @@ impl<'a> Scheduler<'a> {
             task_info.vruntime += delta / weight;
         }
         // Make sure vruntime is moving forward (> current minimum).
-        if min_vruntime > task_info.vruntime {
-            task_info.vruntime = min_vruntime;
-        }
+        task_info.vruntime = task_info.vruntime.max(min_vruntime);
+
         // Update total task cputime.
         task_info.sum_exec_runtime = sum_exec_runtime;
     }
@@ -381,21 +380,32 @@ impl<'a> Scheduler<'a> {
                     // Schedule the task and update task information.
                     let task = EnqueuedMessage::from_bytes(msg.as_slice()).as_queued_task_ctx();
                     if let Some(task_info) = self.task_map.get_mut(task.pid) {
+                        // Taks is already mapped in self.task_map: update its information.
                         Self::update_enqueued(
                             task_info,
                             task.sum_exec_runtime,
                             task.weight,
-                            self.min_vruntime,
+                            // Make sure the global vruntime is always progressing during each
+                            // scheduler run.
+                            self.min_vruntime + 1,
                             self.skel.rodata().slice_ns,
                         );
                         self.task_pool.push(task.pid, task.cpu, task_info.vruntime);
                     } else {
+                        // A new task has been scheduled.
+                        //
+                        // Initialize task information in self.task_map and set an initial vruntime
+                        // of (self.min_vruntime + 1): this ensures a progressing global vruntime
+                        // during each scheduler run, providing a priority boost to newer tasks
+                        // (that is still beneficial for potential short-lived tasks), while also
+                        // preventing excessive starvation of the other tasks sitting in the
+                        // self.task_pool tree, waiting to be dispatched.
                         let task_info = TaskInfo {
                             sum_exec_runtime: task.sum_exec_runtime,
-                            vruntime: self.min_vruntime,
+                            vruntime: self.min_vruntime + 1,
                         };
                         self.task_map.insert(task.pid, task_info);
-                        self.task_pool.push(task.pid, task.cpu, self.min_vruntime);
+                        self.task_pool.push(task.pid, task.cpu, self.min_vruntime + 1);
                     }
                 }
                 Ok(None) => {
