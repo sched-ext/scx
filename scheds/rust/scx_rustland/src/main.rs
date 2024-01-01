@@ -410,10 +410,10 @@ impl<'a> Scheduler<'a> {
                     //
                     // Use the previously used CPU if idle, that is always the best choice (to
                     // mitigate migration overhead), otherwise pick the next idle CPU available.
-                    if let Some(id) = idle_cpus.iter().position(|&x| x == task.cpu) {
+                    if let Some(pos) = idle_cpus.iter().position(|&x| x == task.cpu) {
                         // The CPU assigned to the task is in idle_cpus, keep the assignment and
                         // remove the CPU from idle_cpus.
-                        idle_cpus.remove(id);
+                        idle_cpus.remove(pos);
                     } else {
                         // The CPU assigned to the task is not in idle_cpus, pop the first CPU from
                         // idle_cpus and assign it to the task.
