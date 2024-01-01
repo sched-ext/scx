@@ -355,11 +355,10 @@ impl<'a> Scheduler<'a> {
     ) {
         // Add cputime delta normalized by weight to the vruntime (if delta > 0).
         if sum_exec_runtime > task_info.sum_exec_runtime {
-            let mut delta = sum_exec_runtime - task_info.sum_exec_runtime;
+            let delta = (sum_exec_runtime - task_info.sum_exec_runtime) * 100 / weight;
             // Never account more than max_slice_ns. This helps to prevent starving a task for too
             // long in the scheduler task pool.
-            delta = delta.min(max_slice_ns);
-            task_info.vruntime += delta / weight;
+            task_info.vruntime += delta.min(max_slice_ns);
         }
         // Make sure vruntime is moving forward (> current minimum).
         task_info.vruntime = task_info.vruntime.max(min_vruntime);
