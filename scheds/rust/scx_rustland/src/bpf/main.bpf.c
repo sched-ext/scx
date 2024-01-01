@@ -336,12 +336,6 @@ static bool is_task_cpu_available(struct task_struct *p, u64 enq_flags)
 		return true;
 
 	/*
-	 * No scheduling required if it's the last task running.
-	 */
-        if (enq_flags & SCX_ENQ_LAST)
-		return true;
-
-	/*
 	 * For regular tasks always rely on force_local to determine if we can
 	 * bypass the scheduler.
 	 */
