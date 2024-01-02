@@ -17,7 +17,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use std::fs::metadata;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -156,20 +155,6 @@ impl TaskInfoMap {
     fn new() -> Self {
         TaskInfoMap {
             tasks: HashMap::new(),
-        }
-    }
-
-    // Clean up old entries (pids that don't exist anymore).
-    fn gc(&mut self) {
-        fn is_pid_running(pid: i32) -> bool {
-            let path = format!("/proc/{}", pid);
-            metadata(path).is_ok()
-        }
-        let pids: Vec<i32> = self.tasks.keys().cloned().collect();
-        for pid in pids {
-            if !is_pid_running(pid) {
-                self.tasks.remove(&pid);
-            }
         }
     }
 }
@@ -362,6 +347,13 @@ impl<'a> Scheduler<'a> {
                 Ok(Some(msg)) => {
                     // Extract the task object from the message.
                     let task = EnqueuedMessage::from_bytes(msg.as_slice()).as_queued_task_ctx();
+
+                    // Check for exiting tasks (cpu < 0) and remove their corresponding entries in
+                    // the task map (if present).
+                    if task.cpu < 0 {
+                        self.task_map.tasks.remove(&task.pid);
+                        continue;
+                    }
 
                     // Get task information if the task is already stored in the task map,
                     // otherwise create a new entry for it.
@@ -560,8 +552,6 @@ impl<'a> Scheduler<'a> {
 
             // Print scheduler statistics every second.
             if elapsed > Duration::from_secs(1) {
-                // Free up unused scheduler resources.
-                self.task_map.gc();
                 // Print scheduler statistics.
                 self.print_stats();
 
