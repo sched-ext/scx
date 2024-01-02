@@ -17,6 +17,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use std::fs::metadata;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -158,15 +159,18 @@ impl TaskInfoMap {
         }
     }
 
-    // Get an item (as mutable) from the HashMap (by pid)
-    fn get_mut(&mut self, pid: i32) -> Option<&mut TaskInfo> {
-        self.tasks.get_mut(&pid)
-    }
-
-    // Add or update an item in the HashMap (by pid), if the pid is already present the item will
-    // be replaced (updated)
-    fn insert(&mut self, pid: i32, task: TaskInfo) {
-        self.tasks.insert(pid, task);
+    // Clean up old entries (pids that don't exist anymore).
+    fn gc(&mut self) {
+        fn is_pid_running(pid: i32) -> bool {
+            let path = format!("/proc/{}", pid);
+            metadata(path).is_ok()
+        }
+        let pids: Vec<i32> = self.tasks.keys().cloned().collect();
+        for pid in pids {
+            if !is_pid_running(pid) {
+                self.tasks.remove(&pid);
+            }
+        }
     }
 }
 
@@ -331,16 +335,18 @@ impl<'a> Scheduler<'a> {
         sum_exec_runtime: u64,
         weight: u64,
         min_vruntime: u64,
+        max_slice_ns: u64,
     ) {
         // Add cputime delta normalized by weight to the vruntime (if delta > 0).
         if sum_exec_runtime > task_info.sum_exec_runtime {
-            let delta = (sum_exec_runtime - task_info.sum_exec_runtime) / weight;
-            task_info.vruntime += delta;
+            let delta = (sum_exec_runtime - task_info.sum_exec_runtime) * 100 / weight;
+            // Never account more than max_slice_ns. This helps to prevent starving a task for too
+            // long in the scheduler task pool.
+            task_info.vruntime += delta.min(max_slice_ns);
         }
         // Make sure vruntime is moving forward (> current minimum).
-        if min_vruntime > task_info.vruntime {
-            task_info.vruntime = min_vruntime;
-        }
+        task_info.vruntime = task_info.vruntime.max(min_vruntime);
+
         // Update total task cputime.
         task_info.sum_exec_runtime = sum_exec_runtime;
     }
@@ -354,24 +360,36 @@ impl<'a> Scheduler<'a> {
         loop {
             match queued.lookup_and_delete(&[]) {
                 Ok(Some(msg)) => {
-                    // Schedule the task and update task information.
+                    // Extract the task object from the message.
                     let task = EnqueuedMessage::from_bytes(msg.as_slice()).as_queued_task_ctx();
-                    if let Some(task_info) = self.task_map.get_mut(task.pid) {
-                        Self::update_enqueued(
-                            task_info,
-                            task.sum_exec_runtime,
-                            task.weight,
-                            self.min_vruntime,
-                        );
-                        self.task_pool.push(task.pid, task.cpu, task_info.vruntime);
-                    } else {
-                        let task_info = TaskInfo {
-                            sum_exec_runtime: task.sum_exec_runtime,
-                            vruntime: self.min_vruntime,
-                        };
-                        self.task_map.insert(task.pid, task_info);
-                        self.task_pool.push(task.pid, task.cpu, self.min_vruntime);
-                    }
+
+                    // Get task information if the task is already stored in the task map,
+                    // otherwise create a new entry for it.
+                    let task_info =
+                        self.task_map
+                            .tasks
+                            .entry(task.pid)
+                            .or_insert_with_key(|&_pid| TaskInfo {
+                                sum_exec_runtime: task.sum_exec_runtime,
+                                vruntime: self.min_vruntime,
+                            });
+
+                    // Update task information.
+                    Self::update_enqueued(
+                        task_info,
+                        task.sum_exec_runtime,
+                        task.weight,
+                        // Make sure the global vruntime is always progressing (at least by +1)
+                        // during each scheduler run, providing a priority boost to newer tasks
+                        // (that is still beneficial for potential short-lived tasks), while also
+                        // preventing excessive starvation of the other tasks sitting in the
+                        // self.task_pool tree, waiting to be dispatched.
+                        self.min_vruntime + 1,
+                        self.skel.rodata().slice_ns,
+                    );
+
+                    // Insert task in the task pool (ordered by vruntime).
+                    self.task_pool.push(task.pid, task.cpu, task_info.vruntime);
                 }
                 Ok(None) => {
                     // Reset nr_queued and update nr_scheduled, to notify the dispatcher that
@@ -410,10 +428,10 @@ impl<'a> Scheduler<'a> {
                     //
                     // Use the previously used CPU if idle, that is always the best choice (to
                     // mitigate migration overhead), otherwise pick the next idle CPU available.
-                    if let Some(id) = idle_cpus.iter().position(|&x| x == task.cpu) {
+                    if let Some(pos) = idle_cpus.iter().position(|&x| x == task.cpu) {
                         // The CPU assigned to the task is in idle_cpus, keep the assignment and
                         // remove the CPU from idle_cpus.
-                        idle_cpus.remove(id);
+                        idle_cpus.remove(pos);
                     } else {
                         // The CPU assigned to the task is not in idle_cpus, pop the first CPU from
                         // idle_cpus and assign it to the task.
@@ -484,10 +502,14 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    // Print internal scheduler statistics (fetched from the BPF part)
+    // Print internal scheduler statistics (fetched from the BPF part).
     fn print_stats(&mut self) {
         // Show minimum vruntime (this should be constantly incrementing).
-        info!("vruntime={}", self.min_vruntime);
+        info!(
+            "vruntime={} tasks={}",
+            self.min_vruntime,
+            self.task_map.tasks.len()
+        );
 
         // Show general statistics.
         let nr_user_dispatches = self.skel.bss().nr_user_dispatches as u64;
@@ -538,7 +560,11 @@ impl<'a> Scheduler<'a> {
 
             // Print scheduler statistics every second.
             if elapsed > Duration::from_secs(1) {
+                // Free up unused scheduler resources.
+                self.task_map.gc();
+                // Print scheduler statistics.
                 self.print_stats();
+
                 prev_ts = curr_ts;
             }
         }

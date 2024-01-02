@@ -252,18 +252,15 @@ static void dispatch_local(struct task_struct *p, u64 enq_flags)
  */
 static void dispatch_on_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 {
+	/*
+	 * If it's not possible to dispatch on the selected CPU, re-use the
+	 * previously used one.
+	 */
+	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		cpu = scx_bpf_task_cpu(p);
 	dbg_msg("%s: pid=%d cpu=%ld", __func__, p->pid, cpu);
 	scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns,
 			 enq_flags | SCX_ENQ_LOCAL);
-}
-
-/*
- * Dispatch a task on the global FIFO.
- */
-static void dispatch_global(struct task_struct *p, u64 enq_flags)
-{
-	dbg_msg("%s: pid=%d", __func__, p->pid);
-	scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice_ns, enq_flags);
 }
 
 /*
@@ -336,12 +333,6 @@ static bool is_task_cpu_available(struct task_struct *p, u64 enq_flags)
 		return true;
 
 	/*
-	 * No scheduling required if it's the last task running.
-	 */
-        if (enq_flags & SCX_ENQ_LAST)
-		return true;
-
-	/*
 	 * For regular tasks always rely on force_local to determine if we can
 	 * bypass the scheduler.
 	 */
@@ -395,14 +386,15 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * processed by the user-space scheduler.
 	 *
 	 * If @queued list is full (user-space scheduler is congested) tasks
-	 * will be dispatched directly from the kernel to the global FIFO.
+	 * will be dispatched directly from the kernel (re-using their
+	 * previously used CPU in this case).
 	 */
 	get_task_info(&task, p);
 	dbg_msg("enqueue: pid=%d", task.pid);
 	if (bpf_map_push_elem(&queued, &task, 0)) {
 		dbg_msg("scheduler congested: pid=%d", task.pid);
 		__sync_fetch_and_add(&nr_sched_congested, 1);
-		dispatch_global(p, enq_flags);
+		dispatch_on_cpu(p, task.cpu, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -424,7 +416,11 @@ static void dispatch_user_scheduler(void)
 		scx_bpf_error("Failed to find usersched task %d", usersched_pid);
 		return;
 	}
-	dispatch_global(p, 0);
+	/*
+	 * Always try to dispatch the user-space scheduler on the current CPU,
+	 * if possible.
+	 */
+	dispatch_on_cpu(p, bpf_get_smp_processor_id(), 0);
 	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	bpf_task_release(p);
 }
@@ -445,7 +441,6 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	bpf_repeat(MAX_ENQUEUED_TASKS) {
 		struct task_struct *p;
 		struct dispatched_task_ctx task;
-		s32 prev_cpu;
 
 		if (!scx_bpf_dispatch_nr_slots())
 			break;
@@ -465,10 +460,7 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		 */
 		dbg_msg("usersched: pid=%d cpu=%d payload=%llu",
 			task.pid, task.cpu, task.payload);
-		if (bpf_cpumask_test_cpu(task.cpu, p->cpus_ptr))
-			dispatch_on_cpu(p, task.cpu, 0);
-		else
-			dispatch_global(p, 0);
+		dispatch_on_cpu(p, task.cpu, 0);
 		__sync_fetch_and_add(&nr_user_dispatches, 1);
 		bpf_task_release(p);
 	}
