@@ -39,13 +39,24 @@ const volatile u32 num_possible_cpus = 64;
 /* Stats that are printed by user space. */
 u64 nr_failed_enqueues, nr_kernel_enqueues, nr_user_enqueues;
 
-struct user_exit_info uei;
+/*
+ * Number of tasks that are queued for scheduling.
+ *
+ * This number is incremented by the BPF component when a task is queued to the
+ * user-space scheduler and it must be decremented by the user-space scheduler
+ * when a task is consumed.
+ */
+volatile u64 nr_queued;
 
 /*
- * Whether the user space scheduler needs to be scheduled due to a task being
- * enqueued in user space.
+ * Number of tasks that are waiting for scheduling.
+ *
+ * This number must be updated by the user-space scheduler to keep track if
+ * there is still some scheduling work to do.
  */
-static bool usersched_needed;
+volatile u64 nr_scheduled;
+
+struct user_exit_info uei;
 
 /*
  * The map containing tasks that are enqueued in user space from the kernel.
@@ -81,6 +92,29 @@ struct {
 	__type(key, int);
 	__type(value, struct task_ctx);
 } task_ctx_stor SEC(".maps");
+
+/*
+ * Flag used to wake-up the user-space scheduler.
+ */
+static volatile u32 usersched_needed;
+
+/*
+ * Set user-space scheduler wake-up flag (equivalent to an atomic release
+ * operation).
+ */
+static void set_usersched_needed(void)
+{
+	__sync_fetch_and_or(&usersched_needed, 1);
+}
+
+/*
+ * Check and clear user-space scheduler wake-up flag (equivalent to an atomic
+ * acquire operation).
+ */
+static bool test_and_clear_usersched_needed(void)
+{
+	return __sync_fetch_and_and(&usersched_needed, 0) == 1;
+}
 
 static bool is_usersched_task(const struct task_struct *p)
 {
@@ -140,7 +174,6 @@ static void dispatch_user_scheduler(void)
 {
 	struct task_struct *p;
 
-	usersched_needed = false;
 	p = usersched_task();
 	if (p) {
 		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
@@ -165,7 +198,7 @@ static void enqueue_task_in_user_space(struct task_struct *p, u64 enq_flags)
 		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, enq_flags);
 	} else {
 		__sync_fetch_and_add(&nr_user_enqueues, 1);
-		usersched_needed = true;
+		set_usersched_needed();
 	}
 }
 
@@ -194,7 +227,7 @@ void BPF_STRUCT_OPS(userland_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(userland_dispatch, s32 cpu, struct task_struct *prev)
 {
-	if (usersched_needed)
+	if (test_and_clear_usersched_needed())
 		dispatch_user_scheduler();
 
 	bpf_repeat(MAX_ENQUEUED_TASKS) {
@@ -215,6 +248,55 @@ void BPF_STRUCT_OPS(userland_dispatch, s32 cpu, struct task_struct *prev)
 
 		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
 		bpf_task_release(p);
+	}
+}
+
+/*
+ * A CPU is about to change its idle state. If the CPU is going idle, ensure
+ * that the user-space scheduler has a chance to run if there is any remaining
+ * work to do.
+ */
+void BPF_STRUCT_OPS(userland_update_idle, s32 cpu, bool idle)
+{
+	/*
+	 * Don't do anything if we exit from and idle state, a CPU owner will
+	 * be assigned in .running().
+	 */
+	if (!idle)
+		return;
+	/*
+	 * A CPU is now available, notify the user-space scheduler that tasks
+	 * can be dispatched, if there is at least one task waiting to be
+	 * scheduled, either queued (accounted in nr_queued) or scheduled
+	 * (accounted in nr_scheduled).
+	 *
+	 * NOTE: nr_queued is incremented by the BPF component, more exactly in
+	 * enqueue(), when a task is sent to the user-space scheduler, then
+	 * the scheduler drains the queued tasks (updating nr_queued) and adds
+	 * them to its internal data structures / state; at this point tasks
+	 * become "scheduled" and the user-space scheduler will take care of
+	 * updating nr_scheduled accordingly; lastly tasks will be dispatched
+	 * and the user-space scheduler will update nr_scheduled again.
+	 *
+	 * Checking both counters allows to determine if there is still some
+	 * pending work to do for the scheduler: new tasks have been queued
+	 * since last check, or there are still tasks "queued" or "scheduled"
+	 * since the previous user-space scheduler run. If the counters are
+	 * both zero it is pointless to wake-up the scheduler (even if a CPU
+	 * becomes idle), because there is nothing to do.
+	 *
+	 * Keep in mind that update_idle() doesn't run concurrently with the
+	 * user-space scheduler (that is single-threaded): this function is
+	 * naturally serialized with the user-space scheduler code, therefore
+	 * this check here is also safe from a concurrency perspective.
+	 */
+	if (nr_queued || nr_scheduled) {
+		/*
+		 * Kick the CPU to make it immediately ready to accept
+		 * dispatched tasks.
+		 */
+		set_usersched_needed();
+		scx_bpf_kick_cpu(cpu, 0);
 	}
 }
 
@@ -257,9 +339,11 @@ struct sched_ext_ops userland_ops = {
 	.select_cpu		= (void *)userland_select_cpu,
 	.enqueue		= (void *)userland_enqueue,
 	.dispatch		= (void *)userland_dispatch,
+	.update_idle		= (void *)userland_update_idle,
 	.prep_enable		= (void *)userland_prep_enable,
 	.init			= (void *)userland_init,
 	.exit			= (void *)userland_exit,
+	.flags			= SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
 	.timeout_ms		= 3000,
 	.name			= "userland",
 };
