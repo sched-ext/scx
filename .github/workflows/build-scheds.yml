@@ -38,9 +38,6 @@ jobs:
       - run: make -j -C bpftool/src
       - run: sudo make -j -C bpftool/src install
 
-      # asm headers
-      - run: sudo ln -s /usr/include/asm-generic /usr/include/asm
-
       - uses: actions/checkout@v4
 
       # libbpf

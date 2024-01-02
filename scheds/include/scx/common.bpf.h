@@ -10,7 +10,7 @@
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
-#include <linux/errno.h>
+#include <asm-generic/errno.h>
 #include "user_exit_info.h"
 
 #define PF_WQ_WORKER			0x00000020	/* I'm a workqueue worker */
