@@ -348,13 +348,17 @@ static bool is_task_cpu_available(struct task_struct *p, u64 enq_flags)
  * Fill @task with all the information that need to be sent to the user-space
  * scheduler.
  */
-static void
-get_task_info(struct queued_task_ctx *task, const struct task_struct *p)
+static void get_task_info(struct queued_task_ctx *task,
+			  const struct task_struct *p, bool exiting)
 {
 	task->pid = p->pid;
 	task->sum_exec_runtime = p->se.sum_exec_runtime;
 	task->weight = p->scx.weight;
-	task->cpu = scx_bpf_task_cpu(p);
+	/*
+	 * Use a negative CPU number to notify that the task is exiting, so
+	 * that we can free up its resources in the user-space scheduler.
+	 */
+	task->cpu = exiting ? -1 : scx_bpf_task_cpu(p);
 }
 
 /*
@@ -389,7 +393,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * will be dispatched directly from the kernel (re-using their
 	 * previously used CPU in this case).
 	 */
-	get_task_info(&task, p);
+	get_task_info(&task, p, false);
 	dbg_msg("enqueue: pid=%d", task.pid);
 	if (bpf_map_push_elem(&queued, &task, 0)) {
 		dbg_msg("scheduler congested: pid=%d", task.pid);
@@ -557,6 +561,37 @@ s32 BPF_STRUCT_OPS(rustland_prep_enable, struct task_struct *p,
 }
 
 /*
+ * Task @p is freed.
+ *
+ * Notify the user-space scheduler that we can free up all the allocated
+ * resources for this task.
+ */
+void BPF_STRUCT_OPS(rustland_disable, struct task_struct *p)
+{
+        struct queued_task_ctx task;
+
+	dbg_msg("exiting: pid=%d", task.pid);
+	get_task_info(&task, p, true);
+	if (bpf_map_push_elem(&queued, &task, 0)) {
+		/*
+		 * We may have a memory leak in the scheduler at this point,
+		 * because we failed to notify it about this exiting task and
+		 * some resources may remain allocated.
+		 *
+		 * Do not worrry too much about this condition for now, since
+		 * it should be pretty rare (and it happens only when the
+		 * scheduler is already congested, so it is probably a good
+		 * thing to avoid introducing extra overhead to free up
+		 * resources).
+		 */
+		dbg_msg("scheduler congested: pid=%d", task.pid);
+		__sync_fetch_and_add(&nr_sched_congested, 1);
+		return;
+	}
+	__sync_fetch_and_add(&nr_queued, 1);
+}
+
+/*
  * Heartbeat scheduler timer callback.
  */
 static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
@@ -633,6 +668,7 @@ struct sched_ext_ops rustland = {
 	.stopping		= (void *)rustland_stopping,
 	.update_idle		= (void *)rustland_update_idle,
 	.prep_enable		= (void *)rustland_prep_enable,
+	.disable		= (void *)rustland_disable,
 	.init			= (void *)rustland_init,
 	.exit			= (void *)rustland_exit,
 	.flags			= SCX_OPS_ENQ_LAST,
