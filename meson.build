@@ -22,6 +22,8 @@ get_sys_incls = find_program(join_paths(meson.current_source_dir(),
                                         'meson-scripts/get_sys_incls'))
 cargo_fetch = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/cargo_fetch'))
+test_sched  = find_program(join_paths(meson.current_source_dir(),
+                                      'meson-scripts/test_sched'))
 
 bpf_clang_ver = run_command(get_clang_ver, bpf_clang, check: true).stdout().strip()
 bpf_clang_maj = bpf_clang_ver.split('.')[0].to_int()
@@ -145,6 +147,12 @@ if get_option('enable_rust')
 endif
 
 run_target('fetch', command: [cargo_fetch, cargo], env: cargo_env)
+
+if get_option('kernel') != ''
+  kernel = get_option('kernel')
+endif
+
+run_target('test_sched', command: [test_sched, kernel])
 
 if get_option('enable_rust')
   subdir('rust')
