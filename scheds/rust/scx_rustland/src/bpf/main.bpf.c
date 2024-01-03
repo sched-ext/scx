@@ -320,19 +320,6 @@ static bool is_task_cpu_available(struct task_struct *p, u64 enq_flags)
 		return true;
 
 	/*
-	 * Moreover, immediately dispatch kthreads that still have more than
-	 * half of their runtime budget. As they are likely to release the CPU
-	 * soon, granting them a substantial priority boost can enhance the
-	 * overall system performance.
-	 *
-	 * In the event that one of these kthreads turns into a CPU hog, it
-	 * will deplete its runtime budget and therefore it will be scheduled
-	 * like any other normal task.
-	 */
-	if (is_kthread(p) && p->scx.slice > slice_ns / 2)
-		return true;
-
-	/*
 	 * For regular tasks always rely on force_local to determine if we can
 	 * bypass the scheduler.
 	 */
@@ -352,13 +339,17 @@ static void get_task_info(struct queued_task_ctx *task,
 			  const struct task_struct *p, bool exiting)
 {
 	task->pid = p->pid;
-	task->sum_exec_runtime = p->se.sum_exec_runtime;
-	task->weight = p->scx.weight;
 	/*
 	 * Use a negative CPU number to notify that the task is exiting, so
 	 * that we can free up its resources in the user-space scheduler.
 	 */
-	task->cpu = exiting ? -1 : scx_bpf_task_cpu(p);
+	if (exiting) {
+		task->cpu = -1;
+		return;
+	}
+	task->sum_exec_runtime = p->se.sum_exec_runtime;
+	task->weight = p->scx.weight;
+	task->cpu = scx_bpf_task_cpu(p);
 }
 
 /*
@@ -568,7 +559,7 @@ s32 BPF_STRUCT_OPS(rustland_prep_enable, struct task_struct *p,
  */
 void BPF_STRUCT_OPS(rustland_disable, struct task_struct *p)
 {
-        struct queued_task_ctx task;
+        struct queued_task_ctx task = {};
 
 	dbg_msg("exiting: pid=%d", task.pid);
 	get_task_info(&task, p, true);
