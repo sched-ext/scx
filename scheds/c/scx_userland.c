@@ -59,6 +59,9 @@ static struct bpf_link *ops_link;
 /* Stats collected in user space. */
 static __u64 nr_vruntime_enqueues, nr_vruntime_dispatches, nr_vruntime_failed;
 
+/* Number of tasks currently enqueued. */
+static __u64 nr_curr_enqueued;
+
 /* The data structure containing tasks that are enqueued in user space. */
 struct enqueued_task {
 	LIST_ENTRY(enqueued_task) entries;
@@ -191,6 +194,7 @@ static int vruntime_enqueue(const struct scx_userland_enqueued_task *bpf_task)
 
 	update_enqueued(curr, bpf_task);
 	nr_vruntime_enqueues++;
+	nr_curr_enqueued++;
 
 	/*
 	 * Enqueue the task in a vruntime-sorted list. A more optimal data
@@ -224,8 +228,11 @@ static void drain_enqueued_map(void)
 		struct scx_userland_enqueued_task task;
 		int err;
 
-		if (bpf_map_lookup_and_delete_elem(enqueued_fd, NULL, &task))
+		if (bpf_map_lookup_and_delete_elem(enqueued_fd, NULL, &task)) {
+			skel->bss->nr_queued = 0;
+			skel->bss->nr_scheduled = nr_curr_enqueued;
 			return;
+		}
 
 		err = vruntime_enqueue(&task);
 		if (err) {
@@ -248,7 +255,7 @@ static void dispatch_batch(void)
 
 		task = LIST_FIRST(&vruntime_head);
 		if (!task)
-			return;
+			break;
 
 		min_vruntime = task->vruntime;
 		pid = task_pid(task);
@@ -261,9 +268,11 @@ static void dispatch_batch(void)
 			 * tasks in this batch.
 			 */
 			LIST_INSERT_HEAD(&vruntime_head, task, entries);
-			return;
+			break;
 		}
+		nr_curr_enqueued--;
 	}
+	skel->bss->nr_scheduled = nr_curr_enqueued;
 }
 
 static void *run_stats_printer(void *arg)
