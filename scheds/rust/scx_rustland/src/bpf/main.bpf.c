@@ -320,19 +320,6 @@ static bool is_task_cpu_available(struct task_struct *p, u64 enq_flags)
 		return true;
 
 	/*
-	 * Moreover, immediately dispatch kthreads that still have more than
-	 * half of their runtime budget. As they are likely to release the CPU
-	 * soon, granting them a substantial priority boost can enhance the
-	 * overall system performance.
-	 *
-	 * In the event that one of these kthreads turns into a CPU hog, it
-	 * will deplete its runtime budget and therefore it will be scheduled
-	 * like any other normal task.
-	 */
-	if (is_kthread(p) && p->scx.slice > slice_ns / 2)
-		return true;
-
-	/*
 	 * For regular tasks always rely on force_local to determine if we can
 	 * bypass the scheduler.
 	 */
