@@ -415,7 +415,7 @@ static void dispatch_user_scheduler(void)
 	 * Always try to dispatch the user-space scheduler on the current CPU,
 	 * if possible.
 	 */
-	dispatch_on_cpu(p, bpf_get_smp_processor_id(), 0);
+	dispatch_on_cpu(p, bpf_get_smp_processor_id(), SCX_ENQ_PREEMPT);
 	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	bpf_task_release(p);
 }
