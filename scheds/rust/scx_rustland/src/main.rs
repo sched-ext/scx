@@ -6,12 +6,14 @@ mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 
+mod bpf;
+use bpf::*;
+
 use std::thread;
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
-use std::ffi::CStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -21,22 +23,13 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-use libbpf_rs::skel::OpenSkel as _;
-use libbpf_rs::skel::Skel as _;
-use libbpf_rs::skel::SkelBuilder as _;
 use log::info;
 use log::warn;
 
-use libc::{sched_param, sched_setscheduler};
-
 const SCHEDULER_NAME: &'static str = "RustLand";
-
-// Defined in UAPI
-const SCHED_EXT: i32 = 7;
 
 /// scx_rustland: simple user-space scheduler written in Rust
 ///
@@ -86,53 +79,6 @@ struct Opts {
     debug: bool,
 }
 
-// Message received from the dispatcher (see bpf_intf::queued_task_ctx for details).
-//
-// NOTE: eventually libbpf-rs will provide a better abstraction for this.
-struct EnqueuedMessage {
-    inner: bpf_intf::queued_task_ctx,
-}
-
-impl EnqueuedMessage {
-    fn from_bytes(bytes: &[u8]) -> Self {
-        let queued_task_struct = unsafe { *(bytes.as_ptr() as *const bpf_intf::queued_task_ctx) };
-        EnqueuedMessage {
-            inner: queued_task_struct,
-        }
-    }
-
-    fn as_queued_task_ctx(&self) -> bpf_intf::queued_task_ctx {
-        self.inner
-    }
-}
-
-// Message sent to the dispatcher (see bpf_intf::dispatched_task_ctx for details).
-//
-// NOTE: eventually libbpf-rs will provide a better abstraction for this.
-struct DispatchedMessage {
-    inner: bpf_intf::dispatched_task_ctx,
-}
-
-impl DispatchedMessage {
-    fn from_task(task: &Task) -> Self {
-        let dispatched_task_struct = bpf_intf::dispatched_task_ctx {
-            pid: task.pid,
-            cpu: task.cpu,
-            payload: task.vruntime,
-        };
-        DispatchedMessage {
-            inner: dispatched_task_struct,
-        }
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        let size = std::mem::size_of::<bpf_intf::dispatched_task_ctx>();
-        let ptr = &self.inner as *const _ as *const u8;
-
-        unsafe { std::slice::from_raw_parts(ptr, size) }
-    }
-}
-
 // Basic item stored in the task information map.
 #[derive(Debug)]
 struct TaskInfo {
@@ -159,12 +105,11 @@ impl TaskInfoMap {
     }
 }
 
-// Basic task item stored in the task pool.
 #[derive(Debug, PartialEq, Eq, PartialOrd)]
-struct Task {
-    pid: i32,      // pid that uniquely identifies a task
-    cpu: i32,      // CPU where the task is running
-    vruntime: u64, // total vruntime (that determines the order how tasks are dispatched)
+pub struct Task {
+    pub pid: i32,      // pid that uniquely identifies a task
+    pub cpu: i32,      // CPU where the task is running
+    pub vruntime: u64, // total vruntime (that determines the order how tasks are dispatched)
 }
 
 // Make sure tasks are ordered by vruntime, if multiple tasks have the same vruntime order by pid.
@@ -173,6 +118,17 @@ impl Ord for Task {
         self.vruntime
             .cmp(&other.vruntime)
             .then_with(|| self.pid.cmp(&other.pid))
+    }
+}
+
+// Convert Task to DispatchedTask used by the dispatcher.
+impl Task {
+    pub fn to_dispatched_task(&self) -> DispatchedTask {
+        DispatchedTask {
+            pid: self.pid,
+            cpu: self.cpu,
+            payload: self.vruntime,
+        }
     }
 }
 
@@ -205,20 +161,18 @@ impl TaskTree {
 
 // Main scheduler object
 struct Scheduler<'a> {
-    skel: BpfSkel<'a>,     // BPF connector
+    bpf: BpfScheduler<'a>, // BPF connector
     task_pool: TaskTree,   // tasks ordered by vruntime
     task_map: TaskInfoMap, // map pids to the corresponding task information
     min_vruntime: u64,     // Keep track of the minimum vruntime across all tasks
     nr_cpus_online: i32,   // Amount of the available CPUs in the system
-    struct_ops: Option<libbpf_rs::Link>,
 }
 
 impl<'a> Scheduler<'a> {
     fn init(opts: &Opts) -> Result<Self> {
-        // Open the BPF prog first for verification.
-        let skel_builder = BpfSkelBuilder::default();
-        let mut skel = skel_builder.open().context("Failed to open BPF program")?;
-        let pid = std::process::id();
+        // Low-level BPF connector.
+        let bpf = BpfScheduler::init(opts.slice_us, opts.partial, opts.debug)?;
+        info!("{} scheduler attached", SCHEDULER_NAME);
 
         // Scheduler task pool to sort tasks by vruntime.
         let task_pool = TaskTree::new();
@@ -235,69 +189,14 @@ impl<'a> Scheduler<'a> {
         // hotplugging, but for now let's keep it simple and set this only at initialization).
         let nr_cpus_online = libbpf_rs::num_possible_cpus().unwrap() as i32;
 
-        // Set scheduler options (defined in the BPF part).
-        skel.bss_mut().usersched_pid = pid;
-        skel.rodata_mut().slice_ns = opts.slice_us * 1000;
-        skel.rodata_mut().switch_partial = opts.partial;
-        skel.rodata_mut().debug = opts.debug;
-
-        // Attach BPF scheduler.
-        let mut skel = skel.load().context("Failed to load BPF program")?;
-        skel.attach().context("Failed to attach BPF program")?;
-        let struct_ops = Some(
-            skel.maps_mut()
-                .rustland()
-                .attach_struct_ops()
-                .context("Failed to attach struct ops")?,
-        );
-        info!("{} scheduler attached", SCHEDULER_NAME);
-
         // Return scheduler object.
         Ok(Self {
-            skel,
+            bpf,
             task_pool,
             task_map,
             min_vruntime,
             nr_cpus_online,
-            struct_ops,
         })
-    }
-
-    // Read exit code from the BPF part.
-    fn read_bpf_exit_kind(&mut self) -> i32 {
-        unsafe { std::ptr::read_volatile(&self.skel.bss().exit_kind as *const _) }
-    }
-
-    // Called on exit to get exit code and exit message from the BPF part.
-    fn report_bpf_exit_kind(&mut self) -> Result<()> {
-        let cstr = unsafe { CStr::from_ptr(self.skel.bss().exit_msg.as_ptr() as *const _) };
-        let msg = cstr
-            .to_str()
-            .context("Failed to convert exit msg to string")
-            .unwrap();
-        if !msg.is_empty() {
-            warn!("EXIT: {}", msg);
-        }
-        match self.read_bpf_exit_kind() {
-            0 => Ok(()),
-            err => bail!("BPF error code: {}", err),
-        }
-    }
-
-    // Get the pid running on a certain CPU, if no tasks are running return 0
-    fn get_cpu_pid(&self, cpu: i32) -> u32 {
-        let maps = self.skel.maps();
-        let cpu_map = maps.cpu_map();
-
-        let key = cpu.to_ne_bytes();
-        let value = cpu_map.lookup(&key, libbpf_rs::MapFlags::ANY).unwrap();
-        let pid = value.map_or(0u32, |vec| {
-            let mut array: [u8; 4] = Default::default();
-            array.copy_from_slice(&vec[..std::cmp::min(4, vec.len())]);
-            u32::from_le_bytes(array)
-        });
-
-        pid
     }
 
     // Return the array of idle CPU ids.
@@ -305,7 +204,7 @@ impl<'a> Scheduler<'a> {
         let mut idle_cpus = Vec::new();
 
         for cpu in 0..self.nr_cpus_online {
-            let pid = self.get_cpu_pid(cpu);
+            let pid = self.bpf.get_cpu_pid(cpu);
             if pid == 0 {
                 idle_cpus.push(cpu);
             }
@@ -356,15 +255,9 @@ impl<'a> Scheduler<'a> {
     // Drain all the tasks from the queued list, update their vruntime (Self::update_enqueued()),
     // then push them all to the task pool (doing so will sort them by their vruntime).
     fn drain_queued_tasks(&mut self) {
-        let maps = self.skel.maps();
-        let queued = maps.queued();
-
         loop {
-            match queued.lookup_and_delete(&[]) {
-                Ok(Some(msg)) => {
-                    // Extract the task object from the message.
-                    let task = EnqueuedMessage::from_bytes(msg.as_slice()).as_queued_task_ctx();
-
+            match self.bpf.dequeue_task() {
+                Ok(Some(task)) => {
                     // Check for exiting tasks (cpu < 0) and remove their corresponding entries in
                     // the task map (if present).
                     if task.cpu < 0 {
@@ -389,7 +282,7 @@ impl<'a> Scheduler<'a> {
                         task.sum_exec_runtime,
                         task.weight,
                         self.min_vruntime,
-                        self.skel.rodata().slice_ns,
+                        self.bpf.skel.rodata().slice_ns,
                     );
 
                     // Insert task in the task pool (ordered by vruntime).
@@ -399,8 +292,8 @@ impl<'a> Scheduler<'a> {
                     // Reset nr_queued and update nr_scheduled, to notify the dispatcher that
                     // queued tasks are drained, but there is still some work left to do in the
                     // scheduler.
-                    self.skel.bss_mut().nr_queued = 0;
-                    self.skel.bss_mut().nr_scheduled = self.task_pool.tasks.len() as u64;
+                    *self.bpf.nr_queued_mut() = 0;
+                    *self.bpf.nr_scheduled_mut() = self.task_pool.tasks.len() as u64;
                     break;
                 }
                 Err(err) => {
@@ -413,8 +306,6 @@ impl<'a> Scheduler<'a> {
 
     // Dispatch tasks from the task pool in order (sending them to the BPF dispatcher).
     fn dispatch_tasks(&mut self) {
-        let maps = self.skel.maps();
-        let dispatched = maps.dispatched();
         let mut idle_cpus = self.get_idle_cpus();
 
         // Dispatch only a batch of tasks equal to the amount of idle CPUs in the system.
@@ -442,9 +333,8 @@ impl<'a> Scheduler<'a> {
                         task.cpu = idle_cpus.pop().unwrap();
                     }
 
-                    // Send task to the dispatcher.
-                    let msg = DispatchedMessage::from_task(&task);
-                    match dispatched.update(&[], msg.as_bytes(), libbpf_rs::MapFlags::ANY) {
+                    // Send task to the BPF dispatcher.
+                    match self.bpf.dispatch_task(&task.to_dispatched_task()) {
                         Ok(_) => {}
                         Err(_) => {
                             /*
@@ -462,7 +352,7 @@ impl<'a> Scheduler<'a> {
         // Reset nr_scheduled to notify the dispatcher that all the tasks received by the scheduler
         // has been dispatched, so there is no reason to re-activate the scheduler, unless more
         // tasks are queued.
-        self.skel.bss_mut().nr_scheduled = self.task_pool.tasks.len() as u64;
+        self.bpf.skel.bss_mut().nr_scheduled = self.task_pool.tasks.len() as u64;
     }
 
     // Main scheduling function (called in a loop to periodically drain tasks from the queued list
@@ -516,17 +406,24 @@ impl<'a> Scheduler<'a> {
         );
 
         // Show general statistics.
-        let nr_user_dispatches = self.skel.bss().nr_user_dispatches as u64;
-        let nr_kernel_dispatches = self.skel.bss().nr_kernel_dispatches as u64;
-        let nr_sched_congested = self.skel.bss().nr_sched_congested as u64;
+        let nr_user_dispatches = *self.bpf.nr_user_dispatches_mut();
+        let nr_kernel_dispatches = *self.bpf.nr_kernel_dispatches_mut();
         info!(
-            "  nr_user_dispatched={} nr_kernel_dispatches={} nr_sched_congested={}",
-            nr_user_dispatches, nr_kernel_dispatches, nr_sched_congested
+            "  nr_user_dispatches={} nr_kernel_dispatches={}",
+            nr_user_dispatches, nr_kernel_dispatches
+        );
+
+        // Show failure statistics.
+        let nr_failed_dispatches = *self.bpf.nr_failed_dispatches_mut();
+        let nr_sched_congested = *self.bpf.nr_sched_congested_mut();
+        info!(
+            "  nr_failed_dispatches={} nr_sched_congested={}",
+            nr_failed_dispatches, nr_sched_congested
         );
 
         // Show tasks that are waiting to be dispatched.
-        let nr_queued = self.skel.bss().nr_queued as u64;
-        let nr_scheduled = self.skel.bss().nr_scheduled as u64;
+        let nr_queued = *self.bpf.nr_queued_mut();
+        let nr_scheduled = *self.bpf.nr_scheduled_mut();
         let nr_waiting = nr_queued + nr_scheduled;
         info!(
             "  nr_waiting={} [nr_queued={} + nr_scheduled={}]",
@@ -543,7 +440,7 @@ impl<'a> Scheduler<'a> {
             let pid = if cpu == sched_cpu {
                 "[self]".to_string()
             } else {
-                self.get_cpu_pid(cpu).to_string()
+                self.bpf.get_cpu_pid(cpu).to_string()
             };
             info!("  cpu={} pid={}", cpu, pid);
         }
@@ -554,12 +451,13 @@ impl<'a> Scheduler<'a> {
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<()> {
         let mut prev_ts = SystemTime::now();
 
-        while !shutdown.load(Ordering::Relaxed) && self.read_bpf_exit_kind() == 0 {
+        while !shutdown.load(Ordering::Relaxed) && self.bpf.read_bpf_exit_kind() == 0 {
             let curr_ts = SystemTime::now();
             let elapsed = curr_ts
                 .duration_since(prev_ts)
                 .unwrap_or_else(|_| Duration::from_secs(0));
 
+            // Call the main scheduler body.
             self.schedule();
 
             // Print scheduler statistics every second.
@@ -570,25 +468,31 @@ impl<'a> Scheduler<'a> {
                 prev_ts = curr_ts;
             }
         }
-        self.report_bpf_exit_kind()
+
+        // Report exit code and message from the BPF part.
+        let (exit_code, msg) = self.bpf.report_bpf_exit_kind();
+        match exit_code {
+            0 => {
+                if !msg.is_empty() {
+                    info!("EXIT: {}", msg);
+                }
+                Ok(())
+            }
+            err => {
+                if !msg.is_empty() {
+                    warn!("FAIL: {} (err={})", msg, err);
+                }
+                Err(anyhow::Error::msg(err))
+            }
+        }
     }
 }
 
+// Unregister the scheduler.
 impl<'a> Drop for Scheduler<'a> {
     fn drop(&mut self) {
-        if let Some(struct_ops) = self.struct_ops.take() {
-            drop(struct_ops);
-        }
         info!("Unregister {} scheduler", SCHEDULER_NAME);
     }
-}
-
-// Set scheduling class for the scheduler itself to SCHED_EXT
-fn use_sched_ext() -> i32 {
-    let pid = std::process::id();
-    let param: sched_param = sched_param { sched_priority: 0 };
-    let res = unsafe { sched_setscheduler(pid as i32, SCHED_EXT, &param as *const sched_param) };
-    res
 }
 
 fn main() -> Result<()> {
@@ -607,12 +511,6 @@ fn main() -> Result<()> {
         simplelog::TerminalMode::Stderr,
         simplelog::ColorChoice::Auto,
     )?;
-
-    // Make sure to use the SCHED_EXT class at least for the scheduler itself.
-    let res = use_sched_ext();
-    if res != 0 {
-        bail!("Failed to all sched_setscheduler: {}", res);
-    }
 
     let mut sched = Scheduler::init(&opts)?;
     let shutdown = Arc::new(AtomicBool::new(false));
