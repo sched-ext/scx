@@ -35,9 +35,13 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 
-#define MAX_CPUS 1024
-
 char _license[] SEC("license") = "GPL";
+
+/*
+ * Maximum amount of CPUs supported by this scheduler (this defines the size of
+ * cpu_map that is used to store the idle state and CPU ownership).
+ */
+#define MAX_CPUS 1024
 
 /*
  * Exit info (passed to the user-space counterpart).
@@ -301,6 +305,9 @@ static void dispatch_on_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
  * If the CPU where the task was running is still idle, then the task can be
  * dispatched immediately on the same CPU from .enqueue(), without having to
  * call the scheduler.
+ *
+ * Decision made in this function is not final. The user-space scheduler may
+ * decide to move the task to a different CPU later, if needed.
  */
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
@@ -381,7 +388,9 @@ static void get_task_info(struct queued_task_ctx *task,
 }
 
 /*
- * Task @p becomes ready to run.
+ * Task @p becomes ready to run. We can dispatch the task directly here if the
+ * user-space scheduler is not required, or enqueue it to be processed by the
+ * scheduler.
  */
 void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 {
@@ -430,7 +439,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 /*
  * Dispatch the user-space scheduler.
  */
-static void dispatch_user_scheduler(void)
+static void dispatch_user_scheduler(s32 cpu)
 {
 	struct task_struct *p;
 
@@ -442,27 +451,34 @@ static void dispatch_user_scheduler(void)
 		scx_bpf_error("Failed to find usersched task %d", usersched_pid);
 		return;
 	}
-	/*
-	 * Always try to dispatch the user-space scheduler on the current CPU,
-	 * if possible.
-	 */
-	dispatch_on_cpu(p, bpf_get_smp_processor_id(), SCX_ENQ_PREEMPT);
+	dispatch_on_cpu(p, cpu, SCX_ENQ_PREEMPT);
 	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	bpf_task_release(p);
 }
 
 /*
  * Dispatch tasks that are ready to run.
+ *
+ * This function is called when a CPU's local DSQ is empty and ready to accept
+ * new dispatched tasks.
+ *
+ * We may dispatch tasks also on other CPUs from here, if the scheduler decided
+ * so (usually if other CPUs are idle we may want to send more tasks to their
+ * local DSQ to optimize the scheduling pipeline).
  */
 void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 {
-	/* Check if the user-space scheduler needs to run */
-	dispatch_user_scheduler();
+	/*
+	 * Check if the user-space scheduler needs to run, and in that case try
+	 * to dispatch it on the current CPU.
+	 */
+	dispatch_user_scheduler(cpu);
 
 	/*
-	 * Consume all tasks from the @dispatched list and immediately dispatch
-	 * them to the global FIFO (the proper ordering has been already
-	 * determined by the user-space scheduler).
+	 * Consume all tasks from the @dispatched list and immediately try to
+	 * dispatch them on their target CPU selected by the user-space
+	 * scheduler (at this point the proper ordering has been already
+	 * determined by the scheduler).
 	 */
 	bpf_repeat(MAX_ENQUEUED_TASKS) {
 		struct task_struct *p;
@@ -471,7 +487,10 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		if (!scx_bpf_dispatch_nr_slots())
 			break;
 
-		/* Pop first task from the dispatched queue */
+		/*
+		 * Pop first task from the dispatched queue, stop if dispatch
+		 * queue is empty.
+		 */
 		if (bpf_map_pop_elem(&dispatched, &task))
 			break;
 
@@ -481,8 +500,7 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 			continue;
 		/*
 		 * Check whether the scheduler assigned a different CPU to the
-		 * task and migrate (if possible); otherwise, dispatch on the
-		 * global DSQ.
+		 * task and migrate (if possible).
 		 */
 		dbg_msg("usersched: pid=%d cpu=%d payload=%llu",
 			task.pid, task.cpu, task.payload);
@@ -492,7 +510,9 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	}
 }
 
-/* Task @p starts on a CPU */
+/*
+ * Task @p starts on its selected CPU (update CPU ownership map).
+ */
 void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 {
 	dbg_msg("start: pid=%d (%s)", p->pid, p->comm);
@@ -504,7 +524,9 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 		set_cpu_owner(scx_bpf_task_cpu(p), p->pid);
 }
 
-/* Task @p releases a CPU */
+/*
+ * Task @p stops running on its associated CPU (update CPU ownership map).
+ */
 void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 {
 	dbg_msg("stop: pid=%d (%s)", p->pid, p->comm);
@@ -519,12 +541,12 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
  * A CPU is about to change its idle state.
  *
  * NOTE: implementing an update_idle() callback automatically disables the
- * built-in idle tracking, so we need to rely on the internal CPU ownership
- * (get_cpu_owner() / set_cpu_owner()) to determine if a CPU is available or
- * not.
+ * built-in idle tracking. This is fine because we want to rely on the internal
+ * CPU ownership map (get_cpu_owner() / set_cpu_owner()) to determine if a CPU
+ * is available or not.
  *
- * The same information can be shared with the user-space scheduler via the
- * BPF_MAP_TYPE_ARRAY cpu_map.
+ * This information can easily be shared with the user-space scheduler via
+ * cpu_map.
  */
 void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 {
@@ -536,10 +558,7 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 		return;
 	/*
 	 * A CPU is now available, notify the user-space scheduler that tasks
-	 * can be dispatched, if there is at least one task waiting to be
-	 * scheduled, either queued (accounted in nr_queued) or scheduled
-	 * (accounted in nr_scheduled).
-	 *
+	 * can be dispatched.
 	 */
 	if (is_usersched_needed()) {
 		/*
@@ -551,7 +570,12 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 	}
 }
 
-/* Task @p is created */
+/*
+ * A new task @p is being created.
+ *
+ * Allocate and initialize all the internal structures for the task (this
+ * function is allowed to block, so it can be used to preallocate memory).
+ */
 s32 BPF_STRUCT_OPS(rustland_prep_enable, struct task_struct *p,
 		   struct scx_enable_args *args)
 {
@@ -564,10 +588,10 @@ s32 BPF_STRUCT_OPS(rustland_prep_enable, struct task_struct *p,
 }
 
 /*
- * Task @p is freed.
+ * Task @p is exiting.
  *
  * Notify the user-space scheduler that we can free up all the allocated
- * resources for this task.
+ * resources associated to this task.
  */
 void BPF_STRUCT_OPS(rustland_disable, struct task_struct *p)
 {
@@ -596,6 +620,12 @@ void BPF_STRUCT_OPS(rustland_disable, struct task_struct *p)
 
 /*
  * Heartbeat scheduler timer callback.
+ *
+ * If the system is completely idle the sched-ext wathcdog may incorrectly
+ * detect that as a stall and automatically disable the scheduler. So, use this
+ * timer to periodically wake-up the scheduler and avoid long inactivity.
+ *
+ * This can also help to pervent real "stalling" conditions in the scheduler.
  */
 static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
 {
