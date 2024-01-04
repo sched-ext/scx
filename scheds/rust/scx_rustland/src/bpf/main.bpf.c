@@ -239,6 +239,34 @@ static bool test_and_clear_usersched_needed(void)
 }
 
 /*
+ * Return true if there's any pending activity to do for the scheduler, false
+ * otherwise.
+ *
+ * NOTE: nr_queued is incremented by the BPF component, more exactly in
+ * enqueue(), when a task is sent to the user-space scheduler, then the
+ * scheduler drains the queued tasks (updating nr_queued) and adds them to its
+ * internal data structures / state; at this point tasks become "scheduled" and
+ * the user-space scheduler will take care of updating nr_scheduled
+ * accordingly; lastly tasks will be dispatched and the user-space scheduler
+ * will update nr_scheduled again.
+ *
+ * Checking both counters allows to determine if there is still some pending
+ * work to do for the scheduler: new tasks have been queued since last check,
+ * or there are still tasks "queued" or "scheduled" since the previous
+ * user-space scheduler run. If the counters are both zero it is pointless to
+ * wake-up the scheduler (even if a CPU becomes idle), because there is nothing
+ * to do.
+ *
+ * Also keep in mind that we don't need any protection here since this code
+ * doesn't run concurrently with the user-space scheduler (that is single
+ * threaded), therefore this check is also safe from a concurrency perspective.
+ */
+static bool is_usersched_needed(void)
+{
+	return nr_queued || nr_scheduled;
+}
+
+/*
  * Dispatch a task on its local per-CPU FIFO.
  */
 static void dispatch_local(struct task_struct *p, u64 enq_flags)
@@ -367,10 +395,13 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Dispatch the task on the local FIFO directly if the selected task's
-	 * CPU is available (no scheduling decision required).
+	 * Directly dispatch the task to the local DSQ if the selected task's
+	 * CPU is available (no scheduling decision required). However, do so
+	 * only when the scheduler has no pending activity, otherwise, we risk
+	 * disrupting the scheduler's decisions and negatively affecting the
+	 * overall system performance.
 	 */
-	if (is_task_cpu_available(p, enq_flags)) {
+	if (!is_usersched_needed() && is_task_cpu_available(p, enq_flags)) {
 		dispatch_local(p, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
@@ -415,7 +446,7 @@ static void dispatch_user_scheduler(void)
 	 * Always try to dispatch the user-space scheduler on the current CPU,
 	 * if possible.
 	 */
-	dispatch_on_cpu(p, bpf_get_smp_processor_id(), 0);
+	dispatch_on_cpu(p, bpf_get_smp_processor_id(), SCX_ENQ_PREEMPT);
 	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	bpf_task_release(p);
 }
@@ -509,27 +540,8 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 	 * scheduled, either queued (accounted in nr_queued) or scheduled
 	 * (accounted in nr_scheduled).
 	 *
-	 * NOTE: nr_queued is incremented by the BPF component, more exactly in
-	 * enqueue(), when a task is sent to the user-space scheduler, then
-	 * the scheduler drains the queued tasks (updating nr_queued) and adds
-	 * them to its internal data structures / state; at this point tasks
-	 * become "scheduled" and the user-space scheduler will take care of
-	 * updating nr_scheduled accordingly; lastly tasks will be dispatched
-	 * and the user-space scheduler will update nr_scheduled again.
-	 *
-	 * Checking both counters allows to determine if there is still some
-	 * pending work to do for the scheduler: new tasks have been queued
-	 * since last check, or there are still tasks "queued" or "scheduled"
-	 * since the previous user-space scheduler run. If the counters are
-	 * both zero it is pointless to wake-up the scheduler (even if a CPU
-	 * becomes idle), because there is nothing to do.
-	 *
-	 * Keep in mind that update_idle() doesn't run concurrently with the
-	 * user-space scheduler (that is single-threaded): this function is
-	 * naturally serialized with the user-space scheduler code, therefore
-	 * this check here is also safe from a concurrency perspective.
 	 */
-	if (nr_queued || nr_scheduled) {
+	if (is_usersched_needed()) {
 		/*
 		 * Kick the CPU to make it immediately ready to accept
 		 * dispatched tasks.

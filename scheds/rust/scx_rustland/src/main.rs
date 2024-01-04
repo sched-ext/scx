@@ -332,11 +332,11 @@ impl<'a> Scheduler<'a> {
         // Evaluate last time slot used by the task, scaled by its priority (weight).
         let mut delta = (sum_exec_runtime - task_info.sum_exec_runtime) * 100 / weight;
 
-        // Account (max_slice_ns / 2) to new tasks to avoid granting excessive priority without
-        // understanding their nature. This allows to mitigate potential system starvation caused
-        // by spawning a massive amount of tasks (e.g., fork-bomb attacks).
+        // Account an extra (max_slice_ns / 2) to new tasks to avoid granting excessive priority
+        // without understanding their nature. This allows to mitigate potential system starvation
+        // caused by spawning a massive amount of tasks (e.g., fork-bomb attacks).
         if task_info.sum_exec_runtime == 0 {
-            delta = max_slice_ns / 2;
+            delta += max_slice_ns / 2;
         }
 
         // Never account more than max_slice_ns, to prevent starving a task for too long in the
