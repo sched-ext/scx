@@ -237,16 +237,25 @@ impl<'a> BpfScheduler<'a> {
     }
 
     // Counter of user dispatch events.
+    #[allow(dead_code)]
     pub fn nr_user_dispatches_mut(&mut self) -> &mut u64 {
         &mut self.skel.bss_mut().nr_user_dispatches
     }
 
     // Counter of user kernel events.
+    #[allow(dead_code)]
     pub fn nr_kernel_dispatches_mut(&mut self) -> &mut u64 {
         &mut self.skel.bss_mut().nr_kernel_dispatches
     }
 
+    // Counter of failed dispatch events.
+    #[allow(dead_code)]
+    pub fn nr_failed_dispatches_mut(&mut self) -> &mut u64 {
+        &mut self.skel.bss_mut().nr_failed_dispatches
+    }
+
     // Counter of scheduler congestion events.
+    #[allow(dead_code)]
     pub fn nr_sched_congested_mut(&mut self) -> &mut u64 {
         &mut self.skel.bss_mut().nr_sched_congested
     }

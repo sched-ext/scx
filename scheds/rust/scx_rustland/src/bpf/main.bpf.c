@@ -73,8 +73,11 @@ volatile u64 nr_queued;
  */
 volatile u64 nr_scheduled;
 
-/* Misc statistics */
-volatile u64 nr_user_dispatches, nr_kernel_dispatches, nr_sched_congested;
+/* Dispatch statistics */
+volatile u64 nr_user_dispatches, nr_kernel_dispatches;
+
+/* Failure statistics */
+volatile u64 nr_failed_dispatches, nr_sched_congested;
 
  /* Report additional debugging information */
 const volatile bool debug;
@@ -291,7 +294,18 @@ static void dispatch_task(struct task_struct *p, s32 cpu, u64 enq_flags)
 	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
 		cpu = scx_bpf_task_cpu(p);
 		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
-			dbg_msg("%s: pid=%d global", __func__, p->pid);
+			/*
+			 * Both the designated CPU and the previously used CPU
+			 * are unavailable, we need to fallback to the global DSQ.
+			 *
+			 * This is not necessarily a problem, using the global
+			 * DSQ will give a small performance penalty to the
+			 * task (because it needs to wait for the local DSQ to
+			 * be drained). So for now simply report the event as a
+			 * "dispatch failure" and keep going.
+			 */
+			dbg_msg("%s: pid=%d (fail)", __func__, p->pid);
+			__sync_fetch_and_add(&nr_failed_dispatches, 1);
 			scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice_ns,
 					 enq_flags);
 			return;
