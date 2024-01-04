@@ -484,9 +484,6 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		struct task_struct *p;
 		struct dispatched_task_ctx task;
 
-		if (!scx_bpf_dispatch_nr_slots())
-			break;
-
 		/*
 		 * Pop first task from the dispatched queue, stop if dispatch
 		 * queue is empty.
