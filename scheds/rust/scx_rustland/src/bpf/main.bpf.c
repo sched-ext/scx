@@ -340,7 +340,7 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 }
 
 /*
- * Return true if the selected CPU for the task is immediately avaliable
+ * Return true if the selected CPU for the task is immediately available
  * (user-space scheduler not required), false otherwise (user-space scheduler
  * required).
  *
@@ -609,7 +609,7 @@ void BPF_STRUCT_OPS(rustland_disable, struct task_struct *p)
 		 * because we failed to notify it about this exiting task and
 		 * some resources may remain allocated.
 		 *
-		 * Do not worrry too much about this condition for now, since
+		 * Do not worry too much about this condition for now, since
 		 * it should be pretty rare (and it happens only when the
 		 * scheduler is already congested, so it is probably a good
 		 * thing to avoid introducing extra overhead to free up
@@ -625,11 +625,11 @@ void BPF_STRUCT_OPS(rustland_disable, struct task_struct *p)
 /*
  * Heartbeat scheduler timer callback.
  *
- * If the system is completely idle the sched-ext wathcdog may incorrectly
+ * If the system is completely idle the sched-ext watchdog may incorrectly
  * detect that as a stall and automatically disable the scheduler. So, use this
  * timer to periodically wake-up the scheduler and avoid long inactivity.
  *
- * This can also help to pervent real "stalling" conditions in the scheduler.
+ * This can also help to prevent real "stalling" conditions in the scheduler.
  */
 static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
 {
