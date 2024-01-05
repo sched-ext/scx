@@ -212,7 +212,8 @@ impl<'a> Scheduler<'a> {
         idle_cpus
     }
 
-    // Update task's vruntime based on the information collected from the kernel.
+    // Update task's vruntime based on the information collected from the kernel and return the
+    // evaluated weighted time slice to the caller.
     //
     // This method implements the main task ordering logic of the scheduler.
     fn update_enqueued(
@@ -221,34 +222,39 @@ impl<'a> Scheduler<'a> {
         weight: u64,
         min_vruntime: u64,
         slice_ns: u64,
-    ) {
+    ) -> u64 {
         // Scale the maximum allowed time slice by a factor of 10 to increase the
         // range of allowed time delta and give a better chance to prioritize tasks
         // with shorter time delta / higher weight.
         let max_slice_ns = slice_ns * 10;
 
         // Evaluate last time slot used by the task, scaled by its priority (weight).
-        let mut delta = (sum_exec_runtime - task_info.sum_exec_runtime) * 100 / weight;
+        let mut slice = (sum_exec_runtime - task_info.sum_exec_runtime) * 100 / weight;
 
         // Account an extra (max_slice_ns / 2) to new tasks to avoid granting excessive priority
         // without understanding their nature. This allows to mitigate potential system starvation
         // caused by spawning a massive amount of tasks (e.g., fork-bomb attacks).
         if task_info.sum_exec_runtime == 0 {
-            delta += max_slice_ns / 2;
+            slice += max_slice_ns / 2;
         }
 
-        // Never account more than max_slice_ns, to prevent starving a task for too long in the
-        // scheduler task pool, but still give a range large enough to be able to prioritize
-        // tasks with short delta / higher weight.
-        task_info.vruntime += delta.min(max_slice_ns);
-
-        // Also make sure that the global vruntime is always progressing (at least by +1)
-        // during each scheduler run, to prevent excessive starvation of the other tasks
-        // sitting in the self.task_pool tree, waiting to be dispatched.
-        task_info.vruntime = task_info.vruntime.max(min_vruntime + 1);
+        // Make sure that the updated vruntime is in the range:
+        //
+        //   (min_vruntime, min_vruntime + max_slice_ns]
+        //
+        // In this way we ensure that global vruntime is always progressing during each scheduler
+        // run, preventing excessive starvation of the other tasks sitting in the self.task_pool
+        // tree.
+        //
+        // Moreover, limiting the accounted time slice to max_slice_ns, allows to prevent starving
+        // the current task for too long in the scheduler task pool.
+        task_info.vruntime = min_vruntime + slice.clamp(1, max_slice_ns);
 
         // Update total task cputime.
         task_info.sum_exec_runtime = sum_exec_runtime;
+
+        // Return the evaluated weighted time delta to the caller.
+        task_info.vruntime - min_vruntime
     }
 
     // Drain all the tasks from the queued list, update their vruntime (Self::update_enqueued()),
