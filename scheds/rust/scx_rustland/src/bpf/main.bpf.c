@@ -410,6 +410,14 @@ static bool is_task_cpu_available(struct task_struct *p, u64 enq_flags)
 		return true;
 
 	/*
+	 * Do not bypass the user-space scheduler if there are pending
+	 * activity, otherwise, we may risk disrupting the scheduler's
+	 * decisions and negatively affecting the overall system performance.
+	 */
+	if (is_usersched_needed())
+		return false;
+
+	/*
 	 * For regular tasks always rely on force_local to determine if we can
 	 * bypass the scheduler.
 	 */
@@ -460,12 +468,9 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 
 	/*
 	 * Directly dispatch the task to the local DSQ if the selected task's
-	 * CPU is available (no scheduling decision required). However, do so
-	 * only when the scheduler has no pending activity, otherwise, we risk
-	 * disrupting the scheduler's decisions and negatively affecting the
-	 * overall system performance.
+	 * CPU is available (no scheduling decision required).
 	 */
-	if (!is_usersched_needed() && is_task_cpu_available(p, enq_flags)) {
+	if (is_task_cpu_available(p, enq_flags)) {
 		dispatch_local(p, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
