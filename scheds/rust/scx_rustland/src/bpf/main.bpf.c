@@ -295,6 +295,8 @@ static void dispatch_local(struct task_struct *p, u64 enq_flags)
  */
 static s32 get_task_cpu(struct task_struct *p, s32 cpu)
 {
+	if (cpu < 0)
+		return cpu;
 	/*
 	 * Check if the designated CPU can be used to dispatch the task.
 	 */
@@ -482,7 +484,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (bpf_map_push_elem(&queued, &task, 0)) {
 		dbg_msg("scheduler congested: pid=%d", task.pid);
 		__sync_fetch_and_add(&nr_sched_congested, 1);
-		dispatch_task(p, task.cpu, enq_flags);
+		dispatch_task(p, -1, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
