@@ -43,6 +43,9 @@ char _license[] SEC("license") = "GPL";
  */
 #define MAX_CPUS 1024
 
+/* !0 for veristat, set during init */
+const volatile u32 num_possible_cpus = 8;
+
 /*
  * Exit info (passed to the user-space counterpart).
  */
@@ -283,6 +286,38 @@ static void dispatch_local(struct task_struct *p, u64 enq_flags)
 }
 
 /*
+ * Get a valid CPU to dispatch a task.
+ *
+ * First we check if the designated CPU is available, otherwise we check if the
+ * previously used CPU is still available (trying to reduce migrations), if
+ * both are busy return a random CPU available according to the bitmask, or
+ * -ENOENT if none of the allowed CPUs are available.
+ */
+static s32 get_task_cpu(struct task_struct *p, s32 cpu)
+{
+	/*
+	 * Check if the designated CPU can be used to dispatch the task.
+	 */
+	if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		return cpu;
+
+	/*
+	 * The designated CPU is unavailable, check if the previously used CPU
+	 * is available.
+	 */
+	cpu = scx_bpf_task_cpu(p);
+	if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		return cpu;
+
+	/*
+	 * Otherwise get a random CPU available according to the cpumask.
+	 * Return -ENOENT if no CPU is available.
+	 */
+	cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
+	return cpu < num_possible_cpus ? : -ENOENT;
+}
+
+/*
  * Dispatch a task on a target CPU.
  *
  * If it's not possible to dispatch on the selected CPU, try to re-use the
@@ -291,25 +326,22 @@ static void dispatch_local(struct task_struct *p, u64 enq_flags)
  */
 static void dispatch_task(struct task_struct *p, s32 cpu, u64 enq_flags)
 {
-	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
-		cpu = scx_bpf_task_cpu(p);
-		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
-			/*
-			 * Both the designated CPU and the previously used CPU
-			 * are unavailable, we need to fallback to the global DSQ.
-			 *
-			 * This is not necessarily a problem, using the global
-			 * DSQ will give a small performance penalty to the
-			 * task (because it needs to wait for the local DSQ to
-			 * be drained). So for now simply report the event as a
-			 * "dispatch failure" and keep going.
-			 */
-			dbg_msg("%s: pid=%d (fail)", __func__, p->pid);
-			__sync_fetch_and_add(&nr_failed_dispatches, 1);
-			scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice_ns,
-					 enq_flags);
-			return;
-		}
+	cpu = get_task_cpu(p, cpu);
+	if (cpu < 0) {
+		/*
+		 * We couldn't find any available CPU that can be used
+		 * immediately to dispatch the task.
+		 *
+		 * This is not necessarily a problem, using the global DSQ will
+		 * give a small performance penalty to the task (because it
+		 * needs to wait for the local DSQ to be drained). So for now
+		 * simply report the event as a "dispatch failure" and keep
+		 * going.
+		 */
+		dbg_msg("%s: pid=%d (fail)", __func__, p->pid);
+		__sync_fetch_and_add(&nr_failed_dispatches, 1);
+		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice_ns, enq_flags);
+		return;
 	}
 	dbg_msg("%s: pid=%d cpu=%ld", __func__, p->pid, cpu);
 	scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns,
