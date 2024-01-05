@@ -106,10 +106,10 @@ impl TaskInfoMap {
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd)]
-pub struct Task {
-    pub pid: i32,      // pid that uniquely identifies a task
-    pub cpu: i32,      // CPU where the task is running
-    pub vruntime: u64, // total vruntime (that determines the order how tasks are dispatched)
+struct Task {
+    pid: i32,      // pid that uniquely identifies a task
+    cpu: i32,      // CPU where the task is running
+    vruntime: u64, // total vruntime (that determines the order how tasks are dispatched)
 }
 
 // Make sure tasks are ordered by vruntime, if multiple tasks have the same vruntime order by pid.
@@ -148,8 +148,7 @@ impl TaskTree {
 
     // Add an item to the pool (item will be placed in the tree depending on its vruntime, items
     // with the same vruntime will be sorted by pid).
-    fn push(&mut self, pid: i32, cpu: i32, vruntime: u64) {
-        let task = Task { pid, cpu, vruntime };
+    fn push(&mut self, task: Task) {
         self.tasks.insert(task);
     }
 
@@ -286,7 +285,11 @@ impl<'a> Scheduler<'a> {
                     );
 
                     // Insert task in the task pool (ordered by vruntime).
-                    self.task_pool.push(task.pid, task.cpu, task_info.vruntime);
+                    self.task_pool.push(Task {
+                        pid: task.pid,
+                        cpu: task.cpu,
+                        vruntime: task_info.vruntime,
+                    });
                 }
                 Ok(None) => {
                     // Reset nr_queued and update nr_scheduled, to notify the dispatcher that
@@ -341,7 +344,7 @@ impl<'a> Scheduler<'a> {
                              * Re-add the task to the dispatched list in case of failure and stop
                              * dispatching.
                              */
-                            self.task_pool.push(task.pid, task.cpu, task.vruntime);
+                            self.task_pool.push(task);
                             break;
                         }
                     }
