@@ -227,21 +227,27 @@ impl<'a> Scheduler<'a> {
         weight: u64,
         min_vruntime: u64,
         slice_ns: u64,
-    ) -> u64 {
-        // Scale the maximum allowed time slice by a factor of 10 to increase the
-        // range of allowed time delta and give a better chance to prioritize tasks
-        // with shorter time delta / higher weight.
+    ) {
+        // Allow to scale the maximum time slice by a factor of 10 to increase the range of allowed
+        // time delta and give a better chance to prioritize tasks with higher weight.
         let max_slice_ns = slice_ns * 10;
 
         // Evaluate last time slot used by the task, scaled by its priority (weight).
-        let mut slice = (sum_exec_runtime - task_info.sum_exec_runtime) * 100 / weight;
-
-        // Account an extra (max_slice_ns / 2) to new tasks to avoid granting excessive priority
-        // without understanding their nature. This allows to mitigate potential system starvation
-        // caused by spawning a massive amount of tasks (e.g., fork-bomb attacks).
-        if task_info.sum_exec_runtime == 0 {
-            slice += max_slice_ns / 2;
-        }
+        //
+        // NOTE: make sure to handle the case where the current sum_exec_runtime is less then the
+        // previous sum_exec_runtime. This can happen, for example, when a new task is created via
+        // execve() (or its variants): the kernel will initialize a new task_struct, resetting
+        // sum_exec_runtime, while keeping the same PID.
+        //
+        // Consequently, the existing task_info slot is reused, containing the total run-time of
+        // the previous task (likely exceeding the current sum_exec_runtime). In such cases, simply
+        // use sum_exec_runtime as the time slice of the new task.
+        let slice = if sum_exec_runtime > task_info.sum_exec_runtime {
+            sum_exec_runtime - task_info.sum_exec_runtime
+        } else {
+            sum_exec_runtime
+        } * 100
+            / weight;
 
         // Make sure that the updated vruntime is in the range:
         //
@@ -257,9 +263,6 @@ impl<'a> Scheduler<'a> {
 
         // Update total task cputime.
         task_info.sum_exec_runtime = sum_exec_runtime;
-
-        // Return the evaluated weighted time delta to the caller.
-        task_info.vruntime - min_vruntime
     }
 
     // Drain all the tasks from the queued list, update their vruntime (Self::update_enqueued()),
