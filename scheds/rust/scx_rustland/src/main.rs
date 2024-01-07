@@ -165,6 +165,7 @@ struct Scheduler<'a> {
     task_map: TaskInfoMap, // map pids to the corresponding task information
     min_vruntime: u64,     // Keep track of the minimum vruntime across all tasks
     nr_cpus_online: i32,   // Amount of the available CPUs in the system
+    slice_ns: u64,         // Default time slice (in ns)
 }
 
 impl<'a> Scheduler<'a> {
@@ -172,6 +173,9 @@ impl<'a> Scheduler<'a> {
         // Low-level BPF connector.
         let bpf = BpfScheduler::init(opts.slice_us, opts.partial, opts.debug)?;
         info!("{} scheduler attached", SCHEDULER_NAME);
+
+        // Save the default time slice (in ns) in the scheduler class.
+        let slice_ns = opts.slice_us * 1000;
 
         // Scheduler task pool to sort tasks by vruntime.
         let task_pool = TaskTree::new();
@@ -195,6 +199,7 @@ impl<'a> Scheduler<'a> {
             task_map,
             min_vruntime,
             nr_cpus_online,
+            slice_ns,
         })
     }
 
@@ -287,7 +292,7 @@ impl<'a> Scheduler<'a> {
                         task.sum_exec_runtime,
                         task.weight,
                         self.min_vruntime,
-                        self.bpf.skel.rodata().slice_ns,
+                        self.slice_ns,
                     );
 
                     // Insert task in the task pool (ordered by vruntime).
