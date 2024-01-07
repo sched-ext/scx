@@ -265,6 +265,7 @@ impl<'a> Scheduler<'a> {
     // Drain all the tasks from the queued list, update their vruntime (Self::update_enqueued()),
     // then push them all to the task pool (doing so will sort them by their vruntime).
     fn drain_queued_tasks(&mut self) {
+        let slice_ns = self.bpf.get_effective_slice_us() * 1000;
         loop {
             match self.bpf.dequeue_task() {
                 Ok(Some(task)) => {
@@ -292,7 +293,7 @@ impl<'a> Scheduler<'a> {
                         task.sum_exec_runtime,
                         task.weight,
                         self.min_vruntime,
-                        self.slice_ns,
+                        slice_ns,
                     );
 
                     // Insert task in the task pool (ordered by vruntime).
@@ -318,9 +319,27 @@ impl<'a> Scheduler<'a> {
         }
     }
 
+    // Dynamically adjust the time slice based on the amount of waiting tasks.
+    fn scale_slice_ns(&mut self) {
+        let nr_queued = *self.bpf.nr_queued_mut();
+        let nr_scheduled = *self.bpf.nr_scheduled_mut();
+        let nr_waiting = nr_queued + nr_scheduled;
+        let nr_cpus = self.nr_cpus_online as u64;
+
+        // Scale time slice, but never scale below 1 ms.
+        let scaling = nr_waiting / nr_cpus + 1;
+        let slice_us = (self.slice_ns / scaling / 1000).max(1000);
+
+        // Apply new scaling.
+        self.bpf.set_effective_slice_us(slice_us);
+    }
+
     // Dispatch tasks from the task pool in order (sending them to the BPF dispatcher).
     fn dispatch_tasks(&mut self) {
         let mut idle_cpus = self.get_idle_cpus();
+
+        // Adjust the dynamic time slice immediately before dispatching the tasks.
+        self.scale_slice_ns();
 
         // Dispatch only a batch of tasks equal to the amount of idle CPUs in the system.
         //
@@ -443,6 +462,9 @@ impl<'a> Scheduler<'a> {
             "  nr_waiting={} [nr_queued={} + nr_scheduled={}]",
             nr_waiting, nr_queued, nr_scheduled
         );
+
+        // Show current used time slice.
+        info!("time slice = {} us", self.bpf.get_effective_slice_us());
 
         // Show tasks that are currently running.
         let sched_cpu = match Self::get_current_cpu() {
