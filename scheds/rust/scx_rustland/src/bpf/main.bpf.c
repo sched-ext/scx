@@ -60,6 +60,12 @@ const volatile bool switch_partial; /* Switch all tasks or SCHED_EXT tasks */
 const volatile u64 slice_ns = SCX_SLICE_DFL; /* Base time slice duration */
 
 /*
+ * Effective time slice: allow the scheduler to override the default time slice
+ * (slice_ns) if this one is set.
+ */
+volatile u64 effective_slice_ns;
+
+/*
  * Number of tasks that are queued for scheduling.
  *
  * This number is incremented by the BPF component when a task is queued to the
@@ -329,6 +335,8 @@ static s32 get_task_cpu(struct task_struct *p, s32 cpu)
  */
 static void dispatch_task(struct task_struct *p, s32 cpu, u64 enq_flags)
 {
+	u64 slice = __sync_fetch_and_add(&effective_slice_ns, 0) ? : slice_ns;
+
 	cpu = get_task_cpu(p, cpu);
 	if (cpu < 0) {
 		/*
@@ -343,11 +351,11 @@ static void dispatch_task(struct task_struct *p, s32 cpu, u64 enq_flags)
 		 */
 		dbg_msg("dispatch: pid=%d (%s) cpu=any", p->pid, p->comm);
 		__sync_fetch_and_add(&nr_failed_dispatches, 1);
-		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice_ns, enq_flags);
+		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice, enq_flags);
 		return;
 	}
 	dbg_msg("dispatch: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns,
+	scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, slice,
 			 enq_flags | SCX_ENQ_LOCAL);
 }
 

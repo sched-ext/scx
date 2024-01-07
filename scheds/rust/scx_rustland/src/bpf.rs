@@ -226,6 +226,24 @@ impl<'a> BpfScheduler<'a> {
         }
     }
 
+    // Override the default scheduler time slice (in us).
+    #[allow(dead_code)]
+    pub fn set_effective_slice_us(&mut self, slice_us: u64) {
+        self.skel.bss_mut().effective_slice_ns = slice_us * 1000;
+    }
+
+    // Get current value of time slice (slice_ns).
+    #[allow(dead_code)]
+    pub fn get_effective_slice_us(&mut self) -> u64 {
+        let slice_ns = self.skel.bss().effective_slice_ns;
+
+        if slice_ns > 0 {
+            slice_ns / 1000
+        } else {
+            self.skel.rodata().slice_ns / 1000
+        }
+    }
+
     // Counter of queued tasks.
     pub fn nr_queued_mut(&mut self) -> &mut u64 {
         &mut self.skel.bss_mut().nr_queued
