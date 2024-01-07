@@ -86,9 +86,10 @@ volatile u64 nr_failed_dispatches, nr_sched_congested;
 const volatile bool debug;
 
 /* Allow to use bpf_printk() only when @debug is set */
-#define dbg_msg(_fmt, ...) do {				\
-	if (debug)					\
-		bpf_printk(_fmt, ##__VA_ARGS__);        \
+#define dbg_msg(_fmt, ...) do {						\
+	if (debug)							\
+		bpf_printk(_fmt " nr_queued=%lu nr_scheduled=%llu",	\
+		##__VA_ARGS__, nr_queued, nr_scheduled);		\
 } while(0)
 
 /*
@@ -281,7 +282,7 @@ static bool is_usersched_needed(void)
  */
 static void dispatch_local(struct task_struct *p, u64 enq_flags)
 {
-	dbg_msg("%s: pid=%d", __func__, p->pid);
+	dbg_msg("dispatch: pid=%d (%s) cpu=local", p->pid, p->comm);
 	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags | SCX_ENQ_LOCAL);
 }
 
@@ -340,12 +341,12 @@ static void dispatch_task(struct task_struct *p, s32 cpu, u64 enq_flags)
 		 * simply report the event as a "dispatch failure" and keep
 		 * going.
 		 */
-		dbg_msg("%s: pid=%d (fail)", __func__, p->pid);
+		dbg_msg("dispatch: pid=%d (%s) cpu=any", p->pid, p->comm);
 		__sync_fetch_and_add(&nr_failed_dispatches, 1);
 		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice_ns, enq_flags);
 		return;
 	}
-	dbg_msg("%s: pid=%d cpu=%ld", __func__, p->pid, cpu);
+	dbg_msg("dispatch: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
 	scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns,
 			 enq_flags | SCX_ENQ_LOCAL);
 }
@@ -451,6 +452,15 @@ static void get_task_info(struct queued_task_ctx *task,
 }
 
 /*
+ * User-space scheduler is congested: log that and increment congested counter.
+ */
+static void sched_congested(struct task_struct *p)
+{
+	dbg_msg("congested: pid=%d (%s)", p->pid, p->comm);
+	__sync_fetch_and_add(&nr_sched_congested, 1);
+}
+
+/*
  * Task @p becomes ready to run. We can dispatch the task directly here if the
  * user-space scheduler is not required, or enqueue it to be processed by the
  * scheduler.
@@ -485,10 +495,9 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * previously used CPU in this case).
 	 */
 	get_task_info(&task, p, false);
-	dbg_msg("enqueue: pid=%d", task.pid);
+	dbg_msg("enqueue: pid=%d (%s)", p->pid, p->comm);
 	if (bpf_map_push_elem(&queued, &task, 0)) {
-		dbg_msg("scheduler congested: pid=%d", task.pid);
-		__sync_fetch_and_add(&nr_sched_congested, 1);
+		sched_congested(p);
 		dispatch_task(p, -1, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
@@ -572,13 +581,15 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
  */
 void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 {
-	dbg_msg("start: pid=%d (%s)", p->pid, p->comm);
+	s32 cpu = scx_bpf_task_cpu(p);
+
+	dbg_msg("start: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
 	/*
 	 * Mark the CPU as busy by setting the pid as owner (ignoring the
 	 * user-space scheduler).
 	 */
 	if (!is_usersched_task(p))
-		set_cpu_owner(scx_bpf_task_cpu(p), p->pid);
+		set_cpu_owner(cpu, p->pid);
 }
 
 /*
@@ -586,7 +597,9 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
  */
 void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 {
-	dbg_msg("stop: pid=%d (%s)", p->pid, p->comm);
+	s32 cpu = scx_bpf_task_cpu(p);
+
+	dbg_msg("stop: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
 	/*
 	 * Mark the CPU as idle by setting the owner to 0.
 	 */
@@ -654,7 +667,7 @@ void BPF_STRUCT_OPS(rustland_disable, struct task_struct *p)
 {
         struct queued_task_ctx task = {};
 
-	dbg_msg("exiting: pid=%d", task.pid);
+	dbg_msg("exit: pid=%d (%s)", p->pid, p->comm);
 	get_task_info(&task, p, true);
 	if (bpf_map_push_elem(&queued, &task, 0)) {
 		/*
@@ -668,8 +681,7 @@ void BPF_STRUCT_OPS(rustland_disable, struct task_struct *p)
 		 * thing to avoid introducing extra overhead to free up
 		 * resources).
 		 */
-		dbg_msg("scheduler congested: pid=%d", task.pid);
-		__sync_fetch_and_add(&nr_sched_congested, 1);
+		sched_congested(p);
 		return;
 	}
 	__sync_fetch_and_add(&nr_queued, 1);
