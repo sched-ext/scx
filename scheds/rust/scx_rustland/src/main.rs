@@ -106,10 +106,10 @@ impl TaskInfoMap {
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd)]
-pub struct Task {
-    pub pid: i32,      // pid that uniquely identifies a task
-    pub cpu: i32,      // CPU where the task is running
-    pub vruntime: u64, // total vruntime (that determines the order how tasks are dispatched)
+struct Task {
+    pid: i32,      // pid that uniquely identifies a task
+    cpu: i32,      // CPU where the task is running
+    vruntime: u64, // total vruntime (that determines the order how tasks are dispatched)
 }
 
 // Make sure tasks are ordered by vruntime, if multiple tasks have the same vruntime order by pid.
@@ -148,8 +148,7 @@ impl TaskTree {
 
     // Add an item to the pool (item will be placed in the tree depending on its vruntime, items
     // with the same vruntime will be sorted by pid).
-    fn push(&mut self, pid: i32, cpu: i32, vruntime: u64) {
-        let task = Task { pid, cpu, vruntime };
+    fn push(&mut self, task: Task) {
         self.tasks.insert(task);
     }
 
@@ -166,6 +165,7 @@ struct Scheduler<'a> {
     task_map: TaskInfoMap, // map pids to the corresponding task information
     min_vruntime: u64,     // Keep track of the minimum vruntime across all tasks
     nr_cpus_online: i32,   // Amount of the available CPUs in the system
+    slice_ns: u64,         // Default time slice (in ns)
 }
 
 impl<'a> Scheduler<'a> {
@@ -173,6 +173,9 @@ impl<'a> Scheduler<'a> {
         // Low-level BPF connector.
         let bpf = BpfScheduler::init(opts.slice_us, opts.partial, opts.debug)?;
         info!("{} scheduler attached", SCHEDULER_NAME);
+
+        // Save the default time slice (in ns) in the scheduler class.
+        let slice_ns = opts.slice_us * 1000;
 
         // Scheduler task pool to sort tasks by vruntime.
         let task_pool = TaskTree::new();
@@ -196,6 +199,7 @@ impl<'a> Scheduler<'a> {
             task_map,
             min_vruntime,
             nr_cpus_online,
+            slice_ns,
         })
     }
 
@@ -213,7 +217,8 @@ impl<'a> Scheduler<'a> {
         idle_cpus
     }
 
-    // Update task's vruntime based on the information collected from the kernel.
+    // Update task's vruntime based on the information collected from the kernel and return the
+    // evaluated weighted time slice to the caller.
     //
     // This method implements the main task ordering logic of the scheduler.
     fn update_enqueued(
@@ -222,34 +227,39 @@ impl<'a> Scheduler<'a> {
         weight: u64,
         min_vruntime: u64,
         slice_ns: u64,
-    ) {
+    ) -> u64 {
         // Scale the maximum allowed time slice by a factor of 10 to increase the
         // range of allowed time delta and give a better chance to prioritize tasks
         // with shorter time delta / higher weight.
         let max_slice_ns = slice_ns * 10;
 
         // Evaluate last time slot used by the task, scaled by its priority (weight).
-        let mut delta = (sum_exec_runtime - task_info.sum_exec_runtime) * 100 / weight;
+        let mut slice = (sum_exec_runtime - task_info.sum_exec_runtime) * 100 / weight;
 
         // Account an extra (max_slice_ns / 2) to new tasks to avoid granting excessive priority
         // without understanding their nature. This allows to mitigate potential system starvation
         // caused by spawning a massive amount of tasks (e.g., fork-bomb attacks).
         if task_info.sum_exec_runtime == 0 {
-            delta += max_slice_ns / 2;
+            slice += max_slice_ns / 2;
         }
 
-        // Never account more than max_slice_ns, to prevent starving a task for too long in the
-        // scheduler task pool, but still give a range large enough to be able to prioritize
-        // tasks with short delta / higher weight.
-        task_info.vruntime += delta.min(max_slice_ns);
-
-        // Also make sure that the global vruntime is always progressing (at least by +1)
-        // during each scheduler run, to prevent excessive starvation of the other tasks
-        // sitting in the self.task_pool tree, waiting to be dispatched.
-        task_info.vruntime = task_info.vruntime.max(min_vruntime + 1);
+        // Make sure that the updated vruntime is in the range:
+        //
+        //   (min_vruntime, min_vruntime + max_slice_ns]
+        //
+        // In this way we ensure that global vruntime is always progressing during each scheduler
+        // run, preventing excessive starvation of the other tasks sitting in the self.task_pool
+        // tree.
+        //
+        // Moreover, limiting the accounted time slice to max_slice_ns, allows to prevent starving
+        // the current task for too long in the scheduler task pool.
+        task_info.vruntime = min_vruntime + slice.clamp(1, max_slice_ns);
 
         // Update total task cputime.
         task_info.sum_exec_runtime = sum_exec_runtime;
+
+        // Return the evaluated weighted time delta to the caller.
+        task_info.vruntime - min_vruntime
     }
 
     // Drain all the tasks from the queued list, update their vruntime (Self::update_enqueued()),
@@ -282,11 +292,15 @@ impl<'a> Scheduler<'a> {
                         task.sum_exec_runtime,
                         task.weight,
                         self.min_vruntime,
-                        self.bpf.skel.rodata().slice_ns,
+                        self.slice_ns,
                     );
 
                     // Insert task in the task pool (ordered by vruntime).
-                    self.task_pool.push(task.pid, task.cpu, task_info.vruntime);
+                    self.task_pool.push(Task {
+                        pid: task.pid,
+                        cpu: task.cpu,
+                        vruntime: task_info.vruntime,
+                    });
                 }
                 Ok(None) => {
                     // Reset nr_queued and update nr_scheduled, to notify the dispatcher that
@@ -341,7 +355,7 @@ impl<'a> Scheduler<'a> {
                              * Re-add the task to the dispatched list in case of failure and stop
                              * dispatching.
                              */
-                            self.task_pool.push(task.pid, task.cpu, task.vruntime);
+                            self.task_pool.push(task);
                             break;
                         }
                     }
