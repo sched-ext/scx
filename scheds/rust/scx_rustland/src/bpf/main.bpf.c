@@ -461,7 +461,7 @@ static void dispatch_user_scheduler(s32 cpu)
 		scx_bpf_error("Failed to find usersched task %d", usersched_pid);
 		return;
 	}
-	dispatch_task(p, cpu, SCX_ENQ_PREEMPT);
+	dispatch_task(p, cpu, 0);
 	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	bpf_task_release(p);
 }
