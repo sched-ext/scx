@@ -67,6 +67,18 @@ struct Opts {
     #[clap(short = 's', long, default_value = "20000")]
     slice_us: u64,
 
+    /// Time slice boost: increasing this value enhances performance of interactive applications
+    /// (gaming, multimedia, GUIs, etc.), but may lead to decreased responsiveness of other tasks
+    /// in the system; set to 0 for maximum responsiveness in newly created tasks (e.g., max
+    /// responsiveness of shell sessions).
+    ///
+    /// WARNING: setting a large value can make the scheduler quite unpredictable and you may
+    /// experience temporary system stalls (before hitting the sched-ext watchdog timeout).
+    ///
+    /// The default setting (no boost at all) prioritizes fairness and system stability.
+    #[clap(short = 'b', long, default_value = "1")]
+    slice_boost: u64,
+
     /// If specified, only tasks which have their scheduling policy set to
     /// SCHED_EXT using sched_setscheduler(2) are switched. Otherwise, all
     /// tasks are switched.
@@ -165,6 +177,7 @@ struct Scheduler<'a> {
     task_map: TaskInfoMap, // map pids to the corresponding task information
     min_vruntime: u64,     // Keep track of the minimum vruntime across all tasks
     slice_ns: u64,         // Default time slice (in ns)
+    slice_boost: u64,      // Slice booster
 }
 
 impl<'a> Scheduler<'a> {
@@ -175,6 +188,9 @@ impl<'a> Scheduler<'a> {
 
         // Save the default time slice (in ns) in the scheduler class.
         let slice_ns = opts.slice_us * 1000;
+
+        // Slice booster.
+        let slice_boost = opts.slice_boost;
 
         // Scheduler task pool to sort tasks by vruntime.
         let task_pool = TaskTree::new();
@@ -192,6 +208,7 @@ impl<'a> Scheduler<'a> {
             task_map,
             min_vruntime,
             slice_ns,
+            slice_boost,
         })
     }
 
@@ -219,8 +236,14 @@ impl<'a> Scheduler<'a> {
         weight: u64,
         min_vruntime: u64,
         slice_ns: u64,
+        slice_boost: u64,
     ) {
-        // Evaluate last time slot used by the task, scaled by its priority (weight).
+        // Determine if a task is new or old, based on their current runtime and previous runtime
+        // counters.
+        fn is_new_task(runtime_curr: u64, runtime_prev: u64) -> bool {
+            runtime_curr < runtime_prev || runtime_prev == 0
+        }
+        // Evaluate last time slot used by the task.
         //
         // NOTE: make sure to handle the case where the current sum_exec_runtime is less then the
         // previous sum_exec_runtime. This can happen, for example, when a new task is created via
@@ -230,10 +253,20 @@ impl<'a> Scheduler<'a> {
         // Consequently, the existing task_info slot is reused, containing the total run-time of
         // the previous task (likely exceeding the current sum_exec_runtime). In such cases, simply
         // use sum_exec_runtime as the time slice of the new task.
-        let slice = if sum_exec_runtime > task_info.sum_exec_runtime {
-            sum_exec_runtime - task_info.sum_exec_runtime
+        let slice = if is_new_task(sum_exec_runtime, task_info.sum_exec_runtime) {
+            // New task: check if we need to apply the time slice penalty.
+            if slice_boost != 1 {
+                // Assign to the new task an initial time slice of (slice_ns * slice_boost / 2)
+                // over a maximum allowed time slice of (slice_ns * slice_boost), that can be
+                // potentially reached applying the task's weight (see below).
+                slice_ns * slice_boost / 2
+            } else {
+                sum_exec_runtime
+            }
         } else {
-            sum_exec_runtime
+            // Old task: charge time slice normally.
+            sum_exec_runtime - task_info.sum_exec_runtime
+            // Scale the time slice by the task's priority (weight).
         } * 100
             / weight;
 
@@ -247,7 +280,13 @@ impl<'a> Scheduler<'a> {
         //
         // Moreover, limiting the accounted time slice to slice_ns, allows to prevent starving the
         // current task for too long in the scheduler task pool.
-        task_info.vruntime = min_vruntime + slice.clamp(1, slice_ns);
+        let max_slice_ns =
+            if slice_boost > 1 && is_new_task(sum_exec_runtime, task_info.sum_exec_runtime) {
+                slice_ns * slice_boost
+            } else {
+                slice_ns
+            };
+        task_info.vruntime = min_vruntime + slice.clamp(1, max_slice_ns);
 
         // Update total task cputime.
         task_info.sum_exec_runtime = sum_exec_runtime;
@@ -285,6 +324,7 @@ impl<'a> Scheduler<'a> {
                         task.weight,
                         self.min_vruntime,
                         slice_ns,
+                        self.slice_boost,
                     );
 
                     // Insert task in the task pool (ordered by vruntime).
