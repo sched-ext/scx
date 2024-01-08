@@ -220,10 +220,6 @@ impl<'a> Scheduler<'a> {
         min_vruntime: u64,
         slice_ns: u64,
     ) {
-        // Allow to scale the maximum time slice by a factor of 10 to increase the range of allowed
-        // time delta and give a better chance to prioritize tasks with higher weight.
-        let max_slice_ns = slice_ns * 10;
-
         // Evaluate last time slot used by the task, scaled by its priority (weight).
         //
         // NOTE: make sure to handle the case where the current sum_exec_runtime is less then the
@@ -243,15 +239,15 @@ impl<'a> Scheduler<'a> {
 
         // Make sure that the updated vruntime is in the range:
         //
-        //   (min_vruntime, min_vruntime + max_slice_ns]
+        //   (min_vruntime, min_vruntime + slice_ns]
         //
         // In this way we ensure that global vruntime is always progressing during each scheduler
         // run, preventing excessive starvation of the other tasks sitting in the self.task_pool
         // tree.
         //
-        // Moreover, limiting the accounted time slice to max_slice_ns, allows to prevent starving
-        // the current task for too long in the scheduler task pool.
-        task_info.vruntime = min_vruntime + slice.clamp(1, max_slice_ns);
+        // Moreover, limiting the accounted time slice to slice_ns, allows to prevent starving the
+        // current task for too long in the scheduler task pool.
+        task_info.vruntime = min_vruntime + slice.clamp(1, slice_ns);
 
         // Update total task cputime.
         task_info.sum_exec_runtime = sum_exec_runtime;
