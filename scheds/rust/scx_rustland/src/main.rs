@@ -164,7 +164,6 @@ struct Scheduler<'a> {
     task_pool: TaskTree,   // tasks ordered by vruntime
     task_map: TaskInfoMap, // map pids to the corresponding task information
     min_vruntime: u64,     // Keep track of the minimum vruntime across all tasks
-    nr_cpus_online: i32,   // Amount of the available CPUs in the system
     slice_ns: u64,         // Default time slice (in ns)
 }
 
@@ -186,19 +185,12 @@ impl<'a> Scheduler<'a> {
         // Initialize global minimum vruntime.
         let min_vruntime: u64 = 0;
 
-        // Initialize online CPUs counter.
-        //
-        // We should probably refresh this counter during the normal execution to support cpu
-        // hotplugging, but for now let's keep it simple and set this only at initialization).
-        let nr_cpus_online = libbpf_rs::num_possible_cpus().unwrap() as i32;
-
         // Return scheduler object.
         Ok(Self {
             bpf,
             task_pool,
             task_map,
             min_vruntime,
-            nr_cpus_online,
             slice_ns,
         })
     }
@@ -207,7 +199,7 @@ impl<'a> Scheduler<'a> {
     fn get_idle_cpus(&self) -> Vec<i32> {
         let mut idle_cpus = Vec::new();
 
-        for cpu in 0..self.nr_cpus_online {
+        for cpu in 0..self.bpf.get_nr_cpus() {
             let pid = self.bpf.get_cpu_pid(cpu);
             if pid == 0 {
                 idle_cpus.push(cpu);
@@ -327,7 +319,7 @@ impl<'a> Scheduler<'a> {
         let nr_queued = *self.bpf.nr_queued_mut();
         let nr_scheduled = *self.bpf.nr_scheduled_mut();
         let nr_waiting = nr_queued + nr_scheduled;
-        let nr_cpus = self.nr_cpus_online as u64;
+        let nr_cpus = self.bpf.get_nr_cpus() as u64;
 
         // Scale time slice, but never scale below 1 ms.
         let scaling = nr_waiting / nr_cpus + 1;
@@ -475,7 +467,7 @@ impl<'a> Scheduler<'a> {
             Err(_) => -1,
         };
         info!("Running tasks:");
-        for cpu in 0..self.nr_cpus_online {
+        for cpu in 0..self.bpf.get_nr_cpus() {
             let pid = if cpu == sched_cpu {
                 "[self]".to_string()
             } else {

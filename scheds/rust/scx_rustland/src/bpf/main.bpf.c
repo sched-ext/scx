@@ -44,7 +44,7 @@ char _license[] SEC("license") = "GPL";
 #define MAX_CPUS 1024
 
 /* !0 for veristat, set during init */
-const volatile u32 num_possible_cpus = 8;
+const volatile s32 num_possible_cpus = 8;
 
 /*
  * Exit info (passed to the user-space counterpart).
