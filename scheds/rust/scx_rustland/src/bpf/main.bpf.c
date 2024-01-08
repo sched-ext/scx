@@ -323,7 +323,7 @@ static s32 get_task_cpu(struct task_struct *p, s32 cpu)
 	 * Return -ENOENT if no CPU is available.
 	 */
 	cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
-	return cpu < num_possible_cpus ? : -ENOENT;
+	return cpu < num_possible_cpus ? cpu : -ENOENT;
 }
 
 /*
