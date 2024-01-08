@@ -44,7 +44,7 @@ char _license[] SEC("license") = "GPL";
 #define MAX_CPUS 1024
 
 /* !0 for veristat, set during init */
-const volatile u32 num_possible_cpus = 8;
+const volatile s32 num_possible_cpus = 8;
 
 /*
  * Exit info (passed to the user-space counterpart).
@@ -323,7 +323,7 @@ static s32 get_task_cpu(struct task_struct *p, s32 cpu)
 	 * Return -ENOENT if no CPU is available.
 	 */
 	cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
-	return cpu < num_possible_cpus ? : -ENOENT;
+	return cpu < num_possible_cpus ? cpu : -ENOENT;
 }
 
 /*
