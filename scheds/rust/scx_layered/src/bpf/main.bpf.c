@@ -745,8 +745,8 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 		bpf_cpumask_subset((const struct cpumask *)all_cpumask, cpumask);
 }
 
-s32 BPF_STRUCT_OPS(layered_prep_enable, struct task_struct *p,
-		   struct scx_enable_args *args)
+s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
+		   struct scx_init_task_args *args)
 {
 	struct task_ctx tctx_init = {
 		.pid = p->pid,
@@ -805,14 +805,8 @@ s32 BPF_STRUCT_OPS(layered_prep_enable, struct task_struct *p,
 	return 0;
 }
 
-void BPF_STRUCT_OPS(layered_cancel_enable, struct task_struct *p)
-{
-	s32 pid = p->pid;
-
-	bpf_map_delete_elem(&task_ctxs, &pid);
-}
-
-void BPF_STRUCT_OPS(layered_disable, struct task_struct *p)
+void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
+		    struct scx_exit_task_args *args)
 {
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
@@ -977,9 +971,8 @@ struct sched_ext_ops layered = {
 	.quiescent		= (void *)layered_quiescent,
 	.set_weight		= (void *)layered_set_weight,
 	.set_cpumask		= (void *)layered_set_cpumask,
-	.prep_enable		= (void *)layered_prep_enable,
-	.cancel_enable		= (void *)layered_cancel_enable,
-	.disable		= (void *)layered_disable,
+	.init_task		= (void *)layered_init_task,
+	.exit_task		= (void *)layered_exit_task,
 	.init			= (void *)layered_init,
 	.exit			= (void *)layered_exit,
 	.name			= "layered",

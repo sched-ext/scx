@@ -1,1 +1,1 @@
-vmlinux-v6.6-g597552f5447a.h
+vmlinux-v6.7-gc7f9b2d7de84.h

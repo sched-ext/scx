@@ -51,19 +51,22 @@ static inline bool vtime_before(u64 a, u64 b)
 	return (s64)(a - b) < 0;
 }
 
-void BPF_STRUCT_OPS(simple_enqueue, struct task_struct *p, u64 enq_flags)
+s32 BPF_STRUCT_OPS(simple_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
-	/*
-	 * If scx_select_cpu_dfl() is setting %SCX_ENQ_LOCAL, it indicates that
-	 * running @p on its CPU directly shouldn't affect fairness. Just queue
-	 * it on the local FIFO.
-	 */
-	if (enq_flags & SCX_ENQ_LOCAL) {
+	bool is_idle = false;
+	s32 cpu;
+
+	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+	if (is_idle) {
 		stat_inc(0);	/* count local queueing */
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
-		return;
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
 	}
 
+	return cpu;
+}
+
+void BPF_STRUCT_OPS(simple_enqueue, struct task_struct *p, u64 enq_flags)
+{
 	stat_inc(1);	/* count global queueing */
 
 	if (fifo_sched) {
@@ -120,8 +123,7 @@ void BPF_STRUCT_OPS(simple_stopping, struct task_struct *p, bool runnable)
 	p->scx.dsq_vtime += (SCX_SLICE_DFL - p->scx.slice) * 100 / p->scx.weight;
 }
 
-void BPF_STRUCT_OPS(simple_enable, struct task_struct *p,
-		    struct scx_enable_args *args)
+void BPF_STRUCT_OPS(simple_enable, struct task_struct *p)
 {
 	p->scx.dsq_vtime = vtime_now;
 }
@@ -141,6 +143,7 @@ void BPF_STRUCT_OPS(simple_exit, struct scx_exit_info *ei)
 
 SEC(".struct_ops.link")
 struct sched_ext_ops simple_ops = {
+	.select_cpu		= (void *)simple_select_cpu,
 	.enqueue		= (void *)simple_enqueue,
 	.dispatch		= (void *)simple_dispatch,
 	.running		= (void *)simple_running,
