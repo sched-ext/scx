@@ -11,8 +11,8 @@ jobs:
       - run: echo 'debconf debconf/frontend select Noninteractive' | sudo debconf-set-selections
 
       # Add sched-ext external ppa to get the latest sched-ext kernel
-      - run: sudo add-apt-repository -n -y ppa:arighi/sched-ext
-      - run: sudo sed -i s/jammy/noble/ /etc/apt/sources.list.d/arighi-ubuntu-sched-ext-jammy.list
+      - run: sudo add-apt-repository -n -y ppa:arighi/sched-ext-unstable
+      - run: sudo sed -i s/jammy/noble/ /etc/apt/sources.list.d/arighi-ubuntu-sched-ext-unstable-jammy.list
 
       # Refresh packages list
       - run: sudo apt update
@@ -52,7 +52,7 @@ jobs:
       - run: pip install virtme-ng
 
       # Download a sched-ext enabled kernel
-      - run: apt download linux-image-unsigned-6.7.0-3-generic linux-modules-6.7.0-3-generic
+      - run: apt download linux-image-unsigned-6.7.0-4-generic linux-modules-6.7.0-4-generic
       - run: mkdir -p kernel
       - run: for f in *.deb; do dpkg -x $f kernel; done
 
