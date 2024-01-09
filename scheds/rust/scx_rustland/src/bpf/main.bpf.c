@@ -289,7 +289,7 @@ static bool is_usersched_needed(void)
 static void dispatch_local(struct task_struct *p, u64 enq_flags)
 {
 	dbg_msg("dispatch: pid=%d (%s) cpu=local", p->pid, p->comm);
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags | SCX_ENQ_LOCAL);
+	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
 }
 
 /*
@@ -355,8 +355,7 @@ static void dispatch_task(struct task_struct *p, s32 cpu, u64 enq_flags)
 		return;
 	}
 	dbg_msg("dispatch: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, slice,
-			 enq_flags | SCX_ENQ_LOCAL);
+	scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, slice, enq_flags);
 }
 
 /*
@@ -654,8 +653,8 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
  * Allocate and initialize all the internal structures for the task (this
  * function is allowed to block, so it can be used to preallocate memory).
  */
-s32 BPF_STRUCT_OPS(rustland_prep_enable, struct task_struct *p,
-		   struct scx_enable_args *args)
+s32 BPF_STRUCT_OPS(rustland_init_task, struct task_struct *p,
+		   struct scx_init_task_args *args)
 {
 	/* Allocate task's local storage */
 	if (bpf_task_storage_get(&task_ctx_stor, p, 0,
@@ -671,7 +670,8 @@ s32 BPF_STRUCT_OPS(rustland_prep_enable, struct task_struct *p,
  * Notify the user-space scheduler that we can free up all the allocated
  * resources associated to this task.
  */
-void BPF_STRUCT_OPS(rustland_disable, struct task_struct *p)
+void BPF_STRUCT_OPS(rustland_exit_task, struct task_struct *p,
+		    struct scx_exit_task_args *args)
 {
         struct queued_task_ctx task = {};
 
@@ -777,8 +777,8 @@ struct sched_ext_ops rustland = {
 	.running		= (void *)rustland_running,
 	.stopping		= (void *)rustland_stopping,
 	.update_idle		= (void *)rustland_update_idle,
-	.prep_enable		= (void *)rustland_prep_enable,
-	.disable		= (void *)rustland_disable,
+	.init_task		= (void *)rustland_init_task,
+	.exit_task		= (void *)rustland_exit_task,
 	.init			= (void *)rustland_init,
 	.exit			= (void *)rustland_exit,
 	.flags			= SCX_OPS_ENQ_LAST,

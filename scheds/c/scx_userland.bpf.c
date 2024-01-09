@@ -300,8 +300,8 @@ void BPF_STRUCT_OPS(userland_update_idle, s32 cpu, bool idle)
 	}
 }
 
-s32 BPF_STRUCT_OPS(userland_prep_enable, struct task_struct *p,
-		   struct scx_enable_args *args)
+s32 BPF_STRUCT_OPS(userland_init_task, struct task_struct *p,
+		   struct scx_init_task_args *args)
 {
 	if (bpf_task_storage_get(&task_ctx_stor, p, 0,
 				 BPF_LOCAL_STORAGE_GET_F_CREATE))
@@ -340,7 +340,7 @@ struct sched_ext_ops userland_ops = {
 	.enqueue		= (void *)userland_enqueue,
 	.dispatch		= (void *)userland_dispatch,
 	.update_idle		= (void *)userland_update_idle,
-	.prep_enable		= (void *)userland_prep_enable,
+	.init_task		= (void *)userland_init_task,
 	.init			= (void *)userland_init,
 	.exit			= (void *)userland_exit,
 	.flags			= SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,

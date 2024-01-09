@@ -92,9 +92,6 @@ struct task_ctx {
 	 * if the task should attach to the core that it will execute on next.
 	 */
 	s32 prev_cpu;
-
-	/* Dispatch directly to local_dsq */
-	bool force_local;
 };
 
 struct {
@@ -231,8 +228,6 @@ s32 BPF_STRUCT_OPS(nest_select_cpu, struct task_struct *p, s32 prev_cpu,
 		return -ENOENT;
 	}
 
-	// Unset below if we can't find a core to migrate to.
-	tctx->force_local = true;
 	tctx->prev_cpu = prev_cpu;
 
 	bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(primary));
@@ -337,7 +332,6 @@ s32 BPF_STRUCT_OPS(nest_select_cpu, struct task_struct *p, s32 prev_cpu,
 	}
 
 	bpf_rcu_read_unlock();
-	tctx->force_local = false;
 	return prev_cpu;
 
 promote_to_primary:
@@ -374,6 +368,7 @@ migrate_primary:
 	}
 	bpf_rcu_read_unlock();
 	update_attached(tctx, prev_cpu, cpu);
+	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
 	return cpu;
 }
 
@@ -381,20 +376,10 @@ void BPF_STRUCT_OPS(nest_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
 	u64 vtime = p->scx.dsq_vtime;
-	s32 cpu = bpf_get_smp_processor_id();
 
 	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!tctx) {
 		scx_bpf_error("Unable to find task ctx");
-		return;
-	}
-
-	if (tctx->force_local || (enq_flags & SCX_ENQ_LOCAL)) {
-		tctx->force_local = false;
-		if (enq_flags & SCX_ENQ_LOCAL)
-			update_attached(tctx, tctx->prev_cpu, cpu);
-
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
 		return;
 	}
 
@@ -495,8 +480,8 @@ void BPF_STRUCT_OPS(nest_stopping, struct task_struct *p, bool runnable)
 	p->scx.dsq_vtime += (slice_ns - p->scx.slice) * 100 / p->scx.weight;
 }
 
-s32 BPF_STRUCT_OPS(nest_prep_enable, struct task_struct *p,
-		   struct scx_enable_args *args)
+s32 BPF_STRUCT_OPS(nest_init_task, struct task_struct *p,
+		   struct scx_init_task_args *args)
 {
 	struct task_ctx *tctx;
 	struct bpf_cpumask *cpumask;
@@ -524,8 +509,7 @@ s32 BPF_STRUCT_OPS(nest_prep_enable, struct task_struct *p,
 	return 0;
 }
 
-void BPF_STRUCT_OPS(nest_enable, struct task_struct *p,
-		    struct scx_enable_args *args)
+void BPF_STRUCT_OPS(nest_enable, struct task_struct *p)
 {
 	p->scx.dsq_vtime = vtime_now;
 }
@@ -682,7 +666,7 @@ struct sched_ext_ops nest_ops = {
 	.dispatch		= (void *)nest_dispatch,
 	.running		= (void *)nest_running,
 	.stopping		= (void *)nest_stopping,
-	.prep_enable		= (void *)nest_prep_enable,
+	.init_task		= (void *)nest_init_task,
 	.enable			= (void *)nest_enable,
 	.init			= (void *)nest_init,
 	.exit			= (void *)nest_exit,

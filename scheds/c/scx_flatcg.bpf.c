@@ -302,16 +302,18 @@ static void cgrp_enqueued(struct cgroup *cgrp, struct fcg_cgrp_ctx *cgc)
 	bpf_spin_unlock(&cgv_tree_lock);
 }
 
-void BPF_STRUCT_OPS(fcg_enqueue, struct task_struct *p, u64 enq_flags)
+s32 BPF_STRUCT_OPS(fcg_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	struct fcg_task_ctx *taskc;
-	struct cgroup *cgrp;
-	struct fcg_cgrp_ctx *cgc;
+	bool is_idle = false;
+	s32 cpu;
+
+	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 
 	taskc = bpf_task_storage_get(&task_ctx, p, 0, 0);
 	if (!taskc) {
 		scx_bpf_error("task_ctx lookup failed");
-		return;
+		return cpu;
 	}
 
 	/*
@@ -321,7 +323,7 @@ void BPF_STRUCT_OPS(fcg_enqueue, struct task_struct *p, u64 enq_flags)
 	 * affinities so that we don't have to worry about per-cgroup dq's
 	 * containing tasks that can't be executed from some CPUs.
 	 */
-	if ((enq_flags & SCX_ENQ_LOCAL) || p->nr_cpus_allowed != nr_cpus) {
+	if (is_idle || p->nr_cpus_allowed != nr_cpus) {
 		/*
 		 * Tell fcg_stopping() that this bypassed the regular scheduling
 		 * path and should be force charged to the cgroup. 0 is used to
@@ -338,14 +340,28 @@ void BPF_STRUCT_OPS(fcg_enqueue, struct task_struct *p, u64 enq_flags)
 		 * implement per-cgroup fallback dq's instead so that we have
 		 * more control over when tasks with custom cpumask get issued.
 		 */
-		if ((enq_flags & SCX_ENQ_LOCAL) ||
+		if (is_idle ||
 		    (p->nr_cpus_allowed == 1 && (p->flags & PF_KTHREAD))) {
 			stat_inc(FCG_STAT_LOCAL);
-			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
+			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
 		} else {
 			stat_inc(FCG_STAT_GLOBAL);
-			scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, enq_flags);
+			scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
 		}
+	}
+
+	return cpu;
+}
+
+void BPF_STRUCT_OPS(fcg_enqueue, struct task_struct *p, u64 enq_flags)
+{
+	struct fcg_task_ctx *taskc;
+	struct cgroup *cgrp;
+	struct fcg_cgrp_ctx *cgc;
+
+	taskc = bpf_task_storage_get(&task_ctx, p, 0, 0);
+	if (!taskc) {
+		scx_bpf_error("task_ctx lookup failed");
 		return;
 	}
 
@@ -756,8 +772,8 @@ pick_next_cgroup:
 	}
 }
 
-s32 BPF_STRUCT_OPS(fcg_prep_enable, struct task_struct *p,
-		   struct scx_enable_args *args)
+s32 BPF_STRUCT_OPS(fcg_init_task, struct task_struct *p,
+		   struct scx_init_task_args *args)
 {
 	struct fcg_task_ctx *taskc;
 	struct fcg_cgrp_ctx *cgc;
@@ -893,13 +909,14 @@ void BPF_STRUCT_OPS(fcg_exit, struct scx_exit_info *ei)
 
 SEC(".struct_ops.link")
 struct sched_ext_ops flatcg_ops = {
+	.select_cpu		= (void *)fcg_select_cpu,
 	.enqueue		= (void *)fcg_enqueue,
 	.dispatch		= (void *)fcg_dispatch,
 	.runnable		= (void *)fcg_runnable,
 	.running		= (void *)fcg_running,
 	.stopping		= (void *)fcg_stopping,
 	.quiescent		= (void *)fcg_quiescent,
-	.prep_enable		= (void *)fcg_prep_enable,
+	.init_task		= (void *)fcg_init_task,
 	.cgroup_set_weight	= (void *)fcg_cgroup_set_weight,
 	.cgroup_init		= (void *)fcg_cgroup_init,
 	.cgroup_exit		= (void *)fcg_cgroup_exit,

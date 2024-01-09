@@ -354,8 +354,8 @@ void BPF_STRUCT_OPS(qmap_cpu_release, s32 cpu, struct scx_cpu_release_args *args
 		__sync_fetch_and_add(&nr_reenqueued, cnt);
 }
 
-s32 BPF_STRUCT_OPS(qmap_prep_enable, struct task_struct *p,
-		   struct scx_enable_args *args)
+s32 BPF_STRUCT_OPS(qmap_init_task, struct task_struct *p,
+		   struct scx_init_task_args *args)
 {
 	if (p->tgid == disallow_tgid)
 		p->scx.disallow = true;
@@ -391,7 +391,7 @@ struct sched_ext_ops qmap_ops = {
 	.dispatch		= (void *)qmap_dispatch,
 	.core_sched_before	= (void *)qmap_core_sched_before,
 	.cpu_release		= (void *)qmap_cpu_release,
-	.prep_enable		= (void *)qmap_prep_enable,
+	.init_task		= (void *)qmap_init_task,
 	.init			= (void *)qmap_init,
 	.exit			= (void *)qmap_exit,
 	.flags			= SCX_OPS_ENQ_LAST,
