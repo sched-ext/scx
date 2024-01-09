@@ -1,6 +1,6 @@
 [package]
 name = "scx_layered"
-version = "0.0.3"
+version = "0.0.4"
 authors = ["Tejun Heo <htejun@meta.com>", "Meta"]
 edition = "2021"
 description = "Userspace scheduling with BPF for Ads"
@@ -16,13 +16,13 @@ lazy_static = "1.4"
 libbpf-rs = "0.22"
 libc = "0.2"
 log = "0.4"
-scx_utils = { path = "../../../rust/scx_utils", version = "0.4" }
+scx_utils = { path = "../../../rust/scx_utils", version = "0.5" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 simplelog = "0.12"
 
 [build-dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "0.4" }
+scx_utils = { path = "../../../rust/scx_utils", version = "0.5" }
 
 [features]
 enable_backtrace = []
