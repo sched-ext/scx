@@ -312,14 +312,12 @@ impl<'a> Scheduler<'a> {
 
     // Dynamically adjust the time slice based on the amount of waiting tasks.
     fn scale_slice_ns(&mut self) {
-        let nr_queued = *self.bpf.nr_queued_mut();
-        let nr_scheduled = *self.bpf.nr_scheduled_mut();
-        let nr_waiting = nr_queued + nr_scheduled;
-        let nr_cpus = self.bpf.get_nr_cpus() as u64;
+        let nr_scheduled = self.task_pool.tasks.len() as u64;
+        let slice_us_max = self.slice_ns / 1000;
 
-        // Scale time slice, but never scale below 1 ms.
-        let scaling = nr_waiting / nr_cpus + 1;
-        let slice_us = (self.slice_ns / scaling / 1000).max(1000);
+        // Scale time slice as a function of nr_scheduled, but never scale below 1 ms.
+        let scaling = (nr_scheduled / 2).max(1);
+        let slice_us = (slice_us_max / scaling).max(1000);
 
         // Apply new scaling.
         self.bpf.set_effective_slice_us(slice_us);
@@ -328,9 +326,6 @@ impl<'a> Scheduler<'a> {
     // Dispatch tasks from the task pool in order (sending them to the BPF dispatcher).
     fn dispatch_tasks(&mut self) {
         let mut idle_cpus = self.get_idle_cpus();
-
-        // Adjust the dynamic time slice immediately before dispatching the tasks.
-        self.scale_slice_ns();
 
         // Dispatch only a batch of tasks equal to the amount of idle CPUs in the system.
         //
@@ -384,6 +379,9 @@ impl<'a> Scheduler<'a> {
     fn schedule(&mut self) {
         self.drain_queued_tasks();
         self.dispatch_tasks();
+
+        // Adjust the dynamic time slice immediately after dispatching the tasks.
+        self.scale_slice_ns();
 
         // Yield to avoid using too much CPU from the scheduler itself.
         thread::yield_now();
