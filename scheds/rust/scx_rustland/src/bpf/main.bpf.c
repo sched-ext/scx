@@ -130,31 +130,6 @@ struct {
 } dispatched SEC(".maps");
 
 /*
- * Per-task local storage.
- *
- * This contain all the per-task information used internally by the BPF code.
- */
-struct task_ctx {
-	/*
-	 * Set this flag to dispatch directly from .enqueueu() to the local DSQ
-	 * of the cpu where the task is going to run (bypassing the scheduler).
-	 *
-	 * This can be used for example when the selected cpu is idle; in this
-	 * case we can simply dispatch the task on the same target cpu and
-	 * avoid unnecessary calls to the user-space scheduler.
-	 */
-	bool force_local;
-};
-
-/* Map that contains task-local storage. */
-struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct task_ctx);
-} task_ctx_stor SEC(".maps");
-
-/*
  * Heartbeat timer used to periodically trigger the check to run the user-space
  * scheduler.
  *
@@ -375,66 +350,23 @@ static void dispatch_task(struct task_struct *p, s32 cpu, u64 enq_flags)
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	struct task_ctx *tctx;
-
-	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (!tctx) {
-		scx_bpf_error("Failed to look up task-local storage for %s", p->comm);
-		return -ESRCH;
-	}
 	/*
 	 * Always try to keep the tasks on the same CPU (unless the user-space
 	 * scheduler decides otherwise).
 	 *
 	 * Check if the previously used CPU is idle, in this case we can
-	 * dispatch directly from .enqueue(), bypassing the user-space
-	 * scheduler.
-	 */
-	tctx->force_local = get_cpu_owner(prev_cpu) == 0;
-
-	return prev_cpu;
-}
-
-/*
- * Return true if the selected CPU for the task is immediately available
- * (user-space scheduler not required), false otherwise (user-space scheduler
- * required).
- *
- * To determine if the CPU is available we rely on tctx->force_idle (set in
- * .select_cpu()), since this function may be called on a different CPU (so we
- * cannot check the current CPU directly).
- */
-static bool is_task_cpu_available(struct task_struct *p, u64 enq_flags)
-{
-	struct task_ctx *tctx;
-
-	/*
-	 * Always dispatch per-CPU kthreads on the same CPU, bypassing the
-	 * user-space scheduler (in this way we can to prioritize critical
-	 * kernel threads that may potentially slow down the entire system if
-	 * they are blocked for too long).
-	 */
-	if (is_kthread(p) && p->nr_cpus_allowed == 1)
-		return true;
-
-	/*
-	 * Do not bypass the user-space scheduler if there are pending
-	 * activity, otherwise, we may risk disrupting the scheduler's
+	 * dispatch directly here, bypassing the user-space scheduler.
+	 *
+	 * However, do not bypass the user-space scheduler if there are pending
+	 * activities, otherwise, we may risk disrupting the scheduler's
 	 * decisions and negatively affecting the overall system performance.
 	 */
-	if (is_usersched_needed())
-		return false;
-
-	/*
-	 * For regular tasks always rely on force_local to determine if we can
-	 * bypass the scheduler.
-	 */
-	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (!tctx) {
-		scx_bpf_error("Failed to lookup task ctx for %s", p->comm);
-		return false;
+	if (!is_usersched_needed() && !get_cpu_owner(prev_cpu)) {
+		dispatch_local(p, 0);
+		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	}
-	return tctx->force_local;
+
+	return prev_cpu;
 }
 
 /*
@@ -484,10 +416,12 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Directly dispatch the task to the local DSQ if the selected task's
-	 * CPU is available (no scheduling decision required).
+	 * Always dispatch per-CPU kthreads on the same CPU, bypassing the
+	 * user-space scheduler (in this way we can to prioritize critical
+	 * kernel threads that may potentially slow down the entire system if
+	 * they are blocked for too long).
 	 */
-	if (is_task_cpu_available(p, enq_flags)) {
+	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
 		dispatch_local(p, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
@@ -648,23 +582,6 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 }
 
 /*
- * A new task @p is being created.
- *
- * Allocate and initialize all the internal structures for the task (this
- * function is allowed to block, so it can be used to preallocate memory).
- */
-s32 BPF_STRUCT_OPS(rustland_init_task, struct task_struct *p,
-		   struct scx_init_task_args *args)
-{
-	/* Allocate task's local storage */
-	if (bpf_task_storage_get(&task_ctx_stor, p, 0,
-				 BPF_LOCAL_STORAGE_GET_F_CREATE))
-		return 0;
-	else
-		return -ENOMEM;
-}
-
-/*
  * Task @p is exiting.
  *
  * Notify the user-space scheduler that we can free up all the allocated
@@ -777,7 +694,6 @@ struct sched_ext_ops rustland = {
 	.running		= (void *)rustland_running,
 	.stopping		= (void *)rustland_stopping,
 	.update_idle		= (void *)rustland_update_idle,
-	.init_task		= (void *)rustland_init_task,
 	.exit_task		= (void *)rustland_exit_task,
 	.init			= (void *)rustland_init,
 	.exit			= (void *)rustland_exit,

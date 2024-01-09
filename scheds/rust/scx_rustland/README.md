@@ -35,3 +35,18 @@ seamless integration with sophisticated libraries, tracing tools, external
 services (e.g., AI), etc. Hence, there might be situations where the benefits
 outweigh the overhead, justifying the use of this scheduler in a production
 environment.
+
+## Live demo
+
+A live demo of scx_rustland in action can be found here:
+[Demo](https://www.youtube.com/watch?v=oCfVbz9jvVQ).
+
+For this demo the scheduler includes an extra patch to impose a "time slice
+penalty" on new short-lived tasks. While this approach might not be suitable
+for general usage, it can yield significant advantages in this specific
+scenario.
+
+The key takeaway is to demonstrate the ease and safety of conducting
+experiments like this, as we operate in user-space, and we can accomplish
+everything simply by modifying the Rust code, that is completely abstracted
+from the underlying BPF/kernel internal details.
