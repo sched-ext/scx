@@ -696,6 +696,7 @@ out_stash:
 		bpf_spin_lock(&cgv_tree_lock);
 		bpf_rbtree_add(&cgv_tree, &cgv_node->rb_node, cgv_node_less);
 		bpf_spin_unlock(&cgv_tree_lock);
+		stat_inc(FCG_STAT_PNC_RACE);
 	} else {
 		cgv_node = bpf_kptr_xchg(&stash->node, cgv_node);
 		if (cgv_node) {
@@ -717,6 +718,7 @@ void BPF_STRUCT_OPS(fcg_dispatch, s32 cpu, struct task_struct *prev)
 	struct fcg_cgrp_ctx *cgc;
 	struct cgroup *cgrp;
 	u64 now = bpf_ktime_get_ns();
+	bool picked_next = false;
 
 	cpuc = find_cpu_ctx();
 	if (!cpuc)
@@ -772,9 +774,20 @@ pick_next_cgroup:
 	}
 
 	bpf_repeat(CGROUP_MAX_RETRIES) {
-		if (try_pick_next_cgroup(&cpuc->cur_cgid))
+		if (try_pick_next_cgroup(&cpuc->cur_cgid)) {
+			picked_next = true;
 			break;
+		}
 	}
+
+	/*
+	 * This only happens if try_pick_next_cgroup() races against enqueue
+	 * path for more than CGROUP_MAX_RETRIES times, which is extremely
+	 * unlikely and likely indicates an underlying bug. There shouldn't be
+	 * any stall risk as the race is against enqueue.
+	 */
+	if (!picked_next)
+		stat_inc(FCG_STAT_PNC_FAIL);
 }
 
 s32 BPF_STRUCT_OPS(fcg_init_task, struct task_struct *p,

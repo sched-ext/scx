@@ -186,29 +186,31 @@ int main(int argc, char **argv)
 
 		printf("\n[SEQ %6lu cpu=%5.1lf hweight_gen=%" PRIu64 "]\n",
 		       seq++, cpu_util * 100.0, skel->data->hweight_gen);
-		printf("       act:%6llu  deact:%6llu local:%6llu global:%6llu\n",
+		printf("       act:%6llu  deact:%6llu global:%6llu local:%6llu\n",
 		       stats[FCG_STAT_ACT],
 		       stats[FCG_STAT_DEACT],
-		       stats[FCG_STAT_LOCAL],
-		       stats[FCG_STAT_GLOBAL]);
-		printf("HWT   skip:%6llu   race:%6llu cache:%6llu update:%6llu\n",
-		       stats[FCG_STAT_HWT_SKIP],
-		       stats[FCG_STAT_HWT_RACE],
+		       stats[FCG_STAT_GLOBAL],
+		       stats[FCG_STAT_LOCAL]);
+		printf("HWT  cache:%6llu update:%6llu   skip:%6llu  race:%6llu\n",
 		       stats[FCG_STAT_HWT_CACHE],
-		       stats[FCG_STAT_HWT_UPDATES]);
+		       stats[FCG_STAT_HWT_UPDATES],
+		       stats[FCG_STAT_HWT_SKIP],
+		       stats[FCG_STAT_HWT_RACE]);
 		printf("ENQ   skip:%6llu   race:%6llu\n",
 		       stats[FCG_STAT_ENQ_SKIP],
 		       stats[FCG_STAT_ENQ_RACE]);
-		printf("CNS   keep:%6llu expire:%6llu empty:%6llu   gone:%6llu\n",
+		printf("CNS   keep:%6llu expire:%6llu  empty:%6llu  gone:%6llu\n",
 		       stats[FCG_STAT_CNS_KEEP],
 		       stats[FCG_STAT_CNS_EXPIRE],
 		       stats[FCG_STAT_CNS_EMPTY],
 		       stats[FCG_STAT_CNS_GONE]);
-		printf("PNC nocgrp:%6llu   next:%6llu empty:%6llu   gone:%6llu\n",
-		       stats[FCG_STAT_PNC_NO_CGRP],
+		printf("PNC   next:%6llu  empty:%6llu nocgrp:%6llu  gone:%6llu race:%6llu fail:%6llu\n",
 		       stats[FCG_STAT_PNC_NEXT],
 		       stats[FCG_STAT_PNC_EMPTY],
-		       stats[FCG_STAT_PNC_GONE]);
+		       stats[FCG_STAT_PNC_NO_CGRP],
+		       stats[FCG_STAT_PNC_GONE],
+		       stats[FCG_STAT_PNC_RACE],
+		       stats[FCG_STAT_PNC_FAIL]);
 		printf("BAD remove:%6llu\n",
 		       acc_stats[FCG_STAT_BAD_REMOVAL]);
 		fflush(stdout);
