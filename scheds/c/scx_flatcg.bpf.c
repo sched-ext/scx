@@ -307,6 +307,17 @@ static void cgrp_enqueued(struct cgroup *cgrp, struct fcg_cgrp_ctx *cgc)
 	bpf_spin_unlock(&cgv_tree_lock);
 }
 
+static void set_bypassed_at(struct task_struct *p, struct fcg_task_ctx *taskc)
+{
+	/*
+	 * Tell fcg_stopping() that this bypassed the regular scheduling path
+	 * and should be force charged to the cgroup. 0 is used to indicate that
+	 * the task isn't bypassing, so if the current runtime is 0, go back by
+	 * one nanosecond.
+	 */
+	taskc->bypassed_at = p->se.sum_exec_runtime ?: (u64)-1;
+}
+
 s32 BPF_STRUCT_OPS(fcg_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	struct fcg_task_ctx *taskc;
@@ -324,35 +335,12 @@ s32 BPF_STRUCT_OPS(fcg_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake
 	/*
 	 * If select_cpu_dfl() is recommending local enqueue, the target CPU is
 	 * idle. Follow it and charge the cgroup later in fcg_stopping() after
-	 * the fact. Use the same mechanism to deal with tasks with custom
-	 * affinities so that we don't have to worry about per-cgroup dq's
-	 * containing tasks that can't be executed from some CPUs.
+	 * the fact.
 	 */
-	if (is_idle || p->nr_cpus_allowed != nr_cpus) {
-		/*
-		 * Tell fcg_stopping() that this bypassed the regular scheduling
-		 * path and should be force charged to the cgroup. 0 is used to
-		 * indicate that the task isn't bypassing, so if the current
-		 * runtime is 0, go back by one nanosecond.
-		 */
-		taskc->bypassed_at = p->se.sum_exec_runtime ?: (u64)-1;
-
-		/*
-		 * The global dq is deprioritized as we don't want to let tasks
-		 * to boost themselves by constraining its cpumask. The
-		 * deprioritization is rather severe, so let's not apply that to
-		 * per-cpu kernel threads. This is ham-fisted. We probably wanna
-		 * implement per-cgroup fallback dq's instead so that we have
-		 * more control over when tasks with custom cpumask get issued.
-		 */
-		if (is_idle ||
-		    (p->nr_cpus_allowed == 1 && (p->flags & PF_KTHREAD))) {
-			stat_inc(FCG_STAT_LOCAL);
-			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
-		} else {
-			stat_inc(FCG_STAT_GLOBAL);
-			scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
-		}
+	if (is_idle) {
+		set_bypassed_at(p, taskc);
+		stat_inc(FCG_STAT_LOCAL);
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
 	}
 
 	return cpu;
@@ -367,6 +355,32 @@ void BPF_STRUCT_OPS(fcg_enqueue, struct task_struct *p, u64 enq_flags)
 	taskc = bpf_task_storage_get(&task_ctx, p, 0, 0);
 	if (!taskc) {
 		scx_bpf_error("task_ctx lookup failed");
+		return;
+	}
+
+	/*
+	 * Use the direct dispatching and force charging to deal with tasks with
+	 * custom affinities so that we don't have to worry about per-cgroup
+	 * dq's containing tasks that can't be executed from some CPUs.
+	 */
+	if (p->nr_cpus_allowed != nr_cpus) {
+		set_bypassed_at(p, taskc);
+
+		/*
+		 * The global dq is deprioritized as we don't want to let tasks
+		 * to boost themselves by constraining its cpumask. The
+		 * deprioritization is rather severe, so let's not apply that to
+		 * per-cpu kernel threads. This is ham-fisted. We probably wanna
+		 * implement per-cgroup fallback dq's instead so that we have
+		 * more control over when tasks with custom cpumask get issued.
+		 */
+		if (p->nr_cpus_allowed == 1 && (p->flags & PF_KTHREAD)) {
+			stat_inc(FCG_STAT_LOCAL);
+			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
+		} else {
+			stat_inc(FCG_STAT_GLOBAL);
+			scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, enq_flags);
+		}
 		return;
 	}
 
