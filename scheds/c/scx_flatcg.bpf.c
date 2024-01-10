@@ -46,6 +46,11 @@
 #include <scx/common.bpf.h>
 #include "scx_flatcg.h"
 
+/*
+ * Maximum amount of retries to find a valid cgroup.
+ */
+#define CGROUP_MAX_RETRIES 1024
+
 char _license[] SEC("license") = "GPL";
 
 const volatile u32 nr_cpus = 32;	/* !0 for veristat, set during init */
@@ -766,7 +771,7 @@ pick_next_cgroup:
 		return;
 	}
 
-	bpf_repeat(BPF_MAX_LOOPS) {
+	bpf_repeat(CGROUP_MAX_RETRIES) {
 		if (try_pick_next_cgroup(&cpuc->cur_cgid))
 			break;
 	}
