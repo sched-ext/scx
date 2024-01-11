@@ -36,10 +36,9 @@ services (e.g., AI), etc. Hence, there might be situations where the benefits
 outweigh the overhead, justifying the use of this scheduler in a production
 environment.
 
-## Live demo
+## Demo
 
-A live demo of scx_rustland in action can be found here:
-[Demo](https://www.youtube.com/watch?v=oCfVbz9jvVQ).
+[scx_rustland-terraria](https://github.com/sched-ext/scx/assets/1051723/42ec3bf2-9f1f-4403-80ab-bf5d66b7c2d5)
 
 For this demo the scheduler includes an extra patch to impose a "time slice
 penalty" on new short-lived tasks. While this approach might not be suitable
