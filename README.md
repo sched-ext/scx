@@ -16,6 +16,14 @@ with and deployed; even in massive and complex production environments.
   motivation), please refer to the [overview document](OVERVIEW.md).
 - For a description of the schedulers shipped with this tree, please refer to
   the [schedulers document](scheds/README.md).
+- The following video is the [scx_rustland](https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_rustland)
+  scheduler which makes most scheduling decisions in userspace Rust code showing
+  better FPS in terraria while kernel is being compiled. This doesn't mean that
+  scx_rustland is a better scheduler but does demonstrate how safe and easy it is to
+  implement a scheduler which is generally usable and can outperform the default
+  scheduler in certain scenarios.
+  
+[scx_rustland-terraria](https://github.com/sched-ext/scx/assets/1051723/42ec3bf2-9f1f-4403-80ab-bf5d66b7c2d5)
 
 While the kernel feature is not upstream yet, we believe sched_ext has a
 reasonable chance of landing upstream in the foreseeable future. Both Meta
