@@ -127,8 +127,9 @@ const SCHED_EXT: i32 = 7;
 pub struct QueuedTask {
     pub pid: i32,              // pid that uniquely identifies a task
     pub cpu: i32,              // CPU where the task is running (-1 = exiting)
-    pub sum_exec_runtime: u64, // Total cpu time */
-    pub weight: u64,           // Task static priority */
+    pub sum_exec_runtime: u64, // Total cpu time
+    pub nvcsw: u64,            // Voluntary context switches
+    pub weight: u64,           // Task static priority
 }
 
 // Task queued for dispatching to the BPF component (see bpf_intf::dispatched_task_ctx).
@@ -159,6 +160,7 @@ impl EnqueuedMessage {
             pid: self.inner.pid,
             cpu: self.inner.cpu,
             sum_exec_runtime: self.inner.sum_exec_runtime,
+            nvcsw: self.inner.nvcsw,
             weight: self.inner.weight,
         }
     }
