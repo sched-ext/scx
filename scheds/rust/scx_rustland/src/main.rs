@@ -125,8 +125,12 @@ struct TaskInfo {
 //
 // TaskInfo objects are stored in the HashMap and they are indexed by pid.
 //
-// TODO: provide some hooks for .disable() in the BPF part to clean up entries once the task exits
-// (or provide a garbage collector to free up the items that are not needed anymore).
+// Entries are removed when the corresponding task exits.
+//
+// This information is fetched from the BPF section (through the .exit_task() callback) and
+// received by the user-space scheduler via self.bpf.dequeue_task(): a task with a negative .cpu
+// value represents an exiting task, so in this case we can free the corresponding entry in
+// TaskInfoMap (see also Scheduler::drain_queued_tasks()).
 struct TaskInfoMap {
     tasks: HashMap<i32, TaskInfo>,
 }
