@@ -386,6 +386,7 @@ static void get_task_info(struct queued_task_ctx *task,
 		return;
 	}
 	task->sum_exec_runtime = p->se.sum_exec_runtime;
+	task->nvcsw = p->nvcsw;
 	task->weight = p->scx.weight;
 	task->cpu = scx_bpf_task_cpu(p);
 }
