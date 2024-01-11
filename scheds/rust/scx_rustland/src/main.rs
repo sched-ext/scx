@@ -61,6 +61,21 @@ const SCHEDULER_NAME: &'static str = "RustLand";
 /// scheduling policies should be able to simply modify the Rust component, without having to deal
 /// with any internal kernel / BPF details.
 ///
+/// === Troubleshooting ===
+///
+/// - Disable HyperThreading / SMT if you notice poor performance: this scheduler lacks support for
+///   any type of core scheduling and lacks NUMA awareness, assuming uniform performance and
+///   migration costs across all CPUs.
+///
+/// - Adjust the time slice boost parameter (option `-b`) to enhance the responsiveness of
+///   low-latency applications (i.e., online gaming, live streaming, video conferencing etc.).
+///
+/// - Reduce the time slice boost parameter (option `-b`) if you notice poor performance in your
+///   CPU-intensive applications or if you experience any stall during your typical workload.
+///
+/// - Reduce the time slice (option `-s`) if you experience audio issues (i.e., cracking audio or
+///   audio packet loss).
+///
 #[derive(Debug, Parser)]
 struct Opts {
     /// Scheduling slice duration in microseconds.
