@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use std::fs::File;
 use std::io::{self, Read};
@@ -69,14 +69,16 @@ struct Opts {
 
     /// Time slice boost: increasing this value enhances performance of interactive applications
     /// (gaming, multimedia, GUIs, etc.), but may lead to decreased responsiveness of other tasks
-    /// in the system; set to 0 for maximum responsiveness in newly created tasks (e.g., max
-    /// responsiveness of shell sessions).
+    /// in the system.
     ///
     /// WARNING: setting a large value can make the scheduler quite unpredictable and you may
     /// experience temporary system stalls (before hitting the sched-ext watchdog timeout).
     ///
-    /// The default setting (no boost at all) prioritizes fairness and system stability.
-    #[clap(short = 'b', long, default_value = "1")]
+    /// Default time slice boost is 100, which means interactive tasks will get a 100x priority
+    /// boost to run respect to non-interactive tasks.
+    ///
+    /// Use "1" to disable time slice boost and fallback to the standard vruntime-based scheduling.
+    #[clap(short = 'b', long, default_value = "100")]
     slice_boost: u64,
 
     /// If specified, only tasks which have their scheduling policy set to
@@ -91,11 +93,17 @@ struct Opts {
     debug: bool,
 }
 
+// Time constants.
+const MSEC_PER_SEC: u64 = 1_000;
+const NSEC_PER_SEC: u64 = 1_000_000_000;
+
 // Basic item stored in the task information map.
 #[derive(Debug)]
 struct TaskInfo {
     sum_exec_runtime: u64, // total cpu time used by the task
     vruntime: u64,         // total vruntime of the task
+    nvcsw: u64,            // total amount of voluntary context switches
+    nvcsw_ts: u64,         // timestamp of the previous nvcsw update
 }
 
 // Task information map: store total execution time and vruntime of each task in the system.
@@ -187,10 +195,10 @@ impl<'a> Scheduler<'a> {
         info!("{} scheduler attached", SCHEDULER_NAME);
 
         // Save the default time slice (in ns) in the scheduler class.
-        let slice_ns = opts.slice_us * 1000;
+        let slice_ns = opts.slice_us * MSEC_PER_SEC;
 
-        // Slice booster.
-        let slice_boost = opts.slice_boost;
+        // Slice booster (must be >= 1).
+        let slice_boost = opts.slice_boost.max(1);
 
         // Scheduler task pool to sort tasks by vruntime.
         let task_pool = TaskTree::new();
@@ -226,6 +234,14 @@ impl<'a> Scheduler<'a> {
         idle_cpus
     }
 
+    // Return current timestamp in ns.
+    fn now() -> u64 {
+        let ts = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        ts.as_nanos() as u64
+    }
+
     // Update task's vruntime based on the information collected from the kernel and return the
     // evaluated weighted time slice to the caller.
     //
@@ -233,17 +249,15 @@ impl<'a> Scheduler<'a> {
     fn update_enqueued(
         task_info: &mut TaskInfo,
         sum_exec_runtime: u64,
+        nvcsw: u64,
         weight: u64,
         min_vruntime: u64,
         slice_ns: u64,
         slice_boost: u64,
+        now: u64,
     ) {
         // Determine if a task is new or old, based on their current runtime and previous runtime
         // counters.
-        fn is_new_task(runtime_curr: u64, runtime_prev: u64) -> bool {
-            runtime_curr < runtime_prev || runtime_prev == 0
-        }
-        // Evaluate last time slot used by the task.
         //
         // NOTE: make sure to handle the case where the current sum_exec_runtime is less then the
         // previous sum_exec_runtime. This can happen, for example, when a new task is created via
@@ -253,22 +267,37 @@ impl<'a> Scheduler<'a> {
         // Consequently, the existing task_info slot is reused, containing the total run-time of
         // the previous task (likely exceeding the current sum_exec_runtime). In such cases, simply
         // use sum_exec_runtime as the time slice of the new task.
-        let slice = if is_new_task(sum_exec_runtime, task_info.sum_exec_runtime) {
-            // New task: check if we need to apply the time slice penalty.
-            if slice_boost != 1 {
-                // Assign to the new task an initial time slice of (slice_ns * slice_boost / 2)
-                // over a maximum allowed time slice of (slice_ns * slice_boost), that can be
-                // potentially reached applying the task's weight (see below).
-                slice_ns * slice_boost / 2
-            } else {
-                sum_exec_runtime
-            }
+        fn is_new_task(curr_runtime: u64, prev_runtime: u64) -> bool {
+            curr_runtime < prev_runtime || prev_runtime == 0
+        }
+
+        // Determine if a task is interactive, based on the amount of voluntary context switches
+        // per seconds.
+        //
+        // NOTE: we should probably make the (delta_nvcsw / delta_t) threshold a tunable, but for
+        // now let's assume that 1 voluntary context switch over the last 10 seconds is enough to
+        // assume that the task is interactive.
+        fn is_interactive_task(delta_nvcsw: u64, delta_ns: u64) -> bool {
+            delta_nvcsw / (delta_ns / (10 * NSEC_PER_SEC)).max(1) > 0
+        }
+
+        // Evaluate last time slot used by the task.
+        let mut slice = if is_new_task(sum_exec_runtime, task_info.sum_exec_runtime) {
+            // Give to newer tasks a priority boost, so we can prioritize responsiveness of
+            // interactive shell sessions.
+            sum_exec_runtime / slice_boost
         } else {
             // Old task: charge time slice normally.
             sum_exec_runtime - task_info.sum_exec_runtime
-            // Scale the time slice by the task's priority (weight).
-        } * 100
-            / weight;
+        };
+
+        // Apply the slice boost to interactive tasks.
+        if is_interactive_task(nvcsw - task_info.nvcsw, now - task_info.nvcsw_ts) {
+            slice /= slice_boost;
+        }
+
+        // Scale the time slice by the task's priority (weight).
+        slice = slice * 100 / weight;
 
         // Make sure that the updated vruntime is in the range:
         //
@@ -280,22 +309,22 @@ impl<'a> Scheduler<'a> {
         //
         // Moreover, limiting the accounted time slice to slice_ns, allows to prevent starving the
         // current task for too long in the scheduler task pool.
-        let max_slice_ns =
-            if slice_boost > 1 && is_new_task(sum_exec_runtime, task_info.sum_exec_runtime) {
-                slice_ns * slice_boost
-            } else {
-                slice_ns
-            };
-        task_info.vruntime = min_vruntime + slice.clamp(1, max_slice_ns);
+        task_info.vruntime = min_vruntime + slice.clamp(1, slice_ns * 100 / weight);
 
         // Update total task cputime.
         task_info.sum_exec_runtime = sum_exec_runtime;
+
+        // Update voluntay context switches counter and timestamp.
+        if now - task_info.nvcsw_ts > 10 * NSEC_PER_SEC {
+            task_info.nvcsw = nvcsw;
+            task_info.nvcsw_ts = now;
+        }
     }
 
     // Drain all the tasks from the queued list, update their vruntime (Self::update_enqueued()),
     // then push them all to the task pool (doing so will sort them by their vruntime).
     fn drain_queued_tasks(&mut self) {
-        let slice_ns = self.bpf.get_effective_slice_us() * 1000;
+        let slice_ns = self.bpf.get_effective_slice_us() * MSEC_PER_SEC;
         loop {
             match self.bpf.dequeue_task() {
                 Ok(Some(task)) => {
@@ -315,16 +344,20 @@ impl<'a> Scheduler<'a> {
                             .or_insert_with_key(|&_pid| TaskInfo {
                                 sum_exec_runtime: 0,
                                 vruntime: self.min_vruntime,
+                                nvcsw: 0,
+                                nvcsw_ts: Self::now(),
                             });
 
                     // Update task information.
                     Self::update_enqueued(
                         task_info,
                         task.sum_exec_runtime,
+                        task.nvcsw,
                         task.weight,
                         self.min_vruntime,
                         slice_ns,
                         self.slice_boost,
+                        Self::now(),
                     );
 
                     // Insert task in the task pool (ordered by vruntime).
@@ -353,11 +386,11 @@ impl<'a> Scheduler<'a> {
     // Dynamically adjust the time slice based on the amount of waiting tasks.
     fn scale_slice_ns(&mut self) {
         let nr_scheduled = self.task_pool.tasks.len() as u64;
-        let slice_us_max = self.slice_ns / 1000;
+        let slice_us_max = self.slice_ns / MSEC_PER_SEC;
 
         // Scale time slice as a function of nr_scheduled, but never scale below 1 ms.
         let scaling = (nr_scheduled / 2).max(1);
-        let slice_us = (slice_us_max / scaling).max(1000);
+        let slice_us = (slice_us_max / scaling).max(MSEC_PER_SEC);
 
         // Apply new scaling.
         self.bpf.set_effective_slice_us(slice_us);
@@ -514,20 +547,15 @@ impl<'a> Scheduler<'a> {
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<()> {
-        let mut prev_ts = SystemTime::now();
+        let mut prev_ts = Self::now();
 
         while !shutdown.load(Ordering::Relaxed) && self.bpf.read_bpf_exit_kind() == 0 {
-            let curr_ts = SystemTime::now();
-            let elapsed = curr_ts
-                .duration_since(prev_ts)
-                .unwrap_or_else(|_| Duration::from_secs(0));
-
             // Call the main scheduler body.
             self.schedule();
 
             // Print scheduler statistics every second.
-            if elapsed > Duration::from_secs(1) {
-                // Print scheduler statistics.
+            let curr_ts = Self::now();
+            if curr_ts - prev_ts > NSEC_PER_SEC {
                 self.print_stats();
 
                 prev_ts = curr_ts;
