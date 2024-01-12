@@ -19,6 +19,9 @@ use libbpf_rs::skel::SkelBuilder as _;
 
 use libc::{sched_param, sched_setscheduler};
 
+mod alloc;
+use alloc::*;
+
 // Defined in UAPI
 const SCHED_EXT: i32 = 7;
 
@@ -122,6 +125,18 @@ const SCHED_EXT: i32 = 7;
 /// }
 ///
 
+// Override default memory allocator.
+//
+// To prevent potential deadlock conditions under heavy loads, any scheduler that delegates
+// scheduling decisions to user-space should avoid triggering page faults.
+//
+// To address this issue, replace the global allocator with a custom one (RustLandAllocator),
+// designed to operate on a pre-allocated buffer. This, coupled with the memory locking achieved
+// through mlockall(), prevents page faults from occurring during the execution of the user-space
+// scheduler.
+#[global_allocator]
+static ALLOCATOR: RustLandAllocator = RustLandAllocator;
+
 // Task queued for scheduling from the BPF component (see bpf_intf::queued_task_ctx).
 #[derive(Debug)]
 pub struct QueuedTask {
@@ -203,6 +218,10 @@ impl<'a> BpfScheduler<'a> {
         // Open the BPF prog first for verification.
         let skel_builder = BpfSkelBuilder::default();
         let mut skel = skel_builder.open().context("Failed to open BPF program")?;
+
+        // Lock all the memory to prevent page faults that could trigger potential deadlocks during
+        // scheduling.
+        ALLOCATOR.lock_memory();
 
         // Initialize online CPUs counter.
         //
