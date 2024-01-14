@@ -205,6 +205,7 @@ struct Scheduler<'a> {
     min_vruntime: u64,     // Keep track of the minimum vruntime across all tasks
     slice_ns: u64,         // Default time slice (in ns)
     slice_boost: u64,      // Slice booster
+    init_page_faults: u64, // Initial page faults counter
 }
 
 impl<'a> Scheduler<'a> {
@@ -228,6 +229,9 @@ impl<'a> Scheduler<'a> {
         // Initialize global minimum vruntime.
         let min_vruntime: u64 = 0;
 
+        // Initialize initial page fault counter.
+        let init_page_faults: u64 = 0;
+
         // Return scheduler object.
         Ok(Self {
             bpf,
@@ -236,6 +240,7 @@ impl<'a> Scheduler<'a> {
             min_vruntime,
             slice_ns,
             slice_boost,
+            init_page_faults,
         })
     }
 
@@ -479,6 +484,29 @@ impl<'a> Scheduler<'a> {
         thread::yield_now();
     }
 
+    // Get total page faults from /proc/self/stat.
+    fn get_page_faults() -> Result<u64, io::Error> {
+        let path = format!("/proc/self/stat");
+        let mut file = File::open(path)?;
+
+        // Read the contents of the file into a string.
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+
+        // Parse the relevant fields and calculate the total page faults.
+        let fields: Vec<&str> = content.split_whitespace().collect();
+        if fields.len() >= 12 {
+            let minflt: u64 = fields[9].parse().unwrap_or(0);
+            let majflt: u64 = fields[11].parse().unwrap_or(0);
+            Ok(minflt + majflt)
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid format in /proc/[PID]/stat",
+            ))
+        }
+    }
+
     // Get the current CPU where the scheduler is running.
     fn get_current_cpu() -> io::Result<i32> {
         // Open /proc/self/stat file
@@ -510,14 +538,44 @@ impl<'a> Scheduler<'a> {
         }
     }
 
+    // Print critical user-space scheduler statistics.
+    fn print_faults(&mut self) {
+        // Get counters of scheduling failures.
+        let nr_failed_dispatches = *self.bpf.nr_failed_dispatches_mut();
+        let nr_sched_congested = *self.bpf.nr_sched_congested_mut();
+
+        // Get the total amount of page faults of the user-space scheduler.
+        //
+        // NOTE:this value must remain set to 0, if the user-space scheduler is faulting we may
+        // experience deadlock conditions in the scheduler.
+        let page_faults = match Self::get_page_faults() {
+            Ok(page_faults) => page_faults,
+            Err(_) => 0,
+        };
+        if self.init_page_faults == 0 {
+            self.init_page_faults = page_faults;
+        }
+        let nr_page_faults = page_faults - self.init_page_faults;
+
+        // Report overall scheduler status at the end.
+        let status = if nr_page_faults + nr_failed_dispatches + nr_sched_congested > 0 {
+            "WARNING"
+        } else {
+            "OK"
+        };
+        info!(
+            "  nr_failed_dispatches={} nr_sched_congested={} nr_page_faults={} [{}]",
+            nr_failed_dispatches, nr_sched_congested, nr_page_faults, status
+        );
+    }
+
     // Print internal scheduler statistics (fetched from the BPF part).
     fn print_stats(&mut self) {
         // Show minimum vruntime (this should be constantly incrementing).
-        info!(
-            "vruntime={} tasks={}",
-            self.min_vruntime,
-            self.task_map.tasks.len()
-        );
+        info!("vruntime={}", self.min_vruntime);
+
+        // Show the total amount of tasks currently monitored by the scheduler.
+        info!("  tasks={}", self.task_map.tasks.len());
 
         // Show general statistics.
         let nr_user_dispatches = *self.bpf.nr_user_dispatches_mut();
@@ -525,14 +583,6 @@ impl<'a> Scheduler<'a> {
         info!(
             "  nr_user_dispatches={} nr_kernel_dispatches={}",
             nr_user_dispatches, nr_kernel_dispatches
-        );
-
-        // Show failure statistics.
-        let nr_failed_dispatches = *self.bpf.nr_failed_dispatches_mut();
-        let nr_sched_congested = *self.bpf.nr_sched_congested_mut();
-        info!(
-            "  nr_failed_dispatches={} nr_sched_congested={}",
-            nr_failed_dispatches, nr_sched_congested
         );
 
         // Show tasks that are waiting to be dispatched.
@@ -543,6 +593,9 @@ impl<'a> Scheduler<'a> {
             "  nr_waiting={} [nr_queued={} + nr_scheduled={}]",
             nr_waiting, nr_queued, nr_scheduled
         );
+
+        // Show total page faults of the user-space scheduler.
+        self.print_faults();
 
         // Show current used time slice.
         info!("time slice = {} us", self.bpf.get_effective_slice_us());
