@@ -1,0 +1,12 @@
+[Unit]
+Description=Start scx_simple
+ConditionPathExists=/sys/kernel/debug/sched/ext
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/scx_simple
+Restart=always
+StandardOutput=null
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Start scx_rusty
+ConditionPathExists=/sys/kernel/debug/sched/ext
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/scx_rusty
+Restart=always
+StandardOutput=null
+
+[Install]
+WantedBy=multi-user.target
