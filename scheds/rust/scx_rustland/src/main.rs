@@ -9,6 +9,9 @@ pub mod bpf_intf;
 mod bpf;
 use bpf::*;
 
+mod topology;
+use topology::*;
+
 use std::thread;
 
 use std::collections::BTreeSet;
@@ -63,9 +66,9 @@ const SCHEDULER_NAME: &'static str = "RustLand";
 ///
 /// === Troubleshooting ===
 ///
-/// - Disable HyperThreading / SMT if you notice poor performance: this scheduler lacks support for
-///   any type of core scheduling and lacks NUMA awareness, assuming uniform performance and
-///   migration costs across all CPUs.
+/// - Disable HyperThreading / SMT if you notice poor performance (add "nosmt" to the kernel boot
+///   parameters): this scheduler is not NUMA-aware and it implements a simple policy of handling
+///   SMT cores.
 ///
 /// - Adjust the time slice boost parameter (option `-b`) to enhance the responsiveness of
 ///   low-latency applications (i.e., online gaming, live streaming, video conferencing etc.).
@@ -200,6 +203,7 @@ impl TaskTree {
 // Main scheduler object
 struct Scheduler<'a> {
     bpf: BpfScheduler<'a>, // BPF connector
+    cores: CoreMapping,    // Map of core ids -> CPU ids
     task_pool: TaskTree,   // tasks ordered by vruntime
     task_map: TaskInfoMap, // map pids to the corresponding task information
     min_vruntime: u64,     // Keep track of the minimum vruntime across all tasks
@@ -210,9 +214,8 @@ struct Scheduler<'a> {
 
 impl<'a> Scheduler<'a> {
     fn init(opts: &Opts) -> Result<Self> {
-        // Low-level BPF connector.
-        let bpf = BpfScheduler::init(opts.slice_us, opts.partial, opts.debug)?;
-        info!("{} scheduler attached", SCHEDULER_NAME);
+        // Initialize core mapping topology.
+        let cores = CoreMapping::new();
 
         // Save the default time slice (in ns) in the scheduler class.
         let slice_ns = opts.slice_us * MSEC_PER_SEC;
@@ -232,9 +235,19 @@ impl<'a> Scheduler<'a> {
         // Initialize initial page fault counter.
         let init_page_faults: u64 = 0;
 
+        // Low-level BPF connector.
+        let bpf = BpfScheduler::init(
+            opts.slice_us,
+            cores.nr_cpus_online,
+            opts.partial,
+            opts.debug,
+        )?;
+        info!("{} scheduler attached", SCHEDULER_NAME);
+
         // Return scheduler object.
         Ok(Self {
             bpf,
+            cores,
             task_pool,
             task_map,
             min_vruntime,
@@ -244,17 +257,46 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    // Return the array of idle CPU ids.
+    // Returns the list of idle CPUs, sorted by the amount of free sibling CPUs in the same core.
+    //
+    // In this way we can schedule first on the CPUs that are "more free" than others, maximizing
+    // performance in presence of SMT cores.
     fn get_idle_cpus(&self) -> Vec<i32> {
-        let mut idle_cpus = Vec::new();
+        let cores = &self.cores.map;
+        let num_cpus = self.cores.nr_cpus_online;
 
-        for cpu in 0..self.bpf.get_nr_cpus() {
-            let pid = self.bpf.get_cpu_pid(cpu);
-            if pid == 0 {
-                idle_cpus.push(cpu);
-            }
-        }
+        // Cache the results of self.bpf.get_cpu_pid() for all CPUs.
+        let cpu_pid_map: Vec<u32> = (0..num_cpus)
+            .map(|cpu_id| self.bpf.get_cpu_pid(cpu_id))
+            .collect();
 
+        // Create a Vec of tuples containing core id and the number of busy CPU ids for each core.
+        let mut core_status: Vec<(i32, usize)> = cores
+            .iter()
+            .map(|(&core_id, core_cpus)| {
+                let busy_cpus = core_cpus
+                    .iter()
+                    .filter(|&&cpu_id| cpu_pid_map[cpu_id as usize] > 0)
+                    .count();
+                (core_id, busy_cpus)
+            })
+            .collect();
+
+        // Sort the Vec based on the number of busy CPUs in ascending order (free cores first).
+        core_status.sort_by(|a, b| a.1.cmp(&b.1));
+
+        // Generate the list of idle CPU ids, ordered by the number of busy siblings (ascending).
+        let idle_cpus: Vec<i32> = core_status
+            .iter()
+            .flat_map(|&(core_id, _)| {
+                cores[&core_id]
+                    .iter()
+                    .filter(|&&cpu_id| cpu_pid_map[cpu_id as usize] == 0)
+                    .cloned()
+            })
+            .collect();
+
+        // Return the list of idle CPUs.
         idle_cpus
     }
 
@@ -600,19 +642,25 @@ impl<'a> Scheduler<'a> {
         // Show current used time slice.
         info!("time slice = {} us", self.bpf.get_effective_slice_us());
 
-        // Show tasks that are currently running.
+        // Show tasks that are currently running on each core and CPU.
         let sched_cpu = match Self::get_current_cpu() {
             Ok(cpu_info) => cpu_info,
             Err(_) => -1,
         };
         info!("Running tasks:");
-        for cpu in 0..self.bpf.get_nr_cpus() {
-            let pid = if cpu == sched_cpu {
-                "[self]".to_string()
-            } else {
-                self.bpf.get_cpu_pid(cpu).to_string()
-            };
-            info!("  cpu={} pid={}", cpu, pid);
+        let mut core_ids: Vec<i32> = self.cores.map.keys().copied().collect();
+        core_ids.sort();
+        for core_id in core_ids {
+            let mut cpu_ids: Vec<i32> = self.cores.map.get(&core_id).unwrap().clone();
+            cpu_ids.sort();
+            for cpu_id in cpu_ids {
+                let pid = if cpu_id == sched_cpu {
+                    "[self]".to_string()
+                } else {
+                    self.bpf.get_cpu_pid(cpu_id).to_string()
+                };
+                info!("  core {:2} cpu {:2} pid={}", core_id, cpu_id, pid);
+            }
         }
 
         log::logger().flush();

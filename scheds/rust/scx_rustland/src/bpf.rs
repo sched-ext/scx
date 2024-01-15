@@ -7,8 +7,6 @@ use crate::bpf_intf;
 use crate::bpf_skel::*;
 
 use std::ffi::CStr;
-use std::fs::File;
-use std::io::{self, BufRead};
 
 use anyhow::Context;
 use anyhow::Result;
@@ -214,7 +212,7 @@ pub struct BpfScheduler<'a> {
 }
 
 impl<'a> BpfScheduler<'a> {
-    pub fn init(slice_us: u64, partial: bool, debug: bool) -> Result<Self> {
+    pub fn init(slice_us: u64, nr_cpus_online: i32, partial: bool, debug: bool) -> Result<Self> {
         // Open the BPF prog first for verification.
         let skel_builder = BpfSkelBuilder::default();
         let mut skel = skel_builder.open().context("Failed to open BPF program")?;
@@ -225,9 +223,8 @@ impl<'a> BpfScheduler<'a> {
 
         // Initialize online CPUs counter.
         //
-        // We should probably refresh this counter during the normal execution to support cpu
+        // NOTE: we should probably refresh this counter during the normal execution to support cpu
         // hotplugging, but for now let's keep it simple and set this only at initialization).
-        let nr_cpus_online = Self::count_cpus()?;
         skel.rodata_mut().num_possible_cpus = nr_cpus_online;
 
         // Set scheduler options (defined in the BPF part).
@@ -254,30 +251,6 @@ impl<'a> BpfScheduler<'a> {
                 err
             ))),
         }
-    }
-
-    // Return the amount of available CPUs in the system (according to /proc/stat).
-    fn count_cpus() -> io::Result<i32> {
-        let file = File::open("/proc/stat")?;
-        let reader = io::BufReader::new(file);
-        let mut cpu_count = -1;
-
-        for line in reader.lines() {
-            let line = line?;
-            if line.starts_with("cpu") {
-                cpu_count += 1;
-            } else {
-                break;
-            }
-        }
-
-        Ok(cpu_count)
-    }
-
-    // Override the default scheduler time slice (in us).
-    #[allow(dead_code)]
-    pub fn get_nr_cpus(&self) -> i32 {
-        self.skel.rodata().num_possible_cpus
     }
 
     // Override the default scheduler time slice (in us).
