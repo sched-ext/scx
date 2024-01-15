@@ -48,6 +48,14 @@ static MEMORY: RustLandMemory = RustLandMemory {
 pub struct RustLandAllocator;
 
 impl RustLandAllocator {
+    unsafe fn block_to_addr(&self, block: usize) -> *mut u8 {
+        MEMORY.arena.get().cast::<u8>().add(block * BLOCK_SIZE)
+    }
+
+    unsafe fn is_aligned(&self, block: usize, align_size: usize) -> bool {
+        self.block_to_addr(block) as usize & (align_size - 1) == 0
+    }
+
     pub fn lock_memory(&self) {
         unsafe {
             // Call setrlimit to set the locked-in-memory limit to unlimited.
@@ -73,9 +81,6 @@ impl RustLandAllocator {
 unsafe impl GlobalAlloc for RustLandAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let align = layout.align();
-        if align > BLOCK_SIZE {
-            panic!("unsupported alignment: {}", align);
-        }
         let size = layout.size();
 
         // Find the first sequence of free blocks that can accommodate the requested size.
@@ -83,15 +88,18 @@ unsafe impl GlobalAlloc for RustLandAllocator {
         let mut contiguous_blocks = 0;
         let mut start_block = None;
 
-        for (index, &is_allocated) in map_guard.iter().enumerate() {
-            if is_allocated {
-                // Reset consecutive blocks count if an allocated block is encountered.
+        for (block, &is_allocated) in map_guard.iter().enumerate() {
+            // Reset consecutive blocks count if an allocated block is encountered or if the
+            // first block is not aligned to the requested alignment.
+            if is_allocated
+                || (contiguous_blocks == 0 && !self.is_aligned(block, align))
+            {
                 contiguous_blocks = 0;
             } else {
                 contiguous_blocks += 1;
                 if contiguous_blocks * BLOCK_SIZE >= size {
                     // Found a sequence of free blocks that can accommodate the size.
-                    start_block = Some(index + 1 - contiguous_blocks);
+                    start_block = Some(block + 1 - contiguous_blocks);
                     break;
                 }
             }
@@ -104,7 +112,7 @@ unsafe impl GlobalAlloc for RustLandAllocator {
                     map_guard[i] = true;
                 }
                 // Return a pointer to the aligned allocated block.
-                MEMORY.arena.get().cast::<u8>().add(start * BLOCK_SIZE)
+                self.block_to_addr(start)
             }
             None => {
                 // No contiguous block sequence found, just panic.
