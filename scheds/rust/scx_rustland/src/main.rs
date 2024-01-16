@@ -209,6 +209,7 @@ struct Scheduler<'a> {
     min_vruntime: u64,     // Keep track of the minimum vruntime across all tasks
     slice_ns: u64,         // Default time slice (in ns)
     slice_boost: u64,      // Slice booster
+    eff_slice_boost: u64,  // Effective slice booster
     init_page_faults: u64, // Initial page faults counter
 }
 
@@ -222,6 +223,7 @@ impl<'a> Scheduler<'a> {
 
         // Slice booster (must be >= 1).
         let slice_boost = opts.slice_boost.max(1);
+        let eff_slice_boost = slice_boost;
 
         // Scheduler task pool to sort tasks by vruntime.
         let task_pool = TaskTree::new();
@@ -253,6 +255,7 @@ impl<'a> Scheduler<'a> {
             min_vruntime,
             slice_ns,
             slice_boost,
+            eff_slice_boost,
             init_page_faults,
         })
     }
@@ -414,6 +417,21 @@ impl<'a> Scheduler<'a> {
                                 nvcsw_ts: Self::now(),
                             });
 
+                    // Update dynamic slice boost.
+                    //
+                    // The slice boost is dynamically adjusted as a function of the amount of CPUs
+                    // in the system and the amount of tasks currently waiting to be dispatched.
+                    //
+                    // As the amount of waiting tasks in the task_pool increases we should reduce
+                    // the slice boost to enforce the scheduler to apply a pure vruntime-based
+                    // policy.
+                    //
+                    // This allows to survive stress tests that are spawning a massive amount of
+                    // tasks.
+                    self.eff_slice_boost = (self.slice_boost * self.cores.nr_cpus_online as u64
+                        / self.task_pool.tasks.len().max(1) as u64)
+                        .max(1);
+
                     // Update task information.
                     Self::update_enqueued(
                         task_info,
@@ -422,7 +440,7 @@ impl<'a> Scheduler<'a> {
                         task.weight,
                         self.min_vruntime,
                         slice_ns,
-                        self.slice_boost,
+                        self.eff_slice_boost,
                         Self::now(),
                     );
 
@@ -641,6 +659,9 @@ impl<'a> Scheduler<'a> {
 
         // Show current used time slice.
         info!("time slice = {} us", self.bpf.get_effective_slice_us());
+
+        // Show current slice boost.
+        info!("slice boost = {}", self.eff_slice_boost);
 
         // Show tasks that are currently running on each core and CPU.
         let sched_cpu = match Self::get_current_cpu() {
