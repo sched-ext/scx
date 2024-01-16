@@ -107,9 +107,6 @@ struct pcpu_ctx {
 
 	/* Whether the current core has been scheduled for compaction. */
 	bool scheduled_compaction;
-
-	/* Number of times a primary core has been scheduled for compaction. */
-	u32 num_schedulings;
 };
 
 struct {
@@ -226,7 +223,6 @@ static int compact_primary_core(void *map, int *key, struct bpf_timer *timer)
 	bpf_cpumask_clear_cpu(cpu, primary);
 	try_make_core_reserved(cpu, reserve, false);
 	bpf_rcu_read_unlock();
-	pcpu_ctx->num_schedulings = 0;
 	pcpu_ctx->scheduled_compaction = false;
 	return 0;
 }
@@ -461,10 +457,8 @@ void BPF_STRUCT_OPS(nest_dispatch, s32 cpu, struct task_struct *prev)
 		stat_inc(NEST_STAT(NOT_CONSUMED));
 		if (in_primary) {
 			/*
-			 * Immediately demote a primary core if:
-			 * - It's been scheduled for compaction at least
-			 *   r_depth times without actually being compacted.
-			 * - The previous task on it is dying
+			 * Immediately demote a primary core if the previous
+			 * task on it is dying
 			 *
 			 * Note that we elect to not compact the "first" CPU in
 			 * the mask so as to encourage at least one core to
@@ -473,12 +467,11 @@ void BPF_STRUCT_OPS(nest_dispatch, s32 cpu, struct task_struct *prev)
 			 * nest, but BPF doesn't yet have a kfunc for querying
 			 * cpumask weight.
 			 */
-			if ((prev && prev->__state == TASK_DEAD) ||
-			    (cpu != bpf_cpumask_first(cast_mask(primary)) && pcpu_ctx->num_schedulings >= r_depth)) {
+			if ((prev && prev->__state == TASK_DEAD) &&
+			    (cpu != bpf_cpumask_first(cast_mask(primary)))) {
 				stat_inc(NEST_STAT(EAGERLY_COMPACTED));
 				bpf_cpumask_clear_cpu(cpu, primary);
 				try_make_core_reserved(cpu, reserve, false);
-				pcpu_ctx->num_schedulings = 0;
 			} else  {
 				pcpu_ctx->scheduled_compaction = true;
 				/*
@@ -488,14 +481,12 @@ void BPF_STRUCT_OPS(nest_dispatch, s32 cpu, struct task_struct *prev)
 				 */
 				bpf_timer_start(&pcpu_ctx->timer, p_remove_ns,
 						BPF_F_TIMER_CPU_PIN);
-				pcpu_ctx->num_schedulings++;
 				stat_inc(NEST_STAT(SCHEDULED_COMPACTION));
 			}
 		}
 		return;
 	}
 	stat_inc(NEST_STAT(CONSUMED));
-	pcpu_ctx->num_schedulings = 0;
 }
 
 void BPF_STRUCT_OPS(nest_running, struct task_struct *p)
@@ -638,7 +629,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(nest_init)
 			scx_bpf_error("Failed to initialize pcpu timer");
 			return -EINVAL;
 		}
-		ctx->num_schedulings  = 0;
 		err = bpf_timer_set_callback(&ctx->timer, compact_primary_core);
 		if (err) {
 			scx_bpf_error("Failed to set pcpu timer callback");
