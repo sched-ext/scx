@@ -4,7 +4,7 @@ ConditionPathExists=/sys/kernel/debug/sched/ext
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/scx_central
+ExecStart=scx_central
 Restart=always
 StandardOutput=null
 

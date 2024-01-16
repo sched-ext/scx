@@ -4,7 +4,7 @@ ConditionPathExists=/sys/kernel/debug/sched/ext
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/scx_qmap
+ExecStart=scx_qmap
 Restart=always
 StandardOutput=null
 

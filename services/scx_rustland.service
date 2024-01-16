@@ -4,7 +4,7 @@ ConditionPathExists=/sys/kernel/debug/sched/ext
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/scx_rustland
+ExecStart=scx_rustland
 Restart=always
 StandardOutput=null
 

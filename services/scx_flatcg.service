@@ -4,7 +4,7 @@ ConditionPathExists=/sys/kernel/debug/sched/ext
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/scx_flatcg
+ExecStart=scx_flatcg
 Restart=always
 StandardOutput=null
 
