@@ -1,0 +1,12 @@
+[Unit]
+Description=Start scx_nest
+ConditionPathExists=/sys/kernel/debug/sched/ext
+
+[Service]
+Type=simple
+ExecStart=scx_nest
+Restart=always
+StandardOutput=null
+
+[Install]
+WantedBy=multi-user.target

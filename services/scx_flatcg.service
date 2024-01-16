@@ -1,0 +1,12 @@
+[Unit]
+Description=Start scx_flatcg
+ConditionPathExists=/sys/kernel/debug/sched/ext
+
+[Service]
+Type=simple
+ExecStart=scx_flatcg
+Restart=always
+StandardOutput=null
+
+[Install]
+WantedBy=multi-user.target

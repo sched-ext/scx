@@ -16,3 +16,9 @@ option('enable_rust', type: 'boolean', value: 'true',
        description: 'Enable rust sub-projects')
 option('kernel', type: 'string', value: 'vmlinuz',
        description: 'kernel image used to test schedulers')
+option(
+  'systemd',
+  type: 'feature',
+  value: 'auto',
+  description: 'sd-notify support via libsystemd and install systemd unit files'
+)

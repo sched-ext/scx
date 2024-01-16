@@ -1,0 +1,12 @@
+[Unit]
+Description=Start scx_central
+ConditionPathExists=/sys/kernel/debug/sched/ext
+
+[Service]
+Type=simple
+ExecStart=scx_central
+Restart=always
+StandardOutput=null
+
+[Install]
+WantedBy=multi-user.target

@@ -158,3 +158,9 @@ if get_option('enable_rust')
   subdir('rust')
 endif
 subdir('scheds')
+
+systemd = dependency('systemd', required: get_option('systemd'))
+
+if systemd.found()
+  subdir('services')
+endif
