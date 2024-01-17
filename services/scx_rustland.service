@@ -6,7 +6,6 @@ ConditionPathExists=/sys/kernel/debug/sched/ext
 Type=simple
 ExecStart=scx_rustland
 Restart=always
-StandardOutput=journal
 StandardError=journal
 LogNamespace=sched-ext
 

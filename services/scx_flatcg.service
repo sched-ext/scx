@@ -6,7 +6,6 @@ ConditionPathExists=/sys/kernel/debug/sched/ext
 Type=simple
 ExecStart=scx_flatcg
 Restart=always
-StandardOutput=journal
 StandardError=journal
 LogNamespace=sched-ext
 
