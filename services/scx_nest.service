@@ -6,7 +6,8 @@ ConditionPathExists=/sys/kernel/debug/sched/ext
 Type=simple
 ExecStart=scx_nest
 Restart=always
-StandardOutput=null
+StandardError=journal
+LogNamespace=sched-ext
 
 [Install]
 WantedBy=multi-user.target
