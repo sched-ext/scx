@@ -273,30 +273,30 @@ impl<'a> Scheduler<'a> {
             .map(|cpu_id| self.bpf.get_cpu_pid(cpu_id))
             .collect();
 
-        // Create a Vec of tuples containing core id and the number of busy CPU ids for each core.
-        let mut core_status: Vec<(i32, usize)> = cores
+        // Generate the list of idle cores (cores that don't have any task running on their CPUs).
+        let core_idle: Vec<i32> = cores
             .iter()
-            .map(|(&core_id, core_cpus)| {
-                let busy_cpus = core_cpus
-                    .iter()
-                    .filter(|&&cpu_id| cpu_pid_map[cpu_id as usize] > 0)
-                    .count();
-                (core_id, busy_cpus)
+            .filter_map(|(&core_id, core_cpus)| {
+                if core_cpus.iter().all(|&cpu_id| cpu_pid_map[cpu_id as usize] == 0) {
+                    Some(core_id)
+                } else {
+                    None
+                }
             })
             .collect();
 
-        // Sort the Vec based on the number of busy CPUs in ascending order (free cores first).
-        core_status.sort_by(|a, b| a.1.cmp(&b.1));
-
-        // Generate the list of idle CPU ids, ordered by the number of busy siblings (ascending).
-        let idle_cpus: Vec<i32> = core_status
+        // Generate the list of idle CPU IDs by selecting the first item from each list of CPU IDs
+        // associated to the idle cores. The remaining sibling CPUs will be used as spare/emergency
+        // CPUs by the BPF dispatcher.
+        //
+        // This prevents overloading cores on SMT systems, improving the overall system
+        // responsiveness and it also improves scheduler stability: using the remaining sibling
+        // CPUs as spare CPUs ensures that the BPF dispatcher will always have some available CPUs
+        // that can be used in emergency conditions (e.g., when the target CPU for a task cannot be
+        // used, in presence of cpumask restrictions).
+        let idle_cpus: Vec<i32> = core_idle
             .iter()
-            .flat_map(|&(core_id, _)| {
-                cores[&core_id]
-                    .iter()
-                    .filter(|&&cpu_id| cpu_pid_map[cpu_id as usize] == 0)
-                    .cloned()
-            })
+            .flat_map(|&core_id| cores[&core_id].iter().take(1).cloned())
             .collect();
 
         // Return the list of idle CPUs.
