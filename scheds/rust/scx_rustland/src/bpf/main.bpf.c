@@ -572,14 +572,8 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 	 * A CPU is now available, notify the user-space scheduler that tasks
 	 * can be dispatched.
 	 */
-	if (is_usersched_needed()) {
-		/*
-		 * Kick the CPU to make it immediately ready to accept
-		 * dispatched tasks.
-		 */
-		scx_bpf_kick_cpu(cpu, 0);
+	if (is_usersched_needed())
 		set_usersched_needed();
-	}
 }
 
 /*
