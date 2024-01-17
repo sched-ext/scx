@@ -107,9 +107,6 @@ struct pcpu_ctx {
 
 	/* Whether the current core has been scheduled for compaction. */
 	bool scheduled_compaction;
-
-	/* Number of times a primary core has been scheduled for compaction. */
-	u32 num_schedulings;
 };
 
 struct {
@@ -195,6 +192,39 @@ static void update_attached(struct task_ctx *tctx, s32 prev_cpu, s32 new_cpu)
 	if (tctx->prev_cpu == new_cpu)
 		tctx->attached_core = new_cpu;
 	tctx->prev_cpu = prev_cpu;
+}
+
+static int compact_primary_core(void *map, int *key, struct bpf_timer *timer)
+{
+	struct bpf_cpumask *primary, *reserve;
+	s32 cpu = bpf_get_smp_processor_id();
+	struct pcpu_ctx *pcpu_ctx;
+
+	stat_inc(NEST_STAT(CALLBACK_COMPACTED));
+	/*
+	 * If we made it to this callback, it means that the timer callback was
+	 * never cancelled, and so the core needs to be demoted from the
+	 * primary nest.
+	 */
+	pcpu_ctx = bpf_map_lookup_elem(&pcpu_ctxs, &cpu);
+	if (!pcpu_ctx) {
+		scx_bpf_error("Couldn't lookup pcpu ctx");
+		return 0;
+	}
+	bpf_rcu_read_lock();
+	primary = primary_cpumask;
+	reserve = reserve_cpumask;
+	if (!primary || !reserve) {
+		scx_bpf_error("Couldn't find primary or reserve");
+		bpf_rcu_read_unlock();
+		return 0;
+	}
+
+	bpf_cpumask_clear_cpu(cpu, primary);
+	try_make_core_reserved(cpu, reserve, false);
+	bpf_rcu_read_unlock();
+	pcpu_ctx->scheduled_compaction = false;
+	return 0;
 }
 
 s32 BPF_STRUCT_OPS(nest_select_cpu, struct task_struct *p, s32 prev_cpu,
@@ -344,6 +374,8 @@ migrate_primary:
 		if (pcpu_ctx->scheduled_compaction) {
 			if (bpf_timer_cancel(&pcpu_ctx->timer) < 0)
 				scx_bpf_error("Failed to cancel pcpu timer");
+			if (bpf_timer_set_callback(&pcpu_ctx->timer, compact_primary_core))
+				scx_bpf_error("Failed to re-arm pcpu timer");
 			pcpu_ctx->scheduled_compaction = false;
 			stat_inc(NEST_STAT(CANCELLED_COMPACTION));
 		}
@@ -425,10 +457,8 @@ void BPF_STRUCT_OPS(nest_dispatch, s32 cpu, struct task_struct *prev)
 		stat_inc(NEST_STAT(NOT_CONSUMED));
 		if (in_primary) {
 			/*
-			 * Immediately demote a primary core if:
-			 * - It's been scheduled for compaction at least
-			 *   r_depth times without actually being compacted.
-			 * - The previous task on it is dying
+			 * Immediately demote a primary core if the previous
+			 * task on it is dying
 			 *
 			 * Note that we elect to not compact the "first" CPU in
 			 * the mask so as to encourage at least one core to
@@ -437,12 +467,11 @@ void BPF_STRUCT_OPS(nest_dispatch, s32 cpu, struct task_struct *prev)
 			 * nest, but BPF doesn't yet have a kfunc for querying
 			 * cpumask weight.
 			 */
-			if ((prev && prev->__state == TASK_DEAD) ||
-			    (cpu != bpf_cpumask_first(cast_mask(primary)) && pcpu_ctx->num_schedulings >= r_depth)) {
+			if ((prev && prev->__state == TASK_DEAD) &&
+			    (cpu != bpf_cpumask_first(cast_mask(primary)))) {
 				stat_inc(NEST_STAT(EAGERLY_COMPACTED));
 				bpf_cpumask_clear_cpu(cpu, primary);
 				try_make_core_reserved(cpu, reserve, false);
-				pcpu_ctx->num_schedulings = 0;
 			} else  {
 				pcpu_ctx->scheduled_compaction = true;
 				/*
@@ -452,14 +481,12 @@ void BPF_STRUCT_OPS(nest_dispatch, s32 cpu, struct task_struct *prev)
 				 */
 				bpf_timer_start(&pcpu_ctx->timer, p_remove_ns,
 						BPF_F_TIMER_CPU_PIN);
-				pcpu_ctx->num_schedulings++;
 				stat_inc(NEST_STAT(SCHEDULED_COMPACTION));
 			}
 		}
 		return;
 	}
 	stat_inc(NEST_STAT(CONSUMED));
-	pcpu_ctx->num_schedulings = 0;
 }
 
 void BPF_STRUCT_OPS(nest_running, struct task_struct *p)
@@ -512,40 +539,6 @@ s32 BPF_STRUCT_OPS(nest_init_task, struct task_struct *p,
 void BPF_STRUCT_OPS(nest_enable, struct task_struct *p)
 {
 	p->scx.dsq_vtime = vtime_now;
-}
-
-static int compact_primary_core(void *map, int *key, struct bpf_timer *timer)
-{
-	struct bpf_cpumask *primary, *reserve;
-	s32 cpu = bpf_get_smp_processor_id();
-	struct pcpu_ctx *pcpu_ctx;
-
-	stat_inc(NEST_STAT(CALLBACK_COMPACTED));
-	/*
-	 * If we made it to this callback, it means that the timer callback was
-	 * never cancelled, and so the core needs to be demoted from the
-	 * primary nest.
-	 */
-	pcpu_ctx = bpf_map_lookup_elem(&pcpu_ctxs, &cpu);
-	if (!pcpu_ctx) {
-		scx_bpf_error("Couldn't lookup pcpu ctx");
-		return 0;
-	}
-	bpf_rcu_read_lock();
-	primary = primary_cpumask;
-	reserve = reserve_cpumask;
-	if (!primary || !reserve) {
-		scx_bpf_error("Couldn't find primary or reserve");
-		bpf_rcu_read_unlock();
-		return 0;
-	}
-
-	bpf_cpumask_clear_cpu(cpu, primary);
-	try_make_core_reserved(cpu, reserve, false);
-	bpf_rcu_read_unlock();
-	pcpu_ctx->num_schedulings = 0;
-	pcpu_ctx->scheduled_compaction = false;
-	return 0;
 }
 
 static int stats_timerfn(void *map, int *key, struct bpf_timer *timer)
@@ -636,8 +629,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(nest_init)
 			scx_bpf_error("Failed to initialize pcpu timer");
 			return -EINVAL;
 		}
-		ctx->num_schedulings  = 0;
-		bpf_timer_set_callback(&ctx->timer, compact_primary_core);
+		err = bpf_timer_set_callback(&ctx->timer, compact_primary_core);
+		if (err) {
+			scx_bpf_error("Failed to set pcpu timer callback");
+			return -EINVAL;
+		}
 	}
 
 	timer = bpf_map_lookup_elem(&stats_timer, &key);
