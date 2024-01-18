@@ -10,17 +10,13 @@ jobs:
       # Hard turn-off interactive mode
       - run: echo 'debconf debconf/frontend select Noninteractive' | sudo debconf-set-selections
 
-      # Add sched-ext external ppa to get the latest sched-ext kernel
-      - run: sudo add-apt-repository -n -y ppa:arighi/sched-ext-unstable
-      - run: sudo sed -i s/jammy/noble/ /etc/apt/sources.list.d/arighi-ubuntu-sched-ext-unstable-jammy.list
-
       # Refresh packages list
       - run: sudo apt update
 
       ### DOWNLOAD AND INSTALL DEPENDENCIES ###
 
       # Download dependencies packaged by Ubuntu
-      - run: sudo apt -y install coreutils cmake cargo elfutils libelf-dev libunwind-dev libzstd-dev linux-headers-generic linux-tools-common linux-tools-generic ninja-build python3-pip python3-requests qemu-kvm udev iproute2 busybox-static libvirt-clients kbd kmod file rsync zstd
+      - run: sudo apt -y install bison busybox-static cargo cmake coreutils cpio elfutils file flex gcc git iproute2 kbd kmod libcap-dev libelf-dev libunwind-dev libvirt-clients libzstd-dev linux-headers-generic linux-tools-common linux-tools-generic make ninja-build pahole python3-dev python3-pip python3-requests qemu-kvm rsync rustc udev zstd
 
       # clang 17
       # Use a custom llvm.sh script which includes the -y flag for
@@ -51,16 +47,23 @@ jobs:
       # Install virtme-ng
       - run: pip install virtme-ng
 
-      # Download a sched-ext enabled kernel
-      - run: apt download linux-image-unsigned-6.7.0-4-generic linux-modules-6.7.0-4-generic
-      - run: mkdir -p kernel
-      - run: for f in *.deb; do dpkg -x $f kernel; done
+      # Get the latest sched-ext enabled kernel directly from the git
+      # repository (try the sched_ext-ci branch first, if it doesn't exist use
+      # sched_ext)
+      - run: git clone --single-branch -b sched_ext-ci --depth 1 https://github.com/sched-ext/sched_ext.git linux || git clone --single-branch -b sched_ext --depth 1 https://github.com/sched-ext/sched_ext.git linux
+
+      # Build a minimal kernel (with sched-ext enabled) using virtme-ng
+      - run: cd linux && vng -v --build --config .github/workflows/sched-ext.config
 
       ### END DEPENDENCIES ###
 
       # The actual build:
-      - run: meson setup build -Dlibbpf_a=`pwd`/libbpf/src/libbpf.a -Dkernel=$(pwd)/$(ls -c1 kernel/boot/vmlinuz* | tail -1)
+      - run: meson setup build -Dlibbpf_a=`pwd`/libbpf/src/libbpf.a -Dkernel=$(pwd)/linux
       - run: meson compile -C build
+
+      # Print CPU model before running the tests (this can be useful for
+      # debugging purposes)
+      - run: grep 'model name' /proc/cpuinfo | head -1
 
       # Test schedulers
       - run: meson compile -C build test_sched
