@@ -105,7 +105,7 @@ const volatile bool debug;
  * The @queued and @dispatched lists are used in a producer/consumer fashion
  * between the BPF part and the user-space part.
  */
-#define MAX_ENQUEUED_TASKS 1024
+#define MAX_ENQUEUED_TASKS 8192
 
 /*
  * The map containing tasks that are queued to user space from the kernel.
