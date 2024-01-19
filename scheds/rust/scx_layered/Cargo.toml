@@ -3,7 +3,7 @@ name = "scx_layered"
 version = "0.0.4"
 authors = ["Tejun Heo <htejun@meta.com>", "Meta"]
 edition = "2021"
-description = "Userspace scheduling with BPF for Ads"
+description = "A highly configurable multi-layer BPF / user space hybrid scheduler used within sched_ext, which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. https://github.com/sched-ext/scx/tree/main"
 license = "GPL-2.0-only"
 
 [dependencies]
