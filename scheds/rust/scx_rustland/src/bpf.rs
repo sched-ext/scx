@@ -380,5 +380,6 @@ impl<'a> Drop for BpfScheduler<'a> {
         if let Some(struct_ops) = self.struct_ops.take() {
             drop(struct_ops);
         }
+        ALLOCATOR.unlock_memory();
     }
 }
