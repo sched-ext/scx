@@ -259,15 +259,6 @@ static bool is_usersched_needed(void)
 }
 
 /*
- * Dispatch a task on its local per-CPU FIFO.
- */
-static void dispatch_local(struct task_struct *p, u64 enq_flags)
-{
-	dbg_msg("dispatch: pid=%d (%s) cpu=local", p->pid, p->comm);
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
-}
-
-/*
  * Get a valid CPU to dispatch a task.
  *
  * First we check if the designated CPU is available, otherwise we check if the
@@ -330,7 +321,21 @@ static void dispatch_task(struct task_struct *p, s32 cpu, u64 enq_flags)
 		return;
 	}
 	dbg_msg("dispatch: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, slice, enq_flags);
+	scx_bpf_dispatch(p, cpu, slice, enq_flags);
+	/*
+	 * Wake-up the target CPU, so the task can immediately run.
+	 */
+	scx_bpf_kick_cpu(cpu, 0);
+}
+
+/*
+ * Dispatch a task on its local per-CPU FIFO.
+ */
+static void dispatch_local(struct task_struct *p, u64 enq_flags)
+{
+	s32 cpu = scx_bpf_task_cpu(p);
+
+	dispatch_task(p, cpu, enq_flags);
 }
 
 /*
@@ -418,9 +423,11 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 
 	/*
 	 * Always dispatch per-CPU kthreads on the same CPU, bypassing the
-	 * user-space scheduler (in this way we can to prioritize critical
-	 * kernel threads that may potentially slow down the entire system if
-	 * they are blocked for too long).
+	 * user-space scheduler.
+	 *
+	 * In this way we can prioritize critical kernel threads that may
+	 * potentially slow down the entire system if they are blocked for too
+	 * long (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
 		dispatch_local(p, enq_flags);
@@ -429,8 +436,8 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Other tasks can be added to the @queued list and they will be
-	 * processed by the user-space scheduler.
+	 * Add tasks to the @queued list, they will be processed by the
+	 * user-space scheduler.
 	 *
 	 * If @queued list is full (user-space scheduler is congested) tasks
 	 * will be dispatched directly from the kernel (re-using their
@@ -513,8 +520,14 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		dbg_msg("usersched: pid=%d cpu=%d payload=%llu",
 			task.pid, task.cpu, task.payload);
 		dispatch_task(p, task.cpu, 0);
-		__sync_fetch_and_add(&nr_user_dispatches, 1);
 		bpf_task_release(p);
+		__sync_fetch_and_add(&nr_user_dispatches, 1);
+	}
+
+	/* Consume all tasks enqueued in the current CPU's DSQ */
+	bpf_repeat(MAX_ENQUEUED_TASKS) {
+		if (!scx_bpf_consume(cpu))
+			break;
 	}
 }
 
@@ -655,17 +668,48 @@ static int usersched_timer_init(void)
 }
 
 /*
+ * Create a custom DSQ for each CPU available in the system.
+ *
+ * All the tasks processed by the user-space scheduler will be always
+ * dispatched on the custom DSQ associated to the CPU selected by the
+ * user-space scheduler.
+ *
+ * Custom DSQs are then consumed from the .dispatch() callback, that
+ * will transfer all the enqueued tasks to the consuming CPU's local
+ * DSQ.
+ */
+static int dsq_init(void)
+{
+	int err;
+	s32 cpu;
+
+	bpf_for(cpu, 0, num_possible_cpus) {
+		err = scx_bpf_create_dsq(cpu, -1);
+		if (err) {
+			scx_bpf_error("failed to create pcpu DSQ %d: %d", cpu, err);
+			return err;
+		}
+	}
+
+	return 0;
+}
+
+/*
  * Initialize the scheduling class.
  */
 s32 BPF_STRUCT_OPS_SLEEPABLE(rustland_init)
 {
 	int err;
 
+	err = dsq_init();
+	if (err)
+		return err;
 	err = usersched_timer_init();
 	if (err)
 		return err;
         if (!switch_partial)
 		scx_bpf_switch_all();
+
 	return 0;
 }
 
