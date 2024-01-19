@@ -11,6 +11,6 @@ systemd_system_unit_dir = systemd.get_variable(pkgconfig : 'systemdsystemunitdir
     [
       'journald@sched-ext.conf',
     ],
-    install_dir: '/etc/systemd/journald@sched-ext.conf.d'
+    install_dir: '/etc/systemd'
   )
 
