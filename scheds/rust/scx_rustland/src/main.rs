@@ -319,7 +319,7 @@ impl<'a> Scheduler<'a> {
         task_info: &mut TaskInfo,
         sum_exec_runtime: u64,
         nvcsw: u64,
-        weight: u64,
+        mut weight: u64,
         min_vruntime: u64,
         slice_ns: u64,
         slice_boost: u64,
@@ -344,10 +344,10 @@ impl<'a> Scheduler<'a> {
         // per seconds.
         //
         // NOTE: we should probably make the (delta_nvcsw / delta_t) threshold a tunable, but for
-        // now let's assume that 1 voluntary context switch over the last 10 seconds is enough to
-        // assume that the task is interactive.
+        // now let's pretend that an average of 1 voluntary context switch per second, over the
+        // last 10 seconds, is enough to assume that the task is interactive.
         fn is_interactive_task(delta_nvcsw: u64, delta_ns: u64) -> bool {
-            delta_nvcsw / (delta_ns / (10 * NSEC_PER_SEC)).max(1) > 0
+            delta_nvcsw * 10 * NSEC_PER_SEC / delta_ns.max(1) >= 10
         }
 
         // Evaluate last time slot used by the task.
@@ -362,7 +362,7 @@ impl<'a> Scheduler<'a> {
 
         // Apply the slice boost to interactive tasks.
         if is_interactive_task(nvcsw - task_info.nvcsw, now - task_info.nvcsw_ts) {
-            slice /= slice_boost;
+            weight *= slice_boost;
         }
 
         // Scale the time slice by the task's priority (weight).
