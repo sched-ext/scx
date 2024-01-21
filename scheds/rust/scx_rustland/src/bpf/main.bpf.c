@@ -590,6 +590,23 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 }
 
 /*
+ * A CPU is taken away from the scheduler, preempting the current task by
+ * another one running in a higher priority sched_class.
+ */
+void BPF_STRUCT_OPS(rustland_cpu_release, s32 cpu,
+				struct scx_cpu_release_args *args)
+{
+	struct task_struct *p = args->task;
+	/*
+	 * If the interrupted task is the user-space scheduler make sure to
+	 * re-schedule it immediately.
+	 */
+	dbg_msg("cpu preemption: pid=%d (%s)", p->pid, p->comm);
+	if (is_usersched_task(p))
+		set_usersched_needed();
+}
+
+/*
  * Task @p is exiting.
  *
  * Notify the user-space scheduler that we can free up all the allocated
@@ -733,6 +750,7 @@ struct sched_ext_ops rustland = {
 	.running		= (void *)rustland_running,
 	.stopping		= (void *)rustland_stopping,
 	.update_idle		= (void *)rustland_update_idle,
+	.cpu_release		= (void *)rustland_cpu_release,
 	.exit_task		= (void *)rustland_exit_task,
 	.init			= (void *)rustland_init,
 	.exit			= (void *)rustland_exit,
