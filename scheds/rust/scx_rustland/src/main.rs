@@ -95,7 +95,7 @@ struct Opts {
     /// Default time slice boost is 100, which means interactive tasks will get a 100x priority
     /// boost to run respect to non-interactive tasks.
     ///
-    /// Use "1" to disable time slice boost and fallback to the standard vruntime-based scheduling.
+    /// Use "0" to disable time slice boost and fallback to the standard vruntime-based scheduling.
     #[clap(short = 'b', long, default_value = "100")]
     slice_boost: u64,
 
@@ -221,8 +221,8 @@ impl<'a> Scheduler<'a> {
         // Save the default time slice (in ns) in the scheduler class.
         let slice_ns = opts.slice_us * MSEC_PER_SEC;
 
-        // Slice booster (must be >= 1).
-        let slice_boost = opts.slice_boost.max(1);
+        // Slice booster (0 = disabled).
+        let slice_boost = opts.slice_boost;
         let eff_slice_boost = slice_boost;
 
         // Scheduler task pool to sort tasks by vruntime.
