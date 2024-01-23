@@ -105,7 +105,7 @@ const volatile bool debug;
  * The @queued and @dispatched lists are used in a producer/consumer fashion
  * between the BPF part and the user-space part.
  */
-#define MAX_ENQUEUED_TASKS 1024
+#define MAX_ENQUEUED_TASKS 8192
 
 /*
  * The map containing tasks that are queued to user space from the kernel.
@@ -259,78 +259,31 @@ static bool is_usersched_needed(void)
 }
 
 /*
- * Dispatch a task on its local per-CPU FIFO.
+ * Dispatch a task and wake-up a target CPU.
  */
-static void dispatch_local(struct task_struct *p, u64 enq_flags)
-{
-	dbg_msg("dispatch: pid=%d (%s) cpu=local", p->pid, p->comm);
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
-}
-
-/*
- * Get a valid CPU to dispatch a task.
- *
- * First we check if the designated CPU is available, otherwise we check if the
- * previously used CPU is still available (trying to reduce migrations), if
- * both are busy return a random CPU available according to the bitmask, or
- * -ENOENT if none of the allowed CPUs are available.
- */
-static s32 get_task_cpu(struct task_struct *p, s32 cpu)
-{
-	if (cpu < 0)
-		return cpu;
-	/*
-	 * Check if the designated CPU can be used to dispatch the task.
-	 */
-	if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-		return cpu;
-
-	/*
-	 * The designated CPU is unavailable, check if the previously used CPU
-	 * is available.
-	 */
-	cpu = scx_bpf_task_cpu(p);
-	if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-		return cpu;
-
-	/*
-	 * Otherwise get a random CPU available according to the cpumask.
-	 * Return -ENOENT if no CPU is available.
-	 */
-	cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
-	return cpu < num_possible_cpus ? cpu : -ENOENT;
-}
-
-/*
- * Dispatch a task on a target CPU.
- *
- * If it's not possible to dispatch on the selected CPU, try to re-use the
- * previously used one, if that one is also not usable dispatch to the global
- * DSQ.
- */
-static void dispatch_task(struct task_struct *p, s32 cpu, u64 enq_flags)
+static void
+dispatch_task(struct task_struct *p, s32 cpu, u64 enq_flags)
 {
 	u64 slice = __sync_fetch_and_add(&effective_slice_ns, 0) ? : slice_ns;
 
-	cpu = get_task_cpu(p, cpu);
-	if (cpu < 0) {
-		/*
-		 * We couldn't find any available CPU that can be used
-		 * immediately to dispatch the task.
-		 *
-		 * This is not necessarily a problem, using the global DSQ will
-		 * give a small performance penalty to the task (because it
-		 * needs to wait for the local DSQ to be drained). So for now
-		 * simply report the event as a "dispatch failure" and keep
-		 * going.
-		 */
-		dbg_msg("dispatch: pid=%d (%s) cpu=any", p->pid, p->comm);
-		__sync_fetch_and_add(&nr_failed_dispatches, 1);
-		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice, enq_flags);
-		return;
-	}
+	/*
+	 * Wake-up the CPU selected by the scheduler, so the task will have
+	 * more chances to transition there.
+	 */
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, 0);
 	dbg_msg("dispatch: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, slice, enq_flags);
+	scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice, enq_flags);
+}
+
+/*
+ * Dispatch a task on its local CPU.
+ */
+static void dispatch_local(struct task_struct *p, u64 enq_flags)
+{
+	s32 cpu = scx_bpf_task_cpu(p);
+
+	dispatch_task(p, cpu, enq_flags);
 }
 
 /*
@@ -350,23 +303,16 @@ static void dispatch_task(struct task_struct *p, s32 cpu, u64 enq_flags)
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	/*
-	 * Always try to keep the tasks on the same CPU (unless the user-space
-	 * scheduler decides otherwise).
-	 *
-	 * Check if the previously used CPU is idle, in this case we can
-	 * dispatch directly here, bypassing the user-space scheduler.
-	 *
-	 * However, do not bypass the user-space scheduler if there are pending
-	 * activities, otherwise, we may risk disrupting the scheduler's
-	 * decisions and negatively affecting the overall system performance.
-	 */
-	if (!is_usersched_needed() && !get_cpu_owner(prev_cpu)) {
+	bool is_idle = false;
+	s32 cpu;
+
+	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+	if (is_idle) {
 		dispatch_local(p, 0);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	}
 
-	return prev_cpu;
+	return cpu;
 }
 
 /*
@@ -418,9 +364,11 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 
 	/*
 	 * Always dispatch per-CPU kthreads on the same CPU, bypassing the
-	 * user-space scheduler (in this way we can to prioritize critical
-	 * kernel threads that may potentially slow down the entire system if
-	 * they are blocked for too long).
+	 * user-space scheduler.
+	 *
+	 * In this way we can prioritize critical kernel threads that may
+	 * potentially slow down the entire system if they are blocked for too
+	 * long (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
 		dispatch_local(p, enq_flags);
@@ -429,8 +377,8 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Other tasks can be added to the @queued list and they will be
-	 * processed by the user-space scheduler.
+	 * Add tasks to the @queued list, they will be processed by the
+	 * user-space scheduler.
 	 *
 	 * If @queued list is full (user-space scheduler is congested) tasks
 	 * will be dispatched directly from the kernel (re-using their
@@ -440,7 +388,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	dbg_msg("enqueue: pid=%d (%s)", p->pid, p->comm);
 	if (bpf_map_push_elem(&queued, &task, 0)) {
 		sched_congested(p);
-		dispatch_task(p, -1, enq_flags);
+		dispatch_local(p, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -512,9 +460,13 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		 */
 		dbg_msg("usersched: pid=%d cpu=%d payload=%llu",
 			task.pid, task.cpu, task.payload);
+		/*
+		 * Update task vruntime with the value determined by the
+		 * user-space scheduler.
+		 */
 		dispatch_task(p, task.cpu, 0);
-		__sync_fetch_and_add(&nr_user_dispatches, 1);
 		bpf_task_release(p);
+		__sync_fetch_and_add(&nr_user_dispatches, 1);
 	}
 }
 
@@ -573,6 +525,23 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 	 * can be dispatched.
 	 */
 	if (is_usersched_needed())
+		set_usersched_needed();
+}
+
+/*
+ * A CPU is taken away from the scheduler, preempting the current task by
+ * another one running in a higher priority sched_class.
+ */
+void BPF_STRUCT_OPS(rustland_cpu_release, s32 cpu,
+				struct scx_cpu_release_args *args)
+{
+	struct task_struct *p = args->task;
+	/*
+	 * If the interrupted task is the user-space scheduler make sure to
+	 * re-schedule it immediately.
+	 */
+	dbg_msg("cpu preemption: pid=%d (%s)", p->pid, p->comm);
+	if (is_usersched_task(p))
 		set_usersched_needed();
 }
 
@@ -666,6 +635,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rustland_init)
 		return err;
         if (!switch_partial)
 		scx_bpf_switch_all();
+
 	return 0;
 }
 
@@ -689,10 +659,11 @@ struct sched_ext_ops rustland = {
 	.running		= (void *)rustland_running,
 	.stopping		= (void *)rustland_stopping,
 	.update_idle		= (void *)rustland_update_idle,
+	.cpu_release		= (void *)rustland_cpu_release,
 	.exit_task		= (void *)rustland_exit_task,
 	.init			= (void *)rustland_init,
 	.exit			= (void *)rustland_exit,
-	.flags			= SCX_OPS_ENQ_LAST,
+	.flags			= SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
 	.timeout_ms		= 5000,
 	.name			= "rustland",
 };

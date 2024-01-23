@@ -5,6 +5,8 @@
 
 use std::alloc::{GlobalAlloc, Layout};
 use std::cell::UnsafeCell;
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
 use std::sync::{Mutex, MutexGuard};
 
 /// scx_rustland: memory allocator.
@@ -44,6 +46,71 @@ static MEMORY: RustLandMemory = RustLandMemory {
     allocation_map: Mutex::new([false; NUM_BLOCKS]),
 };
 
+// State of special sysctl VM settings.
+//
+// This is used to save the previous state of some procfs settings that must be changed by the
+// user-space scheduler.
+struct VmSettings {
+    // We cannot allow page faults in the user-space scheduler, otherwise we may hit deadlock
+    // conditions: a kthread may need to run to resolve the page fault, but the user-space
+    // scheduler is waiting on the page fault to be resolved => deadlock.
+    //
+    // To prevent this from happening automatically enforce vm.compact_unevictable_allowed=0 when
+    // the scheduler is running, to disable compaction of unevictable memory pages and make sure
+    // that the scheduler never faults.
+    //
+    // The original value will be restored when the user-space scheduler exits.
+    compact_unevictable_allowed: i32,
+}
+
+impl VmSettings {
+    // Return the content of a procfs file as i32.
+    fn read_procfs(&self, file_path: &str) -> i32 {
+        let file = File::open(file_path).expect(&format!("Failed to open {}", file_path));
+        let reader = BufReader::new(file);
+
+        if let Some(Ok(line)) = reader.lines().next() {
+            let value: i32 = match line.trim().parse() {
+                Ok(v) => v,
+                Err(_) => panic!("Failed to parse {}", file_path),
+            };
+
+            value
+        } else {
+            panic!("empty {}", file_path);
+        }
+    }
+
+    // Write an i32 to a file in procfs.
+    fn write_procfs(&self, file_path: &str, value: i32) {
+        let mut file = File::create(file_path).expect(&format!("Failed to open {}", file_path));
+        file.write_all(value.to_string().as_bytes())
+            .expect(&format!("Failed to write to {}", file_path));
+    }
+
+    // Save all the sysctl VM settings in the internal state.
+    fn save(&self) {
+        let compact_unevictable_allowed = "/proc/sys/vm/compact_unevictable_allowed";
+        let value = self.read_procfs(compact_unevictable_allowed);
+        unsafe {
+            VM.compact_unevictable_allowed = value;
+        };
+        self.write_procfs(compact_unevictable_allowed, 0);
+    }
+
+    // Restore all the previous sysctl vm settings.
+    fn restore(&self) {
+        let compact_unevictable_allowed = "/proc/sys/vm/compact_unevictable_allowed";
+        let value = unsafe { VM.compact_unevictable_allowed };
+        self.write_procfs(compact_unevictable_allowed, value);
+    }
+}
+
+// Special sysctl VM settings.
+static mut VM: VmSettings = VmSettings {
+    compact_unevictable_allowed: 0,
+};
+
 // Main allocator class.
 pub struct RustLandAllocator;
 
@@ -58,6 +125,8 @@ impl RustLandAllocator {
 
     pub fn lock_memory(&self) {
         unsafe {
+            VM.save();
+
             // Call setrlimit to set the locked-in-memory limit to unlimited.
             let new_rlimit = libc::rlimit {
                 rlim_cur: libc::RLIM_INFINITY,
@@ -73,6 +142,12 @@ impl RustLandAllocator {
             if res != 0 {
                 panic!("mlockall failed with error code: {}", res);
             }
+        };
+    }
+
+    pub fn unlock_memory(&self) {
+        unsafe {
+            VM.restore();
         };
     }
 }
@@ -91,9 +166,7 @@ unsafe impl GlobalAlloc for RustLandAllocator {
         for (block, &is_allocated) in map_guard.iter().enumerate() {
             // Reset consecutive blocks count if an allocated block is encountered or if the
             // first block is not aligned to the requested alignment.
-            if is_allocated
-                || (contiguous_blocks == 0 && !self.is_aligned(block, align))
-            {
+            if is_allocated || (contiguous_blocks == 0 && !self.is_aligned(block, align)) {
                 contiguous_blocks = 0;
             } else {
                 contiguous_blocks += 1;
