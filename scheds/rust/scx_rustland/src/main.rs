@@ -260,10 +260,10 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    // Returns the list of idle CPUs, sorted by the amount of free sibling CPUs in the same core.
+    // Returns the list of idle CPUs.
     //
-    // In this way we can schedule first on the CPUs that are "more free" than others, maximizing
-    // performance in presence of SMT cores.
+    // On SMT systems consider only one CPU for each fully idle core, to avoid disrupting
+    // performnance too much by running multiple tasks in the same core.
     fn get_idle_cpus(&self) -> Vec<i32> {
         let cores = &self.cores.map;
         let num_cpus = self.cores.nr_cpus_online;
@@ -273,8 +273,15 @@ impl<'a> Scheduler<'a> {
             .map(|cpu_id| self.bpf.get_cpu_pid(cpu_id))
             .collect();
 
-        // Generate the list of idle cores (cores that don't have any task running on their CPUs).
-        let core_idle: Vec<i32> = cores
+        // Generate the list of idle CPU IDs by selecting the first item from each list of CPU IDs
+        // associated to the idle cores. The remaining sibling CPUs will be used as spare/emergency
+        // CPUs by the BPF dispatcher.
+        //
+        // This prevents overloading cores on SMT systems, improving the overall system
+        // responsiveness and it also improves scheduler stability: using the remaining sibling
+        // CPUs as spare CPUs ensures that the BPF dispatcher will always have some available CPUs
+        // that can be used in emergency conditions.
+        let idle_cores: Vec<i32> = cores
             .iter()
             .filter_map(|(&core_id, core_cpus)| {
                 if core_cpus
@@ -288,22 +295,7 @@ impl<'a> Scheduler<'a> {
             })
             .collect();
 
-        // Generate the list of idle CPU IDs by selecting the first item from each list of CPU IDs
-        // associated to the idle cores. The remaining sibling CPUs will be used as spare/emergency
-        // CPUs by the BPF dispatcher.
-        //
-        // This prevents overloading cores on SMT systems, improving the overall system
-        // responsiveness and it also improves scheduler stability: using the remaining sibling
-        // CPUs as spare CPUs ensures that the BPF dispatcher will always have some available CPUs
-        // that can be used in emergency conditions (e.g., when the target CPU for a task cannot be
-        // used, in presence of cpumask restrictions).
-        let idle_cpus: Vec<i32> = core_idle
-            .iter()
-            .flat_map(|&core_id| cores[&core_id].iter().take(1).cloned())
-            .collect();
-
-        // Return the list of idle CPUs.
-        idle_cpus
+        idle_cores.iter().map(|&core| cores[&core][0]).collect()
     }
 
     // Return current timestamp in ns.
@@ -318,16 +310,7 @@ impl<'a> Scheduler<'a> {
     // evaluated weighted time slice to the caller.
     //
     // This method implements the main task ordering logic of the scheduler.
-    fn update_enqueued(
-        task_info: &mut TaskInfo,
-        sum_exec_runtime: u64,
-        nvcsw: u64,
-        mut weight: u64,
-        min_vruntime: u64,
-        slice_ns: u64,
-        slice_boost: u64,
-        now: u64,
-    ) {
+    fn update_enqueued(&mut self, task: &QueuedTask) -> u64 {
         // Determine if a task is new or old, based on their current runtime and previous runtime
         // counters.
         //
@@ -353,20 +336,57 @@ impl<'a> Scheduler<'a> {
             delta_nvcsw * 10 * NSEC_PER_SEC / delta_ns.max(1) >= 10
         }
 
+        // Cache the current timestamp.
+        let now = Self::now();
+
+        // Get the current effective time slice.
+        let slice_ns = self.bpf.get_effective_slice_us() * MSEC_PER_SEC;
+
+        // Update dynamic slice boost.
+        //
+        // The slice boost is dynamically adjusted as a function of the amount of CPUs
+        // in the system and the amount of tasks currently waiting to be dispatched.
+        //
+        // As the amount of waiting tasks in the task_pool increases we should reduce
+        // the slice boost to enforce the scheduler to apply a pure vruntime-based
+        // policy.
+        //
+        // This allows to survive stress tests that are spawning a massive amount of
+        // tasks.
+        self.eff_slice_boost = (self.slice_boost * self.cores.nr_cpus_online as u64
+            / self.task_pool.tasks.len().max(1) as u64)
+            .max(1);
+
+        // Get task information if the task is already stored in the task map,
+        // otherwise create a new entry for it.
+        let task_info = self
+            .task_map
+            .tasks
+            .entry(task.pid)
+            .or_insert_with_key(|&_pid| TaskInfo {
+                sum_exec_runtime: 0,
+                vruntime: self.min_vruntime,
+                nvcsw: 0,
+                nvcsw_ts: now,
+            });
+
         // Evaluate last time slot used by the task.
-        let mut slice = if is_new_task(sum_exec_runtime, task_info.sum_exec_runtime) {
+        let mut slice = if is_new_task(task.sum_exec_runtime, task_info.sum_exec_runtime) {
             // Give to newer tasks a priority boost, so we can prioritize responsiveness of
             // interactive shell sessions.
-            sum_exec_runtime / slice_boost
+            task.sum_exec_runtime / self.slice_boost
         } else {
             // Old task: charge time slice normally.
-            sum_exec_runtime - task_info.sum_exec_runtime
+            task.sum_exec_runtime - task_info.sum_exec_runtime
         };
 
         // Apply the slice boost to interactive tasks.
-        if is_interactive_task(nvcsw - task_info.nvcsw, now - task_info.nvcsw_ts) {
-            weight *= slice_boost;
-        }
+        let weight = if is_interactive_task(task.nvcsw - task_info.nvcsw, now - task_info.nvcsw_ts)
+        {
+            task.weight * self.slice_boost
+        } else {
+            task.weight
+        };
 
         // Scale the time slice by the task's priority (weight).
         slice = slice * 100 / weight;
@@ -381,22 +401,24 @@ impl<'a> Scheduler<'a> {
         //
         // Moreover, limiting the accounted time slice to slice_ns, allows to prevent starving the
         // current task for too long in the scheduler task pool.
-        task_info.vruntime = min_vruntime + slice.clamp(1, slice_ns * 100 / weight);
+        task_info.vruntime = self.min_vruntime + slice.clamp(1, slice_ns * 100 / weight);
 
         // Update total task cputime.
-        task_info.sum_exec_runtime = sum_exec_runtime;
+        task_info.sum_exec_runtime = task.sum_exec_runtime;
 
         // Update voluntay context switches counter and timestamp.
         if now - task_info.nvcsw_ts > 10 * NSEC_PER_SEC {
-            task_info.nvcsw = nvcsw;
+            task_info.nvcsw = task.nvcsw;
             task_info.nvcsw_ts = now;
         }
+
+        // Return the task vruntime.
+        task_info.vruntime
     }
 
     // Drain all the tasks from the queued list, update their vruntime (Self::update_enqueued()),
     // then push them all to the task pool (doing so will sort them by their vruntime).
     fn drain_queued_tasks(&mut self) {
-        let slice_ns = self.bpf.get_effective_slice_us() * MSEC_PER_SEC;
         loop {
             match self.bpf.dequeue_task() {
                 Ok(Some(task)) => {
@@ -407,51 +429,14 @@ impl<'a> Scheduler<'a> {
                         continue;
                     }
 
-                    // Get task information if the task is already stored in the task map,
-                    // otherwise create a new entry for it.
-                    let task_info =
-                        self.task_map
-                            .tasks
-                            .entry(task.pid)
-                            .or_insert_with_key(|&_pid| TaskInfo {
-                                sum_exec_runtime: 0,
-                                vruntime: self.min_vruntime,
-                                nvcsw: 0,
-                                nvcsw_ts: Self::now(),
-                            });
-
-                    // Update dynamic slice boost.
-                    //
-                    // The slice boost is dynamically adjusted as a function of the amount of CPUs
-                    // in the system and the amount of tasks currently waiting to be dispatched.
-                    //
-                    // As the amount of waiting tasks in the task_pool increases we should reduce
-                    // the slice boost to enforce the scheduler to apply a pure vruntime-based
-                    // policy.
-                    //
-                    // This allows to survive stress tests that are spawning a massive amount of
-                    // tasks.
-                    self.eff_slice_boost = (self.slice_boost * self.cores.nr_cpus_online as u64
-                        / self.task_pool.tasks.len().max(1) as u64)
-                        .max(1);
-
                     // Update task information.
-                    Self::update_enqueued(
-                        task_info,
-                        task.sum_exec_runtime,
-                        task.nvcsw,
-                        task.weight,
-                        self.min_vruntime,
-                        slice_ns,
-                        self.eff_slice_boost,
-                        Self::now(),
-                    );
+                    let vruntime = self.update_enqueued(&task);
 
                     // Insert task in the task pool (ordered by vruntime).
                     self.task_pool.push(Task {
                         pid: task.pid,
                         cpu: task.cpu,
-                        vruntime: task_info.vruntime,
+                        vruntime,
                     });
                 }
                 Ok(None) => {
@@ -485,30 +470,26 @@ impl<'a> Scheduler<'a> {
 
     // Dispatch tasks from the task pool in order (sending them to the BPF dispatcher).
     fn dispatch_tasks(&mut self) {
-        let mut idle_cpus = self.get_idle_cpus();
-
         // Dispatch only a batch of tasks equal to the amount of idle CPUs in the system.
         //
         // This allows to have more tasks sitting in the task pool, reducing the pressure on the
         // dispatcher queues and giving a chance to higher priority tasks to come in and get
         // dispatched earlier, mitigating potential priority inversion issues.
+        let mut idle_cpus = self.get_idle_cpus();
         while !idle_cpus.is_empty() {
             match self.task_pool.pop() {
                 Some(mut task) => {
                     // Update global minimum vruntime.
                     self.min_vruntime = task.vruntime;
 
-                    // Select a CPU to dispatch the task.
-                    //
-                    // Use the previously used CPU if idle, that is always the best choice (to
-                    // mitigate migration overhead), otherwise pick the next idle CPU available.
+                    // Pick an ideal idle CPU for the task.
                     if let Some(pos) = idle_cpus.iter().position(|&x| x == task.cpu) {
                         // The CPU assigned to the task is in idle_cpus, keep the assignment and
                         // remove the CPU from idle_cpus.
                         idle_cpus.remove(pos);
                     } else {
-                        // The CPU assigned to the task is not in idle_cpus, pop the first CPU from
-                        // idle_cpus and assign it to the task.
+                        // The CPU assigned to the task is not in idle_cpus, remove the first idle
+                        // CPU and dispatch the task to the shared DSQ.
                         task.cpu = idle_cpus.pop().unwrap();
                     }
 
