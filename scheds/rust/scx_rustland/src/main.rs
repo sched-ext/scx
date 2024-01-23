@@ -112,6 +112,8 @@ struct Opts {
 }
 
 // Time constants.
+const USEC_PER_NSEC: u64 = 1_000;
+const NSEC_PER_USEC: u64 = 1_000;
 const MSEC_PER_SEC: u64 = 1_000;
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 
@@ -120,6 +122,7 @@ const NSEC_PER_SEC: u64 = 1_000_000_000;
 struct TaskInfo {
     sum_exec_runtime: u64, // total cpu time used by the task
     vruntime: u64,         // total vruntime of the task
+    avg_nvcsw: u64,        // average of voluntary context switches
     nvcsw: u64,            // total amount of voluntary context switches
     nvcsw_ts: u64,         // timestamp of the previous nvcsw update
 }
@@ -219,7 +222,7 @@ impl<'a> Scheduler<'a> {
         let cores = CoreMapping::new();
 
         // Save the default time slice (in ns) in the scheduler class.
-        let slice_ns = opts.slice_us * MSEC_PER_SEC;
+        let slice_ns = opts.slice_us * NSEC_PER_USEC;
 
         // Slice booster (0 = disabled).
         let slice_boost = opts.slice_boost;
@@ -326,16 +329,6 @@ impl<'a> Scheduler<'a> {
             curr_runtime < prev_runtime || prev_runtime == 0
         }
 
-        // Determine if a task is interactive, based on the amount of voluntary context switches
-        // per seconds.
-        //
-        // NOTE: we should probably make the (delta_nvcsw / delta_t) threshold a tunable, but for
-        // now let's pretend that an average of 1 voluntary context switch per second, over the
-        // last 10 seconds, is enough to assume that the task is interactive.
-        fn is_interactive_task(delta_nvcsw: u64, delta_ns: u64) -> bool {
-            delta_nvcsw * 10 * NSEC_PER_SEC / delta_ns.max(1) >= 10
-        }
-
         // Cache the current timestamp.
         let now = Self::now();
 
@@ -366,24 +359,28 @@ impl<'a> Scheduler<'a> {
             .or_insert_with_key(|&_pid| TaskInfo {
                 sum_exec_runtime: 0,
                 vruntime: self.min_vruntime,
-                nvcsw: 0,
+                nvcsw: task.nvcsw,
                 nvcsw_ts: now,
+                avg_nvcsw: 0,
             });
 
         // Evaluate last time slot used by the task.
         let mut slice = if is_new_task(task.sum_exec_runtime, task_info.sum_exec_runtime) {
-            // Give to newer tasks a priority boost, so we can prioritize responsiveness of
-            // interactive shell sessions.
-            task.sum_exec_runtime / self.slice_boost
+            task.sum_exec_runtime
         } else {
-            // Old task: charge time slice normally.
             task.sum_exec_runtime - task_info.sum_exec_runtime
         };
 
         // Apply the slice boost to interactive tasks.
-        let weight = if is_interactive_task(task.nvcsw - task_info.nvcsw, now - task_info.nvcsw_ts)
-        {
-            task.weight * self.slice_boost
+        //
+        // Determine if a task is interactive, based on the moving average of voluntary context
+        // switches over time.
+        //
+        // NOTE: we should make this threshold a tunable, but for now let's assume that a moving
+        // average of 10 voluntary context switch per second is enough to classify the task as
+        // interactive.
+        let weight = if task_info.avg_nvcsw >= 10 {
+            task.weight * self.slice_boost.max(1)
         } else {
             task.weight
         };
@@ -401,13 +398,18 @@ impl<'a> Scheduler<'a> {
         //
         // Moreover, limiting the accounted time slice to slice_ns, allows to prevent starving the
         // current task for too long in the scheduler task pool.
-        task_info.vruntime = self.min_vruntime + slice.clamp(1, slice_ns * 100 / weight);
+        task_info.vruntime = self.min_vruntime + slice.clamp(1, slice_ns);
 
         // Update total task cputime.
         task_info.sum_exec_runtime = task.sum_exec_runtime;
 
-        // Update voluntay context switches counter and timestamp.
-        if now - task_info.nvcsw_ts > 10 * NSEC_PER_SEC {
+        // Refresh voluntay context switches average, counter and timestamp every second.
+        if now - task_info.nvcsw_ts > NSEC_PER_SEC {
+            let delta_nvcsw = task.nvcsw - task_info.nvcsw;
+            let delta_t = (now - task_info.nvcsw_ts).max(1);
+            let avg_nvcsw = delta_nvcsw * NSEC_PER_SEC / delta_t;
+
+            task_info.avg_nvcsw = (task_info.avg_nvcsw + avg_nvcsw) / 2;
             task_info.nvcsw = task.nvcsw;
             task_info.nvcsw_ts = now;
         }
@@ -462,7 +464,7 @@ impl<'a> Scheduler<'a> {
 
         // Scale time slice as a function of nr_scheduled, but never scale below 1 ms.
         let scaling = (nr_scheduled / 2).max(1);
-        let slice_us = (slice_us_max / scaling).max(MSEC_PER_SEC);
+        let slice_us = (slice_us_max / scaling).max(USEC_PER_NSEC);
 
         // Apply new scaling.
         self.bpf.set_effective_slice_us(slice_us);
