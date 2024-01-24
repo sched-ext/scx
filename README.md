@@ -364,6 +364,9 @@ $ cargo install scx_rusty
 
 and `scx_rusty` will be built and installed as `~/.cargo/bin/scx_rusty`.
 
+## SystemD services
+
+See: [services](services/README.md)
 
 ## Kernel Feature Status
 
