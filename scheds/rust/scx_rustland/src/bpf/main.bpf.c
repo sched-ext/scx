@@ -249,7 +249,7 @@ static bool test_and_clear_usersched_needed(void)
  * doesn't run concurrently with the user-space scheduler (that is single
  * threaded), therefore this check is also safe from a concurrency perspective.
  */
-static bool is_usersched_needed(void)
+static bool usersched_has_pending_tasks(void)
 {
 	return nr_queued || nr_scheduled;
 }
@@ -280,6 +280,26 @@ static void dispatch_local(struct task_struct *p, u64 enq_flags)
 	s32 cpu = scx_bpf_task_cpu(p);
 
 	dispatch_task(p, cpu, enq_flags);
+}
+
+/*
+ * Dispatch the user-space scheduler.
+ */
+static void dispatch_user_scheduler(s32 cpu)
+{
+	struct task_struct *p;
+
+	if (!test_and_clear_usersched_needed())
+		return;
+
+	p = bpf_task_from_pid(usersched_pid);
+	if (!p) {
+		scx_bpf_error("Failed to find usersched task %d", usersched_pid);
+		return;
+	}
+	dispatch_task(p, cpu, 0);
+	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+	bpf_task_release(p);
 }
 
 /*
@@ -392,26 +412,6 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 }
 
 /*
- * Dispatch the user-space scheduler.
- */
-static void dispatch_user_scheduler(s32 cpu)
-{
-	struct task_struct *p;
-
-	if (!test_and_clear_usersched_needed())
-		return;
-
-	p = bpf_task_from_pid(usersched_pid);
-	if (!p) {
-		scx_bpf_error("Failed to find usersched task %d", usersched_pid);
-		return;
-	}
-	dispatch_task(p, cpu, 0);
-	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
-	bpf_task_release(p);
-}
-
-/*
  * Dispatch tasks that are ready to run.
  *
  * This function is called when a CPU's local DSQ is empty and ready to accept
@@ -520,7 +520,7 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 	 * A CPU is now available, notify the user-space scheduler that tasks
 	 * can be dispatched.
 	 */
-	if (is_usersched_needed())
+	if (usersched_has_pending_tasks())
 		set_usersched_needed();
 }
 
