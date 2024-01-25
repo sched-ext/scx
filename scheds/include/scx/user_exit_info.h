@@ -14,6 +14,7 @@ struct user_exit_info {
 	int		kind;
 	char		reason[128];
 	char		msg[1024];
+	char		dump[32768];
 };
 
 #ifdef __bpf__
@@ -26,6 +27,7 @@ static inline void uei_record(struct user_exit_info *uei,
 {
 	bpf_probe_read_kernel_str(uei->reason, sizeof(uei->reason), ei->reason);
 	bpf_probe_read_kernel_str(uei->msg, sizeof(uei->msg), ei->msg);
+	bpf_probe_read_kernel_str(uei->dump, sizeof(uei->dump), ei->dump);
 	/* use __sync to force memory barrier */
 	__sync_val_compare_and_swap(&uei->kind, uei->kind, ei->kind);
 }
@@ -40,6 +42,12 @@ static inline bool uei_exited(struct user_exit_info *uei)
 
 static inline void uei_print(const struct user_exit_info *uei)
 {
+	if (uei->dump[0] != '\0') {
+		fputs("\nDEBUG DUMP\n", stderr);
+		fputs("================================================================================\n\n", stderr);
+		fputs(uei->dump, stderr);
+		fputs("\n================================================================================\n\n", stderr);
+	}
 	fprintf(stderr, "EXIT: %s", uei->reason);
 	if (uei->msg[0] != '\0')
 		fprintf(stderr, " (%s)", uei->msg);
