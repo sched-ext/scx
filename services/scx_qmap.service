@@ -1,6 +1,6 @@
 [Unit]
 Description=Start scx_qmap
-ConditionPathExists=/sys/kernel/debug/sched/ext
+ConditionPathIsDirectory=/sys/kernel/sched_ext
 
 [Service]
 Type=simple
