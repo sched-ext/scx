@@ -1,6 +1,7 @@
 [Unit]
 Description=Start scx_rusty
 ConditionPathIsDirectory=/sys/kernel/sched_ext
+Conflicts=scx_central.service  scx_flatcg.service  scx_nest.service  scx_pair.service  scx_qmap.service  scx_rustland.service  scx_simple.service  scx_userland.service
 
 [Service]
 Type=simple
