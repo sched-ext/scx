@@ -404,9 +404,9 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	/* not much to do if bound to a single CPU */
 	if (p->nr_cpus_allowed == 1) {
 		cpu = prev_cpu;
+		if (!bpf_cpumask_test_cpu(cpu, layer_cpumask))
+			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			if (!bpf_cpumask_test_cpu(cpu, layer_cpumask))
-				lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 			goto dispatch_local;
 		} else {
 			goto out_put_cpumasks;
