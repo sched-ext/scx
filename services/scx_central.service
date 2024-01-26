@@ -1,6 +1,7 @@
 [Unit]
 Description=Start scx_central
 ConditionPathIsDirectory=/sys/kernel/sched_ext
+Conflicts=scx_flatcg.service  scx_nest.service  scx_pair.service  scx_qmap.service  scx_rustland.service  scx_rusty.service  scx_simple.service  scx_userland.service
 
 [Service]
 Type=simple
