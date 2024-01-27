@@ -45,6 +45,15 @@ struct user_exit_info uei;
  */
 #define MAX_CPUS 1024
 
+/*
+ * Introduce a custom DSQ shared across all the CPUs, where we can dispatch
+ * tasks that will be executed on the first CPU available.
+ *
+ * Per-CPU DSQs are also provided, to allow the scheduler to run a task on a
+ * specific CPU (see dsq_init()).
+ */
+#define SHARED_DSQ MAX_CPUS
+
 /* !0 for veristat, set during init */
 const volatile s32 num_possible_cpus = 8;
 
@@ -255,37 +264,79 @@ static bool usersched_has_pending_tasks(void)
 }
 
 /*
- * Dispatch a task and wake-up a target CPU.
+ * Return the corresponding CPU associated to a DSQ.
  */
-static void
-dispatch_task(struct task_struct *p, s32 cpu, u64 enq_flags)
+static s32 dsq_id_to_cpu(u64 dsq_id)
 {
-	u64 slice = __sync_fetch_and_add(&effective_slice_ns, 0) ? : slice_ns;
-
-	/*
-	 * Wake-up the CPU selected by the scheduler, so the task will have
-	 * more chances to transition there.
-	 */
-	if (cpu >= 0)
-		scx_bpf_kick_cpu(cpu, 0);
-	dbg_msg("dispatch: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
-	scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice, enq_flags);
+	if (dsq_id >= MAX_CPUS) {
+		scx_bpf_error("Invalid dsq_id: %llu", dsq_id);
+		return -EINVAL;
+	}
+	return (s32)dsq_id;
 }
 
 /*
- * Dispatch a task on its local CPU.
+ * Return the DSQ ID associated to a CPU, or SHARED_DSQ if the CPU is not
+ * valid.
  */
-static void dispatch_local(struct task_struct *p, u64 enq_flags)
+static u64 cpu_to_dsq_id(s32 cpu)
 {
-	s32 cpu = scx_bpf_task_cpu(p);
+	if (cpu < 0 || cpu >= MAX_CPUS) {
+		scx_bpf_error("Invalid cpu: %d", cpu);
+		return SHARED_DSQ;
+	}
+	return (u64)cpu;
+}
 
-	dispatch_task(p, cpu, enq_flags);
+/*
+ * Dispatch a task to a target DSQ, waking up the corresponding CPU, if needed.
+ */
+static void dispatch_task(struct task_struct *p, u64 dsq_id, u64 enq_flags)
+{
+	u64 slice = __sync_fetch_and_add(&effective_slice_ns, 0) ? : slice_ns;
+	s32 cpu;
+
+	switch (dsq_id) {
+	case SCX_DSQ_LOCAL:
+		break;
+	case SHARED_DSQ:
+		/*
+		 * Dispatch a task to the shared DSQ and kick the CPU assigned
+		 * to the task by the select_cpu() callbak.
+		 */
+		cpu = scx_bpf_task_cpu(p);
+		scx_bpf_kick_cpu(cpu, 0);
+		break;
+	default:
+		/*
+		 * Dispatch a task to a specific per-CPU DSQ if the target CPU
+		 * can be used (according to the cpumask), otherwise redirect
+		 * the task to the shared DSQ.
+		 *
+		 * In the future we may want to provide a way to check the
+		 * cpumask in advance from user-space in a proper synchronized
+		 * way, instead of bouncing the task somewhere else, but for
+		 * now this allows to dispatch tasks to valid CPUs, avoid
+		 * potential starvation issues.
+		 */
+		cpu = dsq_id_to_cpu(dsq_id);
+		if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+			scx_bpf_kick_cpu(cpu, 0);
+		} else {
+			dsq_id = SHARED_DSQ;
+			cpu = scx_bpf_task_cpu(p);
+			scx_bpf_kick_cpu(cpu, 0);
+		}
+		break;
+	}
+	dbg_msg("dispatch: pid=%d (%s) dsq=%llu", p->pid, p->comm, dsq_id);
+	scx_bpf_dispatch(p, dsq_id, slice, enq_flags);
 }
 
 /*
  * Dispatch the user-space scheduler.
  */
-static void dispatch_user_scheduler(s32 cpu)
+static void dispatch_user_scheduler(void)
 {
 	struct task_struct *p;
 
@@ -297,21 +348,22 @@ static void dispatch_user_scheduler(s32 cpu)
 		scx_bpf_error("Failed to find usersched task %d", usersched_pid);
 		return;
 	}
-	dispatch_task(p, cpu, 0);
-	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+	/*
+	 * Dispatch the scheduler on the first CPU available, likely the
+	 * current one.
+	 */
+	dispatch_task(p, SHARED_DSQ, 0);
 	bpf_task_release(p);
 }
 
 /*
- * Select the target CPU where a task can be directly dispatched to from
- * .enqueue().
+ * Select the target CPU where a task can be executed.
  *
  * The idea here is to try to find an idle CPU in the system, and preferably
- * maintain the task on the same CPU.
- *
- * If the CPU where the task was running is still idle, then the task can be
- * dispatched immediately on the same CPU from .enqueue(), without having to
- * call the scheduler.
+ * maintain the task on the same CPU. If we can find an idle CPU in the system
+ * dispatch the task directly bypassing the user-space scheduler. Otherwise,
+ * send the task to the user-space scheduler, maintaining the previously used
+ * CPU as a hint for the scheduler.
  *
  * Decision made in this function is not final. The user-space scheduler may
  * decide to move the task to a different CPU later, if needed.
@@ -324,7 +376,11 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
-		dispatch_local(p, 0);
+		/*
+		 * Using SCX_DSQ_LOCAL ensures that the task will be executed
+		 * directly on the CPU returned by this function.
+		 */
+		dispatch_task(p, SCX_DSQ_LOCAL, 0);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	}
 
@@ -387,7 +443,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * long (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
-		dispatch_local(p, enq_flags);
+		dispatch_task(p, SCX_DSQ_LOCAL, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -404,7 +460,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	dbg_msg("enqueue: pid=%d (%s)", p->pid, p->comm);
 	if (bpf_map_push_elem(&queued, &task, 0)) {
 		sched_congested(p);
-		dispatch_local(p, enq_flags);
+		dispatch_task(p, SHARED_DSQ, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -425,9 +481,9 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
 	 * Check if the user-space scheduler needs to run, and in that case try
-	 * to dispatch it on the current CPU.
+	 * to dispatch it immediately.
 	 */
-	dispatch_user_scheduler(cpu);
+	dispatch_user_scheduler();
 
 	/*
 	 * Consume all tasks from the @dispatched list and immediately try to
@@ -451,18 +507,33 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		if (!p)
 			continue;
 		/*
-		 * Check whether the scheduler assigned a different CPU to the
-		 * task and migrate (if possible).
+		 * Check whether the user-space scheduler assigned a different
+		 * CPU to the task and migrate (if possible).
+		 *
+		 * If no CPU has been specified (task.cpu < 0), then dispatch
+		 * the task to the shared DSQ and rely on the built-in idle CPU
+		 * selection.
 		 */
 		dbg_msg("usersched: pid=%d cpu=%d payload=%llu",
 			task.pid, task.cpu, task.payload);
-		/*
-		 * Update task vruntime with the value determined by the
-		 * user-space scheduler.
-		 */
-		dispatch_task(p, task.cpu, 0);
+		if (task.cpu < 0)
+			dispatch_task(p, SHARED_DSQ, 0);
+		else
+			dispatch_task(p, cpu_to_dsq_id(task.cpu), 0);
 		bpf_task_release(p);
 		__sync_fetch_and_add(&nr_user_dispatches, 1);
+	}
+
+	/* Consume all tasks enqueued in the current CPU's DSQ first */
+	bpf_repeat(MAX_ENQUEUED_TASKS) {
+		if (!scx_bpf_consume(cpu_to_dsq_id(cpu)))
+			break;
+	}
+
+	/* Consume all tasks enqueued in the shared DSQ */
+	bpf_repeat(MAX_ENQUEUED_TASKS) {
+		if (!scx_bpf_consume(SHARED_DSQ))
+			break;
 	}
 }
 
@@ -520,8 +591,14 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 	 * A CPU is now available, notify the user-space scheduler that tasks
 	 * can be dispatched.
 	 */
-	if (usersched_has_pending_tasks())
+	if (usersched_has_pending_tasks()) {
 		set_usersched_needed();
+		/*
+		 * Wake up the idle CPU, so that it can immediately accept
+		 * dispatched tasks.
+		 */
+		scx_bpf_kick_cpu(cpu, 0);
+	}
 }
 
 /*
@@ -620,12 +697,49 @@ static int usersched_timer_init(void)
 }
 
 /*
+ * Create a DSQ for each CPU available in the system and a global shared DSQ.
+ *
+ * All the tasks processed by the user-space scheduler can be dispatched either
+ * to a specific CPU/DSQ or to the first CPU available (SHARED_DSQ).
+ *
+ * Custom DSQs are then consumed from the .dispatch() callback, that will
+ * transfer all the enqueued tasks to the consuming CPU's local DSQ.
+ */
+static int dsq_init(void)
+{
+	int err;
+	s32 cpu;
+
+	/* Create per-CPU DSQs */
+	bpf_for(cpu, 0, num_possible_cpus) {
+		err = scx_bpf_create_dsq(cpu_to_dsq_id(cpu), -1);
+		if (err) {
+			scx_bpf_error("failed to create pcpu DSQ %d: %d",
+				      cpu, err);
+			return err;
+		}
+	}
+
+	/* Create the global shared DSQ */
+	err = scx_bpf_create_dsq(SHARED_DSQ, -1);
+	if (err) {
+		scx_bpf_error("failed to create shared DSQ: %d", err);
+		return err;
+	}
+
+	return 0;
+}
+
+/*
  * Initialize the scheduling class.
  */
 s32 BPF_STRUCT_OPS_SLEEPABLE(rustland_init)
 {
 	int err;
 
+	err = dsq_init();
+	if (err)
+		return err;
 	err = usersched_timer_init();
 	if (err)
 		return err;

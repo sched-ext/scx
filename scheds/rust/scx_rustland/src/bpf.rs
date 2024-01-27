@@ -24,6 +24,12 @@ use scx_utils::uei_report;
 // Defined in UAPI
 const SCHED_EXT: i32 = 7;
 
+// Do not assign any specific CPU to the task.
+//
+// The task will be dispatched to the global shared DSQ and it will run on the first CPU available.
+#[allow(dead_code)]
+pub const NO_CPU: i32 = -1;
+
 /// scx_rustland: provide high-level abstractions to interact with the BPF component.
 ///
 /// Overview
