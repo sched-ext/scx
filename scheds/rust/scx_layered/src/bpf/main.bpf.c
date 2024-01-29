@@ -340,7 +340,6 @@ static void maybe_refresh_layered_cpumask(struct cpumask *layered_cpumask,
 }
 
 static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
-			      const struct cpumask *idle_cpumask,
 			      const struct cpumask *idle_smtmask)
 {
 	bool prev_in_cand = bpf_cpumask_test_cpu(prev_cpu, cand_cpumask);
@@ -369,7 +368,7 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 
 s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
-	const struct cpumask *idle_cpumask, *idle_smtmask;
+	const struct cpumask *idle_smtmask;
 	struct cpumask *layer_cpumask, *layered_cpumask;
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
@@ -393,34 +392,27 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)))
 		return prev_cpu;
 
-	if (!(idle_cpumask = scx_bpf_get_idle_cpumask()))
-		return prev_cpu;
-
-	if (!(idle_smtmask = scx_bpf_get_idle_smtmask())) {
-		cpu = prev_cpu;
-		goto out_put_idle_cpumask;
-	}
-
 	/* not much to do if bound to a single CPU */
 	if (p->nr_cpus_allowed == 1) {
-		cpu = prev_cpu;
 		if (!bpf_cpumask_test_cpu(cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			goto dispatch_local;
-		} else {
-			goto out_put_cpumasks;
-		}
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			tctx->dispatch_local = true;
+		return prev_cpu;
 	}
 
 	maybe_refresh_layered_cpumask(layered_cpumask, p, tctx, layer_cpumask);
+
+	if (!(idle_smtmask = scx_bpf_get_idle_smtmask())) {
+		return prev_cpu;
+	}
 
 	/*
 	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
 	 * partially idle @prev_cpu.
 	 */
 	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
-				      idle_cpumask, idle_smtmask)) >= 0)
+				      idle_smtmask)) >= 0)
 		goto dispatch_local;
 
 	/*
@@ -428,20 +420,18 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	 */
 	if (layer->open &&
 	    ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu,
-				       idle_cpumask, idle_smtmask)) >= 0)) {
+				       idle_smtmask)) >= 0)) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cctx);
 		goto dispatch_local;
 	}
 
 	cpu = prev_cpu;
-	goto out_put_cpumasks;
+	goto out_put_idle_smtmask;
 
 dispatch_local:
 	tctx->dispatch_local = true;
-out_put_cpumasks:
+out_put_idle_smtmask:
 	scx_bpf_put_idle_cpumask(idle_smtmask);
-out_put_idle_cpumask:
-	scx_bpf_put_idle_cpumask(idle_cpumask);
 	return cpu;
 }
 
