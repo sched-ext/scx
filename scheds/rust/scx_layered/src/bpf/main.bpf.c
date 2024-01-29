@@ -392,23 +392,20 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)))
 		return prev_cpu;
 
-	if (!(idle_smtmask = scx_bpf_get_idle_smtmask())) {
+	/* not much to do if bound to a single CPU */
+	if (p->nr_cpus_allowed == 1) {
+		if (!bpf_cpumask_test_cpu(cpu, layer_cpumask))
+			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			tctx->dispatch_local = true;
 		return prev_cpu;
 	}
 
-	/* not much to do if bound to a single CPU */
-	if (p->nr_cpus_allowed == 1) {
-		cpu = prev_cpu;
-		if (!bpf_cpumask_test_cpu(cpu, layer_cpumask))
-			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			goto dispatch_local;
-		} else {
-			goto out_put_idle_smtmask;
-		}
-	}
-
 	maybe_refresh_layered_cpumask(layered_cpumask, p, tctx, layer_cpumask);
+
+	if (!(idle_smtmask = scx_bpf_get_idle_smtmask())) {
+		return prev_cpu;
+	}
 
 	/*
 	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
