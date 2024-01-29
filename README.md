@@ -394,7 +394,10 @@ followings are important branches:
     [LKML thread](http://lkml.kernel.org/r/20230711011412.100319-1-tj@kernel.org)
   - [`sched_ext-v5'](https://github.com/sched-ext/sched_ext/tree/sched_ext-v5):
     [LKML thread](http://lkml.kernel.org/r/20231111024835.2164816-1-tj@kernel.org)
+    
+## [Breaking Changes](./BREAKING_CHANGES.md)
 
+[A list of the breaking changes](./BREAKING_CHANGES.md) in the sched_ext kernel tree and the associated commits for the schedulers in this repo.
 
 ## Getting in Touch
 
