@@ -462,9 +462,9 @@ impl<'a> Scheduler<'a> {
         let nr_scheduled = self.task_pool.tasks.len() as u64;
         let slice_us_max = self.slice_ns / MSEC_PER_SEC;
 
-        // Scale time slice as a function of nr_scheduled, but never scale below 1 ms.
-        let scaling = (nr_scheduled / 2).max(1);
-        let slice_us = (slice_us_max / scaling).max(USEC_PER_NSEC);
+        // Scale time slice as a function of nr_scheduled, but never scale below 250 us.
+        let scaling = ((nr_scheduled + 1) / 2).max(1);
+        let slice_us = (slice_us_max / scaling).max(USEC_PER_NSEC / 4);
 
         // Apply new scaling.
         self.bpf.set_effective_slice_us(slice_us);
