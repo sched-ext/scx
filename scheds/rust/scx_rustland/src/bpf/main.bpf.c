@@ -37,6 +37,8 @@
 
 char _license[] SEC("license") = "GPL";
 
+struct user_exit_info uei;
+
 /*
  * Maximum amount of CPUs supported by this scheduler (this defines the size of
  * cpu_map that is used to store the idle state and CPU ownership).
@@ -45,12 +47,6 @@ char _license[] SEC("license") = "GPL";
 
 /* !0 for veristat, set during init */
 const volatile s32 num_possible_cpus = 8;
-
-/*
- * Exit info (passed to the user-space counterpart).
- */
-int exit_kind = SCX_EXIT_NONE;
-char exit_msg[SCX_EXIT_MSG_LEN];
 
 /*
  * Scheduler attributes and statistics.
@@ -644,8 +640,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rustland_init)
  */
 void BPF_STRUCT_OPS(rustland_exit, struct scx_exit_info *ei)
 {
-	bpf_probe_read_kernel_str(exit_msg, sizeof(exit_msg), ei->msg);
-	exit_kind = ei->kind;
+	uei_record(&uei, ei);
 }
 
 /*

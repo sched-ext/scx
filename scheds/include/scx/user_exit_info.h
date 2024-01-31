@@ -10,11 +10,17 @@
 #ifndef __USER_EXIT_INFO_H
 #define __USER_EXIT_INFO_H
 
+enum uei_sizes {
+	UEI_REASON_SIZE	= 128,
+	UEI_MSG_SIZE	= 1024,
+	UEI_DUMP_SIZE	= 32768,
+};
+
 struct user_exit_info {
 	int		kind;
-	char		reason[128];
-	char		msg[1024];
-	char		dump[32768];
+	char		reason[UEI_REASON_SIZE];
+	char		msg[UEI_MSG_SIZE];
+	char		dump[UEI_DUMP_SIZE];
 };
 
 #ifdef __bpf__
@@ -33,6 +39,9 @@ static inline void uei_record(struct user_exit_info *uei,
 }
 
 #else	/* !__bpf__ */
+
+#include <stdio.h>
+#include <stdbool.h>
 
 static inline bool uei_exited(struct user_exit_info *uei)
 {

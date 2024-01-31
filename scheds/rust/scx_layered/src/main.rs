@@ -8,7 +8,6 @@ pub mod bpf_intf;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::ffi::CStr;
 use std::ffi::CString;
 use std::fs;
 use std::io::Read;
@@ -40,6 +39,8 @@ use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 use scx_utils::ravg::ravg_read;
+use scx_utils::uei_exited;
+use scx_utils::uei_report;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -633,66 +634,6 @@ impl Stats {
             prev_bpf_stats: cur_bpf_stats,
         };
         Ok(())
-    }
-}
-
-#[derive(Debug, Default)]
-struct UserExitInfo {
-    kind: i32,
-    reason: Option<String>,
-    msg: Option<String>,
-}
-
-impl UserExitInfo {
-    fn read(bpf_uei: &bpf_bss_types::user_exit_info) -> Result<Self> {
-        let kind = unsafe { std::ptr::read_volatile(&bpf_uei.kind as *const _) };
-
-        let (reason, msg) = if kind != 0 {
-            (
-                Some(
-                    unsafe { CStr::from_ptr(bpf_uei.reason.as_ptr() as *const _) }
-                        .to_str()
-                        .context("Failed to convert reason to string")?
-                        .to_string(),
-                )
-                .filter(|s| !s.is_empty()),
-                Some(
-                    unsafe { CStr::from_ptr(bpf_uei.msg.as_ptr() as *const _) }
-                        .to_str()
-                        .context("Failed to convert msg to string")?
-                        .to_string(),
-                )
-                .filter(|s| !s.is_empty()),
-            )
-        } else {
-            (None, None)
-        };
-
-        Ok(Self { kind, reason, msg })
-    }
-
-    fn exited(bpf_uei: &bpf_bss_types::user_exit_info) -> Result<bool> {
-        Ok(Self::read(bpf_uei)?.kind != 0)
-    }
-
-    fn report(&self) -> Result<()> {
-        let why = match (&self.reason, &self.msg) {
-            (Some(reason), None) => format!("{}", reason),
-            (Some(reason), Some(msg)) => format!("{} ({})", reason, msg),
-            _ => "".into(),
-        };
-
-        match self.kind {
-            0 => Ok(()),
-            etype => {
-                if etype != 64 {
-                    bail!("EXIT: kind={} {}", etype, why);
-                } else {
-                    info!("EXIT: {}", why);
-                    Ok(())
-                }
-            }
-        }
     }
 }
 
@@ -1495,7 +1436,11 @@ impl<'a> Scheduler<'a> {
             .max(4);
 
         let calc_frac = |a, b| {
-            if b != 0.0 { a / b * 100.0 } else { 0.0 }
+            if b != 0.0 {
+                a / b * 100.0
+            } else {
+                0.0
+            }
         };
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
@@ -1596,7 +1541,7 @@ impl<'a> Scheduler<'a> {
         let mut next_sched_at = now + self.sched_intv;
         let mut next_monitor_at = now + self.monitor_intv;
 
-        while !shutdown.load(Ordering::Relaxed) && !UserExitInfo::exited(&self.skel.bss().uei)? {
+        while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel.bss().uei) {
             let now = Instant::now();
 
             if now >= next_sched_at {
@@ -1621,7 +1566,7 @@ impl<'a> Scheduler<'a> {
         }
 
         self.struct_ops.take();
-        UserExitInfo::read(&self.skel.bss().uei)?.report()
+        uei_report!(&self.skel.bss().uei)
     }
 }
 

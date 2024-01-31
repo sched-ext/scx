@@ -277,7 +277,10 @@ impl<'a> Scheduler<'a> {
         let core_idle: Vec<i32> = cores
             .iter()
             .filter_map(|(&core_id, core_cpus)| {
-                if core_cpus.iter().all(|&cpu_id| cpu_pid_map[cpu_id as usize] == 0) {
+                if core_cpus
+                    .iter()
+                    .all(|&cpu_id| cpu_pid_map[cpu_id as usize] == 0)
+                {
                     Some(core_id)
                 } else {
                     None
@@ -690,7 +693,7 @@ impl<'a> Scheduler<'a> {
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<()> {
         let mut prev_ts = Self::now();
 
-        while !shutdown.load(Ordering::Relaxed) && self.bpf.read_bpf_exit_kind() == 0 {
+        while !shutdown.load(Ordering::Relaxed) && !self.bpf.exited() {
             // Call the main scheduler body.
             self.schedule();
 
@@ -703,22 +706,7 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        // Report exit code and message from the BPF part.
-        let (exit_code, msg) = self.bpf.report_bpf_exit_kind();
-        match exit_code {
-            0 => {
-                if !msg.is_empty() {
-                    info!("EXIT: {}", msg);
-                }
-                Ok(())
-            }
-            err => {
-                if !msg.is_empty() {
-                    warn!("FAIL: {} (err={})", msg, err);
-                }
-                Err(anyhow::Error::msg(err))
-            }
-        }
+	self.bpf.shutdown_and_report()
     }
 }
 
