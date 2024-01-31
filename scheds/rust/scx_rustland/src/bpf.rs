@@ -6,8 +6,6 @@
 use crate::bpf_intf;
 use crate::bpf_skel::*;
 
-use std::ffi::CStr;
-
 use anyhow::Context;
 use anyhow::Result;
 
@@ -19,6 +17,9 @@ use libc::{sched_param, sched_setscheduler};
 
 mod alloc;
 use alloc::*;
+
+use scx_utils::uei_exited;
+use scx_utils::uei_report;
 
 // Defined in UAPI
 const SCHED_EXT: i32 = 7;
@@ -42,8 +43,8 @@ const SCHED_EXT: i32 = 7;
 /// nr_queued_mut() and nr_scheduled_mut() can be updated to notify the BPF component if the
 /// user-space scheduler has some pending work to do or not.
 ///
-/// Finally the methods read_bpf_exit_kind() and report_bpf_exit_kind() can be used respectively to
-/// read the exit code and exit message from the BPF component, when the scheduler is unregistered.
+/// Finally the methods exited() and shutdown_and_report() can be used respectively to test
+/// whether the BPF component exited, and to shutdown and report exit message.
 ///
 /// Example
 /// =======
@@ -102,7 +103,7 @@ const SCHED_EXT: i32 = 7;
 ///     }
 ///
 ///     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<()> {
-///         while !shutdown.load(Ordering::Relaxed) && self.bpf.read_bpf_exit_kind() == 0 {
+///         while !shutdown.load(Ordering::Relaxed) && !self.bpf.exited() {
 ///             self.dispatch_tasks();
 ///             thread::yield_now();
 ///         }
@@ -358,19 +359,14 @@ impl<'a> BpfScheduler<'a> {
     }
 
     // Read exit code from the BPF part.
-    pub fn read_bpf_exit_kind(&mut self) -> i32 {
-        unsafe { std::ptr::read_volatile(&self.skel.bss().exit_kind as *const _) }
+    pub fn exited(&mut self) -> bool {
+	uei_exited!(&self.skel.bss().uei)
     }
 
-    // Called on exit to get exit code and exit message from the BPF part.
-    pub fn report_bpf_exit_kind(&mut self) -> (i32, String) {
-        let cstr = unsafe { CStr::from_ptr(self.skel.bss().exit_msg.as_ptr() as *const _) };
-        let msg = cstr
-            .to_str()
-            .unwrap_or("Failed to convert exit msg to string")
-            .to_string();
-
-        (self.read_bpf_exit_kind(), msg)
+    // Called on exit to shutdown and report exit message from the BPF part.
+    pub fn shutdown_and_report(&mut self) -> Result<()> {
+	self.struct_ops.take();
+	uei_report!(self.skel.bss().uei)
     }
 }
 
