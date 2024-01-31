@@ -21,5 +21,6 @@ tar = "0.4"
 version-compare = "0.1"
 
 [build-dependencies]
+bindgen = ">=0.68, <0.70"
 tar = "0.4"
 walkdir = "2.4"

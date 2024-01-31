@@ -30,7 +30,13 @@
 //! Utility modules which can be useful for userspace component of sched_ext
 //! schedulers.
 
+mod bindings;
+
 mod bpf_builder;
 pub use bpf_builder::BpfBuilder;
 
 pub mod ravg;
+
+mod user_exit_info;
+pub use user_exit_info::UserExitInfo;
+pub use user_exit_info::ScxExitKind;
