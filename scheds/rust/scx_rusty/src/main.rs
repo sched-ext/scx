@@ -9,7 +9,6 @@ pub mod bpf_intf;
 use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::ffi::CStr;
 use std::ops::Bound::Included;
 use std::ops::Bound::Unbounded;
 use std::sync::atomic::AtomicBool;
@@ -34,6 +33,8 @@ use log::trace;
 use log::warn;
 use ordered_float::OrderedFloat;
 use scx_utils::ravg::ravg_read;
+use scx_utils::uei_exited;
+use scx_utils::uei_report;
 
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
@@ -187,8 +188,7 @@ fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
         .ok_or_else(|| anyhow!("Could not read total cpu stat in proc"))
 }
 
-fn sub_or_zero(curr: &u64, prev: &u64) -> u64
-{
+fn sub_or_zero(curr: &u64, prev: &u64) -> u64 {
     if let Some(res) = curr.checked_sub(*prev) {
         res
     } else {
@@ -1172,35 +1172,12 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn read_bpf_exit_kind(&mut self) -> i32 {
-        unsafe { std::ptr::read_volatile(&self.skel.bss().exit_kind as *const _) }
-    }
-
-    fn report_bpf_exit_kind(&mut self) -> Result<()> {
-        // Report msg if EXT_OPS_EXIT_ERROR.
-        match self.read_bpf_exit_kind() {
-            0 => Ok(()),
-            etype if etype == 2 => {
-                let cstr = unsafe { CStr::from_ptr(self.skel.bss().exit_msg.as_ptr() as *const _) };
-                let msg = cstr
-                    .to_str()
-                    .context("Failed to convert exit msg to string")
-                    .unwrap();
-                bail!("BPF exit_kind={} msg={}", etype, msg);
-            }
-            etype => {
-                info!("BPF exit_kind={}", etype);
-                Ok(())
-            }
-        }
-    }
-
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<()> {
         let now = Instant::now();
         let mut next_tune_at = now + self.tune_interval;
         let mut next_sched_at = now + self.sched_interval;
 
-        while !shutdown.load(Ordering::Relaxed) && self.read_bpf_exit_kind() == 0 {
+        while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel.bss().uei) {
             let now = Instant::now();
 
             if now >= next_tune_at {
@@ -1226,7 +1203,8 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        self.report_bpf_exit_kind()
+	self.struct_ops.take();
+	uei_report!(&self.skel.bss().uei)
     }
 }
 

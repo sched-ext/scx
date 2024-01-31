@@ -48,6 +48,8 @@
 
 char _license[] SEC("license") = "GPL";
 
+struct user_exit_info uei;
+
 /*
  * const volatiles are set during initialization and treated as consts by the
  * jit compiler.
@@ -70,12 +72,6 @@ const volatile u32 debug;
 
 /* base slice duration */
 const volatile u64 slice_ns = SCX_SLICE_DFL;
-
-/*
- * Exit info
- */
-int exit_kind = SCX_EXIT_NONE;
-char exit_msg[SCX_EXIT_MSG_LEN];
 
 /*
  * Per-CPU context
@@ -1141,8 +1137,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 
 void BPF_STRUCT_OPS(rusty_exit, struct scx_exit_info *ei)
 {
-	bpf_probe_read_kernel_str(exit_msg, sizeof(exit_msg), ei->msg);
-	exit_kind = ei->kind;
+	uei_record(&uei, ei);
 }
 
 SEC(".struct_ops.link")
