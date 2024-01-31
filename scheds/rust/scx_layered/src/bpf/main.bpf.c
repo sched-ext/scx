@@ -209,7 +209,6 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *layered_cpumask;
 
 	bool			all_cpus_allowed;
-	bool			dispatch_local;
 	u64			started_running_at;
 };
 
@@ -396,8 +395,10 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (p->nr_cpus_allowed == 1) {
 		if (!bpf_cpumask_test_cpu(cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
-			tctx->dispatch_local = true;
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+			lstat_inc(LSTAT_LOCAL, layer, cctx);
+			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		}
 		return prev_cpu;
 	}
 
@@ -429,7 +430,8 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	goto out_put_idle_smtmask;
 
 dispatch_local:
-	tctx->dispatch_local = true;
+	lstat_inc(LSTAT_LOCAL, layer, cctx);
+	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
 out_put_idle_smtmask:
 	scx_bpf_put_idle_cpumask(idle_smtmask);
 	return cpu;
@@ -446,13 +448,6 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)) ||
 	    !(layer = lookup_layer(tctx->layer)))
 		return;
-
-	if (tctx->dispatch_local) {
-		tctx->dispatch_local = false;
-		lstat_inc(LSTAT_LOCAL, layer, cctx);
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
-		return;
-	}
 
 	lstat_inc(LSTAT_GLOBAL, layer, cctx);
 
