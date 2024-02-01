@@ -266,7 +266,7 @@ static bool usersched_has_pending_tasks(void)
 /*
  * Return the corresponding CPU associated to a DSQ.
  */
-static s32 dsq_id_to_cpu(u64 dsq_id)
+static s32 dsq_to_cpu(u64 dsq_id)
 {
 	if (dsq_id >= MAX_CPUS) {
 		scx_bpf_error("Invalid dsq_id: %llu", dsq_id);
@@ -279,7 +279,7 @@ static s32 dsq_id_to_cpu(u64 dsq_id)
  * Return the DSQ ID associated to a CPU, or SHARED_DSQ if the CPU is not
  * valid.
  */
-static u64 cpu_to_dsq_id(s32 cpu)
+static u64 cpu_to_dsq(s32 cpu)
 {
 	if (cpu < 0 || cpu >= MAX_CPUS) {
 		scx_bpf_error("Invalid cpu: %d", cpu);
@@ -298,35 +298,27 @@ static void dispatch_task(struct task_struct *p, u64 dsq_id, u64 enq_flags)
 
 	switch (dsq_id) {
 	case SCX_DSQ_LOCAL:
-		break;
 	case SHARED_DSQ:
-		/*
-		 * Dispatch a task to the shared DSQ and kick the CPU assigned
-		 * to the task by the select_cpu() callbak.
-		 */
-		cpu = scx_bpf_task_cpu(p);
-		scx_bpf_kick_cpu(cpu, 0);
 		break;
 	default:
 		/*
 		 * Dispatch a task to a specific per-CPU DSQ if the target CPU
 		 * can be used (according to the cpumask), otherwise redirect
-		 * the task to the shared DSQ.
+		 * the task to the CPU assigned by the built-in idle selection
+		 * logic.
 		 *
-		 * In the future we may want to provide a way to check the
-		 * cpumask in advance from user-space in a proper synchronized
-		 * way, instead of bouncing the task somewhere else, but for
-		 * now this allows to dispatch tasks to valid CPUs, avoid
-		 * potential starvation issues.
+		 * If also this CPU is not usable (because cpumask has changed
+		 * in the meantime), we can simply ignore the task, as it has
+		 * been dequeued and re-enqueued, so it will pick a valid CPU.
 		 */
-		cpu = dsq_id_to_cpu(dsq_id);
-		if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
-			scx_bpf_kick_cpu(cpu, 0);
-		} else {
-			dsq_id = SHARED_DSQ;
+		cpu = dsq_to_cpu(dsq_id);
+		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
 			cpu = scx_bpf_task_cpu(p);
-			scx_bpf_kick_cpu(cpu, 0);
+			if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+				return;
+			dsq_id = dsq_to_cpu(cpu);
 		}
+		scx_bpf_kick_cpu(cpu, 0);
 		break;
 	}
 	dbg_msg("dispatch: pid=%d (%s) dsq=%llu", p->pid, p->comm, dsq_id);
@@ -425,7 +417,7 @@ static void sched_congested(struct task_struct *p)
  */
 void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 {
-        struct queued_task_ctx task;
+	struct queued_task_ctx task;
 
 	/*
 	 * Scheduler is dispatched directly in .dispatch() when needed, so
@@ -519,14 +511,14 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		if (task.cpu < 0)
 			dispatch_task(p, SHARED_DSQ, 0);
 		else
-			dispatch_task(p, cpu_to_dsq_id(task.cpu), 0);
+			dispatch_task(p, cpu_to_dsq(task.cpu), 0);
 		bpf_task_release(p);
 		__sync_fetch_and_add(&nr_user_dispatches, 1);
 	}
 
 	/* Consume all tasks enqueued in the current CPU's DSQ first */
 	bpf_repeat(MAX_ENQUEUED_TASKS) {
-		if (!scx_bpf_consume(cpu_to_dsq_id(cpu)))
+		if (!scx_bpf_consume(cpu_to_dsq(cpu)))
 			break;
 	}
 
@@ -712,7 +704,7 @@ static int dsq_init(void)
 
 	/* Create per-CPU DSQs */
 	bpf_for(cpu, 0, num_possible_cpus) {
-		err = scx_bpf_create_dsq(cpu_to_dsq_id(cpu), -1);
+		err = scx_bpf_create_dsq(cpu_to_dsq(cpu), -1);
 		if (err) {
 			scx_bpf_error("failed to create pcpu DSQ %d: %d",
 				      cpu, err);
