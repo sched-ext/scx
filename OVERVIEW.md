@@ -362,49 +362,103 @@ is missing.
 
 ### Dispatch queues
 
-To bridge the workflow imbalance between the scheduler core and sched_ext_ops
-callbacks, sched_ext uses simple FIFOs called dispatch queues (DSQ's). By
-default, there is one global dsq (`SCX_DSQ_GLOBAL`), and one local per-CPU dsq
-(`SCX_DSQ_LOCAL`). `SCX_DSQ_GLOBAL` is provided for convenience and need not be
-used by a scheduler that doesn't require it. As described in more detail below,
-`SCX_DSQ_LOCAL` is the per-CPU FIFO that sched_ext pulls from when putting the
-next task on the CPU. The BPF scheduler can manage an arbitrary number of dsq's
-using `scx_bpf_create_dsq()` and `scx_bpf_destroy_dsq()`.
+To match the impedance between the scheduler core and the BPF scheduler,
+sched_ext uses DSQs (dispatch queues) which can operate as both a FIFO and a
+priority queue. By default, there is one global FIFO (``SCX_DSQ_GLOBAL``),
+and one local dsq per CPU (``SCX_DSQ_LOCAL``). The BPF scheduler can manage
+an arbitrary number of dsq's using ``scx_bpf_create_dsq()`` and
+``scx_bpf_destroy_dsq()``.
+
+A CPU always executes a task from its local DSQ. A task is "dispatched" to a
+DSQ. A non-local DSQ is "consumed" to transfer a task to the consuming CPU's
+local DSQ.
+
+When a CPU is looking for the next task to run, if the local DSQ is not
+empty, the first task is picked. Otherwise, the CPU tries to consume the
+global DSQ. If that doesn't yield a runnable task either, ``ops.dispatch()``
+is invoked.
 
 ### Scheduling cycle
 
-The following briefly shows a typical workflow for how a waking task is
-scheduled and executed.
+The following briefly shows how a waking task is scheduled and executed.
 
-1. When a task is waking up, `.select_cpu()` is the first operation invoked.
-   This serves two purposes. It both allows a scheduler to optimize task
-   placement by specifying a CPU where it expects the task to eventually be
-   scheduled, and the latter is that the selected CPU will be woken if it's
-   idle.
+1. When a task is waking up, ``ops.select_cpu()`` is the first operation
+   invoked. This serves two purposes. First, CPU selection optimization
+   hint. Second, waking up the selected CPU if idle.
 
-2. Once the target CPU is selected, .enqueue() is invoked. It can make one of
-   the following decisions:
+   The CPU selected by ``ops.select_cpu()`` is an optimization hint and not
+   binding. The actual decision is made at the last step of scheduling.
+   However, there is a small performance gain if the CPU
+   ``ops.select_cpu()`` returns matches the CPU the task eventually runs on.
 
-   - Immediately dispatch the task to either the global DSQ (`SCX_DSQ_GLOBAL`)
-     or the current CPU's local dsq (`SCX_DSQ_LOCAL`).
+   A side-effect of selecting a CPU is waking it up from idle. While a BPF
+   scheduler can wake up any cpu using the ``scx_bpf_kick_cpu()`` helper,
+   using ``ops.select_cpu()`` judiciously can be simpler and more efficient.
 
-   - Immediately dispatch the task to a user-created dispatch queue.
+   A task can be immediately dispatched to a DSQ from ``ops.select_cpu()`` by
+   calling ``scx_bpf_dispatch()``. If the task is dispatched to
+   ``SCX_DSQ_LOCAL`` from ``ops.select_cpu()``, it will be dispatched to the
+   local DSQ of whichever CPU is returned from ``ops.select_cpu()``.
+   Additionally, dispatching directly from ``ops.select_cpu()`` will cause the
+   ``ops.enqueue()`` callback to be skipped.
 
-   - Queue the task on the BPF side, e.g. in an rbtree map for a vruntime
-     scheduler, with the intention of dispatching it at a later time from
-     `.dispatch()`.
+   Note that the scheduler core will ignore an invalid CPU selection, for
+   example, if it's outside the allowed cpumask of the task.
 
-3. When a CPU is ready to schedule, it first looks at its local DSQ. If empty,
-   it invokes `.consume()` which should make one or more `scx_bpf_consume()`
-   calls to consume tasks from DSQ's. If a `scx_bpf_consume()` call succeeds,
-   the CPU has the next task to run and `.consume()` can return. If
-   `.consume()` is not defined, sched_ext will by-default consume from only the
-   built-in `SCX_DSQ_GLOBAL` DSQ.
+2. Once the target CPU is selected, ``ops.enqueue()`` is invoked (unless the
+   task was dispatched directly from ``ops.select_cpu()``). ``ops.enqueue()``
+   can make one of the following decisions:
 
-4. If there's still no task to run, `.dispatch()` is invoked which should make
-   one or more `scx_bpf_dispatch()` calls to dispatch tasks from the BPF
-   scheduler to one of the DSQ's. If more than one task has been dispatched,
-   go back to the previous consumption step.
+   * Immediately dispatch the task to either the global or local DSQ by
+     calling ``scx_bpf_dispatch()`` with ``SCX_DSQ_GLOBAL`` or
+     ``SCX_DSQ_LOCAL``, respectively.
+
+   * Immediately dispatch the task to a custom DSQ by calling
+     ``scx_bpf_dispatch()`` with a DSQ ID which is smaller than 2^63.
+
+   * Queue the task on the BPF side.
+
+3. When a CPU is ready to schedule, it first looks at its local DSQ. If
+   empty, it then looks at the global DSQ. If there still isn't a task to
+   run, ``ops.dispatch()`` is invoked which can use the following two
+   functions to populate the local DSQ.
+
+   * ``scx_bpf_dispatch()`` dispatches a task to a DSQ. Any target DSQ can
+     be used - ``SCX_DSQ_LOCAL``, ``SCX_DSQ_LOCAL_ON | cpu``,
+     ``SCX_DSQ_GLOBAL`` or a custom DSQ. While ``scx_bpf_dispatch()``
+     currently can't be called with BPF locks held, this is being worked on
+     and will be supported. ``scx_bpf_dispatch()`` schedules dispatching
+     rather than performing them immediately. There can be up to
+     ``ops.dispatch_max_batch`` pending tasks.
+
+   * ``scx_bpf_consume()`` tranfers a task from the specified non-local DSQ
+     to the dispatching DSQ. This function cannot be called with any BPF
+     locks held. ``scx_bpf_consume()`` flushes the pending dispatched tasks
+     before trying to consume the specified DSQ.
+
+4. After ``ops.dispatch()`` returns, if there are tasks in the local DSQ,
+   the CPU runs the first one. If empty, the following steps are taken:
+
+   * Try to consume the global DSQ. If successful, run the task.
+
+   * If ``ops.dispatch()`` has dispatched any tasks, retry #3.
+
+   * If the previous task is an SCX task and still runnable, keep executing
+     it (see ``SCX_OPS_ENQ_LAST``).
+
+   * Go idle.
+
+Note that the BPF scheduler can always choose to dispatch tasks immediately in
+``ops.select_cpu()`` or ``ops.enqueue()``. If only the built-in DSQs are used,
+there is no need to implement ``ops.dispatch()`` as a task is never queued on
+the BPF scheduler and both the local and global DSQs are consumed
+automatically.
+
+``scx_bpf_dispatch()`` queues the task on the FIFO of the target DSQ. Use
+``scx_bpf_dispatch_vtime()`` for the priority queue. Internal DSQs such as
+``SCX_DSQ_LOCAL`` and ``SCX_DSQ_GLOBAL`` do not support priority-queue
+dispatching, and must be dispatched to with ``scx_bpf_dispatch()``.
+
 
 ### Verifying callback behavior
 
