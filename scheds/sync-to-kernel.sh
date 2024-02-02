@@ -8,15 +8,20 @@ if [ $# -ne 1 ]; then
 fi
 
 # We sync these schedulers
-rust_scheds=(scx_rusty scx_layered)
-c_scheds=(scx_simple scx_qmap scx_central scx_pair scx_flatcg scx_userland)
+rust_scheds=()
+c_scheds=(scx_simple scx_qmap)
 
 headers=($(git ls-files include | grep -v include/vmlinux))
-scheds=($(git ls-files ${rust_scheds[@]/#/rust/} | grep -Ev 'meson.build|LICENSE'))
-kernel="$1/tools/sched_ext"
+
+scheds=()
+for rust_sched in ${rust_scheds[@]}; do
+    scheds+=($(git ls-files rust/${rust_sched} | grep -Ev 'meson.build|LICENSE'))
+done
 for c_sched in ${c_scheds[@]}; do
     scheds+=($(git ls-files c/${c_sched}*))
 done
+
+kernel="$1/tools/sched_ext"
 
 echo "Syncing ${#headers[@]} headers and ${#scheds[@]} scheduler source files to $kernel"
 
