@@ -88,12 +88,20 @@ bpf_base_cflags = ['-g', '-O2', '-Wall', '-Wno-compare-distinct-pointer-types',
 
 message('cpu=@0@ bpf_base_cflags=@1@'.format(cpu, bpf_base_cflags))
 
+libbpf_c_headers = []
+
+if get_option('libbpf_a') != ''
+  foreach header: get_option('libbpf_h')
+    libbpf_c_headers += ['-I', header]
+  endforeach
+endif
+
 #
 # Generators to build BPF skel file for C schedulers.
 #
 gen_bpf_o = generator(bpf_clang,
                       output: '@BASENAME@.o',
-                      arguments: [bpf_base_cflags, '-target', 'bpf', '@EXTRA_ARGS@',
+                      arguments: [bpf_base_cflags, '-target', 'bpf', libbpf_c_headers, '@EXTRA_ARGS@',
                                   '-c', '@INPUT@', '-o', '@OUTPUT@'])
 gen_bpf_skel = generator(bpftool_build_skel,
                          output: ['@BASENAME@.skel.h', '@BASENAME@.subskel.h' ],
