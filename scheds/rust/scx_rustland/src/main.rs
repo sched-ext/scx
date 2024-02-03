@@ -191,9 +191,22 @@ impl TaskTree {
         }
     }
 
+    // Search a Task item in the TaskTree by its PID.
+    fn find(&self, pid: i32) -> Option<&Task> {
+        self.tasks.iter().find(|t| t.pid == pid)
+    }
+
     // Add an item to the pool (item will be placed in the tree depending on its vruntime, items
     // with the same vruntime will be sorted by pid).
     fn push(&mut self, task: Task) {
+        // Replace old item if it's already present.
+        if let Some(prev_task) = self.find(task.pid) {
+            self.tasks.remove(&Task {
+                pid: prev_task.pid,
+                cpu: prev_task.cpu,
+                vruntime: prev_task.vruntime,
+            });
+        }
         self.tasks.insert(task);
     }
 
