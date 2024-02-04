@@ -316,6 +316,28 @@ static int spawn_stats_thread(void)
 	return pthread_create(&stats_printer, NULL, run_stats_printer, NULL);
 }
 
+static void print_example_warning(const char *sched)
+{
+	const char *warning_fmt =
+		"**************************************************************************\n"
+		"\n"
+		"WARNING: %s is an example scheduler.\n"
+		"\n"
+		"It is meant to provide an example of a simple scheduler implementation,\n"
+		"and is not meant to be run in production environments. If you want to\n"
+		"run a scheduler that makes decisions in user space, it is recommended\n"
+		"to instead use use *scx_rustland*.\n"
+		"\n"
+		"Please do not open GitHub issues in the event of poor performance, or\n"
+		"the scheduler being evicted due to a runnable task timeout.\n"
+		"If running this scheduler causes a system crash, or for the\n"
+		"whole system to hang indefinitely, please open a GitHub issue.\n"
+		"\n"
+		"**************************************************************************\n\n";
+
+	printf(warning_fmt, sched);
+}
+
 static void bootstrap(int argc, char **argv)
 {
 	int err;
@@ -383,6 +405,7 @@ static void bootstrap(int argc, char **argv)
 
 	SCX_BUG_ON(spawn_stats_thread(), "Failed to spawn stats thread");
 
+	print_example_warning(basename(argv[0]));
 	ops_link = bpf_map__attach_struct_ops(skel->maps.userland_ops);
 	SCX_BUG_ON(!ops_link, "Failed to attach struct_ops");
 }
