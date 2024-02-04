@@ -1,6 +1,6 @@
 name: build-scheds
 run-name: ${{ github.actor }} PR run
-on: [pull_request, push]
+on: [pull_request]
 jobs:
   build-schedulers:
     runs-on: ubuntu-22.04
