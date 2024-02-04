@@ -344,6 +344,5 @@ struct sched_ext_ops userland_ops = {
 	.init			= (void *)userland_init,
 	.exit			= (void *)userland_exit,
 	.flags			= SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
-	.timeout_ms		= 3000,
 	.name			= "userland",
 };
