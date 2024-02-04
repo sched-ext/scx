@@ -632,9 +632,10 @@ impl<'a> Scheduler<'a> {
         // Show general statistics.
         let nr_user_dispatches = *self.bpf.nr_user_dispatches_mut();
         let nr_kernel_dispatches = *self.bpf.nr_kernel_dispatches_mut();
+        let nr_cancel_dispatches = *self.bpf.nr_cancel_dispatches_mut();
         info!(
-            "  nr_user_dispatches={} nr_kernel_dispatches={}",
-            nr_user_dispatches, nr_kernel_dispatches
+            "  nr_user_dispatches={} nr_kernel_dispatches={} nr_cancel_dispatches={}",
+            nr_user_dispatches, nr_kernel_dispatches, nr_cancel_dispatches
         );
 
         // Show tasks that are waiting to be dispatched.
