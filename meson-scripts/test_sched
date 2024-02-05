@@ -41,7 +41,7 @@ for sched in ${SCHEDULERS}; do
     timeout --preserve-status ${GUEST_TIMEOUT} \
         vng --force-9p --disable-microvm -v -r ${kernel} -- \
             "timeout --foreground --preserve-status ${TEST_TIMEOUT} ${sched_path}" \
-	        2>&1 </dev/null | tee /tmp/output
+                2> >(tee /tmp/output) </dev/null
         sed -n -e '/\bBUG:/q1' \
 	       -e '/\bWARNING:/q1' \
 	       -e '/\berror\b/Iq1' \
