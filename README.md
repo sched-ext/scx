@@ -123,19 +123,26 @@ $ sudo apt build-dep scx
 
 #### Adding the Repository
 
-Import and locally sign the packager's GPG key. This can be skipped if the
-signature checking is disabled when adding the repo.
+Install packages with a list of mirrors and GPG keys
 
 ```
-$ sudo pacman-key --recv-keys 697C63013E65270255EBC2608744DC1EB26B5A9A
-$ sudo pacman-key --lsign-key 697C63013E65270255EBC2608744DC1EB26B5A9A
+sudo pacman -U 'https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-3-1-any.pkg.tar.zst' 'https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-mirrorlist-18-1-any.pkg.tar.zst'
 ```
 
 Add the following custom repository section to `/etc/pacman.conf`.
 
 ```
-[scx]
-Server = https://github.com/sched-ext/scx-packaging-arch/releases/download/repo
+# cachyos repos
+[cachyos]
+Include = /etc/pacman.d/cachyos-mirrorlist
+```
+
+You can also import the gpg key manually. This can be skipped if the
+signature checking is disabled when adding the repo.
+
+```
+$ sudo pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com
+$ sudo pacman-key --lsign-key F3B607488DB35A47
 ```
 
 If you haven't imported the GPG key, append the following line.
@@ -147,20 +154,15 @@ SigLevel = Never
 #### Installing the Kernel and Schedulers
 
 ```
-$ sudo pacman -Sy scx/linux scx/libbpf scx/scx-scheds
+$ sudo pacman -Sy cachyos/linux-sched-ext cachyos/linux-sched-ext-headers cachyos/scx-scheds
 ```
-
-Note that the above replaces the default kernel and libbpf packages. The
-latter won't be unnecessary once libbpf is updated to >=1.3.0 in the Arch
-repository. After a reboot, the scheduler binaries `/usr/bin/scx_*` should
-be usable.
 
 #### Setting Up Dev Environment
 
 In addition to the packages from the previous step, install the following.
 
 ```
-$ sudo pacman -Sy scx/linux-headers scx/clang-github-bin meson cargo bpf pahole
+$ sudo pacman -Sy cachyos/clang-github-bin meson cargo bpf pahole
 ```
 
 `clang-github-bin` is necessary because the recommended `clang` version is
