@@ -321,7 +321,7 @@ static void print_example_warning(const char *sched)
 	const char *warning_fmt =
 		"**************************************************************************\n"
 		"\n"
-		"WARNING: %s is an example scheduler.\n"
+		"NOTICE: %s is an example scheduler.\n"
 		"\n"
 		"It is meant to provide an example of a simple scheduler implementation,\n"
 		"and is not meant to be run in production environments. If you want to\n"
