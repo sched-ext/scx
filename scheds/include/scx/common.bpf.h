@@ -4,8 +4,8 @@
  * Copyright (c) 2022 Tejun Heo <tj@kernel.org>
  * Copyright (c) 2022 David Vernet <dvernet@meta.com>
  */
-#ifndef __SCHED_EXT_COMMON_BPF_H
-#define __SCHED_EXT_COMMON_BPF_H
+#ifndef __SCX_COMMON_BPF_H
+#define __SCX_COMMON_BPF_H
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -242,5 +242,7 @@ u32 bpf_cpumask_any_and_distribute(const struct cpumask *src1,
 /* rcu */
 void bpf_rcu_read_lock(void) __ksym;
 void bpf_rcu_read_unlock(void) __ksym;
+
+#include "compat.bpf.h"
 
 #endif	/* __SCHED_EXT_COMMON_BPF_H */

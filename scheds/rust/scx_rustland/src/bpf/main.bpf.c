@@ -318,7 +318,7 @@ static void dispatch_task(struct task_struct *p, u64 dsq_id, u64 enq_flags)
 				return;
 			dsq_id = dsq_to_cpu(cpu);
 		}
-		scx_bpf_kick_cpu(cpu, 0);
+		__COMPAT_scx_bpf_kick_cpu_IDLE(cpu);
 		break;
 	}
 	dbg_msg("dispatch: pid=%d (%s) dsq=%llu", p->pid, p->comm, dsq_id);
