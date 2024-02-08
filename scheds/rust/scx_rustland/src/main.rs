@@ -497,9 +497,11 @@ impl<'a> Scheduler<'a> {
                     // Update global minimum vruntime.
                     self.min_vruntime = task.vruntime;
 
-                    // Do not pin the task to any specific CPU, simply dispatch on the first idle
-                    // CPU available.
-                    task.cpu = NO_CPU;
+                    // If the CPU assigned to the task is not idle anymore, dispatch to the first
+                    // CPU that becomes available.
+                    if !idle_cpus.contains(&task.cpu) {
+                        task.cpu = NO_CPU;
+                    }
 
                     // Send task to the BPF dispatcher.
                     match self.bpf.dispatch_task(&task.to_dispatched_task()) {
