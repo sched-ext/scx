@@ -571,8 +571,15 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Mark the CPU as idle by setting the owner to 0.
 	 */
-	if (!is_usersched_task(p))
+	if (!is_usersched_task(p)) {
 		set_cpu_owner(scx_bpf_task_cpu(p), 0);
+		/*
+		 * Kick the user-space scheduler immediately when a task
+		 * releases a CPU and speculate on the fact that most of the
+		 * time there is another task ready to run.
+		 */
+		set_usersched_needed();
+	}
 }
 
 /*
