@@ -694,8 +694,10 @@ impl<'a> Scheduler<'a> {
                 prev_ts = curr_ts;
             }
         }
+        // Dump scheduler statistics before exiting
+        self.print_stats();
 
-	self.bpf.shutdown_and_report()
+        self.bpf.shutdown_and_report()
     }
 }
 

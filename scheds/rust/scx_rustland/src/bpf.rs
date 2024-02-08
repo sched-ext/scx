@@ -366,13 +366,13 @@ impl<'a> BpfScheduler<'a> {
 
     // Read exit code from the BPF part.
     pub fn exited(&mut self) -> bool {
-	uei_exited!(&self.skel.bss().uei)
+        uei_exited!(&self.skel.bss().uei)
     }
 
     // Called on exit to shutdown and report exit message from the BPF part.
     pub fn shutdown_and_report(&mut self) -> Result<()> {
-	self.struct_ops.take();
-	uei_report!(self.skel.bss().uei)
+        self.struct_ops.take();
+        uei_report!(self.skel.bss().uei)
     }
 }
 
