@@ -88,7 +88,7 @@ volatile u64 nr_queued;
 volatile u64 nr_scheduled;
 
 /* Dispatch statistics */
-volatile u64 nr_user_dispatches, nr_kernel_dispatches;
+volatile u64 nr_user_dispatches, nr_kernel_dispatches, nr_cancel_dispatches;
 
 /* Failure statistics */
 volatile u64 nr_failed_dispatches, nr_sched_congested;
@@ -299,6 +299,9 @@ static void dispatch_task(struct task_struct *p, u64 dsq_id, u64 enq_flags)
 	switch (dsq_id) {
 	case SCX_DSQ_LOCAL:
 	case SHARED_DSQ:
+		scx_bpf_dispatch(p, dsq_id, slice, enq_flags);
+		dbg_msg("dispatch: pid=%d (%s) dsq=%llu",
+			p->pid, p->comm, dsq_id);
 		break;
 	default:
 		/*
@@ -311,18 +314,30 @@ static void dispatch_task(struct task_struct *p, u64 dsq_id, u64 enq_flags)
 		 * in the meantime), we can simply ignore the task, as it has
 		 * been dequeued and re-enqueued, so it will pick a valid CPU.
 		 */
+		scx_bpf_dispatch(p, dsq_id, slice, enq_flags);
+
 		cpu = dsq_to_cpu(dsq_id);
 		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
-			cpu = scx_bpf_task_cpu(p);
-			if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-				return;
-			dsq_id = dsq_to_cpu(cpu);
+			/*
+			 * Abort the current dispatch and redirect to the
+			 * shared DSQ if the target CPU is not allowed.
+			 */
+			scx_bpf_dispatch_cancel();
+			__sync_fetch_and_add(&nr_cancel_dispatches, 1);
+
+			dsq_id = SHARED_DSQ;
+			scx_bpf_dispatch(p, dsq_id, slice, enq_flags);
+			dbg_msg("dispatch: pid=%d (%s) dsq=%llu cancel",
+				p->pid, p->comm, dsq_id);
+			return;
 		}
+		dbg_msg("dispatch: pid=%d (%s) dsq=%llu",
+			p->pid, p->comm, dsq_id);
+
+		/* Wake up the target CPU (only if idle) */
 		__COMPAT_scx_bpf_kick_cpu_IDLE(cpu);
 		break;
 	}
-	dbg_msg("dispatch: pid=%d (%s) dsq=%llu", p->pid, p->comm, dsq_id);
-	scx_bpf_dispatch(p, dsq_id, slice, enq_flags);
 }
 
 /*
@@ -556,8 +571,15 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Mark the CPU as idle by setting the owner to 0.
 	 */
-	if (!is_usersched_task(p))
+	if (!is_usersched_task(p)) {
 		set_cpu_owner(scx_bpf_task_cpu(p), 0);
+		/*
+		 * Kick the user-space scheduler immediately when a task
+		 * releases a CPU and speculate on the fact that most of the
+		 * time there is another task ready to run.
+		 */
+		set_usersched_needed();
+	}
 }
 
 /*

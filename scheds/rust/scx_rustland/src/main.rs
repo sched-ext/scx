@@ -497,9 +497,11 @@ impl<'a> Scheduler<'a> {
                     // Update global minimum vruntime.
                     self.min_vruntime = task.vruntime;
 
-                    // Do not pin the task to any specific CPU, simply dispatch on the first idle
-                    // CPU available.
-                    task.cpu = NO_CPU;
+                    // If the CPU assigned to the task is not idle anymore, dispatch to the first
+                    // CPU that becomes available.
+                    if !idle_cpus.contains(&task.cpu) {
+                        task.cpu = NO_CPU;
+                    }
 
                     // Send task to the BPF dispatcher.
                     match self.bpf.dispatch_task(&task.to_dispatched_task()) {
@@ -632,9 +634,10 @@ impl<'a> Scheduler<'a> {
         // Show general statistics.
         let nr_user_dispatches = *self.bpf.nr_user_dispatches_mut();
         let nr_kernel_dispatches = *self.bpf.nr_kernel_dispatches_mut();
+        let nr_cancel_dispatches = *self.bpf.nr_cancel_dispatches_mut();
         info!(
-            "  nr_user_dispatches={} nr_kernel_dispatches={}",
-            nr_user_dispatches, nr_kernel_dispatches
+            "  nr_user_dispatches={} nr_kernel_dispatches={} nr_cancel_dispatches={}",
+            nr_user_dispatches, nr_kernel_dispatches, nr_cancel_dispatches
         );
 
         // Show tasks that are waiting to be dispatched.
@@ -694,8 +697,10 @@ impl<'a> Scheduler<'a> {
                 prev_ts = curr_ts;
             }
         }
+        // Dump scheduler statistics before exiting
+        self.print_stats();
 
-	self.bpf.shutdown_and_report()
+        self.bpf.shutdown_and_report()
     }
 }
 
