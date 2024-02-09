@@ -152,9 +152,10 @@ impl TaskInfoMap {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd)]
 struct Task {
-    pid: i32,      // pid that uniquely identifies a task
-    cpu: i32,      // CPU where the task is running
-    vruntime: u64, // total vruntime (that determines the order how tasks are dispatched)
+    pid: i32,         // pid that uniquely identifies a task
+    cpu: i32,         // CPU where the task is running
+    cpumask_cnt: u64, // cpumask generation counter
+    vruntime: u64,    // total vruntime (that determines the order how tasks are dispatched)
 }
 
 // Make sure tasks are ordered by vruntime, if multiple tasks have the same vruntime order by pid.
@@ -172,6 +173,7 @@ impl Task {
         DispatchedTask {
             pid: self.pid,
             cpu: self.cpu,
+            cpumask_cnt: self.cpumask_cnt,
             payload: self.vruntime,
         }
     }
@@ -204,6 +206,7 @@ impl TaskTree {
             self.tasks.remove(&Task {
                 pid: prev_task.pid,
                 cpu: prev_task.cpu,
+                cpumask_cnt: prev_task.cpumask_cnt,
                 vruntime: prev_task.vruntime,
             });
         }
@@ -451,6 +454,7 @@ impl<'a> Scheduler<'a> {
                     self.task_pool.push(Task {
                         pid: task.pid,
                         cpu: task.cpu,
+                        cpumask_cnt: task.cpumask_cnt,
                         vruntime,
                     });
                 }
@@ -634,10 +638,15 @@ impl<'a> Scheduler<'a> {
         // Show general statistics.
         let nr_user_dispatches = *self.bpf.nr_user_dispatches_mut();
         let nr_kernel_dispatches = *self.bpf.nr_kernel_dispatches_mut();
-        let nr_cancel_dispatches = *self.bpf.nr_cancel_dispatches_mut();
         info!(
-            "  nr_user_dispatches={} nr_kernel_dispatches={} nr_cancel_dispatches={}",
-            nr_user_dispatches, nr_kernel_dispatches, nr_cancel_dispatches
+            "  nr_user_dispatches={} nr_kernel_dispatches={}",
+            nr_user_dispatches, nr_kernel_dispatches,
+        );
+        let nr_cancel_dispatches = *self.bpf.nr_cancel_dispatches_mut();
+        let nr_bounce_dispatches = *self.bpf.nr_bounce_dispatches_mut();
+        info!(
+            "  nr_cancel_dispatches={} nr_bounce_dispatches={}",
+            nr_cancel_dispatches, nr_bounce_dispatches,
         );
 
         // Show tasks that are waiting to be dispatched.

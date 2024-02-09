@@ -88,7 +88,8 @@ volatile u64 nr_queued;
 volatile u64 nr_scheduled;
 
 /* Dispatch statistics */
-volatile u64 nr_user_dispatches, nr_kernel_dispatches, nr_cancel_dispatches;
+volatile u64 nr_user_dispatches, nr_kernel_dispatches,
+	     nr_cancel_dispatches, nr_bounce_dispatches;
 
 /* Failure statistics */
 volatile u64 nr_failed_dispatches, nr_sched_congested;
@@ -133,6 +134,40 @@ struct {
 	__type(value, struct dispatched_task_ctx);
 	__uint(max_entries, MAX_ENQUEUED_TASKS);
 } dispatched SEC(".maps");
+
+/*
+ * Per-task local storage.
+ *
+ * This contain all the per-task information used internally by the BPF code.
+ */
+struct task_ctx {
+	/*
+	 * cpumask generation counter: used to verify the validity of the
+	 * current task's cpumask.
+	 */
+	u64 cpumask_cnt;
+};
+
+/* Map that contains task-local storage. */
+struct {
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct task_ctx);
+} task_ctx_stor SEC(".maps");
+
+/* Return a local task context from a generic task */
+struct task_ctx *lookup_task_ctx(struct task_struct *p)
+{
+	struct task_ctx *tctx;
+
+	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	if (!tctx) {
+		scx_bpf_error("Failed to lookup task ctx for %s", p->comm);
+		return NULL;
+	}
+	return tctx;
+}
 
 /*
  * Heartbeat timer used to periodically trigger the check to run the user-space
@@ -291,9 +326,13 @@ static u64 cpu_to_dsq(s32 cpu)
 /*
  * Dispatch a task to a target DSQ, waking up the corresponding CPU, if needed.
  */
-static void dispatch_task(struct task_struct *p, u64 dsq_id, u64 enq_flags)
+static void
+dispatch_task(struct task_struct *p, u64 dsq_id, u64 cpumask_cnt, u64 enq_flags)
 {
+	struct task_ctx *tctx;
 	u64 slice = __sync_fetch_and_add(&effective_slice_ns, 0) ? : slice_ns;
+	u64 curr_cpumask_cnt;
+	bool force_shared = false;
 	s32 cpu;
 
 	switch (dsq_id) {
@@ -307,30 +346,58 @@ static void dispatch_task(struct task_struct *p, u64 dsq_id, u64 enq_flags)
 		/*
 		 * Dispatch a task to a specific per-CPU DSQ if the target CPU
 		 * can be used (according to the cpumask), otherwise redirect
-		 * the task to the CPU assigned by the built-in idle selection
+		 * the task to the first CPU available, using the shared DSQ
 		 * logic.
 		 *
-		 * If also this CPU is not usable (because cpumask has changed
-		 * in the meantime), we can simply ignore the task, as it has
-		 * been dequeued and re-enqueued, so it will pick a valid CPU.
+		 * This can happen if the user-space scheduler dispatches the
+		 * task to an invalid CPU, the redirection to the shared DSQ
+		 * allows to prevent potential stalls in the scheduler.
+		 *
+		 * If the cpumask is not valid anymore (determined by the
+		 * cpumask_cnt generation counter) we can simply cancel the
+		 * dispatch event, since the task will be re-enqueued by the
+		 * core sched-ext code, potentially selecting a different cpu
+		 * and a different cpumask.
 		 */
 		scx_bpf_dispatch(p, dsq_id, slice, enq_flags);
 
+		tctx = lookup_task_ctx(p);
+		if (!tctx)
+			return;
+
+		/* Read current cpumask generation counter */
+		curr_cpumask_cnt = tctx->cpumask_cnt;
+
+		/* Check if the CPU is valid, according to the cpumask */
 		cpu = dsq_to_cpu(dsq_id);
-		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
-			/*
-			 * Abort the current dispatch and redirect to the
-			 * shared DSQ if the target CPU is not allowed.
-			 */
+		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+			force_shared = true;
+
+		/* If the cpumask is not valid anymore, ignore the dispatch event */
+		if (curr_cpumask_cnt != cpumask_cnt) {
 			scx_bpf_dispatch_cancel();
 			__sync_fetch_and_add(&nr_cancel_dispatches, 1);
 
-			dsq_id = SHARED_DSQ;
-			scx_bpf_dispatch(p, dsq_id, slice, enq_flags);
 			dbg_msg("dispatch: pid=%d (%s) dsq=%llu cancel",
 				p->pid, p->comm, dsq_id);
 			return;
 		}
+
+		/*
+		 * If the cpumask is valid, but the CPU is invalid, redirect
+		 * the task to the shared DSQ.
+		 */
+		if (force_shared) {
+			scx_bpf_dispatch_cancel();
+			__sync_fetch_and_add(&nr_bounce_dispatches, 1);
+
+			scx_bpf_dispatch(p, SHARED_DSQ, slice, enq_flags);
+			dbg_msg("dispatch: pid=%d (%s) dsq=%llu bounce",
+				p->pid, p->comm, dsq_id);
+			return;
+		}
+
+		/* Requested dispatch was valid */
 		dbg_msg("dispatch: pid=%d (%s) dsq=%llu",
 			p->pid, p->comm, dsq_id);
 
@@ -359,7 +426,7 @@ static void dispatch_user_scheduler(void)
 	 * Dispatch the scheduler on the first CPU available, likely the
 	 * current one.
 	 */
-	dispatch_task(p, SHARED_DSQ, 0);
+	dispatch_task(p, SHARED_DSQ, 0, 0);
 	bpf_task_release(p);
 }
 
@@ -387,7 +454,7 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 * Using SCX_DSQ_LOCAL ensures that the task will be executed
 		 * directly on the CPU returned by this function.
 		 */
-		dispatch_task(p, SCX_DSQ_LOCAL, 0);
+		dispatch_task(p, SCX_DSQ_LOCAL, 0, 0);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	}
 
@@ -401,6 +468,8 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 static void get_task_info(struct queued_task_ctx *task,
 			  const struct task_struct *p, bool exiting)
 {
+	struct task_ctx *tctx;
+
 	task->pid = p->pid;
 	/*
 	 * Use a negative CPU number to notify that the task is exiting, so
@@ -410,6 +479,11 @@ static void get_task_info(struct queued_task_ctx *task,
 		task->cpu = -1;
 		return;
 	}
+
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
+		return;
+	task->cpumask_cnt = tctx->cpumask_cnt;
 	task->sum_exec_runtime = p->se.sum_exec_runtime;
 	task->nvcsw = p->nvcsw;
 	task->weight = p->scx.weight;
@@ -450,7 +524,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * long (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
-		dispatch_task(p, SCX_DSQ_LOCAL, enq_flags);
+		dispatch_task(p, SCX_DSQ_LOCAL, 0, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -467,7 +541,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	dbg_msg("enqueue: pid=%d (%s)", p->pid, p->comm);
 	if (bpf_map_push_elem(&queued, &task, 0)) {
 		sched_congested(p);
-		dispatch_task(p, SHARED_DSQ, enq_flags);
+		dispatch_task(p, SHARED_DSQ, 0, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -521,12 +595,12 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		 * the task to the shared DSQ and rely on the built-in idle CPU
 		 * selection.
 		 */
-		dbg_msg("usersched: pid=%d cpu=%d payload=%llu",
-			task.pid, task.cpu, task.payload);
+		dbg_msg("usersched: pid=%d cpu=%d cpumask_cnt=%llu payload=%llu",
+			task.pid, task.cpu, task.cpumask_cnt, task.payload);
 		if (task.cpu < 0)
-			dispatch_task(p, SHARED_DSQ, 0);
+			dispatch_task(p, SHARED_DSQ, 0, 0);
 		else
-			dispatch_task(p, cpu_to_dsq(task.cpu), 0);
+			dispatch_task(p, cpu_to_dsq(task.cpu), task.cpumask_cnt, 0);
 		bpf_task_release(p);
 		__sync_fetch_and_add(&nr_user_dispatches, 1);
 	}
@@ -616,6 +690,20 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 }
 
 /*
+ * Task @p changes cpumask: update its local cpumask generation counter.
+ */
+void BPF_STRUCT_OPS(rustland_set_cpumask, struct task_struct *p,
+		    const struct cpumask *cpumask)
+{
+	struct task_ctx *tctx;
+
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
+		return;
+	tctx->cpumask_cnt++;
+}
+
+/*
  * A CPU is taken away from the scheduler, preempting the current task by
  * another one running in a higher priority sched_class.
  */
@@ -630,6 +718,24 @@ void BPF_STRUCT_OPS(rustland_cpu_release, s32 cpu,
 	dbg_msg("cpu preemption: pid=%d (%s)", p->pid, p->comm);
 	if (is_usersched_task(p))
 		set_usersched_needed();
+}
+
+
+/*
+ * A new task @p is being created.
+ *
+ * Allocate and initialize all the internal structures for the task (this
+ * function is allowed to block, so it can be used to preallocate memory).
+ */
+s32 BPF_STRUCT_OPS(rustland_init_task, struct task_struct *p,
+		   struct scx_init_task_args *args)
+{
+	/* Allocate task's local storage */
+	if (bpf_task_storage_get(&task_ctx_stor, p, 0,
+				 BPF_LOCAL_STORAGE_GET_F_CREATE))
+		return 0;
+	else
+		return -ENOMEM;
 }
 
 /*
@@ -782,7 +888,9 @@ struct sched_ext_ops rustland = {
 	.running		= (void *)rustland_running,
 	.stopping		= (void *)rustland_stopping,
 	.update_idle		= (void *)rustland_update_idle,
+	.set_cpumask		= (void *)rustland_set_cpumask,
 	.cpu_release		= (void *)rustland_cpu_release,
+	.init_task		= (void *)rustland_init_task,
 	.exit_task		= (void *)rustland_exit_task,
 	.init			= (void *)rustland_init,
 	.exit			= (void *)rustland_exit,
