@@ -104,9 +104,9 @@ struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
 	__type(value, struct lock_wrapper);
-	__uint(max_entries, MAX_DOMS);
+	__uint(max_entries, MAX_DOMS * LB_LOAD_BUCKETS);
 	__uint(map_flags, 0);
-} dom_load_locks SEC(".maps");
+} dom_dcycle_locks SEC(".maps");
 
 struct dom_active_pids {
 	u64 gen;
@@ -118,128 +118,6 @@ struct dom_active_pids {
 struct dom_active_pids dom_active_pids[MAX_DOMS];
 
 const u64 ravg_1 = 1 << RAVG_FRAC_BITS;
-
-static void dom_load_adj(u32 dom_id, s64 adj, u64 now)
-{
-	struct dom_ctx *domc;
-	struct lock_wrapper *lockw;
-
-	domc = bpf_map_lookup_elem(&dom_data, &dom_id);
-	lockw = bpf_map_lookup_elem(&dom_load_locks, &dom_id);
-
-	if (!domc || !lockw) {
-		scx_bpf_error("dom_ctx / lock lookup failed");
-		return;
-	}
-
-	bpf_spin_lock(&lockw->lock);
-	domc->load += adj;
-	ravg_accumulate(&domc->load_rd, domc->load, now, load_half_life);
-	bpf_spin_unlock(&lockw->lock);
-
-	if (adj < 0 && (s64)domc->load < 0)
-		scx_bpf_error("cpu%d dom%u load underflow (load=%lld adj=%lld)",
-			      bpf_get_smp_processor_id(), dom_id, domc->load, adj);
-
-	if (debug >=2 &&
-	    (!domc->dbg_load_printed_at || now - domc->dbg_load_printed_at >= 1000000000)) {
-		bpf_printk("LOAD ADJ dom=%u adj=%lld load=%llu",
-			   dom_id,
-			   adj,
-			   ravg_read(&domc->load_rd, now, load_half_life) >> RAVG_FRAC_BITS);
-		domc->dbg_load_printed_at = now;
-	}
-}
-
-static void dom_load_xfer_task(struct task_struct *p, struct task_ctx *taskc,
-			       u32 from_dom_id, u32 to_dom_id, u64 now)
-{
-	struct dom_ctx *from_domc, *to_domc;
-	struct lock_wrapper *from_lockw, *to_lockw;
-	struct ravg_data task_load_rd;
-	u64 from_load[2], to_load[2], task_load;
-
-	from_domc = bpf_map_lookup_elem(&dom_data, &from_dom_id);
-	from_lockw = bpf_map_lookup_elem(&dom_load_locks, &from_dom_id);
-	to_domc = bpf_map_lookup_elem(&dom_data, &to_dom_id);
-	to_lockw = bpf_map_lookup_elem(&dom_load_locks, &to_dom_id);
-	if (!from_domc || !from_lockw || !to_domc || !to_lockw) {
-		scx_bpf_error("dom_ctx / lock lookup failed");
-		return;
-	}
-
-	/*
-	 * @p is moving from @from_dom_id to @to_dom_id. Its load contribution
-	 * should be moved together. We only track duty cycle for tasks. Scale
-	 * it by weight to get load_rd.
-	 */
-	ravg_accumulate(&taskc->dcyc_rd, taskc->runnable, now, load_half_life);
-	task_load_rd = taskc->dcyc_rd;
-	ravg_scale(&task_load_rd, p->scx.weight, 0);
-
-	if (debug >= 2)
-		task_load = ravg_read(&task_load_rd, now, load_half_life);
-
-	/* transfer out of @from_dom_id */
-	bpf_spin_lock(&from_lockw->lock);
-	if (taskc->runnable)
-		from_domc->load -= p->scx.weight;
-
-	if (debug >= 2)
-		from_load[0] = ravg_read(&from_domc->load_rd, now, load_half_life);
-
-	ravg_transfer(&from_domc->load_rd, from_domc->load,
-		      &task_load_rd, taskc->runnable, load_half_life, false);
-
-	if (debug >= 2)
-		from_load[1] = ravg_read(&from_domc->load_rd, now, load_half_life);
-
-	bpf_spin_unlock(&from_lockw->lock);
-
-	/* transfer into @to_dom_id */
-	bpf_spin_lock(&to_lockw->lock);
-	if (taskc->runnable)
-		to_domc->load += p->scx.weight;
-
-	if (debug >= 2)
-		to_load[0] = ravg_read(&to_domc->load_rd, now, load_half_life);
-
-	ravg_transfer(&to_domc->load_rd, to_domc->load,
-		      &task_load_rd, taskc->runnable, load_half_life, true);
-
-	if (debug >= 2)
-		to_load[1] = ravg_read(&to_domc->load_rd, now, load_half_life);
-
-	bpf_spin_unlock(&to_lockw->lock);
-
-	if (debug >= 2)
-		bpf_printk("XFER dom%u->%u task=%lu from=%lu->%lu to=%lu->%lu",
-			   from_dom_id, to_dom_id,
-			   task_load >> RAVG_FRAC_BITS,
-			   from_load[0] >> RAVG_FRAC_BITS,
-			   from_load[1] >> RAVG_FRAC_BITS,
-			   to_load[0] >> RAVG_FRAC_BITS,
-			   to_load[1] >> RAVG_FRAC_BITS);
-}
-
-/*
- * Statistics
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(key_size, sizeof(u32));
-	__uint(value_size, sizeof(u64));
-	__uint(max_entries, RUSTY_NR_STATS);
-} stats SEC(".maps");
-
-static inline void stat_add(enum stat_idx idx, u64 addend)
-{
-	u32 idx_v = idx;
-
-	u64 *cnt_p = bpf_map_lookup_elem(&stats, &idx_v);
-	if (cnt_p)
-		(*cnt_p) += addend;
-}
 
 /* Map pid -> task_ctx */
 struct {
@@ -261,6 +139,183 @@ struct task_ctx *lookup_task_ctx(struct task_struct *p)
 		scx_bpf_error("task_ctx lookup failed for pid %d", p->pid);
 		return NULL;
 	}
+}
+
+static inline u32 weight_to_bucket_idx(u32 weight)
+{
+	/* Weight is calculated linearly, and is within range of [1, 10000] */
+	return weight * LB_LOAD_BUCKETS / LB_MAX_WEIGHT;
+}
+
+static void task_load_adj(struct task_struct *p, struct task_ctx *taskc,
+			  u64 now, bool runnable)
+{
+	taskc->runnable = runnable;
+	ravg_accumulate(&taskc->dcyc_rd, taskc->runnable, now, load_half_life);
+}
+
+static struct bucket_ctx *lookup_dom_bucket(struct dom_ctx *dom_ctx,
+					    u32 weight, u32 *bucket_id)
+{
+	u32 idx = weight_to_bucket_idx(weight);
+	struct bucket_ctx *bucket;
+
+	*bucket_id = idx;
+	bucket = MEMBER_VPTR(dom_ctx->buckets, [idx]);
+	if (bucket)
+		return bucket;
+
+	scx_bpf_error("Failed to lookup dom bucket");
+	return NULL;
+}
+
+static struct lock_wrapper *lookup_dom_lock(u32 dom_id, u32 weight)
+{
+	u32 idx = dom_id * LB_LOAD_BUCKETS + weight_to_bucket_idx(weight);
+	struct lock_wrapper *lockw;
+
+	lockw = bpf_map_lookup_elem(&dom_dcycle_locks, &idx);
+	if (lockw)
+		return lockw;
+
+	scx_bpf_error("Failed to lookup dom lock");
+	return NULL;
+}
+
+static void dom_dcycle_adj(u32 dom_id, u32 weight, u64 now, bool runnable)
+{
+	struct dom_ctx *domc;
+	struct bucket_ctx *bucket;
+	struct lock_wrapper *lockw;
+	s64 adj = runnable ? 1 : -1;
+	u32 bucket_idx = 0;
+
+	domc = bpf_map_lookup_elem(&dom_data, &dom_id);
+	if (!domc) {
+		scx_bpf_error("Failed to lookup dom_ctx");
+		return;
+	}
+
+	bucket = lookup_dom_bucket(domc, weight, &bucket_idx);
+	lockw = lookup_dom_lock(dom_id, weight);
+
+	if (!bucket || !lockw)
+		return;
+
+	bpf_spin_lock(&lockw->lock);
+	bucket->dcycle += adj;
+	ravg_accumulate(&bucket->rd, bucket->dcycle, now, load_half_life);
+	bpf_spin_unlock(&lockw->lock);
+
+	if (adj < 0 && (s64)bucket->dcycle < 0)
+		scx_bpf_error("cpu%d dom%u bucket%u load underflow (dcycle=%lld adj=%lld)",
+			      bpf_get_smp_processor_id(), dom_id, bucket_idx,
+			      bucket->dcycle, adj);
+
+	if (debug >=2 &&
+	    (!domc->dbg_dcycle_printed_at || now - domc->dbg_dcycle_printed_at >= 1000000000)) {
+		bpf_printk("DCYCLE ADJ dom=%u bucket=%u adj=%lld dcycle=%u avg_dcycle=%llu",
+			   dom_id, bucket_idx, adj, bucket->dcycle,
+			   ravg_read(&bucket->rd, now, load_half_life) >> RAVG_FRAC_BITS);
+		domc->dbg_dcycle_printed_at = now;
+	}
+}
+
+static void dom_load_xfer_task(struct task_struct *p, struct task_ctx *taskc,
+			       u32 from_dom_id, u32 to_dom_id, u64 now)
+{
+	struct bucket_ctx *from_bucket, *to_bucket;
+	u32 idx = 0, weight = taskc->weight;
+	struct dom_ctx *from_domc, *to_domc;
+	struct lock_wrapper *from_lockw, *to_lockw;
+	struct ravg_data task_dcyc_rd;
+	u64 from_dcycle[2], to_dcycle[2], task_dcycle;
+
+	from_domc = bpf_map_lookup_elem(&dom_data, &from_dom_id);
+	from_lockw = lookup_dom_lock(from_dom_id, weight);
+	to_domc = bpf_map_lookup_elem(&dom_data, &to_dom_id);
+	to_lockw = lookup_dom_lock(to_dom_id, weight);
+	if (!from_domc || !from_lockw || !to_domc || !to_lockw) {
+		scx_bpf_error("dom_ctx / lock lookup failed");
+		return;
+	}
+
+	from_bucket = lookup_dom_bucket(from_domc, weight, &idx);
+	to_bucket = lookup_dom_bucket(to_domc, weight, &idx);
+	if (!from_bucket || !to_bucket)
+		return;
+
+	/*
+	 * @p is moving from @from_dom_id to @to_dom_id. Its duty cycle
+	 * contribution in the relevant bucket of @from_dom_id should be moved
+	 * together to the corresponding bucket in @to_dom_id. We only track
+	 * duty cycle from BPF. Load is computed in user space when performing
+	 * load balancing.
+	 */
+	ravg_accumulate(&taskc->dcyc_rd, taskc->runnable, now, load_half_life);
+	task_dcyc_rd = taskc->dcyc_rd;
+	if (debug >= 2)
+		task_dcycle = ravg_read(&task_dcyc_rd, now, load_half_life);
+
+	/* transfer out of @from_dom_id */
+	bpf_spin_lock(&from_lockw->lock);
+	if (taskc->runnable)
+		from_bucket->dcycle--;
+
+	if (debug >= 2)
+		from_dcycle[0] = ravg_read(&from_bucket->rd, now, load_half_life);
+
+	ravg_transfer(&from_bucket->rd, from_bucket->dcycle,
+		      &task_dcyc_rd, taskc->runnable, load_half_life, false);
+
+	if (debug >= 2)
+		from_dcycle[1] = ravg_read(&from_bucket->rd, now, load_half_life);
+
+	bpf_spin_unlock(&from_lockw->lock);
+
+	/* transfer into @to_dom_id */
+	bpf_spin_lock(&to_lockw->lock);
+	if (taskc->runnable)
+		to_bucket->dcycle++;
+
+	if (debug >= 2)
+		to_dcycle[0] = ravg_read(&to_bucket->rd, now, load_half_life);
+
+	ravg_transfer(&to_bucket->rd, to_bucket->dcycle,
+		      &task_dcyc_rd, taskc->runnable, load_half_life, true);
+
+	if (debug >= 2)
+		to_dcycle[1] = ravg_read(&to_bucket->rd, now, load_half_life);
+
+	bpf_spin_unlock(&to_lockw->lock);
+
+	if (debug >= 2)
+		bpf_printk("XFER dom%u->%u task=%lu from=%lu->%lu to=%lu->%lu",
+			   from_dom_id, to_dom_id,
+			   task_dcycle >> RAVG_FRAC_BITS,
+			   from_dcycle[0] >> RAVG_FRAC_BITS,
+			   from_dcycle[1] >> RAVG_FRAC_BITS,
+			   to_dcycle[0] >> RAVG_FRAC_BITS,
+			   to_dcycle[1] >> RAVG_FRAC_BITS);
+}
+
+/*
+ * Statistics
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(key_size, sizeof(u32));
+	__uint(value_size, sizeof(u64));
+	__uint(max_entries, RUSTY_NR_STATS);
+} stats SEC(".maps");
+
+static inline void stat_add(enum stat_idx idx, u64 addend)
+{
+	u32 idx_v = idx;
+
+	u64 *cnt_p = bpf_map_lookup_elem(&stats, &idx_v);
+	if (cnt_p)
+		(*cnt_p) += addend;
 }
 
 /*
@@ -788,11 +843,10 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	taskc->runnable = true;
 	taskc->is_kworker = p->flags & PF_WQ_WORKER;
 
-	ravg_accumulate(&taskc->dcyc_rd, taskc->runnable, now, load_half_life);
-	dom_load_adj(taskc->dom_id, p->scx.weight, now);
+	task_load_adj(p, taskc, now, true);
+	dom_dcycle_adj(taskc->dom_id, taskc->weight, now, true);
 }
 
 void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
@@ -875,18 +929,21 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	taskc->runnable = false;
-
-	ravg_accumulate(&taskc->dcyc_rd, taskc->runnable, now, load_half_life);
-	dom_load_adj(taskc->dom_id, -(s64)p->scx.weight, now);
+	task_load_adj(p, taskc, now, false);
+	dom_dcycle_adj(taskc->dom_id, taskc->weight, now, false);
 }
 
 void BPF_STRUCT_OPS(rusty_set_weight, struct task_struct *p, u32 weight)
 {
 	struct task_ctx *taskc;
+	u64 now = bpf_ktime_get_ns();
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
+
+	if (debug >= 2)
+		bpf_printk("%s[%d]: SET_WEIGHT %u -> %u", p->comm, p->pid,
+			   taskc->weight, weight);
 
 	taskc->weight = weight;
 }
@@ -908,7 +965,7 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 		if (cpumask_intersects_domain(cpumask, dom)) {
 			taskc->dom_mask |= 1LLU << dom;
 			/*
-			 * AsThe starting point is round-robin'd and the first
+			 * The starting point is round-robin'd and the first
 			 * match should be spread across all the domains.
 			 */
 			if (first_dom == MAX_DOMS)
@@ -970,6 +1027,9 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 		return ret;
 	}
 
+	if (debug >= 2)
+		bpf_printk("%s[%d]: INIT (weight %u))", p->comm, p->pid, p->scx.weight);
+
 	/*
 	 * Read the entry from the map immediately so we can add the cpumask
 	 * with bpf_kptr_xchg().
@@ -1019,10 +1079,15 @@ void BPF_STRUCT_OPS(rusty_exit_task, struct task_struct *p,
 
 static s32 create_dom(u32 dom_id)
 {
-	struct dom_ctx domc_init = {}, *domc;
+	struct dom_ctx *domc;
 	struct bpf_cpumask *cpumask;
 	u32 cpu;
 	s32 ret;
+
+	if (dom_id >= MAX_DOMS) {
+		scx_bpf_error("Max dom ID %u exceeded (%u)", MAX_DOMS, dom_id);
+		return -EINVAL;
+	}
 
 	ret = scx_bpf_create_dsq(dom_id, -1);
 	if (ret < 0) {
@@ -1030,15 +1095,9 @@ static s32 create_dom(u32 dom_id)
 		return ret;
 	}
 
-	ret = bpf_map_update_elem(&dom_data, &dom_id, &domc_init, 0);
-	if (ret) {
-		scx_bpf_error("Failed to add dom_ctx entry %u (%d)", dom_id, ret);
-		return ret;
-	}
-
 	domc = bpf_map_lookup_elem(&dom_data, &dom_id);
 	if (!domc) {
-		/* Should never happen, we just inserted it above. */
+		/* Should never happen, it's created statically at load time. */
 		scx_bpf_error("No dom%u", dom_id);
 		return -ENOENT;
 	}

@@ -26,6 +26,12 @@ enum consts {
 	MAX_DOMS		= 64,	/* limited to avoid complex bitmask ops */
 	CACHELINE_SIZE		= 64,
 
+	LB_DEFAULT_WEIGHT	= 100,
+	LB_MIN_WEIGHT		= 1,
+	LB_MAX_WEIGHT		= 10000,
+	LB_LOAD_BUCKETS		= 100,	/* Must be a factor of LB_MAX_WEIGHT */
+	LB_WEIGHT_PER_BUCKET	= LB_MAX_WEIGHT / LB_LOAD_BUCKETS,
+
 	/*
 	 * When userspace load balancer is trying to determine the tasks to push
 	 * out from an overloaded domain, it looks at the the following number
@@ -84,14 +90,18 @@ struct task_ctx {
 	struct ravg_data dcyc_rd;
 };
 
+struct bucket_ctx {
+	u64 dcycle;
+	struct ravg_data rd;
+};
+
 struct dom_ctx {
 	u64 vtime_now;
 	struct bpf_cpumask __kptr *cpumask;
 	struct bpf_cpumask __kptr *direct_greedy_cpumask;
 
-	u64 load;
-	struct ravg_data load_rd;
-	u64 dbg_load_printed_at;
+	u64 dbg_dcycle_printed_at;
+	struct bucket_ctx buckets[LB_LOAD_BUCKETS];
 };
 
 #endif /* __INTF_H */

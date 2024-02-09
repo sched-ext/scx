@@ -19,6 +19,7 @@ log = "0.4.17"
 ordered-float = "3.4.0"
 scx_utils = { path = "../../../rust/scx_utils", version = "0.6" }
 simplelog = "0.12.0"
+static_assertions = "1.1.0"
 
 [build-dependencies]
 scx_utils = { path = "../../../rust/scx_utils", version = "0.6" }
