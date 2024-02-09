@@ -490,17 +490,22 @@ impl<'a> Scheduler<'a> {
         // This allows to have more tasks sitting in the task pool, reducing the pressure on the
         // dispatcher queues and giving a chance to higher priority tasks to come in and get
         // dispatched earlier, mitigating potential priority inversion issues.
-        let idle_cpus = self.get_idle_cpus();
-        for _ in &idle_cpus {
+        let mut idle_cpus = self.get_idle_cpus();
+        while !idle_cpus.is_empty() {
             match self.task_pool.pop() {
                 Some(mut task) => {
                     // Update global minimum vruntime.
                     self.min_vruntime = task.vruntime;
 
-                    // If the CPU assigned to the task is not idle anymore, dispatch to the first
-                    // CPU that becomes available.
-                    if !idle_cpus.contains(&task.cpu) {
-                        task.cpu = NO_CPU;
+                    // Pick an ideal idle CPU for the task.
+                    if let Some(pos) = idle_cpus.iter().position(|&x| x == task.cpu) {
+                        // The CPU assigned to the task is in idle_cpus, keep the assignment and
+                        // remove the CPU from idle_cpus.
+                        idle_cpus.remove(pos);
+                    } else {
+                        // The CPU assigned to the task is not in idle_cpus, remove the first idle
+                        // CPU and dispatch the task to the shared DSQ.
+                        task.cpu = idle_cpus.pop().unwrap();
                     }
 
                     // Send task to the BPF dispatcher.

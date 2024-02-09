@@ -325,8 +325,8 @@ static void dispatch_task(struct task_struct *p, u64 dsq_id, u64 enq_flags)
 			scx_bpf_dispatch_cancel();
 			__sync_fetch_and_add(&nr_cancel_dispatches, 1);
 
-			dsq_id = SHARED_DSQ;
-			scx_bpf_dispatch(p, dsq_id, slice, enq_flags);
+			/*dsq_id = SHARED_DSQ;
+			scx_bpf_dispatch(p, dsq_id, slice, enq_flags);*/
 			dbg_msg("dispatch: pid=%d (%s) dsq=%llu cancel",
 				p->pid, p->comm, dsq_id);
 			return;
