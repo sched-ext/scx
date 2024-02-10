@@ -150,7 +150,7 @@ impl TaskInfoMap {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 struct Task {
     pid: i32,         // pid that uniquely identifies a task
     cpu: i32,         // CPU where the task is running
@@ -183,6 +183,7 @@ impl Task {
 // (ordered by vruntime using a BTreeSet).
 struct TaskTree {
     tasks: BTreeSet<Task>,
+    task_map: HashMap<i32, Task>, // Map from pid to task
 }
 
 // Task pool methods (push / pop).
@@ -190,32 +191,31 @@ impl TaskTree {
     fn new() -> Self {
         TaskTree {
             tasks: BTreeSet::new(),
+            task_map: HashMap::new(),
         }
-    }
-
-    // Search a Task item in the TaskTree by its PID.
-    fn find(&self, pid: i32) -> Option<&Task> {
-        self.tasks.iter().find(|t| t.pid == pid)
     }
 
     // Add an item to the pool (item will be placed in the tree depending on its vruntime, items
     // with the same vruntime will be sorted by pid).
     fn push(&mut self, task: Task) {
-        // Replace old item if it's already present.
-        if let Some(prev_task) = self.find(task.pid) {
-            self.tasks.remove(&Task {
-                pid: prev_task.pid,
-                cpu: prev_task.cpu,
-                cpumask_cnt: prev_task.cpumask_cnt,
-                vruntime: prev_task.vruntime,
-            });
+        // Check if task already exists.
+        if let Some(prev_task) = self.task_map.get(&task.pid) {
+            self.tasks.remove(prev_task);
         }
-        self.tasks.insert(task);
+
+        // Insert/update task.
+        self.tasks.insert(task.clone());
+        self.task_map.insert(task.pid, task);
     }
 
     // Pop the first item from the BTreeSet (item with the smallest vruntime).
     fn pop(&mut self) -> Option<Task> {
-        self.tasks.pop_first()
+        if let Some(task) = self.tasks.pop_first() {
+            self.task_map.remove(&task.pid);
+            Some(task)
+        } else {
+            None
+        }
     }
 }
 
