@@ -147,6 +147,7 @@ static ALLOCATOR: RustLandAllocator = RustLandAllocator;
 pub struct QueuedTask {
     pub pid: i32,              // pid that uniquely identifies a task
     pub cpu: i32,              // CPU where the task is running (-1 = exiting)
+    pub cpumask_cnt: u64,      // cpumask generation counter
     pub sum_exec_runtime: u64, // Total cpu time
     pub nvcsw: u64,            // Voluntary context switches
     pub weight: u64,           // Task static priority
@@ -155,9 +156,10 @@ pub struct QueuedTask {
 // Task queued for dispatching to the BPF component (see bpf_intf::dispatched_task_ctx).
 #[derive(Debug)]
 pub struct DispatchedTask {
-    pub pid: i32,     // pid that uniquely identifies a task
-    pub cpu: i32,     // target CPU selected by the scheduler
-    pub payload: u64, // task payload (used for debugging)
+    pub pid: i32,              // pid that uniquely identifies a task
+    pub cpu: i32,              // target CPU selected by the scheduler
+    pub cpumask_cnt: u64,      // cpumask generation counter
+    pub payload: u64,          // task payload (used for debugging)
 }
 
 // Message received from the dispatcher (see bpf_intf::queued_task_ctx for details).
@@ -179,6 +181,7 @@ impl EnqueuedMessage {
         QueuedTask {
             pid: self.inner.pid,
             cpu: self.inner.cpu,
+            cpumask_cnt: self.inner.cpumask_cnt,
             sum_exec_runtime: self.inner.sum_exec_runtime,
             nvcsw: self.inner.nvcsw,
             weight: self.inner.weight,
@@ -198,6 +201,7 @@ impl DispatchedMessage {
         let dispatched_task_struct = bpf_intf::dispatched_task_ctx {
             pid: task.pid,
             cpu: task.cpu,
+            cpumask_cnt: task.cpumask_cnt,
             payload: task.payload,
         };
         DispatchedMessage {
@@ -304,6 +308,12 @@ impl<'a> BpfScheduler<'a> {
     #[allow(dead_code)]
     pub fn nr_cancel_dispatches_mut(&mut self) -> &mut u64 {
         &mut self.skel.bss_mut().nr_cancel_dispatches
+    }
+
+    // Counter of dispatches bounced to the shared DSQ.
+    #[allow(dead_code)]
+    pub fn nr_bounce_dispatches_mut(&mut self) -> &mut u64 {
+        &mut self.skel.bss_mut().nr_bounce_dispatches
     }
 
     // Counter of failed dispatch events.
