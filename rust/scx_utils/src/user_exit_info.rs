@@ -6,6 +6,7 @@ use crate::bindings;
 use anyhow::bail;
 use anyhow::Result;
 use std::ffi::CStr;
+use std::os::raw::c_char;
 
 pub enum ScxExitKind {
     None = bindings::scx_exit_kind_SCX_EXIT_NONE as isize,
@@ -71,9 +72,9 @@ impl UserExitInfo {
     /// type which then calls this method with the individual fields.
     pub fn new(
         kind_ptr: *const i32,
-        reason_ptr: *const i8,
-        msg_ptr: *const i8,
-        dump_ptr: *const i8,
+        reason_ptr: *const c_char,
+        msg_ptr: *const c_char,
+        dump_ptr: *const c_char,
     ) -> Self {
         let kind = unsafe { std::ptr::read_volatile(kind_ptr) };
 
