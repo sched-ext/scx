@@ -130,18 +130,6 @@ pub const NO_CPU: i32 = -1;
 /// }
 ///
 
-// Override default memory allocator.
-//
-// To prevent potential deadlock conditions under heavy loads, any scheduler that delegates
-// scheduling decisions to user-space should avoid triggering page faults.
-//
-// To address this issue, replace the global allocator with a custom one (RustLandAllocator),
-// designed to operate on a pre-allocated buffer. This, coupled with the memory locking achieved
-// through mlockall(), prevents page faults from occurring during the execution of the user-space
-// scheduler.
-#[global_allocator]
-static ALLOCATOR: RustLandAllocator = RustLandAllocator;
-
 // Task queued for scheduling from the BPF component (see bpf_intf::queued_task_ctx).
 #[derive(Debug)]
 pub struct QueuedTask {
