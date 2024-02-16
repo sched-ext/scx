@@ -11,7 +11,6 @@ extern crate static_assertions;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::ops::Bound::Included;
 use std::ops::Bound::Unbounded;
 use std::sync::atomic::AtomicBool;
@@ -25,7 +24,6 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use bitvec::prelude::*;
 use clap::Parser;
 use libbpf_rs::skel::OpenSkel as _;
 use libbpf_rs::skel::Skel as _;
@@ -38,6 +36,7 @@ use ordered_float::OrderedFloat;
 use scx_utils::ravg::ravg_read;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Topology;
 
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
@@ -249,163 +248,6 @@ fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
     }
 }
 
-#[derive(Debug)]
-struct Topology {
-    nr_cpus: usize,
-    nr_doms: usize,
-    dom_cpus: Vec<BitVec<u64, Lsb0>>,
-    cpu_dom: Vec<Option<usize>>,
-}
-
-impl Topology {
-    fn from_cpumasks(cpumasks: &[String], nr_cpus: usize) -> Result<Self> {
-        if cpumasks.len() > MAX_DOMS {
-            bail!(
-                "Number of requested domains ({}) is greater than MAX_DOMS ({})",
-                cpumasks.len(),
-                MAX_DOMS
-            );
-        }
-        let mut cpu_dom = vec![None; nr_cpus];
-        let mut dom_cpus = vec![bitvec![u64, Lsb0; 0; MAX_CPUS]; cpumasks.len()];
-        for (dom, cpumask) in cpumasks.iter().enumerate() {
-            let hex_str = {
-                let mut tmp_str = cpumask
-                    .strip_prefix("0x")
-                    .unwrap_or(cpumask)
-                    .replace('_', "");
-                if tmp_str.len() % 2 != 0 {
-                    tmp_str = "0".to_string() + &tmp_str;
-                }
-                tmp_str
-            };
-            let byte_vec = hex::decode(&hex_str)
-                .with_context(|| format!("Failed to parse cpumask: {}", cpumask))?;
-
-            for (index, &val) in byte_vec.iter().rev().enumerate() {
-                let mut v = val;
-                while v != 0 {
-                    let lsb = v.trailing_zeros() as usize;
-                    v &= !(1 << lsb);
-                    let cpu = index * 8 + lsb;
-                    if cpu > nr_cpus {
-                        bail!(
-                            concat!(
-                                "Found cpu ({}) in cpumask ({}) which is larger",
-                                " than the number of cpus on the machine ({})"
-                            ),
-                            cpu,
-                            cpumask,
-                            nr_cpus
-                        );
-                    }
-                    if let Some(other_dom) = cpu_dom[cpu] {
-                        bail!(
-                            "Found cpu ({}) with domain ({}) but also in cpumask ({})",
-                            cpu,
-                            other_dom,
-                            cpumask
-                        );
-                    }
-                    cpu_dom[cpu] = Some(dom);
-                    dom_cpus[dom].set(cpu, true);
-                }
-            }
-            dom_cpus[dom].set_uninitialized(false);
-        }
-
-        for (cpu, dom) in cpu_dom.iter().enumerate() {
-            if dom.is_none() {
-                bail!(
-                    "CPU {} not assigned to any domain. Make sure it is covered by some --cpumasks argument.",
-                    cpu
-                );
-            }
-        }
-
-        Ok(Self {
-            nr_cpus,
-            nr_doms: dom_cpus.len(),
-            dom_cpus,
-            cpu_dom,
-        })
-    }
-
-    fn from_cache_level(level: u32, nr_cpus: usize) -> Result<Self> {
-        let mut cpu_to_cache = vec![]; // (cpu_id, Option<cache_id>)
-        let mut cache_ids = BTreeSet::<usize>::new();
-        let mut nr_offline = 0;
-
-        // Build cpu -> cache ID mapping.
-        for cpu in 0..nr_cpus {
-            let path = format!("/sys/devices/system/cpu/cpu{}/cache/index{}/id", cpu, level);
-            let id = match std::fs::read_to_string(&path) {
-                Ok(val) => Some(val.trim().parse::<usize>().with_context(|| {
-                    format!("Failed to parse {:?}'s content {:?}", &path, &val)
-                })?),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    nr_offline += 1;
-                    None
-                }
-                Err(e) => return Err(e).with_context(|| format!("Failed to open {:?}", &path)),
-            };
-
-            cpu_to_cache.push(id);
-            if let Some(id) = id {
-                cache_ids.insert(id);
-            }
-        }
-
-        info!(
-            "CPUs: online/possible = {}/{}",
-            nr_cpus - nr_offline,
-            nr_cpus
-        );
-
-        // Cache IDs may have holes. Assign consecutive domain IDs to
-        // existing cache IDs.
-        let mut cache_to_dom = BTreeMap::<usize, usize>::new();
-        let mut nr_doms = 0;
-        for cache_id in cache_ids.iter() {
-            cache_to_dom.insert(*cache_id, nr_doms);
-            nr_doms += 1;
-        }
-
-        if nr_doms > MAX_DOMS {
-            bail!(
-                "Total number of doms {} is greater than MAX_DOMS ({})",
-                nr_doms,
-                MAX_DOMS
-            );
-        }
-
-        // Build and return dom -> cpumask and cpu -> dom mappings.
-        let mut dom_cpus = vec![bitvec![u64, Lsb0; 0; MAX_CPUS]; nr_doms];
-        let mut cpu_dom = vec![];
-
-        for (cpu, cache) in cpu_to_cache.iter().enumerate().take(nr_cpus) {
-            match cache {
-                Some(cache_id) => {
-                    let dom_id = cache_to_dom[cache_id];
-                    dom_cpus[dom_id].set(cpu, true);
-                    cpu_dom.push(Some(dom_id));
-                }
-                None => {
-                    dom_cpus[0].set(cpu, true);
-                    cpu_dom.push(None);
-                }
-            }
-        }
-
-        Ok(Self {
-            nr_cpus,
-            nr_doms: dom_cpus.len(),
-            dom_cpus,
-            cpu_dom,
-        })
-    }
-}
-
 struct Tuner {
     top: Arc<Topology>,
     direct_greedy_under: f64,
@@ -450,7 +292,7 @@ impl Tuner {
             // initialization and None CpuStat indicates the CPU has gone
             // down since then. Ignore both.
             if let (Some(dom), Some(curr), Some(prev)) = (
-                self.top.cpu_dom[cpu],
+                self.top.cpu_domain_id(cpu),
                 curr_cpu_stats.get(&cpu32),
                 self.prev_cpu_stats.get(&cpu32),
             ) {
@@ -478,7 +320,7 @@ impl Tuner {
             // This could be implemented better.
             let update_dom_bits = |target: &mut [u64; 8], val: bool| {
                 for cpu in 0..self.top.nr_cpus {
-                    if let Some(cdom) = self.top.cpu_dom[cpu] {
+                    if let Some(cdom) = self.top.cpu_domain_id(cpu) {
                         if cdom == dom {
                             if val {
                                 target[cpu / 64] |= 1u64 << (cpu % 64);
@@ -1142,39 +984,46 @@ impl<'a> Scheduler<'a> {
         skel_builder.obj_builder.debug(opts.verbose > 0);
         let mut skel = skel_builder.open().context("Failed to open BPF program")?;
 
-        let nr_cpus = libbpf_rs::num_possible_cpus().unwrap();
-        if nr_cpus > MAX_CPUS {
+        // Initialize skel according to @opts.
+        let top = Arc::new(if !opts.cpumasks.is_empty() {
+            Topology::builder().cpumasks(&opts.cpumasks).build()?
+        } else {
+            Topology::builder().cache_level(opts.cache_level).build()?
+        });
+
+        if top.nr_cpus > MAX_CPUS {
             bail!(
                 "nr_cpus ({}) is greater than MAX_CPUS ({})",
-                nr_cpus,
+                top.nr_cpus,
                 MAX_CPUS
             );
         }
 
-        // Initialize skel according to @opts.
-        let top = Arc::new(if !opts.cpumasks.is_empty() {
-            Topology::from_cpumasks(&opts.cpumasks, nr_cpus)?
-        } else {
-            Topology::from_cache_level(opts.cache_level, nr_cpus)?
-        });
+	if top.nr_doms > MAX_DOMS {
+            bail!(
+                "nr_doms ({}) is greater than MAX_DOMS ({})",
+                top.nr_cpus,
+                MAX_DOMS
+            );
+	}
 
         skel.rodata_mut().nr_doms = top.nr_doms as u32;
         skel.rodata_mut().nr_cpus = top.nr_cpus as u32;
 
-        for (cpu, dom) in top.cpu_dom.iter().enumerate() {
-            skel.rodata_mut().cpu_dom_id_map[cpu] = dom.unwrap_or(0) as u32;
+        for (cpu, dom) in top.cpu_domain_map.iter() {
+            skel.rodata_mut().cpu_dom_id_map[*cpu] = *dom as u32;
         }
 
-        for (dom, cpus) in top.dom_cpus.iter().enumerate() {
-            let raw_cpus_slice = cpus.as_raw_slice();
-            let dom_cpumask_slice = &mut skel.rodata_mut().dom_cpumasks[dom];
+        for (dom_id, domain) in top.domains.iter() {
+            let raw_cpus_slice = domain.mask.as_raw_slice();
+            let dom_cpumask_slice = &mut skel.rodata_mut().dom_cpumasks[*dom_id];
             let (left, _) = dom_cpumask_slice.split_at_mut(raw_cpus_slice.len());
-            left.clone_from_slice(cpus.as_raw_slice());
+            left.clone_from_slice(domain.mask.as_raw_slice());
             info!(
                 "DOM[{:02}] cpumask{} ({} cpus)",
-                dom,
-                &format_cpumask(dom_cpumask_slice, nr_cpus),
-                cpus.count_ones()
+                domain.id(),
+                &format_cpumask(dom_cpumask_slice, top.nr_cpus),
+                domain.mask.count_ones()
             );
         }
 

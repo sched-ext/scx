@@ -40,3 +40,7 @@ pub mod ravg;
 mod user_exit_info;
 pub use user_exit_info::UserExitInfo;
 pub use user_exit_info::ScxExitKind;
+
+mod topology;
+pub use topology::Domain;
+pub use topology::Topology;
