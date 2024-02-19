@@ -41,9 +41,8 @@ depend on. Switching to a sched_ext scheduler is as simple as running a
 sched_ext binary:
 
 ```
-root@test ~# head -2 /sys/kernel/debug/sched/ext
-ops                           :
-enabled                       : 0
+root@test ~# cat /sys/kernel/sched_ext/state /sys/kernel/sched_ext/*/ops 2>/dev/null
+disabled
 root@test ~# scx_simple
 local=1 global=0
 local=74 global=15
@@ -51,9 +50,9 @@ local=78 global=32
 local=82 global=42
 local=86 global=54
 ^Zfish: Job 1, 'scx_simple' has stopped
-root@test ~# head -2 /sys/kernel/debug/sched/ext
-ops                           : simple
-enabled                       : 1
+root@test ~# cat /sys/kernel/sched_ext/state /sys/kernel/sched_ext/*/ops 2>/dev/null
+enabled
+simple
 root@test ~# fg
 Send job 1 (scx_simple) to foreground
 local=635 global=179
