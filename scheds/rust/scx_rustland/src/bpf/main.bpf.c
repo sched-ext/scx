@@ -190,12 +190,7 @@ struct {
 /*
  * Map of allocated CPUs.
  */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, MAX_CPUS);
-	__type(key, u32);
-	__type(value, u32);
-} cpu_map SEC(".maps");
+volatile u32 cpu_map[MAX_CPUS];
 
 /*
  * Assign a task to a CPU (used in .running() and .stopping()).
@@ -204,14 +199,11 @@ struct {
  */
 static void set_cpu_owner(u32 cpu, u32 pid)
 {
-	u32 *owner;
-
-	owner = bpf_map_lookup_elem(&cpu_map, &cpu);
-	if (!owner) {
-		scx_bpf_error("Failed to look up cpu_map for cpu %u", cpu);
+	if (cpu >= MAX_CPUS) {
+		scx_bpf_error("Invalid cpu: %d", cpu);
 		return;
 	}
-	*owner = pid;
+	cpu_map[cpu] = pid;
 }
 
 /*
@@ -221,14 +213,11 @@ static void set_cpu_owner(u32 cpu, u32 pid)
  */
 static u32 get_cpu_owner(u32 cpu)
 {
-	u32 *owner;
-
-	owner = bpf_map_lookup_elem(&cpu_map, &cpu);
-	if (!owner) {
-		scx_bpf_error("Failed to look up cpu_map for cpu %u", cpu);
+	if (cpu >= MAX_CPUS) {
+		scx_bpf_error("Invalid cpu: %d", cpu);
 		return 0;
 	}
-	return *owner;
+	return cpu_map[cpu];
 }
 
 /*

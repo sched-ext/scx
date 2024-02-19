@@ -328,18 +328,9 @@ impl<'a> BpfScheduler<'a> {
     // Get the pid running on a certain CPU, if no tasks are running return 0.
     #[allow(dead_code)]
     pub fn get_cpu_pid(&self, cpu: i32) -> u32 {
-        let maps = self.skel.maps();
-        let cpu_map = maps.cpu_map();
+        let cpu_map_ptr = self.skel.bss().cpu_map.as_ptr();
 
-        let key = cpu.to_ne_bytes();
-        let value = cpu_map.lookup(&key, libbpf_rs::MapFlags::ANY).unwrap();
-        let pid = value.map_or(0u32, |vec| {
-            let mut array: [u8; 4] = Default::default();
-            array.copy_from_slice(&vec[..std::cmp::min(4, vec.len())]);
-            u32::from_le_bytes(array)
-        });
-
-        pid
+        unsafe { *cpu_map_ptr.offset(cpu as isize) }
     }
 
     // Receive a task to be scheduled from the BPF dispatcher.
