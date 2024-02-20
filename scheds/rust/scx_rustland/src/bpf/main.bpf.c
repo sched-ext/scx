@@ -119,8 +119,7 @@ const volatile bool debug;
  * This map is drained by the user space scheduler.
  */
 struct {
-	__uint(type, BPF_MAP_TYPE_QUEUE);
-	__type(value, struct queued_task_ctx);
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, MAX_ENQUEUED_TASKS);
 } queued SEC(".maps");
 
@@ -157,11 +156,11 @@ struct {
 } task_ctx_stor SEC(".maps");
 
 /* Return a local task context from a generic task */
-struct task_ctx *lookup_task_ctx(struct task_struct *p)
+struct task_ctx *lookup_task_ctx(const struct task_struct *p)
 {
 	struct task_ctx *tctx;
 
-	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+	tctx = bpf_task_storage_get(&task_ctx_stor, (struct task_struct *)p, 0, 0);
 	if (!tctx) {
 		scx_bpf_error("Failed to lookup task ctx for %s", p->comm);
 		return NULL;
@@ -190,12 +189,7 @@ struct {
 /*
  * Map of allocated CPUs.
  */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, MAX_CPUS);
-	__type(key, u32);
-	__type(value, u32);
-} cpu_map SEC(".maps");
+volatile u32 cpu_map[MAX_CPUS];
 
 /*
  * Assign a task to a CPU (used in .running() and .stopping()).
@@ -204,14 +198,11 @@ struct {
  */
 static void set_cpu_owner(u32 cpu, u32 pid)
 {
-	u32 *owner;
-
-	owner = bpf_map_lookup_elem(&cpu_map, &cpu);
-	if (!owner) {
-		scx_bpf_error("Failed to look up cpu_map for cpu %u", cpu);
+	if (cpu >= MAX_CPUS) {
+		scx_bpf_error("Invalid cpu: %d", cpu);
 		return;
 	}
-	*owner = pid;
+	cpu_map[cpu] = pid;
 }
 
 /*
@@ -221,14 +212,11 @@ static void set_cpu_owner(u32 cpu, u32 pid)
  */
 static u32 get_cpu_owner(u32 cpu)
 {
-	u32 *owner;
-
-	owner = bpf_map_lookup_elem(&cpu_map, &cpu);
-	if (!owner) {
-		scx_bpf_error("Failed to look up cpu_map for cpu %u", cpu);
+	if (cpu >= MAX_CPUS) {
+		scx_bpf_error("Invalid cpu: %d", cpu);
 		return 0;
 	}
-	return *owner;
+	return cpu_map[cpu];
 }
 
 /*
@@ -506,7 +494,7 @@ static void sched_congested(struct task_struct *p)
  */
 void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	struct queued_task_ctx task;
+	struct queued_task_ctx *task;
 
 	/*
 	 * Scheduler is dispatched directly in .dispatch() when needed, so
@@ -534,17 +522,20 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * user-space scheduler.
 	 *
 	 * If @queued list is full (user-space scheduler is congested) tasks
-	 * will be dispatched directly from the kernel (re-using their
-	 * previously used CPU in this case).
+	 * will be dispatched directly from the kernel (using the first CPU
+	 * available in this case).
 	 */
-	get_task_info(&task, p, false);
-	dbg_msg("enqueue: pid=%d (%s)", p->pid, p->comm);
-	if (bpf_map_push_elem(&queued, &task, 0)) {
+	task = bpf_ringbuf_reserve(&queued, sizeof(*task), 0);
+	if (!task) {
 		sched_congested(p);
 		dispatch_task(p, SHARED_DSQ, 0, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
+	get_task_info(task, p, false);
+	dbg_msg("enqueue: pid=%d (%s)", p->pid, p->comm);
+	bpf_ringbuf_submit(task, 0);
+
 	__sync_fetch_and_add(&nr_queued, 1);
 }
 
@@ -747,11 +738,11 @@ s32 BPF_STRUCT_OPS(rustland_init_task, struct task_struct *p,
 void BPF_STRUCT_OPS(rustland_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
-        struct queued_task_ctx task = {};
+	struct queued_task_ctx *task;
 
 	dbg_msg("exit: pid=%d (%s)", p->pid, p->comm);
-	get_task_info(&task, p, true);
-	if (bpf_map_push_elem(&queued, &task, 0)) {
+	task = bpf_ringbuf_reserve(&queued, sizeof(*task), 0);
+	if (!task) {
 		/*
 		 * We may have a memory leak in the scheduler at this point,
 		 * because we failed to notify it about this exiting task and
@@ -766,6 +757,9 @@ void BPF_STRUCT_OPS(rustland_exit_task, struct task_struct *p,
 		sched_congested(p);
 		return;
 	}
+	get_task_info(task, p, true);
+	bpf_ringbuf_submit(task, 0);
+
 	__sync_fetch_and_add(&nr_queued, 1);
 }
 

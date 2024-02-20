@@ -144,10 +144,10 @@ pub struct QueuedTask {
 // Task queued for dispatching to the BPF component (see bpf_intf::dispatched_task_ctx).
 #[derive(Debug)]
 pub struct DispatchedTask {
-    pub pid: i32,              // pid that uniquely identifies a task
-    pub cpu: i32,              // target CPU selected by the scheduler
-    pub cpumask_cnt: u64,      // cpumask generation counter
-    pub payload: u64,          // task payload (used for debugging)
+    pub pid: i32,         // pid that uniquely identifies a task
+    pub cpu: i32,         // target CPU selected by the scheduler
+    pub cpumask_cnt: u64, // cpumask generation counter
+    pub payload: u64,     // task payload (used for debugging)
 }
 
 // Message received from the dispatcher (see bpf_intf::queued_task_ctx for details).
@@ -205,12 +205,17 @@ impl DispatchedMessage {
     }
 }
 
-pub struct BpfScheduler<'a> {
-    pub skel: BpfSkel<'a>,               // Low-level BPF connector
+pub struct BpfScheduler<'cb> {
+    pub skel: BpfSkel<'cb>,              // Low-level BPF connector
+    queued: libbpf_rs::RingBuffer<'cb>,  // Ring buffer of queued tasks
     struct_ops: Option<libbpf_rs::Link>, // Low-level BPF methods
 }
 
-impl<'a> BpfScheduler<'a> {
+// Buffer to store a task read from the ring buffer.
+const BUFSIZE: usize = std::mem::size_of::<QueuedTask>();
+static mut BUF: [u8; BUFSIZE] = [0; BUFSIZE];
+
+impl<'cb> BpfScheduler<'cb> {
     pub fn init(slice_us: u64, nr_cpus_online: i32, partial: bool, debug: bool) -> Result<Self> {
         // Open the BPF prog first for verification.
         let skel_builder = BpfSkelBuilder::default();
@@ -219,6 +224,26 @@ impl<'a> BpfScheduler<'a> {
         // Lock all the memory to prevent page faults that could trigger potential deadlocks during
         // scheduling.
         ALLOCATOR.lock_memory();
+
+        // Copy one item from the ring buffer.
+        fn callback(data: &[u8]) -> i32 {
+            unsafe {
+                BUF.copy_from_slice(data);
+            }
+
+            // Return an unsupported error to stop early and consume only one item.
+            //
+            // NOTE: this is quite a hack. I wish libbpf would honor stopping after the first item
+            // is consumed, upon returnin a non-zero positive value here, but it doesn't seem to be
+            // the case:
+            //
+            // https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/tools/lib/bpf/ringbuf.c?h=v6.8-rc5#n260
+            //
+            // Maybe we should fix this to stop processing items from the ring buffer also when a
+            // value > 0 is returned.
+            //
+            -255
+        }
 
         // Initialize online CPUs counter.
         //
@@ -242,9 +267,21 @@ impl<'a> BpfScheduler<'a> {
                 .context("Failed to attach struct ops")?,
         );
 
+        // Build the ring buffer of queued tasks.
+        let binding = skel.maps();
+        let queued_ring_buffer = binding.queued();
+        let mut rbb = libbpf_rs::RingBufferBuilder::new();
+        rbb.add(queued_ring_buffer, callback)
+            .expect("failed to add ringbuf callback");
+        let queued = rbb.build().expect("failed to build ringbuf");
+
         // Make sure to use the SCHED_EXT class at least for the scheduler itself.
         match Self::use_sched_ext() {
-            0 => Ok(Self { skel, struct_ops }),
+            0 => Ok(Self {
+                skel,
+                queued,
+                struct_ops,
+            }),
             err => Err(anyhow::Error::msg(format!(
                 "sched_setscheduler error: {}",
                 err
@@ -328,34 +365,23 @@ impl<'a> BpfScheduler<'a> {
     // Get the pid running on a certain CPU, if no tasks are running return 0.
     #[allow(dead_code)]
     pub fn get_cpu_pid(&self, cpu: i32) -> u32 {
-        let maps = self.skel.maps();
-        let cpu_map = maps.cpu_map();
+        let cpu_map_ptr = self.skel.bss().cpu_map.as_ptr();
 
-        let key = cpu.to_ne_bytes();
-        let value = cpu_map.lookup(&key, libbpf_rs::MapFlags::ANY).unwrap();
-        let pid = value.map_or(0u32, |vec| {
-            let mut array: [u8; 4] = Default::default();
-            array.copy_from_slice(&vec[..std::cmp::min(4, vec.len())]);
-            u32::from_le_bytes(array)
-        });
-
-        pid
+        unsafe { *cpu_map_ptr.offset(cpu as isize) }
     }
 
     // Receive a task to be scheduled from the BPF dispatcher.
     //
     // NOTE: if task.cpu is negative the task is exiting and it does not require to be scheduled.
     pub fn dequeue_task(&mut self) -> Result<Option<QueuedTask>, libbpf_rs::Error> {
-        let maps = self.skel.maps();
-        let queued = maps.queued();
-
-        match queued.lookup_and_delete(&[]) {
-            Ok(Some(msg)) => {
-                let task = EnqueuedMessage::from_bytes(msg.as_slice()).to_queued_task();
+        match self.queued.consume() {
+            Ok(()) => Ok(None),
+            Err(error) if error.kind() == libbpf_rs::ErrorKind::Other => {
+                // A valid task is received, convert data to a proper task struct.
+                let task = unsafe { EnqueuedMessage::from_bytes(&BUF).to_queued_task() };
                 Ok(Some(task))
             }
-            Ok(None) => Ok(None),
-            Err(err) => Err(err),
+            Err(error) => Err(error),
         }
     }
 

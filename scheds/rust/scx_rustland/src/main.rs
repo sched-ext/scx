@@ -283,14 +283,8 @@ impl<'a> Scheduler<'a> {
     //
     // On SMT systems consider only one CPU for each fully idle core, to avoid disrupting
     // performnance too much by running multiple tasks in the same core.
-    fn get_idle_cpus(&self) -> Vec<i32> {
+    fn get_idle_cpus(&mut self) -> Vec<i32> {
         let cores = &self.cores.map;
-        let num_cpus = self.cores.nr_cpus_online;
-
-        // Cache the results of self.bpf.get_cpu_pid() for all CPUs.
-        let cpu_pid_map: Vec<u32> = (0..num_cpus)
-            .map(|cpu_id| self.bpf.get_cpu_pid(cpu_id))
-            .collect();
 
         // Generate the list of idle CPU IDs by selecting the first item from each list of CPU IDs
         // associated to the idle cores. The remaining sibling CPUs will be used as spare/emergency
@@ -305,7 +299,7 @@ impl<'a> Scheduler<'a> {
             .filter_map(|(&core_id, core_cpus)| {
                 if core_cpus
                     .iter()
-                    .all(|&cpu_id| cpu_pid_map[cpu_id as usize] == 0)
+                    .all(|&cpu_id| self.bpf.get_cpu_pid(cpu_id) == 0)
                 {
                     Some(core_id)
                 } else {
@@ -477,7 +471,7 @@ impl<'a> Scheduler<'a> {
     // Dynamically adjust the time slice based on the amount of waiting tasks.
     fn scale_slice_ns(&mut self) {
         let nr_scheduled = self.task_pool.tasks.len() as u64;
-        let slice_us_max = self.slice_ns / MSEC_PER_SEC;
+        let slice_us_max = self.slice_ns / NSEC_PER_USEC;
 
         // Scale time slice as a function of nr_scheduled, but never scale below 250 us.
         let scaling = ((nr_scheduled + 1) / 2).max(1);
