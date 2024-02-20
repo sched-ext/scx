@@ -288,36 +288,19 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    // Returns the list of idle CPUs.
+    // Return the amount of idle cores.
     //
     // On SMT systems consider only one CPU for each fully idle core, to avoid disrupting
     // performnance too much by running multiple tasks in the same core.
-    fn get_idle_cpus(&mut self) -> Vec<i32> {
+    fn nr_idle_cpus(&mut self) -> usize {
         let cores = &self.cores.map;
 
-        // Generate the list of idle CPU IDs by selecting the first item from each list of CPU IDs
-        // associated to the idle cores. The remaining sibling CPUs will be used as spare/emergency
-        // CPUs by the BPF dispatcher.
-        //
-        // This prevents overloading cores on SMT systems, improving the overall system
-        // responsiveness and it also improves scheduler stability: using the remaining sibling
-        // CPUs as spare CPUs ensures that the BPF dispatcher will always have some available CPUs
-        // that can be used in emergency conditions.
-        let idle_cores: Vec<i32> = cores
-            .iter()
-            .filter_map(|(&core_id, core_cpus)| {
-                if core_cpus
-                    .iter()
-                    .all(|&cpu_id| self.bpf.get_cpu_pid(cpu_id) == 0)
-                {
-                    Some(core_id)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Count the number of cores where all CPUs are idle.
+        let idle_cpu_count = cores.iter().filter(|(_, core_cpus)| {
+            core_cpus.iter().all(|&cpu_id| self.bpf.get_cpu_pid(cpu_id) == 0)
+        }).count();
 
-        idle_cores.iter().map(|&core| cores[&core][0]).collect()
+        idle_cpu_count
     }
 
     // Return current timestamp in ns.
@@ -497,18 +480,11 @@ impl<'a> Scheduler<'a> {
         // This allows to have more tasks sitting in the task pool, reducing the pressure on the
         // dispatcher queues and giving a chance to higher priority tasks to come in and get
         // dispatched earlier, mitigating potential priority inversion issues.
-        let idle_cpus = self.get_idle_cpus();
-        for _ in &idle_cpus {
+        for _ in 0..self.nr_idle_cpus() {
             match self.task_pool.pop() {
-                Some(mut task) => {
+                Some(task) => {
                     // Update global minimum vruntime.
                     self.min_vruntime = task.vruntime;
-
-                    // If the CPU assigned to the task is not idle anymore, dispatch to the first
-                    // CPU that becomes available.
-                    if !idle_cpus.contains(&task.cpu) {
-                        task.cpu = NO_CPU;
-                    }
 
                     // Send task to the BPF dispatcher.
                     match self.bpf.dispatch_task(&task.to_dispatched_task()) {
