@@ -99,6 +99,14 @@ struct Opts {
     #[clap(short = 'b', long, default_value = "100")]
     slice_boost: u64,
 
+    /// If specified, all the scheduling events and actions will be processed in user-space,
+    /// disabling any form of in-kernel optimization.
+    ///
+    /// This mode will likely make the system less responsive, but more predictable in terms of
+    /// performance.
+    #[clap(short = 'u', long, action = clap::ArgAction::SetTrue)]
+    full_user: bool,
+
     /// If specified, only tasks which have their scheduling policy set to
     /// SCHED_EXT using sched_setscheduler(2) are switched. Otherwise, all
     /// tasks are switched.
@@ -261,6 +269,7 @@ impl<'a> Scheduler<'a> {
             opts.slice_us,
             cores.nr_cpus_online,
             opts.partial,
+            opts.full_user,
             opts.debug,
         )?;
         info!("{} scheduler attached", SCHEDULER_NAME);

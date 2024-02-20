@@ -223,7 +223,13 @@ struct AlignedBuffer([u8; BUFSIZE]);
 static mut BUF: AlignedBuffer = AlignedBuffer([0; BUFSIZE]);
 
 impl<'cb> BpfScheduler<'cb> {
-    pub fn init(slice_us: u64, nr_cpus_online: i32, partial: bool, debug: bool) -> Result<Self> {
+    pub fn init(
+        slice_us: u64,
+        nr_cpus_online: i32,
+        partial: bool,
+        full_user: bool,
+        debug: bool,
+    ) -> Result<Self> {
         // Open the BPF prog first for verification.
         let skel_builder = BpfSkelBuilder::default();
         let mut skel = skel_builder.open().context("Failed to open BPF program")?;
@@ -263,6 +269,7 @@ impl<'cb> BpfScheduler<'cb> {
         skel.rodata_mut().slice_ns = slice_us * 1000;
         skel.rodata_mut().switch_partial = partial;
         skel.rodata_mut().debug = debug;
+        skel.rodata_mut().full_user = full_user;
 
         // Attach BPF scheduler.
         let mut skel = skel.load().context("Failed to load BPF program")?;
