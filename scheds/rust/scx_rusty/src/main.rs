@@ -11,7 +11,6 @@ extern crate static_assertions;
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::ops::Bound::Included;
 use std::ops::Bound::Unbounded;
 use std::sync::atomic::AtomicBool;
@@ -25,7 +24,6 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use bitvec::prelude::*;
 use clap::Parser;
 use libbpf_rs::skel::OpenSkel as _;
 use libbpf_rs::skel::Skel as _;
@@ -38,6 +36,7 @@ use ordered_float::OrderedFloat;
 use scx_utils::ravg::ravg_read;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Topology;
 
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
@@ -249,163 +248,6 @@ fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
     }
 }
 
-#[derive(Debug)]
-struct Topology {
-    nr_cpus: usize,
-    nr_doms: usize,
-    dom_cpus: Vec<BitVec<u64, Lsb0>>,
-    cpu_dom: Vec<Option<usize>>,
-}
-
-impl Topology {
-    fn from_cpumasks(cpumasks: &[String], nr_cpus: usize) -> Result<Self> {
-        if cpumasks.len() > MAX_DOMS {
-            bail!(
-                "Number of requested domains ({}) is greater than MAX_DOMS ({})",
-                cpumasks.len(),
-                MAX_DOMS
-            );
-        }
-        let mut cpu_dom = vec![None; nr_cpus];
-        let mut dom_cpus = vec![bitvec![u64, Lsb0; 0; MAX_CPUS]; cpumasks.len()];
-        for (dom, cpumask) in cpumasks.iter().enumerate() {
-            let hex_str = {
-                let mut tmp_str = cpumask
-                    .strip_prefix("0x")
-                    .unwrap_or(cpumask)
-                    .replace('_', "");
-                if tmp_str.len() % 2 != 0 {
-                    tmp_str = "0".to_string() + &tmp_str;
-                }
-                tmp_str
-            };
-            let byte_vec = hex::decode(&hex_str)
-                .with_context(|| format!("Failed to parse cpumask: {}", cpumask))?;
-
-            for (index, &val) in byte_vec.iter().rev().enumerate() {
-                let mut v = val;
-                while v != 0 {
-                    let lsb = v.trailing_zeros() as usize;
-                    v &= !(1 << lsb);
-                    let cpu = index * 8 + lsb;
-                    if cpu > nr_cpus {
-                        bail!(
-                            concat!(
-                                "Found cpu ({}) in cpumask ({}) which is larger",
-                                " than the number of cpus on the machine ({})"
-                            ),
-                            cpu,
-                            cpumask,
-                            nr_cpus
-                        );
-                    }
-                    if let Some(other_dom) = cpu_dom[cpu] {
-                        bail!(
-                            "Found cpu ({}) with domain ({}) but also in cpumask ({})",
-                            cpu,
-                            other_dom,
-                            cpumask
-                        );
-                    }
-                    cpu_dom[cpu] = Some(dom);
-                    dom_cpus[dom].set(cpu, true);
-                }
-            }
-            dom_cpus[dom].set_uninitialized(false);
-        }
-
-        for (cpu, dom) in cpu_dom.iter().enumerate() {
-            if dom.is_none() {
-                bail!(
-                    "CPU {} not assigned to any domain. Make sure it is covered by some --cpumasks argument.",
-                    cpu
-                );
-            }
-        }
-
-        Ok(Self {
-            nr_cpus,
-            nr_doms: dom_cpus.len(),
-            dom_cpus,
-            cpu_dom,
-        })
-    }
-
-    fn from_cache_level(level: u32, nr_cpus: usize) -> Result<Self> {
-        let mut cpu_to_cache = vec![]; // (cpu_id, Option<cache_id>)
-        let mut cache_ids = BTreeSet::<usize>::new();
-        let mut nr_offline = 0;
-
-        // Build cpu -> cache ID mapping.
-        for cpu in 0..nr_cpus {
-            let path = format!("/sys/devices/system/cpu/cpu{}/cache/index{}/id", cpu, level);
-            let id = match std::fs::read_to_string(&path) {
-                Ok(val) => Some(val.trim().parse::<usize>().with_context(|| {
-                    format!("Failed to parse {:?}'s content {:?}", &path, &val)
-                })?),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    nr_offline += 1;
-                    None
-                }
-                Err(e) => return Err(e).with_context(|| format!("Failed to open {:?}", &path)),
-            };
-
-            cpu_to_cache.push(id);
-            if let Some(id) = id {
-                cache_ids.insert(id);
-            }
-        }
-
-        info!(
-            "CPUs: online/possible = {}/{}",
-            nr_cpus - nr_offline,
-            nr_cpus
-        );
-
-        // Cache IDs may have holes. Assign consecutive domain IDs to
-        // existing cache IDs.
-        let mut cache_to_dom = BTreeMap::<usize, usize>::new();
-        let mut nr_doms = 0;
-        for cache_id in cache_ids.iter() {
-            cache_to_dom.insert(*cache_id, nr_doms);
-            nr_doms += 1;
-        }
-
-        if nr_doms > MAX_DOMS {
-            bail!(
-                "Total number of doms {} is greater than MAX_DOMS ({})",
-                nr_doms,
-                MAX_DOMS
-            );
-        }
-
-        // Build and return dom -> cpumask and cpu -> dom mappings.
-        let mut dom_cpus = vec![bitvec![u64, Lsb0; 0; MAX_CPUS]; nr_doms];
-        let mut cpu_dom = vec![];
-
-        for (cpu, cache) in cpu_to_cache.iter().enumerate().take(nr_cpus) {
-            match cache {
-                Some(cache_id) => {
-                    let dom_id = cache_to_dom[cache_id];
-                    dom_cpus[dom_id].set(cpu, true);
-                    cpu_dom.push(Some(dom_id));
-                }
-                None => {
-                    dom_cpus[0].set(cpu, true);
-                    cpu_dom.push(None);
-                }
-            }
-        }
-
-        Ok(Self {
-            nr_cpus,
-            nr_doms: dom_cpus.len(),
-            dom_cpus,
-            cpu_dom,
-        })
-    }
-}
-
 struct Tuner {
     top: Arc<Topology>,
     direct_greedy_under: f64,
@@ -428,7 +270,7 @@ impl Tuner {
             kick_greedy_under: opts.kick_greedy_under / 100.0,
             proc_reader,
             prev_cpu_stats,
-            dom_utils: vec![0.0; top.nr_doms],
+            dom_utils: vec![0.0; top.nr_doms()],
             lb_apply_weight: false,
             top,
         })
@@ -440,17 +282,17 @@ impl Tuner {
             .read_stat()?
             .cpus_map
             .ok_or_else(|| anyhow!("Expected cpus_map to exist"))?;
-        let mut dom_nr_cpus = vec![0; self.top.nr_doms];
-        let mut dom_util_sum = vec![0.0; self.top.nr_doms];
+        let mut dom_nr_cpus = vec![0; self.top.nr_doms()];
+        let mut dom_util_sum = vec![0.0; self.top.nr_doms()];
 
         let mut avg_util = 0.0f64;
-        for cpu in 0..self.top.nr_cpus {
+        for cpu in 0..self.top.nr_cpus() {
             let cpu32 = cpu as u32;
             // None domain indicates the CPU was offline during
             // initialization and None CpuStat indicates the CPU has gone
             // down since then. Ignore both.
             if let (Some(dom), Some(curr), Some(prev)) = (
-                self.top.cpu_dom[cpu],
+                self.top.cpu_domain_id(cpu),
                 curr_cpu_stats.get(&cpu32),
                 self.prev_cpu_stats.get(&cpu32),
             ) {
@@ -460,11 +302,11 @@ impl Tuner {
                 avg_util += util;
             }
         }
-        avg_util /= self.top.nr_cpus as f64;
+        avg_util /= self.top.nr_cpus() as f64;
         self.lb_apply_weight = approx_ge(avg_util, 0.99999);
 
         let ti = &mut skel.bss_mut().tune_input;
-        for dom in 0..self.top.nr_doms {
+        for dom in 0..self.top.nr_doms() {
             // Calculate the domain avg util. If there are no active CPUs,
             // it doesn't really matter. Go with 0.0 as that's less likely
             // to confuse users.
@@ -477,8 +319,8 @@ impl Tuner {
 
             // This could be implemented better.
             let update_dom_bits = |target: &mut [u64; 8], val: bool| {
-                for cpu in 0..self.top.nr_cpus {
-                    if let Some(cdom) = self.top.cpu_dom[cpu] {
+                for cpu in 0..self.top.nr_cpus() {
+                    if let Some(cdom) = self.top.cpu_domain_id(cpu) {
                         if cdom == dom {
                             if val {
                                 target[cpu / 64] |= 1u64 << (cpu % 64);
@@ -579,11 +421,11 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
             lb_apply_weight: lb_apply_weight.clone(),
             infeas_threshold: bpf_intf::consts_LB_MAX_WEIGHT as f64,
 
-            tasks_by_load: (0..top.nr_doms).map(|_| None).collect(),
+            tasks_by_load: (0..top.nr_doms()).map(|_| None).collect(),
             load_avg: 0f64,
-            dom_loads: vec![0.0; top.nr_doms],
+            dom_loads: vec![0.0; top.nr_doms()],
 
-            imbal: vec![0.0; top.nr_doms],
+            imbal: vec![0.0; top.nr_doms()],
             doms_to_pull: BTreeMap::new(),
             doms_to_push: BTreeMap::new(),
 
@@ -624,7 +466,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
 
         self.infeas_threshold = infeas_thrsh;
         let mut global_load_sum = 0.0f64;
-        for dom in 0..self.top.nr_doms {
+        for dom in 0..self.top.nr_doms() {
             let dom_offset = (dom as u64) * NUM_BUCKETS;
             let mut dom_load_sum = 0.0f64;
             for i in 0..NUM_BUCKETS {
@@ -637,7 +479,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
             global_load_sum += dom_load_sum;
         }
 
-        self.load_avg = global_load_sum / self.top.nr_doms as f64;
+        self.load_avg = global_load_sum / self.top.nr_doms() as f64;
     }
 
     fn adjust_infeas_weights(&mut self,
@@ -691,7 +533,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
         //
         // https://drive.google.com/file/d/1fAoWUlmW-HTp6akuATVpMxpUpvWcGSAv
         const NUM_BUCKETS: u64 = bpf_intf::consts_LB_LOAD_BUCKETS as u64;
-        let p = self.top.nr_cpus as f64;
+        let p = self.top.nr_cpus() as f64;
         let mut curr_dcycle_sum = 0.0f64;
         let mut curr_load_sum = global_load_sum;
         let mut lambda_x = curr_load_sum / p;
@@ -717,7 +559,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
         // self-correct soon. If it is the result of the user configuring us to
         // use weights even when the system is under-utilized, they were warned
         // when the scheduler was launched.
-        self.load_avg = global_load_sum / self.top.nr_doms as f64;
+        self.load_avg = global_load_sum / self.top.nr_doms() as f64;
         Ok(())
     }
 
@@ -738,11 +580,11 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
         // dcycle values stored in every bucket. Recorded here so we don't have
         // to do another ravg read later when testing and adjusting for
         // infeasibility.
-        let mut doms_dcycle_buckets = vec![0.064; NUM_BUCKETS as usize * self.top.nr_doms];
+        let mut doms_dcycle_buckets = vec![0.064; NUM_BUCKETS as usize * self.top.nr_doms()];
 
         // Sum of dcycle for each domain. Used if we're going to do load
         // balancing based on just dcycle to avoid having to do two iterations.
-        let mut doms_dcycle_sums = vec![0.064; self.top.nr_doms];
+        let mut doms_dcycle_sums = vec![0.064; self.top.nr_doms()];
 
         // Track maximum weight so we can test for infeasibility below.
         let mut max_weight = 0.0f64;
@@ -750,7 +592,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
         // Accumulate dcycle and load across all domains and buckets. If we're
         // under-utilized, or there are no infeasible weights, this is
         // sufficient to collect all of the data we need for load balancing.
-        for dom in 0..self.top.nr_doms {
+        for dom in 0..self.top.nr_doms() {
             let dom_key = unsafe { std::mem::transmute::<u32, [u8; 4]>(dom as u32) };
 
             let dom_offset = dom as u64 * NUM_BUCKETS;
@@ -803,7 +645,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
 
         if !self.lb_apply_weight {
             // System is under-utilized, so just use dcycle instead of load.
-            self.load_avg = global_dcycle_sum / self.top.nr_doms as f64;
+            self.load_avg = global_dcycle_sum / self.top.nr_doms() as f64;
             self.dom_loads = doms_dcycle_sums;
             return Ok(());
         }
@@ -826,7 +668,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
         // See the function header for adjust_infeas_weights() for a more
         // comprehensive description of the algorithm for adjusting for
         // infeasible weights.
-        let infeasible_thresh = global_load_sum / self.top.nr_cpus as f64;
+        let infeasible_thresh = global_load_sum / self.top.nr_cpus() as f64;
         if approx_ge(max_weight, infeasible_thresh) {
             debug!("max_weight={} infeasible_threshold= {}",
                    max_weight, infeasible_thresh);
@@ -835,7 +677,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
                                               global_load_sum);
         }
 
-        self.load_avg = global_load_sum / self.top.nr_doms as f64;
+        self.load_avg = global_load_sum / self.top.nr_doms() as f64;
         Ok(())
     }
 
@@ -1142,39 +984,48 @@ impl<'a> Scheduler<'a> {
         skel_builder.obj_builder.debug(opts.verbose > 0);
         let mut skel = skel_builder.open().context("Failed to open BPF program")?;
 
-        let nr_cpus = libbpf_rs::num_possible_cpus().unwrap();
-        if nr_cpus > MAX_CPUS {
+        // Initialize skel according to @opts.
+        let top = Arc::new(if !opts.cpumasks.is_empty() {
+            Topology::builder().cpumasks(&opts.cpumasks).build()?
+        } else {
+            Topology::builder().cache_level(opts.cache_level).build()?
+        });
+
+        if top.nr_cpus()  > MAX_CPUS {
             bail!(
                 "nr_cpus ({}) is greater than MAX_CPUS ({})",
-                nr_cpus,
+                top.nr_cpus() ,
                 MAX_CPUS
             );
         }
 
-        // Initialize skel according to @opts.
-        let top = Arc::new(if !opts.cpumasks.is_empty() {
-            Topology::from_cpumasks(&opts.cpumasks, nr_cpus)?
-        } else {
-            Topology::from_cache_level(opts.cache_level, nr_cpus)?
-        });
-
-        skel.rodata_mut().nr_doms = top.nr_doms as u32;
-        skel.rodata_mut().nr_cpus = top.nr_cpus as u32;
-
-        for (cpu, dom) in top.cpu_dom.iter().enumerate() {
-            skel.rodata_mut().cpu_dom_id_map[cpu] = dom.unwrap_or(0) as u32;
+        if top.nr_doms() > MAX_DOMS {
+            bail!(
+                "nr_doms ({}) is greater than MAX_DOMS ({})",
+                top.nr_cpus(),
+                MAX_DOMS
+            );
         }
 
-        for (dom, cpus) in top.dom_cpus.iter().enumerate() {
-            let raw_cpus_slice = cpus.as_raw_slice();
-            let dom_cpumask_slice = &mut skel.rodata_mut().dom_cpumasks[dom];
+        skel.rodata_mut().nr_doms = top.nr_doms() as u32;
+        skel.rodata_mut().nr_cpus = top.nr_cpus() as u32;
+
+        for cpu in 0..top.nr_cpus() {
+            let dom_id = top.cpu_domain_id(cpu).unwrap();
+            skel.rodata_mut().cpu_dom_id_map[cpu] =
+                dom_id.try_into().expect("Domain ID could not fit into 32 bits");
+        }
+
+        for (dom_id, domain) in top.domains().iter() {
+            let raw_cpus_slice = domain.mask_slice();
+            let dom_cpumask_slice = &mut skel.rodata_mut().dom_cpumasks[*dom_id];
             let (left, _) = dom_cpumask_slice.split_at_mut(raw_cpus_slice.len());
-            left.clone_from_slice(cpus.as_raw_slice());
+            left.clone_from_slice(raw_cpus_slice);
             info!(
                 "DOM[{:02}] cpumask{} ({} cpus)",
-                dom,
-                &format_cpumask(dom_cpumask_slice, nr_cpus),
-                cpus.count_ones()
+                domain.id(),
+                &format_cpumask(dom_cpumask_slice, top.nr_cpus()),
+                domain.num_cpus()
             );
         }
 
@@ -1278,7 +1129,7 @@ impl<'a> Scheduler<'a> {
         let mut maps = self.skel.maps_mut();
         let stats_map = maps.stats();
         let mut stats: Vec<u64> = Vec::new();
-        let zero_vec = vec![vec![0u8; stats_map.value_size() as usize]; self.top.nr_cpus];
+        let zero_vec = vec![vec![0u8; stats_map.value_size() as usize]; self.top.nr_cpus()];
 
         for stat in 0..bpf_intf::stat_idx_RUSTY_NR_STATS {
             let cpu_stat_vec = stats_map
@@ -1362,14 +1213,14 @@ impl<'a> Scheduler<'a> {
         let ti = &self.skel.bss().tune_input;
         info!(
             "direct_greedy_cpumask={}",
-            format_cpumask(&ti.direct_greedy_cpumask, self.top.nr_cpus)
+            format_cpumask(&ti.direct_greedy_cpumask, self.top.nr_cpus())
         );
         info!(
             "  kick_greedy_cpumask={}",
-            format_cpumask(&ti.kick_greedy_cpumask, self.top.nr_cpus)
+            format_cpumask(&ti.kick_greedy_cpumask, self.top.nr_cpus())
         );
 
-        for i in 0..self.top.nr_doms {
+        for i in 0..self.top.nr_doms() {
             info!(
                 "DOM[{:02}] util={:6.2} load={:8.2} imbal={}",
                 i,
