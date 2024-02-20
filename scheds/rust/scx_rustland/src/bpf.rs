@@ -18,6 +18,7 @@ use libc::{sched_param, sched_setscheduler};
 mod alloc;
 use alloc::*;
 
+use scx_utils::init_libbpf_logging;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 
@@ -232,6 +233,7 @@ impl<'cb> BpfScheduler<'cb> {
     ) -> Result<Self> {
         // Open the BPF prog first for verification.
         let skel_builder = BpfSkelBuilder::default();
+        init_libbpf_logging(None);
         let mut skel = skel_builder.open().context("Failed to open BPF program")?;
 
         // Lock all the memory to prevent page faults that could trigger potential deadlocks during
