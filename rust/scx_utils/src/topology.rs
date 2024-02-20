@@ -2,6 +2,107 @@
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
+
+//! # SCX Topology
+//!
+//! A crate that allows schedulers to inspect and model the host's topology, in
+//! service of creating scheduling domains.
+//!
+//! A Topology is comprised of one or more Domain objects, which themselves
+//! have an ID, a cpumask of all CPUs in the domain, and a set of CPU siblings:
+//!
+//!		                                Topology
+//!		                                    |
+//!		                    o---------------o---------------o
+//!		                    |               |               |
+//!		                    |               |               |
+//!	            o-----------o----------o   ...   o----------o-----------o
+//!	            | Domain   0           |         | Domain   1           |
+//!	            | Cpumask  0x00FF00FF  |         | Cpumask  0xFF00FF00  |
+//!	            | CPUS     {CPUs set}  |         | CPUS     {CPUs set}  |
+//!	            o----------------------o         o----------------------o
+//!
+//! Topology objects also track CPU siblings, and physical core nodes. Soon, it
+//! will include support for tracking NUMA nodes, and will aggregate Domains
+//! inside of such nodes.
+//!
+//! Creating Topology
+//! -----------------
+//!
+//! Topology objects are created using the builder pattern. For example, to
+//! create a Topology at the granularity of a host's L3 cache, you could do the
+//! following:
+//!
+//!     let top = Topology::builder().cache_level(opts.cache_level).build()?;
+//!
+//! From here, you can query the Topology using the set of accessor functions
+//! defined below. The Topology object is (currently) entirely read-only. At
+//! some point in the future, it could also be updated to support CPU hotplug.
+//!
+//! Topology
+//! --------
+//!
+//! The Topology object is the main object capturing the host's topology. It
+//! contains one or more Domain objects (described below), as well as other
+//! useful information such as a list of all CPU sibling pairs on the system.
+//! For example, the following loop would print out all CPU siblings on the
+//! system:
+//!
+//!     let top = Topology::builder().cache_level(opts.cache_level).build()?;
+//!     for cpu in 0..top.nr_cpus() {
+//!             let node = top.cpu_core(cpu);
+//!             let sibling = top.cpu_sibling(cpu);
+//!
+//!             info!("{}: [{} | {}]", cpu, node, sibling);
+//!     }
+//!
+//! Domains
+//! -------
+//!
+//! As mentioned above, each Topology is comprised of one or more Domain
+//! objects. Domains are subsets of CPUs of the host's topology, aggregated at
+//! the granularity of the specified cache level.
+//!
+//! For convenience, domains contain helper functions for accessing &[u64]
+//! slices which reflect the cpumask of the Domain. This can be useful in
+//! passing the cpumask value down to BPF. For example:
+//!
+//!     for (dom_id, domain) in top.domains().iter() {
+//!             let raw_cpus_slice = domain.mask_slice();
+//!             let dom_cpumask_slice = &mut skel.rodata_mut().dom_cpumasks[*dom_id];
+//!             let (left, _) = dom_cpumask_slice.split_at_mut(raw_cpus_slice.len());
+//!             left.clone_from_slice(raw_cpus_slice);
+//!     }
+//!
+//! Future Improvements
+//! -------------------
+//!
+//! There are a number of ways that this crate could be improved:
+//!
+//! 1. Make Topology more generic
+//!
+//! There are a few things in the current implementation that are the way they
+//! are purely for the convenience of the calling schedulers. For example, the
+//! cpumask option that can be passed to the TopologyBuilder is not relevant to
+//! creating a topological representation of the underlying host. We should add
+//! a separate crate that handles cpumask creation and manipulation.
+//! Additionally, we're creating Domain objects according to the caller's
+//! specified cache level. This is also relevant specifically to schedulers. A
+//! Topology object should be more generic than that, and may possibly be used
+//! by other contexts that aren't schedulers.
+//!
+//! 2. Add support for NUMA nodes
+//!
+//! We don't yet have support for identifying and categorizing NUMA nodes on the
+//! host.
+//!
+//! 3. Make Topology more complete
+//!
+//! We're currently picking and choosing elements of /sys/devices/system/cpu/*
+//! that we find useful. Related to the above points, we should eventually make
+//! this crate provide all of that information in an easy-to-consume format for
+//! rust callers.
+
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
@@ -14,11 +115,9 @@ use log::info;
 
 #[derive(Debug)]
 pub struct Domain {
-    pub domain_id: usize,
-    pub cpus: BTreeSet<usize>,
-    pub reserved_cpus: BitVec<u64, Lsb0>,
-    pub cpu_siblings: Vec<usize>,
-    pub mask: BitVec<u64, Lsb0>,
+    domain_id: usize,
+    cpus: BTreeSet<usize>,
+    mask: BitVec<u64, Lsb0>,
 }
 
 impl Domain {
@@ -28,13 +127,30 @@ impl Domain {
             .try_into()
             .expect("domain ID could not fit into 64 bits")
     }
+
+    /// Check whether the domain has the specified CPU.
+    pub fn has_cpu(&self, cpu: usize) -> bool {
+        self.cpus.contains(&cpu)
+    }
+
+    /// Get a raw slice of the domain's cpumask as a set of one or more u64
+    /// variables whose bits represent CPUs in the mask.
+    pub fn mask_slice(&self) -> &[u64] {
+        self.mask.as_raw_slice()
+    }
+
+    /// The number of CPUs in the domain.
+    pub fn num_cpus(&self) -> usize {
+        self.cpus.len()
+    }
 }
 
 #[derive(Debug)]
 pub struct Topology {
-    pub domains: BTreeMap<usize, Domain>,       // (dom_id, Domain)
-    pub cpu_domain_map: BTreeMap<usize, usize>, // (cpu, domain ID)
-    pub cache_level: Option<u32>,
+    domains: BTreeMap<usize, Domain>,       // (dom_id, Domain)
+    cpu_domain_map: BTreeMap<usize, usize>, // (cpu, domain ID)
+    cpu_core_map: Vec<usize>,               // (cpu, physical core)
+    cpu_sibling_map: Vec<usize>,            // (cpu, sibling cpu)
     pub nr_cpus: usize,
     pub nr_doms: usize,
 }
@@ -55,6 +171,31 @@ impl Topology {
     pub fn cpu_domain(&self, cpu: usize) -> Option<&Domain> {
         self.domains.get(&self.cpu_domain_id(cpu)?)
     }
+
+    /// Get the ID of the physical core of the specified CPU.
+    pub fn cpu_core(&self, cpu: usize) -> usize {
+        self.cpu_core_map[cpu]
+    }
+
+    /// Get the sibling CPU of the specified CPU.
+    pub fn cpu_sibling(&self, cpu: usize) -> usize {
+        self.cpu_sibling_map[cpu]
+    }
+
+    /// Get the Domains in the Topology.
+    pub fn domains(&self) -> &BTreeMap<usize, Domain> {
+        &self.domains
+    }
+
+    /// Get the number of CPUs in the Topology.
+    pub fn nr_cpus(&self) -> usize {
+        self.nr_cpus
+    }
+
+    /// Get the number of domains in the Topology.
+    pub fn nr_doms(&self) -> usize {
+        self.nr_doms
+    }
 }
 
 #[derive(Debug)]
@@ -64,21 +205,41 @@ pub struct TopologyBuilder {
 }
 
 impl TopologyBuilder {
-    fn create_sibling_map(&self, nr_cpus: usize) -> Vec<usize> {
-        let mut cpu_to_node = vec![]; // (cpu_id, core_id)
+    fn create_cpu_core_maps(&self, nr_cpus: usize) -> (Vec<usize>, Vec<usize>) {
+        let mut cpu_to_node = vec![0; nr_cpus]; // (cpu_id, core_id)
+        let mut cpu_to_sibling = vec![0; nr_cpus]; // (cpu_id, cpu_sibling_id)
+        let mut node_to_cpu = BTreeMap::<usize, usize>::new();
+        let mut nodes_completed = BTreeSet::<usize>::new();
         for cpu in 0..nr_cpus {
             let path = format!("/sys/devices/system/cpu/cpu{}/topology/core_id", cpu);
             let id = match std::fs::read_to_string(&path) {
                 Ok(val) => val.trim().parse::<usize>().expect("malformed core ID"),
                 Err(_) => {
-                    panic!("Failed to open or read sibling file {:?}", &path);
+                    panic!("Failed to open or read core_id file {:?}", &path);
                 }
             };
 
-            cpu_to_node.push(id);
+            cpu_to_node[cpu] = id;
+            if node_to_cpu.contains_key(&id) {
+                if nodes_completed.contains(&id) {
+                    panic!("More than two CPUs detected in node {}", id);
+                }
+
+                let sibling = node_to_cpu.get(&id).unwrap().clone();
+                cpu_to_sibling[sibling as usize] = cpu;
+                cpu_to_sibling[cpu] = sibling;
+
+                // Make sure we're not running on an architecture that supports
+                // more than two SMT siblings
+                nodes_completed.insert(id);
+            } else {
+                node_to_cpu.insert(id, cpu);
+                // Assume by default that a CPU has no sibling
+                cpu_to_sibling[cpu] = cpu;
+            }
         }
 
-        cpu_to_node
+        (cpu_to_node, cpu_to_sibling)
     }
 
     fn build_from_cpumasks(&self, cpumasks: &[String], nr_cpus: usize) -> Result<Topology> {
@@ -138,14 +299,11 @@ impl TopologyBuilder {
                     }
                 }
             }
-            let empty_reserved = bitvec![u64, Lsb0; 0; nr_cpus];
             domains.insert(
                 dom,
                 Domain {
                     domain_id: dom,
                     cpus,
-                    reserved_cpus: empty_reserved,
-                    cpu_siblings: self.create_sibling_map(nr_cpus),
                     mask: mask.clone(),
                 },
             );
@@ -170,10 +328,12 @@ impl TopologyBuilder {
         }
 
         let nr_doms = domains.len();
+        let (core_map, sibling_map) = self.create_cpu_core_maps(nr_cpus);
         Ok(Topology {
             domains,
             cpu_domain_map: cpu_domains,
-            cache_level: None,
+            cpu_core_map: core_map,
+            cpu_sibling_map: sibling_map,
             nr_cpus,
             nr_doms,
         })
@@ -250,14 +410,11 @@ impl TopologyBuilder {
                     cpus.insert(*cpu);
                 }
             }
-            let empty_reserved = bitvec![u64, Lsb0; 0; nr_cpus];
             domains.insert(
                 dom_id,
                 Domain {
                     domain_id: dom_id,
                     cpus,
-                    reserved_cpus: empty_reserved,
-                    cpu_siblings: self.create_sibling_map(nr_cpus),
                     mask: cpus_bitvec.clone(),
                 },
             );
@@ -280,10 +437,12 @@ impl TopologyBuilder {
         let (domains, cpu_domains) = self.build_domains_map(&cache_ids, &cpu_to_cache, nr_cpus);
         let nr_doms = domains.len();
 
+        let (core_map, sibling_map) = self.create_cpu_core_maps(nr_cpus);
         Ok(Topology {
             domains,
             cpu_domain_map: cpu_domains,
-            cache_level: Some(self.cache_level),
+            cpu_core_map: core_map,
+            cpu_sibling_map: sibling_map,
             nr_cpus,
             nr_doms,
         })
