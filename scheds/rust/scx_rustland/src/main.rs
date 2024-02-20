@@ -99,6 +99,17 @@ struct Opts {
     #[clap(short = 'b', long, default_value = "100")]
     slice_boost: u64,
 
+    /// If specified, rely on the sched-ext built-in idle selection logic to dispatch tasks.
+    /// Otherwise dispatch tasks on the first CPU available.
+    ///
+    /// Relying on the built-in logic can improve throughput (since tasks are more likely to remain
+    /// on the same CPU when the system is overloaded), but it can reduce system responsiveness.
+    ///
+    /// By default always dispatch tasks on the first CPU available to increase system
+    /// responsiveness over throughput, especially when the system is overloaded.
+    #[clap(short = 'i', long, action = clap::ArgAction::SetTrue)]
+    builtin_idle: bool,
+
     /// If specified, all the scheduling events and actions will be processed in user-space,
     /// disabling any form of in-kernel optimization.
     ///
@@ -238,6 +249,7 @@ struct Scheduler<'a> {
     slice_boost: u64,      // Slice booster
     eff_slice_boost: u64,  // Effective slice booster
     init_page_faults: u64, // Initial page faults counter
+    builtin_idle: bool,   // Use sched-ext built-in idle selection logic
 }
 
 impl<'a> Scheduler<'a> {
@@ -251,6 +263,9 @@ impl<'a> Scheduler<'a> {
         // Slice booster (0 = disabled).
         let slice_boost = opts.slice_boost;
         let eff_slice_boost = slice_boost;
+
+        // Use built-in idle selection logic.
+        let builtin_idle = opts.builtin_idle;
 
         // Scheduler task pool to sort tasks by vruntime.
         let task_pool = TaskTree::new();
@@ -285,6 +300,7 @@ impl<'a> Scheduler<'a> {
             slice_boost,
             eff_slice_boost,
             init_page_faults,
+            builtin_idle,
         })
     }
 
@@ -482,9 +498,15 @@ impl<'a> Scheduler<'a> {
         // dispatched earlier, mitigating potential priority inversion issues.
         for _ in 0..self.nr_idle_cpus() {
             match self.task_pool.pop() {
-                Some(task) => {
+                Some(mut task) => {
                     // Update global minimum vruntime.
                     self.min_vruntime = task.vruntime;
+
+                    // If built-in idle selection logic is disabled, dispatch on the first CPU
+                    // available.
+                    if !self.builtin_idle {
+                        task.cpu = NO_CPU;
+                    }
 
                     // Send task to the BPF dispatcher.
                     match self.bpf.dispatch_task(&task.to_dispatched_task()) {
