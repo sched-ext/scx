@@ -33,6 +33,7 @@ use log::info;
 use log::trace;
 use log::warn;
 use ordered_float::OrderedFloat;
+use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
@@ -982,6 +983,7 @@ impl<'a> Scheduler<'a> {
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 0);
+        init_libbpf_logging(None);
         let mut skel = skel_builder.open().context("Failed to open BPF program")?;
 
         // Initialize skel according to @opts.

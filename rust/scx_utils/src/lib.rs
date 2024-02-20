@@ -37,6 +37,9 @@ pub use bpf_builder::BpfBuilder;
 
 pub mod ravg;
 
+mod libbpf_logger;
+pub use libbpf_logger::init_libbpf_logging;
+
 mod user_exit_info;
 pub use user_exit_info::UserExitInfo;
 pub use user_exit_info::ScxExitKind;
