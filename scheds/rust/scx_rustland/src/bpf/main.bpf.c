@@ -97,6 +97,14 @@ volatile u64 nr_failed_dispatches, nr_sched_congested;
  /* Report additional debugging information */
 const volatile bool debug;
 
+ /*
+  * Enable/disable full user-space mode.
+  *
+  * In full user-space mode all events and actions will be sent to user-space,
+  * basically disabling any optimization to bypass the user-space scheduler.
+  */
+const volatile bool full_user;
+
 /* Allow to use bpf_printk() only when @debug is set */
 #define dbg_msg(_fmt, ...) do {						\
 	if (debug)							\
@@ -437,7 +445,7 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	s32 cpu;
 
 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-	if (is_idle) {
+	if (is_idle && !full_user) {
 		/*
 		 * Using SCX_DSQ_LOCAL ensures that the task will be executed
 		 * directly on the CPU returned by this function.

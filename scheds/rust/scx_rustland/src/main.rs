@@ -99,6 +99,25 @@ struct Opts {
     #[clap(short = 'b', long, default_value = "100")]
     slice_boost: u64,
 
+    /// If specified, rely on the sched-ext built-in idle selection logic to dispatch tasks.
+    /// Otherwise dispatch tasks on the first CPU available.
+    ///
+    /// Relying on the built-in logic can improve throughput (since tasks are more likely to remain
+    /// on the same CPU when the system is overloaded), but it can reduce system responsiveness.
+    ///
+    /// By default always dispatch tasks on the first CPU available to increase system
+    /// responsiveness over throughput, especially when the system is overloaded.
+    #[clap(short = 'i', long, action = clap::ArgAction::SetTrue)]
+    builtin_idle: bool,
+
+    /// If specified, all the scheduling events and actions will be processed in user-space,
+    /// disabling any form of in-kernel optimization.
+    ///
+    /// This mode will likely make the system less responsive, but more predictable in terms of
+    /// performance.
+    #[clap(short = 'u', long, action = clap::ArgAction::SetTrue)]
+    full_user: bool,
+
     /// If specified, only tasks which have their scheduling policy set to
     /// SCHED_EXT using sched_setscheduler(2) are switched. Otherwise, all
     /// tasks are switched.
@@ -230,6 +249,7 @@ struct Scheduler<'a> {
     slice_boost: u64,      // Slice booster
     eff_slice_boost: u64,  // Effective slice booster
     init_page_faults: u64, // Initial page faults counter
+    builtin_idle: bool,   // Use sched-ext built-in idle selection logic
 }
 
 impl<'a> Scheduler<'a> {
@@ -243,6 +263,9 @@ impl<'a> Scheduler<'a> {
         // Slice booster (0 = disabled).
         let slice_boost = opts.slice_boost;
         let eff_slice_boost = slice_boost;
+
+        // Use built-in idle selection logic.
+        let builtin_idle = opts.builtin_idle;
 
         // Scheduler task pool to sort tasks by vruntime.
         let task_pool = TaskTree::new();
@@ -261,6 +284,7 @@ impl<'a> Scheduler<'a> {
             opts.slice_us,
             cores.nr_cpus_online,
             opts.partial,
+            opts.full_user,
             opts.debug,
         )?;
         info!("{} scheduler attached", SCHEDULER_NAME);
@@ -276,39 +300,23 @@ impl<'a> Scheduler<'a> {
             slice_boost,
             eff_slice_boost,
             init_page_faults,
+            builtin_idle,
         })
     }
 
-    // Returns the list of idle CPUs.
+    // Return the amount of idle cores.
     //
     // On SMT systems consider only one CPU for each fully idle core, to avoid disrupting
     // performnance too much by running multiple tasks in the same core.
-    fn get_idle_cpus(&mut self) -> Vec<i32> {
+    fn nr_idle_cpus(&mut self) -> usize {
         let cores = &self.cores.map;
 
-        // Generate the list of idle CPU IDs by selecting the first item from each list of CPU IDs
-        // associated to the idle cores. The remaining sibling CPUs will be used as spare/emergency
-        // CPUs by the BPF dispatcher.
-        //
-        // This prevents overloading cores on SMT systems, improving the overall system
-        // responsiveness and it also improves scheduler stability: using the remaining sibling
-        // CPUs as spare CPUs ensures that the BPF dispatcher will always have some available CPUs
-        // that can be used in emergency conditions.
-        let idle_cores: Vec<i32> = cores
-            .iter()
-            .filter_map(|(&core_id, core_cpus)| {
-                if core_cpus
-                    .iter()
-                    .all(|&cpu_id| self.bpf.get_cpu_pid(cpu_id) == 0)
-                {
-                    Some(core_id)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // Count the number of cores where all CPUs are idle.
+        let idle_cpu_count = cores.iter().filter(|(_, core_cpus)| {
+            core_cpus.iter().all(|&cpu_id| self.bpf.get_cpu_pid(cpu_id) == 0)
+        }).count();
 
-        idle_cores.iter().map(|&core| cores[&core][0]).collect()
+        idle_cpu_count
     }
 
     // Return current timestamp in ns.
@@ -488,16 +496,15 @@ impl<'a> Scheduler<'a> {
         // This allows to have more tasks sitting in the task pool, reducing the pressure on the
         // dispatcher queues and giving a chance to higher priority tasks to come in and get
         // dispatched earlier, mitigating potential priority inversion issues.
-        let idle_cpus = self.get_idle_cpus();
-        for _ in &idle_cpus {
+        for _ in 0..self.nr_idle_cpus() {
             match self.task_pool.pop() {
                 Some(mut task) => {
                     // Update global minimum vruntime.
                     self.min_vruntime = task.vruntime;
 
-                    // If the CPU assigned to the task is not idle anymore, dispatch to the first
-                    // CPU that becomes available.
-                    if !idle_cpus.contains(&task.cpu) {
+                    // If built-in idle selection logic is disabled, dispatch on the first CPU
+                    // available.
+                    if !self.builtin_idle {
                         task.cpu = NO_CPU;
                     }
 
