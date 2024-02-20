@@ -212,8 +212,15 @@ pub struct BpfScheduler<'cb> {
 }
 
 // Buffer to store a task read from the ring buffer.
+//
+// NOTE: make the buffer aligned to 64-bits to prevent misaligned dereferences when accessing the
+// buffer using a pointer.
 const BUFSIZE: usize = std::mem::size_of::<QueuedTask>();
-static mut BUF: [u8; BUFSIZE] = [0; BUFSIZE];
+
+#[repr(align(8))]
+struct AlignedBuffer([u8; BUFSIZE]);
+
+static mut BUF: AlignedBuffer = AlignedBuffer([0; BUFSIZE]);
 
 impl<'cb> BpfScheduler<'cb> {
     pub fn init(slice_us: u64, nr_cpus_online: i32, partial: bool, debug: bool) -> Result<Self> {
@@ -228,7 +235,7 @@ impl<'cb> BpfScheduler<'cb> {
         // Copy one item from the ring buffer.
         fn callback(data: &[u8]) -> i32 {
             unsafe {
-                BUF.copy_from_slice(data);
+                BUF.0.copy_from_slice(data);
             }
 
             // Return an unsupported error to stop early and consume only one item.
@@ -378,7 +385,7 @@ impl<'cb> BpfScheduler<'cb> {
             Ok(()) => Ok(None),
             Err(error) if error.kind() == libbpf_rs::ErrorKind::Other => {
                 // A valid task is received, convert data to a proper task struct.
-                let task = unsafe { EnqueuedMessage::from_bytes(&BUF).to_queued_task() };
+                let task = unsafe { EnqueuedMessage::from_bytes(&BUF.0).to_queued_task() };
                 Ok(Some(task))
             }
             Err(error) => Err(error),
