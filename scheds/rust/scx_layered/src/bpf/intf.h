@@ -62,6 +62,7 @@ enum layer_match_kind {
 	MATCH_COMM_PREFIX,
 	MATCH_NICE_ABOVE,
 	MATCH_NICE_BELOW,
+	MATCH_NICE_EQUALS,
 
 	NR_LAYER_MATCH_KINDS,
 };
@@ -70,7 +71,7 @@ struct layer_match {
 	int		kind;
 	char		cgroup_prefix[MAX_PATH];
 	char		comm_prefix[MAX_COMM];
-	int		nice_above_or_below;
+	int		nice;
 };
 
 struct layer_match_ands {

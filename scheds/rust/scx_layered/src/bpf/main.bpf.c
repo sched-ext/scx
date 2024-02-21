@@ -36,6 +36,12 @@ static inline bool vtime_before(u64 a, u64 b)
 	return (s64)(a - b) < 0;
 }
 
+static inline s32 prio_to_nice(s32 static_prio)
+{
+	/* See DEFAULT_PRIO and PRIO_TO_NICE in include/linux/sched/prio.h */
+	return static_prio - 120;
+}
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, u32);
@@ -536,9 +542,11 @@ static bool match_one(struct layer_match *match, struct task_struct *p, const ch
 		return match_prefix(match->comm_prefix, comm, MAX_COMM);
 	}
 	case MATCH_NICE_ABOVE:
-		return (s32)p->static_prio - 120 > match->nice_above_or_below;
+		return prio_to_nice((s32)p->static_prio) > match->nice;
 	case MATCH_NICE_BELOW:
-		return (s32)p->static_prio - 120 < match->nice_above_or_below;
+		return prio_to_nice((s32)p->static_prio) < match->nice;
+	case MATCH_NICE_EQUALS:
+		return prio_to_nice((s32)p->static_prio) == match->nice;
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
 		return false;
@@ -890,10 +898,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 					dbg("%s COMM_PREFIX \"%s\"", header, match->comm_prefix);
 					break;
 				case MATCH_NICE_ABOVE:
-					dbg("%s NICE_ABOVE %d", header, match->nice_above_or_below);
+					dbg("%s NICE_ABOVE %d", header, match->nice);
 					break;
 				case MATCH_NICE_BELOW:
-					dbg("%s NICE_BELOW %d", header, match->nice_above_or_below);
+					dbg("%s NICE_BELOW %d", header, match->nice);
+					break;
+				case MATCH_NICE_EQUALS:
+					dbg("%s NICE_EQUALS %d", header, match->nice);
 					break;
 				default:
 					scx_bpf_error("%s Invalid kind", header);
