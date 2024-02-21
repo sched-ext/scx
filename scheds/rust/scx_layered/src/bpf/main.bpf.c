@@ -505,9 +505,6 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		struct layer *layer = &layers[idx];
 		struct cpumask *layer_cpumask;
 
-		if (layer->open)
-			continue;
-
 		/* consume matching layers */
 		if (!(layer_cpumask = lookup_layer_cpumask(idx)))
 			return;
