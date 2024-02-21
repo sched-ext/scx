@@ -140,21 +140,34 @@ static struct cpumask *lookup_layer_cpumask(int idx)
 	}
 }
 
+struct layer *lookup_layer(int idx)
+{
+	if (idx < 0 || idx >= nr_layers) {
+		scx_bpf_error("invalid layer %d", idx);
+		return NULL;
+	}
+	return &layers[idx];
+}
+
 static void refresh_cpumasks(int idx)
 {
 	struct layer_cpumask_wrapper *cpumaskw;
-	struct layer *layer;
 	int cpu, total = 0;
+	struct layer *layer = lookup_layer(idx);
 
-	if (!__sync_val_compare_and_swap(&layers[idx].refresh_cpus, 1, 0))
+	if (!layer)
+		return;
+
+	if (!__sync_val_compare_and_swap(&layer->refresh_cpus, 1, 0))
 		return;
 
 	cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &idx);
 
+	bpf_rcu_read_lock();
 	bpf_for(cpu, 0, nr_possible_cpus) {
 		u8 *u8_ptr;
 
-		if ((u8_ptr = MEMBER_VPTR(layers, [idx].cpus[cpu / 8]))) {
+		if ((u8_ptr = &layer->cpus[cpu / 8])) {
 			/*
 			 * XXX - The following test should be outside the loop
 			 * but that makes the verifier think that
@@ -162,6 +175,7 @@ static void refresh_cpumasks(int idx)
 			 */
 			barrier_var(cpumaskw);
 			if (!cpumaskw || !cpumaskw->cpumask) {
+				bpf_rcu_read_unlock();
 				scx_bpf_error("can't happen");
 				return;
 			}
@@ -176,13 +190,7 @@ static void refresh_cpumasks(int idx)
 			scx_bpf_error("can't happen");
 		}
 	}
-
-	// XXX - shouldn't be necessary
-	layer = MEMBER_VPTR(layers, [idx]);
-	if (!layer) {
-		scx_bpf_error("can't happen");
-		return;
-	}
+	bpf_rcu_read_unlock();
 
 	layer->nr_cpus = total;
 	__sync_fetch_and_add(&layer->cpus_seq, 1);
@@ -238,15 +246,6 @@ struct task_ctx *lookup_task_ctx(struct task_struct *p)
 		scx_bpf_error("task_ctx lookup failed");
 		return NULL;
 	}
-}
-
-struct layer *lookup_layer(int idx)
-{
-	if (idx < 0 || idx >= nr_layers) {
-		scx_bpf_error("invalid layer %d", idx);
-		return NULL;
-	}
-	return &layers[idx];
 }
 
 /*
@@ -505,9 +504,6 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	bpf_for(idx, 0, nr_layers) {
 		struct layer *layer = &layers[idx];
 		struct cpumask *layer_cpumask;
-
-		if (layer->open)
-			continue;
 
 		/* consume matching layers */
 		if (!(layer_cpumask = lookup_layer_cpumask(idx)))
@@ -925,16 +921,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		if (!cpumask)
 			return -ENOMEM;
 
-		/*
-		 * Start all layers with full cpumask so that everything runs
-		 * everywhere. This will soon be updated by refresh_cpumasks()
-		 * once the scheduler starts running.
-		 */
-		bpf_cpumask_setall(cpumask);
-
 		cpumask = bpf_kptr_xchg(&cpumaskw->cpumask, cpumask);
 		if (cpumask)
 			bpf_cpumask_release(cpumask);
+
+		refresh_cpumasks(i);
 	}
 
 	return 0;
