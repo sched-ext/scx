@@ -112,6 +112,7 @@ use anyhow::Result;
 use bitvec::prelude::*;
 
 use log::info;
+use log::warn;
 
 #[derive(Debug)]
 pub struct Domain {
@@ -222,7 +223,12 @@ impl TopologyBuilder {
             cpu_to_node[cpu] = id;
             if node_to_cpu.contains_key(&id) {
                 if nodes_completed.contains(&id) {
-                    panic!("More than two CPUs detected in node {}", id);
+                    // This can happen in multi-socket machines where a core ID
+                    // will be the same across two different nodes. Once we add
+                    // support for NUMA nodes, this should no longer be an issue
+                    // (unless we're running on architectures with more than 2
+                    // SMT siblings).
+                    warn!("More than two CPUs detected in node {}: siblings may be invalid", id);
                 }
 
                 let sibling = node_to_cpu.get(&id).unwrap().clone();
