@@ -841,37 +841,13 @@ impl Layer {
 
         let nr_cpus = cpu_pool.nr_cpus;
 
-        let mut layer = Self {
+        Ok(Self {
             name: name.into(),
             kind,
 
             nr_cpus: 0,
             cpus: bitvec![0; nr_cpus],
-        };
-
-        match &layer.kind {
-            LayerKind::Confined {
-                cpus_range,
-                util_range,
-            }
-            | LayerKind::Grouped {
-                cpus_range,
-                util_range,
-                ..
-            } => {
-                layer.resize_confined_or_grouped(
-                    cpu_pool,
-                    *cpus_range,
-                    *util_range,
-                    (0.0, 0.0),
-                    (0.0, 0.0),
-                    false,
-                )?;
-            }
-            _ => {}
-        }
-
-        Ok(layer)
+        })
     }
 
     fn grow_confined_or_grouped(
@@ -1239,17 +1215,7 @@ impl<'a> Scheduler<'a> {
         }
         Self::init_layers(&mut skel, &layer_specs)?;
 
-        // Attach.
         let mut skel = skel.load().context("Failed to load BPF program")?;
-        skel.attach().context("Failed to attach BPF program")?;
-        let struct_ops = Some(
-            skel.maps_mut()
-                .layered()
-                .attach_struct_ops()
-                .context("Failed to attach layered struct ops")?,
-        );
-        info!("Layered Scheduler Attached");
-
         let mut layers = vec![];
         for spec in layer_specs.iter() {
             layers.push(Layer::new(&mut cpu_pool, &spec.name, spec.kind.clone())?);
@@ -1258,8 +1224,8 @@ impl<'a> Scheduler<'a> {
         // Other stuff.
         let proc_reader = procfs::ProcReader::new();
 
-        Ok(Self {
-            struct_ops, // should be held to keep it attached
+        let mut sched = Self {
+            struct_ops: None,
             layer_specs,
 
             sched_intv: Duration::from_secs_f64(opts.interval),
@@ -1281,7 +1247,22 @@ impl<'a> Scheduler<'a> {
 
             om_stats: OpenMetricsStats::new(),
             om_format: opts.open_metrics_format,
-        })
+        };
+
+        // Initialize layers before we attach the scheduler
+        sched.refresh_cpumasks()?;
+
+        // Attach.
+        sched.skel.attach().context("Failed to attach BPF program")?;
+        sched.struct_ops = Some(
+            sched.skel.maps_mut()
+                .layered()
+                .attach_struct_ops()
+                .context("Failed to attach layered struct ops")?,
+        );
+        info!("Layered Scheduler Attached");
+
+        Ok(sched)
     }
 
     fn update_bpf_layer_cpumask(layer: &Layer, bpf_layer: &mut bpf_bss_types::layer) {
@@ -1295,10 +1276,7 @@ impl<'a> Scheduler<'a> {
         bpf_layer.refresh_cpus = 1;
     }
 
-    fn step(&mut self) -> Result<()> {
-        let started_at = Instant::now();
-        self.sched_stats
-            .refresh(&mut self.skel, &self.proc_reader, started_at)?;
+    fn refresh_cpumasks(&mut self) -> Result<()> {
         let mut updated = false;
 
         for idx in 0..self.layers.len() {
@@ -1365,6 +1343,16 @@ impl<'a> Scheduler<'a> {
                 );
             }
         }
+
+        Ok(())
+    }
+
+    fn step(&mut self) -> Result<()> {
+        let started_at = Instant::now();
+        self.sched_stats
+            .refresh(&mut self.skel, &self.proc_reader, started_at)?;
+
+        self.refresh_cpumasks()?;
 
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
