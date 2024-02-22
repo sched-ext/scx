@@ -114,6 +114,9 @@ lazy_static::lazy_static! {
 /// * NiceBelow: Matches if the task's nice value is smaller than the
 ///   pattern.
 ///
+/// * NiceEquals: Matches if the task's nice value is exactly equal to
+///   the pattern.
+///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
 ///
@@ -280,6 +283,7 @@ enum LayerMatch {
     CommPrefix(String),
     NiceAbove(i32),
     NiceBelow(i32),
+    NiceEquals(i32),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1170,11 +1174,15 @@ impl<'a> Scheduler<'a> {
                         }
                         LayerMatch::NiceAbove(nice) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_NICE_ABOVE as i32;
-                            mt.nice_above_or_below = *nice;
+                            mt.nice = *nice;
                         }
                         LayerMatch::NiceBelow(nice) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_NICE_BELOW as i32;
-                            mt.nice_above_or_below = *nice;
+                            mt.nice = *nice;
+                        }
+                        LayerMatch::NiceEquals(nice) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_NICE_EQUALS as i32;
+                            mt.nice = *nice;
                         }
                     }
                 }
