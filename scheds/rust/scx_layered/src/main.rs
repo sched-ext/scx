@@ -1249,8 +1249,11 @@ impl<'a> Scheduler<'a> {
             om_format: opts.open_metrics_format,
         };
 
-        // Initialize layers before we attach the scheduler
-        sched.refresh_cpumasks()?;
+        // XXX If we try to refresh the cpumasks here before attaching, we
+        // sometimes (non-deterministically) don't see the updated values in
+        // BPF. It would be better to update the cpumasks here before we
+        // attach, but the value will quickly converge anyways so it's not a
+        // huge problem in the interim until we figure it out.
 
         // Attach.
         sched.skel.attach().context("Failed to attach BPF program")?;
