@@ -33,6 +33,7 @@ use log::info;
 use log::trace;
 use log::warn;
 use ordered_float::OrderedFloat;
+use scx_utils::Cpumask;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
 use scx_utils::uei_exited;
@@ -251,6 +252,7 @@ fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
 
 struct Tuner {
     top: Arc<Topology>,
+    dom_group: Arc<DomainGroup>,
     direct_greedy_under: f64,
     kick_greedy_under: f64,
     proc_reader: procfs::ProcReader,
@@ -260,7 +262,7 @@ struct Tuner {
 }
 
 impl Tuner {
-    fn new(top: Arc<Topology>, opts: &Opts) -> Result<Self> {
+    fn new(top: Arc<Topology>, dom_group: Arc<DomainGroup>, opts: &Opts) -> Result<Self> {
         let proc_reader = procfs::ProcReader::new();
         let prev_cpu_stats = proc_reader
             .read_stat()?
@@ -271,9 +273,10 @@ impl Tuner {
             kick_greedy_under: opts.kick_greedy_under / 100.0,
             proc_reader,
             prev_cpu_stats,
-            dom_utils: vec![0.0; top.nr_doms()],
+            dom_utils: vec![0.0; dom_group.nr_doms()],
             lb_apply_weight: false,
             top,
+            dom_group,
         })
     }
 
@@ -283,8 +286,8 @@ impl Tuner {
             .read_stat()?
             .cpus_map
             .ok_or_else(|| anyhow!("Expected cpus_map to exist"))?;
-        let mut dom_nr_cpus = vec![0; self.top.nr_doms()];
-        let mut dom_util_sum = vec![0.0; self.top.nr_doms()];
+        let mut dom_nr_cpus = vec![0; self.dom_group.nr_doms()];
+        let mut dom_util_sum = vec![0.0; self.dom_group.nr_doms()];
 
         let mut avg_util = 0.0f64;
         for cpu in 0..self.top.nr_cpus() {
@@ -293,7 +296,7 @@ impl Tuner {
             // initialization and None CpuStat indicates the CPU has gone
             // down since then. Ignore both.
             if let (Some(dom), Some(curr), Some(prev)) = (
-                self.top.cpu_domain_id(cpu),
+                self.dom_group.cpu_dom_id(cpu),
                 curr_cpu_stats.get(&cpu32),
                 self.prev_cpu_stats.get(&cpu32),
             ) {
@@ -307,7 +310,7 @@ impl Tuner {
         self.lb_apply_weight = approx_ge(avg_util, 0.99999);
 
         let ti = &mut skel.bss_mut().tune_input;
-        for dom in 0..self.top.nr_doms() {
+        for dom in 0..self.dom_group.nr_doms() {
             // Calculate the domain avg util. If there are no active CPUs,
             // it doesn't really matter. Go with 0.0 as that's less likely
             // to confuse users.
@@ -321,7 +324,7 @@ impl Tuner {
             // This could be implemented better.
             let update_dom_bits = |target: &mut [u64; 8], val: bool| {
                 for cpu in 0..self.top.nr_cpus() {
-                    if let Some(cdom) = self.top.cpu_domain_id(cpu) {
+                    if let Some(cdom) = self.dom_group.cpu_dom_id(cpu) {
                         if cdom == dom {
                             if val {
                                 target[cpu / 64] |= 1u64 << (cpu % 64);
@@ -368,6 +371,7 @@ struct TaskInfo {
 struct LoadBalancer<'a, 'b, 'c> {
     skel: &'a mut BpfSkel<'b>,
     top: Arc<Topology>,
+    dom_group: Arc<DomainGroup>,
     skip_kworkers: bool,
 
     lb_apply_weight: bool,
@@ -411,6 +415,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
     fn new(
         skel: &'a mut BpfSkel<'b>,
         top: Arc<Topology>,
+        dom_group: Arc<DomainGroup>,
         skip_kworkers: bool,
         lb_apply_weight: &bool,
         nr_lb_data_errors: &'c mut u64,
@@ -422,17 +427,18 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
             lb_apply_weight: lb_apply_weight.clone(),
             infeas_threshold: bpf_intf::consts_LB_MAX_WEIGHT as f64,
 
-            tasks_by_load: (0..top.nr_doms()).map(|_| None).collect(),
+            tasks_by_load: (0..dom_group.nr_doms()).map(|_| None).collect(),
             load_avg: 0f64,
-            dom_loads: vec![0.0; top.nr_doms()],
+            dom_loads: vec![0.0; dom_group.nr_doms()],
 
-            imbal: vec![0.0; top.nr_doms()],
+            imbal: vec![0.0; dom_group.nr_doms()],
             doms_to_pull: BTreeMap::new(),
             doms_to_push: BTreeMap::new(),
 
             nr_lb_data_errors,
 
             top,
+            dom_group,
         }
     }
 
@@ -467,7 +473,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
 
         self.infeas_threshold = infeas_thrsh;
         let mut global_load_sum = 0.0f64;
-        for dom in 0..self.top.nr_doms() {
+        for dom in 0..self.dom_group.nr_doms() {
             let dom_offset = (dom as u64) * NUM_BUCKETS;
             let mut dom_load_sum = 0.0f64;
             for i in 0..NUM_BUCKETS {
@@ -480,7 +486,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
             global_load_sum += dom_load_sum;
         }
 
-        self.load_avg = global_load_sum / self.top.nr_doms() as f64;
+        self.load_avg = global_load_sum / self.dom_group.nr_doms() as f64;
     }
 
     fn adjust_infeas_weights(&mut self,
@@ -560,7 +566,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
         // self-correct soon. If it is the result of the user configuring us to
         // use weights even when the system is under-utilized, they were warned
         // when the scheduler was launched.
-        self.load_avg = global_load_sum / self.top.nr_doms() as f64;
+        self.load_avg = global_load_sum / self.dom_group.nr_doms() as f64;
         Ok(())
     }
 
@@ -581,11 +587,11 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
         // dcycle values stored in every bucket. Recorded here so we don't have
         // to do another ravg read later when testing and adjusting for
         // infeasibility.
-        let mut doms_dcycle_buckets = vec![0.064; NUM_BUCKETS as usize * self.top.nr_doms()];
+        let mut doms_dcycle_buckets = vec![0.064; NUM_BUCKETS as usize * self.dom_group.nr_doms()];
 
         // Sum of dcycle for each domain. Used if we're going to do load
         // balancing based on just dcycle to avoid having to do two iterations.
-        let mut doms_dcycle_sums = vec![0.064; self.top.nr_doms()];
+        let mut doms_dcycle_sums = vec![0.064; self.dom_group.nr_doms()];
 
         // Track maximum weight so we can test for infeasibility below.
         let mut max_weight = 0.0f64;
@@ -593,7 +599,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
         // Accumulate dcycle and load across all domains and buckets. If we're
         // under-utilized, or there are no infeasible weights, this is
         // sufficient to collect all of the data we need for load balancing.
-        for dom in 0..self.top.nr_doms() {
+        for dom in 0..self.dom_group.nr_doms() {
             let dom_key = unsafe { std::mem::transmute::<u32, [u8; 4]>(dom as u32) };
 
             let dom_offset = dom as u64 * NUM_BUCKETS;
@@ -646,7 +652,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
 
         if !self.lb_apply_weight {
             // System is under-utilized, so just use dcycle instead of load.
-            self.load_avg = global_dcycle_sum / self.top.nr_doms() as f64;
+            self.load_avg = global_dcycle_sum / self.dom_group.nr_doms() as f64;
             self.dom_loads = doms_dcycle_sums;
             return Ok(());
         }
@@ -678,7 +684,7 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
                                               global_load_sum);
         }
 
-        self.load_avg = global_load_sum / self.top.nr_doms() as f64;
+        self.load_avg = global_load_sum / self.dom_group.nr_doms() as f64;
         Ok(())
     }
 
@@ -958,6 +964,46 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
     }
 }
 
+#[derive(Debug)]
+struct Domain {
+    id: usize,
+    mask: Cpumask,
+}
+
+impl Domain {
+    /// Get the Domain's ID.
+    fn id(&self) -> usize {
+        self.id
+    }
+
+    /// Get a raw slice of the domain's cpumask as a set of one or more u64
+    /// variables whose bits represent CPUs in the mask.
+    fn mask_slice(&self) -> &[u64] {
+        self.mask.as_raw_slice()
+    }
+
+    /// The number of CPUs in the domain.
+    fn num_cpus(&self) -> usize {
+        self.mask.len()
+    }
+}
+
+#[derive(Debug)]
+struct DomainGroup {
+    doms: BTreeMap<usize, Domain>,
+    cpu_dom_map: BTreeMap<usize, usize>,
+}
+
+impl DomainGroup {
+    fn nr_doms(&self) -> usize {
+        self.doms.len()
+    }
+
+    fn cpu_dom_id(&self, cpu: usize) -> Option<usize> {
+        self.cpu_dom_map.get(&cpu).copied()
+    }
+}
+
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -968,6 +1014,9 @@ struct Scheduler<'a> {
     balanced_kworkers: bool,
 
     top: Arc<Topology>,
+
+    dom_group: Arc<DomainGroup>,
+
     proc_reader: procfs::ProcReader,
 
     prev_at: Instant,
@@ -987,11 +1036,29 @@ impl<'a> Scheduler<'a> {
         let mut skel = skel_builder.open().context("Failed to open BPF program")?;
 
         // Initialize skel according to @opts.
-        let top = Arc::new(if !opts.cpumasks.is_empty() {
-            Topology::builder().cpumasks(&opts.cpumasks).build()?
+        let top = Arc::new(Topology::new()?);
+
+        let doms = if !opts.cpumasks.is_empty() {
+            let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
+            let mut id = 0;
+            for mask_str in opts.cpumasks.iter() {
+                let mask = Cpumask::from_str(&mask_str)?;
+                doms.insert(id, Domain { id, mask });
+                id += 1;
+            }
+            doms
         } else {
-            Topology::builder().cache_level(opts.cache_level).build()?
-        });
+            let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
+            let mut id = 0;
+            for node in top.nodes().iter() {
+                for (_, llc) in node.llcs().iter() {
+                    let mask = llc.span();
+                    doms.insert(id, Domain { id, mask });
+                    id += 1;
+                }
+            }
+            doms
+        };
 
         if top.nr_cpus()  > MAX_CPUS {
             bail!(
@@ -1001,7 +1068,7 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        if top.nr_doms() > MAX_DOMS {
+        if doms.len() > MAX_DOMS {
             bail!(
                 "nr_doms ({}) is greater than MAX_DOMS ({})",
                 top.nr_cpus(),
@@ -1009,16 +1076,22 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        skel.rodata_mut().nr_doms = top.nr_doms() as u32;
+        skel.rodata_mut().nr_doms = doms.len() as u32;
         skel.rodata_mut().nr_cpus = top.nr_cpus() as u32;
 
+        let mut cpu_dom_map = BTreeMap::new();
+        for (id, dom) in doms.iter() {
+            for cpu in dom.mask.clone().into_iter() {
+                cpu_dom_map.insert(cpu, *id);
+            }
+        }
         for cpu in 0..top.nr_cpus() {
-            let dom_id = top.cpu_domain_id(cpu).unwrap();
+            let dom_id = cpu_dom_map.get(&cpu).unwrap();
             skel.rodata_mut().cpu_dom_id_map[cpu] =
-                dom_id.try_into().expect("Domain ID could not fit into 32 bits");
+                (*dom_id).try_into().expect("Domain ID could not fit into 32 bits");
         }
 
-        for (dom_id, domain) in top.domains().iter() {
+        for (dom_id, domain) in doms.iter() {
             let raw_cpus_slice = domain.mask_slice();
             let dom_cpumask_slice = &mut skel.rodata_mut().dom_cpumasks[*dom_id];
             let (left, _) = dom_cpumask_slice.split_at_mut(raw_cpus_slice.len());
@@ -1054,6 +1127,11 @@ impl<'a> Scheduler<'a> {
         let proc_reader = procfs::ProcReader::new();
         let prev_total_cpu = read_total_cpu(&proc_reader)?;
 
+        let dom_group = Arc::new(DomainGroup {
+            doms,
+            cpu_dom_map,
+        });
+
         Ok(Self {
             skel,
             struct_ops, // should be held to keep it attached
@@ -1064,6 +1142,7 @@ impl<'a> Scheduler<'a> {
             balanced_kworkers: opts.balanced_kworkers,
 
             top: top.clone(),
+            dom_group: dom_group.clone(),
             proc_reader,
 
             prev_at: Instant::now(),
@@ -1071,7 +1150,7 @@ impl<'a> Scheduler<'a> {
 
             nr_lb_data_errors: 0,
 
-            tuner: Tuner::new(top, opts)?,
+            tuner: Tuner::new(top, dom_group, opts)?,
         })
     }
 
@@ -1222,7 +1301,7 @@ impl<'a> Scheduler<'a> {
             format_cpumask(&ti.kick_greedy_cpumask, self.top.nr_cpus())
         );
 
-        for i in 0..self.top.nr_doms() {
+        for i in 0..self.dom_group.nr_doms() {
             info!(
                 "DOM[{:02}] util={:6.2} load={:8.2} imbal={}",
                 i,
@@ -1245,6 +1324,7 @@ impl<'a> Scheduler<'a> {
         let mut lb = LoadBalancer::new(
             &mut self.skel,
             self.top.clone(),
+	    self.dom_group.clone(),
             self.balanced_kworkers,
             &lb_apply_weight,
             &mut self.nr_lb_data_errors,
