@@ -48,5 +48,12 @@ mod topology;
 pub use topology::Domain;
 pub use topology::Topology;
 
+mod topology2;
+pub use topology2::Topology2;
+pub use topology2::Cpu;
+pub use topology2::Core;
+pub use topology2::Cache;
+pub use topology2::Node;
+
 mod cpumask;
 pub use cpumask::Cpumask;
