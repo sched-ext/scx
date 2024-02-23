@@ -9,7 +9,8 @@
 //! service of creating scheduling domains.
 //!
 //! A Topology is comprised of one or more Domain objects, which themselves
-//! have an ID, a cpumask of all CPUs in the domain, and a set of CPU siblings:
+//! have an ID, a cpumask of all CPUs in the domain, and a set of Cores
+//! containing CPU siblings:
 //!
 //!		                                Topology
 //!		                                    |
@@ -19,7 +20,10 @@
 //!	            o-----------o----------o   ...   o----------o-----------o
 //!	            | Domain   0           |         | Domain   1           |
 //!	            | Cpumask  0x00FF00FF  |         | Cpumask  0xFF00FF00  |
-//!	            | CPUS     {CPUs set}  |         | CPUS     {CPUs set}  |
+//!	            |                      |         |                      |
+//!	            | Core 0   {CPUs set}  |         | Core 0    {CPUs set} |
+//!	            | Core 1   {CPUs set}  |         | Core 1    {CPUs set} |
+//!	            | ...                  |         | ...                  |
 //!	            o----------------------o         o----------------------o
 //!
 //! Topology objects also track CPU siblings, and physical core nodes. Soon, it
@@ -106,6 +110,7 @@
 use crate::Cpumask;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 
 use anyhow::bail;
 use anyhow::Result;
@@ -151,6 +156,7 @@ pub struct Topology {
     cpu_domain_map: BTreeMap<usize, usize>, // (cpu, domain ID)
     cpu_core_map: Vec<usize>,               // (cpu, physical core)
     cpu_sibling_map: Vec<usize>,            // (cpu, sibling cpu)
+    cpu_cores: HashMap<usize, Vec<usize>>,  // (physical core, [cpu, ...])
     pub nr_cpus: usize,
     pub nr_doms: usize,
 }
@@ -182,6 +188,11 @@ impl Topology {
         self.cpu_sibling_map[cpu]
     }
 
+    /// Get the CPUs of the specified core.
+    pub fn core_cpus(&self, core: usize) -> &Vec<usize> {
+        &self.cpu_cores[&core]
+    }
+
     /// Get the Domains in the Topology.
     pub fn domains(&self) -> &BTreeMap<usize, Domain> {
         &self.domains
@@ -190,6 +201,11 @@ impl Topology {
     /// Get the number of CPUs in the Topology.
     pub fn nr_cpus(&self) -> usize {
         self.nr_cpus
+    }
+
+    /// Get the number of cores in the Topology.
+    pub fn nr_cores(&self) -> usize {
+        self.cpu_cores.len()
     }
 
     /// Get the number of domains in the Topology.
@@ -205,9 +221,10 @@ pub struct TopologyBuilder {
 }
 
 impl TopologyBuilder {
-    fn create_cpu_core_maps(&self, nr_cpus: usize) -> (Vec<usize>, Vec<usize>) {
+    fn create_cpu_core_maps(&self, nr_cpus: usize) -> (Vec<usize>, Vec<usize>, HashMap<usize, Vec<usize>>) {
         let mut cpu_to_node = vec![0; nr_cpus]; // (cpu_id, core_id)
         let mut cpu_to_sibling = vec![0; nr_cpus]; // (cpu_id, cpu_sibling_id)
+        let mut cpu_cores = HashMap::<usize, Vec<usize>>::new(); // (core_id, [cpu_id, ...])
         let mut node_to_cpu = BTreeMap::<usize, usize>::new();
         let mut nodes_completed = BTreeSet::<usize>::new();
         for cpu in 0..nr_cpus {
@@ -219,6 +236,10 @@ impl TopologyBuilder {
                 }
             };
 
+            cpu_cores
+                .entry(id)
+                .or_insert(Vec::new())
+                .push(cpu);
             cpu_to_node[cpu] = id;
             if node_to_cpu.contains_key(&id) {
                 if nodes_completed.contains(&id) {
@@ -244,7 +265,7 @@ impl TopologyBuilder {
             }
         }
 
-        (cpu_to_node, cpu_to_sibling)
+        (cpu_to_node, cpu_to_sibling, cpu_cores)
     }
 
     fn build_from_cpumasks(&self, cpumasks: &[String], nr_cpus: usize) -> Result<Topology> {
@@ -290,12 +311,13 @@ impl TopologyBuilder {
         }
 
         let nr_doms = domains.len();
-        let (core_map, sibling_map) = self.create_cpu_core_maps(nr_cpus);
+        let (core_map, sibling_map, cores_map) = self.create_cpu_core_maps(nr_cpus);
         Ok(Topology {
             domains,
             cpu_domain_map: cpu_domains,
             cpu_core_map: core_map,
             cpu_sibling_map: sibling_map,
+            cpu_cores: cores_map,
             nr_cpus,
             nr_doms,
         })
@@ -399,12 +421,13 @@ impl TopologyBuilder {
         let (domains, cpu_domains) = self.build_domains_map(&cache_ids, &cpu_to_cache, nr_cpus);
         let nr_doms = domains.len();
 
-        let (core_map, sibling_map) = self.create_cpu_core_maps(nr_cpus);
+        let (core_map, sibling_map, cores_map) = self.create_cpu_core_maps(nr_cpus);
         Ok(Topology {
             domains,
             cpu_domain_map: cpu_domains,
             cpu_core_map: core_map,
             cpu_sibling_map: sibling_map,
+            cpu_cores: cores_map,
             nr_cpus,
             nr_doms,
         })
