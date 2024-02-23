@@ -45,15 +45,11 @@ pub use user_exit_info::UserExitInfo;
 pub use user_exit_info::ScxExitKind;
 
 mod topology;
-pub use topology::Domain;
 pub use topology::Topology;
-
-mod topology2;
-pub use topology2::Topology2;
-pub use topology2::Cpu;
-pub use topology2::Core;
-pub use topology2::Cache;
-pub use topology2::Node;
+pub use topology::Cpu;
+pub use topology::Core;
+pub use topology::Cache;
+pub use topology::Node;
 
 mod cpumask;
 pub use cpumask::Cpumask;
