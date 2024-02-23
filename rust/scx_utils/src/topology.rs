@@ -65,9 +65,8 @@
 //!
 //! With a created Topology, you can query the topological hierarchy using the
 //! set of accessor functions defined below. All objects in the topological
-//! hierarchy are (currently) entirely read-only, though that may change if and
-//! when we add support for dynamically updating the hierarchy during e.g. CPU
-//! hotplug.
+//! hierarchy are entirely read-only. If the host topology were to change (due
+//! to e.g. hotplug), a new Topology object should be created.
 
 use crate::Cpumask;
 use anyhow::bail;
@@ -182,6 +181,8 @@ impl Node {
 #[derive(Debug)]
 pub struct Topology {
     nodes: Vec<Node>,
+    cores: BTreeMap<usize, Core>,
+    cpus: BTreeMap<usize, Cpu>,
     nr_cpus: usize,
     span: Cpumask,
 }
@@ -193,12 +194,44 @@ impl Topology {
         let span = cpus_online()?;
         let nodes = create_numa_nodes(&span)?;
 
-        Ok(Topology { nodes, nr_cpus, span })
+        // For convenient and efficient lookup from the root topology object,
+        // create two BTreeMaps to the full set of Core and Cpu objects on the
+        // system. We clone the objects that are located further down in the
+        // hierarchy rather than dealing with references, as the entire
+        // Topology is read-only anyways.
+        let mut cores = BTreeMap::new();
+        let mut cpus = BTreeMap::new();
+        for node in nodes.iter() {
+            for (_, llc) in node.llcs.iter() {
+                for (core_id, core) in llc.cores.iter() {
+                    if let Some(_) = cores.insert(*core_id, core.clone()) {
+                        bail!("Found duplicate core ID {}", core_id);
+                    }
+                    for (cpu_id, cpu) in core.cpus.iter() {
+                        if let Some(_) = cpus.insert(*cpu_id, cpu.clone()) {
+                            bail!("Found duplicate CPU ID {}", cpu_id);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Topology { nodes, nr_cpus, cores, cpus, span })
     }
 
     /// Get a slice of the NUMA nodes on the host
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
+    }
+
+    /// Get a hashmap of <core ID, Core> for all Cores on the host.
+    pub fn cores(&self) -> &BTreeMap<usize, Core> {
+        &self.cores
+    }
+
+    /// Get a hashmap of <CPU ID, Cpu> for all Cpus on the host.
+    pub fn cpus(&self) -> &BTreeMap<usize, Cpu> {
+        &self.cpus
     }
 
     /// Get the number of total CPUs on the host
