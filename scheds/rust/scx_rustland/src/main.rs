@@ -9,8 +9,7 @@ pub mod bpf_intf;
 mod bpf;
 use bpf::*;
 
-mod topology;
-use topology::*;
+use scx_utils::Topology;
 
 use std::thread;
 
@@ -241,7 +240,7 @@ impl TaskTree {
 // Main scheduler object
 struct Scheduler<'a> {
     bpf: BpfScheduler<'a>, // BPF connector
-    cores: CoreMapping,    // Map of core ids -> CPU ids
+    topo: Topology,        // Host topology
     task_pool: TaskTree,   // tasks ordered by vruntime
     task_map: TaskInfoMap, // map pids to the corresponding task information
     min_vruntime: u64,     // Keep track of the minimum vruntime across all tasks
@@ -255,7 +254,7 @@ struct Scheduler<'a> {
 impl<'a> Scheduler<'a> {
     fn init(opts: &Opts) -> Result<Self> {
         // Initialize core mapping topology.
-        let cores = CoreMapping::new();
+        let topo = Topology::new().expect("Failed to build host topology");
 
         // Save the default time slice (in ns) in the scheduler class.
         let slice_ns = opts.slice_us * NSEC_PER_USEC;
@@ -282,7 +281,7 @@ impl<'a> Scheduler<'a> {
         // Low-level BPF connector.
         let bpf = BpfScheduler::init(
             opts.slice_us,
-            cores.nr_cpus_online,
+            topo.nr_cpus() as i32,
             opts.partial,
             opts.full_user,
             opts.debug,
@@ -292,7 +291,7 @@ impl<'a> Scheduler<'a> {
         // Return scheduler object.
         Ok(Self {
             bpf,
-            cores,
+            topo,
             task_pool,
             task_map,
             min_vruntime,
@@ -309,12 +308,22 @@ impl<'a> Scheduler<'a> {
     // On SMT systems consider only one CPU for each fully idle core, to avoid disrupting
     // performnance too much by running multiple tasks in the same core.
     fn nr_idle_cpus(&mut self) -> usize {
-        let cores = &self.cores.map;
+        let mut idle_cpu_count = 0;
 
-        // Count the number of cores where all CPUs are idle.
-        let idle_cpu_count = cores.iter().filter(|(_, core_cpus)| {
-            core_cpus.iter().all(|&cpu_id| self.bpf.get_cpu_pid(cpu_id) == 0)
-        }).count();
+        // Count the number of cores where all the CPUs are idle.
+        for (_, core) in self.topo.cores().iter() {
+            let mut all_idle = true;
+            for (cpu_id, _) in core.cpus().iter() {
+                if self.bpf.get_cpu_pid(*cpu_id as i32) != 0 {
+                    all_idle = false;
+                    break;
+                }
+            }
+
+            if all_idle {
+                idle_cpu_count += 1;
+            }
+        }
 
         idle_cpu_count
     }
@@ -364,7 +373,7 @@ impl<'a> Scheduler<'a> {
         //
         // This allows to survive stress tests that are spawning a massive amount of
         // tasks.
-        self.eff_slice_boost = (self.slice_boost * self.cores.nr_cpus_online as u64
+        self.eff_slice_boost = (self.slice_boost * self.topo.nr_cpus() as u64
             / self.task_pool.tasks.len().max(1) as u64)
             .max(1);
 
@@ -674,16 +683,12 @@ impl<'a> Scheduler<'a> {
             Err(_) => -1,
         };
         info!("Running tasks:");
-        let mut core_ids: Vec<i32> = self.cores.map.keys().copied().collect();
-        core_ids.sort();
-        for core_id in core_ids {
-            let mut cpu_ids: Vec<i32> = self.cores.map.get(&core_id).unwrap().clone();
-            cpu_ids.sort();
-            for cpu_id in cpu_ids {
-                let pid = if cpu_id == sched_cpu {
+        for (core_id, core) in self.topo.cores().iter() {
+            for (cpu_id, _) in core.cpus().iter() {
+                let pid = if *cpu_id as i32 == sched_cpu {
                     "[self]".to_string()
                 } else {
-                    self.bpf.get_cpu_pid(cpu_id).to_string()
+                    self.bpf.get_cpu_pid(*cpu_id as i32).to_string()
                 };
                 info!("  core {:2} cpu {:2} pid={}", core_id, cpu_id, pid);
             }
