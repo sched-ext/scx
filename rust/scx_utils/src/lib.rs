@@ -47,3 +47,6 @@ pub use user_exit_info::ScxExitKind;
 mod topology;
 pub use topology::Domain;
 pub use topology::Topology;
+
+mod cpumask;
+pub use cpumask::Cpumask;

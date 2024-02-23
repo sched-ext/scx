@@ -103,13 +103,12 @@
 //! this crate provide all of that information in an easy-to-consume format for
 //! rust callers.
 
+use crate::Cpumask;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use anyhow::bail;
-use anyhow::Context;
 use anyhow::Result;
-use bitvec::prelude::*;
 
 use log::info;
 use log::warn;
@@ -118,7 +117,7 @@ use log::warn;
 pub struct Domain {
     domain_id: usize,
     cpus: BTreeSet<usize>,
-    mask: BitVec<u64, Lsb0>,
+    mask: Cpumask,
 }
 
 impl Domain {
@@ -253,64 +252,21 @@ impl TopologyBuilder {
 
         let mut domains = BTreeMap::<usize, Domain>::new();
         for (dom, cpumask) in cpumasks.iter().enumerate() {
-            let hex_str = {
-                let mut tmp_str = cpumask
-                    .strip_prefix("0x")
-                    .unwrap_or(cpumask)
-                    .replace('_', "");
-                if tmp_str.len() % 2 != 0 {
-                    tmp_str = "0".to_string() + &tmp_str;
-                }
-                tmp_str
-            };
-            let byte_vec = hex::decode(&hex_str)
-                .with_context(|| format!("Failed to parse cpumask: {}", cpumask))?;
 
-            let mut mask = bitvec![u64, Lsb0; 0; nr_cpus];
-            for (index, &val) in byte_vec.iter().rev().enumerate() {
-                let mut v = val;
-                while v != 0 {
-                    let lsb = v.trailing_zeros() as usize;
-                    v &= !(1 << lsb);
-                    let cpu = index * 8 + lsb;
-                    if cpu > nr_cpus {
-                        bail!(
-                            concat!(
-                                "Found cpu ({}) in cpumask ({}) which is larger",
-                                " than the number of cpus on the machine ({})"
-                            ),
-                            cpu,
-                            cpumask,
-                            nr_cpus
-                        );
-                    }
-                    if let Some(other_dom) = cpu_dom[cpu] {
-                        bail!(
-                            "Found cpu ({}) with domain ({}) but also in cpumask ({})",
-                            cpu,
-                            other_dom,
-                            cpumask
-                        );
-                    }
-                    mask.set(cpu, true);
-                    cpu_dom[cpu] = Some(dom);
-                }
-            }
-            mask.set_uninitialized(false);
+            let mask = Cpumask::from_str(cpumask)?;
             let mut cpus = BTreeSet::<usize>::new();
-            for (cpu, dom_id) in cpu_dom.iter().enumerate() {
-                if let Some(id) = dom_id {
-                    if *id == dom {
-                        cpus.insert(cpu);
-                    }
-                }
+
+            for cpu in mask.clone().into_iter() {
+                cpus.insert(cpu);
+                cpu_dom[cpu] = Some(dom);
             }
+
             domains.insert(
                 dom,
                 Domain {
                     domain_id: dom,
                     cpus,
-                    mask: mask.clone(),
+                    mask,
                 },
             );
         }
@@ -392,24 +348,24 @@ impl TopologyBuilder {
         }
 
         // Build and return dom -> cpumask and cpu -> dom mappings.
-        let mut dom_cpus = vec![bitvec![u64, Lsb0; 0; nr_cpus]; nr_doms];
+        let mut dom_cpus = vec![Cpumask::new().unwrap(); nr_doms];
         let mut cpu_domains = BTreeMap::<usize, usize>::new();
 
         for (cpu, cache) in cpu_to_cache.iter().enumerate().take(nr_cpus) {
             match cache {
                 Some(cache_id) => {
                     let dom_id = cache_to_dom[cache_id];
-                    dom_cpus[dom_id].set(cpu, true);
+                    dom_cpus[dom_id].set_cpu(cpu).unwrap();
                     cpu_domains.insert(cpu, dom_id);
                 }
                 None => {
-                    dom_cpus[0].set(cpu, true);
+                    dom_cpus[0].set_cpu(cpu).unwrap();
                 }
             }
         }
 
         let mut domains = BTreeMap::<usize, Domain>::new(); // (domain_id, Domain)
-        for (dom_id, cpus_bitvec) in dom_cpus.iter().enumerate() {
+        for (dom_id, cpumask) in dom_cpus.iter().enumerate() {
             let mut cpus = BTreeSet::<usize>::new();
             for (cpu, cpu_dom) in cpu_domains.iter() {
                 if cpu_dom == &dom_id {
@@ -421,7 +377,7 @@ impl TopologyBuilder {
                 Domain {
                     domain_id: dom_id,
                     cpus,
-                    mask: cpus_bitvec.clone(),
+                    mask: cpumask.clone(),
                 },
             );
         }
