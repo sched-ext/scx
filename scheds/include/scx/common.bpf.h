@@ -245,4 +245,4 @@ void bpf_rcu_read_unlock(void) __ksym;
 
 #include "compat.bpf.h"
 
-#endif	/* __SCHED_EXT_COMMON_BPF_H */
+#endif	/* __SCX_COMMON_BPF_H */
