@@ -46,22 +46,17 @@ done
 # done
 
 nr_missing=0
-for dst in "${dsts[@]}"; do
-    if [ ! -f "$dst" ]; then
-	echo "ERROR: $dst does not exist" 1>&2
-	nr_missing=$((nr_missing+1))
-    fi
-done
-
-if [ $nr_missing -gt 0 ]; then
-    exit 1
-fi
-
 nr_skipped=0
 for ((i=0;i<${#srcs[@]};i++)); do
     src="${srcs[i]}"
     dst="${dsts[i]}"
     orig="$src"
+
+    if [ ! -f "$dst" ]; then
+	echo "WARNING: $dst does not exist" 1>&2
+	nr_missing=$((nr_missing+1))
+	continue
+    fi
 
     #
     # As scx_utils is in this repo, rust schedulers point directly to
@@ -86,4 +81,4 @@ for ((i=0;i<${#srcs[@]};i++)); do
     cp -f "$src" "$dst"
 done
 
-echo "Skipped $nr_skipped unchanged files"
+echo "Skipped $nr_skipped unchanged and $nr_missing new files"
