@@ -15,12 +15,11 @@ use libbpf_rs::skel::SkelBuilder as _;
 
 use libc::{sched_param, sched_setscheduler};
 
-mod alloc;
-use alloc::*;
-
 use scx_utils::init_libbpf_logging;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+
+use scx_rustland_core::ALLOCATOR;
 
 // Defined in UAPI
 const SCHED_EXT: i32 = 7;
