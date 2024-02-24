@@ -9,7 +9,7 @@ fi
 
 # We sync these schedulers
 rust_scheds=()
-c_scheds=(scx_simple scx_qmap)
+c_scheds=(scx_simple scx_qmap scx_central scx_flatcg)
 
 headers=($(git ls-files include | grep -v include/vmlinux))
 
