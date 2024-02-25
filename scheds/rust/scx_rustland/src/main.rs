@@ -33,15 +33,18 @@ use log::warn;
 
 const SCHEDULER_NAME: &'static str = "RustLand";
 
-/// scx_rustland: simple user-space scheduler written in Rust
+/// scx_rustland: user-space scheduler written in Rust
 ///
-/// The main goal of this scheduler is be an "easy to read" template that can be used to quickly
-/// test more complex scheduling policies. For this reason this scheduler is mostly focused on
-/// simplicity and code readability.
+/// scx_rustland is designed to prioritize interactive workloads over background CPU-intensive
+/// workloads. For this reason the typical use case of this scheduler involves low-latency
+/// interactive applications, such as gaming, video conferencing and live streaming.
 ///
-/// The scheduler is made of a BPF component (dispatcher) that implements the low level sched-ext
-/// functionalities and a user-space counterpart (scheduler), written in Rust, that implements the
-/// actual scheduling policy.
+/// scx_rustland is also designed to be an "easy to read" template that can be used by any
+/// developer to quickly experiment more complex scheduling policies fully implemented in Rust.
+///
+/// The scheduler is made of a BPF component (scx_rustland_core) that implements the low level
+/// sched-ext functionalities and a user-space counterpart (scheduler), written in Rust, that
+/// implements the actual scheduling policy.
 ///
 /// The default scheduling policy implemented in the user-space scheduler is a based on virtual
 /// runtime (vruntime):
@@ -64,10 +67,6 @@ const SCHEDULER_NAME: &'static str = "RustLand";
 /// with any internal kernel / BPF details.
 ///
 /// === Troubleshooting ===
-///
-/// - Disable HyperThreading / SMT if you notice poor performance (add "nosmt" to the kernel boot
-///   parameters): this scheduler is not NUMA-aware and it implements a simple policy of handling
-///   SMT cores.
 ///
 /// - Adjust the time slice boost parameter (option `-b`) to enhance the responsiveness of
 ///   low-latency applications (i.e., online gaming, live streaming, video conferencing etc.).
