@@ -10,9 +10,15 @@ fs = import('fs')
 
 cc = meson.get_compiler('c')
 
+enable_rust = get_option('enable_rust')
+
 bpf_clang = find_program(get_option('bpf_clang'))
 bpftool = find_program(get_option('bpftool'))
-cargo = find_program(get_option('cargo'))
+
+if enable_rust
+  cargo = find_program(get_option('cargo'))
+endif
+
 
 get_clang_ver = find_program(join_paths(meson.current_source_dir(),
                                         'meson-scripts/get_clang_ver'))
@@ -20,10 +26,12 @@ bpftool_build_skel = find_program(join_paths(meson.current_source_dir(),
                                              'meson-scripts/bpftool_build_skel'))
 get_sys_incls = find_program(join_paths(meson.current_source_dir(),
                                         'meson-scripts/get_sys_incls'))
-cargo_fetch = find_program(join_paths(meson.current_source_dir(),
-                                      'meson-scripts/cargo_fetch'))
 test_sched  = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/test_sched'))
+if enable_rust
+  cargo_fetch = find_program(join_paths(meson.current_source_dir(),
+                                      'meson-scripts/cargo_fetch'))
+endif
 
 bpf_clang_ver = run_command(get_clang_ver, bpf_clang, check: true).stdout().strip()
 bpf_clang_maj = bpf_clang_ver.split('.')[0].to_int()
@@ -150,11 +158,10 @@ if get_option('cargo_home') != ''
   cargo_env.set('CARGO_HOME', get_option('cargo_home'))
 endif
 
-if get_option('enable_rust')
+if enable_rust
   meson.add_install_script('meson-scripts/install_rust_user_scheds')
+  run_target('fetch', command: [cargo_fetch, cargo], env: cargo_env)
 endif
-
-run_target('fetch', command: [cargo_fetch, cargo], env: cargo_env)
 
 if get_option('kernel') != ''
   kernel = get_option('kernel')
@@ -162,7 +169,7 @@ endif
 
 run_target('test_sched', command: [test_sched, kernel])
 
-if get_option('enable_rust')
+if enable_rust
   subdir('rust')
 endif
 subdir('scheds')
