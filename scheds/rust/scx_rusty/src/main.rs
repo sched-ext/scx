@@ -6,6 +6,12 @@ mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 
+mod domain;
+use domain::DomainGroup;
+
+pub mod tuner;
+use tuner::Tuner;
+
 #[macro_use]
 extern crate static_assertions;
 
@@ -33,7 +39,6 @@ use log::info;
 use log::trace;
 use log::warn;
 use ordered_float::OrderedFloat;
-use scx_utils::Cpumask;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
 use scx_utils::uei_exited;
@@ -193,7 +198,7 @@ fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
         .ok_or_else(|| anyhow!("Could not read total cpu stat in proc"))
 }
 
-fn sub_or_zero(curr: &u64, prev: &u64) -> u64 {
+pub fn sub_or_zero(curr: &u64, prev: &u64) -> u64 {
     if let Some(res) = curr.checked_sub(*prev) {
         res
     } else {
@@ -201,164 +206,8 @@ fn sub_or_zero(curr: &u64, prev: &u64) -> u64 {
     }
 }
 
-fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
-    match (curr, prev) {
-        (
-            procfs::CpuStat {
-                user_usec: Some(curr_user),
-                nice_usec: Some(curr_nice),
-                system_usec: Some(curr_system),
-                idle_usec: Some(curr_idle),
-                iowait_usec: Some(curr_iowait),
-                irq_usec: Some(curr_irq),
-                softirq_usec: Some(curr_softirq),
-                stolen_usec: Some(curr_stolen),
-                ..
-            },
-            procfs::CpuStat {
-                user_usec: Some(prev_user),
-                nice_usec: Some(prev_nice),
-                system_usec: Some(prev_system),
-                idle_usec: Some(prev_idle),
-                iowait_usec: Some(prev_iowait),
-                irq_usec: Some(prev_irq),
-                softirq_usec: Some(prev_softirq),
-                stolen_usec: Some(prev_stolen),
-                ..
-            },
-        ) => {
-            let idle_usec = sub_or_zero(curr_idle, prev_idle);
-            let iowait_usec = sub_or_zero(curr_iowait, prev_iowait);
-            let user_usec = sub_or_zero(curr_user, prev_user);
-            let system_usec = sub_or_zero(curr_system, prev_system);
-            let nice_usec = sub_or_zero(curr_nice, prev_nice);
-            let irq_usec = sub_or_zero(curr_irq, prev_irq);
-            let softirq_usec = sub_or_zero(curr_softirq, prev_softirq);
-            let stolen_usec = sub_or_zero(curr_stolen, prev_stolen);
-
-            let busy_usec =
-                user_usec + system_usec + nice_usec + irq_usec + softirq_usec + stolen_usec;
-            let total_usec = idle_usec + busy_usec + iowait_usec;
-            if total_usec > 0 {
-                Ok(((busy_usec as f64) / (total_usec as f64)).clamp(0.0, 1.0))
-            } else {
-                Ok(1.0)
-            }
-        }
-        _ => {
-            bail!("Missing stats in cpustat");
-        }
-    }
-}
-
-struct Tuner {
-    top: Arc<Topology>,
-    dom_group: Arc<DomainGroup>,
-    direct_greedy_under: f64,
-    kick_greedy_under: f64,
-    proc_reader: procfs::ProcReader,
-    prev_cpu_stats: BTreeMap<u32, procfs::CpuStat>,
-    lb_apply_weight: bool,
-    dom_utils: Vec<f64>,
-}
-
-impl Tuner {
-    fn new(top: Arc<Topology>, dom_group: Arc<DomainGroup>, opts: &Opts) -> Result<Self> {
-        let proc_reader = procfs::ProcReader::new();
-        let prev_cpu_stats = proc_reader
-            .read_stat()?
-            .cpus_map
-            .ok_or_else(|| anyhow!("Expected cpus_map to exist"))?;
-        Ok(Self {
-            direct_greedy_under: opts.direct_greedy_under / 100.0,
-            kick_greedy_under: opts.kick_greedy_under / 100.0,
-            proc_reader,
-            prev_cpu_stats,
-            dom_utils: vec![0.0; dom_group.nr_doms()],
-            lb_apply_weight: false,
-            top,
-            dom_group,
-        })
-    }
-
-    fn step(&mut self, skel: &mut BpfSkel) -> Result<()> {
-        let curr_cpu_stats = self
-            .proc_reader
-            .read_stat()?
-            .cpus_map
-            .ok_or_else(|| anyhow!("Expected cpus_map to exist"))?;
-        let mut dom_nr_cpus = vec![0; self.dom_group.nr_doms()];
-        let mut dom_util_sum = vec![0.0; self.dom_group.nr_doms()];
-
-        let mut avg_util = 0.0f64;
-        for cpu in 0..self.top.nr_cpus() {
-            let cpu32 = cpu as u32;
-            // None domain indicates the CPU was offline during
-            // initialization and None CpuStat indicates the CPU has gone
-            // down since then. Ignore both.
-            if let (Some(dom), Some(curr), Some(prev)) = (
-                self.dom_group.cpu_dom_id(cpu),
-                curr_cpu_stats.get(&cpu32),
-                self.prev_cpu_stats.get(&cpu32),
-            ) {
-                let util = calc_util(curr, prev)?;
-                dom_nr_cpus[dom] += 1;
-                dom_util_sum[dom] += util;
-                avg_util += util;
-            }
-        }
-        avg_util /= self.top.nr_cpus() as f64;
-        self.lb_apply_weight = approx_ge(avg_util, 0.99999);
-
-        let ti = &mut skel.bss_mut().tune_input;
-        for dom in 0..self.dom_group.nr_doms() {
-            // Calculate the domain avg util. If there are no active CPUs,
-            // it doesn't really matter. Go with 0.0 as that's less likely
-            // to confuse users.
-            let util = match dom_nr_cpus[dom] {
-                0 => 0.0,
-                nr => dom_util_sum[dom] / nr as f64,
-            };
-
-            self.dom_utils[dom] = util;
-
-            // This could be implemented better.
-            let update_dom_bits = |target: &mut [u64; 8], val: bool| {
-                for cpu in 0..self.top.nr_cpus() {
-                    if let Some(cdom) = self.dom_group.cpu_dom_id(cpu) {
-                        if cdom == dom {
-                            if val {
-                                target[cpu / 64] |= 1u64 << (cpu % 64);
-                            } else {
-                                target[cpu / 64] &= !(1u64 << (cpu % 64));
-                            }
-                        }
-                    }
-                }
-            };
-
-            update_dom_bits(
-                &mut ti.direct_greedy_cpumask,
-                self.direct_greedy_under > 0.99999 || util < self.direct_greedy_under,
-            );
-            update_dom_bits(
-                &mut ti.kick_greedy_cpumask,
-                self.kick_greedy_under > 0.99999 || util < self.kick_greedy_under,
-            );
-        }
-
-        ti.gen += 1;
-        self.prev_cpu_stats = curr_cpu_stats;
-        Ok(())
-    }
-}
-
 fn approx_eq(a: f64, b: f64) -> bool {
     (a - b).abs() <= 0.0001f64
-}
-
-fn approx_ge(a: f64, b: f64) -> bool {
-    a > b || approx_eq(a, b)
 }
 
 #[derive(Debug)]
@@ -802,46 +651,6 @@ impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
     }
 }
 
-#[derive(Debug)]
-struct Domain {
-    id: usize,
-    mask: Cpumask,
-}
-
-impl Domain {
-    /// Get the Domain's ID.
-    fn id(&self) -> usize {
-        self.id
-    }
-
-    /// Get a raw slice of the domain's cpumask as a set of one or more u64
-    /// variables whose bits represent CPUs in the mask.
-    fn mask_slice(&self) -> &[u64] {
-        self.mask.as_raw_slice()
-    }
-
-    /// The number of CPUs in the domain.
-    fn num_cpus(&self) -> usize {
-        self.mask.len()
-    }
-}
-
-#[derive(Debug)]
-struct DomainGroup {
-    doms: BTreeMap<usize, Domain>,
-    cpu_dom_map: BTreeMap<usize, usize>,
-}
-
-impl DomainGroup {
-    fn nr_doms(&self) -> usize {
-        self.doms.len()
-    }
-
-    fn cpu_dom_id(&self, cpu: usize) -> Option<usize> {
-        self.cpu_dom_map.get(&cpu).copied()
-    }
-}
-
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -876,27 +685,7 @@ impl<'a> Scheduler<'a> {
         // Initialize skel according to @opts.
         let top = Arc::new(Topology::new()?);
 
-        let doms = if !opts.cpumasks.is_empty() {
-            let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
-            let mut id = 0;
-            for mask_str in opts.cpumasks.iter() {
-                let mask = Cpumask::from_str(&mask_str)?;
-                doms.insert(id, Domain { id, mask });
-                id += 1;
-            }
-            doms
-        } else {
-            let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
-            let mut id = 0;
-            for node in top.nodes().iter() {
-                for (_, llc) in node.llcs().iter() {
-                    let mask = llc.span();
-                    doms.insert(id, Domain { id, mask });
-                    id += 1;
-                }
-            }
-            doms
-        };
+	let domains = Arc::new(DomainGroup::new(top.clone(), &opts.cpumasks)?);
 
         if top.nr_cpus()  > MAX_CPUS {
             bail!(
@@ -906,7 +695,7 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        if doms.len() > MAX_DOMS {
+        if domains.nr_doms() > MAX_DOMS {
             bail!(
                 "nr_doms ({}) is greater than MAX_DOMS ({})",
                 top.nr_cpus(),
@@ -914,31 +703,25 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        skel.rodata_mut().nr_doms = doms.len() as u32;
+        skel.rodata_mut().nr_doms = domains.nr_doms() as u32;
         skel.rodata_mut().nr_cpus = top.nr_cpus() as u32;
 
-        let mut cpu_dom_map = BTreeMap::new();
-        for (id, dom) in doms.iter() {
-            for cpu in dom.mask.clone().into_iter() {
-                cpu_dom_map.insert(cpu, *id);
-            }
-        }
         for cpu in 0..top.nr_cpus() {
-            let dom_id = cpu_dom_map.get(&cpu).unwrap();
+            let dom_id = domains.cpu_dom_id(cpu.clone()).unwrap();
             skel.rodata_mut().cpu_dom_id_map[cpu] =
-                (*dom_id).try_into().expect("Domain ID could not fit into 32 bits");
+                dom_id.clone().try_into().expect("Domain ID could not fit into 32 bits");
         }
 
-        for (dom_id, domain) in doms.iter() {
+        for (dom_id, domain) in domains.doms().iter() {
             let raw_cpus_slice = domain.mask_slice();
-            let dom_cpumask_slice = &mut skel.rodata_mut().dom_cpumasks[*dom_id];
+            let dom_cpumask_slice = &mut skel.rodata_mut().dom_cpumasks[dom_id.clone()];
             let (left, _) = dom_cpumask_slice.split_at_mut(raw_cpus_slice.len());
             left.clone_from_slice(raw_cpus_slice);
             info!(
                 "DOM[{:02}] cpumask{} ({} cpus)",
                 domain.id(),
                 &format_cpumask(dom_cpumask_slice, top.nr_cpus()),
-                domain.num_cpus()
+                domain.weight()
             );
         }
 
@@ -965,11 +748,6 @@ impl<'a> Scheduler<'a> {
         let proc_reader = procfs::ProcReader::new();
         let prev_total_cpu = read_total_cpu(&proc_reader)?;
 
-        let dom_group = Arc::new(DomainGroup {
-            doms,
-            cpu_dom_map,
-        });
-
         Ok(Self {
             skel,
             struct_ops, // should be held to keep it attached
@@ -980,7 +758,7 @@ impl<'a> Scheduler<'a> {
             balanced_kworkers: opts.balanced_kworkers,
 
             top: top.clone(),
-            dom_group: dom_group.clone(),
+            dom_group: domains.clone(),
             proc_reader,
 
             prev_at: Instant::now(),
@@ -988,7 +766,7 @@ impl<'a> Scheduler<'a> {
 
             nr_lb_data_errors: 0,
 
-            tuner: Tuner::new(top, dom_group, opts)?,
+            tuner: Tuner::new(top, domains, opts.direct_greedy_under, opts.kick_greedy_under)?,
         })
     }
 
@@ -1143,7 +921,7 @@ impl<'a> Scheduler<'a> {
             info!(
                 "DOM[{:02}] util={:6.2} load={:8.2} imbal={}",
                 i,
-                self.tuner.dom_utils[i] * 100.0,
+                self.tuner.dom_util(i) * 100.0,
                 dom_loads[i],
                 if imbal[i] == 0.0 {
                     format!("{:9.2}", 0.0)
@@ -1207,7 +985,7 @@ impl<'a> Scheduler<'a> {
                     next_tune_at = now + self.tune_interval;
                 }
             }
-            let lb_apply_weight = self.tuner.lb_apply_weight;
+            let lb_apply_weight = self.tuner.fully_utilized;
 
             if now >= next_sched_at {
                 self.lb_step(lb_apply_weight)?;
