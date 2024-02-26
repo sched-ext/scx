@@ -463,7 +463,7 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    fn lb_step(&mut self, lb_apply_weight: bool) -> Result<()> {
+    fn lb_step(&mut self) -> Result<()> {
         let started_at = Instant::now();
         let bpf_stats = self.read_bpf_stats()?;
         let cpu_busy = self.get_cpu_busy()?;
@@ -473,16 +473,12 @@ impl<'a> Scheduler<'a> {
             self.top.clone(),
             self.dom_group.clone(),
             self.balanced_kworkers,
-            lb_apply_weight.clone(),
+            self.tuner.fully_utilized.clone(),
+            self.balance_load.clone(),
             &mut self.nr_lb_data_errors,
         );
 
-        lb.read_dom_loads()?;
-        lb.calculate_dom_load_balance()?;
-
-        if self.balance_load {
-            lb.load_balance()?;
-        }
+        lb.load_balance()?;
 
         // Extract fields needed for reporting and drop lb to release
         // mutable borrows.
@@ -516,10 +512,9 @@ impl<'a> Scheduler<'a> {
                     next_tune_at = now + self.tune_interval;
                 }
             }
-            let lb_apply_weight = self.tuner.fully_utilized;
 
             if now >= next_sched_at {
-                self.lb_step(lb_apply_weight)?;
+                self.lb_step()?;
                 next_sched_at += self.sched_interval;
                 if next_sched_at < now {
                     next_sched_at = now + self.sched_interval;
