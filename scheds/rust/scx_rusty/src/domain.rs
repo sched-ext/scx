@@ -38,30 +38,33 @@ impl Domain {
 pub struct DomainGroup {
     doms: BTreeMap<usize, Domain>,
     cpu_dom_map: BTreeMap<usize, usize>,
+    dom_numa_map: BTreeMap<usize, usize>,
+    num_numa_nodes: usize,
 }
 
 impl DomainGroup {
     pub fn new(top: Arc<Topology>, cpumasks: &[String]) -> Result<Self> {
-        let doms = if !cpumasks.is_empty() {
+        let mut dom_numa_map = BTreeMap::new();
+        let (doms, num_numa_nodes) = if !cpumasks.is_empty() {
             let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
             let mut id = 0;
             for mask_str in cpumasks.iter() {
                 let mask = Cpumask::from_str(&mask_str)?;
-                doms.insert(id, Domain { id, mask });
+                doms.insert(id, Domain { id, mask, });
+                dom_numa_map.insert(id, 0);
                 id += 1;
             }
-            doms
+            (doms, 1)
         } else {
             let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
-            let mut id = 0;
-            for node in top.nodes().iter() {
-                for (_, llc) in node.llcs().iter() {
+            for (node_id, node) in top.nodes().iter().enumerate() {
+                for (id, llc) in node.llcs().iter() {
                     let mask = llc.span();
-                    doms.insert(id, Domain { id, mask });
-                    id += 1;
+                    doms.insert(*id, Domain { id: id.clone(), mask, });
+                    dom_numa_map.insert(*id, node_id.clone());
                 }
             }
-            doms
+            (doms, top.nodes().len())
         };
 
         let mut cpu_dom_map = BTreeMap::new();
@@ -71,7 +74,7 @@ impl DomainGroup {
             }
         }
 
-        Ok(Self { doms, cpu_dom_map, })
+        Ok(Self { doms, cpu_dom_map, dom_numa_map, num_numa_nodes, })
     }
 
     pub fn doms(&self) -> &BTreeMap<usize, Domain> {
@@ -82,7 +85,15 @@ impl DomainGroup {
         self.doms.len()
     }
 
-    pub fn cpu_dom_id(&self, cpu: usize) -> Option<usize> {
-        self.cpu_dom_map.get(&cpu).copied()
+    pub fn nr_nodes(&self) -> usize {
+        self.num_numa_nodes
+    }
+
+    pub fn cpu_dom_id(&self, cpu: &usize) -> Option<usize> {
+        self.cpu_dom_map.get(cpu).copied()
+    }
+
+    pub fn dom_numa_id(&self, dom_id: &usize) -> Option<usize> {
+        self.dom_numa_map.get(dom_id).copied()
     }
 }

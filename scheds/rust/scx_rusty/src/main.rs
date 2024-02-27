@@ -238,7 +238,7 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().nr_cpus = top.nr_cpus() as u32;
 
         for cpu in 0..top.nr_cpus() {
-            let dom_id = domains.cpu_dom_id(cpu.clone()).unwrap();
+            let dom_id = domains.cpu_dom_id(&cpu).unwrap();
             skel.rodata_mut().cpu_dom_id_map[cpu] =
                 dom_id.clone().try_into().expect("Domain ID could not fit into 32 bits");
         }
@@ -475,20 +475,21 @@ impl<'a> Scheduler<'a> {
             self.balanced_kworkers,
             self.tuner.fully_utilized.clone(),
             self.balance_load.clone(),
-            &mut self.nr_lb_data_errors,
         );
 
         lb.load_balance()?;
 
         // Extract fields needed for reporting and drop lb to release
         // mutable borrows.
-        let (load_avg, dom_loads, imbal) = (lb.load_avg, lb.dom_loads, lb.imbal);
+        let dom_load_avg = 0.0f64;
+        let dom_loads = vec![0.0f64; self.dom_group.nr_doms()];
+        let imbal = vec![0.0f64; self.dom_group.nr_doms()];
 
         self.report(
             &bpf_stats,
             cpu_busy,
             Instant::now().duration_since(started_at),
-            load_avg,
+            dom_load_avg,
             &dom_loads,
             &imbal,
         );

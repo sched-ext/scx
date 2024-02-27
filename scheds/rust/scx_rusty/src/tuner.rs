@@ -126,7 +126,7 @@ impl Tuner {
             // initialization and None CpuStat indicates the CPU has gone
             // down since then. Ignore both.
             if let (Some(dom), Some(curr), Some(prev)) = (
-                self.dom_group.cpu_dom_id(cpu),
+                self.dom_group.cpu_dom_id(&cpu),
                 curr_cpu_stats.get(&cpu32),
                 self.prev_cpu_stats.get(&cpu32),
             ) {
@@ -154,7 +154,7 @@ impl Tuner {
             // This could be implemented better.
             let update_dom_bits = |target: &mut [u64; 8], val: bool| {
                 for cpu in 0..self.top.nr_cpus() {
-                    if let Some(cdom) = self.dom_group.cpu_dom_id(cpu) {
+                    if let Some(cdom) = self.dom_group.cpu_dom_id(&cpu) {
                         if cdom == dom {
                             if val {
                                 target[cpu / 64] |= 1u64 << (cpu % 64);
