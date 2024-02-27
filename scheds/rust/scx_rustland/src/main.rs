@@ -472,8 +472,7 @@ impl<'a> Scheduler<'a> {
                     // Reset nr_queued and update nr_scheduled, to notify the dispatcher that
                     // queued tasks are drained, but there is still some work left to do in the
                     // scheduler.
-                    *self.bpf.nr_queued_mut() = 0;
-                    *self.bpf.nr_scheduled_mut() = self.task_pool.tasks.len() as u64;
+                    self.bpf.update_tasks(Some(0), Some(self.task_pool.tasks.len() as u64));
                     break;
                 }
                 Err(err) => {
@@ -532,10 +531,10 @@ impl<'a> Scheduler<'a> {
                 None => break,
             }
         }
-        // Reset nr_scheduled to notify the dispatcher that all the tasks received by the scheduler
-        // has been dispatched, so there is no reason to re-activate the scheduler, unless more
-        // tasks are queued.
-        self.bpf.skel.bss_mut().nr_scheduled = self.task_pool.tasks.len() as u64;
+        // Update nr_scheduled to notify the dispatcher that all the tasks received by the
+        // scheduler has been dispatched, so there is no reason to re-activate the scheduler,
+        // unless more tasks are queued.
+        self.bpf.update_tasks(None, Some(self.task_pool.tasks.len() as u64));
     }
 
     // Main scheduling function (called in a loop to periodically drain tasks from the queued list

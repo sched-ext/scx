@@ -56,9 +56,8 @@ impl<'a> Scheduler<'a> {
                     std::thread::yield_now();
                 }
                 Ok(None) => {
-                    // Notify the BPF component that all tasks have been dispatched.
-                    *self.bpf.nr_queued_mut() = 0;
-                    *self.bpf.nr_scheduled_mut() = 0;
+                    // Notify the BPF component that all tasks have been scheduled and dispatched.
+                    self.bpf.update_tasks(Some(0), Some(0));
 
                     // All queued tasks have been dipatched, add a short sleep to reduce
                     // scheduler's CPU consuption.

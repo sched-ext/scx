@@ -242,6 +242,23 @@ impl<'cb> BpfScheduler<'cb> {
         }
     }
 
+    // Update the amount of tasks that have been queued to the user-space scheduler and dispatched.
+    //
+    // This method is used to notify the BPF component if the user-space scheduler has still some
+    // pending actions to complete (based on the counter of queued and scheduled tasks).
+    //
+    // NOTE: do not set allow(dead_code) for this method, any scheduler must use this method at
+    // some point, otherwise the BPF component will keep waking-up the user-space scheduler in a
+    // busy loop, causing unnecessary high CPU consumption.
+    pub fn update_tasks(&mut self, nr_queued: Option<u64>, nr_scheduled: Option<u64>) {
+        if let Some(queued) = nr_queued {
+            self.skel.bss_mut().nr_queued = queued;
+        }
+        if let Some(scheduled) = nr_scheduled {
+            self.skel.bss_mut().nr_scheduled = scheduled;
+        }
+    }
+
     // Override the default scheduler time slice (in us).
     #[allow(dead_code)]
     pub fn set_effective_slice_us(&mut self, slice_us: u64) {
@@ -261,11 +278,13 @@ impl<'cb> BpfScheduler<'cb> {
     }
 
     // Counter of queued tasks.
+    #[allow(dead_code)]
     pub fn nr_queued_mut(&mut self) -> &mut u64 {
         &mut self.skel.bss_mut().nr_queued
     }
 
     // Counter of scheduled tasks.
+    #[allow(dead_code)]
     pub fn nr_scheduled_mut(&mut self) -> &mut u64 {
         &mut self.skel.bss_mut().nr_scheduled
     }

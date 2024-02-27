@@ -52,8 +52,7 @@ impl<'a> Scheduler<'a> {
             }
             Ok(None) => {
                 // Notify the BPF component that all tasks have been dispatched.
-                *self.bpf.nr_queued_mut() = 0;
-                *self.bpf.nr_scheduled_mut() = 0;
+                self.bpf.update_tasks(Some(0), Some(0))?
 
                 break;
             }
