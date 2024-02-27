@@ -1,3 +1,4 @@
 src/bpf/.output
+bpf.rs
 Cargo.lock
 target
