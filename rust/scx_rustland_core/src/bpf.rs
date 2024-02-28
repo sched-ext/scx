@@ -15,12 +15,11 @@ use libbpf_rs::skel::SkelBuilder as _;
 
 use libc::{sched_param, sched_setscheduler};
 
-mod alloc;
-use alloc::*;
-
 use scx_utils::init_libbpf_logging;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+
+use scx_rustland_core::ALLOCATOR;
 
 // Defined in UAPI
 const SCHED_EXT: i32 = 7;
@@ -31,7 +30,7 @@ const SCHED_EXT: i32 = 7;
 #[allow(dead_code)]
 pub const NO_CPU: i32 = -1;
 
-/// scx_rustland: provide high-level abstractions to interact with the BPF component.
+/// High-level Rust abstraction to interact with a generic sched-ext BPF component.
 ///
 /// Overview
 /// ========
@@ -40,7 +39,7 @@ pub const NO_CPU: i32 = -1;
 /// initialized it will take care of registering and initializing the BPF component.
 ///
 /// The scheduler then can use BpfScheduler() instance to receive tasks (in the form of QueuedTask
-/// object) and dispatch tasks (in the form of DispatchedTask objects), using respectively the
+/// objects) and dispatch tasks (in the form of DispatchedTask objects), using respectively the
 /// methods dequeue_task() and dispatch_task().
 ///
 /// The CPU ownership map can be accessed using the method get_cpu_pid(), this also allows to keep
@@ -51,85 +50,8 @@ pub const NO_CPU: i32 = -1;
 /// user-space scheduler has some pending work to do or not.
 ///
 /// Finally the methods exited() and shutdown_and_report() can be used respectively to test
+/// whether the BPF component exited, and to shutdown and report the exit message.
 /// whether the BPF component exited, and to shutdown and report exit message.
-///
-/// Example
-/// =======
-///
-/// Following you can find bare minimum template that can be used to implement a simple FIFO
-/// scheduler using the BPF abstraction:
-///
-/// mod bpf_skel;
-/// pub use bpf_skel::*;
-/// mod bpf;
-/// pub mod bpf_intf;
-/// use bpf::*;
-///
-/// use std::thread;
-///
-/// use std::sync::atomic::AtomicBool;
-/// use std::sync::atomic::Ordering;
-/// use std::sync::Arc;
-///
-/// use anyhow::Result;
-///
-/// struct Scheduler<'a> {
-///     bpf: BpfScheduler<'a>,
-/// }
-///
-/// impl<'a> Scheduler<'a> {
-///     fn init() -> Result<Self> {
-///         let bpf = BpfScheduler::init(20000, false, false)?;
-///         Ok(Self { bpf })
-///     }
-///
-///     fn dispatch_tasks(&mut self) {
-///         loop {
-///             match self.bpf.dequeue_task() {
-///                 Ok(Some(task)) => {
-///                     if task.cpu >= 0  {
-///                         let _ = self.bpf.dispatch_task(
-///                             &DispatchedTask {
-///                                 pid: task.pid,
-///                                 cpu: task.cpu,
-///                                 payload: 0,
-///                             }
-///                         );
-///                     }
-///                 }
-///                 Ok(None) => {
-///                     *self.bpf.nr_queued_mut() = 0;
-///                     *self.bpf.nr_scheduled_mut() = 0;
-///                     break;
-///                 }
-///                 Err(_) => {
-///                     break;
-///                 }
-///             }
-///         }
-///     }
-///
-///     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<()> {
-///         while !shutdown.load(Ordering::Relaxed) && !self.bpf.exited() {
-///             self.dispatch_tasks();
-///             thread::yield_now();
-///         }
-///
-///         Ok(())
-///     }
-/// }
-///
-/// fn main() -> Result<()> {
-///     let mut sched = Scheduler::init()?;
-///     let shutdown = Arc::new(AtomicBool::new(false));
-///     let shutdown_clone = shutdown.clone();
-///     ctrlc::set_handler(move || {
-///         shutdown_clone.store(true, Ordering::Relaxed);
-///     })?;
-///
-///     sched.run(shutdown)
-/// }
-///
 
 // Task queued for scheduling from the BPF component (see bpf_intf::queued_task_ctx).
 #[derive(Debug)]
@@ -241,16 +163,31 @@ impl<'cb> BpfScheduler<'cb> {
         ALLOCATOR.lock_memory();
 
         // Copy one item from the ring buffer.
+        //
+        // # Safety
+        //
+        // Each invocation of the callback will trigger the copy of exactly one QueuedTask item to
+        // BUF. The caller must be synchronize to ensure that multiple invocations of the callback
+        // are not happening at the same time, but this is implicitly guaranteed by the fact that
+        // the caller is a single-thread process (for now).
+        //
+        // Use of a `str` whose contents are not valid UTF-8 is undefined behavior.
         fn callback(data: &[u8]) -> i32 {
             unsafe {
+                // SAFETY: copying from the BPF ring buffer to BUF is safe, since the size of BUF
+                // is exactly the size of QueuedTask and the callback operates in chunks of
+                // QueuedTask items. It also copies exactly one QueuedTask at a time, this is
+                // guaranteed by the error code returned by this callback (see below). From a
+                // thread-safety perspective this is also correct, assuming the caller is a
+                // single-thread process (as it is for now).
                 BUF.0.copy_from_slice(data);
             }
 
             // Return an unsupported error to stop early and consume only one item.
             //
             // NOTE: this is quite a hack. I wish libbpf would honor stopping after the first item
-            // is consumed, upon returnin a non-zero positive value here, but it doesn't seem to be
-            // the case:
+            // is consumed, upon returning a non-zero positive value here, but it doesn't seem to
+            // be the case:
             //
             // https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/tools/lib/bpf/ringbuf.c?h=v6.8-rc5#n260
             //
@@ -305,6 +242,23 @@ impl<'cb> BpfScheduler<'cb> {
         }
     }
 
+    // Update the amount of tasks that have been queued to the user-space scheduler and dispatched.
+    //
+    // This method is used to notify the BPF component if the user-space scheduler has still some
+    // pending actions to complete (based on the counter of queued and scheduled tasks).
+    //
+    // NOTE: do not set allow(dead_code) for this method, any scheduler must use this method at
+    // some point, otherwise the BPF component will keep waking-up the user-space scheduler in a
+    // busy loop, causing unnecessary high CPU consumption.
+    pub fn update_tasks(&mut self, nr_queued: Option<u64>, nr_scheduled: Option<u64>) {
+        if let Some(queued) = nr_queued {
+            self.skel.bss_mut().nr_queued = queued;
+        }
+        if let Some(scheduled) = nr_scheduled {
+            self.skel.bss_mut().nr_scheduled = scheduled;
+        }
+    }
+
     // Override the default scheduler time slice (in us).
     #[allow(dead_code)]
     pub fn set_effective_slice_us(&mut self, slice_us: u64) {
@@ -324,11 +278,13 @@ impl<'cb> BpfScheduler<'cb> {
     }
 
     // Counter of queued tasks.
+    #[allow(dead_code)]
     pub fn nr_queued_mut(&mut self) -> &mut u64 {
         &mut self.skel.bss_mut().nr_queued
     }
 
     // Counter of scheduled tasks.
+    #[allow(dead_code)]
     pub fn nr_scheduled_mut(&mut self) -> &mut u64 {
         &mut self.skel.bss_mut().nr_scheduled
     }

@@ -1,0 +1,50 @@
+// Copyright (c) Andrea Righi <andrea.righi@canonical.com>
+
+// This software may be used and distributed according to the terms of the
+// GNU General Public License version 2.
+
+use anyhow::Result;
+
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
+
+use scx_utils::BpfBuilder;
+
+pub struct RustLandBuilder {
+    inner_builder: BpfBuilder,
+}
+
+impl RustLandBuilder {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            inner_builder: BpfBuilder::new()?,
+        })
+    }
+
+    fn create_file(&self, file_name: &str, content: &[u8]) {
+        let path = Path::new(file_name);
+        let mut file = File::create(&path).expect("Unable to create file");
+        file.write_all(content).expect("Unable to write to file");
+    }
+
+    pub fn build(&mut self) -> Result<()> {
+        // Embed the BPF source files.
+        let intf = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bpf/intf.h"));
+        let skel = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bpf/main.bpf.c"));
+        let bpf = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bpf.rs"));
+
+        // Generate BPF backend code (C).
+        self.create_file("intf.h", intf);
+        self.create_file("main.bpf.c", skel);
+
+        self.inner_builder.enable_intf("intf.h", "bpf_intf.rs");
+        self.inner_builder.enable_skel("main.bpf.c", "bpf");
+
+        // Generate user-space BPF connector code (Rust).
+        self.create_file("src/bpf.rs", bpf);
+
+        // Build the scheduler.
+        self.inner_builder.build()
+    }
+}

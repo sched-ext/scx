@@ -15,3 +15,4 @@ main.rs or \*.bpf.c files.
 - [scx_layered](scx_layered/README.md)
 - [scx_rusty](scx_rusty/README.md)
 - [scx_rustland](scx_rustland/README.md)
+- [scx_rlfifo](scx_rlfifo/README.md)

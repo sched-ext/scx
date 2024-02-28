@@ -18,10 +18,12 @@ hex = "0.4.3"
 lazy_static = "1.4"
 libbpf-cargo = "0.22"
 libbpf-rs = "0.22.0"
+buddy-alloc = "0.5.1"
 log = "0.4.17"
 regex = "1.10"
 sscanf = "0.4"
 tar = "0.4"
+walkdir = "2.4"
 version-compare = "0.1"
 
 [build-dependencies]

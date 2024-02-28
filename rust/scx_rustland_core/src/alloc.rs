@@ -15,7 +15,7 @@ const HEAP_SIZE: usize = 64 * 1024 * 1024; // 64M
 const LEAF_SIZE: usize = 64;
 
 #[repr(align(4096))]
-pub struct AlignedHeap<const N: usize>([u8; N]);
+struct AlignedHeap<const N: usize>([u8; N]);
 
 // Statically pre-allocated memory arena.
 static mut FAST_HEAP: AlignedHeap<FAST_HEAP_SIZE> = AlignedHeap([0u8; FAST_HEAP_SIZE]);
@@ -26,25 +26,25 @@ static mut HEAP: AlignedHeap<HEAP_SIZE> = AlignedHeap([0u8; HEAP_SIZE]);
 // To prevent potential deadlock conditions under heavy loads, any scheduler that delegates
 // scheduling decisions to user-space should avoid triggering page faults.
 //
-// To address this issue, replace the global allocator with a custom one (RustLandAllocator),
+// To address this issue, replace the global allocator with a custom one (UserAllocator),
 // designed to operate on a pre-allocated buffer. This, coupled with the memory locking achieved
 // through mlockall(), prevents page faults from occurring during the execution of the user-space
 // scheduler.
 #[cfg_attr(not(test), global_allocator)]
-pub static ALLOCATOR: RustLandAllocator = unsafe {
+pub static ALLOCATOR: UserAllocator = unsafe {
     let fast_param = FastAllocParam::new(FAST_HEAP.0.as_ptr(), FAST_HEAP_SIZE);
     let buddy_param = BuddyAllocParam::new(HEAP.0.as_ptr(), HEAP_SIZE, LEAF_SIZE);
-    RustLandAllocator {
+    UserAllocator {
         arena: NonThreadsafeAlloc::new(fast_param, buddy_param),
     }
 };
 
 // Main allocator class.
-pub struct RustLandAllocator {
-    pub arena: NonThreadsafeAlloc,
+pub struct UserAllocator {
+    arena: NonThreadsafeAlloc,
 }
 
-impl RustLandAllocator {
+impl UserAllocator {
     pub fn lock_memory(&self) {
         unsafe {
             VM.save();
@@ -75,7 +75,7 @@ impl RustLandAllocator {
 }
 
 // Override global allocator methods.
-unsafe impl GlobalAlloc for RustLandAllocator {
+unsafe impl GlobalAlloc for UserAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         self.arena.alloc(layout)
     }

@@ -1,0 +1,26 @@
+[package]
+name = "scx_rustland_core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Andrea Righi <andrea.righi@canonical.com>"]
+license = "GPL-2.0-only"
+repository = "https://github.com/sched-ext/scx"
+description = "Framework to implement sched_ext schedulers running in user space"
+
+include = [
+    "src/bpf/intf.h",
+    "src/bpf/main.bpf.c",
+    "src/bpf.rs",
+]
+
+[dependencies]
+anyhow = "1.0"
+libbpf-rs = "0.22.0"
+libc = "0.2.137"
+buddy-alloc = "0.5.1"
+scx_utils = { path = "../scx_utils", version = "0.6" }
+
+[build-dependencies]
+tar = "0.4"
+walkdir = "2.4"
+scx_utils = { path = "../scx_utils", version = "0.6" }

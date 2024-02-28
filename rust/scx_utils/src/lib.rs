@@ -35,6 +35,9 @@ mod bindings;
 mod bpf_builder;
 pub use bpf_builder::BpfBuilder;
 
+mod builder;
+pub use builder::Builder;
+
 pub mod ravg;
 
 mod libbpf_logger;

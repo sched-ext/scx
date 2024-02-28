@@ -4,15 +4,9 @@ This is a single user-defined scheduler used within [sched_ext](https://github.c
 
 ## Overview
 
-scx_rustland is made of a BPF component (dispatcher) that implements the low
-level sched-ext functionalities and a user-space counterpart (scheduler),
+scx_rustland is made of a BPF component (scx_rustland_core) that implements the
+low level sched-ext functionalities and a user-space counterpart (scheduler),
 written in Rust, that implements the actual scheduling policy.
-
-The BPF dispatcher is completely agnostic of the particular scheduling policy
-implemented in user-space. For this reason developers that are willing to use
-this scheduler to experiment scheduling policies should be able to simply
-modify the Rust component, without having to deal with any internal kernel /
-BPF details.
 
 ## How To Install
 
@@ -20,9 +14,14 @@ Available as a [Rust crate](https://crates.io/crates/scx_rustland): `cargo add s
 
 ## Typical Use Case
 
-scx_rustland is designed to be "easy to read" template that can be used by any
-developer to quickly experiment more complex scheduling policies, that can be
-fully implemented in Rust.
+scx_rustland is designed to prioritize interactive workloads over background
+CPU-intensive workloads. For this reason the typical use case of this scheduler
+involves low-latency interactive applications, such as gaming, video
+conferencing and live streaming.
+
+scx_rustland is also designed to be an "easy to read" template that can be used
+by any developer to quickly experiment more complex scheduling policies fully
+implemented in Rust.
 
 ## Production Ready?
 
@@ -32,20 +31,17 @@ with a certain cost.
 
 However, a scheduler entirely implemented in user-space holds the potential for
 seamless integration with sophisticated libraries, tracing tools, external
-services (e.g., AI), etc. Hence, there might be situations where the benefits
-outweigh the overhead, justifying the use of this scheduler in a production
-environment.
+services (e.g., AI), etc.
+
+Hence, there might be situations where the benefits outweigh the overhead,
+justifying the use of this scheduler in a production environment.
 
 ## Demo
 
 [scx_rustland-terraria](https://github.com/sched-ext/scx/assets/1051723/42ec3bf2-9f1f-4403-80ab-bf5d66b7c2d5)
 
-For this demo the scheduler includes an extra patch to impose a "time slice
-penalty" on new short-lived tasks. While this approach might not be suitable
-for general usage, it can yield significant advantages in this specific
-scenario.
-
-The key takeaway is to demonstrate the ease and safety of conducting
-experiments like this, as we operate in user-space, and we can accomplish
-everything simply by modifying the Rust code, that is completely abstracted
-from the underlying BPF/kernel internal details.
+The key takeaway of this demo is to demonstrate that , despite the overhead of
+running a scheduler in user-space, we can still obtain interesting results and,
+in this particular case, even outperform the default Linux scheduler (EEVDF) in
+terms of application responsiveness (fps), while a CPU intensive workload
+(parallel kernel build) is running in the background.

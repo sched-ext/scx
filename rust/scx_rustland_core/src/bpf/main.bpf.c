@@ -1,19 +1,13 @@
 /* Copyright (c) Andrea Righi <andrea.righi@canonical.com> */
 /*
- * scx_rustland: simple user-space scheduler written in Rust
+ * scx_rustland_core: BPF backend for schedulers running in user-space.
  *
- * The main goal of this scheduler is be an "easy to read" template that can be
- * used to quickly test more complex scheduling policies. For this reason this
- * scheduler is mostly focused on simplicity and code readability.
+ * This BPF backend implements the low level sched-ext functionalities for a
+ * user-space counterpart, that implements the actual scheduling policy.
  *
- * The scheduler is made of a BPF component (dispatcher) that implements the
- * low level sched-ext functionalities and a user-space counterpart
- * (scheduler), written in Rust, that implements the actual scheduling policy.
- *
- * The BPF dispatcher collects total cputime and weight from the tasks that
- * need to run, then it sends all details to the user-space scheduler that
- * decides the best order of execution of the tasks (based on the collected
- * metrics).
+ * The BPF part collects total cputime and weight from the tasks that need to
+ * run, then it sends all details to the user-space scheduler that decides the
+ * best order of execution of the tasks (based on the collected metrics).
  *
  * The user-space scheduler then returns to the BPF component the list of tasks
  * to be dispatched in the proper order.
