@@ -3,7 +3,7 @@ option('bpf_clang', type: 'string', value: 'clang',
 option('bpftool', type: 'string', value: 'bpftool',
        description: 'bpftool to use when generating .bpf.skel.h')
 option('libbpf_a', type: 'string',
-       description: 'Static libbpf.a to use')
+       description: 'Static libbpf.a to use. Default is to use the one inside the libbpf submodule. Set this option to "disabled" to link libbpf dynamically.')
 option('libbpf_h', type: 'array',
        description: 'libbpf header directories, only meaningful with libbpf_a option')
 option('cargo', type: 'string', value: 'cargo',

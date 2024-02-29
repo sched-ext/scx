@@ -44,9 +44,21 @@ elif bpf_clang_maj < 17
           .format(bpf_clang.full_path(), bpf_clang_ver))
 endif
 
-if get_option('libbpf_a') != ''
+libbpf_a = '@0@/libbpf/src/libbpf.a'.format(meson.current_source_dir())
+
+if get_option('libbpf_a') == 'disabled'
+  libbpf_a = ''
+elif get_option('libbpf_a') != ''
+  libbpf_a = get_option('libbpf_a')
+endif
+
+if libbpf_a != ''
+  if not fs.exists(libbpf_a)
+    error('@0@ does not exist. You need to build/make libbpf.'.format(libbpf_a))
+  endif
+
   libbpf_dep = [declare_dependency(
-    link_args: get_option('libbpf_a'),
+    link_args: libbpf_a,
     include_directories: get_option('libbpf_h')),
     cc.find_library('elf'),
     cc.find_library('z'),
@@ -98,7 +110,7 @@ message('cpu=@0@ bpf_base_cflags=@1@'.format(cpu, bpf_base_cflags))
 
 libbpf_c_headers = []
 
-if get_option('libbpf_a') != ''
+if libbpf_a != ''
   foreach header: get_option('libbpf_h')
     libbpf_c_headers += ['-I', header]
   endforeach
@@ -139,14 +151,14 @@ foreach flag: bpf_base_cflags
   cargo_env.append('BPF_BASE_CFLAGS', flag, separator: ' ')
 endforeach
 
-if get_option('libbpf_a') != ''
+if libbpf_a != ''
   foreach header: get_option('libbpf_h')
     cargo_env.append('BPF_EXTRA_CFLAGS_PRE_INCL', '-I' + header, separator: ' ')
   endforeach
 
   cargo_env.append('RUSTFLAGS',
                    '-C link-args=-lelf -C link-args=-lz -C link-args=-lzstd -L '
-                   + fs.parent(get_option('libbpf_a')))
+                   + fs.parent(libbpf_a))
 
   #
   # XXX - scx_rusty's original Cargo.toml contained a dependency matching
