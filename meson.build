@@ -130,6 +130,11 @@ endif
 cargo_env = environment()
 cargo_env.set('BPF_CLANG', bpf_clang.full_path())
 
+#
+# Limit the maximum amount of parallel builds for the Rust schedulers.
+#
+cargo_env.set('CARGO_BUILD_JOBS', '1')
+
 foreach flag: bpf_base_cflags
   cargo_env.append('BPF_BASE_CFLAGS', flag, separator: ' ')
 endforeach
