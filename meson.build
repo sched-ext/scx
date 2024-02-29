@@ -28,6 +28,8 @@ get_sys_incls = find_program(join_paths(meson.current_source_dir(),
                                         'meson-scripts/get_sys_incls'))
 test_sched  = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/test_sched'))
+build_libbpf = find_program(join_paths(meson.current_source_dir(),
+                                      'meson-scripts/build_libbpf'))
 if enable_rust
   cargo_fetch = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/cargo_fetch'))
@@ -44,9 +46,64 @@ elif bpf_clang_maj < 17
           .format(bpf_clang.full_path(), bpf_clang_ver))
 endif
 
-if get_option('libbpf_a') != ''
+libbpf_path = '@0@/libbpf/src'.format(meson.current_source_dir())
+libbpf_a = '@0@/libbpf.a'.format(libbpf_path)
+should_build_libbpf = true
+
+if get_option('libbpf_a') == 'disabled'
+  libbpf_a = ''
+  should_build_libbpf = false
+elif get_option('libbpf_a') != ''
+  libbpf_a = get_option('libbpf_a')
+  if not fs.exists(libbpf_a)
+    error('@0@ does not exist.'.format(libbpf_a))
+  endif
+  should_build_libbpf = false
+endif
+
+# WARNING! To build libbpf with the same compiler(CC) and CFLAGS
+# as the schedulers we need to do this hack whereby we create a dummy exe
+# then read the compiler and args from meson's compile_commands.json
+# and re-set them when we build libbpf with make
+if should_build_libbpf
+  jq = find_program('jq')
+  make = find_program('make')
+  nproc = find_program('nproc')
+
+  if not jq.found() or not make.found()
+    error('To build the libbpf library "make" and "jq" are required')
+  endif
+
+  message('Updating libbpf submodule')
+  run_command('git', 'submodule', 'update', '--init', '--recursive', check: true)
+  # make sure it's clean
+  run_command('git', 'submodule', 'foreach', '--recursive', 'git', 'clean', '-xfd', check: true)
+
+  # setup the build target
+  executable('cc_cflags_probe', 'meson-scripts/cc_cflags_probe.c', install: false)
+
+  make_jobs = 1
+  if nproc.found()
+    make_jobs = run_command(nproc, check: true).stdout().to_int()
+  endif
+
+  libbpf = custom_target('libbpf',
+              output: '@PLAINNAME@.__PHONY__',
+              input: 'meson-scripts/cc_cflags_probe.c',
+              command: [build_libbpf, jq, make, libbpf_path, '@0@'.format(make_jobs)],
+              build_by_default: true)
+else
+  # this is a noop when we're not building libbpf ourselves
+  libbpf = custom_target('libbpf',
+              output: '@PLAINNAME@.__PHONY__',
+              input: 'meson-scripts/cc_cflags_probe.c',
+              command: ['echo'],
+              build_by_default: true)
+endif
+
+if libbpf_a != ''
   libbpf_dep = [declare_dependency(
-    link_args: get_option('libbpf_a'),
+    link_args: libbpf_a,
     include_directories: get_option('libbpf_h')),
     cc.find_library('elf'),
     cc.find_library('z'),
@@ -98,7 +155,7 @@ message('cpu=@0@ bpf_base_cflags=@1@'.format(cpu, bpf_base_cflags))
 
 libbpf_c_headers = []
 
-if get_option('libbpf_a') != ''
+if libbpf_a != ''
   foreach header: get_option('libbpf_h')
     libbpf_c_headers += ['-I', header]
   endforeach
@@ -109,10 +166,12 @@ endif
 #
 gen_bpf_o = generator(bpf_clang,
                       output: '@BASENAME@.o',
+                      depends: [libbpf],
                       arguments: [bpf_base_cflags, '-target', 'bpf', libbpf_c_headers, '@EXTRA_ARGS@',
                                   '-c', '@INPUT@', '-o', '@OUTPUT@'])
 gen_bpf_skel = generator(bpftool_build_skel,
-                         output: ['@BASENAME@.skel.h', '@BASENAME@.subskel.h' ],
+                         output: ['@BASENAME@.skel.h','@BASENAME@.subskel.h' ],
+                         depends: [libbpf],
                          arguments: [bpftool.full_path(), '@INPUT@', '@OUTPUT0@', '@OUTPUT1@'])
 
 #
@@ -134,14 +193,14 @@ foreach flag: bpf_base_cflags
   cargo_env.append('BPF_BASE_CFLAGS', flag, separator: ' ')
 endforeach
 
-if get_option('libbpf_a') != ''
+if libbpf_a != ''
   foreach header: get_option('libbpf_h')
     cargo_env.append('BPF_EXTRA_CFLAGS_PRE_INCL', '-I' + header, separator: ' ')
   endforeach
 
   cargo_env.append('RUSTFLAGS',
                    '-C link-args=-lelf -C link-args=-lz -C link-args=-lzstd -L '
-                   + fs.parent(get_option('libbpf_a')))
+                   + fs.parent(libbpf_a))
 
   #
   # XXX - scx_rusty's original Cargo.toml contained a dependency matching

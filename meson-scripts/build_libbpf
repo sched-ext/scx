@@ -1,0 +1,21 @@
+#!/bin/bash
+
+set -e
+
+out=$("$1" 'map(select(.["file"] | contains ("cc_cflags_probe.c"))) | first | .["command"]' < compile_commands.json)
+out=${out#\"}
+out=${out%\"}
+args=($out)
+
+cc=${args[0]}
+declare -a cflags=()
+
+for arg in ${args[@]:1}; do
+    case $arg in
+	-I*|-M*|-o|-c) ;;
+	-*) cflags+="$arg ";;
+    esac
+done
+
+make_out=$(env CC="$cc" CFLAGS="$cflags" "$2" -C "$3" -j"$4")
+exit $?
