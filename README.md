@@ -198,7 +198,7 @@ repo](https://mesonbuild.com/Quick-guide.html#installation-from-source) and call
   standard utilities including `awk`.
 - `clang`: >=16 required, >=17 recommended
 - `libbpf`: >=1.2.2 required, >=1.3 recommended (`RESIZE_ARRAY` support is
-  new in 1.3)
+  new in 1.3). It's preferred to link statically against the source from the libbpf git submodule.
 - Rust toolchain: >=1.72
 - `libelf`, `libz`, `libzstd` if linking against staic `libbpf.a`
 - `bpftool` (usually available in `linux-tools-common`)
@@ -210,9 +210,21 @@ repo](https://mesonbuild.com/Quick-guide.html#installation-from-source) and call
 commands in the root of the tree builds and installs all schedulers under
 `~/bin`.
 
-```
+#### Static linking against libbpf submodule (preferred)
+
+ ```
 $ cd $SCX
 $ meson setup build --prefix ~
+$ meson compile -C build
+$ meson install -C build
+```
+
+Note: `meson setup` will also fetch the libbpf submodule and `meson compile` will build it.
+
+#### Dynamic linking against libbpf
+```
+$ cd $SCX
+$ meson setup build --prefix ~ -D libbpf_a=disabled
 $ meson compile -C build
 $ meson install -C build
 ```
@@ -276,7 +288,7 @@ options can be used in such cases.
 
 - `bpf_clang`: `clang` to use when compiling `.bpf.c`
 - `bpftool`: `bpftool` to use when generating `.bpf.skel.h`
-- `libbpf_a`: Static `libbpf.a` to use
+- `libbpf_a`: Static `libbpf.a` to use. Set this to "disabled" to link libbpf dynamically
 - `libbpf_h`: `libbpf` header directories, only meaningful with `libbpf_a` option
 - `cargo`: `cargo` to use when building rust sub-projects
 - 'cargo_home': 'CARGO_HOME env to use when invoking cargo'
