@@ -169,10 +169,8 @@ impl TaskInfoMap {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 struct Task {
-    pid: i32,         // pid that uniquely identifies a task
-    cpu: i32,         // CPU where the task is running
-    cpumask_cnt: u64, // cpumask generation counter
-    vruntime: u64,    // total vruntime (that determines the order how tasks are dispatched)
+    qtask: QueuedTask, // queued task
+    vruntime: u64,     // total vruntime (that determines the order how tasks are dispatched)
 }
 
 // Make sure tasks are ordered by vruntime, if multiple tasks have the same vruntime order by pid.
@@ -180,19 +178,7 @@ impl Ord for Task {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.vruntime
             .cmp(&other.vruntime)
-            .then_with(|| self.pid.cmp(&other.pid))
-    }
-}
-
-// Convert Task to DispatchedTask used by the dispatcher.
-impl Task {
-    pub fn to_dispatched_task(&self) -> DispatchedTask {
-        DispatchedTask {
-            pid: self.pid,
-            cpu: self.cpu,
-            cpumask_cnt: self.cpumask_cnt,
-            slice_ns: 0 /* always use default time slice */,
-        }
+            .then_with(|| self.qtask.pid.cmp(&other.qtask.pid))
     }
 }
 
@@ -216,19 +202,19 @@ impl TaskTree {
     // with the same vruntime will be sorted by pid).
     fn push(&mut self, task: Task) {
         // Check if task already exists.
-        if let Some(prev_task) = self.task_map.get(&task.pid) {
+        if let Some(prev_task) = self.task_map.get(&task.qtask.pid) {
             self.tasks.remove(prev_task);
         }
 
         // Insert/update task.
         self.tasks.insert(task.clone());
-        self.task_map.insert(task.pid, task);
+        self.task_map.insert(task.qtask.pid, task);
     }
 
     // Pop the first item from the BTreeSet (item with the smallest vruntime).
     fn pop(&mut self) -> Option<Task> {
         if let Some(task) = self.tasks.pop_first() {
-            self.task_map.remove(&task.pid);
+            self.task_map.remove(&task.qtask.pid);
             Some(task)
         } else {
             None
@@ -462,9 +448,7 @@ impl<'a> Scheduler<'a> {
 
                     // Insert task in the task pool (ordered by vruntime).
                     self.task_pool.push(Task {
-                        pid: task.pid,
-                        cpu: task.cpu,
-                        cpumask_cnt: task.cpumask_cnt,
+                        qtask: task,
                         vruntime,
                     });
                 }
@@ -505,18 +489,19 @@ impl<'a> Scheduler<'a> {
         // dispatched earlier, mitigating potential priority inversion issues.
         for _ in 0..self.nr_idle_cpus() {
             match self.task_pool.pop() {
-                Some(mut task) => {
+                Some(task) => {
                     // Update global minimum vruntime.
                     self.min_vruntime = task.vruntime;
 
                     // If built-in idle selection logic is disabled, dispatch on the first CPU
                     // available.
+                    let mut dispatched_task = DispatchedTask::new(&task.qtask);
                     if !self.builtin_idle {
-                        task.cpu = NO_CPU;
+                        dispatched_task.set_cpu(NO_CPU);
                     }
 
                     // Send task to the BPF dispatcher.
-                    match self.bpf.dispatch_task(&task.to_dispatched_task()) {
+                    match self.bpf.dispatch_task(&dispatched_task) {
                         Ok(_) => {}
                         Err(_) => {
                             /*

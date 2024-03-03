@@ -54,23 +54,50 @@ pub const NO_CPU: i32 = -1;
 /// whether the BPF component exited, and to shutdown and report exit message.
 
 // Task queued for scheduling from the BPF component (see bpf_intf::queued_task_ctx).
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct QueuedTask {
     pub pid: i32,              // pid that uniquely identifies a task
     pub cpu: i32,              // CPU where the task is running (-1 = exiting)
-    pub cpumask_cnt: u64,      // cpumask generation counter
     pub sum_exec_runtime: u64, // Total cpu time
     pub nvcsw: u64,            // Voluntary context switches
     pub weight: u64,           // Task static priority
+    cpumask_cnt: u64,          // cpumask generation counter (private)
 }
 
 // Task queued for dispatching to the BPF component (see bpf_intf::dispatched_task_ctx).
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct DispatchedTask {
-    pub pid: i32,         // pid that uniquely identifies a task
-    pub cpu: i32,         // target CPU selected by the scheduler
-    pub cpumask_cnt: u64, // cpumask generation counter
-    pub slice_ns: u64,    // time slice assigned to the task (0 = default)
+    pid: i32,             // pid that uniquely identifies a task
+    cpu: i32,             // target CPU selected by the scheduler
+    slice_ns: u64,        // time slice assigned to the task (0 = default)
+    cpumask_cnt: u64,     // cpumask generation counter (private)
+}
+
+impl DispatchedTask {
+    // Create a DispatchedTask from a QueuedTask.
+    //
+    // A dispatched task should be always originated from a QueuedTask (there is no reason to
+    // dispatch a task if it wasn't queued to the scheduler earlier).
+    pub fn new(task: &QueuedTask) -> Self {
+        DispatchedTask {
+            pid: task.pid,
+            cpu: task.cpu,
+            cpumask_cnt: task.cpumask_cnt,
+            slice_ns: 0 // use default time slice
+        }
+    }
+
+    // Assign a specific CPU to a task.
+    #[allow(dead_code)]
+    pub fn set_cpu(&mut self, cpu: i32) {
+        self.cpu = cpu;
+    }
+
+    // Assign a specific time slice to a task.
+    #[allow(dead_code)]
+    pub fn set_slice_ns(&mut self, slice_ns: u64) {
+        self.slice_ns = slice_ns;
+    }
 }
 
 // Message received from the dispatcher (see bpf_intf::queued_task_ctx for details).
