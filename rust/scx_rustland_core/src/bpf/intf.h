@@ -43,10 +43,6 @@ struct queued_task_ctx {
 /*
  * Task sent to the BPF dispatcher by the user-space scheduler.
  *
- * This structure has a payload that can be used by the user-space scheduler to
- * send debugging information to the BPF dispatcher (i.e., vruntime, etc.),
- * depending on the particular scheduler implementation.
- *
  * This struct can be easily extended to send more information to the
  * dispatcher (i.e., a target CPU, a variable time slice, etc.).
  */
@@ -54,7 +50,7 @@ struct dispatched_task_ctx {
 	s32 pid;
 	s32 cpu; /* CPU where the task should be dispatched */
 	u64 cpumask_cnt; /* cpumask generation counter */
-	u64 payload; /* Task payload */
+	u64 slice_ns; /* time slice assigned to the task (0=default) */
 };
 
 #endif /* __INTF_H */

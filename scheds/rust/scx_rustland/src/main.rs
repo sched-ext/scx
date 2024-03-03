@@ -191,7 +191,7 @@ impl Task {
             pid: self.pid,
             cpu: self.cpu,
             cpumask_cnt: self.cpumask_cnt,
-            payload: self.vruntime,
+            slice_ns: 0 /* always use default time slice */,
         }
     }
 }

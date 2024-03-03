@@ -46,7 +46,7 @@ impl<'a> Scheduler<'a> {
                         pid: task.pid,
                         cpu: task.cpu,
                         cpumask_cnt: task.cpumask_cnt,
-                        payload: 0,
+                        slice_ns: 0,
                     });
                 }
             }

@@ -70,7 +70,7 @@ pub struct DispatchedTask {
     pub pid: i32,         // pid that uniquely identifies a task
     pub cpu: i32,         // target CPU selected by the scheduler
     pub cpumask_cnt: u64, // cpumask generation counter
-    pub payload: u64,     // task payload (used for debugging)
+    pub slice_ns: u64,    // time slice assigned to the task (0 = default)
 }
 
 // Message received from the dispatcher (see bpf_intf::queued_task_ctx for details).
@@ -113,7 +113,7 @@ impl DispatchedMessage {
             pid: task.pid,
             cpu: task.cpu,
             cpumask_cnt: task.cpumask_cnt,
-            payload: task.payload,
+            slice_ns: task.slice_ns,
         };
         DispatchedMessage {
             inner: dispatched_task_struct,

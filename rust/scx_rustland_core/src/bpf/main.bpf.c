@@ -317,10 +317,12 @@ static u64 cpu_to_dsq(s32 cpu)
  * Dispatch a task to a target DSQ, waking up the corresponding CPU, if needed.
  */
 static void
-dispatch_task(struct task_struct *p, u64 dsq_id, u64 cpumask_cnt, u64 enq_flags)
+dispatch_task(struct task_struct *p, u64 dsq_id,
+	      u64 cpumask_cnt, u64 task_slice_ns, u64 enq_flags)
 {
 	struct task_ctx *tctx;
-	u64 slice = __sync_fetch_and_add(&effective_slice_ns, 0) ? : slice_ns;
+	u64 slice = task_slice_ns ? :
+		__sync_fetch_and_add(&effective_slice_ns, 0) ? : slice_ns;
 	u64 curr_cpumask_cnt;
 	bool force_shared = false;
 	s32 cpu;
@@ -416,7 +418,7 @@ static void dispatch_user_scheduler(void)
 	 * Dispatch the scheduler on the first CPU available, likely the
 	 * current one.
 	 */
-	dispatch_task(p, SHARED_DSQ, 0, 0);
+	dispatch_task(p, SHARED_DSQ, 0, 0, 0);
 	bpf_task_release(p);
 }
 
@@ -444,7 +446,7 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 * Using SCX_DSQ_LOCAL ensures that the task will be executed
 		 * directly on the CPU returned by this function.
 		 */
-		dispatch_task(p, SCX_DSQ_LOCAL, 0, 0);
+		dispatch_task(p, SCX_DSQ_LOCAL, 0, 0, 0);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	}
 
@@ -514,7 +516,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * long (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
-		dispatch_task(p, SCX_DSQ_LOCAL, 0, enq_flags);
+		dispatch_task(p, SCX_DSQ_LOCAL, 0, 0, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -530,7 +532,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	task = bpf_ringbuf_reserve(&queued, sizeof(*task), 0);
 	if (!task) {
 		sched_congested(p);
-		dispatch_task(p, SHARED_DSQ, 0, enq_flags);
+		dispatch_task(p, SHARED_DSQ, 0, 0, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -588,12 +590,13 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		 * the task to the shared DSQ and rely on the built-in idle CPU
 		 * selection.
 		 */
-		dbg_msg("usersched: pid=%d cpu=%d cpumask_cnt=%llu payload=%llu",
-			task.pid, task.cpu, task.cpumask_cnt, task.payload);
+		dbg_msg("usersched: pid=%d cpu=%d cpumask_cnt=%llu slice_ns=%llu",
+			task.pid, task.cpu, task.cpumask_cnt, task.slice_ns);
 		if (task.cpu < 0)
-			dispatch_task(p, SHARED_DSQ, 0, 0);
+			dispatch_task(p, SHARED_DSQ, 0, task.slice_ns, 0);
 		else
-			dispatch_task(p, cpu_to_dsq(task.cpu), task.cpumask_cnt, 0);
+			dispatch_task(p, cpu_to_dsq(task.cpu), task.cpumask_cnt,
+				      task.slice_ns, 0);
 		bpf_task_release(p);
 		__sync_fetch_and_add(&nr_user_dispatches, 1);
 	}
