@@ -45,12 +45,7 @@ impl<'a> Scheduler<'a> {
                     // task.cpu < 0 is used to to notify an exiting task, in this
                     // case we can simply ignore the task.
                     if task.cpu >= 0 {
-                        let _ = self.bpf.dispatch_task(&DispatchedTask {
-                            pid: task.pid,
-                            cpu: task.cpu,
-                            cpumask_cnt: task.cpumask_cnt,
-                            payload: 0,
-                        });
+                        let _ = self.bpf.dispatch_task(&DispatchedTask::new(&task));
                     }
                     // Give the task a chance to run and prevent overflowing the dispatch queue.
                     std::thread::yield_now();
