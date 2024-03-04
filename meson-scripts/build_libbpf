@@ -7,10 +7,16 @@ out=${out#\"}
 out=${out%\"}
 args=($out)
 
-cc=${args[0]}
+idx=0
+cc=${args[idx]}
+if [ "$cc" = "ccache" ]; then
+    idx=$((idx+1))
+    cc="$cc ${args[idx]}"
+fi
+
 declare -a cflags=()
 
-for arg in ${args[@]:1}; do
+for arg in ${args[@]:(idx+1)}; do
     case $arg in
 	-I*|-M*|-o|-c) ;;
 	-*) cflags+="$arg ";;
