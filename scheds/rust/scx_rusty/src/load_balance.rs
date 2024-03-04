@@ -92,8 +92,20 @@
 //! Statistics
 //! ----------
 //!
-//! Load balancing statistics are currently not exported from the LoadBalancer
-//! object. This will be added in a future commit.
+//! After load balancing has occurred, statistics may be queried by invoking
+//! the get_stats() function on the LoadBalancer object:
+//!
+//! ```
+//! let lb = LoadBalancer::new(...)?;
+//! lb.load_balance()?;
+//!
+//! let stats = lb.get_stats();
+//! ...
+//! ```
+//!
+//! Statistics are exported as a vector of NumaStat objects, which each
+//! contains load balancing statistics for that NUMA node, as well as
+//! statistics for any Domains contained therein as DomainStat objects.
 //!
 //! Future Improvements
 //! -------------------
@@ -125,6 +137,7 @@ use crate::bpf_intf;
 use crate::DomainGroup;
 
 use std::cell::Cell;
+use std::fmt;
 use std::sync::Arc;
 
 use anyhow::bail;
@@ -210,13 +223,14 @@ impl dyn LoadOrdered {
     }
 }
 
-#[derive(Debug)]
-struct LoadEntity {
+#[derive(Debug, Clone)]
+pub struct LoadEntity {
     cost_ratio: f64,
     push_max_ratio: f64,
     xfer_ratio: f64,
     load_sum: OrderedFloat<f64>,
     load_avg: f64,
+    load_delta: f64,
     bal_state: BalanceState,
 }
 
@@ -232,16 +246,29 @@ impl LoadEntity {
             xfer_ratio,
             load_sum: OrderedFloat(load_sum),
             load_avg,
+            load_delta: 0.0f64,
             bal_state: BalanceState::Balanced,
         }
     }
 
-    fn load_sum(&self) -> f64 {
+    pub fn load_sum(&self) -> f64 {
         *self.load_sum
     }
 
-    fn imbal(&self) -> f64 {
+    pub fn load_avg(&self) -> f64 {
+        self.load_avg
+    }
+
+    pub fn imbal(&self) -> f64 {
         self.load_sum() - self.load_avg
+    }
+
+    pub fn delta(&self) -> f64 {
+        self.load_delta
+    }
+
+    fn state(&self) -> BalanceState {
+        self.bal_state
     }
 
     fn rebalance(&mut self, new_load: f64) {
@@ -263,14 +290,11 @@ impl LoadEntity {
 
     fn add_load(&mut self, delta: f64) {
         self.rebalance(self.load_sum() + delta);
+        self.load_delta += delta;
     }
 
     fn push_cutoff(&self) -> f64 {
         self.imbal().abs() * self.push_max_ratio
-    }
-
-    fn state(&self) -> BalanceState {
-        self.bal_state
     }
 
     fn xfer_between(&self, other: &LoadEntity) -> f64 {
@@ -358,6 +382,7 @@ impl LoadOrdered for Domain {
 impl_ord_for_type!(Domain);
 
 struct NumaNode {
+    id: usize,
     load: LoadEntity,
     push_domains: SortedVec<Domain>,
     pull_domains: SortedVec<Domain>,
@@ -369,8 +394,9 @@ impl NumaNode {
     const LOAD_IMBAL_XFER_TARGET_RATIO: f64 = 0.50;
     const LOAD_IMBAL_PUSH_MAX_RATIO: f64 = 0.50;
 
-    fn new(numa_load_avg: f64) -> Self {
+    fn new(id: usize, numa_load_avg: f64) -> Self {
         Self {
+            id,
             load: LoadEntity::new(NumaNode::LOAD_IMBAL_HIGH_RATIO,
                                   NumaNode::LOAD_IMBAL_PUSH_MAX_RATIO,
                                   NumaNode::LOAD_IMBAL_XFER_TARGET_RATIO,
@@ -393,8 +419,7 @@ impl NumaNode {
         let domain = Domain::new(id, load, dom_load_avg);
 
         self.insert_domain(domain);
-
-        self.load.add_load(load);
+        self.load.rebalance(self.load.load_sum() + load);
     }
 
     fn xfer_between(&self, other: &NumaNode) -> f64 {
@@ -415,6 +440,41 @@ impl NumaNode {
             }
         }
     }
+
+    fn update_load(&mut self, delta: f64) {
+        self.load.add_load(delta);
+    }
+
+    fn numa_stat(&self) -> NumaStat {
+        let mut n_stat = NumaStat {
+            id: self.id,
+            load: self.load.clone(),
+            domains: Vec::new(),
+        };
+
+        for dom in self.push_domains.iter(){
+            n_stat.domains.push(DomainStat {
+                id: dom.id,
+                load: dom.load.clone(),
+            });
+        }
+
+        for dom in self.pull_domains.iter(){
+            n_stat.domains.push(DomainStat {
+                id: dom.id,
+                load: dom.load.clone(),
+            });
+        }
+
+        for dom in self.balanced_domains.iter(){
+            n_stat.domains.push(DomainStat {
+                id: dom.id,
+                load: dom.load.clone(),
+            });
+        }
+
+        n_stat
+    }
 }
 
 impl LoadOrdered for NumaNode {
@@ -423,6 +483,40 @@ impl LoadOrdered for NumaNode {
     }
 }
 impl_ord_for_type!(NumaNode);
+
+pub struct DomainStat {
+    pub id: usize,
+    pub load: LoadEntity,
+}
+
+fn fmt_balance_stat(f: &mut fmt::Formatter<'_>,
+                    load: &LoadEntity, preamble: String) -> fmt::Result {
+    let imbal = load.imbal();
+    let load_sum = load.load_sum();
+    let load_delta = load.delta();
+    let get_fmt = |num: f64| if num >= 0.0f64 { format!("{:+4.2}", num) } else { format!("{:4.2}", num) };
+
+    write!(f, "{} load={:4.2} imbal={:4.2} load_delta={:4.2}",
+           preamble, load_sum, get_fmt(imbal), get_fmt(load_delta))
+}
+
+impl fmt::Display for DomainStat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_balance_stat(f, &self.load, format!("  DOMAIN[{:02}]", self.id))
+    }
+}
+
+pub struct NumaStat {
+    pub id: usize,
+    pub load: LoadEntity,
+    pub domains: Vec<DomainStat>,
+}
+
+impl fmt::Display for NumaStat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt_balance_stat(f, &self.load, format!("NODE[{:02}]", self.id))
+    }
+}
 
 pub struct LoadBalancer<'a, 'b> {
     skel: &'a mut BpfSkel<'b>,
@@ -462,6 +556,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             push_nodes: SortedVec::new(),
             pull_nodes: SortedVec::new(),
             balanced_nodes: Vec::new(),
+
             lb_apply_weight: lb_apply_weight.clone(),
             balance_load,
 
@@ -479,7 +574,25 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         if self.balance_load {
             self.perform_balancing()?
         }
+
         Ok(())
+    }
+
+    pub fn get_stats(&self) -> Vec<NumaStat> {
+        let push_len = self.push_nodes.len();
+        let pull_len = self.pull_nodes.len();
+
+        if push_len > 0 || pull_len > 0 {
+            panic!("Expected only balanced nodes, got {} pushed, {} pulled",
+                   push_len, pull_len);
+        }
+
+        let mut numa_stats = Vec::with_capacity(self.dom_group.nr_nodes());
+        for node in self.balanced_nodes.iter() {
+            numa_stats.push(node.numa_stat());
+        }
+
+        numa_stats
     }
 
     fn create_domain_hierarchy(&mut self) -> Result<()> {
@@ -496,8 +609,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let numa_load_avg = total_load / num_numa_nodes as f64;
 
         let mut nodes : Vec<NumaNode> = Vec::with_capacity(num_numa_nodes);
-        for _ in 0..num_numa_nodes {
-            nodes.push(NumaNode::new(numa_load_avg));
+        for id in 0..num_numa_nodes {
+            nodes.push(NumaNode::new(id, numa_load_avg));
         }
 
         let dom_load_avg = total_load / dom_loads.len() as f64;
@@ -794,13 +907,13 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                                                                    xfer)?
                 {
                     delta = transferred;
-                    pull_node.load.add_load(delta);
+                    pull_node.update_load(delta);
                     break;
                 }
             }
             std::mem::swap(&mut pull_node.pull_domains, &mut SortedVec::from_unsorted(pull_doms));
             if delta > 0.0f64 {
-                push_node.load.add_load(-delta);
+                push_node.update_load(-delta);
             }
         }
         std::mem::swap(&mut push_node.push_domains, &mut SortedVec::from_unsorted(push_doms));

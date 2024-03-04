@@ -14,6 +14,7 @@ use tuner::Tuner;
 
 pub mod load_balance;
 use load_balance::LoadBalancer;
+use load_balance::NumaStat;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -408,14 +409,12 @@ impl<'a> Scheduler<'a> {
 
     fn report(
         &mut self,
-        stats: &[u64],
+        bpf_stats: &[u64],
         cpu_busy: f64,
         processing_dur: Duration,
-        load_avg: f64,
-        dom_loads: &[f64],
-        imbal: &[f64],
+        lb_stats: &[NumaStat],
     ) {
-        let stat = |idx| stats[idx as usize];
+        let stat = |idx| bpf_stats[idx as usize];
         let total = stat(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE)
@@ -426,12 +425,14 @@ impl<'a> Scheduler<'a> {
             + stat(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY);
 
+        let numa_load_avg = lb_stats[0].load.load_avg();
+        let dom_load_avg = lb_stats[0].domains[0].load.load_avg();
         info!(
-            "cpu={:7.2} bal={} load_avg={:8.2} task_err={} lb_data_err={} proc={:?}ms",
+            "cpu={:7.2} bal={} numa_load_avg={:8.2} dom_load_avg={:8.2} task_err={} lb_data_err={} proc={:?}ms",
             cpu_busy * 100.0,
-            stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
-            load_avg,
-            stats[bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR as usize],
+            bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
+            numa_load_avg, dom_load_avg,
+            bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR as usize],
             self.nr_lb_data_errors,
             processing_dur.as_millis(),
         );
@@ -472,18 +473,11 @@ impl<'a> Scheduler<'a> {
             format_cpumask(&ti.kick_greedy_cpumask, self.top.nr_cpus())
         );
 
-        for i in 0..self.dom_group.nr_doms() {
-            info!(
-                "DOM[{:02}] util={:6.2} load={:8.2} imbal={}",
-                i,
-                self.tuner.dom_util(i) * 100.0,
-                dom_loads[i],
-                if imbal[i] == 0.0 {
-                    format!("{:9.2}", 0.0)
-                } else {
-                    format!("{:+9.2}", imbal[i])
-                },
-            );
+        for node in lb_stats.iter() {
+            info!("{}", node);
+            for dom in node.domains.iter() {
+                info!("{}", dom);
+            }
         }
     }
 
@@ -503,19 +497,12 @@ impl<'a> Scheduler<'a> {
 
         lb.load_balance()?;
 
-        // Extract fields needed for reporting and drop lb to release
-        // mutable borrows.
-        let dom_load_avg = 0.0f64;
-        let dom_loads = vec![0.0f64; self.dom_group.nr_doms()];
-        let imbal = vec![0.0f64; self.dom_group.nr_doms()];
-
+        let stats = lb.get_stats();
         self.report(
             &bpf_stats,
             cpu_busy,
             Instant::now().duration_since(started_at),
-            dom_load_avg,
-            &dom_loads,
-            &imbal,
+            &stats,
         );
 
         self.prev_at = started_at;
