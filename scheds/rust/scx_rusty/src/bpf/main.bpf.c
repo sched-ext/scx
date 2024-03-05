@@ -70,6 +70,7 @@ const volatile u32 load_half_life = 1000000000	/* 1s */;
 const volatile bool kthreads_local;
 const volatile bool fifo_sched;
 const volatile bool switch_partial;
+const volatile bool direct_greedy_numa;
 const volatile u32 greedy_threshold;
 const volatile u32 debug;
 
@@ -627,29 +628,36 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 			goto enoent;
 		}
 
-		/*
-		 * Only look for an idle core in the current NUMA node when
-		 * looking for direct greedy CPUs outside of the current
-		 * domain. Stealing work temporarily is fine when you're going
-		 * across domain boundaries, but it may be less desirable when
-		 * crossing NUMA boundaries as the task's working set may end
-		 * up spanning multiple NUMA nodes.
-		 */
-		node_mask = domc->node_cpumask;
 		tmp_direct_greedy = direct_greedy_cpumask;
-		if (!node_mask || !tmp_direct_greedy) {
-			scx_bpf_error("Failed to lookup node mask or direct_greedy mask");
+		if (!tmp_direct_greedy) {
+			scx_bpf_error("Failed to lookup direct_greedy mask");
 			goto enoent;
 		}
+		/*
+		 * By default, only look for an idle core in the current NUMA
+		 * node when looking for direct greedy CPUs outside of the
+		 * current domain. Stealing work temporarily is fine when
+		 * you're going across domain boundaries, but it may be less
+		 * desirable when crossing NUMA boundaries as the task's
+		 * working set may end up spanning multiple NUMA nodes.
+		 */
+		if (!direct_greedy_numa) {
+			node_mask = domc->node_cpumask;
+			if (!node_mask) {
+				scx_bpf_error("Failed to lookup node mask");
+				goto enoent;
+			}
 
-		tmp_cpumask = bpf_kptr_xchg(&taskc->tmp_cpumask, NULL);
-		if (!tmp_cpumask) {
-			scx_bpf_error("Failed to lookup tmp cpumask");
-			goto enoent;
+			tmp_cpumask = bpf_kptr_xchg(&taskc->tmp_cpumask, NULL);
+			if (!tmp_cpumask) {
+				scx_bpf_error("Failed to lookup tmp cpumask");
+				goto enoent;
+			}
+			bpf_cpumask_and(tmp_cpumask,
+					(const struct cpumask *)node_mask,
+					(const struct cpumask *)tmp_direct_greedy);
+			tmp_direct_greedy = tmp_cpumask;
 		}
-		bpf_cpumask_and(tmp_cpumask, (const struct cpumask *)node_mask,
-				(const struct cpumask *)tmp_direct_greedy);
-		tmp_direct_greedy = tmp_cpumask;
 
 		/* Try to find an idle core in the previous and then any domain */
 		if (has_idle_cores) {

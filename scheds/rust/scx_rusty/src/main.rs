@@ -147,6 +147,14 @@ struct Opts {
     #[clap(short = 'K', long, default_value = "100.0")]
     kick_greedy_under: f64,
 
+    /// Whether tasks can be pushed directly to idle CPUs on NUMA nodes
+    /// different than its domain's node. If direct_greedy_under is disabled,
+    /// this option is a no-op. Otherwise, if this option is set to false
+    /// (default), tasks will only be directly pushed to idle CPUs if they
+    /// reside on the same NUMA node as the task's domain.
+    #[clap(short = 'r', long, action = clap::ArgAction::SetTrue)]
+    direct_greedy_numa: bool,
+
     /// If specified, only tasks which have their scheduling policy set to
     /// SCHED_EXT using sched_setscheduler(2) are switched. Otherwise, all
     /// tasks are switched.
@@ -277,6 +285,7 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().fifo_sched = opts.fifo_sched;
         skel.rodata_mut().switch_partial = opts.partial;
         skel.rodata_mut().greedy_threshold = opts.greedy_threshold;
+        skel.rodata_mut().direct_greedy_numa = opts.direct_greedy_numa;
         skel.rodata_mut().debug = opts.verbose as u32;
 
         // Attach.
