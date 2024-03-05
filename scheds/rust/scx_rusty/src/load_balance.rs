@@ -143,6 +143,7 @@ use std::sync::Arc;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use log::debug;
 use log::warn;
 use ordered_float::OrderedFloat;
 use scx_utils::ravg::ravg_read;
@@ -174,6 +175,16 @@ enum BalanceState {
     Balanced,
     NeedsPush,
     NeedsPull,
+}
+
+impl fmt::Display for BalanceState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BalanceState::Balanced => write!(f, "BALANCED"),
+            BalanceState::NeedsPush => write!(f, "OVER-LOADED"),
+            BalanceState::NeedsPull => write!(f, "UNDER-LOADED"),
+        }
+    }
 }
 
 macro_rules! impl_ord_for_type {
@@ -240,7 +251,7 @@ impl LoadEntity {
            xfer_ratio: f64,
            load_sum: f64,
            load_avg: f64) -> Self {
-        Self {
+        let mut entity = Self {
             cost_ratio,
             push_max_ratio,
             xfer_ratio,
@@ -248,7 +259,9 @@ impl LoadEntity {
             load_avg,
             load_delta: 0.0f64,
             bal_state: BalanceState::Balanced,
-        }
+        };
+        entity.add_load(0.0f64);
+        entity
     }
 
     pub fn load_sum(&self) -> f64 {
@@ -367,6 +380,9 @@ impl Domain {
 
         self.load.add_load(-load);
         other.load.add_load(load);
+
+        debug!("  DOM {} sending [pid: {:05}](load: {:.06}) --> DOM {} ",
+               self.id, pid, load, other.id);
     }
 
     fn xfer_between(&self, other: &Domain) -> f64 {
@@ -405,14 +421,6 @@ impl NumaNode {
             pull_domains: SortedVec::new(),
             balanced_domains: Vec::new(), 
         }
-    }
-
-    fn can_push(&self) -> bool {
-        self.push_domains.len() > 0
-    }
-
-    fn can_pull(&self) -> bool {
-        self.pull_domains.len() > 0
     }
 
     fn allocate_domain(&mut self, id: usize, load: f64, dom_load_avg: f64) {
@@ -472,6 +480,7 @@ impl NumaNode {
                 load: dom.load.clone(),
             });
         }
+        n_stat.domains.sort_by(|x, y| x.id.partial_cmp(&y.id).unwrap());
 
         n_stat
     }
@@ -496,7 +505,7 @@ fn fmt_balance_stat(f: &mut fmt::Formatter<'_>,
     let load_delta = load.delta();
     let get_fmt = |num: f64| if num >= 0.0f64 { format!("{:+4.2}", num) } else { format!("{:4.2}", num) };
 
-    write!(f, "{} load={:4.2} imbal={:4.2} load_delta={:4.2}",
+    write!(f, "{} load={:4.2} imbal={} load_delta={}",
            preamble, load_sum, get_fmt(imbal), get_fmt(load_delta))
 }
 
@@ -591,6 +600,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         for node in self.balanced_nodes.iter() {
             numa_stats.push(node.numa_stat());
         }
+
+        numa_stats.sort_by(|x, y| x.id.partial_cmp(&y.id).unwrap());
 
         numa_stats
     }
@@ -889,7 +900,12 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     fn transfer_between_nodes(&mut self,
                               push_node: &mut NumaNode,
                               pull_node: &mut NumaNode) -> Result<f64> {
-        if !push_node.can_push() || !pull_node.can_pull() {
+        let n_push_doms = push_node.push_domains.len();
+        let n_pull_doms = pull_node.pull_domains.len();
+        debug!("Inter node {} -> {} started ({} push domains -> {} pull domains)",
+               push_node.id, pull_node.id, n_push_doms, n_pull_doms);
+
+        if n_push_doms == 0 || n_pull_doms == 0 {
             return Ok(0.0f64);
         }
 
@@ -922,7 +938,13 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     }
 
     fn balance_between_nodes(&mut self) -> Result<()> {
-        if self.push_nodes.len() == 0 || self.pull_nodes.len() == 0 {
+        let n_push_nodes = self.push_nodes.len();
+        let n_pull_nodes = self.pull_nodes.len();
+
+        debug!("Node <-> Node LB started ({} pushers -> {} pullers)",
+               n_push_nodes, n_pull_nodes);
+
+        if n_push_nodes == 0 || n_pull_nodes == 0 {
             return Ok(());
         }
 
@@ -933,6 +955,10 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             let push_cutoff = push_node.load.push_cutoff();
             let mut pushed = 0f64;
 
+            if push_node.load.imbal() < 0.0f64 {
+                bail!("Push node {} had imbal {}", push_node.id, push_node.load.imbal());
+            }
+
             // Always try to send load to the nodes that need it most, in
             // descending order.
             loop {
@@ -940,6 +966,9 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 let mut pull_nodes = std::mem::take(&mut self.pull_nodes).into_vec();
 
                 for pull_node in pull_nodes.iter_mut() {
+                    if pull_node.load.imbal() >= 0.0f64 {
+                        bail!("Pull node {} had imbal {}", pull_node.id, pull_node.load.imbal());
+                    }
                     let migrated = self.transfer_between_nodes(push_node, pull_node)?;
                     if migrated > 0.0f64 {
                         // Break after a successful migration so that we can
@@ -948,6 +977,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                         // pull from domains in descending-imbalance order.
                         pushed += migrated;
                         transfer_occurred = true;
+                        debug!("NODE {} sending {:.06} --> NODE {}", push_node.id, migrated, pull_node.id);
                         break;
                     }
                 }
@@ -957,6 +987,10 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     break;
                 }
             }
+
+            if pushed > 0.0f64 {
+                debug!("NODE {} pushed {:.06} total load", push_node.id, pushed);
+            }
         }
         std::mem::swap(&mut self.push_nodes, &mut SortedVec::from_unsorted(push_nodes));
 
@@ -964,7 +998,13 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     }
 
     fn balance_within_node(&mut self, node: &mut NumaNode) -> Result<()> {
-        if !node.can_push() || !node.can_pull() {
+        let n_push_doms = node.push_domains.len();
+        let n_pull_doms = node.pull_domains.len();
+
+        debug!("Intra node {} LB started ({} push domains -> {} pull domains)",
+               node.id, n_push_doms, n_pull_doms);
+
+        if n_push_doms == 0 || n_pull_doms == 0 {
             return Ok(());
         }
 
@@ -973,11 +1013,17 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             let push_cutoff = push_dom.load.push_cutoff();
             let push_imbal = push_dom.load.imbal();
             let mut load = 0.0f64;
+            if push_dom.load.imbal() < 0.0f64 {
+                bail!("Push dom {} had imbal {}", push_dom.id, push_dom.load.imbal());
+            }
 
             loop {
                 let mut did_transfer = false;
                 let mut pull_doms = std::mem::take(&mut node.pull_domains).into_vec();
                 for pull_dom in pull_doms.iter_mut().filter(|x| x.load.state() == BalanceState::NeedsPull) {
+                    if pull_dom.load.imbal() >= 0.0f64 {
+                        bail!("Pull dom {} had imbal {}", pull_dom.id, pull_dom.load.imbal());
+                    }
                     let pull_imbal = pull_dom.load.imbal();
                     let xfer = push_dom.xfer_between(&pull_dom);
                     if let Some(transferred) = self.try_find_move_task((push_dom, push_imbal),
@@ -996,6 +1042,9 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     break;
                 }
             }
+            if load > 0.0f64 {
+                debug!("DOM {} pushed {:.06} total load", push_dom.id, load);
+            }
         }
         std::mem::swap(&mut node.push_domains, &mut SortedVec::from_unsorted(push_doms));
 
@@ -1009,10 +1058,14 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         // higher cost function than balancing between domains inside of NUMA
         // nodes, but the mechanics are the same. Adjustments made here are
         // reflected in intra-node balancing decisions made next.
-        self.balance_between_nodes()?;
+        if self.dom_group.nr_nodes() > 1 {
+            self.balance_between_nodes()?;
+        }
 
         // Now that the NUMA nodes have been balanced, do another balance round
         // amongst the domains in each node.
+
+        debug!("Intra node LBs started");
 
         // Assume all nodes are now balanced.
         self.balanced_nodes.append(&mut std::mem::take(&mut self.push_nodes).into_vec());
