@@ -23,5 +23,5 @@ for arg in ${args[@]:(idx+1)}; do
     esac
 done
 
-make_out=$(env CC="$cc" CFLAGS="$cflags" "$2" -C "$3" -j"$4")
+make_out=$(env CC="$cc" CFLAGS="$cflags" BUILD_STATIC_ONLY=y "$2" -C "$3" -j"$4")
 exit $?
