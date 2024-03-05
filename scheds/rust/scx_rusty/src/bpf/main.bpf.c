@@ -59,9 +59,12 @@ struct user_exit_info uei;
  * Domains and cpus
  */
 const volatile u32 nr_doms = 32;	/* !0 for veristat, set during init */
+const volatile u32 nr_nodes = 32;	/* !0 for veristat, set during init */
 const volatile u32 nr_cpus = 64;	/* !0 for veristat, set during init */
 const volatile u32 cpu_dom_id_map[MAX_CPUS];
+const volatile u32 dom_numa_id_map[MAX_DOMS];
 const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
+const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 load_half_life = 1000000000	/* 1s */;
 
 const volatile bool kthreads_local;
@@ -84,6 +87,17 @@ struct pcpu_ctx {
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 struct pcpu_ctx pcpu_ctx[MAX_CPUS];
+
+/*
+ * Numa node context
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct node_ctx);
+	__uint(max_entries, MAX_NUMA_NODES);
+	__uint(map_flags, 0);
+} node_data SEC(".maps");
 
 /*
  * Domain context
@@ -467,7 +481,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 {
 	const struct cpumask *idle_smtmask = scx_bpf_get_idle_smtmask();
 	struct task_ctx *taskc;
-	struct bpf_cpumask *p_cpumask;
+	struct bpf_cpumask *p_cpumask, *tmp_cpumask = NULL;
 	bool prev_domestic, has_idle_cores;
 	s32 cpu;
 
@@ -599,18 +613,43 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	/*
 	 * Domestic domain is fully booked. If there are CPUs which are idle and
-	 * under-utilized, ignore domain boundaries and push the task there. Try
-	 * to find an idle core first.
+	 * under-utilized, ignore domain boundaries (while still respecting NUMA
+	 * boundaries) and push the task there. Try to find an idle core first.
 	 */
 	if (taskc->all_cpus && direct_greedy_cpumask &&
 	    !bpf_cpumask_empty((const struct cpumask *)direct_greedy_cpumask)) {
 		u32 dom_id = cpu_to_dom_id(prev_cpu);
 		struct dom_ctx *domc;
+		struct bpf_cpumask *tmp_direct_greedy, *node_mask;
 
 		if (!(domc = bpf_map_lookup_elem(&dom_data, &dom_id))) {
 			scx_bpf_error("Failed to lookup dom[%u]", dom_id);
 			goto enoent;
 		}
+
+		/*
+		 * Only look for an idle core in the current NUMA node when
+		 * looking for direct greedy CPUs outside of the current
+		 * domain. Stealing work temporarily is fine when you're going
+		 * across domain boundaries, but it may be less desirable when
+		 * crossing NUMA boundaries as the task's working set may end
+		 * up spanning multiple NUMA nodes.
+		 */
+		node_mask = domc->node_cpumask;
+		tmp_direct_greedy = direct_greedy_cpumask;
+		if (!node_mask || !tmp_direct_greedy) {
+			scx_bpf_error("Failed to lookup node mask or direct_greedy mask");
+			goto enoent;
+		}
+
+		tmp_cpumask = bpf_kptr_xchg(&taskc->tmp_cpumask, NULL);
+		if (!tmp_cpumask) {
+			scx_bpf_error("Failed to lookup tmp cpumask");
+			goto enoent;
+		}
+		bpf_cpumask_and(tmp_cpumask, (const struct cpumask *)node_mask,
+				(const struct cpumask *)tmp_direct_greedy);
+		tmp_direct_greedy = tmp_cpumask;
 
 		/* Try to find an idle core in the previous and then any domain */
 		if (has_idle_cores) {
@@ -626,7 +665,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 			if (direct_greedy_cpumask) {
 				cpu = scx_bpf_pick_idle_cpu((const struct cpumask *)
-							    direct_greedy_cpumask,
+							    tmp_direct_greedy,
 							    SCX_PICK_IDLE_CORE);
 				if (cpu >= 0) {
 					stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
@@ -649,7 +688,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 		if (direct_greedy_cpumask) {
 			cpu = scx_bpf_pick_idle_cpu((const struct cpumask *)
-						    direct_greedy_cpumask, 0);
+						    tmp_direct_greedy, 0);
 			if (cpu >= 0) {
 				stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
 				goto direct;
@@ -668,10 +707,20 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	else
 		cpu = scx_bpf_pick_any_cpu((const struct cpumask *)p_cpumask, 0);
 
+	if (tmp_cpumask) {
+		tmp_cpumask = bpf_kptr_xchg(&taskc->tmp_cpumask, tmp_cpumask);
+		if (tmp_cpumask)
+			bpf_cpumask_release(tmp_cpumask);
+	}
 	scx_bpf_put_idle_cpumask(idle_smtmask);
 	return cpu;
 
 direct:
+	if (tmp_cpumask) {
+		tmp_cpumask = bpf_kptr_xchg(&taskc->tmp_cpumask, tmp_cpumask);
+		if (tmp_cpumask)
+			bpf_cpumask_release(tmp_cpumask);
+	}
 	taskc->dispatch_local = true;
 	scx_bpf_put_idle_cpumask(idle_smtmask);
 	return cpu;
@@ -1053,6 +1102,18 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 		return -EINVAL;
 	}
 
+	cpumask = bpf_cpumask_create();
+	if (!cpumask) {
+		scx_bpf_error("Failed to create BPF cpumask for task");
+		return -ENOMEM;
+	}
+	cpumask = bpf_kptr_xchg(&map_value->tmp_cpumask, cpumask);
+	if (cpumask) {
+        scx_bpf_error("%s[%d] tmp_cpumask already present", p->comm, p->pid);
+		bpf_cpumask_release(cpumask);
+		return -EEXIST;
+	}
+
 	task_pick_and_set_domain(map_value, p, p->cpus_ptr, true);
 
 	return 0;
@@ -1077,11 +1138,53 @@ void BPF_STRUCT_OPS(rusty_exit_task, struct task_struct *p,
 	}
 }
 
+static s32 create_node(u32 node_id)
+{
+	u32 cpu;
+	struct bpf_cpumask *cpumask;
+	struct node_ctx *nodec;
+
+	nodec = bpf_map_lookup_elem(&node_data, &node_id);
+	if (!nodec) {
+		/* Should never happen, it's created statically at load time. */
+		scx_bpf_error("No node%u", node_id);
+		return -ENOENT;
+	}
+
+	cpumask = bpf_cpumask_create();
+	if (!cpumask)
+		return -ENOMEM;
+
+	for (cpu = 0; cpu < MAX_CPUS; cpu++) {
+		const volatile u64 *nmask;
+
+		nmask = MEMBER_VPTR(numa_cpumasks, [node_id][cpu / 64]);
+		if (!nmask) {
+			scx_bpf_error("array index error");
+			bpf_cpumask_release(cpumask);
+			return -ENOENT;
+		}
+
+		if (*nmask & (1LLU << (cpu % 64)))
+			bpf_cpumask_set_cpu(cpu, cpumask);
+	}
+
+	cpumask = bpf_kptr_xchg(&nodec->cpumask, cpumask);
+	if (cpumask) {
+		scx_bpf_error("Node %u cpumask already present", node_id);
+		bpf_cpumask_release(cpumask);
+		return -EEXIST;
+	}
+
+	return 0;
+}
+
 static s32 create_dom(u32 dom_id)
 {
 	struct dom_ctx *domc;
-	struct bpf_cpumask *cpumask;
-	u32 cpu;
+	struct node_ctx *nodec;
+	struct bpf_cpumask *cpumask, *node_mask;
+	u32 cpu, node_id, *nid_ptr;
 	s32 ret;
 
 	if (dom_id >= MAX_DOMS) {
@@ -1141,10 +1244,46 @@ static s32 create_dom(u32 dom_id)
 			      dom_id);
 		return -ENOMEM;
 	}
-
 	cpumask = bpf_kptr_xchg(&domc->direct_greedy_cpumask, cpumask);
 	if (cpumask) {
 		scx_bpf_error("Domain %u direct_greedy_cpumask already present",
+			      dom_id);
+		bpf_cpumask_release(cpumask);
+		return -EEXIST;
+	}
+
+	nid_ptr = MEMBER_VPTR(dom_numa_id_map, [dom_id]);
+	if (!nid_ptr) {
+		scx_bpf_error("Couldn't look up node ID for %s", dom_id);
+		return -EEXIST;
+	}
+	node_id = *nid_ptr;
+	nodec = bpf_map_lookup_elem(&node_data, &node_id);
+	if (!nodec) {
+		/* Should never happen, it's created statically at load time. */
+		scx_bpf_error("No node%u", node_id);
+		return -ENOENT;
+	}
+	bpf_rcu_read_lock();
+	node_mask = nodec->cpumask;
+	if (!node_mask) {
+		bpf_rcu_read_unlock();
+		scx_bpf_error("NUMA %d mask not found for domain %u",
+			      node_id, dom_id);
+		return -ENOENT;
+	}
+	cpumask = bpf_cpumask_create();
+	if (!cpumask) {
+		bpf_rcu_read_unlock();
+		scx_bpf_error("Failed to create BPF cpumask for domain %u",
+			      dom_id);
+		return -ENOMEM;
+	}
+	bpf_cpumask_copy(cpumask, (const struct cpumask *)node_mask);
+	bpf_rcu_read_unlock();
+	cpumask = bpf_kptr_xchg(&domc->node_cpumask, cpumask);
+	if (cpumask) {
+		scx_bpf_error("Domain %u node_cpumask already present",
 			      dom_id);
 		bpf_cpumask_release(cpumask);
 		return -EEXIST;
@@ -1181,6 +1320,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 
 	if (!switch_partial)
 		scx_bpf_switch_all();
+
+	bpf_for(i, 0, nr_nodes) {
+		ret = create_node(i);
+		if (ret)
+			return ret;
+	}
 
 	bpf_for(i, 0, nr_doms) {
 		ret = create_dom(i);

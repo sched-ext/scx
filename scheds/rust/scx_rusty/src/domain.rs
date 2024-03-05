@@ -10,7 +10,7 @@ use anyhow::Result;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Domain {
     id: usize,
     mask: Cpumask,
@@ -20,6 +20,11 @@ impl Domain {
     /// Get the Domain's ID.
     pub fn id(&self) -> usize {
         self.id
+    }
+
+    /// Get a copy of the domain's cpumask.
+    pub fn mask(&self) -> Cpumask {
+        self.mask.clone()
     }
 
     /// Get a raw slice of the domain's cpumask as a set of one or more u64
@@ -77,8 +82,16 @@ impl DomainGroup {
         Ok(Self { doms, cpu_dom_map, dom_numa_map, num_numa_nodes, })
     }
 
-    pub fn doms(&self) -> &BTreeMap<usize, Domain> {
-        &self.doms
+    pub fn numa_doms(&self, numa_id: &usize) -> Vec<Domain> {
+        let mut numa_doms = Vec::new();
+        for (d_id, n_id) in self.dom_numa_map.iter() {
+            if n_id == numa_id {
+                let dom = self.doms.get(&d_id).unwrap();
+                numa_doms.push(dom.clone());
+            }
+        }
+
+        numa_doms
     }
 
     pub fn nr_doms(&self) -> usize {

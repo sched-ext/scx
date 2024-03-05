@@ -37,6 +37,7 @@ use log::info;
 use scx_utils::init_libbpf_logging;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Cpumask;
 use scx_utils::Topology;
 
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
@@ -234,6 +235,7 @@ impl<'a> Scheduler<'a> {
             );
         }
 
+        skel.rodata_mut().nr_nodes = domains.nr_nodes() as u32;
         skel.rodata_mut().nr_doms = domains.nr_doms() as u32;
         skel.rodata_mut().nr_cpus = top.nr_cpus() as u32;
 
@@ -243,17 +245,30 @@ impl<'a> Scheduler<'a> {
                 dom_id.clone().try_into().expect("Domain ID could not fit into 32 bits");
         }
 
-        for (dom_id, domain) in domains.doms().iter() {
-            let raw_cpus_slice = domain.mask_slice();
-            let dom_cpumask_slice = &mut skel.rodata_mut().dom_cpumasks[dom_id.clone()];
-            let (left, _) = dom_cpumask_slice.split_at_mut(raw_cpus_slice.len());
-            left.clone_from_slice(raw_cpus_slice);
-            info!(
-                "DOM[{:02}] cpumask{} ({} cpus)",
-                domain.id(),
-                &format_cpumask(dom_cpumask_slice, top.nr_cpus()),
-                domain.weight()
-            );
+        for numa in 0..domains.nr_nodes() {
+            let mut numa_mask = Cpumask::new()?;
+            let node_domains = domains.numa_doms(&numa);
+            for dom in node_domains.iter() {
+                let dom_mask = dom.mask();
+                numa_mask = numa_mask.or(&dom_mask)?;
+            }
+
+            let raw_numa_slice = numa_mask.as_raw_slice();
+            let node_cpumask_slice = &mut skel.rodata_mut().numa_cpumasks[numa];
+            let (left, _) = node_cpumask_slice.split_at_mut(raw_numa_slice.len());
+            left.clone_from_slice(raw_numa_slice);
+            info!("NUMA[{:02}] mask= {}]", numa, numa_mask);
+
+            for dom in node_domains.iter() {
+                let raw_dom_slice = dom.mask_slice();
+                let dom_cpumask_slice = &mut skel.rodata_mut().dom_cpumasks[dom.id()];
+                let (left, _) = dom_cpumask_slice.split_at_mut(raw_dom_slice.len());
+                left.clone_from_slice(raw_dom_slice);
+                skel.rodata_mut().dom_numa_id_map[dom.id()] =
+                    numa.try_into().expect("NUMA ID could not fit into 32 bits");
+
+                info!("  DOM[{:02}] mask= {}", dom.id(), dom.mask());
+            }
         }
 
         skel.rodata_mut().slice_ns = opts.slice_us * 1000;
