@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use anyhow::Result;
 
@@ -46,17 +46,14 @@ impl<'a> Scheduler<'a> {
                     // case we can simply ignore the task.
                     if task.cpu >= 0 {
                         let _ = self.bpf.dispatch_task(&DispatchedTask::new(&task));
+
+                        // Give the task a chance to run and prevent overflowing the dispatch queue.
+                        std::thread::yield_now();
                     }
-                    // Give the task a chance to run and prevent overflowing the dispatch queue.
-                    std::thread::yield_now();
                 }
                 Ok(None) => {
                     // Notify the BPF component that all tasks have been scheduled and dispatched.
                     self.bpf.update_tasks(Some(0), Some(0));
-
-                    // All queued tasks have been dipatched, add a short sleep to reduce
-                    // scheduler's CPU consuption.
-                    std::thread::sleep(Duration::from_millis(1));
                     break;
                 }
                 Err(_) => {
@@ -64,6 +61,8 @@ impl<'a> Scheduler<'a> {
                 }
             }
         }
+        // All queued tasks have been dipatched, yield to reduce scheduler's CPU consumption.
+        std::thread::yield_now();
     }
 
     fn print_stats(&mut self) {
@@ -99,10 +98,31 @@ impl<'a> Scheduler<'a> {
     }
 }
 
+fn print_warning() {
+    let warning = r#"
+**************************************************************************
+
+WARNING: The purpose of scx_rlfifo is to provide a simple scheduler
+implementation based on scx_rustland_core, and it is not intended for
+use in production environments. If you want to run a scheduler that makes
+decisions in user space, it is recommended to use *scx_rustland* instead.
+
+Please do not open GitHub issues in the event of poor performance, or
+scheduler eviction due to a runnable task timeout. However, if running this
+scheduler results in a system crash or the entire system becoming unresponsive,
+please open a GitHub issue.
+
+**************************************************************************"#;
+
+    println!("{}", warning);
+}
+
 fn main() -> Result<()> {
     let mut sched = Scheduler::init()?;
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
+
+    print_warning();
 
     ctrlc::set_handler(move || {
         shutdown_clone.store(true, Ordering::Relaxed);
