@@ -80,7 +80,7 @@ if should_build_libbpf
   run_command('git', 'submodule', 'foreach', '--recursive', 'git', 'clean', '-xfd', check: true)
 
   # setup the build target
-  executable('cc_cflags_probe', 'meson-scripts/cc_cflags_probe.c', install: false)
+  executable('cc_cflags_probe', 'meson-scripts/cc_cflags_probe.c', install: false, pie: true)
 
   make_jobs = 1
   if nproc.found()
@@ -199,7 +199,7 @@ if libbpf_a != ''
   endforeach
 
   cargo_env.append('RUSTFLAGS',
-                   '-C link-args=-lelf -C link-args=-lz -C link-args=-lzstd -L '
+                   '-C relocation-model=pic -C link-args=-lelf -C link-args=-lz -C link-args=-lzstd -L '
                    + fs.parent(libbpf_a))
 
   #
