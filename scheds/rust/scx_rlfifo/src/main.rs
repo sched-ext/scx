@@ -98,10 +98,31 @@ impl<'a> Scheduler<'a> {
     }
 }
 
+fn print_warning() {
+    let warning = r#"
+**************************************************************************
+
+WARNING: The purpose of scx_rlfifo is to provide a simple scheduler
+implementation based on scx_rustland_core, and it is not intended for
+use in production environments. If you want to run a scheduler that makes
+decisions in user space, it is recommended to use *scx_rustland* instead.
+
+Please do not open GitHub issues in the event of poor performance, or
+scheduler eviction due to a runnable task timeout. However, if running this
+scheduler results in a system crash or the entire system becoming unresponsive,
+please open a GitHub issue.
+
+**************************************************************************"#;
+
+    println!("{}", warning);
+}
+
 fn main() -> Result<()> {
     let mut sched = Scheduler::init()?;
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
+
+    print_warning();
 
     ctrlc::set_handler(move || {
         shutdown_clone.store(true, Ordering::Relaxed);
