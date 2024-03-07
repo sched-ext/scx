@@ -296,7 +296,7 @@ impl<'a> Scheduler<'a> {
         let mut idle_cpu_count = 0;
 
         // Count the number of cores where all the CPUs are idle.
-        for (_, core) in self.topo.cores().iter() {
+        for core in self.topo.cores().iter() {
             let mut all_idle = true;
             for (cpu_id, _) in core.cpus().iter() {
                 if self.bpf.get_cpu_pid(*cpu_id as i32) != 0 {
@@ -666,14 +666,14 @@ impl<'a> Scheduler<'a> {
             Err(_) => -1,
         };
         info!("Running tasks:");
-        for (core_id, core) in self.topo.cores().iter() {
+        for core in self.topo.cores().iter() {
             for (cpu_id, _) in core.cpus().iter() {
                 let pid = if *cpu_id as i32 == sched_cpu {
                     "[self]".to_string()
                 } else {
                     self.bpf.get_cpu_pid(*cpu_id as i32).to_string()
                 };
-                info!("  core {:2} cpu {:2} pid={}", core_id, cpu_id, pid);
+                info!("  core {:2} cpu {:2} pid={}", core.id(), cpu_id, pid);
             }
         }
 
