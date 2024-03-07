@@ -180,7 +180,7 @@ of experiments. For example, sched_ext makes it easy to defer CPU assignment
 until a task starts executing, allowing schedulers to share scheduling queues
 at any granularity (hyper-twin, CCX and so on). Additionally, higher level
 frameworks can be built on top to further widen the scope. For example, the
-aforementioned [rhone](https://github.com/Decave/rhone) library allows
+aforementioned [rhone](https://github.com/Byte-Lab/rhone) library allows
 implementing scheduling policies in user-space by encapsulating the complexity
 around communicating scheduling decisions with the kernel. This allows taking
 advantage of a richer programming environment in user-space, enabling
