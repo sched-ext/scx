@@ -11,16 +11,15 @@
 #define __USER_EXIT_INFO_H
 
 enum uei_sizes {
-	UEI_REASON_SIZE	= 128,
-	UEI_MSG_SIZE	= 1024,
-	UEI_DUMP_SIZE	= 32768,
+	UEI_REASON_LEN		= 128,
+	UEI_MSG_LEN		= 1024,
+	UEI_DUMP_DFL_LEN	= 32768,
 };
 
 struct user_exit_info {
 	int		kind;
-	char		reason[UEI_REASON_SIZE];
-	char		msg[UEI_MSG_SIZE];
-	char		dump[UEI_DUMP_SIZE];
+	char		reason[UEI_REASON_LEN];
+	char		msg[UEI_MSG_LEN];
 };
 
 #ifdef __bpf__
@@ -28,40 +27,54 @@ struct user_exit_info {
 #include "vmlinux.h"
 #include <bpf/bpf_core_read.h>
 
-static inline void uei_record(struct user_exit_info *uei,
-			      const struct scx_exit_info *ei)
-{
-	bpf_probe_read_kernel_str(uei->reason, sizeof(uei->reason), ei->reason);
-	bpf_probe_read_kernel_str(uei->msg, sizeof(uei->msg), ei->msg);
-	bpf_probe_read_kernel_str(uei->dump, sizeof(uei->dump), ei->dump);
-	/* use __sync to force memory barrier */
-	__sync_val_compare_and_swap(&uei->kind, uei->kind, ei->kind);
-}
+#define UEI_DEFINE(__name)							\
+	char RESIZABLE_ARRAY(data, __name##_dump);				\
+	const volatile u32 __name##_dump_len;					\
+	struct user_exit_info __name SEC(".data")
+
+#define UEI_RECORD(__uei_name, __ei) ({						\
+	bpf_probe_read_kernel_str(__uei_name.reason,				\
+				  sizeof(__uei_name.reason), (__ei)->reason);	\
+	bpf_probe_read_kernel_str(__uei_name.msg,				\
+				  sizeof(__uei_name.msg), (__ei)->msg);		\
+	bpf_probe_read_kernel_str(__uei_name##_dump,				\
+				  __uei_name##_dump_len, (__ei)->dump);		\
+	/* use __sync to force memory barrier */				\
+	__sync_val_compare_and_swap(&__uei_name.kind, __uei_name.kind,		\
+				    (__ei)->kind);				\
+})
 
 #else	/* !__bpf__ */
 
 #include <stdio.h>
 #include <stdbool.h>
 
-static inline bool uei_exited(struct user_exit_info *uei)
-{
-	/* use __sync to force memory barrier */
-	return __sync_val_compare_and_swap(&uei->kind, -1, -1);
-}
+/* no need to call the following explicitly if SCX_OPS_LOAD() is used */
+#define UEI_SET_SIZE(__skel, __ops_name, __uei_name) ({				\
+	u32 __len = (__skel)->struct_ops.__ops_name->exit_dump_len ?: UEI_DUMP_DFL_LEN; \
+	(__skel)->rodata->__uei_name##_dump_len = __len;			\
+	RESIZE_ARRAY(data, __uei_name##_dump, __len);				\
+})
 
-static inline void uei_print(const struct user_exit_info *uei)
-{
-	if (uei->dump[0] != '\0') {
-		fputs("\nDEBUG DUMP\n", stderr);
-		fputs("================================================================================\n\n", stderr);
-		fputs(uei->dump, stderr);
-		fputs("\n================================================================================\n\n", stderr);
-	}
-	fprintf(stderr, "EXIT: %s", uei->reason);
-	if (uei->msg[0] != '\0')
-		fprintf(stderr, " (%s)", uei->msg);
-	fputs("\n", stderr);
-}
+#define UEI_EXITED(__skel, __uei_name) ({					\
+	/* use __sync to force memory barrier */				\
+	__sync_val_compare_and_swap(&(__skel)->data->__uei_name.kind, -1, -1);	\
+})
+
+#define UEI_REPORT(__skel, __uei_name) ({					\
+	struct user_exit_info *__uei = &(__skel)->data->__uei_name;		\
+	char *__uei_dump = (__skel)->data_##__uei_name##_dump->__uei_name##_dump; \
+	if (__uei_dump[0] != '\0') {						\
+		fputs("\nDEBUG DUMP\n", stderr);				\
+		fputs("================================================================================\n\n", stderr); \
+		fputs(__uei_dump, stderr);					\
+		fputs("\n================================================================================\n\n", stderr); \
+	}									\
+	fprintf(stderr, "EXIT: %s", __uei->reason);				\
+	if (__uei->msg[0] != '\0')						\
+		fprintf(stderr, " (%s)", __uei->msg);				\
+	fputs("\n", stderr);							\
+})
 
 #endif	/* __bpf__ */
 #endif	/* __USER_EXIT_INFO_H */

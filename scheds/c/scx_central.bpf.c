@@ -55,7 +55,6 @@ enum {
 	TIMER_INTERVAL_NS	= 1 * MS_TO_NS,
 };
 
-const volatile bool switch_partial;
 const volatile s32 central_cpu;
 const volatile u32 nr_cpu_ids = 1;	/* !0 for veristat, set during init */
 const volatile u64 slice_ns = SCX_SLICE_DFL;
@@ -65,7 +64,7 @@ u64 nr_total, nr_locals, nr_queued, nr_lost_pids;
 u64 nr_timers, nr_dispatches, nr_mismatches, nr_retries;
 u64 nr_overflows;
 
-struct user_exit_info uei;
+UEI_DEFINE(uei);
 
 struct {
 	__uint(type, BPF_MAP_TYPE_QUEUE);
@@ -176,7 +175,7 @@ static bool dispatch_to_cpu(s32 cpu)
 		scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, SCX_SLICE_INF, 0);
 
 		if (cpu != central_cpu)
-			__COMPAT_scx_bpf_kick_cpu_IDLE(cpu);
+			scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
 
 		bpf_task_release(p);
 		return true;
@@ -306,9 +305,6 @@ int BPF_STRUCT_OPS_SLEEPABLE(central_init)
 	struct bpf_timer *timer;
 	int ret;
 
-	if (!switch_partial)
-		scx_bpf_switch_all();
-
 	ret = scx_bpf_create_dsq(FALLBACK_DSQ_ID, -1);
 	if (ret)
 		return ret;
@@ -344,24 +340,22 @@ int BPF_STRUCT_OPS_SLEEPABLE(central_init)
 
 void BPF_STRUCT_OPS(central_exit, struct scx_exit_info *ei)
 {
-	uei_record(&uei, ei);
+	UEI_RECORD(uei, ei);
 }
 
-SEC(".struct_ops.link")
-struct sched_ext_ops central_ops = {
-	/*
-	 * We are offloading all scheduling decisions to the central CPU and
-	 * thus being the last task on a given CPU doesn't mean anything
-	 * special. Enqueue the last tasks like any other tasks.
-	 */
-	.flags			= SCX_OPS_ENQ_LAST,
+SCX_OPS_DEFINE(central_ops,
+	       /*
+		* We are offloading all scheduling decisions to the central CPU
+		* and thus being the last task on a given CPU doesn't mean
+		* anything special. Enqueue the last tasks like any other tasks.
+		*/
+	       .flags			= SCX_OPS_ENQ_LAST,
 
-	.select_cpu		= (void *)central_select_cpu,
-	.enqueue		= (void *)central_enqueue,
-	.dispatch		= (void *)central_dispatch,
-	.running		= (void *)central_running,
-	.stopping		= (void *)central_stopping,
-	.init			= (void *)central_init,
-	.exit			= (void *)central_exit,
-	.name			= "central",
-};
+	       .select_cpu		= (void *)central_select_cpu,
+	       .enqueue			= (void *)central_enqueue,
+	       .dispatch		= (void *)central_dispatch,
+	       .running			= (void *)central_running,
+	       .stopping		= (void *)central_stopping,
+	       .init			= (void *)central_init,
+	       .exit			= (void *)central_exit,
+	       .name			= "central");
