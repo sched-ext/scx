@@ -20,10 +20,9 @@ const char help_fmt[] =
 "\n"
 "See the top-level comment in .bpf.c for more details.\n"
 "\n"
-"Usage: %s [-S STRIDE] [-p]\n"
+"Usage: %s [-S STRIDE]\n"
 "\n"
 "  -S STRIDE     Override CPU pair stride (default: nr_cpus_ids / 2)\n"
-"  -p            Switch only tasks on SCHED_EXT policy intead of all\n"
 "  -h            Display this help and exit\n";
 
 static volatile int exit_req;
@@ -57,9 +56,6 @@ int main(int argc, char **argv)
 		switch (opt) {
 		case 'S':
 			stride = strtoul(optarg, NULL, 0);
-			break;
-		case 'p':
-			skel->rodata->switch_partial = true;
 			break;
 		default:
 			fprintf(stderr, help_fmt, basename(argv[0]));
@@ -103,7 +99,7 @@ int main(int argc, char **argv)
 	}
 	printf("\n");
 
-	SCX_BUG_ON(scx_pair__load(skel), "Failed to load skel");
+	SCX_OPS_LOAD(skel, pair_ops, scx_pair, uei);
 
 	/*
 	 * Populate the cgrp_q_arr map which is an array containing per-cgroup
@@ -138,10 +134,9 @@ int main(int argc, char **argv)
 	/*
 	 * Fully initialized, attach and run.
 	 */
-	link = bpf_map__attach_struct_ops(skel->maps.pair_ops);
-	SCX_BUG_ON(!link, "Failed to attach struct_ops");
+	link = SCX_OPS_ATTACH(skel, pair_ops);
 
-	while (!exit_req && !uei_exited(&skel->bss->uei)) {
+	while (!exit_req && !UEI_EXITED(skel, uei)) {
 		printf("[SEQ %llu]\n", seq++);
 		printf(" total:%10" PRIu64 " dispatch:%10" PRIu64 "   missing:%10" PRIu64 "\n",
 		       skel->bss->nr_total,
@@ -163,7 +158,7 @@ int main(int argc, char **argv)
 	}
 
 	bpf_link__destroy(link);
-	uei_print(&skel->bss->uei);
+	UEI_REPORT(skel, uei);
 	scx_pair__destroy(skel);
 	return 0;
 }

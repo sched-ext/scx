@@ -187,12 +187,10 @@ int main(int argc, char **argv)
 		}
 	}
 
-	SCX_BUG_ON(scx_nest__load(skel), "Failed to load skel");
+	SCX_OPS_LOAD(skel, nest_ops, scx_nest, uei);
+	link = SCX_OPS_ATTACH(skel, nest_ops);
 
-	link = bpf_map__attach_struct_ops(skel->maps.nest_ops);
-	SCX_BUG_ON(!link, "Failed to attach struct_ops");
-
-	while (!exit_req && !uei_exited(&skel->bss->uei)) {
+	while (!exit_req && !UEI_EXITED(skel, uei)) {
 		u64 stats[NEST_STAT(NR)];
 		enum nest_stat_idx i;
 		enum nest_stat_group last_grp = -1;
@@ -218,7 +216,7 @@ int main(int argc, char **argv)
 	}
 
 	bpf_link__destroy(link);
-	uei_print(&skel->bss->uei);
+	UEI_REPORT(skel, uei);
 	scx_nest__destroy(skel);
 	return 0;
 }

@@ -17,7 +17,7 @@ const char help_fmt[] =
 "\n"
 "See the top-level comment in .bpf.c for more details.\n"
 "\n"
-"Usage: %s [-f] [-p]\n"
+"Usage: %s [-f]\n"
 "\n"
 "  -f            Use FIFO scheduling instead of weighted vtime scheduling\n"
 "  -h            Display this help and exit\n";

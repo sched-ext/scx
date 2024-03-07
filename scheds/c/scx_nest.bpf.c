@@ -59,7 +59,7 @@ u64 stats_primary_mask, stats_reserved_mask, stats_other_mask, stats_idle_mask;
 static s32 nr_reserved;
 
 static u64 vtime_now;
-struct user_exit_info uei;
+UEI_DEFINE(uei);
 
 extern unsigned long CONFIG_HZ __kconfig;
 
@@ -235,15 +235,6 @@ s32 BPF_STRUCT_OPS(nest_select_cpu, struct task_struct *p, s32 prev_cpu,
 	struct task_ctx *tctx;
 	struct pcpu_ctx *pcpu_ctx;
 	bool direct_to_primary = false, reset_impatient = true;
-
-	/*
-	 * Don't bother trying to find an idle core if a task is doing an
-	 * exec(). We would have already tried to find a core on fork(), and if
-	 * we were successful in doing so, the task will already be running on
-	 * what was previously an idle core.
-	 */
-	if (wake_flags & SCX_WAKE_EXEC)
-		return prev_cpu;
 
 	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 	if (!tctx)
@@ -591,7 +582,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(nest_init)
 	struct bpf_timer *timer;
 	u32 key = 0;
 
-	scx_bpf_switch_all();
+	__COMPAT_scx_bpf_switch_all();
 
 	err = scx_bpf_create_dsq(FALLBACK_DSQ_ID, NUMA_NO_NODE);
 	if (err) {
@@ -652,20 +643,19 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(nest_init)
 
 void BPF_STRUCT_OPS(nest_exit, struct scx_exit_info *ei)
 {
-	uei_record(&uei, ei);
+	UEI_RECORD(uei, ei);
 }
 
-SEC(".struct_ops.link")
-struct sched_ext_ops nest_ops = {
-	.select_cpu		= (void *)nest_select_cpu,
-	.enqueue		= (void *)nest_enqueue,
-	.dispatch		= (void *)nest_dispatch,
-	.running		= (void *)nest_running,
-	.stopping		= (void *)nest_stopping,
-	.init_task		= (void *)nest_init_task,
-	.enable			= (void *)nest_enable,
-	.init			= (void *)nest_init,
-	.exit			= (void *)nest_exit,
-	.flags			= 0,
-	.name			= "nest",
-};
+SCX_OPS_DEFINE(nest_ops,
+	       .select_cpu		= (void *)nest_select_cpu,
+	       .enqueue			= (void *)nest_enqueue,
+	       .dispatch		= (void *)nest_dispatch,
+	       .running			= (void *)nest_running,
+	       .stopping		= (void *)nest_stopping,
+	       .init_task		= (void *)nest_init_task,
+	       .enable			= (void *)nest_enable,
+	       .init			= (void *)nest_init,
+	       .exit			= (void *)nest_exit,
+	       .flags			= 0,
+	       .name			= "nest");
+

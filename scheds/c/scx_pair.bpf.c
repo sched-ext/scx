@@ -120,8 +120,6 @@
 
 char _license[] SEC("license") = "GPL";
 
-const volatile bool switch_partial;
-
 /* !0 for veristat, set during init */
 const volatile u32 nr_cpu_ids = 1;
 
@@ -239,7 +237,7 @@ u64 nr_total, nr_dispatched, nr_missing, nr_kicks, nr_preemptions;
 u64 nr_exps, nr_exp_waits, nr_exp_empty;
 u64 nr_cgrp_next, nr_cgrp_coll, nr_cgrp_empty;
 
-struct user_exit_info uei;
+UEI_DEFINE(uei);
 
 static bool time_before(u64 a, u64 b)
 {
@@ -600,27 +598,17 @@ void BPF_STRUCT_OPS(pair_cgroup_exit, struct cgroup *cgrp)
 	}
 }
 
-s32 BPF_STRUCT_OPS(pair_init)
-{
-	if (!switch_partial)
-		scx_bpf_switch_all();
-	return 0;
-}
-
 void BPF_STRUCT_OPS(pair_exit, struct scx_exit_info *ei)
 {
-	uei_record(&uei, ei);
+	UEI_RECORD(uei, ei);
 }
 
-SEC(".struct_ops.link")
-struct sched_ext_ops pair_ops = {
-	.enqueue		= (void *)pair_enqueue,
-	.dispatch		= (void *)pair_dispatch,
-	.cpu_acquire		= (void *)pair_cpu_acquire,
-	.cpu_release		= (void *)pair_cpu_release,
-	.cgroup_init		= (void *)pair_cgroup_init,
-	.cgroup_exit		= (void *)pair_cgroup_exit,
-	.init			= (void *)pair_init,
-	.exit			= (void *)pair_exit,
-	.name			= "pair",
-};
+SCX_OPS_DEFINE(pair_ops,
+	       .enqueue			= (void *)pair_enqueue,
+	       .dispatch		= (void *)pair_dispatch,
+	       .cpu_acquire		= (void *)pair_cpu_acquire,
+	       .cpu_release		= (void *)pair_cpu_release,
+	       .cgroup_init		= (void *)pair_cgroup_init,
+	       .cgroup_exit		= (void *)pair_cgroup_exit,
+	       .exit			= (void *)pair_exit,
+	       .name			= "pair");
