@@ -198,7 +198,7 @@ repo](https://mesonbuild.com/Quick-guide.html#installation-from-source) and call
   standard utilities including `awk`.
 - `clang`: >=16 required, >=17 recommended
 - `libbpf`: >=1.2.2 required, >=1.3 recommended (`RESIZE_ARRAY` support is
-  new in 1.3). It's preferred to link statically against the source from the libbpf git submodule.
+  new in 1.3). It's preferred to link statically against the source from the libbpf git repo, which is cloned during setup.
 - Rust toolchain: >=1.72
 - `libelf`, `libz`, `libzstd` if linking against staic `libbpf.a`
 - `bpftool` (usually available in `linux-tools-common`)
@@ -210,7 +210,7 @@ repo](https://mesonbuild.com/Quick-guide.html#installation-from-source) and call
 commands in the root of the tree builds and installs all schedulers under
 `~/bin`.
 
-#### Static linking against libbpf submodule (preferred)
+#### Static linking against libbpf (preferred)
 
  ```
 $ cd $SCX
@@ -219,7 +219,7 @@ $ meson compile -C build
 $ meson install -C build
 ```
 
-Note: `meson setup` will also fetch the libbpf submodule and `meson compile` will build it.
+Note: `meson setup` will also clone the libbpf repo and `meson compile` will build it.
 
 #### Dynamic linking against libbpf
 ```

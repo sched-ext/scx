@@ -28,6 +28,8 @@ get_sys_incls = find_program(join_paths(meson.current_source_dir(),
                                         'meson-scripts/get_sys_incls'))
 test_sched  = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/test_sched'))
+fetch_libbpf = find_program(join_paths(meson.current_source_dir(),
+                                      'meson-scripts/fetch_libbpf'))
 build_libbpf = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/build_libbpf'))
 if enable_rust
@@ -46,9 +48,11 @@ elif bpf_clang_maj < 17
           .format(bpf_clang.full_path(), bpf_clang_ver))
 endif
 
-libbpf_path = '@0@/libbpf/src'.format(meson.current_source_dir())
+libbpf_path = '@0@/libbpf/src'.format(meson.current_build_dir())
 libbpf_a = '@0@/libbpf.a'.format(libbpf_path)
 should_build_libbpf = true
+libbpf_h = get_option('libbpf_h')
+libbpf_local_h = get_option('libbpf_h')
 
 if get_option('libbpf_a') == 'disabled'
   libbpf_a = ''
@@ -74,10 +78,12 @@ if should_build_libbpf
     error('To build the libbpf library "make" and "jq" are required')
   endif
 
-  message('Updating libbpf submodule')
-  run_command('git', 'submodule', 'update', '--init', '--recursive', check: true)
-  # make sure it's clean
-  run_command('git', 'submodule', 'foreach', '--recursive', 'git', 'clean', '-xfd', check: true)
+  libbpf_h = ['@0@/usr/include'.format(libbpf_path)]
+  libbpf_local_h = ['.@0@/libbpf/src/usr/include'.format(meson.current_build_dir().replace(meson.current_source_dir(), ''))]
+
+  message('Fetching libbpf repo')
+  libbpf_commit = '4f875865b772c4f534bc0a665bbd988193825bd4'
+  run_command(fetch_libbpf, meson.current_build_dir(), libbpf_commit, check: true)
 
   # setup the build target
   executable('cc_cflags_probe', 'meson-scripts/cc_cflags_probe.c', install: false, pie: true)
@@ -104,7 +110,7 @@ endif
 if libbpf_a != ''
   libbpf_dep = [declare_dependency(
     link_args: libbpf_a,
-    include_directories: get_option('libbpf_h')),
+    include_directories: libbpf_local_h),
     cc.find_library('elf'),
     cc.find_library('z'),
     cc.find_library('zstd')]
@@ -156,7 +162,7 @@ message('cpu=@0@ bpf_base_cflags=@1@'.format(cpu, bpf_base_cflags))
 libbpf_c_headers = []
 
 if libbpf_a != ''
-  foreach header: get_option('libbpf_h')
+  foreach header: libbpf_h
     libbpf_c_headers += ['-I', header]
   endforeach
 endif
@@ -194,7 +200,7 @@ foreach flag: bpf_base_cflags
 endforeach
 
 if libbpf_a != ''
-  foreach header: get_option('libbpf_h')
+  foreach header: libbpf_h
     cargo_env.append('BPF_EXTRA_CFLAGS_PRE_INCL', '-I' + header, separator: ' ')
   endforeach
 
