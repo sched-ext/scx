@@ -38,10 +38,9 @@ const char help_fmt[] =
 "\n"
 "Try to reduce `sysctl kernel.pid_max` if this program triggers OOMs.\n"
 "\n"
-"Usage: %s [-b BATCH] [-p]\n"
+"Usage: %s [-b BATCH]\n"
 "\n"
 "  -b BATCH      The number of tasks to batch when dispatching (default: 8)\n"
-"  -p            Don't switch all, switch only tasks on SCHED_EXT policy\n"
 "  -h            Display this help and exit\n";
 
 /* Defined in UAPI */
@@ -345,7 +344,6 @@ static void bootstrap(int argc, char **argv)
 	struct sched_param sched_param = {
 		.sched_priority = sched_get_priority_max(SCHED_EXT),
 	};
-	bool switch_partial = false;
 
 	err = init_tasks();
 	if (err)
@@ -370,9 +368,6 @@ static void bootstrap(int argc, char **argv)
 		case 'b':
 			batch_size = strtoul(optarg, NULL, 0);
 			break;
-		case 'p':
-			switch_partial = true;
-			break;
 		default:
 			fprintf(stderr, help_fmt, basename(argv[0]));
 			exit(opt != 'h');
@@ -394,9 +389,8 @@ static void bootstrap(int argc, char **argv)
 	assert(skel->rodata->num_possible_cpus > 0);
 	skel->rodata->usersched_pid = getpid();
 	assert(skel->rodata->usersched_pid > 0);
-	skel->rodata->switch_partial = switch_partial;
 
-	SCX_BUG_ON(scx_userland__load(skel), "Failed to load skel");
+	SCX_OPS_LOAD(skel, userland_ops, scx_userland, uei);
 
 	enqueued_fd = bpf_map__fd(skel->maps.enqueued);
 	dispatched_fd = bpf_map__fd(skel->maps.dispatched);
@@ -406,8 +400,7 @@ static void bootstrap(int argc, char **argv)
 	SCX_BUG_ON(spawn_stats_thread(), "Failed to spawn stats thread");
 
 	print_example_warning(basename(argv[0]));
-	ops_link = bpf_map__attach_struct_ops(skel->maps.userland_ops);
-	SCX_BUG_ON(!ops_link, "Failed to attach struct_ops");
+	ops_link = SCX_OPS_ATTACH(skel, userland_ops);
 }
 
 static void sched_main_loop(void)
@@ -440,7 +433,7 @@ int main(int argc, char **argv)
 
 	exit_req = 1;
 	bpf_link__destroy(ops_link);
-	uei_print(&skel->bss->uei);
+	UEI_REPORT(skel, uei);
 	scx_userland__destroy(skel);
 	return 0;
 }
