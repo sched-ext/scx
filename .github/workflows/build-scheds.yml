@@ -36,11 +36,6 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      # libbpf
-      - run: git clone --recurse-submodules --branch v1.3.0 https://github.com/libbpf/libbpf.git
-      - run: make -j -C libbpf/src
-      - run: sudo make -j -C libbpf/src install
-
       # meson
       - run: pip install meson
 
@@ -61,7 +56,7 @@ jobs:
       ### END DEPENDENCIES ###
 
       # The actual build:
-      - run: meson setup build -Dlibbpf_a=`pwd`/libbpf/src/libbpf.a -Dkernel=$(pwd)/linux
+      - run: meson setup build -Dkernel=$(pwd)/linux
       - run: meson compile -C build
 
       # Print CPU model before running the tests (this can be useful for
