@@ -201,7 +201,7 @@ repo](https://mesonbuild.com/Quick-guide.html#installation-from-source) and call
   new in 1.3). It's preferred to link statically against the source from the libbpf git repo, which is cloned during setup.
 - Rust toolchain: >=1.72
 - `libelf`, `libz`, `libzstd` if linking against staic `libbpf.a`
-- `bpftool` (usually available in `linux-tools-common`)
+- `bpftool` By default this is cloned and built as part of the default build process. Alternatively it's usually available in `linux-tools-common`.
 
 
 ### Setting Up and Building
@@ -219,7 +219,7 @@ $ meson compile -C build
 $ meson install -C build
 ```
 
-Note: `meson setup` will also clone the libbpf repo and `meson compile` will build it.
+Notes: `meson setup` will also clone both libbpf and bpftool repos and `meson compile` will build them both.
 
 #### Dynamic linking against libbpf
 ```
@@ -227,6 +227,16 @@ $ cd $SCX
 $ meson setup build --prefix ~ -D libbpf_a=disabled
 $ meson compile -C build
 $ meson install -C build
+```
+
+#### Using a different bpftool
+This will check the system for an installed bpftool
+```
+$ meson setup build --prefix ~ -D bpftool=disabled
+```
+Using a custom built bpftool
+```
+$ meson setup build --prefix ~ -D bpftool=/path/to/bpftool
 ```
 
 Note that `meson compile` step is not strictly necessary as `install`
@@ -287,7 +297,7 @@ override some of the toolchains and dependencies - e.g. to directly use
 options can be used in such cases.
 
 - `bpf_clang`: `clang` to use when compiling `.bpf.c`
-- `bpftool`: `bpftool` to use when generating `.bpf.skel.h`
+- `bpftool`: `bpftool` to use when generating `.bpf.skel.h`. Set this to "disabled" to check the system for an already installed bpftool
 - `libbpf_a`: Static `libbpf.a` to use. Set this to "disabled" to link libbpf dynamically
 - `libbpf_h`: `libbpf` header directories, only meaningful with `libbpf_a` option
 - `cargo`: `cargo` to use when building rust sub-projects
