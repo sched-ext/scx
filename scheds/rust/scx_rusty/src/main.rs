@@ -110,12 +110,26 @@ struct Opts {
     #[clap(short = 'C', long, num_args = 1.., conflicts_with = "cache_level")]
     cpumasks: Vec<String>,
 
-    /// When non-zero, enable greedy task stealing. When a domain is idle, a
-    /// cpu will attempt to steal tasks from a domain with at least
-    /// greedy_threshold tasks enqueued. These tasks aren't permanently
-    /// stolen from the domain.
+    /// When non-zero, enable greedy task stealing. When a domain is idle, a cpu
+    /// will attempt to steal tasks from another domain as follows:
+    ///
+    /// 1. Try to consume a task from the current domain
+    /// 2. Try to consume a task from another domain in the current NUMA node
+    ///    (or globally, if running on a single-socket system), if the domain
+    ///    has at least this specified number of tasks enqueued.
+    ///
+    /// See greedy_threshold_x_numa to enable task stealing across NUMA nodes.
+    /// Tasks stolen in this manner are not permanently stolen from their
+    /// domain.
     #[clap(short = 'g', long, default_value = "1")]
     greedy_threshold: u32,
+
+    /// When non-zero, enable greedy task stealing across NUMA nodes. The order
+    /// of greedy task stealing follows greedy_threshold as described above, and
+    /// greedy_threshold must be nonzero to enable task stealing across NUMA
+    /// nodes.
+    #[clap(long, default_value = "0")]
+    greedy_threshold_x_numa: u32,
 
     /// Disable load balancing. Unless disabled, periodically userspace will
     /// calculate the load factor of each domain and instruct BPF which
@@ -286,6 +300,7 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().fifo_sched = opts.fifo_sched;
         skel.rodata_mut().switch_partial = opts.partial;
         skel.rodata_mut().greedy_threshold = opts.greedy_threshold;
+        skel.rodata_mut().greedy_threshold_x_numa = opts.greedy_threshold_x_numa;
         skel.rodata_mut().direct_greedy_numa = opts.direct_greedy_numa;
         skel.rodata_mut().debug = opts.verbose as u32;
 
@@ -423,7 +438,8 @@ impl<'a> Scheduler<'a> {
             + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY_FAR)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY);
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
 
         let numa_load_avg = lb_stats[0].load.load_avg();
         let dom_load_avg = lb_stats[0].domains[0].load.load_avg();
@@ -456,9 +472,14 @@ impl<'a> Scheduler<'a> {
         );
 
         info!(
-            "dsq={:5.2} greedy={:5.2} kick_greedy={:5.2} rep={:5.2}",
+            "dsq={:5.2} greedy_local={:5.2} greedy_xnuma={:5.2}",
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA),
+        );
+
+        info!(
+            "kick_greedy={:5.2} rep={:5.2}",
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_KICK_GREEDY),
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_REPATRIATE),
         );

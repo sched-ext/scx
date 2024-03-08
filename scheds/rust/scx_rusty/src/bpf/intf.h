@@ -55,7 +55,8 @@ enum stat_idx {
 	RUSTY_STAT_DIRECT_GREEDY,
 	RUSTY_STAT_DIRECT_GREEDY_FAR,
 	RUSTY_STAT_DSQ_DISPATCH,
-	RUSTY_STAT_GREEDY,
+	RUSTY_STAT_GREEDY_LOCAL,
+	RUSTY_STAT_GREEDY_XNUMA,
 
 	/* Extra stats that don't contribute to total */
 	RUSTY_STAT_REPATRIATE,
@@ -102,6 +103,7 @@ struct dom_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 	struct bpf_cpumask __kptr *direct_greedy_cpumask;
 	struct bpf_cpumask __kptr *node_cpumask;
+	u32 node_id;
 
 	u64 dbg_dcycle_printed_at;
 	struct bucket_ctx buckets[LB_LOAD_BUCKETS];

@@ -72,6 +72,7 @@ const volatile bool fifo_sched;
 const volatile bool switch_partial;
 const volatile bool direct_greedy_numa;
 const volatile u32 greedy_threshold;
+const volatile u32 greedy_threshold_x_numa;
 const volatile u32 debug;
 
 /* base slice duration */
@@ -82,9 +83,12 @@ const volatile u64 slice_ns = SCX_SLICE_DFL;
  */
 struct pcpu_ctx {
 	u32 dom_rr_cur; /* used when scanning other doms */
+	u32 dom_id;
+	u32 nr_node_doms;
+	u32 node_doms[MAX_DOMS];
 
 	/* libbpf-rs does not respect the alignment, so pad out the struct explicitly */
-	u8 _padding[CACHELINE_SIZE - sizeof(u32)];
+	u8 _padding[CACHELINE_SIZE - ((3 + MAX_DOMS) * sizeof(u32) % CACHELINE_SIZE)];
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 struct pcpu_ctx pcpu_ctx[MAX_CPUS];
@@ -854,24 +858,43 @@ static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
 static u32 dom_rr_next(s32 cpu)
 {
 	struct pcpu_ctx *pcpuc;
-	u32 dom_id;
+	u32 idx, *dom_id;
 
 	pcpuc = MEMBER_VPTR(pcpu_ctx, [cpu]);
-	if (!pcpuc)
+	if (!pcpuc || !pcpuc->nr_node_doms)
 		return 0;
 
-	dom_id = (pcpuc->dom_rr_cur + 1) % nr_doms;
+	idx = (pcpuc->dom_rr_cur + 1) % pcpuc->nr_node_doms;
+	dom_id = MEMBER_VPTR(pcpuc->node_doms, [idx]);
+	if (!dom_id) {
+		scx_bpf_error("Failed to lookup dom for %d", cpu);
+		return 0;
+	}
 
-	if (dom_id == cpu_to_dom_id(cpu))
-		dom_id = (dom_id + 1) % nr_doms;
+	if (*dom_id == cpu_to_dom_id(cpu))
+		scx_bpf_error("%d found current dom in node_doms array", cpu);
 
-	pcpuc->dom_rr_cur = dom_id;
-	return dom_id;
+	pcpuc->dom_rr_cur++;
+	return *dom_id;
+}
+
+u32 dom_node_id(u32 dom_id)
+{
+	u32 *nid_ptr;
+
+	nid_ptr = MEMBER_VPTR(dom_numa_id_map, [dom_id]);
+	if (!nid_ptr) {
+		scx_bpf_error("Couldn't look up node ID for %s", dom_id);
+		return 0;
+	}
+	return *nid_ptr;
 }
 
 void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 {
 	u32 dom = cpu_to_dom_id(cpu);
+	struct pcpu_ctx *pcpuc;
+	u32 node_doms, my_node, i;
 
 	if (scx_bpf_consume(dom)) {
 		stat_add(RUSTY_STAT_DSQ_DISPATCH, 1);
@@ -881,13 +904,35 @@ void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 	if (!greedy_threshold)
 		return;
 
-	bpf_repeat(nr_doms - 1) {
-		u32 dom_id = dom_rr_next(cpu);
+	pcpuc = MEMBER_VPTR(pcpu_ctx, [cpu]);
+	if (!pcpuc) {
+		scx_bpf_error("Failed to get PCPU context");
+		return;
+	}
+	node_doms = pcpuc->nr_node_doms;
 
-		if (scx_bpf_dsq_nr_queued(dom_id) >= greedy_threshold &&
-		    scx_bpf_consume(dom_id)) {
-			stat_add(RUSTY_STAT_GREEDY, 1);
-			break;
+	/* try to steal a task from domains on the current NUMA node */
+	bpf_for(i, 0, node_doms) {
+		dom = (pcpuc->dom_rr_cur + 1 + i) % node_doms;
+		if (scx_bpf_consume(dom)) {
+			stat_add(RUSTY_STAT_GREEDY_LOCAL, 1);
+			return;
+		}
+	}
+
+	if (!greedy_threshold_x_numa || nr_nodes == 1)
+		return;
+
+	/* try to steal a task from domains on other NUMA nodes */
+	my_node = dom_node_id(pcpuc->dom_id);
+	bpf_repeat(nr_doms - 1) {
+		dom = (pcpuc->dom_rr_cur + 1) % nr_doms;
+		pcpuc->dom_rr_cur++;
+		if (dom_node_id(dom) != my_node &&
+		    scx_bpf_dsq_nr_queued(dom) >= greedy_threshold_x_numa &&
+		    scx_bpf_consume(dom)) {
+			stat_add(RUSTY_STAT_GREEDY_XNUMA, 1);
+			return;
 		}
 	}
 }
@@ -1192,7 +1237,7 @@ static s32 create_dom(u32 dom_id)
 	struct dom_ctx *domc;
 	struct node_ctx *nodec;
 	struct bpf_cpumask *cpumask, *node_mask;
-	u32 cpu, node_id, *nid_ptr;
+	u32 cpu, node_id;
 	s32 ret;
 
 	if (dom_id >= MAX_DOMS) {
@@ -1260,12 +1305,7 @@ static s32 create_dom(u32 dom_id)
 		return -EEXIST;
 	}
 
-	nid_ptr = MEMBER_VPTR(dom_numa_id_map, [dom_id]);
-	if (!nid_ptr) {
-		scx_bpf_error("Couldn't look up node ID for %s", dom_id);
-		return -EEXIST;
-	}
-	node_id = *nid_ptr;
+	node_id = dom_node_id(dom_id);
 	nodec = bpf_map_lookup_elem(&node_data, &node_id);
 	if (!nodec) {
 		/* Should never happen, it's created statically at load time. */
@@ -1296,6 +1336,67 @@ static s32 create_dom(u32 dom_id)
 		bpf_cpumask_release(cpumask);
 		return -EEXIST;
 	}
+
+	return 0;
+}
+
+static s32 initialize_cpu(s32 cpu)
+{
+	struct bpf_cpumask *cpumask;
+	struct dom_ctx *domc;
+	int i, j = 0;
+	struct pcpu_ctx *pcpuc = MEMBER_VPTR(pcpu_ctx, [cpu]);
+	u32 *dom_nodes;
+
+	if (!pcpuc) {
+		scx_bpf_error("Failed to lookup pcpu ctx %d", cpu);
+		return -ENOENT;
+	}
+
+	pcpuc->dom_rr_cur = cpu;
+	bpf_for(i, 0, nr_doms) {
+		domc = bpf_map_lookup_elem(&dom_data, &i);
+		if (!domc) {
+			scx_bpf_error("Failed to lookup dom_ctx");
+			return -ENOENT;
+		}
+		bpf_rcu_read_lock();
+		cpumask = domc->node_cpumask;
+		if (!cpumask) {
+			bpf_rcu_read_unlock();
+			scx_bpf_error("Failed to lookup dom node cpumask");
+			return -ENOENT;
+		}
+
+		if (bpf_cpumask_test_cpu(cpu, (const struct cpumask *)cpumask)) {
+			cpumask = domc->cpumask;
+			if (!cpumask) {
+				bpf_rcu_read_unlock();
+				scx_bpf_error("Failed to lookup dom cpumask");
+				return -ENOENT;
+			}
+			/*
+			 * Only record the remote domains in this array, as
+			 * we'll only ever consume from them on the greedy
+			 * threshold path.
+			 */
+			if (!bpf_cpumask_test_cpu(cpu,
+						  (const struct cpumask *)cpumask)) {
+				dom_nodes = MEMBER_VPTR(pcpuc->node_doms, [j]);
+				if (!dom_nodes) {
+					bpf_rcu_read_unlock();
+					scx_bpf_error("Failed to lookup doms ptr");
+					return -EINVAL;
+				}
+				*dom_nodes = i;
+				j++;
+			} else {
+				pcpuc->dom_id = i;
+			}
+		}
+		bpf_rcu_read_unlock();
+	}
+	pcpuc->nr_node_doms = j;
 
 	return 0;
 }
@@ -1334,15 +1435,17 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 		if (ret)
 			return ret;
 	}
-
 	bpf_for(i, 0, nr_doms) {
 		ret = create_dom(i);
 		if (ret)
 			return ret;
 	}
 
-	bpf_for(i, 0, nr_cpus)
-		pcpu_ctx[i].dom_rr_cur = i;
+	bpf_for(i, 0, nr_cpus) {
+		ret = initialize_cpu(i);
+		if (ret)
+			return ret;
+	}
 
 	return 0;
 }
