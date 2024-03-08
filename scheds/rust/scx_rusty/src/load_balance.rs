@@ -151,6 +151,7 @@ use scx_utils::Topology;
 use scx_utils::LoadLedger;
 use scx_utils::LoadAggregator;
 use sorted_vec::SortedVec;
+use std::vec::Vec;
 
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 
@@ -400,9 +401,7 @@ impl_ord_for_type!(Domain);
 struct NumaNode {
     id: usize,
     load: LoadEntity,
-    push_domains: SortedVec<Domain>,
-    pull_domains: SortedVec<Domain>,
-    balanced_domains: Vec<Domain>,
+    domains: SortedVec<Domain>,
 }
 
 impl NumaNode {
@@ -417,9 +416,7 @@ impl NumaNode {
                                   NumaNode::LOAD_IMBAL_PUSH_MAX_RATIO,
                                   NumaNode::LOAD_IMBAL_XFER_TARGET_RATIO,
                                   0.0f64, numa_load_avg),
-            push_domains: SortedVec::new(),
-            pull_domains: SortedVec::new(),
-            balanced_domains: Vec::new(), 
+            domains: SortedVec::new(),
         }
     }
 
@@ -435,18 +432,7 @@ impl NumaNode {
     }
 
     fn insert_domain(&mut self, domain: Domain) {
-        let state = domain.load.state();
-        match state {
-            BalanceState::Balanced => {
-                self.balanced_domains.push(domain);
-            },
-            BalanceState::NeedsPush => {
-                self.push_domains.insert(domain);
-            },
-            BalanceState::NeedsPull => {
-                self.pull_domains.insert(domain);
-            }
-        }
+        self.domains.insert(domain);
     }
 
     fn update_load(&mut self, delta: f64) {
@@ -460,21 +446,7 @@ impl NumaNode {
             domains: Vec::new(),
         };
 
-        for dom in self.push_domains.iter(){
-            n_stat.domains.push(DomainStat {
-                id: dom.id,
-                load: dom.load.clone(),
-            });
-        }
-
-        for dom in self.pull_domains.iter(){
-            n_stat.domains.push(DomainStat {
-                id: dom.id,
-                load: dom.load.clone(),
-            });
-        }
-
-        for dom in self.balanced_domains.iter(){
+        for dom in self.domains.iter(){
             n_stat.domains.push(DomainStat {
                 id: dom.id,
                 load: dom.load.clone(),
@@ -900,23 +872,17 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     fn transfer_between_nodes(&mut self,
                               push_node: &mut NumaNode,
                               pull_node: &mut NumaNode) -> Result<f64> {
-        let n_push_doms = push_node.push_domains.len();
-        let n_pull_doms = pull_node.pull_domains.len();
-        debug!("Inter node {} -> {} started ({} push domains -> {} pull domains)",
-               push_node.id, pull_node.id, n_push_doms, n_pull_doms);
-
-        if n_push_doms == 0 || n_pull_doms == 0 {
-            return Ok(0.0f64);
-        }
+        debug!("Inter node {} -> {} started",
+               push_node.id, pull_node.id);
 
         let push_imbal = push_node.load.imbal();
         let pull_imbal = pull_node.load.imbal();
         let xfer = push_node.xfer_between(&pull_node);
 
         let mut delta = 0.0f64;
-        let mut push_doms = std::mem::take(&mut push_node.push_domains).into_vec();
+        let mut push_doms = std::mem::take(&mut push_node.domains).into_vec();
         for push_dom in push_doms.iter_mut().rev() {
-            let mut pull_doms = std::mem::take(&mut pull_node.pull_domains).into_vec();
+            let mut pull_doms = std::mem::take(&mut pull_node.domains).into_vec();
             for pull_dom in pull_doms.iter_mut() {
                 if let Some(transferred) = self.try_find_move_task((push_dom, push_imbal),
                                                                    (pull_dom, pull_imbal),
@@ -927,12 +893,12 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     break;
                 }
             }
-            std::mem::swap(&mut pull_node.pull_domains, &mut SortedVec::from_unsorted(pull_doms));
+            std::mem::swap(&mut pull_node.domains, &mut SortedVec::from_unsorted(pull_doms));
             if delta > 0.0f64 {
                 push_node.update_load(-delta);
             }
         }
-        std::mem::swap(&mut push_node.push_domains, &mut SortedVec::from_unsorted(push_doms));
+        std::mem::swap(&mut push_node.domains, &mut SortedVec::from_unsorted(push_doms));
 
         Ok(delta)
     }
@@ -998,46 +964,50 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     }
 
     fn balance_within_node(&mut self, node: &mut NumaNode) -> Result<()> {
-        let n_push_doms = node.push_domains.len();
-        let n_pull_doms = node.pull_domains.len();
-
-        debug!("Intra node {} LB started ({} push domains -> {} pull domains)",
-               node.id, n_push_doms, n_pull_doms);
-
-        if n_push_doms == 0 || n_pull_doms == 0 {
-            return Ok(());
+        if node.domains.len() < 2 {
+            return Ok(())
         }
 
-        let mut push_doms = std::mem::take(&mut node.push_domains).into_vec();
-        for push_dom in push_doms.iter_mut().filter(|x| x.load.state() == BalanceState::NeedsPush).rev() {
-            let push_cutoff = push_dom.load.push_cutoff();
-            let push_imbal = push_dom.load.imbal();
-            let mut load = 0.0f64;
-            if push_dom.load.imbal() < 0.0f64 {
-                bail!("Push dom {} had imbal {}", push_dom.id, push_dom.load.imbal());
+        debug!("Intra node {} LB started)", node.id);
+
+        let mut pushers = Vec::new();
+
+        loop {
+            let mut push_dom = node.domains.pop().unwrap();
+            if node.domains.len() == 0 || push_dom.load.state() != BalanceState::NeedsPush {
+                node.domains.insert(push_dom);
+                break;
             }
 
+            let push_cutoff = push_dom.load.push_cutoff();
+            let push_imbal = push_dom.load.imbal();
+            if push_imbal < 0.0f64 {
+                bail!("Node {} push dom {} had imbal {}", node.id, push_dom.id, push_imbal);
+            }
+            let mut load = 0.0f64;
+            let mut did_transfer = false;
             loop {
-                let mut did_transfer = false;
-                let mut pull_doms = std::mem::take(&mut node.pull_domains).into_vec();
-                for pull_dom in pull_doms.iter_mut().filter(|x| x.load.state() == BalanceState::NeedsPull) {
-                    if pull_dom.load.imbal() >= 0.0f64 {
-                        bail!("Pull dom {} had imbal {}", pull_dom.id, pull_dom.load.imbal());
-                    }
-                    let pull_imbal = pull_dom.load.imbal();
-                    let xfer = push_dom.xfer_between(&pull_dom);
-                    if let Some(transferred) = self.try_find_move_task((push_dom, push_imbal),
-                                                                       (pull_dom, pull_imbal),
-                                                                       xfer)?
-                    {
-                        if transferred > 0.0f64 {
-                            load += transferred;
-                            did_transfer = true;
-                        }
+                let mut pull_dom = node.domains.remove_index(0);
+                if pull_dom.load.state() != BalanceState::NeedsPull {
+                    node.domains.push(pull_dom);
+                    break;
+                }
+                let pull_imbal = pull_dom.load.imbal();
+                if pull_imbal >= 0.0f64 {
+                    bail!("Node {} pull dom {} had imbal {}", node.id, pull_dom.id, pull_imbal);
+                }
+                let xfer = push_dom.xfer_between(&pull_dom);
+                if let Some(transferred) = self.try_find_move_task((&mut push_dom, push_imbal),
+                                                                   (&mut pull_dom, pull_imbal),
+                                                                   xfer)?
+                {
+                    if transferred > 0.0f64 {
+                        load += transferred;
+                        did_transfer = true;
                     }
                 }
-                std::mem::swap(&mut node.pull_domains, &mut SortedVec::from_unsorted(pull_doms));
 
+                node.domains.insert(pull_dom);
                 if !did_transfer || load >= push_cutoff {
                     break;
                 }
@@ -1045,8 +1015,20 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             if load > 0.0f64 {
                 debug!("DOM {} pushed {:.06} total load", push_dom.id, load);
             }
+
+            pushers.push(push_dom);
+            if !did_transfer {
+                break;
+            }
         }
-        std::mem::swap(&mut node.push_domains, &mut SortedVec::from_unsorted(push_doms));
+
+        loop {
+            let push_dom = pushers.pop();
+            if push_dom.is_none() {
+                break;
+            }
+            node.domains.insert(push_dom.unwrap());
+        }
 
         Ok(())
     }
