@@ -79,8 +79,8 @@ const SCHEDULER_NAME: &'static str = "RustLand";
 ///
 #[derive(Debug, Parser)]
 struct Opts {
-    /// Scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "20000")]
+    /// Scheduling slice duration in microseconds (default is 5ms).
+    #[clap(short = 's', long, default_value = "5000")]
     slice_us: u64,
 
     /// Time slice boost: increasing this value enhances performance of interactive applications
