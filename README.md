@@ -161,13 +161,8 @@ $ sudo pacman -Sy cachyos/linux-sched-ext cachyos/linux-sched-ext-headers cachyo
 In addition to the packages from the previous step, install the following.
 
 ```
-$ sudo pacman -Sy cachyos/clang-github-bin meson cargo bpf pahole
+$ sudo pacman -Sy meson cargo bpf pahole
 ```
-
-`clang-github-bin` is necessary because the recommended `clang` version is
-17 while Arch is still shipping 16. It's built from the [AUR
-package](https://aur.archlinux.org/packages/clang-github-bin) of the same
-name. This is a repackage of the official LLVM release in `.deb` format.
 
 
 ## Repository Structure
