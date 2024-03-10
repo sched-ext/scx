@@ -79,8 +79,8 @@ const SCHEDULER_NAME: &'static str = "RustLand";
 ///
 #[derive(Debug, Parser)]
 struct Opts {
-    /// Scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "20000")]
+    /// Scheduling slice duration in microseconds (default is 5ms).
+    #[clap(short = 's', long, default_value = "5000")]
     slice_us: u64,
 
     /// Time slice boost: increasing this value enhances performance of interactive applications
@@ -391,10 +391,13 @@ impl<'a> Scheduler<'a> {
         // NOTE: we should make this threshold a tunable, but for now let's assume that a moving
         // average of 10 voluntary context switch per second is enough to classify the task as
         // interactive.
+        //
+        // NOTE: some tasks may have a very high weight, that can potentially disrupt our slice
+        // boost optimizations, therefore always limit the task priority to a max of 1000.
         let weight = if task_info.avg_nvcsw >= 10 {
-            task.weight * self.slice_boost.max(1)
+            task.weight.min(1000) * self.slice_boost.max(1)
         } else {
-            task.weight
+            task.weight.min(1000)
         };
 
         // Scale the time slice by the task's priority (weight).
