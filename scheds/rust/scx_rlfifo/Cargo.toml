@@ -9,7 +9,7 @@ license = "GPL-2.0-only"
 [dependencies]
 anyhow = "1.0.65"
 ctrlc = { version = "3.1", features = ["termination"] }
-libbpf-rs = "0.22.0"
+libbpf-rs = { git = "https://github.com/libbpf/libbpf-rs.git#af3296c00d74fd50b311adc7f931563be137cd8b" }
 libc = "0.2.137"
 scx_utils = { path = "../../../rust/scx_utils", version = "0.6" }
 scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "0.1" }
