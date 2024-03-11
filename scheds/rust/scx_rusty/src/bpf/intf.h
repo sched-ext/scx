@@ -17,6 +17,7 @@
 typedef unsigned char u8;
 typedef unsigned int u32;
 typedef unsigned long long u64;
+typedef int s32;
 #endif
 
 #include <scx/ravg.bpf.h>
