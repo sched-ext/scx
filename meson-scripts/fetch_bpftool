@@ -1,0 +1,9 @@
+#!/bin/bash
+
+cd $1
+rm -rf bpftool
+git clone --depth=1 https://github.com/libbpf/bpftool.git
+cd bpftool
+git fetch --depth=1 origin $2
+git checkout $2
+git submodule update --init --recursive

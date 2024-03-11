@@ -29,11 +29,6 @@ jobs:
       - run: sudo ln -sf /usr/bin/clang-17 /usr/bin/clang
       - run: sudo ln -sf /usr/bin/llvm-strip-17 /usr/bin/llvm-strip
 
-      # bpftool
-      - run: git clone --recurse-submodules --branch v7.3.0 https://github.com/libbpf/bpftool.git
-      - run: make -j -C bpftool/src
-      - run: sudo make -j -C bpftool/src install
-
       - uses: actions/checkout@v4
 
       # meson

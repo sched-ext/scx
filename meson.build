@@ -13,7 +13,6 @@ cc = meson.get_compiler('c')
 enable_rust = get_option('enable_rust')
 
 bpf_clang = find_program(get_option('bpf_clang'))
-bpftool = find_program(get_option('bpftool'))
 
 if enable_rust
   cargo = find_program(get_option('cargo'))
@@ -32,6 +31,10 @@ fetch_libbpf = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/fetch_libbpf'))
 build_libbpf = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/build_libbpf'))
+fetch_bpftool = find_program(join_paths(meson.current_source_dir(),
+                                      'meson-scripts/fetch_bpftool'))
+build_bpftool = find_program(join_paths(meson.current_source_dir(),
+                                      'meson-scripts/build_bpftool'))
 if enable_rust
   cargo_fetch = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/cargo_fetch'))
@@ -46,6 +49,25 @@ if bpf_clang_maj < 16
 elif bpf_clang_maj < 17
   warning('clang >= 17 recommended (@0@ ver=@1@)'
           .format(bpf_clang.full_path(), bpf_clang_ver))
+endif
+
+# These are for building libbpf and/or bpftool
+
+if meson.get_compiler('c').get_id() == 'gcc'
+  extra_args = ['-Wno-sign-compare']
+else
+  extra_args = []
+endif
+
+executable('cc_cflags_probe', 'meson-scripts/cc_cflags_probe.c', install: false, pie: true, c_args : extra_args)
+
+jq = find_program('jq')
+make = find_program('make')
+nproc = find_program('nproc')
+
+make_jobs = 1
+if nproc.found()
+  make_jobs = run_command(nproc, check: true).stdout().to_int()
 endif
 
 libbpf_path = '@0@/libbpf/src'.format(meson.current_build_dir())
@@ -70,10 +92,6 @@ endif
 # then read the compiler and args from meson's compile_commands.json
 # and re-set them when we build libbpf with make
 if should_build_libbpf
-  jq = find_program('jq')
-  make = find_program('make')
-  nproc = find_program('nproc')
-
   if not jq.found() or not make.found()
     error('To build the libbpf library "make" and "jq" are required')
   endif
@@ -84,9 +102,6 @@ if should_build_libbpf
   message('Fetching libbpf repo')
   libbpf_commit = '4f875865b772c4f534bc0a665bbd988193825bd4'
   run_command(fetch_libbpf, meson.current_build_dir(), libbpf_commit, check: true)
-
-  # setup the build target
-  executable('cc_cflags_probe', 'meson-scripts/cc_cflags_probe.c', install: false, pie: true)
 
   make_jobs = 1
   if nproc.found()
@@ -120,6 +135,40 @@ else
     warning('libbpf <1.3 does not support RESIZE_ARRAY(), expect breakages in schedulers that use them')
   endif
 endif
+
+bpftool_path = '@0@/bpftool/src'.format(meson.current_build_dir())
+should_build_bpftool = true
+bpftool_exe_path = '@0@/bpftool'.format(bpftool_path)
+
+if get_option('bpftool') == 'disabled'
+  bpftool = find_program('bpftool')
+  should_build_bpftool = false
+  bpftool_exe_path = bpftool.full_path()
+elif get_option('bpftool') != ''
+  bpftool = find_program(get_option('bpftool'))
+  should_build_bpftool = false
+  bpftool_exe_path = bpftool.full_path()
+endif
+
+if should_build_bpftool
+  message('Fetching bpftool repo')
+  bpftool_commit = '8328f373c0ef27fda14f12e67f1d6ed882dd2e81'
+  run_command(fetch_bpftool, meson.current_build_dir(), bpftool_commit, check: true)
+  
+  bpftool_target = custom_target('bpftool_target',
+              output: '@PLAINNAME@.__PHONY__',
+              input: 'meson-scripts/bpftool_dummy.c',
+              command: [build_bpftool, jq, make, bpftool_path, '@0@'.format(make_jobs)],
+              build_by_default: true)
+else
+  # this is a noop when we're not building bpftool ourselves
+  bpftool_target = custom_target('bpftool_target',
+              output: '@PLAINNAME@.__PHONY__',
+              input: 'meson-scripts/bpftool_dummy.c',
+              command: ['echo'],
+              build_by_default: true)
+endif
+# end libbpf/bpftool stuff
 
 #
 # Determine bpf_base_cflags which will be used to compile all .bpf.o files.
@@ -177,8 +226,8 @@ gen_bpf_o = generator(bpf_clang,
                                   '-c', '@INPUT@', '-o', '@OUTPUT@'])
 gen_bpf_skel = generator(bpftool_build_skel,
                          output: ['@BASENAME@.skel.h','@BASENAME@.subskel.h' ],
-                         depends: [libbpf],
-                         arguments: [bpftool.full_path(), '@INPUT@', '@OUTPUT0@', '@OUTPUT1@'])
+                         depends: [libbpf, bpftool_target],
+                         arguments: [bpftool_exe_path, '@INPUT@', '@OUTPUT0@', '@OUTPUT1@'])
 
 #
 # For rust sub-projects.
