@@ -172,10 +172,6 @@ struct AlignedBuffer([u8; BUFSIZE]);
 
 static mut BUF: AlignedBuffer = AlignedBuffer([0; BUFSIZE]);
 
-// Special negative error code for libbpf to stop after consuming just one item from a BPF
-// ring buffer.
-const LIBBPF_STOP: i32 = -255;
-
 impl<'cb> BpfScheduler<'cb> {
     pub fn init(
         slice_us: u64,
@@ -225,7 +221,7 @@ impl<'cb> BpfScheduler<'cb> {
             // Maybe we should fix this to stop processing items from the ring buffer also when a
             // value > 0 is returned.
             //
-            LIBBPF_STOP
+            -255
         }
 
         // Initialize online CPUs counter.
@@ -376,16 +372,15 @@ impl<'cb> BpfScheduler<'cb> {
     // Receive a task to be scheduled from the BPF dispatcher.
     //
     // NOTE: if task.cpu is negative the task is exiting and it does not require to be scheduled.
-    pub fn dequeue_task(&mut self) -> Result<Option<QueuedTask>, i32> {
-        match self.queued.consume_raw() {
-            0 => Ok(None),
-            LIBBPF_STOP => {
+    pub fn dequeue_task(&mut self) -> Result<Option<QueuedTask>, libbpf_rs::Error> {
+        match self.queued.consume() {
+            Ok(()) => Ok(None),
+            Err(error) if error.kind() == libbpf_rs::ErrorKind::Other => {
                 // A valid task is received, convert data to a proper task struct.
                 let task = unsafe { EnqueuedMessage::from_bytes(&BUF.0).to_queued_task() };
                 Ok(Some(task))
             }
-            res if res < 0 => Err(res),
-            res => panic!("Unexpected return value from libbpf-rs::consume_raw(): {}", res),
+            Err(error) => Err(error),
         }
     }
 
