@@ -386,7 +386,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 		return prev_cpu;
 
 	/*
-	 * We usually update the layer in layered_runnable() to avoid confusing.
+	 * We usually update the layer in layered_runnable() to avoid confusion.
 	 * As layered_select_cpu() takes place before runnable, new tasks would
 	 * still have -1 layer. Just return @prev_cpu.
 	 */
@@ -855,8 +855,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	bpf_for(i, 0, nr_layers) {
 		struct layer *layer = &layers[i];
 
-		dbg("CFG LAYER[%d] open=%d preempt=%d",
-		    i, layer->open, layer->preempt);
+		dbg("CFG LAYER[%d] open=%d preempt=%d exclusive=%d",
+		    i, layer->open, layer->preempt, layer->exclusive);
 
 		if (layer->nr_match_ors > MAX_LAYER_MATCH_ORS) {
 			scx_bpf_error("too many ORs");

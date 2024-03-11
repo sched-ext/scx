@@ -85,6 +85,7 @@ struct layer {
 	unsigned int		idx;
 	bool			open;
 	bool			preempt;
+	bool			exclusive;
 
 	u64			vtime_now;
 	u64			nr_tasks;

@@ -95,26 +95,27 @@ lazy_static::lazy_static! {
 /// The outer array contains the OR groups and the inner AND blocks, so the
 /// above matches:
 ///
-/// * Tasks which are in the cgroup sub-hierarchy under "system.slice".
-/// * Or tasks whose comm starts with "fbagent" and have a nice value > 0.
+/// - Tasks which are in the cgroup sub-hierarchy under "system.slice".
+///
+/// - Or tasks whose comm starts with "fbagent" and have a nice value > 0.
 ///
 /// Currently, the following matches are supported:
 ///
-/// * CgroupPrefix: Matches the prefix of the cgroup that the task belongs
+/// - CgroupPrefix: Matches the prefix of the cgroup that the task belongs
 ///   to. As this is a string match, whether the pattern has the trailing
 ///   '/' makes a difference. For example, "TOP/CHILD/" only matches tasks
 ///   which are under that particular cgroup while "TOP/CHILD" also matches
 ///   tasks under "TOP/CHILD0/" or "TOP/CHILD1/".
 ///
-/// * CommPrefix: Matches the task's comm prefix.
+/// - CommPrefix: Matches the task's comm prefix.
 ///
-/// * NiceAbove: Matches if the task's nice value is greater than the
+/// - NiceAbove: Matches if the task's nice value is greater than the
 ///   pattern.
 ///
-/// * NiceBelow: Matches if the task's nice value is smaller than the
+/// - NiceBelow: Matches if the task's nice value is smaller than the
 ///   pattern.
 ///
-/// * NiceEquals: Matches if the task's nice value is exactly equal to
+/// - NiceEquals: Matches if the task's nice value is exactly equal to
 ///   the pattern.
 ///
 /// While there are complexity limitations as the matches are performed in
@@ -141,21 +142,26 @@ lazy_static::lazy_static! {
 ///
 /// Currently, the following policy kinds are supported:
 ///
-/// * Confined: Tasks are restricted to the allocated CPUs. The number of
+/// - Confined: Tasks are restricted to the allocated CPUs. The number of
 ///   CPUs allocated is modulated to keep the per-CPU utilization in
 ///   "util_range". The range can optionally be restricted with the
 ///   "cpus_range" property.
 ///
-/// * Grouped: Similar to Confined but tasks may spill outside if there are
-///   idle CPUs outside the allocated ones. If "preempt" is true, tasks in
-///   this layer will preempt tasks which belong to other non-preempting
-///   layers when no idle CPUs are available.
+/// - Grouped: Similar to Confined but tasks may spill outside if there are
+///   idle CPUs outside the allocated ones.
 ///
-/// * Open: Prefer the CPUs which are not occupied by Confined or Grouped
+/// - Open: Prefer the CPUs which are not occupied by Confined or Grouped
 ///   layers. Tasks in this group will spill into occupied CPUs if there are
-///   no unoccupied idle CPUs. If "preempt" is true, tasks in this layer
-///   will preempt tasks which belong to other non-preempting layers when no
-///   idle CPUs are available.
+///   no unoccupied idle CPUs.
+///
+/// Both Grouped and Open layers also acception the following options:
+///
+/// - preempt: If true, tasks in the layer will preempt tasks which belong
+///   to other non-preempting layers when no idle CPUs are available.
+///
+/// - exclusive: If true, tasks in the layer will occupy the whole core. The
+///   other logical CPUs sharing the same core will be kept idle. This isn't
+///   a hard guarantee, so don't depend on it for security purposes.
 ///
 /// Similar to matches, adding new policies and extending existing ones
 /// should be relatively straightforward.
@@ -296,9 +302,11 @@ enum LayerKind {
         cpus_range: Option<(usize, usize)>,
         util_range: (f64, f64),
         preempt: bool,
+        exclusive: bool,
     },
     Open {
         preempt: bool,
+        exclusive: bool,
     },
 }
 
@@ -1192,9 +1200,13 @@ impl<'a> Scheduler<'a> {
             layer.nr_match_ors = spec.matches.len() as u32;
 
             match &spec.kind {
-                LayerKind::Open { preempt } | LayerKind::Grouped { preempt, .. } => {
+                LayerKind::Open { preempt, exclusive }
+                | LayerKind::Grouped {
+                    preempt, exclusive, ..
+                } => {
                     layer.open = true;
                     layer.preempt = *preempt;
+                    layer.exclusive = *exclusive;
                 }
                 _ => {}
             }
@@ -1264,9 +1276,14 @@ impl<'a> Scheduler<'a> {
         // huge problem in the interim until we figure it out.
 
         // Attach.
-        sched.skel.attach().context("Failed to attach BPF program")?;
+        sched
+            .skel
+            .attach()
+            .context("Failed to attach BPF program")?;
         sched.struct_ops = Some(
-            sched.skel.maps_mut()
+            sched
+                .skel
+                .maps_mut()
                 .layered()
                 .attach_struct_ops()
                 .context("Failed to attach layered struct ops")?,
@@ -1601,7 +1618,10 @@ fn write_example_file(path: &str) -> Result<()> {
                     LayerMatch::CgroupPrefix("workload.slice/".into()),
                     LayerMatch::NiceBelow(0),
                 ]],
-                kind: LayerKind::Open { preempt: true },
+                kind: LayerKind::Open {
+                    preempt: true,
+                    exclusive: true,
+                },
             },
             LayerSpec {
                 name: "normal".into(),
@@ -1611,6 +1631,7 @@ fn write_example_file(path: &str) -> Result<()> {
                     cpus_range: None,
                     util_range: (0.5, 0.6),
                     preempt: false,
+                    exclusive: false,
                 },
             },
         ],
