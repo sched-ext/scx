@@ -1162,7 +1162,7 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 	}
 	cpumask = bpf_kptr_xchg(&map_value->tmp_cpumask, cpumask);
 	if (cpumask) {
-        scx_bpf_error("%s[%d] tmp_cpumask already present", p->comm, p->pid);
+		scx_bpf_error("%s[%d] tmp_cpumask already present", p->comm, p->pid);
 		bpf_cpumask_release(cpumask);
 		return -EEXIST;
 	}
