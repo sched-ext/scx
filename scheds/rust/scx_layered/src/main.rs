@@ -1477,6 +1477,15 @@ impl<'a> Scheduler<'a> {
             }
         };
 
+        let fmt_pct = |v: f64| {
+            let out = format!("{:5.2}", v);
+            if out.starts_with("100") {
+                "100.0".to_string()
+            } else {
+                out
+            }
+        };
+
         self.om_stats.total.set(total as i64);
         self.om_stats
             .local
@@ -1507,11 +1516,11 @@ impl<'a> Scheduler<'a> {
 
         if !self.om_format {
             info!(
-                "tot={:7} local={:5.2} open_idle={:5.2} affn_viol={:5.2} tctx_err={} proc={:?}ms",
+                "tot={:7} local={} open_idle={} affn_viol={} tctx_err={} proc={:?}ms",
                 self.om_stats.total.get(),
-                self.om_stats.local.get(),
-                self.om_stats.open_idle.get(),
-                self.om_stats.affn_viol.get(),
+                fmt_pct(self.om_stats.local.get()),
+                fmt_pct(self.om_stats.open_idle.get()),
+                fmt_pct(self.om_stats.affn_viol.get()),
                 self.om_stats.tctx_err.get(),
                 self.om_stats.proc_ms.get(),
             );
@@ -1525,11 +1534,11 @@ impl<'a> Scheduler<'a> {
             );
 
             info!(
-                "excl_coll={:5.2} excl_preempt={:5.2} excl_idle={:5.2} excl_wakeup={:5.2}",
-                lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION),
-                lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT),
-                self.om_stats.excl_idle.get(),
-                self.om_stats.excl_wakeup.get(),
+                "excl_coll={} excl_preempt={} excl_idle={} excl_wakeup={}",
+                fmt_pct(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION)),
+                fmt_pct(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT)),
+                fmt_pct(self.om_stats.excl_idle.get()),
+                fmt_pct(self.om_stats.excl_wakeup.get()),
             );
         }
 
@@ -1627,13 +1636,13 @@ impl<'a> Scheduler<'a> {
                     width = header_width,
                 );
                 info!(
-                    "  {:<width$}  tot={:7} local={:5.2} open_idle={:5.2} preempt={:5.2} affn_viol={:5.2}",
+                    "  {:<width$}  tot={:7} local={} open_idle={} preempt={} affn_viol={}",
                     "",
                     l_total.get(),
-                    l_local.get(),
-                    l_open_idle.get(),
-                    l_preempt.get(),
-                    l_affn_viol.get(),
+                    fmt_pct(l_local.get()),
+                    fmt_pct(l_open_idle.get()),
+                    fmt_pct(l_preempt.get()),
+                    fmt_pct(l_affn_viol.get()),
                     width = header_width,
                 );
                 match &layer.kind {
@@ -1643,9 +1652,9 @@ impl<'a> Scheduler<'a> {
                         if *min_exec_us > 0 =>
                     {
                         info!(
-                            "  {:<width$}  min_exec={:5.2} min_exec_ms={:7.2}",
+                            "  {:<width$}  min_exec={} min_exec_ms={:7.2}",
                             "",
-                            l_min_exec.get(),
+                            fmt_pct(l_min_exec.get()),
                             l_min_exec_us.get() as f64 / 1000.0,
                             width = header_width,
                         );
@@ -1657,10 +1666,10 @@ impl<'a> Scheduler<'a> {
                         if *exclusive =>
                     {
                         info!(
-                            "  {:<width$}  excl_coll={:5.2} excl_preempt={:5.2}",
+                            "  {:<width$}  excl_coll={} excl_preempt={}",
                             "",
-                            l_excl_collision.get(),
-                            l_excl_preempt.get(),
+                            fmt_pct(l_excl_collision.get()),
+			    fmt_pct(l_excl_preempt.get()),
                             width = header_width,
                         );
                     }
