@@ -393,14 +393,14 @@ fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
                 ..
             },
         ) => {
-            let idle_usec = curr_idle - prev_idle;
-            let iowait_usec = curr_iowait - prev_iowait;
-            let user_usec = curr_user - prev_user;
-            let system_usec = curr_system - prev_system;
-            let nice_usec = curr_nice - prev_nice;
-            let irq_usec = curr_irq - prev_irq;
-            let softirq_usec = curr_softirq - prev_softirq;
-            let stolen_usec = curr_stolen - prev_stolen;
+            let idle_usec = curr_idle.saturating_sub(*prev_idle);
+            let iowait_usec = curr_iowait.saturating_sub(*prev_iowait);
+            let user_usec = curr_user.saturating_sub(*prev_user);
+            let system_usec = curr_system.saturating_sub(*prev_system);
+            let nice_usec = curr_nice.saturating_sub(*prev_nice);
+            let irq_usec = curr_irq.saturating_sub(*prev_irq);
+            let softirq_usec = curr_softirq.saturating_sub(*prev_softirq);
+            let stolen_usec = curr_stolen.saturating_sub(*prev_stolen);
 
             let busy_usec =
                 user_usec + system_usec + nice_usec + irq_usec + softirq_usec + stolen_usec;
@@ -411,9 +411,7 @@ fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
                 Ok(1.0)
             }
         }
-        _ => {
-            bail!("Missing stats in cpustat");
-        }
+        _ => bail!("Missing stats in cpustat"),
     }
 }
 
@@ -1478,11 +1476,10 @@ impl<'a> Scheduler<'a> {
         };
 
         let fmt_pct = |v: f64| {
-            let out = format!("{:5.2}", v);
-            if out.starts_with("100") {
-                "100.0".to_string()
+            if v >= 99.995 {
+                format!("{:5.1}", v)
             } else {
-                out
+                format!("{:5.2}", v)
             }
         };
 
@@ -1669,7 +1666,7 @@ impl<'a> Scheduler<'a> {
                             "  {:<width$}  excl_coll={} excl_preempt={}",
                             "",
                             fmt_pct(l_excl_collision.get()),
-			    fmt_pct(l_excl_preempt.get()),
+                            fmt_pct(l_excl_preempt.get()),
                             width = header_width,
                         );
                     }
