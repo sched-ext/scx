@@ -1093,6 +1093,7 @@ struct OpenMetricsStats {
     l_min_exec_us: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_open_idle: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_preempt: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_preempt_fail: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_affn_viol: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_excl_collision: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_excl_preempt: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
@@ -1174,6 +1175,10 @@ impl OpenMetricsStats {
         register!(
             l_preempt,
             "% of scheduling events that preempted other tasks"
+        );
+        register!(
+            l_preempt_fail,
+            "% of scheduling events that attempted to preempt other tasks but failed"
         );
         register!(
             l_affn_viol,
@@ -1606,6 +1611,10 @@ impl<'a> Scheduler<'a> {
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE)
             );
             let l_preempt = set!(l_preempt, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT));
+            let l_preempt_fail = set!(
+                l_preempt_fail,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FAIL)
+            );
             let l_affn_viol = set!(
                 l_affn_viol,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL)
@@ -1633,13 +1642,21 @@ impl<'a> Scheduler<'a> {
                     width = header_width,
                 );
                 info!(
-                    "  {:<width$}  tot={:7} local={} open_idle={} preempt={} affn_viol={}",
+                    "  {:<width$}  tot={:7} local={} open_idle={} affn_viol={}",
                     "",
                     l_total.get(),
                     fmt_pct(l_local.get()),
                     fmt_pct(l_open_idle.get()),
-                    fmt_pct(l_preempt.get()),
                     fmt_pct(l_affn_viol.get()),
+                    width = header_width,
+                );
+                info!(
+                    "  {:<width$}  preempt/fail={}/{} min_exec={}/{:7.2}ms",
+                    "",
+                    fmt_pct(l_preempt.get()),
+                    fmt_pct(l_preempt_fail.get()),
+                    fmt_pct(l_min_exec.get()),
+                    l_min_exec_us.get() as f64 / 1000.0,
                     width = header_width,
                 );
                 info!(
@@ -1652,27 +1669,6 @@ impl<'a> Scheduler<'a> {
                     width = header_width
                 );
                 match &layer.kind {
-                    LayerKind::Confined { min_exec_us, .. }
-                    | LayerKind::Grouped { min_exec_us, .. }
-                    | LayerKind::Open { min_exec_us, .. } => {
-                        if *min_exec_us > 0 {
-                            info!(
-                                "  {:<width$}  min_exec={} min_exec_ms={:7.2}",
-                                "",
-                                fmt_pct(l_min_exec.get()),
-                                l_min_exec_us.get() as f64 / 1000.0,
-                                width = header_width,
-                            );
-                        } else if l_min_exec.get() != 0.0 || l_min_exec_us.get() != 0 {
-                            warn!(
-                                "min_exec_us is off but min_exec={} min_exec_ms={:7.2}",
-                                fmt_pct(l_min_exec.get()),
-                                l_min_exec_us.get() as f64 / 1000.0,
-                            );
-                        }
-                    }
-                }
-                match &layer.kind {
                     LayerKind::Grouped { exclusive, .. } | LayerKind::Open { exclusive, .. } => {
                         if *exclusive {
                             info!(
@@ -1684,7 +1680,8 @@ impl<'a> Scheduler<'a> {
                             );
                         } else if l_excl_collision.get() != 0.0 || l_excl_preempt.get() != 0.0 {
                             warn!(
-                                "exclusive is off but excl_coll={} excl_preempt={}",
+                                "{}: exclusive is off but excl_coll={} excl_preempt={}",
+                                spec.name,
                                 fmt_pct(l_excl_collision.get()),
                                 fmt_pct(l_excl_preempt.get()),
                             );

@@ -524,8 +524,10 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		preempt_cursor = (cpu + 1) % nr_possible_cpus;
 
 		lstat_inc(LSTAT_PREEMPT, layer, cctx);
-		break;
+		return;
 	}
+
+	lstat_inc(LSTAT_PREEMPT_FAIL, layer, cctx);
 }
 
 void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
