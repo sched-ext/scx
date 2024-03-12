@@ -151,6 +151,7 @@ use scx_utils::Topology;
 use scx_utils::LoadLedger;
 use scx_utils::LoadAggregator;
 use sorted_vec::SortedVec;
+use std::collections::VecDeque;
 
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 
@@ -855,7 +856,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             bail!("push node {}:{}, pull node {}:{}",
                   push_node.id, push_imbal, pull_node.id, pull_imbal);
         }
-        let mut pushers = Vec::with_capacity(push_node.domains.len());
+        let mut pushers = VecDeque::with_capacity(push_node.domains.len());
         let mut pullers = Vec::with_capacity(pull_node.domains.len());
         let mut pushed = 0f64;
 
@@ -883,13 +884,13 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             while pullers.len() > 0 {
                 pull_node.domains.insert(pullers.pop().unwrap());
             }
-            pushers.push(push_dom);
+            pushers.push_back(push_dom);
             if pushed > 0.0f64 {
                 break;
             }
         }
         while pushers.len() > 0 {
-            push_node.domains.insert(pushers.pop().unwrap());
+            push_node.domains.insert(pushers.pop_front().unwrap());
         }
 
         Ok(pushed)
@@ -902,7 +903,48 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         debug!("Node <-> Node LB started");
 
-        let mut pushers = Vec::with_capacity(self.nodes.len());
+        // Keep track of the nodes we're pushing load from, and pulling load to,
+        // respectively. We use separate vectors like this to allow us to
+        // mutably iterate over the same list, and pull nodes from the front and
+        // back in a nested fashion. The load algorithm looks roughly like this:
+        //
+        // In sorted order from most -> least loaded:
+        //
+        // For each "push node" (i.e. node with a positive load imbalance):
+        // restart_push:
+        //      For each "pull node" (i.e. node with a negative load imbalance):
+        //              For each "push domain" (i.e. each domain in "push node"
+        //              with a positive load imbalance):
+        //                      For each "pull domain" (i.e. each domain in
+        //                      "pull node" with a negative load imbalance):
+        //                              load = try_move_load(push_dom -> pull-dom)
+        //                              if load > 0
+        //                                      goto restart_pushext_pull
+        //
+        // There are four levels of nesting here, but in practice these are very
+        // shallow loops, as a system doesn't usually have many nodes or domains
+        // per node, only a subset of them will be imbalanced, and the
+        // imbalanced nodes and domains will only ever be in push imbalance, or
+        // pull imbalance at any given time.
+        //
+        // Because we're iterating mutably over these lists, we pop nodes and
+        // domains off of their lists, and then re-insert them after we're done
+        // doing migrations. The lists below are how we keep track of
+        // already-visited nodes while we're still iterating over the lists.
+        // Note that we immediately go back to iterating over every pull node
+        // any time we successfully transfer load, so that we ensure that we're
+        // always sending load to the least-loaded node.
+        //
+        // Note that we use a VecDeque for the pushers because we're iterating
+        // over self.nodes in descending-load order. Thus, when we're done
+        // iterating and we're adding the popped nodes back into self.nodes, we
+        // want to add them back in _ascending_ order so that we don't have to
+        // unnecessarily shift any already-re-added nodes to the right in the
+        // backing vector. In other words, this lets us do a true append in the
+        // SortedVec, rather than doing an insert(list.len() - 2, node). This
+        // applies both to iterating over push-imbalanced nodes, and iterating
+        // over push-imbalanced domains in the inner loops.
+        let mut pushers = VecDeque::with_capacity(self.nodes.len());
         let mut pullers = Vec::with_capacity(self.nodes.len());
 
         while self.nodes.len() >= 2 {
@@ -924,17 +966,14 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     break;
                 }
                 let migrated = self.transfer_between_nodes(&mut push_node, &mut pull_node)?;
+                pullers.push(pull_node);
                 if migrated > 0.0f64 {
                     // Break after a successful migration so that we can
                     // rebalance the pulling domains before the next
                     // transfer attempt, and ensure that we're trying to
                     // pull from domains in descending-imbalance order.
                     pushed += migrated;
-                    self.nodes.insert(pull_node);
                     debug!("NODE {} sending {:.06} --> NODE {}", push_node.id, migrated, pull_id);
-                    break;
-                } else {
-                    pullers.push(pull_node);
                 }
             }
             while pullers.len() > 0 {
@@ -944,15 +983,11 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             if pushed > 0.0f64 {
                 debug!("NODE {} pushed {:.06} total load", push_node.id, pushed);
             }
-            pushers.push(push_node);
-
-            if pushed == 0.0f64 {
-                break;
-            }
+            pushers.push_back(push_node);
         }
 
         while pushers.len() > 0 {
-            self.nodes.insert(pushers.pop().unwrap());
+            self.nodes.insert(pushers.pop_front().unwrap());
         }
 
         Ok(())
@@ -965,22 +1000,28 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         debug!("Intra node {} LB started", node.id);
 
-        let mut pushers = Vec::new();
+        // See the comment in balance_between_nodes() for the purpose of these
+        // lists. Everything is roughly the same here as in that comment block,
+        // with the notable exception that we're only iterating over domains
+        // inside of a single node.
+        let mut pushers = VecDeque::with_capacity(node.domains.len());
+        let mut pullers = Vec::new();
 
-        loop {
+        while node.domains.len() >= 2 {
             let mut push_dom = node.domains.pop().unwrap();
             if node.domains.len() == 0 || push_dom.load.state() != BalanceState::NeedsPush {
                 node.domains.insert(push_dom);
                 break;
             }
 
+            let mut pushed = 0.0f64;
             let push_cutoff = push_dom.load.push_cutoff();
             let push_imbal = push_dom.load.imbal();
             if push_imbal < 0.0f64 {
                 bail!("Node {} push dom {} had imbal {}", node.id, push_dom.id, push_imbal);
             }
-            let mut load = 0.0f64;
-            loop {
+
+            while node.domains.len() > 0 && pushed < push_cutoff {
                 let mut pull_dom = node.domains.remove_index(0);
                 if pull_dom.load.state() != BalanceState::NeedsPull {
                     node.domains.push(pull_dom);
@@ -991,38 +1032,37 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     bail!("Node {} pull dom {} had imbal {}", node.id, pull_dom.id, pull_imbal);
                 }
                 let xfer = push_dom.xfer_between(&pull_dom);
-                let mut did_transfer = false;
-                if let Some(transferred) = self.try_find_move_task((&mut push_dom, push_imbal),
-                                                                   (&mut pull_dom, pull_imbal),
-                                                                   xfer)?
-                {
-                    if transferred > 0.0f64 {
-                        load += transferred;
-                        did_transfer = true;
+                let transferred = self.try_find_move_task((&mut push_dom, push_imbal),
+                                                          (&mut pull_dom, pull_imbal),
+                                                          xfer)?;
+                if let Some(transferred) = transferred {
+                    if transferred <= 0.0f64 {
+                        bail!("Expected nonzero load transfer")
                     }
+                    pushed += transferred;
+                    // We've pushed load to pull_dom, and have already updated
+                    // its load (in try_find_move_task()). Re-insert it into the
+                    // sorted list (thus ensuring we're still iterating from
+                    // least load -> most load in the loop above), and try to
+                    // push more load.
+                    node.domains.insert(pull_dom);
+                    continue;
                 }
 
-                node.domains.insert(pull_dom);
-                if !did_transfer || load >= push_cutoff {
-                    break;
-                }
+                // Couldn't push any load to this domain, try the next one.
+                pullers.push(pull_dom);
             }
-            if load > 0.0f64 {
-                debug!("DOM {} pushed {:.06} total load", push_dom.id, load);
+            while pullers.len() > 0 {
+                node.domains.insert(pullers.pop().unwrap());
             }
 
-            pushers.push(push_dom);
-            if load == 0.0f64 {
-                break;
+            if pushed > 0.0f64 {
+                debug!("DOM {} pushed {:.06} total load", push_dom.id, pushed);
             }
+            pushers.push_back(push_dom);
         }
-
-        loop {
-            let push_dom = pushers.pop();
-            if push_dom.is_none() {
-                break;
-            }
-            node.domains.insert(push_dom.unwrap());
+        while pushers.len() > 0 {
+            node.domains.insert(pushers.pop_front().unwrap());
         }
 
         Ok(())
