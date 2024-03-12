@@ -34,6 +34,7 @@ use libbpf_rs::skel::SkelBuilder as _;
 use log::debug;
 use log::info;
 use log::trace;
+use log::warn;
 use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
@@ -1642,36 +1643,6 @@ impl<'a> Scheduler<'a> {
                     fmt_pct(l_affn_viol.get()),
                     width = header_width,
                 );
-                match &layer.kind {
-                    LayerKind::Confined { min_exec_us, .. }
-                    | LayerKind::Grouped { min_exec_us, .. }
-                    | LayerKind::Open { min_exec_us, .. }
-                        if *min_exec_us > 0 =>
-                    {
-                        info!(
-                            "  {:<width$}  min_exec={} min_exec_ms={:7.2}",
-                            "",
-                            fmt_pct(l_min_exec.get()),
-                            l_min_exec_us.get() as f64 / 1000.0,
-                            width = header_width,
-                        );
-                    }
-                    _ => {}
-                }
-                match &layer.kind {
-                    LayerKind::Grouped { exclusive, .. } | LayerKind::Open { exclusive, .. }
-                        if *exclusive =>
-                    {
-                        info!(
-                            "  {:<width$}  excl_coll={} excl_preempt={}",
-                            "",
-                            fmt_pct(l_excl_collision.get()),
-                            fmt_pct(l_excl_preempt.get()),
-                            width = header_width,
-                        );
-                    }
-                    _ => (),
-                }
                 info!(
                     "  {:<width$}  cpus={:3} [{:3},{:3}] {}",
                     "",
@@ -1681,6 +1652,47 @@ impl<'a> Scheduler<'a> {
                     format_bitvec(&layer.cpus),
                     width = header_width
                 );
+                match &layer.kind {
+                    LayerKind::Confined { min_exec_us, .. }
+                    | LayerKind::Grouped { min_exec_us, .. }
+                    | LayerKind::Open { min_exec_us, .. } => {
+                        if *min_exec_us > 0 {
+                            info!(
+                                "  {:<width$}  min_exec={} min_exec_ms={:7.2}",
+                                "",
+                                fmt_pct(l_min_exec.get()),
+                                l_min_exec_us.get() as f64 / 1000.0,
+                                width = header_width,
+                            );
+                        } else if l_min_exec.get() != 0.0 || l_min_exec_us.get() != 0 {
+                            warn!(
+                                "min_exec_us is off but min_exec={} min_exec_ms={:7.2}",
+                                fmt_pct(l_min_exec.get()),
+                                l_min_exec_us.get() as f64 / 1000.0,
+                            );
+                        }
+                    }
+                }
+                match &layer.kind {
+                    LayerKind::Grouped { exclusive, .. } | LayerKind::Open { exclusive, .. } => {
+                        if *exclusive {
+                            info!(
+                                "  {:<width$}  excl_coll={} excl_preempt={}",
+                                "",
+                                fmt_pct(l_excl_collision.get()),
+                                fmt_pct(l_excl_preempt.get()),
+                                width = header_width,
+                            );
+                        } else if l_excl_collision.get() != 0.0 || l_excl_preempt.get() != 0.0 {
+                            warn!(
+                                "exclusive is off but excl_coll={} excl_preempt={}",
+                                fmt_pct(l_excl_collision.get()),
+                                fmt_pct(l_excl_preempt.get()),
+                            );
+                        }
+                    }
+                    _ => (),
+                }
             }
             self.nr_layer_cpus_min_max[lidx] = (layer.nr_cpus, layer.nr_cpus);
         }
