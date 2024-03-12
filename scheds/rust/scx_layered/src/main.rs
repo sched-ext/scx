@@ -154,6 +154,12 @@ lazy_static::lazy_static! {
 ///   layers. Tasks in this group will spill into occupied CPUs if there are
 ///   no unoccupied idle CPUs.
 ///
+/// All layers take the following options:
+///
+/// - min_exec_us: Minimum execution time in microseconds. Whenever a task
+///   is scheduled in, this is the minimum CPU time that it's charged no
+///   matter how short the actual execution time may be.
+///
 /// Both Grouped and Open layers also acception the following options:
 ///
 /// - preempt: If true, tasks in the layer will preempt tasks which belong
@@ -297,14 +303,17 @@ enum LayerKind {
     Confined {
         cpus_range: Option<(usize, usize)>,
         util_range: (f64, f64),
+        min_exec_us: u64,
     },
     Grouped {
         cpus_range: Option<(usize, usize)>,
         util_range: (f64, f64),
+        min_exec_us: u64,
         preempt: bool,
         exclusive: bool,
     },
     Open {
+        min_exec_us: u64,
         preempt: bool,
         exclusive: bool,
     },
@@ -852,6 +861,7 @@ impl Layer {
             LayerKind::Confined {
                 cpus_range,
                 util_range,
+                ..
             } => {
                 let cpus_range = cpus_range.unwrap_or((0, std::usize::MAX));
                 if cpus_range.0 > cpus_range.1 || cpus_range.1 == 0 {
@@ -1080,6 +1090,8 @@ struct OpenMetricsStats {
     l_tasks: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_total: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_local: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_min_exec: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_min_exec_us: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_open_idle: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_preempt: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_affn_viol: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
@@ -1148,6 +1160,14 @@ impl OpenMetricsStats {
         register!(l_tasks, "Number of tasks in the layer");
         register!(l_total, "Number of scheduling events in the layer");
         register!(l_local, "% of scheduling events directly into an idle CPU");
+        register!(
+            l_min_exec,
+            "Number of times execution duration was shorter than min_exec_us"
+        );
+        register!(
+            l_min_exec_us,
+            "Total execution duration extended due to min_exec_us"
+        );
         register!(
             l_open_idle,
             "% of scheduling events into idle CPUs occupied by other layers"
@@ -1238,15 +1258,24 @@ impl<'a> Scheduler<'a> {
             layer.nr_match_ors = spec.matches.len() as u32;
 
             match &spec.kind {
-                LayerKind::Open { preempt, exclusive }
+                LayerKind::Confined { min_exec_us, .. } => layer.min_exec_ns = min_exec_us * 1000,
+                LayerKind::Open {
+                    min_exec_us,
+                    preempt,
+                    exclusive,
+                    ..
+                }
                 | LayerKind::Grouped {
-                    preempt, exclusive, ..
+                    min_exec_us,
+                    preempt,
+                    exclusive,
+                    ..
                 } => {
                     layer.open = true;
+                    layer.min_exec_ns = min_exec_us * 1000;
                     layer.preempt = *preempt;
                     layer.exclusive = *exclusive;
                 }
-                _ => {}
             }
         }
 
@@ -1353,6 +1382,7 @@ impl<'a> Scheduler<'a> {
                 LayerKind::Confined {
                     cpus_range,
                     util_range,
+                    ..
                 }
                 | LayerKind::Grouped {
                     cpus_range,
@@ -1557,6 +1587,14 @@ impl<'a> Scheduler<'a> {
             let l_tasks = set!(l_tasks, stats.nr_layer_tasks[lidx] as i64);
             let l_total = set!(l_total, ltotal as i64);
             let l_local = set!(l_local, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_LOCAL));
+            let l_min_exec = set!(
+                l_min_exec,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC)
+            );
+            let l_min_exec_us = set!(
+                l_min_exec_us,
+                (lstat(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC_NS) / 1000) as i64
+            );
             let l_open_idle = set!(
                 l_open_idle,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE)
@@ -1599,6 +1637,22 @@ impl<'a> Scheduler<'a> {
                     width = header_width,
                 );
                 match &layer.kind {
+                    LayerKind::Confined { min_exec_us, .. }
+                    | LayerKind::Grouped { min_exec_us, .. }
+                    | LayerKind::Open { min_exec_us, .. }
+                        if *min_exec_us > 0 =>
+                    {
+                        info!(
+                            "  {:<width$}  min_exec={:5.2} min_exec_ms={:7.2}",
+                            "",
+                            l_min_exec.get(),
+                            l_min_exec_us.get() as f64 / 1000.0,
+                            width = header_width,
+                        );
+                    }
+                    _ => {}
+                }
+                match &layer.kind {
                     LayerKind::Grouped { exclusive, .. } | LayerKind::Open { exclusive, .. }
                         if *exclusive =>
                     {
@@ -1608,7 +1662,7 @@ impl<'a> Scheduler<'a> {
                             l_excl_collision.get(),
                             l_excl_preempt.get(),
                             width = header_width,
-                        )
+                        );
                     }
                     _ => (),
                 }
@@ -1689,6 +1743,7 @@ fn write_example_file(path: &str) -> Result<()> {
                 kind: LayerKind::Confined {
                     cpus_range: Some((0, 16)),
                     util_range: (0.8, 0.9),
+                    min_exec_us: 1000,
                 },
             },
             LayerSpec {
@@ -1699,6 +1754,7 @@ fn write_example_file(path: &str) -> Result<()> {
                     LayerMatch::NiceBelow(0),
                 ]],
                 kind: LayerKind::Open {
+                    min_exec_us: 100,
                     preempt: true,
                     exclusive: true,
                 },
@@ -1710,6 +1766,7 @@ fn write_example_file(path: &str) -> Result<()> {
                 kind: LayerKind::Grouped {
                     cpus_range: None,
                     util_range: (0.5, 0.6),
+                    min_exec_us: 200,
                     preempt: false,
                     exclusive: false,
                 },
@@ -1782,6 +1839,7 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
             LayerKind::Confined {
                 cpus_range,
                 util_range,
+                ..
             }
             | LayerKind::Grouped {
                 cpus_range,

@@ -46,6 +46,8 @@ enum global_stat_idx {
 enum layer_stat_idx {
 	LSTAT_LOCAL,
 	LSTAT_GLOBAL,
+	LSTAT_MIN_EXEC,
+	LSTAT_MIN_EXEC_NS,
 	LSTAT_OPEN_IDLE,
 	LSTAT_AFFN_VIOL,
 	LSTAT_PREEMPT,
@@ -90,6 +92,7 @@ struct layer {
 	struct layer_match_ands	matches[MAX_LAYER_MATCH_ORS];
 	unsigned int		nr_match_ors;
 	unsigned int		idx;
+	u64			min_exec_ns;
 	bool			open;
 	bool			preempt;
 	bool			exclusive;

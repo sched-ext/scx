@@ -45,7 +45,7 @@ static inline s32 prio_to_nice(s32 static_prio)
 
 static inline s32 sibling_cpu(s32 cpu)
 {
-	s32 *sib;
+	const volatile s32 *sib;
 
 	sib = MEMBER_VPTR(__sibling_cpu, [cpu]);
 	if (sib)
@@ -89,14 +89,21 @@ static void gstat_inc(enum global_stat_idx idx, struct cpu_ctx *cctx)
 	cctx->gstats[idx]++;
 }
 
-static void lstat_inc(enum layer_stat_idx idx, struct layer *layer, struct cpu_ctx *cctx)
+static void lstat_add(enum layer_stat_idx idx, struct layer *layer,
+		      struct cpu_ctx *cctx, s64 delta)
 {
 	u64 *vptr;
 
 	if ((vptr = MEMBER_VPTR(*cctx, .lstats[layer->idx][idx])))
-		(*vptr)++;
+		(*vptr) += delta;
 	else
 		scx_bpf_error("invalid layer or stat idxs: %d, %d", idx, layer->idx);
+}
+
+static void lstat_inc(enum layer_stat_idx idx, struct layer *layer,
+		      struct cpu_ctx *cctx)
+{
+	lstat_add(idx, layer, cctx, 1);
 }
 
 struct lock_wrapper {
@@ -738,20 +745,25 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 {
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
+	struct layer *layer;
+	s32 lidx;
 	u64 used;
-	u32 layer;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
 
-	layer = tctx->layer;
-	if (layer >= nr_layers) {
-		scx_bpf_error("invalid layer %u", layer);
+	lidx = tctx->layer;
+	if (!(layer = lookup_layer(lidx)))
 		return;
-	}
 
 	used = bpf_ktime_get_ns() - tctx->started_running_at;
-	cctx->layer_cycles[layer] += used;
+	if (used < layer->min_exec_ns) {
+		lstat_inc(LSTAT_MIN_EXEC, layer, cctx);
+		lstat_add(LSTAT_MIN_EXEC_NS, layer, cctx, layer->min_exec_ns - used);
+		used = layer->min_exec_ns;
+	}
+
+	cctx->layer_cycles[lidx] += used;
 	cctx->current_preempt = false;
 	cctx->prev_exclusive = cctx->current_exclusive;
 	cctx->current_exclusive = false;
@@ -914,8 +926,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	bpf_for(i, 0, nr_layers) {
 		struct layer *layer = &layers[i];
 
-		dbg("CFG LAYER[%d] open=%d preempt=%d exclusive=%d",
-		    i, layer->open, layer->preempt, layer->exclusive);
+		dbg("CFG LAYER[%d] min_exec_ns=%lu open=%d preempt=%d exclusive=%d",
+		    i, layer->min_exec_ns, layer->open, layer->preempt,
+		    layer->exclusive);
 
 		if (layer->nr_match_ors > MAX_LAYER_MATCH_ORS) {
 			scx_bpf_error("too many ORs");
