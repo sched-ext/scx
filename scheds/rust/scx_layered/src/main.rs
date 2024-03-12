@@ -656,6 +656,7 @@ struct CpuPool {
     nr_cpus: usize,
     all_cpus: BitVec,
     core_cpus: Vec<BitVec>,
+    sibling_cpu: Vec<i32>,
     cpu_core: Vec<usize>,
     available_cores: BitVec,
     first_cpu: usize,
@@ -724,10 +725,26 @@ impl CpuPool {
             }
         }
 
+        // Build sibling_cpu[]
+        let mut sibling_cpu = vec![-1i32; *NR_POSSIBLE_CPUS];
+        for cpus in &core_cpus {
+            let mut first = -1i32;
+            for cpu in cpus.iter_ones() {
+                if first < 0 {
+                    first = cpu as i32;
+                } else {
+                    sibling_cpu[first as usize] = cpu as i32;
+                    sibling_cpu[cpu as usize] = first;
+                    break;
+                }
+            }
+        }
+
         info!(
             "CPUs: online/possible={}/{} nr_cores={}",
             nr_cpus, *NR_POSSIBLE_CPUS, nr_cores,
         );
+        debug!("CPUs: siblings={:?}", &sibling_cpu[..nr_cpus]);
 
         let first_cpu = core_cpus[0].first_one().unwrap();
 
@@ -736,6 +753,7 @@ impl CpuPool {
             nr_cpus,
             all_cpus,
             core_cpus,
+            sibling_cpu,
             cpu_core,
             available_cores: bitvec![1; nr_cores],
             first_cpu,
@@ -1049,6 +1067,8 @@ struct OpenMetricsStats {
     open_idle: Gauge<f64, AtomicU64>,
     affn_viol: Gauge<f64, AtomicU64>,
     tctx_err: Gauge<i64, AtomicI64>,
+    excl_idle: Gauge<f64, AtomicU64>,
+    excl_wakeup: Gauge<f64, AtomicU64>,
     proc_ms: Gauge<i64, AtomicI64>,
     busy: Gauge<f64, AtomicU64>,
     util: Gauge<f64, AtomicU64>,
@@ -1063,6 +1083,8 @@ struct OpenMetricsStats {
     l_open_idle: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_preempt: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_affn_viol: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_excl_collision: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_excl_preempt: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_cur_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_min_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_max_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
@@ -1095,6 +1117,14 @@ impl OpenMetricsStats {
             "% which violated configured policies due to CPU affinity restrictions"
         );
         register!(tctx_err, "Failures to free task contexts");
+        register!(
+            excl_idle,
+            "Number of times a CPU skipped dispatching due to sibling running an exclusive task"
+        );
+        register!(
+            excl_wakeup,
+            "Number of times an idle sibling CPU was woken up after an exclusive task is finished"
+        );
         register!(
             proc_ms,
             "CPU time this binary has consumed during the period"
@@ -1129,6 +1159,14 @@ impl OpenMetricsStats {
         register!(
             l_affn_viol,
             "% of scheduling events that violated configured policies due to CPU affinity restrictions"
+        );
+        register!(
+            l_excl_collision,
+            "Number of times an exclusive task skipped a CPU as the sibling was also exclusive"
+        );
+        register!(
+            l_excl_preempt,
+            "Number of times a sibling CPU was preempted for an exclusive task"
         );
         register!(l_cur_nr_cpus, "Current # of CPUs assigned to the layer");
         register!(l_min_nr_cpus, "Minimum # of CPUs assigned to the layer");
@@ -1230,6 +1268,9 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().slice_ns = opts.slice_us * 1000;
         skel.rodata_mut().nr_possible_cpus = *NR_POSSIBLE_CPUS as u32;
         skel.rodata_mut().smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
+        for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
+            skel.rodata_mut().__sibling_cpu[cpu] = *sib;
+        }
         for cpu in cpu_pool.all_cpus.iter_ones() {
             skel.rodata_mut().all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
@@ -1417,8 +1458,17 @@ impl<'a> Scheduler<'a> {
             .affn_viol
             .set(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL));
         self.om_stats.tctx_err.set(
-            stats.prev_bpf_stats.gstats
-                [bpf_intf::global_stat_idx_GSTAT_TASK_CTX_FREE_FAILED as usize] as i64,
+            stats.bpf_stats.gstats[bpf_intf::global_stat_idx_GSTAT_TASK_CTX_FREE_FAILED as usize]
+                as i64,
+        );
+        self.om_stats.excl_idle.set(
+            stats.prev_bpf_stats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_IDLE as usize] as f64
+                / total as f64,
+        );
+        self.om_stats.excl_wakeup.set(
+            stats.prev_bpf_stats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_WAKEUP as usize]
+                as f64
+                / total as f64,
         );
         self.om_stats.proc_ms.set(processing_dur.as_millis() as i64);
         self.om_stats.busy.set(stats.cpu_busy * 100.0);
@@ -1442,6 +1492,14 @@ impl<'a> Scheduler<'a> {
                 self.om_stats.util.get(),
                 self.om_stats.load.get(),
                 self.cpu_pool.fallback_cpu,
+            );
+
+            info!(
+                "excl_coll={:5.2} excl_preempt={:5.2} excl_idle={:5.2} excl_wakeup={:5.2}",
+                lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION),
+                lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT),
+                self.om_stats.excl_idle.get(),
+                self.om_stats.excl_wakeup.get(),
             );
         }
 
@@ -1508,6 +1566,14 @@ impl<'a> Scheduler<'a> {
                 l_affn_viol,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL)
             );
+            let l_excl_collision = set!(
+                l_excl_collision,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION)
+            );
+            let l_excl_preempt = set!(
+                l_excl_preempt,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT)
+            );
             let l_cur_nr_cpus = set!(l_cur_nr_cpus, layer.nr_cpus as i64);
             let l_min_nr_cpus = set!(l_min_nr_cpus, self.nr_layer_cpus_min_max[lidx].0 as i64);
             let l_max_nr_cpus = set!(l_max_nr_cpus, self.nr_layer_cpus_min_max[lidx].1 as i64);
@@ -1532,6 +1598,20 @@ impl<'a> Scheduler<'a> {
                     l_affn_viol.get(),
                     width = header_width,
                 );
+                match &layer.kind {
+                    LayerKind::Grouped { exclusive, .. } | LayerKind::Open { exclusive, .. }
+                        if *exclusive =>
+                    {
+                        info!(
+                            "  {:<width$}  excl_coll={:5.2} excl_preempt={:5.2}",
+                            "",
+                            l_excl_collision.get(),
+                            l_excl_preempt.get(),
+                            width = header_width,
+                        )
+                    }
+                    _ => (),
+                }
                 info!(
                     "  {:<width$}  cpus={:3} [{:3},{:3}] {}",
                     "",

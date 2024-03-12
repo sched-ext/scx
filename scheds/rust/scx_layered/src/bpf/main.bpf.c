@@ -17,6 +17,7 @@ const volatile u64 slice_ns = SCX_SLICE_DFL;
 const volatile u32 nr_possible_cpus = 1;
 const volatile u32 nr_layers = 1;
 const volatile bool smt_enabled = true;
+const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
@@ -40,6 +41,17 @@ static inline s32 prio_to_nice(s32 static_prio)
 {
 	/* See DEFAULT_PRIO and PRIO_TO_NICE in include/linux/sched/prio.h */
 	return static_prio - 120;
+}
+
+static inline s32 sibling_cpu(s32 cpu)
+{
+	s32 *sib;
+
+	sib = MEMBER_VPTR(__sibling_cpu, [cpu]);
+	if (sib)
+		return *sib;
+	else
+		return -1;
 }
 
 struct {
@@ -271,7 +283,6 @@ int BPF_PROG(tp_cgroup_attach_task, struct cgroup *cgrp, const char *cgrp_path,
 	struct list_head *thread_head;
 	struct task_struct *next;
 	struct task_ctx *tctx;
-	int leader_pid = leader->pid;
 
 	if (!(tctx = lookup_task_ctx_may_fail(leader)))
 		return 0;
@@ -399,7 +410,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 
 	/* not much to do if bound to a single CPU */
 	if (p->nr_cpus_allowed == 1) {
-		if (!bpf_cpumask_test_cpu(cpu, layer_cpumask))
+		if (!bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			lstat_inc(LSTAT_LOCAL, layer, cctx);
@@ -476,16 +487,28 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	bpf_for(idx, 0, nr_possible_cpus) {
-		struct cpu_ctx *cand_cctx;
+		struct cpu_ctx *cand_cctx, *sib_cctx = NULL;
 		u32 cpu = (preempt_cursor + idx) % nr_possible_cpus;
+		s32 sib;
 
 		if (!all_cpumask ||
 		    !bpf_cpumask_test_cpu(cpu, (const struct cpumask *)all_cpumask))
 			continue;
+
 		if (!(cand_cctx = lookup_cpu_ctx(cpu)) || cand_cctx->current_preempt)
 			continue;
+		if (layer->exclusive && (sib = sibling_cpu(cpu)) >= 0 &&
+		    (!(sib_cctx = lookup_cpu_ctx(sib)) ||
+		     sib_cctx->current_preempt)) {
+			lstat_inc(LSTAT_EXCL_COLLISION, layer, cctx);
+			continue;
+		}
 
 		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+		if (sib_cctx && !sib_cctx->maybe_idle) {
+			lstat_inc(LSTAT_EXCL_PREEMPT, layer, cctx);
+			scx_bpf_kick_cpu(sib, SCX_KICK_PREEMPT);
+		}
 
 		/*
 		 * Round-robining doesn't have to be strict. Let's not bother
@@ -500,7 +523,18 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 {
+	s32 sib = sibling_cpu(cpu);
+	struct cpu_ctx *cctx, *sib_cctx;
 	int idx;
+
+	if (!(cctx = lookup_cpu_ctx(-1)))
+		return;
+
+	if (sib >= 0 && (sib_cctx = lookup_cpu_ctx(sib)) &&
+	    sib_cctx->current_exclusive) {
+		gstat_inc(GSTAT_EXCL_IDLE, cctx);
+		return;
+	}
 
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers)
@@ -675,7 +709,29 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 		layer->vtime_now = p->scx.dsq_vtime;
 
 	cctx->current_preempt = layer->preempt;
+	cctx->current_exclusive = layer->exclusive;
 	tctx->started_running_at = bpf_ktime_get_ns();
+
+	/*
+	 * If this CPU is transitioning from running an exclusive task to a
+	 * non-exclusive one, the sibling CPU has likely been idle. Wake it up.
+	 */
+	if (cctx->prev_exclusive && !cctx->current_exclusive) {
+		s32 sib = sibling_cpu(scx_bpf_task_cpu(p));
+		struct cpu_ctx *sib_cctx;
+
+		/*
+		 * %SCX_KICK_IDLE would be great here but we want to support
+		 * older kernels. Let's use racy custom idle flag instead.
+		 */
+		if (sib >= 0 && (sib_cctx = lookup_cpu_ctx(sib)) &&
+		    sib_cctx->maybe_idle) {
+			gstat_inc(GSTAT_EXCL_WAKEUP, cctx);
+			scx_bpf_kick_cpu(sib, 0);
+		}
+	}
+
+	cctx->maybe_idle = false;
 }
 
 void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
@@ -697,9 +753,12 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	used = bpf_ktime_get_ns() - tctx->started_running_at;
 	cctx->layer_cycles[layer] += used;
 	cctx->current_preempt = false;
+	cctx->prev_exclusive = cctx->current_exclusive;
+	cctx->current_exclusive = false;
 
 	/* scale the execution time by the inverse of the weight and charge */
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
+	cctx->maybe_idle = true;
 }
 
 void BPF_STRUCT_OPS(layered_quiescent, struct task_struct *p, u64 deq_flags)
