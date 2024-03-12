@@ -1495,16 +1495,15 @@ impl<'a> Scheduler<'a> {
             .affn_viol
             .set(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL));
         self.om_stats.tctx_err.set(
-            stats.bpf_stats.gstats[bpf_intf::global_stat_idx_GSTAT_TASK_CTX_FREE_FAILED as usize]
-                as i64,
+            stats.prev_bpf_stats.gstats
+                [bpf_intf::global_stat_idx_GSTAT_TASK_CTX_FREE_FAILED as usize] as i64,
         );
         self.om_stats.excl_idle.set(
-            stats.prev_bpf_stats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_IDLE as usize] as f64
+            stats.bpf_stats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_IDLE as usize] as f64
                 / total as f64,
         );
         self.om_stats.excl_wakeup.set(
-            stats.prev_bpf_stats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_WAKEUP as usize]
-                as f64
+            stats.bpf_stats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_WAKEUP as usize] as f64
                 / total as f64,
         );
         self.om_stats.proc_ms.set(processing_dur.as_millis() as i64);
