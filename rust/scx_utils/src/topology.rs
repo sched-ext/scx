@@ -181,7 +181,7 @@ impl Node {
 #[derive(Debug)]
 pub struct Topology {
     nodes: Vec<Node>,
-    cores: BTreeMap<usize, Core>,
+    cores: Vec<Core>,
     cpus: BTreeMap<usize, Cpu>,
     nr_cpus: usize,
     span: Cpumask,
@@ -199,14 +199,12 @@ impl Topology {
         // system. We clone the objects that are located further down in the
         // hierarchy rather than dealing with references, as the entire
         // Topology is read-only anyways.
-        let mut cores = BTreeMap::new();
+        let mut cores = Vec::new();
         let mut cpus = BTreeMap::new();
         for node in nodes.iter() {
-            for (_, llc) in node.llcs.iter() {
-                for (core_id, core) in llc.cores.iter() {
-                    if let Some(_) = cores.insert(*core_id, core.clone()) {
-                        bail!("Found duplicate core ID {}", core_id);
-                    }
+            for llc in node.llcs.values() {
+                for core in llc.cores.values() {
+                    cores.push(core.clone());
                     for (cpu_id, cpu) in core.cpus.iter() {
                         if let Some(_) = cpus.insert(*cpu_id, cpu.clone()) {
                             bail!("Found duplicate CPU ID {}", cpu_id);
@@ -219,13 +217,13 @@ impl Topology {
         Ok(Topology { nodes, nr_cpus, cores, cpus, span })
     }
 
-    /// Get a slice of the NUMA nodes on the host
+    /// Get a slice of the NUMA nodes on the host.
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
 
-    /// Get a hashmap of <core ID, Core> for all Cores on the host.
-    pub fn cores(&self) -> &BTreeMap<usize, Core> {
+    /// Get a slice of all Cores on the host.
+    pub fn cores(&self) -> &[Core] {
         &self.cores
     }
 

@@ -6,18 +6,24 @@ mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 
-#[macro_use]
-extern crate static_assertions;
+mod domain;
+use domain::DomainGroup;
 
-use std::cell::Cell;
-use std::collections::BTreeMap;
-use std::ops::Bound::Included;
-use std::ops::Bound::Unbounded;
+pub mod tuner;
+use tuner::Tuner;
+
+pub mod load_balance;
+use load_balance::LoadBalancer;
+use load_balance::NumaStat;
+
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+
+#[macro_use]
+extern crate static_assertions;
 
 use ::fb_procfs as procfs;
 use anyhow::anyhow;
@@ -28,20 +34,13 @@ use clap::Parser;
 use libbpf_rs::skel::OpenSkel as _;
 use libbpf_rs::skel::Skel as _;
 use libbpf_rs::skel::SkelBuilder as _;
-use log::debug;
 use log::info;
-use log::trace;
-use log::warn;
-use ordered_float::OrderedFloat;
-use scx_utils::Cpumask;
 use scx_utils::init_libbpf_logging;
-use scx_utils::ravg::ravg_read;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Cpumask;
 use scx_utils::Topology;
-use scx_utils::LoadAggregator;
 
-const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 
@@ -111,12 +110,26 @@ struct Opts {
     #[clap(short = 'C', long, num_args = 1.., conflicts_with = "cache_level")]
     cpumasks: Vec<String>,
 
-    /// When non-zero, enable greedy task stealing. When a domain is idle, a
-    /// cpu will attempt to steal tasks from a domain with at least
-    /// greedy_threshold tasks enqueued. These tasks aren't permanently
-    /// stolen from the domain.
+    /// When non-zero, enable greedy task stealing. When a domain is idle, a cpu
+    /// will attempt to steal tasks from another domain as follows:
+    ///
+    /// 1. Try to consume a task from the current domain
+    /// 2. Try to consume a task from another domain in the current NUMA node
+    ///    (or globally, if running on a single-socket system), if the domain
+    ///    has at least this specified number of tasks enqueued.
+    ///
+    /// See greedy_threshold_x_numa to enable task stealing across NUMA nodes.
+    /// Tasks stolen in this manner are not permanently stolen from their
+    /// domain.
     #[clap(short = 'g', long, default_value = "1")]
     greedy_threshold: u32,
+
+    /// When non-zero, enable greedy task stealing across NUMA nodes. The order
+    /// of greedy task stealing follows greedy_threshold as described above, and
+    /// greedy_threshold must be nonzero to enable task stealing across NUMA
+    /// nodes.
+    #[clap(long, default_value = "0")]
+    greedy_threshold_x_numa: u32,
 
     /// Disable load balancing. Unless disabled, periodically userspace will
     /// calculate the load factor of each domain and instruct BPF which
@@ -149,6 +162,14 @@ struct Opts {
     #[clap(short = 'K', long, default_value = "100.0")]
     kick_greedy_under: f64,
 
+    /// Whether tasks can be pushed directly to idle CPUs on NUMA nodes
+    /// different than its domain's node. If direct_greedy_under is disabled,
+    /// this option is a no-op. Otherwise, if this option is set to false
+    /// (default), tasks will only be directly pushed to idle CPUs if they
+    /// reside on the same NUMA node as the task's domain.
+    #[clap(short = 'r', long, action = clap::ArgAction::SetTrue)]
+    direct_greedy_numa: bool,
+
     /// If specified, only tasks which have their scheduling policy set to
     /// SCHED_EXT using sched_setscheduler(2) are switched. Otherwise, all
     /// tasks are switched.
@@ -159,22 +180,6 @@ struct Opts {
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
-}
-
-fn now_monotonic() -> u64 {
-    let mut time = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
-    assert!(ret == 0);
-    time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
-}
-
-fn clear_map(map: &libbpf_rs::Map) {
-    for key in map.keys() {
-        let _ = map.delete(&key);
-    }
 }
 
 fn format_cpumask(cpumask: &[u64], nr_cpus: usize) -> String {
@@ -193,652 +198,11 @@ fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
         .ok_or_else(|| anyhow!("Could not read total cpu stat in proc"))
 }
 
-fn sub_or_zero(curr: &u64, prev: &u64) -> u64 {
+pub fn sub_or_zero(curr: &u64, prev: &u64) -> u64 {
     if let Some(res) = curr.checked_sub(*prev) {
         res
     } else {
         0
-    }
-}
-
-fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
-    match (curr, prev) {
-        (
-            procfs::CpuStat {
-                user_usec: Some(curr_user),
-                nice_usec: Some(curr_nice),
-                system_usec: Some(curr_system),
-                idle_usec: Some(curr_idle),
-                iowait_usec: Some(curr_iowait),
-                irq_usec: Some(curr_irq),
-                softirq_usec: Some(curr_softirq),
-                stolen_usec: Some(curr_stolen),
-                ..
-            },
-            procfs::CpuStat {
-                user_usec: Some(prev_user),
-                nice_usec: Some(prev_nice),
-                system_usec: Some(prev_system),
-                idle_usec: Some(prev_idle),
-                iowait_usec: Some(prev_iowait),
-                irq_usec: Some(prev_irq),
-                softirq_usec: Some(prev_softirq),
-                stolen_usec: Some(prev_stolen),
-                ..
-            },
-        ) => {
-            let idle_usec = sub_or_zero(curr_idle, prev_idle);
-            let iowait_usec = sub_or_zero(curr_iowait, prev_iowait);
-            let user_usec = sub_or_zero(curr_user, prev_user);
-            let system_usec = sub_or_zero(curr_system, prev_system);
-            let nice_usec = sub_or_zero(curr_nice, prev_nice);
-            let irq_usec = sub_or_zero(curr_irq, prev_irq);
-            let softirq_usec = sub_or_zero(curr_softirq, prev_softirq);
-            let stolen_usec = sub_or_zero(curr_stolen, prev_stolen);
-
-            let busy_usec =
-                user_usec + system_usec + nice_usec + irq_usec + softirq_usec + stolen_usec;
-            let total_usec = idle_usec + busy_usec + iowait_usec;
-            if total_usec > 0 {
-                Ok(((busy_usec as f64) / (total_usec as f64)).clamp(0.0, 1.0))
-            } else {
-                Ok(1.0)
-            }
-        }
-        _ => {
-            bail!("Missing stats in cpustat");
-        }
-    }
-}
-
-struct Tuner {
-    top: Arc<Topology>,
-    dom_group: Arc<DomainGroup>,
-    direct_greedy_under: f64,
-    kick_greedy_under: f64,
-    proc_reader: procfs::ProcReader,
-    prev_cpu_stats: BTreeMap<u32, procfs::CpuStat>,
-    lb_apply_weight: bool,
-    dom_utils: Vec<f64>,
-}
-
-impl Tuner {
-    fn new(top: Arc<Topology>, dom_group: Arc<DomainGroup>, opts: &Opts) -> Result<Self> {
-        let proc_reader = procfs::ProcReader::new();
-        let prev_cpu_stats = proc_reader
-            .read_stat()?
-            .cpus_map
-            .ok_or_else(|| anyhow!("Expected cpus_map to exist"))?;
-        Ok(Self {
-            direct_greedy_under: opts.direct_greedy_under / 100.0,
-            kick_greedy_under: opts.kick_greedy_under / 100.0,
-            proc_reader,
-            prev_cpu_stats,
-            dom_utils: vec![0.0; dom_group.nr_doms()],
-            lb_apply_weight: false,
-            top,
-            dom_group,
-        })
-    }
-
-    fn step(&mut self, skel: &mut BpfSkel) -> Result<()> {
-        let curr_cpu_stats = self
-            .proc_reader
-            .read_stat()?
-            .cpus_map
-            .ok_or_else(|| anyhow!("Expected cpus_map to exist"))?;
-        let mut dom_nr_cpus = vec![0; self.dom_group.nr_doms()];
-        let mut dom_util_sum = vec![0.0; self.dom_group.nr_doms()];
-
-        let mut avg_util = 0.0f64;
-        for cpu in 0..self.top.nr_cpus() {
-            let cpu32 = cpu as u32;
-            // None domain indicates the CPU was offline during
-            // initialization and None CpuStat indicates the CPU has gone
-            // down since then. Ignore both.
-            if let (Some(dom), Some(curr), Some(prev)) = (
-                self.dom_group.cpu_dom_id(cpu),
-                curr_cpu_stats.get(&cpu32),
-                self.prev_cpu_stats.get(&cpu32),
-            ) {
-                let util = calc_util(curr, prev)?;
-                dom_nr_cpus[dom] += 1;
-                dom_util_sum[dom] += util;
-                avg_util += util;
-            }
-        }
-        avg_util /= self.top.nr_cpus() as f64;
-        self.lb_apply_weight = approx_ge(avg_util, 0.99999);
-
-        let ti = &mut skel.bss_mut().tune_input;
-        for dom in 0..self.dom_group.nr_doms() {
-            // Calculate the domain avg util. If there are no active CPUs,
-            // it doesn't really matter. Go with 0.0 as that's less likely
-            // to confuse users.
-            let util = match dom_nr_cpus[dom] {
-                0 => 0.0,
-                nr => dom_util_sum[dom] / nr as f64,
-            };
-
-            self.dom_utils[dom] = util;
-
-            // This could be implemented better.
-            let update_dom_bits = |target: &mut [u64; 8], val: bool| {
-                for cpu in 0..self.top.nr_cpus() {
-                    if let Some(cdom) = self.dom_group.cpu_dom_id(cpu) {
-                        if cdom == dom {
-                            if val {
-                                target[cpu / 64] |= 1u64 << (cpu % 64);
-                            } else {
-                                target[cpu / 64] &= !(1u64 << (cpu % 64));
-                            }
-                        }
-                    }
-                }
-            };
-
-            update_dom_bits(
-                &mut ti.direct_greedy_cpumask,
-                self.direct_greedy_under > 0.99999 || util < self.direct_greedy_under,
-            );
-            update_dom_bits(
-                &mut ti.kick_greedy_cpumask,
-                self.kick_greedy_under > 0.99999 || util < self.kick_greedy_under,
-            );
-        }
-
-        ti.gen += 1;
-        self.prev_cpu_stats = curr_cpu_stats;
-        Ok(())
-    }
-}
-
-fn approx_eq(a: f64, b: f64) -> bool {
-    (a - b).abs() <= 0.0001f64
-}
-
-fn approx_ge(a: f64, b: f64) -> bool {
-    a > b || approx_eq(a, b)
-}
-
-#[derive(Debug)]
-struct TaskInfo {
-    pid: i32,
-    dom_mask: u64,
-    migrated: Cell<bool>,
-    is_kworker: bool,
-}
-
-struct LoadBalancer<'a, 'b, 'c> {
-    skel: &'a mut BpfSkel<'b>,
-    top: Arc<Topology>,
-    dom_group: Arc<DomainGroup>,
-    skip_kworkers: bool,
-
-    infeas_threshold: f64,
-
-    tasks_by_load: Vec<Option<BTreeMap<OrderedFloat<f64>, TaskInfo>>>,
-    load_avg: f64,
-    dom_loads: Vec<f64>,
-
-    imbal: Vec<f64>,
-    doms_to_push: BTreeMap<OrderedFloat<f64>, u32>,
-    doms_to_pull: BTreeMap<OrderedFloat<f64>, u32>,
-
-    lb_apply_weight: bool,
-    nr_lb_data_errors: &'c mut u64,
-}
-
-// Verify that the number of buckets is a factor of the maximum weight to
-// ensure that the range of weight can be split evenly amongst every bucket.
-const_assert_eq!(bpf_intf::consts_LB_MAX_WEIGHT % bpf_intf::consts_LB_LOAD_BUCKETS, 0);
-
-
-impl<'a, 'b, 'c> LoadBalancer<'a, 'b, 'c> {
-    // If imbalance gets higher than this ratio, try to balance the loads.
-    const LOAD_IMBAL_HIGH_RATIO: f64 = 0.05;
-
-    // Aim to transfer this fraction of the imbalance on each round. We want
-    // to be gradual to avoid unnecessary oscillations. While this can delay
-    // convergence, greedy execution should be able to bridge the temporary
-    // gap.
-    const LOAD_IMBAL_XFER_TARGET_RATIO: f64 = 0.50;
-
-    // Don't push out more than this ratio of load on each round. While this
-    // overlaps with XFER_TARGET_RATIO, XFER_TARGET_RATIO only defines the
-    // target and doesn't limit the total load. As long as the transfer
-    // reduces load imbalance between the two involved domains, it'd happily
-    // transfer whatever amount that can be transferred. This limit is used
-    // as the safety cap to avoid draining a given domain too much in a
-    // single round.
-    const LOAD_IMBAL_PUSH_MAX_RATIO: f64 = 0.50;
-
-    fn new(
-        skel: &'a mut BpfSkel<'b>,
-        top: Arc<Topology>,
-        dom_group: Arc<DomainGroup>,
-        skip_kworkers: bool,
-        lb_apply_weight: bool,
-        nr_lb_data_errors: &'c mut u64,
-    ) -> Self {
-        Self {
-            skel,
-            skip_kworkers,
-
-            infeas_threshold: bpf_intf::consts_LB_MAX_WEIGHT as f64,
-
-            tasks_by_load: (0..dom_group.nr_doms()).map(|_| None).collect(),
-            load_avg: 0f64,
-            dom_loads: vec![0.0; dom_group.nr_doms()],
-
-            imbal: vec![0.0; dom_group.nr_doms()],
-            doms_to_pull: BTreeMap::new(),
-            doms_to_push: BTreeMap::new(),
-
-            lb_apply_weight: lb_apply_weight.clone(),
-            nr_lb_data_errors,
-
-            top,
-            dom_group,
-        }
-    }
-
-    fn bucket_range(&self, bucket: u64) -> (f64, f64) {
-        const MAX_WEIGHT: u64 = bpf_intf::consts_LB_MAX_WEIGHT as u64;
-        const NUM_BUCKETS: u64 = bpf_intf::consts_LB_LOAD_BUCKETS as u64;
-        const WEIGHT_PER_BUCKET: u64 = MAX_WEIGHT / NUM_BUCKETS;
-
-        if bucket >= NUM_BUCKETS {
-            panic!("Invalid bucket {}, max {}", bucket, NUM_BUCKETS);
-        }
-
-        // w_x = [1 + (10000 * x) / N, 10000 * (x + 1) / N]
-        let min_w = 1 + (MAX_WEIGHT * bucket) / NUM_BUCKETS;
-        let max_w = min_w + WEIGHT_PER_BUCKET - 1;
-
-        (min_w as f64, max_w as f64)
-    }
-
-    fn bucket_weight(&self, bucket: u64) -> usize {
-        const WEIGHT_PER_BUCKET: f64 = bpf_intf::consts_LB_WEIGHT_PER_BUCKET as f64;
-        let (min_weight, _) = self.bucket_range(bucket);
-
-        // Use the mid-point of the bucket when determining weight
-	(min_weight + (WEIGHT_PER_BUCKET / 2.0f64)).floor() as usize
-    }
-
-    fn read_dom_loads(&mut self) -> Result<()> {
-        const NUM_BUCKETS: u64 = bpf_intf::consts_LB_LOAD_BUCKETS as u64;
-        let now_mono = now_monotonic();
-        let load_half_life = self.skel.rodata().load_half_life;
-        let maps = self.skel.maps();
-        let dom_data = maps.dom_data();
-
-        let mut aggregator = LoadAggregator::new(self.top.nr_cpus(), !self.lb_apply_weight.clone());
-
-        // Accumulate dcycle and load across all domains and buckets. If we're
-        // under-utilized, or there are no infeasible weights, this is
-        // sufficient to collect all of the data we need for load balancing.
-        for dom in 0..self.dom_group.nr_doms() {
-            let dom_key = unsafe { std::mem::transmute::<u32, [u8; 4]>(dom as u32) };
-
-            if let Some(dom_ctx_map_elem) = dom_data
-                .lookup(&dom_key, libbpf_rs::MapFlags::ANY)
-                .context("Failed to lookup dom_ctx")?
-            {
-                let dom_ctx =
-                    unsafe { &*(dom_ctx_map_elem.as_slice().as_ptr() as *const bpf_intf::dom_ctx) };
-
-                for bucket in 0..NUM_BUCKETS {
-                    let bucket_ctx = dom_ctx.buckets[bucket as usize];
-                    let rd = &bucket_ctx.rd;
-                    let duty_cycle = ravg_read(
-                        rd.val,
-                        rd.val_at,
-                        rd.old,
-                        rd.cur,
-                        now_mono,
-                        load_half_life,
-                        RAVG_FRAC_BITS,
-                    );
-
-                    if approx_eq(0.0, duty_cycle) {
-                        continue;
-                    }
-
-                    let weight = self.bucket_weight(bucket);
-                    aggregator.record_dom_load(dom, weight, duty_cycle)?;
-                }
-            }
-        }
-
-        let ledger = aggregator.calculate();
-        if !self.lb_apply_weight {
-            // System is under-utilized, so just use dcycle instead of load.
-            self.load_avg = ledger.global_dcycle_sum() / self.dom_group.nr_doms() as f64;
-            self.dom_loads = ledger.dom_dcycle_sums().to_vec();
-        } else {
-            self.load_avg = ledger.global_load_sum() / self.dom_group.nr_doms() as f64;
-            self.dom_loads = ledger.dom_load_sums().to_vec();
-            self.infeas_threshold = ledger.effective_max_weight();
-        }
-
-        Ok(())
-    }
-
-    /// To balance dom loads, identify doms with lower and higher load than
-    /// average.
-    fn calculate_dom_load_balance(&mut self) -> Result<()> {
-        let mode = if self.lb_apply_weight {
-            "weighted"
-        } else {
-            "dcycle"
-        };
-
-        debug!("mode= {} load_avg= {:.2} infeasible_thresh= {:.2}",
-               mode, self.load_avg, self.infeas_threshold);
-        for (dom, dom_load) in self.dom_loads.iter().enumerate() {
-            let imbal = dom_load - self.load_avg;
-            if imbal.abs() >= self.load_avg * Self::LOAD_IMBAL_HIGH_RATIO {
-                if imbal > 0f64 {
-                    self.doms_to_push.insert(OrderedFloat(imbal), dom as u32);
-                } else {
-                    self.doms_to_pull.insert(OrderedFloat(-imbal), dom as u32);
-                }
-                self.imbal[dom] = imbal;
-            }
-        }
-        Ok(())
-    }
-
-    /// @dom needs to push out tasks to balance loads. Make sure its
-    /// tasks_by_load is populated so that the victim tasks can be picked.
-    fn populate_tasks_by_load(&mut self, dom: u32) -> Result<()> {
-        if self.tasks_by_load[dom as usize].is_some() {
-            return Ok(());
-        }
-
-        // Read active_pids and update write_idx and gen.
-        //
-        // XXX - We can't read task_ctx inline because self.skel.bss()
-        // borrows mutably and thus conflicts with self.skel.maps().
-        const MAX_PIDS: u64 = bpf_intf::consts_MAX_DOM_ACTIVE_PIDS as u64;
-        let active_pids = &mut self.skel.bss_mut().dom_active_pids[dom as usize];
-        let mut pids = vec![];
-
-        let (mut ridx, widx) = (active_pids.read_idx, active_pids.write_idx);
-        if widx - ridx > MAX_PIDS {
-            ridx = widx - MAX_PIDS;
-        }
-
-        for idx in ridx..widx {
-            let pid = active_pids.pids[(idx % MAX_PIDS) as usize];
-            pids.push(pid);
-        }
-
-        active_pids.read_idx = active_pids.write_idx;
-        active_pids.gen += 1;
-
-        // Read task_ctx and load.
-        let load_half_life = self.skel.rodata().load_half_life;
-        let maps = self.skel.maps();
-        let task_data = maps.task_data();
-        let now_mono = now_monotonic();
-        let mut tasks_by_load = BTreeMap::new();
-
-        for pid in pids.iter() {
-            let key = unsafe { std::mem::transmute::<i32, [u8; 4]>(*pid) };
-
-            if let Some(task_data_elem) = task_data.lookup(&key, libbpf_rs::MapFlags::ANY)? {
-                let task_ctx =
-                    unsafe { &*(task_data_elem.as_slice().as_ptr() as *const bpf_intf::task_ctx) };
-                if task_ctx.dom_id != dom {
-                    continue;
-                }
-
-                let weight = (task_ctx.weight as f64).min(self.infeas_threshold);
-
-                let rd = &task_ctx.dcyc_rd;
-                let load = weight
-                    * ravg_read(
-                        rd.val,
-                        rd.val_at,
-                        rd.old,
-                        rd.cur,
-                        now_mono,
-                        load_half_life,
-                        RAVG_FRAC_BITS,
-                    );
-
-                tasks_by_load.insert(
-                    OrderedFloat(load),
-                    TaskInfo {
-                        pid: *pid,
-                        dom_mask: task_ctx.dom_mask,
-                        migrated: Cell::new(false),
-                        is_kworker: task_ctx.is_kworker,
-                    },
-                );
-            }
-        }
-
-        debug!(
-            "DOM[{:02}] read load for {} tasks",
-            dom,
-            &tasks_by_load.len(),
-        );
-        trace!("DOM[{:02}] tasks_by_load={:?}", dom, &tasks_by_load);
-
-        self.tasks_by_load[dom as usize] = Some(tasks_by_load);
-        Ok(())
-    }
-
-    // Find the first candidate pid which hasn't already been migrated and
-    // can run in @pull_dom.
-    fn find_first_candidate<'d, I>(
-        tasks_by_load: I,
-        pull_dom: u32,
-        skip_kworkers: bool,
-    ) -> Option<(f64, &'d TaskInfo)>
-    where
-        I: IntoIterator<Item = (&'d OrderedFloat<f64>, &'d TaskInfo)>,
-    {
-        match tasks_by_load
-            .into_iter()
-            .skip_while(|(_, task)| {
-                task.migrated.get()
-                    || (task.dom_mask & (1 << pull_dom) == 0)
-                    || (skip_kworkers && task.is_kworker)
-            })
-            .next()
-        {
-            Some((OrderedFloat(load), task)) => Some((*load, task)),
-            None => None,
-        }
-    }
-
-    fn pick_victim(
-        &mut self,
-        (push_dom, to_push): (u32, f64),
-        (pull_dom, to_pull): (u32, f64),
-    ) -> Result<Option<(&TaskInfo, f64)>> {
-        let to_xfer = to_pull.min(to_push) * Self::LOAD_IMBAL_XFER_TARGET_RATIO;
-
-        debug!(
-            "considering dom {}@{:.2} -> {}@{:.2}",
-            push_dom, to_push, pull_dom, to_pull
-        );
-
-        let calc_new_imbal = |xfer: f64| (to_push - xfer).abs() + (to_pull - xfer).abs();
-
-        self.populate_tasks_by_load(push_dom)?;
-
-        // We want to pick a task to transfer from push_dom to pull_dom to
-        // reduce the load imbalance between the two closest to $to_xfer.
-        // IOW, pick a task which has the closest load value to $to_xfer
-        // that can be migrated. Find such task by locating the first
-        // migratable task while scanning left from $to_xfer and the
-        // counterpart while scanning right and picking the better of the
-        // two.
-        let (load, task, new_imbal) = match (
-            Self::find_first_candidate(
-                self.tasks_by_load[push_dom as usize]
-                    .as_ref()
-                    .unwrap()
-                    .range((Unbounded, Included(&OrderedFloat(to_xfer))))
-                    .rev(),
-                pull_dom,
-                self.skip_kworkers,
-            ),
-            Self::find_first_candidate(
-                self.tasks_by_load[push_dom as usize]
-                    .as_ref()
-                    .unwrap()
-                    .range((Included(&OrderedFloat(to_xfer)), Unbounded)),
-                pull_dom,
-                self.skip_kworkers,
-            ),
-        ) {
-            (None, None) => return Ok(None),
-            (Some((load, task)), None) | (None, Some((load, task))) => {
-                (load, task, calc_new_imbal(load))
-            }
-            (Some((load0, task0)), Some((load1, task1))) => {
-                let (new_imbal0, new_imbal1) = (calc_new_imbal(load0), calc_new_imbal(load1));
-                if new_imbal0 <= new_imbal1 {
-                    (load0, task0, new_imbal0)
-                } else {
-                    (load1, task1, new_imbal1)
-                }
-            }
-        };
-
-        // If the best candidate can't reduce the imbalance, there's nothing
-        // to do for this pair.
-        let old_imbal = to_push + to_pull;
-        if old_imbal < new_imbal {
-            debug!(
-                "skipping pid {}, dom {} -> {} won't improve imbal {:.2} -> {:.2}",
-                task.pid, push_dom, pull_dom, old_imbal, new_imbal
-            );
-            return Ok(None);
-        }
-
-        debug!(
-            "migrating pid {}, dom {} -> {}, imbal={:.2} -> {:.2}",
-            task.pid, push_dom, pull_dom, old_imbal, new_imbal,
-        );
-
-        Ok(Some((task, load)))
-    }
-
-    // Actually execute the load balancing. Concretely this writes pid -> dom
-    // entries into the lb_data map for bpf side to consume.
-    fn load_balance(&mut self) -> Result<()> {
-        clear_map(self.skel.maps().lb_data());
-
-        debug!("imbal={:?}", &self.imbal);
-        debug!("doms_to_push={:?}", &self.doms_to_push);
-        debug!("doms_to_pull={:?}", &self.doms_to_pull);
-
-        // Push from the most imbalanced to least.
-        while let Some((OrderedFloat(mut to_push), push_dom)) = self.doms_to_push.pop_last() {
-            let push_max = self.dom_loads[push_dom as usize] * Self::LOAD_IMBAL_PUSH_MAX_RATIO;
-            let mut pushed = 0f64;
-
-            // Transfer tasks from push_dom to reduce imbalance.
-            loop {
-                let last_pushed = pushed;
-
-                // Pull from the most imbalanced to least.
-                let mut doms_to_pull = BTreeMap::<_, _>::new();
-                std::mem::swap(&mut self.doms_to_pull, &mut doms_to_pull);
-                let mut pull_doms = doms_to_pull.into_iter().rev().collect::<Vec<(_, _)>>();
-
-                for (to_pull, pull_dom) in pull_doms.iter_mut() {
-                    if let Some((task, load)) =
-                        self.pick_victim((push_dom, to_push), (*pull_dom, f64::from(*to_pull)))?
-                    {
-                        // Execute migration.
-                        task.migrated.set(true);
-                        to_push -= load;
-                        *to_pull -= load;
-                        pushed += load;
-
-                        // Ask BPF code to execute the migration.
-                        let pid = task.pid;
-                        let cpid = (pid as libc::pid_t).to_ne_bytes();
-                        if let Err(e) = self.skel.maps_mut().lb_data().update(
-                            &cpid,
-                            &pull_dom.to_ne_bytes(),
-                            libbpf_rs::MapFlags::NO_EXIST,
-                        ) {
-                            warn!(
-                                "Failed to update lb_data map for pid={} error={:?}",
-                                pid, &e
-                            );
-                            *self.nr_lb_data_errors += 1;
-                        }
-
-                        // Always break after a successful migration so that
-                        // the pulling domains are always considered in the
-                        // descending imbalance order.
-                        break;
-                    }
-                }
-
-                pull_doms
-                    .into_iter()
-                    .map(|(k, v)| self.doms_to_pull.insert(k, v))
-                    .count();
-
-                // Stop repeating if nothing got transferred or pushed enough.
-                if pushed == last_pushed || pushed >= push_max {
-                    break;
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-struct Domain {
-    id: usize,
-    mask: Cpumask,
-}
-
-impl Domain {
-    /// Get the Domain's ID.
-    fn id(&self) -> usize {
-        self.id
-    }
-
-    /// Get a raw slice of the domain's cpumask as a set of one or more u64
-    /// variables whose bits represent CPUs in the mask.
-    fn mask_slice(&self) -> &[u64] {
-        self.mask.as_raw_slice()
-    }
-
-    /// The number of CPUs in the domain.
-    fn num_cpus(&self) -> usize {
-        self.mask.len()
-    }
-}
-
-#[derive(Debug)]
-struct DomainGroup {
-    doms: BTreeMap<usize, Domain>,
-    cpu_dom_map: BTreeMap<usize, usize>,
-}
-
-impl DomainGroup {
-    fn nr_doms(&self) -> usize {
-        self.doms.len()
-    }
-
-    fn cpu_dom_id(&self, cpu: usize) -> Option<usize> {
-        self.cpu_dom_map.get(&cpu).copied()
     }
 }
 
@@ -876,27 +240,7 @@ impl<'a> Scheduler<'a> {
         // Initialize skel according to @opts.
         let top = Arc::new(Topology::new()?);
 
-        let doms = if !opts.cpumasks.is_empty() {
-            let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
-            let mut id = 0;
-            for mask_str in opts.cpumasks.iter() {
-                let mask = Cpumask::from_str(&mask_str)?;
-                doms.insert(id, Domain { id, mask });
-                id += 1;
-            }
-            doms
-        } else {
-            let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
-            let mut id = 0;
-            for node in top.nodes().iter() {
-                for (_, llc) in node.llcs().iter() {
-                    let mask = llc.span();
-                    doms.insert(id, Domain { id, mask });
-                    id += 1;
-                }
-            }
-            doms
-        };
+	let domains = Arc::new(DomainGroup::new(top.clone(), &opts.cpumasks)?);
 
         if top.nr_cpus()  > MAX_CPUS {
             bail!(
@@ -906,7 +250,7 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        if doms.len() > MAX_DOMS {
+        if domains.nr_doms() > MAX_DOMS {
             bail!(
                 "nr_doms ({}) is greater than MAX_DOMS ({})",
                 top.nr_cpus(),
@@ -914,32 +258,40 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        skel.rodata_mut().nr_doms = doms.len() as u32;
+        skel.rodata_mut().nr_nodes = domains.nr_nodes() as u32;
+        skel.rodata_mut().nr_doms = domains.nr_doms() as u32;
         skel.rodata_mut().nr_cpus = top.nr_cpus() as u32;
 
-        let mut cpu_dom_map = BTreeMap::new();
-        for (id, dom) in doms.iter() {
-            for cpu in dom.mask.clone().into_iter() {
-                cpu_dom_map.insert(cpu, *id);
-            }
-        }
         for cpu in 0..top.nr_cpus() {
-            let dom_id = cpu_dom_map.get(&cpu).unwrap();
+            let dom_id = domains.cpu_dom_id(&cpu).unwrap();
             skel.rodata_mut().cpu_dom_id_map[cpu] =
-                (*dom_id).try_into().expect("Domain ID could not fit into 32 bits");
+                dom_id.clone().try_into().expect("Domain ID could not fit into 32 bits");
         }
 
-        for (dom_id, domain) in doms.iter() {
-            let raw_cpus_slice = domain.mask_slice();
-            let dom_cpumask_slice = &mut skel.rodata_mut().dom_cpumasks[*dom_id];
-            let (left, _) = dom_cpumask_slice.split_at_mut(raw_cpus_slice.len());
-            left.clone_from_slice(raw_cpus_slice);
-            info!(
-                "DOM[{:02}] cpumask{} ({} cpus)",
-                domain.id(),
-                &format_cpumask(dom_cpumask_slice, top.nr_cpus()),
-                domain.num_cpus()
-            );
+        for numa in 0..domains.nr_nodes() {
+            let mut numa_mask = Cpumask::new()?;
+            let node_domains = domains.numa_doms(&numa);
+            for dom in node_domains.iter() {
+                let dom_mask = dom.mask();
+                numa_mask = numa_mask.or(&dom_mask)?;
+            }
+
+            let raw_numa_slice = numa_mask.as_raw_slice();
+            let node_cpumask_slice = &mut skel.rodata_mut().numa_cpumasks[numa];
+            let (left, _) = node_cpumask_slice.split_at_mut(raw_numa_slice.len());
+            left.clone_from_slice(raw_numa_slice);
+            info!("NUMA[{:02}] mask= {}]", numa, numa_mask);
+
+            for dom in node_domains.iter() {
+                let raw_dom_slice = dom.mask_slice();
+                let dom_cpumask_slice = &mut skel.rodata_mut().dom_cpumasks[dom.id()];
+                let (left, _) = dom_cpumask_slice.split_at_mut(raw_dom_slice.len());
+                left.clone_from_slice(raw_dom_slice);
+                skel.rodata_mut().dom_numa_id_map[dom.id()] =
+                    numa.try_into().expect("NUMA ID could not fit into 32 bits");
+
+                info!("  DOM[{:02}] mask= {}", dom.id(), dom.mask());
+            }
         }
 
         skel.rodata_mut().slice_ns = opts.slice_us * 1000;
@@ -948,6 +300,8 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().fifo_sched = opts.fifo_sched;
         skel.rodata_mut().switch_partial = opts.partial;
         skel.rodata_mut().greedy_threshold = opts.greedy_threshold;
+        skel.rodata_mut().greedy_threshold_x_numa = opts.greedy_threshold_x_numa;
+        skel.rodata_mut().direct_greedy_numa = opts.direct_greedy_numa;
         skel.rodata_mut().debug = opts.verbose as u32;
 
         // Attach.
@@ -965,11 +319,6 @@ impl<'a> Scheduler<'a> {
         let proc_reader = procfs::ProcReader::new();
         let prev_total_cpu = read_total_cpu(&proc_reader)?;
 
-        let dom_group = Arc::new(DomainGroup {
-            doms,
-            cpu_dom_map,
-        });
-
         Ok(Self {
             skel,
             struct_ops, // should be held to keep it attached
@@ -980,7 +329,7 @@ impl<'a> Scheduler<'a> {
             balanced_kworkers: opts.balanced_kworkers,
 
             top: top.clone(),
-            dom_group: dom_group.clone(),
+            dom_group: domains.clone(),
             proc_reader,
 
             prev_at: Instant::now(),
@@ -988,7 +337,7 @@ impl<'a> Scheduler<'a> {
 
             nr_lb_data_errors: 0,
 
-            tuner: Tuner::new(top, dom_group, opts)?,
+            tuner: Tuner::new(top, domains, opts.direct_greedy_under, opts.kick_greedy_under)?,
         })
     }
 
@@ -1075,14 +424,12 @@ impl<'a> Scheduler<'a> {
 
     fn report(
         &mut self,
-        stats: &[u64],
+        bpf_stats: &[u64],
         cpu_busy: f64,
         processing_dur: Duration,
-        load_avg: f64,
-        dom_loads: &[f64],
-        imbal: &[f64],
+        lb_stats: &[NumaStat],
     ) {
-        let stat = |idx| stats[idx as usize];
+        let stat = |idx| bpf_stats[idx as usize];
         let total = stat(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE)
@@ -1091,14 +438,17 @@ impl<'a> Scheduler<'a> {
             + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY_FAR)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY);
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
 
+        let numa_load_avg = lb_stats[0].load.load_avg();
+        let dom_load_avg = lb_stats[0].domains[0].load.load_avg();
         info!(
-            "cpu={:7.2} bal={} load_avg={:8.2} task_err={} lb_data_err={} proc={:?}ms",
+            "cpu={:7.2} bal={} numa_load_avg={:8.2} dom_load_avg={:8.2} task_err={} lb_data_err={} proc={:?}ms",
             cpu_busy * 100.0,
-            stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
-            load_avg,
-            stats[bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR as usize],
+            bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
+            numa_load_avg, dom_load_avg,
+            bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR as usize],
             self.nr_lb_data_errors,
             processing_dur.as_millis(),
         );
@@ -1122,9 +472,14 @@ impl<'a> Scheduler<'a> {
         );
 
         info!(
-            "dsq={:5.2} greedy={:5.2} kick_greedy={:5.2} rep={:5.2}",
+            "dsq={:5.2} greedy_local={:5.2} greedy_xnuma={:5.2}",
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA),
+        );
+
+        info!(
+            "kick_greedy={:5.2} rep={:5.2}",
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_KICK_GREEDY),
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_REPATRIATE),
         );
@@ -1139,22 +494,15 @@ impl<'a> Scheduler<'a> {
             format_cpumask(&ti.kick_greedy_cpumask, self.top.nr_cpus())
         );
 
-        for i in 0..self.dom_group.nr_doms() {
-            info!(
-                "DOM[{:02}] util={:6.2} load={:8.2} imbal={}",
-                i,
-                self.tuner.dom_utils[i] * 100.0,
-                dom_loads[i],
-                if imbal[i] == 0.0 {
-                    format!("{:9.2}", 0.0)
-                } else {
-                    format!("{:+9.2}", imbal[i])
-                },
-            );
+        for node in lb_stats.iter() {
+            info!("{}", node);
+            for dom in node.domains.iter() {
+                info!("{}", dom);
+            }
         }
     }
 
-    fn lb_step(&mut self, lb_apply_weight: bool) -> Result<()> {
+    fn lb_step(&mut self) -> Result<()> {
         let started_at = Instant::now();
         let bpf_stats = self.read_bpf_stats()?;
         let cpu_busy = self.get_cpu_busy()?;
@@ -1164,28 +512,18 @@ impl<'a> Scheduler<'a> {
             self.top.clone(),
             self.dom_group.clone(),
             self.balanced_kworkers,
-            lb_apply_weight.clone(),
-            &mut self.nr_lb_data_errors,
+            self.tuner.fully_utilized.clone(),
+            self.balance_load.clone(),
         );
 
-        lb.read_dom_loads()?;
-        lb.calculate_dom_load_balance()?;
+        lb.load_balance()?;
 
-        if self.balance_load {
-            lb.load_balance()?;
-        }
-
-        // Extract fields needed for reporting and drop lb to release
-        // mutable borrows.
-        let (load_avg, dom_loads, imbal) = (lb.load_avg, lb.dom_loads, lb.imbal);
-
+        let stats = lb.get_stats();
         self.report(
             &bpf_stats,
             cpu_busy,
             Instant::now().duration_since(started_at),
-            load_avg,
-            &dom_loads,
-            &imbal,
+            &stats,
         );
 
         self.prev_at = started_at;
@@ -1207,10 +545,9 @@ impl<'a> Scheduler<'a> {
                     next_tune_at = now + self.tune_interval;
                 }
             }
-            let lb_apply_weight = self.tuner.lb_apply_weight;
 
             if now >= next_sched_at {
-                self.lb_step(lb_apply_weight)?;
+                self.lb_step()?;
                 next_sched_at += self.sched_interval;
                 if next_sched_at < now {
                     next_sched_at = now + self.sched_interval;

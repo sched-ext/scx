@@ -24,6 +24,7 @@ typedef unsigned long long u64;
 enum consts {
 	MAX_CPUS		= 512,
 	MAX_DOMS		= 64,	/* limited to avoid complex bitmask ops */
+	MAX_NUMA_NODES		= MAX_DOMS,	/* Assume at least 1 domain per NUMA node */
 	CACHELINE_SIZE		= 64,
 
 	LB_DEFAULT_WEIGHT	= 100,
@@ -54,7 +55,8 @@ enum stat_idx {
 	RUSTY_STAT_DIRECT_GREEDY,
 	RUSTY_STAT_DIRECT_GREEDY_FAR,
 	RUSTY_STAT_DSQ_DISPATCH,
-	RUSTY_STAT_GREEDY,
+	RUSTY_STAT_GREEDY_LOCAL,
+	RUSTY_STAT_GREEDY_XNUMA,
 
 	/* Extra stats that don't contribute to total */
 	RUSTY_STAT_REPATRIATE,
@@ -72,6 +74,7 @@ struct task_ctx {
 	u64 dom_mask;
 
 	struct bpf_cpumask __kptr *cpumask;
+	struct bpf_cpumask __kptr *tmp_cpumask;
 	u32 dom_id;
 	u32 weight;
 	bool runnable;
@@ -99,9 +102,15 @@ struct dom_ctx {
 	u64 vtime_now;
 	struct bpf_cpumask __kptr *cpumask;
 	struct bpf_cpumask __kptr *direct_greedy_cpumask;
+	struct bpf_cpumask __kptr *node_cpumask;
+	u32 node_id;
 
 	u64 dbg_dcycle_printed_at;
 	struct bucket_ctx buckets[LB_LOAD_BUCKETS];
+};
+
+struct node_ctx {
+	struct bpf_cpumask __kptr *cpumask;
 };
 
 #endif /* __INTF_H */

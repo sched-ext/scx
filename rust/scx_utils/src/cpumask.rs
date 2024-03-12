@@ -207,7 +207,14 @@ impl Cpumask {
 
 impl fmt::Display for Cpumask {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:<{}>", self.nr_cpus, self.mask)
+        let slice = self.as_raw_slice();
+        let mut remaining_width = self.nr_cpus + 2;
+        write!(f, "{:#0width$b}", slice[0], width = remaining_width.min(66))?;
+        for submask in &slice[1..] {
+            remaining_width -= 64;
+            write!(f, "{:0width$b}", submask, width = remaining_width.min(64))?;
+        }
+        Ok(())
     }
 }
 
