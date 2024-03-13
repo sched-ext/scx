@@ -35,6 +35,7 @@ use libbpf_rs::skel::OpenSkel as _;
 use libbpf_rs::skel::Skel as _;
 use libbpf_rs::skel::SkelBuilder as _;
 use log::info;
+use log::warn;
 use scx_utils::init_libbpf_logging;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
@@ -262,10 +263,25 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().nr_doms = domains.nr_doms() as u32;
         skel.rodata_mut().nr_cpus = top.nr_cpus() as u32;
 
+        let mut warned = false;
         for cpu in 0..top.nr_cpus() {
-            let dom_id = domains.cpu_dom_id(&cpu).unwrap();
-            skel.rodata_mut().cpu_dom_id_map[cpu] =
-                dom_id.clone().try_into().expect("Domain ID could not fit into 32 bits");
+            if let Some(dom_id) = domains.cpu_dom_id(&cpu) {
+                skel.rodata_mut().cpu_dom_id_map[cpu] =
+                    dom_id.clone().try_into().expect("Domain ID could not fit into 32 bits");
+            } else {
+                // As described in
+                // https://bugzilla.kernel.org/show_bug.cgi?id=218109, some
+                // chips may incorrectly report disabled CPUs as offline. It
+                // doesn't appear that this is going to be corrected anytime
+                // soon, so just put the CPUs in domain 0 so we can get past
+                // startup.
+                if !warned {
+                    warn!("Found a CPU without a domain, putting in domain 0. May experience suboptimal scheduling.");
+                    warn!("Please see https://bugzilla.kernel.org/show_bug.cgi?id=218109 for more details");
+                    warned = true;
+                }
+                skel.rodata_mut().cpu_dom_id_map[cpu] = 0;
+            }
         }
 
         for numa in 0..domains.nr_nodes() {
