@@ -302,20 +302,29 @@ enum LayerMatch {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum LayerKind {
     Confined {
-        cpus_range: Option<(usize, usize)>,
         util_range: (f64, f64),
+	#[serde(default)]
+        cpus_range: Option<(usize, usize)>,
+	#[serde(default)]
         min_exec_us: u64,
     },
     Grouped {
-        cpus_range: Option<(usize, usize)>,
         util_range: (f64, f64),
+	#[serde(default)]
+        cpus_range: Option<(usize, usize)>,
+	#[serde(default)]
         min_exec_us: u64,
+	#[serde(default)]
         preempt: bool,
+	#[serde(default)]
         exclusive: bool,
     },
     Open {
+	#[serde(default)]
         min_exec_us: u64,
+	#[serde(default)]
         preempt: bool,
+	#[serde(default)]
         exclusive: bool,
     },
 }
