@@ -359,7 +359,7 @@ impl<'a> Scheduler<'a> {
         //
         // This allows to survive stress tests that are spawning a massive amount of
         // tasks.
-        self.eff_slice_boost = (self.slice_boost * self.topo.nr_cpus() as u64
+        self.eff_slice_boost = (self.slice_boost * self.topo.nr_cpus_possible() as u64
             / self.task_pool.tasks.len().max(1) as u64)
             .max(1);
 

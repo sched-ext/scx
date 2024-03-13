@@ -177,14 +177,13 @@ pub struct Topology {
     nodes: Vec<Node>,
     cores: Vec<Core>,
     cpus: BTreeMap<usize, Cpu>,
-    nr_cpus: usize,
     span: Cpumask,
+    nr_cpus_possible: usize,
 }
 
 impl Topology {
     /// Build a complete host Topology
     pub fn new() -> Result<Topology> {
-        let nr_cpus = libbpf_rs::num_possible_cpus()?;
         let span = cpus_online()?;
         let nodes = create_numa_nodes(&span)?;
 
@@ -208,7 +207,8 @@ impl Topology {
             }
         }
 
-        Ok(Topology { nodes, nr_cpus, cores, cpus, span })
+        let nr_cpus_possible = libbpf_rs::num_possible_cpus().unwrap();
+        Ok(Topology { nodes, cores, cpus, span, nr_cpus_possible, })
     }
 
     /// Get a slice of the NUMA nodes on the host.
@@ -226,14 +226,26 @@ impl Topology {
         &self.cpus
     }
 
-    /// Get the number of total CPUs on the host
-    pub fn nr_cpus(&self) -> usize {
-        self.nr_cpus
-    }
-
     /// Get a cpumask of all the online CPUs on the host
     pub fn span(&self) -> Cpumask {
         self.span.clone()
+    }
+
+    /// Get the maximum possible number of CPUs. Note that this number is likely
+    /// only applicable in the context of storing and extracting per-CPU data
+    /// between user space and BPF, as it doesn't necessarily reflect the actual
+    /// number of online or even possible CPUs in the system.
+    ///
+    /// For example, as described in
+    /// https://bugzilla.kernel.org/show_bug.cgi?id=218109, some buggy AMD BIOS
+    /// implementations may incorrectly report disabled CPUs as offlined / part
+    /// of the CPUs possible mask.
+    ///
+    /// Even if the CPUs are possible and may be enabled with hotplug, they're
+    /// not active now, so you wouldn't want to use this number to determine
+    /// system load, util, etc.
+    pub fn nr_cpus_possible(&self) -> usize {
+        self.nr_cpus_possible
     }
 }
 

@@ -182,14 +182,6 @@ struct Opts {
     verbose: u8,
 }
 
-fn format_cpumask(cpumask: &[u64], nr_cpus: usize) -> String {
-    cpumask
-        .iter()
-        .take((nr_cpus + 64) / 64)
-        .rev()
-        .fold(String::new(), |acc, x| format!("{} {:016X}", acc, x))
-}
-
 fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
     reader
         .read_stat()
@@ -240,12 +232,12 @@ impl<'a> Scheduler<'a> {
         // Initialize skel according to @opts.
         let top = Arc::new(Topology::new()?);
 
-	let domains = Arc::new(DomainGroup::new(top.clone(), &opts.cpumasks)?);
+        let domains = Arc::new(DomainGroup::new(top.clone(), &opts.cpumasks)?);
 
-        if top.nr_cpus()  > MAX_CPUS {
+        if top.nr_cpus_possible() > MAX_CPUS {
             bail!(
-                "nr_cpus ({}) is greater than MAX_CPUS ({})",
-                top.nr_cpus() ,
+                "Num possible CPUs ({}) exceeds maximum of ({})",
+                top.nr_cpus_possible(),
                 MAX_CPUS
             );
         }
@@ -253,19 +245,28 @@ impl<'a> Scheduler<'a> {
         if domains.nr_doms() > MAX_DOMS {
             bail!(
                 "nr_doms ({}) is greater than MAX_DOMS ({})",
-                top.nr_cpus(),
+                domains.nr_doms(),
                 MAX_DOMS
             );
         }
 
         skel.rodata_mut().nr_nodes = domains.nr_nodes() as u32;
         skel.rodata_mut().nr_doms = domains.nr_doms() as u32;
-        skel.rodata_mut().nr_cpus = top.nr_cpus() as u32;
+        skel.rodata_mut().nr_cpus_possible = top.nr_cpus_possible() as u32;
 
-        for cpu in 0..top.nr_cpus() {
-            let dom_id = domains.cpu_dom_id(&cpu).unwrap();
-            skel.rodata_mut().cpu_dom_id_map[cpu] =
-                dom_id.clone().try_into().expect("Domain ID could not fit into 32 bits");
+        // Any CPU with dom > MAX_DOMS is considered offline by default. There
+        // are a few places in the BPF code where we skip over offlined CPUs
+        // (e.g. when initializing or refreshing tune params), and elsewhere the
+        // scheduler will error if we try to schedule from them.
+        for cpu in 0..top.nr_cpus_possible() {
+            skel.rodata_mut().cpu_dom_id_map[cpu] = u32::MAX;
+        }
+
+        for (id, dom) in domains.doms().iter() {
+            for cpu in dom.mask().into_iter() {
+                skel.rodata_mut().cpu_dom_id_map[cpu] =
+                    id.clone().try_into().expect("Domain ID could not fit into 32 bits");
+            }
         }
 
         for numa in 0..domains.nr_nodes() {
@@ -280,7 +281,7 @@ impl<'a> Scheduler<'a> {
             let node_cpumask_slice = &mut skel.rodata_mut().numa_cpumasks[numa];
             let (left, _) = node_cpumask_slice.split_at_mut(raw_numa_slice.len());
             left.clone_from_slice(raw_numa_slice);
-            info!("NUMA[{:02}] mask= {}]", numa, numa_mask);
+            info!("NUMA[{:02}] mask= {}", numa, numa_mask);
 
             for dom in node_domains.iter() {
                 let raw_dom_slice = dom.mask_slice();
@@ -328,7 +329,7 @@ impl<'a> Scheduler<'a> {
             balance_load: !opts.no_load_balance,
             balanced_kworkers: opts.balanced_kworkers,
 
-            top: top.clone(),
+            top: top,
             dom_group: domains.clone(),
             proc_reader,
 
@@ -337,7 +338,7 @@ impl<'a> Scheduler<'a> {
 
             nr_lb_data_errors: 0,
 
-            tuner: Tuner::new(top, domains, opts.direct_greedy_under, opts.kick_greedy_under)?,
+            tuner: Tuner::new(domains, opts.direct_greedy_under, opts.kick_greedy_under)?,
         })
     }
 
@@ -397,7 +398,7 @@ impl<'a> Scheduler<'a> {
         let mut maps = self.skel.maps_mut();
         let stats_map = maps.stats();
         let mut stats: Vec<u64> = Vec::new();
-        let zero_vec = vec![vec![0u8; stats_map.value_size() as usize]; self.top.nr_cpus()];
+        let zero_vec = vec![vec![0u8; stats_map.value_size() as usize]; self.top.nr_cpus_possible()];
 
         for stat in 0..bpf_intf::stat_idx_RUSTY_NR_STATS {
             let cpu_stat_vec = stats_map
@@ -484,15 +485,8 @@ impl<'a> Scheduler<'a> {
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_REPATRIATE),
         );
 
-        let ti = &self.skel.bss().tune_input;
-        info!(
-            "direct_greedy_cpumask={}",
-            format_cpumask(&ti.direct_greedy_cpumask, self.top.nr_cpus())
-        );
-        info!(
-            "  kick_greedy_cpumask={}",
-            format_cpumask(&ti.kick_greedy_cpumask, self.top.nr_cpus())
-        );
+        info!("direct_greedy_cpumask={}", self.tuner.direct_greedy_mask);
+        info!("  kick_greedy_cpumask={}", self.tuner.kick_greedy_mask);
 
         for node in lb_stats.iter() {
             info!("{}", node);
@@ -509,7 +503,6 @@ impl<'a> Scheduler<'a> {
 
         let mut lb = LoadBalancer::new(
             &mut self.skel,
-            self.top.clone(),
             self.dom_group.clone(),
             self.balanced_kworkers,
             self.tuner.fully_utilized.clone(),

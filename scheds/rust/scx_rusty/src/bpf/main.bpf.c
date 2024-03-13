@@ -60,7 +60,7 @@ struct user_exit_info uei;
  */
 const volatile u32 nr_doms = 32;	/* !0 for veristat, set during init */
 const volatile u32 nr_nodes = 32;	/* !0 for veristat, set during init */
-const volatile u32 nr_cpus = 64;	/* !0 for veristat, set during init */
+const volatile u32 nr_cpus_possible = 64;	/* !0 for veristat, set during init */
 const volatile u32 cpu_dom_id_map[MAX_CPUS];
 const volatile u32 dom_numa_id_map[MAX_DOMS];
 const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
@@ -384,6 +384,11 @@ static u32 cpu_to_dom_id(s32 cpu)
 	return *dom_idp;
 }
 
+static inline bool is_offline_cpu(s32 cpu)
+{
+	return cpu_to_dom_id(cpu) > MAX_DOMS;
+}
+
 static void refresh_tune_params(void)
 {
 	s32 cpu;
@@ -393,9 +398,12 @@ static void refresh_tune_params(void)
 
 	tune_params_gen = tune_input.gen;
 
-	bpf_for(cpu, 0, nr_cpus) {
+	bpf_for(cpu, 0, nr_cpus_possible) {
 		u32 dom_id = cpu_to_dom_id(cpu);
 		struct dom_ctx *domc;
+
+		if (is_offline_cpu(cpu))
+			continue;
 
 		if (!(domc = bpf_map_lookup_elem(&dom_data, &dom_id))) {
 			scx_bpf_error("Failed to lookup dom[%u]", dom_id);
@@ -432,6 +440,12 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	u32 old_dom_id = taskc->dom_id;
 	s64 vtime_delta;
 
+	t_cpumask = taskc->cpumask;
+	if (!t_cpumask) {
+		scx_bpf_error("Failed to look up task cpumask");
+		return false;
+	}
+
 	old_domc = bpf_map_lookup_elem(&dom_data, &old_dom_id);
 	if (!old_domc) {
 		scx_bpf_error("Failed to lookup old dom%u", old_dom_id);
@@ -445,8 +459,15 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 
 	new_domc = bpf_map_lookup_elem(&dom_data, &new_dom_id);
 	if (!new_domc) {
-		scx_bpf_error("Failed to lookup new dom%u", new_dom_id);
-		return false;
+		if (new_dom_id == NO_DOM_FOUND) {
+			taskc->offline = true;
+			bpf_cpumask_clear(t_cpumask);
+			return !(p->scx.flags & SCX_TASK_QUEUED);
+		} else {
+			scx_bpf_error("Failed to lookup new dom%u",
+				      new_dom_id);
+			return false;
+		}
 	}
 
 	d_cpumask = new_domc->cpumask;
@@ -847,7 +868,7 @@ static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
 	if (dom_id >= MAX_DOMS)
 		return false;
 
-	bpf_for(cpu, 0, nr_cpus) {
+	bpf_for(cpu, 0, nr_cpus_possible) {
 		if (bpf_cpumask_test_cpu(cpu, cpumask) &&
 		    (dom_cpumasks[dom_id][cpu / 64] & (1LLU << (cpu % 64))))
 			return true;
@@ -945,6 +966,11 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
+	if (taskc->offline) {
+		scx_bpf_error("Offline task [%s](%d) is becoming runnable",
+			      p->comm, p->pid);
+		return;
+	}
 	taskc->is_kworker = p->flags & PF_WQ_WORKER;
 
 	task_load_adj(p, taskc, now, true);
@@ -1054,10 +1080,10 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 			    const struct cpumask *cpumask)
 {
 	s32 cpu = bpf_get_smp_processor_id();
-	u32 first_dom = MAX_DOMS, dom;
+	u32 first_dom = NO_DOM_FOUND, dom;
 
 	if (cpu < 0 || cpu >= MAX_CPUS)
-		return MAX_DOMS;
+		return NO_DOM_FOUND;
 
 	taskc->dom_mask = 0;
 
@@ -1070,7 +1096,7 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 			 * The starting point is round-robin'd and the first
 			 * match should be spread across all the domains.
 			 */
-			if (first_dom == MAX_DOMS)
+			if (first_dom == NO_DOM_FOUND)
 				first_dom = dom;
 		}
 	}
@@ -1441,7 +1467,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 			return ret;
 	}
 
-	bpf_for(i, 0, nr_cpus) {
+	bpf_for(i, 0, nr_cpus_possible) {
+		if (is_offline_cpu(i))
+			continue;
+
 		ret = initialize_cpu(i);
 		if (ret)
 			return ret;

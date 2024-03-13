@@ -26,7 +26,7 @@ struct Scheduler<'a> {
 impl<'a> Scheduler<'a> {
     fn init() -> Result<Self> {
         let topo = Topology::new().expect("Failed to build host topology");
-        let bpf = BpfScheduler::init(5000, topo.nr_cpus() as i32, false, false, false)?;
+        let bpf = BpfScheduler::init(5000, topo.nr_cpus_possible() as i32, false, false, false)?;
         Ok(Self { bpf })
     }
 
