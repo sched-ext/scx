@@ -504,6 +504,12 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 		if (!(cand_cctx = lookup_cpu_ctx(cpu)) || cand_cctx->current_preempt)
 			continue;
+
+		/*
+		 * If exclusive, we want to make sure the sibling CPU, if
+		 * there's one, is idle. However, if the sibling CPU is already
+		 * running a preempt task, we shouldn't kick it out.
+		 */
 		if (layer->exclusive && (sib = sibling_cpu(cpu)) >= 0 &&
 		    (!(sib_cctx = lookup_cpu_ctx(sib)) ||
 		     sib_cctx->current_preempt)) {
@@ -512,6 +518,14 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		}
 
 		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+
+		/*
+		 * $sib_cctx is set iff @p is an exclusive task, a sibling CPU
+		 * exists which is not running a preempt task. Let's preempt the
+		 * sibling CPU so that it can become idle. The ->maybe_idle test
+		 * is inaccurate and racy but should be good enough for
+		 * best-effort optimization.
+		 */
 		if (sib_cctx && !sib_cctx->maybe_idle) {
 			lstat_inc(LSTAT_EXCL_PREEMPT, layer, cctx);
 			scx_bpf_kick_cpu(sib, SCX_KICK_PREEMPT);
@@ -539,6 +553,11 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (!(cctx = lookup_cpu_ctx(-1)))
 		return;
 
+	/*
+	 * If the sibling CPU is running an exclusive task, keep this CPU idle.
+	 * This test is a racy test but should be good enough for best-effort
+	 * optimization.
+	 */
 	if (sib >= 0 && (sib_cctx = lookup_cpu_ctx(sib)) &&
 	    sib_cctx->current_exclusive) {
 		gstat_inc(GSTAT_EXCL_IDLE, cctx);
@@ -731,7 +750,8 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 
 		/*
 		 * %SCX_KICK_IDLE would be great here but we want to support
-		 * older kernels. Let's use racy custom idle flag instead.
+		 * older kernels. Let's use racy and inaccruate custom idle flag
+		 * instead.
 		 */
 		if (sib >= 0 && (sib_cctx = lookup_cpu_ctx(sib)) &&
 		    sib_cctx->maybe_idle) {
