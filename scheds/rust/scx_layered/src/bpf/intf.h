@@ -38,20 +38,30 @@ enum consts {
 /* Statistics */
 enum global_stat_idx {
 	GSTAT_TASK_CTX_FREE_FAILED,
+	GSTAT_EXCL_IDLE,
+	GSTAT_EXCL_WAKEUP,
 	NR_GSTATS,
 };
 
 enum layer_stat_idx {
 	LSTAT_LOCAL,
 	LSTAT_GLOBAL,
+	LSTAT_MIN_EXEC,
+	LSTAT_MIN_EXEC_NS,
 	LSTAT_OPEN_IDLE,
 	LSTAT_AFFN_VIOL,
 	LSTAT_PREEMPT,
+	LSTAT_PREEMPT_FAIL,
+	LSTAT_EXCL_COLLISION,
+	LSTAT_EXCL_PREEMPT,
 	NR_LSTATS,
 };
 
 struct cpu_ctx {
 	bool			current_preempt;
+	bool			current_exclusive;
+	bool			prev_exclusive;
+	bool			maybe_idle;
 	u64			layer_cycles[MAX_LAYERS];
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
@@ -83,8 +93,10 @@ struct layer {
 	struct layer_match_ands	matches[MAX_LAYER_MATCH_ORS];
 	unsigned int		nr_match_ors;
 	unsigned int		idx;
+	u64			min_exec_ns;
 	bool			open;
 	bool			preempt;
+	bool			exclusive;
 
 	u64			vtime_now;
 	u64			nr_tasks;

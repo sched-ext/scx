@@ -34,6 +34,7 @@ use libbpf_rs::skel::SkelBuilder as _;
 use log::debug;
 use log::info;
 use log::trace;
+use log::warn;
 use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
@@ -95,26 +96,27 @@ lazy_static::lazy_static! {
 /// The outer array contains the OR groups and the inner AND blocks, so the
 /// above matches:
 ///
-/// * Tasks which are in the cgroup sub-hierarchy under "system.slice".
-/// * Or tasks whose comm starts with "fbagent" and have a nice value > 0.
+/// - Tasks which are in the cgroup sub-hierarchy under "system.slice".
+///
+/// - Or tasks whose comm starts with "fbagent" and have a nice value > 0.
 ///
 /// Currently, the following matches are supported:
 ///
-/// * CgroupPrefix: Matches the prefix of the cgroup that the task belongs
+/// - CgroupPrefix: Matches the prefix of the cgroup that the task belongs
 ///   to. As this is a string match, whether the pattern has the trailing
 ///   '/' makes a difference. For example, "TOP/CHILD/" only matches tasks
 ///   which are under that particular cgroup while "TOP/CHILD" also matches
 ///   tasks under "TOP/CHILD0/" or "TOP/CHILD1/".
 ///
-/// * CommPrefix: Matches the task's comm prefix.
+/// - CommPrefix: Matches the task's comm prefix.
 ///
-/// * NiceAbove: Matches if the task's nice value is greater than the
+/// - NiceAbove: Matches if the task's nice value is greater than the
 ///   pattern.
 ///
-/// * NiceBelow: Matches if the task's nice value is smaller than the
+/// - NiceBelow: Matches if the task's nice value is smaller than the
 ///   pattern.
 ///
-/// * NiceEquals: Matches if the task's nice value is exactly equal to
+/// - NiceEquals: Matches if the task's nice value is exactly equal to
 ///   the pattern.
 ///
 /// While there are complexity limitations as the matches are performed in
@@ -141,21 +143,32 @@ lazy_static::lazy_static! {
 ///
 /// Currently, the following policy kinds are supported:
 ///
-/// * Confined: Tasks are restricted to the allocated CPUs. The number of
+/// - Confined: Tasks are restricted to the allocated CPUs. The number of
 ///   CPUs allocated is modulated to keep the per-CPU utilization in
 ///   "util_range". The range can optionally be restricted with the
 ///   "cpus_range" property.
 ///
-/// * Grouped: Similar to Confined but tasks may spill outside if there are
-///   idle CPUs outside the allocated ones. If "preempt" is true, tasks in
-///   this layer will preempt tasks which belong to other non-preempting
-///   layers when no idle CPUs are available.
+/// - Grouped: Similar to Confined but tasks may spill outside if there are
+///   idle CPUs outside the allocated ones.
 ///
-/// * Open: Prefer the CPUs which are not occupied by Confined or Grouped
+/// - Open: Prefer the CPUs which are not occupied by Confined or Grouped
 ///   layers. Tasks in this group will spill into occupied CPUs if there are
-///   no unoccupied idle CPUs. If "preempt" is true, tasks in this layer
-///   will preempt tasks which belong to other non-preempting layers when no
-///   idle CPUs are available.
+///   no unoccupied idle CPUs.
+///
+/// All layers take the following options:
+///
+/// - min_exec_us: Minimum execution time in microseconds. Whenever a task
+///   is scheduled in, this is the minimum CPU time that it's charged no
+///   matter how short the actual execution time may be.
+///
+/// Both Grouped and Open layers also acception the following options:
+///
+/// - preempt: If true, tasks in the layer will preempt tasks which belong
+///   to other non-preempting layers when no idle CPUs are available.
+///
+/// - exclusive: If true, tasks in the layer will occupy the whole core. The
+///   other logical CPUs sharing the same core will be kept idle. This isn't
+///   a hard guarantee, so don't depend on it for security purposes.
 ///
 /// Similar to matches, adding new policies and extending existing ones
 /// should be relatively straightforward.
@@ -291,14 +304,19 @@ enum LayerKind {
     Confined {
         cpus_range: Option<(usize, usize)>,
         util_range: (f64, f64),
+        min_exec_us: u64,
     },
     Grouped {
         cpus_range: Option<(usize, usize)>,
         util_range: (f64, f64),
+        min_exec_us: u64,
         preempt: bool,
+        exclusive: bool,
     },
     Open {
+        min_exec_us: u64,
         preempt: bool,
+        exclusive: bool,
     },
 }
 
@@ -376,14 +394,14 @@ fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
                 ..
             },
         ) => {
-            let idle_usec = curr_idle - prev_idle;
-            let iowait_usec = curr_iowait - prev_iowait;
-            let user_usec = curr_user - prev_user;
-            let system_usec = curr_system - prev_system;
-            let nice_usec = curr_nice - prev_nice;
-            let irq_usec = curr_irq - prev_irq;
-            let softirq_usec = curr_softirq - prev_softirq;
-            let stolen_usec = curr_stolen - prev_stolen;
+            let idle_usec = curr_idle.saturating_sub(*prev_idle);
+            let iowait_usec = curr_iowait.saturating_sub(*prev_iowait);
+            let user_usec = curr_user.saturating_sub(*prev_user);
+            let system_usec = curr_system.saturating_sub(*prev_system);
+            let nice_usec = curr_nice.saturating_sub(*prev_nice);
+            let irq_usec = curr_irq.saturating_sub(*prev_irq);
+            let softirq_usec = curr_softirq.saturating_sub(*prev_softirq);
+            let stolen_usec = curr_stolen.saturating_sub(*prev_stolen);
 
             let busy_usec =
                 user_usec + system_usec + nice_usec + irq_usec + softirq_usec + stolen_usec;
@@ -394,9 +412,7 @@ fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
                 Ok(1.0)
             }
         }
-        _ => {
-            bail!("Missing stats in cpustat");
-        }
+        _ => bail!("Missing stats in cpustat"),
     }
 }
 
@@ -648,6 +664,7 @@ struct CpuPool {
     nr_cpus: usize,
     all_cpus: BitVec,
     core_cpus: Vec<BitVec>,
+    sibling_cpu: Vec<i32>,
     cpu_core: Vec<usize>,
     available_cores: BitVec,
     first_cpu: usize,
@@ -716,10 +733,26 @@ impl CpuPool {
             }
         }
 
+        // Build sibling_cpu[]
+        let mut sibling_cpu = vec![-1i32; *NR_POSSIBLE_CPUS];
+        for cpus in &core_cpus {
+            let mut first = -1i32;
+            for cpu in cpus.iter_ones() {
+                if first < 0 {
+                    first = cpu as i32;
+                } else {
+                    sibling_cpu[first as usize] = cpu as i32;
+                    sibling_cpu[cpu as usize] = first;
+                    break;
+                }
+            }
+        }
+
         info!(
             "CPUs: online/possible={}/{} nr_cores={}",
             nr_cpus, *NR_POSSIBLE_CPUS, nr_cores,
         );
+        debug!("CPUs: siblings={:?}", &sibling_cpu[..nr_cpus]);
 
         let first_cpu = core_cpus[0].first_one().unwrap();
 
@@ -728,6 +761,7 @@ impl CpuPool {
             nr_cpus,
             all_cpus,
             core_cpus,
+            sibling_cpu,
             cpu_core,
             available_cores: bitvec![1; nr_cores],
             first_cpu,
@@ -826,6 +860,7 @@ impl Layer {
             LayerKind::Confined {
                 cpus_range,
                 util_range,
+                ..
             } => {
                 let cpus_range = cpus_range.unwrap_or((0, std::usize::MAX));
                 if cpus_range.0 > cpus_range.1 || cpus_range.1 == 0 {
@@ -1041,6 +1076,8 @@ struct OpenMetricsStats {
     open_idle: Gauge<f64, AtomicU64>,
     affn_viol: Gauge<f64, AtomicU64>,
     tctx_err: Gauge<i64, AtomicI64>,
+    excl_idle: Gauge<f64, AtomicU64>,
+    excl_wakeup: Gauge<f64, AtomicU64>,
     proc_ms: Gauge<i64, AtomicI64>,
     busy: Gauge<f64, AtomicU64>,
     util: Gauge<f64, AtomicU64>,
@@ -1052,9 +1089,14 @@ struct OpenMetricsStats {
     l_tasks: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_total: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_local: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_min_exec: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_min_exec_us: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_open_idle: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_preempt: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_preempt_fail: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_affn_viol: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_excl_collision: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_excl_preempt: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_cur_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_min_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_max_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
@@ -1088,6 +1130,14 @@ impl OpenMetricsStats {
         );
         register!(tctx_err, "Failures to free task contexts");
         register!(
+            excl_idle,
+            "Number of times a CPU skipped dispatching due to sibling running an exclusive task"
+        );
+        register!(
+            excl_wakeup,
+            "Number of times an idle sibling CPU was woken up after an exclusive task is finished"
+        );
+        register!(
             proc_ms,
             "CPU time this binary has consumed during the period"
         );
@@ -1111,6 +1161,14 @@ impl OpenMetricsStats {
         register!(l_total, "Number of scheduling events in the layer");
         register!(l_local, "% of scheduling events directly into an idle CPU");
         register!(
+            l_min_exec,
+            "Number of times execution duration was shorter than min_exec_us"
+        );
+        register!(
+            l_min_exec_us,
+            "Total execution duration extended due to min_exec_us"
+        );
+        register!(
             l_open_idle,
             "% of scheduling events into idle CPUs occupied by other layers"
         );
@@ -1119,8 +1177,20 @@ impl OpenMetricsStats {
             "% of scheduling events that preempted other tasks"
         );
         register!(
+            l_preempt_fail,
+            "% of scheduling events that attempted to preempt other tasks but failed"
+        );
+        register!(
             l_affn_viol,
             "% of scheduling events that violated configured policies due to CPU affinity restrictions"
+        );
+        register!(
+            l_excl_collision,
+            "Number of times an exclusive task skipped a CPU as the sibling was also exclusive"
+        );
+        register!(
+            l_excl_preempt,
+            "Number of times a sibling CPU was preempted for an exclusive task"
         );
         register!(l_cur_nr_cpus, "Current # of CPUs assigned to the layer");
         register!(l_min_nr_cpus, "Minimum # of CPUs assigned to the layer");
@@ -1192,11 +1262,24 @@ impl<'a> Scheduler<'a> {
             layer.nr_match_ors = spec.matches.len() as u32;
 
             match &spec.kind {
-                LayerKind::Open { preempt } | LayerKind::Grouped { preempt, .. } => {
-                    layer.open = true;
-                    layer.preempt = *preempt;
+                LayerKind::Confined { min_exec_us, .. } => layer.min_exec_ns = min_exec_us * 1000,
+                LayerKind::Open {
+                    min_exec_us,
+                    preempt,
+                    exclusive,
+                    ..
                 }
-                _ => {}
+                | LayerKind::Grouped {
+                    min_exec_us,
+                    preempt,
+                    exclusive,
+                    ..
+                } => {
+                    layer.open = true;
+                    layer.min_exec_ns = min_exec_us * 1000;
+                    layer.preempt = *preempt;
+                    layer.exclusive = *exclusive;
+                }
             }
         }
 
@@ -1218,6 +1301,9 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().slice_ns = opts.slice_us * 1000;
         skel.rodata_mut().nr_possible_cpus = *NR_POSSIBLE_CPUS as u32;
         skel.rodata_mut().smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
+        for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
+            skel.rodata_mut().__sibling_cpu[cpu] = *sib;
+        }
         for cpu in cpu_pool.all_cpus.iter_ones() {
             skel.rodata_mut().all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
@@ -1264,9 +1350,14 @@ impl<'a> Scheduler<'a> {
         // huge problem in the interim until we figure it out.
 
         // Attach.
-        sched.skel.attach().context("Failed to attach BPF program")?;
+        sched
+            .skel
+            .attach()
+            .context("Failed to attach BPF program")?;
         sched.struct_ops = Some(
-            sched.skel.maps_mut()
+            sched
+                .skel
+                .maps_mut()
                 .layered()
                 .attach_struct_ops()
                 .context("Failed to attach layered struct ops")?,
@@ -1295,6 +1386,7 @@ impl<'a> Scheduler<'a> {
                 LayerKind::Confined {
                     cpus_range,
                     util_range,
+                    ..
                 }
                 | LayerKind::Grouped {
                     cpus_range,
@@ -1389,6 +1481,14 @@ impl<'a> Scheduler<'a> {
             }
         };
 
+        let fmt_pct = |v: f64| {
+            if v >= 99.995 {
+                format!("{:5.1}", v)
+            } else {
+                format!("{:5.2}", v)
+            }
+        };
+
         self.om_stats.total.set(total as i64);
         self.om_stats
             .local
@@ -1403,6 +1503,14 @@ impl<'a> Scheduler<'a> {
             stats.prev_bpf_stats.gstats
                 [bpf_intf::global_stat_idx_GSTAT_TASK_CTX_FREE_FAILED as usize] as i64,
         );
+        self.om_stats.excl_idle.set(
+            stats.bpf_stats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_IDLE as usize] as f64
+                / total as f64,
+        );
+        self.om_stats.excl_wakeup.set(
+            stats.bpf_stats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_WAKEUP as usize] as f64
+                / total as f64,
+        );
         self.om_stats.proc_ms.set(processing_dur.as_millis() as i64);
         self.om_stats.busy.set(stats.cpu_busy * 100.0);
         self.om_stats.util.set(stats.total_util * 100.0);
@@ -1410,11 +1518,11 @@ impl<'a> Scheduler<'a> {
 
         if !self.om_format {
             info!(
-                "tot={:7} local={:5.2} open_idle={:5.2} affn_viol={:5.2} tctx_err={} proc={:?}ms",
+                "tot={:7} local={} open_idle={} affn_viol={} tctx_err={} proc={:?}ms",
                 self.om_stats.total.get(),
-                self.om_stats.local.get(),
-                self.om_stats.open_idle.get(),
-                self.om_stats.affn_viol.get(),
+                fmt_pct(self.om_stats.local.get()),
+                fmt_pct(self.om_stats.open_idle.get()),
+                fmt_pct(self.om_stats.affn_viol.get()),
                 self.om_stats.tctx_err.get(),
                 self.om_stats.proc_ms.get(),
             );
@@ -1425,6 +1533,14 @@ impl<'a> Scheduler<'a> {
                 self.om_stats.util.get(),
                 self.om_stats.load.get(),
                 self.cpu_pool.fallback_cpu,
+            );
+
+            info!(
+                "excl_coll={} excl_preempt={} excl_idle={} excl_wakeup={}",
+                fmt_pct(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION)),
+                fmt_pct(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT)),
+                fmt_pct(self.om_stats.excl_idle.get()),
+                fmt_pct(self.om_stats.excl_wakeup.get()),
             );
         }
 
@@ -1482,14 +1598,34 @@ impl<'a> Scheduler<'a> {
             let l_tasks = set!(l_tasks, stats.nr_layer_tasks[lidx] as i64);
             let l_total = set!(l_total, ltotal as i64);
             let l_local = set!(l_local, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_LOCAL));
+            let l_min_exec = set!(
+                l_min_exec,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC)
+            );
+            let l_min_exec_us = set!(
+                l_min_exec_us,
+                (lstat(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC_NS) / 1000) as i64
+            );
             let l_open_idle = set!(
                 l_open_idle,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE)
             );
             let l_preempt = set!(l_preempt, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT));
+            let l_preempt_fail = set!(
+                l_preempt_fail,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FAIL)
+            );
             let l_affn_viol = set!(
                 l_affn_viol,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL)
+            );
+            let l_excl_collision = set!(
+                l_excl_collision,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION)
+            );
+            let l_excl_preempt = set!(
+                l_excl_preempt,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT)
             );
             let l_cur_nr_cpus = set!(l_cur_nr_cpus, layer.nr_cpus as i64);
             let l_min_nr_cpus = set!(l_min_nr_cpus, self.nr_layer_cpus_min_max[lidx].0 as i64);
@@ -1506,13 +1642,21 @@ impl<'a> Scheduler<'a> {
                     width = header_width,
                 );
                 info!(
-                    "  {:<width$}  tot={:7} local={:5.2} open_idle={:5.2} preempt={:5.2} affn_viol={:5.2}",
+                    "  {:<width$}  tot={:7} local={} open_idle={} affn_viol={}",
                     "",
                     l_total.get(),
-                    l_local.get(),
-                    l_open_idle.get(),
-                    l_preempt.get(),
-                    l_affn_viol.get(),
+                    fmt_pct(l_local.get()),
+                    fmt_pct(l_open_idle.get()),
+                    fmt_pct(l_affn_viol.get()),
+                    width = header_width,
+                );
+                info!(
+                    "  {:<width$}  preempt/fail={}/{} min_exec={}/{:7.2}ms",
+                    "",
+                    fmt_pct(l_preempt.get()),
+                    fmt_pct(l_preempt_fail.get()),
+                    fmt_pct(l_min_exec.get()),
+                    l_min_exec_us.get() as f64 / 1000.0,
                     width = header_width,
                 );
                 info!(
@@ -1524,6 +1668,27 @@ impl<'a> Scheduler<'a> {
                     format_bitvec(&layer.cpus),
                     width = header_width
                 );
+                match &layer.kind {
+                    LayerKind::Grouped { exclusive, .. } | LayerKind::Open { exclusive, .. } => {
+                        if *exclusive {
+                            info!(
+                                "  {:<width$}  excl_coll={} excl_preempt={}",
+                                "",
+                                fmt_pct(l_excl_collision.get()),
+                                fmt_pct(l_excl_preempt.get()),
+                                width = header_width,
+                            );
+                        } else if l_excl_collision.get() != 0.0 || l_excl_preempt.get() != 0.0 {
+                            warn!(
+                                "{}: exclusive is off but excl_coll={} excl_preempt={}",
+                                spec.name,
+                                fmt_pct(l_excl_collision.get()),
+                                fmt_pct(l_excl_preempt.get()),
+                            );
+                        }
+                    }
+                    _ => (),
+                }
             }
             self.nr_layer_cpus_min_max[lidx] = (layer.nr_cpus, layer.nr_cpus);
         }
@@ -1592,6 +1757,7 @@ fn write_example_file(path: &str) -> Result<()> {
                 kind: LayerKind::Confined {
                     cpus_range: Some((0, 16)),
                     util_range: (0.8, 0.9),
+                    min_exec_us: 1000,
                 },
             },
             LayerSpec {
@@ -1601,7 +1767,11 @@ fn write_example_file(path: &str) -> Result<()> {
                     LayerMatch::CgroupPrefix("workload.slice/".into()),
                     LayerMatch::NiceBelow(0),
                 ]],
-                kind: LayerKind::Open { preempt: true },
+                kind: LayerKind::Open {
+                    min_exec_us: 100,
+                    preempt: true,
+                    exclusive: true,
+                },
             },
             LayerSpec {
                 name: "normal".into(),
@@ -1610,7 +1780,9 @@ fn write_example_file(path: &str) -> Result<()> {
                 kind: LayerKind::Grouped {
                     cpus_range: None,
                     util_range: (0.5, 0.6),
+                    min_exec_us: 200,
                     preempt: false,
+                    exclusive: false,
                 },
             },
         ],
@@ -1681,6 +1853,7 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
             LayerKind::Confined {
                 cpus_range,
                 util_range,
+                ..
             }
             | LayerKind::Grouped {
                 cpus_range,
