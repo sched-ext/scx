@@ -273,7 +273,7 @@ impl<'a> Scheduler<'a> {
             let node_domains = domains.numa_doms(&numa);
             for dom in node_domains.iter() {
                 let dom_mask = dom.mask();
-                numa_mask = numa_mask.or(&dom_mask)?;
+                numa_mask = numa_mask.or(&dom_mask);
             }
 
             let raw_numa_slice = numa_mask.as_raw_slice();

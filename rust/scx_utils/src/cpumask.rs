@@ -44,6 +44,12 @@ use anyhow::Context;
 use anyhow::Result;
 use bitvec::prelude::*;
 use std::fmt;
+use std::ops::BitAnd;
+use std::ops::BitAndAssign;
+use std::ops::BitOr;
+use std::ops::BitOrAssign;
+use std::ops::BitXor;
+use std::ops::BitXorAssign;
 
 #[derive(Debug, Clone)]
 pub struct Cpumask {
@@ -183,25 +189,25 @@ impl Cpumask {
         self.nr_cpus
     }
 
-    /// Create a Cpumask that is the OR of the current Cpumask and another.
-    pub fn or(&self, other: &Cpumask) -> Result<Cpumask> {
-        let mut new = self.clone();
-        new.mask |= other.mask.clone();
-        Ok(new)
-    }
-
     /// Create a Cpumask that is the AND of the current Cpumask and another.
-    pub fn and(&self, other: &Cpumask) -> Result<Cpumask> {
+    pub fn and(&self, other: &Cpumask) -> Cpumask {
         let mut new = self.clone();
         new.mask &= other.mask.clone();
-        Ok(new)
+        new
+    }
+
+    /// Create a Cpumask that is the OR of the current Cpumask and another.
+    pub fn or(&self, other: &Cpumask) -> Cpumask {
+        let mut new = self.clone();
+        new.mask |= other.mask.clone();
+        new
     }
 
     /// Create a Cpumask that is the XOR of the current Cpumask and another.
-    pub fn xor(&self, other: &Cpumask) -> Result<Cpumask> {
+    pub fn xor(&self, other: &Cpumask) -> Cpumask {
         let mut new = self.clone();
         new.mask ^= other.mask.clone();
-        Ok(new)
+        new
     }
 }
 
@@ -215,6 +221,45 @@ impl fmt::Display for Cpumask {
             write!(f, "{:0width$b}", submask, width = remaining_width.min(64))?;
         }
         Ok(())
+    }
+}
+
+impl BitAnd for Cpumask {
+    type Output = Self;
+    fn bitand(self, rhs: Self) -> Self {
+        self.and(&rhs)
+    }
+}
+
+impl BitAndAssign for Cpumask {
+    fn bitand_assign(&mut self, rhs: Cpumask) {
+        self.mask &= &rhs.mask;
+    }
+}
+
+impl BitOr for Cpumask {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        self.or(&rhs)
+    }
+}
+
+impl BitOrAssign for Cpumask {
+    fn bitor_assign(&mut self, rhs: Cpumask) {
+        self.mask |= &rhs.mask;
+    }
+}
+
+impl BitXor for Cpumask {
+    type Output = Self;
+    fn bitxor(self, rhs: Self) -> Self {
+        self.xor(&rhs)
+    }
+}
+
+impl BitXorAssign for Cpumask {
+    fn bitxor_assign(&mut self, rhs: Cpumask) {
+        self.mask ^= &rhs.mask;
     }
 }
 
