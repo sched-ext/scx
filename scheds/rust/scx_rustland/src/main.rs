@@ -264,7 +264,7 @@ impl<'a> Scheduler<'a> {
         let init_page_faults: u64 = 0;
 
         // Low-level BPF connector.
-        let nr_online_cpus = topo.span().weight() + 1;
+        let nr_online_cpus = topo.span().weight();
         let bpf = BpfScheduler::init(
             opts.slice_us,
             nr_online_cpus as i32,

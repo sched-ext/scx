@@ -278,7 +278,7 @@ fn cpus_online() -> Result<Cpumask> {
                 bail!("Failed to parse online cpus {}", group.trim());
             }
         };
-        for i in min..max {
+        for i in min..(max + 1) {
             mask.set_cpu(i)?;
         }
     }
