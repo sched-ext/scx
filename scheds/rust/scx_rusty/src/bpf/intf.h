@@ -26,6 +26,7 @@ enum consts {
 	MAX_DOMS		= 64,	/* limited to avoid complex bitmask ops */
 	MAX_NUMA_NODES		= MAX_DOMS,	/* Assume at least 1 domain per NUMA node */
 	CACHELINE_SIZE		= 64,
+	NO_DOM_FOUND		= MAX_DOMS + 1,
 
 	LB_DEFAULT_WEIGHT	= 100,
 	LB_MIN_WEIGHT		= 1,
@@ -89,6 +90,12 @@ struct task_ctx {
 
 	/* select_cpu() telling enqueue() to queue directly on the DSQ */
 	bool dispatch_local;
+
+	/*
+	 * Task couldn't find a domain to run on. Is likely affinitized to an
+	 * offline core
+	 */
+	bool offline;
 
 	struct ravg_data dcyc_rd;
 };

@@ -14,7 +14,7 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Result;
 
-use scx_utils::Topology;
+use scx_utils::Cpumask;
 
 fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
     match (curr, prev) {
@@ -67,19 +67,18 @@ fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
 }
 
 pub struct Tuner {
-    top: Arc<Topology>,
+    pub direct_greedy_mask: Cpumask,
+    pub kick_greedy_mask: Cpumask,
+    pub fully_utilized: bool,
     dom_group: Arc<DomainGroup>,
     direct_greedy_under: f64,
     kick_greedy_under: f64,
     proc_reader: procfs::ProcReader,
     prev_cpu_stats: BTreeMap<u32, procfs::CpuStat>,
-    pub fully_utilized: bool,
-    dom_utils: Vec<f64>,
 }
 
 impl Tuner {
-    pub fn new(top: Arc<Topology>,
-               dom_group: Arc<DomainGroup>,
+    pub fn new(dom_group: Arc<DomainGroup>,
                direct_greedy_under: f64,
                kick_greedy_under: f64) -> Result<Self> {
         let proc_reader = procfs::ProcReader::new();
@@ -89,19 +88,15 @@ impl Tuner {
             .ok_or_else(|| anyhow!("Expected cpus_map to exist"))?;
 
        Ok(Self {
+           direct_greedy_mask: Cpumask::new()?,
+           kick_greedy_mask: Cpumask::new()?,
+           fully_utilized: false,
            direct_greedy_under: direct_greedy_under / 100.0,
            kick_greedy_under: kick_greedy_under / 100.0,
            proc_reader,
            prev_cpu_stats,
-           dom_utils: vec![0.0; dom_group.nr_doms()],
-           fully_utilized: false,
-           top,
            dom_group,
        })
-    }
-
-    pub fn dom_util(&self, dom: usize) -> f64 {
-        self.dom_utils[dom]
     }
 
     /// Apply a step in the Tuner by:
@@ -116,68 +111,60 @@ impl Tuner {
             .read_stat()?
             .cpus_map
             .ok_or_else(|| anyhow!("Expected cpus_map to exist"))?;
-        let mut dom_nr_cpus = vec![0; self.dom_group.nr_doms()];
-        let mut dom_util_sum = vec![0.0; self.dom_group.nr_doms()];
+        let mut dom_util_sum = vec![0.0f64; self.dom_group.nr_doms()];
 
         let mut avg_util = 0.0f64;
-        for cpu in 0..self.top.nr_cpus() {
-            let cpu32 = cpu as u32;
-            // None domain indicates the CPU was offline during
-            // initialization and None CpuStat indicates the CPU has gone
-            // down since then. Ignore both.
-            if let (Some(dom), Some(curr), Some(prev)) = (
-                self.dom_group.cpu_dom_id(&cpu),
-                curr_cpu_stats.get(&cpu32),
-                self.prev_cpu_stats.get(&cpu32),
-            ) {
-                let util = calc_util(curr, prev)?;
-                dom_nr_cpus[dom] += 1;
-                dom_util_sum[dom] += util;
-                avg_util += util;
+        for (dom_id, dom) in self.dom_group.doms().iter() {
+            for cpu in dom.mask().into_iter() {
+                let cpu32 = cpu as u32;
+                if let (Some(curr), Some(prev)) = (
+                    curr_cpu_stats.get(&cpu32),
+                    self.prev_cpu_stats.get(&cpu32),
+                ) {
+                    let util = calc_util(curr, prev)?;
+                    dom_util_sum[*dom_id] += util;
+                    avg_util += util;
+                }
             }
         }
-        avg_util /= self.top.nr_cpus() as f64;
+        avg_util /= self.dom_group.weight() as f64;
         self.fully_utilized = avg_util >= 0.99999;
 
-        let ti = &mut skel.bss_mut().tune_input;
-        for dom in 0..self.dom_group.nr_doms() {
+        self.direct_greedy_mask.clear();
+        self.kick_greedy_mask.clear();
+        for (dom_id, dom) in self.dom_group.doms().iter() {
             // Calculate the domain avg util. If there are no active CPUs,
             // it doesn't really matter. Go with 0.0 as that's less likely
             // to confuse users.
-            let util = match dom_nr_cpus[dom] {
+            let util = match dom.weight() {
                 0 => 0.0,
-                nr => dom_util_sum[dom] / nr as f64,
+                nr => dom_util_sum[*dom_id] / nr as f64,
             };
 
-            self.dom_utils[dom] = util;
+            let enable_direct = self.direct_greedy_under > 0.99999 || util < self.direct_greedy_under;
+            let enable_kick = self.kick_greedy_under > 0.99999 || util < self.kick_greedy_under;
 
-            // This could be implemented better.
-            let update_dom_bits = |target: &mut [u64; 8], val: bool| {
-                for cpu in 0..self.top.nr_cpus() {
-                    if let Some(cdom) = self.dom_group.cpu_dom_id(&cpu) {
-                        if cdom == dom {
-                            if val {
-                                target[cpu / 64] |= 1u64 << (cpu % 64);
-                            } else {
-                                target[cpu / 64] &= !(1u64 << (cpu % 64));
-                            }
-                        }
-                    }
-                }
-            };
-
-            update_dom_bits(
-                &mut ti.direct_greedy_cpumask,
-                self.direct_greedy_under > 0.99999 || util < self.direct_greedy_under,
-            );
-            update_dom_bits(
-                &mut ti.kick_greedy_cpumask,
-                self.kick_greedy_under > 0.99999 || util < self.kick_greedy_under,
-            );
+            if enable_direct {
+                self.direct_greedy_mask |= dom.mask();
+            }
+            if enable_kick {
+                self.kick_greedy_mask |= dom.mask();
+            }
         }
 
+        let ti = &mut skel.bss_mut().tune_input;
+        let write_to_bpf = |target: &mut [u64; 8], mask: &Cpumask| {
+            let raw_slice = mask.as_raw_slice();
+            let (left, _) = target.split_at_mut(raw_slice.len());
+            left.clone_from_slice(raw_slice);
+        };
+
+        write_to_bpf(&mut ti.direct_greedy_cpumask, &self.direct_greedy_mask);
+        write_to_bpf(&mut ti.kick_greedy_cpumask, &self.kick_greedy_mask);
         ti.gen += 1;
+
         self.prev_cpu_stats = curr_cpu_stats;
+
         Ok(())
     }
 }

@@ -147,7 +147,6 @@ use log::debug;
 use log::warn;
 use ordered_float::OrderedFloat;
 use scx_utils::ravg::ravg_read;
-use scx_utils::Topology;
 use scx_utils::LoadLedger;
 use scx_utils::LoadAggregator;
 use sorted_vec::SortedVec;
@@ -501,7 +500,6 @@ impl fmt::Display for NumaStat {
 
 pub struct LoadBalancer<'a, 'b> {
     skel: &'a mut BpfSkel<'b>,
-    top: Arc<Topology>,
     dom_group: Arc<DomainGroup>,
     skip_kworkers: bool,
 
@@ -520,7 +518,6 @@ const_assert_eq!(bpf_intf::consts_LB_MAX_WEIGHT % bpf_intf::consts_LB_LOAD_BUCKE
 impl<'a, 'b> LoadBalancer<'a, 'b> {
     pub fn new(
         skel: &'a mut BpfSkel<'b>,
-        top: Arc<Topology>,
         dom_group: Arc<DomainGroup>,
         skip_kworkers: bool,
         lb_apply_weight: bool,
@@ -537,7 +534,6 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             lb_apply_weight: lb_apply_weight.clone(),
             balance_load,
 
-            top,
             dom_group,
         }
     }
@@ -610,9 +606,10 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let maps = self.skel.maps();
         let dom_data = maps.dom_data();
 
-        let mut aggregator = LoadAggregator::new(self.top.nr_cpus(), !self.lb_apply_weight.clone());
+        let mut aggregator = LoadAggregator::new(self.dom_group.weight(), !self.lb_apply_weight.clone());
 
-        for dom in 0..self.dom_group.nr_doms() {
+        for dom_id in self.dom_group.doms().keys() {
+            let dom = *dom_id;
             let dom_key = unsafe { std::mem::transmute::<u32, [u8; 4]>(dom as u32) };
 
             if let Some(dom_ctx_map_elem) = dom_data

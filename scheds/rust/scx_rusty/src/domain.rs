@@ -35,7 +35,7 @@ impl Domain {
 
     /// The number of CPUs in the domain.
     pub fn weight(&self) -> usize {
-        self.mask.len()
+        self.mask.weight()
     }
 }
 
@@ -45,28 +45,37 @@ pub struct DomainGroup {
     cpu_dom_map: BTreeMap<usize, usize>,
     dom_numa_map: BTreeMap<usize, usize>,
     num_numa_nodes: usize,
+    span: Cpumask,
 }
 
 impl DomainGroup {
     pub fn new(top: Arc<Topology>, cpumasks: &[String]) -> Result<Self> {
+        let mut span = Cpumask::new()?;
         let mut dom_numa_map = BTreeMap::new();
+        // Track the domain ID separate from the LLC ID, because LLC IDs can
+        // have gaps if there are offlined CPUs, and domain IDs need to be
+        // contiguous (at least for now, until we can update libraries to not
+        // return vectors of domain values).
+        let mut dom_id = 0;
         let (doms, num_numa_nodes) = if !cpumasks.is_empty() {
             let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
-            let mut id = 0;
             for mask_str in cpumasks.iter() {
                 let mask = Cpumask::from_str(&mask_str)?;
-                doms.insert(id, Domain { id, mask, });
-                dom_numa_map.insert(id, 0);
-                id += 1;
+                span |= mask.clone();
+                doms.insert(dom_id, Domain { id: dom_id, mask, });
+                dom_numa_map.insert(dom_id, 0);
+                dom_id += 1;
             }
             (doms, 1)
         } else {
             let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
             for (node_id, node) in top.nodes().iter().enumerate() {
-                for (id, llc) in node.llcs().iter() {
+                for (_, llc) in node.llcs().iter() {
                     let mask = llc.span();
-                    doms.insert(*id, Domain { id: id.clone(), mask, });
-                    dom_numa_map.insert(*id, node_id.clone());
+                    span |= mask.clone();
+                    doms.insert(dom_id, Domain { id: dom_id, mask, });
+                    dom_numa_map.insert(dom_id, node_id.clone());
+                    dom_id += 1;
                 }
             }
             (doms, top.nodes().len())
@@ -79,7 +88,7 @@ impl DomainGroup {
             }
         }
 
-        Ok(Self { doms, cpu_dom_map, dom_numa_map, num_numa_nodes, })
+        Ok(Self { doms, cpu_dom_map, dom_numa_map, num_numa_nodes, span })
     }
 
     pub fn numa_doms(&self, numa_id: &usize) -> Vec<Domain> {
@@ -92,6 +101,10 @@ impl DomainGroup {
         }
 
         numa_doms
+    }
+
+    pub fn doms(&self) -> &BTreeMap<usize, Domain> {
+        &self.doms
     }
 
     pub fn nr_doms(&self) -> usize {
@@ -108,5 +121,9 @@ impl DomainGroup {
 
     pub fn dom_numa_id(&self, dom_id: &usize) -> Option<usize> {
         self.dom_numa_map.get(dom_id).copied()
+    }
+
+    pub fn weight(&self) -> usize {
+        self.span.weight()
     }
 }
