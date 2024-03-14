@@ -35,7 +35,7 @@ impl Domain {
 
     /// The number of CPUs in the domain.
     pub fn weight(&self) -> usize {
-        self.mask.len()
+        self.mask.weight()
     }
 }
 
