@@ -281,8 +281,13 @@ fn cpus_online() -> Result<Cpumask> {
         let (min, max) = match sscanf!(group.trim(), "{usize}-{usize}") {
             Ok((x, y)) => (x, y),
             Err(_) => {
-                bail!("Failed to parse online cpus {}", group.trim());
-            }
+                match sscanf!(group.trim(), "{usize}") {
+                    Ok(x) => (x, x),
+                    Err(_) => {
+                        bail!("Failed to parse online cpus {}", group.trim());
+                    }
+                }
+            },
         };
         for i in min..(max + 1) {
             mask.set_cpu(i)?;
