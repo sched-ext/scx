@@ -612,7 +612,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         let mut aggregator = LoadAggregator::new(self.top.nr_cpus(), !self.lb_apply_weight.clone());
 
-        for dom in 0..self.dom_group.nr_doms() {
+        for dom_id in self.dom_group.doms().keys() {
+            let dom = *dom_id;
             let dom_key = unsafe { std::mem::transmute::<u32, [u8; 4]>(dom as u32) };
 
             if let Some(dom_ctx_map_elem) = dom_data
