@@ -264,14 +264,15 @@ impl<'a> Scheduler<'a> {
         let init_page_faults: u64 = 0;
 
         // Low-level BPF connector.
+        let nr_online_cpus = topo.span().weight() + 1;
         let bpf = BpfScheduler::init(
             opts.slice_us,
-            topo.nr_cpus() as i32,
+            nr_online_cpus as i32,
             opts.partial,
             opts.full_user,
             opts.debug,
         )?;
-        info!("{} scheduler attached", SCHEDULER_NAME);
+        info!("{} scheduler attached - {} online CPUs", SCHEDULER_NAME, nr_online_cpus);
 
         // Return scheduler object.
         Ok(Self {
@@ -298,8 +299,8 @@ impl<'a> Scheduler<'a> {
         // Count the number of cores where all the CPUs are idle.
         for core in self.topo.cores().iter() {
             let mut all_idle = true;
-            for (cpu_id, _) in core.cpus().iter() {
-                if self.bpf.get_cpu_pid(*cpu_id as i32) != 0 {
+            for cpu_id in core.span().into_iter() {
+                if self.bpf.get_cpu_pid(cpu_id as i32) != 0 {
                     all_idle = false;
                     break;
                 }
