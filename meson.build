@@ -41,6 +41,10 @@ if enable_rust
 endif
 
 bpf_clang_ver = run_command(get_clang_ver, bpf_clang, check: true).stdout().strip()
+if bpf_clang_ver == ''
+  error('Unable to find clang version')
+endif
+
 bpf_clang_maj = bpf_clang_ver.split('.')[0].to_int()
 
 if bpf_clang_maj < 16
