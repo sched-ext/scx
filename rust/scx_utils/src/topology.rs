@@ -79,7 +79,6 @@ use std::path::Path;
 #[derive(Debug, Clone)]
 pub struct Cpu {
     id: usize,
-    online: bool,
     min_freq: usize,
     max_freq: usize,
 }
@@ -88,11 +87,6 @@ impl Cpu {
     /// Get the ID of this Cpu
     pub fn id(&self) -> usize {
         self.id
-    }
-
-    /// Is this CPU online?
-    pub fn cpus(&self) -> bool {
-        self.online
     }
 
     /// Get the minimum scaling frequency of this CPU
@@ -316,6 +310,13 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
                 }
             };
 
+            // CPU is offline. The Topology hierarchy is read-only, and assumes
+            // that hotplug will cause the scheduler to restart. Thus, we can
+            // just skip this CPU altogether.
+            if !online_mask.test_cpu(cpu_id) {
+                continue;
+            }
+
             // Physical core ID
             let top_path = cpu_path.join("topology");
             let core_id = read_file_usize(&top_path.join("core_id"))?;
@@ -330,9 +331,6 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
             let freq_path = cpu_path.join("cpufreq");
             let min_freq = read_file_usize(&freq_path.join("scaling_min_freq")).unwrap_or(0);
             let max_freq = read_file_usize(&freq_path.join("scaling_max_freq")).unwrap_or(0);
-
-            // Hotplug information
-            let online = online_mask.test_cpu(cpu_id);
 
             if !node.llcs.contains_key(&llc_id) {
                 let cache = Cache {
@@ -358,7 +356,6 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
                 cpu_id,
                 Cpu {
                     id: cpu_id,
-                    online: online,
                     min_freq: min_freq,
                     max_freq: max_freq,
                 },
