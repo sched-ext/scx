@@ -71,10 +71,6 @@ const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 /// domains, each representing a chiplet in a six-chiplet AMD processor, and
 /// could match the performance of production setup using CFS.
 ///
-/// WARNING: Very high weight (low nice value) tasks can throw off load
-/// balancing due to infeasible weight problem. This problem will be solved
-/// in the near future.
-///
 /// WARNING: scx_rusty currently assumes that all domains have equal
 /// processing power and at similar distances from each other. This
 /// limitation will be removed in the future.
@@ -125,8 +121,8 @@ struct Opts {
     greedy_threshold: u32,
 
     /// When non-zero, enable greedy task stealing across NUMA nodes. The order
-    /// of greedy task stealing follows greedy_threshold as described above, and
-    /// greedy_threshold must be nonzero to enable task stealing across NUMA
+    /// of greedy task stealing follows greedy-threshold as described above, and
+    /// greedy-threshold must be nonzero to enable task stealing across NUMA
     /// nodes.
     #[clap(long, default_value = "0")]
     greedy_threshold_x_numa: u32,
@@ -163,7 +159,7 @@ struct Opts {
     kick_greedy_under: f64,
 
     /// Whether tasks can be pushed directly to idle CPUs on NUMA nodes
-    /// different than its domain's node. If direct_greedy_under is disabled,
+    /// different than its domain's node. If direct-greedy-under is disabled,
     /// this option is a no-op. Otherwise, if this option is set to false
     /// (default), tasks will only be directly pushed to idle CPUs if they
     /// reside on the same NUMA node as the task's domain.
