@@ -820,7 +820,11 @@ static bool is_eligible(struct task_ctx *taskc)
 
 static bool is_wakeup_wf(u64 wake_flags)
 {
-	return wake_flags & (SCX_WAKE_TTWU | SCX_WAKE_SYNC);
+	/*
+	 * We don't need to test SCX_WAKE_SYNC because SCX_WAKE_SYNC should
+	 * only be set when SCX_WAKE_TTWU is set.
+	 */
+	return wake_flags & SCX_WAKE_TTWU;
 }
 
 static bool is_wakeup_ef(u64 enq_flags)
