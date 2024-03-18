@@ -1175,7 +1175,13 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 static bool transit_task_stat(struct task_ctx *taskc, int tgt_stat)
 {
 	/*
-	 * Update task loads only when the state transition is valid.
+	 * Update task loads only when the state transition is valid. So far,
+	 * two types of invalid state transitions have been observed, and there
+	 * are reasons for that. The two are as follows:
+	 *   - STOPPING -> RUNNING: This can happen when the task is forked
+	 *     (STOPPING) and then scheduled (RUNNING) without enqueuing.
+	 *   - ENQ -> ENQ: The underlying scx core can issue ops.enqueue() more
+	 *     than once for a task.
 	 *
 	 * initial state
 	 * -------------
@@ -1187,9 +1193,9 @@ static bool transit_task_stat(struct task_ctx *taskc, int tgt_stat)
 	 *    +-------------------------+
 	 */
 	const static int valid_tgt_stat[] = {
-		LAVD_TASK_STAT_ENQ,
-		LAVD_TASK_STAT_RUNNING,
-		LAVD_TASK_STAT_STOPPING,
+		[LAVD_TASK_STAT_STOPPING]	= LAVD_TASK_STAT_ENQ,
+		[LAVD_TASK_STAT_ENQ]		= LAVD_TASK_STAT_RUNNING,
+		[LAVD_TASK_STAT_RUNNING]	= LAVD_TASK_STAT_STOPPING,
 	};
 	int src_stat = taskc->stat;
 
