@@ -450,6 +450,22 @@ static u64 rsigmoid_u64(u64 v, u64 max)
 	return (v > max) ? 0 : max - v;
 }
 
+static struct task_ctx *try_get_task_ctx(struct task_struct *p)
+{
+	return bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+}
+
+static struct task_ctx *get_task_ctx(struct task_struct *p)
+{
+	struct task_ctx *taskc;
+
+	taskc = try_get_task_ctx(p);
+	if (!taskc)
+		scx_bpf_error("task_ctx lookup failed for %s[%d]",
+			      p->comm, p->pid);
+	return taskc;
+}
+
 static struct cpu_ctx *get_cpu_ctx(void)
 {
 	const u32 idx = 0;
@@ -559,10 +575,10 @@ static void proc_dump_all_tasks(struct task_struct *p)
 	bpf_rcu_read_lock();
 
 	bpf_for_each(task, pos, NULL, BPF_TASK_ITER_ALL_THREADS) {
-		taskc = bpf_task_storage_get(&task_ctx_stor, pos, 0, 0);
 		/*
-		 * If a task is not under sched_ext, taskc is NULL.
+		 * Print information about ever-scheduled tasks.
 		 */
+		taskc = get_task_ctx(pos);
 		if (taskc && have_scheduled(taskc))
 			submit_task_ctx(pos, taskc, LAVD_CPU_ID_NONE);
 	}
@@ -1348,13 +1364,9 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	cpu_id = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &found_idle);
 
 	if (found_idle && is_wakeup_wf(wake_flags)) {
-		struct task_ctx *taskc;
-
-		taskc = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-		if (!taskc) {
-			scx_bpf_error("task_ctx_stor lookup failed");
+		struct task_ctx *taskc = get_task_ctx(p);
+		if (!taskc)
 			return prev_cpu;
-		}
 
 		if (!put_local_rq(p, taskc, 0)) {
 			/*
@@ -1382,11 +1394,9 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * always put the task to the global DSQ, so any idle CPU can pick it
 	 * up.
 	 */
-	taskc = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (!taskc) {
-		scx_bpf_error("task_ctx_stor lookup failed");
+	taskc = get_task_ctx(p);
+	if (!taskc)
 		return;
-	}
 
 	/*
 	 * Place a task to the global run queue.
@@ -1418,11 +1428,11 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 
 	waker = bpf_get_current_task_btf();
-	taskc = bpf_task_storage_get(&task_ctx_stor, waker, 0, 0);
+	taskc = try_get_task_ctx(waker);
 	if (!taskc) {
 		/*
-		 * In this case, the waker is either an idle task or a task not
-		 * governed by scx, so we just ignore.
+		 * In this case, the waker could be an idle task
+		 * (swapper/_[_]), so we just ignore.
 		 */
 		return;
 	}
@@ -1441,11 +1451,9 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	/*
 	 * Update task statistics then adjust task load based on the update.
 	 */
-	taskc = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (!taskc) {
-		scx_bpf_error("task_ctx_stor lookup failed");
+	taskc = get_task_ctx(p);
+	if (!taskc)
 		return;
-	}
 
 	cpuc = get_cpu_ctx();
 	if (!cpuc) {
@@ -1508,11 +1516,9 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 		return;
 	}
 
-	taskc = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (!taskc) {
-		scx_bpf_error("task_ctx_stor lookup failed");
+	taskc = get_task_ctx(p);
+	if (!taskc)
 		return;
-	}
 
 	if (transit_task_stat(taskc, LAVD_TASK_STAT_STOPPING))
 		update_stat_for_stop(p, taskc, cpuc);
@@ -1539,11 +1545,9 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	/*
 	 * When a task @p goes to sleep, its associated wait_freq is updated.
 	 */
-	taskc = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (!taskc) {
-		scx_bpf_error("task_ctx_stor lookup failed");
+	taskc = get_task_ctx(p);
+	if (!taskc)
 		return;
-	}
 
 	now = bpf_ktime_get_ns();
 	interval = now - taskc->last_wait_clk;
@@ -1652,6 +1656,7 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 		scx_bpf_error("task_ctx_stor first lookup failed");
 		return -ENOMEM;
 	}
+
 
 	/*
 	 * Initialize @p's context.
