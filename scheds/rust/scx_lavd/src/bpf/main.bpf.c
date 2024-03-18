@@ -388,11 +388,6 @@ static const u64 lat_prio_to_greedy_thresholds[NICE_WIDTH] = {
 static u16 get_nice_prio(struct task_struct *p);
 static u64 get_task_load_ideal(struct task_struct *p);
 
-static bool put_local_rq(struct task_struct *p, struct task_ctx *taskc,
-			 u64 enq_flags);
-static bool put_global_rq(struct task_struct *p, struct task_ctx *taskc,
-			  u64 enq_flags);
-
 static inline __attribute__((always_inline)) u32 bpf_log2(u32 v)
 {
 	u32 r;
@@ -1357,24 +1352,33 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * CPU. If the task is directly dispatched here, the sched_ext won't
 	 * call ops.enqueue().
 	 */
-	cpu_id = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &found_idle);
-
-	if (found_idle && is_wakeup_wf(wake_flags)) {
-		struct task_ctx *taskc = get_task_ctx(p);
-		if (!taskc)
-			return prev_cpu;
-
-		if (!put_local_rq(p, taskc, 0)) {
-			/*
-			 * If a task is overscheduled (greedy_ratio > 1000), we
-			 * do not select a CPU, so that later the enqueue
-			 * operation can put it to the global queue.
-			 */
-			return prev_cpu;
-		}
+	if (!is_wakeup_wf(wake_flags)) {
+		cpu_id = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags,
+						&found_idle);
+		return found_idle ? cpu_id : prev_cpu;
 	}
 
-	return cpu_id;
+	struct task_ctx *taskc = get_task_ctx(p);
+	if (!taskc)
+		return prev_cpu;
+
+	if (!put_local_rq(p, taskc, 0)) {
+		/*
+		 * If a task is overscheduled (greedy_ratio > 1000), we
+		 * do not select a CPU, so that later the enqueue
+		 * operation can put it to the global queue.
+		 */
+		return prev_cpu;
+	}
+
+	/*
+	 * Note that once an idle CPU is successfully picked (i.e., found_idle
+	 * == true), then the picked CPU must be returned. Otherwise, that CPU
+	 * is stalled because the picked CPU is already punched out from the
+	 * idle mask.
+	 */
+	cpu_id = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &found_idle);
+	return found_idle ? cpu_id : prev_cpu;
 }
 
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
