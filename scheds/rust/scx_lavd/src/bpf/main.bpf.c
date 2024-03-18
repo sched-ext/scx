@@ -389,7 +389,7 @@ static u16 get_nice_prio(struct task_struct *p);
 static u64 get_task_load_ideal(struct task_struct *p);
 
 static bool put_local_rq(struct task_struct *p, struct task_ctx *taskc,
-			 s32 cpu_id, u64 enq_flags);
+			 u64 enq_flags);
 static bool put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 			  u64 enq_flags);
 
@@ -1250,7 +1250,7 @@ static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 }
 
 static bool put_local_rq(struct task_struct *p, struct task_ctx *taskc,
-			 s32 cpu_id, u64 enq_flags)
+			 u64 enq_flags)
 {
 	/*
 	 * Calculate when a tack can be scheduled. If a task is cannot be
@@ -1352,7 +1352,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 			return prev_cpu;
 		}
 
-		if (!put_local_rq(p, taskc, cpu_id, 0)) {
+		if (!put_local_rq(p, taskc, 0)) {
 			/*
 			 * If a task is overscheduled (greedy_ratio > 1000), we
 			 * do not select a CPU, so that later the enqueue
