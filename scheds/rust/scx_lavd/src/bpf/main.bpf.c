@@ -1248,13 +1248,7 @@ static void update_stat_for_stop(struct task_struct *p, struct task_ctx *taskc,
 {
 	u64 now, run_time_ns;
 
-	/*
-	 * If the task was runnable before governed by this scheduler, ignore
-	 * this run.
-	 */
 	now = bpf_ktime_get_ns();
-	if (now < taskc->last_start_clk)
-		return;
 
 	/*
 	 * When stopped, reduce the per-CPU task load. Per-CPU task load will
