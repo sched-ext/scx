@@ -32,6 +32,7 @@ use libbpf_rs::skel::SkelBuilder as _;
 use log::info;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Topology;
 
 use nix::sys::signal;
 use plain::Plain;
@@ -111,7 +112,8 @@ impl<'a> Scheduler<'a> {
         let mut skel = skel_builder.open().context("Failed to open BPF program")?;
 
         // Initialize skel according to @opts.
-        let nr_cpus_onln = num_cpus::get() as u64;
+        let topo = Topology::new().expect("Failed to build host topology");
+        let nr_cpus_onln = topo.span().weight() as u64;
         skel.bss_mut().nr_cpus_onln = nr_cpus_onln;
         skel.rodata_mut().verbose = opts.verbose;
         let intrspc = introspec::init(opts);
