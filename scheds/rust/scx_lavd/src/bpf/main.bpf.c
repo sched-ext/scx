@@ -1482,10 +1482,9 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 
 static bool slice_fully_consumed(struct cpu_ctx *cpuc, struct task_ctx *taskc)
 {
-	u64 run_time_ns = 0;
+	u64 run_time_ns;
 
-	if (taskc->last_stop_clk > taskc->last_start_clk)
-		run_time_ns = taskc->last_stop_clk - taskc->last_start_clk;
+	run_time_ns = taskc->last_stop_clk - taskc->last_start_clk;
 
 	return run_time_ns >= taskc->slice_ns;
 }
