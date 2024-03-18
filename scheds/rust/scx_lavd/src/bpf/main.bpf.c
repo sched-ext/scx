@@ -469,15 +469,25 @@ static struct task_ctx *get_task_ctx(struct task_struct *p)
 static struct cpu_ctx *get_cpu_ctx(void)
 {
 	const u32 idx = 0;
+	struct cpu_ctx *cpuc;
 
-	return bpf_map_lookup_elem(&cpu_ctx_stor, &idx);
+	cpuc = bpf_map_lookup_elem(&cpu_ctx_stor, &idx);
+	if (!cpuc)
+		scx_bpf_error("cpu_ctx lookup failed for current cpu");
+
+	return cpuc;
 }
 
-static struct cpu_ctx *get_cpu_ctx_id(s32 cpu)
+static struct cpu_ctx *get_cpu_ctx_id(s32 cpu_id)
 {
 	const u32 idx = 0;
+	struct cpu_ctx *cpuc;
 
-	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
+	cpuc = bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu_id);
+	if (!cpuc)
+		scx_bpf_error("cpu_ctx lookup failed for %d", cpu_id);
+
+	return cpuc;
 }
 
 static struct sys_cpu_util *get_sys_cpu_util_cur(void)
@@ -658,7 +668,6 @@ static void update_sys_cpu_load(void)
 	bpf_for(cpu, 0, nr_cpus_onln) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
-			scx_bpf_error("cpu_ctx_stor lookup failed");
 			compute_total = 0;
 			break;
 		}
@@ -1272,6 +1281,8 @@ static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 static bool put_local_rq(struct task_struct *p, struct task_ctx *taskc,
 			 u64 enq_flags)
 {
+	struct cpu_ctx *cpuc;
+
 	/*
 	 * Calculate when a tack can be scheduled. If a task is cannot be
 	 * scheduled soonish (i.e., the task is ineligible since
@@ -1290,11 +1301,9 @@ static bool put_local_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * rq. Statistics will be adjusted when more accurate statistics
 	 * become available (ops.running).
 	 */
-	struct cpu_ctx *cpuc = get_cpu_ctx();
-	if (!cpuc) {
-		scx_bpf_error("cpu_ctx_stor lookup failed");
+	cpuc = get_cpu_ctx();
+	if (!cpuc)
 		return false;
-	}
 
 	if (transit_task_stat(taskc, LAVD_TASK_STAT_ENQ))
 		update_stat_for_enq(p, taskc, cpuc);
@@ -1328,10 +1337,8 @@ static bool put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * Reflect task's load immediately.
 	 */
 	cpuc = get_cpu_ctx();
-	if (!cpuc) {
-		scx_bpf_error("cpu_ctx_stor lookup failed");
+	if (!cpuc)
 		return false;
-	}
 	if (transit_task_stat(taskc, LAVD_TASK_STAT_ENQ))
 		update_stat_for_enq(p, taskc, cpuc);
 
@@ -1456,10 +1463,8 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 		return;
 
 	cpuc = get_cpu_ctx();
-	if (!cpuc) {
-		scx_bpf_error("cpu_ctx_stor lookup failed");
+	if (!cpuc)
 		return;
-	}
 
 	if (transit_task_stat(taskc, LAVD_TASK_STAT_RUNNING))
 		update_stat_for_run(p, taskc, cpuc);
@@ -1511,10 +1516,8 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 	 * Reduce the task load.
 	 */
 	cpuc = get_cpu_ctx();
-	if (!cpuc) {
-		scx_bpf_error("cpu_ctx_stor lookup failed");
+	if (!cpuc)
 		return;
-	}
 
 	taskc = get_task_ctx(p);
 	if (!taskc)
@@ -1561,12 +1564,11 @@ void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
 	 * When a cpu becomes online, reset its cpu context and trigger the
 	 * recalculation of the global cpu load.
 	 */
-	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+	struct cpu_ctx *cpuc;
 
-	if (!cpuc) {
-		scx_bpf_error("cpu_ctx_stor lookup failed");
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc)
 		return;
-	}
 
 	memset(cpuc, 0, sizeof(*cpuc));
 
@@ -1580,12 +1582,11 @@ void BPF_STRUCT_OPS(lavd_cpu_offline, s32 cpu)
 	 * When a cpu becomes offline, trigger the recalculation of the global
 	 * cpu load.
 	 */
-	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+	struct cpu_ctx *cpuc;
 
-	if (!cpuc) {
-		scx_bpf_error("cpu_ctx_stor lookup failed");
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc)
 		return;
-	}
 
 	memset(cpuc, 0, sizeof(*cpuc));
 
@@ -1601,12 +1602,11 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 	 * default idle core tracking and core selection algorithm.
 	 */
 
-	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+	struct cpu_ctx *cpuc;
 
-	if (!cpuc) {
-		scx_bpf_error("cpu_ctx_stor lookup failed");
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc)
 		return;
-	}
 
 	/*
 	 * The CPU is entering into the idle state.
