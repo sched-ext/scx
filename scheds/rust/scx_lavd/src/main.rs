@@ -47,8 +47,8 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 /// See the more detailed overview of the LAVD design at main.bpf.c.
 #[derive(Debug, Parser)]
 struct Opts {
-    /// The number of scheduling samples to be reported every second (default: 0)
-    #[clap(short = 's', long, default_value = "0")]
+    /// The number of scheduling samples to be reported every second (default: 1)
+    #[clap(short = 's', long, default_value = "1")]
     nr_sched_samples: u64,
 
     /// PID to be tracked all its scheduling activities if specified
