@@ -94,12 +94,12 @@
  * fair use of CPU time. It defers choosing over-scheduled tasks to reduce the
  * frequency of task execution. The deferring time- ineligible duration- is
  * proportional to how much time is over-spent and added to the task's
- * deadline. Additionally, suppose a task is compute-intensive and not
- * latency-critical tasks. In that case, so its runtime per schedule is long
- * enough without voluntarily yielding CPU time, the scheduler reduces the time
- * slice, too. Note that reducing the time slice of a latency-critical task for
- * fairness is not very effective because the scheduling overhead might be
- * detrimental.
+ * deadline. Additionally, if a task is compute-intensive and not
+ * latency-critical, the scheduler automatically reduces its time slice, since
+ * its runtime per schedule is sufficiently long enough without voluntarily
+ * yielding the CPU. Note that reducing the time slice of a latency-critical
+ * task for fairness is not very effective because the scheduling overhead
+ * might be detrimental.
  *
  *
  * Copyright (c) 2023, 2024 Changwoo Min <changwoo@igalia.com>
