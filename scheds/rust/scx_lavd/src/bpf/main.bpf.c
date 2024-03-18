@@ -1437,7 +1437,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * is updated. The @current task is a waker and @p is a waiter, which
 	 * is being wakened up now.
 	 */
-	if (!(enq_flags & SCX_ENQ_WAKEUP))
+	if (!is_wakeup_ef(enq_flags))
 		return;
 
 	waker = bpf_get_current_task_btf();
