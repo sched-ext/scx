@@ -1042,19 +1042,8 @@ out:
 static u64 calc_latency_weight(struct task_struct *p, struct task_ctx *taskc,
 			       bool is_wakeup)
 {
-	int nice_prio, lat_boost_prio, prio;
-	u64 weight;
-
-	/*
-	 * Aggregate nice priority and latency boost priority, then convert the
-	 * final priority to weight.
-	 */
-	nice_prio = get_nice_prio(p);
-	lat_boost_prio = boost_lat(p, taskc, is_wakeup);
-	prio = sum_prios_for_lat(p, nice_prio, lat_boost_prio);
-
-	weight = sched_prio_to_latency_weight[prio];
-	return weight;
+	boost_lat(p, taskc, is_wakeup);
+	return sched_prio_to_latency_weight[taskc->lat_prio];
 }
 
 static u64 calc_virtual_dealine_delta(struct task_struct *p,
