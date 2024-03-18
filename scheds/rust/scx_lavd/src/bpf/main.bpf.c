@@ -796,7 +796,7 @@ static u64 calc_greedy_factor(struct task_ctx *taskc)
 		gr_ft *= LAVD_SLICE_GREEDY_FT;
 
 	return gr_ft;
-	}
+}
 
 static bool is_eligible(struct task_ctx *taskc)
 {
