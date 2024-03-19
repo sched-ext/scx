@@ -1167,10 +1167,22 @@ static bool transit_task_stat(struct task_ctx *taskc, int tgt_stat)
 	 * Update task loads only when the state transition is valid. So far,
 	 * two types of invalid state transitions have been observed, and there
 	 * are reasons for that. The two are as follows:
-	 *   - STOPPING -> RUNNING: This can happen when the task is forked
-	 *     (STOPPING) and then scheduled (RUNNING) without enqueuing.
-	 *   - ENQ -> ENQ: The underlying scx core can issue ops.enqueue() more
-	 *     than once for a task.
+	 *
+	 *   - ENQ -> ENQ: This transition can happen because scx_lavd does not
+	 *   provide ops.dequeue. When task attributes are updated (e.g., nice
+	 *   level, allowed cpus and so on), the scx core will dequeue the task
+	 *   and re-enqueue it (ENQ->DEQ->ENQ). However, When ops.dequeue() is
+	 *   not provided, the dequeue operations is done by the scx core.
+	 *   Hence, ignoring the dequeue operation is completely fine.
+	 *
+	 *   - STOPPING -> RUNNING: This can happen because there are several
+	 *   special cases where scx core skips enqueue including: 1) bypass
+	 *   mode is turned on (this is turned on during both init and exit.
+	 *   it's also used across suspend/resume operations. 2)
+	 *   SCX_OPS_ENQ_EXITING is not set and an exiting task was woken up.
+	 *   3) The associated CPU is not fully online. However, we avoid
+	 *   collecting time & frequency statistics for such special cases for
+	 *   accuracy.
 	 *
 	 * initial state
 	 * -------------
