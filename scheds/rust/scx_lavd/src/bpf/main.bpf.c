@@ -94,12 +94,12 @@
  * fair use of CPU time. It defers choosing over-scheduled tasks to reduce the
  * frequency of task execution. The deferring time- ineligible duration- is
  * proportional to how much time is over-spent and added to the task's
- * deadline. Additionally, suppose a task is compute-intensive and not
- * latency-critical tasks. In that case, so its runtime per schedule is long
- * enough without voluntarily yielding CPU time, the scheduler reduces the time
- * slice, too. Note that reducing the time slice of a latency-critical task for
- * fairness is not very effective because the scheduling overhead might be
- * detrimental.
+ * deadline. Additionally, if a task is compute-intensive and not
+ * latency-critical, the scheduler automatically reduces its time slice, since
+ * its runtime per schedule is sufficiently long enough without voluntarily
+ * yielding the CPU. Note that reducing the time slice of a latency-critical
+ * task for fairness is not very effective because the scheduling overhead
+ * might be detrimental.
  *
  *
  * Copyright (c) 2023, 2024 Changwoo Min <changwoo@igalia.com>
@@ -268,13 +268,18 @@ static const u64 sched_prio_to_slice_weight[NICE_WIDTH] = {
  * MuQSS scheduler. We choose a different distribution for
  * sched_prio_to_latency_weight on purpose instead of inversing
  * sched_prio_to_slice_weight. That is because sched_prio_to_slice_weight is
- * too steep to use for latency. We normalized the values so that the normal
+ * too steep to use for latency. Suppose the maximum time slice per schedule
+ * (LAVD_SLICE_MAX_NS) is 4 msec. We normalized the values so that the normal
  * priority (nice 0) has a deadline of 10 msec. The virtual deadline ranges
- * from 1.5 msec to 60.9 msec.
+ * from 1.5 msec to 60.9 msec. As the maximum time slice becomes shorter, the
+ * deadlines become tighter.Taking an example of 3 msec, the virtual deadline
+ * ranges from 1.15 msec (for nice -20) to 7.5 msec (for nice 0) and 45.65 msec
+ * (for nice 19).
  */
 static const u64 sched_prio_to_latency_weight[NICE_WIDTH] = {
-	/* weight	nice priority	sched priority	vdeadline (usec)  */
-	/* ------	-------------	--------------	----------------  */
+	/* weight	nice priority	sched priority	vdeadline (usec)    */
+	/*						(max slice == 4 ms) */
+	/* ------	-------------	--------------	------------------- */
 	  383,		/* -20		 0		 1532 */
 	  419,		/* -19		 1 		 1676 */
 	  461,		/* -18		 2 		 1844 */
@@ -388,11 +393,6 @@ static const u64 lat_prio_to_greedy_thresholds[NICE_WIDTH] = {
 static u16 get_nice_prio(struct task_struct *p);
 static u64 get_task_load_ideal(struct task_struct *p);
 
-static bool put_local_rq(struct task_struct *p, struct task_ctx *taskc,
-			 s32 cpu_id, u64 enq_flags);
-static bool put_global_rq(struct task_struct *p, struct task_ctx *taskc,
-			  u64 enq_flags);
-
 static inline __attribute__((always_inline)) u32 bpf_log2(u32 v)
 {
 	u32 r;
@@ -450,18 +450,44 @@ static u64 rsigmoid_u64(u64 v, u64 max)
 	return (v > max) ? 0 : max - v;
 }
 
+static struct task_ctx *try_get_task_ctx(struct task_struct *p)
+{
+	return bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
+}
+
+static struct task_ctx *get_task_ctx(struct task_struct *p)
+{
+	struct task_ctx *taskc;
+
+	taskc = try_get_task_ctx(p);
+	if (!taskc)
+		scx_bpf_error("task_ctx lookup failed for %s[%d]",
+			      p->comm, p->pid);
+	return taskc;
+}
+
 static struct cpu_ctx *get_cpu_ctx(void)
 {
 	const u32 idx = 0;
+	struct cpu_ctx *cpuc;
 
-	return bpf_map_lookup_elem(&cpu_ctx_stor, &idx);
+	cpuc = bpf_map_lookup_elem(&cpu_ctx_stor, &idx);
+	if (!cpuc)
+		scx_bpf_error("cpu_ctx lookup failed for current cpu");
+
+	return cpuc;
 }
 
-static struct cpu_ctx *get_cpu_ctx_id(s32 cpu)
+static struct cpu_ctx *get_cpu_ctx_id(s32 cpu_id)
 {
 	const u32 idx = 0;
+	struct cpu_ctx *cpuc;
 
-	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
+	cpuc = bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu_id);
+	if (!cpuc)
+		scx_bpf_error("cpu_ctx lookup failed for %d", cpu_id);
+
+	return cpuc;
 }
 
 static struct sys_cpu_util *get_sys_cpu_util_cur(void)
@@ -559,10 +585,10 @@ static void proc_dump_all_tasks(struct task_struct *p)
 	bpf_rcu_read_lock();
 
 	bpf_for_each(task, pos, NULL, BPF_TASK_ITER_ALL_THREADS) {
-		taskc = bpf_task_storage_get(&task_ctx_stor, pos, 0, 0);
 		/*
-		 * If a task is not under sched_ext, taskc is NULL.
+		 * Print information about ever-scheduled tasks.
 		 */
+		taskc = get_task_ctx(pos);
 		if (taskc && have_scheduled(taskc))
 			submit_task_ctx(pos, taskc, LAVD_CPU_ID_NONE);
 	}
@@ -642,7 +668,6 @@ static void update_sys_cpu_load(void)
 	bpf_for(cpu, 0, nr_cpus_onln) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
-			scx_bpf_error("cpu_ctx_stor lookup failed");
 			compute_total = 0;
 			break;
 		}
@@ -796,7 +821,7 @@ static u64 calc_greedy_factor(struct task_ctx *taskc)
 		gr_ft *= LAVD_SLICE_GREEDY_FT;
 
 	return gr_ft;
-	}
+}
 
 static bool is_eligible(struct task_ctx *taskc)
 {
@@ -820,7 +845,11 @@ static bool is_eligible(struct task_ctx *taskc)
 
 static bool is_wakeup_wf(u64 wake_flags)
 {
-	return wake_flags & (SCX_WAKE_TTWU | SCX_WAKE_SYNC);
+	/*
+	 * We don't need to test SCX_WAKE_SYNC because SCX_WAKE_SYNC should
+	 * only be set when SCX_WAKE_TTWU is set.
+	 */
+	return wake_flags & SCX_WAKE_TTWU;
 }
 
 static bool is_wakeup_ef(u64 enq_flags)
@@ -834,7 +863,7 @@ static u64 calc_eligible_delta(struct task_struct *p, struct task_ctx *taskc)
 	 * We calculate how long a task should be ineligible for execution. To
 	 * this end, the scheduler stretches the ineligible duration of a task
 	 * so it can control the frequency of the task's running to let the
-	 * task pay its debut. Reducing the time slice of a task would be
+	 * task pay its debt. Reducing the time slice of a task would be
 	 * another approach. However, adjusting the time slice for fairness
 	 * does not work well since many latency-critical tasks voluntarily
 	 * yield CPU waiting for an event before expiring its time slice. 
@@ -1013,19 +1042,8 @@ out:
 static u64 calc_latency_weight(struct task_struct *p, struct task_ctx *taskc,
 			       bool is_wakeup)
 {
-	int nice_prio, lat_boost_prio, prio;
-	u64 weight;
-
-	/*
-	 * Aggregate nice priority and latency boost priority, then convert the
-	 * final priority to weight.
-	 */
-	nice_prio = get_nice_prio(p);
-	lat_boost_prio = boost_lat(p, taskc, is_wakeup);
-	prio = sum_prios_for_lat(p, nice_prio, lat_boost_prio);
-
-	weight = sched_prio_to_latency_weight[prio];
-	return weight;
+	boost_lat(p, taskc, is_wakeup);
+	return sched_prio_to_latency_weight[taskc->lat_prio];
 }
 
 static u64 calc_virtual_dealine_delta(struct task_struct *p,
@@ -1146,7 +1164,25 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 static bool transit_task_stat(struct task_ctx *taskc, int tgt_stat)
 {
 	/*
-	 * Update task loads only when the state transition is valid.
+	 * Update task loads only when the state transition is valid. So far,
+	 * two types of invalid state transitions have been observed, and there
+	 * are reasons for that. The two are as follows:
+	 *
+	 *   - ENQ -> ENQ: This transition can happen because scx_lavd does not
+	 *   provide ops.dequeue. When task attributes are updated (e.g., nice
+	 *   level, allowed cpus and so on), the scx core will dequeue the task
+	 *   and re-enqueue it (ENQ->DEQ->ENQ). However, When ops.dequeue() is
+	 *   not provided, the dequeue operations is done by the scx core.
+	 *   Hence, ignoring the dequeue operation is completely fine.
+	 *
+	 *   - STOPPING -> RUNNING: This can happen because there are several
+	 *   special cases where scx core skips enqueue including: 1) bypass
+	 *   mode is turned on (this is turned on during both init and exit.
+	 *   it's also used across suspend/resume operations. 2)
+	 *   SCX_OPS_ENQ_EXITING is not set and an exiting task was woken up.
+	 *   3) The associated CPU is not fully online. However, we avoid
+	 *   collecting time & frequency statistics for such special cases for
+	 *   accuracy.
 	 *
 	 * initial state
 	 * -------------
@@ -1158,9 +1194,9 @@ static bool transit_task_stat(struct task_ctx *taskc, int tgt_stat)
 	 *    +-------------------------+
 	 */
 	const static int valid_tgt_stat[] = {
-		LAVD_TASK_STAT_ENQ,
-		LAVD_TASK_STAT_RUNNING,
-		LAVD_TASK_STAT_STOPPING,
+		[LAVD_TASK_STAT_STOPPING]	= LAVD_TASK_STAT_ENQ,
+		[LAVD_TASK_STAT_ENQ]		= LAVD_TASK_STAT_RUNNING,
+		[LAVD_TASK_STAT_RUNNING]	= LAVD_TASK_STAT_STOPPING,
 	};
 	int src_stat = taskc->stat;
 
@@ -1213,13 +1249,7 @@ static void update_stat_for_stop(struct task_struct *p, struct task_ctx *taskc,
 {
 	u64 now, run_time_ns;
 
-	/*
-	 * If the task was runnable before governed by this scheduler, ignore
-	 * this run.
-	 */
 	now = bpf_ktime_get_ns();
-	if (now < taskc->last_start_clk)
-		return;
 
 	/*
 	 * When stopped, reduce the per-CPU task load. Per-CPU task load will
@@ -1250,8 +1280,10 @@ static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 }
 
 static bool put_local_rq(struct task_struct *p, struct task_ctx *taskc,
-			 s32 cpu_id, u64 enq_flags)
+			 u64 enq_flags)
 {
+	struct cpu_ctx *cpuc;
+
 	/*
 	 * Calculate when a tack can be scheduled. If a task is cannot be
 	 * scheduled soonish (i.e., the task is ineligible since
@@ -1270,11 +1302,9 @@ static bool put_local_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * rq. Statistics will be adjusted when more accurate statistics
 	 * become available (ops.running).
 	 */
-	struct cpu_ctx *cpuc = get_cpu_ctx();
-	if (!cpuc) {
-		scx_bpf_error("cpu_ctx_stor lookup failed");
+	cpuc = get_cpu_ctx();
+	if (!cpuc)
 		return false;
-	}
 
 	if (transit_task_stat(taskc, LAVD_TASK_STAT_ENQ))
 		update_stat_for_enq(p, taskc, cpuc);
@@ -1308,10 +1338,8 @@ static bool put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * Reflect task's load immediately.
 	 */
 	cpuc = get_cpu_ctx();
-	if (!cpuc) {
-		scx_bpf_error("cpu_ctx_stor lookup failed");
+	if (!cpuc)
 		return false;
-	}
 	if (transit_task_stat(taskc, LAVD_TASK_STAT_ENQ))
 		update_stat_for_enq(p, taskc, cpuc);
 
@@ -1341,28 +1369,33 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * CPU. If the task is directly dispatched here, the sched_ext won't
 	 * call ops.enqueue().
 	 */
-	cpu_id = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &found_idle);
-
-	if (found_idle && is_wakeup_wf(wake_flags)) {
-		struct task_ctx *taskc;
-
-		taskc = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-		if (!taskc) {
-			scx_bpf_error("task_ctx_stor lookup failed");
-			return prev_cpu;
-		}
-
-		if (!put_local_rq(p, taskc, cpu_id, 0)) {
-			/*
-			 * If a task is overscheduled (greedy_ratio > 1000), we
-			 * do not select a CPU, so that later the enqueue
-			 * operation can put it to the global queue.
-			 */
-			return prev_cpu;
-		}
+	if (!is_wakeup_wf(wake_flags)) {
+		cpu_id = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags,
+						&found_idle);
+		return found_idle ? cpu_id : prev_cpu;
 	}
 
-	return cpu_id;
+	struct task_ctx *taskc = get_task_ctx(p);
+	if (!taskc)
+		return prev_cpu;
+
+	if (!put_local_rq(p, taskc, 0)) {
+		/*
+		 * If a task is overscheduled (greedy_ratio > 1000), we
+		 * do not select a CPU, so that later the enqueue
+		 * operation can put it to the global queue.
+		 */
+		return prev_cpu;
+	}
+
+	/*
+	 * Note that once an idle CPU is successfully picked (i.e., found_idle
+	 * == true), then the picked CPU must be returned. Otherwise, that CPU
+	 * is stalled because the picked CPU is already punched out from the
+	 * idle mask.
+	 */
+	cpu_id = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &found_idle);
+	return found_idle ? cpu_id : prev_cpu;
 }
 
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
@@ -1378,11 +1411,9 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * always put the task to the global DSQ, so any idle CPU can pick it
 	 * up.
 	 */
-	taskc = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (!taskc) {
-		scx_bpf_error("task_ctx_stor lookup failed");
+	taskc = get_task_ctx(p);
+	if (!taskc)
 		return;
-	}
 
 	/*
 	 * Place a task to the global run queue.
@@ -1410,15 +1441,15 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * is updated. The @current task is a waker and @p is a waiter, which
 	 * is being wakened up now.
 	 */
-	if (!(enq_flags & SCX_ENQ_WAKEUP))
+	if (!is_wakeup_ef(enq_flags))
 		return;
 
 	waker = bpf_get_current_task_btf();
-	taskc = bpf_task_storage_get(&task_ctx_stor, waker, 0, 0);
+	taskc = try_get_task_ctx(waker);
 	if (!taskc) {
 		/*
-		 * In this case, the waker is either an idle task or a task not
-		 * governed by scx, so we just ignore.
+		 * In this case, the waker could be an idle task
+		 * (swapper/_[_]), so we just ignore.
 		 */
 		return;
 	}
@@ -1437,17 +1468,13 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	/*
 	 * Update task statistics then adjust task load based on the update.
 	 */
-	taskc = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (!taskc) {
-		scx_bpf_error("task_ctx_stor lookup failed");
+	taskc = get_task_ctx(p);
+	if (!taskc)
 		return;
-	}
 
 	cpuc = get_cpu_ctx();
-	if (!cpuc) {
-		scx_bpf_error("cpu_ctx_stor lookup failed");
+	if (!cpuc)
 		return;
-	}
 
 	if (transit_task_stat(taskc, LAVD_TASK_STAT_RUNNING))
 		update_stat_for_run(p, taskc, cpuc);
@@ -1465,10 +1492,17 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 
 static bool slice_fully_consumed(struct cpu_ctx *cpuc, struct task_ctx *taskc)
 {
-	u64 run_time_ns = 0;
+	u64 run_time_ns;
 
-	if (taskc->last_stop_clk > taskc->last_start_clk)
-		run_time_ns = taskc->last_stop_clk - taskc->last_start_clk;
+	/*
+	 * Sanity check just to make sure the runtime is positive.
+	 */
+	if (taskc->last_stop_clk < taskc->last_start_clk) {
+		scx_bpf_error("run_time_ns is negative: 0x%llu - 0x%llu",
+			      taskc->last_stop_clk, taskc->last_start_clk);
+	}
+
+	run_time_ns = taskc->last_stop_clk - taskc->last_start_clk;
 
 	return run_time_ns >= taskc->slice_ns;
 }
@@ -1499,16 +1533,12 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 	 * Reduce the task load.
 	 */
 	cpuc = get_cpu_ctx();
-	if (!cpuc) {
-		scx_bpf_error("cpu_ctx_stor lookup failed");
+	if (!cpuc)
 		return;
-	}
 
-	taskc = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (!taskc) {
-		scx_bpf_error("task_ctx_stor lookup failed");
+	taskc = get_task_ctx(p);
+	if (!taskc)
 		return;
-	}
 
 	if (transit_task_stat(taskc, LAVD_TASK_STAT_STOPPING))
 		update_stat_for_stop(p, taskc, cpuc);
@@ -1535,11 +1565,9 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	/*
 	 * When a task @p goes to sleep, its associated wait_freq is updated.
 	 */
-	taskc = bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-	if (!taskc) {
-		scx_bpf_error("task_ctx_stor lookup failed");
+	taskc = get_task_ctx(p);
+	if (!taskc)
 		return;
-	}
 
 	now = bpf_ktime_get_ns();
 	interval = now - taskc->last_wait_clk;
@@ -1553,12 +1581,11 @@ void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
 	 * When a cpu becomes online, reset its cpu context and trigger the
 	 * recalculation of the global cpu load.
 	 */
-	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+	struct cpu_ctx *cpuc;
 
-	if (!cpuc) {
-		scx_bpf_error("cpu_ctx_stor lookup failed");
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc)
 		return;
-	}
 
 	memset(cpuc, 0, sizeof(*cpuc));
 
@@ -1572,12 +1599,11 @@ void BPF_STRUCT_OPS(lavd_cpu_offline, s32 cpu)
 	 * When a cpu becomes offline, trigger the recalculation of the global
 	 * cpu load.
 	 */
-	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+	struct cpu_ctx *cpuc;
 
-	if (!cpuc) {
-		scx_bpf_error("cpu_ctx_stor lookup failed");
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc)
 		return;
-	}
 
 	memset(cpuc, 0, sizeof(*cpuc));
 
@@ -1593,12 +1619,11 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 	 * default idle core tracking and core selection algorithm.
 	 */
 
-	struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+	struct cpu_ctx *cpuc;
 
-	if (!cpuc) {
-		scx_bpf_error("cpu_ctx_stor lookup failed");
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc)
 		return;
-	}
 
 	/*
 	 * The CPU is entering into the idle state.
@@ -1648,6 +1673,7 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 		scx_bpf_error("task_ctx_stor first lookup failed");
 		return -ENOMEM;
 	}
+
 
 	/*
 	 * Initialize @p's context.

@@ -10,14 +10,14 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
-extern crate static_assertions;
-extern crate plain;
 extern crate libc;
+extern crate plain;
+extern crate static_assertions;
 
+use std::mem;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use std::mem;
 
 use libc::c_char;
 use std::ffi::CStr;
@@ -32,10 +32,11 @@ use libbpf_rs::skel::SkelBuilder as _;
 use log::info;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Topology;
 
-use rlimit::{setrlimit, getrlimit, Resource};
-use plain::Plain;
 use nix::sys::signal;
+use plain::Plain;
+use rlimit::{getrlimit, setrlimit, Resource};
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
@@ -46,8 +47,8 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 /// See the more detailed overview of the LAVD design at main.bpf.c.
 #[derive(Debug, Parser)]
 struct Opts {
-    /// The number of scheduling samples to be reported every second (default: 0)
-    #[clap(short = 's', long, default_value = "0")]
+    /// The number of scheduling samples to be reported every second (default: 1)
+    #[clap(short = 's', long, default_value = "1")]
     nr_sched_samples: u64,
 
     /// PID to be tracked all its scheduling activities if specified
@@ -63,17 +64,14 @@ struct Opts {
 unsafe impl Plain for msg_task_ctx {}
 
 impl msg_task_ctx {
-    fn from_bytes(buf: &[u8]) -> & msg_task_ctx {
-        plain::from_bytes(buf)
-            .expect("The buffer is either too short or not aligned!")
+    fn from_bytes(buf: &[u8]) -> &msg_task_ctx {
+        plain::from_bytes(buf).expect("The buffer is either too short or not aligned!")
     }
 }
 
 impl introspec {
     fn new() -> Self {
-        let intrspc = unsafe {
-            mem::MaybeUninit::<introspec>::zeroed().assume_init()
-        };
+        let intrspc = unsafe { mem::MaybeUninit::<introspec>::zeroed().assume_init() };
         intrspc
     }
 
@@ -82,12 +80,10 @@ impl introspec {
         if opts.nr_sched_samples > 0 {
             intrspc.cmd = LAVD_CMD_SCHED_N;
             intrspc.arg = opts.nr_sched_samples;
-        }
-        else if opts.pid_traced > 0 {
+        } else if opts.pid_traced > 0 {
             intrspc.cmd = LAVD_CMD_PID;
             intrspc.arg = opts.pid_traced;
-        }
-        else {
+        } else {
             intrspc.cmd = LAVD_CMD_NOP;
         }
         intrspc.requested = false as u8;
@@ -113,13 +109,13 @@ impl<'a> Scheduler<'a> {
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 0);
-        let mut skel = skel_builder.open()
-                                   .context("Failed to open BPF program")?;
+        let mut skel = skel_builder.open().context("Failed to open BPF program")?;
 
         // Initialize skel according to @opts.
-	let nr_cpus_onln = num_cpus::get() as u64;
-	skel.bss_mut().nr_cpus_onln = nr_cpus_onln;
-	skel.rodata_mut(). verbose = opts.verbose;
+        let topo = Topology::new().expect("Failed to build host topology");
+        let nr_cpus_onln = topo.span().weight() as u64;
+        skel.bss_mut().nr_cpus_onln = nr_cpus_onln;
+        skel.rodata_mut().verbose = opts.verbose;
         let intrspc = introspec::init(opts);
 
         // Attach.
@@ -170,36 +166,62 @@ impl<'a> Scheduler<'a> {
         let mseq = Scheduler::get_msg_seq_id();
 
         if mseq % 32 == 1 {
-            info!("| {:9} | {:8} | {:17} \
+            info!(
+                "| {:9} | {:8} | {:17} \
                    | {:4} | {:9} | {:9} \
                    | {:10} | {:9} | {:8} \
                    | {:12} | {:7} | {:9} \
                    | {:9} | {:9} | {:9} \
                    | {:9} | {:8} |",
-                  "mseq", "pid", "comm",
-                  "cpu", "vddln_ns", "elglty_ns",
-                  "slice_ns", "grdy_rt", "lat_prio",
-                  "static_prio", "lat_bst", "slice_bst",
-                  "run_freq", "run_tm_ns", "wait_freq",
-                  "wake_freq", "cpu_util");
+                "mseq",
+                "pid",
+                "comm",
+                "cpu",
+                "vddln_ns",
+                "elglty_ns",
+                "slice_ns",
+                "grdy_rt",
+                "lat_prio",
+                "static_prio",
+                "lat_bst",
+                "slice_bst",
+                "run_freq",
+                "run_tm_ns",
+                "wait_freq",
+                "wake_freq",
+                "cpu_util"
+            );
         }
 
-        let c_tx_cm: *const c_char = (&tx.comm as *const [i8;17]) as *const i8;
+        let c_tx_cm: *const c_char = (&tx.comm as *const [i8; 17]) as *const i8;
         let c_tx_cm_str: &CStr = unsafe { CStr::from_ptr(c_tx_cm) };
-        let tx_comm : &str = c_tx_cm_str.to_str().unwrap();
+        let tx_comm: &str = c_tx_cm_str.to_str().unwrap();
 
-        info!("| {:9} | {:8} | {:17} \
+        info!(
+            "| {:9} | {:8} | {:17} \
                | {:4} | {:9} | {:9} \
                | {:10} | {:9} | {:8} \
                | {:12} | {:7} | {:9} \
                | {:9} | {:9} | {:9} \
                | {:9} | {:8} | ",
-              mseq, tx.pid, tx_comm,
-              tx.cpu_id, tc.vdeadline_delta_ns, tc.eligible_delta_ns,
-              tc.slice_ns, tc.greedy_ratio, tc.lat_prio,
-              tx.static_prio, tc.lat_boost_prio, tc.slice_boost_prio,
-              tc.run_freq, tc.run_time_ns, tc.wait_freq,
-              tc.wake_freq, tx.cpu_util);
+            mseq,
+            tx.pid,
+            tx_comm,
+            tx.cpu_id,
+            tc.vdeadline_delta_ns,
+            tc.eligible_delta_ns,
+            tc.slice_ns,
+            tc.greedy_ratio,
+            tc.lat_prio,
+            tx.static_prio,
+            tc.lat_boost_prio,
+            tc.slice_boost_prio,
+            tc.run_freq,
+            tc.run_time_ns,
+            tc.wait_freq,
+            tc.wake_freq,
+            tx.cpu_util
+        );
 
         0
     }
@@ -207,17 +229,16 @@ impl<'a> Scheduler<'a> {
     fn prep_introspec(&mut self) -> u64 {
         let mut interval_ms = 1000;
 
-        if self.intrspc.cmd == LAVD_CMD_SCHED_N && 
-            self.intrspc.arg > self.nr_cpus_onln {
-		// More samples, shorter sampling interval.
-                let f = self.intrspc.arg / self.nr_cpus_onln * 2;
-                interval_ms /= f;
+        if self.intrspc.cmd == LAVD_CMD_SCHED_N && self.intrspc.arg > self.nr_cpus_onln {
+            // More samples, shorter sampling interval.
+            let f = self.intrspc.arg / self.nr_cpus_onln * 2;
+            interval_ms /= f;
         }
-	self.intrspc.requested = true as u8;
+        self.intrspc.requested = true as u8;
 
-	self.skel.bss_mut().intrspc.cmd = self.intrspc.cmd;
-	self.skel.bss_mut().intrspc.arg = self.intrspc.arg;
-	self.skel.bss_mut().intrspc.requested = self.intrspc.requested;
+        self.skel.bss_mut().intrspc.cmd = self.intrspc.cmd;
+        self.skel.bss_mut().intrspc.arg = self.intrspc.arg;
+        self.skel.bss_mut().intrspc.requested = self.intrspc.requested;
 
         interval_ms
     }
@@ -231,7 +252,7 @@ impl<'a> Scheduler<'a> {
         // Once dumped, it is done.
         if self.intrspc.cmd == LAVD_CMD_DUMP {
             self.intrspc.cmd = LAVD_CMD_NOP;
-	}
+        }
     }
 
     fn running(&mut self) -> bool {
@@ -247,8 +268,8 @@ impl<'a> Scheduler<'a> {
         }
         self.rb_mgr.consume().unwrap();
 
-	self.struct_ops.take();
-	uei_report!(&self.skel.bss().uei)
+        self.struct_ops.take();
+        uei_report!(&self.skel.bss().uei)
     }
 }
 
@@ -260,7 +281,7 @@ impl<'a> Drop for Scheduler<'a> {
     }
 }
 
-fn init_log(opts: & Opts) {
+fn init_log(opts: &Opts) {
     let llv = match opts.verbose {
         0 => simplelog::LevelFilter::Info,
         1 => simplelog::LevelFilter::Debug,
@@ -276,7 +297,8 @@ fn init_log(opts: & Opts) {
         lcfg.build(),
         simplelog::TerminalMode::Stderr,
         simplelog::ColorChoice::Auto,
-    ).unwrap();
+    )
+    .unwrap();
 }
 
 extern "C" fn handle_sigint(_: libc::c_int, _: *mut libc::siginfo_t, _: *mut libc::c_void) {
@@ -288,7 +310,9 @@ fn init_signal_handlers() {
     unsafe {
         let sigint_action = signal::SigAction::new(
             signal::SigHandler::SigAction(handle_sigint),
-            signal::SaFlags::empty(), signal::SigSet::empty());
+            signal::SaFlags::empty(),
+            signal::SigSet::empty(),
+        );
         signal::sigaction(signal::SIGINT, &sigint_action).unwrap();
     }
 }
