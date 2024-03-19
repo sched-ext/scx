@@ -268,13 +268,18 @@ static const u64 sched_prio_to_slice_weight[NICE_WIDTH] = {
  * MuQSS scheduler. We choose a different distribution for
  * sched_prio_to_latency_weight on purpose instead of inversing
  * sched_prio_to_slice_weight. That is because sched_prio_to_slice_weight is
- * too steep to use for latency. We normalized the values so that the normal
+ * too steep to use for latency. Suppose the maximum time slice per schedule
+ * (LAVD_SLICE_MAX_NS) is 4 msec. We normalized the values so that the normal
  * priority (nice 0) has a deadline of 10 msec. The virtual deadline ranges
- * from 1.5 msec to 60.9 msec.
+ * from 1.5 msec to 60.9 msec. As the maximum time slice becomes shorter, the
+ * deadlines become tighter.Taking an example of 3 msec, the virtual deadline
+ * ranges from 1.15 msec (for nice -20) to 7.5 msec (for nice 0) and 45.65 msec
+ * (for nice 19).
  */
 static const u64 sched_prio_to_latency_weight[NICE_WIDTH] = {
-	/* weight	nice priority	sched priority	vdeadline (usec)  */
-	/* ------	-------------	--------------	----------------  */
+	/* weight	nice priority	sched priority	vdeadline (usec)    */
+	/*						(max slice == 4 ms) */
+	/* ------	-------------	--------------	------------------- */
 	  383,		/* -20		 0		 1532 */
 	  419,		/* -19		 1 		 1676 */
 	  461,		/* -18		 2 		 1844 */
