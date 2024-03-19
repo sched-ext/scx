@@ -1482,6 +1482,14 @@ static bool slice_fully_consumed(struct cpu_ctx *cpuc, struct task_ctx *taskc)
 {
 	u64 run_time_ns;
 
+	/*
+	 * Sanity check just to make sure the runtime is positive.
+	 */
+	if (taskc->last_stop_clk < taskc->last_start_clk) {
+		scx_bpf_error("run_time_ns is negative: 0x%llu - 0x%llu",
+			      taskc->last_stop_clk, taskc->last_start_clk);
+	}
+
 	run_time_ns = taskc->last_stop_clk - taskc->last_start_clk;
 
 	return run_time_ns >= taskc->slice_ns;
