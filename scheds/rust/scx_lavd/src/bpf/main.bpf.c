@@ -858,7 +858,7 @@ static u64 calc_eligible_delta(struct task_struct *p, struct task_ctx *taskc)
 	 * We calculate how long a task should be ineligible for execution. To
 	 * this end, the scheduler stretches the ineligible duration of a task
 	 * so it can control the frequency of the task's running to let the
-	 * task pay its debut. Reducing the time slice of a task would be
+	 * task pay its debt. Reducing the time slice of a task would be
 	 * another approach. However, adjusting the time slice for fairness
 	 * does not work well since many latency-critical tasks voluntarily
 	 * yield CPU waiting for an event before expiring its time slice. 
