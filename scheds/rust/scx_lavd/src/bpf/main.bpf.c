@@ -262,64 +262,60 @@ static const u64 sched_prio_to_slice_weight[NICE_WIDTH] = {
  * It is used to determine the virtual deadline. Each step increases by 10%.
  * The idea behind the virtual deadline is to limit the competition window
  * among concurrent tasks. For example, in the case of a normal priority task
- * with priority 19 (or nice 0), its corresponding value is 10,000,000 nsec (or
- * 10 msec). This guarantees that any tasks enqueued in 10 msec after the task
- * is enqueued will not compete with the task. The array is adapted from the
- * MuQSS scheduler. We choose a different distribution for
- * sched_prio_to_latency_weight on purpose instead of inversing
- * sched_prio_to_slice_weight. That is because sched_prio_to_slice_weight is
- * too steep to use for latency. Suppose the maximum time slice per schedule
- * (LAVD_SLICE_MAX_NS) is 4 msec. We normalized the values so that the normal
- * priority (nice 0) has a deadline of 10 msec. The virtual deadline ranges
- * from 1.5 msec to 60.9 msec. As the maximum time slice becomes shorter, the
- * deadlines become tighter.Taking an example of 3 msec, the virtual deadline
- * ranges from 1.15 msec (for nice -20) to 7.5 msec (for nice 0) and 45.65 msec
- * (for nice 19).
+ * with nice 0, its corresponding value is 7.5 msec. This guarantees that any
+ * tasks enqueued in 7.5 msec after the task is enqueued will not compete for
+ * CPU time with the task. This array is the inverse of
+ * sched_prio_to_latency_weight with some normalization. Suppose the maximum
+ * time slice per schedule (LAVD_SLICE_MAX_NS) is 3 msec. We normalized the
+ * values so that the normal priority (nice 0) has a deadline of 7.5 msec, a
+ * center of the targeted latency (i.e., when LAVD_TARGETED_LATENCY_NS is 15
+ * msec). The virtual deadline ranges from 87 usec to 512 msec. As the maximum
+ * time slice becomes shorter, the deadlines become tighter.
  */
 static const u64 sched_prio_to_latency_weight[NICE_WIDTH] = {
 	/* weight	nice priority	sched priority	vdeadline (usec)    */
-	/*						(max slice == 4 ms) */
+	/*						(max slice == 3 ms) */
 	/* ------	-------------	--------------	------------------- */
-	  383,		/* -20		 0		 1532 */
-	  419,		/* -19		 1 		 1676 */
-	  461,		/* -18		 2 		 1844 */
-	  505,		/* -17		 3 		 2020 */
-	  553,		/* -16		 4 		 2212 */
-	  607,		/* -15		 5 		 2428 */
-	  667,		/* -14		 6 		 2668 */
-	  733,		/* -13		 7 		 2932 */
-	  804,		/* -12		 8 		 3216 */
-	  882,		/* -11		 9 		 3528 */
-	  969,		/* -10		10 		 3876 */
-	 1065,		/*  -9		11 		 4260 */
-	 1169,		/*  -8		12 		 4676 */
-	 1286,		/*  -7		13 		 5144 */
-	 1414,		/*  -6		14 		 5656 */
-	 1555,		/*  -5		15 		 6220 */
-	 1711,		/*  -4		16 		 6844 */
-	 1881,		/*  -3		17 		 7524 */
-	 2066,		/*  -2		18 		 8264 */
-	 2273,		/*  -1		19 		 9092 */
-	 2500,		/*   0		20 		10000 */
-	 2748,		/*   1		21 		10992 */
-	 3020,		/*   2		22 		12080 */
-	 3322,		/*   3		23 		13288 */
-	 3654,		/*   4		24 		14616 */
-	 4019,		/*   5		25 		16076 */
-	 4420,		/*   6		26 		17680 */
-	 4859,		/*   7		27 		19436 */
-	 5344,		/*   8		28 		21376 */
-	 5876,		/*   9		29 		23504 */
-	 6462,		/*  10		30 		25848 */
-	 7108,		/*  11		31 		28432 */
-	 7817,		/*  12		32 		31268 */
-	 8597,		/*  13		33 		34388 */
-	 9456,		/*  14		34 		37824 */
-	10401,		/*  15		35 		41604 */
-	11438,		/*  16		36 		45752 */
-	12581,		/*  17		37 		50324 */
-	13837,		/*  18		38 		55348 */
-	15218,		/*  19		39 		60872 */
+	    29,		/* -20		 0		    87 */
+	    36,		/* -19		 1		   108 */
+	    45,		/* -18		 2		   135 */
+	    55,		/* -17		 3		   165 */
+	    71,		/* -16		 4		   213 */
+	    88,		/* -15		 5		   264 */
+	   110,		/* -14		 6		   330 */
+	   137,		/* -13		 7		   411 */
+	   171,		/* -12		 8		   513 */
+	   215,		/* -11		 9		   645 */
+	   268,		/* -10		10		   804 */
+	   336,		/*  -9		11		  1008 */
+	   420,		/*  -8		12		  1260 */
+	   522,		/*  -7		13		  1566 */
+	   655,		/*  -6		14		  1965 */
+	   820,		/*  -5		15		  2460 */
+	  1024,		/*  -4		16		  3072 */
+	  1286,		/*  -3		17		  3858 */
+	  1614,		/*  -2		18		  4842 */
+	  2005,		/*  -1		19		  6015 */
+	  2500,		/*   0		20		  7500 */
+	  3122,		/*   1		21		  9366 */
+	  3908,		/*   2		22		 11724 */
+	  4867,		/*   3		23		 14601 */
+	  6052,		/*   4		24		 18156 */
+	  7642,		/*   5		25		 22926 */
+	  9412,		/*   6		26		 28236 */
+	 11907,		/*   7		27		 35721 */
+	 14884,		/*   8		28		 44652 */
+	 18686,		/*   9		29		 56058 */
+	 23273,		/*  10		30		 69819 */
+	 29425,		/*  11		31		 88275 */
+	 36571,		/*  12		32		109713 */
+	 45714,		/*  13		33		137142 */
+	 56889,		/*  14		34		170667 */
+	 71111,		/*  15		35		213333 */
+	 88276,		/*  16		36		264828 */
+	111304,		/*  17		37		333912 */
+	142222,		/*  18		38		426666 */
+	170667,		/*  19		39		512001 */
 };
 
 /*
@@ -388,7 +384,6 @@ static const u64 lat_prio_to_greedy_thresholds[NICE_WIDTH] = {
 	 1000,		/*  18		38 */
 	 1000,		/*  19		39 */
 };
-
 
 static u16 get_nice_prio(struct task_struct *p);
 static u64 get_task_load_ideal(struct task_struct *p);
