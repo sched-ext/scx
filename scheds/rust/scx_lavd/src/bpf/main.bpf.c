@@ -1113,8 +1113,10 @@ static u64 calc_slice_share(struct task_struct *p, struct task_ctx *taskc)
 	 * scheduler tries to allocate a longer time slice.
 	 */
 	u64 share = get_task_load_ideal(p);
+	u64 slice_boost_step = min(taskc->slice_boost_prio,
+				   LAVD_SLICE_BOOST_MAX_STEP);
 
-	share += (share * taskc->slice_boost_prio) / LAVD_SLICE_BOOST_MAX;
+	share += (share * slice_boost_step) / LAVD_SLICE_BOOST_MAX_STEP;
 
 	return share;
 }
@@ -1521,7 +1523,7 @@ static void adjust_slice_boost(struct cpu_ctx *cpuc, struct task_ctx *taskc)
 	 * fully consumed, decrease the slice boost priority by half.
 	 */
 	if (slice_fully_consumed(cpuc, taskc)) {
-		if (taskc->slice_boost_prio < LAVD_SLICE_BOOST_MAX)
+		if (taskc->slice_boost_prio < LAVD_SLICE_BOOST_MAX_PRIO)
 			taskc->slice_boost_prio++;
 	}
 	else {
