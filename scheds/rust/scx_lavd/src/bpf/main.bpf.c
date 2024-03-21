@@ -1247,7 +1247,7 @@ static void update_stat_for_run(struct task_struct *p, struct task_ctx *taskc,
 static void update_stat_for_stop(struct task_struct *p, struct task_ctx *taskc,
 				 struct cpu_ctx *cpuc)
 {
-	u64 now, run_time_ns;
+	u64 now, run_time_ns, run_time_boosted_ns;
 
 	now = bpf_ktime_get_ns();
 
@@ -1259,10 +1259,16 @@ static void update_stat_for_stop(struct task_struct *p, struct task_ctx *taskc,
 	cpuc->load_ideal  -= get_task_load_ideal(p);
 
 	/*
-	 * Update task's run_time.
+	 * Update task's run_time. If a task got slice-boosted -- in other
+	 * words, its time slices have been fully consumed multiple times,
+	 * stretch the measured runtime according to the slice_boost_prio.
+	 * The stretched runtime more accurately reflects the actual runtime
+	 * per schedule as if a large enough time slice was given in the first
+	 * place.
 	 */
 	run_time_ns = now - taskc->last_start_clk;
-	taskc->run_time_ns = calc_avg(taskc->run_time_ns, run_time_ns);
+	run_time_boosted_ns = run_time_ns * (1 + taskc->slice_boost_prio);
+	taskc->run_time_ns = calc_avg(taskc->run_time_ns, run_time_boosted_ns);
 	taskc->last_stop_clk = now;
 }
 
