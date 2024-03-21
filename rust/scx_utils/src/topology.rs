@@ -340,8 +340,11 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
 
             // L3 cache ID
             let cache_path = cpu_path.join("cache");
+            // Use LLC 0 if we fail to detect the cache hierarchy. This seems to
+            // happen on certain SKUs, so if there's no cache information then
+            // we have no option but to assume a single unified cache per node.
             let llc_id =
-                read_file_usize(&cache_path.join(format!("index{}", CACHE_LEVEL)).join("id"))?;
+                read_file_usize(&cache_path.join(format!("index{}", CACHE_LEVEL)).join("id")).unwrap_or(0);
 
             // Min and max frequencies. If the kernel is not compiled with
             // CONFIG_CPU_FREQ, just assume 0 for both frequencies.
