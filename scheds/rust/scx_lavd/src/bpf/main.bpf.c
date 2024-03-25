@@ -123,7 +123,6 @@ volatile u64			nr_cpus_onln;
 static struct sys_cpu_util	__sys_cpu_util[2];
 static volatile int		__sys_cpu_util_idx;
 
-volatile u64			max_lat_cri;
 struct user_exit_info		uei;
 
 const volatile u8		verbose;
@@ -520,6 +519,10 @@ static int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc,
 	m->taskc_x.static_prio = get_nice_prio(p);
 	m->taskc_x.cpu_util = cutil_cur->util / 10;
 	m->taskc_x.cpu_id = cpu_id;
+	m->taskc_x.max_lat_cri = cutil_cur->max_lat_cri;
+	m->taskc_x.min_lat_cri = cutil_cur->min_lat_cri;
+	m->taskc_x.avg_lat_cri = cutil_cur->avg_lat_cri;
+
 	memcpy(&m->taskc, taskc, sizeof(m->taskc));
 
 	bpf_ringbuf_submit(m, 0);
@@ -654,6 +657,8 @@ static void update_sys_cpu_load(void)
 	u64 now, duration, duration_total;
 	u64 idle_total = 0, compute_total = 0;
 	u64 load_actual = 0, load_ideal = 0;
+	s64 max_lat_cri = 0, min_lat_cri = UINT_MAX, avg_lat_cri = 0;
+	u64 sum_lat_cri = 0, sched_nr = 0;
 	u64 new_util;
 	int cpu;
 
@@ -672,6 +677,27 @@ static void update_sys_cpu_load(void)
 		 */
 		load_actual += cpuc->load_actual;
 		load_ideal += cpuc->load_ideal;
+
+		/*
+		 * Accumulate task's latency criticlity information.
+		 *
+		 * Updating cpuc->* is racy. However, it could degrade the
+		 * accuracy a little bit in very rare cases, so we do embrace
+		 * embrace for performance on purpose.
+		 */
+		sum_lat_cri += cpuc->sum_lat_cri;
+		cpuc->sum_lat_cri = 0;
+
+		sched_nr += cpuc->sched_nr;
+		cpuc->sched_nr = 0;
+
+		if (cpuc->max_lat_cri > max_lat_cri)
+			max_lat_cri = cpuc->max_lat_cri;
+		cpuc->max_lat_cri = 0;
+
+		if (cpuc->min_lat_cri < min_lat_cri)
+			min_lat_cri = cpuc->min_lat_cri;
+		cpuc->min_lat_cri = UINT_MAX;
 
 		/*
 		 * If the CPU is in an idle state (i.e., idle_start_clk is
@@ -698,36 +724,46 @@ static void update_sys_cpu_load(void)
 	if (duration_total > idle_total)
 		compute_total = duration_total - idle_total;
 	new_util = (compute_total * LAVD_CPU_UTIL_MAX) / duration_total;
+	if (sched_nr > 0)
+		avg_lat_cri = sum_lat_cri / sched_nr;
 
 	/*
-	 * Update the CPU utilization to the next version, and then make the
-	 * next version atomically visible.
+	 * Update the CPU utilization to the next version.
 	 */
 	cutil_next->load_actual = calc_avg(cutil_cur->load_actual, load_actual);
 	cutil_next->load_ideal = calc_avg(cutil_cur->load_ideal, load_ideal);
 	cutil_next->util = calc_avg(cutil_cur->util, new_util);
+
+	/*
+	 * Calculate the increment for latency criticality to priority mapping
+	 *  - Case 1. inc1k_low:   [min_lc, avg_lc) -> [half_range, 0)
+	 *  - Case 2. inc1k_high:  [avg_lc, max_lc] -> [0, -half_range)
+	 */
+	cutil_next->min_lat_cri = calc_avg(cutil_cur->min_lat_cri, min_lat_cri);
+	cutil_next->max_lat_cri = calc_avg(cutil_cur->max_lat_cri, max_lat_cri);
+	cutil_next->avg_lat_cri = calc_avg(cutil_cur->avg_lat_cri, avg_lat_cri);
+
+	if (cutil_next->avg_lat_cri == cutil_next->min_lat_cri)
+		cutil_next->inc1k_low = 0;
+	else {
+		cutil_next->inc1k_low = ((LAVD_BOOST_RANGE >> 1) * 1000) /
+					(cutil_next->avg_lat_cri -
+					 cutil_next->min_lat_cri);
+	}
+
+	if ((cutil_next->max_lat_cri + 1) == cutil_next->avg_lat_cri)
+		cutil_next->inc1k_high = 0;
+	else {	
+		cutil_next->inc1k_high = ((LAVD_BOOST_RANGE >> 1) * 1000) /
+					 (cutil_next->max_lat_cri + 1 -
+					  cutil_next->avg_lat_cri);
+	}
+
+	/*
+	 * Make the next version atomically visible.
+	 */
 	cutil_next->last_update_clk = now;
 	flip_sys_cpu_util();
-}
-
-static void decay_max_lat_cri(void)
-{
-	/*
-	 * Decrease max_lat_cri by 3.13% (>> 5) every update interval. The
-	 * maximum can be bumped up for a moment, then the actual lat_cri
-	 * values could never reach the maximum value. To address this, we
-	 * decrease the maximum value here so that the maximum can be bumped up
-	 * again to the actual maximum. This helps to manage max_lat_cri close
-	 * to the actual maximum value tightly. Note that we don't need to
-	 * handle the CAS failure. That is because the CAS failure means
-	 * another task bumps the old maximum to the higher, actual maximum.
-	 */
-	u64 cur_max = max_lat_cri;
-	u64 delta = (cur_max >> 5) ? : 1;
-	s64 new_max = cur_max - delta;
-
-	if (new_max > 0)
-		__sync_val_compare_and_swap(&max_lat_cri, cur_max, new_max);
 }
 
 static int update_timer_fn(void *map, int *key, struct bpf_timer *timer)
@@ -735,7 +771,6 @@ static int update_timer_fn(void *map, int *key, struct bpf_timer *timer)
 	int err;
 
 	update_sys_cpu_load();
-	decay_max_lat_cri();
 
 	err = bpf_timer_start(timer, LAVD_CPU_UTIL_INTERVAL_NS, 0);
 	if (err)
@@ -923,11 +958,60 @@ static int sum_prios_for_lat(struct task_struct *p, int nice_prio,
 	return prio;
 }
 
+static int map_lat_cri_to_lat_prio(u64 lat_cri)
+{
+	/*
+	 * Latency criticality is an absolute metric representing how
+	 * latency-critical a task is. However, latency priority is a relative
+	 * metric compared to the other co-running tasks. Especially when the
+	 * task's latency criticalities are in a small range, the relative
+	 * metric is advantageous in mitigating integer truncation errors. In
+	 * the relative metric, we map
+	 *
+	 *  - Case 1. inc1k_low:   [min_lc, avg_lc) -> [boost_range/2,  0)
+	 *  - Case 2. inc1k_high:  [avg_lc, max_lc] -> [0, -boost_range/2)
+	 *
+	 * Hence, latency priority 20 now means that a task has an average
+	 * latency criticality among the co-running tasks.
+	 */
+
+	struct sys_cpu_util *cutil_cur = get_sys_cpu_util_cur();
+	s64 base_lat_cri, inc1k;
+	int base_prio, lat_prio;
+
+	/*
+	 * Set up params for the Case 1 and 2.
+	 */
+	if (lat_cri < cutil_cur->avg_lat_cri) {
+		inc1k = cutil_cur->inc1k_low;
+		base_lat_cri = cutil_cur->min_lat_cri;
+		base_prio = LAVD_BOOST_RANGE >> 1;
+	}
+	else {
+		inc1k = cutil_cur->inc1k_high;
+		base_lat_cri = cutil_cur->avg_lat_cri;
+		base_prio = 0;
+	}
+
+	/*
+	 * Task's lat_cri could be more up-to-date than cutil_cur's one. In
+	 * this case, just take the cutil_cur's one.
+	 */
+	if (lat_cri >= base_lat_cri) {
+		lat_prio = base_prio -
+			   (((lat_cri - base_lat_cri) * inc1k + 500) / 1000);
+	}
+	else
+		lat_prio = base_prio;
+
+	return lat_prio;
+}
+
 static int boost_lat(struct task_struct *p, struct task_ctx *taskc,
-		     bool is_wakeup)
+		     struct cpu_ctx *cpuc, bool is_wakeup)
 {
 	u64 run_time_ft = 0, wait_freq_ft = 0, wake_freq_ft = 0;
-	u64 lat_cri_raw = 0, cur_max = 0, lat_cri = 0;
+	u64 lat_cri_raw = 0;
 	u16 static_prio;
 	int boost;
 
@@ -993,36 +1077,13 @@ static int boost_lat(struct task_struct *p, struct task_ctx *taskc,
 	 * conversion, we mitigate the exponentially skewed distribution to
 	 * non-linear distribution.
 	 */
-	lat_cri = bpf_log2l(lat_cri_raw + 1);
-
-	/*
-	 * Update the global @max_lat_cri if necessary. Updating @max_lat_cri
-	 * is racy because it can be tested and updated concurrently from
-	 * multiple CPUs. So we use an atomic cmpxchg.
-	 *
-	 * Note that the bounded retry (@LAVD_MAX_CAS_RETRY) does *not
-	 * *guarantee* the update of @max_lat_cri. However, it is unlikely to
-	 * happen, and even if it happens, the incorrect value will be
-	 * corrected next time anyway. So let's just live with it. 
-	 *
-	 * We decay @max_lat_cri periodially (at decay_max_lat_cri) to maintain
-	 * @max_lat_cri up-to-date.
-	 */
-	cur_max = max_lat_cri;
-	for (int i = 0; lat_cri > cur_max && i < LAVD_MAX_CAS_RETRY; i++) {
-		cur_max = __sync_val_compare_and_swap(&max_lat_cri, cur_max,
-				lat_cri);
-	}
+	taskc->lat_cri = bpf_log2l(lat_cri_raw + 1);
 
 	/*
 	 * Convert @p's latency criticality to its boost priority linearly.
-	 */
-	boost = (LAVD_BOOST_RANGE - ((lat_cri * LAVD_BOOST_RANGE) / cur_max)) - 
-		(LAVD_BOOST_RANGE >> 1);
-
-	/*
 	 * When a task is wakening up, boost its latency boost priority by 1.
 	 */
+	boost = map_lat_cri_to_lat_prio(taskc->lat_cri);
 	if (is_wakeup)
 		boost -= LAVD_BOOST_WAKEUP_LAT;
 
@@ -1035,14 +1096,15 @@ out:
 }
 
 static u64 calc_latency_weight(struct task_struct *p, struct task_ctx *taskc,
-			       bool is_wakeup)
+			       struct cpu_ctx *cpuc, bool is_wakeup)
 {
-	boost_lat(p, taskc, is_wakeup);
+	boost_lat(p, taskc, cpuc, is_wakeup);
 	return sched_prio_to_latency_weight[taskc->lat_prio];
 }
 
 static u64 calc_virtual_dealine_delta(struct task_struct *p,
 				      struct task_ctx *taskc,
+				      struct cpu_ctx *cpuc,
 				      u64 enq_flags)
 {
 	u64 vdeadline_delta_ns, weight;
@@ -1062,7 +1124,7 @@ static u64 calc_virtual_dealine_delta(struct task_struct *p,
 	 * boost priority (and weight).
 	 */
 	is_wakeup = is_wakeup_ef(enq_flags);
-	weight = calc_latency_weight(p, taskc, is_wakeup);
+	weight = calc_latency_weight(p, taskc, cpuc, is_wakeup);
 	vdeadline_delta_ns = (LAVD_SLICE_MAX_NS * weight) / 1000;
 	taskc->vdeadline_delta_ns = vdeadline_delta_ns;
 	return vdeadline_delta_ns;
@@ -1236,6 +1298,19 @@ static void update_stat_for_run(struct task_struct *p, struct task_ctx *taskc,
 	taskc->run_freq = calc_avg_freq(taskc->run_freq, interval);
 
 	/*
+	 * Update per-CPU latency criticality information for ever-scheduled
+	 * tasks
+	 */
+	if (have_scheduled(taskc)) {
+		if (cpuc->max_lat_cri < taskc->lat_cri)
+			cpuc->max_lat_cri = taskc->lat_cri;
+		if (cpuc->min_lat_cri > taskc->lat_cri)
+			cpuc->min_lat_cri = taskc->lat_cri;
+		cpuc->sum_lat_cri += taskc->lat_cri;
+		cpuc->sched_nr++;
+	}
+
+	/*
 	 * Update task state when starts running.
 	 */
 	taskc->last_start_clk = now;
@@ -1270,7 +1345,7 @@ static void update_stat_for_stop(struct task_struct *p, struct task_ctx *taskc,
 }
 
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
-			     u64 enq_flags)
+			     struct cpu_ctx *cpuc, u64 enq_flags)
 {
 	/*
 	 * Before enqueueing a task to a run queue, we should decide when a
@@ -1278,7 +1353,7 @@ static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 	 * urgent it is - vdeadline_delta_ns - and when it becomes eligible if
 	 * overscheduled - eligible_time_ns.
 	 */
-	calc_virtual_dealine_delta(p, taskc, enq_flags);
+	calc_virtual_dealine_delta(p, taskc, cpuc, enq_flags);
 	calc_eligible_delta(p, taskc);
 }
 
@@ -1286,6 +1361,10 @@ static bool put_local_rq(struct task_struct *p, struct task_ctx *taskc,
 			 u64 enq_flags)
 {
 	struct cpu_ctx *cpuc;
+
+	cpuc = get_cpu_ctx();
+	if (!cpuc)
+		return false;
 
 	/*
 	 * Calculate when a tack can be scheduled. If a task is cannot be
@@ -1296,7 +1375,7 @@ static bool put_local_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * Note that the task's time slice will be calculated and reassigned
 	 * right before running at ops.running().
 	 */
-	calc_when_to_run(p, taskc, enq_flags);
+	calc_when_to_run(p, taskc, cpuc, enq_flags);
 	if (!is_eligible(taskc))
 		return false;
 
@@ -1305,10 +1384,6 @@ static bool put_local_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * rq. Statistics will be adjusted when more accurate statistics
 	 * become available (ops.running).
 	 */
-	cpuc = get_cpu_ctx();
-	if (!cpuc)
-		return false;
-
 	if (transit_task_stat(taskc, LAVD_TASK_STAT_ENQ))
 		update_stat_for_enq(p, taskc, cpuc);
 
@@ -1329,20 +1404,21 @@ static bool put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	struct cpu_ctx *cpuc;
 	u64 vdeadline;
 
+	cpuc = get_cpu_ctx();
+	if (!cpuc)
+		return false;
+
 	/*
 	 * Calculate when a tack can be scheduled.
 	 *
 	 * Note that the task's time slice will be calculated and reassigned
 	 * right before running at ops.running().
 	 */
-	calc_when_to_run(p, taskc, enq_flags);
+	calc_when_to_run(p, taskc, cpuc, enq_flags);
 
 	/*
 	 * Reflect task's load immediately.
 	 */
-	cpuc = get_cpu_ctx();
-	if (!cpuc)
-		return false;
 	if (transit_task_stat(taskc, LAVD_TASK_STAT_ENQ))
 		update_stat_for_enq(p, taskc, cpuc);
 
