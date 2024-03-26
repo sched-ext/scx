@@ -245,14 +245,14 @@ struct {
 	__uint(map_flags, 0);
 } task_ctxs SEC(".maps");
 
-struct task_ctx *lookup_task_ctx_may_fail(struct task_struct *p)
+static struct task_ctx *lookup_task_ctx_may_fail(struct task_struct *p)
 {
 	s32 pid = p->pid;
 
 	return bpf_map_lookup_elem(&task_ctxs, &pid);
 }
 
-struct task_ctx *lookup_task_ctx(struct task_struct *p)
+static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 {
 	struct task_ctx *tctx;
 	s32 pid = p->pid;
@@ -265,7 +265,7 @@ struct task_ctx *lookup_task_ctx(struct task_struct *p)
 	}
 }
 
-struct layer *lookup_layer(int idx)
+static struct layer *lookup_layer(int idx)
 {
 	if (idx < 0 || idx >= nr_layers) {
 		scx_bpf_error("invalid layer %d", idx);
