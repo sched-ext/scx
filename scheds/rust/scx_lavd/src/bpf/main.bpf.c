@@ -1396,14 +1396,6 @@ static bool put_local_rq(struct task_struct *p, struct task_ctx *taskc,
 		return false;
 
 	/*
-	 * Add task load based on the current statistics regardless of a target
-	 * rq. Statistics will be adjusted when more accurate statistics
-	 * become available (ops.running).
-	 */
-	if (transit_task_stat(taskc, LAVD_TASK_STAT_ENQ))
-		update_stat_for_enq(p, taskc, cpuc);
-
-	/*
 	 * This task should be scheduled as soon as possible (e.g., wakened up)
 	 * so the deadline is no use and enqueued into a local DSQ, which
 	 * always follows a FIFO order.
@@ -1431,12 +1423,6 @@ static bool put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * right before running at ops.running().
 	 */
 	calc_when_to_run(p, taskc, cpuc, enq_flags);
-
-	/*
-	 * Reflect task's load immediately.
-	 */
-	if (transit_task_stat(taskc, LAVD_TASK_STAT_ENQ))
-		update_stat_for_enq(p, taskc, cpuc);
 
 	/*
 	 * Enqueue the task to the global runqueue based on its virtual
@@ -1527,9 +1513,23 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 {
+	struct cpu_ctx *cpuc;
 	struct task_struct *waker;
-	struct task_ctx *taskc;
+	struct task_ctx *p_taskc, *waker_taskc;
 	u64 now, interval;
+
+	cpuc = get_cpu_ctx();
+	p_taskc = get_task_ctx(p);
+	if (!cpuc || !p_taskc)
+		return;
+
+	/*
+	 * Add task load based on the current statistics regardless of a target
+	 * rq. Statistics will be adjusted when more accurate statistics become
+	 * available (ops.running).
+	 */
+	if (transit_task_stat(p_taskc, LAVD_TASK_STAT_ENQ))
+		update_stat_for_enq(p, p_taskc, cpuc);
 
 	/*
 	 * When a task @p is wakened up, the wake frequency of its waker task
@@ -1540,8 +1540,8 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 
 	waker = bpf_get_current_task_btf();
-	taskc = try_get_task_ctx(waker);
-	if (!taskc) {
+	waker_taskc = try_get_task_ctx(waker);
+	if (!waker_taskc) {
 		/*
 		 * In this case, the waker could be an idle task
 		 * (swapper/_[_]), so we just ignore.
@@ -1550,9 +1550,9 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	}
 
 	now = bpf_ktime_get_ns();
-	interval = now - taskc->last_wake_clk;
-	taskc->wake_freq = calc_avg_freq(taskc->wake_freq, interval);
-	taskc->last_wake_clk = now;
+	interval = now - waker_taskc->last_wake_clk;
+	waker_taskc->wake_freq = calc_avg_freq(waker_taskc->wake_freq, interval);
+	waker_taskc->last_wake_clk = now;
 }
 
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
