@@ -1220,70 +1220,6 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	return slice;
 }
 
-static bool transit_task_stat(struct task_ctx *taskc, int tgt_stat)
-{
-	/*
-	 * Update task loads only when the state transition is valid. So far,
-	 * two types of invalid state transitions have been observed, and there
-	 * are reasons for that. The two are as follows:
-	 *
-	 *   - ENQ -> ENQ: This transition can happen because scx_lavd does not
-	 *   provide ops.dequeue. When task attributes are updated (e.g., nice
-	 *   level, allowed cpus and so on), the scx core will dequeue the task
-	 *   and re-enqueue it (ENQ->DEQ->ENQ). However, When ops.dequeue() is
-	 *   not provided, the dequeue operations is done by the scx core.
-	 *   Hence, ignoring the dequeue operation is completely fine.
-	 *
-	 *   - STOPPING -> RUNNING: This can happen because there are several
-	 *   special cases where scx core skips enqueue including: 1) bypass
-	 *   mode is turned on (this is turned on during both init and exit.
-	 *   it's also used across suspend/resume operations. 2)
-	 *   SCX_OPS_ENQ_EXITING is not set and an exiting task was woken up.
-	 *   3) The associated CPU is not fully online. However, we avoid
-	 *   collecting time & frequency statistics for such special cases for
-	 *   accuracy.
-	 *
-	 * initial state
-	 * -------------
-	 *     |
-	 *    \/
-	 * [STOPPING] --> [QUIESCENT] <--> [ENQ] --> [RUNNING]
-	 *    /\                                         /\
-	 *    |                                          |
-	 *    +------------------------------------------+
-	 */
-	int src_stat = taskc->stat;
-	bool valid;
-
-	if (src_stat < _LAVD_TASK_STAT_MIN || src_stat > _LAVD_TASK_STAT_MAX) {
-		scx_bpf_error("Invalid task state: %d", src_stat);
-		return false;
-	}
-
-	switch (src_stat) {
-	case LAVD_TASK_STAT_STOPPING:
-		valid = tgt_stat == LAVD_TASK_STAT_QUIESCENT ||
-			tgt_stat == LAVD_TASK_STAT_RUNNING;
-		break;
-	case LAVD_TASK_STAT_QUIESCENT:
-		valid = tgt_stat == LAVD_TASK_STAT_ENQ;
-		break;
-	case LAVD_TASK_STAT_ENQ:
-		valid = tgt_stat == LAVD_TASK_STAT_QUIESCENT ||
-			tgt_stat == LAVD_TASK_STAT_RUNNING;
-		break;
-	case LAVD_TASK_STAT_RUNNING:
-		valid = tgt_stat == LAVD_TASK_STAT_STOPPING;
-		break;
-	}
-
-	if (!valid)
-		return false;
-
-	taskc->stat = tgt_stat;
-	return true;
-}
-
 static void update_stat_for_enq(struct task_struct *p, struct task_ctx *taskc,
 				struct cpu_ctx *cpuc)
 {
@@ -1528,8 +1464,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * rq. Statistics will be adjusted when more accurate statistics become
 	 * available (ops.running).
 	 */
-	if (transit_task_stat(p_taskc, LAVD_TASK_STAT_ENQ))
-		update_stat_for_enq(p, p_taskc, cpuc);
+	update_stat_for_enq(p, p_taskc, cpuc);
 
 	/*
 	 * When a task @p is wakened up, the wake frequency of its waker task
@@ -1571,8 +1506,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	if (!cpuc)
 		return;
 
-	if (transit_task_stat(taskc, LAVD_TASK_STAT_RUNNING))
-		update_stat_for_run(p, taskc, cpuc);
+	update_stat_for_run(p, taskc, cpuc);
 
 	/*
 	 * Calcualte task's time slice based on updated load.
@@ -1635,8 +1569,7 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 	if (!taskc)
 		return;
 
-	if (transit_task_stat(taskc, LAVD_TASK_STAT_STOPPING))
-		update_stat_for_stop(p, taskc, cpuc);
+	update_stat_for_stop(p, taskc, cpuc);
 
 	/*
 	 * Adjust slice boost for the task's next schedule.
@@ -1655,8 +1588,7 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	if (!cpuc || !taskc)
 		return;
 
-	if (transit_task_stat(taskc, LAVD_TASK_STAT_QUIESCENT))
-		update_stat_for_quiescent(p, taskc, cpuc);
+	update_stat_for_quiescent(p, taskc, cpuc);
 
 	/*
 	 * If a task @p is dequeued from a run queue for some other reason
