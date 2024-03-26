@@ -10,10 +10,6 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
-extern crate libc;
-extern crate plain;
-extern crate static_assertions;
-
 use std::mem;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
