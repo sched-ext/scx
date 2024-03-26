@@ -1247,29 +1247,41 @@ static bool transit_task_stat(struct task_ctx *taskc, int tgt_stat)
 	 * -------------
 	 *     |
 	 *    \/
-	 * [STOPPING] --> [ENQ] --> [RUNNING]
-	 *    /\                        |
-	 *    |                         |
-	 *    +-------------------------+
+	 * [STOPPING] --> [QUIESCENT] <--> [ENQ] --> [RUNNING]
+	 *    /\                                         /\
+	 *    |                                          |
+	 *    +------------------------------------------+
 	 */
-	const static int valid_tgt_stat[] = {
-		[LAVD_TASK_STAT_STOPPING]	= LAVD_TASK_STAT_ENQ,
-		[LAVD_TASK_STAT_ENQ]		= LAVD_TASK_STAT_RUNNING,
-		[LAVD_TASK_STAT_RUNNING]	= LAVD_TASK_STAT_STOPPING,
-	};
 	int src_stat = taskc->stat;
+	bool valid;
 
 	if (src_stat < _LAVD_TASK_STAT_MIN || src_stat > _LAVD_TASK_STAT_MAX) {
 		scx_bpf_error("Invalid task state: %d", src_stat);
 		return false;
 	}
 
-	if (valid_tgt_stat[src_stat] == tgt_stat) {
-		taskc->stat = tgt_stat;
-		return true;
+	switch (src_stat) {
+	case LAVD_TASK_STAT_STOPPING:
+		valid = tgt_stat == LAVD_TASK_STAT_QUIESCENT ||
+			tgt_stat == LAVD_TASK_STAT_RUNNING;
+		break;
+	case LAVD_TASK_STAT_QUIESCENT:
+		valid = tgt_stat == LAVD_TASK_STAT_ENQ;
+		break;
+	case LAVD_TASK_STAT_ENQ:
+		valid = tgt_stat == LAVD_TASK_STAT_QUIESCENT ||
+			tgt_stat == LAVD_TASK_STAT_RUNNING;
+		break;
+	case LAVD_TASK_STAT_RUNNING:
+		valid = tgt_stat == LAVD_TASK_STAT_STOPPING;
+		break;
 	}
 
-	return false;
+	if (!valid)
+		return false;
+
+	taskc->stat = tgt_stat;
+	return true;
 }
 
 static void update_stat_for_enq(struct task_struct *p, struct task_ctx *taskc,
@@ -1324,13 +1336,6 @@ static void update_stat_for_stop(struct task_struct *p, struct task_ctx *taskc,
 	now = bpf_ktime_get_ns();
 
 	/*
-	 * When stopped, reduce the per-CPU task load. Per-CPU task load will
-	 * be aggregated periodically at update_sys_cpu_load().
-	 */
-	cpuc->load_actual -= taskc->load_actual;
-	cpuc->load_ideal  -= get_task_load_ideal(p);
-
-	/*
 	 * Update task's run_time. If a task got slice-boosted -- in other
 	 * words, its time slices have been fully consumed multiple times,
 	 * stretch the measured runtime according to the slice_boost_prio.
@@ -1342,6 +1347,17 @@ static void update_stat_for_stop(struct task_struct *p, struct task_ctx *taskc,
 	run_time_boosted_ns = run_time_ns * (1 + taskc->slice_boost_prio);
 	taskc->run_time_ns = calc_avg(taskc->run_time_ns, run_time_boosted_ns);
 	taskc->last_stop_clk = now;
+}
+
+static void update_stat_for_quiescent(struct task_struct *p, struct task_ctx *taskc,
+				      struct cpu_ctx *cpuc)
+{
+	/*
+	 * When quiescent, reduce the per-CPU task load. Per-CPU task load will
+	 * be aggregated periodically at update_sys_cpu_load().
+	 */
+	cpuc->load_actual -= taskc->load_actual;
+	cpuc->load_ideal  -= get_task_load_ideal(p);
 }
 
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
@@ -1630,8 +1646,17 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 {
+	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
 	u64 now, interval;
+
+	cpuc = get_cpu_ctx();
+	taskc = get_task_ctx(p);
+	if (!cpuc || !taskc)
+		return;
+
+	if (transit_task_stat(taskc, LAVD_TASK_STAT_QUIESCENT))
+		update_stat_for_quiescent(p, taskc, cpuc);
 
 	/*
 	 * If a task @p is dequeued from a run queue for some other reason
@@ -1644,10 +1669,6 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	/*
 	 * When a task @p goes to sleep, its associated wait_freq is updated.
 	 */
-	taskc = get_task_ctx(p);
-	if (!taskc)
-		return;
-
 	now = bpf_ktime_get_ns();
 	interval = now - taskc->last_wait_clk;
 	taskc->wait_freq = calc_avg_freq(taskc->wait_freq, interval);
