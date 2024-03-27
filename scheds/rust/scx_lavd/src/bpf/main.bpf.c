@@ -681,9 +681,9 @@ static void update_sys_cpu_load(void)
 		/*
 		 * Accumulate task's latency criticlity information.
 		 *
-		 * Updating cpuc->* is racy. However, it could degrade the
-		 * accuracy a little bit in very rare cases, so we do embrace
-		 * embrace for performance on purpose.
+		 * While updating cpu->* is racy, the resulting impact on
+		 * accuracy should be small and very rare and thus should be
+		 * fine.
 		 */
 		sum_lat_cri += cpuc->sum_lat_cri;
 		cpuc->sum_lat_cri = 0;
