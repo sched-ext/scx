@@ -238,31 +238,25 @@ struct task_ctx {
 };
 
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, pid_t);
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
 	__type(value, struct task_ctx);
-	__uint(max_entries, MAX_TASKS);
-	__uint(map_flags, 0);
 } task_ctxs SEC(".maps");
 
 static struct task_ctx *lookup_task_ctx_may_fail(struct task_struct *p)
 {
-	s32 pid = p->pid;
-
-	return bpf_map_lookup_elem(&task_ctxs, &pid);
+	return bpf_task_storage_get(&task_ctxs, p, 0, 0);
 }
 
 static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 {
-	struct task_ctx *tctx;
-	s32 pid = p->pid;
+	struct task_ctx *tctx = lookup_task_ctx_may_fail(p);
 
-	if ((tctx = bpf_map_lookup_elem(&task_ctxs, &pid))) {
-		return tctx;
-	} else {
+	if (!tctx)
 		scx_bpf_error("task_ctx lookup failed");
-		return NULL;
-	}
+
+	return tctx;
 }
 
 static struct layer *lookup_layer(int idx)
@@ -852,29 +846,21 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	 * fail spuriously due to BPF recursion protection triggering
 	 * unnecessarily.
 	 */
-	if ((ret = bpf_map_update_elem(&task_ctxs, &pid, &tctx_init, 0 /*BPF_NOEXIST*/))) {
-		scx_bpf_error("task_ctx allocation failure, ret=%d", ret);
-		return ret;
-	}
-
-	/*
-	 * Read the entry from the map immediately so we can add the cpumask
-	 * with bpf_kptr_xchg().
-	 */
-	if (!(tctx = lookup_task_ctx(p)))
-		return -ENOENT;
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask) {
-		bpf_map_delete_elem(&task_ctxs, &pid);
+	tctx = bpf_task_storage_get(&task_ctxs, p, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!tctx) {
+		scx_bpf_error("task_ctx allocation failure");
 		return -ENOMEM;
 	}
+
+	cpumask = bpf_cpumask_create();
+	if (!cpumask)
+		return -ENOMEM;
 
 	cpumask = bpf_kptr_xchg(&tctx->layered_cpumask, cpumask);
 	if (cpumask) {
 		/* Should never happen as we just inserted it above. */
 		bpf_cpumask_release(cpumask);
-		bpf_map_delete_elem(&task_ctxs, &pid);
 		return -EINVAL;
 	}
 
@@ -901,16 +887,6 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 
 	if (tctx->layer >= 0 && tctx->layer < nr_layers)
 		__sync_fetch_and_add(&layers[tctx->layer].nr_tasks, -1);
-
-	/*
-	 * XXX - There's no reason delete should fail here but BPF's recursion
-	 * protection can unnecessarily fail the operation. The fact that
-	 * deletions aren't reliable means that we sometimes leak task_ctx and
-	 * can't use BPF_NOEXIST on allocation in .prep_enable().
-	 */
-	ret = bpf_map_delete_elem(&task_ctxs, &pid);
-	if (ret)
-		gstat_inc(GSTAT_TASK_CTX_FREE_FAILED, cctx);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)

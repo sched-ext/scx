@@ -37,7 +37,6 @@ enum consts {
 
 /* Statistics */
 enum global_stat_idx {
-	GSTAT_TASK_CTX_FREE_FAILED,
 	GSTAT_EXCL_IDLE,
 	GSTAT_EXCL_WAKEUP,
 	NR_GSTATS,
