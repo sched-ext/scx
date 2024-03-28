@@ -170,9 +170,10 @@ impl<'a> Scheduler<'a> {
                 "| {:9} | {:8} | {:17} \
                    | {:4} | {:9} | {:9} \
                    | {:10} | {:9} | {:8} \
-                   | {:12} | {:7} | {:9} \
+                   | {:7} | {:7} | {:7} \
+                   | {:7} | {:12} | {:7} \
                    | {:9} | {:9} | {:9} \
-                   | {:9} | {:8} |",
+                   | {:9} | {:9} | {:8} |",
                 "mseq",
                 "pid",
                 "comm",
@@ -182,6 +183,10 @@ impl<'a> Scheduler<'a> {
                 "slice_ns",
                 "grdy_rt",
                 "lat_prio",
+                "lat_cri",
+                "min_lc",
+                "avg_lc",
+                "max_lc",
                 "static_prio",
                 "lat_bst",
                 "slice_bst",
@@ -201,9 +206,10 @@ impl<'a> Scheduler<'a> {
             "| {:9} | {:8} | {:17} \
                | {:4} | {:9} | {:9} \
                | {:10} | {:9} | {:8} \
-               | {:12} | {:7} | {:9} \
+               | {:7} | {:7} | {:7} \
+               | {:7} | {:12} | {:7} \
                | {:9} | {:9} | {:9} \
-               | {:9} | {:8} | ",
+               | {:9} | {:9} | {:8} | ",
             mseq,
             tx.pid,
             tx_comm,
@@ -213,6 +219,10 @@ impl<'a> Scheduler<'a> {
             tc.slice_ns,
             tc.greedy_ratio,
             tc.lat_prio,
+            tc.lat_cri,
+            tx.min_lat_cri,
+            tx.avg_lat_cri,
+            tx.max_lat_cri,
             tx.static_prio,
             tc.lat_boost_prio,
             tc.slice_boost_prio,

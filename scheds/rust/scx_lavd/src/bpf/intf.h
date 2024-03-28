@@ -56,12 +56,13 @@ enum consts {
 	LAVD_SLICE_GREEDY_FT		= 3,
 
 	LAVD_LC_FREQ_MAX		= 1000000,
-	LAVD_LC_RUNTIME_MAX		= (2 * NSEC_PER_MSEC),
+	LAVD_LC_RUNTIME_MAX		= (4 * LAVD_SLICE_MAX_NS),
 	LAVD_LC_RUNTIME_SHIFT		= 10,
 
 	LAVD_BOOST_RANGE		= 14, /* 35% of nice range */
 	LAVD_BOOST_WAKEUP_LAT		= 1,
-	LAVD_SLICE_BOOST_MAX		= 3,
+	LAVD_SLICE_BOOST_MAX_PRIO	= (LAVD_SLICE_MAX_NS/LAVD_SLICE_MIN_NS),
+	LAVD_SLICE_BOOST_MAX_STEP	= 3,
 	LAVD_GREEDY_RATIO_MAX		= USHRT_MAX,
 
 	LAVD_ELIGIBLE_TIME_LAT_FT	= 2,
@@ -84,6 +85,13 @@ struct sys_cpu_util {
 
 	volatile u64	load_ideal;	/* average ideal load of runnable tasks */
 	volatile u64	load_actual;	/* average actual load of runnable tasks */
+
+	volatile u64	avg_lat_cri;	/* average latency criticality (LC) */
+	volatile u64	max_lat_cri;	/* maximum latency criticality (LC) */
+	volatile u64	min_lat_cri;	/* minimum latency criticality (LC) */
+
+	volatile s64	inc1k_low;	/* increment from low LC to priority mapping */
+	volatile s64	inc1k_high;	/* increment from high LC to priority mapping */
 };
 
 /*
@@ -101,6 +109,14 @@ struct cpu_ctx {
 	 */
 	volatile u64	load_actual;	/* actual load of runnable tasks */
 	volatile u64	load_ideal;	/* ideal loaf of runnable tasks */
+
+	/*
+	 * Information used to keep track of latency criticality
+	 */
+	volatile u64	max_lat_cri;	/* maximum latency criticality */
+	volatile u64	min_lat_cri;	/* minimum latency criticality */
+	volatile u64	sum_lat_cri;	/* sum of latency criticality */
+	volatile u64	sched_nr;	/* number of schedules */
 };
 
 /* 
@@ -134,6 +150,7 @@ struct task_ctx {
 	u64	eligible_delta_ns;
 	u64	slice_ns;
 	u64	greedy_ratio;
+	u64	lat_cri;
 	u16	stat;		/* NIL -> ENQ -> RUN -> STOP -> NIL ... */
 	u16	slice_boost_prio;/* how many times a task fully consumed the slice */
 	u16	lat_prio;	/* latency priority */
@@ -146,6 +163,9 @@ struct task_ctx_x {
 	u16	static_prio;	/* nice priority */
 	u16	cpu_id;		/* where a task ran */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
+	u64	max_lat_cri;	/* maximum latency criticality */
+	u64	min_lat_cri;	/* minimum latency criticality */
+	u64	avg_lat_cri;	/* average latency criticality */
 };
 
 
