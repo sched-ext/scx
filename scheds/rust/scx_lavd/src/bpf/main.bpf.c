@@ -1221,58 +1221,6 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	return slice;
 }
 
-static bool transit_task_stat(struct task_ctx *taskc, int tgt_stat)
-{
-	/*
-	 * Update task loads only when the state transition is valid. So far,
-	 * two types of invalid state transitions have been observed, and there
-	 * are reasons for that. The two are as follows:
-	 *
-	 *   - ENQ -> ENQ: This transition can happen because scx_lavd does not
-	 *   provide ops.dequeue. When task attributes are updated (e.g., nice
-	 *   level, allowed cpus and so on), the scx core will dequeue the task
-	 *   and re-enqueue it (ENQ->DEQ->ENQ). However, When ops.dequeue() is
-	 *   not provided, the dequeue operations is done by the scx core.
-	 *   Hence, ignoring the dequeue operation is completely fine.
-	 *
-	 *   - STOPPING -> RUNNING: This can happen because there are several
-	 *   special cases where scx core skips enqueue including: 1) bypass
-	 *   mode is turned on (this is turned on during both init and exit.
-	 *   it's also used across suspend/resume operations. 2)
-	 *   SCX_OPS_ENQ_EXITING is not set and an exiting task was woken up.
-	 *   3) The associated CPU is not fully online. However, we avoid
-	 *   collecting time & frequency statistics for such special cases for
-	 *   accuracy.
-	 *
-	 * initial state
-	 * -------------
-	 *     |
-	 *    \/
-	 * [STOPPING] --> [ENQ] --> [RUNNING]
-	 *    /\                        |
-	 *    |                         |
-	 *    +-------------------------+
-	 */
-	const static int valid_tgt_stat[] = {
-		[LAVD_TASK_STAT_STOPPING]	= LAVD_TASK_STAT_ENQ,
-		[LAVD_TASK_STAT_ENQ]		= LAVD_TASK_STAT_RUNNING,
-		[LAVD_TASK_STAT_RUNNING]	= LAVD_TASK_STAT_STOPPING,
-	};
-	int src_stat = taskc->stat;
-
-	if (src_stat < _LAVD_TASK_STAT_MIN || src_stat > _LAVD_TASK_STAT_MAX) {
-		scx_bpf_error("Invalid task state: %d", src_stat);
-		return false;
-	}
-
-	if (valid_tgt_stat[src_stat] == tgt_stat) {
-		taskc->stat = tgt_stat;
-		return true;
-	}
-
-	return false;
-}
-
 static void update_stat_for_enq(struct task_struct *p, struct task_ctx *taskc,
 				struct cpu_ctx *cpuc)
 {
@@ -1325,13 +1273,6 @@ static void update_stat_for_stop(struct task_struct *p, struct task_ctx *taskc,
 	now = bpf_ktime_get_ns();
 
 	/*
-	 * When stopped, reduce the per-CPU task load. Per-CPU task load will
-	 * be aggregated periodically at update_sys_cpu_load().
-	 */
-	cpuc->load_actual -= taskc->load_actual;
-	cpuc->load_ideal  -= get_task_load_ideal(p);
-
-	/*
 	 * Adjust slice boost for the task's next schedule. Note that the
 	 * updating slice_boost_prio should be done before updating
 	 * run_time_boosted_ns, since the run_time_boosted_ns calculation
@@ -1351,6 +1292,17 @@ static void update_stat_for_stop(struct task_struct *p, struct task_ctx *taskc,
 	run_time_ns = now - taskc->last_start_clk;
 	run_time_boosted_ns = run_time_ns * (1 + taskc->slice_boost_prio);
 	taskc->run_time_ns = calc_avg(taskc->run_time_ns, run_time_boosted_ns);
+}
+
+static void update_stat_for_quiescent(struct task_struct *p, struct task_ctx *taskc,
+				      struct cpu_ctx *cpuc)
+{
+	/*
+	 * When quiescent, reduce the per-CPU task load. Per-CPU task load will
+	 * be aggregated periodically at update_sys_cpu_load().
+	 */
+	cpuc->load_actual -= taskc->load_actual;
+	cpuc->load_ideal  -= get_task_load_ideal(p);
 }
 
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
@@ -1389,14 +1341,6 @@ static bool put_local_rq(struct task_struct *p, struct task_ctx *taskc,
 		return false;
 
 	/*
-	 * Add task load based on the current statistics regardless of a target
-	 * rq. Statistics will be adjusted when more accurate statistics
-	 * become available (ops.running).
-	 */
-	if (transit_task_stat(taskc, LAVD_TASK_STAT_ENQ))
-		update_stat_for_enq(p, taskc, cpuc);
-
-	/*
 	 * This task should be scheduled as soon as possible (e.g., wakened up)
 	 * so the deadline is no use and enqueued into a local DSQ, which
 	 * always follows a FIFO order.
@@ -1424,12 +1368,6 @@ static bool put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * right before running at ops.running().
 	 */
 	calc_when_to_run(p, taskc, cpuc, enq_flags);
-
-	/*
-	 * Reflect task's load immediately.
-	 */
-	if (transit_task_stat(taskc, LAVD_TASK_STAT_ENQ))
-		update_stat_for_enq(p, taskc, cpuc);
 
 	/*
 	 * Enqueue the task to the global runqueue based on its virtual
@@ -1520,9 +1458,22 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 {
+	struct cpu_ctx *cpuc;
 	struct task_struct *waker;
-	struct task_ctx *taskc;
+	struct task_ctx *p_taskc, *waker_taskc;
 	u64 now, interval;
+
+	cpuc = get_cpu_ctx();
+	p_taskc = get_task_ctx(p);
+	if (!cpuc || !p_taskc)
+		return;
+
+	/*
+	 * Add task load based on the current statistics regardless of a target
+	 * rq. Statistics will be adjusted when more accurate statistics become
+	 * available (ops.running).
+	 */
+	update_stat_for_enq(p, p_taskc, cpuc);
 
 	/*
 	 * When a task @p is wakened up, the wake frequency of its waker task
@@ -1533,8 +1484,8 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 
 	waker = bpf_get_current_task_btf();
-	taskc = try_get_task_ctx(waker);
-	if (!taskc) {
+	waker_taskc = try_get_task_ctx(waker);
+	if (!waker_taskc) {
 		/*
 		 * In this case, the waker could be an idle task
 		 * (swapper/_[_]), so we just ignore.
@@ -1543,9 +1494,9 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	}
 
 	now = bpf_ktime_get_ns();
-	interval = now - taskc->last_wake_clk;
-	taskc->wake_freq = calc_avg_freq(taskc->wake_freq, interval);
-	taskc->last_wake_clk = now;
+	interval = now - waker_taskc->last_wake_clk;
+	waker_taskc->wake_freq = calc_avg_freq(waker_taskc->wake_freq, interval);
+	waker_taskc->last_wake_clk = now;
 }
 
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
@@ -1564,8 +1515,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	if (!cpuc)
 		return;
 
-	if (transit_task_stat(taskc, LAVD_TASK_STAT_RUNNING))
-		update_stat_for_run(p, taskc, cpuc);
+	update_stat_for_run(p, taskc, cpuc);
 
 	/*
 	 * Calcualte task's time slice based on updated load.
@@ -1628,14 +1578,21 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 	if (!taskc)
 		return;
 
-	if (transit_task_stat(taskc, LAVD_TASK_STAT_STOPPING))
-		update_stat_for_stop(p, taskc, cpuc);
+	update_stat_for_stop(p, taskc, cpuc);
 }
 
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 {
+	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
 	u64 now, interval;
+
+	cpuc = get_cpu_ctx();
+	taskc = get_task_ctx(p);
+	if (!cpuc || !taskc)
+		return;
+
+	update_stat_for_quiescent(p, taskc, cpuc);
 
 	/*
 	 * If a task @p is dequeued from a run queue for some other reason
@@ -1648,10 +1605,6 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	/*
 	 * When a task @p goes to sleep, its associated wait_freq is updated.
 	 */
-	taskc = get_task_ctx(p);
-	if (!taskc)
-		return;
-
 	now = bpf_ktime_get_ns();
 	interval = now - taskc->last_wait_clk;
 	taskc->wait_freq = calc_avg_freq(taskc->wait_freq, interval);

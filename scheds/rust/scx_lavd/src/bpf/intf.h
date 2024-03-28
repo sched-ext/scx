@@ -119,19 +119,6 @@ struct cpu_ctx {
 	volatile u64	sched_nr;	/* number of schedules */
 };
 
-/* 
- * Per-task scheduling context 
- */
-enum task_stat {
-	_LAVD_TASK_STAT_MIN		= 0,
-
-	LAVD_TASK_STAT_STOPPING		= _LAVD_TASK_STAT_MIN,
-	LAVD_TASK_STAT_ENQ,
-	LAVD_TASK_STAT_RUNNING,
-
-	_LAVD_TASK_STAT_MAX		= LAVD_TASK_STAT_RUNNING,
-};
-
 struct task_ctx {
 	/*
 	 * Essential task running statistics for latency criticality calculation
@@ -151,7 +138,6 @@ struct task_ctx {
 	u64	slice_ns;
 	u64	greedy_ratio;
 	u64	lat_cri;
-	u16	stat;		/* NIL -> ENQ -> RUN -> STOP -> NIL ... */
 	u16	slice_boost_prio;/* how many times a task fully consumed the slice */
 	u16	lat_prio;	/* latency priority */
 	s16	lat_boost_prio;	/* DEBUG */
