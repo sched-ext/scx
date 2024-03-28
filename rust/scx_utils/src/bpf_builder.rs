@@ -478,14 +478,6 @@ impl BpfBuilder {
         self
     }
 
-    fn cflags_string(&self) -> String {
-        self.cflags
-            .iter()
-            .map(|x| x.as_str())
-            .collect::<Vec<&str>>()
-            .join(" ")
-    }
-
     fn bindgen_bpf_intf(&self, deps: &mut BTreeSet<String>) -> Result<()> {
         let (input, output) = match &self.intf_input_output {
             Some(pair) => pair,
@@ -538,7 +530,7 @@ impl BpfBuilder {
             .source(input)
             .obj(&obj)
             .clang(&self.clang.0)
-            .clang_args(self.cflags_string())
+            .clang_args(&self.cflags)
             .build_and_generate(&skel_path)?;
 
         match &self.skel_deps {

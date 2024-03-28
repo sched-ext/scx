@@ -17,9 +17,10 @@ glob = "0.3"
 hex = "0.4.3"
 lazy_static = "1.4"
 libbpf-cargo = "0.22"
-libbpf-rs = "0.22.0"
-buddy-alloc = "0.5.1"
-log = "0.4.17"
+libbpf-rs = "0.22"
+buddy-alloc = "0.5"
+log = "0.4"
+paste = "1.0"
 regex = "1.10"
 sscanf = "0.4"
 tar = "0.4"
@@ -30,3 +31,8 @@ version-compare = "0.1"
 bindgen = ">=0.68, <0.70"
 tar = "0.4"
 walkdir = "2.4"
+
+[patch.crates-io]
+libbpf-sys = { git = "https://github.com/libbpf/libbpf-sys.git", rev = "125444300e2db452131dd6453101599c1a277784" }
+libbpf-rs = { git = "https://github.com/libbpf/libbpf-rs.git", rev = "560641a5aff2c613dff6ae02147b0000558e4945" }
+libbpf-cargo = { git = "https://github.com/libbpf/libbpf-rs.git", rev = "125444300e2db452131dd6453101599c1a277784" }
