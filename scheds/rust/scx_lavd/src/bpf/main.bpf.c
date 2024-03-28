@@ -386,6 +386,7 @@ static const u64 lat_prio_to_greedy_thresholds[NICE_WIDTH] = {
 
 static u16 get_nice_prio(struct task_struct *p);
 static u64 get_task_load_ideal(struct task_struct *p);
+static void adjust_slice_boost(struct cpu_ctx *cpuc, struct task_ctx *taskc);
 
 static inline __attribute__((always_inline)) u32 bpf_log2(u32 v)
 {
@@ -1331,6 +1332,15 @@ static void update_stat_for_stop(struct task_struct *p, struct task_ctx *taskc,
 	cpuc->load_ideal  -= get_task_load_ideal(p);
 
 	/*
+	 * Adjust slice boost for the task's next schedule. Note that the
+	 * updating slice_boost_prio should be done before updating
+	 * run_time_boosted_ns, since the run_time_boosted_ns calculation
+	 * requires updated slice_boost_prio.
+	 */
+	taskc->last_stop_clk = now;
+	adjust_slice_boost(cpuc, taskc);
+
+	/*
 	 * Update task's run_time. If a task got slice-boosted -- in other
 	 * words, its time slices have been fully consumed multiple times,
 	 * stretch the measured runtime according to the slice_boost_prio.
@@ -1341,7 +1351,6 @@ static void update_stat_for_stop(struct task_struct *p, struct task_ctx *taskc,
 	run_time_ns = now - taskc->last_start_clk;
 	run_time_boosted_ns = run_time_ns * (1 + taskc->slice_boost_prio);
 	taskc->run_time_ns = calc_avg(taskc->run_time_ns, run_time_boosted_ns);
-	taskc->last_stop_clk = now;
 }
 
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
@@ -1621,11 +1630,6 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 
 	if (transit_task_stat(taskc, LAVD_TASK_STAT_STOPPING))
 		update_stat_for_stop(p, taskc, cpuc);
-
-	/*
-	 * Adjust slice boost for the task's next schedule.
-	 */
-	adjust_slice_boost(cpuc, taskc);
 }
 
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
