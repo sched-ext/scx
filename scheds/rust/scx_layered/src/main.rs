@@ -199,7 +199,7 @@ lazy_static::lazy_static! {
 /// scx_layered will print out a set of statistics every monitoring
 /// interval.
 ///
-///   tot= 117909 local=86.20 open_idle= 0.21 affn_viol= 1.37 tctx_err=9 proc=6ms
+///   tot= 117909 local=86.20 open_idle= 0.21 affn_viol= 1.37 proc=6ms
 ///   busy= 34.2 util= 1733.6 load=  21744.1 fallback_cpu=  1
 ///     batch    : util/frac=   11.8/  0.7 load/frac=     29.7:  0.1 tasks=  2597
 ///                tot=   3478 local=67.80 open_idle= 0.00 preempt= 0.00 affn_viol= 0.00
@@ -1084,7 +1084,6 @@ struct OpenMetricsStats {
     local: Gauge<f64, AtomicU64>,
     open_idle: Gauge<f64, AtomicU64>,
     affn_viol: Gauge<f64, AtomicU64>,
-    tctx_err: Gauge<i64, AtomicI64>,
     excl_idle: Gauge<f64, AtomicU64>,
     excl_wakeup: Gauge<f64, AtomicU64>,
     proc_ms: Gauge<i64, AtomicI64>,
@@ -1137,7 +1136,6 @@ impl OpenMetricsStats {
             affn_viol,
             "% which violated configured policies due to CPU affinity restrictions"
         );
-        register!(tctx_err, "Failures to free task contexts");
         register!(
             excl_idle,
             "Number of times a CPU skipped dispatching due to sibling running an exclusive task"
@@ -1508,10 +1506,6 @@ impl<'a> Scheduler<'a> {
         self.om_stats
             .affn_viol
             .set(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL));
-        self.om_stats.tctx_err.set(
-            stats.prev_bpf_stats.gstats
-                [bpf_intf::global_stat_idx_GSTAT_TASK_CTX_FREE_FAILED as usize] as i64,
-        );
         self.om_stats.excl_idle.set(
             stats.bpf_stats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_IDLE as usize] as f64
                 / total as f64,
@@ -1527,12 +1521,11 @@ impl<'a> Scheduler<'a> {
 
         if !self.om_format {
             info!(
-                "tot={:7} local={} open_idle={} affn_viol={} tctx_err={} proc={:?}ms",
+                "tot={:7} local={} open_idle={} affn_viol={} proc={:?}ms",
                 self.om_stats.total.get(),
                 fmt_pct(self.om_stats.local.get()),
                 fmt_pct(self.om_stats.open_idle.get()),
                 fmt_pct(self.om_stats.affn_viol.get()),
-                self.om_stats.tctx_err.get(),
                 self.om_stats.proc_ms.get(),
             );
 
