@@ -1171,10 +1171,7 @@ static u64 calc_slice_share(struct task_struct *p, struct task_ctx *taskc)
 	 * scheduler tries to allocate a longer time slice.
 	 */
 	u64 share = get_task_load_ideal(p);
-	u64 slice_boost_step = min(taskc->slice_boost_prio,
-				   LAVD_SLICE_BOOST_MAX_STEP);
-
-	share += (share * slice_boost_step) / LAVD_SLICE_BOOST_MAX_STEP;
+	share += (share * taskc->slice_boost_prio) / LAVD_SLICE_BOOST_MAX_STEP;
 
 	return share;
 }
@@ -1271,30 +1268,16 @@ static void update_stat_for_stopping(struct task_struct *p,
 				     struct task_ctx *taskc,
 				     struct cpu_ctx *cpuc)
 {
-	u64 now, run_time_ns, run_time_boosted_ns;
+	u64 now, run_time_ns;
 
 	now = bpf_ktime_get_ns();
 
 	/*
-	 * Adjust slice boost for the task's next schedule. Note that the
-	 * updating slice_boost_prio should be done before updating
-	 * run_time_boosted_ns, since the run_time_boosted_ns calculation
-	 * requires updated slice_boost_prio.
-	 */
-	taskc->last_stop_clk = now;
-	adjust_slice_boost(cpuc, taskc);
-
-	/*
-	 * Update task's run_time. If a task got slice-boosted -- in other
-	 * words, its time slices have been fully consumed multiple times,
-	 * stretch the measured runtime according to the slice_boost_prio.
-	 * The stretched runtime more accurately reflects the actual runtime
-	 * per schedule as if a large enough time slice was given in the first
-	 * place.
+	 * Update task's run_time.
 	 */
 	run_time_ns = now - taskc->last_start_clk;
-	run_time_boosted_ns = run_time_ns * (1 + taskc->slice_boost_prio);
-	taskc->run_time_ns = calc_avg(taskc->run_time_ns, run_time_boosted_ns);
+	taskc->run_time_ns = calc_avg(taskc->run_time_ns, run_time_ns);
+	taskc->last_stop_clk = now;
 }
 
 static void update_stat_for_quiescent(struct task_struct *p,
@@ -1467,16 +1450,16 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *p_taskc, *waker_taskc;
 	u64 now, interval;
 
-	cpuc = get_cpu_ctx();
-	p_taskc = get_task_ctx(p);
-	if (!cpuc || !p_taskc)
-		return;
-
 	/*
 	 * Add task load based on the current statistics regardless of a target
 	 * rq. Statistics will be adjusted when more accurate statistics become
 	 * available (ops.running).
 	 */
+	cpuc = get_cpu_ctx();
+	p_taskc = get_task_ctx(p);
+	if (!cpuc || !p_taskc)
+		return;
+
 	update_stat_for_runnable(p, p_taskc, cpuc);
 
 	/*
@@ -1505,18 +1488,15 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 {
-	struct task_ctx *taskc;
 	struct cpu_ctx *cpuc;
+	struct task_ctx *taskc;
 
 	/*
-	 * Update task statistics then adjust task load based on the update.
+	 * Update task statistics
 	 */
-	taskc = get_task_ctx(p);
-	if (!taskc)
-		return;
-
 	cpuc = get_cpu_ctx();
-	if (!cpuc)
+	taskc = get_task_ctx(p);
+	if (!cpuc || !taskc)
 		return;
 
 	update_stat_for_running(p, taskc, cpuc);
@@ -1557,7 +1537,7 @@ static void adjust_slice_boost(struct cpu_ctx *cpuc, struct task_ctx *taskc)
 	 * fully consumed, decrease the slice boost priority by half.
 	 */
 	if (slice_fully_consumed(cpuc, taskc)) {
-		if (taskc->slice_boost_prio < LAVD_SLICE_BOOST_MAX_PRIO)
+		if (taskc->slice_boost_prio < LAVD_SLICE_BOOST_MAX_STEP)
 			taskc->slice_boost_prio++;
 	}
 	else {
@@ -1572,17 +1552,19 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 	struct task_ctx *taskc;
 
 	/*
-	 * Reduce the task load.
+	 * Update task statistics
 	 */
 	cpuc = get_cpu_ctx();
-	if (!cpuc)
-		return;
-
 	taskc = get_task_ctx(p);
-	if (!taskc)
+	if (!cpuc || !taskc)
 		return;
 
 	update_stat_for_stopping(p, taskc, cpuc);
+
+	/*
+	 * Adjust slice boost for the task's next schedule.
+	 */
+	adjust_slice_boost(cpuc, taskc);
 }
 
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
@@ -1591,6 +1573,9 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	struct task_ctx *taskc;
 	u64 now, interval;
 
+	/*
+	 * Substract task load from the current CPU's load.
+	 */
 	cpuc = get_cpu_ctx();
 	taskc = get_task_ctx(p);
 	if (!cpuc || !taskc)
