@@ -1221,8 +1221,9 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	return slice;
 }
 
-static void update_stat_for_enq(struct task_struct *p, struct task_ctx *taskc,
-				struct cpu_ctx *cpuc)
+static void update_stat_for_runnable(struct task_struct *p,
+				     struct task_ctx *taskc,
+				     struct cpu_ctx *cpuc)
 {
 	/*
 	 * Reflect task's load immediately.
@@ -1232,8 +1233,9 @@ static void update_stat_for_enq(struct task_struct *p, struct task_ctx *taskc,
 	cpuc->load_ideal  += get_task_load_ideal(p);
 }
 
-static void update_stat_for_run(struct task_struct *p, struct task_ctx *taskc,
-				struct cpu_ctx *cpuc)
+static void update_stat_for_running(struct task_struct *p,
+				    struct task_ctx *taskc,
+				    struct cpu_ctx *cpuc)
 {
 	u64 now, wait_period, interval;
 
@@ -1265,8 +1267,9 @@ static void update_stat_for_run(struct task_struct *p, struct task_ctx *taskc,
 	taskc->last_start_clk = now;
 }
 
-static void update_stat_for_stop(struct task_struct *p, struct task_ctx *taskc,
-				 struct cpu_ctx *cpuc)
+static void update_stat_for_stopping(struct task_struct *p,
+				     struct task_ctx *taskc,
+				     struct cpu_ctx *cpuc)
 {
 	u64 now, run_time_ns, run_time_boosted_ns;
 
@@ -1294,7 +1297,8 @@ static void update_stat_for_stop(struct task_struct *p, struct task_ctx *taskc,
 	taskc->run_time_ns = calc_avg(taskc->run_time_ns, run_time_boosted_ns);
 }
 
-static void update_stat_for_quiescent(struct task_struct *p, struct task_ctx *taskc,
+static void update_stat_for_quiescent(struct task_struct *p,
+				      struct task_ctx *taskc,
 				      struct cpu_ctx *cpuc)
 {
 	/*
@@ -1473,7 +1477,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * rq. Statistics will be adjusted when more accurate statistics become
 	 * available (ops.running).
 	 */
-	update_stat_for_enq(p, p_taskc, cpuc);
+	update_stat_for_runnable(p, p_taskc, cpuc);
 
 	/*
 	 * When a task @p is wakened up, the wake frequency of its waker task
@@ -1515,7 +1519,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	if (!cpuc)
 		return;
 
-	update_stat_for_run(p, taskc, cpuc);
+	update_stat_for_running(p, taskc, cpuc);
 
 	/*
 	 * Calcualte task's time slice based on updated load.
@@ -1578,7 +1582,7 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 	if (!taskc)
 		return;
 
-	update_stat_for_stop(p, taskc, cpuc);
+	update_stat_for_stopping(p, taskc, cpuc);
 }
 
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
