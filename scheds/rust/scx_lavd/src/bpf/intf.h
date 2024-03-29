@@ -124,6 +124,7 @@ struct task_ctx {
 	 */
 	u64	last_start_clk;	/* last time when scheduled in */
 	u64	last_stop_clk;	/* last time when scheduled out */
+	u64	acc_run_time_ns; /* accmulated runtime from runnable to quiescent state */
 	u64	run_time_ns;	/* average runtime per schedule */
 	u64	run_freq;	/* scheduling frequency in a second */
 	u64	last_wait_clk;	/* last time when a task waits for an event */

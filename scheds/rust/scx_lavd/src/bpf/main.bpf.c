@@ -1226,6 +1226,7 @@ static void update_stat_for_runnable(struct task_struct *p,
 	 * Reflect task's load immediately.
 	 */
 	taskc->load_actual = calc_task_load_actual(taskc);
+	taskc->acc_run_time_ns = 0;
 	cpuc->load_actual += taskc->load_actual;
 	cpuc->load_ideal  += get_task_load_ideal(p);
 }
@@ -1268,15 +1269,20 @@ static void update_stat_for_stopping(struct task_struct *p,
 				     struct task_ctx *taskc,
 				     struct cpu_ctx *cpuc)
 {
-	u64 now, run_time_ns;
-
-	now = bpf_ktime_get_ns();
+	u64 now = bpf_ktime_get_ns();
 
 	/*
-	 * Update task's run_time.
+	 * Update task's run_time. When a task is scheduled consecutively
+	 * without ops.quiescent(), the task's runtime is accumulated for
+	 * statistics. Suppose a task is scheduled 2ms, 2ms, and 2ms with the
+	 * time slice exhausted. If 6ms of time slice was given in the first
+	 * place, the task will entirely consume the time slice. Hence, the
+	 * consecutive execution is accumulated and reflected in the
+	 * calculation of runtime statistics.
 	 */
-	run_time_ns = now - taskc->last_start_clk;
-	taskc->run_time_ns = calc_avg(taskc->run_time_ns, run_time_ns);
+	taskc->acc_run_time_ns += now - taskc->last_start_clk;
+	taskc->run_time_ns = calc_avg(taskc->run_time_ns,
+				      taskc->acc_run_time_ns);
 	taskc->last_stop_clk = now;
 }
 
