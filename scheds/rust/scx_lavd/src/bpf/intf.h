@@ -120,27 +120,34 @@ struct cpu_ctx {
 
 struct task_ctx {
 	/*
-	 * Essential task running statistics for latency criticality calculation
+	 * Clocks when a task state transition happens for task statistics calculation
 	 */
-	u64	last_start_clk;	/* last time when scheduled in */
-	u64	last_stop_clk;	/* last time when scheduled out */
-	u64	acc_run_time_ns; /* accmulated runtime from runnable to quiescent state */
-	u64	run_time_ns;	/* average runtime per schedule */
-	u64	run_freq;	/* scheduling frequency in a second */
-	u64	last_wait_clk;	/* last time when a task waits for an event */
-	u64	wait_freq;	/* waiting frequency in a second */
-	u64	wake_freq;	/* waking-up frequency in a second */
-	u64	last_wake_clk;	/* last time when a task wakes up others */
+	u64	last_runnable_clk;	/* last time when a task wakes up others */
+	u64	last_running_clk;	/* last time when scheduled in */
+	u64	last_stopping_clk;	/* last time when scheduled out */
+	u64	last_quiescent_clk;	/* last time when a task waits for an event */
 
-	u64	load_actual;	/* task load derived from run_time and run_freq */
-	u64	vdeadline_delta_ns;
-	u64	eligible_delta_ns;
-	u64	slice_ns;
-	u64	greedy_ratio;
-	u64	lat_cri;
-	u16	slice_boost_prio;/* how many times a task fully consumed the slice */
-	u16	lat_prio;	/* latency priority */
-	s16	lat_boost_prio;	/* DEBUG */
+	/*
+	 * Task running statistics for latency criticality calculation
+	 */
+	u64	acc_run_time_ns;	/* accmulated runtime from runnable to quiescent state */
+	u64	run_time_ns;		/* average runtime per schedule */
+	u64	run_freq;		/* scheduling frequency in a second */
+	u64	wait_freq;		/* waiting frequency in a second */
+	u64	wake_freq;		/* waking-up frequency in a second */
+	u64	load_actual;		/* task load derived from run_time and run_freq */
+
+	/*
+	 * Task deadline and time slice
+	 */
+	u64	vdeadline_delta_ns;	/* time delta until task's virtual deadline */
+	u64	eligible_delta_ns;	/* time delta until task becomes eligible */
+	u64	slice_ns;		/* time slice */
+	u64	greedy_ratio;		/* task's overscheduling ratio compared to its nice priority */
+	u64	lat_cri;		/* calculated latency criticality */
+	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
+	u16	lat_prio;		/* latency priority */
+	s16	lat_boost_prio;		/* DEBUG */
 };
 
 struct task_ctx_x {

@@ -1242,7 +1242,7 @@ static void update_stat_for_running(struct task_struct *p,
 	 * frequency in a second using an exponential weighted moving average.
 	 */
 	now = bpf_ktime_get_ns();
-	wait_period = now - taskc->last_stop_clk;
+	wait_period = now - taskc->last_stopping_clk;
 	interval = taskc->run_time_ns + wait_period;
 	taskc->run_freq = calc_avg_freq(taskc->run_freq, interval);
 
@@ -1262,7 +1262,7 @@ static void update_stat_for_running(struct task_struct *p,
 	/*
 	 * Update task state when starts running.
 	 */
-	taskc->last_start_clk = now;
+	taskc->last_running_clk = now;
 }
 
 static void update_stat_for_stopping(struct task_struct *p,
@@ -1280,10 +1280,10 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 * consecutive execution is accumulated and reflected in the
 	 * calculation of runtime statistics.
 	 */
-	taskc->acc_run_time_ns += now - taskc->last_start_clk;
+	taskc->acc_run_time_ns += now - taskc->last_running_clk;
 	taskc->run_time_ns = calc_avg(taskc->run_time_ns,
 				      taskc->acc_run_time_ns);
-	taskc->last_stop_clk = now;
+	taskc->last_stopping_clk = now;
 }
 
 static void update_stat_for_quiescent(struct task_struct *p,
@@ -1487,9 +1487,9 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	}
 
 	now = bpf_ktime_get_ns();
-	interval = now - waker_taskc->last_wake_clk;
+	interval = now - waker_taskc->last_runnable_clk;
 	waker_taskc->wake_freq = calc_avg_freq(waker_taskc->wake_freq, interval);
-	waker_taskc->last_wake_clk = now;
+	waker_taskc->last_runnable_clk = now;
 }
 
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
@@ -1525,12 +1525,12 @@ static bool slice_fully_consumed(struct cpu_ctx *cpuc, struct task_ctx *taskc)
 	/*
 	 * Sanity check just to make sure the runtime is positive.
 	 */
-	if (taskc->last_stop_clk < taskc->last_start_clk) {
+	if (taskc->last_stopping_clk < taskc->last_running_clk) {
 		scx_bpf_error("run_time_ns is negative: 0x%llu - 0x%llu",
-			      taskc->last_stop_clk, taskc->last_start_clk);
+			      taskc->last_stopping_clk, taskc->last_running_clk);
 	}
 
-	run_time_ns = taskc->last_stop_clk - taskc->last_start_clk;
+	run_time_ns = taskc->last_stopping_clk - taskc->last_running_clk;
 
 	return run_time_ns >= taskc->slice_ns;
 }
@@ -1601,9 +1601,9 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	 * When a task @p goes to sleep, its associated wait_freq is updated.
 	 */
 	now = bpf_ktime_get_ns();
-	interval = now - taskc->last_wait_clk;
+	interval = now - taskc->last_quiescent_clk;
 	taskc->wait_freq = calc_avg_freq(taskc->wait_freq, interval);
-	taskc->last_wait_clk = now;
+	taskc->last_quiescent_clk = now;
 }
 
 void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
@@ -1710,10 +1710,10 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 	 * Initialize @p's context.
 	 */
 	now = bpf_ktime_get_ns();
-	taskc->last_start_clk = now;
-	taskc->last_stop_clk = now;
-	taskc->last_wait_clk = now;
-	taskc->last_wake_clk = now;
+	taskc->last_runnable_clk = now;
+	taskc->last_running_clk = now;
+	taskc->last_stopping_clk = now;
+	taskc->last_quiescent_clk = now;
 	taskc->greedy_ratio = 1000;
 
 	/*
