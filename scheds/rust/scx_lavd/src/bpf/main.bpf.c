@@ -1235,14 +1235,17 @@ static void update_stat_for_running(struct task_struct *p,
 				    struct task_ctx *taskc,
 				    struct cpu_ctx *cpuc)
 {
-	u64 now, wait_period, interval;
+	u64 wait_period, interval;
+	u64 now = bpf_ktime_get_ns();
+
+	if (!have_scheduled(taskc))
+		goto clk_out;
 
 	/*
 	 * Since this is the start of a new schedule for @p, we update run
 	 * frequency in a second using an exponential weighted moving average.
 	 */
-	now = bpf_ktime_get_ns();
-	wait_period = now - taskc->last_stopping_clk;
+	wait_period = now - taskc->last_quiescent_clk;
 	interval = taskc->run_time_ns + wait_period;
 	taskc->run_freq = calc_avg_freq(taskc->run_freq, interval);
 
@@ -1250,15 +1253,14 @@ static void update_stat_for_running(struct task_struct *p,
 	 * Update per-CPU latency criticality information for ever-scheduled
 	 * tasks
 	 */
-	if (have_scheduled(taskc)) {
-		if (cpuc->max_lat_cri < taskc->lat_cri)
-			cpuc->max_lat_cri = taskc->lat_cri;
-		if (cpuc->min_lat_cri > taskc->lat_cri)
-			cpuc->min_lat_cri = taskc->lat_cri;
-		cpuc->sum_lat_cri += taskc->lat_cri;
-		cpuc->sched_nr++;
-	}
+	if (cpuc->max_lat_cri < taskc->lat_cri)
+		cpuc->max_lat_cri = taskc->lat_cri;
+	if (cpuc->min_lat_cri > taskc->lat_cri)
+		cpuc->min_lat_cri = taskc->lat_cri;
+	cpuc->sum_lat_cri += taskc->lat_cri;
+	cpuc->sched_nr++;
 
+clk_out:
 	/*
 	 * Update task state when starts running.
 	 */
@@ -1707,7 +1709,7 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 
 
 	/*
-	 * Initialize @p's context.
+	 * Initialize @p's context with the current clock and default load.
 	 */
 	now = bpf_ktime_get_ns();
 	taskc->last_runnable_clk = now;
@@ -1715,6 +1717,8 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 	taskc->last_stopping_clk = now;
 	taskc->last_quiescent_clk = now;
 	taskc->greedy_ratio = 1000;
+	taskc->run_time_ns = LAVD_LC_RUNTIME_MAX;
+	taskc->run_freq = 1;
 
 	/*
 	 * When a task is forked, we immediately reflect changes to the current
