@@ -1171,10 +1171,7 @@ static u64 calc_slice_share(struct task_struct *p, struct task_ctx *taskc)
 	 * scheduler tries to allocate a longer time slice.
 	 */
 	u64 share = get_task_load_ideal(p);
-	u64 slice_boost_step = min(taskc->slice_boost_prio,
-				   LAVD_SLICE_BOOST_MAX_STEP);
-
-	share += (share * slice_boost_step) / LAVD_SLICE_BOOST_MAX_STEP;
+	share += (share * taskc->slice_boost_prio) / LAVD_SLICE_BOOST_MAX_STEP;
 
 	return share;
 }
@@ -1221,28 +1218,34 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	return slice;
 }
 
-static void update_stat_for_enq(struct task_struct *p, struct task_ctx *taskc,
-				struct cpu_ctx *cpuc)
+static void update_stat_for_runnable(struct task_struct *p,
+				     struct task_ctx *taskc,
+				     struct cpu_ctx *cpuc)
 {
 	/*
 	 * Reflect task's load immediately.
 	 */
 	taskc->load_actual = calc_task_load_actual(taskc);
+	taskc->acc_run_time_ns = 0;
 	cpuc->load_actual += taskc->load_actual;
 	cpuc->load_ideal  += get_task_load_ideal(p);
 }
 
-static void update_stat_for_run(struct task_struct *p, struct task_ctx *taskc,
-				struct cpu_ctx *cpuc)
+static void update_stat_for_running(struct task_struct *p,
+				    struct task_ctx *taskc,
+				    struct cpu_ctx *cpuc)
 {
-	u64 now, wait_period, interval;
+	u64 wait_period, interval;
+	u64 now = bpf_ktime_get_ns();
+
+	if (!have_scheduled(taskc))
+		goto clk_out;
 
 	/*
 	 * Since this is the start of a new schedule for @p, we update run
 	 * frequency in a second using an exponential weighted moving average.
 	 */
-	now = bpf_ktime_get_ns();
-	wait_period = now - taskc->last_stop_clk;
+	wait_period = now - taskc->last_quiescent_clk;
 	interval = taskc->run_time_ns + wait_period;
 	taskc->run_freq = calc_avg_freq(taskc->run_freq, interval);
 
@@ -1250,51 +1253,43 @@ static void update_stat_for_run(struct task_struct *p, struct task_ctx *taskc,
 	 * Update per-CPU latency criticality information for ever-scheduled
 	 * tasks
 	 */
-	if (have_scheduled(taskc)) {
-		if (cpuc->max_lat_cri < taskc->lat_cri)
-			cpuc->max_lat_cri = taskc->lat_cri;
-		if (cpuc->min_lat_cri > taskc->lat_cri)
-			cpuc->min_lat_cri = taskc->lat_cri;
-		cpuc->sum_lat_cri += taskc->lat_cri;
-		cpuc->sched_nr++;
-	}
+	if (cpuc->max_lat_cri < taskc->lat_cri)
+		cpuc->max_lat_cri = taskc->lat_cri;
+	if (cpuc->min_lat_cri > taskc->lat_cri)
+		cpuc->min_lat_cri = taskc->lat_cri;
+	cpuc->sum_lat_cri += taskc->lat_cri;
+	cpuc->sched_nr++;
 
+clk_out:
 	/*
 	 * Update task state when starts running.
 	 */
-	taskc->last_start_clk = now;
+	taskc->last_running_clk = now;
 }
 
-static void update_stat_for_stop(struct task_struct *p, struct task_ctx *taskc,
-				 struct cpu_ctx *cpuc)
+static void update_stat_for_stopping(struct task_struct *p,
+				     struct task_ctx *taskc,
+				     struct cpu_ctx *cpuc)
 {
-	u64 now, run_time_ns, run_time_boosted_ns;
-
-	now = bpf_ktime_get_ns();
+	u64 now = bpf_ktime_get_ns();
 
 	/*
-	 * Adjust slice boost for the task's next schedule. Note that the
-	 * updating slice_boost_prio should be done before updating
-	 * run_time_boosted_ns, since the run_time_boosted_ns calculation
-	 * requires updated slice_boost_prio.
+	 * Update task's run_time. When a task is scheduled consecutively
+	 * without ops.quiescent(), the task's runtime is accumulated for
+	 * statistics. Suppose a task is scheduled 2ms, 2ms, and 2ms with the
+	 * time slice exhausted. If 6ms of time slice was given in the first
+	 * place, the task will entirely consume the time slice. Hence, the
+	 * consecutive execution is accumulated and reflected in the
+	 * calculation of runtime statistics.
 	 */
-	taskc->last_stop_clk = now;
-	adjust_slice_boost(cpuc, taskc);
-
-	/*
-	 * Update task's run_time. If a task got slice-boosted -- in other
-	 * words, its time slices have been fully consumed multiple times,
-	 * stretch the measured runtime according to the slice_boost_prio.
-	 * The stretched runtime more accurately reflects the actual runtime
-	 * per schedule as if a large enough time slice was given in the first
-	 * place.
-	 */
-	run_time_ns = now - taskc->last_start_clk;
-	run_time_boosted_ns = run_time_ns * (1 + taskc->slice_boost_prio);
-	taskc->run_time_ns = calc_avg(taskc->run_time_ns, run_time_boosted_ns);
+	taskc->acc_run_time_ns += now - taskc->last_running_clk;
+	taskc->run_time_ns = calc_avg(taskc->run_time_ns,
+				      taskc->acc_run_time_ns);
+	taskc->last_stopping_clk = now;
 }
 
-static void update_stat_for_quiescent(struct task_struct *p, struct task_ctx *taskc,
+static void update_stat_for_quiescent(struct task_struct *p,
+				      struct task_ctx *taskc,
 				      struct cpu_ctx *cpuc)
 {
 	/*
@@ -1463,17 +1458,17 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *p_taskc, *waker_taskc;
 	u64 now, interval;
 
-	cpuc = get_cpu_ctx();
-	p_taskc = get_task_ctx(p);
-	if (!cpuc || !p_taskc)
-		return;
-
 	/*
 	 * Add task load based on the current statistics regardless of a target
 	 * rq. Statistics will be adjusted when more accurate statistics become
 	 * available (ops.running).
 	 */
-	update_stat_for_enq(p, p_taskc, cpuc);
+	cpuc = get_cpu_ctx();
+	p_taskc = get_task_ctx(p);
+	if (!cpuc || !p_taskc)
+		return;
+
+	update_stat_for_runnable(p, p_taskc, cpuc);
 
 	/*
 	 * When a task @p is wakened up, the wake frequency of its waker task
@@ -1494,28 +1489,25 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	}
 
 	now = bpf_ktime_get_ns();
-	interval = now - waker_taskc->last_wake_clk;
+	interval = now - waker_taskc->last_runnable_clk;
 	waker_taskc->wake_freq = calc_avg_freq(waker_taskc->wake_freq, interval);
-	waker_taskc->last_wake_clk = now;
+	waker_taskc->last_runnable_clk = now;
 }
 
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 {
-	struct task_ctx *taskc;
 	struct cpu_ctx *cpuc;
+	struct task_ctx *taskc;
 
 	/*
-	 * Update task statistics then adjust task load based on the update.
+	 * Update task statistics
 	 */
-	taskc = get_task_ctx(p);
-	if (!taskc)
-		return;
-
 	cpuc = get_cpu_ctx();
-	if (!cpuc)
+	taskc = get_task_ctx(p);
+	if (!cpuc || !taskc)
 		return;
 
-	update_stat_for_run(p, taskc, cpuc);
+	update_stat_for_running(p, taskc, cpuc);
 
 	/*
 	 * Calcualte task's time slice based on updated load.
@@ -1535,12 +1527,12 @@ static bool slice_fully_consumed(struct cpu_ctx *cpuc, struct task_ctx *taskc)
 	/*
 	 * Sanity check just to make sure the runtime is positive.
 	 */
-	if (taskc->last_stop_clk < taskc->last_start_clk) {
+	if (taskc->last_stopping_clk < taskc->last_running_clk) {
 		scx_bpf_error("run_time_ns is negative: 0x%llu - 0x%llu",
-			      taskc->last_stop_clk, taskc->last_start_clk);
+			      taskc->last_stopping_clk, taskc->last_running_clk);
 	}
 
-	run_time_ns = taskc->last_stop_clk - taskc->last_start_clk;
+	run_time_ns = taskc->last_stopping_clk - taskc->last_running_clk;
 
 	return run_time_ns >= taskc->slice_ns;
 }
@@ -1553,7 +1545,7 @@ static void adjust_slice_boost(struct cpu_ctx *cpuc, struct task_ctx *taskc)
 	 * fully consumed, decrease the slice boost priority by half.
 	 */
 	if (slice_fully_consumed(cpuc, taskc)) {
-		if (taskc->slice_boost_prio < LAVD_SLICE_BOOST_MAX_PRIO)
+		if (taskc->slice_boost_prio < LAVD_SLICE_BOOST_MAX_STEP)
 			taskc->slice_boost_prio++;
 	}
 	else {
@@ -1568,17 +1560,19 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 	struct task_ctx *taskc;
 
 	/*
-	 * Reduce the task load.
+	 * Update task statistics
 	 */
 	cpuc = get_cpu_ctx();
-	if (!cpuc)
-		return;
-
 	taskc = get_task_ctx(p);
-	if (!taskc)
+	if (!cpuc || !taskc)
 		return;
 
-	update_stat_for_stop(p, taskc, cpuc);
+	update_stat_for_stopping(p, taskc, cpuc);
+
+	/*
+	 * Adjust slice boost for the task's next schedule.
+	 */
+	adjust_slice_boost(cpuc, taskc);
 }
 
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
@@ -1587,6 +1581,9 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	struct task_ctx *taskc;
 	u64 now, interval;
 
+	/*
+	 * Substract task load from the current CPU's load.
+	 */
 	cpuc = get_cpu_ctx();
 	taskc = get_task_ctx(p);
 	if (!cpuc || !taskc)
@@ -1606,9 +1603,9 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	 * When a task @p goes to sleep, its associated wait_freq is updated.
 	 */
 	now = bpf_ktime_get_ns();
-	interval = now - taskc->last_wait_clk;
+	interval = now - taskc->last_quiescent_clk;
 	taskc->wait_freq = calc_avg_freq(taskc->wait_freq, interval);
-	taskc->last_wait_clk = now;
+	taskc->last_quiescent_clk = now;
 }
 
 void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
@@ -1712,14 +1709,16 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 
 
 	/*
-	 * Initialize @p's context.
+	 * Initialize @p's context with the current clock and default load.
 	 */
 	now = bpf_ktime_get_ns();
-	taskc->last_start_clk = now;
-	taskc->last_stop_clk = now;
-	taskc->last_wait_clk = now;
-	taskc->last_wake_clk = now;
+	taskc->last_runnable_clk = now;
+	taskc->last_running_clk = now;
+	taskc->last_stopping_clk = now;
+	taskc->last_quiescent_clk = now;
 	taskc->greedy_ratio = 1000;
+	taskc->run_time_ns = LAVD_LC_RUNTIME_MAX;
+	taskc->run_freq = 1;
 
 	/*
 	 * When a task is forked, we immediately reflect changes to the current
