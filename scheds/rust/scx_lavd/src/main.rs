@@ -23,9 +23,10 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use libbpf_rs::skel::OpenSkel as _;
-use libbpf_rs::skel::Skel as _;
 use libbpf_rs::skel::SkelBuilder as _;
 use log::info;
+use scx_utils::scx_ops_attach;
+use scx_utils::scx_ops_load;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Topology;
@@ -50,6 +51,10 @@ struct Opts {
     /// PID to be tracked all its scheduling activities if specified
     #[clap(short = 'p', long, default_value = "0")]
     pid_traced: u64,
+
+    /// Exit debug dump buffer length. 0 indicates default.
+    #[clap(long, default_value = "0")]
+    exit_dump_len: u32,
 
     /// Enable verbose output including libbpf details. Specify multiple
     /// times to increase verbosity.
@@ -111,18 +116,13 @@ impl<'a> Scheduler<'a> {
         let topo = Topology::new().expect("Failed to build host topology");
         let nr_cpus_onln = topo.span().weight() as u64;
         skel.bss_mut().nr_cpus_onln = nr_cpus_onln;
+        skel.struct_ops.lavd_ops_mut().exit_dump_len = opts.exit_dump_len;
         skel.rodata_mut().verbose = opts.verbose;
         let intrspc = introspec::init(opts);
 
         // Attach.
-        let mut skel = skel.load().context("Failed to load BPF program")?;
-        skel.attach().context("Failed to attach BPF program")?;
-        let struct_ops = Some(
-            skel.maps_mut()
-                .lavd_ops()
-                .attach_struct_ops()
-                .context("Failed to attach scx_lavd struct ops")?,
-        );
+        let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
+        let struct_ops = Some(scx_ops_attach!(skel, lavd_ops)?);
 
         // Build a ring buffer for instrumentation
         let mut maps = skel.maps_mut();
@@ -262,7 +262,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn running(&mut self) -> bool {
-        RUNNING.load(Ordering::Relaxed) && !uei_exited!(&self.skel.bss().uei)
+        RUNNING.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei)
     }
 
     fn run(&mut self) -> Result<()> {
@@ -275,7 +275,7 @@ impl<'a> Scheduler<'a> {
         self.rb_mgr.consume().unwrap();
 
         self.struct_ops.take();
-        uei_report!(&self.skel.bss().uei)
+        uei_report!(&self.skel, uei)
     }
 }
 
