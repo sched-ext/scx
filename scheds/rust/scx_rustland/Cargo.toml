@@ -27,6 +27,6 @@ scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "0.1" 
 enable_backtrace = []
 
 [patch.crates-io]
-libbpf-sys = { git = "https://github.com/libbpf/libbpf-sys.git", rev = "75042c653ee956b8c262e41ca4bcfcb0e2c461a1" }
-libbpf-rs = { git = "https://github.com/libbpf/libbpf-rs.git", rev = "560641a5aff2c613dff6ae02147b0000558e4945" }
+libbpf-sys = { git = "https://github.com/libbpf/libbpf-sys.git", rev = "125444300e2db452131dd6453101599c1a277784" }
+libbpf-rs = { git = "https://github.com/libbpf/libbpf-rs.git", rev = "7745f2e43c2bde59920b8b7400d62f66b906f05b" }
 libbpf-cargo = { git = "https://github.com/libbpf/libbpf-rs.git", rev = "7745f2e43c2bde59920b8b7400d62f66b906f05b" }
