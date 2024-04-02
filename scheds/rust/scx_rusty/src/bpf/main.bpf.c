@@ -531,10 +531,12 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * local dsq of the waker.
 	 */
 	if (wake_flags & SCX_WAKE_SYNC) {
-		struct task_struct *current = (void *)bpf_get_current_task();
+		struct task_struct *current = (void *)bpf_get_current_task_btf();
 
-		if (!(BPF_CORE_READ(current, flags) & PF_EXITING) &&
-		    taskc->dom_id < MAX_DOMS) {
+		cpu = bpf_get_smp_processor_id();
+		if (!(current->flags & PF_EXITING) &&
+		    taskc->dom_id < MAX_DOMS &&
+		    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) == 0) {
 			struct dom_ctx *domc;
 			struct bpf_cpumask *d_cpumask;
 			const struct cpumask *idle_cpumask;
@@ -560,7 +562,6 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 			scx_bpf_put_idle_cpumask(idle_cpumask);
 
 			if (has_idle) {
-				cpu = bpf_get_smp_processor_id();
 				if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
 					stat_add(RUSTY_STAT_WAKE_SYNC, 1);
 					goto direct;
