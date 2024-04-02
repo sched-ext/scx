@@ -28,7 +28,7 @@ static inline bool __COMPAT_read_enum(const char *type, const char *name, u64 *v
 
 	__COMPAT_load_vmlinux_btf();
 
-	tid = btf__find_by_name_kind(__COMPAT_vmlinux_btf, type, BTF_KIND_ENUM);
+	tid = btf__find_by_name(__COMPAT_vmlinux_btf, type);
 	if (tid < 0)
 		return false;
 

@@ -63,7 +63,7 @@ int main(int argc, char **argv)
 	skel = scx_simple__open();
 	SCX_BUG_ON(!skel, "Failed to open skel");
 
-	while ((opt = getopt(argc, argv, "fph")) != -1) {
+	while ((opt = getopt(argc, argv, "fh")) != -1) {
 		switch (opt) {
 		case 'f':
 			skel->rodata->fifo_sched = true;

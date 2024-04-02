@@ -27,11 +27,11 @@
 char _license[] SEC("license") = "GPL";
 
 const volatile u64 slice_ns = SCX_SLICE_DFL;
-const volatile bool switch_partial;
 const volatile u32 stall_user_nth;
 const volatile u32 stall_kernel_nth;
 const volatile u32 dsp_inf_loop_after;
 const volatile s32 disallow_tgid;
+const volatile bool switch_partial;
 
 u32 test_error_cnt;
 
