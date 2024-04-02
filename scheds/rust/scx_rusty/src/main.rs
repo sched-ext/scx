@@ -32,10 +32,12 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use libbpf_rs::skel::OpenSkel as _;
-use libbpf_rs::skel::Skel as _;
 use libbpf_rs::skel::SkelBuilder as _;
 use log::info;
+use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
+use scx_utils::scx_ops_attach;
+use scx_utils::scx_ops_load;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cpumask;
@@ -172,6 +174,10 @@ struct Opts {
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     partial: bool,
 
+    /// Exit debug dump buffer length. 0 indicates default.
+    #[clap(long, default_value = "0")]
+    exit_dump_len: u32,
+
     /// Enable verbose output including libbpf details. Specify multiple
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
@@ -260,8 +266,10 @@ impl<'a> Scheduler<'a> {
 
         for (id, dom) in domains.doms().iter() {
             for cpu in dom.mask().into_iter() {
-                skel.rodata_mut().cpu_dom_id_map[cpu] =
-                    id.clone().try_into().expect("Domain ID could not fit into 32 bits");
+                skel.rodata_mut().cpu_dom_id_map[cpu] = id
+                    .clone()
+                    .try_into()
+                    .expect("Domain ID could not fit into 32 bits");
             }
         }
 
@@ -291,6 +299,11 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+	if opts.partial {
+            skel.struct_ops.rusty_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
+	}
+        skel.struct_ops.rusty_mut().exit_dump_len = opts.exit_dump_len;
+
         skel.rodata_mut().slice_ns = opts.slice_us * 1000;
         skel.rodata_mut().load_half_life = (opts.load_half_life * 1000000000.0) as u32;
         skel.rodata_mut().kthreads_local = opts.kthreads_local;
@@ -302,14 +315,8 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().debug = opts.verbose as u32;
 
         // Attach.
-        let mut skel = skel.load().context("Failed to load BPF program")?;
-        skel.attach().context("Failed to attach BPF program")?;
-        let struct_ops = Some(
-            skel.maps_mut()
-                .rusty()
-                .attach_struct_ops()
-                .context("Failed to attach rusty struct ops")?,
-        );
+        let mut skel = scx_ops_load!(skel, rusty, uei)?;
+        let struct_ops = Some(scx_ops_attach!(skel, rusty)?);
         info!("Rusty Scheduler Attached");
 
         // Other stuff.
@@ -325,7 +332,7 @@ impl<'a> Scheduler<'a> {
             balance_load: !opts.no_load_balance,
             balanced_kworkers: opts.balanced_kworkers,
 
-            top: top,
+            top,
             dom_group: domains.clone(),
             proc_reader,
 
@@ -394,7 +401,8 @@ impl<'a> Scheduler<'a> {
         let mut maps = self.skel.maps_mut();
         let stats_map = maps.stats();
         let mut stats: Vec<u64> = Vec::new();
-        let zero_vec = vec![vec![0u8; stats_map.value_size() as usize]; self.top.nr_cpus_possible()];
+        let zero_vec =
+            vec![vec![0u8; stats_map.value_size() as usize]; self.top.nr_cpus_possible()];
 
         for stat in 0..bpf_intf::stat_idx_RUSTY_NR_STATS {
             let cpu_stat_vec = stats_map
@@ -524,7 +532,7 @@ impl<'a> Scheduler<'a> {
         let mut next_tune_at = now + self.tune_interval;
         let mut next_sched_at = now + self.sched_interval;
 
-        while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel.bss().uei) {
+        while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();
 
             if now >= next_tune_at {
@@ -550,8 +558,8 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-	self.struct_ops.take();
-	uei_report!(&self.skel.bss().uei)
+        self.struct_ops.take();
+        uei_report!(&self.skel, uei)
     }
 }
 
