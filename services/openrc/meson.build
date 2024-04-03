@@ -8,7 +8,7 @@ install_data('../scx', install_dir: '/etc/default')
 install_symlink(
       'scx',
       pointing_to: '/etc/default/scx',
-      install_dir: '/etc/conf.d/scx'
+      install_dir: '/etc/conf.d'
 )
 # meson.add_install_script(
     # 'sh', '-c',

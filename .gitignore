@@ -1,1 +1,3 @@
 libbpf/
+*.gitignore
+PKGBUILD
