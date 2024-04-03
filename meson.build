@@ -298,7 +298,7 @@ if systemd.found()
   subdir('services')
 endif
 
-systemd = dependency('openrc', required: get_option('openrc'))
+openrc = dependency('openrc', required: get_option('openrc'))
 
 if openrc.found()
   subdir('services/openrc')
