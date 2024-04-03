@@ -138,7 +138,7 @@ SigLevel = Never
 Install packages with a list of mirrors and GPG keys
 
 ```
-sudo pacman -U 'https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-20240331-1-any.pkg.tar.zst' 'https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-mirrorlist-18-1-any.pkg.tar.zst'
+$ sudo pacman -U 'https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-20240331-1-any.pkg.tar.zst' 'https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-mirrorlist-18-1-any.pkg.tar.zst'
 ```
 
 Add the following custom repository section to `/etc/pacman.conf`.
@@ -156,7 +156,7 @@ $ sudo pacman -Sy cachyos/linux-sched-ext cachyos/linux-sched-ext-headers cachyo
 ```
 
 Note that the kernel installs as `/boot/vmlinuz-linux-sched-ext` along with the matching initramfs.
-Update the bootloader configuration to add boot entry for the new kernel.
+Update the bootloader configuration to add the boot entry for the new kernel.
 
 #### Setting Up Dev Environment
 
