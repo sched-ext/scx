@@ -120,6 +120,19 @@ $ sudo apt build-dep scx
 
 ### Arch Linux
 
+Import the gpg key. This can be skipped if the signature checking is disabled.
+
+```
+$ sudo pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com
+$ sudo pacman-key --lsign-key F3B607488DB35A47
+```
+
+If you haven't imported the GPG key, append the following line.
+
+```
+SigLevel = Never
+```
+
 #### Adding the Repository
 
 Install packages with a list of mirrors and GPG keys
@@ -136,25 +149,14 @@ Add the following custom repository section to `/etc/pacman.conf`.
 Include = /etc/pacman.d/cachyos-mirrorlist
 ```
 
-You can also import the gpg key manually. This can be skipped if the
-signature checking is disabled when adding the repo.
-
-```
-$ sudo pacman-key --recv-keys F3B607488DB35A47 --keyserver keyserver.ubuntu.com
-$ sudo pacman-key --lsign-key F3B607488DB35A47
-```
-
-If you haven't imported the GPG key, append the following line.
-
-```
-SigLevel = Never
-```
-
 #### Installing the Kernel and Schedulers
 
 ```
 $ sudo pacman -Sy cachyos/linux-sched-ext cachyos/linux-sched-ext-headers cachyos/scx-scheds
 ```
+
+Note that the kernel installs as `/boot/vmlinuz-linux-sched-ext` along with the matching initramfs.
+Update the bootloader configuration to add boot entry for the new kernel.
 
 #### Setting Up Dev Environment
 
