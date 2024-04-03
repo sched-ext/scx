@@ -27,15 +27,15 @@
 char _license[] SEC("license") = "GPL";
 
 const volatile u64 slice_ns = SCX_SLICE_DFL;
-const volatile bool switch_partial;
 const volatile u32 stall_user_nth;
 const volatile u32 stall_kernel_nth;
 const volatile u32 dsp_inf_loop_after;
 const volatile s32 disallow_tgid;
+const volatile bool switch_partial;
 
 u32 test_error_cnt;
 
-struct user_exit_info uei;
+UEI_DEFINE(uei);
 
 struct qmap {
 	__uint(type, BPF_MAP_TYPE_QUEUE);
@@ -192,7 +192,7 @@ void BPF_STRUCT_OPS(qmap_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, 0, enq_flags);
 		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 		if (cpu >= 0)
-			__COMPAT_scx_bpf_kick_cpu_IDLE(cpu);
+			scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
 		return;
 	}
 
@@ -374,27 +374,25 @@ s32 BPF_STRUCT_OPS(qmap_init_task, struct task_struct *p,
 s32 BPF_STRUCT_OPS(qmap_init)
 {
 	if (!switch_partial)
-		scx_bpf_switch_all();
+		__COMPAT_scx_bpf_switch_all();
 	return 0;
 }
 
 void BPF_STRUCT_OPS(qmap_exit, struct scx_exit_info *ei)
 {
-	uei_record(&uei, ei);
+	UEI_RECORD(uei, ei);
 }
 
-SEC(".struct_ops.link")
-struct sched_ext_ops qmap_ops = {
-	.select_cpu		= (void *)qmap_select_cpu,
-	.enqueue		= (void *)qmap_enqueue,
-	.dequeue		= (void *)qmap_dequeue,
-	.dispatch		= (void *)qmap_dispatch,
-	.core_sched_before	= (void *)qmap_core_sched_before,
-	.cpu_release		= (void *)qmap_cpu_release,
-	.init_task		= (void *)qmap_init_task,
-	.init			= (void *)qmap_init,
-	.exit			= (void *)qmap_exit,
-	.flags			= SCX_OPS_ENQ_LAST,
-	.timeout_ms		= 5000U,
-	.name			= "qmap",
-};
+SCX_OPS_DEFINE(qmap_ops,
+	       .select_cpu		= (void *)qmap_select_cpu,
+	       .enqueue			= (void *)qmap_enqueue,
+	       .dequeue			= (void *)qmap_dequeue,
+	       .dispatch		= (void *)qmap_dispatch,
+	       .core_sched_before	= (void *)qmap_core_sched_before,
+	       .cpu_release		= (void *)qmap_cpu_release,
+	       .init_task		= (void *)qmap_init_task,
+	       .init			= (void *)qmap_init,
+	       .exit			= (void *)qmap_exit,
+	       .flags			= SCX_OPS_ENQ_LAST,
+	       .timeout_ms		= 5000U,
+	       .name			= "qmap");

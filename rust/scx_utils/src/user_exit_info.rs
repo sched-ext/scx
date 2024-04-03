@@ -7,6 +7,16 @@ use anyhow::bail;
 use anyhow::Result;
 use std::ffi::CStr;
 use std::os::raw::c_char;
+use std::sync::Mutex;
+
+pub struct UeiDumpPtr {
+    pub ptr: *const c_char,
+}
+unsafe impl Send for UeiDumpPtr {}
+
+pub static UEI_DUMP_PTR_MUTEX: Mutex<UeiDumpPtr> = Mutex::new(UeiDumpPtr {
+    ptr: std::ptr::null(),
+});
 
 pub enum ScxExitKind {
     None = bindings::scx_exit_kind_SCX_EXIT_NONE as isize,
@@ -18,19 +28,52 @@ pub enum ScxExitKind {
     ErrorStall = bindings::scx_exit_kind_SCX_EXIT_ERROR_STALL as isize,
 }
 
+pub enum ScxInternalConsts {
+    ExitDumpDflLen = bindings::scx_internal_consts_SCX_EXIT_DUMP_DFL_LEN as isize,
+}
+
 /// Takes a reference to C struct user_exit_info and reads it into
 /// UserExitInfo. See UserExitInfo.
 #[macro_export]
 macro_rules! uei_read {
-    ($bpf_uei:expr) => {{
-        {
-            let bpf_uei = $bpf_uei;
+    ($skel: expr, $uei:ident) => {{
+        scx_utils::paste! {
+            let bpf_uei = $skel.data().$uei;
+            let bpf_dump = scx_utils::UEI_DUMP_PTR_MUTEX.lock().unwrap().ptr;
+
             scx_utils::UserExitInfo::new(
                 &bpf_uei.kind as *const _,
                 bpf_uei.reason.as_ptr() as *const _,
                 bpf_uei.msg.as_ptr() as *const _,
-                bpf_uei.dump.as_ptr() as *const _,
+                bpf_dump,
             )
+        }
+    }};
+}
+
+/// Resize debug dump area according to ops.exit_dump_len. If this macro is
+/// not called, debug dump area is not allocated and debug dump won't be
+/// printed out.
+#[macro_export]
+macro_rules! uei_set_size {
+    ($skel: expr, $ops: ident, $uei:ident) => {{
+        scx_utils::paste! {
+            let len = match $skel.struct_ops.$ops().exit_dump_len {
+                0 => scx_utils::ScxInternalConsts::ExitDumpDflLen as u32,
+                v => v,
+            };
+            $skel.rodata_mut().[<$uei _dump_len>] = len;
+            $skel.maps_mut().[<data_ $uei _dump>]().set_value_size(len).unwrap();
+
+            let mut ptr = scx_utils::UEI_DUMP_PTR_MUTEX.lock().unwrap();
+            *ptr = scx_utils::UeiDumpPtr { ptr:
+                       $skel
+                       .maps()
+                       .[<data_ $uei _dump>]()
+                       .initial_value()
+                       .unwrap()
+                       .as_ptr() as *const _,
+            };
         }
     }};
 }
@@ -39,8 +82,9 @@ macro_rules! uei_read {
 /// scheduler has exited. See UserExitInfo.
 #[macro_export]
 macro_rules! uei_exited {
-    ($bpf_uei:expr) => {{
-        (unsafe { std::ptr::read_volatile(&$bpf_uei.kind as *const _) } != 0)
+    ($skel: expr, $uei:ident) => {{
+        let bpf_uei = $skel.data().uei;
+        (unsafe { std::ptr::read_volatile(&bpf_uei.kind as *const _) } != 0)
     }};
 }
 
@@ -48,8 +92,8 @@ macro_rules! uei_exited {
 /// UserExitInfo::report() on it. See UserExitInfo.
 #[macro_export]
 macro_rules! uei_report {
-    ($bpf_uei:expr) => {{
-        scx_utils::uei_read!($bpf_uei).report()
+    ($skel: expr, $uei:ident) => {{
+        scx_utils::uei_read!($skel, $uei).report()
     }};
 }
 
@@ -78,7 +122,7 @@ impl UserExitInfo {
     ) -> Self {
         let kind = unsafe { std::ptr::read_volatile(kind_ptr) };
 
-        let (reason, msg, dump) = (
+        let (reason, msg) = (
             Some(
                 unsafe { CStr::from_ptr(reason_ptr) }
                     .to_str()
@@ -93,14 +137,19 @@ impl UserExitInfo {
                     .to_string(),
             )
             .filter(|s| !s.is_empty()),
+        );
+
+        let dump = if dump_ptr.is_null() {
+            None
+        } else {
             Some(
                 unsafe { CStr::from_ptr(dump_ptr) }
                     .to_str()
                     .expect("Failed to convert msg to string")
                     .to_string(),
             )
-            .filter(|s| !s.is_empty()),
-        );
+            .filter(|s| !s.is_empty())
+        };
 
         Self {
             kind,
@@ -118,12 +167,12 @@ impl UserExitInfo {
             return Ok(());
         }
 
-	if let Some(dump) = &self.dump {
-	    eprintln!("\nDEBUG DUMP");
-	    eprintln!("================================================================================\n");
-	    eprintln!("{}", dump);
-	    eprintln!("================================================================================\n");
-	}
+        if let Some(dump) = &self.dump {
+            eprintln!("\nDEBUG DUMP");
+            eprintln!("================================================================================\n");
+            eprintln!("{}", dump);
+            eprintln!("================================================================================\n");
+        }
 
         let why = match (&self.reason, &self.msg) {
             (Some(reason), None) => format!("EXIT: {}", reason),

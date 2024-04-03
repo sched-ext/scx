@@ -122,6 +122,10 @@ struct Opts {
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     partial: bool,
 
+    /// Exit debug dump buffer length. 0 indicates default.
+    #[clap(long, default_value = "0")]
+    exit_dump_len: u32,
+
     /// If specified, all the BPF scheduling events will be reported in
     /// debugfs (e.g., /sys/kernel/debug/tracing/trace_pipe).
     #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
@@ -269,6 +273,7 @@ impl<'a> Scheduler<'a> {
             opts.slice_us,
             nr_online_cpus as i32,
             opts.partial,
+	    opts.exit_dump_len,
             opts.full_user,
             opts.debug,
         )?;

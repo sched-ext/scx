@@ -29,31 +29,55 @@ static inline void ___vmlinux_h_sanity_check___(void)
 }
 
 void scx_bpf_error_bstr(char *fmt, unsigned long long *data, u32 data_len) __ksym;
+void scx_bpf_exit_bstr(s64 exit_code, char *fmt,
+		       unsigned long long *data, u32 data__sz) __ksym;
 
 static inline __attribute__((format(printf, 1, 2)))
-void ___scx_bpf_error_format_checker(const char *fmt, ...) {}
+void ___scx_bpf_exit_format_checker(const char *fmt, ...) {}
+
+/*
+ * Helper macro for initializing the fmt and variadic argument inputs to both
+ * bstr exit kfuncs. Callers to this function should use ___fmt and ___param to
+ * refer to the initialized list of inputs to the bstr kfunc.
+ */
+#define scx_bpf_exit_preamble(fmt, args...)				\
+	static char ___fmt[] = fmt;					\
+	/*								\
+	 * Note that __param[] must have at least one			\
+	 * element to keep the verifier happy.				\
+	 */								\
+	unsigned long long ___param[___bpf_narg(args) ?: 1] = {};	\
+									\
+	_Pragma("GCC diagnostic push")					\
+	_Pragma("GCC diagnostic ignored \"-Wint-conversion\"")		\
+	___bpf_fill(___param, args);					\
+	_Pragma("GCC diagnostic pop")					\
+
+/*
+ * scx_bpf_exit() wraps the scx_bpf_exit_bstr() kfunc with variadic arguments
+ * instead of an array of u64. Using this macro will cause the scheduler to
+ * exit cleanly with the specified exit code being passed to user space.
+ */
+#define scx_bpf_exit(code, fmt, args...)					\
+({										\
+	scx_bpf_exit_preamble(fmt, args)					\
+	scx_bpf_exit_bstr(code, ___fmt, ___param, sizeof(___param));		\
+	___scx_bpf_exit_format_checker(fmt, ##args);				\
+})
 
 /*
  * scx_bpf_error() wraps the scx_bpf_error_bstr() kfunc with variadic arguments
- * instead of an array of u64. Note that __param[] must have at least one
- * element to keep the verifier happy.
+ * instead of an array of u64. Invoking this macro will cause the scheduler to
+ * exit in an erroneous state, with diagnostic information being passed to the
+ * user.
  */
 #define scx_bpf_error(fmt, args...)						\
 ({										\
-	static char ___fmt[] = fmt;						\
-	unsigned long long ___param[___bpf_narg(args) ?: 1] = {};		\
-										\
-	_Pragma("GCC diagnostic push")						\
-	_Pragma("GCC diagnostic ignored \"-Wint-conversion\"")			\
-	___bpf_fill(___param, args);						\
-	_Pragma("GCC diagnostic pop")						\
-										\
+	scx_bpf_exit_preamble(fmt, args)					\
 	scx_bpf_error_bstr(___fmt, ___param, sizeof(___param));			\
-										\
-	___scx_bpf_error_format_checker(fmt, ##args);				\
+	___scx_bpf_exit_format_checker(fmt, ##args);				\
 })
 
-void scx_bpf_switch_all(void) __ksym;
 s32 scx_bpf_create_dsq(u64 dsq_id, s32 node) __ksym;
 bool scx_bpf_consume(u64 dsq_id) __ksym;
 void scx_bpf_dispatch(struct task_struct *p, u64 dsq_id, u64 slice, u64 enq_flags) __ksym;

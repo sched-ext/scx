@@ -30,7 +30,7 @@ static u32 preempt_cursor;
 
 #include "util.bpf.c"
 
-struct user_exit_info uei;
+UEI_DEFINE(uei);
 
 static inline bool vtime_before(u64 a, u64 b)
 {
@@ -894,7 +894,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	struct bpf_cpumask *cpumask;
 	int i, j, k, nr_online_cpus, ret;
 
-	scx_bpf_switch_all();
+	__COMPAT_scx_bpf_switch_all();
 
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
@@ -1020,23 +1020,21 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 
 void BPF_STRUCT_OPS(layered_exit, struct scx_exit_info *ei)
 {
-	uei_record(&uei, ei);
+	UEI_RECORD(uei, ei);
 }
 
-SEC(".struct_ops.link")
-struct sched_ext_ops layered = {
-	.select_cpu		= (void *)layered_select_cpu,
-	.enqueue		= (void *)layered_enqueue,
-	.dispatch		= (void *)layered_dispatch,
-	.runnable		= (void *)layered_runnable,
-	.running		= (void *)layered_running,
-	.stopping		= (void *)layered_stopping,
-	.quiescent		= (void *)layered_quiescent,
-	.set_weight		= (void *)layered_set_weight,
-	.set_cpumask		= (void *)layered_set_cpumask,
-	.init_task		= (void *)layered_init_task,
-	.exit_task		= (void *)layered_exit_task,
-	.init			= (void *)layered_init,
-	.exit			= (void *)layered_exit,
-	.name			= "layered",
-};
+SCX_OPS_DEFINE(layered,
+	       .select_cpu		= (void *)layered_select_cpu,
+	       .enqueue			= (void *)layered_enqueue,
+	       .dispatch		= (void *)layered_dispatch,
+	       .runnable		= (void *)layered_runnable,
+	       .running			= (void *)layered_running,
+	       .stopping		= (void *)layered_stopping,
+	       .quiescent		= (void *)layered_quiescent,
+	       .set_weight		= (void *)layered_set_weight,
+	       .set_cpumask		= (void *)layered_set_cpumask,
+	       .init_task		= (void *)layered_init_task,
+	       .exit_task		= (void *)layered_exit_task,
+	       .init			= (void *)layered_init,
+	       .exit			= (void *)layered_exit,
+	       .name			= "layered");

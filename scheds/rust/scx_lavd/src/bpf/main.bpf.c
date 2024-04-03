@@ -123,9 +123,9 @@ volatile u64			nr_cpus_onln;
 static struct sys_cpu_util	__sys_cpu_util[2];
 static volatile int		__sys_cpu_util_idx;
 
-struct user_exit_info		uei;
-
 const volatile u8		verbose;
+
+UEI_DEFINE(uei);
 
 #define debugln(fmt, ...)						\
 ({									\
@@ -1778,33 +1778,30 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	/*
 	 * Switch all tasks to scx tasks.
 	 */
-	scx_bpf_switch_all();
+	__COMPAT_scx_bpf_switch_all();
 
 	return err;
 }
 
 void BPF_STRUCT_OPS(lavd_exit, struct scx_exit_info *ei)
 {
-	uei_record(&uei, ei);
+	UEI_RECORD(uei, ei);
 }
 
-SEC(".struct_ops.link")
-struct sched_ext_ops lavd_ops = {
-	.select_cpu		= (void *)lavd_select_cpu,
-	.enqueue		= (void *)lavd_enqueue,
-	.dispatch		= (void *)lavd_dispatch,
-	.runnable		= (void *)lavd_runnable,
-	.running		= (void *)lavd_running,
-	.stopping		= (void *)lavd_stopping,
-	.quiescent		= (void *)lavd_quiescent,
-	.cpu_online		= (void *)lavd_cpu_online,
-	.cpu_offline		= (void *)lavd_cpu_offline,
-	.update_idle		= (void *)lavd_update_idle,
-	.init_task		= (void *)lavd_init_task,
-	.init			= (void *)lavd_init,
-	.exit			= (void *)lavd_exit,
-	.flags			= SCX_OPS_KEEP_BUILTIN_IDLE,
-	.timeout_ms		= 5000U,
-	.name			= "lavd",
-};
-
+SCX_OPS_DEFINE(lavd_ops,
+	       .select_cpu		= (void *)lavd_select_cpu,
+	       .enqueue			= (void *)lavd_enqueue,
+	       .dispatch		= (void *)lavd_dispatch,
+	       .runnable		= (void *)lavd_runnable,
+	       .running			= (void *)lavd_running,
+	       .stopping		= (void *)lavd_stopping,
+	       .quiescent		= (void *)lavd_quiescent,
+	       .cpu_online		= (void *)lavd_cpu_online,
+	       .cpu_offline		= (void *)lavd_cpu_offline,
+	       .update_idle		= (void *)lavd_update_idle,
+	       .init_task		= (void *)lavd_init_task,
+	       .init			= (void *)lavd_init,
+	       .exit			= (void *)lavd_exit,
+	       .flags			= SCX_OPS_KEEP_BUILTIN_IDLE,
+	       .timeout_ms		= 5000U,
+	       .name			= "lavd");

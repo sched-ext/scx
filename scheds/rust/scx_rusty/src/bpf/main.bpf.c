@@ -48,7 +48,7 @@
 
 char _license[] SEC("license") = "GPL";
 
-struct user_exit_info uei;
+UEI_DEFINE(uei);
 
 /*
  * const volatiles are set during initialization and treated as consts by the
@@ -1455,7 +1455,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 		bpf_cpumask_release(cpumask);
 
 	if (!switch_partial)
-		scx_bpf_switch_all();
+		__COMPAT_scx_bpf_switch_all();
 
 	bpf_for(i, 0, nr_nodes) {
 		ret = create_node(i);
@@ -1482,23 +1482,21 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 
 void BPF_STRUCT_OPS(rusty_exit, struct scx_exit_info *ei)
 {
-	uei_record(&uei, ei);
+	UEI_RECORD(uei, ei);
 }
 
-SEC(".struct_ops.link")
-struct sched_ext_ops rusty = {
-	.select_cpu		= (void *)rusty_select_cpu,
-	.enqueue		= (void *)rusty_enqueue,
-	.dispatch		= (void *)rusty_dispatch,
-	.runnable		= (void *)rusty_runnable,
-	.running		= (void *)rusty_running,
-	.stopping		= (void *)rusty_stopping,
-	.quiescent		= (void *)rusty_quiescent,
-	.set_weight		= (void *)rusty_set_weight,
-	.set_cpumask		= (void *)rusty_set_cpumask,
-	.init_task		= (void *)rusty_init_task,
-	.exit_task		= (void *)rusty_exit_task,
-	.init			= (void *)rusty_init,
-	.exit			= (void *)rusty_exit,
-	.name			= "rusty",
-};
+SCX_OPS_DEFINE(rusty,
+	       .select_cpu		= (void *)rusty_select_cpu,
+	       .enqueue			= (void *)rusty_enqueue,
+	       .dispatch		= (void *)rusty_dispatch,
+	       .runnable		= (void *)rusty_runnable,
+	       .running			= (void *)rusty_running,
+	       .stopping		= (void *)rusty_stopping,
+	       .quiescent		= (void *)rusty_quiescent,
+	       .set_weight		= (void *)rusty_set_weight,
+	       .set_cpumask		= (void *)rusty_set_cpumask,
+	       .init_task		= (void *)rusty_init_task,
+	       .exit_task		= (void *)rusty_exit_task,
+	       .init			= (void *)rusty_init,
+	       .exit			= (void *)rusty_exit,
+	       .name			= "rusty");

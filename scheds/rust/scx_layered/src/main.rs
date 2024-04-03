@@ -29,7 +29,6 @@ use anyhow::Result;
 use bitvec::prelude::*;
 use clap::Parser;
 use libbpf_rs::skel::OpenSkel as _;
-use libbpf_rs::skel::Skel as _;
 use libbpf_rs::skel::SkelBuilder as _;
 use log::debug;
 use log::info;
@@ -41,6 +40,8 @@ use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
+use scx_utils::scx_ops_attach;
+use scx_utils::scx_ops_load;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use serde::Deserialize;
@@ -271,6 +272,10 @@ struct Opts {
     #[clap(short = 'n', long)]
     no_load_frac_limit: bool,
 
+    /// Exit debug dump buffer length. 0 indicates default.
+    #[clap(long, default_value = "0")]
+    exit_dump_len: u32,
+
     /// Enable verbose output including libbpf details. Specify multiple
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
@@ -303,28 +308,28 @@ enum LayerMatch {
 enum LayerKind {
     Confined {
         util_range: (f64, f64),
-	#[serde(default)]
+        #[serde(default)]
         cpus_range: Option<(usize, usize)>,
-	#[serde(default)]
+        #[serde(default)]
         min_exec_us: u64,
     },
     Grouped {
         util_range: (f64, f64),
-	#[serde(default)]
+        #[serde(default)]
         cpus_range: Option<(usize, usize)>,
-	#[serde(default)]
+        #[serde(default)]
         min_exec_us: u64,
-	#[serde(default)]
+        #[serde(default)]
         preempt: bool,
-	#[serde(default)]
+        #[serde(default)]
         exclusive: bool,
     },
     Open {
-	#[serde(default)]
+        #[serde(default)]
         min_exec_us: u64,
-	#[serde(default)]
+        #[serde(default)]
         preempt: bool,
-	#[serde(default)]
+        #[serde(default)]
         exclusive: bool,
     },
 }
@@ -1282,10 +1287,10 @@ impl<'a> Scheduler<'a> {
                     exclusive,
                     ..
                 } => {
-                    layer.open = true;
+                    layer.open.write(true);
                     layer.min_exec_ns = min_exec_us * 1000;
-                    layer.preempt = *preempt;
-                    layer.exclusive = *exclusive;
+                    layer.preempt.write(*preempt);
+                    layer.exclusive.write(*exclusive);
                 }
             }
         }
@@ -1304,6 +1309,8 @@ impl<'a> Scheduler<'a> {
         let mut skel = skel_builder.open().context("Failed to open BPF program")?;
 
         // Initialize skel according to @opts.
+        skel.struct_ops.layered_mut().exit_dump_len = opts.exit_dump_len;
+
         skel.rodata_mut().debug = opts.verbose as u32;
         skel.rodata_mut().slice_ns = opts.slice_us * 1000;
         skel.rodata_mut().nr_possible_cpus = *NR_POSSIBLE_CPUS as u32;
@@ -1316,7 +1323,8 @@ impl<'a> Scheduler<'a> {
         }
         Self::init_layers(&mut skel, &layer_specs)?;
 
-        let mut skel = skel.load().context("Failed to load BPF program")?;
+        let mut skel = scx_ops_load!(skel, layered, uei)?;
+
         let mut layers = vec![];
         for spec in layer_specs.iter() {
             layers.push(Layer::new(&mut cpu_pool, &spec.name, spec.kind.clone())?);
@@ -1357,24 +1365,13 @@ impl<'a> Scheduler<'a> {
         // huge problem in the interim until we figure it out.
 
         // Attach.
-        sched
-            .skel
-            .attach()
-            .context("Failed to attach BPF program")?;
-        sched.struct_ops = Some(
-            sched
-                .skel
-                .maps_mut()
-                .layered()
-                .attach_struct_ops()
-                .context("Failed to attach layered struct ops")?,
-        );
+        sched.struct_ops = Some(scx_ops_attach!(sched.skel, layered)?);
         info!("Layered Scheduler Attached");
 
         Ok(sched)
     }
 
-    fn update_bpf_layer_cpumask(layer: &Layer, bpf_layer: &mut bpf_bss_types::layer) {
+    fn update_bpf_layer_cpumask(layer: &Layer, bpf_layer: &mut bpf_types::layer) {
         for bit in 0..layer.cpus.len() {
             if layer.cpus[bit] {
                 bpf_layer.cpus[bit / 8] |= 1 << (bit % 8);
@@ -1709,7 +1706,7 @@ impl<'a> Scheduler<'a> {
         let mut next_sched_at = now + self.sched_intv;
         let mut next_monitor_at = now + self.monitor_intv;
 
-        while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel.bss().uei) {
+        while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();
 
             if now >= next_sched_at {
@@ -1734,7 +1731,7 @@ impl<'a> Scheduler<'a> {
         }
 
         self.struct_ops.take();
-        uei_report!(&self.skel.bss().uei)
+        uei_report!(&self.skel, uei)
     }
 }
 

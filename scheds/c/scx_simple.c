@@ -17,10 +17,9 @@ const char help_fmt[] =
 "\n"
 "See the top-level comment in .bpf.c for more details.\n"
 "\n"
-"Usage: %s [-f] [-p]\n"
+"Usage: %s [-f]\n"
 "\n"
 "  -f            Use FIFO scheduling instead of weighted vtime scheduling\n"
-"  -p            Switch only tasks on SCHED_EXT policy intead of all\n"
 "  -h            Display this help and exit\n";
 
 static volatile int exit_req;
@@ -64,13 +63,10 @@ int main(int argc, char **argv)
 	skel = scx_simple__open();
 	SCX_BUG_ON(!skel, "Failed to open skel");
 
-	while ((opt = getopt(argc, argv, "fph")) != -1) {
+	while ((opt = getopt(argc, argv, "fh")) != -1) {
 		switch (opt) {
 		case 'f':
 			skel->rodata->fifo_sched = true;
-			break;
-		case 'p':
-			skel->rodata->switch_partial = true;
 			break;
 		default:
 			fprintf(stderr, help_fmt, basename(argv[0]));
@@ -78,12 +74,10 @@ int main(int argc, char **argv)
 		}
 	}
 
-	SCX_BUG_ON(scx_simple__load(skel), "Failed to load skel");
+	SCX_OPS_LOAD(skel, simple_ops, scx_simple, uei);
+	link = SCX_OPS_ATTACH(skel, simple_ops);
 
-	link = bpf_map__attach_struct_ops(skel->maps.simple_ops);
-	SCX_BUG_ON(!link, "Failed to attach struct_ops");
-
-	while (!exit_req && !uei_exited(&skel->bss->uei)) {
+	while (!exit_req && !UEI_EXITED(skel, uei)) {
 		__u64 stats[2];
 
 		read_stats(skel, stats);
@@ -93,7 +87,7 @@ int main(int argc, char **argv)
 	}
 
 	bpf_link__destroy(link);
-	uei_print(&skel->bss->uei);
+	UEI_REPORT(skel, uei);
 	scx_simple__destroy(skel);
 	return 0;
 }

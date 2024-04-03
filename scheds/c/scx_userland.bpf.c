@@ -30,7 +30,6 @@
 
 char _license[] SEC("license") = "GPL";
 
-const volatile bool switch_partial;
 const volatile s32 usersched_pid;
 
 /* !0 for veristat, set during init */
@@ -56,7 +55,7 @@ volatile u64 nr_queued;
  */
 volatile u64 nr_scheduled;
 
-struct user_exit_info uei;
+UEI_DEFINE(uei);
 
 /*
  * The map containing tasks that are enqueued in user space from the kernel.
@@ -324,25 +323,22 @@ s32 BPF_STRUCT_OPS(userland_init)
 		return -EINVAL;
 	}
 
-	if (!switch_partial)
-		scx_bpf_switch_all();
 	return 0;
 }
 
 void BPF_STRUCT_OPS(userland_exit, struct scx_exit_info *ei)
 {
-	uei_record(&uei, ei);
+	UEI_RECORD(uei, ei);
 }
 
-SEC(".struct_ops.link")
-struct sched_ext_ops userland_ops = {
-	.select_cpu		= (void *)userland_select_cpu,
-	.enqueue		= (void *)userland_enqueue,
-	.dispatch		= (void *)userland_dispatch,
-	.update_idle		= (void *)userland_update_idle,
-	.init_task		= (void *)userland_init_task,
-	.init			= (void *)userland_init,
-	.exit			= (void *)userland_exit,
-	.flags			= SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
-	.name			= "userland",
-};
+SCX_OPS_DEFINE(userland_ops,
+	       .select_cpu		= (void *)userland_select_cpu,
+	       .enqueue			= (void *)userland_enqueue,
+	       .dispatch		= (void *)userland_dispatch,
+	       .update_idle		= (void *)userland_update_idle,
+	       .init_task		= (void *)userland_init_task,
+	       .init			= (void *)userland_init,
+	       .exit			= (void *)userland_exit,
+	       .flags			= SCX_OPS_ENQ_LAST |
+					  SCX_OPS_KEEP_BUILTIN_IDLE,
+	       .name			= "userland");

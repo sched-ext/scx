@@ -30,6 +30,9 @@
 //! Utility modules which can be useful for userspace component of sched_ext
 //! schedulers.
 
+pub use paste::paste;
+pub use log::warn;
+
 mod bindings;
 
 mod bpf_builder;
@@ -38,21 +41,26 @@ pub use bpf_builder::BpfBuilder;
 mod builder;
 pub use builder::Builder;
 
-pub mod ravg;
+mod user_exit_info;
+pub use user_exit_info::ScxExitKind;
+pub use user_exit_info::ScxInternalConsts;
+pub use user_exit_info::UeiDumpPtr;
+pub use user_exit_info::UserExitInfo;
+pub use user_exit_info::UEI_DUMP_PTR_MUTEX;
+
+pub mod compat;
 
 mod libbpf_logger;
 pub use libbpf_logger::init_libbpf_logging;
 
-mod user_exit_info;
-pub use user_exit_info::UserExitInfo;
-pub use user_exit_info::ScxExitKind;
+pub mod ravg;
 
 mod topology;
-pub use topology::Topology;
-pub use topology::Cpu;
-pub use topology::Core;
 pub use topology::Cache;
+pub use topology::Core;
+pub use topology::Cpu;
 pub use topology::Node;
+pub use topology::Topology;
 
 mod cpumask;
 pub use cpumask::Cpumask;

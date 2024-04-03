@@ -31,7 +31,7 @@
 
 char _license[] SEC("license") = "GPL";
 
-struct user_exit_info uei;
+UEI_DEFINE(uei);
 
 /*
  * Maximum amount of CPUs supported by this scheduler (this defines the size of
@@ -394,7 +394,7 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 			p->pid, p->comm, dsq_id);
 
 		/* Wake up the target CPU (only if idle) */
-		__COMPAT_scx_bpf_kick_cpu_IDLE(cpu);
+		scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
 		break;
 	}
 }
@@ -863,7 +863,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rustland_init)
 	if (err)
 		return err;
         if (!switch_partial)
-		scx_bpf_switch_all();
+		__COMPAT_scx_bpf_switch_all();
 
 	return 0;
 }
@@ -873,27 +873,25 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rustland_init)
  */
 void BPF_STRUCT_OPS(rustland_exit, struct scx_exit_info *ei)
 {
-	uei_record(&uei, ei);
+	UEI_RECORD(uei, ei);
 }
 
 /*
  * Scheduling class declaration.
  */
-SEC(".struct_ops.link")
-struct sched_ext_ops rustland = {
-	.select_cpu		= (void *)rustland_select_cpu,
-	.enqueue		= (void *)rustland_enqueue,
-	.dispatch		= (void *)rustland_dispatch,
-	.running		= (void *)rustland_running,
-	.stopping		= (void *)rustland_stopping,
-	.update_idle		= (void *)rustland_update_idle,
-	.set_cpumask		= (void *)rustland_set_cpumask,
-	.cpu_release		= (void *)rustland_cpu_release,
-	.init_task		= (void *)rustland_init_task,
-	.exit_task		= (void *)rustland_exit_task,
-	.init			= (void *)rustland_init,
-	.exit			= (void *)rustland_exit,
-	.flags			= SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
-	.timeout_ms		= 5000,
-	.name			= "rustland",
-};
+SCX_OPS_DEFINE(rustland,
+	       .select_cpu		= (void *)rustland_select_cpu,
+	       .enqueue			= (void *)rustland_enqueue,
+	       .dispatch		= (void *)rustland_dispatch,
+	       .running			= (void *)rustland_running,
+	       .stopping		= (void *)rustland_stopping,
+	       .update_idle		= (void *)rustland_update_idle,
+	       .set_cpumask		= (void *)rustland_set_cpumask,
+	       .cpu_release		= (void *)rustland_cpu_release,
+	       .init_task		= (void *)rustland_init_task,
+	       .exit_task		= (void *)rustland_exit_task,
+	       .init			= (void *)rustland_init,
+	       .exit			= (void *)rustland_exit,
+	       .flags			= SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
+	       .timeout_ms		= 5000,
+	       .name			= "rustland");

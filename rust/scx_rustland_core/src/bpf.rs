@@ -10,12 +10,14 @@ use anyhow::Context;
 use anyhow::Result;
 
 use libbpf_rs::skel::OpenSkel as _;
-use libbpf_rs::skel::Skel as _;
 use libbpf_rs::skel::SkelBuilder as _;
 
 use libc::{sched_param, sched_setscheduler};
 
+use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
+use scx_utils::scx_ops_attach;
+use scx_utils::scx_ops_load;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 
@@ -67,10 +69,10 @@ pub struct QueuedTask {
 // Task queued for dispatching to the BPF component (see bpf_intf::dispatched_task_ctx).
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct DispatchedTask {
-    pid: i32,             // pid that uniquely identifies a task
-    cpu: i32,             // target CPU selected by the scheduler
-    slice_ns: u64,        // time slice assigned to the task (0 = default)
-    cpumask_cnt: u64,     // cpumask generation counter (private)
+    pid: i32,         // pid that uniquely identifies a task
+    cpu: i32,         // target CPU selected by the scheduler
+    slice_ns: u64,    // time slice assigned to the task (0 = default)
+    cpumask_cnt: u64, // cpumask generation counter (private)
 }
 
 impl DispatchedTask {
@@ -83,7 +85,7 @@ impl DispatchedTask {
             pid: task.pid,
             cpu: task.cpu,
             cpumask_cnt: task.cpumask_cnt,
-            slice_ns: 0 // use default time slice
+            slice_ns: 0, // use default time slice
         }
     }
 
@@ -177,6 +179,7 @@ impl<'cb> BpfScheduler<'cb> {
         slice_us: u64,
         nr_cpus_online: i32,
         partial: bool,
+	exit_dump_len: u32,
         full_user: bool,
         debug: bool,
     ) -> Result<Self> {
@@ -231,6 +234,11 @@ impl<'cb> BpfScheduler<'cb> {
         skel.rodata_mut().num_possible_cpus = nr_cpus_online;
 
         // Set scheduler options (defined in the BPF part).
+        if partial {
+            skel.struct_ops.rustland_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
+        }
+	skel.struct_ops.rustland_mut().exit_dump_len = exit_dump_len;
+
         skel.bss_mut().usersched_pid = std::process::id();
         skel.rodata_mut().slice_ns = slice_us * 1000;
         skel.rodata_mut().switch_partial = partial;
@@ -238,14 +246,8 @@ impl<'cb> BpfScheduler<'cb> {
         skel.rodata_mut().full_user = full_user;
 
         // Attach BPF scheduler.
-        let mut skel = skel.load().context("Failed to load BPF program")?;
-        skel.attach().context("Failed to attach BPF program")?;
-        let struct_ops = Some(
-            skel.maps_mut()
-                .rustland()
-                .attach_struct_ops()
-                .context("Failed to attach struct ops")?,
-        );
+        let mut skel = scx_ops_load!(skel, rustland, uei)?;
+        let struct_ops = Some(scx_ops_attach!(skel, rustland)?);
 
         // Build the ring buffer of queued tasks.
         let binding = skel.maps();
@@ -395,13 +397,13 @@ impl<'cb> BpfScheduler<'cb> {
 
     // Read exit code from the BPF part.
     pub fn exited(&mut self) -> bool {
-        uei_exited!(&self.skel.bss().uei)
+        uei_exited!(&self.skel, uei)
     }
 
     // Called on exit to shutdown and report exit message from the BPF part.
     pub fn shutdown_and_report(&mut self) -> Result<()> {
         self.struct_ops.take();
-        uei_report!(self.skel.bss().uei)
+        uei_report!(&self.skel, uei)
     }
 }
 

@@ -25,10 +25,9 @@
 char _license[] SEC("license") = "GPL";
 
 const volatile bool fifo_sched;
-const volatile bool switch_partial;
 
 static u64 vtime_now;
-struct user_exit_info uei;
+UEI_DEFINE(uei);
 
 #define SHARED_DSQ 0
 
@@ -130,26 +129,21 @@ void BPF_STRUCT_OPS(simple_enable, struct task_struct *p)
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(simple_init)
 {
-	if (!switch_partial)
-		scx_bpf_switch_all();
-
 	return scx_bpf_create_dsq(SHARED_DSQ, -1);
 }
 
 void BPF_STRUCT_OPS(simple_exit, struct scx_exit_info *ei)
 {
-	uei_record(&uei, ei);
+	UEI_RECORD(uei, ei);
 }
 
-SEC(".struct_ops.link")
-struct sched_ext_ops simple_ops = {
-	.select_cpu		= (void *)simple_select_cpu,
-	.enqueue		= (void *)simple_enqueue,
-	.dispatch		= (void *)simple_dispatch,
-	.running		= (void *)simple_running,
-	.stopping		= (void *)simple_stopping,
-	.enable			= (void *)simple_enable,
-	.init			= (void *)simple_init,
-	.exit			= (void *)simple_exit,
-	.name			= "simple",
-};
+SCX_OPS_DEFINE(simple_ops,
+	       .select_cpu		= (void *)simple_select_cpu,
+	       .enqueue			= (void *)simple_enqueue,
+	       .dispatch		= (void *)simple_dispatch,
+	       .running			= (void *)simple_running,
+	       .stopping		= (void *)simple_stopping,
+	       .enable			= (void *)simple_enable,
+	       .init			= (void *)simple_init,
+	       .exit			= (void *)simple_exit,
+	       .name			= "simple");
