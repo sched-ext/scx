@@ -22,3 +22,9 @@ option(
   value: 'auto',
   description: 'sd-notify support via libsystemd and install systemd unit files'
 )
+option(
+  'openrc',
+  type: 'feature',
+  value: 'auto',
+  description: 'openrc init.d service file'
+)

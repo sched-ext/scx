@@ -158,7 +158,7 @@ if should_build_bpftool
   message('Fetching bpftool repo')
   bpftool_commit = '20ce6933869b70bacfdd0dd1a8399199290bf8ff'
   run_command(fetch_bpftool, meson.current_build_dir(), bpftool_commit, check: true)
-  
+
   bpftool_target = custom_target('bpftool_target',
               output: '@PLAINNAME@.__PHONY__',
               input: 'meson-scripts/bpftool_dummy.c',
@@ -295,5 +295,11 @@ subdir('scheds')
 systemd = dependency('systemd', required: get_option('systemd'))
 
 if systemd.found()
+  subdir('services')
+endif
+
+systemd = dependency('openrc', required: get_option('openrc'))
+
+if openrc.found()
   subdir('services')
 endif
