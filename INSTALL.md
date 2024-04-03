@@ -71,8 +71,9 @@ Include = /etc/pacman.d/cachyos-mirrorlist
 $ sudo pacman -Sy cachyos/linux-sched-ext cachyos/linux-sched-ext-headers cachyos/scx-scheds
 ```
 
-Note that the kernel installs as `/boot/vmlinuz-linux-sched-ext` along with the matching initramfs.
-Update the bootloader configuration to add the boot entry for the new kernel.
+:warning: The kernel installs as `/boot/vmlinuz-linux-sched-ext` along with
+the matching initramfs. Update the bootloader configuration to add the boot
+entry for the new kernel.
 
 #### Setting Up Dev Environment
 

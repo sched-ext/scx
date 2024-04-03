@@ -192,6 +192,11 @@ $ meson setup build -Dbuildtype=release
 $ meson compile -C build scx_simple scx_rusty
 ```
 
+:warning: **If your system has `sccache` installed**: `meson` automatically
+uses `sccache` if available. However, `sccache` fails in one of the build
+steps. If you encounter this issue, disable `sccache` by specifying `CC`
+directly - `$ CC=clang meson setup build -Dbuildtype=release`.
+
 You can also specify `-v` if you want to see the commands being used:
 
 ```
