@@ -301,5 +301,5 @@ endif
 systemd = dependency('openrc', required: get_option('openrc'))
 
 if openrc.found()
-  subdir('services')
+  subdir('services/openrc')
 endif
