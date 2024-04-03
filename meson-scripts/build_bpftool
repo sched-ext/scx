@@ -9,7 +9,7 @@ args=($out)
 
 idx=0
 cc=${args[idx]}
-if [ "$cc" = "ccache" ]; then
+if [ "$cc" = "ccache" -o "$cc" = "sccache" ]; then
     idx=$((idx+1))
     cc="$cc ${args[idx]}"
 fi
