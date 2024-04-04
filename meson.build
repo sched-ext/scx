@@ -302,7 +302,7 @@ subdir('scheds')
 systemd = dependency('systemd', required: get_option('systemd'))
 
 if systemd.found()
-  subdir('services')
+  subdir('services/systemd')
 endif
 
 openrc = dependency('openrc', required: get_option('openrc'))
