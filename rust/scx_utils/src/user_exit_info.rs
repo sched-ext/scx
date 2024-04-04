@@ -22,6 +22,7 @@ pub enum ScxExitKind {
     None = bindings::scx_exit_kind_SCX_EXIT_NONE as isize,
     Done = bindings::scx_exit_kind_SCX_EXIT_DONE as isize,
     Unreg = bindings::scx_exit_kind_SCX_EXIT_UNREG as isize,
+    UnregBPF = bindings::scx_exit_kind_SCX_EXIT_UNREG_BPF as isize,
     SysRq = bindings::scx_exit_kind_SCX_EXIT_SYSRQ as isize,
     Error = bindings::scx_exit_kind_SCX_EXIT_ERROR as isize,
     ErrorBPF = bindings::scx_exit_kind_SCX_EXIT_ERROR_BPF as isize,
@@ -40,9 +41,14 @@ macro_rules! uei_read {
         scx_utils::paste! {
             let bpf_uei = $skel.data().$uei;
             let bpf_dump = scx_utils::UEI_DUMP_PTR_MUTEX.lock().unwrap().ptr;
+            let exit_code_ptr = match scx_utils::compat::struct_has_field("scx_exit_info", "exit_code") {
+                Ok(true) => &bpf_uei.exit_code as *const _,
+                _ => std::ptr::null(),
+            };
 
             scx_utils::UserExitInfo::new(
                 &bpf_uei.kind as *const _,
+                exit_code_ptr,
                 bpf_uei.reason.as_ptr() as *const _,
                 bpf_uei.msg.as_ptr() as *const _,
                 bpf_dump,
@@ -103,6 +109,7 @@ pub struct UserExitInfo {
     /// The C enum scx_exit_kind value. Test against ScxExitKind. None-zero
     /// value indicates that the BPF scheduler has exited.
     kind: i32,
+    exit_code: i64,
     reason: Option<String>,
     msg: Option<String>,
     dump: Option<String>,
@@ -116,11 +123,17 @@ impl UserExitInfo {
     /// type which then calls this method with the individual fields.
     pub fn new(
         kind_ptr: *const i32,
+        exit_code_ptr: *const i64,
         reason_ptr: *const c_char,
         msg_ptr: *const c_char,
         dump_ptr: *const c_char,
     ) -> Self {
         let kind = unsafe { std::ptr::read_volatile(kind_ptr) };
+        let exit_code = if exit_code_ptr.is_null() {
+            0
+        } else {
+            unsafe { std::ptr::read_volatile(exit_code_ptr) }
+        };
 
         let (reason, msg) = (
             Some(
@@ -153,6 +166,7 @@ impl UserExitInfo {
 
         Self {
             kind,
+            exit_code,
             reason,
             msg,
             dump,
@@ -180,11 +194,22 @@ impl UserExitInfo {
             _ => "<UNKNOWN>".into(),
         };
 
-        if self.kind <= ScxExitKind::Unreg as i32 {
+        if self.kind <= ScxExitKind::UnregBPF as i32 {
             eprintln!("{}", why);
             Ok(())
         } else {
             bail!("{}", why)
+        }
+    }
+
+    /// Return the exit code that the scheduler gracefully exited with. This
+    /// only applies when the BPF scheduler exits with scx_bpf_exit(), i.e. kind
+    /// ScxExitKind::UnregBPF.
+    pub fn exit_code(&self) -> Option<i64> {
+        if self.kind == ScxExitKind::UnregBPF as i32 {
+            Some(self.exit_code)
+        } else {
+            None
         }
     }
 }

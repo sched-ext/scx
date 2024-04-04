@@ -39,9 +39,10 @@ use scx_utils::init_libbpf_logging;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::uei_exited;
-use scx_utils::uei_report;
+use scx_utils::uei_read;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
+use scx_utils::UserExitInfo;
 
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
@@ -527,7 +528,7 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<()> {
+    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let now = Instant::now();
         let mut next_tune_at = now + self.tune_interval;
         let mut next_sched_at = now + self.sched_interval;
@@ -559,7 +560,9 @@ impl<'a> Scheduler<'a> {
         }
 
         self.struct_ops.take();
-        uei_report!(&self.skel, uei)
+        let uei = uei_read!(&self.skel, uei);
+        uei.report()?;
+        Ok(uei)
     }
 }
 
@@ -591,8 +594,6 @@ fn main() -> Result<()> {
         simplelog::ColorChoice::Auto,
     )?;
 
-    let mut sched = Scheduler::init(&opts)?;
-
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
     ctrlc::set_handler(move || {
@@ -600,5 +601,16 @@ fn main() -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
-    sched.run(shutdown)
+    while !shutdown.load(Ordering::Relaxed) {
+        let mut sched = Scheduler::init(&opts)?;
+
+        let uei = sched.run(shutdown.clone())?;
+        if let Some(exit_code) = uei.exit_code() {
+            if exit_code == bpf_intf::rusty_exit_codes_RUSTY_EXIT_HOTPLUG as i64 {
+                continue;
+            }
+        }
+        break;
+    }
+    Ok(())
 }
