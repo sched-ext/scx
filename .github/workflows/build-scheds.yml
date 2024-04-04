@@ -55,7 +55,7 @@ jobs:
 
       # The actual build:
       - run: meson setup build -Dkernel=$(pwd)/linux -Dkernel_headers=./linux/usr/include
-      - run: meson compile -C build
+      - run: meson compile -C build --jobs=1
 
       # Print CPU model before running the tests (this can be useful for
       # debugging purposes)
