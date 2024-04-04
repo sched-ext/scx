@@ -1,0 +1,3 @@
+#!/bin/bash
+
+"$1" --version | sed -nr 's/^.*bpftool v([\.0-9]*)(git)?( .*)?$/\1/p'

@@ -21,6 +21,8 @@ endif
 
 get_clang_ver = find_program(join_paths(meson.current_source_dir(),
                                         'meson-scripts/get_clang_ver'))
+get_bpftool_ver = find_program(join_paths(meson.current_source_dir(),
+                                          'meson-scripts/get_bpftool_ver'))
 bpftool_build_skel = find_program(join_paths(meson.current_source_dir(),
                                              'meson-scripts/bpftool_build_skel'))
 get_sys_incls = find_program(join_paths(meson.current_source_dir(),
@@ -135,10 +137,7 @@ if libbpf_a != ''
     cc.find_library('z'),
     cc.find_library('zstd')]
 else
-  libbpf_dep = dependency('libbpf', version: '>=1.2.2')
-  if libbpf_dep.version().version_compare('<1.3')
-    warning('libbpf <1.3 does not support RESIZE_ARRAY(), expect breakages in schedulers that use them')
-  endif
+  libbpf_dep = dependency('libbpf', version: '>=1.4')
 endif
 
 if get_option('kernel_headers') != ''
@@ -173,6 +172,12 @@ if should_build_bpftool
               command: [build_bpftool, jq, make, bpftool_path, '@0@'.format(make_jobs)],
               build_by_default: true)
 else
+  bpftool_ver = run_command(get_bpftool_ver, bpftool_exe_path, check: true).stdout().strip()
+  bpftool_maj = bpftool_ver.split('.')[0].to_int()
+  bpftool_min = bpftool_ver.split('.')[1].to_int()
+  if bpftool_maj < 7 or (bpftool_maj == 7 and bpftool_min < 4)
+    error('bpftool >= 7.4 required (@0@ ver=@1@)'.format(bpftool_exe_path, bpftool_ver))
+  endif
   # this is a noop when we're not building bpftool ourselves
   bpftool_target = custom_target('bpftool_target',
               output: '@PLAINNAME@.__PHONY__',
