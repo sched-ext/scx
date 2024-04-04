@@ -16,6 +16,8 @@ option('enable_rust', type: 'boolean', value: 'true',
        description: 'Enable rust sub-projects')
 option('kernel', type: 'string', value: 'vmlinuz',
        description: 'kernel image used to test schedulers')
+option('kernel_headers', type: 'string', value: '',
+       description: 'kernel headers to build the schedulers')
 option(
   'systemd',
   type: 'feature',

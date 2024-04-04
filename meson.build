@@ -140,6 +140,13 @@ else
   endif
 endif
 
+if get_option('kernel_headers') != ''
+  kernel_headers = get_option('kernel_headers')
+  kernel_dep = [declare_dependency(include_directories: kernel_headers)]
+else
+  kernel_dep = []
+endif
+
 bpftool_path = '@0@/bpftool/src'.format(meson.current_build_dir())
 should_build_bpftool = true
 bpftool_exe_path = '@0@/bpftool'.format(bpftool_path)
