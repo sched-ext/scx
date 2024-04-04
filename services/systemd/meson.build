@@ -8,4 +8,4 @@ install_data('scx.service', install_dir: systemd_system_unit_dir)
 install_data('journald@sched-ext.conf', install_dir: '/etc/systemd')
 
 # Install the 'scx' file to the '/etc/default' directory
-install_data('scx', install_dir: '/etc/default')
+install_data('../scx', install_dir: '/etc/default')
