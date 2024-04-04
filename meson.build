@@ -101,7 +101,8 @@ if should_build_libbpf
   endif
 
   libbpf_h = ['@0@/usr/include'.format(libbpf_path)]
-  libbpf_local_h = ['.@0@/libbpf/src/usr/include'.format(meson.current_build_dir().replace(meson.current_source_dir(), ''))]
+  libbpf_local_h = ['.@0@/libbpf/src/usr/include'.format(meson.current_build_dir().replace(meson.current_source_dir(), '')),
+                    '.@0@/libbpf/include/uapi'.format(meson.current_build_dir().replace(meson.current_source_dir(), ''))]
 
   message('Fetching libbpf repo')
   libbpf_commit = '6d3595d215b014d3eddb88038d686e1c20781534'
