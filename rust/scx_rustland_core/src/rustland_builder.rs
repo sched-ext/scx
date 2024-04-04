@@ -30,9 +30,9 @@ impl RustLandBuilder {
 
     pub fn build(&mut self) -> Result<()> {
         // Embed the BPF source files.
-        let intf = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bpf/intf.h"));
-        let skel = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bpf/main.bpf.c"));
-        let bpf = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bpf.rs"));
+        let intf = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/bpf/intf.h"));
+        let skel = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/bpf/main.bpf.c"));
+        let bpf = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/bpf.rs"));
 
         // Generate BPF backend code (C).
         self.create_file("intf.h", intf);
