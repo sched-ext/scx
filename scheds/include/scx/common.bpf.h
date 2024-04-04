@@ -30,7 +30,7 @@ static inline void ___vmlinux_h_sanity_check___(void)
 
 void scx_bpf_error_bstr(char *fmt, unsigned long long *data, u32 data_len) __ksym;
 void scx_bpf_exit_bstr(s64 exit_code, char *fmt,
-		       unsigned long long *data, u32 data__sz) __ksym;
+		       unsigned long long *data, u32 data__sz) __ksym __weak;
 
 static inline __attribute__((format(printf, 1, 2)))
 void ___scx_bpf_exit_format_checker(const char *fmt, ...) {}
