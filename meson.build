@@ -76,8 +76,9 @@ if nproc.found()
   make_jobs = run_command(nproc, check: true).stdout().to_int()
 endif
 
-libbpf_path = '@0@/libbpf/src'.format(meson.current_build_dir())
-libbpf_a = '@0@/libbpf.a'.format(libbpf_path)
+libbpf_path = '@0@/libbpf'.format(meson.current_build_dir())
+libbpf_src_path = '@0@/src'.format(libbpf_path)
+libbpf_a = '@0@/libbpf.a'.format(libbpf_src_path)
 should_build_libbpf = true
 libbpf_h = get_option('libbpf_h')
 libbpf_local_h = get_option('libbpf_h')
@@ -102,9 +103,19 @@ if should_build_libbpf
     error('To build the libbpf library "make" and "jq" are required')
   endif
 
-  libbpf_h = ['@0@/usr/include'.format(libbpf_path)]
-  libbpf_local_h = ['.@0@/libbpf/src/usr/include'.format(meson.current_build_dir().replace(meson.current_source_dir(), '')),
-                    '.@0@/libbpf/include/uapi'.format(meson.current_build_dir().replace(meson.current_source_dir(), ''))]
+  libbpf_header_paths = ['/src/usr/include', '/include/uapi']
+
+  libbpf_h = []
+
+  # This exists because meson doesn't like absolute paths for include_directories
+  # if they are found within the same directory as the source
+  libbpf_local_h = []
+  local_build_path = meson.current_build_dir().replace(meson.current_source_dir(), '')
+
+  foreach path : libbpf_header_paths
+    libbpf_h += ['@0@'.format(libbpf_path) + path]
+    libbpf_local_h += ['.@0@/libbpf'.format(local_build_path) +  path]
+  endforeach
 
   message('Fetching libbpf repo')
   libbpf_commit = '6d3595d215b014d3eddb88038d686e1c20781534'
@@ -118,7 +129,7 @@ if should_build_libbpf
   libbpf = custom_target('libbpf',
               output: '@PLAINNAME@.__PHONY__',
               input: 'meson-scripts/cc_cflags_probe.c',
-              command: [build_libbpf, jq, make, libbpf_path, '@0@'.format(make_jobs)],
+              command: [build_libbpf, jq, make, libbpf_src_path, '@0@'.format(make_jobs)],
               build_by_default: true)
 else
   # this is a noop when we're not building libbpf ourselves
