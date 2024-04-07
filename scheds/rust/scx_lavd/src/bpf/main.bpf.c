@@ -528,6 +528,7 @@ static int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc,
 	memcpy(m->taskc_x.comm, p->comm, TASK_COMM_LEN);
 	m->taskc_x.static_prio = get_nice_prio(p);
 	m->taskc_x.cpu_util = cutil_cur->util / 10;
+	m->taskc_x.sys_load_factor = cutil_cur->load_factor / 10;
 	m->taskc_x.cpu_id = cpu_id;
 	m->taskc_x.max_lat_cri = cutil_cur->max_lat_cri;
 	m->taskc_x.min_lat_cri = cutil_cur->min_lat_cri;
@@ -666,10 +667,10 @@ static void update_sys_cpu_load(void)
 	struct sys_cpu_util *cutil_next = get_sys_cpu_util_next();
 	u64 now, duration, duration_total;
 	u64 idle_total = 0, compute_total = 0;
-	u64 load_actual = 0, load_ideal = 0;
+	u64 load_actual = 0, load_ideal = 0, load_run_time_ns = 0;
 	s64 max_lat_cri = 0, min_lat_cri = UINT_MAX, avg_lat_cri = 0;
 	u64 sum_lat_cri = 0, sched_nr = 0;
-	u64 new_util;
+	u64 new_util, new_load_factor;
 	int cpu;
 
 	now = bpf_ktime_get_ns();
@@ -683,10 +684,11 @@ static void update_sys_cpu_load(void)
 		}
 
 		/*
-		 * Accumulate task's ideal and actual loads.
+		 * Accumulate cpus' loads.
 		 */
-		load_actual += cpuc->load_actual;
 		load_ideal += cpuc->load_ideal;
+		load_actual += cpuc->load_actual;
+		load_run_time_ns += cpuc->load_run_time_ns;
 
 		/*
 		 * Accumulate task's latency criticlity information.
@@ -733,7 +735,14 @@ static void update_sys_cpu_load(void)
 	duration_total = duration * nr_cpus_onln;
 	if (duration_total > idle_total)
 		compute_total = duration_total - idle_total;
+
 	new_util = (compute_total * LAVD_CPU_UTIL_MAX) / duration_total;
+
+	new_load_factor = (1000 * LAVD_LOAD_FACTOR_ADJ * load_run_time_ns) /
+			  (LAVD_TARGETED_LATENCY_NS * nr_cpus_onln);
+	if (new_load_factor > LAVD_LOAD_FACTOR_MAX)
+		new_load_factor = LAVD_LOAD_FACTOR_MAX;
+
 	if (sched_nr == 0) {
 		/*
 		 * When a system is completely idle, it is indeed possible
@@ -752,12 +761,8 @@ static void update_sys_cpu_load(void)
 	cutil_next->load_actual = calc_avg(cutil_cur->load_actual, load_actual);
 	cutil_next->load_ideal = calc_avg(cutil_cur->load_ideal, load_ideal);
 	cutil_next->util = calc_avg(cutil_cur->util, new_util);
+	cutil_next->load_factor = calc_avg(cutil_cur->load_factor, new_load_factor);
 
-	/*
-	 * Calculate the increment for latency criticality to priority mapping
-	 *  - Case 1. inc1k_low:   [min_lc, avg_lc) -> [half_range, 0)
-	 *  - Case 2. inc1k_high:  [avg_lc, max_lc] -> [0, -half_range)
-	 */
 	cutil_next->min_lat_cri = calc_avg(cutil_cur->min_lat_cri, min_lat_cri);
 	cutil_next->max_lat_cri = calc_avg(cutil_cur->max_lat_cri, max_lat_cri);
 	cutil_next->avg_lat_cri = calc_avg(cutil_cur->avg_lat_cri, avg_lat_cri);
@@ -765,6 +770,11 @@ static void update_sys_cpu_load(void)
 				  ((cutil_next->max_lat_cri -
 				    cutil_next->avg_lat_cri) >> 1);
 
+	/*
+	 * Calculate the increment for latency criticality to priority mapping
+	 *  - Case 1. inc1k_low:   [min_lc, avg_lc) -> [half_range, 0)
+	 *  - Case 2. inc1k_high:  [avg_lc, max_lc] -> [0, -half_range)
+	 */
 	if (cutil_next->avg_lat_cri == cutil_next->min_lat_cri)
 		cutil_next->inc1k_low = 0;
 	else {
@@ -1129,6 +1139,7 @@ static u64 calc_virtual_dealine_delta(struct task_struct *p,
 				      struct cpu_ctx *cpuc,
 				      u64 enq_flags)
 {
+	u64 load_factor = get_sys_cpu_util_cur()->load_factor;
 	u64 vdeadline_delta_ns, weight;
 	bool is_wakeup;
 
@@ -1147,7 +1158,15 @@ static u64 calc_virtual_dealine_delta(struct task_struct *p,
 	 */
 	is_wakeup = is_wakeup_ef(enq_flags);
 	weight = calc_latency_weight(p, taskc, cpuc, is_wakeup);
-	vdeadline_delta_ns = (LAVD_SLICE_MAX_NS * weight * LAVD_SYS_LOAD_FACTOR) / 1000;
+	vdeadline_delta_ns = (LAVD_SLICE_MAX_NS * weight) / 1000;
+
+	/*
+	 * When a system is overloaded (>1000), stretch time space so make time
+	 * tick slower to give room to execute the overloaded tasks.
+	 */
+	if (load_factor > 1000)
+		vdeadline_delta_ns = (vdeadline_delta_ns * load_factor) / 1000;
+
 	taskc->vdeadline_delta_ns = vdeadline_delta_ns;
 	return vdeadline_delta_ns;
 }
@@ -1197,6 +1216,15 @@ static u64 calc_slice_share(struct task_struct *p, struct task_ctx *taskc)
 	return share;
 }
 
+static inline __attribute__((always_inline)) u64 cap_time_slice_ns(u64 slice)
+{
+	if (slice < LAVD_SLICE_MIN_NS)
+		slice = LAVD_SLICE_MIN_NS;
+	else if (slice > LAVD_SLICE_MAX_NS)
+		slice = LAVD_SLICE_MAX_NS;
+	return slice;
+}
+
 static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 {
 	struct sys_cpu_util *cutil_cur = get_sys_cpu_util_cur();
@@ -1220,10 +1248,7 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	/*
 	 * Keep the slice in [LAVD_SLICE_MIN_NS, LAVD_SLICE_MAX_NS].
 	 */
-	if (slice < LAVD_SLICE_MIN_NS)
-		slice = LAVD_SLICE_MIN_NS;
-	else if (slice > LAVD_SLICE_MAX_NS)
-		slice = LAVD_SLICE_MAX_NS;
+	slice = cap_time_slice_ns(slice);
 
 	/*
 	 * If a task has yet to be scheduled (i.e., a freshly forked task or a
@@ -1248,8 +1273,9 @@ static void update_stat_for_runnable(struct task_struct *p,
 	 */
 	taskc->load_actual = calc_task_load_actual(taskc);
 	taskc->acc_run_time_ns = 0;
-	cpuc->load_actual += taskc->load_actual;
 	cpuc->load_ideal  += get_task_load_ideal(p);
+	cpuc->load_actual += taskc->load_actual;
+	cpuc->load_run_time_ns += cap_time_slice_ns(taskc->run_time_ns);
 }
 
 static void update_stat_for_running(struct task_struct *p,
@@ -1292,6 +1318,7 @@ static void update_stat_for_stopping(struct task_struct *p,
 				     struct cpu_ctx *cpuc)
 {
 	u64 now = bpf_ktime_get_ns();
+	u64 old_run_time_ns;
 
 	/*
 	 * Update task's run_time. When a task is scheduled consecutively
@@ -1302,10 +1329,19 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 * consecutive execution is accumulated and reflected in the
 	 * calculation of runtime statistics.
 	 */
+	old_run_time_ns = taskc->run_time_ns;
 	taskc->acc_run_time_ns += now - taskc->last_running_clk;
 	taskc->run_time_ns = calc_avg(taskc->run_time_ns,
 				      taskc->acc_run_time_ns);
 	taskc->last_stopping_clk = now;
+
+	/*
+	 * After getting updated task's runtime, compensate CPU's total
+	 * runtime.
+	 */
+	cpuc->load_run_time_ns = cpuc->load_run_time_ns -
+				 cap_time_slice_ns(old_run_time_ns) +
+				 cap_time_slice_ns(taskc->run_time_ns);
 }
 
 static void update_stat_for_quiescent(struct task_struct *p,
@@ -1316,8 +1352,9 @@ static void update_stat_for_quiescent(struct task_struct *p,
 	 * When quiescent, reduce the per-CPU task load. Per-CPU task load will
 	 * be aggregated periodically at update_sys_cpu_load().
 	 */
-	cpuc->load_actual -= taskc->load_actual;
 	cpuc->load_ideal  -= get_task_load_ideal(p);
+	cpuc->load_actual -= taskc->load_actual;
+	cpuc->load_run_time_ns -= cap_time_slice_ns(taskc->run_time_ns);
 }
 
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
