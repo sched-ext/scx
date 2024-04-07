@@ -45,16 +45,17 @@ extern void bpf_iter_task_destroy(struct bpf_iter_task *it) __weak __ksym;
  */
 enum consts {
 	CLOCK_BOOTTIME			= 7,
-	NSEC_PER_USEC			= 1000L,
-	NSEC_PER_MSEC			= (1000L * NSEC_PER_USEC),
-	LAVD_TIME_ONE_SEC		= (1000L * NSEC_PER_MSEC),
+	NSEC_PER_USEC			= 1000ULL,
+	NSEC_PER_MSEC			= (1000ULL * NSEC_PER_USEC),
+	LAVD_TIME_ONE_SEC		= (1000ULL * NSEC_PER_MSEC),
 	LAVD_MAX_CAS_RETRY		= 8,
 
 	LAVD_TARGETED_LATENCY_NS	= (15 * NSEC_PER_MSEC),
 	LAVD_SLICE_MIN_NS		= (300 * NSEC_PER_USEC),/* min time slice */
 	LAVD_SLICE_MAX_NS		= (3 * NSEC_PER_MSEC),	/* max time slice */
 	LAVD_SLICE_GREEDY_FT		= 3,
-	LAVD_SYS_LOAD_FACTOR		= 1, /* TODO: will be automatically induced */
+	LAVD_LOAD_FACTOR_ADJ		= 6,
+	LAVD_LOAD_FACTOR_MAX		= (10 * 1000),
 	LAVD_TIME_INFINITY_NS		= 0xFFFFFFFFFFFFFFFFULL,
 
 	LAVD_LC_FREQ_MAX		= 1000000,
@@ -87,6 +88,7 @@ enum consts {
 struct sys_cpu_util {
 	volatile u64	last_update_clk;
 	volatile u64	util;		/* average of the CPU utilization */
+	volatile u64	load_factor;	/* system load in % (1000 = 100%) for running all runnables within a LAVD_TARGETED_LATENCY_NS */
 
 	volatile u64	load_ideal;	/* average ideal load of runnable tasks */
 	volatile u64	load_actual;	/* average actual load of runnable tasks */
@@ -113,8 +115,9 @@ struct cpu_ctx {
 	/*
 	 * Information used to keep track of load
 	 */
-	volatile u64	load_actual;	/* actual load of runnable tasks */
 	volatile u64	load_ideal;	/* ideal loaf of runnable tasks */
+	volatile u64	load_actual;	/* actual load of runnable tasks */
+	volatile u64	load_run_time_ns; /* total runtime of runnable tasks */
 
 	/*
 	 * Information used to keep track of latency criticality
@@ -172,6 +175,7 @@ struct task_ctx_x {
 	u16	static_prio;	/* nice priority */
 	u16	cpu_id;		/* where a task ran */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
+	u64	sys_load_factor; /* system load factor in [0..100..] */
 	u64	max_lat_cri;	/* maximum latency criticality */
 	u64	min_lat_cri;	/* minimum latency criticality */
 	u64	avg_lat_cri;	/* average latency criticality */
