@@ -1476,7 +1476,8 @@ static int find_victim_cpu(struct cpumask *cpumask, struct task_ctx *taskc)
 	/*
 	 * First, test the current CPU since it can skip the expensive IPI.
 	 */
-	if (test_task_cpu(&prm_task, cur_cpu, &prm_cpus[0]))
+	if (bpf_cpumask_test_cpu(cur_cpu, cpumask) &&
+	    test_task_cpu(&prm_task, cur_cpu, &prm_cpus[0]))
 		return cur_cpu;
 
 	/*
