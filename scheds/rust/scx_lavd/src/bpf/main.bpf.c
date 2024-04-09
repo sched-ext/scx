@@ -183,9 +183,9 @@ struct {
  * Preemption related ones
  */
 struct preemption_info {
-	u64	stopping_tm_est_ns;
-	u16	lat_prio;
-	int	cpu;
+	u64		stopping_tm_est_ns;
+	u16		lat_prio;
+	struct cpu_ctx	*cpuc;
 };
 
 /*
@@ -1285,12 +1285,11 @@ static void update_stat_for_running(struct task_struct *p,
 	u64 wait_period, interval;
 	u64 now = bpf_ktime_get_ns();
 
+	/*
+	 * Since this is the start of a new schedule for @p, we update run
+	 * frequency in a second using an exponential weighted moving average.
+	 */
 	if (have_scheduled(taskc)) {
-		/*
-		 * Since this is the start of a new schedule for @p, we update
-		 * run frequency in a second using an exponential weighted
-		 * moving average.
-		 */
 		wait_period = now - taskc->last_quiescent_clk;
 		interval = taskc->run_time_ns + wait_period;
 		taskc->run_freq = calc_avg_freq(taskc->run_freq, interval);
@@ -1389,21 +1388,21 @@ static int comp_preemption_info(struct preemption_info *prm_a,
 	return 0;
 }
 
-static int get_random_start_pos(void)
+static int get_random_start_pos(u32 nuance)
 {
 	/*
 	 * Get a large enough random integer to increase or decrease the total
 	 * CPUs without worrying about over-/underflow.
 	 */
-	return (bpf_get_prandom_u32() + 1000) >> 1;
+	return (bpf_get_prandom_u32() + nuance + 1000) >> 1;
 }
 
-static int get_random_directional_inc(void)
+static int get_random_directional_inc(u32 nuance)
 {
-	return (bpf_get_prandom_u32() & 0x1) ? 1 : -1;
+	return ((bpf_get_prandom_u32() + nuance) & 0x1) ? 1 : -1;
 }
 
-static bool test_task_cpu(struct preemption_info *prm_task, int cpu,
+static int test_task_cpu(struct preemption_info *prm_task, int cpu,
 			  struct preemption_info *prm_cpu)
 {
 	struct cpu_ctx *cpuc;
@@ -1419,7 +1418,7 @@ static bool test_task_cpu(struct preemption_info *prm_task, int cpu,
 	}
 	prm_cpu->stopping_tm_est_ns = cpuc->stopping_tm_est_ns;
 	prm_cpu->lat_prio = cpuc->lat_prio;
-	prm_cpu->cpu = cpu;
+	prm_cpu->cpuc = cpuc;
 
 	/*
 	 * If that CPU runs a lower priority task, that's a victim
@@ -1449,7 +1448,8 @@ static bool is_worth_kick_other_task(struct task_ctx *taskc)
 	return ret;
 }
 
-static int find_victim_cpu(struct cpumask *cpumask, struct task_ctx *taskc)
+static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
+				       struct task_ctx *taskc)
 {
 	/*
 	 * We see preemption as a load-balancing problem. In a system with N
@@ -1460,10 +1460,11 @@ static int find_victim_cpu(struct cpumask *cpumask, struct task_ctx *taskc)
 	 * least latency critical task. Hence, we use the 'power of two random
 	 * choices' technique.
 	 */
+	struct cpu_ctx *cpuc = NULL;
 	struct preemption_info prm_task, prm_cpus[2];
 	int cpu_base, cpu_inc, cpu;
 	int i, v = 0, cur_cpu = bpf_get_smp_processor_id();
-	bool ret;
+	int ret;
 
 	/*
 	 * Get task's preemption information for comparison.
@@ -1471,21 +1472,23 @@ static int find_victim_cpu(struct cpumask *cpumask, struct task_ctx *taskc)
 	prm_task.stopping_tm_est_ns = get_est_stopping_time(taskc) +
 				      LAVD_PREEMPT_KICK_MARGIN;
 	prm_task.lat_prio = taskc->lat_prio;
-	prm_task.cpu = -1;
+	prm_task.cpuc = get_cpu_ctx();
 
 	/*
 	 * First, test the current CPU since it can skip the expensive IPI.
 	 */
 	if (bpf_cpumask_test_cpu(cur_cpu, cpumask) &&
-	    test_task_cpu(&prm_task, cur_cpu, &prm_cpus[0]))
-		return cur_cpu;
+	    test_task_cpu(&prm_task, cur_cpu, &prm_cpus[0])) {
+		cpuc = prm_task.cpuc;
+		goto bingo_out;
+	}
 
 	/*
 	 * If the current CPU cannot be a victim, let's check if it is worth to
 	 * try to kick other CPU at the expense of IPI.
 	 */
 	if (!is_worth_kick_other_task(taskc))
-		return -ESRCH;
+		goto null_out;
 
 	/*
 	 * Randomly find _two_ CPUs that run lower-priority tasks than @p. To
@@ -1498,8 +1501,8 @@ static int find_victim_cpu(struct cpumask *cpumask, struct task_ctx *taskc)
 	 * be too expensive to perform every task queue. We need to revisit
 	 * this if the traversal cost becomes problematic.
 	 */
-	cpu_base = get_random_start_pos();
-	cpu_inc = get_random_directional_inc();
+	cpu_base = get_random_start_pos(cur_cpu);
+	cpu_inc = get_random_directional_inc(cur_cpu);
 	bpf_for(i, 0, nr_cpus_onln) {
 		/*
 		 * Decide a CPU ID to examine.
@@ -1517,7 +1520,7 @@ static int find_victim_cpu(struct cpumask *cpumask, struct task_ctx *taskc)
 		 * candidate.
 		 */
 		ret = test_task_cpu(&prm_task, cpu, &prm_cpus[v]);
-		if (ret && ++v >= 2)
+		if (ret == true && ++v >= 2)
 			break;
 	}
 
@@ -1527,44 +1530,73 @@ static int find_victim_cpu(struct cpumask *cpumask, struct task_ctx *taskc)
 	switch(v) {
 	case 2:	/* two dandidates */
 		ret = comp_preemption_info(&prm_cpus[0], &prm_cpus[1]);
-		return (ret < 0) ? prm_cpus[0].cpu : prm_cpus[1].cpu;
+		cpuc = (ret < 0) ? prm_cpus[0].cpuc : prm_cpus[1].cpuc;
+		goto bingo_out;
 	case 1:	/* one candidate */
-		return prm_cpus[0].cpu;
+		cpuc = prm_cpus[0].cpuc;
+		goto bingo_out;
 	case 0:	/* no candidate */
-		return -ESRCH;
+		goto null_out;
 	default:/* something wrong */
-		return -EINVAL;
+		goto null_out;
 	}
+
+bingo_out:
+	if (!cpuc) /* to make the verifier happy */
+		goto null_out;
+	taskc->victim_cpu = cpuc->cpu_id;
+	return cpuc;
+
+null_out:
+	taskc->victim_cpu = LAVD_CPU_ID_NONE;
+	return NULL;
 }
 
-static void kick_cpu(int victim_cpu)
+static void kick_cpu(struct cpu_ctx *victim_cpuc)
 {
-	struct task_struct *cur_p;
-
 	/*
+	 * If the current CPU is a victim, we just reset the current task's
+	 * time slice as an optimization. Othewise, kick the remote CPU for
+	 * preemption.
+	 *
 	 * Kicking the victim CPU does _not_ guarantee that task @p will run on
 	 * that CPU. Enqueuing @p to the global queue is one operation, and
 	 * kicking the victim is another asynchronous operation. However, it is
 	 * okay because, anyway, the victim CPU will run a higher-priority task
 	 * than @p.
 	 */
-	if (bpf_get_smp_processor_id() != victim_cpu) {
-		scx_bpf_kick_cpu(victim_cpu, SCX_KICK_PREEMPT);
-		return;
+	if (bpf_get_smp_processor_id() == victim_cpuc->cpu_id) {
+		struct task_struct *tsk = bpf_get_current_task_btf();
+		tsk->scx.slice = 0;
 	}
+	else
+		scx_bpf_kick_cpu(victim_cpuc->cpu_id, SCX_KICK_PREEMPT);
+}
+
+static bool try_find_and_kick_victim_cpu(const struct cpumask *cpumask,
+					 struct task_ctx *taskc)
+{
+	struct cpu_ctx *victim_cpuc;
 
 	/*
-	 * If the current CPU is a victim, we just reset the current task's
-	 * time slice.
+	 * Find a victim CPU among CPUs that run lower-priority tasks.
 	 */
-	cur_p = bpf_get_current_task_btf();
-	cur_p->scx.slice = 0;
+	victim_cpuc = find_victim_cpu(cpumask, taskc);
+
+	/*
+	 * If a victim CPU is chosen, preempt the victim by kicking it.
+	 */
+	if (victim_cpuc) {
+		kick_cpu(victim_cpuc);
+		return true;
+	}
+
+	return false;
 }
 
 static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 			  struct cpu_ctx *cpuc, u64 enq_flags)
 {
-	int victim_cpu = -1;
 	u64 vdeadline;
 
 	/*
@@ -1574,27 +1606,22 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * right before running at ops.running().
 	 */
 	calc_when_to_run(p, taskc, cpuc, enq_flags);
+	vdeadline = taskc->eligible_delta_ns + taskc->vdeadline_delta_ns +
+		    bpf_ktime_get_ns();
 
 	/*
-	 * Find a victim CPU among CPUs that run lower-priority tasks.
+	 * Try to find and kick a victim CPU, which runs a less urgent task.
+	 * The kick will be done asynchronously.
 	 */
-	victim_cpu = find_victim_cpu(p->cpus_ptr, taskc);
-	taskc->victim_cpu = (victim_cpu < 0) ? LAVD_CPU_ID_NONE : victim_cpu;
+	try_find_and_kick_victim_cpu(p->cpus_ptr, taskc);
 
 	/*
 	 * Enqueue the task to the global runqueue based on its virtual
 	 * deadline.
 	 */
-	vdeadline = taskc->eligible_delta_ns + taskc->vdeadline_delta_ns +
-		    bpf_ktime_get_ns();
 	scx_bpf_dispatch_vtime(p, LAVD_GLOBAL_DSQ, LAVD_SLICE_MAX_NS,
 			       vdeadline, enq_flags);
 
-	/*
-	 * If a victim CPU is chosen, preempt the victim by kicking it.
-	 */
-	if (victim_cpu >= 0)
-		kick_cpu(victim_cpu);
 }
 
 static bool put_local_rq(struct task_struct *p, struct task_ctx *taskc,
@@ -1872,9 +1899,10 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	taskc->last_quiescent_clk = now;
 }
 
-static void cpu_ctx_init_online(struct cpu_ctx *cpuc)
+static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id)
 {
 	memset(cpuc, 0, sizeof(*cpuc));
+	cpuc->cpu_id = cpu_id;
 	cpuc->lat_prio = LAVD_LAT_PRIO_IDLE;
 	cpuc->stopping_tm_est_ns = LAVD_TIME_INFINITY_NS;
 	barrier();
@@ -1882,9 +1910,10 @@ static void cpu_ctx_init_online(struct cpu_ctx *cpuc)
 	cpuc->is_online = true;
 }
 
-static void cpu_ctx_init_offline(struct cpu_ctx *cpuc)
+static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cpu_id)
 {
 	memset(cpuc, 0, sizeof(*cpuc));
+	cpuc->cpu_id = cpu_id;
 	cpuc->is_online = false;
 	barrier();
 
@@ -1904,7 +1933,7 @@ void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
 	if (!cpuc)
 		return;
 
-	cpu_ctx_init_online(cpuc);
+	cpu_ctx_init_online(cpuc, cpu);
 
 	__sync_fetch_and_add(&nr_cpus_onln, 1);
 	update_sys_cpu_load();
@@ -1922,7 +1951,7 @@ void BPF_STRUCT_OPS(lavd_cpu_offline, s32 cpu)
 	if (!cpuc)
 		return;
 
-	cpu_ctx_init_offline(cpuc);
+	cpu_ctx_init_offline(cpuc, cpu);
 
 	__sync_fetch_and_sub(&nr_cpus_onln, 1);
 	update_sys_cpu_load();
@@ -2051,7 +2080,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
 			return -ESRCH;
 		}
-		cpu_ctx_init_online(cpuc);
+		cpu_ctx_init_online(cpuc, cpu);
 	}
 
 	/*

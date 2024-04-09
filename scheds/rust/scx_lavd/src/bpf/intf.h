@@ -76,7 +76,7 @@ enum consts {
 	LAVD_CPU_ID_HERE		= ((u16)-2),
 	LAVD_CPU_ID_NONE		= ((u16)-1),
 
-	LAVD_PREEMPT_KICK_LAT_PRIO	= 17,
+	LAVD_PREEMPT_KICK_LAT_PRIO	= 18,
 	LAVD_PREEMPT_KICK_MARGIN	= (LAVD_SLICE_MIN_NS >> 1),
 
 	LAVD_GLOBAL_DSQ			= 0,
@@ -132,8 +132,8 @@ struct cpu_ctx {
 	 */
 	volatile u64	stopping_tm_est_ns; /* estimated stopping time */
 	volatile u16	lat_prio;	/* latency priority */
-	volatile u8	is_preempting;	/* is it being preempted? */
 	volatile u8	is_online;	/* is this CPU online? */
+	s32		cpu_id;		/* cpu id */
 };
 
 struct task_ctx {
