@@ -164,16 +164,18 @@ impl<'a> Scheduler<'a> {
         if mseq % 32 == 1 {
             info!(
                 "| {:9} | {:8} | {:17} \
-                   | {:4} | {:9} | {:9} \
-                   | {:10} | {:9} | {:8} \
-                   | {:7} | {:7} | {:7} \
-                   | {:7} | {:12} | {:7} \
+                   | {:4} | {:4} | {:9} \
+                   | {:9} | {:10} | {:9} \
+                   | {:8} | {:7} | {:7} \
+                   | {:7} | {:7} | {:12} \
+                   | {:7} | {:9} | {:9} \
                    | {:9} | {:9} | {:9} \
-                   | {:9} | {:9} | {:8} |",
+                   | {:8} | {:6} |",
                 "mseq",
                 "pid",
                 "comm",
                 "cpu",
+                "vtmc",
                 "vddln_ns",
                 "elglty_ns",
                 "slice_ns",
@@ -190,7 +192,8 @@ impl<'a> Scheduler<'a> {
                 "run_tm_ns",
                 "wait_freq",
                 "wake_freq",
-                "cpu_util"
+                "cpu_util",
+                "sys_ld"
             );
         }
 
@@ -200,16 +203,18 @@ impl<'a> Scheduler<'a> {
 
         info!(
             "| {:9} | {:8} | {:17} \
-               | {:4} | {:9} | {:9} \
-               | {:10} | {:9} | {:8} \
-               | {:7} | {:7} | {:7} \
-               | {:7} | {:12} | {:7} \
+               | {:4} | {:4} | {:9} \
+               | {:9} | {:10} | {:9} \
+               | {:8} | {:7} | {:7} \
+               | {:7} | {:7} | {:12} \
+               | {:7} | {:9} | {:9} \
                | {:9} | {:9} | {:9} \
-               | {:9} | {:9} | {:8} | ",
+               | {:8} | {:6} |",
             mseq,
             tx.pid,
             tx_comm,
             tx.cpu_id,
+            tc.victim_cpu,
             tc.vdeadline_delta_ns,
             tc.eligible_delta_ns,
             tc.slice_ns,
@@ -226,7 +231,8 @@ impl<'a> Scheduler<'a> {
             tc.run_time_ns,
             tc.wait_freq,
             tc.wake_freq,
-            tx.cpu_util
+            tx.cpu_util,
+            tx.sys_load_factor
         );
 
         0
