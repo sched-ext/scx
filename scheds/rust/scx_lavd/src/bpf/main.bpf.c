@@ -1402,20 +1402,15 @@ static int get_random_directional_inc(u32 nuance)
 	return ((bpf_get_prandom_u32() + nuance) & 0x1) ? 1 : -1;
 }
 
-static int test_task_cpu(struct preemption_info *prm_task, int cpu,
-			  struct preemption_info *prm_cpu)
+static int test_task_cpu(struct preemption_info *prm_task,
+			 struct cpu_ctx *cpuc,
+			 struct preemption_info *prm_cpu)
 {
-	struct cpu_ctx *cpuc;
 	int ret;
 
 	/*
-	 * Get a CPU information
+	 * Set a CPU information
 	 */
-	cpuc = get_cpu_ctx_id(cpu);
-	if (!cpuc) {
-		scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
-		return false;
-	}
 	prm_cpu->stopping_tm_est_ns = cpuc->stopping_tm_est_ns;
 	prm_cpu->lat_prio = cpuc->lat_prio;
 	prm_cpu->cpuc = cpuc;
@@ -1448,6 +1443,12 @@ static bool is_worth_kick_other_task(struct task_ctx *taskc)
 	return ret;
 }
 
+static bool can_cpu_be_kicked(u64 now, struct cpu_ctx *cpuc)
+{
+	u64 delta = now - cpuc->last_kick_clk;
+	return delta >= LAVD_PREEMPT_KICK_MARGIN;
+}
+
 static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 				       struct task_ctx *taskc)
 {
@@ -1460,7 +1461,8 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 * least latency critical task. Hence, we use the 'power of two random
 	 * choices' technique.
 	 */
-	struct cpu_ctx *cpuc = NULL;
+	u64 now = bpf_ktime_get_ns();
+	struct cpu_ctx *victim_cpuc = NULL, *cpuc;
 	struct preemption_info prm_task, prm_cpus[2];
 	int cpu_base, cpu_inc, cpu;
 	int i, v = 0, cur_cpu = bpf_get_smp_processor_id();
@@ -1472,14 +1474,19 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	prm_task.stopping_tm_est_ns = get_est_stopping_time(taskc) +
 				      LAVD_PREEMPT_KICK_MARGIN;
 	prm_task.lat_prio = taskc->lat_prio;
-	prm_task.cpuc = get_cpu_ctx();
+	prm_task.cpuc = cpuc = get_cpu_ctx();
+	if (!cpuc) {
+		scx_bpf_error("Failed to lookup the current cpu_ctx");
+		goto null_out;
+	}
 
 	/*
 	 * First, test the current CPU since it can skip the expensive IPI.
 	 */
-	if (bpf_cpumask_test_cpu(cur_cpu, cpumask) &&
-	    test_task_cpu(&prm_task, cur_cpu, &prm_cpus[0])) {
-		cpuc = prm_task.cpuc;
+	if (can_cpu_be_kicked(now, cpuc) &&
+	    bpf_cpumask_test_cpu(cur_cpu, cpumask) &&
+	    test_task_cpu(&prm_task, cpuc, &prm_cpus[0])) {
+		victim_cpuc = prm_task.cpuc;
 		goto bingo_out;
 	}
 
@@ -1501,6 +1508,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 * be too expensive to perform every task queue. We need to revisit
 	 * this if the traversal cost becomes problematic.
 	 */
+	barrier();
 	cpu_base = get_random_start_pos(cur_cpu);
 	cpu_inc = get_random_directional_inc(cur_cpu);
 	bpf_for(i, 0, nr_cpus_onln) {
@@ -1512,14 +1520,20 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 		/*
 		 * Check whether that CPU is qualified to run @p.
 		 */
-		if (cur_cpu == cpu || !bpf_cpumask_test_cpu(cpu, cpumask))
+		if (cur_cpu == cpu || !can_cpu_be_kicked(now, cpuc) ||
+		    !bpf_cpumask_test_cpu(cpu, cpumask))
 			continue;
 
 		/*
 		 * If that CPU runs a lower priority task, that's a victim
 		 * candidate.
 		 */
-		ret = test_task_cpu(&prm_task, cpu, &prm_cpus[v]);
+		cpuc = get_cpu_ctx_id(cpu);
+		if (!cpuc) {
+			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
+			goto null_out;
+		}
+		ret = test_task_cpu(&prm_task, cpuc, &prm_cpus[v]);
 		if (ret == true && ++v >= 2)
 			break;
 	}
@@ -1530,10 +1544,10 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	switch(v) {
 	case 2:	/* two dandidates */
 		ret = comp_preemption_info(&prm_cpus[0], &prm_cpus[1]);
-		cpuc = (ret < 0) ? prm_cpus[0].cpuc : prm_cpus[1].cpuc;
+		victim_cpuc = (ret < 0) ? prm_cpus[0].cpuc : prm_cpus[1].cpuc;
 		goto bingo_out;
 	case 1:	/* one candidate */
-		cpuc = prm_cpus[0].cpuc;
+		victim_cpuc = prm_cpus[0].cpuc;
 		goto bingo_out;
 	case 0:	/* no candidate */
 		goto null_out;
@@ -1542,13 +1556,11 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	}
 
 bingo_out:
-	if (!cpuc) /* to make the verifier happy */
-		goto null_out;
-	taskc->victim_cpu = cpuc->cpu_id;
-	return cpuc;
+	taskc->victim_cpu = victim_cpuc->cpu_id;
+	return victim_cpuc;
 
 null_out:
-	taskc->victim_cpu = LAVD_CPU_ID_NONE;
+	taskc->victim_cpu = (s16)LAVD_CPU_ID_NONE;
 	return NULL;
 }
 
@@ -1571,6 +1583,18 @@ static void kick_cpu(struct cpu_ctx *victim_cpuc)
 	}
 	else
 		scx_bpf_kick_cpu(victim_cpuc->cpu_id, SCX_KICK_PREEMPT);
+
+	/*
+	 * Update the last kick clock to avoid too frequent kick on the CPU.
+	 *
+	 * However, this does _not_ guarantee this particular CPU will be
+	 * observed only by another CPU. Reading this CPU's status is still
+	 * racy. We can avoid such a racy read, but creating a critical section
+	 * in this path is not worth making. Hence, we just embrace the racy
+	 * reads.
+	 */
+	__sync_lock_test_and_set(&victim_cpuc->last_kick_clk,
+				 bpf_ktime_get_ns());
 }
 
 static bool try_find_and_kick_victim_cpu(const struct cpumask *cpumask,
@@ -1653,7 +1677,7 @@ static bool put_local_rq(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	taskc->vdeadline_delta_ns = 0;
 	taskc->eligible_delta_ns = 0;
-	taskc->victim_cpu = LAVD_CPU_ID_NONE;
+	taskc->victim_cpu = (s16)LAVD_CPU_ID_NONE;
 	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, LAVD_SLICE_MAX_NS, enq_flags);
 	return true;
 }

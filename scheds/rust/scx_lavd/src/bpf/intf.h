@@ -118,6 +118,7 @@ struct cpu_ctx {
 	volatile u64	load_ideal;	/* ideal loaf of runnable tasks */
 	volatile u64	load_actual;	/* actual load of runnable tasks */
 	volatile u64	load_run_time_ns; /* total runtime of runnable tasks */
+	volatile u64	last_kick_clk;	/* when the CPU was kicked */
 
 	/*
 	 * Information used to keep track of latency criticality
