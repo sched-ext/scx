@@ -997,7 +997,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			return ret;
 
 		if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &i)))
-			return -ENONET;
+			return -ENOENT;
 
 		cpumask = bpf_cpumask_create();
 		if (!cpumask)
