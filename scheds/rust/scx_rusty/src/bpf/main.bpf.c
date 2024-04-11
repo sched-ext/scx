@@ -1272,7 +1272,9 @@ static s32 create_dom(u32 dom_id)
 		return -EINVAL;
 	}
 
-	ret = scx_bpf_create_dsq(dom_id, -1);
+	node_id = dom_node_id(dom_id);
+
+	ret = scx_bpf_create_dsq(dom_id, node_id);
 	if (ret < 0) {
 		scx_bpf_error("Failed to create dsq %u (%d)", dom_id, ret);
 		return ret;
@@ -1332,7 +1334,6 @@ static s32 create_dom(u32 dom_id)
 		return -EEXIST;
 	}
 
-	node_id = dom_node_id(dom_id);
 	nodec = bpf_map_lookup_elem(&node_data, &node_id);
 	if (!nodec) {
 		/* Should never happen, it's created statically at load time. */
