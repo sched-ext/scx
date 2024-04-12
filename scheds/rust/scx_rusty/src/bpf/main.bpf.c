@@ -160,6 +160,17 @@ static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 	}
 }
 
+static struct pcpu_ctx *lookup_pcpu_ctx(s32 cpu)
+{
+	struct pcpu_ctx *pcpuc;
+
+	pcpuc = MEMBER_VPTR(pcpu_ctx, [cpu]);
+	if (!pcpuc)
+		scx_bpf_error("Failed to lookup pcpu ctx for %d", cpu);
+
+	return pcpuc;
+}
+
 static inline u32 weight_to_bucket_idx(u32 weight)
 {
 	/* Weight is calculated linearly, and is within range of [1, 10000] */
@@ -882,7 +893,7 @@ static u32 dom_rr_next(s32 cpu)
 	struct pcpu_ctx *pcpuc;
 	u32 idx, *dom_id;
 
-	pcpuc = MEMBER_VPTR(pcpu_ctx, [cpu]);
+	pcpuc = lookup_pcpu_ctx(cpu);
 	if (!pcpuc || !pcpuc->nr_node_doms)
 		return 0;
 
@@ -926,11 +937,9 @@ void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 	if (!greedy_threshold)
 		return;
 
-	pcpuc = MEMBER_VPTR(pcpu_ctx, [cpu]);
-	if (!pcpuc) {
-		scx_bpf_error("Failed to get PCPU context");
+	pcpuc = lookup_pcpu_ctx(cpu);
+	if (!pcpuc)
 		return;
-	}
 	node_doms = pcpuc->nr_node_doms;
 
 	/* try to steal a task from domains on the current NUMA node */
@@ -1359,13 +1368,11 @@ static s32 initialize_cpu(s32 cpu)
 	struct bpf_cpumask *cpumask;
 	struct dom_ctx *domc;
 	int i, j = 0;
-	struct pcpu_ctx *pcpuc = MEMBER_VPTR(pcpu_ctx, [cpu]);
+	struct pcpu_ctx *pcpuc = lookup_pcpu_ctx(cpu);
 	u32 *dom_nodes;
 
-	if (!pcpuc) {
-		scx_bpf_error("Failed to lookup pcpu ctx %d", cpu);
+	if (!pcpuc)
 		return -ENOENT;
-	}
 
 	pcpuc->dom_rr_cur = cpu;
 	bpf_for(i, 0, nr_doms) {
