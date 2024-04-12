@@ -902,11 +902,11 @@ static u32 dom_rr_next(s32 cpu)
 
 u32 dom_node_id(u32 dom_id)
 {
-	u32 *nid_ptr;
+	const volatile u32 *nid_ptr;
 
 	nid_ptr = MEMBER_VPTR(dom_numa_id_map, [dom_id]);
 	if (!nid_ptr) {
-		scx_bpf_error("Couldn't look up node ID for %s", dom_id);
+		scx_bpf_error("Couldn't look up node ID for %d", dom_id);
 		return 0;
 	}
 	return *nid_ptr;
@@ -1065,7 +1065,6 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 void BPF_STRUCT_OPS(rusty_set_weight, struct task_struct *p, u32 weight)
 {
 	struct task_ctx *taskc;
-	u64 now = bpf_ktime_get_ns();
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
