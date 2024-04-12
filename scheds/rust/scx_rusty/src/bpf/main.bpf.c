@@ -147,7 +147,7 @@ struct {
 	__uint(map_flags, 0);
 } task_data SEC(".maps");
 
-struct task_ctx *lookup_task_ctx(struct task_struct *p)
+static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 {
 	struct task_ctx *taskc;
 	s32 pid = p->pid;
@@ -158,6 +158,17 @@ struct task_ctx *lookup_task_ctx(struct task_struct *p)
 		scx_bpf_error("task_ctx lookup failed for pid %d", p->pid);
 		return NULL;
 	}
+}
+
+static struct pcpu_ctx *lookup_pcpu_ctx(s32 cpu)
+{
+	struct pcpu_ctx *pcpuc;
+
+	pcpuc = MEMBER_VPTR(pcpu_ctx, [cpu]);
+	if (!pcpuc)
+		scx_bpf_error("Failed to lookup pcpu ctx for %d", cpu);
+
+	return pcpuc;
 }
 
 static inline u32 weight_to_bucket_idx(u32 weight)
@@ -882,7 +893,7 @@ static u32 dom_rr_next(s32 cpu)
 	struct pcpu_ctx *pcpuc;
 	u32 idx, *dom_id;
 
-	pcpuc = MEMBER_VPTR(pcpu_ctx, [cpu]);
+	pcpuc = lookup_pcpu_ctx(cpu);
 	if (!pcpuc || !pcpuc->nr_node_doms)
 		return 0;
 
@@ -902,11 +913,11 @@ static u32 dom_rr_next(s32 cpu)
 
 u32 dom_node_id(u32 dom_id)
 {
-	u32 *nid_ptr;
+	const volatile u32 *nid_ptr;
 
 	nid_ptr = MEMBER_VPTR(dom_numa_id_map, [dom_id]);
 	if (!nid_ptr) {
-		scx_bpf_error("Couldn't look up node ID for %s", dom_id);
+		scx_bpf_error("Couldn't look up node ID for %d", dom_id);
 		return 0;
 	}
 	return *nid_ptr;
@@ -926,11 +937,9 @@ void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 	if (!greedy_threshold)
 		return;
 
-	pcpuc = MEMBER_VPTR(pcpu_ctx, [cpu]);
-	if (!pcpuc) {
-		scx_bpf_error("Failed to get PCPU context");
+	pcpuc = lookup_pcpu_ctx(cpu);
+	if (!pcpuc)
 		return;
-	}
 	node_doms = pcpuc->nr_node_doms;
 
 	/* try to steal a task from domains on the current NUMA node */
@@ -1065,7 +1074,6 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 void BPF_STRUCT_OPS(rusty_set_weight, struct task_struct *p, u32 weight)
 {
 	struct task_ctx *taskc;
-	u64 now = bpf_ktime_get_ns();
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
@@ -1134,10 +1142,28 @@ void BPF_STRUCT_OPS(rusty_set_cpumask, struct task_struct *p,
 			bpf_cpumask_subset((const struct cpumask *)all_cpumask, cpumask);
 }
 
+static s32 create_save_cpumask(struct bpf_cpumask **kptr)
+{
+	struct bpf_cpumask *cpumask;
+
+	cpumask = bpf_cpumask_create();
+	if (!cpumask) {
+		scx_bpf_error("Failed to create cpumask");
+		return -ENOMEM;
+	}
+
+	cpumask = bpf_kptr_xchg(kptr, cpumask);
+	if (cpumask) {
+		scx_bpf_error("kptr already had cpumask");
+		bpf_cpumask_release(cpumask);
+	}
+
+	return 0;
+}
+
 s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
-	struct bpf_cpumask *cpumask;
 	struct task_ctx taskc = { .dom_active_pids_gen = -1 };
 	struct task_ctx *map_value;
 	long ret;
@@ -1168,30 +1194,16 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 		/* Should never happen -- it was just inserted above. */
 		return -EINVAL;
 
-	cpumask = bpf_cpumask_create();
-	if (!cpumask) {
+	ret = create_save_cpumask(&map_value->cpumask);
+	if (ret) {
 		bpf_map_delete_elem(&task_data, &pid);
-		return -ENOMEM;
+		return ret;
 	}
 
-	cpumask = bpf_kptr_xchg(&map_value->cpumask, cpumask);
-	if (cpumask) {
-		/* Should never happen as we just inserted it above. */
-		bpf_cpumask_release(cpumask);
+	ret = create_save_cpumask(&map_value->tmp_cpumask);
+	if (ret) {
 		bpf_map_delete_elem(&task_data, &pid);
-		return -EINVAL;
-	}
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask) {
-		scx_bpf_error("Failed to create BPF cpumask for task");
-		return -ENOMEM;
-	}
-	cpumask = bpf_kptr_xchg(&map_value->tmp_cpumask, cpumask);
-	if (cpumask) {
-		scx_bpf_error("%s[%d] tmp_cpumask already present", p->comm, p->pid);
-		bpf_cpumask_release(cpumask);
-		return -EEXIST;
+		return ret;
 	}
 
 	task_pick_and_set_domain(map_value, p, p->cpus_ptr, true);
@@ -1223,6 +1235,7 @@ static s32 create_node(u32 node_id)
 	u32 cpu;
 	struct bpf_cpumask *cpumask;
 	struct node_ctx *nodec;
+	s32 ret;
 
 	nodec = bpf_map_lookup_elem(&node_data, &node_id);
 	if (!nodec) {
@@ -1231,39 +1244,41 @@ static s32 create_node(u32 node_id)
 		return -ENOENT;
 	}
 
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
+	ret = create_save_cpumask(&nodec->cpumask);
+	if (ret)
+		return ret;
 
-	for (cpu = 0; cpu < MAX_CPUS; cpu++) {
+	bpf_rcu_read_lock();
+	cpumask = nodec->cpumask;
+	if (!cpumask) {
+		bpf_rcu_read_unlock();
+		scx_bpf_error("Failed to lookup node cpumask");
+		return -ENOENT;
+	}
+
+	bpf_for(cpu, 0, MAX_CPUS) {
 		const volatile u64 *nmask;
 
 		nmask = MEMBER_VPTR(numa_cpumasks, [node_id][cpu / 64]);
 		if (!nmask) {
 			scx_bpf_error("array index error");
-			bpf_cpumask_release(cpumask);
-			return -ENOENT;
+			ret = -ENOENT;
+			break;
 		}
 
 		if (*nmask & (1LLU << (cpu % 64)))
 			bpf_cpumask_set_cpu(cpu, cpumask);
 	}
 
-	cpumask = bpf_kptr_xchg(&nodec->cpumask, cpumask);
-	if (cpumask) {
-		scx_bpf_error("Node %u cpumask already present", node_id);
-		bpf_cpumask_release(cpumask);
-		return -EEXIST;
-	}
-
-	return 0;
+	bpf_rcu_read_unlock();
+	return ret;
 }
 
 static s32 create_dom(u32 dom_id)
 {
 	struct dom_ctx *domc;
 	struct node_ctx *nodec;
-	struct bpf_cpumask *cpumask, *node_mask;
+	struct bpf_cpumask *dom_mask, *node_mask, *all_mask;
 	u32 cpu, node_id;
 	s32 ret;
 
@@ -1287,52 +1302,42 @@ static s32 create_dom(u32 dom_id)
 		return -ENOENT;
 	}
 
-	cpumask = bpf_cpumask_create();
-	if (!cpumask) {
-		scx_bpf_error("Failed to create BPF cpumask for domain %u", dom_id);
-		return -ENOMEM;
+
+	ret = create_save_cpumask(&domc->cpumask);
+	if (ret)
+		return ret;
+
+	bpf_rcu_read_lock();
+	dom_mask = domc->cpumask;
+	all_mask = all_cpumask;
+	if (!dom_mask || !all_mask) {
+		bpf_rcu_read_unlock();
+		scx_bpf_error("Could not find cpumask");
+		return -ENOENT;
 	}
 
-	for (cpu = 0; cpu < MAX_CPUS; cpu++) {
+	bpf_for(cpu, 0, MAX_CPUS) {
 		const volatile u64 *dmask;
 
 		dmask = MEMBER_VPTR(dom_cpumasks, [dom_id][cpu / 64]);
 		if (!dmask) {
 			scx_bpf_error("array index error");
-			bpf_cpumask_release(cpumask);
-			return -ENOENT;
+			ret = -ENOENT;
+			break;
 		}
 
 		if (*dmask & (1LLU << (cpu % 64))) {
-			bpf_cpumask_set_cpu(cpu, cpumask);
-
-			bpf_rcu_read_lock();
-			if (all_cpumask)
-				bpf_cpumask_set_cpu(cpu, all_cpumask);
-			bpf_rcu_read_unlock();
+			bpf_cpumask_set_cpu(cpu, dom_mask);
+			bpf_cpumask_set_cpu(cpu, all_mask);
 		}
 	}
+	bpf_rcu_read_unlock();
+	if (ret)
+		return ret;
 
-	cpumask = bpf_kptr_xchg(&domc->cpumask, cpumask);
-	if (cpumask) {
-		scx_bpf_error("Domain %u cpumask already present", dom_id);
-		bpf_cpumask_release(cpumask);
-		return -EEXIST;
-	}
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask) {
-		scx_bpf_error("Failed to create BPF cpumask for domain %u",
-			      dom_id);
-		return -ENOMEM;
-	}
-	cpumask = bpf_kptr_xchg(&domc->direct_greedy_cpumask, cpumask);
-	if (cpumask) {
-		scx_bpf_error("Domain %u direct_greedy_cpumask already present",
-			      dom_id);
-		bpf_cpumask_release(cpumask);
-		return -EEXIST;
-	}
+	ret = create_save_cpumask(&domc->direct_greedy_cpumask);
+	if (ret)
+		return ret;
 
 	nodec = bpf_map_lookup_elem(&node_data, &node_id);
 	if (!nodec) {
@@ -1340,30 +1345,20 @@ static s32 create_dom(u32 dom_id)
 		scx_bpf_error("No node%u", node_id);
 		return -ENOENT;
 	}
+	ret = create_save_cpumask(&domc->node_cpumask);
+	if (ret)
+		return ret;
+
 	bpf_rcu_read_lock();
 	node_mask = nodec->cpumask;
-	if (!node_mask) {
+	dom_mask = domc->node_cpumask;
+	if (!node_mask || !dom_mask) {
 		bpf_rcu_read_unlock();
-		scx_bpf_error("NUMA %d mask not found for domain %u",
-			      node_id, dom_id);
+		scx_bpf_error("cpumask lookup failed");
 		return -ENOENT;
 	}
-	cpumask = bpf_cpumask_create();
-	if (!cpumask) {
-		bpf_rcu_read_unlock();
-		scx_bpf_error("Failed to create BPF cpumask for domain %u",
-			      dom_id);
-		return -ENOMEM;
-	}
-	bpf_cpumask_copy(cpumask, (const struct cpumask *)node_mask);
+	bpf_cpumask_copy(dom_mask, (const struct cpumask *)node_mask);
 	bpf_rcu_read_unlock();
-	cpumask = bpf_kptr_xchg(&domc->node_cpumask, cpumask);
-	if (cpumask) {
-		scx_bpf_error("Domain %u node_cpumask already present",
-			      dom_id);
-		bpf_cpumask_release(cpumask);
-		return -EEXIST;
-	}
 
 	return 0;
 }
@@ -1373,13 +1368,11 @@ static s32 initialize_cpu(s32 cpu)
 	struct bpf_cpumask *cpumask;
 	struct dom_ctx *domc;
 	int i, j = 0;
-	struct pcpu_ctx *pcpuc = MEMBER_VPTR(pcpu_ctx, [cpu]);
+	struct pcpu_ctx *pcpuc = lookup_pcpu_ctx(cpu);
 	u32 *dom_nodes;
 
-	if (!pcpuc) {
-		scx_bpf_error("Failed to lookup pcpu ctx %d", cpu);
+	if (!pcpuc)
 		return -ENOENT;
-	}
 
 	pcpuc->dom_rr_cur = cpu;
 	bpf_for(i, 0, nr_doms) {
@@ -1447,29 +1440,19 @@ void BPF_STRUCT_OPS(rusty_cpu_offline, s32 cpu)
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 {
-	struct bpf_cpumask *cpumask;
 	s32 i, ret;
 
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&all_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
+	ret = create_save_cpumask(&all_cpumask);
+	if (ret)
+		return ret;
 
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&direct_greedy_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
+	ret = create_save_cpumask(&direct_greedy_cpumask);
+	if (ret)
+		return ret;
 
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&kick_greedy_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
+	ret = create_save_cpumask(&kick_greedy_cpumask);
+	if (ret)
+		return ret;
 
 	if (!switch_partial)
 		__COMPAT_scx_bpf_switch_all();
