@@ -147,7 +147,7 @@ struct {
 	__uint(map_flags, 0);
 } task_data SEC(".maps");
 
-struct task_ctx *lookup_task_ctx(struct task_struct *p)
+static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 {
 	struct task_ctx *taskc;
 	s32 pid = p->pid;
