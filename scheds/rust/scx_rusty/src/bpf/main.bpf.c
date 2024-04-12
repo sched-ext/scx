@@ -86,9 +86,6 @@ struct pcpu_ctx {
 	u32 dom_id;
 	u32 nr_node_doms;
 	u32 node_doms[MAX_DOMS];
-
-	/* libbpf-rs does not respect the alignment, so pad out the struct explicitly */
-	u8 _padding[CACHELINE_SIZE - ((3 + MAX_DOMS) * sizeof(u32) % CACHELINE_SIZE)];
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 struct pcpu_ctx pcpu_ctx[MAX_CPUS];
