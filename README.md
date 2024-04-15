@@ -368,3 +368,4 @@ sched_ext in various ways. Followings are some examples:
 - [LWN: The extensible scheduler class (February, 2023)](https://lwn.net/Articles/922405/)
 - [arighi's blog: Implement your own kernel CPU scheduler in Ubuntu with sched-ext (July, 2023)](https://arighi.blogspot.com/2023/07/implement-your-own-cpu-scheduler-in.html)
 - [Changwoo's blog: sched_ext: a BPF-extensible scheduler class (Part 1) (December, 2023)](https://blogs.igalia.com/changwoo/sched-ext-a-bpf-extensible-scheduler-class-part-1/)
+- [arighi's blog: Getting started with sched-ext development (April, 2024)](https://arighi.blogspot.com/2024/04/getting-started-with-sched-ext.html)
