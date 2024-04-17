@@ -120,6 +120,14 @@ struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
 	__type(value, struct lock_wrapper);
+	__uint(max_entries, MAX_DOMS);
+	__uint(map_flags, 0);
+} dom_vtime_locks SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct lock_wrapper);
 	__uint(max_entries, MAX_DOMS * LB_LOAD_BUCKETS);
 	__uint(map_flags, 0);
 } dom_dcycle_locks SEC(".maps");
@@ -212,7 +220,7 @@ static struct bucket_ctx *lookup_dom_bucket(struct dom_ctx *dom_ctx,
 	return NULL;
 }
 
-static struct lock_wrapper *lookup_dom_lock(u32 dom_id, u32 weight)
+static struct lock_wrapper *lookup_dom_bkt_lock(u32 dom_id, u32 weight)
 {
 	u32 idx = dom_id * LB_LOAD_BUCKETS + weight_to_bucket_idx(weight);
 	struct lock_wrapper *lockw;
@@ -223,6 +231,33 @@ static struct lock_wrapper *lookup_dom_lock(u32 dom_id, u32 weight)
 
 	scx_bpf_error("Failed to lookup dom lock");
 	return NULL;
+}
+
+static struct lock_wrapper *lookup_dom_vtime_lock(u32 dom_id)
+{
+	struct lock_wrapper *lockw;
+	u32 idx = dom_id;
+
+	lockw = bpf_map_lookup_elem(&dom_vtime_locks, &idx);
+	if (!lockw)
+		scx_bpf_error("Failed to lookup dom lock");
+
+	return lockw;
+}
+
+static inline bool vtime_before(u64 a, u64 b)
+{
+	return (s64)(a - b) < 0;
+}
+
+static u64 scale_up_fair(u64 value, u64 weight)
+{
+	return value * weight / 100;
+}
+
+static u64 scale_inverse_fair(u64 value, u64 weight)
+{
+	return value * 100 / weight;
 }
 
 static void dom_dcycle_adj(u32 dom_id, u32 weight, u64 now, bool runnable)
@@ -237,7 +272,7 @@ static void dom_dcycle_adj(u32 dom_id, u32 weight, u64 now, bool runnable)
 		return;
 
 	bucket = lookup_dom_bucket(domc, weight, &bucket_idx);
-	lockw = lookup_dom_lock(dom_id, weight);
+	lockw = lookup_dom_bkt_lock(dom_id, weight);
 
 	if (!bucket || !lockw)
 		return;
@@ -261,21 +296,19 @@ static void dom_dcycle_adj(u32 dom_id, u32 weight, u64 now, bool runnable)
 	}
 }
 
-static void dom_load_xfer_task(struct task_struct *p, struct task_ctx *taskc,
-			       u32 from_dom_id, u32 to_dom_id, u64 now)
+static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
+			         struct dom_ctx *from_domc,
+				 struct dom_ctx *to_domc, u64 now)
 {
 	struct bucket_ctx *from_bucket, *to_bucket;
 	u32 idx = 0, weight = taskc->weight;
-	struct dom_ctx *from_domc, *to_domc;
 	struct lock_wrapper *from_lockw, *to_lockw;
 	struct ravg_data task_dcyc_rd;
 	u64 from_dcycle[2], to_dcycle[2], task_dcycle;
 
-	from_domc = lookup_dom_ctx(from_dom_id);
-	from_lockw = lookup_dom_lock(from_dom_id, weight);
-	to_domc = lookup_dom_ctx(to_dom_id);
-	to_lockw = lookup_dom_lock(to_dom_id, weight);
-	if (!from_domc || !from_lockw || !to_domc || !to_lockw)
+	from_lockw = lookup_dom_bkt_lock(from_domc->id, weight);
+	to_lockw = lookup_dom_bkt_lock(to_domc->id, weight);
+	if (!from_lockw || !to_lockw)
 		return;
 
 	from_bucket = lookup_dom_bucket(from_domc, weight, &idx);
@@ -284,8 +317,8 @@ static void dom_load_xfer_task(struct task_struct *p, struct task_ctx *taskc,
 		return;
 
 	/*
-	 * @p is moving from @from_dom_id to @to_dom_id. Its duty cycle
-	 * contribution in the relevant bucket of @from_dom_id should be moved
+	 * @p is moving from @from_domc to @to_domc. Its duty cycle
+	 * contribution in the relevant bucket of @from_domc should be moved
 	 * together to the corresponding bucket in @to_dom_id. We only track
 	 * duty cycle from BPF. Load is computed in user space when performing
 	 * load balancing.
@@ -295,7 +328,7 @@ static void dom_load_xfer_task(struct task_struct *p, struct task_ctx *taskc,
 	if (debug >= 2)
 		task_dcycle = ravg_read(&task_dcyc_rd, now, load_half_life);
 
-	/* transfer out of @from_dom_id */
+	/* transfer out of @from_domc */
 	bpf_spin_lock(&from_lockw->lock);
 	if (taskc->runnable)
 		from_bucket->dcycle--;
@@ -311,7 +344,7 @@ static void dom_load_xfer_task(struct task_struct *p, struct task_ctx *taskc,
 
 	bpf_spin_unlock(&from_lockw->lock);
 
-	/* transfer into @to_dom_id */
+	/* transfer into @to_domc */
 	bpf_spin_lock(&to_lockw->lock);
 	if (taskc->runnable)
 		to_bucket->dcycle++;
@@ -328,13 +361,46 @@ static void dom_load_xfer_task(struct task_struct *p, struct task_ctx *taskc,
 	bpf_spin_unlock(&to_lockw->lock);
 
 	if (debug >= 2)
-		bpf_printk("XFER dom%u->%u task=%lu from=%lu->%lu to=%lu->%lu",
-			   from_dom_id, to_dom_id,
+		bpf_printk("XFER DCYCLE dom%u->%u task=%lu from=%lu->%lu to=%lu->%lu",
+			   from_domc->id, to_domc->id,
 			   task_dcycle >> RAVG_FRAC_BITS,
 			   from_dcycle[0] >> RAVG_FRAC_BITS,
 			   from_dcycle[1] >> RAVG_FRAC_BITS,
 			   to_dcycle[0] >> RAVG_FRAC_BITS,
 			   to_dcycle[1] >> RAVG_FRAC_BITS);
+}
+
+static u64 dom_min_vruntime(struct dom_ctx *domc)
+{
+	/*
+	 * Technically, this is undefined behavior according to the C standard,
+	 * section 5.1.2.4:
+	 *
+	 * The execution of a program contains a data race if it contains two
+	 * conflicting actions in different threads, at least one of which is
+	 * not atomic, and neither happens before the other. Any such data race
+	 * results in undefined behavior.
+	 *
+	 * To get around this we can adopt what's done in the LKMM by using
+	 * READ_ONCE() and WRITE_ONCE() macros.
+	 *
+	 * XXX: Once those macros are added, update this access.
+	 */
+	return domc->min_vruntime;
+}
+
+static void dom_xfer_task(struct task_struct *p, struct task_ctx *taskc,
+			  u32 from_dom_id, u32 to_dom_id, u64 now)
+{
+	struct dom_ctx *from_domc, *to_domc;
+
+	from_domc = lookup_dom_ctx(from_dom_id);
+	to_domc = lookup_dom_ctx(to_dom_id);
+
+	if (!from_domc || !to_domc)
+		return;
+
+	dom_dcycle_xfer_task(p, taskc, from_domc, to_domc, now);
 }
 
 /*
@@ -383,11 +449,6 @@ u64 tune_params_gen;
 private(A) struct bpf_cpumask __kptr *all_cpumask;
 private(A) struct bpf_cpumask __kptr *direct_greedy_cpumask;
 private(A) struct bpf_cpumask __kptr *kick_greedy_cpumask;
-
-static inline bool vtime_before(u64 a, u64 b)
-{
-	return (s64)(a - b) < 0;
-}
 
 static u32 cpu_to_dom_id(s32 cpu)
 {
@@ -449,13 +510,253 @@ static void refresh_tune_params(void)
 	}
 }
 
+/*
+ * log2 helper functions taken from scx_lavd
+ */
+static inline __attribute__((always_inline)) u32 bpf_log2(u32 v)
+{
+        u32 r;
+        u32 shift;
+
+        r = (v > 0xFFFF) << 4; v >>= r;
+        shift = (v > 0xFF) << 3; v >>= shift; r |= shift;
+        shift = (v > 0xF) << 2; v >>= shift; r |= shift;
+        shift = (v > 0x3) << 1; v >>= shift; r |= shift;
+        r |= (v >> 1);
+        return r;
+}
+
+static inline __attribute__((always_inline)) u32 bpf_log2l(u64 v)
+{
+        u32 hi = v >> 32;
+        if (hi)
+                return bpf_log2(hi) + 32 + 1;
+        else
+                return bpf_log2(v) + 1;
+}
+
+static u64 min(u64 a, u64 b)
+{
+	return a <= b ? a : b;
+}
+
+/*
+ * ** Taken directly from fair.c in the Linux kernel **
+ *
+ * We use this table to inversely scale deadline according to a task's
+ * calculated latency factor. We preserve the comment directly from the table
+ * in fair.c:
+ *
+ * "Nice levels are multiplicative, with a gentle 10% change for every
+ * nice level changed. I.e. when a CPU-bound task goes from nice 0 to
+ * nice 1, it will get ~10% less CPU time than another CPU-bound task
+ * that remained on nice 0.
+ *
+ * The "10% effect" is relative and cumulative: from _any_ nice level,
+ * if you go up 1 level, it's -10% CPU usage, if you go down 1 level
+ * it's +10% CPU usage. (to achieve that we use a multiplier of 1.25.
+ * If a task goes up by ~10% and another task goes down by ~10% then
+ * the relative distance between them is ~25%.)"
+ */
+const int sched_prio_to_weight[DL_MAX_LAT_PRIO] = {
+ /* -20 */     88761,     71755,     56483,     46273,     36291,
+ /* -15 */     29154,     23254,     18705,     14949,     11916,
+ /* -10 */      9548,      7620,      6100,      4904,      3906,
+ /*  -5 */      3121,      2501,      1991,      1586,      1277,
+ /*   0 */      1024,       820,       655,       526,       423,
+ /*   5 */       335,       272,       215,       172,       137,
+ /*  10 */       110,        87,        70,        56,        45,
+ /*  15 */        36,        29,        23,        18,        15,
+};
+
+static u64 sched_prio_to_latency_weight(u64 prio)
+{
+	if (prio >= DL_MAX_LAT_PRIO) {
+		scx_bpf_error("Invalid prio index");
+		return 0;
+	}
+
+	return sched_prio_to_weight[DL_MAX_LAT_PRIO - prio - 1];
+}
+
+static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
+			   u64 enq_flags)
+{
+	u64 waker_freq, blocked_freq;
+	u64 lat_prio, lat_scale, avg_run_raw, avg_run;
+	u64 freq_factor;
+
+	/*
+	 * Determine the latency criticality of a task, and scale a task's
+	 * deadline accordingly. Much of this is inspired by the logic in
+	 * scx_lavd that was originally conceived and implemented by Changwoo
+	 * Min. Though the implementations for determining latency criticality
+	 * are quite different in many ways, individuals familiar with both
+	 * schedulers will feel an eerie sense of deja-vu. The details of
+	 * interactivity boosting for rusty are described below.
+	 */
+
+	/*
+	 * We begin by calculating the following interactivity factors for a
+	 * task:
+	 *
+	 * - waker_freq: The frequency with which a task wakes up other tasks.
+	 *		 A high waker frequency generally implies a producer
+	 *		 task that is at the beginning and/or middle of a work
+	 *		 chain.
+	 *
+	 * - blocked_freq: The frequency with which a task is blocked. A high
+	 *		   blocked frequency indicates a consumer task that is
+	 *		   at the middle and/or end of a work chain.
+	 *
+	 * A task that is high in both frequencies indicates what is often the
+	 * most latency-critical interactive task: a task that functions both
+	 * as a producer and a consumer by being in the _middle_ of a work
+	 * chain.
+	 *
+	 * We want to prioritize running these tasks, as they are likely to
+	 * have a disproporionate impact on the latency (and possibly
+	 * throughput) of the workload they are enabling due to Amdahl's law.
+	 * For example, say that you have a workload where 50% of the workload
+	 * is serialized by a producer and consumer task (25% each), and the
+	 * latter 50% is serviced in parallel by n CPU hogging tasks. If either
+	 * the producer or consumer is improved by a factor of x, it improves
+	 * the latency of the entire workload by:
+	 *
+	 *	S_lat(x) = 1 / ((1 - .25) + (.25 / x))
+	 *
+	 * Say that we improve wakeup latency by 2x for either task, the
+	 * latency improvement would be:
+	 *
+	 *	S_lat(2) = 1 / ((1 - .25) + (.25 / 2))
+	 *		 = 1 / (.75 + .125)
+	 *		 = 1 / .875
+	 *		~= 14.2%
+	 *
+	 * If we instead improve wakeup latency by 2x for all the n parallel
+	 * tasks in the latter 50% of the workload window, the improvement
+	 * would be:
+	 *
+	 *	S_lat(2) = 1 / ((1 - .5) + (.5 / 2))
+	 *		 = 1 / (.5 + .25)
+	 *		 = 1 / .75
+	 *		~= 33%
+	 *
+	 * This is also significant, but the returns are amortized across all
+	 * of those tasks. Thus, by giving a latency boost to the producer /
+	 * consumer tasks, we optimize for the case of scheduling tasks that
+	 * are on the critical path for serial workchains, and have a
+	 * disproportionate impact on the latency of a workload.
+	 *
+	 * We multiply the frequencies of wait_freq and waker_freq somewhat
+	 * arbitrarily, based on observed performance for audio and gaming
+	 * interactive workloads.
+	 */
+	waker_freq = min(taskc->waker_freq, DL_FREQ_FT_MAX);
+	blocked_freq = min(taskc->blocked_freq, DL_FREQ_FT_MAX);
+	freq_factor = blocked_freq * waker_freq * waker_freq;
+
+	/*
+	 * Scale the frequency factor according to the task's weight. A task
+	 * with higher weight is given a higher frequency factor than a task
+	 * with a lower weight.
+	 */
+	freq_factor = scale_up_fair(freq_factor, p->scx.weight);
+
+	/*
+	 * The above frequencies roughly follow an exponential distribution, so
+	 * borrow the bpf_log2l() implementation from lavd to linearize it to a
+	 * boost priority.
+	 */
+	lat_prio = bpf_log2l(freq_factor + 1);
+	lat_prio = min(lat_prio, DL_MAX_LAT_PRIO);
+
+	/*
+	 * Next calculate a task's average runtime, and apply it to deadline
+	 * accordingly. A task with a large runtime is penalized from an
+	 * interactivity standpoint, for obvious reasons.
+	 *
+	 * As with waker and blocked frequencies above, this follows an
+	 * exponential distribution. We inversely scale to account for
+	 * empirical observations which seem to bring it roughly to the same
+	 * order of magnitude as the blocker and waker frequencies above.
+	 *
+	 * We inversely scale the task's averge_runtime to cause tasks with
+	 * lower weight to receive a harsher penalty for long runtimes, and
+	 * vice versa for tasks with lower weight.
+	 */
+	avg_run_raw = taskc->avg_runtime / DL_RUNTIME_SCALE;
+	avg_run_raw = (avg_run_raw, DL_MAX_LATENCY_NS);
+	avg_run_raw = scale_inverse_fair(avg_run_raw, p->scx.weight);
+	avg_run = bpf_log2l(avg_run_raw + 1);
+
+	if (avg_run < lat_prio) {
+		/* Equivalent to lat_prio = log(freq_factor / avg_run_raw) */
+		lat_prio -= avg_run;
+	} else {
+		lat_prio = 0;
+	}
+
+	/*
+	 * Ultimately, what we're trying to arrive at is a single value
+	 * 'lat_prio' that we can use to compute the weight that we use to
+	 * scale a task's average runtime as below.
+	 *
+	 * To summarize what we've done above, we compute this lat_prio as the
+	 * sum of a task's frequency factor, minus an average runtime factor.
+	 * Both factors are scaled according to a task's weight.
+	 *
+	 * Today, we're just interpreting lat_prio as a niceness value, but
+	 * this can and almost certainly will likely change to something more
+	 * generic and/or continuous and flexible so that it can also
+	 * accommodate cgroups.
+	 */
+	lat_scale = sched_prio_to_latency_weight(lat_prio);
+	lat_scale = min(lat_scale, LB_MAX_WEIGHT);
+
+	/*
+	 * Finally, with our 'lat_scale' weight, we compute the length of the
+	 * task's request as:
+	 *
+	 * r_i = avg_runtime * 100 / lat_scale
+	 *
+	 * In other words, the "CPU request length" which is used to determine
+	 * the actual absolute vtime that the task is dispatched with.
+	 */
+	return scale_inverse_fair(taskc->avg_runtime, lat_scale);
+}
+
+static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 enq_flags)
+{
+	u64 dom_vruntime, min_vruntime;
+	struct dom_ctx *domc;
+
+	if (!(domc = lookup_dom_ctx(taskc->dom_id)))
+		return;
+
+	dom_vruntime = dom_min_vruntime(domc);
+	min_vruntime = dom_vruntime - slice_ns;
+	/*
+	 * Allow an idling task to accumulate at most one slice worth of
+	 * vruntime budget. This prevents e.g. a task for sleeping for 1 day,
+	 * and then coming back and having essentially full use of the CPU for
+	 * an entire day until it's caught up to the other tasks' vtimes.
+	 */
+	if (vtime_before(p->scx.dsq_vtime, min_vruntime)) {
+		p->scx.dsq_vtime = min_vruntime;
+		taskc->deadline = p->scx.dsq_vtime + task_compute_dl(p, taskc, enq_flags);
+		stat_add(RUSTY_STAT_DL_CLAMP, 1);
+	} else {
+		stat_add(RUSTY_STAT_DL_PRESET, 1);
+	}
+}
+
 static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
 	struct dom_ctx *old_domc, *new_domc;
 	struct bpf_cpumask *d_cpumask, *t_cpumask;
 	u32 old_dom_id = taskc->dom_id;
-	s64 vtime_delta;
 
 	t_cpumask = taskc->cpumask;
 	if (!t_cpumask) {
@@ -466,11 +767,6 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	old_domc = lookup_dom_ctx(old_dom_id);
 	if (!old_domc)
 		return false;
-
-	if (init_dsq_vtime)
-		vtime_delta = 0;
-	else
-		vtime_delta = p->scx.dsq_vtime - old_domc->vtime_now;
 
 	new_domc = try_lookup_dom_ctx(new_dom_id);
 	if (!new_domc) {
@@ -506,10 +802,12 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 				   p->cpus_ptr)) {
 		u64 now = bpf_ktime_get_ns();
 
-		dom_load_xfer_task(p, taskc, taskc->dom_id, new_dom_id, now);
-
-		p->scx.dsq_vtime = new_domc->vtime_now + vtime_delta;
+		if (!init_dsq_vtime)
+			dom_xfer_task(p, taskc, taskc->dom_id, new_dom_id, now);
 		taskc->dom_id = new_dom_id;
+		p->scx.dsq_vtime = dom_min_vruntime(new_domc);
+		taskc->deadline = p->scx.dsq_vtime +
+				  scale_inverse_fair(taskc->avg_runtime, taskc->weight);
 		bpf_cpumask_and(t_cpumask, (const struct cpumask *)d_cpumask,
 				p->cpus_ptr);
 	}
@@ -775,6 +1073,14 @@ enoent:
 	return -ENOENT;
 }
 
+static void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
+			  u64 enq_flags)
+{
+	clamp_task_vtime(p, taskc, enq_flags);
+	scx_bpf_dispatch_vtime(p, taskc->dom_id, slice_ns, taskc->deadline,
+			       enq_flags);
+}
+
 void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *taskc;
@@ -825,26 +1131,10 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 dom_queue:
-	if (fifo_sched) {
+	if (fifo_sched)
 		scx_bpf_dispatch(p, taskc->dom_id, slice_ns, enq_flags);
-	} else {
-		u64 vtime = p->scx.dsq_vtime;
-		u32 dom_id = taskc->dom_id;
-		struct dom_ctx *domc;
-
-		domc = lookup_dom_ctx(dom_id);
-		if (!domc)
-			return;
-
-		/*
-		 * Limit the amount of budget that an idling task can accumulate
-		 * to one slice.
-		 */
-		if (vtime_before(vtime, domc->vtime_now - slice_ns))
-			vtime = domc->vtime_now - slice_ns;
-
-		scx_bpf_dispatch_vtime(p, taskc->dom_id, slice_ns, vtime, enq_flags);
-	}
+	else
+		place_task_dl(p, taskc, enq_flags);
 
 	/*
 	 * If there are CPUs which are idle and not saturated, wake them up to
@@ -884,29 +1174,6 @@ static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
 			return true;
 	}
 	return false;
-}
-
-static u32 dom_rr_next(s32 cpu)
-{
-	struct pcpu_ctx *pcpuc;
-	u32 idx, *dom_id;
-
-	pcpuc = lookup_pcpu_ctx(cpu);
-	if (!pcpuc || !pcpuc->nr_node_doms)
-		return 0;
-
-	idx = (pcpuc->dom_rr_cur + 1) % pcpuc->nr_node_doms;
-	dom_id = MEMBER_VPTR(pcpuc->node_doms, [idx]);
-	if (!dom_id) {
-		scx_bpf_error("Failed to lookup dom for %d", cpu);
-		return 0;
-	}
-
-	if (*dom_id == cpu_to_dom_id(cpu))
-		scx_bpf_error("%d found current dom in node_doms array", cpu);
-
-	pcpuc->dom_rr_cur++;
-	return *dom_id;
 }
 
 u32 dom_node_id(u32 dom_id)
@@ -966,23 +1233,73 @@ void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 	}
 }
 
+/*
+ * Exponential weighted moving average
+ *
+ * Copied from scx_lavd. Returns the new average as:
+ *
+ *	new_avg := (old_avg * .75) + (new_val * .25);
+ */
+static u64 calc_avg(u64 old_val, u64 new_val)
+{
+	return (old_val - (old_val >> 2)) + (new_val >> 2);
+}
+
+static u64 update_freq(u64 freq, u64 interval)
+{
+	u64 new_freq;
+
+	new_freq = (100 * NSEC_PER_MSEC) / interval;
+	return calc_avg(freq, new_freq);
+}
+
 void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 {
-	u64 now = bpf_ktime_get_ns();
-	struct task_ctx *taskc;
+	u64 now = bpf_ktime_get_ns(), interval;
+	struct task_struct *waker;
+	struct task_ctx *wakee_ctx, *waker_ctx;
 
-	if (!(taskc = lookup_task_ctx(p)))
+	if (!(wakee_ctx = lookup_task_ctx(p)))
 		return;
 
-	if (taskc->offline) {
+	if (wakee_ctx->offline) {
 		scx_bpf_error("Offline task [%s](%d) is becoming runnable",
 			      p->comm, p->pid);
 		return;
 	}
-	taskc->is_kworker = p->flags & PF_WQ_WORKER;
 
-	task_load_adj(p, taskc, now, true);
-	dom_dcycle_adj(taskc->dom_id, taskc->weight, now, true);
+	wakee_ctx->is_kworker = p->flags & PF_WQ_WORKER;
+
+	task_load_adj(p, wakee_ctx, now, true);
+	dom_dcycle_adj(wakee_ctx->dom_id, wakee_ctx->weight, now, true);
+
+	if (fifo_sched)
+		return;
+
+	wakee_ctx->sum_runtime = 0;
+
+	waker = bpf_get_current_task_btf();
+	if (!(waker_ctx = lookup_task_ctx(p)))
+		return;
+
+	interval = now - waker_ctx->last_woke_at;
+	waker_ctx->waker_freq = update_freq(waker_ctx->waker_freq, interval);
+	waker_ctx->last_woke_at = now;
+}
+
+static void running_update_vtime(struct task_struct *p,
+				 struct task_ctx *taskc,
+				 struct dom_ctx *domc)
+{
+	struct lock_wrapper* lockw = lookup_dom_vtime_lock(domc->id);
+
+	if (!lockw)
+		return;
+
+	bpf_spin_lock(&lockw->lock);
+	if (vtime_before(domc->min_vruntime, p->scx.dsq_vtime))
+		domc->min_vruntime = p->scx.dsq_vtime;
+	bpf_spin_unlock(&lockw->lock);
 }
 
 void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
@@ -994,7 +1311,6 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	taskc->running_at = bpf_ktime_get_ns();
 	dom_id = taskc->dom_id;
 	if (dom_id >= MAX_DOMS) {
 		scx_bpf_error("Invalid dom ID");
@@ -1030,19 +1346,34 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	if (!domc)
 		return;
 
-	/*
-	 * Global vtime always progresses forward as tasks start executing. The
-	 * test and update can be performed concurrently from multiple CPUs and
-	 * thus racy. Any error should be contained and temporary. Let's just
-	 * live with it.
-	 */
-	if (vtime_before(domc->vtime_now, p->scx.dsq_vtime))
-		domc->vtime_now = p->scx.dsq_vtime;
+	running_update_vtime(p, taskc, domc);
+	taskc->last_run_at = bpf_ktime_get_ns();
+}
+
+static void stopping_update_vtime(struct task_struct *p,
+				  struct task_ctx *taskc,
+				  struct dom_ctx *domc)
+{
+	struct lock_wrapper* lockw = lookup_dom_vtime_lock(domc->id);
+	u64 now, delta;
+
+	if (!lockw)
+		return;
+
+	now = bpf_ktime_get_ns();
+	delta = now - taskc->last_run_at;
+
+	taskc->sum_runtime += delta;
+	taskc->avg_runtime = calc_avg(taskc->avg_runtime, taskc->sum_runtime);
+
+	p->scx.dsq_vtime += scale_inverse_fair(delta, p->scx.weight);
+	taskc->deadline = p->scx.dsq_vtime + task_compute_dl(p, taskc, 0);
 }
 
 void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
 {
 	struct task_ctx *taskc;
+	struct dom_ctx *domc;
 
 	if (fifo_sched)
 		return;
@@ -1050,21 +1381,33 @@ void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	/* scale the execution time by the inverse of the weight and charge */
-	p->scx.dsq_vtime +=
-		(bpf_ktime_get_ns() - taskc->running_at) * 100 / p->scx.weight;
+	if (!(domc = lookup_dom_ctx(taskc->dom_id)))
+		return;
+
+	stopping_update_vtime(p, taskc, domc);
 }
 
 void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 {
-	u64 now = bpf_ktime_get_ns();
+	u64 now = bpf_ktime_get_ns(), interval;
 	struct task_ctx *taskc;
+	struct dom_ctx *domc;
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
 	task_load_adj(p, taskc, now, false);
 	dom_dcycle_adj(taskc->dom_id, taskc->weight, now, false);
+
+	if (fifo_sched)
+		return;
+
+	if (!(domc = lookup_dom_ctx(taskc->dom_id)))
+		return;
+
+	interval = now - taskc->last_blocked_at;
+	taskc->blocked_freq = update_freq(taskc->blocked_freq, interval);
+	taskc->last_blocked_at = now;
 }
 
 void BPF_STRUCT_OPS(rusty_set_weight, struct task_struct *p, u32 weight)
@@ -1160,7 +1503,13 @@ static s32 create_save_cpumask(struct bpf_cpumask **kptr)
 s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
-	struct task_ctx taskc = { .dom_active_pids_gen = -1 };
+	u64 now = bpf_ktime_get_ns();
+	struct task_ctx taskc = {
+		.dom_active_pids_gen = -1,
+		.last_blocked_at = now,
+		.last_woke_at = now,
+
+	};
 	struct task_ctx *map_value;
 	long ret;
 	pid_t pid;
@@ -1294,6 +1643,8 @@ static s32 create_dom(u32 dom_id)
 	domc = lookup_dom_ctx(dom_id);
 	if (!domc)
 		return -ENOENT;
+
+	domc->id = dom_id;
 
 	ret = create_save_cpumask(&domc->cpumask);
 	if (ret)
@@ -1485,4 +1836,5 @@ SCX_OPS_DEFINE(rusty,
 	       .cpu_offline		= (void *)rusty_cpu_offline,
 	       .init			= (void *)rusty_init,
 	       .exit			= (void *)rusty_exit,
+	       .timeout_ms		= 10000,
 	       .name			= "rusty");

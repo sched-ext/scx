@@ -489,6 +489,12 @@ impl<'a> Scheduler<'a> {
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_KICK_GREEDY),
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_REPATRIATE),
         );
+        info!(
+            "dl_clamped={:5.2} dl_preset={:5.2}",
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_CLAMP),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_PRESET),
+
+        );
 
         info!("direct_greedy_cpumask={}", self.tuner.direct_greedy_mask);
         info!("  kick_greedy_cpumask={}", self.tuner.kick_greedy_mask);

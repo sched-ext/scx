@@ -34,6 +34,22 @@ enum consts {
 	LB_LOAD_BUCKETS		= 100,	/* Must be a factor of LB_MAX_WEIGHT */
 	LB_WEIGHT_PER_BUCKET	= LB_MAX_WEIGHT / LB_LOAD_BUCKETS,
 
+	/* Time constants */
+	MSEC_PER_SEC		= 1000LLU,
+	USEC_PER_MSEC		= 1000LLU,
+	NSEC_PER_USEC		= 1000LLU,
+	NSEC_PER_MSEC           = USEC_PER_MSEC * NSEC_PER_USEC,
+	USEC_PER_SEC            = USEC_PER_MSEC * MSEC_PER_SEC,
+	NSEC_PER_SEC            = NSEC_PER_USEC * USEC_PER_SEC,
+
+	/* Constants used for determining a task's deadline */
+	DL_RUNTIME_SCALE	= 2, /* roughly scales average runtime to */
+				     /* same order of magnitude as waker  */
+				     /* and blocked frequencies */
+	DL_MAX_LATENCY_NS	= (50 * NSEC_PER_MSEC),
+	DL_FREQ_FT_MAX		= 100000,
+	DL_MAX_LAT_PRIO		= 39,
+
 	/*
 	 * When userspace load balancer is trying to determine the tasks to push
 	 * out from an overloaded domain, it looks at the the following number
@@ -71,6 +87,10 @@ enum stat_idx {
 	/* Errors */
 	RUSTY_STAT_TASK_GET_ERR,
 
+	/* Deadline related stats */
+	RUSTY_STAT_DL_CLAMP,
+	RUSTY_STAT_DL_PRESET,
+
 	RUSTY_NR_STATS,
 };
 
@@ -84,7 +104,19 @@ struct task_ctx {
 	u32 weight;
 	bool runnable;
 	u64 dom_active_pids_gen;
-	u64 running_at;
+	u64 deadline;
+
+	u64 sum_runtime;
+	u64 avg_runtime;
+	u64 last_run_at;
+
+	/* frequency with which a task is blocked (consumer) */
+	u64 blocked_freq;
+	u64 last_blocked_at;
+
+	/* frequency with which a task wakes other tasks (producer) */
+	u64 waker_freq;
+	u64 last_woke_at;
 
 	/* The task is a workqueue worker thread */
 	bool is_kworker;
@@ -110,11 +142,12 @@ struct bucket_ctx {
 };
 
 struct dom_ctx {
-	u64 vtime_now;
+	u32 id;
 	struct bpf_cpumask __kptr *cpumask;
 	struct bpf_cpumask __kptr *direct_greedy_cpumask;
 	struct bpf_cpumask __kptr *node_cpumask;
-	u32 node_id;
+
+	u64 min_vruntime;
 
 	u64 dbg_dcycle_printed_at;
 	struct bucket_ctx buckets[LB_LOAD_BUCKETS];
