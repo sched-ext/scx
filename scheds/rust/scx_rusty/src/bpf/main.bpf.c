@@ -144,6 +144,22 @@ struct {
 	__uint(map_flags, 0);
 } task_data SEC(".maps");
 
+static struct dom_ctx *try_lookup_dom_ctx(u32 dom_id)
+{
+	return bpf_map_lookup_elem(&dom_data, &dom_id);
+}
+
+static struct dom_ctx *lookup_dom_ctx(u32 dom_id)
+{
+	struct dom_ctx *domc;
+
+	domc = try_lookup_dom_ctx(dom_id);
+	if (!domc)
+		scx_bpf_error("Failed to lookup dom[%u]", dom_id);
+
+	return domc;
+}
+
 static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 {
 	struct task_ctx *taskc;
@@ -217,11 +233,8 @@ static void dom_dcycle_adj(u32 dom_id, u32 weight, u64 now, bool runnable)
 	s64 adj = runnable ? 1 : -1;
 	u32 bucket_idx = 0;
 
-	domc = bpf_map_lookup_elem(&dom_data, &dom_id);
-	if (!domc) {
-		scx_bpf_error("Failed to lookup dom_ctx");
+	if (!(domc = lookup_dom_ctx(dom_id)))
 		return;
-	}
 
 	bucket = lookup_dom_bucket(domc, weight, &bucket_idx);
 	lockw = lookup_dom_lock(dom_id, weight);
@@ -258,14 +271,12 @@ static void dom_load_xfer_task(struct task_struct *p, struct task_ctx *taskc,
 	struct ravg_data task_dcyc_rd;
 	u64 from_dcycle[2], to_dcycle[2], task_dcycle;
 
-	from_domc = bpf_map_lookup_elem(&dom_data, &from_dom_id);
+	from_domc = lookup_dom_ctx(from_dom_id);
 	from_lockw = lookup_dom_lock(from_dom_id, weight);
-	to_domc = bpf_map_lookup_elem(&dom_data, &to_dom_id);
+	to_domc = lookup_dom_ctx(to_dom_id);
 	to_lockw = lookup_dom_lock(to_dom_id, weight);
-	if (!from_domc || !from_lockw || !to_domc || !to_lockw) {
-		scx_bpf_error("dom_ctx / lock lookup failed");
+	if (!from_domc || !from_lockw || !to_domc || !to_lockw)
 		return;
-	}
 
 	from_bucket = lookup_dom_bucket(from_domc, weight, &idx);
 	to_bucket = lookup_dom_bucket(to_domc, weight, &idx);
@@ -413,10 +424,8 @@ static void refresh_tune_params(void)
 		if (is_offline_cpu(cpu))
 			continue;
 
-		if (!(domc = bpf_map_lookup_elem(&dom_data, &dom_id))) {
-			scx_bpf_error("Failed to lookup dom[%u]", dom_id);
+		if (!(domc = lookup_dom_ctx(dom_id)))
 			return;
-		}
 
 		if (tune_input.direct_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
 			if (direct_greedy_cpumask)
@@ -454,18 +463,16 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 		return false;
 	}
 
-	old_domc = bpf_map_lookup_elem(&dom_data, &old_dom_id);
-	if (!old_domc) {
-		scx_bpf_error("Failed to lookup old dom%u", old_dom_id);
+	old_domc = lookup_dom_ctx(old_dom_id);
+	if (!old_domc)
 		return false;
-	}
 
 	if (init_dsq_vtime)
 		vtime_delta = 0;
 	else
 		vtime_delta = p->scx.dsq_vtime - old_domc->vtime_now;
 
-	new_domc = bpf_map_lookup_elem(&dom_data, &new_dom_id);
+	new_domc = try_lookup_dom_ctx(new_dom_id);
 	if (!new_domc) {
 		if (new_dom_id == NO_DOM_FOUND) {
 			taskc->offline = true;
@@ -550,11 +557,9 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 			const struct cpumask *idle_cpumask;
 			bool has_idle;
 
-			domc = bpf_map_lookup_elem(&dom_data, &taskc->dom_id);
-			if (!domc) {
-				scx_bpf_error("Failed to find dom%u", taskc->dom_id);
+			domc = lookup_dom_ctx(taskc->dom_id);
+			if (!domc)
 				goto enoent;
-			}
 			d_cpumask = domc->cpumask;
 			if (!d_cpumask) {
 				scx_bpf_error("Failed to acquire dom%u cpumask kptr",
@@ -657,10 +662,8 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		struct dom_ctx *domc;
 		struct bpf_cpumask *tmp_direct_greedy, *node_mask;
 
-		if (!(domc = bpf_map_lookup_elem(&dom_data, &dom_id))) {
-			scx_bpf_error("Failed to lookup dom[%u]", dom_id);
+		if (!(domc = lookup_dom_ctx(dom_id)))
 			goto enoent;
-		}
 
 		tmp_direct_greedy = direct_greedy_cpumask;
 		if (!tmp_direct_greedy) {
@@ -829,11 +832,9 @@ dom_queue:
 		u32 dom_id = taskc->dom_id;
 		struct dom_ctx *domc;
 
-		domc = bpf_map_lookup_elem(&dom_data, &dom_id);
-		if (!domc) {
-			scx_bpf_error("Failed to lookup dom[%u]", dom_id);
+		domc = lookup_dom_ctx(dom_id);
+		if (!domc)
 			return;
-		}
 
 		/*
 		 * Limit the amount of budget that an idling task can accumulate
@@ -1025,11 +1026,9 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	if (fifo_sched)
 		return;
 
-	domc = bpf_map_lookup_elem(&dom_data, &dom_id);
-	if (!domc) {
-		scx_bpf_error("Failed to lookup dom[%u]", dom_id);
+	domc = lookup_dom_ctx(dom_id);
+	if (!domc)
 		return;
-	}
 
 	/*
 	 * Global vtime always progresses forward as tasks start executing. The
@@ -1292,13 +1291,9 @@ static s32 create_dom(u32 dom_id)
 		return ret;
 	}
 
-	domc = bpf_map_lookup_elem(&dom_data, &dom_id);
-	if (!domc) {
-		/* Should never happen, it's created statically at load time. */
-		scx_bpf_error("No dom%u", dom_id);
+	domc = lookup_dom_ctx(dom_id);
+	if (!domc)
 		return -ENOENT;
-	}
-
 
 	ret = create_save_cpumask(&domc->cpumask);
 	if (ret)
@@ -1373,11 +1368,9 @@ static s32 initialize_cpu(s32 cpu)
 
 	pcpuc->dom_rr_cur = cpu;
 	bpf_for(i, 0, nr_doms) {
-		domc = bpf_map_lookup_elem(&dom_data, &i);
-		if (!domc) {
-			scx_bpf_error("Failed to lookup dom_ctx");
+		domc = lookup_dom_ctx(i);
+		if (!domc)
 			return -ENOENT;
-		}
 		bpf_rcu_read_lock();
 		cpumask = domc->node_cpumask;
 		if (!cpumask) {
