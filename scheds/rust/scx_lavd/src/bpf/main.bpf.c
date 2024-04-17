@@ -1134,10 +1134,10 @@ static u64 calc_latency_weight(struct task_struct *p, struct task_ctx *taskc,
 	return sched_prio_to_latency_weight[taskc->lat_prio];
 }
 
-static u64 calc_virtual_dealine_delta(struct task_struct *p,
-				      struct task_ctx *taskc,
-				      struct cpu_ctx *cpuc,
-				      u64 enq_flags)
+static u64 calc_virtual_deadline_delta(struct task_struct *p,
+				       struct task_ctx *taskc,
+				       struct cpu_ctx *cpuc,
+				       u64 enq_flags)
 {
 	u64 load_factor = get_sys_cpu_util_cur()->load_factor;
 	u64 vdeadline_delta_ns, weight;
@@ -1148,8 +1148,8 @@ static u64 calc_virtual_dealine_delta(struct task_struct *p,
 	 *   vdeadline = now + (a full time slice * latency weight)
 	 *
 	 * where
-	 *   - weigth is detemined by nice priority and boost priorty
-	 *   - (a full time slice * latency weight) determins the time window
+	 *   - weight is determined by nice priority and boost priorty
+	 *   - (a full time slice * latency weight) determines the time window
 	 *   of competition among concurrent tasks.
 	 *
 	 * Note that not using average runtime (taskc->run_time) is intentional
@@ -1365,7 +1365,7 @@ static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 	 * urgent it is - vdeadline_delta_ns - and when it becomes eligible if
 	 * overscheduled - eligible_time_ns.
 	 */
-	calc_virtual_dealine_delta(p, taskc, cpuc, enq_flags);
+	calc_virtual_deadline_delta(p, taskc, cpuc, enq_flags);
 	calc_eligible_delta(p, taskc);
 }
 
