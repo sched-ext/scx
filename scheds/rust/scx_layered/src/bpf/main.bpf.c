@@ -825,21 +825,8 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
-	struct task_ctx tctx_init = {
-		.pid = p->pid,
-		.layer = -1,
-		.refresh_layer = true,
-	};
 	struct task_ctx *tctx;
 	struct bpf_cpumask *cpumask;
-	s32 pid = p->pid;
-	s32 ret;
-
-	if (all_cpumask)
-		tctx_init.all_cpus_allowed =
-			bpf_cpumask_subset((const struct cpumask *)all_cpumask, p->cpus_ptr);
-	else
-		scx_bpf_error("missing all_cpumask");
 
 	/*
 	 * XXX - We want BPF_NOEXIST but bpf_map_delete_elem() in .disable() may
@@ -863,6 +850,16 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 		bpf_cpumask_release(cpumask);
 		return -EINVAL;
 	}
+
+	tctx->pid = p->pid;
+	tctx->layer = -1;
+	tctx->refresh_layer = true;
+
+	if (all_cpumask)
+		tctx->all_cpus_allowed =
+			bpf_cpumask_subset((const struct cpumask *)all_cpumask, p->cpus_ptr);
+	else
+		scx_bpf_error("missing all_cpumask");
 
 	/*
 	 * We are matching cgroup hierarchy path directly rather than the CPU
