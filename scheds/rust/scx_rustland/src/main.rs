@@ -175,6 +175,7 @@ impl TaskInfoMap {
 struct Task {
     qtask: QueuedTask,      // queued task
     vruntime: u64,          // total vruntime (that determines the order how tasks are dispatched)
+    is_interactive: bool,   // task can preempt other tasks
 }
 
 // Make sure tasks are ordered by vruntime, if multiple tasks have the same vruntime order by pid.
@@ -327,11 +328,12 @@ impl<'a> Scheduler<'a> {
         ts.as_nanos() as u64
     }
 
-    // Update task's vruntime based on the information collected from the kernel and return the
-    // evaluated weighted time slice to the caller.
+    // Update task's vruntime based on the information collected from the kernel and return to the
+    // caller the evaluated weighted time slice along with a flag indicating whether the task is
+    // interactive or not (interactive tasks are allowed to preempt other tasks).
     //
     // This method implements the main task ordering logic of the scheduler.
-    fn update_enqueued(&mut self, task: &QueuedTask) -> u64 {
+    fn update_enqueued(&mut self, task: &QueuedTask) -> (u64, bool) {
         // Determine if a task is new or old, based on their current runtime and previous runtime
         // counters.
         //
@@ -389,18 +391,19 @@ impl<'a> Scheduler<'a> {
             task.sum_exec_runtime - task_info.sum_exec_runtime
         };
 
-        // Apply the slice boost to interactive tasks.
-        //
         // Determine if a task is interactive, based on the moving average of voluntary context
         // switches over time.
         //
         // NOTE: we should make this threshold a tunable, but for now let's assume that a moving
         // average of 10 voluntary context switch per second is enough to classify the task as
         // interactive.
+        let is_interactive = task_info.avg_nvcsw >= 10;
+
+        // Apply the slice boost to interactive tasks.
         //
         // NOTE: some tasks may have a very high weight, that can potentially disrupt our slice
         // boost optimizations, therefore always limit the task priority to a max of 1000.
-        let weight = if task_info.avg_nvcsw >= 10 {
+        let weight = if is_interactive {
             task.weight.min(1000) * self.slice_boost.max(1)
         } else {
             task.weight.min(1000)
@@ -435,8 +438,8 @@ impl<'a> Scheduler<'a> {
             task_info.nvcsw_ts = now;
         }
 
-        // Return the task vruntime.
-        task_info.vruntime
+        // Return the task vruntime and a flag indicating if the task is interactive.
+        (task_info.vruntime, is_interactive)
     }
 
     // Drain all the tasks from the queued list, update their vruntime (Self::update_enqueued()),
@@ -452,13 +455,14 @@ impl<'a> Scheduler<'a> {
                         continue;
                     }
 
-                    // Update task information.
-                    let vruntime = self.update_enqueued(&task);
+                    // Update task information and determine vruntime and interactiveness.
+                    let (vruntime, is_interactive) = self.update_enqueued(&task);
 
                     // Insert task in the task pool (ordered by vruntime).
                     self.task_pool.push(Task {
                         qtask: task,
                         vruntime,
+                        is_interactive,
                     });
                 }
                 Ok(None) => {
@@ -509,6 +513,16 @@ impl<'a> Scheduler<'a> {
                     // Set special dispatch flags.
                     if !self.builtin_idle {
                         dispatched_task.set_flag(RL_CPU_ANY);
+                    }
+                    if task.is_interactive {
+                        // Assign the maximum time slice to this task and allow to preempt others.
+                        //
+                        // NOTE: considering that, with preemption enabled, interactive tasks can
+                        // preempt each other (for now) and they are also more likely to release
+                        // the CPU before its assigned time slice expires, always give them the
+                        // maximum static time slice allowed.
+                        dispatched_task.set_slice_ns(self.slice_ns);
+                        dispatched_task.set_flag(RL_PREEMPT_CPU);
                     }
 
                     // Send task to the BPF dispatcher.
