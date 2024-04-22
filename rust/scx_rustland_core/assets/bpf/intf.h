@@ -26,6 +26,39 @@ typedef unsigned long long u64;
 typedef long long s64;
 #endif
 
+/* Check a condition at build time */
+#define BUILD_BUG_ON(expr) \
+	do { \
+		extern char __build_assert__[(expr) ? -1 : 1] \
+			__attribute__((unused)); \
+	} while(0)
+
+/*
+ * Maximum amount of CPUs supported by this scheduler (this defines the size of
+ * cpu_map that is used to store the idle state and CPU ownership).
+ */
+#define MAX_CPUS 1024
+
+/* Isolate target CPU from dispatch flags. */
+#define CPU_MASK	(MAX_CPUS - 1)
+
+/* Use extra bits in the CPU attribute to store dispatch flags. */
+#define RL_BASE_FLAG	__builtin_ctz(MAX_CPUS)
+
+/* Define dispatch flags using macros. */
+#define RL_FLAG(flag) (1U << (RL_BASE_FLAG + flag))
+
+/* Dispatch flags */
+enum {
+	/*
+	 * Do not assign any specific CPU to the task.
+	 *
+	 * The task will be dispatched to the global shared DSQ and it will run
+	 * on the first CPU available.
+	 */
+	RL_CPU_ANY = RL_FLAG(0),
+};
+
 /*
  * Task sent to the user-space scheduler by the BPF dispatcher.
  *

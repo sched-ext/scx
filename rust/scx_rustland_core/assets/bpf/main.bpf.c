@@ -34,12 +34,6 @@ char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
 
 /*
- * Maximum amount of CPUs supported by this scheduler (this defines the size of
- * cpu_map that is used to store the idle state and CPU ownership).
- */
-#define MAX_CPUS 1024
-
-/*
  * Introduce a custom DSQ shared across all the CPUs, where we can dispatch
  * tasks that will be executed on the first CPU available.
  *
@@ -592,11 +586,12 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		 */
 		dbg_msg("usersched: pid=%d cpu=%d cpumask_cnt=%llu slice_ns=%llu",
 			task.pid, task.cpu, task.cpumask_cnt, task.slice_ns);
-		if (task.cpu < 0)
+
+		if (task.cpu & RL_CPU_ANY)
 			dispatch_task(p, SHARED_DSQ, 0, task.slice_ns, 0);
 		else
-			dispatch_task(p, cpu_to_dsq(task.cpu), task.cpumask_cnt,
-				      task.slice_ns, 0);
+			dispatch_task(p, cpu_to_dsq(task.cpu & CPU_MASK),
+				      task.cpumask_cnt, task.slice_ns, 0);
 		bpf_task_release(p);
 		__sync_fetch_and_add(&nr_user_dispatches, 1);
 	}
@@ -856,6 +851,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rustland_init)
 {
 	int err;
 
+	/* Compile-time checks */
+	BUILD_BUG_ON((MAX_CPUS % 2));
+
+	/* Initialize rustland core */
 	err = dsq_init();
 	if (err)
 		return err;

@@ -173,8 +173,8 @@ impl TaskInfoMap {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 struct Task {
-    qtask: QueuedTask, // queued task
-    vruntime: u64,     // total vruntime (that determines the order how tasks are dispatched)
+    qtask: QueuedTask,      // queued task
+    vruntime: u64,          // total vruntime (that determines the order how tasks are dispatched)
 }
 
 // Make sure tasks are ordered by vruntime, if multiple tasks have the same vruntime order by pid.
@@ -505,8 +505,10 @@ impl<'a> Scheduler<'a> {
                     // If built-in idle selection logic is disabled, dispatch on the first CPU
                     // available.
                     let mut dispatched_task = DispatchedTask::new(&task.qtask);
+
+                    // Set special dispatch flags.
                     if !self.builtin_idle {
-                        dispatched_task.set_cpu(NO_CPU);
+                        dispatched_task.set_flag(RL_CPU_ANY);
                     }
 
                     // Send task to the BPF dispatcher.

@@ -26,11 +26,11 @@ use scx_rustland_core::ALLOCATOR;
 // Defined in UAPI
 const SCHED_EXT: i32 = 7;
 
-// Do not assign any specific CPU to the task.
+// Allow to dispatch the task on any CPU.
 //
 // The task will be dispatched to the global shared DSQ and it will run on the first CPU available.
 #[allow(dead_code)]
-pub const NO_CPU: i32 = -1;
+pub const RL_CPU_ANY: i32 = bpf_intf::RL_CPU_ANY as i32;
 
 /// High-level Rust abstraction to interact with a generic sched-ext BPF component.
 ///
@@ -93,6 +93,12 @@ impl DispatchedTask {
     #[allow(dead_code)]
     pub fn set_cpu(&mut self, cpu: i32) {
         self.cpu = cpu;
+    }
+
+    // Assign a specific dispatch flag to a task.
+    #[allow(dead_code)]
+    pub fn set_flag(&mut self, flag: i32) {
+        self.cpu |= flag;
     }
 
     // Assign a specific time slice to a task.
