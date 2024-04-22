@@ -108,6 +108,16 @@ struct Opts {
     #[clap(short = 'i', long, action = clap::ArgAction::SetTrue)]
     builtin_idle: bool,
 
+    /// If specified, disable task preemption.
+    ///
+    /// Disabling task preemption can help to improve the throughput of CPU-intensive tasks, while
+    /// still providing a good level of system responsiveness.
+    ///
+    /// Preemption is enabled by default to provide a higher level of responsiveness to the
+    /// interactive tasks.
+    #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
+    no_preemption: bool,
+
     /// If specified, all the scheduling events and actions will be processed in user-space,
     /// disabling any form of in-kernel optimization.
     ///
@@ -238,7 +248,8 @@ struct Scheduler<'a> {
     slice_boost: u64,      // Slice booster
     eff_slice_boost: u64,  // Effective slice booster
     init_page_faults: u64, // Initial page faults counter
-    builtin_idle: bool,   // Use sched-ext built-in idle selection logic
+    builtin_idle: bool,    // Use sched-ext built-in idle selection logic
+    no_preemption: bool,   // Disable task preemption
 }
 
 impl<'a> Scheduler<'a> {
@@ -255,6 +266,9 @@ impl<'a> Scheduler<'a> {
 
         // Use built-in idle selection logic.
         let builtin_idle = opts.builtin_idle;
+
+        // Disable task preemption.
+        let no_preemption = opts.no_preemption;
 
         // Scheduler task pool to sort tasks by vruntime.
         let task_pool = TaskTree::new();
@@ -292,6 +306,7 @@ impl<'a> Scheduler<'a> {
             eff_slice_boost,
             init_page_faults,
             builtin_idle,
+            no_preemption,
         })
     }
 
@@ -514,7 +529,7 @@ impl<'a> Scheduler<'a> {
                     if !self.builtin_idle {
                         dispatched_task.set_flag(RL_CPU_ANY);
                     }
-                    if task.is_interactive {
+                    if task.is_interactive && !self.no_preemption {
                         // Assign the maximum time slice to this task and allow to preempt others.
                         //
                         // NOTE: considering that, with preemption enabled, interactive tasks can
