@@ -57,6 +57,11 @@ enum {
 	 * on the first CPU available.
 	 */
 	RL_CPU_ANY = RL_FLAG(0),
+
+	/*
+	 * Allow to preempt the target CPU when dispatching the task.
+	 */
+	RL_PREEMPT_CPU = RL_FLAG(1),
 };
 
 /*

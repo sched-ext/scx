@@ -32,6 +32,10 @@ const SCHED_EXT: i32 = 7;
 #[allow(dead_code)]
 pub const RL_CPU_ANY: i32 = bpf_intf::RL_CPU_ANY as i32;
 
+// Allow to preempt the target CPU when dispatching the task.
+#[allow(dead_code)]
+pub const RL_PREEMPT_CPU: i32 = bpf_intf::RL_PREEMPT_CPU as i32;
+
 /// High-level Rust abstraction to interact with a generic sched-ext BPF component.
 ///
 /// Overview

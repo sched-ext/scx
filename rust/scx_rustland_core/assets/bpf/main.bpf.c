@@ -564,6 +564,7 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	bpf_repeat(MAX_ENQUEUED_TASKS) {
 		struct task_struct *p;
 		struct dispatched_task_ctx task;
+		u64 enq_flags = 0;
 
 		/*
 		 * Pop first task from the dispatched queue, stop if dispatch
@@ -576,22 +577,28 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		p = bpf_task_from_pid(task.pid);
 		if (!p)
 			continue;
+
+		dbg_msg("usersched: pid=%d cpu=%d cpumask_cnt=%llu slice_ns=%llu",
+			task.pid, task.cpu, task.cpumask_cnt, task.slice_ns);
+		/*
+		 * Map RL_PREEMPT_CPU to SCX_ENQ_PREEMPT and allow this task to
+		 * preempt others.
+		 */
+		if (task.cpu & RL_PREEMPT_CPU)
+			enq_flags = SCX_ENQ_PREEMPT;
 		/*
 		 * Check whether the user-space scheduler assigned a different
 		 * CPU to the task and migrate (if possible).
 		 *
-		 * If no CPU has been specified (task.cpu < 0), then dispatch
-		 * the task to the shared DSQ and rely on the built-in idle CPU
-		 * selection.
+		 * If the task has been submitted with RL_CPU_ANY, then
+		 * dispatch it to the shared DSQ and run it on the first CPU
+		 * available.
 		 */
-		dbg_msg("usersched: pid=%d cpu=%d cpumask_cnt=%llu slice_ns=%llu",
-			task.pid, task.cpu, task.cpumask_cnt, task.slice_ns);
-
 		if (task.cpu & RL_CPU_ANY)
-			dispatch_task(p, SHARED_DSQ, 0, task.slice_ns, 0);
+			dispatch_task(p, SHARED_DSQ, 0, task.slice_ns, enq_flags);
 		else
 			dispatch_task(p, cpu_to_dsq(task.cpu & CPU_MASK),
-				      task.cpumask_cnt, task.slice_ns, 0);
+				      task.cpumask_cnt, task.slice_ns, enq_flags);
 		bpf_task_release(p);
 		__sync_fetch_and_add(&nr_user_dispatches, 1);
 	}
