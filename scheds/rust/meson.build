@@ -1,7 +1,13 @@
 # the previous scheduler in the compile sequence
 sched = []
 
-# to add a new scheduler, assign the output of your custom_target to sched
+# Since meson and cargo tries build in parallel, this can cause significant load
+# when meson tries to launch N instances of cargo and cargo tries to compile N files
+# in parallel (N*N compiler instances in total).
+#
+# To prevent this from happening, we try to force meson to build them sequentially
+# by making the "current" scheduler depend on another scheduler.
+# To add a new scheduler, assign the output of your custom_target to sched
 # and add sched as a dependency to your custom_target. For example:
 #
 # sched = custom_target('scx_mysched',
