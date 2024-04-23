@@ -1,8 +1,8 @@
-custom_target('scx_layered',
+sched = custom_target('scx_layered',
               output: '@PLAINNAME@.__PHONY__',
               input: 'Cargo.toml',
               command: [cargo, 'build', '--manifest-path=@INPUT@', '--target-dir=@OUTDIR@',
                         cargo_build_args],
               env: cargo_env,
-              depends: [libbpf, bpftool_target],
-              build_by_default: true)
+              depends: [libbpf, bpftool_target, sched],
+              build_always_stale: true)
