@@ -26,6 +26,35 @@ typedef unsigned long long u64;
 typedef long long s64;
 #endif
 
+/* Check a condition at build time */
+#define BUILD_BUG_ON(expr) \
+	do { \
+		extern char __build_assert__[(expr) ? -1 : 1] \
+			__attribute__((unused)); \
+	} while(0)
+
+/*
+ * Maximum amount of CPUs supported by this scheduler (this defines the size of
+ * cpu_map that is used to store the idle state and CPU ownership).
+ */
+#define MAX_CPUS 1024
+
+/* Special dispatch flags */
+enum {
+	/*
+	 * Do not assign any specific CPU to the task.
+	 *
+	 * The task will be dispatched to the global shared DSQ and it will run
+	 * on the first CPU available.
+	 */
+	RL_CPU_ANY = 1 << 0,
+
+	/*
+	 * Allow to preempt the target CPU when dispatching the task.
+	 */
+	RL_PREEMPT_CPU = 1 << 1,
+};
+
 /*
  * Task sent to the user-space scheduler by the BPF dispatcher.
  *
@@ -49,6 +78,7 @@ struct queued_task_ctx {
 struct dispatched_task_ctx {
 	s32 pid;
 	s32 cpu; /* CPU where the task should be dispatched */
+	u64 flags; /* special dispatch flags */
 	u64 cpumask_cnt; /* cpumask generation counter */
 	u64 slice_ns; /* time slice assigned to the task (0=default) */
 };

@@ -34,12 +34,6 @@ char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
 
 /*
- * Maximum amount of CPUs supported by this scheduler (this defines the size of
- * cpu_map that is used to store the idle state and CPU ownership).
- */
-#define MAX_CPUS 1024
-
-/*
  * Introduce a custom DSQ shared across all the CPUs, where we can dispatch
  * tasks that will be executed on the first CPU available.
  *
@@ -570,6 +564,7 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	bpf_repeat(MAX_ENQUEUED_TASKS) {
 		struct task_struct *p;
 		struct dispatched_task_ctx task;
+		u64 enq_flags = 0;
 
 		/*
 		 * Pop first task from the dispatched queue, stop if dispatch
@@ -582,21 +577,28 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		p = bpf_task_from_pid(task.pid);
 		if (!p)
 			continue;
+
+		dbg_msg("usersched: pid=%d cpu=%d cpumask_cnt=%llu slice_ns=%llu flags=%llx",
+			task.pid, task.cpu, task.cpumask_cnt, task.slice_ns, task.flags);
+		/*
+		 * Map RL_PREEMPT_CPU to SCX_ENQ_PREEMPT and allow this task to
+		 * preempt others.
+		 */
+		if (task.flags & RL_PREEMPT_CPU)
+			enq_flags = SCX_ENQ_PREEMPT;
 		/*
 		 * Check whether the user-space scheduler assigned a different
 		 * CPU to the task and migrate (if possible).
 		 *
-		 * If no CPU has been specified (task.cpu < 0), then dispatch
-		 * the task to the shared DSQ and rely on the built-in idle CPU
-		 * selection.
+		 * If the task has been submitted with RL_CPU_ANY, then
+		 * dispatch it to the shared DSQ and run it on the first CPU
+		 * available.
 		 */
-		dbg_msg("usersched: pid=%d cpu=%d cpumask_cnt=%llu slice_ns=%llu",
-			task.pid, task.cpu, task.cpumask_cnt, task.slice_ns);
-		if (task.cpu < 0)
-			dispatch_task(p, SHARED_DSQ, 0, task.slice_ns, 0);
+		if (task.flags & RL_CPU_ANY)
+			dispatch_task(p, SHARED_DSQ, 0, task.slice_ns, enq_flags);
 		else
-			dispatch_task(p, cpu_to_dsq(task.cpu), task.cpumask_cnt,
-				      task.slice_ns, 0);
+			dispatch_task(p, cpu_to_dsq(task.cpu),
+				      task.cpumask_cnt, task.slice_ns, enq_flags);
 		bpf_task_release(p);
 		__sync_fetch_and_add(&nr_user_dispatches, 1);
 	}
@@ -856,6 +858,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rustland_init)
 {
 	int err;
 
+	/* Compile-time checks */
+	BUILD_BUG_ON((MAX_CPUS % 2));
+
+	/* Initialize rustland core */
 	err = dsq_init();
 	if (err)
 		return err;

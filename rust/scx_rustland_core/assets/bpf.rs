@@ -26,11 +26,15 @@ use scx_rustland_core::ALLOCATOR;
 // Defined in UAPI
 const SCHED_EXT: i32 = 7;
 
-// Do not assign any specific CPU to the task.
+// Allow to dispatch the task on any CPU.
 //
 // The task will be dispatched to the global shared DSQ and it will run on the first CPU available.
 #[allow(dead_code)]
-pub const NO_CPU: i32 = -1;
+pub const RL_CPU_ANY: u64 = bpf_intf::RL_CPU_ANY as u64;
+
+// Allow to preempt the target CPU when dispatching the task.
+#[allow(dead_code)]
+pub const RL_PREEMPT_CPU: u64 = bpf_intf::RL_PREEMPT_CPU as u64;
 
 /// High-level Rust abstraction to interact with a generic sched-ext BPF component.
 ///
@@ -71,6 +75,7 @@ pub struct QueuedTask {
 pub struct DispatchedTask {
     pid: i32,         // pid that uniquely identifies a task
     cpu: i32,         // target CPU selected by the scheduler
+    flags: u64,       // special dispatch flags
     slice_ns: u64,    // time slice assigned to the task (0 = default)
     cpumask_cnt: u64, // cpumask generation counter (private)
 }
@@ -84,6 +89,7 @@ impl DispatchedTask {
         DispatchedTask {
             pid: task.pid,
             cpu: task.cpu,
+            flags: 0,
             cpumask_cnt: task.cpumask_cnt,
             slice_ns: 0, // use default time slice
         }
@@ -93,6 +99,12 @@ impl DispatchedTask {
     #[allow(dead_code)]
     pub fn set_cpu(&mut self, cpu: i32) {
         self.cpu = cpu;
+    }
+
+    // Assign a specific dispatch flag to a task.
+    #[allow(dead_code)]
+    pub fn set_flag(&mut self, flag: u64) {
+        self.flags |= flag;
     }
 
     // Assign a specific time slice to a task.
@@ -141,6 +153,7 @@ impl DispatchedMessage {
         let dispatched_task_struct = bpf_intf::dispatched_task_ctx {
             pid: task.pid,
             cpu: task.cpu,
+            flags: task.flags,
             cpumask_cnt: task.cpumask_cnt,
             slice_ns: task.slice_ns,
         };
