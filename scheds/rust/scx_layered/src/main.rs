@@ -189,10 +189,15 @@ lazy_static::lazy_static! {
 ///
 /// The configuration can be specified in multiple json files and command
 /// line arguments. Each must contain valid layer configurations and they're
-/// concatenated in the specified order. In most cases, something like the
-/// following should do.
+/// concatenated in the specified order.
+///
+/// By default, an argument to scx_layered is interpreted as a JSON string. If
+/// the argument is a pointer to a JSON file, it should be prefixed with file:
+/// or f: as follows:
 ///
 ///   $ scx_layered file:example.json
+///   ...
+///   $ scx_layered f:example.json
 ///
 /// Statistics
 /// ==========
