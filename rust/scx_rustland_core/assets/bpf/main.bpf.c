@@ -578,13 +578,13 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		if (!p)
 			continue;
 
-		dbg_msg("usersched: pid=%d cpu=%d cpumask_cnt=%llu slice_ns=%llu",
-			task.pid, task.cpu, task.cpumask_cnt, task.slice_ns);
+		dbg_msg("usersched: pid=%d cpu=%d cpumask_cnt=%llu slice_ns=%llu flags=%llx",
+			task.pid, task.cpu, task.cpumask_cnt, task.slice_ns, task.flags);
 		/*
 		 * Map RL_PREEMPT_CPU to SCX_ENQ_PREEMPT and allow this task to
 		 * preempt others.
 		 */
-		if (task.cpu & RL_PREEMPT_CPU)
+		if (task.flags & RL_PREEMPT_CPU)
 			enq_flags = SCX_ENQ_PREEMPT;
 		/*
 		 * Check whether the user-space scheduler assigned a different
@@ -594,10 +594,10 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		 * dispatch it to the shared DSQ and run it on the first CPU
 		 * available.
 		 */
-		if (task.cpu & RL_CPU_ANY)
+		if (task.flags & RL_CPU_ANY)
 			dispatch_task(p, SHARED_DSQ, 0, task.slice_ns, enq_flags);
 		else
-			dispatch_task(p, cpu_to_dsq(task.cpu & CPU_MASK),
+			dispatch_task(p, cpu_to_dsq(task.cpu),
 				      task.cpumask_cnt, task.slice_ns, enq_flags);
 		bpf_task_release(p);
 		__sync_fetch_and_add(&nr_user_dispatches, 1);

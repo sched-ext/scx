@@ -39,16 +39,7 @@ typedef long long s64;
  */
 #define MAX_CPUS 1024
 
-/* Isolate target CPU from dispatch flags. */
-#define CPU_MASK	(MAX_CPUS - 1)
-
-/* Use extra bits in the CPU attribute to store dispatch flags. */
-#define RL_BASE_FLAG	__builtin_ctz(MAX_CPUS)
-
-/* Define dispatch flags using macros. */
-#define RL_FLAG(flag) (1U << (RL_BASE_FLAG + flag))
-
-/* Dispatch flags */
+/* Special dispatch flags */
 enum {
 	/*
 	 * Do not assign any specific CPU to the task.
@@ -56,12 +47,12 @@ enum {
 	 * The task will be dispatched to the global shared DSQ and it will run
 	 * on the first CPU available.
 	 */
-	RL_CPU_ANY = RL_FLAG(0),
+	RL_CPU_ANY = 1 << 0,
 
 	/*
 	 * Allow to preempt the target CPU when dispatching the task.
 	 */
-	RL_PREEMPT_CPU = RL_FLAG(1),
+	RL_PREEMPT_CPU = 1 << 1,
 };
 
 /*
@@ -87,6 +78,7 @@ struct queued_task_ctx {
 struct dispatched_task_ctx {
 	s32 pid;
 	s32 cpu; /* CPU where the task should be dispatched */
+	u64 flags; /* special dispatch flags */
 	u64 cpumask_cnt; /* cpumask generation counter */
 	u64 slice_ns; /* time slice assigned to the task (0=default) */
 };
