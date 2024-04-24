@@ -69,6 +69,7 @@ struct cpu_ctx {
 enum layer_match_kind {
 	MATCH_CGROUP_PREFIX,
 	MATCH_COMM_PREFIX,
+	MATCH_PCOMM_PREFIX,
 	MATCH_NICE_ABOVE,
 	MATCH_NICE_BELOW,
 	MATCH_NICE_EQUALS,
@@ -80,6 +81,7 @@ struct layer_match {
 	int		kind;
 	char		cgroup_prefix[MAX_PATH];
 	char		comm_prefix[MAX_COMM];
+	char		pcomm_prefix[MAX_COMM];
 	int		nice;
 };
 

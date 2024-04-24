@@ -598,6 +598,12 @@ static bool match_one(struct layer_match *match, struct task_struct *p, const ch
 		memcpy(comm, p->comm, MAX_COMM);
 		return match_prefix(match->comm_prefix, comm, MAX_COMM);
 	}
+	case MATCH_PCOMM_PREFIX: {
+		char pcomm[MAX_COMM];
+
+		memcpy(pcomm, p->group_leader->comm, MAX_COMM);
+		return match_prefix(match->pcomm_prefix, pcomm, MAX_COMM);
+	}
 	case MATCH_NICE_ABOVE:
 		return prio_to_nice((s32)p->static_prio) > match->nice;
 	case MATCH_NICE_BELOW:
@@ -964,6 +970,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 					break;
 				case MATCH_COMM_PREFIX:
 					dbg("%s COMM_PREFIX \"%s\"", header, match->comm_prefix);
+					break;
+				case MATCH_PCOMM_PREFIX:
+					dbg("%s PCOMM_PREFIX \"%s\"", header, match->pcomm_prefix);
 					break;
 				case MATCH_NICE_ABOVE:
 					dbg("%s NICE_ABOVE %d", header, match->nice);

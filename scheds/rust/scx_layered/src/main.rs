@@ -111,6 +111,8 @@ lazy_static::lazy_static! {
 ///
 /// - CommPrefix: Matches the task's comm prefix.
 ///
+/// - PcommPrefix: Matches the task's thread group leader's comm prefix.
+///
 /// - NiceAbove: Matches if the task's nice value is greater than the
 ///   pattern.
 ///
@@ -304,6 +306,7 @@ struct Opts {
 enum LayerMatch {
     CgroupPrefix(String),
     CommPrefix(String),
+    PcommPrefix(String),
     NiceAbove(i32),
     NiceBelow(i32),
     NiceEquals(i32),
@@ -1259,6 +1262,10 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_COMM_PREFIX as i32;
                             copy_into_cstr(&mut mt.comm_prefix, prefix.as_str());
                         }
+                        LayerMatch::PcommPrefix(prefix) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_PCOMM_PREFIX as i32;
+                            copy_into_cstr(&mut mt.pcomm_prefix, prefix.as_str());
+                        }
                         LayerMatch::NiceAbove(nice) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_NICE_ABOVE as i32;
                             mt.nice = *nice;
@@ -1846,6 +1853,11 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
                     LayerMatch::CommPrefix(prefix) => {
                         if prefix.len() > MAX_COMM {
                             bail!("Spec {:?} has too long a comm prefix", spec.name);
+                        }
+                    }
+                    LayerMatch::PcommPrefix(prefix) => {
+                        if prefix.len() > MAX_COMM {
+                            bail!("Spec {:?} has too long a process name prefix", spec.name);
                         }
                     }
                     _ => {}
