@@ -320,7 +320,7 @@ impl<'a> Scheduler<'a> {
         // Count the number of cores where all the CPUs are idle.
         for core in self.topo.cores().iter() {
             let mut all_idle = true;
-            for cpu_id in core.span().into_iter() {
+            for cpu_id in core.span().clone().into_iter() {
                 if self.bpf.get_cpu_pid(cpu_id as i32) != 0 {
                     all_idle = false;
                     break;
