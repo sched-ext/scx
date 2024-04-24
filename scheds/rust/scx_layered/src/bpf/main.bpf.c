@@ -763,7 +763,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 		}
 	}
 
-	if (layer->perf > 0)
+	if (bpf_ksym_exists(scx_bpf_cpuperf_set) && layer->perf > 0)
 		scx_bpf_cpuperf_set(cpu, layer->perf);
 
 	cctx->maybe_idle = false;

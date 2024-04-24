@@ -38,6 +38,7 @@ use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
+use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
 use scx_utils::scx_ops_attach;
@@ -1252,6 +1253,7 @@ struct Scheduler<'a> {
 impl<'a> Scheduler<'a> {
     fn init_layers(skel: &mut OpenBpfSkel, specs: &Vec<LayerSpec>) -> Result<()> {
         skel.rodata_mut().nr_layers = specs.len() as u32;
+        let mut perf_set = false;
 
         for (spec_i, spec) in specs.iter().enumerate() {
             let layer = &mut skel.bss_mut().layers[spec_i];
@@ -1317,6 +1319,12 @@ impl<'a> Scheduler<'a> {
                     layer.perf = u32::try_from(*perf)?;
                 }
             }
+
+            perf_set |= layer.perf > 0;
+        }
+
+        if perf_set && !compat::kfunc_exists("scx_bpf_cpuperf_set")? {
+            warn!("cpufreq support not available, ignoring perf configurations");
         }
 
         Ok(())
