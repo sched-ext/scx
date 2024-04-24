@@ -75,6 +75,7 @@ use glob::glob;
 use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::slice::Iter;
 
 #[derive(Debug, Clone)]
 pub struct Cpu {
@@ -249,6 +250,53 @@ impl Topology {
     }
 }
 
+/// Generate a topology map from a Topology object, represented as an array of arrays.
+///
+/// Each inner array corresponds to a core containing its associated CPU IDs. This map can
+/// facilitate efficient iteration over the host's topology.
+///
+/// # Example
+///
+/// ```
+/// let topo = Topology::new()?;
+/// let topo_map = TopologyMap::new(topo)?;
+///
+/// for (core_id, core) in topo_map.iter().enumerate() {
+///     for cpu in core {
+///         println!("core={} cpu={}", core_id, cpu);
+///     }
+/// }
+/// ```
+#[derive(Debug)]
+pub struct TopologyMap {
+    map: Vec<Vec<usize>>,
+    nr_cpus_possible: usize,
+}
+
+impl TopologyMap {
+    pub fn new(topo: Topology) -> Result<TopologyMap> {
+        let mut map: Vec<Vec<usize>> = Vec::new();
+
+        for core in topo.cores().into_iter() {
+            let mut cpu_ids: Vec<usize> = Vec::new();
+            for cpu_id in core.span().clone().into_iter() {
+                cpu_ids.push(cpu_id);
+            }
+            map.push(cpu_ids);
+        }
+        let nr_cpus_possible = topo.nr_cpus_possible;
+
+        Ok(TopologyMap { map, nr_cpus_possible, })
+    }
+
+    pub fn nr_cpus_possible(&self) -> usize {
+        self.nr_cpus_possible
+    }
+
+    pub fn iter(&self) -> Iter<Vec<usize>> {
+        self.map.iter()
+    }
+}
 
 /**********************************************
  * Helper functions for creating the Topology *
