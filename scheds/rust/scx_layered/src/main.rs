@@ -111,6 +111,8 @@ lazy_static::lazy_static! {
 ///
 /// - CommPrefix: Matches the task's comm prefix.
 ///
+/// - PcommPrefix: Matches the task's thread group leader's comm prefix.
+///
 /// - NiceAbove: Matches if the task's nice value is greater than the
 ///   pattern.
 ///
@@ -189,10 +191,15 @@ lazy_static::lazy_static! {
 ///
 /// The configuration can be specified in multiple json files and command
 /// line arguments. Each must contain valid layer configurations and they're
-/// concatenated in the specified order. In most cases, something like the
-/// following should do.
+/// concatenated in the specified order.
+///
+/// By default, an argument to scx_layered is interpreted as a JSON string. If
+/// the argument is a pointer to a JSON file, it should be prefixed with file:
+/// or f: as follows:
 ///
 ///   $ scx_layered file:example.json
+///   ...
+///   $ scx_layered f:example.json
 ///
 /// Statistics
 /// ==========
@@ -299,6 +306,7 @@ struct Opts {
 enum LayerMatch {
     CgroupPrefix(String),
     CommPrefix(String),
+    PcommPrefix(String),
     NiceAbove(i32),
     NiceBelow(i32),
     NiceEquals(i32),
@@ -1254,6 +1262,10 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_COMM_PREFIX as i32;
                             copy_into_cstr(&mut mt.comm_prefix, prefix.as_str());
                         }
+                        LayerMatch::PcommPrefix(prefix) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_PCOMM_PREFIX as i32;
+                            copy_into_cstr(&mut mt.pcomm_prefix, prefix.as_str());
+                        }
                         LayerMatch::NiceAbove(nice) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_NICE_ABOVE as i32;
                             mt.nice = *nice;
@@ -1841,6 +1853,11 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
                     LayerMatch::CommPrefix(prefix) => {
                         if prefix.len() > MAX_COMM {
                             bail!("Spec {:?} has too long a comm prefix", spec.name);
+                        }
+                    }
+                    LayerMatch::PcommPrefix(prefix) => {
+                        if prefix.len() > MAX_COMM {
+                            bail!("Spec {:?} has too long a process name prefix", spec.name);
                         }
                     }
                     _ => {}
