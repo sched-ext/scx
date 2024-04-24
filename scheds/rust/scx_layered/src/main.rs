@@ -312,6 +312,8 @@ enum LayerKind {
         cpus_range: Option<(usize, usize)>,
         #[serde(default)]
         min_exec_us: u64,
+        #[serde(default)]
+        perf: u64,
     },
     Grouped {
         util_range: (f64, f64),
@@ -323,6 +325,8 @@ enum LayerKind {
         preempt: bool,
         #[serde(default)]
         exclusive: bool,
+        #[serde(default)]
+        perf: u64,
     },
     Open {
         #[serde(default)]
@@ -331,6 +335,8 @@ enum LayerKind {
         preempt: bool,
         #[serde(default)]
         exclusive: bool,
+        #[serde(default)]
+        perf: u64,
     },
 }
 
@@ -1274,23 +1280,29 @@ impl<'a> Scheduler<'a> {
             layer.nr_match_ors = spec.matches.len() as u32;
 
             match &spec.kind {
-                LayerKind::Confined { min_exec_us, .. } => layer.min_exec_ns = min_exec_us * 1000,
+                LayerKind::Confined { min_exec_us, perf, .. } => {
+                    layer.min_exec_ns = min_exec_us * 1000;
+                    layer.perf = u32::try_from(*perf)?;
+                }
                 LayerKind::Open {
                     min_exec_us,
                     preempt,
                     exclusive,
+                    perf,
                     ..
                 }
                 | LayerKind::Grouped {
                     min_exec_us,
                     preempt,
                     exclusive,
+                    perf,
                     ..
                 } => {
                     layer.open.write(true);
                     layer.min_exec_ns = min_exec_us * 1000;
                     layer.preempt.write(*preempt);
                     layer.exclusive.write(*exclusive);
+                    layer.perf = u32::try_from(*perf)?;
                 }
             }
         }
@@ -1757,6 +1769,7 @@ fn write_example_file(path: &str) -> Result<()> {
                     cpus_range: Some((0, 16)),
                     util_range: (0.8, 0.9),
                     min_exec_us: 1000,
+                    perf: 1024,
                 },
             },
             LayerSpec {
@@ -1770,6 +1783,7 @@ fn write_example_file(path: &str) -> Result<()> {
                     min_exec_us: 100,
                     preempt: true,
                     exclusive: true,
+                    perf: 1024,
                 },
             },
             LayerSpec {
@@ -1782,6 +1796,7 @@ fn write_example_file(path: &str) -> Result<()> {
                     min_exec_us: 200,
                     preempt: false,
                     exclusive: false,
+                    perf: 1024,
                 },
             },
         ],

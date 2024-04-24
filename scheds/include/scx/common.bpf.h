@@ -98,6 +98,9 @@ bool scx_bpf_task_running(const struct task_struct *p) __ksym;
 s32 scx_bpf_task_cpu(const struct task_struct *p) __ksym;
 struct cgroup *scx_bpf_task_cgroup(struct task_struct *p) __ksym;
 u32 scx_bpf_reenqueue_local(void) __ksym;
+u32 scx_bpf_cpuperf_cap(s32 cpu) __ksym;
+u32 scx_bpf_cpuperf_cur(s32 cpu) __ksym;
+void scx_bpf_cpuperf_set(u32 cpu, u32 perf) __ksym;
 
 #define BPF_STRUCT_OPS(name, args...)						\
 SEC("struct_ops/"#name)								\

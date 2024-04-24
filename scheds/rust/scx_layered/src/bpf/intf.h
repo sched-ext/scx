@@ -107,6 +107,7 @@ struct layer {
 	unsigned int		refresh_cpus;
 	unsigned char		cpus[MAX_CPUS_U8];
 	unsigned int		nr_cpus;	// managed from BPF side
+	unsigned int		perf;
 };
 
 #endif /* __INTF_H */

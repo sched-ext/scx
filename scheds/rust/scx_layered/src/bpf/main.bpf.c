@@ -722,6 +722,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 	struct layer *layer;
+	u32 cpu;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)) ||
 	    !(layer = lookup_layer(tctx->layer)))
@@ -734,12 +735,14 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	cctx->current_exclusive = layer->exclusive;
 	tctx->started_running_at = bpf_ktime_get_ns();
 
+	cpu = scx_bpf_task_cpu(p);
+
 	/*
 	 * If this CPU is transitioning from running an exclusive task to a
 	 * non-exclusive one, the sibling CPU has likely been idle. Wake it up.
 	 */
 	if (cctx->prev_exclusive && !cctx->current_exclusive) {
-		s32 sib = sibling_cpu(scx_bpf_task_cpu(p));
+		s32 sib = sibling_cpu(cpu);
 		struct cpu_ctx *sib_cctx;
 
 		/*
@@ -753,6 +756,9 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 			scx_bpf_kick_cpu(sib, 0);
 		}
 	}
+
+	if (layer->perf > 0)
+		scx_bpf_cpuperf_set(cpu, layer->perf);
 
 	cctx->maybe_idle = false;
 }
