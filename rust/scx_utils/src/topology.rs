@@ -119,8 +119,8 @@ impl Core {
     }
 
     /// Get a Cpumask of all SMT siblings in this Core
-    pub fn span(&self) -> Cpumask {
-        self.span.clone()
+    pub fn span(&self) -> &Cpumask {
+        &self.span
     }
 }
 
@@ -143,8 +143,8 @@ impl Cache {
     }
 
     /// Get a Cpumask of all CPUs in this LLC
-    pub fn span(&self) -> Cpumask {
-        self.span.clone()
+    pub fn span(&self) -> &Cpumask {
+        &self.span
     }
 }
 
@@ -167,8 +167,8 @@ impl Node {
     }
 
     /// Get a Cpumask of all CPUs in this NUMA node
-    pub fn span(&self) -> Cpumask {
-        self.span.clone()
+    pub fn span(&self) -> &Cpumask {
+        &self.span
     }
 }
 
@@ -227,8 +227,8 @@ impl Topology {
     }
 
     /// Get a cpumask of all the online CPUs on the host
-    pub fn span(&self) -> Cpumask {
-        self.span.clone()
+    pub fn span(&self) -> &Cpumask {
+        &self.span
     }
 
     /// Get the maximum possible number of CPUs. Note that this number is likely
