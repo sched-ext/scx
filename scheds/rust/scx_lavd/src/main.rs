@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 //
-// Copyright (c) 2024 Changwoo Min <changwoo@igalia.com>
+// Copyright (c) 2024 Valve Corporation.
+// Author: Changwoo Min <changwoo@igalia.com>
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.

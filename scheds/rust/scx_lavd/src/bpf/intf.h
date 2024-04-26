@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Copyright (c) 2023, 2024 Changwoo Min <changwoo@igalia.com>
+ * Copyright (c) 2023, 2024 Valve Corporation.
+ * Author: Changwoo Min <changwoo@igalia.com>
  */
 #ifndef __INTF_H
 #define __INTF_H

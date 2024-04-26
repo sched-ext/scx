@@ -102,7 +102,8 @@
  * might be detrimental.
  *
  *
- * Copyright (c) 2023, 2024 Changwoo Min <changwoo@igalia.com>
+ * Copyright (c) 2023, 2024 Valve Corporation.
+ * Author: Changwoo Min <changwoo@igalia.com>
  */
 #include <scx/common.bpf.h>
 #include "intf.h"
