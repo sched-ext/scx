@@ -198,7 +198,7 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        let c_tx_cm: *const c_char = (&tx.comm as *const [i8; 17]) as *const i8;
+        let c_tx_cm: *const c_char = (&tx.comm as *const [c_char; 17]) as *const c_char;
         let c_tx_cm_str: &CStr = unsafe { CStr::from_ptr(c_tx_cm) };
         let tx_comm: &str = c_tx_cm_str.to_str().unwrap();
 
