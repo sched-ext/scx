@@ -1,6 +1,6 @@
 [package]
 name = "scx_rustland"
-version = "0.0.4"
+version = "0.0.5"
 authors = ["Andrea Righi <andrea.righi@canonical.com>", "Canonical"]
 edition = "2021"
 description = "A BPF component (dispatcher) that implements the low level sched-ext functionalities and a user-space counterpart (scheduler), written in Rust, that implements the actual scheduling policy. This is used within sched_ext, which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. https://github.com/sched-ext/scx/tree/main"
