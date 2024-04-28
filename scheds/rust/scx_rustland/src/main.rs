@@ -34,6 +34,8 @@ use log::warn;
 
 const SCHEDULER_NAME: &'static str = "RustLand";
 
+const VERSION: &'static str = env!("CARGO_PKG_VERSION");
+
 /// scx_rustland: user-space scheduler written in Rust
 ///
 /// scx_rustland is designed to prioritize interactive workloads over background CPU-intensive
@@ -141,6 +143,10 @@ struct Opts {
     /// debugfs (e.g., /sys/kernel/debug/tracing/trace_pipe).
     #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
     debug: bool,
+
+    /// Print scheduler version and exit.
+    #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
+    version: bool,
 }
 
 // Time constants.
@@ -753,6 +759,16 @@ impl<'a> Drop for Scheduler<'a> {
 
 fn main() -> Result<()> {
     let opts = Opts::parse();
+
+    if opts.version {
+        println!(
+            "{} version {} - scx_rustland_core {}",
+            SCHEDULER_NAME,
+            VERSION,
+            scx_rustland_core::VERSION
+        );
+        return Ok(());
+    }
 
     let loglevel = simplelog::LevelFilter::Info;
 
