@@ -41,6 +41,7 @@ const char help_fmt[] =
 "Usage: %s [-b BATCH]\n"
 "\n"
 "  -b BATCH      The number of tasks to batch when dispatching (default: 8)\n"
+"  -v            Print libbpf debug messages\n"
 "  -h            Display this help and exit\n";
 
 /* Defined in UAPI */
@@ -49,6 +50,7 @@ const char help_fmt[] =
 /* Number of tasks to batch when dispatching to user space. */
 static __u32 batch_size = 8;
 
+static bool verbose;
 static volatile int exit_req;
 static int enqueued_fd, dispatched_fd;
 
@@ -95,6 +97,13 @@ struct enqueued_task *tasks;
 static int pid_max;
 
 static double min_vruntime;
+
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
+{
+	if (level == LIBBPF_DEBUG && !verbose)
+		return 0;
+	return vfprintf(stderr, format, args);
+}
 
 static void sigint_handler(int userland)
 {
@@ -337,7 +346,7 @@ static void print_example_warning(const char *sched)
 	printf(warning_fmt, sched);
 }
 
-static void bootstrap(int argc, char **argv)
+static void pre_bootstrap(int argc, char **argv)
 {
 	int err;
 	__u32 opt;
@@ -349,9 +358,9 @@ static void bootstrap(int argc, char **argv)
 	if (err)
 		exit(err);
 
+	libbpf_set_print(libbpf_print_fn);
 	signal(SIGINT, sigint_handler);
 	signal(SIGTERM, sigint_handler);
-	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
 
 	/*
 	 * Enforce that the user scheduler task is managed by sched_ext. The
@@ -363,10 +372,13 @@ static void bootstrap(int argc, char **argv)
 	err = syscall(__NR_sched_setscheduler, getpid(), SCHED_EXT, &sched_param);
 	SCX_BUG_ON(err, "Failed to set scheduler to SCHED_EXT");
 
-	while ((opt = getopt(argc, argv, "b:ph")) != -1) {
+	while ((opt = getopt(argc, argv, "b:vh")) != -1) {
 		switch (opt) {
 		case 'b':
 			batch_size = strtoul(optarg, NULL, 0);
+			break;
+		case 'v':
+			verbose = true;
 			break;
 		default:
 			fprintf(stderr, help_fmt, basename(argv[0]));
@@ -381,9 +393,11 @@ static void bootstrap(int argc, char **argv)
 	 */
 	err = mlockall(MCL_CURRENT | MCL_FUTURE);
 	SCX_BUG_ON(err, "Failed to prefault and lock address space");
+}
 
-	skel = scx_userland__open();
-	SCX_BUG_ON(!skel, "Failed to open skel");
+static void bootstrap(char *comm)
+{
+	skel = SCX_OPS_OPEN(userland_ops, scx_userland);
 
 	skel->rodata->num_possible_cpus = libbpf_num_possible_cpus();
 	assert(skel->rodata->num_possible_cpus > 0);
@@ -399,7 +413,7 @@ static void bootstrap(int argc, char **argv)
 
 	SCX_BUG_ON(spawn_stats_thread(), "Failed to spawn stats thread");
 
-	print_example_warning(basename(argv[0]));
+	print_example_warning(basename(comm));
 	ops_link = SCX_OPS_ATTACH(skel, userland_ops);
 }
 
@@ -428,12 +442,19 @@ static void sched_main_loop(void)
 
 int main(int argc, char **argv)
 {
-	bootstrap(argc, argv);
+	__u64 ecode;
+
+	pre_bootstrap(argc, argv);
+restart:
+	bootstrap(argv[0]);
 	sched_main_loop();
 
 	exit_req = 1;
 	bpf_link__destroy(ops_link);
-	UEI_REPORT(skel, uei);
+	ecode = UEI_REPORT(skel, uei);
 	scx_userland__destroy(skel);
+
+	if (UEI_ECODE_RESTART(ecode))
+		goto restart;
 	return 0;
 }

@@ -29,9 +29,18 @@ const char help_fmt[] =
 "  -i ITERS      Number of successive placement failures tolerated before trying to aggressively expand primary nest (default 2), or 0 to disable\n"
 "  -s SLICE_US   Override slice duration in us (default 20000us / 20ms)\n"
 "  -I            First try to find a fully idle core, and then any idle core, when searching nests. Default behavior is to ignore hypertwins and check for any idle core.\n"
+"  -v            Print libbpf debug messages\n"
 "  -h            Display this help and exit\n";
 
+static bool verbose;
 static volatile int exit_req;
+
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
+{
+	if (level == LIBBPF_DEBUG && !verbose)
+		return 0;
+	return vfprintf(stderr, format, args);
+}
 
 static void sigint_handler(int nest)
 {
@@ -152,19 +161,18 @@ int main(int argc, char **argv)
 	struct scx_nest *skel;
 	struct bpf_link *link;
 	__u32 opt;
+	__u64 ecode;
 
+	libbpf_set_print(libbpf_print_fn);
 	signal(SIGINT, sigint_handler);
 	signal(SIGTERM, sigint_handler);
-
-	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
-
-	skel = scx_nest__open();
-	SCX_BUG_ON(!skel, "Failed to open skel");
+restart:
+	skel = SCX_OPS_OPEN(nest_ops, scx_nest);
 
 	skel->rodata->nr_cpus = libbpf_num_possible_cpus();
 	skel->rodata->sampling_cadence_ns = SAMPLING_CADENCE_S * 1000 * 1000 * 1000;
 
-	while ((opt = getopt(argc, argv, "hId:m:i:s:")) != -1) {
+	while ((opt = getopt(argc, argv, "d:m:i:Is:vh")) != -1) {
 		switch (opt) {
 		case 'd':
 			skel->rodata->p_remove_ns = strtoull(optarg, NULL, 0) * 1000;
@@ -180,6 +188,9 @@ int main(int argc, char **argv)
 			break;
 		case 's':
 			skel->rodata->slice_ns = strtoull(optarg, NULL, 0) * 1000;
+			break;
+		case 'v':
+			verbose = true;
 			break;
 		default:
 			fprintf(stderr, help_fmt, basename(argv[0]));
@@ -216,7 +227,10 @@ int main(int argc, char **argv)
 	}
 
 	bpf_link__destroy(link);
-	UEI_REPORT(skel, uei);
+	ecode = UEI_REPORT(skel, uei);
 	scx_nest__destroy(skel);
+
+	if (UEI_ECODE_RESTART(ecode))
+		goto restart;
 	return 0;
 }
