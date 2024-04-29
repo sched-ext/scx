@@ -1421,18 +1421,12 @@ static s32 initialize_cpu(s32 cpu)
 
 void BPF_STRUCT_OPS(rusty_cpu_online, s32 cpu)
 {
-	if (bpf_ksym_exists(scx_bpf_exit_bstr))
-		scx_bpf_exit(RUSTY_EXIT_HOTPLUG, "CPU %d went online", cpu);
-	else
-		scx_bpf_error("CPU %d went online", cpu);
+	__COMPAT_scx_bpf_exit(RUSTY_EXIT_HOTPLUG, "CPU %d went online", cpu);
 }
 
 void BPF_STRUCT_OPS(rusty_cpu_offline, s32 cpu)
 {
-	if (bpf_ksym_exists(scx_bpf_exit_bstr))
-		scx_bpf_exit(RUSTY_EXIT_HOTPLUG, "CPU %d went offline", cpu);
-	else
-		scx_bpf_error("CPU %d went offline", cpu);
+	__COMPAT_scx_bpf_exit(RUSTY_EXIT_HOTPLUG, "CPU %d went offline", cpu);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
