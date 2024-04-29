@@ -26,14 +26,23 @@ const char help_fmt[] =
 "\n"
 "See the top-level comment in .bpf.c for more details.\n"
 "\n"
-"Usage: %s [-s SLICE_US] [-i INTERVAL] [-f]\n"
+"Usage: %s [-s SLICE_US] [-i INTERVAL] [-f] [-v]\n"
 "\n"
 "  -s SLICE_US   Override slice duration\n"
 "  -i INTERVAL   Report interval\n"
 "  -f            Use FIFO scheduling instead of weighted vtime scheduling\n"
+"  -v            Print libbpf debug messages\n"
 "  -h            Display this help and exit\n";
 
+static bool verbose;
 static volatile int exit_req;
+
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
+{
+	if (level == LIBBPF_DEBUG && !verbose)
+		return 0;
+	return vfprintf(stderr, format, args);
+}
 
 static void sigint_handler(int dummy)
 {
@@ -119,18 +128,17 @@ int main(int argc, char **argv)
 	__u64 last_stats[FCG_NR_STATS] = {};
 	unsigned long seq = 0;
 	__s32 opt;
+	__u64 ecode;
 
+	libbpf_set_print(libbpf_print_fn);
 	signal(SIGINT, sigint_handler);
 	signal(SIGTERM, sigint_handler);
-
-	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
-
-	skel = scx_flatcg__open();
-	SCX_BUG_ON(!skel, "Failed to open skel");
+restart:
+	skel = SCX_OPS_OPEN(flatcg_ops, scx_flatcg);
 
 	skel->rodata->nr_cpus = libbpf_num_possible_cpus();
 
-	while ((opt = getopt(argc, argv, "s:i:dfph")) != -1) {
+	while ((opt = getopt(argc, argv, "s:i:dfvh")) != -1) {
 		double v;
 
 		switch (opt) {
@@ -148,6 +156,9 @@ int main(int argc, char **argv)
 			break;
 		case 'f':
 			skel->rodata->fifo_sched = true;
+			break;
+		case 'v':
+			verbose = true;
 			break;
 		case 'h':
 		default:
@@ -213,7 +224,10 @@ int main(int argc, char **argv)
 	}
 
 	bpf_link__destroy(link);
-	UEI_REPORT(skel, uei);
+	ecode = UEI_REPORT(skel, uei);
 	scx_flatcg__destroy(skel);
+
+	if (UEI_ECODE_RESTART(ecode))
+		goto restart;
 	return 0;
 }

@@ -29,8 +29,8 @@ pub enum ScxExitKind {
     ErrorStall = bindings::scx_exit_kind_SCX_EXIT_ERROR_STALL as isize,
 }
 
-pub enum ScxInternalConsts {
-    ExitDumpDflLen = bindings::scx_internal_consts_SCX_EXIT_DUMP_DFL_LEN as isize,
+pub enum ScxConsts {
+    ExitDumpDflLen = bindings::scx_consts_SCX_EXIT_DUMP_DFL_LEN as isize,
 }
 
 /// Takes a reference to C struct user_exit_info and reads it into
@@ -65,7 +65,7 @@ macro_rules! uei_set_size {
     ($skel: expr, $ops: ident, $uei:ident) => {{
         scx_utils::paste! {
             let len = match $skel.struct_ops.$ops().exit_dump_len {
-                0 => scx_utils::ScxInternalConsts::ExitDumpDflLen as u32,
+                0 => scx_utils::ScxConsts::ExitDumpDflLen as u32,
                 v => v,
             };
             $skel.rodata_mut().[<$uei _dump_len>] = len;
