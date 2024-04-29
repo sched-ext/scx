@@ -514,8 +514,8 @@ static void flip_sys_cpu_util(void)
 	__sys_cpu_util_idx ^= 0x1;
 }
 
-static int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc,
-			   u16 cpu_id)
+static __attribute__((always_inline))
+int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u16 cpu_id)
 {
 	struct sys_cpu_util *cutil_cur = get_sys_cpu_util_cur();
 	struct msg_task_ctx *m;
