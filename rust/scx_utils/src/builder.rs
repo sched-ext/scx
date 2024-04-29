@@ -45,7 +45,7 @@ impl Builder {
         let bindings = bindgen::Builder::default()
             .header("bindings.h")
             .allowlist_type("scx_exit_kind")
-            .allowlist_type("scx_internal_consts")
+            .allowlist_type("scx_consts")
             .parse_callbacks(Box::new(bindgen::CargoCallbacks))
             .generate()
             .expect("Unable to generate bindings");

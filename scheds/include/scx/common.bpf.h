@@ -28,9 +28,54 @@ static inline void ___vmlinux_h_sanity_check___(void)
 		       "bpftool generated vmlinux.h is missing high bits for 64bit enums, upgrade clang and pahole");
 }
 
+s32 scx_bpf_create_dsq(u64 dsq_id, s32 node) __ksym;
+s32 scx_bpf_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bool *is_idle) __ksym;
+void scx_bpf_dispatch(struct task_struct *p, u64 dsq_id, u64 slice, u64 enq_flags) __ksym;
+void scx_bpf_dispatch_vtime(struct task_struct *p, u64 dsq_id, u64 slice, u64 vtime, u64 enq_flags) __ksym;
+u32 scx_bpf_dispatch_nr_slots(void) __ksym;
+void scx_bpf_dispatch_cancel(void) __ksym;
+bool scx_bpf_consume(u64 dsq_id) __ksym;
+bool __scx_bpf_consume_task(unsigned long it, struct task_struct *p) __ksym __weak;
+u32 scx_bpf_reenqueue_local(void) __ksym;
+void scx_bpf_kick_cpu(s32 cpu, u64 flags) __ksym;
+s32 scx_bpf_dsq_nr_queued(u64 dsq_id) __ksym;
+void scx_bpf_destroy_dsq(u64 dsq_id) __ksym;
+int bpf_iter_scx_dsq_new(struct bpf_iter_scx_dsq *it, u64 dsq_id, bool rev) __ksym __weak;
+struct task_struct *bpf_iter_scx_dsq_next(struct bpf_iter_scx_dsq *it) __ksym __weak;
+void bpf_iter_scx_dsq_destroy(struct bpf_iter_scx_dsq *it) __ksym __weak;
+void scx_bpf_exit_bstr(s64 exit_code, char *fmt, unsigned long long *data, u32 data__sz) __ksym __weak;
 void scx_bpf_error_bstr(char *fmt, unsigned long long *data, u32 data_len) __ksym;
-void scx_bpf_exit_bstr(s64 exit_code, char *fmt,
-		       unsigned long long *data, u32 data__sz) __ksym __weak;
+u32 scx_bpf_cpuperf_cap(s32 cpu) __ksym __weak;
+u32 scx_bpf_cpuperf_cur(s32 cpu) __ksym __weak;
+void scx_bpf_cpuperf_set(s32 cpu, u32 perf) __ksym __weak;
+u32 scx_bpf_nr_cpu_ids(void) __ksym __weak;
+const struct cpumask *scx_bpf_get_possible_cpumask(void) __ksym __weak;
+const struct cpumask *scx_bpf_get_online_cpumask(void) __ksym __weak;
+void scx_bpf_put_cpumask(const struct cpumask *cpumask) __ksym __weak;
+const struct cpumask *scx_bpf_get_idle_cpumask(void) __ksym;
+const struct cpumask *scx_bpf_get_idle_smtmask(void) __ksym;
+void scx_bpf_put_idle_cpumask(const struct cpumask *cpumask) __ksym;
+bool scx_bpf_test_and_clear_cpu_idle(s32 cpu) __ksym;
+s32 scx_bpf_pick_idle_cpu(const cpumask_t *cpus_allowed, u64 flags) __ksym;
+s32 scx_bpf_pick_any_cpu(const cpumask_t *cpus_allowed, u64 flags) __ksym;
+bool scx_bpf_task_running(const struct task_struct *p) __ksym;
+s32 scx_bpf_task_cpu(const struct task_struct *p) __ksym;
+struct cgroup *scx_bpf_task_cgroup(struct task_struct *p) __ksym;
+
+/*
+ * Use the following as @it when calling scx_bpf_consume_task() from whitin
+ * bpf_for_each() loops.
+ */
+#define BPF_FOR_EACH_ITER	(&___it)
+
+/* hopefully temporary wrapper to work around BPF restriction */
+static inline bool scx_bpf_consume_task(struct bpf_iter_scx_dsq *it,
+					struct task_struct *p)
+{
+	unsigned long ptr;
+	bpf_probe_read_kernel(&ptr, sizeof(ptr), it);
+	return __scx_bpf_consume_task(ptr, p);
+}
 
 static inline __attribute__((format(printf, 1, 2)))
 void ___scx_bpf_exit_format_checker(const char *fmt, ...) {}
@@ -40,18 +85,18 @@ void ___scx_bpf_exit_format_checker(const char *fmt, ...) {}
  * bstr exit kfuncs. Callers to this function should use ___fmt and ___param to
  * refer to the initialized list of inputs to the bstr kfunc.
  */
-#define scx_bpf_exit_preamble(fmt, args...)				\
-	static char ___fmt[] = fmt;					\
-	/*								\
-	 * Note that __param[] must have at least one			\
-	 * element to keep the verifier happy.				\
-	 */								\
-	unsigned long long ___param[___bpf_narg(args) ?: 1] = {};	\
-									\
-	_Pragma("GCC diagnostic push")					\
-	_Pragma("GCC diagnostic ignored \"-Wint-conversion\"")		\
-	___bpf_fill(___param, args);					\
-	_Pragma("GCC diagnostic pop")					\
+#define scx_bpf_exit_preamble(fmt, args...)					\
+	static char ___fmt[] = fmt;						\
+	/*									\
+	 * Note that __param[] must have at least one				\
+	 * element to keep the verifier happy.					\
+	 */									\
+	unsigned long long ___param[___bpf_narg(args) ?: 1] = {};		\
+										\
+	_Pragma("GCC diagnostic push")						\
+	_Pragma("GCC diagnostic ignored \"-Wint-conversion\"")			\
+	___bpf_fill(___param, args);						\
+	_Pragma("GCC diagnostic pop")						\
 
 /*
  * scx_bpf_exit() wraps the scx_bpf_exit_bstr() kfunc with variadic arguments
@@ -77,30 +122,6 @@ void ___scx_bpf_exit_format_checker(const char *fmt, ...) {}
 	scx_bpf_error_bstr(___fmt, ___param, sizeof(___param));			\
 	___scx_bpf_exit_format_checker(fmt, ##args);				\
 })
-
-s32 scx_bpf_create_dsq(u64 dsq_id, s32 node) __ksym;
-bool scx_bpf_consume(u64 dsq_id) __ksym;
-void scx_bpf_dispatch(struct task_struct *p, u64 dsq_id, u64 slice, u64 enq_flags) __ksym;
-void scx_bpf_dispatch_vtime(struct task_struct *p, u64 dsq_id, u64 slice, u64 vtime, u64 enq_flags) __ksym;
-u32 scx_bpf_dispatch_nr_slots(void) __ksym;
-void scx_bpf_dispatch_cancel(void) __ksym;
-void scx_bpf_kick_cpu(s32 cpu, u64 flags) __ksym;
-s32 scx_bpf_dsq_nr_queued(u64 dsq_id) __ksym;
-bool scx_bpf_test_and_clear_cpu_idle(s32 cpu) __ksym;
-s32 scx_bpf_pick_idle_cpu(const cpumask_t *cpus_allowed, u64 flags) __ksym;
-s32 scx_bpf_pick_any_cpu(const cpumask_t *cpus_allowed, u64 flags) __ksym;
-const struct cpumask *scx_bpf_get_idle_cpumask(void) __ksym;
-const struct cpumask *scx_bpf_get_idle_smtmask(void) __ksym;
-void scx_bpf_put_idle_cpumask(const struct cpumask *cpumask) __ksym;
-void scx_bpf_destroy_dsq(u64 dsq_id) __ksym;
-s32 scx_bpf_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bool *is_idle) __ksym;
-bool scx_bpf_task_running(const struct task_struct *p) __ksym;
-s32 scx_bpf_task_cpu(const struct task_struct *p) __ksym;
-struct cgroup *scx_bpf_task_cgroup(struct task_struct *p) __ksym;
-u32 scx_bpf_reenqueue_local(void) __ksym;
-u32 scx_bpf_cpuperf_cap(s32 cpu) __ksym;
-u32 scx_bpf_cpuperf_cur(s32 cpu) __ksym;
-void scx_bpf_cpuperf_set(u32 cpu, u32 perf) __ksym __weak;
 
 #define BPF_STRUCT_OPS(name, args...)						\
 SEC("struct_ops/"#name)								\
@@ -156,7 +177,8 @@ BPF_PROG(name, ##args)
  * be a pointer to the area. Use `MEMBER_VPTR(*ptr, .member)` instead of
  * `MEMBER_VPTR(ptr, ->member)`.
  */
-#define MEMBER_VPTR(base, member) (typeof((base) member) *)({			\
+#define MEMBER_VPTR(base, member) (typeof((base) member) *)			\
+({										\
 	u64 __base = (u64)&(base);						\
 	u64 __addr = (u64)&((base) member) - __base;				\
 	_Static_assert(sizeof(base) >= sizeof((base) member),			\
@@ -186,18 +208,19 @@ BPF_PROG(name, ##args)
  * size of the array to compute the max, which will result in rejection by
  * the verifier.
  */
-#define ARRAY_ELEM_PTR(arr, i, n) (typeof(arr[i]) *)({	  \
-	u64 __base = (u64)arr;				  \
-	u64 __addr = (u64)&(arr[i]) - __base;		  \
-	asm volatile (					  \
-		"if %0 <= %[max] goto +2\n"		  \
-		"%0 = 0\n"				  \
-		"goto +1\n"				  \
-		"%0 += %1\n"				  \
-		: "+r"(__addr)				  \
-		: "r"(__base),				  \
-		  [max]"r"(sizeof(arr[0]) * ((n) - 1)));  \
-	__addr;						  \
+#define ARRAY_ELEM_PTR(arr, i, n) (typeof(arr[i]) *)				\
+({										\
+	u64 __base = (u64)arr;							\
+	u64 __addr = (u64)&(arr[i]) - __base;					\
+	asm volatile (								\
+		"if %0 <= %[max] goto +2\n"					\
+		"%0 = 0\n"							\
+		"goto +1\n"							\
+		"%0 += %1\n"							\
+		: "+r"(__addr)							\
+		: "r"(__base),							\
+		  [max]"r"(sizeof(arr[0]) * ((n) - 1)));			\
+	__addr;									\
 })
 
 /*
@@ -227,7 +250,7 @@ int bpf_rbtree_add_impl(struct bpf_rb_root *root, struct bpf_rb_node *node,
 
 struct bpf_rb_node *bpf_rbtree_first(struct bpf_rb_root *root) __ksym;
 
-extern void *bpf_refcount_acquire_impl(void *kptr, void *meta) __ksym;
+void *bpf_refcount_acquire_impl(void *kptr, void *meta) __ksym;
 #define bpf_refcount_acquire(kptr) bpf_refcount_acquire_impl(kptr, NULL)
 
 /* task */

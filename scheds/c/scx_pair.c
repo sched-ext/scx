@@ -23,9 +23,18 @@ const char help_fmt[] =
 "Usage: %s [-S STRIDE]\n"
 "\n"
 "  -S STRIDE     Override CPU pair stride (default: nr_cpus_ids / 2)\n"
+"  -v            Print libbpf debug messages\n"
 "  -h            Display this help and exit\n";
 
+static bool verbose;
 static volatile int exit_req;
+
+static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
+{
+	if (level == LIBBPF_DEBUG && !verbose)
+		return 0;
+	return vfprintf(stderr, format, args);
+}
 
 static void sigint_handler(int dummy)
 {
@@ -36,26 +45,27 @@ int main(int argc, char **argv)
 {
 	struct scx_pair *skel;
 	struct bpf_link *link;
-	__u64 seq = 0;
+	__u64 seq = 0, ecode;
 	__s32 stride, i, opt, outer_fd;
 
+	libbpf_set_print(libbpf_print_fn);
 	signal(SIGINT, sigint_handler);
 	signal(SIGTERM, sigint_handler);
-
-	libbpf_set_strict_mode(LIBBPF_STRICT_ALL);
-
-	skel = scx_pair__open();
-	SCX_BUG_ON(!skel, "Failed to open skel");
+restart:
+	skel = SCX_OPS_OPEN(pair_ops, scx_pair);
 
 	skel->rodata->nr_cpu_ids = libbpf_num_possible_cpus();
 
 	/* pair up the earlier half to the latter by default, override with -s */
 	stride = skel->rodata->nr_cpu_ids / 2;
 
-	while ((opt = getopt(argc, argv, "S:ph")) != -1) {
+	while ((opt = getopt(argc, argv, "S:vh")) != -1) {
 		switch (opt) {
 		case 'S':
 			stride = strtoul(optarg, NULL, 0);
+			break;
+		case 'v':
+			verbose = true;
 			break;
 		default:
 			fprintf(stderr, help_fmt, basename(argv[0]));
@@ -158,7 +168,10 @@ int main(int argc, char **argv)
 	}
 
 	bpf_link__destroy(link);
-	UEI_REPORT(skel, uei);
+	ecode = UEI_REPORT(skel, uei);
 	scx_pair__destroy(skel);
+
+	if (UEI_ECODE_RESTART(ecode))
+		goto restart;
 	return 0;
 }
