@@ -6,6 +6,7 @@
 use std::alloc::{GlobalAlloc, Layout};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
+use std::num::ParseIntError;
 
 use buddy_alloc::{BuddyAllocParam, FastAllocParam, NonThreadsafeAlloc};
 
@@ -47,7 +48,10 @@ pub struct UserAllocator {
 impl UserAllocator {
     pub fn lock_memory(&self) {
         unsafe {
-            VM.save();
+            match VM.save() {
+                Ok(_) => {}
+                Err(res) => eprintln!("WARNING: {}\n", res),
+            };
 
             // Call setrlimit to set the locked-in-memory limit to unlimited.
             let new_rlimit = libc::rlimit {
@@ -69,7 +73,10 @@ impl UserAllocator {
 
     pub fn unlock_memory(&self) {
         unsafe {
-            VM.restore();
+            match VM.restore() {
+                Ok(_) => {}
+                Err(res) => eprintln!("WARNING: {}\n", res),
+            }
         };
     }
 }
@@ -104,44 +111,61 @@ struct VmSettings {
 
 impl VmSettings {
     // Return the content of a procfs file as i32.
-    fn read_procfs(&self, file_path: &str) -> i32 {
-        let file = File::open(file_path).expect(&format!("Failed to open {}", file_path));
+    fn read_procfs(&self, file_path: &str) -> Result<i32, String> {
+        // Attempt to open the file
+        let file = match File::open(file_path) {
+            Ok(f) => f,
+            Err(err) => return Err(format!("Failed to open {}: {}", file_path, err)),
+        };
+
         let reader = BufReader::new(file);
 
         if let Some(Ok(line)) = reader.lines().next() {
-            let value: i32 = match line.trim().parse() {
-                Ok(v) => v,
-                Err(_) => panic!("Failed to parse {}", file_path),
-            };
-
-            value
+            let value: Result<i32, ParseIntError> = line.trim().parse();
+            match value {
+                Ok(v) => Ok(v),
+                Err(err) => Err(format!("Failed to parse {}: {}", file_path, err)),
+            }
         } else {
-            panic!("empty {}", file_path);
+            Err(format!("File is empty: {}", file_path))
         }
     }
 
     // Write an i32 to a file in procfs.
-    fn write_procfs(&self, file_path: &str, value: i32) {
-        let mut file = File::create(file_path).expect(&format!("Failed to open {}", file_path));
-        file.write_all(value.to_string().as_bytes())
-            .expect(&format!("Failed to write to {}", file_path));
+    fn write_procfs(&self, file_path: &str, value: i32) -> Result<(), String> {
+        // Attempt to create or open the file
+        let mut file = match File::create(file_path) {
+            Ok(f) => f,
+            Err(err) => return Err(format!("Failed to open {}: {}", file_path, err)),
+        };
+
+        // Attempt to write the value to the file
+        if let Err(err) = write!(file, "{}", value) {
+            return Err(format!("Failed to write to {}: {}", file_path, err));
+        }
+
+        Ok(()) // Return Ok if writing was successful
     }
 
     // Save all the sysctl VM settings in the internal state.
-    fn save(&self) {
+    fn save(&self) -> Result<(), String> {
         let compact_unevictable_allowed = "/proc/sys/vm/compact_unevictable_allowed";
-        let value = self.read_procfs(compact_unevictable_allowed);
+        let value = self.read_procfs(compact_unevictable_allowed)?;
         unsafe {
             VM.compact_unevictable_allowed = value;
         };
-        self.write_procfs(compact_unevictable_allowed, 0);
+        self.write_procfs(compact_unevictable_allowed, 0)?;
+
+        Ok(())
     }
 
     // Restore all the previous sysctl vm settings.
-    fn restore(&self) {
+    fn restore(&self) -> Result<(), String> {
         let compact_unevictable_allowed = "/proc/sys/vm/compact_unevictable_allowed";
         let value = unsafe { VM.compact_unevictable_allowed };
-        self.write_procfs(compact_unevictable_allowed, value);
+        self.write_procfs(compact_unevictable_allowed, value)?;
+
+        Ok(())
     }
 }
 
