@@ -1,5 +1,6 @@
 #!/bin/bash
 
+unset CDPATH
 cd $1
 rm -rf libbpf
 git clone --depth=1 https://github.com/libbpf/libbpf
