@@ -141,6 +141,17 @@ $ meson install -C build
 
 Notes: `meson setup` will also clone both libbpf and bpftool repos and `meson compile` will build them both.
 
+### Static linking against system libbpf
+Note, depending on your system configuration `libbpf_a` and `libbpf_h` may be
+in different directories. The system libbpf version needs to match the minimum
+libbpf version for scx.
+ ```
+$ cd $SCX
+$ meson setup build --prefix ~ -D libbpf_a=/usr/lib64/libbpf.a libbpf_h=/usr/include/bpf/
+$ meson compile -C build
+$ meson install -C build
+```
+
 #### Dynamic linking against libbpf
 ```
 $ cd $SCX
