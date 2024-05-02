@@ -311,7 +311,7 @@ impl LoadEntity {
     }
 
     fn xfer_between(&self, other: &LoadEntity) -> f64 {
-        self.imbal().min(other.imbal()).abs() * self.xfer_ratio
+        self.imbal().abs().min(other.imbal().abs()) * self.xfer_ratio
     }
 }
 
@@ -714,11 +714,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     continue;
                 }
 
-                let weight = (task_ctx.weight as f64).min(self.infeas_threshold);
-
                 let rd = &task_ctx.dcyc_rd;
-                let load = weight
-                    * ravg_read(
+                let mut load = ravg_read(
                         rd.val,
                         rd.val_at,
                         rd.old,
@@ -727,6 +724,11 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                         load_half_life,
                         RAVG_FRAC_BITS,
                     );
+
+                if self.lb_apply_weight {
+                    let weight = (task_ctx.weight as f64).min(self.infeas_threshold);
+                    load *= weight;
+                }
 
                 dom.tasks.insert(
                     TaskInfo {
