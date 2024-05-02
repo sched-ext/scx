@@ -70,6 +70,9 @@ pub struct Tuner {
     pub direct_greedy_mask: Cpumask,
     pub kick_greedy_mask: Cpumask,
     pub fully_utilized: bool,
+    pub slice_ns: u64,
+    underutil_slice_ns: u64,
+    overutil_slice_ns: u64,
     dom_group: Arc<DomainGroup>,
     direct_greedy_under: f64,
     kick_greedy_under: f64,
@@ -80,7 +83,9 @@ pub struct Tuner {
 impl Tuner {
     pub fn new(dom_group: Arc<DomainGroup>,
                direct_greedy_under: f64,
-               kick_greedy_under: f64) -> Result<Self> {
+               kick_greedy_under: f64,
+               underutil_slice_ns: u64,
+               overutil_slice_ns: u64) -> Result<Self> {
         let proc_reader = procfs::ProcReader::new();
         let prev_cpu_stats = proc_reader
             .read_stat()?
@@ -95,6 +100,9 @@ impl Tuner {
            kick_greedy_under: kick_greedy_under / 100.0,
            proc_reader,
            prev_cpu_stats,
+           slice_ns: underutil_slice_ns,
+           underutil_slice_ns: underutil_slice_ns,
+           overutil_slice_ns: overutil_slice_ns,
            dom_group,
        })
     }
@@ -161,6 +169,13 @@ impl Tuner {
 
         write_to_bpf(&mut ti.direct_greedy_cpumask, &self.direct_greedy_mask);
         write_to_bpf(&mut ti.kick_greedy_cpumask, &self.kick_greedy_mask);
+        if self.fully_utilized {
+            self.slice_ns = self.overutil_slice_ns;
+        } else {
+            self.slice_ns = self.underutil_slice_ns;
+        }
+        ti.slice_ns = self.slice_ns;
+
         ti.gen += 1;
 
         self.prev_cpu_stats = curr_cpu_stats;

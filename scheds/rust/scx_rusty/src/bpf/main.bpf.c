@@ -76,7 +76,7 @@ const volatile u32 greedy_threshold_x_numa;
 const volatile u32 debug;
 
 /* base slice duration */
-const volatile u64 slice_ns = SCX_SLICE_DFL;
+static u64 slice_ns = SCX_SLICE_DFL;
 
 /*
  * Per-CPU context
@@ -441,6 +441,7 @@ struct {
  */
 struct tune_input{
 	u64 gen;
+	u64 slice_ns;
 	u64 direct_greedy_cpumask[MAX_CPUS / 64];
 	u64 kick_greedy_cpumask[MAX_CPUS / 64];
 } tune_input;
@@ -477,6 +478,7 @@ static void refresh_tune_params(void)
 		return;
 
 	tune_params_gen = tune_input.gen;
+	slice_ns = tune_input.slice_ns;
 
 	bpf_for(cpu, 0, nr_cpus_possible) {
 		u32 dom_id = cpu_to_dom_id(cpu);
