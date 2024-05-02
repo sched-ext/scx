@@ -311,7 +311,7 @@ impl LoadEntity {
     }
 
     fn xfer_between(&self, other: &LoadEntity) -> f64 {
-        self.imbal().min(other.imbal()).abs() * self.xfer_ratio
+        self.imbal().abs().min(other.imbal().abs()) * self.xfer_ratio
     }
 }
 
