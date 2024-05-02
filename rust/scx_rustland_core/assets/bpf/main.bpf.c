@@ -96,8 +96,7 @@ const volatile bool full_user;
 /* Allow to use bpf_printk() only when @debug is set */
 #define dbg_msg(_fmt, ...) do {						\
 	if (debug)							\
-		bpf_printk(_fmt " nr_queued=%lu nr_scheduled=%llu",	\
-		##__VA_ARGS__, nr_queued, nr_scheduled);		\
+		bpf_printk(_fmt, ##__VA_ARGS__);			\
 } while(0)
 
 /*
@@ -110,24 +109,31 @@ const volatile bool full_user;
 #define MAX_ENQUEUED_TASKS 8192
 
 /*
+ * Maximum amount of slots reserved to the tasks dispatched via shared queue.
+ */
+#define MAX_DISPATCH_SLOT (MAX_ENQUEUED_TASKS / 8)
+
+/*
  * The map containing tasks that are queued to user space from the kernel.
  *
  * This map is drained by the user space scheduler.
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, MAX_ENQUEUED_TASKS);
+	__uint(max_entries, MAX_ENQUEUED_TASKS *
+				sizeof(struct queued_task_ctx));
 } queued SEC(".maps");
 
 /*
- * The map containing pids that are dispatched from user space to the kernel.
+ * The user ring buffer containing pids that are dispatched from user space to
+ * the kernel.
  *
  * Drained by the kernel in .dispatch().
  */
 struct {
-	__uint(type, BPF_MAP_TYPE_QUEUE);
-	__type(value, struct dispatched_task_ctx);
-	__uint(max_entries, MAX_ENQUEUED_TASKS);
+        __uint(type, BPF_MAP_TYPE_USER_RINGBUF);
+	__uint(max_entries, MAX_ENQUEUED_TASKS *
+				sizeof(struct dispatched_task_ctx));
 } dispatched SEC(".maps");
 
 /*
@@ -538,6 +544,53 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 }
 
 /*
+ * Handle a task dispatched from user-space, performing the actual low-level
+ * BPF dispatch.
+ */
+static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
+{
+	const struct dispatched_task_ctx *task;
+	struct task_struct *p;
+	u64 enq_flags = 0;
+
+	/* Get a pointer to the dispatched task */
+	task = bpf_dynptr_data(dynptr, 0, sizeof(*task));
+	if (!task)
+		return 0;
+
+	/* Ignore entry if the task doesn't exist anymore */
+	p = bpf_task_from_pid(task->pid);
+	if (!p)
+		return 0;
+
+	dbg_msg("usersched: pid=%d cpu=%d cpumask_cnt=%llu slice_ns=%llu flags=%llx",
+		task->pid, task->cpu, task->cpumask_cnt, task->slice_ns, task->flags);
+	/*
+	 * Map RL_PREEMPT_CPU to SCX_ENQ_PREEMPT and allow this task to
+	 * preempt others.
+	 */
+	if (task->flags & RL_PREEMPT_CPU)
+		enq_flags = SCX_ENQ_PREEMPT;
+	/*
+	 * Check whether the user-space scheduler assigned a different
+	 * CPU to the task and migrate (if possible).
+	 *
+	 * If the task has been submitted with RL_CPU_ANY, then
+	 * dispatch it to the shared DSQ and run it on the first CPU
+	 * available.
+	 */
+	if (task->flags & RL_CPU_ANY)
+		dispatch_task(p, SHARED_DSQ, 0, task->slice_ns, enq_flags);
+	else
+		dispatch_task(p, cpu_to_dsq(task->cpu),
+			      task->cpumask_cnt, task->slice_ns, enq_flags);
+	bpf_task_release(p);
+	__sync_fetch_and_add(&nr_user_dispatches, 1);
+
+	return !scx_bpf_dispatch_nr_slots();
+}
+
+/*
  * Dispatch tasks that are ready to run.
  *
  * This function is called when a CPU's local DSQ is empty and ready to accept
@@ -561,47 +614,7 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 * scheduler (at this point the proper ordering has been already
 	 * determined by the scheduler).
 	 */
-	bpf_repeat(MAX_ENQUEUED_TASKS) {
-		struct task_struct *p;
-		struct dispatched_task_ctx task;
-		u64 enq_flags = 0;
-
-		/*
-		 * Pop first task from the dispatched queue, stop if dispatch
-		 * queue is empty.
-		 */
-		if (bpf_map_pop_elem(&dispatched, &task))
-			break;
-
-		/* Ignore entry if the task doesn't exist anymore */
-		p = bpf_task_from_pid(task.pid);
-		if (!p)
-			continue;
-
-		dbg_msg("usersched: pid=%d cpu=%d cpumask_cnt=%llu slice_ns=%llu flags=%llx",
-			task.pid, task.cpu, task.cpumask_cnt, task.slice_ns, task.flags);
-		/*
-		 * Map RL_PREEMPT_CPU to SCX_ENQ_PREEMPT and allow this task to
-		 * preempt others.
-		 */
-		if (task.flags & RL_PREEMPT_CPU)
-			enq_flags = SCX_ENQ_PREEMPT;
-		/*
-		 * Check whether the user-space scheduler assigned a different
-		 * CPU to the task and migrate (if possible).
-		 *
-		 * If the task has been submitted with RL_CPU_ANY, then
-		 * dispatch it to the shared DSQ and run it on the first CPU
-		 * available.
-		 */
-		if (task.flags & RL_CPU_ANY)
-			dispatch_task(p, SHARED_DSQ, 0, task.slice_ns, enq_flags);
-		else
-			dispatch_task(p, cpu_to_dsq(task.cpu),
-				      task.cpumask_cnt, task.slice_ns, enq_flags);
-		bpf_task_release(p);
-		__sync_fetch_and_add(&nr_user_dispatches, 1);
-	}
+	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, 0);
 
 	/* Consume all tasks enqueued in the current CPU's DSQ first */
 	bpf_repeat(MAX_ENQUEUED_TASKS) {
@@ -900,4 +913,5 @@ SCX_OPS_DEFINE(rustland,
 	       .exit			= (void *)rustland_exit,
 	       .flags			= SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
 	       .timeout_ms		= 5000,
+	       .dispatch_max_batch	= MAX_DISPATCH_SLOT,
 	       .name			= "rustland");

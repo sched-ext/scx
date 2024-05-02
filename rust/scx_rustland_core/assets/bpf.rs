@@ -9,6 +9,8 @@ use crate::bpf_skel::*;
 use anyhow::Context;
 use anyhow::Result;
 
+use plain::Plain;
+
 use libbpf_rs::skel::OpenSkel as _;
 use libbpf_rs::skel::SkelBuilder as _;
 
@@ -114,6 +116,15 @@ impl DispatchedTask {
     }
 }
 
+// Helpers used to submit tasks to the BPF user ring buffer.
+unsafe impl Plain for bpf_intf::dispatched_task_ctx {}
+
+impl AsMut<bpf_intf::dispatched_task_ctx> for bpf_intf::dispatched_task_ctx {
+    fn as_mut(&mut self) -> &mut bpf_intf::dispatched_task_ctx {
+        self
+    }
+}
+
 // Message received from the dispatcher (see bpf_intf::queued_task_ctx for details).
 //
 // NOTE: eventually libbpf-rs will provide a better abstraction for this.
@@ -141,39 +152,11 @@ impl EnqueuedMessage {
     }
 }
 
-// Message sent to the dispatcher (see bpf_intf::dispatched_task_ctx for details).
-//
-// NOTE: eventually libbpf-rs will provide a better abstraction for this.
-struct DispatchedMessage {
-    inner: bpf_intf::dispatched_task_ctx,
-}
-
-impl DispatchedMessage {
-    fn from_dispatched_task(task: &DispatchedTask) -> Self {
-        let dispatched_task_struct = bpf_intf::dispatched_task_ctx {
-            pid: task.pid,
-            cpu: task.cpu,
-            flags: task.flags,
-            cpumask_cnt: task.cpumask_cnt,
-            slice_ns: task.slice_ns,
-        };
-        DispatchedMessage {
-            inner: dispatched_task_struct,
-        }
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        let size = std::mem::size_of::<bpf_intf::dispatched_task_ctx>();
-        let ptr = &self.inner as *const _ as *const u8;
-
-        unsafe { std::slice::from_raw_parts(ptr, size) }
-    }
-}
-
 pub struct BpfScheduler<'cb> {
-    pub skel: BpfSkel<'cb>,              // Low-level BPF connector
-    queued: libbpf_rs::RingBuffer<'cb>,  // Ring buffer of queued tasks
-    struct_ops: Option<libbpf_rs::Link>, // Low-level BPF methods
+    pub skel: BpfSkel<'cb>,                // Low-level BPF connector
+    queued: libbpf_rs::RingBuffer<'cb>,    // Ring buffer of queued tasks
+    dispatched: libbpf_rs::UserRingBuffer, // User Ring buffer of dispatched tasks
+    struct_ops: Option<libbpf_rs::Link>,   // Low-level BPF methods
 }
 
 // Buffer to store a task read from the ring buffer.
@@ -196,7 +179,7 @@ impl<'cb> BpfScheduler<'cb> {
         slice_us: u64,
         nr_cpus_online: i32,
         partial: bool,
-	exit_dump_len: u32,
+        exit_dump_len: u32,
         full_user: bool,
         debug: bool,
     ) -> Result<Self> {
@@ -254,7 +237,7 @@ impl<'cb> BpfScheduler<'cb> {
         if partial {
             skel.struct_ops.rustland_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
         }
-	skel.struct_ops.rustland_mut().exit_dump_len = exit_dump_len;
+        skel.struct_ops.rustland_mut().exit_dump_len = exit_dump_len;
 
         skel.bss_mut().usersched_pid = std::process::id();
         skel.rodata_mut().slice_ns = slice_us * 1000;
@@ -267,18 +250,23 @@ impl<'cb> BpfScheduler<'cb> {
         let struct_ops = Some(scx_ops_attach!(skel, rustland)?);
 
         // Build the ring buffer of queued tasks.
-        let binding = skel.maps();
-        let queued_ring_buffer = binding.queued();
+        let maps = skel.maps();
+        let queued_ring_buffer = maps.queued();
         let mut rbb = libbpf_rs::RingBufferBuilder::new();
         rbb.add(queued_ring_buffer, callback)
             .expect("failed to add ringbuf callback");
         let queued = rbb.build().expect("failed to build ringbuf");
+
+        // Build the user ring buffer of dispatched tasks.
+        let dispatched = libbpf_rs::UserRingBuffer::new(&maps.dispatched())
+            .expect("failed to create user ringbuf");
 
         // Make sure to use the SCHED_EXT class at least for the scheduler itself.
         match Self::use_sched_ext() {
             0 => Ok(Self {
                 skel,
                 queued,
+                dispatched,
                 struct_ops,
             }),
             err => Err(anyhow::Error::msg(format!(
@@ -400,17 +388,48 @@ impl<'cb> BpfScheduler<'cb> {
                 Ok(Some(task))
             }
             res if res < 0 => Err(res),
-            res => panic!("Unexpected return value from libbpf-rs::consume_raw(): {}", res),
+            res => panic!(
+                "Unexpected return value from libbpf-rs::consume_raw(): {}",
+                res
+            ),
         }
     }
 
     // Send a task to the dispatcher.
     pub fn dispatch_task(&mut self, task: &DispatchedTask) -> Result<(), libbpf_rs::Error> {
-        let maps = self.skel.maps();
-        let dispatched = maps.dispatched();
-        let msg = DispatchedMessage::from_dispatched_task(&task);
+        // Reserve a slot in the user ring buffer.
+        let mut urb_sample = self
+            .dispatched
+            .reserve(std::mem::size_of::<bpf_intf::dispatched_task_ctx>())?;
+        let bytes = urb_sample.as_mut();
+        let dispatched_task = plain::from_mut_bytes::<bpf_intf::dispatched_task_ctx>(bytes)
+            .expect("failed to convert bytes");
 
-        dispatched.update(&[], msg.as_bytes(), libbpf_rs::MapFlags::ANY)
+        // Convert the dispatched task into the low-level dispatched task context.
+        let bpf_intf::dispatched_task_ctx {
+            pid,
+            cpu,
+            flags,
+            cpumask_cnt,
+            slice_ns,
+            ..
+        } = &mut dispatched_task.as_mut();
+
+        *pid = task.pid;
+        *cpu = task.cpu;
+        *flags = task.flags;
+        *cpumask_cnt = task.cpumask_cnt;
+        *slice_ns = task.slice_ns;
+
+        // Store the task in the user ring buffer.
+        //
+        // NOTE: submit() only updates the reserved slot in the user ring buffer, so it is not
+        // expected to fail.
+        self.dispatched
+            .submit(urb_sample)
+            .expect("failed to submit task");
+
+        Ok(())
     }
 
     // Read exit code from the BPF part.
