@@ -512,31 +512,6 @@ static void refresh_tune_params(void)
 	}
 }
 
-/*
- * log2 helper functions taken from scx_lavd
- */
-static inline __attribute__((always_inline)) u32 bpf_log2(u32 v)
-{
-        u32 r;
-        u32 shift;
-
-        r = (v > 0xFFFF) << 4; v >>= r;
-        shift = (v > 0xFF) << 3; v >>= shift; r |= shift;
-        shift = (v > 0xF) << 2; v >>= shift; r |= shift;
-        shift = (v > 0x3) << 1; v >>= shift; r |= shift;
-        r |= (v >> 1);
-        return r;
-}
-
-static inline __attribute__((always_inline)) u32 bpf_log2l(u64 v)
-{
-        u32 hi = v >> 32;
-        if (hi)
-                return bpf_log2(hi) + 32 + 1;
-        else
-                return bpf_log2(v) + 1;
-}
-
 static u64 min(u64 a, u64 b)
 {
 	return a <= b ? a : b;
@@ -667,8 +642,8 @@ static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
 
 	/*
 	 * The above frequencies roughly follow an exponential distribution, so
-	 * borrow the bpf_log2l() implementation from lavd to linearize it to a
-	 * boost priority.
+	 * use bpf_log2l() to linearize it to a boost priority that we can then
+	 * scale to a weight factor below.
 	 */
 	lat_prio = bpf_log2l(freq_factor + 1);
 	lat_prio = min(lat_prio, DL_MAX_LAT_PRIO);
