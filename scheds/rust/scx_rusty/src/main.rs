@@ -304,9 +304,9 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-	if opts.partial {
+        if opts.partial {
             skel.struct_ops.rusty_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
-	}
+        }
         skel.struct_ops.rusty_mut().exit_dump_len = opts.exit_dump_len;
 
         skel.rodata_mut().load_half_life = (opts.load_half_life * 1000000000.0) as u32;
