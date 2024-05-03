@@ -127,12 +127,6 @@ struct task_ctx {
 	/* select_cpu() telling enqueue() to queue directly on the DSQ */
 	bool dispatch_local;
 
-	/*
-	 * Task couldn't find a domain to run on. Is likely affinitized to an
-	 * offline core
-	 */
-	bool offline;
-
 	struct ravg_data dcyc_rd;
 };
 

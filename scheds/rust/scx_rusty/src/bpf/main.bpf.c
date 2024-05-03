@@ -748,7 +748,6 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	new_domc = try_lookup_dom_ctx(new_dom_id);
 	if (!new_domc) {
 		if (new_dom_id == NO_DOM_FOUND) {
-			taskc->offline = true;
 			bpf_cpumask_clear(t_cpumask);
 			return !(p->scx.flags & SCX_TASK_QUEUED);
 		} else {
@@ -1248,12 +1247,6 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 
 	if (!(wakee_ctx = lookup_task_ctx(p)))
 		return;
-
-	if (wakee_ctx->offline) {
-		scx_bpf_error("Offline task [%s](%d) is becoming runnable",
-			      p->comm, p->pid);
-		return;
-	}
 
 	wakee_ctx->is_kworker = p->flags & PF_WQ_WORKER;
 
