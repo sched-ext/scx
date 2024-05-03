@@ -1171,6 +1171,16 @@ void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 	struct pcpu_ctx *pcpuc;
 	u32 node_doms, my_node, i;
 
+	/*
+	 * In older kernels, we may receive an ops.dispatch() callback when a
+	 * CPU is coming online during a hotplug _before_ the hotplug callback
+	 * has been invoked. We're just going to exit in that hotplug callback,
+	 * so let's just defer consuming here to avoid triggering a bad DSQ
+	 * error in ext.c.
+	 */
+	if (unlikely(is_offline_cpu(cpu)))
+		return;
+
 	if (scx_bpf_consume(dom)) {
 		stat_add(RUSTY_STAT_DSQ_DISPATCH, 1);
 		return;
