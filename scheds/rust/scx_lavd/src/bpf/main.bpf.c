@@ -398,28 +398,6 @@ static u16 get_nice_prio(struct task_struct *p);
 static u64 get_task_load_ideal(struct task_struct *p);
 static void adjust_slice_boost(struct cpu_ctx *cpuc, struct task_ctx *taskc);
 
-static inline __attribute__((always_inline)) u32 bpf_log2(u32 v)
-{
-	u32 r;
-	u32 shift;
-	
-	r = (v > 0xFFFF) << 4; v >>= r;
-	shift = (v > 0xFF) << 3; v >>= shift; r |= shift;
-	shift = (v > 0xF) << 2; v >>= shift; r |= shift;
-	shift = (v > 0x3) << 1; v >>= shift; r |= shift;
-	r |= (v >> 1);
-	return r;
-}
-
-static inline __attribute__((always_inline)) u32 bpf_log2l(u64 v)
-{
-	u32 hi = v >> 32;
-	if (hi)
-		return bpf_log2(hi) + 32 + 1;
-	else
-		return bpf_log2(v) + 1;
-}
-
 static u64 sigmoid_u64(u64 v, u64 max)
 {
 	/*
