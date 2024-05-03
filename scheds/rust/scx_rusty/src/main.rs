@@ -79,9 +79,13 @@ const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 /// limitation will be removed in the future.
 #[derive(Debug, Parser)]
 struct Opts {
-    /// Scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "20000")]
-    slice_us: u64,
+    /// Scheduling slice duration for under-utilized hosts, in microseconds.
+    #[clap(short = 'u', long, default_value = "20000")]
+    slice_us_underutil: u64,
+
+    /// Scheduling slice duration for over-utilized hosts, in microseconds.
+    #[clap(short = 'o', long, default_value = "1000")]
+    slice_us_overutil: u64,
 
     /// Monitoring and load balance interval in seconds.
     #[clap(short = 'i', long, default_value = "2.0")]
@@ -305,7 +309,6 @@ impl<'a> Scheduler<'a> {
 	}
         skel.struct_ops.rusty_mut().exit_dump_len = opts.exit_dump_len;
 
-        skel.rodata_mut().slice_ns = opts.slice_us * 1000;
         skel.rodata_mut().load_half_life = (opts.load_half_life * 1000000000.0) as u32;
         skel.rodata_mut().kthreads_local = opts.kthreads_local;
         skel.rodata_mut().fifo_sched = opts.fifo_sched;
@@ -342,7 +345,11 @@ impl<'a> Scheduler<'a> {
 
             nr_lb_data_errors: 0,
 
-            tuner: Tuner::new(domains, opts.direct_greedy_under, opts.kick_greedy_under)?,
+            tuner: Tuner::new(domains,
+                              opts.direct_greedy_under,
+                              opts.kick_greedy_under,
+                              opts.slice_us_underutil * 1000,
+                              opts.slice_us_overutil * 1000,)?,
         })
     }
 
@@ -489,7 +496,14 @@ impl<'a> Scheduler<'a> {
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_KICK_GREEDY),
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_REPATRIATE),
         );
+        info!(
+            "dl_clamped={:5.2} dl_preset={:5.2}",
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_CLAMP),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_PRESET),
 
+        );
+
+        info!("slice_length={}us", self.tuner.slice_ns / 1000);
         info!("direct_greedy_cpumask={}", self.tuner.direct_greedy_mask);
         info!("  kick_greedy_cpumask={}", self.tuner.kick_greedy_mask);
 
