@@ -116,3 +116,43 @@ $ sudo scx_rusty
 #### Setting up Dev Environment
 
 No additional steps needed here other than what is mentioned in the main README.md.
+
+## Nix
+
+(Chaotic Nyx)[https://github.com/chaotic-cx/nyx] is maintaining the linux-cachyos kernel and scx-scheds package in a flake.
+
+#### Integrate the repository using flake
+
+<pre lang="nix"><code class="language-nix">
+{
+  description = "My configuration";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    chaotic.url = "github:chaotic-cx/nyx/nyxpkgs-unstable";
+  };
+
+  outputs = { nixpkgs, chaotic, ... }: {
+    nixosConfigurations = {
+      hostname = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          ./configuration.nix # Your system configuration.
+          chaotic.nixosModules.default # OUR DEFAULT MODULE
+        ];
+      };
+    };
+  };
+}
+</code></pre>
+
+#### Add this to your configuration to install the kernel
+
+<pre lang="nix"><code class="language-nix">
+{
+  boot.kernelPackages = pkgs.linuxPackages_cachyos;
+  environment.systemPackages =  [ pkgs.scx ];
+}
+</code></pre>
+
+Then install the package and reboot your system. After you can use all provided example schedulers.
