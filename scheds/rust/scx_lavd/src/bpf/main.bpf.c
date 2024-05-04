@@ -1074,7 +1074,7 @@ static int boost_lat(struct task_struct *p, struct task_ctx *taskc,
 		     struct cpu_ctx *cpuc, bool is_wakeup)
 {
 	u64 run_time_ft = 0, wait_freq_ft = 0, wake_freq_ft = 0;
-	u64 lat_cri_raw, perf_cri_raw;
+	u64 lat_cri_raw;
 	u16 static_prio;
 	int boost;
 
@@ -1823,9 +1823,22 @@ static u32 calc_cpuperf_target(struct sys_cpu_util *cutil_cur,
 	u32 cpuperf_target;
 
 	/*
-	 * If a task with an average performance criticality of the current CPU
-	 * consumes 100% of CPU time, we set the CPU performance to the
-	 * maximum.
+	 * We determine the clock frequency of a CPU using two factors: 1) the
+	 * current CPU utilization (cpuc->util) and 2) the current task's
+	 * performance criticality (taskc->perf_cri) compared to the
+	 * system-wide average performance criticality
+	 * (cutil_cur->avg_perf_cri).
+	 *
+	 * When a current CPU utilization is 100%, and the current task's
+	 * performance criticality is the same as the system-wide average
+	 * criticality, we set the target CPU frequency to the maximum.
+	 *
+	 * In other words, even if CPU utilization is not so high, the target
+	 * CPU frequency could be high when the task's performance criticality
+	 * is high enough (i.e., boosting CPU frequency). On the other hand,
+	 * the target CPU frequency could be low even if CPU utilization is
+	 * high when a non-performance-critical task is running (i.e.,
+	 * deboosting CPU frequency).
 	 */
 	max_load = cutil_cur->avg_perf_cri * 1000 /* max cpu util */;
 	cpu_load = taskc->perf_cri * cpuc->util;
