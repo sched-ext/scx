@@ -89,6 +89,7 @@ are provided for select distros.
 - [Ubuntu](INSTALL.md#ubuntu)
 - [Arch Linux](INSTALL.md#arch-linux)
 - [Fedora](INSTALL.md#fedora)
+- [Nix](INSTALL.md#nix)
 
 ## Repository Structure
 
