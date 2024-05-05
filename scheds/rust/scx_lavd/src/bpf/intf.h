@@ -56,8 +56,8 @@ enum consts {
 	LAVD_MAX_CAS_RETRY		= 8,
 
 	LAVD_TARGETED_LATENCY_NS	= (15 * NSEC_PER_MSEC),
-	LAVD_SLICE_MIN_NS		= (300 * NSEC_PER_USEC),/* min time slice */
-	LAVD_SLICE_MAX_NS		= (3 * NSEC_PER_MSEC),	/* max time slice */
+	LAVD_SLICE_MIN_NS		= ( 1 * NSEC_PER_MSEC), /* min time slice */
+	LAVD_SLICE_MAX_NS		= (15 * NSEC_PER_MSEC), /* max time slice */
 	LAVD_SLICE_UNDECIDED		= SCX_SLICE_INF,
 	LAVD_SLICE_GREEDY_FT		= 3,
 	LAVD_LOAD_FACTOR_ADJ		= 6,
@@ -73,18 +73,17 @@ enum consts {
 	LAVD_GREEDY_RATIO_MAX		= USHRT_MAX,
 	LAVD_LAT_PRIO_IDLE		= USHRT_MAX,
 
-	LAVD_ELIGIBLE_TIME_LAT_FT	= 2,
-	LAVD_ELIGIBLE_TIME_MAX		= LAVD_TARGETED_LATENCY_NS,
+	LAVD_ELIGIBLE_TIME_LAT_FT	= 16,
+	LAVD_ELIGIBLE_TIME_MAX		= (LAVD_SLICE_MIN_NS >> 8),
 
 	LAVD_CPU_UTIL_MAX		= 1000, /* 100.0% */
 	LAVD_CPU_UTIL_INTERVAL_NS	= (100 * NSEC_PER_MSEC), /* 100 msec */
-	LAVD_CPU_ID_HERE		= ((u16)-2),
-	LAVD_CPU_ID_NONE		= ((u16)-1),
+	LAVD_CPU_ID_HERE		= ((u32)-2),
+	LAVD_CPU_ID_NONE		= ((u32)-1),
 
-	LAVD_FREQ_CPU_UTIL_THRES	= 950, /* 95.0% */
-
-	LAVD_PREEMPT_KICK_LAT_PRIO	= 18,
-	LAVD_PREEMPT_KICK_MARGIN	= (LAVD_SLICE_MIN_NS >> 1),
+	LAVD_PREEMPT_KICK_LAT_PRIO	= 15,
+	LAVD_PREEMPT_KICK_MARGIN	= (LAVD_SLICE_MIN_NS >> 3),
+	LAVD_PREEMPT_TICK_MARGIN	= (LAVD_SLICE_MIN_NS >> 8),
 
 	LAVD_GLOBAL_DSQ			= 0,
 };
@@ -180,10 +179,10 @@ struct task_ctx {
 	u64	slice_ns;		/* time slice */
 	u64	greedy_ratio;		/* task's overscheduling ratio compared to its nice priority */
 	u64	lat_cri;		/* calculated latency criticality */
+	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
 	u16	lat_prio;		/* latency priority */
 	s16	lat_boost_prio;		/* DEBUG */
-	s16	victim_cpu;		/* DEBUG */
 
 	/*
 	 * Task's performance criticality
@@ -195,11 +194,9 @@ struct task_ctx_x {
 	pid_t	pid;
 	char	comm[TASK_COMM_LEN + 1];
 	u16	static_prio;	/* nice priority */
-	u16	cpu_id;		/* where a task ran */
+	u32	cpu_id;		/* where a task ran */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
 	u64	sys_load_factor; /* system load factor in [0..100..] */
-	u64	max_lat_cri;	/* maximum latency criticality */
-	u64	min_lat_cri;	/* minimum latency criticality */
 	u64	avg_lat_cri;	/* average latency criticality */
 	u64	avg_perf_cri;	/* average performance criticality */
 };
