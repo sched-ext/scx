@@ -45,6 +45,10 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 /// See the more detailed overview of the LAVD design at main.bpf.c.
 #[derive(Debug, Parser)]
 struct Opts {
+    /// Diable frequency scaling by scx_lavd
+    #[clap(long = "no-freq-scaling", action = clap::ArgAction::SetTrue)]
+    no_freq_scaling: bool,
+
     /// The number of scheduling samples to be reported every second (default: 1)
     #[clap(short = 's', long, default_value = "1")]
     nr_sched_samples: u64,
@@ -118,6 +122,7 @@ impl<'a> Scheduler<'a> {
         let nr_cpus_onln = topo.span().weight() as u64;
         skel.bss_mut().nr_cpus_onln = nr_cpus_onln;
         skel.struct_ops.lavd_ops_mut().exit_dump_len = opts.exit_dump_len;
+        skel.rodata_mut().no_freq_scaling = opts.no_freq_scaling;
         skel.rodata_mut().verbose = opts.verbose;
         let intrspc = introspec::init(opts);
 
@@ -171,7 +176,8 @@ impl<'a> Scheduler<'a> {
                    | {:7} | {:7} | {:12} \
                    | {:7} | {:9} | {:9} \
                    | {:9} | {:9} | {:9} \
-                   | {:8} | {:6} |",
+                   | {:8} | {:8} | {:8} \
+                   | {:6} |",
                 "mseq",
                 "pid",
                 "comm",
@@ -193,6 +199,8 @@ impl<'a> Scheduler<'a> {
                 "run_tm_ns",
                 "wait_freq",
                 "wake_freq",
+                "perf_cri",
+                "avg_pc",
                 "cpu_util",
                 "sys_ld"
             );
@@ -210,7 +218,8 @@ impl<'a> Scheduler<'a> {
                | {:7} | {:7} | {:12} \
                | {:7} | {:9} | {:9} \
                | {:9} | {:9} | {:9} \
-               | {:8} | {:6} |",
+               | {:8} | {:8} | {:8} \
+               | {:6} |",
             mseq,
             tx.pid,
             tx_comm,
@@ -232,6 +241,8 @@ impl<'a> Scheduler<'a> {
             tc.run_time_ns,
             tc.wait_freq,
             tc.wake_freq,
+            tc.perf_cri,
+            tx.avg_perf_cri,
             tx.cpu_util,
             tx.sys_load_factor
         );

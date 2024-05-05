@@ -124,6 +124,7 @@ volatile u64			nr_cpus_onln;
 static struct sys_cpu_util	__sys_cpu_util[2];
 static volatile int		__sys_cpu_util_idx;
 
+const volatile bool		no_freq_scaling;
 const volatile u8		verbose;
 
 UEI_DEFINE(uei);
@@ -496,7 +497,12 @@ static __attribute__((always_inline))
 int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u16 cpu_id)
 {
 	struct sys_cpu_util *cutil_cur = get_sys_cpu_util_cur();
+	struct cpu_ctx *cpuc;
 	struct msg_task_ctx *m;
+
+	cpuc = get_cpu_ctx_id(cpu_id);
+	if (!cpuc)
+		return -EINVAL;
 
 	m = bpf_ringbuf_reserve(&introspec_msg, sizeof(*m), 0);
 	if (!m)
@@ -506,12 +512,13 @@ int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u16 cpu_id)
 	m->taskc_x.pid = p->pid;
 	memcpy(m->taskc_x.comm, p->comm, TASK_COMM_LEN);
 	m->taskc_x.static_prio = get_nice_prio(p);
-	m->taskc_x.cpu_util = cutil_cur->util / 10;
+	m->taskc_x.cpu_util = cpuc->util / 10;
 	m->taskc_x.sys_load_factor = cutil_cur->load_factor / 10;
 	m->taskc_x.cpu_id = cpu_id;
 	m->taskc_x.max_lat_cri = cutil_cur->max_lat_cri;
 	m->taskc_x.min_lat_cri = cutil_cur->min_lat_cri;
 	m->taskc_x.avg_lat_cri = cutil_cur->avg_lat_cri;
+	m->taskc_x.avg_perf_cri = cutil_cur->avg_perf_cri;
 
 	memcpy(&m->taskc, taskc, sizeof(m->taskc));
 
@@ -644,11 +651,12 @@ static void update_sys_cpu_load(void)
 {
 	struct sys_cpu_util *cutil_cur = get_sys_cpu_util_cur();
 	struct sys_cpu_util *cutil_next = get_sys_cpu_util_next();
-	u64 now, duration, duration_total;
+	u64 now, duration, duration_total, compute, idle;
 	u64 idle_total = 0, compute_total = 0;
 	u64 load_actual = 0, load_ideal = 0, load_run_time_ns = 0;
 	s64 max_lat_cri = 0, min_lat_cri = UINT_MAX, avg_lat_cri = 0;
 	u64 sum_lat_cri = 0, sched_nr = 0;
+	u64 sum_perf_cri = 0, avg_perf_cri = 0;
 	u64 new_util, new_load_factor;
 	int cpu;
 
@@ -691,6 +699,12 @@ static void update_sys_cpu_load(void)
 		cpuc->min_lat_cri = UINT_MAX;
 
 		/*
+		 * Accumulate task's performance criticlity information.
+		 */
+		sum_perf_cri += cpuc->sum_perf_cri;
+		cpuc->sum_perf_cri = 0;
+
+		/*
 		 * If the CPU is in an idle state (i.e., idle_start_clk is
 		 * non-zero), accumulate the current idle peirod so far.
 		 */
@@ -707,6 +721,18 @@ static void update_sys_cpu_load(void)
 			}
 		}
 
+		/*
+		 * Calculcate per-CPU utilization
+		 */
+		compute = 0;
+		if (duration > cpuc->idle_total)
+			compute = duration - cpuc->idle_total;
+		new_util = (compute * LAVD_CPU_UTIL_MAX) / duration;
+		cpuc->util = calc_avg(cpuc->util, new_util);
+
+		/*
+		 * Accmulate system-wide idle time
+		 */
 		idle_total += cpuc->idle_total;
 		cpuc->idle_total = 0;
 	}
@@ -730,9 +756,12 @@ static void update_sys_cpu_load(void)
 		min_lat_cri = cutil_cur->min_lat_cri;
 		max_lat_cri = cutil_cur->max_lat_cri;
 		avg_lat_cri = cutil_cur->avg_lat_cri;
+		avg_perf_cri = cutil_cur->avg_perf_cri;
 	}
-	else
+	else {
 		avg_lat_cri = sum_lat_cri / sched_nr;
+		avg_perf_cri = sum_perf_cri / sched_nr;
+	}
 
 	/*
 	 * Update the CPU utilization to the next version.
@@ -748,6 +777,7 @@ static void update_sys_cpu_load(void)
 	cutil_next->thr_lat_cri = cutil_next->avg_lat_cri +
 				  ((cutil_next->max_lat_cri -
 				    cutil_next->avg_lat_cri) >> 1);
+	cutil_next->avg_perf_cri = calc_avg(cutil_cur->avg_perf_cri, avg_perf_cri);
 
 	/*
 	 * Calculate the increment for latency criticality to priority mapping
@@ -1022,7 +1052,7 @@ static int boost_lat(struct task_struct *p, struct task_ctx *taskc,
 		     struct cpu_ctx *cpuc, bool is_wakeup)
 {
 	u64 run_time_ft = 0, wait_freq_ft = 0, wake_freq_ft = 0;
-	u64 lat_cri_raw = 0;
+	u64 lat_cri_raw;
 	u16 static_prio;
 	int boost;
 
@@ -1263,6 +1293,8 @@ static void update_stat_for_running(struct task_struct *p,
 {
 	u64 wait_period, interval;
 	u64 now = bpf_ktime_get_ns();
+	u64 load_actual_ft, load_ideal_ft, wait_freq_ft, wake_freq_ft;
+	u64 perf_cri_raw;
 
 	/*
 	 * Since this is the start of a new schedule for @p, we update run
@@ -1284,6 +1316,29 @@ static void update_stat_for_running(struct task_struct *p,
 		cpuc->min_lat_cri = taskc->lat_cri;
 	cpuc->sum_lat_cri += taskc->lat_cri;
 	cpuc->sched_nr++;
+
+	/*
+	 * Update task's performance criticality
+	 *
+	 * A task is more CPU-performance sensitive when it meets the following
+	 * conditions:
+	 *
+	 * - Its actual load (runtime * run_freq) is high;
+	 * - Its nice priority is high;
+	 * - It is in the middle of the task graph (high wait and wake
+	 *   frequencies).
+	 *
+	 * We use the log-ed value since the raw value follows the highly
+	 * skewed distribution.
+	 */
+	load_actual_ft = calc_runtime_factor(taskc->load_actual);
+	load_ideal_ft = get_task_load_ideal(p);
+	wait_freq_ft = calc_freq_factor(taskc->wait_freq);
+	wake_freq_ft = calc_freq_factor(taskc->wake_freq);
+	perf_cri_raw = load_actual_ft * load_ideal_ft *
+		       wait_freq_ft * wake_freq_ft;
+	taskc->perf_cri = bpf_log2l(perf_cri_raw + 1);
+	cpuc->sum_perf_cri += taskc->perf_cri;
 
 	/*
 	 * Update task state when starts running.
@@ -1739,6 +1794,57 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	scx_bpf_consume(LAVD_GLOBAL_DSQ);
 }
 
+static u32 calc_cpuperf_target(struct sys_cpu_util *cutil_cur,
+			       struct task_ctx *taskc, struct cpu_ctx *cpuc)
+{
+	u64 max_load, cpu_load;
+	u32 cpuperf_target;
+
+	/*
+	 * We determine the clock frequency of a CPU using two factors: 1) the
+	 * current CPU utilization (cpuc->util) and 2) the current task's
+	 * performance criticality (taskc->perf_cri) compared to the
+	 * system-wide average performance criticality
+	 * (cutil_cur->avg_perf_cri).
+	 *
+	 * When a current CPU utilization is 100%, and the current task's
+	 * performance criticality is the same as the system-wide average
+	 * criticality, we set the target CPU frequency to the maximum.
+	 *
+	 * In other words, even if CPU utilization is not so high, the target
+	 * CPU frequency could be high when the task's performance criticality
+	 * is high enough (i.e., boosting CPU frequency). On the other hand,
+	 * the target CPU frequency could be low even if CPU utilization is
+	 * high when a non-performance-critical task is running (i.e.,
+	 * deboosting CPU frequency).
+	 */
+	max_load = cutil_cur->avg_perf_cri * 1000 /* max cpu util */;
+	cpu_load = taskc->perf_cri * cpuc->util;
+	cpuperf_target = (cpu_load * SCX_CPUPERF_ONE) / max_load;
+	return min(cpuperf_target, SCX_CPUPERF_ONE);
+}
+
+void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
+{
+	struct sys_cpu_util *cutil_cur = get_sys_cpu_util_cur();
+	struct cpu_ctx *cpuc;
+	struct task_ctx *taskc;
+	u32 cpuperf_target;
+
+	cpuc = get_cpu_ctx();
+	taskc = get_task_ctx(p);
+	if (!cpuc || !taskc)
+		return;
+
+	/*
+	 * Update performance target of the current CPU
+	 */
+	if (!no_freq_scaling) {
+		cpuperf_target = calc_cpuperf_target(cutil_cur, taskc, cpuc);
+		scx_bpf_cpuperf_set(scx_bpf_task_cpu(p), cpuperf_target);
+	}
+}
+
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc;
@@ -2147,6 +2253,7 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .select_cpu		= (void *)lavd_select_cpu,
 	       .enqueue			= (void *)lavd_enqueue,
 	       .dispatch		= (void *)lavd_dispatch,
+	       .tick			= (void *)lavd_tick,
 	       .runnable		= (void *)lavd_runnable,
 	       .running			= (void *)lavd_running,
 	       .stopping		= (void *)lavd_stopping,

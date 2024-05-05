@@ -21,8 +21,11 @@ typedef signed long s64;
 
 typedef int pid_t;
 
+#define U64_MAX ((u64)~0ULL)
+
 enum {
 	TASK_COMM_LEN = 16,
+	SCX_SLICE_INF = U64_MAX,
 };
 
 #define __kptr
@@ -49,13 +52,13 @@ enum consts {
 	NSEC_PER_USEC			= 1000ULL,
 	NSEC_PER_MSEC			= (1000ULL * NSEC_PER_USEC),
 	LAVD_TIME_ONE_SEC		= (1000ULL * NSEC_PER_MSEC),
-	LAVD_TIME_INFINITY_NS		= 0xFFFFFFFFFFFFFFFFULL,
+	LAVD_TIME_INFINITY_NS		= SCX_SLICE_INF,
 	LAVD_MAX_CAS_RETRY		= 8,
 
 	LAVD_TARGETED_LATENCY_NS	= (15 * NSEC_PER_MSEC),
 	LAVD_SLICE_MIN_NS		= (300 * NSEC_PER_USEC),/* min time slice */
 	LAVD_SLICE_MAX_NS		= (3 * NSEC_PER_MSEC),	/* max time slice */
-	LAVD_SLICE_UNDECIDED		= LAVD_TIME_INFINITY_NS,
+	LAVD_SLICE_UNDECIDED		= SCX_SLICE_INF,
 	LAVD_SLICE_GREEDY_FT		= 3,
 	LAVD_LOAD_FACTOR_ADJ		= 6,
 	LAVD_LOAD_FACTOR_MAX		= (10 * 1000),
@@ -77,6 +80,8 @@ enum consts {
 	LAVD_CPU_UTIL_INTERVAL_NS	= (100 * NSEC_PER_MSEC), /* 100 msec */
 	LAVD_CPU_ID_HERE		= ((u16)-2),
 	LAVD_CPU_ID_NONE		= ((u16)-1),
+
+	LAVD_FREQ_CPU_UTIL_THRES	= 950, /* 95.0% */
 
 	LAVD_PREEMPT_KICK_LAT_PRIO	= 18,
 	LAVD_PREEMPT_KICK_MARGIN	= (LAVD_SLICE_MIN_NS >> 1),
@@ -102,12 +107,16 @@ struct sys_cpu_util {
 
 	volatile s64	inc1k_low;	/* increment from low LC to priority mapping */
 	volatile s64	inc1k_high;	/* increment from high LC to priority mapping */
+
+	volatile u64	avg_perf_cri;	/* average performance criticality */
 };
 
 /*
  * Per-CPU context
  */
 struct cpu_ctx {
+	volatile u64	util;		/* average of the CPU utilization */
+
 	/* 
 	 * Information used to keep track of CPU utilization
 	 */
@@ -129,6 +138,11 @@ struct cpu_ctx {
 	volatile u64	min_lat_cri;	/* minimum latency criticality */
 	volatile u64	sum_lat_cri;	/* sum of latency criticality */
 	volatile u64	sched_nr;	/* number of schedules */
+
+	/*
+	 * Information used to keep track of performance criticality
+	 */
+	volatile u64	sum_perf_cri;	/* sum of performance criticality */
 
 	/*
 	 * Information of a current running task for preemption
@@ -170,6 +184,11 @@ struct task_ctx {
 	u16	lat_prio;		/* latency priority */
 	s16	lat_boost_prio;		/* DEBUG */
 	s16	victim_cpu;		/* DEBUG */
+
+	/*
+	 * Task's performance criticality
+	 */
+	u64	perf_cri;		/* performance criticality of a task */
 };
 
 struct task_ctx_x {
@@ -182,6 +201,7 @@ struct task_ctx_x {
 	u64	max_lat_cri;	/* maximum latency criticality */
 	u64	min_lat_cri;	/* minimum latency criticality */
 	u64	avg_lat_cri;	/* average latency criticality */
+	u64	avg_perf_cri;	/* average performance criticality */
 };
 
 
