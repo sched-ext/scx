@@ -261,6 +261,10 @@ static inline u32 bpf_log2l(u64 v)
                 return bpf_log2(v) + 1;
 }
 
+/* useful compiler attributes */
+#define likely(x) __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
+
 void *bpf_obj_new_impl(__u64 local_type_id, void *meta) __ksym;
 void bpf_obj_drop_impl(void *kptr, void *meta) __ksym;
 

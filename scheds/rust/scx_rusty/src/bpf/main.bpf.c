@@ -748,7 +748,6 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	new_domc = try_lookup_dom_ctx(new_dom_id);
 	if (!new_domc) {
 		if (new_dom_id == NO_DOM_FOUND) {
-			taskc->offline = true;
 			bpf_cpumask_clear(t_cpumask);
 			return !(p->scx.flags & SCX_TASK_QUEUED);
 		} else {
@@ -1171,6 +1170,16 @@ void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 	struct pcpu_ctx *pcpuc;
 	u32 node_doms, my_node, i;
 
+	/*
+	 * In older kernels, we may receive an ops.dispatch() callback when a
+	 * CPU is coming online during a hotplug _before_ the hotplug callback
+	 * has been invoked. We're just going to exit in that hotplug callback,
+	 * so let's just defer consuming here to avoid triggering a bad DSQ
+	 * error in ext.c.
+	 */
+	if (unlikely(is_offline_cpu(cpu)))
+		return;
+
 	if (scx_bpf_consume(dom)) {
 		stat_add(RUSTY_STAT_DSQ_DISPATCH, 1);
 		return;
@@ -1238,12 +1247,6 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 
 	if (!(wakee_ctx = lookup_task_ctx(p)))
 		return;
-
-	if (wakee_ctx->offline) {
-		scx_bpf_error("Offline task [%s](%d) is becoming runnable",
-			      p->comm, p->pid);
-		return;
-	}
 
 	wakee_ctx->is_kworker = p->flags & PF_WQ_WORKER;
 
