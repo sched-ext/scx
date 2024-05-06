@@ -271,26 +271,33 @@ impl Topology {
 pub struct TopologyMap {
     map: Vec<Vec<usize>>,
     nr_cpus_possible: usize,
+    nr_cpus_online: usize,
 }
 
 impl TopologyMap {
     pub fn new(topo: Topology) -> Result<TopologyMap> {
         let mut map: Vec<Vec<usize>> = Vec::new();
+        let mut nr_cpus_online = 0;
 
         for core in topo.cores().into_iter() {
             let mut cpu_ids: Vec<usize> = Vec::new();
             for cpu_id in core.span().clone().into_iter() {
                 cpu_ids.push(cpu_id);
+                nr_cpus_online += 1;
             }
             map.push(cpu_ids);
         }
         let nr_cpus_possible = topo.nr_cpus_possible;
 
-        Ok(TopologyMap { map, nr_cpus_possible, })
+        Ok(TopologyMap { map, nr_cpus_possible, nr_cpus_online })
     }
 
     pub fn nr_cpus_possible(&self) -> usize {
         self.nr_cpus_possible
+    }
+
+    pub fn nr_cpus_online(&self) -> usize {
+        self.nr_cpus_online
     }
 
     pub fn iter(&self) -> Iter<Vec<usize>> {

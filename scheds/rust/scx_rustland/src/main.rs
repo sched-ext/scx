@@ -290,7 +290,7 @@ impl<'a> Scheduler<'a> {
         let init_page_faults: u64 = 0;
 
         // Low-level BPF connector.
-        let nr_online_cpus = topo_map.nr_cpus_possible();
+        let nr_online_cpus = topo_map.nr_cpus_online();
         let bpf = BpfScheduler::init(
             opts.slice_us,
             nr_online_cpus as i32,
@@ -385,7 +385,7 @@ impl<'a> Scheduler<'a> {
         //
         // This allows to survive stress tests that are spawning a massive amount of
         // tasks.
-        self.eff_slice_boost = (self.slice_boost * self.topo_map.nr_cpus_possible() as u64
+        self.eff_slice_boost = (self.slice_boost * self.topo_map.nr_cpus_online() as u64
             / self.task_pool.tasks.len().max(1) as u64)
             .max(1);
 
