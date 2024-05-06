@@ -69,6 +69,11 @@ volatile u64 nr_queued;
  */
 volatile u64 nr_scheduled;
 
+/*
+ * Amount of currently running tasks.
+ */
+volatile u64 nr_running;
+
 /* Dispatch statistics */
 volatile u64 nr_user_dispatches, nr_kernel_dispatches,
 	     nr_cancel_dispatches, nr_bounce_dispatches;
@@ -672,8 +677,10 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 	 * Mark the CPU as busy by setting the pid as owner (ignoring the
 	 * user-space scheduler).
 	 */
-	if (!is_usersched_task(p))
+	if (!is_usersched_task(p)) {
 		set_cpu_owner(cpu, p->pid);
+		__sync_fetch_and_add(&nr_running, 1);
+	}
 }
 
 /*
@@ -689,6 +696,7 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 	 */
 	if (!is_usersched_task(p)) {
 		set_cpu_owner(scx_bpf_task_cpu(p), 0);
+		__sync_fetch_and_sub(&nr_running, 1);
 		/*
 		 * Kick the user-space scheduler immediately when a task
 		 * releases a CPU and speculate on the fact that most of the

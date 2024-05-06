@@ -293,6 +293,12 @@ impl<'cb> BpfScheduler<'cb> {
         }
     }
 
+    // Counter of currently running tasks.
+    #[allow(dead_code)]
+    pub fn nr_running_mut(&mut self) -> &mut u64 {
+        &mut self.skel.bss_mut().nr_running
+    }
+
     // Counter of queued tasks.
     #[allow(dead_code)]
     pub fn nr_queued_mut(&mut self) -> &mut u64 {
