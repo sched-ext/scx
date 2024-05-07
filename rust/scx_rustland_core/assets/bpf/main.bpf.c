@@ -105,6 +105,19 @@ const volatile bool full_user;
   */
 const volatile bool low_power;
 
+/*
+ * Automatically switch to simple FIFO scheduling during periods of system
+ * underutilization to minimize unnecessary scheduling overhead.
+ *
+ * 'fifo_sched' can be used by the user-space scheduler to enable/disable this
+ * behavior.
+ *
+ * 'is_fifo_enabled' indicates whether the scheduling has switched to FIFO mode
+ * or regular scheduling mode.
+ */
+const volatile bool fifo_sched;
+static bool is_fifo_enabled;
+
 /* Allow to use bpf_printk() only when @debug is set */
 #define dbg_msg(_fmt, ...) do {						\
 	if (debug)							\
@@ -199,6 +212,13 @@ struct {
 	__type(key, u32);
 	__type(value, struct usersched_timer);
 } usersched_timer SEC(".maps");
+
+/*
+ * Time period of the scheduler heartbeat, used to periodically kick the the
+ * scheduler and check if we need to switch to FIFO mode or regular
+ * scheduling (default 100ms).
+ */
+#define USERSCHED_TIMER_NS (NSEC_PER_SEC / 10)
 
 /*
  * Map of allocated CPUs.
@@ -542,6 +562,20 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
+	 * Dispatch directly to the target CPU DSQ if the scheduler is set to
+	 * FIFO mode.
+	 */
+	if (!full_user && is_fifo_enabled) {
+		s32 cpu = scx_bpf_task_cpu(p);
+
+		scx_bpf_dispatch(p, cpu_to_dsq(cpu), slice_ns, enq_flags);
+		scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
+
+		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		return;
+	}
+
+	/*
 	 * Add tasks to the @queued list, they will be processed by the
 	 * user-space scheduler.
 	 *
@@ -747,7 +781,6 @@ void BPF_STRUCT_OPS(rustland_cpu_release, s32 cpu,
 		set_usersched_needed();
 }
 
-
 /*
  * A new task @p is being created.
  *
@@ -800,6 +833,43 @@ void BPF_STRUCT_OPS(rustland_exit_task, struct task_struct *p,
 }
 
 /*
+ * Check whether we can switch to FIFO mode if the system is underutilized.
+ */
+static bool should_enable_fifo(void)
+{
+	/* Moving average of the tasks that are waiting to be scheduled */
+	static u64 nr_waiting_avg;
+	/* Current amount of tasks waiting to be scheduled */
+	u64 nr_waiting = nr_queued + nr_scheduled;
+
+	if (!fifo_sched)
+		return false;
+
+	/*
+	 * Exiting from FIFO mode requires to have almost all the CPUs busy.
+	 */
+	if (is_fifo_enabled)
+		return nr_running < num_possible_cpus - 1;
+
+	/*
+	 * We are not in FIFO mode, check for the task waiting to be processed
+	 * by the user-space scheduler.
+	 *
+	 * We want to evaluate a moving average of the waiting tasks to prevent
+	 * bouncing too often between FIFO mode and user-space mode.
+	 */
+	nr_waiting_avg = (nr_waiting_avg + nr_waiting) / 2;
+
+	/*
+	 * The condition to enter in FIFO mode is to have no tasks (in average)
+	 * that are waiting to be scheduled.
+	 *
+	 * Exiting from FIFO mode requires to have almost all the CPUs busy.
+	 */
+	return nr_waiting_avg == 0;
+}
+
+/*
  * Heartbeat scheduler timer callback.
  *
  * If the system is completely idle the sched-ext watchdog may incorrectly
@@ -815,8 +885,11 @@ static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
 	/* Kick the scheduler */
 	set_usersched_needed();
 
+	/* Update flag that determines if FIFO scheduling needs to be enabled */
+	is_fifo_enabled = should_enable_fifo();
+
 	/* Re-arm the timer */
-	err = bpf_timer_start(timer, NSEC_PER_SEC, 0);
+	err = bpf_timer_start(timer, USERSCHED_TIMER_NS, 0);
 	if (err)
 		scx_bpf_error("Failed to arm stats timer");
 
@@ -839,7 +912,7 @@ static int usersched_timer_init(void)
 	}
 	bpf_timer_init(timer, &usersched_timer, CLOCK_BOOTTIME);
 	bpf_timer_set_callback(timer, usersched_timer_fn);
-	err = bpf_timer_start(timer, NSEC_PER_SEC, 0);
+	err = bpf_timer_start(timer, USERSCHED_TIMER_NS, 0);
 	if (err)
 		scx_bpf_error("Failed to arm scheduler timer");
 

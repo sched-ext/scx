@@ -137,6 +137,19 @@ struct Opts {
     #[clap(short = 'l', long, action = clap::ArgAction::SetTrue)]
     low_power: bool,
 
+    /// By default the scheduler automatically transitions to FIFO mode when the system is
+    /// underutilized. This allows to reduce unnecessary scheduling overhead and boost performance
+    /// when the system is not running at full capacity.
+    ///
+    /// Be aware that FIFO mode can lead to less predictable performance. Therefore, use this
+    /// option if performance predictability is important, such as when running real-time audio
+    /// applications or during live streaming. Conversely, avoid using this option when you care
+    /// about maximizing performance, such as gaming.
+    ///
+    /// Set this option to disable this automatic transition.
+    #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
+    disable_fifo: bool,
+
     /// If specified, only tasks which have their scheduling policy set to
     /// SCHED_EXT using sched_setscheduler(2) are switched. Otherwise, all
     /// tasks are switched.
@@ -304,6 +317,7 @@ impl<'a> Scheduler<'a> {
             opts.exit_dump_len,
             opts.full_user,
             opts.low_power,
+            !opts.disable_fifo,
             opts.debug,
         )?;
         info!("{} scheduler attached - {} CPUs", SCHEDULER_NAME, nr_cpus);
