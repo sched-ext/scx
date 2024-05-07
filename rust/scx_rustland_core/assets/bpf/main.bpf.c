@@ -416,6 +416,14 @@ static void dispatch_user_scheduler(void)
 }
 
 /*
+ * Return true if we are waking up from a wait event, false otherwise.
+ */
+static bool is_waking_up(u64 wake_flags)
+{
+	return !!(wake_flags & SCX_WAKE_TTWU);
+}
+
+/*
  * Select the target CPU where a task can be executed.
  *
  * The idea here is to try to find an idle CPU in the system, and preferably
@@ -433,12 +441,42 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	bool is_idle = false;
 	s32 cpu;
 
-	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-	if (is_idle && cpu < num_possible_cpus && !full_user) {
+	/*
+	 * In full-user mode simply assign the previously used CPU and let the
+	 * user-space scheduler decide where it should be dispatched.
+	 */
+	if (full_user)
+		return prev_cpu;
+
+	/*
+	 * Always try to stick on the same CPU if it's available, to better
+	 * exploit the cached working set.
+	 */
+	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		/*
 		 * Using SCX_DSQ_LOCAL ensures that the task will be executed
 		 * directly on the CPU returned by this function.
 		 */
+		dispatch_task(p, SCX_DSQ_LOCAL, 0, 0, 0);
+		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		return prev_cpu;
+	}
+
+	/*
+	 * If the previously used CPU is not available, check whether the task
+	 * is coming from a wait state. If not, enqueue it on the same CPU
+	 * regardless, without directly dispatching it.
+	 */
+	if (!is_waking_up(wake_flags))
+		return prev_cpu;
+
+	/*
+	 * If we are coming from a wait state, try to find the best CPU relying
+	 * on the built-in idle selection logic (eventually migrating the
+	 * task).
+	 */
+	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+	if (is_idle) {
 		dispatch_task(p, SCX_DSQ_LOCAL, 0, 0, 0);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	}
