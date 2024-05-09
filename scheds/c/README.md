@@ -89,7 +89,7 @@ and which can benefit from running on a subset of cores on the host so as to
 keep the frequencies high on those cores. Some workloads may perform better by
 spreading work across many cores to avoid thrashing the cache, etc. Determining
 whether a workload is well-suited to scx_nest will likely require
-expermentation.
+experimentation.
 
 ### Production Ready?
 
