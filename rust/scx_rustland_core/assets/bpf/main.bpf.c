@@ -53,12 +53,6 @@ const volatile bool switch_partial; /* Switch all tasks or SCHED_EXT tasks */
 const volatile u64 slice_ns = SCX_SLICE_DFL; /* Base time slice duration */
 
 /*
- * Effective time slice: allow the scheduler to override the default time slice
- * (slice_ns) if this one is set.
- */
-volatile u64 effective_slice_ns;
-
-/*
  * Number of tasks that are queued for scheduling.
  *
  * This number is incremented by the BPF component when a task is queued to the
@@ -321,8 +315,7 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 	      u64 cpumask_cnt, u64 task_slice_ns, u64 enq_flags)
 {
 	struct task_ctx *tctx;
-	u64 slice = task_slice_ns ? :
-		__sync_fetch_and_add(&effective_slice_ns, 0) ? : slice_ns;
+	u64 slice = task_slice_ns ? : slice_ns;
 	u64 curr_cpumask_cnt;
 	bool force_shared = false;
 	s32 cpu;

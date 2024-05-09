@@ -150,9 +150,8 @@ struct Opts {
 }
 
 // Time constants.
-const USEC_PER_NSEC: u64 = 1_000;
 const NSEC_PER_USEC: u64 = 1_000;
-const MSEC_PER_SEC: u64 = 1_000;
+const NSEC_PER_MSEC: u64 = 1_000_000;
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 
 // Basic item stored in the task information map.
@@ -375,9 +374,6 @@ impl<'a> Scheduler<'a> {
         // Cache the current timestamp.
         let now = Self::now();
 
-        // Get the current effective time slice.
-        let slice_ns = self.bpf.get_effective_slice_us() * MSEC_PER_SEC;
-
         // Update dynamic slice boost.
         //
         // The slice boost is dynamically adjusted as a function of the amount of CPUs
@@ -445,7 +441,7 @@ impl<'a> Scheduler<'a> {
         //
         // Moreover, limiting the accounted time slice to slice_ns, allows to prevent starving the
         // current task for too long in the scheduler task pool.
-        task_info.vruntime = self.min_vruntime + slice.clamp(1, slice_ns);
+        task_info.vruntime = self.min_vruntime + slice.clamp(1, self.slice_ns);
 
         // Update total task cputime.
         task_info.sum_exec_runtime = task.sum_exec_runtime;
@@ -503,21 +499,24 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    // Dynamically adjust the time slice based on the amount of waiting tasks.
-    fn scale_slice_ns(&mut self) {
-        let nr_scheduled = self.task_pool.tasks.len() as u64;
-        let slice_us_max = self.slice_ns / NSEC_PER_USEC;
-
+    // Return the target time slice, proportionally adjusted based on the total amount of tasks
+    // waiting to be scheduled (more tasks waiting => shorter time slice).
+    fn effective_slice_ns(&mut self, nr_scheduled: u64) -> u64 {
         // Scale time slice as a function of nr_scheduled, but never scale below 250 us.
+        //
+        // The goal here is to adjust the time slice allocated to tasks based on the number of
+        // tasks currently awaiting scheduling. When the system is heavily loaded, shorter time
+        // slices are assigned to provide more opportunities for all tasks to receive CPU time.
         let scaling = ((nr_scheduled + 1) / 2).max(1);
-        let slice_us = (slice_us_max / scaling).max(USEC_PER_NSEC / 4);
+        let slice_ns = (self.slice_ns / scaling).max(NSEC_PER_MSEC / 4);
 
-        // Apply new scaling.
-        self.bpf.set_effective_slice_us(slice_us);
+        slice_ns
     }
 
     // Dispatch tasks from the task pool in order (sending them to the BPF dispatcher).
     fn dispatch_tasks(&mut self) {
+        let nr_scheduled = self.task_pool.tasks.len() as u64;
+
         // Dispatch only a batch of tasks equal to the amount of idle CPUs in the system.
         //
         // This allows to have more tasks sitting in the task pool, reducing the pressure on the
@@ -546,6 +545,8 @@ impl<'a> Scheduler<'a> {
                         // maximum static time slice allowed.
                         dispatched_task.set_slice_ns(self.slice_ns);
                         dispatched_task.set_flag(RL_PREEMPT_CPU);
+                    } else {
+                        dispatched_task.set_slice_ns(self.effective_slice_ns(nr_scheduled));
                     }
 
                     // Send task to the BPF dispatcher.
@@ -575,9 +576,6 @@ impl<'a> Scheduler<'a> {
     fn schedule(&mut self) {
         self.drain_queued_tasks();
         self.dispatch_tasks();
-
-        // Adjust the dynamic time slice immediately after dispatching the tasks.
-        self.scale_slice_ns();
 
         // Yield to avoid using too much CPU from the scheduler itself.
         thread::yield_now();
@@ -701,9 +699,6 @@ impl<'a> Scheduler<'a> {
 
         // Show total page faults of the user-space scheduler.
         self.print_faults();
-
-        // Show current used time slice.
-        info!("time slice = {} us", self.bpf.get_effective_slice_us());
 
         // Show current slice boost.
         info!("slice boost = {}", self.eff_slice_boost);
