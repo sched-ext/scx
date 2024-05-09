@@ -700,14 +700,6 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 
 /*
  * A CPU is about to change its idle state.
- *
- * NOTE: implementing an update_idle() callback automatically disables the
- * built-in idle tracking. This is fine because we want to rely on the internal
- * CPU ownership map (get_cpu_owner() / set_cpu_owner()) to determine if a CPU
- * is available or not.
- *
- * This information can easily be shared with the user-space scheduler via
- * cpu_map.
  */
 void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 {
