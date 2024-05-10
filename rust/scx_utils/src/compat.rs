@@ -10,6 +10,7 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::mem::size_of;
 use std::slice::from_raw_parts;
+use std::io;
 
 lazy_static::lazy_static! {
     pub static ref SCX_OPS_SWITCH_PARTIAL: u64 =
@@ -134,6 +135,22 @@ pub fn kfunc_exists(kfunc: &str) -> Result<bool> {
     Ok(tid >= 0)
 }
 
+pub fn is_sched_ext_enabled() -> io::Result<bool> {
+    let content = std::fs::read_to_string("/sys/kernel/sched_ext/state")?;
+
+    match content.trim() {
+        "enabled" => Ok(true),
+        "disabled" => Ok(false),
+        _ => {
+            // Error if the content is neither "enabled" nor "disabled"
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Unexpected content in /sys/kernel/sched_ext/state",
+            ))
+        }
+    }
+}
+
 /// struct sched_ext_ops can change over time. If
 /// compat.bpf.h::SCX_OPS_DEFINE() is used to define ops and scx_ops_load!()
 /// and scx_ops_attach!() are used to load and attach it, backward
@@ -164,6 +181,9 @@ macro_rules! scx_ops_load {
 #[macro_export]
 macro_rules! scx_ops_attach {
     ($skel: expr, $ops: ident) => {{
+        if scx_utils::compat::is_sched_ext_enabled().unwrap_or(false) {
+            return Err(anyhow::anyhow!("another sched_ext scheduler is already running"));
+        }
         $skel
             .maps_mut()
             .$ops()
