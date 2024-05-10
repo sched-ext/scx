@@ -1440,21 +1440,13 @@ static int get_random_directional_inc(u32 nuance)
 static  bool can_task1_kick_task2(struct preemption_info *prm_task1,
 				  struct preemption_info *prm_task2)
 {
-	int ret;
-
-	ret = comp_preemption_info(prm_task1, prm_task2);
-	if (ret < 0)
-		return true;
-
-	return false;
+	return comp_preemption_info(prm_task1, prm_task2) < 0;
 }
 
 static  bool can_cpu1_kick_cpu2(struct preemption_info *prm_cpu1,
 				struct preemption_info *prm_cpu2,
 				struct cpu_ctx *cpuc2)
 {
-	int ret;
-
 	/*
 	 * Set a CPU information
 	 */
@@ -1467,11 +1459,7 @@ static  bool can_cpu1_kick_cpu2(struct preemption_info *prm_cpu1,
 	 * If that CPU runs a lower priority task, that's a victim
 	 * candidate.
 	 */
-	ret = comp_preemption_info(prm_cpu1, prm_cpu2);
-	if (ret < 0)
-		return true;
-
-	return false;
+	return comp_preemption_info(prm_cpu1, prm_cpu2) < 0;
 }
 
 static bool is_worth_kick_other_task(struct task_ctx *taskc)
