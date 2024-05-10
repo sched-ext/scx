@@ -441,5 +441,10 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
 
         nodes.push(node);
     }
+
+    if nodes.is_empty() {
+        bail!("No node found, does sysfs directory /sys/devices/system/node exist?");
+    }
+
     Ok(nodes)
 }
