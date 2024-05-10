@@ -83,6 +83,14 @@ In addition to the packages from the previous step, install the following.
 $ sudo pacman -Sy meson cargo bpf pahole
 ```
 
+#### Using Debug Kernel
+
+CachyOS does provide a kernel with an unstripped vmlinux, which can be used for debugging.
+
+```
+$ sudo pacman -Sy linux-cachyos-sched-ext-debug linux-cachyos-sched-ext-debug-headers
+```
+
 ## Fedora
 
 Experimental sched_ext support for Fedora is provided by the following
