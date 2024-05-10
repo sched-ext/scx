@@ -181,6 +181,7 @@ impl<'cb> BpfScheduler<'cb> {
         partial: bool,
         exit_dump_len: u32,
         full_user: bool,
+        low_power: bool,
         debug: bool,
     ) -> Result<Self> {
         // Open the BPF prog first for verification.
@@ -244,6 +245,7 @@ impl<'cb> BpfScheduler<'cb> {
         skel.rodata_mut().switch_partial = partial;
         skel.rodata_mut().debug = debug;
         skel.rodata_mut().full_user = full_user;
+        skel.rodata_mut().low_power = low_power;
 
         // Attach BPF scheduler.
         let mut skel = scx_ops_load!(skel, rustland, uei)?;

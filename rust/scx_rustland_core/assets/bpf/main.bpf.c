@@ -84,13 +84,26 @@ volatile u64 nr_failed_dispatches, nr_sched_congested;
  /* Report additional debugging information */
 const volatile bool debug;
 
- /*
-  * Enable/disable full user-space mode.
-  *
-  * In full user-space mode all events and actions will be sent to user-space,
-  * basically disabling any optimization to bypass the user-space scheduler.
-  */
+/*
+ * Enable/disable full user-space mode.
+ *
+ * In full user-space mode all events and actions will be sent to user-space,
+ * basically disabling any optimization to bypass the user-space scheduler.
+ */
 const volatile bool full_user;
+
+ /*
+  * Enable/disable low-power mode.
+  *
+  * When low-power mode is enabled, the scheduler behaves in a more non-work
+  * conserving way: the CPUs operate at reduced capacity, which slows down
+  * CPU-bound tasks, enhancing the prioritization of interactive workloads.
+  *
+  * In summary, enabling low-power mode will limit the performance of
+  * CPU-intensive tasks, reducing power consumption, while maintaining
+  * effective prioritization of interactive tasks.
+  */
+const volatile bool low_power;
 
 /* Allow to use bpf_printk() only when @debug is set */
 #define dbg_msg(_fmt, ...) do {						\
@@ -727,7 +740,8 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 		 * Wake up the idle CPU, so that it can immediately accept
 		 * dispatched tasks.
 		 */
-		scx_bpf_kick_cpu(cpu, 0);
+		if (!low_power || !nr_running)
+			scx_bpf_kick_cpu(cpu, 0);
 	}
 }
 
