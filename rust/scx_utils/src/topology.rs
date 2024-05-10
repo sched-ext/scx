@@ -186,7 +186,14 @@ impl Topology {
     /// Build a complete host Topology
     pub fn new() -> Result<Topology> {
         let span = cpus_online()?;
-        let nodes = create_numa_nodes(&span)?;
+        // If the kernel is compiled with CONFIG_NUMA, then build a topology
+        // from the NUMA hierarchy in sysfs. Otherwise, just make a single
+        // default node of ID 0 which contains all cores.
+        let nodes = if Path::new("/sys/devices/system/node").exists() {
+            create_numa_nodes(&span)?
+        } else {
+            create_default_node(&span)?
+        };
 
         // For convenient and efficient lookup from the root topology object,
         // create two BTreeMaps to the full set of Core and Cpu objects on the
@@ -345,6 +352,106 @@ fn cpus_online() -> Result<Cpumask> {
     Ok(mask)
 }
 
+fn create_insert_cpu(cpu_id: usize, node: &mut Node, online_mask: &Cpumask) -> Result<()> {
+    // CPU is offline. The Topology hierarchy is read-only, and assumes
+    // that hotplug will cause the scheduler to restart. Thus, we can
+    // just skip this CPU altogether.
+    if !online_mask.test_cpu(cpu_id) {
+        return Ok(());
+    }
+
+    let cpu_str = format!("/sys/devices/system/cpu/cpu{}", cpu_id);
+    let cpu_path = Path::new(&cpu_str);
+
+    // Physical core ID
+    let top_path = cpu_path.join("topology");
+    let core_id = read_file_usize(&top_path.join("core_id"))?;
+
+    // L3 cache ID
+    let cache_path = cpu_path.join("cache");
+    // Use LLC 0 if we fail to detect the cache hierarchy. This seems to
+    // happen on certain SKUs, so if there's no cache information then
+    // we have no option but to assume a single unified cache per node.
+    let llc_id =
+        read_file_usize(&cache_path.join(format!("index{}", CACHE_LEVEL)).join("id")).unwrap_or(0);
+
+    // Min and max frequencies. If the kernel is not compiled with
+    // CONFIG_CPU_FREQ, just assume 0 for both frequencies.
+    let freq_path = cpu_path.join("cpufreq");
+    let min_freq = read_file_usize(&freq_path.join("scaling_min_freq")).unwrap_or(0);
+    let max_freq = read_file_usize(&freq_path.join("scaling_max_freq")).unwrap_or(0);
+
+    if !node.llcs.contains_key(&llc_id) {
+        let cache = Cache {
+            id: llc_id,
+            cores: BTreeMap::new(),
+            span: Cpumask::new()?,
+        };
+        node.llcs.insert(llc_id, cache);
+    }
+    let cache = node.llcs.get_mut(&llc_id).unwrap();
+
+    if !cache.cores.contains_key(&core_id) {
+        let core = Core {
+            id: core_id,
+            cpus: BTreeMap::new(),
+            span: Cpumask::new()?,
+        };
+        cache.cores.insert(core_id, core);
+    }
+    let core = cache.cores.get_mut(&core_id).unwrap();
+
+    core.cpus.insert(
+        cpu_id,
+        Cpu {
+            id: cpu_id,
+            min_freq: min_freq,
+            max_freq: max_freq,
+        },
+    );
+
+    if node.span.test_cpu(cpu_id) {
+        bail!("Node {} already had CPU {}", node.id, cpu_id);
+    }
+
+    // Update all of the devices' spans to include this CPU.
+    core.span.set_cpu(cpu_id)?;
+    cache.span.set_cpu(cpu_id)?;
+    node.span.set_cpu(cpu_id)?;
+
+    Ok(())
+}
+
+fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {
+    let mut nodes: Vec<Node> = Vec::with_capacity(1);
+    let mut node = Node {
+        id: 0,
+        llcs: BTreeMap::new(),
+        span: Cpumask::new()?,
+    };
+
+    if !Path::new("/sys/devices/system/cpu").exists() {
+        bail!("/sys/devices/system/cpu sysfs node not found");
+    }
+
+    let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*")?;
+    for cpu_path in cpu_paths.filter_map(Result::ok) {
+        let cpu_str = cpu_path.to_str().unwrap().trim();
+        let cpu_id = match sscanf!(cpu_str, "/sys/devices/system/cpu/cpu{usize}") {
+            Ok(val) => val,
+            Err(_) => {
+                bail!("Failed to parse cpu ID {}", cpu_str);
+            }
+        };
+
+        create_insert_cpu(cpu_id, &mut node, &online_mask)?;
+    }
+
+    nodes.push(node);
+
+    Ok(nodes)
+}
+
 fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
     let mut nodes: Vec<Node> = Vec::new();
 
@@ -375,68 +482,7 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
                 }
             };
 
-            // CPU is offline. The Topology hierarchy is read-only, and assumes
-            // that hotplug will cause the scheduler to restart. Thus, we can
-            // just skip this CPU altogether.
-            if !online_mask.test_cpu(cpu_id) {
-                continue;
-            }
-
-            // Physical core ID
-            let top_path = cpu_path.join("topology");
-            let core_id = read_file_usize(&top_path.join("core_id"))?;
-
-            // L3 cache ID
-            let cache_path = cpu_path.join("cache");
-            // Use LLC 0 if we fail to detect the cache hierarchy. This seems to
-            // happen on certain SKUs, so if there's no cache information then
-            // we have no option but to assume a single unified cache per node.
-            let llc_id =
-                read_file_usize(&cache_path.join(format!("index{}", CACHE_LEVEL)).join("id")).unwrap_or(0);
-
-            // Min and max frequencies. If the kernel is not compiled with
-            // CONFIG_CPU_FREQ, just assume 0 for both frequencies.
-            let freq_path = cpu_path.join("cpufreq");
-            let min_freq = read_file_usize(&freq_path.join("scaling_min_freq")).unwrap_or(0);
-            let max_freq = read_file_usize(&freq_path.join("scaling_max_freq")).unwrap_or(0);
-
-            if !node.llcs.contains_key(&llc_id) {
-                let cache = Cache {
-                    id: llc_id,
-                    cores: BTreeMap::new(),
-                    span: Cpumask::new()?,
-                };
-                node.llcs.insert(llc_id, cache);
-            }
-            let cache = node.llcs.get_mut(&llc_id).unwrap();
-
-            if !cache.cores.contains_key(&core_id) {
-                let core = Core {
-                    id: core_id,
-                    cpus: BTreeMap::new(),
-                    span: Cpumask::new()?,
-                };
-                cache.cores.insert(core_id, core);
-            }
-            let core = cache.cores.get_mut(&core_id).unwrap();
-
-            core.cpus.insert(
-                cpu_id,
-                Cpu {
-                    id: cpu_id,
-                    min_freq: min_freq,
-                    max_freq: max_freq,
-                },
-            );
-
-            if node.span.test_cpu(cpu_id) {
-                bail!("Node {} already had CPU {}", node_id, cpu_id);
-            }
-
-            // Update all of the devices' spans to include this CPU.
-            core.span.set_cpu(cpu_id)?;
-            cache.span.set_cpu(cpu_id)?;
-            node.span.set_cpu(cpu_id)?;
+            create_insert_cpu(cpu_id, &mut node, &online_mask)?;
         }
 
         nodes.push(node);
