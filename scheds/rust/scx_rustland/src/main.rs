@@ -522,7 +522,7 @@ impl<'a> Scheduler<'a> {
         // This allows to have more tasks sitting in the task pool, reducing the pressure on the
         // dispatcher queues and giving a chance to higher priority tasks to come in and get
         // dispatched earlier, mitigating potential priority inversion issues.
-        for _ in 0..self.nr_idle_cpus() {
+        for _ in 0..self.nr_idle_cpus().max(1) {
             match self.task_pool.pop() {
                 Some(task) => {
                     // Update global minimum vruntime.
