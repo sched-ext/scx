@@ -53,12 +53,6 @@ const volatile bool switch_partial; /* Switch all tasks or SCHED_EXT tasks */
 const volatile u64 slice_ns = SCX_SLICE_DFL; /* Base time slice duration */
 
 /*
- * Effective time slice: allow the scheduler to override the default time slice
- * (slice_ns) if this one is set.
- */
-volatile u64 effective_slice_ns;
-
-/*
  * Number of tasks that are queued for scheduling.
  *
  * This number is incremented by the BPF component when a task is queued to the
@@ -321,8 +315,7 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 	      u64 cpumask_cnt, u64 task_slice_ns, u64 enq_flags)
 {
 	struct task_ctx *tctx;
-	u64 slice = task_slice_ns ? :
-		__sync_fetch_and_add(&effective_slice_ns, 0) ? : slice_ns;
+	u64 slice = task_slice_ns ? : slice_ns;
 	u64 curr_cpumask_cnt;
 	bool force_shared = false;
 	s32 cpu;
@@ -423,6 +416,14 @@ static void dispatch_user_scheduler(void)
 }
 
 /*
+ * Return true if we are waking up from a wait event, false otherwise.
+ */
+static bool is_waking_up(u64 wake_flags)
+{
+	return !!(wake_flags & SCX_WAKE_TTWU);
+}
+
+/*
  * Select the target CPU where a task can be executed.
  *
  * The idea here is to try to find an idle CPU in the system, and preferably
@@ -440,12 +441,42 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	bool is_idle = false;
 	s32 cpu;
 
-	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-	if (is_idle && cpu < num_possible_cpus && !full_user) {
+	/*
+	 * In full-user mode simply assign the previously used CPU and let the
+	 * user-space scheduler decide where it should be dispatched.
+	 */
+	if (full_user)
+		return prev_cpu;
+
+	/*
+	 * Always try to stick on the same CPU if it's available, to better
+	 * exploit the cached working set.
+	 */
+	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		/*
 		 * Using SCX_DSQ_LOCAL ensures that the task will be executed
 		 * directly on the CPU returned by this function.
 		 */
+		dispatch_task(p, SCX_DSQ_LOCAL, 0, 0, 0);
+		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		return prev_cpu;
+	}
+
+	/*
+	 * If the previously used CPU is not available, check whether the task
+	 * is coming from a wait state. If not, enqueue it on the same CPU
+	 * regardless, without directly dispatching it.
+	 */
+	if (!is_waking_up(wake_flags))
+		return prev_cpu;
+
+	/*
+	 * If we are coming from a wait state, try to find the best CPU relying
+	 * on the built-in idle selection logic (eventually migrating the
+	 * task).
+	 */
+	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+	if (is_idle) {
 		dispatch_task(p, SCX_DSQ_LOCAL, 0, 0, 0);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	}
@@ -669,14 +700,6 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 
 /*
  * A CPU is about to change its idle state.
- *
- * NOTE: implementing an update_idle() callback automatically disables the
- * built-in idle tracking. This is fine because we want to rely on the internal
- * CPU ownership map (get_cpu_owner() / set_cpu_owner()) to determine if a CPU
- * is available or not.
- *
- * This information can easily be shared with the user-space scheduler via
- * cpu_map.
  */
 void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 {
