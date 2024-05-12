@@ -290,16 +290,16 @@ impl<'a> Scheduler<'a> {
         let init_page_faults: u64 = 0;
 
         // Low-level BPF connector.
-        let nr_online_cpus = topo_map.nr_cpus_online();
+        let nr_cpus = topo_map.nr_cpus_possible();
         let bpf = BpfScheduler::init(
             opts.slice_us,
-            nr_online_cpus as i32,
+            nr_cpus as i32,
             opts.partial,
 	    opts.exit_dump_len,
             opts.full_user,
             opts.debug,
         )?;
-        info!("{} scheduler attached - {} online CPUs", SCHEDULER_NAME, nr_online_cpus);
+        info!("{} scheduler attached - {} CPUs", SCHEDULER_NAME, nr_cpus);
 
         // Return scheduler object.
         Ok(Self {
