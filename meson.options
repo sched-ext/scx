@@ -30,3 +30,9 @@ option(
   value: 'auto',
   description: 'openrc init.d service file'
 )
+option(
+  'libalpm',
+  type: 'feature',
+  value: 'auto',
+  description: 'install pacman hooks'
+)

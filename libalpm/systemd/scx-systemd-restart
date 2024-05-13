@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+
+# Check the status of the service
+if systemctl is-active --quiet scx.service; then
+    echo "The service is active. Restarting..."
+    systemctl daemon-reload
+    systemctl restart scx.service
+    echo "Service has been restarted."
+else
+    echo "The service is not active."
+fi
