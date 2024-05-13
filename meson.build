@@ -327,3 +327,9 @@ openrc = dependency('openrc', required: get_option('openrc'))
 if openrc.found()
   subdir('services/openrc')
 endif
+
+libalpm = dependency('libalpm', required: get_option('libalpm'))
+
+if libalpm.found() and systemd.found()
+  subdir('libalpm/systemd')
+endif
