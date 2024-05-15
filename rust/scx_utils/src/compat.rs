@@ -151,9 +151,47 @@ pub fn is_sched_ext_enabled() -> io::Result<bool> {
     }
 }
 
-/// struct sched_ext_ops can change over time. If
-/// compat.bpf.h::SCX_OPS_DEFINE() is used to define ops and scx_ops_load!()
-/// and scx_ops_attach!() are used to load and attach it, backward
+/// struct sched_ext_ops can change over time. If compat.bpf.h::SCX_OPS_DEFINE()
+/// is used to define ops, and scx_ops_open!(), scx_ops_load!(), and
+/// scx_ops_attach!() are used to open, load and attach it, backward
+/// compatibility is automatically maintained where reasonable.
+///
+/// - sched_ext_ops.hotplug_seq was added later. On kernels which support it,
+/// set the value to a nonzero value to trigger an exit in the scheduler when
+/// a hotplug event occurs between opening and attaching the scheduler.
+#[macro_export]
+macro_rules! scx_ops_open {
+    ($builder: expr, $ops: ident) => {{
+        scx_utils::paste! {
+            let mut skel = $builder.open().context("Failed to open BPF program")?;
+            let ops = skel.struct_ops.[<$ops _mut>]();
+            let has_field = scx_utils::compat::struct_has_field("sched_ext_ops", "hotplug_seq")?;
+            if has_field {
+                let path = std::path::Path::new("/sys/kernel/sched_ext/hotplug_seq");
+                let val = match std::fs::read_to_string(&path) {
+                    Ok(val) => val,
+                    Err(_) => {
+                        return Err(anyhow::anyhow!("Failed to open or read file {:?}", path));
+                    }
+                };
+
+                ops.hotplug_seq = match val.trim().parse::<u64>() {
+                    Ok(parsed) => parsed,
+                    Err(_) => {
+                        return Err(anyhow::anyhow!("Failed to parse hotplug seq {}", val));
+                    }
+                };
+            }
+
+            let result : Result<OpenBpfSkel<'_>, anyhow::Error> = Ok(skel);
+            result
+        }
+    }};
+}
+
+/// struct sched_ext_ops can change over time. If compat.bpf.h::SCX_OPS_DEFINE()
+/// is used to define ops, and scx_ops_open!(), scx_ops_load!(), and
+/// scx_ops_attach!() are used to open, load and attach it, backward
 /// compatibility is automatically maintained where reasonable.
 ///
 /// - sched_ext_ops.exit_dump_len was added later. On kernels which don't
