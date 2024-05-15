@@ -20,45 +20,43 @@
 
 BEGIN
 {
-    if ($1 == 0) {
-        printf("PID is missing, use `sudo ./trace.bt <pid>`\n");
-        exit();
-    }
-    printf("Instrumenting runqueue latency for PID %d. Hit Ctrl-C to end.\n", $1);
+	if ($1 == 0) {
+		printf("PID is missing, use `sudo ./process_runqlat.bt <pid>`\n");
+		exit();
+	}
+	printf("Instrumenting runqueue latency for PID %d. Hit Ctrl-C to end.\n", $1);
 }
 
 /*
-* TP_PROTO(
-*     struct task_struct *p
-* )
+* args:
+* - struct task_struct *p
 */
 rawtracepoint:sched_wakeup,
 rawtracepoint:sched_wakeup_new,
 {
-    $task = (struct task_struct *)arg0;
-    // We filter by tgid to include all threads of the process
-    if ($task->tgid == $1) {
-        @qtime[$task->pid] = nsecs;
-    }
+	$task = (struct task_struct *)arg0;
+	// We filter by tgid to include all threads of the process
+	if ($task->tgid == $1) {
+		@qtime[$task->pid] = nsecs;
+	}
 }
 
 /*
-* TP_PROTO(
-*     bool preempt,
-*     struct task_struct *prev,
-*     struct task_struct *next,
-*     unsigned int prev_state
-*)
+* args:
+* - bool preempt
+* - struct task_struct *prev
+* - struct task_struct *next
+* - unsigned int prev_state
 */
 rawtracepoint:sched_switch
 {
-    $prev = (struct task_struct *)arg1;
-    $next = (struct task_struct *)arg2;
-    $prev_state = arg3;
+	$prev = (struct task_struct *)arg1;
+	$next = (struct task_struct *)arg2;
+	$prev_state = arg3;
 
-    if ($next->tgid != $1) {
-        return;
-    }
+	if ($next->tgid != $1) {
+		return;
+	}
 
 	if ($prev_state == TASK_RUNNING && $prev->tgid == $1) {
 		@qtime[$prev->pid] = nsecs;
@@ -66,15 +64,15 @@ rawtracepoint:sched_switch
 
 	$nsec = @qtime[$next->pid];
 	if ($nsec) {
-        $usec = (nsecs - $nsec) / 1000;
-        @usec_total_stats = stats($usec);
-        @usec_hist = hist($usec);
-        @tasks[$next->comm, $next->pid] = stats($usec);
+		$usec = (nsecs - $nsec) / 1000;
+		@usec_total_stats = stats($usec);
+		@usec_hist = hist($usec);
+		@tasks[$next->comm, $next->pid] = stats($usec);
 	}
 	delete(@qtime[$next->pid]);
 }
 
 END
 {
-    clear(@qtime);
+	clear(@qtime);
 }
