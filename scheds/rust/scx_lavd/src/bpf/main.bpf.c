@@ -126,7 +126,7 @@
  * high (e.g., 15). If the task is urgent enough, the scheduler finds a victim
  * CPU, which runs a lower-priority task, and kicks the remote victim CPU by
  * sending IPI. Then, the remote CPU will preempt out its running task and
- * scheduler the highest priority task in the global run queue. The scheduler
+ * schedule the highest priority task in the global run queue. The scheduler
  * uses 'The Power of Two Random Choices' heuristic so all N CPUs can run the N
  * highest priority tasks.
  *
