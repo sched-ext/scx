@@ -40,6 +40,7 @@ use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::uei_exited;
 use scx_utils::uei_read;
+use scx_utils::SCX_ECODE_ACT_RESTART;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
@@ -620,7 +621,7 @@ fn main() -> Result<()> {
 
         let uei = sched.run(shutdown.clone())?;
         if let Some(exit_code) = uei.exit_code() {
-            if exit_code == bpf_intf::rusty_exit_codes_RUSTY_EXIT_HOTPLUG as i64 {
+            if (exit_code & *SCX_ECODE_ACT_RESTART as i64) != 0 {
                 continue;
             }
         }

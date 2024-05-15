@@ -34,6 +34,7 @@ pub enum ScxExitKind {
     Done = bindings::scx_exit_kind_SCX_EXIT_DONE as isize,
     Unreg = bindings::scx_exit_kind_SCX_EXIT_UNREG as isize,
     UnregBPF = bindings::scx_exit_kind_SCX_EXIT_UNREG_BPF as isize,
+    UnregKern = bindings::scx_exit_kind_SCX_EXIT_UNREG_KERN as isize,
     SysRq = bindings::scx_exit_kind_SCX_EXIT_SYSRQ as isize,
     Error = bindings::scx_exit_kind_SCX_EXIT_ERROR as isize,
     ErrorBPF = bindings::scx_exit_kind_SCX_EXIT_ERROR_BPF as isize,
@@ -205,7 +206,7 @@ impl UserExitInfo {
             _ => "<UNKNOWN>".into(),
         };
 
-        if self.kind <= ScxExitKind::UnregBPF as i32 {
+        if self.kind <= ScxExitKind::UnregKern as i32 {
             eprintln!("{}", why);
             Ok(())
         } else {
@@ -217,7 +218,7 @@ impl UserExitInfo {
     /// only applies when the BPF scheduler exits with scx_bpf_exit(), i.e. kind
     /// ScxExitKind::UnregBPF.
     pub fn exit_code(&self) -> Option<i64> {
-        if self.kind == ScxExitKind::UnregBPF as i32 {
+        if self.kind == ScxExitKind::UnregBPF as i32 || self.kind == ScxExitKind::UnregKern as i32 {
             Some(self.exit_code)
         } else {
             None

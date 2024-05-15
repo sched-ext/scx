@@ -1743,16 +1743,6 @@ static s32 initialize_cpu(s32 cpu)
 	return 0;
 }
 
-void BPF_STRUCT_OPS(rusty_cpu_online, s32 cpu)
-{
-	__COMPAT_scx_bpf_exit(RUSTY_EXIT_HOTPLUG, "CPU %d went online", cpu);
-}
-
-void BPF_STRUCT_OPS(rusty_cpu_offline, s32 cpu)
-{
-	__COMPAT_scx_bpf_exit(RUSTY_EXIT_HOTPLUG, "CPU %d went offline", cpu);
-}
-
 s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 {
 	s32 i, ret;
@@ -1812,8 +1802,6 @@ SCX_OPS_DEFINE(rusty,
 	       .set_cpumask		= (void *)rusty_set_cpumask,
 	       .init_task		= (void *)rusty_init_task,
 	       .exit_task		= (void *)rusty_exit_task,
-	       .cpu_online		= (void *)rusty_cpu_online,
-	       .cpu_offline		= (void *)rusty_cpu_offline,
 	       .init			= (void *)rusty_init,
 	       .exit			= (void *)rusty_exit,
 	       .timeout_ms		= 10000,
