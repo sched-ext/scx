@@ -44,6 +44,8 @@ pub use builder::Builder;
 mod user_exit_info;
 pub use user_exit_info::ScxExitKind;
 pub use user_exit_info::ScxConsts;
+pub use user_exit_info::SCX_ECODE_RSN_HOTPLUG;
+pub use user_exit_info::SCX_ECODE_ACT_RESTART;
 pub use user_exit_info::UeiDumpPtr;
 pub use user_exit_info::UserExitInfo;
 pub use user_exit_info::UEI_DUMP_PTR_MUTEX;

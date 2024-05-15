@@ -3,6 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 use crate::bindings;
+use crate::compat;
 use anyhow::bail;
 use anyhow::Result;
 use std::ffi::CStr;
@@ -17,6 +18,16 @@ unsafe impl Send for UeiDumpPtr {}
 pub static UEI_DUMP_PTR_MUTEX: Mutex<UeiDumpPtr> = Mutex::new(UeiDumpPtr {
     ptr: std::ptr::null(),
 });
+
+lazy_static::lazy_static! {
+    pub static ref SCX_ECODE_RSN_HOTPLUG: u64 =
+    compat::read_enum("scx_exit_code", "SCX_ECODE_RSN_HOTPLUG").unwrap_or(0);
+}
+
+lazy_static::lazy_static! {
+    pub static ref SCX_ECODE_ACT_RESTART: u64 =
+    compat::read_enum("scx_exit_code", "SCX_ECODE_ACT_RESTART").unwrap_or(0);
+}
 
 pub enum ScxExitKind {
     None = bindings::scx_exit_kind_SCX_EXIT_NONE as isize,
