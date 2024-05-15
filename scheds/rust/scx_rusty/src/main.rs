@@ -38,6 +38,7 @@ use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
+use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_read;
 use scx_utils::SCX_ECODE_ACT_RESTART;
@@ -235,7 +236,7 @@ impl<'a> Scheduler<'a> {
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 0);
         init_libbpf_logging(None);
-        let mut skel = skel_builder.open().context("Failed to open BPF program")?;
+        let mut skel = scx_ops_open!(skel_builder, rusty).unwrap();
 
         // Initialize skel according to @opts.
         let top = Arc::new(Topology::new()?);
