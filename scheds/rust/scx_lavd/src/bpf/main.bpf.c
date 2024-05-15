@@ -41,10 +41,10 @@
  *
  *        [Task x] --> [Task B] --> [Task C]
  *
- * We define Task B is more latency-critical in the following cases:
- *  a) as Task B's runtime per schedule is shorter (runtime B)
- *  b) as Task B wakes Task C more frequently (wake_freq B)
- *  c) as Task B waits for Task A more frequently (wait_freq B)
+ * We define Task B is more latency-critical in the following cases: a) as Task
+ * B's runtime per schedule is shorter (runtime B) b) as Task B wakes Task C
+ * more frequently (wake_freq B) c) as Task B waits for Task A more frequently
+ * (wait_freq B)
  *
  * Intuitively, if Task B's runtime per schedule is long, a relatively short
  * scheduling delay won't affect a lot; if Task B frequently wakes up Task C,
@@ -70,8 +70,8 @@
  * least once within a predefined time window, which is called a targeted
  * latency. For example, if a targeted latency is 15 msec and 10 tasks are
  * runnable, the scheduler equally divides 15 msec of CPU time into 10 tasks.
- * Of course, the scheduler will consider the task's priority -- a task with
- * higher priority (lower nice value) will receive a longer time slice.
+* Of course, the scheduler will consider the task's priority -- a task with
+* higher priority (lower nice value) will receive a longer time slice.
  *
  * The scheduler also considers the behavioral properties of a task in
  * determining the time slice. If a task is compute-intensive, so it consumes
@@ -100,6 +100,35 @@
  * yielding the CPU. Note that reducing the time slice of a latency-critical
  * task for fairness is not very effective because the scheduling overhead
  * might be detrimental.
+ *
+ *
+ * 6. Preemption
+ * -------------
+ *
+ * A task can be preempted (de-scheduled) before exhausting its time slice. The
+ * scheduler uses two preemption mechanisms: 1) yield-based preemption and
+ * 2) kick-based preemption.
+ *
+ * In every scheduler tick interval (when ops.tick() is called), the running
+ * task checks if a higher priority task awaits execution in the global run
+ * queue. If so, the running task shrinks its time slice to zero to trigger
+ * re-scheduling for another task as soon as possible. This is what we call
+ * yield-based preemption. In addition to the tick interval, the scheduler
+ * additionally performs yield-based preemption when there is no idle CPU on
+ * ops.select_cpu() and ops.enqueue(). The yield-based preemption takes the
+ * majority (70-90%) of preemption operations in the scheduler.
+ *
+ * The kick-based preemption is to _immediately_ schedule an urgent task, even
+ * paying a higher preemption cost. When a task is enqueued to the global run
+ * queue (because no idle CPU is available), the scheduler checks if the
+ * currently enqueuing task is urgent enough. The urgent task should be very
+ * latency-critical (e.g., top 25%), and its latency priority should be very
+ * high (e.g., 15). If the task is urgent enough, the scheduler finds a victim
+ * CPU, which runs a lower-priority task, and kicks the remote victim CPU by
+ * sending IPI. Then, the remote CPU will preempt out its running task and
+ * scheduler the highest priority task in the global run queue. The scheduler
+ * uses 'The Power of Two Random Choices' heuristic so all N CPUs can run the N
+ * highest priority tasks.
  *
  *
  * Copyright (c) 2023, 2024 Valve Corporation.

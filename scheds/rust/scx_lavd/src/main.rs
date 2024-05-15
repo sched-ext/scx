@@ -340,7 +340,8 @@ fn main() -> Result<()> {
 
     let mut sched = Scheduler::init(&opts)?;
     info!("scx_lavd scheduler is initialized");
-
+    info!("    Note that scx_lavd currently is not optimized for multi-CCX/NUMA architectures.");
+    info!("    Stay tuned for future improvements!");
     init_signal_handlers();
 
     info!("scx_lavd scheduler starts running.");
