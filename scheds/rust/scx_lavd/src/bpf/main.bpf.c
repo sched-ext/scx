@@ -461,7 +461,7 @@ static u64 rsigmoid_u64(u64 v, u64 max)
 	 *	|   \
 	 *	+----+-------->
 	 */
-	return (v > max) ? 0 : max - v;
+	return (v >= max) ? 0 : max - v;
 }
 
 static struct task_ctx *try_get_task_ctx(struct task_struct *p)
