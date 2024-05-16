@@ -50,6 +50,8 @@ enum consts {
 	DL_FREQ_FT_MAX		= 100000,
 	DL_MAX_LAT_PRIO		= 39,
 
+    UTIL_SCALE_FCTR     = 1024,
+
 	/*
 	 * When userspace load balancer is trying to determine the tasks to push
 	 * out from an overloaded domain, it looks at the the following number
@@ -146,5 +148,21 @@ struct dom_ctx {
 struct node_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 };
+
+/*
+ * Per-CPU context
+ */
+struct pcpu_ctx {
+	u32 dom_rr_cur; /* used when scanning other doms */
+	u32 dom_id;
+	u32 nr_node_doms;
+
+	u32 util;
+	u64 idle_usec;
+	u64 iowait_usec;
+	u64 busy_usec;
+
+	u32 node_doms[MAX_DOMS];
+} __attribute__((aligned(CACHELINE_SIZE)));
 
 #endif /* __INTF_H */

@@ -78,16 +78,6 @@ const volatile u32 debug;
 /* base slice duration */
 static u64 slice_ns = SCX_SLICE_DFL;
 
-/*
- * Per-CPU context
- */
-struct pcpu_ctx {
-	u32 dom_rr_cur; /* used when scanning other doms */
-	u32 dom_id;
-	u32 nr_node_doms;
-	u32 node_doms[MAX_DOMS];
-} __attribute__((aligned(CACHELINE_SIZE)));
-
 struct pcpu_ctx pcpu_ctx[MAX_CPUS];
 
 /*

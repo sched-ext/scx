@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::bpf_intf;
 use crate::sub_or_zero;
 use crate::DomainGroup;
 use crate::BpfSkel;
@@ -16,7 +17,7 @@ use anyhow::Result;
 
 use scx_utils::Cpumask;
 
-fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
+fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<(f64, u64, u64, u64)> {
     match (curr, prev) {
         (
             procfs::CpuStat {
@@ -54,11 +55,13 @@ fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
             let busy_usec =
                 user_usec + system_usec + nice_usec + irq_usec + softirq_usec + stolen_usec;
             let total_usec = idle_usec + busy_usec + iowait_usec;
-            if total_usec > 0 {
-                Ok(((busy_usec as f64) / (total_usec as f64)).clamp(0.0, 1.0))
+            let util = if total_usec > 0 {
+                ((busy_usec as f64) / (total_usec as f64)).clamp(0.0, 1.0)
             } else {
-                Ok(1.0)
-            }
+                1.0
+            };
+
+            Ok((util, idle_usec, iowait_usec, busy_usec))
         }
         _ => {
             bail!("Missing stats in cpustat");
@@ -121,17 +124,24 @@ impl Tuner {
             .ok_or_else(|| anyhow!("Expected cpus_map to exist"))?;
         let mut dom_util_sum = vec![0.0f64; self.dom_group.nr_doms()];
 
+        let pcpu_arr = &mut skel.bss_mut().pcpu_ctx;
+
         let mut avg_util = 0.0f64;
         for (dom_id, dom) in self.dom_group.doms().iter() {
             for cpu in dom.mask().into_iter() {
                 let cpu32 = cpu as u32;
-                if let (Some(curr), Some(prev)) = (
+                if let (Some(curr), Some(prev), pcpuc) = (
                     curr_cpu_stats.get(&cpu32),
                     self.prev_cpu_stats.get(&cpu32),
+                    pcpu_arr.get_mut(cpu).unwrap()
                 ) {
-                    let util = calc_util(curr, prev)?;
+                    let (util, idle, iowait, busy) = calc_util(curr, prev)?;
                     dom_util_sum[*dom_id] += util;
                     avg_util += util;
+                    pcpuc.idle_usec = idle;
+                    pcpuc.iowait_usec = iowait;
+                    pcpuc.busy_usec = busy;
+                    pcpuc.util = (util * bpf_intf::consts_UTIL_SCALE_FCTR as f64) as u32;
                 }
             }
         }
