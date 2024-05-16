@@ -3,6 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 use crate::bindings;
+use crate::compat;
 use anyhow::bail;
 use anyhow::Result;
 use std::ffi::CStr;
@@ -18,11 +19,22 @@ pub static UEI_DUMP_PTR_MUTEX: Mutex<UeiDumpPtr> = Mutex::new(UeiDumpPtr {
     ptr: std::ptr::null(),
 });
 
+lazy_static::lazy_static! {
+    pub static ref SCX_ECODE_RSN_HOTPLUG: u64 =
+    compat::read_enum("scx_exit_code", "SCX_ECODE_RSN_HOTPLUG").unwrap_or(0);
+}
+
+lazy_static::lazy_static! {
+    pub static ref SCX_ECODE_ACT_RESTART: u64 =
+    compat::read_enum("scx_exit_code", "SCX_ECODE_ACT_RESTART").unwrap_or(0);
+}
+
 pub enum ScxExitKind {
     None = bindings::scx_exit_kind_SCX_EXIT_NONE as isize,
     Done = bindings::scx_exit_kind_SCX_EXIT_DONE as isize,
     Unreg = bindings::scx_exit_kind_SCX_EXIT_UNREG as isize,
     UnregBPF = bindings::scx_exit_kind_SCX_EXIT_UNREG_BPF as isize,
+    UnregKern = bindings::scx_exit_kind_SCX_EXIT_UNREG_KERN as isize,
     SysRq = bindings::scx_exit_kind_SCX_EXIT_SYSRQ as isize,
     Error = bindings::scx_exit_kind_SCX_EXIT_ERROR as isize,
     ErrorBPF = bindings::scx_exit_kind_SCX_EXIT_ERROR_BPF as isize,
@@ -194,7 +206,7 @@ impl UserExitInfo {
             _ => "<UNKNOWN>".into(),
         };
 
-        if self.kind <= ScxExitKind::UnregBPF as i32 {
+        if self.kind <= ScxExitKind::UnregKern as i32 {
             eprintln!("{}", why);
             Ok(())
         } else {
@@ -206,7 +218,7 @@ impl UserExitInfo {
     /// only applies when the BPF scheduler exits with scx_bpf_exit(), i.e. kind
     /// ScxExitKind::UnregBPF.
     pub fn exit_code(&self) -> Option<i64> {
-        if self.kind == ScxExitKind::UnregBPF as i32 {
+        if self.kind == ScxExitKind::UnregBPF as i32 || self.kind == ScxExitKind::UnregKern as i32 {
             Some(self.exit_code)
         } else {
             None

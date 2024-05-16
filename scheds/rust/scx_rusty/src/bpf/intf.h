@@ -61,10 +61,6 @@ enum consts {
 	MAX_DOM_ACTIVE_PIDS	= 1024,
 };
 
-enum rusty_exit_codes {
-	RUSTY_EXIT_HOTPLUG,
-};
-
 /* Statistics */
 enum stat_idx {
 	/* The following fields add up to all dispatched tasks */
