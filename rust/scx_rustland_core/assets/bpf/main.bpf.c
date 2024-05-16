@@ -69,6 +69,11 @@ volatile u64 nr_queued;
  */
 volatile u64 nr_scheduled;
 
+/*
+ * Amount of currently running tasks.
+ */
+volatile u64 nr_running;
+
 /* Dispatch statistics */
 volatile u64 nr_user_dispatches, nr_kernel_dispatches,
 	     nr_cancel_dispatches, nr_bounce_dispatches;
@@ -79,13 +84,26 @@ volatile u64 nr_failed_dispatches, nr_sched_congested;
  /* Report additional debugging information */
 const volatile bool debug;
 
- /*
-  * Enable/disable full user-space mode.
-  *
-  * In full user-space mode all events and actions will be sent to user-space,
-  * basically disabling any optimization to bypass the user-space scheduler.
-  */
+/*
+ * Enable/disable full user-space mode.
+ *
+ * In full user-space mode all events and actions will be sent to user-space,
+ * basically disabling any optimization to bypass the user-space scheduler.
+ */
 const volatile bool full_user;
+
+ /*
+  * Enable/disable low-power mode.
+  *
+  * When low-power mode is enabled, the scheduler behaves in a more non-work
+  * conserving way: the CPUs operate at reduced capacity, which slows down
+  * CPU-bound tasks, enhancing the prioritization of interactive workloads.
+  *
+  * In summary, enabling low-power mode will limit the performance of
+  * CPU-intensive tasks, reducing power consumption, while maintaining
+  * effective prioritization of interactive tasks.
+  */
+const volatile bool low_power;
 
 /* Allow to use bpf_printk() only when @debug is set */
 #define dbg_msg(_fmt, ...) do {						\
@@ -672,8 +690,10 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 	 * Mark the CPU as busy by setting the pid as owner (ignoring the
 	 * user-space scheduler).
 	 */
-	if (!is_usersched_task(p))
+	if (!is_usersched_task(p)) {
 		set_cpu_owner(cpu, p->pid);
+		__sync_fetch_and_add(&nr_running, 1);
+	}
 }
 
 /*
@@ -689,6 +709,7 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 	 */
 	if (!is_usersched_task(p)) {
 		set_cpu_owner(scx_bpf_task_cpu(p), 0);
+		__sync_fetch_and_sub(&nr_running, 1);
 		/*
 		 * Kick the user-space scheduler immediately when a task
 		 * releases a CPU and speculate on the fact that most of the
@@ -719,7 +740,8 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 		 * Wake up the idle CPU, so that it can immediately accept
 		 * dispatched tasks.
 		 */
-		scx_bpf_kick_cpu(cpu, 0);
+		if (!low_power || !nr_running)
+			scx_bpf_kick_cpu(cpu, 0);
 	}
 }
 
