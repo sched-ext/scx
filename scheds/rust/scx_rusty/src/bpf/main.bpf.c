@@ -786,6 +786,41 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	return taskc->dom_id == new_dom_id;
 }
 
+static bool should_wake_sync(struct task_struct *p, struct task_ctx *taskc)
+{
+	struct task_struct *current = (void *)bpf_get_current_task_btf();
+	s32 cpu = bpf_get_smp_processor_id();
+	struct dom_ctx *domc;
+	struct bpf_cpumask *d_cpumask;
+	const struct cpumask *idle_cpumask;
+	bool has_idle;
+
+	if ((current->flags & PF_EXITING) ||
+	    taskc->dom_id >= MAX_DOMS ||
+	    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) > 0)
+		return false;
+
+	domc = lookup_dom_ctx(taskc->dom_id);
+	if (!domc)
+		return false;
+
+	d_cpumask = domc->cpumask;
+	if (!d_cpumask) {
+		scx_bpf_error("Failed to acquire dom%u cpumask kptr",
+				taskc->dom_id);
+		return false;
+	}
+
+	idle_cpumask = scx_bpf_get_idle_cpumask();
+
+	has_idle = bpf_cpumask_intersects((const struct cpumask *)d_cpumask,
+					  idle_cpumask);
+
+	scx_bpf_put_idle_cpumask(idle_cpumask);
+
+	return has_idle && bpf_cpumask_test_cpu(cpu, p->cpus_ptr);
+}
+
 s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -814,42 +849,10 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * If WAKE_SYNC and the machine isn't fully saturated, wake up @p to the
 	 * local dsq of the waker.
 	 */
-	if (wake_flags & SCX_WAKE_SYNC) {
-		struct task_struct *current = (void *)bpf_get_current_task_btf();
-
+	if ((wake_flags & SCX_WAKE_SYNC) && should_wake_sync(p, taskc)) {
+		stat_add(RUSTY_STAT_WAKE_SYNC, 1);
 		cpu = bpf_get_smp_processor_id();
-		if (!(current->flags & PF_EXITING) &&
-		    taskc->dom_id < MAX_DOMS &&
-		    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) == 0) {
-			struct dom_ctx *domc;
-			struct bpf_cpumask *d_cpumask;
-			const struct cpumask *idle_cpumask;
-			bool has_idle;
-
-			domc = lookup_dom_ctx(taskc->dom_id);
-			if (!domc)
-				goto enoent;
-			d_cpumask = domc->cpumask;
-			if (!d_cpumask) {
-				scx_bpf_error("Failed to acquire dom%u cpumask kptr",
-					      taskc->dom_id);
-				goto enoent;
-			}
-
-			idle_cpumask = scx_bpf_get_idle_cpumask();
-
-			has_idle = bpf_cpumask_intersects((const struct cpumask *)d_cpumask,
-							  idle_cpumask);
-
-			scx_bpf_put_idle_cpumask(idle_cpumask);
-
-			if (has_idle) {
-				if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
-					stat_add(RUSTY_STAT_WAKE_SYNC, 1);
-					goto direct;
-				}
-			}
-		}
+		goto direct;
 	}
 
 	has_idle_cores = !bpf_cpumask_empty(idle_smtmask);
