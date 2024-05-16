@@ -411,10 +411,10 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 
 	/* not much to do if bound to a single CPU */
 	if (p->nr_cpus_allowed == 1) {
-		if (!bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
-			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			lstat_inc(LSTAT_LOCAL, layer, cctx);
+			if (!bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
+				lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		}
 		return prev_cpu;
@@ -478,7 +478,14 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (!tctx->all_cpus_allowed) {
 		lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
-		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice_ns, enq_flags);
+		/*
+		 * Run kthread w/ modified affinities right after preempt
+		 * layers. User threads w/ modified affinities run last.
+		 */
+		if (p->flags & PF_KTHREAD)
+			scx_bpf_dispatch(p, HI_FALLBACK_DSQ, slice_ns, enq_flags);
+		else
+			scx_bpf_dispatch(p, LO_FALLBACK_DSQ, slice_ns, enq_flags);
 		return;
 	}
 
@@ -563,6 +570,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		if (layers[idx].preempt && scx_bpf_consume(idx))
 			return;
 
+	scx_bpf_consume(HI_FALLBACK_DSQ);
+
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
 		struct layer *layer = &layers[idx];
@@ -585,6 +594,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		    scx_bpf_consume(idx))
 			return;
 	}
+
+	scx_bpf_consume(LO_FALLBACK_DSQ);
 }
 
 static bool match_one(struct layer_match *match, struct task_struct *p, const char *cgrp_path)
@@ -902,6 +913,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	int i, j, k, nr_online_cpus, ret;
 
 	__COMPAT_scx_bpf_switch_all();
+
+	ret = scx_bpf_create_dsq(HI_FALLBACK_DSQ, -1);
+	if (ret < 0)
+		return ret;
+
+	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
+	if (ret < 0)
+		return ret;
 
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
