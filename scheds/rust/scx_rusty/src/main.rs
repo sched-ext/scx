@@ -449,12 +449,20 @@ impl<'a> Scheduler<'a> {
     ) {
         let stat = |idx| bpf_stats[idx as usize];
         let total = stat(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_LOCALPREV_IDLE)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDYPREV_IDLE)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_KTHRD_LOCAL)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_PINNED)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_DISPATCH)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY_FAR)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_LOCAL_ICORE)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_LOCAL_ICPU)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_DOMESTIC_ICORE)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_DOMESTIC_ICPU)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_LOCALN_ICORE)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_LOCALN_ICPU)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_DOMESTICN_ICORE)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_DOMESTICN_ICPU)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_RMTN_ICORE)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_RMTN_ICPU)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
@@ -474,19 +482,43 @@ impl<'a> Scheduler<'a> {
         let stat_pct = |idx| stat(idx) as f64 / total as f64 * 100.0;
 
         info!(
-            "tot={:7} wsync={:5.2} prev_idle={:5.2} greedy_idle={:5.2} pin={:5.2}",
+            "tot={:7} wsync={:5.2} local_prev_idle={:5.2} greedy_prev_idle={:5.2} kthrd={:5.2} pin={:5.2}",
             total,
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_LOCALPREV_IDLE),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDYPREV_IDLE),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_KTHRD_LOCAL),
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PINNED),
         );
 
         info!(
-            "dir={:5.2} dir_greedy={:5.2} dir_greedy_far={:5.2}",
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_DISPATCH),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY_FAR),
+            "local_core={:5.2} local_cpu={:5.2}",
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_LOCAL_ICORE),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_LOCAL_ICPU),
+        );
+
+        info!(
+            "domestic_core={:5.2} domestic_cpu={:5.2}",
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DOMESTIC_ICORE),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DOMESTIC_ICPU),
+        );
+
+        info!(
+            "local_numa_core={:5.2} local_numa_cpu={:5.2}",
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_LOCALN_ICORE),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_LOCALN_ICPU),
+        );
+
+        info!(
+            "domestic_numa_core={:5.2} domestic_numa_cpu={:5.2}",
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DOMESTICN_ICORE),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DOMESTICN_ICPU),
+        );
+
+        info!(
+            "remote_numa_core={:5.2} remote_numa_cpu={:5.2}",
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_RMTN_ICORE),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_RMTN_ICPU),
         );
 
         info!(

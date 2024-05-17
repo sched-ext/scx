@@ -80,6 +80,11 @@ static u64 slice_ns = SCX_SLICE_DFL;
 
 struct pcpu_ctx pcpu_ctx[MAX_CPUS];
 
+enum sel_cpu_type {
+	SEL_CPU_FULL_IDLE,
+	SEL_CPU_ANY_IDLE,
+};
+
 /*
  * Numa node context
  */
@@ -185,6 +190,19 @@ static struct pcpu_ctx *lookup_pcpu_ctx(s32 cpu)
 		scx_bpf_error("Failed to lookup pcpu ctx for %d", cpu);
 
 	return pcpuc;
+}
+
+static u32 numa_dom_id(struct node_ctx *nodec, u32 dom_offset)
+{
+	u32 *dom_node;
+
+	dom_node = MEMBER_VPTR(nodec->dom_ids, [dom_offset]);
+	if (!dom_node) {
+		scx_bpf_error("Failed to lookup node doms ptr");
+		return 0;
+	}
+
+	return *dom_node;
 }
 
 static inline u32 weight_to_bucket_idx(u32 weight)
@@ -728,6 +746,29 @@ static inline const struct cpumask *c_mask(struct bpf_cpumask *bpf_mask)
 	return (const struct cpumask *)bpf_mask;
 }
 
+static u32 dom_node_id(u32 dom_id)
+{
+	const volatile u32 *nid_ptr;
+
+	nid_ptr = MEMBER_VPTR(dom_numa_id_map, [dom_id]);
+	if (!nid_ptr) {
+		scx_bpf_error("Couldn't look up node ID for %d", dom_id);
+		return 0;
+	}
+	return *nid_ptr;
+}
+
+static struct node_ctx *lookup_node_ctx(u32 node_id)
+{
+	struct node_ctx *nodec;
+
+	nodec = bpf_map_lookup_elem(&node_data, &node_id);
+	if (!nodec)
+		scx_bpf_error("No node%u", node_id);
+
+	return nodec;
+}
+
 static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
@@ -823,24 +864,111 @@ static bool should_wake_sync(struct task_struct *p, struct task_ctx *taskc)
 	return has_idle && bpf_cpumask_test_cpu(cpu, p->cpus_ptr);
 }
 
+static s32 try_get_dom_cpu(struct task_struct *p, struct task_ctx *taskc, u32 dom_id,
+			   struct bpf_cpumask *scratch_mask, bool has_idle_cores,
+			   enum sel_cpu_type *sel_type)
+{
+	const struct cpumask *avail;
+	struct bpf_cpumask *tmp, *direct;
+	struct dom_ctx *domc;
+	s32 cpu;
+
+	if (dom_id == taskc->dom_id) {
+		tmp = taskc->cpumask;
+		if (!tmp) {
+			scx_bpf_error("Couldn't get task cpumask");
+			return -ENOENT;
+		}
+		avail = c_mask(tmp);
+	} else {
+		if (unlikely(!scratch_mask)) {
+			scx_bpf_error("scratch cpumask not passed");
+			return -ENOENT;
+		}
+
+		domc = lookup_dom_ctx(dom_id);
+		if (!domc)
+			return -ENOENT;
+		tmp = domc->cpumask;
+		if (!tmp) {
+			scx_bpf_error("Couldn't get domain cpumask");
+			return -ENOENT;
+		}
+		direct = direct_greedy_cpumask;
+		if (!direct) {
+			scx_bpf_error("Couldn't get greedy cpumask");
+			return -ENOENT;
+		}
+
+		bpf_cpumask_and(scratch_mask, c_mask(tmp), p->cpus_ptr);
+		bpf_cpumask_and(scratch_mask, c_mask(scratch_mask), c_mask(direct));
+		avail = c_mask(scratch_mask);
+	}
+
+	cpu = scx_bpf_pick_idle_cpu(avail, SCX_PICK_IDLE_CORE);
+	if (cpu >= 0) {
+		*sel_type = SEL_CPU_FULL_IDLE;
+		return cpu;
+	}
+
+	cpu = scx_bpf_pick_idle_cpu(avail, 0);
+	if (cpu >= 0)
+		*sel_type = SEL_CPU_ANY_IDLE;
+
+	return cpu;
+}
+
+static s32 __always_inline try_get_node_cpu(
+		struct task_struct *p, struct task_ctx *taskc,
+		struct pcpu_ctx *pcpuc, struct node_ctx *nodec,
+		struct bpf_cpumask *scratch_mask,
+		bool has_idle_cores, enum sel_cpu_type *sel_type)
+{
+	u32 idx;
+
+	bpf_for(idx, 0, nodec->nr_dom_ids) {
+		u32 offset, curr_id;
+		s32 cpu;
+
+		offset = (nodec->dom_rr_cur++ + idx) % nodec->nr_dom_ids;
+		curr_id = numa_dom_id(nodec, offset);
+
+		/* Already tested in caller */
+		if (curr_id == taskc->dom_id || curr_id == pcpuc->dom_id)
+			continue;
+
+		cpu = try_get_dom_cpu(p, taskc, curr_id, scratch_mask,
+				      has_idle_cores, sel_type);
+		if (cpu >= 0)
+			return cpu;
+	}
+
+	return -ENOENT;
+}
+
 s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
 	const struct cpumask *idle_smtmask = scx_bpf_get_idle_smtmask();
 	struct task_ctx *taskc;
-	struct bpf_cpumask *p_cpumask, *tmp_cpumask = NULL;
-	bool prev_domestic, has_idle_cores;
+	struct bpf_cpumask *tmp_cpumask = NULL, *p_cpumask;
+	bool prev_dom_domestic, has_idle_cores, prev_node_domestic = true;
 	s32 cpu;
+	struct pcpu_ctx *pcpuc;
+	enum sel_cpu_type sel_type;
+	u32 idx, local_node;
+	u32 local_nid = 0, domestic_nid = 0;
+	struct node_ctx *nodec;
 
 	refresh_tune_params();
 
-	if (!(taskc = lookup_task_ctx(p)) || !(p_cpumask = taskc->cpumask))
+	if (!(taskc = lookup_task_ctx(p)) || !(pcpuc = lookup_pcpu_ctx(prev_cpu)))
 		goto enoent;
 
 	if (p->nr_cpus_allowed == 1) {
 		cpu = prev_cpu;
 		if (kthreads_local && (p->flags & PF_KTHREAD)) {
-			stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
+			stat_add(RUSTY_STAT_KTHRD_LOCAL, 1);
 		} else {
 			stat_add(RUSTY_STAT_PINNED, 1);
 		}
@@ -859,149 +987,162 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	has_idle_cores = !bpf_cpumask_empty(idle_smtmask);
 
-	/* did @p get pulled out to a foreign domain by e.g. greedy execution? */
-	prev_domestic = bpf_cpumask_test_cpu(prev_cpu, c_mask(p_cpumask));
+	/*
+	 * We define a "local" object as the object in the topological
+	 * hierarchy of the host where the task last executed in. For example,
+	 * a task's local domain is the domain it last executed in, and its
+	 * local NUMA node is the NUMA node that contains its local domain. A
+	 * "domestic" object is the object in the topological hierarchy where
+	 * the task is assigned according to the load balancer.
+	 */
+	prev_dom_domestic = pcpuc->dom_id == taskc->dom_id;
 
 	/*
 	 * See if we want to keep @prev_cpu. We want to keep @prev_cpu if the
 	 * whole physical core is idle. If the sibling[s] are busy, it's likely
 	 * more advantageous to look for wholly idle cores first.
 	 */
-	if (prev_domestic) {
-		if (bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
+	if (prev_dom_domestic) {
+		if (has_idle_cores &&
+		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			stat_add(RUSTY_STAT_PREV_IDLE, 1);
+			stat_add(RUSTY_STAT_LOCALPREV_IDLE, 1);
 			cpu = prev_cpu;
 			goto direct;
 		}
 	} else {
-		/*
-		 * @prev_cpu is foreign. Linger iff the domain isn't too busy as
-		 * indicated by direct_greedy_cpumask. There may also be an idle
-		 * CPU in the domestic domain
-		 */
-		if (direct_greedy_cpumask &&
-		    bpf_cpumask_test_cpu(prev_cpu, c_mask(direct_greedy_cpumask)) &&
-		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			stat_add(RUSTY_STAT_GREEDY_IDLE, 1);
-			cpu = prev_cpu;
-			goto direct;
-		}
-	}
-
-	/*
-	 * @prev_cpu didn't work out. Let's see whether there's an idle CPU @p
-	 * can be directly dispatched to. We'll first try to find the best idle
-	 * domestic CPU and then move onto foreign.
-	 */
-
-	/* If there is a domestic idle core, dispatch directly */
-	if (has_idle_cores) {
-		cpu = scx_bpf_pick_idle_cpu(c_mask(p_cpumask), SCX_PICK_IDLE_CORE);
-		if (cpu >= 0) {
-			stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
-			goto direct;
-		}
-	}
-
-	/*
-	 * If @prev_cpu was domestic and is idle itself even though the core
-	 * isn't, picking @prev_cpu may improve L1/2 locality.
-	 */
-	if (prev_domestic && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
-		cpu = prev_cpu;
-		goto direct;
-	}
-
-	/* If there is any domestic idle CPU, dispatch directly */
-	cpu = scx_bpf_pick_idle_cpu(c_mask(p_cpumask), 0);
-	if (cpu >= 0) {
-		stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
-		goto direct;
-	}
-
-	/*
-	 * Domestic domain is fully booked. If there are CPUs which are idle and
-	 * under-utilized, ignore domain boundaries (while still respecting NUMA
-	 * boundaries) and push the task there. Try to find an idle core first.
-	 */
-	if (taskc->all_cpus && direct_greedy_cpumask &&
-	    !bpf_cpumask_empty(c_mask(direct_greedy_cpumask))) {
-		u32 dom_id = cpu_to_dom_id(prev_cpu);
-		struct dom_ctx *domc;
-		struct bpf_cpumask *tmp_direct_greedy, *node_mask;
-
-		if (!(domc = lookup_dom_ctx(dom_id)))
-			goto enoent;
-
-		tmp_direct_greedy = direct_greedy_cpumask;
-		if (!tmp_direct_greedy) {
-			scx_bpf_error("Failed to lookup direct_greedy mask");
-			goto enoent;
-		}
-		/*
-		 * By default, only look for an idle core in the current NUMA
-		 * node when looking for direct greedy CPUs outside of the
-		 * current domain. Stealing work temporarily is fine when
-		 * you're going across domain boundaries, but it may be less
-		 * desirable when crossing NUMA boundaries as the task's
-		 * working set may end up spanning multiple NUMA nodes.
-		 */
-		if (!direct_greedy_numa) {
-			node_mask = domc->node_cpumask;
-			if (!node_mask) {
-				scx_bpf_error("Failed to lookup node mask");
-				goto enoent;
-			}
-
-			tmp_cpumask = bpf_kptr_xchg(&taskc->tmp_cpumask, NULL);
-			if (!tmp_cpumask) {
-				scx_bpf_error("Failed to lookup tmp cpumask");
-				goto enoent;
-			}
-			bpf_cpumask_and(tmp_cpumask, c_mask(node_mask),
-					c_mask(tmp_direct_greedy));
-			tmp_direct_greedy = tmp_cpumask;
-		}
-
-		/* Try to find an idle core in the previous and then any domain */
-		if (has_idle_cores) {
-			if (domc->direct_greedy_cpumask) {
-				cpu = scx_bpf_pick_idle_cpu(c_mask(domc->direct_greedy_cpumask),
-							    SCX_PICK_IDLE_CORE);
-				if (cpu >= 0) {
-					stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
-					goto direct;
-				}
-			}
-
-			if (direct_greedy_cpumask) {
-				cpu = scx_bpf_pick_idle_cpu(c_mask(tmp_direct_greedy),
-							    SCX_PICK_IDLE_CORE);
-				if (cpu >= 0) {
-					stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
-					goto direct;
-				}
-			}
-		}
-
-		/*
-		 * No idle core. Is there any idle CPU?
-		 */
-		if (domc->direct_greedy_cpumask) {
-			cpu = scx_bpf_pick_idle_cpu(c_mask(domc->direct_greedy_cpumask), 0);
-			if (cpu >= 0) {
-				stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
+		local_nid = dom_node_id(pcpuc->dom_id);
+		domestic_nid = dom_node_id(taskc->dom_id);
+		prev_node_domestic = local_nid == domestic_nid;
+		if (!prev_node_domestic ||
+		    (direct_greedy_cpumask &&
+		     bpf_cpumask_test_cpu(prev_cpu, c_mask(direct_greedy_cpumask)))) {
+			/*
+			 * @prev_cpu is foreign. Linger iff:
+			 *
+			 * 1. The domain isn't too busy as indicated by
+			 *    direct_greedy_cpumask, unless the temporary
+			 *    domain is in another NUMA node to avoid a more
+			 *    significant access latency cost.
+			 *
+			 * 2. There is an idle CPU in the domestic domain.
+			 */
+			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+				stat_add(RUSTY_STAT_GREEDYPREV_IDLE, 1);
+				cpu = prev_cpu;
 				goto direct;
 			}
 		}
+	}
 
-		if (direct_greedy_cpumask) {
-			cpu = scx_bpf_pick_idle_cpu(c_mask(tmp_direct_greedy), 0);
+	/*
+	 * @prev_cpu didn't work out.
+	 *
+	 * We search for an idle CPU in the following hierarchy:
+	 *
+	 * 1. Try to find a fully idle core
+	 * 2. Try to find a partially idle core (an idle CPU)
+	 *
+	 * In the following domain order:
+	 *
+	 * - Task's domestic domain
+	 * - Task's local domain (if local dom != domestic dom, and local node
+	 *			  == domestic node)
+	 * - Any domain in the task's domestic NUMA node
+	 * - Any domain in the task's local NUMA node
+	 * - Any domain in any remaining NUMA node(s)
+	 *
+	 * This can likely be improved. For example, we probably want to first
+	 * try to stay in the local NUMA node if we're in a non-domestic NUMA
+	 * node to account for the increased costs of bouncing back and forth
+	 * between them. For now, let's just err on the side of bringing the
+	 * task back to its domestic NUMA node first.
+	 */
+
+
+	/* 1. domestic domain */
+	cpu = try_get_dom_cpu(p, taskc, taskc->dom_id, tmp_cpumask,
+			      has_idle_cores, &sel_type);
+	if (cpu >= 0) {
+		if (sel_type == SEL_CPU_FULL_IDLE)
+			stat_add(RUSTY_STAT_LOCAL_ICORE, 1);
+		else
+			stat_add(RUSTY_STAT_LOCAL_ICPU, 1);
+		goto direct;
+	}
+
+	tmp_cpumask = bpf_kptr_xchg(&taskc->tmp_cpumask, NULL);
+	if (!tmp_cpumask) {
+		scx_bpf_error("Failed to lookup tmp cpumask");
+		goto enoent;
+	}
+
+	/* 2. local domain, if != domestic domain */
+	if (!prev_dom_domestic) {
+		cpu = try_get_dom_cpu(p, taskc, pcpuc->dom_id, tmp_cpumask,
+				      has_idle_cores, &sel_type);
+		if (cpu >= 0) {
+			if (sel_type == SEL_CPU_FULL_IDLE)
+				stat_add(RUSTY_STAT_DOMESTIC_ICORE, 1);
+			else
+				stat_add(RUSTY_STAT_DOMESTIC_ICPU, 1);
+			goto direct;
+		}
+	}
+
+	/* 3. any other domain in domestic NUMA node */
+	local_node = dom_node_id(taskc->dom_id);
+	nodec = lookup_node_ctx(local_node);
+	if (!nodec)
+		goto enoent;
+
+	cpu = try_get_node_cpu(p, taskc, pcpuc, nodec, tmp_cpumask,
+			       has_idle_cores, &sel_type);
+	if (cpu >= 0) {
+		if (sel_type == SEL_CPU_FULL_IDLE)
+			stat_add(RUSTY_STAT_DOMESTICN_ICORE, 1);
+		else
+			stat_add(RUSTY_STAT_DOMESTICN_ICPU, 1);
+		goto direct;
+	}
+
+	/* 4. any other domain in the task's local NUMA node */
+	if (!prev_node_domestic) {
+		local_node = dom_node_id(pcpuc->dom_id);
+		nodec = lookup_node_ctx(local_node);
+		if (!nodec)
+			goto enoent;
+
+		cpu = try_get_node_cpu(p, taskc, pcpuc, nodec, tmp_cpumask,
+				       has_idle_cores, &sel_type);
+		if (cpu >= 0) {
+			if (sel_type == SEL_CPU_FULL_IDLE)
+				stat_add(RUSTY_STAT_LOCALN_ICORE, 1);
+			else
+				stat_add(RUSTY_STAT_LOCALN_ICPU, 1);
+			goto direct;
+		}
+	}
+
+	/* 5. any other nodes in the system */
+	if (direct_greedy_numa) {
+		bpf_for(idx, 0, nr_nodes) {
+			/* Both already checked above */
+			if (idx == local_nid || idx == domestic_nid)
+				continue;
+
+			nodec = lookup_node_ctx(idx);
+			if (!nodec)
+				goto enoent;
+
+			cpu = try_get_node_cpu(p, taskc, pcpuc, nodec,
+					       tmp_cpumask, has_idle_cores,
+					       &sel_type);
 			if (cpu >= 0) {
-				stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
+				if (sel_type == SEL_CPU_FULL_IDLE)
+					stat_add(RUSTY_STAT_RMTN_ICORE, 1);
+				else
+					stat_add(RUSTY_STAT_RMTN_ICPU, 1);
 				goto direct;
 			}
 		}
@@ -1013,10 +1154,14 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * stalls as all in-domain CPUs may be idle by the time @p gets
 	 * enqueued.
 	 */
-	if (prev_domestic)
+	if (prev_dom_domestic) {
 		cpu = prev_cpu;
-	else
+	} else {
+		p_cpumask = taskc->cpumask;
+		if (!p_cpumask)
+			goto enoent;
 		cpu = scx_bpf_pick_any_cpu(c_mask(p_cpumask), 0);
+	}
 
 	if (tmp_cpumask) {
 		tmp_cpumask = bpf_kptr_xchg(&taskc->tmp_cpumask, tmp_cpumask);
@@ -1037,6 +1182,11 @@ direct:
 	return cpu;
 
 enoent:
+	if (tmp_cpumask) {
+		tmp_cpumask = bpf_kptr_xchg(&taskc->tmp_cpumask, tmp_cpumask);
+		if (tmp_cpumask)
+			bpf_cpumask_release(tmp_cpumask);
+	}
 	scx_bpf_put_idle_cpumask(idle_smtmask);
 	return -ENOENT;
 }
@@ -1142,18 +1292,6 @@ static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
 		return false;
 
 	return bpf_cpumask_intersects(cpumask, (const struct cpumask *)dmask);
-}
-
-u32 dom_node_id(u32 dom_id)
-{
-	const volatile u32 *nid_ptr;
-
-	nid_ptr = MEMBER_VPTR(dom_numa_id_map, [dom_id]);
-	if (!nid_ptr) {
-		scx_bpf_error("Couldn't look up node ID for %d", dom_id);
-		return 0;
-	}
-	return *nid_ptr;
 }
 
 void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
@@ -1554,12 +1692,10 @@ static s32 create_node(u32 node_id)
 	struct node_ctx *nodec;
 	s32 ret;
 
-	nodec = bpf_map_lookup_elem(&node_data, &node_id);
-	if (!nodec) {
+	nodec = lookup_node_ctx(node_id);
+	if (!nodec)
 		/* Should never happen, it's created statically at load time. */
-		scx_bpf_error("No node%u", node_id);
 		return -ENOENT;
-	}
 
 	ret = create_save_cpumask(&nodec->cpumask);
 	if (ret)
@@ -1596,7 +1732,7 @@ static s32 create_dom(u32 dom_id)
 	struct dom_ctx *domc;
 	struct node_ctx *nodec;
 	struct bpf_cpumask *dom_mask, *node_mask, *all_mask;
-	u32 cpu, node_id;
+	u32 cpu, node_id, *dom_ids;
 	s32 ret;
 
 	if (dom_id >= MAX_DOMS) {
@@ -1654,12 +1790,19 @@ static s32 create_dom(u32 dom_id)
 	if (ret)
 		return ret;
 
-	nodec = bpf_map_lookup_elem(&node_data, &node_id);
-	if (!nodec) {
+	nodec = lookup_node_ctx(node_id);
+	if (!nodec)
 		/* Should never happen, it's created statically at load time. */
-		scx_bpf_error("No node%u", node_id);
+		return -ENOENT;
+	dom_ids = MEMBER_VPTR(nodec->dom_ids, [nodec->nr_dom_ids]);
+	if (!dom_ids) {
+		scx_bpf_error("Failed to set node dom ID (idx %u, max %u)",
+			      nodec->nr_dom_ids, MAX_DOMS);
 		return -ENOENT;
 	}
+	*dom_ids = dom_id;
+	nodec->nr_dom_ids++;
+
 	ret = create_save_cpumask(&domc->node_cpumask);
 	if (ret)
 		return ret;
