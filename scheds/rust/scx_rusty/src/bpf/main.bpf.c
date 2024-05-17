@@ -723,6 +723,11 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 	}
 }
 
+static inline const struct cpumask *c_mask(struct bpf_cpumask *bpf_mask)
+{
+	return (const struct cpumask *)bpf_mask;
+}
+
 static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
@@ -769,8 +774,7 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	 * set_cpumask might have happened between userspace requesting LB and
 	 * here and @p might not be able to run in @dom_id anymore. Verify.
 	 */
-	if (bpf_cpumask_intersects((const struct cpumask *)d_cpumask,
-				   p->cpus_ptr)) {
+	if (bpf_cpumask_intersects(c_mask(d_cpumask), p->cpus_ptr)) {
 		u64 now = bpf_ktime_get_ns();
 
 		if (!init_dsq_vtime)
@@ -779,8 +783,7 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 		p->scx.dsq_vtime = dom_min_vruntime(new_domc);
 		taskc->deadline = p->scx.dsq_vtime +
 				  scale_inverse_fair(taskc->avg_runtime, taskc->weight);
-		bpf_cpumask_and(t_cpumask, (const struct cpumask *)d_cpumask,
-				p->cpus_ptr);
+		bpf_cpumask_and(t_cpumask, c_mask(d_cpumask), p->cpus_ptr);
 	}
 
 	return taskc->dom_id == new_dom_id;
@@ -813,8 +816,7 @@ static bool should_wake_sync(struct task_struct *p, struct task_ctx *taskc)
 
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 
-	has_idle = bpf_cpumask_intersects((const struct cpumask *)d_cpumask,
-					  idle_cpumask);
+	has_idle = bpf_cpumask_intersects(c_mask(d_cpumask), idle_cpumask);
 
 	scx_bpf_put_idle_cpumask(idle_cpumask);
 
@@ -858,8 +860,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	has_idle_cores = !bpf_cpumask_empty(idle_smtmask);
 
 	/* did @p get pulled out to a foreign domain by e.g. greedy execution? */
-	prev_domestic = bpf_cpumask_test_cpu(prev_cpu,
-					     (const struct cpumask *)p_cpumask);
+	prev_domestic = bpf_cpumask_test_cpu(prev_cpu, c_mask(p_cpumask));
 
 	/*
 	 * See if we want to keep @prev_cpu. We want to keep @prev_cpu if the
@@ -880,8 +881,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 * CPU in the domestic domain
 		 */
 		if (direct_greedy_cpumask &&
-		    bpf_cpumask_test_cpu(prev_cpu, (const struct cpumask *)
-					 direct_greedy_cpumask) &&
+		    bpf_cpumask_test_cpu(prev_cpu, c_mask(direct_greedy_cpumask)) &&
 		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			stat_add(RUSTY_STAT_GREEDY_IDLE, 1);
@@ -898,8 +898,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	/* If there is a domestic idle core, dispatch directly */
 	if (has_idle_cores) {
-		cpu = scx_bpf_pick_idle_cpu((const struct cpumask *)p_cpumask,
-					    SCX_PICK_IDLE_CORE);
+		cpu = scx_bpf_pick_idle_cpu(c_mask(p_cpumask), SCX_PICK_IDLE_CORE);
 		if (cpu >= 0) {
 			stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
 			goto direct;
@@ -917,7 +916,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	}
 
 	/* If there is any domestic idle CPU, dispatch directly */
-	cpu = scx_bpf_pick_idle_cpu((const struct cpumask *)p_cpumask, 0);
+	cpu = scx_bpf_pick_idle_cpu(c_mask(p_cpumask), 0);
 	if (cpu >= 0) {
 		stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
 		goto direct;
@@ -929,7 +928,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * boundaries) and push the task there. Try to find an idle core first.
 	 */
 	if (taskc->all_cpus && direct_greedy_cpumask &&
-	    !bpf_cpumask_empty((const struct cpumask *)direct_greedy_cpumask)) {
+	    !bpf_cpumask_empty(c_mask(direct_greedy_cpumask))) {
 		u32 dom_id = cpu_to_dom_id(prev_cpu);
 		struct dom_ctx *domc;
 		struct bpf_cpumask *tmp_direct_greedy, *node_mask;
@@ -962,17 +961,15 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 				scx_bpf_error("Failed to lookup tmp cpumask");
 				goto enoent;
 			}
-			bpf_cpumask_and(tmp_cpumask,
-					(const struct cpumask *)node_mask,
-					(const struct cpumask *)tmp_direct_greedy);
+			bpf_cpumask_and(tmp_cpumask, c_mask(node_mask),
+					c_mask(tmp_direct_greedy));
 			tmp_direct_greedy = tmp_cpumask;
 		}
 
 		/* Try to find an idle core in the previous and then any domain */
 		if (has_idle_cores) {
 			if (domc->direct_greedy_cpumask) {
-				cpu = scx_bpf_pick_idle_cpu((const struct cpumask *)
-							    domc->direct_greedy_cpumask,
+				cpu = scx_bpf_pick_idle_cpu(c_mask(domc->direct_greedy_cpumask),
 							    SCX_PICK_IDLE_CORE);
 				if (cpu >= 0) {
 					stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
@@ -981,8 +978,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 			}
 
 			if (direct_greedy_cpumask) {
-				cpu = scx_bpf_pick_idle_cpu((const struct cpumask *)
-							    tmp_direct_greedy,
+				cpu = scx_bpf_pick_idle_cpu(c_mask(tmp_direct_greedy),
 							    SCX_PICK_IDLE_CORE);
 				if (cpu >= 0) {
 					stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
@@ -995,8 +991,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 * No idle core. Is there any idle CPU?
 		 */
 		if (domc->direct_greedy_cpumask) {
-			cpu = scx_bpf_pick_idle_cpu((const struct cpumask *)
-						    domc->direct_greedy_cpumask, 0);
+			cpu = scx_bpf_pick_idle_cpu(c_mask(domc->direct_greedy_cpumask), 0);
 			if (cpu >= 0) {
 				stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
 				goto direct;
@@ -1004,8 +999,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		}
 
 		if (direct_greedy_cpumask) {
-			cpu = scx_bpf_pick_idle_cpu((const struct cpumask *)
-						    tmp_direct_greedy, 0);
+			cpu = scx_bpf_pick_idle_cpu(c_mask(tmp_direct_greedy), 0);
 			if (cpu >= 0) {
 				stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
 				goto direct;
@@ -1022,7 +1016,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (prev_domestic)
 		cpu = prev_cpu;
 	else
-		cpu = scx_bpf_pick_any_cpu((const struct cpumask *)p_cpumask, 0);
+		cpu = scx_bpf_pick_any_cpu(c_mask(p_cpumask), 0);
 
 	if (tmp_cpumask) {
 		tmp_cpumask = bpf_kptr_xchg(&taskc->tmp_cpumask, tmp_cpumask);
@@ -1078,7 +1072,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 	    task_set_domain(taskc, p, *new_dom, false)) {
 		stat_add(RUSTY_STAT_LOAD_BALANCE, 1);
 		taskc->dispatch_local = false;
-		cpu = scx_bpf_pick_any_cpu((const struct cpumask *)p_cpumask, 0);
+		cpu = scx_bpf_pick_any_cpu(c_mask(p_cpumask), 0);
 		if (cpu >= 0)
 			scx_bpf_kick_cpu(cpu, 0);
 		goto dom_queue;
@@ -1098,8 +1092,8 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 	 * the domain would be woken up which can induce temporary execution
 	 * stalls. Kick a domestic CPU if @p is on a foreign domain.
 	 */
-	if (!bpf_cpumask_test_cpu(scx_bpf_task_cpu(p), (const struct cpumask *)p_cpumask)) {
-		cpu = scx_bpf_pick_any_cpu((const struct cpumask *)p_cpumask, 0);
+	if (!bpf_cpumask_test_cpu(scx_bpf_task_cpu(p), c_mask(p_cpumask))) {
+		cpu = scx_bpf_pick_any_cpu(c_mask(p_cpumask), 0);
 		scx_bpf_kick_cpu(cpu, 0);
 		stat_add(RUSTY_STAT_REPATRIATE, 1);
 	}
@@ -1126,8 +1120,7 @@ dom_queue:
 	 * high utilization, KICK_GREEDY can slightly improve work-conservation.
 	 */
 	if (taskc->all_cpus && kick_greedy_cpumask) {
-		cpu = scx_bpf_pick_idle_cpu((const struct cpumask *)
-					    kick_greedy_cpumask, 0);
+		cpu = scx_bpf_pick_idle_cpu(c_mask(kick_greedy_cpumask), 0);
 		if (cpu >= 0) {
 			stat_add(RUSTY_STAT_KICK_GREEDY, 1);
 			scx_bpf_kick_cpu(cpu, 0);
@@ -1457,7 +1450,7 @@ void BPF_STRUCT_OPS(rusty_set_cpumask, struct task_struct *p,
 	task_pick_and_set_domain(taskc, p, cpumask, false);
 	if (all_cpumask)
 		taskc->all_cpus =
-			bpf_cpumask_subset((const struct cpumask *)all_cpumask, cpumask);
+			bpf_cpumask_subset(c_mask(all_cpumask), cpumask);
 }
 
 static s32 create_save_cpumask(struct bpf_cpumask **kptr)
@@ -1679,7 +1672,7 @@ static s32 create_dom(u32 dom_id)
 		scx_bpf_error("cpumask lookup failed");
 		return -ENOENT;
 	}
-	bpf_cpumask_copy(dom_mask, (const struct cpumask *)node_mask);
+	bpf_cpumask_copy(dom_mask, c_mask(node_mask));
 	bpf_rcu_read_unlock();
 
 	return 0;
@@ -1709,7 +1702,7 @@ static s32 initialize_cpu(s32 cpu)
 			return -ENOENT;
 		}
 
-		if (bpf_cpumask_test_cpu(cpu, (const struct cpumask *)cpumask)) {
+		if (bpf_cpumask_test_cpu(cpu, c_mask(cpumask))) {
 			cpumask = domc->cpumask;
 			if (!cpumask) {
 				bpf_rcu_read_unlock();
@@ -1721,8 +1714,7 @@ static s32 initialize_cpu(s32 cpu)
 			 * we'll only ever consume from them on the greedy
 			 * threshold path.
 			 */
-			if (!bpf_cpumask_test_cpu(cpu,
-						  (const struct cpumask *)cpumask)) {
+			if (!bpf_cpumask_test_cpu(cpu, c_mask(cpumask))) {
 				dom_nodes = MEMBER_VPTR(pcpuc->node_doms, [j]);
 				if (!dom_nodes) {
 					bpf_rcu_read_unlock();
