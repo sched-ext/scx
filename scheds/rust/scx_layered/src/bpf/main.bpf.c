@@ -413,7 +413,8 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (p->nr_cpus_allowed == 1) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			lstat_inc(LSTAT_LOCAL, layer, cctx);
-			if (!bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
+			if (!layer->open &&
+			    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
 				lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		}
@@ -422,9 +423,8 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 
 	maybe_refresh_layered_cpumask(layered_cpumask, p, tctx, layer_cpumask);
 
-	if (!(idle_smtmask = scx_bpf_get_idle_smtmask())) {
+	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
 		return prev_cpu;
-	}
 
 	/*
 	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
@@ -476,16 +476,35 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (vtime_before(vtime, layer->vtime_now - slice_ns))
 		vtime = layer->vtime_now - slice_ns;
 
-	if (!tctx->all_cpus_allowed) {
+	/*
+	 * Special-case per-cpu kthreads which aren't in a preempting layer so
+	 * that they run between preempting and non-preempting layers. This is
+	 * to give reasonable boost to per-cpu kthreads by default as they are
+	 * usually important for system performance and responsiveness.
+	 */
+	if (!layer->preempt &&
+	    (p->flags & PF_KTHREAD) && p->nr_cpus_allowed == 1) {
+		struct cpumask *layer_cpumask;
+
+		if (!layer->open &&
+		    (layer_cpumask = lookup_layer_cpumask(tctx->layer)) &&
+		    !bpf_cpumask_test_cpu(scx_bpf_task_cpu(p), layer_cpumask))
+			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
+
+		scx_bpf_dispatch(p, HI_FALLBACK_DSQ, slice_ns, enq_flags);
+		return;
+	}
+
+	/*
+	 * As an open or grouped layer is consumed from all CPUs, a task which
+	 * belongs to such a layer can be safely put in the layer's DSQ
+	 * regardless of its cpumask. However, a task with custom cpumask in a
+	 * confined layer may fail to be consumed for an indefinite amount of
+	 * time. Queue them to the fallback DSQ.
+	 */
+	if (!layer->open && !tctx->all_cpus_allowed) {
 		lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
-		/*
-		 * Run kthread w/ modified affinities right after preempt
-		 * layers. User threads w/ modified affinities run last.
-		 */
-		if (p->flags & PF_KTHREAD)
-			scx_bpf_dispatch(p, HI_FALLBACK_DSQ, slice_ns, enq_flags);
-		else
-			scx_bpf_dispatch(p, LO_FALLBACK_DSQ, slice_ns, enq_flags);
+		scx_bpf_dispatch(p, LO_FALLBACK_DSQ, slice_ns, enq_flags);
 		return;
 	}
 
@@ -499,8 +518,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		u32 cpu = (preempt_cursor + idx) % nr_possible_cpus;
 		s32 sib;
 
-		if (!all_cpumask ||
-		    !bpf_cpumask_test_cpu(cpu, (const struct cpumask *)all_cpumask))
+		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 			continue;
 
 		if (!(cand_cctx = lookup_cpu_ctx(cpu)) || cand_cctx->current_preempt)
