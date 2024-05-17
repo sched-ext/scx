@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""
+Small wrapper for running stress tests. Do not make this more complicated and
+assume any libraries besides Python3 stdlib.
+"""
+import logging
+import os
+import subprocess
+import sys
+import time
+
+from pathlib import PurePath
+from typing import List
+from argparse import ArgumentParser, Namespace
+from configparser import ConfigParser
+
+logger = logging.getLogger(__name__)
+SCRIPT_DIR: str = os.path.dirname(os.path.realpath(__file__))
+
+def get_exe_path(exe: str) -> str:
+    path = subprocess.check_output(["which", exe])
+    return path.decode("utf-8").replace("\n", "")
+
+def sched_path(path: str, sched: str) -> str:
+    rel_path = subprocess.check_output(
+        ["find", path, "-type", "f", "-executable", "-name", sched]).decode("utf-8").replace("\n", "")
+    full_path = subprocess.check_output(["readlink", "-f", rel_path]).decode("utf-8").replace("\n", "")
+    logger.debug(f"found scheduler {sched} in path: {full_path}")
+    return full_path
+
+def load_config(path: str) -> ConfigParser:
+    config = ConfigParser()
+    config.read(path)
+    return config
+
+def run_stress_test(
+    config,
+    build_dir: str,
+    output: str,
+    vng_path: str,
+    kernel: str,
+    verbose: bool,
+) -> int:
+    scheduler_args = config.get('scheduler_args')
+    stress_cmd = config.get('stress_cmd')
+    s_path = sched_path(build_dir, config.get('sched'))
+    sched_cmd = s_path + " " + config.get('sched_args')
+    timeout_sec = int(config.get("timeout_sec"))
+    if vng_path:
+        vm_input = f"{stress_cmd} & timeout --foreground --preserve-status {timeout_sec} {sched_cmd}"
+        cmd = [vng_path, "--user", "root", "--force-9p", "-v", "--", vm_input]
+        err = sys.stderr if output == "-" else open(output, "w")
+        out = sys.stdout if output == "-" else err
+        proc = subprocess.Popen(
+            cmd, env=os.environ, cwd=kernel, shell=False, stdout=out,
+            stderr=err, stdin=subprocess.PIPE, text=True)
+        proc.wait()
+        return proc.returncode
+
+
+def stress_tests(args: Namespace) -> None:
+    configs = load_config(args.config)
+    vng_path = ""
+    if args.vng:
+        try:
+            vng_path = get_exe_path("vng")
+        except Exception:
+            raise OSError(
+                "Please install `vng` to run, see:\n"
+                "https://github.com/arighi/virtme-ng?tab=readme-ov-file#installation")
+
+    return_codes = {}
+    for test_name in configs.sections():
+        if args.stress_test and test_name != args.stress_test:
+            continue
+        return_codes[test_name] = run_stress_test(
+            configs[test_name],
+            args.build_dir,
+            args.output,
+            vng_path,
+            args.kernel,
+            args.verbose,
+        )
+    for test_name, ret in return_codes.items():
+        if ret not in (143, 0):
+            logging.error(f"Failed stress tests for {test_name}: exit {ret}")
+            sys.exit(ret)
+    logging.info("All stress tests passed!")
+
+
+if __name__ == "__main__":
+    parser = ArgumentParser(prog=__file__)
+    parser.add_argument(
+       '-c', '--config',
+       default=os.path.join(SCRIPT_DIR, "stress_tests.ini"),
+       help='Path to config file'
+    )
+    parser.add_argument('-o', '--output', default='-', help='Scheduler output')
+    parser.add_argument(
+        '-t', '--stress-test', default='', help='Name of the stress test (default: all)')
+    parser.add_argument(
+        '-b', '--build-dir', default='build', help='Meson build dir')
+    parser.add_argument(
+        '-k', '--kernel', default='', help='Kernel path for vng')
+    parser.add_argument(
+        '-v', '--verbose', action='store_true', help='Verbose output')
+    parser.add_argument(
+        '--vng', action='store_true', default=True, help='Run in vng')
+
+    args = parser.parse_args()
+    if args.verbose:
+        logger.setLevel(logging.DEBUG)
+    stress_tests(args)
