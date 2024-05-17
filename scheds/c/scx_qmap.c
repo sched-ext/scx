@@ -33,6 +33,7 @@ const char help_fmt[] =
 "                (e.g. match shell on a loaded system)\n"
 "  -d PID        Disallow a process from switching into SCHED_EXT (-1 for self)\n"
 "  -D LEN        Set scx_exit_info.dump buffer length\n"
+"  -S            Suppress qmap-specific debug dump\n"
 "  -p            Switch only tasks on SCHED_EXT policy intead of all\n"
 "  -v            Print libbpf debug messages\n"
 "  -h            Display this help and exit\n";
@@ -64,7 +65,7 @@ int main(int argc, char **argv)
 
 	skel = SCX_OPS_OPEN(qmap_ops, scx_qmap);
 
-	while ((opt = getopt(argc, argv, "s:e:t:T:l:b:PE:d:D:pvh")) != -1) {
+	while ((opt = getopt(argc, argv, "s:e:t:T:l:b:PE:d:D:Spvh")) != -1) {
 		switch (opt) {
 		case 's':
 			skel->rodata->slice_ns = strtoull(optarg, NULL, 0) * 1000;
@@ -98,6 +99,9 @@ int main(int argc, char **argv)
 			break;
 		case 'D':
 			skel->struct_ops.qmap_ops->exit_dump_len = strtoul(optarg, NULL, 0);
+			break;
+		case 'S':
+			skel->rodata->suppress_dump = true;
 			break;
 		case 'p':
 			skel->rodata->switch_partial = true;

@@ -158,6 +158,7 @@ static inline long scx_hotplug_seq(void)
  * reasonable.
  *
  * - ops.tick(): Ignored on older kernels with a warning.
+ * - ops.dump*(): Ignored on older kernels with a warning.
  * - ops.exit_dump_len: Cleared to zero on older kernels with a warning.
  * - ops.hotplug_seq: Ignored on older kernels.
  */
@@ -183,6 +184,15 @@ static inline long scx_hotplug_seq(void)
 	    (__skel)->struct_ops.__ops_name->tick) {				\
 		fprintf(stderr, "WARNING: kernel doesn't support ops.tick()\n"); \
 		(__skel)->struct_ops.__ops_name->tick = NULL;			\
+	}									\
+	if (!__COMPAT_struct_has_field("sched_ext_ops", "dump") &&		\
+	    ((__skel)->struct_ops.__ops_name->dump ||				\
+	     (__skel)->struct_ops.__ops_name->dump_cpu ||			\
+	     (__skel)->struct_ops.__ops_name->dump_task)) {			\
+		fprintf(stderr, "WARNING: kernel doesn't support ops.dump*()\n"); \
+		(__skel)->struct_ops.__ops_name->dump = NULL;			\
+		(__skel)->struct_ops.__ops_name->dump_cpu = NULL;		\
+		(__skel)->struct_ops.__ops_name->dump_task = NULL;		\
 	}									\
 	SCX_BUG_ON(__scx_name##__load((__skel)), "Failed to load skel");	\
 })

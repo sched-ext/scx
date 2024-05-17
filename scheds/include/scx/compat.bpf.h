@@ -43,9 +43,19 @@ static inline void __COMPAT_scx_bpf_switch_all(void)
 #define __COMPAT_scx_bpf_exit(code, fmt, args...)				\
 ({										\
 	if (bpf_ksym_exists(scx_bpf_exit_bstr))					\
-		scx_bpf_exit((code), fmt, args);				\
+		scx_bpf_exit((code), fmt, ##args);				\
 	else									\
-		scx_bpf_error(fmt, args);					\
+		scx_bpf_error(fmt, ##args);					\
+})
+
+/*
+ * scx_bpf_dump() is a new addition. Ignore if unavailable. Users can use
+ * scx_bpf_dump() directly in the future.
+ */
+#define __COMPAT_scx_bpf_dump(fmt, args...)					\
+({										\
+	if (bpf_ksym_exists(scx_bpf_dump_bstr))					\
+		scx_bpf_dump(fmt, ##args);					\
 })
 
 /*
