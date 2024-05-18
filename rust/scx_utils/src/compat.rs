@@ -8,9 +8,9 @@ use libbpf_rs::libbpf_sys::*;
 use std::ffi::c_void;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::io;
 use std::mem::size_of;
 use std::slice::from_raw_parts;
-use std::io;
 
 lazy_static::lazy_static! {
     pub static ref SCX_OPS_SWITCH_PARTIAL: u64 =
@@ -220,13 +220,20 @@ macro_rules! scx_ops_load {
 macro_rules! scx_ops_attach {
     ($skel: expr, $ops: ident) => {{
         if scx_utils::compat::is_sched_ext_enabled().unwrap_or(false) {
-            return Err(anyhow::anyhow!("another sched_ext scheduler is already running"));
+            return Err(anyhow::anyhow!(
+                "another sched_ext scheduler is already running"
+            ));
         }
         $skel
-            .maps_mut()
-            .$ops()
-            .attach_struct_ops()
-            .context("Failed to attach struct ops")
+            .attach()
+            .context("Failed to attach non-struct_ops BPF programs")
+            .and_then(|_| {
+                $skel
+                    .maps_mut()
+                    .$ops()
+                    .attach_struct_ops()
+                    .context("Failed to attach struct_ops BPF programs")
+            })
     }};
 }
 

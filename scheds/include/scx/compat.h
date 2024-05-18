@@ -187,8 +187,9 @@ static inline long scx_hotplug_seq(void)
 	SCX_BUG_ON(__scx_name##__load((__skel)), "Failed to load skel");	\
 })
 
-#define SCX_OPS_ATTACH(__skel, __ops_name) ({					\
+#define SCX_OPS_ATTACH(__skel, __ops_name, __scx_name) ({			\
 	struct bpf_link *__link;						\
+	SCX_BUG_ON(__scx_name##__attach((__skel)), "Failed to attach skel");	\
 	__link = bpf_map__attach_struct_ops((__skel)->maps.__ops_name);		\
 	SCX_BUG_ON(!__link, "Failed to attach struct_ops");			\
 	__link;									\

@@ -102,7 +102,7 @@ restart:
 		   skel->rodata->central_cpu, skel->rodata->nr_cpu_ids - 1);
 	CPU_FREE(cpuset);
 
-	link = SCX_OPS_ATTACH(skel, central_ops);
+	link = SCX_OPS_ATTACH(skel, central_ops, scx_central);
 
 	if (!skel->data->timer_pinned)
 		printf("WARNING : BPF_F_TIMER_CPU_PIN not available, timer not pinned to central\n");

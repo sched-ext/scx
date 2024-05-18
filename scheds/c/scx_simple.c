@@ -86,7 +86,7 @@ restart:
 	}
 
 	SCX_OPS_LOAD(skel, simple_ops, scx_simple, uei);
-	link = SCX_OPS_ATTACH(skel, simple_ops);
+	link = SCX_OPS_ATTACH(skel, simple_ops, scx_simple);
 
 	while (!exit_req && !UEI_EXITED(skel, uei)) {
 		__u64 stats[2];

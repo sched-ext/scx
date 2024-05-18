@@ -117,7 +117,7 @@ int main(int argc, char **argv)
 		fprintf(stderr, "kernel doesn't support DSQ iteration\n");
 
 	SCX_OPS_LOAD(skel, qmap_ops, scx_qmap, uei);
-	link = SCX_OPS_ATTACH(skel, qmap_ops);
+	link = SCX_OPS_ATTACH(skel, qmap_ops, scx_qmap);
 
 	while (!exit_req && !UEI_EXITED(skel, uei)) {
 		long nr_enqueued = skel->bss->nr_enqueued;

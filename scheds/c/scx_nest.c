@@ -199,7 +199,7 @@ restart:
 	}
 
 	SCX_OPS_LOAD(skel, nest_ops, scx_nest, uei);
-	link = SCX_OPS_ATTACH(skel, nest_ops);
+	link = SCX_OPS_ATTACH(skel, nest_ops, scx_nest);
 
 	while (!exit_req && !UEI_EXITED(skel, uei)) {
 		u64 stats[NEST_STAT(NR)];

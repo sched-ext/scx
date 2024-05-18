@@ -173,7 +173,7 @@ restart:
 	       dump_cgrps);
 
 	SCX_OPS_LOAD(skel, flatcg_ops, scx_flatcg, uei);
-	link = SCX_OPS_ATTACH(skel, flatcg_ops);
+	link = SCX_OPS_ATTACH(skel, flatcg_ops, scx_flatcg);
 
 	while (!exit_req && !UEI_EXITED(skel, uei)) {
 		__u64 acc_stats[FCG_NR_STATS];

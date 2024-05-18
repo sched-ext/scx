@@ -28,8 +28,9 @@ use anyhow::Context;
 use anyhow::Result;
 use bitvec::prelude::*;
 use clap::Parser;
-use libbpf_rs::skel::OpenSkel as _;
-use libbpf_rs::skel::SkelBuilder as _;
+use libbpf_rs::skel::OpenSkel;
+use libbpf_rs::skel::Skel;
+use libbpf_rs::skel::SkelBuilder;
 use log::debug;
 use log::info;
 use log::trace;
@@ -1294,7 +1295,9 @@ impl<'a> Scheduler<'a> {
             layer.nr_match_ors = spec.matches.len() as u32;
 
             match &spec.kind {
-                LayerKind::Confined { min_exec_us, perf, .. } => {
+                LayerKind::Confined {
+                    min_exec_us, perf, ..
+                } => {
                     layer.min_exec_ns = min_exec_us * 1000;
                     layer.perf = u32::try_from(*perf)?;
                 }

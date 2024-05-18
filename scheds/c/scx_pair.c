@@ -144,7 +144,7 @@ restart:
 	/*
 	 * Fully initialized, attach and run.
 	 */
-	link = SCX_OPS_ATTACH(skel, pair_ops);
+	link = SCX_OPS_ATTACH(skel, pair_ops, scx_pair);
 
 	while (!exit_req && !UEI_EXITED(skel, uei)) {
 		printf("[SEQ %llu]\n", seq++);

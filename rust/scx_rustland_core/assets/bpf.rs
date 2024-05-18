@@ -11,8 +11,9 @@ use anyhow::Result;
 
 use plain::Plain;
 
-use libbpf_rs::skel::OpenSkel as _;
-use libbpf_rs::skel::SkelBuilder as _;
+use libbpf_rs::skel::OpenSkel;
+use libbpf_rs::skel::Skel;
+use libbpf_rs::skel::SkelBuilder;
 
 use libc::{sched_param, sched_setscheduler};
 
