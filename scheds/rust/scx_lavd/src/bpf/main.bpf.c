@@ -70,8 +70,8 @@
  * least once within a predefined time window, which is called a targeted
  * latency. For example, if a targeted latency is 15 msec and 10 tasks are
  * runnable, the scheduler equally divides 15 msec of CPU time into 10 tasks.
-* Of course, the scheduler will consider the task's priority -- a task with
-* higher priority (lower nice value) will receive a longer time slice.
+ * Of course, the scheduler will consider the task's priority -- a task with
+ * higher priority (lower nice value) will receive a longer time slice.
  *
  * The scheduler also considers the behavioral properties of a task in
  * determining the time slice. If a task is compute-intensive, so it consumes
