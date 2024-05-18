@@ -31,8 +31,9 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-use libbpf_rs::skel::OpenSkel as _;
-use libbpf_rs::skel::SkelBuilder as _;
+use libbpf_rs::skel::OpenSkel;
+use libbpf_rs::skel::Skel;
+use libbpf_rs::skel::SkelBuilder;
 use log::info;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
@@ -41,10 +42,10 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_read;
-use scx_utils::SCX_ECODE_ACT_RESTART;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
+use scx_utils::SCX_ECODE_ACT_RESTART;
 
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
@@ -347,11 +348,13 @@ impl<'a> Scheduler<'a> {
 
             nr_lb_data_errors: 0,
 
-            tuner: Tuner::new(domains,
-                              opts.direct_greedy_under,
-                              opts.kick_greedy_under,
-                              opts.slice_us_underutil * 1000,
-                              opts.slice_us_overutil * 1000,)?,
+            tuner: Tuner::new(
+                domains,
+                opts.direct_greedy_under,
+                opts.kick_greedy_under,
+                opts.slice_us_underutil * 1000,
+                opts.slice_us_overutil * 1000,
+            )?,
         })
     }
 
@@ -502,7 +505,6 @@ impl<'a> Scheduler<'a> {
             "dl_clamped={:5.2} dl_preset={:5.2}",
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_CLAMP),
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_PRESET),
-
         );
 
         info!("slice_length={}us", self.tuner.slice_ns / 1000);

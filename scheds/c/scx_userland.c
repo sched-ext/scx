@@ -414,7 +414,7 @@ static void bootstrap(char *comm)
 	SCX_BUG_ON(spawn_stats_thread(), "Failed to spawn stats thread");
 
 	print_example_warning(basename(comm));
-	ops_link = SCX_OPS_ATTACH(skel, userland_ops);
+	ops_link = SCX_OPS_ATTACH(skel, userland_ops, scx_userland);
 }
 
 static void sched_main_loop(void)
