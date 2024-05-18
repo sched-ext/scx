@@ -224,7 +224,7 @@ static void set_cpu_owner(u32 cpu, u32 pid)
  *
  * Return 0 if the CPU is idle.
  */
-static u32 get_cpu_owner(u32 cpu)
+static __maybe_unused u32 get_cpu_owner(u32 cpu)
 {
 	if (cpu >= MAX_CPUS) {
 		scx_bpf_error("Invalid cpu: %d", cpu);

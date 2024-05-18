@@ -1966,9 +1966,7 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
 	struct sys_cpu_util *cutil_cur = get_sys_cpu_util_cur();
 	s32 cpu_id = scx_bpf_task_cpu(p_run);
 	struct cpu_ctx *cpuc_run;
-	struct task_ctx *taskc_run, *taskc_wait;
-	struct preemption_info prm_run, prm_wait;
-	struct task_struct *p_wait;
+	struct task_ctx *taskc_run;
 	bool preempted = false;
 
 

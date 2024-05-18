@@ -888,8 +888,6 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 {
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
-	s32 pid = p->pid;
-	int ret;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
