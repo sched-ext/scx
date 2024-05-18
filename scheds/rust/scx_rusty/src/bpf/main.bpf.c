@@ -168,17 +168,22 @@ static struct dom_ctx *lookup_dom_ctx(u32 dom_id)
 	return domc;
 }
 
+static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
+{
+	s32 pid = p->pid;
+
+	return bpf_map_lookup_elem(&task_data, &pid);
+}
+
 static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 {
 	struct task_ctx *taskc;
-	s32 pid = p->pid;
 
-	if ((taskc = bpf_map_lookup_elem(&task_data, &pid))) {
-		return taskc;
-	} else {
+	taskc = try_lookup_task_ctx(p);
+	if (!taskc)
 		scx_bpf_error("task_ctx lookup failed for pid %d", p->pid);
-		return NULL;
-	}
+
+	return taskc;
 }
 
 static struct pcpu_ctx *lookup_pcpu_ctx(s32 cpu)
@@ -535,7 +540,7 @@ static u64 min(u64 a, u64 b)
  * If a task goes up by ~10% and another task goes down by ~10% then
  * the relative distance between them is ~25%.)"
  */
-const int sched_prio_to_weight[DL_MAX_LAT_PRIO] = {
+const int sched_prio_to_weight[DL_MAX_LAT_PRIO + 1] = {
  /* -20 */     88761,     71755,     56483,     46273,     36291,
  /* -15 */     29154,     23254,     18705,     14949,     11916,
  /* -10 */      9548,      7620,      6100,      4904,      3906,
@@ -663,7 +668,7 @@ static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
 	 * vice versa for tasks with lower weight.
 	 */
 	avg_run_raw = taskc->avg_runtime / DL_RUNTIME_SCALE;
-	avg_run_raw = (avg_run_raw, DL_MAX_LATENCY_NS);
+	avg_run_raw = min(avg_run_raw, DL_MAX_LATENCY_NS);
 	avg_run_raw = scale_inverse_fair(avg_run_raw, p->scx.weight);
 	avg_run = bpf_log2l(avg_run_raw + 1);
 
@@ -1259,7 +1264,7 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 	wakee_ctx->sum_runtime = 0;
 
 	waker = bpf_get_current_task_btf();
-	if (!(waker_ctx = lookup_task_ctx(p)))
+	if (!(waker_ctx = try_lookup_task_ctx(waker)))
 		return;
 
 	interval = now - waker_ctx->last_woke_at;
