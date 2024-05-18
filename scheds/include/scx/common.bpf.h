@@ -276,6 +276,8 @@ static inline u32 bpf_log2l(u64 v)
 /* useful compiler attributes */
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
+#define __maybe_unused __attribute__((__unused__))
+
 
 void *bpf_obj_new_impl(__u64 local_type_id, void *meta) __ksym;
 void bpf_obj_drop_impl(void *kptr, void *meta) __ksym;
