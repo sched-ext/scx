@@ -17,6 +17,8 @@
 typedef unsigned char u8;
 typedef unsigned int u32;
 typedef unsigned long long u64;
+typedef int s32;
+typedef long long s64;
 #endif
 
 #include <scx/ravg.bpf.h>
@@ -50,7 +52,15 @@ enum consts {
 	DL_FREQ_FT_MAX		= 100000,
 	DL_MAX_LAT_PRIO		= 39,
 
-    UTIL_SCALE_FCTR     = 1024,
+	DL_SCALE_FCTR		= 1024,
+
+	UTIL_SCALE_FCTR     = 1024,
+
+	/* Preemption */
+	PREEMPT_MAX_RETRY	= 5,
+	PREEMPT_LAT_PRIO_FCTR	= 4,
+	PREEMPT_VTIME_FCTR	= 1,
+	PREEMPT_SUM_THRSHLD	= 32,
 
 	/*
 	 * When userspace load balancer is trying to determine the tasks to push
@@ -81,6 +91,9 @@ enum stat_idx {
 	RUSTY_STAT_DOMESTICN_ICPU,
 	RUSTY_STAT_RMTN_ICORE,
 	RUSTY_STAT_RMTN_ICPU,
+	RUSTY_STAT_LOCALPREV_PREEMPT,
+	RUSTY_STAT_LOCAL_PREEMPT,
+	RUSTY_STAT_DOMESTIC_PREEMPT,
 	RUSTY_STAT_DSQ_DISPATCH,
 	RUSTY_STAT_GREEDY_LOCAL,
 	RUSTY_STAT_GREEDY_XNUMA,
@@ -111,6 +124,7 @@ struct task_ctx {
 	bool runnable;
 	u64 dom_active_pids_gen;
 	u64 deadline;
+	u64 lat_prio;
 
 	u64 sum_runtime;
 	u64 avg_runtime;
@@ -146,6 +160,7 @@ struct dom_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 	struct bpf_cpumask __kptr *direct_greedy_cpumask;
 	struct bpf_cpumask __kptr *node_cpumask;
+	struct bpf_cpumask __kptr *preempt_cpumask;
 
 	u64 min_vruntime;
 
@@ -160,10 +175,21 @@ struct node_ctx {
 	u32 dom_ids[MAX_DOMS];
 };
 
+struct cpu_preempt_ctx {
+	u64 last_preempted_at;
+	u64 last_ran_at;
+	s64 vtime;
+	s64 lat_prio;
+	u64 est_stop_time;
+
+	bool preempted;
+};
+
 /*
  * Per-CPU context
  */
 struct pcpu_ctx {
+	s32 cpu;
 	u32 dom_rr_cur; /* used when scanning other doms */
 	u32 dom_id;
 	u32 nr_node_doms;
@@ -172,6 +198,8 @@ struct pcpu_ctx {
 	u64 idle_usec;
 	u64 iowait_usec;
 	u64 busy_usec;
+
+	struct cpu_preempt_ctx preempt_ctx;
 
 	u32 node_doms[MAX_DOMS];
 } __attribute__((aligned(CACHELINE_SIZE)));

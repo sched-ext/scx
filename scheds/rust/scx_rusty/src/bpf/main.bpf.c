@@ -192,6 +192,11 @@ static struct pcpu_ctx *lookup_pcpu_ctx(s32 cpu)
 	return pcpuc;
 }
 
+static struct pcpu_ctx *get_current_pcpuc(void)
+{
+	return lookup_pcpu_ctx(bpf_get_smp_processor_id());
+}
+
 static u32 numa_dom_id(struct node_ctx *nodec, u32 dom_offset)
 {
 	u32 *dom_node;
@@ -644,7 +649,8 @@ static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	waker_freq = min(taskc->waker_freq, DL_FREQ_FT_MAX);
 	blocked_freq = min(taskc->blocked_freq, DL_FREQ_FT_MAX);
-	freq_factor = blocked_freq * waker_freq * waker_freq;
+	freq_factor = blocked_freq * blocked_freq * blocked_freq *
+		      waker_freq * waker_freq;
 
 	/*
 	 * Scale the frequency factor according to the task's weight. A task
@@ -686,6 +692,7 @@ static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
 	} else {
 		lat_prio = 0;
 	}
+	taskc->lat_prio = lat_prio;
 
 	/*
 	 * Ultimately, what we're trying to arrive at is a single value
@@ -946,6 +953,176 @@ static s32 __always_inline try_get_node_cpu(
 	return -ENOENT;
 }
 
+static s64 get_preempt_sum(s64 vtime_dlta, s64 lat_prio_dlta)
+{
+	bool neg = false;
+	s64 vtime_dlta_fctr, sum;
+	s64 vtime_portion, prio_portion;
+
+	if (vtime_dlta < 0) {
+		neg = true;
+		vtime_dlta *= -1;
+	}
+	vtime_dlta_fctr = bpf_log2l(vtime_dlta + 1);
+	if (neg)
+		vtime_dlta_fctr *= -1;
+
+	vtime_portion = vtime_dlta_fctr * PREEMPT_VTIME_FCTR;
+	prio_portion = lat_prio_dlta * PREEMPT_LAT_PRIO_FCTR;
+	sum = vtime_portion + prio_portion;
+	/*
+	bpf_printk("vtime_dlta_fctr: %ld, lat_prio_dlta: %ld, "
+		   "vtime portion: %ld, prio portion: %ld, sum: %ld",
+		   vtime_dlta_fctr, lat_prio_dlta, vtime_portion,
+		   prio_portion, sum);
+		   */
+
+	return sum;
+
+}
+
+static s32 cmp_cpu_preempt(struct pcpu_ctx *cpu1, struct pcpu_ctx *cpu2)
+{
+	struct cpu_preempt_ctx *ctx1, *ctx2;
+	s64 vtime_dlta, lat_prio_dlta, sum;
+
+	ctx1 = &cpu1->preempt_ctx;
+	ctx2 = &cpu2->preempt_ctx;
+
+	vtime_dlta = ctx1->vtime - ctx2->vtime;
+	lat_prio_dlta = ctx2->lat_prio - ctx1->lat_prio;
+
+	sum = get_preempt_sum(vtime_dlta, lat_prio_dlta);
+	if (sum < 0)
+		return -1;
+	else if (sum == 0)
+		return 0;
+	else
+		return 1;
+}
+
+static bool try_preempt_cpu(struct task_struct *p, struct task_ctx *tctx,
+			    struct pcpu_ctx *pcpuc)
+{
+	struct cpu_preempt_ctx *preempt_ctx;
+	s64 vtime_dlta, lat_prio_dlta, sum;
+
+	preempt_ctx = &pcpuc->preempt_ctx;
+
+	vtime_dlta = preempt_ctx->vtime - (s64)p->scx.dsq_vtime;
+	lat_prio_dlta = (s64)tctx->lat_prio - preempt_ctx->lat_prio ;
+
+	sum = get_preempt_sum(vtime_dlta, lat_prio_dlta);
+	/*
+	bpf_printk("%s[%d] preempt score %ld (vtime dlta: %ld, lat_prio dlta: %ld), task prio: %lu, pcpu prio: %ld",
+		   p->comm, p->pid, sum, vtime_dlta, lat_prio_dlta, tctx->lat_prio, pcpuc->preempt_ctx.lat_prio);
+		   */
+	if (sum < PREEMPT_SUM_THRSHLD)
+		return false;
+
+	scx_bpf_kick_cpu(pcpuc->cpu, SCX_KICK_PREEMPT);
+	return true;
+}
+
+static s32 try_preempt_domain(struct task_struct *p, struct task_ctx *taskc,
+			      u32 dom_id, s32 prev_cpu)
+{
+	struct dom_ctx *domc = lookup_dom_ctx(dom_id);
+	struct bpf_cpumask *p_mask, *preempt_mask;
+	u32 i;
+	s32 cpu1 = -1, cpu2 = -1;
+	enum stat_idx stat_idx = dom_id != taskc->dom_id ?
+				RUSTY_STAT_LOCAL_PREEMPT : RUSTY_STAT_DOMESTIC_PREEMPT;
+	struct pcpu_ctx *pcpuc1, *pcpuc2, *pcpu_prev;
+	struct pcpu_ctx *pcpuc_pref, *pcpuc_bk;
+
+	p_mask = taskc->cpumask;
+	if (!domc || !p_mask)
+		return -ENOENT;
+
+	preempt_mask = domc->preempt_cpumask;
+	if (!preempt_mask)
+		return -ENOENT;
+
+	if (prev_cpu >= 0) {
+		pcpu_prev = lookup_pcpu_ctx(prev_cpu);
+		if (!pcpu_prev)
+			return -ENOENT;
+
+		if (try_preempt_cpu(p, taskc, pcpu_prev)) {
+			stat_add(RUSTY_STAT_LOCALPREV_PREEMPT, 1);
+			return prev_cpu;
+		}
+	}
+
+	bpf_for(i, 0, PREEMPT_MAX_RETRY) {
+		if (cpu1 == -1) {
+			cpu1 = bpf_cpumask_any_distribute(c_mask(p_mask));
+			if (cpu1 == cpu2 || cpu1 == prev_cpu) {
+				cpu1 = -1;
+				continue;
+			}
+			if (!bpf_cpumask_test_and_clear_cpu(cpu1, preempt_mask))
+				cpu1 = -1;
+		}
+
+		if (cpu2 == -1) {
+			cpu2 = bpf_cpumask_any_distribute(c_mask(p_mask));
+			if (cpu1 == cpu2 || cpu2 == prev_cpu) {
+				cpu2 = -1;
+				continue;
+			}
+			if (!bpf_cpumask_test_and_clear_cpu(cpu2, preempt_mask))
+				cpu2 = -1;
+		}
+		if (likely(cpu1 != -1 && cpu2 != -1))
+			break;
+	}
+
+	if (cpu1 == -1 && cpu2 == -1)
+		return -ENOENT;
+	else if (cpu1 == -1)
+		cpu1 = cpu2;
+	else if (cpu2 == -1)
+		cpu2 = cpu1;
+
+	pcpuc1 = lookup_pcpu_ctx(cpu1);
+	pcpuc2 = lookup_pcpu_ctx(cpu2);
+	if (!pcpuc1 || !pcpuc2)
+		return -ENOENT;
+
+	if (cpu1 == cpu2) {
+		if (try_preempt_cpu(p, taskc, pcpuc1)) {
+			stat_add(stat_idx, 1);
+			return cpu1;
+		}
+		return -ENOENT;
+	}
+
+	if (cmp_cpu_preempt(pcpuc1, pcpuc2) <= 0) {
+		pcpuc_pref = pcpuc1;
+		pcpuc_bk = pcpuc2;
+	} else {
+		pcpuc_pref = pcpuc2;
+		pcpuc_bk = pcpuc1;
+	}
+
+	if (try_preempt_cpu(p, taskc, pcpuc_pref)) {
+		bpf_cpumask_set_cpu(pcpuc_bk->cpu, preempt_mask);
+		stat_add(stat_idx, 1);
+		return pcpuc_pref->cpu;
+	}
+	bpf_cpumask_set_cpu(pcpuc_pref->cpu, preempt_mask);
+
+	if (try_preempt_cpu(p, taskc, pcpuc_bk)) {
+		stat_add(stat_idx, 1);
+		return pcpuc_bk->cpu;
+	}
+	bpf_cpumask_set_cpu(pcpuc_bk->cpu, preempt_mask);
+
+	return -ENOENT;
+}
+
 s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -1146,6 +1323,17 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 				goto direct;
 			}
 		}
+	}
+
+	cpu = try_preempt_domain(p, taskc, taskc->dom_id,
+				 prev_dom_domestic ? prev_cpu : -1);
+	if (cpu >= 0)
+		goto direct;
+
+	if (!prev_dom_domestic) {
+		cpu = try_preempt_domain(p, taskc, pcpuc->dom_id, prev_cpu);
+		if (cpu >= 0)
+			goto direct;
 	}
 
 	/*
@@ -1397,19 +1585,35 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 	waker_ctx->last_woke_at = now;
 }
 
+static void set_preempt_ctx(struct pcpu_ctx *pcpuc, struct task_struct *p,
+			    struct task_ctx *taskc)
+{
+	struct cpu_preempt_ctx *preempt_ctx;
+
+	preempt_ctx = &pcpuc->preempt_ctx;
+
+	preempt_ctx->last_ran_at = bpf_ktime_get_ns();
+	preempt_ctx->lat_prio = taskc->lat_prio;
+	preempt_ctx->vtime = p->scx.dsq_vtime;
+	preempt_ctx->est_stop_time = preempt_ctx->last_ran_at +
+				     taskc->avg_runtime;
+}
+
 static void running_update_vtime(struct task_struct *p,
 				 struct task_ctx *taskc,
 				 struct dom_ctx *domc)
 {
 	struct lock_wrapper* lockw = lookup_dom_vtime_lock(domc->id);
+	struct pcpu_ctx *pcpuc = get_current_pcpuc();
 
-	if (!lockw)
+	if (!lockw || !pcpuc)
 		return;
 
 	bpf_spin_lock(&lockw->lock);
 	if (vtime_before(domc->min_vruntime, p->scx.dsq_vtime))
 		domc->min_vruntime = p->scx.dsq_vtime;
 	bpf_spin_unlock(&lockw->lock);
+	set_preempt_ctx(pcpuc, p, taskc);
 }
 
 void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
@@ -1417,6 +1621,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	struct task_ctx *taskc;
 	struct dom_ctx *domc;
 	u32 dom_id, dap_gen;
+	struct pcpu_ctx *pcpuc;
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
@@ -1453,11 +1658,28 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 		return;
 
 	domc = lookup_dom_ctx(dom_id);
-	if (!domc)
+	pcpuc = get_current_pcpuc();
+	if (!domc || !pcpuc)
 		return;
 
 	running_update_vtime(p, taskc, domc);
 	taskc->last_run_at = bpf_ktime_get_ns();
+}
+
+static void update_preempt_ctx(struct pcpu_ctx *pcpuc, struct task_struct *p,
+			       struct task_ctx *taskc, struct dom_ctx *domc)
+{
+	struct cpu_preempt_ctx *preempt_ctx;
+	u64 now = bpf_ktime_get_ns();
+	struct bpf_cpumask *preempt_mask;
+
+	preempt_ctx = &pcpuc->preempt_ctx;
+
+	if (now - preempt_ctx->last_preempted_at > 2 * slice_ns) {
+		preempt_mask = domc->preempt_cpumask;
+		if (preempt_mask)
+			bpf_cpumask_set_cpu(pcpuc->cpu, preempt_mask);
+	}
 }
 
 static void stopping_update_vtime(struct task_struct *p,
@@ -1465,9 +1687,10 @@ static void stopping_update_vtime(struct task_struct *p,
 				  struct dom_ctx *domc)
 {
 	struct lock_wrapper* lockw = lookup_dom_vtime_lock(domc->id);
+	struct pcpu_ctx *pcpuc = get_current_pcpuc();
 	u64 now, delta;
 
-	if (!lockw)
+	if (!lockw || !pcpuc)
 		return;
 
 	now = bpf_ktime_get_ns();
@@ -1478,6 +1701,7 @@ static void stopping_update_vtime(struct task_struct *p,
 
 	p->scx.dsq_vtime += scale_inverse_fair(delta, p->scx.weight);
 	taskc->deadline = p->scx.dsq_vtime + task_compute_dl(p, taskc, 0);
+	update_preempt_ctx(pcpuc, p, taskc, domc);
 }
 
 void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
@@ -1731,7 +1955,7 @@ static s32 create_dom(u32 dom_id)
 {
 	struct dom_ctx *domc;
 	struct node_ctx *nodec;
-	struct bpf_cpumask *dom_mask, *node_mask, *all_mask;
+	struct bpf_cpumask *dom_mask, *node_mask, *all_mask, *preempt_mask;
 	u32 cpu, node_id, *dom_ids;
 	s32 ret;
 
@@ -1758,10 +1982,15 @@ static s32 create_dom(u32 dom_id)
 	if (ret)
 		return ret;
 
+	ret = create_save_cpumask(&domc->preempt_cpumask);
+	if (ret)
+		return ret;
+
 	bpf_rcu_read_lock();
 	dom_mask = domc->cpumask;
 	all_mask = all_cpumask;
-	if (!dom_mask || !all_mask) {
+	preempt_mask = domc->preempt_cpumask;
+	if (!dom_mask || !all_mask || !preempt_mask) {
 		bpf_rcu_read_unlock();
 		scx_bpf_error("Could not find cpumask");
 		return -ENOENT;
@@ -1782,6 +2011,7 @@ static s32 create_dom(u32 dom_id)
 			bpf_cpumask_set_cpu(cpu, all_mask);
 		}
 	}
+	bpf_cpumask_copy(preempt_mask, c_mask(dom_mask));
 	bpf_rcu_read_unlock();
 	if (ret)
 		return ret;
@@ -1832,6 +2062,7 @@ static s32 initialize_cpu(s32 cpu)
 	if (!pcpuc)
 		return -ENOENT;
 
+	pcpuc->cpu = cpu;
 	pcpuc->dom_rr_cur = cpu;
 	bpf_for(i, 0, nr_doms) {
 		domc = lookup_dom_ctx(i);

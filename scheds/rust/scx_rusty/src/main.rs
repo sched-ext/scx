@@ -463,6 +463,9 @@ impl<'a> Scheduler<'a> {
             + stat(bpf_intf::stat_idx_RUSTY_STAT_DOMESTICN_ICPU)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_RMTN_ICORE)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_RMTN_ICPU)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_LOCALPREV_PREEMPT)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_LOCAL_PREEMPT)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_DOMESTIC_PREEMPT)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
@@ -519,6 +522,13 @@ impl<'a> Scheduler<'a> {
             "remote_numa_core={:5.2} remote_numa_cpu={:5.2}",
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_RMTN_ICORE),
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_RMTN_ICPU),
+        );
+
+        info!(
+            "preempt_prev={:5.2} preempt_local={:5.2} preempt_domestic={:5.2}",
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_LOCALPREV_PREEMPT),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_LOCAL_PREEMPT),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DOMESTIC_PREEMPT),
         );
 
         info!(
