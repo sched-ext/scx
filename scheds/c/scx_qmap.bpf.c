@@ -40,6 +40,7 @@ const volatile u32 dsp_batch;
 const volatile bool print_shared_dsq;
 const volatile char exp_prefix[17];
 const volatile s32 disallow_tgid;
+const volatile bool suppress_dump;
 const volatile bool switch_partial;
 
 u32 test_error_cnt;
@@ -462,6 +463,57 @@ s32 BPF_STRUCT_OPS(qmap_init_task, struct task_struct *p,
 		return -ENOMEM;
 }
 
+void BPF_STRUCT_OPS(qmap_dump, struct scx_dump_ctx *dctx)
+{
+	s32 i, pid;
+
+	if (suppress_dump)
+		return;
+
+	bpf_for(i, 0, 5) {
+		void *fifo;
+
+		if (!(fifo = bpf_map_lookup_elem(&queue_arr, &i)))
+			return;
+
+		__COMPAT_scx_bpf_dump("QMAP FIFO[%d]:", i);
+		bpf_repeat(4096) {
+			if (bpf_map_pop_elem(fifo, &pid))
+				break;
+			__COMPAT_scx_bpf_dump(" %d", pid);
+		}
+		__COMPAT_scx_bpf_dump("\n");
+	}
+}
+
+void BPF_STRUCT_OPS(qmap_dump_cpu, struct scx_dump_ctx *dctx, s32 cpu, bool idle)
+{
+	u32 zero = 0;
+	struct cpu_ctx *cpuc;
+
+	if (suppress_dump || idle)
+		return;
+	if (!(cpuc = bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &zero, cpu)))
+		return;
+
+	__COMPAT_scx_bpf_dump("QMAP: dsp_idx=%llu dsp_cnt=%llu avg_weight=%u cpuperf_target=%u",
+			      cpuc->dsp_idx, cpuc->dsp_cnt, cpuc->avg_weight,
+			      cpuc->cpuperf_target);
+}
+
+void BPF_STRUCT_OPS(qmap_dump_task, struct scx_dump_ctx *dctx, struct task_struct *p)
+{
+	struct task_ctx *taskc;
+
+	if (suppress_dump)
+		return;
+	if (!(taskc = bpf_task_storage_get(&task_ctx_stor, p, 0, 0)))
+		return;
+
+	__COMPAT_scx_bpf_dump("QMAP: force_local=%d core_sched_seq=%llu",
+			      taskc->force_local, taskc->core_sched_seq);
+}
+
 /*
  * Print out the online and possible CPU map using bpf_printk() as a
  * demonstration of using the cpumask kfuncs and ops.cpu_on/offline().
@@ -535,13 +587,16 @@ struct {
  */
 static void monitor_cpuperf(void)
 {
-	u32 zero = 0;
-	u32 nr_cpu_ids = scx_bpf_nr_cpu_ids();
+	u32 zero = 0, nr_cpu_ids;
 	u64 cap_sum = 0, cur_sum = 0, cur_min = SCX_CPUPERF_ONE, cur_max = 0;
 	u64 target_sum = 0, target_min = SCX_CPUPERF_ONE, target_max = 0;
 	const struct cpumask *online;
 	int i, nr_online_cpus = 0;
 
+	if (!__COMPAT_HAS_CPUMASKS)
+		return;
+
+	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 	online = scx_bpf_get_online_cpumask();
 
 	bpf_for(i, 0, nr_cpu_ids) {
@@ -661,6 +716,9 @@ SCX_OPS_DEFINE(qmap_ops,
 	       .core_sched_before	= (void *)qmap_core_sched_before,
 	       .cpu_release		= (void *)qmap_cpu_release,
 	       .init_task		= (void *)qmap_init_task,
+	       .dump			= (void *)qmap_dump,
+	       .dump_cpu		= (void *)qmap_dump_cpu,
+	       .dump_task		= (void *)qmap_dump_task,
 	       .cpu_online		= (void *)qmap_cpu_online,
 	       .cpu_offline		= (void *)qmap_cpu_offline,
 	       .init			= (void *)qmap_init,
