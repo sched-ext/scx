@@ -463,9 +463,11 @@ impl<'a> Scheduler<'a> {
             + stat(bpf_intf::stat_idx_RUSTY_STAT_DOMESTICN_ICPU)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_RMTN_ICORE)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_RMTN_ICPU)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_LOCALPREV_PREEMPT)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_PREV_PREEMPT)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_CURR_PREEMPT)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_LOCAL_PREEMPT)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_DOMESTIC_PREEMPT)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_REMD_PREEMPT)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
@@ -525,10 +527,16 @@ impl<'a> Scheduler<'a> {
         );
 
         info!(
-            "preempt_prev={:5.2} preempt_local={:5.2} preempt_domestic={:5.2}",
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_LOCALPREV_PREEMPT),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_LOCAL_PREEMPT),
+            "preempt_curr={:5.2} preempt_prev={:5.2}",
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_CURR_PREEMPT),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PREV_PREEMPT),
+        );
+
+        info!(
+            "preempt_domestic={:5.2} preempt_local={:5.2}, preempt_remote={:5.2}",
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DOMESTIC_PREEMPT),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_LOCAL_PREEMPT),
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_REMD_PREEMPT),
         );
 
         info!(
