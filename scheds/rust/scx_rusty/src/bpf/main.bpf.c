@@ -485,7 +485,7 @@ static u32 cpu_to_dom_id(s32 cpu)
 
 static inline bool is_offline_cpu(s32 cpu)
 {
-	return cpu_to_dom_id(cpu) > MAX_DOMS;
+	return unlikely(cpu_to_dom_id(cpu) > MAX_DOMS);
 }
 
 static void refresh_tune_params(void)
@@ -1030,11 +1030,12 @@ static s32 try_preempt_domain(struct task_struct *p, struct task_ctx *taskc,
 	struct dom_ctx *domc = lookup_dom_ctx(dom_id);
 	struct bpf_cpumask *p_mask, *preempt_mask;
 	u32 i;
-	s32 cpu1 = -1, cpu2 = -1;
+	s32 cpu, cpu1 = -1, cpu2 = -1;
 	enum stat_idx stat_idx = dom_id != taskc->dom_id ?
 				RUSTY_STAT_LOCAL_PREEMPT : RUSTY_STAT_DOMESTIC_PREEMPT;
 	struct pcpu_ctx *pcpuc1, *pcpuc2, *pcpu_prev;
 	struct pcpu_ctx *pcpuc_pref, *pcpuc_bk;
+	u32 start_idx;
 
 	p_mask = taskc->cpumask;
 	if (!domc || !p_mask)
@@ -1096,7 +1097,7 @@ static s32 try_preempt_domain(struct task_struct *p, struct task_ctx *taskc,
 			stat_add(stat_idx, 1);
 			return cpu1;
 		}
-		return -ENOENT;
+		goto rest_domain;
 	}
 
 	if (cmp_cpu_preempt(pcpuc1, pcpuc2) <= 0) {
@@ -1120,7 +1121,30 @@ static s32 try_preempt_domain(struct task_struct *p, struct task_ctx *taskc,
 	}
 	bpf_cpumask_set_cpu(pcpuc_bk->cpu, preempt_mask);
 
-	return -ENOENT;
+rest_domain:
+	cpu = -ENOENT;
+	start_idx = bpf_get_prandom_u32() % nr_cpus_possible;
+	bpf_for(i, 0, nr_cpus_possible) {
+		s32 cpu_i = (i + start_idx) % nr_cpus_possible;
+		struct pcpu_ctx *pcpuc;
+
+		if (cpu_i == cpu1 || cpu_i == cpu2 || is_offline_cpu(cpu) ||
+		    !bpf_cpumask_test_cpu(cpu_i, c_mask(p_mask)) ||
+		    !bpf_cpumask_test_and_clear_cpu(cpu, preempt_mask))
+			continue;
+
+		pcpuc = lookup_pcpu_ctx(cpu_i);
+		if (!pcpuc)
+			break;
+
+		if (try_preempt_cpu(p, taskc, pcpuc)) {
+			stat_add(stat_idx, 1);
+			cpu = cpu_i;
+			break;
+		}
+	}
+
+	return cpu;
 }
 
 s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
