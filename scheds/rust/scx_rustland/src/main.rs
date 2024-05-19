@@ -260,7 +260,6 @@ struct Scheduler<'a> {
     min_vruntime: u64,     // Keep track of the minimum vruntime across all tasks
     slice_ns: u64,         // Default time slice (in ns)
     slice_boost: u64,      // Slice booster
-    eff_slice_boost: u64,  // Effective slice booster
     init_page_faults: u64, // Initial page faults counter
     builtin_idle: bool,    // Use sched-ext built-in idle selection logic
     no_preemption: bool,   // Disable task preemption
@@ -277,7 +276,6 @@ impl<'a> Scheduler<'a> {
 
         // Slice booster (0 = disabled).
         let slice_boost = opts.slice_boost;
-        let eff_slice_boost = slice_boost;
 
         // Use built-in idle selection logic.
         let builtin_idle = opts.builtin_idle;
@@ -319,7 +317,6 @@ impl<'a> Scheduler<'a> {
             min_vruntime,
             slice_ns,
             slice_boost,
-            eff_slice_boost,
             init_page_faults,
             builtin_idle,
             no_preemption,
@@ -382,21 +379,6 @@ impl<'a> Scheduler<'a> {
 
         // Cache the current timestamp.
         let now = Self::now();
-
-        // Update dynamic slice boost.
-        //
-        // The slice boost is dynamically adjusted as a function of the amount of CPUs
-        // in the system and the amount of tasks currently waiting to be dispatched.
-        //
-        // As the amount of waiting tasks in the task_pool increases we should reduce
-        // the slice boost to enforce the scheduler to apply a pure vruntime-based
-        // policy.
-        //
-        // This allows to survive stress tests that are spawning a massive amount of
-        // tasks.
-        self.eff_slice_boost = (self.slice_boost * self.topo_map.nr_cpus_online() as u64
-            / self.task_pool.tasks.len().max(1) as u64)
-            .max(1);
 
         // Get task information if the task is already stored in the task map,
         // otherwise create a new entry for it.
@@ -708,9 +690,6 @@ impl<'a> Scheduler<'a> {
 
         // Show total page faults of the user-space scheduler.
         self.print_faults();
-
-        // Show current slice boost.
-        info!("slice boost = {}", self.eff_slice_boost);
 
         // Show tasks that are currently running on each core and CPU.
         let sched_cpu = match Self::get_current_cpu() {
