@@ -61,7 +61,7 @@ endif
 # These are for building libbpf and/or bpftool
 
 if meson.get_compiler('c').get_id() == 'gcc'
-  extra_args = ['-Wno-sign-compare']
+  extra_args = ['-Wno-sign-compare', '-Wno-maybe-uninitialized']
 else
   extra_args = []
 endif
