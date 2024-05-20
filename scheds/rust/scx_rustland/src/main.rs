@@ -681,13 +681,14 @@ impl<'a> Scheduler<'a> {
             nr_cancel_dispatches, nr_bounce_dispatches,
         );
 
-        // Show tasks that are waiting to be dispatched.
+        // Show tasks that are running or waiting to be dispatched.
+        let nr_running = *self.bpf.nr_running_mut();
         let nr_queued = *self.bpf.nr_queued_mut();
         let nr_scheduled = *self.bpf.nr_scheduled_mut();
         let nr_waiting = nr_queued + nr_scheduled;
         info!(
-            "  nr_waiting={} [nr_queued={} + nr_scheduled={}]",
-            nr_waiting, nr_queued, nr_scheduled
+            "  nr_running={} nr_waiting={} [nr_queued={} + nr_scheduled={}]",
+            nr_running, nr_waiting, nr_queued, nr_scheduled
         );
 
         // Show total page faults of the user-space scheduler.
