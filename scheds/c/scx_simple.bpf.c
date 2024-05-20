@@ -29,6 +29,13 @@ const volatile bool fifo_sched;
 static u64 vtime_now;
 UEI_DEFINE(uei);
 
+/*
+ * Built-in DSQs such as SCX_DSQ_GLOBAL cannot be used as priority queues
+ * (meaning, cannot be dispatched to with scx_bpf_dispatch_vtime()). We
+ * therefore create a separate DSQ with ID 0 that we dispatch to and consume
+ * from. If scx_simple only supported global FIFO scheduling, then we could
+ * just use SCX_DSQ_GLOBAL.
+ */
 #define SHARED_DSQ 0
 
 struct {
