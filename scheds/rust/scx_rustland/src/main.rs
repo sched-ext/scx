@@ -543,17 +543,9 @@ impl<'a> Scheduler<'a> {
                         dispatched_task.set_flag(RL_CPU_ANY);
                     }
                     if task.is_interactive && !self.no_preemption {
-                        // Assign the maximum time slice to this task and allow to preempt others.
-                        //
-                        // NOTE: considering that, with preemption enabled, interactive tasks can
-                        // preempt each other (for now) and they are also more likely to release
-                        // the CPU before its assigned time slice expires, always give them the
-                        // maximum static time slice allowed.
-                        dispatched_task.set_slice_ns(self.slice_ns);
                         dispatched_task.set_flag(RL_PREEMPT_CPU);
-                    } else {
-                        dispatched_task.set_slice_ns(self.effective_slice_ns(nr_scheduled));
                     }
+                    dispatched_task.set_slice_ns(self.effective_slice_ns(nr_scheduled));
 
                     // Send task to the BPF dispatcher.
                     match self.bpf.dispatch_task(&dispatched_task) {
