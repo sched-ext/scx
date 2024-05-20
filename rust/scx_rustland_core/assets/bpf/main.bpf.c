@@ -172,6 +172,11 @@ struct task_ctx {
 	 * current task's cpumask.
 	 */
 	u64 cpumask_cnt;
+
+	/*
+	 * Dispatch immediately to the local DSQ.
+	 */
+	bool dispatch_local;
 };
 
 /* Map that contains task-local storage. */
@@ -468,21 +473,45 @@ static void dispatch_user_scheduler(void)
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
+	struct task_ctx *tctx;
 	bool is_idle = false;
 	s32 cpu;
 
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
+		return prev_cpu;
+
 	/*
-	 * Try to find the best CPU relying on the built-in idle selection
-	 * logic, eventually migrating the task and dispatching directly from
-	 * here if a CPU is available, unless full_user mode is enabled.
+	 * If the previously used CPU is still available, keep using it to take
+	 * advantage of the cached working set.
 	 */
-	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-	if (is_idle && !full_user) {
-		dispatch_task(p, SCX_DSQ_LOCAL, 0, 0, 0);
-		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		tctx->dispatch_local = true;
+		return prev_cpu;
 	}
 
-	return cpu;
+	/*
+	 * If the task was directly dispatched give it a second chance to
+	 * remain on the current CPU, instead of immediately migrating it.
+	 */
+	if (tctx->dispatch_local) {
+		tctx->dispatch_local = false;
+		return prev_cpu;
+	}
+
+	/*
+	 * Find the best CPU relying on the built-in idle selection logic,
+	 * eventually migrating the task and dispatching directly from here if
+	 * a CPU is available.
+	 */
+	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+	if (is_idle) {
+		tctx->dispatch_local = true;
+		return cpu;
+	}
+	tctx->dispatch_local = false;
+
+	return prev_cpu;
 }
 
 /*
@@ -531,6 +560,7 @@ static void sched_congested(struct task_struct *p)
 void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct queued_task_ctx *task;
+	struct task_ctx *tctx;
 
 	/*
 	 * Scheduler is dispatched directly in .dispatch() when needed, so
@@ -548,7 +578,21 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * long (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
-		dispatch_task(p, SCX_DSQ_LOCAL, 0, 0, enq_flags);
+		dispatch_task(p, SCX_DSQ_LOCAL, 0, slice_ns, enq_flags);
+		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		return;
+	}
+
+	/*
+	 * Dispatch immediately on the local DSQ if .select_cpu() has found an
+	 * idle CPU.
+	 *
+	 * NOTE: assign a shorter time slice (slice_ns / 4) to task directly
+	 * dispatched to prevent them from gaining excessive CPU bandwidth.
+	 */
+	tctx = lookup_task_ctx(p);
+	if (!full_user && tctx && tctx->dispatch_local) {
+		dispatch_task(p, SCX_DSQ_LOCAL, 0, slice_ns / 4, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -557,7 +601,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Dispatch directly to the target CPU DSQ if the scheduler is set to
 	 * FIFO mode.
 	 */
-	if (is_fifo_enabled) {
+	if (!full_user && is_fifo_enabled) {
 		s32 cpu = scx_bpf_task_cpu(p);
 
 		scx_bpf_dispatch(p, cpu_to_dsq(cpu), slice_ns, enq_flags);
