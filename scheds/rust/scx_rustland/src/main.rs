@@ -197,9 +197,9 @@ impl TaskInfoMap {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 struct Task {
-    qtask: QueuedTask,      // queued task
-    vruntime: u64,          // total vruntime (that determines the order how tasks are dispatched)
-    is_interactive: bool,   // task can preempt other tasks
+    qtask: QueuedTask,    // queued task
+    vruntime: u64,        // total vruntime (that determines the order how tasks are dispatched)
+    is_interactive: bool, // task can preempt other tasks
 }
 
 // Make sure tasks are ordered by vruntime, if multiple tasks have the same vruntime order by pid.
@@ -301,7 +301,7 @@ impl<'a> Scheduler<'a> {
             opts.slice_us,
             nr_cpus as i32,
             opts.partial,
-	    opts.exit_dump_len,
+            opts.exit_dump_len,
             opts.full_user,
             opts.low_power,
             opts.debug,
@@ -479,7 +479,8 @@ impl<'a> Scheduler<'a> {
                     // Reset nr_queued and update nr_scheduled, to notify the dispatcher that
                     // queued tasks are drained, but there is still some work left to do in the
                     // scheduler.
-                    self.bpf.update_tasks(Some(0), Some(self.task_pool.tasks.len() as u64));
+                    self.bpf
+                        .update_tasks(Some(0), Some(self.task_pool.tasks.len() as u64));
                     break;
                 }
                 Err(err) => {
@@ -559,7 +560,8 @@ impl<'a> Scheduler<'a> {
         // Update nr_scheduled to notify the dispatcher that all the tasks received by the
         // scheduler has been dispatched, so there is no reason to re-activate the scheduler,
         // unless more tasks are queued.
-        self.bpf.update_tasks(None, Some(self.task_pool.tasks.len() as u64));
+        self.bpf
+            .update_tasks(None, Some(self.task_pool.tasks.len() as u64));
     }
 
     // Main scheduling function (called in a loop to periodically drain tasks from the queued list
