@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+
+# Check the status of the service
+if /etc/init.d/scx status > /dev/null; then
+    echo "The service is active. Restarting..."
+    /usr/bin/rc-service scx restart
+    echo "Service has been restarted."
+else
+    echo "The service is not active."
+fi
