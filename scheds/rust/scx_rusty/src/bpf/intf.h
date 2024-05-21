@@ -19,6 +19,12 @@ typedef unsigned int u32;
 typedef unsigned long long u64;
 #endif
 
+#define TASK_INTERRUPTIBLE		0x00000001
+#define TASK_UNINTERRUPTIBLE		0x00000002
+#define TASK_WAKING			0x00000200
+#define TASK_NOLOAD			0x00000400
+#define TASK_IDLE			(TASK_UNINTERRUPTIBLE | TASK_NOLOAD)
+
 #include <scx/ravg.bpf.h>
 
 enum consts {
@@ -87,7 +93,15 @@ enum stat_idx {
 	RUSTY_STAT_DL_CLAMP,
 	RUSTY_STAT_DL_PRESET,
 
+	RUSTY_STAT_IOWAIT_BOOST,
+
 	RUSTY_NR_STATS,
+};
+
+struct boost_ctx {
+	u64		deadline;
+	unsigned int	level;
+	unsigned int	curr_ios;
 };
 
 struct task_ctx {
@@ -124,6 +138,7 @@ struct task_ctx {
 	bool dispatch_local;
 
 	struct ravg_data dcyc_rd;
+	struct boost_ctx boost_ctx;
 };
 
 struct bucket_ctx {

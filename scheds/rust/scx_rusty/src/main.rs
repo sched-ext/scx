@@ -157,6 +157,19 @@ struct Opts {
     #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
     fifo_sched: bool,
 
+    /// Enable IO wait boosting.
+    #[clap(long, action = ::clap::ArgAction::SetTrue)]
+    iowait_boost: bool,
+
+    /// Maximum number of IO wait requests to boost frequency. After reaching the limit CPU
+    /// frequency will not be boosted for tasks with outstanding IO wait requests.
+    #[clap(long, default_value = "128")]
+    iowait_boost_max_ios: u32,
+
+    /// Maximum duration of IO wait boosting in milliseconds.
+    #[clap(long, default_value = "50")]
+    iowait_boost_max_dur_ms: u32,
+
     /// Idle CPUs with utilization lower than this will get remote tasks
     /// directly pushed on them. 0 disables, 100 enables always.
     #[clap(short = 'D', long, default_value = "90.0")]
@@ -313,6 +326,9 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.rusty_mut().exit_dump_len = opts.exit_dump_len;
 
         skel.rodata_mut().load_half_life = (opts.load_half_life * 1000000000.0) as u32;
+        skel.rodata_mut().iowait_boost = opts.iowait_boost;
+        skel.rodata_mut().iowait_boost_max_ios = opts.iowait_boost_max_ios;
+        skel.rodata_mut().iowait_boost_max_dur_ms = opts.iowait_boost_max_dur_ms;
         skel.rodata_mut().kthreads_local = opts.kthreads_local;
         skel.rodata_mut().fifo_sched = opts.fifo_sched;
         skel.rodata_mut().switch_partial = opts.partial;
@@ -510,6 +526,10 @@ impl<'a> Scheduler<'a> {
         info!("slice_length={}us", self.tuner.slice_ns / 1000);
         info!("direct_greedy_cpumask={}", self.tuner.direct_greedy_mask);
         info!("  kick_greedy_cpumask={}", self.tuner.kick_greedy_mask);
+        info!("direct_greedy_cpumask={}", self.tuner.direct_greedy_mask);
+        if self.skel.rodata().iowait_boost {
+            info!("iowait_boost={}", stat(bpf_intf::stat_idx_RUSTY_STAT_IOWAIT_BOOST));
+        }
 
         for node in lb_stats.iter() {
             info!("{}", node);

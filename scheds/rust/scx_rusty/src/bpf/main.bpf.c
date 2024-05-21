@@ -67,6 +67,9 @@ const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
 const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 load_half_life = 1000000000	/* 1s */;
 
+const volatile bool iowait_boost;
+const volatile u32 iowait_boost_max_ios;
+const volatile u32 iowait_boost_max_dur_ms;
 const volatile bool kthreads_local;
 const volatile bool fifo_sched;
 const volatile bool switch_partial;
@@ -559,6 +562,41 @@ static u64 sched_prio_to_latency_weight(u64 prio)
 	}
 
 	return sched_prio_to_weight[DL_MAX_LAT_PRIO - prio - 1];
+}
+
+static void do_iowait_boost(struct task_struct *p, struct task_ctx *taskc, s32 cpu)
+{
+	if (!iowait_boost || !p || !taskc || cpu < 0)
+		return;
+	if (!(p->flags & PF_KTHREAD) || (p->flags & TASK_IDLE))
+		return;
+
+	if (BPF_CORE_READ_BITFIELD_PROBED(p, in_iowait)) {
+		u64 now = bpf_ktime_get_ns();
+		if (taskc->boost_ctx.deadline == 0)
+			taskc->boost_ctx.deadline = now +
+				iowait_boost_max_dur_ms * NSEC_PER_MSEC;
+
+		if (now > taskc->boost_ctx.deadline) {
+			taskc->boost_ctx.curr_ios = 0;
+			taskc->boost_ctx.deadline = 0;
+			return;
+		}
+
+		taskc->boost_ctx.curr_ios++;
+		if (taskc->boost_ctx.curr_ios <= iowait_boost_max_ios*2) {
+			if (taskc->boost_ctx.level == 0)
+				taskc->boost_ctx.level = SCX_CPUPERF_ONE;
+			__COMPAT_scx_bpf_cpuperf_set(cpu, min(taskc->boost_ctx.level, SCX_CPUPERF_ONE));
+			stat_add(RUSTY_STAT_IOWAIT_BOOST, 1);
+		}
+	} else {
+		// If the task is not in iowait then reset any boost related
+		// fields. By default boost to the max performance level.
+		taskc->boost_ctx.level = SCX_CPUPERF_ONE;
+		taskc->boost_ctx.curr_ios = 0;
+		taskc->boost_ctx.deadline = 0;
+	}
 }
 
 static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
@@ -1094,6 +1132,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 	if (taskc->dispatch_local) {
 		taskc->dispatch_local = false;
 		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
+		do_iowait_boost(p, taskc, cpu);
 		return;
 	}
 
@@ -1107,6 +1146,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!bpf_cpumask_test_cpu(scx_bpf_task_cpu(p), (const struct cpumask *)p_cpumask)) {
 		cpu = scx_bpf_pick_any_cpu((const struct cpumask *)p_cpumask, 0);
+		do_iowait_boost(p, taskc, cpu);
 		scx_bpf_kick_cpu(cpu, 0);
 		stat_add(RUSTY_STAT_REPATRIATE, 1);
 	}
@@ -1114,8 +1154,10 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 dom_queue:
 	if (fifo_sched)
 		scx_bpf_dispatch(p, taskc->dom_id, slice_ns, enq_flags);
-	else
+	else {
+		do_iowait_boost(p, taskc, cpu);
 		place_task_dl(p, taskc, enq_flags);
+	}
 
 	/*
 	 * If there are CPUs which are idle and not saturated, wake them up to
@@ -1138,6 +1180,7 @@ dom_queue:
 		if (cpu >= 0) {
 			stat_add(RUSTY_STAT_KICK_GREEDY, 1);
 			scx_bpf_kick_cpu(cpu, 0);
+			do_iowait_boost(p, taskc, cpu);
 		}
 	}
 }
