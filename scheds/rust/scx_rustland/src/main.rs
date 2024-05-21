@@ -101,13 +101,13 @@ struct Opts {
     #[clap(short = 'b', long, default_value = "100")]
     slice_boost: u64,
 
-    /// If specified, rely on the sched-ext built-in idle selection logic to dispatch tasks.
-    /// Otherwise dispatch tasks on the first CPU available.
+    /// If specified, always enforce the built-in idle selection logic to dispatch tasks.
+    /// Otherwise allow to dispatch interactive tasks on the first CPU available.
     ///
     /// Relying on the built-in logic can improve throughput (since tasks are more likely to remain
     /// on the same CPU when the system is overloaded), but it can reduce system responsiveness.
     ///
-    /// By default always dispatch tasks on the first CPU available to increase system
+    /// By default always dispatch interactive tasks on the first CPU available to increase system
     /// responsiveness over throughput, especially when the system is overloaded.
     ///
     /// NOTE: this option cannot be used with --full-user.
@@ -550,15 +550,21 @@ impl<'a> Scheduler<'a> {
                     // available.
                     let mut dispatched_task = DispatchedTask::new(&task.qtask);
 
+                    // Interactive tasks will be dispatched on the first CPU available and they are
+                    // allowed to preempt other tasks.
+                    if task.is_interactive {
+                        dispatched_task.set_flag(RL_CPU_ANY);
+                        if !self.no_preemption {
+                            dispatched_task.set_flag(RL_PREEMPT_CPU);
+                        }
+                    }
+                    dispatched_task.set_slice_ns(self.effective_slice_ns(nr_scheduled));
+
                     // In full-user mode we skip the built-in idle selection logic, so simply
                     // dispatch all the tasks on the first CPU available.
                     if self.full_user || !self.builtin_idle {
                         dispatched_task.set_flag(RL_CPU_ANY);
                     }
-                    if task.is_interactive && !self.no_preemption {
-                        dispatched_task.set_flag(RL_PREEMPT_CPU);
-                    }
-                    dispatched_task.set_slice_ns(self.effective_slice_ns(nr_scheduled));
 
                     // Send task to the BPF dispatcher.
                     match self.bpf.dispatch_task(&dispatched_task) {
