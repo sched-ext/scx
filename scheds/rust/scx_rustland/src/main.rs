@@ -100,13 +100,13 @@ struct Opts {
     #[clap(short = 'b', long, default_value = "100")]
     slice_boost: u64,
 
-    /// If specified, rely on the sched-ext built-in idle selection logic to dispatch tasks.
-    /// Otherwise dispatch tasks on the first CPU available.
+    /// If specified, always enforce the built-in idle selection logic to dispatch tasks.
+    /// Otherwise allow to dispatch interactive tasks on the first CPU available.
     ///
     /// Relying on the built-in logic can improve throughput (since tasks are more likely to remain
     /// on the same CPU when the system is overloaded), but it can reduce system responsiveness.
     ///
-    /// By default always dispatch tasks on the first CPU available to increase system
+    /// By default always dispatch interactive tasks on the first CPU available to increase system
     /// responsiveness over throughput, especially when the system is overloaded.
     #[clap(short = 'i', long, action = clap::ArgAction::SetTrue)]
     builtin_idle: bool,
@@ -539,11 +539,13 @@ impl<'a> Scheduler<'a> {
                     let mut dispatched_task = DispatchedTask::new(&task.qtask);
 
                     // Set special dispatch flags.
-                    if !self.builtin_idle {
-                        dispatched_task.set_flag(RL_CPU_ANY);
-                    }
-                    if task.is_interactive && !self.no_preemption {
-                        dispatched_task.set_flag(RL_PREEMPT_CPU);
+                    if task.is_interactive {
+                        if !self.builtin_idle {
+                            dispatched_task.set_flag(RL_CPU_ANY);
+                        }
+                        if !self.no_preemption {
+                            dispatched_task.set_flag(RL_PREEMPT_CPU);
+                        }
                     }
                     dispatched_task.set_slice_ns(self.effective_slice_ns(nr_scheduled));
 
