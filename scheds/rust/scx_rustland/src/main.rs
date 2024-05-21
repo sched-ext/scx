@@ -100,13 +100,13 @@ struct Opts {
     #[clap(short = 'b', long, default_value = "100")]
     slice_boost: u64,
 
-    /// If specified, rely on the sched-ext built-in idle selection logic to dispatch tasks.
-    /// Otherwise dispatch tasks on the first CPU available.
+    /// If specified, always enforce the built-in idle selection logic to dispatch tasks.
+    /// Otherwise allow to dispatch interactive tasks on the first CPU available.
     ///
     /// Relying on the built-in logic can improve throughput (since tasks are more likely to remain
     /// on the same CPU when the system is overloaded), but it can reduce system responsiveness.
     ///
-    /// By default always dispatch tasks on the first CPU available to increase system
+    /// By default always dispatch interactive tasks on the first CPU available to increase system
     /// responsiveness over throughput, especially when the system is overloaded.
     #[clap(short = 'i', long, action = clap::ArgAction::SetTrue)]
     builtin_idle: bool,
@@ -136,6 +136,19 @@ struct Opts {
     /// effective prioritization of interactive tasks.
     #[clap(short = 'l', long, action = clap::ArgAction::SetTrue)]
     low_power: bool,
+
+    /// By default the scheduler automatically transitions to FIFO mode when the system is
+    /// underutilized. This allows to reduce unnecessary scheduling overhead and boost performance
+    /// when the system is not running at full capacity.
+    ///
+    /// Be aware that FIFO mode can lead to less predictable performance. Therefore, use this
+    /// option if performance predictability is important, such as when running real-time audio
+    /// applications or during live streaming. Conversely, avoid using this option when you care
+    /// about maximizing performance, such as gaming.
+    ///
+    /// Set this option to disable this automatic transition.
+    #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
+    disable_fifo: bool,
 
     /// If specified, only tasks which have their scheduling policy set to
     /// SCHED_EXT using sched_setscheduler(2) are switched. Otherwise, all
@@ -304,6 +317,7 @@ impl<'a> Scheduler<'a> {
             opts.exit_dump_len,
             opts.full_user,
             opts.low_power,
+            !opts.disable_fifo,
             opts.debug,
         )?;
         info!("{} scheduler attached - {} CPUs", SCHEDULER_NAME, nr_cpus);
@@ -525,21 +539,15 @@ impl<'a> Scheduler<'a> {
                     let mut dispatched_task = DispatchedTask::new(&task.qtask);
 
                     // Set special dispatch flags.
-                    if !self.builtin_idle {
-                        dispatched_task.set_flag(RL_CPU_ANY);
+                    if task.is_interactive {
+                        if !self.builtin_idle {
+                            dispatched_task.set_flag(RL_CPU_ANY);
+                        }
+                        if !self.no_preemption {
+                            dispatched_task.set_flag(RL_PREEMPT_CPU);
+                        }
                     }
-                    if task.is_interactive && !self.no_preemption {
-                        // Assign the maximum time slice to this task and allow to preempt others.
-                        //
-                        // NOTE: considering that, with preemption enabled, interactive tasks can
-                        // preempt each other (for now) and they are also more likely to release
-                        // the CPU before its assigned time slice expires, always give them the
-                        // maximum static time slice allowed.
-                        dispatched_task.set_slice_ns(self.slice_ns);
-                        dispatched_task.set_flag(RL_PREEMPT_CPU);
-                    } else {
-                        dispatched_task.set_slice_ns(self.effective_slice_ns(nr_scheduled));
-                    }
+                    dispatched_task.set_slice_ns(self.effective_slice_ns(nr_scheduled));
 
                     // Send task to the BPF dispatcher.
                     match self.bpf.dispatch_task(&dispatched_task) {

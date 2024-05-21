@@ -105,6 +105,19 @@ const volatile bool full_user;
   */
 const volatile bool low_power;
 
+/*
+ * Automatically switch to simple FIFO scheduling during periods of system
+ * underutilization to minimize unnecessary scheduling overhead.
+ *
+ * 'fifo_sched' can be used by the user-space scheduler to enable/disable this
+ * behavior.
+ *
+ * 'is_fifo_enabled' indicates whether the scheduling has switched to FIFO mode
+ * or regular scheduling mode.
+ */
+const volatile bool fifo_sched;
+static bool is_fifo_enabled;
+
 /* Allow to use bpf_printk() only when @debug is set */
 #define dbg_msg(_fmt, ...) do {						\
 	if (debug)							\
@@ -159,6 +172,11 @@ struct task_ctx {
 	 * current task's cpumask.
 	 */
 	u64 cpumask_cnt;
+
+	/*
+	 * Dispatch immediately to the local DSQ.
+	 */
+	bool dispatch_local;
 };
 
 /* Map that contains task-local storage. */
@@ -199,6 +217,13 @@ struct {
 	__type(key, u32);
 	__type(value, struct usersched_timer);
 } usersched_timer SEC(".maps");
+
+/*
+ * Time period of the scheduler heartbeat, used to periodically kick the the
+ * scheduler and check if we need to switch to FIFO mode or regular
+ * scheduling (default 100ms).
+ */
+#define USERSCHED_TIMER_NS (NSEC_PER_SEC / 10)
 
 /*
  * Map of allocated CPUs.
@@ -434,14 +459,6 @@ static void dispatch_user_scheduler(void)
 }
 
 /*
- * Return true if we are waking up from a wait event, false otherwise.
- */
-static bool is_waking_up(u64 wake_flags)
-{
-	return !!(wake_flags & SCX_WAKE_TTWU);
-}
-
-/*
  * Select the target CPU where a task can be executed.
  *
  * The idea here is to try to find an idle CPU in the system, and preferably
@@ -456,50 +473,45 @@ static bool is_waking_up(u64 wake_flags)
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
+	struct task_ctx *tctx;
 	bool is_idle = false;
 	s32 cpu;
 
-	/*
-	 * In full-user mode simply assign the previously used CPU and let the
-	 * user-space scheduler decide where it should be dispatched.
-	 */
-	if (full_user)
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
 		return prev_cpu;
 
 	/*
-	 * Always try to stick on the same CPU if it's available, to better
-	 * exploit the cached working set.
+	 * If the previously used CPU is still available, keep using it to take
+	 * advantage of the cached working set.
 	 */
 	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		/*
-		 * Using SCX_DSQ_LOCAL ensures that the task will be executed
-		 * directly on the CPU returned by this function.
-		 */
-		dispatch_task(p, SCX_DSQ_LOCAL, 0, 0, 0);
-		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		tctx->dispatch_local = true;
 		return prev_cpu;
 	}
 
 	/*
-	 * If the previously used CPU is not available, check whether the task
-	 * is coming from a wait state. If not, enqueue it on the same CPU
-	 * regardless, without directly dispatching it.
+	 * If the task was directly dispatched give it a second chance to
+	 * remain on the current CPU, instead of immediately migrating it.
 	 */
-	if (!is_waking_up(wake_flags))
+	if (tctx->dispatch_local) {
+		tctx->dispatch_local = false;
 		return prev_cpu;
+	}
 
 	/*
-	 * If we are coming from a wait state, try to find the best CPU relying
-	 * on the built-in idle selection logic (eventually migrating the
-	 * task).
+	 * Find the best CPU relying on the built-in idle selection logic,
+	 * eventually migrating the task and dispatching directly from here if
+	 * a CPU is available.
 	 */
 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
-		dispatch_task(p, SCX_DSQ_LOCAL, 0, 0, 0);
-		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		tctx->dispatch_local = true;
+		return cpu;
 	}
+	tctx->dispatch_local = false;
 
-	return cpu;
+	return prev_cpu;
 }
 
 /*
@@ -548,6 +560,7 @@ static void sched_congested(struct task_struct *p)
 void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct queued_task_ctx *task;
+	struct task_ctx *tctx;
 
 	/*
 	 * Scheduler is dispatched directly in .dispatch() when needed, so
@@ -565,7 +578,35 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * long (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
-		dispatch_task(p, SCX_DSQ_LOCAL, 0, 0, enq_flags);
+		dispatch_task(p, SCX_DSQ_LOCAL, 0, slice_ns, enq_flags);
+		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		return;
+	}
+
+	/*
+	 * Dispatch immediately on the local DSQ if .select_cpu() has found an
+	 * idle CPU.
+	 *
+	 * NOTE: assign a shorter time slice (slice_ns / 4) to task directly
+	 * dispatched to prevent them from gaining excessive CPU bandwidth.
+	 */
+	tctx = lookup_task_ctx(p);
+	if (!full_user && tctx && tctx->dispatch_local) {
+		dispatch_task(p, SCX_DSQ_LOCAL, 0, slice_ns / 4, enq_flags);
+		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		return;
+	}
+
+	/*
+	 * Dispatch directly to the target CPU DSQ if the scheduler is set to
+	 * FIFO mode.
+	 */
+	if (!full_user && is_fifo_enabled) {
+		s32 cpu = scx_bpf_task_cpu(p);
+
+		scx_bpf_dispatch(p, cpu_to_dsq(cpu), slice_ns, enq_flags);
+		scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
+
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -665,15 +706,15 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, 0);
 
-	/* Consume all tasks enqueued in the current CPU's DSQ first */
-	bpf_repeat(MAX_ENQUEUED_TASKS) {
-		if (!scx_bpf_consume(cpu_to_dsq(cpu)))
-			break;
-	}
-
 	/* Consume all tasks enqueued in the shared DSQ */
 	bpf_repeat(MAX_ENQUEUED_TASKS) {
 		if (!scx_bpf_consume(SHARED_DSQ))
+			break;
+	}
+
+	/* Consume all tasks enqueued in the current CPU's DSQ first */
+	bpf_repeat(MAX_ENQUEUED_TASKS) {
+		if (!scx_bpf_consume(cpu_to_dsq(cpu)))
 			break;
 	}
 }
@@ -776,7 +817,6 @@ void BPF_STRUCT_OPS(rustland_cpu_release, s32 cpu,
 		set_usersched_needed();
 }
 
-
 /*
  * A new task @p is being created.
  *
@@ -829,6 +869,43 @@ void BPF_STRUCT_OPS(rustland_exit_task, struct task_struct *p,
 }
 
 /*
+ * Check whether we can switch to FIFO mode if the system is underutilized.
+ */
+static bool should_enable_fifo(void)
+{
+	/* Moving average of the tasks that are waiting to be scheduled */
+	static u64 nr_waiting_avg;
+	/* Current amount of tasks waiting to be scheduled */
+	u64 nr_waiting = nr_queued + nr_scheduled;
+
+	if (!fifo_sched)
+		return false;
+
+	/*
+	 * Exiting from FIFO mode requires to have almost all the CPUs busy.
+	 */
+	if (is_fifo_enabled)
+		return nr_running < num_possible_cpus - 1;
+
+	/*
+	 * We are not in FIFO mode, check for the task waiting to be processed
+	 * by the user-space scheduler.
+	 *
+	 * We want to evaluate a moving average of the waiting tasks to prevent
+	 * bouncing too often between FIFO mode and user-space mode.
+	 */
+	nr_waiting_avg = (nr_waiting_avg + nr_waiting) / 2;
+
+	/*
+	 * The condition to enter in FIFO mode is to have no tasks (in average)
+	 * that are waiting to be scheduled.
+	 *
+	 * Exiting from FIFO mode requires to have almost all the CPUs busy.
+	 */
+	return nr_waiting_avg == 0;
+}
+
+/*
  * Heartbeat scheduler timer callback.
  *
  * If the system is completely idle the sched-ext watchdog may incorrectly
@@ -844,8 +921,11 @@ static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
 	/* Kick the scheduler */
 	set_usersched_needed();
 
+	/* Update flag that determines if FIFO scheduling needs to be enabled */
+	is_fifo_enabled = should_enable_fifo();
+
 	/* Re-arm the timer */
-	err = bpf_timer_start(timer, NSEC_PER_SEC, 0);
+	err = bpf_timer_start(timer, USERSCHED_TIMER_NS, 0);
 	if (err)
 		scx_bpf_error("Failed to arm stats timer");
 
@@ -868,7 +948,7 @@ static int usersched_timer_init(void)
 	}
 	bpf_timer_init(timer, &usersched_timer, CLOCK_BOOTTIME);
 	bpf_timer_set_callback(timer, usersched_timer_fn);
-	err = bpf_timer_start(timer, NSEC_PER_SEC, 0);
+	err = bpf_timer_start(timer, USERSCHED_TIMER_NS, 0);
 	if (err)
 		scx_bpf_error("Failed to arm scheduler timer");
 
