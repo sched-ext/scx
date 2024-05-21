@@ -670,15 +670,15 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, 0);
 
-	/* Consume all tasks enqueued in the current CPU's DSQ first */
-	bpf_repeat(MAX_ENQUEUED_TASKS) {
-		if (!scx_bpf_consume(cpu_to_dsq(cpu)))
-			break;
-	}
-
 	/* Consume all tasks enqueued in the shared DSQ */
 	bpf_repeat(MAX_ENQUEUED_TASKS) {
 		if (!scx_bpf_consume(SHARED_DSQ))
+			break;
+	}
+
+	/* Consume all tasks enqueued in the current CPU's DSQ first */
+	bpf_repeat(MAX_ENQUEUED_TASKS) {
+		if (!scx_bpf_consume(cpu_to_dsq(cpu)))
 			break;
 	}
 }
