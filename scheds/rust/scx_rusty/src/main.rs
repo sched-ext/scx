@@ -577,6 +577,8 @@ impl<'a> Scheduler<'a> {
                           task_ctx.blocked_freq, task_ctx.waker_freq);
                     info!("        avg_runtime: {}, lat_prio: {}",
                           task_ctx.avg_runtime, task_ctx.lat_prio);
+                    info!("        avg_rq_delay: {}us",
+                          task_ctx.avg_rq_delay / 1000);
                 }
             }
         }

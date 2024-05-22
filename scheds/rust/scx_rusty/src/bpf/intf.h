@@ -105,6 +105,9 @@ struct task_ctx {
 	u64 deadline;
 	u64 lat_prio;
 
+	u64 enqueued_at;
+	u64 avg_rq_delay;
+
 	u64 sum_runtime;
 	u64 avg_runtime;
 	u64 last_run_at;

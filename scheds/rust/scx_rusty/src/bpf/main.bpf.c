@@ -1072,6 +1072,8 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
+
+	taskc->enqueued_at = bpf_ktime_get_ns();
 	if (!(p_cpumask = taskc->cpumask)) {
 		scx_bpf_error("NULL cpmask");
 		return;
@@ -1292,6 +1294,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	struct task_ctx *taskc;
 	struct dom_ctx *domc;
 	u32 dom_id, dap_gen;
+	u64 rq_delay, now = bpf_ktime_get_ns();
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
@@ -1324,6 +1327,14 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 		taskc->dom_active_pids_gen = dap_gen;
 	}
 
+	if (taskc->enqueued_at) {
+		rq_delay = now - taskc->enqueued_at;
+		if (taskc->avg_rq_delay)
+			taskc->avg_rq_delay = calc_avg(rq_delay, taskc->avg_rq_delay);
+		else
+			taskc->avg_rq_delay = rq_delay;
+	}
+
 	if (fifo_sched)
 		return;
 
@@ -1332,7 +1343,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 		return;
 
 	running_update_vtime(p, taskc, domc);
-	taskc->last_run_at = bpf_ktime_get_ns();
+	taskc->last_run_at = now;
 }
 
 static void stopping_update_vtime(struct task_struct *p,
@@ -1350,6 +1361,7 @@ static void stopping_update_vtime(struct task_struct *p,
 
 	taskc->sum_runtime += delta;
 	taskc->avg_runtime = calc_avg(taskc->avg_runtime, taskc->sum_runtime);
+	taskc->enqueued_at = now;
 
 	p->scx.dsq_vtime += scale_inverse_fair(delta, p->scx.weight);
 	taskc->deadline = p->scx.dsq_vtime + task_compute_dl(p, taskc, 0);
