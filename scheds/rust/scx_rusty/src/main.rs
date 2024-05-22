@@ -37,6 +37,7 @@ use libbpf_rs::skel::SkelBuilder;
 use log::info;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
+use scx_utils::ravg::ravg_read;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -49,6 +50,17 @@ use scx_utils::SCX_ECODE_ACT_RESTART;
 
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
+const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
+
+fn now_monotonic() -> u64 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
+    assert!(ret == 0);
+    time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
+}
 
 /// scx_rusty: A multi-domain BPF / userspace hybrid scheduler
 ///
@@ -567,13 +579,13 @@ impl<'a> Scheduler<'a> {
         info!("");
         info!("");
         let now = self.skel.bss().system_now;
-        let fives_past = now - (2 * bpf_intf::consts_NSEC_PER_SEC as u64);
+        let twos_past = now - (2 * bpf_intf::consts_NSEC_PER_SEC as u64);
         let mut total_blocked_freq = 0;
         let mut total_waker_freq = 0;
         let mut total_lat_prio = 0;
         let mut total_runtime = 0;
         let mut total_rq_delay = 0;
-        let mut n_tasks = 0;
+        let mut n_tasks = 0.0f64;
         for key in task_data.keys() {
             if let Some(task_data_elem) = task_data.lookup(&key, libbpf_rs::MapFlags::ANY)? {
                 let task_ctx = unsafe { &*(task_data_elem.as_slice().as_ptr() as *const bpf_intf::task_ctx) };
@@ -583,32 +595,49 @@ impl<'a> Scheduler<'a> {
                     Ok(comm) => comm,
                     _ => "Unknown".to_string(),
                 };
-                n_tasks += 1;
+                n_tasks += 1.0;
                 total_blocked_freq += task_ctx.blocked_freq;
                 total_waker_freq += task_ctx.waker_freq;
-                total_runtime = task_ctx.avg_runtime;
+                total_runtime += task_ctx.avg_runtime;
                 total_lat_prio += task_ctx.lat_prio;
                 total_rq_delay += task_ctx.avg_rq_delay;
-                if comm.contains("stress-ng") || task_ctx.last_run_at < fives_past {
+                if task_ctx.last_run_at < twos_past {
                     continue;
                 }
+                let load_half_life = self.skel.rodata().load_half_life;
+
+                let rd = &task_ctx.dcyc_rd;
+                let dc = ravg_read(
+                        rd.val,
+                        rd.val_at,
+                        rd.old,
+                        rd.cur,
+                        now_monotonic(),
+                        load_half_life,
+                        RAVG_FRAC_BITS,
+                    );
+
                 info!("{}[{}]", comm.trim(), pid);
-                info!("        blocked_freq: {}, waker_freq: {}",
-                    task_ctx.blocked_freq, task_ctx.waker_freq);
-                info!("        avg_runtime: {}, lat_prio: {}",
-                    task_ctx.avg_runtime, task_ctx.lat_prio);
-                info!("        avg_rq_delay: {}us",
-                    task_ctx.avg_rq_delay / 1000);
+                info!("        blocked_freq: {}, waker_freq: {}, work_chain_prio: {}",
+                    task_ctx.blocked_freq, task_ctx.waker_freq, task_ctx.work_chain_prio);
+                info!("        dcycle: {}, dcycle_adjusted: {}, dcycle_prio: {}", dc,
+                      task_ctx.dcycle_adjusted, task_ctx.dcycle_prio);
+                info!("        avg_runtime: {}, avg_run_prio: {}",
+                      task_ctx.avg_runtime, task_ctx.avg_run_prio);
+                info!("        lat_prio: {}, lat_scale: {}",
+                      task_ctx.lat_prio, task_ctx.lat_scale);
+                info!("        avg_rq_delay: {}us, deadline: {}",
+                      task_ctx.avg_rq_delay / 1000, task_ctx.deadline);
             }
         }
-        let avg = |total: u64| total / n_tasks;
+        let avg = |total: f64| total as f64 / n_tasks;
         info!("TOTAL:");
         info!("        avg_blocked_freq: {}, avg_waker_freq: {}",
-              avg(total_blocked_freq), avg(total_waker_freq));
+              avg(total_blocked_freq as f64), avg(total_waker_freq as f64));
         info!("        avg_runtime: {}, avg_lat_prio: {}",
-              avg(total_runtime), avg(total_lat_prio));
+              avg(total_runtime as f64), avg(total_lat_prio as f64));
         info!("        avg_rq_delay: {}us",
-              avg(total_rq_delay) / 1000);
+              avg(total_rq_delay as f64) / 1000.0);
         Ok(())
     }
 

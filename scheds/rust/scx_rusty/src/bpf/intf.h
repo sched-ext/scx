@@ -17,7 +17,8 @@
 typedef unsigned char u8;
 typedef unsigned int u32;
 typedef unsigned long long u64;
-typedef int i32;
+typedef int s32;
+typedef long long s64;
 #endif
 
 #include <scx/ravg.bpf.h>
@@ -44,12 +45,10 @@ enum consts {
 	NSEC_PER_SEC            = NSEC_PER_USEC * USEC_PER_SEC,
 
 	/* Constants used for determining a task's deadline */
-	DL_RUNTIME_SCALE	= 2, /* roughly scales average runtime to */
-				     /* same order of magnitude as waker  */
-				     /* and blocked frequencies */
-	DL_MAX_LATENCY_NS	= (50 * NSEC_PER_MSEC),
+	DL_RUNTIME_FACTOR	= 100,
 	DL_FREQ_FT_MAX		= 100000,
 	DL_MAX_LAT_PRIO		= 39,
+	DL_FULL_DCYCLE		= 650000,
 
 	/*
 	 * When userspace load balancer is trying to determine the tasks to push
@@ -95,7 +94,7 @@ struct task_ctx {
 	/* The domains this task can run on */
 	u64 dom_mask;
 
-    i32 pid;
+	s32 pid;
 	struct bpf_cpumask __kptr *cpumask;
 	struct bpf_cpumask __kptr *tmp_cpumask;
 	u32 dom_id;
@@ -103,7 +102,12 @@ struct task_ctx {
 	bool runnable;
 	u64 dom_active_pids_gen;
 	u64 deadline;
-	u64 lat_prio;
+	u64 work_chain_prio;
+	s64 dcycle_prio;
+	s64 avg_run_prio;
+	s64 lat_prio;
+	s64 lat_scale;
+	u64 dcycle_adjusted;
 
 	u64 enqueued_at;
 	u64 avg_rq_delay;

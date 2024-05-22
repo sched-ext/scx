@@ -524,65 +524,36 @@ static u64 min(u64 a, u64 b)
 	return a <= b ? a : b;
 }
 
-/*
- * ** Taken directly from fair.c in the Linux kernel **
- *
- * We use this table to inversely scale deadline according to a task's
- * calculated latency factor. We preserve the comment directly from the table
- * in fair.c:
- *
- * "Nice levels are multiplicative, with a gentle 10% change for every
- * nice level changed. I.e. when a CPU-bound task goes from nice 0 to
- * nice 1, it will get ~10% less CPU time than another CPU-bound task
- * that remained on nice 0.
- *
- * The "10% effect" is relative and cumulative: from _any_ nice level,
- * if you go up 1 level, it's -10% CPU usage, if you go down 1 level
- * it's +10% CPU usage. (to achieve that we use a multiplier of 1.25.
- * If a task goes up by ~10% and another task goes down by ~10% then
- * the relative distance between them is ~25%.)"
- */
-const int sched_prio_to_weight[DL_MAX_LAT_PRIO + 1] = {
- /* -20 */     88761,     71755,     56483,     46273,     36291,
- /* -15 */     29154,     23254,     18705,     14949,     11916,
- /* -10 */      9548,      7620,      6100,      4904,      3906,
- /*  -5 */      3121,      2501,      1991,      1586,      1277,
- /*   0 */      1024,       820,       655,       526,       423,
- /*   5 */       335,       272,       215,       172,       137,
- /*  10 */       110,        87,        70,        56,        45,
- /*  15 */        36,        29,        23,        18,        15,
-};
+static u64 max(u64 a, u64 b)
+{
+	return a >= b ? a : b;
+}
+
+static u64 abs(s64 a)
+{
+	return (u64)(a >= 0 ? a : -a);
+}
 
 static u64 sched_prio_to_latency_weight(u64 prio)
 {
-	if (prio >= DL_MAX_LAT_PRIO) {
-		scx_bpf_error("Invalid prio index");
-		return 0;
-	}
-
-	return sched_prio_to_weight[DL_MAX_LAT_PRIO - prio - 1];
+	return prio * 1000;
 }
 
-static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
+static s64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
 			   u64 enq_flags)
 {
-	u64 waker_freq, blocked_freq;
-	u64 lat_prio, lat_scale, avg_run_raw, avg_run;
-	u64 freq_factor;
+	u64 waker_freq, blocked_freq, worker_chain_product;
+	u64 task_dcycle;
+	u64 avg_run_raw;
+	s64 work_chain_linear, avg_run_linear, dcycle_linear, lat_prio, dl;
+	u64 lat_prio_abs, lat_scale;
+	struct ravg_data task_dcyc_rd;
 
 	/*
-	 * Determine the latency criticality of a task, and scale a task's
-	 * deadline accordingly. Much of this is inspired by the logic in
-	 * scx_lavd that was originally conceived and implemented by Changwoo
-	 * Min. Though the implementations for determining latency criticality
-	 * are quite different in many ways, individuals familiar with both
-	 * schedulers will feel an eerie sense of deja-vu. The details of
-	 * interactivity boosting for rusty are described below.
-	 */
-
-	/*
-	 * We begin by calculating the following interactivity factors for a
-	 * task:
+	 * We begin by calculating the following work-chain interactivity
+	 * factors for a task. This was inspired by the workchain-detection
+	 * logic in scx_lavd that was originally conceived and implemented by
+	 * Changwoo Min:
 	 *
 	 * - waker_freq: The frequency with which a task wakes up other tasks.
 	 *		 A high waker frequency generally implies a producer
@@ -635,79 +606,111 @@ static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
 	 * We multiply the frequencies of wait_freq and waker_freq somewhat
 	 * arbitrarily, based on observed performance for audio and gaming
 	 * interactive workloads.
+	 *
+	 * We take the logarithm of this exponential product to get a linear
+	 * value that we can use to compute a final latency criticality factor.
 	 */
 	waker_freq = min(taskc->waker_freq, DL_FREQ_FT_MAX);
 	blocked_freq = min(taskc->blocked_freq, DL_FREQ_FT_MAX);
-	freq_factor = blocked_freq * waker_freq * waker_freq;
+	worker_chain_product = max(blocked_freq, 1) * max(waker_freq, 1);
+	work_chain_linear = bpf_log2l(max(worker_chain_product, 1));
+	taskc->work_chain_prio = work_chain_linear;
 
 	/*
-	 * Scale the frequency factor according to the task's weight. A task
-	 * with higher weight is given a higher frequency factor than a task
-	 * with a lower weight.
+	 * Next, take into account a task's duty cycle. A task with a low duty
+	 * cycle should also get boosted, as it's rarely using the CPU. In
+	 * addition, it's necessary to take duty cycle into account because a
+	 * task that rarely runs would be penalized relative to worker-chain
+	 * tasks that have very frequent waker / blocker frequencies, even
+	 * though it's arguably more interactive as it uses less CPU.
+	 *
+	 * We want tasks with a _low_ duty cycle to have a positive
+	 * interactivity boost, so we set the linear form of dcycle to be the
+	 * logarithm of the inverse of a task's duty cycle, and the numerical
+	 * representation of max duty cycle when using moving averages.
 	 */
-	freq_factor = scale_up_fair(freq_factor, p->scx.weight);
+	task_dcyc_rd = taskc->dcyc_rd;
+	task_dcycle = ravg_read(&task_dcyc_rd, bpf_ktime_get_ns(), load_half_life);
+	if (task_dcycle > DL_FULL_DCYCLE)
+		task_dcycle = 0;
+	else
+		task_dcycle = DL_FULL_DCYCLE - task_dcycle;
+	taskc->dcycle_adjusted = task_dcycle;
+	dcycle_linear = bpf_log2l(max(task_dcycle, 1));
+	taskc->dcycle_prio = dcycle_linear;
 
 	/*
-	 * The above frequencies roughly follow an exponential distribution, so
-	 * use bpf_log2l() to linearize it to a boost priority that we can then
-	 * scale to a weight factor below.
-	 */
-	lat_prio = bpf_log2l(freq_factor + 1);
-	lat_prio = min(lat_prio, DL_MAX_LAT_PRIO);
-
-	/*
-	 * Next calculate a task's average runtime, and apply it to deadline
-	 * accordingly. A task with a large runtime is penalized from an
-	 * interactivity standpoint, for obvious reasons.
+	 * Finally, take into account a task's average runtime. A task with a
+	 * large runtime is penalized from an interactivity standpoint, for
+	 * obvious reasons.
 	 *
 	 * As with waker and blocked frequencies above, this follows an
 	 * exponential distribution. We inversely scale to account for
 	 * empirical observations which seem to bring it roughly to the same
-	 * order of magnitude as the blocker and waker frequencies above.
+	 * order of magnitude as the work-chain and dcycle factors above.
 	 *
-	 * We inversely scale the task's averge_runtime to cause tasks with
-	 * lower weight to receive a harsher penalty for long runtimes, and
-	 * vice versa for tasks with lower weight.
+	 * XXX: This has all so far been done anecdotally. We should
+	 * mathematically determine the correct values for these scaling
+	 * factors to represent a well-defined scaling function.
 	 */
-	avg_run_raw = taskc->avg_runtime / DL_RUNTIME_SCALE;
-	avg_run_raw = min(avg_run_raw, DL_MAX_LATENCY_NS);
+	avg_run_raw = taskc->avg_runtime / DL_RUNTIME_FACTOR;
 	avg_run_raw = scale_inverse_fair(avg_run_raw, p->scx.weight);
-	avg_run = bpf_log2l(avg_run_raw + 1);
-
-	if (avg_run < lat_prio) {
-		/* Equivalent to lat_prio = log(freq_factor / avg_run_raw) */
-		lat_prio -= avg_run;
-	} else {
-		lat_prio = 0;
-	}
+	avg_run_linear = bpf_log2l(max(avg_run_raw, 1));
+	taskc->avg_run_prio = avg_run_linear;
 
 	/*
 	 * Ultimately, what we're trying to arrive at is a single value
-	 * 'lat_prio' that we can use to compute the weight that we use to
-	 * scale a task's average runtime as below.
+	 * 'lat_prio' that we can use to either positively or negatively adjust
+	 * a task's deadline according to its perceived interactivity.
 	 *
-	 * To summarize what we've done above, we compute this lat_prio as the
-	 * sum of a task's frequency factor, minus an average runtime factor.
-	 * Both factors are scaled according to a task's weight.
+	 * We have three linear factors computed above:
+	 * 1. Work-chain factor: To what degree a task functions as a producer,
+	 *    consumer, or both in a work chain. Higher means more interactive.
 	 *
-	 * Today, we're just interpreting lat_prio as a niceness value, but
-	 * this can and almost certainly will likely change to something more
-	 * generic and/or continuous and flexible so that it can also
-	 * accommodate cgroups.
+	 * 2. Duty cycle factor: How infrequently (recall that it's really the
+	 *    inverse of a task's duty cycle) does a task use the CPU. Higher
+	 *    again means more interactive.
+	 *
+	 * 3. Average runtime factor: How long does a task typically run on the
+	 *    CPU? Tasks that run for longer periods of time will of course be
+	 *    considered less interactive. Note that a task that runs
+	 *    infrequently, but typically uses the CPU for a long time, will be
+	 *    penalized less than a CPU hogging task, but more than a truly
+	 *    interactive task.
+	 *
+	 * We then finally compute a signed latency priority value of:
+	 *
+	 * Average runtime factor - (work-chain factor + duty cycle factor)
+	 *
+	 * Thus, a _lower_ (more negative) value means _more_ interactivity.
+	 * With this, we determine the deadline as follows:
+	 *
+	 * 1. Compute the scaling weight as the absolute value of the latency
+	 *    priority sum
+	 * 2. Calculate an intermediate value of slice_ns scaled by the above
+	 *    weight
+	 * 3. Compute a task's deadline as either the negative or positive
+	 *    value for this adjusted intermediate value, depending on whether
+	 *    the latency priority was negative or positive respectively.
+	 *
+	 * This ends up working out quite well because tasks with higher
+	 * interactivity will scale their deadlines further back in time (the
+	 * absolute value of the latency priority will be higher, thus giving a
+	 * larger weight to scale slice_ns), and tasks with less interactivity
+	 * / more CPU-hogging behavior will scale their deadlines further
+	 * forward in time due to weight being higher from having lower
+	 * interactivity scores and a higher average runtime.
 	 */
-	lat_scale = sched_prio_to_latency_weight(lat_prio);
+	lat_prio = avg_run_linear - dcycle_linear - work_chain_linear;
+	taskc->lat_prio = lat_prio;
+	lat_prio_abs = abs(lat_prio);
+	lat_prio_abs = min(lat_prio_abs, DL_MAX_LAT_PRIO);
+	lat_scale = sched_prio_to_latency_weight(lat_prio_abs);
+	taskc->lat_scale = lat_prio < 0 ? -lat_scale : lat_scale;
 	lat_scale = min(lat_scale, LB_MAX_WEIGHT);
+	dl = scale_up_fair(slice_ns, lat_scale);
 
-	/*
-	 * Finally, with our 'lat_scale' weight, we compute the length of the
-	 * task's request as:
-	 *
-	 * r_i = avg_runtime * 100 / lat_scale
-	 *
-	 * In other words, the "CPU request length" which is used to determine
-	 * the actual absolute vtime that the task is dispatched with.
-	 */
-	return scale_inverse_fair(taskc->avg_runtime, lat_scale);
+	return lat_prio >= 0 ? dl : -dl;
 }
 
 static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 enq_flags)

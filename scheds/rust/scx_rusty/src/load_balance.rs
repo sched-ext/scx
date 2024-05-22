@@ -154,7 +154,7 @@ use std::collections::VecDeque;
 
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 
-fn now_monotonic() -> u64 {
+pub fn now_monotonic() -> u64 {
     let mut time = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
