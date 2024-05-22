@@ -17,6 +17,7 @@
 typedef unsigned char u8;
 typedef unsigned int u32;
 typedef unsigned long long u64;
+typedef int i32;
 #endif
 
 #include <scx/ravg.bpf.h>
@@ -94,6 +95,7 @@ struct task_ctx {
 	/* The domains this task can run on */
 	u64 dom_mask;
 
+    i32 pid;
 	struct bpf_cpumask __kptr *cpumask;
 	struct bpf_cpumask __kptr *tmp_cpumask;
 	u32 dom_id;
@@ -101,6 +103,7 @@ struct task_ctx {
 	bool runnable;
 	u64 dom_active_pids_gen;
 	u64 deadline;
+	u64 lat_prio;
 
 	u64 sum_runtime;
 	u64 avg_runtime;

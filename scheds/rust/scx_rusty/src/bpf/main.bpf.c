@@ -1524,6 +1524,7 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 		/* Should never happen -- it was just inserted above. */
 		return -EINVAL;
 
+	map_value->pid = p->pid;
 	ret = create_save_cpumask(&map_value->cpumask);
 	if (ret) {
 		bpf_map_delete_elem(&task_data, &pid);

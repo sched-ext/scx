@@ -99,6 +99,11 @@ struct Opts {
     #[clap(short = 'I', long, default_value = "0.1")]
     tune_interval: f64,
 
+    /// Collecting task stats happens at a lower frequency due to how many.
+    /// tasks are in the system.
+    #[clap(short = 'T', long, default_value = "2.0")]
+    task_stats_interval: f64,
+
     /// The half-life of task and domain load running averages in seconds.
     #[clap(short = 'l', long, default_value = "1.0")]
     load_half_life: f64,
@@ -214,6 +219,7 @@ struct Scheduler<'a> {
 
     sched_interval: Duration,
     tune_interval: Duration,
+    task_stats_interval: Duration,
     balance_load: bool,
     balanced_kworkers: bool,
 
@@ -336,6 +342,7 @@ impl<'a> Scheduler<'a> {
 
             sched_interval: Duration::from_secs_f64(opts.interval),
             tune_interval: Duration::from_secs_f64(opts.tune_interval),
+            task_stats_interval: Duration::from_secs_f64(opts.task_stats_interval),
             balance_load: !opts.no_load_balance,
             balanced_kworkers: opts.balanced_kworkers,
 
@@ -440,7 +447,7 @@ impl<'a> Scheduler<'a> {
         Ok(stats)
     }
 
-    fn report(
+    fn report_sys_stats(
         &mut self,
         bpf_stats: &[u64],
         cpu_busy: f64,
@@ -535,7 +542,7 @@ impl<'a> Scheduler<'a> {
         lb.load_balance()?;
 
         let stats = lb.get_stats();
-        self.report(
+        self.report_sys_stats(
             &bpf_stats,
             cpu_busy,
             Instant::now().duration_since(started_at),
@@ -546,10 +553,41 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn task_report(&self) -> Result<()> {
+        let maps = self.skel.maps();
+        let task_data = maps.task_data();
+
+        info!("");
+        info!("");
+        info!("---------------------TASK DATA---------------------");
+        info!("");
+        info!("");
+        for key in task_data.keys() {
+            if let Some(task_data_elem) = task_data.lookup(&key, libbpf_rs::MapFlags::ANY)? {
+                let task_ctx = unsafe { &*(task_data_elem.as_slice().as_ptr() as *const bpf_intf::task_ctx) };
+                if task_ctx.runnable {
+                    let pid = task_ctx.pid;
+                    let path = format!("/proc/{}/comm", pid);
+                    let comm = match std::fs::read_to_string(&path) {
+                        Ok(comm) => comm,
+                        _ => "Unknown".to_string(),
+                    };
+                    info!("{}[{}]", comm.trim(), pid);
+                    info!("        blocked_freq: {}, waker_freq: {}",
+                          task_ctx.blocked_freq, task_ctx.waker_freq);
+                    info!("        avg_runtime: {}, lat_prio: {}",
+                          task_ctx.avg_runtime, task_ctx.lat_prio);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let now = Instant::now();
         let mut next_tune_at = now + self.tune_interval;
         let mut next_sched_at = now + self.sched_interval;
+        let mut next_taskstats_at = now + self.task_stats_interval;
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();
@@ -567,6 +605,14 @@ impl<'a> Scheduler<'a> {
                 next_sched_at += self.sched_interval;
                 if next_sched_at < now {
                     next_sched_at = now + self.sched_interval;
+                }
+            }
+
+            if now >= next_taskstats_at {
+                self.task_report()?;
+                next_taskstats_at += self.task_stats_interval;
+                if next_taskstats_at < now {
+                   next_taskstats_at = now + self.task_stats_interval;
                 }
             }
 
