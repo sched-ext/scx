@@ -554,6 +554,10 @@ impl<'a> Scheduler<'a> {
     }
 
     fn task_report(&self) -> Result<()> {
+        if self.skel.rodata().debug == 0 {
+            return Ok(());
+        }
+
         let maps = self.skel.maps();
         let task_data = maps.task_data();
 
@@ -562,26 +566,49 @@ impl<'a> Scheduler<'a> {
         info!("---------------------TASK DATA---------------------");
         info!("");
         info!("");
+        let now = self.skel.bss().system_now;
+        let fives_past = now - (2 * bpf_intf::consts_NSEC_PER_SEC as u64);
+        let mut total_blocked_freq = 0;
+        let mut total_waker_freq = 0;
+        let mut total_lat_prio = 0;
+        let mut total_runtime = 0;
+        let mut total_rq_delay = 0;
+        let mut n_tasks = 0;
         for key in task_data.keys() {
             if let Some(task_data_elem) = task_data.lookup(&key, libbpf_rs::MapFlags::ANY)? {
                 let task_ctx = unsafe { &*(task_data_elem.as_slice().as_ptr() as *const bpf_intf::task_ctx) };
-                if task_ctx.runnable {
-                    let pid = task_ctx.pid;
-                    let path = format!("/proc/{}/comm", pid);
-                    let comm = match std::fs::read_to_string(&path) {
-                        Ok(comm) => comm,
-                        _ => "Unknown".to_string(),
-                    };
-                    info!("{}[{}]", comm.trim(), pid);
-                    info!("        blocked_freq: {}, waker_freq: {}",
-                          task_ctx.blocked_freq, task_ctx.waker_freq);
-                    info!("        avg_runtime: {}, lat_prio: {}",
-                          task_ctx.avg_runtime, task_ctx.lat_prio);
-                    info!("        avg_rq_delay: {}us",
-                          task_ctx.avg_rq_delay / 1000);
+                let pid = task_ctx.pid;
+                let path = format!("/proc/{}/comm", pid);
+                let comm = match std::fs::read_to_string(&path) {
+                    Ok(comm) => comm,
+                    _ => "Unknown".to_string(),
+                };
+                n_tasks += 1;
+                total_blocked_freq += task_ctx.blocked_freq;
+                total_waker_freq += task_ctx.waker_freq;
+                total_runtime = task_ctx.avg_runtime;
+                total_lat_prio += task_ctx.lat_prio;
+                total_rq_delay += task_ctx.avg_rq_delay;
+                if comm.contains("stress-ng") || task_ctx.last_run_at < fives_past {
+                    continue;
                 }
+                info!("{}[{}]", comm.trim(), pid);
+                info!("        blocked_freq: {}, waker_freq: {}",
+                    task_ctx.blocked_freq, task_ctx.waker_freq);
+                info!("        avg_runtime: {}, lat_prio: {}",
+                    task_ctx.avg_runtime, task_ctx.lat_prio);
+                info!("        avg_rq_delay: {}us",
+                    task_ctx.avg_rq_delay / 1000);
             }
         }
+        let avg = |total: u64| total / n_tasks;
+        info!("TOTAL:");
+        info!("        avg_blocked_freq: {}, avg_waker_freq: {}",
+              avg(total_blocked_freq), avg(total_waker_freq));
+        info!("        avg_runtime: {}, avg_lat_prio: {}",
+              avg(total_runtime), avg(total_lat_prio));
+        info!("        avg_rq_delay: {}us",
+              avg(total_rq_delay) / 1000);
         Ok(())
     }
 

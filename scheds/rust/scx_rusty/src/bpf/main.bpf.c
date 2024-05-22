@@ -78,6 +78,8 @@ const volatile u32 debug;
 /* base slice duration */
 static u64 slice_ns = SCX_SLICE_DFL;
 
+u64 system_now;
+
 /*
  * Per-CPU context
  */
@@ -1335,6 +1337,9 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 			taskc->avg_rq_delay = rq_delay;
 	}
 
+	if (bpf_get_smp_processor_id() == 0)
+	    system_now = now;
+
 	if (fifo_sched)
 		return;
 
@@ -1372,10 +1377,10 @@ void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
 	struct task_ctx *taskc;
 	struct dom_ctx *domc;
 
-	if (fifo_sched)
+	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	if (!(taskc = lookup_task_ctx(p)))
+	if (fifo_sched)
 		return;
 
 	if (!(domc = lookup_dom_ctx(taskc->dom_id)))
