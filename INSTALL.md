@@ -110,15 +110,24 @@ Then select the kernel containing the name "schedext".
 
 #### Installing the Schedulers
 
-At the moment, only the Rust schedulers are available for install (c schedulers coming soon):
-- scx_rusty
-- scx_layered
-- scx_rustland
+- [scx_rusty](https://src.fedoraproject.org/rpms/rust-scx_rusty)
+- [scx_layered](https://src.fedoraproject.org/rpms/rust-scx_layered)
+- [scx_rustland](https://src.fedoraproject.org/rpms/rust-scx_rustland)
+- [scx_c_schedulers](https://src.fedoraproject.org/rpms/scx_c_schedulers) that include:
+  - scx_central
+  - scx_flatcg
+  - scx_nest
+  - scx_pair
+  - scx_qmap
+  - scx_simple
+  - scx_userland
 
 Example:
 ```
 $ sudo dnf install scx_rusty
 $ sudo scx_rusty
+$ sudo dnf install scx_c_schedulers
+$ sudo scx_simple
 ```
 
 #### Setting up Dev Environment
