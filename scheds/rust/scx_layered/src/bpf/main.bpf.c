@@ -234,7 +234,8 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *layered_cpumask;
 
 	bool			all_cpus_allowed;
-	u64			started_running_at;
+	u64			runnable_at;
+	u64			running_at;
 };
 
 struct {
@@ -747,8 +748,8 @@ void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
+	tctx->runnable_at = now;
 	maybe_refresh_layer(p, tctx);
-
 	adj_load(tctx->layer, p->scx.weight, now);
 }
 
@@ -768,7 +769,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 
 	cctx->current_preempt = layer->preempt;
 	cctx->current_exclusive = layer->exclusive;
-	tctx->started_running_at = bpf_ktime_get_ns();
+	tctx->running_at = bpf_ktime_get_ns();
 
 	cpu = scx_bpf_task_cpu(p);
 
@@ -813,7 +814,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	if (!(layer = lookup_layer(lidx)))
 		return;
 
-	used = bpf_ktime_get_ns() - tctx->started_running_at;
+	used = bpf_ktime_get_ns() - tctx->running_at;
 	if (used < layer->min_exec_ns) {
 		lstat_inc(LSTAT_MIN_EXEC, layer, cctx);
 		lstat_add(LSTAT_MIN_EXEC_NS, layer, cctx, layer->min_exec_ns - used);
@@ -923,6 +924,72 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 
 	if (tctx->layer >= 0 && tctx->layer < nr_layers)
 		__sync_fetch_and_add(&layers[tctx->layer].nr_tasks, -1);
+}
+
+static u64 dsq_first_runnable_for_ms(u64 dsq_id, u64 now)
+{
+	struct task_struct *p;
+
+	__COMPAT_DSQ_FOR_EACH(p, dsq_id, 0) {
+		struct task_ctx *tctx;
+
+		if ((tctx = lookup_task_ctx(p)))
+			return (now - tctx->runnable_at) / 1000000;
+	}
+
+	return 0;
+}
+
+static void dump_layer_cpumask(int idx)
+{
+	struct cpumask *layer_cpumask;
+	s32 cpu;
+	char buf[128] = "", *p;
+
+	if (!__COMPAT_HAS_CPUMASKS)
+		return;
+
+	if (!(layer_cpumask = lookup_layer_cpumask(idx)))
+		return;
+
+	bpf_for(cpu, 0, scx_bpf_nr_cpu_ids()) {
+		if (!(p = MEMBER_VPTR(buf, [idx++])))
+			break;
+		if (bpf_cpumask_test_cpu(cpu, layer_cpumask))
+			*p++ = '0' + cpu % 10;
+		else
+			*p++ = '.';
+
+		if ((cpu & 7) == 7) {
+			if (!(p = MEMBER_VPTR(buf, [idx++])))
+				break;
+			*p++ = '|';
+		}
+	}
+	buf[sizeof(buf) - 1] = '\0';
+
+	scx_bpf_dump("%s", buf);
+}
+
+void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
+{
+	u64 now = bpf_ktime_get_ns();
+	int i;
+
+	bpf_for(i, 0, nr_layers) {
+		scx_bpf_dump("LAYER[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
+			     i, layers[i].nr_cpus, scx_bpf_dsq_nr_queued(i),
+			     dsq_first_runnable_for_ms(i, now));
+		dump_layer_cpumask(i);
+		scx_bpf_dump("\n");
+	}
+
+	scx_bpf_dump("HI_FALLBACK nr_queued=%d -%llums\n",
+		     scx_bpf_dsq_nr_queued(HI_FALLBACK_DSQ),
+		     dsq_first_runnable_for_ms(HI_FALLBACK_DSQ, now));
+	scx_bpf_dump("LO_FALLBACK nr_queued=%d -%llums\n",
+		     scx_bpf_dsq_nr_queued(LO_FALLBACK_DSQ),
+		     dsq_first_runnable_for_ms(LO_FALLBACK_DSQ, now));
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
@@ -1082,6 +1149,7 @@ SCX_OPS_DEFINE(layered,
 	       .set_cpumask		= (void *)layered_set_cpumask,
 	       .init_task		= (void *)layered_init_task,
 	       .exit_task		= (void *)layered_exit_task,
+	       .dump			= (void *)layered_dump,
 	       .init			= (void *)layered_init,
 	       .exit			= (void *)layered_exit,
 	       .name			= "layered");
