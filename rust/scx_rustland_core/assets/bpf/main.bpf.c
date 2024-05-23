@@ -131,7 +131,7 @@ static bool is_fifo_enabled;
  * The @queued and @dispatched lists are used in a producer/consumer fashion
  * between the BPF part and the user-space part.
  */
-#define MAX_ENQUEUED_TASKS 8192
+#define MAX_ENQUEUED_TASKS 4096
 
 /*
  * Maximum amount of slots reserved to the tasks dispatched via shared queue.
