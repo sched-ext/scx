@@ -1822,6 +1822,35 @@ static void put_local_rq_no_fail(struct task_struct *p, struct task_ctx *taskc,
 	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, LAVD_SLICE_UNDECIDED, enq_flags);
 }
 
+static s32 pick_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
+		      bool *is_idle)
+{
+	struct bpf_cpumask *p_mask = p->cpus_ptr;
+	s32 cpu_id;
+
+	/*
+	 * Pick a fully idle core.
+	 */
+	cpu_id = scx_bpf_pick_idle_cpu(p_mask, SCX_PICK_IDLE_CORE);
+	if (cpu_id >= 0)
+		goto bingo;
+
+	/*
+	 * If there is no fully idle core, pick any idle core.
+	 */
+	cpu_id = scx_bpf_pick_idle_cpu(p_mask, 0);
+	if (cpu_id >= 0)
+		goto bingo;
+
+	/*
+	 * If there is no idle core, stay on the previous core.
+	 */
+	cpu_id = prev_cpu;
+
+bingo:
+	return cpu_id;
+}
+
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -1841,8 +1870,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * call ops.enqueue().
 	 */
 	if (!is_wakeup_wf(wake_flags)) {
-		cpu_id = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags,
-						&found_idle);
+		cpu_id = pick_cpu(p, prev_cpu, wake_flags, &found_idle);
 		if (found_idle)
 			return cpu_id;
 
@@ -1870,7 +1898,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * is stalled because the picked CPU is already punched out from the
 	 * idle mask.
 	 */
-	cpu_id = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &found_idle);
+	cpu_id = pick_cpu(p, prev_cpu, wake_flags, &found_idle);
 	if (found_idle) {
 		put_local_rq_no_fail(p, taskc, 0);
 		return cpu_id;
