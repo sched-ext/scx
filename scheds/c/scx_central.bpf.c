@@ -305,6 +305,7 @@ int BPF_STRUCT_OPS_SLEEPABLE(central_init)
 	struct bpf_timer *timer;
 	int ret;
 
+	__COMPAT_scx_bpf_switch_all();
 	ret = scx_bpf_create_dsq(FALLBACK_DSQ_ID, -1);
 	if (ret)
 		return ret;
