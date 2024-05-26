@@ -173,3 +173,43 @@ No additional steps needed here other than what is mentioned in the main README.
 </code></pre>
 
 Then install the package and reboot your system. After you can use all provided example schedulers.
+
+## openSUSE Tumbleweed
+
+Experimental sched_ext support for openSUSE Tumbleweed is provided by the following
+OBS project:
+
+ https://build.opensuse.org/project/show/home:flonnegren:sched-ext
+
+#### Adding the Repository
+
+Add the home:flonnegren:sched-ext repository using:
+
+```
+$ sudo zypper addrepo --name sched-ext --refresh --enable https://download.opensuse.org/repositories/home:flonnegren:sched-ext/standard/home:flonnegren:sched-ext.repo
+$ sudo zypper refresh
+```
+
+#### Installing the Kernel
+
+```
+$ sudo zypper install --repo sched-ext --force kernel-default-base
+$ sudo reboot
+```
+
+Then the new kernel should be booted by default.
+
+#### Installing the Schedulers
+
+All schedulers are provided in the scx package
+
+Example:
+```
+$ sudo zypper install scx
+$ sudo scx_rusty
+```
+
+#### Setting up Dev Environment
+
+No additional steps needed here other than what is mentioned in the main README.md.
+
