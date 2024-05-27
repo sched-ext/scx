@@ -151,7 +151,7 @@ char _license[] SEC("license") = "GPL";
 volatile u64			nr_cpus_onln;
 
 static struct sys_cpu_util	__sys_cpu_util[2];
-static volatile int		__sys_cpu_util_idx;
+static int		__sys_cpu_util_idx;
 
 const volatile bool		no_freq_scaling;
 const volatile u8		verbose;
@@ -506,21 +506,21 @@ static struct cpu_ctx *get_cpu_ctx_id(s32 cpu_id)
 
 static struct sys_cpu_util *get_sys_cpu_util_cur(void)
 {
-	if (__sys_cpu_util_idx == 0)
+	if (READ_ONCE(__sys_cpu_util_idx) == 0)
 		return &__sys_cpu_util[0];
 	return &__sys_cpu_util[1];
 }
 
 static struct sys_cpu_util *get_sys_cpu_util_next(void)
 {
-	if (__sys_cpu_util_idx == 0)
+	if (READ_ONCE(__sys_cpu_util_idx) == 0)
 		return &__sys_cpu_util[1];
 	return &__sys_cpu_util[0];
 }
 
 static void flip_sys_cpu_util(void)
 {
-	__sys_cpu_util_idx ^= 0x1;
+	WRITE_ONCE(__sys_cpu_util_idx, __sys_cpu_util_idx ^ 0x1);
 }
 
 static __attribute__((always_inline))
