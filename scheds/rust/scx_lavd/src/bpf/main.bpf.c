@@ -520,7 +520,7 @@ static struct sys_cpu_util *get_sys_cpu_util_next(void)
 
 static void flip_sys_cpu_util(void)
 {
-	__sync_fetch_and_xor(&__sys_cpu_util_idx, 0x1);
+	__sys_cpu_util_idx ^= 0x1;
 }
 
 static __attribute__((always_inline))
