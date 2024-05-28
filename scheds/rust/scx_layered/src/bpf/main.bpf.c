@@ -234,7 +234,8 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *layered_cpumask;
 
 	bool			all_cpus_allowed;
-	u64			started_running_at;
+	u64			runnable_at;
+	u64			running_at;
 };
 
 struct {
@@ -411,10 +412,11 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 
 	/* not much to do if bound to a single CPU */
 	if (p->nr_cpus_allowed == 1) {
-		if (!bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
-			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			lstat_inc(LSTAT_LOCAL, layer, cctx);
+			if (!layer->open &&
+			    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
+				lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		}
 		return prev_cpu;
@@ -422,9 +424,8 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 
 	maybe_refresh_layered_cpumask(layered_cpumask, p, tctx, layer_cpumask);
 
-	if (!(idle_smtmask = scx_bpf_get_idle_smtmask())) {
+	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
 		return prev_cpu;
-	}
 
 	/*
 	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
@@ -476,9 +477,35 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (vtime_before(vtime, layer->vtime_now - slice_ns))
 		vtime = layer->vtime_now - slice_ns;
 
-	if (!tctx->all_cpus_allowed) {
+	/*
+	 * Special-case per-cpu kthreads which aren't in a preempting layer so
+	 * that they run between preempting and non-preempting layers. This is
+	 * to give reasonable boost to per-cpu kthreads by default as they are
+	 * usually important for system performance and responsiveness.
+	 */
+	if (!layer->preempt &&
+	    (p->flags & PF_KTHREAD) && p->nr_cpus_allowed == 1) {
+		struct cpumask *layer_cpumask;
+
+		if (!layer->open &&
+		    (layer_cpumask = lookup_layer_cpumask(tctx->layer)) &&
+		    !bpf_cpumask_test_cpu(scx_bpf_task_cpu(p), layer_cpumask))
+			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
+
+		scx_bpf_dispatch(p, HI_FALLBACK_DSQ, slice_ns, enq_flags);
+		return;
+	}
+
+	/*
+	 * As an open or grouped layer is consumed from all CPUs, a task which
+	 * belongs to such a layer can be safely put in the layer's DSQ
+	 * regardless of its cpumask. However, a task with custom cpumask in a
+	 * confined layer may fail to be consumed for an indefinite amount of
+	 * time. Queue them to the fallback DSQ.
+	 */
+	if (!layer->open && !tctx->all_cpus_allowed) {
 		lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
-		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice_ns, enq_flags);
+		scx_bpf_dispatch(p, LO_FALLBACK_DSQ, slice_ns, enq_flags);
 		return;
 	}
 
@@ -492,8 +519,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		u32 cpu = (preempt_cursor + idx) % nr_possible_cpus;
 		s32 sib;
 
-		if (!all_cpumask ||
-		    !bpf_cpumask_test_cpu(cpu, (const struct cpumask *)all_cpumask))
+		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 			continue;
 
 		if (!(cand_cctx = lookup_cpu_ctx(cpu)) || cand_cctx->current_preempt)
@@ -563,6 +589,9 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		if (layers[idx].preempt && scx_bpf_consume(idx))
 			return;
 
+	if (scx_bpf_consume(HI_FALLBACK_DSQ))
+		return;
+
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
 		struct layer *layer = &layers[idx];
@@ -585,6 +614,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		    scx_bpf_consume(idx))
 			return;
 	}
+
+	scx_bpf_consume(LO_FALLBACK_DSQ);
 }
 
 static bool match_one(struct layer_match *match, struct task_struct *p, const char *cgrp_path)
@@ -718,8 +749,8 @@ void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
+	tctx->runnable_at = now;
 	maybe_refresh_layer(p, tctx);
-
 	adj_load(tctx->layer, p->scx.weight, now);
 }
 
@@ -739,7 +770,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 
 	cctx->current_preempt = layer->preempt;
 	cctx->current_exclusive = layer->exclusive;
-	tctx->started_running_at = bpf_ktime_get_ns();
+	tctx->running_at = bpf_ktime_get_ns();
 
 	cpu = scx_bpf_task_cpu(p);
 
@@ -784,7 +815,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	if (!(layer = lookup_layer(lidx)))
 		return;
 
-	used = bpf_ktime_get_ns() - tctx->started_running_at;
+	used = bpf_ktime_get_ns() - tctx->running_at;
 	if (used < layer->min_exec_ns) {
 		lstat_inc(LSTAT_MIN_EXEC, layer, cctx);
 		lstat_add(LSTAT_MIN_EXEC_NS, layer, cctx, layer->min_exec_ns - used);
@@ -896,12 +927,86 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 		__sync_fetch_and_add(&layers[tctx->layer].nr_tasks, -1);
 }
 
+static u64 dsq_first_runnable_for_ms(u64 dsq_id, u64 now)
+{
+	struct task_struct *p;
+
+	__COMPAT_DSQ_FOR_EACH(p, dsq_id, 0) {
+		struct task_ctx *tctx;
+
+		if ((tctx = lookup_task_ctx(p)))
+			return (now - tctx->runnable_at) / 1000000;
+	}
+
+	return 0;
+}
+
+static void dump_layer_cpumask(int idx)
+{
+	struct cpumask *layer_cpumask;
+	s32 cpu;
+	char buf[128] = "", *p;
+
+	if (!__COMPAT_HAS_CPUMASKS)
+		return;
+
+	if (!(layer_cpumask = lookup_layer_cpumask(idx)))
+		return;
+
+	bpf_for(cpu, 0, scx_bpf_nr_cpu_ids()) {
+		if (!(p = MEMBER_VPTR(buf, [idx++])))
+			break;
+		if (bpf_cpumask_test_cpu(cpu, layer_cpumask))
+			*p++ = '0' + cpu % 10;
+		else
+			*p++ = '.';
+
+		if ((cpu & 7) == 7) {
+			if (!(p = MEMBER_VPTR(buf, [idx++])))
+				break;
+			*p++ = '|';
+		}
+	}
+	buf[sizeof(buf) - 1] = '\0';
+
+	scx_bpf_dump("%s", buf);
+}
+
+void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
+{
+	u64 now = bpf_ktime_get_ns();
+	int i;
+
+	bpf_for(i, 0, nr_layers) {
+		scx_bpf_dump("LAYER[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
+			     i, layers[i].nr_cpus, scx_bpf_dsq_nr_queued(i),
+			     dsq_first_runnable_for_ms(i, now));
+		dump_layer_cpumask(i);
+		scx_bpf_dump("\n");
+	}
+
+	scx_bpf_dump("HI_FALLBACK nr_queued=%d -%llums\n",
+		     scx_bpf_dsq_nr_queued(HI_FALLBACK_DSQ),
+		     dsq_first_runnable_for_ms(HI_FALLBACK_DSQ, now));
+	scx_bpf_dump("LO_FALLBACK nr_queued=%d -%llums\n",
+		     scx_bpf_dsq_nr_queued(LO_FALLBACK_DSQ),
+		     dsq_first_runnable_for_ms(LO_FALLBACK_DSQ, now));
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
 	struct bpf_cpumask *cpumask;
 	int i, j, k, nr_online_cpus, ret;
 
 	__COMPAT_scx_bpf_switch_all();
+
+	ret = scx_bpf_create_dsq(HI_FALLBACK_DSQ, -1);
+	if (ret < 0)
+		return ret;
+
+	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
+	if (ret < 0)
+		return ret;
 
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
@@ -1045,6 +1150,7 @@ SCX_OPS_DEFINE(layered,
 	       .set_cpumask		= (void *)layered_set_cpumask,
 	       .init_task		= (void *)layered_init_task,
 	       .exit_task		= (void *)layered_exit_task,
+	       .dump			= (void *)layered_dump,
 	       .init			= (void *)layered_init,
 	       .exit			= (void *)layered_exit,
 	       .name			= "layered");

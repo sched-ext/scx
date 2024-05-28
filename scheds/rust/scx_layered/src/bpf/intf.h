@@ -31,6 +31,9 @@ enum consts {
 	MAX_LAYERS		= 16,
 	USAGE_HALF_LIFE		= 100000000,	/* 100ms */
 
+	HI_FALLBACK_DSQ		= MAX_LAYERS,
+	LO_FALLBACK_DSQ		= MAX_LAYERS + 1,
+
 	/* XXX remove */
 	MAX_CGRP_PREFIXES = 32
 };
