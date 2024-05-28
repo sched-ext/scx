@@ -589,7 +589,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		if (layers[idx].preempt && scx_bpf_consume(idx))
 			return;
 
-	scx_bpf_consume(HI_FALLBACK_DSQ);
+	if (scx_bpf_consume(HI_FALLBACK_DSQ))
+		return;
 
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
