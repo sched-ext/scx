@@ -355,7 +355,22 @@ impl<'cb> BpfScheduler<'cb> {
     // Set scheduling class for the scheduler itself to SCHED_EXT
     fn use_sched_ext() -> i32 {
         let pid = std::process::id();
+        #[cfg(target_env = "gnu")]
         let param: sched_param = sched_param { sched_priority: 0 };
+        #[cfg(target_env = "musl")]
+        let param: sched_param = sched_param {
+            sched_priority: 0,
+            sched_ss_low_priority: 0,
+            sched_ss_repl_period: timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            sched_ss_init_budget: timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            sched_ss_max_repl: 0,
+        };
         let res =
             unsafe { sched_setscheduler(pid as i32, SCHED_EXT, &param as *const sched_param) };
         res
