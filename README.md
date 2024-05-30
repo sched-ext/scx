@@ -22,7 +22,7 @@ with and deployed; even in massive and complex production environments.
   scx_rustland is a better scheduler but does demonstrate how safe and easy it is to
   implement a scheduler which is generally usable and can outperform the default
   scheduler in certain scenarios.
-  
+
 [scx_rustland-terraria](https://github.com/sched-ext/scx/assets/1051723/42ec3bf2-9f1f-4403-80ab-bf5d66b7c2d5)
 
 While the kernel feature is not upstream yet, we believe sched_ext has a
@@ -108,10 +108,10 @@ scx
 
 `meson` is the main build system but each Rust sub-project is its own
 self-contained cargo project and can be built and published separately. The
-followings are the dependencies and version requirements. 
+followings are the dependencies and version requirements.
 
 **Note**: Many distros only have earlier versions of `meson`, in that case just [clone the meson
-repo](https://mesonbuild.com/Quick-guide.html#installation-from-source) and call 
+repo](https://mesonbuild.com/Quick-guide.html#installation-from-source) and call
 `meson.py` e.g. `/path/to/meson/repo/meson.py compile -C build`. Alternatively, use `pip` e.g.
 `pip install meson` or `pip install meson --break-system-packages` (if needed).
 
@@ -123,6 +123,15 @@ repo](https://mesonbuild.com/Quick-guide.html#installation-from-source) and call
 - Rust toolchain: >=1.72
 - `libelf`, `libz`, `libzstd` if linking against staic `libbpf.a`
 - `bpftool` By default this is cloned and built as part of the default build process. Alternatively it's usually available in `linux-tools-common`.
+
+The kernel has to be built with the following configuration:
+- `CONFIG_BPF=y`
+- `CONFIG_BPF_EVENTS=y`
+- `CONFIG_BPF_JIT=y`
+- `CONFIG_BPF_SYSCALL=y`
+- `CONFIG_DEBUG_INFO_BTF=y`
+- `CONFIG_FTRACE=y`
+- `CONFIG_SCHED_CLASS_EXT=y`
 
 
 ### Setting Up and Building
@@ -354,7 +363,7 @@ followings are important branches:
     [LKML thread](http://lkml.kernel.org/r/20230711011412.100319-1-tj@kernel.org)
   - [`sched_ext-v5'](https://github.com/sched-ext/sched_ext/tree/sched_ext-v5):
     [LKML thread](http://lkml.kernel.org/r/20231111024835.2164816-1-tj@kernel.org)
-    
+
 ## [Breaking Changes](./BREAKING_CHANGES.md)
 
 [A list of the breaking changes](./BREAKING_CHANGES.md) in the sched_ext kernel tree and the associated commits for the schedulers in this repo.
