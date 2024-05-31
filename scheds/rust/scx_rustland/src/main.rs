@@ -28,7 +28,6 @@ use std::path::Path;
 
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::bail;
 use clap::Parser;
 use log::info;
 use log::warn;
@@ -100,19 +99,6 @@ struct Opts {
     /// Use "0" to disable time slice boost and fallback to the standard vruntime-based scheduling.
     #[clap(short = 'b', long, default_value = "100")]
     slice_boost: u64,
-
-    /// If specified, always enforce the built-in idle selection logic to dispatch tasks.
-    /// Otherwise allow to dispatch interactive tasks on the first CPU available.
-    ///
-    /// Relying on the built-in logic can improve throughput (since tasks are more likely to remain
-    /// on the same CPU when the system is overloaded), but it can reduce system responsiveness.
-    ///
-    /// By default always dispatch interactive tasks on the first CPU available to increase system
-    /// responsiveness over throughput, especially when the system is overloaded.
-    ///
-    /// NOTE: this option cannot be used with --full-user.
-    #[clap(short = 'i', long, action = clap::ArgAction::SetTrue)]
-    builtin_idle: bool,
 
     /// If specified, disable task preemption.
     ///
@@ -277,7 +263,6 @@ struct Scheduler<'a> {
     slice_ns: u64,         // Default time slice (in ns)
     slice_boost: u64,      // Slice booster
     init_page_faults: u64, // Initial page faults counter
-    builtin_idle: bool,    // Use sched-ext built-in idle selection logic
     no_preemption: bool,   // Disable task preemption
     full_user: bool,       // Run all tasks through the user-space scheduler
 }
@@ -288,18 +273,11 @@ impl<'a> Scheduler<'a> {
         let topo = Topology::new().expect("Failed to build host topology");
         let topo_map = TopologyMap::new(topo).expect("Failed to generate topology map");
 
-        if opts.full_user && opts.builtin_idle {
-            bail!("--full-user cannot be used together with --builtin-idle");
-        }
-
         // Save the default time slice (in ns) in the scheduler class.
         let slice_ns = opts.slice_us * NSEC_PER_USEC;
 
         // Slice booster (0 = disabled).
         let slice_boost = opts.slice_boost;
-
-        // Use built-in idle selection logic.
-        let builtin_idle = opts.builtin_idle;
 
         // Disable task preemption.
         let no_preemption = opts.no_preemption;
@@ -343,7 +321,6 @@ impl<'a> Scheduler<'a> {
             slice_ns,
             slice_boost,
             init_page_faults,
-            builtin_idle,
             no_preemption,
             full_user,
         })
@@ -546,8 +523,6 @@ impl<'a> Scheduler<'a> {
                     // Update global minimum vruntime.
                     self.min_vruntime = task.vruntime;
 
-                    // If built-in idle selection logic is disabled, dispatch on the first CPU
-                    // available.
                     let mut dispatched_task = DispatchedTask::new(&task.qtask);
 
                     // Interactive tasks will be dispatched on the first CPU available and they are
@@ -558,13 +533,15 @@ impl<'a> Scheduler<'a> {
                             dispatched_task.set_flag(RL_PREEMPT_CPU);
                         }
                     }
-                    dispatched_task.set_slice_ns(self.effective_slice_ns(nr_scheduled));
-
-                    // In full-user mode we skip the built-in idle selection logic, so simply
-                    // dispatch all the tasks on the first CPU available.
-                    if self.full_user || !self.builtin_idle {
+                    if self.full_user {
+                        // In full-user mode we skip the built-in idle selection logic, so simply
+                        // dispatch all the tasks on the first CPU available.
                         dispatched_task.set_flag(RL_CPU_ANY);
                     }
+
+                    // Assign a timeslice as a function of the amount of tasks that are waiting to
+                    // be scheduled.
+                    dispatched_task.set_slice_ns(self.effective_slice_ns(nr_scheduled));
 
                     // Send task to the BPF dispatcher.
                     match self.bpf.dispatch_task(&dispatched_task) {
