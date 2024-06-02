@@ -497,22 +497,8 @@ impl<'a> Scheduler<'a> {
 
     // Return the target time slice, proportionally adjusted based on the total amount of tasks
     // waiting to be scheduled (more tasks waiting => shorter time slice).
-    fn effective_slice_ns(&mut self, nr_scheduled: u64) -> u64 {
-        // Scale time slice as a function of nr_scheduled, but never scale below 250 us.
-        //
-        // The goal here is to adjust the time slice allocated to tasks based on the number of
-        // tasks currently awaiting scheduling. When the system is heavily loaded, shorter time
-        // slices are assigned to provide more opportunities for all tasks to receive CPU time.
-        let scaling = ((nr_scheduled + 1) / 2).max(1);
-        let slice_ns = (self.slice_ns / scaling).max(NSEC_PER_MSEC / 4);
-
-        slice_ns
-    }
-
     // Dispatch tasks from the task pool in order (sending them to the BPF dispatcher).
     fn dispatch_tasks(&mut self) {
-        let nr_scheduled = self.task_pool.tasks.len() as u64;
-
         // Dispatch only a batch of tasks equal to the amount of idle CPUs in the system.
         //
         // This allows to have more tasks sitting in the task pool, reducing the pressure on the
@@ -521,28 +507,58 @@ impl<'a> Scheduler<'a> {
         for _ in 0..self.nr_idle_cpus().max(1) {
             match self.task_pool.pop() {
                 Some(task) => {
+                    // Determine the task's virtual time slice.
+                    //
+                    // The goal is to evaluate the optimal time slice, considering the vruntime as
+                    // a deadline for the task to complete its work before releasing the CPU.
+                    //
+                    // This is accomplished by calculating the difference between the task's
+                    // vruntime and the global current vruntime and use this value as the task time
+                    // slice.
+                    //
+                    // In this way, tasks that "promise" to release the CPU quickly (based on
+                    // their previous work pattern) get a much higher priority (due to
+                    // vruntime-based scheduling and the additional priority boost for being
+                    // classified as interactive), but they are also given a shorter time slice
+                    // to complete their work and fulfill their promise of rapidity.
+                    //
+                    // At the same time tasks that are more CPU-intensive get de-prioritized, but
+                    // they will also tend to have a longer time slice available, reducing in this
+                    // way the amount of context switches that can negatively affect their
+                    // performance.
+                    //
+                    // In conclusion, latency-sensitive tasks get a high priority and a short time
+                    // slice (and they can preempt other tasks), CPU-intensive tasks get low
+                    // priority and a long time slice.
+                    //
+                    // Moreover, ensure that the time slice is never less than 0.25 ms to prevent
+                    // excessive penalty from assigning time slices that are too short and reduce
+                    // context switch overhead.
+                    let slice_ns = (task.vruntime - self.min_vruntime).max(NSEC_PER_MSEC / 4);
+
                     // Update global minimum vruntime.
                     self.min_vruntime = task.vruntime;
 
+                    // Create a new task to dispatch.
                     let mut dispatched_task = DispatchedTask::new(&task.qtask);
 
-                    // Interactive tasks will be dispatched on the first CPU available and they are
-                    // allowed to preempt other tasks.
+                    dispatched_task.set_slice_ns(slice_ns);
+
                     if task.is_interactive {
+                        // Dispatch interactive tasks on the first CPU available.
                         dispatched_task.set_flag(RL_CPU_ANY);
+
+                        // Interactive tasks can preempt other tasks.
                         if !self.no_preemption {
                             dispatched_task.set_flag(RL_PREEMPT_CPU);
                         }
                     }
+
+                    // In full-user mode we skip the built-in idle selection logic, so simply
+                    // dispatch all the tasks on the first CPU available.
                     if self.full_user {
-                        // In full-user mode we skip the built-in idle selection logic, so simply
-                        // dispatch all the tasks on the first CPU available.
                         dispatched_task.set_flag(RL_CPU_ANY);
                     }
-
-                    // Assign a timeslice as a function of the amount of tasks that are waiting to
-                    // be scheduled.
-                    dispatched_task.set_slice_ns(self.effective_slice_ns(nr_scheduled));
 
                     // Send task to the BPF dispatcher.
                     match self.bpf.dispatch_task(&dispatched_task) {
