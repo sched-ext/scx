@@ -41,11 +41,10 @@ use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
-use scx_utils::uei_read;
+use scx_utils::uei_report;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
-use scx_utils::SCX_ECODE_ACT_RESTART;
 
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
@@ -578,9 +577,7 @@ impl<'a> Scheduler<'a> {
         }
 
         self.struct_ops.take();
-        let uei = uei_read!(&self.skel, uei);
-        uei.report()?;
-        Ok(uei)
+        uei_report!(&self.skel, uei)
     }
 }
 
@@ -619,16 +616,11 @@ fn main() -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
-    while !shutdown.load(Ordering::Relaxed) {
+    loop {
         let mut sched = Scheduler::init(&opts)?;
-
-        let uei = sched.run(shutdown.clone())?;
-        if let Some(exit_code) = uei.exit_code() {
-            if (exit_code & *SCX_ECODE_ACT_RESTART as i64) != 0 {
-                continue;
-            }
+        if !sched.run(shutdown.clone())?.should_restart() {
+            break;
         }
-        break;
     }
     Ok(())
 }

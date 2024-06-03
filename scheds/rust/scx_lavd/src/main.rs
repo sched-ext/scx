@@ -29,9 +29,11 @@ use libbpf_rs::skel::SkelBuilder;
 use log::info;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
+use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Topology;
+use scx_utils::UserExitInfo;
 
 use nix::sys::signal;
 use plain::Plain;
@@ -116,7 +118,7 @@ impl<'a> Scheduler<'a> {
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 0);
-        let mut skel = skel_builder.open().context("Failed to open BPF program")?;
+        let mut skel = scx_ops_open!(skel_builder, lavd_ops)?;
 
         // Initialize skel according to @opts.
         let topo = Topology::new().expect("Failed to build host topology");
@@ -276,7 +278,7 @@ impl<'a> Scheduler<'a> {
         RUNNING.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei)
     }
 
-    fn run(&mut self) -> Result<()> {
+    fn run(&mut self) -> Result<UserExitInfo> {
         while self.running() {
             let interval_ms = self.prep_introspec();
             std::thread::sleep(Duration::from_millis(interval_ms));
@@ -338,13 +340,19 @@ fn main() -> Result<()> {
     let opts = Opts::parse();
 
     init_log(&opts);
-
-    let mut sched = Scheduler::init(&opts)?;
-    info!("scx_lavd scheduler is initialized");
-    info!("    Note that scx_lavd currently is not optimized for multi-CCX/NUMA architectures.");
-    info!("    Stay tuned for future improvements!");
     init_signal_handlers();
 
-    info!("scx_lavd scheduler starts running.");
-    sched.run()
+    loop {
+	let mut sched = Scheduler::init(&opts)?;
+	info!("scx_lavd scheduler is initialized");
+	info!("    Note that scx_lavd currently is not optimized for multi-CCX/NUMA architectures.");
+	info!("    Stay tuned for future improvements!");
+
+	info!("scx_lavd scheduler starts running.");
+	if !sched.run()?.should_restart() {
+	    break;
+	}
+    }
+
+    Ok(())
 }

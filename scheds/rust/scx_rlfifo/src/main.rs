@@ -10,6 +10,7 @@ mod bpf;
 use bpf::*;
 
 use scx_utils::Topology;
+use scx_utils::UserExitInfo;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -26,7 +27,16 @@ struct Scheduler<'a> {
 impl<'a> Scheduler<'a> {
     fn init() -> Result<Self> {
         let topo = Topology::new().expect("Failed to build host topology");
-        let bpf = BpfScheduler::init(5000, topo.nr_cpus_possible() as i32, false, 0, false, false, true, false)?;
+        let bpf = BpfScheduler::init(
+            5000,
+            topo.nr_cpus_possible() as i32,
+            false,
+            0,
+            false,
+            false,
+            true,
+            false,
+        )?;
         Ok(Self { bpf })
     }
 
@@ -84,7 +94,7 @@ impl<'a> Scheduler<'a> {
         );
     }
 
-    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<()> {
+    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let mut prev_ts = Self::now();
 
         while !shutdown.load(Ordering::Relaxed) && !self.bpf.exited() {
@@ -121,15 +131,20 @@ please open a GitHub issue.
 }
 
 fn main() -> Result<()> {
-    let mut sched = Scheduler::init()?;
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown.clone();
-
     print_warning();
 
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
     ctrlc::set_handler(move || {
         shutdown_clone.store(true, Ordering::Relaxed);
     })?;
 
-    sched.run(shutdown)
+    loop {
+        let mut sched = Scheduler::init()?;
+        if !sched.run(shutdown.clone())?.should_restart() {
+            break;
+        }
+    }
+
+    Ok(())
 }

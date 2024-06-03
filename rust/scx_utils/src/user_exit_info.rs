@@ -106,12 +106,13 @@ macro_rules! uei_exited {
     }};
 }
 
-/// Takes a reference to C struct user_exit_info, reads it and invokes
-/// UserExitInfo::report() on it. See UserExitInfo.
+/// Takes a reference to C struct user_exit_info, reads, invokes
+/// UserExitInfo::report() on and then returns Ok(uei). See UserExitInfo.
 #[macro_export]
 macro_rules! uei_report {
     ($skel: expr, $uei:ident) => {{
-        scx_utils::uei_read!($skel, $uei).report()
+        let uei = scx_utils::uei_read!($skel, $uei);
+        uei.report().and_then(|_| Ok(uei))
     }};
 }
 
@@ -222,6 +223,14 @@ impl UserExitInfo {
             Some(self.exit_code)
         } else {
             None
+        }
+    }
+
+    /// Test whether the BPF scheduler requested restart.
+    pub fn should_restart(&self) -> bool {
+        match self.exit_code() {
+            Some(ecode) => (ecode & *SCX_ECODE_ACT_RESTART as i64) != 0,
+            _ => false,
         }
     }
 }

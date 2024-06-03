@@ -21,8 +21,10 @@ use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
+use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::UserExitInfo;
 
 use scx_rustland_core::ALLOCATOR;
 
@@ -189,7 +191,7 @@ impl<'cb> BpfScheduler<'cb> {
         // Open the BPF prog first for verification.
         let skel_builder = BpfSkelBuilder::default();
         init_libbpf_logging(None);
-        let mut skel = skel_builder.open().context("Failed to open BPF program")?;
+        let mut skel = scx_ops_open!(skel_builder, rustland)?;
 
         // Lock all the memory to prevent page faults that could trigger potential deadlocks during
         // scheduling.
@@ -446,7 +448,7 @@ impl<'cb> BpfScheduler<'cb> {
     }
 
     // Called on exit to shutdown and report exit message from the BPF part.
-    pub fn shutdown_and_report(&mut self) -> Result<()> {
+    pub fn shutdown_and_report(&mut self) -> Result<UserExitInfo> {
         self.struct_ops.take();
         uei_report!(&self.skel, uei)
     }
