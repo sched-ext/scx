@@ -151,6 +151,20 @@ $ meson install -C build
 
 Notes: `meson setup` will also clone both libbpf and bpftool repos and `meson compile` will build them both.
 
+Make sure you have dependencies installed that allow you to compile from source!
+
+##### Ubuntu/Debian
+
+```
+apt install gcc-multilib build-essential libssl-dev
+```
+
+##### Arch Linux
+
+```
+pacman -S base-devel
+```
+
 ### Static linking against system libbpf
 Note, depending on your system configuration `libbpf_a` and `libbpf_h` may be
 in different directories. The system libbpf version needs to match the minimum
@@ -299,7 +313,6 @@ $ cd $SCX
 $ meson setup build -Dcargo_home=$HOME/cargo-deps -Doffline=true -Dbuildtype=release
 $ meson compile -C build
 ```
-
 
 ### Working with Rust Sub-projects
 
