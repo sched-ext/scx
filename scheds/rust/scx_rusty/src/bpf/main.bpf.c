@@ -1144,17 +1144,18 @@ dom_queue:
 
 static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
 {
-	s32 cpu;
+	struct dom_ctx *domc;
+	struct bpf_cpumask *dmask;
 
-	if (dom_id >= MAX_DOMS)
+	domc = lookup_dom_ctx(dom_id);
+	if (!domc)
 		return false;
 
-	bpf_for(cpu, 0, nr_cpus_possible) {
-		if (bpf_cpumask_test_cpu(cpu, cpumask) &&
-		    (dom_cpumasks[dom_id][cpu / 64] & (1LLU << (cpu % 64))))
-			return true;
-	}
-	return false;
+	dmask = domc->cpumask;
+	if (!dmask)
+		return false;
+
+	return bpf_cpumask_intersects(cpumask, (const struct cpumask *)dmask);
 }
 
 u32 dom_node_id(u32 dom_id)
