@@ -370,8 +370,8 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 	case SCX_DSQ_LOCAL:
 	case SHARED_DSQ:
 		scx_bpf_dispatch(p, dsq_id, slice, enq_flags);
-		dbg_msg("dispatch: pid=%d (%s) dsq=%llu slice=%llu",
-			p->pid, p->comm, dsq_id, slice);
+		dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu",
+			p->pid, p->comm, dsq_id, enq_flags, slice);
 		break;
 	default:
 		/*
@@ -423,14 +423,14 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 			__sync_fetch_and_add(&nr_bounce_dispatches, 1);
 
 			scx_bpf_dispatch(p, SHARED_DSQ, slice, enq_flags);
-			dbg_msg("dispatch: pid=%d (%s) dsq=%llu slice=%llu bounce",
-				p->pid, p->comm, dsq_id, slice);
+			dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu bounce",
+				p->pid, p->comm, dsq_id, enq_flags, slice);
 			return;
 		}
 
 		/* Requested dispatch was valid */
-		dbg_msg("dispatch: pid=%d (%s) dsq=%llu slice=%llu",
-			p->pid, p->comm, dsq_id, slice);
+		dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu",
+			p->pid, p->comm, dsq_id, enq_flags, slice);
 
 		/* Wake up the target CPU (only if idle) */
 		scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
