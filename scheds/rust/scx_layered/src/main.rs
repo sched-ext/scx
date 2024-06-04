@@ -44,8 +44,10 @@ use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
+use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::UserExitInfo;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -1227,10 +1229,10 @@ impl OpenMetricsStats {
     }
 }
 
-struct Scheduler<'a> {
+struct Scheduler<'a, 'b> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
-    layer_specs: Vec<LayerSpec>,
+    layer_specs: &'b Vec<LayerSpec>,
 
     sched_intv: Duration,
     monitor_intv: Duration,
@@ -1251,7 +1253,7 @@ struct Scheduler<'a> {
     om_format: bool,
 }
 
-impl<'a> Scheduler<'a> {
+impl<'a, 'b> Scheduler<'a, 'b> {
     fn init_layers(skel: &mut OpenBpfSkel, specs: &Vec<LayerSpec>) -> Result<()> {
         skel.rodata_mut().nr_layers = specs.len() as u32;
         let mut perf_set = false;
@@ -1333,7 +1335,7 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn init(opts: &Opts, layer_specs: Vec<LayerSpec>) -> Result<Self> {
+    fn init(opts: &Opts, layer_specs: &'b Vec<LayerSpec>) -> Result<Self> {
         let nr_layers = layer_specs.len();
         let mut cpu_pool = CpuPool::new()?;
 
@@ -1341,7 +1343,7 @@ impl<'a> Scheduler<'a> {
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 1);
         init_libbpf_logging(None);
-        let mut skel = skel_builder.open().context("Failed to open BPF program")?;
+        let mut skel = scx_ops_open!(skel_builder, layered)?;
 
         // Initialize skel according to @opts.
         skel.struct_ops.layered_mut().exit_dump_len = opts.exit_dump_len;
@@ -1356,7 +1358,7 @@ impl<'a> Scheduler<'a> {
         for cpu in cpu_pool.all_cpus.iter_ones() {
             skel.rodata_mut().all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
-        Self::init_layers(&mut skel, &layer_specs)?;
+        Self::init_layers(&mut skel, layer_specs)?;
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
 
@@ -1736,7 +1738,7 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<()> {
+    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let now = Instant::now();
         let mut next_sched_at = now + self.sched_intv;
         let mut next_monitor_at = now + self.monitor_intv;
@@ -1770,7 +1772,7 @@ impl<'a> Scheduler<'a> {
     }
 }
 
-impl<'a> Drop for Scheduler<'a> {
+impl<'a, 'b> Drop for Scheduler<'a, 'b> {
     fn drop(&mut self) {
         if let Some(struct_ops) = self.struct_ops.take() {
             drop(struct_ops);
@@ -1966,8 +1968,6 @@ fn main() -> Result<()> {
     debug!("specs={}", serde_json::to_string_pretty(&layer_config)?);
     verify_layer_specs(&layer_config.specs)?;
 
-    let mut sched = Scheduler::init(&opts, layer_config.specs)?;
-
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
     ctrlc::set_handler(move || {
@@ -1975,5 +1975,12 @@ fn main() -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
-    sched.run(shutdown)
+    loop {
+        let mut sched = Scheduler::init(&opts, &layer_config.specs)?;
+        if !sched.run(shutdown.clone())?.should_restart() {
+            break;
+        }
+    }
+
+    Ok(())
 }

@@ -11,6 +11,7 @@ use bpf::*;
 
 use scx_utils::Topology;
 use scx_utils::TopologyMap;
+use scx_utils::UserExitInfo;
 
 use std::thread;
 
@@ -716,7 +717,7 @@ impl<'a> Scheduler<'a> {
         log::logger().flush();
     }
 
-    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<()> {
+    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let mut prev_ts = Self::now();
 
         while !shutdown.load(Ordering::Relaxed) && !self.bpf.exited() {
@@ -772,7 +773,6 @@ fn main() -> Result<()> {
         simplelog::ColorChoice::Auto,
     )?;
 
-    let mut sched = Scheduler::init(&opts)?;
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
     ctrlc::set_handler(move || {
@@ -780,6 +780,13 @@ fn main() -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
-    // Start the scheduler.
-    sched.run(shutdown)
+    loop {
+        let mut sched = Scheduler::init(&opts)?;
+        // Start the scheduler.
+        if !sched.run(shutdown.clone())?.should_restart() {
+            break;
+        }
+    }
+
+    Ok(())
 }
