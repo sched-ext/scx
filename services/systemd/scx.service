@@ -13,4 +13,4 @@ StandardError=journal
 LogNamespace=sched-ext
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical.target
