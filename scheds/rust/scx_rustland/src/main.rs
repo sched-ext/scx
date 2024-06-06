@@ -534,7 +534,8 @@ impl<'a> Scheduler<'a> {
                     // Moreover, ensure that the time slice is never less than 0.25 ms to prevent
                     // excessive penalty from assigning time slices that are too short and reduce
                     // context switch overhead.
-                    let slice_ns = (task.vruntime - self.min_vruntime).max(NSEC_PER_MSEC / 4);
+                    let slice_ns =
+                        (task.vruntime - self.min_vruntime).clamp(NSEC_PER_MSEC / 4, self.slice_ns);
 
                     // Update global minimum vruntime.
                     self.min_vruntime = task.vruntime;
