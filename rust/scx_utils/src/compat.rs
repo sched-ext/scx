@@ -127,11 +127,11 @@ pub fn struct_has_field(type_name: &str, field: &str) -> Result<bool> {
     return Ok(false);
 }
 
-pub fn kfunc_exists(kfunc: &str) -> Result<bool> {
+pub fn ksym_exists(ksym: &str) -> Result<bool> {
     let btf: &btf = *VMLINUX_BTF;
 
-    let kfunc_name = CString::new(kfunc).unwrap();
-    let tid = unsafe { btf__find_by_name_kind(btf, kfunc_name.as_ptr(), BTF_KIND_FUNC) };
+    let ksym_name = CString::new(ksym).unwrap();
+    let tid = unsafe { btf__find_by_name(btf, ksym_name.as_ptr()) };
     Ok(tid >= 0)
 }
 
@@ -252,8 +252,8 @@ mod tests {
     }
 
     #[test]
-    fn test_kfunc_exists() {
-        assert!(super::kfunc_exists("scx_bpf_consume").unwrap());
-        assert!(!super::kfunc_exists("NO_SUCH_KFUNC").unwrap());
+    fn test_ksym_exists() {
+        assert!(super::ksym_exists("scx_bpf_consume").unwrap());
+        assert!(!super::ksym_exists("NO_SUCH_KFUNC").unwrap());
     }
 }

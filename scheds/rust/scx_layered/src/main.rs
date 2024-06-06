@@ -1328,7 +1328,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             perf_set |= layer.perf > 0;
         }
 
-        if perf_set && !compat::kfunc_exists("scx_bpf_cpuperf_set")? {
+        if perf_set && !compat::ksym_exists("scx_bpf_cpuperf_set")? {
             warn!("cpufreq support not available, ignoring perf configurations");
         }
 
@@ -1344,6 +1344,17 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         skel_builder.obj_builder.debug(opts.verbose > 1);
         init_libbpf_logging(None);
         let mut skel = scx_ops_open!(skel_builder, layered)?;
+
+        // scheduler_tick() got renamed to sched_tick() during v6.10-rc.
+        let sched_tick_name = match compat::ksym_exists("sched_tick")? {
+            true => "sched_tick",
+            false => "scheduler_tick",
+        };
+
+        skel.progs_mut()
+            .sched_tick_fentry()
+            .set_attach_target(0, Some(sched_tick_name.into()))
+            .context("Failed to set attach target for sched_tick_fentry()")?;
 
         // Initialize skel according to @opts.
         skel.struct_ops.layered_mut().exit_dump_len = opts.exit_dump_len;

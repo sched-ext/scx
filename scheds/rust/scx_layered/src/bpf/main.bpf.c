@@ -214,8 +214,8 @@ static void refresh_cpumasks(int idx)
 	trace("LAYER[%d] now has %d cpus, seq=%llu", idx, layer->nr_cpus, layer->cpus_seq);
 }
 
-SEC("fentry/scheduler_tick")
-int scheduler_tick_fentry(const void *ctx)
+SEC("fentry")
+int BPF_PROG(sched_tick_fentry)
 {
 	int idx;
 
