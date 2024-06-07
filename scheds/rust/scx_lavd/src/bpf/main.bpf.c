@@ -776,7 +776,7 @@ static void do_update_sys_stat(void)
 		new_util = (compute * LAVD_CPU_UTIL_MAX) / duration;
 		cpuc->util = calc_avg(cpuc->util, new_util);
 
-		if (cpuc->util > LAVE_TC_PER_CORE_MAX_CTUIL)
+		if (cpuc->util > LAVD_TC_PER_CORE_MAX_CTUIL)
 			nr_violation += 1000;
 
 
@@ -866,7 +866,7 @@ static u64 calc_nr_active_cpus(struct sys_stat *stat_cur)
 	 * nr_active = ceil(nr_cpus_onln * cpu_util * per_core_max_util)
 	 */
 	nr_active  = (nr_cpus_onln * stat_cur->util * 1000) + 500;
-	nr_active /= (LAVE_TC_PER_CORE_MAX_CTUIL * 1000);
+	nr_active /= (LAVD_TC_PER_CORE_MAX_CTUIL * 1000);
 
 	/*
 	 * If a few CPUs are particularly busy, boost the overflow CPUs by 2x.
@@ -935,7 +935,6 @@ static void do_core_compaction(void)
 		/*
 		 * Skip offline cpu
 		 */
-		// cpu = get_cpu_id_of_order(i);
 		cpu = cpu_order[i];
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc || !cpuc->is_online) {
@@ -2217,7 +2216,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	__COMPAT_DSQ_FOR_EACH(p, LAVD_GLOBAL_DSQ, 0) {
 		/*
 		 * Prioritize kernel tasks because most kernel tasks are pinned
-		 * to a paritular CPU and latency-critical (e.g., ksoftirqd,
+		 * to a particular CPU and latency-critical (e.g., ksoftirqd,
 		 * kworker, etc).
 		 */
 		if (is_kernel_task(p)) {
@@ -2258,7 +2257,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		/*
 		 * This is the first time a particular pinned user-space task
 		 * is run on this CPU at this interval. From now on, this CPU
-		 * will be part of the activee CPU so can be used to run the
+		 * will be part of the active CPU so can be used to run the
 		 * pinned task and the other tasks.
 		 */
 		bpf_cpumask_test_and_set_cpu(cpu, active);

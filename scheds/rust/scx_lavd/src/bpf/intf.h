@@ -86,7 +86,7 @@ enum consts {
 	LAVD_PREEMPT_KICK_MARGIN	= (LAVD_SLICE_MIN_NS >> 3),
 	LAVD_PREEMPT_TICK_MARGIN	= (LAVD_SLICE_MIN_NS >> 8),
 
-	LAVE_TC_PER_CORE_MAX_CTUIL	= 500, /* maximum per-core CPU utilization */
+	LAVD_TC_PER_CORE_MAX_CTUIL	= 500, /* maximum per-core CPU utilization */
 	LAVD_TC_NR_ACTIVE_MIN		= 1, /* num of mininum active cores */
 	LAVD_TC_NR_OVRFLW		= 1, /* num of overflow cores */
 	LAVD_TC_CPU_PIN_INTERVAL	= (100 * NSEC_PER_MSEC),
