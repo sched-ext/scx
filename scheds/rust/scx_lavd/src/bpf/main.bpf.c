@@ -883,11 +883,9 @@ static const struct cpumask *cast_mask(struct bpf_cpumask *mask)
 	return (const struct cpumask *)mask;
 }
 
-static bool test_and_clear_cpu_periodically(u32 cpu,
-					    struct bpf_cpumask *cpumask)
+static void clear_cpu_periodically(u32 cpu, struct bpf_cpumask *cpumask)
 {
 	u32 clear;
-	bool ret = false;
 
 	/*
 	 * If the CPU is on, we clear the bit once every four times
@@ -895,12 +893,11 @@ static bool test_and_clear_cpu_periodically(u32 cpu,
 	 * probabilistically cleared once every 100 msec (4 * 25 msec).
 	 */
 	if (!bpf_cpumask_test_cpu(cpu, cast_mask(cpumask)))
-		return false;
+		return;
 
 	clear = !(bpf_get_prandom_u32() % LAVD_TC_CPU_PIN_INTERVAL_DIV);
 	if (clear)
-		ret = bpf_cpumask_test_and_clear_cpu(cpu, cpumask);
-	return ret;
+		bpf_cpumask_clear_cpu(cpu, cpumask);
 }
 
 static void do_core_compaction(void)
@@ -938,16 +935,7 @@ static void do_core_compaction(void)
 		cpu = cpu_order[i];
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc || !cpuc->is_online) {
-			/*
-			 * active_cpumask needs to be atomically updated since
-			 * there are concurrent writes -- one from
-			 * do_core_compaction() and another from
-			 * ops.dispatch(). On the other hand, ovrflw_cpumask
-			 * does not have such concurrent writes so that it can
-			 * be safely updated with a non-atomic (no LOCK prefix)
-			 * bitwise instruction.
-			 */
-			bpf_cpumask_test_and_clear_cpu(cpu, active);
+			bpf_cpumask_clear_cpu(cpu, active);
 			bpf_cpumask_clear_cpu(cpu, ovrflw);
 			continue;
 		}
@@ -957,18 +945,18 @@ static void do_core_compaction(void)
 		 */
 		if (i < nr_cpus) {
 			if (i < nr_active) {
-				bpf_cpumask_test_and_set_cpu(cpu, active);
+				bpf_cpumask_set_cpu(cpu, active);
 				bpf_cpumask_clear_cpu(cpu, ovrflw);
 			}
 			else {
-				bpf_cpumask_test_and_set_cpu(cpu, ovrflw);
+				bpf_cpumask_set_cpu(cpu, ovrflw);
 				bpf_cpumask_clear_cpu(cpu, active);
 			}
 			scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
 		}
 		else {
 			if (i < nr_active_old) {
-				bpf_cpumask_test_and_clear_cpu(cpu, active);
+				bpf_cpumask_clear_cpu(cpu, active);
 				bpf_cpumask_clear_cpu(cpu, ovrflw);
 			}
 			else {
@@ -986,7 +974,7 @@ static void do_core_compaction(void)
 				 * here for a while, approximately for
 				 * LAVD_TC_CPU_PIN_INTERVAL.
 				 */
-				test_and_clear_cpu_periodically(cpu, active);
+				clear_cpu_periodically(cpu, active);
 				bpf_cpumask_clear_cpu(cpu, ovrflw);
 			}
 		}
@@ -2271,7 +2259,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * kick @cpu here since @cpu is the current CPU, which is
 		 * obviously not idle.
 		 */
-		bpf_cpumask_test_and_set_cpu(cpu, active);
+		bpf_cpumask_set_cpu(cpu, active);
 
 release_break:
 		bpf_task_release(p);
