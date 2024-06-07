@@ -49,6 +49,7 @@ extern void bpf_iter_task_destroy(struct bpf_iter_task *it) __weak __ksym;
  */
 enum consts {
 	CLOCK_BOOTTIME			= 7,
+	CACHELINE_SIZE			= 64,
 	NSEC_PER_USEC			= 1000ULL,
 	NSEC_PER_MSEC			= (1000ULL * NSEC_PER_USEC),
 	LAVD_TIME_ONE_SEC		= (1000ULL * NSEC_PER_MSEC),
@@ -168,7 +169,7 @@ struct cpu_ctx {
 	 */
 	struct bpf_cpumask __kptr *tmp_a_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_o_mask;	/* temporary cpu mask */
-};
+} __attribute__((aligned(CACHELINE_SIZE)));
 
 struct task_ctx {
 	/*
