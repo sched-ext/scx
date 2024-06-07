@@ -2692,7 +2692,6 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
 		return -ENOMEM;
-	bpf_cpumask_clear(cpumask);
 
 	cpumask = bpf_kptr_xchg(p_cpumask, cpumask);
 	if (cpumask)
