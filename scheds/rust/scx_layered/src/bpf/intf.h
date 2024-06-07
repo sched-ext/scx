@@ -69,6 +69,7 @@ enum layer_stat_idx {
 	LSTAT_KICK,
 	LSTAT_YIELD,
 	LSTAT_YIELD_IGNORE,
+	LSTAT_MIGRATION,
 	NR_LSTATS,
 };
 

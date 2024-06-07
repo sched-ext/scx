@@ -228,7 +228,7 @@ int BPF_PROG(sched_tick_fentry)
 
 struct task_ctx {
 	int			pid;
-
+	int			last_cpu;
 	int			layer;
 	bool			refresh_layer;
 	u64			layer_cpus_seq;
@@ -972,11 +972,15 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 	struct layer *layer;
-	u32 cpu;
+	s32 task_cpu = scx_bpf_task_cpu(p);
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)) ||
 	    !(layer = lookup_layer(tctx->layer)))
 		return;
+
+	if (tctx->last_cpu >= 0 && tctx->last_cpu != task_cpu)
+		lstat_inc(LSTAT_MIGRATION, layer, cctx);
+	tctx->last_cpu = task_cpu;
 
 	if (vtime_before(layer->vtime_now, p->scx.dsq_vtime))
 		layer->vtime_now = p->scx.dsq_vtime;
@@ -985,14 +989,12 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	cctx->current_exclusive = layer->exclusive;
 	tctx->running_at = bpf_ktime_get_ns();
 
-	cpu = scx_bpf_task_cpu(p);
-
 	/*
 	 * If this CPU is transitioning from running an exclusive task to a
 	 * non-exclusive one, the sibling CPU has likely been idle. Wake it up.
 	 */
 	if (cctx->prev_exclusive && !cctx->current_exclusive) {
-		s32 sib = sibling_cpu(cpu);
+		s32 sib = sibling_cpu(task_cpu);
 		struct cpu_ctx *sib_cctx;
 
 		/*
@@ -1008,7 +1010,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	}
 
 	if (layer->perf > 0)
-		__COMPAT_scx_bpf_cpuperf_set(cpu, layer->perf);
+		__COMPAT_scx_bpf_cpuperf_set(task_cpu, layer->perf);
 
 	cctx->maybe_idle = false;
 }
@@ -1146,6 +1148,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	}
 
 	tctx->pid = p->pid;
+	tctx->last_cpu = -1;
 	tctx->layer = -1;
 	tctx->refresh_layer = true;
 

@@ -1172,6 +1172,7 @@ struct OpenMetricsStats {
     l_kick: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_yield: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_yield_ignore: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
+    l_migration: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_cur_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_min_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_max_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
@@ -1311,6 +1312,7 @@ impl OpenMetricsStats {
         );
         register!(l_yield, "% of scheduling events that yielded");
         register!(l_yield_ignore, "Number of times yield was ignored");
+	register!(l_migration, "% of scheduling events that migrated across CPUs");
         register!(l_cur_nr_cpus, "Current # of CPUs assigned to the layer");
         register!(l_min_nr_cpus, "Minimum # of CPUs assigned to the layer");
         register!(l_max_nr_cpus, "Maximum # of CPUs assigned to the layer");
@@ -1847,6 +1849,10 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 l_yield_ignore,
                 lstat(bpf_intf::layer_stat_idx_LSTAT_YIELD_IGNORE) as i64
             );
+            let l_migration = set!(
+                l_migration,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIGRATION)
+            );
             let l_cur_nr_cpus = set!(l_cur_nr_cpus, layer.nr_cpus as i64);
             let l_min_nr_cpus = set!(l_min_nr_cpus, self.nr_layer_cpus_min_max[lidx].0 as i64);
             let l_max_nr_cpus = set!(l_max_nr_cpus, self.nr_layer_cpus_min_max[lidx].1 as i64);
@@ -1884,9 +1890,10 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     width = header_width,
                 );
                 info!(
-                    "  {:<width$}  open_idle={} affn_viol={}",
+                    "  {:<width$}  open_idle={} mig={} affn_viol={}",
                     "",
                     fmt_pct(l_open_idle.get()),
+                    fmt_pct(l_migration.get()),
                     fmt_pct(l_affn_viol.get()),
                     width = header_width,
                 );
