@@ -65,6 +65,7 @@ enum layer_stat_idx {
 	LSTAT_EXCL_COLLISION,
 	LSTAT_EXCL_PREEMPT,
 	LSTAT_YIELD,
+	LSTAT_YIELD_IGNORE,
 	NR_LSTATS,
 };
 
@@ -110,6 +111,7 @@ struct layer {
 	unsigned int		idx;
 	u64			min_exec_ns;
 	u64			max_exec_ns;
+	u64			yield_step_ns;
 	bool			open;
 	bool			preempt;
 	bool			exclusive;

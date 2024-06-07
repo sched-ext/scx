@@ -168,6 +168,10 @@ lazy_static::lazy_static! {
 ///   is scheduled in, this is the minimum CPU time that it's charged no
 ///   matter how short the actual execution time may be.
 ///
+/// - yield_ignore: Yield ignore ratio. If 0.0, yield(2) forfeits a whole
+///   execution slice. 0.25 yields three quarters of an execution slice and
+///   so on. If 1.0, yield is completely ignored.
+///
 /// Both Grouped and Open layers also acception the following options:
 ///
 /// - preempt: If true, tasks in the layer will preempt tasks which belong
@@ -332,6 +336,8 @@ enum LayerKind {
         #[serde(default)]
         min_exec_us: u64,
         #[serde(default)]
+        yield_ignore: f64,
+        #[serde(default)]
         perf: u64,
     },
     Grouped {
@@ -341,21 +347,25 @@ enum LayerKind {
         #[serde(default)]
         min_exec_us: u64,
         #[serde(default)]
+        yield_ignore: f64,
+        #[serde(default)]
+        perf: u64,
+        #[serde(default)]
         preempt: bool,
         #[serde(default)]
         exclusive: bool,
-        #[serde(default)]
-        perf: u64,
     },
     Open {
         #[serde(default)]
         min_exec_us: u64,
         #[serde(default)]
+        yield_ignore: f64,
+        #[serde(default)]
+        perf: u64,
+        #[serde(default)]
         preempt: bool,
         #[serde(default)]
         exclusive: bool,
-        #[serde(default)]
-        perf: u64,
     },
 }
 
@@ -1143,6 +1153,7 @@ struct OpenMetricsStats {
     l_excl_collision: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_excl_preempt: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_yield: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_yield_ignore: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_cur_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_min_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_max_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
@@ -1269,6 +1280,7 @@ impl OpenMetricsStats {
             "Number of times a sibling CPU was preempted for an exclusive task"
         );
         register!(l_yield, "% of scheduling events that yielded");
+	register!(l_yield_ignore, "Number of times yield was ignored");
         register!(l_cur_nr_cpus, "Current # of CPUs assigned to the layer");
         register!(l_min_nr_cpus, "Minimum # of CPUs assigned to the layer");
         register!(l_max_nr_cpus, "Maximum # of CPUs assigned to the layer");
@@ -1301,7 +1313,7 @@ struct Scheduler<'a, 'b> {
 }
 
 impl<'a, 'b> Scheduler<'a, 'b> {
-    fn init_layers(skel: &mut OpenBpfSkel, specs: &Vec<LayerSpec>) -> Result<()> {
+    fn init_layers(skel: &mut OpenBpfSkel, opts: &Opts, specs: &Vec<LayerSpec>) -> Result<()> {
         skel.rodata_mut().nr_layers = specs.len() as u32;
         let mut perf_set = false;
 
@@ -1345,31 +1357,47 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
             match &spec.kind {
                 LayerKind::Confined {
-                    min_exec_us, perf, ..
-                } => {
-                    layer.min_exec_ns = min_exec_us * 1000;
-                    layer.perf = u32::try_from(*perf)?;
-                }
-                LayerKind::Open {
                     min_exec_us,
-                    preempt,
-                    exclusive,
+                    yield_ignore,
                     perf,
                     ..
                 }
                 | LayerKind::Grouped {
                     min_exec_us,
-                    preempt,
-                    exclusive,
+                    yield_ignore,
+                    perf,
+                    ..
+                }
+                | LayerKind::Open {
+                    min_exec_us,
+                    yield_ignore,
                     perf,
                     ..
                 } => {
-                    layer.open.write(true);
                     layer.min_exec_ns = min_exec_us * 1000;
-                    layer.preempt.write(*preempt);
-                    layer.exclusive.write(*exclusive);
+                    layer.yield_step_ns = if *yield_ignore > 0.999 {
+                        0
+                    } else if *yield_ignore < 0.001 {
+                        opts.slice_us * 1000
+                    } else {
+                        ((opts.slice_us * 1000) as f64 * (1.0 - *yield_ignore)) as u64
+                    };
                     layer.perf = u32::try_from(*perf)?;
                 }
+            }
+
+            match &spec.kind {
+                LayerKind::Open {
+                    preempt, exclusive, ..
+                }
+                | LayerKind::Grouped {
+                    preempt, exclusive, ..
+                } => {
+                    layer.open.write(true);
+                    layer.preempt.write(*preempt);
+                    layer.exclusive.write(*exclusive);
+                }
+                _ => {}
             }
 
             perf_set |= layer.perf > 0;
@@ -1421,7 +1449,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         for cpu in cpu_pool.all_cpus.iter_ones() {
             skel.rodata_mut().all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
-        Self::init_layers(&mut skel, layer_specs)?;
+        Self::init_layers(&mut skel, opts, layer_specs)?;
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
 
@@ -1596,6 +1624,16 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             }
         };
 
+        let fmt_num = |v: i64| {
+            if v > 1_000_000 {
+                format!("{:5.1}m", v as f64 / 1_000_000.0)
+            } else if v > 1_000 {
+                format!("{:5.1}k", v as f64 / 1_000.0)
+            } else {
+                format!("{:5.0} ", v)
+            }
+        };
+
         self.om_stats.total.set(total as i64);
         self.om_stats
             .local
@@ -1761,6 +1799,10 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT)
             );
             let l_yield = set!(l_yield, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_YIELD));
+            let l_yield_ignore = set!(
+                l_yield_ignore,
+                lstat(bpf_intf::layer_stat_idx_LSTAT_YIELD_IGNORE) as i64
+            );
             let l_cur_nr_cpus = set!(l_cur_nr_cpus, layer.nr_cpus as i64);
             let l_min_nr_cpus = set!(l_min_nr_cpus, self.nr_layer_cpus_min_max[lidx].0 as i64);
             let l_max_nr_cpus = set!(l_max_nr_cpus, self.nr_layer_cpus_min_max[lidx].1 as i64);
@@ -1787,12 +1829,13 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     width = header_width,
                 );
                 info!(
-                    "  {:<width$}  keep/max/busy={}/{}/{} yield={}",
+                    "  {:<width$}  keep/max/busy={}/{}/{} yield/ign={}/{}",
                     "",
                     fmt_pct(l_keep.get()),
                     fmt_pct(l_keep_fail_max_exec.get()),
                     fmt_pct(l_keep_fail_busy.get()),
                     fmt_pct(l_yield.get()),
+                    fmt_num(l_yield_ignore.get()),
                     width = header_width,
                 );
                 info!(
@@ -1910,6 +1953,7 @@ fn write_example_file(path: &str) -> Result<()> {
                     cpus_range: Some((0, 16)),
                     util_range: (0.8, 0.9),
                     min_exec_us: 1000,
+                    yield_ignore: 0.0,
                     perf: 1024,
                 },
             },
@@ -1922,6 +1966,7 @@ fn write_example_file(path: &str) -> Result<()> {
                 ]],
                 kind: LayerKind::Open {
                     min_exec_us: 100,
+                    yield_ignore: 0.25,
                     preempt: true,
                     exclusive: true,
                     perf: 1024,
@@ -1935,6 +1980,7 @@ fn write_example_file(path: &str) -> Result<()> {
                     cpus_range: None,
                     util_range: (0.5, 0.6),
                     min_exec_us: 200,
+                    yield_ignore: 0.0,
                     preempt: false,
                     exclusive: false,
                     perf: 1024,

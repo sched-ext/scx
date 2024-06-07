@@ -957,12 +957,30 @@ void BPF_STRUCT_OPS(layered_quiescent, struct task_struct *p, u64 deq_flags)
 bool BPF_STRUCT_OPS(layered_yield, struct task_struct *from, struct task_struct *to)
 {
 	struct cpu_ctx *cctx;
+	struct task_ctx *tctx;
+	struct layer *layer;
 
-	if (!(cctx = lookup_cpu_ctx(-1)))
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(from)) ||
+	    !(layer = lookup_layer(tctx->layer)))
 		return false;
 
-	cctx->yielding = true;
-	from->scx.slice = 0;
+	/*
+	 * Special-case 0 yield_step_ns. Yiedling is completely ignored and
+	 * the task is eligible for keep_running().
+	 */
+	if (!layer->yield_step_ns) {
+		lstat_inc(LSTAT_YIELD_IGNORE, layer, cctx);
+		return false;
+	}
+
+	if (from->scx.slice > layer->yield_step_ns) {
+		from->scx.slice -= layer->yield_step_ns;
+		lstat_inc(LSTAT_YIELD_IGNORE, layer, cctx);
+	} else {
+		from->scx.slice = 0;
+		cctx->yielding = true;
+	}
+
 	return false;
 }
 
