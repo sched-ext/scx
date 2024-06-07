@@ -118,7 +118,7 @@ if should_build_libbpf
   endforeach
 
   message('Fetching libbpf repo')
-  libbpf_commit = '6d3595d215b014d3eddb88038d686e1c20781534'
+  libbpf_commit = '42065ea6627ff6e1ab4c65e51042a70fbf30ff7c'
   run_command(fetch_libbpf, meson.current_build_dir(), libbpf_commit, check: true)
 
   make_jobs = 1
@@ -174,7 +174,7 @@ endif
 
 if should_build_bpftool
   message('Fetching bpftool repo')
-  bpftool_commit = '20ce6933869b70bacfdd0dd1a8399199290bf8ff'
+  bpftool_commit = '42065ea6627ff6e1ab4c65e51042a70fbf30ff7c'
   run_command(fetch_bpftool, meson.current_build_dir(), bpftool_commit, check: true)
 
   bpftool_target = custom_target('bpftool_target',

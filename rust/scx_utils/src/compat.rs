@@ -127,11 +127,11 @@ pub fn struct_has_field(type_name: &str, field: &str) -> Result<bool> {
     return Ok(false);
 }
 
-pub fn kfunc_exists(kfunc: &str) -> Result<bool> {
+pub fn ksym_exists(ksym: &str) -> Result<bool> {
     let btf: &btf = *VMLINUX_BTF;
 
-    let kfunc_name = CString::new(kfunc).unwrap();
-    let tid = unsafe { btf__find_by_name_kind(btf, kfunc_name.as_ptr(), BTF_KIND_FUNC) };
+    let ksym_name = CString::new(ksym).unwrap();
+    let tid = unsafe { btf__find_by_name(btf, ksym_name.as_ptr()) };
     Ok(tid >= 0)
 }
 
@@ -204,10 +204,27 @@ macro_rules! scx_ops_load {
             scx_utils::uei_set_size!($skel, $ops, $uei);
 
             let ops = $skel.struct_ops.[<$ops _mut>]();
-            let has_field = scx_utils::compat::struct_has_field("sched_ext_ops", "exit_dump_len")?;
-            if !has_field && ops.exit_dump_len != 0 {
+
+            if !scx_utils::compat::struct_has_field("sched_ext_ops", "exit_dump_len")?
+                && ops.exit_dump_len != 0 {
                 scx_utils::warn!("Kernel doesn't support setting exit dump len");
                 ops.exit_dump_len = 0;
+            }
+
+            if !scx_utils::compat::struct_has_field("sched_ext_ops", "tick")?
+                && ops.tick != std::ptr::null_mut() {
+                scx_utils::warn!("Kernel doesn't support ops.tick()");
+                ops.tick = std::ptr::null_mut();
+            }
+
+            if !scx_utils::compat::struct_has_field("sched_ext_ops", "dump")?
+                && (ops.dump != std::ptr::null_mut() ||
+                    ops.dump_cpu != std::ptr::null_mut() ||
+                    ops.dump_task != std::ptr::null_mut()) {
+                scx_utils::warn!("Kernel doesn't support ops.dump*()");
+                ops.dump = std::ptr::null_mut();
+                ops.dump_cpu = std::ptr::null_mut();
+                ops.dump_task = std::ptr::null_mut();
             }
 
             $skel.load().context("Failed to load BPF program")
@@ -252,8 +269,8 @@ mod tests {
     }
 
     #[test]
-    fn test_kfunc_exists() {
-        assert!(super::kfunc_exists("scx_bpf_consume").unwrap());
-        assert!(!super::kfunc_exists("NO_SUCH_KFUNC").unwrap());
+    fn test_ksym_exists() {
+        assert!(super::ksym_exists("scx_bpf_consume").unwrap());
+        assert!(!super::ksym_exists("NO_SUCH_KFUNC").unwrap());
     }
 }
