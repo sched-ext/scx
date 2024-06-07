@@ -469,6 +469,11 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	    !(layer = lookup_layer(tctx->layer)))
 		return;
 
+	if (cctx->yielding) {
+		lstat_inc(LSTAT_YIELD, layer, cctx);
+		cctx->yielding = false;
+	}
+
 	if (enq_flags & SCX_ENQ_REENQ) {
 		lstat_inc(LSTAT_ENQ_REENQ, layer, cctx);
 	} else {
@@ -677,7 +682,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	 * be extending slice from ops.tick() but that's not available in older
 	 * kernels, so let's make do with this for now.
 	 */
-	if (prev && keep_running(cctx, prev))
+	if (prev && !cctx->yielding && keep_running(cctx, prev))
 		return;
 
 	/*
@@ -935,6 +940,8 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	cctx->current_exclusive = false;
 
 	/* scale the execution time by the inverse of the weight and charge */
+	if (cctx->yielding && used < slice_ns)
+		used = slice_ns;
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 	cctx->maybe_idle = true;
 }
@@ -945,6 +952,18 @@ void BPF_STRUCT_OPS(layered_quiescent, struct task_struct *p, u64 deq_flags)
 
 	if ((tctx = lookup_task_ctx(p)))
 		adj_load(tctx->layer, -(s64)p->scx.weight, bpf_ktime_get_ns());
+}
+
+bool BPF_STRUCT_OPS(layered_yield, struct task_struct *from, struct task_struct *to)
+{
+	struct cpu_ctx *cctx;
+
+	if (!(cctx = lookup_cpu_ctx(-1)))
+		return false;
+
+	cctx->yielding = true;
+	from->scx.slice = 0;
+	return false;
 }
 
 void BPF_STRUCT_OPS(layered_set_weight, struct task_struct *p, u32 weight)
@@ -1259,6 +1278,7 @@ SCX_OPS_DEFINE(layered,
 	       .running			= (void *)layered_running,
 	       .stopping		= (void *)layered_stopping,
 	       .quiescent		= (void *)layered_quiescent,
+	       .yield			= (void *)layered_yield,
 	       .set_weight		= (void *)layered_set_weight,
 	       .set_cpumask		= (void *)layered_set_cpumask,
 	       .cpu_release		= (void *)layered_cpu_release,

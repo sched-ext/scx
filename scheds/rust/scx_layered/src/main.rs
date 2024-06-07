@@ -1142,6 +1142,7 @@ struct OpenMetricsStats {
     l_keep_fail_busy: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_excl_collision: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_excl_preempt: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_yield: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_cur_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_min_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_max_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
@@ -1267,6 +1268,7 @@ impl OpenMetricsStats {
             l_excl_preempt,
             "Number of times a sibling CPU was preempted for an exclusive task"
         );
+        register!(l_yield, "% of scheduling events that yielded");
         register!(l_cur_nr_cpus, "Current # of CPUs assigned to the layer");
         register!(l_min_nr_cpus, "Minimum # of CPUs assigned to the layer");
         register!(l_max_nr_cpus, "Maximum # of CPUs assigned to the layer");
@@ -1758,6 +1760,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 l_excl_preempt,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT)
             );
+            let l_yield = set!(l_yield, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_YIELD));
             let l_cur_nr_cpus = set!(l_cur_nr_cpus, layer.nr_cpus as i64);
             let l_min_nr_cpus = set!(l_min_nr_cpus, self.nr_layer_cpus_min_max[lidx].0 as i64);
             let l_max_nr_cpus = set!(l_max_nr_cpus, self.nr_layer_cpus_min_max[lidx].1 as i64);
@@ -1784,11 +1787,17 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     width = header_width,
                 );
                 info!(
-                    "  {:<width$}  keep/max/busy={}/{}/{} open_idle={} affn_viol={}",
+                    "  {:<width$}  keep/max/busy={}/{}/{} yield={}",
                     "",
                     fmt_pct(l_keep.get()),
                     fmt_pct(l_keep_fail_max_exec.get()),
                     fmt_pct(l_keep_fail_busy.get()),
+                    fmt_pct(l_yield.get()),
+                    width = header_width,
+                );
+                info!(
+                    "  {:<width$}  open_idle={} affn_viol={}",
+                    "",
                     fmt_pct(l_open_idle.get()),
                     fmt_pct(l_affn_viol.get()),
                     width = header_width,

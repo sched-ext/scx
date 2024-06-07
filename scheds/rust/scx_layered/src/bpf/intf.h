@@ -64,6 +64,7 @@ enum layer_stat_idx {
 	LSTAT_PREEMPT_FAIL,
 	LSTAT_EXCL_COLLISION,
 	LSTAT_EXCL_PREEMPT,
+	LSTAT_YIELD,
 	NR_LSTATS,
 };
 
@@ -72,6 +73,7 @@ struct cpu_ctx {
 	bool			current_exclusive;
 	bool			prev_exclusive;
 	bool			maybe_idle;
+	bool			yielding;
 	u64			layer_cycles[MAX_LAYERS];
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
