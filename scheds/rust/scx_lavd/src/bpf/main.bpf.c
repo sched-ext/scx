@@ -890,9 +890,9 @@ static bool test_and_clear_cpu_periodically(u32 cpu,
 	bool ret = false;
 
 	/*
-	 * If the CPU is on, we clear the bit once every eight times
+	 * If the CPU is on, we clear the bit once every four times
 	 * (LAVD_TC_CPU_PIN_INTERVAL_DIV). Hence, the bit will be
-	 * probabilistically cleared once every 200 msec (8 * 25 msec).
+	 * probabilistically cleared once every 100 msec (4 * 25 msec).
 	 */
 	if (!bpf_cpumask_test_cpu(cpu, cast_mask(cpumask)))
 		return false;
@@ -938,8 +938,17 @@ static void do_core_compaction(void)
 		cpu = cpu_order[i];
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc || !cpuc->is_online) {
+			/*
+			 * active_cpumask needs to be atomically updated since
+			 * there are concurrent writes -- one from
+			 * do_core_compaction() and another from
+			 * ops.dispatch(). On the other hand, ovrflw_cpumask
+			 * does not have such concurrent writes so that it can
+			 * be safely updated with a non-atomic (no LOCK prefix)
+			 * bitwise instruction.
+			 */
 			bpf_cpumask_test_and_clear_cpu(cpu, active);
-			bpf_cpumask_test_and_clear_cpu(cpu, ovrflw);
+			bpf_cpumask_clear_cpu(cpu, ovrflw);
 			continue;
 		}
 
@@ -949,18 +958,18 @@ static void do_core_compaction(void)
 		if (i < nr_cpus) {
 			if (i < nr_active) {
 				bpf_cpumask_test_and_set_cpu(cpu, active);
-				bpf_cpumask_test_and_clear_cpu(cpu, ovrflw);
+				bpf_cpumask_clear_cpu(cpu, ovrflw);
 			}
 			else {
 				bpf_cpumask_test_and_set_cpu(cpu, ovrflw);
-				bpf_cpumask_test_and_clear_cpu(cpu, active);
+				bpf_cpumask_clear_cpu(cpu, active);
 			}
 			scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
 		}
 		else {
 			if (i < nr_active_old) {
 				bpf_cpumask_test_and_clear_cpu(cpu, active);
-				bpf_cpumask_test_and_clear_cpu(cpu, ovrflw);
+				bpf_cpumask_clear_cpu(cpu, ovrflw);
 			}
 			else {
 				/*
@@ -978,7 +987,7 @@ static void do_core_compaction(void)
 				 * LAVD_TC_CPU_PIN_INTERVAL.
 				 */
 				test_and_clear_cpu_periodically(cpu, active);
-				bpf_cpumask_test_and_clear_cpu(cpu, ovrflw);
+				bpf_cpumask_clear_cpu(cpu, ovrflw);
 			}
 		}
 	}
