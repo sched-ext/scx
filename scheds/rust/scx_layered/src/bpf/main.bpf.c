@@ -463,11 +463,54 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	}
 }
 
+static __attribute__((always_inline))
+bool try_preempt(s32 cand, struct task_struct *p, struct cpu_ctx *cctx,
+		 struct task_ctx *tctx, struct layer *layer)
+{
+	struct cpu_ctx *cand_cctx, *sib_cctx = NULL;
+	s32 sib;
+
+	if (!bpf_cpumask_test_cpu(cand, p->cpus_ptr))
+		return false;
+
+	if (!(cand_cctx = lookup_cpu_ctx(cand)) || cand_cctx->current_preempt)
+		return false;
+
+	/*
+	 * If exclusive, we want to make sure the sibling CPU, if there's
+	 * one, is idle. However, if the sibling CPU is already running a
+	 * preempt task, we shouldn't kick it out.
+	 */
+	if (layer->exclusive && (sib = sibling_cpu(cand)) >= 0 &&
+	    (!(sib_cctx = lookup_cpu_ctx(sib)) || sib_cctx->current_preempt)) {
+		lstat_inc(LSTAT_EXCL_COLLISION, layer, cctx);
+		return false;
+	}
+
+	scx_bpf_kick_cpu(cand, SCX_KICK_PREEMPT);
+
+	/*
+	 * $sib_cctx is set iff @p is an exclusive task, a sibling CPU
+	 * exists which is not running a preempt task. Let's preempt the
+	 * sibling CPU so that it can become idle. The ->maybe_idle test is
+	 * inaccurate and racy but should be good enough for best-effort
+	 * optimization.
+	 */
+	if (sib_cctx && !sib_cctx->maybe_idle) {
+		lstat_inc(LSTAT_EXCL_PREEMPT, layer, cctx);
+		scx_bpf_kick_cpu(sib, SCX_KICK_PREEMPT);
+	}
+
+	lstat_inc(LSTAT_PREEMPT, layer, cctx);
+	return true;
+}
+
 void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 	struct layer *layer;
+	s32 task_cpu = scx_bpf_task_cpu(p);
 	u64 vtime = p->scx.dsq_vtime;
 	u32 idx;
 
@@ -514,7 +557,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 		if (!layer->open &&
 		    (layer_cpumask = lookup_layer_cpumask(tctx->layer)) &&
-		    !bpf_cpumask_test_cpu(scx_bpf_task_cpu(p), layer_cpumask))
+		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 
 		scx_bpf_dispatch(p, HI_FALLBACK_DSQ, slice_ns, enq_flags);
@@ -544,7 +587,7 @@ find_cpu:
 	if (!(enq_flags & SCX_ENQ_WAKEUP)) {
 		s32 cpu;
 
-		cpu = pick_idle_cpu(p, scx_bpf_task_cpu(p), cctx, tctx, layer);
+		cpu = pick_idle_cpu(p, task_cpu, cctx, tctx, layer);
 		if (cpu >= 0) {
 			lstat_inc(LSTAT_KICK, layer, cctx);
 			scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
@@ -555,51 +598,20 @@ find_cpu:
 	if (!layer->preempt)
 		return;
 
-	bpf_for(idx, 0, nr_possible_cpus) {
-		struct cpu_ctx *cand_cctx, *sib_cctx = NULL;
-		u32 cpu = (preempt_cursor + idx) % nr_possible_cpus;
-		s32 sib;
-
-		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-			continue;
-
-		if (!(cand_cctx = lookup_cpu_ctx(cpu)) || cand_cctx->current_preempt)
-			continue;
-
-		/*
-		 * If exclusive, we want to make sure the sibling CPU, if
-		 * there's one, is idle. However, if the sibling CPU is already
-		 * running a preempt task, we shouldn't kick it out.
-		 */
-		if (layer->exclusive && (sib = sibling_cpu(cpu)) >= 0 &&
-		    (!(sib_cctx = lookup_cpu_ctx(sib)) ||
-		     sib_cctx->current_preempt)) {
-			lstat_inc(LSTAT_EXCL_COLLISION, layer, cctx);
-			continue;
-		}
-
-		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-
-		/*
-		 * $sib_cctx is set iff @p is an exclusive task, a sibling CPU
-		 * exists which is not running a preempt task. Let's preempt the
-		 * sibling CPU so that it can become idle. The ->maybe_idle test
-		 * is inaccurate and racy but should be good enough for
-		 * best-effort optimization.
-		 */
-		if (sib_cctx && !sib_cctx->maybe_idle) {
-			lstat_inc(LSTAT_EXCL_PREEMPT, layer, cctx);
-			scx_bpf_kick_cpu(sib, SCX_KICK_PREEMPT);
-		}
-
-		/*
-		 * Round-robining doesn't have to be strict. Let's not bother
-		 * with atomic ops on $preempt_cursor.
-		 */
-		preempt_cursor = (cpu + 1) % nr_possible_cpus;
-
-		lstat_inc(LSTAT_PREEMPT, layer, cctx);
+	if (try_preempt(task_cpu, p, cctx, tctx, layer))
 		return;
+
+	bpf_for(idx, 0, nr_possible_cpus) {
+		s32 cand = (preempt_cursor + idx) % nr_possible_cpus;
+
+		if (try_preempt(cand, p, cctx, tctx, layer)) {
+			/*
+			 * Round-robining doesn't have to be strict. Let's
+			 * not bother with atomic ops on $preempt_cursor.
+			 */
+			preempt_cursor = (cand + 1) % nr_possible_cpus;
+			return;
+		}
 	}
 
 	lstat_inc(LSTAT_PREEMPT_FAIL, layer, cctx);
