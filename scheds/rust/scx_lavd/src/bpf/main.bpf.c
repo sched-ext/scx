@@ -2258,10 +2258,11 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * This is the first time a particular pinned user-space task
 		 * is run on this CPU at this interval. From now on, this CPU
 		 * will be part of the active CPU so can be used to run the
-		 * pinned task and the other tasks.
+		 * pinned task and the other tasks. Note that we don't need to
+		 * kick @cpu here since @cpu is the current CPU, which is
+		 * obviously not idle.
 		 */
 		bpf_cpumask_test_and_set_cpu(cpu, active);
-		scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
 
 release_break:
 		bpf_task_release(p);
