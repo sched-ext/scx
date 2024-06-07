@@ -14,6 +14,7 @@ char _license[] SEC("license") = "GPL";
 
 const volatile u32 debug = 0;
 const volatile u64 slice_ns = SCX_SLICE_DFL;
+const volatile u64 max_exec_ns = 20 * SCX_SLICE_DFL;
 const volatile u32 nr_possible_cpus = 1;
 const volatile u32 nr_layers = 1;
 const volatile bool smt_enabled = true;
@@ -564,6 +565,84 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	lstat_inc(LSTAT_PREEMPT_FAIL, layer, cctx);
 }
 
+static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
+{
+	struct task_ctx *tctx;
+	struct layer *layer;
+
+	if (!max_exec_ns)
+		return false;
+
+	/* does it wanna? */
+	if (!(p->scx.flags & SCX_TASK_QUEUED))
+		goto no;
+
+	if (!(tctx = lookup_task_ctx(p)) || !(layer = lookup_layer(tctx->layer)))
+		goto no;
+
+	/* @p has fully consumed its slice and still wants to run */
+	cctx->ran_current_for += slice_ns;
+
+	/*
+	 * There wasn't anything in the local or global DSQ, but there may be
+	 * tasks which are affine to this CPU in some other DSQs. Let's not run
+	 * for too long.
+	 */
+	if (cctx->ran_current_for > max_exec_ns) {
+		lstat_inc(LSTAT_KEEP_FAIL_MAX_EXEC, layer, cctx);
+		goto no;
+	}
+
+	/*
+	 * @p is eligible for continuing. We need to implement a better way to
+	 * determine whether a layer is allowed to keep running. For now,
+	 * implement something simple.
+	 */
+	if (layer->preempt) {
+		/*
+		 * @p is in an preempting layer. As long as the layer doesn't
+		 * have tasks waiting, keep running it. If there are multiple
+		 * competing preempting layers, this won't work well.
+		 */
+		if (!scx_bpf_dsq_nr_queued(layer->idx)) {
+			lstat_inc(LSTAT_KEEP, layer, cctx);
+			return true;
+		}
+	} else {
+		const struct cpumask *idle_cpumask;
+		bool has_idle = false;
+
+		if (!(idle_cpumask = scx_bpf_get_idle_cpumask()))
+			goto no;
+
+		/*
+		 * If @p is in an open layer, keep running if there's any idle
+		 * CPU. If confined, keep running iff the layer has idle CPUs.
+		 */
+		if (layer->open) {
+			has_idle = !bpf_cpumask_empty(idle_cpumask);
+		} else {
+			struct cpumask *layer_cpumask;
+
+			if ((layer_cpumask = lookup_layer_cpumask(layer->idx)))
+				has_idle = bpf_cpumask_intersects(idle_cpumask,
+								  layer_cpumask);
+		}
+
+		scx_bpf_put_idle_cpumask(idle_cpumask);
+
+		if (has_idle) {
+			lstat_inc(LSTAT_KEEP, layer, cctx);
+			return true;
+		}
+	}
+
+	lstat_inc(LSTAT_KEEP_FAIL_BUSY, layer, cctx);
+no:
+	cctx->ran_current_for = 0;
+	return false;
+}
+
 void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 {
 	s32 sib = sibling_cpu(cpu);
@@ -571,6 +650,21 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	int idx;
 
 	if (!(cctx = lookup_cpu_ctx(-1)))
+		return;
+
+	/*
+	 * if @prev was on SCX and is still runnable, we are here because @prev
+	 * has exhausted its slice. We may want to keep running it on this CPU
+	 * rather than giving this CPU to another task and then try to schedule
+	 * @prev somewhere else.
+	 *
+	 * Let's not dispatch any task if we want to keep running @prev. This
+	 * will trigger the automatic local enq behavior which will put @prev on
+	 * @cpu's local DSQ. A more straightforward way to implement this would
+	 * be extending slice from ops.tick() but that's not available in older
+	 * kernels, so let's make do with this for now.
+	 */
+	if (prev && keep_running(cctx, prev))
 		return;
 
 	/*

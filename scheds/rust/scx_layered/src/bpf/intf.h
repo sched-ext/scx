@@ -14,8 +14,10 @@
 #endif
 
 #ifndef __KERNEL__
-typedef unsigned long long u64;
+typedef int s32;
 typedef long long s64;
+typedef unsigned u32;
+typedef unsigned long long u64;
 #endif
 
 #include <scx/ravg.bpf.h>
@@ -52,6 +54,9 @@ enum layer_stat_idx {
 	LSTAT_MIN_EXEC_NS,
 	LSTAT_OPEN_IDLE,
 	LSTAT_AFFN_VIOL,
+	LSTAT_KEEP,
+	LSTAT_KEEP_FAIL_MAX_EXEC,
+	LSTAT_KEEP_FAIL_BUSY,
 	LSTAT_PREEMPT,
 	LSTAT_PREEMPT_FAIL,
 	LSTAT_EXCL_COLLISION,
@@ -67,6 +72,7 @@ struct cpu_ctx {
 	u64			layer_cycles[MAX_LAYERS];
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
+	u64			ran_current_for;
 };
 
 enum layer_match_kind {
@@ -98,6 +104,7 @@ struct layer {
 	unsigned int		nr_match_ors;
 	unsigned int		idx;
 	u64			min_exec_ns;
+	u64			max_exec_ns;
 	bool			open;
 	bool			preempt;
 	bool			exclusive;

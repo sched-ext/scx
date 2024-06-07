@@ -269,6 +269,13 @@ struct Opts {
     #[clap(short = 's', long, default_value = "20000")]
     slice_us: u64,
 
+    /// Maximum consecutive execution time in microseconds. A task may be
+    /// allowed to keep executing on a CPU for this long. Note that this is
+    /// the upper limit and a task may have to moved off the CPU earlier. 0
+    /// indicates default - 20 * slice_us.
+    #[clap(short = 'M', long, default_value = "0")]
+    max_exec_us: u64,
+
     /// Scheduling interval in seconds.
     #[clap(short = 'i', long, default_value = "0.1")]
     interval: f64,
@@ -1126,6 +1133,9 @@ struct OpenMetricsStats {
     l_preempt: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_preempt_fail: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_affn_viol: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_keep: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_keep_fail_max_exec: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_keep_fail_busy: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_excl_collision: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_excl_preempt: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_cur_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
@@ -1213,6 +1223,18 @@ impl OpenMetricsStats {
         register!(
             l_affn_viol,
             "% of scheduling events that violated configured policies due to CPU affinity restrictions"
+        );
+        register!(
+            l_keep,
+            "% of scheduling events that continued executing after slice expiration"
+        );
+        register!(
+            l_keep_fail_max_exec,
+            "% of scheduling events that weren't allowed to continue executing after slice expiration due to overrunning max_exec duration limit"
+        );
+        register!(
+            l_keep_fail_busy,
+            "% of scheduling events that weren't allowed to continue executing after slice expiration to accommodate other tasks"
         );
         register!(
             l_excl_collision,
@@ -1361,6 +1383,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         skel.rodata_mut().debug = opts.verbose as u32;
         skel.rodata_mut().slice_ns = opts.slice_us * 1000;
+        skel.rodata_mut().max_exec_ns = if opts.max_exec_us > 0 {
+            opts.max_exec_us * 1000
+        } else {
+            opts.slice_us * 1000 * 20
+        };
         skel.rodata_mut().nr_possible_cpus = *NR_POSSIBLE_CPUS as u32;
         skel.rodata_mut().smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
         for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
@@ -1524,7 +1551,8 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         let lsum = |idx| stats.bpf_stats.lstats_sums[idx as usize];
         let total = lsum(bpf_intf::layer_stat_idx_LSTAT_LOCAL)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_GLOBAL);
+            + lsum(bpf_intf::layer_stat_idx_LSTAT_GLOBAL)
+            + lsum(bpf_intf::layer_stat_idx_LSTAT_KEEP);
         let lsum_pct = |idx| {
             if total != 0 {
                 lsum(idx) as f64 / total as f64 * 100.0
@@ -1610,7 +1638,8 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
             let lstat = |sidx| stats.bpf_stats.lstats[lidx][sidx as usize];
             let ltotal = lstat(bpf_intf::layer_stat_idx_LSTAT_LOCAL)
-                + lstat(bpf_intf::layer_stat_idx_LSTAT_GLOBAL);
+                + lstat(bpf_intf::layer_stat_idx_LSTAT_GLOBAL)
+                + lstat(bpf_intf::layer_stat_idx_LSTAT_KEEP);
             let lstat_pct = |sidx| {
                 if ltotal != 0 {
                     lstat(sidx) as f64 / ltotal as f64 * 100.0
@@ -1666,6 +1695,15 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 l_affn_viol,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL)
             );
+            let l_keep = set!(l_keep, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP));
+            let l_keep_fail_max_exec = set!(
+                l_keep_fail_max_exec,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP_FAIL_MAX_EXEC)
+            );
+            let l_keep_fail_busy = set!(
+                l_keep_fail_busy,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP_FAIL_BUSY)
+            );
             let l_excl_collision = set!(
                 l_excl_collision,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION)
@@ -1695,6 +1733,14 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     fmt_pct(l_local.get()),
                     fmt_pct(l_open_idle.get()),
                     fmt_pct(l_affn_viol.get()),
+                    width = header_width,
+                );
+                info!(
+                    "  {:<width$}  keep/max/busy={}/{}/{}",
+                    "",
+                    fmt_pct(l_keep.get()),
+                    fmt_pct(l_keep_fail_max_exec.get()),
+                    fmt_pct(l_keep_fail_busy.get()),
                     width = header_width,
                 );
                 info!(
