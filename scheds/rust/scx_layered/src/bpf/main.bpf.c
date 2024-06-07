@@ -385,48 +385,30 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 	return scx_bpf_pick_idle_cpu(cand_cpumask, 0);
 }
 
-s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
+static __attribute__((always_inline))
+s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
+		  struct cpu_ctx *cctx, struct task_ctx *tctx, struct layer *layer)
 {
 	const struct cpumask *idle_smtmask;
 	struct cpumask *layer_cpumask, *layered_cpumask;
-	struct cpu_ctx *cctx;
-	struct task_ctx *tctx;
-	struct layer *layer;
 	s32 cpu;
 
 	/* look up everything we need */
-	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)) ||
-	    !(layered_cpumask = (struct cpumask *)tctx->layered_cpumask))
-		return prev_cpu;
-
-	/*
-	 * We usually update the layer in layered_runnable() to avoid confusion.
-	 * As layered_select_cpu() takes place before runnable, new tasks would
-	 * still have -1 layer. Just return @prev_cpu.
-	 */
-	if (tctx->layer < 0)
-		return prev_cpu;
-
-	if (!(layer = lookup_layer(tctx->layer)) ||
+	if (!(layered_cpumask = (struct cpumask *)tctx->layered_cpumask) ||
 	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)))
-		return prev_cpu;
+		return -1;
 
 	/* not much to do if bound to a single CPU */
-	if (p->nr_cpus_allowed == 1) {
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			lstat_inc(LSTAT_SEL_LOCAL, layer, cctx);
-			if (!layer->open &&
-			    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
-				lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
-			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
-		}
+	if (p->nr_cpus_allowed == 1 && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		if (!layer->open && !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
+			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 		return prev_cpu;
 	}
 
 	maybe_refresh_layered_cpumask(layered_cpumask, p, tctx, layer_cpumask);
 
 	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
-		return prev_cpu;
+		return -1;
 
 	/*
 	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
@@ -434,7 +416,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	 */
 	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
 				      idle_smtmask)) >= 0)
-		goto dispatch_local;
+		goto out_put;
 
 	/*
 	 * If the layer is an open one, we can try the whole machine.
@@ -443,18 +425,42 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	    ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu,
 				       idle_smtmask)) >= 0)) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cctx);
-		goto dispatch_local;
+		goto out_put;
 	}
 
-	cpu = prev_cpu;
-	goto out_put_idle_smtmask;
-
-dispatch_local:
-	lstat_inc(LSTAT_SEL_LOCAL, layer, cctx);
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
-out_put_idle_smtmask:
+	cpu = -1;
+out_put:
 	scx_bpf_put_idle_cpumask(idle_smtmask);
 	return cpu;
+}
+
+s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
+{
+	struct cpu_ctx *cctx;
+	struct task_ctx *tctx;
+	struct layer *layer;
+	s32 cpu;
+
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
+		return prev_cpu;
+
+	/*
+	 * We usually update the layer in layered_runnable() to avoid confusion.
+	 * As layered_select_cpu() takes place before runnable, new tasks would
+	 * still have -1 layer. Just return @prev_cpu.
+	 */
+	if (tctx->layer < 0 || !(layer = lookup_layer(tctx->layer)))
+		return prev_cpu;
+
+	cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx, layer);
+
+	if (cpu >= 0) {
+		lstat_inc(LSTAT_SEL_LOCAL, layer, cctx);
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		return cpu;
+	} else {
+		return prev_cpu;
+	}
 }
 
 void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
@@ -512,7 +518,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 
 		scx_bpf_dispatch(p, HI_FALLBACK_DSQ, slice_ns, enq_flags);
-		return;
+		goto find_cpu;
 	}
 
 	/*
@@ -525,10 +531,26 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!layer->open && !tctx->all_cpus_allowed) {
 		lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 		scx_bpf_dispatch(p, LO_FALLBACK_DSQ, slice_ns, enq_flags);
-		return;
+		goto find_cpu;
 	}
 
 	scx_bpf_dispatch_vtime(p, tctx->layer, slice_ns, vtime, enq_flags);
+
+find_cpu:
+	/*
+	 * If we aren't in the wakeup path, layered_select_cpu() hasn't run and
+	 * thus we haven't looked for and kicked an idle CPU. Let's do it now.
+	 */
+	if (!(enq_flags & SCX_ENQ_WAKEUP)) {
+		s32 cpu;
+
+		cpu = pick_idle_cpu(p, scx_bpf_task_cpu(p), cctx, tctx, layer);
+		if (cpu >= 0) {
+			lstat_inc(LSTAT_KICK, layer, cctx);
+			scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
+			return;
+		}
+	}
 
 	if (!layer->preempt)
 		return;
