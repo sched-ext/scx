@@ -2818,7 +2818,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	 *  - overflow CPUs: a pair of hyper-twin which will be used when there
 	 *    is no idle active CPUs.
 	 */
-	init_cpumasks();
+	err = init_cpumasks();
+	if (err)
+		return err;
 
 	/*
 	 * Switch all tasks to scx tasks.
