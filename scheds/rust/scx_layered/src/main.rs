@@ -172,14 +172,16 @@ lazy_static::lazy_static! {
 ///   execution slice. 0.25 yields three quarters of an execution slice and
 ///   so on. If 1.0, yield is completely ignored.
 ///
-/// Both Grouped and Open layers also acception the following options:
-///
 /// - preempt: If true, tasks in the layer will preempt tasks which belong
 ///   to other non-preempting layers when no idle CPUs are available.
 ///
 /// - exclusive: If true, tasks in the layer will occupy the whole core. The
 ///   other logical CPUs sharing the same core will be kept idle. This isn't
 ///   a hard guarantee, so don't depend on it for security purposes.
+///
+/// - perf: CPU performance target. 0 means no configuration. A value
+///   between 1 and 1024 indicates the performance level CPUs running tasks
+///   in this layer are configured to using scx_bpf_cpuperf_set().
 ///
 /// Similar to matches, adding new policies and extending existing ones
 /// should be relatively straightforward.
@@ -338,6 +340,10 @@ enum LayerKind {
         #[serde(default)]
         yield_ignore: f64,
         #[serde(default)]
+        preempt: bool,
+        #[serde(default)]
+        exclusive: bool,
+        #[serde(default)]
         perf: u64,
     },
     Grouped {
@@ -349,11 +355,11 @@ enum LayerKind {
         #[serde(default)]
         yield_ignore: f64,
         #[serde(default)]
-        perf: u64,
-        #[serde(default)]
         preempt: bool,
         #[serde(default)]
         exclusive: bool,
+        #[serde(default)]
+        perf: u64,
     },
     Open {
         #[serde(default)]
@@ -361,11 +367,11 @@ enum LayerKind {
         #[serde(default)]
         yield_ignore: f64,
         #[serde(default)]
-        perf: u64,
-        #[serde(default)]
         preempt: bool,
         #[serde(default)]
         exclusive: bool,
+        #[serde(default)]
+        perf: u64,
     },
 }
 
@@ -1365,18 +1371,24 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     min_exec_us,
                     yield_ignore,
                     perf,
+                    preempt,
+                    exclusive,
                     ..
                 }
                 | LayerKind::Grouped {
                     min_exec_us,
                     yield_ignore,
                     perf,
+                    preempt,
+                    exclusive,
                     ..
                 }
                 | LayerKind::Open {
                     min_exec_us,
                     yield_ignore,
                     perf,
+                    preempt,
+                    exclusive,
                     ..
                 } => {
                     layer.min_exec_ns = min_exec_us * 1000;
@@ -1387,20 +1399,15 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     } else {
                         ((opts.slice_us * 1000) as f64 * (1.0 - *yield_ignore)) as u64
                     };
+                    layer.preempt.write(*preempt);
+                    layer.exclusive.write(*exclusive);
                     layer.perf = u32::try_from(*perf)?;
                 }
             }
 
             match &spec.kind {
-                LayerKind::Open {
-                    preempt, exclusive, ..
-                }
-                | LayerKind::Grouped {
-                    preempt, exclusive, ..
-                } => {
+                LayerKind::Open { .. } | LayerKind::Grouped { .. } => {
                     layer.open.write(true);
-                    layer.preempt.write(*preempt);
-                    layer.exclusive.write(*exclusive);
                 }
                 _ => {}
             }
@@ -1871,7 +1878,9 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     width = header_width
                 );
                 match &layer.kind {
-                    LayerKind::Grouped { exclusive, .. } | LayerKind::Open { exclusive, .. } => {
+                    LayerKind::Confined { exclusive, .. }
+                    | LayerKind::Grouped { exclusive, .. }
+                    | LayerKind::Open { exclusive, .. } => {
                         if *exclusive {
                             info!(
                                 "  {:<width$}  excl_coll={} excl_preempt={}",
@@ -1889,7 +1898,6 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                             );
                         }
                     }
-                    _ => (),
                 }
             }
             self.nr_layer_cpus_min_max[lidx] = (layer.nr_cpus, layer.nr_cpus);
@@ -1961,6 +1969,8 @@ fn write_example_file(path: &str) -> Result<()> {
                     util_range: (0.8, 0.9),
                     min_exec_us: 1000,
                     yield_ignore: 0.0,
+                    preempt: false,
+                    exclusive: false,
                     perf: 1024,
                 },
             },
