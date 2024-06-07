@@ -414,7 +414,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	/* not much to do if bound to a single CPU */
 	if (p->nr_cpus_allowed == 1) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			lstat_inc(LSTAT_LOCAL, layer, cctx);
+			lstat_inc(LSTAT_SEL_LOCAL, layer, cctx);
 			if (!layer->open &&
 			    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
 				lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
@@ -450,7 +450,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	goto out_put_idle_smtmask;
 
 dispatch_local:
-	lstat_inc(LSTAT_LOCAL, layer, cctx);
+	lstat_inc(LSTAT_SEL_LOCAL, layer, cctx);
 	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
 out_put_idle_smtmask:
 	scx_bpf_put_idle_cpumask(idle_smtmask);
@@ -469,7 +469,20 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	    !(layer = lookup_layer(tctx->layer)))
 		return;
 
-	lstat_inc(LSTAT_GLOBAL, layer, cctx);
+	if (enq_flags & SCX_ENQ_REENQ) {
+		lstat_inc(LSTAT_ENQ_REENQ, layer, cctx);
+	} else {
+		if (enq_flags & SCX_ENQ_LAST) {
+			lstat_inc(LSTAT_ENQ_LAST, layer, cctx);
+			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
+			return;
+		}
+
+		if (enq_flags & SCX_ENQ_WAKEUP)
+			lstat_inc(LSTAT_ENQ_WAKEUP, layer, cctx);
+		else
+			lstat_inc(LSTAT_ENQ_EXPIRE, layer, cctx);
+	}
 
 	/*
 	 * Limit the amount of budget that an idling task can accumulate
@@ -959,6 +972,12 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 		bpf_cpumask_subset((const struct cpumask *)all_cpumask, cpumask);
 }
 
+void BPF_STRUCT_OPS(layered_cpu_release, s32 cpu,
+		    struct scx_cpu_release_args *args)
+{
+	scx_bpf_reenqueue_local();
+}
+
 s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
@@ -1242,9 +1261,11 @@ SCX_OPS_DEFINE(layered,
 	       .quiescent		= (void *)layered_quiescent,
 	       .set_weight		= (void *)layered_set_weight,
 	       .set_cpumask		= (void *)layered_set_cpumask,
+	       .cpu_release		= (void *)layered_cpu_release,
 	       .init_task		= (void *)layered_init_task,
 	       .exit_task		= (void *)layered_exit_task,
 	       .dump			= (void *)layered_dump,
 	       .init			= (void *)layered_init,
 	       .exit			= (void *)layered_exit,
+	       .flags			= SCX_OPS_ENQ_LAST,
 	       .name			= "layered");

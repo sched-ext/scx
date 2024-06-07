@@ -1126,7 +1126,11 @@ struct OpenMetricsStats {
     l_load_frac: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_tasks: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_total: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
-    l_local: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_sel_local: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_enq_wakeup: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_enq_expire: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_enq_last: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_enq_reenq: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_min_exec: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_min_exec_us: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_open_idle: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
@@ -1199,7 +1203,26 @@ impl OpenMetricsStats {
         register!(l_load_frac, "Fraction of total load consumed by the layer");
         register!(l_tasks, "Number of tasks in the layer");
         register!(l_total, "Number of scheduling events in the layer");
-        register!(l_local, "% of scheduling events directly into an idle CPU");
+        register!(
+            l_sel_local,
+            "% of scheduling events directly into an idle CPU"
+        );
+        register!(
+            l_enq_wakeup,
+            "% of scheduling events enqueued to layer after wakeup"
+        );
+        register!(
+            l_enq_expire,
+            "% of scheduling events enqueued to layer after slice expiration"
+        );
+        register!(
+            l_enq_last,
+            "% of scheduling events enqueued as last runnable task on CPU"
+        );
+        register!(
+            l_enq_reenq,
+            "% of scheduling events re-enqueued due to RT preemption"
+        );
         register!(
             l_min_exec,
             "Number of times execution duration was shorter than min_exec_us"
@@ -1550,9 +1573,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         self.prev_processing_dur = self.processing_dur;
 
         let lsum = |idx| stats.bpf_stats.lstats_sums[idx as usize];
-        let total = lsum(bpf_intf::layer_stat_idx_LSTAT_LOCAL)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_GLOBAL)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_KEEP);
+        let total = lsum(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
+            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
+            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
+            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST)
+            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ);
         let lsum_pct = |idx| {
             if total != 0 {
                 lsum(idx) as f64 / total as f64 * 100.0
@@ -1572,7 +1597,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         self.om_stats.total.set(total as i64);
         self.om_stats
             .local
-            .set(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_LOCAL));
+            .set(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL));
         self.om_stats
             .open_idle
             .set(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE));
@@ -1637,9 +1662,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
             let lstat = |sidx| stats.bpf_stats.lstats[lidx][sidx as usize];
-            let ltotal = lstat(bpf_intf::layer_stat_idx_LSTAT_LOCAL)
-                + lstat(bpf_intf::layer_stat_idx_LSTAT_GLOBAL)
-                + lstat(bpf_intf::layer_stat_idx_LSTAT_KEEP);
+            let ltotal = lstat(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
+                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
+                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
+                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST)
+                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ);
             let lstat_pct = |sidx| {
                 if ltotal != 0 {
                     lstat(sidx) as f64 / ltotal as f64 * 100.0
@@ -1673,7 +1700,26 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             );
             let l_tasks = set!(l_tasks, stats.nr_layer_tasks[lidx] as i64);
             let l_total = set!(l_total, ltotal as i64);
-            let l_local = set!(l_local, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_LOCAL));
+            let l_sel_local = set!(
+                l_sel_local,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
+            );
+            let l_enq_wakeup = set!(
+                l_enq_wakeup,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
+            );
+            let l_enq_expire = set!(
+                l_enq_expire,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
+            );
+            let l_enq_last = set!(
+                l_enq_last,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST)
+            );
+            let l_enq_reenq = set!(
+                l_enq_reenq,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ)
+            );
             let l_min_exec = set!(
                 l_min_exec,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC)
@@ -1727,20 +1773,24 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     width = header_width,
                 );
                 info!(
-                    "  {:<width$}  tot={:7} local={} open_idle={} affn_viol={}",
+                    "  {:<width$}  tot={:7} local={} wake/exp/last/reenq={}/{}/{}/{}",
                     "",
                     l_total.get(),
-                    fmt_pct(l_local.get()),
-                    fmt_pct(l_open_idle.get()),
-                    fmt_pct(l_affn_viol.get()),
+                    fmt_pct(l_sel_local.get()),
+                    fmt_pct(l_enq_wakeup.get()),
+                    fmt_pct(l_enq_expire.get()),
+                    fmt_pct(l_enq_last.get()),
+                    fmt_pct(l_enq_reenq.get()),
                     width = header_width,
                 );
                 info!(
-                    "  {:<width$}  keep/max/busy={}/{}/{}",
+                    "  {:<width$}  keep/max/busy={}/{}/{} open_idle={} affn_viol={}",
                     "",
                     fmt_pct(l_keep.get()),
                     fmt_pct(l_keep_fail_max_exec.get()),
                     fmt_pct(l_keep_fail_busy.get()),
+                    fmt_pct(l_open_idle.get()),
+                    fmt_pct(l_affn_viol.get()),
                     width = header_width,
                 );
                 info!(
