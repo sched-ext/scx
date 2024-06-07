@@ -61,6 +61,8 @@ enum layer_stat_idx {
 	LSTAT_KEEP_FAIL_MAX_EXEC,
 	LSTAT_KEEP_FAIL_BUSY,
 	LSTAT_PREEMPT,
+	LSTAT_PREEMPT_FIRST,
+	LSTAT_PREEMPT_IDLE,
 	LSTAT_PREEMPT_FAIL,
 	LSTAT_EXCL_COLLISION,
 	LSTAT_EXCL_PREEMPT,
@@ -76,6 +78,7 @@ struct cpu_ctx {
 	bool			prev_exclusive;
 	bool			maybe_idle;
 	bool			yielding;
+	bool			try_preempt_first;
 	u64			layer_cycles[MAX_LAYERS];
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
@@ -115,6 +118,7 @@ struct layer {
 	u64			yield_step_ns;
 	bool			open;
 	bool			preempt;
+	bool			preempt_first;
 	bool			exclusive;
 
 	u64			vtime_now;

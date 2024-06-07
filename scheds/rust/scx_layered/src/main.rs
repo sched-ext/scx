@@ -175,6 +175,9 @@ lazy_static::lazy_static! {
 /// - preempt: If true, tasks in the layer will preempt tasks which belong
 ///   to other non-preempting layers when no idle CPUs are available.
 ///
+/// - preempt_first: If true, tasks in the layer will try to preempt tasks
+///   in their previous CPUs before trying to find idle CPUs.
+///
 /// - exclusive: If true, tasks in the layer will occupy the whole core. The
 ///   other logical CPUs sharing the same core will be kept idle. This isn't
 ///   a hard guarantee, so don't depend on it for security purposes.
@@ -342,6 +345,8 @@ enum LayerKind {
         #[serde(default)]
         preempt: bool,
         #[serde(default)]
+        preempt_first: bool,
+        #[serde(default)]
         exclusive: bool,
         #[serde(default)]
         perf: u64,
@@ -357,6 +362,8 @@ enum LayerKind {
         #[serde(default)]
         preempt: bool,
         #[serde(default)]
+        preempt_first: bool,
+        #[serde(default)]
         exclusive: bool,
         #[serde(default)]
         perf: u64,
@@ -368,6 +375,8 @@ enum LayerKind {
         yield_ignore: f64,
         #[serde(default)]
         preempt: bool,
+        #[serde(default)]
+        preempt_first: bool,
         #[serde(default)]
         exclusive: bool,
         #[serde(default)]
@@ -1151,6 +1160,8 @@ struct OpenMetricsStats {
     l_min_exec_us: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_open_idle: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_preempt: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_preempt_first: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_preempt_idle: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_preempt_fail: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_affn_viol: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_keep: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
@@ -1257,6 +1268,14 @@ impl OpenMetricsStats {
         register!(
             l_preempt,
             "% of scheduling events that preempted other tasks"
+        );
+        register!(
+            l_preempt_first,
+            "% of scheduling events that first-preempted other tasks"
+        );
+        register!(
+            l_preempt_idle,
+            "% of scheduling events that idle-preempted other tasks"
         );
         register!(
             l_preempt_fail,
@@ -1372,6 +1391,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     yield_ignore,
                     perf,
                     preempt,
+                    preempt_first,
                     exclusive,
                     ..
                 }
@@ -1380,6 +1400,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     yield_ignore,
                     perf,
                     preempt,
+                    preempt_first,
                     exclusive,
                     ..
                 }
@@ -1388,6 +1409,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     yield_ignore,
                     perf,
                     preempt,
+                    preempt_first,
                     exclusive,
                     ..
                 } => {
@@ -1400,6 +1422,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                         ((opts.slice_us * 1000) as f64 * (1.0 - *yield_ignore)) as u64
                     };
                     layer.preempt.write(*preempt);
+                    layer.preempt_first.write(*preempt_first);
                     layer.exclusive.write(*exclusive);
                     layer.perf = u32::try_from(*perf)?;
                 }
@@ -1785,6 +1808,14 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE)
             );
             let l_preempt = set!(l_preempt, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT));
+            let l_preempt_first = set!(
+                l_preempt_first,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FIRST)
+            );
+            let l_preempt_idle = set!(
+                l_preempt_idle,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_IDLE)
+            );
             let l_preempt_fail = set!(
                 l_preempt_fail,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FAIL)
@@ -1860,9 +1891,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     width = header_width,
                 );
                 info!(
-                    "  {:<width$}  preempt/fail={}/{} min_exec={}/{:7.2}ms",
+                    "  {:<width$}  preempt/first/idle/fail={}/{}/{}/{} min_exec={}/{:7.2}ms",
                     "",
                     fmt_pct(l_preempt.get()),
+                    fmt_pct(l_preempt_first.get()),
+                    fmt_pct(l_preempt_idle.get()),
                     fmt_pct(l_preempt_fail.get()),
                     fmt_pct(l_min_exec.get()),
                     l_min_exec_us.get() as f64 / 1000.0,
@@ -1970,6 +2003,7 @@ fn write_example_file(path: &str) -> Result<()> {
                     min_exec_us: 1000,
                     yield_ignore: 0.0,
                     preempt: false,
+                    preempt_first: false,
                     exclusive: false,
                     perf: 1024,
                 },
@@ -1985,6 +2019,7 @@ fn write_example_file(path: &str) -> Result<()> {
                     min_exec_us: 100,
                     yield_ignore: 0.25,
                     preempt: true,
+                    preempt_first: false,
                     exclusive: true,
                     perf: 1024,
                 },
@@ -1999,6 +2034,7 @@ fn write_example_file(path: &str) -> Result<()> {
                     min_exec_us: 200,
                     yield_ignore: 0.0,
                     preempt: false,
+                    preempt_first: false,
                     exclusive: false,
                     perf: 1024,
                 },
