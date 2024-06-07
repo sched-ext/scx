@@ -204,10 +204,27 @@ macro_rules! scx_ops_load {
             scx_utils::uei_set_size!($skel, $ops, $uei);
 
             let ops = $skel.struct_ops.[<$ops _mut>]();
-            let has_field = scx_utils::compat::struct_has_field("sched_ext_ops", "exit_dump_len")?;
-            if !has_field && ops.exit_dump_len != 0 {
+
+            if !scx_utils::compat::struct_has_field("sched_ext_ops", "exit_dump_len")?
+                && ops.exit_dump_len != 0 {
                 scx_utils::warn!("Kernel doesn't support setting exit dump len");
                 ops.exit_dump_len = 0;
+            }
+
+            if !scx_utils::compat::struct_has_field("sched_ext_ops", "tick")?
+                && ops.tick != std::ptr::null_mut() {
+                scx_utils::warn!("Kernel doesn't support ops.tick()");
+                ops.tick = std::ptr::null_mut();
+            }
+
+            if !scx_utils::compat::struct_has_field("sched_ext_ops", "dump")?
+                && (ops.dump != std::ptr::null_mut() ||
+                    ops.dump_cpu != std::ptr::null_mut() ||
+                    ops.dump_task != std::ptr::null_mut()) {
+                scx_utils::warn!("Kernel doesn't support ops.dump*()");
+                ops.dump = std::ptr::null_mut();
+                ops.dump_cpu = std::ptr::null_mut();
+                ops.dump_task = std::ptr::null_mut();
             }
 
             $skel.load().context("Failed to load BPF program")
