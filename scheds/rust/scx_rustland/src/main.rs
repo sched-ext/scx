@@ -261,6 +261,7 @@ struct Scheduler<'a> {
     task_pool: TaskTree,   // tasks ordered by vruntime
     task_map: TaskInfoMap, // map pids to the corresponding task information
     min_vruntime: u64,     // Keep track of the minimum vruntime across all tasks
+    max_vruntime: u64,     // Keep track of the maximum vruntime across all tasks
     slice_ns: u64,         // Default time slice (in ns)
     slice_boost: u64,      // Slice booster
     init_page_faults: u64, // Initial page faults counter
@@ -292,8 +293,9 @@ impl<'a> Scheduler<'a> {
         // Scheduler task map to store tasks information.
         let task_map = TaskInfoMap::new();
 
-        // Initialize global minimum vruntime.
+        // Initialize global minimum and maximum vruntime.
         let min_vruntime: u64 = 0;
+        let max_vruntime: u64 = 0;
 
         // Initialize initial page fault counter.
         let init_page_faults: u64 = 0;
@@ -319,6 +321,7 @@ impl<'a> Scheduler<'a> {
             task_pool,
             task_map,
             min_vruntime,
+            max_vruntime,
             slice_ns,
             slice_boost,
             init_page_faults,
@@ -438,6 +441,9 @@ impl<'a> Scheduler<'a> {
         // current task for too long in the scheduler task pool.
         task_info.vruntime = self.min_vruntime + slice.clamp(1, self.slice_ns);
 
+        // Update maximum vruntime.
+        self.max_vruntime = self.max_vruntime.max(task_info.vruntime);
+
         // Update total task cputime.
         task_info.sum_exec_runtime = task.sum_exec_runtime;
 
@@ -504,7 +510,15 @@ impl<'a> Scheduler<'a> {
         // This allows to have more tasks sitting in the task pool, reducing the pressure on the
         // dispatcher queues and giving a chance to higher priority tasks to come in and get
         // dispatched earlier, mitigating potential priority inversion issues.
-        for _ in 0..self.nr_idle_cpus().max(1) {
+        let delta_slice = self.max_vruntime - self.min_vruntime;
+        let nr_tasks = if delta_slice <= self.slice_ns {
+            self.nr_idle_cpus().max(1)
+        } else {
+            // Scheduler is getting congested, flush all tasks that are waiting to be scheduled to
+            // mitigate excessive starvation.
+            usize::MAX
+        };
+        for _ in 0..nr_tasks {
             match self.task_pool.pop() {
                 Some(task) => {
                     // Determine the task's virtual time slice.
@@ -682,7 +696,14 @@ impl<'a> Scheduler<'a> {
     // Print internal scheduler statistics (fetched from the BPF part).
     fn print_stats(&mut self) {
         // Show minimum vruntime (this should be constantly incrementing).
-        info!("vruntime={}", self.min_vruntime);
+        let delta = self.max_vruntime - self.min_vruntime;
+        info!(
+            "min_vruntime={} max_vruntime={} delta={}us slice={}us",
+            self.min_vruntime,
+            self.max_vruntime,
+            delta / NSEC_PER_USEC,
+            self.slice_ns / NSEC_PER_USEC,
+        );
 
         // Show the total amount of tasks currently monitored by the scheduler.
         info!("  tasks={}", self.task_map.tasks.len());
