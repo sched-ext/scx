@@ -48,7 +48,11 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 /// See the more detailed overview of the LAVD design at main.bpf.c.
 #[derive(Debug, Parser)]
 struct Opts {
-    /// Diable frequency scaling by scx_lavd
+    /// Disable core compaction, which uses minimum CPUs for power saving, and always use all the online CPUs.
+    #[clap(long = "no-core-compaction", action = clap::ArgAction::SetTrue)]
+    no_core_compaction: bool,
+
+    /// Disable frequency scaling by scx_lavd
     #[clap(long = "no-freq-scaling", action = clap::ArgAction::SetTrue)]
     no_freq_scaling: bool,
 
@@ -120,11 +124,23 @@ impl<'a> Scheduler<'a> {
         skel_builder.obj_builder.debug(opts.verbose > 0);
         let mut skel = scx_ops_open!(skel_builder, lavd_ops)?;
 
-        // Initialize skel according to @opts.
+        // Initialize CPU order topologically sorted by cpu, core, LLC, and NUMA.
         let topo = Topology::new().expect("Failed to build host topology");
+        for node in topo.nodes().iter() {
+            for llc in node.llcs().values() {
+                for core in llc.cores().values() {
+                    for (cpu_id, cpu) in core.cpus().iter() {
+                        skel.rodata_mut().cpu_order[*cpu_id] = cpu.id() as u16;
+                    }
+                }
+            }
+        }
+
+        // Initialize skel according to @opts.
         let nr_cpus_onln = topo.span().weight() as u64;
         skel.bss_mut().nr_cpus_onln = nr_cpus_onln;
         skel.struct_ops.lavd_ops_mut().exit_dump_len = opts.exit_dump_len;
+        skel.rodata_mut().no_core_compaction = opts.no_core_compaction;
         skel.rodata_mut().no_freq_scaling = opts.no_freq_scaling;
         skel.rodata_mut().verbose = opts.verbose;
         let intrspc = introspec::init(opts);
@@ -172,28 +188,28 @@ impl<'a> Scheduler<'a> {
 
         if mseq % 32 == 1 {
             info!(
-                "| {:9} | {:8} | {:17} \
+                "| {:6} | {:8} | {:17} \
                    | {:4} | {:4} | {:9} \
-                   | {:9} | {:10} | {:9} \
-                   | {:8} | {:7} | {:12} \
-                   | {:7} | {:9} | {:9} \
+                   | {:6} | {:8} | {:7} \
+                   | {:8} | {:7} | {:8} \
+                   | {:7} | {:7} | {:9} \
                    | {:9} | {:9} | {:9} \
                    | {:8} | {:8} | {:8} \
-                   | {:6} |",
+                   | {:6} | {:6} | ",
                 "mseq",
                 "pid",
                 "comm",
                 "cpu",
                 "vtmc",
                 "vddln_ns",
-                "elglty_ns",
-                "slice_ns",
+                "eli_ns",
+                "slc_ns",
                 "grdy_rt",
                 "lat_prio",
                 "avg_lc",
-                "static_prio",
+                "st_prio",
                 "lat_bst",
-                "slice_bst",
+                "slc_bst",
                 "run_freq",
                 "run_tm_ns",
                 "wait_freq",
@@ -201,7 +217,8 @@ impl<'a> Scheduler<'a> {
                 "perf_cri",
                 "avg_pc",
                 "cpu_util",
-                "sys_ld"
+                "sys_ld",
+                "nr_act",
             );
         }
 
@@ -210,14 +227,14 @@ impl<'a> Scheduler<'a> {
         let tx_comm: &str = c_tx_cm_str.to_str().unwrap();
 
         info!(
-            "| {:9} | {:8} | {:17} \
+            "| {:6} | {:8} | {:17} \
                | {:4} | {:4} | {:9} \
-               | {:9} | {:10} | {:9} \
-               | {:8} | {:7} | {:12} \
-               | {:7} | {:9} | {:9} \
+               | {:6} | {:8} | {:7} \
+               | {:8} | {:7} | {:8} \
+               | {:7} | {:7} | {:9} \
                | {:9} | {:9} | {:9} \
                | {:8} | {:8} | {:8} \
-               | {:6} |",
+               | {:6} | {:6} |",
             mseq,
             tx.pid,
             tx_comm,
@@ -239,7 +256,8 @@ impl<'a> Scheduler<'a> {
             tc.perf_cri,
             tx.avg_perf_cri,
             tx.cpu_util,
-            tx.sys_load_factor
+            tx.sys_load_factor,
+            tx.nr_active,
         );
 
         0
