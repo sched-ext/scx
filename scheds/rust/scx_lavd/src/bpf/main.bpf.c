@@ -2177,7 +2177,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 static bool is_kernel_task(struct task_struct *p)
 {
-	return p->mm == NULL;
+	return p->flags & PF_KTHREAD;
 }
 
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
