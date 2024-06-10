@@ -439,12 +439,10 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 */
 	if (from_selcpu && should_try_preempt_first(prev_cpu, layer, layered_cpumask)) {
 		cctx->try_preempt_first = true;
-		cpu = -1;
-		goto out_put;
+		return -1;
 	}
 
-	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
-		return -1;
+	idle_smtmask = scx_bpf_get_idle_smtmask();
 
 	/*
 	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
@@ -660,8 +658,9 @@ find_cpu:
 		 * run and thus we haven't looked for and kicked an idle CPU.
 		 * Let's do it now.
 		 */
-		if (!(enq_flags & SCX_ENQ_WAKEUP))
-			pick_idle_cpu_and_kick(p, task_cpu, cctx, tctx, layer);
+		if (!(enq_flags & SCX_ENQ_WAKEUP) &&
+		    pick_idle_cpu_and_kick(p, task_cpu, cctx, tctx, layer))
+			return;
 		if (!layer->preempt)
 			return;
 		if (try_preempt(task_cpu, p, cctx, tctx, layer, false))
@@ -689,7 +688,7 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 	struct task_ctx *tctx;
 	struct layer *layer;
 
-	if (!max_exec_ns)
+	if (cctx->yielding || !max_exec_ns)
 		return false;
 
 	/* does it wanna? */
@@ -728,11 +727,8 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 			return true;
 		}
 	} else {
-		const struct cpumask *idle_cpumask;
+		const struct cpumask *idle_cpumask = scx_bpf_get_idle_cpumask();
 		bool has_idle = false;
-
-		if (!(idle_cpumask = scx_bpf_get_idle_cpumask()))
-			goto no;
 
 		/*
 		 * If @p is in an open layer, keep running if there's any idle
@@ -783,7 +779,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	 * be extending slice from ops.tick() but that's not available in older
 	 * kernels, so let's make do with this for now.
 	 */
-	if (prev && !cctx->yielding && keep_running(cctx, prev))
+	if (prev && keep_running(cctx, prev))
 		return;
 
 	/*
