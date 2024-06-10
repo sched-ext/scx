@@ -140,7 +140,7 @@ struct {
 } stats SEC(".maps");
 
 
-static __attribute__((always_inline)) void stat_inc(u32 idx)
+static __always_inline void stat_inc(u32 idx)
 {
 	u64 *cnt_p = bpf_map_lookup_elem(&stats, &idx);
 	if (cnt_p)
@@ -157,7 +157,7 @@ static const struct cpumask *cast_mask(struct bpf_cpumask *mask)
 	return (const struct cpumask *)mask;
 }
 
-static  __attribute__((always_inline)) void
+static __always_inline void
 try_make_core_reserved(s32 cpu, struct bpf_cpumask * reserved, bool promotion)
 {
 	s32 tmp_nr_reserved;

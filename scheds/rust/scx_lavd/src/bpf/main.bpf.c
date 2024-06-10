@@ -539,7 +539,7 @@ static void flip_sys_stat(void)
 	WRITE_ONCE(__sys_stat_idx, __sys_stat_idx ^ 0x1);
 }
 
-static __attribute__((always_inline))
+static __always_inline
 int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();

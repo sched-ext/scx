@@ -168,14 +168,23 @@ lazy_static::lazy_static! {
 ///   is scheduled in, this is the minimum CPU time that it's charged no
 ///   matter how short the actual execution time may be.
 ///
-/// Both Grouped and Open layers also acception the following options:
+/// - yield_ignore: Yield ignore ratio. If 0.0, yield(2) forfeits a whole
+///   execution slice. 0.25 yields three quarters of an execution slice and
+///   so on. If 1.0, yield is completely ignored.
 ///
 /// - preempt: If true, tasks in the layer will preempt tasks which belong
 ///   to other non-preempting layers when no idle CPUs are available.
 ///
+/// - preempt_first: If true, tasks in the layer will try to preempt tasks
+///   in their previous CPUs before trying to find idle CPUs.
+///
 /// - exclusive: If true, tasks in the layer will occupy the whole core. The
 ///   other logical CPUs sharing the same core will be kept idle. This isn't
 ///   a hard guarantee, so don't depend on it for security purposes.
+///
+/// - perf: CPU performance target. 0 means no configuration. A value
+///   between 1 and 1024 indicates the performance level CPUs running tasks
+///   in this layer are configured to using scx_bpf_cpuperf_set().
 ///
 /// Similar to matches, adding new policies and extending existing ones
 /// should be relatively straightforward.
@@ -269,6 +278,13 @@ struct Opts {
     #[clap(short = 's', long, default_value = "20000")]
     slice_us: u64,
 
+    /// Maximum consecutive execution time in microseconds. A task may be
+    /// allowed to keep executing on a CPU for this long. Note that this is
+    /// the upper limit and a task may have to moved off the CPU earlier. 0
+    /// indicates default - 20 * slice_us.
+    #[clap(short = 'M', long, default_value = "0")]
+    max_exec_us: u64,
+
     /// Scheduling interval in seconds.
     #[clap(short = 'i', long, default_value = "0.1")]
     interval: f64,
@@ -325,6 +341,14 @@ enum LayerKind {
         #[serde(default)]
         min_exec_us: u64,
         #[serde(default)]
+        yield_ignore: f64,
+        #[serde(default)]
+        preempt: bool,
+        #[serde(default)]
+        preempt_first: bool,
+        #[serde(default)]
+        exclusive: bool,
+        #[serde(default)]
         perf: u64,
     },
     Grouped {
@@ -334,7 +358,11 @@ enum LayerKind {
         #[serde(default)]
         min_exec_us: u64,
         #[serde(default)]
+        yield_ignore: f64,
+        #[serde(default)]
         preempt: bool,
+        #[serde(default)]
+        preempt_first: bool,
         #[serde(default)]
         exclusive: bool,
         #[serde(default)]
@@ -344,7 +372,11 @@ enum LayerKind {
         #[serde(default)]
         min_exec_us: u64,
         #[serde(default)]
+        yield_ignore: f64,
+        #[serde(default)]
         preempt: bool,
+        #[serde(default)]
+        preempt_first: bool,
         #[serde(default)]
         exclusive: bool,
         #[serde(default)]
@@ -1119,15 +1151,28 @@ struct OpenMetricsStats {
     l_load_frac: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_tasks: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_total: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
-    l_local: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_sel_local: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_enq_wakeup: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_enq_expire: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_enq_last: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_enq_reenq: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_min_exec: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_min_exec_us: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_open_idle: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_preempt: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_preempt_first: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_preempt_idle: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_preempt_fail: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_affn_viol: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_keep: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_keep_fail_max_exec: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_keep_fail_busy: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_excl_collision: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_excl_preempt: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_kick: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_yield: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
+    l_yield_ignore: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
+    l_migration: Family<Vec<(String, String)>, Gauge<f64, AtomicU64>>,
     l_cur_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_min_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
     l_max_nr_cpus: Family<Vec<(String, String)>, Gauge<i64, AtomicI64>>,
@@ -1189,7 +1234,26 @@ impl OpenMetricsStats {
         register!(l_load_frac, "Fraction of total load consumed by the layer");
         register!(l_tasks, "Number of tasks in the layer");
         register!(l_total, "Number of scheduling events in the layer");
-        register!(l_local, "% of scheduling events directly into an idle CPU");
+        register!(
+            l_sel_local,
+            "% of scheduling events directly into an idle CPU"
+        );
+        register!(
+            l_enq_wakeup,
+            "% of scheduling events enqueued to layer after wakeup"
+        );
+        register!(
+            l_enq_expire,
+            "% of scheduling events enqueued to layer after slice expiration"
+        );
+        register!(
+            l_enq_last,
+            "% of scheduling events enqueued as last runnable task on CPU"
+        );
+        register!(
+            l_enq_reenq,
+            "% of scheduling events re-enqueued due to RT preemption"
+        );
         register!(
             l_min_exec,
             "Number of times execution duration was shorter than min_exec_us"
@@ -1207,12 +1271,32 @@ impl OpenMetricsStats {
             "% of scheduling events that preempted other tasks"
         );
         register!(
+            l_preempt_first,
+            "% of scheduling events that first-preempted other tasks"
+        );
+        register!(
+            l_preempt_idle,
+            "% of scheduling events that idle-preempted other tasks"
+        );
+        register!(
             l_preempt_fail,
             "% of scheduling events that attempted to preempt other tasks but failed"
         );
         register!(
             l_affn_viol,
             "% of scheduling events that violated configured policies due to CPU affinity restrictions"
+        );
+        register!(
+            l_keep,
+            "% of scheduling events that continued executing after slice expiration"
+        );
+        register!(
+            l_keep_fail_max_exec,
+            "% of scheduling events that weren't allowed to continue executing after slice expiration due to overrunning max_exec duration limit"
+        );
+        register!(
+            l_keep_fail_busy,
+            "% of scheduling events that weren't allowed to continue executing after slice expiration to accommodate other tasks"
         );
         register!(
             l_excl_collision,
@@ -1222,6 +1306,13 @@ impl OpenMetricsStats {
             l_excl_preempt,
             "Number of times a sibling CPU was preempted for an exclusive task"
         );
+        register!(
+            l_kick,
+            "% of schduling events that kicked a CPU from enqueue path"
+        );
+        register!(l_yield, "% of scheduling events that yielded");
+        register!(l_yield_ignore, "Number of times yield was ignored");
+	register!(l_migration, "% of scheduling events that migrated across CPUs");
         register!(l_cur_nr_cpus, "Current # of CPUs assigned to the layer");
         register!(l_min_nr_cpus, "Minimum # of CPUs assigned to the layer");
         register!(l_max_nr_cpus, "Maximum # of CPUs assigned to the layer");
@@ -1254,7 +1345,7 @@ struct Scheduler<'a, 'b> {
 }
 
 impl<'a, 'b> Scheduler<'a, 'b> {
-    fn init_layers(skel: &mut OpenBpfSkel, specs: &Vec<LayerSpec>) -> Result<()> {
+    fn init_layers(skel: &mut OpenBpfSkel, opts: &Opts, specs: &Vec<LayerSpec>) -> Result<()> {
         skel.rodata_mut().nr_layers = specs.len() as u32;
         let mut perf_set = false;
 
@@ -1298,31 +1389,52 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
             match &spec.kind {
                 LayerKind::Confined {
-                    min_exec_us, perf, ..
-                } => {
-                    layer.min_exec_ns = min_exec_us * 1000;
-                    layer.perf = u32::try_from(*perf)?;
-                }
-                LayerKind::Open {
                     min_exec_us,
-                    preempt,
-                    exclusive,
+                    yield_ignore,
                     perf,
+                    preempt,
+                    preempt_first,
+                    exclusive,
                     ..
                 }
                 | LayerKind::Grouped {
                     min_exec_us,
-                    preempt,
-                    exclusive,
+                    yield_ignore,
                     perf,
+                    preempt,
+                    preempt_first,
+                    exclusive,
+                    ..
+                }
+                | LayerKind::Open {
+                    min_exec_us,
+                    yield_ignore,
+                    perf,
+                    preempt,
+                    preempt_first,
+                    exclusive,
                     ..
                 } => {
-                    layer.open.write(true);
                     layer.min_exec_ns = min_exec_us * 1000;
+                    layer.yield_step_ns = if *yield_ignore > 0.999 {
+                        0
+                    } else if *yield_ignore < 0.001 {
+                        opts.slice_us * 1000
+                    } else {
+                        ((opts.slice_us * 1000) as f64 * (1.0 - *yield_ignore)) as u64
+                    };
                     layer.preempt.write(*preempt);
+                    layer.preempt_first.write(*preempt_first);
                     layer.exclusive.write(*exclusive);
                     layer.perf = u32::try_from(*perf)?;
                 }
+            }
+
+            match &spec.kind {
+                LayerKind::Open { .. } | LayerKind::Grouped { .. } => {
+                    layer.open.write(true);
+                }
+                _ => {}
             }
 
             perf_set |= layer.perf > 0;
@@ -1361,6 +1473,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         skel.rodata_mut().debug = opts.verbose as u32;
         skel.rodata_mut().slice_ns = opts.slice_us * 1000;
+        skel.rodata_mut().max_exec_ns = if opts.max_exec_us > 0 {
+            opts.max_exec_us * 1000
+        } else {
+            opts.slice_us * 1000 * 20
+        };
         skel.rodata_mut().nr_possible_cpus = *NR_POSSIBLE_CPUS as u32;
         skel.rodata_mut().smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
         for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
@@ -1369,7 +1486,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         for cpu in cpu_pool.all_cpus.iter_ones() {
             skel.rodata_mut().all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
-        Self::init_layers(&mut skel, layer_specs)?;
+        Self::init_layers(&mut skel, opts, layer_specs)?;
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
 
@@ -1523,8 +1640,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         self.prev_processing_dur = self.processing_dur;
 
         let lsum = |idx| stats.bpf_stats.lstats_sums[idx as usize];
-        let total = lsum(bpf_intf::layer_stat_idx_LSTAT_LOCAL)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_GLOBAL);
+        let total = lsum(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
+            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
+            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
+            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST)
+            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ);
         let lsum_pct = |idx| {
             if total != 0 {
                 lsum(idx) as f64 / total as f64 * 100.0
@@ -1541,10 +1661,20 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             }
         };
 
+        let fmt_num = |v: i64| {
+            if v > 1_000_000 {
+                format!("{:5.1}m", v as f64 / 1_000_000.0)
+            } else if v > 1_000 {
+                format!("{:5.1}k", v as f64 / 1_000.0)
+            } else {
+                format!("{:5.0} ", v)
+            }
+        };
+
         self.om_stats.total.set(total as i64);
         self.om_stats
             .local
-            .set(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_LOCAL));
+            .set(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL));
         self.om_stats
             .open_idle
             .set(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE));
@@ -1609,8 +1739,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
             let lstat = |sidx| stats.bpf_stats.lstats[lidx][sidx as usize];
-            let ltotal = lstat(bpf_intf::layer_stat_idx_LSTAT_LOCAL)
-                + lstat(bpf_intf::layer_stat_idx_LSTAT_GLOBAL);
+            let ltotal = lstat(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
+                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
+                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
+                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST)
+                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ);
             let lstat_pct = |sidx| {
                 if ltotal != 0 {
                     lstat(sidx) as f64 / ltotal as f64 * 100.0
@@ -1644,7 +1777,26 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             );
             let l_tasks = set!(l_tasks, stats.nr_layer_tasks[lidx] as i64);
             let l_total = set!(l_total, ltotal as i64);
-            let l_local = set!(l_local, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_LOCAL));
+            let l_sel_local = set!(
+                l_sel_local,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
+            );
+            let l_enq_wakeup = set!(
+                l_enq_wakeup,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
+            );
+            let l_enq_expire = set!(
+                l_enq_expire,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
+            );
+            let l_enq_last = set!(
+                l_enq_last,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST)
+            );
+            let l_enq_reenq = set!(
+                l_enq_reenq,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ)
+            );
             let l_min_exec = set!(
                 l_min_exec,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC)
@@ -1658,6 +1810,14 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE)
             );
             let l_preempt = set!(l_preempt, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT));
+            let l_preempt_first = set!(
+                l_preempt_first,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FIRST)
+            );
+            let l_preempt_idle = set!(
+                l_preempt_idle,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_IDLE)
+            );
             let l_preempt_fail = set!(
                 l_preempt_fail,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FAIL)
@@ -1666,6 +1826,15 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 l_affn_viol,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL)
             );
+            let l_keep = set!(l_keep, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP));
+            let l_keep_fail_max_exec = set!(
+                l_keep_fail_max_exec,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP_FAIL_MAX_EXEC)
+            );
+            let l_keep_fail_busy = set!(
+                l_keep_fail_busy,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP_FAIL_BUSY)
+            );
             let l_excl_collision = set!(
                 l_excl_collision,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION)
@@ -1673,6 +1842,16 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             let l_excl_preempt = set!(
                 l_excl_preempt,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT)
+            );
+            let l_kick = set!(l_kick, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KICK));
+            let l_yield = set!(l_yield, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_YIELD));
+            let l_yield_ignore = set!(
+                l_yield_ignore,
+                lstat(bpf_intf::layer_stat_idx_LSTAT_YIELD_IGNORE) as i64
+            );
+            let l_migration = set!(
+                l_migration,
+                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIGRATION)
             );
             let l_cur_nr_cpus = set!(l_cur_nr_cpus, layer.nr_cpus as i64);
             let l_min_nr_cpus = set!(l_min_nr_cpus, self.nr_layer_cpus_min_max[lidx].0 as i64);
@@ -1689,18 +1868,41 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     width = header_width,
                 );
                 info!(
-                    "  {:<width$}  tot={:7} local={} open_idle={} affn_viol={}",
+                    "  {:<width$}  tot={:7} local={} wake/exp/last/reenq={}/{}/{}/{}",
                     "",
                     l_total.get(),
-                    fmt_pct(l_local.get()),
+                    fmt_pct(l_sel_local.get()),
+                    fmt_pct(l_enq_wakeup.get()),
+                    fmt_pct(l_enq_expire.get()),
+                    fmt_pct(l_enq_last.get()),
+                    fmt_pct(l_enq_reenq.get()),
+                    width = header_width,
+                );
+                info!(
+                    "  {:<width$}  keep/max/busy={}/{}/{} kick={} yield/ign={}/{}",
+                    "",
+                    fmt_pct(l_keep.get()),
+                    fmt_pct(l_keep_fail_max_exec.get()),
+                    fmt_pct(l_keep_fail_busy.get()),
+                    fmt_pct(l_kick.get()),
+                    fmt_pct(l_yield.get()),
+                    fmt_num(l_yield_ignore.get()),
+                    width = header_width,
+                );
+                info!(
+                    "  {:<width$}  open_idle={} mig={} affn_viol={}",
+                    "",
                     fmt_pct(l_open_idle.get()),
+                    fmt_pct(l_migration.get()),
                     fmt_pct(l_affn_viol.get()),
                     width = header_width,
                 );
                 info!(
-                    "  {:<width$}  preempt/fail={}/{} min_exec={}/{:7.2}ms",
+                    "  {:<width$}  preempt/first/idle/fail={}/{}/{}/{} min_exec={}/{:7.2}ms",
                     "",
                     fmt_pct(l_preempt.get()),
+                    fmt_pct(l_preempt_first.get()),
+                    fmt_pct(l_preempt_idle.get()),
                     fmt_pct(l_preempt_fail.get()),
                     fmt_pct(l_min_exec.get()),
                     l_min_exec_us.get() as f64 / 1000.0,
@@ -1716,7 +1918,9 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     width = header_width
                 );
                 match &layer.kind {
-                    LayerKind::Grouped { exclusive, .. } | LayerKind::Open { exclusive, .. } => {
+                    LayerKind::Confined { exclusive, .. }
+                    | LayerKind::Grouped { exclusive, .. }
+                    | LayerKind::Open { exclusive, .. } => {
                         if *exclusive {
                             info!(
                                 "  {:<width$}  excl_coll={} excl_preempt={}",
@@ -1734,7 +1938,6 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                             );
                         }
                     }
-                    _ => (),
                 }
             }
             self.nr_layer_cpus_min_max[lidx] = (layer.nr_cpus, layer.nr_cpus);
@@ -1805,6 +2008,10 @@ fn write_example_file(path: &str) -> Result<()> {
                     cpus_range: Some((0, 16)),
                     util_range: (0.8, 0.9),
                     min_exec_us: 1000,
+                    yield_ignore: 0.0,
+                    preempt: false,
+                    preempt_first: false,
+                    exclusive: false,
                     perf: 1024,
                 },
             },
@@ -1817,7 +2024,9 @@ fn write_example_file(path: &str) -> Result<()> {
                 ]],
                 kind: LayerKind::Open {
                     min_exec_us: 100,
+                    yield_ignore: 0.25,
                     preempt: true,
+                    preempt_first: false,
                     exclusive: true,
                     perf: 1024,
                 },
@@ -1830,7 +2039,9 @@ fn write_example_file(path: &str) -> Result<()> {
                     cpus_range: None,
                     util_range: (0.5, 0.6),
                     min_exec_us: 200,
+                    yield_ignore: 0.0,
                     preempt: false,
+                    preempt_first: false,
                     exclusive: false,
                     perf: 1024,
                 },

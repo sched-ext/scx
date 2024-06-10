@@ -14,8 +14,10 @@
 #endif
 
 #ifndef __KERNEL__
-typedef unsigned long long u64;
+typedef int s32;
 typedef long long s64;
+typedef unsigned u32;
+typedef unsigned long long u64;
 #endif
 
 #include <scx/ravg.bpf.h>
@@ -46,16 +48,28 @@ enum global_stat_idx {
 };
 
 enum layer_stat_idx {
-	LSTAT_LOCAL,
-	LSTAT_GLOBAL,
+	LSTAT_SEL_LOCAL,
+	LSTAT_ENQ_WAKEUP,
+	LSTAT_ENQ_EXPIRE,
+	LSTAT_ENQ_LAST,
+	LSTAT_ENQ_REENQ,
 	LSTAT_MIN_EXEC,
 	LSTAT_MIN_EXEC_NS,
 	LSTAT_OPEN_IDLE,
 	LSTAT_AFFN_VIOL,
+	LSTAT_KEEP,
+	LSTAT_KEEP_FAIL_MAX_EXEC,
+	LSTAT_KEEP_FAIL_BUSY,
 	LSTAT_PREEMPT,
+	LSTAT_PREEMPT_FIRST,
+	LSTAT_PREEMPT_IDLE,
 	LSTAT_PREEMPT_FAIL,
 	LSTAT_EXCL_COLLISION,
 	LSTAT_EXCL_PREEMPT,
+	LSTAT_KICK,
+	LSTAT_YIELD,
+	LSTAT_YIELD_IGNORE,
+	LSTAT_MIGRATION,
 	NR_LSTATS,
 };
 
@@ -64,9 +78,12 @@ struct cpu_ctx {
 	bool			current_exclusive;
 	bool			prev_exclusive;
 	bool			maybe_idle;
+	bool			yielding;
+	bool			try_preempt_first;
 	u64			layer_cycles[MAX_LAYERS];
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
+	u64			ran_current_for;
 };
 
 enum layer_match_kind {
@@ -98,8 +115,11 @@ struct layer {
 	unsigned int		nr_match_ors;
 	unsigned int		idx;
 	u64			min_exec_ns;
+	u64			max_exec_ns;
+	u64			yield_step_ns;
 	bool			open;
 	bool			preempt;
+	bool			preempt_first;
 	bool			exclusive;
 
 	u64			vtime_now;
