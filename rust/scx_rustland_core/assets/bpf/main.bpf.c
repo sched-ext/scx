@@ -456,7 +456,7 @@ static void dispatch_user_scheduler(void)
 	 * Dispatch the scheduler on the first CPU available, likely the
 	 * current one.
 	 */
-	dispatch_task(p, SHARED_DSQ, 0, 0, 0);
+	dispatch_task(p, SHARED_DSQ, 0, 0, SCX_ENQ_PREEMPT);
 	bpf_task_release(p);
 }
 
