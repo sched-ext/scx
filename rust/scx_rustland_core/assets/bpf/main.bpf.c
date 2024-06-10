@@ -367,7 +367,6 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 	s32 cpu;
 
 	switch (dsq_id) {
-	case SCX_DSQ_LOCAL:
 	case SHARED_DSQ:
 		scx_bpf_dispatch(p, dsq_id, slice, enq_flags);
 		dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu",
@@ -462,6 +461,18 @@ static void dispatch_user_scheduler(void)
 }
 
 /*
+ * Directly dispatch a task on a target CPU bypassing the user-space scheduler.
+ */
+static void
+dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 slice_ns, u64 enq_flags)
+{
+	scx_bpf_dispatch(p, cpu_to_dsq(cpu), slice_ns, enq_flags);
+	scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
+
+	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+}
+
+/*
  * Select the target CPU where a task can be executed.
  *
  * The idea here is to try to find an idle CPU in the system, and preferably
@@ -495,14 +506,10 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	/*
 	 * If the previously used CPU is still available, keep using it to take
 	 * advantage of the cached working set.
-	 *
-	 * NOTE: assign a shorter time slice (slice_ns / 4) to a task directly
-	 * dispatched to prevent it from gaining excessive CPU bandwidth.
 	 */
 	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		tctx->allow_migration = false;
-		dispatch_task(p, SCX_DSQ_LOCAL, 0, slice_ns / 4, 0);
-		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		dispatch_direct_cpu(p, prev_cpu, slice_ns, 0);
 		return prev_cpu;
 	}
 
@@ -523,8 +530,7 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
 		tctx->allow_migration = false;
-		dispatch_task(p, SCX_DSQ_LOCAL, 0, slice_ns / 4, 0);
-		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		dispatch_direct_cpu(p, cpu, slice_ns, 0);
 		return cpu;
 	}
 	tctx->allow_migration = true;
@@ -595,7 +601,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * long (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
-		dispatch_task(p, SCX_DSQ_LOCAL, 0, slice_ns, enq_flags);
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -605,12 +611,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * FIFO mode.
 	 */
 	if (!full_user && is_fifo_enabled) {
-		s32 cpu = scx_bpf_task_cpu(p);
-
-		scx_bpf_dispatch(p, cpu_to_dsq(cpu), slice_ns, enq_flags);
-		scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
-
-		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		dispatch_direct_cpu(p, scx_bpf_task_cpu(p), slice_ns, enq_flags);
 		return;
 	}
 
