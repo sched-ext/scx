@@ -385,7 +385,7 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 	return scx_bpf_pick_idle_cpu(cand_cpumask, 0);
 }
 
-static __attribute__((always_inline))
+static __always_inline
 bool should_try_preempt_first(s32 cand, struct layer *layer,
 			      const struct cpumask *layered_cpumask)
 {
@@ -408,7 +408,7 @@ bool should_try_preempt_first(s32 cand, struct layer *layer,
 	return true;
 }
 
-static __attribute__((always_inline))
+static __always_inline
 s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		  struct cpu_ctx *cctx, struct task_ctx *tctx, struct layer *layer,
 		  bool from_selcpu)
@@ -499,7 +499,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	}
 }
 
-static __attribute__((always_inline))
+static __always_inline
 bool pick_idle_cpu_and_kick(struct task_struct *p, s32 task_cpu,
 			    struct cpu_ctx *cctx, struct task_ctx *tctx,
 			    struct layer *layer)
@@ -517,7 +517,7 @@ bool pick_idle_cpu_and_kick(struct task_struct *p, s32 task_cpu,
 	}
 }
 
-static __attribute__((always_inline))
+static __always_inline
 bool try_preempt(s32 cand, struct task_struct *p, struct cpu_ctx *cctx,
 		 struct task_ctx *tctx, struct layer *layer, bool preempt_first)
 {

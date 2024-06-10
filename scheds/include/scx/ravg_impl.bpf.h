@@ -194,8 +194,7 @@ static RAVG_FN_ATTRS void ravg_transfer(struct ravg_data *base, u64 base_new_val
  * u64 and @b is u32 and (@a * @b) may be bigger than #U64_MAX. The caller must
  * ensure that the final shifted result fits in u64.
  */
-static inline __attribute__((always_inline))
-u64 u64_x_u32_rshift(u64 a, u32 b, u32 rshift)
+static __always_inline u64 u64_x_u32_rshift(u64 a, u32 b, u32 rshift)
 {
 	const u64 mask32 = (u32)-1;
 	u64 al = a & mask32;
