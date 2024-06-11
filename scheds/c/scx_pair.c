@@ -76,9 +76,9 @@ restart:
 	bpf_map__set_max_entries(skel->maps.pair_ctx, skel->rodata->nr_cpu_ids / 2);
 
 	/* Resize arrays so their element count is equal to cpu count. */
-	RESIZE_ARRAY(rodata, pair_cpu, skel->rodata->nr_cpu_ids);
-	RESIZE_ARRAY(rodata, pair_id, skel->rodata->nr_cpu_ids);
-	RESIZE_ARRAY(rodata, in_pair_idx, skel->rodata->nr_cpu_ids);
+	RESIZE_ARRAY(skel, rodata, pair_cpu, skel->rodata->nr_cpu_ids);
+	RESIZE_ARRAY(skel, rodata, pair_id, skel->rodata->nr_cpu_ids);
+	RESIZE_ARRAY(skel, rodata, in_pair_idx, skel->rodata->nr_cpu_ids);
 
 	for (i = 0; i < skel->rodata->nr_cpu_ids; i++)
 		skel->rodata_pair_cpu->pair_cpu[i] = -1;

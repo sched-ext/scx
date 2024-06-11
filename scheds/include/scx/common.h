@@ -44,7 +44,8 @@ typedef int64_t s64;
 
 /**
  * RESIZE_ARRAY - Convenience macro for resizing a BPF array
- * @elfsec: the data section of the BPF program in which to the array exists
+ * @__skel: the skeleton containing the array
+ * @elfsec: the data section of the BPF program in which the array exists
  * @arr: the name of the array
  * @n: the desired array element count
  *
@@ -56,13 +57,13 @@ typedef int64_t s64;
  * for that custom data section so that it points to the newly memory mapped
  * region.
  */
-#define RESIZE_ARRAY(elfsec, arr, n)						  \
-	do {									  \
-		size_t __sz;							  \
-		bpf_map__set_value_size(skel->maps.elfsec##_##arr,		  \
-				sizeof(skel->elfsec##_##arr->arr[0]) * (n));	  \
-		skel->elfsec##_##arr =						  \
-			bpf_map__initial_value(skel->maps.elfsec##_##arr, &__sz); \
+#define RESIZE_ARRAY(__skel, elfsec, arr, n)						\
+	do {										\
+		size_t __sz;								\
+		bpf_map__set_value_size((__skel)->maps.elfsec##_##arr,			\
+				sizeof((__skel)->elfsec##_##arr->arr[0]) * (n));	\
+		(__skel)->elfsec##_##arr =						\
+			bpf_map__initial_value((__skel)->maps.elfsec##_##arr, &__sz);	\
 	} while (0)
 
 #include "user_exit_info.h"
