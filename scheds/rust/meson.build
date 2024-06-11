@@ -15,6 +15,7 @@ sched = []
 #                       depends: [mydep, sched],
 #                       build_always_stale: true)
 subdir('scx_layered')
+subdir('scx_mitosis')
 subdir('scx_rusty')
 subdir('scx_rustland')
 subdir('scx_rlfifo')
