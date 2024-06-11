@@ -53,10 +53,10 @@ struct user_exit_info {
 #include <stdbool.h>
 
 /* no need to call the following explicitly if SCX_OPS_LOAD() is used */
-#define UEI_SET_SIZE(__skel, __ops_name, __uei_name) ({				\
-	u32 __len = (__skel)->struct_ops.__ops_name->exit_dump_len ?: UEI_DUMP_DFL_LEN; \
-	(__skel)->rodata->__uei_name##_dump_len = __len;			\
-	RESIZE_ARRAY(data, __uei_name##_dump, __len);				\
+#define UEI_SET_SIZE(__skel, __ops_name, __uei_name) ({					\
+	u32 __len = (__skel)->struct_ops.__ops_name->exit_dump_len ?: UEI_DUMP_DFL_LEN;	\
+	(__skel)->rodata->__uei_name##_dump_len = __len;				\
+	RESIZE_ARRAY((__skel), data, __uei_name##_dump, __len);				\
 })
 
 #define UEI_EXITED(__skel, __uei_name) ({					\

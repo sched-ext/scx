@@ -77,8 +77,8 @@ restart:
 	}
 
 	/* Resize arrays so their element count is equal to cpu count. */
-	RESIZE_ARRAY(data, cpu_gimme_task, skel->rodata->nr_cpu_ids);
-	RESIZE_ARRAY(data, cpu_started_at, skel->rodata->nr_cpu_ids);
+	RESIZE_ARRAY(skel, data, cpu_gimme_task, skel->rodata->nr_cpu_ids);
+	RESIZE_ARRAY(skel, data, cpu_started_at, skel->rodata->nr_cpu_ids);
 
 	SCX_OPS_LOAD(skel, central_ops, scx_central, uei);
 
