@@ -1,4 +1,4 @@
-custom_target('scx_mitosis',
+sched = custom_target('scx_mitosis',
               output: '@PLAINNAME@.__PHONY__',
               input: 'Cargo.toml',
               command: [cargo, 'build', '--manifest-path=@INPUT@', '--target-dir=@OUTDIR@',
