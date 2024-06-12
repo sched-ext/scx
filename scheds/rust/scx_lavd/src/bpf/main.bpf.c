@@ -1460,6 +1460,33 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	return slice;
 }
 
+static void reset_suspended_duration(struct cpu_ctx *cpuc)
+{
+	if (cpuc->online_clk > cpuc->offline_clk)
+		cpuc->offline_clk = cpuc->online_clk;
+}
+
+static u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc)
+{
+	/*
+	 * When a system is suspended, a task is also suspended in a running
+	 * stat on the CPU. Hence, we subtract the suspended duration when it
+	 * resumes.
+	 */
+
+	u64 duration = 0;
+
+	if (cpuc->online_clk > cpuc->offline_clk) {
+		duration = cpuc->online_clk - cpuc->offline_clk;
+		/*
+		 * Once calculated, reset the duration to zero.
+		 */
+		cpuc->offline_clk = cpuc->online_clk;
+	}
+
+	return duration;
+}
+
 static void update_stat_for_runnable(struct task_struct *p,
 				     struct task_ctx *taskc,
 				     struct cpu_ctx *cpuc)
@@ -1495,7 +1522,7 @@ static void update_stat_for_running(struct task_struct *p,
 
 	/*
 	 * Update per-CPU latency criticality information for ever-scheduled
-	 * tasks
+	 * tasks.
 	 */
 	if (cpuc->max_lat_cri < taskc->lat_cri)
 		cpuc->max_lat_cri = taskc->lat_cri;
@@ -1503,6 +1530,12 @@ static void update_stat_for_running(struct task_struct *p,
 		cpuc->min_lat_cri = taskc->lat_cri;
 	cpuc->sum_lat_cri += taskc->lat_cri;
 	cpuc->sched_nr++;
+
+	/*
+	 * It is clear there is no need to consider the suspended duration
+	 * while running a task, so reset the suspended duration to zero.
+	 */
+	reset_suspended_duration(cpuc);
 
 	/*
 	 * Update task's performance criticality
@@ -1538,7 +1571,7 @@ static void update_stat_for_stopping(struct task_struct *p,
 				     struct cpu_ctx *cpuc)
 {
 	u64 now = bpf_ktime_get_ns();
-	u64 old_run_time_ns;
+	u64 old_run_time_ns, suspended_duration;
 
 	/*
 	 * Update task's run_time. When a task is scheduled consecutively
@@ -1550,7 +1583,9 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 * calculation of runtime statistics.
 	 */
 	old_run_time_ns = taskc->run_time_ns;
-	taskc->acc_run_time_ns += now - taskc->last_running_clk;
+	suspended_duration = get_suspended_duration_and_reset(cpuc);
+	taskc->acc_run_time_ns += now - taskc->last_running_clk -
+				  suspended_duration;
 	taskc->run_time_ns = calc_avg(taskc->run_time_ns,
 				      taskc->acc_run_time_ns);
 	taskc->last_stopping_clk = now;
@@ -2521,21 +2556,23 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	taskc->last_quiescent_clk = now;
 }
 
-static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id)
+static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 {
-	memset(cpuc, 0, sizeof(*cpuc) - 2 * sizeof(struct bpf_cpumask *));
+	cpuc->idle_start_clk = 0;
 	cpuc->cpu_id = cpu_id;
 	cpuc->lat_prio = LAVD_LAT_PRIO_IDLE;
 	cpuc->stopping_tm_est_ns = LAVD_TIME_INFINITY_NS;
+	WRITE_ONCE(cpuc->online_clk, now);
 	barrier();
 
 	cpuc->is_online = true;
 }
 
-static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cpu_id)
+static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 {
-	memset(cpuc, 0, sizeof(*cpuc) - 2 * sizeof(struct bpf_cpumask *));
+	cpuc->idle_start_clk = 0;
 	cpuc->cpu_id = cpu_id;
+	WRITE_ONCE(cpuc->offline_clk, now);
 	cpuc->is_online = false;
 	barrier();
 
@@ -2549,13 +2586,14 @@ void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
 	 * When a cpu becomes online, reset its cpu context and trigger the
 	 * recalculation of the global cpu load.
 	 */
+	u64 now = bpf_ktime_get_ns();
 	struct cpu_ctx *cpuc;
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc)
 		return;
 
-	cpu_ctx_init_online(cpuc, cpu);
+	cpu_ctx_init_online(cpuc, cpu, now);
 
 	__sync_fetch_and_add(&nr_cpus_onln, 1);
 	update_sys_stat();
@@ -2567,13 +2605,14 @@ void BPF_STRUCT_OPS(lavd_cpu_offline, s32 cpu)
 	 * When a cpu becomes offline, trigger the recalculation of the global
 	 * cpu load.
 	 */
+	u64 now = bpf_ktime_get_ns();
 	struct cpu_ctx *cpuc;
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc)
 		return;
 
-	cpu_ctx_init_offline(cpuc, cpu);
+	cpu_ctx_init_offline(cpuc, cpu, now);
 
 	__sync_fetch_and_sub(&nr_cpus_onln, 1);
 	update_sys_stat();
@@ -2716,7 +2755,7 @@ out:
 	return err;
 }
 
-static s32 init_per_cpu_ctx(void)
+static s32 init_per_cpu_ctx(u64 now)
 {
 	int cpu;
 	int err;
@@ -2736,21 +2775,20 @@ static s32 init_per_cpu_ctx(void)
 		if (err)
 			return err;
 
-		cpu_ctx_init_online(cpuc, cpu);
+		cpu_ctx_init_online(cpuc, cpu, now);
+		cpuc->offline_clk = now;
 	}
 
 	return 0;
 }
 
-static s32 init_sys_stat(void)
+static s32 init_sys_stat(u64 now)
 {
 	struct bpf_timer *timer;
-	u64 now;
 	u32 key = 0;
 	int err;
 
 	memset(__sys_stats, 0, sizeof(__sys_stats));
-	now = bpf_ktime_get_ns();
 	__sys_stats[0].last_update_clk = now;
 	__sys_stats[1].last_update_clk = now;
 	__sys_stats[0].nr_active = nr_cpus_onln;
@@ -2774,6 +2812,7 @@ static s32 init_sys_stat(void)
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 {
+	u64 now = bpf_ktime_get_ns();
 	int err;
 
 	/*
@@ -2788,7 +2827,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	/*
 	 * Initialize per-CPU context.
 	 */
-	err = init_per_cpu_ctx();
+	err = init_per_cpu_ctx(now);
 	if (err)
 		return err;
 
@@ -2796,7 +2835,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	 * Initialize the last update clock and the update timer to track
 	 * system-wide CPU load.
 	 */
-	err = init_sys_stat();
+	err = init_sys_stat(now);
 	if (err)
 		return err;
 
