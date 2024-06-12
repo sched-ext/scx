@@ -692,36 +692,57 @@ static u64 calc_avg_freq(u64 old_freq, u64 interval)
 	return ewma_freq;
 }
 
-static void do_update_sys_stat(void)
-{
-	struct sys_stat *stat_cur = get_sys_stat_cur();
-	struct sys_stat *stat_next = get_sys_stat_next();
-	u64 now, duration, duration_total, compute;
-	u64 idle_total = 0, compute_total = 0;
-	u64 load_actual = 0, load_ideal = 0, load_run_time_ns = 0;
-	s64 max_lat_cri = 0, min_lat_cri = UINT_MAX, avg_lat_cri = 0;
-	u64 sum_lat_cri = 0, sched_nr = 0;
-	u64 sum_perf_cri = 0, avg_perf_cri = 0;
-	u64 new_util, new_load_factor;
-	u64 nr_violation = 0;
-	int cpu;
+struct sys_stat_ctx {
+	struct sys_stat *stat_cur;
+	struct sys_stat	*stat_next;
+	u64		now;
+	u64		duration;
+	u64		duration_total;
+	u64		idle_total;
+	u64		compute_total;
+	u64		load_actual;
+	u64		load_ideal;
+	u64		load_run_time_ns;
+	s64		max_lat_cri;
+	s64		min_lat_cri;
+	s64		avg_lat_cri;
+	u64		sum_lat_cri;
+	u64		sched_nr;
+	u64		sum_perf_cri;
+	u64		avg_perf_cri;
+	u64		new_util;
+	u64		new_load_factor;
+	u64		nr_violation;
+};
 
-	now = bpf_ktime_get_ns();
-	duration = now - stat_cur->last_update_clk;
+static void init_sys_stat_ctx(struct sys_stat_ctx *c)
+{
+	memset(c, 0, sizeof(*c));
+
+	c->stat_cur = get_sys_stat_cur();
+	c->stat_next = get_sys_stat_next();
+	c->now = bpf_ktime_get_ns();
+	c->duration = c->now - c->stat_cur->last_update_clk;
+	c->min_lat_cri = UINT_MAX;
+}
+
+static void collect_sys_stat(struct sys_stat_ctx *c)
+{
+	int cpu;
 
 	bpf_for(cpu, 0, nr_cpus_onln) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
-			compute_total = 0;
+			c->compute_total = 0;
 			break;
 		}
 
 		/*
 		 * Accumulate cpus' loads.
 		 */
-		load_ideal += cpuc->load_ideal;
-		load_actual += cpuc->load_actual;
-		load_run_time_ns += cpuc->load_run_time_ns;
+		c->load_ideal += cpuc->load_ideal;
+		c->load_actual += cpuc->load_actual;
+		c->load_run_time_ns += cpuc->load_run_time_ns;
 
 		/*
 		 * Accumulate task's latency criticlity information.
@@ -730,24 +751,24 @@ static void do_update_sys_stat(void)
 		 * accuracy should be small and very rare and thus should be
 		 * fine.
 		 */
-		sum_lat_cri += cpuc->sum_lat_cri;
+		c->sum_lat_cri += cpuc->sum_lat_cri;
 		cpuc->sum_lat_cri = 0;
 
-		sched_nr += cpuc->sched_nr;
+		c->sched_nr += cpuc->sched_nr;
 		cpuc->sched_nr = 0;
 
-		if (cpuc->max_lat_cri > max_lat_cri)
-			max_lat_cri = cpuc->max_lat_cri;
+		if (cpuc->max_lat_cri > c->max_lat_cri)
+			c->max_lat_cri = cpuc->max_lat_cri;
 		cpuc->max_lat_cri = 0;
 
-		if (cpuc->min_lat_cri < min_lat_cri)
-			min_lat_cri = cpuc->min_lat_cri;
+		if (cpuc->min_lat_cri < c->min_lat_cri)
+			c->min_lat_cri = cpuc->min_lat_cri;
 		cpuc->min_lat_cri = UINT_MAX;
 
 		/*
 		 * Accumulate task's performance criticlity information.
 		 */
-		sum_perf_cri += cpuc->sum_perf_cri;
+		c->sum_perf_cri += cpuc->sum_perf_cri;
 		cpuc->sum_perf_cri = 0;
 
 		/*
@@ -760,9 +781,9 @@ static void do_update_sys_stat(void)
 				break;
 
 			bool ret = __sync_bool_compare_and_swap(
-					&cpuc->idle_start_clk, old_clk, now);
+					&cpuc->idle_start_clk, old_clk, c->now);
 			if (ret) {
-				idle_total += now - old_clk;
+				c->idle_total += c->now - old_clk;
 				break;
 			}
 		}
@@ -770,71 +791,96 @@ static void do_update_sys_stat(void)
 		/*
 		 * Calculcate per-CPU utilization
 		 */
-		compute = 0;
-		if (duration > cpuc->idle_total)
-			compute = duration - cpuc->idle_total;
-		new_util = (compute * LAVD_CPU_UTIL_MAX) / duration;
-		cpuc->util = calc_avg(cpuc->util, new_util);
+		u64 compute = 0;
+		if (c->duration > cpuc->idle_total)
+			compute = c->duration - cpuc->idle_total;
+		c->new_util = (compute * LAVD_CPU_UTIL_MAX) / c->duration;
+		cpuc->util = calc_avg(cpuc->util, c->new_util);
 
 		if (cpuc->util > LAVD_TC_PER_CORE_MAX_CTUIL)
-			nr_violation += 1000;
-
+			c->nr_violation += 1000;
 
 		/*
 		 * Accmulate system-wide idle time
 		 */
-		idle_total += cpuc->idle_total;
+		c->idle_total += cpuc->idle_total;
 		cpuc->idle_total = 0;
 	}
+}
 
-	duration_total = duration * nr_cpus_onln;
-	if (duration_total > idle_total)
-		compute_total = duration_total - idle_total;
+static void calc_sys_stat(struct sys_stat_ctx *c)
+{
+	c->duration_total = c->duration * nr_cpus_onln;
+	if (c->duration_total > c->idle_total)
+		c->compute_total = c->duration_total - c->idle_total;
 
-	new_util = (compute_total * LAVD_CPU_UTIL_MAX) / duration_total;
+	c->new_util = (c->compute_total * LAVD_CPU_UTIL_MAX) /
+		      c->duration_total;
 
-	new_load_factor = (1000 * LAVD_LOAD_FACTOR_ADJ * load_run_time_ns) /
-			  (LAVD_TARGETED_LATENCY_NS * nr_cpus_onln);
-	if (new_load_factor > LAVD_LOAD_FACTOR_MAX)
-		new_load_factor = LAVD_LOAD_FACTOR_MAX;
+	c->new_load_factor = (1000 * LAVD_LOAD_FACTOR_ADJ *
+				c->load_run_time_ns) /
+				(LAVD_TARGETED_LATENCY_NS * nr_cpus_onln);
+	if (c->new_load_factor > LAVD_LOAD_FACTOR_MAX)
+		c->new_load_factor = LAVD_LOAD_FACTOR_MAX;
 
-	if (sched_nr == 0) {
+	if (c->sched_nr == 0) {
 		/*
 		 * When a system is completely idle, it is indeed possible
 		 * nothing scheduled for an interval.
 		 */
-		min_lat_cri = stat_cur->min_lat_cri;
-		max_lat_cri = stat_cur->max_lat_cri;
-		avg_lat_cri = stat_cur->avg_lat_cri;
-		avg_perf_cri = stat_cur->avg_perf_cri;
+		c->min_lat_cri = c->stat_cur->min_lat_cri;
+		c->max_lat_cri = c->stat_cur->max_lat_cri;
+		c->avg_lat_cri = c->stat_cur->avg_lat_cri;
+		c->avg_perf_cri = c->stat_cur->avg_perf_cri;
 	}
 	else {
-		avg_lat_cri = sum_lat_cri / sched_nr;
-		avg_perf_cri = sum_perf_cri / sched_nr;
+		c->avg_lat_cri = c->sum_lat_cri / c->sched_nr;
+		c->avg_perf_cri = c->sum_perf_cri / c->sched_nr;
 	}
+}
 
+static void update_sys_stat_next(struct sys_stat_ctx *c)
+{
 	/*
 	 * Update the CPU utilization to the next version.
 	 */
-	stat_next->load_actual = calc_avg(stat_cur->load_actual, load_actual);
-	stat_next->load_ideal = calc_avg(stat_cur->load_ideal, load_ideal);
-	stat_next->util = calc_avg(stat_cur->util, new_util);
-	stat_next->load_factor = calc_avg(stat_cur->load_factor, new_load_factor);
+	struct sys_stat *stat_cur = c->stat_cur;
+	struct sys_stat *stat_next = c->stat_next;
 
-	stat_next->min_lat_cri = calc_avg(stat_cur->min_lat_cri, min_lat_cri);
-	stat_next->max_lat_cri = calc_avg(stat_cur->max_lat_cri, max_lat_cri);
-	stat_next->avg_lat_cri = calc_avg(stat_cur->avg_lat_cri, avg_lat_cri);
+	stat_next->load_actual =
+		calc_avg(stat_cur->load_actual, c->load_actual);
+	stat_next->load_ideal =
+		calc_avg(stat_cur->load_ideal, c->load_ideal);
+	stat_next->util =
+		calc_avg(stat_cur->util, c->new_util);
+	stat_next->load_factor =
+		calc_avg(stat_cur->load_factor, c->new_load_factor);
+
+	stat_next->min_lat_cri =
+		calc_avg(stat_cur->min_lat_cri, c->min_lat_cri);
+	stat_next->max_lat_cri =
+		calc_avg(stat_cur->max_lat_cri, c->max_lat_cri);
+	stat_next->avg_lat_cri =
+		calc_avg(stat_cur->avg_lat_cri, c->avg_lat_cri);
 	stat_next->thr_lat_cri = stat_next->max_lat_cri -
-				 ((stat_next->max_lat_cri - stat_next->avg_lat_cri) >> 1);
-	stat_next->avg_perf_cri = calc_avg(stat_cur->avg_perf_cri, avg_perf_cri);
+		((stat_next->max_lat_cri - stat_next->avg_lat_cri) >> 1);
+	stat_next->avg_perf_cri =
+		calc_avg(stat_cur->avg_perf_cri, c->avg_perf_cri);
 
-	stat_next->nr_violation = calc_avg(stat_cur->nr_violation, nr_violation);
+	stat_next->nr_violation =
+		calc_avg(stat_cur->nr_violation, c->nr_violation);
+}
 
+static void calc_inc1k(struct sys_stat_ctx *c)
+{
 	/*
-	 * Calculate the increment for latency criticality to priority mapping
+	 * Calculate the increment for mapping from latency criticality to
+	 * priority.
 	 *  - Case 1. inc1k_low:   [min_lc, avg_lc) -> [half_range, 0)
 	 *  - Case 2. inc1k_high:  [avg_lc, max_lc] -> [0, -half_range)
 	 */
+	struct sys_stat *stat_next = c->stat_next;
+
 	if (stat_next->avg_lat_cri == stat_next->min_lat_cri)
 		stat_next->inc1k_low = 0;
 	else {
@@ -850,11 +896,25 @@ static void do_update_sys_stat(void)
 					 (stat_next->max_lat_cri + 1 -
 					  stat_next->avg_lat_cri);
 	}
+}
+
+static void do_update_sys_stat(void)
+{
+	struct sys_stat_ctx c;
+
+	/*
+	 * Collect and prepare the next version of stat.
+	 */
+	init_sys_stat_ctx(&c);
+	collect_sys_stat(&c);
+	calc_sys_stat(&c);
+	update_sys_stat_next(&c);
+	calc_inc1k(&c);
 
 	/*
 	 * Make the next version atomically visible.
 	 */
-	stat_next->last_update_clk = now;
+	c.stat_next->last_update_clk = c.now;
 	flip_sys_stat();
 }
 
