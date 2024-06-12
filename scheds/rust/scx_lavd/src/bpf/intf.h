@@ -142,6 +142,12 @@ struct cpu_ctx {
 	volatile u64	last_kick_clk;	/* when the CPU was kicked */
 
 	/*
+	 * Information for cpu hotplug
+	 */
+	u64		online_clk;	/* when a CPU becomes online */
+	u64		offline_clk;	/* when a CPU becomes offline */
+
+	/*
 	 * Information used to keep track of latency criticality
 	 */
 	volatile u64	max_lat_cri;	/* maximum latency criticality */
@@ -165,7 +171,6 @@ struct cpu_ctx {
 	/*
 	 * Fields for core compaction
 	 *
-	 * NOTE: The followings MUST be placed at the end of this struct.
 	 */
 	struct bpf_cpumask __kptr *tmp_a_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_o_mask;	/* temporary cpu mask */
