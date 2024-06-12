@@ -670,6 +670,15 @@ static void try_proc_introspec_cmd(struct task_struct *p,
 	}
 }
 
+static u32 calc_avg32(u32 old_val, u32 new_val)
+{
+	/*
+	 * Calculate the exponential weighted moving average (EWMA).
+	 *  - EWMA = (0.75 * old) + (0.25 * new)
+	 */
+	return (old_val - (old_val >> 2)) + (new_val >> 2);
+}
+
 static u64 calc_avg(u64 old_val, u64 new_val)
 {
 	/*
@@ -2367,14 +2376,14 @@ unlock_out:
 
 }
 
-static u32 calc_cpuperf_target(struct sys_stat *stat_cur,
+static int calc_cpuperf_target(struct sys_stat *stat_cur,
 			       struct task_ctx *taskc, struct cpu_ctx *cpuc)
 {
 	u64 max_load, cpu_load;
 	u32 cpuperf_target;
 
 	if (!stat_cur || !taskc || !cpuc)
-		return 0;
+		return -EINVAL;
 
 	/*
 	 * We determine the clock frequency of a CPU using two factors: 1) the
@@ -2397,13 +2406,61 @@ static u32 calc_cpuperf_target(struct sys_stat *stat_cur,
 	max_load = stat_cur->avg_perf_cri * 1000 /* max cpu util */;
 	cpu_load = taskc->perf_cri * cpuc->util;
 	cpuperf_target = (cpu_load * SCX_CPUPERF_ONE) / max_load;
-	return min(cpuperf_target, SCX_CPUPERF_ONE);
+	cpuperf_target = min(cpuperf_target, SCX_CPUPERF_ONE);
+
+	cpuc->cpuperf_task = cpuperf_target;
+	cpuc->cpuperf_avg = calc_avg32(cpuc->cpuperf_avg, cpuperf_target);
+	return 0;
+}
+
+static bool try_increase_cpuperf_target(struct cpu_ctx *cpuc)
+{
+	/*
+	 * When a task becomes running, update CPU's performance target only
+	 * when the current task's target performance is higher. This helps
+	 * rapidly adopt workload changes by rapidly increasing CPU's
+	 * performance target.
+	 */
+	u32 target;
+
+	if (!cpuc)
+		return false;
+
+	target = max(cpuc->cpuperf_task, cpuc->cpuperf_avg);
+	if (cpuc->cpuperf_cur < target) {
+		cpuc->cpuperf_cur = target;
+		scx_bpf_cpuperf_set(cpuc->cpu_id, target);
+		return true;
+	}
+
+	return false;
+}
+
+static bool try_decrease_cpuperf_target(struct cpu_ctx *cpuc)
+{
+	/*
+	 * Upon every tick interval, we try to decrease the CPU's performance
+	 * target if the current one is higher than both the current task's
+	 * target and EWMA of past targets. This helps gradually adopt workload
+	 * changes upon sudden down falls.
+	 */
+	u32 target;
+
+	if (!cpuc)
+		return false;
+
+	target = max(cpuc->cpuperf_task, cpuc->cpuperf_avg);
+	if (cpuc->cpuperf_cur != target) {
+		cpuc->cpuperf_cur = target;
+		scx_bpf_cpuperf_set(cpuc->cpu_id, target);
+		return true;
+	}
+
+	return false;
 }
 
 void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
 {
-	struct sys_stat *stat_cur = get_sys_stat_cur();
-	s32 cpu_id = scx_bpf_task_cpu(p_run);
 	struct cpu_ctx *cpuc_run;
 	struct task_ctx *taskc_run;
 	bool preempted = false;
@@ -2425,10 +2482,8 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
 	 * task continues to run.
 	 */
 freq_out:
-	if (!no_freq_scaling && !preempted) {
-		u32 tgt = calc_cpuperf_target(stat_cur, taskc_run, cpuc_run);
-		scx_bpf_cpuperf_set(cpu_id, tgt);
-	}
+	if (!no_freq_scaling && !preempted)
+		try_decrease_cpuperf_target(cpuc_run);
 }
 
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
@@ -2497,6 +2552,7 @@ static bool need_to_calc_time_slice(struct task_struct *p)
 
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 {
+	struct sys_stat *stat_cur = get_sys_stat_cur();
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
 
@@ -2509,6 +2565,15 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 		return;
 
 	update_stat_for_running(p, taskc, cpuc);
+
+	/*
+	 * Calculate the task's CPU performance target and update if the new
+	 * target is higher than the current one. The CPU's performance target
+	 * urgently increases according to task's target but it decreases
+	 * gradually according to EWMA of past performance targets.
+	 */
+	calc_cpuperf_target(stat_cur, taskc, cpuc);
+	try_increase_cpuperf_target(cpuc);
 
 	/*
 	 * Update running task's information for preemption

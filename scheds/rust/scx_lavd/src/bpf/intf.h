@@ -169,6 +169,13 @@ struct cpu_ctx {
 	s32		cpu_id;		/* cpu id */
 
 	/*
+	 * Information for CPU frequency scaling
+	 */
+	u32		cpuperf_cur;	/* CPU's current performance target */
+	u32		cpuperf_task;	/* task's CPU performance target */
+	u32		cpuperf_avg;	/* EWMA of task's CPU performance target */
+
+	/*
 	 * Fields for core compaction
 	 *
 	 */
