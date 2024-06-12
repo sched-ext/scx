@@ -1000,7 +1000,7 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 
 	update_sys_stat();
 
-	err = bpf_timer_start(timer, LAVD_CPU_UTIL_INTERVAL_NS, 0);
+	err = bpf_timer_start(timer, LAVD_SYS_STAT_INTERVAL_NS, 0);
 	if (err)
 		scx_bpf_error("Failed to arm update timer");
 
@@ -1394,7 +1394,7 @@ static u64 calc_task_load_actual(struct task_ctx *taskc)
 	 * The actual load is the CPU time consumed in a time interval, which
 	 * can be calculated from task's average run time and frequency.
 	 */
-	const s64 interval_adj = LAVD_TIME_ONE_SEC / LAVD_CPU_UTIL_INTERVAL_NS;
+	const s64 interval_adj = LAVD_TIME_ONE_SEC / LAVD_SYS_STAT_INTERVAL_NS;
 	return (taskc->run_time_ns * taskc->run_freq) / interval_adj;
 }
 
@@ -2801,7 +2801,7 @@ static s32 init_sys_stat(u64 now)
 	}
 	bpf_timer_init(timer, &update_timer, CLOCK_BOOTTIME);
 	bpf_timer_set_callback(timer, update_timer_cb);
-	err = bpf_timer_start(timer, LAVD_CPU_UTIL_INTERVAL_NS, 0);
+	err = bpf_timer_start(timer, LAVD_SYS_STAT_INTERVAL_NS, 0);
 	if (err) {
 		scx_bpf_error("Failed to arm update timer");
 		return err;
