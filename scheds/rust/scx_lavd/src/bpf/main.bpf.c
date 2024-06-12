@@ -564,6 +564,7 @@ int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 	m->taskc_x.avg_lat_cri = stat_cur->avg_lat_cri;
 	m->taskc_x.avg_perf_cri = stat_cur->avg_perf_cri;
 	m->taskc_x.nr_active = stat_cur->nr_active;
+	m->taskc_x.cpuperf_cur = cpuc->cpuperf_cur;
 
 	memcpy(&m->taskc, taskc, sizeof(m->taskc));
 

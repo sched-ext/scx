@@ -188,14 +188,14 @@ impl<'a> Scheduler<'a> {
 
         if mseq % 32 == 1 {
             info!(
-                "| {:6} | {:8} | {:17} \
+                "| {:6} | {:7} | {:17} \
                    | {:4} | {:4} | {:9} \
                    | {:6} | {:8} | {:7} \
                    | {:8} | {:7} | {:8} \
                    | {:7} | {:7} | {:9} \
                    | {:9} | {:9} | {:9} \
                    | {:8} | {:8} | {:8} \
-                   | {:6} | {:6} | ",
+                   | {:8} | {:6} | {:6} |",
                 "mseq",
                 "pid",
                 "comm",
@@ -216,6 +216,7 @@ impl<'a> Scheduler<'a> {
                 "wake_freq",
                 "perf_cri",
                 "avg_pc",
+                "cpufreq",
                 "cpu_util",
                 "sys_ld",
                 "nr_act",
@@ -227,14 +228,14 @@ impl<'a> Scheduler<'a> {
         let tx_comm: &str = c_tx_cm_str.to_str().unwrap();
 
         info!(
-            "| {:6} | {:8} | {:17} \
+            "| {:6} | {:7} | {:17} \
                | {:4} | {:4} | {:9} \
                | {:6} | {:8} | {:7} \
                | {:8} | {:7} | {:8} \
                | {:7} | {:7} | {:9} \
                | {:9} | {:9} | {:9} \
                | {:8} | {:8} | {:8} \
-               | {:6} | {:6} |",
+               | {:8} | {:6} | {:6} |",
             mseq,
             tx.pid,
             tx_comm,
@@ -255,6 +256,7 @@ impl<'a> Scheduler<'a> {
             tc.wake_freq,
             tc.perf_cri,
             tx.avg_perf_cri,
+            tx.cpuperf_cur,
             tx.cpu_util,
             tx.sys_load_factor,
             tx.nr_active,

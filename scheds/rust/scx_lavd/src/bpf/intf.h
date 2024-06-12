@@ -231,6 +231,7 @@ struct task_ctx_x {
 	u64	avg_lat_cri;	/* average latency criticality */
 	u64	avg_perf_cri;	/* average performance criticality */
 	u32	nr_active;	/* number of active cores */
+	u32	cpuperf_cur;	/* CPU's current performance target */
 };
 
 
