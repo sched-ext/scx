@@ -228,16 +228,6 @@ static inline const struct cpumask *lookup_cell_cpumask(int idx)
 	return (const struct cpumask *)cpumaskw->cpumask;
 }
 
-/* css iteration is experimental, forward declare the necessary functions */
-struct bpf_iter_css;
-struct cgroup_subsys_state;
-extern int bpf_iter_css_new(struct bpf_iter_css *it,
-			    struct cgroup_subsys_state *start,
-			    unsigned int flags) __weak __ksym;
-extern struct cgroup_subsys_state *
-bpf_iter_css_next(struct bpf_iter_css *it) __weak __ksym;
-extern void bpf_iter_css_destroy(struct bpf_iter_css *it) __weak __ksym;
-
 /*
 * Along with a user_global_seq bump, indicates that cgroup->cell assignment
 * changed
