@@ -131,6 +131,33 @@
  * highest priority tasks.
  *
  *
+ * 7. Performance criticality
+ * --------------------------
+ *
+ * We define the performance criticality metric to express how sensitive a task
+ * is to CPU frequency. The more performance-critical a task is, the higher the
+ * CPU frequency will be assigned. A task is more performance-critical in the
+ * following conditions: 1) the task's runtime in a second is longer (i.e.,
+ * task runtime x frequency), 2) the task's waiting or waken-up frequencies are
+ * higher (i.e., the task is in the middle of the task chain).
+ *
+ *
+ * 8. CPU frequency scaling
+ * ------------------------
+ *
+ * Two factors determine the clock frequency of a CPU: 1) the current CPU
+ * utilization and 2) the current task's CPU criticality compared to the
+ * system-wide average performance criticality. This effectively boosts the CPU
+ * clock frequency of performance-critical tasks even when the CPU utilization
+ * is low.
+ *
+ * When actually changing the CPU's performance target, we should be able to
+ * quickly capture the demand for spiky workloads while providing steady clock
+ * frequency to avoid unexpected performance fluctuations. To this end, we
+ * quickly increase the clock frequency when a task gets running but gradually
+ * decrease it upon every tick interval.
+ *
+ *
  * Copyright (c) 2023, 2024 Valve Corporation.
  * Author: Changwoo Min <changwoo@igalia.com>
  */
