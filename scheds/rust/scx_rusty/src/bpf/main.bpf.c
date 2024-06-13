@@ -70,6 +70,7 @@ const volatile u32 load_half_life = 1000000000	/* 1s */;
 const volatile bool kthreads_local;
 const volatile bool fifo_sched;
 const volatile bool direct_greedy_numa;
+const volatile bool mempolicy_affinity;
 const volatile u32 greedy_threshold;
 const volatile u32 greedy_threshold_x_numa;
 const volatile u32 debug;
@@ -567,6 +568,57 @@ static u64 sched_prio_to_latency_weight(u64 prio)
 	}
 
 	return sched_prio_to_weight[DL_MAX_LAT_PRIO - prio - 1];
+}
+
+
+/*
+ * Returns the preferred domain according to the mempolicy. See man(2)
+ * set_mempolicy for more details.
+ */
+static u32 task_pick_mempolicy_domain(
+		struct task_struct *p, struct task_ctx *taskc, u32 rr_token)
+{
+	u32 ret = NO_DOM_FOUND;
+	if (!mempolicy_affinity || !bpf_core_field_exists(p->mempolicy) ||
+			!p->mempolicy || !taskc->cpumask)
+		return ret;
+
+	if (!(p->mempolicy->mode & (MPOL_BIND|MPOL_PREFERRED))) {
+		return ret;
+	}
+
+	// MPOL_BIND and MPOL_PREFERRED_MANY use the home_node field on the
+	// mempolicy struct, so use that for now. In the future the memory
+	// usage of the node can be checked to follow the same algorithm for
+	// where memory allocations will occur.
+	if ((int)p->mempolicy->home_node >= 0) {
+		struct node_ctx *nodec;
+		return (u32)p->mempolicy->home_node;
+	}
+
+	nodemask_t *node_mask = &p->mempolicy->nodes;
+
+	void *mask = BPF_CORE_READ(node_mask, bits);
+	u32 val = 0;
+	if (bpf_core_read(&val, sizeof(val), mask)) {
+		return ret;
+	}
+
+	bool cleared = false;
+	u32 i;
+	bpf_for(i, 0, nr_nodes) {
+		if (!(val & (1 <<i))) {
+			continue;
+		}
+
+		ret = i;
+		// If the round robin token matches the domain then return
+		// it.
+		if (ret != NO_DOM_FOUND && i % rr_token == 0)
+			return ret;
+	}
+
+	return ret;
 }
 
 static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
@@ -1442,7 +1494,7 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 			    const struct cpumask *cpumask)
 {
 	s32 cpu = bpf_get_smp_processor_id();
-	u32 first_dom = NO_DOM_FOUND, dom;
+	u32 first_dom = NO_DOM_FOUND, dom, mempolicy_dom;
 
 	if (cpu < 0 || cpu >= MAX_CPUS)
 		return NO_DOM_FOUND;
@@ -1450,6 +1502,10 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 	taskc->dom_mask = 0;
 
 	dom = pcpu_ctx[cpu].dom_rr_cur++;
+	mempolicy_dom = task_pick_mempolicy_domain(p, taskc, dom);
+	if (mempolicy_dom != NO_DOM_FOUND)
+		return mempolicy_dom;
+
 	bpf_repeat(nr_doms) {
 		dom = (dom + 1) % nr_doms;
 		if (cpumask_intersects_domain(cpumask, dom)) {
