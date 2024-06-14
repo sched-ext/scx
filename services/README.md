@@ -41,9 +41,22 @@ systemctl enable --now scx.service
 systemctl status scx.service
 ```
 
+## Override global configuration
+
+It is possible to override the global scx settings using systemd environment
+variables `SCX_SCHEDULER_OVERRIDE` and `SCX_FLAGS_OVERRIDE`.
+
+Example:
+
+```
+systemctl set-environment SCX_SCHEDULER_OVERRIDE=scx_rustland
+systemctl set-environment SCX_FLAGS_OVERRIDE="-s 10000"
+systemctl restart scx
+```
+
 ## Checking Journald Logs
 
-The SCX schedulers do not log to the default journald namspace. Instead, they save logs in a dedicated ```sched-ext``` namespace.
+The SCX schedulers do not log to the default journald namespace. Instead, they save logs in a dedicated ```sched-ext``` namespace.
 This is where you should look for information about possible errors.
 
 - To view the logs, use the following command:
