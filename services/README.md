@@ -54,6 +54,14 @@ systemctl set-environment SCX_FLAGS_OVERRIDE="-s 10000"
 systemctl restart scx
 ```
 
+If you want to restore the default value from the `/etc/default/scx` file execute:
+
+```
+systemctl unset-environment SCX_SCHEDULER_OVERRIDE
+systemctl unset-environment SCX_FLAGS_OVERRIDE
+systemctl restart scx
+```
+
 ## Checking Journald Logs
 
 The SCX schedulers do not log to the default journald namespace. Instead, they save logs in a dedicated ```sched-ext``` namespace.
