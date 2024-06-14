@@ -78,7 +78,6 @@ enum consts {
 	LAVD_ELIGIBLE_TIME_MAX		= (LAVD_SLICE_MIN_NS >> 8),
 
 	LAVD_CPU_UTIL_MAX		= 1000, /* 100.0% */
-	LAVD_CPU_UTIL_INTERVAL_NS	= (25 * NSEC_PER_MSEC),
 	LAVD_CPU_ID_HERE		= ((u32)-2),
 	LAVD_CPU_ID_NONE		= ((u32)-1),
 	LAVD_CPU_ID_MAX			= 512,
@@ -87,12 +86,13 @@ enum consts {
 	LAVD_PREEMPT_KICK_MARGIN	= (LAVD_SLICE_MIN_NS >> 3),
 	LAVD_PREEMPT_TICK_MARGIN	= (LAVD_SLICE_MIN_NS >> 8),
 
+	LAVD_SYS_STAT_INTERVAL_NS	= (25 * NSEC_PER_MSEC),
 	LAVD_TC_PER_CORE_MAX_CTUIL	= 500, /* maximum per-core CPU utilization */
 	LAVD_TC_NR_ACTIVE_MIN		= 1, /* num of mininum active cores */
 	LAVD_TC_NR_OVRFLW		= 1, /* num of overflow cores */
 	LAVD_TC_CPU_PIN_INTERVAL	= (100 * NSEC_PER_MSEC),
 	LAVD_TC_CPU_PIN_INTERVAL_DIV	= (LAVD_TC_CPU_PIN_INTERVAL /
-					   LAVD_CPU_UTIL_INTERVAL_NS),
+					   LAVD_SYS_STAT_INTERVAL_NS),
 
 	LAVD_GLOBAL_DSQ			= 0,
 };
@@ -169,6 +169,13 @@ struct cpu_ctx {
 	s32		cpu_id;		/* cpu id */
 
 	/*
+	 * Information for CPU frequency scaling
+	 */
+	u32		cpuperf_cur;	/* CPU's current performance target */
+	u32		cpuperf_task;	/* task's CPU performance target */
+	u32		cpuperf_avg;	/* EWMA of task's CPU performance target */
+
+	/*
 	 * Fields for core compaction
 	 *
 	 */
@@ -224,6 +231,7 @@ struct task_ctx_x {
 	u64	avg_lat_cri;	/* average latency criticality */
 	u64	avg_perf_cri;	/* average performance criticality */
 	u32	nr_active;	/* number of active cores */
+	u32	cpuperf_cur;	/* CPU's current performance target */
 };
 
 
