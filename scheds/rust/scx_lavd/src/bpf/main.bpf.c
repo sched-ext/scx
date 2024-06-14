@@ -158,6 +158,31 @@
  * decrease it upon every tick interval.
  *
  *
+ * 9. Core compaction
+ * ------------------
+ *
+ * When system-wide CPU utilization is low, it is very likely all the CPUs are
+ * running with very low utilization. All CPUs run with low clock frequency due
+ * to dynamic frequency scaling, frequently going in and out from/to C-state.
+ * That results in low performance (i.e., low clock frequency) and high power
+ * consumption (i.e., frequent P-/C-state transition).
+ *
+ * The idea of *core compaction* is using less number of CPUs when system-wide
+ * CPU utilization is low (say < 50%). The chosen cores (called "active cores")
+ * will run in higher utilization and higher clock frequency, and the rest of
+ * the cores (called "idle cores") will be in a C-state for a much longer
+ * duration. Thus, the core compaction can achieve higher performance with
+ * lower power consumption.
+ *
+ * One potential problem of core compaction is latency spikes when all the
+ * active cores are overloaded. A few techniques are incorporated to solve this
+ * problem. 1) Limit the active CPU core's utilization below a certain limit
+ * (say 50%). 2) Do not use the core compaction when the system-wide
+ * utilization is moderate (say 50%). 3) Do not enforce the core compaction for
+ * kernel and pinned user-space tasks since they are manually optimized for
+ * performance.
+ *
+ *
  * Copyright (c) 2023, 2024 Valve Corporation.
  * Author: Changwoo Min <changwoo@igalia.com>
  */
