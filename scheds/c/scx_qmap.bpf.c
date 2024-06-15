@@ -579,7 +579,7 @@ struct {
 	__uint(max_entries, 1);
 	__type(key, u32);
 	__type(value, struct monitor_timer);
-} central_timer SEC(".maps");
+} monitor_timer SEC(".maps");
 
 /*
  * Print out the min, avg and max performance levels of CPUs every second to
@@ -692,11 +692,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(qmap_init)
 	if (ret)
 		return ret;
 
-	timer = bpf_map_lookup_elem(&central_timer, &key);
+	timer = bpf_map_lookup_elem(&monitor_timer, &key);
 	if (!timer)
 		return -ESRCH;
 
-	bpf_timer_init(timer, &central_timer, CLOCK_MONOTONIC);
+	bpf_timer_init(timer, &monitor_timer, CLOCK_MONOTONIC);
 	bpf_timer_set_callback(timer, monitor_timerfn);
 
 	return bpf_timer_start(timer, ONE_SEC_IN_NS, 0);
