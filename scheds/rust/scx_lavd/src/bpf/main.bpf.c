@@ -1427,7 +1427,7 @@ static int boost_lat(struct task_struct *p, struct task_ctx *taskc,
 	 * conversion, we mitigate the exponentially skewed distribution to
 	 * non-linear distribution.
 	 */
-	taskc->lat_cri = bpf_log2l(lat_cri_raw + 1);
+	taskc->lat_cri = log2_u64(lat_cri_raw + 1);
 
 	/*
 	 * Convert @p's latency criticality to its boost priority linearly.
@@ -1679,7 +1679,7 @@ static void update_stat_for_running(struct task_struct *p,
 	wake_freq_ft = calc_freq_factor(taskc->wake_freq);
 	perf_cri_raw = load_actual_ft * load_ideal_ft *
 		       wait_freq_ft * wake_freq_ft;
-	taskc->perf_cri = bpf_log2l(perf_cri_raw + 1);
+	taskc->perf_cri = log2_u64(perf_cri_raw + 1);
 	cpuc->sum_perf_cri += taskc->perf_cri;
 
 	/*

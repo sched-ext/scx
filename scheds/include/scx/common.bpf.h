@@ -243,36 +243,6 @@ BPF_PROG(name, ##args)
 #define __contains(name, node) __attribute__((btf_decl_tag("contains:" #name ":" #node)))
 #define private(name) SEC(".data." #name) __hidden __attribute__((aligned(8)))
 
-/*
- * bpf_log2 - Compute the base 2 logarithm of a 32-bit exponential value.
- * @v: The value for which we're computing the base 2 logarithm.
- */
-static inline u32 bpf_log2(u32 v)
-{
-        u32 r;
-        u32 shift;
-
-        r = (v > 0xFFFF) << 4; v >>= r;
-        shift = (v > 0xFF) << 3; v >>= shift; r |= shift;
-        shift = (v > 0xF) << 2; v >>= shift; r |= shift;
-        shift = (v > 0x3) << 1; v >>= shift; r |= shift;
-        r |= (v >> 1);
-        return r;
-}
-
-/*
- * bpf_log2l - Compute the base 2 logarithm of a 64-bit exponential value.
- * @v: The value for which we're computing the base 2 logarithm.
- */
-static inline u32 bpf_log2l(u64 v)
-{
-        u32 hi = v >> 32;
-        if (hi)
-                return bpf_log2(hi) + 32 + 1;
-        else
-                return bpf_log2(v) + 1;
-}
-
 /* useful compiler attributes */
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
@@ -330,6 +300,36 @@ static __always_inline void __write_once_size(volatile void *p, void *res, int s
 	__write_once_size(&(x), __u.__c, sizeof(x));	\
 	__u.__val;					\
 })
+
+/*
+ * log2_u32 - Compute the base 2 logarithm of a 32-bit exponential value.
+ * @v: The value for which we're computing the base 2 logarithm.
+ */
+static inline u32 log2_u32(u32 v)
+{
+        u32 r;
+        u32 shift;
+
+        r = (v > 0xFFFF) << 4; v >>= r;
+        shift = (v > 0xFF) << 3; v >>= shift; r |= shift;
+        shift = (v > 0xF) << 2; v >>= shift; r |= shift;
+        shift = (v > 0x3) << 1; v >>= shift; r |= shift;
+        r |= (v >> 1);
+        return r;
+}
+
+/*
+ * log2_u64 - Compute the base 2 logarithm of a 64-bit exponential value.
+ * @v: The value for which we're computing the base 2 logarithm.
+ */
+static inline u32 log2_u64(u64 v)
+{
+        u32 hi = v >> 32;
+        if (hi)
+                return log2_u32(hi) + 32 + 1;
+        else
+                return log2_u32(v) + 1;
+}
 
 void *bpf_obj_new_impl(__u64 local_type_id, void *meta) __ksym;
 void bpf_obj_drop_impl(void *kptr, void *meta) __ksym;
