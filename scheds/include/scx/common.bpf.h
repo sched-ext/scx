@@ -235,43 +235,94 @@ BPF_PROG(name, ##args)
 	__addr;									\
 })
 
+
 /*
- * BPF core and other generic helpers
+ * BPF declarations and helpers
  */
 
 /* list and rbtree */
 #define __contains(name, node) __attribute__((btf_decl_tag("contains:" #name ":" #node)))
 #define private(name) SEC(".data." #name) __hidden __attribute__((aligned(8)))
 
-/*
- * bpf_log2 - Compute the base 2 logarithm of a 32-bit exponential value.
- * @v: The value for which we're computing the base 2 logarithm.
- */
-static inline u32 bpf_log2(u32 v)
-{
-        u32 r;
-        u32 shift;
+void *bpf_obj_new_impl(__u64 local_type_id, void *meta) __ksym;
+void bpf_obj_drop_impl(void *kptr, void *meta) __ksym;
 
-        r = (v > 0xFFFF) << 4; v >>= r;
-        shift = (v > 0xFF) << 3; v >>= shift; r |= shift;
-        shift = (v > 0xF) << 2; v >>= shift; r |= shift;
-        shift = (v > 0x3) << 1; v >>= shift; r |= shift;
-        r |= (v >> 1);
-        return r;
-}
+#define bpf_obj_new(type) ((type *)bpf_obj_new_impl(bpf_core_type_id_local(type), NULL))
+#define bpf_obj_drop(kptr) bpf_obj_drop_impl(kptr, NULL)
+
+void bpf_list_push_front(struct bpf_list_head *head, struct bpf_list_node *node) __ksym;
+void bpf_list_push_back(struct bpf_list_head *head, struct bpf_list_node *node) __ksym;
+struct bpf_list_node *bpf_list_pop_front(struct bpf_list_head *head) __ksym;
+struct bpf_list_node *bpf_list_pop_back(struct bpf_list_head *head) __ksym;
+struct bpf_rb_node *bpf_rbtree_remove(struct bpf_rb_root *root,
+				      struct bpf_rb_node *node) __ksym;
+int bpf_rbtree_add_impl(struct bpf_rb_root *root, struct bpf_rb_node *node,
+			bool (less)(struct bpf_rb_node *a, const struct bpf_rb_node *b),
+			void *meta, __u64 off) __ksym;
+#define bpf_rbtree_add(head, node, less) bpf_rbtree_add_impl(head, node, less, NULL, 0)
+
+struct bpf_rb_node *bpf_rbtree_first(struct bpf_rb_root *root) __ksym;
+
+void *bpf_refcount_acquire_impl(void *kptr, void *meta) __ksym;
+#define bpf_refcount_acquire(kptr) bpf_refcount_acquire_impl(kptr, NULL)
+
+/* task */
+struct task_struct *bpf_task_from_pid(s32 pid) __ksym;
+struct task_struct *bpf_task_acquire(struct task_struct *p) __ksym;
+void bpf_task_release(struct task_struct *p) __ksym;
+
+/* cgroup */
+struct cgroup *bpf_cgroup_ancestor(struct cgroup *cgrp, int level) __ksym;
+void bpf_cgroup_release(struct cgroup *cgrp) __ksym;
+struct cgroup *bpf_cgroup_from_id(u64 cgid) __ksym;
+
+/* css iteration */
+struct bpf_iter_css;
+struct cgroup_subsys_state;
+extern int bpf_iter_css_new(struct bpf_iter_css *it,
+			    struct cgroup_subsys_state *start,
+			    unsigned int flags) __weak __ksym;
+extern struct cgroup_subsys_state *
+bpf_iter_css_next(struct bpf_iter_css *it) __weak __ksym;
+extern void bpf_iter_css_destroy(struct bpf_iter_css *it) __weak __ksym;
+
+/* cpumask */
+struct bpf_cpumask *bpf_cpumask_create(void) __ksym;
+struct bpf_cpumask *bpf_cpumask_acquire(struct bpf_cpumask *cpumask) __ksym;
+void bpf_cpumask_release(struct bpf_cpumask *cpumask) __ksym;
+u32 bpf_cpumask_first(const struct cpumask *cpumask) __ksym;
+u32 bpf_cpumask_first_zero(const struct cpumask *cpumask) __ksym;
+void bpf_cpumask_set_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
+void bpf_cpumask_clear_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
+bool bpf_cpumask_test_cpu(u32 cpu, const struct cpumask *cpumask) __ksym;
+bool bpf_cpumask_test_and_set_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
+bool bpf_cpumask_test_and_clear_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
+void bpf_cpumask_setall(struct bpf_cpumask *cpumask) __ksym;
+void bpf_cpumask_clear(struct bpf_cpumask *cpumask) __ksym;
+bool bpf_cpumask_and(struct bpf_cpumask *dst, const struct cpumask *src1,
+		     const struct cpumask *src2) __ksym;
+void bpf_cpumask_or(struct bpf_cpumask *dst, const struct cpumask *src1,
+		    const struct cpumask *src2) __ksym;
+void bpf_cpumask_xor(struct bpf_cpumask *dst, const struct cpumask *src1,
+		     const struct cpumask *src2) __ksym;
+bool bpf_cpumask_equal(const struct cpumask *src1, const struct cpumask *src2) __ksym;
+bool bpf_cpumask_intersects(const struct cpumask *src1, const struct cpumask *src2) __ksym;
+bool bpf_cpumask_subset(const struct cpumask *src1, const struct cpumask *src2) __ksym;
+bool bpf_cpumask_empty(const struct cpumask *cpumask) __ksym;
+bool bpf_cpumask_full(const struct cpumask *cpumask) __ksym;
+void bpf_cpumask_copy(struct bpf_cpumask *dst, const struct cpumask *src) __ksym;
+u32 bpf_cpumask_any_distribute(const struct cpumask *cpumask) __ksym;
+u32 bpf_cpumask_any_and_distribute(const struct cpumask *src1,
+				   const struct cpumask *src2) __ksym;
+
+/* rcu */
+void bpf_rcu_read_lock(void) __ksym;
+void bpf_rcu_read_unlock(void) __ksym;
+
 
 /*
- * bpf_log2l - Compute the base 2 logarithm of a 64-bit exponential value.
- * @v: The value for which we're computing the base 2 logarithm.
+ * Other helpers
  */
-static inline u32 bpf_log2l(u64 v)
-{
-        u32 hi = v >> 32;
-        if (hi)
-                return bpf_log2(hi) + 32 + 1;
-        else
-                return bpf_log2(v) + 1;
-}
 
 /* useful compiler attributes */
 #define likely(x) __builtin_expect(!!(x), 1)
@@ -279,12 +330,9 @@ static inline u32 bpf_log2l(u64 v)
 #define __maybe_unused __attribute__((__unused__))
 
 /*
- * The folloing functions are taken from kernel sources
- * under /include/asm-generic/rwonce.h in order to prevent
- * compiler from refetching reads or writes, also forbids
- * compiler from reordering successive reads or writes.
+ * READ/WRITE_ONCE() are from kernel (include/asm-generic/rwonce.h). They
+ * prevent compiler from caching, redoing or reordering reads or writes.
  */
-
 typedef __u8  __attribute__((__may_alias__))  __u8_alias_t;
 typedef __u16 __attribute__((__may_alias__)) __u16_alias_t;
 typedef __u32 __attribute__((__may_alias__)) __u32_alias_t;
@@ -334,80 +382,35 @@ static __always_inline void __write_once_size(volatile void *p, void *res, int s
 	__u.__val;					\
 })
 
-void *bpf_obj_new_impl(__u64 local_type_id, void *meta) __ksym;
-void bpf_obj_drop_impl(void *kptr, void *meta) __ksym;
+/*
+ * log2_u32 - Compute the base 2 logarithm of a 32-bit exponential value.
+ * @v: The value for which we're computing the base 2 logarithm.
+ */
+static inline u32 log2_u32(u32 v)
+{
+        u32 r;
+        u32 shift;
 
-#define bpf_obj_new(type) ((type *)bpf_obj_new_impl(bpf_core_type_id_local(type), NULL))
-#define bpf_obj_drop(kptr) bpf_obj_drop_impl(kptr, NULL)
+        r = (v > 0xFFFF) << 4; v >>= r;
+        shift = (v > 0xFF) << 3; v >>= shift; r |= shift;
+        shift = (v > 0xF) << 2; v >>= shift; r |= shift;
+        shift = (v > 0x3) << 1; v >>= shift; r |= shift;
+        r |= (v >> 1);
+        return r;
+}
 
-void bpf_list_push_front(struct bpf_list_head *head, struct bpf_list_node *node) __ksym;
-void bpf_list_push_back(struct bpf_list_head *head, struct bpf_list_node *node) __ksym;
-struct bpf_list_node *bpf_list_pop_front(struct bpf_list_head *head) __ksym;
-struct bpf_list_node *bpf_list_pop_back(struct bpf_list_head *head) __ksym;
-struct bpf_rb_node *bpf_rbtree_remove(struct bpf_rb_root *root,
-				      struct bpf_rb_node *node) __ksym;
-int bpf_rbtree_add_impl(struct bpf_rb_root *root, struct bpf_rb_node *node,
-			bool (less)(struct bpf_rb_node *a, const struct bpf_rb_node *b),
-			void *meta, __u64 off) __ksym;
-#define bpf_rbtree_add(head, node, less) bpf_rbtree_add_impl(head, node, less, NULL, 0)
-
-struct bpf_rb_node *bpf_rbtree_first(struct bpf_rb_root *root) __ksym;
-
-void *bpf_refcount_acquire_impl(void *kptr, void *meta) __ksym;
-#define bpf_refcount_acquire(kptr) bpf_refcount_acquire_impl(kptr, NULL)
-
-/* task */
-struct task_struct *bpf_task_from_pid(s32 pid) __ksym;
-struct task_struct *bpf_task_acquire(struct task_struct *p) __ksym;
-void bpf_task_release(struct task_struct *p) __ksym;
-
-/* cgroup */
-struct cgroup *bpf_cgroup_ancestor(struct cgroup *cgrp, int level) __ksym;
-void bpf_cgroup_release(struct cgroup *cgrp) __ksym;
-struct cgroup *bpf_cgroup_from_id(u64 cgid) __ksym;
-
-/* css iteration is experimental, forward declare the necessary functions */
-struct bpf_iter_css;
-struct cgroup_subsys_state;
-extern int bpf_iter_css_new(struct bpf_iter_css *it,
-			    struct cgroup_subsys_state *start,
-			    unsigned int flags) __weak __ksym;
-extern struct cgroup_subsys_state *
-bpf_iter_css_next(struct bpf_iter_css *it) __weak __ksym;
-extern void bpf_iter_css_destroy(struct bpf_iter_css *it) __weak __ksym;
-
-/* cpumask */
-struct bpf_cpumask *bpf_cpumask_create(void) __ksym;
-struct bpf_cpumask *bpf_cpumask_acquire(struct bpf_cpumask *cpumask) __ksym;
-void bpf_cpumask_release(struct bpf_cpumask *cpumask) __ksym;
-u32 bpf_cpumask_first(const struct cpumask *cpumask) __ksym;
-u32 bpf_cpumask_first_zero(const struct cpumask *cpumask) __ksym;
-void bpf_cpumask_set_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
-void bpf_cpumask_clear_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
-bool bpf_cpumask_test_cpu(u32 cpu, const struct cpumask *cpumask) __ksym;
-bool bpf_cpumask_test_and_set_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
-bool bpf_cpumask_test_and_clear_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
-void bpf_cpumask_setall(struct bpf_cpumask *cpumask) __ksym;
-void bpf_cpumask_clear(struct bpf_cpumask *cpumask) __ksym;
-bool bpf_cpumask_and(struct bpf_cpumask *dst, const struct cpumask *src1,
-		     const struct cpumask *src2) __ksym;
-void bpf_cpumask_or(struct bpf_cpumask *dst, const struct cpumask *src1,
-		    const struct cpumask *src2) __ksym;
-void bpf_cpumask_xor(struct bpf_cpumask *dst, const struct cpumask *src1,
-		     const struct cpumask *src2) __ksym;
-bool bpf_cpumask_equal(const struct cpumask *src1, const struct cpumask *src2) __ksym;
-bool bpf_cpumask_intersects(const struct cpumask *src1, const struct cpumask *src2) __ksym;
-bool bpf_cpumask_subset(const struct cpumask *src1, const struct cpumask *src2) __ksym;
-bool bpf_cpumask_empty(const struct cpumask *cpumask) __ksym;
-bool bpf_cpumask_full(const struct cpumask *cpumask) __ksym;
-void bpf_cpumask_copy(struct bpf_cpumask *dst, const struct cpumask *src) __ksym;
-u32 bpf_cpumask_any_distribute(const struct cpumask *cpumask) __ksym;
-u32 bpf_cpumask_any_and_distribute(const struct cpumask *src1,
-				   const struct cpumask *src2) __ksym;
-
-/* rcu */
-void bpf_rcu_read_lock(void) __ksym;
-void bpf_rcu_read_unlock(void) __ksym;
+/*
+ * log2_u64 - Compute the base 2 logarithm of a 64-bit exponential value.
+ * @v: The value for which we're computing the base 2 logarithm.
+ */
+static inline u32 log2_u64(u64 v)
+{
+        u32 hi = v >> 32;
+        if (hi)
+                return log2_u32(hi) + 32 + 1;
+        else
+                return log2_u32(v) + 1;
+}
 
 #include "compat.bpf.h"
 

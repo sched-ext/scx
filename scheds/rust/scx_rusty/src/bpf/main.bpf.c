@@ -633,10 +633,10 @@ static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
 
 	/*
 	 * The above frequencies roughly follow an exponential distribution, so
-	 * use bpf_log2l() to linearize it to a boost priority that we can then
+	 * use log2_u64() to linearize it to a boost priority that we can then
 	 * scale to a weight factor below.
 	 */
-	lat_prio = bpf_log2l(freq_factor + 1);
+	lat_prio = log2_u64(freq_factor + 1);
 	lat_prio = min(lat_prio, DL_MAX_LAT_PRIO);
 
 	/*
@@ -656,7 +656,7 @@ static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
 	avg_run_raw = taskc->avg_runtime / DL_RUNTIME_SCALE;
 	avg_run_raw = min(avg_run_raw, DL_MAX_LATENCY_NS);
 	avg_run_raw = scale_inverse_fair(avg_run_raw, p->scx.weight);
-	avg_run = bpf_log2l(avg_run_raw + 1);
+	avg_run = log2_u64(avg_run_raw + 1);
 
 	if (avg_run < lat_prio) {
 		/* Equivalent to lat_prio = log(freq_factor / avg_run_raw) */
