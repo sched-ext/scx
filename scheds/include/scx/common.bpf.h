@@ -235,13 +235,94 @@ BPF_PROG(name, ##args)
 	__addr;									\
 })
 
+
 /*
- * BPF core and other generic helpers
+ * BPF declarations and helpers
  */
 
 /* list and rbtree */
 #define __contains(name, node) __attribute__((btf_decl_tag("contains:" #name ":" #node)))
 #define private(name) SEC(".data." #name) __hidden __attribute__((aligned(8)))
+
+void *bpf_obj_new_impl(__u64 local_type_id, void *meta) __ksym;
+void bpf_obj_drop_impl(void *kptr, void *meta) __ksym;
+
+#define bpf_obj_new(type) ((type *)bpf_obj_new_impl(bpf_core_type_id_local(type), NULL))
+#define bpf_obj_drop(kptr) bpf_obj_drop_impl(kptr, NULL)
+
+void bpf_list_push_front(struct bpf_list_head *head, struct bpf_list_node *node) __ksym;
+void bpf_list_push_back(struct bpf_list_head *head, struct bpf_list_node *node) __ksym;
+struct bpf_list_node *bpf_list_pop_front(struct bpf_list_head *head) __ksym;
+struct bpf_list_node *bpf_list_pop_back(struct bpf_list_head *head) __ksym;
+struct bpf_rb_node *bpf_rbtree_remove(struct bpf_rb_root *root,
+				      struct bpf_rb_node *node) __ksym;
+int bpf_rbtree_add_impl(struct bpf_rb_root *root, struct bpf_rb_node *node,
+			bool (less)(struct bpf_rb_node *a, const struct bpf_rb_node *b),
+			void *meta, __u64 off) __ksym;
+#define bpf_rbtree_add(head, node, less) bpf_rbtree_add_impl(head, node, less, NULL, 0)
+
+struct bpf_rb_node *bpf_rbtree_first(struct bpf_rb_root *root) __ksym;
+
+void *bpf_refcount_acquire_impl(void *kptr, void *meta) __ksym;
+#define bpf_refcount_acquire(kptr) bpf_refcount_acquire_impl(kptr, NULL)
+
+/* task */
+struct task_struct *bpf_task_from_pid(s32 pid) __ksym;
+struct task_struct *bpf_task_acquire(struct task_struct *p) __ksym;
+void bpf_task_release(struct task_struct *p) __ksym;
+
+/* cgroup */
+struct cgroup *bpf_cgroup_ancestor(struct cgroup *cgrp, int level) __ksym;
+void bpf_cgroup_release(struct cgroup *cgrp) __ksym;
+struct cgroup *bpf_cgroup_from_id(u64 cgid) __ksym;
+
+/* css iteration */
+struct bpf_iter_css;
+struct cgroup_subsys_state;
+extern int bpf_iter_css_new(struct bpf_iter_css *it,
+			    struct cgroup_subsys_state *start,
+			    unsigned int flags) __weak __ksym;
+extern struct cgroup_subsys_state *
+bpf_iter_css_next(struct bpf_iter_css *it) __weak __ksym;
+extern void bpf_iter_css_destroy(struct bpf_iter_css *it) __weak __ksym;
+
+/* cpumask */
+struct bpf_cpumask *bpf_cpumask_create(void) __ksym;
+struct bpf_cpumask *bpf_cpumask_acquire(struct bpf_cpumask *cpumask) __ksym;
+void bpf_cpumask_release(struct bpf_cpumask *cpumask) __ksym;
+u32 bpf_cpumask_first(const struct cpumask *cpumask) __ksym;
+u32 bpf_cpumask_first_zero(const struct cpumask *cpumask) __ksym;
+void bpf_cpumask_set_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
+void bpf_cpumask_clear_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
+bool bpf_cpumask_test_cpu(u32 cpu, const struct cpumask *cpumask) __ksym;
+bool bpf_cpumask_test_and_set_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
+bool bpf_cpumask_test_and_clear_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
+void bpf_cpumask_setall(struct bpf_cpumask *cpumask) __ksym;
+void bpf_cpumask_clear(struct bpf_cpumask *cpumask) __ksym;
+bool bpf_cpumask_and(struct bpf_cpumask *dst, const struct cpumask *src1,
+		     const struct cpumask *src2) __ksym;
+void bpf_cpumask_or(struct bpf_cpumask *dst, const struct cpumask *src1,
+		    const struct cpumask *src2) __ksym;
+void bpf_cpumask_xor(struct bpf_cpumask *dst, const struct cpumask *src1,
+		     const struct cpumask *src2) __ksym;
+bool bpf_cpumask_equal(const struct cpumask *src1, const struct cpumask *src2) __ksym;
+bool bpf_cpumask_intersects(const struct cpumask *src1, const struct cpumask *src2) __ksym;
+bool bpf_cpumask_subset(const struct cpumask *src1, const struct cpumask *src2) __ksym;
+bool bpf_cpumask_empty(const struct cpumask *cpumask) __ksym;
+bool bpf_cpumask_full(const struct cpumask *cpumask) __ksym;
+void bpf_cpumask_copy(struct bpf_cpumask *dst, const struct cpumask *src) __ksym;
+u32 bpf_cpumask_any_distribute(const struct cpumask *cpumask) __ksym;
+u32 bpf_cpumask_any_and_distribute(const struct cpumask *src1,
+				   const struct cpumask *src2) __ksym;
+
+/* rcu */
+void bpf_rcu_read_lock(void) __ksym;
+void bpf_rcu_read_unlock(void) __ksym;
+
+
+/*
+ * Other helpers
+ */
 
 /* useful compiler attributes */
 #define likely(x) __builtin_expect(!!(x), 1)
@@ -330,81 +411,6 @@ static inline u32 log2_u64(u64 v)
         else
                 return log2_u32(v) + 1;
 }
-
-void *bpf_obj_new_impl(__u64 local_type_id, void *meta) __ksym;
-void bpf_obj_drop_impl(void *kptr, void *meta) __ksym;
-
-#define bpf_obj_new(type) ((type *)bpf_obj_new_impl(bpf_core_type_id_local(type), NULL))
-#define bpf_obj_drop(kptr) bpf_obj_drop_impl(kptr, NULL)
-
-void bpf_list_push_front(struct bpf_list_head *head, struct bpf_list_node *node) __ksym;
-void bpf_list_push_back(struct bpf_list_head *head, struct bpf_list_node *node) __ksym;
-struct bpf_list_node *bpf_list_pop_front(struct bpf_list_head *head) __ksym;
-struct bpf_list_node *bpf_list_pop_back(struct bpf_list_head *head) __ksym;
-struct bpf_rb_node *bpf_rbtree_remove(struct bpf_rb_root *root,
-				      struct bpf_rb_node *node) __ksym;
-int bpf_rbtree_add_impl(struct bpf_rb_root *root, struct bpf_rb_node *node,
-			bool (less)(struct bpf_rb_node *a, const struct bpf_rb_node *b),
-			void *meta, __u64 off) __ksym;
-#define bpf_rbtree_add(head, node, less) bpf_rbtree_add_impl(head, node, less, NULL, 0)
-
-struct bpf_rb_node *bpf_rbtree_first(struct bpf_rb_root *root) __ksym;
-
-void *bpf_refcount_acquire_impl(void *kptr, void *meta) __ksym;
-#define bpf_refcount_acquire(kptr) bpf_refcount_acquire_impl(kptr, NULL)
-
-/* task */
-struct task_struct *bpf_task_from_pid(s32 pid) __ksym;
-struct task_struct *bpf_task_acquire(struct task_struct *p) __ksym;
-void bpf_task_release(struct task_struct *p) __ksym;
-
-/* cgroup */
-struct cgroup *bpf_cgroup_ancestor(struct cgroup *cgrp, int level) __ksym;
-void bpf_cgroup_release(struct cgroup *cgrp) __ksym;
-struct cgroup *bpf_cgroup_from_id(u64 cgid) __ksym;
-
-/* css iteration */
-struct bpf_iter_css;
-struct cgroup_subsys_state;
-extern int bpf_iter_css_new(struct bpf_iter_css *it,
-			    struct cgroup_subsys_state *start,
-			    unsigned int flags) __weak __ksym;
-extern struct cgroup_subsys_state *
-bpf_iter_css_next(struct bpf_iter_css *it) __weak __ksym;
-extern void bpf_iter_css_destroy(struct bpf_iter_css *it) __weak __ksym;
-
-/* cpumask */
-struct bpf_cpumask *bpf_cpumask_create(void) __ksym;
-struct bpf_cpumask *bpf_cpumask_acquire(struct bpf_cpumask *cpumask) __ksym;
-void bpf_cpumask_release(struct bpf_cpumask *cpumask) __ksym;
-u32 bpf_cpumask_first(const struct cpumask *cpumask) __ksym;
-u32 bpf_cpumask_first_zero(const struct cpumask *cpumask) __ksym;
-void bpf_cpumask_set_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
-void bpf_cpumask_clear_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
-bool bpf_cpumask_test_cpu(u32 cpu, const struct cpumask *cpumask) __ksym;
-bool bpf_cpumask_test_and_set_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
-bool bpf_cpumask_test_and_clear_cpu(u32 cpu, struct bpf_cpumask *cpumask) __ksym;
-void bpf_cpumask_setall(struct bpf_cpumask *cpumask) __ksym;
-void bpf_cpumask_clear(struct bpf_cpumask *cpumask) __ksym;
-bool bpf_cpumask_and(struct bpf_cpumask *dst, const struct cpumask *src1,
-		     const struct cpumask *src2) __ksym;
-void bpf_cpumask_or(struct bpf_cpumask *dst, const struct cpumask *src1,
-		    const struct cpumask *src2) __ksym;
-void bpf_cpumask_xor(struct bpf_cpumask *dst, const struct cpumask *src1,
-		     const struct cpumask *src2) __ksym;
-bool bpf_cpumask_equal(const struct cpumask *src1, const struct cpumask *src2) __ksym;
-bool bpf_cpumask_intersects(const struct cpumask *src1, const struct cpumask *src2) __ksym;
-bool bpf_cpumask_subset(const struct cpumask *src1, const struct cpumask *src2) __ksym;
-bool bpf_cpumask_empty(const struct cpumask *cpumask) __ksym;
-bool bpf_cpumask_full(const struct cpumask *cpumask) __ksym;
-void bpf_cpumask_copy(struct bpf_cpumask *dst, const struct cpumask *src) __ksym;
-u32 bpf_cpumask_any_distribute(const struct cpumask *cpumask) __ksym;
-u32 bpf_cpumask_any_and_distribute(const struct cpumask *src1,
-				   const struct cpumask *src2) __ksym;
-
-/* rcu */
-void bpf_rcu_read_lock(void) __ksym;
-void bpf_rcu_read_unlock(void) __ksym;
 
 #include "compat.bpf.h"
 
