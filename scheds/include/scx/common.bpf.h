@@ -279,12 +279,9 @@ static inline u32 bpf_log2l(u64 v)
 #define __maybe_unused __attribute__((__unused__))
 
 /*
- * The folloing functions are taken from kernel sources
- * under /include/asm-generic/rwonce.h in order to prevent
- * compiler from refetching reads or writes, also forbids
- * compiler from reordering successive reads or writes.
+ * READ/WRITE_ONCE() are from kernel (include/asm-generic/rwonce.h). They
+ * prevent compiler from caching, redoing or reordering reads or writes.
  */
-
 typedef __u8  __attribute__((__may_alias__))  __u8_alias_t;
 typedef __u16 __attribute__((__may_alias__)) __u16_alias_t;
 typedef __u32 __attribute__((__may_alias__)) __u32_alias_t;
@@ -366,7 +363,7 @@ struct cgroup *bpf_cgroup_ancestor(struct cgroup *cgrp, int level) __ksym;
 void bpf_cgroup_release(struct cgroup *cgrp) __ksym;
 struct cgroup *bpf_cgroup_from_id(u64 cgid) __ksym;
 
-/* css iteration is experimental, forward declare the necessary functions */
+/* css iteration */
 struct bpf_iter_css;
 struct cgroup_subsys_state;
 extern int bpf_iter_css_new(struct bpf_iter_css *it,
