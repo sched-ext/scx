@@ -28,14 +28,14 @@ impl<'a> Scheduler<'a> {
     fn init() -> Result<Self> {
         let topo = Topology::new().expect("Failed to build host topology");
         let bpf = BpfScheduler::init(
-            5000,
-            topo.nr_cpus_possible() as i32,
-            false,
-            0,
-            false,
-            false,
-            true,
-            false,
+            5000,                           // slice_ns (default task time slice)
+            topo.nr_cpus_possible() as i32, // nr_cpus (max CPUs available in the system)
+            false,                          // partial (include all tasks if disabled)
+            0,                              // exit_dump_len (buffer size of exit info)
+            false,                          // full_user (schedule all tasks in user-space)
+            false,                          // low_power (low power mode)
+            true,                           // fifo_sched (enable BPF FIFO scheduling)
+            false,                          // debug (debug mode)
         )?;
         Ok(Self { bpf })
     }
@@ -55,7 +55,8 @@ impl<'a> Scheduler<'a> {
                     // task.cpu < 0 is used to to notify an exiting task, in this
                     // case we can simply ignore the task.
                     if task.cpu >= 0 {
-                        let _ = self.bpf.dispatch_task(&DispatchedTask::new(&task));
+                        let dispatched_task = DispatchedTask::new(&task);
+                        let _ = self.bpf.dispatch_task(&dispatched_task);
 
                         // Give the task a chance to run and prevent overflowing the dispatch queue.
                         std::thread::yield_now();
