@@ -55,7 +55,11 @@ impl<'a> Scheduler<'a> {
                     // task.cpu < 0 is used to to notify an exiting task, in this
                     // case we can simply ignore the task.
                     if task.cpu >= 0 {
-                        let dispatched_task = DispatchedTask::new(&task);
+                        let mut dispatched_task = DispatchedTask::new(&task);
+
+                        // Allow to dispatch on the first CPU available.
+                        dispatched_task.set_flag(RL_CPU_ANY);
+
                         let _ = self.bpf.dispatch_task(&dispatched_task);
 
                         // Give the task a chance to run and prevent overflowing the dispatch queue.
