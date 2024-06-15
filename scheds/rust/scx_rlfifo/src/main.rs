@@ -32,9 +32,9 @@ impl<'a> Scheduler<'a> {
             topo.nr_cpus_possible() as i32, // nr_cpus (max CPUs available in the system)
             false,                          // partial (include all tasks if disabled)
             0,                              // exit_dump_len (buffer size of exit info)
-            false,                          // full_user (schedule all tasks in user-space)
+            true,                           // full_user (schedule all tasks in user-space)
             false,                          // low_power (low power mode)
-            true,                           // fifo_sched (enable BPF FIFO scheduling)
+            false,                          // fifo_sched (enable BPF FIFO scheduling)
             false,                          // debug (debug mode)
         )?;
         Ok(Self { bpf })
