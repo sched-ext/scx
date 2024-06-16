@@ -162,6 +162,9 @@ macro_rules! unwrap_or_break {
 }
 
 pub fn check_min_requirements() -> Result<()> {
+    if let Ok(false) | Err(_) = struct_has_field("sched_ext_ops", "dump") {
+	bail!("sched_ext_ops.dump() missing, kernel too old?");
+    }
     if let Ok(false) | Err(_) = struct_has_field("sched_ext_ops", "tick") {
 	bail!("sched_ext_ops.tick() missing, kernel too old?");
     }
@@ -245,20 +248,6 @@ macro_rules! scx_ops_load {
     ($skel: expr, $ops: ident, $uei: ident) => { 'block: {
         scx_utils::paste! {
             scx_utils::uei_set_size!($skel, $ops, $uei);
-
-            let ops = $skel.struct_ops.[<$ops _mut>]();
-
-            let has_field = scx_utils::unwrap_or_break!(
-                scx_utils::compat::struct_has_field("sched_ext_ops", "dump"), 'block);
-            if !has_field && (ops.dump != std::ptr::null_mut() ||
-                              ops.dump_cpu != std::ptr::null_mut() ||
-                              ops.dump_task != std::ptr::null_mut()) {
-                scx_utils::warn!("Kernel doesn't support ops.dump*()");
-                ops.dump = std::ptr::null_mut();
-                ops.dump_cpu = std::ptr::null_mut();
-                ops.dump_task = std::ptr::null_mut();
-            }
-
             $skel.load().context("Failed to load BPF program")
         }
     }};

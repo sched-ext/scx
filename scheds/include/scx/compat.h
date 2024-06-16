@@ -148,6 +148,8 @@ static inline long scx_hotplug_seq(void)
 #define SCX_OPS_OPEN(__ops_name, __scx_name) ({					\
 	struct __scx_name *__skel;						\
 										\
+	SCX_BUG_ON(!__COMPAT_struct_has_field("sched_ext_ops", "dump"),		\
+		   "sched_ext_ops.dump() missing, kernel too old?");		\
 	SCX_BUG_ON(!__COMPAT_struct_has_field("sched_ext_ops", "tick"),		\
 		   "sched_ext_ops.tick() missing, kernel too old?");		\
 	SCX_BUG_ON(!__COMPAT_struct_has_field("sched_ext_ops", "exit_dump_len"),\
@@ -175,15 +177,6 @@ static inline long scx_hotplug_seq(void)
 
 #define SCX_OPS_LOAD(__skel, __ops_name, __scx_name, __uei_name) ({		\
 	UEI_SET_SIZE(__skel, __ops_name, __uei_name);				\
-	if (!__COMPAT_struct_has_field("sched_ext_ops", "dump") &&		\
-	    ((__skel)->struct_ops.__ops_name->dump ||				\
-	     (__skel)->struct_ops.__ops_name->dump_cpu ||			\
-	     (__skel)->struct_ops.__ops_name->dump_task)) {			\
-		fprintf(stderr, "WARNING: kernel doesn't support ops.dump*()\n"); \
-		(__skel)->struct_ops.__ops_name->dump = NULL;			\
-		(__skel)->struct_ops.__ops_name->dump_cpu = NULL;		\
-		(__skel)->struct_ops.__ops_name->dump_task = NULL;		\
-	}									\
 	SCX_BUG_ON(__scx_name##__load((__skel)), "Failed to load skel");	\
 })
 
