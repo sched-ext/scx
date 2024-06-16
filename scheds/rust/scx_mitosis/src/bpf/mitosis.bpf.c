@@ -877,8 +877,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	u32 i;
 	s32 ret;
 
-	__COMPAT_scx_bpf_switch_all();
-
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
 		return -ENOMEM;

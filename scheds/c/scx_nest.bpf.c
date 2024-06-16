@@ -582,8 +582,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(nest_init)
 	struct bpf_timer *timer;
 	u32 key = 0;
 
-	__COMPAT_scx_bpf_switch_all();
-
 	err = scx_bpf_create_dsq(FALLBACK_DSQ_ID, NUMA_NO_NODE);
 	if (err) {
 		scx_bpf_error("Failed to create fallback DSQ");

@@ -1010,8 +1010,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rustland_init)
 	err = usersched_timer_init();
 	if (err)
 		return err;
-        if (!switch_partial)
-		__COMPAT_scx_bpf_switch_all();
 
 	return 0;
 }

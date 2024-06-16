@@ -24,19 +24,6 @@
 	__COMPAT_ENUM_OR_ZERO(enum scx_kick_flags, SCX_KICK_IDLE)
 
 /*
- * scx_switch_all() was replaced by %SCX_OPS_SWITCH_PARTIAL. See
- * %__COMPAT_SCX_OPS_SWITCH_PARTIAL in compat.h. This can be dropped in the
- * future.
- */
-void scx_bpf_switch_all(void) __ksym __weak;
-
-static inline void __COMPAT_scx_bpf_switch_all(void)
-{
-	if (!bpf_core_enum_value_exists(enum scx_ops_flags, SCX_OPS_SWITCH_PARTIAL))
-		scx_bpf_switch_all();
-}
-
-/*
  * scx_bpf_exit() is a new addition. Fall back to scx_bpf_error() if
  * unavailable. Users can use scx_bpf_exit() directly in the future.
  */

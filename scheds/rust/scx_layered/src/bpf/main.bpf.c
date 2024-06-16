@@ -1248,8 +1248,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	struct bpf_cpumask *cpumask;
 	int i, j, k, nr_online_cpus, ret;
 
-	__COMPAT_scx_bpf_switch_all();
-
 	ret = scx_bpf_create_dsq(HI_FALLBACK_DSQ, -1);
 	if (ret < 0)
 		return ret;

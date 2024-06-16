@@ -106,14 +106,7 @@ static inline bool __COMPAT_struct_has_field(const char *type, const char *field
 	return false;
 }
 
-/*
- * An ops flag, %SCX_OPS_SWITCH_PARTIAL, replaced scx_bpf_switch_all() which had
- * to be called from ops.init(). To support both before and after, use both
- * %__COMPAT_SCX_OPS_SWITCH_PARTIAL and %__COMPAT_scx_bpf_switch_all() defined
- * in compat.bpf.h. Users can switch to directly using %SCX_OPS_SWITCH_PARTIAL
- * in the future.
- */
-#define __COMPAT_SCX_OPS_SWITCH_PARTIAL						\
+#define SCX_OPS_SWITCH_PARTIAL							\
 	__COMPAT_ENUM_OR_ZERO("scx_ops_flags", "SCX_OPS_SWITCH_PARTIAL")
 
 /*
@@ -164,6 +157,9 @@ static inline long scx_hotplug_seq(void)
  */
 #define SCX_OPS_OPEN(__ops_name, __scx_name) ({					\
 	struct __scx_name *__skel;						\
+										\
+	SCX_BUG_ON(!SCX_OPS_SWITCH_PARTIAL,					\
+		   "SCX_OPS_SWITCH_PARTIAL missing, kernel too old?");		\
 										\
 	__skel = __scx_name##__open();						\
 	SCX_BUG_ON(!__skel, "Could not open " #__scx_name);			\

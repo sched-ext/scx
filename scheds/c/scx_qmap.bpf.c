@@ -41,7 +41,6 @@ const volatile bool print_shared_dsq;
 const volatile char exp_prefix[17];
 const volatile s32 disallow_tgid;
 const volatile bool suppress_dump;
-const volatile bool switch_partial;
 
 u32 test_error_cnt;
 
@@ -682,9 +681,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(qmap_init)
 	u32 key = 0;
 	struct bpf_timer *timer;
 	s32 ret;
-
-	if (!switch_partial)
-		__COMPAT_scx_bpf_switch_all();
 
 	print_cpus();
 

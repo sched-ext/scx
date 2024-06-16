@@ -246,7 +246,6 @@ impl<'cb> BpfScheduler<'cb> {
 
         skel.bss_mut().usersched_pid = std::process::id();
         skel.rodata_mut().slice_ns = slice_us * 1000;
-        skel.rodata_mut().switch_partial = partial;
         skel.rodata_mut().debug = debug;
         skel.rodata_mut().full_user = full_user;
         skel.rodata_mut().low_power = low_power;

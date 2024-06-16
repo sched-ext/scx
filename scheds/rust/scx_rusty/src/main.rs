@@ -314,7 +314,6 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().load_half_life = (opts.load_half_life * 1000000000.0) as u32;
         skel.rodata_mut().kthreads_local = opts.kthreads_local;
         skel.rodata_mut().fifo_sched = opts.fifo_sched;
-        skel.rodata_mut().switch_partial = opts.partial;
         skel.rodata_mut().greedy_threshold = opts.greedy_threshold;
         skel.rodata_mut().greedy_threshold_x_numa = opts.greedy_threshold_x_numa;
         skel.rodata_mut().direct_greedy_numa = opts.direct_greedy_numa;

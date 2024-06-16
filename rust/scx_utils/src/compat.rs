@@ -161,6 +161,13 @@ macro_rules! unwrap_or_break {
     }};
 }
 
+pub fn check_min_requirements() -> Result<()> {
+    if *SCX_OPS_SWITCH_PARTIAL == 0 {
+	bail!("SCX_OPS_SWITCH_PARTIAL missing, kernel too old?");
+    }
+    Ok(())
+}
+
 /// struct sched_ext_ops can change over time. If compat.bpf.h::SCX_OPS_DEFINE()
 /// is used to define ops, and scx_ops_open!(), scx_ops_load!(), and
 /// scx_ops_attach!() are used to open, load and attach it, backward
@@ -169,10 +176,13 @@ macro_rules! unwrap_or_break {
 /// - sched_ext_ops.hotplug_seq was added later. On kernels which support it,
 /// set the value to a nonzero value to trigger an exit in the scheduler when
 /// a hotplug event occurs between opening and attaching the scheduler.
+#[rustfmt::skip]
 #[macro_export]
 macro_rules! scx_ops_open {
     ($builder: expr, $ops: ident) => { 'block: {
         scx_utils::paste! {
+	    scx_utils::unwrap_or_break!(scx_utils::compat::check_min_requirements(), 'block);
+
             let mut skel = match $builder.open().context("Failed to open BPF program") {
                 Ok(val) => val,
                 Err(e) => break 'block Err(e),
