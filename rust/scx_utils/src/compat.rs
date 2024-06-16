@@ -168,6 +168,9 @@ pub fn check_min_requirements() -> Result<()> {
     if let Err(_) = read_enum("scx_kick_flags", "SCX_KICK_IDLE") {
 	bail!("SCX_KICK_IDLE missing, kernel too old?");
     }
+    if let Ok(false) | Err(_) = ksym_exists("scx_bpf_exit_bstr") {
+	bail!("scx_bpf_exit() missing, kernel too old?");
+    }
     Ok(())
 }
 

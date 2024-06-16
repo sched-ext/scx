@@ -16,18 +16,6 @@
 })
 
 /*
- * scx_bpf_exit() is a new addition. Fall back to scx_bpf_error() if
- * unavailable. Users can use scx_bpf_exit() directly in the future.
- */
-#define __COMPAT_scx_bpf_exit(code, fmt, args...)				\
-({										\
-	if (bpf_ksym_exists(scx_bpf_exit_bstr))					\
-		scx_bpf_exit((code), fmt, ##args);				\
-	else									\
-		scx_bpf_error(fmt, ##args);					\
-})
-
-/*
  * scx_bpf_dump() is a new addition. Ignore if unavailable. Users can use
  * scx_bpf_dump() directly in the future.
  */
