@@ -758,17 +758,14 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	if (!old_domc)
 		return false;
 
-	new_domc = try_lookup_dom_ctx(new_dom_id);
-	if (!new_domc) {
-		if (new_dom_id == NO_DOM_FOUND) {
-			bpf_cpumask_clear(t_cpumask);
-			return !(p->scx.flags & SCX_TASK_QUEUED);
-		} else {
-			scx_bpf_error("Failed to lookup new dom%u",
-				      new_dom_id);
-			return false;
-		}
+	if (new_dom_id == NO_DOM_FOUND) {
+		bpf_cpumask_clear(t_cpumask);
+		return !(p->scx.flags & SCX_TASK_QUEUED);
 	}
+
+	new_domc = lookup_dom_ctx(new_dom_id);
+	if (!new_domc)
+		return false;
 
 	d_cpumask = new_domc->cpumask;
 	if (!d_cpumask) {
@@ -777,11 +774,6 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 		return false;
 	}
 
-	t_cpumask = taskc->cpumask;
-	if (!t_cpumask) {
-		scx_bpf_error("Failed to look up task cpumask");
-		return false;
-	}
 
 	/*
 	 * set_cpumask might have happened between userspace requesting LB and
