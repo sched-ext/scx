@@ -163,34 +163,34 @@ macro_rules! unwrap_or_break {
 
 pub fn check_min_requirements() -> Result<()> {
     if let Ok(false) | Err(_) = struct_has_field("sched_ext_ops", "dump") {
-	bail!("sched_ext_ops.dump() missing, kernel too old?");
+        bail!("sched_ext_ops.dump() missing, kernel too old?");
     }
     if let Ok(false) | Err(_) = struct_has_field("sched_ext_ops", "tick") {
-	bail!("sched_ext_ops.tick() missing, kernel too old?");
+        bail!("sched_ext_ops.tick() missing, kernel too old?");
     }
     if let Ok(false) | Err(_) = struct_has_field("sched_ext_ops", "exit_dump_len") {
-	bail!("sched_ext_ops.exit_dump_len missing, kernel too old?");
+        bail!("sched_ext_ops.exit_dump_len missing, kernel too old?");
     }
     if let Ok(false) | Err(_) = struct_has_field("sched_ext_ops", "hotplug_seq") {
-	bail!("sched_ext_ops.hotplug_seq missing, kernel too old?");
+        bail!("sched_ext_ops.hotplug_seq missing, kernel too old?");
     }
     if let Ok(false) | Err(_) = ksym_exists("scx_bpf_cpuperf_cap") {
-	bail!("scx_bpf_cpuperf_*() missing, kernel too old?");
+        bail!("scx_bpf_cpuperf_*() missing, kernel too old?");
     }
     if let Ok(false) | Err(_) = ksym_exists("scx_bpf_nr_cpu_ids") {
-	bail!("scx_bpf_nr_cpu_ids() missing, kernel too old?");
+        bail!("scx_bpf_nr_cpu_ids() missing, kernel too old?");
     }
     if let Ok(false) | Err(_) = ksym_exists("scx_bpf_dump_bstr") {
-	bail!("scx_bpf_dump() missing, kernel too old?");
+        bail!("scx_bpf_dump() missing, kernel too old?");
     }
     if let Ok(false) | Err(_) = ksym_exists("scx_bpf_exit_bstr") {
-	bail!("scx_bpf_exit() missing, kernel too old?");
+        bail!("scx_bpf_exit() missing, kernel too old?");
     }
     if let Err(_) = read_enum("scx_kick_flags", "SCX_KICK_IDLE") {
-	bail!("SCX_KICK_IDLE missing, kernel too old?");
+        bail!("SCX_KICK_IDLE missing, kernel too old?");
     }
     if *SCX_OPS_SWITCH_PARTIAL == 0 {
-	bail!("SCX_OPS_SWITCH_PARTIAL missing, kernel too old?");
+        bail!("SCX_OPS_SWITCH_PARTIAL missing, kernel too old?");
     }
     Ok(())
 }
@@ -199,10 +199,6 @@ pub fn check_min_requirements() -> Result<()> {
 /// is used to define ops, and scx_ops_open!(), scx_ops_load!(), and
 /// scx_ops_attach!() are used to open, load and attach it, backward
 /// compatibility is automatically maintained where reasonable.
-///
-/// - sched_ext_ops.hotplug_seq was added later. On kernels which support it,
-/// set the value to a nonzero value to trigger an exit in the scheduler when
-/// a hotplug event occurs between opening and attaching the scheduler.
 #[rustfmt::skip]
 #[macro_export]
 macro_rules! scx_ops_open {
