@@ -151,6 +151,16 @@ pub fn is_sched_ext_enabled() -> io::Result<bool> {
     }
 }
 
+#[macro_export]
+macro_rules! unwrap_or_break {
+    ($expr: expr, $label: lifetime) => {{
+        match $expr {
+            Ok(val) => val,
+            Err(e) => break $label Err(e),
+        }
+    }};
+}
+
 /// struct sched_ext_ops can change over time. If compat.bpf.h::SCX_OPS_DEFINE()
 /// is used to define ops, and scx_ops_open!(), scx_ops_load!(), and
 /// scx_ops_attach!() are used to open, load and attach it, backward
@@ -161,24 +171,30 @@ pub fn is_sched_ext_enabled() -> io::Result<bool> {
 /// a hotplug event occurs between opening and attaching the scheduler.
 #[macro_export]
 macro_rules! scx_ops_open {
-    ($builder: expr, $ops: ident) => {{
+    ($builder: expr, $ops: ident) => { 'block: {
         scx_utils::paste! {
-            let mut skel = $builder.open().context("Failed to open BPF program")?;
+            let mut skel = match $builder.open().context("Failed to open BPF program") {
+                Ok(val) => val,
+                Err(e) => break 'block Err(e),
+            };
+
             let ops = skel.struct_ops.[<$ops _mut>]();
-            let has_field = scx_utils::compat::struct_has_field("sched_ext_ops", "hotplug_seq")?;
+            let has_field = scx_utils::unwrap_or_break!(
+                scx_utils::compat::struct_has_field("sched_ext_ops", "hotplug_seq"), 'block);
+
             if has_field {
                 let path = std::path::Path::new("/sys/kernel/sched_ext/hotplug_seq");
                 let val = match std::fs::read_to_string(&path) {
                     Ok(val) => val,
                     Err(_) => {
-                        return Err(anyhow::anyhow!("Failed to open or read file {:?}", path));
+                        break 'block Err(anyhow::anyhow!("Failed to open or read file {:?}", path));
                     }
                 };
 
                 ops.hotplug_seq = match val.trim().parse::<u64>() {
                     Ok(parsed) => parsed,
                     Err(_) => {
-                        return Err(anyhow::anyhow!("Failed to parse hotplug seq {}", val));
+                        break 'block Err(anyhow::anyhow!("Failed to parse hotplug seq {}", val));
                     }
                 };
             }
@@ -197,30 +213,34 @@ macro_rules! scx_ops_open {
 /// - sched_ext_ops.exit_dump_len was added later. On kernels which don't
 /// support it, the value is ignored and a warning is triggered if the value
 /// is requested to be non-zero.
+#[rustfmt::skip]
 #[macro_export]
 macro_rules! scx_ops_load {
-    ($skel: expr, $ops: ident, $uei: ident) => {{
+    ($skel: expr, $ops: ident, $uei: ident) => { 'block: {
         scx_utils::paste! {
             scx_utils::uei_set_size!($skel, $ops, $uei);
 
             let ops = $skel.struct_ops.[<$ops _mut>]();
 
-            if !scx_utils::compat::struct_has_field("sched_ext_ops", "exit_dump_len")?
-                && ops.exit_dump_len != 0 {
+            let has_field = scx_utils::unwrap_or_break!(
+                scx_utils::compat::struct_has_field("sched_ext_ops", "exit_dump_len"), 'block);
+            if !has_field && ops.exit_dump_len != 0 {
                 scx_utils::warn!("Kernel doesn't support setting exit dump len");
                 ops.exit_dump_len = 0;
             }
 
-            if !scx_utils::compat::struct_has_field("sched_ext_ops", "tick")?
-                && ops.tick != std::ptr::null_mut() {
+            let has_field = scx_utils::unwrap_or_break!(
+                scx_utils::compat::struct_has_field("sched_ext_ops", "tick"), 'block);
+            if !has_field && ops.tick != std::ptr::null_mut() {
                 scx_utils::warn!("Kernel doesn't support ops.tick()");
                 ops.tick = std::ptr::null_mut();
             }
 
-            if !scx_utils::compat::struct_has_field("sched_ext_ops", "dump")?
-                && (ops.dump != std::ptr::null_mut() ||
-                    ops.dump_cpu != std::ptr::null_mut() ||
-                    ops.dump_task != std::ptr::null_mut()) {
+            let has_field = scx_utils::unwrap_or_break!(
+                scx_utils::compat::struct_has_field("sched_ext_ops", "dump"), 'block);
+            if !has_field && (ops.dump != std::ptr::null_mut() ||
+                              ops.dump_cpu != std::ptr::null_mut() ||
+                              ops.dump_task != std::ptr::null_mut()) {
                 scx_utils::warn!("Kernel doesn't support ops.dump*()");
                 ops.dump = std::ptr::null_mut();
                 ops.dump_cpu = std::ptr::null_mut();
@@ -233,11 +253,12 @@ macro_rules! scx_ops_load {
 }
 
 /// Must be used together with scx_ops_load!(). See there.
+#[rustfmt::skip]
 #[macro_export]
 macro_rules! scx_ops_attach {
-    ($skel: expr, $ops: ident) => {{
+    ($skel: expr, $ops: ident) => { 'block: {
         if scx_utils::compat::is_sched_ext_enabled().unwrap_or(false) {
-            return Err(anyhow::anyhow!(
+            break 'block Err(anyhow::anyhow!(
                 "another sched_ext scheduler is already running"
             ));
         }
