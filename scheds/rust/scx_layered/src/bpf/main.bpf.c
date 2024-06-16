@@ -1006,7 +1006,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	}
 
 	if (layer->perf > 0)
-		__COMPAT_scx_bpf_cpuperf_set(task_cpu, layer->perf);
+		scx_bpf_cpuperf_set(task_cpu, layer->perf);
 
 	cctx->maybe_idle = false;
 }

@@ -151,6 +151,8 @@ static inline long scx_hotplug_seq(void)
 #define SCX_OPS_OPEN(__ops_name, __scx_name) ({					\
 	struct __scx_name *__skel;						\
 										\
+	SCX_BUG_ON(!__COMPAT_has_ksym("scx_bpf_cpuperf_cap"),			\
+		   "scx_bpf_cpuperf_*() missing, kernel too old?");		\
 	SCX_BUG_ON(!__COMPAT_has_ksym("scx_bpf_nr_cpu_ids"),			\
 		   "scx_bpf_nr_cpu_ids() missing, kernel too old?");		\
 	SCX_BUG_ON(!__COMPAT_has_ksym("scx_bpf_dump_bstr"),			\

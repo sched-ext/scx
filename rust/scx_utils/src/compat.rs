@@ -162,6 +162,9 @@ macro_rules! unwrap_or_break {
 }
 
 pub fn check_min_requirements() -> Result<()> {
+    if let Ok(false) | Err(_) = ksym_exists("scx_bpf_cpuperf_cap") {
+	bail!("scx_bpf_cpuperf_*() missing, kernel too old?");
+    }
     if let Ok(false) | Err(_) = ksym_exists("scx_bpf_nr_cpu_ids") {
 	bail!("scx_bpf_nr_cpu_ids() missing, kernel too old?");
     }

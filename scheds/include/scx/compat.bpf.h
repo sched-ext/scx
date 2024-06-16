@@ -16,32 +16,6 @@
 })
 
 /*
- * cpuperf is new. The followings become noop on older kernels. Callers can be
- * updated to call cpuperf kfuncs directly in the future.
- */
-static inline u32 __COMPAT_scx_bpf_cpuperf_cap(s32 cpu)
-{
-	if (bpf_ksym_exists(scx_bpf_cpuperf_cap))
-		return scx_bpf_cpuperf_cap(cpu);
-	else
-		return 1024;
-}
-
-static inline u32 __COMPAT_scx_bpf_cpuperf_cur(s32 cpu)
-{
-	if (bpf_ksym_exists(scx_bpf_cpuperf_cur))
-		return scx_bpf_cpuperf_cur(cpu);
-	else
-		return 1024;
-}
-
-static inline void __COMPAT_scx_bpf_cpuperf_set(s32 cpu, u32 perf)
-{
-	if (bpf_ksym_exists(scx_bpf_cpuperf_set))
-		return scx_bpf_cpuperf_set(cpu, perf);
-}
-
-/*
  * Iteration and scx_bpf_consume_task() are new. The following become noop on
  * older kernels. The users can switch to bpf_for_each(scx_dsq) and directly
  * call scx_bpf_consume_task() in the future.
