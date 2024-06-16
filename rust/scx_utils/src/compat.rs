@@ -162,35 +162,10 @@ macro_rules! unwrap_or_break {
 }
 
 pub fn check_min_requirements() -> Result<()> {
+    // ec7e3b0463e1 ("implement-ops") in https://github.com/sched-ext/sched_ext
+    // is the current minimum required kernel version.
     if let Ok(false) | Err(_) = struct_has_field("sched_ext_ops", "dump") {
         bail!("sched_ext_ops.dump() missing, kernel too old?");
-    }
-    if let Ok(false) | Err(_) = struct_has_field("sched_ext_ops", "tick") {
-        bail!("sched_ext_ops.tick() missing, kernel too old?");
-    }
-    if let Ok(false) | Err(_) = struct_has_field("sched_ext_ops", "exit_dump_len") {
-        bail!("sched_ext_ops.exit_dump_len missing, kernel too old?");
-    }
-    if let Ok(false) | Err(_) = struct_has_field("sched_ext_ops", "hotplug_seq") {
-        bail!("sched_ext_ops.hotplug_seq missing, kernel too old?");
-    }
-    if let Ok(false) | Err(_) = ksym_exists("scx_bpf_cpuperf_cap") {
-        bail!("scx_bpf_cpuperf_*() missing, kernel too old?");
-    }
-    if let Ok(false) | Err(_) = ksym_exists("scx_bpf_nr_cpu_ids") {
-        bail!("scx_bpf_nr_cpu_ids() missing, kernel too old?");
-    }
-    if let Ok(false) | Err(_) = ksym_exists("scx_bpf_dump_bstr") {
-        bail!("scx_bpf_dump() missing, kernel too old?");
-    }
-    if let Ok(false) | Err(_) = ksym_exists("scx_bpf_exit_bstr") {
-        bail!("scx_bpf_exit() missing, kernel too old?");
-    }
-    if let Err(_) = read_enum("scx_kick_flags", "SCX_KICK_IDLE") {
-        bail!("SCX_KICK_IDLE missing, kernel too old?");
-    }
-    if *SCX_OPS_SWITCH_PARTIAL == 0 {
-        bail!("SCX_OPS_SWITCH_PARTIAL missing, kernel too old?");
     }
     Ok(())
 }

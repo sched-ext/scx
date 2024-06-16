@@ -143,31 +143,14 @@ static inline long scx_hotplug_seq(void)
  * and attach it, backward compatibility is automatically maintained where
  * reasonable.
  *
- * - ops.dump*(): Ignored on older kernels with a warning.
+ * ec7e3b0463e1 ("implement-ops") in https://github.com/sched-ext/sched_ext is
+ * the current minimum required kernel version.
  */
 #define SCX_OPS_OPEN(__ops_name, __scx_name) ({					\
 	struct __scx_name *__skel;						\
 										\
 	SCX_BUG_ON(!__COMPAT_struct_has_field("sched_ext_ops", "dump"),		\
 		   "sched_ext_ops.dump() missing, kernel too old?");		\
-	SCX_BUG_ON(!__COMPAT_struct_has_field("sched_ext_ops", "tick"),		\
-		   "sched_ext_ops.tick() missing, kernel too old?");		\
-	SCX_BUG_ON(!__COMPAT_struct_has_field("sched_ext_ops", "exit_dump_len"),\
-		   "sched_ext_ops.exit_dump_len missing, kernel too old?");	\
-	SCX_BUG_ON(!__COMPAT_struct_has_field("sched_ext_ops", "hotplug_seq"),	\
-		   "sched_ext_ops.hotplug_seq missing, kernel too old?");	\
-	SCX_BUG_ON(!__COMPAT_has_ksym("scx_bpf_cpuperf_cap"),			\
-		   "scx_bpf_cpuperf_*() missing, kernel too old?");		\
-	SCX_BUG_ON(!__COMPAT_has_ksym("scx_bpf_nr_cpu_ids"),			\
-		   "scx_bpf_nr_cpu_ids() missing, kernel too old?");		\
-	SCX_BUG_ON(!__COMPAT_has_ksym("scx_bpf_dump_bstr"),			\
-		   "scx_bpf_dump() missing, kernel too old?");			\
-	SCX_BUG_ON(!__COMPAT_has_ksym("scx_bpf_exit_bstr"),			\
-		   "scx_bpf_exit() missing, kernel too old?");			\
-	SCX_BUG_ON(!__COMPAT_ENUM_OR_ZERO("scx_kick_flags", "SCX_KICK_IDLE"),	\
-		   "SCX_KICK_IDLE missing, kernel too old?");			\
-	SCX_BUG_ON(!SCX_OPS_SWITCH_PARTIAL,					\
-		   "SCX_OPS_SWITCH_PARTIAL missing, kernel too old?");		\
 										\
 	__skel = __scx_name##__open();						\
 	SCX_BUG_ON(!__skel, "Could not open " #__scx_name);			\
