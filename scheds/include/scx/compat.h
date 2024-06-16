@@ -146,11 +146,12 @@ static inline long scx_hotplug_seq(void)
  * - ops.tick(): Ignored on older kernels with a warning.
  * - ops.dump*(): Ignored on older kernels with a warning.
  * - ops.exit_dump_len: Cleared to zero on older kernels with a warning.
- * - ops.hotplug_seq: Ignored on older kernels.
  */
 #define SCX_OPS_OPEN(__ops_name, __scx_name) ({					\
 	struct __scx_name *__skel;						\
 										\
+	SCX_BUG_ON(!__COMPAT_struct_has_field("sched_ext_ops", "hotplug_seq"),	\
+		   "sched_ext_ops.hotplug_seq missing, kernel too old?");	\
 	SCX_BUG_ON(!__COMPAT_has_ksym("scx_bpf_cpuperf_cap"),			\
 		   "scx_bpf_cpuperf_*() missing, kernel too old?");		\
 	SCX_BUG_ON(!__COMPAT_has_ksym("scx_bpf_nr_cpu_ids"),			\
@@ -166,9 +167,7 @@ static inline long scx_hotplug_seq(void)
 										\
 	__skel = __scx_name##__open();						\
 	SCX_BUG_ON(!__skel, "Could not open " #__scx_name);			\
-										\
-	if (__COMPAT_struct_has_field("sched_ext_ops", "hotplug_seq"))		\
-		__skel->struct_ops.__ops_name->hotplug_seq = scx_hotplug_seq();	\
+	__skel->struct_ops.__ops_name->hotplug_seq = scx_hotplug_seq();		\
 	__skel; 								\
 })
 

@@ -162,6 +162,9 @@ macro_rules! unwrap_or_break {
 }
 
 pub fn check_min_requirements() -> Result<()> {
+    if let Ok(false) | Err(_) = struct_has_field("sched_ext_ops", "hotplug_seq") {
+	bail!("sched_ext_ops.hotplug_seq missing, kernel too old?");
+    }
     if let Ok(false) | Err(_) = ksym_exists("scx_bpf_cpuperf_cap") {
 	bail!("scx_bpf_cpuperf_*() missing, kernel too old?");
     }
@@ -204,25 +207,21 @@ macro_rules! scx_ops_open {
             };
 
             let ops = skel.struct_ops.[<$ops _mut>]();
-            let has_field = scx_utils::unwrap_or_break!(
-                scx_utils::compat::struct_has_field("sched_ext_ops", "hotplug_seq"), 'block);
+            let path = std::path::Path::new("/sys/kernel/sched_ext/hotplug_seq");
 
-            if has_field {
-                let path = std::path::Path::new("/sys/kernel/sched_ext/hotplug_seq");
-                let val = match std::fs::read_to_string(&path) {
-                    Ok(val) => val,
-                    Err(_) => {
-                        break 'block Err(anyhow::anyhow!("Failed to open or read file {:?}", path));
-                    }
-                };
+            let val = match std::fs::read_to_string(&path) {
+                Ok(val) => val,
+                Err(_) => {
+                    break 'block Err(anyhow::anyhow!("Failed to open or read file {:?}", path));
+                }
+            };
 
-                ops.hotplug_seq = match val.trim().parse::<u64>() {
-                    Ok(parsed) => parsed,
-                    Err(_) => {
-                        break 'block Err(anyhow::anyhow!("Failed to parse hotplug seq {}", val));
-                    }
-                };
-            }
+            ops.hotplug_seq = match val.trim().parse::<u64>() {
+                Ok(parsed) => parsed,
+                Err(_) => {
+                    break 'block Err(anyhow::anyhow!("Failed to parse hotplug seq {}", val));
+                }
+            };
 
             let result : Result<OpenBpfSkel<'_>, anyhow::Error> = Ok(skel);
             result
