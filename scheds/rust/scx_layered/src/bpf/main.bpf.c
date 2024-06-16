@@ -508,7 +508,7 @@ bool pick_idle_cpu_and_kick(struct task_struct *p, s32 task_cpu,
 
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_KICK, layer, cctx);
-		scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return true;
 	} else {
 		return false;

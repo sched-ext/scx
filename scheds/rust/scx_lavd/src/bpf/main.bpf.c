@@ -1074,7 +1074,7 @@ static void do_core_compaction(void)
 				bpf_cpumask_set_cpu(cpu, ovrflw);
 				bpf_cpumask_clear_cpu(cpu, active);
 			}
-			scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		}
 		else {
 			if (i < nr_active_old) {

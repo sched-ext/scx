@@ -16,14 +16,6 @@
 })
 
 /*
- * %SCX_KICK_IDLE is a later addition. To support both before and after, use
- * %__COMPAT_SCX_KICK_IDLE which becomes 0 on kernels which don't support it.
- * Users can use %SCX_KICK_IDLE directly in the future.
- */
-#define __COMPAT_SCX_KICK_IDLE							\
-	__COMPAT_ENUM_OR_ZERO(enum scx_kick_flags, SCX_KICK_IDLE)
-
-/*
  * scx_bpf_exit() is a new addition. Fall back to scx_bpf_error() if
  * unavailable. Users can use scx_bpf_exit() directly in the future.
  */

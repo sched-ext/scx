@@ -175,7 +175,7 @@ static bool dispatch_to_cpu(s32 cpu)
 		scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, SCX_SLICE_INF, 0);
 
 		if (cpu != central_cpu)
-			scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 		bpf_task_release(p);
 		return true;

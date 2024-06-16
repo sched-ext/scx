@@ -221,7 +221,7 @@ void BPF_STRUCT_OPS(qmap_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dispatch(p, SHARED_DSQ, 0, enq_flags);
 		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 		if (cpu >= 0)
-			scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return;
 	}
 

@@ -165,6 +165,9 @@ pub fn check_min_requirements() -> Result<()> {
     if *SCX_OPS_SWITCH_PARTIAL == 0 {
 	bail!("SCX_OPS_SWITCH_PARTIAL missing, kernel too old?");
     }
+    if let Err(_) = read_enum("scx_kick_flags", "SCX_KICK_IDLE") {
+	bail!("SCX_KICK_IDLE missing, kernel too old?");
+    }
     Ok(())
 }
 
