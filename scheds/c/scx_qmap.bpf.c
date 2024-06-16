@@ -524,9 +524,6 @@ static void print_cpus(void)
 	char buf[128] = "", *p;
 	int idx;
 
-	if (!__COMPAT_HAS_CPUMASKS)
-		return;
-
 	possible = scx_bpf_get_possible_cpumask();
 	online = scx_bpf_get_online_cpumask();
 
@@ -591,9 +588,6 @@ static void monitor_cpuperf(void)
 	u64 target_sum = 0, target_min = SCX_CPUPERF_ONE, target_max = 0;
 	const struct cpumask *online;
 	int i, nr_online_cpus = 0;
-
-	if (!__COMPAT_HAS_CPUMASKS)
-		return;
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 	online = scx_bpf_get_online_cpumask();

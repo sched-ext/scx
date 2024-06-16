@@ -110,13 +110,6 @@ static inline bool __COMPAT_struct_has_field(const char *type, const char *field
 	__COMPAT_ENUM_OR_ZERO("scx_ops_flags", "SCX_OPS_SWITCH_PARTIAL")
 
 /*
- * scx_bpf_nr_cpu_ids(), scx_bpf_get_possible/online_cpumask() are new. Users
- * will be able to assume existence in the future.
- */
-#define __COMPAT_HAS_CPUMASKS							\
-	__COMPAT_has_ksym("scx_bpf_nr_cpu_ids")
-
-/*
  * DSQ iterator is new. Users will be able to assume existence in the future.
  */
 #define __COMPAT_HAS_DSQ_ITER							\
@@ -158,6 +151,8 @@ static inline long scx_hotplug_seq(void)
 #define SCX_OPS_OPEN(__ops_name, __scx_name) ({					\
 	struct __scx_name *__skel;						\
 										\
+	SCX_BUG_ON(!__COMPAT_has_ksym("scx_bpf_nr_cpu_ids"),			\
+		   "scx_bpf_nr_cpu_ids() missing, kernel too old?");		\
 	SCX_BUG_ON(!__COMPAT_has_ksym("scx_bpf_dump_bstr"),			\
 		   "scx_bpf_dump() missing, kernel too old?");			\
 	SCX_BUG_ON(!__COMPAT_has_ksym("scx_bpf_exit_bstr"),			\

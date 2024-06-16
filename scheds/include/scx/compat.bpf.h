@@ -16,14 +16,6 @@
 })
 
 /*
- * scx_bpf_nr_cpu_ids(), scx_bpf_get_possible/online_cpumask() are new. No good
- * way to noop these kfuncs. Provide a test macro. Users can assume existence in
- * the future.
- */
-#define __COMPAT_HAS_CPUMASKS							\
-	bpf_ksym_exists(scx_bpf_nr_cpu_ids)
-
-/*
  * cpuperf is new. The followings become noop on older kernels. Callers can be
  * updated to call cpuperf kfuncs directly in the future.
  */

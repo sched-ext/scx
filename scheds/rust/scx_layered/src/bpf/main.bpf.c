@@ -1197,9 +1197,6 @@ static void dump_layer_cpumask(int idx)
 	s32 cpu;
 	char buf[128] = "", *p;
 
-	if (!__COMPAT_HAS_CPUMASKS)
-		return;
-
 	if (!(layer_cpumask = lookup_layer_cpumask(idx)))
 		return;
 
