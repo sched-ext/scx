@@ -373,6 +373,20 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 			p->pid, p->comm, dsq_id, enq_flags, slice);
 		break;
 	default:
+		tctx = lookup_task_ctx(p);
+		if (!tctx) {
+			/*
+			 * If the task doesn't have a context anymore, simply
+			 * bounce it to the first CPU available.
+			 */
+			scx_bpf_dispatch(p, SHARED_DSQ, slice, enq_flags);
+			__sync_fetch_and_add(&nr_bounce_dispatches, 1);
+
+			dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu bounce",
+				p->pid, p->comm, dsq_id, enq_flags, slice);
+			return;
+		}
+
 		/*
 		 * Dispatch a task to a specific per-CPU DSQ if the target CPU
 		 * can be used (according to the cpumask), otherwise redirect
@@ -390,10 +404,6 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 		 * and a different cpumask.
 		 */
 		scx_bpf_dispatch(p, dsq_id, slice, enq_flags);
-
-		tctx = lookup_task_ctx(p);
-		if (!tctx)
-			return;
 
 		/* Read current cpumask generation counter */
 		curr_cpumask_cnt = tctx->cpumask_cnt;
@@ -716,7 +726,7 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 			break;
 	}
 
-	/* Consume all tasks enqueued in the current CPU's DSQ first */
+	/* Consume all tasks enqueued in the current CPU's DSQ */
 	bpf_repeat(MAX_ENQUEUED_TASKS) {
 		if (!scx_bpf_consume(cpu_to_dsq(cpu)))
 			break;
@@ -782,8 +792,8 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 	if (usersched_has_pending_tasks()) {
 		set_usersched_needed();
 		/*
-		 * Wake up the idle CPU, so that it can immediately accept
-		 * dispatched tasks.
+		 * Wake up the idle CPU and trigger a resched, so that it can
+		 * immediately accept dispatched tasks.
 		 */
 		if (!low_power || !nr_running)
 			scx_bpf_kick_cpu(cpu, 0);
