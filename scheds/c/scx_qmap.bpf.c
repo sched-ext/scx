@@ -475,13 +475,13 @@ void BPF_STRUCT_OPS(qmap_dump, struct scx_dump_ctx *dctx)
 		if (!(fifo = bpf_map_lookup_elem(&queue_arr, &i)))
 			return;
 
-		__COMPAT_scx_bpf_dump("QMAP FIFO[%d]:", i);
+		scx_bpf_dump("QMAP FIFO[%d]:", i);
 		bpf_repeat(4096) {
 			if (bpf_map_pop_elem(fifo, &pid))
 				break;
-			__COMPAT_scx_bpf_dump(" %d", pid);
+			scx_bpf_dump(" %d", pid);
 		}
-		__COMPAT_scx_bpf_dump("\n");
+		scx_bpf_dump("\n");
 	}
 }
 
@@ -495,9 +495,9 @@ void BPF_STRUCT_OPS(qmap_dump_cpu, struct scx_dump_ctx *dctx, s32 cpu, bool idle
 	if (!(cpuc = bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &zero, cpu)))
 		return;
 
-	__COMPAT_scx_bpf_dump("QMAP: dsp_idx=%llu dsp_cnt=%llu avg_weight=%u cpuperf_target=%u",
-			      cpuc->dsp_idx, cpuc->dsp_cnt, cpuc->avg_weight,
-			      cpuc->cpuperf_target);
+	scx_bpf_dump("QMAP: dsp_idx=%llu dsp_cnt=%llu avg_weight=%u cpuperf_target=%u",
+		     cpuc->dsp_idx, cpuc->dsp_cnt, cpuc->avg_weight,
+		     cpuc->cpuperf_target);
 }
 
 void BPF_STRUCT_OPS(qmap_dump_task, struct scx_dump_ctx *dctx, struct task_struct *p)
@@ -509,8 +509,8 @@ void BPF_STRUCT_OPS(qmap_dump_task, struct scx_dump_ctx *dctx, struct task_struc
 	if (!(taskc = bpf_task_storage_get(&task_ctx_stor, p, 0, 0)))
 		return;
 
-	__COMPAT_scx_bpf_dump("QMAP: force_local=%d core_sched_seq=%llu",
-			      taskc->force_local, taskc->core_sched_seq);
+	scx_bpf_dump("QMAP: force_local=%d core_sched_seq=%llu",
+		     taskc->force_local, taskc->core_sched_seq);
 }
 
 /*

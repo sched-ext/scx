@@ -158,12 +158,14 @@ static inline long scx_hotplug_seq(void)
 #define SCX_OPS_OPEN(__ops_name, __scx_name) ({					\
 	struct __scx_name *__skel;						\
 										\
-	SCX_BUG_ON(!SCX_OPS_SWITCH_PARTIAL,					\
-		   "SCX_OPS_SWITCH_PARTIAL missing, kernel too old?");		\
-	SCX_BUG_ON(!__COMPAT_ENUM_OR_ZERO("scx_kick_flags", "SCX_KICK_IDLE"),	\
-		   "SCX_KICK_IDLE missing, kernel too old?");			\
+	SCX_BUG_ON(!__COMPAT_has_ksym("scx_bpf_dump_bstr"),			\
+		   "scx_bpf_dump() missing, kernel too old?");			\
 	SCX_BUG_ON(!__COMPAT_has_ksym("scx_bpf_exit_bstr"),			\
 		   "scx_bpf_exit() missing, kernel too old?");			\
+	SCX_BUG_ON(!__COMPAT_ENUM_OR_ZERO("scx_kick_flags", "SCX_KICK_IDLE"),	\
+		   "SCX_KICK_IDLE missing, kernel too old?");			\
+	SCX_BUG_ON(!SCX_OPS_SWITCH_PARTIAL,					\
+		   "SCX_OPS_SWITCH_PARTIAL missing, kernel too old?");		\
 										\
 	__skel = __scx_name##__open();						\
 	SCX_BUG_ON(!__skel, "Could not open " #__scx_name);			\

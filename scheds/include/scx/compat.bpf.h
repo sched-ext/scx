@@ -16,16 +16,6 @@
 })
 
 /*
- * scx_bpf_dump() is a new addition. Ignore if unavailable. Users can use
- * scx_bpf_dump() directly in the future.
- */
-#define __COMPAT_scx_bpf_dump(fmt, args...)					\
-({										\
-	if (bpf_ksym_exists(scx_bpf_dump_bstr))					\
-		scx_bpf_dump(fmt, ##args);					\
-})
-
-/*
  * scx_bpf_nr_cpu_ids(), scx_bpf_get_possible/online_cpumask() are new. No good
  * way to noop these kfuncs. Provide a test macro. Users can assume existence in
  * the future.
