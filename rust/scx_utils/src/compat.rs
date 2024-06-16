@@ -162,6 +162,9 @@ macro_rules! unwrap_or_break {
 }
 
 pub fn check_min_requirements() -> Result<()> {
+    if let Ok(false) | Err(_) = struct_has_field("sched_ext_ops", "exit_dump_len") {
+	bail!("sched_ext_ops.exit_dump_len missing, kernel too old?");
+    }
     if let Ok(false) | Err(_) = struct_has_field("sched_ext_ops", "hotplug_seq") {
 	bail!("sched_ext_ops.hotplug_seq missing, kernel too old?");
     }
@@ -233,10 +236,6 @@ macro_rules! scx_ops_open {
 /// is used to define ops, and scx_ops_open!(), scx_ops_load!(), and
 /// scx_ops_attach!() are used to open, load and attach it, backward
 /// compatibility is automatically maintained where reasonable.
-///
-/// - sched_ext_ops.exit_dump_len was added later. On kernels which don't
-/// support it, the value is ignored and a warning is triggered if the value
-/// is requested to be non-zero.
 #[rustfmt::skip]
 #[macro_export]
 macro_rules! scx_ops_load {
@@ -245,13 +244,6 @@ macro_rules! scx_ops_load {
             scx_utils::uei_set_size!($skel, $ops, $uei);
 
             let ops = $skel.struct_ops.[<$ops _mut>]();
-
-            let has_field = scx_utils::unwrap_or_break!(
-                scx_utils::compat::struct_has_field("sched_ext_ops", "exit_dump_len"), 'block);
-            if !has_field && ops.exit_dump_len != 0 {
-                scx_utils::warn!("Kernel doesn't support setting exit dump len");
-                ops.exit_dump_len = 0;
-            }
 
             let has_field = scx_utils::unwrap_or_break!(
                 scx_utils::compat::struct_has_field("sched_ext_ops", "tick"), 'block);

@@ -145,11 +145,12 @@ static inline long scx_hotplug_seq(void)
  *
  * - ops.tick(): Ignored on older kernels with a warning.
  * - ops.dump*(): Ignored on older kernels with a warning.
- * - ops.exit_dump_len: Cleared to zero on older kernels with a warning.
  */
 #define SCX_OPS_OPEN(__ops_name, __scx_name) ({					\
 	struct __scx_name *__skel;						\
 										\
+	SCX_BUG_ON(!__COMPAT_struct_has_field("sched_ext_ops", "exit_dump_len"),\
+		   "sched_ext_ops.exit_dump_len missing, kernel too old?");	\
 	SCX_BUG_ON(!__COMPAT_struct_has_field("sched_ext_ops", "hotplug_seq"),	\
 		   "sched_ext_ops.hotplug_seq missing, kernel too old?");	\
 	SCX_BUG_ON(!__COMPAT_has_ksym("scx_bpf_cpuperf_cap"),			\
@@ -173,11 +174,6 @@ static inline long scx_hotplug_seq(void)
 
 #define SCX_OPS_LOAD(__skel, __ops_name, __scx_name, __uei_name) ({		\
 	UEI_SET_SIZE(__skel, __ops_name, __uei_name);				\
-	if (!__COMPAT_struct_has_field("sched_ext_ops", "exit_dump_len") &&	\
-	    (__skel)->struct_ops.__ops_name->exit_dump_len) {			\
-		fprintf(stderr, "WARNING: kernel doesn't support setting exit dump len\n"); \
-		(__skel)->struct_ops.__ops_name->exit_dump_len = 0;		\
-	}									\
 	if (!__COMPAT_struct_has_field("sched_ext_ops", "tick") &&		\
 	    (__skel)->struct_ops.__ops_name->tick) {				\
 		fprintf(stderr, "WARNING: kernel doesn't support ops.tick()\n"); \
