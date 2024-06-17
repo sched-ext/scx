@@ -65,6 +65,7 @@ enum consts {
 enum stat_idx {
 	/* The following fields add up to all dispatched tasks */
 	RUSTY_STAT_WAKE_SYNC,
+	RUSTY_STAT_SYNC_PREV_IDLE,
 	RUSTY_STAT_PREV_IDLE,
 	RUSTY_STAT_GREEDY_IDLE,
 	RUSTY_STAT_PINNED,

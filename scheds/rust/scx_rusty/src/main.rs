@@ -447,6 +447,7 @@ impl<'a> Scheduler<'a> {
     ) {
         let stat = |idx| bpf_stats[idx as usize];
         let total = stat(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_SYNC_PREV_IDLE)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_PINNED)
@@ -472,9 +473,14 @@ impl<'a> Scheduler<'a> {
         let stat_pct = |idx| stat(idx) as f64 / total as f64 * 100.0;
 
         info!(
-            "tot={:7} wsync={:5.2} prev_idle={:5.2} greedy_idle={:5.2} pin={:5.2}",
+            "tot={:7} wsync_prev_idle={:5.2} wsync={:5.2}",
             total,
+            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_SYNC_PREV_IDLE),
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC),
+        );
+
+        info!(
+            "prev_idle={:5.2} greedy_idle={:5.2} pin={:5.2}",
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE),
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE),
             stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PINNED),

@@ -83,8 +83,17 @@ static u64 slice_ns = SCX_SLICE_DFL;
 struct pcpu_ctx {
 	u32 dom_rr_cur; /* used when scanning other doms */
 	u32 dom_id;
-	u32 nr_node_doms;
-	u32 node_doms[MAX_DOMS];
+	/*
+	 * Add some padding so that libbpf-rs can generate the rest of the
+	 * padding to CACHELINE_SIZE. This is necessary for now because most
+	 * versions of rust can't generate Default impls for arrays of more
+	 * than 32 elements, so if the struct requires more than 32 bytes of
+	 * padding, rustc will error out.
+	 *
+	 * This is currently being fixed in libbpf-cargo, so we should be able
+	 * to remove this workaround soon.
+	 */
+	u32 pad[8];
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 struct pcpu_ctx pcpu_ctx[MAX_CPUS];
@@ -781,6 +790,61 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	return taskc->dom_id == new_dom_id;
 }
 
+
+static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
+			   s32 prev_cpu)
+{
+	struct task_struct *current = (void *)bpf_get_current_task_btf();
+	s32 cpu;
+	const struct cpumask *idle_cpumask;
+	bool share_llc, has_idle;
+	struct dom_ctx *domc;
+	struct bpf_cpumask *d_cpumask;
+	struct pcpu_ctx *pcpuc;
+
+	cpu = bpf_get_smp_processor_id();
+	pcpuc = lookup_pcpu_ctx(cpu);
+	if (!pcpuc)
+		return -ENOENT;
+
+	domc = lookup_dom_ctx(pcpuc->dom_id);
+	if (!domc)
+		return -ENOENT;
+
+	d_cpumask = domc->cpumask;
+	if (!d_cpumask) {
+		scx_bpf_error("Failed to acquire dom%u cpumask kptr",
+				taskc->dom_id);
+		return -ENOENT;
+	}
+
+	idle_cpumask = scx_bpf_get_idle_cpumask();
+
+	share_llc = bpf_cpumask_test_cpu(prev_cpu, (const struct cpumask *)d_cpumask);
+	if (share_llc && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		stat_add(RUSTY_STAT_SYNC_PREV_IDLE, 1);
+
+		cpu = prev_cpu;
+		goto err_out;
+	}
+
+	has_idle = bpf_cpumask_intersects((const struct cpumask *)d_cpumask,
+			idle_cpumask);
+
+	if (has_idle && bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
+	    !(current->flags & PF_EXITING) && taskc->dom_id < MAX_DOMS &&
+	    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) == 0) {
+		stat_add(RUSTY_STAT_WAKE_SYNC, 1);
+		goto err_out;
+	}
+
+	cpu = -ENOENT;
+
+err_out:
+	scx_bpf_put_idle_cpumask(idle_cpumask);
+	return cpu;
+}
+
 s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -810,41 +874,9 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * local dsq of the waker.
 	 */
 	if (wake_flags & SCX_WAKE_SYNC) {
-		struct task_struct *current = (void *)bpf_get_current_task_btf();
-
-		cpu = bpf_get_smp_processor_id();
-		if (!(current->flags & PF_EXITING) &&
-		    taskc->dom_id < MAX_DOMS &&
-		    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) == 0) {
-			struct dom_ctx *domc;
-			struct bpf_cpumask *d_cpumask;
-			const struct cpumask *idle_cpumask;
-			bool has_idle;
-
-			domc = lookup_dom_ctx(taskc->dom_id);
-			if (!domc)
-				goto enoent;
-			d_cpumask = domc->cpumask;
-			if (!d_cpumask) {
-				scx_bpf_error("Failed to acquire dom%u cpumask kptr",
-					      taskc->dom_id);
-				goto enoent;
-			}
-
-			idle_cpumask = scx_bpf_get_idle_cpumask();
-
-			has_idle = bpf_cpumask_intersects((const struct cpumask *)d_cpumask,
-							  idle_cpumask);
-
-			scx_bpf_put_idle_cpumask(idle_cpumask);
-
-			if (has_idle) {
-				if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
-					stat_add(RUSTY_STAT_WAKE_SYNC, 1);
-					goto direct;
-				}
-			}
-		}
+		cpu = try_sync_wakeup(p, taskc, prev_cpu);
+		if (cpu >= 0)
+			goto direct;
 	}
 
 	has_idle_cores = !bpf_cpumask_empty(idle_smtmask);
@@ -1157,9 +1189,9 @@ u32 dom_node_id(u32 dom_id)
 
 void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 {
-	u32 dom = cpu_to_dom_id(cpu);
+	u32 curr_dom = cpu_to_dom_id(cpu), dom;
 	struct pcpu_ctx *pcpuc;
-	u32 node_doms, my_node, i;
+	u32 my_node;
 
 	/*
 	 * In older kernels, we may receive an ops.dispatch() callback when a
@@ -1171,7 +1203,7 @@ void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 	if (unlikely(is_offline_cpu(cpu)))
 		return;
 
-	if (scx_bpf_consume(dom)) {
+	if (scx_bpf_consume(curr_dom)) {
 		stat_add(RUSTY_STAT_DSQ_DISPATCH, 1);
 		return;
 	}
@@ -1182,11 +1214,15 @@ void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 	pcpuc = lookup_pcpu_ctx(cpu);
 	if (!pcpuc)
 		return;
-	node_doms = pcpuc->nr_node_doms;
+
+	my_node = dom_node_id(curr_dom);
 
 	/* try to steal a task from domains on the current NUMA node */
-	bpf_for(i, 0, node_doms) {
-		dom = (pcpuc->dom_rr_cur + 1 + i) % node_doms;
+	bpf_repeat(nr_doms - 1) {
+		dom = pcpuc->dom_rr_cur++ % nr_doms;
+		if (dom == curr_dom || dom_node_id(dom) != my_node)
+			continue;
+
 		if (scx_bpf_consume(dom)) {
 			stat_add(RUSTY_STAT_GREEDY_LOCAL, 1);
 			return;
@@ -1197,13 +1233,14 @@ void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/* try to steal a task from domains on other NUMA nodes */
-	my_node = dom_node_id(pcpuc->dom_id);
 	bpf_repeat(nr_doms - 1) {
-		dom = (pcpuc->dom_rr_cur + 1) % nr_doms;
-		pcpuc->dom_rr_cur++;
-		if (dom_node_id(dom) != my_node &&
-		    scx_bpf_dsq_nr_queued(dom) >= greedy_threshold_x_numa &&
-		    scx_bpf_consume(dom)) {
+		dom = pcpuc->dom_rr_cur++ % nr_doms;
+
+		if (dom_node_id(dom) == my_node || dom == curr_dom ||
+		    scx_bpf_dsq_nr_queued(dom) >= greedy_threshold_x_numa)
+			continue;
+
+		if (scx_bpf_consume(dom)) {
 			stat_add(RUSTY_STAT_GREEDY_XNUMA, 1);
 			return;
 		}
@@ -1680,58 +1717,38 @@ static s32 create_dom(u32 dom_id)
 static s32 initialize_cpu(s32 cpu)
 {
 	struct bpf_cpumask *cpumask;
-	struct dom_ctx *domc;
-	int i, j = 0;
 	struct pcpu_ctx *pcpuc = lookup_pcpu_ctx(cpu);
-	u32 *dom_nodes;
+	u32 i;
 
 	if (!pcpuc)
 		return -ENOENT;
 
 	pcpuc->dom_rr_cur = cpu;
 	bpf_for(i, 0, nr_doms) {
+		bool in_dom;
+		struct dom_ctx *domc;
+
 		domc = lookup_dom_ctx(i);
 		if (!domc)
 			return -ENOENT;
+
 		bpf_rcu_read_lock();
-		cpumask = domc->node_cpumask;
+		cpumask = domc->cpumask;
 		if (!cpumask) {
 			bpf_rcu_read_unlock();
 			scx_bpf_error("Failed to lookup dom node cpumask");
 			return -ENOENT;
 		}
 
-		if (bpf_cpumask_test_cpu(cpu, (const struct cpumask *)cpumask)) {
-			cpumask = domc->cpumask;
-			if (!cpumask) {
-				bpf_rcu_read_unlock();
-				scx_bpf_error("Failed to lookup dom cpumask");
-				return -ENOENT;
-			}
-			/*
-			 * Only record the remote domains in this array, as
-			 * we'll only ever consume from them on the greedy
-			 * threshold path.
-			 */
-			if (!bpf_cpumask_test_cpu(cpu,
-						  (const struct cpumask *)cpumask)) {
-				dom_nodes = MEMBER_VPTR(pcpuc->node_doms, [j]);
-				if (!dom_nodes) {
-					bpf_rcu_read_unlock();
-					scx_bpf_error("Failed to lookup doms ptr");
-					return -EINVAL;
-				}
-				*dom_nodes = i;
-				j++;
-			} else {
-				pcpuc->dom_id = i;
-			}
-		}
+		in_dom = bpf_cpumask_test_cpu(cpu, (const struct cpumask *)cpumask);
 		bpf_rcu_read_unlock();
+		if (in_dom) {
+			pcpuc->dom_id = i;
+			return 0;
+		}
 	}
-	pcpuc->nr_node_doms = j;
 
-	return 0;
+	return -ENOENT;
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
