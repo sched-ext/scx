@@ -476,8 +476,13 @@ static void dispatch_user_scheduler(void)
 static void
 dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 slice_ns, u64 enq_flags)
 {
-	scx_bpf_dispatch(p, cpu_to_dsq(cpu), slice_ns, enq_flags);
+	u64 dsq_id = cpu_to_dsq(cpu);
+
+	scx_bpf_dispatch(p, dsq_id, slice_ns, enq_flags);
 	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+
+	dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu direct",
+		p->pid, p->comm, dsq_id, enq_flags, slice_ns);
 
 	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 }
