@@ -2445,7 +2445,7 @@ static int calc_cpuperf_target(struct sys_stat *stat_cur,
 	 * system-wide average performance criticality
 	 * (stat_cur->avg_perf_cri).
 	 *
-	 * When a current CPU utilization is 100%, and the current task's
+	 * When a current CPU utilization is 85% and the current task's
 	 * performance criticality is the same as the system-wide average
 	 * criticality, we set the target CPU frequency to the maximum.
 	 *
@@ -2456,7 +2456,7 @@ static int calc_cpuperf_target(struct sys_stat *stat_cur,
 	 * high when a non-performance-critical task is running (i.e.,
 	 * deboosting CPU frequency).
 	 */
-	max_load = stat_cur->avg_perf_cri * 1000 /* max cpu util */;
+	max_load = stat_cur->avg_perf_cri * LAVD_CPU_UTIL_MAX_FOR_CPUPERF;
 	cpu_load = taskc->perf_cri * cpuc->util;
 	cpuperf_target = (cpu_load * SCX_CPUPERF_ONE) / max_load;
 	cpuperf_target = min(cpuperf_target, SCX_CPUPERF_ONE);
