@@ -29,8 +29,7 @@ const char help_fmt[] =
 "  -l COUNT      Trigger dispatch infinite looping after COUNT dispatches\n"
 "  -b COUNT      Dispatch upto COUNT tasks together\n"
 "  -P            Print out DSQ content to trace_pipe every second, use with -b\n"
-"  -E PREFIX     Expedite consumption of threads w/ matching comm, use with -b\n"
-"                (e.g. match shell on a loaded system)\n"
+"  -E CGID       Expedite consumption of threads in a cgroup, use with -b\n"
 "  -d PID        Disallow a process from switching into SCHED_EXT (-1 for self)\n"
 "  -D LEN        Set scx_exit_info.dump buffer length\n"
 "  -S            Suppress qmap-specific debug dump\n"
@@ -89,8 +88,7 @@ int main(int argc, char **argv)
 			skel->rodata->print_shared_dsq = true;
 			break;
 		case 'E':
-			strncpy(skel->rodata->exp_prefix, optarg,
-				sizeof(skel->rodata->exp_prefix) - 1);
+			skel->rodata->exp_cgid = strtoull(optarg, NULL, 0);
 			break;
 		case 'd':
 			skel->rodata->disallow_tgid = strtol(optarg, NULL, 0);
@@ -116,7 +114,7 @@ int main(int argc, char **argv)
 	}
 
 	if (!__COMPAT_HAS_DSQ_ITER &&
-	    (skel->rodata->print_shared_dsq || strlen(skel->rodata->exp_prefix)))
+	    (skel->rodata->print_shared_dsq || skel->rodata->exp_cgid))
 		fprintf(stderr, "kernel doesn't support DSQ iteration\n");
 
 	SCX_OPS_LOAD(skel, qmap_ops, scx_qmap, uei);

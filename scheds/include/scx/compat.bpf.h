@@ -27,7 +27,10 @@
 static inline bool __COMPAT_scx_bpf_consume_task(struct bpf_iter_scx_dsq *it,
 						 struct task_struct *p)
 {
-	return false;
+	if (bpf_ksym_exists(__scx_bpf_consume_task))
+		return scx_bpf_consume_task(it, p);
+	else
+		return false;
 }
 
 /*

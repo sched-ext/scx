@@ -38,7 +38,7 @@ const volatile u32 stall_kernel_nth;
 const volatile u32 dsp_inf_loop_after;
 const volatile u32 dsp_batch;
 const volatile bool print_shared_dsq;
-const volatile char exp_prefix[17];
+const volatile u64 exp_cgid;
 const volatile s32 disallow_tgid;
 const volatile bool suppress_dump;
 
@@ -267,7 +267,7 @@ static bool consume_shared_dsq(void)
 	struct task_struct *p;
 	bool consumed;
 
-	if (exp_prefix[0] == '\0')
+	if (!exp_cgid)
 		return scx_bpf_consume(SHARED_DSQ);
 
 	/*
@@ -278,12 +278,7 @@ static bool consume_shared_dsq(void)
 	 */
 	consumed = false;
 	__COMPAT_DSQ_FOR_EACH(p, SHARED_DSQ, 0) {
-		char comm[sizeof(exp_prefix)];
-
-		memcpy(comm, p->comm, sizeof(exp_prefix) - 1);
-
-		if (!bpf_strncmp(comm, sizeof(exp_prefix),
-				 (const char *)exp_prefix) &&
+		if (p->cgroups->dfl_cgrp->kn->id == exp_cgid &&
 		    __COMPAT_scx_bpf_consume_task(BPF_FOR_EACH_ITER, p)) {
 			consumed = true;
 			__sync_fetch_and_add(&nr_expedited, 1);
