@@ -9,7 +9,7 @@
 //! which enables implementing kernel thread schedulers in BPF and dynamically
 //! loading them.
 //!
-//! Thie crate is a collection of utilities for sched_ext scheduler
+//! This crate is a collection of utilities for sched_ext scheduler
 //! implementations which use Rust for userspace component. This enables
 //! implementing hot paths in BPF while offloading colder and more complex
 //! operations to userspace Rust code which can be significantly more convenient
