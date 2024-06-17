@@ -69,7 +69,6 @@ const volatile u32 load_half_life = 1000000000	/* 1s */;
 
 const volatile bool kthreads_local;
 const volatile bool fifo_sched;
-const volatile bool switch_partial;
 const volatile bool direct_greedy_numa;
 const volatile u32 greedy_threshold;
 const volatile u32 greedy_threshold_x_numa;
@@ -1750,9 +1749,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 	ret = create_save_cpumask(&kick_greedy_cpumask);
 	if (ret)
 		return ret;
-
-	if (!switch_partial)
-		__COMPAT_scx_bpf_switch_all();
 
 	bpf_for(i, 0, nr_nodes) {
 		ret = create_node(i);

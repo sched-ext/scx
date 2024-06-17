@@ -508,7 +508,7 @@ bool pick_idle_cpu_and_kick(struct task_struct *p, s32 task_cpu,
 
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_KICK, layer, cctx);
-		scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return true;
 	} else {
 		return false;
@@ -1006,7 +1006,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	}
 
 	if (layer->perf > 0)
-		__COMPAT_scx_bpf_cpuperf_set(task_cpu, layer->perf);
+		scx_bpf_cpuperf_set(task_cpu, layer->perf);
 
 	cctx->maybe_idle = false;
 }
@@ -1197,9 +1197,6 @@ static void dump_layer_cpumask(int idx)
 	s32 cpu;
 	char buf[128] = "", *p;
 
-	if (!__COMPAT_HAS_CPUMASKS)
-		return;
-
 	if (!(layer_cpumask = lookup_layer_cpumask(idx)))
 		return;
 
@@ -1247,8 +1244,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
 	struct bpf_cpumask *cpumask;
 	int i, j, k, nr_online_cpus, ret;
-
-	__COMPAT_scx_bpf_switch_all();
 
 	ret = scx_bpf_create_dsq(HI_FALLBACK_DSQ, -1);
 	if (ret < 0)

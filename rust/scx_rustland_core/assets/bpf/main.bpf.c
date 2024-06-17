@@ -442,7 +442,7 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 			p->pid, p->comm, dsq_id, enq_flags, slice);
 
 		/* Wake up the target CPU (only if idle) */
-		scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		break;
 	}
 }
@@ -477,7 +477,7 @@ static void
 dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 slice_ns, u64 enq_flags)
 {
 	scx_bpf_dispatch(p, cpu_to_dsq(cpu), slice_ns, enq_flags);
-	scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
+	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 }
@@ -1020,8 +1020,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rustland_init)
 	err = usersched_timer_init();
 	if (err)
 		return err;
-        if (!switch_partial)
-		__COMPAT_scx_bpf_switch_all();
 
 	return 0;
 }

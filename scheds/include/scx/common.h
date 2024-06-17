@@ -28,8 +28,11 @@ typedef int64_t s64;
 
 #define SCX_BUG(__fmt, ...)							\
 	do {									\
-		fprintf(stderr, "%s:%d [scx panic]: %s\n", __FILE__, __LINE__,	\
-			strerror(errno));					\
+		fprintf(stderr, "[SCX_BUG] %s:%d", __FILE__, __LINE__);		\
+		if (errno)							\
+			fprintf(stderr, " (%s)\n", strerror(errno));		\
+		else								\
+			fprintf(stderr, "\n");					\
 		fprintf(stderr, __fmt __VA_OPT__(,) __VA_ARGS__);		\
 		fprintf(stderr, "\n");						\
 										\

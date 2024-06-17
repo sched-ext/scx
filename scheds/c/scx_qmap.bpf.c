@@ -41,7 +41,6 @@ const volatile bool print_shared_dsq;
 const volatile char exp_prefix[17];
 const volatile s32 disallow_tgid;
 const volatile bool suppress_dump;
-const volatile bool switch_partial;
 
 u32 test_error_cnt;
 
@@ -222,7 +221,7 @@ void BPF_STRUCT_OPS(qmap_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dispatch(p, SHARED_DSQ, 0, enq_flags);
 		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 		if (cpu >= 0)
-			scx_bpf_kick_cpu(cpu, __COMPAT_SCX_KICK_IDLE);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return;
 	}
 
@@ -476,13 +475,13 @@ void BPF_STRUCT_OPS(qmap_dump, struct scx_dump_ctx *dctx)
 		if (!(fifo = bpf_map_lookup_elem(&queue_arr, &i)))
 			return;
 
-		__COMPAT_scx_bpf_dump("QMAP FIFO[%d]:", i);
+		scx_bpf_dump("QMAP FIFO[%d]:", i);
 		bpf_repeat(4096) {
 			if (bpf_map_pop_elem(fifo, &pid))
 				break;
-			__COMPAT_scx_bpf_dump(" %d", pid);
+			scx_bpf_dump(" %d", pid);
 		}
-		__COMPAT_scx_bpf_dump("\n");
+		scx_bpf_dump("\n");
 	}
 }
 
@@ -496,9 +495,9 @@ void BPF_STRUCT_OPS(qmap_dump_cpu, struct scx_dump_ctx *dctx, s32 cpu, bool idle
 	if (!(cpuc = bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &zero, cpu)))
 		return;
 
-	__COMPAT_scx_bpf_dump("QMAP: dsp_idx=%llu dsp_cnt=%llu avg_weight=%u cpuperf_target=%u",
-			      cpuc->dsp_idx, cpuc->dsp_cnt, cpuc->avg_weight,
-			      cpuc->cpuperf_target);
+	scx_bpf_dump("QMAP: dsp_idx=%llu dsp_cnt=%llu avg_weight=%u cpuperf_target=%u",
+		     cpuc->dsp_idx, cpuc->dsp_cnt, cpuc->avg_weight,
+		     cpuc->cpuperf_target);
 }
 
 void BPF_STRUCT_OPS(qmap_dump_task, struct scx_dump_ctx *dctx, struct task_struct *p)
@@ -510,8 +509,8 @@ void BPF_STRUCT_OPS(qmap_dump_task, struct scx_dump_ctx *dctx, struct task_struc
 	if (!(taskc = bpf_task_storage_get(&task_ctx_stor, p, 0, 0)))
 		return;
 
-	__COMPAT_scx_bpf_dump("QMAP: force_local=%d core_sched_seq=%llu",
-			      taskc->force_local, taskc->core_sched_seq);
+	scx_bpf_dump("QMAP: force_local=%d core_sched_seq=%llu",
+		     taskc->force_local, taskc->core_sched_seq);
 }
 
 /*
@@ -524,9 +523,6 @@ static void print_cpus(void)
 	s32 cpu;
 	char buf[128] = "", *p;
 	int idx;
-
-	if (!__COMPAT_HAS_CPUMASKS)
-		return;
 
 	possible = scx_bpf_get_possible_cpumask();
 	online = scx_bpf_get_online_cpumask();
@@ -592,9 +588,6 @@ static void monitor_cpuperf(void)
 	u64 target_sum = 0, target_min = SCX_CPUPERF_ONE, target_max = 0;
 	const struct cpumask *online;
 	int i, nr_online_cpus = 0;
-
-	if (!__COMPAT_HAS_CPUMASKS)
-		return;
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 	online = scx_bpf_get_online_cpumask();
@@ -682,9 +675,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(qmap_init)
 	u32 key = 0;
 	struct bpf_timer *timer;
 	s32 ret;
-
-	if (!switch_partial)
-		__COMPAT_scx_bpf_switch_all();
 
 	print_cpus();
 

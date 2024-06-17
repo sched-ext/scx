@@ -106,22 +106,8 @@ static inline bool __COMPAT_struct_has_field(const char *type, const char *field
 	return false;
 }
 
-/*
- * An ops flag, %SCX_OPS_SWITCH_PARTIAL, replaced scx_bpf_switch_all() which had
- * to be called from ops.init(). To support both before and after, use both
- * %__COMPAT_SCX_OPS_SWITCH_PARTIAL and %__COMPAT_scx_bpf_switch_all() defined
- * in compat.bpf.h. Users can switch to directly using %SCX_OPS_SWITCH_PARTIAL
- * in the future.
- */
-#define __COMPAT_SCX_OPS_SWITCH_PARTIAL						\
+#define SCX_OPS_SWITCH_PARTIAL							\
 	__COMPAT_ENUM_OR_ZERO("scx_ops_flags", "SCX_OPS_SWITCH_PARTIAL")
-
-/*
- * scx_bpf_nr_cpu_ids(), scx_bpf_get_possible/online_cpumask() are new. Users
- * will be able to assume existence in the future.
- */
-#define __COMPAT_HAS_CPUMASKS							\
-	__COMPAT_has_ksym("scx_bpf_nr_cpu_ids")
 
 /*
  * DSQ iterator is new. Users will be able to assume existence in the future.
@@ -157,43 +143,23 @@ static inline long scx_hotplug_seq(void)
  * and attach it, backward compatibility is automatically maintained where
  * reasonable.
  *
- * - ops.tick(): Ignored on older kernels with a warning.
- * - ops.dump*(): Ignored on older kernels with a warning.
- * - ops.exit_dump_len: Cleared to zero on older kernels with a warning.
- * - ops.hotplug_seq: Ignored on older kernels.
+ * ec7e3b0463e1 ("implement-ops") in https://github.com/sched-ext/sched_ext is
+ * the current minimum required kernel version.
  */
 #define SCX_OPS_OPEN(__ops_name, __scx_name) ({					\
 	struct __scx_name *__skel;						\
 										\
+	SCX_BUG_ON(!__COMPAT_struct_has_field("sched_ext_ops", "dump"),		\
+		   "sched_ext_ops.dump() missing, kernel too old?");		\
+										\
 	__skel = __scx_name##__open();						\
 	SCX_BUG_ON(!__skel, "Could not open " #__scx_name);			\
-										\
-	if (__COMPAT_struct_has_field("sched_ext_ops", "hotplug_seq"))		\
-		__skel->struct_ops.__ops_name->hotplug_seq = scx_hotplug_seq();	\
+	__skel->struct_ops.__ops_name->hotplug_seq = scx_hotplug_seq();		\
 	__skel; 								\
 })
 
 #define SCX_OPS_LOAD(__skel, __ops_name, __scx_name, __uei_name) ({		\
 	UEI_SET_SIZE(__skel, __ops_name, __uei_name);				\
-	if (!__COMPAT_struct_has_field("sched_ext_ops", "exit_dump_len") &&	\
-	    (__skel)->struct_ops.__ops_name->exit_dump_len) {			\
-		fprintf(stderr, "WARNING: kernel doesn't support setting exit dump len\n"); \
-		(__skel)->struct_ops.__ops_name->exit_dump_len = 0;		\
-	}									\
-	if (!__COMPAT_struct_has_field("sched_ext_ops", "tick") &&		\
-	    (__skel)->struct_ops.__ops_name->tick) {				\
-		fprintf(stderr, "WARNING: kernel doesn't support ops.tick()\n"); \
-		(__skel)->struct_ops.__ops_name->tick = NULL;			\
-	}									\
-	if (!__COMPAT_struct_has_field("sched_ext_ops", "dump") &&		\
-	    ((__skel)->struct_ops.__ops_name->dump ||				\
-	     (__skel)->struct_ops.__ops_name->dump_cpu ||			\
-	     (__skel)->struct_ops.__ops_name->dump_task)) {			\
-		fprintf(stderr, "WARNING: kernel doesn't support ops.dump*()\n"); \
-		(__skel)->struct_ops.__ops_name->dump = NULL;			\
-		(__skel)->struct_ops.__ops_name->dump_cpu = NULL;		\
-		(__skel)->struct_ops.__ops_name->dump_task = NULL;		\
-	}									\
 	SCX_BUG_ON(__scx_name##__load((__skel)), "Failed to load skel");	\
 })
 
