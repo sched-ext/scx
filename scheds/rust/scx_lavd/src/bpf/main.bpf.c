@@ -765,16 +765,16 @@ struct sys_stat_ctx {
 	u64		load_actual;
 	u64		load_ideal;
 	u64		load_run_time_ns;
-	s64		max_lat_cri;
-	s64		min_lat_cri;
-	s64		avg_lat_cri;
+	s32		max_lat_cri;
+	s32		min_lat_cri;
+	s32		avg_lat_cri;
 	u64		sum_lat_cri;
-	u64		sched_nr;
+	u32		sched_nr;
 	u64		sum_perf_cri;
-	u64		avg_perf_cri;
+	u32		avg_perf_cri;
 	u64		new_util;
 	u64		new_load_factor;
-	u64		nr_violation;
+	u32		nr_violation;
 };
 
 static void init_sys_stat_ctx(struct sys_stat_ctx *c)
@@ -919,18 +919,18 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 		calc_avg(stat_cur->load_factor, c->new_load_factor);
 
 	stat_next->min_lat_cri =
-		calc_avg(stat_cur->min_lat_cri, c->min_lat_cri);
+		calc_avg32(stat_cur->min_lat_cri, c->min_lat_cri);
 	stat_next->max_lat_cri =
-		calc_avg(stat_cur->max_lat_cri, c->max_lat_cri);
+		calc_avg32(stat_cur->max_lat_cri, c->max_lat_cri);
 	stat_next->avg_lat_cri =
-		calc_avg(stat_cur->avg_lat_cri, c->avg_lat_cri);
+		calc_avg32(stat_cur->avg_lat_cri, c->avg_lat_cri);
 	stat_next->thr_lat_cri = stat_next->max_lat_cri -
 		((stat_next->max_lat_cri - stat_next->avg_lat_cri) >> 1);
 	stat_next->avg_perf_cri =
-		calc_avg(stat_cur->avg_perf_cri, c->avg_perf_cri);
+		calc_avg32(stat_cur->avg_perf_cri, c->avg_perf_cri);
 
 	stat_next->nr_violation =
-		calc_avg(stat_cur->nr_violation, c->nr_violation);
+		calc_avg32(stat_cur->nr_violation, c->nr_violation);
 }
 
 static void calc_inc1k(struct sys_stat_ctx *c)
@@ -1129,10 +1129,10 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	return 0;
 }
 
-static u64 calc_greedy_ratio(struct task_struct *p, struct task_ctx *taskc)
+static u32 calc_greedy_ratio(struct task_struct *p, struct task_ctx *taskc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
-	u64 ratio;
+	u32 ratio;
 
 	/*
 	 * The greedy ratio of a task represents how much time the task
@@ -1173,12 +1173,12 @@ static u64 calc_lat_factor(u64 lat_prio)
 	return LAVD_ELIGIBLE_TIME_LAT_FT * (NICE_WIDTH - lat_prio);
 }
 
-static u64 calc_greedy_factor(struct task_ctx *taskc)
+static u32 calc_greedy_factor(struct task_ctx *taskc)
 {
-	u64 greedy_ratio = taskc->greedy_ratio;
+	u32 greedy_ratio = taskc->greedy_ratio;
 	s16 lat_prio = taskc->lat_prio;
-	u64 greedy_threshold;
-	u64 gr_ft;
+	u32 greedy_threshold;
+	u32 gr_ft;
 
 	if (lat_prio < 0)
 		lat_prio = 0;
@@ -1308,7 +1308,7 @@ static int sum_prios_for_lat(struct task_struct *p, int nice_prio,
 	return prio;
 }
 
-static int map_lat_cri_to_lat_prio(u64 lat_cri)
+static int map_lat_cri_to_lat_prio(u32 lat_cri)
 {
 	/*
 	 * Latency criticality is an absolute metric representing how
@@ -1326,7 +1326,7 @@ static int map_lat_cri_to_lat_prio(u64 lat_cri)
 	 */
 
 	struct sys_stat *stat_cur = get_sys_stat_cur();
-	s64 base_lat_cri, inc1k;
+	s32 base_lat_cri, inc1k;
 	int base_prio, lat_prio;
 
 	/*
@@ -1440,7 +1440,6 @@ static int boost_lat(struct task_struct *p, struct task_ctx *taskc,
 out:
 	static_prio = get_nice_prio(p);
 	taskc->lat_prio = sum_prios_for_lat(p, static_prio, boost);
-	taskc->lat_boost_prio = boost;
 
 	return boost;
 }
@@ -1546,7 +1545,8 @@ static u64 cap_time_slice_ns(u64 slice)
 static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
-	u64 slice, share, gr_ft;
+	u64 slice, share;
+	u32 gr_ft;
 
 	/*
 	 * The time slice should be short enough to schedule all runnable tasks
@@ -2138,6 +2138,19 @@ static void put_local_rq_no_fail(struct task_struct *p, struct task_ctx *taskc,
 	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, LAVD_SLICE_UNDECIDED, enq_flags);
 }
 
+static bool could_run_on_prev(struct task_struct *p, s32 prev_cpu,
+			      struct bpf_cpumask *a_cpumask,
+			      struct bpf_cpumask *o_cpumask)
+{
+	bool ret;
+
+	ret = bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
+	      (bpf_cpumask_test_cpu(prev_cpu, cast_mask(a_cpumask)) ||
+	       bpf_cpumask_test_cpu(prev_cpu, cast_mask(o_cpumask)));
+
+	return ret;
+}
+
 static s32 pick_cpu(struct task_struct *p, struct task_ctx *taskc,
 		    s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
@@ -2169,9 +2182,9 @@ static s32 pick_cpu(struct task_struct *p, struct task_ctx *taskc,
 	bpf_cpumask_and(a_cpumask, p->cpus_ptr, cast_mask(active));
 
 	/*
-	 * First, try to stay on the previous core if it is active.
+	 * First, try to stay on the previous core if it is on active or ovrfw.
 	 */
-	if (bpf_cpumask_test_cpu(prev_cpu, cast_mask(a_cpumask)) &&
+	if (could_run_on_prev(p, prev_cpu, a_cpumask, o_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu_id = prev_cpu;
 		goto unlock_out;

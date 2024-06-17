@@ -54,7 +54,7 @@ enum consts {
 	NSEC_PER_MSEC			= (1000ULL * NSEC_PER_USEC),
 	LAVD_TIME_ONE_SEC		= (1000ULL * NSEC_PER_MSEC),
 	LAVD_TIME_INFINITY_NS		= SCX_SLICE_INF,
-	LAVD_MAX_CAS_RETRY		= 8,
+	LAVD_MAX_CAS_RETRY		= 4,
 
 	LAVD_TARGETED_LATENCY_NS	= (15 * NSEC_PER_MSEC),
 	LAVD_SLICE_MIN_NS		= ( 1 * NSEC_PER_MSEC), /* min time slice */
@@ -109,18 +109,18 @@ struct sys_stat {
 	volatile u64	load_ideal;	/* average ideal load of runnable tasks */
 	volatile u64	load_actual;	/* average actual load of runnable tasks */
 
-	volatile u64	avg_lat_cri;	/* average latency criticality (LC) */
-	volatile u64	max_lat_cri;	/* maximum latency criticality (LC) */
-	volatile u64	min_lat_cri;	/* minimum latency criticality (LC) */
-	volatile u64	thr_lat_cri;	/* latency criticality threshold for kicking */
+	volatile u32	avg_lat_cri;	/* average latency criticality (LC) */
+	volatile u32	max_lat_cri;	/* maximum latency criticality (LC) */
+	volatile u32	min_lat_cri;	/* minimum latency criticality (LC) */
+	volatile u32	thr_lat_cri;	/* latency criticality threshold for kicking */
 
-	volatile s64	inc1k_low;	/* increment from low LC to priority mapping */
-	volatile s64	inc1k_high;	/* increment from high LC to priority mapping */
+	volatile s32	inc1k_low;	/* increment from low LC to priority mapping */
+	volatile s32	inc1k_high;	/* increment from high LC to priority mapping */
 
-	volatile u64	avg_perf_cri;	/* average performance criticality */
+	volatile u32	avg_perf_cri;	/* average performance criticality */
 
-	volatile u64	nr_violation;	/* number of utilization violation */
-	volatile int	nr_active;	/* number of active cores */
+	volatile u32	nr_violation;	/* number of utilization violation */
+	volatile u32	nr_active;	/* number of active cores */
 };
 
 /*
@@ -151,10 +151,10 @@ struct cpu_ctx {
 	/*
 	 * Information used to keep track of latency criticality
 	 */
-	volatile u64	max_lat_cri;	/* maximum latency criticality */
-	volatile u64	min_lat_cri;	/* minimum latency criticality */
-	volatile u64	sum_lat_cri;	/* sum of latency criticality */
-	volatile u64	sched_nr;	/* number of schedules */
+	volatile u32	max_lat_cri;	/* maximum latency criticality */
+	volatile u32	min_lat_cri;	/* minimum latency criticality */
+	volatile u32	sum_lat_cri;	/* sum of latency criticality */
+	volatile u32	sched_nr;	/* number of schedules */
 
 	/*
 	 * Information used to keep track of performance criticality
@@ -200,6 +200,7 @@ struct task_ctx {
 	u64	run_time_ns;		/* average runtime per schedule */
 	u64	run_freq;		/* scheduling frequency in a second */
 	u64	wait_freq;		/* waiting frequency in a second */
+
 	u64	wake_freq;		/* waking-up frequency in a second */
 	u64	load_actual;		/* task load derived from run_time and run_freq */
 
@@ -209,17 +210,16 @@ struct task_ctx {
 	u64	vdeadline_delta_ns;	/* time delta until task's virtual deadline */
 	u64	eligible_delta_ns;	/* time delta until task becomes eligible */
 	u64	slice_ns;		/* time slice */
-	u64	greedy_ratio;		/* task's overscheduling ratio compared to its nice priority */
-	u64	lat_cri;		/* calculated latency criticality */
+	u32	greedy_ratio;		/* task's overscheduling ratio compared to its nice priority */
+	u32	lat_cri;		/* calculated latency criticality */
 	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
 	u16	lat_prio;		/* latency priority */
-	s16	lat_boost_prio;		/* DEBUG */
 
 	/*
 	 * Task's performance criticality
 	 */
-	u64	perf_cri;		/* performance criticality of a task */
+	u32	perf_cri;		/* performance criticality of a task */
 };
 
 struct task_ctx_x {
@@ -229,8 +229,8 @@ struct task_ctx_x {
 	u32	cpu_id;		/* where a task ran */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
 	u64	sys_load_factor; /* system load factor in [0..100..] */
-	u64	avg_lat_cri;	/* average latency criticality */
-	u64	avg_perf_cri;	/* average performance criticality */
+	u32	avg_perf_cri;	/* average performance criticality */
+	u32	avg_lat_cri;	/* average latency criticality */
 	u32	nr_active;	/* number of active cores */
 	u32	cpuperf_cur;	/* CPU's current performance target */
 };
