@@ -313,25 +313,18 @@ impl LoadAggregator {
             bail!("weight {} is less than minimum weight {}", weight, MIN_WEIGHT);
         }
 
-        if !self.doms.contains_key(&dom_id) {
-            self.doms.insert(dom_id, Domain {
-                loads: BTreeMap::new(),
-                dcycle_sum: 0.0f64,
-                load_sum: 0.0f64,
-            });
-        }
+        let domain = self.doms.entry(dom_id).or_insert(Domain{
+            loads: BTreeMap::new(),
+            dcycle_sum: 0.0f64,
+            load_sum: 0.0f64,
+        });
 
-        let domain = self.doms.get_mut(&dom_id).unwrap();
         if let Some(_) = domain.loads.insert(weight, dcycle) {
             bail!("Domain {} already had load for weight {}", dom_id, weight);
         }
 
-        if !self.global_loads.contains_key(&weight) {
-            self.global_loads.insert(weight, 0.0f64);
-        }
-        let mut weight_dcycle = self.global_loads.get(&weight).unwrap().clone();
-        weight_dcycle += dcycle;
-        self.global_loads.insert(weight, weight_dcycle);
+        let weight_dcycle = self.global_loads.entry(weight).or_insert(0.0f64);
+        *weight_dcycle += dcycle;
 
         let load = weight as f64 * dcycle;
 
