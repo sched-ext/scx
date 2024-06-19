@@ -50,6 +50,7 @@ pub use user_exit_info::UeiDumpPtr;
 pub use user_exit_info::UserExitInfo;
 pub use user_exit_info::UEI_DUMP_PTR_MUTEX;
 
+pub mod build_id;
 pub mod compat;
 
 mod libbpf_logger;
