@@ -2187,6 +2187,7 @@ static s32 pick_cpu(struct task_struct *p, struct task_ctx *taskc,
 	if (could_run_on_prev(p, prev_cpu, a_cpumask, o_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu_id = prev_cpu;
+		*is_idle = true;
 		goto unlock_out;
 	}
 
@@ -2194,16 +2195,20 @@ static s32 pick_cpu(struct task_struct *p, struct task_ctx *taskc,
 	 * Next, pick a fully idle core among active CPUs.
 	 */
 	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(a_cpumask), SCX_PICK_IDLE_CORE);
-	if (cpu_id >= 0)
+	if (cpu_id >= 0) {
+		*is_idle = true;
 		goto unlock_out;
+	}
 
 	/*
 	 * Then, pick an any idle core among active CPUs even if its hypertwin
 	 * is in use.
 	 */
 	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(a_cpumask), 0);
-	if (cpu_id >= 0)
+	if (cpu_id >= 0) {
+		*is_idle = true;
 		goto unlock_out;
+	}
 
 	/*
 	 * Then, pick an any idle core among overflow CPUs.
@@ -2211,8 +2216,10 @@ static s32 pick_cpu(struct task_struct *p, struct task_ctx *taskc,
 	bpf_cpumask_and(o_cpumask, p->cpus_ptr, cast_mask(ovrflw));
 
 	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(o_cpumask), 0);
-	if (cpu_id >= 0)
+	if (cpu_id >= 0) {
+		*is_idle = true;
 		goto unlock_out;
+	}
 
 	/*
 	 * Next, if there is no idle core under our control, pick random core
@@ -2270,8 +2277,10 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 */
 	if (!is_wakeup_wf(wake_flags)) {
 		cpu_id = pick_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
-		if (found_idle)
+		if (found_idle) {
+			put_local_rq_no_fail(p, taskc, 0);
 			return cpu_id;
+		}
 
 		goto try_yield_out;
 	}
