@@ -1804,7 +1804,7 @@ static  bool can_cpu1_kick_cpu2(struct preemption_info *prm_cpu1,
 	 * If that CPU runs a lower priority task, that's a victim
 	 * candidate.
 	 */
-	return comp_preemption_info(prm_cpu1, prm_cpu2) < 0;
+	return can_task1_kick_task2(prm_cpu1, prm_cpu2);
 }
 
 static bool is_worth_kick_other_task(struct task_ctx *taskc)
@@ -1926,8 +1926,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 */
 	switch(v) {
 	case 2:	/* two dandidates */
-		ret = comp_preemption_info(&prm_cpus[0], &prm_cpus[1]);
-		victim_cpu = (ret < 0) ? &prm_cpus[0] : &prm_cpus[1];
+		victim_cpu = can_task1_kick_task2(&prm_cpus[0], &prm_cpus[1]) ? &prm_cpus[0] : &prm_cpus[1];
 		goto bingo_out;
 	case 1:	/* one candidate */
 		victim_cpu = &prm_cpus[0];
