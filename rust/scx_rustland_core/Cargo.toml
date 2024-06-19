@@ -12,7 +12,6 @@ anyhow = "1.0"
 plain = "0.2.3"
 libbpf-rs = "0.23.1"
 libc = "0.2.137"
-buddy-alloc = "0.5.1"
 scx_utils = { path = "../scx_utils", version = "0.8.1" }
 
 [build-dependencies]
