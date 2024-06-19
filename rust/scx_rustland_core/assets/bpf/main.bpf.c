@@ -172,14 +172,6 @@ struct task_ctx {
 	 * current task's cpumask.
 	 */
 	u64 cpumask_cnt;
-
-	/*
-	 * This flag tracks when a task is directly dispatched on a CPU. In
-	 * this case, we want to continue dispatching it on the same CPU for an
-	 * additional round to take advantage of cache locality before
-	 * considering migrating it to a different CPU.
-	 */
-	bool allow_migration;
 };
 
 /* Map that contains task-local storage. */
@@ -503,8 +495,8 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
 	struct task_ctx *tctx;
-	bool is_idle = false;
-	s32 cpu;
+	s32 cpu = prev_cpu;
+	bool do_direct = false;
 
 	/*
 	 * When full_user is enabled, the user-space scheduler is responsible
@@ -512,45 +504,59 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * possibly its own idle tracking mechanism.
 	 */
 	if (full_user)
-		return prev_cpu;
+		return cpu;
 
 	tctx = lookup_task_ctx(p);
 	if (!tctx)
-		return prev_cpu;
+		return cpu;
 
 	/*
 	 * If the previously used CPU is still available, keep using it to take
 	 * advantage of the cached working set.
 	 */
-	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		tctx->allow_migration = false;
-		dispatch_direct_cpu(p, prev_cpu, slice_ns, 0);
-		return prev_cpu;
+	if (scx_bpf_test_and_clear_cpu_idle(cpu)) {
+		do_direct = true;
+		goto out;
 	}
 
 	/*
-	 * If the task was directly dispatched give it a second chance to
-	 * remain on the current CPU, instead of immediately migrating it.
+	 * No need to check for other CPUs if the task can only run on one.
 	 */
-	if (!tctx->allow_migration) {
-		tctx->allow_migration = true;
-		return prev_cpu;
-	}
-
-	/*
-	 * Find the best CPU relying on the built-in idle selection logic,
-	 * eventually migrating the task and dispatching directly from here if
-	 * a CPU is available.
-	 */
-	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-	if (is_idle) {
-		tctx->allow_migration = false;
-		dispatch_direct_cpu(p, cpu, slice_ns, 0);
+	if (p->nr_cpus_allowed == 1)
 		return cpu;
-	}
-	tctx->allow_migration = true;
 
-	return prev_cpu;
+	/*
+	 * Try to migrate to a fully idle core, if present.
+	 */
+	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, SCX_PICK_IDLE_CORE);
+	if (cpu >= 0) {
+		do_direct = true;
+		goto out;
+	}
+
+	/*
+	 * Check for any idle CPU.
+	 */
+	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+	if (cpu >= 0) {
+		do_direct = true;
+		goto out;
+	}
+
+	/*
+	 * Assign the previously used CPU if all the CPUs are busy.
+	 */
+	cpu = prev_cpu;
+out:
+	/*
+	 * If FIFO mode is completely disabled, allow to dispatch directly
+	 * here, otherwise dispatch directly only if the scheduler is currently
+	 * operating in FIFO mode.
+	 */
+	if ((!fifo_sched || is_fifo_enabled) && do_direct)
+		dispatch_direct_cpu(p, cpu, slice_ns, 0);
+
+	return cpu;
 }
 
 /*
@@ -622,8 +628,8 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Dispatch directly to the target CPU DSQ if the scheduler is set to
-	 * FIFO mode.
+	 * Check if we can dispatch the task directly, bypassing the user-space
+	 * scheduler.
 	 */
 	if (!full_user && is_fifo_enabled) {
 		dispatch_direct_cpu(p, scx_bpf_task_cpu(p), slice_ns, enq_flags);
