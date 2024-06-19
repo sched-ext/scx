@@ -395,25 +395,17 @@ fn create_insert_cpu(cpu_id: usize, node: &mut Node, online_mask: &Cpumask) -> R
     let max_freq = read_file_usize(&freq_path.join("scaling_max_freq")).unwrap_or(0);
     let trans_lat_ns = read_file_usize(&freq_path.join("cpuinfo_transition_latency")).unwrap_or(0);
 
-    if !node.llcs.contains_key(&llc_id) {
-        let cache = Cache {
-            id: llc_id,
-            cores: BTreeMap::new(),
-            span: Cpumask::new()?,
-        };
-        node.llcs.insert(llc_id, cache);
-    }
-    let cache = node.llcs.get_mut(&llc_id).unwrap();
+    let cache = node.llcs.entry(llc_id).or_insert(Cache{
+        id: llc_id,
+        cores: BTreeMap::new(),
+        span: Cpumask::new()?,
+    });
 
-    if !cache.cores.contains_key(&core_id) {
-        let core = Core {
-            id: core_id,
-            cpus: BTreeMap::new(),
-            span: Cpumask::new()?,
-        };
-        cache.cores.insert(core_id, core);
-    }
-    let core = cache.cores.get_mut(&core_id).unwrap();
+    let core = cache.cores.entry(core_id).or_insert(Core{
+        id: core_id,
+        cpus: BTreeMap::new(),
+        span: Cpumask::new()?,
+    });
 
     core.cpus.insert(
         cpu_id,
