@@ -35,6 +35,9 @@ use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use log::info;
+use metrics::counter;
+use metrics::Counter;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_ops_attach;
@@ -189,6 +192,10 @@ struct Opts {
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// Enable the Prometheus endpoint for metrics on port 9000.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    enable_prometheus: bool,
 }
 
 fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
@@ -204,6 +211,46 @@ pub fn sub_or_zero(curr: &u64, prev: &u64) -> u64 {
         res
     } else {
         0
+    }
+}
+
+struct Metrics {
+    wsync: Counter,
+    wsync_prev_idle: Counter,
+    prev_idle: Counter,
+    greedy_idle: Counter,
+    pinned: Counter,
+    direct_dispatch: Counter,
+    direct_greedy: Counter,
+    direct_greedy_far: Counter,
+    dsq: Counter,
+    greedy_local: Counter,
+    greedy_xnuma: Counter,
+    kick_greedy: Counter,
+    repatriate: Counter,
+    dl_clamped: Counter,
+    dl_preset: Counter,
+}
+
+impl Metrics {
+    fn new() -> Self {
+        Self {
+            wsync: counter!("dispatched_tasks_total", "type" => "wsync"),
+            wsync_prev_idle: counter!("dispatched_tasks_total", "type" => "wsync_prev_idle"),
+            prev_idle: counter!("dispatched_tasks_total", "type" => "prev_idle"),
+            greedy_idle: counter!("dispatched_tasks_total", "type" => "greedy_idle"),
+            pinned: counter!("dispatched_tasks_total", "type" => "pinned"),
+            direct_dispatch: counter!("dispatched_tasks_total", "type" => "direct_dispatch"),
+            direct_greedy: counter!("dispatched_tasks_total", "type" => "direct_greedy"),
+            direct_greedy_far: counter!("dispatched_tasks_total", "type" => "direct_greedy_far"),
+            dsq: counter!("dispatched_tasks_total", "type" => "dsq"),
+            greedy_local: counter!("dispatched_tasks_total", "type" => "greedy_local"),
+            greedy_xnuma: counter!("dispatched_tasks_total", "type" => "greedy_xnuma"),
+            kick_greedy: counter!("kick_greedy_total"),
+            repatriate: counter!("repatriate_total"),
+            dl_clamped: counter!("dl_clamped_total"),
+            dl_preset: counter!("dl_preset_total"),
+        }
     }
 }
 
@@ -228,6 +275,8 @@ struct Scheduler<'a> {
     nr_lb_data_errors: u64,
 
     tuner: Tuner,
+
+    metrics: Metrics,
 }
 
 impl<'a> Scheduler<'a> {
@@ -353,6 +402,8 @@ impl<'a> Scheduler<'a> {
                 opts.slice_us_underutil * 1000,
                 opts.slice_us_overutil * 1000,
             )?,
+
+            metrics: Metrics::new(),
         })
     }
 
@@ -446,17 +497,51 @@ impl<'a> Scheduler<'a> {
         lb_stats: &[NumaStat],
     ) {
         let stat = |idx| bpf_stats[idx as usize];
-        let total = stat(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_SYNC_PREV_IDLE)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_PINNED)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_DISPATCH)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY_FAR)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
+
+        let wsync = stat(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC);
+        let wsync_prev_idle = stat(bpf_intf::stat_idx_RUSTY_STAT_SYNC_PREV_IDLE);
+        let prev_idle = stat(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE);
+        let greedy_idle = stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE);
+        let pinned = stat(bpf_intf::stat_idx_RUSTY_STAT_PINNED);
+        let direct_dispatch = stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_DISPATCH);
+        let direct_greedy = stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY);
+        let direct_greedy_far = stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY_FAR);
+        let dsq = stat(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH);
+        let greedy_local = stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL);
+        let greedy_xnuma = stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
+        let total = wsync
+            + wsync_prev_idle
+            + prev_idle
+            + greedy_idle
+            + pinned
+            + direct_dispatch
+            + direct_greedy
+            + direct_greedy_far
+            + dsq
+            + greedy_local
+            + greedy_xnuma;
+        
+        self.metrics.wsync_prev_idle.increment(wsync_prev_idle);
+        self.metrics.wsync.increment(wsync);
+        self.metrics.prev_idle.increment(prev_idle);
+        self.metrics.greedy_idle.increment(greedy_idle);
+        self.metrics.pinned.increment(pinned);
+        self.metrics.direct_dispatch.increment(direct_dispatch);
+        self.metrics.direct_greedy.increment(direct_greedy);
+        self.metrics.direct_greedy_far.increment(direct_greedy_far);
+        self.metrics.dsq.increment(dsq);
+        self.metrics.greedy_local.increment(greedy_local);
+        self.metrics.greedy_xnuma.increment(greedy_xnuma);
+
+        let kick_greedy = stat(bpf_intf::stat_idx_RUSTY_STAT_KICK_GREEDY);
+        let repatriate = stat(bpf_intf::stat_idx_RUSTY_STAT_REPATRIATE);
+        let dl_clamped = stat(bpf_intf::stat_idx_RUSTY_STAT_DL_CLAMP);
+        let dl_preset = stat(bpf_intf::stat_idx_RUSTY_STAT_DL_PRESET);
+        
+        self.metrics.kick_greedy.increment(kick_greedy);
+        self.metrics.repatriate.increment(repatriate);
+        self.metrics.dl_clamped.increment(dl_clamped);
+        self.metrics.dl_preset.increment(dl_preset);
 
         let numa_load_avg = lb_stats[0].load.load_avg();
         let dom_load_avg = lb_stats[0].domains[0].load.load_avg();
@@ -470,45 +555,46 @@ impl<'a> Scheduler<'a> {
             processing_dur.as_millis(),
         );
 
-        let stat_pct = |idx| stat(idx) as f64 / total as f64 * 100.0;
+        let stat_pct = |value| value as f64 / total as f64 * 100.0;
 
         info!(
             "tot={:7} wsync_prev_idle={:5.2} wsync={:5.2}",
             total,
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_SYNC_PREV_IDLE),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC),
+            stat_pct(wsync_prev_idle),
+            stat_pct(wsync),
         );
 
         info!(
             "prev_idle={:5.2} greedy_idle={:5.2} pin={:5.2}",
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PINNED),
+            stat_pct(prev_idle),
+            stat_pct(greedy_idle),
+            stat_pct(pinned),
         );
 
         info!(
             "dir={:5.2} dir_greedy={:5.2} dir_greedy_far={:5.2}",
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_DISPATCH),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY_FAR),
+            stat_pct(direct_dispatch),
+            stat_pct(direct_greedy),
+            stat_pct(direct_greedy_far),
         );
 
         info!(
             "dsq={:5.2} greedy_local={:5.2} greedy_xnuma={:5.2}",
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA),
+            stat_pct(dsq),
+            stat_pct(greedy_local),
+            stat_pct(greedy_xnuma),
         );
 
         info!(
             "kick_greedy={:5.2} rep={:5.2}",
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_KICK_GREEDY),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_REPATRIATE),
+            stat_pct(kick_greedy),
+            stat_pct(repatriate),
         );
+
         info!(
             "dl_clamped={:5.2} dl_preset={:5.2}",
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_CLAMP),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_PRESET),
+            stat_pct(dl_clamped),
+            stat_pct(dl_preset),
         );
 
         info!("slice_length={}us", self.tuner.slice_ns / 1000);
@@ -620,6 +706,13 @@ fn main() -> Result<()> {
         shutdown_clone.store(true, Ordering::Relaxed);
     })
     .context("Error setting Ctrl-C handler")?;
+
+    if opts.enable_prometheus {
+        info!("Enabling Prometheus endpoint: http://localhost:9000");
+        PrometheusBuilder::new()
+            .install()
+            .expect("failed to install Prometheus recorder");
+    }
 
     loop {
         let mut sched = Scheduler::init(&opts)?;
