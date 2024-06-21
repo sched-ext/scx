@@ -433,8 +433,12 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 		dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu",
 			p->pid, p->comm, dsq_id, enq_flags, slice);
 
-		/* Wake up the target CPU (only if idle) */
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		/*
+		 * Wake up the target CPU (only if idle and if we are bouncing
+		 * to a different CPU).
+		 */
+		if (cpu != bpf_get_smp_processor_id())
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		break;
 	}
 }
@@ -666,7 +670,7 @@ static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
 {
 	const struct dispatched_task_ctx *task;
 	struct task_struct *p;
-	u64 enq_flags = 0;
+	u64 enq_flags = 0, dsq_id;
 
 	/* Get a pointer to the dispatched task */
 	task = bpf_dynptr_data(dynptr, 0, sizeof(*task));
@@ -695,11 +699,12 @@ static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
 	 * available.
 	 */
 	if (task->flags & RL_CPU_ANY)
-		dispatch_task(p, SHARED_DSQ, 0, task->slice_ns, enq_flags);
+		dsq_id = SHARED_DSQ;
 	else
-		dispatch_task(p, cpu_to_dsq(task->cpu),
-			      task->cpumask_cnt, task->slice_ns, enq_flags);
+		dsq_id = cpu_to_dsq(task->cpu);
+	dispatch_task(p, dsq_id, task->cpumask_cnt, task->slice_ns, enq_flags);
 	bpf_task_release(p);
+
 	__sync_fetch_and_add(&nr_user_dispatches, 1);
 
 	return !scx_bpf_dispatch_nr_slots();
@@ -731,16 +736,14 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, 0);
 
-	/* Consume all tasks enqueued in the shared DSQ */
-	bpf_repeat(MAX_ENQUEUED_TASKS) {
-		if (!scx_bpf_consume(SHARED_DSQ))
-			break;
-	}
-
-	/* Consume all tasks enqueued in the current CPU's DSQ */
-	bpf_repeat(MAX_ENQUEUED_TASKS) {
-		if (!scx_bpf_consume(cpu_to_dsq(cpu)))
-			break;
+	/* Consume first task both from the shared DSQ and the per-CPU DSQ */
+	scx_bpf_consume(SHARED_DSQ);
+	if (scx_bpf_consume(cpu_to_dsq(cpu))) {
+		/*
+		 * Re-kick the current CPU if there are more tasks in the
+		 * per-CPU DSQ
+		 */
+		scx_bpf_kick_cpu(cpu, 0);
 	}
 }
 
