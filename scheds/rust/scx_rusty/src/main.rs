@@ -243,10 +243,10 @@ impl<'a> Scheduler<'a> {
 
         let domains = Arc::new(DomainGroup::new(top.clone(), &opts.cpumasks)?);
 
-        if top.nr_cpus_possible() > MAX_CPUS {
+        if top.nr_cpu_ids() > MAX_CPUS {
             bail!(
-                "Num possible CPUs ({}) exceeds maximum of ({})",
-                top.nr_cpus_possible(),
+                "Num possible CPU IDs ({}) exceeds maximum of ({})",
+                top.nr_cpu_ids(),
                 MAX_CPUS
             );
         }
@@ -261,13 +261,13 @@ impl<'a> Scheduler<'a> {
 
         skel.rodata_mut().nr_nodes = domains.nr_nodes() as u32;
         skel.rodata_mut().nr_doms = domains.nr_doms() as u32;
-        skel.rodata_mut().nr_cpus_possible = top.nr_cpus_possible() as u32;
+        skel.rodata_mut().nr_cpu_ids = top.nr_cpu_ids() as u32;
 
         // Any CPU with dom > MAX_DOMS is considered offline by default. There
         // are a few places in the BPF code where we skip over offlined CPUs
         // (e.g. when initializing or refreshing tune params), and elsewhere the
         // scheduler will error if we try to schedule from them.
-        for cpu in 0..top.nr_cpus_possible() {
+        for cpu in 0..top.nr_cpu_ids() {
             skel.rodata_mut().cpu_dom_id_map[cpu] = u32::MAX;
         }
 
@@ -413,7 +413,7 @@ impl<'a> Scheduler<'a> {
         let stats_map = maps.stats();
         let mut stats: Vec<u64> = Vec::new();
         let zero_vec =
-            vec![vec![0u8; stats_map.value_size() as usize]; self.top.nr_cpus_possible()];
+            vec![vec![0u8; stats_map.value_size() as usize]; self.top.nr_cpu_ids()];
 
         for stat in 0..bpf_intf::stat_idx_RUSTY_NR_STATS {
             let cpu_stat_vec = stats_map
