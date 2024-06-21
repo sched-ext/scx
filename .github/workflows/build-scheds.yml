@@ -16,7 +16,7 @@ jobs:
       ### DOWNLOAD AND INSTALL DEPENDENCIES ###
 
       # Download dependencies packaged by Ubuntu
-      - run: sudo apt -y install bison busybox-static cargo cmake coreutils cpio elfutils file flex gcc gcc-multilib git iproute2 jq kbd kmod libcap-dev libelf-dev libunwind-dev libvirt-clients libzstd-dev linux-headers-generic linux-tools-common linux-tools-generic make ninja-build pahole pkg-config python3-dev python3-pip python3-requests qemu-kvm rsync rustc udev zstd
+      - run: sudo apt -y install bison busybox-static cargo cmake coreutils cpio elfutils file flex gcc gcc-multilib git iproute2 jq kbd kmod libcap-dev libelf-dev libunwind-dev libvirt-clients libzstd-dev linux-headers-generic linux-tools-common linux-tools-generic make ninja-build pahole pkg-config python3-dev python3-pip python3-requests qemu-kvm rsync rustc stress-ng udev zstd
 
       # clang 17
       # Use a custom llvm.sh script which includes the -y flag for
@@ -54,7 +54,7 @@ jobs:
       ### END DEPENDENCIES ###
 
       # The actual build:
-      - run: meson setup build -Dkernel=$(pwd)/linux -Dkernel_headers=./linux/usr/include
+      - run: meson setup build -Dkernel=$(pwd)/linux -Dkernel_headers=./linux/usr/include -Denable_stress=true
       - run: meson compile -C build --jobs=1
 
       # Print CPU model before running the tests (this can be useful for
@@ -69,3 +69,5 @@ jobs:
 
       # Test schedulers
       - run: meson compile -C build test_sched
+      # Stress schedulers
+      - run: meson compile -C build stress_tests

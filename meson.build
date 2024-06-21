@@ -14,10 +14,16 @@ enable_rust = get_option('enable_rust')
 
 bpf_clang = find_program(get_option('bpf_clang'))
 
+enable_stress = get_option('enable_stress')
+
 if enable_rust
   cargo = find_program(get_option('cargo'))
 endif
 
+if enable_stress
+  run_stress_tests = find_program(join_paths(meson.current_source_dir(),
+                                      'meson-scripts/run_stress_tests'))
+endif
 
 get_clang_ver = find_program(join_paths(meson.current_source_dir(),
                                         'meson-scripts/get_clang_ver'))
@@ -319,6 +325,11 @@ if enable_rust
   subdir('rust')
 endif
 subdir('scheds')
+
+if enable_stress
+  run_target('stress_tests', command: [run_stress_tests, '-k', kernel, '-b',
+    meson.current_build_dir()])
+endif
 
 systemd = dependency('systemd', required: get_option('systemd'))
 
