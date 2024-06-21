@@ -19,6 +19,8 @@ scx_utils = { path = "../../../rust/scx_utils", version = "0.8.1" }
 simplelog = "0.12.0"
 sorted-vec = "0.8.3"
 static_assertions = "1.1.0"
+metrics = "0.23.0"
+metrics-exporter-prometheus = "0.15.0"
 
 [build-dependencies]
 scx_utils = { path = "../../../rust/scx_utils", version = "0.8.1" }
