@@ -28,14 +28,14 @@ impl<'a> Scheduler<'a> {
     fn init() -> Result<Self> {
         let topo = Topology::new().expect("Failed to build host topology");
         let bpf = BpfScheduler::init(
-            5000,                           // slice_ns (default task time slice)
-            topo.nr_cpus_possible() as i32, // nr_cpus (max CPUs available in the system)
-            false,                          // partial (include all tasks if disabled)
-            0,                              // exit_dump_len (buffer size of exit info)
-            true,                           // full_user (schedule all tasks in user-space)
-            false,                          // low_power (low power mode)
-            false,                          // fifo_sched (enable BPF FIFO scheduling)
-            false,                          // debug (debug mode)
+            5000,                     // slice_ns (default task time slice)
+            topo.nr_cpu_ids() as i32, // nr_cpus (max CPUs available in the system)
+            false,                    // partial (include all tasks if disabled)
+            0,                        // exit_dump_len (buffer size of exit info)
+            true,                     // full_user (schedule all tasks in user-space)
+            false,                    // low_power (low power mode)
+            false,                    // fifo_sched (enable BPF FIFO scheduling)
+            false,                    // debug (debug mode)
         )?;
         Ok(Self { bpf })
     }
