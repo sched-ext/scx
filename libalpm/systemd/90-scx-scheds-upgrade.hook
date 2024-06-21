@@ -9,8 +9,7 @@ Target = usr/lib/systemd/system/scx.service
 [Trigger]
 Type = Package
 Operation = Upgrade
-Target = scx-scheds
-Target = scx-scheds-git
+Target = scx-scheds*
 
 [Action]
 Description = Checking scx_scheduler...
