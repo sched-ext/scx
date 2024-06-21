@@ -60,7 +60,7 @@ UEI_DEFINE(uei);
  */
 const volatile u32 nr_doms = 32;	/* !0 for veristat, set during init */
 const volatile u32 nr_nodes = 32;	/* !0 for veristat, set during init */
-const volatile u32 nr_cpus_possible = 64;	/* !0 for veristat, set during init */
+const volatile u32 nr_cpu_ids = 64;	/* !0 for veristat, set during init */
 const volatile u32 cpu_dom_id_map[MAX_CPUS];
 const volatile u32 dom_numa_id_map[MAX_DOMS];
 const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
@@ -493,7 +493,7 @@ static void refresh_tune_params(void)
 	tune_params_gen = tune_input.gen;
 	slice_ns = tune_input.slice_ns;
 
-	bpf_for(cpu, 0, nr_cpus_possible) {
+	bpf_for(cpu, 0, nr_cpu_ids) {
 		u32 dom_id = cpu_to_dom_id(cpu);
 		struct dom_ctx *domc;
 
@@ -1784,7 +1784,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 			return ret;
 	}
 
-	bpf_for(i, 0, nr_cpus_possible) {
+	bpf_for(i, 0, nr_cpu_ids) {
 		if (is_offline_cpu(i))
 			continue;
 

@@ -273,7 +273,7 @@ impl<'a> Scheduler<'a> {
     fn init(opts: &Opts) -> Result<Self> {
         // Initialize core mapping topology.
         let topo = Topology::new().expect("Failed to build host topology");
-        let topo_map = TopologyMap::new(topo).expect("Failed to generate topology map");
+        let topo_map = TopologyMap::new(&topo).expect("Failed to generate topology map");
 
         // Save the default time slice (in ns) in the scheduler class.
         let slice_ns = opts.slice_us * NSEC_PER_USEC;
@@ -301,7 +301,7 @@ impl<'a> Scheduler<'a> {
         let init_page_faults: u64 = 0;
 
         // Low-level BPF connector.
-        let nr_cpus = topo_map.nr_cpus_possible();
+        let nr_cpus = topo.nr_cpu_ids();
         let bpf = BpfScheduler::init(
             opts.slice_us,
             nr_cpus as i32,

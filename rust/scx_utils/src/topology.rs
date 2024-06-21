@@ -186,6 +186,8 @@ pub struct Topology {
     cpus: BTreeMap<usize, Cpu>,
     span: Cpumask,
     nr_cpus_possible: usize,
+    nr_cpus_online: usize,
+    nr_cpu_ids: usize,
 }
 
 impl Topology {
@@ -195,7 +197,7 @@ impl Topology {
         // If the kernel is compiled with CONFIG_NUMA, then build a topology
         // from the NUMA hierarchy in sysfs. Otherwise, just make a single
         // default node of ID 0 which contains all cores.
-        let nodes = if Path::new("/sys/devices/system/node").exists() {
+        let (nodes, nr_cpu_ids) = if Path::new("/sys/devices/system/node").exists() {
             create_numa_nodes(&span)?
         } else {
             create_default_node(&span)?
@@ -222,7 +224,8 @@ impl Topology {
         }
 
         let nr_cpus_possible = libbpf_rs::num_possible_cpus().unwrap();
-        Ok(Topology { nodes, cores, cpus, span, nr_cpus_possible, })
+        let nr_cpus_online = span.weight();
+        Ok(Topology { nodes, cores, cpus, span, nr_cpus_possible, nr_cpus_online, nr_cpu_ids, })
     }
 
     /// Get a slice of the NUMA nodes on the host.
@@ -245,21 +248,31 @@ impl Topology {
         &self.span
     }
 
-    /// Get the maximum possible number of CPUs. Note that this number is likely
-    /// only applicable in the context of storing and extracting per-CPU data
-    /// between user space and BPF, as it doesn't necessarily reflect the actual
-    /// number of online or even possible CPUs in the system.
-    ///
-    /// For example, as described in
-    /// https://bugzilla.kernel.org/show_bug.cgi?id=218109, some buggy AMD BIOS
-    /// implementations may incorrectly report disabled CPUs as offlined / part
-    /// of the CPUs possible mask.
-    ///
-    /// Even if the CPUs are possible and may be enabled with hotplug, they're
-    /// not active now, so you wouldn't want to use this number to determine
-    /// system load, util, etc.
+    /// Get the number of possible CPUs that may be active on the system. Note
+    /// that this value is separate from the number of possible _CPU IDs_ in the
+    /// system, as there may be gaps in what CPUs are allowed to be onlined. For
+    /// example, some BIOS implementations may report spans of disabled CPUs
+    /// that may not be onlined, whose IDs are lower than the IDs of other CPUs
+    /// that may be onlined.
     pub fn nr_cpus_possible(&self) -> usize {
         self.nr_cpus_possible
+    }
+
+    /// Get the number of CPUs that were online when the Topology was created.
+    /// Because Topology objects are read-only, this value will not change if a
+    /// CPU is onlined after a Topology object has been created.
+    pub fn nr_cpus_online(&self) -> usize {
+        self.nr_cpus_online
+    }
+
+    /// Get the maximum possible number of CPU IDs in the system. As mentioned
+    /// above, this is different than the number of possible CPUs on the system
+    /// (though very seldom is). This number may differ from the number of
+    /// possible CPUs on the system when e.g. there are fully disabled CPUs in
+    /// the middle of the range of possible CPUs (i.e. CPUs that may be
+    /// onlined).
+    pub fn nr_cpu_ids(&self) -> usize {
+        self.nr_cpu_ids
     }
 }
 
@@ -283,34 +296,21 @@ impl Topology {
 #[derive(Debug)]
 pub struct TopologyMap {
     map: Vec<Vec<usize>>,
-    nr_cpus_possible: usize,
-    nr_cpus_online: usize,
 }
 
 impl TopologyMap {
-    pub fn new(topo: Topology) -> Result<TopologyMap> {
+    pub fn new(topo: &Topology) -> Result<TopologyMap> {
         let mut map: Vec<Vec<usize>> = Vec::new();
-        let mut nr_cpus_online = 0;
 
         for core in topo.cores().into_iter() {
             let mut cpu_ids: Vec<usize> = Vec::new();
             for cpu_id in core.span().clone().into_iter() {
                 cpu_ids.push(cpu_id);
-                nr_cpus_online += 1;
             }
             map.push(cpu_ids);
         }
-        let nr_cpus_possible = topo.nr_cpus_possible;
 
-        Ok(TopologyMap { map, nr_cpus_possible, nr_cpus_online })
-    }
-
-    pub fn nr_cpus_possible(&self) -> usize {
-        self.nr_cpus_possible
-    }
-
-    pub fn nr_cpus_online(&self) -> usize {
-        self.nr_cpus_online
+        Ok(TopologyMap { map, })
     }
 
     pub fn iter(&self) -> Iter<Vec<usize>> {
@@ -429,7 +429,7 @@ fn create_insert_cpu(cpu_id: usize, node: &mut Node, online_mask: &Cpumask) -> R
     Ok(())
 }
 
-fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {
+fn create_default_node(online_mask: &Cpumask) -> Result<(Vec<Node>, usize)> {
     let mut nodes: Vec<Node> = Vec::with_capacity(1);
     let mut node = Node {
         id: 0,
@@ -441,6 +441,7 @@ fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {
         bail!("/sys/devices/system/cpu sysfs node not found");
     }
 
+    let mut nr_cpu_ids = 0;
     let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*")?;
     for cpu_path in cpu_paths.filter_map(Result::ok) {
         let cpu_str = cpu_path.to_str().unwrap().trim();
@@ -451,17 +452,22 @@ fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {
             }
         };
 
+        if cpu_id + 1 > nr_cpu_ids {
+            nr_cpu_ids = cpu_id + 1;
+        }
+
         create_insert_cpu(cpu_id, &mut node, &online_mask)?;
     }
 
     nodes.push(node);
 
-    Ok(nodes)
+    Ok((nodes, nr_cpu_ids))
 }
 
-fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
+fn create_numa_nodes(online_mask: &Cpumask) -> Result<(Vec<Node>, usize)> {
     let mut nodes: Vec<Node> = Vec::new();
 
+    let mut nr_cpu_ids = 0;
     let numa_paths = glob("/sys/devices/system/node/node*")?;
     for numa_path in numa_paths.filter_map(Result::ok) {
         let numa_str = numa_path.to_str().unwrap().trim();
@@ -489,10 +495,14 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
                 }
             };
 
+            if cpu_id + 1 > nr_cpu_ids {
+                nr_cpu_ids = cpu_id + 1;
+            }
+
             create_insert_cpu(cpu_id, &mut node, &online_mask)?;
         }
 
         nodes.push(node);
     }
-    Ok(nodes)
+    Ok((nodes, nr_cpu_ids))
 }
