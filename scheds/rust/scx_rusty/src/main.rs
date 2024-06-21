@@ -190,8 +190,8 @@ struct Opts {
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     partial: bool,
 
-    /// Enables soft NUMA affinity for tasks that use set_mempolicy. This may cause performance
-    /// penalties if not using mempolicies.
+    /// Enables soft NUMA affinity for tasks that use set_mempolicy. This 
+    /// may improve performance in some scenarios when using mempolicies.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     mempolicy_affinity: bool,
 

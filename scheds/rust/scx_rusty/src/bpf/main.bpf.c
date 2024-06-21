@@ -570,57 +570,6 @@ static u64 sched_prio_to_latency_weight(u64 prio)
 	return sched_prio_to_weight[DL_MAX_LAT_PRIO - prio - 1];
 }
 
-
-/*
- * Returns the preferred domain according to the mempolicy. See man(2)
- * set_mempolicy for more details.
- */
-static u32 task_pick_mempolicy_domain(
-		struct task_struct *p, struct task_ctx *taskc, u32 rr_token)
-{
-	u32 ret = NO_DOM_FOUND;
-	if (!mempolicy_affinity || !bpf_core_field_exists(p->mempolicy) ||
-			!p->mempolicy || !taskc->cpumask)
-		return ret;
-
-	if (!(p->mempolicy->mode & (MPOL_BIND|MPOL_PREFERRED))) {
-		return ret;
-	}
-
-	// MPOL_BIND and MPOL_PREFERRED_MANY use the home_node field on the
-	// mempolicy struct, so use that for now. In the future the memory
-	// usage of the node can be checked to follow the same algorithm for
-	// where memory allocations will occur.
-	if ((int)p->mempolicy->home_node >= 0) {
-		struct node_ctx *nodec;
-		return (u32)p->mempolicy->home_node;
-	}
-
-	nodemask_t *node_mask = &p->mempolicy->nodes;
-
-	void *mask = BPF_CORE_READ(node_mask, bits);
-	u32 val = 0;
-	if (bpf_core_read(&val, sizeof(val), mask)) {
-		return ret;
-	}
-
-	bool cleared = false;
-	u32 i;
-	bpf_for(i, 0, nr_nodes) {
-		if (!(val & (1 <<i))) {
-			continue;
-		}
-
-		ret = i;
-		// If the round robin token matches the domain then return
-		// it.
-		if (ret != NO_DOM_FOUND && i % rr_token == 0)
-			return ret;
-	}
-
-	return ret;
-}
-
 static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
 			   u64 enq_flags)
 {
@@ -1245,6 +1194,67 @@ u32 dom_node_id(u32 dom_id)
 	return *nid_ptr;
 }
 
+/*
+ * Returns the dom mask for a node.
+ */
+static u64 node_dom_mask(u32 node_id)
+{
+	u64 mask = 0;
+	u32 dom_id = 0;
+
+	bpf_for(dom_id, 0, nr_doms) {
+		if (!(dom_node_id(dom_id) == node_id))
+			continue;
+
+		mask |= 1LLU << dom_id;
+	}
+
+	return mask;
+}
+
+/*
+ * Sets the preferred domain mask according to the mempolicy. See man(2)
+ * set_mempolicy for more details on mempolicy.
+ */
+static int task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
+						 struct task_ctx *taskc)
+{
+	u32 node_id;
+	u32 val = 0;
+	nodemask_t *node_mask = &p->mempolicy->nodes;
+	void *mask;
+
+	if (!mempolicy_affinity || !bpf_core_field_exists(p->mempolicy) ||
+	    !p->mempolicy || !taskc->cpumask)
+		return -1;
+
+	if (!(p->mempolicy->mode & (MPOL_BIND|MPOL_PREFERRED|MPOL_PREFERRED_MANY)))
+		return -1;
+
+	// MPOL_BIND and MPOL_PREFERRED_MANY use the home_node field on the
+	// mempolicy struct, so use that for now. In the future the memory
+	// usage of the node can be checked to follow the same algorithm for
+	// where memory allocations will occur.
+	if ((int)p->mempolicy->home_node >= 0) {
+		taskc->preferred_dom_mask =
+			node_dom_mask((u32)p->mempolicy->home_node);
+		return 0;
+	}
+
+	mask = BPF_CORE_READ(node_mask, bits);
+	if (bpf_core_read(&val, sizeof(val), mask))
+		return -1;
+
+	bpf_for(node_id, 0, nr_nodes) {
+		if (!(val & 1 << node_id))
+			continue;
+
+		taskc->preferred_dom_mask |= node_dom_mask(node_id);
+	}
+
+	return 0;
+}
+
 void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 {
 	u32 curr_dom = cpu_to_dom_id(cpu), dom;
@@ -1494,20 +1504,20 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 			    const struct cpumask *cpumask)
 {
 	s32 cpu = bpf_get_smp_processor_id();
-	u32 first_dom = NO_DOM_FOUND, dom, mempolicy_dom;
+	u32 first_dom = NO_DOM_FOUND, dom, preferred_dom = NO_DOM_FOUND;
+	int has_preferred_dom;
 
 	if (cpu < 0 || cpu >= MAX_CPUS)
 		return NO_DOM_FOUND;
 
 	taskc->dom_mask = 0;
+	taskc->preferred_dom_mask = 0;
 
 	dom = pcpu_ctx[cpu].dom_rr_cur++;
-	mempolicy_dom = task_pick_mempolicy_domain(p, taskc, dom);
-	if (mempolicy_dom != NO_DOM_FOUND)
-		return mempolicy_dom;
-
+	has_preferred_dom = task_set_preferred_mempolicy_dom_mask(p, taskc);
 	bpf_repeat(nr_doms) {
 		dom = (dom + 1) % nr_doms;
+
 		if (cpumask_intersects_domain(cpumask, dom)) {
 			taskc->dom_mask |= 1LLU << dom;
 			/*
@@ -1516,10 +1526,16 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 			 */
 			if (first_dom == NO_DOM_FOUND)
 				first_dom = dom;
+
+			if (has_preferred_dom < 0)
+			       continue;
+
+			if (((1LLU << dom) & taskc->preferred_dom_mask))
+				preferred_dom = dom;
 		}
 	}
 
-	return first_dom;
+	return preferred_dom != NO_DOM_FOUND ? preferred_dom: first_dom;
 }
 
 static void task_pick_and_set_domain(struct task_ctx *taskc,
@@ -1578,6 +1594,7 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 		.dom_active_pids_gen = -1,
 		.last_blocked_at = now,
 		.last_woke_at = now,
+		.preferred_dom_mask = 0,
 
 	};
 	struct task_ctx *map_value;

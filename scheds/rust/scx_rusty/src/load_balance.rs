@@ -320,6 +320,7 @@ struct TaskInfo {
     pid: i32,
     load: OrderedFloat<f64>,
     dom_mask: u64,
+    preferred_dom_mask: u64,
     migrated: Cell<bool>,
     is_kworker: bool,
 }
@@ -735,6 +736,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                         pid: *pid,
                         load: OrderedFloat(load),
                         dom_mask: task_ctx.dom_mask,
+                        preferred_dom_mask: task_ctx.preferred_dom_mask,
                         migrated: Cell::new(false),
                         is_kworker: task_ctx.is_kworker,
                     },
@@ -752,8 +754,18 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         skip_kworkers: bool,
     ) -> Option<&'d TaskInfo>
     where
-        I: IntoIterator<Item = &'d TaskInfo>,
+        I: IntoIterator<Item = &'d TaskInfo> + Clone,
     {
+        // First try to find a task in the preferred domain mask.
+        if let Some(task) = tasks_by_load.clone().into_iter().take_while(
+            |task| {
+                !task.migrated.get()
+                || (task.preferred_dom_mask & (1 << pull_dom) > 0)
+            }).next()
+        {
+            return Some(task);
+        }
+
         match tasks_by_load
             .into_iter()
             .skip_while(|task| {

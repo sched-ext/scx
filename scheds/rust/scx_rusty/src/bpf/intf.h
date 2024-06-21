@@ -94,6 +94,7 @@ enum stat_idx {
 struct task_ctx {
 	/* The domains this task can run on */
 	u64 dom_mask;
+	u64 preferred_dom_mask;
 
 	struct bpf_cpumask __kptr *cpumask;
 	struct bpf_cpumask __kptr *tmp_cpumask;
