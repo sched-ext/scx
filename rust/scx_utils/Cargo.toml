@@ -25,6 +25,8 @@ sscanf = "0.4"
 tar = "0.4"
 walkdir = "2.4"
 version-compare = "0.1"
+metrics = "0.23.0"
+metrics-util = "0.17.0"
 
 [build-dependencies]
 bindgen = ">=0.68, <0.70"
