@@ -916,10 +916,8 @@ static bool should_enable_fifo(void)
 	nr_waiting_avg = (nr_waiting_avg + nr_waiting) / 2;
 
 	/*
-	 * The condition to enter in FIFO mode is to have no tasks (in average)
-	 * that are waiting to be scheduled.
-	 *
-	 * Exiting from FIFO mode requires to have almost all the CPUs busy.
+	 * The condition to go back to FIFO mode is to have no tasks (in
+	 * average) that are waiting to be scheduled.
 	 */
 	return nr_waiting_avg == 0;
 }
