@@ -867,6 +867,10 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
             while pull_node.domains.len() > 0 {
                 let mut pull_dom = pull_node.domains.remove_index(0);
+                if pull_dom.load.state() != BalanceState::NeedsPull {
+                    pull_node.domains.insert(pull_dom);
+                    break;
+                }
                 let transferred = self.try_find_move_task((&mut push_dom, push_imbal),
                                                           (&mut pull_dom, pull_imbal),
                                                           xfer)?;
