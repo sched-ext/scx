@@ -998,7 +998,7 @@ static int dsq_init(void)
 	s32 cpu;
 
 	/* Create per-CPU DSQs */
-	bpf_for(cpu, 0, num_possible_cpus) {
+	bpf_for(cpu, 0, MAX_CPUS) {
 		err = scx_bpf_create_dsq(cpu_to_dsq(cpu), -1);
 		if (err) {
 			scx_bpf_error("failed to create pcpu DSQ %d: %d",
