@@ -31,7 +31,7 @@ const volatile unsigned char all_cpus[MAX_CPUS_U8];
 * user_global_seq is bumped by userspace to indicate that a new configuration
 * (e.g. cgroup -> cell or cell -> cpu) has been provided
 */
-volatile u32 user_global_seq;
+u32 user_global_seq;
 /* BPF-logic uses this to keep track of the last configuration completed */
 u32 global_seq;
 
@@ -256,7 +256,7 @@ int BPF_PROG(sched_tick_fentry)
 	 * removed, we ensure cpus dispatch from their previous cell for an entire
 	 * scheduler tick. This is a crude way of mimicing RCU synchronization.
 	 */
-	if (draining) {
+	if (READ_ONCE(draining)) {
 		bpf_for(cpu_idx, 0, nr_possible_cpus)
 		{
 			if (!(cpu_ctx = lookup_cpu_ctx(cpu_idx)))
@@ -265,13 +265,15 @@ int BPF_PROG(sched_tick_fentry)
 			cpu_ctx->prev_cell = cpu_ctx->cell;
 		}
 		barrier();
-		draining = false;
+		WRITE_ONCE(draining, false);
 	}
 
-	if (global_seq == user_global_seq)
+	if (global_seq == READ_ONCE(user_global_seq))
 		return 0;
 
-	draining = true;
+	/* There's a debug check in select_cpu that checks for the !draining
+	   condition, make sure it's synchronized with the store here */
+	WRITE_ONCE(draining, true);
 	barrier();
 	/* Iterate through each cell and create its cpumask according to what
 	   userspace says */
@@ -409,9 +411,9 @@ int BPF_PROG(sched_tick_fentry)
 		update_cell_assignment = false;
 	}
 
+	/* Bump the global seq last to ensure that prior stores are now visible. This synchronizes with the read of global_seq */
 	barrier();
-	global_seq++;
-
+	WRITE_ONCE(global_seq, global_seq + 1);
 	return 0;
 }
 
@@ -493,11 +495,8 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 	 * This ordering is pretty important, we read global_seq before reading
 	 * everything else expecting that the updater will update everything and
 	 * then bump global_seq last. This ensures that we cannot miss an update.
-	 *
-	 * Ideally I'd use __atomic_load intrinsics. Instead I'm using a regular
-	 * load + compiler barrier.
 	 */
-	tctx->global_seq = global_seq;
+	tctx->global_seq = READ_ONCE(global_seq);
 	barrier();
 	tctx->cell = cgc->cell;
 
@@ -564,7 +563,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		return prev_cpu;
 
 	/* Check if we need to update the cell/cpumask mapping */
-	if (tctx->global_seq != global_seq) {
+	if (tctx->global_seq != READ_ONCE(global_seq)) {
 		if (!(cgrp = task_cgroup(p)))
 			return prev_cpu;
 		if (update_task_cell(p, tctx, cgrp)) {
@@ -608,7 +607,7 @@ dispatch_local:
 	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
 out_put_idle_smtmask:
 	scx_bpf_put_idle_cpumask(idle_smtmask);
-	if (debug && !draining && tctx->all_cpus_allowed &&
+	if (debug && !READ_ONCE(draining) && tctx->all_cpus_allowed &&
 	    (cctx = lookup_cpu_ctx(cpu)) && cctx->cell != tctx->cell)
 		scx_bpf_error(
 			"select_cpu returned cpu %d belonging to cell %d but task belongs to cell %d, local %d",
