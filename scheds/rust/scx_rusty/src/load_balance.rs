@@ -686,9 +686,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let mut pids = vec![];
 
         let (mut ridx, widx) = (active_pids.read_idx, active_pids.write_idx);
-        if widx - ridx > MAX_PIDS {
-            ridx = widx - MAX_PIDS;
-        }
+        ridx = ridx.max(widx - MAX_PIDS);
 
         for idx in ridx..widx {
             let pid = active_pids.pids[(idx % MAX_PIDS) as usize];
