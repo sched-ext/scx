@@ -216,9 +216,9 @@ struct {
 /*
  * Time period of the scheduler heartbeat, used to periodically kick the the
  * scheduler and check if we need to switch to FIFO mode or regular
- * scheduling (default 100ms).
+ * scheduling (default 10ms).
  */
-#define USERSCHED_TIMER_NS (NSEC_PER_SEC / 10)
+#define USERSCHED_TIMER_NS (NSEC_PER_SEC / 100)
 
 /*
  * Map of allocated CPUs.
@@ -498,7 +498,6 @@ dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 slice_ns, u64 enq_flags)
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	struct task_ctx *tctx;
 	s32 cpu = prev_cpu;
 	bool do_direct = false;
 
@@ -508,10 +507,6 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * possibly its own idle tracking mechanism.
 	 */
 	if (full_user)
-		return cpu;
-
-	tctx = lookup_task_ctx(p);
-	if (!tctx)
 		return cpu;
 
 	/*
@@ -736,14 +731,17 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, 0);
 
-	/* Consume first task both from the shared DSQ and the per-CPU DSQ */
+	/*
+	 * First pick a task from the shared DSQ to give it a higher priority.
+	 */
 	scx_bpf_consume(SHARED_DSQ);
-	if (scx_bpf_consume(cpu_to_dsq(cpu))) {
-		/*
-		 * Re-kick the current CPU if there are more tasks in the
-		 * per-CPU DSQ
-		 */
-		scx_bpf_kick_cpu(cpu, 0);
+
+	/*
+	 * Then consume all the tasks from the per-CPU DSQ.
+	 */
+	bpf_repeat(MAX_DISPATCH_SLOT) {
+		if (!scx_bpf_consume(cpu_to_dsq(cpu)))
+			break;
 	}
 }
 
@@ -945,12 +943,22 @@ static bool should_enable_fifo(void)
 static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
 {
 	int err = 0;
+	s32 cpu;
 
 	/* Kick the scheduler */
 	set_usersched_needed();
 
 	/* Update flag that determines if FIFO scheduling needs to be enabled */
 	is_fifo_enabled = should_enable_fifo();
+
+	/*
+	 * Check if there are still pending tasks dispatched to the per-CPU
+	 * DSQs and kick the CPU if it went idle, to prevent potential stalls.
+	 */
+	bpf_for(cpu, 0, MAX_CPUS) {
+		if (scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) > 0)
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	}
 
 	/* Re-arm the timer */
 	err = bpf_timer_start(timer, USERSCHED_TIMER_NS, 0);
