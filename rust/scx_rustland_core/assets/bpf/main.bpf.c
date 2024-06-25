@@ -438,7 +438,7 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 		 * to a different CPU).
 		 */
 		if (cpu != bpf_get_smp_processor_id())
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			scx_bpf_kick_cpu(cpu, 0);
 		break;
 	}
 }
@@ -475,7 +475,7 @@ dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 slice_ns, u64 enq_flags)
 	u64 dsq_id = cpu_to_dsq(cpu);
 
 	scx_bpf_dispatch(p, dsq_id, slice_ns, enq_flags);
-	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	scx_bpf_kick_cpu(cpu, 0);
 
 	dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu direct",
 		p->pid, p->comm, dsq_id, enq_flags, slice_ns);
@@ -957,7 +957,7 @@ static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
 	 */
 	bpf_for(cpu, 0, MAX_CPUS) {
 		if (scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) > 0)
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			scx_bpf_kick_cpu(cpu, 0);
 	}
 
 	/* Re-arm the timer */
