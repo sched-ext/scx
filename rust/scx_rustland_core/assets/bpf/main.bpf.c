@@ -474,8 +474,15 @@ dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 slice_ns, u64 enq_flags)
 {
 	u64 dsq_id = cpu_to_dsq(cpu);
 
-	scx_bpf_dispatch(p, dsq_id, slice_ns, enq_flags);
-	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		return;
+
+        scx_bpf_dispatch(p, dsq_id, slice_ns, enq_flags);
+	/*
+	 * We know that the CPU is idle here, because it has been assigned in
+	 * select_cpu(), so we don't need to use SCX_KICK_IDLE.
+	 */
+	scx_bpf_kick_cpu(cpu, 0);
 
 	dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu direct",
 		p->pid, p->comm, dsq_id, enq_flags, slice_ns);
