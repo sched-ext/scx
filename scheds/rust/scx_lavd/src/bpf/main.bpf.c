@@ -1528,7 +1528,8 @@ static u64 calc_slice_share(struct task_struct *p, struct task_ctx *taskc)
 	 * scheduler tries to allocate a longer time slice.
 	 */
 	u64 share = get_task_load_ideal(p);
-	share += (share * taskc->slice_boost_prio) / LAVD_SLICE_BOOST_MAX_STEP;
+	share += (LAVD_SLICE_BOOST_MAX_FT * share * taskc->slice_boost_prio) /
+		 LAVD_SLICE_BOOST_MAX_STEP;
 
 	return share;
 }
