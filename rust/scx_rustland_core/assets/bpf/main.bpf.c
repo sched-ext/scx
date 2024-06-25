@@ -467,20 +467,45 @@ static void dispatch_user_scheduler(void)
 }
 
 /*
- * Directly dispatch a task on a target CPU bypassing the user-space scheduler.
+ * Directly dispatch a task to its local CPU, bypassing the user-space
+ * scheduler.
  */
 static void
+dispatch_direct_local(struct task_struct *p, u64 slice_ns, u64 enq_flags)
+{
+	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
+
+	dbg_msg("dispatch: pid=%d (%s) dsq=SCX_DSQ_LOCAL enq_flags=%llx slice=%llu direct",
+		p->pid, p->comm, enq_flags, slice_ns);
+
+	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+}
+
+/*
+ * Directly dispatch a task to a target CPU, bypassing the user-space
+ * scheduler.
+ */
+static int
 dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 slice_ns, u64 enq_flags)
 {
 	u64 dsq_id = cpu_to_dsq(cpu);
 
-	scx_bpf_dispatch(p, dsq_id, slice_ns, enq_flags);
-	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		return -EINVAL;
+
+        scx_bpf_dispatch(p, dsq_id, slice_ns, enq_flags);
+	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+
+	/*
+	 * We know that the CPU is idle here, because it has been assigned in
+	 * select_cpu(), so we don't need to use SCX_KICK_IDLE.
+	 */
+	scx_bpf_kick_cpu(cpu, 0);
 
 	dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu direct",
 		p->pid, p->comm, dsq_id, enq_flags, slice_ns);
 
-	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+	return 0;
 }
 
 /*
@@ -510,15 +535,12 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (full_user)
 		return cpu;
 
-	tctx = lookup_task_ctx(p);
-	if (!tctx)
-		return cpu;
-
 	/*
 	 * If the previously used CPU is still available, keep using it to take
 	 * advantage of the cached working set.
 	 */
-	if (scx_bpf_test_and_clear_cpu_idle(cpu)) {
+	if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
+	    scx_bpf_test_and_clear_cpu_idle(cpu)) {
 		do_direct = true;
 		goto out;
 	}
@@ -618,7 +640,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Always dispatch per-CPU kthreads on the same CPU, bypassing the
+	 * Always dispatch per-CPU kthreads to the local CPU DSQ, bypassing the
 	 * user-space scheduler.
 	 *
 	 * In this way we can prioritize critical kernel threads that may
@@ -626,8 +648,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * long (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
-		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		dispatch_direct_local(p, slice_ns, enq_flags);
 		return;
 	}
 
@@ -636,7 +657,12 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * scheduler.
 	 */
 	if (!full_user && is_fifo_enabled) {
-		dispatch_direct_cpu(p, scx_bpf_task_cpu(p), slice_ns, enq_flags);
+		if (!dispatch_direct_cpu(p, scx_bpf_task_cpu(p), slice_ns, enq_flags))
+			return;
+		/*
+		 * Use the local DSQ if the target CPU is not valid anymore.
+		 */
+		dispatch_direct_local(p, slice_ns, enq_flags);
 		return;
 	}
 
