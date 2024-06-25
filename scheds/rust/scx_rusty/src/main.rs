@@ -43,6 +43,7 @@ use metrics::Histogram;
 use metrics::gauge;
 use metrics::Gauge;
 use scx_utils::LogRecorderBuilder;
+use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_ops_attach;
@@ -304,6 +305,7 @@ impl<'a> Scheduler<'a> {
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 0);
         init_libbpf_logging(None);
+        info!("Running scx_rusty (build ID: {})", *build_id::SCX_FULL_VERSION);
         let mut skel = scx_ops_open!(skel_builder, rusty).unwrap();
 
         // Initialize skel according to @opts.
@@ -390,7 +392,7 @@ impl<'a> Scheduler<'a> {
         // Attach.
         let mut skel = scx_ops_load!(skel, rusty, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, rusty)?);
-        info!("Rusty Scheduler Attached");
+        info!("Rusty scheduler started!");
 
         // Other stuff.
         let proc_reader = procfs::ProcReader::new();

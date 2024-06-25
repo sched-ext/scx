@@ -31,4 +31,5 @@ metrics-util = "0.17.0"
 [build-dependencies]
 bindgen = ">=0.68, <0.70"
 tar = "0.4"
+vergen = { version = "8.0.0", features = ["cargo", "git", "gitcl"] }
 walkdir = "2.4"
