@@ -3,7 +3,6 @@ Description=Start scx_scheduler
 ConditionPathIsDirectory=/sys/kernel/sched_ext
 StartLimitIntervalSec=30
 StartLimitBurst=2
-After=graphical.target
 
 [Service]
 Type=simple
@@ -14,4 +13,4 @@ StandardError=journal
 LogNamespace=sched-ext
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical.target
