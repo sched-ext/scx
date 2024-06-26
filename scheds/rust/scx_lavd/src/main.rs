@@ -27,6 +27,7 @@ use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use log::info;
+use scx_utils::build_id;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -362,7 +363,7 @@ fn main() -> Result<()> {
 
     loop {
 	let mut sched = Scheduler::init(&opts)?;
-	info!("scx_lavd scheduler is initialized");
+	info!("scx_lavd scheduler is initialized (build ID: {})", *build_id::SCX_FULL_VERSION);
 	info!("    Note that scx_lavd currently is not optimized for multi-CCX/NUMA architectures.");
 	info!("    Stay tuned for future improvements!");
 
