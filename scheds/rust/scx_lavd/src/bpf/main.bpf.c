@@ -1482,7 +1482,8 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	 * tick slower to give room to execute the overloaded tasks.
 	 */
 	if (load_factor > 1000)
-		vdeadline_delta_ns = (vdeadline_delta_ns * load_factor) / 1000;
+		vdeadline_delta_ns = (vdeadline_delta_ns *load_factor *
+				      LAVD_LOAD_FACTOR_FT) / 1000;
 
 	taskc->vdeadline_delta_ns = vdeadline_delta_ns;
 	return vdeadline_delta_ns;
