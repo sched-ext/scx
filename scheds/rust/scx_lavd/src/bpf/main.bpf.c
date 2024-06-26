@@ -2867,11 +2867,47 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 	}
 }
 
+static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
+{
+	struct task_struct *parent;
+	struct task_ctx *taskc_parent;
+	u64 now;
+
+	/*
+	 * Inherit parent's statistics if the parent is also under scx.
+	 */
+	parent = p->parent;
+	taskc_parent = try_get_task_ctx(parent);
+	if (parent && taskc_parent)
+		memcpy(taskc, taskc_parent, sizeof(*taskc));
+	else {
+		/*
+		 * If parent's ctx does not exist, init some fields with
+		 * reasonable defaults.
+		 */
+		taskc->run_time_ns = LAVD_SLICE_MIN_NS;
+		taskc->lat_prio = get_nice_prio(p);
+		taskc->run_freq = 1;
+	}
+
+	/*
+	 * Reset context for a fresh new task.
+	 */
+	now = bpf_ktime_get_ns();
+	taskc->last_runnable_clk = now;
+	taskc->last_running_clk = now;
+	taskc->last_stopping_clk = now;
+	taskc->last_quiescent_clk = now;
+	taskc->greedy_ratio = 1000;
+	taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
+	taskc->acc_run_time_ns = 0;
+	taskc->slice_ns = 0;
+}
+
 s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
 	struct task_ctx *taskc;
-	u64 now;
 
 	/*
 	 * When @p becomes under the SCX control (e.g., being forked), @p's
@@ -2887,17 +2923,9 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 
 
 	/*
-	 * Initialize @p's context with the current clock and default load.
+	 * Initialize @p's context.
 	 */
-	now = bpf_ktime_get_ns();
-	taskc->last_runnable_clk = now;
-	taskc->last_running_clk = now;
-	taskc->last_stopping_clk = now;
-	taskc->last_quiescent_clk = now;
-	taskc->greedy_ratio = 1000;
-	taskc->run_time_ns = LAVD_LC_RUNTIME_MAX;
-	taskc->run_freq = 1;
-	taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
+	init_task_ctx(p, taskc);
 
 	/*
 	 * When a task is forked, we immediately reflect changes to the current
