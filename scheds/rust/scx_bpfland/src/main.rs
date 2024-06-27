@@ -64,6 +64,13 @@ struct Opts {
     #[clap(short = 'S', long, default_value = "500")]
     slice_us_min: u64,
 
+    /// Maximum time slice lag in microseconds.
+    ///
+    /// Increasing this value can help to increase the responsiveness of interactive tasks at the
+    /// cost of making regular and newly created tasks less responsive (0 = disabled).
+    #[clap(short = 'l', long, default_value = "0")]
+    slice_us_lag: u64,
+
     /// Threshold of voluntary context switch per second, used to classify interactive tasks
     /// (0 = disable interactive tasks classification).
     #[clap(short = 'c', long, default_value = "10")]
@@ -161,6 +168,7 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().smt_enabled = smt_enabled;
         skel.rodata_mut().slice_ns = opts.slice_us * 1000;
         skel.rodata_mut().slice_ns_min = opts.slice_us_min * 1000;
+        skel.rodata_mut().slice_ns_lag = opts.slice_us_lag * 1000;
         skel.rodata_mut().nvcsw_thresh = opts.nvcsw_thresh;
         skel.rodata_mut().builtin_idle = opts.builtin_idle;
 

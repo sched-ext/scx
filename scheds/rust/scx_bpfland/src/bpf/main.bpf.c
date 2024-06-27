@@ -42,6 +42,15 @@ const volatile u64 slice_ns = SCX_SLICE_DFL;
 const volatile u64 slice_ns_min = 500000;
 
 /*
+ * Maximum time slice lag.
+ *
+ * Increasing this value can help to increase the responsiveness of interactive
+ * tasks at the cost of making regular and newly created tasks less responsive
+ * (0 = disabled).
+ */
+const volatile u64 slice_ns_lag;
+
+/*
  * Enable built-in idle selection logic.
  */
 const volatile bool builtin_idle;
@@ -157,11 +166,11 @@ static inline u64 task_vtime(struct task_struct *p)
 	u64 vtime = p->scx.dsq_vtime;
 
 	/*
-	 * Limit the vruntime to (vtime_now - slice_ns) to avoid penalizing
+	 * Limit the vruntime to (vtime_now - slice_ns_lag) to avoid penalizing
 	 * tasks too much (this helps to speed up new fork'ed tasks).
 	 */
-	if (vtime_before(vtime, vtime_now - slice_ns))
-		vtime = vtime_now - slice_ns;
+	if (vtime_before(vtime, vtime_now - slice_ns_lag))
+		vtime = vtime_now - slice_ns_lag;
 
 	return vtime;
 }
