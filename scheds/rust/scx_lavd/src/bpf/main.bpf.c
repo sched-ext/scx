@@ -2360,16 +2360,31 @@ static bool is_kernel_task(struct task_struct *p)
 	return p->flags & PF_KTHREAD;
 }
 
+static bool use_full_cpus(void)
+{
+	struct sys_stat *stat_cur = get_sys_stat_cur();
+	return no_core_compaction ||
+	       ((stat_cur->nr_active + LAVD_TC_NR_OVRFLW) >= nr_cpus_onln);
+}
+
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct bpf_cpumask *active, *ovrflw;
 	struct task_struct *p;
 
-	bpf_rcu_read_lock();
+	/*
+	 * If all CPUs are using, directly consume without checking CPU masks.
+	 */
+	if (use_full_cpus()) {
+		scx_bpf_consume(LAVD_GLOBAL_DSQ);
+		return;
+	}
 
 	/*
 	 * Prepare cpumasks.
 	 */
+	bpf_rcu_read_lock();
+
 	active = active_cpumask;
 	ovrflw = ovrflw_cpumask;
 	if (!active || !ovrflw) {
