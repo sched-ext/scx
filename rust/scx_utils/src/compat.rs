@@ -20,7 +20,7 @@ lazy_static::lazy_static! {
 fn load_vmlinux_btf() -> &'static mut btf {
     let btf = unsafe { btf__load_vmlinux_btf() };
     if btf.is_null() {
-        panic!("btf__load_vmlinux_btf() returned NULL");
+        panic!("btf__load_vmlinux_btf() returned NULL, was CONFIG_DEBUG_INFO_BTF enabled?")
     }
     unsafe { &mut *btf }
 }
