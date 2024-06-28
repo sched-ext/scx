@@ -62,8 +62,8 @@ enum consts {
 	LAVD_SLICE_UNDECIDED		= SCX_SLICE_INF,
 	LAVD_SLICE_GREEDY_FT		= 3,
 	LAVD_LOAD_FACTOR_ADJ		= 6, /* adjustment for better estimation */
-	LAVD_LOAD_FACTOR_MAX		= (10 * 1000),
-	LAVD_LOAD_FACTOR_FT		= 4, /* factor to stretch the time line */
+	LAVD_LOAD_FACTOR_MAX		= (20 * 1000),
+	LAVD_LOAD_FACTOR_FT		= 80, /* factor to stretch the time line */
 
 	LAVD_LC_FREQ_MAX		= 1000000,
 	LAVD_LC_RUNTIME_MAX		= LAVD_TARGETED_LATENCY_NS,
@@ -75,6 +75,7 @@ enum consts {
 	LAVD_SLICE_BOOST_MAX_STEP	= 8, /* 8 slice exhausitions in a row */
 	LAVD_GREEDY_RATIO_MAX		= USHRT_MAX,
 	LAVD_LAT_PRIO_IDLE		= USHRT_MAX,
+	LAVD_LAT_WEIGHT_SHIFT		= 3,
 
 	LAVD_ELIGIBLE_TIME_LAT_FT	= 16,
 	LAVD_ELIGIBLE_TIME_MAX		= (100 * NSEC_PER_USEC),

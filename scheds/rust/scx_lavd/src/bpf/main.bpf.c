@@ -370,19 +370,20 @@ static const u64 sched_prio_to_slice_weight[NICE_WIDTH] = {
  * It is used to determine the virtual deadline. Each step increases by 10%.
  * The idea behind the virtual deadline is to limit the competition window
  * among concurrent tasks. For example, in the case of a normal priority task
- * with nice 0, its corresponding value is 7.5 msec. This guarantees that any
- * tasks enqueued in 7.5 msec after the task is enqueued will not compete for
- * CPU time with the task. This array is the inverse of
- * sched_prio_to_latency_weight with some normalization. Suppose the maximum
- * time slice per schedule (LAVD_SLICE_MAX_NS) is 3 msec. We normalized the
- * values so that the normal priority (nice 0) has a deadline of 7.5 msec, a
- * center of the targeted latency (i.e., when LAVD_TARGETED_LATENCY_NS is 15
+ * with nice 0, its corresponding value is 7.5 msec (when LAVD_LAT_WEIGHT_SHIFT
+ * is 0). This guarantees that any tasks enqueued in 7.5 msec after the task is
+ * enqueued will not compete for CPU time with the task. This array is the
+ * inverse of sched_prio_to_latency_weight with some normalization. Suppose the
+ * maximum time slice per schedule (LAVD_SLICE_MAX_NS) is 3 msec. We normalized
+ * the values so that the normal priority (nice 0) has a deadline of 7.5 msec,
+ * a center of the targeted latency (i.e., when LAVD_TARGETED_LATENCY_NS is 15
  * msec). The virtual deadline ranges from 87 usec to 512 msec. As the maximum
  * time slice becomes shorter, the deadlines become tighter.
  */
 static const u64 sched_prio_to_latency_weight[NICE_WIDTH] = {
 	/* weight	nice priority	sched priority	vdeadline (usec)    */
 	/*						(max slice == 3 ms) */
+	/*                                              (LAVD_LAT_WEIGHT_SHIFT == 0) */
 	/* ------	-------------	--------------	------------------- */
 	    29,		/* -20		 0		    87 */
 	    36,		/* -19		 1		   108 */
@@ -1448,7 +1449,12 @@ static u64 calc_latency_weight(struct task_struct *p, struct task_ctx *taskc,
 			       struct cpu_ctx *cpuc, bool is_wakeup)
 {
 	boost_lat(p, taskc, cpuc, is_wakeup);
-	return sched_prio_to_latency_weight[taskc->lat_prio];
+
+	/*
+	 * Tighten the competition window according to LAVD_LAT_WEIGHT_SHIFT.
+	 */
+	return sched_prio_to_latency_weight[taskc->lat_prio] >>
+	       LAVD_LAT_WEIGHT_SHIFT;
 }
 
 static u64 calc_virtual_deadline_delta(struct task_struct *p,
@@ -1479,11 +1485,17 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 
 	/*
 	 * When a system is overloaded (>1000), stretch time space so make time
-	 * tick slower to give room to execute the overloaded tasks.
+	 * tick logically slower to give room to execute the overloaded tasks.
 	 */
-	if (load_factor > 1000)
-		vdeadline_delta_ns = (vdeadline_delta_ns *load_factor *
-				      LAVD_LOAD_FACTOR_FT) / 1000;
+	if (load_factor > 1000) {
+		/*
+		 * The time space is stretched more if task's latency priority
+		 * is lower (i.e., higher value) and the load is higher.
+		 */
+		vdeadline_delta_ns = (vdeadline_delta_ns * load_factor *
+				      taskc->lat_prio * taskc->lat_prio) /
+				     (LAVD_LOAD_FACTOR_FT * 1000);
+	}
 
 	taskc->vdeadline_delta_ns = vdeadline_delta_ns;
 	return vdeadline_delta_ns;
@@ -2360,16 +2372,31 @@ static bool is_kernel_task(struct task_struct *p)
 	return p->flags & PF_KTHREAD;
 }
 
+static bool use_full_cpus(void)
+{
+	struct sys_stat *stat_cur = get_sys_stat_cur();
+	return no_core_compaction ||
+	       ((stat_cur->nr_active + LAVD_TC_NR_OVRFLW) >= nr_cpus_onln);
+}
+
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct bpf_cpumask *active, *ovrflw;
 	struct task_struct *p;
 
-	bpf_rcu_read_lock();
+	/*
+	 * If all CPUs are using, directly consume without checking CPU masks.
+	 */
+	if (use_full_cpus()) {
+		scx_bpf_consume(LAVD_GLOBAL_DSQ);
+		return;
+	}
 
 	/*
 	 * Prepare cpumasks.
 	 */
+	bpf_rcu_read_lock();
+
 	active = active_cpumask;
 	ovrflw = ovrflw_cpumask;
 	if (!active || !ovrflw) {
