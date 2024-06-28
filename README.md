@@ -264,6 +264,7 @@ options can be used in such cases.
 - 'cargo_home': 'CARGO_HOME env to use when invoking cargo'
 - `offline`: 'Compilation step should not access the internet'
 - `enable_rust`: 'Enable the build of rust sub-projects'
+- `serialize`: 'Enable/disable the sequential build of the schedulers. Set this to false if you need to build just one scheduler.'
 
 For example, let's say you want to use `bpftool` and `libbpf` shipped in the
 kernel tree located at `$KERNEL`. We need to build `bpftool` in the kernel
