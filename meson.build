@@ -124,7 +124,7 @@ if should_build_libbpf
   endforeach
 
   message('Fetching libbpf repo')
-  libbpf_commit = '42065ea6627ff6e1ab4c65e51042a70fbf30ff7c'
+  libbpf_commit = 'c1a6c770c46c6e78ad6755bf596c23a4e6f6b216'
   run_command(fetch_libbpf, meson.current_build_dir(), libbpf_commit, check: true)
 
   make_jobs = 1
