@@ -14,6 +14,8 @@ option('offline', type: 'boolean', value: 'false',
        description: 'Compilation step should not access the internet')
 option('enable_rust', type: 'boolean', value: 'true',
        description: 'Enable rust sub-projects')
+option('serialize', type: 'boolean', value: 'true',
+       description: 'Serialize the build of all schedulers')
 option('enable_stress', type: 'boolean', value: 'true',
        description: 'Enable stress tests')
 option('kernel', type: 'string', value: 'vmlinuz',

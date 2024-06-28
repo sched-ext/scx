@@ -12,6 +12,8 @@ cc = meson.get_compiler('c')
 
 enable_rust = get_option('enable_rust')
 
+serialize = get_option('serialize')
+
 bpf_clang = find_program(get_option('bpf_clang'))
 
 enable_stress = get_option('enable_stress')
