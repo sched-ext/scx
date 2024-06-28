@@ -19,6 +19,7 @@ subdir('scx_mitosis')
 subdir('scx_rusty')
 subdir('scx_rustland')
 subdir('scx_rlfifo')
+subdir('scx_bpfland')
 subdir('scx_lavd')
 
 # the target to compile all rust schedulers
