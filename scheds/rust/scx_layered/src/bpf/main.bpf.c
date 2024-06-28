@@ -1170,7 +1170,8 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 
-	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
+	tctx = lookup_task_ctx_may_fail(p);
+	if (!(cctx = lookup_cpu_ctx(-1)) || !tctx)
 		return;
 
 	if (tctx->layer >= 0 && tctx->layer < nr_layers)
