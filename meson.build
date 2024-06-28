@@ -271,7 +271,7 @@ gen_bpf_skel = generator(bpftool_build_skel,
 # For rust sub-projects.
 #
 cargo_build_args = ['--quiet']
-if get_option('buildtype') == 'release'
+if get_option('buildtype') == 'release' or get_option('buildtype') == 'plain'
   cargo_build_args += '--release'
 endif
 
