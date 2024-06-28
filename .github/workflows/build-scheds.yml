@@ -38,9 +38,9 @@ jobs:
       - run: pip install virtme-ng
 
       # Get the latest sched-ext enabled kernel directly from the git
-      # repository (try the sched_ext-ci branch first, if it doesn't exist use
-      # sched_ext)
-      - run: git clone --single-branch -b sched_ext-ci --depth 1 https://github.com/sched-ext/sched_ext.git linux || git clone --single-branch -b sched_ext --depth 1 https://github.com/sched-ext/sched_ext.git linux
+      # repository (try the for-next branch first, if it doesn't exist use
+      # sched_ext-base)
+      - run: git clone --single-branch -b for-next --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git linux || git clone --single-branch -b sched_ext-base --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git linux
 
       # Print the latest commit of the checked out sched-ext kernel
       - run: cd linux && git log -1 --pretty=format:"%h %ad %s" --date=short
