@@ -10,6 +10,8 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
+use std::fs::File;
+use std::io::Read;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -17,6 +19,7 @@ use std::time::Duration;
 
 use std::str;
 
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
@@ -36,7 +39,6 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 
 const SCHEDULER_NAME: &'static str = "scx_bpfland";
@@ -127,6 +129,16 @@ impl Metrics {
     }
 }
 
+fn is_smt_active() -> std::io::Result<i32> {
+    let mut file = File::open("/sys/devices/system/cpu/smt/active")?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+
+    let smt_active: i32 = contents.trim().parse().unwrap_or(0);
+
+    Ok(smt_active)
+}
+
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -142,19 +154,11 @@ impl<'a> Scheduler<'a> {
         assert!(opts.slice_us >= opts.slice_us_min);
 
         // Check host topology to determine if we need to enable SMT capabilities.
-        let topo = Topology::new().expect("Failed to build host topology");
-        let nr_cores = topo.cores().len();
-        let nr_cpus = topo
-            .cores()
-            .into_iter()
-            .flat_map(|core| core.span().clone().into_iter())
-            .count();
-
-        let smt_enabled = nr_cpus > nr_cores;
+        let smt_enabled = match is_smt_active() {
+            Ok(value) => value == 1,
+            Err(e) => bail!("Failed to read SMT status: {}", e),
+        };
         info!("SMT scheduling {}", if smt_enabled { "on" } else { "off" });
-        if opts.verbose {
-            info!("nr_cores={} nr_cpus={}", nr_cores, nr_cpus);
-        }
 
         // Initialize BPF connector.
         let mut skel_builder = BpfSkelBuilder::default();
