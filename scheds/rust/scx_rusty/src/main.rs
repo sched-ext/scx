@@ -485,7 +485,7 @@ impl<'a> Scheduler<'a> {
         let stats_map = maps.stats();
         let mut stats: Vec<u64> = Vec::new();
         let zero_vec =
-            vec![vec![0u8; stats_map.value_size() as usize]; self.top.nr_cpu_ids()];
+            vec![vec![0u8; stats_map.value_size() as usize]; self.top.nr_cpus_possible()];
 
         for stat in 0..bpf_intf::stat_idx_RUSTY_NR_STATS {
             let cpu_stat_vec = stats_map
