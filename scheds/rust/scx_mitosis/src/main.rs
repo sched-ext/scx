@@ -347,6 +347,7 @@ impl<'a> Scheduler<'a> {
             let mut reconfigured = false;
             if self.skel.bss().user_global_seq != self.skel.bss().global_seq {
                 trace!("BPF reconfiguration still in progress, skipping further changes");
+                continue;
             } else if self.last_reconfiguration.elapsed() >= self.reconfiguration_interval {
                 trace!("Reconfiguring");
                 reconfigured = true;
