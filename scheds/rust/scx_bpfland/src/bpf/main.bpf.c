@@ -378,7 +378,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	 * If all the previous attempts have failed, try to use any idle CPU in
 	 * the system.
 	 */
-	cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, idle_smtmask);
+	cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, idle_cpumask);
 	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(cpu))
 		goto out_put_cpumask;
