@@ -34,7 +34,7 @@ const volatile bool debug;
 /*
  * Default task time slice.
  */
-const volatile u64 slice_ns = SCX_SLICE_DFL;
+const volatile u64 slice_ns = 5000000;
 
 /*
  * Time slice used when system is over commissioned.
