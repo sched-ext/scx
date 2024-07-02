@@ -51,11 +51,6 @@ const volatile u64 slice_ns_min = 500000;
 const volatile u64 slice_ns_lag;
 
 /*
- * Enable built-in idle selection logic.
- */
-const volatile bool builtin_idle;
-
-/*
  * Threshold of voluntary context switches used to classify a task as
  * interactive.
  */
@@ -64,8 +59,7 @@ const volatile u64 nvcsw_thresh = 10;
 /*
  * Scheduling statistics.
  */
-volatile u64 nr_direct_dispatches, nr_kthread_dispatches,
-	     nr_shared_dispatches, nr_prio_dispatches;
+volatile u64 nr_direct_dispatches, nr_shared_dispatches, nr_prio_dispatches;
 
 /*
  * Amount of currently running tasks.
@@ -167,6 +161,30 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 }
 
 /*
+ * Set the state of a CPU in a cpumask.
+ */
+static bool set_cpu_state(struct bpf_cpumask *cpumask, s32 cpu, bool state)
+{
+	struct bpf_cpumask *mask;
+	int ret = false;
+
+	bpf_rcu_read_lock();
+
+	mask = cpumask;
+	if (!mask)
+		goto out_rcu;
+	if (state)
+		ret = bpf_cpumask_test_and_set_cpu(cpu, mask);
+	else
+		ret = bpf_cpumask_test_and_clear_cpu(cpu, mask);
+
+out_rcu:
+	bpf_rcu_read_unlock();
+
+	return ret;
+}
+
+/*
  * Exponential weighted moving average (EWMA).
  *
  * Copied from scx_lavd. Returns the new average as:
@@ -212,9 +230,7 @@ static inline u64 task_vtime(struct task_struct *p)
  */
 static inline u64 task_slice(struct task_struct *p)
 {
-	u64 slice = p->scx.slice;
-
-	return MAX(slice, slice_ns_min);
+	return MAX(p->scx.slice, slice_ns_min);
 }
 
 /*
@@ -228,22 +244,6 @@ static u64 cpu_to_dsq(s32 cpu)
 		return SHARED_DSQ;
 	}
 	return (u64)cpu;
-}
-
-/*
- * Dispatch a per-CPU kthread directly to the local CPU DSQ.
- */
-static void dispatch_kthread(struct task_struct *p, u64 enq_flags)
-{
-	u64 slice = task_slice(p);
-
-	/*
-	 * Use the local CPU DSQ directly for per-CPU kthreads, to give them
-	 * maximum priority.
-	 */
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice, enq_flags);
-
-	__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 }
 
 /*
@@ -265,9 +265,6 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu)
 	/*
 	 * We don't need to use vtime here, because we basically dispatch one
 	 * task at a time when the corresponding CPU is idle.
-	 *
-	 * We could also use SCX_DSQ_LOCAL, but we want to distinguish regular
-	 * tasks from per-CPU kthreads to give more priority to the latter.
 	 */
 	scx_bpf_dispatch(p, dsq_id, slice, 0);
 	__sync_fetch_and_add(&nr_direct_dispatches, 1);
@@ -281,58 +278,24 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu)
 	 * do not kick the CPU, and the CPU is idle, the task can stall in the
 	 * DSQ indefinitely.
 	 */
-	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
 
 	return 0;
 }
 
 /*
- * Dispatch a regular task.
- */
-static void dispatch_task(struct task_struct *p, u64 enq_flags)
-{
-	u64 vtime = task_vtime(p);
-	u64 slice = task_slice(p);
-	struct task_ctx *tctx;
-
-	tctx = lookup_task_ctx(p);
-	if (!tctx)
-		return;
-	/*
-	 * Always dispatch interactive tasks to the priority DSQ and regular
-	 * tasks to the shared DSQ.
-	 */
-	if (tctx->is_interactive) {
-		scx_bpf_dispatch_vtime(p, PRIO_DSQ, slice, vtime, enq_flags);
-		__sync_fetch_and_add(&nr_prio_dispatches, 1);
-	} else {
-		scx_bpf_dispatch_vtime(p, SHARED_DSQ, slice, vtime, enq_flags);
-		__sync_fetch_and_add(&nr_shared_dispatches, 1);
-	}
-}
-
-/*
  * Find an idle CPU in the system.
+ *
+ * NOTE: the idle CPU selection doesn't need to be formally perfect, it is
+ * totally fine to accept racy conditions and potentially make mistakes, by
+ * picking CPUs that are not idle or even offline, the logic has been designed
+ * to handle these mistakes in favor of a more efficient response and a reduced
+ * scheduling overhead.
  */
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
-	bool prev_in_cand;
 	s32 cpu;
-
-	if (builtin_idle) {
-		bool is_idle = false;
-
-		/*
-		 * Find an idle CPU using the sched_ext built-in idle selection
-		 * logic.
-		 */
-		cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-		if (is_idle)
-			return cpu;
-
-		return -ENOENT;
-	}
 
 	/*
 	 * Acquire the CPU masks to determine the online and idle CPUs in the
@@ -342,14 +305,70 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	idle_smtmask = scx_bpf_get_idle_smtmask();
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 
-	prev_in_cand = bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr);
+	/*
+	 * For tasks that can run only on a single CPU, we can simply verify if
+	 * their only allowed CPU is idle.
+	 */
+	if (p->nr_cpus_allowed == 1) {
+		cpu = bpf_cpumask_first(p->cpus_ptr);
 
+		if (scx_bpf_test_and_clear_cpu_idle(cpu))
+			goto out_put_cpumask;
+		else
+			goto out_not_found;
+	}
+
+	/*
+	 * Try to prioritize newly awakened tasks.
+	 */
+	if (wake_flags & SCX_WAKE_SYNC) {
+		struct task_struct *current = (void *)bpf_get_current_task_btf();
+		struct task_ctx *tctx;
+
+		/*
+		 * When waking up a task that was previously sleeping, there's
+		 * probably no advantage in attempting to reuse the same CPU.
+		 * It's more likely that the current CPU holds the active
+		 * working set.
+		 *
+		 * Therefore, we should just consider if the task can be
+		 * dispatched on the current CPU by checking if the DSQ is
+		 * empty (so that the awakened task can run immediately after
+		 * the waker) and if the system is not fully busy. If these
+		 * conditions are not met, we can just dispatch on the first
+		 * available CPU.
+		 *
+		 * This strategy aims to optimize workloads that operate in a
+		 * producer->consumer fashion.
+		 */
+		cpu = bpf_get_smp_processor_id();
+		if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
+		    !bpf_cpumask_empty(idle_cpumask) &&
+		    !(current->flags & PF_EXITING) &&
+		    scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) == 0)
+			goto out_put_cpumask;
+
+		/*
+		 * If we are waking up a task and we can't use the current CPU
+		 * at least set the task as interactive, so that it can be
+		 * dispatched as soon as possible on the first CPU available.
+		 */
+		tctx = lookup_task_ctx(p);
+		if (tctx)
+			tctx->is_interactive = true;
+
+		goto out_any_cpu;
+	}
+
+	/*
+	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
+	 */
 	if (smt_enabled) {
 		/*
 		 * If the task can still run on the previously used CPU and
 		 * it's a full-idle core, keep using it.
 		 */
-		if (prev_in_cand &&
+		if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
 		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
@@ -366,14 +385,16 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	}
 
 	/*
-	 * If a full-idle core can't be found (or if it's not an SMT system)
+	 * If a full-idle core can't be found (or if this is not an SMT system)
 	 * try to re-use the same CPU, even if it's not in a full-idle core.
 	 */
-	if (prev_in_cand && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+	if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
+	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu = prev_cpu;
 		goto out_put_cpumask;
 	}
 
+out_any_cpu:
 	/*
 	 * If all the previous attempts have failed, try to use any idle CPU in
 	 * the system.
@@ -383,23 +404,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	    scx_bpf_test_and_clear_cpu_idle(cpu))
 		goto out_put_cpumask;
 
-	/*
-	 * Try to prioritize newly awakened tasks.
-	 */
-	if (wake_flags & SCX_WAKE_SYNC) {
-		struct task_ctx *tctx;
-
-		/*
-		 * If we are waking up a task and we couldn't find any idle CPU
-		 * to use, at least set the task as interactive, so that it can
-		 * be dispatched as soon as possible on the first CPU
-		 * available.
-		 */
-		tctx = lookup_task_ctx(p);
-		if (tctx)
-			tctx->is_interactive = true;
-	}
-
+out_not_found:
 	/*
 	 * If all the previous attempts have failed, dispatch the task to the
 	 * first CPU that will become available.
@@ -425,10 +430,18 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	return prev_cpu;
 }
 
+/*
+ * Dispatch all the other tasks that were not dispatched directly in
+ * select_cpu().
+ */
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
+	u64 vtime = task_vtime(p);
+	u64 slice = task_slice(p);
+	struct task_ctx *tctx;
+
 	/*
-	 * Always dispatch per-CPU kthreads immediately.
+	 * Always dispatch per-CPU kthreads directly on their target CPU.
 	 *
 	 * This allows to prioritize critical kernel threads that may
 	 * potentially slow down the entire system if they are blocked for too
@@ -440,15 +453,26 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * this scheduler is desktop usage, this shouldn't be a problem.
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
-		dispatch_kthread(p, enq_flags);
+		s32 cpu = scx_bpf_task_cpu(p);
+		dispatch_direct_cpu(p, cpu);
 		return;
 	}
 
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
 	/*
-	 * Dispatch all the other tasks that were not dispatched directly in
-	 * select_cpu().
+	 * Always dispatch interactive tasks to the priority DSQ and regular
+	 * tasks to the shared DSQ.
 	 */
-	dispatch_task(p, enq_flags);
+	if (tctx->is_interactive) {
+		scx_bpf_dispatch_vtime(p, PRIO_DSQ, slice, vtime, enq_flags);
+		__sync_fetch_and_add(&nr_prio_dispatches, 1);
+	} else {
+		scx_bpf_dispatch_vtime(p, SHARED_DSQ, slice, vtime, enq_flags);
+		__sync_fetch_and_add(&nr_shared_dispatches, 1);
+	}
 }
 
 /*
@@ -457,7 +481,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
  * These tasks will be consumed on other active CPUs to prevent indefinite
  * stalling.
  */
-static int dispatch_offline_cpus(s32 cpu)
+static int consume_offline_cpus(s32 cpu)
 {
 	u64 cpu_max = scx_bpf_nr_cpu_ids();
 	struct bpf_cpumask *offline;
@@ -496,8 +520,8 @@ out_rcu:
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
-	 * First consume directly dispatched tasks, so that they can
-	 * immediately use the CPU assigned in select_cpu().
+	 * Consume directly dispatched tasks, so that they can immediately use
+	 * the CPU assigned in select_cpu().
 	 */
 	if (scx_bpf_consume(cpu_to_dsq(cpu)))
 		return;
@@ -506,7 +530,7 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * Try also to steal tasks directly dispatched to CPUs that have gone
 	 * offline (this allows to prevent indefinite task stalls).
 	 */
-	if (!dispatch_offline_cpus(cpu))
+	if (!consume_offline_cpus(cpu))
 		return;
 
 	/*
@@ -535,6 +559,12 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	/* Update global vruntime */
 	if (vtime_before(vtime_now, p->scx.dsq_vtime))
 		vtime_now = p->scx.dsq_vtime;
+
+	/*
+	 * Ensure time slice never exceeds slice_ns.
+	 */
+	if (p->scx.slice > slice_ns)
+		p->scx.slice = slice_ns;
 
 	__sync_fetch_and_add(&nr_running, 1);
 }
@@ -604,37 +634,16 @@ void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 	p->scx.dsq_vtime = vtime_now;
 }
 
-/*
- * Set the offline state of a CPU, updating the global offline cpumask.
- */
-static void set_cpu_offline(s32 cpu, bool state)
-{
-	struct bpf_cpumask *offline;
-
-	bpf_rcu_read_lock();
-
-	offline = offline_cpumask;
-	if (!offline)
-		goto out_rcu;
-	if (state)
-		bpf_cpumask_set_cpu(cpu, offline);
-	else
-		bpf_cpumask_clear_cpu(cpu, offline);
-
-out_rcu:
-	bpf_rcu_read_unlock();
-}
-
 void BPF_STRUCT_OPS(bpfland_cpu_online, s32 cpu)
 {
 	/* Set the CPU state to offline */
-	set_cpu_offline(cpu, false);
+	set_cpu_state(offline_cpumask, cpu, false);
 }
 
 void BPF_STRUCT_OPS(bpfland_cpu_offline, s32 cpu)
 {
 	/* Set the CPU state to online */
-	set_cpu_offline(cpu, true);
+	set_cpu_state(offline_cpumask, cpu, true);
 }
 
 s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
@@ -649,7 +658,7 @@ s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 {
-	struct bpf_cpumask *offline;
+	struct bpf_cpumask *mask;
 	int err;
 	s32 cpu;
 
@@ -680,12 +689,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	/* Initialize the offline CPU mask */
 	bpf_rcu_read_lock();
 	err = calloc_cpumask(&offline_cpumask);
-	offline = offline_cpumask;
-	if (err || !offline)
-		err -ENOMEM;
+	mask = offline_cpumask;
+	if (!mask)
+		err = -ENOMEM;
 	bpf_rcu_read_unlock();
 
-	return 0;
+	return err;
 }
 
 void BPF_STRUCT_OPS(bpfland_exit, struct scx_exit_info *ei)

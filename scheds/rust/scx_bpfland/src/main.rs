@@ -78,10 +78,6 @@ struct Opts {
     #[clap(short = 'c', long, default_value = "10")]
     nvcsw_thresh: u64,
 
-    /// Enable direct dispatch via sched_ext built-in idle selection logic.
-    #[clap(short = 'i', long, action = clap::ArgAction::SetTrue)]
-    builtin_idle: bool,
-
     /// Enable the Prometheus endpoint for metrics on port 9000.
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     enable_prometheus: bool,
@@ -101,7 +97,6 @@ struct Opts {
 
 struct Metrics {
     nr_running: Gauge,
-    nr_kthread_dispatches: Gauge,
     nr_direct_dispatches: Gauge,
     nr_prio_dispatches: Gauge,
     nr_shared_dispatches: Gauge,
@@ -112,9 +107,6 @@ impl Metrics {
         Metrics {
             nr_running: gauge!(
                 "nr_running", "info" => "Number of running tasks"
-            ),
-            nr_kthread_dispatches: gauge!(
-                "nr_kthread_dispatches", "info" => "Number of kthread dispatches"
             ),
             nr_direct_dispatches: gauge!(
                 "nr_direct_dispatches", "info" => "Number of direct dispatches"
@@ -174,7 +166,6 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().slice_ns_min = opts.slice_us_min * 1000;
         skel.rodata_mut().slice_ns_lag = opts.slice_us_lag * 1000;
         skel.rodata_mut().nvcsw_thresh = opts.nvcsw_thresh;
-        skel.rodata_mut().builtin_idle = opts.builtin_idle;
 
         // Attach the scheduler.
         let mut skel = scx_ops_load!(skel, bpfland_ops, uei)?;
@@ -196,18 +187,14 @@ impl<'a> Scheduler<'a> {
     }
 
     fn update_stats(&mut self) {
-        let nr_running = self.skel.bss().nr_running;
         let nr_cpus = libbpf_rs::num_possible_cpus().unwrap();
-        let nr_kthread_dispatches = self.skel.bss().nr_kthread_dispatches;
+        let nr_running = self.skel.bss().nr_running;
         let nr_direct_dispatches = self.skel.bss().nr_direct_dispatches;
         let nr_prio_dispatches = self.skel.bss().nr_prio_dispatches;
         let nr_shared_dispatches = self.skel.bss().nr_shared_dispatches;
 
         // Update Prometheus statistics.
         self.metrics.nr_running.set(nr_running as f64);
-        self.metrics
-            .nr_kthread_dispatches
-            .set(nr_kthread_dispatches as f64);
         self.metrics
             .nr_direct_dispatches
             .set(nr_direct_dispatches as f64);
@@ -219,10 +206,9 @@ impl<'a> Scheduler<'a> {
             .set(nr_shared_dispatches as f64);
 
         // Log scheduling statistics.
-        info!("running={}/{} nr_kthread_dispatches={} nr_direct_dispatches={} nr_prio_dispatches={} nr_shared_dispatches={}",
+        info!("running={}/{} direct_dispatches={} prio_dispatches={} shared_dispatches={}",
             nr_running,
             nr_cpus,
-            nr_kthread_dispatches,
             nr_direct_dispatches,
             nr_prio_dispatches,
             nr_shared_dispatches);
