@@ -57,6 +57,13 @@ const volatile u64 slice_ns_lag;
 const volatile u64 nvcsw_thresh = 10;
 
 /*
+ * Schedule up to the starvation_thresh number of priority tasks before being
+ * required to schedule a regular task. This ensures that regular tasks are not
+ * starved by interactive tasks.
+ */
+const volatile u64 starvation_thresh = 100;
+
+/*
  * Scheduling statistics.
  */
 volatile u64 nr_direct_dispatches, nr_shared_dispatches, nr_prio_dispatches;
@@ -517,8 +524,38 @@ out_rcu:
 	return ret;
 }
 
+/*
+ * Check if consecutive scheduling of interactive tasks is starving regular
+ * tasks.
+ *
+ * Return true if tasks in the shared DSQ are starving, false otherwise.
+ */
+static bool is_shared_starving(void)
+{
+	static int starvation_cnt;
+
+	if (!starvation_thresh)
+		return false;
+	/*
+	 * NOTE: it is totally fine for this code to be racy, the threshold
+	 * doesn't need to be perfectly enforced.
+	 */
+	if (starvation_cnt++ < starvation_thresh)
+		return false;
+	starvation_cnt = 0;
+
+	return true;
+}
+
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 {
+	/*
+	 * Make sure we are not staving tasks from the shared DSQ.
+	 */
+	if (is_shared_starving())
+		if (scx_bpf_consume(SHARED_DSQ))
+			return;
+
 	/*
 	 * Consume directly dispatched tasks, so that they can immediately use
 	 * the CPU assigned in select_cpu().
@@ -541,9 +578,10 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * so they should naturally release the CPU quickly and give a chance
 	 * to the regular tasks to run.
 	 *
-	 * TODO: Add a tunable setting to limit the number of priority tasks
-	 * dispatched. Once this limit is reached, at least one regular task
-	 * must be dispatched.
+	 * However, in order to limit potential starvation conditions the
+	 * scheduler uses a threshold to ensure that at least one task from the
+	 * shared DSQ is consumed after too many consecutive interactive tasks
+	 * are consumed from the priority DSQ.
 	 */
 	if (scx_bpf_consume(PRIO_DSQ))
 		return;
