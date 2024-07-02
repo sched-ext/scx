@@ -59,7 +59,7 @@ struct Opts {
     exit_dump_len: u32,
 
     /// Maximum scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "20000")]
+    #[clap(short = 's', long, default_value = "5000")]
     slice_us: u64,
 
     /// Minimum scheduling slice duration in microseconds.
