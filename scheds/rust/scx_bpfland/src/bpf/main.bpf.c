@@ -34,12 +34,12 @@ const volatile bool debug;
 /*
  * Default task time slice.
  */
-const volatile u64 slice_ns = 5000000;
+const volatile u64 slice_ns = 5ULL * NSEC_PER_SEC;
 
 /*
  * Time slice used when system is over commissioned.
  */
-const volatile u64 slice_ns_min = 500000;
+const volatile u64 slice_ns_min = 500ULL * NSEC_PER_USEC;
 
 /*
  * Maximum time slice lag.
@@ -54,7 +54,26 @@ const volatile u64 slice_ns_lag;
  * Threshold of voluntary context switches used to classify a task as
  * interactive.
  */
-const volatile u64 nvcsw_thresh = 10;
+const volatile u64 nvcsw_thresh = 10ULL;
+
+/*
+ * Time threshold to prevent task starvation.
+ *
+ * The scheduler processes tasks from various DSQs in the following order:
+ *
+ *  per-CPU DSQs => priority DSQ => shared DSQ
+ *
+ *  Tasks in the shared DSQ may be starved by those in the priority DSQ, which
+ *  in turn may be starved by tasks in any per-CPU DSQ.
+ *
+ *  To mitigate this, store the timestamp of the last task consumption from
+ *  both the priority DSQ and the shared DSQ. If the starvation_thresh_ns
+ *  threshold is exceeded without consuming a task, the scheduler will be
+ *  forced to consume a task from the corresponding DSQ.
+ */
+const volatile u64 starvation_thresh_ns = 5ULL * NSEC_PER_MSEC;
+static u64 starvation_shared_ts;
+static u64 starvation_prio_ts;
 
 /*
  * Scheduling statistics.
@@ -439,15 +458,17 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
  *
  * These tasks will be consumed on other active CPUs to prevent indefinite
  * stalling.
+ *
+ * Return true if one task is consumed, false otherwise.
  */
-static int consume_offline_cpus(s32 cpu)
+static bool consume_offline_cpus(s32 cpu)
 {
 	u64 cpu_max = scx_bpf_nr_cpu_ids();
 	struct bpf_cpumask *offline;
 
 	offline = offline_cpumask;
 	if (!offline)
-		return -ENOENT;
+		return false;
 
 	/*
 	 * Cycle through all the CPUs and evenly consume tasks from the DSQs of
@@ -463,14 +484,77 @@ static int consume_offline_cpus(s32 cpu)
 		 * consume it immediately on the current CPU.
 		 */
 		if (scx_bpf_consume(cpu_to_dsq(cpu)))
-			return 0;
+			return true;
 	}
 
-	return -ENOENT;
+	return false;
+}
+
+/*
+ * Consume a task from the priority DSQ, transferring it to the local CPU DSQ.
+ *
+ * Return true if a task is consumed, false otherwise.
+ */
+static bool consume_prio_task(u64 now)
+{
+	bool ret;
+
+	ret = scx_bpf_consume(PRIO_DSQ);
+	if (ret)
+		starvation_prio_ts = now;
+
+	return ret;
+}
+
+/*
+ * Consume a task from the shared DSQ, transferring it to the local CPU DSQ.
+ *
+ * Return true if a task is consumed, false otherwise.
+ */
+static bool consume_regular_task(u64 now)
+{
+	bool ret;
+
+	ret = scx_bpf_consume(SHARED_DSQ);
+	if (ret)
+		starvation_shared_ts = now;
+
+	return ret;
+}
+
+/*
+ * Consume tasks that are potentially starving.
+ *
+ * In order to limit potential starvation conditions the scheduler uses a
+ * time-based threshold to ensure that at least one task from the
+ * lower-priority DSQs is periodically consumed.
+ */
+static bool consume_starving_tasks(u64 now)
+{
+	if (!starvation_thresh_ns)
+		return false;
+
+	if (vtime_before(starvation_shared_ts + starvation_thresh_ns, now))
+		if (consume_regular_task(now))
+			return true;
+
+	if (vtime_before(starvation_prio_ts + starvation_thresh_ns, now))
+		if (consume_prio_task(now))
+			return true;
+
+	return false;
 }
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 {
+	u64 now = bpf_ktime_get_ns();
+
+	/*
+	 * Make sure we are not staving tasks from the lower priority DSQs.
+	 */
+	if (consume_starving_tasks(now))
+		return;
+
 	/*
 	 * Consume directly dispatched tasks, so that they can immediately use
 	 * the CPU assigned in select_cpu().
@@ -482,28 +566,19 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * Try also to steal tasks directly dispatched to CPUs that have gone
 	 * offline (this allows to prevent indefinite task stalls).
 	 */
-	if (!consume_offline_cpus(cpu))
+	if (consume_offline_cpus(cpu))
 		return;
 
 	/*
 	 * Then always consume interactive tasks before regular tasks.
-	 *
-	 * This is fine and we shouldn't have starvation, because interactive
-	 * tasks are classified by their amount of voluntary context switches,
-	 * so they should naturally release the CPU quickly and give a chance
-	 * to the regular tasks to run.
-	 *
-	 * TODO: Add a tunable setting to limit the number of priority tasks
-	 * dispatched. Once this limit is reached, at least one regular task
-	 * must be dispatched.
 	 */
-	if (scx_bpf_consume(PRIO_DSQ))
+	if (consume_prio_task(now))
 		return;
 
 	/*
 	 * Lastly, consume regular tasks from the shared DSQ.
 	 */
-	scx_bpf_consume(SHARED_DSQ);
+	consume_regular_task(now);
 }
 
 void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)

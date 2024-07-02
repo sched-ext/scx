@@ -78,6 +78,11 @@ struct Opts {
     #[clap(short = 'c', long, default_value = "10")]
     nvcsw_thresh: u64,
 
+    /// Prevent the starvation making sure that at least one lower priority task is scheduled every
+    /// starvation_thresh_us (0 = disable starvation prevention).
+    #[clap(short = 't', long, default_value = "5000")]
+    starvation_thresh_us: u64,
+
     /// Enable the Prometheus endpoint for metrics on port 9000.
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     enable_prometheus: bool,
@@ -165,6 +170,7 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().slice_ns = opts.slice_us * 1000;
         skel.rodata_mut().slice_ns_min = opts.slice_us_min * 1000;
         skel.rodata_mut().slice_ns_lag = opts.slice_us_lag * 1000;
+        skel.rodata_mut().starvation_thresh_ns = opts.starvation_thresh_us * 1000;
         skel.rodata_mut().nvcsw_thresh = opts.nvcsw_thresh;
 
         // Attach the scheduler.

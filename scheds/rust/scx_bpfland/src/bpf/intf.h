@@ -15,7 +15,9 @@
 #define CLAMP(val, lo, hi) MIN(MAX(val, lo), hi)
 
 enum consts {
-	NSEC_PER_SEC = 1000000000ULL,
+        NSEC_PER_USEC = 1000ULL,
+        NSEC_PER_MSEC = (1000ULL * NSEC_PER_USEC),
+        NSEC_PER_SEC = (1000ULL * NSEC_PER_MSEC),
 };
 
 #ifndef __VMLINUX_H__
