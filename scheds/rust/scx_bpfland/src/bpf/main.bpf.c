@@ -230,9 +230,7 @@ static inline u64 task_vtime(struct task_struct *p)
  */
 static inline u64 task_slice(struct task_struct *p)
 {
-	u64 slice = p->scx.slice;
-
-	return MAX(slice, slice_ns_min);
+	return MAX(p->scx.slice, slice_ns_min);
 }
 
 /*
@@ -531,6 +529,13 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	/* Update global vruntime */
 	if (vtime_before(vtime_now, p->scx.dsq_vtime))
 		vtime_now = p->scx.dsq_vtime;
+
+	/*
+	 * Ensure time slice never exceeds slice_ns when a task is started on a
+	 * CPU.
+	 */
+	if (p->scx.slice > slice_ns)
+		p->scx.slice = slice_ns;
 
 	__sync_fetch_and_add(&nr_running, 1);
 }
