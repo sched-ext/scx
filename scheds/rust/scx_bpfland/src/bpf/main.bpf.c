@@ -51,11 +51,6 @@ const volatile u64 slice_ns_min = 500000;
 const volatile u64 slice_ns_lag;
 
 /*
- * Enable built-in idle selection logic.
- */
-const volatile bool builtin_idle;
-
-/*
  * Threshold of voluntary context switches used to classify a task as
  * interactive.
  */
@@ -164,6 +159,30 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 		bpf_cpumask_release(cpumask);
 
 	return 0;
+}
+
+/*
+ * Set the state of a CPU in a cpumask.
+ */
+static bool set_cpu_state(struct bpf_cpumask *cpumask, s32 cpu, bool state)
+{
+	struct bpf_cpumask *mask;
+	int ret = false;
+
+	bpf_rcu_read_lock();
+
+	mask = cpumask;
+	if (!mask)
+		goto out_rcu;
+	if (state)
+		ret = bpf_cpumask_test_and_set_cpu(cpu, mask);
+	else
+		ret = bpf_cpumask_test_and_clear_cpu(cpu, mask);
+
+out_rcu:
+	bpf_rcu_read_unlock();
+
+	return ret;
 }
 
 /*
@@ -299,9 +318,9 @@ static void dispatch_task(struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 	/*
-	 * Always dispatch interactive tasks to the priority DSQ and regular
-	 * tasks to the shared DSQ.
-	 */
+	* Always dispatch interactive tasks to the priority DSQ and regular
+	* tasks to the shared DSQ.
+	*/
 	if (tctx->is_interactive) {
 		scx_bpf_dispatch_vtime(p, PRIO_DSQ, slice, vtime, enq_flags);
 		__sync_fetch_and_add(&nr_prio_dispatches, 1);
@@ -313,26 +332,17 @@ static void dispatch_task(struct task_struct *p, u64 enq_flags)
 
 /*
  * Find an idle CPU in the system.
+ *
+ * NOTE: the idle CPU selection doesn't need to be formally perfect, it is
+ * totally fine to accept racy conditions and potentially make mistakes, by
+ * picking CPUs that are not idle or even offline, the logic has been designed
+ * to handle these mistakes in favor of a more efficient response and a reduced
+ * scheduling overhead.
  */
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
-	bool prev_in_cand;
 	s32 cpu;
-
-	if (builtin_idle) {
-		bool is_idle = false;
-
-		/*
-		 * Find an idle CPU using the sched_ext built-in idle selection
-		 * logic.
-		 */
-		cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-		if (is_idle)
-			return cpu;
-
-		return -ENOENT;
-	}
 
 	/*
 	 * Acquire the CPU masks to determine the online and idle CPUs in the
@@ -342,14 +352,28 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	idle_smtmask = scx_bpf_get_idle_smtmask();
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 
-	prev_in_cand = bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr);
+	/*
+	 * For tasks that can run only on a single CPU, we can simply verify if
+	 * their only allowed CPU is idle.
+	 */
+	if (p->nr_cpus_allowed == 1) {
+		cpu = bpf_cpumask_first(p->cpus_ptr);
 
+		if (scx_bpf_test_and_clear_cpu_idle(cpu))
+			goto out_put_cpumask;
+		else
+			goto out_not_found;
+	}
+
+	/*
+	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
+	 */
 	if (smt_enabled) {
 		/*
 		 * If the task can still run on the previously used CPU and
 		 * it's a full-idle core, keep using it.
 		 */
-		if (prev_in_cand &&
+		if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
 		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
@@ -366,10 +390,11 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	}
 
 	/*
-	 * If a full-idle core can't be found (or if it's not an SMT system)
+	 * If a full-idle core can't be found (or if this is not an SMT system)
 	 * try to re-use the same CPU, even if it's not in a full-idle core.
 	 */
-	if (prev_in_cand && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+	if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
+	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu = prev_cpu;
 		goto out_put_cpumask;
 	}
@@ -390,16 +415,16 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 		struct task_ctx *tctx;
 
 		/*
-		 * If we are waking up a task and we couldn't find any idle CPU
-		 * to use, at least set the task as interactive, so that it can
-		 * be dispatched as soon as possible on the first CPU
-		 * available.
+		 * If we are waking up a task and we can't use the current CPU
+		 * at least set the task as interactive, so that it can be
+		 * dispatched as soon as possible on the first CPU available.
 		 */
 		tctx = lookup_task_ctx(p);
 		if (tctx)
 			tctx->is_interactive = true;
 	}
 
+out_not_found:
 	/*
 	 * If all the previous attempts have failed, dispatch the task to the
 	 * first CPU that will become available.
@@ -604,37 +629,16 @@ void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 	p->scx.dsq_vtime = vtime_now;
 }
 
-/*
- * Set the offline state of a CPU, updating the global offline cpumask.
- */
-static void set_cpu_offline(s32 cpu, bool state)
-{
-	struct bpf_cpumask *offline;
-
-	bpf_rcu_read_lock();
-
-	offline = offline_cpumask;
-	if (!offline)
-		goto out_rcu;
-	if (state)
-		bpf_cpumask_set_cpu(cpu, offline);
-	else
-		bpf_cpumask_clear_cpu(cpu, offline);
-
-out_rcu:
-	bpf_rcu_read_unlock();
-}
-
 void BPF_STRUCT_OPS(bpfland_cpu_online, s32 cpu)
 {
 	/* Set the CPU state to offline */
-	set_cpu_offline(cpu, false);
+	set_cpu_state(offline_cpumask, cpu, false);
 }
 
 void BPF_STRUCT_OPS(bpfland_cpu_offline, s32 cpu)
 {
 	/* Set the CPU state to online */
-	set_cpu_offline(cpu, true);
+	set_cpu_state(offline_cpumask, cpu, true);
 }
 
 s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
@@ -649,7 +653,7 @@ s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 {
-	struct bpf_cpumask *offline;
+	struct bpf_cpumask *mask;
 	int err;
 	s32 cpu;
 
@@ -680,12 +684,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	/* Initialize the offline CPU mask */
 	bpf_rcu_read_lock();
 	err = calloc_cpumask(&offline_cpumask);
-	offline = offline_cpumask;
-	if (err || !offline)
-		err -ENOMEM;
+	mask = offline_cpumask;
+	if (!mask)
+		err = -ENOMEM;
 	bpf_rcu_read_unlock();
 
-	return 0;
+	return err;
 }
 
 void BPF_STRUCT_OPS(bpfland_exit, struct scx_exit_info *ei)

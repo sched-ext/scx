@@ -78,10 +78,6 @@ struct Opts {
     #[clap(short = 'c', long, default_value = "10")]
     nvcsw_thresh: u64,
 
-    /// Enable direct dispatch via sched_ext built-in idle selection logic.
-    #[clap(short = 'i', long, action = clap::ArgAction::SetTrue)]
-    builtin_idle: bool,
-
     /// Enable the Prometheus endpoint for metrics on port 9000.
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     enable_prometheus: bool,
@@ -174,7 +170,6 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().slice_ns_min = opts.slice_us_min * 1000;
         skel.rodata_mut().slice_ns_lag = opts.slice_us_lag * 1000;
         skel.rodata_mut().nvcsw_thresh = opts.nvcsw_thresh;
-        skel.rodata_mut().builtin_idle = opts.builtin_idle;
 
         // Attach the scheduler.
         let mut skel = scx_ops_load!(skel, bpfland_ops, uei)?;
