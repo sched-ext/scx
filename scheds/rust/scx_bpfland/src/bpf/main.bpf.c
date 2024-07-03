@@ -59,8 +59,7 @@ const volatile u64 nvcsw_thresh = 10;
 /*
  * Scheduling statistics.
  */
-volatile u64 nr_direct_dispatches, nr_kthread_dispatches,
-	     nr_shared_dispatches, nr_prio_dispatches;
+volatile u64 nr_direct_dispatches, nr_shared_dispatches, nr_prio_dispatches;
 
 /*
  * Amount of currently running tasks.
@@ -250,28 +249,13 @@ static u64 cpu_to_dsq(s32 cpu)
 }
 
 /*
- * Dispatch a per-CPU kthread directly to the local CPU DSQ.
- */
-static void dispatch_kthread(struct task_struct *p, u64 enq_flags)
-{
-	u64 slice = task_slice(p);
-
-	/*
-	 * Use the local CPU DSQ directly for per-CPU kthreads, to give them
-	 * maximum priority.
-	 */
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice, enq_flags);
-
-	__sync_fetch_and_add(&nr_kthread_dispatches, 1);
-}
-
-/*
  * Dispatch a task directly to the assigned CPU DSQ (used when an idle CPU is
  * found).
  */
 static int dispatch_direct_cpu(struct task_struct *p, s32 cpu)
 {
 	u64 slice = task_slice(p);
+	u64 vtime = task_vtime(p);
 	u64 dsq_id = cpu_to_dsq(cpu);
 
 	/*
@@ -281,14 +265,7 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu)
 	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 		return -EINVAL;
 
-	/*
-	 * We don't need to use vtime here, because we basically dispatch one
-	 * task at a time when the corresponding CPU is idle.
-	 *
-	 * We could also use SCX_DSQ_LOCAL, but we want to distinguish regular
-	 * tasks from per-CPU kthreads to give more priority to the latter.
-	 */
-	scx_bpf_dispatch(p, dsq_id, slice, 0);
+	scx_bpf_dispatch_vtime(p, dsq_id, slice, vtime, 0);
 	__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
 	/*
@@ -303,31 +280,6 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu)
 	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 	return 0;
-}
-
-/*
- * Dispatch a regular task.
- */
-static void dispatch_task(struct task_struct *p, u64 enq_flags)
-{
-	u64 vtime = task_vtime(p);
-	u64 slice = task_slice(p);
-	struct task_ctx *tctx;
-
-	tctx = lookup_task_ctx(p);
-	if (!tctx)
-		return;
-	/*
-	* Always dispatch interactive tasks to the priority DSQ and regular
-	* tasks to the shared DSQ.
-	*/
-	if (tctx->is_interactive) {
-		scx_bpf_dispatch_vtime(p, PRIO_DSQ, slice, vtime, enq_flags);
-		__sync_fetch_and_add(&nr_prio_dispatches, 1);
-	} else {
-		scx_bpf_dispatch_vtime(p, SHARED_DSQ, slice, vtime, enq_flags);
-		__sync_fetch_and_add(&nr_shared_dispatches, 1);
-	}
 }
 
 /*
@@ -450,10 +402,18 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	return prev_cpu;
 }
 
+/*
+ * Dispatch all the other tasks that were not dispatched directly in
+ * select_cpu().
+ */
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
+	u64 vtime = task_vtime(p);
+	u64 slice = task_slice(p);
+	struct task_ctx *tctx;
+
 	/*
-	 * Always dispatch per-CPU kthreads immediately.
+	 * Always dispatch per-CPU kthreads directly on their target CPU.
 	 *
 	 * This allows to prioritize critical kernel threads that may
 	 * potentially slow down the entire system if they are blocked for too
@@ -465,15 +425,26 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * this scheduler is desktop usage, this shouldn't be a problem.
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
-		dispatch_kthread(p, enq_flags);
+		s32 cpu = scx_bpf_task_cpu(p);
+		dispatch_direct_cpu(p, cpu);
 		return;
 	}
 
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
 	/*
-	 * Dispatch all the other tasks that were not dispatched directly in
-	 * select_cpu().
+	 * Always dispatch interactive tasks to the priority DSQ and regular
+	 * tasks to the shared DSQ.
 	 */
-	dispatch_task(p, enq_flags);
+	if (tctx->is_interactive) {
+		scx_bpf_dispatch_vtime(p, PRIO_DSQ, slice, vtime, enq_flags);
+		__sync_fetch_and_add(&nr_prio_dispatches, 1);
+	} else {
+		scx_bpf_dispatch_vtime(p, SHARED_DSQ, slice, vtime, enq_flags);
+		__sync_fetch_and_add(&nr_shared_dispatches, 1);
+	}
 }
 
 /*
@@ -482,7 +453,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
  * These tasks will be consumed on other active CPUs to prevent indefinite
  * stalling.
  */
-static int dispatch_offline_cpus(s32 cpu)
+static int consume_offline_cpus(s32 cpu)
 {
 	u64 cpu_max = scx_bpf_nr_cpu_ids();
 	struct bpf_cpumask *offline;
@@ -521,8 +492,8 @@ out_rcu:
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
-	 * First consume directly dispatched tasks, so that they can
-	 * immediately use the CPU assigned in select_cpu().
+	 * Consume directly dispatched tasks, so that they can immediately use
+	 * the CPU assigned in select_cpu().
 	 */
 	if (scx_bpf_consume(cpu_to_dsq(cpu)))
 		return;
@@ -531,7 +502,7 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * Try also to steal tasks directly dispatched to CPUs that have gone
 	 * offline (this allows to prevent indefinite task stalls).
 	 */
-	if (!dispatch_offline_cpus(cpu))
+	if (!consume_offline_cpus(cpu))
 		return;
 
 	/*
