@@ -682,7 +682,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	err = calloc_cpumask(&offline_cpumask);
 	offline = offline_cpumask;
 	if (err || !offline)
-		err -ENOMEM;
+		err = -ENOMEM;
 	bpf_rcu_read_unlock();
 
 	return 0;
