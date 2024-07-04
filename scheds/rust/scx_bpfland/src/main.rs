@@ -34,6 +34,7 @@ use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 
+use scx_utils::build_id;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -42,8 +43,6 @@ use scx_utils::uei_report;
 use scx_utils::UserExitInfo;
 
 const SCHEDULER_NAME: &'static str = "scx_bpfland";
-
-const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
 /// scx_bpfland: a vruntime-based sched_ext scheduler that prioritizes interactive workloads.
 ///
@@ -159,7 +158,12 @@ impl<'a> Scheduler<'a> {
             Ok(value) => value == 1,
             Err(e) => bail!("Failed to read SMT status: {}", e),
         };
-        info!("SMT scheduling {}", if smt_enabled { "on" } else { "off" });
+        info!(
+            "{} {} {}",
+            SCHEDULER_NAME,
+            *build_id::SCX_FULL_VERSION,
+            if smt_enabled { "SMT on" } else { "SMT off" }
+        );
 
         // Initialize BPF connector.
         let mut skel_builder = BpfSkelBuilder::default();
@@ -256,7 +260,7 @@ fn main() -> Result<()> {
     let opts = Opts::parse();
 
     if opts.version {
-        println!("{} version {}", SCHEDULER_NAME, VERSION);
+        println!("{} {}", SCHEDULER_NAME, *build_id::SCX_FULL_VERSION);
         return Ok(());
     }
 
