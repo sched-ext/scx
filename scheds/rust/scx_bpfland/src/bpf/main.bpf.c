@@ -303,14 +303,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	s32 cpu;
 
 	/*
-	 * Acquire the CPU masks to determine the online and idle CPUs in the
-	 * system.
-	 */
-	online_cpumask = scx_bpf_get_online_cpumask();
-	idle_smtmask = scx_bpf_get_idle_smtmask();
-	idle_cpumask = scx_bpf_get_idle_cpumask();
-
-	/*
 	 * For tasks that can run only on a single CPU, we can simply verify if
 	 * their only allowed CPU is idle.
 	 */
@@ -318,10 +310,18 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 		cpu = bpf_cpumask_first(p->cpus_ptr);
 
 		if (scx_bpf_test_and_clear_cpu_idle(cpu))
-			goto out_put_cpumask;
-		else
-			goto out_not_found;
+			return cpu;
+
+		return -ENOENT;
 	}
+
+	/*
+	 * Acquire the CPU masks to determine the online and idle CPUs in the
+	 * system.
+	 */
+	online_cpumask = scx_bpf_get_online_cpumask();
+	idle_smtmask = scx_bpf_get_idle_smtmask();
+	idle_cpumask = scx_bpf_get_idle_cpumask();
 
 	/*
 	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
@@ -367,23 +367,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 		goto out_put_cpumask;
 
 	/*
-	 * Try to prioritize newly awakened tasks.
-	 */
-	if (wake_flags & SCX_WAKE_SYNC) {
-		struct task_ctx *tctx;
-
-		/*
-		 * If we are waking up a task and we can't use the current CPU
-		 * at least set the task as interactive, so that it can be
-		 * dispatched as soon as possible on the first CPU available.
-		 */
-		tctx = lookup_task_ctx(p);
-		if (tctx)
-			tctx->is_interactive = true;
-	}
-
-out_not_found:
-	/*
 	 * If all the previous attempts have failed, dispatch the task to the
 	 * first CPU that will become available.
 	 */
@@ -400,6 +383,22 @@ out_put_cpumask:
 s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	s32 cpu;
+
+	/*
+	 * Try to prioritize newly awakened tasks.
+	 */
+	if (wake_flags & SCX_WAKE_SYNC) {
+		struct task_ctx *tctx;
+
+		/*
+		 * If we are waking up a task and we can't use the current CPU
+		 * at least set the task as interactive, so that it can be
+		 * dispatched as soon as possible on the first CPU available.
+		 */
+		tctx = lookup_task_ctx(p);
+		if (tctx)
+			tctx->is_interactive = true;
+	}
 
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
 	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
