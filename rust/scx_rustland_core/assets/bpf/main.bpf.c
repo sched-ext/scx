@@ -523,7 +523,6 @@ dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 slice_ns, u64 enq_flags)
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	struct task_ctx *tctx;
 	s32 cpu = prev_cpu;
 	bool do_direct = false;
 
