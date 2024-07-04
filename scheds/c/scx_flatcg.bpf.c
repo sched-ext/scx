@@ -225,7 +225,7 @@ static void cgrp_refresh_hweight(struct cgroup *cgrp, struct fcg_cgrp_ctx *cgc)
 				break;
 
 			/*
-			 * We can be oppotunistic here and not grab the
+			 * We can be opportunistic here and not grab the
 			 * cgv_tree_lock and deal with the occasional races.
 			 * However, hweight updates are already cached and
 			 * relatively low-frequency. Let's just do the
