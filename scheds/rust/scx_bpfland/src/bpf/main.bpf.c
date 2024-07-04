@@ -78,7 +78,8 @@ static u64 starvation_prio_ts;
 /*
  * Scheduling statistics.
  */
-volatile u64 nr_direct_dispatches, nr_shared_dispatches, nr_prio_dispatches;
+volatile u64 nr_direct_dispatches, nr_kthread_dispatches,
+		nr_shared_dispatches, nr_prio_dispatches;
 
 /*
  * Amount of currently running tasks.
@@ -272,7 +273,6 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu)
 		return -EINVAL;
 
 	scx_bpf_dispatch_vtime(p, dsq_id, slice, vtime, 0);
-	__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
 	/*
 	 * Wake-up the target CPU to make sure that the task is consumed as
@@ -402,8 +402,10 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	s32 cpu;
 
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
-	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu))
+	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu)) {
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return cpu;
+	}
 
 	return prev_cpu;
 }
@@ -432,8 +434,10 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
 		s32 cpu = scx_bpf_task_cpu(p);
-		dispatch_direct_cpu(p, cpu);
-		return;
+		if (!dispatch_direct_cpu(p, cpu)) {
+			__sync_fetch_and_add(&nr_kthread_dispatches, 1);
+			return;
+		}
 	}
 
 	tctx = lookup_task_ctx(p);

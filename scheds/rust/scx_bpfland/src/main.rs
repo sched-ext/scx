@@ -102,6 +102,7 @@ struct Opts {
 
 struct Metrics {
     nr_running: Gauge,
+    nr_kthread_dispatches: Gauge,
     nr_direct_dispatches: Gauge,
     nr_prio_dispatches: Gauge,
     nr_shared_dispatches: Gauge,
@@ -113,8 +114,11 @@ impl Metrics {
             nr_running: gauge!(
                 "nr_running", "info" => "Number of running tasks"
             ),
+            nr_kthread_dispatches: gauge!(
+                "nr_kthread_dispatches", "info" => "Number of kthread direct dispatches"
+            ),
             nr_direct_dispatches: gauge!(
-                "nr_direct_dispatches", "info" => "Number of direct dispatches"
+                "nr_direct_dispatches", "info" => "Number of task direct dispatches"
             ),
             nr_prio_dispatches: gauge!(
                 "nr_prio_dispatches", "info" => "Number of interactive task dispatches"
@@ -195,12 +199,17 @@ impl<'a> Scheduler<'a> {
     fn update_stats(&mut self) {
         let nr_cpus = libbpf_rs::num_possible_cpus().unwrap();
         let nr_running = self.skel.bss().nr_running;
+        let nr_kthread_dispatches = self.skel.bss().nr_kthread_dispatches;
         let nr_direct_dispatches = self.skel.bss().nr_direct_dispatches;
         let nr_prio_dispatches = self.skel.bss().nr_prio_dispatches;
         let nr_shared_dispatches = self.skel.bss().nr_shared_dispatches;
 
         // Update Prometheus statistics.
         self.metrics.nr_running.set(nr_running as f64);
+
+        self.metrics
+            .nr_kthread_dispatches
+            .set(nr_kthread_dispatches as f64);
         self.metrics
             .nr_direct_dispatches
             .set(nr_direct_dispatches as f64);
@@ -212,9 +221,10 @@ impl<'a> Scheduler<'a> {
             .set(nr_shared_dispatches as f64);
 
         // Log scheduling statistics.
-        info!("running={}/{} direct_dispatches={} prio_dispatches={} shared_dispatches={}",
+        info!("running={}/{} kthread_dispatches={} direct_dispatches={} prio_dispatches={} shared_dispatches={}",
             nr_running,
             nr_cpus,
+            nr_kthread_dispatches,
             nr_direct_dispatches,
             nr_prio_dispatches,
             nr_shared_dispatches);
