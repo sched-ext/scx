@@ -221,7 +221,7 @@ impl<'a> Scheduler<'a> {
             .set(nr_shared_dispatches as f64);
 
         // Log scheduling statistics.
-        info!("running={}/{} kthread_dispatches={} direct_dispatches={} prio_dispatches={} shared_dispatches={}",
+        info!("running: {:>4}/{:<4} | kthread: {:<6} | direct: {:<6} | prio: {:<6} | shared: {:<6}",
             nr_running,
             nr_cpus,
             nr_kthread_dispatches,
