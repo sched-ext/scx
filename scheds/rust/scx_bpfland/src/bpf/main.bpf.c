@@ -165,23 +165,12 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
  */
 static bool set_cpu_state(struct bpf_cpumask *cpumask, s32 cpu, bool state)
 {
-	struct bpf_cpumask *mask;
-	int ret = false;
-
-	bpf_rcu_read_lock();
-
-	mask = cpumask;
-	if (!mask)
-		goto out_rcu;
+	if (!cpumask)
+		return false;
 	if (state)
-		ret = bpf_cpumask_test_and_set_cpu(cpu, mask);
+		return bpf_cpumask_test_and_set_cpu(cpu, cpumask);
 	else
-		ret = bpf_cpumask_test_and_clear_cpu(cpu, mask);
-
-out_rcu:
-	bpf_rcu_read_unlock();
-
-	return ret;
+		return bpf_cpumask_test_and_clear_cpu(cpu, cpumask);
 }
 
 /*
@@ -455,13 +444,10 @@ static int consume_offline_cpus(s32 cpu)
 {
 	u64 cpu_max = scx_bpf_nr_cpu_ids();
 	struct bpf_cpumask *offline;
-	int ret = -ENOENT;
-
-	bpf_rcu_read_lock();
 
 	offline = offline_cpumask;
 	if (!offline)
-		goto out_rcu;
+		return -ENOENT;
 
 	/*
 	 * Cycle through all the CPUs and evenly consume tasks from the DSQs of
@@ -476,15 +462,11 @@ static int consume_offline_cpus(s32 cpu)
 		 * This CPU is offline, if a task has been dispatched there
 		 * consume it immediately on the current CPU.
 		 */
-		if (scx_bpf_consume(cpu_to_dsq(cpu))) {
-			ret = 0;
-			goto out_rcu;
-		}
+		if (scx_bpf_consume(cpu_to_dsq(cpu)))
+			return 0;
 	}
-out_rcu:
-	bpf_rcu_read_unlock();
 
-	return ret;
+	return -ENOENT;
 }
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
@@ -658,12 +640,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	}
 
 	/* Initialize the offline CPU mask */
-	bpf_rcu_read_lock();
 	err = calloc_cpumask(&offline_cpumask);
 	mask = offline_cpumask;
 	if (!mask)
 		err = -ENOMEM;
-	bpf_rcu_read_unlock();
 
 	return err;
 }
