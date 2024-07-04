@@ -234,12 +234,12 @@ static inline u64 task_vtime(struct task_struct *p)
 }
 
 /*
- * Return the task's unused portion of its previously assigned time slice (with
- * a minimum of slice_ns_min).
+ * Return the task's unused portion of its previously assigned time slice in
+ * the range a [slice_ns_min..slice_ns].
  */
 static inline u64 task_slice(struct task_struct *p)
 {
-	return MAX(p->scx.slice, slice_ns_min);
+	return CLAMP((p->scx.slice + slice_ns_min) / 2, slice_ns_min, slice_ns);
 }
 
 /*
