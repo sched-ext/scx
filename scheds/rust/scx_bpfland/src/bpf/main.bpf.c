@@ -259,7 +259,7 @@ static u64 cpu_to_dsq(s32 cpu)
  * Dispatch a task directly to the assigned CPU DSQ (used when an idle CPU is
  * found).
  */
-static int dispatch_direct_cpu(struct task_struct *p, s32 cpu)
+static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 {
 	u64 slice = task_slice(p);
 	u64 vtime = task_vtime(p);
@@ -272,7 +272,7 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu)
 	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 		return -EINVAL;
 
-	scx_bpf_dispatch_vtime(p, dsq_id, slice, vtime, 0);
+	scx_bpf_dispatch_vtime(p, dsq_id, slice, vtime, enq_flags);
 
 	/*
 	 * Wake-up the target CPU to make sure that the task is consumed as
@@ -402,7 +402,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	s32 cpu;
 
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
-	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu)) {
+	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return cpu;
 	}
@@ -434,7 +434,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
 		s32 cpu = scx_bpf_task_cpu(p);
-		if (!dispatch_direct_cpu(p, cpu)) {
+		if (!dispatch_direct_cpu(p, cpu, enq_flags)) {
 			__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 			return;
 		}
