@@ -59,10 +59,18 @@ const volatile u64 slice_ns_lag;
 const volatile bool local_kthreads;
 
 /*
- * Threshold of voluntary context switches used to classify a task as
- * interactive.
+ * Maximum threshold of voluntary context switches.
+ *
+ * This limits the range of nvcsw_avg_thresh (see below).
  */
-const volatile u64 nvcsw_thresh = 10ULL;
+const volatile u64 nvcsw_max_thresh = 10ULL;
+
+/*
+ * Global average of voluntary context switches used to classify interactive
+ * tasks: tasks with an average amount of voluntary context switches (nvcsw)
+ * greater than this value will be classified as interactive.
+ */
+volatile u64 nvcsw_avg_thresh;
 
 /*
  * Time threshold to prevent task starvation.
@@ -198,6 +206,15 @@ static inline bool is_kthread(const struct task_struct *p)
 }
 
 /*
+ * Return true if interactive tasks classification via voluntary context
+ * switches is enabled, false otherwise.
+ */
+static bool is_nvcsw_enabled(void)
+{
+	return !!nvcsw_max_thresh;
+}
+
+/*
  * Access a cpumask in read-only mode (typically to check bits).
  */
 static const struct cpumask *cast_mask(struct bpf_cpumask *mask)
@@ -246,6 +263,14 @@ static bool set_cpu_state(struct bpf_cpumask *cpumask, s32 cpu, bool state)
 static u64 calc_avg(u64 old_val, u64 new_val)
 {
 	return (old_val - (old_val >> 2)) + (new_val >> 2);
+}
+
+/*
+ * Evaluate the EWMA limited to the range [low ... high]
+ */
+static u64 calc_avg_clamp(u64 old_val, u64 new_val, u64 low, u64 high)
+{
+	return CLAMP(calc_avg(old_val, new_val), low, high);
 }
 
 /*
@@ -721,13 +746,14 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 static void update_task_interactive(struct task_ctx *tctx)
 {
 	/*
-	 * Classify interactive tasks based on the average amount of their
-	 * voluntary context switches.
+	 * Classify the task based on the average of voluntary context
+	 * switches.
 	 *
-	 * If the average of voluntarily context switches is below
-	 * nvcsw_thresh, the task is classified as regular.
+	 * If the task has an average greater than the global average
+	 * (nvcsw_avg_thresh) it is classified as interactive, otherwise the
+	 * task is classified as regular.
 	 */
-	tctx->is_interactive = tctx->avg_nvcsw >= nvcsw_thresh;
+	tctx->is_interactive = tctx->avg_nvcsw >= nvcsw_avg_thresh;
 }
 
 /*
@@ -772,19 +798,45 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 * using an exponentially weighted moving average, see calc_avg().
 	 */
 	delta_t = (s64)(now - tctx->nvcsw_ts);
-	if (nvcsw_thresh && delta_t > NSEC_PER_SEC) {
+	if (is_nvcsw_enabled() && delta_t > NSEC_PER_SEC) {
 		u64 delta_nvcsw = p->nvcsw - tctx->nvcsw;
 		u64 avg_nvcsw = delta_nvcsw * NSEC_PER_SEC / delta_t;
 
-		tctx->avg_nvcsw = calc_avg(tctx->avg_nvcsw, avg_nvcsw);
+		/*
+		 * Evaluate the average nvcsw for the task, limited to the
+		 * range [0 .. nvcsw_max_thresh * 8] to prevent excessive
+		 * spikes.
+		 */
+		tctx->avg_nvcsw = calc_avg_clamp(tctx->avg_nvcsw, avg_nvcsw,
+						 0, nvcsw_max_thresh << 3);
 		tctx->nvcsw = p->nvcsw;
 		tctx->nvcsw_ts = now;
 
+		/*
+		 * Update the global voluntary context switches average using
+		 * an exponentially weighted moving average (EWMA) with the
+		 * formula:
+		 *
+		 *   avg(t) = avg(t - 1) * 0.75 - task_avg(t) * 0.25
+		 *
+		 * This approach is more efficient than iterating through all
+		 * tasks and it helps to prevent rapid fluctuations that may be
+		 * caused by bursts of voluntary context switch events.
+		 *
+		 * Additionally, restrict the global nvcsw_avg_thresh average
+		 * to the range [1 .. nvcsw_max_thresh] to always allow the
+		 * classification of some tasks as interactive.
+		 */
+		nvcsw_avg_thresh = calc_avg_clamp(nvcsw_avg_thresh, avg_nvcsw,
+						  1, nvcsw_max_thresh);
+		/*
+		 * Reresh task status: interactive or regular.
+		 */
 		update_task_interactive(tctx);
 
 		dbg_msg("%d (%s) avg_nvcsw = %llu [%s]",
 			p->pid, p->comm, tctx->avg_nvcsw,
-			tctx->avg_nvcsw < nvcsw_thresh ? "regular" : "interactive");
+			tctx->avg_nvcsw < nvcsw_avg_thresh ? "regular" : "interactive");
 	}
 }
 
