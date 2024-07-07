@@ -84,7 +84,7 @@ volatile u64 nr_direct_dispatches, nr_kthread_dispatches,
 /*
  * Amount of currently running tasks.
  */
-volatile u64 nr_running;
+volatile u64 nr_running, nr_interactive;
 
 /*
  * Exit information.
@@ -586,6 +586,12 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 
 void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 {
+	struct task_ctx *tctx;
+
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
 	/* Update global vruntime */
 	if (vtime_before(vtime_now, p->scx.dsq_vtime))
 		vtime_now = p->scx.dsq_vtime;
@@ -596,6 +602,10 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	 */
 	if (p->scx.slice > slice_ns)
 		p->scx.slice = slice_ns;
+
+	/* Update CPU interactive state */
+	if (tctx->is_interactive)
+		__sync_fetch_and_add(&nr_interactive, 1);
 
 	__sync_fetch_and_add(&nr_running, 1);
 }
@@ -614,6 +624,9 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	tctx = lookup_task_ctx(p);
 	if (!tctx)
 		return;
+
+	if (tctx->is_interactive)
+		__sync_fetch_and_sub(&nr_interactive, 1);
 
 	/*
 	 * Update task vruntime, charging the weighted used time slice.
@@ -722,6 +735,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	mask = offline_cpumask;
 	if (!mask)
 		err = -ENOMEM;
+	if (err)
+		return err;
 
 	return err;
 }
