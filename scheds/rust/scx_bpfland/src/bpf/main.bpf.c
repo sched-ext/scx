@@ -641,7 +641,8 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 * opportunities to be classified as interactive and dispatched to the
 	 * high priority DSQ (PRIO_DSQ).
 	 */
-	p->scx.dsq_vtime += (slice_ns - p->scx.slice) * 100 / p->scx.weight;
+	if (slice_ns > p->scx.slice)
+		p->scx.dsq_vtime += (slice_ns - p->scx.slice) * 100 / p->scx.weight;
 
 	/*
 	 * Refresh voluntary context switch metrics.
