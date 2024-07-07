@@ -34,7 +34,7 @@ const volatile bool debug;
 /*
  * Default task time slice.
  */
-const volatile u64 slice_ns = 5ULL * NSEC_PER_SEC;
+const volatile u64 slice_ns = 5ULL * NSEC_PER_MSEC;
 
 /*
  * Time slice used when system is over commissioned.
