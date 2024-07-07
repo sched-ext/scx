@@ -72,6 +72,15 @@ struct Opts {
     #[clap(short = 'l', long, default_value = "0")]
     slice_us_lag: u64,
 
+    /// Enable per-CPU kthreads prioritization.
+    ///
+    /// Enabling this can enhance the performance of interrupt-driven workloads (e.g., networking
+    /// throughput) over regular system/user workloads. However, it may also introduce
+    /// interactivity issues or unfairness under heavy interrupt-driven loads, such as high RX
+    /// network traffic.
+    #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
+    local_kthreads: bool,
+
     /// Threshold of voluntary context switch per second, used to classify interactive tasks
     /// (0 = disable interactive tasks classification).
     #[clap(short = 'c', long, default_value = "10")]
@@ -179,6 +188,7 @@ impl<'a> Scheduler<'a> {
         // Override default BPF scheduling parameters.
         skel.rodata_mut().debug = opts.debug;
         skel.rodata_mut().smt_enabled = smt_enabled;
+        skel.rodata_mut().local_kthreads = opts.local_kthreads;
         skel.rodata_mut().slice_ns = opts.slice_us * 1000;
         skel.rodata_mut().slice_ns_min = opts.slice_us_min * 1000;
         skel.rodata_mut().slice_ns_lag = opts.slice_us_lag * 1000;

@@ -51,6 +51,19 @@ const volatile u64 slice_ns_min = 500ULL * NSEC_PER_USEC;
 const volatile u64 slice_ns_lag;
 
 /*
+ * When enabled always dispatch per-CPU kthreads directly on their CPU DSQ.
+ *
+ * This allows to prioritize critical kernel threads that may potentially slow
+ * down the entire system if they are blocked for too long (i.e., ksoftirqd/N,
+ * rcuop/N, etc.).
+ *
+ * NOTE: this could cause interactivity problems or unfairness if there are too
+ * many softirqs being scheduled (e.g., in presence of high RX network RX
+ * traffic).
+ */
+const volatile bool local_kthreads;
+
+/*
  * Threshold of voluntary context switches used to classify a task as
  * interactive.
  */
@@ -420,18 +433,10 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *tctx;
 
 	/*
-	 * Always dispatch per-CPU kthreads directly on their target CPU.
-	 *
-	 * This allows to prioritize critical kernel threads that may
-	 * potentially slow down the entire system if they are blocked for too
-	 * long (i.e., ksoftirqd/N, rcuop/N, etc.).
-	 *
-	 * NOTE: this could cause interactivity problems or unfairness if there
-	 * are too many softirqs being scheduled (e.g., in presence of high RX
-	 * network RX traffic). However, considering that the main target of
-	 * this scheduler is desktop usage, this shouldn't be a problem.
+	 * Always dispatch per-CPU kthreads directly on their target CPU if
+	 * local_kthreads is enabled.
 	 */
-	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
+	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
 		s32 cpu = scx_bpf_task_cpu(p);
 		if (!dispatch_direct_cpu(p, cpu, enq_flags)) {
 			__sync_fetch_and_add(&nr_kthread_dispatches, 1);
