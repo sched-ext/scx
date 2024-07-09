@@ -110,6 +110,28 @@ UEI_DEFINE(uei);
 private(BPFLAND) struct bpf_cpumask __kptr *offline_cpumask;
 
 /*
+ * Determine when we need to drain tasks dispatched to CPUs that went offline.
+ */
+static int offline_needed;
+
+/*
+ * Notify the scheduler that we need to drain and re-enqueue the tasks
+ * dispatched to the offline CPU DSQs.
+ */
+static void set_offline_needed(void)
+{
+	__sync_fetch_and_or(&offline_needed, 1);
+}
+
+/*
+ * Check and clear the state of the offline CPUs re-enqueuing.
+ */
+static bool test_and_clear_offline_needed(void)
+{
+	return __sync_fetch_and_and(&offline_needed, 0) == 1;
+}
+
+/*
  * CPUs in the system have SMT is enabled.
  */
 const volatile bool smt_enabled = true;
@@ -320,6 +342,7 @@ static u64 cpu_to_dsq(s32 cpu)
  */
 static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 {
+	struct bpf_cpumask *offline;
 	u64 slice = task_slice(p);
 	u64 vtime = task_vtime(p);
 	u64 dsq_id = cpu_to_dsq(cpu);
@@ -332,6 +355,18 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 		return -EINVAL;
 
 	scx_bpf_dispatch_vtime(p, dsq_id, slice, vtime, enq_flags);
+
+	/*
+	 * If the CPU has gone offline notify that the task needs to be
+	 * consumed from another CPU.
+	 */
+	offline = offline_cpumask;
+	if (!offline)
+		return 0;
+	if (bpf_cpumask_test_cpu(cpu, cast_mask(offline))) {
+		set_offline_needed();
+		return 0;
+	}
 
 	/*
 	 * Wake-up the target CPU to make sure that the task is consumed as
@@ -537,6 +572,10 @@ static bool consume_offline_cpus(s32 cpu)
 {
 	u64 cpu_max = scx_bpf_nr_cpu_ids();
 	struct bpf_cpumask *offline;
+	bool ret = false;
+
+	if (!test_and_clear_offline_needed())
+		return false;
 
 	offline = offline_cpumask;
 	if (!offline)
@@ -555,11 +594,14 @@ static bool consume_offline_cpus(s32 cpu)
 		 * This CPU is offline, if a task has been dispatched there
 		 * consume it immediately on the current CPU.
 		 */
-		if (scx_bpf_consume(cpu_to_dsq(cpu)))
-			return true;
+		if (scx_bpf_consume(cpu_to_dsq(cpu))) {
+			set_offline_needed();
+			ret = true;
+			break;
+		}
 	}
 
-	return false;
+	return ret;
 }
 
 /*
@@ -622,6 +664,13 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	u64 now = bpf_ktime_get_ns();
 
 	/*
+	 * Try also to steal tasks directly dispatched to CPUs that have gone
+	 * offline (this allows to prevent indefinite task stalls).
+	 */
+	if (consume_offline_cpus(cpu))
+		return;
+
+	/*
 	 * Make sure we are not staving tasks from the lower priority DSQs.
 	 */
 	if (consume_starving_tasks(now))
@@ -632,13 +681,6 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * the CPU assigned in select_cpu().
 	 */
 	if (scx_bpf_consume(cpu_to_dsq(cpu)))
-		return;
-
-	/*
-	 * Try also to steal tasks directly dispatched to CPUs that have gone
-	 * offline (this allows to prevent indefinite task stalls).
-	 */
-	if (consume_offline_cpus(cpu))
 		return;
 
 	/*
@@ -769,7 +811,7 @@ void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 
 void BPF_STRUCT_OPS(bpfland_cpu_online, s32 cpu)
 {
-	/* Set the CPU state to offline */
+	/* Set the CPU state to online */
 	set_cpu_state(offline_cpumask, cpu, false);
 
 	__sync_fetch_and_add(&nr_online_cpus, 1);
@@ -777,10 +819,11 @@ void BPF_STRUCT_OPS(bpfland_cpu_online, s32 cpu)
 
 void BPF_STRUCT_OPS(bpfland_cpu_offline, s32 cpu)
 {
-	/* Set the CPU state to online */
+	/* Set the CPU state to offline */
 	set_cpu_state(offline_cpumask, cpu, true);
 
 	__sync_fetch_and_sub(&nr_online_cpus, 1);
+	set_offline_needed();
 }
 
 s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
