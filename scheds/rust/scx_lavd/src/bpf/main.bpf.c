@@ -636,13 +636,13 @@ static void proc_introspec_sched_n(struct task_struct *p,
 	cur_nr = intrspc.arg;
 
 	/*
-	 * Note that the bounded retry (@LAVD_MAX_CAS_RETRY) does *not
-	 * *guarantee* to decrement introspec_arg. However, it is unlikely to
-	 * happen. Even if it happens, it is nothing but a matter of delaying a
-	 * message delivery. That's because other threads will try and succeed
-	 * the CAS operation eventually. So this is good enough. ;-)
+	 * Note that the bounded retry (@LAVD_MAX_RETRY) does *not *guarantee*
+	 * to decrement introspec_arg. However, it is unlikely to happen. Even
+	 * if it happens, it is nothing but a matter of delaying a message
+	 * delivery. That's because other threads will try and succeed the CAS
+	 * operation eventually. So this is good enough. ;-)
 	 */
-	for (i = 0; cur_nr > 0 && i < LAVD_MAX_CAS_RETRY; i++) {
+	for (i = 0; cur_nr > 0 && i < LAVD_MAX_RETRY; i++) {
 		prev_nr = __sync_val_compare_and_swap(
 				&intrspc.arg, cur_nr, cur_nr - 1);
 		/* CAS success: submit a message and done */
@@ -838,7 +838,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		 * If the CPU is in an idle state (i.e., idle_start_clk is
 		 * non-zero), accumulate the current idle peirod so far.
 		 */
-		for (int i = 0; i < LAVD_MAX_CAS_RETRY; i++) {
+		for (int i = 0; i < LAVD_MAX_RETRY; i++) {
 			u64 old_clk = cpuc->idle_start_clk;
 			if (old_clk == 0)
 				break;
