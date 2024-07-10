@@ -427,73 +427,6 @@ static const u64 sched_prio_to_latency_weight[NICE_WIDTH] = {
 	170667,		/*  19		39		512001 */
 };
 
-/*
- * A latency priority to greedy ratios for eligibility
- * ---------------------------------------------------
- *
- * This table is nothing but sched_prio_to_slice_weight * (1000/1024) for
- * direct comparison against greedy_ratio, which is based on 1000.
- *
- * We distribute CPU time based on its nice (static) priorities described in
- * sched_prio_to_slice_weight, the same as the conventional way, for the fair
- * use of CPU time. However, when checking whether a particular task is
- * eligible, we consider its (dynamic) latency priority. Because a
- * latency-critical task may have CPU usage spikes to meet its (soft) deadline,
- * too strict fairness enforcement does not work well.
- *
- * Hence, we are more generous to a latency-critical task and aim for eventual
- * fairness of CPU time. To this end, we determine the task's time slice and
- * ineligible duration based on its nice priority for fairness. But we check if
- * a task is greedier compared to its (dynamic) _latency_ priority (not nice
- * priority). This allows the task to use more CPU time temporarily, but
- * eventually, its CPU time is under fairness control using time slice and
- * ineligibility duration calculation.
- */
-static const u64 lat_prio_to_greedy_thresholds[NICE_WIDTH] = {
-	/* weight	nice priority	sched priority */
-	/* ------	-------------	-------------- */
-	86681,		/* -20		 0 */
-	70073,		/* -19		 1 */
-	55159,		/* -18		 2 */
-	45188,		/* -17		 3 */
-	35440,		/* -16		 4 */
-	28471,		/* -15		 5 */
-	22709,		/* -14		 6 */
-	18267,		/* -13		 7 */
-	14599,		/* -12		 8 */
-	11637,		/* -11		 9 */
-	 9324,		/* -10		10 */
-	 7441,		/*  -9		11 */
-	 5957,		/*  -8		12 */
-	 4789,		/*  -7		13 */
-	 3814,		/*  -6		14 */
-	 3048,		/*  -5		15 */
-	 2442,		/*  -4		16 */
-	 1944,		/*  -3		17 */
-	 1549,		/*  -2		18 */
-	 1247,		/*  -1		19 */
-	 1000,		/*   0		20 */
-	 1000,		/*   1		21 */
-	 1000,		/*   2		22 */
-	 1000,		/*   3		23 */
-	 1000,		/*   4		24 */
-	 1000,		/*   5		25 */
-	 1000,		/*   6		26 */
-	 1000,		/*   7		27 */
-	 1000,		/*   8		28 */
-	 1000,		/*   9		29 */
-	 1000,		/*  10		30 */
-	 1000,		/*  11		31 */
-	 1000,		/*  12		32 */
-	 1000,		/*  13		33 */
-	 1000,		/*  14		34 */
-	 1000,		/*  15		35 */
-	 1000,		/*  16		36 */
-	 1000,		/*  17		37 */
-	 1000,		/*  18		38 */
-	 1000,		/*  19		39 */
-};
-
 static u16 get_nice_prio(struct task_struct *p);
 static u64 get_task_load_ideal(struct task_struct *p);
 static void adjust_slice_boost(struct cpu_ctx *cpuc, struct task_ctx *taskc);
@@ -1186,16 +1119,7 @@ static u32 calc_greedy_factor(struct task_ctx *taskc)
 	else if (lat_prio >= NICE_WIDTH)
 		lat_prio = NICE_WIDTH - 1;
 
-	/*
-	 * When determining how greedy a task is, we are more generous to a
-	 * latency-critical task with a low lat_prio value. That is because a
-	 * latency-critical task can temporarily overspend CPU time. However,
-	 * the time slice and ineligible duration allocation will eventually
-	 * enforce fairness.
-	 */
-	greedy_threshold = lat_prio_to_greedy_thresholds[lat_prio];
-
-	gr_ft = (greedy_ratio * 1000) / greedy_threshold;
+	gr_ft = greedy_ratio;
 	if (gr_ft < 1000)
 		gr_ft = 1000;
 	else
@@ -1214,14 +1138,7 @@ static bool is_eligible(struct task_ctx *taskc)
 	else if (lat_prio >= NICE_WIDTH)
 		lat_prio = NICE_WIDTH - 1;
 
-	/*
-	 * Similar to the greedy factor calculation, we have a loose bound for
-	 * a latency-critical task. That makes a latency-critical task less
-	 * frequently ineligible for low (tail) latency.
-	 */
-	greedy_threshold = lat_prio_to_greedy_thresholds[lat_prio];
-
-	return taskc->greedy_ratio <= greedy_threshold;
+	return taskc->greedy_ratio <= 1000;
 }
 
 static bool is_wakeup_wf(u64 wake_flags)
