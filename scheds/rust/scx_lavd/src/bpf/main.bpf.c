@@ -363,70 +363,6 @@ static const u64 sched_prio_to_slice_weight[NICE_WIDTH] = {
 	   15,		/*  19		39 */
 };
 
-/*
- * A nice priority to latency weight array
- * ---------------------------------------
- *
- * It is used to determine the virtual deadline. Each step increases by 10%.
- * The idea behind the virtual deadline is to limit the competition window
- * among concurrent tasks. For example, in the case of a normal priority task
- * with nice 0, its corresponding value is 7.5 msec (when LAVD_LAT_WEIGHT_SHIFT
- * is 0). This guarantees that any tasks enqueued in 7.5 msec after the task is
- * enqueued will not compete for CPU time with the task. This array is the
- * inverse of sched_prio_to_latency_weight with some normalization. Suppose the
- * maximum time slice per schedule (LAVD_SLICE_MAX_NS) is 3 msec. We normalized
- * the values so that the normal priority (nice 0) has a deadline of 7.5 msec,
- * a center of the targeted latency (i.e., when LAVD_TARGETED_LATENCY_NS is 15
- * msec). The virtual deadline ranges from 87 usec to 512 msec. As the maximum
- * time slice becomes shorter, the deadlines become tighter.
- */
-static const u64 sched_prio_to_latency_weight[NICE_WIDTH] = {
-	/* weight	nice priority	sched priority	vdeadline (usec)    */
-	/*						(max slice == 3 ms) */
-	/*                                              (LAVD_LAT_WEIGHT_SHIFT == 0) */
-	/* ------	-------------	--------------	------------------- */
-	    29,		/* -20		 0		    87 */
-	    36,		/* -19		 1		   108 */
-	    45,		/* -18		 2		   135 */
-	    55,		/* -17		 3		   165 */
-	    71,		/* -16		 4		   213 */
-	    88,		/* -15		 5		   264 */
-	   110,		/* -14		 6		   330 */
-	   137,		/* -13		 7		   411 */
-	   171,		/* -12		 8		   513 */
-	   215,		/* -11		 9		   645 */
-	   268,		/* -10		10		   804 */
-	   336,		/*  -9		11		  1008 */
-	   420,		/*  -8		12		  1260 */
-	   522,		/*  -7		13		  1566 */
-	   655,		/*  -6		14		  1965 */
-	   820,		/*  -5		15		  2460 */
-	  1024,		/*  -4		16		  3072 */
-	  1286,		/*  -3		17		  3858 */
-	  1614,		/*  -2		18		  4842 */
-	  2005,		/*  -1		19		  6015 */
-	  2500,		/*   0		20		  7500 */
-	  3122,		/*   1		21		  9366 */
-	  3908,		/*   2		22		 11724 */
-	  4867,		/*   3		23		 14601 */
-	  6052,		/*   4		24		 18156 */
-	  7642,		/*   5		25		 22926 */
-	  9412,		/*   6		26		 28236 */
-	 11907,		/*   7		27		 35721 */
-	 14884,		/*   8		28		 44652 */
-	 18686,		/*   9		29		 56058 */
-	 23273,		/*  10		30		 69819 */
-	 29425,		/*  11		31		 88275 */
-	 36571,		/*  12		32		109713 */
-	 45714,		/*  13		33		137142 */
-	 56889,		/*  14		34		170667 */
-	 71111,		/*  15		35		213333 */
-	 88276,		/*  16		36		264828 */
-	111304,		/*  17		37		333912 */
-	142222,		/*  18		38		426666 */
-	170667,		/*  19		39		512001 */
-};
-
 static u16 get_nice_prio(struct task_struct *p);
 static u64 get_task_load_ideal(struct task_struct *p);
 static void adjust_slice_boost(struct cpu_ctx *cpuc, struct task_ctx *taskc);
@@ -1111,7 +1047,6 @@ static u32 calc_greedy_factor(struct task_ctx *taskc)
 {
 	u32 greedy_ratio = taskc->greedy_ratio;
 	s16 lat_prio = taskc->lat_prio;
-	u32 greedy_threshold;
 	u32 gr_ft;
 
 	if (lat_prio < 0)
@@ -1130,7 +1065,6 @@ static u32 calc_greedy_factor(struct task_ctx *taskc)
 
 static bool is_eligible(struct task_ctx *taskc)
 {
-	u64 greedy_threshold;
 	s16 lat_prio = taskc->lat_prio;
 
 	if (lat_prio < 0)
@@ -1366,12 +1300,7 @@ static u64 calc_latency_weight(struct task_struct *p, struct task_ctx *taskc,
 			       struct cpu_ctx *cpuc, bool is_wakeup)
 {
 	boost_lat(p, taskc, cpuc, is_wakeup);
-
-	/*
-	 * Tighten the competition window according to LAVD_LAT_WEIGHT_SHIFT.
-	 */
-	return sched_prio_to_latency_weight[taskc->lat_prio] >>
-	       LAVD_LAT_WEIGHT_SHIFT;
+	return LAVD_LAT_WEIGHT_FT / sched_prio_to_slice_weight[taskc->lat_prio];
 }
 
 static u64 calc_virtual_deadline_delta(struct task_struct *p,
