@@ -84,7 +84,7 @@ volatile u64 nr_direct_dispatches, nr_kthread_dispatches,
 /*
  * Amount of currently running tasks.
  */
-volatile u64 nr_running, nr_interactive;
+volatile u64 nr_running, nr_interactive, nr_online_cpus;
 
 /*
  * Exit information.
@@ -682,12 +682,16 @@ void BPF_STRUCT_OPS(bpfland_cpu_online, s32 cpu)
 {
 	/* Set the CPU state to offline */
 	set_cpu_state(offline_cpumask, cpu, false);
+
+	__sync_fetch_and_add(&nr_online_cpus, 1);
 }
 
 void BPF_STRUCT_OPS(bpfland_cpu_offline, s32 cpu)
 {
 	/* Set the CPU state to online */
 	set_cpu_state(offline_cpumask, cpu, true);
+
+	__sync_fetch_and_sub(&nr_online_cpus, 1);
 }
 
 s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
@@ -700,11 +704,37 @@ s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 		return -ENOMEM;
 }
 
+/*
+ * Evaluate the amount of online CPUs.
+ */
+s32 get_nr_online_cpus(void)
+{
+	const struct cpumask *online_cpumask;
+	u64 cpu_max = scx_bpf_nr_cpu_ids();
+	int i, cpus = 0;
+
+	cpu_max = scx_bpf_nr_cpu_ids();
+	online_cpumask = scx_bpf_get_online_cpumask();
+
+	bpf_for(i, 0, cpu_max) {
+		if (!bpf_cpumask_test_cpu(i, online_cpumask))
+			continue;
+		cpus++;
+	}
+
+	scx_bpf_put_cpumask(online_cpumask);
+
+	return cpus;
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 {
 	struct bpf_cpumask *mask;
 	int err;
 	s32 cpu;
+
+	/* Initialize amount of online CPUs */
+	nr_online_cpus = get_nr_online_cpus();
 
 	/* Create per-CPU DSQs (used to dispatch tasks directly on a CPU) */
 	bpf_for(cpu, 0, MAX_CPUS) {

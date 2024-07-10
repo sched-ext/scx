@@ -205,7 +205,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn update_stats(&mut self) {
-        let nr_cpus = libbpf_rs::num_possible_cpus().unwrap();
+        let nr_cpus = self.skel.bss().nr_online_cpus;
         let nr_running = self.skel.bss().nr_running;
         let nr_interactive = self.skel.bss().nr_interactive;
         let nr_kthread_dispatches = self.skel.bss().nr_kthread_dispatches;
