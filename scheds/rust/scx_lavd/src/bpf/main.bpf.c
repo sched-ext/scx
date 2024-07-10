@@ -1410,7 +1410,7 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 		 * is lower (i.e., higher value) and the load is higher.
 		 */
 		vdeadline_delta_ns = (vdeadline_delta_ns * load_factor *
-				      taskc->lat_prio * taskc->lat_prio) /
+				      taskc->lat_prio) /
 				     (LAVD_LOAD_FACTOR_FT * 1000);
 	}
 
