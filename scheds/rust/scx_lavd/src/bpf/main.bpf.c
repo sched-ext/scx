@@ -1481,7 +1481,7 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	 */
 	is_wakeup = is_wakeup_ef(enq_flags);
 	weight = calc_latency_weight(p, taskc, cpuc, is_wakeup);
-	vdeadline_delta_ns = (LAVD_SLICE_MAX_NS * weight) / 1000;
+	vdeadline_delta_ns = (taskc->run_time_ns * weight) / 1000;
 
 	/*
 	 * When a system is overloaded (>1000), stretch time space so make time
