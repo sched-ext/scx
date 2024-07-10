@@ -1289,7 +1289,7 @@ static int boost_lat(struct task_struct *p, struct task_ctx *taskc,
 	 * its property.
 	 */
 	if (!have_scheduled(taskc)) {
-		boost = 0;
+		boost = LAVD_LAT_PRIO_NEW;
 		goto out;
 	}
 

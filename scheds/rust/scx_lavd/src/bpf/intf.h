@@ -74,6 +74,7 @@ enum consts {
 	LAVD_SLICE_BOOST_MAX_FT		= 2, /* maximum additional 2x of slice */
 	LAVD_SLICE_BOOST_MAX_STEP	= 8, /* 8 slice exhausitions in a row */
 	LAVD_GREEDY_RATIO_MAX		= USHRT_MAX,
+	LAVD_LAT_PRIO_NEW		= 10,
 	LAVD_LAT_PRIO_IDLE		= USHRT_MAX,
 	LAVD_LAT_WEIGHT_SHIFT		= 5,
 
