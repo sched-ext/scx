@@ -72,6 +72,15 @@ struct Opts {
     #[clap(short = 'l', long, default_value = "0")]
     slice_us_lag: u64,
 
+    /// Enable per-CPU kthreads prioritization.
+    ///
+    /// Enabling this can enhance the performance of interrupt-driven workloads (e.g., networking
+    /// throughput) over regular system/user workloads. However, it may also introduce
+    /// interactivity issues or unfairness under heavy interrupt-driven loads, such as high RX
+    /// network traffic.
+    #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
+    local_kthreads: bool,
+
     /// Threshold of voluntary context switch per second, used to classify interactive tasks
     /// (0 = disable interactive tasks classification).
     #[clap(short = 'c', long, default_value = "10")]
@@ -101,6 +110,7 @@ struct Opts {
 
 struct Metrics {
     nr_running: Gauge,
+    nr_interactive: Gauge,
     nr_kthread_dispatches: Gauge,
     nr_direct_dispatches: Gauge,
     nr_prio_dispatches: Gauge,
@@ -112,6 +122,9 @@ impl Metrics {
         Metrics {
             nr_running: gauge!(
                 "nr_running", "info" => "Number of running tasks"
+            ),
+            nr_interactive: gauge!(
+                "nr_interactive", "info" => "Number of running interactive tasks"
             ),
             nr_kthread_dispatches: gauge!(
                 "nr_kthread_dispatches", "info" => "Number of kthread direct dispatches"
@@ -175,6 +188,7 @@ impl<'a> Scheduler<'a> {
         // Override default BPF scheduling parameters.
         skel.rodata_mut().debug = opts.debug;
         skel.rodata_mut().smt_enabled = smt_enabled;
+        skel.rodata_mut().local_kthreads = opts.local_kthreads;
         skel.rodata_mut().slice_ns = opts.slice_us * 1000;
         skel.rodata_mut().slice_ns_min = opts.slice_us_min * 1000;
         skel.rodata_mut().slice_ns_lag = opts.slice_us_lag * 1000;
@@ -201,16 +215,21 @@ impl<'a> Scheduler<'a> {
     }
 
     fn update_stats(&mut self) {
-        let nr_cpus = libbpf_rs::num_possible_cpus().unwrap();
+        let nr_cpus = self.skel.bss().nr_online_cpus;
         let nr_running = self.skel.bss().nr_running;
+        let nr_interactive = self.skel.bss().nr_interactive;
         let nr_kthread_dispatches = self.skel.bss().nr_kthread_dispatches;
         let nr_direct_dispatches = self.skel.bss().nr_direct_dispatches;
         let nr_prio_dispatches = self.skel.bss().nr_prio_dispatches;
         let nr_shared_dispatches = self.skel.bss().nr_shared_dispatches;
 
         // Update Prometheus statistics.
-        self.metrics.nr_running.set(nr_running as f64);
-
+        self.metrics
+            .nr_running
+            .set(nr_running as f64);
+        self.metrics
+            .nr_interactive
+            .set(nr_interactive as f64);
         self.metrics
             .nr_kthread_dispatches
             .set(nr_kthread_dispatches as f64);
@@ -225,9 +244,10 @@ impl<'a> Scheduler<'a> {
             .set(nr_shared_dispatches as f64);
 
         // Log scheduling statistics.
-        info!("running: {:>4}/{:<4} | kthread: {:<6} | direct: {:<6} | prio: {:<6} | shared: {:<6}",
+        info!("running: {:>4}/{:<4} interactive: {:>4} | kthread: {:<6} | direct: {:<6} | prio: {:<6} | shared: {:<6}",
             nr_running,
             nr_cpus,
+            nr_interactive,
             nr_kthread_dispatches,
             nr_direct_dispatches,
             nr_prio_dispatches,

@@ -34,7 +34,7 @@ const volatile bool debug;
 /*
  * Default task time slice.
  */
-const volatile u64 slice_ns = 5ULL * NSEC_PER_SEC;
+const volatile u64 slice_ns = 5ULL * NSEC_PER_MSEC;
 
 /*
  * Time slice used when system is over commissioned.
@@ -49,6 +49,19 @@ const volatile u64 slice_ns_min = 500ULL * NSEC_PER_USEC;
  * (0 = disabled).
  */
 const volatile u64 slice_ns_lag;
+
+/*
+ * When enabled always dispatch per-CPU kthreads directly on their CPU DSQ.
+ *
+ * This allows to prioritize critical kernel threads that may potentially slow
+ * down the entire system if they are blocked for too long (i.e., ksoftirqd/N,
+ * rcuop/N, etc.).
+ *
+ * NOTE: this could cause interactivity problems or unfairness if there are too
+ * many softirqs being scheduled (e.g., in presence of high RX network RX
+ * traffic).
+ */
+const volatile bool local_kthreads;
 
 /*
  * Threshold of voluntary context switches used to classify a task as
@@ -84,7 +97,7 @@ volatile u64 nr_direct_dispatches, nr_kthread_dispatches,
 /*
  * Amount of currently running tasks.
  */
-volatile u64 nr_running;
+volatile u64 nr_running, nr_interactive, nr_online_cpus;
 
 /*
  * Exit information.
@@ -133,14 +146,27 @@ struct {
 	__type(value, struct task_ctx);
 } task_ctx_stor SEC(".maps");
 
-/* Return a local task context from a generic task */
+/*
+ * Return a local task context from a generic task.
+ */
+struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
+{
+	return bpf_task_storage_get(&task_ctx_stor,
+					(struct task_struct *)p, 0, 0);
+}
+
+/*
+ * Return a local task context from a generic task, failing if it doesn't
+ * exist.
+ */
 struct task_ctx *lookup_task_ctx(const struct task_struct *p)
 {
 	struct task_ctx *tctx;
 
-	tctx = bpf_task_storage_get(&task_ctx_stor, (struct task_struct *)p, 0, 0);
+	tctx = try_lookup_task_ctx(p);
 	if (!tctx) {
-		scx_bpf_error("Failed to lookup task ctx for %s", p->comm);
+		scx_bpf_error("Failed to lookup task ctx for %d (%s)",
+			      p->pid, p->comm);
 		return NULL;
 	}
 	return tctx;
@@ -152,6 +178,15 @@ struct task_ctx *lookup_task_ctx(const struct task_struct *p)
 static inline bool is_kthread(const struct task_struct *p)
 {
 	return !!(p->flags & PF_KTHREAD);
+}
+
+/*
+ * Return true if the system is capable of accepting more interactive tasks,
+ * false otherwise.
+ */
+static bool is_interactive_avail(void)
+{
+	return scx_bpf_dsq_nr_queued(PRIO_DSQ) < nr_online_cpus * 4;
 }
 
 /*
@@ -380,6 +415,24 @@ out_put_cpumask:
 	return cpu;
 }
 
+/*
+ * Handle synchronous wake-up event for a task.
+ */
+static void handle_sync_wakeup(struct task_struct *p)
+{
+	struct task_ctx *tctx;
+
+	/*
+	 * If we are waking up a task set the task as interactive, so that it
+	 * can be dispatched as soon as possible on the first CPU available.
+	 */
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
+		return;
+	if (is_interactive_avail())
+		tctx->is_interactive = true;
+}
+
 s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	s32 cpu;
@@ -387,18 +440,8 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	/*
 	 * Try to prioritize newly awakened tasks.
 	 */
-	if (wake_flags & SCX_WAKE_SYNC) {
-		struct task_ctx *tctx;
-
-		/*
-		 * If we are waking up a task and we can't use the current CPU
-		 * at least set the task as interactive, so that it can be
-		 * dispatched as soon as possible on the first CPU available.
-		 */
-		tctx = lookup_task_ctx(p);
-		if (tctx)
-			tctx->is_interactive = true;
-	}
+	if (wake_flags & SCX_WAKE_SYNC)
+		handle_sync_wakeup(p);
 
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
 	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
@@ -420,18 +463,10 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *tctx;
 
 	/*
-	 * Always dispatch per-CPU kthreads directly on their target CPU.
-	 *
-	 * This allows to prioritize critical kernel threads that may
-	 * potentially slow down the entire system if they are blocked for too
-	 * long (i.e., ksoftirqd/N, rcuop/N, etc.).
-	 *
-	 * NOTE: this could cause interactivity problems or unfairness if there
-	 * are too many softirqs being scheduled (e.g., in presence of high RX
-	 * network RX traffic). However, considering that the main target of
-	 * this scheduler is desktop usage, this shouldn't be a problem.
+	 * Always dispatch per-CPU kthreads directly on their target CPU if
+	 * local_kthreads is enabled.
 	 */
-	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
+	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
 		s32 cpu = scx_bpf_task_cpu(p);
 		if (!dispatch_direct_cpu(p, cpu, enq_flags)) {
 			__sync_fetch_and_add(&nr_kthread_dispatches, 1);
@@ -444,10 +479,15 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Always dispatch interactive tasks to the priority DSQ and regular
-	 * tasks to the shared DSQ.
+	 * Dispatch interactive tasks to the priority DSQ and regular tasks to
+	 * the shared DSQ.
+	 *
+	 * However, avoid queuing too many tasks to the priority DSQ: if we
+	 * have a storm of interactive tasks (more than 4x the amount of CPUs
+	 * that can consume them) we can just dispatch them to the shared DSQ
+	 * and simply rely on the vruntime logic.
 	 */
-	if (tctx->is_interactive) {
+	if (tctx->is_interactive && is_interactive_avail()) {
 		scx_bpf_dispatch_vtime(p, PRIO_DSQ, slice, vtime, enq_flags);
 		__sync_fetch_and_add(&nr_prio_dispatches, 1);
 	} else {
@@ -586,6 +626,12 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 
 void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 {
+	struct task_ctx *tctx;
+
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
 	/* Update global vruntime */
 	if (vtime_before(vtime_now, p->scx.dsq_vtime))
 		vtime_now = p->scx.dsq_vtime;
@@ -597,6 +643,10 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	if (p->scx.slice > slice_ns)
 		p->scx.slice = slice_ns;
 
+	/* Update CPU interactive state */
+	if (tctx->is_interactive)
+		__sync_fetch_and_add(&nr_interactive, 1);
+
 	__sync_fetch_and_add(&nr_running, 1);
 }
 
@@ -607,6 +657,7 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 {
 	u64 now = bpf_ktime_get_ns();
+	s64 delta_t;
 	struct task_ctx *tctx;
 
 	__sync_fetch_and_sub(&nr_running, 1);
@@ -614,6 +665,9 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	tctx = lookup_task_ctx(p);
 	if (!tctx)
 		return;
+
+	if (tctx->is_interactive)
+		__sync_fetch_and_sub(&nr_interactive, 1);
 
 	/*
 	 * Update task vruntime, charging the weighted used time slice.
@@ -628,7 +682,8 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 * opportunities to be classified as interactive and dispatched to the
 	 * high priority DSQ (PRIO_DSQ).
 	 */
-	p->scx.dsq_vtime += (slice_ns - p->scx.slice) * 100 / p->scx.weight;
+	if (slice_ns > p->scx.slice)
+		p->scx.dsq_vtime += (slice_ns - p->scx.slice) * 100 / p->scx.weight;
 
 	/*
 	 * Refresh voluntary context switch metrics.
@@ -636,9 +691,9 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 * Evaluate the average number of voluntary context switches per second
 	 * using an exponentially weighted moving average, see calc_avg().
 	 */
-	if (now - tctx->nvcsw_ts > NSEC_PER_SEC) {
+	delta_t = (s64)(now - tctx->nvcsw_ts);
+	if (nvcsw_thresh && delta_t > NSEC_PER_SEC) {
 		u64 delta_nvcsw = p->nvcsw - tctx->nvcsw;
-		u64 delta_t = MAX(now - tctx->nvcsw_ts, 1);
 		u64 avg_nvcsw = delta_nvcsw * NSEC_PER_SEC / delta_t;
 
 		tctx->avg_nvcsw = calc_avg(tctx->avg_nvcsw, avg_nvcsw);
@@ -649,32 +704,51 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 			"curr_avg_nvcsw=%llu avg_nvcsw=%llu",
 			__func__, p->pid, p->comm, delta_nvcsw, delta_t,
 			avg_nvcsw, tctx->avg_nvcsw);
+		/*
+		 * Classify interactive tasks based on the average amount of their
+		 * voluntary context switches.
+		 *
+		 * A task can be promoted to interactive if the average of
+		 * voluntary context switches per second exceeds nvcsw_thresh.
+		 *
+		 * However, if the average of voluntarily context switches
+		 * drops to zero, the task will be demoted to regular.
+		 */
+		if (tctx->avg_nvcsw >= nvcsw_thresh)
+			tctx->is_interactive = true;
+		else if (tctx->avg_nvcsw == 0)
+			tctx->is_interactive = false;
 	}
-
-	/*
-	 * Classify interactive tasks based on the average amount of their
-	 * voluntary context switches.
-	 */
-	if (nvcsw_thresh && tctx->avg_nvcsw >= nvcsw_thresh)
-		tctx->is_interactive = true;
 }
 
 void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 {
+	struct task_ctx *tctx;
+
 	/* Initialize task's vruntime */
 	p->scx.dsq_vtime = vtime_now;
+
+	/* Initialize voluntary context switch timestamp */
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
+		return;
+	tctx->nvcsw_ts = bpf_ktime_get_ns();
 }
 
 void BPF_STRUCT_OPS(bpfland_cpu_online, s32 cpu)
 {
 	/* Set the CPU state to offline */
 	set_cpu_state(offline_cpumask, cpu, false);
+
+	__sync_fetch_and_add(&nr_online_cpus, 1);
 }
 
 void BPF_STRUCT_OPS(bpfland_cpu_offline, s32 cpu)
 {
 	/* Set the CPU state to online */
 	set_cpu_state(offline_cpumask, cpu, true);
+
+	__sync_fetch_and_sub(&nr_online_cpus, 1);
 }
 
 s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
@@ -687,11 +761,37 @@ s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 		return -ENOMEM;
 }
 
+/*
+ * Evaluate the amount of online CPUs.
+ */
+s32 get_nr_online_cpus(void)
+{
+	const struct cpumask *online_cpumask;
+	u64 cpu_max = scx_bpf_nr_cpu_ids();
+	int i, cpus = 0;
+
+	cpu_max = scx_bpf_nr_cpu_ids();
+	online_cpumask = scx_bpf_get_online_cpumask();
+
+	bpf_for(i, 0, cpu_max) {
+		if (!bpf_cpumask_test_cpu(i, online_cpumask))
+			continue;
+		cpus++;
+	}
+
+	scx_bpf_put_cpumask(online_cpumask);
+
+	return cpus;
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 {
 	struct bpf_cpumask *mask;
 	int err;
 	s32 cpu;
+
+	/* Initialize amount of online CPUs */
+	nr_online_cpus = get_nr_online_cpus();
 
 	/* Create per-CPU DSQs (used to dispatch tasks directly on a CPU) */
 	bpf_for(cpu, 0, MAX_CPUS) {
@@ -722,6 +822,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	mask = offline_cpumask;
 	if (!mask)
 		err = -ENOMEM;
+	if (err)
+		return err;
 
 	return err;
 }
