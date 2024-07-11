@@ -211,6 +211,7 @@ struct task_ctx {
 	/*
 	 * Task deadline and time slice
 	 */
+	u64	vdeadline_log_clk;	/* logical clock of the deadilne */
 	u64	vdeadline_delta_ns;	/* time delta until task's virtual deadline */
 	u64	eligible_delta_ns;	/* time delta until task becomes eligible */
 	u64	slice_ns;		/* time slice */

@@ -214,6 +214,11 @@ private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflo
 const volatile u16 cpu_order[LAVD_CPU_ID_MAX]; /* ordered by cpus->core->llc->numa */
 
 /*
+ * Logical current clock
+ */
+u64			cur_logical_clk;
+
+/*
  * Options
  */
 const volatile bool	no_freq_scaling;
@@ -1046,13 +1051,7 @@ static u64 calc_lat_factor(u64 lat_prio)
 static u32 calc_greedy_factor(struct task_ctx *taskc)
 {
 	u32 greedy_ratio = taskc->greedy_ratio;
-	s16 lat_prio = taskc->lat_prio;
 	u32 gr_ft;
-
-	if (lat_prio < 0)
-		lat_prio = 0;
-	else if (lat_prio >= NICE_WIDTH)
-		lat_prio = NICE_WIDTH - 1;
 
 	gr_ft = greedy_ratio;
 	if (gr_ft < 1000)
@@ -1065,13 +1064,6 @@ static u32 calc_greedy_factor(struct task_ctx *taskc)
 
 static bool is_eligible(struct task_ctx *taskc)
 {
-	s16 lat_prio = taskc->lat_prio;
-
-	if (lat_prio < 0)
-		lat_prio = 0;
-	else if (lat_prio >= NICE_WIDTH)
-		lat_prio = NICE_WIDTH - 1;
-
 	return taskc->greedy_ratio <= 1000;
 }
 
@@ -1493,6 +1485,11 @@ static void update_stat_for_running(struct task_struct *p,
 	u64 perf_cri_raw;
 
 	/*
+	 * Update the current logical clock.
+	 */
+	WRITE_ONCE(cur_logical_clk, taskc->vdeadline_log_clk);
+
+	/*
 	 * Since this is the start of a new schedule for @p, we update run
 	 * frequency in a second using an exponential weighted moving average.
 	 */
@@ -1595,6 +1592,17 @@ static void update_stat_for_quiescent(struct task_struct *p,
 	cpuc->load_run_time_ns -= cap_time_slice_ns(taskc->run_time_ns);
 }
 
+static u64 calc_exclusive_run_window(void)
+{
+	u64 load_factor;
+
+	load_factor = get_sys_stat_cur()->load_factor;
+	if (load_factor >= 1000)
+		return (LAVD_SLICE_MAX_NS * load_factor) / 1000;
+
+	return 0;
+}
+
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 			     struct cpu_ctx *cpuc, u64 enq_flags)
 {
@@ -1606,6 +1614,15 @@ static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	calc_virtual_deadline_delta(p, taskc, cpuc, enq_flags);
 	calc_eligible_delta(p, taskc);
+
+	/*
+	 * Update the logical clock of the virtual deadline including
+	 * ineligible duration.
+	 */
+	taskc->vdeadline_log_clk = READ_ONCE(cur_logical_clk) +
+				   calc_exclusive_run_window() +
+				   taskc->eligible_delta_ns +
+				   taskc->vdeadline_delta_ns;
 }
 
 static u64 get_est_stopping_time(struct task_ctx *taskc)
@@ -1786,7 +1803,8 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 */
 	switch(v) {
 	case 2:	/* two dandidates */
-		victim_cpu = can_task1_kick_task2(&prm_cpus[0], &prm_cpus[1]) ? &prm_cpus[0] : &prm_cpus[1];
+		victim_cpu = can_task1_kick_task2(&prm_cpus[0], &prm_cpus[1]) ?
+				&prm_cpus[0] : &prm_cpus[1];
 		goto bingo_out;
 	case 1:	/* one candidate */
 		victim_cpu = &prm_cpus[0];
@@ -1923,7 +1941,6 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 {
 	struct task_ctx *taskc_run;
 	struct task_struct *p_run;
-	u64 vdeadline;
 
 	/*
 	 * Calculate when a tack can be scheduled.
@@ -1932,8 +1949,6 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * right before running at ops.running().
 	 */
 	calc_when_to_run(p, taskc, cpuc, enq_flags);
-	vdeadline = taskc->eligible_delta_ns + taskc->vdeadline_delta_ns +
-		    bpf_ktime_get_ns();
 
 	/*
 	 * Try to find and kick a victim CPU, which runs a less urgent task.
@@ -1954,7 +1969,7 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * deadline.
 	 */
 	scx_bpf_dispatch_vtime(p, LAVD_GLOBAL_DSQ, LAVD_SLICE_UNDECIDED,
-			       vdeadline, enq_flags);
+			       taskc->vdeadline_log_clk, enq_flags);
 
 }
 
@@ -2951,6 +2966,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	if (err)
 		return err;
 
+	/*
+	 * Initilize the current logical clock.
+	 */
+	WRITE_ONCE(cur_logical_clk, now);
 	return err;
 }
 
