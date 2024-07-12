@@ -2428,6 +2428,12 @@ freq_out:
 		try_decrease_cpuperf_target(cpuc_run);
 }
 
+static bool are_related_tasks(struct task_struct *p, struct task_struct *q)
+{
+	return p->parent == q || q->parent == p ||
+	       p->tgid == q->tgid || p->parent == q->parent;
+}
+
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc;
@@ -2455,7 +2461,13 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	if (!is_wakeup_ef(enq_flags))
 		return;
 
+	/*
+	 * Filter out unrelated tasks.
+	 */
 	waker = bpf_get_current_task_btf();
+	if (!are_related_tasks(p, waker))
+		return;
+
 	waker_taskc = try_get_task_ctx(waker);
 	if (!waker_taskc) {
 		/*
