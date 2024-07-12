@@ -1905,7 +1905,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	prm_run.lat_prio = taskc_run->lat_prio;
 
 	bpf_rcu_read_lock();
-	__COMPAT_DSQ_FOR_EACH(p_wait, LAVD_GLOBAL_DSQ, 0) {
+	bpf_for_each(scx_dsq, p_wait, LAVD_GLOBAL_DSQ, 0) {
 		taskc_wait = get_task_ctx(p_wait);
 		if (!taskc_wait)
 			break;
@@ -2281,7 +2281,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If this CPU is not either in active or overflow CPUs, it tries to
 	 * find and run a task pinned to run on this CPU.
 	 */
-	__COMPAT_DSQ_FOR_EACH(p, LAVD_GLOBAL_DSQ, 0) {
+	bpf_for_each(scx_dsq, p, LAVD_GLOBAL_DSQ, 0) {
 		/*
 		 * Prioritize kernel tasks because most kernel tasks are pinned
 		 * to a particular CPU and latency-critical (e.g., ksoftirqd,

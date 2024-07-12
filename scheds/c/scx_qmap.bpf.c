@@ -23,7 +23,6 @@
  * Copyright (c) 2022 David Vernet <dvernet@meta.com>
  */
 #include <scx/common.bpf.h>
-#include <string.h>
 
 enum consts {
 	ONE_SEC_IN_NS		= 1000000000,
@@ -38,7 +37,6 @@ const volatile u32 stall_kernel_nth;
 const volatile u32 dsp_inf_loop_after;
 const volatile u32 dsp_batch;
 const volatile bool print_shared_dsq;
-const volatile u64 exp_cgid;
 const volatile s32 disallow_tgid;
 const volatile bool suppress_dump;
 
@@ -122,10 +120,25 @@ struct {
 } cpu_ctx_stor SEC(".maps");
 
 /* Statistics */
-u64 nr_enqueued, nr_dispatched, nr_reenqueued, nr_dequeued;
-u64 nr_core_sched_execed, nr_expedited;
+u64 nr_enqueued, nr_dispatched, nr_reenqueued, nr_dequeued, nr_ddsp_from_enq;
+u64 nr_core_sched_execed;
 u32 cpuperf_min, cpuperf_avg, cpuperf_max;
 u32 cpuperf_target_min, cpuperf_target_avg, cpuperf_target_max;
+
+static s32 pick_direct_dispatch_cpu(struct task_struct *p, s32 prev_cpu)
+{
+	s32 cpu;
+
+	if (p->nr_cpus_allowed == 1 ||
+	    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+		return prev_cpu;
+
+	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+	if (cpu >= 0)
+		return cpu;
+
+	return -1;
+}
 
 s32 BPF_STRUCT_OPS(qmap_select_cpu, struct task_struct *p,
 		   s32 prev_cpu, u64 wake_flags)
@@ -139,17 +152,14 @@ s32 BPF_STRUCT_OPS(qmap_select_cpu, struct task_struct *p,
 		return -ESRCH;
 	}
 
-	if (p->nr_cpus_allowed == 1 ||
-	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+	cpu = pick_direct_dispatch_cpu(p, prev_cpu);
+
+	if (cpu >= 0) {
 		tctx->force_local = true;
+		return cpu;
+	} else {
 		return prev_cpu;
 	}
-
-	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-	if (cpu >= 0)
-		return cpu;
-
-	return prev_cpu;
 }
 
 static int weight_to_idx(u32 weight)
@@ -174,6 +184,7 @@ void BPF_STRUCT_OPS(qmap_enqueue, struct task_struct *p, u64 enq_flags)
 	u32 pid = p->pid;
 	int idx = weight_to_idx(p->scx.weight);
 	void *ring;
+	s32 cpu;
 
 	if (p->flags & PF_KTHREAD) {
 		if (stall_kernel_nth && !(++kernel_cnt % stall_kernel_nth))
@@ -206,6 +217,14 @@ void BPF_STRUCT_OPS(qmap_enqueue, struct task_struct *p, u64 enq_flags)
 	if (tctx->force_local || (enq_flags & SCX_ENQ_LAST)) {
 		tctx->force_local = false;
 		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
+		return;
+	}
+
+	/* if !WAKEUP, select_cpu() wasn't called, try direct dispatch */
+	if (!(enq_flags & SCX_ENQ_WAKEUP) &&
+	    (cpu = pick_direct_dispatch_cpu(p, scx_bpf_task_cpu(p))) >= 0) {
+		__sync_fetch_and_add(&nr_ddsp_from_enq, 1);
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, enq_flags);
 		return;
 	}
 
@@ -262,32 +281,6 @@ static void update_core_sched_head_seq(struct task_struct *p)
 		scx_bpf_error("task_ctx lookup failed");
 }
 
-static bool consume_shared_dsq(void)
-{
-	struct task_struct *p;
-	bool consumed;
-
-	if (!exp_cgid)
-		return scx_bpf_consume(SHARED_DSQ);
-
-	/*
-	 * To demonstrate the use of scx_bpf_consume_task(), implement silly
-	 * selective priority boosting mechanism by scanning SHARED_DSQ looking
-	 * for matching comms and consume them first. This makes difference only
-	 * when dsp_batch is larger than 1.
-	 */
-	consumed = false;
-	__COMPAT_DSQ_FOR_EACH(p, SHARED_DSQ, 0) {
-		if (p->cgroups->dfl_cgrp->kn->id == exp_cgid &&
-		    __COMPAT_scx_bpf_consume_task(BPF_FOR_EACH_ITER, p)) {
-			consumed = true;
-			__sync_fetch_and_add(&nr_expedited, 1);
-		}
-	}
-
-	return consumed || scx_bpf_consume(SHARED_DSQ);
-}
-
 void BPF_STRUCT_OPS(qmap_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct task_struct *p;
@@ -296,7 +289,7 @@ void BPF_STRUCT_OPS(qmap_dispatch, s32 cpu, struct task_struct *prev)
 	void *fifo;
 	s32 i, pid;
 
-	if (consume_shared_dsq())
+	if (scx_bpf_consume(SHARED_DSQ))
 		return;
 
 	if (dsp_inf_loop_after && nr_dispatched > dsp_inf_loop_after) {
@@ -347,7 +340,7 @@ void BPF_STRUCT_OPS(qmap_dispatch, s32 cpu, struct task_struct *prev)
 			batch--;
 			cpuc->dsp_cnt--;
 			if (!batch || !scx_bpf_dispatch_nr_slots()) {
-				consume_shared_dsq();
+				scx_bpf_consume(SHARED_DSQ);
 				return;
 			}
 			if (!cpuc->dsp_cnt)
@@ -649,7 +642,7 @@ static void dump_shared_dsq(void)
 	bpf_printk("Dumping %d tasks in SHARED_DSQ in reverse order", nr);
 
 	bpf_rcu_read_lock();
-	__COMPAT_DSQ_FOR_EACH(p, SHARED_DSQ, SCX_DSQ_ITER_REV)
+	bpf_for_each(scx_dsq, p, SHARED_DSQ, SCX_DSQ_ITER_REV)
 		bpf_printk("%s[%d]", p->comm, p->pid);
 	bpf_rcu_read_unlock();
 }

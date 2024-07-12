@@ -109,12 +109,6 @@ static inline bool __COMPAT_struct_has_field(const char *type, const char *field
 #define SCX_OPS_SWITCH_PARTIAL							\
 	__COMPAT_ENUM_OR_ZERO("scx_ops_flags", "SCX_OPS_SWITCH_PARTIAL")
 
-/*
- * DSQ iterator is new. Users will be able to assume existence in the future.
- */
-#define __COMPAT_HAS_DSQ_ITER							\
-	__COMPAT_has_ksym("bpf_iter_scx_dsq_new")
-
 static inline long scx_hotplug_seq(void)
 {
 	int fd;
@@ -163,8 +157,26 @@ static inline long scx_hotplug_seq(void)
 	SCX_BUG_ON(__scx_name##__load((__skel)), "Failed to load skel");	\
 })
 
+/*
+ * New versions of bpftool now emit additional link placeholders for BPF maps,
+ * and set up BPF skeleton in such a way that libbpf will auto-attach BPF maps
+ * automatically, assumming libbpf is recent enough (v1.5+). Old libbpf will do
+ * nothing with those links and won't attempt to auto-attach maps.
+ *
+ * To maintain compatibility with older libbpf while avoiding trying to attach
+ * twice, disable the autoattach feature on newer libbpf.
+ */
+#if LIBBPF_MAJOR_VERSION > 1 ||							\
+	(LIBBPF_MAJOR_VERSION == 1 && LIBBPF_MINOR_VERSION >= 5)
+#define __SCX_OPS_DISABLE_AUTOATTACH(__skel, __ops_name)			\
+	bpf_map__set_autoattach((__skel)->maps.__ops_name, false)
+#else
+#define __SCX_OPS_DISABLE_AUTOATTACH(__skel, __ops_name) do {} while (0)
+#endif
+
 #define SCX_OPS_ATTACH(__skel, __ops_name, __scx_name) ({			\
 	struct bpf_link *__link;						\
+	__SCX_OPS_DISABLE_AUTOATTACH(__skel, __ops_name);			\
 	SCX_BUG_ON(__scx_name##__attach((__skel)), "Failed to attach skel");	\
 	__link = bpf_map__attach_struct_ops((__skel)->maps.__ops_name);		\
 	SCX_BUG_ON(!__link, "Failed to attach struct_ops");			\
