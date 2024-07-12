@@ -1291,8 +1291,11 @@ out:
 static u64 calc_latency_weight(struct task_struct *p, struct task_ctx *taskc,
 			       struct cpu_ctx *cpuc, bool is_wakeup)
 {
+	u64 w;
+
 	boost_lat(p, taskc, cpuc, is_wakeup);
-	return LAVD_LAT_WEIGHT_FT / sched_prio_to_slice_weight[taskc->lat_prio];
+	w = LAVD_LAT_WEIGHT_FT / sched_prio_to_slice_weight[taskc->lat_prio] + 1;
+	return w;
 }
 
 static u64 calc_virtual_deadline_delta(struct task_struct *p,
@@ -1319,8 +1322,7 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	 */
 	is_wakeup = is_wakeup_ef(enq_flags);
 	weight = calc_latency_weight(p, taskc, cpuc, is_wakeup);
-	vdeadline_delta_ns = (taskc->run_time_ns * weight) / 1000;
-
+	vdeadline_delta_ns = (((taskc->run_time_ns + 1) * weight) + 1000) / 1000;
 	/*
 	 * When a system is overloaded (>1000), stretch time space so make time
 	 * tick logically slower to give room to execute the overloaded tasks.
@@ -1331,11 +1333,12 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 		 * is lower (i.e., higher value) and the load is higher.
 		 */
 		vdeadline_delta_ns = (vdeadline_delta_ns * load_factor *
-				      taskc->lat_prio) /
+				      (taskc->lat_prio + 1)) /
 				     (LAVD_LOAD_FACTOR_FT * 1000);
 	}
 
 	taskc->vdeadline_delta_ns = vdeadline_delta_ns;
+
 	return vdeadline_delta_ns;
 }
 
@@ -2969,7 +2972,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	/*
 	 * Initilize the current logical clock.
 	 */
-	WRITE_ONCE(cur_logical_clk, now);
+	WRITE_ONCE(cur_logical_clk, 0);
 	return err;
 }
 
