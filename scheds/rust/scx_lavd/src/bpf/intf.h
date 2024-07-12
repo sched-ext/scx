@@ -54,7 +54,7 @@ enum consts {
 	NSEC_PER_MSEC			= (1000ULL * NSEC_PER_USEC),
 	LAVD_TIME_ONE_SEC		= (1000ULL * NSEC_PER_MSEC),
 	LAVD_TIME_INFINITY_NS		= SCX_SLICE_INF,
-	LAVD_MAX_CAS_RETRY		= 4,
+	LAVD_MAX_RETRY			= 4,
 
 	LAVD_TARGETED_LATENCY_NS	= (15 * NSEC_PER_MSEC),
 	LAVD_SLICE_MIN_NS		= ( 1 * NSEC_PER_MSEC), /* min time slice */
@@ -63,7 +63,7 @@ enum consts {
 	LAVD_SLICE_GREEDY_FT		= 3,
 	LAVD_LOAD_FACTOR_ADJ		= 6, /* adjustment for better estimation */
 	LAVD_LOAD_FACTOR_MAX		= (20 * 1000),
-	LAVD_LOAD_FACTOR_FT		= 80, /* factor to stretch the time line */
+	LAVD_LOAD_FACTOR_FT		= 4, /* factor to stretch the time line */
 
 	LAVD_LC_FREQ_MAX		= 1000000,
 	LAVD_LC_RUNTIME_MAX		= LAVD_TARGETED_LATENCY_NS,
@@ -74,8 +74,9 @@ enum consts {
 	LAVD_SLICE_BOOST_MAX_FT		= 2, /* maximum additional 2x of slice */
 	LAVD_SLICE_BOOST_MAX_STEP	= 8, /* 8 slice exhausitions in a row */
 	LAVD_GREEDY_RATIO_MAX		= USHRT_MAX,
+	LAVD_LAT_PRIO_NEW		= 10,
 	LAVD_LAT_PRIO_IDLE		= USHRT_MAX,
-	LAVD_LAT_WEIGHT_SHIFT		= 3,
+	LAVD_LAT_WEIGHT_FT		= 88761,
 
 	LAVD_ELIGIBLE_TIME_LAT_FT	= 16,
 	LAVD_ELIGIBLE_TIME_MAX		= (100 * NSEC_PER_USEC),
@@ -210,6 +211,7 @@ struct task_ctx {
 	/*
 	 * Task deadline and time slice
 	 */
+	u64	vdeadline_log_clk;	/* logical clock of the deadilne */
 	u64	vdeadline_delta_ns;	/* time delta until task's virtual deadline */
 	u64	eligible_delta_ns;	/* time delta until task becomes eligible */
 	u64	slice_ns;		/* time slice */

@@ -214,6 +214,11 @@ private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflo
 const volatile u16 cpu_order[LAVD_CPU_ID_MAX]; /* ordered by cpus->core->llc->numa */
 
 /*
+ * Logical current clock
+ */
+u64			cur_logical_clk;
+
+/*
  * Options
  */
 const volatile bool	no_freq_scaling;
@@ -363,137 +368,6 @@ static const u64 sched_prio_to_slice_weight[NICE_WIDTH] = {
 	   15,		/*  19		39 */
 };
 
-/*
- * A nice priority to latency weight array
- * ---------------------------------------
- *
- * It is used to determine the virtual deadline. Each step increases by 10%.
- * The idea behind the virtual deadline is to limit the competition window
- * among concurrent tasks. For example, in the case of a normal priority task
- * with nice 0, its corresponding value is 7.5 msec (when LAVD_LAT_WEIGHT_SHIFT
- * is 0). This guarantees that any tasks enqueued in 7.5 msec after the task is
- * enqueued will not compete for CPU time with the task. This array is the
- * inverse of sched_prio_to_latency_weight with some normalization. Suppose the
- * maximum time slice per schedule (LAVD_SLICE_MAX_NS) is 3 msec. We normalized
- * the values so that the normal priority (nice 0) has a deadline of 7.5 msec,
- * a center of the targeted latency (i.e., when LAVD_TARGETED_LATENCY_NS is 15
- * msec). The virtual deadline ranges from 87 usec to 512 msec. As the maximum
- * time slice becomes shorter, the deadlines become tighter.
- */
-static const u64 sched_prio_to_latency_weight[NICE_WIDTH] = {
-	/* weight	nice priority	sched priority	vdeadline (usec)    */
-	/*						(max slice == 3 ms) */
-	/*                                              (LAVD_LAT_WEIGHT_SHIFT == 0) */
-	/* ------	-------------	--------------	------------------- */
-	    29,		/* -20		 0		    87 */
-	    36,		/* -19		 1		   108 */
-	    45,		/* -18		 2		   135 */
-	    55,		/* -17		 3		   165 */
-	    71,		/* -16		 4		   213 */
-	    88,		/* -15		 5		   264 */
-	   110,		/* -14		 6		   330 */
-	   137,		/* -13		 7		   411 */
-	   171,		/* -12		 8		   513 */
-	   215,		/* -11		 9		   645 */
-	   268,		/* -10		10		   804 */
-	   336,		/*  -9		11		  1008 */
-	   420,		/*  -8		12		  1260 */
-	   522,		/*  -7		13		  1566 */
-	   655,		/*  -6		14		  1965 */
-	   820,		/*  -5		15		  2460 */
-	  1024,		/*  -4		16		  3072 */
-	  1286,		/*  -3		17		  3858 */
-	  1614,		/*  -2		18		  4842 */
-	  2005,		/*  -1		19		  6015 */
-	  2500,		/*   0		20		  7500 */
-	  3122,		/*   1		21		  9366 */
-	  3908,		/*   2		22		 11724 */
-	  4867,		/*   3		23		 14601 */
-	  6052,		/*   4		24		 18156 */
-	  7642,		/*   5		25		 22926 */
-	  9412,		/*   6		26		 28236 */
-	 11907,		/*   7		27		 35721 */
-	 14884,		/*   8		28		 44652 */
-	 18686,		/*   9		29		 56058 */
-	 23273,		/*  10		30		 69819 */
-	 29425,		/*  11		31		 88275 */
-	 36571,		/*  12		32		109713 */
-	 45714,		/*  13		33		137142 */
-	 56889,		/*  14		34		170667 */
-	 71111,		/*  15		35		213333 */
-	 88276,		/*  16		36		264828 */
-	111304,		/*  17		37		333912 */
-	142222,		/*  18		38		426666 */
-	170667,		/*  19		39		512001 */
-};
-
-/*
- * A latency priority to greedy ratios for eligibility
- * ---------------------------------------------------
- *
- * This table is nothing but sched_prio_to_slice_weight * (1000/1024) for
- * direct comparison against greedy_ratio, which is based on 1000.
- *
- * We distribute CPU time based on its nice (static) priorities described in
- * sched_prio_to_slice_weight, the same as the conventional way, for the fair
- * use of CPU time. However, when checking whether a particular task is
- * eligible, we consider its (dynamic) latency priority. Because a
- * latency-critical task may have CPU usage spikes to meet its (soft) deadline,
- * too strict fairness enforcement does not work well.
- *
- * Hence, we are more generous to a latency-critical task and aim for eventual
- * fairness of CPU time. To this end, we determine the task's time slice and
- * ineligible duration based on its nice priority for fairness. But we check if
- * a task is greedier compared to its (dynamic) _latency_ priority (not nice
- * priority). This allows the task to use more CPU time temporarily, but
- * eventually, its CPU time is under fairness control using time slice and
- * ineligibility duration calculation.
- */
-static const u64 lat_prio_to_greedy_thresholds[NICE_WIDTH] = {
-	/* weight	nice priority	sched priority */
-	/* ------	-------------	-------------- */
-	86681,		/* -20		 0 */
-	70073,		/* -19		 1 */
-	55159,		/* -18		 2 */
-	45188,		/* -17		 3 */
-	35440,		/* -16		 4 */
-	28471,		/* -15		 5 */
-	22709,		/* -14		 6 */
-	18267,		/* -13		 7 */
-	14599,		/* -12		 8 */
-	11637,		/* -11		 9 */
-	 9324,		/* -10		10 */
-	 7441,		/*  -9		11 */
-	 5957,		/*  -8		12 */
-	 4789,		/*  -7		13 */
-	 3814,		/*  -6		14 */
-	 3048,		/*  -5		15 */
-	 2442,		/*  -4		16 */
-	 1944,		/*  -3		17 */
-	 1549,		/*  -2		18 */
-	 1247,		/*  -1		19 */
-	 1000,		/*   0		20 */
-	 1000,		/*   1		21 */
-	 1000,		/*   2		22 */
-	 1000,		/*   3		23 */
-	 1000,		/*   4		24 */
-	 1000,		/*   5		25 */
-	 1000,		/*   6		26 */
-	 1000,		/*   7		27 */
-	 1000,		/*   8		28 */
-	 1000,		/*   9		29 */
-	 1000,		/*  10		30 */
-	 1000,		/*  11		31 */
-	 1000,		/*  12		32 */
-	 1000,		/*  13		33 */
-	 1000,		/*  14		34 */
-	 1000,		/*  15		35 */
-	 1000,		/*  16		36 */
-	 1000,		/*  17		37 */
-	 1000,		/*  18		38 */
-	 1000,		/*  19		39 */
-};
-
 static u16 get_nice_prio(struct task_struct *p);
 static u64 get_task_load_ideal(struct task_struct *p);
 static void adjust_slice_boost(struct cpu_ctx *cpuc, struct task_ctx *taskc);
@@ -636,13 +510,13 @@ static void proc_introspec_sched_n(struct task_struct *p,
 	cur_nr = intrspc.arg;
 
 	/*
-	 * Note that the bounded retry (@LAVD_MAX_CAS_RETRY) does *not
-	 * *guarantee* to decrement introspec_arg. However, it is unlikely to
-	 * happen. Even if it happens, it is nothing but a matter of delaying a
-	 * message delivery. That's because other threads will try and succeed
-	 * the CAS operation eventually. So this is good enough. ;-)
+	 * Note that the bounded retry (@LAVD_MAX_RETRY) does *not *guarantee*
+	 * to decrement introspec_arg. However, it is unlikely to happen. Even
+	 * if it happens, it is nothing but a matter of delaying a message
+	 * delivery. That's because other threads will try and succeed the CAS
+	 * operation eventually. So this is good enough. ;-)
 	 */
-	for (i = 0; cur_nr > 0 && i < LAVD_MAX_CAS_RETRY; i++) {
+	for (i = 0; cur_nr > 0 && i < LAVD_MAX_RETRY; i++) {
 		prev_nr = __sync_val_compare_and_swap(
 				&intrspc.arg, cur_nr, cur_nr - 1);
 		/* CAS success: submit a message and done */
@@ -838,7 +712,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		 * If the CPU is in an idle state (i.e., idle_start_clk is
 		 * non-zero), accumulate the current idle peirod so far.
 		 */
-		for (int i = 0; i < LAVD_MAX_CAS_RETRY; i++) {
+		for (int i = 0; i < LAVD_MAX_RETRY; i++) {
 			u64 old_clk = cpuc->idle_start_clk;
 			if (old_clk == 0)
 				break;
@@ -1177,25 +1051,9 @@ static u64 calc_lat_factor(u64 lat_prio)
 static u32 calc_greedy_factor(struct task_ctx *taskc)
 {
 	u32 greedy_ratio = taskc->greedy_ratio;
-	s16 lat_prio = taskc->lat_prio;
-	u32 greedy_threshold;
 	u32 gr_ft;
 
-	if (lat_prio < 0)
-		lat_prio = 0;
-	else if (lat_prio >= NICE_WIDTH)
-		lat_prio = NICE_WIDTH - 1;
-
-	/*
-	 * When determining how greedy a task is, we are more generous to a
-	 * latency-critical task with a low lat_prio value. That is because a
-	 * latency-critical task can temporarily overspend CPU time. However,
-	 * the time slice and ineligible duration allocation will eventually
-	 * enforce fairness.
-	 */
-	greedy_threshold = lat_prio_to_greedy_thresholds[lat_prio];
-
-	gr_ft = (greedy_ratio * 1000) / greedy_threshold;
+	gr_ft = greedy_ratio;
 	if (gr_ft < 1000)
 		gr_ft = 1000;
 	else
@@ -1206,22 +1064,7 @@ static u32 calc_greedy_factor(struct task_ctx *taskc)
 
 static bool is_eligible(struct task_ctx *taskc)
 {
-	u64 greedy_threshold;
-	s16 lat_prio = taskc->lat_prio;
-
-	if (lat_prio < 0)
-		lat_prio = 0;
-	else if (lat_prio >= NICE_WIDTH)
-		lat_prio = NICE_WIDTH - 1;
-
-	/*
-	 * Similar to the greedy factor calculation, we have a loose bound for
-	 * a latency-critical task. That makes a latency-critical task less
-	 * frequently ineligible for low (tail) latency.
-	 */
-	greedy_threshold = lat_prio_to_greedy_thresholds[lat_prio];
-
-	return taskc->greedy_ratio <= greedy_threshold;
+	return taskc->greedy_ratio <= 1000;
 }
 
 static bool is_wakeup_wf(u64 wake_flags)
@@ -1372,7 +1215,7 @@ static int boost_lat(struct task_struct *p, struct task_ctx *taskc,
 	 * its property.
 	 */
 	if (!have_scheduled(taskc)) {
-		boost = 0;
+		boost = LAVD_LAT_PRIO_NEW;
 		goto out;
 	}
 
@@ -1448,13 +1291,11 @@ out:
 static u64 calc_latency_weight(struct task_struct *p, struct task_ctx *taskc,
 			       struct cpu_ctx *cpuc, bool is_wakeup)
 {
-	boost_lat(p, taskc, cpuc, is_wakeup);
+	u64 w;
 
-	/*
-	 * Tighten the competition window according to LAVD_LAT_WEIGHT_SHIFT.
-	 */
-	return sched_prio_to_latency_weight[taskc->lat_prio] >>
-	       LAVD_LAT_WEIGHT_SHIFT;
+	boost_lat(p, taskc, cpuc, is_wakeup);
+	w = LAVD_LAT_WEIGHT_FT / sched_prio_to_slice_weight[taskc->lat_prio] + 1;
+	return w;
 }
 
 static u64 calc_virtual_deadline_delta(struct task_struct *p,
@@ -1481,8 +1322,7 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	 */
 	is_wakeup = is_wakeup_ef(enq_flags);
 	weight = calc_latency_weight(p, taskc, cpuc, is_wakeup);
-	vdeadline_delta_ns = (LAVD_SLICE_MAX_NS * weight) / 1000;
-
+	vdeadline_delta_ns = (((taskc->run_time_ns + 1) * weight) + 1000) / 1000;
 	/*
 	 * When a system is overloaded (>1000), stretch time space so make time
 	 * tick logically slower to give room to execute the overloaded tasks.
@@ -1493,11 +1333,12 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 		 * is lower (i.e., higher value) and the load is higher.
 		 */
 		vdeadline_delta_ns = (vdeadline_delta_ns * load_factor *
-				      taskc->lat_prio * taskc->lat_prio) /
+				      (taskc->lat_prio + 1)) /
 				     (LAVD_LOAD_FACTOR_FT * 1000);
 	}
 
 	taskc->vdeadline_delta_ns = vdeadline_delta_ns;
+
 	return vdeadline_delta_ns;
 }
 
@@ -1647,6 +1488,11 @@ static void update_stat_for_running(struct task_struct *p,
 	u64 perf_cri_raw;
 
 	/*
+	 * Update the current logical clock.
+	 */
+	WRITE_ONCE(cur_logical_clk, taskc->vdeadline_log_clk);
+
+	/*
 	 * Since this is the start of a new schedule for @p, we update run
 	 * frequency in a second using an exponential weighted moving average.
 	 */
@@ -1749,6 +1595,17 @@ static void update_stat_for_quiescent(struct task_struct *p,
 	cpuc->load_run_time_ns -= cap_time_slice_ns(taskc->run_time_ns);
 }
 
+static u64 calc_exclusive_run_window(void)
+{
+	u64 load_factor;
+
+	load_factor = get_sys_stat_cur()->load_factor;
+	if (load_factor >= 1000)
+		return (LAVD_SLICE_MAX_NS * load_factor) / 1000;
+
+	return 0;
+}
+
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 			     struct cpu_ctx *cpuc, u64 enq_flags)
 {
@@ -1760,6 +1617,15 @@ static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	calc_virtual_deadline_delta(p, taskc, cpuc, enq_flags);
 	calc_eligible_delta(p, taskc);
+
+	/*
+	 * Update the logical clock of the virtual deadline including
+	 * ineligible duration.
+	 */
+	taskc->vdeadline_log_clk = READ_ONCE(cur_logical_clk) +
+				   calc_exclusive_run_window() +
+				   taskc->eligible_delta_ns +
+				   taskc->vdeadline_delta_ns;
 }
 
 static u64 get_est_stopping_time(struct task_ctx *taskc)
@@ -1940,7 +1806,8 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 */
 	switch(v) {
 	case 2:	/* two dandidates */
-		victim_cpu = can_task1_kick_task2(&prm_cpus[0], &prm_cpus[1]) ? &prm_cpus[0] : &prm_cpus[1];
+		victim_cpu = can_task1_kick_task2(&prm_cpus[0], &prm_cpus[1]) ?
+				&prm_cpus[0] : &prm_cpus[1];
 		goto bingo_out;
 	case 1:	/* one candidate */
 		victim_cpu = &prm_cpus[0];
@@ -2077,7 +1944,6 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 {
 	struct task_ctx *taskc_run;
 	struct task_struct *p_run;
-	u64 vdeadline;
 
 	/*
 	 * Calculate when a tack can be scheduled.
@@ -2086,8 +1952,6 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * right before running at ops.running().
 	 */
 	calc_when_to_run(p, taskc, cpuc, enq_flags);
-	vdeadline = taskc->eligible_delta_ns + taskc->vdeadline_delta_ns +
-		    bpf_ktime_get_ns();
 
 	/*
 	 * Try to find and kick a victim CPU, which runs a less urgent task.
@@ -2108,7 +1972,7 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * deadline.
 	 */
 	scx_bpf_dispatch_vtime(p, LAVD_GLOBAL_DSQ, LAVD_SLICE_UNDECIDED,
-			       vdeadline, enq_flags);
+			       taskc->vdeadline_log_clk, enq_flags);
 
 }
 
@@ -3105,6 +2969,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	if (err)
 		return err;
 
+	/*
+	 * Initilize the current logical clock.
+	 */
+	WRITE_ONCE(cur_logical_clk, 0);
 	return err;
 }
 
