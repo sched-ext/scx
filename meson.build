@@ -295,7 +295,7 @@ if libbpf_a != ''
 
   cargo_env.append('RUSTFLAGS',
                    '-C relocation-model=pic -C link-args=-lelf -C link-args=-lz -C link-args=-lzstd -L '
-                   + fs.parent(libbpf_a))
+                   + fs.parent(libbpf_a), separator: ' ')
 
   #
   # XXX - scx_rusty's original Cargo.toml contained a dependency matching
