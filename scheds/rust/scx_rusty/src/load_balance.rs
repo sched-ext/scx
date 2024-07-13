@@ -749,7 +749,6 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     // can run in @pull_dom.
     fn find_first_candidate<'d, I>(
         tasks_by_load: I,
-        pull_dom: u32,
         skip_kworkers: bool,
     ) -> Option<&'d TaskInfo>
     where
@@ -759,8 +758,6 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             .into_iter()
             .skip_while(|task| {
                 task.migrated.get()
-                    || (task.dom_mask & (1 << pull_dom) == 0)
-                    || (skip_kworkers && task.is_kworker)
             })
             .next()
         {
@@ -790,7 +787,18 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         // migratable task while scanning left from $to_xfer and the
         // counterpart while scanning right and picking the better of the
         // two.
-        let tasks = std::mem::take(&mut push_dom.tasks).into_vec();
+        let pull_dom_id: u32 = pull_dom.id.try_into().unwrap();
+        let tasks: Vec<TaskInfo> = std::mem::take(&mut push_dom.tasks)
+            .into_vec()
+            .into_iter()
+            .filter(
+                |task|
+                task.dom_mask
+                & (1 << pull_dom_id) == 1
+                || (self.skip_kworkers && task.is_kworker)
+            )
+            .collect();
+
         let (task, new_imbal) = match (
             Self::find_first_candidate(
                 tasks
@@ -798,7 +806,6 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     .iter()
                     .filter(|x| x.load <= OrderedFloat(to_xfer))
                     .rev(),
-                pull_dom.id.try_into().unwrap(),
                 self.skip_kworkers,
             ),
             Self::find_first_candidate(
@@ -806,7 +813,6 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     .as_slice()
                     .iter()
                     .filter(|x| x.load >= OrderedFloat(to_xfer)),
-                pull_dom.id.try_into().unwrap(),
                 self.skip_kworkers,
             ),
         ) {
