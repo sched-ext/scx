@@ -44,6 +44,8 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Topology;
+use scx_utils::Cache;
 use scx_utils::UserExitInfo;
 use serde::Deserialize;
 use serde::Serialize;
@@ -182,6 +184,17 @@ lazy_static::lazy_static! {
 /// - perf: CPU performance target. 0 means no configuration. A value
 ///   between 1 and 1024 indicates the performance level CPUs running tasks
 ///   in this layer are configured to using scx_bpf_cpuperf_set().
+///
+/// - nodes: If set the layer will use the set of NUMA nodes for scheduling
+///   decisions. If unset then all available NUMA nodes will be used. If the
+///   llcs value is set the cpuset of NUMA nodes will be or'ed with the LLC 
+///   config.
+///
+/// - llcs: If set the layer will use the set of LLCs (last level caches) 
+///   for scheduling decisions. If unset then all LLCs will be used. If
+///   the nodes value is set the cpuset of LLCs will be or'ed with the nodes
+///   config.
+///
 ///
 /// Similar to matches, adding new policies and extending existing ones
 /// should be relatively straightforward.
@@ -347,6 +360,10 @@ enum LayerKind {
         exclusive: bool,
         #[serde(default)]
         perf: u64,
+        #[serde(default)]
+        nodes: Vec<usize>,
+        #[serde(default)]
+        llcs: Vec<usize>,
     },
     Grouped {
         util_range: (f64, f64),
@@ -364,6 +381,10 @@ enum LayerKind {
         exclusive: bool,
         #[serde(default)]
         perf: u64,
+        #[serde(default)]
+        nodes: Vec<usize>,
+        #[serde(default)]
+        llcs: Vec<usize>,
     },
     Open {
         #[serde(default)]
@@ -378,6 +399,10 @@ enum LayerKind {
         exclusive: bool,
         #[serde(default)]
         perf: u64,
+        #[serde(default)]
+        nodes: Vec<usize>,
+        #[serde(default)]
+        llcs: Vec<usize>,
     },
 }
 
@@ -501,6 +526,22 @@ fn format_bitvec(bitvec: &BitVec) -> String {
         .fold(String::new(), |string, v| format!("{}{:08x} ", string, v));
     output.pop();
     output
+}
+
+fn nodemask_from_nodes(nodes: &Vec<usize>) -> usize {
+    let mut mask = 0;
+    for node in nodes {
+        mask |= 1 << node;
+    }
+    mask
+}
+
+fn cachemask_from_llcs(llcs: &BTreeMap<usize, Cache>) -> usize {
+    let mut mask = 0;
+    for (_, cache) in llcs {
+        mask |= 1 << cache.id();
+    }
+    mask
 }
 
 fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
@@ -839,11 +880,14 @@ impl CpuPool {
         }
     }
 
-    fn alloc<'a>(&'a mut self) -> Option<&'a BitVec> {
-        let core = self.available_cores.first_one()?;
-        self.available_cores.set(core, false);
-        self.update_fallback_cpu();
-        Some(&self.core_cpus[core])
+    fn alloc_cpus<'a>(&'a mut self, cpus: &BitVec) -> Option<&'a BitVec> {
+        let cores = self.cpus_to_cores(cpus).ok()?;
+        for core in cores.iter_ones() {
+            self.available_cores.set(core, false);
+            self.update_fallback_cpu();
+            return Some(&self.core_cpus[core]);
+        }
+        None
     }
 
     fn cpus_to_cores(&self, cpus_to_match: &BitVec) -> Result<BitVec> {
@@ -897,10 +941,12 @@ impl CpuPool {
         Ok(Some(&self.core_cpus[core]))
     }
 
-    fn available_cpus(&self) -> BitVec {
+    fn available_cpus_in_mask(&self, allowed_cpus: &BitVec) -> BitVec {
         let mut cpus = bitvec![0; self.nr_cpus];
         for core in self.available_cores.iter_ones() {
-            cpus |= &self.core_cpus[core];
+            let mut core_cpus = self.core_cpus[core].clone();
+            core_cpus &= allowed_cpus;
+            cpus |= core_cpus;
         }
         cpus
     }
@@ -913,20 +959,48 @@ struct Layer {
 
     nr_cpus: usize,
     cpus: BitVec,
+    allowed_cpus: BitVec,
 }
 
 impl Layer {
-    fn new(cpu_pool: &mut CpuPool, name: &str, kind: LayerKind) -> Result<Self> {
+    fn new(cpu_pool: &CpuPool, name: &str, kind: LayerKind, topo: &Topology) -> Result<Self> {
+        let mut cpus = bitvec![0; cpu_pool.nr_cpus];
+        cpus.fill(false);
+        let mut allowed_cpus = bitvec![0; cpu_pool.nr_cpus];
         match &kind {
             LayerKind::Confined {
                 cpus_range,
                 util_range,
+                nodes,
+                llcs,
                 ..
             } => {
                 let cpus_range = cpus_range.unwrap_or((0, std::usize::MAX));
                 if cpus_range.0 > cpus_range.1 || cpus_range.1 == 0 {
                     bail!("invalid cpus_range {:?}", cpus_range);
                 }
+                if nodes.len() == 0 && llcs.len() == 0 {
+                    allowed_cpus.fill(true);
+                } else {
+                    // build up the cpus bitset
+                    for node in topo.nodes() {
+                        // first do the matching for nodes
+                        if nodes.contains(&(node.id() as usize)) {
+                            for (id, _cpu) in node.cpus() {
+                                allowed_cpus.set(id, true);
+                            }
+                        }
+                        // next match on any LLCs
+                        for (_, llc) in node.llcs() {
+                            if llcs.contains(&(llc.id() as usize)) {
+                                for (id, _cpu) in llc.cpus() {
+                                    allowed_cpus.set(id, true);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if util_range.0 < 0.0
                     || util_range.0 > 1.0
                     || util_range.1 < 0.0
@@ -936,17 +1010,43 @@ impl Layer {
                     bail!("invalid util_range {:?}", util_range);
                 }
             }
-            _ => {}
+            LayerKind::Grouped {
+                nodes,
+                llcs,
+                ..
+            } |
+            LayerKind::Open { nodes, llcs, .. } => {
+                if nodes.len() == 0 && llcs.len() == 0 {
+                    allowed_cpus.fill(true);
+                } else {
+                    // build up the cpus bitset
+                    for node in topo.nodes() {
+                        // first do the matching for nodes
+                        if nodes.contains(&(node.id() as usize)) {
+                            for (id, _cpu) in node.cpus() {
+                                allowed_cpus.set(id, true);
+                            }
+                        }
+                        // next match on any LLCs
+                        for (_, llc) in node.llcs() {
+                            if llcs.contains(&(llc.id() as usize)) {
+                                for (id, _cpu) in llc.cpus() {
+                                    allowed_cpus.set(id, true);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-
-        let nr_cpus = cpu_pool.nr_cpus;
 
         Ok(Self {
             name: name.into(),
             kind,
 
             nr_cpus: 0,
-            cpus: bitvec![0; nr_cpus],
+            cpus: cpus,
+            allowed_cpus,
         })
     }
 
@@ -959,23 +1059,25 @@ impl Layer {
         (layer_util, _total_util): (f64, f64),
         no_load_frac_limit: bool,
     ) -> Result<bool> {
-        if self.nr_cpus >= cpus_max {
+        let nr_cpus = self.cpus.count_ones();
+        if nr_cpus >= cpus_max {
+            trace!("layer has {} max: {}", nr_cpus, cpus_max);
             return Ok(false);
         }
 
         // Do we already have enough?
-        if self.nr_cpus >= cpus_min
+        if nr_cpus >= cpus_min
             && (layer_util == 0.0
-                || (self.nr_cpus > 0 && layer_util / self.nr_cpus as f64 <= util_high))
+                || (nr_cpus > 0 && layer_util / nr_cpus as f64 <= util_high))
         {
             return Ok(false);
         }
 
         // Can't have more CPUs than our load fraction.
         if !no_load_frac_limit
-            && self.nr_cpus >= cpus_min
+            && nr_cpus >= cpus_min
             && (total_load >= 0.0
-                && self.nr_cpus as f64 / cpu_pool.nr_cpus as f64 >= layer_load / total_load)
+                && nr_cpus as f64 / cpu_pool.nr_cpus as f64 >= layer_load / total_load)
         {
             trace!(
                 "layer-{} needs more CPUs (util={:.3}) but is over the load fraction",
@@ -985,7 +1087,8 @@ impl Layer {
             return Ok(false);
         }
 
-        let new_cpus = match cpu_pool.alloc().clone() {
+        let available_cpus = cpu_pool.available_cpus_in_mask(&self.allowed_cpus);
+        let new_cpus = match cpu_pool.alloc_cpus(&available_cpus).clone() {
             Some(ret) => ret.clone(),
             None => {
                 trace!("layer-{} can't grow, no CPUs", &self.name);
@@ -997,10 +1100,8 @@ impl Layer {
             "layer-{} adding {} CPUs to {} CPUs",
             &self.name,
             new_cpus.count_ones(),
-            self.nr_cpus
+            nr_cpus,
         );
-
-        self.nr_cpus += new_cpus.count_ones();
         self.cpus |= &new_cpus;
         Ok(true)
     }
@@ -1014,10 +1115,10 @@ impl Layer {
         (layer_util, _total_util): (f64, f64),
         no_load_frac_limit: bool,
     ) -> Result<Option<BitVec>> {
-        if self.nr_cpus <= cpus_min {
+        let nr_cpus = self.cpus.count_ones();
+        if nr_cpus <= cpus_min {
             return Ok(None);
         }
-
         let cpus_to_free = match cpu_pool.next_to_free(&self.cpus)? {
             Some(ret) => ret.clone(),
             None => return Ok(None),
@@ -1029,18 +1130,18 @@ impl Layer {
         // $cpus_to_free, we have to free.
         if !no_load_frac_limit
             && total_load >= 0.0
-            && (self.nr_cpus - nr_to_free) as f64 / cpu_pool.nr_cpus as f64
+            && (nr_cpus - nr_to_free) as f64 / cpu_pool.nr_cpus as f64
                 >= layer_load / total_load
         {
             return Ok(Some(cpus_to_free));
         }
 
-        if layer_util / self.nr_cpus as f64 >= util_low {
+        if layer_util / nr_cpus as f64 >= util_low {
             return Ok(None);
         }
 
         // Can't shrink if losing the CPUs pushes us over @util_high.
-        match self.nr_cpus - nr_to_free {
+        match nr_cpus - nr_to_free {
             0 => {
                 if layer_util > 0.0 {
                     return Ok(None);
@@ -1074,8 +1175,7 @@ impl Layer {
             no_load_frac_limit,
         )? {
             Some(cpus_to_free) => {
-                trace!("freeing CPUs {}", &cpus_to_free);
-                self.nr_cpus -= cpus_to_free.count_ones();
+                trace!("{} freeing CPUs\n{}", self.name, &cpus_to_free);
                 self.cpus &= !cpus_to_free.clone();
                 cpu_pool.free(&cpus_to_free)?;
                 Ok(true)
@@ -1154,7 +1254,7 @@ struct Scheduler<'a, 'b> {
 }
 
 impl<'a, 'b> Scheduler<'a, 'b> {
-    fn init_layers(skel: &mut OpenBpfSkel, opts: &Opts, specs: &Vec<LayerSpec>) -> Result<()> {
+    fn init_layers(skel: &mut OpenBpfSkel, opts: &Opts, specs: &Vec<LayerSpec>, topo: &Topology) -> Result<()> {
         skel.rodata_mut().nr_layers = specs.len() as u32;
         let mut perf_set = false;
 
@@ -1204,6 +1304,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     preempt,
                     preempt_first,
                     exclusive,
+                    nodes,
                     ..
                 }
                 | LayerKind::Grouped {
@@ -1213,6 +1314,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     preempt,
                     preempt_first,
                     exclusive,
+                    nodes,
                     ..
                 }
                 | LayerKind::Open {
@@ -1222,6 +1324,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     preempt,
                     preempt_first,
                     exclusive,
+                    nodes,
                     ..
                 } => {
                     layer.min_exec_ns = min_exec_us * 1000;
@@ -1236,6 +1339,13 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     layer.preempt_first.write(*preempt_first);
                     layer.exclusive.write(*exclusive);
                     layer.perf = u32::try_from(*perf)?;
+                    layer.node_mask = nodemask_from_nodes(nodes) as u64;
+                    for topo_node in topo.nodes() {
+                        if !nodes.contains(&topo_node.id()) {
+                            continue;
+                        }
+                        layer.cache_mask |= cachemask_from_llcs(&topo_node.llcs()) as u64;
+                    }
                 }
             }
 
@@ -1256,9 +1366,30 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         Ok(())
     }
 
+    fn init_nodes(skel: &mut OpenBpfSkel, _opts: &Opts, topo: &Topology) {
+        skel.rodata_mut().nr_nodes = topo.nodes().len() as u32;
+        skel.rodata_mut().nr_llcs = 0;
+
+        for node in topo.nodes() {
+            info!("configuring node {}, LLCs {:?}", node.id(), node.llcs().len());
+            skel.rodata_mut().nr_llcs += node.llcs().len() as u32;
+
+            for (_, llc) in node.llcs() {
+                info!("configuring llc {:?} for node {:?}", llc.id(), node.id());
+                skel.rodata_mut().llc_numa_id_map[llc.id()] = node.id() as u32;
+
+            }
+        }
+
+        for (_, cpu) in topo.cpus() {
+            skel.rodata_mut().cpu_llc_id_map[cpu.id()] = cpu.llc_id() as u32;
+        }
+    }
+
     fn init(opts: &Opts, layer_specs: &'b Vec<LayerSpec>) -> Result<Self> {
         let nr_layers = layer_specs.len();
-        let mut cpu_pool = CpuPool::new()?;
+        let topo = Topology::new()?;
+        let cpu_pool = CpuPool::new()?;
 
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
@@ -1295,13 +1426,14 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         for cpu in cpu_pool.all_cpus.iter_ones() {
             skel.rodata_mut().all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
-        Self::init_layers(&mut skel, opts, layer_specs)?;
+        Self::init_layers(&mut skel, opts, layer_specs, &topo)?;
+        Self::init_nodes(&mut skel, opts, &topo);
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
 
         let mut layers = vec![];
         for spec in layer_specs.iter() {
-            layers.push(Layer::new(&mut cpu_pool, &spec.name, spec.kind.clone())?);
+            layers.push(Layer::new(&cpu_pool, &spec.name, spec.kind.clone(), &topo)?);
         }
 
         // Other stuff.
@@ -1400,13 +1532,15 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         }
 
         if updated {
-            let available_cpus = self.cpu_pool.available_cpus();
-            let nr_available_cpus = available_cpus.count_ones();
             for idx in 0..self.layers.len() {
                 let layer = &mut self.layers[idx];
                 let bpf_layer = &mut self.skel.bss_mut().layers[idx];
                 match &layer.kind {
                     LayerKind::Open { .. } => {
+                        let available_cpus = self.cpu_pool.available_cpus_in_mask(&layer.allowed_cpus);
+                        let nr_available_cpus = available_cpus.count_ones();
+                        // Open layers need the intersection of allowed
+                        // cpus and available cpus.
                         layer.cpus.copy_from_bitslice(&available_cpus);
                         layer.nr_cpus = nr_available_cpus;
                         Self::update_bpf_layer_cpumask(layer, bpf_layer);
@@ -1662,7 +1796,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 l_migration,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIGRATION)
             );
-            let l_cur_nr_cpus = set!(l_cur_nr_cpus, layer.nr_cpus as i64);
+            let l_cur_nr_cpus = set!(l_cur_nr_cpus, layer.cpus.count_ones() as i64);
             let l_min_nr_cpus = set!(l_min_nr_cpus, self.nr_layer_cpus_min_max[lidx].0 as i64);
             let l_max_nr_cpus = set!(l_max_nr_cpus, self.nr_layer_cpus_min_max[lidx].1 as i64);
             if !self.om_format {
@@ -1822,6 +1956,8 @@ fn write_example_file(path: &str) -> Result<()> {
                     preempt_first: false,
                     exclusive: false,
                     perf: 1024,
+                    nodes: vec![],
+                    llcs: vec![],
                 },
             },
             LayerSpec {
@@ -1838,6 +1974,8 @@ fn write_example_file(path: &str) -> Result<()> {
                     preempt_first: false,
                     exclusive: true,
                     perf: 1024,
+                    nodes: vec![],
+                    llcs: vec![],
                 },
             },
             LayerSpec {
@@ -1853,6 +1991,8 @@ fn write_example_file(path: &str) -> Result<()> {
                     preempt_first: false,
                     exclusive: false,
                     perf: 1024,
+                    nodes: vec![],
+                    llcs: vec![],
                 },
             },
         ],

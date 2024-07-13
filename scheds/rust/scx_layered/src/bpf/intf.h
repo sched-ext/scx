@@ -28,13 +28,15 @@ enum consts {
 	MAX_CPUS_U8		= MAX_CPUS / 8,
 	MAX_TASKS		= 131072,
 	MAX_PATH		= 4096,
+	MAX_NUMA_NODES		= 64,
+	MAX_DOMS		= 64,
 	MAX_COMM		= 16,
 	MAX_LAYER_MATCH_ORS	= 32,
 	MAX_LAYERS		= 16,
 	USAGE_HALF_LIFE		= 100000000,	/* 100ms */
 
-	HI_FALLBACK_DSQ		= MAX_LAYERS,
-	LO_FALLBACK_DSQ		= MAX_LAYERS + 1,
+	HI_FALLBACK_DSQ		= MAX_LAYERS * MAX_DOMS,
+	LO_FALLBACK_DSQ		= (MAX_LAYERS * MAX_DOMS) + 1,
 
 	/* XXX remove */
 	MAX_CGRP_PREFIXES = 32
@@ -86,6 +88,18 @@ struct cpu_ctx {
 	u64			ran_current_for;
 };
 
+struct cache_ctx {
+	u32 id;
+	struct bpf_cpumask __kptr *cpumask;
+};
+
+struct node_ctx {
+	u32 id;
+	struct bpf_cpumask __kptr *cpumask;
+	u32 nr_llcs;
+	u64 llc_mask;
+};
+
 enum layer_match_kind {
 	MATCH_CGROUP_PREFIX,
 	MATCH_COMM_PREFIX,
@@ -129,6 +143,8 @@ struct layer {
 	struct ravg_data	load_rd;
 
 	u64			cpus_seq;
+	u64			node_mask;
+	u64			cache_mask;
 	unsigned int		refresh_cpus;
 	unsigned char		cpus[MAX_CPUS_U8];
 	unsigned int		nr_cpus;	// managed from BPF side
