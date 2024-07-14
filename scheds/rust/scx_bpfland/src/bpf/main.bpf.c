@@ -181,15 +181,6 @@ static inline bool is_kthread(const struct task_struct *p)
 }
 
 /*
- * Return true if the system is capable of accepting more interactive tasks,
- * false otherwise.
- */
-static bool is_interactive_avail(void)
-{
-	return scx_bpf_dsq_nr_queued(PRIO_DSQ) < nr_online_cpus * 4;
-}
-
-/*
  * Access a cpumask in read-only mode (typically to check bits).
  */
 static const struct cpumask *cast_mask(struct bpf_cpumask *mask)
@@ -281,6 +272,14 @@ static bool is_system_busy(void)
 	scx_bpf_put_cpumask(idle_cpumask);
 
 	return is_busy;
+}
+
+/*
+ * Return true if priority DSQ is congested, false otherwise.
+ */
+static bool is_prio_congested(void)
+{
+	return scx_bpf_dsq_nr_queued(PRIO_DSQ) > nr_online_cpus * 4;
 }
 
 /*
@@ -448,13 +447,18 @@ static void handle_sync_wakeup(struct task_struct *p)
 	struct task_ctx *tctx;
 
 	/*
-	 * If we are waking up a task set the task as interactive, so that it
-	 * can be dispatched as soon as possible on the first CPU available.
+	 * If we are waking up a task immediately promote it as interactive, so
+	 * that it can be dispatched as soon as possible on the first CPU
+	 * available.
+	 *
+	 * However, if the priority queue is congested, we don't want to
+	 * promote additional interactive tasks, instead we give priority to
+	 * the tasks that are already classified as interactive.
 	 */
 	tctx = lookup_task_ctx(p);
 	if (!tctx)
 		return;
-	if (is_interactive_avail())
+	if (!tctx->is_interactive && !is_prio_congested())
 		tctx->is_interactive = true;
 }
 
@@ -512,7 +516,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * that can consume them) we can just dispatch them to the shared DSQ
 	 * and simply rely on the vruntime logic.
 	 */
-	if (tctx->is_interactive && is_interactive_avail()) {
+	if (tctx->is_interactive) {
 		scx_bpf_dispatch_vtime(p, PRIO_DSQ, slice, vtime, enq_flags);
 		__sync_fetch_and_add(&nr_prio_dispatches, 1);
 	} else {
