@@ -5,21 +5,6 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 
-/*
- * Maximum amount of CPUs supported by the scheduler.
- */
-#define MAX_CPUS	1024
-
-/*
- * DSQ used to dispatch regular tasks.
- */
-#define SHARED_DSQ	MAX_CPUS
-
-/*
- * Priority DSQ used to dispatch interactive tasks.
- */
-#define PRIO_DSQ	(MAX_CPUS + 1)
-
 char _license[] SEC("license") = "GPL";
 
 /* Allow to use bpf_printk() only when @debug is set */
@@ -30,6 +15,16 @@ char _license[] SEC("license") = "GPL";
 
  /* Report additional debugging information */
 const volatile bool debug;
+
+/*
+ * Priority DSQ used to dispatch interactive tasks.
+ */
+static s32 prio_dsq_id;
+
+/*
+ * DSQ used to dispatch regular tasks.
+ */
+static s32 shared_dsq_id;
 
 /*
  * Default task time slice.
@@ -301,7 +296,7 @@ static bool is_system_busy(void)
  */
 static bool is_prio_congested(void)
 {
-	return scx_bpf_dsq_nr_queued(PRIO_DSQ) > nr_online_cpus * 4;
+	return scx_bpf_dsq_nr_queued(prio_dsq_id) > nr_online_cpus * 4;
 }
 
 /*
@@ -324,14 +319,16 @@ static inline u64 task_slice(struct task_struct *p)
 }
 
 /*
- * Return the DSQ ID associated to a CPU, or SHARED_DSQ if the CPU is not
+ * Return the DSQ ID associated to a CPU, or shared_dsq_id if the CPU is not
  * valid.
  */
 static u64 cpu_to_dsq(s32 cpu)
 {
-	if (cpu < 0 || cpu >= MAX_CPUS) {
+	u64 cpu_max = scx_bpf_nr_cpu_ids();
+
+	if (cpu < 0 || cpu >= cpu_max) {
 		scx_bpf_error("Invalid cpu: %d", cpu);
-		return SHARED_DSQ;
+		return shared_dsq_id;
 	}
 	return (u64)cpu;
 }
@@ -552,10 +549,10 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * and simply rely on the vruntime logic.
 	 */
 	if (tctx->is_interactive) {
-		scx_bpf_dispatch_vtime(p, PRIO_DSQ, slice, vtime, enq_flags);
+		scx_bpf_dispatch_vtime(p, prio_dsq_id, slice, vtime, enq_flags);
 		__sync_fetch_and_add(&nr_prio_dispatches, 1);
 	} else {
-		scx_bpf_dispatch_vtime(p, SHARED_DSQ, slice, vtime, enq_flags);
+		scx_bpf_dispatch_vtime(p, shared_dsq_id, slice, vtime, enq_flags);
 		__sync_fetch_and_add(&nr_shared_dispatches, 1);
 	}
 }
@@ -613,7 +610,7 @@ static bool consume_prio_task(u64 now)
 {
 	bool ret;
 
-	ret = scx_bpf_consume(PRIO_DSQ);
+	ret = scx_bpf_consume(prio_dsq_id);
 	if (ret)
 		starvation_prio_ts = now;
 
@@ -629,7 +626,7 @@ static bool consume_regular_task(u64 now)
 {
 	bool ret;
 
-	ret = scx_bpf_consume(SHARED_DSQ);
+	ret = scx_bpf_consume(shared_dsq_id);
 	if (ret)
 		starvation_shared_ts = now;
 
@@ -763,7 +760,7 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 * However, this is balanced by the fact that yielding increases the
 	 * number of voluntary context switches (nvcsw), giving the task more
 	 * opportunities to be classified as interactive and dispatched to the
-	 * high priority DSQ (PRIO_DSQ).
+	 * high priority DSQ (prio_dsq_id).
 	 */
 	if (slice_ns > p->scx.slice)
 		p->scx.dsq_vtime += (slice_ns - p->scx.slice) * 100 / p->scx.weight;
@@ -845,7 +842,6 @@ s32 get_nr_online_cpus(void)
 	u64 cpu_max = scx_bpf_nr_cpu_ids();
 	int i, cpus = 0;
 
-	cpu_max = scx_bpf_nr_cpu_ids();
 	online_cpumask = scx_bpf_get_online_cpumask();
 
 	bpf_for(i, 0, cpu_max) {
@@ -862,6 +858,7 @@ s32 get_nr_online_cpus(void)
 s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 {
 	struct bpf_cpumask *mask;
+	u64 cpu_max = scx_bpf_nr_cpu_ids();
 	int err;
 	s32 cpu;
 
@@ -869,7 +866,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	nr_online_cpus = get_nr_online_cpus();
 
 	/* Create per-CPU DSQs (used to dispatch tasks directly on a CPU) */
-	bpf_for(cpu, 0, MAX_CPUS) {
+	bpf_for(cpu, 0, cpu_max) {
 		err = scx_bpf_create_dsq(cpu_to_dsq(cpu), -1);
 		if (err) {
 			scx_bpf_error("failed to create pcpu DSQ %d: %d",
@@ -879,14 +876,16 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	}
 
 	/* Create the global priority DSQ (for interactive tasks) */
-	err = scx_bpf_create_dsq(PRIO_DSQ, -1);
+	prio_dsq_id = cpu_max++;
+	err = scx_bpf_create_dsq(prio_dsq_id, -1);
 	if (err) {
 		scx_bpf_error("failed to create priority DSQ: %d", err);
 		return err;
 	}
 
 	/* Create the global shared DSQ (for regular tasks) */
-	err = scx_bpf_create_dsq(SHARED_DSQ, -1);
+	shared_dsq_id = cpu_max++;
+	err = scx_bpf_create_dsq(shared_dsq_id, -1);
 	if (err) {
 		scx_bpf_error("failed to create shared DSQ: %d", err);
 		return err;
