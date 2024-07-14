@@ -15,8 +15,10 @@ GUEST_TIMEOUT=60
 # TODO:
 #   - scx_layered: temporarily excluded because it
 #     cannot run with a default configuration
+#   - scx_flatcg, scx_pair: excluded until cgroup support lands upstream
+#   - scx_mitosis: not ready yet
 #
-SCHEDULERS="scx_simple scx_central scx_flatcg scx_nest scx_pair scx_rusty scx_rustland scx_bpfland"
+SCHEDULERS="scx_simple scx_central scx_nest scx_rusty scx_rustland scx_bpfland"
 
 if [ ! -x `which vng` ]; then
     echo "vng not found, please install virtme-ng to enable testing"
