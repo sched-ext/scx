@@ -16,24 +16,6 @@
 })
 
 /*
- * Iteration and scx_bpf_consume_task() are new. The following become noop on
- * older kernels. The users can switch to bpf_for_each(scx_dsq) and directly
- * call scx_bpf_consume_task() in the future.
- */
-#define __COMPAT_DSQ_FOR_EACH(p, dsq_id, flags)					\
-	if (bpf_ksym_exists(bpf_iter_scx_dsq_new))				\
-		bpf_for_each(scx_dsq, (p), (dsq_id), (flags))
-
-static inline bool __COMPAT_scx_bpf_consume_task(struct bpf_iter_scx_dsq *it,
-						 struct task_struct *p)
-{
-	if (bpf_ksym_exists(__scx_bpf_consume_task))
-		return scx_bpf_consume_task(it, p);
-	else
-		return false;
-}
-
-/*
  * Define sched_ext_ops. This may be expanded to define multiple variants for
  * backward compatibility. See compat.h::SCX_OPS_LOAD/ATTACH().
  */

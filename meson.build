@@ -1,5 +1,5 @@
 project('sched_ext schedulers', 'c',
-        version: '0.1.10',
+        version: '1.0.0',
         license: 'GPL-2.0',)
 
 if meson.version().version_compare('<1.2')
@@ -126,7 +126,7 @@ if should_build_libbpf
   endforeach
 
   message('Fetching libbpf repo')
-  libbpf_commit = '42065ea6627ff6e1ab4c65e51042a70fbf30ff7c'
+  libbpf_commit = '686f600bca59e107af4040d0838ca2b02c14ff50'
   run_command(fetch_libbpf, meson.current_build_dir(), libbpf_commit, check: true)
 
   make_jobs = 1
@@ -182,7 +182,7 @@ endif
 
 if should_build_bpftool
   message('Fetching bpftool repo')
-  bpftool_commit = '20ce6933869b70bacfdd0dd1a8399199290bf8ff'
+  bpftool_commit = '77a72987353fcae8ce330fd87d4c7afb7677a169'
   run_command(fetch_bpftool, meson.current_build_dir(), bpftool_commit, check: true)
 
   bpftool_target = custom_target('bpftool_target',

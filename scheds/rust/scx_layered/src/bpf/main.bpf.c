@@ -1181,7 +1181,7 @@ static u64 dsq_first_runnable_for_ms(u64 dsq_id, u64 now)
 {
 	struct task_struct *p;
 
-	__COMPAT_DSQ_FOR_EACH(p, dsq_id, 0) {
+	bpf_for_each(scx_dsq, p, dsq_id, 0) {
 		struct task_ctx *tctx;
 
 		if ((tctx = lookup_task_ctx(p)))
