@@ -7,6 +7,12 @@ for manifest in "$MESON_SOURCE_ROOT"/scheds/rust/*/Cargo.toml; do
     target_dir="${MESON_BUILD_ROOT}${source_dir#${MESON_SOURCE_ROOT}}"
     name="${target_dir##*/}"
 
+    # Skip scx_mitosis
+    if [ "$name" = "scx_mitosis" ]; then
+        echo "Skipping installation of $name"
+        continue
+    fi
+
     bins=($(ls -t "${target_dir}/"*"/${name}"))
     if [ ${#bins[@]} -lt 1 ]; then
 	echo "Cannot find a binary for $name under $target_dir" 1>&2
