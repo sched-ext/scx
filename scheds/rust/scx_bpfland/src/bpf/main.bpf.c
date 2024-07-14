@@ -679,6 +679,18 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	__sync_fetch_and_add(&nr_running, 1);
 }
 
+static void update_task_interactive(struct task_ctx *tctx)
+{
+	/*
+	 * Classify interactive tasks based on the average amount of their
+	 * voluntary context switches.
+	 *
+	 * If the average of voluntarily context switches is below
+	 * nvcsw_thresh, the task is classified as regular.
+	 */
+	tctx->is_interactive = tctx->avg_nvcsw >= nvcsw_thresh;
+}
+
 /*
  * Update task statistics when the task is releasing the CPU (either
  * voluntarily or because it expires its assigned time slice).
@@ -729,24 +741,11 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 		tctx->nvcsw = p->nvcsw;
 		tctx->nvcsw_ts = now;
 
-		dbg_msg("%s: pid=%d (%s) delta_nvcsw=%llu delta_t=%llu "
-			"curr_avg_nvcsw=%llu avg_nvcsw=%llu",
-			__func__, p->pid, p->comm, delta_nvcsw, delta_t,
-			avg_nvcsw, tctx->avg_nvcsw);
-		/*
-		 * Classify interactive tasks based on the average amount of their
-		 * voluntary context switches.
-		 *
-		 * A task can be promoted to interactive if the average of
-		 * voluntary context switches per second exceeds nvcsw_thresh.
-		 *
-		 * However, if the average of voluntarily context switches
-		 * drops to zero, the task will be demoted to regular.
-		 */
-		if (tctx->avg_nvcsw >= nvcsw_thresh)
-			tctx->is_interactive = true;
-		else if (tctx->avg_nvcsw == 0)
-			tctx->is_interactive = false;
+		update_task_interactive(tctx);
+
+		dbg_msg("%d (%s) avg_nvcsw = %llu [%s]",
+			p->pid, p->comm, tctx->avg_nvcsw,
+			tctx->avg_nvcsw < nvcsw_thresh ? "regular" : "interactive");
 	}
 }
 
@@ -761,7 +760,11 @@ void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 	tctx = lookup_task_ctx(p);
 	if (!tctx)
 		return;
+	tctx->nvcsw = p->nvcsw;
 	tctx->nvcsw_ts = bpf_ktime_get_ns();
+	tctx->avg_nvcsw = p->nvcsw * NSEC_PER_SEC / tctx->nvcsw_ts;
+
+	update_task_interactive(tctx);
 }
 
 void BPF_STRUCT_OPS(bpfland_cpu_online, s32 cpu)
