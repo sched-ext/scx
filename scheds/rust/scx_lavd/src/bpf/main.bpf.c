@@ -1048,20 +1048,6 @@ static u64 calc_lat_factor(u64 lat_prio)
 	return LAVD_ELIGIBLE_TIME_LAT_FT * (NICE_WIDTH - lat_prio);
 }
 
-static u32 calc_greedy_factor(struct task_ctx *taskc)
-{
-	u32 greedy_ratio = taskc->greedy_ratio;
-	u32 gr_ft;
-
-	gr_ft = greedy_ratio;
-	if (gr_ft < 1000)
-		gr_ft = 1000;
-	else
-		gr_ft *= LAVD_SLICE_GREEDY_FT;
-
-	return gr_ft;
-}
-
 static bool is_eligible(struct task_ctx *taskc)
 {
 	return taskc->greedy_ratio <= 1000;
@@ -1291,11 +1277,18 @@ out:
 static u64 calc_latency_weight(struct task_struct *p, struct task_ctx *taskc,
 			       struct cpu_ctx *cpuc, bool is_wakeup)
 {
+	int prio = taskc->lat_prio;
 	u64 w;
 
 	boost_lat(p, taskc, cpuc, is_wakeup);
-	w = LAVD_LAT_WEIGHT_FT / sched_prio_to_slice_weight[taskc->lat_prio] + 1;
-	return w;
+
+	if (prio >= NICE_WIDTH)
+		prio = NICE_WIDTH - 1;
+	else if (prio < 0)
+		prio = 0;
+
+	w = LAVD_LAT_WEIGHT_FT / sched_prio_to_slice_weight[prio];
+	return w + 1;
 }
 
 static u64 calc_virtual_deadline_delta(struct task_struct *p,
@@ -1373,22 +1366,7 @@ static u64 calc_task_load_actual(struct task_ctx *taskc)
 	return (taskc->run_time_ns * taskc->run_freq) / interval_adj;
 }
 
-static u64 calc_slice_share(struct task_struct *p, struct task_ctx *taskc)
-{
-	/*
-	 * Task's CPU time share within a targeted latency window is basically
-	 * determined by its nice priority (and its corresponding weight). In
-	 * addition, if a task is compute-bound with high slice_boost_prio, the
-	 * scheduler tries to allocate a longer time slice.
-	 */
-	u64 share = get_task_load_ideal(p);
-	share += (LAVD_SLICE_BOOST_MAX_FT * share * taskc->slice_boost_prio) /
-		 LAVD_SLICE_BOOST_MAX_STEP;
-
-	return share;
-}
-
-static u64 cap_time_slice_ns(u64 slice)
+static u64 clamp_time_slice_ns(u64 slice)
 {
 	if (slice < LAVD_SLICE_MIN_NS)
 		slice = LAVD_SLICE_MIN_NS;
@@ -1400,28 +1378,23 @@ static u64 cap_time_slice_ns(u64 slice)
 static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
-	u64 slice, share;
-	u32 gr_ft;
+	u64 nr_queued, slice;
 
 	/*
 	 * The time slice should be short enough to schedule all runnable tasks
 	 * at least once within a targeted latency.
 	 */
-	share = calc_slice_share(p, taskc);
-	slice = (share * nr_cpus_onln) *
-		(LAVD_TARGETED_LATENCY_NS / stat_cur->load_ideal);
-
-	/*
-	 * Take the task's greedy ratio into consideration. We assign a shorter
-	 * time slice when the task is greedy but not latency-critical.
-	 */
-	gr_ft = calc_greedy_factor(taskc);
-	slice = (slice * 1000) / gr_ft;
+	nr_queued = (u64)scx_bpf_dsq_nr_queued(LAVD_GLOBAL_DSQ) + 1;
+	slice = (LAVD_TARGETED_LATENCY_NS * stat_cur->nr_active) / nr_queued;
+	if (stat_cur->load_factor < 1000 && is_eligible(taskc)) {
+		slice += (LAVD_SLICE_BOOST_MAX_FT * slice *
+			  taskc->slice_boost_prio) / LAVD_SLICE_BOOST_MAX_STEP;
+	}
 
 	/*
 	 * Keep the slice in [LAVD_SLICE_MIN_NS, LAVD_SLICE_MAX_NS].
 	 */
-	slice = cap_time_slice_ns(slice);
+	slice = clamp_time_slice_ns(slice);
 
 	/*
 	 * If a task has yet to be scheduled (i.e., a freshly forked task or a
@@ -1475,7 +1448,7 @@ static void update_stat_for_runnable(struct task_struct *p,
 	taskc->acc_run_time_ns = 0;
 	cpuc->load_ideal  += get_task_load_ideal(p);
 	cpuc->load_actual += taskc->load_actual;
-	cpuc->load_run_time_ns += cap_time_slice_ns(taskc->run_time_ns);
+	cpuc->load_run_time_ns += clamp_time_slice_ns(taskc->run_time_ns);
 }
 
 static void update_stat_for_running(struct task_struct *p,
@@ -1578,8 +1551,8 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 * runtime.
 	 */
 	cpuc->load_run_time_ns = cpuc->load_run_time_ns -
-				 cap_time_slice_ns(old_run_time_ns) +
-				 cap_time_slice_ns(taskc->run_time_ns);
+				 clamp_time_slice_ns(old_run_time_ns) +
+				 clamp_time_slice_ns(taskc->run_time_ns);
 }
 
 static void update_stat_for_quiescent(struct task_struct *p,
@@ -1592,7 +1565,7 @@ static void update_stat_for_quiescent(struct task_struct *p,
 	 */
 	cpuc->load_ideal  -= get_task_load_ideal(p);
 	cpuc->load_actual -= taskc->load_actual;
-	cpuc->load_run_time_ns -= cap_time_slice_ns(taskc->run_time_ns);
+	cpuc->load_run_time_ns -= clamp_time_slice_ns(taskc->run_time_ns);
 }
 
 static u64 calc_exclusive_run_window(void)
@@ -1600,9 +1573,11 @@ static u64 calc_exclusive_run_window(void)
 	u64 load_factor;
 
 	load_factor = get_sys_stat_cur()->load_factor;
-	if (load_factor >= 1000)
-		return (LAVD_SLICE_MAX_NS * load_factor) / 1000;
-
+	if (load_factor > 1000) {
+		return (LAVD_SLICE_MIN_NS *
+			load_factor * load_factor * load_factor) /
+		       (1000 * 1000 * 1000);
+	}
 	return 0;
 }
 
@@ -2453,6 +2428,12 @@ freq_out:
 		try_decrease_cpuperf_target(cpuc_run);
 }
 
+static bool are_related_tasks(struct task_struct *p, struct task_struct *q)
+{
+	return p->parent == q || q->parent == p ||
+	       p->tgid == q->tgid || p->parent == q->parent;
+}
+
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc;
@@ -2480,7 +2461,13 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	if (!is_wakeup_ef(enq_flags))
 		return;
 
+	/*
+	 * Filter out unrelated tasks.
+	 */
 	waker = bpf_get_current_task_btf();
+	if (!are_related_tasks(p, waker))
+		return;
+
 	waker_taskc = try_get_task_ctx(waker);
 	if (!waker_taskc) {
 		/*

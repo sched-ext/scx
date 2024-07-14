@@ -56,11 +56,10 @@ enum consts {
 	LAVD_TIME_INFINITY_NS		= SCX_SLICE_INF,
 	LAVD_MAX_RETRY			= 4,
 
-	LAVD_TARGETED_LATENCY_NS	= (15 * NSEC_PER_MSEC),
-	LAVD_SLICE_MIN_NS		= ( 1 * NSEC_PER_MSEC), /* min time slice */
+	LAVD_TARGETED_LATENCY_NS	= (10 * NSEC_PER_MSEC),
+	LAVD_SLICE_MIN_NS		= (30 * NSEC_PER_USEC), /* min time slice */
 	LAVD_SLICE_MAX_NS		= ( 3 * NSEC_PER_MSEC), /* max time slice */
 	LAVD_SLICE_UNDECIDED		= SCX_SLICE_INF,
-	LAVD_SLICE_GREEDY_FT		= 3,
 	LAVD_LOAD_FACTOR_ADJ		= 6, /* adjustment for better estimation */
 	LAVD_LOAD_FACTOR_MAX		= (20 * 1000),
 	LAVD_LOAD_FACTOR_FT		= 4, /* factor to stretch the time line */
