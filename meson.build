@@ -1,5 +1,5 @@
 project('sched_ext schedulers', 'c',
-        version: '1.0.0',
+        version: '1.0.1',
         license: 'GPL-2.0',)
 
 if meson.version().version_compare('<1.2')
