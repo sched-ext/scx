@@ -1203,7 +1203,7 @@ static u64 node_dom_mask(u32 node_id)
 	u32 dom_id = 0;
 
 	bpf_for(dom_id, 0, nr_doms) {
-		if (!(dom_node_id(dom_id) == node_id))
+		if (dom_node_id(dom_id) != node_id)
 			continue;
 
 		mask |= 1LLU << dom_id;
@@ -1216,20 +1216,22 @@ static u64 node_dom_mask(u32 node_id)
  * Sets the preferred domain mask according to the mempolicy. See man(2)
  * set_mempolicy for more details on mempolicy.
  */
-static int task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
-						 struct task_ctx *taskc)
+static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
+						  struct task_ctx *taskc)
 {
 	u32 node_id;
 	u32 val = 0;
 	nodemask_t *node_mask = &p->mempolicy->nodes;
 	void *mask;
 
+	taskc->preferred_dom_mask = 0;
+
 	if (!mempolicy_affinity || !bpf_core_field_exists(p->mempolicy) ||
 	    !p->mempolicy || !taskc->cpumask)
-		return -1;
+		return;
 
 	if (!(p->mempolicy->mode & (MPOL_BIND|MPOL_PREFERRED|MPOL_PREFERRED_MANY)))
-		return -1;
+		return;
 
 	// MPOL_BIND and MPOL_PREFERRED_MANY use the home_node field on the
 	// mempolicy struct, so use that for now. In the future the memory
@@ -1238,12 +1240,12 @@ static int task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 	if ((int)p->mempolicy->home_node >= 0) {
 		taskc->preferred_dom_mask =
 			node_dom_mask((u32)p->mempolicy->home_node);
-		return 0;
+		return;
 	}
 
 	mask = BPF_CORE_READ(node_mask, bits);
 	if (bpf_core_read(&val, sizeof(val), mask))
-		return -1;
+		return;
 
 	bpf_for(node_id, 0, nr_nodes) {
 		if (!(val & 1 << node_id))
@@ -1252,7 +1254,7 @@ static int task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 		taskc->preferred_dom_mask |= node_dom_mask(node_id);
 	}
 
-	return 0;
+	return;
 }
 
 void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
@@ -1511,10 +1513,9 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 		return NO_DOM_FOUND;
 
 	taskc->dom_mask = 0;
-	taskc->preferred_dom_mask = 0;
 
 	dom = pcpu_ctx[cpu].dom_rr_cur++;
-	has_preferred_dom = task_set_preferred_mempolicy_dom_mask(p, taskc);
+	task_set_preferred_mempolicy_dom_mask(p, taskc);
 	bpf_repeat(nr_doms) {
 		dom = (dom + 1) % nr_doms;
 
@@ -1527,10 +1528,11 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 			if (first_dom == NO_DOM_FOUND)
 				first_dom = dom;
 
-			if (has_preferred_dom < 0)
+			if (taskc->preferred_dom_mask == 0)
 			       continue;
 
-			if (((1LLU << dom) & taskc->preferred_dom_mask))
+			if (((1LLU << dom) & taskc->preferred_dom_mask)
+			    && preferred_dom == NO_DOM_FOUND)
 				preferred_dom = dom;
 		}
 	}
