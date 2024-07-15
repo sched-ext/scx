@@ -5,21 +5,6 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 
-/*
- * Maximum amount of CPUs supported by the scheduler.
- */
-#define MAX_CPUS	1024
-
-/*
- * DSQ used to dispatch regular tasks.
- */
-#define SHARED_DSQ	MAX_CPUS
-
-/*
- * Priority DSQ used to dispatch interactive tasks.
- */
-#define PRIO_DSQ	(MAX_CPUS + 1)
-
 char _license[] SEC("license") = "GPL";
 
 /* Allow to use bpf_printk() only when @debug is set */
@@ -30,6 +15,16 @@ char _license[] SEC("license") = "GPL";
 
  /* Report additional debugging information */
 const volatile bool debug;
+
+/*
+ * Priority DSQ used to dispatch interactive tasks.
+ */
+static s32 prio_dsq_id;
+
+/*
+ * DSQ used to dispatch regular tasks.
+ */
+static s32 shared_dsq_id;
 
 /*
  * Default task time slice.
@@ -110,6 +105,28 @@ UEI_DEFINE(uei);
 private(BPFLAND) struct bpf_cpumask __kptr *offline_cpumask;
 
 /*
+ * Determine when we need to drain tasks dispatched to CPUs that went offline.
+ */
+static int offline_needed;
+
+/*
+ * Notify the scheduler that we need to drain and re-enqueue the tasks
+ * dispatched to the offline CPU DSQs.
+ */
+static void set_offline_needed(void)
+{
+	__sync_fetch_and_or(&offline_needed, 1);
+}
+
+/*
+ * Check and clear the state of the offline CPUs re-enqueuing.
+ */
+static bool test_and_clear_offline_needed(void)
+{
+	return __sync_fetch_and_and(&offline_needed, 0) == 1;
+}
+
+/*
  * CPUs in the system have SMT is enabled.
  */
 const volatile bool smt_enabled = true;
@@ -178,15 +195,6 @@ struct task_ctx *lookup_task_ctx(const struct task_struct *p)
 static inline bool is_kthread(const struct task_struct *p)
 {
 	return !!(p->flags & PF_KTHREAD);
-}
-
-/*
- * Return true if the system is capable of accepting more interactive tasks,
- * false otherwise.
- */
-static bool is_interactive_avail(void)
-{
-	return scx_bpf_dsq_nr_queued(PRIO_DSQ) < nr_online_cpus * 4;
 }
 
 /*
@@ -269,23 +277,58 @@ static inline u64 task_vtime(struct task_struct *p)
 }
 
 /*
- * Return the task's unused portion of its previously assigned time slice in
- * the range a [slice_ns_min..slice_ns].
+ * Return true if all the CPUs in the system are idle, false otherwise.
  */
-static inline u64 task_slice(struct task_struct *p)
+static bool is_system_busy(void)
 {
-	return CLAMP((p->scx.slice + slice_ns_min) / 2, slice_ns_min, slice_ns);
+	const struct cpumask *idle_cpumask;
+	bool is_busy;
+
+	idle_cpumask = scx_bpf_get_idle_cpumask();
+	is_busy = bpf_cpumask_empty(idle_cpumask);
+	scx_bpf_put_cpumask(idle_cpumask);
+
+	return is_busy;
 }
 
 /*
- * Return the DSQ ID associated to a CPU, or SHARED_DSQ if the CPU is not
+ * Return true if priority DSQ is congested, false otherwise.
+ */
+static bool is_prio_congested(void)
+{
+	return scx_bpf_dsq_nr_queued(prio_dsq_id) > nr_online_cpus * 4;
+}
+
+/*
+ * Return the task's unused portion of its previously assigned time slice in
+ * the range a [slice_ns_min .. slice_ns].
+ */
+static inline u64 task_slice(struct task_struct *p)
+{
+	/*
+	 * Always return maximum time slice there are idle CPUs in the system.
+	 */
+	if (!is_system_busy())
+		return slice_ns;
+	/*
+	 * Double the amount of unused task slice: this allows to reward tasks
+	 * that use less CPU time and periodically refill the time slice every
+	 * time a task is dispatched.
+	 */
+	return CLAMP(p->scx.slice * 2, slice_ns_min, slice_ns);
+}
+
+/*
+ * Return the DSQ ID associated to a CPU, or shared_dsq_id if the CPU is not
  * valid.
  */
 static u64 cpu_to_dsq(s32 cpu)
 {
-	if (cpu < 0 || cpu >= MAX_CPUS) {
+	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
+
+	if (cpu < 0 || cpu >= nr_cpu_ids) {
 		scx_bpf_error("Invalid cpu: %d", cpu);
-		return SHARED_DSQ;
+		return shared_dsq_id;
 	}
 	return (u64)cpu;
 }
@@ -296,6 +339,7 @@ static u64 cpu_to_dsq(s32 cpu)
  */
 static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 {
+	struct bpf_cpumask *offline;
 	u64 slice = task_slice(p);
 	u64 vtime = task_vtime(p);
 	u64 dsq_id = cpu_to_dsq(cpu);
@@ -308,6 +352,18 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 		return -EINVAL;
 
 	scx_bpf_dispatch_vtime(p, dsq_id, slice, vtime, enq_flags);
+
+	/*
+	 * If the CPU has gone offline notify that the task needs to be
+	 * consumed from another CPU.
+	 */
+	offline = offline_cpumask;
+	if (!offline)
+		return 0;
+	if (bpf_cpumask_test_cpu(cpu, cast_mask(offline))) {
+		set_offline_needed();
+		return 0;
+	}
 
 	/*
 	 * Wake-up the target CPU to make sure that the task is consumed as
@@ -423,13 +479,18 @@ static void handle_sync_wakeup(struct task_struct *p)
 	struct task_ctx *tctx;
 
 	/*
-	 * If we are waking up a task set the task as interactive, so that it
-	 * can be dispatched as soon as possible on the first CPU available.
+	 * If we are waking up a task immediately promote it as interactive, so
+	 * that it can be dispatched as soon as possible on the first CPU
+	 * available.
+	 *
+	 * However, if the priority queue is congested, we don't want to
+	 * promote additional interactive tasks, instead we give priority to
+	 * the tasks that are already classified as interactive.
 	 */
 	tctx = lookup_task_ctx(p);
 	if (!tctx)
 		return;
-	if (is_interactive_avail())
+	if (!tctx->is_interactive && !is_prio_congested())
 		tctx->is_interactive = true;
 }
 
@@ -487,11 +548,11 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * that can consume them) we can just dispatch them to the shared DSQ
 	 * and simply rely on the vruntime logic.
 	 */
-	if (tctx->is_interactive && is_interactive_avail()) {
-		scx_bpf_dispatch_vtime(p, PRIO_DSQ, slice, vtime, enq_flags);
+	if (tctx->is_interactive) {
+		scx_bpf_dispatch_vtime(p, prio_dsq_id, slice, vtime, enq_flags);
 		__sync_fetch_and_add(&nr_prio_dispatches, 1);
 	} else {
-		scx_bpf_dispatch_vtime(p, SHARED_DSQ, slice, vtime, enq_flags);
+		scx_bpf_dispatch_vtime(p, shared_dsq_id, slice, vtime, enq_flags);
 		__sync_fetch_and_add(&nr_shared_dispatches, 1);
 	}
 }
@@ -506,8 +567,12 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
  */
 static bool consume_offline_cpus(s32 cpu)
 {
-	u64 cpu_max = scx_bpf_nr_cpu_ids();
+	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
 	struct bpf_cpumask *offline;
+	bool ret = false;
+
+	if (!test_and_clear_offline_needed())
+		return false;
 
 	offline = offline_cpumask;
 	if (!offline)
@@ -517,8 +582,8 @@ static bool consume_offline_cpus(s32 cpu)
 	 * Cycle through all the CPUs and evenly consume tasks from the DSQs of
 	 * those that are offline.
 	 */
-	bpf_repeat(cpu_max - 1) {
-		cpu = (cpu + 1) % cpu_max;
+	bpf_repeat(nr_cpu_ids - 1) {
+		cpu = (cpu + 1) % nr_cpu_ids;
 
 		if (!bpf_cpumask_test_cpu(cpu, cast_mask(offline)))
 			continue;
@@ -526,11 +591,14 @@ static bool consume_offline_cpus(s32 cpu)
 		 * This CPU is offline, if a task has been dispatched there
 		 * consume it immediately on the current CPU.
 		 */
-		if (scx_bpf_consume(cpu_to_dsq(cpu)))
-			return true;
+		if (scx_bpf_consume(cpu_to_dsq(cpu))) {
+			set_offline_needed();
+			ret = true;
+			break;
+		}
 	}
 
-	return false;
+	return ret;
 }
 
 /*
@@ -542,7 +610,7 @@ static bool consume_prio_task(u64 now)
 {
 	bool ret;
 
-	ret = scx_bpf_consume(PRIO_DSQ);
+	ret = scx_bpf_consume(prio_dsq_id);
 	if (ret)
 		starvation_prio_ts = now;
 
@@ -558,7 +626,7 @@ static bool consume_regular_task(u64 now)
 {
 	bool ret;
 
-	ret = scx_bpf_consume(SHARED_DSQ);
+	ret = scx_bpf_consume(shared_dsq_id);
 	if (ret)
 		starvation_shared_ts = now;
 
@@ -593,6 +661,13 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	u64 now = bpf_ktime_get_ns();
 
 	/*
+	 * Try also to steal tasks directly dispatched to CPUs that have gone
+	 * offline (this allows to prevent indefinite task stalls).
+	 */
+	if (consume_offline_cpus(cpu))
+		return;
+
+	/*
 	 * Make sure we are not staving tasks from the lower priority DSQs.
 	 */
 	if (consume_starving_tasks(now))
@@ -603,13 +678,6 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * the CPU assigned in select_cpu().
 	 */
 	if (scx_bpf_consume(cpu_to_dsq(cpu)))
-		return;
-
-	/*
-	 * Try also to steal tasks directly dispatched to CPUs that have gone
-	 * offline (this allows to prevent indefinite task stalls).
-	 */
-	if (consume_offline_cpus(cpu))
 		return;
 
 	/*
@@ -650,6 +718,18 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	__sync_fetch_and_add(&nr_running, 1);
 }
 
+static void update_task_interactive(struct task_ctx *tctx)
+{
+	/*
+	 * Classify interactive tasks based on the average amount of their
+	 * voluntary context switches.
+	 *
+	 * If the average of voluntarily context switches is below
+	 * nvcsw_thresh, the task is classified as regular.
+	 */
+	tctx->is_interactive = tctx->avg_nvcsw >= nvcsw_thresh;
+}
+
 /*
  * Update task statistics when the task is releasing the CPU (either
  * voluntarily or because it expires its assigned time slice).
@@ -680,7 +760,7 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 * However, this is balanced by the fact that yielding increases the
 	 * number of voluntary context switches (nvcsw), giving the task more
 	 * opportunities to be classified as interactive and dispatched to the
-	 * high priority DSQ (PRIO_DSQ).
+	 * high priority DSQ (prio_dsq_id).
 	 */
 	if (slice_ns > p->scx.slice)
 		p->scx.dsq_vtime += (slice_ns - p->scx.slice) * 100 / p->scx.weight;
@@ -700,24 +780,11 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 		tctx->nvcsw = p->nvcsw;
 		tctx->nvcsw_ts = now;
 
-		dbg_msg("%s: pid=%d (%s) delta_nvcsw=%llu delta_t=%llu "
-			"curr_avg_nvcsw=%llu avg_nvcsw=%llu",
-			__func__, p->pid, p->comm, delta_nvcsw, delta_t,
-			avg_nvcsw, tctx->avg_nvcsw);
-		/*
-		 * Classify interactive tasks based on the average amount of their
-		 * voluntary context switches.
-		 *
-		 * A task can be promoted to interactive if the average of
-		 * voluntary context switches per second exceeds nvcsw_thresh.
-		 *
-		 * However, if the average of voluntarily context switches
-		 * drops to zero, the task will be demoted to regular.
-		 */
-		if (tctx->avg_nvcsw >= nvcsw_thresh)
-			tctx->is_interactive = true;
-		else if (tctx->avg_nvcsw == 0)
-			tctx->is_interactive = false;
+		update_task_interactive(tctx);
+
+		dbg_msg("%d (%s) avg_nvcsw = %llu [%s]",
+			p->pid, p->comm, tctx->avg_nvcsw,
+			tctx->avg_nvcsw < nvcsw_thresh ? "regular" : "interactive");
 	}
 }
 
@@ -732,12 +799,16 @@ void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 	tctx = lookup_task_ctx(p);
 	if (!tctx)
 		return;
+	tctx->nvcsw = p->nvcsw;
 	tctx->nvcsw_ts = bpf_ktime_get_ns();
+	tctx->avg_nvcsw = p->nvcsw * NSEC_PER_SEC / tctx->nvcsw_ts;
+
+	update_task_interactive(tctx);
 }
 
 void BPF_STRUCT_OPS(bpfland_cpu_online, s32 cpu)
 {
-	/* Set the CPU state to offline */
+	/* Set the CPU state to online */
 	set_cpu_state(offline_cpumask, cpu, false);
 
 	__sync_fetch_and_add(&nr_online_cpus, 1);
@@ -745,10 +816,11 @@ void BPF_STRUCT_OPS(bpfland_cpu_online, s32 cpu)
 
 void BPF_STRUCT_OPS(bpfland_cpu_offline, s32 cpu)
 {
-	/* Set the CPU state to online */
+	/* Set the CPU state to offline */
 	set_cpu_state(offline_cpumask, cpu, true);
 
 	__sync_fetch_and_sub(&nr_online_cpus, 1);
+	set_offline_needed();
 }
 
 s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
@@ -767,13 +839,12 @@ s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 s32 get_nr_online_cpus(void)
 {
 	const struct cpumask *online_cpumask;
-	u64 cpu_max = scx_bpf_nr_cpu_ids();
+	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
 	int i, cpus = 0;
 
-	cpu_max = scx_bpf_nr_cpu_ids();
 	online_cpumask = scx_bpf_get_online_cpumask();
 
-	bpf_for(i, 0, cpu_max) {
+	bpf_for(i, 0, nr_cpu_ids) {
 		if (!bpf_cpumask_test_cpu(i, online_cpumask))
 			continue;
 		cpus++;
@@ -787,6 +858,7 @@ s32 get_nr_online_cpus(void)
 s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 {
 	struct bpf_cpumask *mask;
+	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
 	int err;
 	s32 cpu;
 
@@ -794,7 +866,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	nr_online_cpus = get_nr_online_cpus();
 
 	/* Create per-CPU DSQs (used to dispatch tasks directly on a CPU) */
-	bpf_for(cpu, 0, MAX_CPUS) {
+	bpf_for(cpu, 0, nr_cpu_ids) {
 		err = scx_bpf_create_dsq(cpu_to_dsq(cpu), -1);
 		if (err) {
 			scx_bpf_error("failed to create pcpu DSQ %d: %d",
@@ -803,15 +875,25 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 		}
 	}
 
-	/* Create the global priority DSQ (for interactive tasks) */
-	err = scx_bpf_create_dsq(PRIO_DSQ, -1);
+	/*
+	 * Create the global priority DSQ (for interactive tasks).
+	 *
+	 * Allocate a new DSQ id that does not clash with any valid CPU id.
+	 */
+	prio_dsq_id = nr_cpu_ids++;
+	err = scx_bpf_create_dsq(prio_dsq_id, -1);
 	if (err) {
 		scx_bpf_error("failed to create priority DSQ: %d", err);
 		return err;
 	}
 
-	/* Create the global shared DSQ (for regular tasks) */
-	err = scx_bpf_create_dsq(SHARED_DSQ, -1);
+	/*
+	 * Create the global shared DSQ (for regular tasks).
+	 *
+	 * Allocate a new DSQ id that does not clash with any valid CPU id..
+	 */
+	shared_dsq_id = nr_cpu_ids++;
+	err = scx_bpf_create_dsq(shared_dsq_id, -1);
 	if (err) {
 		scx_bpf_error("failed to create shared DSQ: %d", err);
 		return err;
