@@ -324,9 +324,9 @@ static inline u64 task_slice(struct task_struct *p)
  */
 static u64 cpu_to_dsq(s32 cpu)
 {
-	u64 cpu_max = scx_bpf_nr_cpu_ids();
+	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
-	if (cpu < 0 || cpu >= cpu_max) {
+	if (cpu < 0 || cpu >= nr_cpu_ids) {
 		scx_bpf_error("Invalid cpu: %d", cpu);
 		return shared_dsq_id;
 	}
@@ -567,7 +567,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
  */
 static bool consume_offline_cpus(s32 cpu)
 {
-	u64 cpu_max = scx_bpf_nr_cpu_ids();
+	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
 	struct bpf_cpumask *offline;
 	bool ret = false;
 
@@ -582,8 +582,8 @@ static bool consume_offline_cpus(s32 cpu)
 	 * Cycle through all the CPUs and evenly consume tasks from the DSQs of
 	 * those that are offline.
 	 */
-	bpf_repeat(cpu_max - 1) {
-		cpu = (cpu + 1) % cpu_max;
+	bpf_repeat(nr_cpu_ids - 1) {
+		cpu = (cpu + 1) % nr_cpu_ids;
 
 		if (!bpf_cpumask_test_cpu(cpu, cast_mask(offline)))
 			continue;
@@ -839,12 +839,12 @@ s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 s32 get_nr_online_cpus(void)
 {
 	const struct cpumask *online_cpumask;
-	u64 cpu_max = scx_bpf_nr_cpu_ids();
+	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
 	int i, cpus = 0;
 
 	online_cpumask = scx_bpf_get_online_cpumask();
 
-	bpf_for(i, 0, cpu_max) {
+	bpf_for(i, 0, nr_cpu_ids) {
 		if (!bpf_cpumask_test_cpu(i, online_cpumask))
 			continue;
 		cpus++;
@@ -858,7 +858,7 @@ s32 get_nr_online_cpus(void)
 s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 {
 	struct bpf_cpumask *mask;
-	u64 cpu_max = scx_bpf_nr_cpu_ids();
+	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
 	int err;
 	s32 cpu;
 
@@ -866,7 +866,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	nr_online_cpus = get_nr_online_cpus();
 
 	/* Create per-CPU DSQs (used to dispatch tasks directly on a CPU) */
-	bpf_for(cpu, 0, cpu_max) {
+	bpf_for(cpu, 0, nr_cpu_ids) {
 		err = scx_bpf_create_dsq(cpu_to_dsq(cpu), -1);
 		if (err) {
 			scx_bpf_error("failed to create pcpu DSQ %d: %d",
@@ -875,16 +875,24 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 		}
 	}
 
-	/* Create the global priority DSQ (for interactive tasks) */
-	prio_dsq_id = cpu_max++;
+	/*
+	 * Create the global priority DSQ (for interactive tasks).
+	 *
+	 * Allocate a new DSQ id that does not clash with any valid CPU id.
+	 */
+	prio_dsq_id = nr_cpu_ids++;
 	err = scx_bpf_create_dsq(prio_dsq_id, -1);
 	if (err) {
 		scx_bpf_error("failed to create priority DSQ: %d", err);
 		return err;
 	}
 
-	/* Create the global shared DSQ (for regular tasks) */
-	shared_dsq_id = cpu_max++;
+	/*
+	 * Create the global shared DSQ (for regular tasks).
+	 *
+	 * Allocate a new DSQ id that does not clash with any valid CPU id..
+	 */
+	shared_dsq_id = nr_cpu_ids++;
 	err = scx_bpf_create_dsq(shared_dsq_id, -1);
 	if (err) {
 		scx_bpf_error("failed to create shared DSQ: %d", err);
