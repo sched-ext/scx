@@ -705,8 +705,52 @@ static s64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
 	 * interactivity scores and a higher average runtime.
 	 */
 	lat_prio = avg_run_linear - inv_dcycle_linear - work_chain_linear;
+
+	/*
+	 * If the task has been previously been assigned a lower (meaning
+	 * heavier) latency priority than what we're computing now, allow it to
+	 * temporarily inherit that lower latency priority.
+	 *
+	 * This is necessary to avoid the case of a CPU-hogging task being
+	 * penalized for latency, when in fact it's on the critical path for
+	 * running an interactive workload.
+	 *
+	 * For example, consider a workload where there's a game that uses a
+	 * CPU-hogging worker thread to crunch through logic that's required to
+	 * progress the game and properly render a frame (e.g. think Factorio,
+	 * Satisfactory, etc). The task will be CPU-intensive and will run with
+	 * high duty cycle, and will also have fairly low wake/block
+	 * frequencies due to it running for high duty cycle, but it's still
+	 * just as critical for avoiding jitter as a render thread.
+	 *
+	 * To accommodate such workloads, we allow a task to inherit the
+	 * latency priority of another task if it either wakes, or was woken,
+	 * by the other task.
+	 *
+	 * Finally, note that this also implements something of a decay
+	 * function for tasks that were previously interactive, but are no
+	 * longer. For example, if a task was assigned a latency priority of
+	 * -10, and then a latency priority of 5, it will run with the -10
+	 *  priority for this scheduling cycle, but will have to run at 5 in
+	 *  the next cycle if it's still high.
+	 *
+	 * As a future improvement, we may want to look into having some kind
+	 * of running average tracking of latency priority that decays over a
+	 * time period rather than hard-setting it on the wakeup path, and
+	 * resetting it here on the enqueue path.
+	 */
+	if (lat_prio > taskc->lat_prio) {
+		s64 lat_prio_tmp = lat_prio;
+
+		lat_prio = taskc->lat_prio;
+		taskc->lat_prio = lat_prio_tmp;
+	} else {
+		taskc->lat_prio = lat_prio;
+	}
+
 	lat_prio_abs = abs(lat_prio);
 	lat_prio_abs = min(lat_prio_abs, DL_MAX_LAT_PRIO);
+
 	lat_scale = sched_prio_to_latency_weight(lat_prio_abs);
 	lat_scale = min(lat_scale, LB_MAX_WEIGHT);
 	dl = scale_up_fair(slice_ns, lat_scale);
@@ -849,6 +893,34 @@ err_out:
 	return cpu;
 }
 
+/*
+ * When a task is being woken, make sure that the latency priority of any
+ * interactive task is temporarily inherited by the other task. See the comment
+ * in task_compute_dl() for details.
+ */
+static void inherit_lat_prio(struct task_struct *wakee)
+{
+	struct task_struct *waker = bpf_get_current_task_btf();
+	struct task_ctx *wakerc, *wakeec;
+	s64 min_prio;
+
+	if (!waker->pid || !wakee->pid)
+		return;
+
+	wakerc = lookup_task_ctx(waker);
+	wakeec = lookup_task_ctx(wakee);
+
+	if (!wakerc || !wakeec)
+		return;
+
+	min_prio = wakerc->lat_prio;
+	if (min_prio > wakeec->lat_prio)
+		min_prio = wakeec->lat_prio;
+
+	wakerc->lat_prio = min_prio;
+	wakeec->lat_prio = min_prio;
+}
+
 s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -872,6 +944,9 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		}
 		goto direct;
 	}
+
+	if (wake_flags & SCX_WAKE_TTWU)
+		inherit_lat_prio(p);
 
 	/*
 	 * If WAKE_SYNC and the machine isn't fully saturated, wake up @p to the
@@ -1593,7 +1668,7 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 		.last_blocked_at = now,
 		.last_woke_at = now,
 		.preferred_dom_mask = 0,
-
+		.lat_prio = DL_MAX_LAT_PRIO,
 	};
 	struct task_ctx *map_value;
 	long ret;

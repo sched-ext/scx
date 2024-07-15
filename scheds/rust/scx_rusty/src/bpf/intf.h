@@ -134,6 +134,8 @@ struct task_ctx {
 	u64 waker_freq;
 	u64 last_woke_at;
 
+	s64 lat_prio;
+
 	/*
 	 * vruntime tracked by the scheduler. Separate from p->scx.dsq_vtime as
 	 * this is set by the scheduler.
