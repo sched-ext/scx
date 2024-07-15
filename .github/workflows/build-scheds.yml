@@ -45,7 +45,7 @@ jobs:
       - run: cd linux && git log -1 --pretty=format:"%h %ad %s" --date=short
 
       # Build a minimal kernel (with sched-ext enabled) using virtme-ng
-      - run: cd linux && vng -v --build --config .github/workflows/sched-ext.config
+      - run: cd linux && vng -v --build --config ../.github/workflows/sched-ext.config
 
       # Generate kernel headers
       - run: cd linux && make headers
