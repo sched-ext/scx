@@ -172,7 +172,7 @@ pub trait MetricFormatter {
             Some(percentage) => {
                 // Assuming only one label for now
                 let name = match key.labels().next() {
-                    Some(label) => label.key(),
+                    Some(label) => label.value(),
                     None => "Unknown",
                 };
 
