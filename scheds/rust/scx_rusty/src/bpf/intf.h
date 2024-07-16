@@ -118,6 +118,16 @@ struct task_ctx {
 	/* The task is a workqueue worker thread */
 	bool is_kworker;
 
+	/* The task is interactive */
+	bool is_interactive;
+
+	/*
+	 * Voluntary context switches metrics.
+	 */
+	u64 nvcsw;
+	u64 nvcsw_ts;
+	u64 avg_nvcsw;
+
 	/* Allowed on all CPUs and eligible for DIRECT_GREEDY optimization */
 	bool all_cpus;
 

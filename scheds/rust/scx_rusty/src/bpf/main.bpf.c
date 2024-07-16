@@ -74,6 +74,14 @@ const volatile u32 greedy_threshold;
 const volatile u32 greedy_threshold_x_numa;
 const volatile u32 debug;
 
+static u32 prio_dom_id;
+/*
+ * TODO: hard-code these values for now.
+ */
+static u64 nvcsw_thresh = 10;
+const volatile u64 starvation_thresh_ns = 5ULL * NSEC_PER_MSEC;
+static u64 starvation_ts;
+
 /* base slice duration */
 static u64 slice_ns = SCX_SLICE_DFL;
 
@@ -824,6 +832,9 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 		return -ENOENT;
 	}
 
+	/* Immediately classify awakened tasks as interactive */
+	taskc->is_interactive = true;
+
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 
 	share_llc = bpf_cpumask_test_cpu(prev_cpu, (const struct cpumask *)d_cpumask);
@@ -1080,8 +1091,10 @@ enoent:
 static void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
 			  u64 enq_flags)
 {
+	u32 dom_id = taskc->is_interactive ? prio_dom_id : taskc->dom_id;
+
 	clamp_task_vtime(p, taskc, enq_flags);
-	scx_bpf_dispatch_vtime(p, taskc->dom_id, slice_ns, taskc->deadline,
+	scx_bpf_dispatch_vtime(p, dom_id, slice_ns, taskc->deadline,
 			       enq_flags);
 }
 
@@ -1195,6 +1208,7 @@ u32 dom_node_id(u32 dom_id)
 
 void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 {
+	u64 now = bpf_ktime_get_ns();
 	u32 curr_dom = cpu_to_dom_id(cpu), dom;
 	struct pcpu_ctx *pcpuc;
 	u32 my_node;
@@ -1208,6 +1222,14 @@ void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (unlikely(is_offline_cpu(cpu)))
 		return;
+
+	if (vtime_before(now, starvation_ts + starvation_thresh_ns)) {
+		if (scx_bpf_consume(prio_dom_id)) {
+			stat_add(RUSTY_STAT_DSQ_DISPATCH, 1);
+			return;
+		}
+	}
+	starvation_ts = now;
 
 	if (scx_bpf_consume(curr_dom)) {
 		stat_add(RUSTY_STAT_DSQ_DISPATCH, 1);
@@ -1369,7 +1391,7 @@ static void stopping_update_vtime(struct task_struct *p,
 				  struct dom_ctx *domc)
 {
 	struct lock_wrapper* lockw = lookup_dom_vtime_lock(domc->id);
-	u64 now, delta;
+	u64 now, delta, delta_t;
 
 	if (!lockw)
 		return;
@@ -1382,6 +1404,18 @@ static void stopping_update_vtime(struct task_struct *p,
 
 	p->scx.dsq_vtime += scale_inverse_fair(delta, p->scx.weight);
 	taskc->deadline = p->scx.dsq_vtime + task_compute_dl(p, taskc, 0);
+
+	delta_t = (s64)(now - taskc->nvcsw_ts);
+	if (delta_t > NSEC_PER_SEC) {
+		u64 delta_nvcsw = p->nvcsw - taskc->nvcsw;
+		u64 avg_nvcsw = delta_nvcsw * NSEC_PER_SEC / delta;
+
+		taskc->avg_nvcsw = calc_avg(taskc->avg_nvcsw, avg_nvcsw);
+		taskc->nvcsw = p->nvcsw;
+		taskc->nvcsw_ts = now;
+
+		taskc->is_interactive = taskc->avg_nvcsw >= nvcsw_thresh;
+	}
 }
 
 void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
@@ -1523,6 +1557,10 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 		.last_blocked_at = now,
 		.last_woke_at = now,
 
+		.nvcsw = p->nvcsw,
+		.nvcsw_ts = now,
+		.avg_nvcsw = p->nvcsw * NSEC_PER_SEC / now,
+		.is_interactive = false,
 	};
 	struct task_ctx *map_value;
 	long ret;
@@ -1783,6 +1821,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 		if (ret)
 			return ret;
 	}
+
+	/* Create a fake domain for interactive tasks */
+	prio_dom_id = nr_doms;
+	ret = create_dom(prio_dom_id);
+	if (ret)
+		return ret;
 
 	bpf_for(i, 0, nr_cpu_ids) {
 		if (is_offline_cpu(i))
