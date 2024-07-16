@@ -83,6 +83,7 @@ pub struct Cpu {
     min_freq: usize,
     max_freq: usize,
     trans_lat_ns: usize,
+    llc_id: usize,
 }
 
 impl Cpu {
@@ -104,6 +105,11 @@ impl Cpu {
     /// Get the transition latency of the CPU in nanoseconds
     pub fn trans_lat_ns(&self) -> usize {
         self.trans_lat_ns
+    }
+
+    /// Get the LLC id of the this Cpu
+    pub fn llc_id(&self) -> usize {
+        self.llc_id
     }
 }
 
@@ -414,6 +420,7 @@ fn create_insert_cpu(cpu_id: usize, node: &mut Node, online_mask: &Cpumask) -> R
             min_freq: min_freq,
             max_freq: max_freq,
             trans_lat_ns: trans_lat_ns,
+            llc_id: llc_id,
         },
     );
 
