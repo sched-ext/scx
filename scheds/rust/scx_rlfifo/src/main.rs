@@ -11,6 +11,9 @@ use bpf::*;
 
 use scx_utils::UserExitInfo;
 
+use libbpf_rs::OpenObject;
+
+use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -24,8 +27,9 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn init() -> Result<Self> {
+    fn init(open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         let bpf = BpfScheduler::init(
+            open_object,
             0,                        // exit_dump_len (buffer size of exit info)
             false,                    // partial (include all tasks if false)
             5000,                     // slice_ns (default task time slice)
@@ -141,8 +145,9 @@ fn main() -> Result<()> {
         shutdown_clone.store(true, Ordering::Relaxed);
     })?;
 
+    let mut open_object = MaybeUninit::uninit();
     loop {
-        let mut sched = Scheduler::init()?;
+        let mut sched = Scheduler::init(&mut open_object)?;
         if !sched.run(shutdown.clone())?.should_restart() {
             break;
         }

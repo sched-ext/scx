@@ -3,6 +3,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use std::mem::MaybeUninit;
+
 use crate::bpf_intf;
 use crate::bpf_skel::*;
 
@@ -14,6 +16,7 @@ use anyhow::Result;
 
 use plain::Plain;
 
+use libbpf_rs::OpenObject;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
@@ -189,6 +192,7 @@ fn is_smt_active() -> std::io::Result<bool> {
 
 impl<'cb> BpfScheduler<'cb> {
     pub fn init(
+        open_object: &'cb mut MaybeUninit<OpenObject>,
         exit_dump_len: u32,
         partial: bool,
         slice_us: u64,
@@ -200,7 +204,7 @@ impl<'cb> BpfScheduler<'cb> {
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(verbose);
-        let mut skel = scx_ops_open!(skel_builder, rustland)?;
+        let mut skel = scx_ops_open!(skel_builder, open_object, rustland)?;
 
         // Lock all the memory to prevent page faults that could trigger potential deadlocks during
         // scheduling.
@@ -242,7 +246,7 @@ impl<'cb> BpfScheduler<'cb> {
         }
 
         // Check host topology to determine if we need to enable SMT capabilities.
-        skel.rodata_mut().smt_enabled = is_smt_active()?;
+        skel.maps.rodata_data.smt_enabled = is_smt_active()?;
 
         // Set scheduler options (defined in the BPF part).
         if partial {
@@ -250,26 +254,26 @@ impl<'cb> BpfScheduler<'cb> {
         }
         skel.struct_ops.rustland_mut().exit_dump_len = exit_dump_len;
 
-        skel.bss_mut().usersched_pid = std::process::id();
-        skel.rodata_mut().slice_ns = slice_us * 1000;
-        skel.rodata_mut().full_user = full_user;
-        skel.rodata_mut().low_power = low_power;
-        skel.rodata_mut().debug = debug;
+        skel.maps.bss_data.usersched_pid = std::process::id();
+        skel.maps.rodata_data.slice_ns = slice_us * 1000;
+        skel.maps.rodata_data.full_user = full_user;
+        skel.maps.rodata_data.low_power = low_power;
+        skel.maps.rodata_data.debug = debug;
 
         // Attach BPF scheduler.
         let mut skel = scx_ops_load!(skel, rustland, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, rustland)?);
 
         // Build the ring buffer of queued tasks.
-        let maps = skel.maps();
-        let queued_ring_buffer = maps.queued();
+        let maps = &skel.maps;
+        let queued_ring_buffer = &maps.queued;
         let mut rbb = libbpf_rs::RingBufferBuilder::new();
         rbb.add(queued_ring_buffer, callback)
             .expect("failed to add ringbuf callback");
         let queued = rbb.build().expect("failed to build ringbuf");
 
         // Build the user ring buffer of dispatched tasks.
-        let dispatched = libbpf_rs::UserRingBuffer::new(&maps.dispatched())
+        let dispatched = libbpf_rs::UserRingBuffer::new(&maps.dispatched)
             .expect("failed to create user ringbuf");
 
         // Make sure to use the SCHED_EXT class at least for the scheduler itself.
@@ -297,71 +301,71 @@ impl<'cb> BpfScheduler<'cb> {
     // busy loop, causing unnecessary high CPU consumption.
     pub fn update_tasks(&mut self, nr_queued: Option<u64>, nr_scheduled: Option<u64>) {
         if let Some(queued) = nr_queued {
-            self.skel.bss_mut().nr_queued = queued;
+            self.skel.maps.bss_data.nr_queued = queued;
         }
         if let Some(scheduled) = nr_scheduled {
-            self.skel.bss_mut().nr_scheduled = scheduled;
+            self.skel.maps.bss_data.nr_scheduled = scheduled;
         }
     }
 
     // Counter of the online CPUs.
     #[allow(dead_code)]
     pub fn nr_online_cpus_mut(&mut self) -> &mut u64 {
-        &mut self.skel.bss_mut().nr_online_cpus
+        &mut self.skel.maps.bss_data.nr_online_cpus
     }
 
     // Counter of currently running tasks.
     #[allow(dead_code)]
     pub fn nr_running_mut(&mut self) -> &mut u64 {
-        &mut self.skel.bss_mut().nr_running
+        &mut self.skel.maps.bss_data.nr_running
     }
 
     // Counter of queued tasks.
     #[allow(dead_code)]
     pub fn nr_queued_mut(&mut self) -> &mut u64 {
-        &mut self.skel.bss_mut().nr_queued
+        &mut self.skel.maps.bss_data.nr_queued
     }
 
     // Counter of scheduled tasks.
     #[allow(dead_code)]
     pub fn nr_scheduled_mut(&mut self) -> &mut u64 {
-        &mut self.skel.bss_mut().nr_scheduled
+        &mut self.skel.maps.bss_data.nr_scheduled
     }
 
     // Counter of user dispatch events.
     #[allow(dead_code)]
     pub fn nr_user_dispatches_mut(&mut self) -> &mut u64 {
-        &mut self.skel.bss_mut().nr_user_dispatches
+        &mut self.skel.maps.bss_data.nr_user_dispatches
     }
 
     // Counter of user kernel events.
     #[allow(dead_code)]
     pub fn nr_kernel_dispatches_mut(&mut self) -> &mut u64 {
-        &mut self.skel.bss_mut().nr_kernel_dispatches
+        &mut self.skel.maps.bss_data.nr_kernel_dispatches
     }
 
     // Counter of cancel dispatch events.
     #[allow(dead_code)]
     pub fn nr_cancel_dispatches_mut(&mut self) -> &mut u64 {
-        &mut self.skel.bss_mut().nr_cancel_dispatches
+        &mut self.skel.maps.bss_data.nr_cancel_dispatches
     }
 
     // Counter of dispatches bounced to the shared DSQ.
     #[allow(dead_code)]
     pub fn nr_bounce_dispatches_mut(&mut self) -> &mut u64 {
-        &mut self.skel.bss_mut().nr_bounce_dispatches
+        &mut self.skel.maps.bss_data.nr_bounce_dispatches
     }
 
     // Counter of failed dispatch events.
     #[allow(dead_code)]
     pub fn nr_failed_dispatches_mut(&mut self) -> &mut u64 {
-        &mut self.skel.bss_mut().nr_failed_dispatches
+        &mut self.skel.maps.bss_data.nr_failed_dispatches
     }
 
     // Counter of scheduler congestion events.
     #[allow(dead_code)]
     pub fn nr_sched_congested_mut(&mut self) -> &mut u64 {
-        &mut self.skel.bss_mut().nr_sched_congested
+        &mut self.skel.maps.bss_data.nr_sched_congested
     }
 
     // Set scheduling class for the scheduler itself to SCHED_EXT

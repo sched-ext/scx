@@ -16,6 +16,7 @@ pub mod load_balance;
 use load_balance::LoadBalancer;
 use load_balance::NumaStat;
 
+use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -31,6 +32,8 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use libbpf_rs::MapCore as _;
+use libbpf_rs::OpenObject;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
@@ -305,13 +308,16 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(opts: &Opts) -> Result<Self> {
+    fn init(
+        opts: &Opts,
+        open_object: &'a mut MaybeUninit<OpenObject>,
+    ) -> Result<Self> {
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 0);
         init_libbpf_logging(None);
         info!("Running scx_rusty (build ID: {})", *build_id::SCX_FULL_VERSION);
-        let mut skel = scx_ops_open!(skel_builder, rusty).unwrap();
+        let mut skel = scx_ops_open!(skel_builder, open_object, rusty).unwrap();
 
         // Initialize skel according to @opts.
         let top = Arc::new(Topology::new()?);
@@ -334,21 +340,21 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        skel.rodata_mut().nr_nodes = domains.nr_nodes() as u32;
-        skel.rodata_mut().nr_doms = domains.nr_doms() as u32;
-        skel.rodata_mut().nr_cpu_ids = top.nr_cpu_ids() as u32;
+        skel.maps.rodata_data.nr_nodes = domains.nr_nodes() as u32;
+        skel.maps.rodata_data.nr_doms = domains.nr_doms() as u32;
+        skel.maps.rodata_data.nr_cpu_ids = top.nr_cpu_ids() as u32;
 
         // Any CPU with dom > MAX_DOMS is considered offline by default. There
         // are a few places in the BPF code where we skip over offlined CPUs
         // (e.g. when initializing or refreshing tune params), and elsewhere the
         // scheduler will error if we try to schedule from them.
         for cpu in 0..top.nr_cpu_ids() {
-            skel.rodata_mut().cpu_dom_id_map[cpu] = u32::MAX;
+            skel.maps.rodata_data.cpu_dom_id_map[cpu] = u32::MAX;
         }
 
         for (id, dom) in domains.doms().iter() {
             for cpu in dom.mask().into_iter() {
-                skel.rodata_mut().cpu_dom_id_map[cpu] = id
+                skel.maps.rodata_data.cpu_dom_id_map[cpu] = id
                     .clone()
                     .try_into()
                     .expect("Domain ID could not fit into 32 bits");
@@ -364,17 +370,17 @@ impl<'a> Scheduler<'a> {
             }
 
             let raw_numa_slice = numa_mask.as_raw_slice();
-            let node_cpumask_slice = &mut skel.rodata_mut().numa_cpumasks[numa];
+            let node_cpumask_slice = &mut skel.maps.rodata_data.numa_cpumasks[numa];
             let (left, _) = node_cpumask_slice.split_at_mut(raw_numa_slice.len());
             left.clone_from_slice(raw_numa_slice);
             info!("NUMA[{:02}] mask= {}", numa, numa_mask);
 
             for dom in node_domains.iter() {
                 let raw_dom_slice = dom.mask_slice();
-                let dom_cpumask_slice = &mut skel.rodata_mut().dom_cpumasks[dom.id()];
+                let dom_cpumask_slice = &mut skel.maps.rodata_data.dom_cpumasks[dom.id()];
                 let (left, _) = dom_cpumask_slice.split_at_mut(raw_dom_slice.len());
                 left.clone_from_slice(raw_dom_slice);
-                skel.rodata_mut().dom_numa_id_map[dom.id()] =
+                skel.maps.rodata_data.dom_numa_id_map[dom.id()] =
                     numa.try_into().expect("NUMA ID could not fit into 32 bits");
 
                 info!("  DOM[{:02}] mask= {}", dom.id(), dom.mask());
@@ -386,14 +392,14 @@ impl<'a> Scheduler<'a> {
         }
         skel.struct_ops.rusty_mut().exit_dump_len = opts.exit_dump_len;
 
-        skel.rodata_mut().load_half_life = (opts.load_half_life * 1000000000.0) as u32;
-        skel.rodata_mut().kthreads_local = opts.kthreads_local;
-        skel.rodata_mut().fifo_sched = opts.fifo_sched;
-        skel.rodata_mut().greedy_threshold = opts.greedy_threshold;
-        skel.rodata_mut().greedy_threshold_x_numa = opts.greedy_threshold_x_numa;
-        skel.rodata_mut().direct_greedy_numa = opts.direct_greedy_numa;
-        skel.rodata_mut().mempolicy_affinity = opts.mempolicy_affinity;
-        skel.rodata_mut().debug = opts.verbose as u32;
+        skel.maps.rodata_data.load_half_life = (opts.load_half_life * 1000000000.0) as u32;
+        skel.maps.rodata_data.kthreads_local = opts.kthreads_local;
+        skel.maps.rodata_data.fifo_sched = opts.fifo_sched;
+        skel.maps.rodata_data.greedy_threshold = opts.greedy_threshold;
+        skel.maps.rodata_data.greedy_threshold_x_numa = opts.greedy_threshold_x_numa;
+        skel.maps.rodata_data.direct_greedy_numa = opts.direct_greedy_numa;
+        skel.maps.rodata_data.mempolicy_affinity = opts.mempolicy_affinity;
+        skel.maps.rodata_data.debug = opts.verbose as u32;
 
         // Attach.
         let mut skel = scx_ops_load!(skel, rusty, uei)?;
@@ -487,8 +493,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn read_bpf_stats(&mut self) -> Result<Vec<u64>> {
-        let mut maps = self.skel.maps_mut();
-        let stats_map = maps.stats();
+        let stats_map = &mut self.skel.maps.stats;
         let mut stats: Vec<u64> = Vec::new();
         let zero_vec =
             vec![vec![0u8; stats_map.value_size() as usize]; self.top.nr_cpus_possible()];
@@ -686,8 +691,9 @@ fn main() -> Result<()> {
             .expect("failed to install log recorder");
     }
 
+    let mut open_object = MaybeUninit::uninit();
     loop {
-        let mut sched = Scheduler::init(&opts)?;
+        let mut sched = Scheduler::init(&opts, &mut open_object)?;
         if !sched.run(shutdown.clone())?.should_restart() {
             break;
         }
