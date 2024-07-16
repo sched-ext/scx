@@ -111,6 +111,7 @@ struct sys_stat {
 
 	volatile u64	load_ideal;	/* average ideal load of runnable tasks */
 	volatile u64	load_actual;	/* average actual load of runnable tasks */
+	volatile u64	avg_svc_time;	/* average service time per task */
 
 	volatile u32	avg_lat_cri;	/* average latency criticality (LC) */
 	volatile u32	max_lat_cri;	/* maximum latency criticality (LC) */
@@ -143,6 +144,7 @@ struct cpu_ctx {
 	volatile u64	load_ideal;	/* ideal loaf of runnable tasks */
 	volatile u64	load_actual;	/* actual load of runnable tasks */
 	volatile u64	load_run_time_ns; /* total runtime of runnable tasks */
+	volatile u64	tot_svc_time;	/* total service time on a CPU */
 	volatile u64	last_kick_clk;	/* when the CPU was kicked */
 
 	/*
@@ -206,6 +208,7 @@ struct task_ctx {
 
 	u64	wake_freq;		/* waking-up frequency in a second */
 	u64	load_actual;		/* task load derived from run_time and run_freq */
+	u64	svc_time;		/* total CPU time consumed for this task */
 
 	/*
 	 * Task deadline and time slice

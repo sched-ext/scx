@@ -216,7 +216,12 @@ const volatile u16 cpu_order[LAVD_CPU_ID_MAX]; /* ordered by cpus->core->llc->nu
 /*
  * Logical current clock
  */
-u64			cur_logical_clk;
+static u64		cur_logical_clk;
+
+/*
+ * Current service time
+ */
+static u64		cur_svc_time;
 
 /*
  * Options
@@ -639,6 +644,7 @@ struct sys_stat_ctx {
 	u64		compute_total;
 	u64		load_actual;
 	u64		load_ideal;
+	u64		tot_svc_time;
 	u64		load_run_time_ns;
 	s32		max_lat_cri;
 	s32		min_lat_cri;
@@ -680,6 +686,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		c->load_ideal += cpuc->load_ideal;
 		c->load_actual += cpuc->load_actual;
 		c->load_run_time_ns += cpuc->load_run_time_ns;
+		c->tot_svc_time += cpuc->tot_svc_time;
 
 		/*
 		 * Accumulate task's latency criticlity information.
@@ -806,6 +813,9 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 
 	stat_next->nr_violation =
 		calc_avg32(stat_cur->nr_violation, c->nr_violation);
+
+	stat_next->avg_svc_time = (c->sched_nr == 0) ? 0 :
+				  c->tot_svc_time / c->sched_nr;
 }
 
 static void calc_inc1k(struct sys_stat_ctx *c)
@@ -1012,15 +1022,10 @@ static u32 calc_greedy_ratio(struct task_struct *p, struct task_ctx *taskc)
 	/*
 	 * The greedy ratio of a task represents how much time the task
 	 * overspent CPU time compared to the ideal, fair CPU allocation. It is
-	 * the ratio of task's actual ratio to its ideal ratio. The actual
-	 * ratio is the ratio of the task's average runtime to the total
-	 * runtime in a system. The ideal ratio is the ratio of the task's
-	 * weight, derived from its nice priority, to the sum of weights in a
-	 * system. We use the moving averages (EWMA: exponentially weighted
-	 * moving average) instead of the actual summation, which never decays.
+	 * the ratio of task's actual service time to average service time in a
+	 * system.
 	 */
-	ratio = (1000 * taskc->load_actual * stat_cur->load_ideal) /
-		(stat_cur->load_actual * get_task_load_ideal(p));
+	ratio = (1000 * taskc->svc_time) / stat_cur->avg_svc_time;
 	taskc->greedy_ratio = ratio;
 	return ratio;
 }
@@ -1316,6 +1321,7 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	is_wakeup = is_wakeup_ef(enq_flags);
 	weight = calc_latency_weight(p, taskc, cpuc, is_wakeup);
 	vdeadline_delta_ns = (((taskc->run_time_ns + 1) * weight) + 1000) / 1000;
+
 	/*
 	 * When a system is overloaded (>1000), stretch time space so make time
 	 * tick logically slower to give room to execute the overloaded tasks.
@@ -1466,6 +1472,12 @@ static void update_stat_for_running(struct task_struct *p,
 	WRITE_ONCE(cur_logical_clk, taskc->vdeadline_log_clk);
 
 	/*
+	 * Update the current service time if necessary.
+	 */
+	if (cur_svc_time < taskc->svc_time)
+		WRITE_ONCE(cur_svc_time, taskc->svc_time);
+
+	/*
 	 * Since this is the start of a new schedule for @p, we update run
 	 * frequency in a second using an exponential weighted moving average.
 	 */
@@ -1521,12 +1533,20 @@ static void update_stat_for_running(struct task_struct *p,
 	taskc->last_running_clk = now;
 }
 
+static u64 calc_svc_time(struct task_struct *p, struct task_ctx *taskc)
+{
+	/*
+	 * Scale the execution time by the inverse of the weight and charge.
+	 */
+	return (taskc->last_stopping_clk - taskc->last_running_clk) / p->scx.weight;
+}
+
 static void update_stat_for_stopping(struct task_struct *p,
 				     struct task_ctx *taskc,
 				     struct cpu_ctx *cpuc)
 {
 	u64 now = bpf_ktime_get_ns();
-	u64 old_run_time_ns, suspended_duration;
+	u64 old_run_time_ns, suspended_duration, task_svc_time;
 
 	/*
 	 * Update task's run_time. When a task is scheduled consecutively
@@ -1544,6 +1564,8 @@ static void update_stat_for_stopping(struct task_struct *p,
 	taskc->run_time_ns = calc_avg(taskc->run_time_ns,
 				      taskc->acc_run_time_ns);
 	taskc->last_stopping_clk = now;
+	task_svc_time = calc_svc_time(p, taskc);
+	taskc->svc_time += task_svc_time;
 	taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
 
 	/*
@@ -1553,6 +1575,11 @@ static void update_stat_for_stopping(struct task_struct *p,
 	cpuc->load_run_time_ns = cpuc->load_run_time_ns -
 				 clamp_time_slice_ns(old_run_time_ns) +
 				 clamp_time_slice_ns(taskc->run_time_ns);
+
+	/*
+	 * Increase total service time of this CPU.
+	 */
+	cpuc->tot_svc_time += task_svc_time;
 }
 
 static void update_stat_for_quiescent(struct task_struct *p,
@@ -2782,6 +2809,22 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	taskc->slice_ns = 0;
 }
 
+void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
+{
+	struct task_ctx *taskc;
+
+	/*
+	 * Set task's service time to the current, minimum service time.
+	 */
+	taskc = get_task_ctx(p);
+	if (!taskc) {
+		scx_bpf_error("task_ctx_stor first lookup failed");
+		return;
+	}
+
+	taskc->svc_time = READ_ONCE(cur_svc_time);
+}
+
 s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
@@ -2957,9 +3000,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 		return err;
 
 	/*
-	 * Initilize the current logical clock.
+	 * Initilize the current logical clock and service time.
 	 */
 	WRITE_ONCE(cur_logical_clk, 0);
+	WRITE_ONCE(cur_svc_time, 0);
+
 	return err;
 }
 
@@ -2980,6 +3025,7 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .cpu_online		= (void *)lavd_cpu_online,
 	       .cpu_offline		= (void *)lavd_cpu_offline,
 	       .update_idle		= (void *)lavd_update_idle,
+	       .enable			= (void *)lavd_enable,
 	       .init_task		= (void *)lavd_init_task,
 	       .init			= (void *)lavd_init,
 	       .exit			= (void *)lavd_exit,
