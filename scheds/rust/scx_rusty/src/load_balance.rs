@@ -320,6 +320,7 @@ struct TaskInfo {
     pid: i32,
     load: OrderedFloat<f64>,
     dom_mask: u64,
+    preferred_dom_mask: u64,
     migrated: Cell<bool>,
     is_kworker: bool,
 }
@@ -735,6 +736,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                         pid: *pid,
                         load: OrderedFloat(load),
                         dom_mask: task_ctx.dom_mask,
+                        preferred_dom_mask: task_ctx.preferred_dom_mask,
                         migrated: Cell::new(false),
                         is_kworker: task_ctx.is_kworker,
                     },
@@ -773,6 +775,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         &mut self,
         (push_dom, to_push): (&mut Domain, f64),
         (pull_dom, to_pull): (&mut Domain, f64),
+        task_filter: impl Fn(&TaskInfo, u32) -> bool,
         to_xfer: f64,
     ) -> Result<Option<f64>> {
         let to_pull = to_pull.abs();
@@ -804,7 +807,10 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 tasks
                     .as_slice()
                     .iter()
-                    .filter(|x| x.load <= OrderedFloat(to_xfer))
+                    .filter(|x| {
+                        x.load <= OrderedFloat(to_xfer)
+                        && task_filter(x, pull_dom_id)
+                    })
                     .rev(),
                 self.skip_kworkers,
             ),
@@ -812,7 +818,10 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 tasks
                     .as_slice()
                     .iter()
-                    .filter(|x| x.load >= OrderedFloat(to_xfer)),
+                    .filter(|x| {
+                        x.load >= OrderedFloat(to_xfer)
+                        && task_filter(x, pull_dom_id)
+                    }),
                 self.skip_kworkers,
             ),
         ) {
@@ -879,9 +888,19 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     pull_node.domains.insert(pull_dom);
                     break;
                 }
-                let transferred = self.try_find_move_task((&mut push_dom, push_imbal),
+                let mut transferred = self.try_find_move_task((&mut push_dom, push_imbal),
                                                           (&mut pull_dom, pull_imbal),
+                                                          |task: &TaskInfo, pull_dom:u32| -> bool {
+                                                              (task.preferred_dom_mask & (1 << pull_dom)) > 0
+                                                          },
                                                           xfer)?;
+                if transferred.is_none() {
+                    transferred = self.try_find_move_task((&mut push_dom, push_imbal),
+                                                          (&mut pull_dom, pull_imbal),
+                                                          |_task: &TaskInfo, _pull_dom:u32| -> bool {true},
+                                                          xfer)?;
+                }
+
                 pullers.push(pull_dom);
                 if let Some(transferred) = transferred {
                     pushed = transferred;
@@ -1041,9 +1060,19 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     bail!("Node {} pull dom {} had imbal {}", node.id, pull_dom.id, pull_imbal);
                 }
                 let xfer = push_dom.xfer_between(&pull_dom);
-                let transferred = self.try_find_move_task((&mut push_dom, push_imbal),
+                let mut transferred = self.try_find_move_task((&mut push_dom, push_imbal),
                                                           (&mut pull_dom, pull_imbal),
+                                                          |task: &TaskInfo, pull_dom:u32| -> bool {
+                                                              (task.preferred_dom_mask & (1 << pull_dom)) > 0
+                                                          },
                                                           xfer)?;
+                if transferred.is_none() {
+                    transferred = self.try_find_move_task((&mut push_dom, push_imbal),
+                                                          (&mut pull_dom, pull_imbal),
+                                                          |_task: &TaskInfo, _pull_dom:u32| -> bool {true},
+                                                          xfer)?;
+                }
+
                 if let Some(transferred) = transferred {
                     if transferred <= 0.0f64 {
                         bail!("Expected nonzero load transfer")

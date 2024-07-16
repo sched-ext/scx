@@ -190,6 +190,11 @@ struct Opts {
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     partial: bool,
 
+    /// Enables soft NUMA affinity for tasks that use set_mempolicy. This 
+    /// may improve performance in some scenarios when using mempolicies.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    mempolicy_affinity: bool,
+
     /// Exit debug dump buffer length. 0 indicates default.
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
@@ -387,6 +392,7 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().greedy_threshold = opts.greedy_threshold;
         skel.rodata_mut().greedy_threshold_x_numa = opts.greedy_threshold_x_numa;
         skel.rodata_mut().direct_greedy_numa = opts.direct_greedy_numa;
+        skel.rodata_mut().mempolicy_affinity = opts.mempolicy_affinity;
         skel.rodata_mut().debug = opts.verbose as u32;
 
         // Attach.
