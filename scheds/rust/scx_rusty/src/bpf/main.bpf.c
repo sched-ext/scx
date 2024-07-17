@@ -1507,7 +1507,6 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 {
 	s32 cpu = bpf_get_smp_processor_id();
 	u32 first_dom = NO_DOM_FOUND, dom, preferred_dom = NO_DOM_FOUND;
-	int has_preferred_dom;
 
 	if (cpu < 0 || cpu >= MAX_CPUS)
 		return NO_DOM_FOUND;
