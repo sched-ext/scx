@@ -98,7 +98,7 @@ enum consts {
 	LAVD_TC_CPU_PIN_INTERVAL_DIV	= (LAVD_TC_CPU_PIN_INTERVAL /
 					   LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_GLOBAL_DSQ			= 0,
+	LAVD_ELIGIBLE_DSQ		= 0, /* a global DSQ for eligible tasks */
 };
 
 /*

@@ -1390,7 +1390,7 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	 * The time slice should be short enough to schedule all runnable tasks
 	 * at least once within a targeted latency.
 	 */
-	nr_queued = (u64)scx_bpf_dsq_nr_queued(LAVD_GLOBAL_DSQ) + 1;
+	nr_queued = (u64)scx_bpf_dsq_nr_queued(LAVD_ELIGIBLE_DSQ) + 1;
 	slice = (LAVD_TARGETED_LATENCY_NS * stat_cur->nr_active) / nr_queued;
 	if (stat_cur->load_factor < 1000 && is_eligible(taskc)) {
 		slice += (LAVD_SLICE_BOOST_MAX_FT * slice *
@@ -1907,7 +1907,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	prm_run.lat_prio = taskc_run->lat_prio;
 
 	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p_wait, LAVD_GLOBAL_DSQ, 0) {
+	bpf_for_each(scx_dsq, p_wait, LAVD_ELIGIBLE_DSQ, 0) {
 		taskc_wait = get_task_ctx(p_wait);
 		if (!taskc_wait)
 			break;
@@ -1932,7 +1932,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 		}
 
 		/*
-		 * Test only the first entry on the LAVD_GLOBAL_DSQ.
+		 * Test only the first entry on the LAVD_ELIGIBLE_DSQ.
 		 */
 		break;
 	}
@@ -1973,7 +1973,7 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * Enqueue the task to the global runqueue based on its virtual
 	 * deadline.
 	 */
-	scx_bpf_dispatch_vtime(p, LAVD_GLOBAL_DSQ, LAVD_SLICE_UNDECIDED,
+	scx_bpf_dispatch_vtime(p, LAVD_ELIGIBLE_DSQ, LAVD_SLICE_UNDECIDED,
 			       taskc->vdeadline_log_clk, enq_flags);
 
 }
@@ -2254,7 +2254,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If all CPUs are using, directly consume without checking CPU masks.
 	 */
 	if (use_full_cpus()) {
-		scx_bpf_consume(LAVD_GLOBAL_DSQ);
+		scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
 		return;
 	}
 
@@ -2275,7 +2275,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (bpf_cpumask_test_cpu(cpu, cast_mask(active)) ||
 	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
-		scx_bpf_consume(LAVD_GLOBAL_DSQ);
+		scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
 		goto unlock_out;
 	}
 
@@ -2283,14 +2283,14 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If this CPU is not either in active or overflow CPUs, it tries to
 	 * find and run a task pinned to run on this CPU.
 	 */
-	bpf_for_each(scx_dsq, p, LAVD_GLOBAL_DSQ, 0) {
+	bpf_for_each(scx_dsq, p, LAVD_ELIGIBLE_DSQ, 0) {
 		/*
 		 * Prioritize kernel tasks because most kernel tasks are pinned
 		 * to a particular CPU and latency-critical (e.g., ksoftirqd,
 		 * kworker, etc).
 		 */
 		if (is_kernel_task(p)) {
-			scx_bpf_consume(LAVD_GLOBAL_DSQ);
+			scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
 			break;
 		}
 
@@ -2322,7 +2322,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * cores. We will optimize this path after introducing per-core
 		 * DSQ.
 		 */
-		scx_bpf_consume(LAVD_GLOBAL_DSQ);
+		scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
 
 		/*
 		 * This is the first time a particular pinned user-space task
@@ -2968,7 +2968,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	/*
 	 * Create a central task queue.
 	 */
-	err = scx_bpf_create_dsq(LAVD_GLOBAL_DSQ, -1);
+	err = scx_bpf_create_dsq(LAVD_ELIGIBLE_DSQ, -1);
 	if (err) {
 		scx_bpf_error("Failed to create a shared DSQ");
 		return err;
