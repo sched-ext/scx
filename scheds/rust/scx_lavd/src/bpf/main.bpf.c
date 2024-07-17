@@ -209,6 +209,20 @@ private(LAVD) struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active 
 private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
 
 /*
+ * Ineligible runnable queue
+ */
+struct task_node {
+	u64			vdeadline;	/* key */
+	u64			pid;		/* value */
+	struct bpf_rb_node	node;
+};
+
+private(LAVD) struct bpf_spin_lock	ineli_lock;
+private(LAVD) struct bpf_rb_root	ineli_rq __contains(task_node, node);
+static u64				nr_ineli;
+static u64				refill_clk; /* when an eliglble DSQ is refilled */
+
+/*
  * CPU topology
  */
 const volatile u16 cpu_order[LAVD_CPU_ID_MAX]; /* ordered by cpus->core->llc->numa */
@@ -1390,7 +1404,8 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	 * The time slice should be short enough to schedule all runnable tasks
 	 * at least once within a targeted latency.
 	 */
-	nr_queued = (u64)scx_bpf_dsq_nr_queued(LAVD_ELIGIBLE_DSQ) + 1;
+	nr_queued = (u64)scx_bpf_dsq_nr_queued(LAVD_ELIGIBLE_DSQ) +
+		    READ_ONCE(nr_ineli) + 1;
 	slice = (LAVD_TARGETED_LATENCY_NS * stat_cur->nr_active) / nr_queued;
 	if (stat_cur->load_factor < 1000 && is_eligible(taskc)) {
 		slice += (LAVD_SLICE_BOOST_MAX_FT * slice *
@@ -1941,11 +1956,23 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	return ret;
 }
 
+static bool less(struct bpf_rb_node *a, const struct bpf_rb_node *b)
+{
+	struct task_node *node_a;
+	struct task_node *node_b;
+
+	node_a = container_of(a, struct task_node, node);
+	node_b = container_of(b, struct task_node, node);
+
+	return node_a->vdeadline < node_b->vdeadline;
+}
+
 static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 			  struct cpu_ctx *cpuc, u64 enq_flags)
 {
 	struct task_ctx *taskc_run;
 	struct task_struct *p_run;
+	struct task_node *t;
 
 	/*
 	 * Calculate when a tack can be scheduled.
@@ -1956,26 +1983,49 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	calc_when_to_run(p, taskc, cpuc, enq_flags);
 
 	/*
-	 * Try to find and kick a victim CPU, which runs a less urgent task.
-	 * The kick will be done asynchronously.
+	 * If a task is eligible, dispatch to the eligible DSQ.
 	 */
-	try_find_and_kick_victim_cpu(p->cpus_ptr, taskc);
+	if (is_eligible(taskc)) {
+		/*
+		 * Try to find and kick a victim CPU, which runs a less urgent
+		 * task. The kick will be done asynchronously.
+		 */
+		try_find_and_kick_victim_cpu(p->cpus_ptr, taskc);
+
+		/*
+		 * If the current task has something to yield, try preempt it.
+		 */
+		p_run = bpf_get_current_task_btf();
+		taskc_run = try_get_task_ctx(p_run);
+		if (taskc_run && p_run->scx.slice != 0)
+			try_yield_current_cpu(p_run, cpuc, taskc_run);
+
+		goto dispatch_out;
+	}
 
 	/*
-	 * If the current task has something to yield, try preempt it.
+	 * If the task is ineligible, keep it to the ineligible run queue.
 	 */
-	p_run = bpf_get_current_task_btf();
-	taskc_run = try_get_task_ctx(p_run);
-	if (taskc_run && p_run->scx.slice != 0)
-		try_yield_current_cpu(p_run, cpuc, taskc_run);
+	t = bpf_obj_new(typeof(*t));
+	if (!t)
+		goto dispatch_out;
+
+	t->vdeadline = taskc->vdeadline_log_clk;
+	t->pid = p->pid;
+
+	bpf_spin_lock(&ineli_lock);
+	bpf_rbtree_add(&ineli_rq, &t->node, less);
+	WRITE_ONCE(nr_ineli, nr_ineli + 1);
+	bpf_spin_unlock(&ineli_lock);
+	return;
 
 	/*
-	 * Enqueue the task to the global runqueue based on its virtual
-	 * deadline.
+	 * Enqueue the task to the eligible DSQ based on its virtual deadline.
 	 */
+dispatch_out:
 	scx_bpf_dispatch_vtime(p, LAVD_ELIGIBLE_DSQ, LAVD_SLICE_UNDECIDED,
 			       taskc->vdeadline_log_clk, enq_flags);
-
+	return;
 }
 
 static bool could_run_on_prev(struct task_struct *p, s32 prev_cpu,
@@ -2097,9 +2147,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
 	bool found_idle = false;
-	struct task_struct *p_run;
-	struct cpu_ctx *cpuc_run;
-	struct task_ctx *taskc, *taskc_run;
+	struct task_ctx *taskc;
 	s32 cpu_id;
 	
 	taskc = get_task_ctx(p);
@@ -2150,6 +2198,101 @@ static bool use_full_cpus(void)
 	       ((stat_cur->nr_active + LAVD_TC_NR_OVRFLW) >= nr_cpus_onln);
 }
 
+static bool refill_eligible_dsq(s32 cpu)
+{
+	struct task_struct *p;
+	struct task_ctx *taskc;
+	struct cpu_ctx *cpuc;
+	struct bpf_rb_node *node;
+	struct task_node *t;
+	u64 pid;
+
+	/*
+	 * Fetch the first task on the ineligible rq.
+	 */
+	bpf_spin_lock(&ineli_lock);
+	node = bpf_rbtree_first(&ineli_rq);
+	if (!node) {
+		bpf_spin_unlock(&ineli_lock);
+		return false;
+	}
+	t = container_of(node, struct task_node, node);
+	pid = t->pid;
+
+	node = bpf_rbtree_remove(&ineli_rq, &t->node);
+	WRITE_ONCE(nr_ineli, nr_ineli - 1);
+	bpf_spin_unlock(&ineli_lock);
+
+	if (node) {
+		t = container_of(node, struct task_node, node);
+		bpf_obj_drop(t);
+	}
+
+	/*
+	 * Recalculate when to run for the task.
+	 */
+	p = bpf_task_from_pid(pid);
+	if (!p)
+		return false;
+	taskc = get_task_ctx(p);
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc || !taskc) {
+		bpf_task_release(p);
+		return false;
+	}
+
+	calc_when_to_run(p, taskc, cpuc, 0);
+
+	/*
+	 * Dispatch the first task to the eligible queue for future
+	 * scheduling.
+	 */
+	scx_bpf_dispatch_vtime(p, LAVD_ELIGIBLE_DSQ,
+			       LAVD_SLICE_UNDECIDED,
+			       taskc->vdeadline_log_clk, 0);
+	bpf_task_release(p);
+
+	/*
+	 * Update the refill clock.
+	 */
+	WRITE_ONCE(refill_clk, bpf_ktime_get_ns());
+
+	return true;
+}
+
+static bool is_time_to_refill(void)
+{
+	return (READ_ONCE(refill_clk) + LAVD_TARGETED_LATENCY_NS) <
+		bpf_ktime_get_ns();
+}
+
+static bool consume_task(s32 cpu)
+{
+	bool ret;
+
+	/*
+	 * If the ineligible rq has not consumed too long,
+	 * move a task from the ineligible rq to the eligible dsq.
+	 */
+	if (is_time_to_refill())
+		refill_eligible_dsq(cpu);
+
+	/*
+	 * Consume a task from the eliglble dsq.
+	 */
+	ret = scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
+	if (!ret) {
+		/*
+		 * If there is not task to run on the eligible dsq, refill it
+		 * then try it again.
+		 */
+		if (refill_eligible_dsq(cpu))
+			ret = scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
+	}
+
+	return ret;
+}
+
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct bpf_cpumask *active, *ovrflw;
@@ -2159,7 +2302,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If all CPUs are using, directly consume without checking CPU masks.
 	 */
 	if (use_full_cpus()) {
-		scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
+		consume_task(cpu);
 		return;
 	}
 
@@ -2180,7 +2323,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (bpf_cpumask_test_cpu(cpu, cast_mask(active)) ||
 	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
-		scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
+		consume_task(cpu);
 		goto unlock_out;
 	}
 
@@ -2195,7 +2338,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * kworker, etc).
 		 */
 		if (is_kernel_task(p)) {
-			scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
+			consume_task(cpu);
 			break;
 		}
 
@@ -2227,7 +2370,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * cores. We will optimize this path after introducing per-core
 		 * DSQ.
 		 */
-		scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
+		consume_task(cpu);
 
 		/*
 		 * This is the first time a particular pinned user-space task
@@ -2247,7 +2390,6 @@ release_break:
 unlock_out:
 	bpf_rcu_read_unlock();
 	return;
-
 }
 
 static int calc_cpuperf_target(struct sys_stat *stat_cur,
@@ -2768,6 +2910,23 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 	return 0;
 }
 
+static s32 init_dsqs(void)
+{
+	int err;
+
+	err = scx_bpf_create_dsq(LAVD_ELIGIBLE_DSQ, -1);
+	if (err) {
+		scx_bpf_error("Failed to create an eligible DSQ");
+		return err;
+	}
+
+	/*
+	 * Nothing to init for ineli_rq.
+	 */
+
+	return 0;
+}
+
 static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 {
 	struct bpf_cpumask *cpumask;
@@ -2871,13 +3030,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	int err;
 
 	/*
-	 * Create a central task queue.
+	 * Create central task queues.
 	 */
-	err = scx_bpf_create_dsq(LAVD_ELIGIBLE_DSQ, -1);
-	if (err) {
-		scx_bpf_error("Failed to create a shared DSQ");
+	err = init_dsqs();
+	if (err)
 		return err;
-	}
 
 	/*
 	 * Initialize per-CPU context.
