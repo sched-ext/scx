@@ -1978,45 +1978,6 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 
 }
 
-static bool prep_put_local_rq(struct task_struct *p, struct task_ctx *taskc,
-			      u64 enq_flags)
-{
-	struct cpu_ctx *cpuc;
-
-	cpuc = get_cpu_ctx();
-	if (!cpuc)
-		return false;
-
-	/*
-	 * Calculate when a tack can be scheduled. If a task is cannot be
-	 * scheduled soonish (i.e., the task is ineligible since
-	 * overscheduled), we do not put this to local run queue, which is for
-	 * immediate execution.
-	 *
-	 * Note that the task's time slice will be calculated and reassigned
-	 * right before running at ops.running().
-	 */
-	calc_when_to_run(p, taskc, cpuc, enq_flags);
-	if (!is_eligible(taskc))
-		return false;
-
-	return true;
-}
-
-static void put_local_rq_no_fail(struct task_struct *p, struct task_ctx *taskc,
-				 u64 enq_flags)
-{
-	/*
-	 * This task should be scheduled as soon as possible (e.g., wakened up)
-	 * so the deadline is no use and enqueued into a local DSQ, which
-	 * always follows a FIFO order.
-	 */
-	taskc->vdeadline_delta_ns = 0;
-	taskc->eligible_delta_ns = 0;
-	taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, LAVD_SLICE_UNDECIDED, enq_flags);
-}
-
 static bool could_run_on_prev(struct task_struct *p, s32 prev_cpu,
 			      struct bpf_cpumask *a_cpumask,
 			      struct bpf_cpumask *o_cpumask)
@@ -2143,68 +2104,12 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	
 	taskc = get_task_ctx(p);
 	if (!taskc)
-		goto try_yield_out;
+		return prev_cpu;
 
-	/*
-	 * When a task wakes up, we should decide where to place the task at
-	 * ops.select_cpu(). We make a best effort to find an idle CPU. If
-	 * there is an idle CPU and a task is a true-wake-up task (not just
-	 * fork-ed or execv-ed), we consider such a task as a latency-critical
-	 * task, so directly dispatch to the local FIFO queue of the chosen
-	 * CPU. If the task is directly dispatched here, the sched_ext won't
-	 * call ops.enqueue().
-	 */
-	if (!is_wakeup_wf(wake_flags)) {
-		cpu_id = pick_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
-		if (found_idle) {
-			put_local_rq_no_fail(p, taskc, 0);
-			return cpu_id;
-		}
-
-		goto try_yield_out;
-	}
-
-	/*
-	 * Prepare to put a task into a local queue. If the task is
-	 * over-scheduled or any error happens during the preparation, it won't
-	 * be put into the local queue. Instead, the task will be put into the
-	 * global queue during ops.enqueue().
-	 */
-	if (!prep_put_local_rq(p, taskc, 0))
-		goto try_yield_out;
-
-	/*
-	 * If the task can be put into the local queue, find an idle CPU first.
-	 * If there is an idle CPU, put the task into the local queue as
-	 * planned. Otherwise, let ops.enqueue() put the task into the global
-	 * queue.
-	 *
-	 * Note that once an idle CPU is successfully picked (i.e., found_idle
-	 * == true), then the picked CPU must be returned. Otherwise, that CPU
-	 * is stalled because the picked CPU is already punched out from the
-	 * idle mask.
-	 */
 	cpu_id = pick_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
-	if (found_idle) {
-		put_local_rq_no_fail(p, taskc, 0);
+	if (found_idle)
 		return cpu_id;
-	}
 
-	/*
-	 * If there is no idle CPU, consider to preempt out the current running
-	 * task if there is a higher priority task in the global run queue.
-	 */
-try_yield_out:
-	p_run = bpf_get_current_task_btf();
-	taskc_run = try_get_task_ctx(p_run);
-	if (!taskc_run)
-		goto out; /* it is a real error or p_run is swapper */
-	cpuc_run = get_cpu_ctx_id(scx_bpf_task_cpu(p_run));
-	if (!cpuc_run)
-		goto out;
-
-	try_yield_current_cpu(p_run, cpuc_run, taskc_run);
-out:
 	return prev_cpu;
 }
 
