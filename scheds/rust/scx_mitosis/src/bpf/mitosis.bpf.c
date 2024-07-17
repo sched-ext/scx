@@ -228,6 +228,91 @@ static inline const struct cpumask *lookup_cell_cpumask(int idx)
 }
 
 /*
+ * This is an RCU-like implementation to keep track of scheduling events so we
+ * can establish when cell assignments have propagated completely.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, 1);
+} percpu_critical_sections SEC(".maps");
+
+/* Same implementation for enter/exit */
+static __always_inline int critical_section()
+{
+	u32 zero = 0;
+	u32 *data;
+
+	if (!(data = bpf_map_lookup_elem(&percpu_critical_sections, &zero))) {
+		scx_bpf_error("no percpu_critical_sections");
+		return -1;
+	}
+
+	/*
+	 * Bump the counter, the LSB indicates we are in a critical section and the
+	 * rest of the bits keep track of how many critical sections.
+	 */
+	WRITE_ONCE(*data, *data + 1);
+	return 0;
+}
+
+#define critical_section_enter() critical_section()
+#define critical_section_exit() critical_section()
+
+u32 critical_section_state[MAX_CPUS];
+/*
+ * Write side will record the current state and then poll to check that the
+ * generation has advanced (somewhat like call_rcu)
+ */
+static __always_inline int critical_section_record()
+{
+	u32 zero = 0;
+	u32 *data;
+	int nr_cpus = nr_possible_cpus;
+	if (nr_cpus > MAX_CPUS)
+		nr_cpus = MAX_CPUS;
+
+	for (int i = 0; i < nr_cpus; ++i) {
+		if (!(data = bpf_map_lookup_percpu_elem(
+			      &percpu_critical_sections, &zero, i))) {
+			scx_bpf_error("no percpu_critical_sections");
+			return -1;
+		}
+
+		critical_section_state[i] = READ_ONCE(*data);
+	}
+	return 0;
+}
+
+static __always_inline int critical_section_poll()
+{
+	u32 zero = 0;
+	u32 *data;
+
+	int nr_cpus = nr_possible_cpus;
+	if (nr_cpus > MAX_CPUS)
+		nr_cpus = MAX_CPUS;
+
+	for (int i = 0; i < nr_cpus; ++i) {
+		/* If not in a critical section at the time of record, then it passes */
+		if (!(critical_section_state[i] & 1))
+			continue;
+
+		if (!(data = bpf_map_lookup_percpu_elem(
+			      &percpu_critical_sections, &zero, i))) {
+			scx_bpf_error("no percpu_critical_sections");
+			return -1;
+		}
+
+		if (READ_ONCE(*data) == critical_section_state[i])
+			return 1;
+	}
+
+	return 0;
+}
+
+/*
 * Along with a user_global_seq bump, indicates that cgroup->cell assignment
 * changed
 */
@@ -256,6 +341,8 @@ int BPF_PROG(sched_tick_fentry)
 	 * scheduler tick. This is a crude way of mimicing RCU synchronization.
 	 */
 	if (READ_ONCE(draining)) {
+		if (critical_section_poll())
+			return 0;
 		bpf_for(cpu_idx, 0, nr_possible_cpus)
 		{
 			if (!(cpu_ctx = lookup_cpu_ctx(cpu_idx)))
@@ -414,6 +501,11 @@ int BPF_PROG(sched_tick_fentry)
 	/* Bump the global seq last to ensure that prior stores are now visible. This synchronizes with the read of global_seq */
 	barrier();
 	WRITE_ONCE(global_seq, global_seq + 1);
+	/*
+	 * On subsequent ticks we'll check that all in-flight enqueues are done so
+	 * we can clear the prev_cell for each cpu. Record the state here.
+	 */
+	critical_section_record();
 	return 0;
 }
 
@@ -651,11 +743,19 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
 
+	/*
+	 * This is a lightweight (RCU-like) critical section covering from when we
+	 * refresh cell information to when we enqueue onto the task's assigned
+	 * cell's DSQ. This allows us to publish new cell assignments and establish
+	 * a point at which all future enqueues will be on the new assignments.
+	 */
+	critical_section_enter();
+
 	if (maybe_refresh_cell(p, tctx) < 0)
-		return;
+		goto out;
 
 	if (!(cell = lookup_cell(tctx->cell)))
-		return;
+		goto out;
 
 	/*
 	 * Limit the amount of budget that an idling task can accumulate
@@ -681,6 +781,9 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!(enq_flags & SCX_ENQ_WAKEUP))
 		pick_idle_cpu_and_kick(p, task_cpu, cctx, tctx);
+
+out:
+	critical_section_exit();
 }
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
