@@ -81,10 +81,10 @@ struct Opts {
     #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
     local_kthreads: bool,
 
-    /// Threshold of voluntary context switch per second, used to classify interactive tasks
-    /// (0 = disable interactive tasks classification).
+    /// Maximum threshold of voluntary context switch per second, used to classify interactive
+    /// tasks (0 = disable interactive tasks classification).
     #[clap(short = 'c', long, default_value = "10")]
-    nvcsw_thresh: u64,
+    nvcsw_max_thresh: u64,
 
     /// Prevent the starvation making sure that at least one lower priority task is scheduled every
     /// starvation_thresh_us (0 = disable starvation prevention).
@@ -111,6 +111,7 @@ struct Opts {
 struct Metrics {
     nr_running: Gauge,
     nr_interactive: Gauge,
+    nvcsw_avg_thresh: Gauge,
     nr_kthread_dispatches: Gauge,
     nr_direct_dispatches: Gauge,
     nr_prio_dispatches: Gauge,
@@ -125,6 +126,9 @@ impl Metrics {
             ),
             nr_interactive: gauge!(
                 "nr_interactive", "info" => "Number of running interactive tasks"
+            ),
+            nvcsw_avg_thresh: gauge!(
+                "nvcsw_avg_thresh", "info" => "Average of voluntary context switches"
             ),
             nr_kthread_dispatches: gauge!(
                 "nr_kthread_dispatches", "info" => "Number of kthread direct dispatches"
@@ -193,7 +197,7 @@ impl<'a> Scheduler<'a> {
         skel.rodata_mut().slice_ns_min = opts.slice_us_min * 1000;
         skel.rodata_mut().slice_ns_lag = opts.slice_us_lag * 1000;
         skel.rodata_mut().starvation_thresh_ns = opts.starvation_thresh_us * 1000;
-        skel.rodata_mut().nvcsw_thresh = opts.nvcsw_thresh;
+        skel.rodata_mut().nvcsw_max_thresh = opts.nvcsw_max_thresh;
 
         // Attach the scheduler.
         let mut skel = scx_ops_load!(skel, bpfland_ops, uei)?;
@@ -218,6 +222,7 @@ impl<'a> Scheduler<'a> {
         let nr_cpus = self.skel.bss().nr_online_cpus;
         let nr_running = self.skel.bss().nr_running;
         let nr_interactive = self.skel.bss().nr_interactive;
+        let nvcsw_avg_thresh = self.skel.bss().nvcsw_avg_thresh;
         let nr_kthread_dispatches = self.skel.bss().nr_kthread_dispatches;
         let nr_direct_dispatches = self.skel.bss().nr_direct_dispatches;
         let nr_prio_dispatches = self.skel.bss().nr_prio_dispatches;
@@ -230,6 +235,8 @@ impl<'a> Scheduler<'a> {
         self.metrics
             .nr_interactive
             .set(nr_interactive as f64);
+        self.metrics
+            .nvcsw_avg_thresh.set(nvcsw_avg_thresh as f64);
         self.metrics
             .nr_kthread_dispatches
             .set(nr_kthread_dispatches as f64);
@@ -244,10 +251,11 @@ impl<'a> Scheduler<'a> {
             .set(nr_shared_dispatches as f64);
 
         // Log scheduling statistics.
-        info!("running: {:>4}/{:<4} interactive: {:>4} | kthread: {:<6} | direct: {:<6} | prio: {:<6} | shared: {:<6}",
+        info!("running: {:>4}/{:<4} interactive: {:>4} | nvcsw: {:<4} | kthread: {:<6} | direct: {:<6} | prio: {:<6} | shared: {:<6}",
             nr_running,
             nr_cpus,
             nr_interactive,
+            nvcsw_avg_thresh,
             nr_kthread_dispatches,
             nr_direct_dispatches,
             nr_prio_dispatches,
