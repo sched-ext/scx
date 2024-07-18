@@ -1336,20 +1336,6 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	weight = calc_latency_weight(p, taskc, cpuc, is_wakeup);
 	vdeadline_delta_ns = (((taskc->run_time_ns + 1) * weight) + 1000) / 1000;
 
-	/*
-	 * When a system is overloaded (>1000), stretch time space so make time
-	 * tick logically slower to give room to execute the overloaded tasks.
-	 */
-	if (load_factor > 1000) {
-		/*
-		 * The time space is stretched more if task's latency priority
-		 * is lower (i.e., higher value) and the load is higher.
-		 */
-		vdeadline_delta_ns = (vdeadline_delta_ns * load_factor *
-				      (taskc->lat_prio + 1)) /
-				     (LAVD_LOAD_FACTOR_FT * 1000);
-	}
-
 	taskc->vdeadline_delta_ns = vdeadline_delta_ns;
 
 	return vdeadline_delta_ns;
@@ -1395,6 +1381,11 @@ static u64 clamp_time_slice_ns(u64 slice)
 	return slice;
 }
 
+static u64 rq_nr_queued(void)
+{
+	return scx_bpf_dsq_nr_queued(LAVD_ELIGIBLE_DSQ) + READ_ONCE(nr_ineli);
+}
+
 static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
@@ -1404,8 +1395,7 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	 * The time slice should be short enough to schedule all runnable tasks
 	 * at least once within a targeted latency.
 	 */
-	nr_queued = (u64)scx_bpf_dsq_nr_queued(LAVD_ELIGIBLE_DSQ) +
-		    READ_ONCE(nr_ineli) + 1;
+	nr_queued = rq_nr_queued() + 1;
 	slice = (LAVD_TARGETED_LATENCY_NS * stat_cur->nr_active) / nr_queued;
 	if (stat_cur->load_factor < 1000 && is_eligible(taskc)) {
 		slice += (LAVD_SLICE_BOOST_MAX_FT * slice *
@@ -1472,6 +1462,28 @@ static void update_stat_for_runnable(struct task_struct *p,
 	cpuc->load_run_time_ns += clamp_time_slice_ns(taskc->run_time_ns);
 }
 
+static void advance_cur_logical_clk(struct task_ctx *taskc)
+{
+	u64 nr_queued, delta, new_clk;
+
+	/*
+	 * The clock should not go backward, so do nothing.
+	 */
+	if (taskc->vdeadline_log_clk <= cur_logical_clk) {
+		return;
+	}
+
+	/*
+	 * Advance the clock up to the task's deadline. When overloaded,
+	 * advnace the clock slower so other can jump in the run queue.
+	 */
+	nr_queued = max(rq_nr_queued(), 1);
+	delta = (taskc->vdeadline_log_clk - cur_logical_clk) / nr_queued;
+	new_clk = cur_logical_clk + delta;
+
+	WRITE_ONCE(cur_logical_clk, new_clk);
+}
+
 static void update_stat_for_running(struct task_struct *p,
 				    struct task_ctx *taskc,
 				    struct cpu_ctx *cpuc)
@@ -1484,7 +1496,7 @@ static void update_stat_for_running(struct task_struct *p,
 	/*
 	 * Update the current logical clock.
 	 */
-	WRITE_ONCE(cur_logical_clk, taskc->vdeadline_log_clk);
+	advance_cur_logical_clk(taskc);
 
 	/*
 	 * Update the current service time if necessary.
