@@ -1209,7 +1209,7 @@ static int map_lat_cri_to_lat_prio(u32 lat_cri)
 static int boost_lat(struct task_struct *p, struct task_ctx *taskc,
 		     struct cpu_ctx *cpuc, bool is_wakeup)
 {
-	u64 run_time_ft = 0, wait_freq_ft = 0, wake_freq_ft = 0;
+	u64 wait_freq_ft = 0, wake_freq_ft = 0;
 	u64 lat_cri_raw;
 	u16 static_prio;
 	int boost;
@@ -1226,25 +1226,18 @@ static int boost_lat(struct task_struct *p, struct task_ctx *taskc,
 
 	/*
 	 * A task is more latency-critical as its wait or wake frequencies
-	 * (i.e., wait_freq and wake_freq) are higher and/or its runtime per
-	 * schedule (run_time) is shorter.
+	 * (i.e., wait_freq and wake_freq) are higher.
 	 *
 	 * Since those numbers are unbounded and their upper limits are
 	 * unknown, we transform them using sigmoid-like functions. For wait
 	 * and wake frequencies, we use a sigmoid function (sigmoid_u64), which
 	 * is monotonically increasing since higher frequencies mean more
-	 * latency-critical. For per-schedule runtime, we use a horizontally
-	 * flipped version of the sigmoid function (rsigmoid_u64) because a
-	 * shorter runtime means more latency-critical.
+	 * latency-critical.
 	 */
-	run_time_ft = calc_runtime_factor(taskc->run_time_ns);
 	wait_freq_ft = calc_freq_factor(taskc->wait_freq);
 	wake_freq_ft = calc_freq_factor(taskc->wake_freq);
 
 	/*
-	 * A raw latency criticality factor consists of two parts -- a
-	 * frequency part and a runtime part.
-	 *
 	 * Wake frequency and wait frequency represent how much a task is used
 	 * for a producer and a consumer, respectively. If both are high, the
 	 * task is in the middle of a task chain. We multiply frequencies --
@@ -1253,17 +1246,8 @@ static int boost_lat(struct task_struct *p, struct task_ctx *taskc,
 	 * wake_freq to prioritize scheduling of a producer task. That's
 	 * because if the scheduling of a producer task is delayed, all the
 	 * following consumer tasks are also delayed.
-	 *
-	 * For the runtime part, we cubic the runtime to amplify the subtle
-	 * differences.
-	 *
-	 * We aggregate the frequency part and the runtime part using addition.
-	 * In this way, if a task is either high-frequency _or_ short-runtime,
-	 * it is considered latency-critical. Of course, such a task with both
-	 * high frequency _and_ short runtime is _super_ latency-critical.
 	 */
-	lat_cri_raw = (wait_freq_ft * wake_freq_ft * wake_freq_ft) + 
-		      (run_time_ft * run_time_ft * run_time_ft);
+	lat_cri_raw = (wait_freq_ft * wake_freq_ft * wake_freq_ft);
 
 	/*
 	 * The ratio above tends to follow an exponentially skewed
