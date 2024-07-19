@@ -1,0 +1,60 @@
+#!/usr/bin/env bpftrace
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+
+// This software may be used and distributed according to the terms of the
+// GNU General Public License version 2.
+
+#include <linux/sched.h>
+#include <linux/sched/ext.h>
+
+rawtracepoint:sched_wakeup,
+rawtracepoint:sched_wakeup_new,
+{
+	$task = (struct task_struct *)arg0;
+
+	if ($1 > 0 && $task->tgid != $1) {
+		return;
+	}
+
+	@qtime[$task->pid] = nsecs;
+	if ($task->scx.dsq->id >= 0) {
+		@dsq_time[$task->scx.dsq->id] = nsecs;
+	}
+}
+
+rawtracepoint:sched_switch
+{
+	$prev = (struct task_struct *)arg1;
+	$next = (struct task_struct *)arg2;
+	$prev_state = arg3;
+
+	if ($1 > 0 && $next->tgid != $1) {
+		return;
+	}
+
+	if ($prev_state == TASK_RUNNING) {
+		@qtime[$prev->pid] = nsecs;
+	}
+
+	$nsec = @qtime[$next->pid];
+	if ($nsec) {
+		$usec = (nsecs - $nsec) / 1000;
+		@usec_total_stats = stats($usec);
+		@usec_hist = hist($usec);
+		@tasks[$next->comm, $next->pid] = stats($usec);
+		@avg_lat = avg($usec);
+		if ($prev->scx.dsq->id >= 0) {
+			@dsq_lat[$prev->scx.dsq->id] = avg($usec);
+		}
+	}
+	delete(@qtime[$next->pid]);
+}
+
+interval:s:1 {
+    $scx_ops = kaddr("scx_ops");
+    $ops = (struct sched_ext_ops*)$scx_ops;
+    printf("scheduler: %s\n", $ops->name);
+    print(@avg_lat);
+    print(@usec_hist);
+    print(@dsq_lat);
+}
