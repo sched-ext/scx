@@ -750,18 +750,13 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     // Find the first candidate pid which hasn't already been migrated and
     // can run in @pull_dom.
     fn find_first_candidate<'d, I>(
-        tasks_by_load: I,
-        skip_kworkers: bool,
+        tasks_by_load: I
     ) -> Option<&'d TaskInfo>
     where
         I: IntoIterator<Item = &'d TaskInfo>,
     {
         match tasks_by_load
-            .into_iter()
-            .skip_while(|task| {
-                task.migrated.get()
-            })
-            .next()
+            .into_iter().next()
         {
             Some(task) => Some(task),
             None => None,
@@ -799,6 +794,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 task.dom_mask
                 & (1 << pull_dom_id) == 1
                 || (self.skip_kworkers && task.is_kworker)
+                || task.migrated.get()
             )
             .collect();
 
@@ -812,7 +808,6 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                         && task_filter(x, pull_dom_id)
                     })
                     .rev(),
-                self.skip_kworkers,
             ),
             Self::find_first_candidate(
                 tasks
@@ -822,7 +817,6 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                         x.load >= OrderedFloat(to_xfer)
                         && task_filter(x, pull_dom_id)
                     }),
-                self.skip_kworkers,
             ),
         ) {
             (None, None) => return Ok(None),
