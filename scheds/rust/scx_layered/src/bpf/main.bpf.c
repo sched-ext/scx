@@ -635,7 +635,17 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!layer->open && !tctx->all_cpus_allowed) {
 		lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
-		scx_bpf_dispatch(p, LO_FALLBACK_DSQ, slice_ns, enq_flags);
+		/*
+		 * We were previously dispatching to LO_FALLBACK_DSQ for any
+		 * affinitized, non-PCPU kthreads, but found that starvation
+		 * became an issue when the system was under heavy load.
+		 *
+		 * Longer term, we can address this by implementing layer
+		 * weights and applying that to fallback DSQs to avoid
+		 * starvation. For now, we just dispatch all affinitized tasks
+		 * to HI_FALLBACK_DSQ to avoid this starvation issue.
+		 */
+		scx_bpf_dispatch(p, HI_FALLBACK_DSQ, slice_ns, enq_flags);
 		goto find_cpu;
 	}
 
