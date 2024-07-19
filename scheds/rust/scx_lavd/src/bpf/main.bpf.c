@@ -1315,7 +1315,6 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 				       struct cpu_ctx *cpuc,
 				       u64 enq_flags)
 {
-	u64 load_factor = get_sys_stat_cur()->load_factor;
 	u64 vdeadline_delta_ns, weight;
 	bool is_wakeup;
 
@@ -2833,39 +2832,16 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 
 static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 {
-	struct task_struct *parent;
-	struct task_ctx *taskc_parent;
-	u64 now;
+	u64 now = bpf_ktime_get_ns();
 
-	/*
-	 * Inherit parent's statistics if the parent is also under scx.
-	 */
-	parent = p->parent;
-	taskc_parent = try_get_task_ctx(parent);
-	if (parent && taskc_parent)
-		memcpy(taskc, taskc_parent, sizeof(*taskc));
-	else {
-		/*
-		 * If parent's ctx does not exist, init some fields with
-		 * reasonable defaults.
-		 */
-		taskc->run_time_ns = LAVD_SLICE_MIN_NS;
-		taskc->lat_prio = get_nice_prio(p);
-		taskc->run_freq = 1;
-	}
-
-	/*
-	 * Reset context for a fresh new task.
-	 */
-	now = bpf_ktime_get_ns();
-	taskc->last_runnable_clk = now;
-	taskc->last_running_clk = now;
-	taskc->last_stopping_clk = now;
-	taskc->last_quiescent_clk = now;
+	memset(taskc, 0, sizeof(*taskc));
+	taskc->last_running_clk = now; /* for run_time_ns */
+	taskc->last_stopping_clk = now; /* for run_time_ns */
+	taskc->run_time_ns = LAVD_SLICE_MAX_NS;
+	taskc->lat_prio = get_nice_prio(p);
+	taskc->run_freq = 0;
 	taskc->greedy_ratio = 1000;
 	taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
-	taskc->acc_run_time_ns = 0;
-	taskc->slice_ns = 0;
 }
 
 void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
