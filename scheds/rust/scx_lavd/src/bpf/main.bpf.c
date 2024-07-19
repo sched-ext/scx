@@ -322,71 +322,6 @@ struct {
 	__uint(max_entries, 16 * 1024 /* 16 KB */);
 } introspec_msg SEC(".maps");
 
-/*
- * A nice priority to CPU usage weight array
- * -----------------------------------------
- *
- * This is the exact same weight array in the kernel (kernel/sched/core.c). We
- * used the same array on purpose to provide the same level of fairness. Each
- * step increases by around 23%. Here is the comments from the kernel source
- * code for reference:
- *
- * "Nice levels are multiplicative, with a gentle 10% change for every nice
- * level changed. I.e. when a CPU-bound task goes from nice 0 to nice 1, it
- * will get ~10% less CPU time than another CPU-bound task that remained on
- * nice 0."
- *
- * "The "10% effect" is relative and cumulative: from _any_ nice level, if you
- * go up 1 level, it's -10% CPU usage, if you go down 1 level it's +10% CPU
- * usage. (to achieve that we use a multiplier of 1.25. If a task goes up by
- * ~10% and another task goes down by ~10% then the relative distance between
- * them is ~25%.)"
- */
-static const u64 sched_prio_to_slice_weight[NICE_WIDTH] = {
-	/* weight	nice priority	sched priority */
-	/* ------	-------------	-------------- */
-	88761,		/* -20		 0 */
-	71755,		/* -19		 1 */
-	56483,		/* -18		 2 */
-	46273,		/* -17		 3 */
-	36291,		/* -16		 4 */
-	29154,		/* -15		 5 */
-	23254,		/* -14		 6 */
-	18705,		/* -13		 7 */
-	14949,		/* -12		 8 */
-	11916,		/* -11		 9 */
-	 9548,		/* -10		10 */
-	 7620,		/*  -9		11 */
-	 6100,		/*  -8		12 */
-	 4904,		/*  -7		13 */
-	 3906,		/*  -6		14 */
-	 3121,		/*  -5		15 */
-	 2501,		/*  -4		16 */
-	 1991,		/*  -3		17 */
-	 1586,		/*  -2		18 */
-	 1277,		/*  -1		19 */
-	 1024,		/*   0		20 */
-	  820,		/*   1		21 */
-	  655,		/*   2		22 */
-	  526,		/*   3		23 */
-	  423,		/*   4		24 */
-	  335,		/*   5		25 */
-	  272,		/*   6		26 */
-	  215,		/*   7		27 */
-	  172,		/*   8		28 */
-	  137,		/*   9		29 */
-	  110,		/*  10		30 */
-	   87,		/*  11		31 */
-	   70,		/*  12		32 */
-	   56,		/*  13		33 */
-	   45,		/*  14		34 */
-	   36,		/*  15		35 */
-	   29,		/*  16		36 */
-	   23,		/*  17		37 */
-	   18,		/*  18		38 */
-	   15,		/*  19		39 */
-};
-
 static u16 get_nice_prio(struct task_struct *p);
 static u64 get_task_load_ideal(struct task_struct *p);
 static void adjust_slice_boost(struct cpu_ctx *cpuc, struct task_ctx *taskc);
@@ -1293,47 +1228,17 @@ out:
 	return boost;
 }
 
-static u64 calc_latency_weight(struct task_struct *p, struct task_ctx *taskc,
-			       struct cpu_ctx *cpuc, bool is_wakeup)
-{
-	int prio = taskc->lat_prio;
-	u64 w;
-
-	boost_lat(p, taskc, cpuc, is_wakeup);
-
-	if (prio >= NICE_WIDTH)
-		prio = NICE_WIDTH - 1;
-	else if (prio < 0)
-		prio = 0;
-
-	w = LAVD_LAT_WEIGHT_FT / sched_prio_to_slice_weight[prio];
-	return w + 1;
-}
-
 static u64 calc_virtual_deadline_delta(struct task_struct *p,
 				       struct task_ctx *taskc,
 				       struct cpu_ctx *cpuc,
 				       u64 enq_flags)
 {
-	u64 vdeadline_delta_ns, weight;
+	u64 vdeadline_delta_ns;
 	bool is_wakeup;
 
-	/* Virtual deadline of @p is defined as follows:
-	 *
-	 *   vdeadline = now + (a full time slice * latency weight)
-	 *
-	 * where
-	 *   - weight is determined by nice priority and boost priorty
-	 *   - (a full time slice * latency weight) determines the time window
-	 *   of competition among concurrent tasks.
-	 *
-	 * Note that not using average runtime (taskc->run_time) is intentional
-	 * because task's average runtime is already reflected in calculating
-	 * boost priority (and weight).
-	 */
 	is_wakeup = is_wakeup_ef(enq_flags);
-	weight = calc_latency_weight(p, taskc, cpuc, is_wakeup);
-	vdeadline_delta_ns = (((taskc->run_time_ns + 1) * weight) + 1000) / 1000;
+	boost_lat(p, taskc, cpuc, is_wakeup);
+	vdeadline_delta_ns = (taskc->run_time_ns * 1000) / taskc->lat_cri;
 
 	taskc->vdeadline_delta_ns = vdeadline_delta_ns;
 
@@ -1342,23 +1247,7 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 
 static u64 get_task_load_ideal(struct task_struct *p)
 {
-	int prio;
-	u64 weight;
-
-	/*
-	 * The task's ideal load is simply the weight based on the task's nice
-	 * priority (without considering boosting). Note that the ideal load
-	 * and actual load are not compatible for comparison. However, the
-	 * ratios of them are directly comparable. 
-	 */
-	prio = get_nice_prio(p);
-	if (prio >= NICE_WIDTH)
-		prio = NICE_WIDTH - 1;
-	else if (prio < 0)
-		prio = 0;
-
-	weight = sched_prio_to_slice_weight[prio];
-	return weight;
+	return p->scx.weight;
 }
 
 static u64 calc_task_load_actual(struct task_ctx *taskc)
