@@ -74,12 +74,10 @@ enum consts {
 	LAVD_SLICE_BOOST_MAX_FT		= 2, /* maximum additional 2x of slice */
 	LAVD_SLICE_BOOST_MAX_STEP	= 8, /* 8 slice exhausitions in a row */
 	LAVD_GREEDY_RATIO_MAX		= USHRT_MAX,
-	LAVD_LAT_PRIO_NEW		= 10,
-	LAVD_LAT_PRIO_IDLE		= USHRT_MAX,
-	LAVD_LAT_WEIGHT_FT		= 88761,
 
 	LAVD_ELIGIBLE_TIME_LAT_FT	= 16,
 	LAVD_ELIGIBLE_TIME_MAX		= (10 * LAVD_TARGETED_LATENCY_NS),
+	LAVD_REFILL_NR			= 2,
 
 	LAVD_CPU_UTIL_MAX		= 1000, /* 100.0% */
 	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= 850, /* 85.0% */
@@ -87,7 +85,6 @@ enum consts {
 	LAVD_CPU_ID_NONE		= ((u32)-1),
 	LAVD_CPU_ID_MAX			= 512,
 
-	LAVD_PREEMPT_KICK_LAT_PRIO	= 15,
 	LAVD_PREEMPT_KICK_MARGIN	= (2 * NSEC_PER_USEC),
 	LAVD_PREEMPT_TICK_MARGIN	= (1 * NSEC_PER_USEC),
 
@@ -118,9 +115,6 @@ struct sys_stat {
 	volatile u32	max_lat_cri;	/* maximum latency criticality (LC) */
 	volatile u32	min_lat_cri;	/* minimum latency criticality (LC) */
 	volatile u32	thr_lat_cri;	/* latency criticality threshold for kicking */
-
-	volatile s32	inc1k_low;	/* increment from low LC to priority mapping */
-	volatile s32	inc1k_high;	/* increment from high LC to priority mapping */
 
 	volatile u32	avg_perf_cri;	/* average performance criticality */
 
@@ -171,7 +165,7 @@ struct cpu_ctx {
 	 * Information of a current running task for preemption
 	 */
 	volatile u64	stopping_tm_est_ns; /* estimated stopping time */
-	volatile u16	lat_prio;	/* latency priority */
+	volatile u16	lat_cri;	/* latency criticality */
 	volatile u8	is_online;	/* is this CPU online? */
 	s32		cpu_id;		/* cpu id */
 
@@ -222,7 +216,6 @@ struct task_ctx {
 	u32	lat_cri;		/* calculated latency criticality */
 	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
-	u16	lat_prio;		/* latency priority */
 
 	/*
 	 * Task's performance criticality
