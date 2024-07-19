@@ -1210,22 +1210,24 @@ static void update_stat_for_runnable(struct task_struct *p,
 
 static void advance_cur_logical_clk(struct task_ctx *taskc)
 {
+	u64 vlc, clc;
 	u64 nr_queued, delta, new_clk;
 
 	/*
 	 * The clock should not go backward, so do nothing.
 	 */
-	if (taskc->vdeadline_log_clk <= cur_logical_clk) {
+	vlc = READ_ONCE(taskc->vdeadline_log_clk);
+	clc = READ_ONCE(cur_logical_clk);
+	if (vlc <= clc)
 		return;
-	}
 
 	/*
 	 * Advance the clock up to the task's deadline. When overloaded,
 	 * advnace the clock slower so other can jump in the run queue.
 	 */
 	nr_queued = max(rq_nr_queued(), 1);
-	delta = (taskc->vdeadline_log_clk - cur_logical_clk) / nr_queued;
-	new_clk = cur_logical_clk + delta;
+	delta = (vlc - clc) / nr_queued;
+	new_clk = clc + delta;
 
 	WRITE_ONCE(cur_logical_clk, new_clk);
 }
@@ -1347,7 +1349,6 @@ static void update_stat_for_stopping(struct task_struct *p,
 	cpuc->load_run_time_ns = cpuc->load_run_time_ns -
 				 clamp_time_slice_ns(old_run_time_ns) +
 				 clamp_time_slice_ns(taskc->run_time_ns);
-
 	/*
 	 * Increase total service time of this CPU.
 	 */
@@ -1369,6 +1370,8 @@ static void update_stat_for_quiescent(struct task_struct *p,
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 			     struct cpu_ctx *cpuc, u64 enq_flags)
 {
+	u64 vlc;
+
 	/*
 	 * Before enqueueing a task to a run queue, we should decide when a
 	 * task should be scheduled. It is determined by two factors: how
@@ -1382,9 +1385,9 @@ static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 	 * Update the logical clock of the virtual deadline including
 	 * ineligible duration.
 	 */
-	taskc->vdeadline_log_clk = READ_ONCE(cur_logical_clk) +
-				   taskc->eligible_delta_ns +
-				   taskc->vdeadline_delta_ns;
+	vlc = READ_ONCE(cur_logical_clk) + taskc->eligible_delta_ns +
+	      taskc->vdeadline_delta_ns;
+	WRITE_ONCE(taskc->vdeadline_log_clk, vlc);
 }
 
 static u64 get_est_stopping_time(struct task_ctx *taskc)
