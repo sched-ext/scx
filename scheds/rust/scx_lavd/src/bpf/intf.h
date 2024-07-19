@@ -106,7 +106,6 @@ struct sys_stat {
 	volatile u64	last_update_clk;
 	volatile u64	util;		/* average of the CPU utilization */
 
-	volatile u64	load_ideal;	/* average ideal load of runnable tasks */
 	volatile u64	load_actual;	/* average actual load of runnable tasks */
 	volatile u64	avg_svc_time;	/* average service time per task */
 
@@ -135,7 +134,6 @@ struct cpu_ctx {
 	/*
 	 * Information used to keep track of load
 	 */
-	volatile u64	load_ideal;	/* ideal loaf of runnable tasks */
 	volatile u64	load_actual;	/* actual load of runnable tasks */
 	volatile u64	load_run_time_ns; /* total runtime of runnable tasks */
 	volatile u64	tot_svc_time;	/* total service time on a CPU */

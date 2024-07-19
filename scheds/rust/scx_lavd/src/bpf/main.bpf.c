@@ -323,7 +323,6 @@ struct {
 } introspec_msg SEC(".maps");
 
 static u16 get_nice_prio(struct task_struct *p);
-static u64 get_task_load_ideal(struct task_struct *p);
 static void adjust_slice_boost(struct cpu_ctx *cpuc, struct task_ctx *taskc);
 
 static u64 sigmoid_u64(u64 v, u64 max)
@@ -591,7 +590,6 @@ struct sys_stat_ctx {
 	u64		idle_total;
 	u64		compute_total;
 	u64		load_actual;
-	u64		load_ideal;
 	u64		tot_svc_time;
 	u64		load_run_time_ns;
 	s32		max_lat_cri;
@@ -630,7 +628,6 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		/*
 		 * Accumulate cpus' loads.
 		 */
-		c->load_ideal += cpuc->load_ideal;
 		c->load_actual += cpuc->load_actual;
 		c->load_run_time_ns += cpuc->load_run_time_ns;
 		c->tot_svc_time += cpuc->tot_svc_time;
@@ -734,8 +731,6 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 
 	stat_next->load_actual =
 		calc_avg(stat_cur->load_actual, c->load_actual);
-	stat_next->load_ideal =
-		calc_avg(stat_cur->load_ideal, c->load_ideal);
 	stat_next->util =
 		calc_avg(stat_cur->util, c->new_util);
 
@@ -1114,11 +1109,6 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	return vdeadline_delta_ns;
 }
 
-static u64 get_task_load_ideal(struct task_struct *p)
-{
-	return p->scx.weight;
-}
-
 static u64 calc_task_load_actual(struct task_ctx *taskc)
 {
 	/*
@@ -1214,7 +1204,6 @@ static void update_stat_for_runnable(struct task_struct *p,
 	 */
 	taskc->load_actual = calc_task_load_actual(taskc);
 	taskc->acc_run_time_ns = 0;
-	cpuc->load_ideal  += get_task_load_ideal(p);
 	cpuc->load_actual += taskc->load_actual;
 	cpuc->load_run_time_ns += clamp_time_slice_ns(taskc->run_time_ns);
 }
@@ -1247,7 +1236,7 @@ static void update_stat_for_running(struct task_struct *p,
 {
 	u64 wait_period, interval;
 	u64 now = bpf_ktime_get_ns();
-	u64 load_actual_ft, load_ideal_ft, wait_freq_ft, wake_freq_ft;
+	u64 load_actual_ft, wait_freq_ft, wake_freq_ft;
 	u64 perf_cri_raw;
 
 	/*
@@ -1303,10 +1292,9 @@ static void update_stat_for_running(struct task_struct *p,
 	 * skewed distribution.
 	 */
 	load_actual_ft = calc_runtime_factor(taskc->load_actual);
-	load_ideal_ft = get_task_load_ideal(p);
 	wait_freq_ft = calc_freq_factor(taskc->wait_freq);
 	wake_freq_ft = calc_freq_factor(taskc->wake_freq);
-	perf_cri_raw = load_actual_ft * load_ideal_ft *
+	perf_cri_raw = load_actual_ft * p->scx.weight *
 		       wait_freq_ft * wake_freq_ft;
 	taskc->perf_cri = log2_u64(perf_cri_raw + 1);
 	cpuc->sum_perf_cri += taskc->perf_cri;
@@ -1374,7 +1362,6 @@ static void update_stat_for_quiescent(struct task_struct *p,
 	 * When quiescent, reduce the per-CPU task load. Per-CPU task load will
 	 * be aggregated periodically at update_sys_cpu_load().
 	 */
-	cpuc->load_ideal  -= get_task_load_ideal(p);
 	cpuc->load_actual -= taskc->load_actual;
 	cpuc->load_run_time_ns -= clamp_time_slice_ns(taskc->run_time_ns);
 }
@@ -2621,18 +2608,6 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 	 * Initialize @p's context.
 	 */
 	init_task_ctx(p, taskc);
-
-	/*
-	 * When a task is forked, we immediately reflect changes to the current
-	 * ideal load not to over-allocate time slices without counting forked
-	 * tasks.
-	 */
-	if (args->fork) {
-		struct sys_stat *stat_cur = get_sys_stat_cur();
-		u64 load_ideal = get_task_load_ideal(p);
-
-		__sync_fetch_and_add(&stat_cur->load_ideal, load_ideal);
-	}
 
 	return 0;
 }
