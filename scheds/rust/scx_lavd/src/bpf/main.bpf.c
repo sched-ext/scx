@@ -1206,10 +1206,23 @@ static int map_lat_cri_to_lat_prio(u32 lat_cri)
 	return lat_prio;
 }
 
+static u64 calc_starvation_factor(struct task_ctx *taskc)
+{
+	struct sys_stat *stat_cur = get_sys_stat_cur();
+	u64 ratio;
+
+	/*
+	 * Prioritize tasks whose service time is smaller than average.
+	 */
+	ratio = (LAVD_LC_STARVATION_FT * stat_cur->avg_svc_time) /
+		taskc->svc_time;
+	return ratio + 1;
+}
+
 static int boost_lat(struct task_struct *p, struct task_ctx *taskc,
 		     struct cpu_ctx *cpuc, bool is_wakeup)
 {
-	u64 wait_freq_ft = 0, wake_freq_ft = 0;
+	u64 starvation_ft, wait_freq_ft, wake_freq_ft;
 	u64 lat_cri_raw;
 	u16 static_prio;
 	int boost;
@@ -1226,9 +1239,9 @@ static int boost_lat(struct task_struct *p, struct task_ctx *taskc,
 
 	/*
 	 * A task is more latency-critical as its wait or wake frequencies
-	 * (i.e., wait_freq and wake_freq) are higher.
+	 * (i.e., wait_freq and wake_freq) and starvation factors are higher.
 	 *
-	 * Since those numbers are unbounded and their upper limits are
+	 * Since those frequencies are unbounded and their upper limits are
 	 * unknown, we transform them using sigmoid-like functions. For wait
 	 * and wake frequencies, we use a sigmoid function (sigmoid_u64), which
 	 * is monotonically increasing since higher frequencies mean more
@@ -1236,6 +1249,7 @@ static int boost_lat(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	wait_freq_ft = calc_freq_factor(taskc->wait_freq);
 	wake_freq_ft = calc_freq_factor(taskc->wake_freq);
+	starvation_ft  = calc_starvation_factor(taskc);
 
 	/*
 	 * Wake frequency and wait frequency represent how much a task is used
@@ -1247,7 +1261,9 @@ static int boost_lat(struct task_struct *p, struct task_ctx *taskc,
 	 * because if the scheduling of a producer task is delayed, all the
 	 * following consumer tasks are also delayed.
 	 */
-	lat_cri_raw = (wait_freq_ft * wake_freq_ft * wake_freq_ft);
+	lat_cri_raw = wait_freq_ft *
+		      wake_freq_ft * wake_freq_ft *
+		      starvation_ft;
 
 	/*
 	 * The ratio above tends to follow an exponentially skewed
