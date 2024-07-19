@@ -105,7 +105,6 @@ enum consts {
 struct sys_stat {
 	volatile u64	last_update_clk;
 	volatile u64	util;		/* average of the CPU utilization */
-	volatile u64	load_factor;	/* system load in % (1000 = 100%) for running all runnables within a LAVD_TARGETED_LATENCY_NS */
 
 	volatile u64	load_ideal;	/* average ideal load of runnable tasks */
 	volatile u64	load_actual;	/* average actual load of runnable tasks */
@@ -229,7 +228,6 @@ struct task_ctx_x {
 	u16	static_prio;	/* nice priority */
 	u32	cpu_id;		/* where a task ran */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
-	u64	sys_load_factor; /* system load factor in [0..100..] */
 	u32	avg_perf_cri;	/* average performance criticality */
 	u32	avg_lat_cri;	/* average latency criticality */
 	u32	nr_active;	/* number of active cores */

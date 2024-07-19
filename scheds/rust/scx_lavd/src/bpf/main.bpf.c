@@ -440,7 +440,6 @@ int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 	memcpy(m->taskc_x.comm, p->comm, TASK_COMM_LEN);
 	m->taskc_x.static_prio = get_nice_prio(p);
 	m->taskc_x.cpu_util = cpuc->util / 10;
-	m->taskc_x.sys_load_factor = stat_cur->load_factor / 10;
 	m->taskc_x.cpu_id = cpu_id;
 	m->taskc_x.avg_lat_cri = stat_cur->avg_lat_cri;
 	m->taskc_x.avg_perf_cri = stat_cur->avg_perf_cri;
@@ -603,7 +602,6 @@ struct sys_stat_ctx {
 	u64		sum_perf_cri;
 	u32		avg_perf_cri;
 	u64		new_util;
-	u64		new_load_factor;
 	u32		nr_violation;
 };
 
@@ -710,12 +708,6 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 	c->new_util = (c->compute_total * LAVD_CPU_UTIL_MAX) /
 		      c->duration_total;
 
-	c->new_load_factor = (1000 * LAVD_LOAD_FACTOR_ADJ *
-				c->load_run_time_ns) /
-				(LAVD_TARGETED_LATENCY_NS * nr_cpus_onln);
-	if (c->new_load_factor > LAVD_LOAD_FACTOR_MAX)
-		c->new_load_factor = LAVD_LOAD_FACTOR_MAX;
-
 	if (c->sched_nr == 0) {
 		/*
 		 * When a system is completely idle, it is indeed possible
@@ -746,8 +738,6 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 		calc_avg(stat_cur->load_ideal, c->load_ideal);
 	stat_next->util =
 		calc_avg(stat_cur->util, c->new_util);
-	stat_next->load_factor =
-		calc_avg(stat_cur->load_factor, c->new_load_factor);
 
 	stat_next->min_lat_cri =
 		calc_avg32(stat_cur->min_lat_cri, c->min_lat_cri);
@@ -1164,7 +1154,7 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	 */
 	nr_queued = rq_nr_queued() + 1;
 	slice = (LAVD_TARGETED_LATENCY_NS * stat_cur->nr_active) / nr_queued;
-	if (stat_cur->load_factor < 1000 && is_eligible(taskc)) {
+	if (is_eligible(taskc)) {
 		slice += (LAVD_SLICE_BOOST_MAX_FT * slice *
 			  taskc->slice_boost_prio) / LAVD_SLICE_BOOST_MAX_STEP;
 	}
@@ -1389,19 +1379,6 @@ static void update_stat_for_quiescent(struct task_struct *p,
 	cpuc->load_run_time_ns -= clamp_time_slice_ns(taskc->run_time_ns);
 }
 
-static u64 calc_exclusive_run_window(void)
-{
-	u64 load_factor;
-
-	load_factor = get_sys_stat_cur()->load_factor;
-	if (load_factor > 1000) {
-		return (LAVD_SLICE_MIN_NS *
-			load_factor * load_factor * load_factor) /
-		       (1000 * 1000 * 1000);
-	}
-	return 0;
-}
-
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 			     struct cpu_ctx *cpuc, u64 enq_flags)
 {
@@ -1419,7 +1396,6 @@ static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 	 * ineligible duration.
 	 */
 	taskc->vdeadline_log_clk = READ_ONCE(cur_logical_clk) +
-				   calc_exclusive_run_window() +
 				   taskc->eligible_delta_ns +
 				   taskc->vdeadline_delta_ns;
 }

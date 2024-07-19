@@ -196,7 +196,7 @@ impl<'a> Scheduler<'a> {
                    | {:7} | {:9} | {:9} \
                    | {:9} | {:9} | {:8} \
                    | {:8} | {:8} | {:8} \
-                   | {:6} | {:6} |",
+                   | {:6} |",
                 "mseq",
                 "pid",
                 "comm",
@@ -218,7 +218,6 @@ impl<'a> Scheduler<'a> {
                 "avg_pc",
                 "cpufreq",
                 "cpu_util",
-                "sys_ld",
                 "nr_act",
             );
         }
@@ -235,7 +234,7 @@ impl<'a> Scheduler<'a> {
                | {:7} | {:9} | {:9} \
                | {:9} | {:9} | {:8} \
                | {:8} | {:8} | {:8} \
-               | {:6} | {:6} |",
+               | {:6} |",
             mseq,
             tx.pid,
             tx_comm,
@@ -257,7 +256,6 @@ impl<'a> Scheduler<'a> {
             tx.avg_perf_cri,
             tx.cpuperf_cur,
             tx.cpu_util,
-            tx.sys_load_factor,
             tx.nr_active,
         );
 
