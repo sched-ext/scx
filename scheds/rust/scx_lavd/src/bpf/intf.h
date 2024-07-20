@@ -66,8 +66,6 @@ enum consts {
 	LAVD_LC_RUNTIME_SHIFT		= 10,
 	LAVD_LC_STARVATION_FT		= 1024,
 
-	LAVD_BOOST_RANGE		= 40, /* 100% of nice range */
-	LAVD_BOOST_WAKEUP_LAT		= 1,
 	LAVD_SLICE_BOOST_MAX_FT		= 2, /* maximum additional 2x of slice */
 	LAVD_SLICE_BOOST_MAX_STEP	= 8, /* 8 slice exhausitions in a row */
 	LAVD_GREEDY_RATIO_MAX		= USHRT_MAX,
