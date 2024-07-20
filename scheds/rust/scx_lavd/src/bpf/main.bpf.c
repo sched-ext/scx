@@ -925,6 +925,11 @@ static u32 calc_greedy_ratio(struct task_struct *p, struct task_ctx *taskc)
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u32 ratio;
 
+	if (!have_scheduled(taskc)) {
+		ratio = LAVD_GREEDY_RATIO_NEW;
+		goto out;
+	}
+
 	/*
 	 * The greedy ratio of a task represents how much time the task
 	 * overspent CPU time compared to the ideal, fair CPU allocation. It is
@@ -932,6 +937,8 @@ static u32 calc_greedy_ratio(struct task_struct *p, struct task_ctx *taskc)
 	 * system.
 	 */
 	ratio = (1000 * taskc->svc_time) / stat_cur->avg_svc_time;
+
+out:
 	taskc->greedy_ratio = ratio;
 	return ratio;
 }
@@ -993,7 +1000,8 @@ static u64 calc_eligible_delta(struct task_struct *p, struct task_ctx *taskc)
 	 *	task's interval_old * greedy_ratio =
 	 *	when the task become eligible.
 	 */
-	u64 delta_ns;
+	struct sys_stat *stat_cur = get_sys_stat_cur();
+	u64 delta_ns, lat_cri_ft;
 
 	/*
 	 * Get how greedy this task has been to enforce fairness if necessary.
@@ -1010,8 +1018,28 @@ static u64 calc_eligible_delta(struct task_struct *p, struct task_ctx *taskc)
 		goto out;
 	}
 
-	delta_ns = (LAVD_TIME_ONE_SEC / (1000 * taskc->run_freq)) *
-		   (taskc->greedy_ratio);
+
+	/*
+	 * Calculate ineligible duration based on greedy ratio, run_freq, and
+	 * lat_cri.
+	 */
+	delta_ns = (LAVD_TIME_ONE_SEC / (1000 * (taskc->run_freq + 1))) *
+		   taskc->greedy_ratio;
+
+	if (stat_cur->avg_lat_cri < taskc->lat_cri) {
+		/*
+		 * Prioritize above-average latency-critical tasks.
+		 */
+		lat_cri_ft = taskc->lat_cri - stat_cur->avg_lat_cri + 1;
+		delta_ns /= lat_cri_ft;
+	}
+	else {
+		/*
+		 * Deprioritize below-average latency-critical tasks.
+		 */
+		lat_cri_ft = stat_cur->avg_lat_cri - taskc->lat_cri + 1;
+		delta_ns *= lat_cri_ft;
+	}
 
 	if (delta_ns > LAVD_ELIGIBLE_TIME_MAX)
 		delta_ns = LAVD_ELIGIBLE_TIME_MAX;
@@ -2564,8 +2592,6 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	taskc->last_running_clk = now; /* for run_time_ns */
 	taskc->last_stopping_clk = now; /* for run_time_ns */
 	taskc->run_time_ns = LAVD_SLICE_MAX_NS;
-	taskc->run_freq = 0;
-	taskc->greedy_ratio = 1000;
 	taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
 }
 
