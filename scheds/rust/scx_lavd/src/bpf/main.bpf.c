@@ -1092,21 +1092,17 @@ static void boost_lat(struct task_struct *p, struct task_ctx *taskc,
 	taskc->lat_cri = log2_u64(lat_cri_raw + 1) + is_wakeup;
 }
 
-static u64 calc_virtual_deadline_delta(struct task_struct *p,
-				       struct task_ctx *taskc,
-				       struct cpu_ctx *cpuc,
-				       u64 enq_flags)
+static void calc_virtual_deadline_delta(struct task_struct *p,
+					struct task_ctx *taskc,
+					struct cpu_ctx *cpuc,
+					u64 enq_flags)
 {
-	u64 vdeadline_delta_ns;
 	bool is_wakeup;
 
 	is_wakeup = is_wakeup_ef(enq_flags);
 	boost_lat(p, taskc, cpuc, is_wakeup);
-	vdeadline_delta_ns = (taskc->run_time_ns * 1000) / taskc->lat_cri;
-
-	taskc->vdeadline_delta_ns = vdeadline_delta_ns;
-
-	return vdeadline_delta_ns;
+	taskc->vdeadline_delta_ns = (taskc->run_time_ns *
+				     LAVD_VDL_LOOSENESS_FT) / taskc->lat_cri;
 }
 
 static u64 calc_task_load_actual(struct task_ctx *taskc)
