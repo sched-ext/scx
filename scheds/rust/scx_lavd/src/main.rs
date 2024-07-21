@@ -190,13 +190,13 @@ impl<'a> Scheduler<'a> {
         if mseq % 32 == 1 {
             info!(
                 "| {:6} | {:7} | {:17} \
-                   | {:4} | {:4} | {:9} \
-                   | {:6} | {:8} | {:7} \
-                   | {:8} | {:4} | {:7} \
-                   | {:8} | {:7} | {:9} \
-                   | {:9} | {:9} | {:9} \
+                   | {:4} | {:4} | {:12} \
+                   | {:14} | {:8} | {:7} \
+                   | {:8} | {:7} | {:8} \
+                   | {:7} | {:9} | {:9} \
+                   | {:9} | {:9} | {:8} \
                    | {:8} | {:8} | {:8} \
-                   | {:8} | {:6} | {:6} |",
+                   | {:6} |",
                 "mseq",
                 "pid",
                 "comm",
@@ -206,8 +206,7 @@ impl<'a> Scheduler<'a> {
                 "eli_ns",
                 "slc_ns",
                 "grdy_rt",
-                "lat_prio",
-                "lc",
+                "lat_cri",
                 "avg_lc",
                 "st_prio",
                 "slc_bst",
@@ -219,7 +218,6 @@ impl<'a> Scheduler<'a> {
                 "avg_pc",
                 "cpufreq",
                 "cpu_util",
-                "sys_ld",
                 "nr_act",
             );
         }
@@ -230,13 +228,13 @@ impl<'a> Scheduler<'a> {
 
         info!(
             "| {:6} | {:7} | {:17} \
-               | {:4} | {:4} | {:9} \
-               | {:6} | {:8} | {:7} \
-               | {:8} | {:4} | {:7} \
-               | {:8} | {:7} | {:9} \
-               | {:9} | {:9} | {:9} \
+               | {:4} | {:4} | {:12} \
+               | {:14} | {:8} | {:7} \
+               | {:8} | {:7} | {:8} \
+               | {:7} | {:9} | {:9} \
+               | {:9} | {:9} | {:8} \
                | {:8} | {:8} | {:8} \
-               | {:8} | {:6} | {:6} |",
+               | {:6} |",
             mseq,
             tx.pid,
             tx_comm,
@@ -246,7 +244,6 @@ impl<'a> Scheduler<'a> {
             tc.eligible_delta_ns,
             tc.slice_ns,
             tc.greedy_ratio,
-            tc.lat_prio,
             tc.lat_cri,
             tx.avg_lat_cri,
             tx.static_prio,
@@ -259,7 +256,6 @@ impl<'a> Scheduler<'a> {
             tx.avg_perf_cri,
             tx.cpuperf_cur,
             tx.cpu_util,
-            tx.sys_load_factor,
             tx.nr_active,
         );
 
