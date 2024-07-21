@@ -302,26 +302,12 @@ static inline u64 task_vtime(struct task_struct *p)
 }
 
 /*
- * Return true if all the CPUs in the system are idle, false otherwise.
+ * Return the amount of tasks waiting to be dispatched.
  */
-static bool is_system_busy(void)
+static u64 nr_tasks_waiting(void)
 {
-	const struct cpumask *idle_cpumask;
-	bool is_busy;
-
-	idle_cpumask = scx_bpf_get_idle_cpumask();
-	is_busy = bpf_cpumask_empty(idle_cpumask);
-	scx_bpf_put_cpumask(idle_cpumask);
-
-	return is_busy;
-}
-
-/*
- * Return true if priority DSQ is congested, false otherwise.
- */
-static bool is_prio_congested(void)
-{
-	return scx_bpf_dsq_nr_queued(prio_dsq_id) > nr_online_cpus * 4;
+	return scx_bpf_dsq_nr_queued(prio_dsq_id) +
+	       scx_bpf_dsq_nr_queued(shared_dsq_id);
 }
 
 /*
@@ -330,17 +316,20 @@ static bool is_prio_congested(void)
  */
 static inline u64 task_slice(struct task_struct *p)
 {
+	static u64 nr_waiting;
+	u64 scaling;
+
 	/*
-	 * Always return maximum time slice there are idle CPUs in the system.
+	 * Refresh the amount of waiting tasks to get a more accurate scaling
+	 * factor for the time slice.
 	 */
-	if (!is_system_busy())
-		return slice_ns;
+	nr_waiting = (nr_waiting + nr_tasks_waiting()) / 2;
+
 	/*
-	 * Double the amount of unused task slice: this allows to reward tasks
-	 * that use less CPU time and periodically refill the time slice every
-	 * time a task is dispatched.
+	 * Scale the time slice based on the average number of waiting tasks
+	 * (more waiting tasks result in a shorter time slice).
 	 */
-	return CLAMP(p->scx.slice * 2, slice_ns_min, slice_ns);
+	return MAX(slice_ns / (nr_waiting + 1), slice_ns_min);
 }
 
 /*
@@ -494,6 +483,14 @@ out_put_cpumask:
 	scx_bpf_put_cpumask(online_cpumask);
 
 	return cpu;
+}
+
+/*
+ * Return true if priority DSQ is congested, false otherwise.
+ */
+static bool is_prio_congested(void)
+{
+	return scx_bpf_dsq_nr_queued(prio_dsq_id) > nr_online_cpus * 4;
 }
 
 /*
