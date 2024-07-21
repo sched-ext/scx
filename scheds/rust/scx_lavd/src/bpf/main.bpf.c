@@ -1228,7 +1228,7 @@ static void advance_cur_logical_clk(struct task_ctx *taskc)
 
 	/*
 	 * Advance the clock up to the task's deadline. When overloaded,
-	 * advnace the clock slower so other can jump in the run queue.
+	 * advance the clock slower so other can jump in the run queue.
 	 */
 	nr_queued = max(scx_bpf_dsq_nr_queued(LAVD_ELIGIBLE_DSQ), 1);
 	delta = (vlc - clc) / nr_queued;
