@@ -94,8 +94,7 @@ static u64 starvation_prio_ts;
 /*
  * Scheduling statistics.
  */
-volatile u64 nr_direct_dispatches, nr_kthread_dispatches,
-		nr_shared_dispatches, nr_prio_dispatches;
+volatile u64 nr_direct_dispatches, nr_shared_dispatches, nr_prio_dispatches;
 
 /*
  * Amount of currently running tasks.
@@ -549,7 +548,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
 		s32 cpu = scx_bpf_task_cpu(p);
 		if (!dispatch_direct_cpu(p, cpu, enq_flags)) {
-			__sync_fetch_and_add(&nr_kthread_dispatches, 1);
+			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 			return;
 		}
 	}
