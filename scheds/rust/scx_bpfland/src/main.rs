@@ -160,6 +160,8 @@ struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     metrics: Metrics,
+    slice_ns: u64,
+    slice_ns_min: u64,
 }
 
 impl<'a> Scheduler<'a> {
@@ -215,7 +217,13 @@ impl<'a> Scheduler<'a> {
             skel,
             struct_ops,
             metrics: Metrics::new(),
+            slice_ns: opts.slice_us * 1000,
+            slice_ns_min: opts.slice_us_min * 1000,
         })
+    }
+
+    fn effective_slice(&self, nr_waiting: u64) -> u64 {
+        std::cmp::max(self.slice_ns / (nr_waiting + 1), self.slice_ns_min)
     }
 
     fn update_stats(&mut self) {
@@ -250,12 +258,15 @@ impl<'a> Scheduler<'a> {
             .nr_shared_dispatches
             .set(nr_shared_dispatches as f64);
 
+        let slice_ms = self.effective_slice(nr_waiting) as f64 / 1_000_000.0;
+
         // Log scheduling statistics.
-        info!("running: {:>4}/{:<4} interactive: {:<4} wait: {:<4} | nvcsw: {:<4} | direct: {:<6} prio: {:<6} shared: {:<6}",
+        info!("running: {:>4}/{:<4} interactive: {:<4} wait: {:<4} | slice: {:5.2}ms | nvcsw: {:<4} | direct: {:<6} prio: {:<6} shared: {:<6}",
             nr_running,
             nr_cpus,
             nr_interactive,
             nr_waiting,
+            slice_ms,
             nvcsw_avg_thresh,
             nr_direct_dispatches,
             nr_prio_dispatches,
