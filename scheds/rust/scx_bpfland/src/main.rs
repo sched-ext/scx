@@ -111,6 +111,7 @@ struct Opts {
 struct Metrics {
     nr_running: Gauge,
     nr_interactive: Gauge,
+    nr_waiting: Gauge,
     nvcsw_avg_thresh: Gauge,
     nr_kthread_dispatches: Gauge,
     nr_direct_dispatches: Gauge,
@@ -126,6 +127,9 @@ impl Metrics {
             ),
             nr_interactive: gauge!(
                 "nr_interactive", "info" => "Number of running interactive tasks"
+            ),
+            nr_waiting: gauge!(
+                "nr_waiting", "info" => "Average amount of tasks waiting to be dispatched"
             ),
             nvcsw_avg_thresh: gauge!(
                 "nvcsw_avg_thresh", "info" => "Average of voluntary context switches"
@@ -222,6 +226,7 @@ impl<'a> Scheduler<'a> {
         let nr_cpus = self.skel.bss().nr_online_cpus;
         let nr_running = self.skel.bss().nr_running;
         let nr_interactive = self.skel.bss().nr_interactive;
+        let nr_waiting = self.skel.bss().nr_waiting;
         let nvcsw_avg_thresh = self.skel.bss().nvcsw_avg_thresh;
         let nr_kthread_dispatches = self.skel.bss().nr_kthread_dispatches;
         let nr_direct_dispatches = self.skel.bss().nr_direct_dispatches;
@@ -235,6 +240,9 @@ impl<'a> Scheduler<'a> {
         self.metrics
             .nr_interactive
             .set(nr_interactive as f64);
+        self.metrics
+            .nr_waiting
+            .set(nr_waiting as f64);
         self.metrics
             .nvcsw_avg_thresh.set(nvcsw_avg_thresh as f64);
         self.metrics
@@ -251,10 +259,11 @@ impl<'a> Scheduler<'a> {
             .set(nr_shared_dispatches as f64);
 
         // Log scheduling statistics.
-        info!("running: {:>4}/{:<4} interactive: {:>4} | nvcsw: {:<4} | kthread: {:<6} | direct: {:<6} | prio: {:<6} | shared: {:<6}",
+        info!("running: {:>4}/{:<4} interactive: {:<4} wait: {:<4} | nvcsw: {:<4} | kthread: {:<6} | direct: {:<6} | prio: {:<6} | shared: {:<6}",
             nr_running,
             nr_cpus,
             nr_interactive,
+            nr_waiting,
             nvcsw_avg_thresh,
             nr_kthread_dispatches,
             nr_direct_dispatches,

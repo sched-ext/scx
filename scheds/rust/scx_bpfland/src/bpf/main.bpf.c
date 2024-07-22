@@ -100,7 +100,7 @@ volatile u64 nr_direct_dispatches, nr_kthread_dispatches,
 /*
  * Amount of currently running tasks.
  */
-volatile u64 nr_running, nr_interactive, nr_online_cpus;
+volatile u64 nr_running, nr_waiting, nr_interactive, nr_online_cpus;
 
 /*
  * Exit information.
@@ -316,9 +316,6 @@ static u64 nr_tasks_waiting(void)
  */
 static inline u64 task_slice(struct task_struct *p)
 {
-	static u64 nr_waiting;
-	u64 scaling;
-
 	/*
 	 * Refresh the amount of waiting tasks to get a more accurate scaling
 	 * factor for the time slice.
