@@ -678,26 +678,17 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         }
         dom.queried_tasks = true;
 
-        // Read active_pids and update write_idx and gen.
-        //
-        // XXX - We can't read task_ctx inline because self.skel.bss()
-        // borrows mutably and thus conflicts with self.skel.maps().
+        // Read active_pids and update read_idx and gen.
         const MAX_PIDS: u64 = bpf_intf::consts_MAX_DOM_ACTIVE_PIDS as u64;
         let active_pids = &mut self.skel.bss_mut().dom_active_pids[dom.id];
-        let mut pids = vec![];
-
         let (mut ridx, widx) = (active_pids.read_idx, active_pids.write_idx);
+        active_pids.read_idx = active_pids.write_idx;
+        active_pids.gen += 1;
+
+        let active_pids = &self.skel.bss().dom_active_pids[dom.id];
         if widx - ridx > MAX_PIDS {
             ridx = widx - MAX_PIDS;
         }
-
-        for idx in ridx..widx {
-            let pid = active_pids.pids[(idx % MAX_PIDS) as usize];
-            pids.push(pid);
-        }
-
-        active_pids.read_idx = active_pids.write_idx;
-        active_pids.gen += 1;
 
         // Read task_ctx and load.
         let load_half_life = self.skel.rodata().load_half_life;
@@ -705,8 +696,9 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let task_data = maps.task_data();
         let now_mono = now_monotonic();
 
-        for pid in pids.iter() {
-            let key = unsafe { std::mem::transmute::<i32, [u8; 4]>(*pid) };
+        for idx in ridx..widx {
+            let pid = active_pids.pids[(idx % MAX_PIDS) as usize];
+            let key = unsafe { std::mem::transmute::<i32, [u8; 4]>(pid) };
 
             if let Some(task_data_elem) = task_data.lookup(&key, libbpf_rs::MapFlags::ANY)? {
                 let task_ctx =
@@ -733,7 +725,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
                 dom.tasks.insert(
                     TaskInfo {
-                        pid: *pid,
+                        pid,
                         load: OrderedFloat(load),
                         dom_mask: task_ctx.dom_mask,
                         preferred_dom_mask: task_ctx.preferred_dom_mask,
