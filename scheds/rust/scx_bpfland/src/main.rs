@@ -111,8 +111,8 @@ struct Opts {
 struct Metrics {
     nr_running: Gauge,
     nr_interactive: Gauge,
+    nr_waiting: Gauge,
     nvcsw_avg_thresh: Gauge,
-    nr_kthread_dispatches: Gauge,
     nr_direct_dispatches: Gauge,
     nr_prio_dispatches: Gauge,
     nr_shared_dispatches: Gauge,
@@ -127,11 +127,11 @@ impl Metrics {
             nr_interactive: gauge!(
                 "nr_interactive", "info" => "Number of running interactive tasks"
             ),
+            nr_waiting: gauge!(
+                "nr_waiting", "info" => "Average amount of tasks waiting to be dispatched"
+            ),
             nvcsw_avg_thresh: gauge!(
                 "nvcsw_avg_thresh", "info" => "Average of voluntary context switches"
-            ),
-            nr_kthread_dispatches: gauge!(
-                "nr_kthread_dispatches", "info" => "Number of kthread direct dispatches"
             ),
             nr_direct_dispatches: gauge!(
                 "nr_direct_dispatches", "info" => "Number of task direct dispatches"
@@ -160,6 +160,8 @@ struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     metrics: Metrics,
+    slice_ns: u64,
+    slice_ns_min: u64,
 }
 
 impl<'a> Scheduler<'a> {
@@ -215,15 +217,21 @@ impl<'a> Scheduler<'a> {
             skel,
             struct_ops,
             metrics: Metrics::new(),
+            slice_ns: opts.slice_us * 1000,
+            slice_ns_min: opts.slice_us_min * 1000,
         })
+    }
+
+    fn effective_slice(&self, nr_waiting: u64) -> u64 {
+        std::cmp::max(self.slice_ns / (nr_waiting + 1), self.slice_ns_min)
     }
 
     fn update_stats(&mut self) {
         let nr_cpus = self.skel.bss().nr_online_cpus;
         let nr_running = self.skel.bss().nr_running;
         let nr_interactive = self.skel.bss().nr_interactive;
+        let nr_waiting = self.skel.bss().nr_waiting;
         let nvcsw_avg_thresh = self.skel.bss().nvcsw_avg_thresh;
-        let nr_kthread_dispatches = self.skel.bss().nr_kthread_dispatches;
         let nr_direct_dispatches = self.skel.bss().nr_direct_dispatches;
         let nr_prio_dispatches = self.skel.bss().nr_prio_dispatches;
         let nr_shared_dispatches = self.skel.bss().nr_shared_dispatches;
@@ -236,10 +244,10 @@ impl<'a> Scheduler<'a> {
             .nr_interactive
             .set(nr_interactive as f64);
         self.metrics
-            .nvcsw_avg_thresh.set(nvcsw_avg_thresh as f64);
+            .nr_waiting
+            .set(nr_waiting as f64);
         self.metrics
-            .nr_kthread_dispatches
-            .set(nr_kthread_dispatches as f64);
+            .nvcsw_avg_thresh.set(nvcsw_avg_thresh as f64);
         self.metrics
             .nr_direct_dispatches
             .set(nr_direct_dispatches as f64);
@@ -250,13 +258,16 @@ impl<'a> Scheduler<'a> {
             .nr_shared_dispatches
             .set(nr_shared_dispatches as f64);
 
+        let slice_ms = self.effective_slice(nr_waiting) as f64 / 1_000_000.0;
+
         // Log scheduling statistics.
-        info!("running: {:>4}/{:<4} interactive: {:>4} | nvcsw: {:<4} | kthread: {:<6} | direct: {:<6} | prio: {:<6} | shared: {:<6}",
+        info!("running: {:>4}/{:<4} interactive: {:<4} wait: {:<4} | slice: {:5.2}ms | nvcsw: {:<4} | direct: {:<6} prio: {:<6} shared: {:<6}",
             nr_running,
             nr_cpus,
             nr_interactive,
+            nr_waiting,
+            slice_ms,
             nvcsw_avg_thresh,
-            nr_kthread_dispatches,
             nr_direct_dispatches,
             nr_prio_dispatches,
             nr_shared_dispatches);
