@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use libc::c_char;
 use std::ffi::CStr;
+use std::fmt;
 use std::str;
 
 use anyhow::Context;
@@ -26,6 +27,7 @@ use clap::Parser;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use log::debug;
 use log::info;
 use scx_utils::build_id;
 use scx_utils::scx_ops_attach;
@@ -105,6 +107,94 @@ impl introspec {
     }
 }
 
+#[derive(Debug)]
+struct CpuFlatId {
+    node_id: usize,
+    llc_pos: usize,
+    max_freq: usize,
+    core_pos: usize,
+    cpu_pos: usize,
+    cpu_id: usize,
+}
+
+#[derive(Debug)]
+struct FlatTopology {
+    cpu_fids: Vec<CpuFlatId>,
+    nr_cpus_online: usize,
+}
+
+impl fmt::Display for FlatTopology {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for cpu_fid in self.cpu_fids.iter() {
+            write!(f, "\n{:?}", cpu_fid);
+        }
+        Ok(())
+    }
+}
+
+impl FlatTopology {
+    /// Build a flat-structured topology
+    pub fn new() -> Result<FlatTopology> {
+        let topo = Topology::new().expect("Failed to build host topology");
+        let mut cpu_fids = Vec::new();
+
+        // Build a vector of cpu flat ids.
+        for (node_id, node) in topo.nodes().iter().enumerate() {
+            let mut llc_pos = 0;
+            for (_llc_id, llc) in node.llcs().iter() {
+                let mut core_pos = 0;
+                for (_core_id, core) in llc.cores().iter() {
+                    let mut cpu_pos = 0;
+                    for (_cpu_id, cpu) in core.cpus().iter() {
+                        let cpu_fid = CpuFlatId {
+                            node_id,
+                            llc_pos,
+                            max_freq: cpu.max_freq(),
+                            core_pos,
+                            cpu_pos,
+                            cpu_id: cpu.id(),
+                        };
+                        cpu_fids.push(cpu_fid);
+                        cpu_pos += 1;
+                    }
+                    core_pos += 1;
+                }
+                llc_pos += 1;
+            }
+        }
+
+        // Sort the cpu_fids  by node, llc, max_freq, core, and cpu order
+        cpu_fids.sort_by(|a, b| {
+            if a.node_id == b.node_id {
+                if a.llc_pos == b.llc_pos {
+                    if a.max_freq == b.max_freq {
+                        if a.core_pos == b.core_pos {
+                            return a.cpu_pos.cmp(&b.cpu_pos);
+                        }
+                        return a.core_pos.cmp(&b.core_pos);
+                    }
+                    return b.max_freq.cmp(&a.max_freq);
+                }
+                return a.llc_pos.cmp(&b.llc_pos);
+            }
+            return a.node_id.cmp(&b.node_id);
+        });
+
+        Ok(FlatTopology {
+            cpu_fids,
+            nr_cpus_online: topo.nr_cpus_online(),
+        })
+    }
+
+    pub fn cpu_fids(&self) -> &Vec<CpuFlatId> {
+        &self.cpu_fids
+    }
+
+    pub fn nr_cpus_online(&self) -> usize {
+        self.nr_cpus_online
+    }
+}
+
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -125,20 +215,15 @@ impl<'a> Scheduler<'a> {
         skel_builder.obj_builder.debug(opts.verbose > 0);
         let mut skel = scx_ops_open!(skel_builder, lavd_ops)?;
 
-        // Initialize CPU order topologically sorted by cpu, core, LLC, and NUMA.
-        let topo = Topology::new().expect("Failed to build host topology");
-        for node in topo.nodes().iter() {
-            for llc in node.llcs().values() {
-                for core in llc.cores().values() {
-                    for (cpu_id, cpu) in core.cpus().iter() {
-                        skel.rodata_mut().cpu_order[*cpu_id] = cpu.id() as u16;
-                    }
-                }
-            }
+        // Initialize CPU order topologically sorted by a cpu, node, llc, max_freq, and core order
+        let topo = FlatTopology::new().expect("Failed to build host topology");
+        for (pos, cpu) in topo.cpu_fids().iter().enumerate() {
+            skel.rodata_mut().cpu_order[pos] = cpu.cpu_id as u16;
         }
+        debug!("{}", topo);
 
         // Initialize skel according to @opts.
-        let nr_cpus_onln = topo.span().weight() as u64;
+        let nr_cpus_onln = topo.nr_cpus_online() as u64;
         skel.bss_mut().nr_cpus_onln = nr_cpus_onln;
         skel.struct_ops.lavd_ops_mut().exit_dump_len = opts.exit_dump_len;
         skel.rodata_mut().no_core_compaction = opts.no_core_compaction;
@@ -360,15 +445,20 @@ fn main() -> Result<()> {
     init_signal_handlers();
 
     loop {
-	let mut sched = Scheduler::init(&opts)?;
-	info!("scx_lavd scheduler is initialized (build ID: {})", *build_id::SCX_FULL_VERSION);
-	info!("    Note that scx_lavd currently is not optimized for multi-CCX/NUMA architectures.");
-	info!("    Stay tuned for future improvements!");
+        let mut sched = Scheduler::init(&opts)?;
+        info!(
+            "scx_lavd scheduler is initialized (build ID: {})",
+            *build_id::SCX_FULL_VERSION
+        );
+        info!(
+            "    Note that scx_lavd currently is not optimized for multi-CCX/NUMA architectures."
+        );
+        info!("    Stay tuned for future improvements!");
 
-	info!("scx_lavd scheduler starts running.");
-	if !sched.run()?.should_restart() {
-	    break;
-	}
+        info!("scx_lavd scheduler starts running.");
+        if !sched.run()?.should_restart() {
+            break;
+        }
     }
 
     Ok(())
