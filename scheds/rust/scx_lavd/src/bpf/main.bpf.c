@@ -861,20 +861,20 @@ static void do_core_compaction(void)
 			else {
 				/*
 				 * This is the case when a CPU belongs to the
-				 * active set even though that CPU was not an
-				 * active set initially. This can happen only
+				 * overflow set even though that CPU was not an
+				 * overflow set initially. This can happen only
 				 * when a pinned userspace task ran on this
-				 * CPU. In this case, we keep the CPU active
-				 * since the CPU will be used anyway for the
-				 * task. This will promote equal use of all
-				 * used CPUs, lowering the energy consumption
-				 * by avoiding a few CPUs being turbo-boosted.
-				 * Hence, we do not clear the active cpumask
-				 * here for a while, approximately for
-				 * LAVD_CC_CPU_PIN_INTERVAL.
+				 * CPU. In this case, we keep the CPU in an
+				 * overflow set since the CPU will be used
+				 * anyway for the task. This will promote equal
+				 * use of all used CPUs, lowering the energy
+				 * consumption by avoiding a few CPUs being
+				 * turbo-boosted. Hence, we do not clear the
+				 * overflow cpumask here for a while,
+				 * approximately for LAVD_CC_CPU_PIN_INTERVAL.
 				 */
-				clear_cpu_periodically(cpu, active);
-				bpf_cpumask_clear_cpu(cpu, ovrflw);
+				bpf_cpumask_clear_cpu(cpu, active);
+				clear_cpu_periodically(cpu, ovrflw);
 			}
 		}
 	}
@@ -1959,6 +1959,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 */
 		if (is_kernel_task(p)) {
 			scx_bpf_consume(LAVD_GLOBAL_DSQ);
+			bpf_cpumask_set_cpu(cpu, ovrflw);
 			break;
 		}
 
@@ -1975,9 +1976,8 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * If a task can run on active or overflow CPUs, it just does
 		 * nothing to go idle. 
 		 */
-		if (bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr))
-			goto release_break;
-		if (bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))
+		if (bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
+		    bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))
 			goto release_break;
 
 		/*
@@ -1995,12 +1995,12 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		/*
 		 * This is the first time a particular pinned user-space task
 		 * is run on this CPU at this interval. From now on, this CPU
-		 * will be part of the active CPU so can be used to run the
+		 * will be part of the overflow CPU so can be used to run the
 		 * pinned task and the other tasks. Note that we don't need to
 		 * kick @cpu here since @cpu is the current CPU, which is
 		 * obviously not idle.
 		 */
-		bpf_cpumask_set_cpu(cpu, active);
+		bpf_cpumask_set_cpu(cpu, ovrflw);
 
 release_break:
 		bpf_task_release(p);
