@@ -63,7 +63,7 @@ static inline s32 sibling_cpu(s32 cpu)
 // return the dsq id for the layer based on the LLC id.
 static inline u64 layer_dsq_id(u32 layer_id, u32 llc_id)
 {
-	return (layer_id*nr_llcs) + llc_id;
+	return (layer_id * nr_llcs) + llc_id;
 }
 
 struct {
@@ -695,7 +695,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		goto find_cpu;
 	}
 
-	u32 llc_id = cpu_to_llc_id(tctx->last_cpu >= 0 ? tctx->last_cpu: 0);
+	u32 llc_id = cpu_to_llc_id(tctx->last_cpu >= 0 ? tctx->last_cpu : 0);
 	idx = layer_dsq_id(layer->idx, llc_id);
 	scx_bpf_dispatch_vtime(p, idx, slice_ns, vtime, enq_flags);
 
