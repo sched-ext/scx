@@ -2220,8 +2220,10 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 * urgently increases according to task's target but it decreases
 	 * gradually according to EWMA of past performance targets.
 	 */
-	calc_cpuperf_target(stat_cur, taskc, cpuc);
-	try_increase_cpuperf_target(cpuc);
+	if (!no_freq_scaling) {
+		calc_cpuperf_target(stat_cur, taskc, cpuc);
+		try_increase_cpuperf_target(cpuc);
+	}
 
 	/*
 	 * Update running task's information for preemption
