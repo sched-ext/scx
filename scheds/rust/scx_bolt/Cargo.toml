@@ -15,6 +15,7 @@ libbpf-rs = "0.23"
 libc = "0.2.137"
 log = "0.4.17"
 ordered-float = "3.4.0"
+plain = "0.2.3"
 scx_utils = { path = "../../../rust/scx_utils", version = "1.0.1" }
 simplelog = "0.12.0"
 sorted-vec = "0.8.3"

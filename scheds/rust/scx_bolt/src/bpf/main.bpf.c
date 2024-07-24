@@ -6,6 +6,12 @@
 #include <scx/common.bpf.h>
 #include <scx/user_exit_info.h>
 
+#include "intf.h"
+
+#define SCX_MAIN_SCHED
+#include "domains.h"
+#undef SCX_MAIN_SCHED
+
 char _license[] SEC("license") = "GPL";
 
 const volatile u8 debug;

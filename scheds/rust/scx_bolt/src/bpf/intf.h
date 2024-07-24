@@ -24,6 +24,7 @@ typedef long long s64;
 
 enum consts {
 	CACHELINE_SIZE		= 64,
+	MAX_CPUS		= 1024,
 };
 
 #endif /* __INTF_H */

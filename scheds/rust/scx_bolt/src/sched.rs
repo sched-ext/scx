@@ -2,20 +2,21 @@
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
-use crate::bpf_skel::*;
-use libbpf_rs::skel::OpenSkel;
-use libbpf_rs::skel::Skel;
-use libbpf_rs::skel::SkelBuilder;
-
+use std::ffi::c_uint;
+use std::ffi::c_ulonglong;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use libbpf_rs::ProgramInput;
+use libbpf_rs::skel::OpenSkel;
+use libbpf_rs::skel::Skel;
+use libbpf_rs::skel::SkelBuilder;
 use log::info;
-
 use scx_utils::build_id;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_ops_attach;
@@ -24,6 +25,9 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
+
+use crate::bpf_skel::*;
+use crate::bpf_intf;
 
 /// A builder for creating a new instance of a bolt `Scheduler`.
 ///
@@ -56,6 +60,43 @@ impl SchedulerBuilder {
         self
     }
 
+    fn create_domains(top: Arc<Topology>, skel: &mut BpfSkel<'_>) -> Result<()> {
+        if top.nr_cpu_ids() > bpf_intf::consts_MAX_CPUS as usize {
+            bail!("Maximum CPUs {} exceeded: {}", bpf_intf::consts_MAX_CPUS, top.nr_cpu_ids());
+        }
+        let n_mask_indices = bpf_intf::consts_MAX_CPUS as usize / 64;
+        let mut progs = skel.progs_mut();
+        let prog = progs.create_dom_sys();
+        for node in top.nodes().iter() {
+            for (_, llc) in node.llcs().iter() {
+                let raw_mask = llc.span().clone();
+                let mut raw_mask = raw_mask.as_raw_slice().to_vec();
+                if raw_mask.len() > n_mask_indices {
+                    panic!("CPUs mask vector exceeded max expected size");
+                }
+                raw_mask.resize(n_mask_indices, 0);
+                #[repr(C)]
+                struct dom_init_ctx {
+                    dom_id: c_uint,
+                    mask: [c_ulonglong; 16],
+                }
+                let init_ctx = dom_init_ctx {
+                    dom_id: llc.id() as u32,
+                    mask: raw_mask.try_into().unwrap(),
+                };
+                let input = ProgramInput {
+                    context_in: Some(unsafe { plain::as_bytes(&init_ctx)}),
+                    ..Default::default()
+                };
+                let output = prog.test_run(input)?;
+                if output.return_value != 0 {
+                    bail!("Failed to create domain {}: {}", llc.id(), output.return_value);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn build(&self) -> Result<Scheduler> {
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
@@ -68,11 +109,21 @@ impl SchedulerBuilder {
         let mut skel = scx_ops_open!(skel_builder, bolt).unwrap();
 
         skel.rodata_mut().debug = self.verbosity as u8;
+        skel.rodata_mut().nr_cpu_ids = top.nr_cpu_ids() as u32;
         skel.struct_ops.bolt_mut().exit_dump_len = 0;
+
+        let mut nr_dom_ids = 0;
+        for node in top.nodes().iter() {
+            for (_, _) in node.llcs().iter() {
+                nr_dom_ids += 1;
+            }
+        }
+        skel.maps_mut().dom_data().set_max_entries(nr_dom_ids)?;
 
         // TODO: Once the libbpf bug is solved with user exit info, also
         // initialize that here.
         let mut skel = skel.load().context("Failed to load BPF program")?;
+        Self::create_domains(top.clone(), &mut skel)?;
 
         // Attach.
         let struct_ops = Some(scx_ops_attach!(skel, bolt)?);
