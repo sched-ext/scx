@@ -43,7 +43,7 @@ const volatile u64 slice_ns_min = 500ULL * NSEC_PER_USEC;
  * tasks at the cost of making regular and newly created tasks less responsive
  * (0 = disabled).
  */
-const volatile u64 slice_ns_lag;
+const volatile s64 slice_ns_lag;
 
 /*
  * When enabled always dispatch per-CPU kthreads directly on their CPU DSQ.
@@ -291,8 +291,16 @@ static inline u64 task_vtime(struct task_struct *p)
 	u64 vtime = p->scx.dsq_vtime;
 
 	/*
-	 * Limit the vruntime to (vtime_now - slice_ns_lag) to avoid penalizing
-	 * tasks too much (this helps to speed up new fork'ed tasks).
+	 * Limit the vruntime to (vtime_now - slice_ns_lag) to avoid
+	 * excessively penalizing tasks.
+	 *
+	 * A positive slice_ns_lag can enhance vruntime scheduling
+	 * effectiveness, but it may lead to more "spikey" performance as tasks
+	 * could remain in the queue for too long.
+	 *
+	 * Instead, a negative slice_ns_lag can result in more consistent
+	 * performance (less spikey), smoothing the reordering of the vruntime
+	 * scheduling and making the scheduler closer to a FIFO.  ￼ ￼ ￼
 	 */
 	if (vtime_before(vtime, vtime_now - slice_ns_lag))
 		vtime = vtime_now - slice_ns_lag;
