@@ -671,7 +671,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		c->new_util = (compute * LAVD_CPU_UTIL_MAX) / c->duration;
 		cpuc->util = calc_avg(cpuc->util, c->new_util);
 
-		if (cpuc->util > LAVD_TC_PER_CORE_MAX_CTUIL)
+		if (cpuc->util > LAVD_CC_PER_CORE_MAX_CTUIL)
 			c->nr_violation += 1000;
 
 		/*
@@ -765,14 +765,14 @@ static u64 calc_nr_active_cpus(struct sys_stat *stat_cur)
 	 * nr_active = ceil(nr_cpus_onln * cpu_util * per_core_max_util)
 	 */
 	nr_active  = (nr_cpus_onln * stat_cur->util * 1000) + 500;
-	nr_active /= (LAVD_TC_PER_CORE_MAX_CTUIL * 1000);
+	nr_active /= (LAVD_CC_PER_CORE_MAX_CTUIL * 1000);
 
 	/*
 	 * If a few CPUs are particularly busy, boost the overflow CPUs by 2x.
 	 */
-	nr_active += min(LAVD_TC_NR_OVRFLW, (stat_cur->nr_violation) / 1000);
+	nr_active += min(LAVD_CC_NR_OVRFLW, (stat_cur->nr_violation) / 1000);
 	nr_active = max(min(nr_active, nr_cpus_onln),
-			LAVD_TC_NR_ACTIVE_MIN);
+			LAVD_CC_NR_ACTIVE_MIN);
 
 	return nr_active;
 }
@@ -788,13 +788,13 @@ static void clear_cpu_periodically(u32 cpu, struct bpf_cpumask *cpumask)
 
 	/*
 	 * If the CPU is on, we clear the bit once every four times
-	 * (LAVD_TC_CPU_PIN_INTERVAL_DIV). Hence, the bit will be
+	 * (LAVD_CC_CPU_PIN_INTERVAL_DIV). Hence, the bit will be
 	 * probabilistically cleared once every 100 msec (4 * 25 msec).
 	 */
 	if (!bpf_cpumask_test_cpu(cpu, cast_mask(cpumask)))
 		return;
 
-	clear = !(bpf_get_prandom_u32() % LAVD_TC_CPU_PIN_INTERVAL_DIV);
+	clear = !(bpf_get_prandom_u32() % LAVD_CC_CPU_PIN_INTERVAL_DIV);
 	if (clear)
 		bpf_cpumask_clear_cpu(cpu, cpumask);
 }
@@ -823,7 +823,7 @@ static void do_core_compaction(void)
 	 */
 	nr_active_old = stat_cur->nr_active;
 	nr_active = calc_nr_active_cpus(stat_cur);
-	nr_cpus = nr_active + LAVD_TC_NR_OVRFLW;
+	nr_cpus = nr_active + LAVD_CC_NR_OVRFLW;
 	bpf_for(i, 0, nr_cpus_onln) {
 		if (i >= LAVD_CPU_ID_MAX)
 			break;
@@ -871,7 +871,7 @@ static void do_core_compaction(void)
 				 * by avoiding a few CPUs being turbo-boosted.
 				 * Hence, we do not clear the active cpumask
 				 * here for a while, approximately for
-				 * LAVD_TC_CPU_PIN_INTERVAL.
+				 * LAVD_CC_CPU_PIN_INTERVAL.
 				 */
 				clear_cpu_periodically(cpu, active);
 				bpf_cpumask_clear_cpu(cpu, ovrflw);
@@ -1147,7 +1147,7 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	 * The time slice should be short enough to schedule all runnable tasks
 	 * at least once within a targeted latency.
 	 */
-	nr_queued = scx_bpf_dsq_nr_queued(LAVD_ELIGIBLE_DSQ) + 1;
+	nr_queued = scx_bpf_dsq_nr_queued(LAVD_GLOBAL_DSQ) + 1;
 	slice = (LAVD_TARGETED_LATENCY_NS * stat_cur->nr_active) / nr_queued;
 	if (is_eligible(taskc)) {
 		slice += (LAVD_SLICE_BOOST_MAX_FT * slice *
@@ -1230,7 +1230,7 @@ static void advance_cur_logical_clk(struct task_ctx *taskc)
 	 * Advance the clock up to the task's deadline. When overloaded,
 	 * advance the clock slower so other can jump in the run queue.
 	 */
-	nr_queued = max(scx_bpf_dsq_nr_queued(LAVD_ELIGIBLE_DSQ), 1);
+	nr_queued = max(scx_bpf_dsq_nr_queued(LAVD_GLOBAL_DSQ), 1);
 	delta = (vlc - clc) / nr_queued;
 	new_clk = clc + delta;
 
@@ -1668,7 +1668,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	prm_run.lat_cri = taskc_run->lat_cri;
 
 	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p_wait, LAVD_ELIGIBLE_DSQ, 0) {
+	bpf_for_each(scx_dsq, p_wait, LAVD_GLOBAL_DSQ, 0) {
 		taskc_wait = get_task_ctx(p_wait);
 		if (!taskc_wait)
 			break;
@@ -1693,7 +1693,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 		}
 
 		/*
-		 * Test only the first entry on the LAVD_ELIGIBLE_DSQ.
+		 * Test only the first entry on the LAVD_GLOBAL_DSQ.
 		 */
 		break;
 	}
@@ -1738,7 +1738,7 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	/*
 	 * Enqueue the task to the eligible DSQ based on its virtual deadline.
 	 */
-	scx_bpf_dispatch_vtime(p, LAVD_ELIGIBLE_DSQ, LAVD_SLICE_UNDECIDED,
+	scx_bpf_dispatch_vtime(p, LAVD_GLOBAL_DSQ, LAVD_SLICE_UNDECIDED,
 			       taskc->vdeadline_log_clk, enq_flags);
 	return;
 }
@@ -1910,7 +1910,7 @@ static bool use_full_cpus(void)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	return no_core_compaction ||
-	       ((stat_cur->nr_active + LAVD_TC_NR_OVRFLW) >= nr_cpus_onln);
+	       ((stat_cur->nr_active + LAVD_CC_NR_OVRFLW) >= nr_cpus_onln);
 }
 
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
@@ -1922,7 +1922,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If all CPUs are using, directly consume without checking CPU masks.
 	 */
 	if (use_full_cpus()) {
-		scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
+		scx_bpf_consume(LAVD_GLOBAL_DSQ);
 		return;
 	}
 
@@ -1943,7 +1943,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (bpf_cpumask_test_cpu(cpu, cast_mask(active)) ||
 	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
-		scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
+		scx_bpf_consume(LAVD_GLOBAL_DSQ);
 		goto unlock_out;
 	}
 
@@ -1951,14 +1951,14 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If this CPU is not either in active or overflow CPUs, it tries to
 	 * find and run a task pinned to run on this CPU.
 	 */
-	bpf_for_each(scx_dsq, p, LAVD_ELIGIBLE_DSQ, 0) {
+	bpf_for_each(scx_dsq, p, LAVD_GLOBAL_DSQ, 0) {
 		/*
 		 * Prioritize kernel tasks because most kernel tasks are pinned
 		 * to a particular CPU and latency-critical (e.g., ksoftirqd,
 		 * kworker, etc).
 		 */
 		if (is_kernel_task(p)) {
-			scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
+			scx_bpf_consume(LAVD_GLOBAL_DSQ);
 			break;
 		}
 
@@ -1990,7 +1990,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * cores. We will optimize this path after introducing per-core
 		 * DSQ.
 		 */
-		scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
+		scx_bpf_consume(LAVD_GLOBAL_DSQ);
 
 		/*
 		 * This is the first time a particular pinned user-space task
@@ -2496,7 +2496,7 @@ static s32 init_dsq(void)
 {
 	int err;
 
-	err = scx_bpf_create_dsq(LAVD_ELIGIBLE_DSQ, -1);
+	err = scx_bpf_create_dsq(LAVD_GLOBAL_DSQ, -1);
 	if (err) {
 		scx_bpf_error("Failed to create an eligible DSQ");
 		return err;
