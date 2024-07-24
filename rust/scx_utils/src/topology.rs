@@ -159,6 +159,15 @@ impl Cache {
     pub fn span(&self) -> &Cpumask {
         &self.span
     }
+
+    /// Get the map of all CPUs for this LLC.
+    pub fn cpus(&self) -> BTreeMap<usize, Cpu> {
+        let mut cpus = BTreeMap::new();
+        for (_, core) in self.cores() {
+            cpus.append(&mut core.cpus.clone());
+        }
+        cpus
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +186,17 @@ impl Node {
     /// Get the map of LLCs inside this NUMA node
     pub fn llcs(&self) -> &BTreeMap<usize, Cache> {
         &self.llcs
+    }
+
+    /// Get the map of all CPUs for this NUMA node.
+    pub fn cpus(&self) -> BTreeMap<usize, Cpu> {
+        let mut cpus = BTreeMap::new();
+        for (_, llc) in &self.llcs {
+            for (_, core) in llc.cores() {
+                cpus.append(&mut core.cpus.clone());
+            }
+        }
+        cpus
     }
 
     /// Get a Cpumask of all CPUs in this NUMA node
