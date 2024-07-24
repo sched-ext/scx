@@ -900,6 +900,9 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 static bool match_one(struct layer_match *match, struct task_struct *p, const char *cgrp_path)
 {
+	bool result = false;
+	struct cred *cred;
+
 	switch (match->kind) {
 	case MATCH_CGROUP_PREFIX: {
 		return match_prefix(match->cgroup_prefix, cgrp_path, MAX_PATH);
@@ -921,9 +924,23 @@ static bool match_one(struct layer_match *match, struct task_struct *p, const ch
 		return prio_to_nice((s32)p->static_prio) < match->nice;
 	case MATCH_NICE_EQUALS:
 		return prio_to_nice((s32)p->static_prio) == match->nice;
+	case MATCH_USER_ID_EQUALS:
+		bpf_rcu_read_lock();
+		cred = p->real_cred;
+		if (cred)
+			result = cred->euid.val == match->user_id;
+		bpf_rcu_read_unlock();
+		return result;
+	case MATCH_GROUP_ID_EQUALS:
+		bpf_rcu_read_lock();
+		cred = p->real_cred;
+		if (cred)
+			result = cred->egid.val == match->group_id;
+		bpf_rcu_read_unlock();
+		return result;
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
-		return false;
+		return result;
 	}
 }
 
@@ -1494,6 +1511,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 					break;
 				case MATCH_NICE_EQUALS:
 					dbg("%s NICE_EQUALS %d", header, match->nice);
+					break;
+				case MATCH_USER_ID_EQUALS:
+					dbg("%s USER_ID %u", header, match->user_id);
+					break;
+				case MATCH_GROUP_ID_EQUALS:
+					dbg("%s GROUP_ID %u", header, match->group_id);
 					break;
 				default:
 					scx_bpf_error("%s Invalid kind", header);

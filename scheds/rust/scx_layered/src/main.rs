@@ -125,6 +125,10 @@ lazy_static::lazy_static! {
 /// - NiceEquals: Matches if the task's nice value is exactly equal to
 ///   the pattern.
 ///
+/// - UserId: Matches if the task's effective user id matches the pattern.
+///
+/// - GroupId: Matches if the task's effective group id matches the pattern.
+///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
 ///
@@ -340,6 +344,8 @@ enum LayerMatch {
     NiceAbove(i32),
     NiceBelow(i32),
     NiceEquals(i32),
+    UserId(u32),
+    GroupId(u32),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1288,6 +1294,14 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                         LayerMatch::NiceEquals(nice) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_NICE_EQUALS as i32;
                             mt.nice = *nice;
+                        }
+                        LayerMatch::UserId(user_id) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_USER_ID_EQUALS as i32;
+                            mt.user_id = *user_id;
+                        }
+                        LayerMatch::GroupId(group_id) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_GROUP_ID_EQUALS as i32;
+                            mt.group_id = *group_id;
                         }
                     }
                 }
