@@ -26,6 +26,7 @@ use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::LogRecorderBuilder;
+use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 
 /// scx_bolt: An interactive, battery-aware scheduler
@@ -38,8 +39,15 @@ struct Opts {
 }
 
 struct Scheduler<'a> {
+    // Main libbpf-rs skeleton object.
     skel: BpfSkel<'a>,
+
+    // Link containing the attached scheduler. Drop to unload.
     struct_ops: Option<libbpf_rs::Link>,
+
+    // Read-only host Topology.
+    #[allow(dead_code)]
+    top: Arc<Topology>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -48,6 +56,9 @@ impl<'a> Scheduler<'a> {
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 0);
         init_libbpf_logging(None);
+
+        let top = Arc::new(Topology::new()?);
+
         info!("Running scx_bolt (build ID: {})", *build_id::SCX_FULL_VERSION);
         let mut skel = scx_ops_open!(skel_builder, bolt).unwrap();
 
@@ -64,7 +75,8 @@ impl<'a> Scheduler<'a> {
 
         Ok(Self {
             skel,
-            struct_ops, // should be held to keep it attached
+            struct_ops,
+            top,
         })
     }
 
