@@ -107,6 +107,8 @@ enum layer_match_kind {
 	MATCH_NICE_ABOVE,
 	MATCH_NICE_BELOW,
 	MATCH_NICE_EQUALS,
+	MATCH_USER_ID_EQUALS,
+	MATCH_GROUP_ID_EQUALS,
 
 	NR_LAYER_MATCH_KINDS,
 };
@@ -117,6 +119,8 @@ struct layer_match {
 	char		comm_prefix[MAX_COMM];
 	char		pcomm_prefix[MAX_COMM];
 	int		nice;
+	u32		user_id;
+	u32		group_id;
 };
 
 struct layer_match_ands {
