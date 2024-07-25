@@ -17,6 +17,7 @@
 typedef unsigned char u8;
 typedef unsigned int u32;
 typedef unsigned long long u64;
+typedef long long s64;
 #endif
 
 #include <scx/ravg.bpf.h>
@@ -43,12 +44,29 @@ enum consts {
 	NSEC_PER_SEC            = NSEC_PER_USEC * USEC_PER_SEC,
 
 	/* Constants used for determining a task's deadline */
-	DL_RUNTIME_SCALE	= 2, /* roughly scales average runtime to */
-				     /* same order of magnitude as waker  */
-				     /* and blocked frequencies */
-	DL_MAX_LATENCY_NS	= (50 * NSEC_PER_MSEC),
+	DL_RUNTIME_FACTOR	= 100,
 	DL_FREQ_FT_MAX		= 100000,
 	DL_MAX_LAT_PRIO		= 39,
+	/*
+	 * Duty cycle is the proportion of time in some interval during which a
+	 * task could have used CPU. In other words, for some time interval
+	 * [t_0, t_1], a task's duty cycle is the value between [0, 1]
+	 * corresponding to how much time in the interval it _could_ have used.
+	 * For example, if it could have run the entire time its duty cycle
+	 * would be 1, and if it could only have run for half of the interval
+	 * its duty cycle would be .5. Note that a task that's runnable for the
+	 * first half of the interval, and running for the second half at which
+	 * point it blocks, would still have a duty cycle of .5.
+	 *
+	 * We track duty cycle in BPF using the running average helpers. The
+	 * value below is approximately the value that is observed in the
+	 * kernel when a task has duty cycle ~= 1. In user space we can do
+	 * floating point arithmetic in e.g. the rust implementation of
+	 * ravg_read(), but here in the kernel we're stuck with fixed-point
+	 * integer arithmetic and must therefore use values like this when
+	 * determining a task's latency priority when calculating its deadline.
+	 */
+	DL_FULL_DCYCLE		= 650000,
 
 	/*
 	 * When userspace load balancer is trying to determine the tasks to push
@@ -115,6 +133,14 @@ struct task_ctx {
 	/* frequency with which a task wakes other tasks (producer) */
 	u64 waker_freq;
 	u64 last_woke_at;
+
+	s64 lat_prio;
+
+	/*
+	 * vruntime tracked by the scheduler. Separate from p->scx.dsq_vtime as
+	 * this is set by the scheduler.
+	 */
+	u64 vruntime;
 
 	/* The task is a workqueue worker thread */
 	bool is_kworker;
