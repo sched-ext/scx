@@ -211,7 +211,8 @@ private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflo
 /*
  * CPU topology
  */
-const volatile u16 cpu_order[LAVD_CPU_ID_MAX]; /* ordered by cpus->core->llc->numa */
+const volatile u16 cpu_order[LAVD_CPU_ID_MAX]; /* CPU preference order */
+const volatile u16 __cpu_capacity_hint[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1000 */
 
 /*
  * Logical current clock
@@ -1138,7 +1139,8 @@ static u64 clamp_time_slice_ns(u64 slice)
 	return slice;
 }
 
-static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
+static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc,
+			   struct cpu_ctx *cpuc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 nr_queued, slice;
@@ -1149,15 +1151,26 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	 */
 	nr_queued = scx_bpf_dsq_nr_queued(LAVD_GLOBAL_DSQ) + 1;
 	slice = (LAVD_TARGETED_LATENCY_NS * stat_cur->nr_active) / nr_queued;
+
+	/*
+	 * Keep the slice in [LAVD_SLICE_MIN_NS, LAVD_SLICE_MAX_NS].
+	 */
+	slice = clamp_time_slice_ns(slice);
+
+	/*
+	 * Boost time slice for CPU-bound tasks.
+	 */
 	if (is_eligible(taskc)) {
 		slice += (LAVD_SLICE_BOOST_MAX_FT * slice *
 			  taskc->slice_boost_prio) / LAVD_SLICE_BOOST_MAX_STEP;
 	}
 
 	/*
-	 * Keep the slice in [LAVD_SLICE_MIN_NS, LAVD_SLICE_MAX_NS].
+	 * Boost time slice based on CPU's capacity to assign a longer time
+	 * slice for a more performant CPU for making each CPU's job processing
+	 * throughput similar.
 	 */
-	slice = clamp_time_slice_ns(slice);
+	slice = slice * cpuc->capacity / 1024;
 
 	/*
 	 * If a task has yet to be scheduled (i.e., a freshly forked task or a
@@ -2235,7 +2248,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 * Calculate the task's time slice based on updated load if necessary.
 	 */
 	if (need_to_calc_time_slice(p))
-		p->scx.slice = calc_time_slice(p, taskc);
+		p->scx.slice = calc_time_slice(p, taskc, cpuc);
 
 	/*
 	 * If there is a relevant introspection command with @p, process it.
@@ -2549,10 +2562,44 @@ out:
 	return err;
 }
 
-static s32 init_per_cpu_ctx(u64 now)
+static bool can_trust_kernel_cap(void)
 {
 	int cpu;
-	int err;
+
+	/*
+	 * If scx_bpf_cpuperf_cap () returns 1024 for all cores, it could be
+	 * either of two: 1) all cores' capacities are indeed the same, 2)
+	 * in-kernel driver does not provide a proper value.
+	 */
+	bpf_for(cpu, 0, nr_cpus_onln) {
+		if (scx_bpf_cpuperf_cap(cpu) != 1024)
+			return true;
+	}
+
+	return false;
+}
+
+static u16 get_cpuperf_cap(s32 cpu, bool in_kernel)
+{
+	if (in_kernel)
+		return scx_bpf_cpuperf_cap(cpu);
+
+	/*
+	 * If CPU's capacitiy values are all 1024, then let's just use the
+	 * capacity value from userspace, which are calculated using each CPU's
+	 * maximum frequency.
+	 */
+	if (cpu >= 0 && cpu < LAVD_CPU_ID_MAX)
+		return __cpu_capacity_hint[cpu];
+
+	scx_bpf_error("Infeasible CPU id: %d", cpu);
+	return 1;
+}
+
+static s32 init_per_cpu_ctx(u64 now)
+{
+	bool in_kernel_cap = can_trust_kernel_cap();
+	int cpu, err;
 
 	bpf_for(cpu, 0, nr_cpus_onln) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
@@ -2570,6 +2617,7 @@ static s32 init_per_cpu_ctx(u64 now)
 			return err;
 
 		cpu_ctx_init_online(cpuc, cpu, now);
+		cpuc->capacity = get_cpuperf_cap(cpu, in_kernel_cap);
 		cpuc->offline_clk = now;
 	}
 

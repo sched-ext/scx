@@ -119,6 +119,7 @@ struct CpuFlatId {
     core_pos: usize,
     cpu_pos: usize,
     cpu_id: usize,
+    cpu_cap: usize,
 }
 
 #[derive(Debug)]
@@ -144,6 +145,7 @@ impl FlatTopology {
         let mut cpu_fids = Vec::new();
 
         // Build a vector of cpu flat ids.
+        let mut base_freq = 0;
         for (node_id, node) in topo.nodes().iter().enumerate() {
             let mut llc_pos = 0;
             for (_llc_id, llc) in node.llcs().iter() {
@@ -158,9 +160,13 @@ impl FlatTopology {
                             core_pos,
                             cpu_pos,
                             cpu_id: cpu.id(),
+                            cpu_cap: 0,
                         };
                         cpu_fids.push(cpu_fid);
                         cpu_pos += 1;
+                        if base_freq < cpu.max_freq() {
+                            base_freq = cpu.max_freq();
+                        }
                     }
                     core_pos += 1;
                 }
@@ -168,6 +174,12 @@ impl FlatTopology {
             }
         }
 
+        // Initialize cpu capacity
+        for cpu_fid in cpu_fids.iter_mut() {
+            cpu_fid.cpu_cap = ((cpu_fid.max_freq * 1024) / base_freq) as usize;
+        }
+
+        // Sort the cpu_fids
         if prefer_smt_core {
             // Sort the cpu_fids  by node, llc, max_freq, core, and cpu order
             cpu_fids.sort_by(|a, b| {
@@ -185,8 +197,7 @@ impl FlatTopology {
                 }
                 return a.node_id.cmp(&b.node_id);
             });
-        }
-        else {
+        } else {
             // Sort the cpu_fids  by cpu, node, llc, max_freq, and core order
             cpu_fids.sort_by(|a, b| {
                 if a.cpu_pos == b.cpu_pos {
@@ -242,10 +253,10 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, lavd_ops)?;
 
         // Initialize CPU order topologically sorted by a cpu, node, llc, max_freq, and core order
-        let topo = FlatTopology::new(opts.prefer_smt_core).expect(
-            "Failed to build host topology");
+        let topo = FlatTopology::new(opts.prefer_smt_core).expect("Failed to build host topology");
         for (pos, cpu) in topo.cpu_fids().iter().enumerate() {
             skel.rodata_mut().cpu_order[pos] = cpu.cpu_id as u16;
+            skel.rodata_mut().__cpu_capacity_hint[cpu.cpu_id] = cpu.cpu_cap as u16;
         }
         debug!("{}", topo);
 

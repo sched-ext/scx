@@ -67,8 +67,8 @@ enum consts {
 	LAVD_LC_RUNTIME_SHIFT		= 10,
 	LAVD_LC_STARVATION_FT		= 1024,
 
-	LAVD_SLICE_BOOST_MAX_FT		= 2, /* maximum additional 2x of slice */
-	LAVD_SLICE_BOOST_MAX_STEP	= 8, /* 8 slice exhausitions in a row */
+	LAVD_SLICE_BOOST_MAX_FT		= 3, /* maximum additional 2x of slice */
+	LAVD_SLICE_BOOST_MAX_STEP	= 6, /* 8 slice exhausitions in a row */
 	LAVD_GREEDY_RATIO_NEW		= 2000,
 
 	LAVD_ELIGIBLE_TIME_MAX		= (1ULL * LAVD_TIME_ONE_SEC),
@@ -171,6 +171,7 @@ struct cpu_ctx {
 	 * Fields for core compaction
 	 *
 	 */
+	u16		capacity;	/* CPU capacity based on 1000 */
 	struct bpf_cpumask __kptr *tmp_a_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_o_mask;	/* temporary cpu mask */
 } __attribute__((aligned(CACHELINE_SIZE)));
