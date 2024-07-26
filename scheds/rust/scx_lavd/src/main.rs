@@ -55,6 +55,10 @@ struct Opts {
     #[clap(long = "no-core-compaction", action = clap::ArgAction::SetTrue)]
     no_core_compaction: bool,
 
+    /// Use SMT logical cores before using other physcial cores in core compaction
+    #[clap(long = "prefer-smt-core", action = clap::ArgAction::SetTrue)]
+    prefer_smt_core: bool,
+
     /// Disable frequency scaling by scx_lavd
     #[clap(long = "no-freq-scaling", action = clap::ArgAction::SetTrue)]
     no_freq_scaling: bool,
@@ -121,6 +125,7 @@ struct CpuFlatId {
 struct FlatTopology {
     cpu_fids: Vec<CpuFlatId>,
     nr_cpus_online: usize,
+    prefer_smt_core: bool,
 }
 
 impl fmt::Display for FlatTopology {
@@ -134,7 +139,7 @@ impl fmt::Display for FlatTopology {
 
 impl FlatTopology {
     /// Build a flat-structured topology
-    pub fn new() -> Result<FlatTopology> {
+    pub fn new(prefer_smt_core: bool) -> Result<FlatTopology> {
         let topo = Topology::new().expect("Failed to build host topology");
         let mut cpu_fids = Vec::new();
 
@@ -163,26 +168,47 @@ impl FlatTopology {
             }
         }
 
-        // Sort the cpu_fids  by node, llc, max_freq, core, and cpu order
-        cpu_fids.sort_by(|a, b| {
-            if a.node_id == b.node_id {
-                if a.llc_pos == b.llc_pos {
-                    if a.max_freq == b.max_freq {
-                        if a.core_pos == b.core_pos {
-                            return a.cpu_pos.cmp(&b.cpu_pos);
+        if prefer_smt_core {
+            // Sort the cpu_fids  by node, llc, max_freq, core, and cpu order
+            cpu_fids.sort_by(|a, b| {
+                if a.node_id == b.node_id {
+                    if a.llc_pos == b.llc_pos {
+                        if a.max_freq == b.max_freq {
+                            if a.core_pos == b.core_pos {
+                                return a.cpu_pos.cmp(&b.cpu_pos);
+                            }
+                            return a.core_pos.cmp(&b.core_pos);
                         }
-                        return a.core_pos.cmp(&b.core_pos);
+                        return b.max_freq.cmp(&a.max_freq);
                     }
-                    return b.max_freq.cmp(&a.max_freq);
+                    return a.llc_pos.cmp(&b.llc_pos);
                 }
-                return a.llc_pos.cmp(&b.llc_pos);
-            }
-            return a.node_id.cmp(&b.node_id);
-        });
+                return a.node_id.cmp(&b.node_id);
+            });
+        }
+        else {
+            // Sort the cpu_fids  by cpu, node, llc, max_freq, and core order
+            cpu_fids.sort_by(|a, b| {
+                if a.cpu_pos == b.cpu_pos {
+                    if a.node_id == b.node_id {
+                        if a.llc_pos == b.llc_pos {
+                            if a.max_freq == b.max_freq {
+                                return a.core_pos.cmp(&b.core_pos);
+                            }
+                            return b.max_freq.cmp(&a.max_freq);
+                        }
+                        return a.llc_pos.cmp(&b.llc_pos);
+                    }
+                    return a.cpu_pos.cmp(&b.cpu_pos);
+                }
+                return a.cpu_pos.cmp(&b.cpu_pos);
+            });
+        }
 
         Ok(FlatTopology {
             cpu_fids,
             nr_cpus_online: topo.nr_cpus_online(),
+            prefer_smt_core,
         })
     }
 
@@ -216,7 +242,8 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, lavd_ops)?;
 
         // Initialize CPU order topologically sorted by a cpu, node, llc, max_freq, and core order
-        let topo = FlatTopology::new().expect("Failed to build host topology");
+        let topo = FlatTopology::new(opts.prefer_smt_core).expect(
+            "Failed to build host topology");
         for (pos, cpu) in topo.cpu_fids().iter().enumerate() {
             skel.rodata_mut().cpu_order[pos] = cpu.cpu_id as u16;
         }
