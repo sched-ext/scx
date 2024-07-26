@@ -309,31 +309,18 @@ static inline u64 task_vtime(struct task_struct *p)
 }
 
 /*
- * Return the amount of tasks waiting to be dispatched.
- */
-static u64 nr_tasks_waiting(void)
-{
-	return scx_bpf_dsq_nr_queued(prio_dsq_id) +
-	       scx_bpf_dsq_nr_queued(shared_dsq_id);
-}
-
-/*
  * Return the task's unused portion of its previously assigned time slice in
  * the range a [slice_ns_min .. slice_ns].
  */
 static inline u64 task_slice(struct task_struct *p)
 {
 	/*
-	 * Refresh the amount of waiting tasks to get a more accurate scaling
-	 * factor for the time slice.
-	 */
-	nr_waiting = (nr_waiting + nr_tasks_waiting()) / 2;
-
-	/*
 	 * Scale the time slice based on the average number of waiting tasks
-	 * (more waiting tasks result in a shorter time slice).
+	 * normalized to the amount of online CPUs (more waiting tasks results
+	 * in a shorter time slice).
 	 */
-	return MAX(slice_ns / (nr_waiting + 1), slice_ns_min);
+	return CLAMP(slice_ns * nr_online_cpus / (nr_waiting + 1),
+		     slice_ns_min, slice_ns);
 }
 
 /*
@@ -561,10 +548,6 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		}
 	}
 
-	tctx = lookup_task_ctx(p);
-	if (!tctx)
-		return;
-
 	/*
 	 * Dispatch interactive tasks to the priority DSQ and regular tasks to
 	 * the shared DSQ.
@@ -574,6 +557,9 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * that can consume them) we can just dispatch them to the shared DSQ
 	 * and simply rely on the vruntime logic.
 	 */
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
+		return;
 	if (tctx->is_interactive) {
 		scx_bpf_dispatch_vtime(p, prio_dsq_id, slice, vtime, enq_flags);
 		__sync_fetch_and_add(&nr_prio_dispatches, 1);
@@ -581,6 +567,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dispatch_vtime(p, shared_dsq_id, slice, vtime, enq_flags);
 		__sync_fetch_and_add(&nr_shared_dispatches, 1);
 	}
+	__sync_fetch_and_add(&nr_waiting, 1);
 }
 
 /*
@@ -682,7 +669,12 @@ static bool consume_starving_tasks(u64 now)
 	return false;
 }
 
-void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
+/*
+ * Try to consume and run one task from the wait queues.
+ *
+ * Return true if a task has been consumed, false otherwise.
+ */
+static bool try_dispatch_task(s32 cpu)
 {
 	u64 now = bpf_ktime_get_ns();
 
@@ -691,31 +683,51 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * offline (this allows to prevent indefinite task stalls).
 	 */
 	if (consume_offline_cpus(cpu))
-		return;
+		return true;
 
 	/*
 	 * Make sure we are not staving tasks from the lower priority DSQs.
 	 */
 	if (consume_starving_tasks(now))
-		return;
+		return true;
 
 	/*
 	 * Consume directly dispatched tasks, so that they can immediately use
 	 * the CPU assigned in select_cpu().
 	 */
 	if (scx_bpf_consume(cpu_to_dsq(cpu)))
-		return;
+		return true;
 
 	/*
 	 * Then always consume interactive tasks before regular tasks.
 	 */
 	if (consume_prio_task(now))
-		return;
+		return true;
 
 	/*
 	 * Lastly, consume regular tasks from the shared DSQ.
 	 */
-	consume_regular_task(now);
+	return consume_regular_task(now);
+}
+
+/*
+ * Return the amount of tasks waiting to be dispatched.
+ */
+static u64 nr_tasks_waiting(void)
+{
+	return scx_bpf_dsq_nr_queued(prio_dsq_id) +
+	       scx_bpf_dsq_nr_queued(shared_dsq_id);
+}
+
+void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
+{
+	if (!try_dispatch_task(cpu))
+		return;
+	/*
+	 * Refresh the amount of waiting tasks to get a more accurate scaling
+	 * factor for the time slice.
+	 */
+	WRITE_ONCE(nr_waiting, nr_tasks_waiting());
 }
 
 void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)

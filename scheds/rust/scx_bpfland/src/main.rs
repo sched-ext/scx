@@ -226,8 +226,10 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    fn effective_slice(&self, nr_waiting: u64) -> u64 {
-        std::cmp::max(self.slice_ns / (nr_waiting + 1), self.slice_ns_min)
+    fn effective_slice(&self, nr_cpus: u64, nr_waiting: u64) -> u64 {
+        let slice = self.slice_ns * nr_cpus / (nr_waiting + 1);
+
+        slice.clamp(self.slice_ns_min, self.slice_ns)
     }
 
     fn update_stats(&mut self) {
@@ -262,7 +264,7 @@ impl<'a> Scheduler<'a> {
             .nr_shared_dispatches
             .set(nr_shared_dispatches as f64);
 
-        let slice_ms = self.effective_slice(nr_waiting) as f64 / 1_000_000.0;
+        let slice_ms = self.effective_slice(nr_cpus, nr_waiting) as f64 / 1_000_000.0;
 
         // Log scheduling statistics.
         info!("running: {:>4}/{:<4} interactive: {:<4} wait: {:<4} | slice: {:5.2}ms | nvcsw: {:<4} | direct: {:<6} prio: {:<6} shared: {:<6}",
