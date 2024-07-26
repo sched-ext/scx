@@ -67,10 +67,14 @@ struct Opts {
 
     /// Maximum time slice lag in microseconds.
     ///
-    /// Increasing this value can help to increase the responsiveness of interactive tasks at the
-    /// cost of making regular and newly created tasks less responsive (0 = disabled).
-    #[clap(short = 'l', long, default_value = "0")]
-    slice_us_lag: u64,
+    /// A positive value can help to enhance the responsiveness of interactive tasks, but it can
+    /// also make performance more "spikey".
+    ///
+    /// A negative value can make performance more consistent, but it can also reduce the
+    /// responsiveness of interactive tasks (by smoothing the effect of the vruntime scheduling and
+    /// making the task ordering closer to a FIFO).
+    #[clap(short = 'l', long, allow_hyphen_values = true, default_value = "0")]
+    slice_us_lag: i64,
 
     /// Enable per-CPU kthreads prioritization.
     ///
