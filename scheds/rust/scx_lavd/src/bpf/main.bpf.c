@@ -580,7 +580,6 @@ struct sys_stat_ctx {
 	u64		tot_svc_time;
 	u64		load_run_time_ns;
 	s32		max_lat_cri;
-	s32		min_lat_cri;
 	s32		avg_lat_cri;
 	u64		sum_lat_cri;
 	u32		sched_nr;
@@ -598,7 +597,6 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 	c->stat_next = get_sys_stat_next();
 	c->now = bpf_ktime_get_ns();
 	c->duration = c->now - c->stat_cur->last_update_clk;
-	c->min_lat_cri = UINT_MAX;
 }
 
 static void collect_sys_stat(struct sys_stat_ctx *c)
@@ -635,10 +633,6 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		if (cpuc->max_lat_cri > c->max_lat_cri)
 			c->max_lat_cri = cpuc->max_lat_cri;
 		cpuc->max_lat_cri = 0;
-
-		if (cpuc->min_lat_cri < c->min_lat_cri)
-			c->min_lat_cri = cpuc->min_lat_cri;
-		cpuc->min_lat_cri = UINT_MAX;
 
 		/*
 		 * Accumulate task's performance criticlity information.
@@ -697,7 +691,6 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 		 * When a system is completely idle, it is indeed possible
 		 * nothing scheduled for an interval.
 		 */
-		c->min_lat_cri = c->stat_cur->min_lat_cri;
 		c->max_lat_cri = c->stat_cur->max_lat_cri;
 		c->avg_lat_cri = c->stat_cur->avg_lat_cri;
 		c->avg_perf_cri = c->stat_cur->avg_perf_cri;
@@ -721,8 +714,6 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 	stat_next->util =
 		calc_avg(stat_cur->util, c->new_util);
 
-	stat_next->min_lat_cri =
-		calc_avg32(stat_cur->min_lat_cri, c->min_lat_cri);
 	stat_next->max_lat_cri =
 		calc_avg32(stat_cur->max_lat_cri, c->max_lat_cri);
 	stat_next->avg_lat_cri =
@@ -907,7 +898,7 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 	return 0;
 }
 
-static u32 calc_greedy_ratio(struct task_struct *p, struct task_ctx *taskc)
+static u32 calc_greedy_ratio(struct task_ctx *taskc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u32 ratio;
@@ -967,7 +958,7 @@ static bool is_wakeup_ef(u64 enq_flags)
 	return enq_flags & SCX_ENQ_WAKEUP;
 }
 
-static u64 calc_eligible_delta(struct task_struct *p, struct task_ctx *taskc)
+static u64 calc_eligible_delta(struct task_ctx *taskc)
 {
 	/*
 	 * We calculate how long a task should be ineligible for execution. To
@@ -995,7 +986,7 @@ static u64 calc_eligible_delta(struct task_struct *p, struct task_ctx *taskc)
 	 * If a task is too greedy so it is not eligible, don't put it to the
 	 * local rq to seek another eligible task later.
 	 */
-	calc_greedy_ratio(p, taskc);
+	calc_greedy_ratio(taskc);
 
 	/*
 	 * Considering task's greedy ratio, decide if a task is now eligible.
@@ -1066,15 +1057,14 @@ static u64 calc_starvation_factor(struct task_ctx *taskc)
 	return ratio + 1;
 }
 
-static void boost_lat(struct task_struct *p, struct task_ctx *taskc,
-		      struct cpu_ctx *cpuc, bool is_wakeup)
+static void calc_lat_cri(struct task_ctx *taskc)
 {
 	u64 starvation_ft, wait_freq_ft, wake_freq_ft;
 	u64 lat_cri_raw;
 
 	/*
 	 * A task is more latency-critical as its wait or wake frequencies
-	 * (i.e., wait_freq and wake_freq) and starvation factors are higher.
+	 * (i.e., wait_freq and wake_freq) are higher.
 	 *
 	 * Since those frequencies are unbounded and their upper limits are
 	 * unknown, we transform them using sigmoid-like functions. For wait
@@ -1084,40 +1074,39 @@ static void boost_lat(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	wait_freq_ft = calc_freq_factor(taskc->wait_freq);
 	wake_freq_ft = calc_freq_factor(taskc->wake_freq);
-	starvation_ft  = calc_starvation_factor(taskc);
 
 	/*
 	 * Wake frequency and wait frequency represent how much a task is used
 	 * for a producer and a consumer, respectively. If both are high, the
 	 * task is in the middle of a task chain.
 	 */
-	lat_cri_raw = wait_freq_ft * wake_freq_ft * starvation_ft;
+	lat_cri_raw = wait_freq_ft * wake_freq_ft;
 
 	/*
 	 * The ratio above tends to follow an exponentially skewed
 	 * distribution, so we linearize it using log2 before converting it to
 	 * a boost priority. We add +1 to guarantee the latency criticality
 	 * (log2-ed) is always positive.
-	 *
-	 * Note that the priority-to-weight conversion table is non-linear.
-	 * Through this process -- log2(ratio) then priority to weight
-	 * conversion, we mitigate the exponentially skewed distribution to
-	 * non-linear distribution.
 	 */
-	taskc->lat_cri = log2_u64(lat_cri_raw + 1) + is_wakeup;
+	taskc->lat_cri = log2_u64(lat_cri_raw + 1);
 }
 
-static void calc_virtual_deadline_delta(struct task_struct *p,
-					struct task_ctx *taskc,
-					struct cpu_ctx *cpuc,
-					u64 enq_flags)
+static void calc_starv_cri(struct task_ctx *taskc, bool is_wakeup)
+{
+	taskc->starv_cri = log2_u64(calc_starvation_factor(taskc) + 1) +
+			   is_wakeup;
+}
+
+static void calc_virtual_deadline_delta(struct task_ctx *taskc, u64 enq_flags)
 {
 	bool is_wakeup;
 
 	is_wakeup = is_wakeup_ef(enq_flags);
-	boost_lat(p, taskc, cpuc, is_wakeup);
-	taskc->vdeadline_delta_ns = (taskc->run_time_ns *
-				     LAVD_VDL_LOOSENESS_FT) / taskc->lat_cri;
+	calc_lat_cri(taskc);
+	calc_starv_cri(taskc, is_wakeup);
+	taskc->vdeadline_delta_ns =
+		(taskc->run_time_ns * LAVD_VDL_LOOSENESS_FT) /
+		(taskc->lat_cri + taskc->starv_cri);
 }
 
 static u64 calc_task_load_actual(struct task_ctx *taskc)
@@ -1286,8 +1275,6 @@ static void update_stat_for_running(struct task_struct *p,
 	 */
 	if (cpuc->max_lat_cri < taskc->lat_cri)
 		cpuc->max_lat_cri = taskc->lat_cri;
-	if (cpuc->min_lat_cri > taskc->lat_cri)
-		cpuc->min_lat_cri = taskc->lat_cri;
 	cpuc->sum_lat_cri += taskc->lat_cri;
 	cpuc->sched_nr++;
 
@@ -1385,8 +1372,7 @@ static void update_stat_for_quiescent(struct task_struct *p,
 	cpuc->load_run_time_ns -= clamp_time_slice_ns(taskc->run_time_ns);
 }
 
-static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
-			     struct cpu_ctx *cpuc, u64 enq_flags)
+static void calc_when_to_run(struct task_ctx *taskc, u64 enq_flags)
 {
 	u64 vlc;
 
@@ -1396,8 +1382,8 @@ static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 	 * urgent it is - vdeadline_delta_ns - and when it becomes eligible if
 	 * overscheduled - eligible_time_ns.
 	 */
-	calc_virtual_deadline_delta(p, taskc, cpuc, enq_flags);
-	calc_eligible_delta(p, taskc);
+	calc_virtual_deadline_delta(taskc, enq_flags);
+	calc_eligible_delta(taskc);
 
 	/*
 	 * Update the logical clock of the virtual deadline including
@@ -1727,7 +1713,7 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * Note that the task's time slice will be calculated and reassigned
 	 * right before running at ops.running().
 	 */
-	calc_when_to_run(p, taskc, cpuc, enq_flags);
+	calc_when_to_run(taskc, enq_flags);
 
 	/*
 	 * If a task is eligible, dispatch to the eligible DSQ.
@@ -1883,8 +1869,9 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		return prev_cpu;
 
 	cpu_id = pick_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
-	if (found_idle)
+	if (found_idle) {
 		return cpu_id;
+	}
 
 	return prev_cpu;
 }

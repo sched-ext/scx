@@ -105,7 +105,6 @@ struct sys_stat {
 
 	volatile u32	avg_lat_cri;	/* average latency criticality (LC) */
 	volatile u32	max_lat_cri;	/* maximum latency criticality (LC) */
-	volatile u32	min_lat_cri;	/* minimum latency criticality (LC) */
 	volatile u32	thr_lat_cri;	/* latency criticality threshold for kicking */
 
 	volatile u32	avg_perf_cri;	/* average performance criticality */
@@ -143,7 +142,6 @@ struct cpu_ctx {
 	 * Information used to keep track of latency criticality
 	 */
 	volatile u32	max_lat_cri;	/* maximum latency criticality */
-	volatile u32	min_lat_cri;	/* minimum latency criticality */
 	volatile u32	sum_lat_cri;	/* sum of latency criticality */
 	volatile u32	sched_nr;	/* number of schedules */
 
@@ -206,6 +204,7 @@ struct task_ctx {
 	u64	slice_ns;		/* time slice */
 	u32	greedy_ratio;		/* task's overscheduling ratio compared to its nice priority */
 	u32	lat_cri;		/* calculated latency criticality */
+	u32	starv_cri;		/* calculated starvation criticality */
 	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
 
