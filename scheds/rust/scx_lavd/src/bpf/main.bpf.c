@@ -211,7 +211,8 @@ private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflo
 /*
  * CPU topology
  */
-const volatile u16 cpu_order[LAVD_CPU_ID_MAX]; /* ordered by cpus->core->llc->numa */
+const volatile u16 cpu_order[LAVD_CPU_ID_MAX]; /* CPU preference order */
+const volatile u16 __cpu_capacity_hint[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1000 */
 
 /*
  * Logical current clock
@@ -671,7 +672,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		c->new_util = (compute * LAVD_CPU_UTIL_MAX) / c->duration;
 		cpuc->util = calc_avg(cpuc->util, c->new_util);
 
-		if (cpuc->util > LAVD_TC_PER_CORE_MAX_CTUIL)
+		if (cpuc->util > LAVD_CC_PER_CORE_MAX_CTUIL)
 			c->nr_violation += 1000;
 
 		/*
@@ -765,14 +766,14 @@ static u64 calc_nr_active_cpus(struct sys_stat *stat_cur)
 	 * nr_active = ceil(nr_cpus_onln * cpu_util * per_core_max_util)
 	 */
 	nr_active  = (nr_cpus_onln * stat_cur->util * 1000) + 500;
-	nr_active /= (LAVD_TC_PER_CORE_MAX_CTUIL * 1000);
+	nr_active /= (LAVD_CC_PER_CORE_MAX_CTUIL * 1000);
 
 	/*
 	 * If a few CPUs are particularly busy, boost the overflow CPUs by 2x.
 	 */
-	nr_active += min(LAVD_TC_NR_OVRFLW, (stat_cur->nr_violation) / 1000);
+	nr_active += min(LAVD_CC_NR_OVRFLW, (stat_cur->nr_violation) / 1000);
 	nr_active = max(min(nr_active, nr_cpus_onln),
-			LAVD_TC_NR_ACTIVE_MIN);
+			LAVD_CC_NR_ACTIVE_MIN);
 
 	return nr_active;
 }
@@ -788,13 +789,13 @@ static void clear_cpu_periodically(u32 cpu, struct bpf_cpumask *cpumask)
 
 	/*
 	 * If the CPU is on, we clear the bit once every four times
-	 * (LAVD_TC_CPU_PIN_INTERVAL_DIV). Hence, the bit will be
+	 * (LAVD_CC_CPU_PIN_INTERVAL_DIV). Hence, the bit will be
 	 * probabilistically cleared once every 100 msec (4 * 25 msec).
 	 */
 	if (!bpf_cpumask_test_cpu(cpu, cast_mask(cpumask)))
 		return;
 
-	clear = !(bpf_get_prandom_u32() % LAVD_TC_CPU_PIN_INTERVAL_DIV);
+	clear = !(bpf_get_prandom_u32() % LAVD_CC_CPU_PIN_INTERVAL_DIV);
 	if (clear)
 		bpf_cpumask_clear_cpu(cpu, cpumask);
 }
@@ -823,7 +824,7 @@ static void do_core_compaction(void)
 	 */
 	nr_active_old = stat_cur->nr_active;
 	nr_active = calc_nr_active_cpus(stat_cur);
-	nr_cpus = nr_active + LAVD_TC_NR_OVRFLW;
+	nr_cpus = nr_active + LAVD_CC_NR_OVRFLW;
 	bpf_for(i, 0, nr_cpus_onln) {
 		if (i >= LAVD_CPU_ID_MAX)
 			break;
@@ -861,20 +862,20 @@ static void do_core_compaction(void)
 			else {
 				/*
 				 * This is the case when a CPU belongs to the
-				 * active set even though that CPU was not an
-				 * active set initially. This can happen only
+				 * overflow set even though that CPU was not an
+				 * overflow set initially. This can happen only
 				 * when a pinned userspace task ran on this
-				 * CPU. In this case, we keep the CPU active
-				 * since the CPU will be used anyway for the
-				 * task. This will promote equal use of all
-				 * used CPUs, lowering the energy consumption
-				 * by avoiding a few CPUs being turbo-boosted.
-				 * Hence, we do not clear the active cpumask
-				 * here for a while, approximately for
-				 * LAVD_TC_CPU_PIN_INTERVAL.
+				 * CPU. In this case, we keep the CPU in an
+				 * overflow set since the CPU will be used
+				 * anyway for the task. This will promote equal
+				 * use of all used CPUs, lowering the energy
+				 * consumption by avoiding a few CPUs being
+				 * turbo-boosted. Hence, we do not clear the
+				 * overflow cpumask here for a while,
+				 * approximately for LAVD_CC_CPU_PIN_INTERVAL.
 				 */
-				clear_cpu_periodically(cpu, active);
-				bpf_cpumask_clear_cpu(cpu, ovrflw);
+				bpf_cpumask_clear_cpu(cpu, active);
+				clear_cpu_periodically(cpu, ovrflw);
 			}
 		}
 	}
@@ -1138,7 +1139,8 @@ static u64 clamp_time_slice_ns(u64 slice)
 	return slice;
 }
 
-static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
+static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc,
+			   struct cpu_ctx *cpuc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 nr_queued, slice;
@@ -1147,17 +1149,28 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	 * The time slice should be short enough to schedule all runnable tasks
 	 * at least once within a targeted latency.
 	 */
-	nr_queued = scx_bpf_dsq_nr_queued(LAVD_ELIGIBLE_DSQ) + 1;
+	nr_queued = scx_bpf_dsq_nr_queued(LAVD_GLOBAL_DSQ) + 1;
 	slice = (LAVD_TARGETED_LATENCY_NS * stat_cur->nr_active) / nr_queued;
+
+	/*
+	 * Keep the slice in [LAVD_SLICE_MIN_NS, LAVD_SLICE_MAX_NS].
+	 */
+	slice = clamp_time_slice_ns(slice);
+
+	/*
+	 * Boost time slice for CPU-bound tasks.
+	 */
 	if (is_eligible(taskc)) {
 		slice += (LAVD_SLICE_BOOST_MAX_FT * slice *
 			  taskc->slice_boost_prio) / LAVD_SLICE_BOOST_MAX_STEP;
 	}
 
 	/*
-	 * Keep the slice in [LAVD_SLICE_MIN_NS, LAVD_SLICE_MAX_NS].
+	 * Boost time slice based on CPU's capacity to assign a longer time
+	 * slice for a more performant CPU for making each CPU's job processing
+	 * throughput similar.
 	 */
-	slice = clamp_time_slice_ns(slice);
+	slice = slice * cpuc->capacity / 1024;
 
 	/*
 	 * If a task has yet to be scheduled (i.e., a freshly forked task or a
@@ -1230,7 +1243,7 @@ static void advance_cur_logical_clk(struct task_ctx *taskc)
 	 * Advance the clock up to the task's deadline. When overloaded,
 	 * advance the clock slower so other can jump in the run queue.
 	 */
-	nr_queued = max(scx_bpf_dsq_nr_queued(LAVD_ELIGIBLE_DSQ), 1);
+	nr_queued = max(scx_bpf_dsq_nr_queued(LAVD_GLOBAL_DSQ), 1);
 	delta = (vlc - clc) / nr_queued;
 	new_clk = clc + delta;
 
@@ -1668,7 +1681,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	prm_run.lat_cri = taskc_run->lat_cri;
 
 	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p_wait, LAVD_ELIGIBLE_DSQ, 0) {
+	bpf_for_each(scx_dsq, p_wait, LAVD_GLOBAL_DSQ, 0) {
 		taskc_wait = get_task_ctx(p_wait);
 		if (!taskc_wait)
 			break;
@@ -1693,7 +1706,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 		}
 
 		/*
-		 * Test only the first entry on the LAVD_ELIGIBLE_DSQ.
+		 * Test only the first entry on the LAVD_GLOBAL_DSQ.
 		 */
 		break;
 	}
@@ -1738,7 +1751,7 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	/*
 	 * Enqueue the task to the eligible DSQ based on its virtual deadline.
 	 */
-	scx_bpf_dispatch_vtime(p, LAVD_ELIGIBLE_DSQ, LAVD_SLICE_UNDECIDED,
+	scx_bpf_dispatch_vtime(p, LAVD_GLOBAL_DSQ, LAVD_SLICE_UNDECIDED,
 			       taskc->vdeadline_log_clk, enq_flags);
 	return;
 }
@@ -1910,7 +1923,7 @@ static bool use_full_cpus(void)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	return no_core_compaction ||
-	       ((stat_cur->nr_active + LAVD_TC_NR_OVRFLW) >= nr_cpus_onln);
+	       ((stat_cur->nr_active + LAVD_CC_NR_OVRFLW) >= nr_cpus_onln);
 }
 
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
@@ -1922,7 +1935,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If all CPUs are using, directly consume without checking CPU masks.
 	 */
 	if (use_full_cpus()) {
-		scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
+		scx_bpf_consume(LAVD_GLOBAL_DSQ);
 		return;
 	}
 
@@ -1943,7 +1956,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (bpf_cpumask_test_cpu(cpu, cast_mask(active)) ||
 	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
-		scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
+		scx_bpf_consume(LAVD_GLOBAL_DSQ);
 		goto unlock_out;
 	}
 
@@ -1951,14 +1964,15 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If this CPU is not either in active or overflow CPUs, it tries to
 	 * find and run a task pinned to run on this CPU.
 	 */
-	bpf_for_each(scx_dsq, p, LAVD_ELIGIBLE_DSQ, 0) {
+	bpf_for_each(scx_dsq, p, LAVD_GLOBAL_DSQ, 0) {
 		/*
 		 * Prioritize kernel tasks because most kernel tasks are pinned
 		 * to a particular CPU and latency-critical (e.g., ksoftirqd,
 		 * kworker, etc).
 		 */
 		if (is_kernel_task(p)) {
-			scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
+			scx_bpf_consume(LAVD_GLOBAL_DSQ);
+			bpf_cpumask_set_cpu(cpu, ovrflw);
 			break;
 		}
 
@@ -1975,9 +1989,8 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * If a task can run on active or overflow CPUs, it just does
 		 * nothing to go idle. 
 		 */
-		if (bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr))
-			goto release_break;
-		if (bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))
+		if (bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
+		    bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))
 			goto release_break;
 
 		/*
@@ -1990,17 +2003,17 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * cores. We will optimize this path after introducing per-core
 		 * DSQ.
 		 */
-		scx_bpf_consume(LAVD_ELIGIBLE_DSQ);
+		scx_bpf_consume(LAVD_GLOBAL_DSQ);
 
 		/*
 		 * This is the first time a particular pinned user-space task
 		 * is run on this CPU at this interval. From now on, this CPU
-		 * will be part of the active CPU so can be used to run the
+		 * will be part of the overflow CPU so can be used to run the
 		 * pinned task and the other tasks. Note that we don't need to
 		 * kick @cpu here since @cpu is the current CPU, which is
 		 * obviously not idle.
 		 */
-		bpf_cpumask_set_cpu(cpu, active);
+		bpf_cpumask_set_cpu(cpu, ovrflw);
 
 release_break:
 		bpf_task_release(p);
@@ -2220,8 +2233,10 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 * urgently increases according to task's target but it decreases
 	 * gradually according to EWMA of past performance targets.
 	 */
-	calc_cpuperf_target(stat_cur, taskc, cpuc);
-	try_increase_cpuperf_target(cpuc);
+	if (!no_freq_scaling) {
+		calc_cpuperf_target(stat_cur, taskc, cpuc);
+		try_increase_cpuperf_target(cpuc);
+	}
 
 	/*
 	 * Update running task's information for preemption
@@ -2233,7 +2248,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 * Calculate the task's time slice based on updated load if necessary.
 	 */
 	if (need_to_calc_time_slice(p))
-		p->scx.slice = calc_time_slice(p, taskc);
+		p->scx.slice = calc_time_slice(p, taskc, cpuc);
 
 	/*
 	 * If there is a relevant introspection command with @p, process it.
@@ -2496,7 +2511,7 @@ static s32 init_dsq(void)
 {
 	int err;
 
-	err = scx_bpf_create_dsq(LAVD_ELIGIBLE_DSQ, -1);
+	err = scx_bpf_create_dsq(LAVD_GLOBAL_DSQ, -1);
 	if (err) {
 		scx_bpf_error("Failed to create an eligible DSQ");
 		return err;
@@ -2547,10 +2562,44 @@ out:
 	return err;
 }
 
-static s32 init_per_cpu_ctx(u64 now)
+static bool can_trust_kernel_cap(void)
 {
 	int cpu;
-	int err;
+
+	/*
+	 * If scx_bpf_cpuperf_cap () returns 1024 for all cores, it could be
+	 * either of two: 1) all cores' capacities are indeed the same, 2)
+	 * in-kernel driver does not provide a proper value.
+	 */
+	bpf_for(cpu, 0, nr_cpus_onln) {
+		if (scx_bpf_cpuperf_cap(cpu) != 1024)
+			return true;
+	}
+
+	return false;
+}
+
+static u16 get_cpuperf_cap(s32 cpu, bool in_kernel)
+{
+	if (in_kernel)
+		return scx_bpf_cpuperf_cap(cpu);
+
+	/*
+	 * If CPU's capacitiy values are all 1024, then let's just use the
+	 * capacity value from userspace, which are calculated using each CPU's
+	 * maximum frequency.
+	 */
+	if (cpu >= 0 && cpu < LAVD_CPU_ID_MAX)
+		return __cpu_capacity_hint[cpu];
+
+	scx_bpf_error("Infeasible CPU id: %d", cpu);
+	return 1;
+}
+
+static s32 init_per_cpu_ctx(u64 now)
+{
+	bool in_kernel_cap = can_trust_kernel_cap();
+	int cpu, err;
 
 	bpf_for(cpu, 0, nr_cpus_onln) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
@@ -2568,6 +2617,7 @@ static s32 init_per_cpu_ctx(u64 now)
 			return err;
 
 		cpu_ctx_init_online(cpuc, cpu, now);
+		cpuc->capacity = get_cpuperf_cap(cpu, in_kernel_cap);
 		cpuc->offline_clk = now;
 	}
 

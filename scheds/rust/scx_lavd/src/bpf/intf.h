@@ -67,14 +67,11 @@ enum consts {
 	LAVD_LC_RUNTIME_SHIFT		= 10,
 	LAVD_LC_STARVATION_FT		= 1024,
 
-	LAVD_SLICE_BOOST_MAX_FT		= 2, /* maximum additional 2x of slice */
-	LAVD_SLICE_BOOST_MAX_STEP	= 8, /* 8 slice exhausitions in a row */
+	LAVD_SLICE_BOOST_MAX_FT		= 3, /* maximum additional 2x of slice */
+	LAVD_SLICE_BOOST_MAX_STEP	= 6, /* 8 slice exhausitions in a row */
 	LAVD_GREEDY_RATIO_NEW		= 2000,
-	LAVD_GREEDY_RATIO_MAX		= USHRT_MAX,
 
-	LAVD_ELIGIBLE_TIME_LAT_FT	= 16,
 	LAVD_ELIGIBLE_TIME_MAX		= (1ULL * LAVD_TIME_ONE_SEC),
-	LAVD_REFILL_NR			= 2,
 
 	LAVD_CPU_UTIL_MAX		= 1000, /* 100.0% */
 	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= 850, /* 85.0% */
@@ -86,14 +83,14 @@ enum consts {
 	LAVD_PREEMPT_TICK_MARGIN	= (1ULL * NSEC_PER_USEC),
 
 	LAVD_SYS_STAT_INTERVAL_NS	= (25ULL * NSEC_PER_MSEC),
-	LAVD_TC_PER_CORE_MAX_CTUIL	= 500, /* maximum per-core CPU utilization */
-	LAVD_TC_NR_ACTIVE_MIN		= 1, /* num of mininum active cores */
-	LAVD_TC_NR_OVRFLW		= 1, /* num of overflow cores */
-	LAVD_TC_CPU_PIN_INTERVAL	= (100ULL * NSEC_PER_MSEC),
-	LAVD_TC_CPU_PIN_INTERVAL_DIV	= (LAVD_TC_CPU_PIN_INTERVAL /
+	LAVD_CC_PER_CORE_MAX_CTUIL	= 500, /* maximum per-core CPU utilization */
+	LAVD_CC_NR_ACTIVE_MIN		= 1, /* num of mininum active cores */
+	LAVD_CC_NR_OVRFLW		= 1, /* num of overflow cores */
+	LAVD_CC_CPU_PIN_INTERVAL	= (100ULL * NSEC_PER_MSEC),
+	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL /
 					   LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_ELIGIBLE_DSQ		= 0, /* a global DSQ for eligible tasks */
+	LAVD_GLOBAL_DSQ			= 0, /* a global DSQ for eligible tasks */
 };
 
 /*
@@ -174,6 +171,7 @@ struct cpu_ctx {
 	 * Fields for core compaction
 	 *
 	 */
+	u16		capacity;	/* CPU capacity based on 1000 */
 	struct bpf_cpumask __kptr *tmp_a_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_o_mask;	/* temporary cpu mask */
 } __attribute__((aligned(CACHELINE_SIZE)));
