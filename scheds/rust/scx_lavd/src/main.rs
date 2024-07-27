@@ -132,7 +132,7 @@ struct FlatTopology {
 impl fmt::Display for FlatTopology {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for cpu_fid in self.cpu_fids.iter() {
-            write!(f, "\n{:?}", cpu_fid);
+            write!(f, "\n{:?}", cpu_fid).expect("Failed to write");
         }
         Ok(())
     }
