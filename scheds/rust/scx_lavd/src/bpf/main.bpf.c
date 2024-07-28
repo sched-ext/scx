@@ -2695,7 +2695,11 @@ static s32 init_per_cpu_ctx(u64 now)
 {
 	bool in_kernel_cap = can_trust_kernel_cap();
 	int cpu, err;
+	u32 sum_capacity = 0, avg_capacity;
 
+	/*
+	 * Initilize CPU info
+	 */
 	bpf_for(cpu, 0, nr_cpus_onln) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
@@ -2714,6 +2718,22 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpu_ctx_init_online(cpuc, cpu, now);
 		cpuc->capacity = get_cpuperf_cap(cpu, in_kernel_cap);
 		cpuc->offline_clk = now;
+
+		sum_capacity += cpuc->capacity;
+	}
+
+	/*
+	 * Classify CPU into BIG or little cores based on their average capacity.
+	 */
+	avg_capacity = sum_capacity / nr_cpus_onln;
+	bpf_for(cpu, 0, nr_cpus_onln) {
+		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+		if (!cpuc) {
+			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
+			return -ESRCH;
+		}
+
+		cpuc->big_core = cpuc->capacity >= avg_capacity;
 	}
 
 	return 0;

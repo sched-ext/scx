@@ -170,6 +170,7 @@ struct cpu_ctx {
 	 *
 	 */
 	u16		capacity;	/* CPU capacity based on 1000 */
+	u8		big_core;	/* is it a big core? */
 	struct bpf_cpumask __kptr *tmp_a_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_o_mask;	/* temporary cpu mask */
 } __attribute__((aligned(CACHELINE_SIZE)));
