@@ -1079,7 +1079,15 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	 * a boost priority. We add +1 to guarantee the latency criticality
 	 * (log2-ed) is always positive.
 	 */
-	taskc->lat_cri = log2_u64(lat_cri_raw + 1);
+	lat_cri = log2_u64(lat_cri_raw + 1);
+
+	/*
+	 * A user-provided nice value is a strong hint for latency-criticality.
+	 */
+	lat_cri += calc_static_prio_factor(p);
+	lat_cri = max(lat_cri, 1);
+
+	taskc->lat_cri = lat_cri;
 }
 
 static void calc_starv_cri(struct task_ctx *taskc, bool is_wakeup)
