@@ -1069,9 +1069,9 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	/*
 	 * Wake frequency and wait frequency represent how much a task is used
 	 * for a producer and a consumer, respectively. If both are high, the
-	 * task is in the middle of a task chain.
+	 * task is in the middle of a task chain. We prioritize a producer.
 	 */
-	lat_cri_raw = wait_freq_ft * wake_freq_ft;
+	lat_cri_raw = wait_freq_ft * wake_freq_ft * wake_freq_ft;
 
 	/*
 	 * The ratio above tends to follow an exponentially skewed
@@ -1244,7 +1244,7 @@ static void update_stat_for_running(struct task_struct *p,
 	u64 wait_period, interval;
 	u64 now = bpf_ktime_get_ns();
 	u64 load_actual_ft, wait_freq_ft, wake_freq_ft;
-	u64 perf_cri_raw;
+	u64 perf_cri, perf_cri_raw;
 
 	/*
 	 * Update the current logical clock.
@@ -1299,9 +1299,13 @@ static void update_stat_for_running(struct task_struct *p,
 	load_actual_ft = calc_runtime_factor(taskc->load_actual);
 	wait_freq_ft = calc_freq_factor(taskc->wait_freq);
 	wake_freq_ft = calc_freq_factor(taskc->wake_freq);
-	perf_cri_raw = load_actual_ft * p->scx.weight *
-		       wait_freq_ft * wake_freq_ft;
-	taskc->perf_cri = log2_u64(perf_cri_raw + 1);
+
+	perf_cri_raw = load_actual_ft * p->scx.weight;
+	perf_cri = log2_u64(perf_cri_raw + 1);
+	perf_cri_raw = wait_freq_ft * wake_freq_ft * wake_freq_ft;
+	perf_cri += log2_u64(perf_cri_raw + 1);
+
+	taskc->perf_cri = perf_cri;
 	cpuc->sum_perf_cri += taskc->perf_cri;
 
 	/*
