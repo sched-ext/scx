@@ -225,10 +225,17 @@ static u64		cur_logical_clk;
 static u64		cur_svc_time;
 
 /*
+ * Last task consumption time
+ */
+static u64		lat_cri_rq_clk; /* last task consumption timem for latency-critical task */
+static u64		regular_rq_clk; /* last task consumption timem for latency-critical task */
+
+/*
  * Options
  */
-const volatile bool	no_freq_scaling;
 const volatile bool	no_core_compaction;
+const volatile bool	no_2_level_scheduling;
+const volatile bool	no_freq_scaling;
 const volatile u8	verbose;
 
 UEI_DEFINE(uei);
@@ -944,15 +951,6 @@ static bool is_eligible(struct task_ctx *taskc)
 	return taskc->greedy_ratio <= 1000;
 }
 
-static bool is_wakeup_wf(u64 wake_flags)
-{
-	/*
-	 * We don't need to test SCX_WAKE_SYNC because SCX_WAKE_SYNC should
-	 * only be set when SCX_WAKE_TTWU is set.
-	 */
-	return wake_flags & SCX_WAKE_TTWU;
-}
-
 static bool is_wakeup_ef(u64 enq_flags)
 {
 	return enq_flags & SCX_ENQ_WAKEUP;
@@ -1027,23 +1025,6 @@ out:
 	return delta_ns;
 }
 
-static int sum_prios_for_lat(struct task_struct *p, int nice_prio,
-			     int lat_boost_prio)
-{
-	int prio;
-
-	/*
-	 * Bound the final scheduler priority to the NICE_WIDTHE, [0, 40).
-	 */
-	prio = nice_prio + lat_boost_prio;
-	if (prio >= NICE_WIDTH)
-		prio = NICE_WIDTH - 1;
-	else if (prio < 0)
-		prio = 0;
-
-	return prio;
-}
-
 static u64 calc_starvation_factor(struct task_ctx *taskc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
@@ -1057,10 +1038,20 @@ static u64 calc_starvation_factor(struct task_ctx *taskc)
 	return ratio + 1;
 }
 
-static void calc_lat_cri(struct task_ctx *taskc)
+static s64 calc_static_prio_factor(struct task_struct *p)
 {
-	u64 starvation_ft, wait_freq_ft, wake_freq_ft;
-	u64 lat_cri_raw;
+	/*
+	 * A nicer task with >20 static priority will get penalized with
+	 * negative latency-criticality. However, a greedier task with <20
+	 * static priority will get boosted.
+	 */
+	return (20 - get_nice_prio(p)) >> 1;
+}
+
+static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
+{
+	u64 wait_freq_ft, wake_freq_ft;
+	s64 lat_cri_raw, lat_cri;
 
 	/*
 	 * A task is more latency-critical as its wait or wake frequencies
@@ -1097,12 +1088,13 @@ static void calc_starv_cri(struct task_ctx *taskc, bool is_wakeup)
 			   is_wakeup;
 }
 
-static void calc_virtual_deadline_delta(struct task_ctx *taskc, u64 enq_flags)
+static void calc_virtual_deadline_delta(struct task_struct *p,
+					struct task_ctx *taskc, u64 enq_flags)
 {
 	bool is_wakeup;
 
 	is_wakeup = is_wakeup_ef(enq_flags);
-	calc_lat_cri(taskc);
+	calc_lat_cri(p, taskc);
 	calc_starv_cri(taskc, is_wakeup);
 	taskc->vdeadline_delta_ns =
 		(taskc->run_time_ns * LAVD_VDL_LOOSENESS_FT) /
@@ -1128,6 +1120,12 @@ static u64 clamp_time_slice_ns(u64 slice)
 	return slice;
 }
 
+static s32 nr_queued_tasks(void)
+{
+	return scx_bpf_dsq_nr_queued(LAVD_LATENCY_CRITICAL_DSQ) +
+	       scx_bpf_dsq_nr_queued(LAVD_REGULAR_DSQ);
+}
+
 static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc,
 			   struct cpu_ctx *cpuc)
 {
@@ -1138,7 +1136,7 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc,
 	 * The time slice should be short enough to schedule all runnable tasks
 	 * at least once within a targeted latency.
 	 */
-	nr_queued = scx_bpf_dsq_nr_queued(LAVD_GLOBAL_DSQ) + 1;
+	nr_queued = nr_queued_tasks() + 1;
 	slice = (LAVD_TARGETED_LATENCY_NS * stat_cur->nr_active) / nr_queued;
 
 	/*
@@ -1232,7 +1230,7 @@ static void advance_cur_logical_clk(struct task_ctx *taskc)
 	 * Advance the clock up to the task's deadline. When overloaded,
 	 * advance the clock slower so other can jump in the run queue.
 	 */
-	nr_queued = max(scx_bpf_dsq_nr_queued(LAVD_GLOBAL_DSQ), 1);
+	nr_queued = max(nr_queued_tasks(), 1);
 	delta = (vlc - clc) / nr_queued;
 	new_clk = clc + delta;
 
@@ -1372,7 +1370,8 @@ static void update_stat_for_quiescent(struct task_struct *p,
 	cpuc->load_run_time_ns -= clamp_time_slice_ns(taskc->run_time_ns);
 }
 
-static void calc_when_to_run(struct task_ctx *taskc, u64 enq_flags)
+static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
+			     u64 enq_flags)
 {
 	u64 vlc;
 
@@ -1382,7 +1381,7 @@ static void calc_when_to_run(struct task_ctx *taskc, u64 enq_flags)
 	 * urgent it is - vdeadline_delta_ns - and when it becomes eligible if
 	 * overscheduled - eligible_time_ns.
 	 */
-	calc_virtual_deadline_delta(taskc, enq_flags);
+	calc_virtual_deadline_delta(p, taskc, enq_flags);
 	calc_eligible_delta(taskc);
 
 	/*
@@ -1667,7 +1666,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	prm_run.lat_cri = taskc_run->lat_cri;
 
 	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p_wait, LAVD_GLOBAL_DSQ, 0) {
+	bpf_for_each(scx_dsq, p_wait, LAVD_LATENCY_CRITICAL_DSQ, 0) {
 		taskc_wait = get_task_ctx(p_wait);
 		if (!taskc_wait)
 			break;
@@ -1692,7 +1691,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 		}
 
 		/*
-		 * Test only the first entry on the LAVD_GLOBAL_DSQ.
+		 * Test only the first entry on the LAVD_LATENCY_CRITICAL_DSQ.
 		 */
 		break;
 	}
@@ -1701,11 +1700,19 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	return ret;
 }
 
+static bool is_lat_cri_task(struct task_ctx *taskc)
+{
+	struct sys_stat *stat_cur = get_sys_stat_cur();
+
+	return taskc->lat_cri > stat_cur->avg_lat_cri;
+}
+
 static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 			  struct cpu_ctx *cpuc, u64 enq_flags)
 {
 	struct task_ctx *taskc_run;
 	struct task_struct *p_run;
+	u64 dsq_id = LAVD_REGULAR_DSQ;
 
 	/*
 	 * Calculate when a tack can be scheduled.
@@ -1713,7 +1720,7 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * Note that the task's time slice will be calculated and reassigned
 	 * right before running at ops.running().
 	 */
-	calc_when_to_run(taskc, enq_flags);
+	calc_when_to_run(p, taskc, enq_flags);
 
 	/*
 	 * If a task is eligible, dispatch to the eligible DSQ.
@@ -1735,9 +1742,11 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	}
 
 	/*
-	 * Enqueue the task to the eligible DSQ based on its virtual deadline.
+	 * Enqueue the task to one of the DSQs based on its virtual deadline.
 	 */
-	scx_bpf_dispatch_vtime(p, LAVD_GLOBAL_DSQ, LAVD_SLICE_UNDECIDED,
+	if (no_2_level_scheduling || is_lat_cri_task(taskc))
+		dsq_id = LAVD_LATENCY_CRITICAL_DSQ;
+	scx_bpf_dispatch_vtime(p, dsq_id, LAVD_SLICE_UNDECIDED,
 			       taskc->vdeadline_log_clk, enq_flags);
 	return;
 }
@@ -1913,16 +1922,63 @@ static bool use_full_cpus(void)
 	       ((stat_cur->nr_active + LAVD_CC_NR_OVRFLW) >= nr_cpus_onln);
 }
 
+static bool consume_lat_cri_task(u64 now)
+{
+	if (scx_bpf_consume(LAVD_LATENCY_CRITICAL_DSQ)) {
+		WRITE_ONCE(lat_cri_rq_clk, now);
+		return true;
+	}
+	return false;
+}
+
+static bool consume_regular_task(u64 now)
+{
+	if (scx_bpf_consume(LAVD_REGULAR_DSQ)) {
+		WRITE_ONCE(regular_rq_clk, now);
+		return true;
+	}
+	return false;
+}
+
+static bool consume_starving_task(u64 now)
+{
+	u64 clk;
+
+	clk = READ_ONCE(lat_cri_rq_clk) + LAVD_DSQ_STARVE_TIMEOUT;
+	if (clk < now && consume_lat_cri_task(now))
+		return true;
+
+	clk = READ_ONCE(regular_rq_clk) + LAVD_DSQ_STARVE_TIMEOUT;
+	if (clk < now && consume_regular_task(now))
+		return true;
+	return  false;
+}
+
+static bool consume_task(u64 now)
+{
+	if (!no_2_level_scheduling && consume_starving_task(now))
+		return true;
+
+	if (consume_lat_cri_task(now))
+		return true;
+
+	if (!no_2_level_scheduling && consume_regular_task(now))
+		return true;
+	return false;
+}
+
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
+	u64 now = bpf_ktime_get_ns();
 	struct bpf_cpumask *active, *ovrflw;
 	struct task_struct *p;
+	bool ret = false;
 
 	/*
 	 * If all CPUs are using, directly consume without checking CPU masks.
 	 */
 	if (use_full_cpus()) {
-		scx_bpf_consume(LAVD_GLOBAL_DSQ);
+		consume_task(now);
 		return;
 	}
 
@@ -1943,7 +1999,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (bpf_cpumask_test_cpu(cpu, cast_mask(active)) ||
 	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
-		scx_bpf_consume(LAVD_GLOBAL_DSQ);
+		consume_task(now);
 		goto unlock_out;
 	}
 
@@ -1951,14 +2007,14 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If this CPU is not either in active or overflow CPUs, it tries to
 	 * find and run a task pinned to run on this CPU.
 	 */
-	bpf_for_each(scx_dsq, p, LAVD_GLOBAL_DSQ, 0) {
+	bpf_for_each(scx_dsq, p, LAVD_LATENCY_CRITICAL_DSQ, 0) {
 		/*
 		 * Prioritize kernel tasks because most kernel tasks are pinned
 		 * to a particular CPU and latency-critical (e.g., ksoftirqd,
 		 * kworker, etc).
 		 */
 		if (is_kernel_task(p)) {
-			scx_bpf_consume(LAVD_GLOBAL_DSQ);
+			ret = consume_task(now);
 			bpf_cpumask_set_cpu(cpu, ovrflw);
 			break;
 		}
@@ -1990,7 +2046,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * cores. We will optimize this path after introducing per-core
 		 * DSQ.
 		 */
-		scx_bpf_consume(LAVD_GLOBAL_DSQ);
+		ret = consume_task(now);
 
 		/*
 		 * This is the first time a particular pinned user-space task
@@ -2006,7 +2062,32 @@ release_break:
 		bpf_task_release(p);
 		break;
 	}
+
+	if (no_2_level_scheduling || ret)
+		goto unlock_out;
   
+	bpf_for_each(scx_dsq, p, LAVD_REGULAR_DSQ, 0) {
+		if (is_kernel_task(p)) {
+			consume_task(now);
+			bpf_cpumask_set_cpu(cpu, ovrflw);
+			break;
+		}
+
+		p = bpf_task_from_pid(p->pid);
+		if (!p)
+			goto unlock_out;
+
+		if (bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
+		    bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))
+			goto release_break2;
+
+		consume_task(now);
+		bpf_cpumask_set_cpu(cpu, ovrflw);
+release_break2:
+		bpf_task_release(p);
+		break;
+	}
+
 unlock_out:
 	bpf_rcu_read_unlock();
 	return;
@@ -2494,13 +2575,19 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 	return 0;
 }
 
-static s32 init_dsq(void)
+static s32 init_dsqs(void)
 {
 	int err;
 
-	err = scx_bpf_create_dsq(LAVD_GLOBAL_DSQ, -1);
+	err = scx_bpf_create_dsq(LAVD_LATENCY_CRITICAL_DSQ, -1);
 	if (err) {
-		scx_bpf_error("Failed to create an eligible DSQ");
+		scx_bpf_error("Failed to create a latency critical DSQ");
+		return err;
+	}
+
+	err = scx_bpf_create_dsq(LAVD_REGULAR_DSQ, -1);
+	if (err) {
+		scx_bpf_error("Failed to create a regular DSQ");
 		return err;
 	}
 
@@ -2645,9 +2732,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	int err;
 
 	/*
-	 * Create a central task queue.
+	 * Create central task queues.
 	 */
-	err = init_dsq();
+	err = init_dsqs();
 	if (err)
 		return err;
 
@@ -2706,6 +2793,6 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .init_task		= (void *)lavd_init_task,
 	       .init			= (void *)lavd_init,
 	       .exit			= (void *)lavd_exit,
-	       .flags			= /* SCX_OPS_ENQ_LAST | */ SCX_OPS_KEEP_BUILTIN_IDLE,
+	       .flags			= SCX_OPS_KEEP_BUILTIN_IDLE,
 	       .timeout_ms		= 30000U,
 	       .name			= "lavd");
