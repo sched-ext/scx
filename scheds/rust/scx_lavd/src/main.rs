@@ -63,7 +63,8 @@ struct Opts {
     #[clap(long = "no-freq-scaling", action = clap::ArgAction::SetTrue)]
     no_freq_scaling: bool,
 
-    /// The number of scheduling samples to be reported every second (default: 1)
+    /// The number of scheduling samples to be reported every second
+    /// (default: 1, 0 = disable logging)
     #[clap(short = 's', long, default_value = "1")]
     nr_sched_samples: u64,
 
