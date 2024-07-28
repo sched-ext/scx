@@ -175,8 +175,16 @@ impl FlatTopology {
         }
 
         // Initialize cpu capacity
-        for cpu_fid in cpu_fids.iter_mut() {
-            cpu_fid.cpu_cap = ((cpu_fid.max_freq * 1024) / base_freq) as usize;
+        if base_freq > 0 {
+            for cpu_fid in cpu_fids.iter_mut() {
+                cpu_fid.cpu_cap = ((cpu_fid.max_freq * 1024) / base_freq) as usize;
+            }
+        } else {
+            // Unfortunately, the frequency information in sysfs seems not always correct in some
+            // distributions.
+            for cpu_fid in cpu_fids.iter_mut() {
+                cpu_fid.cpu_cap = 1024 as usize;
+            }
         }
 
         // Sort the cpu_fids
