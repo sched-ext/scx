@@ -91,6 +91,12 @@ enum consts {
 	LAVD_LATENCY_CRITICAL_DSQ	= 0, /* a global DSQ for latency-criticcal tasks */
 	LAVD_REGULAR_DSQ		= 1, /* a global DSQ for non-latency-criticcal tasks */
 	LAVD_DSQ_STARVE_TIMEOUT		= (5ULL * NSEC_PER_USEC),
+
+	LAVD_STATUS_STR_LEN		= 5, /* {LR: Latency-critical, Regular}
+						{HI: performance-Hungry, performance-Insensitive}
+						{BT: Big, liTtle}
+						{EG: Eligible, Greedy}
+						{PN: Preemption, Not} */
 };
 
 /*
@@ -218,6 +224,7 @@ struct task_ctx {
 struct task_ctx_x {
 	pid_t	pid;
 	char	comm[TASK_COMM_LEN + 1];
+	char	stat[LAVD_STATUS_STR_LEN + 1];
 	u16	static_prio;	/* nice priority */
 	u32	cpu_id;		/* where a task ran */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
@@ -235,7 +242,6 @@ enum {
        LAVD_CMD_NOP		= 0x0,
        LAVD_CMD_SCHED_N		= 0x1,
        LAVD_CMD_PID		= 0x2,
-       LAVD_CMD_DUMP		= 0x3,
 };
 
 enum {

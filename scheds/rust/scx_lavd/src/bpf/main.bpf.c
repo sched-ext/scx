@@ -439,6 +439,15 @@ int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 	m->taskc_x.nr_active = stat_cur->nr_active;
 	m->taskc_x.cpuperf_cur = cpuc->cpuperf_cur;
 
+	m->taskc_x.stat[0] = taskc->lat_cri > stat_cur->avg_lat_cri ?
+				'L' : 'R';
+	m->taskc_x.stat[1] = taskc->perf_cri > stat_cur->avg_perf_cri ?
+				'H' : 'I';
+	m->taskc_x.stat[2] = cpuc->big_core ? 'B' : 'T';
+	m->taskc_x.stat[3] = taskc->greedy_ratio <= 1000 ? 'E' : 'G';
+	m->taskc_x.stat[4] = taskc->victim_cpu >= 0 ? 'P' : 'N';
+	m->taskc_x.stat[5] = '\0';
+
 	memcpy(&m->taskc, taskc, sizeof(m->taskc));
 
 	bpf_ringbuf_submit(m, 0);
@@ -491,25 +500,6 @@ static bool have_scheduled(struct task_ctx *taskc)
 	return taskc->slice_ns != 0;
 }
 
-static void proc_dump_all_tasks(struct task_struct *p)
-{
-	struct task_struct *pos;
-	struct task_ctx *taskc;
-
-	bpf_rcu_read_lock();
-
-	bpf_for_each(task, pos, NULL, BPF_TASK_ITER_ALL_THREADS) {
-		/*
-		 * Print information about ever-scheduled tasks.
-		 */
-		taskc = get_task_ctx(pos);
-		if (taskc && have_scheduled(taskc))
-			submit_task_ctx(pos, taskc, LAVD_CPU_ID_NONE);
-	}
-
-	bpf_rcu_read_unlock();
-}
-
 static void try_proc_introspec_cmd(struct task_struct *p,
 				   struct task_ctx *taskc, u32 cpu_id)
 {
@@ -524,16 +514,6 @@ static void try_proc_introspec_cmd(struct task_struct *p,
 		break;
 	case LAVD_CMD_PID:
 		proc_introspec_pid(p, taskc, cpu_id);
-		break;
-	case LAVD_CMD_DUMP:
-		/*
-		 * When multiple tasks can compete to dump all, only the winner
-		 * task actually does the job.
-		 */
-		ret = __sync_bool_compare_and_swap(&intrspc.cmd,
-				LAVD_CMD_DUMP, LAVD_CMD_NOP);
-		if (ret)
-			proc_dump_all_tasks(p);
 		break;
 	case LAVD_CMD_NOP:
 		/* do nothing */
