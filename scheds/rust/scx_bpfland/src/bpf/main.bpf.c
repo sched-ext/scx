@@ -59,6 +59,11 @@ const volatile s64 slice_ns_lag;
 const volatile bool local_kthreads;
 
 /*
+ * Disable task preemption.
+ */
+const volatile bool preemption_disabled;
+
+/*
  * Maximum threshold of voluntary context switches.
  *
  * This limits the range of nvcsw_avg_thresh (see below).
@@ -540,11 +545,38 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 }
 
 /*
+ * Return true if p1 can preempt p2, false otherwise.
+ */
+static bool can_preempt(struct task_struct *p1, struct task_struct *p2)
+{
+	if (preemption_disabled)
+		return false;
+
+	/*
+	 * Allow interactive tasks to preempt non-interactive tasks if they
+	 * have a shorter vruntime.
+	 */
+	if (p1->scx.dsq_vtime < p2->scx.dsq_vtime) {
+		struct task_ctx *tctx1 = try_lookup_task_ctx(p1);
+		struct task_ctx *tctx2 = try_lookup_task_ctx(p2);
+
+		if (!tctx1 || !tctx2)
+			return false;
+
+		if (tctx1->is_interactive && !tctx2->is_interactive)
+			return true;
+	}
+
+	return false;
+}
+
+/*
  * Dispatch all the other tasks that were not dispatched directly in
  * select_cpu().
  */
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
+	struct task_struct *current = (void *)bpf_get_current_task_btf();
 	u64 vtime = task_vtime(p);
 	u64 slice = task_slice(p);
 	struct task_ctx *tctx;
@@ -555,6 +587,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
 		s32 cpu = scx_bpf_task_cpu(p);
+
 		if (!dispatch_direct_cpu(p, cpu, enq_flags)) {
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 			return;
@@ -564,6 +597,25 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	tctx = lookup_task_ctx(p);
 	if (!tctx)
 		return;
+
+	/*
+	 * If the enqueued task has a vruntime shorter than the task that is
+	 * currently running, preempt the current task in favor of the newly
+	 * enqueued task.
+	 *
+	 * NOTE: we should cycle through all the CPUs to find the optimal task
+	 * to preempt, but we also don't want to introduce too much overhead,
+	 * so we are limiting the preemption check to the current CPU only.
+	 */
+	if (can_preempt(p, current)) {
+		s32 cpu = bpf_get_smp_processor_id();
+
+		if (!dispatch_direct_cpu(p, cpu, enq_flags)) {
+			current->scx.slice = 0;
+			__sync_fetch_and_add(&nr_direct_dispatches, 1);
+			return;
+		}
+	}
 
 	/*
 	 * Dispatch interactive tasks to the priority DSQ and regular tasks to

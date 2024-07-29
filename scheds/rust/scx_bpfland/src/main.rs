@@ -76,6 +76,16 @@ struct Opts {
     #[clap(short = 'l', long, allow_hyphen_values = true, default_value = "0")]
     slice_us_lag: i64,
 
+    /// Disable task preemption.
+    ///
+    /// With preemption enabled interactive tasks with a shorter vruntime are allowed to preempt
+    /// non-interactive tasks.
+    ///
+    /// Task preemption can help to improve responsiveness, but it can also lead to less consistent
+    /// performance and a more spiky behavior.
+    #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
+    preemption_disabled: bool,
+
     /// Enable per-CPU kthreads prioritization.
     ///
     /// Enabling this can enhance the performance of interrupt-driven workloads (e.g., networking
@@ -96,7 +106,7 @@ struct Opts {
     starvation_thresh_us: u64,
 
     /// Enable the Prometheus endpoint for metrics on port 9000.
-    #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
+    #[clap(short = 'P', long, action = clap::ArgAction::SetTrue)]
     enable_prometheus: bool,
 
     /// Enable BPF debugging via /sys/kernel/debug/tracing/trace_pipe.
@@ -198,6 +208,7 @@ impl<'a> Scheduler<'a> {
         // Override default BPF scheduling parameters.
         skel.rodata_mut().debug = opts.debug;
         skel.rodata_mut().smt_enabled = smt_enabled;
+        skel.rodata_mut().preemption_disabled = opts.preemption_disabled;
         skel.rodata_mut().local_kthreads = opts.local_kthreads;
         skel.rodata_mut().slice_ns = opts.slice_us * 1000;
         skel.rodata_mut().slice_ns_min = opts.slice_us_min * 1000;
