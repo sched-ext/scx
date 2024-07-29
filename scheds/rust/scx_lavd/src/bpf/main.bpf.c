@@ -1755,6 +1755,10 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 
 	/*
 	 * Enqueue the task to one of the DSQs based on its virtual deadline.
+	 *
+	 * Note that, with no_2_level_scheduling, all tasks are considered
+	 * latency-critical and they're all enqueed to the
+	 * LAVD_LATENCY_CRITICAL_DSQ.
 	 */
 	if (no_2_level_scheduling || is_lat_cri_task(taskc))
 		dsq_id = LAVD_LATENCY_CRITICAL_DSQ;
@@ -2075,6 +2079,10 @@ release_break:
 		break;
 	}
 
+	/*
+	 * With no_2_level_scheduling, all tasks are considered
+	 * latency-critical, so we don't need to check the regular quque.
+	 */
 	if (no_2_level_scheduling || ret)
 		goto unlock_out;
   
