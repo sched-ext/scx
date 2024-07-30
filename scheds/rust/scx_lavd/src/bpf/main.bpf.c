@@ -1033,8 +1033,7 @@ static u64 calc_starvation_factor(struct task_ctx *taskc)
 	/*
 	 * Prioritize tasks whose service time is smaller than average.
 	 */
-	ratio = (LAVD_LC_STARVATION_FT * stat_cur->avg_svc_time) /
-		taskc->svc_time;
+	ratio = stat_cur->avg_svc_time / taskc->svc_time;
 	return ratio + 1;
 }
 
@@ -1092,8 +1091,7 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 
 static void calc_starv_cri(struct task_ctx *taskc, bool is_wakeup)
 {
-	taskc->starv_cri = log2_u64(calc_starvation_factor(taskc) + 1) +
-			   is_wakeup;
+	taskc->starv_cri = calc_starvation_factor(taskc) + is_wakeup;
 }
 
 static void calc_virtual_deadline_delta(struct task_struct *p,
@@ -1104,9 +1102,8 @@ static void calc_virtual_deadline_delta(struct task_struct *p,
 	is_wakeup = is_wakeup_ef(enq_flags);
 	calc_lat_cri(p, taskc);
 	calc_starv_cri(taskc, is_wakeup);
-	taskc->vdeadline_delta_ns =
-		(taskc->run_time_ns * LAVD_VDL_LOOSENESS_FT) /
-		(taskc->lat_cri + taskc->starv_cri);
+	taskc->vdeadline_delta_ns = taskc->run_time_ns / (taskc->lat_cri +
+				    taskc->starv_cri);
 }
 
 static u64 calc_task_load_actual(struct task_ctx *taskc)
@@ -1938,7 +1935,8 @@ static bool use_full_cpus(void)
 	       ((stat_cur->nr_active + LAVD_CC_NR_OVRFLW) >= nr_cpus_onln);
 }
 
-static bool consume_lat_cri_task(u64 now)
+static __always_inline
+bool consume_lat_cri_task(u64 now)
 {
 	if (scx_bpf_consume(LAVD_LATENCY_CRITICAL_DSQ)) {
 		WRITE_ONCE(lat_cri_rq_clk, now);
@@ -1947,7 +1945,8 @@ static bool consume_lat_cri_task(u64 now)
 	return false;
 }
 
-static bool consume_regular_task(u64 now)
+static __always_inline
+bool consume_regular_task(u64 now)
 {
 	if (scx_bpf_consume(LAVD_REGULAR_DSQ)) {
 		WRITE_ONCE(regular_rq_clk, now);
@@ -1956,7 +1955,8 @@ static bool consume_regular_task(u64 now)
 	return false;
 }
 
-static bool consume_starving_task(u64 now)
+static __always_inline
+bool consume_starving_task(u64 now)
 {
 	u64 clk;
 
@@ -1970,7 +1970,8 @@ static bool consume_starving_task(u64 now)
 	return  false;
 }
 
-static bool consume_task(u64 now)
+static __always_inline
+bool consume_task(u64 now)
 {
 	if (!no_2_level_scheduling && consume_starving_task(now))
 		return true;

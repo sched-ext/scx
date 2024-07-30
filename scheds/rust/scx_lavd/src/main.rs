@@ -132,13 +132,12 @@ struct CpuFlatId {
 struct FlatTopology {
     cpu_fids: Vec<CpuFlatId>,
     nr_cpus_online: usize,
-    prefer_smt_core: bool,
 }
 
 impl fmt::Display for FlatTopology {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for cpu_fid in self.cpu_fids.iter() {
-            write!(f, "\n{:?}", cpu_fid);
+            write!(f, "\n{:?}", cpu_fid).ok();
         }
         Ok(())
     }
@@ -234,7 +233,6 @@ impl FlatTopology {
         Ok(FlatTopology {
             cpu_fids,
             nr_cpus_online: topo.nr_cpus_online(),
-            prefer_smt_core,
         })
     }
 
