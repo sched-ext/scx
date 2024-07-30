@@ -60,12 +60,10 @@ enum consts {
 	LAVD_SLICE_MIN_NS		= (30ULL * NSEC_PER_USEC), /* min time slice */
 	LAVD_SLICE_MAX_NS		= ( 3ULL * NSEC_PER_MSEC), /* max time slice */
 	LAVD_SLICE_UNDECIDED		= SCX_SLICE_INF,
-	LAVD_VDL_LOOSENESS_FT		= 100,
 
 	LAVD_LC_FREQ_MAX		= 1000000,
 	LAVD_LC_RUNTIME_MAX		= LAVD_TARGETED_LATENCY_NS,
 	LAVD_LC_RUNTIME_SHIFT		= 10,
-	LAVD_LC_STARVATION_FT		= 1024,
 
 	LAVD_SLICE_BOOST_MAX_FT		= 3, /* maximum additional 2x of slice */
 	LAVD_SLICE_BOOST_MAX_STEP	= 6, /* 8 slice exhausitions in a row */
