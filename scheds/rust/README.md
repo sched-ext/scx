@@ -17,4 +17,5 @@ main.rs or \*.bpf.c files.
 - [scx_rustland](scx_rustland/README.md)
 - [scx_rlfifo](scx_rlfifo/README.md)
 - [scx_lavd](scx_lavd/README.md)
+- [scx_asdf](scx_asdf/README.md)
 - [scx_bpfland](scx_bpfland/README.md)
