@@ -60,11 +60,16 @@ struct Opts {
     #[clap(long = "prefer-smt-core", action = clap::ArgAction::SetTrue)]
     prefer_smt_core: bool,
 
+    /// Disable 2-level scheduling, which segregates latency-critical tasks from regular tasks
+    #[clap(long = "no-2-level-scheduling", action = clap::ArgAction::SetTrue)]
+    no_2_level_scheduling: bool,
+
     /// Disable frequency scaling by scx_lavd
     #[clap(long = "no-freq-scaling", action = clap::ArgAction::SetTrue)]
     no_freq_scaling: bool,
 
-    /// The number of scheduling samples to be reported every second (default: 1)
+    /// The number of scheduling samples to be reported every second
+    /// (default: 1, 0 = disable logging)
     #[clap(short = 's', long, default_value = "1")]
     nr_sched_samples: u64,
 

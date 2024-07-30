@@ -56,7 +56,7 @@ enum consts {
 	LAVD_TIME_INFINITY_NS		= SCX_SLICE_INF,
 	LAVD_MAX_RETRY			= 4,
 
-	LAVD_TARGETED_LATENCY_NS	= (15ULL * NSEC_PER_MSEC),
+	LAVD_TARGETED_LATENCY_NS	= (20ULL * NSEC_PER_MSEC),
 	LAVD_SLICE_MIN_NS		= (30ULL * NSEC_PER_USEC), /* min time slice */
 	LAVD_SLICE_MAX_NS		= ( 3ULL * NSEC_PER_MSEC), /* max time slice */
 	LAVD_SLICE_UNDECIDED		= SCX_SLICE_INF,
@@ -90,7 +90,9 @@ enum consts {
 	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL /
 					   LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_GLOBAL_DSQ			= 0, /* a global DSQ for eligible tasks */
+	LAVD_LATENCY_CRITICAL_DSQ	= 0, /* a global DSQ for latency-criticcal tasks */
+	LAVD_REGULAR_DSQ		= 1, /* a global DSQ for non-latency-criticcal tasks */
+	LAVD_DSQ_STARVE_TIMEOUT		= (5ULL * NSEC_PER_USEC),
 };
 
 /*
@@ -105,7 +107,6 @@ struct sys_stat {
 
 	volatile u32	avg_lat_cri;	/* average latency criticality (LC) */
 	volatile u32	max_lat_cri;	/* maximum latency criticality (LC) */
-	volatile u32	min_lat_cri;	/* minimum latency criticality (LC) */
 	volatile u32	thr_lat_cri;	/* latency criticality threshold for kicking */
 
 	volatile u32	avg_perf_cri;	/* average performance criticality */
@@ -143,7 +144,6 @@ struct cpu_ctx {
 	 * Information used to keep track of latency criticality
 	 */
 	volatile u32	max_lat_cri;	/* maximum latency criticality */
-	volatile u32	min_lat_cri;	/* minimum latency criticality */
 	volatile u32	sum_lat_cri;	/* sum of latency criticality */
 	volatile u32	sched_nr;	/* number of schedules */
 
@@ -206,6 +206,7 @@ struct task_ctx {
 	u64	slice_ns;		/* time slice */
 	u32	greedy_ratio;		/* task's overscheduling ratio compared to its nice priority */
 	u32	lat_cri;		/* calculated latency criticality */
+	u32	starv_cri;		/* calculated starvation criticality */
 	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
 
