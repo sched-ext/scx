@@ -86,6 +86,7 @@ struct cpu_ctx {
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
 	u64			ran_current_for;
+	u32			layer_idx;
 };
 
 struct cache_ctx {

@@ -60,6 +60,37 @@ static inline s32 sibling_cpu(s32 cpu)
 		return -1;
 }
 
+static u32 cpu_ctx_layer_idx_inc(struct cpu_ctx *cctx)
+{
+	if (cctx->layer_idx >= nr_layers || cctx->layer_idx > MAX_LAYERS) {
+		cctx->layer_idx = 0;
+	} else {
+		cctx->layer_idx++;
+	}
+}
+
+static __noinline u32 iter_layer_cpu_ctx(u32 layer_idx, int idx)
+{
+	u32 offset;
+
+	// shouldn't happen, appease the verifier
+	if (idx < 0 || idx > MAX_LAYERS || idx > nr_layers)
+		return 0;
+
+	if (layer_idx > MAX_LAYERS || layer_idx > nr_layers)
+		return 0;
+
+	offset = (u32)idx & 0xfff + layer_idx;
+	if (offset > nr_layers)
+		offset -= nr_layers;
+
+	if (offset > MAX_LAYERS) {
+		scx_bpf_error("invalid layer id %u", layer_idx);
+		return 0;
+	}
+	return offset;
+}
+
 // return the dsq id for the layer based on the LLC id.
 static inline u64 layer_dsq_id(u32 layer_id, u32 llc_id)
 {
@@ -822,6 +853,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	s32 sib = sibling_cpu(cpu);
 	struct cpu_ctx *cctx, *sib_cctx;
 	int idx, llc_id;
+	u32 layer_idx;
 	u64 dsq_id;
 
 	if (!(cctx = lookup_cpu_ctx(-1)))
@@ -853,11 +885,16 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
+	// Adjust the per cpu layer offset so that layers are iterated in a
+	// round robin order.
+	cpu_ctx_layer_idx_inc(cctx);
+
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
+		layer_idx = iter_layer_cpu_ctx(cctx->layer_idx, idx);
 		bpf_for(llc_id, 0, nr_llcs) {
-			dsq_id = layer_dsq_id(idx, llc_id);
-			if (layers[idx].preempt && scx_bpf_consume(dsq_id))
+			dsq_id = layer_dsq_id(layer_idx, llc_id);
+			if (layers[layer_idx].preempt && scx_bpf_consume(dsq_id))
 				return;
 		}
 	}
@@ -867,13 +904,14 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
+		layer_idx = iter_layer_cpu_ctx(cctx->layer_idx, idx);
 		bpf_for(llc_id, 0, nr_llcs) {
-			struct layer *layer = &layers[idx];
+			struct layer *layer = &layers[layer_idx];
 			struct cpumask *layer_cpumask;
-			dsq_id = layer_dsq_id(idx, llc_id);
+			dsq_id = layer_dsq_id(layer_idx, llc_id);
 
 			/* consume matching layers */
-			if (!(layer_cpumask = lookup_layer_cpumask(idx)))
+			if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
 				return;
 
 			if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
@@ -886,10 +924,11 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* consume !preempting open layers */
 	bpf_for(idx, 0, nr_layers) {
+		layer_idx = iter_layer_cpu_ctx(cctx->layer_idx, idx);
 		bpf_for(llc_id, 0, nr_llcs) {
-			dsq_id = layer_dsq_id(idx, llc_id);
+			dsq_id = layer_dsq_id(layer_idx, llc_id);
 
-			if (!layers[idx].preempt && layers[idx].open &&
+			if (!layers[layer_idx].preempt && layers[layer_idx].open &&
 			    scx_bpf_consume(dsq_id))
 				return;
 		}
