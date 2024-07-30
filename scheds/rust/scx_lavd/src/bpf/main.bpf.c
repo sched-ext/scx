@@ -1938,7 +1938,8 @@ static bool use_full_cpus(void)
 	       ((stat_cur->nr_active + LAVD_CC_NR_OVRFLW) >= nr_cpus_onln);
 }
 
-static bool consume_lat_cri_task(u64 now)
+static __always_inline
+bool consume_lat_cri_task(u64 now)
 {
 	if (scx_bpf_consume(LAVD_LATENCY_CRITICAL_DSQ)) {
 		WRITE_ONCE(lat_cri_rq_clk, now);
@@ -1947,7 +1948,8 @@ static bool consume_lat_cri_task(u64 now)
 	return false;
 }
 
-static bool consume_regular_task(u64 now)
+static __always_inline
+bool consume_regular_task(u64 now)
 {
 	if (scx_bpf_consume(LAVD_REGULAR_DSQ)) {
 		WRITE_ONCE(regular_rq_clk, now);
@@ -1956,7 +1958,8 @@ static bool consume_regular_task(u64 now)
 	return false;
 }
 
-static bool consume_starving_task(u64 now)
+static __always_inline
+bool consume_starving_task(u64 now)
 {
 	u64 clk;
 
@@ -1970,7 +1973,8 @@ static bool consume_starving_task(u64 now)
 	return  false;
 }
 
-static bool consume_task(u64 now)
+static __always_inline
+bool consume_task(u64 now)
 {
 	if (!no_2_level_scheduling && consume_starving_task(now))
 		return true;
