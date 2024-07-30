@@ -19,6 +19,7 @@ subdir('scx_layered')
 subdir('scx_rusty')
 subdir('scx_rustland')
 subdir('scx_rlfifo')
+subdir('scx_asdf')
 subdir('scx_bpfland')
 subdir('scx_lavd')
 

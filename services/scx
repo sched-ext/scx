@@ -1,4 +1,4 @@
-# List of scx_schedulers: scx_bpfland scx_central scx_lavd scx_layered scx_nest scx_qmap scx_rlfifo scx_rustland scx_rusty scx_simple scx_userland
+# List of scx_schedulers: scx_asdf scx_bpfland scx_central scx_lavd scx_layered scx_nest scx_qmap scx_rlfifo scx_rustland scx_rusty scx_simple scx_userland
 SCX_SCHEDULER=scx_rusty
 
 # Set custom flags for each scheduler, below is an example of how to use

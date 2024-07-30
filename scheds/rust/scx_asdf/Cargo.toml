@@ -1,0 +1,25 @@
+[package]
+name = "scx_asdf"
+version = "1.0.0"
+authors = ["Andrea Righi <andrea.righi@linux.dev>"]
+edition = "2021"
+description = "Adaptive Shortest Deadline First scheduler. https://github.com/sched-ext/scx/tree/main"
+license = "GPL-2.0-only"
+
+[dependencies]
+anyhow = "1.0.65"
+ctrlc = { version = "3.1", features = ["termination"] }
+clap = { version = "4.1", features = ["derive", "env", "unicode", "wrap_help"] }
+libbpf-rs = "0.24.1"
+log = "0.4.17"
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.1" }
+simplelog = "0.12.0"
+rlimit = "0.10.1"
+metrics = "0.23.0"
+metrics-exporter-prometheus = "0.15.0"
+
+[build-dependencies]
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.1" }
+
+[features]
+enable_backtrace = []
