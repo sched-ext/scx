@@ -726,7 +726,8 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		goto find_cpu;
 	}
 
-	u32 llc_id = cpu_to_llc_id(tctx->last_cpu >= 0 ? tctx->last_cpu : 0);
+	u32 llc_id = cpu_to_llc_id(tctx->last_cpu >= 0 ? tctx->last_cpu :
+				   bpf_get_smp_processor_id());
 	idx = layer_dsq_id(layer->idx, llc_id);
 	scx_bpf_dispatch_vtime(p, idx, slice_ns, vtime, enq_flags);
 
