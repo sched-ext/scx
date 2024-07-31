@@ -20,6 +20,16 @@ UEI_DEFINE(uei);
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(bolt_init)
 {
+	u32 dom;
+
+	bpf_for(dom, 0, nr_dom_ids) {
+		int err;
+
+		err = domains_init_dom(dom);
+		if (err)
+			return err;
+	}
+
 	return 0;
 }
 

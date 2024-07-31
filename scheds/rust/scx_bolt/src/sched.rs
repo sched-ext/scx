@@ -118,7 +118,14 @@ impl SchedulerBuilder {
                 nr_dom_ids += 1;
             }
         }
+        skel.rodata_mut().nr_dom_ids = nr_dom_ids as u32;
         skel.maps_mut().dom_data().set_max_entries(nr_dom_ids)?;
+
+        for node in top.nodes().iter() {
+            for (id, _) in node.llcs().iter() {
+                skel.rodata_mut().numa_dom_id_map[*id] = node.id() as u32;
+            }
+        }
 
         // TODO: Once the libbpf bug is solved with user exit info, also
         // initialize that here.

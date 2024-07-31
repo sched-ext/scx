@@ -16,6 +16,12 @@
 #include "intf.h"
 
 const volatile u32 nr_cpu_ids = 64; /* !0 for veristat, set during init */
+const volatile u32 nr_dom_ids = 64; /* !0 for veristat, set during init */
+
+// XXX: Remove this map once we can set this in create_dom_sys(). See
+// https://lore.kernel.org/all/20240731051437.69689-1-void@manifault.com/
+// for more information.
+const volatile u32 numa_dom_id_map[1024]; /* !0 for veristat, set during init */
 
 struct dom_init_ctx {
 	u32 dom_id;
@@ -48,6 +54,17 @@ static struct dom_ctx *domains_lookup_dom(u32 dom_id)
                 scx_bpf_error("Failed to lookup dom[%u]", dom_id);
 
         return domc;
+}
+
+/* Called from the initialization path in the main scheduler */
+static int domains_init_dom(u32 dom_id)
+{
+	u32 *numa_id = MEMBER_VPTR(numa_dom_id_map, [dom_id]);
+
+	if (!numa_id)
+		return -ENOENT;
+
+	return scx_bpf_create_dsq(dom_id, *numa_id);
 }
 
 SEC("syscall")
