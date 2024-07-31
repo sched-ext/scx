@@ -102,6 +102,16 @@ static inline u64 llc_hi_fallback_dsq_id(u32 llc_id)
 	return HI_FALLBACK_DSQ + llc_id;
 }
 
+static u64 llc_hi_fallback_dsq_iter_offset(int llc_offset, int idx)
+{
+	int offset = llc_offset + idx;
+
+	if (offset >= nr_llcs)
+		return llc_hi_fallback_dsq_id(offset - nr_llcs);
+
+	return llc_hi_fallback_dsq_id(idx + llc_offset);
+}
+
 static u32 cpu_to_llc_id(s32 cpu_id)
 {
         const volatile u32 *llc_ptr;
@@ -882,7 +892,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	int idx, llc_id;
 	u32 layer_idx;
 	u32 node_id = cpu_node_id(cpu);
-	u64 dsq_id, next_dsq_id;
+	u64 dsq_id;
 
 	if (!(cctx = lookup_cpu_ctx(-1)))
 		return;
@@ -929,20 +939,13 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* consume any hi fallback dsqs starting with the llc local dsq */
 	dsq_id = cpu_hi_fallback_dsq_id(cpu);
-	if (scx_bpf_consume(dsq_id))
-		return;
-
-	/* consume from any hi fallback dsqs in the node */
+	llc_id = cpu_to_llc_id(cpu);
 	bpf_for(idx, 0, nr_llcs) {
-		llc_id = llc_iter_cpu_offset(idx, cpu);
-		if (llc_node_id(llc_id) != node_id)
-			continue;
+		if (idx == 0 && scx_bpf_consume(dsq_id))
+				return;
 
-		next_dsq_id = llc_hi_fallback_dsq_id(llc_id);
-		if (next_dsq_id == dsq_id)
-			continue;
-
-		if (scx_bpf_consume(next_dsq_id))
+		dsq_id = llc_hi_fallback_dsq_iter_offset(llc_id, idx);
+		if (scx_bpf_consume(dsq_id))
 			return;
 	}
 
@@ -1463,6 +1466,7 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 	u64 now = bpf_ktime_get_ns();
 	int i, j, idx;
 	struct layer *layer;
+	u64 dsq_id;
 
 	bpf_for(i, 0, nr_layers) {
 		layer = lookup_layer(i);
@@ -1485,9 +1489,10 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 	}
 
 	bpf_for(i, 0, nr_llcs) {
-		scx_bpf_dump("HI_FALLBACK nr_queued=%d -%llums\n",
-			     scx_bpf_dsq_nr_queued(llc_hi_fallback_dsq_id(i)),
-			     dsq_first_runnable_for_ms(llc_hi_fallback_dsq_id(i), now));
+		dsq_id = llc_hi_fallback_dsq_id(i);
+		scx_bpf_dump("HI_FALLBACK[%d] nr_queued=%d -%llums\n",
+			     dsq_id, scx_bpf_dsq_nr_queued(dsq_id),
+			     dsq_first_runnable_for_ms(dsq_id, now));
 	}
 	scx_bpf_dump("LO_FALLBACK nr_queued=%d -%llums\n",
 		     scx_bpf_dsq_nr_queued(LO_FALLBACK_DSQ),
