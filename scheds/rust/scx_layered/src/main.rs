@@ -896,12 +896,23 @@ impl CpuPool {
         }
     }
 
-    fn alloc_cpus<'a>(&'a mut self, cpus: &BitVec) -> Option<&'a BitVec> {
-        let cores = self.cpus_to_cores(cpus).ok()?;
-        for core in cores.iter_ones() {
-            self.available_cores.set(core, false);
-            self.update_fallback_cpu();
-            return Some(&self.core_cpus[core]);
+    fn alloc_cpus<'a>(&'a mut self, layer: &Layer) -> Option<&'a BitVec> {
+        let available_cpus = self.available_cpus_in_mask(&layer.allowed_cpus);
+        let available_cores = self.cpus_to_cores(&available_cpus).ok()?;
+
+        for alloc_core in layer.core_alloc_order() {
+            match available_cores.get(*alloc_core) {
+                Some(bit) => {
+                    if *bit {
+                        self.available_cores.set(*alloc_core, false);
+                        self.update_fallback_cpu();
+                        return Some(&self.core_cpus[*alloc_core]);
+                    }
+                }
+                None => {
+                    continue;
+                }
+            }
         }
         None
     }
@@ -972,6 +983,7 @@ impl CpuPool {
 struct Layer {
     name: String,
     kind: LayerKind,
+    core_order: Vec<usize>,
 
     nr_cpus: usize,
     cpus: BitVec,
@@ -979,7 +991,13 @@ struct Layer {
 }
 
 impl Layer {
-    fn new(cpu_pool: &CpuPool, name: &str, kind: LayerKind, topo: &Topology) -> Result<Self> {
+    fn new(
+        idx: usize,
+        cpu_pool: &CpuPool,
+        name: &str,
+        kind: LayerKind,
+        topo: &Topology
+    ) -> Result<Self> {
         let mut cpus = bitvec![0; cpu_pool.nr_cpus];
         cpus.fill(false);
         let mut allowed_cpus = bitvec![0; cpu_pool.nr_cpus];
@@ -1051,14 +1069,56 @@ impl Layer {
             }
         }
 
+        let mut nodes = topo.nodes().iter().collect::<Vec<_>>().clone();
+        let num_nodes = nodes.len();
+        let is_left = idx % 2 == 0;
+        let rot_by = |idx, len| -> usize { if idx <= len { idx } else { idx % len } };
+        if is_left {
+            nodes.rotate_left(rot_by(idx, num_nodes));
+        } else {
+            nodes.rotate_right(rot_by(idx, num_nodes));
+        }
+
+        let mut core_order = vec![];
+        for node in nodes.iter() {
+            let mut llcs = node.llcs().clone().into_values().collect::<Vec<_>>().clone();
+            let num_llcs = llcs.len();
+            if is_left {
+                llcs.rotate_left(rot_by(idx, num_llcs));
+            } else {
+                llcs.rotate_right(rot_by(idx, num_llcs));
+            }
+
+            for llc in llcs.iter() {
+                let mut llc_cores = llc.cores().clone().into_values().collect::<Vec<_>>().clone();
+                let num_cores = llc_cores.len();
+
+                if is_left {
+                    llc_cores.rotate_left(rot_by(idx, num_cores));
+                } else {
+                    llc_cores.rotate_right(rot_by(idx, num_cores));
+                }
+
+
+                for llc_core in llc_cores.iter() {
+                    core_order.push(llc_core.id());
+                }
+            }
+        }
+
         Ok(Self {
             name: name.into(),
             kind,
+            core_order,
 
             nr_cpus: 0,
             cpus,
             allowed_cpus,
         })
+    }
+
+    fn core_alloc_order(&self) -> &Vec<usize> {
+        &self.core_order
     }
 
     fn grow_confined_or_grouped(
@@ -1097,8 +1157,7 @@ impl Layer {
             return Ok(false);
         }
 
-        let available_cpus = cpu_pool.available_cpus_in_mask(&self.allowed_cpus);
-        let new_cpus = match cpu_pool.alloc_cpus(&available_cpus).clone() {
+        let new_cpus = match cpu_pool.alloc_cpus(&self).clone() {
             Some(ret) => ret.clone(),
             None => {
                 trace!("layer-{} can't grow, no CPUs", &self.name);
@@ -1460,8 +1519,8 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         let mut skel = scx_ops_load!(skel, layered, uei)?;
 
         let mut layers = vec![];
-        for spec in layer_specs.iter() {
-            layers.push(Layer::new(&cpu_pool, &spec.name, spec.kind.clone(), &topo)?);
+        for (idx, spec) in layer_specs.iter().enumerate() {
+            layers.push(Layer::new(idx, &cpu_pool, &spec.name, spec.kind.clone(), &topo)?);
         }
 
         // Other stuff.
@@ -1516,8 +1575,9 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
     fn refresh_cpumasks(&mut self) -> Result<()> {
         let mut updated = false;
+	let num_layers = self.layers.len();
 
-        for idx in 0..self.layers.len() {
+        for idx in 0..num_layers {
             match self.layers[idx].kind {
                 LayerKind::Confined {
                     cpus_range,
@@ -1558,7 +1618,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         }
 
         if updated {
-            for idx in 0..self.layers.len() {
+            for idx in 0..num_layers {
                 let layer = &mut self.layers[idx];
                 let bpf_layer = &mut self.skel.maps.bss_data.layers[idx];
                 match &layer.kind {
