@@ -302,10 +302,10 @@ static inline u64 task_vtime(struct task_struct *p)
 	 * performance (less spikey), smoothing the reordering of the vruntime
 	 * scheduling and making the scheduler closer to a FIFO.  ￼ ￼ ￼
 	 */
-	if (vtime_before(vtime, vtime_now - slice_ns_lag))
-		vtime = vtime_now - slice_ns_lag;
+	if (vtime_before(p->scx.dsq_vtime, vtime_now - slice_ns_lag))
+		p->scx.dsq_vtime = vtime_now - slice_ns_lag;
 
-	return vtime;
+	return p->scx.dsq_vtime;
 }
 
 /*
