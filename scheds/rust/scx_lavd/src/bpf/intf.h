@@ -91,9 +91,7 @@ enum consts {
 	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL /
 					   LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_LATENCY_CRITICAL_DSQ	= 0, /* a global DSQ for latency-criticcal tasks */
-	LAVD_REGULAR_DSQ		= 1, /* a global DSQ for non-latency-criticcal tasks */
-	LAVD_DSQ_STARVE_TIMEOUT		= (5ULL * NSEC_PER_USEC),
+	LAVD_GLOBAL_DSQ			= 0, /* a global DSQ */
 
 	LAVD_STATUS_STR_LEN		= 5, /* {LR: Latency-critical, Regular}
 						{HI: performance-Hungry, performance-Insensitive}
