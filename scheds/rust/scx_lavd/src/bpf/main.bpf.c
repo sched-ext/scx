@@ -933,7 +933,10 @@ static bool is_eligible(struct task_ctx *taskc)
 
 static bool is_wakeup_ef(u64 enq_flags)
 {
-	return enq_flags & SCX_ENQ_WAKEUP;
+	/*
+	 * This is a clear sign of immediate consumer.
+	 */
+	return !!(enq_flags & SCX_ENQ_WAKEUP);
 }
 
 static u64 calc_eligible_delta(struct task_ctx *taskc)
@@ -1013,8 +1016,10 @@ static u64 calc_starvation_factor(struct task_ctx *taskc)
 	/*
 	 * Prioritize tasks whose service time is smaller than average.
 	 */
-	ratio = stat_cur->avg_svc_time / taskc->svc_time;
-	return ratio + 1;
+	ratio = (stat_cur->avg_svc_time * LAVD_LC_STARVATION_FT) / taskc->svc_time;
+	if (ratio >= LAVD_LC_STARVATION_FT)
+		ratio -= LAVD_LC_STARVATION_FT;
+	return ratio;
 }
 
 static s64 calc_static_prio_factor(struct task_struct *p)
@@ -1071,7 +1076,8 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 
 static void calc_starv_cri(struct task_ctx *taskc, bool is_wakeup)
 {
-	taskc->starv_cri = calc_starvation_factor(taskc) + is_wakeup;
+	taskc->starv_cri = calc_starvation_factor(taskc) +
+			   (is_wakeup * LAVD_LC_WAKEUP_FT);
 }
 
 static void calc_virtual_deadline_delta(struct task_struct *p,
@@ -1905,7 +1911,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 static bool is_kernel_task(struct task_struct *p)
 {
-	return p->flags & PF_KTHREAD;
+	return !!(p->flags & PF_KTHREAD);
 }
 
 static bool use_full_cpus(void)

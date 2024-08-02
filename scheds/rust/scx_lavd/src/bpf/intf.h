@@ -64,9 +64,11 @@ enum consts {
 	LAVD_LC_FREQ_MAX		= 1000000,
 	LAVD_LC_RUNTIME_MAX		= LAVD_TARGETED_LATENCY_NS,
 	LAVD_LC_RUNTIME_SHIFT		= 10,
+	LAVD_LC_WAKEUP_FT		= 30,
+	LAVD_LC_STARVATION_FT		= 30,
 
-	LAVD_SLICE_BOOST_MAX_FT		= 3, /* maximum additional 2x of slice */
-	LAVD_SLICE_BOOST_MAX_STEP	= 6, /* 8 slice exhausitions in a row */
+	LAVD_SLICE_BOOST_MAX_FT		= 3, /* maximum additional 3x of slice */
+	LAVD_SLICE_BOOST_MAX_STEP	= 6, /* 6 slice exhausitions in a row */
 	LAVD_GREEDY_RATIO_NEW		= 2000,
 
 	LAVD_ELIGIBLE_TIME_MAX		= (1ULL * LAVD_TIME_ONE_SEC),
