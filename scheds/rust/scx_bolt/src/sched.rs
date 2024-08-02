@@ -108,8 +108,11 @@ impl SchedulerBuilder {
         info!("Running scx_bolt (build ID: {})", *build_id::SCX_FULL_VERSION);
         let mut skel = scx_ops_open!(skel_builder, bolt).unwrap();
 
+        let nr_cpu_ids = top.nr_cpu_ids() as u32;
+
         skel.rodata_mut().debug = self.verbosity as u8;
-        skel.rodata_mut().nr_cpu_ids = top.nr_cpu_ids() as u32;
+        skel.rodata_mut().nr_cpu_ids = nr_cpu_ids;
+        skel.maps_mut().pcpu_data().set_max_entries(nr_cpu_ids)?;
         skel.struct_ops.bolt_mut().exit_dump_len = 0;
 
         let mut nr_dom_ids = 0;
