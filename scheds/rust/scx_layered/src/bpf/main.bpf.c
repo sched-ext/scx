@@ -23,6 +23,7 @@ const volatile u32 nr_layers = 1;
 const volatile u32 nr_nodes = 32;	/* !0 for veristat, set during init */
 const volatile u32 nr_llcs = 32;	/* !0 for veristat, set during init */
 const volatile bool smt_enabled = true;
+const volatile bool disable_topology = false;
 const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
@@ -67,6 +68,7 @@ static u32 cpu_ctx_layer_idx_inc(struct cpu_ctx *cctx)
 	} else {
 		cctx->layer_idx++;
 	}
+	return cctx->layer_idx;
 }
 
 static __noinline u32 iter_layer_cpu_ctx(u32 layer_idx, int idx)
@@ -726,10 +728,14 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		goto find_cpu;
 	}
 
-	u32 llc_id = cpu_to_llc_id(tctx->last_cpu >= 0 ? tctx->last_cpu :
-				   bpf_get_smp_processor_id());
-	idx = layer_dsq_id(layer->idx, llc_id);
-	scx_bpf_dispatch_vtime(p, idx, slice_ns, vtime, enq_flags);
+	if (disable_topology) {
+		scx_bpf_dispatch_vtime(p, tctx->layer, slice_ns, vtime, enq_flags);
+	} else {
+		u32 llc_id = cpu_to_llc_id(tctx->last_cpu >= 0 ? tctx->last_cpu :
+					   bpf_get_smp_processor_id());
+		idx = layer_dsq_id(layer->idx, llc_id);
+		scx_bpf_dispatch_vtime(p, idx, slice_ns, vtime, enq_flags);
+	}
 
 find_cpu:
 	if (try_preempt_first) {
@@ -812,10 +818,19 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 		 * have tasks waiting, keep running it. If there are multiple
 		 * competing preempting layers, this won't work well.
 		 */
-		u32 dsq_id = cpu_to_llc_id(tctx->last_cpu >= 0 ? tctx->last_cpu : 0);
-		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
-			lstat_inc(LSTAT_KEEP, layer, cctx);
-			return true;
+		if (disable_topology) {
+			if (!scx_bpf_dsq_nr_queued(layer->idx)) {
+				lstat_inc(LSTAT_KEEP, layer, cctx);
+				return true;
+			}
+		} else {
+			u32 dsq_id = cpu_to_llc_id(tctx->last_cpu >= 0 ?
+						   tctx->last_cpu :
+						   bpf_get_smp_processor_id());
+			if (!scx_bpf_dsq_nr_queued(dsq_id)) {
+				lstat_inc(LSTAT_KEEP, layer, cctx);
+				return true;
+			}
 		}
 	} else {
 		const struct cpumask *idle_cpumask = scx_bpf_get_idle_cpumask();
@@ -893,10 +908,15 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = iter_layer_cpu_ctx(cctx->layer_idx, idx);
-		bpf_for(llc_id, 0, nr_llcs) {
-			dsq_id = layer_dsq_id(layer_idx, llc_id);
-			if (layers[layer_idx].preempt && scx_bpf_consume(dsq_id))
+		if (disable_topology) {
+			if (layers[layer_idx].preempt && scx_bpf_consume(layer_idx))
 				return;
+		} else {
+			bpf_for(llc_id, 0, nr_llcs) {
+				dsq_id = layer_dsq_id(layer_idx, llc_id);
+				if (layers[layer_idx].preempt && scx_bpf_consume(dsq_id))
+					return;
+			}
 		}
 	}
 
@@ -906,10 +926,9 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = iter_layer_cpu_ctx(cctx->layer_idx, idx);
-		bpf_for(llc_id, 0, nr_llcs) {
+		if (disable_topology) {
 			struct layer *layer = &layers[layer_idx];
 			struct cpumask *layer_cpumask;
-			dsq_id = layer_dsq_id(layer_idx, llc_id);
 
 			/* consume matching layers */
 			if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
@@ -917,8 +936,24 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 			if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
 			    (cpu == fallback_cpu && layer->nr_cpus == 0)) {
-				if (scx_bpf_consume(dsq_id))
+				if (scx_bpf_consume(layer_idx))
 					return;
+			}
+		} else {
+			bpf_for(llc_id, 0, nr_llcs) {
+				struct layer *layer = &layers[layer_idx];
+				struct cpumask *layer_cpumask;
+				dsq_id = layer_dsq_id(layer_idx, llc_id);
+
+				/* consume matching layers */
+				if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
+					return;
+
+				if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
+				    (cpu == fallback_cpu && layer->nr_cpus == 0)) {
+					if (scx_bpf_consume(dsq_id))
+						return;
+				}
 			}
 		}
 	}
@@ -926,12 +961,18 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	/* consume !preempting open layers */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = iter_layer_cpu_ctx(cctx->layer_idx, idx);
-		bpf_for(llc_id, 0, nr_llcs) {
-			dsq_id = layer_dsq_id(layer_idx, llc_id);
-
+		if (disable_topology) {
 			if (!layers[layer_idx].preempt && layers[layer_idx].open &&
-			    scx_bpf_consume(dsq_id))
+			    scx_bpf_consume(layer_idx))
 				return;
+		} else {
+			bpf_for(llc_id, 0, nr_llcs) {
+				dsq_id = layer_dsq_id(layer_idx, llc_id);
+
+				if (!layers[layer_idx].preempt && layers[layer_idx].open &&
+				    scx_bpf_consume(dsq_id))
+					return;
+			}
 		}
 	}
 
@@ -1428,14 +1469,20 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 			continue;
 		}
 
-		bpf_for(j, 0, nr_llcs) {
-			if (!(layer->cache_mask & (1 << j)))
-				continue;
+		if (disable_topology) {
+			scx_bpf_dump("LAYER[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
+				     i, layers[i].nr_cpus, scx_bpf_dsq_nr_queued(i),
+				     dsq_first_runnable_for_ms(i, now));
+		} else {
+			bpf_for(j, 0, nr_llcs) {
+				if (!(layer->cache_mask & (1 << j)))
+					continue;
 
-			idx = layer_dsq_id(layer->idx, j);
-			scx_bpf_dump("LAYER[%d]DSQ[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
-				     i, idx, layers[i].nr_cpus, scx_bpf_dsq_nr_queued(idx),
-				     dsq_first_runnable_for_ms(idx, now));
+				idx = layer_dsq_id(layer->idx, j);
+				scx_bpf_dump("LAYER[%d]DSQ[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
+					     i, idx, layers[i].nr_cpus, scx_bpf_dsq_nr_queued(idx),
+					     dsq_first_runnable_for_ms(idx, now));
+			}
 		}
 		dump_layer_cpumask(i);
 		scx_bpf_dump("\n");
@@ -1593,13 +1640,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			bpf_cpumask_release(cpumask);
 
 		// create the dsqs for the layer
-		bpf_for(j, 0, nr_llcs) {
-			int node_id = llc_node_id(i);
-			dbg("creating dsq %llu for layer %d on node %d", llc_dsq_id, i, node_id);
-			ret = scx_bpf_create_dsq(llc_dsq_id, node_id);
+		if (disable_topology) {
+			ret = scx_bpf_create_dsq(i, -1);
 			if (ret < 0)
 				return ret;
-			llc_dsq_id++;
+		} else {
+			bpf_for(j, 0, nr_llcs) {
+				int node_id = llc_node_id(i);
+				dbg("creating dsq %llu for layer %d on node %d",
+				    llc_dsq_id, i, node_id);
+				ret = scx_bpf_create_dsq(llc_dsq_id, node_id);
+				if (ret < 0)
+					return ret;
+				llc_dsq_id++;
+			}
 		}
 	}
 
