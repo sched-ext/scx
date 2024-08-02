@@ -434,7 +434,7 @@ int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 	m->taskc_x.static_prio = get_nice_prio(p);
 	m->taskc_x.cpu_util = cpuc->util / 10;
 	m->taskc_x.cpu_id = cpu_id;
-	m->taskc_x.avg_lat_cri = stat_cur->avg_lat_cri;
+	m->taskc_x.thr_lat_cri = stat_cur->thr_lat_cri;
 	m->taskc_x.avg_perf_cri = stat_cur->avg_perf_cri;
 	m->taskc_x.nr_active = stat_cur->nr_active;
 	m->taskc_x.cpuperf_cur = cpuc->cpuperf_cur;
@@ -939,7 +939,7 @@ static bool is_wakeup_ef(u64 enq_flags)
 	return !!(enq_flags & SCX_ENQ_WAKEUP);
 }
 
-static u64 calc_eligible_delta(struct task_ctx *taskc)
+static u64 calc_eligible_delta(struct task_ctx *taskc, u64 enq_flags)
 {
 	/*
 	 * We calculate how long a task should be ineligible for execution. To
@@ -961,6 +961,7 @@ static u64 calc_eligible_delta(struct task_ctx *taskc)
 	 */
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 delta_ns, lat_cri_ft;
+	bool is_wakeup;
 
 	/*
 	 * Get how greedy this task has been to enforce fairness if necessary.
@@ -977,26 +978,28 @@ static u64 calc_eligible_delta(struct task_ctx *taskc)
 		goto out;
 	}
 
+	is_wakeup = is_wakeup_ef(enq_flags);
 
 	/*
 	 * Calculate ineligible duration based on greedy ratio, run_freq, and
-	 * lat_cri.
+	 * lat_cri. Prioritize wake-up tasks.
 	 */
 	delta_ns = (LAVD_TIME_ONE_SEC / (1000 * (taskc->run_freq + 1))) *
 		   taskc->greedy_ratio;
+	lat_cri_ft = taskc->lat_cri + (is_wakeup * (LAVD_LC_WAKEUP_FT >> 1));
 
-	if (stat_cur->avg_lat_cri < taskc->lat_cri) {
+	if (have_scheduled(taskc) && stat_cur->thr_lat_cri < lat_cri_ft) {
 		/*
-		 * Prioritize above-average latency-critical tasks.
+		 * Prioritize far above-average latency-critical tasks.
 		 */
-		lat_cri_ft = taskc->lat_cri - stat_cur->avg_lat_cri + 1;
+		lat_cri_ft = lat_cri_ft - stat_cur->thr_lat_cri + 1;
 		delta_ns /= lat_cri_ft;
 	}
 	else {
 		/*
 		 * Deprioritize below-average latency-critical tasks.
 		 */
-		lat_cri_ft = stat_cur->avg_lat_cri - taskc->lat_cri + 1;
+		lat_cri_ft = stat_cur->thr_lat_cri - lat_cri_ft + 1;
 		delta_ns *= lat_cri_ft;
 	}
 
@@ -1074,22 +1077,21 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	taskc->lat_cri = lat_cri;
 }
 
-static void calc_starv_cri(struct task_ctx *taskc, bool is_wakeup)
+static u64 calc_starv_cri(struct task_ctx *taskc, bool is_wakeup)
 {
-	taskc->starv_cri = calc_starvation_factor(taskc) +
-			   (is_wakeup * LAVD_LC_WAKEUP_FT);
+	return calc_starvation_factor(taskc) + (is_wakeup * LAVD_LC_WAKEUP_FT);
 }
 
 static void calc_virtual_deadline_delta(struct task_struct *p,
 					struct task_ctx *taskc, u64 enq_flags)
 {
 	bool is_wakeup;
+	u64 sc;
 
 	is_wakeup = is_wakeup_ef(enq_flags);
 	calc_lat_cri(p, taskc);
-	calc_starv_cri(taskc, is_wakeup);
-	taskc->vdeadline_delta_ns = taskc->run_time_ns / (taskc->lat_cri +
-				    taskc->starv_cri);
+	sc = calc_starv_cri(taskc, is_wakeup);
+	taskc->vdeadline_delta_ns = taskc->run_time_ns / (taskc->lat_cri + sc);
 }
 
 static u64 calc_task_load_actual(struct task_ctx *taskc)
@@ -1377,7 +1379,7 @@ static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 	 * overscheduled - eligible_time_ns.
 	 */
 	calc_virtual_deadline_delta(p, taskc, enq_flags);
-	calc_eligible_delta(taskc);
+	calc_eligible_delta(taskc, enq_flags);
 
 	/*
 	 * Update the logical clock of the virtual deadline including
@@ -1699,7 +1701,7 @@ static bool is_lat_cri_task(struct task_ctx *taskc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 
-	return taskc->lat_cri > stat_cur->avg_lat_cri;
+	return taskc->lat_cri > stat_cur->thr_lat_cri;
 }
 
 static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
@@ -2531,6 +2533,7 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 
 static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 {
+	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 now = bpf_ktime_get_ns();
 
 	memset(taskc, 0, sizeof(*taskc));
@@ -2538,6 +2541,7 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	taskc->last_stopping_clk = now; /* for run_time_ns */
 	taskc->run_time_ns = LAVD_SLICE_MAX_NS;
 	taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
+	taskc->svc_time = stat_cur->avg_svc_time * LAVD_NEW_PROC_PENALITY;
 }
 
 void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)

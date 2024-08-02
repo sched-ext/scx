@@ -69,9 +69,10 @@ enum consts {
 
 	LAVD_SLICE_BOOST_MAX_FT		= 3, /* maximum additional 3x of slice */
 	LAVD_SLICE_BOOST_MAX_STEP	= 6, /* 6 slice exhausitions in a row */
-	LAVD_GREEDY_RATIO_NEW		= 2000,
+	LAVD_NEW_PROC_PENALITY		= 5,
+	LAVD_GREEDY_RATIO_NEW		= (1000 * LAVD_NEW_PROC_PENALITY),
 
-	LAVD_ELIGIBLE_TIME_MAX		= (1ULL * LAVD_TIME_ONE_SEC),
+	LAVD_ELIGIBLE_TIME_MAX		= (9999ULL * LAVD_TIME_ONE_SEC),
 
 	LAVD_CPU_UTIL_MAX		= 1000, /* 100.0% */
 	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= 850, /* 85.0% */
@@ -213,7 +214,6 @@ struct task_ctx {
 	u64	slice_ns;		/* time slice */
 	u32	greedy_ratio;		/* task's overscheduling ratio compared to its nice priority */
 	u32	lat_cri;		/* calculated latency criticality */
-	u32	starv_cri;		/* calculated starvation criticality */
 	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
 
@@ -231,7 +231,7 @@ struct task_ctx_x {
 	u32	cpu_id;		/* where a task ran */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
 	u32	avg_perf_cri;	/* average performance criticality */
-	u32	avg_lat_cri;	/* average latency criticality */
+	u32	thr_lat_cri;	/* threshold for latency criticality */
 	u32	nr_active;	/* number of active cores */
 	u32	cpuperf_cur;	/* CPU's current performance target */
 };
