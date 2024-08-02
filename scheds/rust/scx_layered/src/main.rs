@@ -328,6 +328,11 @@ struct Opts {
     #[clap(short = 'o', long)]
     open_metrics_format: bool,
 
+    /// Disable topology awareness. When enabled the nodes and llcs setting on 
+    /// a layer is ignored.
+    #[clap(short = 't', long)]
+    disable_topology: bool,
+
     /// Write example layer specifications into the file and exit.
     #[clap(short = 'e', long)]
     example: Option<String>,
@@ -1434,6 +1439,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         };
         skel.rodata_mut().nr_possible_cpus = *NR_POSSIBLE_CPUS as u32;
         skel.rodata_mut().smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
+        skel.rodata_mut().disable_topology = opts.disable_topology;
         for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
             skel.rodata_mut().__sibling_cpu[cpu] = *sib;
         }
@@ -2159,6 +2165,23 @@ fn main() -> Result<()> {
         shutdown_clone.store(true, Ordering::Relaxed);
     })
     .context("Error setting Ctrl-C handler")?;
+
+    // If disabling topology awareness clear out any set NUMA/LLC configs and 
+    // it will fallback to using all cores.
+    if opts.disable_topology {
+        info!("Disabling topology awareness");
+        for i in 0..layer_config.specs.len() {
+            let kind = &mut layer_config.specs[i].kind;
+            match kind {
+                LayerKind::Confined { nodes, llcs, .. }
+                | LayerKind::Open { nodes, llcs, .. }
+                | LayerKind::Grouped { nodes, llcs, .. } => {
+                    nodes.truncate(0);
+                    llcs.truncate(0);
+                }
+            }
+        }
+    }
 
     loop {
         let mut sched = Scheduler::init(&opts, &layer_config.specs)?;
