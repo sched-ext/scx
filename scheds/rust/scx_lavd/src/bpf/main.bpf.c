@@ -94,13 +94,7 @@
  * fair use of CPU time. It defers choosing over-scheduled tasks to reduce the
  * frequency of task execution. The deferring time- ineligible duration- is
  * proportional to how much time is over-spent and added to the task's
- * deadline. Additionally, if a task is compute-intensive and not
- * latency-critical, the scheduler automatically reduces its time slice, since
- * its runtime per schedule is sufficiently long enough without voluntarily
- * yielding the CPU. Note that reducing the time slice of a latency-critical
- * task for fairness is not very effective because the scheduling overhead
- * might be detrimental.
- *
+ * deadline.
  *
  * 6. Preemption
  * -------------
@@ -427,7 +421,7 @@ int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 	m->taskc_x.static_prio = get_nice_prio(p);
 	m->taskc_x.cpu_util = cpuc->util / 10;
 	m->taskc_x.cpu_id = cpu_id;
-	m->taskc_x.thr_lat_cri = stat_cur->thr_lat_cri;
+	m->taskc_x.avg_lat_cri = stat_cur->avg_lat_cri;
 	m->taskc_x.avg_perf_cri = stat_cur->avg_perf_cri;
 	m->taskc_x.nr_active = stat_cur->nr_active;
 	m->taskc_x.cpuperf_cur = cpuc->cpuperf_cur;
@@ -892,7 +886,7 @@ static u32 calc_greedy_ratio(struct task_ctx *taskc)
 	ratio = (1000 * taskc->svc_time) / stat_cur->avg_svc_time;
 
 out:
-	taskc->greedy_ratio = ratio;
+	taskc->greedy_ratio = max(ratio, 1);
 	return ratio;
 }
 
@@ -919,100 +913,6 @@ static bool is_eligible(struct task_ctx *taskc)
 	return taskc->greedy_ratio <= 1000;
 }
 
-static bool is_wakeup_ef(u64 enq_flags)
-{
-	/*
-	 * This is a clear sign of immediate consumer.
-	 */
-	return !!(enq_flags & SCX_ENQ_WAKEUP);
-}
-
-static u64 calc_eligible_delta(struct task_ctx *taskc, u64 enq_flags)
-{
-	/*
-	 * We calculate how long a task should be ineligible for execution. To
-	 * this end, the scheduler stretches the ineligible duration of a task
-	 * so it can control the frequency of the task's running to let the
-	 * task pay its debt. Reducing the time slice of a task would be
-	 * another approach. However, adjusting the time slice for fairness
-	 * does not work well since many latency-critical tasks voluntarily
-	 * yield CPU waiting for an event before expiring its time slice. 
-	 *
-	 * task's freq_new =
-	 *	freq_old / greedy_ratio = 
-	 *	unit_time / (interval_old * greedy_ratio) = 
-	 *	unit_time / interval_new
-	 *
-	 * task's interval_new =
-	 *	task's interval_old * greedy_ratio =
-	 *	when the task become eligible.
-	 */
-	struct sys_stat *stat_cur = get_sys_stat_cur();
-	u64 delta_ns, lat_cri_ft;
-	bool is_wakeup;
-
-	/*
-	 * Get how greedy this task has been to enforce fairness if necessary.
-	 * If a task is too greedy so it is not eligible, don't put it to the
-	 * local rq to seek another eligible task later.
-	 */
-	calc_greedy_ratio(taskc);
-
-	/*
-	 * Considering task's greedy ratio, decide if a task is now eligible.
-	 */
-	if (is_eligible(taskc)) {
-		delta_ns = 0;
-		goto out;
-	}
-
-	is_wakeup = is_wakeup_ef(enq_flags);
-
-	/*
-	 * Calculate ineligible duration based on greedy ratio, run_freq, and
-	 * lat_cri. Prioritize wake-up tasks.
-	 */
-	delta_ns = (LAVD_TIME_ONE_SEC / (1000 * (taskc->run_freq + 1))) *
-		   taskc->greedy_ratio;
-	lat_cri_ft = taskc->lat_cri + (is_wakeup * (LAVD_LC_WAKEUP_FT >> 1));
-
-	if (have_scheduled(taskc) && stat_cur->thr_lat_cri < lat_cri_ft) {
-		/*
-		 * Prioritize far above-average latency-critical tasks.
-		 */
-		lat_cri_ft = lat_cri_ft - stat_cur->thr_lat_cri + 1;
-		delta_ns /= lat_cri_ft;
-	}
-	else {
-		/*
-		 * Deprioritize below-average latency-critical tasks.
-		 */
-		lat_cri_ft = stat_cur->thr_lat_cri - lat_cri_ft + 1;
-		delta_ns *= lat_cri_ft;
-	}
-
-	if (delta_ns > LAVD_ELIGIBLE_TIME_MAX)
-		delta_ns = LAVD_ELIGIBLE_TIME_MAX;
-
-out:
-	taskc->eligible_delta_ns = delta_ns;
-	return delta_ns;
-}
-
-static u64 calc_starvation_factor(struct task_ctx *taskc)
-{
-	struct sys_stat *stat_cur = get_sys_stat_cur();
-	u64 ratio;
-
-	/*
-	 * Prioritize tasks whose service time is smaller than average.
-	 */
-	ratio = (stat_cur->avg_svc_time * LAVD_LC_STARVATION_FT) / taskc->svc_time;
-	if (ratio >= LAVD_LC_STARVATION_FT)
-		ratio -= LAVD_LC_STARVATION_FT;
-	return ratio;
-}
-
 static s64 calc_static_prio_factor(struct task_struct *p)
 {
 	/*
@@ -1023,10 +923,11 @@ static s64 calc_static_prio_factor(struct task_struct *p)
 	return (20 - get_nice_prio(p)) >> 1;
 }
 
-static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
+static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
+			u64 enq_flags)
 {
-	u64 wait_freq_ft, wake_freq_ft;
-	s64 lat_cri_raw, lat_cri;
+	u64 wait_freq_ft, wake_freq_ft, runtime_ft;
+	s64 lat_cri;
 
 	/*
 	 * A task is more latency-critical as its wait or wake frequencies
@@ -1040,46 +941,56 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	 */
 	wait_freq_ft = calc_freq_factor(taskc->wait_freq);
 	wake_freq_ft = calc_freq_factor(taskc->wake_freq);
+	runtime_ft = calc_runtime_factor(taskc->run_time_ns);
 
 	/*
 	 * Wake frequency and wait frequency represent how much a task is used
 	 * for a producer and a consumer, respectively. If both are high, the
-	 * task is in the middle of a task chain. We prioritize a producer.
+	 * task is in the middle of a task chain. The ratio tends to follow an
+	 * exponentially skewed distribution, so we linearize it using log2. We
+	 * add +1 to guarantee the latency criticality (log2-ed) is always
+	 * positive.
 	 */
-	lat_cri_raw = wait_freq_ft * wake_freq_ft * wake_freq_ft;
-
-	/*
-	 * The ratio above tends to follow an exponentially skewed
-	 * distribution, so we linearize it using log2 before converting it to
-	 * a boost priority. We add +1 to guarantee the latency criticality
-	 * (log2-ed) is always positive.
-	 */
-	lat_cri = log2_u64(lat_cri_raw + 1);
+	lat_cri = log2_u64(runtime_ft * wait_freq_ft + 1) +
+		  log2_u64(wake_freq_ft * wake_freq_ft + 1);
 
 	/*
 	 * A user-provided nice value is a strong hint for latency-criticality.
 	 */
 	lat_cri += calc_static_prio_factor(p);
+
+	/*
+	 * Prioritize a wake-up task since this is a clear sign of immediate
+	 * consumer. If it is a synchronous wakeup, doule the prioritization.
+	 */
+	if (enq_flags & SCX_ENQ_WAKEUP)
+		lat_cri += LAVD_LC_WAKEUP_FT;
+
+	if (taskc->sync_wakeup) {
+		lat_cri += LAVD_LC_WAKEUP_FT;
+		taskc->sync_wakeup = false;
+	}
+
+	/*
+	 * Make sure the lat_cri is non-zero.
+	 */
 	lat_cri = max(lat_cri, 1);
-
 	taskc->lat_cri = lat_cri;
-}
-
-static u64 calc_starv_cri(struct task_ctx *taskc, bool is_wakeup)
-{
-	return calc_starvation_factor(taskc) + (is_wakeup * LAVD_LC_WAKEUP_FT);
+	return lat_cri;
 }
 
 static void calc_virtual_deadline_delta(struct task_struct *p,
 					struct task_ctx *taskc, u64 enq_flags)
 {
-	bool is_wakeup;
-	u64 sc;
+	u64 deadline, lat_cri, greedy_ratio;
 
-	is_wakeup = is_wakeup_ef(enq_flags);
-	calc_lat_cri(p, taskc);
-	sc = calc_starv_cri(taskc, is_wakeup);
-	taskc->vdeadline_delta_ns = taskc->run_time_ns / (taskc->lat_cri + sc);
+	/*
+	 * Calculate the deadline based on latency criticality and greedy ratio.
+	 */
+	lat_cri = calc_lat_cri(p, taskc, enq_flags);
+	greedy_ratio = calc_greedy_ratio(taskc);
+	deadline = (LAVD_SLICE_MAX_NS * greedy_ratio) / (1000 * lat_cri);
+	taskc->vdeadline_delta_ns = deadline;
 }
 
 static u64 calc_task_load_actual(struct task_ctx *taskc)
@@ -1361,19 +1272,14 @@ static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 
 	/*
 	 * Before enqueueing a task to a run queue, we should decide when a
-	 * task should be scheduled. It is determined by two factors: how
-	 * urgent it is - vdeadline_delta_ns - and when it becomes eligible if
-	 * overscheduled - eligible_time_ns.
+	 * task should be scheduled.
 	 */
 	calc_virtual_deadline_delta(p, taskc, enq_flags);
-	calc_eligible_delta(taskc, enq_flags);
 
 	/*
-	 * Update the logical clock of the virtual deadline including
-	 * ineligible duration.
+	 * Update the logical clock of the virtual deadline.
 	 */
-	vlc = READ_ONCE(cur_logical_clk) + taskc->eligible_delta_ns +
-	      taskc->vdeadline_delta_ns;
+	vlc = READ_ONCE(cur_logical_clk) + taskc->vdeadline_delta_ns;
 	WRITE_ONCE(taskc->vdeadline_log_clk, vlc);
 }
 
@@ -1684,13 +1590,6 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	return ret;
 }
 
-static bool is_lat_cri_task(struct task_ctx *taskc)
-{
-	struct sys_stat *stat_cur = get_sys_stat_cur();
-
-	return taskc->lat_cri > stat_cur->thr_lat_cri;
-}
-
 static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 			  struct cpu_ctx *cpuc, u64 enq_flags)
 {
@@ -1706,7 +1605,7 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	calc_when_to_run(p, taskc, enq_flags);
 
 	/*
-	 * If a task is eligible, dispatch to the eligible DSQ.
+	 * If a task is eligible, try to preempt a task.
 	 */
 	if (is_eligible(taskc)) {
 		/*
@@ -1857,6 +1756,8 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	taskc = get_task_ctx(p);
 	if (!taskc)
 		return prev_cpu;
+
+	taskc->sync_wakeup = !!(wake_flags & SCX_WAKE_SYNC);
 
 	cpu_id = pick_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
 	if (found_idle) {
@@ -2142,7 +2043,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * is updated. The @current task is a waker and @p is a waiter, which
 	 * is being wakened up now.
 	 */
-	if (!is_wakeup_ef(enq_flags))
+	if (!(enq_flags & SCX_ENQ_WAKEUP))
 		return;
 
 	/*

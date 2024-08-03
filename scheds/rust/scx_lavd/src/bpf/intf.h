@@ -63,16 +63,13 @@ enum consts {
 
 	LAVD_LC_FREQ_MAX		= 1000000,
 	LAVD_LC_RUNTIME_MAX		= LAVD_TARGETED_LATENCY_NS,
-	LAVD_LC_RUNTIME_SHIFT		= 10,
+	LAVD_LC_RUNTIME_SHIFT		= 15,
 	LAVD_LC_WAKEUP_FT		= 30,
-	LAVD_LC_STARVATION_FT		= 30,
 
 	LAVD_SLICE_BOOST_MAX_FT		= 3, /* maximum additional 3x of slice */
 	LAVD_SLICE_BOOST_MAX_STEP	= 6, /* 6 slice exhausitions in a row */
 	LAVD_NEW_PROC_PENALITY		= 5,
 	LAVD_GREEDY_RATIO_NEW		= (1000 * LAVD_NEW_PROC_PENALITY),
-
-	LAVD_ELIGIBLE_TIME_MAX		= (9999ULL * LAVD_TIME_ONE_SEC),
 
 	LAVD_CPU_UTIL_MAX		= 1000, /* 100.0% */
 	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= 850, /* 85.0% */
@@ -208,13 +205,12 @@ struct task_ctx {
 	 */
 	u64	vdeadline_log_clk;	/* logical clock of the deadilne */
 	u64	vdeadline_delta_ns;	/* time delta until task's virtual deadline */
-	u64	eligible_delta_ns;	/* time delta until task becomes eligible */
 	u64	slice_ns;		/* time slice */
 	u32	greedy_ratio;		/* task's overscheduling ratio compared to its nice priority */
 	u32	lat_cri;		/* calculated latency criticality */
 	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
-
+	u8	sync_wakeup;
 	/*
 	 * Task's performance criticality
 	 */
@@ -229,7 +225,7 @@ struct task_ctx_x {
 	u32	cpu_id;		/* where a task ran */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
 	u32	avg_perf_cri;	/* average performance criticality */
-	u32	thr_lat_cri;	/* threshold for latency criticality */
+	u32	avg_lat_cri;	/* average latency criticality */
 	u32	nr_active;	/* number of active cores */
 	u32	cpuperf_cur;	/* CPU's current performance target */
 };
