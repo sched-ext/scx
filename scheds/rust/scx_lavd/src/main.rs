@@ -60,10 +60,6 @@ struct Opts {
     #[clap(long = "prefer-smt-core", action = clap::ArgAction::SetTrue)]
     prefer_smt_core: bool,
 
-    /// Disable 2-level scheduling, which segregates latency-critical tasks from regular tasks
-    #[clap(long = "no-2-level-scheduling", action = clap::ArgAction::SetTrue)]
-    no_2_level_scheduling: bool,
-
     /// Disable frequency scaling by scx_lavd
     #[clap(long = "no-freq-scaling", action = clap::ArgAction::SetTrue)]
     no_freq_scaling: bool,
@@ -325,7 +321,7 @@ impl<'a> Scheduler<'a> {
 
         if mseq % 32 == 1 {
             info!(
-                "| {:6} | {:7} | {:17} \
+                "| {:6} | {:7} | {:17} | {:5} \
                    | {:4} | {:4} | {:12} \
                    | {:14} | {:8} | {:7} \
                    | {:8} | {:7} | {:8} \
@@ -336,6 +332,7 @@ impl<'a> Scheduler<'a> {
                 "mseq",
                 "pid",
                 "comm",
+                "stat",
                 "cpu",
                 "vtmc",
                 "vddln_ns",
@@ -343,7 +340,7 @@ impl<'a> Scheduler<'a> {
                 "slc_ns",
                 "grdy_rt",
                 "lat_cri",
-                "avg_lc",
+                "thr_lc",
                 "st_prio",
                 "slc_bst",
                 "run_freq",
@@ -362,8 +359,12 @@ impl<'a> Scheduler<'a> {
         let c_tx_cm_str: &CStr = unsafe { CStr::from_ptr(c_tx_cm) };
         let tx_comm: &str = c_tx_cm_str.to_str().unwrap();
 
+        let c_tx_st: *const c_char = (&tx.stat as *const [c_char; 6]) as *const c_char;
+        let c_tx_st_str: &CStr = unsafe { CStr::from_ptr(c_tx_st) };
+        let tx_stat: &str = c_tx_st_str.to_str().unwrap();
+
         info!(
-            "| {:6} | {:7} | {:17} \
+            "| {:6} | {:7} | {:17} | {:5} \
                | {:4} | {:4} | {:12} \
                | {:14} | {:8} | {:7} \
                | {:8} | {:7} | {:8} \
@@ -374,6 +375,7 @@ impl<'a> Scheduler<'a> {
             mseq,
             tx.pid,
             tx_comm,
+            tx_stat,
             tx.cpu_id,
             tc.victim_cpu,
             tc.vdeadline_delta_ns,
@@ -381,7 +383,7 @@ impl<'a> Scheduler<'a> {
             tc.slice_ns,
             tc.greedy_ratio,
             tc.lat_cri,
-            tx.avg_lat_cri,
+            tx.thr_lat_cri,
             tx.static_prio,
             tc.slice_boost_prio,
             tc.run_freq,
@@ -419,11 +421,6 @@ impl<'a> Scheduler<'a> {
         // If not yet requested, do nothing.
         if self.intrspc.requested == false as u8 {
             return;
-        }
-
-        // Once dumped, it is done.
-        if self.intrspc.cmd == LAVD_CMD_DUMP {
-            self.intrspc.cmd = LAVD_CMD_NOP;
         }
     }
 
@@ -505,7 +502,8 @@ fn main() -> Result<()> {
             "    Note that scx_lavd currently is not optimized for multi-CCX/NUMA architectures."
         );
         info!("    Stay tuned for future improvements!");
-
+        info!(
+            "    stat: ('L'atency-critical, 'R'egular) (performance-'H'ungry, performance-'I'nsensitive) ('B'ig, li'T'tle) ('E'ligigle, 'G'reedy) ('P'reempting, 'N'ot)");
         info!("scx_lavd scheduler starts running.");
         if !sched.run()?.should_restart() {
             break;

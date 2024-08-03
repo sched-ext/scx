@@ -64,12 +64,15 @@ enum consts {
 	LAVD_LC_FREQ_MAX		= 1000000,
 	LAVD_LC_RUNTIME_MAX		= LAVD_TARGETED_LATENCY_NS,
 	LAVD_LC_RUNTIME_SHIFT		= 10,
+	LAVD_LC_WAKEUP_FT		= 30,
+	LAVD_LC_STARVATION_FT		= 30,
 
-	LAVD_SLICE_BOOST_MAX_FT		= 3, /* maximum additional 2x of slice */
-	LAVD_SLICE_BOOST_MAX_STEP	= 6, /* 8 slice exhausitions in a row */
-	LAVD_GREEDY_RATIO_NEW		= 2000,
+	LAVD_SLICE_BOOST_MAX_FT		= 3, /* maximum additional 3x of slice */
+	LAVD_SLICE_BOOST_MAX_STEP	= 6, /* 6 slice exhausitions in a row */
+	LAVD_NEW_PROC_PENALITY		= 5,
+	LAVD_GREEDY_RATIO_NEW		= (1000 * LAVD_NEW_PROC_PENALITY),
 
-	LAVD_ELIGIBLE_TIME_MAX		= (1ULL * LAVD_TIME_ONE_SEC),
+	LAVD_ELIGIBLE_TIME_MAX		= (9999ULL * LAVD_TIME_ONE_SEC),
 
 	LAVD_CPU_UTIL_MAX		= 1000, /* 100.0% */
 	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= 850, /* 85.0% */
@@ -88,9 +91,13 @@ enum consts {
 	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL /
 					   LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_LATENCY_CRITICAL_DSQ	= 0, /* a global DSQ for latency-criticcal tasks */
-	LAVD_REGULAR_DSQ		= 1, /* a global DSQ for non-latency-criticcal tasks */
-	LAVD_DSQ_STARVE_TIMEOUT		= (5ULL * NSEC_PER_USEC),
+	LAVD_GLOBAL_DSQ			= 0, /* a global DSQ */
+
+	LAVD_STATUS_STR_LEN		= 5, /* {LR: Latency-critical, Regular}
+						{HI: performance-Hungry, performance-Insensitive}
+						{BT: Big, liTtle}
+						{EG: Eligible, Greedy}
+						{PN: Preemption, Not} */
 };
 
 /*
@@ -170,6 +177,7 @@ struct cpu_ctx {
 	 *
 	 */
 	u16		capacity;	/* CPU capacity based on 1000 */
+	u8		big_core;	/* is it a big core? */
 	struct bpf_cpumask __kptr *tmp_a_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_o_mask;	/* temporary cpu mask */
 } __attribute__((aligned(CACHELINE_SIZE)));
@@ -204,7 +212,6 @@ struct task_ctx {
 	u64	slice_ns;		/* time slice */
 	u32	greedy_ratio;		/* task's overscheduling ratio compared to its nice priority */
 	u32	lat_cri;		/* calculated latency criticality */
-	u32	starv_cri;		/* calculated starvation criticality */
 	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
 
@@ -217,11 +224,12 @@ struct task_ctx {
 struct task_ctx_x {
 	pid_t	pid;
 	char	comm[TASK_COMM_LEN + 1];
+	char	stat[LAVD_STATUS_STR_LEN + 1];
 	u16	static_prio;	/* nice priority */
 	u32	cpu_id;		/* where a task ran */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
 	u32	avg_perf_cri;	/* average performance criticality */
-	u32	avg_lat_cri;	/* average latency criticality */
+	u32	thr_lat_cri;	/* threshold for latency criticality */
 	u32	nr_active;	/* number of active cores */
 	u32	cpuperf_cur;	/* CPU's current performance target */
 };
@@ -234,7 +242,6 @@ enum {
        LAVD_CMD_NOP		= 0x0,
        LAVD_CMD_SCHED_N		= 0x1,
        LAVD_CMD_PID		= 0x2,
-       LAVD_CMD_DUMP		= 0x3,
 };
 
 enum {
