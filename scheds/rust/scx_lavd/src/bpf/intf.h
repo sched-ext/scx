@@ -84,7 +84,7 @@ enum consts {
 	LAVD_CC_PER_CORE_MAX_CTUIL	= 500, /* maximum per-core CPU utilization */
 	LAVD_CC_NR_ACTIVE_MIN		= 1, /* num of mininum active cores */
 	LAVD_CC_NR_OVRFLW		= 1, /* num of overflow cores */
-	LAVD_CC_CPU_PIN_INTERVAL	= (100ULL * NSEC_PER_MSEC),
+	LAVD_CC_CPU_PIN_INTERVAL	= (3ULL * LAVD_TIME_ONE_SEC),
 	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL /
 					   LAVD_SYS_STAT_INTERVAL_NS),
 

@@ -752,9 +752,6 @@ static void clear_cpu_periodically(u32 cpu, struct bpf_cpumask *cpumask)
 	 * (LAVD_CC_CPU_PIN_INTERVAL_DIV). Hence, the bit will be
 	 * probabilistically cleared once every 100 msec (4 * 25 msec).
 	 */
-	if (!bpf_cpumask_test_cpu(cpu, cast_mask(cpumask)))
-		return;
-
 	clear = !(bpf_get_prandom_u32() % LAVD_CC_CPU_PIN_INTERVAL_DIV);
 	if (clear)
 		bpf_cpumask_clear_cpu(cpu, cpumask);
