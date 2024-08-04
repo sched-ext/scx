@@ -20,8 +20,6 @@ use libc::{pthread_self, pthread_setschedparam, sched_param};
 #[cfg(target_env = "musl")]
 use libc::timespec;
 
-use scx_utils::compat;
-use scx_utils::init_libbpf_logging;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -73,7 +71,6 @@ pub struct QueuedTask {
     pub pid: i32,              // pid that uniquely identifies a task
     pub cpu: i32,              // CPU where the task is running (-1 = exiting)
     pub sum_exec_runtime: u64, // Total cpu time
-    pub nvcsw: u64,            // Voluntary context switches
     pub weight: u64,           // Task static priority
     cpumask_cnt: u64,          // cpumask generation counter (private)
 }
@@ -152,7 +149,6 @@ impl EnqueuedMessage {
             cpu: self.inner.cpu,
             cpumask_cnt: self.inner.cpumask_cnt,
             sum_exec_runtime: self.inner.sum_exec_runtime,
-            nvcsw: self.inner.nvcsw,
             weight: self.inner.weight,
         }
     }
@@ -184,7 +180,6 @@ impl<'cb> BpfScheduler<'cb> {
     pub fn init(
         slice_us: u64,
         nr_cpus_online: i32,
-        partial: bool,
         exit_dump_len: u32,
         full_user: bool,
         low_power: bool,
@@ -193,7 +188,6 @@ impl<'cb> BpfScheduler<'cb> {
     ) -> Result<Self> {
         // Open the BPF prog first for verification.
         let skel_builder = BpfSkelBuilder::default();
-        init_libbpf_logging(None);
         let mut skel = scx_ops_open!(skel_builder, rustland)?;
 
         // Lock all the memory to prevent page faults that could trigger potential deadlocks during
@@ -242,9 +236,6 @@ impl<'cb> BpfScheduler<'cb> {
         skel.rodata_mut().num_possible_cpus = nr_cpus_online;
 
         // Set scheduler options (defined in the BPF part).
-        if partial {
-            skel.struct_ops.rustland_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
-        }
         skel.struct_ops.rustland_mut().exit_dump_len = exit_dump_len;
 
         skel.bss_mut().usersched_pid = std::process::id();

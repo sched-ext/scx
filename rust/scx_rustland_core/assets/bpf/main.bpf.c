@@ -462,7 +462,7 @@ static void dispatch_user_scheduler(void)
 	 * Dispatch the scheduler on the first CPU available, likely the
 	 * current one.
 	 */
-	dispatch_task(p, SHARED_DSQ, 0, 0, SCX_ENQ_PREEMPT);
+	dispatch_task(p, SHARED_DSQ, 0, 0, 0);
 	bpf_task_release(p);
 }
 
@@ -608,7 +608,6 @@ static void get_task_info(struct queued_task_ctx *task,
 		return;
 	task->cpumask_cnt = tctx->cpumask_cnt;
 	task->sum_exec_runtime = p->se.sum_exec_runtime;
-	task->nvcsw = p->nvcsw;
 	task->weight = p->scx.weight;
 	task->cpu = scx_bpf_task_cpu(p);
 }
@@ -761,15 +760,16 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, 0);
 
-	/* Consume first task both from the shared DSQ and the per-CPU DSQ */
+	/*
+	 * First try to consume a task from the per-CPU DSQ.
+	 */
+	if (scx_bpf_consume(cpu_to_dsq(cpu)))
+		return;
+
+	/*
+	 * Consume a task from the shared DSQ.
+	 */
 	scx_bpf_consume(SHARED_DSQ);
-	if (scx_bpf_consume(cpu_to_dsq(cpu))) {
-		/*
-		 * Re-kick the current CPU if there are more tasks in the
-		 * per-CPU DSQ
-		 */
-		scx_bpf_kick_cpu(cpu, 0);
-	}
 }
 
 /*
