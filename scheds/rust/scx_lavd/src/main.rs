@@ -28,8 +28,8 @@ use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use log::debug;
-use log::warn;
 use log::info;
+use log::warn;
 use scx_utils::build_id;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -148,30 +148,24 @@ impl FlatTopology {
         // Build a vector of cpu flat ids.
         let mut base_freq = 0;
         for (node_id, node) in topo.nodes().iter().enumerate() {
-            let mut llc_pos = 0;
-            for (_llc_id, llc) in node.llcs().iter() {
-                let mut core_pos = 0;
-                for (_core_id, core) in llc.cores().iter() {
-                    let mut cpu_pos = 0;
-                    for (_cpu_id, cpu) in core.cpus().iter() {
+            for (llc_pos, (_llc_id, llc)) in node.llcs().iter().enumerate() {
+                for (core_pos, (_core_id, core)) in llc.cores().iter().enumerate() {
+                    for (cpu_pos, (cpu_id, cpu)) in core.cpus().iter().enumerate() {
                         let cpu_fid = CpuFlatId {
                             node_id,
                             llc_pos,
                             max_freq: cpu.max_freq(),
                             core_pos,
                             cpu_pos,
-                            cpu_id: cpu.id(),
+                            cpu_id: *cpu_id,
                             cpu_cap: 0,
                         };
                         cpu_fids.push(cpu_fid);
-                        cpu_pos += 1;
                         if base_freq < cpu.max_freq() {
                             base_freq = cpu.max_freq();
                         }
                     }
-                    core_pos += 1;
                 }
-                llc_pos += 1;
             }
         }
 
@@ -193,36 +187,22 @@ impl FlatTopology {
         if prefer_smt_core {
             // Sort the cpu_fids  by node, llc, max_freq, core, and cpu order
             cpu_fids.sort_by(|a, b| {
-                if a.node_id == b.node_id {
-                    if a.llc_pos == b.llc_pos {
-                        if a.max_freq == b.max_freq {
-                            if a.core_pos == b.core_pos {
-                                return a.cpu_pos.cmp(&b.cpu_pos);
-                            }
-                            return a.core_pos.cmp(&b.core_pos);
-                        }
-                        return b.max_freq.cmp(&a.max_freq);
-                    }
-                    return a.llc_pos.cmp(&b.llc_pos);
-                }
-                return a.node_id.cmp(&b.node_id);
+                a.node_id
+                    .cmp(&b.node_id)
+                    .then_with(|| a.llc_pos.cmp(&b.llc_pos))
+                    .then_with(|| a.max_freq.cmp(&b.max_freq))
+                    .then_with(|| a.core_pos.cmp(&b.core_pos))
+                    .then_with(|| a.cpu_pos.cmp(&b.cpu_pos))
             });
         } else {
             // Sort the cpu_fids  by cpu, node, llc, max_freq, and core order
             cpu_fids.sort_by(|a, b| {
-                if a.cpu_pos == b.cpu_pos {
-                    if a.node_id == b.node_id {
-                        if a.llc_pos == b.llc_pos {
-                            if a.max_freq == b.max_freq {
-                                return a.core_pos.cmp(&b.core_pos);
-                            }
-                            return b.max_freq.cmp(&a.max_freq);
-                        }
-                        return a.llc_pos.cmp(&b.llc_pos);
-                    }
-                    return a.cpu_pos.cmp(&b.cpu_pos);
-                }
-                return a.cpu_pos.cmp(&b.cpu_pos);
+                a.cpu_pos
+                    .cmp(&b.cpu_pos)
+                    .then_with(|| a.node_id.cmp(&b.node_id))
+                    .then_with(|| a.llc_pos.cmp(&b.llc_pos))
+                    .then_with(|| a.max_freq.cmp(&b.max_freq))
+                    .then_with(|| a.core_pos.cmp(&b.core_pos))
             });
         }
 
