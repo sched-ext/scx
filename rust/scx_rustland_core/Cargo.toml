@@ -2,7 +2,7 @@
 name = "scx_rustland_core"
 version = "1.0.1"
 edition = "2021"
-authors = ["Andrea Righi <andrea.righi@canonical.com>"]
+authors = ["Andrea Righi <andrea.righi@linux.dev>"]
 license = "GPL-2.0-only"
 repository = "https://github.com/sched-ext/scx"
 description = "Framework to implement sched_ext schedulers running in user space"

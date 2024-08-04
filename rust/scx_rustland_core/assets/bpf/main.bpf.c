@@ -1,4 +1,4 @@
-/* Copyright (c) Andrea Righi <andrea.righi@canonical.com> */
+/* Copyright (c) Andrea Righi <andrea.righi@linux.dev> */
 /*
  * scx_rustland_core: BPF backend for schedulers running in user-space.
  *
