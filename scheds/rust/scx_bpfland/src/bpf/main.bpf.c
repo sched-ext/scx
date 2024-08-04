@@ -609,16 +609,22 @@ static bool consume_offline_cpus(s32 cpu)
 	 * those that are offline.
 	 */
 	bpf_repeat(nr_cpu_ids - 1) {
+		s32 dsq_id;
+
 		cpu = (cpu + 1) % nr_cpu_ids;
+		dsq_id = cpu_to_dsq(cpu);
 
 		if (!bpf_cpumask_test_cpu(cpu, cast_mask(offline)))
 			continue;
+		if (!scx_bpf_dsq_nr_queued(dsq_id))
+			continue;
+		set_offline_needed();
+
 		/*
 		 * This CPU is offline, if a task has been dispatched there
 		 * consume it immediately on the current CPU.
 		 */
-		if (scx_bpf_consume(cpu_to_dsq(cpu))) {
-			set_offline_needed();
+		if (scx_bpf_consume(dsq_id)) {
 			ret = true;
 			break;
 		}

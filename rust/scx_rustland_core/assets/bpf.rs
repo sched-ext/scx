@@ -6,6 +6,9 @@
 use crate::bpf_intf;
 use crate::bpf_skel::*;
 
+use std::fs::File;
+use std::io::Read;
+
 use anyhow::Context;
 use anyhow::Result;
 
@@ -176,18 +179,28 @@ static mut BUF: AlignedBuffer = AlignedBuffer([0; BUFSIZE]);
 // ring buffer.
 const LIBBPF_STOP: i32 = -255;
 
+fn is_smt_active() -> std::io::Result<bool> {
+    let mut file = File::open("/sys/devices/system/cpu/smt/active")?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+
+    let smt_active: i32 = contents.trim().parse().unwrap_or(0);
+
+    Ok(smt_active == 1)
+}
+
 impl<'cb> BpfScheduler<'cb> {
     pub fn init(
-        slice_us: u64,
-        nr_cpus_online: i32,
         exit_dump_len: u32,
+        slice_us: u64,
         full_user: bool,
         low_power: bool,
-        fifo_sched: bool,
+        verbose: bool,
         debug: bool,
     ) -> Result<Self> {
         // Open the BPF prog first for verification.
-        let skel_builder = BpfSkelBuilder::default();
+        let mut skel_builder = BpfSkelBuilder::default();
+        skel_builder.obj_builder.debug(verbose);
         let mut skel = scx_ops_open!(skel_builder, rustland)?;
 
         // Lock all the memory to prevent page faults that could trigger potential deadlocks during
@@ -229,21 +242,17 @@ impl<'cb> BpfScheduler<'cb> {
             LIBBPF_STOP
         }
 
-        // Initialize online CPUs counter.
-        //
-        // NOTE: we should probably refresh this counter during the normal execution to support cpu
-        // hotplugging, but for now let's keep it simple and set this only at initialization).
-        skel.rodata_mut().num_possible_cpus = nr_cpus_online;
+        // Check host topology to determine if we need to enable SMT capabilities.
+        skel.rodata_mut().smt_enabled = is_smt_active()?;
 
         // Set scheduler options (defined in the BPF part).
         skel.struct_ops.rustland_mut().exit_dump_len = exit_dump_len;
 
         skel.bss_mut().usersched_pid = std::process::id();
         skel.rodata_mut().slice_ns = slice_us * 1000;
-        skel.rodata_mut().debug = debug;
         skel.rodata_mut().full_user = full_user;
         skel.rodata_mut().low_power = low_power;
-        skel.rodata_mut().fifo_sched = fifo_sched;
+        skel.rodata_mut().debug = debug;
 
         // Attach BPF scheduler.
         let mut skel = scx_ops_load!(skel, rustland, uei)?;

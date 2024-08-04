@@ -117,22 +117,13 @@ struct Opts {
     #[clap(short = 'l', long, action = clap::ArgAction::SetTrue)]
     low_power: bool,
 
-    /// By default the scheduler automatically transitions to FIFO mode when the system is
-    /// underutilized. This allows to reduce unnecessary scheduling overhead and boost performance
-    /// when the system is not running at full capacity.
-    ///
-    /// Be aware that FIFO mode can lead to less predictable performance. Therefore, use this
-    /// option if performance predictability is important, such as when running real-time audio
-    /// applications or during live streaming. Conversely, avoid using this option when you care
-    /// about maximizing performance, such as gaming.
-    ///
-    /// Set this option to disable this automatic transition.
-    #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
-    disable_fifo: bool,
-
     /// Exit debug dump buffer length. 0 indicates default.
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
+
+    /// Enable verbose output, including libbpf details.
+    #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
+    verbose: bool,
 
     /// If specified, all the BPF scheduling events will be reported in
     /// debugfs (e.g., /sys/kernel/debug/tracing/trace_pipe).
@@ -140,7 +131,7 @@ struct Opts {
     debug: bool,
 
     /// Print scheduler version and exit.
-    #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
+    #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
 }
 
@@ -298,17 +289,15 @@ impl<'a> Scheduler<'a> {
         let topo_map = TopologyMap::new(&topo).expect("Failed to generate topology map");
 
         // Low-level BPF connector.
-        let nr_cpus = topo.nr_cpu_ids();
         let bpf = BpfScheduler::init(
-            opts.slice_us,
-            nr_cpus as i32,
             opts.exit_dump_len,
+            opts.slice_us,
             opts.full_user,
             opts.low_power,
-            !opts.disable_fifo,
+            opts.verbose,
             opts.debug,
         )?;
-        info!("{} scheduler attached - {} CPUs", SCHEDULER_NAME, nr_cpus);
+        info!("{} scheduler attached", SCHEDULER_NAME);
 
         // Return scheduler object.
         Ok(Self {

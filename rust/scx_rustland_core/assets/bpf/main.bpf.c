@@ -42,9 +42,6 @@ UEI_DEFINE(uei);
  */
 #define SHARED_DSQ MAX_CPUS
 
-/* !0 for veristat, set during init */
-const volatile s32 num_possible_cpus = 8;
-
 /*
  * Scheduler attributes and statistics.
  */
@@ -72,7 +69,7 @@ volatile u64 nr_scheduled;
 /*
  * Amount of currently running tasks.
  */
-volatile u64 nr_running;
+volatile u64 nr_running, nr_online_cpus;
 
 /* Dispatch statistics */
 volatile u64 nr_user_dispatches, nr_kernel_dispatches,
@@ -83,6 +80,12 @@ volatile u64 nr_failed_dispatches, nr_sched_congested;
 
  /* Report additional debugging information */
 const volatile bool debug;
+
+/* Allow to use bpf_printk() only when @debug is set */
+#define dbg_msg(_fmt, ...) do {						\
+	if (debug)							\
+		bpf_printk(_fmt, ##__VA_ARGS__);			\
+} while(0)
 
 /*
  * Enable/disable full user-space mode.
@@ -106,23 +109,75 @@ const volatile bool full_user;
 const volatile bool low_power;
 
 /*
- * Automatically switch to simple FIFO scheduling during periods of system
- * underutilization to minimize unnecessary scheduling overhead.
- *
- * 'fifo_sched' can be used by the user-space scheduler to enable/disable this
- * behavior.
- *
- * 'is_fifo_enabled' indicates whether the scheduling has switched to FIFO mode
- * or regular scheduling mode.
+ * CPUs in the system have SMT is enabled.
  */
-const volatile bool fifo_sched;
-static bool is_fifo_enabled;
+const volatile bool smt_enabled = true;
 
-/* Allow to use bpf_printk() only when @debug is set */
-#define dbg_msg(_fmt, ...) do {						\
-	if (debug)							\
-		bpf_printk(_fmt, ##__VA_ARGS__);			\
-} while(0)
+/*
+ * Mask of offline CPUs, used to properly support CPU hotplugging.
+ */
+private(BPFLAND) struct bpf_cpumask __kptr *offline_cpumask;
+
+/*
+ * Set the state of a CPU in a cpumask.
+ */
+static bool set_cpu_state(struct bpf_cpumask *cpumask, s32 cpu, bool state)
+{
+	if (!cpumask)
+		return false;
+	if (state)
+		return bpf_cpumask_test_and_set_cpu(cpu, cpumask);
+	else
+		return bpf_cpumask_test_and_clear_cpu(cpu, cpumask);
+}
+
+/*
+ * Access a cpumask in read-only mode (typically to check bits).
+ */
+static const struct cpumask *cast_mask(struct bpf_cpumask *mask)
+{
+	return (const struct cpumask *)mask;
+}
+
+/*
+ * Allocate/re-allocate a new cpumask.
+ */
+static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
+{
+	struct bpf_cpumask *cpumask;
+
+	cpumask = bpf_cpumask_create();
+	if (!cpumask)
+		return -ENOMEM;
+
+	cpumask = bpf_kptr_xchg(p_cpumask, cpumask);
+	if (cpumask)
+		bpf_cpumask_release(cpumask);
+
+	return 0;
+}
+
+/*
+ * Determine when we need to drain tasks dispatched to CPUs that went offline.
+ */
+static int offline_needed;
+
+/*
+ * Notify the scheduler that we need to drain and re-enqueue the tasks
+ * dispatched to the offline CPU DSQs.
+ */
+static void set_offline_needed(void)
+{
+	__sync_fetch_and_or(&offline_needed, 1);
+}
+
+/*
+ * Check and clear the state of the offline CPUs re-enqueuing.
+ */
+static bool test_and_clear_offline_needed(void)
+{
+	return __sync_fetch_and_and(&offline_needed, 0) == 1;
+}
 
 /*
  * Maximum amount of tasks queued between kernel and user-space at a certain
@@ -214,9 +269,8 @@ struct {
 } usersched_timer SEC(".maps");
 
 /*
- * Time period of the scheduler heartbeat, used to periodically kick the the
- * scheduler and check if we need to switch to FIFO mode or regular
- * scheduling (default 100ms).
+ * Time period of the scheduler heartbeat, used to periodically kick the
+ * user-space scheduler and check if there is any pending activity.
  */
 #define USERSCHED_TIMER_NS (NSEC_PER_SEC / 10)
 
@@ -356,7 +410,7 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 	u64 slice = task_slice_ns ? : slice_ns;
 	u64 curr_cpumask_cnt;
 	bool force_shared = false;
-	s32 cpu;
+	s32 cpu = scx_bpf_task_cpu(p);
 
 	switch (dsq_id) {
 	case SHARED_DSQ:
@@ -433,30 +487,31 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 		dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu",
 			p->pid, p->comm, dsq_id, enq_flags, slice);
 
-		/*
-		 * Wake up the target CPU (only if idle and if we are bouncing
-		 * to a different CPU).
-		 */
-		if (cpu != bpf_get_smp_processor_id())
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		break;
 	}
+
+	/*
+	 * Wake up the target CPU (only if idle and if we are bouncing
+	 * to a different CPU).
+	 */
+	if (cpu != bpf_get_smp_processor_id())
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
 /*
  * Dispatch the user-space scheduler.
  */
-static void dispatch_user_scheduler(void)
+static bool dispatch_user_scheduler(void)
 {
 	struct task_struct *p;
 
 	if (!test_and_clear_usersched_needed())
-		return;
+		return false;
 
 	p = bpf_task_from_pid(usersched_pid);
 	if (!p) {
 		scx_bpf_error("Failed to find usersched task %d", usersched_pid);
-		return;
+		return false;
 	}
 	/*
 	 * Dispatch the scheduler on the first CPU available, likely the
@@ -464,30 +519,17 @@ static void dispatch_user_scheduler(void)
 	 */
 	dispatch_task(p, SHARED_DSQ, 0, 0, 0);
 	bpf_task_release(p);
-}
 
-/*
- * Directly dispatch a task to its local CPU, bypassing the user-space
- * scheduler.
- */
-static void
-dispatch_direct_local(struct task_struct *p, u64 slice_ns, u64 enq_flags)
-{
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
-
-	dbg_msg("dispatch: pid=%d (%s) dsq=SCX_DSQ_LOCAL enq_flags=%llx slice=%llu direct",
-		p->pid, p->comm, enq_flags, slice_ns);
-
-	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+	return true;
 }
 
 /*
  * Directly dispatch a task to a target CPU, bypassing the user-space
  * scheduler.
  */
-static int
-dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 slice_ns, u64 enq_flags)
+static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 {
+	struct bpf_cpumask *offline;
 	u64 dsq_id = cpu_to_dsq(cpu);
 
 	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
@@ -497,15 +539,122 @@ dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 slice_ns, u64 enq_flags)
 	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 
 	/*
-	 * We know that the CPU is idle here, because it has been assigned in
-	 * select_cpu(), so we don't need to use SCX_KICK_IDLE.
+	 * If the CPU has gone offline notify that the task needs to be
+	 * consumed from another CPU.
 	 */
-	scx_bpf_kick_cpu(cpu, 0);
+	offline = offline_cpumask;
+	if (!offline)
+		return 0;
+	if (bpf_cpumask_test_cpu(cpu, cast_mask(offline))) {
+		set_offline_needed();
+		return 0;
+	}
+
+	/*
+	 * Wake-up the target CPU to make sure that the task is consumed as
+	 * soon as possible.
+	 *
+	 * Note: the target CPU must be activated, because the task has been
+	 * dispatched to a DSQ that only the target CPU can consume. If we do
+	 * not kick the CPU, and the CPU is idle, the task can stall in the DSQ
+	 * indefinitely.
+	 */
+	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 	dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu direct",
 		p->pid, p->comm, dsq_id, enq_flags, slice_ns);
 
 	return 0;
+}
+
+/*
+ * Find an idle CPU in the system for the task.
+ *
+ * NOTE: the idle CPU selection doesn't need to be formally perfect, it is
+ * totally fine to accept racy conditions and potentially make mistakes, by
+ * picking CPUs that are not idle or even offline, the logic has been designed
+ * to handle these mistakes in favor of a more efficient response and a reduced
+ * scheduling overhead.
+ */
+static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
+{
+	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
+	s32 cpu;
+
+	/*
+	 * For tasks that can run only on a single CPU, we can simply verify if
+	 * their only allowed CPU is idle.
+	 */
+	if (p->nr_cpus_allowed == 1) {
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			return prev_cpu;
+
+		return -ENOENT;
+	}
+
+	/*
+	 * Acquire the CPU masks to determine the online and idle CPUs in the
+	 * system.
+	 */
+	online_cpumask = scx_bpf_get_online_cpumask();
+	idle_smtmask = scx_bpf_get_idle_smtmask();
+	idle_cpumask = scx_bpf_get_idle_cpumask();
+
+	/*
+	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
+	 */
+	if (smt_enabled) {
+		/*
+		 * If the task can still run on the previously used CPU and
+		 * it's a full-idle core, keep using it.
+		 */
+		if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
+		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
+		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+			cpu = prev_cpu;
+			goto out_put_cpumask;
+		}
+
+		/*
+		 * Otherwise, search for another usable full-idle core.
+		 */
+		cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, idle_smtmask);
+		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
+		    scx_bpf_test_and_clear_cpu_idle(cpu))
+			goto out_put_cpumask;
+	}
+
+	/*
+	 * If a full-idle core can't be found (or if this is not an SMT system)
+	 * try to re-use the same CPU, even if it's not in a full-idle core.
+	 */
+	if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
+	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		cpu = prev_cpu;
+		goto out_put_cpumask;
+	}
+
+	/*
+	 * If all the previous attempts have failed, try to use any idle CPU in
+	 * the system.
+	 */
+	cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, idle_cpumask);
+	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
+	    scx_bpf_test_and_clear_cpu_idle(cpu))
+		goto out_put_cpumask;
+
+	/*
+	 * If all the previous attempts have failed, dispatch the task to the
+	 * first CPU that will become available.
+	 */
+	cpu = -ENOENT;
+
+out_put_cpumask:
+	scx_bpf_put_cpumask(idle_cpumask);
+	scx_bpf_put_cpumask(idle_smtmask);
+	scx_bpf_put_cpumask(online_cpumask);
+
+	return cpu;
 }
 
 /*
@@ -523,8 +672,7 @@ dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 slice_ns, u64 enq_flags)
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	s32 cpu = prev_cpu;
-	bool do_direct = false;
+	s32 cpu;
 
 	/*
 	 * When full_user is enabled, the user-space scheduler is responsible
@@ -532,56 +680,13 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * possibly its own idle tracking mechanism.
 	 */
 	if (full_user)
+		return prev_cpu;
+
+	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
+	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0))
 		return cpu;
 
-	/*
-	 * If the previously used CPU is still available, keep using it to take
-	 * advantage of the cached working set.
-	 */
-	if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
-	    scx_bpf_test_and_clear_cpu_idle(cpu)) {
-		do_direct = true;
-		goto out;
-	}
-
-	/*
-	 * No need to check for other CPUs if the task can only run on one.
-	 */
-	if (p->nr_cpus_allowed == 1)
-		return cpu;
-
-	/*
-	 * Try to migrate to a fully idle core, if present.
-	 */
-	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, SCX_PICK_IDLE_CORE);
-	if (cpu >= 0) {
-		do_direct = true;
-		goto out;
-	}
-
-	/*
-	 * Check for any idle CPU.
-	 */
-	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-	if (cpu >= 0) {
-		do_direct = true;
-		goto out;
-	}
-
-	/*
-	 * Assign the previously used CPU if all the CPUs are busy.
-	 */
-	cpu = prev_cpu;
-out:
-	/*
-	 * If FIFO mode is completely disabled, allow to dispatch directly
-	 * here, otherwise dispatch directly only if the scheduler is currently
-	 * operating in FIFO mode.
-	 */
-	if ((!fifo_sched || is_fifo_enabled) && do_direct)
-		dispatch_direct_cpu(p, cpu, slice_ns, 0);
-
-	return cpu;
+	return prev_cpu;
 }
 
 /*
@@ -628,6 +733,7 @@ static void sched_congested(struct task_struct *p)
  */
 void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 {
+	s32 cpu = scx_bpf_task_cpu(p);
 	struct queued_task_ctx *task;
 
 	/*
@@ -638,31 +744,17 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Always dispatch per-CPU kthreads to the local CPU DSQ, bypassing the
-	 * user-space scheduler.
+	 * Always dispatch per-CPU kthreads directly on their target CPU.
 	 *
-	 * In this way we can prioritize critical kernel threads that may
+	 * This allows to prioritize critical kernel threads that may
 	 * potentially slow down the entire system if they are blocked for too
-	 * long (i.e., ksoftirqd/N, rcuop/N, etc.).
+	 * long (i.e., ksoftirqd/N, rcuop/N, etc.), but it could also cause
+	 * interactivity problems or unfairness if there are too many softirqs
+	 * being scheduled (e.g., in presence of high RX network traffic).
 	 */
-	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
-		dispatch_direct_local(p, slice_ns, enq_flags);
-		return;
-	}
-
-	/*
-	 * Check if we can dispatch the task directly, bypassing the user-space
-	 * scheduler.
-	 */
-	if (!full_user && is_fifo_enabled) {
-		if (!dispatch_direct_cpu(p, scx_bpf_task_cpu(p), slice_ns, enq_flags))
+	if (!full_user && is_kthread(p) && p->nr_cpus_allowed == 1)
+		if (!dispatch_direct_cpu(p, cpu, enq_flags))
 			return;
-		/*
-		 * Use the local DSQ if the target CPU is not valid anymore.
-		 */
-		dispatch_direct_local(p, slice_ns, enq_flags);
-		return;
-	}
 
 	/*
 	 * Add tasks to the @queued list, they will be processed by the
@@ -735,6 +827,50 @@ static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
 }
 
 /*
+ * Consume tasks dispatched to CPUs that have gone offline.
+ *
+ * These tasks will be consumed on other active CPUs to prevent indefinite
+ * stalling.
+ *
+ * Return true if one task is consumed, false otherwise.
+ */
+static bool consume_offline_cpus(s32 cpu)
+{
+	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
+	struct bpf_cpumask *offline;
+	bool ret = false;
+
+	if (!test_and_clear_offline_needed())
+		return false;
+
+	offline = offline_cpumask;
+	if (!offline)
+		return false;
+
+	/*
+	 * Cycle through all the CPUs and evenly consume tasks from the DSQs of
+	 * those that are offline.
+	 */
+	bpf_repeat(nr_cpu_ids - 1) {
+		cpu = (cpu + 1) % nr_cpu_ids;
+
+		if (!bpf_cpumask_test_cpu(cpu, cast_mask(offline)))
+			continue;
+		/*
+		 * This CPU is offline, if a task has been dispatched there
+		 * consume it immediately on the current CPU.
+		 */
+		if (scx_bpf_consume(cpu_to_dsq(cpu))) {
+			set_offline_needed();
+			ret = true;
+			break;
+		}
+	}
+
+	return ret;
+}
+
+/*
  * Dispatch tasks that are ready to run.
  *
  * This function is called when a CPU's local DSQ is empty and ready to accept
@@ -747,10 +883,24 @@ static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
 void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
+	 * Try also to steal tasks directly dispatched to CPUs that have gone
+	 * offline (this allows to prevent indefinite task stalls).
+	 */
+	if (consume_offline_cpus(cpu))
+		return;
+
+	/*
+	 * First try to consume a task from the per-CPU DSQ.
+	 */
+	if (scx_bpf_consume(cpu_to_dsq(cpu)))
+		return;
+
+	/*
 	 * Check if the user-space scheduler needs to run, and in that case try
 	 * to dispatch it immediately.
 	 */
-	dispatch_user_scheduler();
+	if (dispatch_user_scheduler())
+		return;
 
 	/*
 	 * Consume all tasks from the @dispatched list and immediately try to
@@ -759,12 +909,6 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 * determined by the scheduler).
 	 */
 	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, 0);
-
-	/*
-	 * First try to consume a task from the per-CPU DSQ.
-	 */
-	if (scx_bpf_consume(cpu_to_dsq(cpu)))
-		return;
 
 	/*
 	 * Consume a task from the shared DSQ.
@@ -780,6 +924,14 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 	s32 cpu = scx_bpf_task_cpu(p);
 
 	dbg_msg("start: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
+
+	/*
+	 * Ensure time slice never exceeds slice_ns when a task is started on a
+	 * CPU.
+	 */
+	if (p->scx.slice > slice_ns)
+		p->scx.slice = slice_ns;
+
 	/*
 	 * Mark the CPU as busy by setting the pid as owner (ignoring the
 	 * user-space scheduler).
@@ -870,6 +1022,23 @@ void BPF_STRUCT_OPS(rustland_cpu_release, s32 cpu,
 		set_usersched_needed();
 }
 
+void BPF_STRUCT_OPS(rustland_cpu_online, s32 cpu)
+{
+	/* Set the CPU state to online */
+	set_cpu_state(offline_cpumask, cpu, false);
+
+	__sync_fetch_and_add(&nr_online_cpus, 1);
+}
+
+void BPF_STRUCT_OPS(rustland_cpu_offline, s32 cpu)
+{
+	/* Set the CPU state to offline */
+	set_cpu_state(offline_cpumask, cpu, true);
+
+	__sync_fetch_and_sub(&nr_online_cpus, 1);
+	set_offline_needed();
+}
+
 /*
  * A new task @p is being created.
  *
@@ -922,41 +1091,6 @@ void BPF_STRUCT_OPS(rustland_exit_task, struct task_struct *p,
 }
 
 /*
- * Check whether we can switch to FIFO mode if the system is underutilized.
- */
-static bool should_enable_fifo(void)
-{
-	/* Moving average of the tasks that are waiting to be scheduled */
-	static u64 nr_waiting_avg;
-	/* Current amount of tasks waiting to be scheduled */
-	u64 nr_waiting = nr_queued + nr_scheduled;
-
-	if (!fifo_sched)
-		return false;
-
-	/*
-	 * Exiting from FIFO mode requires to have almost all the CPUs busy.
-	 */
-	if (is_fifo_enabled)
-		return nr_running < num_possible_cpus - 1;
-
-	/*
-	 * We are not in FIFO mode, check for the task waiting to be processed
-	 * by the user-space scheduler.
-	 *
-	 * We want to evaluate a moving average of the waiting tasks to prevent
-	 * bouncing too often between FIFO mode and user-space mode.
-	 */
-	nr_waiting_avg = (nr_waiting_avg + nr_waiting) / 2;
-
-	/*
-	 * The condition to go back to FIFO mode is to have no tasks (in
-	 * average) that are waiting to be scheduled.
-	 */
-	return nr_waiting_avg == 0;
-}
-
-/*
  * Heartbeat scheduler timer callback.
  *
  * If the system is completely idle the sched-ext watchdog may incorrectly
@@ -971,9 +1105,6 @@ static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
 
 	/* Kick the scheduler */
 	set_usersched_needed();
-
-	/* Update flag that determines if FIFO scheduling needs to be enabled */
-	is_fifo_enabled = should_enable_fifo();
 
 	/* Re-arm the timer */
 	err = bpf_timer_start(timer, USERSCHED_TIMER_NS, 0);
@@ -1007,6 +1138,28 @@ static int usersched_timer_init(void)
 }
 
 /*
+ * Evaluate the amount of online CPUs.
+ */
+s32 get_nr_online_cpus(void)
+{
+	const struct cpumask *online_cpumask;
+	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
+	int i, cpus = 0;
+
+	online_cpumask = scx_bpf_get_online_cpumask();
+
+	bpf_for(i, 0, nr_cpu_ids) {
+		if (!bpf_cpumask_test_cpu(i, online_cpumask))
+			continue;
+		cpus++;
+	}
+
+	scx_bpf_put_cpumask(online_cpumask);
+
+	return cpus;
+}
+
+/*
  * Create a DSQ for each CPU available in the system and a global shared DSQ.
  *
  * All the tasks processed by the user-space scheduler can be dispatched either
@@ -1017,11 +1170,15 @@ static int usersched_timer_init(void)
  */
 static int dsq_init(void)
 {
+	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
 	int err;
 	s32 cpu;
 
+	/* Initialize amount of online CPUs */
+	nr_online_cpus = get_nr_online_cpus();
+
 	/* Create per-CPU DSQs */
-	bpf_for(cpu, 0, num_possible_cpus) {
+	bpf_for(cpu, 0, nr_cpu_ids) {
 		err = scx_bpf_create_dsq(cpu_to_dsq(cpu), -1);
 		if (err) {
 			scx_bpf_error("failed to create pcpu DSQ %d: %d",
@@ -1045,10 +1202,19 @@ static int dsq_init(void)
  */
 s32 BPF_STRUCT_OPS_SLEEPABLE(rustland_init)
 {
+	struct bpf_cpumask *mask;
 	int err;
 
 	/* Compile-time checks */
 	BUILD_BUG_ON((MAX_CPUS % 2));
+
+	/* Initialize the offline CPU mask */
+	err = calloc_cpumask(&offline_cpumask);
+	mask = offline_cpumask;
+	if (!mask)
+		err = -ENOMEM;
+	if (err)
+		return err;
 
 	/* Initialize rustland core */
 	err = dsq_init();
@@ -1081,6 +1247,8 @@ SCX_OPS_DEFINE(rustland,
 	       .update_idle		= (void *)rustland_update_idle,
 	       .set_cpumask		= (void *)rustland_set_cpumask,
 	       .cpu_release		= (void *)rustland_cpu_release,
+	       .cpu_online		= (void *)rustland_cpu_online,
+	       .cpu_offline		= (void *)rustland_cpu_offline,
 	       .init_task		= (void *)rustland_init_task,
 	       .exit_task		= (void *)rustland_exit_task,
 	       .init			= (void *)rustland_init,
