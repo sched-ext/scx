@@ -15,7 +15,7 @@ use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 
-use libc::{sched_param, sched_setscheduler};
+use libc::{sched_param, sched_setscheduler, timespec};
 
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
