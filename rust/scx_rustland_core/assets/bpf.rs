@@ -302,6 +302,12 @@ impl<'cb> BpfScheduler<'cb> {
         }
     }
 
+    // Counter of the online CPUs.
+    #[allow(dead_code)]
+    pub fn nr_online_cpus_mut(&mut self) -> &mut u64 {
+        &mut self.skel.bss_mut().nr_online_cpus
+    }
+
     // Counter of currently running tasks.
     #[allow(dead_code)]
     pub fn nr_running_mut(&mut self) -> &mut u64 {

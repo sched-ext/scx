@@ -582,9 +582,10 @@ impl<'a> Scheduler<'a> {
 
     // Print internal scheduler statistics (fetched from the BPF part).
     fn print_stats(&mut self) {
-        // Show minimum vruntime (this should be constantly incrementing).
+        // Show online CPUs, minimum vruntime and time slice.
         info!(
-            "min_vruntime={} slice={}us",
+            "cpus={} min_vruntime={} slice={}us",
+            *self.bpf.nr_online_cpus_mut(),
             self.min_vruntime,
             self.slice_ns / NSEC_PER_USEC,
         );
