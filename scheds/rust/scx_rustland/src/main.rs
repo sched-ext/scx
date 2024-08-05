@@ -301,31 +301,6 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    // Return the amount of idle cores.
-    //
-    // On SMT systems consider only one CPU for each fully idle core, to avoid disrupting
-    // performnance too much by running multiple tasks in the same core.
-    fn nr_idle_cpus(&mut self) -> usize {
-        let mut idle_cpu_count = 0;
-
-        // Count the number of cores where all the CPUs are idle.
-        for core in self.topo_map.iter() {
-            let mut all_idle = true;
-            for cpu_id in core {
-                if self.bpf.get_cpu_pid(*cpu_id as i32) != 0 {
-                    all_idle = false;
-                    break;
-                }
-            }
-
-            if all_idle {
-                idle_cpu_count += 1;
-            }
-        }
-
-        idle_cpu_count
-    }
-
     // Return current timestamp in ns.
     fn now() -> u64 {
         let ts = SystemTime::now()
@@ -427,57 +402,47 @@ impl<'a> Scheduler<'a> {
         nr_queued + nr_scheduled
     }
 
-    // Return the target time slice, proportionally adjusted based on the total amount of tasks
-    // waiting to be scheduled (more tasks waiting => shorter time slice).
-    // Dispatch tasks from the task pool in order (sending them to the BPF dispatcher).
-    fn dispatch_tasks(&mut self) {
-        // Dispatch only a batch of tasks equal to the amount of idle CPUs in the system.
-        //
-        // This allows to have more tasks sitting in the task pool, reducing the pressure on the
-        // dispatcher queues and giving a chance to higher priority tasks to come in and get
-        // dispatched earlier, mitigating potential priority inversion issues.
-        let nr_tasks = self.nr_idle_cpus().max(1);
-        for _ in 0..nr_tasks {
-            match self.task_pool.pop() {
-                Some(task) => {
-                    // Update global minimum vruntime.
-                    if self.min_vruntime < task.vruntime {
-                        self.min_vruntime = task.vruntime;
-                    }
+    // Dispatch the first task from the task pool (sending them to the BPF dispatcher).
+    fn dispatch_task(&mut self) {
+        match self.task_pool.pop() {
+            Some(task) => {
+                // Update global minimum vruntime.
+                if self.min_vruntime < task.vruntime {
+                    self.min_vruntime = task.vruntime;
+                }
 
-                    // Scale time slice based on the amount of tasks that are waiting in the
-                    // scheduler's queue and the previously unused time slice budget, but make sure
-                    // to assign at least slice_us_min.
-                    let slice_ns = (self.slice_ns / (self.nr_tasks_waiting() + 1)).max(self.slice_ns_min);
+                // Scale time slice based on the amount of tasks that are waiting in the
+                // scheduler's queue and the previously unused time slice budget, but make sure
+                // to assign at least slice_us_min.
+                let slice_ns = (self.slice_ns / (self.nr_tasks_waiting() + 1)).max(self.slice_ns_min);
 
-                    // Create a new task to dispatch.
-                    let mut dispatched_task = DispatchedTask::new(&task.qtask);
+                // Create a new task to dispatch.
+                let mut dispatched_task = DispatchedTask::new(&task.qtask);
 
-                    // Assign the time slice to the task.
-                    dispatched_task.set_slice_ns(slice_ns);
+                // Assign the time slice to the task.
+                dispatched_task.set_slice_ns(slice_ns);
 
-                    // Dispatch task on the first CPU available if it is classified as
-                    // interactive, non-interactive tasks will continue to run on the same CPU.
-                    if task.is_interactive {
-                        dispatched_task.set_flag(RL_CPU_ANY);
-                    }
+                // Dispatch task on the first CPU available if it is classified as
+                // interactive, non-interactive tasks will continue to run on the same CPU.
+                if task.is_interactive {
+                    dispatched_task.set_flag(RL_CPU_ANY);
+                }
 
-                    // Send task to the BPF dispatcher.
-                    match self.bpf.dispatch_task(&dispatched_task) {
-                        Ok(_) => {}
-                        Err(_) => {
-                            /*
-                             * Re-add the task to the dispatched list in case of failure and stop
-                             * dispatching.
-                             */
-                            self.task_pool.push(task);
-                            break;
-                        }
+                // Send task to the BPF dispatcher.
+                match self.bpf.dispatch_task(&dispatched_task) {
+                    Ok(_) => {}
+                    Err(_) => {
+                        /*
+                         * Re-add the task to the dispatched list in case of failure and stop
+                         * dispatching.
+                         */
+                        self.task_pool.push(task);
                     }
                 }
-                None => break,
             }
+            None => {}
         }
+
         // Update nr_scheduled to notify the dispatcher that all the tasks received by the
         // scheduler has been dispatched, so there is no reason to re-activate the scheduler,
         // unless more tasks are queued.
@@ -489,7 +454,7 @@ impl<'a> Scheduler<'a> {
     // and dispatch them to the BPF part via the dispatched list).
     fn schedule(&mut self) {
         self.drain_queued_tasks();
-        self.dispatch_tasks();
+        self.dispatch_task();
 
         // Yield to avoid using too much CPU from the scheduler itself.
         thread::yield_now();
@@ -514,37 +479,6 @@ impl<'a> Scheduler<'a> {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Invalid format in /proc/[PID]/stat",
-            ))
-        }
-    }
-
-    // Get the current CPU where the scheduler is running.
-    fn get_current_cpu() -> io::Result<i32> {
-        // Open /proc/self/stat file
-        let path = Path::new("/proc/self/stat");
-        let mut file = File::open(path)?;
-
-        // Read the content of the file into a String
-        let mut content = String::new();
-        file.read_to_string(&mut content)?;
-
-        // Split the content into fields using whitespace as the delimiter
-        let fields: Vec<&str> = content.split_whitespace().collect();
-
-        // Parse the 39th field as an i32 and return it.
-        if let Some(field) = fields.get(38) {
-            if let Ok(value) = field.parse::<i32>() {
-                Ok(value)
-            } else {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Unable to parse current CPU information as i32",
-                ))
-            }
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Unable to get current CPU information",
             ))
         }
     }
@@ -619,23 +553,6 @@ impl<'a> Scheduler<'a> {
 
         // Show total page faults of the user-space scheduler.
         self.print_faults();
-
-        // Show tasks that are currently running on each core and CPU.
-        let sched_cpu = match Self::get_current_cpu() {
-            Ok(cpu_info) => cpu_info,
-            Err(_) => -1,
-        };
-        info!("Running tasks:");
-        for (core_id, core) in self.topo_map.iter().enumerate() {
-            for cpu_id in core {
-                let pid = if *cpu_id as i32 == sched_cpu {
-                    "[self]".to_string()
-                } else {
-                    self.bpf.get_cpu_pid(*cpu_id as i32).to_string()
-                };
-                info!("  core {:2} cpu {:2} pid={}", core_id, cpu_id, pid);
-            }
-        }
 
         log::logger().flush();
     }

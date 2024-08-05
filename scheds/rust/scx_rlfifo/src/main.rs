@@ -9,7 +9,6 @@ pub mod bpf_intf;
 mod bpf;
 use bpf::*;
 
-use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 
 use std::sync::atomic::AtomicBool;

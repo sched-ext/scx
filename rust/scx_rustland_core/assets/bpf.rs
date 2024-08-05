@@ -57,9 +57,6 @@ pub const RL_PREEMPT_CPU: u64 = bpf_intf::RL_PREEMPT_CPU as u64;
 /// objects) and dispatch tasks (in the form of DispatchedTask objects), using respectively the
 /// methods dequeue_task() and dispatch_task().
 ///
-/// The CPU ownership map can be accessed using the method get_cpu_pid(), this also allows to keep
-/// track of the idle and busy CPUs, with the corresponding PIDs associated to them.
-///
 /// BPF counters and statistics can be accessed using the methods nr_*_mut(), in particular
 /// nr_queued_mut() and nr_scheduled_mut() can be updated to notify the BPF component if the
 /// user-space scheduler has some pending work to do or not.
@@ -382,14 +379,6 @@ impl<'cb> BpfScheduler<'cb> {
         };
 
         unsafe { pthread_setschedparam(pthread_self(), SCHED_EXT, &param as *const sched_param) }
-    }
-
-    // Get the pid running on a certain CPU, if no tasks are running return 0.
-    #[allow(dead_code)]
-    pub fn get_cpu_pid(&self, cpu: i32) -> u32 {
-        let cpu_map_ptr = self.skel.bss().cpu_map.as_ptr();
-
-        unsafe { *cpu_map_ptr.offset(cpu as isize) }
     }
 
     // Receive a task to be scheduled from the BPF dispatcher.

@@ -275,39 +275,6 @@ struct {
 #define USERSCHED_TIMER_NS (NSEC_PER_SEC / 10)
 
 /*
- * Map of allocated CPUs.
- */
-volatile u32 cpu_map[MAX_CPUS];
-
-/*
- * Assign a task to a CPU (used in .running() and .stopping()).
- *
- * If pid == 0 the CPU will be considered idle.
- */
-static void set_cpu_owner(u32 cpu, u32 pid)
-{
-	if (cpu >= MAX_CPUS) {
-		scx_bpf_error("Invalid cpu: %d", cpu);
-		return;
-	}
-	cpu_map[cpu] = pid;
-}
-
-/*
- * Get the pid of the task that is currently running on @cpu.
- *
- * Return 0 if the CPU is idle.
- */
-static __maybe_unused u32 get_cpu_owner(u32 cpu)
-{
-	if (cpu >= MAX_CPUS) {
-		scx_bpf_error("Invalid cpu: %d", cpu);
-		return 0;
-	}
-	return cpu_map[cpu];
-}
-
-/*
  * Return true if the target task @p is the user-space scheduler.
  */
 static inline bool is_usersched_task(const struct task_struct *p)
@@ -937,10 +904,8 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 	 * Mark the CPU as busy by setting the pid as owner (ignoring the
 	 * user-space scheduler).
 	 */
-	if (!is_usersched_task(p)) {
-		set_cpu_owner(cpu, p->pid);
+	if (!is_usersched_task(p))
 		__sync_fetch_and_add(&nr_running, 1);
-	}
 }
 
 /*
@@ -955,7 +920,6 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 	 * Mark the CPU as idle by setting the owner to 0.
 	 */
 	if (!is_usersched_task(p)) {
-		set_cpu_owner(scx_bpf_task_cpu(p), 0);
 		__sync_fetch_and_sub(&nr_running, 1);
 		/*
 		 * Kick the user-space scheduler immediately when a task
