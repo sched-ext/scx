@@ -72,34 +72,18 @@ const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 ///
 /// === Troubleshooting ===
 ///
-/// - Adjust the time slice boost parameter (option `-b`) to enhance the responsiveness of
-///   low-latency applications (i.e., online gaming, live streaming, video conferencing etc.).
-///
-/// - Reduce the time slice boost parameter (option `-b`) if you notice poor performance in your
-///   CPU-intensive applications or if you experience any stall during your typical workload.
-///
 /// - Reduce the time slice (option `-s`) if you experience audio issues (i.e., cracking audio or
 ///   audio packet loss).
 ///
 #[derive(Debug, Parser)]
 struct Opts {
-    /// Scheduling slice duration in microseconds (default is 5ms).
+    /// Scheduling slice duration in microseconds.
     #[clap(short = 's', long, default_value = "5000")]
     slice_us: u64,
 
-    /// Time slice boost: increasing this value enhances performance of interactive applications
-    /// (gaming, multimedia, GUIs, etc.), but may lead to decreased responsiveness of other tasks
-    /// in the system.
-    ///
-    /// WARNING: setting a large value can make the scheduler quite unpredictable and you may
-    /// experience temporary system stalls (before hitting the sched-ext watchdog timeout).
-    ///
-    /// Default time slice boost is 100, which means interactive tasks will get a 100x priority
-    /// boost to run respect to non-interactive tasks.
-    ///
-    /// Use "0" to disable time slice boost and fallback to the standard vruntime-based scheduling.
-    #[clap(short = 'b', long, default_value = "100")]
-    slice_boost: u64,
+    /// Scheduling minimum slice duration in microseconds.
+    #[clap(short = 'S', long, default_value = "500")]
+    slice_us_min: u64,
 
     /// If specified, all the scheduling events and actions will be processed in user-space,
     /// disabling any form of in-kernel optimization.
@@ -137,7 +121,6 @@ struct Opts {
 
 // Time constants.
 const NSEC_PER_USEC: u64 = 1_000;
-const NSEC_PER_MSEC: u64 = 1_000_000;
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 
 #[derive(Debug, Clone)]
@@ -216,13 +199,18 @@ impl TaskInfoMap {
 struct Task {
     qtask: QueuedTask,    // queued task
     vruntime: u64,        // total vruntime (that determines the order how tasks are dispatched)
+    timestamp: u64,       // task enqueue timestamp
+    is_interactive: bool, // task is interactive
 }
 
-// Make sure tasks are ordered by vruntime, if multiple tasks have the same vruntime order by pid.
+// Sort tasks by their interactive status first (interactive tasks are always scheduled before
+// regular tasks), then sort them by their vruntime, then by their timestamp and lastly by their
+// pid.
 impl Ord for Task {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.vruntime
-            .cmp(&other.vruntime)
+        other.is_interactive.cmp(&self.is_interactive)
+            .then_with(|| self.vruntime.cmp(&other.vruntime))
+            .then_with(|| self.timestamp.cmp(&other.timestamp))
             .then_with(|| self.qtask.pid.cmp(&other.qtask.pid))
     }
 }
@@ -276,10 +264,9 @@ struct Scheduler<'a> {
     proc_stats: HashMap<i32, u64>, // Task statistics from procfs
     interactive_pids: Vec<i32>, // List of interactive tasks
     min_vruntime: u64,     // Keep track of the minimum vruntime across all tasks
-    max_vruntime: u64,     // Keep track of the maximum vruntime across all tasks
     init_page_faults: u64, // Initial page faults counter
     slice_ns: u64,         // Default time slice (in ns)
-    slice_boost: u64,      // Slice booster
+    slice_ns_min: u64,     // Minimum time slice (in ns)
 }
 
 impl<'a> Scheduler<'a> {
@@ -308,10 +295,9 @@ impl<'a> Scheduler<'a> {
             proc_stats: HashMap::new(),
             interactive_pids: Vec::new(),
             min_vruntime: 0,
-            max_vruntime: 0,
             init_page_faults: 0,
             slice_ns: opts.slice_us * NSEC_PER_USEC,
-            slice_boost: opts.slice_boost,
+            slice_ns_min: opts.slice_us_min * NSEC_PER_USEC,
         })
     }
 
@@ -349,21 +335,12 @@ impl<'a> Scheduler<'a> {
     }
 
     // Update task's vruntime based on the information collected from the kernel and return to the
-    // caller the evaluated weighted time slice.
+    // caller the evaluated task's vruntime.
     //
     // This method implements the main task ordering logic of the scheduler.
     fn update_enqueued(&mut self, task: &QueuedTask) -> u64 {
         // Determine if a task is new or old, based on their current runtime and previous runtime
         // counters.
-        //
-        // NOTE: make sure to handle the case where the current sum_exec_runtime is less then the
-        // previous sum_exec_runtime. This can happen, for example, when a new task is created via
-        // execve() (or its variants): the kernel will initialize a new task_struct, resetting
-        // sum_exec_runtime, while keeping the same PID.
-        //
-        // Consequently, the existing task_info slot is reused, containing the total run-time of
-        // the previous task (likely exceeding the current sum_exec_runtime). In such cases, simply
-        // use sum_exec_runtime as the time slice of the new task.
         fn is_new_task(curr_runtime: u64, prev_runtime: u64) -> bool {
             curr_runtime < prev_runtime || prev_runtime == 0
         }
@@ -379,40 +356,19 @@ impl<'a> Scheduler<'a> {
                 vruntime: self.min_vruntime,
             });
 
-        // Evaluate last time slot used by the task.
-        let mut slice = if is_new_task(task.sum_exec_runtime, task_info.sum_exec_runtime) {
+        // Evaluate used task time slice.
+        let slice = if is_new_task(task.sum_exec_runtime, task_info.sum_exec_runtime) {
             task.sum_exec_runtime
         } else {
             task.sum_exec_runtime - task_info.sum_exec_runtime
-        };
+        }.min(self.slice_ns);
 
-        // Apply the slice boost to interactive tasks.
-        //
-        // Some tasks may have a very high weight, that can potentially disrupt our slice boost
-        // optimizations, therefore always limit the task priority to a max of 1000.
-        let weight = if self.interactive_pids.contains(&task.pid) {
-            task.weight.min(1000) * self.slice_boost.max(1)
-        } else {
-            task.weight.min(1000)
-        };
-
-        // Scale the time slice by the task's priority (weight).
-        slice = slice * 100 / weight;
-
-        // Make sure that the updated vruntime is in the range:
-        //
-        //   (min_vruntime, min_vruntime + slice_ns]
-        //
-        // In this way we ensure that global vruntime is always progressing during each scheduler
-        // run, preventing excessive starvation of the other tasks sitting in the self.task_pool
-        // tree.
-        //
-        // Moreover, limiting the accounted time slice to slice_ns, allows to prevent starving the
-        // current task for too long in the scheduler task pool.
-        task_info.vruntime = self.min_vruntime + slice.clamp(1, self.slice_ns);
-
-        // Update maximum vruntime.
-        self.max_vruntime = self.max_vruntime.max(task_info.vruntime);
+        // Update task's vruntime re-aligning it to min_vruntime, to avoid
+        // over-prioritizing tasks with a mostly sleepy behavior.
+        if task_info.vruntime < self.min_vruntime {
+            task_info.vruntime = self.min_vruntime;
+        }
+        task_info.vruntime += slice * 100 / task.weight;
 
         // Update total task cputime.
         task_info.sum_exec_runtime = task.sum_exec_runtime;
@@ -436,11 +392,15 @@ impl<'a> Scheduler<'a> {
 
                     // Update task information and determine vruntime.
                     let vruntime = self.update_enqueued(&task);
+                    let timestamp = Self::now();
+                    let is_interactive = self.interactive_pids.contains(&task.pid);
 
                     // Insert task in the task pool (ordered by vruntime).
                     self.task_pool.push(Task {
                         qtask: task,
                         vruntime,
+                        timestamp,
+                        is_interactive,
                     });
                 }
                 Ok(None) => {
@@ -459,6 +419,14 @@ impl<'a> Scheduler<'a> {
         }
     }
 
+    // Return the total amount of tasks that are waiting to be scheduled.
+    fn nr_tasks_waiting(&mut self) -> u64 {
+        let nr_queued = *self.bpf.nr_queued_mut();
+        let nr_scheduled = *self.bpf.nr_scheduled_mut();
+
+        nr_queued + nr_scheduled
+    }
+
     // Return the target time slice, proportionally adjusted based on the total amount of tasks
     // waiting to be scheduled (more tasks waiting => shorter time slice).
     // Dispatch tasks from the task pool in order (sending them to the BPF dispatcher).
@@ -468,49 +436,19 @@ impl<'a> Scheduler<'a> {
         // This allows to have more tasks sitting in the task pool, reducing the pressure on the
         // dispatcher queues and giving a chance to higher priority tasks to come in and get
         // dispatched earlier, mitigating potential priority inversion issues.
-        let delta_slice = self.max_vruntime - self.min_vruntime;
-        let nr_tasks = if delta_slice <= self.slice_ns {
-            self.nr_idle_cpus().max(1)
-        } else {
-            // Scheduler is getting congested, flush all tasks that are waiting to be scheduled to
-            // mitigate excessive starvation.
-            usize::MAX
-        };
+        let nr_tasks = self.nr_idle_cpus().max(1);
         for _ in 0..nr_tasks {
             match self.task_pool.pop() {
                 Some(task) => {
-                    // Determine the task's virtual time slice.
-                    //
-                    // The goal is to evaluate the optimal time slice, considering the vruntime as
-                    // a deadline for the task to complete its work before releasing the CPU.
-                    //
-                    // This is accomplished by calculating the difference between the task's
-                    // vruntime and the global current vruntime and use this value as the task time
-                    // slice.
-                    //
-                    // In this way, tasks that "promise" to release the CPU quickly (based on
-                    // their previous work pattern) get a much higher priority (due to
-                    // vruntime-based scheduling and the additional priority boost for being
-                    // classified as interactive), but they are also given a shorter time slice
-                    // to complete their work and fulfill their promise of rapidity.
-                    //
-                    // At the same time tasks that are more CPU-intensive get de-prioritized, but
-                    // they will also tend to have a longer time slice available, reducing in this
-                    // way the amount of context switches that can negatively affect their
-                    // performance.
-                    //
-                    // In conclusion, latency-sensitive tasks get a high priority and a short time
-                    // slice (and they can preempt other tasks), CPU-intensive tasks get low
-                    // priority and a long time slice.
-                    //
-                    // Moreover, ensure that the time slice is never less than 0.25 ms to prevent
-                    // excessive penalty from assigning time slices that are too short and reduce
-                    // context switch overhead.
-                    let slice_ns =
-                        (task.vruntime - self.min_vruntime).clamp(NSEC_PER_MSEC / 4, self.slice_ns);
-
                     // Update global minimum vruntime.
-                    self.min_vruntime = task.vruntime;
+                    if self.min_vruntime < task.vruntime {
+                        self.min_vruntime = task.vruntime;
+                    }
+
+                    // Scale time slice based on the amount of tasks that are waiting in the
+                    // scheduler's queue and the previously unused time slice budget, but make sure
+                    // to assign at least slice_us_min.
+                    let slice_ns = (self.slice_ns / (self.nr_tasks_waiting() + 1)).max(self.slice_ns_min);
 
                     // Create a new task to dispatch.
                     let mut dispatched_task = DispatchedTask::new(&task.qtask);
@@ -518,8 +456,11 @@ impl<'a> Scheduler<'a> {
                     // Assign the time slice to the task.
                     dispatched_task.set_slice_ns(slice_ns);
 
-                    // Dispatch tasks on the first CPU available.
-                    dispatched_task.set_flag(RL_CPU_ANY);
+                    // Dispatch task on the first CPU available if it is classified as
+                    // interactive, non-interactive tasks will continue to run on the same CPU.
+                    if task.is_interactive {
+                        dispatched_task.set_flag(RL_CPU_ANY);
+                    }
 
                     // Send task to the BPF dispatcher.
                     match self.bpf.dispatch_task(&dispatched_task) {
@@ -642,12 +583,9 @@ impl<'a> Scheduler<'a> {
     // Print internal scheduler statistics (fetched from the BPF part).
     fn print_stats(&mut self) {
         // Show minimum vruntime (this should be constantly incrementing).
-        let delta = self.max_vruntime - self.min_vruntime;
         info!(
-            "min_vruntime={} max_vruntime={} delta={}us slice={}us",
+            "min_vruntime={} slice={}us",
             self.min_vruntime,
-            self.max_vruntime,
-            delta / NSEC_PER_USEC,
             self.slice_ns / NSEC_PER_USEC,
         );
 
