@@ -26,7 +26,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use core::cell::RefCell;
+use std::sync::Mutex;
 use std::alloc::{GlobalAlloc, Layout};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -435,23 +435,21 @@ impl BuddyAlloc {
 // Main allocator class.
 pub struct UserAllocator {
     buddy_alloc_param: BuddyAllocParam,
-    inner_buddy_alloc: RefCell<Option<BuddyAlloc>>,
+    inner_buddy_alloc: Mutex<Option<BuddyAlloc>>,
 }
 
 impl UserAllocator {
     pub const fn new(buddy_alloc_param: BuddyAllocParam) -> Self {
         UserAllocator {
-            inner_buddy_alloc: RefCell::new(None),
+            inner_buddy_alloc: Mutex::new(None),
             buddy_alloc_param,
         }
     }
 
     unsafe fn fetch_buddy_alloc<R, F: FnOnce(&mut BuddyAlloc) -> R>(&self, f: F) -> R {
-        let mut inner = self.inner_buddy_alloc.borrow_mut();
-        if inner.is_none() {
-            inner.replace(BuddyAlloc::new(self.buddy_alloc_param));
-        }
-        f(inner.as_mut().expect("nerver"))
+        let mut inner = self.inner_buddy_alloc.lock().unwrap();
+        let alloc = inner.get_or_insert_with(|| BuddyAlloc::new(self.buddy_alloc_param));
+        f(alloc)
     }
 
     pub fn lock_memory(&self) {
