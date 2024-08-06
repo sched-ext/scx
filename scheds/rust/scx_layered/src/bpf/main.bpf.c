@@ -982,7 +982,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 static bool match_one(struct layer_match *match, struct task_struct *p, const char *cgrp_path)
 {
 	bool result = false;
-	struct cred *cred;
+	const struct cred *cred;
 
 	switch (match->kind) {
 	case MATCH_CGROUP_PREFIX: {
