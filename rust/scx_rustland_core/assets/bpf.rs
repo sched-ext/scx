@@ -15,7 +15,10 @@ use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 
-use libc::{sched_param, sched_setscheduler, timespec};
+use libc::{pthread_self, pthread_setschedparam, sched_param};
+
+#[cfg(target_env = "musl")]
+use libc::timespec;
 
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
@@ -355,7 +358,6 @@ impl<'cb> BpfScheduler<'cb> {
 
     // Set scheduling class for the scheduler itself to SCHED_EXT
     fn use_sched_ext() -> i32 {
-        let pid = std::process::id();
         #[cfg(target_env = "gnu")]
         let param: sched_param = sched_param { sched_priority: 0 };
         #[cfg(target_env = "musl")]
@@ -372,9 +374,8 @@ impl<'cb> BpfScheduler<'cb> {
             },
             sched_ss_max_repl: 0,
         };
-        let res =
-            unsafe { sched_setscheduler(pid as i32, SCHED_EXT, &param as *const sched_param) };
-        res
+
+        unsafe { pthread_setschedparam(pthread_self(), SCHED_EXT, &param as *const sched_param) }
     }
 
     // Get the pid running on a certain CPU, if no tasks are running return 0.
