@@ -27,6 +27,7 @@ impl<'a> Scheduler<'a> {
     fn init() -> Result<Self> {
         let bpf = BpfScheduler::init(
             0,                        // exit_dump_len (buffer size of exit info)
+            false,                    // partial (include all tasks if false)
             5000,                     // slice_ns (default task time slice)
             true,                     // full_user (schedule all tasks in user-space)
             false,                    // low_power (low power mode)

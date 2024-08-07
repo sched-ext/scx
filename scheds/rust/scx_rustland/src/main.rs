@@ -101,6 +101,11 @@ struct Opts {
     #[clap(short = 'l', long, action = clap::ArgAction::SetTrue)]
     low_power: bool,
 
+    /// If specified, only tasks which have their scheduling policy set to SCHED_EXT using
+    /// sched_setscheduler(2) are switched. Otherwise, all tasks are switched.
+    #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
+    partial: bool,
+
     /// Exit debug dump buffer length. 0 indicates default.
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
@@ -278,6 +283,7 @@ impl<'a> Scheduler<'a> {
         // Low-level BPF connector.
         let bpf = BpfScheduler::init(
             opts.exit_dump_len,
+            opts.partial,
             opts.slice_us,
             opts.full_user,
             opts.low_power,

@@ -23,6 +23,7 @@ use libc::{pthread_self, pthread_setschedparam, sched_param};
 #[cfg(target_env = "musl")]
 use libc::timespec;
 
+use scx_utils::compat;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -189,6 +190,7 @@ fn is_smt_active() -> std::io::Result<bool> {
 impl<'cb> BpfScheduler<'cb> {
     pub fn init(
         exit_dump_len: u32,
+        partial: bool,
         slice_us: u64,
         full_user: bool,
         low_power: bool,
@@ -243,6 +245,9 @@ impl<'cb> BpfScheduler<'cb> {
         skel.rodata_mut().smt_enabled = is_smt_active()?;
 
         // Set scheduler options (defined in the BPF part).
+        if partial {
+            skel.struct_ops.rustland_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
+        }
         skel.struct_ops.rustland_mut().exit_dump_len = exit_dump_len;
 
         skel.bss_mut().usersched_pid = std::process::id();
