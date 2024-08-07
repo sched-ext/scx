@@ -338,7 +338,7 @@ impl BpfBuilder {
 
         // Assemble cflags.
         let mut cflags: Vec<String> =
-            ["-g", "-O2", "-Wall", "-Wno-compare-distinct-pointer-types'"]
+            ["-g", "-O2", "-Wall", "-Wno-compare-distinct-pointer-types"]
                 .into_iter()
                 .map(|x| x.into())
                 .collect();
