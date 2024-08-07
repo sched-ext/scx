@@ -1,4 +1,4 @@
-// Copyright (c) Andrea Righi <andrea.righi@canonical.com>
+// Copyright (c) Andrea Righi <andrea.righi@linux.dev>
 
 // Buddy allocator code imported from https://github.com/jjyr/buddy-alloc
 // and distributed under the terms of the MIT license.

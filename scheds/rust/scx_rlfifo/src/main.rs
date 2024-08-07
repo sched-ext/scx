@@ -1,4 +1,4 @@
-// Copyright (c) Andrea Righi <andrea.righi@canonical.com>
+// Copyright (c) Andrea Righi <andrea.righi@linux.dev>
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
@@ -9,7 +9,6 @@ pub mod bpf_intf;
 mod bpf;
 use bpf::*;
 
-use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 
 use std::sync::atomic::AtomicBool;
@@ -26,15 +25,13 @@ struct Scheduler<'a> {
 
 impl<'a> Scheduler<'a> {
     fn init() -> Result<Self> {
-        let topo = Topology::new().expect("Failed to build host topology");
         let bpf = BpfScheduler::init(
-            5000,                     // slice_ns (default task time slice)
-            topo.nr_cpu_ids() as i32, // nr_cpus (max CPUs available in the system)
-            false,                    // partial (include all tasks if disabled)
             0,                        // exit_dump_len (buffer size of exit info)
+            false,                    // partial (include all tasks if false)
+            5000,                     // slice_ns (default task time slice)
             true,                     // full_user (schedule all tasks in user-space)
             false,                    // low_power (low power mode)
-            false,                    // fifo_sched (enable BPF FIFO scheduling)
+            false,                    // verbose (verbose output)
             false,                    // debug (debug mode)
         )?;
         Ok(Self { bpf })

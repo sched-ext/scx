@@ -1,10 +1,13 @@
-// Copyright (c) Andrea Righi <andrea.righi@canonical.com>
+// Copyright (c) Andrea Righi <andrea.righi@linux.dev>
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
 use crate::bpf_intf;
 use crate::bpf_skel::*;
+
+use std::fs::File;
+use std::io::Read;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -21,7 +24,6 @@ use libc::{pthread_self, pthread_setschedparam, sched_param};
 use libc::timespec;
 
 use scx_utils::compat;
-use scx_utils::init_libbpf_logging;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -56,9 +58,6 @@ pub const RL_PREEMPT_CPU: u64 = bpf_intf::RL_PREEMPT_CPU as u64;
 /// objects) and dispatch tasks (in the form of DispatchedTask objects), using respectively the
 /// methods dequeue_task() and dispatch_task().
 ///
-/// The CPU ownership map can be accessed using the method get_cpu_pid(), this also allows to keep
-/// track of the idle and busy CPUs, with the corresponding PIDs associated to them.
-///
 /// BPF counters and statistics can be accessed using the methods nr_*_mut(), in particular
 /// nr_queued_mut() and nr_scheduled_mut() can be updated to notify the BPF component if the
 /// user-space scheduler has some pending work to do or not.
@@ -73,7 +72,6 @@ pub struct QueuedTask {
     pub pid: i32,              // pid that uniquely identifies a task
     pub cpu: i32,              // CPU where the task is running (-1 = exiting)
     pub sum_exec_runtime: u64, // Total cpu time
-    pub nvcsw: u64,            // Voluntary context switches
     pub weight: u64,           // Task static priority
     cpumask_cnt: u64,          // cpumask generation counter (private)
 }
@@ -152,7 +150,6 @@ impl EnqueuedMessage {
             cpu: self.inner.cpu,
             cpumask_cnt: self.inner.cpumask_cnt,
             sum_exec_runtime: self.inner.sum_exec_runtime,
-            nvcsw: self.inner.nvcsw,
             weight: self.inner.weight,
         }
     }
@@ -180,20 +177,29 @@ static mut BUF: AlignedBuffer = AlignedBuffer([0; BUFSIZE]);
 // ring buffer.
 const LIBBPF_STOP: i32 = -255;
 
+fn is_smt_active() -> std::io::Result<bool> {
+    let mut file = File::open("/sys/devices/system/cpu/smt/active")?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+
+    let smt_active: i32 = contents.trim().parse().unwrap_or(0);
+
+    Ok(smt_active == 1)
+}
+
 impl<'cb> BpfScheduler<'cb> {
     pub fn init(
-        slice_us: u64,
-        nr_cpus_online: i32,
-        partial: bool,
         exit_dump_len: u32,
+        partial: bool,
+        slice_us: u64,
         full_user: bool,
         low_power: bool,
-        fifo_sched: bool,
+        verbose: bool,
         debug: bool,
     ) -> Result<Self> {
         // Open the BPF prog first for verification.
-        let skel_builder = BpfSkelBuilder::default();
-        init_libbpf_logging(None);
+        let mut skel_builder = BpfSkelBuilder::default();
+        skel_builder.obj_builder.debug(verbose);
         let mut skel = scx_ops_open!(skel_builder, rustland)?;
 
         // Lock all the memory to prevent page faults that could trigger potential deadlocks during
@@ -235,11 +241,8 @@ impl<'cb> BpfScheduler<'cb> {
             LIBBPF_STOP
         }
 
-        // Initialize online CPUs counter.
-        //
-        // NOTE: we should probably refresh this counter during the normal execution to support cpu
-        // hotplugging, but for now let's keep it simple and set this only at initialization).
-        skel.rodata_mut().num_possible_cpus = nr_cpus_online;
+        // Check host topology to determine if we need to enable SMT capabilities.
+        skel.rodata_mut().smt_enabled = is_smt_active()?;
 
         // Set scheduler options (defined in the BPF part).
         if partial {
@@ -249,10 +252,9 @@ impl<'cb> BpfScheduler<'cb> {
 
         skel.bss_mut().usersched_pid = std::process::id();
         skel.rodata_mut().slice_ns = slice_us * 1000;
-        skel.rodata_mut().debug = debug;
         skel.rodata_mut().full_user = full_user;
         skel.rodata_mut().low_power = low_power;
-        skel.rodata_mut().fifo_sched = fifo_sched;
+        skel.rodata_mut().debug = debug;
 
         // Attach BPF scheduler.
         let mut skel = scx_ops_load!(skel, rustland, uei)?;
@@ -300,6 +302,12 @@ impl<'cb> BpfScheduler<'cb> {
         if let Some(scheduled) = nr_scheduled {
             self.skel.bss_mut().nr_scheduled = scheduled;
         }
+    }
+
+    // Counter of the online CPUs.
+    #[allow(dead_code)]
+    pub fn nr_online_cpus_mut(&mut self) -> &mut u64 {
+        &mut self.skel.bss_mut().nr_online_cpus
     }
 
     // Counter of currently running tasks.
@@ -376,14 +384,6 @@ impl<'cb> BpfScheduler<'cb> {
         };
 
         unsafe { pthread_setschedparam(pthread_self(), SCHED_EXT, &param as *const sched_param) }
-    }
-
-    // Get the pid running on a certain CPU, if no tasks are running return 0.
-    #[allow(dead_code)]
-    pub fn get_cpu_pid(&self, cpu: i32) -> u32 {
-        let cpu_map_ptr = self.skel.bss().cpu_map.as_ptr();
-
-        unsafe { *cpu_map_ptr.offset(cpu as isize) }
     }
 
     // Receive a task to be scheduled from the BPF dispatcher.
