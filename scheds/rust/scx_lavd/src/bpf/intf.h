@@ -88,7 +88,9 @@ enum consts {
 	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL /
 					   LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_GLOBAL_DSQ			= 0, /* a global DSQ */
+	LAVD_CPDOM_TYPES_NR		= 2,  /* big or LITTLE */
+	LAVD_CPDOM_MAX_NR		= (64 / LAVD_CPDOM_TYPES_NR), /* maximum number of compute domain (<= 64) */
+	LAVD_CPDOM_MAX_DIST		= 6,  /* maximum distance from one compute domain to another */
 
 	LAVD_STATUS_STR_LEN		= 5, /* {LR: Latency-critical, Regular}
 						{HI: performance-Hungry, performance-Insensitive}
@@ -118,7 +120,18 @@ struct sys_stat {
 };
 
 /*
- * Per-CPU context
+ * Compute domain context
+ * - system > numa node > llc domain > compute domain per core type (P or E)
+ */
+struct cpdom_ctx {
+	u64	id;				    /* id of this compute domain (== dsq_id) */
+	u8	is_active;			    /* if this compute domain is active */
+	u8	nr_neighbors[LAVD_CPDOM_MAX_DIST];  /* number of neighbors per distance */
+	u64	neighbor_bits[LAVD_CPDOM_MAX_DIST]; /* bitmask of neighbor bitmask per distance */
+};
+
+/*
+ * CPU context
  */
 struct cpu_ctx {
 	/* 
@@ -175,10 +188,14 @@ struct cpu_ctx {
 	 */
 	u16		capacity;	/* CPU capacity based on 1000 */
 	u8		big_core;	/* is it a big core? */
+	u8		cpdom_id;	/* compute domain id (== dsq_id) */
 	struct bpf_cpumask __kptr *tmp_a_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_o_mask;	/* temporary cpu mask */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
+/*
+ * Task context
+ */
 struct task_ctx {
 	/*
 	 * Clocks when a task state transition happens for task statistics calculation
@@ -217,6 +234,9 @@ struct task_ctx {
 	u32	perf_cri;		/* performance criticality of a task */
 };
 
+/*
+ * Task's extra context for report
+ */
 struct task_ctx_x {
 	pid_t	pid;
 	char	comm[TASK_COMM_LEN + 1];

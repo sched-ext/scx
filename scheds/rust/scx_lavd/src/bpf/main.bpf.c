@@ -198,6 +198,7 @@ volatile u64		nr_cpus_onln;
 
 static struct sys_stat	__sys_stats[2];
 static volatile int	__sys_stat_idx;
+static volatile u64	nr_queued_task;
 
 private(LAVD) struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
 private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
@@ -205,8 +206,10 @@ private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflo
 /*
  * CPU topology
  */
-const volatile u16 cpu_order[LAVD_CPU_ID_MAX]; /* CPU preference order */
-const volatile u16 __cpu_capacity_hint[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1000 */
+const volatile u16	cpu_order[LAVD_CPU_ID_MAX]; /* CPU preference order */
+const volatile u16	__cpu_capacity_hint[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1000 */
+struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_TYPES_NR][LAVD_CPDOM_MAX_NR]; /* contexts for compute domains */
+
 
 /*
  * Logical current clock
@@ -1004,11 +1007,6 @@ static u64 clamp_time_slice_ns(u64 slice)
 	return slice;
 }
 
-static s32 nr_queued_tasks(void)
-{
-	return scx_bpf_dsq_nr_queued(LAVD_GLOBAL_DSQ);
-}
-
 static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc,
 			   struct cpu_ctx *cpuc)
 {
@@ -1019,7 +1017,7 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc,
 	 * The time slice should be short enough to schedule all runnable tasks
 	 * at least once within a targeted latency.
 	 */
-	nr_queued = nr_queued_tasks() + 1;
+	nr_queued = nr_queued_task + 1;
 	slice = (LAVD_TARGETED_LATENCY_NS * stat_cur->nr_active) / nr_queued;
 
 	/*
@@ -1113,7 +1111,7 @@ static void advance_cur_logical_clk(struct task_ctx *taskc)
 	 * Advance the clock up to the task's deadline. When overloaded,
 	 * advance the clock slower so other can jump in the run queue.
 	 */
-	nr_queued = max(nr_queued_tasks(), 1);
+	nr_queued = max(nr_queued_task, 1);
 	delta = (vlc - clc) / nr_queued;
 	new_clk = clc + delta;
 
@@ -1548,7 +1546,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	prm_run.lat_cri = taskc_run->lat_cri;
 
 	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p_wait, LAVD_GLOBAL_DSQ, 0) {
+	bpf_for_each(scx_dsq, p_wait, cpuc_run->cpdom_id, 0) {
 		taskc_wait = get_task_ctx(p_wait);
 		if (!taskc_wait)
 			break;
@@ -1573,7 +1571,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 		}
 
 		/*
-		 * Test only the first entry on the LAVD_GLOBAL_DSQ.
+		 * Test only the first entry on the DSQ.
 		 */
 		break;
 	}
@@ -1582,11 +1580,13 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	return ret;
 }
 
-static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
-			  struct cpu_ctx *cpuc, u64 enq_flags)
+static void put_cpdom_rq(struct task_struct *p, struct task_ctx *taskc,
+			 struct cpu_ctx *cpuc, u64 enq_flags)
 {
 	struct task_ctx *taskc_run;
 	struct task_struct *p_run;
+
+	__sync_fetch_and_add(&nr_queued_task, 1);
 
 	/*
 	 * Calculate when a tack can be scheduled.
@@ -1618,7 +1618,7 @@ static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 	/*
 	 * Enqueue the task to one of the DSQs based on its virtual deadline.
 	 */
-	scx_bpf_dispatch_vtime(p, LAVD_GLOBAL_DSQ, LAVD_SLICE_UNDECIDED,
+	scx_bpf_dispatch_vtime(p, cpuc->cpdom_id, LAVD_SLICE_UNDECIDED,
 			       taskc->vdeadline_log_clk, enq_flags);
 	return;
 }
@@ -1779,9 +1779,9 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Place a task to the global run queue.
+	 * Place a task to a run queue of current cpu's compute domain.
 	 */
-	put_global_rq(p, taskc, cpuc, enq_flags);
+	put_cpdom_rq(p, taskc, cpuc, enq_flags);
 }
 
 static bool is_kernel_task(struct task_struct *p)
@@ -1796,16 +1796,35 @@ static bool use_full_cpus(void)
 	       ((stat_cur->nr_active + LAVD_CC_NR_OVRFLW) >= nr_cpus_onln);
 }
 
+static bool consume_task(u64 dsq_id)
+{
+	if (scx_bpf_consume(dsq_id)) {
+		__sync_fetch_and_add(&nr_queued_task, -1);
+		return true;
+	}
+
+	return false;
+}
+
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
+	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *active, *ovrflw;
 	struct task_struct *p;
+	u64 dsq_id = 0;
+
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc) {
+		scx_bpf_error("Failed to look up cpu context: %d", cpu);
+		return;
+	}
+	dsq_id = cpuc->cpdom_id;
 
 	/*
 	 * If all CPUs are using, directly consume without checking CPU masks.
 	 */
 	if (use_full_cpus()) {
-		scx_bpf_consume(LAVD_GLOBAL_DSQ);
+		consume_task(dsq_id);
 		return;
 	}
 
@@ -1826,7 +1845,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (bpf_cpumask_test_cpu(cpu, cast_mask(active)) ||
 	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
-		scx_bpf_consume(LAVD_GLOBAL_DSQ);
+		consume_task(dsq_id);
 		goto unlock_out;
 	}
 
@@ -1834,14 +1853,14 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If this CPU is not either in active or overflow CPUs, it tries to
 	 * find and run a task pinned to run on this CPU.
 	 */
-	bpf_for_each(scx_dsq, p, LAVD_GLOBAL_DSQ, 0) {
+	bpf_for_each(scx_dsq, p, dsq_id, 0) {
 		/*
 		 * Prioritize kernel tasks because most kernel tasks are pinned
 		 * to a particular CPU and latency-critical (e.g., ksoftirqd,
 		 * kworker, etc).
 		 */
 		if (is_kernel_task(p)) {
-			scx_bpf_consume(LAVD_GLOBAL_DSQ);
+			consume_task(dsq_id);
 			bpf_cpumask_set_cpu(cpu, ovrflw);
 			break;
 		}
@@ -1873,7 +1892,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * cores. We will optimize this path after introducing per-core
 		 * DSQ.
 		 */
-		scx_bpf_consume(LAVD_GLOBAL_DSQ);
+		consume_task(dsq_id);
 
 		/*
 		 * This is the first time a particular pinned user-space task
@@ -2379,14 +2398,33 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 	return 0;
 }
 
-static s32 init_dsqs(void)
+static s32 init_cpdoms(void)
 {
+	struct cpdom_ctx *cpdomc;
 	int err;
 
-	err = scx_bpf_create_dsq(LAVD_GLOBAL_DSQ, -1);
-	if (err) {
-		scx_bpf_error("Failed to create a latency critical DSQ");
-		return err;
+	for (int i = 0; i < LAVD_CPDOM_TYPES_NR; i++) {
+		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++) {
+			/*
+			 * Fetch a cpdom context.
+			 */
+			cpdomc = MEMBER_VPTR(cpdom_ctxs, [i][j]);
+			if (!cpdomc) {
+				scx_bpf_error("Failed to lookup cpdom_ctx for [%d][%d]", i, j);
+				return -ESRCH;
+			}
+
+			/*
+			 * Create an associated DSQ.
+			 */
+			if (!cpdomc->is_active)
+				continue;
+			err = scx_bpf_create_dsq(cpdomc->id, -1);
+			if (err) {
+				scx_bpf_error("Failed to create a DSQ for cpdom %llu", cpdomc->id);
+				return err;
+			}
+		}
 	}
 
 	return 0;
@@ -2513,6 +2551,19 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->big_core = cpuc->capacity >= avg_capacity;
 	}
 
+	/*
+	 * Initialize compute domain id
+	 */
+	bpf_for(cpu, 0, nr_cpus_onln) {
+		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+		if (!cpuc) {
+			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
+			return -ESRCH;
+		}
+
+		cpuc->cpdom_id = 0; /* TODO */
+	}
+
 	return 0;
 }
 
@@ -2550,9 +2601,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	int err;
 
 	/*
-	 * Create central task queues.
+	 * Create compute domains.
 	 */
-	err = init_dsqs();
+	err = init_cpdoms();
 	if (err)
 		return err;
 

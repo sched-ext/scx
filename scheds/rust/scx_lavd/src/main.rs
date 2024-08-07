@@ -243,6 +243,10 @@ impl<'a> Scheduler<'a> {
         }
         debug!("{}", topo);
 
+        // Initialize compute domain contexts
+        skel.bss_mut().cpdom_ctxs[0][0].id = 0; /* TODO */
+        skel.bss_mut().cpdom_ctxs[0][0].is_active = 1; /* TODO */
+
         // Initialize skel according to @opts.
         let nr_cpus_onln = topo.nr_cpus_online() as u64;
         skel.bss_mut().nr_cpus_onln = nr_cpus_onln;
