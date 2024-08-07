@@ -144,6 +144,33 @@ const volatile bool smt_enabled = true;
 static u64 vtime_now;
 
 /*
+ * Per-CPU context.
+ */
+struct cpu_ctx {
+	/*
+	 * Timestamp used for the idle CPU decay (this determines when the CPU
+	 * can go idle).
+	 */
+	u64 idle_deadline;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct cpu_ctx);
+	__uint(max_entries, 1);
+} cpu_ctx_stor SEC(".maps");
+
+/*
+ * Return a CPU context.
+ */
+struct task_ctx *try_lookup_cpu_ctx(s32 cpu)
+{
+	const u32 idx = 0;
+	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
+}
+
+/*
  * Per-task local storage.
  *
  * This contain all the per-task information used internally by the BPF code.
@@ -288,8 +315,6 @@ static inline bool vtime_before(u64 a, u64 b)
  */
 static inline u64 task_vtime(struct task_struct *p)
 {
-	u64 vtime = p->scx.dsq_vtime;
-
 	/*
 	 * Limit the vruntime to (vtime_now - slice_ns_lag) to avoid
 	 * excessively penalizing tasks.
@@ -300,7 +325,7 @@ static inline u64 task_vtime(struct task_struct *p)
 	 *
 	 * Instead, a negative slice_ns_lag can result in more consistent
 	 * performance (less spikey), smoothing the reordering of the vruntime
-	 * scheduling and making the scheduler closer to a FIFO.  ￼ ￼ ￼
+	 * scheduling and making the scheduler closer to a FIFO.
 	 */
 	if (vtime_before(p->scx.dsq_vtime, vtime_now - slice_ns_lag))
 		p->scx.dsq_vtime = vtime_now - slice_ns_lag;
@@ -770,10 +795,25 @@ static void update_task_interactive(struct task_ctx *tctx)
 void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 {
 	u64 now = bpf_ktime_get_ns();
+	s32 cpu = scx_bpf_task_cpu(p);
 	s64 delta_t;
+	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 
 	__sync_fetch_and_sub(&nr_running, 1);
+
+	/*
+	 * Idle CPU decay: force the CPU to stay up for another slice_ns_min/2
+	 * and speculate on the fact that another task may need to run on this
+	 * CPU.
+	 *
+	 * If we don't receive any dispatch event after slice_ns_min/2, allow the
+	 * CPU to go idle.
+	 */
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return;
+	cctx->idle_deadline = bpf_ktime_get_ns() + slice_ns_min / 2;
 
 	tctx = lookup_task_ctx(p);
 	if (!tctx)
@@ -845,6 +885,20 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 			p->pid, p->comm, tctx->avg_nvcsw,
 			tctx->avg_nvcsw < nvcsw_avg_thresh ? "regular" : "interactive");
 	}
+}
+
+void BPF_STRUCT_OPS(bpfland_update_idle, s32 cpu, bool idle)
+{
+	u64 now = bpf_ktime_get_ns();
+	struct cpu_ctx *cctx;
+
+	if (!idle)
+		return;
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return;
+	if (vtime_before(now, cctx->idle_deadline))
+		scx_bpf_kick_cpu(cpu, 0);
 }
 
 void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
@@ -980,11 +1034,13 @@ SCX_OPS_DEFINE(bpfland_ops,
 	       .dispatch		= (void *)bpfland_dispatch,
 	       .running			= (void *)bpfland_running,
 	       .stopping		= (void *)bpfland_stopping,
+	       .update_idle		= (void *)bpfland_update_idle,
 	       .enable			= (void *)bpfland_enable,
 	       .cpu_online		= (void *)bpfland_cpu_online,
 	       .cpu_offline		= (void *)bpfland_cpu_offline,
 	       .init_task		= (void *)bpfland_init_task,
 	       .init			= (void *)bpfland_init,
 	       .exit			= (void *)bpfland_exit,
+	       .flags			= SCX_OPS_KEEP_BUILTIN_IDLE,
 	       .timeout_ms		= 5000,
 	       .name			= "bpfland");
