@@ -960,13 +960,8 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 	 * Prioritize a wake-up task since this is a clear sign of immediate
 	 * consumer. If it is a synchronous wakeup, doule the prioritization.
 	 */
-	if (enq_flags & SCX_ENQ_WAKEUP)
-		lat_cri += LAVD_LC_WAKEUP_FT;
-
-	if (taskc->sync_wakeup) {
-		lat_cri += LAVD_LC_WAKEUP_FT;
-		taskc->sync_wakeup = false;
-	}
+	taskc->wakeup_ft += !!(enq_flags & SCX_ENQ_WAKEUP);
+	lat_cri += taskc->wakeup_ft * LAVD_LC_WAKEUP_FT;
 
 	/*
 	 * Make sure the lat_cri is non-zero.
@@ -1131,8 +1126,7 @@ static void update_stat_for_running(struct task_struct *p,
 {
 	u64 wait_period, interval;
 	u64 now = bpf_ktime_get_ns();
-	u64 load_actual_ft, wait_freq_ft, wake_freq_ft;
-	u64 perf_cri, perf_cri_raw;
+	u64 wait_freq_ft, wake_freq_ft, perf_cri;
 
 	/*
 	 * Update the current logical clock.
@@ -1176,22 +1170,23 @@ static void update_stat_for_running(struct task_struct *p,
 	 * A task is more CPU-performance sensitive when it meets the following
 	 * conditions:
 	 *
-	 * - Its actual load (runtime * run_freq) is high;
-	 * - Its nice priority is high;
 	 * - It is in the middle of the task graph (high wait and wake
 	 *   frequencies).
+	 * - Its runtime and frequency are high;
+	 * - Its nice priority is high;
+	 * - It is a woken-up task.
 	 *
 	 * We use the log-ed value since the raw value follows the highly
 	 * skewed distribution.
 	 */
-	load_actual_ft = calc_runtime_factor(taskc->load_actual);
 	wait_freq_ft = calc_freq_factor(taskc->wait_freq);
 	wake_freq_ft = calc_freq_factor(taskc->wake_freq);
-
-	perf_cri_raw = load_actual_ft * p->scx.weight;
-	perf_cri = log2_u64(perf_cri_raw + 1);
-	perf_cri_raw = wait_freq_ft * wake_freq_ft * wake_freq_ft;
-	perf_cri += log2_u64(perf_cri_raw + 1);
+	perf_cri = log2_u64(wait_freq_ft * wake_freq_ft * wake_freq_ft);
+	perf_cri += log2_u64(max(taskc->run_freq, 1) *
+			     max(taskc->run_time_ns, 1));
+	perf_cri += calc_static_prio_factor(p);
+	perf_cri += taskc->wakeup_ft * LAVD_LC_WAKEUP_FT;
+	taskc->wakeup_ft = 0;
 
 	taskc->perf_cri = perf_cri;
 	cpuc->sum_perf_cri += taskc->perf_cri;
@@ -1754,7 +1749,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (!taskc)
 		return prev_cpu;
 
-	taskc->sync_wakeup = !!(wake_flags & SCX_WAKE_SYNC);
+	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
 
 	cpu_id = pick_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
 	if (found_idle) {

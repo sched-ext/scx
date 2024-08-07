@@ -210,7 +210,7 @@ struct task_ctx {
 	u32	lat_cri;		/* calculated latency criticality */
 	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
-	u8	sync_wakeup;
+	u8	wakeup_ft;		/* regular wakeup = 1, sync wakeup = 2 */
 	/*
 	 * Task's performance criticality
 	 */
