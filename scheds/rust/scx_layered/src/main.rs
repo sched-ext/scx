@@ -6,7 +6,13 @@ mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 pub mod metrics;
-use metrics::OpenMetricsStats;
+pub mod log_recorder;
+use log_recorder::ArcLogRecorder;
+use log_recorder::LogRecorder;
+use ::metrics::gauge;
+use ::metrics::set_global_recorder;
+use metrics::Metrics;
+use metrics_exporter_prometheus::PrometheusBuilder;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -38,7 +44,6 @@ use log::debug;
 use log::info;
 use log::trace;
 use log::warn;
-use prometheus_client::encoding::text::encode;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
@@ -421,7 +426,7 @@ enum LayerKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct LayerSpec {
+pub struct LayerSpec {
     name: String,
     comment: Option<String>,
     matches: Vec<Vec<LayerMatch>>,
@@ -520,26 +525,6 @@ fn copy_into_cstr(dst: &mut [i8], src: &str) {
     let cstr = CString::new(src).unwrap();
     let bytes = unsafe { std::mem::transmute::<&[u8], &[i8]>(cstr.as_bytes_with_nul()) };
     dst[0..bytes.len()].copy_from_slice(bytes);
-}
-
-fn format_bitvec(bitvec: &BitVec) -> String {
-    let mut vals = Vec::<u32>::new();
-    let mut val: u32 = 0;
-    for (idx, bit) in bitvec.iter().enumerate() {
-        if idx > 0 && idx % 32 == 0 {
-            vals.push(val);
-            val = 0;
-        }
-        if *bit {
-            val |= 1 << (idx % 32);
-        }
-    }
-    vals.push(val);
-    let mut output = vals
-        .iter()
-        .fold(String::new(), |string, v| format!("{}{:08x} ", string, v));
-    output.pop();
-    output
 }
 
 fn nodemask_from_nodes(nodes: &Vec<usize>) -> usize {
@@ -967,7 +952,7 @@ impl CpuPool {
 }
 
 #[derive(Debug)]
-struct Layer {
+pub struct Layer {
     name: String,
     kind: LayerKind,
 
@@ -1263,12 +1248,18 @@ struct Scheduler<'a, 'b> {
     processing_dur: Duration,
     prev_processing_dur: Duration,
 
-    om_stats: OpenMetricsStats,
+    metrics: Metrics,
+    log_recorder: Arc<LogRecorder>,
     om_format: bool,
 }
 
 impl<'a, 'b> Scheduler<'a, 'b> {
-    fn init_layers(skel: &mut OpenBpfSkel, opts: &Opts, specs: &Vec<LayerSpec>, topo: &Topology) -> Result<()> {
+    fn init_layers(
+        skel: &mut OpenBpfSkel,
+        opts: &Opts,
+        specs: &Vec<LayerSpec>,
+        topo: &Topology,
+    ) -> Result<()> {
         skel.maps.rodata_data.nr_layers = specs.len() as u32;
         let mut perf_set = false;
 
@@ -1408,7 +1399,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         }
     }
 
-    fn init(opts: &Opts, layer_specs: &'b Vec<LayerSpec>, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+    fn init(opts: &Opts, layer_specs: &'b Vec<LayerSpec>, log_recorder: Arc<LogRecorder>, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         let nr_layers = layer_specs.len();
         let topo = Topology::new()?;
         let cpu_pool = CpuPool::new()?;
@@ -1483,7 +1474,8 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             proc_reader,
             skel,
 
-            om_stats: OpenMetricsStats::new(),
+            metrics: Metrics::new(),
+            log_recorder,
             om_format: opts.open_metrics_format,
         };
 
@@ -1619,81 +1611,35 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             }
         };
 
-        let fmt_pct = |v: f64| {
-            if v >= 99.995 {
-                format!("{:5.1}", v)
-            } else {
-                format!("{:5.2}", v)
-            }
-        };
-
-        let fmt_num = |v: i64| {
-            if v > 1_000_000 {
-                format!("{:5.1}m", v as f64 / 1_000_000.0)
-            } else if v > 1_000 {
-                format!("{:5.1}k", v as f64 / 1_000.0)
-            } else {
-                format!("{:5.0} ", v)
-            }
-        };
-
-        self.om_stats.total.set(total as i64);
-        self.om_stats
+        self.metrics.total.set(total as f64);
+        self.metrics
             .local
             .set(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL));
-        self.om_stats
+        self.metrics
             .open_idle
             .set(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE));
-        self.om_stats
+        self.metrics
             .affn_viol
             .set(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL));
-        self.om_stats.excl_idle.set(
+        self.metrics.excl_coll.set(
+            lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION),
+        );
+        self.metrics.excl_preempt.set(
+            lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT),
+        );
+        self.metrics.excl_idle.set(
             stats.bpf_stats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_IDLE as usize] as f64
                 / total as f64,
         );
-        self.om_stats.excl_wakeup.set(
+        self.metrics.excl_wakeup.set(
             stats.bpf_stats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_WAKEUP as usize] as f64
                 / total as f64,
         );
-        self.om_stats.proc_ms.set(processing_dur.as_millis() as i64);
-        self.om_stats.busy.set(stats.cpu_busy * 100.0);
-        self.om_stats.util.set(stats.total_util * 100.0);
-        self.om_stats.load.set(stats.total_load);
-
-        if !self.om_format {
-            info!(
-                "tot={:7} local={} open_idle={} affn_viol={} proc={:?}ms",
-                self.om_stats.total.get(),
-                fmt_pct(self.om_stats.local.get()),
-                fmt_pct(self.om_stats.open_idle.get()),
-                fmt_pct(self.om_stats.affn_viol.get()),
-                self.om_stats.proc_ms.get(),
-            );
-
-            info!(
-                "busy={:5.1} util={:7.1} load={:9.1} fallback_cpu={:3}",
-                self.om_stats.busy.get(),
-                self.om_stats.util.get(),
-                self.om_stats.load.get(),
-                self.cpu_pool.fallback_cpu,
-            );
-
-            info!(
-                "excl_coll={} excl_preempt={} excl_idle={} excl_wakeup={}",
-                fmt_pct(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION)),
-                fmt_pct(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT)),
-                fmt_pct(self.om_stats.excl_idle.get()),
-                fmt_pct(self.om_stats.excl_wakeup.get()),
-            );
-        }
-
-        let header_width = self
-            .layer_specs
-            .iter()
-            .map(|spec| spec.name.len())
-            .max()
-            .unwrap()
-            .max(4);
+        self.metrics.proc_ms.set(processing_dur.as_millis() as f64);
+        self.metrics.busy.set(stats.cpu_busy * 100.0);
+        self.metrics.util.set(stats.total_util * 100.0);
+        self.metrics.load.set(stats.total_load);
+        self.metrics.fallback_cpu.set(self.cpu_pool.fallback_cpu as f64);
 
         let calc_frac = |a, b| {
             if b != 0.0 {
@@ -1723,197 +1669,109 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             // $e: The expression to set the metric to
             macro_rules! set {
                 ($i: ident, $e:expr) => {{
-                    let l = self
-                        .om_stats
-                        .$i
-                        .get_or_create(&vec![("layer_name".to_owned(), spec.name.clone())]);
-                    l.set($e);
-                    l
+                    gauge!(self.metrics.$i.clone(), "layer" => spec.name.clone()).set($e);
                 }};
             }
-            let l_util = set!(l_util, stats.layer_utils[lidx] * 100.0);
-            let l_util_frac = set!(
+
+            set!(l_util, stats.layer_utils[lidx] * 100.0);
+            set!(
                 l_util_frac,
                 calc_frac(stats.layer_utils[lidx], stats.total_util)
             );
-            let l_load = set!(l_load, stats.layer_loads[lidx]);
-            let l_load_frac = set!(
+            set!(l_load, stats.layer_loads[lidx]);
+            set!(
                 l_load_frac,
                 calc_frac(stats.layer_loads[lidx], stats.total_load)
             );
-            let l_tasks = set!(l_tasks, stats.nr_layer_tasks[lidx] as i64);
-            let l_total = set!(l_total, ltotal as i64);
-            let l_sel_local = set!(
+            set!(l_tasks, stats.nr_layer_tasks[lidx] as f64);
+            set!(l_total, ltotal as f64);
+            set!(
                 l_sel_local,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
             );
-            let l_enq_wakeup = set!(
+            set!(
                 l_enq_wakeup,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
             );
-            let l_enq_expire = set!(
+            set!(
                 l_enq_expire,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
             );
-            let l_enq_last = set!(
+            set!(
                 l_enq_last,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST)
             );
-            let l_enq_reenq = set!(
+            set!(
                 l_enq_reenq,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ)
             );
-            let l_min_exec = set!(
+            set!(
                 l_min_exec,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC)
             );
-            let l_min_exec_us = set!(
+            set!(
                 l_min_exec_us,
-                (lstat(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC_NS) / 1000) as i64
+                (lstat(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC_NS) / 1000) as f64
             );
-            let l_open_idle = set!(
+            set!(
                 l_open_idle,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE)
             );
-            let l_preempt = set!(l_preempt, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT));
-            let l_preempt_first = set!(
+            set!(l_preempt, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT));
+            set!(
                 l_preempt_first,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FIRST)
             );
-            let l_preempt_idle = set!(
+            set!(
                 l_preempt_idle,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_IDLE)
             );
-            let l_preempt_fail = set!(
+            set!(
                 l_preempt_fail,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FAIL)
             );
-            let l_affn_viol = set!(
+            set!(
                 l_affn_viol,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL)
             );
-            let l_keep = set!(l_keep, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP));
-            let l_keep_fail_max_exec = set!(
+            set!(l_keep, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP));
+            set!(
                 l_keep_fail_max_exec,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP_FAIL_MAX_EXEC)
             );
-            let l_keep_fail_busy = set!(
+            set!(
                 l_keep_fail_busy,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP_FAIL_BUSY)
             );
-            let l_excl_collision = set!(
+            set!(
                 l_excl_collision,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION)
             );
-            let l_excl_preempt = set!(
+            set!(
                 l_excl_preempt,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT)
             );
-            let l_kick = set!(l_kick, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KICK));
-            let l_yield = set!(l_yield, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_YIELD));
-            let l_yield_ignore = set!(
+            set!(l_kick, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KICK));
+            set!(l_yield, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_YIELD));
+            set!(
                 l_yield_ignore,
-                lstat(bpf_intf::layer_stat_idx_LSTAT_YIELD_IGNORE) as i64
+                lstat(bpf_intf::layer_stat_idx_LSTAT_YIELD_IGNORE) as f64
             );
-            let l_migration = set!(
+            set!(
                 l_migration,
                 lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIGRATION)
             );
-            let l_cur_nr_cpus = set!(l_cur_nr_cpus, layer.cpus.count_ones() as i64);
-            let l_min_nr_cpus = set!(l_min_nr_cpus, self.nr_layer_cpus_min_max[lidx].0 as i64);
-            let l_max_nr_cpus = set!(l_max_nr_cpus, self.nr_layer_cpus_min_max[lidx].1 as i64);
-            if !self.om_format {
-                info!(
-                    "  {:<width$}: util/frac={:7.1}/{:5.1} load/frac={:9.1}:{:5.1} tasks={:6}",
-                    spec.name,
-                    l_util.get(),
-                    l_util_frac.get(),
-                    l_load.get(),
-                    l_load_frac.get(),
-                    l_tasks.get(),
-                    width = header_width,
-                );
-                info!(
-                    "  {:<width$}  tot={:7} local={} wake/exp/last/reenq={}/{}/{}/{}",
-                    "",
-                    l_total.get(),
-                    fmt_pct(l_sel_local.get()),
-                    fmt_pct(l_enq_wakeup.get()),
-                    fmt_pct(l_enq_expire.get()),
-                    fmt_pct(l_enq_last.get()),
-                    fmt_pct(l_enq_reenq.get()),
-                    width = header_width,
-                );
-                info!(
-                    "  {:<width$}  keep/max/busy={}/{}/{} kick={} yield/ign={}/{}",
-                    "",
-                    fmt_pct(l_keep.get()),
-                    fmt_pct(l_keep_fail_max_exec.get()),
-                    fmt_pct(l_keep_fail_busy.get()),
-                    fmt_pct(l_kick.get()),
-                    fmt_pct(l_yield.get()),
-                    fmt_num(l_yield_ignore.get()),
-                    width = header_width,
-                );
-                info!(
-                    "  {:<width$}  open_idle={} mig={} affn_viol={}",
-                    "",
-                    fmt_pct(l_open_idle.get()),
-                    fmt_pct(l_migration.get()),
-                    fmt_pct(l_affn_viol.get()),
-                    width = header_width,
-                );
-                info!(
-                    "  {:<width$}  preempt/first/idle/fail={}/{}/{}/{} min_exec={}/{:7.2}ms",
-                    "",
-                    fmt_pct(l_preempt.get()),
-                    fmt_pct(l_preempt_first.get()),
-                    fmt_pct(l_preempt_idle.get()),
-                    fmt_pct(l_preempt_fail.get()),
-                    fmt_pct(l_min_exec.get()),
-                    l_min_exec_us.get() as f64 / 1000.0,
-                    width = header_width,
-                );
-                info!(
-                    "  {:<width$}  cpus={:3} [{:3},{:3}] {}",
-                    "",
-                    l_cur_nr_cpus.get(),
-                    l_min_nr_cpus.get(),
-                    l_max_nr_cpus.get(),
-                    format_bitvec(&layer.cpus),
-                    width = header_width
-                );
-                match &layer.kind {
-                    LayerKind::Confined { exclusive, .. }
-                    | LayerKind::Grouped { exclusive, .. }
-                    | LayerKind::Open { exclusive, .. } => {
-                        if *exclusive {
-                            info!(
-                                "  {:<width$}  excl_coll={} excl_preempt={}",
-                                "",
-                                fmt_pct(l_excl_collision.get()),
-                                fmt_pct(l_excl_preempt.get()),
-                                width = header_width,
-                            );
-                        } else if l_excl_collision.get() != 0.0 || l_excl_preempt.get() != 0.0 {
-                            warn!(
-                                "{}: exclusive is off but excl_coll={} excl_preempt={}",
-                                spec.name,
-                                fmt_pct(l_excl_collision.get()),
-                                fmt_pct(l_excl_preempt.get()),
-                            );
-                        }
-                    }
-                }
-            }
+            set!(l_cur_nr_cpus, layer.cpus.count_ones() as f64);
+            set!(l_min_nr_cpus, self.nr_layer_cpus_min_max[lidx].0 as f64);
+            set!(l_max_nr_cpus, self.nr_layer_cpus_min_max[lidx].1 as f64);
+
             self.nr_layer_cpus_min_max[lidx] = (layer.nr_cpus, layer.nr_cpus);
         }
 
-        if self.om_format {
-            let mut buffer = String::new();
-            encode(&mut buffer, &self.om_stats.registry).unwrap();
-            print!("{}", buffer);
+        if !self.om_format {
+            self.log_recorder.report(&self.layer_specs, &self.layers);
         }
+
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
     }
@@ -2186,9 +2044,20 @@ fn main() -> Result<()> {
         }
     }
 
+
+    let log_recorder = Arc::new(LogRecorder::new());
+    if opts.open_metrics_format {
+        info!("Enabling Prometheus endpoint: http://localhost:9000");
+        PrometheusBuilder::new()
+            .install()
+            .expect("failed to install Prometheus recorder");
+    } else {
+        set_global_recorder(ArcLogRecorder::new(log_recorder.clone()))?;
+    }
+
     let mut open_object = MaybeUninit::uninit();
     loop {
-        let mut sched = Scheduler::init(&opts, &layer_config.specs, &mut open_object)?;
+        let mut sched = Scheduler::init(&opts, &layer_config.specs, log_recorder.clone(), &mut open_object)?;
         if !sched.run(shutdown.clone())?.should_restart() {
             break;
         }
