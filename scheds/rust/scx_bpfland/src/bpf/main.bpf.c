@@ -91,6 +91,9 @@ const volatile u64 starvation_thresh_ns = 5ULL * NSEC_PER_MSEC;
 static u64 starvation_shared_ts;
 static u64 starvation_prio_ts;
 
+#define MAX_CPUS 1024
+const volatile int cpu_allowed[MAX_CPUS];
+
 /*
  * Scheduling statistics.
  */
@@ -110,6 +113,11 @@ UEI_DEFINE(uei);
  * Mask of offline CPUs, used to properly support CPU hotplugging.
  */
 private(BPFLAND) struct bpf_cpumask __kptr *offline_cpumask;
+
+/*
+ * Mask of allowed CPUs that the scheduler can use.
+ */
+private(BPFLAND) struct bpf_cpumask __kptr *allowed_cpumask;
 
 /*
  * Determine when we need to drain tasks dispatched to CPUs that went offline.
@@ -164,7 +172,7 @@ struct {
 /*
  * Return a CPU context.
  */
-struct task_ctx *try_lookup_cpu_ctx(s32 cpu)
+struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
 {
 	const u32 idx = 0;
 	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
@@ -176,10 +184,10 @@ struct task_ctx *try_lookup_cpu_ctx(s32 cpu)
  * This contain all the per-task information used internally by the BPF code.
  */
 struct task_ctx {
-	/*
-	 * Set to true if the task is classified as interactive.
-	 */
-	bool is_interactive;
+        /*
+         * A temporary cpumask for calculating the allowed CPU mask.
+         */
+	struct bpf_cpumask __kptr *tmp_mask;
 
 	/*
 	 * Voluntary context switches metrics.
@@ -187,6 +195,11 @@ struct task_ctx {
 	u64 nvcsw;
 	u64 nvcsw_ts;
 	u64 avg_nvcsw;
+
+	/*
+	 * Set to true if the task is classified as interactive.
+	 */
+	bool is_interactive;
 };
 
 /* Map that contains task-local storage. */
@@ -434,7 +447,13 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
+	struct bpf_cpumask *p_mask, *allowed;
+	struct task_ctx *tctx;
 	s32 cpu;
+
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
+		return prev_cpu;
 
 	/*
 	 * For tasks that can run only on a single CPU, we can simply verify if
@@ -449,6 +468,10 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 		return -ENOENT;
 	}
 
+	allowed = allowed_cpumask;
+	if (!allowed)
+		return -ENOENT;
+
 	/*
 	 * Acquire the CPU masks to determine the online and idle CPUs in the
 	 * system.
@@ -456,6 +479,16 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	online_cpumask = scx_bpf_get_online_cpumask();
 	idle_smtmask = scx_bpf_get_idle_smtmask();
 	idle_cpumask = scx_bpf_get_idle_cpumask();
+
+	bpf_rcu_read_lock();
+
+	p_mask = tctx->tmp_mask;
+	if (!p_mask) {
+		cpu = prev_cpu;
+		goto out_put_cpumask;
+	}
+
+	bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(allowed));
 
 	/*
 	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
@@ -465,7 +498,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 		 * If the task can still run on the previously used CPU and
 		 * it's a full-idle core, keep using it.
 		 */
-		if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
+		if (bpf_cpumask_test_cpu(prev_cpu, cast_mask(p_mask)) &&
 		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
@@ -475,7 +508,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 		/*
 		 * Otherwise, search for another usable full-idle core.
 		 */
-		cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, idle_smtmask);
+		cpu = bpf_cpumask_any_and_distribute(cast_mask(p_mask), idle_smtmask);
 		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
 		    scx_bpf_test_and_clear_cpu_idle(cpu))
 			goto out_put_cpumask;
@@ -485,7 +518,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	 * If a full-idle core can't be found (or if this is not an SMT system)
 	 * try to re-use the same CPU, even if it's not in a full-idle core.
 	 */
-	if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
+	if (bpf_cpumask_test_cpu(prev_cpu, cast_mask(p_mask)) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu = prev_cpu;
 		goto out_put_cpumask;
@@ -495,7 +528,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	 * If all the previous attempts have failed, try to use any idle CPU in
 	 * the system.
 	 */
-	cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, idle_cpumask);
+	cpu = bpf_cpumask_any_and_distribute(cast_mask(p_mask), idle_cpumask);
 	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(cpu))
 		goto out_put_cpumask;
@@ -507,6 +540,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	cpu = -ENOENT;
 
 out_put_cpumask:
+	bpf_rcu_read_unlock();
 	scx_bpf_put_cpumask(idle_cpumask);
 	scx_bpf_put_cpumask(idle_smtmask);
 	scx_bpf_put_cpumask(online_cpumask);
@@ -939,11 +973,22 @@ void BPF_STRUCT_OPS(bpfland_cpu_offline, s32 cpu)
 s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
-	if (bpf_task_storage_get(&task_ctx_stor, p, 0,
-				 BPF_LOCAL_STORAGE_GET_F_CREATE))
-		return 0;
-	else
+	struct task_ctx *tctx;
+	struct bpf_cpumask *cpumask;
+
+	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!tctx)
 		return -ENOMEM;
+	cpumask = bpf_cpumask_create();
+	if (!cpumask)
+		return -ENOMEM;
+
+	cpumask = bpf_kptr_xchg(&tctx->tmp_mask, cpumask);
+	if (cpumask)
+		bpf_cpumask_release(cpumask);
+
+	return 0;
 }
 
 /*
@@ -1012,13 +1057,30 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 		return err;
 	}
 
-	/* Initialize the offline CPU mask */
+	/*
+	 * Initialize the offline CPU mask.
+	 */
 	err = calloc_cpumask(&offline_cpumask);
 	mask = offline_cpumask;
 	if (!mask)
 		err = -ENOMEM;
 	if (err)
 		return err;
+
+	/*
+	 * Initialize the allowed CPU mask.
+	 */
+	err = calloc_cpumask(&allowed_cpumask);
+	bpf_rcu_read_lock();
+	mask = allowed_cpumask;
+	if (!mask)
+		err = -ENOMEM;
+	if (!err) {
+		bpf_for(cpu, 0, MAX_CPUS)
+			if (cpu_allowed[cpu])
+				bpf_cpumask_set_cpu(cpu, mask);
+	}
+	bpf_rcu_read_unlock();
 
 	return err;
 }

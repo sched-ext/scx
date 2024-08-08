@@ -46,6 +46,61 @@ use scx_utils::UserExitInfo;
 
 const SCHEDULER_NAME: &'static str = "scx_bpfland";
 
+#[derive(Debug, Clone)]
+struct CpuMask {
+    mask: Vec<u64>,
+    num_bits: usize,
+}
+
+impl CpuMask {
+    pub fn from_mask(mask: Vec<u64>, num_bits: usize) -> Self {
+        Self { mask, num_bits }
+    }
+
+    pub fn is_cpu_set(&self, cpu: usize) -> bool {
+        if cpu >= self.num_bits {
+            return false;
+        }
+        let idx = cpu / 64;
+        let bit = cpu % 64;
+        self.mask.get(idx).map_or(false, |&val| val & (1 << bit) != 0)
+    }
+
+    pub fn from_str(hex_str: &str) -> Result<Self, std::num::ParseIntError> {
+        let hex_str = hex_str.trim_start_matches("0x");
+        let num_bits = hex_str.len() * 4;
+
+        let num_u64s = (num_bits + 63) / 64;
+        let padded_hex_str = format!("{:0>width$}", hex_str, width = num_u64s * 16);
+
+        let mask = (0..num_u64s)
+            .rev()
+            .map(|i| u64::from_str_radix(&padded_hex_str[i * 16..(i + 1) * 16], 16))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(CpuMask::from_mask(mask, num_bits))
+    }
+
+    pub fn to_string(&self) -> String {
+        let mut hex_str = String::new();
+        for &chunk in self.mask.iter().rev() {
+            hex_str.push_str(&format!("{:016x}", chunk));
+        }
+
+        // Remove leading zeros, but keep at least one digit.
+        hex_str = hex_str.trim_start_matches('0').to_string();
+        if hex_str.is_empty() {
+            hex_str = "0".to_string();
+        }
+        format!("0x{}", hex_str)
+    }
+}
+
+// Custom parser function for cpumask using CpuMask's from_str method
+fn parse_cpumask(hex_str: &str) -> Result<CpuMask, std::num::ParseIntError> {
+    CpuMask::from_str(hex_str)
+}
+
 /// scx_bpfland: a vruntime-based sched_ext scheduler that prioritizes interactive workloads.
 ///
 /// This scheduler is derived from scx_rustland, but it is fully implemented in BFP with minimal
@@ -96,6 +151,10 @@ struct Opts {
     /// starvation_thresh_us (0 = disable starvation prevention).
     #[clap(short = 't', long, default_value = "5000")]
     starvation_thresh_us: u64,
+
+    /// Allowed CPU mask, specified as a hexadecimal number (e.g., 0xffff).
+    #[clap(short = 'm', long, default_value = "0xffff", value_parser = parse_cpumask)]
+    cpumask: CpuMask,
 
     /// Enable the Prometheus endpoint for metrics on port 9000.
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
@@ -206,6 +265,12 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_ns_lag = opts.slice_us_lag * 1000;
         skel.maps.rodata_data.starvation_thresh_ns = opts.starvation_thresh_us * 1000;
         skel.maps.rodata_data.nvcsw_max_thresh = opts.nvcsw_max_thresh;
+
+        info!("allowed cpumask = {}", opts.cpumask.to_string());
+        for cpu in 0..opts.cpumask.num_bits {
+            let allowed = opts.cpumask.is_cpu_set(cpu) as i32;
+            skel.maps.rodata_data.cpu_allowed[cpu] = allowed;
+        }
 
         // Attach the scheduler.
         let mut skel = scx_ops_load!(skel, bpfland_ops, uei)?;
