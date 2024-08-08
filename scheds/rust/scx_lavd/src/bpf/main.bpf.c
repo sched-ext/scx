@@ -403,6 +403,21 @@ static void flip_sys_stat(void)
 	WRITE_ONCE(__sys_stat_idx, __sys_stat_idx ^ 0x1);
 }
 
+static bool is_lat_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
+{
+	return taskc->lat_cri >= stat_cur->avg_lat_cri;
+}
+
+static bool is_perf_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
+{
+	return taskc->perf_cri >= stat_cur->avg_perf_cri;
+}
+
+static bool is_greedy(struct task_ctx *taskc)
+{
+	return taskc->greedy_ratio > 1000;
+}
+
 static __always_inline
 int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 {
@@ -429,12 +444,10 @@ int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 	m->taskc_x.nr_active = stat_cur->nr_active;
 	m->taskc_x.cpuperf_cur = cpuc->cpuperf_cur;
 
-	m->taskc_x.stat[0] = taskc->lat_cri > stat_cur->avg_lat_cri ?
-				'L' : 'R';
-	m->taskc_x.stat[1] = taskc->perf_cri > stat_cur->avg_perf_cri ?
-				'H' : 'I';
+	m->taskc_x.stat[0] = is_lat_cri(taskc, stat_cur) ? 'L' : 'R';
+	m->taskc_x.stat[1] = is_perf_cri(taskc, stat_cur) ? 'H' : 'I';
 	m->taskc_x.stat[2] = cpuc->big_core ? 'B' : 'T';
-	m->taskc_x.stat[3] = taskc->greedy_ratio <= 1000 ? 'E' : 'G';
+	m->taskc_x.stat[3] = is_greedy(taskc) ? 'G' : 'E';
 	m->taskc_x.stat[4] = taskc->victim_cpu >= 0 ? 'P' : 'N';
 	m->taskc_x.stat[5] = '\0';
 
@@ -1580,11 +1593,31 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	return ret;
 }
 
+static u64 find_proper_dsq(struct task_ctx *taskc, struct cpu_ctx *cpuc)
+{
+	struct sys_stat *stat_cur = get_sys_stat_cur();
+	bool perf_cri = is_perf_cri(taskc, stat_cur);
+	bool big_core = cpuc->big_core;
+
+	/*
+	 * If a task type and a core type matches, use the current cpu's
+	 * compute domain DSQ.
+	 */
+	if (perf_cri == big_core)
+		return cpuc->cpdom_id;
+
+	/*
+	 * Otherwise, use the DSQ of an alternative core type.
+	 */
+	return cpuc->cpdom_alt_id;
+}
+
 static void put_cpdom_rq(struct task_struct *p, struct task_ctx *taskc,
 			 struct cpu_ctx *cpuc, u64 enq_flags)
 {
 	struct task_ctx *taskc_run;
 	struct task_struct *p_run;
+	u64 dsq_id;
 
 	__sync_fetch_and_add(&nr_queued_task, 1);
 
@@ -1618,9 +1651,14 @@ static void put_cpdom_rq(struct task_struct *p, struct task_ctx *taskc,
 	/*
 	 * Enqueue the task to one of the DSQs based on its virtual deadline.
 	 */
-	scx_bpf_dispatch_vtime(p, cpuc->cpdom_id, LAVD_SLICE_UNDECIDED,
+	dsq_id = find_proper_dsq(taskc, cpuc);
+	scx_bpf_dispatch_vtime(p, dsq_id, LAVD_SLICE_UNDECIDED,
 			       taskc->vdeadline_log_clk, enq_flags);
-	return;
+
+	debugln("put: %s(%d, %llu/%llu) ==> dsq: %llu, id: %llu, big: %d",
+			p->comm, p->pid, taskc->perf_cri,
+			get_sys_stat_cur()->avg_perf_cri, dsq_id,
+			cpuc->cpdom_id, cpuc->big_core);
 }
 
 static bool could_run_on_prev(struct task_struct *p, s32 prev_cpu,
@@ -2561,7 +2599,10 @@ static s32 init_per_cpu_ctx(u64 now)
 			return -ESRCH;
 		}
 
-		cpuc->cpdom_id = 0; /* TODO */
+		cpuc->cpdom_id = cpu % 2; /* TODO */
+		cpuc->cpdom_alt_id = (cpu + 1) % 2; /* TODO */
+
+		cpuc->big_core = (cpu + 1) % 2; /* TODO XXX */
 	}
 
 	return 0;

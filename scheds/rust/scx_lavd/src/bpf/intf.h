@@ -125,6 +125,7 @@ struct sys_stat {
  */
 struct cpdom_ctx {
 	u64	id;				    /* id of this compute domain (== dsq_id) */
+	u64	alt_id;				    /* id of the closest compute domain of alternative type (== dsq id) */
 	u8	is_active;			    /* if this compute domain is active */
 	u8	nr_neighbors[LAVD_CPDOM_MAX_DIST];  /* number of neighbors per distance */
 	u64	neighbor_bits[LAVD_CPDOM_MAX_DIST]; /* bitmask of neighbor bitmask per distance */
@@ -189,6 +190,7 @@ struct cpu_ctx {
 	u16		capacity;	/* CPU capacity based on 1000 */
 	u8		big_core;	/* is it a big core? */
 	u8		cpdom_id;	/* compute domain id (== dsq_id) */
+	u8		cpdom_alt_id;	/* compute domain id of anternative type (== dsq_id) */
 	struct bpf_cpumask __kptr *tmp_a_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_o_mask;	/* temporary cpu mask */
 } __attribute__((aligned(CACHELINE_SIZE)));

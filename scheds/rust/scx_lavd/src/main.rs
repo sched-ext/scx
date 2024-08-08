@@ -244,8 +244,15 @@ impl<'a> Scheduler<'a> {
         debug!("{}", topo);
 
         // Initialize compute domain contexts
+        // TODO: big core
         skel.bss_mut().cpdom_ctxs[0][0].id = 0; /* TODO */
+        skel.bss_mut().cpdom_ctxs[0][0].alt_id = 1; /* TODO */
         skel.bss_mut().cpdom_ctxs[0][0].is_active = 1; /* TODO */
+
+        // TODO: little core
+        skel.bss_mut().cpdom_ctxs[1][0].id = 1; /* TODO */
+        skel.bss_mut().cpdom_ctxs[1][0].alt_id = 0; /* TODO */
+        skel.bss_mut().cpdom_ctxs[1][0].is_active = 1; /* TODO */
 
         // Initialize skel according to @opts.
         let nr_cpus_onln = topo.nr_cpus_online() as u64;
