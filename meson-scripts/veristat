@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+GUEST_TIMEOUT=25
+BUILD_DIR=$1
+SCHED=$2
+KERNEL=$3
+
+if [ "${KERNEL}" == "vmlinuz" ]; then
+  unset KERNEL
+fi
+
+cd $build_dir
+
+if [ -n "${KERNEL}" ] && [ ! -x `which vng` ]; then
+  echo "vng not found, please install virtme-ng to enable testing"
+  exit 1
+fi
+
+if [ -n "${SCHED}" ]; then
+  BPF_PATH=$(find ${BUILD_DIR} -type f -name bpf.bpf.o | grep ${SCHED})
+  echo "Running veristat on ${BPF_PATH}"
+  if [ -n "${KERNEL}" ]; then
+    timeout --preserve-status ${GUEST_TIMEOUT} \
+      vng --force-9p -v -r ${KERNEL} -- \
+        veristat ${BPF_PATH}
+    exit $?
+  else
+    sudo veristat ${BPF_PATH}
+    exit $?
+  fi
+fi
+
+for BPF_PATH in $(find ${BUILD_DIR} -type f -name bpf.bpf.o); do
+  if [ -n "${KERNEL}" ]; then
+    timeout --preserve-status ${GUEST_TIMEOUT} \
+      vng --force-9p -v -r ${KERNEL} -- \
+        veristat ${BPF_PATH}
+    exit $?
+  else
+    sudo veristat ${BPF_PATH}
+    exit $?
+  fi
+done
