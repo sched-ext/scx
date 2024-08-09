@@ -783,9 +783,9 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             .filter(
                 |task|
                 task.dom_mask
-                & (1 << pull_dom_id) == 1
-                || (self.skip_kworkers && task.is_kworker)
-                || task.migrated.get()
+                & (1 << pull_dom_id) != 0
+                || !(self.skip_kworkers && task.is_kworker)
+                || !task.migrated.get()
             )
             .collect();
 
