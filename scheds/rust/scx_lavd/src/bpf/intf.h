@@ -88,8 +88,7 @@ enum consts {
 	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL /
 					   LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_CPDOM_TYPES_NR		= 2,  /* big or LITTLE */
-	LAVD_CPDOM_MAX_NR		= (64 / LAVD_CPDOM_TYPES_NR), /* maximum number of compute domain (<= 64) */
+	LAVD_CPDOM_MAX_NR		= 64, /* maximum number of compute domain (<= 64) */
 	LAVD_CPDOM_MAX_DIST		= 6,  /* maximum distance from one compute domain to another */
 
 	LAVD_STATUS_STR_LEN		= 5, /* {LR: Latency-critical, Regular}
@@ -126,6 +125,7 @@ struct sys_stat {
 struct cpdom_ctx {
 	u64	id;				    /* id of this compute domain (== dsq_id) */
 	u64	alt_id;				    /* id of the closest compute domain of alternative type (== dsq id) */
+	u8	is_big;				    /* is it a big core or little core? */
 	u8	is_active;			    /* if this compute domain is active */
 	u8	nr_neighbors[LAVD_CPDOM_MAX_DIST];  /* number of neighbors per distance */
 	u64	neighbor_bits[LAVD_CPDOM_MAX_DIST]; /* bitmask of neighbor bitmask per distance */

@@ -208,7 +208,7 @@ private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflo
  */
 const volatile u16	cpu_order[LAVD_CPU_ID_MAX]; /* CPU preference order */
 const volatile u16	__cpu_capacity_hint[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1000 */
-struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_TYPES_NR][LAVD_CPDOM_MAX_NR]; /* contexts for compute domains */
+struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR]; /* contexts for compute domains */
 
 
 /*
@@ -1834,13 +1834,70 @@ static bool use_full_cpus(void)
 	       ((stat_cur->nr_active + LAVD_CC_NR_OVRFLW) >= nr_cpus_onln);
 }
 
-static bool consume_task(u64 dsq_id)
+static s64 pick_any_bit(u64 bitmap, u64 nr_set)
 {
+	s64 nuance = bpf_get_prandom_u32();
+	s64 i, pos;
+
+	bpf_for(i, 0, 64) {
+		pos = (i + nuance) % 64;
+		if (bitmap & (1LLU << pos))
+			return pos;
+	}
+
+	return -ENOENT;
+}
+
+static bool consume_task(struct cpu_ctx *cpuc)
+{
+	struct cpdom_ctx *cpdomc, *cpdomc_pick;
+	u64 dsq_id = cpuc->cpdom_id;
+	u64 nr_nbr;
+
+	/*
+	 * Try to consume from CPU's associated DSQ.
+	 */
 	if (scx_bpf_consume(dsq_id)) {
 		__sync_fetch_and_add(&nr_queued_task, -1);
 		return true;
 	}
 
+	/*
+	 * If there is no task in the assssociated DSQ, traverse neighbor
+	 * compute domains in distance order -- task stealing.
+	 */
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
+	if (!cpdomc) {
+		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_id);
+		return false;
+	}
+
+	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
+		nr_nbr = cpdomc->nr_neighbors[i];
+		if (nr_nbr == 0)
+			continue;
+
+		for (int j = 0; j < nr_nbr; j++) {
+			dsq_id = pick_any_bit(cpdomc->neighbor_bits[i], nr_nbr);
+			if (dsq_id == -ENOENT)
+				continue;
+
+			cpdomc_pick = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
+			if (!cpdomc_pick) {
+				scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_id);
+				return false;
+			}
+
+			if (!cpdomc_pick->is_active)
+				continue;
+	
+			if (scx_bpf_consume(dsq_id)) {
+				__sync_fetch_and_add(&nr_queued_task, -1);
+				return true;
+			}
+		}
+	}
+	
 	return false;
 }
 
@@ -1862,7 +1919,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If all CPUs are using, directly consume without checking CPU masks.
 	 */
 	if (use_full_cpus()) {
-		consume_task(dsq_id);
+		consume_task(cpuc);
 		return;
 	}
 
@@ -1883,7 +1940,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (bpf_cpumask_test_cpu(cpu, cast_mask(active)) ||
 	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
-		consume_task(dsq_id);
+		consume_task(cpuc);
 		goto unlock_out;
 	}
 
@@ -1898,7 +1955,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * kworker, etc).
 		 */
 		if (is_kernel_task(p)) {
-			consume_task(dsq_id);
+			consume_task(cpuc);
 			bpf_cpumask_set_cpu(cpu, ovrflw);
 			break;
 		}
@@ -1930,7 +1987,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * cores. We will optimize this path after introducing per-core
 		 * DSQ.
 		 */
-		consume_task(dsq_id);
+		consume_task(cpuc);
 
 		/*
 		 * This is the first time a particular pinned user-space task
@@ -2441,27 +2498,25 @@ static s32 init_cpdoms(void)
 	struct cpdom_ctx *cpdomc;
 	int err;
 
-	for (int i = 0; i < LAVD_CPDOM_TYPES_NR; i++) {
-		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++) {
-			/*
-			 * Fetch a cpdom context.
-			 */
-			cpdomc = MEMBER_VPTR(cpdom_ctxs, [i][j]);
-			if (!cpdomc) {
-				scx_bpf_error("Failed to lookup cpdom_ctx for [%d][%d]", i, j);
-				return -ESRCH;
-			}
+	for (int i = 0; i < LAVD_CPDOM_MAX_NR; i++) {
+		/*
+		 * Fetch a cpdom context.
+		 */
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [i]);
+		if (!cpdomc) {
+			scx_bpf_error("Failed to lookup cpdom_ctx for %d", i);
+			return -ESRCH;
+		}
 
-			/*
-			 * Create an associated DSQ.
-			 */
-			if (!cpdomc->is_active)
-				continue;
-			err = scx_bpf_create_dsq(cpdomc->id, -1);
-			if (err) {
-				scx_bpf_error("Failed to create a DSQ for cpdom %llu", cpdomc->id);
-				return err;
-			}
+		/*
+		 * Create an associated DSQ.
+		 */
+		if (!cpdomc->is_active)
+			continue;
+		err = scx_bpf_create_dsq(cpdomc->id, -1);
+		if (err) {
+			scx_bpf_error("Failed to create a DSQ for cpdom %llu", cpdomc->id);
+			return err;
 		}
 	}
 

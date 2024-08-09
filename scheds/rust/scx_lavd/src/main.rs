@@ -245,14 +245,21 @@ impl<'a> Scheduler<'a> {
 
         // Initialize compute domain contexts
         // TODO: big core
-        skel.bss_mut().cpdom_ctxs[0][0].id = 0; /* TODO */
-        skel.bss_mut().cpdom_ctxs[0][0].alt_id = 1; /* TODO */
-        skel.bss_mut().cpdom_ctxs[0][0].is_active = 1; /* TODO */
+        skel.bss_mut().cpdom_ctxs[0].id = 0; /* TODO */
+        skel.bss_mut().cpdom_ctxs[0].alt_id = 1; /* TODO */
+        skel.bss_mut().cpdom_ctxs[0].is_big = 1; /* TODO */
+        skel.bss_mut().cpdom_ctxs[0].is_active = 1; /* TODO */
+        skel.bss_mut().cpdom_ctxs[0].nr_neighbors[0] = 1; /* TODO */
+        skel.bss_mut().cpdom_ctxs[0].neighbor_bits[0] = 0x1 << 1; /* TODO */
+
 
         // TODO: little core
-        skel.bss_mut().cpdom_ctxs[1][0].id = 1; /* TODO */
-        skel.bss_mut().cpdom_ctxs[1][0].alt_id = 0; /* TODO */
-        skel.bss_mut().cpdom_ctxs[1][0].is_active = 1; /* TODO */
+        skel.bss_mut().cpdom_ctxs[1].id = 1; /* TODO */
+        skel.bss_mut().cpdom_ctxs[1].alt_id = 0; /* TODO */
+        skel.bss_mut().cpdom_ctxs[1].is_big = 0; /* TODO */
+        skel.bss_mut().cpdom_ctxs[1].is_active = 1; /* TODO */
+        skel.bss_mut().cpdom_ctxs[1].nr_neighbors[0] = 1; /* TODO */
+        skel.bss_mut().cpdom_ctxs[1].neighbor_bits[0] = 0x1 << 0; /* TODO */
 
         // Initialize skel according to @opts.
         let nr_cpus_onln = topo.nr_cpus_online() as u64;
