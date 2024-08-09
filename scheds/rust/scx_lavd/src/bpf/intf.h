@@ -193,6 +193,7 @@ struct cpu_ctx {
 	u8		cpdom_alt_id;	/* compute domain id of anternative type (== dsq_id) */
 	struct bpf_cpumask __kptr *tmp_a_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_o_mask;	/* temporary cpu mask */
+	struct bpf_cpumask __kptr *tmp_t_mask;	/* temporary cpu mask */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 /*

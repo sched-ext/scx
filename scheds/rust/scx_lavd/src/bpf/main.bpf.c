@@ -202,6 +202,8 @@ static volatile u64	nr_queued_task;
 
 private(LAVD) struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
 private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
+private(LAVD) struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
+private(LAVD) struct bpf_cpumask __kptr *little_cpumask; /* CPU mask for little CPUs */
 
 /*
  * CPU topology
@@ -1677,8 +1679,10 @@ static bool could_run_on_prev(struct task_struct *p, s32 prev_cpu,
 static s32 pick_cpu(struct task_struct *p, struct task_ctx *taskc,
 		    s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
+	struct sys_stat *stat_cur = get_sys_stat_cur();
 	struct cpu_ctx *cpuc;
-	struct bpf_cpumask *a_cpumask, *o_cpumask, *active, *ovrflw;
+	struct bpf_cpumask *a_cpumask, *o_cpumask, *t_cpumask;
+	struct bpf_cpumask *active, *ovrflw, *big, *little;
 	s32 cpu_id;
 
 	bpf_rcu_read_lock();
@@ -1695,17 +1699,22 @@ static s32 pick_cpu(struct task_struct *p, struct task_ctx *taskc,
 
 	a_cpumask = cpuc->tmp_a_mask;
 	o_cpumask = cpuc->tmp_o_mask;
+	t_cpumask = cpuc->tmp_t_mask;
 	active  = active_cpumask;
 	ovrflw  = ovrflw_cpumask;
-	if (!a_cpumask || !o_cpumask || !active || !ovrflw) {
+	big = big_cpumask;
+	little = little_cpumask;
+	if (!a_cpumask || !o_cpumask || !t_cpumask ||
+	    !active || !ovrflw || !big || !little) {
 		cpu_id = -ENOENT;
 		goto unlock_out;
 	}
 
 	bpf_cpumask_and(a_cpumask, p->cpus_ptr, cast_mask(active));
 
+
 	/*
-	 * First, try to stay on the previous core if it is on active or ovrfw.
+	 * Try to stay on the previous core if it is on active or ovrfw.
 	 */
 	if (could_run_on_prev(p, prev_cpu, a_cpumask, o_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
@@ -1715,7 +1724,31 @@ static s32 pick_cpu(struct task_struct *p, struct task_ctx *taskc,
 	}
 
 	/*
-	 * Next, pick a fully idle core among active CPUs.
+	 * Pick a fully idle core among active CPUs with a matching core type.
+	 */
+	if (is_perf_cri(taskc, stat_cur))
+		bpf_cpumask_and(t_cpumask, a_cpumask, big);
+	else
+		bpf_cpumask_and(t_cpumask, a_cpumask, little);
+
+	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(t_cpumask), SCX_PICK_IDLE_CORE);
+	if (cpu_id >= 0) {
+		*is_idle = true;
+		goto unlock_out;
+	}
+
+	/*
+	 * Pick a fully idle core among active CPUs with a matching core type
+	 * even if its hypertwin is in use.
+	 */
+	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(t_cpumask), 0);
+	if (cpu_id >= 0) {
+		*is_idle = true;
+		goto unlock_out;
+	}
+
+	/*
+	 * Pick a fully idle core among active CPUs.
 	 */
 	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(a_cpumask), SCX_PICK_IDLE_CORE);
 	if (cpu_id >= 0) {
@@ -1724,8 +1757,8 @@ static s32 pick_cpu(struct task_struct *p, struct task_ctx *taskc,
 	}
 
 	/*
-	 * Then, pick an any idle core among active CPUs even if its hypertwin
-	 * is in use.
+	 * Pick an any idle core among active CPUs even if its hypertwin is in
+	 * use.
 	 */
 	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(a_cpumask), 0);
 	if (cpu_id >= 0) {
@@ -1734,7 +1767,7 @@ static s32 pick_cpu(struct task_struct *p, struct task_ctx *taskc,
 	}
 
 	/*
-	 * Then, pick an any idle core among overflow CPUs.
+	 * Pick an any idle core among overflow CPUs.
 	 */
 	bpf_cpumask_and(o_cpumask, p->cpus_ptr, cast_mask(ovrflw));
 
@@ -1745,7 +1778,7 @@ static s32 pick_cpu(struct task_struct *p, struct task_ctx *taskc,
 	}
 
 	/*
-	 * Next, if there is no idle core under our control, pick random core
+	 * If there is no idle core under our control, pick random core
 	 * either in active of overflow CPUs.
 	 */
 	if (!bpf_cpumask_empty(cast_mask(a_cpumask))) {
@@ -1759,7 +1792,7 @@ static s32 pick_cpu(struct task_struct *p, struct task_ctx *taskc,
 	}
 
 	/*
-	 * Finally, if the task cannot run on either active or overflow cores,
+	 * If the task cannot run on either active or overflow cores,
 	 * stay on the previous core (if it is okay) or one of its taskset.
 	 */
 	if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
@@ -2553,6 +2586,14 @@ static int init_cpumasks(void)
 	if (err)
 		goto out;
 
+	err = calloc_cpumask(&big_cpumask);
+	if (err)
+		goto out;
+
+	err = calloc_cpumask(&little_cpumask);
+	if (err)
+		goto out;
+
 	/*
 	 * Initially activate all CPUs until we know the system load.
 	 */
@@ -2602,8 +2643,22 @@ static u16 get_cpuperf_cap(s32 cpu, bool in_kernel)
 static s32 init_per_cpu_ctx(u64 now)
 {
 	bool in_kernel_cap = can_trust_kernel_cap();
-	int cpu, err;
+	int cpu, err = 0;
 	u32 sum_capacity = 0, avg_capacity;
+	struct bpf_cpumask *big, *little;
+	
+	bpf_rcu_read_lock();
+
+	/*
+	 * Prepare cpumasks.
+	 */
+	big = big_cpumask;
+	little = little_cpumask;
+	if (!big|| !little) {
+		scx_bpf_error("Failed to prepare cpumasks.");
+		err = -ENOMEM;
+		goto unlock_out;
+	}
 
 	/*
 	 * Initilize CPU info
@@ -2612,16 +2667,21 @@ static s32 init_per_cpu_ctx(u64 now)
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
-			return -ESRCH;
+			err = -ESRCH;
+			goto unlock_out;
 		}
 
 		err = calloc_cpumask(&cpuc->tmp_a_mask);
 		if (err)
-			return err;
+			goto unlock_out;
 
 		err = calloc_cpumask(&cpuc->tmp_o_mask);
 		if (err)
-			return err;
+			goto unlock_out;
+
+		err = calloc_cpumask(&cpuc->tmp_t_mask);
+		if (err)
+			goto unlock_out;
 
 		cpu_ctx_init_online(cpuc, cpu, now);
 		cpuc->capacity = get_cpuperf_cap(cpu, in_kernel_cap);
@@ -2638,10 +2698,15 @@ static s32 init_per_cpu_ctx(u64 now)
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
-			return -ESRCH;
+			err = -ESRCH;
+			goto unlock_out;
 		}
 
 		cpuc->big_core = cpuc->capacity >= avg_capacity;
+		if (cpuc->big_core)
+			bpf_cpumask_set_cpu(cpu, big);
+		else
+			bpf_cpumask_set_cpu(cpu, little);
 	}
 
 	/*
@@ -2651,7 +2716,8 @@ static s32 init_per_cpu_ctx(u64 now)
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
-			return -ESRCH;
+			err = -ESRCH;
+			goto unlock_out;
 		}
 
 		cpuc->cpdom_id = cpu % 2; /* TODO */
@@ -2660,7 +2726,11 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->big_core = (cpu + 1) % 2; /* TODO XXX */
 	}
 
-	return 0;
+
+unlock_out:
+	bpf_rcu_read_unlock();
+
+	return err;
 }
 
 static s32 init_sys_stat(u64 now)
@@ -2704,6 +2774,16 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 		return err;
 
 	/*
+	 * Allocate cpumask for task compaction.
+	 *  - active CPUs: a group of CPUs will be used for now.
+	 *  - overflow CPUs: a pair of hyper-twin which will be used when there
+	 *    is no idle active CPUs.
+	 */
+	err = init_cpumasks();
+	if (err)
+		return err;
+
+	/*
 	 * Initialize per-CPU context.
 	 */
 	err = init_per_cpu_ctx(now);
@@ -2715,16 +2795,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	 * system-wide CPU load.
 	 */
 	err = init_sys_stat(now);
-	if (err)
-		return err;
-
-	/*
-	 * Allocate cpumask for task compaction.
-	 *  - active CPUs: a group of CPUs will be used for now.
-	 *  - overflow CPUs: a pair of hyper-twin which will be used when there
-	 *    is no idle active CPUs.
-	 */
-	err = init_cpumasks();
 	if (err)
 		return err;
 
