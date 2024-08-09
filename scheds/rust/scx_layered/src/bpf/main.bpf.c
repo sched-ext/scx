@@ -979,7 +979,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	scx_bpf_consume(LO_FALLBACK_DSQ);
 }
 
-static bool match_one(struct layer_match *match, struct task_struct *p, const char *cgrp_path)
+static __noinline bool match_one(struct layer_match *match,
+				 struct task_struct *p, const char *cgrp_path)
 {
 	bool result = false;
 	const struct cred *cred;
@@ -1025,15 +1026,23 @@ static bool match_one(struct layer_match *match, struct task_struct *p, const ch
 	}
 }
 
-static bool match_layer(struct layer *layer, struct task_struct *p, const char *cgrp_path)
+int match_layer(u32 layer_id, pid_t pid, const char *cgrp_path)
 {
-	u32 nr_match_ors = layer->nr_match_ors;
+
+	struct task_struct *p;
+	struct layer *layer;
+	u32 nr_match_ors;
 	u64 or_idx, and_idx;
 
-	if (nr_match_ors > MAX_LAYER_MATCH_ORS) {
-		scx_bpf_error("too many ORs");
-		return false;
-	}
+	p = bpf_task_from_pid(pid);
+	if (!p)
+		return -EINVAL;
+
+	if (layer_id >= nr_layers || layer->nr_match_ors > MAX_LAYER_MATCH_ORS)
+		goto err;
+
+	layer = &layers[layer_id];
+	nr_match_ors = layer->nr_match_ors;
 
 	bpf_for(or_idx, 0, nr_match_ors) {
 		struct layer_match_ands *ands;
@@ -1041,33 +1050,39 @@ static bool match_layer(struct layer *layer, struct task_struct *p, const char *
 
 		barrier_var(or_idx);
 		if (or_idx >= MAX_LAYER_MATCH_ORS)
-			return false; /* can't happen */
+			goto err;
+
 		ands = &layer->matches[or_idx];
 
-		if (ands->nr_match_ands > NR_LAYER_MATCH_KINDS) {
-			scx_bpf_error("too many ANDs");
-			return false;
-		}
+		if (ands->nr_match_ands > NR_LAYER_MATCH_KINDS)
+			goto err;
 
 		bpf_for(and_idx, 0, ands->nr_match_ands) {
 			struct layer_match *match;
 
 			barrier_var(and_idx);
 			if (and_idx >= NR_LAYER_MATCH_KINDS)
-				return false; /* can't happen */
-			match = &ands->matches[and_idx];
+				goto err;
 
+			match = &ands->matches[and_idx];
 			if (!match_one(match, p, cgrp_path)) {
 				matched = false;
 				break;
 			}
 		}
 
-		if (matched)
-			return true;
+		if (matched) {
+			bpf_task_release(p);
+			return 0;
+		}
 	}
 
-	return false;
+	bpf_task_release(p);
+	return -ENOENT;
+
+err:
+	bpf_task_release(p);
+	return -EINVAL;
 }
 
 static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *tctx)
@@ -1075,6 +1090,7 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *tctx)
 	const char *cgrp_path;
 	bool matched = false;
 	u64 idx;	// XXX - int makes verifier unhappy
+	pid_t pid = p->pid;
 
 	if (!tctx->refresh_layer)
 		return;
@@ -1087,7 +1103,7 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *tctx)
 		__sync_fetch_and_add(&layers[tctx->layer].nr_tasks, -1);
 
 	bpf_for(idx, 0, nr_layers) {
-		if (match_layer(&layers[idx], p, cgrp_path)) {
+		if (match_layer(idx, pid, cgrp_path) == 0) {
 			matched = true;
 			break;
 		}
