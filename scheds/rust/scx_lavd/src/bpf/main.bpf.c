@@ -503,9 +503,6 @@ static void try_proc_introspec_cmd(struct task_struct *p,
 	case LAVD_CMD_SCHED_N:
 		proc_introspec_sched_n(p, taskc, cpu_id);
 		break;
-	case LAVD_CMD_PID:
-		proc_introspec_pid(p, taskc, cpu_id);
-		break;
 	case LAVD_CMD_NOP:
 		/* do nothing */
 		break;
