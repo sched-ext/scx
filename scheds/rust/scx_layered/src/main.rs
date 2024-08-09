@@ -14,6 +14,7 @@ use std::ffi::CString;
 use std::fs;
 use std::io::Read;
 use std::io::Write;
+use std::mem::MaybeUninit;
 use std::ops::Sub;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -28,6 +29,8 @@ use anyhow::Context;
 use anyhow::Result;
 use bitvec::prelude::*;
 use clap::Parser;
+use libbpf_rs::MapCore as _;
+use libbpf_rs::OpenObject;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
@@ -558,8 +561,8 @@ fn cachemask_from_llcs(llcs: &BTreeMap<usize, Cache>) -> usize {
 fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
     let mut cpu_ctxs = vec![];
     let cpu_ctxs_vec = skel
-        .maps()
-        .cpu_ctxs()
+        .maps
+        .cpu_ctxs
         .lookup_percpu(&0u32.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
         .context("Failed to lookup cpu_ctx")?
         .unwrap();
@@ -651,7 +654,7 @@ impl Stats {
     fn read_layer_loads(skel: &mut BpfSkel, nr_layers: usize) -> (f64, Vec<f64>) {
         let now_mono = now_monotonic();
         let layer_loads: Vec<f64> = skel
-            .bss()
+            .maps.bss_data
             .layers
             .iter()
             .take(nr_layers)
@@ -684,7 +687,7 @@ impl Stats {
     }
 
     fn new(skel: &mut BpfSkel, proc_reader: &procfs::ProcReader) -> Result<Self> {
-        let nr_layers = skel.rodata().nr_layers as usize;
+        let nr_layers = skel.maps.rodata_data.nr_layers as usize;
         let bpf_stats = BpfStats::read(&read_cpu_ctxs(skel)?, nr_layers);
 
         Ok(Self {
@@ -718,7 +721,7 @@ impl Stats {
         let cpu_ctxs = read_cpu_ctxs(skel)?;
 
         let nr_layer_tasks: Vec<usize> = skel
-            .bss()
+            .maps.bss_data
             .layers
             .iter()
             .take(self.nr_layers)
@@ -1266,11 +1269,11 @@ struct Scheduler<'a, 'b> {
 
 impl<'a, 'b> Scheduler<'a, 'b> {
     fn init_layers(skel: &mut OpenBpfSkel, opts: &Opts, specs: &Vec<LayerSpec>, topo: &Topology) -> Result<()> {
-        skel.rodata_mut().nr_layers = specs.len() as u32;
+        skel.maps.rodata_data.nr_layers = specs.len() as u32;
         let mut perf_set = false;
 
         for (spec_i, spec) in specs.iter().enumerate() {
-            let layer = &mut skel.bss_mut().layers[spec_i];
+            let layer = &mut skel.maps.bss_data.layers[spec_i];
 
             for (or_i, or) in spec.matches.iter().enumerate() {
                 for (and_i, and) in or.iter().enumerate() {
@@ -1386,26 +1389,26 @@ impl<'a, 'b> Scheduler<'a, 'b> {
     }
 
     fn init_nodes(skel: &mut OpenBpfSkel, _opts: &Opts, topo: &Topology) {
-        skel.rodata_mut().nr_nodes = topo.nodes().len() as u32;
-        skel.rodata_mut().nr_llcs = 0;
+        skel.maps.rodata_data.nr_nodes = topo.nodes().len() as u32;
+        skel.maps.rodata_data.nr_llcs = 0;
 
         for node in topo.nodes() {
             info!("configuring node {}, LLCs {:?}", node.id(), node.llcs().len());
-            skel.rodata_mut().nr_llcs += node.llcs().len() as u32;
+            skel.maps.rodata_data.nr_llcs += node.llcs().len() as u32;
 
             for (_, llc) in node.llcs() {
                 info!("configuring llc {:?} for node {:?}", llc.id(), node.id());
-                skel.rodata_mut().llc_numa_id_map[llc.id()] = node.id() as u32;
+                skel.maps.rodata_data.llc_numa_id_map[llc.id()] = node.id() as u32;
 
             }
         }
 
         for (_, cpu) in topo.cpus() {
-            skel.rodata_mut().cpu_llc_id_map[cpu.id()] = cpu.llc_id() as u32;
+            skel.maps.rodata_data.cpu_llc_id_map[cpu.id()] = cpu.llc_id() as u32;
         }
     }
 
-    fn init(opts: &Opts, layer_specs: &'b Vec<LayerSpec>) -> Result<Self> {
+    fn init(opts: &Opts, layer_specs: &'b Vec<LayerSpec>, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         let nr_layers = layer_specs.len();
         let topo = Topology::new()?;
         let cpu_pool = CpuPool::new()?;
@@ -1414,7 +1417,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 1);
         init_libbpf_logging(None);
-        let mut skel = scx_ops_open!(skel_builder, layered)?;
+        let mut skel = scx_ops_open!(skel_builder, open_object, layered)?;
 
         // scheduler_tick() got renamed to sched_tick() during v6.10-rc.
         let sched_tick_name = match compat::ksym_exists("sched_tick")? {
@@ -1422,29 +1425,29 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             false => "scheduler_tick",
         };
 
-        skel.progs_mut()
-            .sched_tick_fentry()
+        skel.progs
+            .sched_tick_fentry
             .set_attach_target(0, Some(sched_tick_name.into()))
             .context("Failed to set attach target for sched_tick_fentry()")?;
 
         // Initialize skel according to @opts.
         skel.struct_ops.layered_mut().exit_dump_len = opts.exit_dump_len;
 
-        skel.rodata_mut().debug = opts.verbose as u32;
-        skel.rodata_mut().slice_ns = opts.slice_us * 1000;
-        skel.rodata_mut().max_exec_ns = if opts.max_exec_us > 0 {
+        skel.maps.rodata_data.debug = opts.verbose as u32;
+        skel.maps.rodata_data.slice_ns = opts.slice_us * 1000;
+        skel.maps.rodata_data.max_exec_ns = if opts.max_exec_us > 0 {
             opts.max_exec_us * 1000
         } else {
             opts.slice_us * 1000 * 20
         };
-        skel.rodata_mut().nr_possible_cpus = *NR_POSSIBLE_CPUS as u32;
-        skel.rodata_mut().smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
-        skel.rodata_mut().disable_topology = opts.disable_topology;
+        skel.maps.rodata_data.nr_possible_cpus = *NR_POSSIBLE_CPUS as u32;
+        skel.maps.rodata_data.smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
+        skel.maps.rodata_data.disable_topology = opts.disable_topology;
         for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
-            skel.rodata_mut().__sibling_cpu[cpu] = *sib;
+            skel.maps.rodata_data.__sibling_cpu[cpu] = *sib;
         }
         for cpu in cpu_pool.all_cpus.iter_ones() {
-            skel.rodata_mut().all_cpus[cpu / 8] |= 1 << (cpu % 8);
+            skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
         Self::init_layers(&mut skel, opts, layer_specs, &topo)?;
         Self::init_nodes(&mut skel, opts, &topo);
@@ -1497,7 +1500,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         Ok(sched)
     }
 
-    fn update_bpf_layer_cpumask(layer: &Layer, bpf_layer: &mut bpf_types::layer) {
+    fn update_bpf_layer_cpumask(layer: &Layer, bpf_layer: &mut types::layer) {
         for bit in 0..layer.cpus.len() {
             if layer.cpus[bit] {
                 bpf_layer.cpus[bit / 8] |= 1 << (bit % 8);
@@ -1542,7 +1545,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     {
                         Self::update_bpf_layer_cpumask(
                             &self.layers[idx],
-                            &mut self.skel.bss_mut().layers[idx],
+                            &mut self.skel.maps.bss_data.layers[idx],
                         );
                         updated = true;
                     }
@@ -1554,7 +1557,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         if updated {
             for idx in 0..self.layers.len() {
                 let layer = &mut self.layers[idx];
-                let bpf_layer = &mut self.skel.bss_mut().layers[idx];
+                let bpf_layer = &mut self.skel.maps.bss_data.layers[idx];
                 match &layer.kind {
                     LayerKind::Open { .. } => {
                         let available_cpus = self.cpu_pool.available_cpus_in_mask(&layer.allowed_cpus);
@@ -1569,7 +1572,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 }
             }
 
-            self.skel.bss_mut().fallback_cpu = self.cpu_pool.fallback_cpu as u32;
+            self.skel.maps.bss_data.fallback_cpu = self.cpu_pool.fallback_cpu as u32;
 
             for (lidx, layer) in self.layers.iter().enumerate() {
                 self.nr_layer_cpus_min_max[lidx] = (
@@ -2183,8 +2186,9 @@ fn main() -> Result<()> {
         }
     }
 
+    let mut open_object = MaybeUninit::uninit();
     loop {
-        let mut sched = Scheduler::init(&opts, &layer_config.specs)?;
+        let mut sched = Scheduler::init(&opts, &layer_config.specs, &mut open_object)?;
         if !sched.run(shutdown.clone())?.should_restart() {
             break;
         }

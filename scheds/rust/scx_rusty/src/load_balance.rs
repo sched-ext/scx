@@ -143,6 +143,7 @@ use std::sync::Arc;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use libbpf_rs::MapCore as _;
 use log::debug;
 use log::warn;
 use ordered_float::OrderedFloat;
@@ -368,7 +369,7 @@ impl Domain {
         let dom_id: u32 = other.id.try_into().unwrap();
 
         // Ask BPF code to execute the migration.
-        if let Err(e) = skel.maps_mut().lb_data().update(
+        if let Err(e) = skel.maps.lb_data.update(
             &cpid,
             &dom_id.to_ne_bytes(),
             libbpf_rs::MapFlags::NO_EXIST,
@@ -603,9 +604,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     fn calculate_load_avgs(&mut self) -> Result<LoadLedger> {
         const NUM_BUCKETS: u64 = bpf_intf::consts_LB_LOAD_BUCKETS as u64;
         let now_mono = now_monotonic();
-        let load_half_life = self.skel.rodata().load_half_life;
-        let maps = self.skel.maps();
-        let dom_data = maps.dom_data();
+        let load_half_life = self.skel.maps.rodata_data.load_half_life;
+        let dom_data = &self.skel.maps.dom_data;
 
         let mut aggregator = LoadAggregator::new(self.dom_group.weight(), !self.lb_apply_weight.clone());
 
@@ -680,20 +680,19 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         // Read active_pids and update read_idx and gen.
         const MAX_PIDS: u64 = bpf_intf::consts_MAX_DOM_ACTIVE_PIDS as u64;
-        let active_pids = &mut self.skel.bss_mut().dom_active_pids[dom.id];
+        let active_pids = &mut self.skel.maps.bss_data.dom_active_pids[dom.id];
         let (mut ridx, widx) = (active_pids.read_idx, active_pids.write_idx);
         active_pids.read_idx = active_pids.write_idx;
         active_pids.gen += 1;
 
-        let active_pids = &self.skel.bss().dom_active_pids[dom.id];
+        let active_pids = &self.skel.maps.bss_data.dom_active_pids[dom.id];
         if widx - ridx > MAX_PIDS {
             ridx = widx - MAX_PIDS;
         }
 
         // Read task_ctx and load.
-        let load_half_life = self.skel.rodata().load_half_life;
-        let maps = self.skel.maps();
-        let task_data = maps.task_data();
+        let load_half_life = self.skel.maps.rodata_data.load_half_life;
+        let task_data = &self.skel.maps.task_data;
         let now_mono = now_monotonic();
 
         for idx in ridx..widx {
@@ -1093,7 +1092,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     }
 
     fn perform_balancing(&mut self) -> Result<()> {
-        clear_map(self.skel.maps().lb_data());
+        clear_map(&self.skel.maps.lb_data);
 
         // First balance load between the NUMA nodes. Balancing here has a
         // higher cost function than balancing between domains inside of NUMA
