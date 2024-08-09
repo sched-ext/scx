@@ -1687,13 +1687,6 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	return ret;
 }
 
-static bool is_lat_cri_task(struct task_ctx *taskc)
-{
-	struct sys_stat *stat_cur = get_sys_stat_cur();
-
-	return taskc->lat_cri > stat_cur->thr_lat_cri;
-}
-
 static void put_global_rq(struct task_struct *p, struct task_ctx *taskc,
 			  struct cpu_ctx *cpuc, u64 enq_flags)
 {
