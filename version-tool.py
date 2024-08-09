@@ -50,7 +50,7 @@ def do_meson_ver(new_ver):
     with open(path, 'w') as f:
         f.writelines(lines)
 
-    return new_ver
+    return ver
 
 def get_rust_paths():
     result = subprocess.run(['git', 'ls-files'], stdout=subprocess.PIPE)
@@ -108,7 +108,7 @@ def do_rust_ver(path, new_ver):
     with open(path, 'w') as f:
         f.writelines(lines)
 
-    return new_ver
+    return ver
 
 def do_rust_deps(path, deps, new_deps):
     with open(path, 'r') as f:
