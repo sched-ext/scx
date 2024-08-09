@@ -9,8 +9,6 @@ pub mod bpf_intf;
 mod bpf;
 use bpf::*;
 
-use scx_utils::Topology;
-use scx_utils::TopologyMap;
 use scx_utils::UserExitInfo;
 
 use std::thread;
@@ -25,7 +23,6 @@ use std::time::SystemTime;
 
 use std::fs::File;
 use std::io::{self, Read};
-use std::path::Path;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -264,7 +261,6 @@ impl TaskTree {
 // Main scheduler object
 struct Scheduler<'a> {
     bpf: BpfScheduler<'a>, // BPF connector
-    topo_map: TopologyMap, // Host topology
     task_pool: TaskTree,   // tasks ordered by vruntime
     task_map: TaskInfoMap, // map pids to the corresponding task information
     proc_stats: HashMap<i32, u64>, // Task statistics from procfs
@@ -280,9 +276,6 @@ impl<'a> Scheduler<'a> {
         opts: &Opts,
         open_object: &'a mut MaybeUninit<OpenObject>,
     ) -> Result<Self> {
-        // Initialize core mapping topology.
-        let topo = Topology::new().expect("Failed to build host topology");
-        let topo_map = TopologyMap::new(&topo).expect("Failed to generate topology map");
 
         // Low-level BPF connector.
         let bpf = BpfScheduler::init(
@@ -300,7 +293,6 @@ impl<'a> Scheduler<'a> {
         // Return scheduler object.
         Ok(Self {
             bpf,
-            topo_map,
             task_pool: TaskTree::new(),
             task_map: TaskInfoMap::new(),
             proc_stats: HashMap::new(),
