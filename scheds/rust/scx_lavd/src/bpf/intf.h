@@ -234,6 +234,8 @@ struct task_ctx {
 	/*
 	 * Task's performance criticality
 	 */
+	u8	on_big;			/* executable on a big core */
+	u8	on_little;		/* executable on a little core */
 	u32	perf_cri;		/* performance criticality of a task */
 };
 

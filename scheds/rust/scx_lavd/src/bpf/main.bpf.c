@@ -412,7 +412,9 @@ static bool is_lat_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
 
 static bool is_perf_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
 {
-	return taskc->perf_cri >= stat_cur->avg_perf_cri;
+	if (taskc->on_big && taskc->on_little)
+		return taskc->perf_cri >= stat_cur->avg_perf_cri;
+	return taskc->on_big;
 }
 
 static bool is_greedy(struct task_ctx *taskc)
@@ -1727,9 +1729,9 @@ static s32 pick_cpu(struct task_struct *p, struct task_ctx *taskc,
 	 * Pick a fully idle core among active CPUs with a matching core type.
 	 */
 	if (is_perf_cri(taskc, stat_cur))
-		bpf_cpumask_and(t_cpumask, a_cpumask, big);
+		bpf_cpumask_and(t_cpumask, cast_mask(a_cpumask), cast_mask(big));
 	else
-		bpf_cpumask_and(t_cpumask, a_cpumask, little);
+		bpf_cpumask_and(t_cpumask, cast_mask(a_cpumask), cast_mask(little));
 
 	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(t_cpumask), SCX_PICK_IDLE_CORE);
 	if (cpu_id >= 0) {
@@ -2471,6 +2473,50 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 	}
 }
 
+static void set_on_core_type(struct task_ctx *taskc,
+				 const struct cpumask *cpumask)
+{
+	bool on_big = false, on_little = false;
+	struct cpu_ctx *cpuc;
+	int cpu;
+
+	bpf_for(cpu, 0, nr_cpus_onln) {
+		if (!bpf_cpumask_test_cpu(cpu, cpumask))
+			continue;
+
+		cpuc = get_cpu_ctx_id(cpu);
+		if (!cpuc) {
+			scx_bpf_error("Failed to look up cpu_ctx: %d", cpu);
+			return;
+		}
+
+		if (cpuc->big_core)
+			on_big = true;
+		else
+			on_big = true;
+
+		if (on_big && on_little)
+			break;
+	}
+
+	taskc->on_big = on_big;
+	taskc->on_little = on_little;
+}
+
+void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
+		    const struct cpumask *cpumask)
+{
+	struct task_ctx *taskc;
+
+	taskc = get_task_ctx(p);
+	if (!taskc) {
+		scx_bpf_error("task_ctx_stor first lookup failed");
+		return;
+	}
+
+	set_on_core_type(taskc, cpumask);
+}
+
 static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
@@ -2482,6 +2528,8 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	taskc->run_time_ns = LAVD_SLICE_MAX_NS;
 	taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
 	taskc->svc_time = stat_cur->avg_svc_time * LAVD_NEW_PROC_PENALITY;
+
+	set_on_core_type(taskc, p->cpus_ptr);
 }
 
 void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
@@ -2522,7 +2570,6 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 	 * Initialize @p's context.
 	 */
 	init_task_ctx(p, taskc);
-
 	return 0;
 }
 
@@ -2824,6 +2871,7 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .cpu_online		= (void *)lavd_cpu_online,
 	       .cpu_offline		= (void *)lavd_cpu_offline,
 	       .update_idle		= (void *)lavd_update_idle,
+	       .set_cpumask		= (void *)lavd_set_cpumask,
 	       .enable			= (void *)lavd_enable,
 	       .init_task		= (void *)lavd_init_task,
 	       .init			= (void *)lavd_init,
