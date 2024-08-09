@@ -90,6 +90,7 @@ enum consts {
 
 	LAVD_CPDOM_MAX_NR		= 64, /* maximum number of compute domain (<= 64) */
 	LAVD_CPDOM_MAX_DIST		= 6,  /* maximum distance from one compute domain to another */
+	LAVD_CPDOM_STARV_NS		= (5ULL * NSEC_PER_MSEC),
 
 	LAVD_STATUS_STR_LEN		= 5, /* {LR: Latency-critical, Regular}
 						{HI: performance-Hungry, performance-Insensitive}
@@ -125,10 +126,12 @@ struct sys_stat {
 struct cpdom_ctx {
 	u64	id;				    /* id of this compute domain (== dsq_id) */
 	u64	alt_id;				    /* id of the closest compute domain of alternative type (== dsq id) */
+	u64	last_consume_clk;		    /* when the associated DSQ was consumed */
 	u8	is_big;				    /* is it a big core or little core? */
 	u8	is_active;			    /* if this compute domain is active */
 	u8	nr_neighbors[LAVD_CPDOM_MAX_DIST];  /* number of neighbors per distance */
 	u64	neighbor_bits[LAVD_CPDOM_MAX_DIST]; /* bitmask of neighbor bitmask per distance */
+	u64	cpumask[LAVD_CPU_ID_MAX/64];	    /* cpumasks belongs to this compute domain */
 };
 
 /*
@@ -191,6 +194,7 @@ struct cpu_ctx {
 	u8		big_core;	/* is it a big core? */
 	u8		cpdom_id;	/* compute domain id (== dsq_id) */
 	u8		cpdom_alt_id;	/* compute domain id of anternative type (== dsq_id) */
+	u8		cpdom_poll_pos;	/* index to check if a DSQ of a compute domain is starving */
 	struct bpf_cpumask __kptr *tmp_a_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_o_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_t_mask;	/* temporary cpu mask */
