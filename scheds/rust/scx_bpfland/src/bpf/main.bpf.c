@@ -288,8 +288,6 @@ static inline bool vtime_before(u64 a, u64 b)
  */
 static inline u64 task_vtime(struct task_struct *p)
 {
-	u64 vtime = p->scx.dsq_vtime;
-
 	/*
 	 * Limit the vruntime to (vtime_now - slice_ns_lag) to avoid
 	 * excessively penalizing tasks.
