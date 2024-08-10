@@ -16,7 +16,12 @@ serialize = get_option('serialize')
 
 bpf_clang = find_program(get_option('bpf_clang'))
 
+run_veristat = find_program(join_paths(meson.current_source_dir(),
+                                       'meson-scripts/veristat'))
+
 enable_stress = get_option('enable_stress')
+
+veristat_scheduler = get_option('veristat_scheduler')
 
 if enable_rust
   cargo = find_program(get_option('cargo'))
@@ -322,6 +327,9 @@ if get_option('kernel') != ''
 endif
 
 run_target('test_sched', command: [test_sched, kernel])
+
+run_target('veristat', command: [run_veristat, meson.current_build_dir(),
+                                 get_option('veristat_scheduler'), get_option('kernel')])
 
 if enable_rust
   subdir('rust')
