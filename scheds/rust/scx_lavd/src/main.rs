@@ -11,24 +11,24 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
+use libc::c_char;
+use std::collections::BTreeMap;
+use std::ffi::CStr;
+use std::fmt;
 use std::mem;
 use std::mem::MaybeUninit;
+use std::str;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
-use std::ffi::CStr;
-use std::fmt;
-use std::str;
-use std::collections::BTreeMap;
-use libc::c_char;
 
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-use libbpf_rs::OpenObject;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::OpenObject;
 use log::debug;
 use log::info;
 use log::warn;
@@ -223,19 +223,22 @@ impl FlatTopology {
         let mut cpdom_id = 0;
         let mut cpdom_map: BTreeMap<ComputeDomainKey, ComputeDomainValue> = BTreeMap::new();
         for cpu_fid in cpu_fids.iter() {
-            let key = ComputeDomainKey {node_id: cpu_fid.node_id,
-                                        llc_pos: cpu_fid.llc_pos,
-                                        is_big: cpu_fid.max_freq >= avg_freq, };
+            let key = ComputeDomainKey {
+                node_id: cpu_fid.node_id,
+                llc_pos: cpu_fid.llc_pos,
+                is_big: cpu_fid.max_freq >= avg_freq,
+            };
             let ret = cpdom_map.get(&key);
             let mut value;
             if ret.is_none() {
-                value = ComputeDomainValue {cpdom_id: cpdom_id,
-                                            cpdom_alt_id: cpdom_id,
-                                            cpu_ids: Vec::new(),
-                                            neighbor_map: BTreeMap::new(),};
+                value = ComputeDomainValue {
+                    cpdom_id,
+                    cpdom_alt_id: cpdom_id,
+                    cpu_ids: Vec::new(),
+                    neighbor_map: BTreeMap::new(),
+                };
                 cpdom_id += 1;
-            }
-            else {
+            } else {
                 value = ret.unwrap().clone();
             }
             value.cpu_ids.push(cpu_fid.cpu_id);
@@ -253,7 +256,7 @@ impl FlatTopology {
                 let alt_v = ret.unwrap();
                 let mut value = v.clone();
                 value.cpdom_alt_id = alt_v.cpdom_id;
-                alt_update_vec.push( (k.clone(), value) );
+                alt_update_vec.push((k.clone(), value));
             }
         }
         for (key, value) in alt_update_vec.iter() {
@@ -281,8 +284,7 @@ impl FlatTopology {
                     let mut value = ret.unwrap().clone();
                     value.push(to_v.cpdom_id);
                     map.insert(d, value.to_vec());
-                }
-                else {
+                } else {
                     let value = [to_v.cpdom_id];
                     map.insert(d, value.to_vec());
                 }
@@ -290,8 +292,8 @@ impl FlatTopology {
         }
 
         Ok(FlatTopology {
-            cpu_fids: cpu_fids,
-            cpdom_map: cpdom_map,
+            cpu_fids,
+            cpdom_map,
             nr_cpus_online: topo.nr_cpus_online(),
         })
     }
@@ -305,8 +307,7 @@ impl FlatTopology {
         }
         if from.node_id != to.node_id {
             d += 2;
-        }
-        else {
+        } else {
             if from.llc_pos != to.llc_pos {
                 d += 1;
             }
@@ -324,10 +325,7 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(
-        opts: &'a Opts,
-        open_object: &'a mut MaybeUninit<OpenObject>,
-    ) -> Result<Self> {
+    fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         // Increase MEMLOCK size since the BPF scheduler might use
         // more than the current limit
         let (soft_limit, _) = getrlimit(Resource::MEMLOCK).unwrap();

@@ -1976,7 +1976,7 @@ static bool consume_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 	}
 
 	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
-		nr_nbr = cpdomc->nr_neighbors[i];
+		nr_nbr = min(cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
 			continue;
 
@@ -2012,6 +2012,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	struct bpf_cpumask *active, *ovrflw;
 	struct task_struct *p;
 	u64 dsq_id = 0;
+	bool consume_out = false;
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
@@ -2045,7 +2046,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (bpf_cpumask_test_cpu(cpu, cast_mask(active)) ||
 	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
-		consume_task(cpu, cpuc, now);
+		consume_out = true;
 		goto unlock_out;
 	}
 
@@ -2061,7 +2062,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 */
 		if (is_kernel_task(p)) {
 			bpf_cpumask_set_cpu(cpu, ovrflw);
-			consume_task(cpu, cpuc, now);
+			consume_out = true;
 			break;
 		}
 
@@ -2102,7 +2103,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * cores. We will optimize this path after introducing per-core
 		 * DSQ.
 		 */
-		consume_task(cpu, cpuc, now);
+		consume_out = true;
 
 release_break:
 		bpf_task_release(p);
@@ -2111,7 +2112,14 @@ release_break:
 
 unlock_out:
 	bpf_rcu_read_unlock();
-	return;
+
+	/*
+	 * Note that the verifier in 6.8 kernel cannot correctly verifies the
+	 * code correctly when consume_task() is under a rcu-read-lock region.
+	 * Hence, we moveed it outside of the rcu region. :-(
+	 */
+	if (consume_out)
+		consume_task(cpu, cpuc, now);
 }
 
 static int calc_cpuperf_target(struct sys_stat *stat_cur,
@@ -2743,7 +2751,8 @@ static s32 init_per_cpu_ctx(u64 now)
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *big, *little;
 	struct cpdom_ctx *cpdomc;
-	int cpu, cpdom_id, i, j, err = 0;
+	int cpu, i, j, err = 0;
+	u64 cpdom_id;
 	u32 sum_capacity = 0, avg_capacity;
 	
 	bpf_rcu_read_lock();
