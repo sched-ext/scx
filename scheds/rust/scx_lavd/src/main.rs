@@ -176,23 +176,23 @@ impl FlatTopology {
 
         // Sort the cpu_fids
         if prefer_smt_core {
-            // Sort the cpu_fids  by node, llc, max_freq, core, and cpu order
+            // Sort the cpu_fids by node, llc, ^max_freq, core, and cpu order
             cpu_fids.sort_by(|a, b| {
                 a.node_id
                     .cmp(&b.node_id)
                     .then_with(|| a.llc_pos.cmp(&b.llc_pos))
-                    .then_with(|| a.max_freq.cmp(&b.max_freq))
+                    .then_with(|| b.max_freq.cmp(&a.max_freq))
                     .then_with(|| a.core_pos.cmp(&b.core_pos))
                     .then_with(|| a.cpu_pos.cmp(&b.cpu_pos))
             });
         } else {
-            // Sort the cpu_fids  by cpu, node, llc, max_freq, and core order
+            // Sort the cpu_fids by cpu, node, llc, ^max_freq, and core order
             cpu_fids.sort_by(|a, b| {
                 a.cpu_pos
                     .cmp(&b.cpu_pos)
                     .then_with(|| a.node_id.cmp(&b.node_id))
                     .then_with(|| a.llc_pos.cmp(&b.llc_pos))
-                    .then_with(|| a.max_freq.cmp(&b.max_freq))
+                    .then_with(|| b.max_freq.cmp(&a.max_freq))
                     .then_with(|| a.core_pos.cmp(&b.core_pos))
             });
         }

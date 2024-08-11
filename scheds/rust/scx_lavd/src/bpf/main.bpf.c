@@ -2724,28 +2724,8 @@ out:
 	return err;
 }
 
-static bool can_trust_kernel_cap(void)
+static u16 get_cpuperf_cap(s32 cpu)
 {
-	int cpu;
-
-	/*
-	 * If scx_bpf_cpuperf_cap () returns 1024 for all cores, it could be
-	 * either of two: 1) all cores' capacities are indeed the same, 2)
-	 * in-kernel driver does not provide a proper value.
-	 */
-	bpf_for(cpu, 0, nr_cpus_onln) {
-		if (scx_bpf_cpuperf_cap(cpu) != 1024)
-			return true;
-	}
-
-	return false;
-}
-
-static u16 get_cpuperf_cap(s32 cpu, bool in_kernel)
-{
-	if (in_kernel)
-		return scx_bpf_cpuperf_cap(cpu);
-
 	/*
 	 * If CPU's capacitiy values are all 1024, then let's just use the
 	 * capacity value from userspace, which are calculated using each CPU's
@@ -2760,7 +2740,6 @@ static u16 get_cpuperf_cap(s32 cpu, bool in_kernel)
 
 static s32 init_per_cpu_ctx(u64 now)
 {
-	bool in_kernel_cap = can_trust_kernel_cap();
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *big, *little;
 	struct cpdom_ctx *cpdomc;
@@ -2804,7 +2783,7 @@ static s32 init_per_cpu_ctx(u64 now)
 			goto unlock_out;
 
 		cpu_ctx_init_online(cpuc, cpu, now);
-		cpuc->capacity = get_cpuperf_cap(cpu, in_kernel_cap);
+		cpuc->capacity = get_cpuperf_cap(cpu);
 		cpuc->offline_clk = now;
 		cpuc->cpdom_poll_pos = cpu % LAVD_CPDOM_MAX_NR;
 
