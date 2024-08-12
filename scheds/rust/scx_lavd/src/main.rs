@@ -339,37 +339,37 @@ impl<'a> Scheduler<'a> {
         // Initialize CPU order topologically sorted by a cpu, node, llc, max_freq, and core order
         let topo = FlatTopology::new(opts.prefer_smt_core).expect("Failed to build host topology");
         for (pos, cpu) in topo.cpu_fids.iter().enumerate() {
-            skel.rodata_mut().cpu_order[pos] = cpu.cpu_id as u16;
-            skel.rodata_mut().__cpu_capacity_hint[cpu.cpu_id] = cpu.cpu_cap as u16;
+            skel.maps.rodata_data.cpu_order[pos] = cpu.cpu_id as u16;
+            skel.maps.rodata_data.__cpu_capacity_hint[cpu.cpu_id] = cpu.cpu_cap as u16;
         }
         debug!("{}", topo);
 
         // Initialize compute domain contexts
         for (k, v) in topo.cpdom_map.iter() {
-            skel.bss_mut().cpdom_ctxs[v.cpdom_id].id = v.cpdom_id as u64;
-            skel.bss_mut().cpdom_ctxs[v.cpdom_id].alt_id = v.cpdom_alt_id as u64;
-            skel.bss_mut().cpdom_ctxs[v.cpdom_id].is_big = k.is_big as u8;
-            skel.bss_mut().cpdom_ctxs[v.cpdom_id].is_active = 1;
+            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].id = v.cpdom_id as u64;
+            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].alt_id = v.cpdom_alt_id as u64;
+            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_big = k.is_big as u8;
+            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_active = 1;
             for cpu_id in v.cpu_ids.iter() {
                 let i = cpu_id / 64;
                 let j = cpu_id % 64;
-                skel.bss_mut().cpdom_ctxs[v.cpdom_id].cpumask[i] |= 0x01 << j;
+                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].cpumask[i] |= 0x01 << j;
             }
 
             for (k, (_d, neighbors)) in v.neighbor_map.iter().enumerate() {
-                skel.bss_mut().cpdom_ctxs[v.cpdom_id].nr_neighbors[k] = neighbors.len() as u8;
+                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].nr_neighbors[k] = neighbors.len() as u8;
                 for n in neighbors.iter() {
-                    skel.bss_mut().cpdom_ctxs[v.cpdom_id].neighbor_bits[k] = 0x1 << n;
+                    skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].neighbor_bits[k] = 0x1 << n;
                 }
             }
         }
 
         // Initialize skel according to @opts.
         let nr_cpus_onln = topo.nr_cpus_online as u64;
-        skel.bss_mut().nr_cpus_onln = nr_cpus_onln;
-        skel.rodata_mut().no_core_compaction = opts.no_core_compaction;
-        skel.rodata_mut().no_freq_scaling = opts.no_freq_scaling;
-        skel.rodata_mut().verbose = opts.verbose;
+        skel.maps.bss_data.nr_cpus_onln = nr_cpus_onln;
+        skel.maps.rodata_data.no_core_compaction = opts.no_core_compaction;
+        skel.maps.rodata_data.no_freq_scaling = opts.no_freq_scaling;
+        skel.maps.rodata_data.verbose = opts.verbose;
         let intrspc = introspec::init(opts);
 
         // Attach.
