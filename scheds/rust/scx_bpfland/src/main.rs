@@ -10,31 +10,33 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
+use std::ffi::c_int;
 use std::fs::File;
 use std::io::Read;
 use std::mem::MaybeUninit;
+use std::str;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-
-use std::str;
 
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use log::info;
+use log::warn;
 
 use metrics::{gauge, Gauge};
 use metrics_exporter_prometheus::PrometheusBuilder;
 
 use rlimit::{getrlimit, setrlimit, Resource};
 
-use libbpf_rs::OpenObject;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 
 use scx_utils::build_id;
 use scx_utils::scx_ops_attach;
@@ -45,6 +47,69 @@ use scx_utils::uei_report;
 use scx_utils::UserExitInfo;
 
 const SCHEDULER_NAME: &'static str = "scx_bpfland";
+
+#[derive(Debug, Clone)]
+struct CpuMask {
+    mask: Vec<u64>,
+    num_bits: usize,
+}
+
+impl CpuMask {
+    pub fn from_mask(mask: Vec<u64>, num_bits: usize) -> Self {
+        Self { mask, num_bits }
+    }
+
+    pub fn is_cpu_set(&self, cpu: usize) -> bool {
+        if self.num_bits == 0 {
+            return true;
+        }
+        if cpu >= self.num_bits {
+            return false;
+        }
+        let idx = cpu / 64;
+        let bit = cpu % 64;
+        self.mask
+            .get(idx)
+            .map_or(false, |&val| val & (1 << bit) != 0)
+    }
+
+    pub fn from_str(hex_str: &str) -> Result<Self, std::num::ParseIntError> {
+        let hex_str = hex_str.trim_start_matches("0x");
+        let num_bits = hex_str.len() * 4;
+
+        let num_u64s = (num_bits + 63) / 64;
+        let padded_hex_str = format!("{:0>width$}", hex_str, width = num_u64s * 16);
+
+        let mask = (0..num_u64s)
+            .rev()
+            .map(|i| u64::from_str_radix(&padded_hex_str[i * 16..(i + 1) * 16], 16))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(CpuMask::from_mask(mask, num_bits))
+    }
+
+    pub fn to_string(&self) -> String {
+        if self.num_bits == 0 {
+            return "all".to_string();
+        }
+        let mut hex_str = String::new();
+        for &chunk in self.mask.iter().rev() {
+            hex_str.push_str(&format!("{:016x}", chunk));
+        }
+
+        // Remove leading zeros, but keep at least one digit.
+        hex_str = hex_str.trim_start_matches('0').to_string();
+        if hex_str.is_empty() {
+            hex_str = "0".to_string();
+        }
+        format!("0x{}", hex_str)
+    }
+}
+
+// Custom parser function for cpumask using CpuMask's from_str method
+fn parse_cpumask(hex_str: &str) -> Result<CpuMask, std::num::ParseIntError> {
+    CpuMask::from_str(hex_str)
+}
 
 /// scx_bpfland: a vruntime-based sched_ext scheduler that prioritizes interactive workloads.
 ///
@@ -86,6 +151,14 @@ struct Opts {
     /// network traffic.
     #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
     local_kthreads: bool,
+
+    /// Specifies the initial set of CPUs, represented as a bitmask in hex (e.g., 0xff), that the
+    /// scheduler will use to dispatch tasks, until the system becomes saturated, at which point
+    /// tasks may overflow to other available CPUs.
+    ///
+    /// (empty string = all CPUs are used for initial scheduling)
+    #[clap(short = 'm', long, default_value = "", value_parser = parse_cpumask)]
+    primary_domain: CpuMask,
 
     /// Maximum threshold of voluntary context switch per second, used to classify interactive
     /// tasks (0 = disable interactive tasks classification).
@@ -205,8 +278,13 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.starvation_thresh_ns = opts.starvation_thresh_us * 1000;
         skel.maps.rodata_data.nvcsw_max_thresh = opts.nvcsw_max_thresh;
 
-        // Attach the scheduler.
+        // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, bpfland_ops, uei)?;
+
+        // Initialize primary domain CPUs.
+        Self::init_primary_domain(&mut skel, &opts.primary_domain)?;
+
+        // Attach the scheduler.
         let struct_ops = Some(scx_ops_attach!(skel, bpfland_ops)?);
 
         // Enable Prometheus metrics.
@@ -222,6 +300,45 @@ impl<'a> Scheduler<'a> {
             struct_ops,
             metrics: Metrics::new(),
         })
+    }
+
+    fn enable_cpu(skel: &mut BpfSkel<'_>, cpu: usize) -> Result<(), u32> {
+        let prog = &mut skel.progs.enable_cpu;
+        let mut args = cpu_arg {
+            cpu_id: cpu as c_int,
+        };
+        let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
+            ..Default::default()
+        };
+        let out = prog.test_run(input).unwrap();
+        if out.return_value != 0 {
+            return Err(out.return_value);
+        }
+
+        Ok(())
+    }
+
+    fn init_primary_domain(skel: &mut BpfSkel<'_>, primary_domain: &CpuMask) -> Result<()> {
+        info!("primary CPU domain = {}", primary_domain.to_string());
+
+        for cpu in 0..libbpf_rs::num_possible_cpus().unwrap() {
+            if primary_domain.is_cpu_set(cpu) {
+                if let Err(err) = Self::enable_cpu(skel, cpu) {
+                    warn!(
+                        "Failed to add CPU {} to primary domain: error {}",
+                        cpu, err
+                    );
+                }
+            }
+        }
+
+        Ok(())
     }
 
     fn update_stats(&mut self) {
@@ -245,7 +362,8 @@ impl<'a> Scheduler<'a> {
             .nr_waiting
             .set(nr_waiting as f64);
         self.metrics
-            .nvcsw_avg_thresh.set(nvcsw_avg_thresh as f64);
+            .nvcsw_avg_thresh
+            .set(nvcsw_avg_thresh as f64);
         self.metrics
             .nr_direct_dispatches
             .set(nr_direct_dispatches as f64);
