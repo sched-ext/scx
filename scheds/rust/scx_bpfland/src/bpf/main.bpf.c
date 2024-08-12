@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Copyright (c) 2024 Andrea Righi <righi.andrea@gmail.com>
+ * Copyright (c) 2024 Andrea Righi <andrea.righi@linux.dev>
  */
 #include <scx/common.bpf.h>
 #include "intf.h"
