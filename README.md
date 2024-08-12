@@ -391,7 +391,7 @@ can reach us through the following channels:
 - Slack: [https://schedextworkspace.slack.com](https://join.slack.com/t/schedextworkspace/shared_invite/zt-24c4on3sk-sHlozdLfCZBODfwU6t6dbw)
 - Reddit: https://reddit.com/r/sched_ext
 
-We also hold weekly office hours every monday. Please see the #office-hours
+We also hold weekly office hours every Tuesday. Please see the #office-hours
 channel on slack for details. To join the slack community, you can use [this
 link](https://bit.ly/scx_slack).
 
