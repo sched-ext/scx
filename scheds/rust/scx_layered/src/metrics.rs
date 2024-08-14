@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::AtomicU64;
+
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
@@ -188,7 +189,10 @@ impl OpenMetricsStats {
         );
         register!(l_yield, "% of scheduling events that yielded");
         register!(l_yield_ignore, "Number of times yield was ignored");
-	register!(l_migration, "% of scheduling events that migrated across CPUs");
+        register!(
+            l_migration,
+            "% of scheduling events that migrated across CPUs"
+        );
         register!(l_cur_nr_cpus, "Current # of CPUs assigned to the layer");
         register!(l_min_nr_cpus, "Minimum # of CPUs assigned to the layer");
         register!(l_max_nr_cpus, "Maximum # of CPUs assigned to the layer");

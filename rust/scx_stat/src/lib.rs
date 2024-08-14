@@ -7,7 +7,7 @@ pub use stat::{
 };
 
 mod server;
-pub use server::{ScxStatOutput, ScxStatServer, ScxStatRequest, ScxStatResponse, ScxStatErrno};
+pub use server::{ScxStatErrno, ScxStatOutput, ScxStatRequest, ScxStatResponse, ScxStatServer};
 
 mod client;
 pub use client::ScxStatClient;

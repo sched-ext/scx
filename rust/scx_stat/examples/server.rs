@@ -1,4 +1,4 @@
-use scx_stat::{ScxStatServer, ScxStatOutput, StatMeta};
+use scx_stat::{ScxStatOutput, ScxStatServer, StatMeta};
 use scx_stat_derive::Stat;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

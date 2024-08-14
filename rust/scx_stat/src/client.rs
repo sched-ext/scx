@@ -91,6 +91,6 @@ impl ScxStatClient {
     where
         T: for<'a> Deserialize<'a>,
     {
-	self.send_request(&ScxStatRequest::new(req, args))
+        self.send_request(&ScxStatRequest::new(req, args))
     }
 }

@@ -6,8 +6,6 @@ mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 pub mod metrics;
-use metrics::OpenMetricsStats;
-
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::CString;
@@ -29,15 +27,16 @@ use anyhow::Context;
 use anyhow::Result;
 use bitvec::prelude::*;
 use clap::Parser;
-use libbpf_rs::MapCore as _;
-use libbpf_rs::OpenObject;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::MapCore as _;
+use libbpf_rs::OpenObject;
 use log::debug;
 use log::info;
 use log::trace;
 use log::warn;
+use metrics::OpenMetricsStats;
 use prometheus_client::encoding::text::encode;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
@@ -47,8 +46,8 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Topology;
 use scx_utils::Cache;
+use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use serde::Deserialize;
 use serde::Serialize;
@@ -194,10 +193,10 @@ lazy_static::lazy_static! {
 ///
 /// - nodes: If set the layer will use the set of NUMA nodes for scheduling
 ///   decisions. If unset then all available NUMA nodes will be used. If the
-///   llcs value is set the cpuset of NUMA nodes will be or'ed with the LLC 
+///   llcs value is set the cpuset of NUMA nodes will be or'ed with the LLC
 ///   config.
 ///
-/// - llcs: If set the layer will use the set of LLCs (last level caches) 
+/// - llcs: If set the layer will use the set of LLCs (last level caches)
 ///   for scheduling decisions. If unset then all LLCs will be used. If
 ///   the nodes value is set the cpuset of LLCs will be or'ed with the nodes
 ///   config.
@@ -331,7 +330,7 @@ struct Opts {
     #[clap(short = 'o', long)]
     open_metrics_format: bool,
 
-    /// Disable topology awareness. When enabled the nodes and llcs setting on 
+    /// Disable topology awareness. When enabled the nodes and llcs setting on
     /// a layer is ignored.
     #[clap(short = 't', long)]
     disable_topology: bool,
@@ -654,7 +653,8 @@ impl Stats {
     fn read_layer_loads(skel: &mut BpfSkel, nr_layers: usize) -> (f64, Vec<f64>) {
         let now_mono = now_monotonic();
         let layer_loads: Vec<f64> = skel
-            .maps.bss_data
+            .maps
+            .bss_data
             .layers
             .iter()
             .take(nr_layers)
@@ -721,7 +721,8 @@ impl Stats {
         let cpu_ctxs = read_cpu_ctxs(skel)?;
 
         let nr_layer_tasks: Vec<usize> = skel
-            .maps.bss_data
+            .maps
+            .bss_data
             .layers
             .iter()
             .take(self.nr_layers)
@@ -1024,12 +1025,7 @@ impl Layer {
                     bail!("invalid util_range {:?}", util_range);
                 }
             }
-            LayerKind::Grouped {
-                nodes,
-                llcs,
-                ..
-            } |
-            LayerKind::Open { nodes, llcs, .. } => {
+            LayerKind::Grouped { nodes, llcs, .. } | LayerKind::Open { nodes, llcs, .. } => {
                 if nodes.len() == 0 && llcs.len() == 0 {
                     allowed_cpus.fill(true);
                 } else {
@@ -1059,7 +1055,7 @@ impl Layer {
             kind,
 
             nr_cpus: 0,
-            cpus: cpus,
+            cpus,
             allowed_cpus,
         })
     }
@@ -1081,8 +1077,7 @@ impl Layer {
 
         // Do we already have enough?
         if nr_cpus >= cpus_min
-            && (layer_util == 0.0
-                || (nr_cpus > 0 && layer_util / nr_cpus as f64 <= util_high))
+            && (layer_util == 0.0 || (nr_cpus > 0 && layer_util / nr_cpus as f64 <= util_high))
         {
             return Ok(false);
         }
@@ -1144,8 +1139,7 @@ impl Layer {
         // $cpus_to_free, we have to free.
         if !no_load_frac_limit
             && total_load >= 0.0
-            && (nr_cpus - nr_to_free) as f64 / cpu_pool.nr_cpus as f64
-                >= layer_load / total_load
+            && (nr_cpus - nr_to_free) as f64 / cpu_pool.nr_cpus as f64 >= layer_load / total_load
         {
             return Ok(Some(cpus_to_free));
         }
@@ -1268,7 +1262,12 @@ struct Scheduler<'a, 'b> {
 }
 
 impl<'a, 'b> Scheduler<'a, 'b> {
-    fn init_layers(skel: &mut OpenBpfSkel, opts: &Opts, specs: &Vec<LayerSpec>, topo: &Topology) -> Result<()> {
+    fn init_layers(
+        skel: &mut OpenBpfSkel,
+        opts: &Opts,
+        specs: &Vec<LayerSpec>,
+        topo: &Topology,
+    ) -> Result<()> {
         skel.maps.rodata_data.nr_layers = specs.len() as u32;
         let mut perf_set = false;
 
@@ -1393,13 +1392,16 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         skel.maps.rodata_data.nr_llcs = 0;
 
         for node in topo.nodes() {
-            info!("configuring node {}, LLCs {:?}", node.id(), node.llcs().len());
+            info!(
+                "configuring node {}, LLCs {:?}",
+                node.id(),
+                node.llcs().len()
+            );
             skel.maps.rodata_data.nr_llcs += node.llcs().len() as u32;
 
             for (_, llc) in node.llcs() {
                 info!("configuring llc {:?} for node {:?}", llc.id(), node.id());
                 skel.maps.rodata_data.llc_numa_id_map[llc.id()] = node.id() as u32;
-
             }
         }
 
@@ -1408,7 +1410,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         }
     }
 
-    fn init(opts: &Opts, layer_specs: &'b Vec<LayerSpec>, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+    fn init(
+        opts: &Opts,
+        layer_specs: &'b Vec<LayerSpec>,
+        open_object: &'a mut MaybeUninit<OpenObject>,
+    ) -> Result<Self> {
         let nr_layers = layer_specs.len();
         let topo = Topology::new()?;
         let cpu_pool = CpuPool::new()?;
@@ -1560,7 +1566,8 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 let bpf_layer = &mut self.skel.maps.bss_data.layers[idx];
                 match &layer.kind {
                     LayerKind::Open { .. } => {
-                        let available_cpus = self.cpu_pool.available_cpus_in_mask(&layer.allowed_cpus);
+                        let available_cpus =
+                            self.cpu_pool.available_cpus_in_mask(&layer.allowed_cpus);
                         let nr_available_cpus = available_cpus.count_ones();
                         // Open layers need the intersection of allowed
                         // cpus and available cpus.
@@ -2169,7 +2176,7 @@ fn main() -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
-    // If disabling topology awareness clear out any set NUMA/LLC configs and 
+    // If disabling topology awareness clear out any set NUMA/LLC configs and
     // it will fallback to using all cores.
     if opts.disable_topology {
         info!("Disabling topology awareness");

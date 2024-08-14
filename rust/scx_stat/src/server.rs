@@ -23,10 +23,10 @@ pub struct ScxStatRequest {
 
 impl ScxStatRequest {
     pub fn new(req: &str, args: Vec<(String, String)>) -> Self {
-	Self {
+        Self {
             req: req.to_string(),
             args: args.into_iter().collect(),
-	}
+        }
     }
 }
 
