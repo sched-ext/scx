@@ -1,0 +1,17 @@
+workspace = { members = ["scx_stat_derive"] }
+[package]
+name = "scx_stat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+libc = "0.2"
+log = "0.4"
+quote = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+syn = { version = "2.0", features = ["extra-traits", "full"] }
+
+[dev-dependencies]
+scx_stat_derive = { path = "scx_stat_derive", version = "0.1.0" }
