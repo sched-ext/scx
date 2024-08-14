@@ -1,7 +1,7 @@
 [package]
 name = "scx_bpfland"
 version = "1.0.2"
-authors = ["Andrea Righi <righi.andrea@gmail.com>", "Canonical"]
+authors = ["Andrea Righi <andrea.righi@linux.dev>"]
 edition = "2021"
 description = "A vruntime-based sched_ext scheduler that prioritizes interactive workloads. https://github.com/sched-ext/scx/tree/main"
 license = "GPL-2.0-only"

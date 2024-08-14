@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Copyright (c) 2024 Andrea Righi <righi.andrea@gmail.com>
+ * Copyright (c) 2024 Andrea Righi <andrea.righi@linux.dev>
  *
  * This software may be used and distributed according to the terms of the GNU
  * General Public License version 2.
@@ -15,9 +15,9 @@
 #define CLAMP(val, lo, hi) MIN(MAX(val, lo), hi)
 
 enum consts {
-        NSEC_PER_USEC = 1000ULL,
-        NSEC_PER_MSEC = (1000ULL * NSEC_PER_USEC),
-        NSEC_PER_SEC = (1000ULL * NSEC_PER_MSEC),
+	NSEC_PER_USEC = 1000ULL,
+	NSEC_PER_MSEC = (1000ULL * NSEC_PER_USEC),
+	NSEC_PER_SEC = (1000ULL * NSEC_PER_MSEC),
 };
 
 #ifndef __VMLINUX_H__
@@ -33,5 +33,9 @@ typedef signed long s64;
 
 typedef int pid_t;
 #endif /* __VMLINUX_H__ */
+
+struct cpu_arg {
+	s32 cpu_id;
+};
 
 #endif /* __INTF_H */
