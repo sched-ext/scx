@@ -34,9 +34,8 @@ for BPF_PATH in $(find ${BUILD_DIR} -type f -name bpf.bpf.o); do
     timeout --preserve-status ${GUEST_TIMEOUT} \
       vng --force-9p -v -r ${KERNEL} -- \
         veristat ${BPF_PATH}
-    exit $?
   else
+    echo "$BPF_PATH"
     sudo veristat ${BPF_PATH}
-    exit $?
   fi
 done
