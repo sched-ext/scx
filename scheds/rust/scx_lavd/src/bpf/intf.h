@@ -63,16 +63,13 @@ enum consts {
 
 	LAVD_LC_FREQ_MAX		= 1000000,
 	LAVD_LC_RUNTIME_MAX		= LAVD_TARGETED_LATENCY_NS,
-	LAVD_LC_RUNTIME_SHIFT		= 10,
+	LAVD_LC_RUNTIME_SHIFT		= 15,
 	LAVD_LC_WAKEUP_FT		= 30,
-	LAVD_LC_STARVATION_FT		= 30,
 
 	LAVD_SLICE_BOOST_MAX_FT		= 3, /* maximum additional 3x of slice */
 	LAVD_SLICE_BOOST_MAX_STEP	= 6, /* 6 slice exhausitions in a row */
 	LAVD_NEW_PROC_PENALITY		= 5,
 	LAVD_GREEDY_RATIO_NEW		= (1000 * LAVD_NEW_PROC_PENALITY),
-
-	LAVD_ELIGIBLE_TIME_MAX		= (9999ULL * LAVD_TIME_ONE_SEC),
 
 	LAVD_CPU_UTIL_MAX		= 1000, /* 100.0% */
 	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= 850, /* 85.0% */
@@ -87,11 +84,13 @@ enum consts {
 	LAVD_CC_PER_CORE_MAX_CTUIL	= 500, /* maximum per-core CPU utilization */
 	LAVD_CC_NR_ACTIVE_MIN		= 1, /* num of mininum active cores */
 	LAVD_CC_NR_OVRFLW		= 1, /* num of overflow cores */
-	LAVD_CC_CPU_PIN_INTERVAL	= (100ULL * NSEC_PER_MSEC),
+	LAVD_CC_CPU_PIN_INTERVAL	= (3ULL * LAVD_TIME_ONE_SEC),
 	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL /
 					   LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_GLOBAL_DSQ			= 0, /* a global DSQ */
+	LAVD_CPDOM_MAX_NR		= 64, /* maximum number of compute domain (<= 64) */
+	LAVD_CPDOM_MAX_DIST		= 6,  /* maximum distance from one compute domain to another */
+	LAVD_CPDOM_STARV_NS		= (5ULL * NSEC_PER_MSEC),
 
 	LAVD_STATUS_STR_LEN		= 5, /* {LR: Latency-critical, Regular}
 						{HI: performance-Hungry, performance-Insensitive}
@@ -121,7 +120,22 @@ struct sys_stat {
 };
 
 /*
- * Per-CPU context
+ * Compute domain context
+ * - system > numa node > llc domain > compute domain per core type (P or E)
+ */
+struct cpdom_ctx {
+	u64	id;				    /* id of this compute domain (== dsq_id) */
+	u64	alt_id;				    /* id of the closest compute domain of alternative type (== dsq id) */
+	u64	last_consume_clk;		    /* when the associated DSQ was consumed */
+	u8	is_big;				    /* is it a big core or little core? */
+	u8	is_active;			    /* if this compute domain is active */
+	u8	nr_neighbors[LAVD_CPDOM_MAX_DIST];  /* number of neighbors per distance */
+	u64	neighbor_bits[LAVD_CPDOM_MAX_DIST]; /* bitmask of neighbor bitmask per distance */
+	u64	cpumask[LAVD_CPU_ID_MAX/64];	    /* cpumasks belongs to this compute domain */
+};
+
+/*
+ * CPU context
  */
 struct cpu_ctx {
 	/* 
@@ -178,10 +192,17 @@ struct cpu_ctx {
 	 */
 	u16		capacity;	/* CPU capacity based on 1000 */
 	u8		big_core;	/* is it a big core? */
+	u8		cpdom_id;	/* compute domain id (== dsq_id) */
+	u8		cpdom_alt_id;	/* compute domain id of anternative type (== dsq_id) */
+	u8		cpdom_poll_pos;	/* index to check if a DSQ of a compute domain is starving */
 	struct bpf_cpumask __kptr *tmp_a_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_o_mask;	/* temporary cpu mask */
+	struct bpf_cpumask __kptr *tmp_t_mask;	/* temporary cpu mask */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
+/*
+ * Task context
+ */
 struct task_ctx {
 	/*
 	 * Clocks when a task state transition happens for task statistics calculation
@@ -208,19 +229,23 @@ struct task_ctx {
 	 */
 	u64	vdeadline_log_clk;	/* logical clock of the deadilne */
 	u64	vdeadline_delta_ns;	/* time delta until task's virtual deadline */
-	u64	eligible_delta_ns;	/* time delta until task becomes eligible */
 	u64	slice_ns;		/* time slice */
 	u32	greedy_ratio;		/* task's overscheduling ratio compared to its nice priority */
 	u32	lat_cri;		/* calculated latency criticality */
 	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
-
+	u8	wakeup_ft;		/* regular wakeup = 1, sync wakeup = 2 */
 	/*
 	 * Task's performance criticality
 	 */
+	u8	on_big;			/* executable on a big core */
+	u8	on_little;		/* executable on a little core */
 	u32	perf_cri;		/* performance criticality of a task */
 };
 
+/*
+ * Task's extra context for report
+ */
 struct task_ctx_x {
 	pid_t	pid;
 	char	comm[TASK_COMM_LEN + 1];
@@ -229,7 +254,7 @@ struct task_ctx_x {
 	u32	cpu_id;		/* where a task ran */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
 	u32	avg_perf_cri;	/* average performance criticality */
-	u32	thr_lat_cri;	/* threshold for latency criticality */
+	u32	avg_lat_cri;	/* average latency criticality */
 	u32	nr_active;	/* number of active cores */
 	u32	cpuperf_cur;	/* CPU's current performance target */
 };
@@ -241,7 +266,6 @@ struct task_ctx_x {
 enum {
        LAVD_CMD_NOP		= 0x0,
        LAVD_CMD_SCHED_N		= 0x1,
-       LAVD_CMD_PID		= 0x2,
 };
 
 enum {

@@ -11,24 +11,24 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
+use libc::c_char;
+use std::collections::BTreeMap;
+use std::ffi::CStr;
+use std::fmt;
 use std::mem;
 use std::mem::MaybeUninit;
+use std::str;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use libc::c_char;
-use std::ffi::CStr;
-use std::fmt;
-use std::str;
-
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-use libbpf_rs::OpenObject;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::OpenObject;
 use log::debug;
 use log::info;
 use log::warn;
@@ -71,14 +71,6 @@ struct Opts {
     #[clap(short = 's', long, default_value = "1")]
     nr_sched_samples: u64,
 
-    /// PID to be tracked all its scheduling activities if specified
-    #[clap(short = 'p', long, default_value = "0")]
-    pid_traced: u64,
-
-    /// Exit debug dump buffer length. 0 indicates default.
-    #[clap(long, default_value = "0")]
-    exit_dump_len: u32,
-
     /// Enable verbose output including libbpf details. Specify multiple
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
@@ -104,9 +96,6 @@ impl introspec {
         if opts.nr_sched_samples > 0 {
             intrspc.cmd = LAVD_CMD_SCHED_N;
             intrspc.arg = opts.nr_sched_samples;
-        } else if opts.pid_traced > 0 {
-            intrspc.cmd = LAVD_CMD_PID;
-            intrspc.arg = opts.pid_traced;
         } else {
             intrspc.cmd = LAVD_CMD_NOP;
         }
@@ -126,16 +115,35 @@ struct CpuFlatId {
     cpu_cap: usize,
 }
 
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone)]
+struct ComputeDomainKey {
+    node_id: usize,
+    llc_pos: usize,
+    is_big: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ComputeDomainValue {
+    cpdom_id: usize,
+    cpdom_alt_id: usize,
+    cpu_ids: Vec<usize>,
+    neighbor_map: BTreeMap<usize, Vec<usize>>,
+}
+
 #[derive(Debug)]
 struct FlatTopology {
     cpu_fids: Vec<CpuFlatId>,
+    cpdom_map: BTreeMap<ComputeDomainKey, ComputeDomainValue>,
     nr_cpus_online: usize,
 }
 
 impl fmt::Display for FlatTopology {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for cpu_fid in self.cpu_fids.iter() {
-            write!(f, "\n{:?}", cpu_fid).ok();
+            write!(f, "\nCPU: {:?}", cpu_fid).ok();
+        }
+        for (k, v) in self.cpdom_map.iter() {
+            write!(f, "\nCPDOM: {:?} {:?}", k, v).ok();
         }
         Ok(())
     }
@@ -149,6 +157,7 @@ impl FlatTopology {
 
         // Build a vector of cpu flat ids.
         let mut base_freq = 0;
+        let mut avg_freq = 0;
         for (node_id, node) in topo.nodes().iter().enumerate() {
             for (llc_pos, (_llc_id, llc)) in node.llcs().iter().enumerate() {
                 for (core_pos, (_core_id, core)) in llc.cores().iter().enumerate() {
@@ -166,10 +175,12 @@ impl FlatTopology {
                         if base_freq < cpu.max_freq() {
                             base_freq = cpu.max_freq();
                         }
+                        avg_freq += cpu.max_freq();
                     }
                 }
             }
         }
+        avg_freq /= cpu_fids.len() as usize;
 
         // Initialize cpu capacity
         if base_freq > 0 {
@@ -187,39 +198,121 @@ impl FlatTopology {
 
         // Sort the cpu_fids
         if prefer_smt_core {
-            // Sort the cpu_fids  by node, llc, max_freq, core, and cpu order
+            // Sort the cpu_fids by node, llc, ^max_freq, core, and cpu order
             cpu_fids.sort_by(|a, b| {
                 a.node_id
                     .cmp(&b.node_id)
                     .then_with(|| a.llc_pos.cmp(&b.llc_pos))
-                    .then_with(|| a.max_freq.cmp(&b.max_freq))
+                    .then_with(|| b.max_freq.cmp(&a.max_freq))
                     .then_with(|| a.core_pos.cmp(&b.core_pos))
                     .then_with(|| a.cpu_pos.cmp(&b.cpu_pos))
             });
         } else {
-            // Sort the cpu_fids  by cpu, node, llc, max_freq, and core order
+            // Sort the cpu_fids by cpu, node, llc, ^max_freq, and core order
             cpu_fids.sort_by(|a, b| {
                 a.cpu_pos
                     .cmp(&b.cpu_pos)
                     .then_with(|| a.node_id.cmp(&b.node_id))
                     .then_with(|| a.llc_pos.cmp(&b.llc_pos))
-                    .then_with(|| a.max_freq.cmp(&b.max_freq))
+                    .then_with(|| b.max_freq.cmp(&a.max_freq))
                     .then_with(|| a.core_pos.cmp(&b.core_pos))
             });
         }
 
+        // Creat a compute domain map
+        let mut cpdom_id = 0;
+        let mut cpdom_map: BTreeMap<ComputeDomainKey, ComputeDomainValue> = BTreeMap::new();
+        for cpu_fid in cpu_fids.iter() {
+            let key = ComputeDomainKey {
+                node_id: cpu_fid.node_id,
+                llc_pos: cpu_fid.llc_pos,
+                is_big: cpu_fid.max_freq >= avg_freq,
+            };
+            let ret = cpdom_map.get(&key);
+            let mut value;
+            if ret.is_none() {
+                value = ComputeDomainValue {
+                    cpdom_id,
+                    cpdom_alt_id: cpdom_id,
+                    cpu_ids: Vec::new(),
+                    neighbor_map: BTreeMap::new(),
+                };
+                cpdom_id += 1;
+            } else {
+                value = ret.unwrap().clone();
+            }
+            value.cpu_ids.push(cpu_fid.cpu_id);
+            cpdom_map.insert(key, value);
+        }
+
+        // Fill up cpdom_alt_id for each compute domain
+        let mut alt_update_vec = Vec::new();
+        for (k, v) in cpdom_map.iter() {
+            let mut key = k.clone();
+            key.is_big = !k.is_big;
+
+            let ret = cpdom_map.get(&key);
+            if !ret.is_none() {
+                let alt_v = ret.unwrap();
+                let mut value = v.clone();
+                value.cpdom_alt_id = alt_v.cpdom_id;
+                alt_update_vec.push((k.clone(), value));
+            }
+        }
+        for (key, value) in alt_update_vec.iter() {
+            cpdom_map.insert(key.clone(), value.clone());
+        }
+
+        // Build a neighbor map for each compute domain
+        let mut keys1 = Vec::new();
+        let mut keys2 = Vec::new();
+        for (key, value) in cpdom_map.iter() {
+            keys1.push((key.clone(), value.clone()));
+            keys2.push((key.clone(), value.clone()));
+        }
+        for (from_k, _) in keys1.iter() {
+            for (to_k, to_v) in keys2.iter() {
+                if from_k == to_k {
+                    continue;
+                }
+
+                let d = Self::dist(from_k, to_k);
+                let from_v = cpdom_map.get_mut(from_k).unwrap();
+                let map = &mut from_v.neighbor_map;
+                let ret = map.get(&d);
+                if !ret.is_none() {
+                    let mut value = ret.unwrap().clone();
+                    value.push(to_v.cpdom_id);
+                    map.insert(d, value.to_vec());
+                } else {
+                    let value = [to_v.cpdom_id];
+                    map.insert(d, value.to_vec());
+                }
+            }
+        }
+
         Ok(FlatTopology {
             cpu_fids,
+            cpdom_map,
             nr_cpus_online: topo.nr_cpus_online(),
         })
     }
 
-    pub fn cpu_fids(&self) -> &Vec<CpuFlatId> {
-        &self.cpu_fids
-    }
-
-    pub fn nr_cpus_online(&self) -> usize {
-        self.nr_cpus_online
+    /// Calculate distance from two compute domains
+    pub fn dist(from: &ComputeDomainKey, to: &ComputeDomainKey) -> usize {
+        let mut d = 0;
+        // code type > numa node > llc
+        if from.is_big != to.is_big {
+            d += 3;
+        }
+        if from.node_id != to.node_id {
+            d += 2;
+        } else {
+            if from.llc_pos != to.llc_pos {
+                d += 1;
+            }
+        }
+        d
     }
 }
 
@@ -232,10 +325,7 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(
-        opts: &'a Opts,
-        open_object: &'a mut MaybeUninit<OpenObject>,
-    ) -> Result<Self> {
+    fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         // Increase MEMLOCK size since the BPF scheduler might use
         // more than the current limit
         let (soft_limit, _) = getrlimit(Resource::MEMLOCK).unwrap();
@@ -248,16 +338,35 @@ impl<'a> Scheduler<'a> {
 
         // Initialize CPU order topologically sorted by a cpu, node, llc, max_freq, and core order
         let topo = FlatTopology::new(opts.prefer_smt_core).expect("Failed to build host topology");
-        for (pos, cpu) in topo.cpu_fids().iter().enumerate() {
+        for (pos, cpu) in topo.cpu_fids.iter().enumerate() {
             skel.maps.rodata_data.cpu_order[pos] = cpu.cpu_id as u16;
             skel.maps.rodata_data.__cpu_capacity_hint[cpu.cpu_id] = cpu.cpu_cap as u16;
         }
         debug!("{}", topo);
 
+        // Initialize compute domain contexts
+        for (k, v) in topo.cpdom_map.iter() {
+            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].id = v.cpdom_id as u64;
+            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].alt_id = v.cpdom_alt_id as u64;
+            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_big = k.is_big as u8;
+            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_active = 1;
+            for cpu_id in v.cpu_ids.iter() {
+                let i = cpu_id / 64;
+                let j = cpu_id % 64;
+                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].cpumask[i] |= 0x01 << j;
+            }
+
+            for (k, (_d, neighbors)) in v.neighbor_map.iter().enumerate() {
+                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].nr_neighbors[k] = neighbors.len() as u8;
+                for n in neighbors.iter() {
+                    skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].neighbor_bits[k] = 0x1 << n;
+                }
+            }
+        }
+
         // Initialize skel according to @opts.
-        let nr_cpus_onln = topo.nr_cpus_online() as u64;
+        let nr_cpus_onln = topo.nr_cpus_online as u64;
         skel.maps.bss_data.nr_cpus_onln = nr_cpus_onln;
-        skel.struct_ops.lavd_ops_mut().exit_dump_len = opts.exit_dump_len;
         skel.maps.rodata_data.no_core_compaction = opts.no_core_compaction;
         skel.maps.rodata_data.no_freq_scaling = opts.no_freq_scaling;
         skel.maps.rodata_data.verbose = opts.verbose;
@@ -305,8 +414,8 @@ impl<'a> Scheduler<'a> {
 
         if mseq % 32 == 1 {
             info!(
-                "| {:6} | {:7} | {:17} | {:5} \
-                   | {:4} | {:4} | {:12} \
+                "| {:6} | {:7} | {:17} \
+                   | {:5} | {:4} | {:4} \
                    | {:14} | {:8} | {:7} \
                    | {:8} | {:7} | {:8} \
                    | {:7} | {:9} | {:9} \
@@ -320,11 +429,10 @@ impl<'a> Scheduler<'a> {
                 "cpu",
                 "vtmc",
                 "vddln_ns",
-                "eli_ns",
                 "slc_ns",
                 "grdy_rt",
                 "lat_cri",
-                "thr_lc",
+                "avg_lc",
                 "st_prio",
                 "slc_bst",
                 "run_freq",
@@ -348,8 +456,8 @@ impl<'a> Scheduler<'a> {
         let tx_stat: &str = c_tx_st_str.to_str().unwrap();
 
         info!(
-            "| {:6} | {:7} | {:17} | {:5} \
-               | {:4} | {:4} | {:12} \
+            "| {:6} | {:7} | {:17} \
+               | {:5} | {:4} | {:4} \
                | {:14} | {:8} | {:7} \
                | {:8} | {:7} | {:8} \
                | {:7} | {:9} | {:9} \
@@ -363,11 +471,10 @@ impl<'a> Scheduler<'a> {
             tx.cpu_id,
             tc.victim_cpu,
             tc.vdeadline_delta_ns,
-            tc.eligible_delta_ns,
             tc.slice_ns,
             tc.greedy_ratio,
             tc.lat_cri,
-            tx.thr_lat_cri,
+            tx.avg_lat_cri,
             tx.static_prio,
             tc.slice_boost_prio,
             tc.run_freq,
