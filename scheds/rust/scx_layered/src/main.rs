@@ -3,11 +3,11 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 mod bpf_skel;
+mod stats;
 pub use bpf_skel::*;
 pub mod bpf_intf;
-pub mod metrics;
-use metrics::OpenMetricsStats;
-
+use stats::LayerStats;
+use stats::SysStats;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::CString;
@@ -19,6 +19,7 @@ use std::ops::Sub;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -29,16 +30,15 @@ use anyhow::Context;
 use anyhow::Result;
 use bitvec::prelude::*;
 use clap::Parser;
-use libbpf_rs::MapCore as _;
-use libbpf_rs::OpenObject;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::MapCore as _;
+use libbpf_rs::OpenObject;
 use log::debug;
 use log::info;
 use log::trace;
 use log::warn;
-use prometheus_client::encoding::text::encode;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
@@ -47,8 +47,8 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Topology;
 use scx_utils::Cache;
+use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use serde::Deserialize;
 use serde::Serialize;
@@ -194,10 +194,10 @@ lazy_static::lazy_static! {
 ///
 /// - nodes: If set the layer will use the set of NUMA nodes for scheduling
 ///   decisions. If unset then all available NUMA nodes will be used. If the
-///   llcs value is set the cpuset of NUMA nodes will be or'ed with the LLC 
+///   llcs value is set the cpuset of NUMA nodes will be or'ed with the LLC
 ///   config.
 ///
-/// - llcs: If set the layer will use the set of LLCs (last level caches) 
+/// - llcs: If set the layer will use the set of LLCs (last level caches)
 ///   for scheduling decisions. If unset then all LLCs will be used. If
 ///   the nodes value is set the cpuset of LLCs will be or'ed with the nodes
 ///   config.
@@ -231,12 +231,13 @@ lazy_static::lazy_static! {
 ///   ...
 ///   $ scx_layered f:example.json
 ///
-/// Statistics
-/// ==========
+/// Monitoring Statistics
+/// =====================
 ///
-/// scx_layered will print out a set of statistics every monitoring
-/// interval.
+/// scx_stat server will listen on /var/run/scx/root/stat. Monitor
+/// statistics by runing `scx_layered monitor`.
 ///
+///   $ scx_layered --monitor
 ///   tot= 117909 local=86.20 open_idle= 0.21 affn_viol= 1.37 proc=6ms
 ///   busy= 34.2 util= 1733.6 load=  21744.1 fallback_cpu=  1
 ///     batch    : util/frac=   11.8/  0.7 load/frac=     29.7:  0.1 tasks=  2597
@@ -306,9 +307,9 @@ struct Opts {
     #[clap(short = 'i', long, default_value = "0.1")]
     interval: f64,
 
-    /// Monitoring interval in seconds.
-    #[clap(short = 'm', long, default_value = "2.0")]
-    monitor: f64,
+    /// Statistics interval in seconds.
+    #[clap(short = 'I', long, default_value = "2.0")]
+    stats_interval: f64,
 
     /// Disable load-fraction based max layer CPU limit. ***NOTE***
     /// load-fraction calculation is currently broken due to lack of
@@ -325,13 +326,7 @@ struct Opts {
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
 
-    /// Enable output of stats in OpenMetrics format instead of via log macros.
-    /// This option is useful if you want to collect stats in some monitoring
-    /// database like prometheseus.
-    #[clap(short = 'o', long)]
-    open_metrics_format: bool,
-
-    /// Disable topology awareness. When enabled the nodes and llcs setting on 
+    /// Disable topology awareness. When enabled the nodes and llcs setting on
     /// a layer is ignored.
     #[clap(short = 't', long)]
     disable_topology: bool,
@@ -339,6 +334,10 @@ struct Opts {
     /// Write example layer specifications into the file and exit.
     #[clap(short = 'e', long)]
     example: Option<String>,
+
+    /// Run in monitor mode.
+    #[clap(long)]
+    monitor: bool,
 
     /// Layer specification. See --help.
     specs: Vec<String>,
@@ -522,26 +521,6 @@ fn copy_into_cstr(dst: &mut [i8], src: &str) {
     dst[0..bytes.len()].copy_from_slice(bytes);
 }
 
-fn format_bitvec(bitvec: &BitVec) -> String {
-    let mut vals = Vec::<u32>::new();
-    let mut val: u32 = 0;
-    for (idx, bit) in bitvec.iter().enumerate() {
-        if idx > 0 && idx % 32 == 0 {
-            vals.push(val);
-            val = 0;
-        }
-        if *bit {
-            val |= 1 << (idx % 32);
-        }
-    }
-    vals.push(val);
-    let mut output = vals
-        .iter()
-        .fold(String::new(), |string, v| format!("{}{:08x} ", string, v));
-    output.pop();
-    output
-}
-
 fn nodemask_from_nodes(nodes: &Vec<usize>) -> usize {
     let mut mask = 0;
     for node in nodes {
@@ -654,7 +633,8 @@ impl Stats {
     fn read_layer_loads(skel: &mut BpfSkel, nr_layers: usize) -> (f64, Vec<f64>) {
         let now_mono = now_monotonic();
         let layer_loads: Vec<f64> = skel
-            .maps.bss_data
+            .maps
+            .bss_data
             .layers
             .iter()
             .take(nr_layers)
@@ -721,7 +701,8 @@ impl Stats {
         let cpu_ctxs = read_cpu_ctxs(skel)?;
 
         let nr_layer_tasks: Vec<usize> = skel
-            .maps.bss_data
+            .maps
+            .bss_data
             .layers
             .iter()
             .take(self.nr_layers)
@@ -1024,12 +1005,7 @@ impl Layer {
                     bail!("invalid util_range {:?}", util_range);
                 }
             }
-            LayerKind::Grouped {
-                nodes,
-                llcs,
-                ..
-            } |
-            LayerKind::Open { nodes, llcs, .. } => {
+            LayerKind::Grouped { nodes, llcs, .. } | LayerKind::Open { nodes, llcs, .. } => {
                 if nodes.len() == 0 && llcs.len() == 0 {
                     allowed_cpus.fill(true);
                 } else {
@@ -1059,7 +1035,7 @@ impl Layer {
             kind,
 
             nr_cpus: 0,
-            cpus: cpus,
+            cpus,
             allowed_cpus,
         })
     }
@@ -1081,8 +1057,7 @@ impl Layer {
 
         // Do we already have enough?
         if nr_cpus >= cpus_min
-            && (layer_util == 0.0
-                || (nr_cpus > 0 && layer_util / nr_cpus as f64 <= util_high))
+            && (layer_util == 0.0 || (nr_cpus > 0 && layer_util / nr_cpus as f64 <= util_high))
         {
             return Ok(false);
         }
@@ -1144,8 +1119,7 @@ impl Layer {
         // $cpus_to_free, we have to free.
         if !no_load_frac_limit
             && total_load >= 0.0
-            && (nr_cpus - nr_to_free) as f64 / cpu_pool.nr_cpus as f64
-                >= layer_load / total_load
+            && (nr_cpus - nr_to_free) as f64 / cpu_pool.nr_cpus as f64 >= layer_load / total_load
         {
             return Ok(Some(cpus_to_free));
         }
@@ -1249,7 +1223,7 @@ struct Scheduler<'a, 'b> {
     layer_specs: &'b Vec<LayerSpec>,
 
     sched_intv: Duration,
-    monitor_intv: Duration,
+    stats_intv: Duration,
     no_load_frac_limit: bool,
 
     cpu_pool: CpuPool,
@@ -1263,12 +1237,16 @@ struct Scheduler<'a, 'b> {
     processing_dur: Duration,
     prev_processing_dur: Duration,
 
-    om_stats: OpenMetricsStats,
-    om_format: bool,
+    sys_stats: Arc<Mutex<SysStats>>,
 }
 
 impl<'a, 'b> Scheduler<'a, 'b> {
-    fn init_layers(skel: &mut OpenBpfSkel, opts: &Opts, specs: &Vec<LayerSpec>, topo: &Topology) -> Result<()> {
+    fn init_layers(
+        skel: &mut OpenBpfSkel,
+        opts: &Opts,
+        specs: &Vec<LayerSpec>,
+        topo: &Topology,
+    ) -> Result<()> {
         skel.maps.rodata_data.nr_layers = specs.len() as u32;
         let mut perf_set = false;
 
@@ -1393,13 +1371,16 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         skel.maps.rodata_data.nr_llcs = 0;
 
         for node in topo.nodes() {
-            info!("configuring node {}, LLCs {:?}", node.id(), node.llcs().len());
+            info!(
+                "configuring node {}, LLCs {:?}",
+                node.id(),
+                node.llcs().len()
+            );
             skel.maps.rodata_data.nr_llcs += node.llcs().len() as u32;
 
             for (_, llc) in node.llcs() {
                 info!("configuring llc {:?} for node {:?}", llc.id(), node.id());
                 skel.maps.rodata_data.llc_numa_id_map[llc.id()] = node.id() as u32;
-
             }
         }
 
@@ -1408,7 +1389,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         }
     }
 
-    fn init(opts: &Opts, layer_specs: &'b Vec<LayerSpec>, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+    fn init(
+        opts: &Opts,
+        layer_specs: &'b Vec<LayerSpec>,
+        open_object: &'a mut MaybeUninit<OpenObject>,
+    ) -> Result<Self> {
         let nr_layers = layer_specs.len();
         let topo = Topology::new()?;
         let cpu_pool = CpuPool::new()?;
@@ -1461,13 +1446,14 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         // Other stuff.
         let proc_reader = procfs::ProcReader::new();
+        let sys_stats = Arc::new(Mutex::new(SysStats::default()));
 
         let mut sched = Self {
             struct_ops: None,
             layer_specs,
 
             sched_intv: Duration::from_secs_f64(opts.interval),
-            monitor_intv: Duration::from_secs_f64(opts.monitor),
+            stats_intv: Duration::from_secs_f64(opts.stats_interval),
             no_load_frac_limit: opts.no_load_frac_limit,
 
             cpu_pool,
@@ -1483,9 +1469,10 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             proc_reader,
             skel,
 
-            om_stats: OpenMetricsStats::new(),
-            om_format: opts.open_metrics_format,
+            sys_stats: sys_stats.clone(),
         };
+
+        stats::launch_server(sys_stats)?;
 
         // XXX If we try to refresh the cpumasks here before attaching, we
         // sometimes (non-deterministically) don't see the updated values in
@@ -1495,7 +1482,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         // Attach.
         sched.struct_ops = Some(scx_ops_attach!(sched.skel, layered)?);
-        info!("Layered Scheduler Attached");
+        info!("Layered Scheduler Attached. Run `scx_layered --monitor` for metrics.");
 
         Ok(sched)
     }
@@ -1560,7 +1547,8 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 let bpf_layer = &mut self.skel.maps.bss_data.layers[idx];
                 match &layer.kind {
                     LayerKind::Open { .. } => {
-                        let available_cpus = self.cpu_pool.available_cpus_in_mask(&layer.allowed_cpus);
+                        let available_cpus =
+                            self.cpu_pool.available_cpus_in_mask(&layer.allowed_cpus);
                         let nr_available_cpus = available_cpus.count_ones();
                         // Open layers need the intersection of allowed
                         // cpus and available cpus.
@@ -1596,332 +1584,39 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         Ok(())
     }
 
-    fn report(&mut self) -> Result<()> {
+    fn refresh_sys_stats(&mut self) -> Result<()> {
         let started_at = Instant::now();
         self.report_stats
             .refresh(&mut self.skel, &self.proc_reader, started_at)?;
         let stats = &self.report_stats;
+        let bstats = &stats.bpf_stats;
 
         let processing_dur = self.processing_dur - self.prev_processing_dur;
         self.prev_processing_dur = self.processing_dur;
 
-        let lsum = |idx| stats.bpf_stats.lstats_sums[idx as usize];
-        let total = lsum(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ);
-        let lsum_pct = |idx| {
-            if total != 0 {
-                lsum(idx) as f64 / total as f64 * 100.0
-            } else {
-                0.0
-            }
-        };
-
-        let fmt_pct = |v: f64| {
-            if v >= 99.995 {
-                format!("{:5.1}", v)
-            } else {
-                format!("{:5.2}", v)
-            }
-        };
-
-        let fmt_num = |v: i64| {
-            if v > 1_000_000 {
-                format!("{:5.1}m", v as f64 / 1_000_000.0)
-            } else if v > 1_000 {
-                format!("{:5.1}k", v as f64 / 1_000.0)
-            } else {
-                format!("{:5.0} ", v)
-            }
-        };
-
-        self.om_stats.total.set(total as i64);
-        self.om_stats
-            .local
-            .set(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL));
-        self.om_stats
-            .open_idle
-            .set(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE));
-        self.om_stats
-            .affn_viol
-            .set(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL));
-        self.om_stats.excl_idle.set(
-            stats.bpf_stats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_IDLE as usize] as f64
-                / total as f64,
-        );
-        self.om_stats.excl_wakeup.set(
-            stats.bpf_stats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_WAKEUP as usize] as f64
-                / total as f64,
-        );
-        self.om_stats.proc_ms.set(processing_dur.as_millis() as i64);
-        self.om_stats.busy.set(stats.cpu_busy * 100.0);
-        self.om_stats.util.set(stats.total_util * 100.0);
-        self.om_stats.load.set(stats.total_load);
-
-        if !self.om_format {
-            info!(
-                "tot={:7} local={} open_idle={} affn_viol={} proc={:?}ms",
-                self.om_stats.total.get(),
-                fmt_pct(self.om_stats.local.get()),
-                fmt_pct(self.om_stats.open_idle.get()),
-                fmt_pct(self.om_stats.affn_viol.get()),
-                self.om_stats.proc_ms.get(),
-            );
-
-            info!(
-                "busy={:5.1} util={:7.1} load={:9.1} fallback_cpu={:3}",
-                self.om_stats.busy.get(),
-                self.om_stats.util.get(),
-                self.om_stats.load.get(),
-                self.cpu_pool.fallback_cpu,
-            );
-
-            info!(
-                "excl_coll={} excl_preempt={} excl_idle={} excl_wakeup={}",
-                fmt_pct(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION)),
-                fmt_pct(lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT)),
-                fmt_pct(self.om_stats.excl_idle.get()),
-                fmt_pct(self.om_stats.excl_wakeup.get()),
-            );
-        }
-
-        let header_width = self
-            .layer_specs
-            .iter()
-            .map(|spec| spec.name.len())
-            .max()
-            .unwrap()
-            .max(4);
-
-        let calc_frac = |a, b| {
-            if b != 0.0 {
-                a / b * 100.0
-            } else {
-                0.0
-            }
-        };
+        let mut sys_stats = SysStats::new(
+            stats,
+            bstats,
+            &self.stats_intv,
+            &processing_dur,
+            self.cpu_pool.fallback_cpu,
+        )?;
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
-            let lstat = |sidx| stats.bpf_stats.lstats[lidx][sidx as usize];
-            let ltotal = lstat(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
-                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
-                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
-                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST)
-                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ);
-            let lstat_pct = |sidx| {
-                if ltotal != 0 {
-                    lstat(sidx) as f64 / ltotal as f64 * 100.0
-                } else {
-                    0.0
-                }
-            };
-
-            // Helper macros to reduce some boilerplate.
-            // $i: The identifier of the metric to set
-            // $e: The expression to set the metric to
-            macro_rules! set {
-                ($i: ident, $e:expr) => {{
-                    let l = self
-                        .om_stats
-                        .$i
-                        .get_or_create(&vec![("layer_name".to_owned(), spec.name.clone())]);
-                    l.set($e);
-                    l
-                }};
-            }
-            let l_util = set!(l_util, stats.layer_utils[lidx] * 100.0);
-            let l_util_frac = set!(
-                l_util_frac,
-                calc_frac(stats.layer_utils[lidx], stats.total_util)
-            );
-            let l_load = set!(l_load, stats.layer_loads[lidx]);
-            let l_load_frac = set!(
-                l_load_frac,
-                calc_frac(stats.layer_loads[lidx], stats.total_load)
-            );
-            let l_tasks = set!(l_tasks, stats.nr_layer_tasks[lidx] as i64);
-            let l_total = set!(l_total, ltotal as i64);
-            let l_sel_local = set!(
-                l_sel_local,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
-            );
-            let l_enq_wakeup = set!(
-                l_enq_wakeup,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
-            );
-            let l_enq_expire = set!(
-                l_enq_expire,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
-            );
-            let l_enq_last = set!(
-                l_enq_last,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST)
-            );
-            let l_enq_reenq = set!(
-                l_enq_reenq,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ)
-            );
-            let l_min_exec = set!(
-                l_min_exec,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC)
-            );
-            let l_min_exec_us = set!(
-                l_min_exec_us,
-                (lstat(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC_NS) / 1000) as i64
-            );
-            let l_open_idle = set!(
-                l_open_idle,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE)
-            );
-            let l_preempt = set!(l_preempt, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT));
-            let l_preempt_first = set!(
-                l_preempt_first,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FIRST)
-            );
-            let l_preempt_idle = set!(
-                l_preempt_idle,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_IDLE)
-            );
-            let l_preempt_fail = set!(
-                l_preempt_fail,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FAIL)
-            );
-            let l_affn_viol = set!(
-                l_affn_viol,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL)
-            );
-            let l_keep = set!(l_keep, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP));
-            let l_keep_fail_max_exec = set!(
-                l_keep_fail_max_exec,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP_FAIL_MAX_EXEC)
-            );
-            let l_keep_fail_busy = set!(
-                l_keep_fail_busy,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP_FAIL_BUSY)
-            );
-            let l_excl_collision = set!(
-                l_excl_collision,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION)
-            );
-            let l_excl_preempt = set!(
-                l_excl_preempt,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT)
-            );
-            let l_kick = set!(l_kick, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KICK));
-            let l_yield = set!(l_yield, lstat_pct(bpf_intf::layer_stat_idx_LSTAT_YIELD));
-            let l_yield_ignore = set!(
-                l_yield_ignore,
-                lstat(bpf_intf::layer_stat_idx_LSTAT_YIELD_IGNORE) as i64
-            );
-            let l_migration = set!(
-                l_migration,
-                lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIGRATION)
-            );
-            let l_cur_nr_cpus = set!(l_cur_nr_cpus, layer.cpus.count_ones() as i64);
-            let l_min_nr_cpus = set!(l_min_nr_cpus, self.nr_layer_cpus_min_max[lidx].0 as i64);
-            let l_max_nr_cpus = set!(l_max_nr_cpus, self.nr_layer_cpus_min_max[lidx].1 as i64);
-            if !self.om_format {
-                info!(
-                    "  {:<width$}: util/frac={:7.1}/{:5.1} load/frac={:9.1}:{:5.1} tasks={:6}",
-                    spec.name,
-                    l_util.get(),
-                    l_util_frac.get(),
-                    l_load.get(),
-                    l_load_frac.get(),
-                    l_tasks.get(),
-                    width = header_width,
-                );
-                info!(
-                    "  {:<width$}  tot={:7} local={} wake/exp/last/reenq={}/{}/{}/{}",
-                    "",
-                    l_total.get(),
-                    fmt_pct(l_sel_local.get()),
-                    fmt_pct(l_enq_wakeup.get()),
-                    fmt_pct(l_enq_expire.get()),
-                    fmt_pct(l_enq_last.get()),
-                    fmt_pct(l_enq_reenq.get()),
-                    width = header_width,
-                );
-                info!(
-                    "  {:<width$}  keep/max/busy={}/{}/{} kick={} yield/ign={}/{}",
-                    "",
-                    fmt_pct(l_keep.get()),
-                    fmt_pct(l_keep_fail_max_exec.get()),
-                    fmt_pct(l_keep_fail_busy.get()),
-                    fmt_pct(l_kick.get()),
-                    fmt_pct(l_yield.get()),
-                    fmt_num(l_yield_ignore.get()),
-                    width = header_width,
-                );
-                info!(
-                    "  {:<width$}  open_idle={} mig={} affn_viol={}",
-                    "",
-                    fmt_pct(l_open_idle.get()),
-                    fmt_pct(l_migration.get()),
-                    fmt_pct(l_affn_viol.get()),
-                    width = header_width,
-                );
-                info!(
-                    "  {:<width$}  preempt/first/idle/fail={}/{}/{}/{} min_exec={}/{:7.2}ms",
-                    "",
-                    fmt_pct(l_preempt.get()),
-                    fmt_pct(l_preempt_first.get()),
-                    fmt_pct(l_preempt_idle.get()),
-                    fmt_pct(l_preempt_fail.get()),
-                    fmt_pct(l_min_exec.get()),
-                    l_min_exec_us.get() as f64 / 1000.0,
-                    width = header_width,
-                );
-                info!(
-                    "  {:<width$}  cpus={:3} [{:3},{:3}] {}",
-                    "",
-                    l_cur_nr_cpus.get(),
-                    l_min_nr_cpus.get(),
-                    l_max_nr_cpus.get(),
-                    format_bitvec(&layer.cpus),
-                    width = header_width
-                );
-                match &layer.kind {
-                    LayerKind::Confined { exclusive, .. }
-                    | LayerKind::Grouped { exclusive, .. }
-                    | LayerKind::Open { exclusive, .. } => {
-                        if *exclusive {
-                            info!(
-                                "  {:<width$}  excl_coll={} excl_preempt={}",
-                                "",
-                                fmt_pct(l_excl_collision.get()),
-                                fmt_pct(l_excl_preempt.get()),
-                                width = header_width,
-                            );
-                        } else if l_excl_collision.get() != 0.0 || l_excl_preempt.get() != 0.0 {
-                            warn!(
-                                "{}: exclusive is off but excl_coll={} excl_preempt={}",
-                                spec.name,
-                                fmt_pct(l_excl_collision.get()),
-                                fmt_pct(l_excl_preempt.get()),
-                            );
-                        }
-                    }
-                }
-            }
+            let layer_stats =
+                LayerStats::new(lidx, layer, stats, bstats, self.nr_layer_cpus_min_max[lidx]);
+            sys_stats.layers.insert(spec.name.to_string(), layer_stats);
             self.nr_layer_cpus_min_max[lidx] = (layer.nr_cpus, layer.nr_cpus);
         }
 
-        if self.om_format {
-            let mut buffer = String::new();
-            encode(&mut buffer, &self.om_stats.registry).unwrap();
-            print!("{}", buffer);
-        }
-        self.processing_dur += Instant::now().duration_since(started_at);
+        *self.sys_stats.lock().unwrap() = sys_stats;
         Ok(())
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let now = Instant::now();
         let mut next_sched_at = now + self.sched_intv;
-        let mut next_monitor_at = now + self.monitor_intv;
+        let mut next_stats_at = now + self.stats_intv;
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();
@@ -1933,16 +1628,16 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 }
             }
 
-            if now >= next_monitor_at {
-                self.report()?;
-                while next_monitor_at < now {
-                    next_monitor_at += self.monitor_intv;
+            if now >= next_stats_at {
+                self.refresh_sys_stats()?;
+                while next_stats_at < now {
+                    next_stats_at += self.stats_intv;
                 }
             }
 
             std::thread::sleep(
                 next_sched_at
-                    .min(next_monitor_at)
+                    .min(next_stats_at)
                     .duration_since(Instant::now()),
             );
         }
@@ -2146,6 +1841,17 @@ fn main() -> Result<()> {
 
     debug!("opts={:?}", &opts);
 
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
+    ctrlc::set_handler(move || {
+        shutdown_clone.store(true, Ordering::Relaxed);
+    })
+    .context("Error setting Ctrl-C handler")?;
+
+    if opts.monitor {
+        return stats::monitor(shutdown.clone());
+    }
+
     if let Some(path) = &opts.example {
         write_example_file(path)?;
         return Ok(());
@@ -2162,14 +1868,7 @@ fn main() -> Result<()> {
     debug!("specs={}", serde_json::to_string_pretty(&layer_config)?);
     verify_layer_specs(&layer_config.specs)?;
 
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown.clone();
-    ctrlc::set_handler(move || {
-        shutdown_clone.store(true, Ordering::Relaxed);
-    })
-    .context("Error setting Ctrl-C handler")?;
-
-    // If disabling topology awareness clear out any set NUMA/LLC configs and 
+    // If disabling topology awareness clear out any set NUMA/LLC configs and
     // it will fallback to using all cores.
     if opts.disable_topology {
         info!("Disabling topology awareness");
