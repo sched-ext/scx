@@ -12,6 +12,8 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 
 use libc::c_char;
+use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::CStr;
 use std::fmt;
@@ -125,9 +127,9 @@ struct ComputeDomainKey {
 #[derive(Debug, Clone)]
 struct ComputeDomainValue {
     cpdom_id: usize,
-    cpdom_alt_id: usize,
+    cpdom_alt_id: Cell<usize>,
     cpu_ids: Vec<usize>,
-    neighbor_map: BTreeMap<usize, Vec<usize>>,
+    neighbor_map: RefCell<BTreeMap<usize, RefCell<Vec<usize>>>>,
 }
 
 #[derive(Debug)]
@@ -152,6 +154,18 @@ impl fmt::Display for FlatTopology {
 impl FlatTopology {
     /// Build a flat-structured topology
     pub fn new(prefer_smt_core: bool) -> Result<FlatTopology> {
+        let (cpu_fids, avg_freq, nr_cpus_online) = Self::build_cpu_fids(prefer_smt_core).unwrap();
+        let cpdom_map = Self::build_cpdom(&cpu_fids, avg_freq).unwrap();
+
+        Ok(FlatTopology {
+            cpu_fids,
+            cpdom_map,
+            nr_cpus_online,
+        })
+    }
+
+    /// Build a flat-structured list of CPUs in a preference order
+    fn build_cpu_fids(prefer_smt_core: bool) -> Option<(Vec<CpuFlatId>, usize, usize)> {
         let topo = Topology::new().expect("Failed to build host topology");
         let mut cpu_fids = Vec::new();
 
@@ -219,6 +233,14 @@ impl FlatTopology {
             });
         }
 
+        Some((cpu_fids, avg_freq, topo.nr_cpus_online()))
+    }
+
+    /// Build a list of compute domains
+    fn build_cpdom(
+        cpu_fids: &Vec<CpuFlatId>,
+        avg_freq: usize,
+    ) -> Option<BTreeMap<ComputeDomainKey, ComputeDomainValue>> {
         // Creat a compute domain map
         let mut cpdom_id = 0;
         let mut cpdom_map: BTreeMap<ComputeDomainKey, ComputeDomainValue> = BTreeMap::new();
@@ -228,78 +250,60 @@ impl FlatTopology {
                 llc_pos: cpu_fid.llc_pos,
                 is_big: cpu_fid.max_freq >= avg_freq,
             };
-            let ret = cpdom_map.get(&key);
             let mut value;
-            if ret.is_none() {
-                value = ComputeDomainValue {
-                    cpdom_id,
-                    cpdom_alt_id: cpdom_id,
-                    cpu_ids: Vec::new(),
-                    neighbor_map: BTreeMap::new(),
-                };
-                cpdom_id += 1;
-            } else {
-                value = ret.unwrap().clone();
+            match cpdom_map.get(&key) {
+                Some(v) => {
+                    value = v.clone();
+                }
+                None => {
+                    value = ComputeDomainValue {
+                        cpdom_id,
+                        cpdom_alt_id: Cell::new(cpdom_id),
+                        cpu_ids: Vec::new(),
+                        neighbor_map: RefCell::new(BTreeMap::new()),
+                    };
+                    cpdom_id += 1;
+                }
             }
             value.cpu_ids.push(cpu_fid.cpu_id);
             cpdom_map.insert(key, value);
         }
 
         // Fill up cpdom_alt_id for each compute domain
-        let mut alt_update_vec = Vec::new();
         for (k, v) in cpdom_map.iter() {
             let mut key = k.clone();
             key.is_big = !k.is_big;
 
-            let ret = cpdom_map.get(&key);
-            if !ret.is_none() {
-                let alt_v = ret.unwrap();
-                let mut value = v.clone();
-                value.cpdom_alt_id = alt_v.cpdom_id;
-                alt_update_vec.push((k.clone(), value));
+            if let Some(alt_v) = cpdom_map.get(&key) {
+                v.cpdom_alt_id.set(alt_v.cpdom_id);
             }
-        }
-        for (key, value) in alt_update_vec.iter() {
-            cpdom_map.insert(key.clone(), value.clone());
         }
 
         // Build a neighbor map for each compute domain
-        let mut keys1 = Vec::new();
-        let mut keys2 = Vec::new();
-        for (key, value) in cpdom_map.iter() {
-            keys1.push((key.clone(), value.clone()));
-            keys2.push((key.clone(), value.clone()));
-        }
-        for (from_k, _) in keys1.iter() {
-            for (to_k, to_v) in keys2.iter() {
+        for (from_k, from_v) in cpdom_map.iter() {
+            for (to_k, to_v) in cpdom_map.iter() {
                 if from_k == to_k {
                     continue;
                 }
 
                 let d = Self::dist(from_k, to_k);
-                let from_v = cpdom_map.get_mut(from_k).unwrap();
-                let map = &mut from_v.neighbor_map;
-                let ret = map.get(&d);
-                if !ret.is_none() {
-                    let mut value = ret.unwrap().clone();
-                    value.push(to_v.cpdom_id);
-                    map.insert(d, value.to_vec());
-                } else {
-                    let value = [to_v.cpdom_id];
-                    map.insert(d, value.to_vec());
+                let mut map = from_v.neighbor_map.borrow_mut();
+                match map.get(&d) {
+                    Some(v) => {
+                        v.borrow_mut().push(to_v.cpdom_id);
+                    }
+                    None => {
+                        map.insert(d, RefCell::new(vec![to_v.cpdom_id]));
+                    }
                 }
             }
         }
 
-        Ok(FlatTopology {
-            cpu_fids,
-            cpdom_map,
-            nr_cpus_online: topo.nr_cpus_online(),
-        })
+        Some(cpdom_map)
     }
 
     /// Calculate distance from two compute domains
-    pub fn dist(from: &ComputeDomainKey, to: &ComputeDomainKey) -> usize {
+    fn dist(from: &ComputeDomainKey, to: &ComputeDomainKey) -> usize {
         let mut d = 0;
         // code type > numa node > llc
         if from.is_big != to.is_big {
@@ -336,41 +340,13 @@ impl<'a> Scheduler<'a> {
         skel_builder.obj_builder.debug(opts.verbose > 0);
         let mut skel = scx_ops_open!(skel_builder, open_object, lavd_ops)?;
 
-        // Initialize CPU order topologically sorted by a cpu, node, llc, max_freq, and core order
-        let topo = FlatTopology::new(opts.prefer_smt_core).expect("Failed to build host topology");
-        for (pos, cpu) in topo.cpu_fids.iter().enumerate() {
-            skel.maps.rodata_data.cpu_order[pos] = cpu.cpu_id as u16;
-            skel.maps.rodata_data.__cpu_capacity_hint[cpu.cpu_id] = cpu.cpu_cap as u16;
-        }
-        debug!("{}", topo);
-
-        // Initialize compute domain contexts
-        for (k, v) in topo.cpdom_map.iter() {
-            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].id = v.cpdom_id as u64;
-            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].alt_id = v.cpdom_alt_id as u64;
-            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_big = k.is_big as u8;
-            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_active = 1;
-            for cpu_id in v.cpu_ids.iter() {
-                let i = cpu_id / 64;
-                let j = cpu_id % 64;
-                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].cpumask[i] |= 0x01 << j;
-            }
-
-            for (k, (_d, neighbors)) in v.neighbor_map.iter().enumerate() {
-                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].nr_neighbors[k] = neighbors.len() as u8;
-                for n in neighbors.iter() {
-                    skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].neighbor_bits[k] = 0x1 << n;
-                }
-            }
-        }
+        // Initialize CPU topology
+        let topo = FlatTopology::new(opts.prefer_smt_core).unwrap();
+        Self::init_cpus(&mut skel, &topo);
 
         // Initialize skel according to @opts.
         let nr_cpus_onln = topo.nr_cpus_online as u64;
-        skel.maps.bss_data.nr_cpus_onln = nr_cpus_onln;
-        skel.maps.rodata_data.no_core_compaction = opts.no_core_compaction;
-        skel.maps.rodata_data.no_freq_scaling = opts.no_freq_scaling;
-        skel.maps.rodata_data.verbose = opts.verbose;
-        let intrspc = introspec::init(opts);
+        Self::init_globals(&mut skel, &opts, nr_cpus_onln);
 
         // Attach.
         let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
@@ -387,8 +363,46 @@ impl<'a> Scheduler<'a> {
             struct_ops,
             nr_cpus_onln,
             rb_mgr,
-            intrspc,
+            intrspc: introspec::init(opts),
         })
+    }
+
+    fn init_cpus(skel: &mut OpenBpfSkel, topo: &FlatTopology) {
+        // Initialize CPU order topologically sorted
+        // by a cpu, node, llc, max_freq, and core order
+        for (pos, cpu) in topo.cpu_fids.iter().enumerate() {
+            skel.maps.rodata_data.cpu_order[pos] = cpu.cpu_id as u16;
+            skel.maps.rodata_data.__cpu_capacity_hint[cpu.cpu_id] = cpu.cpu_cap as u16;
+        }
+        debug!("{:#?}", topo);
+
+        // Initialize compute domain contexts
+        for (k, v) in topo.cpdom_map.iter() {
+            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].id = v.cpdom_id as u64;
+            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].alt_id = v.cpdom_alt_id.get() as u64;
+            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_big = k.is_big as u8;
+            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_active = 1;
+            for cpu_id in v.cpu_ids.iter() {
+                let i = cpu_id / 64;
+                let j = cpu_id % 64;
+                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].cpumask[i] |= 0x01 << j;
+            }
+
+            for (k, (_d, neighbors)) in v.neighbor_map.borrow().iter().enumerate() {
+                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].nr_neighbors[k] =
+                    neighbors.borrow().len() as u8;
+                for n in neighbors.borrow().iter() {
+                    skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].neighbor_bits[k] = 0x1 << n;
+                }
+            }
+        }
+    }
+
+    fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, nr_cpus_onln: u64) {
+        skel.maps.bss_data.nr_cpus_onln = nr_cpus_onln;
+        skel.maps.rodata_data.no_core_compaction = opts.no_core_compaction;
+        skel.maps.rodata_data.no_freq_scaling = opts.no_freq_scaling;
+        skel.maps.rodata_data.verbose = opts.verbose;
     }
 
     fn get_msg_seq_id() -> u64 {
