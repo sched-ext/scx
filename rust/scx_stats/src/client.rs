@@ -1,5 +1,6 @@
 use crate::{ScxStatsErrno, ScxStatsRequest, ScxStatsResponse};
 use anyhow::{anyhow, bail, Result};
+use log::trace;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -69,10 +70,12 @@ impl ScxStatsClient {
         }
 
         let req = serde_json::to_string(&req)? + "\n";
+        trace!("Sending: {}", req.trim());
         self.stream.as_ref().unwrap().write_all(req.as_bytes())?;
 
         let mut line = String::new();
         self.reader.as_mut().unwrap().read_line(&mut line)?;
+        trace!("Received: {}", line.trim());
         let mut resp: ScxStatsResponse = serde_json::from_str(&line)?;
 
         let (errno, resp) = (

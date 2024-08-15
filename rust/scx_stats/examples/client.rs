@@ -9,27 +9,32 @@ use std::env::args;
 #[derive(Clone, Debug, Serialize, Deserialize, Stats)]
 #[stat(desc = "domain statistics")]
 struct DomainStats {
-    dom_name: String,
-    #[stat(desc = "domain last updated at")]
-    pub dom_at: u64,
-    #[stat(desc = "it's an i64 counter")]
-    dom_i_cnt: i64,
-    dom_u_cnt: u64,
-    dom_f_cnt: f64,
+    pub name: String,
+    #[stat(desc = "an event counter")]
+    pub events: u64,
+    #[stat(desc = "a gauge number")]
+    pub pressure: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Stats)]
 #[stat(desc = "cluster statistics")]
 struct ClusterStats {
-    cls_name: String,
-    #[stat(desc = "last updated at")]
-    cls_at: u64,
+    pub name: String,
+    #[stat(desc = "update timestamp")]
+    pub at: u64,
+    #[stat(desc = "some bitmap we want to report")]
+    pub bitmap: Vec<u32>,
     #[stat(desc = "domain statistics")]
-    doms_dict: BTreeMap<usize, DomainStats>,
-    doms_array: Vec<DomainStats>,
+    pub doms_dict: BTreeMap<usize, DomainStats>,
 }
 
 fn main() {
+    simple_logger::SimpleLogger::new()
+        .with_level(log::LevelFilter::Info)
+        .env()
+        .init()
+        .unwrap();
+
     std::assert_eq!(args().len(), 2, "Usage: client UNIX_SOCKET_PATH");
     let path = args().nth(1).unwrap();
 

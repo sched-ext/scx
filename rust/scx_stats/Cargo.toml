@@ -18,3 +18,4 @@ syn = { version = "2.0", features = ["extra-traits", "full"] }
 
 [dev-dependencies]
 scx_stats_derive = { path = "scx_stats_derive", version = "0.1.0" }
+simple_logger = "5.0"
