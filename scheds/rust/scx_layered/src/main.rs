@@ -1092,6 +1092,7 @@ impl Layer {
             nr_cpus,
         );
         self.cpus |= &new_cpus;
+        self.nr_cpus = self.cpus.count_ones();
         Ok(true)
     }
 
@@ -1166,6 +1167,7 @@ impl Layer {
                 trace!("{} freeing CPUs\n{}", self.name, &cpus_to_free);
                 self.cpus &= !cpus_to_free.clone();
                 cpu_pool.free(&cpus_to_free)?;
+                self.nr_cpus = self.cpus.count_ones();
                 Ok(true)
             }
             None => Ok(false),
