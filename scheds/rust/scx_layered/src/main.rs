@@ -1472,7 +1472,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             sys_stats: sys_stats.clone(),
         };
 
-	stats::launch_server(sys_stats)?;
+        stats::launch_server(sys_stats)?;
 
         // XXX If we try to refresh the cpumasks here before attaching, we
         // sometimes (non-deterministically) don't see the updated values in
@@ -1600,7 +1600,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             &self.stats_intv,
             &processing_dur,
             self.cpu_pool.fallback_cpu,
-        );
+        )?;
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
             let layer_stats =

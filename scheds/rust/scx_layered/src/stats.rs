@@ -1,11 +1,11 @@
 use crate::bpf_intf;
-use crate::now_monotonic;
 use crate::BpfStats;
 use crate::Layer;
 use crate::LayerKind;
 use crate::Stats;
 use anyhow::Result;
-use log::info;
+use chrono::DateTime;
+use chrono::Local;
 use log::warn;
 use scx_stats::Meta;
 use scx_stats::ScxStatsClient;
@@ -14,12 +14,33 @@ use scx_stats::ToJson;
 use scx_stats_derive::Stats;
 use serde::Deserialize;
 use serde::Serialize;
-use std::sync::Mutex;
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
+fn fmt_pct(v: f64) -> String {
+    if v >= 99.995 {
+        format!("{:5.1}", v)
+    } else {
+        format!("{:5.2}", v)
+    }
+}
+
+fn fmt_num(v: u64) -> String {
+    if v > 1_000_000 {
+        format!("{:5.1}m", v as f64 / 1_000_000.0)
+    } else if v > 1_000 {
+        format!("{:5.1}k", v as f64 / 1_000.0)
+    } else {
+        format!("{:5.0} ", v)
+    }
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 pub struct LayerStats {
@@ -167,6 +188,100 @@ impl LayerStats {
             max_nr_cpus: nr_cpus_range.1 as u32,
         }
     }
+
+    pub fn format<W: Write>(&self, w: &mut W, name: &str, header_width: usize) -> Result<()> {
+        writeln!(
+            w,
+            "  {:<width$}: util/frac={:7.1}/{:5.1} load/frac={:9.1}:{:5.1} tasks={:6}",
+            name,
+            self.util,
+            self.util_frac,
+            self.load,
+            self.load_frac,
+            self.tasks,
+            width = header_width,
+        )?;
+
+        writeln!(
+            w,
+            "  {:<width$}  tot={:7} local={} wake/exp/last/reenq={}/{}/{}/{}",
+            "",
+            self.total,
+            fmt_pct(self.sel_local),
+            fmt_pct(self.enq_wakeup),
+            fmt_pct(self.enq_expire),
+            fmt_pct(self.enq_last),
+            fmt_pct(self.enq_reenq),
+            width = header_width,
+        )?;
+
+        writeln!(
+            w,
+            "  {:<width$}  keep/max/busy={}/{}/{} kick={} yield/ign={}/{}",
+            "",
+            fmt_pct(self.keep),
+            fmt_pct(self.keep_fail_max_exec),
+            fmt_pct(self.keep_fail_busy),
+            fmt_pct(self.kick),
+            fmt_pct(self.yielded),
+            fmt_num(self.yield_ignore),
+            width = header_width,
+        )?;
+
+        writeln!(
+            w,
+            "  {:<width$}  open_idle={} mig={} affn_viol={}",
+            "",
+            fmt_pct(self.open_idle),
+            fmt_pct(self.migration),
+            fmt_pct(self.affn_viol),
+            width = header_width,
+        )?;
+
+        writeln!(
+            w,
+            "  {:<width$}  preempt/first/idle/fail={}/{}/{}/{} min_exec={}/{:7.2}ms",
+            "",
+            fmt_pct(self.preempt),
+            fmt_pct(self.preempt_first),
+            fmt_pct(self.preempt_idle),
+            fmt_pct(self.preempt_fail),
+            fmt_pct(self.min_exec),
+            self.min_exec_us as f64 / 1000.0,
+            width = header_width,
+        )?;
+
+        writeln!(
+            w,
+            "  {:<width$}  cpus={:3} [{:3},{:3}]",
+            "",
+            self.cur_nr_cpus,
+            self.min_nr_cpus,
+            self.max_nr_cpus,
+            //format_bitvec(&layer.cpus),
+            width = header_width
+        )?;
+
+        if self.is_excl != 0 {
+            writeln!(
+                w,
+                "  {:<width$}  excl_coll={} excl_preempt={}",
+                "",
+                fmt_pct(self.excl_collision),
+                fmt_pct(self.excl_preempt),
+                width = header_width,
+            )?;
+        } else if self.excl_collision != 0.0 || self.excl_preempt != 0.0 {
+            warn!(
+                "{}: exclusive is off but excl_coll={} excl_preempt={}",
+                name,
+                fmt_pct(self.excl_collision),
+                fmt_pct(self.excl_preempt),
+            );
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
@@ -174,7 +289,7 @@ pub struct SysStats {
     #[stat(desc = "Update interval")]
     pub intv: f64,
     #[stat(desc = "Timestamp")]
-    pub at: u64,
+    pub at: f64,
     #[stat(desc = "Total scheduling events in the period")]
     pub total: u64,
     #[stat(desc = "% that got scheduled directly into an idle CPU")]
@@ -218,7 +333,7 @@ impl SysStats {
         intv: &Duration,
         proc_dur: &Duration,
         fallback_cpu: usize,
-    ) -> Self {
+    ) -> Result<Self> {
         let lsum = |idx| stats.bpf_stats.lstats_sums[idx as usize];
         let total = lsum(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
             + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
@@ -233,9 +348,9 @@ impl SysStats {
             }
         };
 
-        Self {
+        Ok(Self {
             intv: intv.as_secs_f64(),
-            at: now_monotonic(),
+            at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64(),
             total,
             local: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL),
             open_idle: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE),
@@ -252,133 +367,51 @@ impl SysStats {
             load: stats.total_load,
             fallback_cpu: fallback_cpu as u32,
             layers: BTreeMap::new(),
-        }
+        })
     }
-}
 
-fn print_sys_stats(s: &SysStats) {
-    let fmt_pct = |v: f64| {
-        if v >= 99.995 {
-            format!("{:5.1}", v)
-        } else {
-            format!("{:5.2}", v)
+    pub fn format<W: Write>(&self, w: &mut W) -> Result<()> {
+        writeln!(
+            w,
+            "tot={:7} local={} open_idle={} affn_viol={} proc={:?}ms",
+            self.total,
+            fmt_pct(self.local),
+            fmt_pct(self.open_idle),
+            fmt_pct(self.affn_viol),
+            self.proc_ms,
+        )?;
+
+        writeln!(
+            w,
+            "busy={:5.1} util={:7.1} load={:9.1} fallback_cpu={:3}",
+            self.busy, self.util, self.load, self.fallback_cpu,
+        )?;
+
+        writeln!(
+            w,
+            "excl_coll={} excl_preempt={} excl_idle={} excl_wakeup={}",
+            self.excl_collision, self.excl_preempt, self.excl_idle, self.excl_wakeup
+        )?;
+
+        Ok(())
+    }
+
+    pub fn format_all<W: Write>(&self, w: &mut W) -> Result<()> {
+        self.format(w)?;
+
+        let header_width = self
+            .layers
+            .keys()
+            .map(|name| name.len())
+            .max()
+            .unwrap_or(0)
+            .max(4);
+
+        for (name, layer) in self.layers.iter() {
+            layer.format(w, name, header_width)?;
         }
-    };
 
-    let fmt_num = |v: u64| {
-        if v > 1_000_000 {
-            format!("{:5.1}m", v as f64 / 1_000_000.0)
-        } else if v > 1_000 {
-            format!("{:5.1}k", v as f64 / 1_000.0)
-        } else {
-            format!("{:5.0} ", v)
-        }
-    };
-
-    info!(
-        "tot={:7} local={} open_idle={} affn_viol={} proc={:?}ms",
-        s.total,
-        fmt_pct(s.local),
-        fmt_pct(s.open_idle),
-        fmt_pct(s.affn_viol),
-        s.proc_ms,
-    );
-
-    info!(
-        "busy={:5.1} util={:7.1} load={:9.1} fallback_cpu={:3}",
-        s.busy, s.util, s.load, s.fallback_cpu,
-    );
-
-    info!(
-        "excl_coll={} excl_preempt={} excl_idle={} excl_wakeup={}",
-        s.excl_collision, s.excl_preempt, s.excl_idle, s.excl_wakeup
-    );
-
-    let header_width = s
-        .layers
-        .keys()
-        .map(|name| name.len())
-        .max()
-        .unwrap_or(0)
-        .max(4);
-
-    for (name, l) in s.layers.iter() {
-        info!(
-            "  {:<width$}: util/frac={:7.1}/{:5.1} load/frac={:9.1}:{:5.1} tasks={:6}",
-            name,
-            l.util,
-            l.util_frac,
-            l.load,
-            l.load_frac,
-            l.tasks,
-            width = header_width,
-        );
-        info!(
-            "  {:<width$}  tot={:7} local={} wake/exp/last/reenq={}/{}/{}/{}",
-            "",
-            l.total,
-            fmt_pct(l.sel_local),
-            fmt_pct(l.enq_wakeup),
-            fmt_pct(l.enq_expire),
-            fmt_pct(l.enq_last),
-            fmt_pct(l.enq_reenq),
-            width = header_width,
-        );
-        info!(
-            "  {:<width$}  keep/max/busy={}/{}/{} kick={} yield/ign={}/{}",
-            "",
-            fmt_pct(l.keep),
-            fmt_pct(l.keep_fail_max_exec),
-            fmt_pct(l.keep_fail_busy),
-            fmt_pct(l.kick),
-            fmt_pct(l.yielded),
-            fmt_num(l.yield_ignore),
-            width = header_width,
-        );
-        info!(
-            "  {:<width$}  open_idle={} mig={} affn_viol={}",
-            "",
-            fmt_pct(l.open_idle),
-            fmt_pct(l.migration),
-            fmt_pct(l.affn_viol),
-            width = header_width,
-        );
-        info!(
-            "  {:<width$}  preempt/first/idle/fail={}/{}/{}/{} min_exec={}/{:7.2}ms",
-            "",
-            fmt_pct(l.preempt),
-            fmt_pct(l.preempt_first),
-            fmt_pct(l.preempt_idle),
-            fmt_pct(l.preempt_fail),
-            fmt_pct(l.min_exec),
-            l.min_exec_us as f64 / 1000.0,
-            width = header_width,
-        );
-        info!(
-            "  {:<width$}  cpus={:3} [{:3},{:3}]",
-            "",
-            l.cur_nr_cpus,
-            l.min_nr_cpus,
-            l.max_nr_cpus,
-            //format_bitvec(&layer.cpus),
-            width = header_width
-        );
-        if l.is_excl != 0 {
-            info!(
-                "  {:<width$}  excl_coll={} excl_preempt={}",
-                "",
-                fmt_pct(l.excl_collision),
-                fmt_pct(l.excl_preempt),
-                width = header_width,
-            );
-        } else if l.excl_collision != 0.0 || l.excl_preempt != 0.0 {
-            warn!(
-                "{}: exclusive is off but excl_coll={} excl_preempt={}",
-                name,
-                fmt_pct(l.excl_collision),
-                fmt_pct(l.excl_preempt),
-            );
-        }
+        Ok(())
     }
 }
 
@@ -398,7 +431,11 @@ pub fn monitor(shutdown: Arc<AtomicBool>) -> Result<()> {
     let mut client = ScxStatsClient::new().connect()?;
     while !shutdown.load(Ordering::Relaxed) {
         let sst = client.request::<SysStats>("stat", vec![])?;
-        print_sys_stats(&sst);
+        let at = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
+
+        println!("###### {} ######", at.to_rfc2822());
+        sst.format_all(&mut std::io::stdout())?;
+
         std::thread::sleep(Duration::from_secs_f64(sst.intv));
     }
     Ok(())
