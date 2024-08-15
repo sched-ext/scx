@@ -22,7 +22,7 @@ simplelog = "0.12"
 static_assertions = "1.1.0"
 rlimit = "0.10.1"
 plain = "0.2.3"
-nix = "0.29.0"
+nix = { version = "0.29.0", features = ["signal"] }
 
 [build-dependencies]
 scx_utils = { path = "../../../rust/scx_utils", version = "1.0.2" }
