@@ -45,79 +45,71 @@ fn fmt_num(v: u64) -> String {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 pub struct LayerStats {
-    #[stat(desc = "CPU utilization of the layer (100% means one CPU was fully occupied)")]
+    #[stat(desc = "layer: CPU utilization (100% means one full CPU)")]
     pub util: f64,
-    #[stat(desc = "Fraction of total CPU utilization consumed by the layer")]
+    #[stat(desc = "layer: fraction of total CPU utilization")]
     pub util_frac: f64,
-    #[stat(desc = "Sum of weight * duty_cycle for tasks in the layer")]
+    #[stat(desc = "layer: sum of weight * duty_cycle for tasks")]
     pub load: f64,
-    #[stat(desc = "Fraction of total load consumed by the layer")]
+    #[stat(desc = "layer: fraction of total load")]
     pub load_frac: f64,
-    #[stat(desc = "Number of tasks in the layer")]
+    #[stat(desc = "layer: # tasks")]
     pub tasks: u32,
-    #[stat(desc = "Number of scheduling events in the layer")]
+    #[stat(desc = "layer: # sched events duringg the period")]
     pub total: u64,
-    #[stat(desc = "% of scheduling events directly into an idle CPU")]
+    #[stat(desc = "layer: % dispatched into idle CPU")]
     pub sel_local: f64,
-    #[stat(desc = "% of scheduling events enqueued to layer after wakeup")]
+    #[stat(desc = "layer: % enqueued after wakeup")]
     pub enq_wakeup: f64,
-    #[stat(desc = "% of scheduling events enqueued to layer after slice expiration")]
+    #[stat(desc = "layer: % enqueued after slice expiration")]
     pub enq_expire: f64,
-    #[stat(desc = "% of scheduling events enqueued as last runnable task on CPU")]
+    #[stat(desc = "layer: % enqueued as last runnable task on CPU")]
     pub enq_last: f64,
-    #[stat(desc = "% of scheduling events re-enqueued due to RT preemption")]
+    #[stat(desc = "layer: % re-enqueued due to RT preemption")]
     pub enq_reenq: f64,
-    #[stat(desc = "Number of times execution duration was shorter than min_exec_us")]
+    #[stat(desc = "layer: # times exec duration < min_exec_us")]
     pub min_exec: f64,
-    #[stat(desc = "Total execution duration extended due to min_exec_us")]
+    #[stat(desc = "layer: total exec durations extended due to min_exec_us")]
     pub min_exec_us: u64,
-    #[stat(desc = "% of scheduling events into idle CPUs occupied by other layers")]
+    #[stat(desc = "layer: % dispatche into idle CPUs occupied by other layers")]
     pub open_idle: f64,
-    #[stat(desc = "% of scheduling events that preempted other tasks")]
+    #[stat(desc = "layer: % preempted other tasks")]
     pub preempt: f64,
-    #[stat(desc = "% of scheduling events that first-preempted other tasks")]
+    #[stat(desc = "layer: % first-preempted other tasks")]
     pub preempt_first: f64,
-    #[stat(desc = "% of scheduling events that idle-preempted other tasks")]
+    #[stat(desc = "layer: % idle-preempted other tasks")]
     pub preempt_idle: f64,
-    #[stat(desc = "% of scheduling events that attempted to preempt other tasks but failed")]
+    #[stat(desc = "layer: % attempted to preempt other tasks but failed")]
     pub preempt_fail: f64,
-    #[stat(
-        desc = "% of scheduling events that violated configured policies due to CPU affinity restrictions"
-    )]
+    #[stat(desc = "layer: % violated config due to CPU affinity")]
     pub affn_viol: f64,
-    #[stat(desc = "% of scheduling events that continued executing after slice expiration")]
+    #[stat(desc = "layer: % continued executing after slice expiration")]
     pub keep: f64,
-    #[stat(
-        desc = "% of scheduling events that weren't allowed to continue executing after slice expiration due to overrunning max_exec duration limit"
-    )]
+    #[stat(desc = "layer: % disallowed to continue executing due to max_exec")]
     pub keep_fail_max_exec: f64,
-    #[stat(
-        desc = "% of scheduling events that weren't allowed to continue executing after slice expiration to accommodate other tasks"
-    )]
+    #[stat(desc = "layer: % disallowed to continue executing due to other tasks")]
     pub keep_fail_busy: f64,
-    #[stat(desc = "Whether layer is exclusive")]
+    #[stat(desc = "layer: whether is exclusive")]
     pub is_excl: u32,
-    #[stat(
-        desc = "Number of times an exclusive task skipped a CPU as the sibling was also exclusive"
-    )]
+    #[stat(desc = "layer: # times an excl task skipped a CPU as the sibling was also excl")]
     pub excl_collision: f64,
-    #[stat(desc = "Number of times a sibling CPU was preempted for an exclusive task")]
+    #[stat(desc = "layer: % a sibling CPU was preempted for an exclusive task")]
     pub excl_preempt: f64,
-    #[stat(desc = "% of schduling events that kicked a CPU from enqueue path")]
+    #[stat(desc = "layer: % kicked a CPU from enqueue path")]
     pub kick: f64,
-    #[stat(desc = "% of scheduling events that yielded")]
+    #[stat(desc = "layer: % yielded")]
     pub yielded: f64,
-    #[stat(desc = "Number of times yield was ignored")]
+    #[stat(desc = "layer: # times yield was ignored")]
     pub yield_ignore: u64,
-    #[stat(desc = "% of scheduling events that migrated across CPUs")]
+    #[stat(desc = "layer: % migrated across CPUs")]
     pub migration: f64,
-    #[stat(desc = "Mask of allocated CPUs")]
+    #[stat(desc = "layer: mask of allocated CPUs")]
     pub cpus: Vec<u32>,
-    #[stat(desc = "Current # of CPUs assigned to the layer")]
+    #[stat(desc = "layer: # of CPUs assigned")]
     pub cur_nr_cpus: u32,
-    #[stat(desc = "Minimum # of CPUs assigned to the layer")]
+    #[stat(desc = "layer: minimum # of CPUs assigned")]
     pub min_nr_cpus: u32,
-    #[stat(desc = "Maximum # of CPUs assigned to the layer")]
+    #[stat(desc = "layer: maximum # of CPUs assigned")]
     pub max_nr_cpus: u32,
 }
 
@@ -312,43 +304,37 @@ impl LayerStats {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 pub struct SysStats {
-    #[stat(desc = "Update interval")]
+    #[stat(desc = "update interval")]
     pub intv: f64,
-    #[stat(desc = "Timestamp")]
+    #[stat(desc = "timestamp")]
     pub at: f64,
-    #[stat(desc = "Total scheduling events in the period")]
+    #[stat(desc = "# sched events duringg the period")]
     pub total: u64,
-    #[stat(desc = "% that got scheduled directly into an idle CPU")]
+    #[stat(desc = "% dispatched directly into an idle CPU")]
     pub local: f64,
-    #[stat(desc = "% of open layer tasks scheduled into occupied idle CPUs")]
+    #[stat(desc = "% open layer tasks scheduled into allocated but idle CPUs")]
     pub open_idle: f64,
-    #[stat(desc = "% which violated configured policies due to CPU affinity restrictions")]
+    #[stat(desc = "% violated config due to CPU affinity")]
     pub affn_viol: f64,
-    #[stat(
-        desc = "Number of times an exclusive task skipped a CPU as the sibling was also exclusive"
-    )]
+    #[stat(desc = "# times an excl task skipped a CPU as the sibling was also excl")]
     pub excl_collision: f64,
-    #[stat(desc = "Number of times a sibling CPU was preempted for an exclusive task")]
+    #[stat(desc = "# times a sibling CPU was preempted for an excl task")]
     pub excl_preempt: f64,
-    #[stat(
-        desc = "Number of times a CPU skipped dispatching due to sibling running an exclusive task"
-    )]
+    #[stat(desc = "# times a CPU skipped dispatching due to an excl task on the sibling")]
     pub excl_idle: f64,
-    #[stat(
-        desc = "Number of times an idle sibling CPU was woken up after an exclusive task is finished"
-    )]
+    #[stat(desc = "# times an idle sibling CPU was woken up after an excl task is finished")]
     pub excl_wakeup: f64,
-    #[stat(desc = "CPU time this binary has consumed during the period")]
+    #[stat(desc = "CPU time this binary consumed during the period")]
     pub proc_ms: u64,
-    #[stat(desc = "CPU busy % (100% means all CPUs were fully occupied)")]
+    #[stat(desc = "CPU busy % (100% means all CPU)")]
     pub busy: f64,
-    #[stat(desc = "CPU utilization % (100% means one CPU was fully occupied)")]
+    #[stat(desc = "CPU util % (100% means one CPU)")]
     pub util: f64,
-    #[stat(desc = "Sum of weight * duty_cycle for all tasks")]
+    #[stat(desc = "sum of weight * duty_cycle for all tasks")]
     pub load: f64,
-    #[stat(desc = "Fallback CPU")]
+    #[stat(desc = "fallback CPU")]
     pub fallback_cpu: u32,
-    #[stat(desc = "Per-layer statistics")]
+    #[stat(desc = "per-layer statistics")]
     pub layers: BTreeMap<String, LayerStats>,
 }
 
