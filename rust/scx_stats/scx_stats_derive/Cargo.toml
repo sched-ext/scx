@@ -1,5 +1,5 @@
 [package]
-name = "scx_stat_derive"
+name = "scx_stats_derive"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,6 +9,6 @@ proc-macro = true
 [dependencies]
 proc-macro2 = "1.0"
 quote = "1.0"
-scx_stat = { path = "..", version = "0.1.0" }
+scx_stats = { path = "..", version = "0.1.0" }
 serde_json = "1.0"
 syn = { version = "2.0", features = ["extra-traits", "full"] }

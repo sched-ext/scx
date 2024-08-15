@@ -1,4 +1,4 @@
-use crate::{ScxStatMeta, StatMeta};
+use crate::{ScxStatsMeta, StatsMeta};
 use anyhow::{anyhow, Context, Result};
 use log::warn;
 use serde::{Deserialize, Serialize};
@@ -15,13 +15,13 @@ type StatMap = BTreeMap<
 >;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ScxStatRequest {
+pub struct ScxStatsRequest {
     pub req: String,
     #[serde(default)]
     pub args: BTreeMap<String, String>,
 }
 
-impl ScxStatRequest {
+impl ScxStatsRequest {
     pub fn new(req: &str, args: Vec<(String, String)>) -> Self {
         Self {
             req: req.to_string(),
@@ -31,48 +31,48 @@ impl ScxStatRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ScxStatResponse {
+pub struct ScxStatsResponse {
     pub errno: i32,
     pub args: BTreeMap<String, serde_json::Value>,
 }
 
-pub struct ScxStatErrno(pub i32);
+pub struct ScxStatsErrno(pub i32);
 
-impl std::fmt::Display for ScxStatErrno {
+impl std::fmt::Display for ScxStatsErrno {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", std::io::Error::from_raw_os_error(self.0))
     }
 }
 
-impl std::fmt::Debug for ScxStatErrno {
+impl std::fmt::Debug for ScxStatsErrno {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", std::io::Error::from_raw_os_error(self.0))
     }
 }
 
-struct ScxStatServerData {
-    stat_meta: Vec<ScxStatMeta>,
+struct ScxStatsServerData {
+    stat_meta: Vec<ScxStatsMeta>,
     stat: StatMap,
 }
 
-struct ScxStatServerInner {
+struct ScxStatsServerInner {
     listener: UnixListener,
-    data: Arc<Mutex<ScxStatServerData>>,
+    data: Arc<Mutex<ScxStatsServerData>>,
 }
 
-impl ScxStatServerInner {
-    fn new(listener: UnixListener, stat_meta: Vec<ScxStatMeta>, stat: StatMap) -> Self {
+impl ScxStatsServerInner {
+    fn new(listener: UnixListener, stat_meta: Vec<ScxStatsMeta>, stat: StatMap) -> Self {
         Self {
             listener,
-            data: Arc::new(Mutex::new(ScxStatServerData { stat_meta, stat })),
+            data: Arc::new(Mutex::new(ScxStatsServerData { stat_meta, stat })),
         }
     }
 
-    fn build_resp<T>(errno: i32, resp: &T) -> Result<ScxStatResponse>
+    fn build_resp<T>(errno: i32, resp: &T) -> Result<ScxStatsResponse>
     where
         T: Serialize,
     {
-        Ok(ScxStatResponse {
+        Ok(ScxStatsResponse {
             errno,
             args: [("resp".into(), serde_json::to_value(resp)?)]
                 .into_iter()
@@ -82,9 +82,9 @@ impl ScxStatServerInner {
 
     fn handle_request(
         line: String,
-        data: &Arc<Mutex<ScxStatServerData>>,
-    ) -> Result<ScxStatResponse> {
-        let req: ScxStatRequest = serde_json::from_str(&line)?;
+        data: &Arc<Mutex<ScxStatsServerData>>,
+    ) -> Result<ScxStatsResponse> {
+        let req: ScxStatsRequest = serde_json::from_str(&line)?;
 
         match req.req.as_str() {
             "stat" => {
@@ -96,7 +96,7 @@ impl ScxStatServerInner {
                 let handler = match data.lock().unwrap().stat.get(target) {
                     Some(v) => v.clone(),
                     None => Err(anyhow!("unknown stat target {:?}", req)
-                        .context(ScxStatErrno(libc::EINVAL)))?,
+                        .context(ScxStatsErrno(libc::EINVAL)))?,
                 };
 
                 let resp = handler.lock().unwrap()(&req.args)?;
@@ -104,11 +104,11 @@ impl ScxStatServerInner {
                 Self::build_resp(0, &resp)
             }
             "stat_meta" => Ok(Self::build_resp(0, &data.lock().unwrap().stat_meta)?),
-            req => Err(anyhow!("unknown command {:?}", req).context(ScxStatErrno(libc::EINVAL)))?,
+            req => Err(anyhow!("unknown command {:?}", req).context(ScxStatsErrno(libc::EINVAL)))?,
         }
     }
 
-    fn serve(mut stream: UnixStream, data: Arc<Mutex<ScxStatServerData>>) -> Result<()> {
+    fn serve(mut stream: UnixStream, data: Arc<Mutex<ScxStatsServerData>>) -> Result<()> {
         let mut reader = BufReader::new(stream.try_clone()?);
 
         loop {
@@ -121,7 +121,7 @@ impl ScxStatServerInner {
             let resp = match Self::handle_request(line, &data) {
                 Ok(v) => v,
                 Err(e) => {
-                    let errno = match e.downcast_ref::<ScxStatErrno>() {
+                    let errno = match e.downcast_ref::<ScxStatsErrno>() {
                         Some(e) if e.0 != 0 => e.0,
                         _ => libc::EINVAL,
                     };
@@ -153,17 +153,17 @@ impl ScxStatServerInner {
     }
 }
 
-pub struct ScxStatServer {
+pub struct ScxStatsServer {
     base_path: PathBuf,
     sched_path: PathBuf,
     stat_path: PathBuf,
     path: Option<PathBuf>,
 
-    stat_meta_holder: Vec<ScxStatMeta>,
+    stat_meta_holder: Vec<ScxStatsMeta>,
     stat_holder: StatMap,
 }
 
-impl ScxStatServer {
+impl ScxStatsServer {
     pub fn new() -> Self {
         Self {
             base_path: PathBuf::from("/var/run/scx"),
@@ -176,7 +176,7 @@ impl ScxStatServer {
         }
     }
 
-    pub fn add_stat_meta(mut self, meta: ScxStatMeta) -> Self {
+    pub fn add_stat_meta(mut self, meta: ScxStatsMeta) -> Self {
         self.stat_meta_holder.push(meta);
         self
     }
@@ -236,20 +236,20 @@ impl ScxStatServer {
         std::mem::swap(&mut stat_meta, &mut self.stat_meta_holder);
         std::mem::swap(&mut stat, &mut self.stat_holder);
 
-        let inner = ScxStatServerInner::new(listener, stat_meta, stat);
+        let inner = ScxStatsServerInner::new(listener, stat_meta, stat);
 
         spawn(move || inner.listen());
         Ok(self)
     }
 }
 
-pub trait ScxStatOutput {
+pub trait ScxStatsOutput {
     fn output(&self) -> Result<serde_json::Value>;
 }
 
-impl<T> ScxStatOutput for T
+impl<T> ScxStatsOutput for T
 where
-    T: StatMeta + Serialize,
+    T: StatsMeta + Serialize,
 {
     fn output(&self) -> Result<serde_json::Value> {
         Ok(serde_json::to_value(self)?)

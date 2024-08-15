@@ -2,13 +2,13 @@ use crate::SysStats;
 use anyhow::Result;
 use log::info;
 use log::warn;
-use scx_stat::ScxStatClient;
+use scx_stats::ScxStatsClient;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-fn print_sys_stat(s: &SysStats) {
+fn print_sys_stats(s: &SysStats) {
     let fmt_pct = |v: f64| {
         if v >= 99.995 {
             format!("{:5.1}", v)
@@ -135,10 +135,10 @@ fn print_sys_stat(s: &SysStats) {
 }
 
 pub fn monitor(shutdown: Arc<AtomicBool>) -> Result<()> {
-    let mut client = ScxStatClient::new().connect()?;
+    let mut client = ScxStatsClient::new().connect()?;
     while !shutdown.load(Ordering::Relaxed) {
         let sst = client.request::<SysStats>("stat", vec![])?;
-        print_sys_stat(&sst);
+        print_sys_stats(&sst);
         std::thread::sleep(Duration::from_secs_f64(sst.intv));
     }
     Ok(())

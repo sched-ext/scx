@@ -9,7 +9,7 @@ use syn::{
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ScxStatKind {
+pub enum ScxStatsKind {
     I64,
     U64,
     Float,
@@ -17,7 +17,7 @@ pub enum ScxStatKind {
     Struct(String),
 }
 
-impl ScxStatKind {
+impl ScxStatsKind {
     pub fn new(ty: &Type, paths: &mut BTreeMap<String, Path>) -> syn::Result<Self> {
         match ty {
             Type::Reference(reference) => return Self::new(&reference.elem, paths),
@@ -37,7 +37,7 @@ impl ScxStatKind {
             }
             _ => {}
         }
-        Err(Error::new(ty.span(), "ScxStat: Unsupported element type"))
+        Err(Error::new(ty.span(), "ScxStats: Unsupported element type"))
     }
 
     pub fn can_be_dict_key(&self) -> bool {
@@ -49,19 +49,19 @@ impl ScxStatKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ScxStatData {
+pub enum ScxStatsData {
     #[serde(rename = "datum")]
-    Datum(ScxStatKind),
+    Datum(ScxStatsKind),
     #[serde(rename = "array")]
-    Array(ScxStatKind),
+    Array(ScxStatsKind),
     #[serde(rename = "dict")]
     Dict {
-        key: ScxStatKind,
-        datum: ScxStatKind,
+        key: ScxStatsKind,
+        datum: ScxStatsKind,
     },
 }
 
-impl ScxStatData {
+impl ScxStatsData {
     fn new_array(path: &Path, paths: &mut BTreeMap<String, Path>) -> syn::Result<Option<Self>> {
         if path.leading_colon.is_some() {
             return Ok(None);
@@ -88,7 +88,7 @@ impl ScxStatData {
             }
 
             match &args[0] {
-                GenericArgument::Type(ty) => Ok(Some(Self::Array(ScxStatKind::new(&ty, paths)?))),
+                GenericArgument::Type(ty) => Ok(Some(Self::Array(ScxStatsKind::new(&ty, paths)?))),
                 _ => Ok(None),
             }
         } else {
@@ -123,8 +123,8 @@ impl ScxStatData {
 
             match (&args[0], &args[1]) {
                 (GenericArgument::Type(ty0), GenericArgument::Type(ty1)) => {
-                    let kind0 = ScxStatKind::new(&ty0, paths)?;
-                    let kind1 = ScxStatKind::new(&ty1, paths)?;
+                    let kind0 = ScxStatsKind::new(&ty0, paths)?;
+                    let kind1 = ScxStatsKind::new(&ty1, paths)?;
 
                     if kind0.can_be_dict_key() {
                         Ok(Some(Self::Dict {
@@ -143,8 +143,8 @@ impl ScxStatData {
     }
 
     pub fn new(ty: &Type, paths: &mut BTreeMap<String, Path>) -> syn::Result<Self> {
-        let kind = ScxStatKind::new(ty, paths)?;
-        if let ScxStatKind::Struct(_) = &kind {
+        let kind = ScxStatsKind::new(ty, paths)?;
+        if let ScxStatsKind::Struct(_) = &kind {
             if let Type::Path(path) = ty {
                 if let Some(ar) = Self::new_array(&path.path, paths)? {
                     return Ok(ar);
@@ -159,11 +159,11 @@ impl ScxStatData {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum ScxStatAttr {
+pub enum ScxStatsAttr {
     Desc(String),
 }
 
-impl Parse for ScxStatAttr {
+impl Parse for ScxStatsAttr {
     fn parse(input: &ParseBuffer) -> syn::Result<Self> {
         let ident = input.parse::<Ident>()?;
         match ident.to_string().as_str() {
@@ -177,19 +177,19 @@ impl Parse for ScxStatAttr {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ScxStatAttrs {
+pub struct ScxStatsAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desc: Option<String>,
 }
 
-impl ScxStatAttrs {
+impl ScxStatsAttrs {
     pub fn new(attrs: &[Attribute]) -> syn::Result<Self> {
         let mut desc: Option<String> = None;
 
         for attr in attrs {
             if attr.path().is_ident("stat") {
-                match attr.parse_args::<ScxStatAttr>()? {
-                    ScxStatAttr::Desc(v) => desc = Some(v),
+                match attr.parse_args::<ScxStatsAttr>()? {
+                    ScxStatsAttr::Desc(v) => desc = Some(v),
                 }
             }
         }
@@ -199,54 +199,54 @@ impl ScxStatAttrs {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ScxStatField {
+pub struct ScxStatsField {
     pub name: String,
     #[serde(flatten)]
-    pub data: ScxStatData,
+    pub data: ScxStatsData,
     #[serde(flatten)]
-    pub attrs: ScxStatAttrs,
+    pub attrs: ScxStatsAttrs,
 }
 
-impl ScxStatField {
+impl ScxStatsField {
     pub fn new(field: &Field, paths: &mut BTreeMap<String, Path>) -> syn::Result<Self> {
         Ok(Self {
             name: field.ident.as_ref().unwrap().to_string(),
-            data: ScxStatData::new(&field.ty, paths)?,
-            attrs: ScxStatAttrs::new(&field.attrs)?,
+            data: ScxStatsData::new(&field.ty, paths)?,
+            attrs: ScxStatsAttrs::new(&field.attrs)?,
         })
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ScxStatMeta {
+pub struct ScxStatsMeta {
     pub name: String,
     pub desc: Option<String>,
-    pub fields: Vec<ScxStatField>,
+    pub fields: Vec<ScxStatsField>,
 }
 
 #[derive(Clone, Debug)]
-pub struct ScxStatMetaAux {
-    pub meta: ScxStatMeta,
+pub struct ScxStatsMetaAux {
+    pub meta: ScxStatsMeta,
     pub ident: Ident,
     pub paths: BTreeMap<String, Path>,
 }
 
-impl Parse for ScxStatMetaAux {
+impl Parse for ScxStatsMetaAux {
     fn parse(input: &ParseBuffer) -> syn::Result<Self> {
         let mut paths = BTreeMap::new();
         let mut fields = vec![];
 
         let item_struct: ItemStruct = input.parse()?;
-        let attrs = ScxStatAttrs::new(&item_struct.attrs)?;
+        let attrs = ScxStatsAttrs::new(&item_struct.attrs)?;
 
         if let Fields::Named(named_fields) = &item_struct.fields {
             for field in named_fields.named.iter() {
-                fields.push(ScxStatField::new(field, &mut paths)?);
+                fields.push(ScxStatsField::new(field, &mut paths)?);
             }
         }
 
         Ok(Self {
-            meta: ScxStatMeta {
+            meta: ScxStatsMeta {
                 name: item_struct.ident.to_string(),
                 desc: attrs.desc,
                 fields,
@@ -257,6 +257,6 @@ impl Parse for ScxStatMetaAux {
     }
 }
 
-pub trait StatMeta {
-    fn stat_meta() -> ScxStatMeta;
+pub trait StatsMeta {
+    fn stat_meta() -> ScxStatsMeta;
 }

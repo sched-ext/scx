@@ -37,10 +37,10 @@ use log::debug;
 use log::info;
 use log::trace;
 use log::warn;
-use scx_stat::ScxStatOutput;
-use scx_stat::ScxStatServer;
-use scx_stat::StatMeta;
-use scx_stat_derive::Stat;
+use scx_stats::ScxStatsOutput;
+use scx_stats::ScxStatsServer;
+use scx_stats::StatsMeta;
+use scx_stats_derive::Stats;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
@@ -1219,7 +1219,7 @@ impl Layer {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, Stat)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 struct LayerStats {
     #[stat(desc = "CPU utilization of the layer (100% means one CPU was fully occupied)")]
     util: f64,
@@ -1295,7 +1295,7 @@ struct LayerStats {
     max_nr_cpus: u32,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, Stat)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 struct SysStats {
     #[stat(desc = "Update interval")]
     intv: f64,
@@ -1592,7 +1592,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             sys_stats: sys_stats.clone(),
         };
 
-        ScxStatServer::new()
+        ScxStatsServer::new()
             .add_stat_meta(LayerStats::stat_meta())
             .add_stat_meta(SysStats::stat_meta())
             .add_stat("all", Box::new(move |_| sys_stats.lock().unwrap().output()))

@@ -1,11 +1,11 @@
-use crate::{ScxStatErrno, ScxStatRequest, ScxStatResponse};
+use crate::{ScxStatsErrno, ScxStatsRequest, ScxStatsResponse};
 use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
-pub struct ScxStatClient {
+pub struct ScxStatsClient {
     base_path: PathBuf,
     sched_path: PathBuf,
     stat_path: PathBuf,
@@ -15,7 +15,7 @@ pub struct ScxStatClient {
     reader: Option<BufReader<UnixStream>>,
 }
 
-impl ScxStatClient {
+impl ScxStatsClient {
     pub fn new() -> Self {
         Self {
             base_path: PathBuf::from("/var/run/scx"),
@@ -60,7 +60,7 @@ impl ScxStatClient {
         Ok(self)
     }
 
-    pub fn send_request<T>(&mut self, req: &ScxStatRequest) -> Result<T>
+    pub fn send_request<T>(&mut self, req: &ScxStatsRequest) -> Result<T>
     where
         T: for<'a> Deserialize<'a>,
     {
@@ -73,7 +73,7 @@ impl ScxStatClient {
 
         let mut line = String::new();
         self.reader.as_mut().unwrap().read_line(&mut line)?;
-        let mut resp: ScxStatResponse = serde_json::from_str(&line)?;
+        let mut resp: ScxStatsResponse = serde_json::from_str(&line)?;
 
         let (errno, resp) = (
             resp.errno,
@@ -81,7 +81,7 @@ impl ScxStatClient {
         );
 
         if errno != 0 {
-            Err(anyhow!("{}", &resp).context(ScxStatErrno(errno)))?;
+            Err(anyhow!("{}", &resp).context(ScxStatsErrno(errno)))?;
         }
 
         Ok(serde_json::from_value(resp)?)
@@ -91,6 +91,6 @@ impl ScxStatClient {
     where
         T: for<'a> Deserialize<'a>,
     {
-        self.send_request(&ScxStatRequest::new(req, args))
+        self.send_request(&ScxStatsRequest::new(req, args))
     }
 }

@@ -1,4 +1,4 @@
-custom_target('scx_stat',
+custom_target('scx_stats',
               output: '@PLAINNAME@.__PHONY__',
               input: 'Cargo.toml',
               command: [cargo, 'build', '--manifest-path=@INPUT@', '--target-dir=@OUTDIR@',

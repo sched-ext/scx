@@ -1,6 +1,6 @@
-workspace = { members = ["scx_stat_derive"] }
+workspace = { members = ["scx_stats_derive"] }
 [package]
-name = "scx_stat"
+name = "scx_stats"
 version = "0.1.0"
 edition = "2021"
 
@@ -14,4 +14,4 @@ serde_json = "1.0"
 syn = { version = "2.0", features = ["extra-traits", "full"] }
 
 [dev-dependencies]
-scx_stat_derive = { path = "scx_stat_derive", version = "0.1.0" }
+scx_stats_derive = { path = "scx_stats_derive", version = "0.1.0" }
