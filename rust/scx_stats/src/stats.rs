@@ -161,40 +161,48 @@ impl ScxStatsData {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ScxStatsAttr {
     Desc(String),
+    OMPrefix(String),
 }
 
 impl Parse for ScxStatsAttr {
     fn parse(input: &ParseBuffer) -> syn::Result<Self> {
         let ident = input.parse::<Ident>()?;
-        match ident.to_string().as_str() {
+        Ok(match ident.to_string().as_str() {
             "desc" => {
                 input.parse::<Token!(=)>()?;
-                Ok(Self::Desc(input.parse::<LitStr>()?.value()))
+                Self::Desc(input.parse::<LitStr>()?.value())
             }
-            _ => Err(Error::new(ident.span(), "Unknown attribute")),
-        }
+            "om_prefix" => {
+                input.parse::<Token!(=)>()?;
+                Self::OMPrefix(input.parse::<LitStr>()?.value())
+            }
+            _ => Err(Error::new(ident.span(), "Unknown attribute"))?,
+        })
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScxStatsAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub om_prefix: Option<String>,
 }
 
 impl ScxStatsAttrs {
     pub fn new(attrs: &[Attribute]) -> syn::Result<Self> {
-        let mut desc: Option<String> = None;
+        let mut sattrs: Self = Self::default();
 
         for attr in attrs {
             if attr.path().is_ident("stat") {
                 match attr.parse_args::<ScxStatsAttr>()? {
-                    ScxStatsAttr::Desc(v) => desc = Some(v),
+                    ScxStatsAttr::Desc(v) => sattrs.desc = Some(v),
+                    ScxStatsAttr::OMPrefix(v) => sattrs.om_prefix = Some(v),
                 }
             }
         }
 
-        Ok(Self { desc })
+        Ok(sattrs)
     }
 }
 
