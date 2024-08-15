@@ -3,9 +3,11 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 mod bpf_skel;
-mod monitor;
+mod stats;
 pub use bpf_skel::*;
 pub mod bpf_intf;
+use stats::LayerStats;
+use stats::SysStats;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::ffi::CString;
@@ -40,7 +42,6 @@ use log::warn;
 use scx_stats::ScxStatsOutput;
 use scx_stats::ScxStatsServer;
 use scx_stats::StatsMeta;
-use scx_stats_derive::Stats;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
@@ -1219,124 +1220,6 @@ impl Layer {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
-struct LayerStats {
-    #[stat(desc = "CPU utilization of the layer (100% means one CPU was fully occupied)")]
-    util: f64,
-    #[stat(desc = "Fraction of total CPU utilization consumed by the layer")]
-    util_frac: f64,
-    #[stat(desc = "Sum of weight * duty_cycle for tasks in the layer")]
-    load: f64,
-    #[stat(desc = "Fraction of total load consumed by the layer")]
-    load_frac: f64,
-    #[stat(desc = "Number of tasks in the layer")]
-    tasks: u32,
-    #[stat(desc = "Number of scheduling events in the layer")]
-    total: u64,
-    #[stat(desc = "% of scheduling events directly into an idle CPU")]
-    sel_local: f64,
-    #[stat(desc = "% of scheduling events enqueued to layer after wakeup")]
-    enq_wakeup: f64,
-    #[stat(desc = "% of scheduling events enqueued to layer after slice expiration")]
-    enq_expire: f64,
-    #[stat(desc = "% of scheduling events enqueued as last runnable task on CPU")]
-    enq_last: f64,
-    #[stat(desc = "% of scheduling events re-enqueued due to RT preemption")]
-    enq_reenq: f64,
-    #[stat(desc = "Number of times execution duration was shorter than min_exec_us")]
-    min_exec: f64,
-    #[stat(desc = "Total execution duration extended due to min_exec_us")]
-    min_exec_us: u64,
-    #[stat(desc = "% of scheduling events into idle CPUs occupied by other layers")]
-    open_idle: f64,
-    #[stat(desc = "% of scheduling events that preempted other tasks")]
-    preempt: f64,
-    #[stat(desc = "% of scheduling events that first-preempted other tasks")]
-    preempt_first: f64,
-    #[stat(desc = "% of scheduling events that idle-preempted other tasks")]
-    preempt_idle: f64,
-    #[stat(desc = "% of scheduling events that attempted to preempt other tasks but failed")]
-    preempt_fail: f64,
-    #[stat(
-        desc = "% of scheduling events that violated configured policies due to CPU affinity restrictions"
-    )]
-    affn_viol: f64,
-    #[stat(desc = "% of scheduling events that continued executing after slice expiration")]
-    keep: f64,
-    #[stat(
-        desc = "% of scheduling events that weren't allowed to continue executing after slice expiration due to overrunning max_exec duration limit"
-    )]
-    keep_fail_max_exec: f64,
-    #[stat(
-        desc = "% of scheduling events that weren't allowed to continue executing after slice expiration to accommodate other tasks"
-    )]
-    keep_fail_busy: f64,
-    #[stat(desc = "Whether layer is exclusive")]
-    is_excl: u32,
-    #[stat(
-        desc = "Number of times an exclusive task skipped a CPU as the sibling was also exclusive"
-    )]
-    excl_collision: f64,
-    #[stat(desc = "Number of times a sibling CPU was preempted for an exclusive task")]
-    excl_preempt: f64,
-    #[stat(desc = "% of schduling events that kicked a CPU from enqueue path")]
-    kick: f64,
-    #[stat(desc = "% of scheduling events that yielded")]
-    yielded: f64,
-    #[stat(desc = "Number of times yield was ignored")]
-    yield_ignore: u64,
-    #[stat(desc = "% of scheduling events that migrated across CPUs")]
-    migration: f64,
-    #[stat(desc = "Current # of CPUs assigned to the layer")]
-    cur_nr_cpus: u32,
-    #[stat(desc = "Minimum # of CPUs assigned to the layer")]
-    min_nr_cpus: u32,
-    #[stat(desc = "Maximum # of CPUs assigned to the layer")]
-    max_nr_cpus: u32,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
-struct SysStats {
-    #[stat(desc = "Update interval")]
-    intv: f64,
-    #[stat(desc = "Timestamp")]
-    at: u64,
-    #[stat(desc = "Total scheduling events in the period")]
-    total: u64,
-    #[stat(desc = "% that got scheduled directly into an idle CPU")]
-    local: f64,
-    #[stat(desc = "% of open layer tasks scheduled into occupied idle CPUs")]
-    open_idle: f64,
-    #[stat(desc = "% which violated configured policies due to CPU affinity restrictions")]
-    affn_viol: f64,
-    #[stat(
-        desc = "Number of times an exclusive task skipped a CPU as the sibling was also exclusive"
-    )]
-    excl_collision: f64,
-    #[stat(desc = "Number of times a sibling CPU was preempted for an exclusive task")]
-    excl_preempt: f64,
-    #[stat(
-        desc = "Number of times a CPU skipped dispatching due to sibling running an exclusive task"
-    )]
-    excl_idle: f64,
-    #[stat(
-        desc = "Number of times an idle sibling CPU was woken up after an exclusive task is finished"
-    )]
-    excl_wakeup: f64,
-    #[stat(desc = "CPU time this binary has consumed during the period")]
-    proc_ms: u64,
-    #[stat(desc = "CPU busy % (100% means all CPUs were fully occupied)")]
-    busy: f64,
-    #[stat(desc = "CPU utilization % (100% means one CPU was fully occupied)")]
-    util: f64,
-    #[stat(desc = "Sum of weight * duty_cycle for all tasks")]
-    load: f64,
-    #[stat(desc = "Fallback CPU")]
-    fallback_cpu: u32,
-    #[stat(desc = "Per-layer statistics")]
-    layers: BTreeMap<String, LayerStats>,
-}
-
 struct Scheduler<'a, 'b> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -1718,106 +1601,18 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         let processing_dur = self.processing_dur - self.prev_processing_dur;
         self.prev_processing_dur = self.processing_dur;
 
-        let lsum = |idx| stats.bpf_stats.lstats_sums[idx as usize];
-        let total = lsum(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ);
-        let lsum_pct = |idx| {
-            if total != 0 {
-                lsum(idx) as f64 / total as f64 * 100.0
-            } else {
-                0.0
-            }
-        };
-
-        let mut sys_stats = SysStats {
-            intv: self.stats_intv.as_secs_f64(),
-            at: now_monotonic(),
-            total,
-            local: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL),
-            open_idle: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE),
-            affn_viol: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL),
-            excl_collision: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION),
-            excl_preempt: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT),
-            excl_idle: bstats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_IDLE as usize] as f64
-                / total as f64,
-            excl_wakeup: bstats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_WAKEUP as usize] as f64
-                / total as f64,
-            proc_ms: processing_dur.as_millis() as u64,
-            busy: stats.cpu_busy * 100.0,
-            util: stats.total_util * 100.0,
-            load: stats.total_load,
-            fallback_cpu: self.cpu_pool.fallback_cpu as u32,
-            layers: BTreeMap::new(),
-        };
-
-        let calc_frac = |a, b| {
-            if b != 0.0 {
-                a / b * 100.0
-            } else {
-                0.0
-            }
-        };
+        let mut sys_stats = SysStats::new(
+            stats,
+            bstats,
+            &self.stats_intv,
+            &processing_dur,
+            self.cpu_pool.fallback_cpu,
+        );
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
-            let lstat = |sidx| bstats.lstats[lidx][sidx as usize];
-            let ltotal = lstat(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
-                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
-                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
-                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST)
-                + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ);
-            let lstat_pct = |sidx| {
-                if ltotal != 0 {
-                    lstat(sidx) as f64 / ltotal as f64 * 100.0
-                } else {
-                    0.0
-                }
-            };
-
-            let is_excl = match &layer.kind {
-                LayerKind::Confined { exclusive, .. }
-                | LayerKind::Grouped { exclusive, .. }
-                | LayerKind::Open { exclusive, .. } => *exclusive,
-            } as u32;
-
-            let layer_stat = LayerStats {
-                util: stats.layer_utils[lidx] * 100.0,
-                util_frac: calc_frac(stats.layer_utils[lidx], stats.total_util),
-                load: stats.layer_loads[lidx],
-                load_frac: calc_frac(stats.layer_loads[lidx], stats.total_load),
-                tasks: stats.nr_layer_tasks[lidx] as u32,
-                total: ltotal,
-                sel_local: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL),
-                enq_wakeup: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP),
-                enq_expire: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE),
-                enq_last: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST),
-                enq_reenq: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ),
-                min_exec: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC),
-                min_exec_us: (lstat(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC_NS) / 1000) as u64,
-                open_idle: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE),
-                preempt: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT),
-                preempt_first: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FIRST),
-                preempt_idle: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_IDLE),
-                preempt_fail: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FAIL),
-                affn_viol: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL),
-                keep: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP),
-                keep_fail_max_exec: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP_FAIL_MAX_EXEC),
-                keep_fail_busy: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP_FAIL_BUSY),
-                is_excl,
-                excl_collision: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION),
-                excl_preempt: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT),
-                kick: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KICK),
-                yielded: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_YIELD),
-                yield_ignore: lstat(bpf_intf::layer_stat_idx_LSTAT_YIELD_IGNORE) as u64,
-                migration: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIGRATION),
-                cur_nr_cpus: layer.cpus.count_ones() as u32,
-                min_nr_cpus: self.nr_layer_cpus_min_max[lidx].0 as u32,
-                max_nr_cpus: self.nr_layer_cpus_min_max[lidx].1 as u32,
-            };
-
-            sys_stats.layers.insert(spec.name.to_string(), layer_stat);
+            let layer_stats =
+                LayerStats::new(lidx, layer, stats, bstats, self.nr_layer_cpus_min_max[lidx]);
+            sys_stats.layers.insert(spec.name.to_string(), layer_stats);
             self.nr_layer_cpus_min_max[lidx] = (layer.nr_cpus, layer.nr_cpus);
         }
 
@@ -2061,7 +1856,7 @@ fn main() -> Result<()> {
     .context("Error setting Ctrl-C handler")?;
 
     if opts.monitor {
-        return monitor::monitor(shutdown.clone());
+        return stats::monitor(shutdown.clone());
     }
 
     if let Some(path) = &opts.example {
