@@ -257,6 +257,6 @@ impl Parse for ScxStatsMetaAux {
     }
 }
 
-pub trait StatsMeta {
-    fn stat_meta() -> ScxStatsMeta;
+pub trait Meta {
+    fn meta() -> ScxStatsMeta;
 }

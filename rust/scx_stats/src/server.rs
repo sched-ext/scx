@@ -1,4 +1,4 @@
-use crate::{ScxStatsMeta, StatsMeta};
+use crate::{Meta, ScxStatsMeta};
 use anyhow::{anyhow, Context, Result};
 use log::warn;
 use serde::{Deserialize, Serialize};
@@ -176,12 +176,12 @@ impl ScxStatsServer {
         }
     }
 
-    pub fn add_stat_meta(mut self, meta: ScxStatsMeta) -> Self {
+    pub fn add_stats_meta(mut self, meta: ScxStatsMeta) -> Self {
         self.stat_meta_holder.push(meta);
         self
     }
 
-    pub fn add_stat(
+    pub fn add_stats(
         mut self,
         name: &str,
         fetch: Box<dyn FnMut(&BTreeMap<String, String>) -> Result<serde_json::Value> + Send>,
@@ -243,15 +243,15 @@ impl ScxStatsServer {
     }
 }
 
-pub trait ScxStatsOutput {
-    fn output(&self) -> Result<serde_json::Value>;
+pub trait ToJson {
+    fn to_json(&self) -> Result<serde_json::Value>;
 }
 
-impl<T> ScxStatsOutput for T
+impl<T> ToJson for T
 where
-    T: StatsMeta + Serialize,
+    T: Meta + Serialize,
 {
-    fn output(&self) -> Result<serde_json::Value> {
+    fn to_json(&self) -> Result<serde_json::Value> {
         Ok(serde_json::to_value(self)?)
     }
 }

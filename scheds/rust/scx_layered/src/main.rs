@@ -39,9 +39,9 @@ use log::debug;
 use log::info;
 use log::trace;
 use log::warn;
-use scx_stats::ScxStatsOutput;
+use scx_stats::Meta;
 use scx_stats::ScxStatsServer;
-use scx_stats::StatsMeta;
+use scx_stats::ToJson;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
@@ -1476,9 +1476,12 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         };
 
         ScxStatsServer::new()
-            .add_stat_meta(LayerStats::stat_meta())
-            .add_stat_meta(SysStats::stat_meta())
-            .add_stat("all", Box::new(move |_| sys_stats.lock().unwrap().output()))
+            .add_stats_meta(LayerStats::meta())
+            .add_stats_meta(SysStats::meta())
+            .add_stats(
+                "all",
+                Box::new(move |_| sys_stats.lock().unwrap().to_json()),
+            )
             .launch()?;
 
         // XXX If we try to refresh the cpumasks here before attaching, we

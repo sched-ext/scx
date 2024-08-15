@@ -1,4 +1,4 @@
-use scx_stats::{ScxStatsOutput, ScxStatsServer, StatsMeta};
+use scx_stats::{ScxStatsServer, Meta, ToJson};
 use scx_stats_derive::Stats;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -31,7 +31,7 @@ struct ClusterStats {
 }
 
 fn main() {
-    let stat = ClusterStats {
+    let stats = ClusterStats {
         cls_name: "test cluster".into(),
         cls_at: 12345,
         doms_dict: BTreeMap::from([
@@ -79,9 +79,9 @@ fn main() {
 
     ScxStatsServer::new()
         .set_path(&path)
-        .add_stat_meta(ClusterStats::stat_meta())
-        .add_stat_meta(DomainStats::stat_meta())
-        .add_stat("all", Box::new(move |_| stat.output()))
+        .add_stats_meta(ClusterStats::meta())
+        .add_stats_meta(DomainStats::meta())
+        .add_stats("all", Box::new(move |_| stats.to_json()))
         .launch()
         .unwrap();
 

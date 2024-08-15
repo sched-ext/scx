@@ -5,8 +5,8 @@ use syn::spanned::Spanned;
 
 #[proc_macro_derive(Stats, attributes(stat))]
 pub fn stat(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let stat_aux = parse_macro_input!(input as ScxStatsMetaAux);
-    let (meta, ident, paths) = (stat_aux.meta, stat_aux.ident, stat_aux.paths);
+    let stats_aux = parse_macro_input!(input as ScxStatsMetaAux);
+    let (meta, ident, paths) = (stats_aux.meta, stats_aux.ident, stats_aux.paths);
 
     let mut output = proc_macro2::TokenStream::new();
 
@@ -20,7 +20,7 @@ pub fn stat(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
                     let assert_id = format_ident!("_AssertScxStatsMeta_{}", idx);
                     #[rustfmt::skip]
                     let assert = quote_spanned! {path.span()=>
-                          struct #assert_id where #path: scx_stats::StatsMeta;
+                          struct #assert_id where #path: scx_stats::Meta;
                     };
                     output.extend(assert.into_iter());
                 }
@@ -31,8 +31,8 @@ pub fn stat(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let body = serde_json::to_string(&meta).unwrap();
     let trait_body = quote! {
     #[rustfmt::skip]
-    impl scx_stats::StatsMeta for #ident {
-        fn stat_meta() -> scx_stats::ScxStatsMeta {
+    impl scx_stats::Meta for #ident {
+        fn meta() -> scx_stats::ScxStatsMeta {
             let body = #body;
             scx_stats::serde_json::from_str(body).unwrap()
         }
