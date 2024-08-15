@@ -7,10 +7,14 @@ use crate::Stats;
 use anyhow::Result;
 use log::info;
 use log::warn;
+use scx_stats::Meta;
 use scx_stats::ScxStatsClient;
+use scx_stats::ScxStatsServer;
+use scx_stats::ToJson;
 use scx_stats_derive::Stats;
 use serde::Deserialize;
 use serde::Serialize;
+use std::sync::Mutex;
 use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -376,6 +380,18 @@ fn print_sys_stats(s: &SysStats) {
             );
         }
     }
+}
+
+pub fn launch_server(sys_stats: Arc<Mutex<SysStats>>) -> Result<()> {
+    ScxStatsServer::new()
+        .add_stats_meta(LayerStats::meta())
+        .add_stats_meta(SysStats::meta())
+        .add_stats(
+            "all",
+            Box::new(move |_| sys_stats.lock().unwrap().to_json()),
+        )
+        .launch()?;
+    Ok(())
 }
 
 pub fn monitor(shutdown: Arc<AtomicBool>) -> Result<()> {
