@@ -4,6 +4,7 @@ use crate::Layer;
 use crate::LayerKind;
 use crate::Stats;
 use anyhow::Result;
+use bitvec::prelude::*;
 use chrono::DateTime;
 use chrono::Local;
 use log::warn;
@@ -110,6 +111,8 @@ pub struct LayerStats {
     pub yield_ignore: u64,
     #[stat(desc = "% of scheduling events that migrated across CPUs")]
     pub migration: f64,
+    #[stat(desc = "Mask of allocated CPUs")]
+    pub cpus: Vec<u32>,
     #[stat(desc = "Current # of CPUs assigned to the layer")]
     pub cur_nr_cpus: u32,
     #[stat(desc = "Minimum # of CPUs assigned to the layer")]
@@ -119,6 +122,22 @@ pub struct LayerStats {
 }
 
 impl LayerStats {
+    fn bitvec_to_u32s(bitvec: &BitVec) -> Vec<u32> {
+        let mut vals = Vec::<u32>::new();
+        let mut val: u32 = 0;
+        for (idx, bit) in bitvec.iter().enumerate() {
+            if idx > 0 && idx % 32 == 0 {
+                vals.push(val);
+                val = 0;
+            }
+            if *bit {
+                val |= 1 << (idx % 32);
+            }
+        }
+        vals.push(val);
+        vals
+    }
+
     pub fn new(
         lidx: usize,
         layer: &Layer,
@@ -183,6 +202,7 @@ impl LayerStats {
             yielded: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_YIELD),
             yield_ignore: lstat(bpf_intf::layer_stat_idx_LSTAT_YIELD_IGNORE) as u64,
             migration: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIGRATION),
+            cpus: Self::bitvec_to_u32s(&layer.cpus),
             cur_nr_cpus: layer.cpus.count_ones() as u32,
             min_nr_cpus: nr_cpus_range.0 as u32,
             max_nr_cpus: nr_cpus_range.1 as u32,
@@ -251,14 +271,20 @@ impl LayerStats {
             width = header_width,
         )?;
 
+        let mut cpus = self
+            .cpus
+            .iter()
+            .fold(String::new(), |string, v| format!("{}{:08x} ", string, v));
+        cpus.pop();
+
         writeln!(
             w,
-            "  {:<width$}  cpus={:3} [{:3},{:3}]",
+            "  {:<width$}  cpus={:3} [{:3},{:3}] {}",
             "",
             self.cur_nr_cpus,
             self.min_nr_cpus,
             self.max_nr_cpus,
-            //format_bitvec(&layer.cpus),
+            &cpus,
             width = header_width
         )?;
 
