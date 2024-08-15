@@ -455,14 +455,18 @@ pub fn launch_server(sys_stats: Arc<Mutex<SysStats>>) -> Result<()> {
 
 pub fn monitor(shutdown: Arc<AtomicBool>) -> Result<()> {
     let mut client = ScxStatsClient::new().connect()?;
+    let mut last_at = 0.0;
+
     while !shutdown.load(Ordering::Relaxed) {
         let sst = client.request::<SysStats>("stat", vec![])?;
-        let at = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
+        if sst.at != last_at {
+            let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
+            println!("###### {} ######", dt.to_rfc2822());
+            sst.format_all(&mut std::io::stdout())?;
+            last_at = sst.at;
+        }
 
-        println!("###### {} ######", at.to_rfc2822());
-        sst.format_all(&mut std::io::stdout())?;
-
-        std::thread::sleep(Duration::from_secs_f64(sst.intv));
+        std::thread::sleep(Duration::from_secs(1));
     }
     Ok(())
 }
