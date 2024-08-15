@@ -24,7 +24,7 @@ struct ClusterStats {
     pub at: u64,
     #[stat(desc = "some bitmap we want to report")]
     pub bitmap: Vec<u32>,
-    #[stat(desc = "domain statistics")]
+    #[stat(desc = "domain statistics", om_prefix="d_")]
     pub doms_dict: BTreeMap<usize, DomainStats>,
 }
 

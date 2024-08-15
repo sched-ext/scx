@@ -164,20 +164,34 @@ pub enum ScxStatsAttr {
     OMPrefix(String),
 }
 
-impl Parse for ScxStatsAttr {
+struct ScxStatsAttrVec {
+    attrs: Vec<ScxStatsAttr>,
+}
+
+impl Parse for ScxStatsAttrVec {
     fn parse(input: &ParseBuffer) -> syn::Result<Self> {
-        let ident = input.parse::<Ident>()?;
-        Ok(match ident.to_string().as_str() {
-            "desc" => {
-                input.parse::<Token!(=)>()?;
-                Self::Desc(input.parse::<LitStr>()?.value())
+        let mut attrs = vec![];
+        loop {
+            let ident = input.parse::<Ident>()?;
+            match ident.to_string().as_str() {
+                "desc" => {
+                    input.parse::<Token!(=)>()?;
+                    attrs.push(ScxStatsAttr::Desc(input.parse::<LitStr>()?.value()))
+                }
+                "om_prefix" => {
+                    input.parse::<Token!(=)>()?;
+                    attrs.push(ScxStatsAttr::OMPrefix(input.parse::<LitStr>()?.value()))
+                }
+                _ => Err(Error::new(ident.span(), "Unknown attribute"))?,
             }
-            "om_prefix" => {
-                input.parse::<Token!(=)>()?;
-                Self::OMPrefix(input.parse::<LitStr>()?.value())
+            if !input.is_empty() {
+                input.parse::<Token!(,)>()?;
             }
-            _ => Err(Error::new(ident.span(), "Unknown attribute"))?,
-        })
+            if input.is_empty() {
+                break;
+            }
+        }
+        Ok(Self { attrs })
     }
 }
 
@@ -195,10 +209,13 @@ impl ScxStatsAttrs {
 
         for attr in attrs {
             if attr.path().is_ident("stat") {
-                match attr.parse_args::<ScxStatsAttr>()? {
-                    ScxStatsAttr::Desc(v) => sattrs.desc = Some(v),
-                    ScxStatsAttr::OMPrefix(v) => sattrs.om_prefix = Some(v),
-                }
+		let vec = attr.parse_args::<ScxStatsAttrVec>()?;
+		for attr in vec.attrs.into_iter() {
+                    match attr {
+			ScxStatsAttr::Desc(v) => sattrs.desc = Some(v),
+			ScxStatsAttr::OMPrefix(v) => sattrs.om_prefix = Some(v),
+                    }
+		}
             }
         }
 
