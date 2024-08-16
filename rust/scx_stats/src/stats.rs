@@ -174,9 +174,9 @@ impl ScxStatsData {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ScxStatsAttr {
-    All,
+    Top,
     Desc(String),
-    FieldPrefix(String),
+    User(String, String),
 }
 
 struct ScxStatsAttrVec {
@@ -189,14 +189,24 @@ impl Parse for ScxStatsAttrVec {
         loop {
             let ident = input.parse::<Ident>()?;
             match ident.to_string().as_str() {
-                "all" => attrs.push(ScxStatsAttr::All),
+                "top" => attrs.push(ScxStatsAttr::Top),
                 "desc" => {
                     input.parse::<Token!(=)>()?;
                     attrs.push(ScxStatsAttr::Desc(input.parse::<LitStr>()?.value()))
                 }
-                "field_prefix" => {
+                key if key.starts_with("_") => {
+                    let key = &key[1..];
+                    if key.len() == 0 {
+                        Err(Error::new(
+                            ident.span(),
+                            "scx_stats: User attribute name missing",
+                        ))?
+                    }
                     input.parse::<Token!(=)>()?;
-                    attrs.push(ScxStatsAttr::FieldPrefix(input.parse::<LitStr>()?.value()))
+                    attrs.push(ScxStatsAttr::User(
+                        key.to_string(),
+                        input.parse::<LitStr>()?.value(),
+                    ))
                 }
                 _ => Err(Error::new(ident.span(), "scx_stats: Unknown attribute"))?,
             }
@@ -214,9 +224,11 @@ impl Parse for ScxStatsAttrVec {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScxStatsFieldAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub all: Option<bool>,
+    pub top: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desc: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub user: BTreeMap<String, String>,
 }
 
 impl ScxStatsFieldAttrs {
@@ -229,6 +241,9 @@ impl ScxStatsFieldAttrs {
                 for elem in vec.attrs.into_iter() {
                     match elem {
                         ScxStatsAttr::Desc(v) => fattrs.desc = Some(v),
+                        ScxStatsAttr::User(k, v) => {
+                            fattrs.user.insert(k, v);
+                        }
                         v => Err(Error::new(
                             attr.span(),
                             format!("Not a field attribute: {:?}", &v),
@@ -244,7 +259,6 @@ impl ScxStatsFieldAttrs {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScxStatsField {
-    pub name: String,
     #[serde(flatten)]
     pub data: ScxStatsData,
     #[serde(flatten)]
@@ -252,23 +266,25 @@ pub struct ScxStatsField {
 }
 
 impl ScxStatsField {
-    pub fn new(field: &Field, paths: &mut BTreeMap<String, Path>) -> syn::Result<Self> {
-        Ok(Self {
-            name: field.ident.as_ref().unwrap().to_string(),
-            data: ScxStatsData::new(&field.ty, paths)?,
-            attrs: ScxStatsFieldAttrs::new(&field.attrs)?,
-        })
+    pub fn new(field: &Field, paths: &mut BTreeMap<String, Path>) -> syn::Result<(String, Self)> {
+        Ok((
+            field.ident.as_ref().unwrap().to_string(),
+            Self {
+                data: ScxStatsData::new(&field.ty, paths)?,
+                attrs: ScxStatsFieldAttrs::new(&field.attrs)?,
+            },
+        ))
     }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScxStatsStructAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub all: Option<bool>,
+    pub top: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desc: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub field_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub user: BTreeMap<String, String>,
 }
 
 impl ScxStatsStructAttrs {
@@ -280,9 +296,11 @@ impl ScxStatsStructAttrs {
                 let vec = attr.parse_args::<ScxStatsAttrVec>()?;
                 for elem in vec.attrs.into_iter() {
                     match elem {
-                        ScxStatsAttr::All => sattrs.all = Some(true),
+                        ScxStatsAttr::Top => sattrs.top = Some(true),
                         ScxStatsAttr::Desc(v) => sattrs.desc = Some(v),
-                        ScxStatsAttr::FieldPrefix(v) => sattrs.field_prefix = Some(v),
+                        ScxStatsAttr::User(k, v) => {
+                            sattrs.user.insert(k, v);
+                        }
                     }
                 }
             }
@@ -297,7 +315,7 @@ pub struct ScxStatsMeta {
     pub name: String,
     #[serde(flatten)]
     pub attrs: ScxStatsStructAttrs,
-    pub fields: Vec<ScxStatsField>,
+    pub fields: BTreeMap<String, ScxStatsField>,
 }
 
 #[derive(Clone, Debug)]
@@ -310,21 +328,22 @@ pub struct ScxStatsMetaAux {
 impl Parse for ScxStatsMetaAux {
     fn parse(input: &ParseBuffer) -> syn::Result<Self> {
         let mut paths = BTreeMap::new();
-        let mut fields = vec![];
+        let mut fields = BTreeMap::new();
 
         let item_struct: ItemStruct = input.parse()?;
         let attrs = ScxStatsStructAttrs::new(&item_struct.attrs)?;
 
         if let Fields::Named(named_fields) = &item_struct.fields {
             for field in named_fields.named.iter() {
-                fields.push(ScxStatsField::new(field, &mut paths)?);
+                let (name, sf) = ScxStatsField::new(field, &mut paths)?;
+                fields.insert(name, sf);
             }
         }
 
         Ok(Self {
             meta: ScxStatsMeta {
                 name: item_struct.ident.to_string(),
-		attrs,
+                attrs,
                 fields,
             },
             ident: item_struct.ident,

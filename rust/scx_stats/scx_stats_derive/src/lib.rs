@@ -1,4 +1,4 @@
-use quote::{format_ident, quote, quote_spanned};
+use quote::{quote, quote_spanned};
 use scx_stats::{ScxStatsData, ScxStatsKind, ScxStatsMetaAux};
 use syn::parse_macro_input;
 use syn::spanned::Spanned;
@@ -10,17 +10,16 @@ pub fn stat(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
 
     let mut output = proc_macro2::TokenStream::new();
 
-    for (idx, field) in meta.fields.iter().enumerate() {
+    for (_fname, field) in meta.fields.iter() {
         match &field.data {
             ScxStatsData::Datum(datum)
             | ScxStatsData::Array(datum)
             | ScxStatsData::Dict { key: _, datum } => {
                 if let ScxStatsKind::Struct(name) = &datum {
                     let path = &paths[name.as_str()];
-                    let assert_id = format_ident!("_AssertScxStatsMeta_{}", idx);
                     #[rustfmt::skip]
                     let assert = quote_spanned! {path.span()=>
-                          struct #assert_id where #path: scx_stats::Meta;
+                          struct _AssertScxStatsMeta where #path: scx_stats::Meta;
                     };
                     output.extend(assert.into_iter());
                 }

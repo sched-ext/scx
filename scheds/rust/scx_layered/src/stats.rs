@@ -44,6 +44,7 @@ fn fmt_num(v: u64) -> String {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
+#[stat(_om_prefix = "l_", _om_label="layer_name")]
 pub struct LayerStats {
     #[stat(desc = "layer: CPU utilization (100% means one full CPU)")]
     pub util: f64,
@@ -303,7 +304,7 @@ impl LayerStats {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
-#[stat(all)]
+#[stat(top)]
 pub struct SysStats {
     #[stat(desc = "update interval")]
     pub intv: f64,
@@ -335,7 +336,7 @@ pub struct SysStats {
     pub load: f64,
     #[stat(desc = "fallback CPU")]
     pub fallback_cpu: u32,
-    #[stat(desc = "per-layer statistics", om_prefix = "l_")]
+    #[stat(desc = "per-layer statistics")]
     pub layers: BTreeMap<String, LayerStats>,
 }
 
@@ -433,7 +434,7 @@ pub fn launch_server(sys_stats: Arc<Mutex<SysStats>>) -> Result<()> {
         .add_stats_meta(LayerStats::meta())
         .add_stats_meta(SysStats::meta())
         .add_stats(
-            "all",
+            "top",
             Box::new(move |_| sys_stats.lock().unwrap().to_json()),
         )
         .launch()?;
