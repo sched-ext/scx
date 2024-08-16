@@ -244,7 +244,6 @@ impl ScxStatsFieldAttrs {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScxStatsField {
-    pub name: String,
     #[serde(flatten)]
     pub data: ScxStatsData,
     #[serde(flatten)]
@@ -252,12 +251,14 @@ pub struct ScxStatsField {
 }
 
 impl ScxStatsField {
-    pub fn new(field: &Field, paths: &mut BTreeMap<String, Path>) -> syn::Result<Self> {
-        Ok(Self {
-            name: field.ident.as_ref().unwrap().to_string(),
-            data: ScxStatsData::new(&field.ty, paths)?,
-            attrs: ScxStatsFieldAttrs::new(&field.attrs)?,
-        })
+    pub fn new(field: &Field, paths: &mut BTreeMap<String, Path>) -> syn::Result<(String, Self)> {
+        Ok((
+            field.ident.as_ref().unwrap().to_string(),
+            Self {
+                data: ScxStatsData::new(&field.ty, paths)?,
+                attrs: ScxStatsFieldAttrs::new(&field.attrs)?,
+            },
+        ))
     }
 }
 
@@ -297,7 +298,7 @@ pub struct ScxStatsMeta {
     pub name: String,
     #[serde(flatten)]
     pub attrs: ScxStatsStructAttrs,
-    pub fields: Vec<ScxStatsField>,
+    pub fields: BTreeMap<String, ScxStatsField>,
 }
 
 #[derive(Clone, Debug)]
@@ -310,21 +311,22 @@ pub struct ScxStatsMetaAux {
 impl Parse for ScxStatsMetaAux {
     fn parse(input: &ParseBuffer) -> syn::Result<Self> {
         let mut paths = BTreeMap::new();
-        let mut fields = vec![];
+        let mut fields = BTreeMap::new();
 
         let item_struct: ItemStruct = input.parse()?;
         let attrs = ScxStatsStructAttrs::new(&item_struct.attrs)?;
 
         if let Fields::Named(named_fields) = &item_struct.fields {
             for field in named_fields.named.iter() {
-                fields.push(ScxStatsField::new(field, &mut paths)?);
+                let (name, sf) = ScxStatsField::new(field, &mut paths)?;
+                fields.insert(name, sf);
             }
         }
 
         Ok(Self {
             meta: ScxStatsMeta {
                 name: item_struct.ident.to_string(),
-		attrs,
+                attrs,
                 fields,
             },
             ident: item_struct.ident,
