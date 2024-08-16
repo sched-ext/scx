@@ -444,7 +444,7 @@ pub fn monitor(shutdown: Arc<AtomicBool>) -> Result<()> {
     let mut last_at = 0.0;
 
     while !shutdown.load(Ordering::Relaxed) {
-        let sst = client.request::<SysStats>("stat", vec![])?;
+        let sst = client.request::<SysStats>("stats", vec![])?;
         if sst.at != last_at {
             let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
             println!("###### {} ######", dt.to_rfc2822());

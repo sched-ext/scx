@@ -51,8 +51,8 @@ impl std::fmt::Debug for ScxStatsErrno {
 }
 
 struct ScxStatsServerData {
-    stat_meta: Vec<ScxStatsMeta>,
-    stat: StatMap,
+    stats_meta: Vec<ScxStatsMeta>,
+    stats: StatMap,
 }
 
 struct ScxStatsServerInner {
@@ -61,10 +61,10 @@ struct ScxStatsServerInner {
 }
 
 impl ScxStatsServerInner {
-    fn new(listener: UnixListener, stat_meta: Vec<ScxStatsMeta>, stat: StatMap) -> Self {
+    fn new(listener: UnixListener, stats_meta: Vec<ScxStatsMeta>, stats: StatMap) -> Self {
         Self {
             listener,
-            data: Arc::new(Mutex::new(ScxStatsServerData { stat_meta, stat })),
+            data: Arc::new(Mutex::new(ScxStatsServerData { stats_meta, stats })),
         }
     }
 
@@ -87,13 +87,13 @@ impl ScxStatsServerInner {
         let req: ScxStatsRequest = serde_json::from_str(&line)?;
 
         match req.req.as_str() {
-            "stat" => {
+            "stats" => {
                 let target = match req.args.get("target") {
                     Some(v) => v,
                     None => "all",
                 };
 
-                let handler = match data.lock().unwrap().stat.get(target) {
+                let handler = match data.lock().unwrap().stats.get(target) {
                     Some(v) => v.clone(),
                     None => Err(anyhow!("unknown stat target {:?}", req)
                         .context(ScxStatsErrno(libc::EINVAL)))?,
@@ -103,7 +103,7 @@ impl ScxStatsServerInner {
 
                 Self::build_resp(0, &resp)
             }
-            "stat_meta" => Ok(Self::build_resp(0, &data.lock().unwrap().stat_meta)?),
+            "stats_meta" => Ok(Self::build_resp(0, &data.lock().unwrap().stats_meta)?),
             req => Err(anyhow!("unknown command {:?}", req).context(ScxStatsErrno(libc::EINVAL)))?,
         }
     }
@@ -156,11 +156,11 @@ impl ScxStatsServerInner {
 pub struct ScxStatsServer {
     base_path: PathBuf,
     sched_path: PathBuf,
-    stat_path: PathBuf,
+    stats_path: PathBuf,
     path: Option<PathBuf>,
 
-    stat_meta_holder: Vec<ScxStatsMeta>,
-    stat_holder: StatMap,
+    stats_meta_holder: Vec<ScxStatsMeta>,
+    stats_holder: StatMap,
 }
 
 impl ScxStatsServer {
@@ -168,16 +168,16 @@ impl ScxStatsServer {
         Self {
             base_path: PathBuf::from("/var/run/scx"),
             sched_path: PathBuf::from("root"),
-            stat_path: PathBuf::from("stat"),
+            stats_path: PathBuf::from("stats"),
             path: None,
 
-            stat_meta_holder: vec![],
-            stat_holder: BTreeMap::new(),
+            stats_meta_holder: vec![],
+            stats_holder: BTreeMap::new(),
         }
     }
 
     pub fn add_stats_meta(mut self, meta: ScxStatsMeta) -> Self {
-        self.stat_meta_holder.push(meta);
+        self.stats_meta_holder.push(meta);
         self
     }
 
@@ -186,7 +186,7 @@ impl ScxStatsServer {
         name: &str,
         fetch: Box<dyn FnMut(&BTreeMap<String, String>) -> Result<serde_json::Value> + Send>,
     ) -> Self {
-        self.stat_holder
+        self.stats_holder
             .insert(name.to_string(), Arc::new(Mutex::new(Box::new(fetch))));
         self
     }
@@ -201,8 +201,8 @@ impl ScxStatsServer {
         self
     }
 
-    pub fn set_stat_path<P: AsRef<Path>>(mut self, path: P) -> Self {
-        self.stat_path = PathBuf::from(path.as_ref());
+    pub fn set_stats_path<P: AsRef<Path>>(mut self, path: P) -> Self {
+        self.stats_path = PathBuf::from(path.as_ref());
         self
     }
 
@@ -213,7 +213,7 @@ impl ScxStatsServer {
 
     pub fn launch(mut self) -> Result<Self> {
         if self.path.is_none() {
-            self.path = Some(self.base_path.join(&self.sched_path).join(&self.stat_path));
+            self.path = Some(self.base_path.join(&self.sched_path).join(&self.stats_path));
         }
         let path = &self.path.as_ref().unwrap();
 
@@ -231,12 +231,12 @@ impl ScxStatsServer {
         let listener =
             UnixListener::bind(path).with_context(|| format!("creating UNIX socket {:?}", path))?;
 
-        let mut stat_meta = vec![];
-        let mut stat = BTreeMap::new();
-        std::mem::swap(&mut stat_meta, &mut self.stat_meta_holder);
-        std::mem::swap(&mut stat, &mut self.stat_holder);
+        let mut stats_meta = vec![];
+        let mut stats = BTreeMap::new();
+        std::mem::swap(&mut stats_meta, &mut self.stats_meta_holder);
+        std::mem::swap(&mut stats, &mut self.stats_holder);
 
-        let inner = ScxStatsServerInner::new(listener, stat_meta, stat);
+        let inner = ScxStatsServerInner::new(listener, stats_meta, stats);
 
         spawn(move || inner.listen());
         Ok(self)
