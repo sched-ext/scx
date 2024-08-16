@@ -303,6 +303,7 @@ impl LayerStats {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
+#[stat(all)]
 pub struct SysStats {
     #[stat(desc = "update interval")]
     pub intv: f64,

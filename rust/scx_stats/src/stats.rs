@@ -10,10 +10,15 @@ use syn::{
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ScxStatsKind {
+    #[serde(rename = "i64")]
     I64,
+    #[serde(rename = "u64")]
     U64,
+    #[serde(rename = "float")]
     Float,
+    #[serde(rename = "string")]
     String,
+    #[serde(rename = "struct")]
     Struct(String),
 }
 
@@ -160,6 +165,7 @@ impl ScxStatsData {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ScxStatsAttr {
+    All,
     Desc(String),
     OMPrefix(String),
 }
@@ -174,6 +180,7 @@ impl Parse for ScxStatsAttrVec {
         loop {
             let ident = input.parse::<Ident>()?;
             match ident.to_string().as_str() {
+                "all" => attrs.push(ScxStatsAttr::All),
                 "desc" => {
                     input.parse::<Token!(=)>()?;
                     attrs.push(ScxStatsAttr::Desc(input.parse::<LitStr>()?.value()))
@@ -198,6 +205,8 @@ impl Parse for ScxStatsAttrVec {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScxStatsAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desc: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub om_prefix: Option<String>,
@@ -209,13 +218,14 @@ impl ScxStatsAttrs {
 
         for attr in attrs {
             if attr.path().is_ident("stat") {
-		let vec = attr.parse_args::<ScxStatsAttrVec>()?;
-		for attr in vec.attrs.into_iter() {
+                let vec = attr.parse_args::<ScxStatsAttrVec>()?;
+                for attr in vec.attrs.into_iter() {
                     match attr {
-			ScxStatsAttr::Desc(v) => sattrs.desc = Some(v),
-			ScxStatsAttr::OMPrefix(v) => sattrs.om_prefix = Some(v),
+                        ScxStatsAttr::All => sattrs.all = Some(true),
+                        ScxStatsAttr::Desc(v) => sattrs.desc = Some(v),
+                        ScxStatsAttr::OMPrefix(v) => sattrs.om_prefix = Some(v),
                     }
-		}
+                }
             }
         }
 
@@ -245,6 +255,9 @@ impl ScxStatsField {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScxStatsMeta {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desc: Option<String>,
     pub fields: Vec<ScxStatsField>,
 }
@@ -273,6 +286,7 @@ impl Parse for ScxStatsMetaAux {
         Ok(Self {
             meta: ScxStatsMeta {
                 name: item_struct.ident.to_string(),
+                all: attrs.all,
                 desc: attrs.desc,
                 fields,
             },
