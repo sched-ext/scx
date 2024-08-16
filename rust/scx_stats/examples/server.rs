@@ -8,7 +8,7 @@ use std::io::Read;
 // DomainStat and ClusterStat definitions must match the ones in client.rs.
 //
 #[derive(Clone, Debug, Serialize, Deserialize, Stats)]
-#[stat(desc = "domain statistics", field_prefix="d_")]
+#[stat(desc = "domain statistics", _om_prefix="d_", _om_label="domain_name")]
 struct DomainStats {
     pub name: String,
     #[stat(desc = "an event counter")]

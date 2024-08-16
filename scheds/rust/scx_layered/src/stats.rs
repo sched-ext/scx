@@ -335,7 +335,7 @@ pub struct SysStats {
     pub load: f64,
     #[stat(desc = "fallback CPU")]
     pub fallback_cpu: u32,
-    #[stat(desc = "per-layer statistics", om_prefix = "l_")]
+    #[stat(desc = "per-layer statistics")]
     pub layers: BTreeMap<String, LayerStats>,
 }
 
