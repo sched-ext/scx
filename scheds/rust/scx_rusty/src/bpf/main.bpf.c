@@ -1097,7 +1097,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 	if (!(p_cpumask = taskc->cpumask)) {
-		scx_bpf_error("NULL cpmask");
+		scx_bpf_error("NULL cpumask");
 		return;
 	}
 
