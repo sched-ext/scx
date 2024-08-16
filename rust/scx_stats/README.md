@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Stats)]
-#[stat(desc = "domain statistics")]
+#[stat(desc = "domain statistics", _om_prefix="d_", _om_label="domain_name")]
 struct DomainStats {
     pub name: String,
     #[stat(desc = "an event counter")]
@@ -39,14 +39,14 @@ struct DomainStats {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Stats)]
-#[stat(desc = "cluster statistics")]
+#[stat(desc = "cluster statistics", top)]
 struct ClusterStats {
     pub name: String,
     #[stat(desc = "update timestamp")]
     pub at: u64,
     #[stat(desc = "some bitmap we want to report")]
     pub bitmap: Vec<u32>,
-    #[stat(desc = "domain statistics", om_prefix="d_")]
+    #[stat(desc = "domain statistics")]
     pub doms_dict: BTreeMap<usize, DomainStats>,
 }
 ```
@@ -68,18 +68,18 @@ socket can be launched as follows:
         .set_path(&path)
         .add_stats_meta(ClusterStats::meta())
         .add_stats_meta(DomainStats::meta())
-        .add_stats("all", Box::new(move |_| stats.to_json()))
+        .add_stats("top", Box::new(move |_| stats.to_json()))
         .launch()
         .unwrap();
 ```
 
-The `stat_stats::Meta::meta()` trait function is automatically implemented
-by the `scx_stats::Meta` derive macro for each statistics struct. Adding
-them to the statistics server allows implementing generic clients which
-don't have the definitions of the statistics structs - e.g. to relay the
+The `scx_stats::Meta::meta()` trait function is automatically implemented by
+the `scx_stats::Meta` derive macro for each statistics struct. Adding them
+to the statistics server allows implementing generic clients which don't
+have the definitions of the statistics structs - e.g. to relay the
 statistics to another framework such as OpenMetrics.
 
-`all` is the default statistics reported when no specific target is
+`top` is the default statistics reported when no specific target is
 specified and should always be added to the server. The closure should
 return `serde_json::Value`. Note that `scx_stats::ToJson` automatically adds
 `.to_json()` to structs which implement both `scx_stats::Meta` and
@@ -100,11 +100,11 @@ The above creates a client instance. Let's query the statistics:
     println!("{:#?}", &resp);
 ```
 
-The above is equivalent to querying the `all` target:
+The above is equivalent to querying the `top` target:
 
 ```rust
-    println!("\n===== Requesting \"stat\" with \"target\"=\"all\":");
-    let resp = client.request::<ClusterStats>("stat", vec![("target".into(), "all".into())]);
+    println!("\n===== Requesting \"stat\" with \"target\"=\"top\":");
+    let resp = client.request::<ClusterStats>("stat", vec![("target".into(), "top".into())]);
     println!("{:#?}", &resp);
 ```
 
@@ -197,7 +197,7 @@ Press any key to exit.
 $ RUST_LOG=trace cargo run --example client -- ~/tmp/socket
 ...
 ===== Requesting "stats" but receiving with serde_json::Value:
-2024-08-15T22:13:23.769Z TRACE [scx_stats::client] Sending: {"req":"stats","args":{"target":"all"}}
+2024-08-15T22:13:23.769Z TRACE [scx_stats::client] Sending: {"req":"stats","args":{"target":"top"}}
 2024-08-15T22:13:23.769Z TRACE [scx_stats::client] Received: {"errno":0,"args":{"resp":{"at":12345,"bitmap":[3735928559,3203391149],"doms_dict":{"0":{"events":1234,"name":"domain 0","pressure":1.234},"3":{"events":5678,"name":"domain 3","pressure":5.678}},"name":"test cluster"}}}
 Ok(
     Object {

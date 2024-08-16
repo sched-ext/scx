@@ -304,7 +304,7 @@ impl LayerStats {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
-#[stat(all)]
+#[stat(top)]
 pub struct SysStats {
     #[stat(desc = "update interval")]
     pub intv: f64,
@@ -434,7 +434,7 @@ pub fn launch_server(sys_stats: Arc<Mutex<SysStats>>) -> Result<()> {
         .add_stats_meta(LayerStats::meta())
         .add_stats_meta(SysStats::meta())
         .add_stats(
-            "all",
+            "top",
             Box::new(move |_| sys_stats.lock().unwrap().to_json()),
         )
         .launch()?;

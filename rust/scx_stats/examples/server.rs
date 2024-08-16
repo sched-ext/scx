@@ -5,29 +5,8 @@ use std::collections::BTreeMap;
 use std::env::args;
 use std::io::Read;
 
-// DomainStat and ClusterStat definitions must match the ones in client.rs.
-//
-#[derive(Clone, Debug, Serialize, Deserialize, Stats)]
-#[stat(desc = "domain statistics", _om_prefix="d_", _om_label="domain_name")]
-struct DomainStats {
-    pub name: String,
-    #[stat(desc = "an event counter")]
-    pub events: u64,
-    #[stat(desc = "a gauge number")]
-    pub pressure: f64,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Stats)]
-#[stat(desc = "cluster statistics", all)]
-struct ClusterStats {
-    pub name: String,
-    #[stat(desc = "update timestamp")]
-    pub at: u64,
-    #[stat(desc = "some bitmap we want to report")]
-    pub bitmap: Vec<u32>,
-    #[stat(desc = "domain statistics")]
-    pub doms_dict: BTreeMap<usize, DomainStats>,
-}
+// Hacky definition sharing. See stats_def.rs.h.
+include!("stats_defs.rs.h");
 
 fn main() {
     let stats = ClusterStats {
@@ -61,7 +40,7 @@ fn main() {
         .set_path(&path)
         .add_stats_meta(ClusterStats::meta())
         .add_stats_meta(DomainStats::meta())
-        .add_stats("all", Box::new(move |_| stats.to_json()))
+        .add_stats("top", Box::new(move |_| stats.to_json()))
         .launch()
         .unwrap();
 

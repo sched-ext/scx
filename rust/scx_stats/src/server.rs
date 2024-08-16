@@ -94,7 +94,7 @@ impl ScxStatsServerInner {
             "stats" => {
                 let target = match req.args.get("target") {
                     Some(v) => v,
-                    None => "all",
+                    None => "top",
                 };
 
                 let handler = match data.lock().unwrap().stats.get(target) {

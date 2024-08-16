@@ -174,7 +174,7 @@ impl ScxStatsData {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ScxStatsAttr {
-    All,
+    Top,
     Desc(String),
     User(String, String),
 }
@@ -189,7 +189,7 @@ impl Parse for ScxStatsAttrVec {
         loop {
             let ident = input.parse::<Ident>()?;
             match ident.to_string().as_str() {
-                "all" => attrs.push(ScxStatsAttr::All),
+                "top" => attrs.push(ScxStatsAttr::Top),
                 "desc" => {
                     input.parse::<Token!(=)>()?;
                     attrs.push(ScxStatsAttr::Desc(input.parse::<LitStr>()?.value()))
@@ -224,7 +224,7 @@ impl Parse for ScxStatsAttrVec {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScxStatsFieldAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub all: Option<bool>,
+    pub top: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desc: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -280,7 +280,7 @@ impl ScxStatsField {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ScxStatsStructAttrs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub all: Option<bool>,
+    pub top: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desc: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -296,7 +296,7 @@ impl ScxStatsStructAttrs {
                 let vec = attr.parse_args::<ScxStatsAttrVec>()?;
                 for elem in vec.attrs.into_iter() {
                     match elem {
-                        ScxStatsAttr::All => sattrs.all = Some(true),
+                        ScxStatsAttr::Top => sattrs.top = Some(true),
                         ScxStatsAttr::Desc(v) => sattrs.desc = Some(v),
                         ScxStatsAttr::User(k, v) => {
                             sattrs.user.insert(k, v);
