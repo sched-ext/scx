@@ -123,7 +123,7 @@ No additional steps needed here other than what is mentioned in the main README.
 
 ## Nix
 
-(Chaotic Nyx)[https://github.com/chaotic-cx/nyx] is maintaining the linux-cachyos kernel and scx-scheds package in a flake.
+[Chaotic Nyx](https://github.com/chaotic-cx/nyx) is maintaining the linux-cachyos kernel and scx-scheds package in a flake.
 
 #### Integrate the repository using flake
 
