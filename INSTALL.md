@@ -93,42 +93,29 @@ $ sudo pacman -Sy linux-cachyos-sched-ext-debug linux-cachyos-sched-ext-debug-he
 
 ## Fedora
 
-Experimental sched_ext support for Fedora is provided by the following
-copr project:
-
- https://copr.fedorainfracloud.org/coprs/jordalgo/fedora-6.8-sched_ext/
+CachyOS provides a [community-maintained copr repository](https://copr.fedorainfracloud.org/coprs/bieszczaders/kernel-cachyos) for
+CachyOS kernels which has sched-ext support.
 
 #### Installing the Kernel
 
-```
-$ sudo dnf copr enable jordalgo/fedora-6.8-sched_ext
-$ sudo dnf --disablerepo="*" --enablerepo="copr:copr.fedorainfracloud.org:jordalgo:fedora-6.8-sched_ext" upgrade kernel
+```sh
+$ sudo dnf copr enable bieszczaders/kernel-cachyos
+$ sudo dnf install kernel-cachyos kernel-cachyos-devel-matched
+$ sudo setsebool -P domain_kernel_load_modules on # Necessary for loading kernel modules
 $ sudo reboot
 ```
 
-Then select the kernel containing the name "schedext".
-
 #### Installing the Schedulers
 
-- [scx_rusty](https://src.fedoraproject.org/rpms/rust-scx_rusty)
-- [scx_layered](https://src.fedoraproject.org/rpms/rust-scx_layered)
-- [scx_rustland](https://src.fedoraproject.org/rpms/rust-scx_rustland)
-- [scx_c_schedulers](https://src.fedoraproject.org/rpms/scx_c_schedulers) that include:
-  - scx_central
-  - scx_flatcg
-  - scx_nest
-  - scx_pair
-  - scx_qmap
-  - scx_simple
-  - scx_userland
+The schedulers package is hosted in [another copr](https://copr.fedorainfracloud.org/coprs/bieszczaders/kernel-cachyos-addons)
+also maintained by the CachyOS community.
 
-Example:
+```sh
+$ sudo dnf copr enable bieszczaders/kernel-cachyos-addons
+$ sudo dnf install scx-scheds
 ```
-$ sudo dnf install scx_rusty
-$ sudo scx_rusty
-$ sudo dnf install scx_c_schedulers
-$ sudo scx_simple
-```
+
+Alternatively, we also provide a `-git` package that is synced daily to match the upstream repository.
 
 #### Setting up Dev Environment
 
@@ -136,7 +123,7 @@ No additional steps needed here other than what is mentioned in the main README.
 
 ## Nix
 
-(Chaotic Nyx)[https://github.com/chaotic-cx/nyx] is maintaining the linux-cachyos kernel and scx-scheds package in a flake.
+[Chaotic Nyx](https://github.com/chaotic-cx/nyx) is maintaining the linux-cachyos kernel and scx-scheds package in a flake.
 
 #### Integrate the repository using flake
 
