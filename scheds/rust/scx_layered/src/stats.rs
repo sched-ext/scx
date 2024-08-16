@@ -90,7 +90,7 @@ pub struct LayerStats {
     pub keep_fail_max_exec: f64,
     #[stat(desc = "layer: % disallowed to continue executing due to other tasks")]
     pub keep_fail_busy: f64,
-    #[stat(desc = "layer: whether is exclusive")]
+    #[stat(desc = "layer: whether is exclusive", _om_skip)]
     pub is_excl: u32,
     #[stat(desc = "layer: # times an excl task skipped a CPU as the sibling was also excl")]
     pub excl_collision: f64,
@@ -104,7 +104,7 @@ pub struct LayerStats {
     pub yield_ignore: u64,
     #[stat(desc = "layer: % migrated across CPUs")]
     pub migration: f64,
-    #[stat(desc = "layer: mask of allocated CPUs")]
+    #[stat(desc = "layer: mask of allocated CPUs", _om_skip)]
     pub cpus: Vec<u32>,
     #[stat(desc = "layer: # of CPUs assigned")]
     pub cur_nr_cpus: u32,
@@ -306,9 +306,9 @@ impl LayerStats {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct SysStats {
-    #[stat(desc = "update interval")]
+    #[stat(desc = "update interval", _om_skip)]
     pub intv: f64,
-    #[stat(desc = "timestamp")]
+    #[stat(desc = "timestamp", _om_skip)]
     pub at: f64,
     #[stat(desc = "# sched events duringg the period")]
     pub total: u64,
