@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 pub struct ScxStatsClient {
     base_path: PathBuf,
     sched_path: PathBuf,
-    stat_path: PathBuf,
+    stats_path: PathBuf,
     path: Option<PathBuf>,
 
     stream: Option<UnixStream>,
@@ -21,7 +21,7 @@ impl ScxStatsClient {
         Self {
             base_path: PathBuf::from("/var/run/scx"),
             sched_path: PathBuf::from("root"),
-            stat_path: PathBuf::from("stat"),
+            stats_path: PathBuf::from("stats"),
             path: None,
 
             stream: None,
@@ -39,8 +39,8 @@ impl ScxStatsClient {
         self
     }
 
-    pub fn set_stat_path<P: AsRef<Path>>(mut self, path: P) -> Self {
-        self.stat_path = PathBuf::from(path.as_ref());
+    pub fn set_stats_path<P: AsRef<Path>>(mut self, path: P) -> Self {
+        self.stats_path = PathBuf::from(path.as_ref());
         self
     }
 
@@ -51,7 +51,7 @@ impl ScxStatsClient {
 
     pub fn connect(mut self) -> Result<Self> {
         if self.path.is_none() {
-            self.path = Some(self.base_path.join(&self.sched_path).join(&self.stat_path));
+            self.path = Some(self.base_path.join(&self.sched_path).join(&self.stats_path));
         }
         let path = &self.path.as_ref().unwrap();
 

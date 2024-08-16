@@ -2,8 +2,8 @@ pub use serde_json;
 
 mod stats;
 pub use stats::{
-    Meta, ScxStatsAttr, ScxStatsAttrs, ScxStatsData, ScxStatsField, ScxStatsKind, ScxStatsMeta,
-    ScxStatsMetaAux,
+    Meta, ScxStatsAttr, ScxStatsData, ScxStatsField, ScxStatsFieldAttrs, ScxStatsKind,
+    ScxStatsMeta, ScxStatsMetaAux, ScxStatsStructAttrs,
 };
 
 mod server;

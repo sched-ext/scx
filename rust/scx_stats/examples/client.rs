@@ -7,7 +7,7 @@ use std::env::args;
 // DomainStat and ClusterStat definitions must match the ones in server.rs.
 //
 #[derive(Clone, Debug, Serialize, Deserialize, Stats)]
-#[stat(desc = "domain statistics")]
+#[stat(desc = "domain statistics", field_prefix="d_")]
 struct DomainStats {
     pub name: String,
     #[stat(desc = "an event counter")]
@@ -17,7 +17,7 @@ struct DomainStats {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Stats)]
-#[stat(desc = "cluster statistics")]
+#[stat(desc = "cluster statistics", all)]
 struct ClusterStats {
     pub name: String,
     #[stat(desc = "update timestamp")]
@@ -40,28 +40,28 @@ fn main() {
 
     let mut client = ScxStatsClient::new().set_path(path).connect().unwrap();
 
-    println!("===== Requesting \"stat_meta\":");
-    let resp = client.request::<Vec<ScxStatsMeta>>("stat_meta", vec![]);
+    println!("===== Requesting \"stats_meta\":");
+    let resp = client.request::<Vec<ScxStatsMeta>>("stats_meta", vec![]);
     println!("{:#?}", &resp);
 
-    println!("\n===== Requesting \"stat\" without arguments:");
-    let resp = client.request::<ClusterStats>("stat", vec![]);
+    println!("\n===== Requesting \"stats\" without arguments:");
+    let resp = client.request::<ClusterStats>("stats", vec![]);
     println!("{:#?}", &resp);
 
-    println!("\n===== Requesting \"stat\" with \"target\"=\"non-existent\":");
+    println!("\n===== Requesting \"stats\" with \"target\"=\"non-existent\":");
     let resp =
-        client.request::<ClusterStats>("stat", vec![("target".into(), "non-existent".into())]);
+        client.request::<ClusterStats>("stats", vec![("target".into(), "non-existent".into())]);
     println!("{:#?}", &resp);
 
-    println!("\n===== Requesting \"stat\" with \"target\"=\"all\":");
-    let resp = client.request::<ClusterStats>("stat", vec![("target".into(), "all".into())]);
+    println!("\n===== Requesting \"stats\" with \"target\"=\"all\":");
+    let resp = client.request::<ClusterStats>("stats", vec![("target".into(), "all".into())]);
     println!("{:#?}", &resp);
 
-    println!("\n===== Requesting \"stat_meta\" but receiving with serde_json::Value:");
-    let resp = client.request::<serde_json::Value>("stat_meta", vec![]);
+    println!("\n===== Requesting \"stats_meta\" but receiving with serde_json::Value:");
+    let resp = client.request::<serde_json::Value>("stats_meta", vec![]);
     println!("{:#?}", &resp);
 
-    println!("\n===== Requesting \"stat\" but receiving with serde_json::Value:");
-    let resp = client.request::<serde_json::Value>("stat", vec![("target".into(), "all".into())]);
+    println!("\n===== Requesting \"stats\" but receiving with serde_json::Value:");
+    let resp = client.request::<serde_json::Value>("stats", vec![("target".into(), "all".into())]);
     println!("{:#?}", &resp);
 }

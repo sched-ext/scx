@@ -10,10 +10,15 @@ use syn::{
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ScxStatsKind {
+    #[serde(rename = "i64")]
     I64,
+    #[serde(rename = "u64")]
     U64,
+    #[serde(rename = "float")]
     Float,
+    #[serde(rename = "string")]
     String,
+    #[serde(rename = "struct")]
     Struct(String),
 }
 
@@ -37,7 +42,7 @@ impl ScxStatsKind {
             }
             _ => {}
         }
-        Err(Error::new(ty.span(), "ScxStats: Unsupported element type"))
+        Err(Error::new(ty.span(), "scx_stats: Unsupported element type"))
     }
 
     pub fn can_be_dict_key(&self) -> bool {
@@ -84,7 +89,10 @@ impl ScxStatsData {
         if let PathArguments::AngleBracketed(ab) = &path.segments.last().unwrap().arguments {
             let args = &ab.args;
             if args.len() < 1 {
-                return Err(Error::new(args.span(), "T generic argument missing"));
+                return Err(Error::new(
+                    args.span(),
+                    "scx_stats: T generic argument missing",
+                ));
             }
 
             match &args[0] {
@@ -118,7 +126,10 @@ impl ScxStatsData {
         if let PathArguments::AngleBracketed(ab) = &path.segments.last().unwrap().arguments {
             let args = &ab.args;
             if args.len() < 2 {
-                return Err(Error::new(args.span(), "K, V generic arguments missing"));
+                return Err(Error::new(
+                    args.span(),
+                    "scx_stats: K, V generic arguments missing",
+                ));
             }
 
             match (&args[0], &args[1]) {
@@ -132,7 +143,10 @@ impl ScxStatsData {
                             datum: kind1,
                         }))
                     } else {
-                        Err(Error::new(ty0.span(), "K must be an integer or String"))
+                        Err(Error::new(
+                            ty0.span(),
+                            "scx_stats: K must be an integer or String",
+                        ))
                     }
                 }
                 _ => Ok(None),
@@ -160,41 +174,71 @@ impl ScxStatsData {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ScxStatsAttr {
+    All,
     Desc(String),
+    FieldPrefix(String),
 }
 
-impl Parse for ScxStatsAttr {
+struct ScxStatsAttrVec {
+    attrs: Vec<ScxStatsAttr>,
+}
+
+impl Parse for ScxStatsAttrVec {
     fn parse(input: &ParseBuffer) -> syn::Result<Self> {
-        let ident = input.parse::<Ident>()?;
-        match ident.to_string().as_str() {
-            "desc" => {
-                input.parse::<Token!(=)>()?;
-                Ok(Self::Desc(input.parse::<LitStr>()?.value()))
+        let mut attrs = vec![];
+        loop {
+            let ident = input.parse::<Ident>()?;
+            match ident.to_string().as_str() {
+                "all" => attrs.push(ScxStatsAttr::All),
+                "desc" => {
+                    input.parse::<Token!(=)>()?;
+                    attrs.push(ScxStatsAttr::Desc(input.parse::<LitStr>()?.value()))
+                }
+                "field_prefix" => {
+                    input.parse::<Token!(=)>()?;
+                    attrs.push(ScxStatsAttr::FieldPrefix(input.parse::<LitStr>()?.value()))
+                }
+                _ => Err(Error::new(ident.span(), "scx_stats: Unknown attribute"))?,
             }
-            _ => Err(Error::new(ident.span(), "Unknown attribute")),
+            if !input.is_empty() {
+                input.parse::<Token!(,)>()?;
+            }
+            if input.is_empty() {
+                break;
+            }
         }
+        Ok(Self { attrs })
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ScxStatsAttrs {
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ScxStatsFieldAttrs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desc: Option<String>,
 }
 
-impl ScxStatsAttrs {
+impl ScxStatsFieldAttrs {
     pub fn new(attrs: &[Attribute]) -> syn::Result<Self> {
-        let mut desc: Option<String> = None;
+        let mut fattrs: Self = Self::default();
 
         for attr in attrs {
             if attr.path().is_ident("stat") {
-                match attr.parse_args::<ScxStatsAttr>()? {
-                    ScxStatsAttr::Desc(v) => desc = Some(v),
+                let vec = attr.parse_args::<ScxStatsAttrVec>()?;
+                for elem in vec.attrs.into_iter() {
+                    match elem {
+                        ScxStatsAttr::Desc(v) => fattrs.desc = Some(v),
+                        v => Err(Error::new(
+                            attr.span(),
+                            format!("Not a field attribute: {:?}", &v),
+                        ))?,
+                    }
                 }
             }
         }
 
-        Ok(Self { desc })
+        Ok(fattrs)
     }
 }
 
@@ -204,7 +248,7 @@ pub struct ScxStatsField {
     #[serde(flatten)]
     pub data: ScxStatsData,
     #[serde(flatten)]
-    pub attrs: ScxStatsAttrs,
+    pub attrs: ScxStatsFieldAttrs,
 }
 
 impl ScxStatsField {
@@ -212,15 +256,47 @@ impl ScxStatsField {
         Ok(Self {
             name: field.ident.as_ref().unwrap().to_string(),
             data: ScxStatsData::new(&field.ty, paths)?,
-            attrs: ScxStatsAttrs::new(&field.attrs)?,
+            attrs: ScxStatsFieldAttrs::new(&field.attrs)?,
         })
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ScxStatsStructAttrs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_prefix: Option<String>,
+}
+
+impl ScxStatsStructAttrs {
+    pub fn new(attrs: &[Attribute]) -> syn::Result<Self> {
+        let mut sattrs: Self = Self::default();
+
+        for attr in attrs {
+            if attr.path().is_ident("stat") {
+                let vec = attr.parse_args::<ScxStatsAttrVec>()?;
+                for elem in vec.attrs.into_iter() {
+                    match elem {
+                        ScxStatsAttr::All => sattrs.all = Some(true),
+                        ScxStatsAttr::Desc(v) => sattrs.desc = Some(v),
+                        ScxStatsAttr::FieldPrefix(v) => sattrs.field_prefix = Some(v),
+                    }
+                }
+            }
+        }
+
+        Ok(sattrs)
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ScxStatsMeta {
     pub name: String,
-    pub desc: Option<String>,
+    #[serde(flatten)]
+    pub attrs: ScxStatsStructAttrs,
     pub fields: Vec<ScxStatsField>,
 }
 
@@ -237,7 +313,7 @@ impl Parse for ScxStatsMetaAux {
         let mut fields = vec![];
 
         let item_struct: ItemStruct = input.parse()?;
-        let attrs = ScxStatsAttrs::new(&item_struct.attrs)?;
+        let attrs = ScxStatsStructAttrs::new(&item_struct.attrs)?;
 
         if let Fields::Named(named_fields) = &item_struct.fields {
             for field in named_fields.named.iter() {
@@ -248,7 +324,7 @@ impl Parse for ScxStatsMetaAux {
         Ok(Self {
             meta: ScxStatsMeta {
                 name: item_struct.ident.to_string(),
-                desc: attrs.desc,
+		attrs,
                 fields,
             },
             ident: item_struct.ident,

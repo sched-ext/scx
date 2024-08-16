@@ -46,7 +46,7 @@ struct ClusterStats {
     pub at: u64,
     #[stat(desc = "some bitmap we want to report")]
     pub bitmap: Vec<u32>,
-    #[stat(desc = "domain statistics")]
+    #[stat(desc = "domain statistics", om_prefix="d_")]
     pub doms_dict: BTreeMap<usize, DomainStats>,
 }
 ```
@@ -116,8 +116,8 @@ When implementing a generic client which does not have access to the
 statistics struct definitions, the metadata can come handy:
 
 ```rust
-    println!("\n===== Requesting \"stat_meta\" but receiving with serde_json::Value:");
-    let resp = client.request::<serde_json::Value>("stat_meta", vec![]);
+    println!("\n===== Requesting \"stats_meta\" but receiving with serde_json::Value:");
+    let resp = client.request::<serde_json::Value>("stats_meta", vec![]);
     println!("{:#?}", &resp);
 ```
 
@@ -196,8 +196,8 @@ Press any key to exit.
 ```
 $ RUST_LOG=trace cargo run --example client -- ~/tmp/socket
 ...
-===== Requesting "stat" but receiving with serde_json::Value:
-2024-08-15T22:13:23.769Z TRACE [scx_stats::client] Sending: {"req":"stat","args":{"target":"all"}}
+===== Requesting "stats" but receiving with serde_json::Value:
+2024-08-15T22:13:23.769Z TRACE [scx_stats::client] Sending: {"req":"stats","args":{"target":"all"}}
 2024-08-15T22:13:23.769Z TRACE [scx_stats::client] Received: {"errno":0,"args":{"resp":{"at":12345,"bitmap":[3735928559,3203391149],"doms_dict":{"0":{"events":1234,"name":"domain 0","pressure":1.234},"3":{"events":5678,"name":"domain 3","pressure":5.678}},"name":"test cluster"}}}
 Ok(
     Object {
