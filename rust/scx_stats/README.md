@@ -64,7 +64,23 @@ defined:
 In addition, arbitrary user attributes which start with "_" can be added to
 both structs and fields. They are collected into the "user" dict of the
 containing struct or field. When the value of such user attribute is not
-specified, the string "true" is assigned by default. See the examples.
+specified, the string "true" is assigned by default. For example,
+[scripts/scxstats_to_openmetrics.py](scripts/scxstats_to_openmetrics.py)
+recognizes the following user attribute:
+
+- `_om_prefix`: The value is prefixed to the field name to form the unique
+  OpenMetrics metric name.
+
+- `_om_label`: Labels are used to distinguish different members of a dict.
+  This field attribute specifies the name of the label for a dict field.
+
+- `_om_skip`: Not all fields might make sense to translate to OpenMetrics.
+  This valueless field attribute marks the field to be skipped.
+
+[`examples/stats_defs.rs.h`](./examples/stats_defs.rs.h) shows how the above
+attributes can be used. See
+[scx_layered](https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_layered/src/stats.rs)
+for practical usage.
 
 Note that scx_stats depends on [`serde`](https://crates.io/crates/serde) and
 [`serde_json`](https://crates.io/crates/serde_json) and each statistics
