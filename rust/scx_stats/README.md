@@ -20,14 +20,9 @@ following fields:
 
 - `Vec`s and `BTreeMap`s containing the above.
 
-The following is taken from [`examples/server.rs`](./examples/server.rs):
+The following is taken from [`examples/stats_defs.rs.h`](./examples/stats_defs.rs.h):
 
 ```rust
-use scx_stats::{ScxStatsServer, Meta, ToJson};
-use scx_stats_derive::Stats;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-
 #[derive(Clone, Debug, Serialize, Deserialize, Stats)]
 #[stat(desc = "domain statistics", _om_prefix="d_", _om_label="domain_name")]
 struct DomainStats {
@@ -44,7 +39,7 @@ struct ClusterStats {
     pub name: String,
     #[stat(desc = "update timestamp")]
     pub at: u64,
-    #[stat(desc = "some bitmap we want to report")]
+    #[stat(desc = "some bitmap we want to report", _om_skip)]
     pub bitmap: Vec<u32>,
     #[stat(desc = "domain statistics")]
     pub doms_dict: BTreeMap<usize, DomainStats>,
@@ -53,8 +48,23 @@ struct ClusterStats {
 
 `scx_stats_derive::Stats` is the derive macro which generates everything
 necessary including the statistics metadata. The `stat` struct and field
-attribute allows adding annotations. Currently, the only `desc` is supported
-but it's easy to add more attributes.
+attribute allows adding annotations. The following attributes are currently
+defined:
+
+*struct and field attributes*
+
+- desc: Description.
+
+*struct-only attributes*
+
+- top: Marks the top-level statistics struct which is reported by default.
+  Used by generic tools to find the starting point when processing the
+  metadata.
+
+In addition, arbitrary user attributes which start with "_" can be added to
+both structs and fields. They are collected into the "user" dict of the
+containing struct or field. When the value of such user attribute is not
+specified, the string "true" is assigned by default. See the examples.
 
 Note that scx_stats depends on [`serde`](https://crates.io/crates/serde) and
 [`serde_json`](https://crates.io/crates/serde_json) and each statistics
@@ -117,67 +127,66 @@ statistics struct definitions, the metadata can come handy:
 
 ```rust
     println!("\n===== Requesting \"stats_meta\" but receiving with serde_json::Value:");
-    let resp = client.request::<serde_json::Value>("stats_meta", vec![]);
-    println!("{:#?}", &resp);
+    let resp = client.request::<serde_json::Value>("stats_meta", vec![]).unwrap();
+    println!("{}", serde_json::to_string_pretty(&resp).unwrap());
 ```
 
 For this example, the output would look like the following:
 
 ```
-Ok(
-    Array [
-        Object {
-            "desc": String("cluster statistics"),
-            "fields": Array [
-                Object {
-                    "datum": String("String"),
-                    "name": String("name"),
-                },
-                Object {
-                    "datum": String("U64"),
-                    "desc": String("update timestamp"),
-                    "name": String("at"),
-                },
-                Object {
-                    "array": String("U64"),
-                    "desc": String("some bitmap we want to report"),
-                    "name": String("bitmap"),
-                },
-                Object {
-                    "desc": String("domain statistics"),
-                    "dict": Object {
-                        "datum": Object {
-                            "Struct": String("DomainStats"),
-                        },
-                        "key": String("U64"),
-                    },
-                    "name": String("doms_dict"),
-                },
-            ],
-            "name": String("ClusterStats"),
-        },
-        Object {
-            "desc": String("domain statistics"),
-            "fields": Array [
-                Object {
-                    "datum": String("String"),
-                    "name": String("name"),
-                },
-                Object {
-                    "datum": String("U64"),
-                    "desc": String("an event counter"),
-                    "name": String("events"),
-                },
-                Object {
-                    "datum": String("Float"),
-                    "desc": String("a gauge number"),
-                    "name": String("pressure"),
-                },
-            ],
-            "name": String("DomainStats"),
-        },
-    ],
-)
+{
+  "ClusterStats": {
+    "desc": "cluster statistics",
+    "fields": {
+      "at": {
+        "datum": "u64",
+        "desc": "update timestamp"
+      },
+      "bitmap": {
+        "array": "u64",
+        "desc": "some bitmap we want to report",
+        "user": {
+          "_om_skip": "true"
+        }
+      },
+      "doms_dict": {
+        "desc": "domain statistics",
+        "dict": {
+          "datum": {
+            "struct": "DomainStats"
+          },
+          "key": "u64"
+        }
+      },
+      "name": {
+        "datum": "string"
+      }
+    },
+    "name": "ClusterStats",
+    "top": "true"
+  },
+  "DomainStats": {
+    "desc": "domain statistics",
+    "fields": {
+      "events": {
+        "datum": "u64",
+        "desc": "an event counter"
+      },
+      "name": {
+        "datum": "string"
+      },
+      "pressure": {
+        "datum": "float",
+        "desc": "a gauge number"
+      }
+    },
+    "name": "DomainStats",
+    "user": {
+      "_om_label": "domain_name",
+      "_om_prefix": "d_"
+    }
+  }
+}
 ```
 
 The protocol used for communication on the UNIX domain socket is line based

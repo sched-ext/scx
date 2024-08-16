@@ -20,7 +20,7 @@ fn main() {
     let mut client = ScxStatsClient::new().set_path(path).connect().unwrap();
 
     println!("===== Requesting \"stats_meta\":");
-    let resp = client.request::<Vec<ScxStatsMeta>>("stats_meta", vec![]);
+    let resp = client.request::<BTreeMap<String, ScxStatsMeta>>("stats_meta", vec![]);
     println!("{:#?}", &resp);
 
     println!("\n===== Requesting \"stats\" without arguments:");
@@ -33,14 +33,14 @@ fn main() {
     println!("{:#?}", &resp);
 
     println!("\n===== Requesting \"stats\" with \"target\"=\"all\":");
-    let resp = client.request::<ClusterStats>("stats", vec![("target".into(), "all".into())]);
-    println!("{:#?}", &resp);
-
-    println!("\n===== Requesting \"stats_meta\" but receiving with serde_json::Value:");
-    let resp = client.request::<serde_json::Value>("stats_meta", vec![]);
+    let resp = client.request::<ClusterStats>("stats", vec![("target".into(), "top".into())]);
     println!("{:#?}", &resp);
 
     println!("\n===== Requesting \"stats\" but receiving with serde_json::Value:");
-    let resp = client.request::<serde_json::Value>("stats", vec![("target".into(), "all".into())]);
+    let resp = client.request::<serde_json::Value>("stats", vec![("target".into(), "top".into())]);
     println!("{:#?}", &resp);
+
+    println!("\n===== Requesting \"stats_meta\" but receiving with serde_json::Value:");
+    let resp = client.request::<serde_json::Value>("stats_meta", vec![]).unwrap();
+    println!("{}", serde_json::to_string_pretty(&resp).unwrap());
 }

@@ -18,7 +18,7 @@ struct ClusterStats {
     pub name: String,
     #[stat(desc = "update timestamp")]
     pub at: u64,
-    #[stat(desc = "some bitmap we want to report")]
+    #[stat(desc = "some bitmap we want to report", _om_skip)]
     pub bitmap: Vec<u32>,
     #[stat(desc = "domain statistics")]
     pub doms_dict: BTreeMap<usize, DomainStats>,

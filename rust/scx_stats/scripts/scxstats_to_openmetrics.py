@@ -36,13 +36,21 @@ def make_om_metrics(sname, omid, field, labels, meta_db, registry):
     #
     # @labels: The collected $om_labels as this function descends down
     # nested dicts.
+
+    # om_skip tells us that the server wants this field to be
+    # skipped for OM.
+    if 'user' in field and '_om_skip' in field['user']:
+        dbg(f'skipping {omid} due to _om_skip')
+        return {}
+
     desc = field['desc'] if 'desc' in field else ''
-    prefix = meta_db[sname]['om_prefix']
+    prefix = meta_db[sname]['_om_prefix']
 
     if 'datum' in field:
         match field['datum']:
-            # Single value that can become a Gauge. Gauge name is $om_prefix
-            # + the leaf level field name. The combination must be unique.
+            # Single value that can become a Gauge. Gauge name is
+            # $_om_prefix + the leaf level field name. The combination must
+            # be unique.
             case 'i64' | 'u64' | 'float':
                 gname = prefix + omid.rsplit('.', 1)[-1]
                 dbg(f'creating OM metric {gname}@{omid} {labels} "{desc}"')
@@ -51,15 +59,15 @@ def make_om_metrics(sname, omid, field, labels, meta_db, registry):
         # The only allowed nesting is struct inside dict.
         sname = field['dict']['datum']['struct']
         struct = meta_db[sname]
-        # $om_label's will distinguish different members of the dict by
+        # $_om_label's will distinguish different members of the dict by
         # pointing to the dict keys.
-        if not struct['om_label']:
+        if not struct['_om_label']:
             raise Exception(f'{omid} is nested inside but does not have _om_label')
         # Recurse into the nested struct.
         oms = {}
         for fname, field in struct['fields'].items():
             oms |= make_om_metrics(sname, f'{omid}.{fname}', field,
-                                   labels + [struct['om_label']], meta_db, registry)
+                                   labels + [struct['_om_label']], meta_db, registry)
         return oms
 
     info(f'field "{omid}" has unsupported type, skipping')
@@ -109,19 +117,19 @@ def main():
     top_sname = None
     for sname, struct in resp.items():
         # Find the top-level struct.
-        if 'top' in struct and struct['top']:
+        if 'top' in struct:
             top_sname = sname
 
-        struct['om_prefix'] = ''
-        struct['om_label'] = ''
+        struct['_om_prefix'] = ''
+        struct['_om_label'] = ''
 
         if 'user' in struct:
-            # om_prefix is used to build unique metric name from field names.
-            if 'om_prefix' in struct['user']:
-                struct['om_prefix'] = struct['user']['om_prefix']
-            # om_label is used to distinguish structs nested inside dicts.
-            if 'om_label' in struct['user']:
-                struct['om_label'] = struct['user']['om_label']
+            # _om_prefix is used to build unique metric name from field names.
+            if '_om_prefix' in struct['user']:
+                struct['_om_prefix'] = struct['user']['_om_prefix']
+            # _om_label is used to distinguish structs nested inside dicts.
+            if '_om_label' in struct['user']:
+                struct['_om_label'] = struct['user']['_om_label']
             del struct['user']
 
         meta_db[sname] = struct
