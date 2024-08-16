@@ -38,4 +38,10 @@ struct cpu_arg {
 	s32 cpu_id;
 };
 
+struct domain_arg {
+	s32 lvl_id;
+	s32 cpu_id;
+	s32 sibling_cpu_id;
+};
+
 #endif /* __INTF_H */
