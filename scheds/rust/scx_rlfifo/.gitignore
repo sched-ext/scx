@@ -2,5 +2,4 @@ src/bpf/.output
 intf.h
 main.bpf.c
 bpf.rs
-Cargo.lock
 target
