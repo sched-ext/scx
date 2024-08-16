@@ -51,7 +51,7 @@ impl std::fmt::Debug for ScxStatsErrno {
 }
 
 struct ScxStatsServerData {
-    stats_meta: Vec<ScxStatsMeta>,
+    stats_meta: BTreeMap<String, ScxStatsMeta>,
     stats: StatMap,
 }
 
@@ -61,7 +61,11 @@ struct ScxStatsServerInner {
 }
 
 impl ScxStatsServerInner {
-    fn new(listener: UnixListener, stats_meta: Vec<ScxStatsMeta>, stats: StatMap) -> Self {
+    fn new(
+        listener: UnixListener,
+        stats_meta: BTreeMap<String, ScxStatsMeta>,
+        stats: StatMap,
+    ) -> Self {
         Self {
             listener,
             data: Arc::new(Mutex::new(ScxStatsServerData { stats_meta, stats })),
@@ -159,7 +163,7 @@ pub struct ScxStatsServer {
     stats_path: PathBuf,
     path: Option<PathBuf>,
 
-    stats_meta_holder: Vec<ScxStatsMeta>,
+    stats_meta_holder: BTreeMap<String, ScxStatsMeta>,
     stats_holder: StatMap,
 }
 
@@ -171,13 +175,13 @@ impl ScxStatsServer {
             stats_path: PathBuf::from("stats"),
             path: None,
 
-            stats_meta_holder: vec![],
+            stats_meta_holder: BTreeMap::new(),
             stats_holder: BTreeMap::new(),
         }
     }
 
     pub fn add_stats_meta(mut self, meta: ScxStatsMeta) -> Self {
-        self.stats_meta_holder.push(meta);
+        self.stats_meta_holder.insert(meta.name.clone(), meta);
         self
     }
 
@@ -231,7 +235,7 @@ impl ScxStatsServer {
         let listener =
             UnixListener::bind(path).with_context(|| format!("creating UNIX socket {:?}", path))?;
 
-        let mut stats_meta = vec![];
+        let mut stats_meta = BTreeMap::new();
         let mut stats = BTreeMap::new();
         std::mem::swap(&mut stats_meta, &mut self.stats_meta_holder);
         std::mem::swap(&mut stats, &mut self.stats_holder);
