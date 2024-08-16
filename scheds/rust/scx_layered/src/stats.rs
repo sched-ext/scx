@@ -44,6 +44,7 @@ fn fmt_num(v: u64) -> String {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
+#[stat(_om_field_prefix = "l_", _om_label="layer_name")]
 pub struct LayerStats {
     #[stat(desc = "layer: CPU utilization (100% means one full CPU)")]
     pub util: f64,
