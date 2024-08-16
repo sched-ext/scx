@@ -109,9 +109,107 @@ impl CpuMask {
     }
 }
 
+fn get_primary_cpus(powersave: bool) -> std::io::Result<Vec<usize>> {
+    let cpu_base_path = "/sys/devices/system/cpu/";
+    let mut cpu_freqs = Vec::new();
+
+    // Iterate over each CPU directory and collect CPU ID and its max frequency.
+    for entry in std::fs::read_dir(cpu_base_path)? {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,  // Skip if there's an error
+        };
+
+        let path = entry.path();
+        if path.is_dir() && path.file_name().unwrap().to_str().unwrap_or("").starts_with("cpu") {
+            if let Some(cpu_id_str) = path.file_name().unwrap().to_str().unwrap_or("").strip_prefix("cpu") {
+                if let Ok(cpu_id) = cpu_id_str.parse::<usize>() {
+                    let max_freq_path = path.join("cpufreq/cpuinfo_max_freq");
+                    if max_freq_path.exists() {
+                        if let Ok(max_freq) = std::fs::read_to_string(&max_freq_path) {
+                            if let Ok(freq) = max_freq.trim().parse::<u64>() {
+                                cpu_freqs.push((cpu_id, freq));
+                            } else {
+                                // warn!("failed to parse frequency for cpu{}", cpu_id);
+                            }
+                        } else {
+                            // warn!("failed to read {}", max_freq_path.display());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if cpu_freqs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Find the smallest maximum frequency.
+    let min_freq = cpu_freqs.iter().map(|&(_, freq)| freq).min().unwrap();
+
+    // Check if all CPUs have the smallest frequency.
+    let all_have_min_freq = cpu_freqs.iter().all(|&(_, freq)| freq == min_freq);
+
+    let selected_cpu_ids: Vec<usize> = if all_have_min_freq {
+        // If all CPUs have the smallest frequency, return all CPU IDs.
+        cpu_freqs.into_iter().map(|(cpu_id, _)| cpu_id).collect()
+    } else if powersave {
+        // If powersave is true, return the CPUs with the smallest frequency.
+        cpu_freqs.into_iter()
+            .filter(|&(_, freq)| freq == min_freq)
+            .map(|(cpu_id, _)| cpu_id)
+            .collect()
+    } else {
+        // If powersave is false, return the CPUs with the highest frequency.
+        cpu_freqs.into_iter()
+            .filter(|&(_, freq)| freq != min_freq)
+            .map(|(cpu_id, _)| cpu_id)
+            .collect()
+    };
+
+    Ok(selected_cpu_ids)
+}
+
+// Convert an array of CPUs to the corresponding cpumask of any arbitrary size.
+fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
+    if cpus.is_empty() {
+        return String::from("0x0");
+    }
+
+    // Determine the maximum CPU ID to create a sufficiently large byte vector.
+    let max_cpu_id = *cpus.iter().max().unwrap();
+
+    // Create a byte vector with enough bytes to cover all CPU IDs.
+    let mut bitmask = vec![0u8; (max_cpu_id + 1 + 7) / 8];
+
+    // Set the appropriate bits for each CPU ID.
+    for cpu_id in cpus {
+        let byte_index = cpu_id / 8;
+        let bit_index = cpu_id % 8;
+        bitmask[byte_index] |= 1 << bit_index;
+    }
+
+    // Convert the byte vector to a hexadecimal string.
+    let hex_str: String = bitmask.iter()
+        .rev()
+        .map(|byte| format!("{:02x}", byte))
+        .collect();
+
+    format!("0x{}", hex_str)
+}
+
 // Custom parser function for cpumask using CpuMask's from_str method
-fn parse_cpumask(hex_str: &str) -> Result<CpuMask, std::num::ParseIntError> {
-    CpuMask::from_str(hex_str)
+fn parse_cpumask(cpu_str: &str) -> Result<CpuMask, std::num::ParseIntError> {
+    if cpu_str == "performance" {
+        let cpus = get_primary_cpus(false).unwrap();
+        CpuMask::from_str(&cpus_to_cpumask(&cpus))
+    } else if cpu_str == "powersave" {
+        let cpus = get_primary_cpus(true).unwrap();
+        CpuMask::from_str(&cpus_to_cpumask(&cpus))
+    } else {
+        CpuMask::from_str(cpu_str)
+    }
 }
 
 /// scx_bpfland: a vruntime-based sched_ext scheduler that prioritizes interactive workloads.
@@ -159,7 +257,11 @@ struct Opts {
     /// scheduler will use to dispatch tasks, until the system becomes saturated, at which point
     /// tasks may overflow to other available CPUs.
     ///
-    /// (empty string = all CPUs are used for initial scheduling)
+    /// Special values:
+    ///  - "performance" = automatically detect and use the fastest CPUs
+    ///  - "powersave" = automatically detect and use the slowest CPUs
+    ///
+    /// By default all CPUs are used for the primary scheduling domain.
     #[clap(short = 'm', long, default_value = "", value_parser = parse_cpumask)]
     primary_domain: CpuMask,
 
@@ -294,7 +396,7 @@ impl<'a> Scheduler<'a> {
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, bpfland_ops, uei)?;
 
-        // Initialize primary domain CPUs.
+        // Initialize the primary scheduling domain (based on the --primary-domain option).
         Self::init_primary_domain(&mut skel, &opts.primary_domain)?;
 
         // Initialize L2 cache domains.
