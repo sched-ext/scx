@@ -44,7 +44,7 @@ fn fmt_num(v: u64) -> String {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
-#[stat(_om_prefix = "l_", _om_label="layer_name")]
+#[stat(_om_prefix = "l_", _om_label = "layer_name")]
 pub struct LayerStats {
     #[stat(desc = "layer: CPU utilization (100% means one full CPU)")]
     pub util: f64,
@@ -429,16 +429,15 @@ impl SysStats {
     }
 }
 
-pub fn launch_server(sys_stats: Arc<Mutex<SysStats>>) -> Result<()> {
-    ScxStatsServer::new()
+pub fn launch_server(sys_stats: Arc<Mutex<SysStats>>) -> Result<ScxStatsServer<(), ()>> {
+    Ok(ScxStatsServer::<(), ()>::new()
         .add_stats_meta(LayerStats::meta())
         .add_stats_meta(SysStats::meta())
         .add_stats(
             "top",
-            Box::new(move |_| sys_stats.lock().unwrap().to_json()),
+            Box::new(move |_, _| sys_stats.lock().unwrap().to_json()),
         )
-        .launch()?;
-    Ok(())
+        .launch()?)
 }
 
 pub fn monitor(shutdown: Arc<AtomicBool>) -> Result<()> {

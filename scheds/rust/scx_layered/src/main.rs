@@ -39,6 +39,7 @@ use log::debug;
 use log::info;
 use log::trace;
 use log::warn;
+use scx_stats::ScxStatsServer;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
@@ -1240,6 +1241,7 @@ struct Scheduler<'a, 'b> {
     prev_processing_dur: Duration,
 
     sys_stats: Arc<Mutex<SysStats>>,
+    _stats_server: ScxStatsServer<(), ()>,
 }
 
 impl<'a, 'b> Scheduler<'a, 'b> {
@@ -1450,8 +1452,18 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         let proc_reader = procfs::ProcReader::new();
         let sys_stats = Arc::new(Mutex::new(SysStats::default()));
 
-        let mut sched = Self {
-            struct_ops: None,
+        // XXX If we try to refresh the cpumasks here before attaching, we
+        // sometimes (non-deterministically) don't see the updated values in
+        // BPF. It would be better to update the cpumasks here before we
+        // attach, but the value will quickly converge anyways so it's not a
+        // huge problem in the interim until we figure it out.
+
+        // Attach.
+        let struct_ops = scx_ops_attach!(skel, layered)?;
+        let _stats_server = stats::launch_server(sys_stats.clone())?;
+
+        let sched = Self {
+            struct_ops: Some(struct_ops),
             layer_specs,
 
             sched_intv: Duration::from_secs_f64(opts.interval),
@@ -1471,19 +1483,10 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             proc_reader,
             skel,
 
-            sys_stats: sys_stats.clone(),
+            sys_stats,
+            _stats_server,
         };
 
-        stats::launch_server(sys_stats)?;
-
-        // XXX If we try to refresh the cpumasks here before attaching, we
-        // sometimes (non-deterministically) don't see the updated values in
-        // BPF. It would be better to update the cpumasks here before we
-        // attach, but the value will quickly converge anyways so it's not a
-        // huge problem in the interim until we figure it out.
-
-        // Attach.
-        sched.struct_ops = Some(scx_ops_attach!(sched.skel, layered)?);
         info!("Layered Scheduler Attached. Run `scx_layered --monitor` for metrics.");
 
         Ok(sched)

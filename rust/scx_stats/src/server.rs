@@ -1,41 +1,84 @@
+use crate::ScxStatsClient;
 use crate::{Meta, ScxStatsMeta};
 use anyhow::{anyhow, Context, Result};
-use log::warn;
+use crossbeam::channel::{unbounded, Receiver, RecvError, Select, SendError, Sender};
+use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::spawn;
 
-pub trait StatsReader: FnMut(&BTreeMap<String, String>) -> Result<Value> {}
-impl<T: FnMut(&BTreeMap<String, String>) -> Result<Value>> StatsReader for T {}
+pub trait StatsReader<Tx, Rx>:
+    FnMut(&BTreeMap<String, String>, (&Sender<Tx>, &Receiver<Rx>)) -> Result<Value>
+{
+}
+impl<
+        Tx,
+        Rx,
+        T: FnMut(&BTreeMap<String, String>, (&Sender<Tx>, &Receiver<Rx>)) -> Result<Value>,
+    > StatsReader<Tx, Rx> for T
+{
+}
 
-pub trait StatsReaderSend: FnMut(&BTreeMap<String, String>) -> Result<Value> + Send {}
-impl<T: FnMut(&BTreeMap<String, String>) -> Result<Value> + Send> StatsReaderSend for T {}
+pub trait StatsReaderSend<Tx, Rx>:
+    FnMut(&BTreeMap<String, String>, (&Sender<Tx>, &Receiver<Rx>)) -> Result<Value> + Send
+{
+}
+impl<
+        Tx,
+        Rx,
+        T: FnMut(&BTreeMap<String, String>, (&Sender<Tx>, &Receiver<Rx>)) -> Result<Value> + Send,
+    > StatsReaderSend<Tx, Rx> for T
+{
+}
 
-pub trait StatsReaderSync: Fn(&BTreeMap<String, String>) -> Result<Value> + Send + Sync {}
-impl<T: Fn(&BTreeMap<String, String>) -> Result<Value> + Send + Sync> StatsReaderSync for T {}
+pub trait StatsReaderSync<Tx, Rx>:
+    Fn(&BTreeMap<String, String>, (&Sender<Tx>, &Receiver<Rx>)) -> Result<Value> + Send + Sync
+{
+}
+impl<
+        Tx,
+        Rx,
+        T: Fn(&BTreeMap<String, String>, (&Sender<Tx>, &Receiver<Rx>)) -> Result<Value> + Send + Sync,
+    > StatsReaderSync<Tx, Rx> for T
+{
+}
 
-pub trait StatsOpener: FnMut() -> Result<Box<dyn StatsReader>> + Send {}
-impl<T: FnMut() -> Result<Box<dyn StatsReader>> + Send> StatsOpener for T {}
+pub trait StatsOpener<Tx, Rx>: FnMut() -> Result<Box<dyn StatsReader<Tx, Rx>>> + Send {}
+impl<Tx, Rx, T: FnMut() -> Result<Box<dyn StatsReader<Tx, Rx>>> + Send> StatsOpener<Tx, Rx> for T {}
 
 pub trait StatsCloser: FnOnce() + Send {}
 impl<T: FnOnce() + Send> StatsCloser for T {}
 
-pub struct ScxStatsOps {
-    open: Box<dyn StatsOpener>,
+pub struct ScxStatsOps<Tx, Rx> {
+    open: Box<dyn StatsOpener<Tx, Rx>>,
     close: Option<Box<dyn StatsCloser>>,
 }
 
-#[derive(Default)]
-struct ScxStatsOpenOps {
-    map: BTreeMap<String, (Arc<Mutex<ScxStatsOps>>, Box<dyn StatsReader>)>,
+struct ScxStatsOpenOps<Tx, Rx> {
+    map: BTreeMap<
+        String,
+        (
+            Arc<Mutex<ScxStatsOps<Tx, Rx>>>,
+            Box<dyn StatsReader<Tx, Rx>>,
+        ),
+    >,
 }
 
-impl std::ops::Drop for ScxStatsOpenOps {
+impl<Tx, Rx> ScxStatsOpenOps<Tx, Rx> {
+    fn new() -> Self {
+        Self {
+            map: BTreeMap::new(),
+        }
+    }
+}
+
+impl<Tx, Rx> std::ops::Drop for ScxStatsOpenOps<Tx, Rx> {
     fn drop(&mut self) {
         for (_, (ops, _)) in self.map.iter_mut() {
             if let Some(close) = ops.lock().unwrap().close.take() {
@@ -81,21 +124,57 @@ impl std::fmt::Debug for ScxStatsErrno {
     }
 }
 
-struct ScxStatsServerData {
+struct ChannelPair<Tx, Rx> {
+    tx: Sender<Tx>,
+    rx: Receiver<Rx>,
+}
+
+impl<Tx, Rx> ChannelPair<Tx, Rx> {
+    fn bidi() -> (ChannelPair<Tx, Rx>, ChannelPair<Rx, Tx>) {
+        let (tx, rx) = (unbounded::<Tx>(), unbounded::<Rx>());
+        (
+            ChannelPair { tx: tx.0, rx: rx.1 },
+            ChannelPair { tx: rx.0, rx: tx.1 },
+        )
+    }
+}
+
+impl<Tx, Rx> Clone for ChannelPair<Tx, Rx> {
+    fn clone(&self) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            rx: self.rx.clone(),
+        }
+    }
+}
+
+struct ScxStatsServerData<Tx, Rx> {
     stats_meta: BTreeMap<String, ScxStatsMeta>,
-    stats_ops: BTreeMap<String, Arc<Mutex<ScxStatsOps>>>,
+    stats_ops: BTreeMap<String, Arc<Mutex<ScxStatsOps<Tx, Rx>>>>,
 }
 
-struct ScxStatsServerInner {
+struct ScxStatsServerInner<Tx, Rx>
+where
+    Tx: Send + 'static,
+    Rx: Send + 'static,
+{
     listener: UnixListener,
-    data: Arc<Mutex<ScxStatsServerData>>,
+    data: Arc<Mutex<ScxStatsServerData<Tx, Rx>>>,
+    inner_ch: ChannelPair<Tx, Rx>,
+    exit: Arc<AtomicBool>,
 }
 
-impl ScxStatsServerInner {
+impl<Tx, Rx> ScxStatsServerInner<Tx, Rx>
+where
+    Tx: Send + 'static,
+    Rx: Send + 'static,
+{
     fn new(
         listener: UnixListener,
         stats_meta: BTreeMap<String, ScxStatsMeta>,
-        stats_ops: BTreeMap<String, Arc<Mutex<ScxStatsOps>>>,
+        stats_ops: BTreeMap<String, Arc<Mutex<ScxStatsOps<Tx, Rx>>>>,
+        inner_ch: ChannelPair<Tx, Rx>,
+        exit: Arc<AtomicBool>,
     ) -> Self {
         Self {
             listener,
@@ -103,6 +182,8 @@ impl ScxStatsServerInner {
                 stats_meta,
                 stats_ops,
             })),
+            inner_ch,
+            exit,
         }
     }
 
@@ -120,10 +201,11 @@ impl ScxStatsServerInner {
 
     fn handle_request(
         line: String,
-        data: &Arc<Mutex<ScxStatsServerData>>,
+        data: &Arc<Mutex<ScxStatsServerData<Tx, Rx>>>,
+        inner_ch: &ChannelPair<Tx, Rx>,
     ) -> Result<ScxStatsResponse> {
         let req: ScxStatsRequest = serde_json::from_str(&line)?;
-        let mut open_ops = ScxStatsOpenOps::default();
+        let mut open_ops = ScxStatsOpenOps::new();
 
         match req.req.as_str() {
             "stats" => {
@@ -145,7 +227,7 @@ impl ScxStatsServerInner {
 
                 let read = &mut open_ops.map.get_mut(target).unwrap().1;
 
-                let resp = read(&req.args)?;
+                let resp = read(&req.args, (&inner_ch.tx, &inner_ch.rx))?;
 
                 Self::build_resp(0, &resp)
             }
@@ -154,7 +236,12 @@ impl ScxStatsServerInner {
         }
     }
 
-    fn serve(mut stream: UnixStream, data: Arc<Mutex<ScxStatsServerData>>) -> Result<()> {
+    fn serve(
+        mut stream: UnixStream,
+        data: Arc<Mutex<ScxStatsServerData<Tx, Rx>>>,
+        inner_ch: ChannelPair<Tx, Rx>,
+        exit: Arc<AtomicBool>,
+    ) -> Result<()> {
         let mut stream_reader = BufReader::new(stream.try_clone()?);
 
         loop {
@@ -163,8 +250,12 @@ impl ScxStatsServerInner {
             if line.len() == 0 {
                 return Ok(());
             }
+            if exit.load(Ordering::Relaxed) {
+                debug!("server exiting due to exit");
+                return Ok(());
+            }
 
-            let resp = match Self::handle_request(line, &data) {
+            let resp = match Self::handle_request(line, &data, &inner_ch) {
                 Ok(v) => v,
                 Err(e) => {
                     let errno = match e.downcast_ref::<ScxStatsErrno>() {
@@ -180,37 +271,151 @@ impl ScxStatsServerInner {
         }
     }
 
-    fn listen(self) {
-        loop {
-            for stream in self.listener.incoming() {
-                match stream {
-                    Ok(stream) => {
-                        let data = self.data.clone();
-                        spawn(move || {
-                            if let Err(e) = Self::serve(stream, data) {
-                                warn!("stat communication errored ({})", &e);
+    fn proxy(inner_ch: ChannelPair<Tx, Rx>, add_rx: Receiver<ChannelPair<Rx, Tx>>) {
+        let mut chs_cursor = 0;
+        let mut chs = BTreeMap::<u64, ChannelPair<Rx, Tx>>::new();
+        let mut ch_to_add: Option<ChannelPair<Rx, Tx>> = None;
+        let mut idx_to_drop: Option<u64> = None;
+
+        'outer: loop {
+            if let Some(new_ch) = ch_to_add.take() {
+                let idx = chs_cursor;
+                chs_cursor += 1;
+                chs.insert(idx, new_ch);
+                debug!("proxy: added new channel idx={}", idx);
+            }
+
+            if let Some(idx) = idx_to_drop.take() {
+                debug!("proxy: dropping channel {}", idx);
+                chs.remove(&idx).unwrap();
+            }
+
+            let mut sel = Select::new();
+            let inner_idx = sel.recv(&inner_ch.rx);
+            let add_idx = sel.recv(&add_rx);
+
+            let mut chs_sel_idx = BTreeMap::<usize, u64>::new();
+            for (idx, cp) in chs.iter() {
+                let sel_idx = sel.recv(&cp.rx);
+                chs_sel_idx.insert(sel_idx, *idx);
+            }
+
+            'select: loop {
+                let oper = sel.select();
+                match oper.index() {
+                    sel_idx if sel_idx == add_idx => match oper.recv(&add_rx) {
+                        Ok(ch) => {
+                            ch_to_add = Some(ch);
+                            debug!("proxy: received new channel from add_rx");
+                            break 'select;
+                        }
+                        Err(RecvError) => {
+                            debug!("proxy: add_rx disconnected, terminating");
+                            break 'outer;
+                        }
+                    },
+                    sel_idx if sel_idx == inner_idx => match oper.recv(&inner_ch.rx) {
+                        Ok(_) => {
+                            error!("proxy: unexpected data in ScxStatsServer.channels().0");
+                            panic!();
+                        }
+                        Err(RecvError) => break 'outer,
+                    },
+                    sel_idx => {
+                        let idx = chs_sel_idx.get(&sel_idx).unwrap();
+                        let pair = chs.get(idx).unwrap();
+
+                        let req = match oper.recv(&pair.rx) {
+                            Ok(v) => v,
+                            Err(RecvError) => {
+                                idx_to_drop = Some(*idx);
+                                break 'select;
                             }
-                        });
+                        };
+
+                        match inner_ch.tx.send(req) {
+                            Ok(()) => {}
+                            Err(SendError(..)) => break 'outer,
+                        }
+
+                        let resp = match inner_ch.rx.recv() {
+                            Ok(v) => v,
+                            Err(RecvError) => break 'outer,
+                        };
+
+                        match pair.tx.send(resp) {
+                            Ok(()) => {}
+                            Err(SendError(..)) => {
+                                idx_to_drop = Some(*idx);
+                                break 'select;
+                            }
+                        }
                     }
-                    Err(e) => warn!("failed to accept stat connection ({})", &e),
                 }
+            }
+        }
+    }
+
+    fn listen(self) {
+        let inner_ch_copy = self.inner_ch.clone();
+        let (add_tx, add_rx) = unbounded::<ChannelPair<Rx, Tx>>();
+
+        spawn(move || Self::proxy(inner_ch_copy, add_rx));
+
+        for stream in self.listener.incoming() {
+            if self.exit.load(Ordering::Relaxed) {
+                debug!("listener exiting");
+                break;
+            }
+            match stream {
+                Ok(stream) => {
+                    let data = self.data.clone();
+                    let exit = self.exit.clone();
+
+                    let (tx_pair, rx_pair) = ChannelPair::<Tx, Rx>::bidi();
+                    match add_tx.send(rx_pair) {
+                        Ok(()) => debug!("sent new channel to proxy"),
+                        Err(e) => warn!("ScxStatsServer::proxy() failed ({})", &e),
+                    }
+
+                    spawn(move || {
+                        if let Err(e) = Self::serve(stream, data, tx_pair, exit) {
+                            warn!("stat communication errored ({})", &e);
+                        }
+                    });
+                }
+                Err(e) => warn!("failed to accept stat connection ({})", &e),
             }
         }
     }
 }
 
-pub struct ScxStatsServer {
+pub struct ScxStatsServer<Tx, Rx>
+where
+    Tx: Send + 'static,
+    Rx: Send + 'static,
+{
     base_path: PathBuf,
     sched_path: PathBuf,
     stats_path: PathBuf,
     path: Option<PathBuf>,
 
     stats_meta_holder: BTreeMap<String, ScxStatsMeta>,
-    stats_ops_holder: BTreeMap<String, Arc<Mutex<ScxStatsOps>>>,
+    stats_ops_holder: BTreeMap<String, Arc<Mutex<ScxStatsOps<Tx, Rx>>>>,
+
+    outer_ch: ChannelPair<Rx, Tx>,
+    inner_ch: Option<ChannelPair<Tx, Rx>>,
+    exit: Arc<AtomicBool>,
 }
 
-impl ScxStatsServer {
+impl<Tx, Rx> ScxStatsServer<Tx, Rx>
+where
+    Tx: Send + 'static,
+    Rx: Send + 'static,
+{
     pub fn new() -> Self {
+        let (ich, och) = ChannelPair::<Tx, Rx>::bidi();
+
         Self {
             base_path: PathBuf::from("/var/run/scx"),
             sched_path: PathBuf::from("root"),
@@ -219,6 +424,10 @@ impl ScxStatsServer {
 
             stats_meta_holder: BTreeMap::new(),
             stats_ops_holder: BTreeMap::new(),
+
+            outer_ch: och,
+            inner_ch: Some(ich),
+            exit: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -227,21 +436,21 @@ impl ScxStatsServer {
         self
     }
 
-    pub fn add_stats_ops(mut self, name: &str, ops: ScxStatsOps) -> Self {
+    pub fn add_stats_ops(mut self, name: &str, ops: ScxStatsOps<Tx, Rx>) -> Self {
         self.stats_ops_holder
             .insert(name.to_string(), Arc::new(Mutex::new(ops)));
         self
     }
 
-    pub fn add_stats(self, name: &str, fetch: Box<dyn StatsReaderSend>) -> Self {
+    pub fn add_stats(self, name: &str, fetch: Box<dyn StatsReaderSend<Tx, Rx>>) -> Self {
         let wrapped_fetch = Mutex::new(fetch);
-        let read: Box<dyn StatsReaderSync> =
-            Box::new(move |args| wrapped_fetch.lock().unwrap()(args));
+        let read: Box<dyn StatsReaderSync<Tx, Rx>> =
+            Box::new(move |args, chan| wrapped_fetch.lock().unwrap()(args, chan));
         let wrapped_read = Arc::new(read);
         let ops = ScxStatsOps {
             open: Box::new(move || {
                 let copy = wrapped_read.clone();
-                Ok(Box::new(move |args| copy(args)))
+                Ok(Box::new(move |args, chan| copy(args, chan)))
             }),
             close: None,
         };
@@ -294,10 +503,33 @@ impl ScxStatsServer {
         std::mem::swap(&mut stats_meta, &mut self.stats_meta_holder);
         std::mem::swap(&mut stats, &mut self.stats_ops_holder);
 
-        let inner = ScxStatsServerInner::new(listener, stats_meta, stats);
+        let inner = ScxStatsServerInner::new(
+            listener,
+            stats_meta,
+            stats,
+            self.inner_ch.take().unwrap(),
+            self.exit.clone(),
+        );
 
         spawn(move || inner.listen());
         Ok(self)
+    }
+
+    pub fn channels(&self) -> (Sender<Rx>, Receiver<Tx>) {
+        (self.outer_ch.tx.clone(), self.outer_ch.rx.clone())
+    }
+}
+
+impl<Tx, Rx> std::ops::Drop for ScxStatsServer<Tx, Rx>
+where
+    Tx: Send + 'static,
+    Rx: Send + 'static,
+{
+    fn drop(&mut self) {
+        self.exit.store(true, Ordering::Relaxed);
+        if let Some(path) = self.path.as_ref() {
+            let _ = ScxStatsClient::new().set_path(path).connect();
+        }
     }
 }
 

@@ -41,6 +41,8 @@ fn main() {
     println!("{:#?}", &resp);
 
     println!("\n===== Requesting \"stats_meta\" but receiving with serde_json::Value:");
-    let resp = client.request::<serde_json::Value>("stats_meta", vec![]).unwrap();
+    let resp = client
+        .request::<serde_json::Value>("stats_meta", vec![])
+        .unwrap();
     println!("{}", serde_json::to_string_pretty(&resp).unwrap());
 }
