@@ -628,6 +628,9 @@ struct Stats {
 
     bpf_stats: BpfStats,
     prev_bpf_stats: BpfStats,
+
+    processing_dur: Duration,
+    prev_processing_dur: Duration,
 }
 
 impl Stats {
@@ -689,6 +692,9 @@ impl Stats {
 
             bpf_stats: bpf_stats.clone(),
             prev_bpf_stats: bpf_stats,
+
+            processing_dur: Default::default(),
+            prev_processing_dur: Default::default(),
         })
     }
 
@@ -697,6 +703,7 @@ impl Stats {
         skel: &mut BpfSkel,
         proc_reader: &procfs::ProcReader,
         now: Instant,
+        cur_processing_dur: Duration,
     ) -> Result<()> {
         let elapsed = now.duration_since(self.at).as_secs_f64() as f64;
         let cpu_ctxs = read_cpu_ctxs(skel)?;
@@ -733,6 +740,10 @@ impl Stats {
         let cur_bpf_stats = BpfStats::read(&cpu_ctxs, self.nr_layers);
         let bpf_stats = &cur_bpf_stats - &self.prev_bpf_stats;
 
+        let processing_dur = cur_processing_dur
+            .checked_sub(self.prev_processing_dur)
+            .unwrap();
+
         *self = Self {
             at: now,
             nr_layers: self.nr_layers,
@@ -751,6 +762,9 @@ impl Stats {
 
             bpf_stats,
             prev_bpf_stats: cur_bpf_stats,
+
+            processing_dur,
+            prev_processing_dur: cur_processing_dur,
         };
         Ok(())
     }
@@ -1238,7 +1252,6 @@ struct Scheduler<'a, 'b> {
 
     nr_layer_cpus_min_max: Vec<(usize, usize)>,
     processing_dur: Duration,
-    prev_processing_dur: Duration,
 
     sys_stats: Arc<Mutex<SysStats>>,
     _stats_server: ScxStatsServer<(), ()>,
@@ -1477,8 +1490,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             report_stats: Stats::new(&mut skel, &proc_reader)?,
 
             nr_layer_cpus_min_max: vec![(0, 0); nr_layers],
-            processing_dur: Duration::from_millis(0),
-            prev_processing_dur: Duration::from_millis(0),
+            processing_dur: Default::default(),
 
             proc_reader,
             skel,
@@ -1580,32 +1592,30 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
     fn step(&mut self) -> Result<()> {
         let started_at = Instant::now();
-        self.sched_stats
-            .refresh(&mut self.skel, &self.proc_reader, started_at)?;
-
+        self.sched_stats.refresh(
+            &mut self.skel,
+            &self.proc_reader,
+            started_at,
+            self.processing_dur,
+        )?;
         self.refresh_cpumasks()?;
-
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
     }
 
     fn refresh_sys_stats(&mut self) -> Result<()> {
         let started_at = Instant::now();
-        self.report_stats
-            .refresh(&mut self.skel, &self.proc_reader, started_at)?;
+        self.report_stats.refresh(
+            &mut self.skel,
+            &self.proc_reader,
+            started_at,
+            self.processing_dur,
+        )?;
         let stats = &self.report_stats;
         let bstats = &stats.bpf_stats;
 
-        let processing_dur = self.processing_dur - self.prev_processing_dur;
-        self.prev_processing_dur = self.processing_dur;
-
-        let mut sys_stats = SysStats::new(
-            stats,
-            bstats,
-            &self.stats_intv,
-            &processing_dur,
-            self.cpu_pool.fallback_cpu,
-        )?;
+        let mut sys_stats =
+            SysStats::new(stats, bstats, self.stats_intv, self.cpu_pool.fallback_cpu)?;
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
             let layer_stats =

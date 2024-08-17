@@ -344,8 +344,7 @@ impl SysStats {
     pub fn new(
         stats: &Stats,
         bstats: &BpfStats,
-        intv: &Duration,
-        proc_dur: &Duration,
+        intv: Duration,
         fallback_cpu: usize,
     ) -> Result<Self> {
         let lsum = |idx| stats.bpf_stats.lstats_sums[idx as usize];
@@ -375,7 +374,7 @@ impl SysStats {
                 / total as f64,
             excl_wakeup: bstats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_WAKEUP as usize] as f64
                 / total as f64,
-            proc_ms: proc_dur.as_millis() as u64,
+            proc_ms: stats.processing_dur.as_millis() as u64,
             busy: stats.cpu_busy * 100.0,
             util: stats.total_util * 100.0,
             load: stats.total_load,
