@@ -7,6 +7,8 @@ mod stats;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 use stats::LayerStats;
+use stats::StatsReq;
+use stats::StatsRes;
 use stats::SysStats;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -1254,7 +1256,7 @@ struct Scheduler<'a, 'b> {
     processing_dur: Duration,
 
     sys_stats: Arc<Mutex<SysStats>>,
-    _stats_server: ScxStatsServer<(), ()>,
+    _stats_server: ScxStatsServer<StatsRequest, StatsResponse>,
 }
 
 impl<'a, 'b> Scheduler<'a, 'b> {
@@ -1473,7 +1475,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         // Attach.
         let struct_ops = scx_ops_attach!(skel, layered)?;
-        let _stats_server = stats::launch_server(sys_stats.clone())?;
+        let stats_server = stats::launch_server()?;
 
         let sched = Self {
             struct_ops: Some(struct_ops),
@@ -1496,7 +1498,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             skel,
 
             sys_stats,
-            _stats_server,
+            stats_server,
         };
 
         info!("Layered Scheduler Attached. Run `scx_layered --monitor` for metrics.");
@@ -1629,9 +1631,8 @@ impl<'a, 'b> Scheduler<'a, 'b> {
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
-        let now = Instant::now();
-        let mut next_sched_at = now + self.sched_intv;
-        let mut next_stats_at = now + self.stats_intv;
+	let (req_ch, res_ch) = self.stats_server.channels();
+        let mut next_sched_at = Instant::now() + self.sched_intv;
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();
@@ -1643,18 +1644,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 }
             }
 
-            if now >= next_stats_at {
-                self.refresh_sys_stats()?;
-                while next_stats_at < now {
-                    next_stats_at += self.stats_intv;
-                }
-            }
-
-            std::thread::sleep(
-                next_sched_at
-                    .min(next_stats_at)
-                    .duration_since(Instant::now()),
-            );
+	    match req_ch.recv_deadline(next_sched_at) {
+		Ok(req) => {
+		    
+		}
+	    }
         }
 
         self.struct_ops.take();

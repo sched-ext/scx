@@ -1,9 +1,11 @@
 use crate::bpf_intf;
 use crate::BpfStats;
+use std::thread::ThreadId;
+use std::thread::current;
 use crate::Layer;
 use crate::LayerKind;
 use crate::Stats;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use bitvec::prelude::*;
 use chrono::DateTime;
 use chrono::Local;
@@ -11,6 +13,7 @@ use log::warn;
 use scx_stats::Meta;
 use scx_stats::ScxStatsClient;
 use scx_stats::ScxStatsServer;
+use scx_stats::StatsReader;
 use scx_stats::ToJson;
 use scx_stats_derive::Stats;
 use serde::Deserialize;
@@ -428,13 +431,42 @@ impl SysStats {
     }
 }
 
-pub fn launch_server(sys_stats: Arc<Mutex<SysStats>>) -> Result<ScxStatsServer<(), ()>> {
-    Ok(ScxStatsServer::<(), ()>::new()
+pub enum StatsReq {
+    Hello(ThreadId),
+    Refresh(SysStats),
+}
+
+pub enum StatsRes {
+    Hello(SysStats),
+    Refresh(SysStats),
+}
+
+pub fn launch_server() -> Result<ScxStatsServer<StatsReq, StatsRes>> {
+    let open = move |(tx, rx)| {
+	tx.send(StatsReq::Hello(current().id()))?;
+	let mut sys_stats = match rx.receive()? {
+	    StatsRes::Hello(v) => v,
+	    res => bail!("invalid response to Hello: {:?}", &res),
+	};
+
+        let read: Box<dyn StatsReader> = Box::new(move |_args, (tx, rx)| {
+	    tx.send(StatsReq::Refresh(sys_stats));
+	    sys_stats = match rx.recv()? {
+		StatsRes::Refresh(v) => v,
+		res => bail!("invalid response to Refresh: {:?}", &res),
+	    };
+            sys_stats.to_json()
+        });
+
+        Ok(read)
+    };
+
+    Ok(ScxStatsServer::<StatsRequest, StatsResponse>::new()
         .add_stats_meta(LayerStats::meta())
         .add_stats_meta(SysStats::meta())
         .add_stats(
             "top",
-            Box::new(move |_, _| sys_stats.lock().unwrap().to_json()),
+            Box::new(move |_, (_tx, _rx)| sys_stats.lock().unwrap().to_json()),
         )
         .launch()?)
 }
