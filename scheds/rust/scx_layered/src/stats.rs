@@ -7,7 +7,7 @@ use anyhow::{bail, Result};
 use bitvec::prelude::*;
 use chrono::DateTime;
 use chrono::Local;
-use log::warn;
+use log::{info, warn};
 use scx_stats::Meta;
 use scx_stats::ScxStatsClient;
 use scx_stats::ScxStatsOps;
@@ -25,6 +25,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::current;
+use std::thread::sleep;
 use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -484,14 +485,42 @@ pub fn launch_server() -> Result<ScxStatsServer<StatsReq, StatsRes>> {
 }
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
-    let mut client = ScxStatsClient::new().connect()?;
-
+    let mut retry_cnt: u32 = 0;
     while !shutdown.load(Ordering::Relaxed) {
-        let sst = client.request::<SysStats>("stats", vec![])?;
-        let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
-        println!("###### {} ######", dt.to_rfc2822());
-        sst.format_all(&mut std::io::stdout())?;
-        std::thread::sleep(intv);
+        let mut client = match ScxStatsClient::new().connect() {
+            Ok(v) => v,
+            Err(e) => match e.downcast_ref::<std::io::Error>() {
+                Some(ioe) if ioe.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    if retry_cnt == 1 {
+                        info!("Stats server not avaliable, retrying...");
+                    }
+                    retry_cnt += 1;
+                    sleep(Duration::from_secs(1));
+                    continue;
+                }
+                _ => Err(e)?,
+            },
+        };
+        retry_cnt = 0;
+
+        while !shutdown.load(Ordering::Relaxed) {
+            let sst = match client.request::<SysStats>("stats", vec![]) {
+                Ok(v) => v,
+                Err(e) => match e.downcast_ref::<std::io::Error>() {
+                    Some(ioe) => {
+                        info!("Connection to stats_server failed ({})", &ioe);
+			sleep(Duration::from_secs(1));
+                        break;
+                    }
+                    None => Err(e)?,
+                },
+            };
+            let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
+            println!("###### {} ######", dt.to_rfc2822());
+            sst.format_all(&mut std::io::stdout())?;
+            sleep(intv);
+        }
     }
+
     Ok(())
 }
