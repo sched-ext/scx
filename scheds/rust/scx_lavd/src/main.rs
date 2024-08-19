@@ -64,6 +64,10 @@ struct Opts {
     #[clap(long = "prefer-smt-core", action = clap::ArgAction::SetTrue)]
     prefer_smt_core: bool,
 
+    /// Use little (effiency) cores before using big (performance) cores in core compaction
+    #[clap(long = "prefer-little-core", action = clap::ArgAction::SetTrue)]
+    prefer_little_core: bool,
+
     /// Disable frequency scaling by scx_lavd
     #[clap(long = "no-freq-scaling", action = clap::ArgAction::SetTrue)]
     no_freq_scaling: bool,
@@ -153,8 +157,9 @@ impl fmt::Display for FlatTopology {
 
 impl FlatTopology {
     /// Build a flat-structured topology
-    pub fn new(prefer_smt_core: bool) -> Result<FlatTopology> {
-        let (cpu_fids, avg_freq, nr_cpus_online) = Self::build_cpu_fids(prefer_smt_core).unwrap();
+    pub fn new(opts: &Opts) -> Result<FlatTopology> {
+        let (cpu_fids, avg_freq, nr_cpus_online) =
+            Self::build_cpu_fids(opts.prefer_smt_core, opts.prefer_little_core).unwrap();
         let cpdom_map = Self::build_cpdom(&cpu_fids, avg_freq).unwrap();
 
         Ok(FlatTopology {
@@ -165,7 +170,8 @@ impl FlatTopology {
     }
 
     /// Build a flat-structured list of CPUs in a preference order
-    fn build_cpu_fids(prefer_smt_core: bool) -> Option<(Vec<CpuFlatId>, usize, usize)> {
+    fn build_cpu_fids(prefer_smt_core: bool, prefer_little_core: bool) ->
+        Option<(Vec<CpuFlatId>, usize, usize)> {
         let topo = Topology::new().expect("Failed to build host topology");
         let mut cpu_fids = Vec::new();
 
@@ -211,26 +217,51 @@ impl FlatTopology {
         }
 
         // Sort the cpu_fids
-        if prefer_smt_core {
-            // Sort the cpu_fids by node, llc, ^max_freq, core, and cpu order
-            cpu_fids.sort_by(|a, b| {
-                a.node_id
-                    .cmp(&b.node_id)
-                    .then_with(|| a.llc_pos.cmp(&b.llc_pos))
-                    .then_with(|| b.max_freq.cmp(&a.max_freq))
-                    .then_with(|| a.core_pos.cmp(&b.core_pos))
-                    .then_with(|| a.cpu_pos.cmp(&b.cpu_pos))
-            });
-        } else {
-            // Sort the cpu_fids by cpu, node, llc, ^max_freq, and core order
-            cpu_fids.sort_by(|a, b| {
-                a.cpu_pos
-                    .cmp(&b.cpu_pos)
-                    .then_with(|| a.node_id.cmp(&b.node_id))
-                    .then_with(|| a.llc_pos.cmp(&b.llc_pos))
-                    .then_with(|| b.max_freq.cmp(&a.max_freq))
-                    .then_with(|| a.core_pos.cmp(&b.core_pos))
-            });
+        match (prefer_smt_core, prefer_little_core) {
+            (true, false) => {
+                // Sort the cpu_fids by node, llc, ^max_freq, core, and cpu order
+                cpu_fids.sort_by(|a, b| {
+                    a.node_id
+                        .cmp(&b.node_id)
+                        .then_with(|| a.llc_pos.cmp(&b.llc_pos))
+                        .then_with(|| b.max_freq.cmp(&a.max_freq))
+                        .then_with(|| a.core_pos.cmp(&b.core_pos))
+                        .then_with(|| a.cpu_pos.cmp(&b.cpu_pos))
+                });
+            }
+            (true, true) => {
+                // Sort the cpu_fids by node, llc, max_freq, core, and cpu order
+                cpu_fids.sort_by(|a, b| {
+                    a.node_id
+                        .cmp(&b.node_id)
+                        .then_with(|| a.llc_pos.cmp(&b.llc_pos))
+                        .then_with(|| a.max_freq.cmp(&b.max_freq))
+                        .then_with(|| a.core_pos.cmp(&b.core_pos))
+                        .then_with(|| a.cpu_pos.cmp(&b.cpu_pos))
+                });
+            }
+            (false, false) => {
+                // Sort the cpu_fids by cpu, node, llc, ^max_freq, and core order
+                cpu_fids.sort_by(|a, b| {
+                    a.cpu_pos
+                        .cmp(&b.cpu_pos)
+                        .then_with(|| a.node_id.cmp(&b.node_id))
+                        .then_with(|| a.llc_pos.cmp(&b.llc_pos))
+                        .then_with(|| b.max_freq.cmp(&a.max_freq))
+                        .then_with(|| a.core_pos.cmp(&b.core_pos))
+                });
+            }
+            (false, true) => {
+                // Sort the cpu_fids by cpu, node, llc, max_freq, and core order
+                cpu_fids.sort_by(|a, b| {
+                    a.cpu_pos
+                        .cmp(&b.cpu_pos)
+                        .then_with(|| a.node_id.cmp(&b.node_id))
+                        .then_with(|| a.llc_pos.cmp(&b.llc_pos))
+                        .then_with(|| a.max_freq.cmp(&b.max_freq))
+                        .then_with(|| a.core_pos.cmp(&b.core_pos))
+                });
+            }
         }
 
         Some((cpu_fids, avg_freq, topo.nr_cpus_online()))
@@ -341,7 +372,7 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, open_object, lavd_ops)?;
 
         // Initialize CPU topology
-        let topo = FlatTopology::new(opts.prefer_smt_core).unwrap();
+        let topo = FlatTopology::new(&opts).unwrap();
         Self::init_cpus(&mut skel, &topo);
 
         // Initialize skel according to @opts.
