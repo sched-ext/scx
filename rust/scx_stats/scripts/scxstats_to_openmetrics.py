@@ -90,21 +90,7 @@ def update_om_metrics(resp, omid, labels, meta_db, om_metrics):
         else:
             dbg(f'skpping {k_omid}')
 
-def main():
-    global verbose
-
-    parser = argparse.ArgumentParser(
-        prog='scxstats_to_openmetrics',
-        description='Read from scx_stats server and output in OpenMetrics format')
-    parser.add_argument('-i', '--intv', metavar='SECS', type=float, default='2.0',
-                        help='Polling interval (default: %(default)s)')
-    parser.add_argument('-v', '--verbose', action='count')
-    parser.add_argument('-p', '--path', metavar='PATH', default='/var/run/scx/root/stats',
-                        help='UNIX domain socket path to connect to (default: %(default)s)')
-
-    args = parser.parse_args()
-    verbose = args.verbose
-
+def connect_and_monitor(args):
     # Connect to the stats server.
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.connect(args.path)
@@ -159,5 +145,30 @@ def main():
                 sys.stdout.flush()
 
         time.sleep(args.intv)
+
+def main():
+    global verbose
+
+    parser = argparse.ArgumentParser(
+        prog='scxstats_to_openmetrics',
+        description='Read from scx_stats server and output in OpenMetrics format')
+    parser.add_argument('-i', '--intv', metavar='SECS', type=float, default='2.0',
+                        help='Polling interval (default: %(default)s)')
+    parser.add_argument('-v', '--verbose', action='count')
+    parser.add_argument('-p', '--path', metavar='PATH', default='/var/run/scx/root/stats',
+                        help='UNIX domain socket path to connect to (default: %(default)s)')
+
+    args = parser.parse_args()
+    verbose = args.verbose
+    last_e = None
+
+    while True:
+        try:
+            connect_and_monitor(args)
+        except Exception as e:
+            if type(e) is not type(last_e):
+                info(f'{e}, retrying...')
+                last_e = e
+            time.sleep(1)
 
 main()
