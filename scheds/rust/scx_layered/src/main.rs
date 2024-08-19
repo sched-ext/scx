@@ -671,7 +671,8 @@ impl Stats {
 
     fn new(skel: &mut BpfSkel, proc_reader: &procfs::ProcReader) -> Result<Self> {
         let nr_layers = skel.maps.rodata_data.nr_layers as usize;
-        let bpf_stats = BpfStats::read(&read_cpu_ctxs(skel)?, nr_layers);
+        let cpu_ctxs = read_cpu_ctxs(skel)?;
+        let bpf_stats = BpfStats::read(&cpu_ctxs, nr_layers);
 
         Ok(Self {
             at: Instant::now(),
@@ -684,7 +685,7 @@ impl Stats {
 
             total_util: 0.0,
             layer_utils: vec![0.0; nr_layers],
-            prev_layer_cycles: vec![0; nr_layers],
+            prev_layer_cycles: Self::read_layer_cycles(&cpu_ctxs, nr_layers),
 
             cpu_busy: 0.0,
             prev_total_cpu: read_total_cpu(&proc_reader)?,
