@@ -1,5 +1,6 @@
 name: pr-veristat
 run-name: ${{ github.actor }} PR veristat run
+on: [pull_request]
 jobs:
   pr-veristat:
     runs-on: ubuntu-22.04
