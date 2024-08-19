@@ -59,6 +59,9 @@ jobs:
       # Generate kernel headers
       - run: cd linux && make headers
 
+      - run: wget https://github.com/libbpf/veristat/releases/download/v0.3.2/veristat-v0.3.2-amd64.tar.gz
+      - run: tar zvf veristat-v0.3.2-amd64.tar.gz
+
       ### END DEPENDENCIES ###
 
       # The actual build:
@@ -79,7 +82,8 @@ jobs:
       - run: meson compile -C build veristat_diff
 
       # update veristat cache dirs
-      - run: rm -rf ~/veristat/* && cp *.csv ~/veristat/
+      - run: rm -rf ~/veristat/*.csv || echo 'nothing to clean'
+      - run: cp *.csv ~/veristat/
 
       - name: Save veristat cache
         id: cache-veristat-save
