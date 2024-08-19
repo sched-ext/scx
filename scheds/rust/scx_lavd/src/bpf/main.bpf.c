@@ -362,6 +362,14 @@ static struct task_ctx *get_task_ctx(struct task_struct *p)
 	return taskc;
 }
 
+static s32 get_task_cpu_id(struct task_struct *p)
+{
+	/*
+	 * This code assumes ONFIG_THREAD_INFO_IN_TASK is on in the kernel.
+	 */
+	return READ_ONCE(p->thread_info.cpu);
+}
+
 static struct cpu_ctx *get_cpu_ctx(void)
 {
 	const u32 idx = 0;
@@ -1622,7 +1630,8 @@ static u64 find_proper_dsq(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 }
 
 static void put_cpdom_rq(struct task_struct *p, struct task_ctx *taskc,
-			 struct cpu_ctx *cpuc, u64 enq_flags)
+			 struct cpu_ctx *cpuc_task, struct cpu_ctx *cpuc_cur,
+			 u64 enq_flags)
 {
 	struct task_ctx *taskc_run;
 	struct task_struct *p_run;
@@ -1654,13 +1663,13 @@ static void put_cpdom_rq(struct task_struct *p, struct task_ctx *taskc,
 		p_run = bpf_get_current_task_btf();
 		taskc_run = try_get_task_ctx(p_run);
 		if (taskc_run && p_run->scx.slice != 0)
-			try_yield_current_cpu(p_run, cpuc, taskc_run);
+			try_yield_current_cpu(p_run, cpuc_cur, taskc_run);
 	}
 
 	/*
-	 * Enqueue the task to one of the DSQs based on its virtual deadline.
+	 * Enqueue the task to one of task's DSQs based on its virtual deadline.
 	 */
-	dsq_id = find_proper_dsq(taskc, cpuc);
+	dsq_id = find_proper_dsq(taskc, cpuc_task);
 	scx_bpf_dispatch_vtime(p, dsq_id, LAVD_SLICE_UNDECIDED,
 			       taskc->vdeadline_log_clk, enq_flags);
 }
@@ -1841,8 +1850,9 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	struct cpu_ctx *cpuc;
+	struct cpu_ctx *cpuc_task, *cpuc_cur;
 	struct task_ctx *taskc;
+	s32 cpu_id;
 	
 	/*
 	 * If there is an idle CPU at the ops.select_cpu(), the task is already
@@ -1853,15 +1863,17 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * always put the task to the global DSQ, so any idle CPU can pick it
 	 * up.
 	 */
-	cpuc = get_cpu_ctx();
+	cpu_id = get_task_cpu_id(p);
 	taskc = get_task_ctx(p);
-	if (!cpuc || !taskc)
+	cpuc_task = get_cpu_ctx_id(cpu_id);
+	cpuc_cur = get_cpu_ctx();
+	if (!cpuc_cur || !cpuc_task || !taskc)
 		return;
 
 	/*
 	 * Place a task to a run queue of current cpu's compute domain.
 	 */
-	put_cpdom_rq(p, taskc, cpuc, enq_flags);
+	put_cpdom_rq(p, taskc, cpuc_task, cpuc_cur, enq_flags);
 }
 
 static bool is_kernel_task(struct task_struct *p)
