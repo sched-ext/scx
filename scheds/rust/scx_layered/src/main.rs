@@ -12,6 +12,7 @@ use stats::StatsRes;
 use stats::SysStats;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::io::Read;
@@ -21,6 +22,7 @@ use std::ops::Sub;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -1248,7 +1250,7 @@ struct Scheduler<'a, 'b> {
     proc_reader: procfs::ProcReader,
     sched_stats: Stats,
 
-    nr_layer_cpus_min_max: Vec<(usize, usize)>,
+    nr_layer_cpus_ranges: Vec<(usize, usize)>,
     processing_dur: Duration,
 
     stats_server: ScxStatsServer<StatsReq, StatsRes>,
@@ -1483,7 +1485,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
             sched_stats: Stats::new(&mut skel, &proc_reader)?,
 
-            nr_layer_cpus_min_max: vec![(0, 0); nr_layers],
+            nr_layer_cpus_ranges: vec![(0, 0); nr_layers],
             processing_dur: Default::default(),
 
             proc_reader,
@@ -1573,9 +1575,9 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             self.skel.maps.bss_data.fallback_cpu = self.cpu_pool.fallback_cpu as u32;
 
             for (lidx, layer) in self.layers.iter().enumerate() {
-                self.nr_layer_cpus_min_max[lidx] = (
-                    self.nr_layer_cpus_min_max[lidx].0.min(layer.nr_cpus),
-                    self.nr_layer_cpus_min_max[lidx].1.max(layer.nr_cpus),
+                self.nr_layer_cpus_ranges[lidx] = (
+                    self.nr_layer_cpus_ranges[lidx].0.min(layer.nr_cpus),
+                    self.nr_layer_cpus_ranges[lidx].1.max(layer.nr_cpus),
                 );
             }
         }
@@ -1596,16 +1598,19 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         Ok(())
     }
 
-    fn generate_sys_stats(&mut self, stats: &Stats) -> Result<SysStats> {
+    fn generate_sys_stats(
+        &mut self,
+        stats: &Stats,
+        cpus_ranges: &mut Vec<(usize, usize)>,
+    ) -> Result<SysStats> {
         let bstats = &stats.bpf_stats;
 
         let mut sys_stats = SysStats::new(stats, bstats, self.cpu_pool.fallback_cpu)?;
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
-            let layer_stats =
-                LayerStats::new(lidx, layer, stats, bstats, self.nr_layer_cpus_min_max[lidx]);
+            let layer_stats = LayerStats::new(lidx, layer, stats, bstats, cpus_ranges[lidx]);
             sys_stats.layers.insert(spec.name.to_string(), layer_stats);
-            self.nr_layer_cpus_min_max[lidx] = (layer.nr_cpus, layer.nr_cpus);
+            cpus_ranges[lidx] = (layer.nr_cpus, layer.nr_cpus);
         }
 
         Ok(sys_stats)
@@ -1614,6 +1619,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
         let mut next_sched_at = Instant::now() + self.sched_intv;
+        let mut cpus_ranges = HashMap::<ThreadId, Vec<(usize, usize)>>::new();
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();
@@ -1626,14 +1632,35 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             }
 
             match req_ch.recv_deadline(next_sched_at) {
-                Ok(StatsReq::Hello) => {
+                Ok(StatsReq::Hello(tid)) => {
+                    cpus_ranges.insert(
+                        tid,
+                        self.layers.iter().map(|l| (l.nr_cpus, l.nr_cpus)).collect(),
+                    );
                     let stats = Stats::new(&mut self.skel, &self.proc_reader)?;
                     res_ch.send(StatsRes::Hello(stats))?;
                 }
-                Ok(StatsReq::Refresh(mut stats)) => {
+                Ok(StatsReq::Refresh(tid, mut stats)) => {
+                    // Propagate self's layer cpu ranges into each stat's.
+                    for i in 0..self.nr_layer_cpus_ranges.len() {
+                        for (_, ranges) in cpus_ranges.iter_mut() {
+                            ranges[i] = (
+                                ranges[i].0.min(self.nr_layer_cpus_ranges[i].0),
+                                ranges[i].1.max(self.nr_layer_cpus_ranges[i].1),
+                            );
+                        }
+                        self.nr_layer_cpus_ranges[i] =
+                            (self.layers[i].nr_cpus, self.layers[i].nr_cpus);
+                    }
+
                     stats.refresh(&mut self.skel, &self.proc_reader, now, self.processing_dur)?;
-                    let sys_stats = self.generate_sys_stats(&stats)?;
+                    let sys_stats =
+                        self.generate_sys_stats(&stats, cpus_ranges.get_mut(&tid).unwrap())?;
                     res_ch.send(StatsRes::Refreshed((stats, sys_stats)))?;
+                }
+                Ok(StatsReq::Bye(tid)) => {
+                    cpus_ranges.remove(&tid);
+                    res_ch.send(StatsRes::Bye)?;
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => Err(e)?,

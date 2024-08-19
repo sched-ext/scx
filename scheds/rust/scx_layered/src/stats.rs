@@ -12,6 +12,7 @@ use scx_stats::Meta;
 use scx_stats::ScxStatsClient;
 use scx_stats::ScxStatsOps;
 use scx_stats::ScxStatsServer;
+use scx_stats::StatsCloser;
 use scx_stats::StatsOpener;
 use scx_stats::StatsReader;
 use scx_stats::ToJson;
@@ -23,6 +24,8 @@ use std::io::Write;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::thread::current;
+use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -424,19 +427,22 @@ impl SysStats {
 
 #[derive(Debug)]
 pub enum StatsReq {
-    Hello,
-    Refresh(Stats),
+    Hello(ThreadId),
+    Refresh(ThreadId, Stats),
+    Bye(ThreadId),
 }
 
 #[derive(Debug)]
 pub enum StatsRes {
     Hello(Stats),
     Refreshed((Stats, SysStats)),
+    Bye,
 }
 
 pub fn launch_server() -> Result<ScxStatsServer<StatsReq, StatsRes>> {
     let open: Box<dyn StatsOpener<StatsReq, StatsRes>> = Box::new(move |(req_ch, res_ch)| {
-        req_ch.send(StatsReq::Hello)?;
+        let tid = current().id();
+        req_ch.send(StatsReq::Hello(tid))?;
         let mut stats = Some(match res_ch.recv()? {
             StatsRes::Hello(v) => v,
             res => bail!("invalid response to Hello: {:?}", &res),
@@ -444,7 +450,7 @@ pub fn launch_server() -> Result<ScxStatsServer<StatsReq, StatsRes>> {
 
         let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
             Box::new(move |_args, (req_ch, res_ch)| {
-                req_ch.send(StatsReq::Refresh(stats.take().unwrap()))?;
+                req_ch.send(StatsReq::Refresh(tid, stats.take().unwrap()))?;
                 let (new_stats, sys_stats) = match res_ch.recv()? {
                     StatsRes::Refreshed(v) => v,
                     res => bail!("invalid response to Refresh: {:?}", &res),
@@ -456,10 +462,24 @@ pub fn launch_server() -> Result<ScxStatsServer<StatsReq, StatsRes>> {
         Ok(read)
     });
 
+    let close: Box<dyn StatsCloser<StatsReq, StatsRes>> = Box::new(move |(req_ch, res_ch)| {
+        req_ch.send(StatsReq::Bye(current().id())).unwrap();
+        match res_ch.recv().unwrap() {
+            StatsRes::Bye => {}
+            res => panic!("invalid response to Bye: {:?}", &res),
+        }
+    });
+
     Ok(ScxStatsServer::new()
         .add_stats_meta(LayerStats::meta())
         .add_stats_meta(SysStats::meta())
-        .add_stats_ops("top", ScxStatsOps { open, close: None })
+        .add_stats_ops(
+            "top",
+            ScxStatsOps {
+                open,
+                close: Some(close),
+            },
+        )
         .launch()?)
 }
 
