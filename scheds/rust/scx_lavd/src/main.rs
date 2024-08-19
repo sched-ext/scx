@@ -56,6 +56,18 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 /// See the more detailed overview of the LAVD design at main.bpf.c.
 #[derive(Debug, Parser)]
 struct Opts {
+    /// Run in a performance mode to get maximum performance
+    #[clap(long = "performance", action = clap::ArgAction::SetTrue)]
+    performance: bool,
+
+    /// Run in a power-save mode to minimize power consumption
+    #[clap(long = "powersave", action = clap::ArgAction::SetTrue)]
+    powersave: bool,
+
+    /// Run in a balanced mode aiming for sweetspot between power and performance (default)
+    #[clap(long = "balanced", action = clap::ArgAction::SetTrue)]
+    balanced: bool,
+
     /// Disable core compaction, which uses minimum CPUs for power saving, and always use all the online CPUs.
     #[clap(long = "no-core-compaction", action = clap::ArgAction::SetTrue)]
     no_core_compaction: bool,
@@ -81,6 +93,32 @@ struct Opts {
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
+}
+
+impl Opts {
+    fn proc(&mut self) -> Option<&mut Self> {
+
+        if self.performance {
+            self.no_core_compaction = true;
+            self.prefer_smt_core = false;
+            self.prefer_little_core = false;
+            self.no_freq_scaling = true;
+        }
+        if self.powersave {
+            self.no_core_compaction = false;
+            self.prefer_smt_core = true;
+            self.prefer_little_core = true;
+            self.no_freq_scaling = false;
+        }
+        if self.balanced{
+            self.no_core_compaction = false;
+            self.prefer_smt_core = false;
+            self.prefer_little_core = false;
+            self.no_freq_scaling = false;
+        }
+
+        Some(self)
+    }
 }
 
 unsafe impl Plain for msg_task_ctx {}
@@ -623,10 +661,12 @@ fn init_signal_handlers() {
 }
 
 fn main() -> Result<()> {
-    let opts = Opts::parse();
+    let mut opts = Opts::parse();
+    opts.proc().unwrap();
 
     init_log(&opts);
     init_signal_handlers();
+    debug!("{:#?}", opts);
 
     let mut open_object = MaybeUninit::uninit();
     loop {
