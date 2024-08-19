@@ -241,6 +241,15 @@ struct task_ctx *lookup_task_ctx(const struct task_struct *p)
 }
 
 /*
+ * Return true if interactive tasks classification via voluntary context
+ * switches is enabled, false otherwise.
+ */
+static bool is_nvcsw_enabled(void)
+{
+	return !!nvcsw_max_thresh;
+}
+
+/*
  * Return true if the task is interactive, false otherwise.
  */
 static bool is_task_interactive(struct task_struct *p)
@@ -259,15 +268,6 @@ static bool is_task_interactive(struct task_struct *p)
 static inline bool is_kthread(const struct task_struct *p)
 {
 	return !!(p->flags & PF_KTHREAD);
-}
-
-/*
- * Return true if interactive tasks classification via voluntary context
- * switches is enabled, false otherwise.
- */
-static bool is_nvcsw_enabled(void)
-{
-	return !!nvcsw_max_thresh;
 }
 
 /*
@@ -699,6 +699,9 @@ static void handle_sync_wakeup(struct task_struct *p)
 {
 	struct task_ctx *tctx;
 
+	if (!is_nvcsw_enabled())
+		return;
+
 	/*
 	 * If we are waking up a task immediately promote it as interactive, so
 	 * that it can be dispatched as soon as possible on the first CPU
@@ -933,7 +936,8 @@ static void update_task_interactive(struct task_ctx *tctx)
 	 * (nvcsw_avg_thresh) it is classified as interactive, otherwise the
 	 * task is classified as regular.
 	 */
-	tctx->is_interactive = tctx->avg_nvcsw >= nvcsw_avg_thresh;
+	if (is_nvcsw_enabled())
+		tctx->is_interactive = tctx->avg_nvcsw >= nvcsw_avg_thresh;
 }
 
 /*
