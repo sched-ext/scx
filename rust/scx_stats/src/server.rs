@@ -221,9 +221,9 @@ where
         line: String,
         data: &Arc<Mutex<ScxStatsServerData<Req, Res>>>,
         ch: &ChannelPair<Req, Res>,
+        open_ops: &mut ScxStatsOpenOps<Req, Res>,
     ) -> Result<ScxStatsResponse> {
         let req: ScxStatsRequest = serde_json::from_str(&line)?;
-        let mut open_ops = ScxStatsOpenOps::new();
 
         match req.req.as_str() {
             "stats" => {
@@ -263,6 +263,7 @@ where
         exit: Arc<AtomicBool>,
     ) -> Result<()> {
         let mut stream_reader = BufReader::new(stream.try_clone()?);
+        let mut open_ops = ScxStatsOpenOps::new();
 
         loop {
             let mut line = String::new();
@@ -275,7 +276,7 @@ where
                 return Ok(());
             }
 
-            let resp = match Self::handle_request(line, &data, &inner_ch) {
+            let resp = match Self::handle_request(line, &data, &inner_ch, &mut open_ops) {
                 Ok(v) => v,
                 Err(e) => {
                     let errno = match e.downcast_ref::<ScxStatsErrno>() {
