@@ -382,6 +382,11 @@ followings are important branches:
 
 [A list of the breaking changes](./BREAKING_CHANGES.md) in the sched_ext kernel tree and the associated commits for the schedulers in this repo.
 
+## [Developer Guide](./DEVELOPER_GUIDE.md)
+
+Want to learn how to develop a scheduler or find some useful tools for working
+with schedulers? See the developer guide for more details.
+
 ## Getting in Touch
 
 We aim to build a friendly and approachable community around sched_ext. You
