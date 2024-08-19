@@ -49,15 +49,24 @@ impl<
 {
 }
 
-pub trait StatsOpener<Tx, Rx>: FnMut() -> Result<Box<dyn StatsReader<Tx, Rx>>> + Send {}
-impl<Tx, Rx, T: FnMut() -> Result<Box<dyn StatsReader<Tx, Rx>>> + Send> StatsOpener<Tx, Rx> for T {}
+pub trait StatsOpener<Tx, Rx>:
+    FnMut((&Sender<Tx>, &Receiver<Rx>)) -> Result<Box<dyn StatsReader<Tx, Rx>>> + Send
+{
+}
+impl<
+        Tx,
+        Rx,
+        T: FnMut((&Sender<Tx>, &Receiver<Rx>)) -> Result<Box<dyn StatsReader<Tx, Rx>>> + Send,
+    > StatsOpener<Tx, Rx> for T
+{
+}
 
-pub trait StatsCloser: FnOnce() + Send {}
-impl<T: FnOnce() + Send> StatsCloser for T {}
+pub trait StatsCloser<Tx, Rx>: FnOnce((&Sender<Tx>, &Receiver<Rx>)) + Send {}
+impl<Tx, Rx, T: FnOnce((&Sender<Tx>, &Receiver<Rx>)) + Send> StatsCloser<Tx, Rx> for T {}
 
 pub struct ScxStatsOps<Tx, Rx> {
     open: Box<dyn StatsOpener<Tx, Rx>>,
-    close: Option<Box<dyn StatsCloser>>,
+    close: Option<Box<dyn StatsCloser<Tx, Rx>>>,
 }
 
 struct ScxStatsOpenOps<Tx, Rx> {
@@ -66,6 +75,7 @@ struct ScxStatsOpenOps<Tx, Rx> {
         (
             Arc<Mutex<ScxStatsOps<Tx, Rx>>>,
             Box<dyn StatsReader<Tx, Rx>>,
+            ChannelPair<Tx, Rx>,
         ),
     >,
 }
@@ -80,9 +90,9 @@ impl<Tx, Rx> ScxStatsOpenOps<Tx, Rx> {
 
 impl<Tx, Rx> std::ops::Drop for ScxStatsOpenOps<Tx, Rx> {
     fn drop(&mut self) {
-        for (_, (ops, _)) in self.map.iter_mut() {
+        for (_, (ops, _, ch)) in self.map.iter_mut() {
             if let Some(close) = ops.lock().unwrap().close.take() {
-                close();
+                close((&ch.tx, &ch.rx));
             }
         }
     }
@@ -202,7 +212,7 @@ where
     fn handle_request(
         line: String,
         data: &Arc<Mutex<ScxStatsServerData<Tx, Rx>>>,
-        inner_ch: &ChannelPair<Tx, Rx>,
+        ch: &ChannelPair<Tx, Rx>,
     ) -> Result<ScxStatsResponse> {
         let req: ScxStatsRequest = serde_json::from_str(&line)?;
         let mut open_ops = ScxStatsOpenOps::new();
@@ -221,13 +231,15 @@ where
                 };
 
                 if !open_ops.map.contains_key(target) {
-                    let read = (ops.lock().unwrap().open)()?;
-                    open_ops.map.insert(target.into(), (ops.clone(), read));
+                    let read = (ops.lock().unwrap().open)((&ch.tx, &ch.rx))?;
+                    open_ops
+                        .map
+                        .insert(target.into(), (ops.clone(), read, ch.clone()));
                 }
 
                 let read = &mut open_ops.map.get_mut(target).unwrap().1;
 
-                let resp = read(&req.args, (&inner_ch.tx, &inner_ch.rx))?;
+                let resp = read(&req.args, (&ch.tx, &ch.rx))?;
 
                 Self::build_resp(0, &resp)
             }
@@ -282,11 +294,11 @@ where
                 let idx = chs_cursor;
                 chs_cursor += 1;
                 chs.insert(idx, new_ch);
-                debug!("proxy: added new channel idx={}", idx);
+                debug!("proxy: added new channel idx={}, total={}", idx, chs.len());
             }
 
             if let Some(idx) = idx_to_drop.take() {
-                debug!("proxy: dropping channel {}", idx);
+                debug!("proxy: dropping channel {}, total={}", idx, chs.len());
                 chs.remove(&idx).unwrap();
             }
 
@@ -448,7 +460,7 @@ where
             Box::new(move |args, chan| wrapped_fetch.lock().unwrap()(args, chan));
         let wrapped_read = Arc::new(read);
         let ops = ScxStatsOps {
-            open: Box::new(move || {
+            open: Box::new(move |_| {
                 let copy = wrapped_read.clone();
                 Ok(Box::new(move |args, chan| copy(args, chan)))
             }),
