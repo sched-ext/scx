@@ -67,8 +67,8 @@ pub trait StatsCloser<Req, Res>: FnOnce((&Sender<Req>, &Receiver<Res>)) + Send {
 impl<Req, Res, T: FnOnce((&Sender<Req>, &Receiver<Res>)) + Send> StatsCloser<Req, Res> for T {}
 
 pub struct ScxStatsOps<Req, Res> {
-    open: Box<dyn StatsOpener<Req, Res>>,
-    close: Option<Box<dyn StatsCloser<Req, Res>>>,
+    pub open: Box<dyn StatsOpener<Req, Res>>,
+    pub close: Option<Box<dyn StatsCloser<Req, Res>>>,
 }
 
 struct ScxStatsOpenOps<Req, Res> {
