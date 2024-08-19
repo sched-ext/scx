@@ -31,6 +31,46 @@ common crate for calculating weights between scheduling domains. See the
 `infeasible` crate in `rust/scx_utils/src` for the implementation.
 
 ## Useful Tools
+### perf
+
+The linux `perf` tool has a subcommand for profiling scheduling `perf sched`.
+The interface is text driven, but is able to provide various timeline views and
+aggregations of scheduler events. The following is an example of using `perf
+sched` to get a timeline histogram with additional scheduling metrics.
+
+```
+$ perf sched record
+$ perf sched timehist -Vw --state
+           time    cpu  0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0  task name                       wait time  sch delay   run time  state
+                                                                                                           [tid/pid]                          (msec)     (msec)     (msec)       
+--------------- ------  ---------------------------------------------------------------------------------  ------------------------------  ---------  ---------  ---------  -----
+  960264.500659 [0000]                                                                                     perf[1635250]                                                    awakened: migration/0[19]
+  960264.500680 [0000]  s                                                                                  perf[1635250]                       0.000      0.000      0.000      D                                 
+  960264.500683 [0000]                                                                                     migration/0[19]                                                  awakened: perf[1635250]
+  960264.500809 [0001]                                                                                     perf[1635250]                                                    awakened: migration/1[24]
+  960264.500814 [0001]   s                                                                                 perf[1635250]                       0.000      0.000      0.000      D                                 
+  960264.500816 [0001]                                                                                     migration/1[24]                                                  awakened: perf[1635250]
+  960264.500824 [0001]   s                                                                                 migration/1[24]                     0.000      0.005      0.009      S                                 
+  960264.502403 [0001]   i                                                                                 <idle>                              0.000      0.000      1.579      I                                 
+  960264.502418 [0001]   s                                                                                 HTTPSrvExec39[3403538/3403436]      0.000      0.000      0.014      S                                 
+  960264.506002 [0001]   i                                                                                 <idle>                              0.014      0.000      3.583      I                                 
+  960264.506045 [0001]   s                                                                                 CfgrIO0[13302/13094]                0.000      0.000      0.043      S                                 
+  960264.506763 [0001]                                                                                     swapper                                                          awakened: chef-client[1629157]
+  960264.506767 [0001]   i                                                                                 <idle>                              0.043      0.000      0.721      I                                 
+  960264.506784 [0001]   s                                                                                 chef-client[1629157]                0.000      0.003      0.017      S                                 
+  960264.507622 [0001]   i                                                                                 <idle>                              0.017      0.000      0.837      I                                 
+  960264.507806 [0001]                                                                                     mcrcfg-fci[1635235/1635080]                                      awakened: GlobalCPUThread[1635186/1635080
+  960264.507937 [0001]                                                                                     mcrcfg-fci[1635235/1635080]                                       awakened: FalconClientThr[1635187/1635080
+  960264.507996 [0001]                                                                                     mcrcfg-fci[1635235/1635080]                                       awakened: CfgrIO0[1635185/1635080]
+  960264.508007 [0001]   s                                                                                 mcrcfg-fci[1635235/1635080]          0.000      0.000      0.384      S                                  
+  960264.508079 [0001]   i                                                                                 <idle>                               0.384      0.000      0.071      I                                  
+  960264.508100 [0001]                                                                                     ThriftSrv.N2104[1635036/2683498                                   awakened: IOThreadPool0[2685229/2683498]
+  960264.508108 [0001]   s                                                                                 ThriftSrv.N2104[1635036/2683498      0.000      0.000      0.029      S                                  
+  960264.508638 [0001]   i                                                                                 <idle>                               0.029      0.000      0.529      I                                  
+  960264.508655 [0001]                                                                                     ThriftSrv.N2104[1635036/2683498                                   awakened: ThriftIO70[2683693/2683498]
+
+```
+
 ### `bpftool`
 [`bpftool`](https://github.com/libbpf/bpftool) contains many utilities for
 interacting with the BPF subsystem and BPF programs. If you need to know
