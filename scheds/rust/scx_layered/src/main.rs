@@ -7,9 +7,12 @@ mod stats;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 use stats::LayerStats;
+use stats::StatsReq;
+use stats::StatsRes;
 use stats::SysStats;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
 use std::io::Read;
@@ -19,7 +22,8 @@ use std::ops::Sub;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::thread::spawn;
+use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -30,6 +34,7 @@ use anyhow::Context;
 use anyhow::Result;
 use bitvec::prelude::*;
 use clap::Parser;
+use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
@@ -39,6 +44,7 @@ use log::debug;
 use log::info;
 use log::trace;
 use log::warn;
+use scx_stats::ScxStatsServer;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
@@ -234,10 +240,12 @@ lazy_static::lazy_static! {
 /// Monitoring Statistics
 /// =====================
 ///
-/// scx_stat server will listen on /var/run/scx/root/stat. Monitor
-/// statistics by runing `scx_layered monitor`.
+/// Run with `--monitor INTERVAL` added to enable stats monitoring. There is
+/// also scx_stat server listening on /var/run/scx/root/stat and you can
+/// monitor statistics by running `scx_layered --monitor INTERVAL`
+/// separately.
 ///
-///   $ scx_layered --monitor
+///   $ scx_layered --monitor 1
 ///   tot= 117909 local=86.20 open_idle= 0.21 affn_viol= 1.37 proc=6ms
 ///   busy= 34.2 util= 1733.6 load=  21744.1 fallback_cpu=  1
 ///     batch    : util/frac=   11.8/  0.7 load/frac=     29.7:  0.1 tasks=  2597
@@ -307,10 +315,6 @@ struct Opts {
     #[clap(short = 'i', long, default_value = "0.1")]
     interval: f64,
 
-    /// Statistics interval in seconds.
-    #[clap(short = 'I', long, default_value = "2.0")]
-    stats_interval: f64,
-
     /// Disable load-fraction based max layer CPU limit. ***NOTE***
     /// load-fraction calculation is currently broken due to lack of
     /// infeasible weight adjustments. Setting this option is recommended.
@@ -335,9 +339,10 @@ struct Opts {
     #[clap(short = 'e', long)]
     example: Option<String>,
 
-    /// Run in monitor mode.
+    /// Enable stats monitoring with the specified interval. If no layer
+    /// specs are specified, run in monitor mode.
     #[clap(long)]
-    monitor: bool,
+    monitor: Option<f64>,
 
     /// Layer specification. See --help.
     specs: Vec<String>,
@@ -609,6 +614,7 @@ impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
     }
 }
 
+#[derive(Clone, Debug)]
 struct Stats {
     nr_layers: usize,
     at: Instant,
@@ -627,6 +633,9 @@ struct Stats {
 
     bpf_stats: BpfStats,
     prev_bpf_stats: BpfStats,
+
+    processing_dur: Duration,
+    prev_processing_dur: Duration,
 }
 
 impl Stats {
@@ -668,7 +677,8 @@ impl Stats {
 
     fn new(skel: &mut BpfSkel, proc_reader: &procfs::ProcReader) -> Result<Self> {
         let nr_layers = skel.maps.rodata_data.nr_layers as usize;
-        let bpf_stats = BpfStats::read(&read_cpu_ctxs(skel)?, nr_layers);
+        let cpu_ctxs = read_cpu_ctxs(skel)?;
+        let bpf_stats = BpfStats::read(&cpu_ctxs, nr_layers);
 
         Ok(Self {
             at: Instant::now(),
@@ -681,13 +691,16 @@ impl Stats {
 
             total_util: 0.0,
             layer_utils: vec![0.0; nr_layers],
-            prev_layer_cycles: vec![0; nr_layers],
+            prev_layer_cycles: Self::read_layer_cycles(&cpu_ctxs, nr_layers),
 
             cpu_busy: 0.0,
             prev_total_cpu: read_total_cpu(&proc_reader)?,
 
             bpf_stats: bpf_stats.clone(),
             prev_bpf_stats: bpf_stats,
+
+            processing_dur: Default::default(),
+            prev_processing_dur: Default::default(),
         })
     }
 
@@ -696,6 +709,7 @@ impl Stats {
         skel: &mut BpfSkel,
         proc_reader: &procfs::ProcReader,
         now: Instant,
+        cur_processing_dur: Duration,
     ) -> Result<()> {
         let elapsed = now.duration_since(self.at).as_secs_f64() as f64;
         let cpu_ctxs = read_cpu_ctxs(skel)?;
@@ -732,6 +746,10 @@ impl Stats {
         let cur_bpf_stats = BpfStats::read(&cpu_ctxs, self.nr_layers);
         let bpf_stats = &cur_bpf_stats - &self.prev_bpf_stats;
 
+        let processing_dur = cur_processing_dur
+            .checked_sub(self.prev_processing_dur)
+            .unwrap();
+
         *self = Self {
             at: now,
             nr_layers: self.nr_layers,
@@ -750,6 +768,9 @@ impl Stats {
 
             bpf_stats,
             prev_bpf_stats: cur_bpf_stats,
+
+            processing_dur,
+            prev_processing_dur: cur_processing_dur,
         };
         Ok(())
     }
@@ -1225,7 +1246,6 @@ struct Scheduler<'a, 'b> {
     layer_specs: &'b Vec<LayerSpec>,
 
     sched_intv: Duration,
-    stats_intv: Duration,
     no_load_frac_limit: bool,
 
     cpu_pool: CpuPool,
@@ -1233,13 +1253,11 @@ struct Scheduler<'a, 'b> {
 
     proc_reader: procfs::ProcReader,
     sched_stats: Stats,
-    report_stats: Stats,
 
-    nr_layer_cpus_min_max: Vec<(usize, usize)>,
+    nr_layer_cpus_ranges: Vec<(usize, usize)>,
     processing_dur: Duration,
-    prev_processing_dur: Duration,
 
-    sys_stats: Arc<Mutex<SysStats>>,
+    stats_server: ScxStatsServer<StatsReq, StatsRes>,
 }
 
 impl<'a, 'b> Scheduler<'a, 'b> {
@@ -1448,33 +1466,6 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         // Other stuff.
         let proc_reader = procfs::ProcReader::new();
-        let sys_stats = Arc::new(Mutex::new(SysStats::default()));
-
-        let mut sched = Self {
-            struct_ops: None,
-            layer_specs,
-
-            sched_intv: Duration::from_secs_f64(opts.interval),
-            stats_intv: Duration::from_secs_f64(opts.stats_interval),
-            no_load_frac_limit: opts.no_load_frac_limit,
-
-            cpu_pool,
-            layers,
-
-            sched_stats: Stats::new(&mut skel, &proc_reader)?,
-            report_stats: Stats::new(&mut skel, &proc_reader)?,
-
-            nr_layer_cpus_min_max: vec![(0, 0); nr_layers],
-            processing_dur: Duration::from_millis(0),
-            prev_processing_dur: Duration::from_millis(0),
-
-            proc_reader,
-            skel,
-
-            sys_stats: sys_stats.clone(),
-        };
-
-        stats::launch_server(sys_stats)?;
 
         // XXX If we try to refresh the cpumasks here before attaching, we
         // sometimes (non-deterministically) don't see the updated values in
@@ -1483,7 +1474,30 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         // huge problem in the interim until we figure it out.
 
         // Attach.
-        sched.struct_ops = Some(scx_ops_attach!(sched.skel, layered)?);
+        let struct_ops = scx_ops_attach!(skel, layered)?;
+        let stats_server = stats::launch_server()?;
+
+        let sched = Self {
+            struct_ops: Some(struct_ops),
+            layer_specs,
+
+            sched_intv: Duration::from_secs_f64(opts.interval),
+            no_load_frac_limit: opts.no_load_frac_limit,
+
+            cpu_pool,
+            layers,
+
+            sched_stats: Stats::new(&mut skel, &proc_reader)?,
+
+            nr_layer_cpus_ranges: vec![(0, 0); nr_layers],
+            processing_dur: Default::default(),
+
+            proc_reader,
+            skel,
+
+            stats_server,
+        };
+
         info!("Layered Scheduler Attached. Run `scx_layered --monitor` for metrics.");
 
         Ok(sched)
@@ -1565,9 +1579,9 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             self.skel.maps.bss_data.fallback_cpu = self.cpu_pool.fallback_cpu as u32;
 
             for (lidx, layer) in self.layers.iter().enumerate() {
-                self.nr_layer_cpus_min_max[lidx] = (
-                    self.nr_layer_cpus_min_max[lidx].0.min(layer.nr_cpus),
-                    self.nr_layer_cpus_min_max[lidx].1.max(layer.nr_cpus),
+                self.nr_layer_cpus_ranges[lidx] = (
+                    self.nr_layer_cpus_ranges[lidx].0.min(layer.nr_cpus),
+                    self.nr_layer_cpus_ranges[lidx].1.max(layer.nr_cpus),
                 );
             }
         }
@@ -1577,48 +1591,39 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
     fn step(&mut self) -> Result<()> {
         let started_at = Instant::now();
-        self.sched_stats
-            .refresh(&mut self.skel, &self.proc_reader, started_at)?;
-
+        self.sched_stats.refresh(
+            &mut self.skel,
+            &self.proc_reader,
+            started_at,
+            self.processing_dur,
+        )?;
         self.refresh_cpumasks()?;
-
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
     }
 
-    fn refresh_sys_stats(&mut self) -> Result<()> {
-        let started_at = Instant::now();
-        self.report_stats
-            .refresh(&mut self.skel, &self.proc_reader, started_at)?;
-        let stats = &self.report_stats;
+    fn generate_sys_stats(
+        &mut self,
+        stats: &Stats,
+        cpus_ranges: &mut Vec<(usize, usize)>,
+    ) -> Result<SysStats> {
         let bstats = &stats.bpf_stats;
 
-        let processing_dur = self.processing_dur - self.prev_processing_dur;
-        self.prev_processing_dur = self.processing_dur;
-
-        let mut sys_stats = SysStats::new(
-            stats,
-            bstats,
-            &self.stats_intv,
-            &processing_dur,
-            self.cpu_pool.fallback_cpu,
-        )?;
+        let mut sys_stats = SysStats::new(stats, bstats, self.cpu_pool.fallback_cpu)?;
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
-            let layer_stats =
-                LayerStats::new(lidx, layer, stats, bstats, self.nr_layer_cpus_min_max[lidx]);
+            let layer_stats = LayerStats::new(lidx, layer, stats, bstats, cpus_ranges[lidx]);
             sys_stats.layers.insert(spec.name.to_string(), layer_stats);
-            self.nr_layer_cpus_min_max[lidx] = (layer.nr_cpus, layer.nr_cpus);
+            cpus_ranges[lidx] = (layer.nr_cpus, layer.nr_cpus);
         }
 
-        *self.sys_stats.lock().unwrap() = sys_stats;
-        Ok(())
+        Ok(sys_stats)
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
-        let now = Instant::now();
-        let mut next_sched_at = now + self.sched_intv;
-        let mut next_stats_at = now + self.stats_intv;
+        let (res_ch, req_ch) = self.stats_server.channels();
+        let mut next_sched_at = Instant::now() + self.sched_intv;
+        let mut cpus_ranges = HashMap::<ThreadId, Vec<(usize, usize)>>::new();
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();
@@ -1630,18 +1635,40 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 }
             }
 
-            if now >= next_stats_at {
-                self.refresh_sys_stats()?;
-                while next_stats_at < now {
-                    next_stats_at += self.stats_intv;
+            match req_ch.recv_deadline(next_sched_at) {
+                Ok(StatsReq::Hello(tid)) => {
+                    cpus_ranges.insert(
+                        tid,
+                        self.layers.iter().map(|l| (l.nr_cpus, l.nr_cpus)).collect(),
+                    );
+                    let stats = Stats::new(&mut self.skel, &self.proc_reader)?;
+                    res_ch.send(StatsRes::Hello(stats))?;
                 }
-            }
+                Ok(StatsReq::Refresh(tid, mut stats)) => {
+                    // Propagate self's layer cpu ranges into each stat's.
+                    for i in 0..self.nr_layer_cpus_ranges.len() {
+                        for (_, ranges) in cpus_ranges.iter_mut() {
+                            ranges[i] = (
+                                ranges[i].0.min(self.nr_layer_cpus_ranges[i].0),
+                                ranges[i].1.max(self.nr_layer_cpus_ranges[i].1),
+                            );
+                        }
+                        self.nr_layer_cpus_ranges[i] =
+                            (self.layers[i].nr_cpus, self.layers[i].nr_cpus);
+                    }
 
-            std::thread::sleep(
-                next_sched_at
-                    .min(next_stats_at)
-                    .duration_since(Instant::now()),
-            );
+                    stats.refresh(&mut self.skel, &self.proc_reader, now, self.processing_dur)?;
+                    let sys_stats =
+                        self.generate_sys_stats(&stats, cpus_ranges.get_mut(&tid).unwrap())?;
+                    res_ch.send(StatsRes::Refreshed((stats, sys_stats)))?;
+                }
+                Ok(StatsReq::Bye(tid)) => {
+                    cpus_ranges.remove(&tid);
+                    res_ch.send(StatsRes::Bye)?;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(e) => Err(e)?,
+            }
         }
 
         self.struct_ops.take();
@@ -1850,10 +1877,6 @@ fn main() -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
-    if opts.monitor {
-        return stats::monitor(shutdown.clone());
-    }
-
     if let Some(path) = &opts.example {
         write_example_file(path)?;
         return Ok(());
@@ -1865,6 +1888,16 @@ fn main() -> Result<()> {
             &mut LayerSpec::parse(input)
                 .context(format!("Failed to parse specs[{}] ({:?})", idx, input))?,
         );
+    }
+
+    if let Some(intv) = opts.monitor {
+        let shutdown_copy = shutdown.clone();
+        let jh =
+            spawn(move || stats::monitor(Duration::from_secs_f64(intv), shutdown_copy).unwrap());
+        if layer_config.specs.len() == 0 {
+            let _ = jh.join();
+            return Ok(());
+        }
     }
 
     debug!("specs={}", serde_json::to_string_pretty(&layer_config)?);

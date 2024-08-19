@@ -90,7 +90,7 @@ The statistics server which serves the above structs through a UNIX domain
 socket can be launched as follows:
 
 ```rust
-    ScxStatsServer::new()
+    let _server = ScxStatsServer::new()
         .set_path(&path)
         .add_stats_meta(ClusterStats::meta())
         .add_stats_meta(DomainStats::meta())
@@ -111,9 +111,9 @@ return `serde_json::Value`. Note that `scx_stats::ToJson` automatically adds
 `.to_json()` to structs which implement both `scx_stats::Meta` and
 `serde::Serialize`.
 
-The above will launch the statistics server listening on `@path`. The client
-side is also simple. Taken from
-[`examples/client.rs`](./examples/client.rs):
+The above will launch the statistics server listening on `@path`. Note that
+the server will shutdown when `_server` variable is dropped. The client side
+is also simple. Taken from [`examples/client.rs`](./examples/client.rs):
 
 ```rust
     let mut client = ScxStatsClient::new().set_path(path).connect().unwrap();

@@ -3,14 +3,18 @@ use crate::BpfStats;
 use crate::Layer;
 use crate::LayerKind;
 use crate::Stats;
-use anyhow::Result;
+use anyhow::{bail, Result};
 use bitvec::prelude::*;
 use chrono::DateTime;
 use chrono::Local;
-use log::warn;
+use log::{info, warn};
 use scx_stats::Meta;
 use scx_stats::ScxStatsClient;
+use scx_stats::ScxStatsOps;
 use scx_stats::ScxStatsServer;
+use scx_stats::StatsCloser;
+use scx_stats::StatsOpener;
+use scx_stats::StatsReader;
 use scx_stats::ToJson;
 use scx_stats_derive::Stats;
 use serde::Deserialize;
@@ -20,7 +24,9 @@ use std::io::Write;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::thread::current;
+use std::thread::sleep;
+use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -44,7 +50,7 @@ fn fmt_num(v: u64) -> String {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
-#[stat(_om_prefix = "l_", _om_label="layer_name")]
+#[stat(_om_prefix = "l_", _om_label = "layer_name")]
 pub struct LayerStats {
     #[stat(desc = "layer: CPU utilization (100% means one full CPU)")]
     pub util: f64,
@@ -306,8 +312,6 @@ impl LayerStats {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct SysStats {
-    #[stat(desc = "update interval", _om_skip)]
-    pub intv: f64,
     #[stat(desc = "timestamp", _om_skip)]
     pub at: f64,
     #[stat(desc = "# sched events duringg the period")]
@@ -341,13 +345,7 @@ pub struct SysStats {
 }
 
 impl SysStats {
-    pub fn new(
-        stats: &Stats,
-        bstats: &BpfStats,
-        intv: &Duration,
-        proc_dur: &Duration,
-        fallback_cpu: usize,
-    ) -> Result<Self> {
+    pub fn new(stats: &Stats, bstats: &BpfStats, fallback_cpu: usize) -> Result<Self> {
         let lsum = |idx| stats.bpf_stats.lstats_sums[idx as usize];
         let total = lsum(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
             + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
@@ -363,7 +361,6 @@ impl SysStats {
         };
 
         Ok(Self {
-            intv: intv.as_secs_f64(),
             at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64(),
             total,
             local: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL),
@@ -375,7 +372,7 @@ impl SysStats {
                 / total as f64,
             excl_wakeup: bstats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_WAKEUP as usize] as f64
                 / total as f64,
-            proc_ms: proc_dur.as_millis() as u64,
+            proc_ms: stats.processing_dur.as_millis() as u64,
             busy: stats.cpu_busy * 100.0,
             util: stats.total_util * 100.0,
             load: stats.total_load,
@@ -429,32 +426,101 @@ impl SysStats {
     }
 }
 
-pub fn launch_server(sys_stats: Arc<Mutex<SysStats>>) -> Result<()> {
-    ScxStatsServer::new()
-        .add_stats_meta(LayerStats::meta())
-        .add_stats_meta(SysStats::meta())
-        .add_stats(
-            "top",
-            Box::new(move |_| sys_stats.lock().unwrap().to_json()),
-        )
-        .launch()?;
-    Ok(())
+#[derive(Debug)]
+pub enum StatsReq {
+    Hello(ThreadId),
+    Refresh(ThreadId, Stats),
+    Bye(ThreadId),
 }
 
-pub fn monitor(shutdown: Arc<AtomicBool>) -> Result<()> {
-    let mut client = ScxStatsClient::new().connect()?;
-    let mut last_at = 0.0;
+#[derive(Debug)]
+pub enum StatsRes {
+    Hello(Stats),
+    Refreshed((Stats, SysStats)),
+    Bye,
+}
 
+pub fn launch_server() -> Result<ScxStatsServer<StatsReq, StatsRes>> {
+    let open: Box<dyn StatsOpener<StatsReq, StatsRes>> = Box::new(move |(req_ch, res_ch)| {
+        let tid = current().id();
+        req_ch.send(StatsReq::Hello(tid))?;
+        let mut stats = Some(match res_ch.recv()? {
+            StatsRes::Hello(v) => v,
+            res => bail!("invalid response to Hello: {:?}", &res),
+        });
+
+        let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
+            Box::new(move |_args, (req_ch, res_ch)| {
+                req_ch.send(StatsReq::Refresh(tid, stats.take().unwrap()))?;
+                let (new_stats, sys_stats) = match res_ch.recv()? {
+                    StatsRes::Refreshed(v) => v,
+                    res => bail!("invalid response to Refresh: {:?}", &res),
+                };
+                stats = Some(new_stats);
+                sys_stats.to_json()
+            });
+
+        Ok(read)
+    });
+
+    let close: Box<dyn StatsCloser<StatsReq, StatsRes>> = Box::new(move |(req_ch, res_ch)| {
+        req_ch.send(StatsReq::Bye(current().id())).unwrap();
+        match res_ch.recv().unwrap() {
+            StatsRes::Bye => {}
+            res => panic!("invalid response to Bye: {:?}", &res),
+        }
+    });
+
+    Ok(ScxStatsServer::new()
+        .add_stats_meta(LayerStats::meta())
+        .add_stats_meta(SysStats::meta())
+        .add_stats_ops(
+            "top",
+            ScxStatsOps {
+                open,
+                close: Some(close),
+            },
+        )
+        .launch()?)
+}
+
+pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
+    let mut retry_cnt: u32 = 0;
     while !shutdown.load(Ordering::Relaxed) {
-        let sst = client.request::<SysStats>("stats", vec![])?;
-        if sst.at != last_at {
+        let mut client = match ScxStatsClient::new().connect() {
+            Ok(v) => v,
+            Err(e) => match e.downcast_ref::<std::io::Error>() {
+                Some(ioe) if ioe.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    if retry_cnt == 1 {
+                        info!("Stats server not avaliable, retrying...");
+                    }
+                    retry_cnt += 1;
+                    sleep(Duration::from_secs(1));
+                    continue;
+                }
+                _ => Err(e)?,
+            },
+        };
+        retry_cnt = 0;
+
+        while !shutdown.load(Ordering::Relaxed) {
+            let sst = match client.request::<SysStats>("stats", vec![]) {
+                Ok(v) => v,
+                Err(e) => match e.downcast_ref::<std::io::Error>() {
+                    Some(ioe) => {
+                        info!("Connection to stats_server failed ({})", &ioe);
+			sleep(Duration::from_secs(1));
+                        break;
+                    }
+                    None => Err(e)?,
+                },
+            };
             let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
             println!("###### {} ######", dt.to_rfc2822());
             sst.format_all(&mut std::io::stdout())?;
-            last_at = sst.at;
+            sleep(intv);
         }
-
-        std::thread::sleep(Duration::from_secs(1));
     }
+
     Ok(())
 }
