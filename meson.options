@@ -22,6 +22,8 @@ option('kernel', type: 'string', value: 'vmlinuz',
        description: 'kernel image used to test schedulers')
 option('veristat_scheduler', type: 'string', value: '',
        description: 'veristat scheduler to test')
+option('veristat_diff_dir', type: 'string', value: '',
+       description: 'veristat diff dir')
 option('kernel_headers', type: 'string', value: '',
        description: 'kernel headers to build the schedulers')
 option(
