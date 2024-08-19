@@ -1029,6 +1029,7 @@ dependencies = [
  "bitvec",
  "chrono",
  "clap",
+ "crossbeam",
  "ctrlc",
  "fb_procfs",
  "lazy_static",

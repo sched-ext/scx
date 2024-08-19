@@ -21,7 +21,6 @@ use std::ops::Sub;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -32,6 +31,7 @@ use anyhow::Context;
 use anyhow::Result;
 use bitvec::prelude::*;
 use clap::Parser;
+use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
@@ -310,10 +310,6 @@ struct Opts {
     #[clap(short = 'i', long, default_value = "0.1")]
     interval: f64,
 
-    /// Statistics interval in seconds.
-    #[clap(short = 'I', long, default_value = "2.0")]
-    stats_interval: f64,
-
     /// Disable load-fraction based max layer CPU limit. ***NOTE***
     /// load-fraction calculation is currently broken due to lack of
     /// infeasible weight adjustments. Setting this option is recommended.
@@ -338,9 +334,9 @@ struct Opts {
     #[clap(short = 'e', long)]
     example: Option<String>,
 
-    /// Run in monitor mode.
+    /// Run in monitor mode with the specified interval.
     #[clap(long)]
-    monitor: bool,
+    monitor: Option<f64>,
 
     /// Layer specification. See --help.
     specs: Vec<String>,
@@ -612,6 +608,7 @@ impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
     }
 }
 
+#[derive(Clone, Debug)]
 struct Stats {
     nr_layers: usize,
     at: Instant,
@@ -1242,7 +1239,6 @@ struct Scheduler<'a, 'b> {
     layer_specs: &'b Vec<LayerSpec>,
 
     sched_intv: Duration,
-    stats_intv: Duration,
     no_load_frac_limit: bool,
 
     cpu_pool: CpuPool,
@@ -1250,13 +1246,11 @@ struct Scheduler<'a, 'b> {
 
     proc_reader: procfs::ProcReader,
     sched_stats: Stats,
-    report_stats: Stats,
 
     nr_layer_cpus_min_max: Vec<(usize, usize)>,
     processing_dur: Duration,
 
-    sys_stats: Arc<Mutex<SysStats>>,
-    _stats_server: ScxStatsServer<StatsRequest, StatsResponse>,
+    stats_server: ScxStatsServer<StatsReq, StatsRes>,
 }
 
 impl<'a, 'b> Scheduler<'a, 'b> {
@@ -1465,7 +1459,6 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         // Other stuff.
         let proc_reader = procfs::ProcReader::new();
-        let sys_stats = Arc::new(Mutex::new(SysStats::default()));
 
         // XXX If we try to refresh the cpumasks here before attaching, we
         // sometimes (non-deterministically) don't see the updated values in
@@ -1482,14 +1475,12 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             layer_specs,
 
             sched_intv: Duration::from_secs_f64(opts.interval),
-            stats_intv: Duration::from_secs_f64(opts.stats_interval),
             no_load_frac_limit: opts.no_load_frac_limit,
 
             cpu_pool,
             layers,
 
             sched_stats: Stats::new(&mut skel, &proc_reader)?,
-            report_stats: Stats::new(&mut skel, &proc_reader)?,
 
             nr_layer_cpus_min_max: vec![(0, 0); nr_layers],
             processing_dur: Default::default(),
@@ -1497,7 +1488,6 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             proc_reader,
             skel,
 
-            sys_stats,
             stats_server,
         };
 
@@ -1605,19 +1595,10 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         Ok(())
     }
 
-    fn refresh_sys_stats(&mut self) -> Result<()> {
-        let started_at = Instant::now();
-        self.report_stats.refresh(
-            &mut self.skel,
-            &self.proc_reader,
-            started_at,
-            self.processing_dur,
-        )?;
-        let stats = &self.report_stats;
+    fn generate_sys_stats(&mut self, stats: &Stats) -> Result<SysStats> {
         let bstats = &stats.bpf_stats;
 
-        let mut sys_stats =
-            SysStats::new(stats, bstats, self.stats_intv, self.cpu_pool.fallback_cpu)?;
+        let mut sys_stats = SysStats::new(stats, bstats, self.cpu_pool.fallback_cpu)?;
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
             let layer_stats =
@@ -1626,12 +1607,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             self.nr_layer_cpus_min_max[lidx] = (layer.nr_cpus, layer.nr_cpus);
         }
 
-        *self.sys_stats.lock().unwrap() = sys_stats;
-        Ok(())
+        Ok(sys_stats)
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
-	let (req_ch, res_ch) = self.stats_server.channels();
+        let (res_ch, req_ch) = self.stats_server.channels();
         let mut next_sched_at = Instant::now() + self.sched_intv;
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
@@ -1644,11 +1624,19 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 }
             }
 
-	    match req_ch.recv_deadline(next_sched_at) {
-		Ok(req) => {
-		    
-		}
-	    }
+            match req_ch.recv_deadline(next_sched_at) {
+                Ok(StatsReq::Hello) => {
+                    let stats = Stats::new(&mut self.skel, &self.proc_reader)?;
+                    res_ch.send(StatsRes::Hello(stats))?;
+                }
+                Ok(StatsReq::Refresh(mut stats)) => {
+                    stats.refresh(&mut self.skel, &self.proc_reader, now, self.processing_dur)?;
+                    let sys_stats = self.generate_sys_stats(&stats)?;
+                    res_ch.send(StatsRes::Refreshed((stats, sys_stats)))?;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(e) => Err(e)?,
+            }
         }
 
         self.struct_ops.take();
@@ -1857,8 +1845,8 @@ fn main() -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
-    if opts.monitor {
-        return stats::monitor(shutdown.clone());
+    if let Some(intv) = opts.monitor {
+        return stats::monitor(Duration::from_secs_f64(intv), shutdown.clone());
     }
 
     if let Some(path) = &opts.example {

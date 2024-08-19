@@ -1,7 +1,5 @@
 use crate::bpf_intf;
 use crate::BpfStats;
-use std::thread::ThreadId;
-use std::thread::current;
 use crate::Layer;
 use crate::LayerKind;
 use crate::Stats;
@@ -12,7 +10,9 @@ use chrono::Local;
 use log::warn;
 use scx_stats::Meta;
 use scx_stats::ScxStatsClient;
+use scx_stats::ScxStatsOps;
 use scx_stats::ScxStatsServer;
+use scx_stats::StatsOpener;
 use scx_stats::StatsReader;
 use scx_stats::ToJson;
 use scx_stats_derive::Stats;
@@ -23,7 +23,6 @@ use std::io::Write;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -309,8 +308,6 @@ impl LayerStats {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct SysStats {
-    #[stat(desc = "update interval", _om_skip)]
-    pub intv: f64,
     #[stat(desc = "timestamp", _om_skip)]
     pub at: f64,
     #[stat(desc = "# sched events duringg the period")]
@@ -347,7 +344,6 @@ impl SysStats {
     pub fn new(
         stats: &Stats,
         bstats: &BpfStats,
-        intv: Duration,
         fallback_cpu: usize,
     ) -> Result<Self> {
         let lsum = |idx| stats.bpf_stats.lstats_sums[idx as usize];
@@ -365,7 +361,6 @@ impl SysStats {
         };
 
         Ok(Self {
-            intv: intv.as_secs_f64(),
             at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64(),
             total,
             local: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL),
@@ -431,60 +426,56 @@ impl SysStats {
     }
 }
 
+#[derive(Debug)]
 pub enum StatsReq {
-    Hello(ThreadId),
-    Refresh(SysStats),
+    Hello,
+    Refresh(Stats),
 }
 
+#[derive(Debug)]
 pub enum StatsRes {
-    Hello(SysStats),
-    Refresh(SysStats),
+    Hello(Stats),
+    Refreshed((Stats, SysStats)),
 }
 
 pub fn launch_server() -> Result<ScxStatsServer<StatsReq, StatsRes>> {
-    let open = move |(tx, rx)| {
-	tx.send(StatsReq::Hello(current().id()))?;
-	let mut sys_stats = match rx.receive()? {
-	    StatsRes::Hello(v) => v,
-	    res => bail!("invalid response to Hello: {:?}", &res),
-	};
-
-        let read: Box<dyn StatsReader> = Box::new(move |_args, (tx, rx)| {
-	    tx.send(StatsReq::Refresh(sys_stats));
-	    sys_stats = match rx.recv()? {
-		StatsRes::Refresh(v) => v,
-		res => bail!("invalid response to Refresh: {:?}", &res),
-	    };
-            sys_stats.to_json()
+    let open: Box<dyn StatsOpener<StatsReq, StatsRes>> = Box::new(move |(req_ch, res_ch)| {
+        req_ch.send(StatsReq::Hello)?;
+        let mut stats = Some(match res_ch.recv()? {
+            StatsRes::Hello(v) => v,
+            res => bail!("invalid response to Hello: {:?}", &res),
         });
 
-        Ok(read)
-    };
+        let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
+            Box::new(move |_args, (req_ch, res_ch)| {
+                req_ch.send(StatsReq::Refresh(stats.take().unwrap()))?;
+                let (new_stats, sys_stats) = match res_ch.recv()? {
+                    StatsRes::Refreshed(v) => v,
+                    res => bail!("invalid response to Refresh: {:?}", &res),
+                };
+                stats = Some(new_stats);
+                sys_stats.to_json()
+            });
 
-    Ok(ScxStatsServer::<StatsRequest, StatsResponse>::new()
+        Ok(read)
+    });
+
+    Ok(ScxStatsServer::new()
         .add_stats_meta(LayerStats::meta())
         .add_stats_meta(SysStats::meta())
-        .add_stats(
-            "top",
-            Box::new(move |_, (_tx, _rx)| sys_stats.lock().unwrap().to_json()),
-        )
+        .add_stats_ops("top", ScxStatsOps { open, close: None })
         .launch()?)
 }
 
-pub fn monitor(shutdown: Arc<AtomicBool>) -> Result<()> {
+pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
     let mut client = ScxStatsClient::new().connect()?;
-    let mut last_at = 0.0;
 
     while !shutdown.load(Ordering::Relaxed) {
         let sst = client.request::<SysStats>("stats", vec![])?;
-        if sst.at != last_at {
-            let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
-            println!("###### {} ######", dt.to_rfc2822());
-            sst.format_all(&mut std::io::stdout())?;
-            last_at = sst.at;
-        }
-
-        std::thread::sleep(Duration::from_secs(1));
+        let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
+        println!("###### {} ######", dt.to_rfc2822());
+        sst.format_all(&mut std::io::stdout())?;
+        std::thread::sleep(intv);
     }
     Ok(())
 }
