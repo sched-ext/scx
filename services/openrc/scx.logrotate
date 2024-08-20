@@ -1,0 +1,6 @@
+/var/log/scx/*.log {
+    missingok
+    minsize 4M
+    notifempty
+    copytruncate
+}
