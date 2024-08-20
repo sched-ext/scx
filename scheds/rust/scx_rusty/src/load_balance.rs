@@ -132,8 +132,8 @@
 
 use core::cmp::Ordering;
 
-use crate::bpf_skel::*;
 use crate::bpf_intf;
+use crate::bpf_skel::*;
 use crate::DomainGroup;
 
 use std::cell::Cell;
@@ -148,8 +148,8 @@ use log::debug;
 use log::warn;
 use ordered_float::OrderedFloat;
 use scx_utils::ravg::ravg_read;
-use scx_utils::LoadLedger;
 use scx_utils::LoadAggregator;
+use scx_utils::LoadLedger;
 use sorted_vec::SortedVec;
 use std::collections::VecDeque;
 
@@ -247,11 +247,13 @@ pub struct LoadEntity {
 }
 
 impl LoadEntity {
-    fn new(cost_ratio: f64,
-           push_max_ratio: f64,
-           xfer_ratio: f64,
-           load_sum: f64,
-           load_avg: f64) -> Self {
+    fn new(
+        cost_ratio: f64,
+        push_max_ratio: f64,
+        xfer_ratio: f64,
+        load_sum: f64,
+        load_avg: f64,
+    ) -> Self {
         let mut entity = Self {
             cost_ratio,
             push_max_ratio,
@@ -345,35 +347,31 @@ impl Domain {
     const LOAD_IMBAL_XFER_TARGET_RATIO: f64 = 0.50;
     const LOAD_IMBAL_PUSH_MAX_RATIO: f64 = 0.50;
 
-    fn new(id: usize,
-           load_sum: f64,
-           load_avg: f64) -> Self {
+    fn new(id: usize, load_sum: f64, load_avg: f64) -> Self {
         Self {
             id,
             queried_tasks: false,
-            load: LoadEntity::new(Domain::LOAD_IMBAL_HIGH_RATIO,
-                                  Domain::LOAD_IMBAL_PUSH_MAX_RATIO,
-                                  Domain::LOAD_IMBAL_XFER_TARGET_RATIO,
-                                  load_sum,
-                                  load_avg),
+            load: LoadEntity::new(
+                Domain::LOAD_IMBAL_HIGH_RATIO,
+                Domain::LOAD_IMBAL_PUSH_MAX_RATIO,
+                Domain::LOAD_IMBAL_XFER_TARGET_RATIO,
+                load_sum,
+                load_avg,
+            ),
             tasks: SortedVec::new(),
         }
     }
 
-    fn transfer_load(&mut self,
-                     load: f64,
-                     pid: i32,
-                     other: &mut Domain,
-                     skel: &mut BpfSkel) {
+    fn transfer_load(&mut self, load: f64, pid: i32, other: &mut Domain, skel: &mut BpfSkel) {
         let cpid = (pid as libc::pid_t).to_ne_bytes();
         let dom_id: u32 = other.id.try_into().unwrap();
 
         // Ask BPF code to execute the migration.
-        if let Err(e) = skel.maps.lb_data.update(
-            &cpid,
-            &dom_id.to_ne_bytes(),
-            libbpf_rs::MapFlags::NO_EXIST,
-        ) {
+        if let Err(e) =
+            skel.maps
+                .lb_data
+                .update(&cpid, &dom_id.to_ne_bytes(), libbpf_rs::MapFlags::NO_EXIST)
+        {
             warn!(
                 "Failed to update lb_data map for pid={} error={:?}",
                 pid, &e
@@ -383,8 +381,10 @@ impl Domain {
         self.load.add_load(-load);
         other.load.add_load(load);
 
-        debug!("  DOM {} sending [pid: {:05}](load: {:.06}) --> DOM {} ",
-               self.id, pid, load, other.id);
+        debug!(
+            "  DOM {} sending [pid: {:05}](load: {:.06}) --> DOM {} ",
+            self.id, pid, load, other.id
+        );
     }
 
     fn xfer_between(&self, other: &Domain) -> f64 {
@@ -413,10 +413,13 @@ impl NumaNode {
     fn new(id: usize, numa_load_avg: f64) -> Self {
         Self {
             id,
-            load: LoadEntity::new(NumaNode::LOAD_IMBAL_HIGH_RATIO,
-                                  NumaNode::LOAD_IMBAL_PUSH_MAX_RATIO,
-                                  NumaNode::LOAD_IMBAL_XFER_TARGET_RATIO,
-                                  0.0f64, numa_load_avg),
+            load: LoadEntity::new(
+                NumaNode::LOAD_IMBAL_HIGH_RATIO,
+                NumaNode::LOAD_IMBAL_PUSH_MAX_RATIO,
+                NumaNode::LOAD_IMBAL_XFER_TARGET_RATIO,
+                0.0f64,
+                numa_load_avg,
+            ),
             domains: SortedVec::new(),
         }
     }
@@ -447,13 +450,15 @@ impl NumaNode {
             domains: Vec::new(),
         };
 
-        for dom in self.domains.iter(){
+        for dom in self.domains.iter() {
             n_stat.domains.push(DomainStat {
                 id: dom.id,
                 load: dom.load.clone(),
             });
         }
-        n_stat.domains.sort_by(|x, y| x.id.partial_cmp(&y.id).unwrap());
+        n_stat
+            .domains
+            .sort_by(|x, y| x.id.partial_cmp(&y.id).unwrap());
 
         n_stat
     }
@@ -471,15 +476,30 @@ pub struct DomainStat {
     pub load: LoadEntity,
 }
 
-fn fmt_balance_stat(f: &mut fmt::Formatter<'_>,
-                    load: &LoadEntity, preamble: String) -> fmt::Result {
+fn fmt_balance_stat(
+    f: &mut fmt::Formatter<'_>,
+    load: &LoadEntity,
+    preamble: String,
+) -> fmt::Result {
     let imbal = load.imbal();
     let load_sum = load.load_sum();
     let load_delta = load.delta();
-    let get_fmt = |num: f64| if num >= 0.0f64 { format!("{:+4.2}", num) } else { format!("{:4.2}", num) };
+    let get_fmt = |num: f64| {
+        if num >= 0.0f64 {
+            format!("{:+4.2}", num)
+        } else {
+            format!("{:4.2}", num)
+        }
+    };
 
-    write!(f, "{} load={:4.2} imbal={} load_delta={}",
-           preamble, load_sum, get_fmt(imbal), get_fmt(load_delta))
+    write!(
+        f,
+        "{} load={:4.2} imbal={} load_delta={}",
+        preamble,
+        load_sum,
+        get_fmt(imbal),
+        get_fmt(load_delta)
+    )
 }
 
 impl fmt::Display for DomainStat {
@@ -515,7 +535,10 @@ pub struct LoadBalancer<'a, 'b> {
 
 // Verify that the number of buckets is a factor of the maximum weight to
 // ensure that the range of weight can be split evenly amongst every bucket.
-const_assert_eq!(bpf_intf::consts_LB_MAX_WEIGHT % bpf_intf::consts_LB_LOAD_BUCKETS, 0);
+const_assert_eq!(
+    bpf_intf::consts_LB_MAX_WEIGHT % bpf_intf::consts_LB_LOAD_BUCKETS,
+    0
+);
 
 impl<'a, 'b> LoadBalancer<'a, 'b> {
     pub fn new(
@@ -568,7 +591,10 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let ledger = self.calculate_load_avgs()?;
 
         let (dom_loads, total_load) = if !self.lb_apply_weight {
-            (ledger.dom_dcycle_sums().to_vec(), ledger.global_dcycle_sum())
+            (
+                ledger.dom_dcycle_sums().to_vec(),
+                ledger.global_dcycle_sum(),
+            )
         } else {
             self.infeas_threshold = ledger.effective_max_weight();
             (ledger.dom_load_sums().to_vec(), ledger.global_load_sum())
@@ -577,7 +603,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let num_numa_nodes = self.dom_group.nr_nodes();
         let numa_load_avg = total_load / num_numa_nodes as f64;
 
-        let mut nodes : Vec<NumaNode> = Vec::with_capacity(num_numa_nodes);
+        let mut nodes: Vec<NumaNode> = Vec::with_capacity(num_numa_nodes);
         for id in 0..num_numa_nodes {
             nodes.push(NumaNode::new(id, numa_load_avg));
         }
@@ -607,7 +633,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let load_half_life = self.skel.maps.rodata_data.load_half_life;
         let dom_data = &self.skel.maps.dom_data;
 
-        let mut aggregator = LoadAggregator::new(self.dom_group.weight(), !self.lb_apply_weight.clone());
+        let mut aggregator =
+            LoadAggregator::new(self.dom_group.weight(), !self.lb_apply_weight.clone());
 
         for dom_id in self.dom_group.doms().keys() {
             let dom = *dom_id;
@@ -708,30 +735,28 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
                 let rd = &task_ctx.dcyc_rd;
                 let mut load = ravg_read(
-                        rd.val,
-                        rd.val_at,
-                        rd.old,
-                        rd.cur,
-                        now_mono,
-                        load_half_life,
-                        RAVG_FRAC_BITS,
-                    );
+                    rd.val,
+                    rd.val_at,
+                    rd.old,
+                    rd.cur,
+                    now_mono,
+                    load_half_life,
+                    RAVG_FRAC_BITS,
+                );
 
                 if self.lb_apply_weight {
                     let weight = (task_ctx.weight as f64).min(self.infeas_threshold);
                     load *= weight;
                 }
 
-                dom.tasks.insert(
-                    TaskInfo {
-                        pid,
-                        load: OrderedFloat(load),
-                        dom_mask: task_ctx.dom_mask,
-                        preferred_dom_mask: task_ctx.preferred_dom_mask,
-                        migrated: Cell::new(false),
-                        is_kworker: task_ctx.is_kworker,
-                    },
-                );
+                dom.tasks.insert(TaskInfo {
+                    pid,
+                    load: OrderedFloat(load),
+                    dom_mask: task_ctx.dom_mask,
+                    preferred_dom_mask: task_ctx.preferred_dom_mask,
+                    migrated: Cell::new(false),
+                    is_kworker: task_ctx.is_kworker,
+                });
             }
         }
 
@@ -740,15 +765,11 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
     // Find the first candidate pid which hasn't already been migrated and
     // can run in @pull_dom.
-    fn find_first_candidate<'d, I>(
-        tasks_by_load: I
-    ) -> Option<&'d TaskInfo>
+    fn find_first_candidate<'d, I>(tasks_by_load: I) -> Option<&'d TaskInfo>
     where
         I: IntoIterator<Item = &'d TaskInfo>,
     {
-        match tasks_by_load
-            .into_iter().next()
-        {
+        match tasks_by_load.into_iter().next() {
             Some(task) => Some(task),
             None => None,
         }
@@ -780,13 +801,11 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let tasks: Vec<TaskInfo> = std::mem::take(&mut push_dom.tasks)
             .into_vec()
             .into_iter()
-            .filter(
-                |task|
-                task.dom_mask
-                & (1 << pull_dom_id) != 0
-                || !(self.skip_kworkers && task.is_kworker)
-                || !task.migrated.get()
-            )
+            .filter(|task| {
+                task.dom_mask & (1 << pull_dom_id) != 0
+                    || !(self.skip_kworkers && task.is_kworker)
+                    || !task.migrated.get()
+            })
             .collect();
 
         let (task, new_imbal) = match (
@@ -794,28 +813,21 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 tasks
                     .as_slice()
                     .iter()
-                    .filter(|x| {
-                        x.load <= OrderedFloat(to_xfer)
-                        && task_filter(x, pull_dom_id)
-                    })
+                    .filter(|x| x.load <= OrderedFloat(to_xfer) && task_filter(x, pull_dom_id))
                     .rev(),
             ),
             Self::find_first_candidate(
                 tasks
                     .as_slice()
                     .iter()
-                    .filter(|x| {
-                        x.load >= OrderedFloat(to_xfer)
-                        && task_filter(x, pull_dom_id)
-                    }),
+                    .filter(|x| x.load >= OrderedFloat(to_xfer) && task_filter(x, pull_dom_id)),
             ),
         ) {
             (None, None) => return Ok(None),
-            (Some(task), None) | (None, Some(task)) => {
-                (task, calc_new_imbal(*task.load))
-            }
+            (Some(task), None) | (None, Some(task)) => (task, calc_new_imbal(*task.load)),
             (Some(task0), Some(task1)) => {
-                let (new_imbal0, new_imbal1) = (calc_new_imbal(*task0.load), calc_new_imbal(*task1.load));
+                let (new_imbal0, new_imbal1) =
+                    (calc_new_imbal(*task0.load), calc_new_imbal(*task1.load));
                 if new_imbal0 <= new_imbal1 {
                     (task0, new_imbal0)
                 } else {
@@ -841,19 +853,25 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         Ok(Some(load))
     }
 
-    fn transfer_between_nodes(&mut self,
-                              push_node: &mut NumaNode,
-                              pull_node: &mut NumaNode) -> Result<f64> {
-        debug!("Inter node {} -> {} started",
-               push_node.id, pull_node.id);
+    fn transfer_between_nodes(
+        &mut self,
+        push_node: &mut NumaNode,
+        pull_node: &mut NumaNode,
+    ) -> Result<f64> {
+        debug!("Inter node {} -> {} started", push_node.id, pull_node.id);
 
         let push_imbal = push_node.load.imbal();
         let pull_imbal = pull_node.load.imbal();
         let xfer = push_node.xfer_between(&pull_node);
 
         if push_imbal <= 0.0f64 || pull_imbal >= 0.0f64 {
-            bail!("push node {}:{}, pull node {}:{}",
-                  push_node.id, push_imbal, pull_node.id, pull_imbal);
+            bail!(
+                "push node {}:{}, pull node {}:{}",
+                push_node.id,
+                push_imbal,
+                pull_node.id,
+                pull_imbal
+            );
         }
         let mut pushers = VecDeque::with_capacity(push_node.domains.len());
         let mut pullers = Vec::with_capacity(pull_node.domains.len());
@@ -873,17 +891,21 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     pull_node.domains.insert(pull_dom);
                     break;
                 }
-                let mut transferred = self.try_find_move_task((&mut push_dom, push_imbal),
-                                                          (&mut pull_dom, pull_imbal),
-                                                          |task: &TaskInfo, pull_dom:u32| -> bool {
-                                                              (task.preferred_dom_mask & (1 << pull_dom)) > 0
-                                                          },
-                                                          xfer)?;
+                let mut transferred = self.try_find_move_task(
+                    (&mut push_dom, push_imbal),
+                    (&mut pull_dom, pull_imbal),
+                    |task: &TaskInfo, pull_dom: u32| -> bool {
+                        (task.preferred_dom_mask & (1 << pull_dom)) > 0
+                    },
+                    xfer,
+                )?;
                 if transferred.is_none() {
-                    transferred = self.try_find_move_task((&mut push_dom, push_imbal),
-                                                          (&mut pull_dom, pull_imbal),
-                                                          |_task: &TaskInfo, _pull_dom:u32| -> bool {true},
-                                                          xfer)?;
+                    transferred = self.try_find_move_task(
+                        (&mut push_dom, push_imbal),
+                        (&mut pull_dom, pull_imbal),
+                        |_task: &TaskInfo, _pull_dom: u32| -> bool { true },
+                        xfer,
+                    )?;
                 }
 
                 pullers.push(pull_dom);
@@ -986,7 +1008,10 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     // transfer attempt, and ensure that we're trying to
                     // pull from domains in descending-imbalance order.
                     pushed += migrated;
-                    debug!("NODE {} sending {:.06} --> NODE {}", push_node.id, migrated, pull_id);
+                    debug!(
+                        "NODE {} sending {:.06} --> NODE {}",
+                        push_node.id, migrated, pull_id
+                    );
                 }
             }
             while pullers.len() > 0 {
@@ -1008,7 +1033,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
     fn balance_within_node(&mut self, node: &mut NumaNode) -> Result<()> {
         if node.domains.len() < 2 {
-            return Ok(())
+            return Ok(());
         }
 
         debug!("Intra node {} LB started", node.id);
@@ -1031,7 +1056,12 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             let push_cutoff = push_dom.load.push_cutoff();
             let push_imbal = push_dom.load.imbal();
             if push_imbal < 0.0f64 {
-                bail!("Node {} push dom {} had imbal {}", node.id, push_dom.id, push_imbal);
+                bail!(
+                    "Node {} push dom {} had imbal {}",
+                    node.id,
+                    push_dom.id,
+                    push_imbal
+                );
             }
 
             while node.domains.len() > 0 && pushed < push_cutoff {
@@ -1042,20 +1072,29 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 }
                 let pull_imbal = pull_dom.load.imbal();
                 if pull_imbal >= 0.0f64 {
-                    bail!("Node {} pull dom {} had imbal {}", node.id, pull_dom.id, pull_imbal);
+                    bail!(
+                        "Node {} pull dom {} had imbal {}",
+                        node.id,
+                        pull_dom.id,
+                        pull_imbal
+                    );
                 }
                 let xfer = push_dom.xfer_between(&pull_dom);
-                let mut transferred = self.try_find_move_task((&mut push_dom, push_imbal),
-                                                          (&mut pull_dom, pull_imbal),
-                                                          |task: &TaskInfo, pull_dom:u32| -> bool {
-                                                              (task.preferred_dom_mask & (1 << pull_dom)) > 0
-                                                          },
-                                                          xfer)?;
+                let mut transferred = self.try_find_move_task(
+                    (&mut push_dom, push_imbal),
+                    (&mut pull_dom, pull_imbal),
+                    |task: &TaskInfo, pull_dom: u32| -> bool {
+                        (task.preferred_dom_mask & (1 << pull_dom)) > 0
+                    },
+                    xfer,
+                )?;
                 if transferred.is_none() {
-                    transferred = self.try_find_move_task((&mut push_dom, push_imbal),
-                                                          (&mut pull_dom, pull_imbal),
-                                                          |_task: &TaskInfo, _pull_dom:u32| -> bool {true},
-                                                          xfer)?;
+                    transferred = self.try_find_move_task(
+                        (&mut push_dom, push_imbal),
+                        (&mut pull_dom, pull_imbal),
+                        |_task: &TaskInfo, _pull_dom: u32| -> bool { true },
+                        xfer,
+                    )?;
                 }
 
                 if let Some(transferred) = transferred {

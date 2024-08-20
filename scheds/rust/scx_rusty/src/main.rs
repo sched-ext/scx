@@ -32,20 +32,19 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-use libbpf_rs::MapCore as _;
-use libbpf_rs::OpenObject;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::MapCore as _;
+use libbpf_rs::OpenObject;
 use log::info;
 use metrics::counter;
-use metrics::Counter;
-use metrics_exporter_prometheus::PrometheusBuilder;
-use metrics::histogram;
-use metrics::Histogram;
 use metrics::gauge;
+use metrics::histogram;
+use metrics::Counter;
 use metrics::Gauge;
-use scx_utils::LogRecorderBuilder;
+use metrics::Histogram;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
@@ -55,6 +54,7 @@ use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cpumask;
+use scx_utils::LogRecorderBuilder;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 
@@ -193,7 +193,7 @@ struct Opts {
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     partial: bool,
 
-    /// Enables soft NUMA affinity for tasks that use set_mempolicy. This 
+    /// Enables soft NUMA affinity for tasks that use set_mempolicy. This
     /// may improve performance in some scenarios when using mempolicies.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     mempolicy_affinity: bool,
@@ -308,15 +308,15 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(
-        opts: &Opts,
-        open_object: &'a mut MaybeUninit<OpenObject>,
-    ) -> Result<Self> {
+    fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 0);
         init_libbpf_logging(None);
-        info!("Running scx_rusty (build ID: {})", *build_id::SCX_FULL_VERSION);
+        info!(
+            "Running scx_rusty (build ID: {})",
+            *build_id::SCX_FULL_VERSION
+        );
         let mut skel = scx_ops_open!(skel_builder, open_object, rusty).unwrap();
 
         // Initialize skel according to @opts.
@@ -521,11 +521,7 @@ impl<'a> Scheduler<'a> {
         Ok(stats)
     }
 
-    fn report(
-        &self,
-        bpf_stats: &[u64],
-        lb_stats: &[NumaStat],
-    ) {
+    fn report(&self, bpf_stats: &[u64], lb_stats: &[NumaStat]) {
         let stat = |idx| bpf_stats[idx as usize];
 
         let wsync = stat(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC);
@@ -539,7 +535,7 @@ impl<'a> Scheduler<'a> {
         let dsq = stat(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH);
         let greedy_local = stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL);
         let greedy_xnuma = stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
-        
+
         self.metrics.wsync_prev_idle.increment(wsync_prev_idle);
         self.metrics.wsync.increment(wsync);
         self.metrics.prev_idle.increment(prev_idle);
@@ -556,20 +552,28 @@ impl<'a> Scheduler<'a> {
         let repatriate = stat(bpf_intf::stat_idx_RUSTY_STAT_REPATRIATE);
         let dl_clamped = stat(bpf_intf::stat_idx_RUSTY_STAT_DL_CLAMP);
         let dl_preset = stat(bpf_intf::stat_idx_RUSTY_STAT_DL_PRESET);
-        
+
         self.metrics.kick_greedy.increment(kick_greedy);
         self.metrics.repatriate.increment(repatriate);
         self.metrics.dl_clamped.increment(dl_clamped);
         self.metrics.dl_preset.increment(dl_preset);
 
-        self.metrics.task_errors.increment(stat(bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR));
-        self.metrics.lb_data_errors.increment(self.nr_lb_data_errors);
-        self.metrics.load_balance.increment(stat(bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE));
-        
-        self.metrics.slice_length.set(self.tuner.slice_ns as f64 / 1000.0);
+        self.metrics
+            .task_errors
+            .increment(stat(bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR));
+        self.metrics
+            .lb_data_errors
+            .increment(self.nr_lb_data_errors);
+        self.metrics
+            .load_balance
+            .increment(stat(bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE));
 
-        // We need to dynamically create the metrics for each node and domain 
-        // because we don't know how many there are at compile time. Metrics 
+        self.metrics
+            .slice_length
+            .set(self.tuner.slice_ns as f64 / 1000.0);
+
+        // We need to dynamically create the metrics for each node and domain
+        // because we don't know how many there are at compile time. Metrics
         // will be cached and reused so this is not a performance issue.
         for node in lb_stats.iter() {
             histogram!("load_avg", "node" => node.id.to_string())
@@ -596,13 +600,12 @@ impl<'a> Scheduler<'a> {
         );
 
         lb.load_balance()?;
-        self.metrics.processing_duration.record(started_at.elapsed().as_micros() as f64);
+        self.metrics
+            .processing_duration
+            .record(started_at.elapsed().as_micros() as f64);
 
         let stats = lb.get_stats();
-        self.report(
-            &bpf_stats,
-            &stats,
-        );
+        self.report(&bpf_stats, &stats);
 
         self.prev_at = started_at;
         Ok(())
