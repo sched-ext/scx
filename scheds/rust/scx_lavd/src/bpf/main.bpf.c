@@ -195,6 +195,7 @@ char _license[] SEC("license") = "GPL";
  * Sched related globals
  */
 volatile u64		nr_cpus_onln;
+static volatile u64	nr_cpus_big;
 
 static struct sys_stat	__sys_stats[2];
 static volatile int	__sys_stat_idx;
@@ -1868,8 +1869,7 @@ static bool is_kernel_task(struct task_struct *p)
 static bool use_full_cpus(void)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
-	return no_core_compaction ||
-	       ((stat_cur->nr_active + LAVD_CC_NR_OVRFLW) >= nr_cpus_onln);
+	return (stat_cur->nr_active + LAVD_CC_NR_OVRFLW) >= nr_cpus_onln;
 }
 
 static u64 pick_any_bit(u64 bitmap, u64 nuance)
@@ -2745,7 +2745,7 @@ static u16 get_cpuperf_cap(s32 cpu)
 static s32 init_per_cpu_ctx(u64 now)
 {
 	struct cpu_ctx *cpuc;
-	struct bpf_cpumask *big, *little;
+	struct bpf_cpumask *big, *little, *active, *ovrflw;
 	struct cpdom_ctx *cpdomc;
 	int cpu, i, j, err = 0;
 	u64 cpdom_id;
@@ -2758,7 +2758,9 @@ static s32 init_per_cpu_ctx(u64 now)
 	 */
 	big = big_cpumask;
 	little = little_cpumask;
-	if (!big|| !little) {
+	active  = active_cpumask;
+	ovrflw  = ovrflw_cpumask;
+	if (!big|| !little || !active || !ovrflw) {
 		scx_bpf_error("Failed to prepare cpumasks.");
 		err = -ENOMEM;
 		goto unlock_out;
@@ -2808,10 +2810,19 @@ static s32 init_per_cpu_ctx(u64 now)
 		}
 
 		cpuc->big_core = cpuc->capacity >= avg_capacity;
-		if (cpuc->big_core)
+		if (cpuc->big_core) {
+			nr_cpus_big++;
 			bpf_cpumask_set_cpu(cpu, big);
-		else
+			/*
+			 * Initially, all big cores are in the active domain
+			 * and all little cores in the overflow domain.
+			 */
+			bpf_cpumask_set_cpu(cpu, active);
+		}
+		else {
 			bpf_cpumask_set_cpu(cpu, little);
+			bpf_cpumask_set_cpu(cpu, ovrflw);
+		}
 	}
 
 	/*
@@ -2870,8 +2881,8 @@ static s32 init_sys_stat(u64 now)
 	memset(__sys_stats, 0, sizeof(__sys_stats));
 	__sys_stats[0].last_update_clk = now;
 	__sys_stats[1].last_update_clk = now;
-	__sys_stats[0].nr_active = nr_cpus_onln;
-	__sys_stats[1].nr_active = nr_cpus_onln;
+	__sys_stats[0].nr_active = nr_cpus_big;
+	__sys_stats[1].nr_active = nr_cpus_big;
 
 	timer = bpf_map_lookup_elem(&update_timer, &key);
 	if (!timer) {
@@ -2902,7 +2913,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 		return err;
 
 	/*
-	 * Allocate cpumask for task compaction.
+	 * Allocate cpumask for core compaction.
 	 *  - active CPUs: a group of CPUs will be used for now.
 	 *  - overflow CPUs: a pair of hyper-twin which will be used when there
 	 *    is no idle active CPUs.
