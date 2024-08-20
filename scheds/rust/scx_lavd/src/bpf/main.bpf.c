@@ -362,14 +362,6 @@ static struct task_ctx *get_task_ctx(struct task_struct *p)
 	return taskc;
 }
 
-static s32 get_task_cpu_id(struct task_struct *p)
-{
-	/*
-	 * This code assumes ONFIG_THREAD_INFO_IN_TASK is on in the kernel.
-	 */
-	return READ_ONCE(p->thread_info.cpu);
-}
-
 static struct cpu_ctx *get_cpu_ctx(void)
 {
 	const u32 idx = 0;
@@ -1822,7 +1814,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * always put the task to the global DSQ, so any idle CPU can pick it
 	 * up.
 	 */
-	cpu_id = get_task_cpu_id(p);
+	cpu_id = scx_bpf_task_cpu(p);
 	taskc = get_task_ctx(p);
 	cpuc_task = get_cpu_ctx_id(cpu_id);
 	cpuc_cur = get_cpu_ctx();
