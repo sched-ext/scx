@@ -55,6 +55,10 @@ jobs:
       # Generate kernel headers
       - run: cd linux && make headers
 
+      - run: wget https://github.com/libbpf/veristat/releases/download/v0.3.2/veristat-v0.3.2-amd64.tar.gz
+      - run: tar -xvf veristat-v0.3.2-amd64.tar.gz && sudo cp veristat /usr/bin/
+      - run: sudo chmod +x /usr/bin/veristat && sudo chmod 755 /usr/bin/veristat
+
       ### END DEPENDENCIES ###
 
       # The actual build:
