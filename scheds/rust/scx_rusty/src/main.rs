@@ -39,11 +39,7 @@ use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use log::info;
 use metrics::counter;
-use metrics::gauge;
-use metrics::histogram;
 use metrics::Counter;
-use metrics::Gauge;
-use metrics::Histogram;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use scx_utils::build_id;
 use scx_utils::compat;
@@ -54,7 +50,6 @@ use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cpumask;
-use scx_utils::LogRecorderBuilder;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPUS_POSSIBLE;
@@ -250,12 +245,6 @@ struct Metrics {
     repatriate: Counter,
     dl_clamped: Counter,
     dl_preset: Counter,
-    task_errors: Counter,
-    lb_data_errors: Counter,
-    load_balance: Counter,
-    slice_length: Gauge,
-    cpu_busy_pct: Histogram,
-    processing_duration: Histogram,
 }
 
 impl Metrics {
@@ -276,14 +265,6 @@ impl Metrics {
             repatriate: counter!("repatriate_total"),
             dl_clamped: counter!("dl_clamped_total"),
             dl_preset: counter!("dl_preset_total"),
-            task_errors: counter!("task_errors_total"),
-            lb_data_errors: counter!("lb_data_errors_total"),
-            load_balance: counter!("load_balance_total"),
-
-            slice_length: gauge!("slice_length_us"),
-
-            cpu_busy_pct: histogram!("cpu_busy_pct"),
-            processing_duration: histogram!("processing_duration_us"),
         }
     }
 }
@@ -521,7 +502,13 @@ impl<'a> Scheduler<'a> {
         Ok(stats)
     }
 
-    fn report(&self, bpf_stats: &[u64], lb_stats: &[NumaStat]) {
+    fn report(
+        &mut self,
+        bpf_stats: &[u64],
+        cpu_busy: f64,
+        processing_dur: Duration,
+        lb_stats: &[NumaStat],
+    ) {
         let stat = |idx| bpf_stats[idx as usize];
 
         let wsync = stat(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC);
@@ -535,6 +522,17 @@ impl<'a> Scheduler<'a> {
         let dsq = stat(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH);
         let greedy_local = stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL);
         let greedy_xnuma = stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
+        let total = wsync
+            + wsync_prev_idle
+            + prev_idle
+            + greedy_idle
+            + pinned
+            + direct_dispatch
+            + direct_greedy
+            + direct_greedy_far
+            + dsq
+            + greedy_local
+            + greedy_xnuma;
 
         self.metrics.wsync_prev_idle.increment(wsync_prev_idle);
         self.metrics.wsync.increment(wsync);
@@ -558,29 +556,68 @@ impl<'a> Scheduler<'a> {
         self.metrics.dl_clamped.increment(dl_clamped);
         self.metrics.dl_preset.increment(dl_preset);
 
-        self.metrics
-            .task_errors
-            .increment(stat(bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR));
-        self.metrics
-            .lb_data_errors
-            .increment(self.nr_lb_data_errors);
-        self.metrics
-            .load_balance
-            .increment(stat(bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE));
+        let numa_load_avg = lb_stats[0].load.load_avg();
+        let dom_load_avg = lb_stats[0].domains[0].load.load_avg();
+        info!(
+            "cpu={:7.2} bal={} numa_load_avg={:8.2} dom_load_avg={:8.2} task_err={} lb_data_err={} proc={:?}ms",
+            cpu_busy * 100.0,
+            bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
+            numa_load_avg, dom_load_avg,
+            bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR as usize],
+            self.nr_lb_data_errors,
+            processing_dur.as_millis(),
+        );
 
-        self.metrics
-            .slice_length
-            .set(self.tuner.slice_ns as f64 / 1000.0);
+        let stat_pct = |value| value as f64 / total as f64 * 100.0;
 
-        // We need to dynamically create the metrics for each node and domain
-        // because we don't know how many there are at compile time. Metrics
-        // will be cached and reused so this is not a performance issue.
+        info!(
+            "tot={:7} wsync_prev_idle={:5.2} wsync={:5.2}",
+            total,
+            stat_pct(wsync_prev_idle),
+            stat_pct(wsync),
+        );
+
+        info!(
+            "prev_idle={:5.2} greedy_idle={:5.2} pin={:5.2}",
+            stat_pct(prev_idle),
+            stat_pct(greedy_idle),
+            stat_pct(pinned),
+        );
+
+        info!(
+            "dir={:5.2} dir_greedy={:5.2} dir_greedy_far={:5.2}",
+            stat_pct(direct_dispatch),
+            stat_pct(direct_greedy),
+            stat_pct(direct_greedy_far),
+        );
+
+        info!(
+            "dsq={:5.2} greedy_local={:5.2} greedy_xnuma={:5.2}",
+            stat_pct(dsq),
+            stat_pct(greedy_local),
+            stat_pct(greedy_xnuma),
+        );
+
+        info!(
+            "kick_greedy={:5.2} rep={:5.2}",
+            stat_pct(kick_greedy),
+            stat_pct(repatriate),
+        );
+
+        info!(
+            "dl_clamped={:5.2} dl_preset={:5.2}",
+            stat_pct(dl_clamped),
+            stat_pct(dl_preset),
+        );
+
+        info!("slice_length={}us", self.tuner.slice_ns / 1000);
+        info!("direct_greedy_cpumask={}", self.tuner.direct_greedy_mask);
+        info!("  kick_greedy_cpumask={}", self.tuner.kick_greedy_mask);
+
         for node in lb_stats.iter() {
-            histogram!("load_avg", "node" => node.id.to_string())
-                .record(node.load.load_avg() as f64);
+            info!("{}", node);
             for dom in node.domains.iter() {
-                histogram!("load_avg", "node" => node.id.to_string(), "dom" => dom.id.to_string())
-                    .record(dom.load.load_avg() as f64);
+                info!("{}", dom);
             }
         }
     }
@@ -589,7 +626,6 @@ impl<'a> Scheduler<'a> {
         let started_at = Instant::now();
         let bpf_stats = self.read_bpf_stats()?;
         let cpu_busy = self.get_cpu_busy()?;
-        self.metrics.cpu_busy_pct.record(cpu_busy * 100.0);
 
         let mut lb = LoadBalancer::new(
             &mut self.skel,
@@ -600,12 +636,14 @@ impl<'a> Scheduler<'a> {
         );
 
         lb.load_balance()?;
-        self.metrics
-            .processing_duration
-            .record(started_at.elapsed().as_micros() as f64);
 
         let stats = lb.get_stats();
-        self.report(&bpf_stats, &stats);
+        self.report(
+            &bpf_stats,
+            cpu_busy,
+            Instant::now().duration_since(started_at),
+            &stats,
+        );
 
         self.prev_at = started_at;
         Ok(())
@@ -692,11 +730,6 @@ fn main() -> Result<()> {
         PrometheusBuilder::new()
             .install()
             .expect("failed to install Prometheus recorder");
-    } else {
-        LogRecorderBuilder::new()
-            .with_reporting_interval(Duration::from_secs(3))
-            .install()
-            .expect("failed to install log recorder");
     }
 
     let mut open_object = MaybeUninit::uninit();
