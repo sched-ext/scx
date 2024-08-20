@@ -45,67 +45,10 @@ use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::UserExitInfo;
+use scx_utils::Cpumask;
 use scx_utils::Topology;
 
 const SCHEDULER_NAME: &'static str = "scx_bpfland";
-
-#[derive(Debug, Clone)]
-struct CpuMask {
-    mask: Vec<u64>,
-    num_bits: usize,
-}
-
-impl CpuMask {
-    pub fn from_mask(mask: Vec<u64>, num_bits: usize) -> Self {
-        Self { mask, num_bits }
-    }
-
-    pub fn is_cpu_set(&self, cpu: usize) -> bool {
-        if self.num_bits == 0 {
-            return true;
-        }
-        if cpu >= self.num_bits {
-            return false;
-        }
-        let idx = cpu / 64;
-        let bit = cpu % 64;
-        self.mask
-            .get(idx)
-            .map_or(false, |&val| val & (1 << bit) != 0)
-    }
-
-    pub fn from_str(hex_str: &str) -> Result<Self, std::num::ParseIntError> {
-        let hex_str = hex_str.trim_start_matches("0x");
-        let num_bits = hex_str.len() * 4;
-
-        let num_u64s = (num_bits + 63) / 64;
-        let padded_hex_str = format!("{:0>width$}", hex_str, width = num_u64s * 16);
-
-        let mask = (0..num_u64s)
-            .rev()
-            .map(|i| u64::from_str_radix(&padded_hex_str[i * 16..(i + 1) * 16], 16))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(CpuMask::from_mask(mask, num_bits))
-    }
-
-    pub fn to_string(&self) -> String {
-        if self.num_bits == 0 {
-            return "all".to_string();
-        }
-        let mut hex_str = String::new();
-        for &chunk in self.mask.iter().rev() {
-            hex_str.push_str(&format!("{:016x}", chunk));
-        }
-
-        // Remove leading zeros, but keep at least one digit.
-        hex_str = hex_str.trim_start_matches('0').to_string();
-        if hex_str.is_empty() {
-            hex_str = "0".to_string();
-        }
-        format!("0x{}", hex_str)
-    }
-}
 
 fn get_primary_cpus(powersave: bool) -> std::io::Result<Vec<usize>> {
     let topo = Topology::new().unwrap();
@@ -175,16 +118,20 @@ fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
     format!("0x{}", hex_str)
 }
 
-// Custom parser function for cpumask using CpuMask's from_str method
-fn parse_cpumask(cpu_str: &str) -> Result<CpuMask, std::num::ParseIntError> {
+fn parse_cpumask(cpu_str: &str) -> Result<Cpumask, anyhow::Error> {
     if cpu_str == "performance" {
         let cpus = get_primary_cpus(false).unwrap();
-        CpuMask::from_str(&cpus_to_cpumask(&cpus))
+        Cpumask::from_str(&cpus_to_cpumask(&cpus))
     } else if cpu_str == "powersave" {
         let cpus = get_primary_cpus(true).unwrap();
-        CpuMask::from_str(&cpus_to_cpumask(&cpus))
+        Cpumask::from_str(&cpus_to_cpumask(&cpus))
+    } else if !cpu_str.is_empty() {
+        Cpumask::from_str(&cpu_str.to_string())
     } else {
-        CpuMask::from_str(cpu_str)
+        let mut cpumask = Cpumask::new()?;
+        cpumask.setall();
+
+        Ok(cpumask)
     }
 }
 
@@ -239,7 +186,7 @@ struct Opts {
     ///
     /// By default all CPUs are used for the primary scheduling domain.
     #[clap(short = 'm', long, default_value = "", value_parser = parse_cpumask)]
-    primary_domain: CpuMask,
+    primary_domain: Cpumask,
 
     /// Disable L2 cache awareness.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -429,11 +376,11 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn init_primary_domain(skel: &mut BpfSkel<'_>, topo: &Topology, primary_domain: &CpuMask) -> Result<()> {
-        info!("primary CPU domain = {}", primary_domain.to_string());
+    fn init_primary_domain(skel: &mut BpfSkel<'_>, topo: &Topology, primary_domain: &Cpumask) -> Result<()> {
+        info!("primary CPU domain = 0x{:x}", primary_domain);
 
         for cpu in 0..topo.nr_cpu_ids() {
-            if primary_domain.is_cpu_set(cpu) {
+            if primary_domain.test_cpu(cpu) {
                 if let Err(err) = Self::enable_primary_cpu(skel, cpu) {
                     warn!("failed to add CPU {} to primary domain: error {}", cpu, err);
                 }
