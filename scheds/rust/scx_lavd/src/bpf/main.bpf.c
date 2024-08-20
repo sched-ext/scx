@@ -362,6 +362,14 @@ static struct task_ctx *get_task_ctx(struct task_struct *p)
 	return taskc;
 }
 
+static s32 get_task_cpu_id(struct task_struct *p)
+{
+	/*
+	 * This code assumes ONFIG_THREAD_INFO_IN_TASK is on in the kernel.
+	 */
+	return READ_ONCE(p->thread_info.cpu);
+}
+
 static struct cpu_ctx *get_cpu_ctx(void)
 {
 	const u32 idx = 0;
@@ -1277,6 +1285,181 @@ static void update_stat_for_quiescent(struct task_struct *p,
 	cpuc->load_run_time_ns -= clamp_time_slice_ns(taskc->run_time_ns);
 }
 
+static bool could_run_on_prev(struct task_struct *p, s32 prev_cpu,
+			      struct bpf_cpumask *a_cpumask,
+			      struct bpf_cpumask *o_cpumask)
+{
+	bool ret;
+
+	ret = bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
+	      (bpf_cpumask_test_cpu(prev_cpu, cast_mask(a_cpumask)) ||
+	       bpf_cpumask_test_cpu(prev_cpu, cast_mask(o_cpumask)));
+
+	return ret;
+}
+
+static s32 pick_cpu(struct task_struct *p, struct task_ctx *taskc,
+		    s32 prev_cpu, u64 wake_flags, bool *is_idle)
+{
+	struct sys_stat *stat_cur = get_sys_stat_cur();
+	struct cpu_ctx *cpuc;
+	struct bpf_cpumask *a_cpumask, *o_cpumask, *t_cpumask;
+	struct bpf_cpumask *active, *ovrflw, *big, *little;
+	s32 cpu_id;
+
+	bpf_rcu_read_lock();
+
+	/*
+	 * Prepare cpumaks.
+	 */
+	cpuc = get_cpu_ctx();
+	if (!cpuc || !taskc) {
+		scx_bpf_error("Failed to lookup the current cpu_ctx");
+		cpu_id = prev_cpu;
+		goto unlock_out;
+	}
+
+	a_cpumask = cpuc->tmp_a_mask;
+	o_cpumask = cpuc->tmp_o_mask;
+	t_cpumask = cpuc->tmp_t_mask;
+	active  = active_cpumask;
+	ovrflw  = ovrflw_cpumask;
+	big = big_cpumask;
+	little = little_cpumask;
+	if (!a_cpumask || !o_cpumask || !t_cpumask ||
+	    !active || !ovrflw || !big || !little) {
+		cpu_id = -ENOENT;
+		goto unlock_out;
+	}
+
+	bpf_cpumask_and(a_cpumask, p->cpus_ptr, cast_mask(active));
+	bpf_cpumask_and(o_cpumask, p->cpus_ptr, cast_mask(ovrflw));
+
+	/*
+	 * Try to stay on the previous core if it is on active or ovrfw.
+	 */
+	if (could_run_on_prev(p, prev_cpu, a_cpumask, o_cpumask) &&
+	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		cpu_id = prev_cpu;
+		*is_idle = true;
+		goto unlock_out;
+	}
+
+	if (bpf_cpumask_empty(cast_mask(a_cpumask)))
+		goto start_omask;
+
+	/*
+	 * Pick a fully idle core among active CPUs with a matching core type.
+	 */
+	if (is_perf_cri(taskc, stat_cur))
+		bpf_cpumask_and(t_cpumask, cast_mask(a_cpumask), cast_mask(big));
+	else
+		bpf_cpumask_and(t_cpumask, cast_mask(a_cpumask), cast_mask(little));
+
+	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(t_cpumask), SCX_PICK_IDLE_CORE);
+	if (cpu_id >= 0) {
+		*is_idle = true;
+		goto unlock_out;
+	}
+
+	/*
+	 * Pick a fully idle core among active CPUs with a matching core type
+	 * even if its hypertwin is in use.
+	 */
+	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(t_cpumask), 0);
+	if (cpu_id >= 0) {
+		*is_idle = true;
+		goto unlock_out;
+	}
+
+	/*
+	 * Pick a fully idle core among active CPUs.
+	 */
+	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(a_cpumask), SCX_PICK_IDLE_CORE);
+	if (cpu_id >= 0) {
+		*is_idle = true;
+		goto unlock_out;
+	}
+
+	/*
+	 * Pick an any idle core among active CPUs even if its hypertwin is in
+	 * use.
+	 */
+	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(a_cpumask), 0);
+	if (cpu_id >= 0) {
+		*is_idle = true;
+		goto unlock_out;
+	}
+
+	/*
+	 * Pick an any idle core among overflow CPUs.
+	 */
+start_omask:
+	if (bpf_cpumask_empty(cast_mask(o_cpumask)))
+		goto start_any_mask;
+
+	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(o_cpumask), 0);
+	if (cpu_id >= 0) {
+		*is_idle = true;
+		goto unlock_out;
+	}
+
+	/*
+	 * If there is no idle core under our control, pick random core
+	 * either in active of overflow CPUs.
+	 */
+	if (!bpf_cpumask_empty(cast_mask(a_cpumask))) {
+		cpu_id = bpf_cpumask_any_distribute(cast_mask(a_cpumask));
+		goto unlock_out;
+	}
+
+	if (!bpf_cpumask_empty(cast_mask(o_cpumask))) {
+		cpu_id = bpf_cpumask_any_distribute(cast_mask(o_cpumask));
+		goto unlock_out;
+	}
+
+	/*
+	 * If the task cannot run on either active or overflow cores,
+	 * stay on the previous core (if it is okay) or one of its taskset.
+	 */
+	if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
+		cpu_id = prev_cpu;
+	else {
+start_any_mask:
+		cpu_id = bpf_cpumask_any_distribute(p->cpus_ptr);
+	}
+
+	/*
+	 * Note that we don't need to kick the picked CPU here since the
+	 * ops.select_cpu() path internally triggers kicking cpu if necessary.
+	 */
+unlock_out:
+	bpf_rcu_read_unlock();
+	return cpu_id;
+}
+
+s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
+		   u64 wake_flags)
+{
+	bool found_idle = false;
+	struct task_ctx *taskc;
+	s32 cpu_id;
+
+	taskc = get_task_ctx(p);
+	if (!taskc)
+		return prev_cpu;
+
+	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
+
+	cpu_id = pick_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
+	if (found_idle) {
+		return cpu_id;
+	}
+
+	return prev_cpu;
+}
+
+
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 			     u64 enq_flags)
 {
@@ -1621,12 +1804,30 @@ static u64 find_proper_dsq(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 	return cpuc->cpdom_alt_id;
 }
 
-static void put_cpdom_rq(struct task_struct *p, struct task_ctx *taskc,
-			 struct cpu_ctx *cpuc, u64 enq_flags)
+void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	struct task_ctx *taskc_run;
-	struct task_struct *p_run;
+	struct cpu_ctx *cpuc_task, *cpuc_cur;
+	struct task_ctx *taskc;
+	s32 cpu_id;
 	u64 dsq_id;
+
+	/*
+	 * Place a task to a run queue of current cpu's compute domain.
+	 *
+	 * If there is an idle CPU at the ops.select_cpu(), the task is already
+	 * dispatched at ops.select_cpu(), so ops.enqueue() won't be called.
+	 * Hence, the task that is enqueued here are the cases: 1) there is no
+	 * idle CPU when ops.select_cpu() or 2) the task is not the case of
+	 * being wakened up (i.e., resume after preemption). Therefore, we
+	 * always put the task to the global DSQ, so any idle CPU can pick it
+	 * up.
+	 */
+	cpu_id = get_task_cpu_id(p);
+	taskc = get_task_ctx(p);
+	cpuc_task = get_cpu_ctx_id(cpu_id);
+	cpuc_cur = get_cpu_ctx();
+	if (!cpuc_cur || !cpuc_task || !taskc)
+		return;
 
 	__sync_fetch_and_add(&nr_queued_task, 1);
 
@@ -1642,6 +1843,8 @@ static void put_cpdom_rq(struct task_struct *p, struct task_ctx *taskc,
 	 * If a task is eligible, try to preempt a task.
 	 */
 	if (is_eligible(taskc)) {
+		struct task_ctx *taskc_run;
+		struct task_struct *p_run;
 		/*
 		 * Try to find and kick a victim CPU, which runs a less urgent
 		 * task. The kick will be done asynchronously.
@@ -1654,214 +1857,15 @@ static void put_cpdom_rq(struct task_struct *p, struct task_ctx *taskc,
 		p_run = bpf_get_current_task_btf();
 		taskc_run = try_get_task_ctx(p_run);
 		if (taskc_run && p_run->scx.slice != 0)
-			try_yield_current_cpu(p_run, cpuc, taskc_run);
+			try_yield_current_cpu(p_run, cpuc_cur, taskc_run);
 	}
 
 	/*
-	 * Enqueue the task to one of the DSQs based on its virtual deadline.
+	 * Enqueue the task to one of task's DSQs based on its virtual deadline.
 	 */
-	dsq_id = find_proper_dsq(taskc, cpuc);
+	dsq_id = find_proper_dsq(taskc, cpuc_task);
 	scx_bpf_dispatch_vtime(p, dsq_id, LAVD_SLICE_UNDECIDED,
 			       taskc->vdeadline_log_clk, enq_flags);
-}
-
-static bool could_run_on_prev(struct task_struct *p, s32 prev_cpu,
-			      struct bpf_cpumask *a_cpumask,
-			      struct bpf_cpumask *o_cpumask)
-{
-	bool ret;
-
-	ret = bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
-	      (bpf_cpumask_test_cpu(prev_cpu, cast_mask(a_cpumask)) ||
-	       bpf_cpumask_test_cpu(prev_cpu, cast_mask(o_cpumask)));
-
-	return ret;
-}
-
-static s32 pick_cpu(struct task_struct *p, struct task_ctx *taskc,
-		    s32 prev_cpu, u64 wake_flags, bool *is_idle)
-{
-	struct sys_stat *stat_cur = get_sys_stat_cur();
-	struct cpu_ctx *cpuc;
-	struct bpf_cpumask *a_cpumask, *o_cpumask, *t_cpumask;
-	struct bpf_cpumask *active, *ovrflw, *big, *little;
-	s32 cpu_id;
-
-	bpf_rcu_read_lock();
-
-	/*
-	 * Prepare cpumaks.
-	 */
-	cpuc = get_cpu_ctx();
-	if (!cpuc || !taskc) {
-		scx_bpf_error("Failed to lookup the current cpu_ctx");
-		cpu_id = prev_cpu;
-		goto unlock_out;
-	}
-
-	a_cpumask = cpuc->tmp_a_mask;
-	o_cpumask = cpuc->tmp_o_mask;
-	t_cpumask = cpuc->tmp_t_mask;
-	active  = active_cpumask;
-	ovrflw  = ovrflw_cpumask;
-	big = big_cpumask;
-	little = little_cpumask;
-	if (!a_cpumask || !o_cpumask || !t_cpumask ||
-	    !active || !ovrflw || !big || !little) {
-		cpu_id = -ENOENT;
-		goto unlock_out;
-	}
-
-	bpf_cpumask_and(a_cpumask, p->cpus_ptr, cast_mask(active));
-	bpf_cpumask_and(o_cpumask, p->cpus_ptr, cast_mask(ovrflw));
-
-	/*
-	 * Try to stay on the previous core if it is on active or ovrfw.
-	 */
-	if (could_run_on_prev(p, prev_cpu, a_cpumask, o_cpumask) &&
-	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		cpu_id = prev_cpu;
-		*is_idle = true;
-		goto unlock_out;
-	}
-
-	if (bpf_cpumask_empty(cast_mask(a_cpumask)))
-		goto start_omask;
-
-	/*
-	 * Pick a fully idle core among active CPUs with a matching core type.
-	 */
-	if (is_perf_cri(taskc, stat_cur))
-		bpf_cpumask_and(t_cpumask, cast_mask(a_cpumask), cast_mask(big));
-	else
-		bpf_cpumask_and(t_cpumask, cast_mask(a_cpumask), cast_mask(little));
-
-	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(t_cpumask), SCX_PICK_IDLE_CORE);
-	if (cpu_id >= 0) {
-		*is_idle = true;
-		goto unlock_out;
-	}
-
-	/*
-	 * Pick a fully idle core among active CPUs with a matching core type
-	 * even if its hypertwin is in use.
-	 */
-	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(t_cpumask), 0);
-	if (cpu_id >= 0) {
-		*is_idle = true;
-		goto unlock_out;
-	}
-
-	/*
-	 * Pick a fully idle core among active CPUs.
-	 */
-	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(a_cpumask), SCX_PICK_IDLE_CORE);
-	if (cpu_id >= 0) {
-		*is_idle = true;
-		goto unlock_out;
-	}
-
-	/*
-	 * Pick an any idle core among active CPUs even if its hypertwin is in
-	 * use.
-	 */
-	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(a_cpumask), 0);
-	if (cpu_id >= 0) {
-		*is_idle = true;
-		goto unlock_out;
-	}
-
-	/*
-	 * Pick an any idle core among overflow CPUs.
-	 */
-start_omask:
-	if (bpf_cpumask_empty(cast_mask(o_cpumask)))
-		goto start_any_mask;
-
-	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(o_cpumask), 0);
-	if (cpu_id >= 0) {
-		*is_idle = true;
-		goto unlock_out;
-	}
-
-	/*
-	 * If there is no idle core under our control, pick random core
-	 * either in active of overflow CPUs.
-	 */
-	if (!bpf_cpumask_empty(cast_mask(a_cpumask))) {
-		cpu_id = bpf_cpumask_any_distribute(cast_mask(a_cpumask));
-		goto unlock_out;
-	}
-
-	if (!bpf_cpumask_empty(cast_mask(o_cpumask))) {
-		cpu_id = bpf_cpumask_any_distribute(cast_mask(o_cpumask));
-		goto unlock_out;
-	}
-
-	/*
-	 * If the task cannot run on either active or overflow cores,
-	 * stay on the previous core (if it is okay) or one of its taskset.
-	 */
-	if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
-		cpu_id = prev_cpu;
-	else {
-start_any_mask:
-		cpu_id = bpf_cpumask_any_distribute(p->cpus_ptr);
-	}
-
-	/*
-	 * Note that we don't need to kick the picked CPU here since the
-	 * ops.select_cpu() path internally triggers kicking cpu if necessary.
-	 */
-unlock_out:
-	bpf_rcu_read_unlock();
-	return cpu_id;
-}
-
-s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
-		   u64 wake_flags)
-{
-	bool found_idle = false;
-	struct task_ctx *taskc;
-	s32 cpu_id;
-
-	taskc = get_task_ctx(p);
-	if (!taskc)
-		return prev_cpu;
-
-	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
-
-	cpu_id = pick_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
-	if (found_idle) {
-		return cpu_id;
-	}
-
-	return prev_cpu;
-}
-
-void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
-{
-	struct cpu_ctx *cpuc;
-	struct task_ctx *taskc;
-	
-	/*
-	 * If there is an idle CPU at the ops.select_cpu(), the task is already
-	 * dispatched at ops.select_cpu(), so ops.enqueue() won't be called.
-	 * Hence, the task that is enqueued here are the cases: 1) there is no
-	 * idle CPU when ops.select_cpu() or 2) the task is not the case of
-	 * being wakened up (i.e., resume after preemption). Therefore, we
-	 * always put the task to the global DSQ, so any idle CPU can pick it
-	 * up.
-	 */
-	cpuc = get_cpu_ctx();
-	taskc = get_task_ctx(p);
-	if (!cpuc || !taskc)
-		return;
-
-	/*
-	 * Place a task to a run queue of current cpu's compute domain.
-	 */
-	put_cpdom_rq(p, taskc, cpuc, enq_flags);
 }
 
 static bool is_kernel_task(struct task_struct *p)
