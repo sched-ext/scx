@@ -44,9 +44,10 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::UserExitInfo;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
+use scx_utils::UserExitInfo;
+use scx_utils::NR_CPU_IDS;
 
 const SCHEDULER_NAME: &'static str = "scx_bpfland";
 
@@ -75,13 +76,15 @@ fn get_primary_cpus(powersave: bool) -> std::io::Result<Vec<usize>> {
         cpu_freqs.into_iter().map(|(cpu_id, _)| cpu_id).collect()
     } else if powersave {
         // If powersave is true, return the CPUs with the smallest frequency.
-        cpu_freqs.into_iter()
+        cpu_freqs
+            .into_iter()
             .filter(|&(_, freq)| freq == min_freq)
             .map(|(cpu_id, _)| cpu_id)
             .collect()
     } else {
         // If powersave is false, return the CPUs with the highest frequency.
-        cpu_freqs.into_iter()
+        cpu_freqs
+            .into_iter()
             .filter(|&(_, freq)| freq != min_freq)
             .map(|(cpu_id, _)| cpu_id)
             .collect()
@@ -110,7 +113,8 @@ fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
     }
 
     // Convert the byte vector to a hexadecimal string.
-    let hex_str: String = bitmask.iter()
+    let hex_str: String = bitmask
+        .iter()
         .rev()
         .map(|byte| format!("{:02x}", byte))
         .collect();
@@ -376,10 +380,14 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn init_primary_domain(skel: &mut BpfSkel<'_>, topo: &Topology, primary_domain: &Cpumask) -> Result<()> {
+    fn init_primary_domain(
+        skel: &mut BpfSkel<'_>,
+        topo: &Topology,
+        primary_domain: &Cpumask,
+    ) -> Result<()> {
         info!("primary CPU domain = 0x{:x}", primary_domain);
 
-        for cpu in 0..topo.nr_cpu_ids() {
+        for cpu in 0..*NR_CPU_IDS {
             if primary_domain.test_cpu(cpu) {
                 if let Err(err) = Self::enable_primary_cpu(skel, cpu) {
                     warn!("failed to add CPU {} to primary domain: error {}", cpu, err);
@@ -423,7 +431,7 @@ impl<'a> Scheduler<'a> {
         skel: &mut BpfSkel<'_>,
         topo: &Topology,
         cache_lvl: usize,
-        enable_sibling_cpu_fn: &dyn Fn(&mut BpfSkel<'_>, usize, usize, usize) -> Result<(), u32>
+        enable_sibling_cpu_fn: &dyn Fn(&mut BpfSkel<'_>, usize, usize, usize) -> Result<(), u32>,
     ) -> Result<(), std::io::Error> {
         // Determine the list of CPU IDs associated to each cache node.
         let mut cache_id_map: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -450,7 +458,7 @@ impl<'a> Scheduler<'a> {
             for cpu in &cpus {
                 for sibling_cpu in &cpus {
                     match enable_sibling_cpu_fn(skel, cache_lvl, *cpu, *sibling_cpu) {
-                        Ok(()) => {},
+                        Ok(()) => {}
                         Err(_) => {
                             warn!(
                                 "L{} cache ID {}: failed to set CPU {} sibling {}",
@@ -465,13 +473,19 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn init_l2_cache_domains(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<(), std::io::Error> {
+    fn init_l2_cache_domains(
+        skel: &mut BpfSkel<'_>,
+        topo: &Topology,
+    ) -> Result<(), std::io::Error> {
         Self::init_cache_domains(skel, topo, 2, &|skel, lvl, cpu, sibling_cpu| {
             Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
         })
     }
 
-    fn init_l3_cache_domains(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<(), std::io::Error> {
+    fn init_l3_cache_domains(
+        skel: &mut BpfSkel<'_>,
+        topo: &Topology,
+    ) -> Result<(), std::io::Error> {
         Self::init_cache_domains(skel, topo, 3, &|skel, lvl, cpu, sibling_cpu| {
             Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
         })

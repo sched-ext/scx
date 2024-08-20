@@ -57,6 +57,8 @@ use scx_utils::Cpumask;
 use scx_utils::LogRecorderBuilder;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
+use scx_utils::NR_CPUS_POSSIBLE;
+use scx_utils::NR_CPU_IDS;
 
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
@@ -295,8 +297,6 @@ struct Scheduler<'a> {
     balance_load: bool,
     balanced_kworkers: bool,
 
-    top: Arc<Topology>,
-
     dom_group: Arc<DomainGroup>,
 
     proc_reader: procfs::ProcReader,
@@ -324,14 +324,12 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, open_object, rusty).unwrap();
 
         // Initialize skel according to @opts.
-        let top = Arc::new(Topology::new()?);
+        let domains = Arc::new(DomainGroup::new(&Topology::new()?, &opts.cpumasks)?);
 
-        let domains = Arc::new(DomainGroup::new(top.clone(), &opts.cpumasks)?);
-
-        if top.nr_cpu_ids() > MAX_CPUS {
+        if *NR_CPU_IDS > MAX_CPUS {
             bail!(
                 "Num possible CPU IDs ({}) exceeds maximum of ({})",
-                top.nr_cpu_ids(),
+                *NR_CPU_IDS,
                 MAX_CPUS
             );
         }
@@ -346,13 +344,13 @@ impl<'a> Scheduler<'a> {
 
         skel.maps.rodata_data.nr_nodes = domains.nr_nodes() as u32;
         skel.maps.rodata_data.nr_doms = domains.nr_doms() as u32;
-        skel.maps.rodata_data.nr_cpu_ids = top.nr_cpu_ids() as u32;
+        skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
 
         // Any CPU with dom > MAX_DOMS is considered offline by default. There
         // are a few places in the BPF code where we skip over offlined CPUs
         // (e.g. when initializing or refreshing tune params), and elsewhere the
         // scheduler will error if we try to schedule from them.
-        for cpu in 0..top.nr_cpu_ids() {
+        for cpu in 0..*NR_CPU_IDS {
             skel.maps.rodata_data.cpu_dom_id_map[cpu] = u32::MAX;
         }
 
@@ -423,7 +421,6 @@ impl<'a> Scheduler<'a> {
             balance_load: !opts.no_load_balance,
             balanced_kworkers: opts.balanced_kworkers,
 
-            top,
             dom_group: domains.clone(),
             proc_reader,
 
@@ -499,8 +496,7 @@ impl<'a> Scheduler<'a> {
     fn read_bpf_stats(&mut self) -> Result<Vec<u64>> {
         let stats_map = &mut self.skel.maps.stats;
         let mut stats: Vec<u64> = Vec::new();
-        let zero_vec =
-            vec![vec![0u8; stats_map.value_size() as usize]; self.top.nr_cpus_possible()];
+        let zero_vec = vec![vec![0u8; stats_map.value_size() as usize]; *NR_CPUS_POSSIBLE];
 
         for stat in 0..bpf_intf::stat_idx_RUSTY_NR_STATS {
             let cpu_stat_vec = stats_map
