@@ -9,7 +9,8 @@ include!("src/builder.rs");
 fn main() {
     Builder::new().build();
     EmitBuilder::builder()
-        .all_git()
+        .git_sha(true)
+        .git_dirty(true)
         .cargo_target_triple()
         .emit()
         .unwrap();

@@ -207,6 +207,10 @@ struct Opts {
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
 
+    /// Print version and exit.
+    #[clap(long)]
+    version: bool,
+
     /// Enable the Prometheus endpoint for metrics on port 9000.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_prometheus: bool,
@@ -657,6 +661,11 @@ impl<'a> Drop for Scheduler<'a> {
 
 fn main() -> Result<()> {
     let opts = Opts::parse();
+
+    if opts.version {
+        println!("scx_rusty: {}", *build_id::SCX_FULL_VERSION);
+        return Ok(());
+    }
 
     let llv = match opts.verbose {
         0 => simplelog::LevelFilter::Info,
