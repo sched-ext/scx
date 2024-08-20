@@ -10,11 +10,11 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
+use std::collections::HashMap;
 use std::ffi::c_int;
 use std::fs::File;
 use std::io::Read;
 use std::mem::MaybeUninit;
-use std::str;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -45,6 +45,7 @@ use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::UserExitInfo;
+use scx_utils::Topology;
 
 const SCHEDULER_NAME: &'static str = "scx_bpfland";
 
@@ -106,9 +107,85 @@ impl CpuMask {
     }
 }
 
+fn get_primary_cpus(powersave: bool) -> std::io::Result<Vec<usize>> {
+    let topo = Topology::new().unwrap();
+
+    // Iterate over each CPU directory and collect CPU ID and its max frequency.
+    let mut cpu_freqs = Vec::new();
+    for core in topo.cores().into_iter() {
+        for (cpu_id, cpu) in core.cpus() {
+            cpu_freqs.push((*cpu_id, cpu.max_freq()));
+        }
+    }
+    if cpu_freqs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Find the smallest maximum frequency.
+    let min_freq = cpu_freqs.iter().map(|&(_, freq)| freq).min().unwrap();
+
+    // Check if all CPUs have the smallest frequency.
+    let all_have_min_freq = cpu_freqs.iter().all(|&(_, freq)| freq == min_freq);
+
+    let selected_cpu_ids: Vec<usize> = if all_have_min_freq {
+        // If all CPUs have the smallest frequency, return all CPU IDs.
+        cpu_freqs.into_iter().map(|(cpu_id, _)| cpu_id).collect()
+    } else if powersave {
+        // If powersave is true, return the CPUs with the smallest frequency.
+        cpu_freqs.into_iter()
+            .filter(|&(_, freq)| freq == min_freq)
+            .map(|(cpu_id, _)| cpu_id)
+            .collect()
+    } else {
+        // If powersave is false, return the CPUs with the highest frequency.
+        cpu_freqs.into_iter()
+            .filter(|&(_, freq)| freq != min_freq)
+            .map(|(cpu_id, _)| cpu_id)
+            .collect()
+    };
+
+    Ok(selected_cpu_ids)
+}
+
+// Convert an array of CPUs to the corresponding cpumask of any arbitrary size.
+fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
+    if cpus.is_empty() {
+        return String::from("0x0");
+    }
+
+    // Determine the maximum CPU ID to create a sufficiently large byte vector.
+    let max_cpu_id = *cpus.iter().max().unwrap();
+
+    // Create a byte vector with enough bytes to cover all CPU IDs.
+    let mut bitmask = vec![0u8; (max_cpu_id + 1 + 7) / 8];
+
+    // Set the appropriate bits for each CPU ID.
+    for cpu_id in cpus {
+        let byte_index = cpu_id / 8;
+        let bit_index = cpu_id % 8;
+        bitmask[byte_index] |= 1 << bit_index;
+    }
+
+    // Convert the byte vector to a hexadecimal string.
+    let hex_str: String = bitmask.iter()
+        .rev()
+        .map(|byte| format!("{:02x}", byte))
+        .collect();
+
+    format!("0x{}", hex_str)
+}
+
 // Custom parser function for cpumask using CpuMask's from_str method
-fn parse_cpumask(hex_str: &str) -> Result<CpuMask, std::num::ParseIntError> {
-    CpuMask::from_str(hex_str)
+fn parse_cpumask(cpu_str: &str) -> Result<CpuMask, std::num::ParseIntError> {
+    if cpu_str == "performance" {
+        let cpus = get_primary_cpus(false).unwrap();
+        CpuMask::from_str(&cpus_to_cpumask(&cpus))
+    } else if cpu_str == "powersave" {
+        let cpus = get_primary_cpus(true).unwrap();
+        CpuMask::from_str(&cpus_to_cpumask(&cpus))
+    } else {
+        CpuMask::from_str(cpu_str)
+    }
 }
 
 /// scx_bpfland: a vruntime-based sched_ext scheduler that prioritizes interactive workloads.
@@ -156,9 +233,21 @@ struct Opts {
     /// scheduler will use to dispatch tasks, until the system becomes saturated, at which point
     /// tasks may overflow to other available CPUs.
     ///
-    /// (empty string = all CPUs are used for initial scheduling)
+    /// Special values:
+    ///  - "performance" = automatically detect and use the fastest CPUs
+    ///  - "powersave" = automatically detect and use the slowest CPUs
+    ///
+    /// By default all CPUs are used for the primary scheduling domain.
     #[clap(short = 'm', long, default_value = "", value_parser = parse_cpumask)]
     primary_domain: CpuMask,
+
+    /// Disable L2 cache awareness.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_l2: bool,
+
+    /// Disable L3 cache awareness.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_l3: bool,
 
     /// Maximum threshold of voluntary context switch per second, used to classify interactive
     /// tasks (0 = disable interactive tasks classification).
@@ -238,7 +327,9 @@ fn is_smt_active() -> std::io::Result<i32> {
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
+    opts: &'a Opts,
     metrics: Metrics,
+    cpu_hotplug_cnt: u64,
 }
 
 impl<'a> Scheduler<'a> {
@@ -281,8 +372,20 @@ impl<'a> Scheduler<'a> {
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, bpfland_ops, uei)?;
 
-        // Initialize primary domain CPUs.
-        Self::init_primary_domain(&mut skel, &opts.primary_domain)?;
+        // Initialize CPU topology.
+        let topo = Topology::new().unwrap();
+
+        // Initialize the primary scheduling domain (based on the --primary-domain option).
+        Self::init_primary_domain(&mut skel, &topo, &opts.primary_domain)?;
+
+        // Initialize L2 cache domains.
+        if !opts.disable_l2 {
+            Self::init_l2_cache_domains(&mut skel, &topo)?;
+        }
+        // Initialize L3 cache domains.
+        if !opts.disable_l3 {
+            Self::init_l3_cache_domains(&mut skel, &topo)?;
+        }
 
         // Attach the scheduler.
         let struct_ops = Some(scx_ops_attach!(skel, bpfland_ops)?);
@@ -298,12 +401,14 @@ impl<'a> Scheduler<'a> {
         Ok(Self {
             skel,
             struct_ops,
+            opts,
             metrics: Metrics::new(),
+            cpu_hotplug_cnt: 0,
         })
     }
 
-    fn enable_cpu(skel: &mut BpfSkel<'_>, cpu: usize) -> Result<(), u32> {
-        let prog = &mut skel.progs.enable_cpu;
+    fn enable_primary_cpu(skel: &mut BpfSkel<'_>, cpu: usize) -> Result<(), u32> {
+        let prog = &mut skel.progs.enable_primary_cpu;
         let mut args = cpu_arg {
             cpu_id: cpu as c_int,
         };
@@ -324,21 +429,132 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn init_primary_domain(skel: &mut BpfSkel<'_>, primary_domain: &CpuMask) -> Result<()> {
+    fn init_primary_domain(skel: &mut BpfSkel<'_>, topo: &Topology, primary_domain: &CpuMask) -> Result<()> {
         info!("primary CPU domain = {}", primary_domain.to_string());
 
-        for cpu in 0..libbpf_rs::num_possible_cpus().unwrap() {
+        for cpu in 0..topo.nr_cpu_ids() {
             if primary_domain.is_cpu_set(cpu) {
-                if let Err(err) = Self::enable_cpu(skel, cpu) {
-                    warn!(
-                        "Failed to add CPU {} to primary domain: error {}",
-                        cpu, err
-                    );
+                if let Err(err) = Self::enable_primary_cpu(skel, cpu) {
+                    warn!("failed to add CPU {} to primary domain: error {}", cpu, err);
                 }
             }
         }
 
         Ok(())
+    }
+
+    fn enable_sibling_cpu(
+        skel: &mut BpfSkel<'_>,
+        lvl: usize,
+        cpu: usize,
+        sibling_cpu: usize,
+    ) -> Result<(), u32> {
+        let prog = &mut skel.progs.enable_sibling_cpu;
+        let mut args = domain_arg {
+            lvl_id: lvl as c_int,
+            cpu_id: cpu as c_int,
+            sibling_cpu_id: sibling_cpu as c_int,
+        };
+        let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
+            ..Default::default()
+        };
+        let out = prog.test_run(input).unwrap();
+        if out.return_value != 0 {
+            return Err(out.return_value);
+        }
+
+        Ok(())
+    }
+
+    fn init_cache_domains(
+        skel: &mut BpfSkel<'_>,
+        topo: &Topology,
+        cache_lvl: usize,
+        enable_sibling_cpu_fn: &dyn Fn(&mut BpfSkel<'_>, usize, usize, usize) -> Result<(), u32>
+    ) -> Result<(), std::io::Error> {
+        // Determine the list of CPU IDs associated to each cache node.
+        let mut cache_id_map: HashMap<usize, Vec<usize>> = HashMap::new();
+        for core in topo.cores().into_iter() {
+            for (cpu_id, cpu) in core.cpus() {
+                let cache_id = match cache_lvl {
+                    2 => cpu.l2_id(),
+                    3 => cpu.l3_id(),
+                    _ => panic!("invalid cache level {}", cache_lvl),
+                };
+                cache_id_map
+                    .entry(cache_id)
+                    .or_insert_with(Vec::new)
+                    .push(*cpu_id);
+            }
+        }
+
+        // Update the BPF cpumasks for the cache domains.
+        for (cache_id, cpus) in cache_id_map {
+            info!(
+                "L{} cache ID {}: sibling CPUs: {:?}",
+                cache_lvl, cache_id, cpus
+            );
+            for cpu in &cpus {
+                for sibling_cpu in &cpus {
+                    match enable_sibling_cpu_fn(skel, cache_lvl, *cpu, *sibling_cpu) {
+                        Ok(()) => {},
+                        Err(_) => {
+                            warn!(
+                                "L{} cache ID {}: failed to set CPU {} sibling {}",
+                                cache_lvl, cache_id, *cpu, *sibling_cpu
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn init_l2_cache_domains(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<(), std::io::Error> {
+        Self::init_cache_domains(skel, topo, 2, &|skel, lvl, cpu, sibling_cpu| {
+            Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
+        })
+    }
+
+    fn init_l3_cache_domains(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<(), std::io::Error> {
+        Self::init_cache_domains(skel, topo, 3, &|skel, lvl, cpu, sibling_cpu| {
+            Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
+        })
+    }
+
+    fn refresh_cache_domains(&mut self) {
+        // Check if we need to refresh the CPU cache information.
+        if self.cpu_hotplug_cnt == self.skel.maps.bss_data.cpu_hotplug_cnt {
+            return;
+        }
+
+        // Re-initialize CPU topology.
+        let topo = Topology::new().unwrap();
+
+        // Re-initialize L2 cache domains.
+        if !self.opts.disable_l2 {
+            if let Err(e) = Self::init_l2_cache_domains(&mut self.skel, &topo) {
+                warn!("failed to initialize L2 cache domains: {}", e);
+            }
+        }
+
+        // Re-initialize L3 cache domains.
+        if !self.opts.disable_l3 {
+            if let Err(e) = Self::init_l3_cache_domains(&mut self.skel, &topo) {
+                warn!("failed to initialize L3 cache domains: {}", e);
+            }
+        }
+
+        // Update CPU hotplug generation counter.
+        self.cpu_hotplug_cnt = self.skel.maps.bss_data.cpu_hotplug_cnt;
     }
 
     fn update_stats(&mut self) {
@@ -352,18 +568,10 @@ impl<'a> Scheduler<'a> {
         let nr_shared_dispatches = self.skel.maps.bss_data.nr_shared_dispatches;
 
         // Update Prometheus statistics.
-        self.metrics
-            .nr_running
-            .set(nr_running as f64);
-        self.metrics
-            .nr_interactive
-            .set(nr_interactive as f64);
-        self.metrics
-            .nr_waiting
-            .set(nr_waiting as f64);
-        self.metrics
-            .nvcsw_avg_thresh
-            .set(nvcsw_avg_thresh as f64);
+        self.metrics.nr_running.set(nr_running as f64);
+        self.metrics.nr_interactive.set(nr_interactive as f64);
+        self.metrics.nr_waiting.set(nr_waiting as f64);
+        self.metrics.nvcsw_avg_thresh.set(nvcsw_avg_thresh as f64);
         self.metrics
             .nr_direct_dispatches
             .set(nr_direct_dispatches as f64);
@@ -393,6 +601,7 @@ impl<'a> Scheduler<'a> {
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
+            self.refresh_cache_domains();
             self.update_stats();
             std::thread::sleep(Duration::from_millis(1000));
         }

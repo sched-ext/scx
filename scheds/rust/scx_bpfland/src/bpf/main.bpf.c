@@ -107,10 +107,10 @@ volatile u64 nr_running, nr_waiting, nr_interactive, nr_online_cpus;
 UEI_DEFINE(uei);
 
 /*
- * Mask of CPUs that the scheduler can use, until the system becomes saturated,
+ * Mask of CPUs that the scheduler can use until the system becomes saturated,
  * at which point tasks may overflow to other available CPUs.
  */
-private(BPFLAND) struct bpf_cpumask __kptr *allowed_cpumask;
+private(BPFLAND) struct bpf_cpumask __kptr *primary_cpumask;
 
 /*
  * Mask of offline CPUs, used to properly support CPU hotplugging.
@@ -121,6 +121,13 @@ private(BPFLAND) struct bpf_cpumask __kptr *offline_cpumask;
  * Determine when we need to drain tasks dispatched to CPUs that went offline.
  */
 static int offline_needed;
+
+/*
+ * CPU hotplugging generation counter (used to notify the user-space
+ * counterpart when a CPU hotplug event happened, allowing it to refresh the
+ * topology information).
+ */
+volatile u64 cpu_hotplug_cnt;
 
 /*
  * Notify the scheduler that we need to drain and re-enqueue the tasks
@@ -150,15 +157,41 @@ const volatile bool smt_enabled = true;
 static u64 vtime_now;
 
 /*
+ * Per-CPU context.
+ */
+struct cpu_ctx {
+	struct bpf_cpumask __kptr *l2_cpumask;
+	struct bpf_cpumask __kptr *l3_cpumask;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct cpu_ctx);
+	__uint(max_entries, 1);
+} cpu_ctx_stor SEC(".maps");
+
+/*
+ * Return a CPU context.
+ */
+struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
+{
+	const u32 idx = 0;
+	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
+}
+
+/*
  * Per-task local storage.
  *
  * This contain all the per-task information used internally by the BPF code.
  */
 struct task_ctx {
 	/*
-	 * A temporary cpumask for calculating the allowed CPU mask.
+	 * Temporary cpumask for calculating scheduling domains.
 	 */
 	struct bpf_cpumask __kptr *cpumask;
+	struct bpf_cpumask __kptr *l2_cpumask;
+	struct bpf_cpumask __kptr *l3_cpumask;
 
 	/*
 	 * Voluntary context switches metrics.
@@ -431,12 +464,17 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
-	struct bpf_cpumask *p_mask, *allowed;
+	struct bpf_cpumask *primary, *l2_domain, *l3_domain;
+	struct bpf_cpumask *p_mask, *l2_mask, *l3_mask;
 	struct task_ctx *tctx;
+	struct cpu_ctx *cctx;
 	s32 cpu;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
+		return prev_cpu;
+	cctx = try_lookup_cpu_ctx(prev_cpu);
+	if (!cctx)
 		return prev_cpu;
 
 	/*
@@ -452,8 +490,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 		return -ENOENT;
 	}
 
-	allowed = allowed_cpumask;
-	if (!allowed)
+	primary = primary_cpumask;
+	if (!primary)
 		return -ENOENT;
 
 	/*
@@ -464,17 +502,65 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	idle_smtmask = scx_bpf_get_idle_smtmask();
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 
+	/*
+	 * Scheduling domains of the previously used CPU.
+	 */
+	l2_domain = cctx->l2_cpumask;
+	if (!l2_domain)
+		l2_domain = primary;
+	l3_domain = cctx->l3_cpumask;
+	if (!l3_domain)
+		l3_domain = primary;
+
+	/*
+	 * Task's scheduling domains.
+	 */
 	p_mask = tctx->cpumask;
 	if (!p_mask) {
+		scx_bpf_error("cpumask not initialized");
+		cpu = prev_cpu;
+		goto out_put_cpumask;
+	}
+	l2_mask = tctx->l2_cpumask;
+	if (!l2_mask) {
+		scx_bpf_error("l2 cpumask not initialized");
+		cpu = prev_cpu;
+		goto out_put_cpumask;
+	}
+	l3_mask = tctx->l3_cpumask;
+	if (!l3_mask) {
+		scx_bpf_error("l3 cpumask not initialized");
 		cpu = prev_cpu;
 		goto out_put_cpumask;
 	}
 
 	/*
-	 * Enable the task to run in the intersection of its permitted CPUs and
-	 * the primary scheduling domain.
+	 * Determine the task's primary domain as the intersection of the
+	 * task's allowed cpumask and the global primary scheduling domain.
 	 */
-	bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(allowed));
+	bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(primary));
+
+	/*
+	 * Determine the L2 cache domain as the intersection of the task's
+	 * primary cpumask and the L2 cache domain mask of the previously used
+	 * CPU (ignore if this cpumask completely overlaps with the task's
+	 * cpumask).
+	 */
+	bpf_cpumask_and(l2_mask, cast_mask(p_mask), cast_mask(l2_domain));
+	if (bpf_cpumask_empty(cast_mask(l2_mask)) ||
+	    bpf_cpumask_equal(cast_mask(l2_mask), cast_mask(p_mask)))
+		l2_mask = NULL;
+
+	/*
+	 * Determine the L3 cache domain as the intersection of the task's
+	 * primary cpumask and the L3 cache domain mask of the previously used
+	 * CPU (ignore if this cpumask completely overlaps with the task's
+	 * cpumask).
+	 */
+	bpf_cpumask_and(l3_mask, cast_mask(p_mask), cast_mask(l3_domain));
+	if (bpf_cpumask_empty(cast_mask(l3_mask)) ||
+	    bpf_cpumask_equal(cast_mask(l3_mask), cast_mask(p_mask)))
+		l3_mask = NULL;
 
 	/*
 	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
@@ -492,7 +578,29 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 		}
 
 		/*
-		 * Otherwise, search for another usable full-idle core.
+		 * Search for any full-idle CPU in the primary domain that
+		 * shares the same L2 cache.
+		 */
+		if (l2_mask) {
+			cpu = bpf_cpumask_any_and_distribute(cast_mask(l2_mask), idle_smtmask);
+			if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
+			    scx_bpf_test_and_clear_cpu_idle(cpu))
+				goto out_put_cpumask;
+		}
+
+		/*
+		 * Search for any full-idle CPU in the primary domain that
+		 * shares the same L3 cache.
+		 */
+		if (l3_mask) {
+			cpu = bpf_cpumask_any_and_distribute(cast_mask(l3_mask), idle_smtmask);
+			if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
+			    scx_bpf_test_and_clear_cpu_idle(cpu))
+				goto out_put_cpumask;
+		}
+
+		/*
+		 * Search for any other full-idle core in the primary domain.
 		 */
 		cpu = bpf_cpumask_any_and_distribute(cast_mask(p_mask), idle_smtmask);
 		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
@@ -511,8 +619,29 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	}
 
 	/*
-	 * If all the previous attempts have failed, try to use any idle CPU in
-	 * the system.
+	 * Search for any idle CPU in the primary domain that shares the same
+	 * L2 cache.
+	 */
+	if (l2_mask) {
+		cpu = bpf_cpumask_any_and_distribute(cast_mask(l2_mask), idle_cpumask);
+		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
+		    scx_bpf_test_and_clear_cpu_idle(cpu))
+			goto out_put_cpumask;
+	}
+
+	/*
+	 * Search for any idle CPU in the primary domain that shares the same
+	 * L3 cache.
+	 */
+	if (l3_mask) {
+		cpu = bpf_cpumask_any_and_distribute(cast_mask(l3_mask), idle_cpumask);
+		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
+		    scx_bpf_test_and_clear_cpu_idle(cpu))
+			goto out_put_cpumask;
+	}
+
+	/*
+	 * Search for any idle CPU in the primary domain.
 	 */
 	cpu = bpf_cpumask_any_and_distribute(cast_mask(p_mask), idle_cpumask);
 	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
@@ -520,7 +649,16 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 		goto out_put_cpumask;
 
 	/*
-	 * If all the previous attempts have failed, dispatch the task to the
+	 * If all the previous attempts have failed, try to use any idle CPU in
+	 * the system.
+	 */
+	cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, idle_cpumask);
+	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
+	    scx_bpf_test_and_clear_cpu_idle(cpu))
+		goto out_put_cpumask;
+
+	/*
+	 * We couldn't find any idle CPU, so simply dispatch the task to the
 	 * first CPU that will become available.
 	 */
 	cpu = -ENOENT;
@@ -906,6 +1044,7 @@ void BPF_STRUCT_OPS(bpfland_cpu_online, s32 cpu)
 	set_cpu_state(offline_cpumask, cpu, false);
 
 	__sync_fetch_and_add(&nr_online_cpus, 1);
+	__sync_fetch_and_add(&cpu_hotplug_cnt, 1);
 }
 
 void BPF_STRUCT_OPS(bpfland_cpu_offline, s32 cpu)
@@ -914,6 +1053,8 @@ void BPF_STRUCT_OPS(bpfland_cpu_offline, s32 cpu)
 	set_cpu_state(offline_cpumask, cpu, true);
 
 	__sync_fetch_and_sub(&nr_online_cpus, 1);
+	__sync_fetch_and_add(&cpu_hotplug_cnt, 1);
+
 	set_offline_needed();
 }
 
@@ -927,11 +1068,31 @@ s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!tctx)
 		return -ENOMEM;
+	/*
+	 * Create task's primary cpumask.
+	 */
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
 		return -ENOMEM;
-
 	cpumask = bpf_kptr_xchg(&tctx->cpumask, cpumask);
+	if (cpumask)
+		bpf_cpumask_release(cpumask);
+	/*
+	 * Create task's L2 cache cpumask.
+	 */
+	cpumask = bpf_cpumask_create();
+	if (!cpumask)
+		return -ENOMEM;
+	cpumask = bpf_kptr_xchg(&tctx->l2_cpumask, cpumask);
+	if (cpumask)
+		bpf_cpumask_release(cpumask);
+	/*
+	 * Create task's L3 cache cpumask.
+	 */
+	cpumask = bpf_cpumask_create();
+	if (!cpumask)
+		return -ENOMEM;
+	cpumask = bpf_kptr_xchg(&tctx->l3_cpumask, cpumask);
 	if (cpumask)
 		bpf_cpumask_release(cpumask);
 
@@ -960,7 +1121,7 @@ s32 get_nr_online_cpus(void)
 	return cpus;
 }
 
-static int init_allowed_cpus(void)
+static int init_cpumask(struct bpf_cpumask **cpumask)
 {
 	struct bpf_cpumask *mask;
 	int err = 0;
@@ -968,15 +1129,15 @@ static int init_allowed_cpus(void)
 	/*
 	 * Do nothing if the mask is already initialized.
 	 */
-	mask = allowed_cpumask;
+	mask = *cpumask;
 	if (mask)
 		return 0;
 	/*
-	 * Create the allowed CPU mask.
+	 * Create the CPU mask.
 	 */
-	err = calloc_cpumask(&allowed_cpumask);
+	err = calloc_cpumask(cpumask);
 	if (!err)
-		mask = allowed_cpumask;
+		mask = *cpumask;
 	if (!mask)
 		err = -ENOMEM;
 
@@ -984,20 +1145,55 @@ static int init_allowed_cpus(void)
 }
 
 SEC("syscall")
-int enable_cpu(struct cpu_arg *input)
+int enable_sibling_cpu(struct domain_arg *input)
+{
+	struct cpu_ctx *cctx;
+	struct bpf_cpumask *mask, **pmask;
+	int err = 0;
+
+	cctx = try_lookup_cpu_ctx(input->cpu_id);
+	if (!cctx)
+		return -ENOENT;
+
+	/* Make sure the target CPU mask is initialized */
+	switch (input->lvl_id) {
+	case 2:
+		pmask = &cctx->l2_cpumask;
+		break;
+	case 3:
+		pmask = &cctx->l3_cpumask;
+		break;
+	default:
+		return -EINVAL;
+	}
+	err = init_cpumask(pmask);
+	if (err)
+		return err;
+
+	bpf_rcu_read_lock();
+	mask = *pmask;
+	if (mask)
+		bpf_cpumask_set_cpu(input->sibling_cpu_id, mask);
+	bpf_rcu_read_unlock();
+
+	return err;
+}
+
+SEC("syscall")
+int enable_primary_cpu(struct cpu_arg *input)
 {
 	struct bpf_cpumask *mask;
 	int err = 0;
 
-	/* Make sure the allowed CPU mask is initialized */
-	err = init_allowed_cpus();
+	/* Make sure the primary CPU mask is initialized */
+	err = init_cpumask(&primary_cpumask);
 	if (err)
 		return err;
 	/*
 	 * Enable the target CPU in the primary scheduling domain.
 	 */
 	bpf_rcu_read_lock();
-	mask = allowed_cpumask;
+	mask = primary_cpumask;
 	if (mask)
 		bpf_cpumask_set_cpu(input->cpu_id, mask);
 	bpf_rcu_read_unlock();
@@ -1058,7 +1254,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 		return err;
 
 	/* Initialize the primary scheduling domain */
-	return init_allowed_cpus();
+	err = init_cpumask(&primary_cpumask);
+	if (err)
+		return err;
+
+	return 0;
 }
 
 void BPF_STRUCT_OPS(bpfland_exit, struct scx_exit_info *ei)
