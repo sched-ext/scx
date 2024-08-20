@@ -15,9 +15,6 @@ use std::ffi::c_int;
 use std::fs::File;
 use std::io::Read;
 use std::mem::MaybeUninit;
-use std::path::Path;
-use std::str;
-use std::str::FromStr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -48,6 +45,7 @@ use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::UserExitInfo;
+use scx_utils::Topology;
 
 const SCHEDULER_NAME: &'static str = "scx_bpfland";
 
@@ -110,37 +108,15 @@ impl CpuMask {
 }
 
 fn get_primary_cpus(powersave: bool) -> std::io::Result<Vec<usize>> {
-    let cpu_base_path = "/sys/devices/system/cpu/";
-    let mut cpu_freqs = Vec::new();
+    let topo = Topology::new().unwrap();
 
     // Iterate over each CPU directory and collect CPU ID and its max frequency.
-    for entry in std::fs::read_dir(cpu_base_path)? {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,  // Skip if there's an error
-        };
-
-        let path = entry.path();
-        if path.is_dir() && path.file_name().unwrap().to_str().unwrap_or("").starts_with("cpu") {
-            if let Some(cpu_id_str) = path.file_name().unwrap().to_str().unwrap_or("").strip_prefix("cpu") {
-                if let Ok(cpu_id) = cpu_id_str.parse::<usize>() {
-                    let max_freq_path = path.join("cpufreq/cpuinfo_max_freq");
-                    if max_freq_path.exists() {
-                        if let Ok(max_freq) = std::fs::read_to_string(&max_freq_path) {
-                            if let Ok(freq) = max_freq.trim().parse::<u64>() {
-                                cpu_freqs.push((cpu_id, freq));
-                            } else {
-                                // warn!("failed to parse frequency for cpu{}", cpu_id);
-                            }
-                        } else {
-                            // warn!("failed to read {}", max_freq_path.display());
-                        }
-                    }
-                }
-            }
+    let mut cpu_freqs = Vec::new();
+    for core in topo.cores().into_iter() {
+        for (cpu_id, cpu) in core.cpus() {
+            cpu_freqs.push((*cpu_id, cpu.max_freq()));
         }
     }
-
     if cpu_freqs.is_empty() {
         return Ok(Vec::new());
     }
@@ -396,16 +372,19 @@ impl<'a> Scheduler<'a> {
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, bpfland_ops, uei)?;
 
+        // Initialize CPU topology.
+        let topo = Topology::new().unwrap();
+
         // Initialize the primary scheduling domain (based on the --primary-domain option).
-        Self::init_primary_domain(&mut skel, &opts.primary_domain)?;
+        Self::init_primary_domain(&mut skel, &topo, &opts.primary_domain)?;
 
         // Initialize L2 cache domains.
         if !opts.disable_l2 {
-            Self::init_l2_cache_domains(&mut skel)?;
+            Self::init_l2_cache_domains(&mut skel, &topo)?;
         }
         // Initialize L3 cache domains.
         if !opts.disable_l3 {
-            Self::init_l3_cache_domains(&mut skel)?;
+            Self::init_l3_cache_domains(&mut skel, &topo)?;
         }
 
         // Attach the scheduler.
@@ -450,10 +429,10 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn init_primary_domain(skel: &mut BpfSkel<'_>, primary_domain: &CpuMask) -> Result<()> {
+    fn init_primary_domain(skel: &mut BpfSkel<'_>, topo: &Topology, primary_domain: &CpuMask) -> Result<()> {
         info!("primary CPU domain = {}", primary_domain.to_string());
 
-        for cpu in 0..libbpf_rs::num_possible_cpus().unwrap() {
+        for cpu in 0..topo.nr_cpu_ids() {
             if primary_domain.is_cpu_set(cpu) {
                 if let Err(err) = Self::enable_primary_cpu(skel, cpu) {
                     warn!("failed to add CPU {} to primary domain: error {}", cpu, err);
@@ -462,33 +441,6 @@ impl<'a> Scheduler<'a> {
         }
 
         Ok(())
-    }
-
-    fn read_cache_id(path: &Path) -> Result<String, std::io::Error> {
-        if !path.exists() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "file not found",
-            ));
-        }
-        std::fs::read_to_string(path).map(|content| content.trim().to_string())
-    }
-
-    fn read_cpu_ids(sysfs_path: &str) -> Result<Vec<usize>, std::io::Error> {
-        let mut cpu_ids = Vec::new();
-        for entry in std::fs::read_dir(sysfs_path)? {
-            let entry = entry?;
-            if entry.path().is_dir() {
-                if let Some(cpu_id_str) = entry.path().file_name().and_then(|name| name.to_str()) {
-                    if let Some(cpu_id_str) = cpu_id_str.strip_prefix("cpu") {
-                        if let Ok(cpu_id) = usize::from_str(cpu_id_str) {
-                            cpu_ids.push(cpu_id);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(cpu_ids)
     }
 
     fn enable_sibling_cpu(
@@ -522,37 +474,34 @@ impl<'a> Scheduler<'a> {
 
     fn init_cache_domains(
         skel: &mut BpfSkel<'_>,
+        topo: &Topology,
         cache_lvl: usize,
         enable_sibling_cpu_fn: &dyn Fn(&mut BpfSkel<'_>, usize, usize, usize) -> Result<(), u32>
     ) -> Result<(), std::io::Error> {
-        let sysfs_path = "/sys/devices/system/cpu/";
-        let mut cache_id_map: HashMap<String, Vec<usize>> = HashMap::new();
-
-        for cpu_id in Self::read_cpu_ids(sysfs_path)? {
-            let cache_path = Path::new(sysfs_path).join(format!("cpu{}/cache/index{}", cpu_id, cache_lvl));
-            if !cache_path.exists() {
-                continue;
-            }
-            match Self::read_cache_id(&cache_path.join("id")) {
-                Ok(cache_id) => {
-                    cache_id_map
-                        .entry(cache_id)
-                        .or_insert_with(Vec::new)
-                        .push(cpu_id);
-                }
-                Err(_) => {
-                    warn!("failed to read cache ID for CPU {}", cpu_id);
-                }
+        // Determine the list of CPU IDs associated to each cache node.
+        let mut cache_id_map: HashMap<usize, Vec<usize>> = HashMap::new();
+        for core in topo.cores().into_iter() {
+            for (cpu_id, cpu) in core.cpus() {
+                let cache_id = match cache_lvl {
+                    2 => cpu.l2_id(),
+                    3 => cpu.l3_id(),
+                    _ => panic!("invalid cache level {}", cache_lvl),
+                };
+                cache_id_map
+                    .entry(cache_id)
+                    .or_insert_with(Vec::new)
+                    .push(*cpu_id);
             }
         }
 
+        // Update the BPF cpumasks for the cache domains.
         for (cache_id, cpus) in cache_id_map {
+            info!(
+                "L{} cache ID {}: sibling CPUs: {:?}",
+                cache_lvl, cache_id, cpus
+            );
             for cpu in &cpus {
                 for sibling_cpu in &cpus {
-                    info!(
-                        "L{} cache ID {}: sibling CPUs: {}, {}",
-                        cache_lvl, cache_id, cpu, sibling_cpu
-                    );
                     match enable_sibling_cpu_fn(skel, cache_lvl, *cpu, *sibling_cpu) {
                         Ok(()) => {},
                         Err(_) => {
@@ -569,14 +518,14 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn init_l2_cache_domains(skel: &mut BpfSkel<'_>) -> Result<(), std::io::Error> {
-        Self::init_cache_domains(skel, 2, &|skel, lvl, cpu, sibling_cpu| {
+    fn init_l2_cache_domains(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<(), std::io::Error> {
+        Self::init_cache_domains(skel, topo, 2, &|skel, lvl, cpu, sibling_cpu| {
             Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
         })
     }
 
-    fn init_l3_cache_domains(skel: &mut BpfSkel<'_>) -> Result<(), std::io::Error> {
-        Self::init_cache_domains(skel, 3, &|skel, lvl, cpu, sibling_cpu| {
+    fn init_l3_cache_domains(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<(), std::io::Error> {
+        Self::init_cache_domains(skel, topo, 3, &|skel, lvl, cpu, sibling_cpu| {
             Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
         })
     }
@@ -587,15 +536,19 @@ impl<'a> Scheduler<'a> {
             return;
         }
 
+        // Re-initialize CPU topology.
+        let topo = Topology::new().unwrap();
+
         // Re-initialize L2 cache domains.
         if !self.opts.disable_l2 {
-            if let Err(e) = Self::init_l2_cache_domains(&mut self.skel) {
+            if let Err(e) = Self::init_l2_cache_domains(&mut self.skel, &topo) {
                 warn!("failed to initialize L2 cache domains: {}", e);
             }
         }
+
         // Re-initialize L3 cache domains.
         if !self.opts.disable_l3 {
-            if let Err(e) = Self::init_l3_cache_domains(&mut self.skel) {
+            if let Err(e) = Self::init_l3_cache_domains(&mut self.skel, &topo) {
                 warn!("failed to initialize L3 cache domains: {}", e);
             }
         }
