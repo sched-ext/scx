@@ -83,6 +83,8 @@ pub struct Cpu {
     min_freq: usize,
     max_freq: usize,
     trans_lat_ns: usize,
+    l2_id: usize,
+    l3_id: usize,
     llc_id: usize,
 }
 
@@ -105,6 +107,16 @@ impl Cpu {
     /// Get the transition latency of the CPU in nanoseconds
     pub fn trans_lat_ns(&self) -> usize {
         self.trans_lat_ns
+    }
+
+    /// Get the L2 id of the this Cpu
+    pub fn l2_id(&self) -> usize {
+        self.l2_id
+    }
+
+    /// Get the L2 id of the this Cpu
+    pub fn l3_id(&self) -> usize {
+        self.l3_id
     }
 
     /// Get the LLC id of the this Cpu
@@ -348,8 +360,6 @@ impl TopologyMap {
  * Helper functions for creating the Topology *
  **********************************************/
 
-const CACHE_LEVEL: usize = 3;
-
 fn read_file_usize(path: &Path) -> Result<usize> {
     let val = match std::fs::read_to_string(&path) {
         Ok(val) => val,
@@ -406,13 +416,18 @@ fn create_insert_cpu(cpu_id: usize, node: &mut Node, online_mask: &Cpumask) -> R
     let top_path = cpu_path.join("topology");
     let core_id = read_file_usize(&top_path.join("core_id"))?;
 
-    // L3 cache ID
+    // Evaluate L2, L3 and LLC cache IDs.
+    //
+    // Use ID 0 if we fail to detect the cache hierarchy. This seems to happen on certain SKUs, so
+    // if there's no cache information then we have no option but to assume a single unified cache
+    // per node.
     let cache_path = cpu_path.join("cache");
-    // Use LLC 0 if we fail to detect the cache hierarchy. This seems to
-    // happen on certain SKUs, so if there's no cache information then
-    // we have no option but to assume a single unified cache per node.
-    let llc_id =
-        read_file_usize(&cache_path.join(format!("index{}", CACHE_LEVEL)).join("id")).unwrap_or(0);
+    let l2_id =
+        read_file_usize(&cache_path.join(format!("index{}", 2)).join("id")).unwrap_or(0);
+    let l3_id =
+        read_file_usize(&cache_path.join(format!("index{}", 3)).join("id")).unwrap_or(0);
+    // Assume that LLC is always 3.
+    let llc_id = l3_id;
 
     // Min and max frequencies. If the kernel is not compiled with
     // CONFIG_CPU_FREQ, just assume 0 for both frequencies.
@@ -440,6 +455,8 @@ fn create_insert_cpu(cpu_id: usize, node: &mut Node, online_mask: &Cpumask) -> R
             min_freq: min_freq,
             max_freq: max_freq,
             trans_lat_ns: trans_lat_ns,
+            l2_id: l2_id,
+            l3_id: l3_id,
             llc_id: llc_id,
         },
     );
