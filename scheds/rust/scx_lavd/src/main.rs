@@ -56,6 +56,7 @@ use scx_utils::uei_report;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 
+use itertools::iproduct;
 use nix::sys::signal;
 use plain::Plain;
 use rlimit::{getrlimit, setrlimit, Resource};
@@ -359,21 +360,19 @@ impl FlatTopology {
         }
 
         // Build a neighbor map for each compute domain
-        for (from_k, from_v) in cpdom_map.iter() {
-            for (to_k, to_v) in cpdom_map.iter() {
-                if from_k == to_k {
-                    continue;
-                }
+        for ((from_k, from_v), (to_k, to_v)) in iproduct!(cpdom_map.iter(), cpdom_map.iter()) {
+            if from_k == to_k {
+                continue;
+            }
 
-                let d = Self::dist(from_k, to_k);
-                let mut map = from_v.neighbor_map.borrow_mut();
-                match map.get(&d) {
-                    Some(v) => {
-                        v.borrow_mut().push(to_v.cpdom_id);
-                    }
-                    None => {
-                        map.insert(d, RefCell::new(vec![to_v.cpdom_id]));
-                    }
+            let d = Self::dist(from_k, to_k);
+            let mut map = from_v.neighbor_map.borrow_mut();
+            match map.get(&d) {
+                Some(v) => {
+                    v.borrow_mut().push(to_v.cpdom_id);
+                }
+                None => {
+                    map.insert(d, RefCell::new(vec![to_v.cpdom_id]));
                 }
             }
         }
