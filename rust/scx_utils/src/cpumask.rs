@@ -119,10 +119,7 @@ impl Cpumask {
             }
         }
 
-        Ok(Self {
-            mask,
-            nr_cpus,
-        })
+        Ok(Self { mask, nr_cpus })
     }
 
     /// Return a slice of u64's whose bits reflect the Cpumask.
@@ -170,12 +167,8 @@ impl Cpumask {
     /// exceeds the number of possible CPUs on the host, false is returned.
     pub fn test_cpu(&self, cpu: usize) -> bool {
         match self.mask.get(cpu) {
-            Some(bit) => {
-                *bit
-            }
-            None => {
-                false
-            }
+            Some(bit) => *bit,
+            None => false,
         }
     }
 
@@ -331,7 +324,10 @@ impl IntoIterator for Cpumask {
     type IntoIter = CpumaskIntoIterator;
 
     fn into_iter(self) -> CpumaskIntoIterator {
-        CpumaskIntoIterator { mask: self, index: 0 }
+        CpumaskIntoIterator {
+            mask: self,
+            index: 0,
+        }
     }
 }
 

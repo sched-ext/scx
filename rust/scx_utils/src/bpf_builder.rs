@@ -337,11 +337,10 @@ impl BpfBuilder {
         };
 
         // Assemble cflags.
-        let mut cflags: Vec<String> =
-            ["-g", "-O2", "-Wall", "-Wno-compare-distinct-pointer-types"]
-                .into_iter()
-                .map(|x| x.into())
-                .collect();
+        let mut cflags: Vec<String> = ["-g", "-O2", "-Wall", "-Wno-compare-distinct-pointer-types"]
+            .into_iter()
+            .map(|x| x.into())
+            .collect();
         cflags.push(format!("-D__TARGET_ARCH_{}", &kernel_target));
         cflags.push("-mcpu=v3".into());
         cflags.push(format!("-m{}-endian", endian));
@@ -487,14 +486,13 @@ impl BpfBuilder {
         // Tell cargo to invalidate the built crate whenever the wrapper changes
         deps.insert(input.to_string());
 
-	// FIXME - bindgen's API changed between 0.68 and 0.69 so that
-	// `bindgen::CargoCallbacks::new()` should be used instead of
-	// `bindgen::CargoCallbacks`. Unfortunately, as of Dec 2023, fedora
-	// is shipping 0.68. To accommodate fedora, allow both 0.68 and 0.69
-	// of bindgen and suppress deprecation warning. Remove the following
-	// once fedora can be updated to bindgen >= 0.69.
-	#[allow(deprecated)]
-
+        // FIXME - bindgen's API changed between 0.68 and 0.69 so that
+        // `bindgen::CargoCallbacks::new()` should be used instead of
+        // `bindgen::CargoCallbacks`. Unfortunately, as of Dec 2023, fedora
+        // is shipping 0.68. To accommodate fedora, allow both 0.68 and 0.69
+        // of bindgen and suppress deprecation warning. Remove the following
+        // once fedora can be updated to bindgen >= 0.69.
+        #[allow(deprecated)]
         // The bindgen::Builder is the main entry point to bindgen, and lets
         // you build up options for the resulting bindings.
         let bindings = bindgen::Builder::default()
