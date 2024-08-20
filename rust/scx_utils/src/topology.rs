@@ -76,6 +76,14 @@ use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::slice::Iter;
+use std::sync::LazyLock;
+
+pub static NR_CPU_IDS: LazyLock<usize> = LazyLock::new(|| {
+    read_cpu_ids().unwrap().last().unwrap() + 1
+});
+
+pub static NR_CPUS_POSSIBLE: LazyLock<usize> =
+    LazyLock::new(|| libbpf_rs::num_possible_cpus().unwrap());
 
 #[derive(Debug, Clone)]
 pub struct Cpu {
@@ -315,7 +323,7 @@ impl Topology {
     /// above, this is different than the number of possible CPUs on the system
     /// (though very seldom is). This number may differ from the number of
     /// possible CPUs on the system when e.g. there are fully disabled CPUs in
-    /// the middle of the range of possible CPUs (i.e. CPUs that may be
+    /// the middle of the range of possible CPUs (i.e. CPUs that may not be
     /// onlined).
     pub fn nr_cpu_ids(&self) -> usize {
         self.nr_cpu_ids
@@ -479,6 +487,22 @@ fn create_insert_cpu(cpu_id: usize, node: &mut Node, online_mask: &Cpumask) -> R
     Ok(())
 }
 
+fn read_cpu_ids() -> Result<Vec<usize>> {
+    let mut cpu_ids = vec![];
+    let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*")?;
+    for cpu_path in cpu_paths.filter_map(Result::ok) {
+        let cpu_str = cpu_path.to_str().unwrap().trim();
+        match sscanf!(cpu_str, "/sys/devices/system/cpu/cpu{usize}") {
+            Ok(val) => cpu_ids.push(val),
+            Err(_) => {
+                bail!("Failed to parse cpu ID {}", cpu_str);
+            }
+        }
+    }
+    cpu_ids.sort();
+    Ok(cpu_ids)
+}
+
 fn create_default_node(online_mask: &Cpumask) -> Result<(Vec<Node>, usize)> {
     let mut nodes: Vec<Node> = Vec::with_capacity(1);
     let mut node = Node {
@@ -491,27 +515,14 @@ fn create_default_node(online_mask: &Cpumask) -> Result<(Vec<Node>, usize)> {
         bail!("/sys/devices/system/cpu sysfs node not found");
     }
 
-    let mut nr_cpu_ids = 0;
-    let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*")?;
-    for cpu_path in cpu_paths.filter_map(Result::ok) {
-        let cpu_str = cpu_path.to_str().unwrap().trim();
-        let cpu_id = match sscanf!(cpu_str, "/sys/devices/system/cpu/cpu{usize}") {
-            Ok(val) => val,
-            Err(_) => {
-                bail!("Failed to parse cpu ID {}", cpu_str);
-            }
-        };
-
-        if cpu_id + 1 > nr_cpu_ids {
-            nr_cpu_ids = cpu_id + 1;
-        }
-
-        create_insert_cpu(cpu_id, &mut node, &online_mask)?;
+    let cpu_ids = read_cpu_ids()?;
+    for cpu_id in cpu_ids.iter() {
+	create_insert_cpu(*cpu_id, &mut node, &online_mask)?;
     }
 
     nodes.push(node);
 
-    Ok((nodes, nr_cpu_ids))
+    Ok((nodes, cpu_ids.last().unwrap() + 1))
 }
 
 fn create_numa_nodes(online_mask: &Cpumask) -> Result<(Vec<Node>, usize)> {

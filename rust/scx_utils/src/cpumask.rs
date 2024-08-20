@@ -39,6 +39,7 @@
 //!     assert!(mask.test_cpu(0));
 //!```
 
+use crate::NR_CPU_IDS;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
@@ -54,17 +55,12 @@ use std::ops::BitXorAssign;
 #[derive(Debug, Clone)]
 pub struct Cpumask {
     mask: BitVec<u64, Lsb0>,
-    nr_cpus: usize,
 }
 
 impl Cpumask {
-    fn get_cpus_possible() -> usize {
-        libbpf_rs::num_possible_cpus().expect("Could not query # CPUs")
-    }
-
     fn check_cpu(&self, cpu: usize) -> Result<()> {
-        if cpu >= self.nr_cpus {
-            bail!("Invalid CPU {} passed, max {}", cpu, self.nr_cpus);
+        if cpu >= *NR_CPU_IDS {
+            bail!("Invalid CPU {} passed, max {}", cpu, *NR_CPU_IDS);
         }
 
         Ok(())
@@ -72,18 +68,13 @@ impl Cpumask {
 
     /// Build a new empty Cpumask object.
     pub fn new() -> Result<Cpumask> {
-        let nr_cpus = Cpumask::get_cpus_possible();
-
         Ok(Cpumask {
-            mask: bitvec![u64, Lsb0; 0; nr_cpus],
-            nr_cpus,
+            mask: bitvec![u64, Lsb0; 0; *NR_CPU_IDS],
         })
     }
 
     /// Build a Cpumask object from a hexadecimal string.
     pub fn from_str(cpumask: &String) -> Result<Cpumask> {
-        let nr_cpus = Cpumask::get_cpus_possible();
-
         let hex_str = {
             let mut tmp_str = cpumask
                 .strip_prefix("0x")
@@ -97,14 +88,14 @@ impl Cpumask {
         let byte_vec = hex::decode(&hex_str)
             .with_context(|| format!("Failed to parse cpumask: {}", cpumask))?;
 
-        let mut mask = bitvec![u64, Lsb0; 0; nr_cpus];
+        let mut mask = bitvec![u64, Lsb0; 0; *NR_CPU_IDS];
         for (index, &val) in byte_vec.iter().rev().enumerate() {
             let mut v = val;
             while v != 0 {
                 let lsb = v.trailing_zeros() as usize;
                 v &= !(1 << lsb);
                 let cpu = index * 8 + lsb;
-                if cpu > nr_cpus {
+                if cpu > *NR_CPU_IDS {
                     bail!(
                         concat!(
                             "Found cpu ({}) in cpumask ({}) which is larger",
@@ -112,14 +103,14 @@ impl Cpumask {
                         ),
                         cpu,
                         cpumask,
-                        nr_cpus
+                        *NR_CPU_IDS
                     );
                 }
                 mask.set(cpu, true);
             }
         }
 
-        Ok(Self { mask, nr_cpus })
+        Ok(Self { mask })
     }
 
     /// Return a slice of u64's whose bits reflect the Cpumask.
@@ -179,7 +170,7 @@ impl Cpumask {
 
     /// The total size of the cpumask.
     pub fn len(&self) -> usize {
-        self.nr_cpus
+        *NR_CPU_IDS
     }
 
     /// Create a Cpumask that is the AND of the current Cpumask and another.
@@ -207,7 +198,7 @@ impl Cpumask {
 impl fmt::Display for Cpumask {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let slice = self.as_raw_slice();
-        let mut remaining_width = self.nr_cpus + 2;
+        let mut remaining_width = *NR_CPU_IDS + 2;
         write!(f, "{:#0width$b}", slice[0], width = remaining_width.min(66))?;
         for submask in &slice[1..] {
             remaining_width -= 64;
@@ -227,10 +218,10 @@ impl Cpumask {
             .collect();
 
         // Throw out possible stray from u64 -> u32.
-        masks.truncate((self.nr_cpus + 31) / 32);
+        masks.truncate((*NR_CPU_IDS + 31) / 32);
 
-        // Print the highest 32bit. Trim digits beyond nr_cpus.
-        let width = match (self.nr_cpus + 3) / 4 % 8 {
+        // Print the highest 32bit. Trim digits beyond *NR_CPU_IDS.
+        let width = match (*NR_CPU_IDS + 3) / 4 % 8 {
             0 => 8,
             v => v,
         };
@@ -335,7 +326,7 @@ impl Iterator for CpumaskIntoIterator {
     type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.index < self.mask.nr_cpus {
+        while self.index < *NR_CPU_IDS {
             let index = self.index;
             self.index += 1;
             let bit_val = self.mask.test_cpu(index);
