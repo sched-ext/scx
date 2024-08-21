@@ -82,6 +82,7 @@ pub struct Cpu {
     id: usize,
     min_freq: usize,
     max_freq: usize,
+    base_freq: usize,
     trans_lat_ns: usize,
     l2_id: usize,
     l3_id: usize,
@@ -102,6 +103,14 @@ impl Cpu {
     /// Get the maximum scaling frequency of this CPU
     pub fn max_freq(&self) -> usize {
         self.max_freq
+    }
+
+    /// Get the base operational frequency of this CPU
+    ///
+    /// This is only available on Intel Turbo Boost CPUs, if not available this will simply return
+    /// maximum frequency.
+    pub fn base_freq(&self) -> usize {
+        self.base_freq
     }
 
     /// Get the transition latency of the CPU in nanoseconds
@@ -434,6 +443,7 @@ fn create_insert_cpu(cpu_id: usize, node: &mut Node, online_mask: &Cpumask) -> R
     let freq_path = cpu_path.join("cpufreq");
     let min_freq = read_file_usize(&freq_path.join("scaling_min_freq")).unwrap_or(0);
     let max_freq = read_file_usize(&freq_path.join("scaling_max_freq")).unwrap_or(0);
+    let base_freq = read_file_usize(&freq_path.join("base_frequency")).unwrap_or(max_freq);
     let trans_lat_ns = read_file_usize(&freq_path.join("cpuinfo_transition_latency")).unwrap_or(0);
 
     let cache = node.llcs.entry(llc_id).or_insert(Cache{
@@ -454,6 +464,7 @@ fn create_insert_cpu(cpu_id: usize, node: &mut Node, online_mask: &Cpumask) -> R
             id: cpu_id,
             min_freq: min_freq,
             max_freq: max_freq,
+            base_freq: base_freq,
             trans_lat_ns: trans_lat_ns,
             l2_id: l2_id,
             l3_id: l3_id,
