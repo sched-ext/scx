@@ -224,6 +224,53 @@ impl fmt::Display for Cpumask {
     }
 }
 
+impl Cpumask {
+    fn fmt_with(&self, f: &mut fmt::Formatter<'_>, case: char) -> fmt::Result {
+        let mut masks: Vec<u32> = self
+            .as_raw_slice()
+            .iter()
+            .map(|x| [*x as u32, (x >> 32) as u32])
+            .flatten()
+            .collect();
+
+        // Throw out possible stray from u64 -> u32.
+        masks.truncate((self.nr_cpus + 31) / 32);
+
+        // Print the highest 32bit. Trim digits beyond nr_cpus.
+        let width = match (self.nr_cpus + 3) / 4 % 8 {
+            0 => 8,
+            v => v,
+        };
+        match case {
+            'x' => write!(f, "{:0width$x}", masks.pop().unwrap(), width = width)?,
+            'X' => write!(f, "{:0width$X}", masks.pop().unwrap(), width = width)?,
+            _ => unreachable!(),
+        }
+
+        // The rest in descending order.
+        for submask in masks.iter().rev() {
+            match case {
+                'x' => write!(f, " {:08x}", submask)?,
+                'X' => write!(f, " {:08X}", submask)?,
+                _ => unreachable!(),
+            }
+        }
+        Ok(())
+    }
+}
+
+impl fmt::LowerHex for Cpumask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt_with(f, 'x')
+    }
+}
+
+impl fmt::UpperHex for Cpumask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt_with(f, 'X')
+    }
+}
+
 impl BitAnd for Cpumask {
     type Output = Self;
     fn bitand(self, rhs: Self) -> Self {
