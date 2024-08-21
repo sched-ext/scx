@@ -4,6 +4,9 @@ install_data('scx.initrd', install_dir: '/etc/init.d', rename: 'scx')
 # Install the 'scx' file to the '/etc/default' directory
 install_data('../scx', install_dir: '/etc/default')
 
+# Install the 'scx.logrotate' file to /etc/logrotate.d/scx
+install_data('scx.logrotate', install_dir: '/etc/logrotate.d', rename: 'scx')
+
 # Symlinking /etc/default/scx to /etc/conf.d/scx
 install_symlink(
       'scx',
