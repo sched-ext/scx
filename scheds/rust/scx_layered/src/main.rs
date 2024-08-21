@@ -72,9 +72,70 @@ const NR_LSTATS: usize = bpf_intf::layer_stat_idx_NR_LSTATS as usize;
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
 const CORE_CACHE_LEVEL: u32 = 2;
 
+#[rustfmt::skip]
 lazy_static::lazy_static! {
     static ref NR_POSSIBLE_CPUS: usize = libbpf_rs::num_possible_cpus().unwrap();
     static ref USAGE_DECAY: f64 = 0.5f64.powf(1.0 / USAGE_HALF_LIFE_F64);
+    static ref EXAMPLE_CONFIG: LayerConfig =
+	LayerConfig {
+            specs: vec![
+		LayerSpec {
+                    name: "batch".into(),
+                    comment: Some("tasks under system.slice or tasks with nice value > 0".into()),
+                    matches: vec![
+			vec![LayerMatch::CgroupPrefix("system.slice/".into())],
+			vec![LayerMatch::NiceAbove(0)],
+                    ],
+                    kind: LayerKind::Confined {
+			cpus_range: Some((0, 16)),
+			util_range: (0.8, 0.9),
+			min_exec_us: 1000,
+			yield_ignore: 0.0,
+			preempt: false,
+			preempt_first: false,
+			exclusive: false,
+			perf: 1024,
+			nodes: vec![],
+			llcs: vec![],
+                    },
+		},
+		LayerSpec {
+                    name: "immediate".into(),
+                    comment: Some("tasks under workload.slice with nice value < 0".into()),
+                    matches: vec![vec![
+			LayerMatch::CgroupPrefix("workload.slice/".into()),
+			LayerMatch::NiceBelow(0),
+                    ]],
+                    kind: LayerKind::Open {
+			min_exec_us: 100,
+			yield_ignore: 0.25,
+			preempt: true,
+			preempt_first: false,
+			exclusive: true,
+			perf: 1024,
+			nodes: vec![],
+			llcs: vec![],
+                    },
+		},
+		LayerSpec {
+                    name: "normal".into(),
+                    comment: Some("the rest".into()),
+                    matches: vec![vec![]],
+                    kind: LayerKind::Grouped {
+			cpus_range: None,
+			util_range: (0.5, 0.6),
+			min_exec_us: 200,
+			yield_ignore: 0.0,
+			preempt: false,
+			preempt_first: false,
+			exclusive: false,
+			perf: 1024,
+			nodes: vec![],
+			llcs: vec![],
+                    },
+		},
+            ],
+	};
 }
 
 /// scx_layered: A highly configurable multi-layer sched_ext scheduler
@@ -338,6 +399,10 @@ struct Opts {
     /// Write example layer specifications into the file and exit.
     #[clap(short = 'e', long)]
     example: Option<String>,
+
+    /// Run with example layer specifications (useful for e.g. CI pipelines)
+    #[clap(long)]
+    run_example: bool,
 
     /// Enable stats monitoring with the specified interval. If no layer
     /// specs are specified, run in monitor mode.
@@ -1745,71 +1810,11 @@ impl<'a, 'b> Drop for Scheduler<'a, 'b> {
 }
 
 fn write_example_file(path: &str) -> Result<()> {
-    let example = LayerConfig {
-        specs: vec![
-            LayerSpec {
-                name: "batch".into(),
-                comment: Some("tasks under system.slice or tasks with nice value > 0".into()),
-                matches: vec![
-                    vec![LayerMatch::CgroupPrefix("system.slice/".into())],
-                    vec![LayerMatch::NiceAbove(0)],
-                ],
-                kind: LayerKind::Confined {
-                    cpus_range: Some((0, 16)),
-                    util_range: (0.8, 0.9),
-                    min_exec_us: 1000,
-                    yield_ignore: 0.0,
-                    preempt: false,
-                    preempt_first: false,
-                    exclusive: false,
-                    perf: 1024,
-                    nodes: vec![],
-                    llcs: vec![],
-                },
-            },
-            LayerSpec {
-                name: "immediate".into(),
-                comment: Some("tasks under workload.slice with nice value < 0".into()),
-                matches: vec![vec![
-                    LayerMatch::CgroupPrefix("workload.slice/".into()),
-                    LayerMatch::NiceBelow(0),
-                ]],
-                kind: LayerKind::Open {
-                    min_exec_us: 100,
-                    yield_ignore: 0.25,
-                    preempt: true,
-                    preempt_first: false,
-                    exclusive: true,
-                    perf: 1024,
-                    nodes: vec![],
-                    llcs: vec![],
-                },
-            },
-            LayerSpec {
-                name: "normal".into(),
-                comment: Some("the rest".into()),
-                matches: vec![vec![]],
-                kind: LayerKind::Grouped {
-                    cpus_range: None,
-                    util_range: (0.5, 0.6),
-                    min_exec_us: 200,
-                    yield_ignore: 0.0,
-                    preempt: false,
-                    preempt_first: false,
-                    exclusive: false,
-                    perf: 1024,
-                    nodes: vec![],
-                    llcs: vec![],
-                },
-            },
-        ],
-    };
-
     let mut f = fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(path)?;
-    Ok(f.write_all(serde_json::to_string_pretty(&example)?.as_bytes())?)
+    Ok(f.write_all(serde_json::to_string_pretty(&*EXAMPLE_CONFIG)?.as_bytes())?)
 }
 
 fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
@@ -1942,7 +1947,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut layer_config = LayerConfig { specs: vec![] };
+    let mut layer_config = match opts.run_example {
+        true => EXAMPLE_CONFIG.clone(),
+        false => LayerConfig { specs: vec![] },
+    };
+
     for (idx, input) in opts.specs.iter().enumerate() {
         layer_config.specs.append(
             &mut LayerSpec::parse(input)

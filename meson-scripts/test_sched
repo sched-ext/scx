@@ -13,12 +13,18 @@ GUEST_TIMEOUT=60
 # List of schedulers to test
 #
 # TODO:
-#   - scx_layered: temporarily excluded because it
-#     cannot run with a default configuration
 #   - scx_flatcg, scx_pair: excluded until cgroup support lands upstream
 #   - scx_mitosis: not ready yet
 #
-SCHEDULERS="scx_simple scx_central scx_nest scx_rusty scx_rustland scx_bpfland"
+declare -A SCHEDS
+
+SCHEDS["scx_simple"]=""
+SCHEDS["scx_central"]=""
+SCHEDS["scx_nest"]=""
+SCHEDS["scx_rusty"]=""
+SCHEDS["scx_rustland"]=""
+SCHEDS["scx_bpfland"]=""
+SCHEDS["scx_layered"]="--run-example"
 
 if [ ! -x `which vng` ]; then
     echo "vng not found, please install virtme-ng to enable testing"
@@ -30,7 +36,8 @@ if [ $# -lt 1 ]; then
 fi
 kernel=$1
 
-for sched in ${SCHEDULERS}; do
+for sched in ${!SCHEDS[@]}; do
+    args=${SCHEDS[$sched]}
     sched_path=$(find -type f -executable -name ${sched})
     if [ ! -n "${sched_path}" ]; then
         echo "${sched}: binary not found"
@@ -42,7 +49,7 @@ for sched in ${SCHEDULERS}; do
     rm -f /tmp/output
     timeout --preserve-status ${GUEST_TIMEOUT} \
         vng --force-9p -v -r ${kernel} -- \
-            "timeout --foreground --preserve-status ${TEST_TIMEOUT} ${sched_path}" \
+            "timeout --foreground --preserve-status ${TEST_TIMEOUT} ${sched_path} ${args}" \
                 2> >(tee /tmp/output) </dev/null
         grep -v " Speculative Return Stack Overflow" /tmp/output | \
             sed -n -e '/\bBUG:/q1' \

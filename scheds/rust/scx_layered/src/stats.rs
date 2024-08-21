@@ -509,7 +509,7 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
                 Err(e) => match e.downcast_ref::<std::io::Error>() {
                     Some(ioe) => {
                         info!("Connection to stats_server failed ({})", &ioe);
-			sleep(Duration::from_secs(1));
+                        sleep(Duration::from_secs(1));
                         break;
                     }
                     None => Err(e)?,
