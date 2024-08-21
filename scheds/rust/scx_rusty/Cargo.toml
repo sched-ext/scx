@@ -1,6 +1,6 @@
 [package]
 name = "scx_rusty"
-version = "1.0.2"
+version = "1.0.3"
 authors = ["Dan Schatzberg <dschatzberg@meta.com>", "Meta"]
 edition = "2021"
 description = "A multi-domain, BPF / user space hybrid scheduler used within sched_ext, which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. https://github.com/sched-ext/scx/tree/main"
@@ -15,7 +15,7 @@ libbpf-rs = "0.24.1"
 libc = "0.2.137"
 log = "0.4.17"
 ordered-float = "3.4.0"
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.2" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.3" }
 simplelog = "0.12"
 sorted-vec = "0.8.3"
 static_assertions = "1.1.0"
@@ -23,7 +23,7 @@ metrics = "0.23.0"
 metrics-exporter-prometheus = "0.15.0"
 
 [build-dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.2" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.3" }
 
 [features]
 enable_backtrace = []
