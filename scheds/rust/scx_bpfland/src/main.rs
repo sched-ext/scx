@@ -53,11 +53,12 @@ const SCHEDULER_NAME: &'static str = "scx_bpfland";
 fn get_primary_cpus(powersave: bool) -> std::io::Result<Vec<usize>> {
     let topo = Topology::new().unwrap();
 
-    // Iterate over each CPU directory and collect CPU ID and its max frequency.
+    // Iterate over each CPU directory and collect CPU ID and its base operational frequency to
+    // distinguish between fast and slow cores.
     let mut cpu_freqs = Vec::new();
     for core in topo.cores().into_iter() {
         for (cpu_id, cpu) in core.cpus() {
-            cpu_freqs.push((*cpu_id, cpu.max_freq()));
+            cpu_freqs.push((*cpu_id, cpu.base_freq()));
         }
     }
     if cpu_freqs.is_empty() {
