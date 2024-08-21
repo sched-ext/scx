@@ -328,7 +328,7 @@ impl<'a> Scheduler<'a> {
         let topo = Topology::new().unwrap();
 
         // Initialize the primary scheduling domain (based on the --primary-domain option).
-        Self::init_primary_domain(&mut skel, &topo, &opts.primary_domain)?;
+        Self::init_primary_domain(&mut skel, &opts.primary_domain)?;
 
         // Initialize L2 cache domains.
         if !opts.disable_l2 {
@@ -383,7 +383,6 @@ impl<'a> Scheduler<'a> {
 
     fn init_primary_domain(
         skel: &mut BpfSkel<'_>,
-        topo: &Topology,
         primary_domain: &Cpumask,
     ) -> Result<()> {
         info!("primary CPU domain = 0x{:x}", primary_domain);
