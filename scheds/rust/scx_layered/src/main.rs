@@ -1134,39 +1134,22 @@ impl Layer {
             }
         }
 
-        let mut nodes = topo.nodes().iter().collect::<Vec<_>>().clone();
-        let num_nodes = nodes.len();
         let is_left = idx % 2 == 0;
         let rot_by = |idx, len| -> usize { if idx <= len { idx } else { idx % len } };
-        if is_left {
-            nodes.rotate_left(rot_by(idx, num_nodes));
-        } else {
-            nodes.rotate_right(rot_by(idx, num_nodes));
-        }
 
         let mut core_order = vec![];
-        for node in nodes.iter() {
-            let mut llcs = node.llcs().clone().into_values().collect::<Vec<_>>().clone();
-            let num_llcs = llcs.len();
-            if is_left {
-                llcs.rotate_left(rot_by(idx, num_llcs));
-            } else {
-                llcs.rotate_right(rot_by(idx, num_llcs));
-            }
+        for i in 0..topo.cores().len() {
+            core_order.push(i);
+        }
 
-            for llc in llcs.iter() {
-                let mut llc_cores = llc.cores().clone().into_values().collect::<Vec<_>>().clone();
-                let num_cores = llc_cores.len();
-
+        for node in topo.nodes().iter() {
+            for (_, llc) in node.llcs() {
+                let llc_cores = llc.cores().len();
+                let rot = rot_by(llc_cores + (idx << 1), llc_cores);
                 if is_left {
-                    llc_cores.rotate_left(rot_by(idx, num_cores));
+                    core_order.rotate_left(rot);
                 } else {
-                    llc_cores.rotate_right(rot_by(idx, num_cores));
-                }
-
-
-                for llc_core in llc_cores.iter() {
-                    core_order.push(llc_core.id());
+                    core_order.rotate_right(rot);
                 }
             }
         }
