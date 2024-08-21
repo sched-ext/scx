@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::sub_or_zero;
-use crate::DomainGroup;
 use crate::BpfSkel;
+use crate::DomainGroup;
 
 use ::fb_procfs as procfs;
 use anyhow::anyhow;
@@ -81,30 +81,32 @@ pub struct Tuner {
 }
 
 impl Tuner {
-    pub fn new(dom_group: Arc<DomainGroup>,
-               direct_greedy_under: f64,
-               kick_greedy_under: f64,
-               underutil_slice_ns: u64,
-               overutil_slice_ns: u64) -> Result<Self> {
+    pub fn new(
+        dom_group: Arc<DomainGroup>,
+        direct_greedy_under: f64,
+        kick_greedy_under: f64,
+        underutil_slice_ns: u64,
+        overutil_slice_ns: u64,
+    ) -> Result<Self> {
         let proc_reader = procfs::ProcReader::new();
         let prev_cpu_stats = proc_reader
             .read_stat()?
             .cpus_map
             .ok_or_else(|| anyhow!("Expected cpus_map to exist"))?;
 
-       Ok(Self {
-           direct_greedy_mask: Cpumask::new()?,
-           kick_greedy_mask: Cpumask::new()?,
-           fully_utilized: false,
-           direct_greedy_under: direct_greedy_under / 100.0,
-           kick_greedy_under: kick_greedy_under / 100.0,
-           proc_reader,
-           prev_cpu_stats,
-           slice_ns: underutil_slice_ns,
-           underutil_slice_ns: underutil_slice_ns,
-           overutil_slice_ns: overutil_slice_ns,
-           dom_group,
-       })
+        Ok(Self {
+            direct_greedy_mask: Cpumask::new()?,
+            kick_greedy_mask: Cpumask::new()?,
+            fully_utilized: false,
+            direct_greedy_under: direct_greedy_under / 100.0,
+            kick_greedy_under: kick_greedy_under / 100.0,
+            proc_reader,
+            prev_cpu_stats,
+            slice_ns: underutil_slice_ns,
+            underutil_slice_ns,
+            overutil_slice_ns,
+            dom_group,
+        })
     }
 
     /// Apply a step in the Tuner by:
@@ -125,10 +127,9 @@ impl Tuner {
         for (dom_id, dom) in self.dom_group.doms().iter() {
             for cpu in dom.mask().into_iter() {
                 let cpu32 = cpu as u32;
-                if let (Some(curr), Some(prev)) = (
-                    curr_cpu_stats.get(&cpu32),
-                    self.prev_cpu_stats.get(&cpu32),
-                ) {
+                if let (Some(curr), Some(prev)) =
+                    (curr_cpu_stats.get(&cpu32), self.prev_cpu_stats.get(&cpu32))
+                {
                     let util = calc_util(curr, prev)?;
                     dom_util_sum[*dom_id] += util;
                     avg_util += util;
@@ -149,7 +150,8 @@ impl Tuner {
                 nr => dom_util_sum[*dom_id] / nr as f64,
             };
 
-            let enable_direct = self.direct_greedy_under > 0.99999 || util < self.direct_greedy_under;
+            let enable_direct =
+                self.direct_greedy_under > 0.99999 || util < self.direct_greedy_under;
             let enable_kick = self.kick_greedy_under > 0.99999 || util < self.kick_greedy_under;
 
             if enable_direct {

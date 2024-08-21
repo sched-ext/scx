@@ -30,8 +30,8 @@
 //! Utility modules which can be useful for userspace component of sched_ext
 //! schedulers.
 
-pub use paste::paste;
 pub use log::warn;
+pub use paste::paste;
 
 mod bindings;
 
@@ -42,12 +42,12 @@ mod builder;
 pub use builder::Builder;
 
 mod user_exit_info;
-pub use user_exit_info::ScxExitKind;
 pub use user_exit_info::ScxConsts;
-pub use user_exit_info::SCX_ECODE_RSN_HOTPLUG;
-pub use user_exit_info::SCX_ECODE_ACT_RESTART;
+pub use user_exit_info::ScxExitKind;
 pub use user_exit_info::UeiDumpPtr;
 pub use user_exit_info::UserExitInfo;
+pub use user_exit_info::SCX_ECODE_ACT_RESTART;
+pub use user_exit_info::SCX_ECODE_RSN_HOTPLUG;
 pub use user_exit_info::UEI_DUMP_PTR_MUTEX;
 
 pub mod build_id;
@@ -65,6 +65,8 @@ pub use topology::Cpu;
 pub use topology::Node;
 pub use topology::Topology;
 pub use topology::TopologyMap;
+pub use topology::NR_CPU_IDS;
+pub use topology::NR_CPUS_POSSIBLE;
 
 mod cpumask;
 pub use cpumask::Cpumask;

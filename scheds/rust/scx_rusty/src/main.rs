@@ -32,20 +32,19 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-use libbpf_rs::MapCore as _;
-use libbpf_rs::OpenObject;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::MapCore as _;
+use libbpf_rs::OpenObject;
 use log::info;
 use metrics::counter;
-use metrics::Counter;
-use metrics_exporter_prometheus::PrometheusBuilder;
-use metrics::histogram;
-use metrics::Histogram;
 use metrics::gauge;
+use metrics::histogram;
+use metrics::Counter;
 use metrics::Gauge;
-use scx_utils::LogRecorderBuilder;
+use metrics::Histogram;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
@@ -55,8 +54,11 @@ use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cpumask;
+use scx_utils::LogRecorderBuilder;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
+use scx_utils::NR_CPUS_POSSIBLE;
+use scx_utils::NR_CPU_IDS;
 
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
@@ -193,7 +195,7 @@ struct Opts {
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     partial: bool,
 
-    /// Enables soft NUMA affinity for tasks that use set_mempolicy. This 
+    /// Enables soft NUMA affinity for tasks that use set_mempolicy. This
     /// may improve performance in some scenarios when using mempolicies.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     mempolicy_affinity: bool,
@@ -206,6 +208,10 @@ struct Opts {
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// Print version and exit.
+    #[clap(long)]
+    version: bool,
 
     /// Enable the Prometheus endpoint for metrics on port 9000.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -291,8 +297,6 @@ struct Scheduler<'a> {
     balance_load: bool,
     balanced_kworkers: bool,
 
-    top: Arc<Topology>,
-
     dom_group: Arc<DomainGroup>,
 
     proc_reader: procfs::ProcReader,
@@ -308,26 +312,24 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(
-        opts: &Opts,
-        open_object: &'a mut MaybeUninit<OpenObject>,
-    ) -> Result<Self> {
+    fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 0);
         init_libbpf_logging(None);
-        info!("Running scx_rusty (build ID: {})", *build_id::SCX_FULL_VERSION);
+        info!(
+            "Running scx_rusty (build ID: {})",
+            *build_id::SCX_FULL_VERSION
+        );
         let mut skel = scx_ops_open!(skel_builder, open_object, rusty).unwrap();
 
         // Initialize skel according to @opts.
-        let top = Arc::new(Topology::new()?);
+        let domains = Arc::new(DomainGroup::new(&Topology::new()?, &opts.cpumasks)?);
 
-        let domains = Arc::new(DomainGroup::new(top.clone(), &opts.cpumasks)?);
-
-        if top.nr_cpu_ids() > MAX_CPUS {
+        if *NR_CPU_IDS > MAX_CPUS {
             bail!(
                 "Num possible CPU IDs ({}) exceeds maximum of ({})",
-                top.nr_cpu_ids(),
+                *NR_CPU_IDS,
                 MAX_CPUS
             );
         }
@@ -342,13 +344,13 @@ impl<'a> Scheduler<'a> {
 
         skel.maps.rodata_data.nr_nodes = domains.nr_nodes() as u32;
         skel.maps.rodata_data.nr_doms = domains.nr_doms() as u32;
-        skel.maps.rodata_data.nr_cpu_ids = top.nr_cpu_ids() as u32;
+        skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
 
         // Any CPU with dom > MAX_DOMS is considered offline by default. There
         // are a few places in the BPF code where we skip over offlined CPUs
         // (e.g. when initializing or refreshing tune params), and elsewhere the
         // scheduler will error if we try to schedule from them.
-        for cpu in 0..top.nr_cpu_ids() {
+        for cpu in 0..*NR_CPU_IDS {
             skel.maps.rodata_data.cpu_dom_id_map[cpu] = u32::MAX;
         }
 
@@ -419,7 +421,6 @@ impl<'a> Scheduler<'a> {
             balance_load: !opts.no_load_balance,
             balanced_kworkers: opts.balanced_kworkers,
 
-            top,
             dom_group: domains.clone(),
             proc_reader,
 
@@ -495,8 +496,7 @@ impl<'a> Scheduler<'a> {
     fn read_bpf_stats(&mut self) -> Result<Vec<u64>> {
         let stats_map = &mut self.skel.maps.stats;
         let mut stats: Vec<u64> = Vec::new();
-        let zero_vec =
-            vec![vec![0u8; stats_map.value_size() as usize]; self.top.nr_cpus_possible()];
+        let zero_vec = vec![vec![0u8; stats_map.value_size() as usize]; *NR_CPUS_POSSIBLE];
 
         for stat in 0..bpf_intf::stat_idx_RUSTY_NR_STATS {
             let cpu_stat_vec = stats_map
@@ -521,11 +521,7 @@ impl<'a> Scheduler<'a> {
         Ok(stats)
     }
 
-    fn report(
-        &self,
-        bpf_stats: &[u64],
-        lb_stats: &[NumaStat],
-    ) {
+    fn report(&self, bpf_stats: &[u64], lb_stats: &[NumaStat]) {
         let stat = |idx| bpf_stats[idx as usize];
 
         let wsync = stat(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC);
@@ -539,7 +535,7 @@ impl<'a> Scheduler<'a> {
         let dsq = stat(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH);
         let greedy_local = stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL);
         let greedy_xnuma = stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
-        
+
         self.metrics.wsync_prev_idle.increment(wsync_prev_idle);
         self.metrics.wsync.increment(wsync);
         self.metrics.prev_idle.increment(prev_idle);
@@ -556,20 +552,28 @@ impl<'a> Scheduler<'a> {
         let repatriate = stat(bpf_intf::stat_idx_RUSTY_STAT_REPATRIATE);
         let dl_clamped = stat(bpf_intf::stat_idx_RUSTY_STAT_DL_CLAMP);
         let dl_preset = stat(bpf_intf::stat_idx_RUSTY_STAT_DL_PRESET);
-        
+
         self.metrics.kick_greedy.increment(kick_greedy);
         self.metrics.repatriate.increment(repatriate);
         self.metrics.dl_clamped.increment(dl_clamped);
         self.metrics.dl_preset.increment(dl_preset);
 
-        self.metrics.task_errors.increment(stat(bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR));
-        self.metrics.lb_data_errors.increment(self.nr_lb_data_errors);
-        self.metrics.load_balance.increment(stat(bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE));
-        
-        self.metrics.slice_length.set(self.tuner.slice_ns as f64 / 1000.0);
+        self.metrics
+            .task_errors
+            .increment(stat(bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR));
+        self.metrics
+            .lb_data_errors
+            .increment(self.nr_lb_data_errors);
+        self.metrics
+            .load_balance
+            .increment(stat(bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE));
 
-        // We need to dynamically create the metrics for each node and domain 
-        // because we don't know how many there are at compile time. Metrics 
+        self.metrics
+            .slice_length
+            .set(self.tuner.slice_ns as f64 / 1000.0);
+
+        // We need to dynamically create the metrics for each node and domain
+        // because we don't know how many there are at compile time. Metrics
         // will be cached and reused so this is not a performance issue.
         for node in lb_stats.iter() {
             histogram!("load_avg", "node" => node.id.to_string())
@@ -596,13 +600,12 @@ impl<'a> Scheduler<'a> {
         );
 
         lb.load_balance()?;
-        self.metrics.processing_duration.record(started_at.elapsed().as_micros() as f64);
+        self.metrics
+            .processing_duration
+            .record(started_at.elapsed().as_micros() as f64);
 
         let stats = lb.get_stats();
-        self.report(
-            &bpf_stats,
-            &stats,
-        );
+        self.report(&bpf_stats, &stats);
 
         self.prev_at = started_at;
         Ok(())
@@ -654,6 +657,11 @@ impl<'a> Drop for Scheduler<'a> {
 
 fn main() -> Result<()> {
     let opts = Opts::parse();
+
+    if opts.version {
+        println!("scx_rusty: {}", *build_id::SCX_FULL_VERSION);
+        return Ok(());
+    }
 
     let llv = match opts.verbose {
         0 => simplelog::LevelFilter::Info,

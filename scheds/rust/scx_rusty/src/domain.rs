@@ -3,7 +3,6 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -49,7 +48,7 @@ pub struct DomainGroup {
 }
 
 impl DomainGroup {
-    pub fn new(top: Arc<Topology>, cpumasks: &[String]) -> Result<Self> {
+    pub fn new(top: &Topology, cpumasks: &[String]) -> Result<Self> {
         let mut span = Cpumask::new()?;
         let mut dom_numa_map = BTreeMap::new();
         // Track the domain ID separate from the LLC ID, because LLC IDs can
@@ -62,7 +61,7 @@ impl DomainGroup {
             for mask_str in cpumasks.iter() {
                 let mask = Cpumask::from_str(&mask_str)?;
                 span |= mask.clone();
-                doms.insert(dom_id, Domain { id: dom_id, mask, });
+                doms.insert(dom_id, Domain { id: dom_id, mask });
                 dom_numa_map.insert(dom_id, 0);
                 dom_id += 1;
             }
@@ -73,7 +72,7 @@ impl DomainGroup {
                 for (_, llc) in node.llcs().iter() {
                     let mask = llc.span().clone();
                     span |= mask.clone();
-                    doms.insert(dom_id, Domain { id: dom_id, mask, });
+                    doms.insert(dom_id, Domain { id: dom_id, mask });
                     dom_numa_map.insert(dom_id, node_id.clone());
                     dom_id += 1;
                 }
@@ -88,7 +87,13 @@ impl DomainGroup {
             }
         }
 
-        Ok(Self { doms, cpu_dom_map, dom_numa_map, num_numa_nodes, span })
+        Ok(Self {
+            doms,
+            cpu_dom_map,
+            dom_numa_map,
+            num_numa_nodes,
+            span,
+        })
     }
 
     pub fn numa_doms(&self, numa_id: &usize) -> Vec<Domain> {

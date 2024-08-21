@@ -287,7 +287,7 @@ impl LoadAggregator {
         if !self.dcycle_only && approx_ge(self.max_weight as f64, self.infeasible_threshold()) {
             self.adjust_infeas_weights();
         }
-        
+
         let mut dom_load_sums = Vec::new();
         let mut dom_dcycle_sums = Vec::new();
 
@@ -310,10 +310,14 @@ impl LoadAggregator {
     /// for a given (Domain, weight) tuple.
     pub fn record_dom_load(&mut self, dom_id: usize, weight: usize, dcycle: f64) -> Result<()> {
         if weight < MIN_WEIGHT {
-            bail!("weight {} is less than minimum weight {}", weight, MIN_WEIGHT);
+            bail!(
+                "weight {} is less than minimum weight {}",
+                weight,
+                MIN_WEIGHT
+            );
         }
 
-        let domain = self.doms.entry(dom_id).or_insert(Domain{
+        let domain = self.doms.entry(dom_id).or_insert(Domain {
             loads: BTreeMap::new(),
             dcycle_sum: 0.0f64,
             load_sum: 0.0f64,
