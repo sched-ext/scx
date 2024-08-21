@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rusty"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "scx_utils"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "anyhow",
  "bindgen",
