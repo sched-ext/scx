@@ -76,24 +76,24 @@ use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::slice::Iter;
-use std::sync::LazyLock;
 
-/// The maximum possible number of CPU IDs in the system. As mentioned above,
-/// this is different than the number of possible CPUs on the system (though
-/// very seldom is). This number may differ from the number of possible CPUs on
-/// the system when e.g. there are fully disabled CPUs in the middle of the
-/// range of possible CPUs (i.e. CPUs that may not be onlined).
-pub static NR_CPU_IDS: LazyLock<usize> = LazyLock::new(|| {
-    read_cpu_ids().unwrap().last().unwrap() + 1
-});
+lazy_static::lazy_static! {
+    /// The maximum possible number of CPU IDs in the system. As mentioned
+    /// above, this is different than the number of possible CPUs on the
+    /// system (though very seldom is). This number may differ from the
+    /// number of possible CPUs on the system when e.g. there are fully
+    /// disabled CPUs in the middle of the range of possible CPUs (i.e. CPUs
+    /// that may not be onlined).
+    pub static ref NR_CPU_IDS: usize = read_cpu_ids().unwrap().last().unwrap() + 1;
 
-/// The number of possible CPUs that may be active on the system. Note that this
-/// value is separate from the number of possible _CPU IDs_ in the system, as
-/// there may be gaps in what CPUs are allowed to be onlined. For example, some
-/// BIOS implementations may report spans of disabled CPUs that may not be
-/// onlined, whose IDs are lower than the IDs of other CPUs that may be onlined.
-pub static NR_CPUS_POSSIBLE: LazyLock<usize> =
-    LazyLock::new(|| libbpf_rs::num_possible_cpus().unwrap());
+    /// The number of possible CPUs that may be active on the system. Note
+    /// that this value is separate from the number of possible _CPU IDs_ in
+    /// the system, as there may be gaps in what CPUs are allowed to be
+    /// onlined. For example, some BIOS implementations may report spans of
+    /// disabled CPUs that may not be onlined, whose IDs are lower than the
+    /// IDs of other CPUs that may be onlined.
+    pub static ref NR_CPUS_POSSIBLE: usize = libbpf_rs::num_possible_cpus().unwrap();
+}
 
 #[derive(Debug, Clone)]
 pub struct Cpu {
@@ -421,10 +421,8 @@ fn create_insert_cpu(cpu_id: usize, node: &mut Node, online_mask: &Cpumask) -> R
     // if there's no cache information then we have no option but to assume a single unified cache
     // per node.
     let cache_path = cpu_path.join("cache");
-    let l2_id =
-        read_file_usize(&cache_path.join(format!("index{}", 2)).join("id")).unwrap_or(0);
-    let l3_id =
-        read_file_usize(&cache_path.join(format!("index{}", 3)).join("id")).unwrap_or(0);
+    let l2_id = read_file_usize(&cache_path.join(format!("index{}", 2)).join("id")).unwrap_or(0);
+    let l3_id = read_file_usize(&cache_path.join(format!("index{}", 3)).join("id")).unwrap_or(0);
     // Assume that LLC is always 3.
     let llc_id = l3_id;
 
@@ -502,7 +500,7 @@ fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {
 
     let cpu_ids = read_cpu_ids()?;
     for cpu_id in cpu_ids.iter() {
-	create_insert_cpu(*cpu_id, &mut node, &online_mask)?;
+        create_insert_cpu(*cpu_id, &mut node, &online_mask)?;
     }
 
     nodes.push(node);
