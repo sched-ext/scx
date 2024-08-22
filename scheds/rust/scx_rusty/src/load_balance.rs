@@ -451,10 +451,10 @@ impl NumaNode {
             load: self.load.load_sum(),
             imbal: self.load.imbal(),
             delta: self.load.delta(),
-            domains: BTreeMap::new(),
+            doms: BTreeMap::new(),
         };
         for dom in self.domains.iter() {
-            stats.domains.insert(
+            stats.doms.insert(
                 dom.id,
                 DomainStats {
                     load: dom.load.load_sum(),

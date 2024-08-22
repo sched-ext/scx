@@ -16,6 +16,7 @@ pub mod load_balance;
 use load_balance::LoadBalancer;
 
 mod stats;
+use stats::ClusterStats;
 use stats::NodeStats;
 
 use std::collections::BTreeMap;
@@ -454,13 +455,13 @@ impl<'a> Scheduler<'a> {
         Ok(stats)
     }
 
-    fn report(
+    fn cluster_stats(
         &mut self,
         bpf_stats: &[u64],
         cpu_busy: f64,
         processing_dur: Duration,
-        node_stats: &BTreeMap<usize, NodeStats>,
-    ) {
+        node_stats: BTreeMap<usize, NodeStats>,
+    ) -> ClusterStats {
         let stat = |idx| bpf_stats[idx as usize];
         let total = stat(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_SYNC_PREV_IDLE)
@@ -473,67 +474,40 @@ impl<'a> Scheduler<'a> {
             + stat(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
-
-        info!(
-            "cpu={:7.2} bal={} load={:8.2} task_err={} lb_data_err={} proc={:?}ms",
-            cpu_busy * 100.0,
-            bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
-            node_stats.iter().map(|(_k, v)| v.load).sum::<f64>(),
-            bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR as usize],
-            self.nr_lb_data_errors,
-            processing_dur.as_millis(),
-        );
-
         let stat_pct = |idx| stat(idx) as f64 / total as f64 * 100.0;
 
-        info!(
-            "tot={:7} wsync_prev_idle={:5.2} wsync={:5.2}",
+        ClusterStats {
+            cpu_busy: cpu_busy * 100.0,
+            load: node_stats.iter().map(|(_k, v)| v.load).sum::<f64>(),
+            nr_load_balances: bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
+
+            task_get_err: bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR as usize],
+            lb_data_err: self.nr_lb_data_errors,
+            proc_dur: processing_dur.as_secs_f64(),
+
             total,
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_SYNC_PREV_IDLE),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC),
-        );
 
-        info!(
-            "prev_idle={:5.2} greedy_idle={:5.2} pin={:5.2}",
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PINNED),
-        );
+            sync_prev_idle: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_SYNC_PREV_IDLE),
+            wake_sync: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC),
+            prev_idle: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE),
+            greedy_idle: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE),
+            pinned: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PINNED),
+            dispatch: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_DISPATCH),
+            greedy: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY),
+            greedy_far: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY_FAR),
+            dsq_dispatch: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH),
+            greedy_local: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL),
+            greedy_xnuma: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA),
+            kick_greedy: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_KICK_GREEDY),
+            repatriate: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_REPATRIATE),
+            dl_clamp: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_CLAMP),
+            dl_preset: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_PRESET),
 
-        info!(
-            "dir={:5.2} dir_greedy={:5.2} dir_greedy_far={:5.2}",
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_DISPATCH),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY_FAR),
-        );
+            slice_us: self.tuner.slice_ns / 1000,
+            direct_greedy_cpus: self.tuner.direct_greedy_mask.as_raw_slice().to_owned(),
+            kick_greedy_cpus: self.tuner.kick_greedy_mask.as_raw_slice().to_owned(),
 
-        info!(
-            "dsq={:5.2} greedy_local={:5.2} greedy_xnuma={:5.2}",
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA),
-        );
-
-        info!(
-            "kick_greedy={:5.2} rep={:5.2}",
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_KICK_GREEDY),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_REPATRIATE),
-        );
-        info!(
-            "dl_clamped={:5.2} dl_preset={:5.2}",
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_CLAMP),
-            stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_PRESET),
-        );
-
-        info!("slice_length={}us", self.tuner.slice_ns / 1000);
-        info!("direct_greedy_cpumask={}", self.tuner.direct_greedy_mask);
-        info!("  kick_greedy_cpumask={}", self.tuner.kick_greedy_mask);
-
-        for (nid, node) in node_stats.iter() {
-            info!("{}", node.format(*nid));
-            for (did, dom) in node.domains.iter() {
-                info!("{}", dom.format(*did));
-            }
+            nodes: node_stats,
         }
     }
 
@@ -552,13 +526,16 @@ impl<'a> Scheduler<'a> {
 
         lb.load_balance()?;
 
-        let stats = lb.get_stats();
-        self.report(
+        let lstats = lb.get_stats();
+        let cstats = self.cluster_stats(
             &bpf_stats,
             cpu_busy,
             Instant::now().duration_since(started_at),
-            &stats,
+            lstats,
         );
+        let mut buf = Vec::<u8>::new();
+        cstats.format(&mut buf)?;
+        print!("{}", std::str::from_utf8(&buf).unwrap());
 
         self.prev_at = started_at;
         Ok(())
