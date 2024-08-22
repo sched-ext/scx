@@ -134,6 +134,11 @@ UEI_DEFINE(uei);
 private(BPFLAND) struct bpf_cpumask __kptr *primary_cpumask;
 
 /*
+ * Mask of turbo boosted CPUs in the system.
+ */
+private(BPFLAND) struct bpf_cpumask __kptr *turbo_cpumask;
+
+/*
  * Mask of offline CPUs, used to properly support CPU hotplugging.
  */
 private(BPFLAND) struct bpf_cpumask __kptr *offline_cpumask;
@@ -505,10 +510,11 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
-	struct bpf_cpumask *primary, *l2_domain, *l3_domain;
+	struct bpf_cpumask *primary, *turbo, *l2_domain, *l3_domain;
 	struct bpf_cpumask *p_mask, *l2_mask, *l3_mask;
 	struct task_ctx *tctx;
 	struct cpu_ctx *cctx;
+	bool do_turbo = true;
 	s32 cpu;
 
 	tctx = try_lookup_task_ctx(p);
@@ -534,6 +540,9 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	primary = primary_cpumask;
 	if (!primary)
 		return -ENOENT;
+	turbo = turbo_cpumask;
+	if (!turbo)
+		return -ENOENT;
 
 	/*
 	 * Acquire the CPU masks to determine the online and idle CPUs in the
@@ -552,7 +561,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	l3_domain = cctx->l3_cpumask;
 	if (!l3_domain)
 		l3_domain = primary;
-
+retry:
 	/*
 	 * Task's scheduling domains.
 	 */
@@ -576,10 +585,17 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	}
 
 	/*
-	 * Determine the task's primary domain as the intersection of the
-	 * task's allowed cpumask and the global primary scheduling domain.
+	 * Determine the task's scheduling domain.
+	 *
+	 * Try to dispatch on the turbo boosted CPUs first. If we can't find
+	 * any idle CPU, re-try again with the primary scheduling domain.
 	 */
-	bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(primary));
+	if (do_turbo && !bpf_cpumask_equal(cast_mask(turbo), cast_mask(primary))) {
+		bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(turbo));
+	} else {
+		bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(primary));
+		do_turbo = false;
+	}
 
 	/*
 	 * Determine the L2 cache domain as the intersection of the task's
@@ -682,12 +698,21 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	}
 
 	/*
-	 * Search for any idle CPU in the primary domain.
+	 * Search for any idle CPU in the scheduling domain.
 	 */
 	cpu = bpf_cpumask_any_and_distribute(cast_mask(p_mask), idle_cpumask);
 	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(cpu))
 		goto out_put_cpumask;
+
+	/*
+	 * If we were looking for an idle CPU in the turbo domain and we
+	 * couldn't find any, re-try again with the whole primary domain.
+	 */
+	if (do_turbo) {
+		do_turbo = false;
+		goto retry;
+	}
 
 	/*
 	 * If all the previous attempts have failed, try to use any idle CPU in
@@ -1240,6 +1265,34 @@ int enable_sibling_cpu(struct domain_arg *input)
 }
 
 SEC("syscall")
+int enable_turbo_cpu(struct cpu_arg *input)
+{
+	struct bpf_cpumask *mask;
+	int err = 0;
+
+	/* Make sure the primary CPU mask is initialized */
+	err = init_cpumask(&turbo_cpumask);
+	if (err)
+		return err;
+	/*
+	 * Enable the target CPU in the turbo boost scheduling domain.
+	 */
+	bpf_rcu_read_lock();
+	mask = turbo_cpumask;
+	if (mask) {
+		s32 cpu = input->cpu_id;
+
+		if (cpu < 0)
+			bpf_cpumask_clear(mask);
+		else
+			bpf_cpumask_set_cpu(cpu, mask);
+	}
+	bpf_rcu_read_unlock();
+
+	return err;
+}
+
+SEC("syscall")
 int enable_primary_cpu(struct cpu_arg *input)
 {
 	struct bpf_cpumask *mask;
@@ -1323,6 +1376,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 
 	/* Initialize the primary scheduling domain */
 	err = init_cpumask(&primary_cpumask);
+	if (err)
+		return err;
+
+	/* Initialize the primary scheduling domain */
+	err = init_cpumask(&turbo_cpumask);
 	if (err)
 		return err;
 
