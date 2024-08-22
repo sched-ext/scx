@@ -124,19 +124,24 @@ fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
 }
 
 fn parse_cpumask(cpu_str: &str) -> Result<Cpumask, anyhow::Error> {
-    if cpu_str == "performance" {
-        let cpus = get_primary_cpus(false).unwrap();
-        Cpumask::from_str(&cpus_to_cpumask(&cpus))
-    } else if cpu_str == "powersave" {
-        let cpus = get_primary_cpus(true).unwrap();
-        Cpumask::from_str(&cpus_to_cpumask(&cpus))
-    } else if !cpu_str.is_empty() {
-        Cpumask::from_str(&cpu_str.to_string())
-    } else {
-        let mut cpumask = Cpumask::new()?;
-        cpumask.setall();
-
-        Ok(cpumask)
+    match cpu_str {
+        "powersave" => {
+            let cpus = get_primary_cpus(true).unwrap();
+            Cpumask::from_str(&cpus_to_cpumask(&cpus))
+        }
+        "performance" => {
+            let cpus = get_primary_cpus(false).unwrap();
+            Cpumask::from_str(&cpus_to_cpumask(&cpus))
+        }
+        "auto" => {
+            Cpumask::new()
+        }
+        _ if !cpu_str.is_empty() => Cpumask::from_str(&cpu_str.to_string()),
+        _ => {
+            let mut cpumask = Cpumask::new()?;
+            cpumask.setall();
+            Ok(cpumask)
+        }
     }
 }
 
@@ -196,6 +201,7 @@ struct Opts {
     /// Special values:
     ///  - "performance" = automatically detect and use the fastest CPUs
     ///  - "powersave" = automatically detect and use the slowest CPUs
+    ///  - "auto" = automatically detect the CPUs based on the current energy profile
     ///
     /// By default all CPUs are used for the primary scheduling domain.
     #[clap(short = 'm', long, default_value = "", value_parser = parse_cpumask)]
@@ -290,6 +296,7 @@ struct Scheduler<'a> {
     opts: &'a Opts,
     metrics: Metrics,
     cpu_hotplug_cnt: u64,
+    energy_profile: String,
 }
 
 impl<'a> Scheduler<'a> {
@@ -337,7 +344,10 @@ impl<'a> Scheduler<'a> {
         let topo = Topology::new().unwrap();
 
         // Initialize the primary scheduling domain (based on the --primary-domain option).
-        Self::init_primary_domain(&mut skel, &opts.primary_domain)?;
+        let energy_profile = Self::read_energy_profile();
+        if let Err(err) = Self::init_energy_domain(&mut skel, &opts.primary_domain, &energy_profile) {
+            warn!("failed to initialize primary domain: error {}", err);
+        }
 
         // Initialize L2 cache domains.
         if !opts.disable_l2 {
@@ -365,10 +375,11 @@ impl<'a> Scheduler<'a> {
             opts,
             metrics: Metrics::new(),
             cpu_hotplug_cnt: 0,
+            energy_profile,
         })
     }
 
-    fn enable_primary_cpu(skel: &mut BpfSkel<'_>, cpu: usize) -> Result<(), u32> {
+    fn enable_primary_cpu(skel: &mut BpfSkel<'_>, cpu: i32) -> Result<(), u32> {
         let prog = &mut skel.progs.enable_primary_cpu;
         let mut args = cpu_arg {
             cpu_id: cpu as c_int,
@@ -396,15 +407,66 @@ impl<'a> Scheduler<'a> {
     ) -> Result<()> {
         info!("primary CPU domain = 0x{:x}", primary_domain);
 
+        // Clear the primary domain by passing a negative CPU id.
+        if let Err(err) = Self::enable_primary_cpu(skel, -1) {
+            warn!("failed to reset primary domain: error {}", err);
+        }
+        // Update primary scheduling domain.
         for cpu in 0..*NR_CPU_IDS {
             if primary_domain.test_cpu(cpu) {
-                if let Err(err) = Self::enable_primary_cpu(skel, cpu) {
+                if let Err(err) = Self::enable_primary_cpu(skel, cpu as i32) {
                     warn!("failed to add CPU {} to primary domain: error {}", cpu, err);
                 }
             }
         }
 
         Ok(())
+    }
+
+    fn read_energy_profile() -> String {
+        let res = File::open("/sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference")
+            .and_then(|mut file| {
+                let mut contents = String::new();
+                file.read_to_string(&mut contents)?;
+                Ok(contents.trim().to_string())
+            });
+
+        res.unwrap_or_else(|_| "none".to_string())
+    }
+
+    fn init_energy_domain(skel: &mut BpfSkel<'_>, primary_domain: &Cpumask, energy_profile: &String) -> Result<()> {
+        let domain = if primary_domain.is_empty() {
+            let cpus = match energy_profile.as_str() {
+                "power" => get_primary_cpus(true).unwrap_or(Vec::new()),
+                "performance" => get_primary_cpus(false).unwrap_or(Vec::new()),
+                &_ => Vec::new(),
+            };
+            if cpus.is_empty() {
+                let mut cpumask = Cpumask::new()?;
+                cpumask.setall();
+                cpumask
+            } else {
+                Cpumask::from_str(&cpus_to_cpumask(&cpus))?
+            }
+        } else {
+            primary_domain.clone()
+        };
+        Self::init_primary_domain(skel, &domain)?;
+
+        Ok(())
+    }
+
+    fn refresh_energy_domain(&mut self) {
+        if self.opts.primary_domain.is_empty() {
+            let energy_profile = Self::read_energy_profile();
+            if energy_profile != self.energy_profile {
+                self.energy_profile = energy_profile.clone();
+
+                if let Err(err) = Self::init_energy_domain(&mut self.skel, &self.opts.primary_domain, &energy_profile) {
+                    warn!("failed to refresh primary domain: error {}", err);
+                }
+            }
+        }
     }
 
     fn enable_sibling_cpu(
@@ -572,6 +634,7 @@ impl<'a> Scheduler<'a> {
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             self.refresh_cache_domains();
+            self.refresh_energy_domain();
             self.update_stats();
             std::thread::sleep(Duration::from_millis(1000));
         }

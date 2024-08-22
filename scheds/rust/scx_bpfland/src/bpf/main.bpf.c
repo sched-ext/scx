@@ -1250,12 +1250,20 @@ int enable_primary_cpu(struct cpu_arg *input)
 	if (err)
 		return err;
 	/*
-	 * Enable the target CPU in the primary scheduling domain.
+	 * Enable the target CPU in the primary scheduling domain. If the
+	 * target CPU is a negative value, clear the whole mask (this can be
+	 * used to reset the primary domain).
 	 */
 	bpf_rcu_read_lock();
 	mask = primary_cpumask;
-	if (mask)
-		bpf_cpumask_set_cpu(input->cpu_id, mask);
+	if (mask) {
+		s32 cpu = input->cpu_id;
+
+		if (cpu < 0)
+			bpf_cpumask_clear(mask);
+		else
+			bpf_cpumask_set_cpu(cpu, mask);
+	}
 	bpf_rcu_read_unlock();
 
 	return err;
