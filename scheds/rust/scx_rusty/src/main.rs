@@ -26,6 +26,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 #[macro_use]
 extern crate static_assertions;
@@ -36,12 +38,14 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use log::info;
+use scx_stats::ScxStatsServer;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
@@ -98,7 +102,7 @@ struct Opts {
     #[clap(short = 'o', long, default_value = "1000")]
     slice_us_overutil: u64,
 
-    /// Monitoring and load balance interval in seconds.
+    /// Load balance interval in seconds.
     #[clap(short = 'i', long, default_value = "2.0")]
     interval: f64,
 
@@ -195,6 +199,15 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     mempolicy_affinity: bool,
 
+    /// Enable stats monitoring with the specified interval.
+    #[clap(long)]
+    stats: Option<f64>,
+
+    /// Run in stats monitoring mode with the specified interval. Scheduler
+    /// is not launched.
+    #[clap(long)]
+    monitor: Option<f64>,
+
     /// Exit debug dump buffer length. 0 indicates default.
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
@@ -247,7 +260,6 @@ pub fn sub_or_zero(curr: &u64, prev: &u64) -> u64 {
 
 #[derive(Clone, Debug)]
 struct StatsCtx {
-    at: Instant,
     cpu_busy: u64,
     cpu_total: u64,
     bpf_stats: Vec<u64>,
@@ -279,11 +291,19 @@ impl StatsCtx {
         Ok(stats)
     }
 
+    fn blank() -> Self {
+        Self {
+            cpu_busy: 0,
+            cpu_total: 0,
+            bpf_stats: vec![0u64; bpf_intf::stat_idx_RUSTY_NR_STATS as usize],
+            cpu_used: Duration::default(),
+        }
+    }
+
     fn new(skel: &BpfSkel, proc_reader: &procfs::ProcReader, cpu_used: Duration) -> Result<Self> {
         let (cpu_busy, cpu_total) = read_cpu_busy_and_total(proc_reader)?;
 
         Ok(Self {
-            at: Instant::now(),
             cpu_busy,
             cpu_total,
             bpf_stats: Self::read_bpf_stats(skel)?,
@@ -293,7 +313,6 @@ impl StatsCtx {
 
     fn delta(&self, rhs: &Self) -> Self {
         Self {
-            at: self.at,
             cpu_busy: sub_or_zero(&self.cpu_busy, &rhs.cpu_busy),
             cpu_total: sub_or_zero(&self.cpu_total, &rhs.cpu_total),
             bpf_stats: self
@@ -319,11 +338,13 @@ struct Scheduler<'a> {
     dom_group: Arc<DomainGroup>,
 
     proc_reader: procfs::ProcReader,
-    cpu_used: Duration,
 
+    lb_stats: BTreeMap<usize, NodeStats>,
+    cpu_used: Duration,
     nr_lb_data_errors: u64,
 
     tuner: Tuner,
+    stats_server: ScxStatsServer<StatsCtx, (StatsCtx, ClusterStats)>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -421,7 +442,9 @@ impl<'a> Scheduler<'a> {
         // Attach.
         let mut skel = scx_ops_load!(skel, rusty, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, rusty)?);
-        info!("Rusty scheduler started!");
+        let stats_server = stats::launch_server()?;
+
+        info!("Rusty scheduler started! Run `scx_rusty --monitor` for metrics.");
 
         // Other stuff.
         let proc_reader = procfs::ProcReader::new();
@@ -437,8 +460,9 @@ impl<'a> Scheduler<'a> {
 
             dom_group: domains.clone(),
             proc_reader,
-            cpu_used: Duration::default(),
 
+            lb_stats: BTreeMap::new(),
+            cpu_used: Duration::default(),
             nr_lb_data_errors: 0,
 
             tuner: Tuner::new(
@@ -448,6 +472,7 @@ impl<'a> Scheduler<'a> {
                 opts.slice_us_underutil * 1000,
                 opts.slice_us_overutil * 1000,
             )?,
+            stats_server,
         })
     }
 
@@ -473,6 +498,10 @@ impl<'a> Scheduler<'a> {
         };
 
         ClusterStats {
+            at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64(),
             cpu_busy,
             load: node_stats.iter().map(|(_k, v)| v.load).sum::<f64>(),
             nr_load_balances: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
@@ -507,7 +536,7 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    fn lb_step(&mut self, prev_sc: &mut StatsCtx) -> Result<()> {
+    fn lb_step(&mut self) -> Result<()> {
         let started_at = Instant::now();
 
         let mut lb = LoadBalancer::new(
@@ -520,26 +549,16 @@ impl<'a> Scheduler<'a> {
 
         lb.load_balance()?;
 
-        let lstats = lb.get_stats();
+        self.lb_stats = lb.get_stats();
         self.cpu_used += Instant::now().duration_since(started_at);
-        let cur_sc = StatsCtx::new(&self.skel, &self.proc_reader, self.cpu_used)?;
-        let delta_sc = cur_sc.delta(&prev_sc);
-        *prev_sc = cur_sc;
-
-        let cstats = self.cluster_stats(&delta_sc, lstats);
-
-        let mut buf = Vec::<u8>::new();
-        cstats.format(&mut buf)?;
-        print!("{}", std::str::from_utf8(&buf).unwrap());
-
         Ok(())
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+        let (res_ch, req_ch) = self.stats_server.channels();
         let now = Instant::now();
         let mut next_tune_at = now + self.tune_interval;
         let mut next_sched_at = now + self.sched_interval;
-        let mut prev_sc = StatsCtx::new(&self.skel, &self.proc_reader, self.cpu_used)?;
 
         self.skel.maps.stats.value_size() as usize;
 
@@ -555,18 +574,23 @@ impl<'a> Scheduler<'a> {
             }
 
             if now >= next_sched_at {
-                self.lb_step(&mut prev_sc)?;
+                self.lb_step()?;
                 next_sched_at += self.sched_interval;
                 if next_sched_at < now {
                     next_sched_at = now + self.sched_interval;
                 }
             }
 
-            std::thread::sleep(
-                next_sched_at
-                    .min(next_tune_at)
-                    .duration_since(Instant::now()),
-            );
+            match req_ch.recv_deadline(next_sched_at.min(next_tune_at)) {
+                Ok(prev_sc) => {
+                    let cur_sc = StatsCtx::new(&self.skel, &self.proc_reader, self.cpu_used)?;
+                    let delta_sc = cur_sc.delta(&prev_sc);
+                    let cstats = self.cluster_stats(&delta_sc, self.lb_stats.clone());
+                    res_ch.send((cur_sc, cstats))?;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(e) => Err(e)?,
+            }
         }
 
         self.struct_ops.take();
@@ -613,6 +637,17 @@ fn main() -> Result<()> {
         shutdown_clone.store(true, Ordering::Relaxed);
     })
     .context("Error setting Ctrl-C handler")?;
+
+    if let Some(intv) = opts.monitor.or(opts.stats) {
+        let shutdown_copy = shutdown.clone();
+        let jh = std::thread::spawn(move || {
+            stats::monitor(Duration::from_secs_f64(intv), shutdown_copy).unwrap()
+        });
+        if opts.monitor.is_some() {
+            let _ = jh.join();
+            return Ok(());
+        }
+    }
 
     let mut open_object = MaybeUninit::uninit();
     loop {

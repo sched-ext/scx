@@ -1,7 +1,27 @@
+use crate::StatsCtx;
 use anyhow::Result;
+use chrono::DateTime;
+use chrono::Local;
+use log::info;
+use scx_stats::Meta;
+use scx_stats::ScxStatsClient;
+use scx_stats::ScxStatsOps;
+use scx_stats::ScxStatsServer;
+use scx_stats::StatsOpener;
+use scx_stats::StatsReader;
+use scx_stats::ToJson;
+use scx_stats_derive::Stats;
 use scx_utils::Cpumask;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::thread::sleep;
+use std::time::Duration;
+use std::time::UNIX_EPOCH;
 
 fn signed(x: f64) -> String {
     if x >= 0.0f64 {
@@ -11,7 +31,7 @@ fn signed(x: f64) -> String {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 pub struct DomainStats {
     pub load: f64,
     pub imbal: f64,
@@ -32,7 +52,7 @@ impl DomainStats {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 pub struct NodeStats {
     pub load: f64,
     pub imbal: f64,
@@ -54,8 +74,9 @@ impl NodeStats {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 pub struct ClusterStats {
+    pub at: f64,
     pub cpu_busy: f64,
     pub load: f64,
     pub nr_load_balances: u64,
@@ -156,4 +177,72 @@ impl ClusterStats {
 
         Ok(())
     }
+}
+
+pub fn launch_server() -> Result<ScxStatsServer<StatsCtx, (StatsCtx, ClusterStats)>> {
+    let open: Box<dyn StatsOpener<StatsCtx, (StatsCtx, ClusterStats)>> =
+        Box::new(move |(req_ch, res_ch)| {
+            // Send one bogus request on open to establish prev_sc.
+            let mut prev_sc = StatsCtx::blank();
+            req_ch.send(prev_sc.clone())?;
+            let (cur_sc, _) = res_ch.recv()?;
+            prev_sc = cur_sc;
+
+            let read: Box<dyn StatsReader<StatsCtx, (StatsCtx, ClusterStats)>> =
+                Box::new(move |_args, (req_ch, res_ch)| {
+                    req_ch.send(prev_sc.clone())?;
+                    let (cur_sc, cluster_stats) = res_ch.recv()?;
+                    prev_sc = cur_sc;
+                    cluster_stats.to_json()
+                });
+            Ok(read)
+        });
+
+    Ok(ScxStatsServer::new()
+        .add_stats_meta(DomainStats::meta())
+        .add_stats_meta(NodeStats::meta())
+        .add_stats_meta(ClusterStats::meta())
+        .add_stats_ops("top", ScxStatsOps { open, close: None })
+        .launch()?)
+}
+
+pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
+    let mut retry_cnt: u32 = 0;
+    while !shutdown.load(Ordering::Relaxed) {
+        let mut client = match ScxStatsClient::new().connect() {
+            Ok(v) => v,
+            Err(e) => match e.downcast_ref::<std::io::Error>() {
+                Some(ioe) if ioe.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    if retry_cnt == 1 {
+                        info!("Stats server not avaliable, retrying...");
+                    }
+                    retry_cnt += 1;
+                    sleep(Duration::from_secs(1));
+                    continue;
+                }
+                _ => Err(e)?,
+            },
+        };
+        retry_cnt = 0;
+
+        while !shutdown.load(Ordering::Relaxed) {
+            let cst = match client.request::<ClusterStats>("stats", vec![]) {
+                Ok(v) => v,
+                Err(e) => match e.downcast_ref::<std::io::Error>() {
+                    Some(ioe) => {
+                        info!("Connection to stats_server failed ({})", &ioe);
+                        sleep(Duration::from_secs(1));
+                        break;
+                    }
+                    None => Err(e)?,
+                },
+            };
+            let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(cst.at));
+            println!("###### {} ######", dt.to_rfc2822());
+            cst.format(&mut std::io::stdout())?;
+            sleep(intv);
+        }
+    }
+
+    Ok(())
 }
