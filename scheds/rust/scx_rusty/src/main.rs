@@ -14,7 +14,9 @@ use tuner::Tuner;
 
 pub mod load_balance;
 use load_balance::LoadBalancer;
-use load_balance::NumaStat;
+
+mod stats;
+use stats::NodeStats;
 
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
@@ -456,7 +458,7 @@ impl<'a> Scheduler<'a> {
         bpf_stats: &[u64],
         cpu_busy: f64,
         processing_dur: Duration,
-        lb_stats: &[NumaStat],
+        node_stats: &[NodeStats],
     ) {
         let stat = |idx| bpf_stats[idx as usize];
         let total = stat(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC)
@@ -471,8 +473,8 @@ impl<'a> Scheduler<'a> {
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
 
-        let numa_load_avg = lb_stats[0].load.load_avg();
-        let dom_load_avg = lb_stats[0].domains[0].load.load_avg();
+        let numa_load_avg = node_stats[0].load.load_avg();
+        let dom_load_avg = node_stats[0].domains[0].load.load_avg();
         info!(
             "cpu={:7.2} bal={} numa_load_avg={:8.2} dom_load_avg={:8.2} task_err={} lb_data_err={} proc={:?}ms",
             cpu_busy * 100.0,
@@ -528,7 +530,7 @@ impl<'a> Scheduler<'a> {
         info!("direct_greedy_cpumask={}", self.tuner.direct_greedy_mask);
         info!("  kick_greedy_cpumask={}", self.tuner.kick_greedy_mask);
 
-        for node in lb_stats.iter() {
+        for node in node_stats.iter() {
             info!("{}", node);
             for dom in node.domains.iter() {
                 info!("{}", dom);
