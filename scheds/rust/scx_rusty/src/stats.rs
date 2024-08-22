@@ -62,7 +62,7 @@ pub struct ClusterStats {
 
     pub task_get_err: u64,
     pub lb_data_err: u64,
-    pub proc_dur: f64,
+    pub cpu_used: f64,
 
     pub total: u64,
 
@@ -93,13 +93,13 @@ impl ClusterStats {
     pub fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "cpu={:7.2} load={:8.2} bal={} task_err={} lb_data_err={} proc={:4.1}ms",
+            "cpu={:7.2} load={:8.2} bal={} task_err={} lb_data_err={} cpu_used={:4.1}ms",
             self.cpu_busy,
             self.load,
             self.nr_load_balances,
             self.task_get_err,
             self.lb_data_err,
-            self.proc_dur * 1000.0,
+            self.cpu_used * 1000.0,
         )?;
         writeln!(
             w,
