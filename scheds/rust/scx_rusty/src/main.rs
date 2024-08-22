@@ -18,6 +18,7 @@ use load_balance::LoadBalancer;
 mod stats;
 use stats::NodeStats;
 
+use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -309,7 +310,7 @@ impl<'a> Scheduler<'a> {
             let node_cpumask_slice = &mut skel.maps.rodata_data.numa_cpumasks[numa];
             let (left, _) = node_cpumask_slice.split_at_mut(raw_numa_slice.len());
             left.clone_from_slice(raw_numa_slice);
-            info!("NUMA[{:02}] mask= {}", numa, numa_mask);
+            info!("NODE[{:02}] mask= {}", numa, numa_mask);
 
             for dom in node_domains.iter() {
                 let raw_dom_slice = dom.mask_slice();
@@ -319,7 +320,7 @@ impl<'a> Scheduler<'a> {
                 skel.maps.rodata_data.dom_numa_id_map[dom.id()] =
                     numa.try_into().expect("NUMA ID could not fit into 32 bits");
 
-                info!("  DOM[{:02}] mask= {}", dom.id(), dom.mask());
+                info!(" DOM[{:02}] mask= {}", dom.id(), dom.mask());
             }
         }
 
@@ -458,7 +459,7 @@ impl<'a> Scheduler<'a> {
         bpf_stats: &[u64],
         cpu_busy: f64,
         processing_dur: Duration,
-        node_stats: &[NodeStats],
+        node_stats: &BTreeMap<usize, NodeStats>,
     ) {
         let stat = |idx| bpf_stats[idx as usize];
         let total = stat(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC)
@@ -473,13 +474,11 @@ impl<'a> Scheduler<'a> {
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL)
             + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
 
-        let numa_load_avg = node_stats[0].load.load_avg();
-        let dom_load_avg = node_stats[0].domains[0].load.load_avg();
         info!(
-            "cpu={:7.2} bal={} numa_load_avg={:8.2} dom_load_avg={:8.2} task_err={} lb_data_err={} proc={:?}ms",
+            "cpu={:7.2} bal={} load={:8.2} task_err={} lb_data_err={} proc={:?}ms",
             cpu_busy * 100.0,
             bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
-            numa_load_avg, dom_load_avg,
+            node_stats.iter().map(|(_k, v)| v.load).sum::<f64>(),
             bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR as usize],
             self.nr_lb_data_errors,
             processing_dur.as_millis(),
@@ -530,10 +529,10 @@ impl<'a> Scheduler<'a> {
         info!("direct_greedy_cpumask={}", self.tuner.direct_greedy_mask);
         info!("  kick_greedy_cpumask={}", self.tuner.kick_greedy_mask);
 
-        for node in node_stats.iter() {
-            info!("{}", node);
-            for dom in node.domains.iter() {
-                info!("{}", dom);
+        for (nid, node) in node_stats.iter() {
+            info!("{}", node.format(*nid));
+            for (did, dom) in node.domains.iter() {
+                info!("{}", dom.format(*did));
             }
         }
     }

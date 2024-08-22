@@ -153,6 +153,7 @@ use scx_utils::ravg::ravg_read;
 use scx_utils::LoadAggregator;
 use scx_utils::LoadLedger;
 use sorted_vec::SortedVec;
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
@@ -445,24 +446,24 @@ impl NumaNode {
         self.load.add_load(delta);
     }
 
-    fn node_stats(&self) -> NodeStats {
-        let mut n_stat = NodeStats {
-            id: self.id,
-            load: self.load.clone(),
-            domains: Vec::new(),
+    fn stats(&self) -> NodeStats {
+        let mut stats = NodeStats {
+            load: self.load.load_sum(),
+            imbal: self.load.imbal(),
+            delta: self.load.delta(),
+            domains: BTreeMap::new(),
         };
-
         for dom in self.domains.iter() {
-            n_stat.domains.push(DomainStats {
-                id: dom.id,
-                load: dom.load.clone(),
-            });
+            stats.domains.insert(
+                dom.id,
+                DomainStats {
+                    load: dom.load.load_sum(),
+                    imbal: dom.load.imbal(),
+                    delta: dom.load.delta(),
+                },
+            );
         }
-        n_stat
-            .domains
-            .sort_by(|x, y| x.id.partial_cmp(&y.id).unwrap());
-
-        n_stat
+        stats
     }
 }
 
@@ -529,15 +530,12 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         Ok(())
     }
 
-    pub fn get_stats(&self) -> Vec<NodeStats> {
-        let mut numa_stats = Vec::with_capacity(self.dom_group.nr_nodes());
+    pub fn get_stats(&self) -> BTreeMap<usize, NodeStats> {
+        let mut stats = BTreeMap::new();
         for node in self.nodes.iter() {
-            numa_stats.push(node.node_stats());
+            stats.insert(node.id, node.stats());
         }
-
-        numa_stats.sort_by(|x, y| x.id.partial_cmp(&y.id).unwrap());
-
-        numa_stats
+        stats
     }
 
     fn create_domain_hierarchy(&mut self) -> Result<()> {

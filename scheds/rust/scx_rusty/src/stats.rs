@@ -1,51 +1,46 @@
-use crate::load_balance::LoadEntity;
-use std::fmt;
+use std::collections::BTreeMap;
 
-fn fmt_balance_stat(
-    f: &mut fmt::Formatter<'_>,
-    load: &LoadEntity,
-    preamble: String,
-) -> fmt::Result {
-    let imbal = load.imbal();
-    let load_sum = load.load_sum();
-    let load_delta = load.delta();
-    let get_fmt = |num: f64| {
-        if num >= 0.0f64 {
-            format!("{:+4.2}", num)
-        } else {
-            format!("{:4.2}", num)
-        }
-    };
-
-    write!(
-        f,
-        "{} load={:4.2} imbal={} load_delta={}",
-        preamble,
-        load_sum,
-        get_fmt(imbal),
-        get_fmt(load_delta)
-    )
+fn signed(x: f64) -> String {
+    if x >= 0.0f64 {
+        format!("{:+7.2}", x)
+    } else {
+        format!("{:7.2}", x)
+    }
 }
 
 pub struct DomainStats {
-    pub id: usize,
-    pub load: LoadEntity,
+    pub load: f64,
+    pub imbal: f64,
+    pub delta: f64,
 }
 
-impl fmt::Display for DomainStats {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_balance_stat(f, &self.load, format!("  DOMAIN[{:02}]", self.id))
+impl DomainStats {
+    pub fn format(&self, id: usize) -> String {
+        format!(
+            "   DOM[{:02}] load={:6.2} imbal={} delta={}",
+            id,
+            self.load,
+            signed(self.imbal),
+            signed(self.delta)
+        )
     }
 }
 
 pub struct NodeStats {
-    pub id: usize,
-    pub load: LoadEntity,
-    pub domains: Vec<DomainStats>,
+    pub load: f64,
+    pub imbal: f64,
+    pub delta: f64,
+    pub domains: BTreeMap<usize, DomainStats>,
 }
 
-impl fmt::Display for NodeStats {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_balance_stat(f, &self.load, format!("NODE[{:02}]", self.id))
+impl NodeStats {
+    pub fn format(&self, id: usize) -> String {
+        format!(
+            "  NODE[{:02}] load={:6.2} imbal={} delta={}",
+            id,
+            self.load,
+            signed(self.imbal),
+            signed(self.delta)
+        )
     }
 }
