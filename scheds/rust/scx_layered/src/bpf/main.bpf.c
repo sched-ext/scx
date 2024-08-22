@@ -667,12 +667,6 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (enq_flags & SCX_ENQ_REENQ) {
 		lstat_inc(LSTAT_ENQ_REENQ, layer, cctx);
 	} else {
-		if (enq_flags & SCX_ENQ_LAST) {
-			lstat_inc(LSTAT_ENQ_LAST, layer, cctx);
-			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
-			return;
-		}
-
 		if (enq_flags & SCX_ENQ_WAKEUP)
 			lstat_inc(LSTAT_ENQ_WAKEUP, layer, cctx);
 		else
@@ -1698,5 +1692,4 @@ SCX_OPS_DEFINE(layered,
 	       .dump			= (void *)layered_dump,
 	       .init			= (void *)layered_init,
 	       .exit			= (void *)layered_exit,
-	       .flags			= SCX_OPS_ENQ_LAST,
 	       .name			= "layered");

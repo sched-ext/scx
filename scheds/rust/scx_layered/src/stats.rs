@@ -70,8 +70,6 @@ pub struct LayerStats {
     pub enq_wakeup: f64,
     #[stat(desc = "layer: % enqueued after slice expiration")]
     pub enq_expire: f64,
-    #[stat(desc = "layer: % enqueued as last runnable task on CPU")]
-    pub enq_last: f64,
     #[stat(desc = "layer: % re-enqueued due to RT preemption")]
     pub enq_reenq: f64,
     #[stat(desc = "layer: # times exec duration < min_exec_us")]
@@ -148,7 +146,6 @@ impl LayerStats {
         let ltotal = lstat(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
             + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
             + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
-            + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST)
             + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ);
         let lstat_pct = |sidx| {
             if ltotal != 0 {
@@ -181,7 +178,6 @@ impl LayerStats {
             sel_local: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL),
             enq_wakeup: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP),
             enq_expire: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE),
-            enq_last: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST),
             enq_reenq: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ),
             min_exec: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC),
             min_exec_us: (lstat(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC_NS) / 1000) as u64,
@@ -223,13 +219,12 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  tot={:7} local={} wake/exp/last/reenq={}/{}/{}/{}",
+            "  {:<width$}  tot={:7} local={} wake/exp/reenq={}/{}/{}",
             "",
             self.total,
             fmt_pct(self.sel_local),
             fmt_pct(self.enq_wakeup),
             fmt_pct(self.enq_expire),
-            fmt_pct(self.enq_last),
             fmt_pct(self.enq_reenq),
             width = header_width,
         )?;
@@ -350,7 +345,6 @@ impl SysStats {
         let total = lsum(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
             + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
             + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_LAST)
             + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ);
         let lsum_pct = |idx| {
             if total != 0 {
