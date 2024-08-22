@@ -1,7 +1,10 @@
-use quote::{quote, quote_spanned};
+use quote::{format_ident, quote, quote_spanned};
 use scx_stats::{ScxStatsData, ScxStatsKind, ScxStatsMetaAux};
+use std::sync::atomic::{AtomicU64, Ordering};
 use syn::parse_macro_input;
 use syn::spanned::Spanned;
+
+static ASSERT_IDX: AtomicU64 = AtomicU64::new(0);
 
 #[proc_macro_derive(Stats, attributes(stat))]
 pub fn stat(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
@@ -17,9 +20,11 @@ pub fn stat(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
             | ScxStatsData::Dict { key: _, datum } => {
                 if let ScxStatsKind::Struct(name) = &datum {
                     let path = &paths[name.as_str()];
+                    let idx = ASSERT_IDX.fetch_add(1, Ordering::Relaxed);
+                    let assert_id = format_ident!("_AssertScxStatsMeta_{}", idx);
                     #[rustfmt::skip]
                     let assert = quote_spanned! {path.span()=>
-                          struct _AssertScxStatsMeta where #path: scx_stats::Meta;
+                          struct #assert_id where #path: scx_stats::Meta;
                     };
                     output.extend(assert.into_iter());
                 }
