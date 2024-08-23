@@ -32,6 +32,7 @@ fn signed(x: f64) -> String {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
+#[stat(_om_prefix = "d_", _om_label = "domain")]
 pub struct DomainStats {
     pub load: f64,
     pub imbal: f64,
@@ -53,6 +54,7 @@ impl DomainStats {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
+#[stat(_om_prefix = "n_", _om_label = "node")]
 pub struct NodeStats {
     pub load: f64,
     pub imbal: f64,
@@ -75,6 +77,7 @@ impl NodeStats {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
+#[stat(top)]
 pub struct ClusterStats {
     pub at_us: u64,
     pub lb_at_us: u64,
@@ -105,7 +108,9 @@ pub struct ClusterStats {
     pub dl_preset: f64,
 
     pub slice_us: u64,
+    #[stat(_om_skip)]
     pub direct_greedy_cpus: Vec<u64>,
+    #[stat(_om_skip)]
     pub kick_greedy_cpus: Vec<u64>,
 
     pub nodes: BTreeMap<usize, NodeStats>,
