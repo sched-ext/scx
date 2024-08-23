@@ -1086,6 +1086,8 @@ dependencies = [
  "metrics-util",
  "paste",
  "regex",
+ "scx_stats",
+ "serde",
  "sscanf",
  "tar",
  "vergen",

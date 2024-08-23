@@ -2,9 +2,7 @@ use crate::StatsCtx;
 use anyhow::Result;
 use chrono::DateTime;
 use chrono::Local;
-use log::info;
 use scx_stats::Meta;
-use scx_stats::ScxStatsClient;
 use scx_stats::ScxStatsOps;
 use scx_stats::ScxStatsServer;
 use scx_stats::StatsOpener;
@@ -19,7 +17,6 @@ use std::io::Write;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::thread::sleep;
 use std::time::Duration;
 use std::time::UNIX_EPOCH;
 
@@ -246,46 +243,18 @@ pub fn launch_server() -> Result<ScxStatsServer<StatsCtx, (StatsCtx, ClusterStat
 }
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
-    let mut retry_cnt: u32 = 0;
-    while !shutdown.load(Ordering::Relaxed) {
-        let mut client = match ScxStatsClient::new().connect() {
-            Ok(v) => v,
-            Err(e) => match e.downcast_ref::<std::io::Error>() {
-                Some(ioe) if ioe.kind() == std::io::ErrorKind::ConnectionRefused => {
-                    if retry_cnt == 1 {
-                        info!("Stats server not avaliable, retrying...");
-                    }
-                    retry_cnt += 1;
-                    sleep(Duration::from_secs(1));
-                    continue;
-                }
-                _ => Err(e)?,
-            },
-        };
-        retry_cnt = 0;
-
-        while !shutdown.load(Ordering::Relaxed) {
-            let cst = match client.request::<ClusterStats>("stats", vec![]) {
-                Ok(v) => v,
-                Err(e) => match e.downcast_ref::<std::io::Error>() {
-                    Some(ioe) => {
-                        info!("Connection to stats_server failed ({})", &ioe);
-                        sleep(Duration::from_secs(1));
-                        break;
-                    }
-                    None => Err(e)?,
-                },
-            };
+    scx_utils::monitor_stats::<ClusterStats>(
+        &vec![],
+        intv,
+        || shutdown.load(Ordering::Relaxed),
+        |cst| {
             let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_micros(cst.at_us));
             println!(
                 "###### {}, load balance @ {:7.1}ms ######",
                 dt.to_rfc2822(),
                 (cst.lb_at_us as i64 - cst.at_us as i64) as f64 / 1000.0
             );
-            cst.format(&mut std::io::stdout())?;
-            sleep(intv);
-        }
-    }
-
-    Ok(())
+            cst.format(&mut std::io::stdout())
+        },
+    )
 }
