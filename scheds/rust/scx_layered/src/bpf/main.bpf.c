@@ -1014,6 +1014,10 @@ static __noinline bool match_one(struct layer_match *match,
 			result = cred->egid.val == match->group_id;
 		bpf_rcu_read_unlock();
 		return result;
+	case MATCH_PID_EQUALS:
+		return p->pid == match->pid;
+	case MATCH_PPID_EQUALS:
+		return p->real_parent->pid == match->ppid;
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
 		return result;
@@ -1614,6 +1618,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 					break;
 				case MATCH_GROUP_ID_EQUALS:
 					dbg("%s GROUP_ID %u", header, match->group_id);
+					break;
+				case MATCH_PID_EQUALS:
+					dbg("%s PID %u", header, match->pid);
+					break;
+				case MATCH_PPID_EQUALS:
+					dbg("%s PPID %u", header, match->ppid);
 					break;
 				default:
 					scx_bpf_error("%s Invalid kind", header);
