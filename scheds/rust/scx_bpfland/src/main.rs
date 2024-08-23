@@ -172,6 +172,14 @@ struct Opts {
     #[clap(short = 'l', long, allow_hyphen_values = true, default_value = "0")]
     slice_us_lag: i64,
 
+    /// Shorten interactive tasks deadline based on their average amount of voluntary context
+    /// switches.
+    ///
+    /// Enabling this option can be beneficial in soft real-time scenarios, such as audio
+    /// processing, multimedia, etc.
+    #[clap(short = 'L', long, action = clap::ArgAction::SetTrue)]
+    lowlatency: bool,
+
     /// Enable per-CPU kthreads prioritization.
     ///
     /// Enabling this can enhance the performance of interrupt-driven workloads (e.g., networking
@@ -314,6 +322,7 @@ impl<'a> Scheduler<'a> {
         // Override default BPF scheduling parameters.
         skel.maps.rodata_data.debug = opts.debug;
         skel.maps.rodata_data.smt_enabled = smt_enabled;
+        skel.maps.rodata_data.lowlatency = opts.lowlatency;
         skel.maps.rodata_data.local_kthreads = opts.local_kthreads;
         skel.maps.rodata_data.slice_ns = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_ns_min = opts.slice_us_min * 1000;

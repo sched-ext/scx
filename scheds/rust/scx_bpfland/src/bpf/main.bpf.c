@@ -59,6 +59,27 @@ const volatile s64 slice_ns_lag;
 const volatile bool local_kthreads;
 
 /*
+ * Boost interactive tasks, by shortening their deadline as a function of their
+ * average amount of voluntary context switches.
+ *
+ * Tasks are already classified as interactive if their average amount of
+ * context switches exceeds nvcsw_avg_thresh, which grants them higher
+ * priority.
+ *
+ * When this option is enabled, tasks will receive a deadline boost in addition
+ * to their interactive vs. regular classification, with the boost being
+ * proportional to their average number of context switches.
+ *
+ * This ensures that within the main scheduling classes (interactive and
+ * regular), tasks that more frequently voluntarily yield the CPU receive an
+ * even higher priority.
+ *
+ * This option is particularly useful in soft real-time scenarios, such as
+ * audio processing, multimedia, etc.
+ */
+const volatile bool lowlatency;
+
+/*
  * Maximum threshold of voluntary context switches.
  *
  * This limits the range of nvcsw_avg_thresh (see below).
@@ -341,10 +362,26 @@ static inline bool vtime_before(u64 a, u64 b)
 }
 
 /*
- * Return task's evaluated vruntime.
+ * Return task's average amount of context switches per second.
  */
-static inline u64 task_vtime(struct task_struct *p)
+static bool task_avg_nvcsw(struct task_struct *p)
 {
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return 0;
+	return tctx->avg_nvcsw;
+}
+
+/*
+ * Return task's evaluated deadline.
+ */
+static inline u64 task_deadline(struct task_struct *p)
+{
+	u64 dl_boost = lowlatency ?
+		MIN(task_avg_nvcsw(p), nvcsw_max_thresh) * slice_ns : 0;
+
 	/*
 	 * Limit the vruntime to (vtime_now - slice_ns_lag) to avoid
 	 * excessively penalizing tasks.
@@ -360,7 +397,12 @@ static inline u64 task_vtime(struct task_struct *p)
 	if (vtime_before(p->scx.dsq_vtime, vtime_now - slice_ns_lag))
 		p->scx.dsq_vtime = vtime_now - slice_ns_lag;
 
-	return p->scx.dsq_vtime;
+	/*
+	 * Return the task's deadline as its vruntime, with a bonus that is
+	 * proportional to the task's average number of voluntary context
+	 * switches.
+	 */
+	return p->scx.dsq_vtime - dl_boost;
 }
 
 /*
@@ -413,7 +455,7 @@ static u64 cpu_to_dsq(s32 cpu)
 static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 {
 	struct bpf_cpumask *offline;
-	u64 vtime = task_vtime(p);
+	u64 deadline = task_deadline(p);
 	u64 dsq_id = cpu_to_dsq(cpu);
 
 	/*
@@ -423,7 +465,7 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 		return -EINVAL;
 
-	scx_bpf_dispatch_vtime(p, dsq_id, SCX_SLICE_DFL, vtime, enq_flags);
+	scx_bpf_dispatch_vtime(p, dsq_id, SCX_SLICE_DFL, deadline, enq_flags);
 
 	/*
 	 * If the CPU has gone offline notify that the task needs to be
@@ -723,7 +765,7 @@ static void handle_sync_wakeup(struct task_struct *p)
  */
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	u64 vtime = task_vtime(p);
+	u64 deadline = task_deadline(p);
 
 	/*
 	 * If the system is saturated and we couldn't dispatch directly in
@@ -756,11 +798,11 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (is_task_interactive(p)) {
 		scx_bpf_dispatch_vtime(p, prio_dsq_id, SCX_SLICE_DFL,
-				       vtime, enq_flags);
+				       deadline, enq_flags);
 		__sync_fetch_and_add(&nr_prio_dispatches, 1);
 	} else {
 		scx_bpf_dispatch_vtime(p, shared_dsq_id, SCX_SLICE_DFL,
-				       vtime, enq_flags);
+				       deadline, enq_flags);
 		__sync_fetch_and_add(&nr_shared_dispatches, 1);
 	}
 }
