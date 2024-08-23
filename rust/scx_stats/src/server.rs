@@ -222,14 +222,14 @@ where
         &self,
         name: &str,
         visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
-        visited: &mut BTreeSet<String>,
+        nesting: &mut BTreeSet<String>,
     ) -> Result<()> {
         let m = match self.meta.get(name) {
             Some(v) => v,
             None => bail!("unknown stats meta name {}", name),
         };
 
-        if !visited.insert(name.into()) {
+        if !nesting.insert(name.into()) {
             bail!("loop in stats meta detected, {} already nested", name);
         }
 
@@ -237,22 +237,22 @@ where
 
         for (fname, field) in m.fields.iter() {
             match &field.data {
-                ScxStatsData::Array(ScxStatsKind::Struct(nested)) => {
-                    self.visit_meta_inner(nested, visit, visited)?
+                ScxStatsData::Array(ScxStatsKind::Struct(inner)) => {
+                    self.visit_meta_inner(inner, visit, nesting)?
                 }
                 ScxStatsData::Dict {
-                    key: ScxStatsKind::Struct(nested),
+                    key: ScxStatsKind::Struct(inner),
                     datum: _,
-                } => bail!("{}.{} is a dict with struct {} as key", name, fname, nested),
+                } => bail!("{}.{} is a dict with struct {} as key", name, fname, inner),
                 ScxStatsData::Dict {
                     key: _,
-                    datum: ScxStatsKind::Struct(nested),
-                } => self.visit_meta_inner(nested, visit, visited)?,
+                    datum: ScxStatsKind::Struct(inner),
+                } => self.visit_meta_inner(inner, visit, nesting)?,
                 _ => {}
             }
         }
 
-        visited.remove(name);
+        nesting.remove(name);
         Ok(())
     }
 
@@ -261,8 +261,8 @@ where
         from: &str,
         visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
     ) -> Result<()> {
-        let mut visited = BTreeSet::<String>::new();
-        self.visit_meta_inner(from, visit, &mut visited)
+        let mut nesting = BTreeSet::<String>::new();
+        self.visit_meta_inner(from, visit, &mut nesting)
     }
 
     fn verify_meta(&self) -> Result<()> {
