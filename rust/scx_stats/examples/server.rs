@@ -1,4 +1,4 @@
-use log::{debug, warn};
+use log::{debug, info, warn};
 use scx_stats::{Meta, ScxStatsServer, ToJson};
 use scx_stats_derive::Stats;
 use serde::{Deserialize, Serialize};
@@ -65,6 +65,9 @@ fn main() {
         .launch()
         .unwrap();
 
+    info!("stats_meta:");
+    server.describe_meta(&mut std::io::stderr(), None).unwrap();
+
     debug!("Doing unnecessary server channel handling");
     let (tx, rx) = server.channels();
     spawn(move || {
@@ -76,12 +79,9 @@ fn main() {
         }
     });
 
-    println!(
-        "Server listening. Run `client {:?}`.\n\
-         Use `socat - UNIX-CONNECT:{:?}` for raw connection.\n\
-         Press any key to exit.",
-        &path, &path,
-    );
+    info!("Server listening. Run `client {:?}`.", &path);
+    info!("Use `socat - UNIX-CONNECT:{:?}` for raw connection.", &path);
+    info!("Press any key to exit.");
 
     let mut buf: [u8; 1] = [0];
     let _ = std::io::stdin().read(&mut buf);

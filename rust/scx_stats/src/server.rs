@@ -1,11 +1,11 @@
 use crate::ScxStatsClient;
-use crate::{Meta, ScxStatsMeta};
-use anyhow::{anyhow, Context, Result};
+use crate::{Meta, ScxStatsData, ScxStatsKind, ScxStatsMeta};
+use anyhow::{anyhow, bail, Context, Result};
 use crossbeam::channel::{unbounded, Receiver, RecvError, Select, SendError, Sender};
 use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -167,6 +167,7 @@ impl<Req, Res> Clone for ChannelPair<Req, Res> {
 }
 
 struct ScxStatsServerData<Req, Res> {
+    top: Option<String>,
     meta: BTreeMap<String, ScxStatsMeta>,
     ops: BTreeMap<String, Arc<Mutex<ScxStatsOps<Req, Res>>>>,
 }
@@ -438,6 +439,7 @@ where
             stats_path: PathBuf::from("stats"),
             path: None,
             data: Arc::new(Mutex::new(ScxStatsServerData {
+                top: None,
                 meta: BTreeMap::new(),
                 ops: BTreeMap::new(),
             })),
@@ -448,11 +450,14 @@ where
     }
 
     pub fn add_meta(self, meta: ScxStatsMeta) -> Self {
-        self.data
-            .lock()
-            .unwrap()
-            .meta
-            .insert(meta.name.clone(), meta);
+        let mut data = self.data.lock().unwrap();
+
+        if meta.attrs.top.is_some() && data.top.is_none() {
+            data.top = Some(meta.name.clone());
+        }
+        data.meta.insert(meta.name.clone(), meta);
+
+        drop(data);
         self
     }
 
@@ -501,7 +506,69 @@ where
         self
     }
 
+    fn visit_meta_inner(
+        name: &str,
+        visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
+        meta: &BTreeMap<String, ScxStatsMeta>,
+        visited: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        let m = match meta.get(name) {
+            Some(v) => v,
+            None => bail!("unknown stats meta name {}", name),
+        };
+
+        if !visited.insert(name.into()) {
+            bail!("loop in stats meta detected, {} already nested", name);
+        }
+
+        visit(m)?;
+
+        for (fname, field) in m.fields.iter() {
+            match &field.data {
+                ScxStatsData::Array(ScxStatsKind::Struct(nested)) => {
+                    Self::visit_meta_inner(nested, visit, meta, visited)?
+                }
+                ScxStatsData::Dict {
+                    key: ScxStatsKind::Struct(nested),
+                    datum: _,
+                } => bail!("{}.{} is a dict with struct {} as key", name, fname, nested),
+                ScxStatsData::Dict {
+                    key: _,
+                    datum: ScxStatsKind::Struct(nested),
+                } => Self::visit_meta_inner(nested, visit, meta, visited)?,
+                _ => {}
+            }
+        }
+
+        visited.remove(name);
+        Ok(())
+    }
+
+    fn visit_meta(
+        from: &str,
+        visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
+        meta: &BTreeMap<String, ScxStatsMeta>,
+    ) -> Result<()> {
+        let mut visited = BTreeSet::<String>::new();
+
+        Self::visit_meta_inner(from, visit, meta, &mut visited)
+    }
+
+    fn verify_meta(&self) -> Result<()> {
+        let data = self.data.lock().unwrap();
+
+        if data.top.is_none() {
+            warn!("top-level stats metadata missing");
+            return Ok(());
+        }
+
+        // Null visit checks all nested stats are reacheable without loops.
+        Self::visit_meta(data.top.as_ref().unwrap(), &mut |_| Ok(()), &data.meta)
+    }
+
     pub fn launch(mut self) -> Result<Self> {
+        self.verify_meta()?;
+
         if self.path.is_none() {
             self.path = Some(self.base_path.join(&self.sched_path).join(&self.stats_path));
         }
@@ -534,6 +601,59 @@ where
 
     pub fn channels(&self) -> (Sender<Res>, Receiver<Req>) {
         (self.outer_ch.req.clone(), self.outer_ch.res.clone())
+    }
+
+    pub fn describe_meta<W: Write>(&self, w: &mut W, from: Option<&str>) -> Result<()> {
+        let data = self.data.lock().unwrap();
+        let from = match from {
+            Some(v) => v,
+            None => data
+                .top
+                .as_ref()
+                .ok_or_else(|| anyhow!("don't know where to start "))?,
+        };
+
+        let (mut nwidth, mut fwidth, mut dwidth) = (0usize, 0usize, 0usize);
+
+        Self::visit_meta(
+            from,
+            &mut |m| {
+                nwidth = nwidth.max(m.name.len());
+                (fwidth, dwidth) = m.fields.iter().fold((fwidth, dwidth), |acc, (n, f)| {
+                    (acc.0.max(n.len()), acc.1.max(f.data.to_string().len()))
+                });
+                Ok(())
+            },
+            &data.meta,
+        )?;
+
+        Self::visit_meta(
+            from,
+            &mut |m| {
+                write!(w, "[{:nw$}]", m.name, nw = nwidth)?;
+                if let Some(desc) = &m.attrs.desc {
+                    write!(w, " {}", desc)?;
+                }
+                writeln!(w, "")?;
+
+                for (fname, f) in m.fields.iter() {
+                    write!(
+                        w,
+                        "  {:fw$} {:dw$}",
+                        fname,
+                        f.data.to_string(),
+                        fw = fwidth,
+                        dw = dwidth
+                    )?;
+                    if let Some(desc) = &f.attrs.desc {
+                        write!(w, " {}", desc)?;
+                    }
+                    writeln!(w, "")?;
+                }
+                Ok(())
+            },
+            &data.meta,
+        )
     }
 }
 
