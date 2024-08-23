@@ -172,6 +172,16 @@ impl Cpumask {
         self.mask.count_ones()
     }
 
+    /// Return true if the Cpumask has no bit set, false otherwise.
+    pub fn is_empty(&self) -> bool {
+        self.mask.count_ones() == 0
+    }
+
+    /// Return true if the Cpumask has all bits set, false otherwise.
+    pub fn is_full(&self) -> bool {
+        self.mask.count_ones() == *NR_CPU_IDS
+    }
+
     /// The total size of the cpumask.
     pub fn len(&self) -> usize {
         *NR_CPU_IDS
