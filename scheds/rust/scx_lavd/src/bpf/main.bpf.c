@@ -199,7 +199,6 @@ static volatile u64	nr_cpus_big;
 
 static struct sys_stat	__sys_stats[2];
 static volatile int	__sys_stat_idx;
-static volatile u64	nr_queued_task;
 
 private(LAVD) struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
 private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
@@ -568,6 +567,7 @@ struct sys_stat_ctx {
 	u64		compute_total;
 	u64		load_actual;
 	u64		tot_svc_time;
+	u64		nr_queued_task;
 	u64		load_run_time_ns;
 	s32		max_lat_cri;
 	s32		avg_lat_cri;
@@ -591,7 +591,8 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 
 static void collect_sys_stat(struct sys_stat_ctx *c)
 {
-	int cpu;
+	u64 dsq_id;
+	int cpu, nr;
 
 	bpf_for(cpu, 0, nr_cpus_onln) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
@@ -665,6 +666,12 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		c->idle_total += cpuc->idle_total;
 		cpuc->idle_total = 0;
 	}
+ 
+	bpf_for(dsq_id, 0, LAVD_CPDOM_MAX_NR) {
+		nr = scx_bpf_dsq_nr_queued(dsq_id);
+		if (nr > 0)
+			c->nr_queued_task += nr;
+	}
 }
 
 static void calc_sys_stat(struct sys_stat_ctx *c)
@@ -718,6 +725,9 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 
 	stat_next->avg_svc_time = (c->sched_nr == 0) ? 0 :
 				  c->tot_svc_time / c->sched_nr;
+
+	stat_next->nr_queued_task =
+		calc_avg(stat_cur->nr_queued_task, c->nr_queued_task);
 }
 
 static void do_update_sys_stat(void)
@@ -1040,7 +1050,7 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc,
 	 * The time slice should be short enough to schedule all runnable tasks
 	 * at least once within a targeted latency.
 	 */
-	nr_queued = nr_queued_task + 1;
+	nr_queued = stat_cur->nr_queued_task + 1;
 	slice = (LAVD_TARGETED_LATENCY_NS * stat_cur->nr_active) / nr_queued;
 
 	/*
@@ -1119,6 +1129,7 @@ static void update_stat_for_runnable(struct task_struct *p,
 
 static void advance_cur_logical_clk(struct task_ctx *taskc)
 {
+	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 vlc, clc;
 	u64 nr_queued, delta, new_clk;
 
@@ -1134,7 +1145,7 @@ static void advance_cur_logical_clk(struct task_ctx *taskc)
 	 * Advance the clock up to the task's deadline. When overloaded,
 	 * advance the clock slower so other can jump in the run queue.
 	 */
-	nr_queued = max(nr_queued_task, 1);
+	nr_queued = max(stat_cur->nr_queued_task, 1);
 	delta = (vlc - clc) / nr_queued;
 	new_clk = clc + delta;
 
@@ -1445,9 +1456,8 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
 
 	cpu_id = pick_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
-	if (found_idle) {
+	if (found_idle)
 		return cpu_id;
-	}
 
 	return prev_cpu;
 }
@@ -1822,8 +1832,6 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!cpuc_cur || !cpuc_task || !taskc)
 		return;
 
-	__sync_fetch_and_add(&nr_queued_task, 1);
-
 	/*
 	 * Calculate when a tack can be scheduled.
 	 *
@@ -1902,10 +1910,8 @@ static bool consume_dsq(s32 cpu, u64 dsq_id, u64 now)
 	/*
 	 * Try to consume a task on the associated DSQ.
 	 */
-	if (scx_bpf_consume(dsq_id)) {
-		__sync_fetch_and_add(&nr_queued_task, -1);
+	if (scx_bpf_consume(dsq_id))
 		return true;
-	}
 	return false;
 }
 
