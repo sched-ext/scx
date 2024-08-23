@@ -294,7 +294,13 @@ where
             Ok(())
         })?;
 
+        let mut first = true;
         self.visit_meta(from, &mut |m| {
+            if !first {
+                writeln!(w, "")?;
+            }
+            first = false;
+
             write!(w, "[{:nw$}]", m.name, nw = nwidth)?;
             if let Some(desc) = &m.attrs.desc {
                 write!(w, " {}", desc)?;
