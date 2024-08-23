@@ -23,9 +23,8 @@ gaming, which requires high throughput and low tail latencies.
 
 ## Production Ready?
 
-This scheduler could be used in a production environment where the current code
-is optimized. The current code does not particularly consider multiple NUMA/CCX
-domains, so its scheduling decisions in such hardware would be suboptimal. This
-scheduler currently will mainly perform well on single CCX / single-socket
-hosts.
-
+Yes, scx_lavd should be performant across various CPU architectures, but it
+mainly targets single CCX / single-socket systems. It creates a separate
+scheduling domain per-LLC, per-core type (e.g., P or E core on Intel, big or
+LITTLE on ARM), and per-NUMA domain, so the default balanced profile should be
+performant.
