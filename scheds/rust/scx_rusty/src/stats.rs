@@ -235,10 +235,10 @@ pub fn launch_server() -> Result<ScxStatsServer<StatsCtx, (StatsCtx, ClusterStat
         });
 
     Ok(ScxStatsServer::new()
-        .add_stats_meta(DomainStats::meta())
-        .add_stats_meta(NodeStats::meta())
-        .add_stats_meta(ClusterStats::meta())
-        .add_stats_ops("top", ScxStatsOps { open, close: None })
+        .add_meta(DomainStats::meta())
+        .add_meta(NodeStats::meta())
+        .add_meta(ClusterStats::meta())
+        .add_ops("top", ScxStatsOps { open, close: None })
         .launch()?)
 }
 

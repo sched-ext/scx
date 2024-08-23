@@ -167,8 +167,8 @@ impl<Req, Res> Clone for ChannelPair<Req, Res> {
 }
 
 struct ScxStatsServerData<Req, Res> {
-    stats_meta: BTreeMap<String, ScxStatsMeta>,
-    stats_ops: BTreeMap<String, Arc<Mutex<ScxStatsOps<Req, Res>>>>,
+    meta: BTreeMap<String, ScxStatsMeta>,
+    ops: BTreeMap<String, Arc<Mutex<ScxStatsOps<Req, Res>>>>,
 }
 
 struct ScxStatsServerInner<Req, Res>
@@ -189,17 +189,13 @@ where
 {
     fn new(
         listener: UnixListener,
-        stats_meta: BTreeMap<String, ScxStatsMeta>,
-        stats_ops: BTreeMap<String, Arc<Mutex<ScxStatsOps<Req, Res>>>>,
+        data: Arc<Mutex<ScxStatsServerData<Req, Res>>>,
         inner_ch: ChannelPair<Req, Res>,
         exit: Arc<AtomicBool>,
     ) -> Self {
         Self {
             listener,
-            data: Arc::new(Mutex::new(ScxStatsServerData {
-                stats_meta,
-                stats_ops,
-            })),
+            data,
             inner_ch,
             exit,
         }
@@ -232,7 +228,7 @@ where
                     None => "top",
                 };
 
-                let ops = match data.lock().unwrap().stats_ops.get(target) {
+                let ops = match data.lock().unwrap().ops.get(target) {
                     Some(v) => v.clone(),
                     None => Err(anyhow!("unknown stat target {:?}", req)
                         .context(ScxStatsErrno(libc::EINVAL)))?,
@@ -251,7 +247,7 @@ where
 
                 Self::build_resp(0, &resp)
             }
-            "stats_meta" => Ok(Self::build_resp(0, &data.lock().unwrap().stats_meta)?),
+            "stats_meta" => Ok(Self::build_resp(0, &data.lock().unwrap().meta)?),
             req => Err(anyhow!("unknown command {:?}", req).context(ScxStatsErrno(libc::EINVAL)))?,
         }
     }
@@ -421,8 +417,7 @@ where
     stats_path: PathBuf,
     path: Option<PathBuf>,
 
-    stats_meta_holder: BTreeMap<String, ScxStatsMeta>,
-    stats_ops_holder: BTreeMap<String, Arc<Mutex<ScxStatsOps<Req, Res>>>>,
+    data: Arc<Mutex<ScxStatsServerData<Req, Res>>>,
 
     outer_ch: ChannelPair<Res, Req>,
     inner_ch: Option<ChannelPair<Req, Res>>,
@@ -442,23 +437,30 @@ where
             sched_path: PathBuf::from("root"),
             stats_path: PathBuf::from("stats"),
             path: None,
-
-            stats_meta_holder: BTreeMap::new(),
-            stats_ops_holder: BTreeMap::new(),
-
+            data: Arc::new(Mutex::new(ScxStatsServerData {
+                meta: BTreeMap::new(),
+                ops: BTreeMap::new(),
+            })),
             outer_ch: och,
             inner_ch: Some(ich),
             exit: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    pub fn add_stats_meta(mut self, meta: ScxStatsMeta) -> Self {
-        self.stats_meta_holder.insert(meta.name.clone(), meta);
+    pub fn add_meta(self, meta: ScxStatsMeta) -> Self {
+        self.data
+            .lock()
+            .unwrap()
+            .meta
+            .insert(meta.name.clone(), meta);
         self
     }
 
-    pub fn add_stats_ops(mut self, name: &str, ops: ScxStatsOps<Req, Res>) -> Self {
-        self.stats_ops_holder
+    pub fn add_ops(self, name: &str, ops: ScxStatsOps<Req, Res>) -> Self {
+        self.data
+            .lock()
+            .unwrap()
+            .ops
             .insert(name.to_string(), Arc::new(Mutex::new(ops)));
         self
     }
@@ -476,7 +478,7 @@ where
             close: None,
         };
 
-        self.add_stats_ops(name, ops)
+        self.add_ops(name, ops)
     }
 
     pub fn set_base_path<P: AsRef<Path>>(mut self, path: P) -> Self {
@@ -519,15 +521,9 @@ where
         let listener =
             UnixListener::bind(path).with_context(|| format!("creating UNIX socket {:?}", path))?;
 
-        let mut stats_meta = BTreeMap::new();
-        let mut stats = BTreeMap::new();
-        std::mem::swap(&mut stats_meta, &mut self.stats_meta_holder);
-        std::mem::swap(&mut stats, &mut self.stats_ops_holder);
-
         let inner = ScxStatsServerInner::new(
             listener,
-            stats_meta,
-            stats,
+            self.data.clone(),
             self.inner_ch.take().unwrap(),
             self.exit.clone(),
         );

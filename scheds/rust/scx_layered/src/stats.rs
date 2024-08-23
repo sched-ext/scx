@@ -464,9 +464,9 @@ pub fn launch_server() -> Result<ScxStatsServer<StatsReq, StatsRes>> {
     });
 
     Ok(ScxStatsServer::new()
-        .add_stats_meta(LayerStats::meta())
-        .add_stats_meta(SysStats::meta())
-        .add_stats_ops(
+        .add_meta(LayerStats::meta())
+        .add_meta(SysStats::meta())
+        .add_ops(
             "top",
             ScxStatsOps {
                 open,
@@ -477,7 +477,7 @@ pub fn launch_server() -> Result<ScxStatsServer<StatsReq, StatsRes>> {
 }
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
-    scx_utils::monitor_stats::<SysStats>(
+     scx_utils::monitor_stats::<SysStats>(
         &vec![],
         intv,
         || shutdown.load(Ordering::Relaxed),

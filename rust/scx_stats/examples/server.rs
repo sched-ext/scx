@@ -49,8 +49,8 @@ fn main() {
     // and receives the formatted string just for demonstration.
     let server = ScxStatsServer::<ThreadId, String>::new()
         .set_path(&path)
-        .add_stats_meta(ClusterStats::meta())
-        .add_stats_meta(DomainStats::meta())
+        .add_meta(ClusterStats::meta())
+        .add_meta(DomainStats::meta())
         .add_stats(
             "top",
             Box::new(move |_args, (tx, rx)| {
