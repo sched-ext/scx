@@ -56,35 +56,44 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 /// See the more detailed overview of the LAVD design at main.bpf.c.
 #[derive(Debug, Parser)]
 struct Opts {
-    /// Run in a performance mode to get maximum performance
+    /// Run in performance mode to get maximum performance.
     #[clap(long = "performance", action = clap::ArgAction::SetTrue)]
     performance: bool,
 
-    /// Run in a power-save mode to minimize power consumption
+    /// Run in powersave mode to minimize power consumption.
     #[clap(long = "powersave", action = clap::ArgAction::SetTrue)]
     powersave: bool,
 
-    /// Run in a balanced mode aiming for sweetspot between power and performance (default)
+    /// Run in balanced mode aiming for sweetspot between power and performance (default).
     #[clap(long = "balanced", action = clap::ArgAction::SetTrue)]
     balanced: bool,
 
-    /// Disable core compaction, which uses minimum CPUs for power saving, and always use all the online CPUs.
+    /// The following 4 options are set automatically by the power mode (above), but they can be
+    /// set independently if desired:
+
+    /// Disable core compaction and schedule tasks across all online CPUs. Core compaction attempts
+    /// to keep idle CPUs idle in favor of scheduling tasks on CPUs that are already
+    /// awake. See main.bpf.c for more info.
     #[clap(long = "no-core-compaction", action = clap::ArgAction::SetTrue)]
     no_core_compaction: bool,
 
-    /// Use SMT logical cores before using other physcial cores in core compaction
+    /// Schedule tasks on SMT siblings before using other physcial cores when core compaction is
+    /// enabled.
     #[clap(long = "prefer-smt-core", action = clap::ArgAction::SetTrue)]
     prefer_smt_core: bool,
 
-    /// Use little (effiency) cores before using big (performance) cores in core compaction
+    /// Schedule tasks on little (efficiency) cores before big (performance) cores when core compaction is
+    /// enabled.
     #[clap(long = "prefer-little-core", action = clap::ArgAction::SetTrue)]
     prefer_little_core: bool,
 
-    /// Disable frequency scaling by scx_lavd
+    /// Disable controlling the CPU frequency. In order to improve latency and responsiveness of
+    /// performance-critical tasks, scx_lavd increases the CPU frequency even if CPU usage is low.
+    /// See main.bpf.c for more info.
     #[clap(long = "no-freq-scaling", action = clap::ArgAction::SetTrue)]
     no_freq_scaling: bool,
 
-    /// The number of scheduling samples to be reported every second
+    /// The number of scheduling samples to be reported every second.
     /// (default: 1, 0 = disable logging)
     #[clap(short = 's', long, default_value = "1")]
     nr_sched_samples: u64,
