@@ -195,9 +195,13 @@ lazy_static::lazy_static! {
 /// - NiceEquals: Matches if the task's nice value is exactly equal to
 ///   the pattern.
 ///
-/// - UIDEquals: Matches if the task's effective user id matches the pattern.
+/// - UIDEquals: Matches if the task's effective user id matches the value
 ///
-/// - GIDEquals: Matches if the task's effective group id matches the pattern.
+/// - GIDEquals: Matches if the task's effective group id matches the value.
+///
+/// - PIDEquals: Matches if the task's pid matches the value.
+///
+/// - PPIDEquals: Matches if the task's ppid matches the value.
 ///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
@@ -423,6 +427,8 @@ enum LayerMatch {
     NiceEquals(i32),
     UIDEquals(u32),
     GIDEquals(u32),
+    PIDEquals(u32),
+    PPIDEquals(u32),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1415,6 +1421,14 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                         LayerMatch::GIDEquals(group_id) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_GROUP_ID_EQUALS as i32;
                             mt.group_id = *group_id;
+                        }
+                        LayerMatch::PIDEquals(pid) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_PID_EQUALS as i32;
+                            mt.pid = *pid;
+                        }
+                        LayerMatch::PPIDEquals(ppid) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_PPID_EQUALS as i32;
+                            mt.ppid = *ppid;
                         }
                     }
                 }
