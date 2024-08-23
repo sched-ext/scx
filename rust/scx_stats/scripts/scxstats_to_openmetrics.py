@@ -84,7 +84,7 @@ def update_om_metrics(resp, omid, labels, meta_db, om_metrics):
             # Update known metrics.
             dbg(f'updating {k_omid} {labels} to {v}')
             if len(labels):
-                om_metrics[k_omid].labels(labels).set(v)
+                om_metrics[k_omid].labels(*labels).set(v)
             else:
                 om_metrics[k_omid].set(v)
         else:
@@ -123,6 +123,9 @@ def connect_and_monitor(args):
     if verbose:
         dbg('dumping meta_db:')
         pprint(meta_db)
+
+    if top_sname not in meta_db:
+        raise Exception(f'top-level statistics struct not found among {meta_db.keys()}')
 
     # Instantiate OpenMetrics Gauges.
     registry = CollectorRegistry()
@@ -166,7 +169,7 @@ def main():
         try:
             connect_and_monitor(args)
         except Exception as e:
-            if type(e) is not type(last_e):
+            if verbose or f'{e}' != f'{last_e}':
                 info(f'{e}, retrying...')
                 last_e = e
             time.sleep(1)
