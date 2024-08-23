@@ -1,6 +1,6 @@
 [package]
 name = "scx_utils"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 authors = ["Tejun Heo <tj@kernel.org>"]
 license = "GPL-2.0-only"
@@ -21,7 +21,7 @@ libbpf-rs = "0.24.1"
 log = "0.4.17"
 paste = "1.0"
 regex = "1.10"
-scx_stats = { path = "../scx_stats", version = "0.2.0" }
+scx_stats = { path = "../scx_stats", version = "1.0.3" }
 serde = { version = "1.0", features = ["derive"] }
 sscanf = "0.4"
 tar = "0.4"

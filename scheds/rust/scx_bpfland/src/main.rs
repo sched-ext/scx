@@ -54,11 +54,12 @@ const SCHEDULER_NAME: &'static str = "scx_bpfland";
 fn get_primary_cpus(powersave: bool) -> std::io::Result<Vec<usize>> {
     let topo = Topology::new().unwrap();
 
-    // Iterate over each CPU directory and collect CPU ID and its max frequency.
+    // Iterate over each CPU directory and collect CPU ID and its base operational frequency to
+    // distinguish between fast and slow cores.
     let mut cpu_freqs = Vec::new();
     for core in topo.cores().into_iter() {
         for (cpu_id, cpu) in core.cpus() {
-            cpu_freqs.push((*cpu_id, cpu.max_freq()));
+            cpu_freqs.push((*cpu_id, cpu.base_freq()));
         }
     }
     if cpu_freqs.is_empty() {
@@ -327,7 +328,7 @@ impl<'a> Scheduler<'a> {
         let topo = Topology::new().unwrap();
 
         // Initialize the primary scheduling domain (based on the --primary-domain option).
-        Self::init_primary_domain(&mut skel, &topo, &opts.primary_domain)?;
+        Self::init_primary_domain(&mut skel, &opts.primary_domain)?;
 
         // Initialize L2 cache domains.
         if !opts.disable_l2 {
@@ -382,7 +383,6 @@ impl<'a> Scheduler<'a> {
 
     fn init_primary_domain(
         skel: &mut BpfSkel<'_>,
-        topo: &Topology,
         primary_domain: &Cpumask,
     ) -> Result<()> {
         info!("primary CPU domain = 0x{:x}", primary_domain);

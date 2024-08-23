@@ -65,8 +65,8 @@ pub use topology::Cpu;
 pub use topology::Node;
 pub use topology::Topology;
 pub use topology::TopologyMap;
-pub use topology::NR_CPU_IDS;
 pub use topology::NR_CPUS_POSSIBLE;
+pub use topology::NR_CPU_IDS;
 
 mod cpumask;
 pub use cpumask::Cpumask;

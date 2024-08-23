@@ -1032,7 +1032,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rusty"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats"
-version = "0.2.0"
+version = "1.0.3"
 dependencies = [
  "anyhow",
  "crossbeam",
@@ -1069,7 +1069,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats_derive"
-version = "0.2.0"
+version = "1.0.3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1080,7 +1080,7 @@ dependencies = [
 
 [[package]]
 name = "scx_utils"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "anyhow",
  "bindgen",

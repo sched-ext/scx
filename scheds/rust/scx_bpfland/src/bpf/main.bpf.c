@@ -241,6 +241,15 @@ struct task_ctx *lookup_task_ctx(const struct task_struct *p)
 }
 
 /*
+ * Return true if interactive tasks classification via voluntary context
+ * switches is enabled, false otherwise.
+ */
+static bool is_nvcsw_enabled(void)
+{
+	return !!nvcsw_max_thresh;
+}
+
+/*
  * Return true if the task is interactive, false otherwise.
  */
 static bool is_task_interactive(struct task_struct *p)
@@ -259,15 +268,6 @@ static bool is_task_interactive(struct task_struct *p)
 static inline bool is_kthread(const struct task_struct *p)
 {
 	return !!(p->flags & PF_KTHREAD);
-}
-
-/*
- * Return true if interactive tasks classification via voluntary context
- * switches is enabled, false otherwise.
- */
-static bool is_nvcsw_enabled(void)
-{
-	return !!nvcsw_max_thresh;
 }
 
 /*
@@ -413,7 +413,6 @@ static u64 cpu_to_dsq(s32 cpu)
 static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 {
 	struct bpf_cpumask *offline;
-	u64 slice = task_slice(p);
 	u64 vtime = task_vtime(p);
 	u64 dsq_id = cpu_to_dsq(cpu);
 
@@ -424,7 +423,7 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 		return -EINVAL;
 
-	scx_bpf_dispatch_vtime(p, dsq_id, slice, vtime, enq_flags);
+	scx_bpf_dispatch_vtime(p, dsq_id, SCX_SLICE_DFL, vtime, enq_flags);
 
 	/*
 	 * If the CPU has gone offline notify that the task needs to be
@@ -699,6 +698,9 @@ static void handle_sync_wakeup(struct task_struct *p)
 {
 	struct task_ctx *tctx;
 
+	if (!is_nvcsw_enabled())
+		return;
+
 	/*
 	 * If we are waking up a task immediately promote it as interactive, so
 	 * that it can be dispatched as soon as possible on the first CPU
@@ -722,7 +724,6 @@ static void handle_sync_wakeup(struct task_struct *p)
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	u64 vtime = task_vtime(p);
-	u64 slice = task_slice(p);
 
 	/*
 	 * If the system is saturated and we couldn't dispatch directly in
@@ -754,10 +755,12 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * and simply rely on the vruntime logic.
 	 */
 	if (is_task_interactive(p)) {
-		scx_bpf_dispatch_vtime(p, prio_dsq_id, slice, vtime, enq_flags);
+		scx_bpf_dispatch_vtime(p, prio_dsq_id, SCX_SLICE_DFL,
+				       vtime, enq_flags);
 		__sync_fetch_and_add(&nr_prio_dispatches, 1);
 	} else {
-		scx_bpf_dispatch_vtime(p, shared_dsq_id, slice, vtime, enq_flags);
+		scx_bpf_dispatch_vtime(p, shared_dsq_id, SCX_SLICE_DFL,
+				       vtime, enq_flags);
 		__sync_fetch_and_add(&nr_shared_dispatches, 1);
 	}
 }
@@ -900,7 +903,22 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * Lastly, consume regular tasks from the shared DSQ.
 	 */
-	consume_regular_task(now);
+	if (consume_regular_task(now))
+		return;
+
+	/*
+	 * If the current task expired its time slice, but no other task wants
+	 * to run, simply replenish its time slice and let it run for another
+	 * round on the same CPU.
+	 *
+	 * Note that bpfland_stopping() won't be called if we replenish the
+	 * time slice here. As a result, the nvcsw statistics won't be updated,
+	 * but this isn't an issue, because these statistics are only relevant
+	 * when the system is overloaded, which isn't the case when there are
+	 * no other tasks to run.
+	 */
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
+		prev->scx.slice = task_slice(prev);
 }
 
 void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
@@ -910,11 +928,10 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 		vtime_now = p->scx.dsq_vtime;
 
 	/*
-	 * Ensure time slice never exceeds slice_ns when a task is started on a
-	 * CPU.
+	 * Refresh task's time slice immediately before it starts to run on its
+	 * assigned CPU.
 	 */
-	if (p->scx.slice > slice_ns)
-		p->scx.slice = slice_ns;
+	p->scx.slice = task_slice(p);
 
 	/* Update CPU interactive state */
 	if (is_task_interactive(p))
@@ -933,7 +950,8 @@ static void update_task_interactive(struct task_ctx *tctx)
 	 * (nvcsw_avg_thresh) it is classified as interactive, otherwise the
 	 * task is classified as regular.
 	 */
-	tctx->is_interactive = tctx->avg_nvcsw >= nvcsw_avg_thresh;
+	if (is_nvcsw_enabled())
+		tctx->is_interactive = tctx->avg_nvcsw >= nvcsw_avg_thresh;
 }
 
 /*
