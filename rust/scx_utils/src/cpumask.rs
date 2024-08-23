@@ -113,6 +113,10 @@ impl Cpumask {
         Ok(Self { mask })
     }
 
+    pub fn from_vec(vec: Vec<u64>) -> Self {
+	Self { mask: BitVec::from_vec(vec) }
+    }
+
     /// Return a slice of u64's whose bits reflect the Cpumask.
     pub fn as_raw_slice(&self) -> &[u64] {
         self.mask.as_raw_slice()

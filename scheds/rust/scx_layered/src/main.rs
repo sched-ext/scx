@@ -22,7 +22,6 @@ use std::ops::Sub;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::thread::spawn;
 use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::Instant;
@@ -305,7 +304,7 @@ lazy_static::lazy_static! {
 /// Monitoring Statistics
 /// =====================
 ///
-/// Run with `--monitor INTERVAL` added to enable stats monitoring. There is
+/// Run with `--stats INTERVAL` added to enable stats monitoring. There is
 /// also scx_stat server listening on /var/run/scx/root/stat and you can
 /// monitor statistics by running `scx_layered --monitor INTERVAL`
 /// separately.
@@ -404,14 +403,18 @@ struct Opts {
     #[clap(short = 'e', long)]
     example: Option<String>,
 
+    /// Enable stats monitoring with the specified interval.
+    #[clap(long)]
+    stats: Option<f64>,
+
+    /// Run in stats monitoring mode with the specified interval. Scheduler
+    /// is not launched.
+    #[clap(long)]
+    monitor: Option<f64>,
+
     /// Run with example layer specifications (useful for e.g. CI pipelines)
     #[clap(long)]
     run_example: bool,
-
-    /// Enable stats monitoring with the specified interval. If no layer
-    /// specs are specified, run in monitor mode.
-    #[clap(long)]
-    monitor: Option<f64>,
 
     /// Layer specification. See --help.
     specs: Vec<String>,
@@ -1067,7 +1070,7 @@ impl Layer {
         cpu_pool: &CpuPool,
         name: &str,
         kind: LayerKind,
-        topo: &Topology
+        topo: &Topology,
     ) -> Result<Self> {
         let mut cpus = bitvec![0; cpu_pool.nr_cpus];
         cpus.fill(false);
@@ -1141,7 +1144,13 @@ impl Layer {
         }
 
         let is_left = idx % 2 == 0;
-        let rot_by = |idx, len| -> usize { if idx <= len { idx } else { idx % len } };
+        let rot_by = |idx, len| -> usize {
+            if idx <= len {
+                idx
+            } else {
+                idx % len
+            }
+        };
 
         let mut core_order = vec![];
         for i in 0..topo.cores().len() {
@@ -1582,7 +1591,13 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         let mut layers = vec![];
         for (idx, spec) in layer_specs.iter().enumerate() {
-            layers.push(Layer::new(idx, &cpu_pool, &spec.name, spec.kind.clone(), &topo)?);
+            layers.push(Layer::new(
+                idx,
+                &cpu_pool,
+                &spec.name,
+                spec.kind.clone(),
+                &topo,
+            )?);
         }
 
         // Other stuff.
@@ -1637,7 +1652,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
     fn refresh_cpumasks(&mut self) -> Result<()> {
         let mut updated = false;
-	let num_layers = self.layers.len();
+        let num_layers = self.layers.len();
 
         for idx in 0..num_layers {
             match self.layers[idx].kind {
@@ -1939,6 +1954,17 @@ fn main() -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
+    if let Some(intv) = opts.monitor.or(opts.stats) {
+        let shutdown_copy = shutdown.clone();
+        let jh = std::thread::spawn(move || {
+            stats::monitor(Duration::from_secs_f64(intv), shutdown_copy).unwrap()
+        });
+        if opts.monitor.is_some() {
+            let _ = jh.join();
+            return Ok(());
+        }
+    }
+
     if let Some(path) = &opts.example {
         write_example_file(path)?;
         return Ok(());
@@ -1954,16 +1980,6 @@ fn main() -> Result<()> {
             &mut LayerSpec::parse(input)
                 .context(format!("Failed to parse specs[{}] ({:?})", idx, input))?,
         );
-    }
-
-    if let Some(intv) = opts.monitor {
-        let shutdown_copy = shutdown.clone();
-        let jh =
-            spawn(move || stats::monitor(Duration::from_secs_f64(intv), shutdown_copy).unwrap());
-        if layer_config.specs.len() == 0 {
-            let _ = jh.join();
-            return Ok(());
-        }
     }
 
     debug!("specs={}", serde_json::to_string_pretty(&layer_config)?);

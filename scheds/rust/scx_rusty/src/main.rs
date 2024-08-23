@@ -14,14 +14,20 @@ use tuner::Tuner;
 
 pub mod load_balance;
 use load_balance::LoadBalancer;
-use load_balance::NumaStat;
 
+mod stats;
+use stats::ClusterStats;
+use stats::NodeStats;
+
+use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 #[macro_use]
 extern crate static_assertions;
@@ -32,19 +38,14 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use log::info;
-use metrics::counter;
-use metrics::gauge;
-use metrics::histogram;
-use metrics::Counter;
-use metrics::Gauge;
-use metrics::Histogram;
-use metrics_exporter_prometheus::PrometheusBuilder;
+use scx_stats::ScxStatsServer;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
@@ -54,10 +55,8 @@ use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cpumask;
-use scx_utils::LogRecorderBuilder;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
-use scx_utils::NR_CPUS_POSSIBLE;
 use scx_utils::NR_CPU_IDS;
 
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
@@ -103,7 +102,7 @@ struct Opts {
     #[clap(short = 'o', long, default_value = "1000")]
     slice_us_overutil: u64,
 
-    /// Monitoring and load balance interval in seconds.
+    /// Load balance interval in seconds.
     #[clap(short = 'i', long, default_value = "2.0")]
     interval: f64,
 
@@ -200,6 +199,15 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     mempolicy_affinity: bool,
 
+    /// Enable stats monitoring with the specified interval.
+    #[clap(long)]
+    stats: Option<f64>,
+
+    /// Run in stats monitoring mode with the specified interval. Scheduler
+    /// is not launched.
+    #[clap(long)]
+    monitor: Option<f64>,
+
     /// Exit debug dump buffer length. 0 indicates default.
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
@@ -212,18 +220,34 @@ struct Opts {
     /// Print version and exit.
     #[clap(long)]
     version: bool,
-
-    /// Enable the Prometheus endpoint for metrics on port 9000.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    enable_prometheus: bool,
 }
 
-fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
-    reader
+fn read_cpu_busy_and_total(reader: &procfs::ProcReader) -> Result<(u64, u64)> {
+    let cs = reader
         .read_stat()
         .context("Failed to read procfs")?
         .total_cpu
-        .ok_or_else(|| anyhow!("Could not read total cpu stat in proc"))
+        .ok_or_else(|| anyhow!("Could not read total cpu stat in proc"))?;
+
+    Ok(match cs {
+        procfs::CpuStat {
+            user_usec: Some(user),
+            nice_usec: Some(nice),
+            system_usec: Some(system),
+            idle_usec: Some(idle),
+            iowait_usec: Some(iowait),
+            irq_usec: Some(irq),
+            softirq_usec: Some(softirq),
+            stolen_usec: Some(stolen),
+            guest_usec: _,
+            guest_nice_usec: _,
+        } => {
+            let busy = user + system + nice + irq + softirq + stolen;
+            let total = busy + idle + iowait;
+            (busy, total)
+        }
+        _ => bail!("Some procfs stats are not populated!"),
+    })
 }
 
 pub fn sub_or_zero(curr: &u64, prev: &u64) -> u64 {
@@ -234,56 +258,70 @@ pub fn sub_or_zero(curr: &u64, prev: &u64) -> u64 {
     }
 }
 
-struct Metrics {
-    wsync: Counter,
-    wsync_prev_idle: Counter,
-    prev_idle: Counter,
-    greedy_idle: Counter,
-    pinned: Counter,
-    direct_dispatch: Counter,
-    direct_greedy: Counter,
-    direct_greedy_far: Counter,
-    dsq: Counter,
-    greedy_local: Counter,
-    greedy_xnuma: Counter,
-    kick_greedy: Counter,
-    repatriate: Counter,
-    dl_clamped: Counter,
-    dl_preset: Counter,
-    task_errors: Counter,
-    lb_data_errors: Counter,
-    load_balance: Counter,
-    slice_length: Gauge,
-    cpu_busy_pct: Histogram,
-    processing_duration: Histogram,
+#[derive(Clone, Debug)]
+struct StatsCtx {
+    cpu_busy: u64,
+    cpu_total: u64,
+    bpf_stats: Vec<u64>,
+    time_used: Duration,
 }
 
-impl Metrics {
-    fn new() -> Self {
+impl StatsCtx {
+    fn read_bpf_stats(skel: &BpfSkel) -> Result<Vec<u64>> {
+        let stats_map = &skel.maps.stats;
+        let mut stats: Vec<u64> = Vec::new();
+
+        for stat in 0..bpf_intf::stat_idx_RUSTY_NR_STATS {
+            let cpu_stat_vec = stats_map
+                .lookup_percpu(&stat.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
+                .with_context(|| format!("Failed to lookup stat {}", stat))?
+                .expect("per-cpu stat should exist");
+            let sum = cpu_stat_vec
+                .iter()
+                .map(|val| {
+                    u64::from_ne_bytes(
+                        val.as_slice()
+                            .try_into()
+                            .expect("Invalid value length in stat map"),
+                    )
+                })
+                .sum();
+            stats.push(sum);
+        }
+        Ok(stats)
+    }
+
+    fn blank() -> Self {
         Self {
-            wsync: counter!("dispatched_tasks_total", "type" => "wsync"),
-            wsync_prev_idle: counter!("dispatched_tasks_total", "type" => "wsync_prev_idle"),
-            prev_idle: counter!("dispatched_tasks_total", "type" => "prev_idle"),
-            greedy_idle: counter!("dispatched_tasks_total", "type" => "greedy_idle"),
-            pinned: counter!("dispatched_tasks_total", "type" => "pinned"),
-            direct_dispatch: counter!("dispatched_tasks_total", "type" => "direct_dispatch"),
-            direct_greedy: counter!("dispatched_tasks_total", "type" => "direct_greedy"),
-            direct_greedy_far: counter!("dispatched_tasks_total", "type" => "direct_greedy_far"),
-            dsq: counter!("dispatched_tasks_total", "type" => "dsq"),
-            greedy_local: counter!("dispatched_tasks_total", "type" => "greedy_local"),
-            greedy_xnuma: counter!("dispatched_tasks_total", "type" => "greedy_xnuma"),
-            kick_greedy: counter!("kick_greedy_total"),
-            repatriate: counter!("repatriate_total"),
-            dl_clamped: counter!("dl_clamped_total"),
-            dl_preset: counter!("dl_preset_total"),
-            task_errors: counter!("task_errors_total"),
-            lb_data_errors: counter!("lb_data_errors_total"),
-            load_balance: counter!("load_balance_total"),
+            cpu_busy: 0,
+            cpu_total: 0,
+            bpf_stats: vec![0u64; bpf_intf::stat_idx_RUSTY_NR_STATS as usize],
+            time_used: Duration::default(),
+        }
+    }
 
-            slice_length: gauge!("slice_length_us"),
+    fn new(skel: &BpfSkel, proc_reader: &procfs::ProcReader, time_used: Duration) -> Result<Self> {
+        let (cpu_busy, cpu_total) = read_cpu_busy_and_total(proc_reader)?;
 
-            cpu_busy_pct: histogram!("cpu_busy_pct"),
-            processing_duration: histogram!("processing_duration_us"),
+        Ok(Self {
+            cpu_busy,
+            cpu_total,
+            bpf_stats: Self::read_bpf_stats(skel)?,
+            time_used,
+        })
+    }
+
+    fn delta(&self, rhs: &Self) -> Self {
+        Self {
+            cpu_busy: sub_or_zero(&self.cpu_busy, &rhs.cpu_busy),
+            cpu_total: sub_or_zero(&self.cpu_total, &rhs.cpu_total),
+            bpf_stats: self
+                .bpf_stats
+                .iter()
+                .zip(rhs.bpf_stats.iter())
+                .map(|(lhs, rhs)| sub_or_zero(&lhs, &rhs))
+                .collect(),
+            time_used: self.time_used - rhs.time_used,
         }
     }
 }
@@ -301,14 +339,13 @@ struct Scheduler<'a> {
 
     proc_reader: procfs::ProcReader,
 
-    prev_at: Instant,
-    prev_total_cpu: procfs::CpuStat,
-
+    lb_at: SystemTime,
+    lb_stats: BTreeMap<usize, NodeStats>,
+    time_used: Duration,
     nr_lb_data_errors: u64,
 
     tuner: Tuner,
-
-    metrics: Metrics,
+    stats_server: ScxStatsServer<StatsCtx, (StatsCtx, ClusterStats)>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -375,7 +412,7 @@ impl<'a> Scheduler<'a> {
             let node_cpumask_slice = &mut skel.maps.rodata_data.numa_cpumasks[numa];
             let (left, _) = node_cpumask_slice.split_at_mut(raw_numa_slice.len());
             left.clone_from_slice(raw_numa_slice);
-            info!("NUMA[{:02}] mask= {}", numa, numa_mask);
+            info!("NODE[{:02}] mask= {}", numa, numa_mask);
 
             for dom in node_domains.iter() {
                 let raw_dom_slice = dom.mask_slice();
@@ -385,7 +422,7 @@ impl<'a> Scheduler<'a> {
                 skel.maps.rodata_data.dom_numa_id_map[dom.id()] =
                     numa.try_into().expect("NUMA ID could not fit into 32 bits");
 
-                info!("  DOM[{:02}] mask= {}", dom.id(), dom.mask());
+                info!(" DOM[{:02}] mask= {}", dom.id(), dom.mask());
             }
         }
 
@@ -406,11 +443,12 @@ impl<'a> Scheduler<'a> {
         // Attach.
         let mut skel = scx_ops_load!(skel, rusty, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, rusty)?);
-        info!("Rusty scheduler started!");
+        let stats_server = stats::launch_server()?;
+
+        info!("Rusty scheduler started! Run `scx_rusty --monitor` for metrics.");
 
         // Other stuff.
         let proc_reader = procfs::ProcReader::new();
-        let prev_total_cpu = read_total_cpu(&proc_reader)?;
 
         Ok(Self {
             skel,
@@ -424,9 +462,9 @@ impl<'a> Scheduler<'a> {
             dom_group: domains.clone(),
             proc_reader,
 
-            prev_at: Instant::now(),
-            prev_total_cpu,
-
+            lb_at: SystemTime::now(),
+            lb_stats: BTreeMap::new(),
+            time_used: Duration::default(),
             nr_lb_data_errors: 0,
 
             tuner: Tuner::new(
@@ -436,161 +474,80 @@ impl<'a> Scheduler<'a> {
                 opts.slice_us_underutil * 1000,
                 opts.slice_us_overutil * 1000,
             )?,
-
-            metrics: Metrics::new(),
+            stats_server,
         })
     }
 
-    fn get_cpu_busy(&mut self) -> Result<f64> {
-        let total_cpu = read_total_cpu(&self.proc_reader)?;
-        let busy = match (&self.prev_total_cpu, &total_cpu) {
-            (
-                procfs::CpuStat {
-                    user_usec: Some(prev_user),
-                    nice_usec: Some(prev_nice),
-                    system_usec: Some(prev_system),
-                    idle_usec: Some(prev_idle),
-                    iowait_usec: Some(prev_iowait),
-                    irq_usec: Some(prev_irq),
-                    softirq_usec: Some(prev_softirq),
-                    stolen_usec: Some(prev_stolen),
-                    guest_usec: _,
-                    guest_nice_usec: _,
-                },
-                procfs::CpuStat {
-                    user_usec: Some(curr_user),
-                    nice_usec: Some(curr_nice),
-                    system_usec: Some(curr_system),
-                    idle_usec: Some(curr_idle),
-                    iowait_usec: Some(curr_iowait),
-                    irq_usec: Some(curr_irq),
-                    softirq_usec: Some(curr_softirq),
-                    stolen_usec: Some(curr_stolen),
-                    guest_usec: _,
-                    guest_nice_usec: _,
-                },
-            ) => {
-                let idle_usec = sub_or_zero(curr_idle, prev_idle);
-                let iowait_usec = sub_or_zero(curr_iowait, prev_iowait);
-                let user_usec = sub_or_zero(curr_user, prev_user);
-                let system_usec = sub_or_zero(curr_system, prev_system);
-                let nice_usec = sub_or_zero(curr_nice, prev_nice);
-                let irq_usec = sub_or_zero(curr_irq, prev_irq);
-                let softirq_usec = sub_or_zero(curr_softirq, prev_softirq);
-                let stolen_usec = sub_or_zero(curr_stolen, prev_stolen);
+    fn cluster_stats(&self, sc: &StatsCtx, node_stats: BTreeMap<usize, NodeStats>) -> ClusterStats {
+        let stat = |idx| sc.bpf_stats[idx as usize];
+        let total = stat(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_SYNC_PREV_IDLE)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_PINNED)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_DISPATCH)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY_FAR)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL)
+            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
+        let stat_pct = |idx| stat(idx) as f64 / total as f64 * 100.0;
 
-                let busy_usec =
-                    user_usec + system_usec + nice_usec + irq_usec + softirq_usec + stolen_usec;
-                let total_usec = idle_usec + busy_usec + iowait_usec;
-                busy_usec as f64 / total_usec as f64
-            }
-            _ => {
-                bail!("Some procfs stats are not populated!");
-            }
+        let cpu_busy = if sc.cpu_total != 0 {
+            (sc.cpu_busy as f64 / sc.cpu_total as f64) * 100.0
+        } else {
+            0.0
         };
 
-        self.prev_total_cpu = total_cpu;
-        Ok(busy)
-    }
+        ClusterStats {
+            at_us: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_micros()
+                .try_into()
+                .unwrap(),
+            lb_at_us: self
+                .lb_at
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_micros()
+                .try_into()
+                .unwrap(),
+            total,
+            slice_us: self.tuner.slice_ns / 1000,
 
-    fn read_bpf_stats(&mut self) -> Result<Vec<u64>> {
-        let stats_map = &mut self.skel.maps.stats;
-        let mut stats: Vec<u64> = Vec::new();
-        let zero_vec = vec![vec![0u8; stats_map.value_size() as usize]; *NR_CPUS_POSSIBLE];
+            cpu_busy,
+            load: node_stats.iter().map(|(_k, v)| v.load).sum::<f64>(),
+            nr_migrations: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
 
-        for stat in 0..bpf_intf::stat_idx_RUSTY_NR_STATS {
-            let cpu_stat_vec = stats_map
-                .lookup_percpu(&stat.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
-                .with_context(|| format!("Failed to lookup stat {}", stat))?
-                .expect("per-cpu stat should exist");
-            let sum = cpu_stat_vec
-                .iter()
-                .map(|val| {
-                    u64::from_ne_bytes(
-                        val.as_slice()
-                            .try_into()
-                            .expect("Invalid value length in stat map"),
-                    )
-                })
-                .sum();
-            stats_map
-                .update_percpu(&stat.to_ne_bytes(), &zero_vec, libbpf_rs::MapFlags::ANY)
-                .context("Failed to zero stat")?;
-            stats.push(sum);
-        }
-        Ok(stats)
-    }
+            task_get_err: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR as usize],
+            lb_data_err: self.nr_lb_data_errors,
+            time_used: sc.time_used.as_secs_f64(),
 
-    fn report(&self, bpf_stats: &[u64], lb_stats: &[NumaStat]) {
-        let stat = |idx| bpf_stats[idx as usize];
+            sync_prev_idle: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_SYNC_PREV_IDLE),
+            wake_sync: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC),
+            prev_idle: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE),
+            greedy_idle: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE),
+            pinned: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PINNED),
+            direct: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_DISPATCH),
+            greedy: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY),
+            greedy_far: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY_FAR),
+            dsq_dispatch: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH),
+            greedy_local: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL),
+            greedy_xnuma: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA),
+            kick_greedy: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_KICK_GREEDY),
+            repatriate: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_REPATRIATE),
+            dl_clamp: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_CLAMP),
+            dl_preset: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_PRESET),
 
-        let wsync = stat(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC);
-        let wsync_prev_idle = stat(bpf_intf::stat_idx_RUSTY_STAT_SYNC_PREV_IDLE);
-        let prev_idle = stat(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE);
-        let greedy_idle = stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE);
-        let pinned = stat(bpf_intf::stat_idx_RUSTY_STAT_PINNED);
-        let direct_dispatch = stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_DISPATCH);
-        let direct_greedy = stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY);
-        let direct_greedy_far = stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY_FAR);
-        let dsq = stat(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH);
-        let greedy_local = stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL);
-        let greedy_xnuma = stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
+            direct_greedy_cpus: self.tuner.direct_greedy_mask.as_raw_slice().to_owned(),
+            kick_greedy_cpus: self.tuner.kick_greedy_mask.as_raw_slice().to_owned(),
 
-        self.metrics.wsync_prev_idle.increment(wsync_prev_idle);
-        self.metrics.wsync.increment(wsync);
-        self.metrics.prev_idle.increment(prev_idle);
-        self.metrics.greedy_idle.increment(greedy_idle);
-        self.metrics.pinned.increment(pinned);
-        self.metrics.direct_dispatch.increment(direct_dispatch);
-        self.metrics.direct_greedy.increment(direct_greedy);
-        self.metrics.direct_greedy_far.increment(direct_greedy_far);
-        self.metrics.dsq.increment(dsq);
-        self.metrics.greedy_local.increment(greedy_local);
-        self.metrics.greedy_xnuma.increment(greedy_xnuma);
-
-        let kick_greedy = stat(bpf_intf::stat_idx_RUSTY_STAT_KICK_GREEDY);
-        let repatriate = stat(bpf_intf::stat_idx_RUSTY_STAT_REPATRIATE);
-        let dl_clamped = stat(bpf_intf::stat_idx_RUSTY_STAT_DL_CLAMP);
-        let dl_preset = stat(bpf_intf::stat_idx_RUSTY_STAT_DL_PRESET);
-
-        self.metrics.kick_greedy.increment(kick_greedy);
-        self.metrics.repatriate.increment(repatriate);
-        self.metrics.dl_clamped.increment(dl_clamped);
-        self.metrics.dl_preset.increment(dl_preset);
-
-        self.metrics
-            .task_errors
-            .increment(stat(bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR));
-        self.metrics
-            .lb_data_errors
-            .increment(self.nr_lb_data_errors);
-        self.metrics
-            .load_balance
-            .increment(stat(bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE));
-
-        self.metrics
-            .slice_length
-            .set(self.tuner.slice_ns as f64 / 1000.0);
-
-        // We need to dynamically create the metrics for each node and domain
-        // because we don't know how many there are at compile time. Metrics
-        // will be cached and reused so this is not a performance issue.
-        for node in lb_stats.iter() {
-            histogram!("load_avg", "node" => node.id.to_string())
-                .record(node.load.load_avg() as f64);
-            for dom in node.domains.iter() {
-                histogram!("load_avg", "node" => node.id.to_string(), "dom" => dom.id.to_string())
-                    .record(dom.load.load_avg() as f64);
-            }
+            nodes: node_stats,
         }
     }
 
     fn lb_step(&mut self) -> Result<()> {
-        let started_at = Instant::now();
-        let bpf_stats = self.read_bpf_stats()?;
-        let cpu_busy = self.get_cpu_busy()?;
-        self.metrics.cpu_busy_pct.record(cpu_busy * 100.0);
-
         let mut lb = LoadBalancer::new(
             &mut self.skel,
             self.dom_group.clone(),
@@ -600,21 +557,19 @@ impl<'a> Scheduler<'a> {
         );
 
         lb.load_balance()?;
-        self.metrics
-            .processing_duration
-            .record(started_at.elapsed().as_micros() as f64);
 
-        let stats = lb.get_stats();
-        self.report(&bpf_stats, &stats);
-
-        self.prev_at = started_at;
+        self.lb_at = SystemTime::now();
+        self.lb_stats = lb.get_stats();
         Ok(())
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+        let (res_ch, req_ch) = self.stats_server.channels();
         let now = Instant::now();
         let mut next_tune_at = now + self.tune_interval;
         let mut next_sched_at = now + self.sched_interval;
+
+        self.skel.maps.stats.value_size() as usize;
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();
@@ -635,11 +590,18 @@ impl<'a> Scheduler<'a> {
                 }
             }
 
-            std::thread::sleep(
-                next_sched_at
-                    .min(next_tune_at)
-                    .duration_since(Instant::now()),
-            );
+            self.time_used += Instant::now().duration_since(now);
+
+            match req_ch.recv_deadline(next_sched_at.min(next_tune_at)) {
+                Ok(prev_sc) => {
+                    let cur_sc = StatsCtx::new(&self.skel, &self.proc_reader, self.time_used)?;
+                    let delta_sc = cur_sc.delta(&prev_sc);
+                    let cstats = self.cluster_stats(&delta_sc, self.lb_stats.clone());
+                    res_ch.send((cur_sc, cstats))?;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(e) => Err(e)?,
+            }
         }
 
         self.struct_ops.take();
@@ -687,16 +649,15 @@ fn main() -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
-    if opts.enable_prometheus {
-        info!("Enabling Prometheus endpoint: http://localhost:9000");
-        PrometheusBuilder::new()
-            .install()
-            .expect("failed to install Prometheus recorder");
-    } else {
-        LogRecorderBuilder::new()
-            .with_reporting_interval(Duration::from_secs(3))
-            .install()
-            .expect("failed to install log recorder");
+    if let Some(intv) = opts.monitor.or(opts.stats) {
+        let shutdown_copy = shutdown.clone();
+        let jh = std::thread::spawn(move || {
+            stats::monitor(Duration::from_secs_f64(intv), shutdown_copy).unwrap()
+        });
+        if opts.monitor.is_some() {
+            let _ = jh.join();
+            return Ok(());
+        }
     }
 
     let mut open_object = MaybeUninit::uninit();

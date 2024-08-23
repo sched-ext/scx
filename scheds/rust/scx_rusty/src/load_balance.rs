@@ -105,7 +105,7 @@
 //!
 //! Statistics are exported as a vector of NumaStat objects, which each
 //! contains load balancing statistics for that NUMA node, as well as
-//! statistics for any Domains contained therein as DomainStat objects.
+//! statistics for any Domains contained therein as DomainStats objects.
 //!
 //! Future Improvements
 //! -------------------
@@ -134,6 +134,8 @@ use core::cmp::Ordering;
 
 use crate::bpf_intf;
 use crate::bpf_skel::*;
+use crate::stats::DomainStats;
+use crate::stats::NodeStats;
 use crate::DomainGroup;
 
 use std::cell::Cell;
@@ -151,6 +153,7 @@ use scx_utils::ravg::ravg_read;
 use scx_utils::LoadAggregator;
 use scx_utils::LoadLedger;
 use sorted_vec::SortedVec;
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
@@ -443,24 +446,24 @@ impl NumaNode {
         self.load.add_load(delta);
     }
 
-    fn numa_stat(&self) -> NumaStat {
-        let mut n_stat = NumaStat {
-            id: self.id,
-            load: self.load.clone(),
-            domains: Vec::new(),
+    fn stats(&self) -> NodeStats {
+        let mut stats = NodeStats {
+            load: self.load.load_sum(),
+            imbal: self.load.imbal(),
+            delta: self.load.delta(),
+            doms: BTreeMap::new(),
         };
-
         for dom in self.domains.iter() {
-            n_stat.domains.push(DomainStat {
-                id: dom.id,
-                load: dom.load.clone(),
-            });
+            stats.doms.insert(
+                dom.id,
+                DomainStats {
+                    load: dom.load.load_sum(),
+                    imbal: dom.load.imbal(),
+                    delta: dom.load.delta(),
+                },
+            );
         }
-        n_stat
-            .domains
-            .sort_by(|x, y| x.id.partial_cmp(&y.id).unwrap());
-
-        n_stat
+        stats
     }
 }
 
@@ -470,55 +473,6 @@ impl LoadOrdered for NumaNode {
     }
 }
 impl_ord_for_type!(NumaNode);
-
-pub struct DomainStat {
-    pub id: usize,
-    pub load: LoadEntity,
-}
-
-fn fmt_balance_stat(
-    f: &mut fmt::Formatter<'_>,
-    load: &LoadEntity,
-    preamble: String,
-) -> fmt::Result {
-    let imbal = load.imbal();
-    let load_sum = load.load_sum();
-    let load_delta = load.delta();
-    let get_fmt = |num: f64| {
-        if num >= 0.0f64 {
-            format!("{:+4.2}", num)
-        } else {
-            format!("{:4.2}", num)
-        }
-    };
-
-    write!(
-        f,
-        "{} load={:4.2} imbal={} load_delta={}",
-        preamble,
-        load_sum,
-        get_fmt(imbal),
-        get_fmt(load_delta)
-    )
-}
-
-impl fmt::Display for DomainStat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_balance_stat(f, &self.load, format!("  DOMAIN[{:02}]", self.id))
-    }
-}
-
-pub struct NumaStat {
-    pub id: usize,
-    pub load: LoadEntity,
-    pub domains: Vec<DomainStat>,
-}
-
-impl fmt::Display for NumaStat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt_balance_stat(f, &self.load, format!("NODE[{:02}]", self.id))
-    }
-}
 
 pub struct LoadBalancer<'a, 'b> {
     skel: &'a mut BpfSkel<'b>,
@@ -576,15 +530,12 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         Ok(())
     }
 
-    pub fn get_stats(&self) -> Vec<NumaStat> {
-        let mut numa_stats = Vec::with_capacity(self.dom_group.nr_nodes());
+    pub fn get_stats(&self) -> BTreeMap<usize, NodeStats> {
+        let mut stats = BTreeMap::new();
         for node in self.nodes.iter() {
-            numa_stats.push(node.numa_stat());
+            stats.insert(node.id, node.stats());
         }
-
-        numa_stats.sort_by(|x, y| x.id.partial_cmp(&y.id).unwrap());
-
-        numa_stats
+        stats
     }
 
     fn create_domain_hierarchy(&mut self) -> Result<()> {
