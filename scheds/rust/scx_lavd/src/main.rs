@@ -473,12 +473,21 @@ impl<'a> Scheduler<'a> {
             for cpu_id in v.cpu_ids.iter() {
                 let i = cpu_id / 64;
                 let j = cpu_id % 64;
-                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].cpumask[i] |= 0x01 << j;
+                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].__cpumask[i] |= 0x01 << j;
+            }
+
+            const LAVD_CPDOM_MAX_NR: u8 = 32;
+            const LAVD_CPDOM_MAX_DIST: usize = 4;
+            if v.neighbor_map.borrow().iter().len() > LAVD_CPDOM_MAX_DIST {
+                    panic!("The processor topology is too complex to handle in BPF.");
             }
 
             for (k, (_d, neighbors)) in v.neighbor_map.borrow().iter().enumerate() {
-                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].nr_neighbors[k] =
-                    neighbors.borrow().len() as u8;
+                let nr_neighbors = neighbors.borrow().len() as u8;
+                if nr_neighbors > LAVD_CPDOM_MAX_NR {
+                    panic!("The processor topology is too complex to handle in BPF.");
+                }
+                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].nr_neighbors[k] = nr_neighbors;
                 for n in neighbors.borrow().iter() {
                     skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].neighbor_bits[k] = 0x1 << n;
                 }

@@ -2832,7 +2832,7 @@ static s32 init_per_cpu_ctx(u64 now)
 			continue;
 
 		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
-			u64 cpumask = cpdomc->cpumask[i];
+			u64 cpumask = cpdomc->__cpumask[i];
 			bpf_for(j, 0, 64) {
 				if (cpumask & 0x1LLU << j) {
 					cpu = (i * 64) + j;
