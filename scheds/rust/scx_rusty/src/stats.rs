@@ -34,8 +34,11 @@ fn signed(x: f64) -> String {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(_om_prefix = "d_", _om_label = "domain")]
 pub struct DomainStats {
+    #[stat(desc = "sum of weight * duty_cycle for all tasks")]
     pub load: f64,
+    #[stat(desc = "load imbalance from average")]
     pub imbal: f64,
+    #[stat(desc = "load migrated for load balancing")]
     pub delta: f64,
 }
 
@@ -56,9 +59,13 @@ impl DomainStats {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(_om_prefix = "n_", _om_label = "node")]
 pub struct NodeStats {
+    #[stat(desc = "sum of weight * duty_cycle for all tasks")]
     pub load: f64,
+    #[stat(desc = "load imbalance from average")]
     pub imbal: f64,
+    #[stat(desc = "load migrated for load balancing")]
     pub delta: f64,
+    #[stat(desc = "per-domain statistics")]
     pub doms: BTreeMap<usize, DomainStats>,
 }
 
@@ -79,40 +86,66 @@ impl NodeStats {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct ClusterStats {
+    #[stat(desc = "timestamp")]
     pub at_us: u64,
+    #[stat(desc = "timestamp of the last load balancing")]
     pub lb_at_us: u64,
+    #[stat(desc = "# sched events duringg the period")]
+    pub total: u64,
+    #[stat(desc = "scheduling slice in usecs")]
+    pub slice_us: u64,
+
+    #[stat(desc = "CPU busy % (100% means all CPU)")]
     pub cpu_busy: f64,
+    #[stat(desc = "sum of weight * duty_cycle for all tasks")]
     pub load: f64,
+    #[stat(desc = "# of migrations from load balancing")]
     pub nr_migrations: u64,
 
+    #[stat(desc = "# of BPF task get errors")]
     pub task_get_err: u64,
+    #[stat(desc = "# of BPF lb data get errros")]
     pub lb_data_err: u64,
-    pub cpu_used: f64,
+    #[stat(desc = "time spent running scheduler userspace")]
+    pub time_used: f64,
 
-    pub total: u64,
-
+    #[stat(desc = "% WAKE_SYNC directly dispatched to idle previous CPU")]
     pub sync_prev_idle: f64,
+    #[stat(desc = "% WAKE_SYNC directly dispatched to waker CPU")]
     pub wake_sync: f64,
+    #[stat(desc = "% directly dispatched to idle previous CPU")]
     pub prev_idle: f64,
+    #[stat(desc = "% directly dispatched to idle previous CPU in a different domain")]
     pub greedy_idle: f64,
+    #[stat(desc = "% directly dispatched to CPU due to restricted to one CPU")]
     pub pinned: f64,
-    pub dispatch: f64,
+    #[stat(desc = "% directly dispatched to CPU (--kthreads-local or local domain)")]
+    pub direct: f64,
+    #[stat(desc = "% directly dispatched to CPU (foreign domain, local node)")]
     pub greedy: f64,
+    #[stat(desc = "% directly dispatched to CPU (foreign node)")]
     pub greedy_far: f64,
+    #[stat(desc = "% scheduled from local domain")]
     pub dsq_dispatch: f64,
+    #[stat(desc = "% scheduled from foreign domain")]
     pub greedy_local: f64,
+    #[stat(desc = "% scheduled from foreign node")]
     pub greedy_xnuma: f64,
+    #[stat(desc = "% foreign domain CPU kicked on enqueue")]
     pub kick_greedy: f64,
+    #[stat(desc = "% repatriated to local domain on enqueue")]
     pub repatriate: f64,
+    #[stat(desc = "% accumulated vtime budget clamped")]
     pub dl_clamp: f64,
+    #[stat(desc = "% accumulated vtime budget used as-is")]
     pub dl_preset: f64,
 
-    pub slice_us: u64,
     #[stat(_om_skip)]
     pub direct_greedy_cpus: Vec<u64>,
     #[stat(_om_skip)]
     pub kick_greedy_cpus: Vec<u64>,
 
+    #[stat(desc = "per-node statistics")]
     pub nodes: BTreeMap<usize, NodeStats>,
 }
 
@@ -120,13 +153,13 @@ impl ClusterStats {
     pub fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "cpu={:7.2} load={:8.2} mig={} task_err={} lb_data_err={} cpu_used={:4.1}ms",
+            "cpu={:7.2} load={:8.2} mig={} task_err={} lb_data_err={} time_used={:4.1}ms",
             self.cpu_busy,
             self.load,
             self.nr_migrations,
             self.task_get_err,
             self.lb_data_err,
-            self.cpu_used * 1000.0,
+            self.time_used * 1000.0,
         )?;
         writeln!(
             w,
@@ -142,7 +175,7 @@ impl ClusterStats {
         writeln!(
             w,
             "dir={:5.2} dir_greedy={:5.2} dir_greedy_far={:5.2}",
-            self.dispatch, self.greedy, self.greedy_far,
+            self.direct, self.greedy, self.greedy_far,
         )?;
 
         writeln!(

@@ -263,7 +263,7 @@ struct StatsCtx {
     cpu_busy: u64,
     cpu_total: u64,
     bpf_stats: Vec<u64>,
-    cpu_used: Duration,
+    time_used: Duration,
 }
 
 impl StatsCtx {
@@ -296,18 +296,18 @@ impl StatsCtx {
             cpu_busy: 0,
             cpu_total: 0,
             bpf_stats: vec![0u64; bpf_intf::stat_idx_RUSTY_NR_STATS as usize],
-            cpu_used: Duration::default(),
+            time_used: Duration::default(),
         }
     }
 
-    fn new(skel: &BpfSkel, proc_reader: &procfs::ProcReader, cpu_used: Duration) -> Result<Self> {
+    fn new(skel: &BpfSkel, proc_reader: &procfs::ProcReader, time_used: Duration) -> Result<Self> {
         let (cpu_busy, cpu_total) = read_cpu_busy_and_total(proc_reader)?;
 
         Ok(Self {
             cpu_busy,
             cpu_total,
             bpf_stats: Self::read_bpf_stats(skel)?,
-            cpu_used,
+            time_used,
         })
     }
 
@@ -321,7 +321,7 @@ impl StatsCtx {
                 .zip(rhs.bpf_stats.iter())
                 .map(|(lhs, rhs)| sub_or_zero(&lhs, &rhs))
                 .collect(),
-            cpu_used: self.cpu_used - rhs.cpu_used,
+            time_used: self.time_used - rhs.time_used,
         }
     }
 }
@@ -341,7 +341,7 @@ struct Scheduler<'a> {
 
     lb_at: SystemTime,
     lb_stats: BTreeMap<usize, NodeStats>,
-    cpu_used: Duration,
+    time_used: Duration,
     nr_lb_data_errors: u64,
 
     tuner: Tuner,
@@ -464,7 +464,7 @@ impl<'a> Scheduler<'a> {
 
             lb_at: SystemTime::now(),
             lb_stats: BTreeMap::new(),
-            cpu_used: Duration::default(),
+            time_used: Duration::default(),
             nr_lb_data_errors: 0,
 
             tuner: Tuner::new(
@@ -513,22 +513,23 @@ impl<'a> Scheduler<'a> {
                 .as_micros()
                 .try_into()
                 .unwrap(),
+            total,
+            slice_us: self.tuner.slice_ns / 1000,
+
             cpu_busy,
             load: node_stats.iter().map(|(_k, v)| v.load).sum::<f64>(),
             nr_migrations: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
 
             task_get_err: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR as usize],
             lb_data_err: self.nr_lb_data_errors,
-            cpu_used: sc.cpu_used.as_secs_f64(),
-
-            total,
+            time_used: sc.time_used.as_secs_f64(),
 
             sync_prev_idle: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_SYNC_PREV_IDLE),
             wake_sync: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC),
             prev_idle: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE),
             greedy_idle: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE),
             pinned: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PINNED),
-            dispatch: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_DISPATCH),
+            direct: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_DISPATCH),
             greedy: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY),
             greedy_far: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY_FAR),
             dsq_dispatch: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH),
@@ -539,7 +540,6 @@ impl<'a> Scheduler<'a> {
             dl_clamp: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_CLAMP),
             dl_preset: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_PRESET),
 
-            slice_us: self.tuner.slice_ns / 1000,
             direct_greedy_cpus: self.tuner.direct_greedy_mask.as_raw_slice().to_owned(),
             kick_greedy_cpus: self.tuner.kick_greedy_mask.as_raw_slice().to_owned(),
 
@@ -590,11 +590,11 @@ impl<'a> Scheduler<'a> {
                 }
             }
 
-            self.cpu_used += Instant::now().duration_since(now);
+            self.time_used += Instant::now().duration_since(now);
 
             match req_ch.recv_deadline(next_sched_at.min(next_tune_at)) {
                 Ok(prev_sc) => {
-                    let cur_sc = StatsCtx::new(&self.skel, &self.proc_reader, self.cpu_used)?;
+                    let cur_sc = StatsCtx::new(&self.skel, &self.proc_reader, self.time_used)?;
                     let delta_sc = cur_sc.delta(&prev_sc);
                     let cstats = self.cluster_stats(&delta_sc, self.lb_stats.clone());
                     res_ch.send((cur_sc, cstats))?;

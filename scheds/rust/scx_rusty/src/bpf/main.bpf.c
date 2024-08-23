@@ -832,7 +832,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 		stat_add(RUSTY_STAT_SYNC_PREV_IDLE, 1);
 
 		cpu = prev_cpu;
-		goto err_out;
+		goto out;
 	}
 
 	has_idle = bpf_cpumask_intersects((const struct cpumask *)d_cpumask,
@@ -842,12 +842,12 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 	    !(current->flags & PF_EXITING) && taskc->dom_id < MAX_DOMS &&
 	    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) == 0) {
 		stat_add(RUSTY_STAT_WAKE_SYNC, 1);
-		goto err_out;
+		goto out;
 	}
 
 	cpu = -ENOENT;
 
-err_out:
+out:
 	scx_bpf_put_idle_cpumask(idle_cpumask);
 	return cpu;
 }
