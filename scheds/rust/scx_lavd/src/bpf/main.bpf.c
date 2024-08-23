@@ -1456,8 +1456,17 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
 
 	cpu_id = pick_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
-	if (found_idle)
+	if (found_idle) {
+		/*
+		 * Calculate the task's time slice if found an idle CPU.
+		 */
+		struct cpu_ctx *cpuc_task = get_cpu_ctx_id(cpu_id);
+		if (cpuc_task)
+			p->scx.slice = calc_time_slice(p, taskc, cpuc_task);
+		else
+			p->scx.slice = LAVD_SLICE_MIN_NS;
 		return cpu_id;
+	}
 
 	return prev_cpu;
 }
@@ -1862,10 +1871,15 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
+	 * Calculate the task's time slice.
+	 */
+	p->scx.slice = calc_time_slice(p, taskc, cpuc_task);
+
+	/*
 	 * Enqueue the task to one of task's DSQs based on its virtual deadline.
 	 */
 	dsq_id = find_proper_dsq(taskc, cpuc_task);
-	scx_bpf_dispatch_vtime(p, dsq_id, LAVD_SLICE_UNDECIDED,
+	scx_bpf_dispatch_vtime(p, dsq_id, p->scx.slice,
 			       taskc->vdeadline_log_clk, enq_flags);
 }
 
@@ -2289,27 +2303,6 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	waker_taskc->last_runnable_clk = now;
 }
 
-static bool need_to_calc_time_slice(struct task_struct *p)
-{
-	/*
-	 * We need to calculate the task @p's time slice in two cases: 1) if it
-	 * hasn't been calculated (i.e., LAVD_SLICE_UNDECIDED) after the
-	 * enqueue or 2) if the sched_ext kernel assigns the default time slice
-	 * (i.e., SCX_SLICE_DFL).
-	 *
-	 * Calculating and assigning a time slice without checking these two
-	 * conditions could entail pathological behaviors, notably watchdog
-	 * time out. One condition that could trigger a watchdog time-out is as
-	 * follows. 1) a task is preempted by another task, which runs in a
-	 * higher scheduler class (e.g., RT or DL). 2) when the task is
-	 * re-running after, for example, the RT task preempted out, its time
-	 * slice will be replenished again. 3) If these two steps are repeated,
-	 * the task can run forever.
-	 */
-	return p->scx.slice == LAVD_SLICE_UNDECIDED ||
-	       p->scx.slice == SCX_SLICE_DFL;
-}
-
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
@@ -2342,12 +2335,6 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 */
 	cpuc->lat_cri = taskc->lat_cri;
 	cpuc->stopping_tm_est_ns = get_est_stopping_time(taskc);
-
-	/*
-	 * Calculate the task's time slice based on updated load if necessary.
-	 */
-	if (need_to_calc_time_slice(p))
-		p->scx.slice = calc_time_slice(p, taskc, cpuc);
 
 	/*
 	 * If there is a relevant introspection command with @p, process it.
