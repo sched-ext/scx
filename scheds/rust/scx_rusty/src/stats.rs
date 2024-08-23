@@ -76,10 +76,11 @@ impl NodeStats {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 pub struct ClusterStats {
-    pub at: f64,
+    pub at_us: u64,
+    pub lb_at_us: u64,
     pub cpu_busy: f64,
     pub load: f64,
-    pub nr_load_balances: u64,
+    pub nr_migrations: u64,
 
     pub task_get_err: u64,
     pub lb_data_err: u64,
@@ -114,10 +115,10 @@ impl ClusterStats {
     pub fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "cpu={:7.2} load={:8.2} bal={} task_err={} lb_data_err={} cpu_used={:4.1}ms",
+            "cpu={:7.2} load={:8.2} mig={} task_err={} lb_data_err={} cpu_used={:4.1}ms",
             self.cpu_busy,
             self.load,
-            self.nr_load_balances,
+            self.nr_migrations,
             self.task_get_err,
             self.lb_data_err,
             self.cpu_used * 1000.0,
@@ -237,8 +238,12 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
                     None => Err(e)?,
                 },
             };
-            let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(cst.at));
-            println!("###### {} ######", dt.to_rfc2822());
+            let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_micros(cst.at_us));
+            println!(
+                "###### {}, load balance @ {:7.1}ms ######",
+                dt.to_rfc2822(),
+                (cst.lb_at_us as i64 - cst.at_us as i64) as f64 / 1000.0
+            );
             cst.format(&mut std::io::stdout())?;
             sleep(intv);
         }

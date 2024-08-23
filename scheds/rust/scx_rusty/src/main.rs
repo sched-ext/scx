@@ -339,6 +339,7 @@ struct Scheduler<'a> {
 
     proc_reader: procfs::ProcReader,
 
+    lb_at: SystemTime,
     lb_stats: BTreeMap<usize, NodeStats>,
     cpu_used: Duration,
     nr_lb_data_errors: u64,
@@ -461,6 +462,7 @@ impl<'a> Scheduler<'a> {
             dom_group: domains.clone(),
             proc_reader,
 
+            lb_at: SystemTime::now(),
             lb_stats: BTreeMap::new(),
             cpu_used: Duration::default(),
             nr_lb_data_errors: 0,
@@ -498,13 +500,22 @@ impl<'a> Scheduler<'a> {
         };
 
         ClusterStats {
-            at: SystemTime::now()
+            at_us: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_secs_f64(),
+                .as_micros()
+                .try_into()
+                .unwrap(),
+            lb_at_us: self
+                .lb_at
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_micros()
+                .try_into()
+                .unwrap(),
             cpu_busy,
             load: node_stats.iter().map(|(_k, v)| v.load).sum::<f64>(),
-            nr_load_balances: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
+            nr_migrations: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
 
             task_get_err: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR as usize],
             lb_data_err: self.nr_lb_data_errors,
@@ -537,8 +548,6 @@ impl<'a> Scheduler<'a> {
     }
 
     fn lb_step(&mut self) -> Result<()> {
-        let started_at = Instant::now();
-
         let mut lb = LoadBalancer::new(
             &mut self.skel,
             self.dom_group.clone(),
@@ -549,8 +558,8 @@ impl<'a> Scheduler<'a> {
 
         lb.load_balance()?;
 
+        self.lb_at = SystemTime::now();
         self.lb_stats = lb.get_stats();
-        self.cpu_used += Instant::now().duration_since(started_at);
         Ok(())
     }
 
@@ -580,6 +589,8 @@ impl<'a> Scheduler<'a> {
                     next_sched_at = now + self.sched_interval;
                 }
             }
+
+            self.cpu_used += Instant::now().duration_since(now);
 
             match req_ch.recv_deadline(next_sched_at.min(next_tune_at)) {
                 Ok(prev_sc) => {
