@@ -223,6 +223,7 @@ where
         name: &str,
         visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
         nesting: &mut BTreeSet<String>,
+	visited: &mut BTreeSet<String>,
     ) -> Result<()> {
         let m = match self.meta.get(name) {
             Some(v) => v,
@@ -232,13 +233,16 @@ where
         if !nesting.insert(name.into()) {
             bail!("loop in stats meta detected, {} already nested", name);
         }
+	if !visited.insert(name.into()) {
+	    return Ok(());
+	}
 
         visit(m)?;
 
         for (fname, field) in m.fields.iter() {
             match &field.data {
                 ScxStatsData::Array(ScxStatsKind::Struct(inner)) => {
-                    self.visit_meta_inner(inner, visit, nesting)?
+                    self.visit_meta_inner(inner, visit, nesting, visited)?
                 }
                 ScxStatsData::Dict {
                     key: ScxStatsKind::Struct(inner),
@@ -247,7 +251,7 @@ where
                 ScxStatsData::Dict {
                     key: _,
                     datum: ScxStatsKind::Struct(inner),
-                } => self.visit_meta_inner(inner, visit, nesting)?,
+                } => self.visit_meta_inner(inner, visit, nesting, visited)?,
                 _ => {}
             }
         }
@@ -262,7 +266,8 @@ where
         visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
     ) -> Result<()> {
         let mut nesting = BTreeSet::<String>::new();
-        self.visit_meta_inner(from, visit, &mut nesting)
+	let mut visited = BTreeSet::<String>::new();
+        self.visit_meta_inner(from, visit, &mut nesting, &mut visited)
     }
 
     fn verify_meta(&self) -> Result<()> {
