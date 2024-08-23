@@ -22,7 +22,6 @@ use std::ops::Sub;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::thread::spawn;
 use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::Instant;
@@ -240,7 +239,7 @@ lazy_static::lazy_static! {
 /// Monitoring Statistics
 /// =====================
 ///
-/// Run with `--monitor INTERVAL` added to enable stats monitoring. There is
+/// Run with `--stats INTERVAL` added to enable stats monitoring. There is
 /// also scx_stat server listening on /var/run/scx/root/stat and you can
 /// monitor statistics by running `scx_layered --monitor INTERVAL`
 /// separately.
@@ -339,8 +338,12 @@ struct Opts {
     #[clap(short = 'e', long)]
     example: Option<String>,
 
-    /// Enable stats monitoring with the specified interval. If no layer
-    /// specs are specified, run in monitor mode.
+    /// Enable stats monitoring with the specified interval.
+    #[clap(long)]
+    stats: Option<f64>,
+
+    /// Run in stats monitoring mode with the specified interval. Scheduler
+    /// is not launched.
     #[clap(long)]
     monitor: Option<f64>,
 
@@ -1937,6 +1940,17 @@ fn main() -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
+    if let Some(intv) = opts.monitor.or(opts.stats) {
+        let shutdown_copy = shutdown.clone();
+        let jh = std::thread::spawn(move || {
+            stats::monitor(Duration::from_secs_f64(intv), shutdown_copy).unwrap()
+        });
+        if opts.monitor.is_some() {
+            let _ = jh.join();
+            return Ok(());
+        }
+    }
+
     if let Some(path) = &opts.example {
         write_example_file(path)?;
         return Ok(());
@@ -1948,16 +1962,6 @@ fn main() -> Result<()> {
             &mut LayerSpec::parse(input)
                 .context(format!("Failed to parse specs[{}] ({:?})", idx, input))?,
         );
-    }
-
-    if let Some(intv) = opts.monitor {
-        let shutdown_copy = shutdown.clone();
-        let jh =
-            spawn(move || stats::monitor(Duration::from_secs_f64(intv), shutdown_copy).unwrap());
-        if layer_config.specs.len() == 0 {
-            let _ = jh.join();
-            return Ok(());
-        }
     }
 
     debug!("specs={}", serde_json::to_string_pretty(&layer_config)?);
