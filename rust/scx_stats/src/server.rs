@@ -166,10 +166,158 @@ impl<Req, Res> Clone for ChannelPair<Req, Res> {
     }
 }
 
-struct ScxStatsServerData<Req, Res> {
+pub struct ScxStatsServerData<Req, Res>
+where
+    Req: Send + 'static,
+    Res: Send + 'static,
+{
     top: Option<String>,
     meta: BTreeMap<String, ScxStatsMeta>,
     ops: BTreeMap<String, Arc<Mutex<ScxStatsOps<Req, Res>>>>,
+}
+
+impl<Req, Res> ScxStatsServerData<Req, Res>
+where
+    Req: Send + 'static,
+    Res: Send + 'static,
+{
+    pub fn new() -> Self {
+        Self {
+            top: None,
+            meta: BTreeMap::new(),
+            ops: BTreeMap::new(),
+        }
+    }
+
+    pub fn add_meta(mut self, meta: ScxStatsMeta) -> Self {
+        if meta.attrs.top.is_some() && self.top.is_none() {
+            self.top = Some(meta.name.clone());
+        }
+        self.meta.insert(meta.name.clone(), meta);
+        self
+    }
+
+    pub fn add_ops(mut self, name: &str, ops: ScxStatsOps<Req, Res>) -> Self {
+        self.ops.insert(name.to_string(), Arc::new(Mutex::new(ops)));
+        self
+    }
+
+    pub fn add_stats(self, name: &str, fetch: Box<dyn StatsReaderSend<Req, Res>>) -> Self {
+        let wrapped_fetch = Mutex::new(fetch);
+        let read: Box<dyn StatsReaderSync<Req, Res>> =
+            Box::new(move |args, chan| wrapped_fetch.lock().unwrap()(args, chan));
+        let wrapped_read = Arc::new(read);
+        let ops = ScxStatsOps {
+            open: Box::new(move |_| {
+                let copy = wrapped_read.clone();
+                Ok(Box::new(move |args, chan| copy(args, chan)))
+            }),
+            close: None,
+        };
+
+        self.add_ops(name, ops)
+    }
+
+    fn visit_meta_inner(
+        &self,
+        name: &str,
+        visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
+        visited: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        let m = match self.meta.get(name) {
+            Some(v) => v,
+            None => bail!("unknown stats meta name {}", name),
+        };
+
+        if !visited.insert(name.into()) {
+            bail!("loop in stats meta detected, {} already nested", name);
+        }
+
+        visit(m)?;
+
+        for (fname, field) in m.fields.iter() {
+            match &field.data {
+                ScxStatsData::Array(ScxStatsKind::Struct(nested)) => {
+                    self.visit_meta_inner(nested, visit, visited)?
+                }
+                ScxStatsData::Dict {
+                    key: ScxStatsKind::Struct(nested),
+                    datum: _,
+                } => bail!("{}.{} is a dict with struct {} as key", name, fname, nested),
+                ScxStatsData::Dict {
+                    key: _,
+                    datum: ScxStatsKind::Struct(nested),
+                } => self.visit_meta_inner(nested, visit, visited)?,
+                _ => {}
+            }
+        }
+
+        visited.remove(name);
+        Ok(())
+    }
+
+    fn visit_meta(
+        &self,
+        from: &str,
+        visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
+    ) -> Result<()> {
+        let mut visited = BTreeSet::<String>::new();
+        self.visit_meta_inner(from, visit, &mut visited)
+    }
+
+    fn verify_meta(&self) -> Result<()> {
+        if self.top.is_none() {
+            warn!("top-level stats metadata missing");
+            return Ok(());
+        }
+
+        // Null visit checks all nested stats are reacheable without loops.
+        self.visit_meta(self.top.as_ref().unwrap(), &mut |_| Ok(()))
+    }
+
+    pub fn describe_meta<W: Write>(&self, w: &mut W, from: Option<&str>) -> Result<()> {
+        let from = match from {
+            Some(v) => v,
+            None => self
+                .top
+                .as_ref()
+                .ok_or_else(|| anyhow!("don't know where to start "))?,
+        };
+
+        let (mut nwidth, mut fwidth, mut dwidth) = (0usize, 0usize, 0usize);
+
+        self.visit_meta(from, &mut |m| {
+            nwidth = nwidth.max(m.name.len());
+            (fwidth, dwidth) = m.fields.iter().fold((fwidth, dwidth), |acc, (n, f)| {
+                (acc.0.max(n.len()), acc.1.max(f.data.to_string().len()))
+            });
+            Ok(())
+        })?;
+
+        self.visit_meta(from, &mut |m| {
+            write!(w, "[{:nw$}]", m.name, nw = nwidth)?;
+            if let Some(desc) = &m.attrs.desc {
+                write!(w, " {}", desc)?;
+            }
+            writeln!(w, "")?;
+
+            for (fname, f) in m.fields.iter() {
+                write!(
+                    w,
+                    "  {:fw$} {:dw$}",
+                    fname,
+                    f.data.to_string(),
+                    fw = fwidth,
+                    dw = dwidth
+                )?;
+                if let Some(desc) = &f.attrs.desc {
+                    write!(w, " {}", desc)?;
+                }
+                writeln!(w, "")?;
+            }
+            Ok(())
+        })
+    }
 }
 
 struct ScxStatsServerInner<Req, Res>
@@ -430,7 +578,7 @@ where
     Req: Send + 'static,
     Res: Send + 'static,
 {
-    pub fn new() -> Self {
+    pub fn new(data: ScxStatsServerData<Req, Res>) -> Self {
         let (ich, och) = ChannelPair::<Req, Res>::bidi();
 
         Self {
@@ -438,52 +586,11 @@ where
             sched_path: PathBuf::from("root"),
             stats_path: PathBuf::from("stats"),
             path: None,
-            data: Arc::new(Mutex::new(ScxStatsServerData {
-                top: None,
-                meta: BTreeMap::new(),
-                ops: BTreeMap::new(),
-            })),
+            data: Arc::new(Mutex::new(data)),
             outer_ch: och,
             inner_ch: Some(ich),
             exit: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    pub fn add_meta(self, meta: ScxStatsMeta) -> Self {
-        let mut data = self.data.lock().unwrap();
-
-        if meta.attrs.top.is_some() && data.top.is_none() {
-            data.top = Some(meta.name.clone());
-        }
-        data.meta.insert(meta.name.clone(), meta);
-
-        drop(data);
-        self
-    }
-
-    pub fn add_ops(self, name: &str, ops: ScxStatsOps<Req, Res>) -> Self {
-        self.data
-            .lock()
-            .unwrap()
-            .ops
-            .insert(name.to_string(), Arc::new(Mutex::new(ops)));
-        self
-    }
-
-    pub fn add_stats(self, name: &str, fetch: Box<dyn StatsReaderSend<Req, Res>>) -> Self {
-        let wrapped_fetch = Mutex::new(fetch);
-        let read: Box<dyn StatsReaderSync<Req, Res>> =
-            Box::new(move |args, chan| wrapped_fetch.lock().unwrap()(args, chan));
-        let wrapped_read = Arc::new(read);
-        let ops = ScxStatsOps {
-            open: Box::new(move |_| {
-                let copy = wrapped_read.clone();
-                Ok(Box::new(move |args, chan| copy(args, chan)))
-            }),
-            close: None,
-        };
-
-        self.add_ops(name, ops)
     }
 
     pub fn set_base_path<P: AsRef<Path>>(mut self, path: P) -> Self {
@@ -506,68 +613,8 @@ where
         self
     }
 
-    fn visit_meta_inner(
-        name: &str,
-        visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
-        meta: &BTreeMap<String, ScxStatsMeta>,
-        visited: &mut BTreeSet<String>,
-    ) -> Result<()> {
-        let m = match meta.get(name) {
-            Some(v) => v,
-            None => bail!("unknown stats meta name {}", name),
-        };
-
-        if !visited.insert(name.into()) {
-            bail!("loop in stats meta detected, {} already nested", name);
-        }
-
-        visit(m)?;
-
-        for (fname, field) in m.fields.iter() {
-            match &field.data {
-                ScxStatsData::Array(ScxStatsKind::Struct(nested)) => {
-                    Self::visit_meta_inner(nested, visit, meta, visited)?
-                }
-                ScxStatsData::Dict {
-                    key: ScxStatsKind::Struct(nested),
-                    datum: _,
-                } => bail!("{}.{} is a dict with struct {} as key", name, fname, nested),
-                ScxStatsData::Dict {
-                    key: _,
-                    datum: ScxStatsKind::Struct(nested),
-                } => Self::visit_meta_inner(nested, visit, meta, visited)?,
-                _ => {}
-            }
-        }
-
-        visited.remove(name);
-        Ok(())
-    }
-
-    fn visit_meta(
-        from: &str,
-        visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
-        meta: &BTreeMap<String, ScxStatsMeta>,
-    ) -> Result<()> {
-        let mut visited = BTreeSet::<String>::new();
-
-        Self::visit_meta_inner(from, visit, meta, &mut visited)
-    }
-
-    fn verify_meta(&self) -> Result<()> {
-        let data = self.data.lock().unwrap();
-
-        if data.top.is_none() {
-            warn!("top-level stats metadata missing");
-            return Ok(());
-        }
-
-        // Null visit checks all nested stats are reacheable without loops.
-        Self::visit_meta(data.top.as_ref().unwrap(), &mut |_| Ok(()), &data.meta)
-    }
-
     pub fn launch(mut self) -> Result<Self> {
-        self.verify_meta()?;
+        self.data.lock().unwrap().verify_meta()?;
 
         if self.path.is_none() {
             self.path = Some(self.base_path.join(&self.sched_path).join(&self.stats_path));
@@ -601,59 +648,6 @@ where
 
     pub fn channels(&self) -> (Sender<Res>, Receiver<Req>) {
         (self.outer_ch.req.clone(), self.outer_ch.res.clone())
-    }
-
-    pub fn describe_meta<W: Write>(&self, w: &mut W, from: Option<&str>) -> Result<()> {
-        let data = self.data.lock().unwrap();
-        let from = match from {
-            Some(v) => v,
-            None => data
-                .top
-                .as_ref()
-                .ok_or_else(|| anyhow!("don't know where to start "))?,
-        };
-
-        let (mut nwidth, mut fwidth, mut dwidth) = (0usize, 0usize, 0usize);
-
-        Self::visit_meta(
-            from,
-            &mut |m| {
-                nwidth = nwidth.max(m.name.len());
-                (fwidth, dwidth) = m.fields.iter().fold((fwidth, dwidth), |acc, (n, f)| {
-                    (acc.0.max(n.len()), acc.1.max(f.data.to_string().len()))
-                });
-                Ok(())
-            },
-            &data.meta,
-        )?;
-
-        Self::visit_meta(
-            from,
-            &mut |m| {
-                write!(w, "[{:nw$}]", m.name, nw = nwidth)?;
-                if let Some(desc) = &m.attrs.desc {
-                    write!(w, " {}", desc)?;
-                }
-                writeln!(w, "")?;
-
-                for (fname, f) in m.fields.iter() {
-                    write!(
-                        w,
-                        "  {:fw$} {:dw$}",
-                        fname,
-                        f.data.to_string(),
-                        fw = fwidth,
-                        dw = dwidth
-                    )?;
-                    if let Some(desc) = &f.attrs.desc {
-                        write!(w, " {}", desc)?;
-                    }
-                    writeln!(w, "")?;
-                }
-                Ok(())
-            },
-            &data.meta,
-        )
     }
 }
 

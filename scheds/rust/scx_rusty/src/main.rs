@@ -443,7 +443,7 @@ impl<'a> Scheduler<'a> {
         // Attach.
         let mut skel = scx_ops_load!(skel, rusty, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, rusty)?);
-        let stats_server = stats::launch_server()?;
+        let stats_server = ScxStatsServer::new(stats::server_data()).launch()?;
 
         info!("Rusty scheduler started! Run `scx_rusty --monitor` for metrics.");
 

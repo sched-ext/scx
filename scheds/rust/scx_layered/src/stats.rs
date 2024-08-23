@@ -10,7 +10,7 @@ use chrono::Local;
 use log::warn;
 use scx_stats::Meta;
 use scx_stats::ScxStatsOps;
-use scx_stats::ScxStatsServer;
+use scx_stats::ScxStatsServerData;
 use scx_stats::StatsCloser;
 use scx_stats::StatsOpener;
 use scx_stats::StatsReader;
@@ -432,7 +432,7 @@ pub enum StatsRes {
     Bye,
 }
 
-pub fn launch_server() -> Result<ScxStatsServer<StatsReq, StatsRes>> {
+pub fn server_data() -> ScxStatsServerData<StatsReq, StatsRes> {
     let open: Box<dyn StatsOpener<StatsReq, StatsRes>> = Box::new(move |(req_ch, res_ch)| {
         let tid = current().id();
         req_ch.send(StatsReq::Hello(tid))?;
@@ -463,7 +463,7 @@ pub fn launch_server() -> Result<ScxStatsServer<StatsReq, StatsRes>> {
         }
     });
 
-    Ok(ScxStatsServer::new()
+    ScxStatsServerData::new()
         .add_meta(LayerStats::meta())
         .add_meta(SysStats::meta())
         .add_ops(
@@ -473,11 +473,10 @@ pub fn launch_server() -> Result<ScxStatsServer<StatsReq, StatsRes>> {
                 close: Some(close),
             },
         )
-        .launch()?)
 }
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
-     scx_utils::monitor_stats::<SysStats>(
+    scx_utils::monitor_stats::<SysStats>(
         &vec![],
         intv,
         || shutdown.load(Ordering::Relaxed),

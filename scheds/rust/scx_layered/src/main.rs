@@ -1611,7 +1611,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         // Attach.
         let struct_ops = scx_ops_attach!(skel, layered)?;
-        let stats_server = stats::launch_server()?;
+        let stats_server = ScxStatsServer::new(stats::server_data()).launch()?;
 
         let sched = Self {
             struct_ops: Some(struct_ops),

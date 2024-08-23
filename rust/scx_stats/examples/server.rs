@@ -1,5 +1,5 @@
 use log::{debug, info, warn};
-use scx_stats::{Meta, ScxStatsServer, ToJson};
+use scx_stats::{Meta, ScxStatsServer, ScxStatsServerData, ToJson};
 use scx_stats_derive::Stats;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -47,8 +47,7 @@ fn main() {
     // If communication from the stats generating closure is not necessary,
     // ScxStatsServer::<(), ()> can be used. This example sends thread ID
     // and receives the formatted string just for demonstration.
-    let server = ScxStatsServer::<ThreadId, String>::new()
-        .set_path(&path)
+    let sdata = ScxStatsServerData::<ThreadId, String>::new()
         .add_meta(ClusterStats::meta())
         .add_meta(DomainStats::meta())
         .add_stats(
@@ -61,12 +60,15 @@ fn main() {
                 debug!("Recevied {:?}", res);
                 stats.to_json()
             }),
-        )
-        .launch()
-        .unwrap();
+        );
 
     info!("stats_meta:");
-    server.describe_meta(&mut std::io::stderr(), None).unwrap();
+    sdata.describe_meta(&mut std::io::stderr(), None).unwrap();
+
+    let server = ScxStatsServer::<ThreadId, String>::new(sdata)
+        .set_path(&path)
+        .launch()
+        .unwrap();
 
     debug!("Doing unnecessary server channel handling");
     let (tx, rx) = server.channels();
