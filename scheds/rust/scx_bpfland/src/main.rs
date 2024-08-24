@@ -165,8 +165,8 @@ fn parse_cpumask(cpu_str: &str) -> Result<Cpumask, anyhow::Error> {
 
 /// scx_bpfland: a vruntime-based sched_ext scheduler that prioritizes interactive workloads.
 ///
-/// This scheduler is derived from scx_rustland, but it is fully implemented in BFP with minimal
-/// user-space part written in Rust to process command line options, collect metrics and logs out
+/// This scheduler is derived from scx_rustland, but it is fully implemented in BPF. It has a minimal
+/// user-space part written in Rust to process command line options, collect metrics and log out
 /// scheduling statistics.
 ///
 /// The BPF part makes all the scheduling decisions (see src/bpf/main.bpf.c).
@@ -195,7 +195,7 @@ struct Opts {
     #[clap(short = 'l', long, allow_hyphen_values = true, default_value = "0")]
     slice_us_lag: i64,
 
-    /// Shorten interactive tasks deadline based on their average amount of voluntary context
+    /// Shorten interactive tasks' deadline based on their average amount of voluntary context
     /// switches.
     ///
     /// Enabling this option can be beneficial in soft real-time scenarios, such as audio
@@ -233,12 +233,12 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_l3: bool,
 
-    /// Maximum threshold of voluntary context switch per second, used to classify interactive
+    /// Maximum threshold of voluntary context switches per second. This is used to classify interactive
     /// tasks (0 = disable interactive tasks classification).
     #[clap(short = 'c', long, default_value = "10")]
     nvcsw_max_thresh: u64,
 
-    /// Prevent the starvation making sure that at least one lower priority task is scheduled every
+    /// Prevent starvation by making sure that at least one lower priority task is scheduled every
     /// starvation_thresh_us (0 = disable starvation prevention).
     #[clap(short = 't', long, default_value = "5000")]
     starvation_thresh_us: u64,
