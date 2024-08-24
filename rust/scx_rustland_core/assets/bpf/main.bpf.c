@@ -275,14 +275,6 @@ static inline bool is_usersched_task(const struct task_struct *p)
 }
 
 /*
- * Return true if the target task @p is a kernel thread.
- */
-static inline bool is_kthread(const struct task_struct *p)
-{
-	return !!(p->flags & PF_KTHREAD);
-}
-
-/*
  * Flag used to wake-up the user-space scheduler.
  */
 static volatile u32 usersched_needed;
@@ -472,50 +464,6 @@ static bool dispatch_user_scheduler(void)
 }
 
 /*
- * Directly dispatch a task to a target CPU, bypassing the user-space
- * scheduler.
- */
-static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
-{
-	struct bpf_cpumask *offline;
-	u64 dsq_id = cpu_to_dsq(cpu);
-
-	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-		return -EINVAL;
-
-        scx_bpf_dispatch(p, dsq_id, slice_ns, enq_flags);
-	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
-
-	/*
-	 * If the CPU has gone offline notify that the task needs to be
-	 * consumed from another CPU.
-	 */
-	offline = offline_cpumask;
-	if (!offline)
-		return 0;
-	if (bpf_cpumask_test_cpu(cpu, cast_mask(offline))) {
-		set_offline_needed();
-		return 0;
-	}
-
-	/*
-	 * Wake-up the target CPU to make sure that the task is consumed as
-	 * soon as possible.
-	 *
-	 * Note: the target CPU must be activated, because the task has been
-	 * dispatched to a DSQ that only the target CPU can consume. If we do
-	 * not kick the CPU, and the CPU is idle, the task can stall in the DSQ
-	 * indefinitely.
-	 */
-	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-
-	dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu direct",
-		p->pid, p->comm, dsq_id, enq_flags, slice_ns);
-
-	return 0;
-}
-
-/*
  * Find an idle CPU in the system for the task.
  *
  * NOTE: the idle CPU selection doesn't need to be formally perfect, it is
@@ -689,19 +637,6 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (is_usersched_task(p))
 		return;
-
-	/*
-	 * Always dispatch per-CPU kthreads directly on their target CPU.
-	 *
-	 * This allows to prioritize critical kernel threads that may
-	 * potentially slow down the entire system if they are blocked for too
-	 * long (i.e., ksoftirqd/N, rcuop/N, etc.), but it could also cause
-	 * interactivity problems or unfairness if there are too many softirqs
-	 * being scheduled (e.g., in presence of high RX network traffic).
-	 */
-	if (is_kthread(p) && p->nr_cpus_allowed == 1)
-		if (!dispatch_direct_cpu(p, cpu, enq_flags))
-			return;
 
 	/*
 	 * Add tasks to the @queued list, they will be processed by the
