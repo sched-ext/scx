@@ -612,24 +612,15 @@ int rs_select_cpu(struct task_cpu_arg *input)
  * Fill @task with all the information that need to be sent to the user-space
  * scheduler.
  */
-static void get_task_info(struct queued_task_ctx *task,
-			  const struct task_struct *p, bool exiting)
+static void
+get_task_info(struct queued_task_ctx *task, const struct task_struct *p)
 {
 	struct task_ctx *tctx;
-
-	task->pid = p->pid;
-	/*
-	 * Use a negative CPU number to notify that the task is exiting, so
-	 * that we can free up its resources in the user-space scheduler.
-	 */
-	if (exiting) {
-		task->cpu = -1;
-		return;
-	}
 
 	tctx = lookup_task_ctx(p);
 	if (!tctx)
 		return;
+	task->pid = p->pid;
 	task->cpumask_cnt = tctx->cpumask_cnt;
 	task->sum_exec_runtime = p->se.sum_exec_runtime;
 	task->weight = p->scx.weight;
@@ -677,7 +668,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
-	get_task_info(task, p, false);
+	get_task_info(task, p);
 	dbg_msg("enqueue: pid=%d (%s)", p->pid, p->comm);
 	bpf_ringbuf_submit(task, 0);
 
@@ -960,40 +951,6 @@ s32 BPF_STRUCT_OPS(rustland_init_task, struct task_struct *p,
 }
 
 /*
- * Task @p is exiting.
- *
- * Notify the user-space scheduler that we can free up all the allocated
- * resources associated to this task.
- */
-void BPF_STRUCT_OPS(rustland_exit_task, struct task_struct *p,
-		    struct scx_exit_task_args *args)
-{
-	struct queued_task_ctx *task;
-
-	dbg_msg("exit: pid=%d (%s)", p->pid, p->comm);
-	task = bpf_ringbuf_reserve(&queued, sizeof(*task), 0);
-	if (!task) {
-		/*
-		 * We may have a memory leak in the scheduler at this point,
-		 * because we failed to notify it about this exiting task and
-		 * some resources may remain allocated.
-		 *
-		 * Do not worry too much about this condition for now, since
-		 * it should be pretty rare (and it happens only when the
-		 * scheduler is already congested, so it is probably a good
-		 * thing to avoid introducing extra overhead to free up
-		 * resources).
-		 */
-		sched_congested(p);
-		return;
-	}
-	get_task_info(task, p, true);
-	bpf_ringbuf_submit(task, 0);
-
-	__sync_fetch_and_add(&nr_queued, 1);
-}
-
-/*
  * Heartbeat scheduler timer callback.
  *
  * If the system is completely idle the sched-ext watchdog may incorrectly
@@ -1153,7 +1110,6 @@ SCX_OPS_DEFINE(rustland,
 	       .cpu_online		= (void *)rustland_cpu_online,
 	       .cpu_offline		= (void *)rustland_cpu_offline,
 	       .init_task		= (void *)rustland_init_task,
-	       .exit_task		= (void *)rustland_exit_task,
 	       .init			= (void *)rustland_init,
 	       .exit			= (void *)rustland_exit,
 	       .flags			= SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,

@@ -52,19 +52,15 @@ impl<'a> Scheduler<'a> {
             // Get queued taks and dispatch them in order (FIFO).
             match self.bpf.dequeue_task() {
                 Ok(Some(task)) => {
-                    // task.cpu < 0 is used to to notify an exiting task, in this
-                    // case we can simply ignore the task.
-                    if task.cpu >= 0 {
-                        let mut dispatched_task = DispatchedTask::new(&task);
+                    let mut dispatched_task = DispatchedTask::new(&task);
 
-                        // Allow to dispatch on the first CPU available.
-                        dispatched_task.flags |= RL_CPU_ANY;
+                    // Allow to dispatch on the first CPU available.
+                    dispatched_task.flags |= RL_CPU_ANY;
 
-                        let _ = self.bpf.dispatch_task(&dispatched_task);
+                    let _ = self.bpf.dispatch_task(&dispatched_task);
 
-                        // Give the task a chance to run and prevent overflowing the dispatch queue.
-                        std::thread::yield_now();
-                    }
+                    // Give the task a chance to run and prevent overflowing the dispatch queue.
+                    std::thread::yield_now();
                 }
                 Ok(None) => {
                     // Notify the BPF component that all tasks have been scheduled and dispatched.

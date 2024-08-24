@@ -352,13 +352,6 @@ impl<'a> Scheduler<'a> {
         loop {
             match self.bpf.dequeue_task() {
                 Ok(Some(task)) => {
-                    // Check for exiting tasks (cpu < 0) and remove their corresponding entries in
-                    // the task map (if present).
-                    if task.cpu < 0 {
-                        self.task_map.tasks.remove(&task.pid);
-                        continue;
-                    }
-
                     // Update task information and determine vruntime.
                     let vruntime = self.update_enqueued(&task);
                     let timestamp = Self::now();

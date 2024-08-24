@@ -77,7 +77,7 @@ pub const RL_PREEMPT_CPU: u64 = bpf_intf::RL_PREEMPT_CPU as u64;
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct QueuedTask {
     pub pid: i32,              // pid that uniquely identifies a task
-    pub cpu: i32,              // CPU where the task is running (-1 = exiting)
+    pub cpu: i32,              // CPU where the task is running
     pub sum_exec_runtime: u64, // Total cpu time
     pub weight: u64,           // Task static priority
     cpumask_cnt: u64,          // cpumask generation counter (private)
@@ -397,8 +397,6 @@ impl<'cb> BpfScheduler<'cb> {
     }
 
     // Receive a task to be scheduled from the BPF dispatcher.
-    //
-    // NOTE: if task.cpu is negative the task is exiting and it does not require to be scheduled.
     pub fn dequeue_task(&mut self) -> Result<Option<QueuedTask>, i32> {
         match self.queued.consume_raw() {
             0 => Ok(None),
