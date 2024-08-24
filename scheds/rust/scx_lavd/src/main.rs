@@ -68,28 +68,27 @@ struct Opts {
     #[clap(long = "balanced", action = clap::ArgAction::SetTrue)]
     balanced: bool,
 
-    /// The following 4 options are set automatically by the power mode (above), but they can be
-    /// set independently if desired:
-
     /// Disable core compaction and schedule tasks across all online CPUs. Core compaction attempts
     /// to keep idle CPUs idle in favor of scheduling tasks on CPUs that are already
-    /// awake. See main.bpf.c for more info.
+    /// awake. See main.bpf.c for more info. Normally set by the power mode, but can be set independently if
+    /// desired.
     #[clap(long = "no-core-compaction", action = clap::ArgAction::SetTrue)]
     no_core_compaction: bool,
 
     /// Schedule tasks on SMT siblings before using other physcial cores when core compaction is
-    /// enabled.
+    /// enabled. Normally set by the power mode, but can be set independently if desired.
     #[clap(long = "prefer-smt-core", action = clap::ArgAction::SetTrue)]
     prefer_smt_core: bool,
 
     /// Schedule tasks on little (efficiency) cores before big (performance) cores when core compaction is
-    /// enabled.
+    /// enabled. Normally set by the power mode, but can be set independently if desired.
     #[clap(long = "prefer-little-core", action = clap::ArgAction::SetTrue)]
     prefer_little_core: bool,
 
     /// Disable controlling the CPU frequency. In order to improve latency and responsiveness of
     /// performance-critical tasks, scx_lavd increases the CPU frequency even if CPU usage is low.
-    /// See main.bpf.c for more info.
+    /// See main.bpf.c for more info. Normally set by the power mode, but can be set independently
+    /// if desired.
     #[clap(long = "no-freq-scaling", action = clap::ArgAction::SetTrue)]
     no_freq_scaling: bool,
 
