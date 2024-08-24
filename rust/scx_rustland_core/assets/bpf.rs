@@ -182,7 +182,6 @@ impl<'cb> BpfScheduler<'cb> {
         exit_dump_len: u32,
         partial: bool,
         slice_us: u64,
-        low_power: bool,
         verbose: bool,
         debug: bool,
     ) -> Result<Self> {
@@ -241,7 +240,6 @@ impl<'cb> BpfScheduler<'cb> {
 
         skel.maps.bss_data.usersched_pid = std::process::id();
         skel.maps.rodata_data.slice_ns = slice_us * 1000;
-        skel.maps.rodata_data.low_power = low_power;
         skel.maps.rodata_data.debug = debug;
 
         // Attach BPF scheduler.

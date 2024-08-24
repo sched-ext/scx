@@ -83,14 +83,6 @@ struct Opts {
     #[clap(short = 'S', long, default_value = "500")]
     slice_us_min: u64,
 
-    /// When low-power mode is enabled, the scheduler behaves in a more non-work conserving way:
-    /// the CPUs operate at reduced capacity, which slows down CPU-bound tasks, enhancing the
-    /// prioritization of interactive workloads.  In summary, enabling low-power mode will limit
-    /// the performance of CPU-intensive tasks, reducing power consumption, while maintaining
-    /// effective prioritization of interactive tasks.
-    #[clap(short = 'l', long, action = clap::ArgAction::SetTrue)]
-    low_power: bool,
-
     /// If specified, only tasks which have their scheduling policy set to SCHED_EXT using
     /// sched_setscheduler(2) are switched. Otherwise, all tasks are switched.
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
@@ -275,7 +267,6 @@ impl<'a> Scheduler<'a> {
             opts.exit_dump_len,
             opts.partial,
             opts.slice_us,
-            opts.low_power,
             opts.verbose,
             opts.debug,
         )?;

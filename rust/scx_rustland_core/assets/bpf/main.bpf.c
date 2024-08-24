@@ -87,19 +87,6 @@ const volatile bool debug;
 		bpf_printk(_fmt, ##__VA_ARGS__);			\
 } while(0)
 
- /*
-  * Enable/disable low-power mode.
-  *
-  * When low-power mode is enabled, the scheduler behaves in a more non-work
-  * conserving way: the CPUs operate at reduced capacity, which slows down
-  * CPU-bound tasks, enhancing the prioritization of interactive workloads.
-  *
-  * In summary, enabling low-power mode will limit the performance of
-  * CPU-intensive tasks, reducing power consumption, while maintaining
-  * effective prioritization of interactive tasks.
-  */
-const volatile bool low_power;
-
 /*
  * CPUs in the system have SMT is enabled.
  */
@@ -880,8 +867,7 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 		 * Wake up the idle CPU and trigger a resched, so that it can
 		 * immediately accept dispatched tasks.
 		 */
-		if (!low_power || !nr_running)
-			scx_bpf_kick_cpu(cpu, 0);
+		scx_bpf_kick_cpu(cpu, 0);
 	}
 }
 
