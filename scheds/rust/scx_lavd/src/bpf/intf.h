@@ -133,7 +133,7 @@ struct cpdom_ctx {
 	u8	nr_neighbors[LAVD_CPDOM_MAX_DIST];  /* number of neighbors per distance */
 	u64	neighbor_bits[LAVD_CPDOM_MAX_DIST]; /* bitmask of neighbor bitmask per distance */
 	u64	__cpumask[LAVD_CPU_ID_MAX/64];	    /* cpumasks belongs to this compute domain */
-};
+} __attribute__((aligned(CACHELINE_SIZE)));
 
 /*
  * CPU context
@@ -199,6 +199,7 @@ struct cpu_ctx {
 	struct bpf_cpumask __kptr *tmp_a_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_o_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_t_mask;	/* temporary cpu mask */
+	struct bpf_cpumask __kptr *tmp_t2_mask;	/* temporary cpu mask */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 /*
