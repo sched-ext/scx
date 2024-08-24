@@ -87,14 +87,6 @@ const volatile bool debug;
 		bpf_printk(_fmt, ##__VA_ARGS__);			\
 } while(0)
 
-/*
- * Enable/disable full user-space mode.
- *
- * In full user-space mode all events and actions will be sent to user-space,
- * basically disabling any optimization to bypass the user-space scheduler.
- */
-const volatile bool full_user;
-
  /*
   * Enable/disable low-power mode.
   *
@@ -387,19 +379,8 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 		break;
 	default:
 		tctx = lookup_task_ctx(p);
-		if (!tctx) {
-			/*
-			 * If the task doesn't have a context anymore, simply
-			 * bounce it to the first CPU available.
-			 */
-			scx_bpf_dispatch(p, SHARED_DSQ, slice, enq_flags);
-			__sync_fetch_and_add(&nr_bounce_dispatches, 1);
-
-			dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu bounce",
-				p->pid, p->comm, dsq_id, enq_flags, slice);
+		if (!tctx)
 			return;
-		}
-
 		/*
 		 * Dispatch a task to a specific per-CPU DSQ if the target CPU
 		 * can be used (according to the cpumask), otherwise redirect
@@ -624,36 +605,35 @@ out_put_cpumask:
 	return cpu;
 }
 
-/*
- * Select the target CPU where a task can be executed.
- *
- * The idea here is to try to find an idle CPU in the system, and preferably
- * maintain the task on the same CPU. If we can find an idle CPU in the system
- * dispatch the task directly bypassing the user-space scheduler. Otherwise,
- * send the task to the user-space scheduler, maintaining the previously used
- * CPU as a hint for the scheduler.
- *
- * Decision made in this function is not final. The user-space scheduler may
- * decide to move the task to a different CPU later, if needed.
- */
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	s32 cpu;
-
 	/*
-	 * When full_user is enabled, the user-space scheduler is responsible
-	 * for selecting a target CPU based on its scheduling logic and
-	 * possibly its own idle tracking mechanism.
+	 * Completely delegate the CPU selection logic to the user-space
+	 * scheduler.
 	 */
-	if (full_user)
-		return prev_cpu;
-
-	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
-	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0))
-		return cpu;
-
 	return prev_cpu;
+}
+
+/*
+ * Select an idle CPU for a specific task from the user-space scheduler.
+ */
+SEC("syscall")
+int rs_select_cpu(struct task_cpu_arg *input)
+{
+	struct task_struct *p;
+	int cpu;
+
+	p = bpf_task_from_pid(input->pid);
+	if (!p)
+		return -EINVAL;
+	bpf_rcu_read_lock();
+	cpu = pick_idle_cpu(p, input->cpu, input->flags);
+	bpf_rcu_read_unlock();
+
+	bpf_task_release(p);
+
+	return cpu;
 }
 
 /*
@@ -719,7 +699,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * interactivity problems or unfairness if there are too many softirqs
 	 * being scheduled (e.g., in presence of high RX network traffic).
 	 */
-	if (!full_user && is_kthread(p) && p->nr_cpus_allowed == 1)
+	if (is_kthread(p) && p->nr_cpus_allowed == 1)
 		if (!dispatch_direct_cpu(p, cpu, enq_flags))
 			return;
 

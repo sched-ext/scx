@@ -83,14 +83,6 @@ struct Opts {
     #[clap(short = 'S', long, default_value = "500")]
     slice_us_min: u64,
 
-    /// If specified, all the scheduling events and actions will be processed in user-space,
-    /// disabling any form of in-kernel optimization.
-    ///
-    /// This mode will likely make the system less responsive, but more predictable in terms of
-    /// performance.
-    #[clap(short = 'u', long, action = clap::ArgAction::SetTrue)]
-    full_user: bool,
-
     /// When low-power mode is enabled, the scheduler behaves in a more non-work conserving way:
     /// the CPUs operate at reduced capacity, which slows down CPU-bound tasks, enhancing the
     /// prioritization of interactive workloads.  In summary, enabling low-power mode will limit
@@ -283,7 +275,6 @@ impl<'a> Scheduler<'a> {
             opts.exit_dump_len,
             opts.partial,
             opts.slice_us,
-            opts.full_user,
             opts.low_power,
             opts.verbose,
             opts.debug,
@@ -423,12 +414,15 @@ impl<'a> Scheduler<'a> {
                 let mut dispatched_task = DispatchedTask::new(&task.qtask);
 
                 // Assign the time slice to the task.
-                dispatched_task.set_slice_ns(slice_ns);
+                dispatched_task.slice_ns = slice_ns;
 
-                // Dispatch task on the first CPU available if it is classified as
-                // interactive, non-interactive tasks will continue to run on the same CPU.
-                if task.is_interactive {
-                    dispatched_task.set_flag(RL_CPU_ANY);
+                // Try to pick an idle CPU for the task.
+                let cpu = self.bpf.select_cpu(dispatched_task.pid, dispatched_task.cpu, 0);
+                if cpu >= 0 {
+                    dispatched_task.cpu = cpu;
+                } else {
+                    // Dispatch task on the first CPU available.
+                    dispatched_task.flags |= RL_CPU_ANY;
                 }
 
                 // Send task to the BPF dispatcher.

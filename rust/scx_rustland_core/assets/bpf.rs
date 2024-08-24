@@ -6,10 +6,13 @@
 use std::mem::MaybeUninit;
 
 use crate::bpf_intf;
+use crate::bpf_intf::*;
 use crate::bpf_skel::*;
 
 use std::fs::File;
 use std::io::Read;
+use std::ffi::c_int;
+use std::ffi::c_ulong;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -17,6 +20,7 @@ use anyhow::Result;
 use plain::Plain;
 
 use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
@@ -82,11 +86,11 @@ pub struct QueuedTask {
 // Task queued for dispatching to the BPF component (see bpf_intf::dispatched_task_ctx).
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct DispatchedTask {
-    pid: i32,         // pid that uniquely identifies a task
-    cpu: i32,         // target CPU selected by the scheduler
-    flags: u64,       // special dispatch flags
-    slice_ns: u64,    // time slice assigned to the task (0 = default)
-    cpumask_cnt: u64, // cpumask generation counter (private)
+    pub pid: i32,         // pid that uniquely identifies a task
+    pub cpu: i32,         // target CPU selected by the scheduler
+    pub flags: u64,       // special dispatch flags
+    pub slice_ns: u64,    // time slice assigned to the task (0 = default)
+    cpumask_cnt: u64,     // cpumask generation counter (private)
 }
 
 impl DispatchedTask {
@@ -102,24 +106,6 @@ impl DispatchedTask {
             cpumask_cnt: task.cpumask_cnt,
             slice_ns: 0, // use default time slice
         }
-    }
-
-    // Assign a specific CPU to a task.
-    #[allow(dead_code)]
-    pub fn set_cpu(&mut self, cpu: i32) {
-        self.cpu = cpu;
-    }
-
-    // Assign a specific dispatch flag to a task.
-    #[allow(dead_code)]
-    pub fn set_flag(&mut self, flag: u64) {
-        self.flags |= flag;
-    }
-
-    // Assign a specific time slice to a task.
-    #[allow(dead_code)]
-    pub fn set_slice_ns(&mut self, slice_ns: u64) {
-        self.slice_ns = slice_ns;
     }
 }
 
@@ -196,7 +182,6 @@ impl<'cb> BpfScheduler<'cb> {
         exit_dump_len: u32,
         partial: bool,
         slice_us: u64,
-        full_user: bool,
         low_power: bool,
         verbose: bool,
         debug: bool,
@@ -256,7 +241,6 @@ impl<'cb> BpfScheduler<'cb> {
 
         skel.maps.bss_data.usersched_pid = std::process::id();
         skel.maps.rodata_data.slice_ns = slice_us * 1000;
-        skel.maps.rodata_data.full_user = full_user;
         skel.maps.rodata_data.low_power = low_power;
         skel.maps.rodata_data.debug = debug;
 
@@ -388,6 +372,28 @@ impl<'cb> BpfScheduler<'cb> {
         };
 
         unsafe { pthread_setschedparam(pthread_self(), SCHED_EXT, &param as *const sched_param) }
+    }
+
+    // Pick an idle CPU for the target PID.
+    pub fn select_cpu(&mut self, pid: i32, cpu: i32, flags: u64) -> i32 {
+        let prog = &mut self.skel.progs.rs_select_cpu;
+        let mut args = task_cpu_arg {
+            pid: pid as c_int,
+            cpu: cpu as c_int,
+            flags: flags as c_ulong,
+        };
+        let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
+            ..Default::default()
+        };
+        let out = prog.test_run(input).unwrap();
+
+        out.return_value as i32
     }
 
     // Receive a task to be scheduled from the BPF dispatcher.

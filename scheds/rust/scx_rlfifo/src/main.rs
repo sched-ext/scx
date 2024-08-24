@@ -33,7 +33,6 @@ impl<'a> Scheduler<'a> {
             0,                        // exit_dump_len (buffer size of exit info)
             false,                    // partial (include all tasks if false)
             5000,                     // slice_ns (default task time slice)
-            true,                     // full_user (schedule all tasks in user-space)
             false,                    // low_power (low power mode)
             false,                    // verbose (verbose output)
             false,                    // debug (debug mode)
@@ -59,7 +58,7 @@ impl<'a> Scheduler<'a> {
                         let mut dispatched_task = DispatchedTask::new(&task);
 
                         // Allow to dispatch on the first CPU available.
-                        dispatched_task.set_flag(RL_CPU_ANY);
+                        dispatched_task.flags |= RL_CPU_ANY;
 
                         let _ = self.bpf.dispatch_task(&dispatched_task);
 
