@@ -215,6 +215,11 @@ struct {
  */
 struct task_ctx {
 	/*
+	 * Time slice assigned to the task.
+	 */
+	u64 slice_ns;
+
+	/*
 	 * cpumask generation counter: used to verify the validity of the
 	 * current task's cpumask.
 	 */
@@ -351,28 +356,47 @@ static u64 cpu_to_dsq(s32 cpu)
 }
 
 /*
- * Dispatch a task to a target DSQ, waking up the corresponding CPU, if needed.
+ * Return the time slice assigned to the task.
  */
-static void
-dispatch_task(struct task_struct *p, u64 dsq_id,
-	      u64 cpumask_cnt, u64 task_slice_ns, u64 enq_flags)
+static inline u64 task_slice(struct task_struct *p)
 {
 	struct task_ctx *tctx;
-	u64 slice = task_slice_ns ? : slice_ns;
+
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
+		return slice_ns;
+	return tctx->slice_ns;
+}
+
+/*
+ * Dispatch a task to a target DSQ, waking up the corresponding CPU, if needed.
+ */
+static void dispatch_task(struct task_struct *p, u64 dsq_id,
+			  u64 cpumask_cnt, u64 slice, u64 enq_flags)
+{
+	struct task_ctx *tctx;
 	u64 curr_cpumask_cnt;
 	bool force_shared = false;
 	s32 cpu = scx_bpf_task_cpu(p);
 
+	/*
+	 * Update task's time slice in its context.
+	 */
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
+		return;
+	tctx->slice_ns = slice;
+
+	/*
+	 * Dispatch task to the target DSQ.
+	 */
 	switch (dsq_id) {
 	case SHARED_DSQ:
-		scx_bpf_dispatch(p, dsq_id, slice, enq_flags);
+		scx_bpf_dispatch(p, dsq_id, SCX_SLICE_DFL, enq_flags);
 		dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu",
 			p->pid, p->comm, dsq_id, enq_flags, slice);
 		break;
 	default:
-		tctx = lookup_task_ctx(p);
-		if (!tctx)
-			return;
 		/*
 		 * Dispatch a task to a specific per-CPU DSQ if the target CPU
 		 * can be used (according to the cpumask), otherwise redirect
@@ -389,7 +413,7 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 		 * core sched-ext code, potentially selecting a different cpu
 		 * and a different cpumask.
 		 */
-		scx_bpf_dispatch(p, dsq_id, slice, enq_flags);
+		scx_bpf_dispatch(p, dsq_id, SCX_SLICE_DFL, enq_flags);
 
 		/* Read current cpumask generation counter */
 		curr_cpumask_cnt = tctx->cpumask_cnt;
@@ -417,7 +441,7 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 			scx_bpf_dispatch_cancel();
 			__sync_fetch_and_add(&nr_bounce_dispatches, 1);
 
-			scx_bpf_dispatch(p, SHARED_DSQ, slice, enq_flags);
+			scx_bpf_dispatch(p, SHARED_DSQ, SCX_SLICE_DFL, enq_flags);
 			dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu bounce",
 				p->pid, p->comm, dsq_id, enq_flags, slice);
 			return;
@@ -457,7 +481,7 @@ static bool dispatch_user_scheduler(void)
 	 * Dispatch the scheduler on the first CPU available, likely the
 	 * current one.
 	 */
-	dispatch_task(p, SHARED_DSQ, 0, 0, 0);
+	dispatch_task(p, SHARED_DSQ, 0, slice_ns, 0);
 	bpf_task_release(p);
 
 	return true;
@@ -649,7 +673,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	task = bpf_ringbuf_reserve(&queued, sizeof(*task), 0);
 	if (!task) {
 		sched_congested(p);
-		dispatch_task(p, SHARED_DSQ, 0, 0, enq_flags);
+		dispatch_task(p, SHARED_DSQ, 0, slice_ns, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -812,8 +836,7 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 	 * Ensure time slice never exceeds slice_ns when a task is started on a
 	 * CPU.
 	 */
-	if (p->scx.slice > slice_ns)
-		p->scx.slice = slice_ns;
+	p->scx.slice = task_slice(p);
 
 	/*
 	 * Mark the CPU as busy by setting the pid as owner (ignoring the
