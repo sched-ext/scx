@@ -994,6 +994,7 @@ dependencies = [
  "anyhow",
  "bitvec",
  "clap",
+ "crossbeam",
  "ctrlc",
  "fb_procfs",
  "hex",
@@ -1004,7 +1005,10 @@ dependencies = [
  "ordered-float 3.9.2",
  "plain",
  "rlimit",
+ "scx_stats",
+ "scx_stats_derive",
  "scx_utils",
+ "serde",
  "simplelog",
  "static_assertions",
 ]
@@ -1019,6 +1023,17 @@ dependencies = [
  "log",
  "quote",
  "serde",
+ "serde_json",
+ "syn",
+]
+
+[[package]]
+name = "scx_stats_derive"
+version = "1.0.3"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "scx_stats",
  "serde_json",
  "syn",
 ]

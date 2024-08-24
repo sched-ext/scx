@@ -11,6 +11,9 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
+mod stats;
+use stats::TaskSample;
+
 use libc::c_char;
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -27,6 +30,10 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use crossbeam::channel;
+use crossbeam::channel::Receiver;
+use crossbeam::channel::Sender;
+use crossbeam::channel::TrySendError;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
@@ -106,7 +113,6 @@ struct Opts {
 
 impl Opts {
     fn proc(&mut self) -> Option<&mut Self> {
-
         if self.performance {
             self.no_core_compaction = true;
             self.prefer_smt_core = false;
@@ -119,7 +125,7 @@ impl Opts {
             self.prefer_little_core = true;
             self.no_freq_scaling = false;
         }
-        if self.balanced{
+        if self.balanced {
             self.no_core_compaction = false;
             self.prefer_smt_core = false;
             self.prefer_little_core = false;
@@ -217,8 +223,10 @@ impl FlatTopology {
     }
 
     /// Build a flat-structured list of CPUs in a preference order
-    fn build_cpu_fids(prefer_smt_core: bool, prefer_little_core: bool) ->
-        Option<(Vec<CpuFlatId>, usize, usize)> {
+    fn build_cpu_fids(
+        prefer_smt_core: bool,
+        prefer_little_core: bool,
+    ) -> Option<(Vec<CpuFlatId>, usize, usize)> {
         let topo = Topology::new().expect("Failed to build host topology");
         let mut cpu_fids = Vec::new();
 
@@ -404,6 +412,7 @@ struct Scheduler<'a> {
     nr_cpus_onln: u64,
     rb_mgr: libbpf_rs::RingBuffer<'static>,
     intrspc: introspec,
+    intrspc_rx: Receiver<TaskSample>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -431,9 +440,14 @@ impl<'a> Scheduler<'a> {
         let struct_ops = Some(scx_ops_attach!(skel, lavd_ops)?);
 
         // Build a ring buffer for instrumentation
+        let (intrspc_tx, intrspc_rx) = channel::bounded(4096);
         let rb_map = &mut skel.maps.introspec_msg;
         let mut builder = libbpf_rs::RingBufferBuilder::new();
-        builder.add(rb_map, Scheduler::print_bpf_msg).unwrap();
+        builder
+            .add(rb_map, move |data| {
+                Scheduler::relay_introspec(data, &intrspc_tx)
+            })
+            .unwrap();
         let rb_mgr = builder.build().unwrap();
 
         Ok(Self {
@@ -442,6 +456,7 @@ impl<'a> Scheduler<'a> {
             nr_cpus_onln,
             rb_mgr,
             intrspc: introspec::init(opts),
+            intrspc_rx,
         })
     }
 
@@ -491,7 +506,7 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    fn print_bpf_msg(data: &[u8]) -> i32 {
+    fn relay_introspec(data: &[u8], intrspc_tx: &Sender<TaskSample>) -> i32 {
         let mt = msg_task_ctx::from_bytes(data);
         let tx = mt.taskc_x;
         let tc = mt.taskc;
@@ -501,43 +516,7 @@ impl<'a> Scheduler<'a> {
             return 0;
         }
 
-        // Print a message from the BPF scheduler
         let mseq = Scheduler::get_msg_seq_id();
-
-        if mseq % 32 == 1 {
-            info!(
-                "| {:6} | {:7} | {:17} \
-                   | {:5} | {:4} | {:4} \
-                   | {:14} | {:8} | {:7} \
-                   | {:8} | {:7} | {:8} \
-                   | {:7} | {:9} | {:9} \
-                   | {:9} | {:9} | {:8} \
-                   | {:8} | {:8} | {:8} \
-                   | {:6} |",
-                "mseq",
-                "pid",
-                "comm",
-                "stat",
-                "cpu",
-                "vtmc",
-                "vddln_ns",
-                "slc_ns",
-                "grdy_rt",
-                "lat_cri",
-                "avg_lc",
-                "st_prio",
-                "slc_bst",
-                "run_freq",
-                "run_tm_ns",
-                "wait_freq",
-                "wake_freq",
-                "perf_cri",
-                "avg_pc",
-                "cpufreq",
-                "cpu_util",
-                "nr_act",
-            );
-        }
 
         let c_tx_cm: *const c_char = (&tx.comm as *const [c_char; 17]) as *const c_char;
         let c_tx_cm_str: &CStr = unsafe { CStr::from_ptr(c_tx_cm) };
@@ -547,40 +526,33 @@ impl<'a> Scheduler<'a> {
         let c_tx_st_str: &CStr = unsafe { CStr::from_ptr(c_tx_st) };
         let tx_stat: &str = c_tx_st_str.to_str().unwrap();
 
-        info!(
-            "| {:6} | {:7} | {:17} \
-               | {:5} | {:4} | {:4} \
-               | {:14} | {:8} | {:7} \
-               | {:8} | {:7} | {:8} \
-               | {:7} | {:9} | {:9} \
-               | {:9} | {:9} | {:8} \
-               | {:8} | {:8} | {:8} \
-               | {:6} |",
+        match intrspc_tx.try_send(TaskSample {
             mseq,
-            tx.pid,
-            tx_comm,
-            tx_stat,
-            tx.cpu_id,
-            tc.victim_cpu,
-            tc.vdeadline_delta_ns,
-            tc.slice_ns,
-            tc.greedy_ratio,
-            tc.lat_cri,
-            tx.avg_lat_cri,
-            tx.static_prio,
-            tc.slice_boost_prio,
-            tc.run_freq,
-            tc.run_time_ns,
-            tc.wait_freq,
-            tc.wake_freq,
-            tc.perf_cri,
-            tx.avg_perf_cri,
-            tx.cpuperf_cur,
-            tx.cpu_util,
-            tx.nr_active,
-        );
-
-        0
+            pid: tx.pid,
+            comm: tx_comm.into(),
+            stat: tx_stat.into(),
+            cpu_id: tx.cpu_id,
+            victim_cpu: tc.victim_cpu,
+            vdeadline_delta_ns: tc.vdeadline_delta_ns,
+            slice_ns: tc.slice_ns,
+            greedy_ratio: tc.greedy_ratio,
+            lat_cri: tc.lat_cri,
+            avg_lat_cri: tx.avg_lat_cri,
+            static_prio: tx.static_prio,
+            slice_boost_prio: tc.slice_boost_prio,
+            run_freq: tc.run_freq,
+            run_time_ns: tc.run_time_ns,
+            wait_freq: tc.wait_freq,
+            wake_freq: tc.wake_freq,
+            perf_cri: tc.perf_cri,
+            avg_perf_cri: tx.avg_perf_cri,
+            cpuperf_cur: tx.cpuperf_cur,
+            cpu_util: tx.cpu_util,
+            nr_active: tx.nr_active,
+        }) {
+            Ok(()) | Err(TrySendError::Full(_)) => 0,
+            Err(e) => panic!("failed to send on intrspc_tx ({})", &e),
+        }
     }
 
     fn prep_introspec(&mut self) -> u64 {
@@ -616,6 +588,9 @@ impl<'a> Scheduler<'a> {
             let interval_ms = self.prep_introspec();
             std::thread::sleep(Duration::from_millis(interval_ms));
             self.rb_mgr.poll(Duration::from_millis(100)).unwrap();
+            while let Ok(ts) = self.intrspc_rx.try_recv() {
+                ts.format(&mut std::io::stdout()).unwrap();
+            }
             self.cleanup_introspec();
         }
         self.rb_mgr.consume().unwrap();
