@@ -69,7 +69,7 @@ impl<'a> Scheduler<'a> {
                 }
                 Ok(None) => {
                     // Notify the BPF component that all tasks have been scheduled and dispatched.
-                    self.bpf.update_tasks(Some(0), Some(0));
+                    self.bpf.notify_complete(0);
                     break;
                 }
                 Err(_) => {

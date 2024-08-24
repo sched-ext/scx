@@ -357,11 +357,6 @@ impl<'a> Scheduler<'a> {
                     });
                 }
                 Ok(None) => {
-                    // Reset nr_queued and update nr_scheduled, to notify the dispatcher that
-                    // queued tasks are drained, but there is still some work left to do in the
-                    // scheduler.
-                    self.bpf
-                        .update_tasks(Some(0), Some(self.task_pool.tasks.len() as u64));
                     break;
                 }
                 Err(err) => {
@@ -423,12 +418,6 @@ impl<'a> Scheduler<'a> {
             }
             None => {}
         }
-
-        // Update nr_scheduled to notify the dispatcher that all the tasks received by the
-        // scheduler has been dispatched, so there is no reason to re-activate the scheduler,
-        // unless more tasks are queued.
-        self.bpf
-            .update_tasks(None, Some(self.task_pool.tasks.len() as u64));
     }
 
     // Main scheduling function (called in a loop to periodically drain tasks from the queued list
@@ -437,8 +426,8 @@ impl<'a> Scheduler<'a> {
         self.drain_queued_tasks();
         self.dispatch_task();
 
-        // Yield to avoid using too much CPU from the scheduler itself.
-        thread::yield_now();
+        // Notify the dispatcher if there are still peding tasks to be processed,
+        self.bpf.notify_complete(self.task_pool.tasks.len() as u64);
     }
 
     // Get total page faults from /proc/self/stat.

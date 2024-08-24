@@ -273,21 +273,15 @@ impl<'cb> BpfScheduler<'cb> {
         }
     }
 
-    // Update the amount of tasks that have been queued to the user-space scheduler and dispatched.
-    //
-    // This method is used to notify the BPF component if the user-space scheduler has still some
-    // pending actions to complete (based on the counter of queued and scheduled tasks).
+    // Notify the BPF component that the user-space scheduler has completed its scheduling cycle,
+    // updating the amount tasks that are still peding.
     //
     // NOTE: do not set allow(dead_code) for this method, any scheduler must use this method at
     // some point, otherwise the BPF component will keep waking-up the user-space scheduler in a
     // busy loop, causing unnecessary high CPU consumption.
-    pub fn update_tasks(&mut self, nr_queued: Option<u64>, nr_scheduled: Option<u64>) {
-        if let Some(queued) = nr_queued {
-            self.skel.maps.bss_data.nr_queued = queued;
-        }
-        if let Some(scheduled) = nr_scheduled {
-            self.skel.maps.bss_data.nr_scheduled = scheduled;
-        }
+    pub fn notify_complete(&mut self, nr_pending: u64) {
+        self.skel.maps.bss_data.nr_scheduled = nr_pending;
+        std::thread::yield_now();
     }
 
     // Counter of the online CPUs.
@@ -397,7 +391,10 @@ impl<'cb> BpfScheduler<'cb> {
     // Receive a task to be scheduled from the BPF dispatcher.
     pub fn dequeue_task(&mut self) -> Result<Option<QueuedTask>, i32> {
         match self.queued.consume_raw() {
-            0 => Ok(None),
+            0 => {
+                self.skel.maps.bss_data.nr_queued = 0;
+                Ok(None)
+            }
             LIBBPF_STOP => {
                 // A valid task is received, convert data to a proper task struct.
                 let task = unsafe { EnqueuedMessage::from_bytes(&BUF.0).to_queued_task() };
