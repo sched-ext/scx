@@ -1,11 +1,22 @@
+use anyhow::bail;
 use anyhow::Result;
+use scx_stats::Meta;
+use scx_stats::ScxStatsOps;
+use scx_stats::ScxStatsServerData;
+use scx_stats::StatsOpener;
+use scx_stats::StatsReader;
+use scx_stats::ToJson;
 use scx_stats_derive::Stats;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::io::Write;
+use std::sync::atomic::Ordering;
+use std::thread::ThreadId;
+use std::time::Duration;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
-pub struct TaskSample {
+pub struct SchedSample {
     pub mseq: u64,
     pub pid: i32,
     pub comm: String,
@@ -30,7 +41,7 @@ pub struct TaskSample {
     pub nr_active: u32,
 }
 
-impl TaskSample {
+impl SchedSample {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
@@ -108,4 +119,111 @@ impl TaskSample {
         )?;
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
+pub struct SchedSamples {
+    pub samples: Vec<SchedSample>,
+}
+
+#[derive(Debug)]
+pub enum StatsReq {
+    NewSampler(ThreadId),
+    SchedSamplesNr {
+        tid: ThreadId,
+        nr_samples: u64,
+        interval_ms: u64,
+    },
+}
+
+impl StatsReq {
+    fn from_args(
+        tid: ThreadId,
+        nr_cpus_onln: u64,
+        args: &BTreeMap<String, String>,
+    ) -> Result<Self> {
+        let mut nr_samples = 1;
+
+        if let Some(arg) = args.get("nr_samples") {
+            nr_samples = arg.trim().parse()?;
+        }
+
+        let mut interval_ms = 1000;
+        if nr_samples > nr_cpus_onln {
+            // More samples, shorter sampling interval.
+            let f = nr_samples / nr_cpus_onln * 2;
+            interval_ms /= f;
+        }
+
+        Ok(Self::SchedSamplesNr {
+            tid,
+            nr_samples,
+            interval_ms,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum StatsRes {
+    Ack,
+    Bye,
+    SchedSamples(SchedSamples),
+}
+
+pub fn server_data(nr_cpus_onln: u64) -> ScxStatsServerData<StatsReq, StatsRes> {
+    let samples_open: Box<dyn StatsOpener<StatsReq, StatsRes>> =
+        Box::new(move |(req_ch, res_ch)| {
+            let tid = std::thread::current().id();
+            req_ch.send(StatsReq::NewSampler(tid))?;
+            match res_ch.recv()? {
+                StatsRes::Ack => {}
+                res => bail!("invalid response: {:?}", &res),
+            }
+
+            let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
+                Box::new(move |args, (req_ch, res_ch)| {
+                    let req = StatsReq::from_args(tid, nr_cpus_onln, args)?;
+                    req_ch.send(req)?;
+
+                    let samples = match res_ch.recv()? {
+                        StatsRes::SchedSamples(v) => v,
+                        StatsRes::Bye => bail!("preempted by another sampler"),
+                        res => bail!("invalid response: {:?}", &res),
+                    };
+
+                    samples.to_json()
+                });
+            Ok(read)
+        });
+
+    ScxStatsServerData::new()
+        .add_meta(SchedSample::meta())
+        .add_ops(
+            "sched_samples",
+            ScxStatsOps {
+                open: samples_open,
+                close: None,
+            },
+        )
+}
+
+pub fn monitor_sched_samples(nr_samples: u64) -> Result<()> {
+    println!(
+        "    stat: ('L'atency-critical, 'R'egular) (performance-'H'ungry, performance-'I'nsensitive) ('B'ig, li'T'tle) ('E'ligigle, 'G'reedy) ('P'reempting, 'N'ot)");
+
+    scx_utils::monitor_stats::<SchedSamples>(
+        &vec![
+            ("target".into(), "sched_samples".into()),
+            ("nr_samples".into(), nr_samples.to_string()),
+        ],
+        Duration::from_secs(0),
+        || !crate::RUNNING.load(Ordering::Relaxed),
+        |ts| {
+            let mut stdout = std::io::stdout();
+            for sample in ts.samples.iter() {
+                sample.format(&mut stdout)?;
+            }
+            Ok(())
+        },
+    )
 }

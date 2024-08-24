@@ -275,7 +275,6 @@ enum {
 struct introspec {
 	volatile u64	arg;
 	volatile u32	cmd;
-	u8		requested;
 };
 
 struct msg_hdr {
