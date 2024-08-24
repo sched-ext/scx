@@ -410,3 +410,4 @@ sched_ext in various ways. Followings are some examples:
 - [Changwoo's blog: sched_ext: a BPF-extensible scheduler class (Part 1) (December, 2023)](https://blogs.igalia.com/changwoo/sched-ext-a-bpf-extensible-scheduler-class-part-1/)
 - [arighi's blog: Getting started with sched-ext development (April, 2024)](https://arighi.blogspot.com/2024/04/getting-started-with-sched-ext.html)
 - [Changwoo's blog: sched_ext: scheduler architecture and interfaces (Part 2) (June, 2024)](https://blogs.igalia.com/changwoo/sched-ext-scheduler-architecture-and-interfaces-part-2/)
+- [arighi's YT channel: scx_bpfland Linux scheduler demo: topology awareness (August, 2024)](https://youtu.be/R-FEZOveG-I)
