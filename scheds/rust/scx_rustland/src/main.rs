@@ -541,7 +541,6 @@ impl<'a> Scheduler<'a> {
     fn sync_interactive_tasks(&mut self, stats: &[TaskStat]) {
         self.interactive_pids.clear();
 
-        info!("{:<8} {:>10} {} <-- interactive tasks", "[pid]", "[nvcsw]", "[comm]");
         for i in 0..stats.len() {
             let stat = &stats[i];
 
@@ -551,13 +550,7 @@ impl<'a> Scheduler<'a> {
                 break;
             }
             self.interactive_pids.push(stat.pid);
-            info!(
-                "{:<8} {:>10} {}",
-                stat.pid, stat.nvcsw, stat.comm
-            );
         }
-
-        log::logger().flush();
     }
 
     fn update_interactive_stats(&mut self) -> std::io::Result<Vec<TaskStat>> {
