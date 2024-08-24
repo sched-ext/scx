@@ -69,7 +69,7 @@ const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 ///
 /// The userspace part performs two roles. First, it makes higher frequency
 /// (100ms) tuning decisions. It identifies CPUs which are not too heavily
-/// loaded and mark them so that they can pull tasks from other overloaded
+/// loaded and marks them so that they can pull tasks from other overloaded
 /// domains on the fly.
 ///
 /// Second, it drives lower frequency (2s) load balancing. It determines
@@ -79,10 +79,10 @@ const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 /// migrated.
 ///
 /// The overhead of userspace operations is low. Load balancing is not
-/// performed frequently but work-conservation is still maintained through
+/// performed frequently, but work-conservation is still maintained through
 /// tuning and greedy execution. Load balancing itself is not that expensive
-/// either. It only accesses per-domain load metrics to determine the
-/// domains that need load balancing and limited number of per-task metrics
+/// either. It only accesses per-domain load metrics to determine the domains
+/// that need load balancing, as well as limited number of per-task metrics
 /// for each pushing domain.
 ///
 /// An earlier variant of this scheduler was used to balance across six
@@ -106,7 +106,7 @@ struct Opts {
     #[clap(short = 'i', long, default_value = "2.0")]
     interval: f64,
 
-    /// Tuner runs at higher frequency than the load balancer to dynamically
+    /// The tuner runs at a higher frequency than the load balancer to dynamically
     /// tune scheduling behavior. Tuning interval in seconds.
     #[clap(short = 'I', long, default_value = "0.1")]
     tune_interval: f64,
@@ -121,8 +121,8 @@ struct Opts {
     cache_level: u32,
 
     /// Instead of using cache locality, set the cpumask for each domain
-    /// manually, provide multiple --cpumasks, one for each domain. E.g.
-    /// --cpumasks 0xff_00ff --cpumasks 0xff00 will create two domains with
+    /// manually. Provide multiple --cpumasks, one for each domain. E.g.
+    /// --cpumasks 0xff_00ff --cpumasks 0xff00 will create two domains, with
     /// the corresponding CPUs belonging to each domain. Each CPU must
     /// belong to precisely one domain.
     #[clap(short = 'C', long, num_args = 1.., conflicts_with = "cache_level")]
@@ -149,9 +149,8 @@ struct Opts {
     #[clap(long, default_value = "0")]
     greedy_threshold_x_numa: u32,
 
-    /// Disable load balancing. Unless disabled, periodically userspace will
-    /// calculate the load factor of each domain and instruct BPF which
-    /// processes to move.
+    /// Disable load balancing. Unless disabled, userspace will periodically calculate
+    /// the load factor of each domain and instruct BPF which processes to move.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     no_load_balance: bool,
 
@@ -170,7 +169,7 @@ struct Opts {
     fifo_sched: bool,
 
     /// Idle CPUs with utilization lower than this will get remote tasks
-    /// directly pushed on them. 0 disables, 100 enables always.
+    /// directly pushed onto them. 0 disables, 100 always enables.
     #[clap(short = 'D', long, default_value = "90.0")]
     direct_greedy_under: f64,
 
@@ -181,7 +180,7 @@ struct Opts {
     kick_greedy_under: f64,
 
     /// Whether tasks can be pushed directly to idle CPUs on NUMA nodes
-    /// different than its domain's node. If direct-greedy-under is disabled,
+    /// different than their domain's node. If direct-greedy-under is disabled,
     /// this option is a no-op. Otherwise, if this option is set to false
     /// (default), tasks will only be directly pushed to idle CPUs if they
     /// reside on the same NUMA node as the task's domain.
@@ -203,7 +202,7 @@ struct Opts {
     #[clap(long)]
     stats: Option<f64>,
 
-    /// Run in stats monitoring mode with the specified interval. Scheduler
+    /// Run in stats monitoring mode with the specified interval. The scheduler
     /// is not launched.
     #[clap(long)]
     monitor: Option<f64>,
