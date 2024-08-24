@@ -54,8 +54,14 @@ impl<'a> Scheduler<'a> {
                 Ok(Some(task)) => {
                     let mut dispatched_task = DispatchedTask::new(&task);
 
-                    // Allow to dispatch on the first CPU available.
-                    dispatched_task.flags |= RL_CPU_ANY;
+                    // Try to pick an idle CPU for the task.
+                    let cpu = self.bpf.select_cpu(dispatched_task.pid, dispatched_task.cpu, 0);
+                    if cpu >= 0 {
+                        dispatched_task.cpu = cpu;
+                    } else {
+                        // Dispatch task on the first CPU available.
+                        dispatched_task.flags |= RL_CPU_ANY;
+                    }
 
                     let _ = self.bpf.dispatch_task(&dispatched_task);
 
