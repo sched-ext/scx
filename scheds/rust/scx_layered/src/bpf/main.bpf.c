@@ -1018,6 +1018,8 @@ static __noinline bool match_one(struct layer_match *match,
 		return p->pid == match->pid;
 	case MATCH_PPID_EQUALS:
 		return p->real_parent->pid == match->ppid;
+	case MATCH_TGID_EQUALS:
+		return p->tgid == match->tgid;
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
 		return result;
@@ -1624,6 +1626,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 					break;
 				case MATCH_PPID_EQUALS:
 					dbg("%s PPID %u", header, match->ppid);
+					break;
+				case MATCH_TGID_EQUALS:
+					dbg("%s TGID %u", header, match->tgid);
 					break;
 				default:
 					scx_bpf_error("%s Invalid kind", header);

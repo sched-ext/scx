@@ -111,6 +111,7 @@ enum layer_match_kind {
 	MATCH_GROUP_ID_EQUALS,
 	MATCH_PID_EQUALS,
 	MATCH_PPID_EQUALS,
+	MATCH_TGID_EQUALS,
 
 	NR_LAYER_MATCH_KINDS,
 };
@@ -125,6 +126,7 @@ struct layer_match {
 	u32		group_id;
 	u32		pid;
 	u32		ppid;
+	u32		tgid;
 };
 
 struct layer_match_ands {
