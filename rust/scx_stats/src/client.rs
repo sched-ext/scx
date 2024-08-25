@@ -1,4 +1,4 @@
-use crate::{ScxStatsErrno, ScxStatsRequest, ScxStatsResponse};
+use crate::{StatsErrno, StatsRequest, StatsResponse};
 use anyhow::{anyhow, bail, Result};
 use log::trace;
 use serde::Deserialize;
@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
-pub struct ScxStatsClient {
+pub struct StatsClient {
     base_path: PathBuf,
     sched_path: PathBuf,
     stats_path: PathBuf,
@@ -16,7 +16,7 @@ pub struct ScxStatsClient {
     reader: Option<BufReader<UnixStream>>,
 }
 
-impl ScxStatsClient {
+impl StatsClient {
     pub fn new() -> Self {
         Self {
             base_path: PathBuf::from("/var/run/scx"),
@@ -61,7 +61,7 @@ impl ScxStatsClient {
         Ok(self)
     }
 
-    pub fn send_request<T>(&mut self, req: &ScxStatsRequest) -> Result<T>
+    pub fn send_request<T>(&mut self, req: &StatsRequest) -> Result<T>
     where
         T: for<'a> Deserialize<'a>,
     {
@@ -76,7 +76,7 @@ impl ScxStatsClient {
         let mut line = String::new();
         self.reader.as_mut().unwrap().read_line(&mut line)?;
         trace!("Received: {}", line.trim());
-        let mut resp: ScxStatsResponse = serde_json::from_str(&line)?;
+        let mut resp: StatsResponse = serde_json::from_str(&line)?;
 
         let (errno, resp) = (
             resp.errno,
@@ -84,7 +84,7 @@ impl ScxStatsClient {
         );
 
         if errno != 0 {
-            Err(anyhow!("{}", &resp).context(ScxStatsErrno(errno)))?;
+            Err(anyhow!("{}", &resp).context(StatsErrno(errno)))?;
         }
 
         Ok(serde_json::from_value(resp)?)
@@ -94,6 +94,6 @@ impl ScxStatsClient {
     where
         T: for<'a> Deserialize<'a>,
     {
-        self.send_request(&ScxStatsRequest::new(req, args))
+        self.send_request(&StatsRequest::new(req, args))
     }
 }

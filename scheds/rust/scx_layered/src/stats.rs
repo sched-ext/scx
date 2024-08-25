@@ -8,13 +8,7 @@ use bitvec::prelude::*;
 use chrono::DateTime;
 use chrono::Local;
 use log::warn;
-use scx_stats::Meta;
-use scx_stats::ScxStatsOps;
-use scx_stats::ScxStatsServerData;
-use scx_stats::StatsCloser;
-use scx_stats::StatsOpener;
-use scx_stats::StatsReader;
-use scx_stats::ToJson;
+use scx_stats::prelude::*;
 use scx_stats_derive::Stats;
 use serde::Deserialize;
 use serde::Serialize;
@@ -432,7 +426,7 @@ pub enum StatsRes {
     Bye,
 }
 
-pub fn server_data() -> ScxStatsServerData<StatsReq, StatsRes> {
+pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
     let open: Box<dyn StatsOpener<StatsReq, StatsRes>> = Box::new(move |(req_ch, res_ch)| {
         let tid = current().id();
         req_ch.send(StatsReq::Hello(tid))?;
@@ -463,12 +457,12 @@ pub fn server_data() -> ScxStatsServerData<StatsReq, StatsRes> {
         }
     });
 
-    ScxStatsServerData::new()
+    StatsServerData::new()
         .add_meta(LayerStats::meta())
         .add_meta(SysStats::meta())
         .add_ops(
             "top",
-            ScxStatsOps {
+            StatsOps {
                 open,
                 close: Some(close),
             },

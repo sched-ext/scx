@@ -1,4 +1,4 @@
-use scx_stats::{ScxStatsClient, ScxStatsMeta};
+use scx_stats::prelude::*;
 use scx_stats_derive::Stats;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -17,10 +17,10 @@ fn main() {
     std::assert_eq!(args().len(), 2, "Usage: client UNIX_SOCKET_PATH");
     let path = args().nth(1).unwrap();
 
-    let mut client = ScxStatsClient::new().set_path(path).connect().unwrap();
+    let mut client = StatsClient::new().set_path(path).connect().unwrap();
 
     println!("===== Requesting \"stats_meta\":");
-    let resp = client.request::<BTreeMap<String, ScxStatsMeta>>("stats_meta", vec![]);
+    let resp = client.request::<BTreeMap<String, StatsMeta>>("stats_meta", vec![]);
     println!("{:#?}", &resp);
 
     println!("\n===== Requesting \"stats\" without arguments:");

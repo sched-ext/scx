@@ -1,11 +1,6 @@
 use anyhow::bail;
 use anyhow::Result;
-use scx_stats::Meta;
-use scx_stats::ScxStatsOps;
-use scx_stats::ScxStatsServerData;
-use scx_stats::StatsOpener;
-use scx_stats::StatsReader;
-use scx_stats::ToJson;
+use scx_stats::prelude::*;
 use scx_stats_derive::Stats;
 use serde::Deserialize;
 use serde::Serialize;
@@ -170,7 +165,7 @@ pub enum StatsRes {
     SchedSamples(SchedSamples),
 }
 
-pub fn server_data(nr_cpus_onln: u64) -> ScxStatsServerData<StatsReq, StatsRes> {
+pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
     let samples_open: Box<dyn StatsOpener<StatsReq, StatsRes>> =
         Box::new(move |(req_ch, res_ch)| {
             let tid = std::thread::current().id();
@@ -196,11 +191,11 @@ pub fn server_data(nr_cpus_onln: u64) -> ScxStatsServerData<StatsReq, StatsRes> 
             Ok(read)
         });
 
-    ScxStatsServerData::new()
+    StatsServerData::new()
         .add_meta(SchedSample::meta())
         .add_ops(
             "sched_samples",
-            ScxStatsOps {
+            StatsOps {
                 open: samples_open,
                 close: None,
             },

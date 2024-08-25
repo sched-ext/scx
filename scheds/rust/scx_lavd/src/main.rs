@@ -46,7 +46,7 @@ use libbpf_rs::OpenObject;
 use log::debug;
 use log::info;
 use log::warn;
-use scx_stats::ScxStatsServer;
+use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -406,7 +406,7 @@ struct Scheduler<'a> {
     intrspc: introspec,
     intrspc_rx: Receiver<SchedSample>,
     sampler_tid: Option<ThreadId>,
-    stats_server: ScxStatsServer<StatsReq, StatsRes>,
+    stats_server: StatsServer<StatsReq, StatsRes>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -432,7 +432,7 @@ impl<'a> Scheduler<'a> {
         // Attach.
         let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, lavd_ops)?);
-        let stats_server = ScxStatsServer::new(stats::server_data(nr_cpus_onln)).launch()?;
+        let stats_server = StatsServer::new(stats::server_data(nr_cpus_onln)).launch()?;
 
         // Build a ring buffer for instrumentation
         let (intrspc_tx, intrspc_rx) = channel::bounded(65536);

@@ -2,12 +2,7 @@ use crate::StatsCtx;
 use anyhow::Result;
 use chrono::DateTime;
 use chrono::Local;
-use scx_stats::Meta;
-use scx_stats::ScxStatsOps;
-use scx_stats::ScxStatsServerData;
-use scx_stats::StatsOpener;
-use scx_stats::StatsReader;
-use scx_stats::ToJson;
+use scx_stats::prelude::*;
 use scx_stats_derive::Stats;
 use scx_utils::Cpumask;
 use serde::Deserialize;
@@ -215,7 +210,7 @@ impl ClusterStats {
     }
 }
 
-pub fn server_data() -> ScxStatsServerData<StatsCtx, (StatsCtx, ClusterStats)> {
+pub fn server_data() -> StatsServerData<StatsCtx, (StatsCtx, ClusterStats)> {
     let open: Box<dyn StatsOpener<StatsCtx, (StatsCtx, ClusterStats)>> =
         Box::new(move |(req_ch, res_ch)| {
             // Send one bogus request on open to establish prev_sc.
@@ -234,11 +229,11 @@ pub fn server_data() -> ScxStatsServerData<StatsCtx, (StatsCtx, ClusterStats)> {
             Ok(read)
         });
 
-    ScxStatsServerData::new()
+    StatsServerData::new()
         .add_meta(DomainStats::meta())
         .add_meta(NodeStats::meta())
         .add_meta(ClusterStats::meta())
-        .add_ops("top", ScxStatsOps { open, close: None })
+        .add_ops("top", StatsOps { open, close: None })
 }
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {

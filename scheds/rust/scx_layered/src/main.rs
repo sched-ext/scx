@@ -43,7 +43,7 @@ use log::debug;
 use log::info;
 use log::trace;
 use log::warn;
-use scx_stats::ScxStatsServer;
+use scx_stats::prelude::*;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
@@ -1384,7 +1384,7 @@ struct Scheduler<'a, 'b> {
     nr_layer_cpus_ranges: Vec<(usize, usize)>,
     processing_dur: Duration,
 
-    stats_server: ScxStatsServer<StatsReq, StatsRes>,
+    stats_server: StatsServer<StatsReq, StatsRes>,
 }
 
 impl<'a, 'b> Scheduler<'a, 'b> {
@@ -1620,7 +1620,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         // Attach.
         let struct_ops = scx_ops_attach!(skel, layered)?;
-        let stats_server = ScxStatsServer::new(stats::server_data()).launch()?;
+        let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         let sched = Self {
             struct_ops: Some(struct_ops),
@@ -1938,8 +1938,8 @@ fn main() -> Result<()> {
     let opts = Opts::parse();
 
     if opts.help_stats {
-	stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
-	return Ok(());
+        stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
+        return Ok(());
     }
 
     let llv = match opts.verbose {

@@ -1,5 +1,5 @@
-use crate::ScxStatsClient;
-use crate::{Meta, ScxStatsData, ScxStatsKind, ScxStatsMeta};
+use crate::StatsClient;
+use crate::{Meta, StatsData, StatsKind, StatsMeta};
 use anyhow::{anyhow, bail, Context, Result};
 use crossbeam::channel::{unbounded, Receiver, RecvError, Select, SendError, Sender};
 use log::{debug, error, warn};
@@ -66,23 +66,23 @@ impl<
 pub trait StatsCloser<Req, Res>: FnOnce((&Sender<Req>, &Receiver<Res>)) + Send {}
 impl<Req, Res, T: FnOnce((&Sender<Req>, &Receiver<Res>)) + Send> StatsCloser<Req, Res> for T {}
 
-pub struct ScxStatsOps<Req, Res> {
+pub struct StatsOps<Req, Res> {
     pub open: Box<dyn StatsOpener<Req, Res>>,
     pub close: Option<Box<dyn StatsCloser<Req, Res>>>,
 }
 
-struct ScxStatsOpenOps<Req, Res> {
+struct StatsOpenOps<Req, Res> {
     map: BTreeMap<
         String,
         (
-            Arc<Mutex<ScxStatsOps<Req, Res>>>,
+            Arc<Mutex<StatsOps<Req, Res>>>,
             Box<dyn StatsReader<Req, Res>>,
             ChannelPair<Req, Res>,
         ),
     >,
 }
 
-impl<Req, Res> ScxStatsOpenOps<Req, Res> {
+impl<Req, Res> StatsOpenOps<Req, Res> {
     fn new() -> Self {
         Self {
             map: BTreeMap::new(),
@@ -90,7 +90,7 @@ impl<Req, Res> ScxStatsOpenOps<Req, Res> {
     }
 }
 
-impl<Req, Res> std::ops::Drop for ScxStatsOpenOps<Req, Res> {
+impl<Req, Res> std::ops::Drop for StatsOpenOps<Req, Res> {
     fn drop(&mut self) {
         for (_, (ops, _, ch)) in self.map.iter_mut() {
             if let Some(close) = ops.lock().unwrap().close.take() {
@@ -101,13 +101,13 @@ impl<Req, Res> std::ops::Drop for ScxStatsOpenOps<Req, Res> {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ScxStatsRequest {
+pub struct StatsRequest {
     pub req: String,
     #[serde(default)]
     pub args: BTreeMap<String, String>,
 }
 
-impl ScxStatsRequest {
+impl StatsRequest {
     pub fn new(req: &str, args: Vec<(String, String)>) -> Self {
         Self {
             req: req.to_string(),
@@ -117,20 +117,20 @@ impl ScxStatsRequest {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ScxStatsResponse {
+pub struct StatsResponse {
     pub errno: i32,
     pub args: BTreeMap<String, Value>,
 }
 
-pub struct ScxStatsErrno(pub i32);
+pub struct StatsErrno(pub i32);
 
-impl std::fmt::Display for ScxStatsErrno {
+impl std::fmt::Display for StatsErrno {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", std::io::Error::from_raw_os_error(self.0))
     }
 }
 
-impl std::fmt::Debug for ScxStatsErrno {
+impl std::fmt::Debug for StatsErrno {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", std::io::Error::from_raw_os_error(self.0))
     }
@@ -166,17 +166,17 @@ impl<Req, Res> Clone for ChannelPair<Req, Res> {
     }
 }
 
-pub struct ScxStatsServerData<Req, Res>
+pub struct StatsServerData<Req, Res>
 where
     Req: Send + 'static,
     Res: Send + 'static,
 {
     top: Option<String>,
-    meta: BTreeMap<String, ScxStatsMeta>,
-    ops: BTreeMap<String, Arc<Mutex<ScxStatsOps<Req, Res>>>>,
+    meta: BTreeMap<String, StatsMeta>,
+    ops: BTreeMap<String, Arc<Mutex<StatsOps<Req, Res>>>>,
 }
 
-impl<Req, Res> ScxStatsServerData<Req, Res>
+impl<Req, Res> StatsServerData<Req, Res>
 where
     Req: Send + 'static,
     Res: Send + 'static,
@@ -189,7 +189,7 @@ where
         }
     }
 
-    pub fn add_meta(mut self, meta: ScxStatsMeta) -> Self {
+    pub fn add_meta(mut self, meta: StatsMeta) -> Self {
         if meta.attrs.top.is_some() && self.top.is_none() {
             self.top = Some(meta.name.clone());
         }
@@ -197,7 +197,7 @@ where
         self
     }
 
-    pub fn add_ops(mut self, name: &str, ops: ScxStatsOps<Req, Res>) -> Self {
+    pub fn add_ops(mut self, name: &str, ops: StatsOps<Req, Res>) -> Self {
         self.ops.insert(name.to_string(), Arc::new(Mutex::new(ops)));
         self
     }
@@ -207,7 +207,7 @@ where
         let read: Box<dyn StatsReaderSync<Req, Res>> =
             Box::new(move |args, chan| wrapped_fetch.lock().unwrap()(args, chan));
         let wrapped_read = Arc::new(read);
-        let ops = ScxStatsOps {
+        let ops = StatsOps {
             open: Box::new(move |_| {
                 let copy = wrapped_read.clone();
                 Ok(Box::new(move |args, chan| copy(args, chan)))
@@ -221,7 +221,7 @@ where
     fn visit_meta_inner(
         &self,
         name: &str,
-        visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
+        visit: &mut impl FnMut(&StatsMeta) -> Result<()>,
         nesting: &mut BTreeSet<String>,
         visited: &mut BTreeSet<String>,
     ) -> Result<()> {
@@ -241,16 +241,16 @@ where
 
         for (fname, field) in m.fields.iter() {
             match &field.data {
-                ScxStatsData::Array(ScxStatsKind::Struct(inner)) => {
+                StatsData::Array(StatsKind::Struct(inner)) => {
                     self.visit_meta_inner(inner, visit, nesting, visited)?
                 }
-                ScxStatsData::Dict {
-                    key: ScxStatsKind::Struct(inner),
+                StatsData::Dict {
+                    key: StatsKind::Struct(inner),
                     datum: _,
                 } => bail!("{}.{} is a dict with struct {} as key", name, fname, inner),
-                ScxStatsData::Dict {
+                StatsData::Dict {
                     key: _,
-                    datum: ScxStatsKind::Struct(inner),
+                    datum: StatsKind::Struct(inner),
                 } => self.visit_meta_inner(inner, visit, nesting, visited)?,
                 _ => {}
             }
@@ -263,7 +263,7 @@ where
     fn visit_meta(
         &self,
         from: &str,
-        visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
+        visit: &mut impl FnMut(&StatsMeta) -> Result<()>,
     ) -> Result<()> {
         let mut nesting = BTreeSet::<String>::new();
         let mut visited = BTreeSet::<String>::new();
@@ -331,25 +331,25 @@ where
     }
 }
 
-struct ScxStatsServerInner<Req, Res>
+struct StatsServerInner<Req, Res>
 where
     Req: Send + 'static,
     Res: Send + 'static,
 {
     listener: UnixListener,
-    data: Arc<Mutex<ScxStatsServerData<Req, Res>>>,
+    data: Arc<Mutex<StatsServerData<Req, Res>>>,
     inner_ch: ChannelPair<Req, Res>,
     exit: Arc<AtomicBool>,
 }
 
-impl<Req, Res> ScxStatsServerInner<Req, Res>
+impl<Req, Res> StatsServerInner<Req, Res>
 where
     Req: Send + 'static,
     Res: Send + 'static,
 {
     fn new(
         listener: UnixListener,
-        data: Arc<Mutex<ScxStatsServerData<Req, Res>>>,
+        data: Arc<Mutex<StatsServerData<Req, Res>>>,
         inner_ch: ChannelPair<Req, Res>,
         exit: Arc<AtomicBool>,
     ) -> Self {
@@ -361,11 +361,11 @@ where
         }
     }
 
-    fn build_resp<T>(errno: i32, resp: &T) -> Result<ScxStatsResponse>
+    fn build_resp<T>(errno: i32, resp: &T) -> Result<StatsResponse>
     where
         T: Serialize,
     {
-        Ok(ScxStatsResponse {
+        Ok(StatsResponse {
             errno,
             args: [("resp".into(), serde_json::to_value(resp)?)]
                 .into_iter()
@@ -375,11 +375,11 @@ where
 
     fn handle_request(
         line: String,
-        data: &Arc<Mutex<ScxStatsServerData<Req, Res>>>,
+        data: &Arc<Mutex<StatsServerData<Req, Res>>>,
         ch: &ChannelPair<Req, Res>,
-        open_ops: &mut ScxStatsOpenOps<Req, Res>,
-    ) -> Result<ScxStatsResponse> {
-        let req: ScxStatsRequest = serde_json::from_str(&line)?;
+        open_ops: &mut StatsOpenOps<Req, Res>,
+    ) -> Result<StatsResponse> {
+        let req: StatsRequest = serde_json::from_str(&line)?;
 
         match req.req.as_str() {
             "stats" => {
@@ -388,11 +388,12 @@ where
                     None => "top",
                 };
 
-                let ops = match data.lock().unwrap().ops.get(target) {
-                    Some(v) => v.clone(),
-                    None => Err(anyhow!("unknown stat target {:?}", req)
-                        .context(ScxStatsErrno(libc::EINVAL)))?,
-                };
+                let ops =
+                    match data.lock().unwrap().ops.get(target) {
+                        Some(v) => v.clone(),
+                        None => Err(anyhow!("unknown stat target {:?}", req)
+                            .context(StatsErrno(libc::EINVAL)))?,
+                    };
 
                 if !open_ops.map.contains_key(target) {
                     let read = (ops.lock().unwrap().open)((&ch.req, &ch.res))?;
@@ -408,18 +409,18 @@ where
                 Self::build_resp(0, &resp)
             }
             "stats_meta" => Ok(Self::build_resp(0, &data.lock().unwrap().meta)?),
-            req => Err(anyhow!("unknown command {:?}", req).context(ScxStatsErrno(libc::EINVAL)))?,
+            req => Err(anyhow!("unknown command {:?}", req).context(StatsErrno(libc::EINVAL)))?,
         }
     }
 
     fn serve(
         mut stream: UnixStream,
-        data: Arc<Mutex<ScxStatsServerData<Req, Res>>>,
+        data: Arc<Mutex<StatsServerData<Req, Res>>>,
         inner_ch: ChannelPair<Req, Res>,
         exit: Arc<AtomicBool>,
     ) -> Result<()> {
         let mut stream_reader = BufReader::new(stream.try_clone()?);
-        let mut open_ops = ScxStatsOpenOps::new();
+        let mut open_ops = StatsOpenOps::new();
 
         loop {
             let mut line = String::new();
@@ -435,7 +436,7 @@ where
             let resp = match Self::handle_request(line, &data, &inner_ch, &mut open_ops) {
                 Ok(v) => v,
                 Err(e) => {
-                    let errno = match e.downcast_ref::<ScxStatsErrno>() {
+                    let errno = match e.downcast_ref::<StatsErrno>() {
                         Some(e) if e.0 != 0 => e.0,
                         _ => libc::EINVAL,
                     };
@@ -493,7 +494,7 @@ where
                     },
                     sel_idx if sel_idx == inner_idx => match oper.recv(&inner_ch.res) {
                         Ok(_) => {
-                            error!("proxy: unexpected data in ScxStatsServer.channels().0");
+                            error!("proxy: unexpected data in StatsServer.channels().0");
                             panic!();
                         }
                         Err(RecvError) => break 'outer,
@@ -552,7 +553,7 @@ where
                     let (req_pair, res_pair) = ChannelPair::<Req, Res>::bidi();
                     match add_req.send(res_pair) {
                         Ok(()) => debug!("sent new channel to proxy"),
-                        Err(e) => warn!("ScxStatsServer::proxy() failed ({})", &e),
+                        Err(e) => warn!("StatsServer::proxy() failed ({})", &e),
                     }
 
                     spawn(move || {
@@ -567,7 +568,7 @@ where
     }
 }
 
-pub struct ScxStatsServer<Req, Res>
+pub struct StatsServer<Req, Res>
 where
     Req: Send + 'static,
     Res: Send + 'static,
@@ -577,19 +578,19 @@ where
     stats_path: PathBuf,
     path: Option<PathBuf>,
 
-    data: Arc<Mutex<ScxStatsServerData<Req, Res>>>,
+    data: Arc<Mutex<StatsServerData<Req, Res>>>,
 
     outer_ch: ChannelPair<Res, Req>,
     inner_ch: Option<ChannelPair<Req, Res>>,
     exit: Arc<AtomicBool>,
 }
 
-impl<Req, Res> ScxStatsServer<Req, Res>
+impl<Req, Res> StatsServer<Req, Res>
 where
     Req: Send + 'static,
     Res: Send + 'static,
 {
-    pub fn new(data: ScxStatsServerData<Req, Res>) -> Self {
+    pub fn new(data: StatsServerData<Req, Res>) -> Self {
         let (ich, och) = ChannelPair::<Req, Res>::bidi();
 
         Self {
@@ -646,7 +647,7 @@ where
         let listener =
             UnixListener::bind(path).with_context(|| format!("creating UNIX socket {:?}", path))?;
 
-        let inner = ScxStatsServerInner::new(
+        let inner = StatsServerInner::new(
             listener,
             self.data.clone(),
             self.inner_ch.take().unwrap(),
@@ -662,7 +663,7 @@ where
     }
 }
 
-impl<Req, Res> std::ops::Drop for ScxStatsServer<Req, Res>
+impl<Req, Res> std::ops::Drop for StatsServer<Req, Res>
 where
     Req: Send + 'static,
     Res: Send + 'static,
@@ -670,7 +671,7 @@ where
     fn drop(&mut self) {
         self.exit.store(true, Ordering::Relaxed);
         if let Some(path) = self.path.as_ref() {
-            let _ = ScxStatsClient::new().set_path(path).connect();
+            let _ = StatsClient::new().set_path(path).connect();
         }
     }
 }

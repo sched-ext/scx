@@ -45,7 +45,7 @@ use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use log::info;
-use scx_stats::ScxStatsServer;
+use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
@@ -348,7 +348,7 @@ struct Scheduler<'a> {
     nr_lb_data_errors: u64,
 
     tuner: Tuner,
-    stats_server: ScxStatsServer<StatsCtx, (StatsCtx, ClusterStats)>,
+    stats_server: StatsServer<StatsCtx, (StatsCtx, ClusterStats)>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -446,7 +446,7 @@ impl<'a> Scheduler<'a> {
         // Attach.
         let mut skel = scx_ops_load!(skel, rusty, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, rusty)?);
-        let stats_server = ScxStatsServer::new(stats::server_data()).launch()?;
+        let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         info!("Rusty scheduler started! Run `scx_rusty --monitor` for metrics.");
 
@@ -629,8 +629,8 @@ fn main() -> Result<()> {
     }
 
     if opts.help_stats {
-	stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
-	return Ok(());
+        stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
+        return Ok(());
     }
 
     let llv = match opts.verbose {
