@@ -32,11 +32,11 @@ impl<'a> Scheduler<'a> {
     fn init(open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         let bpf = BpfScheduler::init(
             open_object,
-            0,                        // exit_dump_len (buffer size of exit info)
-            false,                    // partial (include all tasks if false)
-            SLICE_US,                 // default time slice (in us)
-            false,                    // verbose (verbose output)
-            false,                    // debug (debug mode)
+            0,        // exit_dump_len (buffer size of exit info)
+            false,    // partial (include all tasks if false)
+            SLICE_US, // default time slice (in us)
+            false,    // verbose (verbose output)
+            false,    // debug (debug mode)
         )?;
         Ok(Self { bpf })
     }

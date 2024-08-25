@@ -128,15 +128,16 @@ fn parse_proc_pid_stat(pid: i32) -> std::io::Result<TaskStat> {
         if line.starts_with("Name:") {
             comm = line.split_whitespace().nth(1).unwrap_or("").to_string();
         } else if line.starts_with("voluntary_ctxt_switches:") {
-            nvcsw = line.split_whitespace().nth(1).unwrap_or("0").parse().unwrap_or(0);
+            nvcsw = line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0);
         }
     }
 
-    Ok(TaskStat {
-        pid,
-        comm,
-        nvcsw,
-    })
+    Ok(TaskStat { pid, comm, nvcsw })
 }
 
 fn get_all_pids() -> std::io::Result<Vec<i32>> {
@@ -195,7 +196,9 @@ struct Task {
 // pid.
 impl Ord for Task {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.is_interactive.cmp(&self.is_interactive)
+        other
+            .is_interactive
+            .cmp(&self.is_interactive)
             .then_with(|| self.vruntime.cmp(&other.vruntime))
             .then_with(|| self.timestamp.cmp(&other.timestamp))
             .then_with(|| self.qtask.pid.cmp(&other.qtask.pid))
@@ -244,23 +247,19 @@ impl TaskTree {
 
 // Main scheduler object
 struct Scheduler<'a> {
-    bpf: BpfScheduler<'a>, // BPF connector
-    task_pool: TaskTree,   // tasks ordered by vruntime
-    task_map: TaskInfoMap, // map pids to the corresponding task information
+    bpf: BpfScheduler<'a>,         // BPF connector
+    task_pool: TaskTree,           // tasks ordered by vruntime
+    task_map: TaskInfoMap,         // map pids to the corresponding task information
     proc_stats: HashMap<i32, u64>, // Task statistics from procfs
-    interactive_pids: Vec<i32>, // List of interactive tasks
-    min_vruntime: u64,     // Keep track of the minimum vruntime across all tasks
-    init_page_faults: u64, // Initial page faults counter
-    slice_ns: u64,         // Default time slice (in ns)
-    slice_ns_min: u64,     // Minimum time slice (in ns)
+    interactive_pids: Vec<i32>,    // List of interactive tasks
+    min_vruntime: u64,             // Keep track of the minimum vruntime across all tasks
+    init_page_faults: u64,         // Initial page faults counter
+    slice_ns: u64,                 // Default time slice (in ns)
+    slice_ns_min: u64,             // Minimum time slice (in ns)
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(
-        opts: &Opts,
-        open_object: &'a mut MaybeUninit<OpenObject>,
-    ) -> Result<Self> {
-
+    fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         // Low-level BPF connector.
         let bpf = BpfScheduler::init(
             open_object,
@@ -321,7 +320,8 @@ impl<'a> Scheduler<'a> {
             task.sum_exec_runtime
         } else {
             task.sum_exec_runtime - task_info.sum_exec_runtime
-        }.min(self.slice_ns);
+        }
+        .min(self.slice_ns);
 
         // Update task's vruntime re-aligning it to min_vruntime, to avoid
         // over-prioritizing tasks with a mostly sleepy behavior.
@@ -387,7 +387,8 @@ impl<'a> Scheduler<'a> {
                 // Scale time slice based on the amount of tasks that are waiting in the
                 // scheduler's queue and the previously unused time slice budget, but make sure
                 // to assign at least slice_us_min.
-                let slice_ns = (self.slice_ns / (self.nr_tasks_waiting() + 1)).max(self.slice_ns_min);
+                let slice_ns =
+                    (self.slice_ns / (self.nr_tasks_waiting() + 1)).max(self.slice_ns_min);
 
                 // Create a new task to dispatch.
                 let mut dispatched_task = DispatchedTask::new(&task.qtask);
@@ -396,7 +397,9 @@ impl<'a> Scheduler<'a> {
                 dispatched_task.slice_ns = slice_ns;
 
                 // Try to pick an idle CPU for the task.
-                let cpu = self.bpf.select_cpu(dispatched_task.pid, dispatched_task.cpu, 0);
+                let cpu = self
+                    .bpf
+                    .select_cpu(dispatched_task.pid, dispatched_task.cpu, 0);
                 if cpu >= 0 {
                     dispatched_task.cpu = cpu;
                 } else {
