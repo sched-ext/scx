@@ -294,7 +294,7 @@ where
         self.visit_meta(from, &mut |m| {
             nwidth = nwidth.max(m.name.len());
             (fwidth, dwidth) = m.fields.iter().fold((fwidth, dwidth), |acc, (n, f)| {
-                (acc.0.max(n.len()), acc.1.max(f.data.to_string().len()))
+                (acc.0.max(n.len()), acc.1.max(f.data.to_string().len() + 2))
             });
             Ok(())
         })?;
@@ -317,12 +317,12 @@ where
                     w,
                     "  {:fw$} {:dw$}",
                     fname,
-                    f.data.to_string(),
+                    format!("({})", f.data.to_string()),
                     fw = fwidth,
                     dw = dwidth
                 )?;
                 if let Some(desc) = &f.attrs.desc {
-                    write!(w, " {}", desc)?;
+                    write!(w, " : {}", desc)?;
                 }
                 writeln!(w, "")?;
             }
