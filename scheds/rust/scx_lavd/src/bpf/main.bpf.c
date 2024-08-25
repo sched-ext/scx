@@ -1304,7 +1304,8 @@ static bool could_run_on_prev(struct task_struct *p, s32 prev_cpu,
 	return ret;
 }
 
-static s32 pick_idle_cpu_in(struct bpf_cpumask *cpumask)
+static __always_inline
+s32 pick_idle_cpu_in(struct bpf_cpumask *cpumask)
 {
 	s32 cpu_id;
 
