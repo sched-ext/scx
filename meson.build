@@ -337,6 +337,8 @@ run_target('veristat_diff', command: [run_veristat_diff, meson.current_build_dir
                                  get_option('veristat_diff_dir')])
 
 subdir('scheds')
+# currently only scx_loader is located there as binary
+subdir('rust')
 
 if enable_stress
   run_target('stress_tests', command: [run_stress_tests, '-k', kernel, '-b',
