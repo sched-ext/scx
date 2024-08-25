@@ -223,7 +223,7 @@ where
         name: &str,
         visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
         nesting: &mut BTreeSet<String>,
-	visited: &mut BTreeSet<String>,
+        visited: &mut BTreeSet<String>,
     ) -> Result<()> {
         let m = match self.meta.get(name) {
             Some(v) => v,
@@ -233,9 +233,9 @@ where
         if !nesting.insert(name.into()) {
             bail!("loop in stats meta detected, {} already nested", name);
         }
-	if !visited.insert(name.into()) {
-	    return Ok(());
-	}
+        if !visited.insert(name.into()) {
+            return Ok(());
+        }
 
         visit(m)?;
 
@@ -266,13 +266,13 @@ where
         visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
     ) -> Result<()> {
         let mut nesting = BTreeSet::<String>::new();
-	let mut visited = BTreeSet::<String>::new();
+        let mut visited = BTreeSet::<String>::new();
         self.visit_meta_inner(from, visit, &mut nesting, &mut visited)
     }
 
     fn verify_meta(&self) -> Result<()> {
         if self.top.is_none() {
-            warn!("top-level stats metadata missing");
+            debug!("top-level stats metadata missing");
             return Ok(());
         }
 

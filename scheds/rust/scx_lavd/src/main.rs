@@ -684,8 +684,6 @@ fn main() -> Result<()> {
             "scx_lavd scheduler is initialized (build ID: {})",
             *build_id::SCX_FULL_VERSION
         );
-        info!(
-            "    stat: ('L'atency-critical, 'R'egular) (performance-'H'ungry, performance-'I'nsensitive) ('B'ig, li'T'tle) ('E'ligigle, 'G'reedy) ('P'reempting, 'N'ot)");
         info!("scx_lavd scheduler starts running.");
         if !sched.run()?.should_restart() {
             break;
