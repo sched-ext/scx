@@ -9,21 +9,21 @@ use crate::bpf_intf;
 use crate::bpf_intf::*;
 use crate::bpf_skel::*;
 
-use std::fs::File;
-use std::io::Read;
 use std::ffi::c_int;
 use std::ffi::c_ulong;
+use std::fs::File;
+use std::io::Read;
 
 use anyhow::Context;
 use anyhow::Result;
 
 use plain::Plain;
 
-use libbpf_rs::OpenObject;
-use libbpf_rs::ProgramInput;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 
 use libc::{pthread_self, pthread_setschedparam, sched_param};
 
@@ -86,11 +86,11 @@ pub struct QueuedTask {
 // Task queued for dispatching to the BPF component (see bpf_intf::dispatched_task_ctx).
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct DispatchedTask {
-    pub pid: i32,         // pid that uniquely identifies a task
-    pub cpu: i32,         // target CPU selected by the scheduler
-    pub flags: u64,       // special dispatch flags
-    pub slice_ns: u64,    // time slice assigned to the task (0 = default)
-    cpumask_cnt: u64,     // cpumask generation counter (private)
+    pub pid: i32,      // pid that uniquely identifies a task
+    pub cpu: i32,      // target CPU selected by the scheduler
+    pub flags: u64,    // special dispatch flags
+    pub slice_ns: u64, // time slice assigned to the task (0 = default)
+    cpumask_cnt: u64,  // cpumask generation counter (private)
 }
 
 impl DispatchedTask {
@@ -181,7 +181,6 @@ impl<'cb> BpfScheduler<'cb> {
         open_object: &'cb mut MaybeUninit<OpenObject>,
         exit_dump_len: u32,
         partial: bool,
-        slice_us: u64,
         verbose: bool,
         debug: bool,
     ) -> Result<Self> {
@@ -239,7 +238,6 @@ impl<'cb> BpfScheduler<'cb> {
         skel.struct_ops.rustland_mut().exit_dump_len = exit_dump_len;
 
         skel.maps.bss_data.usersched_pid = std::process::id();
-        skel.maps.rodata_data.slice_ns = slice_us * 1000;
         skel.maps.rodata_data.debug = debug;
 
         // Attach BPF scheduler.

@@ -47,7 +47,6 @@ UEI_DEFINE(uei);
  */
 u32 usersched_pid; /* User-space scheduler PID */
 const volatile bool switch_partial; /* Switch all tasks or SCHED_EXT tasks */
-const volatile u64 slice_ns = SCX_SLICE_DFL; /* Base time slice duration */
 
 /*
  * Number of tasks that are queued for scheduling.
@@ -351,7 +350,7 @@ static inline u64 task_slice(struct task_struct *p)
 
 	tctx = lookup_task_ctx(p);
 	if (!tctx)
-		return slice_ns;
+		return SCX_SLICE_DFL;
 	return tctx->slice_ns;
 }
 
@@ -468,7 +467,7 @@ static bool dispatch_user_scheduler(void)
 	 * Dispatch the scheduler on the first CPU available, likely the
 	 * current one.
 	 */
-	dispatch_task(p, SHARED_DSQ, 0, slice_ns, 0);
+	dispatch_task(p, SHARED_DSQ, 0, SCX_SLICE_DFL, 0);
 	bpf_task_release(p);
 
 	return true;
@@ -651,7 +650,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	task = bpf_ringbuf_reserve(&queued, sizeof(*task), 0);
 	if (!task) {
 		sched_congested(p);
-		dispatch_task(p, SHARED_DSQ, 0, slice_ns, enq_flags);
+		dispatch_task(p, SHARED_DSQ, 0, SCX_SLICE_DFL, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -928,12 +927,16 @@ void BPF_STRUCT_OPS(rustland_cpu_offline, s32 cpu)
 s32 BPF_STRUCT_OPS(rustland_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
+	struct task_ctx *tctx;;
+
 	/* Allocate task's local storage */
-	if (bpf_task_storage_get(&task_ctx_stor, p, 0,
-				 BPF_LOCAL_STORAGE_GET_F_CREATE))
-		return 0;
-	else
+	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!tctx)
 		return -ENOMEM;
+	tctx->slice_ns = SCX_SLICE_DFL;
+
+	return 0;
 }
 
 /*

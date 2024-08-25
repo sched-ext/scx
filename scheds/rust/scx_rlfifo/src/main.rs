@@ -34,7 +34,6 @@ impl<'a> Scheduler<'a> {
             open_object,
             0,        // exit_dump_len (buffer size of exit info)
             false,    // partial (include all tasks if false)
-            SLICE_US, // default time slice (in us)
             false,    // verbose (verbose output)
             false,    // debug (debug mode)
         )?;
@@ -93,7 +92,8 @@ impl<'a> Scheduler<'a> {
                         dispatched_task.flags |= RL_CPU_ANY;
                     }
 
-                    // Decide for how long the task needs to run (time slice).
+                    // Decide for how long the task needs to run (time slice); if not specified
+                    // SCX_SLICE_DFL will be used by default.
                     dispatched_task.slice_ns = SLICE_US;
 
                     // Dispatch the task on the target CPU.
@@ -111,6 +111,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn print_stats(&mut self) {
+        // Internal scx_rustland_core statistics.
         let nr_user_dispatches = *self.bpf.nr_user_dispatches_mut();
         let nr_kernel_dispatches = *self.bpf.nr_kernel_dispatches_mut();
         let nr_cancel_dispatches = *self.bpf.nr_cancel_dispatches_mut();

@@ -265,7 +265,6 @@ impl<'a> Scheduler<'a> {
             open_object,
             opts.exit_dump_len,
             opts.partial,
-            opts.slice_us,
             opts.verbose,
             opts.debug,
         )?;
