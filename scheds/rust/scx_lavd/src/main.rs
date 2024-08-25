@@ -685,9 +685,7 @@ fn main() -> Result<()> {
             *build_id::SCX_FULL_VERSION
         );
         info!(
-            "    Note that scx_lavd currently is not optimized for multi-CCX/NUMA architectures."
-        );
-        info!("    Stay tuned for future improvements!");
+            "    stat: ('L'atency-critical, 'R'egular) (performance-'H'ungry, performance-'I'nsensitive) ('B'ig, li'T'tle) ('E'ligigle, 'G'reedy) ('P'reempting, 'N'ot)");
         info!("scx_lavd scheduler starts running.");
         if !sched.run()?.should_restart() {
             break;
