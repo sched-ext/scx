@@ -507,7 +507,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn refresh_sched_domain(&mut self) {
-        if self.opts.primary_domain.is_empty() {
+        if self.opts.primary_domain.is_empty() && self.energy_profile != "none" {
             let energy_profile = Self::read_energy_profile();
             if energy_profile != self.energy_profile {
                 self.energy_profile = energy_profile.clone();
