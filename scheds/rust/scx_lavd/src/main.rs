@@ -11,6 +11,12 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
+mod stats;
+use stats::SchedSample;
+use stats::SchedSamples;
+use stats::StatsReq;
+use stats::StatsRes;
+
 use libc::c_char;
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -22,11 +28,17 @@ use std::mem::MaybeUninit;
 use std::str;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::thread::ThreadId;
 use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use crossbeam::channel;
+use crossbeam::channel::Receiver;
+use crossbeam::channel::RecvTimeoutError;
+use crossbeam::channel::Sender;
+use crossbeam::channel::TrySendError;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
@@ -34,6 +46,7 @@ use libbpf_rs::OpenObject;
 use log::debug;
 use log::info;
 use log::warn;
+use scx_stats::ScxStatsServer;
 use scx_utils::build_id;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -92,10 +105,10 @@ struct Opts {
     #[clap(long = "no-freq-scaling", action = clap::ArgAction::SetTrue)]
     no_freq_scaling: bool,
 
-    /// The number of scheduling samples to be reported every second.
-    /// (default: 1, 0 = disable logging)
-    #[clap(short = 's', long, default_value = "1")]
-    nr_sched_samples: u64,
+    /// Run in monitoring mode. Show the specified number of scheduling
+    /// samples every second.
+    #[clap(long)]
+    monitor_sched_samples: Option<u64>,
 
     /// Enable verbose output including libbpf details. Specify multiple
     /// times to increase verbosity.
@@ -105,7 +118,6 @@ struct Opts {
 
 impl Opts {
     fn proc(&mut self) -> Option<&mut Self> {
-
         if self.performance {
             self.no_core_compaction = true;
             self.prefer_smt_core = false;
@@ -118,7 +130,7 @@ impl Opts {
             self.prefer_little_core = true;
             self.no_freq_scaling = false;
         }
-        if self.balanced{
+        if self.balanced {
             self.no_core_compaction = false;
             self.prefer_smt_core = false;
             self.prefer_little_core = false;
@@ -140,18 +152,6 @@ impl msg_task_ctx {
 impl introspec {
     fn new() -> Self {
         let intrspc = unsafe { mem::MaybeUninit::<introspec>::zeroed().assume_init() };
-        intrspc
-    }
-
-    fn init(opts: &Opts) -> Self {
-        let mut intrspc = introspec::new();
-        if opts.nr_sched_samples > 0 {
-            intrspc.cmd = LAVD_CMD_SCHED_N;
-            intrspc.arg = opts.nr_sched_samples;
-        } else {
-            intrspc.cmd = LAVD_CMD_NOP;
-        }
-        intrspc.requested = false as u8;
         intrspc
     }
 }
@@ -216,8 +216,10 @@ impl FlatTopology {
     }
 
     /// Build a flat-structured list of CPUs in a preference order
-    fn build_cpu_fids(prefer_smt_core: bool, prefer_little_core: bool) ->
-        Option<(Vec<CpuFlatId>, usize, usize)> {
+    fn build_cpu_fids(
+        prefer_smt_core: bool,
+        prefer_little_core: bool,
+    ) -> Option<(Vec<CpuFlatId>, usize, usize)> {
         let topo = Topology::new().expect("Failed to build host topology");
         let mut cpu_fids = Vec::new();
 
@@ -400,9 +402,11 @@ impl FlatTopology {
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
-    nr_cpus_onln: u64,
     rb_mgr: libbpf_rs::RingBuffer<'static>,
     intrspc: introspec,
+    intrspc_rx: Receiver<SchedSample>,
+    sampler_tid: Option<ThreadId>,
+    stats_server: ScxStatsServer<StatsReq, StatsRes>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -428,19 +432,27 @@ impl<'a> Scheduler<'a> {
         // Attach.
         let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, lavd_ops)?);
+        let stats_server = ScxStatsServer::new(stats::server_data(nr_cpus_onln)).launch()?;
 
         // Build a ring buffer for instrumentation
+        let (intrspc_tx, intrspc_rx) = channel::bounded(65536);
         let rb_map = &mut skel.maps.introspec_msg;
         let mut builder = libbpf_rs::RingBufferBuilder::new();
-        builder.add(rb_map, Scheduler::print_bpf_msg).unwrap();
+        builder
+            .add(rb_map, move |data| {
+                Scheduler::relay_introspec(data, &intrspc_tx)
+            })
+            .unwrap();
         let rb_mgr = builder.build().unwrap();
 
         Ok(Self {
             skel,
             struct_ops,
-            nr_cpus_onln,
             rb_mgr,
-            intrspc: introspec::init(opts),
+            intrspc: introspec::new(),
+            intrspc_rx,
+            sampler_tid: None,
+            stats_server,
         })
     }
 
@@ -490,7 +502,7 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    fn print_bpf_msg(data: &[u8]) -> i32 {
+    fn relay_introspec(data: &[u8], intrspc_tx: &Sender<SchedSample>) -> i32 {
         let mt = msg_task_ctx::from_bytes(data);
         let tx = mt.taskc_x;
         let tc = mt.taskc;
@@ -500,43 +512,7 @@ impl<'a> Scheduler<'a> {
             return 0;
         }
 
-        // Print a message from the BPF scheduler
         let mseq = Scheduler::get_msg_seq_id();
-
-        if mseq % 32 == 1 {
-            info!(
-                "| {:6} | {:7} | {:17} \
-                   | {:5} | {:4} | {:4} \
-                   | {:14} | {:8} | {:7} \
-                   | {:8} | {:7} | {:8} \
-                   | {:7} | {:9} | {:9} \
-                   | {:9} | {:9} | {:8} \
-                   | {:8} | {:8} | {:8} \
-                   | {:6} |",
-                "mseq",
-                "pid",
-                "comm",
-                "stat",
-                "cpu",
-                "vtmc",
-                "vddln_ns",
-                "slc_ns",
-                "grdy_rt",
-                "lat_cri",
-                "avg_lc",
-                "st_prio",
-                "slc_bst",
-                "run_freq",
-                "run_tm_ns",
-                "wait_freq",
-                "wake_freq",
-                "perf_cri",
-                "avg_pc",
-                "cpufreq",
-                "cpu_util",
-                "nr_act",
-            );
-        }
 
         let c_tx_cm: *const c_char = (&tx.comm as *const [c_char; 17]) as *const c_char;
         let c_tx_cm_str: &CStr = unsafe { CStr::from_ptr(c_tx_cm) };
@@ -546,75 +522,94 @@ impl<'a> Scheduler<'a> {
         let c_tx_st_str: &CStr = unsafe { CStr::from_ptr(c_tx_st) };
         let tx_stat: &str = c_tx_st_str.to_str().unwrap();
 
-        info!(
-            "| {:6} | {:7} | {:17} \
-               | {:5} | {:4} | {:4} \
-               | {:14} | {:8} | {:7} \
-               | {:8} | {:7} | {:8} \
-               | {:7} | {:9} | {:9} \
-               | {:9} | {:9} | {:8} \
-               | {:8} | {:8} | {:8} \
-               | {:6} |",
+        match intrspc_tx.try_send(SchedSample {
             mseq,
-            tx.pid,
-            tx_comm,
-            tx_stat,
-            tx.cpu_id,
-            tc.victim_cpu,
-            tc.vdeadline_delta_ns,
-            tc.slice_ns,
-            tc.greedy_ratio,
-            tc.lat_cri,
-            tx.avg_lat_cri,
-            tx.static_prio,
-            tc.slice_boost_prio,
-            tc.run_freq,
-            tc.run_time_ns,
-            tc.wait_freq,
-            tc.wake_freq,
-            tc.perf_cri,
-            tx.avg_perf_cri,
-            tx.cpuperf_cur,
-            tx.cpu_util,
-            tx.nr_active,
-        );
-
-        0
+            pid: tx.pid,
+            comm: tx_comm.into(),
+            stat: tx_stat.into(),
+            cpu_id: tx.cpu_id,
+            victim_cpu: tc.victim_cpu,
+            vdeadline_delta_ns: tc.vdeadline_delta_ns,
+            slice_ns: tc.slice_ns,
+            greedy_ratio: tc.greedy_ratio,
+            lat_cri: tc.lat_cri,
+            avg_lat_cri: tx.avg_lat_cri,
+            static_prio: tx.static_prio,
+            slice_boost_prio: tc.slice_boost_prio,
+            run_freq: tc.run_freq,
+            run_time_ns: tc.run_time_ns,
+            wait_freq: tc.wait_freq,
+            wake_freq: tc.wake_freq,
+            perf_cri: tc.perf_cri,
+            avg_perf_cri: tx.avg_perf_cri,
+            cpuperf_cur: tx.cpuperf_cur,
+            cpu_util: tx.cpu_util,
+            nr_active: tx.nr_active,
+        }) {
+            Ok(()) | Err(TrySendError::Full(_)) => 0,
+            Err(e) => panic!("failed to send on intrspc_tx ({})", &e),
+        }
     }
 
-    fn prep_introspec(&mut self) -> u64 {
-        let mut interval_ms = 1000;
-
-        if self.intrspc.cmd == LAVD_CMD_SCHED_N && self.intrspc.arg > self.nr_cpus_onln {
-            // More samples, shorter sampling interval.
-            let f = self.intrspc.arg / self.nr_cpus_onln * 2;
-            interval_ms /= f;
-        }
-        self.intrspc.requested = true as u8;
-
+    fn prep_introspec(&mut self) {
         self.skel.maps.bss_data.intrspc.cmd = self.intrspc.cmd;
         self.skel.maps.bss_data.intrspc.arg = self.intrspc.arg;
-        self.skel.maps.bss_data.intrspc.requested = self.intrspc.requested;
-
-        interval_ms
     }
 
     fn cleanup_introspec(&mut self) {
-        // If not yet requested, do nothing.
-        if self.intrspc.requested == false as u8 {
-            return;
-        }
+        self.skel.maps.bss_data.intrspc.cmd = LAVD_CMD_NOP;
     }
 
     fn running(&mut self) -> bool {
         RUNNING.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei)
     }
 
+    fn stats_req_to_res(&mut self, req: &StatsReq) -> Result<StatsRes> {
+        Ok(match req {
+            StatsReq::NewSampler(tid) => {
+                self.rb_mgr.consume().unwrap();
+                self.sampler_tid = Some(*tid);
+                StatsRes::Ack
+            }
+            StatsReq::SchedSamplesNr {
+                tid,
+                nr_samples,
+                interval_ms,
+            } => {
+                if Some(*tid) != self.sampler_tid {
+                    return Ok(StatsRes::Bye);
+                }
+
+                self.intrspc.cmd = LAVD_CMD_SCHED_N;
+                self.intrspc.arg = *nr_samples;
+                self.prep_introspec();
+                std::thread::sleep(Duration::from_millis(*interval_ms));
+                self.rb_mgr.poll(Duration::from_millis(100)).unwrap();
+
+                let mut samples = vec![];
+                while let Ok(ts) = self.intrspc_rx.try_recv() {
+                    samples.push(ts);
+                }
+
+                self.cleanup_introspec();
+
+                StatsRes::SchedSamples(SchedSamples { samples })
+            }
+        })
+    }
+
     fn run(&mut self) -> Result<UserExitInfo> {
+        let (res_ch, req_ch) = self.stats_server.channels();
+
         while self.running() {
-            let interval_ms = self.prep_introspec();
-            std::thread::sleep(Duration::from_millis(interval_ms));
-            self.rb_mgr.poll(Duration::from_millis(100)).unwrap();
+            match req_ch.recv_timeout(Duration::from_secs(1)) {
+                Ok(req) => {
+                    let res = self.stats_req_to_res(&req)?;
+                    res_ch.send(res)?;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(e) => Err(e)?,
+            }
             self.cleanup_introspec();
         }
         self.rb_mgr.consume().unwrap();
@@ -675,6 +670,12 @@ fn main() -> Result<()> {
     init_log(&opts);
     init_signal_handlers();
     debug!("{:#?}", opts);
+
+    if let Some(nr_samples) = opts.monitor_sched_samples {
+        let jh = std::thread::spawn(move || stats::monitor_sched_samples(nr_samples).unwrap());
+        let _ = jh.join();
+        return Ok(());
+    }
 
     let mut open_object = MaybeUninit::uninit();
     loop {
