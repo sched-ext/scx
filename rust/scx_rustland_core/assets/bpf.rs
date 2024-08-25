@@ -181,12 +181,11 @@ impl<'cb> BpfScheduler<'cb> {
         open_object: &'cb mut MaybeUninit<OpenObject>,
         exit_dump_len: u32,
         partial: bool,
-        verbose: bool,
         debug: bool,
     ) -> Result<Self> {
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
-        skel_builder.obj_builder.debug(verbose);
+        skel_builder.obj_builder.debug(debug);
         let mut skel = scx_ops_open!(skel_builder, open_object, rustland)?;
 
         // Lock all the memory to prevent page faults that could trigger potential deadlocks during

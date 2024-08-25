@@ -92,14 +92,10 @@ struct Opts {
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
 
-    /// Enable verbose output, including libbpf details.
+    /// Enable verbose output, including libbpf details. Moreover, BPF scheduling events will be
+    /// reported in debugfs (e.g., /sys/kernel/debug/tracing/trace_pipe).
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
-
-    /// If specified, all the BPF scheduling events will be reported in
-    /// debugfs (e.g., /sys/kernel/debug/tracing/trace_pipe).
-    #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
-    debug: bool,
 
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
@@ -266,7 +262,6 @@ impl<'a> Scheduler<'a> {
             opts.exit_dump_len,
             opts.partial,
             opts.verbose,
-            opts.debug,
         )?;
         info!("{} scheduler attached", SCHEDULER_NAME);
 

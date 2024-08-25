@@ -32,19 +32,11 @@ impl<'a> Scheduler<'a> {
     fn init(open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         let bpf = BpfScheduler::init(
             open_object,
-            0,        // exit_dump_len (buffer size of exit info)
-            false,    // partial (include all tasks if false)
-            false,    // verbose (verbose output)
-            false,    // debug (debug mode)
+            0,        // exit_dump_len (buffer size of exit info, 0 = default)
+            false,    // partial (false = include all tasks)
+            false,    // debug (false = debug mode off)
         )?;
         Ok(Self { bpf })
-    }
-
-    fn now() -> u64 {
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
     }
 
     fn dispatch_tasks(&mut self) {
@@ -128,6 +120,13 @@ impl<'a> Scheduler<'a> {
             nr_failed_dispatches,
             nr_sched_congested,
         );
+    }
+
+    fn now() -> u64 {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
