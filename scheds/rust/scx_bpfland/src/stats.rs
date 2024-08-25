@@ -47,15 +47,30 @@ impl Metrics {
         )?;
         Ok(())
     }
+
+    fn delta(&self, rhs: &Self) -> Self {
+        Self {
+            nr_direct_dispatches: self.nr_direct_dispatches - rhs.nr_direct_dispatches,
+            nr_prio_dispatches: self.nr_prio_dispatches - rhs.nr_prio_dispatches,
+            nr_shared_dispatches: self.nr_shared_dispatches - rhs.nr_shared_dispatches,
+            ..self.clone()
+        }
+    }
 }
 
 pub fn server_data() -> StatsServerData<(), Metrics> {
-    let open: Box<dyn StatsOpener<(), Metrics>> = Box::new(move |(_req_ch, _res_ch)| {
+    let open: Box<dyn StatsOpener<(), Metrics>> = Box::new(move |(req_ch, res_ch)| {
+        req_ch.send(())?;
+        let mut prev = res_ch.recv()?;
+
         let read: Box<dyn StatsReader<(), Metrics>> = Box::new(move |_args, (req_ch, res_ch)| {
             req_ch.send(())?;
-            let metrics = res_ch.recv()?;
-            metrics.to_json()
+            let cur = res_ch.recv()?;
+            let delta = cur.delta(&prev);
+            prev = cur;
+            delta.to_json()
         });
+
         Ok(read)
     });
 
