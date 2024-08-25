@@ -15,11 +15,17 @@ where
     T: for<'a> Deserialize<'a>,
 {
     let mut retry_cnt: u32 = 0;
+
+    const RETRYABLE_ERRORS: [std::io::ErrorKind; 2] = [
+        std::io::ErrorKind::NotFound,
+        std::io::ErrorKind::ConnectionRefused,
+    ];
+
     while !should_exit() {
         let mut client = match StatsClient::new().connect() {
             Ok(v) => v,
             Err(e) => match e.downcast_ref::<std::io::Error>() {
-                Some(ioe) if ioe.kind() == std::io::ErrorKind::ConnectionRefused => {
+                Some(ioe) if RETRYABLE_ERRORS.contains(&ioe.kind()) => {
                     if retry_cnt == 1 {
                         info!("Stats server not avaliable, retrying...");
                     }
