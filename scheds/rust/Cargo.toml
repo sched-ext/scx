@@ -1,0 +1,5 @@
+[workspace]
+members = ["scx_lavd", "scx_bpfland", "scx_rustland", "scx_rlfifo",
+           "scx_rusty",
+           "scx_layered"] # scx_mitosis temporarily excluded
+resolver = "2"

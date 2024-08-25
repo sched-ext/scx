@@ -1,5 +1,3 @@
-workspace = { members = ["scx_stats_derive"] }
-
 [package]
 name = "scx_stats"
 version = "1.0.3"
