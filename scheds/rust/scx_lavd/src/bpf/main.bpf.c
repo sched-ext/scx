@@ -229,6 +229,7 @@ static u64		cur_svc_time;
  */
 const volatile bool	no_core_compaction;
 const volatile bool	no_freq_scaling;
+const volatile u32 	is_smt_active;
 const volatile u8	verbose;
 
 UEI_DEFINE(uei);
@@ -1307,11 +1308,15 @@ static s32 pick_idle_cpu_in(struct bpf_cpumask *cpumask)
 {
 	s32 cpu_id;
 
-	/*
-	 * Pick a fully idle core within a cpumask.
-	 */
-	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(cpumask), SCX_PICK_IDLE_CORE);
-	if (cpu_id < 0) {
+	if (is_smt_active) {
+		/*
+		 * Pick a fully idle core within a cpumask.
+		 */
+		cpu_id = scx_bpf_pick_idle_cpu(cast_mask(cpumask),
+					       SCX_PICK_IDLE_CORE);
+	}
+
+	if (!is_smt_active || cpu_id < 0) {
 		/*
 		 * Pick a fully idle core within a cpumask even if its
 		 * hypertwin is in use.

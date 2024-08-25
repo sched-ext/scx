@@ -21,6 +21,8 @@ use libc::c_char;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::Read;
 use std::ffi::CStr;
 use std::fmt;
 use std::mem;
@@ -214,6 +216,17 @@ impl FlatTopology {
             cpdom_map,
             nr_cpus_online,
         })
+    }
+
+    /// Check if SMT is enabled or not
+    pub fn is_smt_active() -> std::io::Result<i32> {
+        let mut file = File::open("/sys/devices/system/cpu/smt/active")?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+
+        let smt_active: i32 = contents.trim().parse().unwrap_or(0);
+
+        Ok(smt_active)
     }
 
     /// Build a flat-structured list of CPUs in a preference order
@@ -499,6 +512,10 @@ impl<'a> Scheduler<'a> {
         skel.maps.bss_data.nr_cpus_onln = nr_cpus_onln;
         skel.maps.rodata_data.no_core_compaction = opts.no_core_compaction;
         skel.maps.rodata_data.no_freq_scaling = opts.no_freq_scaling;
+        skel.maps.rodata_data.is_smt_active = match FlatTopology::is_smt_active() {
+            Ok(ret) => (ret == 1) as u32,
+            Err(_)  => 0,
+        };
         skel.maps.rodata_data.verbose = opts.verbose;
     }
 
