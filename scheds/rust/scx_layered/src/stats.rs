@@ -10,7 +10,7 @@ use chrono::Local;
 use log::warn;
 use scx_stats::Meta;
 use scx_stats::ScxStatsOps;
-use scx_stats::ScxStatsServer;
+use scx_stats::ScxStatsServerData;
 use scx_stats::StatsCloser;
 use scx_stats::StatsOpener;
 use scx_stats::StatsReader;
@@ -50,69 +50,69 @@ fn fmt_num(v: u64) -> String {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(_om_prefix = "l_", _om_label = "layer_name")]
 pub struct LayerStats {
-    #[stat(desc = "layer: CPU utilization (100% means one full CPU)")]
+    #[stat(desc = "CPU utilization (100% means one full CPU)")]
     pub util: f64,
-    #[stat(desc = "layer: fraction of total CPU utilization")]
+    #[stat(desc = "fraction of total CPU utilization")]
     pub util_frac: f64,
-    #[stat(desc = "layer: sum of weight * duty_cycle for tasks")]
+    #[stat(desc = "sum of weight * duty_cycle for tasks")]
     pub load: f64,
-    #[stat(desc = "layer: fraction of total load")]
+    #[stat(desc = "fraction of total load")]
     pub load_frac: f64,
-    #[stat(desc = "layer: # tasks")]
+    #[stat(desc = "# tasks")]
     pub tasks: u32,
-    #[stat(desc = "layer: # sched events duringg the period")]
+    #[stat(desc = "# sched events duringg the period")]
     pub total: u64,
-    #[stat(desc = "layer: % dispatched into idle CPU")]
+    #[stat(desc = "% dispatched into idle CPU")]
     pub sel_local: f64,
-    #[stat(desc = "layer: % enqueued after wakeup")]
+    #[stat(desc = "% enqueued after wakeup")]
     pub enq_wakeup: f64,
-    #[stat(desc = "layer: % enqueued after slice expiration")]
+    #[stat(desc = "% enqueued after slice expiration")]
     pub enq_expire: f64,
-    #[stat(desc = "layer: % re-enqueued due to RT preemption")]
+    #[stat(desc = "% re-enqueued due to RT preemption")]
     pub enq_reenq: f64,
-    #[stat(desc = "layer: # times exec duration < min_exec_us")]
+    #[stat(desc = "# times exec duration < min_exec_us")]
     pub min_exec: f64,
-    #[stat(desc = "layer: total exec durations extended due to min_exec_us")]
+    #[stat(desc = "total exec durations extended due to min_exec_us")]
     pub min_exec_us: u64,
-    #[stat(desc = "layer: % dispatche into idle CPUs occupied by other layers")]
+    #[stat(desc = "% dispatche into idle CPUs occupied by other layers")]
     pub open_idle: f64,
-    #[stat(desc = "layer: % preempted other tasks")]
+    #[stat(desc = "% preempted other tasks")]
     pub preempt: f64,
-    #[stat(desc = "layer: % first-preempted other tasks")]
+    #[stat(desc = "% first-preempted other tasks")]
     pub preempt_first: f64,
-    #[stat(desc = "layer: % idle-preempted other tasks")]
+    #[stat(desc = "% idle-preempted other tasks")]
     pub preempt_idle: f64,
-    #[stat(desc = "layer: % attempted to preempt other tasks but failed")]
+    #[stat(desc = "% attempted to preempt other tasks but failed")]
     pub preempt_fail: f64,
-    #[stat(desc = "layer: % violated config due to CPU affinity")]
+    #[stat(desc = "% violated config due to CPU affinity")]
     pub affn_viol: f64,
-    #[stat(desc = "layer: % continued executing after slice expiration")]
+    #[stat(desc = "% continued executing after slice expiration")]
     pub keep: f64,
-    #[stat(desc = "layer: % disallowed to continue executing due to max_exec")]
+    #[stat(desc = "% disallowed to continue executing due to max_exec")]
     pub keep_fail_max_exec: f64,
-    #[stat(desc = "layer: % disallowed to continue executing due to other tasks")]
+    #[stat(desc = "% disallowed to continue executing due to other tasks")]
     pub keep_fail_busy: f64,
-    #[stat(desc = "layer: whether is exclusive", _om_skip)]
+    #[stat(desc = "whether is exclusive", _om_skip)]
     pub is_excl: u32,
-    #[stat(desc = "layer: # times an excl task skipped a CPU as the sibling was also excl")]
+    #[stat(desc = "# times an excl task skipped a CPU as the sibling was also excl")]
     pub excl_collision: f64,
-    #[stat(desc = "layer: % a sibling CPU was preempted for an exclusive task")]
+    #[stat(desc = "% a sibling CPU was preempted for an exclusive task")]
     pub excl_preempt: f64,
-    #[stat(desc = "layer: % kicked a CPU from enqueue path")]
+    #[stat(desc = "% kicked a CPU from enqueue path")]
     pub kick: f64,
-    #[stat(desc = "layer: % yielded")]
+    #[stat(desc = "% yielded")]
     pub yielded: f64,
-    #[stat(desc = "layer: # times yield was ignored")]
+    #[stat(desc = "# times yield was ignored")]
     pub yield_ignore: u64,
-    #[stat(desc = "layer: % migrated across CPUs")]
+    #[stat(desc = "% migrated across CPUs")]
     pub migration: f64,
-    #[stat(desc = "layer: mask of allocated CPUs", _om_skip)]
+    #[stat(desc = "mask of allocated CPUs", _om_skip)]
     pub cpus: Vec<u32>,
-    #[stat(desc = "layer: # of CPUs assigned")]
+    #[stat(desc = "# of CPUs assigned")]
     pub cur_nr_cpus: u32,
-    #[stat(desc = "layer: minimum # of CPUs assigned")]
+    #[stat(desc = "minimum # of CPUs assigned")]
     pub min_nr_cpus: u32,
-    #[stat(desc = "layer: maximum # of CPUs assigned")]
+    #[stat(desc = "maximum # of CPUs assigned")]
     pub max_nr_cpus: u32,
 }
 
@@ -432,7 +432,7 @@ pub enum StatsRes {
     Bye,
 }
 
-pub fn launch_server() -> Result<ScxStatsServer<StatsReq, StatsRes>> {
+pub fn server_data() -> ScxStatsServerData<StatsReq, StatsRes> {
     let open: Box<dyn StatsOpener<StatsReq, StatsRes>> = Box::new(move |(req_ch, res_ch)| {
         let tid = current().id();
         req_ch.send(StatsReq::Hello(tid))?;
@@ -463,17 +463,16 @@ pub fn launch_server() -> Result<ScxStatsServer<StatsReq, StatsRes>> {
         }
     });
 
-    Ok(ScxStatsServer::new()
-        .add_stats_meta(LayerStats::meta())
-        .add_stats_meta(SysStats::meta())
-        .add_stats_ops(
+    ScxStatsServerData::new()
+        .add_meta(LayerStats::meta())
+        .add_meta(SysStats::meta())
+        .add_ops(
             "top",
             ScxStatsOps {
                 open,
                 close: Some(close),
             },
         )
-        .launch()?)
 }
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {

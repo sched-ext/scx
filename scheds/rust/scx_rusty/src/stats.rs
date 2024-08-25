@@ -4,7 +4,7 @@ use chrono::DateTime;
 use chrono::Local;
 use scx_stats::Meta;
 use scx_stats::ScxStatsOps;
-use scx_stats::ScxStatsServer;
+use scx_stats::ScxStatsServerData;
 use scx_stats::StatsOpener;
 use scx_stats::StatsReader;
 use scx_stats::ToJson;
@@ -215,7 +215,7 @@ impl ClusterStats {
     }
 }
 
-pub fn launch_server() -> Result<ScxStatsServer<StatsCtx, (StatsCtx, ClusterStats)>> {
+pub fn server_data() -> ScxStatsServerData<StatsCtx, (StatsCtx, ClusterStats)> {
     let open: Box<dyn StatsOpener<StatsCtx, (StatsCtx, ClusterStats)>> =
         Box::new(move |(req_ch, res_ch)| {
             // Send one bogus request on open to establish prev_sc.
@@ -234,12 +234,11 @@ pub fn launch_server() -> Result<ScxStatsServer<StatsCtx, (StatsCtx, ClusterStat
             Ok(read)
         });
 
-    Ok(ScxStatsServer::new()
-        .add_stats_meta(DomainStats::meta())
-        .add_stats_meta(NodeStats::meta())
-        .add_stats_meta(ClusterStats::meta())
-        .add_stats_ops("top", ScxStatsOps { open, close: None })
-        .launch()?)
+    ScxStatsServerData::new()
+        .add_meta(DomainStats::meta())
+        .add_meta(NodeStats::meta())
+        .add_meta(ClusterStats::meta())
+        .add_ops("top", ScxStatsOps { open, close: None })
 }
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {

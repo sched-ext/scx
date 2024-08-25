@@ -1,5 +1,5 @@
-use log::{debug, warn};
-use scx_stats::{Meta, ScxStatsServer, ToJson};
+use log::{debug, info, warn};
+use scx_stats::{Meta, ScxStatsServer, ScxStatsServerData, ToJson};
 use scx_stats_derive::Stats;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -47,10 +47,9 @@ fn main() {
     // If communication from the stats generating closure is not necessary,
     // ScxStatsServer::<(), ()> can be used. This example sends thread ID
     // and receives the formatted string just for demonstration.
-    let server = ScxStatsServer::<ThreadId, String>::new()
-        .set_path(&path)
-        .add_stats_meta(ClusterStats::meta())
-        .add_stats_meta(DomainStats::meta())
+    let sdata = ScxStatsServerData::<ThreadId, String>::new()
+        .add_meta(ClusterStats::meta())
+        .add_meta(DomainStats::meta())
         .add_stats(
             "top",
             Box::new(move |_args, (tx, rx)| {
@@ -61,7 +60,13 @@ fn main() {
                 debug!("Recevied {:?}", res);
                 stats.to_json()
             }),
-        )
+        );
+
+    info!("stats_meta:");
+    sdata.describe_meta(&mut std::io::stderr(), None).unwrap();
+
+    let server = ScxStatsServer::<ThreadId, String>::new(sdata)
+        .set_path(&path)
         .launch()
         .unwrap();
 
@@ -76,12 +81,9 @@ fn main() {
         }
     });
 
-    println!(
-        "Server listening. Run `client {:?}`.\n\
-         Use `socat - UNIX-CONNECT:{:?}` for raw connection.\n\
-         Press any key to exit.",
-        &path, &path,
-    );
+    info!("Server listening. Run `client {:?}`.", &path);
+    info!("Use `socat - UNIX-CONNECT:{:?}` for raw connection.", &path);
+    info!("Press any key to exit.");
 
     let mut buf: [u8; 1] = [0];
     let _ = std::io::stdin().read(&mut buf);

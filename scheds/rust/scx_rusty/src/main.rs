@@ -219,6 +219,10 @@ struct Opts {
     /// Print version and exit.
     #[clap(long)]
     version: bool,
+
+    /// Show descriptions for statistics.
+    #[clap(long)]
+    help_stats: bool,
 }
 
 fn read_cpu_busy_and_total(reader: &procfs::ProcReader) -> Result<(u64, u64)> {
@@ -442,7 +446,7 @@ impl<'a> Scheduler<'a> {
         // Attach.
         let mut skel = scx_ops_load!(skel, rusty, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, rusty)?);
-        let stats_server = stats::launch_server()?;
+        let stats_server = ScxStatsServer::new(stats::server_data()).launch()?;
 
         info!("Rusty scheduler started! Run `scx_rusty --monitor` for metrics.");
 
@@ -622,6 +626,11 @@ fn main() -> Result<()> {
     if opts.version {
         println!("scx_rusty: {}", *build_id::SCX_FULL_VERSION);
         return Ok(());
+    }
+
+    if opts.help_stats {
+	stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
+	return Ok(());
     }
 
     let llv = match opts.verbose {

@@ -1,11 +1,11 @@
 use crate::ScxStatsClient;
-use crate::{Meta, ScxStatsMeta};
-use anyhow::{anyhow, Context, Result};
+use crate::{Meta, ScxStatsData, ScxStatsKind, ScxStatsMeta};
+use anyhow::{anyhow, bail, Context, Result};
 use crossbeam::channel::{unbounded, Receiver, RecvError, Select, SendError, Sender};
 use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -166,9 +166,169 @@ impl<Req, Res> Clone for ChannelPair<Req, Res> {
     }
 }
 
-struct ScxStatsServerData<Req, Res> {
-    stats_meta: BTreeMap<String, ScxStatsMeta>,
-    stats_ops: BTreeMap<String, Arc<Mutex<ScxStatsOps<Req, Res>>>>,
+pub struct ScxStatsServerData<Req, Res>
+where
+    Req: Send + 'static,
+    Res: Send + 'static,
+{
+    top: Option<String>,
+    meta: BTreeMap<String, ScxStatsMeta>,
+    ops: BTreeMap<String, Arc<Mutex<ScxStatsOps<Req, Res>>>>,
+}
+
+impl<Req, Res> ScxStatsServerData<Req, Res>
+where
+    Req: Send + 'static,
+    Res: Send + 'static,
+{
+    pub fn new() -> Self {
+        Self {
+            top: None,
+            meta: BTreeMap::new(),
+            ops: BTreeMap::new(),
+        }
+    }
+
+    pub fn add_meta(mut self, meta: ScxStatsMeta) -> Self {
+        if meta.attrs.top.is_some() && self.top.is_none() {
+            self.top = Some(meta.name.clone());
+        }
+        self.meta.insert(meta.name.clone(), meta);
+        self
+    }
+
+    pub fn add_ops(mut self, name: &str, ops: ScxStatsOps<Req, Res>) -> Self {
+        self.ops.insert(name.to_string(), Arc::new(Mutex::new(ops)));
+        self
+    }
+
+    pub fn add_stats(self, name: &str, fetch: Box<dyn StatsReaderSend<Req, Res>>) -> Self {
+        let wrapped_fetch = Mutex::new(fetch);
+        let read: Box<dyn StatsReaderSync<Req, Res>> =
+            Box::new(move |args, chan| wrapped_fetch.lock().unwrap()(args, chan));
+        let wrapped_read = Arc::new(read);
+        let ops = ScxStatsOps {
+            open: Box::new(move |_| {
+                let copy = wrapped_read.clone();
+                Ok(Box::new(move |args, chan| copy(args, chan)))
+            }),
+            close: None,
+        };
+
+        self.add_ops(name, ops)
+    }
+
+    fn visit_meta_inner(
+        &self,
+        name: &str,
+        visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
+        nesting: &mut BTreeSet<String>,
+	visited: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        let m = match self.meta.get(name) {
+            Some(v) => v,
+            None => bail!("unknown stats meta name {}", name),
+        };
+
+        if !nesting.insert(name.into()) {
+            bail!("loop in stats meta detected, {} already nested", name);
+        }
+	if !visited.insert(name.into()) {
+	    return Ok(());
+	}
+
+        visit(m)?;
+
+        for (fname, field) in m.fields.iter() {
+            match &field.data {
+                ScxStatsData::Array(ScxStatsKind::Struct(inner)) => {
+                    self.visit_meta_inner(inner, visit, nesting, visited)?
+                }
+                ScxStatsData::Dict {
+                    key: ScxStatsKind::Struct(inner),
+                    datum: _,
+                } => bail!("{}.{} is a dict with struct {} as key", name, fname, inner),
+                ScxStatsData::Dict {
+                    key: _,
+                    datum: ScxStatsKind::Struct(inner),
+                } => self.visit_meta_inner(inner, visit, nesting, visited)?,
+                _ => {}
+            }
+        }
+
+        nesting.remove(name);
+        Ok(())
+    }
+
+    fn visit_meta(
+        &self,
+        from: &str,
+        visit: &mut impl FnMut(&ScxStatsMeta) -> Result<()>,
+    ) -> Result<()> {
+        let mut nesting = BTreeSet::<String>::new();
+	let mut visited = BTreeSet::<String>::new();
+        self.visit_meta_inner(from, visit, &mut nesting, &mut visited)
+    }
+
+    fn verify_meta(&self) -> Result<()> {
+        if self.top.is_none() {
+            warn!("top-level stats metadata missing");
+            return Ok(());
+        }
+
+        // Null visit checks all nested stats are reacheable without loops.
+        self.visit_meta(self.top.as_ref().unwrap(), &mut |_| Ok(()))
+    }
+
+    pub fn describe_meta<W: Write>(&self, w: &mut W, from: Option<&str>) -> Result<()> {
+        let from = match from {
+            Some(v) => v,
+            None => self
+                .top
+                .as_ref()
+                .ok_or_else(|| anyhow!("don't know where to start "))?,
+        };
+
+        let (mut nwidth, mut fwidth, mut dwidth) = (0usize, 0usize, 0usize);
+
+        self.visit_meta(from, &mut |m| {
+            nwidth = nwidth.max(m.name.len());
+            (fwidth, dwidth) = m.fields.iter().fold((fwidth, dwidth), |acc, (n, f)| {
+                (acc.0.max(n.len()), acc.1.max(f.data.to_string().len()))
+            });
+            Ok(())
+        })?;
+
+        let mut first = true;
+        self.visit_meta(from, &mut |m| {
+            if !first {
+                writeln!(w, "")?;
+            }
+            first = false;
+
+            write!(w, "[{:nw$}]", m.name, nw = nwidth)?;
+            if let Some(desc) = &m.attrs.desc {
+                write!(w, " {}", desc)?;
+            }
+            writeln!(w, "")?;
+
+            for (fname, f) in m.fields.iter() {
+                write!(
+                    w,
+                    "  {:fw$} {:dw$}",
+                    fname,
+                    f.data.to_string(),
+                    fw = fwidth,
+                    dw = dwidth
+                )?;
+                if let Some(desc) = &f.attrs.desc {
+                    write!(w, " {}", desc)?;
+                }
+                writeln!(w, "")?;
+            }
+            Ok(())
+        })
+    }
 }
 
 struct ScxStatsServerInner<Req, Res>
@@ -189,17 +349,13 @@ where
 {
     fn new(
         listener: UnixListener,
-        stats_meta: BTreeMap<String, ScxStatsMeta>,
-        stats_ops: BTreeMap<String, Arc<Mutex<ScxStatsOps<Req, Res>>>>,
+        data: Arc<Mutex<ScxStatsServerData<Req, Res>>>,
         inner_ch: ChannelPair<Req, Res>,
         exit: Arc<AtomicBool>,
     ) -> Self {
         Self {
             listener,
-            data: Arc::new(Mutex::new(ScxStatsServerData {
-                stats_meta,
-                stats_ops,
-            })),
+            data,
             inner_ch,
             exit,
         }
@@ -232,7 +388,7 @@ where
                     None => "top",
                 };
 
-                let ops = match data.lock().unwrap().stats_ops.get(target) {
+                let ops = match data.lock().unwrap().ops.get(target) {
                     Some(v) => v.clone(),
                     None => Err(anyhow!("unknown stat target {:?}", req)
                         .context(ScxStatsErrno(libc::EINVAL)))?,
@@ -251,7 +407,7 @@ where
 
                 Self::build_resp(0, &resp)
             }
-            "stats_meta" => Ok(Self::build_resp(0, &data.lock().unwrap().stats_meta)?),
+            "stats_meta" => Ok(Self::build_resp(0, &data.lock().unwrap().meta)?),
             req => Err(anyhow!("unknown command {:?}", req).context(ScxStatsErrno(libc::EINVAL)))?,
         }
     }
@@ -421,8 +577,7 @@ where
     stats_path: PathBuf,
     path: Option<PathBuf>,
 
-    stats_meta_holder: BTreeMap<String, ScxStatsMeta>,
-    stats_ops_holder: BTreeMap<String, Arc<Mutex<ScxStatsOps<Req, Res>>>>,
+    data: Arc<Mutex<ScxStatsServerData<Req, Res>>>,
 
     outer_ch: ChannelPair<Res, Req>,
     inner_ch: Option<ChannelPair<Req, Res>>,
@@ -434,7 +589,7 @@ where
     Req: Send + 'static,
     Res: Send + 'static,
 {
-    pub fn new() -> Self {
+    pub fn new(data: ScxStatsServerData<Req, Res>) -> Self {
         let (ich, och) = ChannelPair::<Req, Res>::bidi();
 
         Self {
@@ -442,41 +597,11 @@ where
             sched_path: PathBuf::from("root"),
             stats_path: PathBuf::from("stats"),
             path: None,
-
-            stats_meta_holder: BTreeMap::new(),
-            stats_ops_holder: BTreeMap::new(),
-
+            data: Arc::new(Mutex::new(data)),
             outer_ch: och,
             inner_ch: Some(ich),
             exit: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    pub fn add_stats_meta(mut self, meta: ScxStatsMeta) -> Self {
-        self.stats_meta_holder.insert(meta.name.clone(), meta);
-        self
-    }
-
-    pub fn add_stats_ops(mut self, name: &str, ops: ScxStatsOps<Req, Res>) -> Self {
-        self.stats_ops_holder
-            .insert(name.to_string(), Arc::new(Mutex::new(ops)));
-        self
-    }
-
-    pub fn add_stats(self, name: &str, fetch: Box<dyn StatsReaderSend<Req, Res>>) -> Self {
-        let wrapped_fetch = Mutex::new(fetch);
-        let read: Box<dyn StatsReaderSync<Req, Res>> =
-            Box::new(move |args, chan| wrapped_fetch.lock().unwrap()(args, chan));
-        let wrapped_read = Arc::new(read);
-        let ops = ScxStatsOps {
-            open: Box::new(move |_| {
-                let copy = wrapped_read.clone();
-                Ok(Box::new(move |args, chan| copy(args, chan)))
-            }),
-            close: None,
-        };
-
-        self.add_stats_ops(name, ops)
     }
 
     pub fn set_base_path<P: AsRef<Path>>(mut self, path: P) -> Self {
@@ -500,6 +625,8 @@ where
     }
 
     pub fn launch(mut self) -> Result<Self> {
+        self.data.lock().unwrap().verify_meta()?;
+
         if self.path.is_none() {
             self.path = Some(self.base_path.join(&self.sched_path).join(&self.stats_path));
         }
@@ -519,15 +646,9 @@ where
         let listener =
             UnixListener::bind(path).with_context(|| format!("creating UNIX socket {:?}", path))?;
 
-        let mut stats_meta = BTreeMap::new();
-        let mut stats = BTreeMap::new();
-        std::mem::swap(&mut stats_meta, &mut self.stats_meta_holder);
-        std::mem::swap(&mut stats, &mut self.stats_ops_holder);
-
         let inner = ScxStatsServerInner::new(
             listener,
-            stats_meta,
-            stats,
+            self.data.clone(),
             self.inner_ch.take().unwrap(),
             self.exit.clone(),
         );

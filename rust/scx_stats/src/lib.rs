@@ -8,8 +8,9 @@ pub use stats::{
 
 mod server;
 pub use server::{
-    ScxStatsErrno, ScxStatsOps, ScxStatsRequest, ScxStatsResponse, ScxStatsServer, StatsCloser,
-    StatsOpener, StatsReader, StatsReaderSend, StatsReaderSync, ToJson,
+    ScxStatsErrno, ScxStatsOps, ScxStatsRequest, ScxStatsResponse, ScxStatsServer,
+    ScxStatsServerData, StatsCloser, StatsOpener, StatsReader, StatsReaderSend, StatsReaderSync,
+    ToJson,
 };
 
 mod client;

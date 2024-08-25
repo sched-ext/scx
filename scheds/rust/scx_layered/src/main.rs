@@ -416,6 +416,10 @@ struct Opts {
     #[clap(long)]
     run_example: bool,
 
+    /// Show descriptions for statistics.
+    #[clap(long)]
+    help_stats: bool,
+
     /// Layer specification. See --help.
     specs: Vec<String>,
 }
@@ -1616,7 +1620,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         // Attach.
         let struct_ops = scx_ops_attach!(skel, layered)?;
-        let stats_server = stats::launch_server()?;
+        let stats_server = ScxStatsServer::new(stats::server_data()).launch()?;
 
         let sched = Self {
             struct_ops: Some(struct_ops),
@@ -1932,6 +1936,11 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
 
 fn main() -> Result<()> {
     let opts = Opts::parse();
+
+    if opts.help_stats {
+	stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
+	return Ok(());
+    }
 
     let llv = match opts.verbose {
         0 => simplelog::LevelFilter::Info,

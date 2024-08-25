@@ -53,6 +53,18 @@ impl ScxStatsKind {
     }
 }
 
+impl std::fmt::Display for ScxStatsKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::I64 => write!(f, "i64"),
+            Self::U64 => write!(f, "u64"),
+            Self::Float => write!(f, "float"),
+            Self::String => write!(f, "string"),
+            Self::Struct(name) => write!(f, "{}", name),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ScxStatsData {
     #[serde(rename = "datum")]
@@ -169,6 +181,16 @@ impl ScxStatsData {
             }
         }
         Ok(Self::Datum(kind))
+    }
+}
+
+impl std::fmt::Display for ScxStatsData {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::Datum(kind) => write!(f, "{}", kind),
+            Self::Array(kind) => write!(f, "[{}]", kind),
+            Self::Dict { key, datum } => write!(f, "{{{}:{}}}", key, datum),
+        }
     }
 }
 
