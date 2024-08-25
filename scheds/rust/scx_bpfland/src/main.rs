@@ -10,6 +10,9 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 pub use bpf_intf::*;
 
+mod stats;
+use stats::Metrics;
+
 use std::collections::HashMap;
 use std::ffi::c_int;
 use std::fs::File;
@@ -24,11 +27,10 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use crossbeam::channel::RecvTimeoutError;
 use log::info;
-use log::warn;
 
-use metrics::{gauge, Gauge};
-use metrics_exporter_prometheus::PrometheusBuilder;
+use log::warn;
 
 use rlimit::{getrlimit, setrlimit, Resource};
 
@@ -37,6 +39,8 @@ use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
+
+use scx_stats::prelude::*;
 
 use scx_utils::build_id;
 use scx_utils::scx_ops_attach;
@@ -151,9 +155,7 @@ fn parse_cpumask(cpu_str: &str) -> Result<Cpumask, anyhow::Error> {
             let cpus = get_primary_cpus(Powermode::Performance).unwrap();
             Cpumask::from_str(&cpus_to_cpumask(&cpus))
         }
-        "auto" => {
-            Cpumask::new()
-        }
+        "auto" => Cpumask::new(),
         _ if !cpu_str.is_empty() => Cpumask::from_str(&cpu_str.to_string()),
         _ => {
             let mut cpumask = Cpumask::new()?;
@@ -243,9 +245,14 @@ struct Opts {
     #[clap(short = 't', long, default_value = "5000")]
     starvation_thresh_us: u64,
 
-    /// Enable the Prometheus endpoint for metrics on port 9000.
-    #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
-    enable_prometheus: bool,
+    /// Enable stats monitoring with the specified interval.
+    #[clap(long)]
+    stats: Option<f64>,
+
+    /// Run in stats monitoring mode with the specified interval. Scheduler
+    /// is not launched.
+    #[clap(long)]
+    monitor: Option<f64>,
 
     /// Enable BPF debugging via /sys/kernel/debug/tracing/trace_pipe.
     #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
@@ -258,44 +265,10 @@ struct Opts {
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
-}
 
-struct Metrics {
-    nr_running: Gauge,
-    nr_interactive: Gauge,
-    nr_waiting: Gauge,
-    nvcsw_avg_thresh: Gauge,
-    nr_direct_dispatches: Gauge,
-    nr_prio_dispatches: Gauge,
-    nr_shared_dispatches: Gauge,
-}
-
-impl Metrics {
-    fn new() -> Self {
-        Metrics {
-            nr_running: gauge!(
-                "nr_running", "info" => "Number of running tasks"
-            ),
-            nr_interactive: gauge!(
-                "nr_interactive", "info" => "Number of running interactive tasks"
-            ),
-            nr_waiting: gauge!(
-                "nr_waiting", "info" => "Average amount of tasks waiting to be dispatched"
-            ),
-            nvcsw_avg_thresh: gauge!(
-                "nvcsw_avg_thresh", "info" => "Average of voluntary context switches"
-            ),
-            nr_direct_dispatches: gauge!(
-                "nr_direct_dispatches", "info" => "Number of task direct dispatches"
-            ),
-            nr_prio_dispatches: gauge!(
-                "nr_prio_dispatches", "info" => "Number of interactive task dispatches"
-            ),
-            nr_shared_dispatches: gauge!(
-                "nr_shared_dispatches", "info" => "Number of regular task dispatches"
-            ),
-        }
-    }
+    /// Show descriptions for statistics.
+    #[clap(long)]
+    help_stats: bool,
 }
 
 fn is_smt_active() -> std::io::Result<i32> {
@@ -312,9 +285,9 @@ struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     opts: &'a Opts,
-    metrics: Metrics,
     cpu_hotplug_cnt: u64,
     energy_profile: String,
+    stats_server: StatsServer<(), Metrics>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -363,10 +336,12 @@ impl<'a> Scheduler<'a> {
 
         // Initialize the primary scheduling domain (based on the --primary-domain option).
         let energy_profile = Self::read_energy_profile();
-        if let Err(err) = Self::init_turbo_domain(&mut skel, &opts.primary_domain, &energy_profile) {
+        if let Err(err) = Self::init_turbo_domain(&mut skel, &opts.primary_domain, &energy_profile)
+        {
             warn!("failed to initialize turbo domain: error {}", err);
         }
-        if let Err(err) = Self::init_energy_domain(&mut skel, &opts.primary_domain, &energy_profile) {
+        if let Err(err) = Self::init_energy_domain(&mut skel, &opts.primary_domain, &energy_profile)
+        {
             warn!("failed to initialize primary domain: error {}", err);
         }
 
@@ -381,22 +356,15 @@ impl<'a> Scheduler<'a> {
 
         // Attach the scheduler.
         let struct_ops = Some(scx_ops_attach!(skel, bpfland_ops)?);
-
-        // Enable Prometheus metrics.
-        if opts.enable_prometheus {
-            info!("Enabling Prometheus endpoint: http://localhost:9000");
-            PrometheusBuilder::new()
-                .install()
-                .expect("failed to install Prometheus recorder");
-        }
+        let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         Ok(Self {
             skel,
             struct_ops,
             opts,
-            metrics: Metrics::new(),
             cpu_hotplug_cnt: 0,
             energy_profile,
+            stats_server,
         })
     }
 
@@ -423,12 +391,13 @@ impl<'a> Scheduler<'a> {
     }
 
     fn read_energy_profile() -> String {
-        let res = File::open("/sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference")
-            .and_then(|mut file| {
-                let mut contents = String::new();
-                file.read_to_string(&mut contents)?;
-                Ok(contents.trim().to_string())
-            });
+        let res =
+            File::open("/sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference")
+                .and_then(|mut file| {
+                    let mut contents = String::new();
+                    file.read_to_string(&mut contents)?;
+                    Ok(contents.trim().to_string())
+                });
 
         res.unwrap_or_else(|_| "none".to_string())
     }
@@ -455,7 +424,11 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn init_turbo_domain(skel: &mut BpfSkel<'_>, primary_domain: &Cpumask, energy_profile: &String) -> Result<()> {
+    fn init_turbo_domain(
+        skel: &mut BpfSkel<'_>,
+        primary_domain: &Cpumask,
+        energy_profile: &String,
+    ) -> Result<()> {
         let domain = if primary_domain.is_empty() {
             let cpus = match energy_profile.as_str() {
                 "balance_power" => get_primary_cpus(Powermode::Turbo).unwrap_or(Vec::new()),
@@ -489,12 +462,18 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn init_energy_domain(skel: &mut BpfSkel<'_>, primary_domain: &Cpumask, energy_profile: &String) -> Result<()> {
+    fn init_energy_domain(
+        skel: &mut BpfSkel<'_>,
+        primary_domain: &Cpumask,
+        energy_profile: &String,
+    ) -> Result<()> {
         let domain = if primary_domain.is_empty() {
             let cpus = match energy_profile.as_str() {
                 "power" => get_primary_cpus(Powermode::Powersave).unwrap_or(Vec::new()),
                 "balance_power" => get_primary_cpus(Powermode::Performance).unwrap_or(Vec::new()),
-                "balance_performance" => get_primary_cpus(Powermode::Performance).unwrap_or(Vec::new()),
+                "balance_performance" => {
+                    get_primary_cpus(Powermode::Performance).unwrap_or(Vec::new())
+                }
                 "performance" => get_primary_cpus(Powermode::Performance).unwrap_or(Vec::new()),
                 &_ => Vec::new(),
             };
@@ -533,10 +512,18 @@ impl<'a> Scheduler<'a> {
             if energy_profile != self.energy_profile {
                 self.energy_profile = energy_profile.clone();
 
-                if let Err(err) = Self::init_turbo_domain(&mut self.skel, &self.opts.primary_domain, &energy_profile) {
+                if let Err(err) = Self::init_turbo_domain(
+                    &mut self.skel,
+                    &self.opts.primary_domain,
+                    &energy_profile,
+                ) {
                     warn!("failed to refresh turbo domain: error {}", err);
                 }
-                if let Err(err) = Self::init_energy_domain(&mut self.skel, &self.opts.primary_domain, &energy_profile) {
+                if let Err(err) = Self::init_energy_domain(
+                    &mut self.skel,
+                    &self.opts.primary_domain,
+                    &energy_profile,
+                ) {
                     warn!("failed to refresh primary domain: error {}", err);
                 }
             }
@@ -663,42 +650,17 @@ impl<'a> Scheduler<'a> {
         self.cpu_hotplug_cnt = self.skel.maps.bss_data.cpu_hotplug_cnt;
     }
 
-    fn update_stats(&mut self) {
-        let nr_cpus = self.skel.maps.bss_data.nr_online_cpus;
-        let nr_running = self.skel.maps.bss_data.nr_running;
-        let nr_interactive = self.skel.maps.bss_data.nr_interactive;
-        let nr_waiting = self.skel.maps.bss_data.nr_waiting;
-        let nvcsw_avg_thresh = self.skel.maps.bss_data.nvcsw_avg_thresh;
-        let nr_direct_dispatches = self.skel.maps.bss_data.nr_direct_dispatches;
-        let nr_prio_dispatches = self.skel.maps.bss_data.nr_prio_dispatches;
-        let nr_shared_dispatches = self.skel.maps.bss_data.nr_shared_dispatches;
-
-        // Update Prometheus statistics.
-        self.metrics.nr_running.set(nr_running as f64);
-        self.metrics.nr_interactive.set(nr_interactive as f64);
-        self.metrics.nr_waiting.set(nr_waiting as f64);
-        self.metrics.nvcsw_avg_thresh.set(nvcsw_avg_thresh as f64);
-        self.metrics
-            .nr_direct_dispatches
-            .set(nr_direct_dispatches as f64);
-        self.metrics
-            .nr_prio_dispatches
-            .set(nr_prio_dispatches as f64);
-        self.metrics
-            .nr_shared_dispatches
-            .set(nr_shared_dispatches as f64);
-
-        // Log scheduling statistics.
-        info!("[{}] tasks -> run: {:>2}/{:<2} int: {:<2} wait: {:<4} | nvcsw: {:<4} | dispatch -> dir: {:<5} prio: {:<5} shr: {:<5}",
-            SCHEDULER_NAME,
-            nr_running,
-            nr_cpus,
-            nr_interactive,
-            nr_waiting,
-            nvcsw_avg_thresh,
-            nr_direct_dispatches,
-            nr_prio_dispatches,
-            nr_shared_dispatches);
+    fn get_metrics(&self) -> Metrics {
+        Metrics {
+            nr_running: self.skel.maps.bss_data.nr_running,
+            nr_cpus: self.skel.maps.bss_data.nr_online_cpus,
+            nr_interactive: self.skel.maps.bss_data.nr_interactive,
+            nr_waiting: self.skel.maps.bss_data.nr_waiting,
+            nvcsw_avg_thresh: self.skel.maps.bss_data.nvcsw_avg_thresh,
+            nr_direct_dispatches: self.skel.maps.bss_data.nr_direct_dispatches,
+            nr_prio_dispatches: self.skel.maps.bss_data.nr_prio_dispatches,
+            nr_shared_dispatches: self.skel.maps.bss_data.nr_shared_dispatches,
+        }
     }
 
     pub fn exited(&mut self) -> bool {
@@ -706,13 +668,16 @@ impl<'a> Scheduler<'a> {
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+        let (res_ch, req_ch) = self.stats_server.channels();
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             self.refresh_cache_domains();
             self.refresh_sched_domain();
-            self.update_stats();
-            std::thread::sleep(Duration::from_millis(1000));
+            match req_ch.recv_timeout(Duration::from_secs(1)) {
+                Ok(()) => res_ch.send(self.get_metrics())?,
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(e) => Err(e)?,
+            }
         }
-        self.update_stats();
 
         self.struct_ops.take();
         uei_report!(&self.skel, uei)
@@ -730,6 +695,11 @@ fn main() -> Result<()> {
 
     if opts.version {
         println!("{} {}", SCHEDULER_NAME, *build_id::SCX_FULL_VERSION);
+        return Ok(());
+    }
+
+    if opts.help_stats {
+        stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
         return Ok(());
     }
 
@@ -753,6 +723,17 @@ fn main() -> Result<()> {
         shutdown_clone.store(true, Ordering::Relaxed);
     })
     .context("Error setting Ctrl-C handler")?;
+
+    if let Some(intv) = opts.monitor.or(opts.stats) {
+        let shutdown_copy = shutdown.clone();
+        let jh = std::thread::spawn(move || {
+            stats::monitor(Duration::from_secs_f64(intv), shutdown_copy).unwrap()
+        });
+        if opts.monitor.is_some() {
+            let _ = jh.join();
+            return Ok(());
+        }
+    }
 
     let mut open_object = MaybeUninit::uninit();
     loop {
