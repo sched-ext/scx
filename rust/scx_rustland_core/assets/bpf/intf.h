@@ -18,13 +18,19 @@
 #define __kptr
 #endif
 
-#ifndef __KERNEL__
+#ifndef __VMLINUX_H__
 typedef unsigned char u8;
+typedef unsigned short u16;
 typedef unsigned int u32;
-typedef int s32;
-typedef unsigned long long u64;
-typedef long long s64;
-#endif
+typedef unsigned long u64;
+
+typedef signed char s8;
+typedef signed short s16;
+typedef signed int s32;
+typedef signed long s64;
+
+typedef int pid_t;
+#endif /* __VMLINUX_H__ */
 
 /* Check a condition at build time */
 #define BUILD_BUG_ON(expr) \
@@ -56,13 +62,22 @@ enum {
 };
 
 /*
+ * Specify a target CPU for a specific PID.
+ */
+struct task_cpu_arg {
+	pid_t pid;
+	s32 cpu;
+	u64 flags;
+};
+
+/*
  * Task sent to the user-space scheduler by the BPF dispatcher.
  *
  * All attributes are collected from the kernel by the the BPF component.
  */
 struct queued_task_ctx {
 	s32 pid;
-	s32 cpu; /* CPU where the task is running (-1 = exiting) */
+	s32 cpu; /* CPU where the task is running */
 	u64 cpumask_cnt; /* cpumask generation counter */
 	u64 sum_exec_runtime; /* Total cpu time */
 	u64 weight; /* Task static priority */
@@ -78,8 +93,8 @@ struct dispatched_task_ctx {
 	s32 pid;
 	s32 cpu; /* CPU where the task should be dispatched */
 	u64 flags; /* special dispatch flags */
-	u64 cpumask_cnt; /* cpumask generation counter */
 	u64 slice_ns; /* time slice assigned to the task (0=default) */
+	u64 cpumask_cnt; /* cpumask generation counter */
 };
 
 #endif /* __INTF_H */

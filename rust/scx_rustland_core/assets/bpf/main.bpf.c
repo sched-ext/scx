@@ -47,7 +47,6 @@ UEI_DEFINE(uei);
  */
 u32 usersched_pid; /* User-space scheduler PID */
 const volatile bool switch_partial; /* Switch all tasks or SCHED_EXT tasks */
-const volatile u64 slice_ns = SCX_SLICE_DFL; /* Base time slice duration */
 
 /*
  * Number of tasks that are queued for scheduling.
@@ -86,27 +85,6 @@ const volatile bool debug;
 	if (debug)							\
 		bpf_printk(_fmt, ##__VA_ARGS__);			\
 } while(0)
-
-/*
- * Enable/disable full user-space mode.
- *
- * In full user-space mode all events and actions will be sent to user-space,
- * basically disabling any optimization to bypass the user-space scheduler.
- */
-const volatile bool full_user;
-
- /*
-  * Enable/disable low-power mode.
-  *
-  * When low-power mode is enabled, the scheduler behaves in a more non-work
-  * conserving way: the CPUs operate at reduced capacity, which slows down
-  * CPU-bound tasks, enhancing the prioritization of interactive workloads.
-  *
-  * In summary, enabling low-power mode will limit the performance of
-  * CPU-intensive tasks, reducing power consumption, while maintaining
-  * effective prioritization of interactive tasks.
-  */
-const volatile bool low_power;
 
 /*
  * CPUs in the system have SMT is enabled.
@@ -223,6 +201,11 @@ struct {
  */
 struct task_ctx {
 	/*
+	 * Time slice assigned to the task.
+	 */
+	u64 slice_ns;
+
+	/*
 	 * cpumask generation counter: used to verify the validity of the
 	 * current task's cpumask.
 	 */
@@ -280,14 +263,6 @@ struct {
 static inline bool is_usersched_task(const struct task_struct *p)
 {
 	return p->pid == usersched_pid;
-}
-
-/*
- * Return true if the target task @p is a kernel thread.
- */
-static inline bool is_kthread(const struct task_struct *p)
-{
-	return !!(p->flags & PF_KTHREAD);
 }
 
 /*
@@ -367,39 +342,47 @@ static u64 cpu_to_dsq(s32 cpu)
 }
 
 /*
- * Dispatch a task to a target DSQ, waking up the corresponding CPU, if needed.
+ * Return the time slice assigned to the task.
  */
-static void
-dispatch_task(struct task_struct *p, u64 dsq_id,
-	      u64 cpumask_cnt, u64 task_slice_ns, u64 enq_flags)
+static inline u64 task_slice(struct task_struct *p)
 {
 	struct task_ctx *tctx;
-	u64 slice = task_slice_ns ? : slice_ns;
+
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
+		return SCX_SLICE_DFL;
+	return tctx->slice_ns;
+}
+
+/*
+ * Dispatch a task to a target DSQ, waking up the corresponding CPU, if needed.
+ */
+static void dispatch_task(struct task_struct *p, u64 dsq_id,
+			  u64 cpumask_cnt, u64 slice, u64 enq_flags)
+{
+	struct task_ctx *tctx;
 	u64 curr_cpumask_cnt;
 	bool force_shared = false;
 	s32 cpu = scx_bpf_task_cpu(p);
 
+	/*
+	 * Update task's time slice in its context.
+	 */
+	tctx = lookup_task_ctx(p);
+	if (!tctx)
+		return;
+	tctx->slice_ns = slice;
+
+	/*
+	 * Dispatch task to the target DSQ.
+	 */
 	switch (dsq_id) {
 	case SHARED_DSQ:
-		scx_bpf_dispatch(p, dsq_id, slice, enq_flags);
+		scx_bpf_dispatch(p, dsq_id, SCX_SLICE_DFL, enq_flags);
 		dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu",
 			p->pid, p->comm, dsq_id, enq_flags, slice);
 		break;
 	default:
-		tctx = lookup_task_ctx(p);
-		if (!tctx) {
-			/*
-			 * If the task doesn't have a context anymore, simply
-			 * bounce it to the first CPU available.
-			 */
-			scx_bpf_dispatch(p, SHARED_DSQ, slice, enq_flags);
-			__sync_fetch_and_add(&nr_bounce_dispatches, 1);
-
-			dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu bounce",
-				p->pid, p->comm, dsq_id, enq_flags, slice);
-			return;
-		}
-
 		/*
 		 * Dispatch a task to a specific per-CPU DSQ if the target CPU
 		 * can be used (according to the cpumask), otherwise redirect
@@ -416,7 +399,7 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 		 * core sched-ext code, potentially selecting a different cpu
 		 * and a different cpumask.
 		 */
-		scx_bpf_dispatch(p, dsq_id, slice, enq_flags);
+		scx_bpf_dispatch(p, dsq_id, SCX_SLICE_DFL, enq_flags);
 
 		/* Read current cpumask generation counter */
 		curr_cpumask_cnt = tctx->cpumask_cnt;
@@ -444,7 +427,7 @@ dispatch_task(struct task_struct *p, u64 dsq_id,
 			scx_bpf_dispatch_cancel();
 			__sync_fetch_and_add(&nr_bounce_dispatches, 1);
 
-			scx_bpf_dispatch(p, SHARED_DSQ, slice, enq_flags);
+			scx_bpf_dispatch(p, SHARED_DSQ, SCX_SLICE_DFL, enq_flags);
 			dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu bounce",
 				p->pid, p->comm, dsq_id, enq_flags, slice);
 			return;
@@ -484,54 +467,10 @@ static bool dispatch_user_scheduler(void)
 	 * Dispatch the scheduler on the first CPU available, likely the
 	 * current one.
 	 */
-	dispatch_task(p, SHARED_DSQ, 0, 0, 0);
+	dispatch_task(p, SHARED_DSQ, 0, SCX_SLICE_DFL, 0);
 	bpf_task_release(p);
 
 	return true;
-}
-
-/*
- * Directly dispatch a task to a target CPU, bypassing the user-space
- * scheduler.
- */
-static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
-{
-	struct bpf_cpumask *offline;
-	u64 dsq_id = cpu_to_dsq(cpu);
-
-	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-		return -EINVAL;
-
-        scx_bpf_dispatch(p, dsq_id, slice_ns, enq_flags);
-	__sync_fetch_and_add(&nr_kernel_dispatches, 1);
-
-	/*
-	 * If the CPU has gone offline notify that the task needs to be
-	 * consumed from another CPU.
-	 */
-	offline = offline_cpumask;
-	if (!offline)
-		return 0;
-	if (bpf_cpumask_test_cpu(cpu, cast_mask(offline))) {
-		set_offline_needed();
-		return 0;
-	}
-
-	/*
-	 * Wake-up the target CPU to make sure that the task is consumed as
-	 * soon as possible.
-	 *
-	 * Note: the target CPU must be activated, because the task has been
-	 * dispatched to a DSQ that only the target CPU can consume. If we do
-	 * not kick the CPU, and the CPU is idle, the task can stall in the DSQ
-	 * indefinitely.
-	 */
-	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-
-	dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu direct",
-		p->pid, p->comm, dsq_id, enq_flags, slice_ns);
-
-	return 0;
 }
 
 /*
@@ -624,60 +563,50 @@ out_put_cpumask:
 	return cpu;
 }
 
-/*
- * Select the target CPU where a task can be executed.
- *
- * The idea here is to try to find an idle CPU in the system, and preferably
- * maintain the task on the same CPU. If we can find an idle CPU in the system
- * dispatch the task directly bypassing the user-space scheduler. Otherwise,
- * send the task to the user-space scheduler, maintaining the previously used
- * CPU as a hint for the scheduler.
- *
- * Decision made in this function is not final. The user-space scheduler may
- * decide to move the task to a different CPU later, if needed.
- */
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	s32 cpu;
-
 	/*
-	 * When full_user is enabled, the user-space scheduler is responsible
-	 * for selecting a target CPU based on its scheduling logic and
-	 * possibly its own idle tracking mechanism.
+	 * Completely delegate the CPU selection logic to the user-space
+	 * scheduler.
 	 */
-	if (full_user)
-		return prev_cpu;
-
-	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
-	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0))
-		return cpu;
-
 	return prev_cpu;
+}
+
+/*
+ * Select an idle CPU for a specific task from the user-space scheduler.
+ */
+SEC("syscall")
+int rs_select_cpu(struct task_cpu_arg *input)
+{
+	struct task_struct *p;
+	int cpu;
+
+	p = bpf_task_from_pid(input->pid);
+	if (!p)
+		return -EINVAL;
+	bpf_rcu_read_lock();
+	cpu = pick_idle_cpu(p, input->cpu, input->flags);
+	bpf_rcu_read_unlock();
+
+	bpf_task_release(p);
+
+	return cpu;
 }
 
 /*
  * Fill @task with all the information that need to be sent to the user-space
  * scheduler.
  */
-static void get_task_info(struct queued_task_ctx *task,
-			  const struct task_struct *p, bool exiting)
+static void
+get_task_info(struct queued_task_ctx *task, const struct task_struct *p)
 {
 	struct task_ctx *tctx;
-
-	task->pid = p->pid;
-	/*
-	 * Use a negative CPU number to notify that the task is exiting, so
-	 * that we can free up its resources in the user-space scheduler.
-	 */
-	if (exiting) {
-		task->cpu = -1;
-		return;
-	}
 
 	tctx = lookup_task_ctx(p);
 	if (!tctx)
 		return;
+	task->pid = p->pid;
 	task->cpumask_cnt = tctx->cpumask_cnt;
 	task->sum_exec_runtime = p->se.sum_exec_runtime;
 	task->weight = p->scx.weight;
@@ -711,19 +640,6 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Always dispatch per-CPU kthreads directly on their target CPU.
-	 *
-	 * This allows to prioritize critical kernel threads that may
-	 * potentially slow down the entire system if they are blocked for too
-	 * long (i.e., ksoftirqd/N, rcuop/N, etc.), but it could also cause
-	 * interactivity problems or unfairness if there are too many softirqs
-	 * being scheduled (e.g., in presence of high RX network traffic).
-	 */
-	if (!full_user && is_kthread(p) && p->nr_cpus_allowed == 1)
-		if (!dispatch_direct_cpu(p, cpu, enq_flags))
-			return;
-
-	/*
 	 * Add tasks to the @queued list, they will be processed by the
 	 * user-space scheduler.
 	 *
@@ -734,11 +650,11 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	task = bpf_ringbuf_reserve(&queued, sizeof(*task), 0);
 	if (!task) {
 		sched_congested(p);
-		dispatch_task(p, SHARED_DSQ, 0, 0, enq_flags);
+		dispatch_task(p, SHARED_DSQ, 0, SCX_SLICE_DFL, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
-	get_task_info(task, p, false);
+	get_task_info(task, p);
 	dbg_msg("enqueue: pid=%d (%s)", p->pid, p->comm);
 	bpf_ringbuf_submit(task, 0);
 
@@ -897,8 +813,7 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 	 * Ensure time slice never exceeds slice_ns when a task is started on a
 	 * CPU.
 	 */
-	if (p->scx.slice > slice_ns)
-		p->scx.slice = slice_ns;
+	p->scx.slice = task_slice(p);
 
 	/*
 	 * Mark the CPU as busy by setting the pid as owner (ignoring the
@@ -951,8 +866,7 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 		 * Wake up the idle CPU and trigger a resched, so that it can
 		 * immediately accept dispatched tasks.
 		 */
-		if (!low_power || !nr_running)
-			scx_bpf_kick_cpu(cpu, 0);
+		scx_bpf_kick_cpu(cpu, 0);
 	}
 }
 
@@ -1013,46 +927,16 @@ void BPF_STRUCT_OPS(rustland_cpu_offline, s32 cpu)
 s32 BPF_STRUCT_OPS(rustland_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
+	struct task_ctx *tctx;;
+
 	/* Allocate task's local storage */
-	if (bpf_task_storage_get(&task_ctx_stor, p, 0,
-				 BPF_LOCAL_STORAGE_GET_F_CREATE))
-		return 0;
-	else
+	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!tctx)
 		return -ENOMEM;
-}
+	tctx->slice_ns = SCX_SLICE_DFL;
 
-/*
- * Task @p is exiting.
- *
- * Notify the user-space scheduler that we can free up all the allocated
- * resources associated to this task.
- */
-void BPF_STRUCT_OPS(rustland_exit_task, struct task_struct *p,
-		    struct scx_exit_task_args *args)
-{
-	struct queued_task_ctx *task;
-
-	dbg_msg("exit: pid=%d (%s)", p->pid, p->comm);
-	task = bpf_ringbuf_reserve(&queued, sizeof(*task), 0);
-	if (!task) {
-		/*
-		 * We may have a memory leak in the scheduler at this point,
-		 * because we failed to notify it about this exiting task and
-		 * some resources may remain allocated.
-		 *
-		 * Do not worry too much about this condition for now, since
-		 * it should be pretty rare (and it happens only when the
-		 * scheduler is already congested, so it is probably a good
-		 * thing to avoid introducing extra overhead to free up
-		 * resources).
-		 */
-		sched_congested(p);
-		return;
-	}
-	get_task_info(task, p, true);
-	bpf_ringbuf_submit(task, 0);
-
-	__sync_fetch_and_add(&nr_queued, 1);
+	return 0;
 }
 
 /*
@@ -1215,7 +1099,6 @@ SCX_OPS_DEFINE(rustland,
 	       .cpu_online		= (void *)rustland_cpu_online,
 	       .cpu_offline		= (void *)rustland_cpu_offline,
 	       .init_task		= (void *)rustland_init_task,
-	       .exit_task		= (void *)rustland_exit_task,
 	       .init			= (void *)rustland_init,
 	       .exit			= (void *)rustland_exit,
 	       .flags			= SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,

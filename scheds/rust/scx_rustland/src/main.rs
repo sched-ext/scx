@@ -16,9 +16,6 @@ use std::thread;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use std::fs::File;
@@ -83,22 +80,6 @@ struct Opts {
     #[clap(short = 'S', long, default_value = "500")]
     slice_us_min: u64,
 
-    /// If specified, all the scheduling events and actions will be processed in user-space,
-    /// disabling any form of in-kernel optimization.
-    ///
-    /// This mode will likely make the system less responsive, but more predictable in terms of
-    /// performance.
-    #[clap(short = 'u', long, action = clap::ArgAction::SetTrue)]
-    full_user: bool,
-
-    /// When low-power mode is enabled, the scheduler behaves in a more non-work conserving way:
-    /// the CPUs operate at reduced capacity, which slows down CPU-bound tasks, enhancing the
-    /// prioritization of interactive workloads.  In summary, enabling low-power mode will limit
-    /// the performance of CPU-intensive tasks, reducing power consumption, while maintaining
-    /// effective prioritization of interactive tasks.
-    #[clap(short = 'l', long, action = clap::ArgAction::SetTrue)]
-    low_power: bool,
-
     /// If specified, only tasks which have their scheduling policy set to SCHED_EXT using
     /// sched_setscheduler(2) are switched. Otherwise, all tasks are switched.
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
@@ -108,14 +89,10 @@ struct Opts {
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
 
-    /// Enable verbose output, including libbpf details.
+    /// Enable verbose output, including libbpf details. Moreover, BPF scheduling events will be
+    /// reported in debugfs (e.g., /sys/kernel/debug/tracing/trace_pipe).
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
-
-    /// If specified, all the BPF scheduling events will be reported in
-    /// debugfs (e.g., /sys/kernel/debug/tracing/trace_pipe).
-    #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
-    debug: bool,
 
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
@@ -144,15 +121,16 @@ fn parse_proc_pid_stat(pid: i32) -> std::io::Result<TaskStat> {
         if line.starts_with("Name:") {
             comm = line.split_whitespace().nth(1).unwrap_or("").to_string();
         } else if line.starts_with("voluntary_ctxt_switches:") {
-            nvcsw = line.split_whitespace().nth(1).unwrap_or("0").parse().unwrap_or(0);
+            nvcsw = line
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0);
         }
     }
 
-    Ok(TaskStat {
-        pid,
-        comm,
-        nvcsw,
-    })
+    Ok(TaskStat { pid, comm, nvcsw })
 }
 
 fn get_all_pids() -> std::io::Result<Vec<i32>> {
@@ -211,7 +189,9 @@ struct Task {
 // pid.
 impl Ord for Task {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.is_interactive.cmp(&self.is_interactive)
+        other
+            .is_interactive
+            .cmp(&self.is_interactive)
             .then_with(|| self.vruntime.cmp(&other.vruntime))
             .then_with(|| self.timestamp.cmp(&other.timestamp))
             .then_with(|| self.qtask.pid.cmp(&other.qtask.pid))
@@ -260,34 +240,21 @@ impl TaskTree {
 
 // Main scheduler object
 struct Scheduler<'a> {
-    bpf: BpfScheduler<'a>, // BPF connector
-    task_pool: TaskTree,   // tasks ordered by vruntime
-    task_map: TaskInfoMap, // map pids to the corresponding task information
+    bpf: BpfScheduler<'a>,         // BPF connector
+    task_pool: TaskTree,           // tasks ordered by vruntime
+    task_map: TaskInfoMap,         // map pids to the corresponding task information
     proc_stats: HashMap<i32, u64>, // Task statistics from procfs
-    interactive_pids: Vec<i32>, // List of interactive tasks
-    min_vruntime: u64,     // Keep track of the minimum vruntime across all tasks
-    init_page_faults: u64, // Initial page faults counter
-    slice_ns: u64,         // Default time slice (in ns)
-    slice_ns_min: u64,     // Minimum time slice (in ns)
+    interactive_pids: Vec<i32>,    // List of interactive tasks
+    min_vruntime: u64,             // Keep track of the minimum vruntime across all tasks
+    init_page_faults: u64,         // Initial page faults counter
+    slice_ns: u64,                 // Default time slice (in ns)
+    slice_ns_min: u64,             // Minimum time slice (in ns)
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(
-        opts: &Opts,
-        open_object: &'a mut MaybeUninit<OpenObject>,
-    ) -> Result<Self> {
-
+    fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         // Low-level BPF connector.
-        let bpf = BpfScheduler::init(
-            open_object,
-            opts.exit_dump_len,
-            opts.partial,
-            opts.slice_us,
-            opts.full_user,
-            opts.low_power,
-            opts.verbose,
-            opts.debug,
-        )?;
+        let bpf = BpfScheduler::init(open_object, opts.exit_dump_len, opts.partial, opts.verbose)?;
         info!("{} scheduler attached", SCHEDULER_NAME);
 
         // Return scheduler object.
@@ -339,7 +306,8 @@ impl<'a> Scheduler<'a> {
             task.sum_exec_runtime
         } else {
             task.sum_exec_runtime - task_info.sum_exec_runtime
-        }.min(self.slice_ns);
+        }
+        .min(self.slice_ns);
 
         // Update task's vruntime re-aligning it to min_vruntime, to avoid
         // over-prioritizing tasks with a mostly sleepy behavior.
@@ -361,13 +329,6 @@ impl<'a> Scheduler<'a> {
         loop {
             match self.bpf.dequeue_task() {
                 Ok(Some(task)) => {
-                    // Check for exiting tasks (cpu < 0) and remove their corresponding entries in
-                    // the task map (if present).
-                    if task.cpu < 0 {
-                        self.task_map.tasks.remove(&task.pid);
-                        continue;
-                    }
-
                     // Update task information and determine vruntime.
                     let vruntime = self.update_enqueued(&task);
                     let timestamp = Self::now();
@@ -382,11 +343,6 @@ impl<'a> Scheduler<'a> {
                     });
                 }
                 Ok(None) => {
-                    // Reset nr_queued and update nr_scheduled, to notify the dispatcher that
-                    // queued tasks are drained, but there is still some work left to do in the
-                    // scheduler.
-                    self.bpf
-                        .update_tasks(Some(0), Some(self.task_pool.tasks.len() as u64));
                     break;
                 }
                 Err(err) => {
@@ -417,18 +373,24 @@ impl<'a> Scheduler<'a> {
                 // Scale time slice based on the amount of tasks that are waiting in the
                 // scheduler's queue and the previously unused time slice budget, but make sure
                 // to assign at least slice_us_min.
-                let slice_ns = (self.slice_ns / (self.nr_tasks_waiting() + 1)).max(self.slice_ns_min);
+                let slice_ns =
+                    (self.slice_ns / (self.nr_tasks_waiting() + 1)).max(self.slice_ns_min);
 
                 // Create a new task to dispatch.
                 let mut dispatched_task = DispatchedTask::new(&task.qtask);
 
                 // Assign the time slice to the task.
-                dispatched_task.set_slice_ns(slice_ns);
+                dispatched_task.slice_ns = slice_ns;
 
-                // Dispatch task on the first CPU available if it is classified as
-                // interactive, non-interactive tasks will continue to run on the same CPU.
-                if task.is_interactive {
-                    dispatched_task.set_flag(RL_CPU_ANY);
+                // Try to pick an idle CPU for the task.
+                let cpu = self
+                    .bpf
+                    .select_cpu(dispatched_task.pid, dispatched_task.cpu, 0);
+                if cpu >= 0 {
+                    dispatched_task.cpu = cpu;
+                } else {
+                    // Dispatch task on the first CPU available.
+                    dispatched_task.flags |= RL_CPU_ANY;
                 }
 
                 // Send task to the BPF dispatcher.
@@ -445,12 +407,6 @@ impl<'a> Scheduler<'a> {
             }
             None => {}
         }
-
-        // Update nr_scheduled to notify the dispatcher that all the tasks received by the
-        // scheduler has been dispatched, so there is no reason to re-activate the scheduler,
-        // unless more tasks are queued.
-        self.bpf
-            .update_tasks(None, Some(self.task_pool.tasks.len() as u64));
     }
 
     // Main scheduling function (called in a loop to periodically drain tasks from the queued list
@@ -459,8 +415,8 @@ impl<'a> Scheduler<'a> {
         self.drain_queued_tasks();
         self.dispatch_task();
 
-        // Yield to avoid using too much CPU from the scheduler itself.
-        thread::yield_now();
+        // Notify the dispatcher if there are still peding tasks to be processed,
+        self.bpf.notify_complete(self.task_pool.tasks.len() as u64);
     }
 
     // Get total page faults from /proc/self/stat.
@@ -563,7 +519,6 @@ impl<'a> Scheduler<'a> {
     fn sync_interactive_tasks(&mut self, stats: &[TaskStat]) {
         self.interactive_pids.clear();
 
-        info!("{:<8} {:>10} {} <-- interactive tasks", "[pid]", "[nvcsw]", "[comm]");
         for i in 0..stats.len() {
             let stat = &stats[i];
 
@@ -573,13 +528,7 @@ impl<'a> Scheduler<'a> {
                 break;
             }
             self.interactive_pids.push(stat.pid);
-            info!(
-                "{:<8} {:>10} {}",
-                stat.pid, stat.nvcsw, stat.comm
-            );
         }
-
-        log::logger().flush();
     }
 
     fn update_interactive_stats(&mut self) -> std::io::Result<Vec<TaskStat>> {
@@ -627,10 +576,10 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+    fn run(&mut self) -> Result<UserExitInfo> {
         let mut prev_ts = Self::now();
 
-        while !shutdown.load(Ordering::Relaxed) && !self.bpf.exited() {
+        while !self.bpf.exited() {
             // Call the main scheduler body.
             self.schedule();
 
@@ -683,18 +632,10 @@ fn main() -> Result<()> {
         simplelog::ColorChoice::Auto,
     )?;
 
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown.clone();
-    ctrlc::set_handler(move || {
-        shutdown_clone.store(true, Ordering::Relaxed);
-    })
-    .context("Error setting Ctrl-C handler")?;
-
     let mut open_object = MaybeUninit::uninit();
     loop {
         let mut sched = Scheduler::init(&opts, &mut open_object)?;
-        // Start the scheduler.
-        if !sched.run(shutdown.clone())?.should_restart() {
+        if !sched.run()?.should_restart() {
             break;
         }
     }

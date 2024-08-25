@@ -1,78 +1,68 @@
-# Framework to implement sched_ext schedulers running in user-space
+# Framework to implement `sched_ext` schedulers running in user-space
 
-[sched_ext](https://github.com/sched-ext/scx) is a Linux kernel feature
-which enables implementing kernel thread schedulers in BPF and dynamically
-loading them.
+`scx_rustland_core` is a Rust framework designed to facilitate the
+implementation of user-space schedulers based on the Linux kernel `sched_ext`
+feature.
 
-This crate provides a generic layer that can be used to implement sched-ext
-schedulers that run in user-space.
+`sched_ext` allows to dynamic load and execute custom schedulers in the kernel,
+leveraging BPF to manage scheduling policies.
 
-It provides a generic BPF abstraction that is completely agnostic of the
-particular scheduling policy implemented in user-space.
+This crate provides an abstraction layer for `sched_ext`, enabling developers
+to write schedulers in Rust without dealing with low-level kernel or BPF
+details.
 
-Developers can use such abstraction to implement schedulers using pure Rust
-code, without having to deal with any internal kernel / BPF internal details.
+## Features
+
+- **Generic BPF Abstraction**: Interact with BPF components using a high-level Rust API.
+- **Task Scheduling**: Enqueue and dispatch tasks using provided methods.
+- **CPU Selection**: Select idle CPUs for task execution with a preference for reusing previous CPUs.
+- **Time slice**: Assign a specific time slice on a per-task basis.
+- **Performance Reporting**: Access internal scheduling statistics.
 
 ## API
 
-The main BPF interface is provided by the `BpfScheduler` struct. When this
-object is initialized it will take care of registering and initializing the BPF
+### `BpfScheduler`
+
+The `BpfScheduler` struct is the core interface for interacting with the BPF
 component.
 
-The scheduler then can use `BpfScheduler` instance to receive tasks (in the
-form of `QueuedTask` objects) and dispatch tasks (in the form of DispatchedTask
-objects), using respectively the methods `dequeue_task()` and `dispatch_task()`.
+- **Initialization**:
+  - `BpfScheduler::init` registers and initializes the BPF component.
 
-Example usage (FIFO scheduler):
+- **Task Management**:
+  - `dequeue_task()`: Retrieve tasks that need to be scheduled.
+  - `dispatch_task(task: &DispatchedTask)`: Dispatch tasks to specific CPUs.
+  - `select_cpu(pid: i32, prev_cpu: i32, flags: u64)`: Select an idle CPU for a task.
+
+- **Completion Notification**:
+  - `notify_complete(nr_pending: u64)` reports the number of pending tasks to the BPF component.
+
+## Getting Started
+
+ - **Installation**:
+   - Add `scx_rustland_core` to your `Cargo.toml` dependencies.
 ```
-struct Scheduler<'a> {
-    bpf: BpfScheduler<'a>,
-}
-
-impl<'a> Scheduler<'a> {
-    fn init() -> Result<Self> {
-        let topo = Topology::new().expect("Failed to build host topology");
-        let bpf = BpfScheduler::init(5000, topo.nr_cpus() as i32, false, false, false)?;
-        Ok(Self { bpf })
-    }
-
-    fn schedule(&mut self) {
-        match self.bpf.dequeue_task() {
-            Ok(Some(task)) => {
-                // task.cpu < 0 is used to to notify an exiting task, in this
-                // case we can simply ignore it.
-                if task.cpu >= 0 {
-                    let _ = self.bpf.dispatch_task(&DispatchedTask {
-                        pid: task.pid,
-                        cpu: task.cpu,
-                        cpumask_cnt: task.cpumask_cnt,
-                        slice_ns: 0,
-                    });
-                }
-            }
-            Ok(None) => {
-                // Notify the BPF component that all tasks have been dispatched.
-                self.bpf.update_tasks(Some(0), Some(0))?
-
-                break;
-            }
-            Err(_) => {
-                break;
-            }
-        }
-    }
+[dependencies]
+scx_rustland_core = "0.1"
 ```
+ - **Implementation**:
+   - Create your scheduler by implementing the provided API.
 
-Moreover, a CPU ownership map (that keeps track of which PID runs on which CPU)
-can be accessed using the method `get_cpu_pid()`. This also allows to keep
-track of the idle and busy CPUs, with the corresponding PIDs associated to
-them.
+ - **Execution**:
+   - Compile and run your scheduler. Ensure that your kernel supports `sched_ext` and is configured to load your BPF programs.
 
-BPF counters and statistics can be accessed using the methods `nr_*_mut()`, in
-particular `nr_queued_mut()` and `nr_scheduled_mut()` can be updated to notify
-the BPF component if the user-space scheduler has still some pending work to do
-or not.
 
-Lastly, the methods `exited()` and `shutdown_and_report()` can be used
-respectively to test whether the BPF component exited, and to shutdown and
-report the exit message.
+## Example
+
+You can find a simple example of a fully working FIFO scheduler implemented
+using the `scx_rustland_core` framework here:
+[scx_rlfifo](https://github.com/sched-ext/scx/tree/main/scheds/rust/scx_rlfifo).
+
+## License
+
+This software is licensed under the GNU General Public License version 2. See
+the LICENSE file for details.
+
+## Contributing
+
+Contributions are welcome! Please submit issues or pull requests via GitHub.

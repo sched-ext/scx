@@ -14,13 +14,11 @@ use scx_utils::UserExitInfo;
 use libbpf_rs::OpenObject;
 
 use std::mem::MaybeUninit;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-
 use std::time::SystemTime;
 
 use anyhow::Result;
+
+const SLICE_US: u64 = 5000;
 
 struct Scheduler<'a> {
     bpf: BpfScheduler<'a>,
@@ -30,58 +28,78 @@ impl<'a> Scheduler<'a> {
     fn init(open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         let bpf = BpfScheduler::init(
             open_object,
-            0,                        // exit_dump_len (buffer size of exit info)
-            false,                    // partial (include all tasks if false)
-            5000,                     // slice_ns (default task time slice)
-            true,                     // full_user (schedule all tasks in user-space)
-            false,                    // low_power (low power mode)
-            false,                    // verbose (verbose output)
-            false,                    // debug (debug mode)
+            0,     // exit_dump_len (buffer size of exit info, 0 = default)
+            false, // partial (false = include all tasks)
+            false, // debug (false = debug mode off)
         )?;
         Ok(Self { bpf })
     }
 
-    fn now() -> u64 {
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    }
-
     fn dispatch_tasks(&mut self) {
         loop {
-            // Get queued taks and dispatch them in order (FIFO).
+            // Consume a taks that wants to run.
             match self.bpf.dequeue_task() {
+                // Consume a task that is ready to run.
+                //
+                // The task contains the following details:
+                //
+                // pub struct QueuedTask {
+                //     pub pid: i32,              // pid that uniquely identifies a task
+                //     pub cpu: i32,              // CPU where the task is running
+                //     pub sum_exec_runtime: u64, // Total cpu time
+                //     pub weight: u64,           // Task static priority
+                // }
+                //
+                // Although the FIFO scheduler doesn't use these fields, they can provide
+                // valuable data for implementing more sophisticated scheduling policies.
                 Ok(Some(task)) => {
-                    // task.cpu < 0 is used to to notify an exiting task, in this
-                    // case we can simply ignore the task.
-                    if task.cpu >= 0 {
-                        let mut dispatched_task = DispatchedTask::new(&task);
+                    // Create a new task to be dispatched, derived from the received enqueued task.
+                    //
+                    // pub struct DispatchedTask {
+                    //     pub pid: i32,      // pid that uniquely identifies a task
+                    //     pub cpu: i32,      // target CPU selected by the scheduler
+                    //     pub flags: u64,    // special dispatch flags
+                    //     pub slice_ns: u64, // time slice assigned to the task (0 = default)
+                    // }
+                    //
+                    // The dispatched task's information are pre-populated from the QueuedTask and
+                    // they can be modified before dispatching it via self.bpf.dispatch_task().
+                    let mut dispatched_task = DispatchedTask::new(&task);
 
-                        // Allow to dispatch on the first CPU available.
-                        dispatched_task.set_flag(RL_CPU_ANY);
-
-                        let _ = self.bpf.dispatch_task(&dispatched_task);
-
-                        // Give the task a chance to run and prevent overflowing the dispatch queue.
-                        std::thread::yield_now();
+                    // Decide where the task needs to run (target CPU).
+                    //
+                    // A call to select_cpu() will return the most suitable idle CPU for the task,
+                    // considering its previously used CPU.
+                    let cpu = self.bpf.select_cpu(task.pid, task.cpu, 0);
+                    if cpu >= 0 {
+                        // Assign the selected CPU to the task to be dispatched.
+                        dispatched_task.cpu = cpu;
+                    } else {
+                        // No idle CPU found: dspatch task on the first CPU available via the flag
+                        // RL_CPU_ANY.
+                        dispatched_task.flags |= RL_CPU_ANY;
                     }
+
+                    // Decide for how long the task needs to run (time slice); if not specified
+                    // SCX_SLICE_DFL will be used by default.
+                    dispatched_task.slice_ns = SLICE_US;
+
+                    // Dispatch the task on the target CPU.
+                    self.bpf.dispatch_task(&dispatched_task).unwrap();
                 }
-                Ok(None) => {
-                    // Notify the BPF component that all tasks have been scheduled and dispatched.
-                    self.bpf.update_tasks(Some(0), Some(0));
-                    break;
-                }
-                Err(_) => {
+                Ok(None) | Err(_) => {
+                    // If no task is ready to run (or in case of error), stop dispatching tasks and
+                    // notify the BPF component that all tasks have been scheduled / dispatched,
+                    // with no remaining pending tasks.
+                    self.bpf.notify_complete(0);
                     break;
                 }
             }
         }
-        // All queued tasks have been dipatched, yield to reduce scheduler's CPU consumption.
-        std::thread::yield_now();
     }
 
     fn print_stats(&mut self) {
+        // Internal scx_rustland_core statistics.
         let nr_user_dispatches = *self.bpf.nr_user_dispatches_mut();
         let nr_kernel_dispatches = *self.bpf.nr_kernel_dispatches_mut();
         let nr_cancel_dispatches = *self.bpf.nr_cancel_dispatches_mut();
@@ -100,10 +118,17 @@ impl<'a> Scheduler<'a> {
         );
     }
 
-    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+    fn now() -> u64 {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn run(&mut self) -> Result<UserExitInfo> {
         let mut prev_ts = Self::now();
 
-        while !shutdown.load(Ordering::Relaxed) && !self.bpf.exited() {
+        while !self.bpf.exited() {
             self.dispatch_tasks();
 
             let curr_ts = Self::now();
@@ -112,7 +137,6 @@ impl<'a> Scheduler<'a> {
                 prev_ts = curr_ts;
             }
         }
-
         self.bpf.shutdown_and_report()
     }
 }
@@ -139,16 +163,11 @@ please open a GitHub issue.
 fn main() -> Result<()> {
     print_warning();
 
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown.clone();
-    ctrlc::set_handler(move || {
-        shutdown_clone.store(true, Ordering::Relaxed);
-    })?;
-
+    // Initialize and load the FIFO scheduler.
     let mut open_object = MaybeUninit::uninit();
     loop {
         let mut sched = Scheduler::init(&mut open_object)?;
-        if !sched.run(shutdown.clone())?.should_restart() {
+        if !sched.run()?.should_restart() {
             break;
         }
     }

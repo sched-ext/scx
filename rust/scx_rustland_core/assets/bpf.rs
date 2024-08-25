@@ -6,20 +6,28 @@
 use std::mem::MaybeUninit;
 
 use crate::bpf_intf;
+use crate::bpf_intf::*;
 use crate::bpf_skel::*;
 
+use std::ffi::c_int;
+use std::ffi::c_ulong;
 use std::fs::File;
 use std::io::Read;
+
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
 
 use plain::Plain;
 
-use libbpf_rs::OpenObject;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 
 use libc::{pthread_self, pthread_setschedparam, sched_param};
 
@@ -73,7 +81,7 @@ pub const RL_PREEMPT_CPU: u64 = bpf_intf::RL_PREEMPT_CPU as u64;
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct QueuedTask {
     pub pid: i32,              // pid that uniquely identifies a task
-    pub cpu: i32,              // CPU where the task is running (-1 = exiting)
+    pub cpu: i32,              // CPU where the task is running
     pub sum_exec_runtime: u64, // Total cpu time
     pub weight: u64,           // Task static priority
     cpumask_cnt: u64,          // cpumask generation counter (private)
@@ -82,11 +90,11 @@ pub struct QueuedTask {
 // Task queued for dispatching to the BPF component (see bpf_intf::dispatched_task_ctx).
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct DispatchedTask {
-    pid: i32,         // pid that uniquely identifies a task
-    cpu: i32,         // target CPU selected by the scheduler
-    flags: u64,       // special dispatch flags
-    slice_ns: u64,    // time slice assigned to the task (0 = default)
-    cpumask_cnt: u64, // cpumask generation counter (private)
+    pub pid: i32,      // pid that uniquely identifies a task
+    pub cpu: i32,      // target CPU selected by the scheduler
+    pub flags: u64,    // special dispatch flags
+    pub slice_ns: u64, // time slice assigned to the task (0 = default)
+    cpumask_cnt: u64,  // cpumask generation counter (private)
 }
 
 impl DispatchedTask {
@@ -102,24 +110,6 @@ impl DispatchedTask {
             cpumask_cnt: task.cpumask_cnt,
             slice_ns: 0, // use default time slice
         }
-    }
-
-    // Assign a specific CPU to a task.
-    #[allow(dead_code)]
-    pub fn set_cpu(&mut self, cpu: i32) {
-        self.cpu = cpu;
-    }
-
-    // Assign a specific dispatch flag to a task.
-    #[allow(dead_code)]
-    pub fn set_flag(&mut self, flag: u64) {
-        self.flags |= flag;
-    }
-
-    // Assign a specific time slice to a task.
-    #[allow(dead_code)]
-    pub fn set_slice_ns(&mut self, slice_ns: u64) {
-        self.slice_ns = slice_ns;
     }
 }
 
@@ -160,6 +150,7 @@ impl EnqueuedMessage {
 
 pub struct BpfScheduler<'cb> {
     pub skel: BpfSkel<'cb>,                // Low-level BPF connector
+    shutdown: Arc<AtomicBool>,             // Determine scheduler shutdown
     queued: libbpf_rs::RingBuffer<'cb>,    // Ring buffer of queued tasks
     dispatched: libbpf_rs::UserRingBuffer, // User Ring buffer of dispatched tasks
     struct_ops: Option<libbpf_rs::Link>,   // Low-level BPF methods
@@ -195,15 +186,18 @@ impl<'cb> BpfScheduler<'cb> {
         open_object: &'cb mut MaybeUninit<OpenObject>,
         exit_dump_len: u32,
         partial: bool,
-        slice_us: u64,
-        full_user: bool,
-        low_power: bool,
-        verbose: bool,
         debug: bool,
     ) -> Result<Self> {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = shutdown.clone();
+        ctrlc::set_handler(move || {
+            shutdown_clone.store(true, Ordering::Relaxed);
+        })
+        .context("Error setting Ctrl-C handler")?;
+
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
-        skel_builder.obj_builder.debug(verbose);
+        skel_builder.obj_builder.debug(debug);
         let mut skel = scx_ops_open!(skel_builder, open_object, rustland)?;
 
         // Lock all the memory to prevent page faults that could trigger potential deadlocks during
@@ -255,9 +249,6 @@ impl<'cb> BpfScheduler<'cb> {
         skel.struct_ops.rustland_mut().exit_dump_len = exit_dump_len;
 
         skel.maps.bss_data.usersched_pid = std::process::id();
-        skel.maps.rodata_data.slice_ns = slice_us * 1000;
-        skel.maps.rodata_data.full_user = full_user;
-        skel.maps.rodata_data.low_power = low_power;
         skel.maps.rodata_data.debug = debug;
 
         // Attach BPF scheduler.
@@ -280,6 +271,7 @@ impl<'cb> BpfScheduler<'cb> {
         match Self::use_sched_ext() {
             0 => Ok(Self {
                 skel,
+                shutdown,
                 queued,
                 dispatched,
                 struct_ops,
@@ -291,21 +283,15 @@ impl<'cb> BpfScheduler<'cb> {
         }
     }
 
-    // Update the amount of tasks that have been queued to the user-space scheduler and dispatched.
-    //
-    // This method is used to notify the BPF component if the user-space scheduler has still some
-    // pending actions to complete (based on the counter of queued and scheduled tasks).
+    // Notify the BPF component that the user-space scheduler has completed its scheduling cycle,
+    // updating the amount tasks that are still peding.
     //
     // NOTE: do not set allow(dead_code) for this method, any scheduler must use this method at
     // some point, otherwise the BPF component will keep waking-up the user-space scheduler in a
     // busy loop, causing unnecessary high CPU consumption.
-    pub fn update_tasks(&mut self, nr_queued: Option<u64>, nr_scheduled: Option<u64>) {
-        if let Some(queued) = nr_queued {
-            self.skel.maps.bss_data.nr_queued = queued;
-        }
-        if let Some(scheduled) = nr_scheduled {
-            self.skel.maps.bss_data.nr_scheduled = scheduled;
-        }
+    pub fn notify_complete(&mut self, nr_pending: u64) {
+        self.skel.maps.bss_data.nr_scheduled = nr_pending;
+        std::thread::yield_now();
     }
 
     // Counter of the online CPUs.
@@ -390,12 +376,35 @@ impl<'cb> BpfScheduler<'cb> {
         unsafe { pthread_setschedparam(pthread_self(), SCHED_EXT, &param as *const sched_param) }
     }
 
+    // Pick an idle CPU for the target PID.
+    pub fn select_cpu(&mut self, pid: i32, cpu: i32, flags: u64) -> i32 {
+        let prog = &mut self.skel.progs.rs_select_cpu;
+        let mut args = task_cpu_arg {
+            pid: pid as c_int,
+            cpu: cpu as c_int,
+            flags: flags as c_ulong,
+        };
+        let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
+            ..Default::default()
+        };
+        let out = prog.test_run(input).unwrap();
+
+        out.return_value as i32
+    }
+
     // Receive a task to be scheduled from the BPF dispatcher.
-    //
-    // NOTE: if task.cpu is negative the task is exiting and it does not require to be scheduled.
     pub fn dequeue_task(&mut self) -> Result<Option<QueuedTask>, i32> {
         match self.queued.consume_raw() {
-            0 => Ok(None),
+            0 => {
+                self.skel.maps.bss_data.nr_queued = 0;
+                Ok(None)
+            }
             LIBBPF_STOP => {
                 // A valid task is received, convert data to a proper task struct.
                 let task = unsafe { EnqueuedMessage::from_bytes(&BUF.0).to_queued_task() };
@@ -448,7 +457,7 @@ impl<'cb> BpfScheduler<'cb> {
 
     // Read exit code from the BPF part.
     pub fn exited(&mut self) -> bool {
-        uei_exited!(&self.skel, uei)
+        self.shutdown.load(Ordering::Relaxed) || uei_exited!(&self.skel, uei)
     }
 
     // Called on exit to shutdown and report exit message from the BPF part.
