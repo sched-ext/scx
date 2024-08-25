@@ -1,6 +1,6 @@
 use anyhow::Result;
 use log::info;
-use scx_stats::ScxStatsClient;
+use scx_stats::prelude::*;
 use serde::Deserialize;
 use std::thread::sleep;
 use std::time::Duration;
@@ -16,7 +16,7 @@ where
 {
     let mut retry_cnt: u32 = 0;
     while !should_exit() {
-        let mut client = match ScxStatsClient::new().connect() {
+        let mut client = match StatsClient::new().connect() {
             Ok(v) => v,
             Err(e) => match e.downcast_ref::<std::io::Error>() {
                 Some(ioe) if ioe.kind() == std::io::ErrorKind::ConnectionRefused => {
