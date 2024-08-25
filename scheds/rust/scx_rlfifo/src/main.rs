@@ -14,10 +14,6 @@ use scx_utils::UserExitInfo;
 use libbpf_rs::OpenObject;
 
 use std::mem::MaybeUninit;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-
 use std::time::SystemTime;
 
 use anyhow::Result;
@@ -32,9 +28,9 @@ impl<'a> Scheduler<'a> {
     fn init(open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         let bpf = BpfScheduler::init(
             open_object,
-            0,        // exit_dump_len (buffer size of exit info, 0 = default)
-            false,    // partial (false = include all tasks)
-            false,    // debug (false = debug mode off)
+            0,     // exit_dump_len (buffer size of exit info, 0 = default)
+            false, // partial (false = include all tasks)
+            false, // debug (false = debug mode off)
         )?;
         Ok(Self { bpf })
     }
@@ -129,10 +125,10 @@ impl<'a> Scheduler<'a> {
             .as_secs()
     }
 
-    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+    fn run(&mut self) -> Result<UserExitInfo> {
         let mut prev_ts = Self::now();
 
-        while !shutdown.load(Ordering::Relaxed) && !self.bpf.exited() {
+        while !self.bpf.exited() {
             self.dispatch_tasks();
 
             let curr_ts = Self::now();
@@ -141,7 +137,6 @@ impl<'a> Scheduler<'a> {
                 prev_ts = curr_ts;
             }
         }
-
         self.bpf.shutdown_and_report()
     }
 }
@@ -168,16 +163,11 @@ please open a GitHub issue.
 fn main() -> Result<()> {
     print_warning();
 
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown.clone();
-    ctrlc::set_handler(move || {
-        shutdown_clone.store(true, Ordering::Relaxed);
-    })?;
-
+    // Initialize and load the FIFO scheduler.
     let mut open_object = MaybeUninit::uninit();
     loop {
         let mut sched = Scheduler::init(&mut open_object)?;
-        if !sched.run(shutdown.clone())?.should_restart() {
+        if !sched.run()?.should_restart() {
             break;
         }
     }

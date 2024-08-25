@@ -16,9 +16,6 @@ use std::thread;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::SystemTime;
 
 use std::fs::File;
@@ -257,12 +254,7 @@ struct Scheduler<'a> {
 impl<'a> Scheduler<'a> {
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         // Low-level BPF connector.
-        let bpf = BpfScheduler::init(
-            open_object,
-            opts.exit_dump_len,
-            opts.partial,
-            opts.verbose,
-        )?;
+        let bpf = BpfScheduler::init(open_object, opts.exit_dump_len, opts.partial, opts.verbose)?;
         info!("{} scheduler attached", SCHEDULER_NAME);
 
         // Return scheduler object.
@@ -584,10 +576,10 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+    fn run(&mut self) -> Result<UserExitInfo> {
         let mut prev_ts = Self::now();
 
-        while !shutdown.load(Ordering::Relaxed) && !self.bpf.exited() {
+        while !self.bpf.exited() {
             // Call the main scheduler body.
             self.schedule();
 
@@ -640,18 +632,10 @@ fn main() -> Result<()> {
         simplelog::ColorChoice::Auto,
     )?;
 
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown.clone();
-    ctrlc::set_handler(move || {
-        shutdown_clone.store(true, Ordering::Relaxed);
-    })
-    .context("Error setting Ctrl-C handler")?;
-
     let mut open_object = MaybeUninit::uninit();
     loop {
         let mut sched = Scheduler::init(&opts, &mut open_object)?;
-        // Start the scheduler.
-        if !sched.run(shutdown.clone())?.should_restart() {
+        if !sched.run()?.should_restart() {
             break;
         }
     }

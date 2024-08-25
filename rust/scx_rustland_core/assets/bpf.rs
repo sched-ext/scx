@@ -14,6 +14,10 @@ use std::ffi::c_ulong;
 use std::fs::File;
 use std::io::Read;
 
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+
 use anyhow::Context;
 use anyhow::Result;
 
@@ -146,6 +150,7 @@ impl EnqueuedMessage {
 
 pub struct BpfScheduler<'cb> {
     pub skel: BpfSkel<'cb>,                // Low-level BPF connector
+    shutdown: Arc<AtomicBool>,             // Determine scheduler shutdown
     queued: libbpf_rs::RingBuffer<'cb>,    // Ring buffer of queued tasks
     dispatched: libbpf_rs::UserRingBuffer, // User Ring buffer of dispatched tasks
     struct_ops: Option<libbpf_rs::Link>,   // Low-level BPF methods
@@ -183,6 +188,13 @@ impl<'cb> BpfScheduler<'cb> {
         partial: bool,
         debug: bool,
     ) -> Result<Self> {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = shutdown.clone();
+        ctrlc::set_handler(move || {
+            shutdown_clone.store(true, Ordering::Relaxed);
+        })
+        .context("Error setting Ctrl-C handler")?;
+
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(debug);
@@ -259,6 +271,7 @@ impl<'cb> BpfScheduler<'cb> {
         match Self::use_sched_ext() {
             0 => Ok(Self {
                 skel,
+                shutdown,
                 queued,
                 dispatched,
                 struct_ops,
@@ -444,7 +457,7 @@ impl<'cb> BpfScheduler<'cb> {
 
     // Read exit code from the BPF part.
     pub fn exited(&mut self) -> bool {
-        uei_exited!(&self.skel, uei)
+        self.shutdown.load(Ordering::Relaxed) || uei_exited!(&self.skel, uei)
     }
 
     // Called on exit to shutdown and report exit message from the BPF part.
