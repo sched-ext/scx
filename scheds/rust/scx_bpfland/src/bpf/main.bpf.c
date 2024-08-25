@@ -384,8 +384,7 @@ static bool task_avg_nvcsw(struct task_struct *p)
  */
 static inline u64 task_deadline(struct task_struct *p)
 {
-	u64 dl_boost = lowlatency ?
-		MIN(task_avg_nvcsw(p), nvcsw_max_thresh) * slice_ns : 0;
+	u64 dl_boost = lowlatency ? task_avg_nvcsw(p) * slice_ns : 0;
 
 	/*
 	 * Limit the vruntime to (vtime_now - slice_ns_lag) to avoid
@@ -406,8 +405,11 @@ static inline u64 task_deadline(struct task_struct *p)
 	 * Return the task's deadline as its vruntime, with a bonus that is
 	 * proportional to the task's average number of voluntary context
 	 * switches.
+	 *
+	 * Also make sure the bonus is limited to the starvation threshold (to
+	 * prevent starvation).
 	 */
-	return p->scx.dsq_vtime - dl_boost;
+	return p->scx.dsq_vtime - MIN(dl_boost, starvation_thresh_ns);
 }
 
 /*
@@ -1062,18 +1064,19 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 * Evaluate the average number of voluntary context switches per second
 	 * using an exponentially weighted moving average, see calc_avg().
 	 */
+	if (!lowlatency && !is_nvcsw_enabled())
+		return;
 	delta_t = (s64)(now - tctx->nvcsw_ts);
-	if (is_nvcsw_enabled() && delta_t > NSEC_PER_SEC) {
+	if (delta_t > NSEC_PER_SEC) {
 		u64 delta_nvcsw = p->nvcsw - tctx->nvcsw;
 		u64 avg_nvcsw = delta_nvcsw * NSEC_PER_SEC / delta_t;
 
 		/*
 		 * Evaluate the average nvcsw for the task, limited to the
-		 * range [0 .. nvcsw_max_thresh * 8] to prevent excessive
-		 * spikes.
+		 * range [0 .. 1000] to prevent excessive spikes.
 		 */
 		tctx->avg_nvcsw = calc_avg_clamp(tctx->avg_nvcsw, avg_nvcsw,
-						 0, nvcsw_max_thresh << 3);
+						 0, MAX(nvcsw_max_thresh, 1000));
 		tctx->nvcsw = p->nvcsw;
 		tctx->nvcsw_ts = now;
 
@@ -1098,10 +1101,6 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 		 * Reresh task status: interactive or regular.
 		 */
 		update_task_interactive(tctx);
-
-		dbg_msg("%d (%s) avg_nvcsw = %llu [%s]",
-			p->pid, p->comm, tctx->avg_nvcsw,
-			tctx->avg_nvcsw < nvcsw_avg_thresh ? "regular" : "interactive");
 	}
 }
 

@@ -15,15 +15,15 @@ Available as a [Rust crate](https://crates.io/crates/scx_rusty): `cargo add scx_
 
 ## Typical Use Case
 
-Rusty is designed to be flexible, and accommodate different architectures and
-workloads. Various load balancing thresholds (e.g. greediness, frequenty, etc),
+Rusty is designed to be flexible, accommodating different architectures and
+workloads. Various load balancing thresholds (e.g. greediness, frequency, etc),
 as well as how Rusty should partition the system into scheduling domains, can
 be tuned to achieve the optimal configuration for any given system or workload.
 
 ## Production Ready?
 
 Yes. If tuned correctly, rusty should be performant across various CPU
-architectures and workloads. Rusty by default creates a separate scheduling
+architectures and workloads. By default, rusty creates a separate scheduling
 domain per-LLC, so its default configuration may be performant as well. Note
 however that scx_rusty does not yet disambiguate between LLCs in different NUMA
 nodes, so it may perform better on multi-CCX machines where all the LLCs share

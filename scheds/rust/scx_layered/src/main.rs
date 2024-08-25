@@ -436,6 +436,7 @@ enum LayerMatch {
     GIDEquals(u32),
     PIDEquals(u32),
     PPIDEquals(u32),
+    TGIDEquals(u32),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1442,6 +1443,10 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                         LayerMatch::PPIDEquals(ppid) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_PPID_EQUALS as i32;
                             mt.ppid = *ppid;
+                        }
+                        LayerMatch::TGIDEquals(tgid) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_TGID_EQUALS as i32;
+                            mt.tgid = *tgid;
                         }
                     }
                 }
