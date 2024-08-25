@@ -244,9 +244,7 @@ For example, here, the `scx_simple` binary can be found at
 `$SCX/build/scheds/c/scx_simple`.
 
 For Rust userspace schedulers such as the ones under `scheds/rust`, the
-same directory under the build root is used as the cargo build target
-directory. Thus, here, the `scx_rusty` binary can be found at
-`$SCX/build/scheds/rust/scx_rusty/release/scx_rusty`.
+`scx_rusty` binary can be found at `$SCX/build/scheds/rust/release`.
 
 
 ### SCX specific build options
@@ -264,7 +262,6 @@ options can be used in such cases.
 - 'cargo_home': 'CARGO_HOME env to use when invoking cargo'
 - `offline`: 'Compilation step should not access the internet'
 - `enable_rust`: 'Enable the build of rust sub-projects'
-- `serialize`: 'Enable/disable the sequential build of the schedulers. Set this to false if you need to build just one scheduler.'
 
 For example, let's say you want to use `bpftool` and `libbpf` shipped in the
 kernel tree located at `$KERNEL`. We need to build `bpftool` in the kernel

@@ -4,8 +4,8 @@ set -e
 
 for manifest in "$MESON_SOURCE_ROOT"/scheds/rust/*/Cargo.toml; do
     source_dir="${manifest%/Cargo.toml}"
-    target_dir="${MESON_BUILD_ROOT}${source_dir#${MESON_SOURCE_ROOT}}"
-    name="${target_dir##*/}"
+    target_dir="${MESON_BUILD_ROOT}/scheds/rust"
+    name="${source_dir##*/}"
 
     # Skip scx_mitosis
     if [ "$name" = "scx_mitosis" ]; then

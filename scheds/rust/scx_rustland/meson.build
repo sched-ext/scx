@@ -1,9 +1,3 @@
-if serialize
-  sched_deps = [libbpf, bpftool_target, sched]
-else
-  sched_deps = [libbpf, bpftool_target]
-endif
-
 sched = custom_target('scx_rustland',
               output: '@PLAINNAME@.__PHONY__',
               input: 'Cargo.toml',
@@ -11,4 +5,5 @@ sched = custom_target('scx_rustland',
                         cargo_build_args],
               env: cargo_env,
               depends: sched_deps,
+              build_by_default: false,
               build_always_stale: true)

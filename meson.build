@@ -12,8 +12,6 @@ cc = meson.get_compiler('c')
 
 enable_rust = get_option('enable_rust')
 
-serialize = get_option('serialize')
-
 bpf_clang = find_program(get_option('bpf_clang'))
 
 run_veristat = find_program(join_paths(meson.current_source_dir(),
@@ -338,9 +336,6 @@ run_target('veristat_diff', command: [run_veristat_diff, meson.current_build_dir
                                  get_option('veristat_scheduler'), get_option('kernel'),
                                  get_option('veristat_diff_dir')])
 
-if enable_rust
-  subdir('rust')
-endif
 subdir('scheds')
 
 if enable_stress
