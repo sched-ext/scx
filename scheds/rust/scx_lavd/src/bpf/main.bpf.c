@@ -1493,17 +1493,8 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
 
 	cpu_id = pick_idle_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
-	if (found_idle) {
-		/*
-		 * Calculate the task's time slice if found an idle CPU.
-		 */
-		struct cpu_ctx *cpuc_task = get_cpu_ctx_id(cpu_id);
-		if (cpuc_task)
-			p->scx.slice = calc_time_slice(p, taskc, cpuc_task);
-		else
-			p->scx.slice = LAVD_SLICE_MIN_NS;
+	if (found_idle)
 		return cpu_id;
-	}
 
 	return (cpu_id >= 0) ? cpu_id : prev_cpu;
 }
