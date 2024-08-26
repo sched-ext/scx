@@ -54,11 +54,6 @@ enum {
 	 * on the first CPU available.
 	 */
 	RL_CPU_ANY = 1 << 0,
-
-	/*
-	 * Allow to preempt the target CPU when dispatching the task.
-	 */
-	RL_PREEMPT_CPU = 1 << 1,
 };
 
 /*
@@ -94,6 +89,7 @@ struct dispatched_task_ctx {
 	s32 cpu; /* CPU where the task should be dispatched */
 	u64 flags; /* special dispatch flags */
 	u64 slice_ns; /* time slice assigned to the task (0=default) */
+	u64 vtime; /* task deadline / vruntime */
 	u64 cpumask_cnt; /* cpumask generation counter */
 };
 
