@@ -21,6 +21,8 @@ use libc::c_char;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::Read;
 use std::ffi::CStr;
 use std::fmt;
 use std::mem;
@@ -56,6 +58,7 @@ use scx_utils::uei_report;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 
+use itertools::iproduct;
 use nix::sys::signal;
 use plain::Plain;
 use rlimit::{getrlimit, setrlimit, Resource};
@@ -215,6 +218,17 @@ impl FlatTopology {
         })
     }
 
+    /// Check if SMT is enabled or not
+    pub fn is_smt_active() -> std::io::Result<i32> {
+        let mut file = File::open("/sys/devices/system/cpu/smt/active")?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+
+        let smt_active: i32 = contents.trim().parse().unwrap_or(0);
+
+        Ok(smt_active)
+    }
+
     /// Build a flat-structured list of CPUs in a preference order
     fn build_cpu_fids(
         prefer_smt_core: bool,
@@ -359,21 +373,19 @@ impl FlatTopology {
         }
 
         // Build a neighbor map for each compute domain
-        for (from_k, from_v) in cpdom_map.iter() {
-            for (to_k, to_v) in cpdom_map.iter() {
-                if from_k == to_k {
-                    continue;
-                }
+        for ((from_k, from_v), (to_k, to_v)) in iproduct!(cpdom_map.iter(), cpdom_map.iter()) {
+            if from_k == to_k {
+                continue;
+            }
 
-                let d = Self::dist(from_k, to_k);
-                let mut map = from_v.neighbor_map.borrow_mut();
-                match map.get(&d) {
-                    Some(v) => {
-                        v.borrow_mut().push(to_v.cpdom_id);
-                    }
-                    None => {
-                        map.insert(d, RefCell::new(vec![to_v.cpdom_id]));
-                    }
+            let d = Self::dist(from_k, to_k);
+            let mut map = from_v.neighbor_map.borrow_mut();
+            match map.get(&d) {
+                Some(v) => {
+                    v.borrow_mut().push(to_v.cpdom_id);
+                }
+                None => {
+                    map.insert(d, RefCell::new(vec![to_v.cpdom_id]));
                 }
             }
         }
@@ -474,12 +486,21 @@ impl<'a> Scheduler<'a> {
             for cpu_id in v.cpu_ids.iter() {
                 let i = cpu_id / 64;
                 let j = cpu_id % 64;
-                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].cpumask[i] |= 0x01 << j;
+                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].__cpumask[i] |= 0x01 << j;
+            }
+
+            const LAVD_CPDOM_MAX_NR: u8 = 32;
+            const LAVD_CPDOM_MAX_DIST: usize = 4;
+            if v.neighbor_map.borrow().iter().len() > LAVD_CPDOM_MAX_DIST {
+                    panic!("The processor topology is too complex to handle in BPF.");
             }
 
             for (k, (_d, neighbors)) in v.neighbor_map.borrow().iter().enumerate() {
-                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].nr_neighbors[k] =
-                    neighbors.borrow().len() as u8;
+                let nr_neighbors = neighbors.borrow().len() as u8;
+                if nr_neighbors > LAVD_CPDOM_MAX_NR {
+                    panic!("The processor topology is too complex to handle in BPF.");
+                }
+                skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].nr_neighbors[k] = nr_neighbors;
                 for n in neighbors.borrow().iter() {
                     skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].neighbor_bits[k] = 0x1 << n;
                 }
@@ -491,6 +512,10 @@ impl<'a> Scheduler<'a> {
         skel.maps.bss_data.nr_cpus_onln = nr_cpus_onln;
         skel.maps.rodata_data.no_core_compaction = opts.no_core_compaction;
         skel.maps.rodata_data.no_freq_scaling = opts.no_freq_scaling;
+        skel.maps.rodata_data.is_smt_active = match FlatTopology::is_smt_active() {
+            Ok(ret) => (ret == 1) as u32,
+            Err(_)  => 0,
+        };
         skel.maps.rodata_data.verbose = opts.verbose;
     }
 

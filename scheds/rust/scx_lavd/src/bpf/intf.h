@@ -88,8 +88,8 @@ enum consts {
 	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL /
 					   LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_CPDOM_MAX_NR		= 64, /* maximum number of compute domain (<= 64) */
-	LAVD_CPDOM_MAX_DIST		= 6,  /* maximum distance from one compute domain to another */
+	LAVD_CPDOM_MAX_NR		= 32, /* maximum number of compute domain */
+	LAVD_CPDOM_MAX_DIST		= 4,  /* maximum distance from one compute domain to another */
 	LAVD_CPDOM_STARV_NS		= (5ULL * NSEC_PER_MSEC),
 
 	LAVD_STATUS_STR_LEN		= 5, /* {LR: Latency-critical, Regular}
@@ -108,6 +108,7 @@ struct sys_stat {
 
 	volatile u64	load_actual;	/* average actual load of runnable tasks */
 	volatile u64	avg_svc_time;	/* average service time per task */
+	volatile u64	nr_queued_task;
 
 	volatile u32	avg_lat_cri;	/* average latency criticality (LC) */
 	volatile u32	max_lat_cri;	/* maximum latency criticality (LC) */
@@ -131,8 +132,8 @@ struct cpdom_ctx {
 	u8	is_active;			    /* if this compute domain is active */
 	u8	nr_neighbors[LAVD_CPDOM_MAX_DIST];  /* number of neighbors per distance */
 	u64	neighbor_bits[LAVD_CPDOM_MAX_DIST]; /* bitmask of neighbor bitmask per distance */
-	u64	cpumask[LAVD_CPU_ID_MAX/64];	    /* cpumasks belongs to this compute domain */
-};
+	u64	__cpumask[LAVD_CPU_ID_MAX/64];	    /* cpumasks belongs to this compute domain */
+} __attribute__((aligned(CACHELINE_SIZE)));
 
 /*
  * CPU context
@@ -198,6 +199,7 @@ struct cpu_ctx {
 	struct bpf_cpumask __kptr *tmp_a_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_o_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_t_mask;	/* temporary cpu mask */
+	struct bpf_cpumask __kptr *tmp_t2_mask;	/* temporary cpu mask */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 /*
