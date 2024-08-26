@@ -101,6 +101,10 @@ struct Opts {
     #[clap(long = "prefer-little-core", action = clap::ArgAction::SetTrue)]
     prefer_little_core: bool,
 
+    /// Do not specifically prefer to schedule on turbo cores.
+    #[clap(long = "no-prefer-turbo-core", action = clap::ArgAction::SetTrue)]
+    no_prefer_turbo_core: bool,
+
     /// Disable controlling the CPU frequency. In order to improve latency and responsiveness of
     /// performance-critical tasks, scx_lavd increases the CPU frequency even if CPU usage is low.
     /// See main.bpf.c for more info. Normally set by the power mode, but can be set independently
@@ -129,18 +133,21 @@ impl Opts {
             self.no_core_compaction = true;
             self.prefer_smt_core = false;
             self.prefer_little_core = false;
+            self.no_prefer_turbo_core = false;
             self.no_freq_scaling = true;
         }
         if self.powersave {
             self.no_core_compaction = false;
             self.prefer_smt_core = true;
             self.prefer_little_core = true;
+            self.no_prefer_turbo_core = true;
             self.no_freq_scaling = false;
         }
         if self.balanced {
             self.no_core_compaction = false;
             self.prefer_smt_core = false;
             self.prefer_little_core = false;
+            self.no_prefer_turbo_core = false;
             self.no_freq_scaling = false;
         }
 
@@ -516,6 +523,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.bss_data.nr_cpus_onln = nr_cpus_onln;
         skel.maps.rodata_data.no_core_compaction = opts.no_core_compaction;
         skel.maps.rodata_data.no_freq_scaling = opts.no_freq_scaling;
+        skel.maps.rodata_data.no_prefer_turbo_core = opts.no_prefer_turbo_core;
         skel.maps.rodata_data.is_smt_active = match FlatTopology::is_smt_active() {
             Ok(ret) => (ret == 1) as u32,
             Err(_)  => 0,

@@ -200,10 +200,11 @@ static volatile u64	nr_cpus_big;
 static struct sys_stat	__sys_stats[2];
 static volatile int	__sys_stat_idx;
 
-private(LAVD) struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
-private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
+private(LAVD) struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
 private(LAVD) struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */
 private(LAVD) struct bpf_cpumask __kptr *little_cpumask; /* CPU mask for little CPUs */
+private(LAVD) struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
+private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
 private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR]; /* CPU mask for each compute domain */
 
 /*
@@ -229,6 +230,7 @@ static u64		cur_svc_time;
  */
 const volatile bool	no_core_compaction;
 const volatile bool	no_freq_scaling;
+const volatile bool	no_prefer_turbo_core;
 const volatile u32 	is_smt_active;
 const volatile u8	verbose;
 
@@ -659,8 +661,14 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		c->new_util = (compute * LAVD_CPU_UTIL_MAX) / c->duration;
 		cpuc->util = calc_avg(cpuc->util, c->new_util);
 
-		if (cpuc->util > LAVD_CC_PER_CORE_MAX_CTUIL)
-			c->nr_violation += 1000;
+		if (cpuc->turbo_core) {
+			if (cpuc->util > LAVD_CC_PER_TURBO_CORE_MAX_CTUIL)
+				c->nr_violation += 1000;
+		}
+		else {
+			if (cpuc->util > LAVD_CC_PER_CORE_MAX_CTUIL)
+				c->nr_violation += 1000;
+		}
 
 		/*
 		 * Accmulate system-wide idle time
@@ -1391,21 +1399,41 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	if (bpf_cpumask_empty(cast_mask(a_cpumask)))
 		goto start_omask;
 
-	if (is_perf_cri(taskc, stat_cur))
+	if (is_perf_cri(taskc, stat_cur) || no_core_compaction ) {
 		bpf_cpumask_and(t_cpumask, cast_mask(a_cpumask), cast_mask(big));
-	else
+	}
+	else {
 		bpf_cpumask_and(t_cpumask, cast_mask(a_cpumask), cast_mask(little));
+		goto start_llc_mask;
+	}
 
-	bpf_cpumask_and(t2_cpumask, cast_mask(t_cpumask), cast_mask(cpdom_mask_prev));
+	/*
+	 * Pick an idle core among turbo boost-enabled CPUs with a matching
+	 * core type.
+	 */
+start_turbo_mask:
+	if (no_prefer_turbo_core || !turbo_cpumask)
+		goto start_llc_mask;
 
+	bpf_cpumask_and(t2_cpumask, cast_mask(t_cpumask), cast_mask(turbo_cpumask));
 	if (bpf_cpumask_empty(cast_mask(t2_cpumask)))
-		goto start_tmask;
+		goto start_llc_mask;
+
+	cpu_id = pick_idle_cpu_in(t2_cpumask);
+	if (cpu_id >= 0) {
+		*is_idle = true;
+		goto unlock_out;
+	}
 
 	/*
 	 * Pick an idle core among active CPUs with a matching core type within
 	 * the prev CPU's LLC domain.
 	 */
-start_t2mask:
+start_llc_mask:
+	bpf_cpumask_and(t2_cpumask, cast_mask(t_cpumask), cast_mask(cpdom_mask_prev));
+	if (bpf_cpumask_empty(cast_mask(t2_cpumask)))
+		goto start_tmask;
+
 	cpu_id = pick_idle_cpu_in(t2_cpumask);
 	if (cpu_id >= 0) {
 		*is_idle = true;
@@ -2755,6 +2783,10 @@ static int init_cpumasks(void)
 	if (err)
 		goto out;
 
+	err = calloc_cpumask(&turbo_cpumask);
+	if (err)
+		goto out;
+
 	err = calloc_cpumask(&big_cpumask);
 	if (err)
 		goto out;
@@ -2777,11 +2809,6 @@ out:
 
 static u16 get_cpuperf_cap(s32 cpu)
 {
-	/*
-	 * If CPU's capacitiy values are all 1024, then let's just use the
-	 * capacity value from userspace, which are calculated using each CPU's
-	 * maximum frequency.
-	 */
 	if (cpu >= 0 && cpu < LAVD_CPU_ID_MAX)
 		return __cpu_capacity_hint[cpu];
 
@@ -2789,25 +2816,51 @@ static u16 get_cpuperf_cap(s32 cpu)
 	return 1;
 }
 
+static u16 get_cputurbo_cap(void)
+{
+	u16 turbo_cap = 0;
+	int nr_turbo = 0, cpu;
+
+	/*
+	 * Find the maximum CPU frequency
+	 */
+	for (cpu = 0; cpu < LAVD_CPU_ID_MAX; cpu++) {
+		if (__cpu_capacity_hint[cpu] > turbo_cap) {
+			turbo_cap = __cpu_capacity_hint[cpu];
+			nr_turbo++;
+		}
+	}
+
+	/*
+	 * If all CPU's frequencies are the same, ignore the turbo.
+	 */
+	if (nr_turbo <= 1)
+		turbo_cap = 0;
+
+	return turbo_cap;
+}
+
 static s32 init_per_cpu_ctx(u64 now)
 {
 	struct cpu_ctx *cpuc;
-	struct bpf_cpumask *big, *little, *active, *ovrflw, *cd_cpumask;
+	struct bpf_cpumask *turbo, *big, *little, *active, *ovrflw, *cd_cpumask;
 	struct cpdom_ctx *cpdomc;
 	int cpu, i, j, err = 0;
 	u64 cpdom_id;
 	u32 sum_capacity = 0, avg_capacity;
+	u16 turbo_cap;
 	
 	bpf_rcu_read_lock();
 
 	/*
 	 * Prepare cpumasks.
 	 */
+	turbo = turbo_cpumask;
 	big = big_cpumask;
 	little = little_cpumask;
 	active  = active_cpumask;
 	ovrflw  = ovrflw_cpumask;
-	if (!big|| !little || !active || !ovrflw) {
+	if (!turbo || !big|| !little || !active || !ovrflw) {
 		scx_bpf_error("Failed to prepare cpumasks.");
 		err = -ENOMEM;
 		goto unlock_out;
@@ -2849,6 +2902,11 @@ static s32 init_per_cpu_ctx(u64 now)
 	}
 
 	/*
+	 * Get turbo capacitiy.
+	 */
+	turbo_cap = get_cputurbo_cap();
+
+	/*
 	 * Classify CPU into BIG or little cores based on their average capacity.
 	 */
 	avg_capacity = sum_capacity / nr_cpus_onln;
@@ -2874,6 +2932,10 @@ static s32 init_per_cpu_ctx(u64 now)
 			bpf_cpumask_set_cpu(cpu, little);
 			bpf_cpumask_set_cpu(cpu, ovrflw);
 		}
+
+		cpuc->turbo_core = cpuc->capacity == turbo_cap;
+		if (cpuc->turbo_core)
+			bpf_cpumask_set_cpu(cpu, turbo);
 	}
 
 	/*
