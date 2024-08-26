@@ -117,6 +117,10 @@ struct Opts {
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// Print scheduler version and exit.
+    #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
+    version: bool,
 }
 
 impl Opts {
@@ -691,6 +695,11 @@ fn init_signal_handlers() {
 fn main() -> Result<()> {
     let mut opts = Opts::parse();
     opts.proc().unwrap();
+
+    if opts.version {
+        println!("scx_lavd {}", *build_id::SCX_FULL_VERSION);
+        return Ok(());
+    }
 
     init_log(&opts);
     init_signal_handlers();
