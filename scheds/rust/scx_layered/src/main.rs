@@ -392,7 +392,7 @@ struct Opts {
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
 
-    /// Disable topology awareness. When enabled, the nodes and llcs settings on
+    /// Disable topology awareness. When enabled, the "nodes" and "llcs" settings on
     /// a layer are ignored.
     #[clap(short = 't', long)]
     disable_topology: bool,
