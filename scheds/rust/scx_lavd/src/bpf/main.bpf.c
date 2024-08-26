@@ -2064,12 +2064,13 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *active, *ovrflw;
 	struct task_struct *p;
+	struct task_ctx *taskc;
 	u64 dsq_id = 0;
-	bool consume_out = false;
+	bool try_consume = false;
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
-		scx_bpf_error("Failed to look up cpu context: %d", cpu);
+		scx_bpf_error("Failed to look up cpu context or task context");
 		return;
 	}
 	dsq_id = cpuc->cpdom_id;
@@ -2078,8 +2079,8 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If all CPUs are using, directly consume without checking CPU masks.
 	 */
 	if (use_full_cpus()) {
-		consume_task(cpu, cpuc, now);
-		return;
+		try_consume = true;
+		goto consume_out;
 	}
 
 	/*
@@ -2099,7 +2100,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (bpf_cpumask_test_cpu(cpu, cast_mask(active)) ||
 	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
-		consume_out = true;
+		try_consume = true;
 		goto unlock_out;
 	}
 
@@ -2115,7 +2116,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 */
 		if (is_kernel_task(p)) {
 			bpf_cpumask_set_cpu(cpu, ovrflw);
-			consume_out = true;
+			try_consume = true;
 			break;
 		}
 
@@ -2156,7 +2157,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * cores. We will optimize this path after introducing per-core
 		 * DSQ.
 		 */
-		consume_out = true;
+		try_consume = true;
 
 release_break:
 		bpf_task_release(p);
@@ -2168,11 +2169,30 @@ unlock_out:
 
 	/*
 	 * Note that the verifier in 6.8 kernel cannot correctly verifies the
-	 * code correctly when consume_task() is under a rcu-read-lock region.
-	 * Hence, we moveed it outside of the rcu region. :-(
+	 * code when consume_task() is under a rcu-read-lock region. Hence, we
+	 * moveed it outside of the rcu region. :-(
 	 */
-	if (consume_out)
-		consume_task(cpu, cpuc, now);
+consume_out:
+	/*
+	 * Consume a task if requested.
+	 */
+	if (!try_consume)
+		return;
+	if (consume_task(cpu, cpuc, now))
+		return;
+
+	/*
+	 * If no other task is consumed, the scheduler will keep continue to
+	 * run the prev task, so let's re-assigne its time slice.
+	 */
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
+		taskc = get_task_ctx(prev);
+		if (!taskc) {
+			scx_bpf_error("Failed to look up task context");
+			return;
+		}
+		prev->scx.slice = calc_time_slice(prev, taskc, cpuc);
+	}
 }
 
 static int calc_cpuperf_target(struct sys_stat *stat_cur,
@@ -2355,6 +2375,11 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 		return;
 
 	update_stat_for_running(p, taskc, cpuc);
+
+	/*
+	 * Calculate the task's time slice.
+	 */
+	p->scx.slice = calc_time_slice(p, taskc, cpuc);
 
 	/*
 	 * Calculate the task's CPU performance target and update if the new
