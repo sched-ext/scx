@@ -90,6 +90,7 @@ pub struct DispatchedTask {
     pub cpu: i32,      // target CPU selected by the scheduler
     pub flags: u64,    // special dispatch flags
     pub slice_ns: u64, // time slice assigned to the task (0 = default)
+    pub vtime: u64,    // task deadline / vruntime
     cpumask_cnt: u64,  // cpumask generation counter (private)
 }
 
@@ -105,6 +106,7 @@ impl DispatchedTask {
             flags: 0,
             cpumask_cnt: task.cpumask_cnt,
             slice_ns: 0, // use default time slice
+            vtime: 0,
         }
     }
 }
@@ -429,16 +431,18 @@ impl<'cb> BpfScheduler<'cb> {
             pid,
             cpu,
             flags,
-            cpumask_cnt,
             slice_ns,
+            vtime,
+            cpumask_cnt,
             ..
         } = &mut dispatched_task.as_mut();
 
         *pid = task.pid;
         *cpu = task.cpu;
         *flags = task.flags;
-        *cpumask_cnt = task.cpumask_cnt;
         *slice_ns = task.slice_ns;
+        *vtime = task.vtime;
+        *cpumask_cnt = task.cpumask_cnt;
 
         // Store the task in the user ring buffer.
         //

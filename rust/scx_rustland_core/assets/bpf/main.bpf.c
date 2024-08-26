@@ -13,9 +13,10 @@
  * to be dispatched in the proper order.
  *
  * Messages between the BPF component and the user-space scheduler are passed
- * using two BPF_MAP_TYPE_QUEUE maps: @queued for the messages sent by the BPF
- * dispatcher to the user-space scheduler and @dispatched for the messages sent
- * by the user-space scheduler to the BPF dispatcher.
+ * using BPF_MAP_TYPE_RINGBUFFER / BPF_MAP_TYPE_USER_RINGBUF maps: @queued for
+ * the messages sent by the BPF dispatcher to the user-space scheduler and
+ * @dispatched for the messages sent by the user-space scheduler to the BPF
+ * dispatcher.
  *
  * The BPF dispatcher is completely agnostic of the particular scheduling
  * policy implemented in user-space. For this reason developers that are
@@ -349,16 +350,17 @@ static inline u64 task_slice(struct task_struct *p)
 	struct task_ctx *tctx;
 
 	tctx = lookup_task_ctx(p);
-	if (!tctx)
+	if (!tctx || !tctx->slice_ns)
 		return SCX_SLICE_DFL;
 	return tctx->slice_ns;
 }
 
 /*
- * Dispatch a task to a target DSQ, waking up the corresponding CPU, if needed.
+ * Dispatch a task to a target per-CPU DSQ, waking up the corresponding CPU, if
+ * needed.
  */
 static void dispatch_task(struct task_struct *p, u64 dsq_id,
-			  u64 cpumask_cnt, u64 slice, u64 enq_flags)
+			  u64 cpumask_cnt, u64 slice, u64 vtime)
 {
 	struct task_ctx *tctx;
 	u64 curr_cpumask_cnt;
@@ -378,9 +380,9 @@ static void dispatch_task(struct task_struct *p, u64 dsq_id,
 	 */
 	switch (dsq_id) {
 	case SHARED_DSQ:
-		scx_bpf_dispatch(p, dsq_id, SCX_SLICE_DFL, enq_flags);
-		dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu",
-			p->pid, p->comm, dsq_id, enq_flags, slice);
+		scx_bpf_dispatch_vtime(p, dsq_id, SCX_SLICE_DFL, vtime, 0);
+		dbg_msg("dispatch: pid=%d (%s) dsq=%llu slice=%llu vtime=%llu",
+			p->pid, p->comm, dsq_id, slice, vtime);
 		break;
 	default:
 		/*
@@ -399,7 +401,7 @@ static void dispatch_task(struct task_struct *p, u64 dsq_id,
 		 * core sched-ext code, potentially selecting a different cpu
 		 * and a different cpumask.
 		 */
-		scx_bpf_dispatch(p, dsq_id, SCX_SLICE_DFL, enq_flags);
+		scx_bpf_dispatch_vtime(p, dsq_id, SCX_SLICE_DFL, vtime, 0);
 
 		/* Read current cpumask generation counter */
 		curr_cpumask_cnt = tctx->cpumask_cnt;
@@ -427,15 +429,15 @@ static void dispatch_task(struct task_struct *p, u64 dsq_id,
 			scx_bpf_dispatch_cancel();
 			__sync_fetch_and_add(&nr_bounce_dispatches, 1);
 
-			scx_bpf_dispatch(p, SHARED_DSQ, SCX_SLICE_DFL, enq_flags);
-			dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu bounce",
-				p->pid, p->comm, dsq_id, enq_flags, slice);
+			scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, vtime, 0);
+			dbg_msg("dispatch: pid=%d (%s) dsq=%llu slice=%llu vtime=%llu bounce",
+				p->pid, p->comm, dsq_id, slice, vtime);
 			return;
 		}
 
 		/* Requested dispatch was valid */
-		dbg_msg("dispatch: pid=%d (%s) dsq=%llu enq_flags=%llx slice=%llu",
-			p->pid, p->comm, dsq_id, enq_flags, slice);
+		dbg_msg("dispatch: pid=%d (%s) dsq=%llu slice=%llu vtime=%llu",
+			p->pid, p->comm, dsq_id, slice, vtime);
 
 		break;
 	}
@@ -629,7 +631,6 @@ static void sched_congested(struct task_struct *p)
  */
 void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	s32 cpu = scx_bpf_task_cpu(p);
 	struct queued_task_ctx *task;
 
 	/*
@@ -650,7 +651,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	task = bpf_ringbuf_reserve(&queued, sizeof(*task), 0);
 	if (!task) {
 		sched_congested(p);
-		dispatch_task(p, SHARED_DSQ, 0, SCX_SLICE_DFL, enq_flags);
+		dispatch_task(p, SHARED_DSQ, 0, SCX_SLICE_DFL, 0);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -696,7 +697,8 @@ static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
 		dsq_id = SHARED_DSQ;
 	else
 		dsq_id = cpu_to_dsq(task->cpu);
-	dispatch_task(p, dsq_id, task->cpumask_cnt, task->slice_ns, enq_flags);
+
+	dispatch_task(p, dsq_id, task->cpumask_cnt, task->slice_ns, task->vtime);
 	bpf_task_release(p);
 
 	__sync_fetch_and_add(&nr_user_dispatches, 1);

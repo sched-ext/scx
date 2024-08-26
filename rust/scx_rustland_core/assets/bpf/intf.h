@@ -89,6 +89,7 @@ struct dispatched_task_ctx {
 	s32 cpu; /* CPU where the task should be dispatched */
 	u64 flags; /* special dispatch flags */
 	u64 slice_ns; /* time slice assigned to the task (0=default) */
+	u64 vtime; /* task deadline / vruntime */
 	u64 cpumask_cnt; /* cpumask generation counter */
 };
 
