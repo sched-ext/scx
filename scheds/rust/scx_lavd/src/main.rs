@@ -30,6 +30,7 @@ use std::mem::MaybeUninit;
 use std::str;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::thread::ThreadId;
 use std::time::Duration;
 
@@ -59,7 +60,6 @@ use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 
 use itertools::iproduct;
-use nix::sys::signal;
 use plain::Plain;
 use rlimit::{getrlimit, setrlimit, Resource};
 
@@ -101,6 +101,10 @@ struct Opts {
     #[clap(long = "prefer-little-core", action = clap::ArgAction::SetTrue)]
     prefer_little_core: bool,
 
+    /// Do not specifically prefer to schedule on turbo cores.
+    #[clap(long = "no-prefer-turbo-core", action = clap::ArgAction::SetTrue)]
+    no_prefer_turbo_core: bool,
+
     /// Disable controlling the CPU frequency. In order to improve latency and responsiveness of
     /// performance-critical tasks, scx_lavd increases the CPU frequency even if CPU usage is low.
     /// See main.bpf.c for more info. Normally set by the power mode, but can be set independently
@@ -117,6 +121,10 @@ struct Opts {
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// Print scheduler version and exit.
+    #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
+    version: bool,
 }
 
 impl Opts {
@@ -125,18 +133,21 @@ impl Opts {
             self.no_core_compaction = true;
             self.prefer_smt_core = false;
             self.prefer_little_core = false;
+            self.no_prefer_turbo_core = false;
             self.no_freq_scaling = true;
         }
         if self.powersave {
             self.no_core_compaction = false;
             self.prefer_smt_core = true;
             self.prefer_little_core = true;
+            self.no_prefer_turbo_core = true;
             self.no_freq_scaling = false;
         }
         if self.balanced {
             self.no_core_compaction = false;
             self.prefer_smt_core = false;
             self.prefer_little_core = false;
+            self.no_prefer_turbo_core = false;
             self.no_freq_scaling = false;
         }
 
@@ -512,6 +523,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.bss_data.nr_cpus_onln = nr_cpus_onln;
         skel.maps.rodata_data.no_core_compaction = opts.no_core_compaction;
         skel.maps.rodata_data.no_freq_scaling = opts.no_freq_scaling;
+        skel.maps.rodata_data.no_prefer_turbo_core = opts.no_prefer_turbo_core;
         skel.maps.rodata_data.is_smt_active = match FlatTopology::is_smt_active() {
             Ok(ret) => (ret == 1) as u32,
             Err(_)  => 0,
@@ -623,10 +635,14 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    fn run(&mut self) -> Result<UserExitInfo> {
+    pub fn exited(&mut self) -> bool {
+        uei_exited!(&self.skel, uei)
+    }
+
+    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
 
-        while self.running() {
+        while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             match req_ch.recv_timeout(Duration::from_secs(1)) {
                 Ok(req) => {
                     let res = self.stats_req_to_res(&req)?;
@@ -676,25 +692,24 @@ extern "C" fn handle_sigint(_: libc::c_int, _: *mut libc::siginfo_t, _: *mut lib
     RUNNING.store(false, Ordering::SeqCst);
 }
 
-fn init_signal_handlers() {
-    // Ctrl-c for termination
-    unsafe {
-        let sigint_action = signal::SigAction::new(
-            signal::SigHandler::SigAction(handle_sigint),
-            signal::SaFlags::empty(),
-            signal::SigSet::empty(),
-        );
-        signal::sigaction(signal::SIGINT, &sigint_action).unwrap();
-    }
-}
-
 fn main() -> Result<()> {
     let mut opts = Opts::parse();
     opts.proc().unwrap();
 
+    if opts.version {
+        println!("scx_lavd {}", *build_id::SCX_FULL_VERSION);
+        return Ok(());
+    }
+
     init_log(&opts);
-    init_signal_handlers();
     debug!("{:#?}", opts);
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
+    ctrlc::set_handler(move || {
+        shutdown_clone.store(true, Ordering::Relaxed);
+    })
+    .context("Error setting Ctrl-C handler")?;
 
     if let Some(nr_samples) = opts.monitor_sched_samples {
         let jh = std::thread::spawn(move || stats::monitor_sched_samples(nr_samples).unwrap());
@@ -710,7 +725,7 @@ fn main() -> Result<()> {
             *build_id::SCX_FULL_VERSION
         );
         info!("scx_lavd scheduler starts running.");
-        if !sched.run()?.should_restart() {
+        if !sched.run(shutdown.clone())?.should_restart() {
             break;
         }
     }

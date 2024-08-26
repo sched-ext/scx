@@ -82,6 +82,7 @@ enum consts {
 
 	LAVD_SYS_STAT_INTERVAL_NS	= (25ULL * NSEC_PER_MSEC),
 	LAVD_CC_PER_CORE_MAX_CTUIL	= 500, /* maximum per-core CPU utilization */
+	LAVD_CC_PER_TURBO_CORE_MAX_CTUIL = 750, /* maximum per-core CPU utilization for a turbo core */
 	LAVD_CC_NR_ACTIVE_MIN		= 1, /* num of mininum active cores */
 	LAVD_CC_NR_OVRFLW		= 1, /* num of overflow cores */
 	LAVD_CC_CPU_PIN_INTERVAL	= (3ULL * LAVD_TIME_ONE_SEC),
@@ -193,6 +194,7 @@ struct cpu_ctx {
 	 */
 	u16		capacity;	/* CPU capacity based on 1000 */
 	u8		big_core;	/* is it a big core? */
+	u8		turbo_core;	/* is it a turbo core? */
 	u8		cpdom_id;	/* compute domain id (== dsq_id) */
 	u8		cpdom_alt_id;	/* compute domain id of anternative type (== dsq_id) */
 	u8		cpdom_poll_pos;	/* index to check if a DSQ of a compute domain is starving */
