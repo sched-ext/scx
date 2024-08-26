@@ -683,12 +683,7 @@ static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
 
 	dbg_msg("usersched: pid=%d cpu=%d cpumask_cnt=%llu slice_ns=%llu flags=%llx",
 		task->pid, task->cpu, task->cpumask_cnt, task->slice_ns, task->flags);
-	/*
-	 * Map RL_PREEMPT_CPU to SCX_ENQ_PREEMPT and allow this task to
-	 * preempt others.
-	 */
-	if (task->flags & RL_PREEMPT_CPU)
-		enq_flags = SCX_ENQ_PREEMPT;
+
 	/*
 	 * Check whether the user-space scheduler assigned a different
 	 * CPU to the task and migrate (if possible).
