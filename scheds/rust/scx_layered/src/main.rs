@@ -279,19 +279,18 @@ lazy_static::lazy_static! {
 /// Configuration example and running scx_layered
 /// =============================================
 ///
-/// A scx_layered config is composed of layer configs and a layer config is
-/// composed of a name, a set of matches and a policy block. Running the
+/// An scx_layered config is composed of layer configs. A layer config is
+/// composed of a name, a set of matches, and a policy block. Running the
 /// following will write an example configuration into example.json.
 ///
 ///   $ scx_layered -e example.json
 ///
-/// Note that the last layer in the configuration must have an empty match
-/// set as it must match all tasks which haven't been matched into previous
-/// layers.
+/// Note that the last layer in the configuration must have an empty match set
+/// as a catch-all for tasks which haven't been matched into previous layers.
 ///
-/// The configuration can be specified in multiple json files and command
-/// line arguments. Each must contain valid layer configurations and they're
-/// concatenated in the specified order.
+/// The configuration can be specified in multiple json files and
+/// command line arguments, which are concatenated in the specified
+/// order. Each must contain valid layer configurations.
 ///
 /// By default, an argument to scx_layered is interpreted as a JSON string. If
 /// the argument is a pointer to a JSON file, it should be prefixed with file:
@@ -304,10 +303,9 @@ lazy_static::lazy_static! {
 /// Monitoring Statistics
 /// =====================
 ///
-/// Run with `--stats INTERVAL` added to enable stats monitoring. There is
-/// also scx_stat server listening on /var/run/scx/root/stat and you can
-/// monitor statistics by running `scx_layered --monitor INTERVAL`
-/// separately.
+/// Run with `--stats INTERVAL` to enable stats monitoring. There is
+/// also an scx_stat server listening on /var/run/scx/root/stat that can
+/// be monitored by running `scx_layered --monitor INTERVAL` separately.
 ///
 ///   $ scx_layered --monitor 1
 ///   tot= 117909 local=86.20 open_idle= 0.21 affn_viol= 1.37 proc=6ms
@@ -389,13 +387,13 @@ struct Opts {
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
 
-    /// Enable verbose output including libbpf details. Specify multiple
+    /// Enable verbose output, including libbpf details. Specify multiple
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
 
-    /// Disable topology awareness. When enabled the nodes and llcs setting on
-    /// a layer is ignored.
+    /// Disable topology awareness. When enabled, the nodes and llcs settings on
+    /// a layer are ignored.
     #[clap(short = 't', long)]
     disable_topology: bool,
 
