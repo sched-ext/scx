@@ -73,9 +73,15 @@ def do_rust_ver(path, new_ver):
     name = None
     ver = None
     for lineno, line in enumerate(lines):
+        workspace_re = r'(^\s*)(\[\s*workspace\s*\])(.*$)'
         name_re = r'(^\s*name\s*=\s*")(.*)(".*$)'
         ver_re = r'(^\s*version\s*=\s*")(.*)(".*$)'
         line = line.rstrip()
+
+        m = re.match(workspace_re, line)
+        if m:
+            dbg(f'[{path}:{lineno}] SKIP: {m.group(1)}{underline(m.group(2))}{m.group(3)}')
+            return None
 
         m = re.match(name_re, line)
         if m:
@@ -257,7 +263,8 @@ def main():
     for path in rust_paths:
         name = cargo_path_to_crate(path)
         ver = do_rust_ver(path, new_rust_vers.get(name))
-        rust_vers[name] = ver
+        if ver:
+            rust_vers[name] = ver
 
     # crates implemented in the tree are included as deps by default
     rust_deps.update(rust_vers)
