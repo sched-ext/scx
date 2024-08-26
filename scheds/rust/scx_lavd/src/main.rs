@@ -30,6 +30,7 @@ use std::mem::MaybeUninit;
 use std::str;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::thread::ThreadId;
 use std::time::Duration;
 
@@ -59,7 +60,6 @@ use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 
 use itertools::iproduct;
-use nix::sys::signal;
 use plain::Plain;
 use rlimit::{getrlimit, setrlimit, Resource};
 
@@ -627,10 +627,14 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    fn run(&mut self) -> Result<UserExitInfo> {
+    pub fn exited(&mut self) -> bool {
+        uei_exited!(&self.skel, uei)
+    }
+
+    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
 
-        while self.running() {
+        while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             match req_ch.recv_timeout(Duration::from_secs(1)) {
                 Ok(req) => {
                     let res = self.stats_req_to_res(&req)?;
@@ -680,18 +684,6 @@ extern "C" fn handle_sigint(_: libc::c_int, _: *mut libc::siginfo_t, _: *mut lib
     RUNNING.store(false, Ordering::SeqCst);
 }
 
-fn init_signal_handlers() {
-    // Ctrl-c for termination
-    unsafe {
-        let sigint_action = signal::SigAction::new(
-            signal::SigHandler::SigAction(handle_sigint),
-            signal::SaFlags::empty(),
-            signal::SigSet::empty(),
-        );
-        signal::sigaction(signal::SIGINT, &sigint_action).unwrap();
-    }
-}
-
 fn main() -> Result<()> {
     let mut opts = Opts::parse();
     opts.proc().unwrap();
@@ -702,8 +694,14 @@ fn main() -> Result<()> {
     }
 
     init_log(&opts);
-    init_signal_handlers();
     debug!("{:#?}", opts);
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
+    ctrlc::set_handler(move || {
+        shutdown_clone.store(true, Ordering::Relaxed);
+    })
+    .context("Error setting Ctrl-C handler")?;
 
     if let Some(nr_samples) = opts.monitor_sched_samples {
         let jh = std::thread::spawn(move || stats::monitor_sched_samples(nr_samples).unwrap());
@@ -719,7 +717,7 @@ fn main() -> Result<()> {
             *build_id::SCX_FULL_VERSION
         );
         info!("scx_lavd scheduler starts running.");
-        if !sched.run()?.should_restart() {
+        if !sched.run(shutdown.clone())?.should_restart() {
             break;
         }
     }

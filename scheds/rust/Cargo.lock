@@ -1087,7 +1087,6 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "log",
- "nix 0.29.0",
  "ordered-float 3.9.2",
  "plain",
  "rlimit",
