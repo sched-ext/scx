@@ -202,6 +202,8 @@ lazy_static::lazy_static! {
 ///
 /// - PPIDEquals: Matches if the task's ppid matches the value.
 ///
+/// - TGIDEquals: Matches if the task's tgid matches the value.
+///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
 ///
