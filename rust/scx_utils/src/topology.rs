@@ -74,7 +74,7 @@ use anyhow::Result;
 use glob::glob;
 use sscanf::sscanf;
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::slice::Iter;
 
 lazy_static::lazy_static! {
@@ -97,7 +97,7 @@ lazy_static::lazy_static! {
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
 pub enum CoreType {
-    Big,
+    Big { turbo: bool },
     Little,
 }
 
@@ -421,7 +421,7 @@ fn create_insert_cpu(
     cpu_id: usize,
     node: &mut Node,
     online_mask: &Cpumask,
-    avg_cpu_freq: Option<usize>,
+    avg_cpu_freq: Option<(usize, usize)>,
 ) -> Result<()> {
     // CPU is offline. The Topology hierarchy is read-only, and assumes
     // that hotplug will cause the scheduler to restart. Thus, we can
@@ -463,16 +463,16 @@ fn create_insert_cpu(
     });
 
     let core_type = match avg_cpu_freq {
-        Some(avg_freq) => {
-            if max_freq >= avg_freq {
-                CoreType::Big
-            } else if max_freq < avg_freq {
-                CoreType::Little
+        Some((avg_base_freq, top_max_freq)) => {
+            if max_freq == top_max_freq {
+                CoreType::Big { turbo: true }
+            } else if base_freq >= avg_base_freq {
+                CoreType::Big { turbo: false }
             } else {
-                CoreType::Big
+                CoreType::Little
             }
         }
-        None => CoreType::Big,
+        None => CoreType::Big { turbo: false },
     };
 
     let core = cache.cores.entry(core_id).or_insert(Core {
@@ -525,24 +525,28 @@ fn read_cpu_ids() -> Result<Vec<usize>> {
     Ok(cpu_ids)
 }
 
-fn avg_cpu_freq() -> Option<usize> {
-    let mut avg_freq = 0;
+// Return the average base frequency across all CPUs and the highest maximum frequency.
+fn avg_cpu_freq() -> Option<(usize, usize)> {
+    let mut top_max_freq = 0;
+    let mut avg_base_freq = 0;
     let mut nr_cpus = 0;
     let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*").ok()?;
     for cpu_path in cpu_paths.filter_map(Result::ok) {
-        let mut buf = PathBuf::from(&cpu_path);
-        buf.push("cpufreq");
-        buf.push("scaling_max_freq");
-        let max_freq = read_file_usize(buf.as_path()).unwrap_or(0);
-        if max_freq > 0 {
-            avg_freq += max_freq;
+        let freq_path = cpu_path.join("cpufreq");
+        let max_freq = read_file_usize(&freq_path.join("scaling_max_freq")).unwrap_or(0);
+        let base_freq = read_file_usize(&freq_path.join("base_frequency")).unwrap_or(max_freq);
+        if base_freq > 0 {
+            if max_freq > top_max_freq {
+                top_max_freq = max_freq;
+            }
+            avg_base_freq += base_freq;
             nr_cpus += 1;
         }
     }
-    if avg_freq == 0 {
+    if avg_base_freq == 0 {
         return None;
     }
-    Some(avg_freq / nr_cpus)
+    Some((avg_base_freq / nr_cpus, top_max_freq))
 }
 
 fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {

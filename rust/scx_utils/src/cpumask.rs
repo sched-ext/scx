@@ -17,9 +17,20 @@
 //! hexadecimal string:
 //!
 //!```
-//!     let all_zeroes = Cpumask::new();
+//!     let all_zeroes = cpumask::new();
 //!     let str = "0xff00ff00";
-//!     let from_str_mask = Cpumask::from_string(str);
+//!     let from_str_mask = cpumask::from_string(str);
+//!```
+//!
+//! The hexadecimal string also supports the special values "none" and "all",
+//! respectively to specify no CPU (empty mask) or all CPUs (full mask):
+//!
+//!```
+//!     let str = "none";
+//!     let all_zeroes = cpumask::from_string(str);
+//!
+//!     let str = "all";
+//!     let all_ones = cpumask::from_string(str);
 //!```
 //!
 //! A Cpumask can be queried and updated using its helper functions:
@@ -75,6 +86,17 @@ impl Cpumask {
 
     /// Build a Cpumask object from a hexadecimal string.
     pub fn from_str(cpumask: &String) -> Result<Cpumask> {
+        match cpumask.as_str() {
+            "none" => {
+                let mask = bitvec![u64, Lsb0; 0; *NR_CPU_IDS];
+                return Ok(Self { mask });
+            },
+            "all" => {
+                let mask = bitvec![u64, Lsb0; 1; *NR_CPU_IDS];
+                return Ok(Self { mask });
+            },
+            _ => {},
+        }
         let hex_str = {
             let mut tmp_str = cpumask
                 .strip_prefix("0x")
@@ -114,7 +136,9 @@ impl Cpumask {
     }
 
     pub fn from_vec(vec: Vec<u64>) -> Self {
-	Self { mask: BitVec::from_vec(vec) }
+        Self {
+            mask: BitVec::from_vec(vec),
+        }
     }
 
     /// Return a slice of u64's whose bits reflect the Cpumask.
