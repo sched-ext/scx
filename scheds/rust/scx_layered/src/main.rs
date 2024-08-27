@@ -93,6 +93,7 @@ lazy_static::lazy_static! {
 			preempt: false,
 			preempt_first: false,
 			exclusive: false,
+                        slice_us: 20000,
 			perf: 1024,
 			nodes: vec![],
 			llcs: vec![],
@@ -111,6 +112,7 @@ lazy_static::lazy_static! {
 			preempt: true,
 			preempt_first: false,
 			exclusive: true,
+                        slice_us: 20000,
 			perf: 1024,
 			nodes: vec![],
 			llcs: vec![],
@@ -128,6 +130,7 @@ lazy_static::lazy_static! {
 			preempt: false,
 			preempt_first: false,
 			exclusive: false,
+                        slice_us: 20000,
 			perf: 1024,
 			nodes: vec![],
 			llcs: vec![],
@@ -450,6 +453,8 @@ enum LayerKind {
         #[serde(default)]
         yield_ignore: f64,
         #[serde(default)]
+        slice_us: u64,
+        #[serde(default)]
         preempt: bool,
         #[serde(default)]
         preempt_first: bool,
@@ -471,6 +476,8 @@ enum LayerKind {
         #[serde(default)]
         yield_ignore: f64,
         #[serde(default)]
+        slice_us: u64,
+        #[serde(default)]
         preempt: bool,
         #[serde(default)]
         preempt_first: bool,
@@ -488,6 +495,8 @@ enum LayerKind {
         min_exec_us: u64,
         #[serde(default)]
         yield_ignore: f64,
+        #[serde(default)]
+        slice_us: u64,
         #[serde(default)]
         preempt: bool,
         #[serde(default)]
@@ -1464,6 +1473,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     preempt_first,
                     exclusive,
                     nodes,
+                    slice_us,
                     ..
                 }
                 | LayerKind::Grouped {
@@ -1474,6 +1484,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     preempt_first,
                     exclusive,
                     nodes,
+                    slice_us,
                     ..
                 }
                 | LayerKind::Open {
@@ -1484,15 +1495,21 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     preempt_first,
                     exclusive,
                     nodes,
+                    slice_us,
                     ..
                 } => {
+                    layer.slice_ns = if *slice_us > 0 {
+                        *slice_us * 1000
+                    } else {
+                        opts.slice_us * 1000
+                    };
                     layer.min_exec_ns = min_exec_us * 1000;
                     layer.yield_step_ns = if *yield_ignore > 0.999 {
                         0
                     } else if *yield_ignore < 0.001 {
-                        opts.slice_us * 1000
+                        layer.slice_ns
                     } else {
-                        ((opts.slice_us * 1000) as f64 * (1.0 - *yield_ignore)) as u64
+                        (layer.slice_ns as f64 * (1.0 - *yield_ignore)) as u64
                     };
                     layer.preempt.write(*preempt);
                     layer.preempt_first.write(*preempt_first);
