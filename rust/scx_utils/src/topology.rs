@@ -74,7 +74,7 @@ use anyhow::Result;
 use glob::glob;
 use sscanf::sscanf;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::slice::Iter;
 
 lazy_static::lazy_static! {
@@ -95,6 +95,12 @@ lazy_static::lazy_static! {
     pub static ref NR_CPUS_POSSIBLE: usize = libbpf_rs::num_possible_cpus().unwrap();
 }
 
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+pub enum CoreType {
+    Big,
+    Little,
+}
+
 #[derive(Debug, Clone)]
 pub struct Cpu {
     id: usize,
@@ -105,6 +111,7 @@ pub struct Cpu {
     l2_id: usize,
     l3_id: usize,
     llc_id: usize,
+    pub core_type: CoreType,
 }
 
 impl Cpu {
@@ -157,6 +164,7 @@ pub struct Core {
     id: usize,
     cpus: BTreeMap<usize, Cpu>,
     span: Cpumask,
+    pub core_type: CoreType,
 }
 
 impl Core {
@@ -409,7 +417,12 @@ fn cpus_online() -> Result<Cpumask> {
     Ok(mask)
 }
 
-fn create_insert_cpu(cpu_id: usize, node: &mut Node, online_mask: &Cpumask) -> Result<()> {
+fn create_insert_cpu(
+    cpu_id: usize,
+    node: &mut Node,
+    online_mask: &Cpumask,
+    avg_cpu_freq: Option<usize>,
+) -> Result<()> {
     // CPU is offline. The Topology hierarchy is read-only, and assumes
     // that hotplug will cause the scheduler to restart. Thus, we can
     // just skip this CPU altogether.
@@ -449,10 +462,24 @@ fn create_insert_cpu(cpu_id: usize, node: &mut Node, online_mask: &Cpumask) -> R
         span: Cpumask::new()?,
     });
 
+    let core_type = match avg_cpu_freq {
+        Some(avg_freq) => {
+            if max_freq >= avg_freq {
+                CoreType::Big
+            } else if max_freq < avg_freq {
+                CoreType::Little
+            } else {
+                CoreType::Big
+            }
+        }
+        None => CoreType::Big,
+    };
+
     let core = cache.cores.entry(core_id).or_insert(Core {
         id: core_id,
         cpus: BTreeMap::new(),
         span: Cpumask::new()?,
+        core_type: core_type.clone(),
     });
 
     core.cpus.insert(
@@ -466,6 +493,7 @@ fn create_insert_cpu(cpu_id: usize, node: &mut Node, online_mask: &Cpumask) -> R
             l2_id: l2_id,
             l3_id: l3_id,
             llc_id: llc_id,
+            core_type: core_type.clone(),
         },
     );
 
@@ -497,6 +525,26 @@ fn read_cpu_ids() -> Result<Vec<usize>> {
     Ok(cpu_ids)
 }
 
+fn avg_cpu_freq() -> Option<usize> {
+    let mut avg_freq = 0;
+    let mut nr_cpus = 0;
+    let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*").ok()?;
+    for cpu_path in cpu_paths.filter_map(Result::ok) {
+        let mut buf = PathBuf::from(&cpu_path);
+        buf.push("cpufreq");
+        buf.push("scaling_max_freq");
+        let max_freq = read_file_usize(buf.as_path()).unwrap_or(0);
+        if max_freq > 0 {
+            avg_freq += max_freq;
+            nr_cpus += 1;
+        }
+    }
+    if avg_freq == 0 {
+        return None;
+    }
+    Some(avg_freq / nr_cpus)
+}
+
 fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {
     let mut nodes: Vec<Node> = Vec::with_capacity(1);
     let mut node = Node {
@@ -509,9 +557,10 @@ fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {
         bail!("/sys/devices/system/cpu sysfs node not found");
     }
 
+    let avg_cpu_freq = avg_cpu_freq();
     let cpu_ids = read_cpu_ids()?;
     for cpu_id in cpu_ids.iter() {
-        create_insert_cpu(*cpu_id, &mut node, &online_mask)?;
+        create_insert_cpu(*cpu_id, &mut node, &online_mask, avg_cpu_freq)?;
     }
 
     nodes.push(node);
@@ -540,6 +589,7 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
 
         let cpu_pattern = numa_path.join("cpu[0-9]*");
         let cpu_paths = glob(cpu_pattern.to_string_lossy().as_ref())?;
+        let avg_cpu_freq = avg_cpu_freq();
         for cpu_path in cpu_paths.filter_map(Result::ok) {
             let cpu_str = cpu_path.to_str().unwrap().trim();
             let cpu_id = match sscanf!(cpu_str, "/sys/devices/system/node/node{usize}/cpu{usize}") {
@@ -549,7 +599,7 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
                 }
             };
 
-            create_insert_cpu(cpu_id, &mut node, &online_mask)?;
+            create_insert_cpu(cpu_id, &mut node, &online_mask, avg_cpu_freq)?;
         }
 
         nodes.push(node);
