@@ -2053,10 +2053,13 @@ static bool consume_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 			continue;
 
 		nuance = bpf_get_prandom_u32();
-		for (int j = 0; j < nr_nbr; j++) {
+		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = dsq_id + 1) {
+			if (j >= nr_nbr)
+				break;
+
 			dsq_id = pick_any_bit(cpdomc->neighbor_bits[i], nuance);
 			if (dsq_id == -ENOENT)
-				goto next_neighbor;
+				continue;
 
 			cpdomc_pick = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
 			if (!cpdomc_pick) {
@@ -2065,12 +2068,10 @@ static bool consume_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 			}
 
 			if (!cpdomc_pick->is_active)
-				goto next_neighbor;
+				continue;
 	
 			if (consume_dsq(cpu, dsq_id, now))
 				return true;
-next_neighbor:
-			nuance = dsq_id + 1;
 		}
 	}
 	
