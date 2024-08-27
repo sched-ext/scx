@@ -35,3 +35,18 @@ a very high weight may cause the scheduler to incorrectly leave cores idle
 because it thinks they're necessary to accommodate the compute for a single
 task. This can also happen in CFS, and should soon be addressed for
 scx_layered.
+
+## Tuning scx_layered
+`scx_layered` is designed with specific use cases in mind and may not perform
+as well as a general purpose scheduler for all workloads. It does have topology
+awareness, which can be disabled with the `-t` flag. This may impact
+performance on NUMA machines, as layers will be able to span NUMA nodes by
+default. For configuring `scx_layered` to span across multiple NUMA nodes simply
+setting all nodes in the `nodes` field of the config.
+
+For controlling the performance level of different levels (i.e. CPU frequency)
+the `perf` field can be set. This must be used in combination with the
+`schedutil` frequency governor. The value should be from 0-1024 with 1024 being
+maximum performance. Depending on the system hardware it will translate to
+frequency, which can also trigger turbo boosting if the value is high enough
+and turboe is enabled.
