@@ -211,7 +211,7 @@ struct Opts {
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
 
-    /// Enable verbose output including libbpf details. Specify multiple
+    /// Enable verbose output, including libbpf details. Specify multiple
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,

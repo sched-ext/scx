@@ -60,7 +60,7 @@ lazy_static::lazy_static! {
 /// split and which cpus they should be assigned to.
 #[derive(Debug, Parser)]
 struct Opts {
-    /// Enable verbose output including libbpf details. Specify multiple
+    /// Enable verbose output, including libbpf details. Specify multiple
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
