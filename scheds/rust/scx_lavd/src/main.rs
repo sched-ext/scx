@@ -597,10 +597,6 @@ impl<'a> Scheduler<'a> {
         self.skel.maps.bss_data.intrspc.cmd = LAVD_CMD_NOP;
     }
 
-    fn running(&mut self) -> bool {
-        RUNNING.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei)
-    }
-
     fn stats_req_to_res(&mut self, req: &StatsReq) -> Result<StatsRes> {
         Ok(match req {
             StatsReq::NewSampler(tid) => {
@@ -686,10 +682,6 @@ fn init_log(opts: &Opts) {
         simplelog::ColorChoice::Auto,
     )
     .unwrap();
-}
-
-extern "C" fn handle_sigint(_: libc::c_int, _: *mut libc::siginfo_t, _: *mut libc::c_void) {
-    RUNNING.store(false, Ordering::SeqCst);
 }
 
 fn main() -> Result<()> {
