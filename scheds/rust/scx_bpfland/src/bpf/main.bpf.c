@@ -592,7 +592,9 @@ retry:
 	 * Try to dispatch on the turbo boosted CPUs first. If we can't find
 	 * any idle CPU, re-try again with the primary scheduling domain.
 	 */
-	if (do_turbo && !bpf_cpumask_equal(cast_mask(turbo), cast_mask(primary))) {
+	if (do_turbo &&
+	    !bpf_cpumask_empty(cast_mask(turbo)) &&
+	    !bpf_cpumask_equal(cast_mask(turbo), cast_mask(primary))) {
 		bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(turbo));
 	} else {
 		bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(primary));

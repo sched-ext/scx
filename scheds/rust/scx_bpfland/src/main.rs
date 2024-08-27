@@ -434,9 +434,10 @@ impl<'a> Scheduler<'a> {
                 "balance_power" => get_primary_cpus(Powermode::Turbo).unwrap_or(Vec::new()),
                 &_ => Vec::new(),
             };
+            // If no turbo-boosted CPUs are selected, use an empty CPU mask, so that tasks are
+            // scheduled directly to the primary domain, bypassing the turbo boost domain.
             if cpus.is_empty() {
                 let mut cpumask = Cpumask::new()?;
-                cpumask.setall();
                 cpumask
             } else {
                 Cpumask::from_str(&cpus_to_cpumask(&cpus))?
