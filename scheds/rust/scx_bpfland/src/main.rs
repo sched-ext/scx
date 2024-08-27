@@ -50,6 +50,7 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
+use scx_utils::CoreType;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 
