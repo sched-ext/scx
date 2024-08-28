@@ -49,4 +49,22 @@ the `perf` field can be set. This must be used in combination with the
 `schedutil` frequency governor. The value should be from 0-1024 with 1024 being
 maximum performance. Depending on the system hardware it will translate to
 frequency, which can also trigger turbo boosting if the value is high enough
-and turboe is enabled.
+and turbo is enabled.
+
+Layer affinities can be defined using the `nodes` or `llcs` layer configs. This
+allows for restricting a layer to a NUMA node or LLC. Layers will by default
+attempt to grow within the same NUMA node, however this may change to suppport
+different layer growth strategies in the future. When tuning the `util_range`
+for a layer there should be some consideration for how the layer should grow.
+For example, if the `util_range` lower bound is too high, it may lead to the
+layer shrinking excessively. This could be ideal for core compaction strategies
+for a layer, but may poorly utilize hardware, especially in low system
+utilization. The upper bound of the `util_range` controls how the layer grows,
+if set too aggressively the layer could grow fast and prevent other layers from
+utilizing CPUs. Lastly, the `slice_us` can be used to tune the timeslice
+per layer. This is useful if a layer has more latency sensitive tasks, where
+timeslices should be shorter. Conversely if a layer is largely CPU bound with
+less concerns of latency it may be useful to increase the `slice_us` parameter.
+
+`scx_layered` can provide performance wins, for certain workloads when
+sufficient tuning on the layer config.
