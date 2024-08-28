@@ -210,7 +210,8 @@ private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR]; /* CPU mask f
 /*
  * CPU topology
  */
-const volatile u16	cpu_order[LAVD_CPU_ID_MAX]; /* CPU preference order */
+const volatile u16	cpu_order_performance[LAVD_CPU_ID_MAX]; /* CPU preference order for performance and balanced mode */
+const volatile u16	cpu_order_powersave[LAVD_CPU_ID_MAX]; /* CPU preference order for powersave mode */
 const volatile u16	__cpu_capacity_hint[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1000 */
 struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR]; /* contexts for compute domains */
 
@@ -228,9 +229,10 @@ static u64		cur_svc_time;
 /*
  * Options
  */
-const volatile bool	no_core_compaction;
-const volatile bool	no_freq_scaling;
-const volatile bool	no_prefer_turbo_core;
+volatile bool	no_core_compaction;
+volatile bool	no_freq_scaling;
+volatile bool	no_prefer_turbo_core;
+volatile bool	is_powersave_mode;
 const volatile u32 	is_smt_active;
 const volatile u8	verbose;
 
@@ -807,6 +809,7 @@ static void do_core_compaction(void)
 	struct bpf_cpumask *active, *ovrflw;
 	int nr_cpus, nr_active, nr_active_old, cpu, i;
 	bool clear;
+	const volatile u16 *cpu_order;
 
 	bpf_rcu_read_lock();
 
@@ -819,6 +822,14 @@ static void do_core_compaction(void)
 		scx_bpf_error("Failed to prepare cpumasks.");
 		goto unlock_out;
 	}
+
+	/*
+	 * Decide a cpuorder to use according to its power mode.
+	 */
+	if (is_powersave_mode)
+		cpu_order = cpu_order_powersave;
+	else
+		cpu_order = cpu_order_performance;
 
 	/*
 	 * Assign active and overflow cores
@@ -2957,7 +2968,7 @@ static s32 init_per_cpu_ctx(u64 now)
 			u64 cpumask = cpdomc->__cpumask[i];
 			bpf_for(j, 0, 64) {
 				if (cpumask & 0x1LLU << j) {
-					cpu = (i * 64) + j;
+			 		cpu = (i * 64) + j;
 					bpf_cpumask_set_cpu(cpu, cd_cpumask);
 					cpuc = get_cpu_ctx_id(cpu);
 					if (!cpuc) {
@@ -3065,6 +3076,35 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 void BPF_STRUCT_OPS(lavd_exit, struct scx_exit_info *ei)
 {
 	UEI_RECORD(uei, ei);
+}
+
+SEC("syscall")
+int set_power_profile(struct power_arg *input)
+{
+	switch (input->power_mode) {
+	case LAVD_PM_PERFORMANCE:
+		no_core_compaction = true;
+		no_freq_scaling = true;
+		no_prefer_turbo_core = false;
+		is_powersave_mode = false;
+		break;
+	case LAVD_PM_BALANCED:
+		no_core_compaction = false;
+		no_freq_scaling = false;
+		no_prefer_turbo_core = false;
+		is_powersave_mode = false;
+		break;
+	case LAVD_PM_POWERSAVE:
+		no_core_compaction = false;
+		no_freq_scaling = false;
+		no_prefer_turbo_core = true;
+		is_powersave_mode = true;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
 }
 
 SCX_OPS_DEFINE(lavd_ops,

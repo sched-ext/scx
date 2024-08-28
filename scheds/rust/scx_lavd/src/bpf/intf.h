@@ -291,4 +291,18 @@ struct msg_task_ctx {
 	struct task_ctx_x	taskc_x;
 };
 
+
+/*
+ * BPF syscall
+ */
+enum {
+	LAVD_PM_PERFORMANCE	= 0,
+	LAVD_PM_BALANCED	= 1,
+	LAVD_PM_POWERSAVE	= 2,
+};
+
+struct power_arg {
+	s32	power_mode;
+};
+
 #endif /* __INTF_H */
