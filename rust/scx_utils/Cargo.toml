@@ -19,6 +19,7 @@ lazy_static = "1.4"
 libbpf-cargo = "0.24.1"
 libbpf-rs = "0.24.1"
 log = "0.4.17"
+nvml-wrapper = "0.10.0"
 paste = "1.0"
 regex = "1.10"
 scx_stats = { path = "../scx_stats", version = "1.0.3" }
