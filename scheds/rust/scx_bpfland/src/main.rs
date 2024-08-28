@@ -48,6 +48,7 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::CoreType;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
@@ -65,61 +66,28 @@ enum Powermode {
 fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
     let topo = Topology::new().unwrap();
 
-    // Iterate over each CPU directory and collect CPU ID and its base operational frequency to
-    // distinguish between fast and slow cores.
-    let mut cpu_freqs = Vec::new();
-    let mut max_cpu_freqs = Vec::new();
-    for core in topo.cores().into_iter() {
-        for (cpu_id, cpu) in core.cpus() {
-            cpu_freqs.push((*cpu_id, cpu.base_freq()));
-            max_cpu_freqs.push((*cpu_id, cpu.max_freq()));
-        }
-    }
-    if cpu_freqs.is_empty() {
-        return Ok(Vec::new());
-    }
+    let cpus: Vec<usize> = topo
+        .cores()
+        .into_iter()
+        .flat_map(|core| core.cpus())
+        .filter_map(|(cpu_id, cpu)| match (&mode, &cpu.core_type) {
+            // Turbo mode: only add turbo-boosted CPUs
+            (Powermode::Turbo, CoreType::Big { turbo: true }) |
+            // Performance mode: add all the Big CPUs (either Turbo or non-Turbo)
+            (Powermode::Performance, CoreType::Big { .. }) |
+            // Powersave mode: add all the Little CPUs
+            (Powermode::Powersave, CoreType::Little) => Some(*cpu_id),
+            _ => None,
+        })
+        .collect();
 
-    // Find the smallest maximum frequency.
-    let min_freq = cpu_freqs.iter().map(|&(_, freq)| freq).min().unwrap();
-
-    // Find the highest maximum frequency.
-    let max_freq = max_cpu_freqs.iter().map(|&(_, freq)| freq).max().unwrap();
-
-    // Check if all CPUs have the smallest frequency.
-    let all_have_min_freq = cpu_freqs.iter().all(|&(_, freq)| freq == min_freq);
-
-    let selected_cpu_ids: Vec<usize> = if mode == Powermode::Turbo {
-        // Turbo: return the CPUs with the highest max frequency.
-        max_cpu_freqs
-            .into_iter()
-            .filter(|&(_, freq)| freq == max_freq)
-            .map(|(cpu_id, _)| cpu_id)
-            .collect()
-    } else if all_have_min_freq || mode == Powermode::Powersave {
-        // Powersave: return the CPUs with the smallest base frequency.
-        cpu_freqs
-            .into_iter()
-            .filter(|&(_, freq)| freq == min_freq)
-            .map(|(cpu_id, _)| cpu_id)
-            .collect()
-    } else if mode == Powermode::Performance {
-        // Performance: return the CPUs with a base frequency greater than the minimum.
-        cpu_freqs
-            .into_iter()
-            .filter(|&(_, freq)| freq > min_freq)
-            .map(|(cpu_id, _)| cpu_id)
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    Ok(selected_cpu_ids)
+    Ok(cpus)
 }
 
 // Convert an array of CPUs to the corresponding cpumask of any arbitrary size.
 fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
     if cpus.is_empty() {
-        return String::from("0x0");
+        return String::from("all");
     }
 
     // Determine the maximum CPU ID to create a sufficiently large byte vector.
@@ -157,11 +125,7 @@ fn parse_cpumask(cpu_str: &str) -> Result<Cpumask, anyhow::Error> {
         }
         "auto" => Cpumask::new(),
         _ if !cpu_str.is_empty() => Cpumask::from_str(&cpu_str.to_string()),
-        _ => {
-            let mut cpumask = Cpumask::new()?;
-            cpumask.setall();
-            Ok(cpumask)
-        }
+        _ => Cpumask::from_str(&"all".to_string()),
     }
 }
 
@@ -222,9 +186,10 @@ struct Opts {
     ///  - "performance" = automatically detect and use the fastest CPUs
     ///  - "powersave" = automatically detect and use the slowest CPUs
     ///  - "auto" = automatically detect the CPUs based on the current energy profile
+    ///  - "all" = all CPUs assigned to the primary domain
     ///
     /// By default all CPUs are used for the primary scheduling domain.
-    #[clap(short = 'm', long, default_value = "", value_parser = parse_cpumask)]
+    #[clap(short = 'm', long, default_value = "all", value_parser = parse_cpumask)]
     primary_domain: Cpumask,
 
     /// Disable L2 cache awareness.
@@ -437,8 +402,7 @@ impl<'a> Scheduler<'a> {
             // If no turbo-boosted CPUs are selected, use an empty CPU mask, so that tasks are
             // scheduled directly to the primary domain, bypassing the turbo boost domain.
             if cpus.is_empty() {
-                let mut cpumask = Cpumask::new()?;
-                cpumask
+                Cpumask::new()?
             } else {
                 Cpumask::from_str(&cpus_to_cpumask(&cpus))?
             }
