@@ -704,7 +704,8 @@ fn main() -> Result<()> {
     .context("Error setting Ctrl-C handler")?;
 
     if let Some(nr_samples) = opts.monitor_sched_samples {
-        let jh = std::thread::spawn(move || stats::monitor_sched_samples(nr_samples).unwrap());
+        let shutdown_copy = shutdown.clone();
+        let jh = std::thread::spawn(move || stats::monitor_sched_samples(nr_samples, shutdown_copy).unwrap());
         let _ = jh.join();
         return Ok(());
     }
