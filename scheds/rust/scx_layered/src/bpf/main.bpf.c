@@ -94,7 +94,7 @@ static __noinline u32 iter_layer_cpu_ctx(u32 layer_idx, int idx)
 }
 
 // return the dsq id for the layer based on the LLC id.
-static inline u64 layer_dsq_id(u32 layer_id, u32 llc_id)
+static __noinline u64 layer_dsq_id(u32 layer_id, u32 llc_id)
 {
 	return (layer_id * nr_llcs) + llc_id;
 }
@@ -862,8 +862,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 {
 	s32 sib = sibling_cpu(cpu);
 	struct cpu_ctx *cctx, *sib_cctx;
-	int idx, llc_id;
-	u32 layer_idx;
+	u32 idx, llc_id, layer_idx;
 	u64 dsq_id;
 
 	if (!(cctx = lookup_cpu_ctx(-1)))
@@ -903,12 +902,12 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = iter_layer_cpu_ctx(cctx->layer_idx, idx);
 		if (disable_topology) {
-			if (layers[layer_idx].preempt && scx_bpf_consume(layer_idx))
+			if (MEMBER_VPTR(layers, [layer_idx].preempt) && scx_bpf_consume(layer_idx))
 				return;
 		} else {
 			bpf_for(llc_id, 0, nr_llcs) {
 				dsq_id = layer_dsq_id(layer_idx, llc_id);
-				if (layers[layer_idx].preempt && scx_bpf_consume(dsq_id))
+				if (MEMBER_VPTR(layers, [layer_idx].preempt) && scx_bpf_consume(dsq_id))
 					return;
 			}
 		}
@@ -944,7 +943,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 					return;
 
 				if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
-				    (cpu == fallback_cpu && layer->nr_cpus == 0)) {
+				    (cpu <= nr_possible_cpus && cpu == fallback_cpu && 
+				     MEMBER_VPTR(layer, ->nr_cpus) == 0)) {
 					if (scx_bpf_consume(dsq_id))
 						return;
 				}
@@ -963,7 +963,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			bpf_for(llc_id, 0, nr_llcs) {
 				dsq_id = layer_dsq_id(layer_idx, llc_id);
 
-				if (!layers[layer_idx].preempt && layers[layer_idx].open &&
+				if (!MEMBER_VPTR(layers, [layer_idx].preempt) &&
+				    MEMBER_VPTR(layers, [layer_idx].open) &&
 				    scx_bpf_consume(dsq_id))
 					return;
 			}

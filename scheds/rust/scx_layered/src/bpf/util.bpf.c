@@ -99,6 +99,7 @@ bool __noinline match_prefix(const char *prefix, const char *str, u32 max_len)
 	}
 
 	bpf_for(c, 0, max_len) {
+		c &= 0xfff;
 		if (c > len) {
 			scx_bpf_error("invalid length");
 			return false; /* appease the verifier */
