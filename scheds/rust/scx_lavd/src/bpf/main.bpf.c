@@ -2050,7 +2050,7 @@ static bool consume_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
 		nr_nbr = min(cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
-			continue;
+			break;
 
 		nuance = bpf_get_prandom_u32();
 		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = dsq_id + 1) {
