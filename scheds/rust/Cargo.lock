@@ -1218,7 +1218,10 @@ dependencies = [
  "ordered-float 3.9.2",
  "plain",
  "scx_rustland_core",
+ "scx_stats",
+ "scx_stats_derive",
  "scx_utils",
+ "serde",
  "simplelog",
 ]
 
