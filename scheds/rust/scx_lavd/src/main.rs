@@ -101,7 +101,8 @@ struct Opts {
     #[clap(long = "prefer-little-core", action = clap::ArgAction::SetTrue)]
     prefer_little_core: bool,
 
-    /// Do not specifically prefer to schedule on turbo cores.
+    /// Do not specifically prefer to schedule on turbo cores. Normally set by the power mode, but
+    /// can be set independently if desired.
     #[clap(long = "no-prefer-turbo-core", action = clap::ArgAction::SetTrue)]
     no_prefer_turbo_core: bool,
 
