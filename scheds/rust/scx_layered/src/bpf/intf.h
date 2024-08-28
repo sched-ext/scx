@@ -141,6 +141,7 @@ struct layer {
 	u64			min_exec_ns;
 	u64			max_exec_ns;
 	u64			yield_step_ns;
+	u64			slice_ns;
 	bool			open;
 	bool			preempt;
 	bool			preempt_first;

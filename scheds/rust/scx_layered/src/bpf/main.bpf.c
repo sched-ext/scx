@@ -569,6 +569,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cctx);
+		u64 layer_slice_ns = layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
 		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		return cpu;
 	} else {
@@ -658,6 +659,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 	try_preempt_first = cctx->try_preempt_first;
 	cctx->try_preempt_first = false;
+	u64 layer_slice_ns = layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
 
 	if (cctx->yielding) {
 		lstat_inc(LSTAT_YIELD, layer, cctx);
@@ -677,8 +679,8 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Limit the amount of budget that an idling task can accumulate
 	 * to one slice.
 	 */
-	if (vtime_before(vtime, layer->vtime_now - slice_ns))
-		vtime = layer->vtime_now - slice_ns;
+	if (vtime_before(vtime, layer->vtime_now - layer_slice_ns))
+		vtime = layer->vtime_now - layer_slice_ns;
 
 	/*
 	 * Special-case per-cpu kthreads which aren't in a preempting layer so
@@ -695,7 +697,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 
-		scx_bpf_dispatch(p, HI_FALLBACK_DSQ, slice_ns, enq_flags);
+		scx_bpf_dispatch(p, HI_FALLBACK_DSQ, layer_slice_ns, enq_flags);
 		goto find_cpu;
 	}
 
@@ -718,17 +720,17 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		 * starvation. For now, we just dispatch all affinitized tasks
 		 * to HI_FALLBACK_DSQ to avoid this starvation issue.
 		 */
-		scx_bpf_dispatch(p, HI_FALLBACK_DSQ, slice_ns, enq_flags);
+		scx_bpf_dispatch(p, HI_FALLBACK_DSQ, layer_slice_ns, enq_flags);
 		goto find_cpu;
 	}
 
 	if (disable_topology) {
-		scx_bpf_dispatch_vtime(p, tctx->layer, slice_ns, vtime, enq_flags);
+		scx_bpf_dispatch_vtime(p, tctx->layer, layer_slice_ns, vtime, enq_flags);
 	} else {
 		u32 llc_id = cpu_to_llc_id(tctx->last_cpu >= 0 ? tctx->last_cpu :
 					   bpf_get_smp_processor_id());
 		idx = layer_dsq_id(layer->idx, llc_id);
-		scx_bpf_dispatch_vtime(p, idx, slice_ns, vtime, enq_flags);
+		scx_bpf_dispatch_vtime(p, idx, layer_slice_ns, vtime, enq_flags);
 	}
 
 find_cpu:
@@ -788,8 +790,9 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 	if (!(tctx = lookup_task_ctx(p)) || !(layer = lookup_layer(tctx->layer)))
 		goto no;
 
+	u64 layer_slice_ns = layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
 	/* @p has fully consumed its slice and still wants to run */
-	cctx->ran_current_for += slice_ns;
+	cctx->ran_current_for += layer_slice_ns;
 
 	/*
 	 * There wasn't anything in the local or global DSQ, but there may be
@@ -814,6 +817,7 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 		 */
 		if (disable_topology) {
 			if (!scx_bpf_dsq_nr_queued(layer->idx)) {
+				p->scx.slice = layer_slice_ns;
 				lstat_inc(LSTAT_KEEP, layer, cctx);
 				return true;
 			}
@@ -822,6 +826,7 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 						   tctx->last_cpu :
 						   bpf_get_smp_processor_id());
 			if (!scx_bpf_dsq_nr_queued(dsq_id)) {
+				p->scx.slice = layer_slice_ns;
 				lstat_inc(LSTAT_KEEP, layer, cctx);
 				return true;
 			}
@@ -847,6 +852,7 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 		scx_bpf_put_idle_cpumask(idle_cpumask);
 
 		if (has_idle) {
+			p->scx.slice = layer_slice_ns;
 			lstat_inc(LSTAT_KEEP, layer, cctx);
 			return true;
 		}
@@ -1288,10 +1294,11 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	cctx->current_preempt = false;
 	cctx->prev_exclusive = cctx->current_exclusive;
 	cctx->current_exclusive = false;
+	u64 layer_slice_ns = layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
 
 	/* scale the execution time by the inverse of the weight and charge */
-	if (cctx->yielding && used < slice_ns)
-		used = slice_ns;
+	if (cctx->yielding && used < layer_slice_ns)
+		used = layer_slice_ns;
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 	cctx->maybe_idle = true;
 }
