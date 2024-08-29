@@ -209,6 +209,26 @@ static void adj_load(u32 layer_idx, s64 adj, u64 now)
 			      bpf_get_smp_processor_id(), layer_idx, layer->load, adj);
 }
 
+struct {
+        __uint(type, BPF_MAP_TYPE_ARRAY);
+        __type(key, u32);
+        __type(value, struct user_ctx);
+        __uint(max_entries, MAX_LAYERS);
+	__uint(map_flags, BPF_F_MMAPABLE);
+} user_ctxs SEC(".maps");
+
+static struct user_ctx *lookup_user_ctx(int layer_idx)
+{
+	struct user_ctx *uctx;
+
+	if ((uctx = bpf_map_lookup_elem(&user_ctxs, &layer_idx))) {
+		return uctx;
+	} else {
+		scx_bpf_error("no layer user_ctx");
+		return NULL;
+	}
+}
+
 struct layer_cpumask_wrapper {
 	struct bpf_cpumask __kptr *cpumask;
 };
@@ -294,17 +314,6 @@ u32 llc_node_id(u32 llc_id)
         return *llc_ptr;
 }
 
-SEC("fentry")
-int BPF_PROG(sched_tick_fentry)
-{
-	int idx;
-
-	if (bpf_get_smp_processor_id() == 0)
-		bpf_for(idx, 0, nr_layers)
-			refresh_cpumasks(idx);
-	return 0;
-}
-
 struct task_ctx {
 	int			pid;
 	int			last_cpu;
@@ -314,6 +323,7 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *layered_cpumask;
 
 	bool			all_cpus_allowed;
+	bool			is_override;
 	u64			runnable_at;
 	u64			running_at;
 };
@@ -418,6 +428,35 @@ int BPF_PROG(tp_task_rename, struct task_struct *p, const char *buf)
 	return 0;
 }
 
+static void refresh_hints(int idx)
+{
+	int i;
+	struct task_ctx *tctx;
+	struct user_ctx *uctx;
+	struct task_struct *p;
+
+
+	if (!(uctx = lookup_user_ctx(idx)))
+		return;
+
+	bpf_for(i, 0, uctx->nr_overrides) {
+		if (i > MAX_LAYER_OVERRIDES)
+			break;
+
+		p = bpf_task_from_pid(uctx->task_overrides[i]);
+		if (!p)
+			continue;
+
+		if (!(tctx = lookup_task_ctx(p))) {
+			bpf_task_release(p);
+			continue;
+		}
+		tctx->layer = idx;
+		tctx->is_override = true;
+		bpf_task_release(p);
+	}
+}
+
 static void maybe_refresh_layered_cpumask(struct cpumask *layered_cpumask,
 					  struct task_struct *p, struct task_ctx *tctx,
 					  const struct cpumask *layer_cpumask)
@@ -435,6 +474,19 @@ static void maybe_refresh_layered_cpumask(struct cpumask *layered_cpumask,
 	bpf_cpumask_and((struct bpf_cpumask *)layered_cpumask, layer_cpumask, p->cpus_ptr);
 	tctx->layer_cpus_seq = layer_seq;
 	trace("%s[%d] cpumask refreshed to seq %llu", p->comm, p->pid, layer_seq);
+}
+
+SEC("fentry")
+int BPF_PROG(sched_tick_fentry)
+{
+	int idx;
+
+	if (bpf_get_smp_processor_id() == 0)
+		bpf_for(idx, 0, nr_layers) {
+			refresh_cpumasks(idx);
+			refresh_hints(idx);
+		}
+	return 0;
 }
 
 static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
@@ -1099,7 +1151,7 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *tctx)
 	u64 idx;	// XXX - int makes verifier unhappy
 	pid_t pid = p->pid;
 
-	if (!tctx->refresh_layer)
+	if (!tctx->refresh_layer || tctx->is_override)
 		return;
 	tctx->refresh_layer = false;
 
@@ -1523,6 +1575,7 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
 	struct bpf_cpumask *cpumask;
+	struct user_ctx *uctx;
 	int i, j, k, nr_online_cpus, ret;
 
 	ret = scx_bpf_create_dsq(HI_FALLBACK_DSQ, -1);
@@ -1570,6 +1623,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		dbg("CFG LAYER[%d] min_exec_ns=%lu open=%d preempt=%d exclusive=%d",
 		    i, layer->min_exec_ns, layer->open, layer->preempt,
 		    layer->exclusive);
+
+		if (!(uctx = lookup_user_ctx(i)))
+			return -ENOENT;
+		uctx->nr_overrides = 0;
 
 		if (layer->nr_match_ors > MAX_LAYER_MATCH_ORS) {
 			scx_bpf_error("too many ORs");

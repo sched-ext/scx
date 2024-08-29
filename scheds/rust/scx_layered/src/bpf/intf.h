@@ -33,6 +33,7 @@ enum consts {
 	MAX_COMM		= 16,
 	MAX_LAYER_MATCH_ORS	= 32,
 	MAX_LAYERS		= 16,
+	MAX_LAYER_OVERRIDES	= 1024,
 	USAGE_HALF_LIFE		= 100000000,	/* 100ms */
 
 	HI_FALLBACK_DSQ		= MAX_LAYERS * MAX_DOMS,
@@ -162,4 +163,8 @@ struct layer {
 	unsigned int		perf;
 };
 
+struct user_ctx {
+	u64			task_overrides[MAX_LAYER_OVERRIDES];
+	u32			nr_overrides;
+};
 #endif /* __INTF_H */

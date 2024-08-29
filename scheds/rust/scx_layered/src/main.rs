@@ -408,6 +408,10 @@ struct Opts {
     #[clap(short = 'e', long)]
     example: Option<String>,
 
+    /// User context bpffs mount path
+    #[clap(short = 'm', long)]
+    user_ctx_mount: Option<String>,
+
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
     stats: Option<f64>,
@@ -1616,6 +1620,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         Self::init_nodes(&mut skel, opts, &topo);
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
+
+        if !skel.maps.user_ctxs.is_pinned() {
+            let path = opts.user_ctx_mount.clone().unwrap_or("/sys/fs/bpf/scx/user_ctxs".to_string());
+            skel.maps.user_ctxs.pin(path);
+        }
 
         let mut layers = vec![];
         for (idx, spec) in layer_specs.iter().enumerate() {
