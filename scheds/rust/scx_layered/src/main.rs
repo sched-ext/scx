@@ -263,6 +263,8 @@ lazy_static::lazy_static! {
 ///   other logical CPUs sharing the same core will be kept idle. This isn't
 ///   a hard guarantee, so don't depend on it for security purposes.
 ///
+/// - slice_us: Scheduling slice duration in microseconds.
+///
 /// - perf: CPU performance target. 0 means no configuration. A value
 ///   between 1 and 1024 indicates the performance level CPUs running tasks
 ///   in this layer are configured to using scx_bpf_cpuperf_set().
