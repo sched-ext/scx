@@ -509,7 +509,7 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
  * to handle these mistakes in favor of a more efficient response and a reduced
  * scheduling overhead.
  */
-static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
+static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
 	struct bpf_cpumask *primary, *turbo, *l2_domain, *l3_domain;
@@ -719,15 +719,6 @@ retry:
 	}
 
 	/*
-	 * If all the previous attempts have failed, try to use any idle CPU in
-	 * the system.
-	 */
-	cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, idle_cpumask);
-	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-	    scx_bpf_test_and_clear_cpu_idle(cpu))
-		goto out_put_cpumask;
-
-	/*
 	 * We couldn't find any idle CPU, so simply dispatch the task to the
 	 * first CPU that will become available.
 	 */
@@ -753,7 +744,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 {
 	s32 cpu;
 
-	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
+	cpu = pick_idle_cpu(p, prev_cpu);
 	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return cpu;
@@ -794,7 +785,9 @@ static void handle_sync_wakeup(struct task_struct *p)
  */
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
+	struct bpf_cpumask *primary;
 	u64 deadline = task_deadline(p);
+	s32 cpu, prev_cpu = scx_bpf_task_cpu(p);
 
 	/*
 	 * If the system is saturated and we couldn't dispatch directly in
@@ -809,11 +802,20 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * local_kthreads is enabled.
 	 */
 	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
-		s32 cpu = scx_bpf_task_cpu(p);
-		if (!dispatch_direct_cpu(p, cpu, enq_flags)) {
+		if (!dispatch_direct_cpu(p, prev_cpu, enq_flags)) {
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 			return;
 		}
+	}
+
+	/*
+	 * Second chance to find an idle CPU and try to contain the task on the
+	 * local CPU / cache / domain.
+	 */
+	cpu = pick_idle_cpu(p, prev_cpu);
+	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		return;
 	}
 
 	/*
@@ -833,6 +835,20 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dispatch_vtime(p, shared_dsq_id, SCX_SLICE_DFL,
 				       deadline, enq_flags);
 		__sync_fetch_and_add(&nr_shared_dispatches, 1);
+	}
+
+	/*
+	 * If there are idle CPUs in the primary domain that are usable by the
+	 * task, wake them up to see whether they'd be able to steal the just
+	 * queued task.
+	 */
+	primary = primary_cpumask;
+	if (!primary)
+		return;
+	if (bpf_cpumask_subset(cast_mask(primary), p->cpus_ptr)) {
+		cpu = scx_bpf_pick_idle_cpu(cast_mask(primary), 0);
+		if (cpu >= 0)
+			scx_bpf_kick_cpu(cpu, 0);
 	}
 }
 
