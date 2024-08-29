@@ -50,6 +50,11 @@ jobs:
       # Generate kernel headers
       - run: cd linux && make headers
 
+      # veristat
+      - run: wget https://github.com/libbpf/veristat/releases/download/v0.3.2/veristat-v0.3.2-amd64.tar.gz
+      - run: tar -xvf veristat-v0.3.2-amd64.tar.gz && sudo cp veristat /usr/bin/
+      - run: sudo chmod +x /usr/bin/veristat && sudo chmod 755 /usr/bin/veristat
+
       ### END DEPENDENCIES ###
 
       # The actual build:
@@ -70,3 +75,4 @@ jobs:
       - run: meson compile -C build test_sched
       # Stress schedulers
       - run: meson compile -C build stress_tests
+      - run: meson compile -C build veristat
