@@ -94,6 +94,7 @@ lazy_static::lazy_static! {
 			preempt_first: false,
 			exclusive: false,
                         slice_us: 20000,
+                        growth_algo: LayerGrowthAlgo::Sticky,
 			perf: 1024,
 			nodes: vec![],
 			llcs: vec![],
@@ -113,6 +114,7 @@ lazy_static::lazy_static! {
 			preempt_first: false,
 			exclusive: true,
                         slice_us: 20000,
+                        growth_algo: LayerGrowthAlgo::Sticky,
 			perf: 1024,
 			nodes: vec![],
 			llcs: vec![],
@@ -131,6 +133,7 @@ lazy_static::lazy_static! {
 			preempt_first: false,
 			exclusive: false,
                         slice_us: 20000,
+                        growth_algo: LayerGrowthAlgo::Linear,
 			perf: 1024,
 			nodes: vec![],
 			llcs: vec![],
@@ -444,6 +447,17 @@ enum LayerMatch {
     TGIDEquals(u32),
 }
 
+#[derive(Clone, Debug, Parser, Serialize, Deserialize)]
+#[clap(rename_all = "snake_case")]
+enum LayerGrowthAlgo {
+    Sticky,
+    Linear,
+}
+
+impl Default for LayerGrowthAlgo {
+    fn default() -> Self { LayerGrowthAlgo::Sticky }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum LayerKind {
     Confined {
@@ -462,6 +476,8 @@ enum LayerKind {
         preempt_first: bool,
         #[serde(default)]
         exclusive: bool,
+        #[serde(default)]
+        growth_algo: LayerGrowthAlgo,
         #[serde(default)]
         perf: u64,
         #[serde(default)]
@@ -486,6 +502,8 @@ enum LayerKind {
         #[serde(default)]
         exclusive: bool,
         #[serde(default)]
+        growth_algo: LayerGrowthAlgo,
+        #[serde(default)]
         perf: u64,
         #[serde(default)]
         nodes: Vec<usize>,
@@ -505,6 +523,8 @@ enum LayerKind {
         preempt_first: bool,
         #[serde(default)]
         exclusive: bool,
+        #[serde(default)]
+        growth_algo: LayerGrowthAlgo,
         #[serde(default)]
         perf: u64,
         #[serde(default)]
@@ -1069,6 +1089,48 @@ impl CpuPool {
     }
 }
 
+fn layer_core_order(
+    growth_algo: LayerGrowthAlgo,
+    layer_idx: usize,
+    topo: &Topology
+    ) -> Vec<usize> {
+    let mut core_order = vec![];
+    match growth_algo {
+        LayerGrowthAlgo::Sticky => {
+            let is_left = layer_idx % 2 == 0;
+            let rot_by = |layer_idx, len| -> usize {
+                if layer_idx <= len {
+                    layer_idx
+                } else {
+                    layer_idx % len
+                }
+            };
+
+            for i in 0..topo.cores().len() {
+                core_order.push(i);
+            }
+
+            for node in topo.nodes().iter() {
+                for (_, llc) in node.llcs() {
+                    let llc_cores = llc.cores().len();
+                    let rot = rot_by(llc_cores + (layer_idx << 1), llc_cores);
+                    if is_left {
+                        core_order.rotate_left(rot);
+                    } else {
+                        core_order.rotate_right(rot);
+                    }
+                }
+            }
+        }
+        LayerGrowthAlgo::Linear => {
+            for i in 0..topo.cores().len() {
+                core_order.push(i);
+            }
+        }
+    }
+    core_order
+}
+
 #[derive(Debug)]
 struct Layer {
     name: String,
@@ -1091,14 +1153,17 @@ impl Layer {
         let mut cpus = bitvec![0; cpu_pool.nr_cpus];
         cpus.fill(false);
         let mut allowed_cpus = bitvec![0; cpu_pool.nr_cpus];
+        let mut layer_growth_algo = LayerGrowthAlgo::Sticky;
         match &kind {
             LayerKind::Confined {
                 cpus_range,
                 util_range,
                 nodes,
                 llcs,
+                growth_algo,
                 ..
             } => {
+                layer_growth_algo = growth_algo.clone();
                 let cpus_range = cpus_range.unwrap_or((0, std::usize::MAX));
                 if cpus_range.0 > cpus_range.1 || cpus_range.1 == 0 {
                     bail!("invalid cpus_range {:?}", cpus_range);
@@ -1134,7 +1199,9 @@ impl Layer {
                     bail!("invalid util_range {:?}", util_range);
                 }
             }
-            LayerKind::Grouped { nodes, llcs, .. } | LayerKind::Open { nodes, llcs, .. } => {
+            LayerKind::Grouped { growth_algo, nodes, llcs, .. } |
+                LayerKind::Open { growth_algo, nodes, llcs, .. } => {
+                layer_growth_algo = growth_algo.clone();
                 if nodes.len() == 0 && llcs.len() == 0 {
                     allowed_cpus.fill(true);
                 } else {
@@ -1159,31 +1226,7 @@ impl Layer {
             }
         }
 
-        let is_left = idx % 2 == 0;
-        let rot_by = |idx, len| -> usize {
-            if idx <= len {
-                idx
-            } else {
-                idx % len
-            }
-        };
-
-        let mut core_order = vec![];
-        for i in 0..topo.cores().len() {
-            core_order.push(i);
-        }
-
-        for node in topo.nodes().iter() {
-            for (_, llc) in node.llcs() {
-                let llc_cores = llc.cores().len();
-                let rot = rot_by(llc_cores + (idx << 1), llc_cores);
-                if is_left {
-                    core_order.rotate_left(rot);
-                } else {
-                    core_order.rotate_right(rot);
-                }
-            }
-        }
+        let core_order = layer_core_order(layer_growth_algo, idx, topo);
 
         Ok(Self {
             name: name.into(),
