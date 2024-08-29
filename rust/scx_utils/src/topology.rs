@@ -265,6 +265,17 @@ impl Node {
         cpus
     }
 
+    /// Get the map of all Cores for this NUMA node.
+    pub fn cores(&self) -> BTreeMap<usize, Core> {
+        let mut cores = BTreeMap::new();
+        for (_, llc) in &self.llcs {
+            for (core_id, core) in llc.cores() {
+                cores.insert(*core_id, core.clone());
+            }
+        }
+        cores
+    }
+
     // Get the map of all GPUs for this NUMA node.
     pub fn gpus(&self) -> &BTreeMap<GpuIndex, Gpu> {
         &self.gpus
