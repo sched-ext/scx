@@ -6,7 +6,9 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::thread::ThreadId;
 use std::time::Duration;
 
@@ -202,9 +204,13 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
         )
 }
 
-pub fn monitor_sched_samples(nr_samples: u64) -> Result<()> {
-    println!(
-        "    stat: ('L'atency-critical, 'R'egular) (performance-'H'ungry, performance-'I'nsensitive) ('B'ig, li'T'tle) ('E'ligigle, 'G'reedy) ('P'reempting, 'N'ot)");
+pub fn monitor_sched_samples(nr_samples: u64, shutdown: Arc<AtomicBool>) -> Result<()> {
+    println!("## stats");
+    println!("  LR: 'L'atency-critical or 'R'egular");
+    println!("  HI: performance-'H'ungry or performance-'I'nsensitive");
+    println!("  BT: 'B'ig or li'T'tle");
+    println!("  EG: 'E'ligigle or 'G'reedy");
+    println!("  PN: 'P'reempting or 'N'ot");
 
     scx_utils::monitor_stats::<SchedSamples>(
         &vec![
@@ -212,7 +218,7 @@ pub fn monitor_sched_samples(nr_samples: u64) -> Result<()> {
             ("nr_samples".into(), nr_samples.to_string()),
         ],
         Duration::from_secs(0),
-        || !crate::RUNNING.load(Ordering::Relaxed),
+        || shutdown.load(Ordering::Relaxed),
         |ts| {
             let mut stdout = std::io::stdout();
             for sample in ts.samples.iter() {

@@ -23,6 +23,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Read;
+use std::ffi::c_int;
 use std::ffi::CStr;
 use std::fmt;
 use std::mem;
@@ -46,6 +47,7 @@ use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 use log::debug;
 use log::info;
 use log::warn;
@@ -63,8 +65,6 @@ use itertools::iproduct;
 use plain::Plain;
 use rlimit::{getrlimit, setrlimit, Resource};
 
-static RUNNING: AtomicBool = AtomicBool::new(true);
-
 /// scx_lavd: Latency-criticality Aware Virtual Deadline (LAVD) scheduler
 ///
 /// The rust part is minimal. It processes command line options and logs out
@@ -72,6 +72,10 @@ static RUNNING: AtomicBool = AtomicBool::new(true);
 /// See the more detailed overview of the LAVD design at main.bpf.c.
 #[derive(Debug, Parser)]
 struct Opts {
+    /// Automatically decide the power mode based on the current energy profile.
+    #[clap(long = "auto", action = clap::ArgAction::SetTrue)]
+    auto: bool,
+
     /// Run in performance mode to get maximum performance.
     #[clap(long = "performance", action = clap::ArgAction::SetTrue)]
     performance: bool,
@@ -199,15 +203,19 @@ struct ComputeDomainValue {
 
 #[derive(Debug)]
 struct FlatTopology {
-    cpu_fids: Vec<CpuFlatId>,
+    cpu_fids_performance: Vec<CpuFlatId>,
+    cpu_fids_powersave: Vec<CpuFlatId>,
     cpdom_map: BTreeMap<ComputeDomainKey, ComputeDomainValue>,
     nr_cpus_online: usize,
 }
 
 impl fmt::Display for FlatTopology {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for cpu_fid in self.cpu_fids.iter() {
-            write!(f, "\nCPU: {:?}", cpu_fid).ok();
+        for cpu_fid in self.cpu_fids_performance.iter() {
+            write!(f, "\nCPU in performance: {:?}", cpu_fid).ok();
+        }
+        for cpu_fid in self.cpu_fids_powersave.iter() {
+            write!(f, "\nCPU in powersave: {:?}", cpu_fid).ok();
         }
         for (k, v) in self.cpdom_map.iter() {
             write!(f, "\nCPDOM: {:?} {:?}", k, v).ok();
@@ -218,13 +226,19 @@ impl fmt::Display for FlatTopology {
 
 impl FlatTopology {
     /// Build a flat-structured topology
-    pub fn new(opts: &Opts) -> Result<FlatTopology> {
-        let (cpu_fids, avg_freq, nr_cpus_online) =
-            Self::build_cpu_fids(opts.prefer_smt_core, opts.prefer_little_core).unwrap();
-        let cpdom_map = Self::build_cpdom(&cpu_fids, avg_freq).unwrap();
+    pub fn new() -> Result<FlatTopology> {
+        let (cpu_fids_performance, avg_freq, nr_cpus_online) =
+            Self::build_cpu_fids(false, false).unwrap();
+        let (cpu_fids_powersave, _, _) =
+            Self::build_cpu_fids(true, true).unwrap();
+
+        // Note that building compute domain is not dependent to CPU orer
+        // so it is okay to use any cpu_fids_*.
+        let cpdom_map = Self::build_cpdom(&cpu_fids_performance, avg_freq).unwrap();
 
         Ok(FlatTopology {
-            cpu_fids,
+            cpu_fids_performance,
+            cpu_fids_powersave,
             cpdom_map,
             nr_cpus_online,
         })
@@ -282,8 +296,8 @@ impl FlatTopology {
                 cpu_fid.cpu_cap = ((cpu_fid.max_freq * 1024) / base_freq) as usize;
             }
         } else {
-            // Unfortunately, the frequency information in sysfs seems not always correct in some
-            // distributions.
+            // Unfortunately, the frequency information in sysfs seems not
+            // always correct in some distributions.
             for cpu_fid in cpu_fids.iter_mut() {
                 cpu_fid.cpu_cap = 1024 as usize;
             }
@@ -446,7 +460,7 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, open_object, lavd_ops)?;
 
         // Initialize CPU topology
-        let topo = FlatTopology::new(&opts).unwrap();
+        let topo = FlatTopology::new().unwrap();
         Self::init_cpus(&mut skel, &topo);
 
         // Initialize skel according to @opts.
@@ -483,9 +497,12 @@ impl<'a> Scheduler<'a> {
     fn init_cpus(skel: &mut OpenBpfSkel, topo: &FlatTopology) {
         // Initialize CPU order topologically sorted
         // by a cpu, node, llc, max_freq, and core order
-        for (pos, cpu) in topo.cpu_fids.iter().enumerate() {
-            skel.maps.rodata_data.cpu_order[pos] = cpu.cpu_id as u16;
+        for (pos, cpu) in topo.cpu_fids_performance.iter().enumerate() {
+            skel.maps.rodata_data.cpu_order_performance[pos] = cpu.cpu_id as u16;
             skel.maps.rodata_data.__cpu_capacity_hint[cpu.cpu_id] = cpu.cpu_cap as u16;
+        }
+        for (pos, cpu) in topo.cpu_fids_powersave.iter().enumerate() {
+            skel.maps.rodata_data.cpu_order_powersave[pos] = cpu.cpu_id as u16;
         }
         debug!("{:#?}", topo);
 
@@ -520,11 +537,16 @@ impl<'a> Scheduler<'a> {
         }
     }
 
+    fn is_powersave_mode(opts: &Opts) -> bool {
+            opts.prefer_smt_core  && opts.prefer_little_core
+    }
+
     fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, nr_cpus_onln: u64) {
         skel.maps.bss_data.nr_cpus_onln = nr_cpus_onln;
-        skel.maps.rodata_data.no_core_compaction = opts.no_core_compaction;
-        skel.maps.rodata_data.no_freq_scaling = opts.no_freq_scaling;
-        skel.maps.rodata_data.no_prefer_turbo_core = opts.no_prefer_turbo_core;
+        skel.maps.bss_data.no_core_compaction = opts.no_core_compaction;
+        skel.maps.bss_data.no_freq_scaling = opts.no_freq_scaling;
+        skel.maps.bss_data.no_prefer_turbo_core = opts.no_prefer_turbo_core;
+        skel.maps.bss_data.is_powersave_mode = Self::is_powersave_mode(&opts);
         skel.maps.rodata_data.is_smt_active = match FlatTopology::is_smt_active() {
             Ok(ret) => (ret == 1) as u32,
             Err(_)  => 0,
@@ -598,10 +620,6 @@ impl<'a> Scheduler<'a> {
         self.skel.maps.bss_data.intrspc.cmd = LAVD_CMD_NOP;
     }
 
-    fn running(&mut self) -> bool {
-        RUNNING.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei)
-    }
-
     fn stats_req_to_res(&mut self, req: &StatsReq) -> Result<StatsRes> {
         Ok(match req {
             StatsReq::NewSampler(tid) => {
@@ -640,10 +658,68 @@ impl<'a> Scheduler<'a> {
         uei_exited!(&self.skel, uei)
     }
 
-    fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+    fn set_power_profile(&mut self, mode: i32) -> Result<(), u32> {
+        let prog = &mut self.skel.progs.set_power_profile;
+        let mut args = power_arg {
+            power_mode: mode as c_int,
+        };
+        let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
+            ..Default::default()
+        };
+        let out = prog.test_run(input).unwrap();
+        if out.return_value != 0 {
+            return Err(out.return_value);
+        }
+
+        Ok(())
+    }
+
+    fn read_energy_profile() -> String {
+        let res =
+            File::open("/sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference")
+                .and_then(|mut file| {
+                    let mut contents = String::new();
+                    file.read_to_string(&mut contents)?;
+                    Ok(contents.trim().to_string())
+                });
+
+        res.unwrap_or_else(|_| "none".to_string())
+    }
+
+    fn update_power_profile(&mut self) -> bool {
+        const LAVD_PM_PERFORMANCE: s32 = 0;
+        const LAVD_PM_BALANCED: s32 = 1;
+        const LAVD_PM_POWERSAVE: s32 = 2;
+
+        let profile = Self::read_energy_profile();
+        if profile == "performance" {
+            let _ = self.set_power_profile(LAVD_PM_PERFORMANCE);
+        } else if profile == "balance_performance" {
+            let _ = self.set_power_profile(LAVD_PM_BALANCED);
+        } else if profile == "power" {
+            let _ = self.set_power_profile(LAVD_PM_POWERSAVE);
+        } else {
+            return false;
+        }
+
+        true
+    }
+
+    fn run(&mut self, auto: bool, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
+        let mut auto = auto;
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
+            if auto {
+                auto = self.update_power_profile();
+            }
+
             match req_ch.recv_timeout(Duration::from_secs(1)) {
                 Ok(req) => {
                     let res = self.stats_req_to_res(&req)?;
@@ -689,10 +765,6 @@ fn init_log(opts: &Opts) {
     .unwrap();
 }
 
-extern "C" fn handle_sigint(_: libc::c_int, _: *mut libc::siginfo_t, _: *mut libc::c_void) {
-    RUNNING.store(false, Ordering::SeqCst);
-}
-
 fn main() -> Result<()> {
     let mut opts = Opts::parse();
     opts.proc().unwrap();
@@ -713,7 +785,8 @@ fn main() -> Result<()> {
     .context("Error setting Ctrl-C handler")?;
 
     if let Some(nr_samples) = opts.monitor_sched_samples {
-        let jh = std::thread::spawn(move || stats::monitor_sched_samples(nr_samples).unwrap());
+        let shutdown_copy = shutdown.clone();
+        let jh = std::thread::spawn(move || stats::monitor_sched_samples(nr_samples, shutdown_copy).unwrap());
         let _ = jh.join();
         return Ok(());
     }
@@ -726,7 +799,7 @@ fn main() -> Result<()> {
             *build_id::SCX_FULL_VERSION
         );
         info!("scx_lavd scheduler starts running.");
-        if !sched.run(shutdown.clone())?.should_restart() {
+        if !sched.run(opts.auto, shutdown.clone())?.should_restart() {
             break;
         }
     }
