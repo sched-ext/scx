@@ -72,9 +72,9 @@ use rlimit::{getrlimit, setrlimit, Resource};
 /// See the more detailed overview of the LAVD design at main.bpf.c.
 #[derive(Debug, Parser)]
 struct Opts {
-    /// Automatically decide the power mode based on the current energy profile.
-    #[clap(long = "auto", action = clap::ArgAction::SetTrue)]
-    auto: bool,
+    /// Automatically decide the scheduler's power mode based on the system's energy profile.
+    #[clap(long = "autopower", action = clap::ArgAction::SetTrue)]
+    autopower: bool,
 
     /// Run in performance mode to get maximum performance.
     #[clap(long = "performance", action = clap::ArgAction::SetTrue)]
@@ -721,14 +721,14 @@ impl<'a> Scheduler<'a> {
         (true, profile)
     }
 
-    fn run(&mut self, auto: bool, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+    fn run(&mut self, autopower: bool, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
-        let mut auto = auto;
+        let mut autopower = autopower;
         let mut profile = "unknown".to_string();
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            if auto {
-                (auto, profile) = self.update_power_profile(profile);
+            if autopower {
+                (autopower, profile) = self.update_power_profile(profile);
             }
 
             match req_ch.recv_timeout(Duration::from_secs(1)) {
@@ -810,7 +810,7 @@ fn main() -> Result<()> {
             *build_id::SCX_FULL_VERSION
         );
         info!("scx_lavd scheduler starts running.");
-        if !sched.run(opts.auto, shutdown.clone())?.should_restart() {
+        if !sched.run(opts.autopower, shutdown.clone())?.should_restart() {
             break;
         }
     }
