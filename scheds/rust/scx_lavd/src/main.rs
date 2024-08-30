@@ -72,6 +72,11 @@ use rlimit::{getrlimit, setrlimit, Resource};
 /// See the more detailed overview of the LAVD design at main.bpf.c.
 #[derive(Debug, Parser)]
 struct Opts {
+    /// Automatically decide the scheduler's power mode based on system load.
+    /// This is a recommended mode if you don't understand the following options:
+    #[clap(long = "autopilot", action = clap::ArgAction::SetTrue)]
+    autopilot: bool,
+
     /// Automatically decide the scheduler's power mode based on the system's energy profile.
     #[clap(long = "autopower", action = clap::ArgAction::SetTrue)]
     autopower: bool,
@@ -551,6 +556,7 @@ impl<'a> Scheduler<'a> {
             Ok(ret) => (ret == 1) as u32,
             Err(_)  => 0,
         };
+        skel.maps.rodata_data.is_autopilot_on = opts.autopilot;
         skel.maps.rodata_data.verbose = opts.verbose;
     }
 

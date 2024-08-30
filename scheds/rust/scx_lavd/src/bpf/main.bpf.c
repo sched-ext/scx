@@ -229,10 +229,11 @@ static u64		cur_svc_time;
 /*
  * Options
  */
-volatile bool	no_core_compaction;
-volatile bool	no_freq_scaling;
-volatile bool	no_prefer_turbo_core;
-volatile bool	is_powersave_mode;
+volatile bool		no_core_compaction;
+volatile bool		no_freq_scaling;
+volatile bool		no_prefer_turbo_core;
+volatile bool		is_powersave_mode;
+const volatile bool	is_autopilot_on;
 const volatile u32 	is_smt_active;
 const volatile u8	verbose;
 
@@ -315,7 +316,7 @@ struct {
 } introspec_msg SEC(".maps");
 
 static u16 get_nice_prio(struct task_struct *p);
-static void adjust_slice_boost(struct cpu_ctx *cpuc, struct task_ctx *taskc);
+static int reinit_active_cpumask_for_performance(void);
 
 static u64 sigmoid_u64(u64 v, u64 max)
 {
@@ -901,9 +902,90 @@ unlock_out:
 	bpf_rcu_read_unlock();
 }
 
+int do_set_power_profile(s32 power_mode, int util)
+{
+	static s32 cur_mode = LAVD_PM_MAX;
+
+	/*
+	 * Skip setting the mode if alreay in the same mode.
+	 */
+	if (cur_mode == power_mode)
+		return 0;
+	cur_mode = power_mode;
+
+	/*
+	 * Change the power mode.
+	 */
+	switch (power_mode) {
+	case LAVD_PM_PERFORMANCE:
+		no_core_compaction = true;
+		no_freq_scaling = true;
+		no_prefer_turbo_core = false;
+		is_powersave_mode = false;
+
+		/*
+		 * Since the core compaction becomes off, we need to
+		 * reinitialize the active and overflow cpumask for performance
+		 * mode.
+		 */
+		reinit_active_cpumask_for_performance();
+		debugln("Set the scheduler's power profile to performance mode: %d", util);
+		break;
+	case LAVD_PM_BALANCED:
+		no_core_compaction = false;
+		no_freq_scaling = false;
+		no_prefer_turbo_core = false;
+		is_powersave_mode = false;
+		debugln("Set the scheduler's power profile to balanced mode: %d", util);
+		break;
+	case LAVD_PM_POWERSAVE:
+		no_core_compaction = false;
+		no_freq_scaling = false;
+		no_prefer_turbo_core = true;
+		is_powersave_mode = true;
+		debugln("Set the scheduler's power profile to power-save mode: %d", util);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int do_autopilot(void)
+{
+	struct sys_stat *stat_cur = get_sys_stat_cur();
+
+	/*
+	 * If the CPU utiulization is very low (say <= 5%), it means high
+	 * performance is not required. We run the scheduler in powersave mode
+	 * to save energy consumption.
+	 */
+	if (stat_cur->util <= LAVD_AP_LOW_UTIL)
+		return do_set_power_profile(LAVD_PM_POWERSAVE, stat_cur->util);
+
+	/*
+	 * If the CPU utiulization is moderate (say > 5%, <= 30%), we run the
+	 * scheduler in balanced mode. Actually, balanced mode can save energy
+	 * consumption only under moderate CPU load.
+	 */
+	if (stat_cur->util <= LAVD_AP_HIGH_UTIL)
+		return do_set_power_profile(LAVD_PM_BALANCED, stat_cur->util);
+
+	/*
+	 * If the CPU utilization is high enough (say > 30%), we run the
+	 * scheduler in performance mode. The system indeed needs perrformance
+	 * also there is little energy benefit even under balanced mode anyway.
+	 */
+	return do_set_power_profile(LAVD_PM_PERFORMANCE, stat_cur->util);
+}
+
 static void update_sys_stat(void)
 {
 	do_update_sys_stat();
+
+	if (is_autopilot_on)
+		do_autopilot();
 
 	if (!no_core_compaction)
 		do_core_compaction();
@@ -3139,37 +3221,7 @@ void BPF_STRUCT_OPS(lavd_exit, struct scx_exit_info *ei)
 SEC("syscall")
 int set_power_profile(struct power_arg *input)
 {
-	switch (input->power_mode) {
-	case LAVD_PM_PERFORMANCE:
-		no_core_compaction = true;
-		no_freq_scaling = true;
-		no_prefer_turbo_core = false;
-		is_powersave_mode = false;
-
-		/*
-		 * Since the core compaction becomes off, we need to
-		 * reinitialize the active and overflow cpumask for performance
-		 * mode.
-		 */
-		reinit_active_cpumask_for_performance();
-		break;
-	case LAVD_PM_BALANCED:
-		no_core_compaction = false;
-		no_freq_scaling = false;
-		no_prefer_turbo_core = false;
-		is_powersave_mode = false;
-		break;
-	case LAVD_PM_POWERSAVE:
-		no_core_compaction = false;
-		no_freq_scaling = false;
-		no_prefer_turbo_core = true;
-		is_powersave_mode = true;
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	return 0;
+	return do_set_power_profile(input->power_mode, 0);
 }
 
 SCX_OPS_DEFINE(lavd_ops,
