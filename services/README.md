@@ -62,26 +62,18 @@ systemctl unset-environment SCX_FLAGS_OVERRIDE
 systemctl restart scx
 ```
 
-## Checking Journald Logs
+## Checking journald Logs
 
-The SCX schedulers do not log to the default journald namespace. Instead, they save logs in a dedicated ```sched-ext``` namespace.
-This is where you should look for information about possible errors.
 
 - To view the logs, use the following command:
 
 ```
-journalctl --namespace=sched-ext
+journalctl -u scx.service
 ```
 
-- To find logs from another system startup and identify when a potential error might have occurred, use:
+- To view the logs of the current session use the command
 
 ```
-journalctl --namespace=sched-ext --list-boots
-```
-
-- To verify the amount of space taken up by the logs, use:
-
-```
-journalctl --namespace=sched-ext --disk-usage
+journalctl -u scx.service -b 0
 ```
 
