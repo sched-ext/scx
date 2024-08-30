@@ -9,19 +9,21 @@ pub mod bpf_intf;
 mod bpf;
 use bpf::*;
 
-use scx_utils::UserExitInfo;
+mod stats;
+use scx_stats::prelude::*;
+use stats::Metrics;
 
-use std::thread;
+use scx_utils::UserExitInfo;
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
+use std::time::Duration;
 use std::time::SystemTime;
 
 use std::fs::File;
 use std::io::{self, Read};
 
-use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use libbpf_rs::OpenObject;
@@ -93,6 +95,19 @@ struct Opts {
     /// reported in debugfs (e.g., /sys/kernel/debug/tracing/trace_pipe).
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
+
+    /// Enable stats monitoring with the specified interval.
+    #[clap(long)]
+    stats: Option<f64>,
+
+    /// Run in stats monitoring mode with the specified interval. Scheduler
+    /// is not launched.
+    #[clap(long)]
+    monitor: Option<f64>,
+
+    /// Show descriptions for statistics.
+    #[clap(long)]
+    help_stats: bool,
 
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
@@ -240,26 +255,30 @@ impl TaskTree {
 
 // Main scheduler object
 struct Scheduler<'a> {
-    bpf: BpfScheduler<'a>,         // BPF connector
-    task_pool: TaskTree,           // tasks ordered by vruntime
-    task_map: TaskInfoMap,         // map pids to the corresponding task information
-    proc_stats: HashMap<i32, u64>, // Task statistics from procfs
-    interactive_pids: Vec<i32>,    // List of interactive tasks
-    min_vruntime: u64,             // Keep track of the minimum vruntime across all tasks
-    init_page_faults: u64,         // Initial page faults counter
-    slice_ns: u64,                 // Default time slice (in ns)
-    slice_ns_min: u64,             // Minimum time slice (in ns)
+    bpf: BpfScheduler<'a>,                  // BPF connector
+    stats_server: StatsServer<(), Metrics>, // statistics
+    task_pool: TaskTree,                    // tasks ordered by vruntime
+    task_map: TaskInfoMap,                  // map pids to the corresponding task information
+    proc_stats: HashMap<i32, u64>,          // Task statistics from procfs
+    interactive_pids: Vec<i32>,             // List of interactive tasks
+    min_vruntime: u64,                      // Keep track of the minimum vruntime across all tasks
+    init_page_faults: u64,                  // Initial page faults counter
+    slice_ns: u64,                          // Default time slice (in ns)
+    slice_ns_min: u64,                      // Minimum time slice (in ns)
 }
 
 impl<'a> Scheduler<'a> {
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         // Low-level BPF connector.
         let bpf = BpfScheduler::init(open_object, opts.exit_dump_len, opts.partial, opts.verbose)?;
+        let stats_server = StatsServer::new(stats::server_data()).launch()?;
+
         info!("{} scheduler attached", SCHEDULER_NAME);
 
         // Return scheduler object.
         Ok(Self {
             bpf,
+            stats_server,
             task_pool: TaskTree::new(),
             task_map: TaskInfoMap::new(),
             proc_stats: HashMap::new(),
@@ -269,6 +288,31 @@ impl<'a> Scheduler<'a> {
             slice_ns: opts.slice_us * NSEC_PER_USEC,
             slice_ns_min: opts.slice_us_min * NSEC_PER_USEC,
         })
+    }
+
+    fn get_metrics(&mut self) -> Metrics {
+        let page_faults = match Self::get_page_faults() {
+            Ok(page_faults) => page_faults,
+            Err(_) => 0,
+        };
+        if self.init_page_faults == 0 {
+            self.init_page_faults = page_faults;
+        }
+        let nr_page_faults = page_faults - self.init_page_faults;
+
+        Metrics {
+            nr_running: *self.bpf.nr_running_mut(),
+            nr_cpus: *self.bpf.nr_online_cpus_mut(),
+            nr_queued: *self.bpf.nr_queued_mut(),
+            nr_scheduled: *self.bpf.nr_scheduled_mut(),
+            nr_page_faults,
+            nr_user_dispatches: *self.bpf.nr_user_dispatches_mut(),
+            nr_kernel_dispatches: *self.bpf.nr_kernel_dispatches_mut(),
+            nr_cancel_dispatches: *self.bpf.nr_cancel_dispatches_mut(),
+            nr_bounce_dispatches: *self.bpf.nr_bounce_dispatches_mut(),
+            nr_failed_dispatches: *self.bpf.nr_failed_dispatches_mut(),
+            nr_sched_congested: *self.bpf.nr_sched_congested_mut(),
+        }
     }
 
     // Return current timestamp in ns.
@@ -442,80 +486,6 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    // Print critical user-space scheduler statistics.
-    fn print_faults(&mut self) {
-        // Get counters of scheduling failures.
-        let nr_failed_dispatches = *self.bpf.nr_failed_dispatches_mut();
-        let nr_sched_congested = *self.bpf.nr_sched_congested_mut();
-
-        // Get the total amount of page faults of the user-space scheduler.
-        //
-        // NOTE:this value must remain set to 0, if the user-space scheduler is faulting we may
-        // experience deadlock conditions in the scheduler.
-        let page_faults = match Self::get_page_faults() {
-            Ok(page_faults) => page_faults,
-            Err(_) => 0,
-        };
-        if self.init_page_faults == 0 {
-            self.init_page_faults = page_faults;
-        }
-        let nr_page_faults = page_faults - self.init_page_faults;
-
-        // Report overall scheduler status at the end.
-        let status = if nr_page_faults + nr_failed_dispatches + nr_sched_congested > 0 {
-            "WARNING"
-        } else {
-            "OK"
-        };
-        info!(
-            "  nr_failed_dispatches={} nr_sched_congested={} nr_page_faults={} [{}]",
-            nr_failed_dispatches, nr_sched_congested, nr_page_faults, status
-        );
-    }
-
-    // Print internal scheduler statistics (fetched from the BPF part).
-    fn print_stats(&mut self) {
-        // Show online CPUs, minimum vruntime and time slice.
-        info!(
-            "cpus={} min_vruntime={} slice={}us",
-            *self.bpf.nr_online_cpus_mut(),
-            self.min_vruntime,
-            self.slice_ns / NSEC_PER_USEC,
-        );
-
-        // Show the total amount of tasks currently monitored by the scheduler.
-        info!("  tasks={}", self.task_map.tasks.len());
-
-        // Show general statistics.
-        let nr_user_dispatches = *self.bpf.nr_user_dispatches_mut();
-        let nr_kernel_dispatches = *self.bpf.nr_kernel_dispatches_mut();
-        info!(
-            "  nr_user_dispatches={} nr_kernel_dispatches={}",
-            nr_user_dispatches, nr_kernel_dispatches,
-        );
-        let nr_cancel_dispatches = *self.bpf.nr_cancel_dispatches_mut();
-        let nr_bounce_dispatches = *self.bpf.nr_bounce_dispatches_mut();
-        info!(
-            "  nr_cancel_dispatches={} nr_bounce_dispatches={}",
-            nr_cancel_dispatches, nr_bounce_dispatches,
-        );
-
-        // Show tasks that are running or waiting to be dispatched.
-        let nr_running = *self.bpf.nr_running_mut();
-        let nr_queued = *self.bpf.nr_queued_mut();
-        let nr_scheduled = *self.bpf.nr_scheduled_mut();
-        let nr_waiting = nr_queued + nr_scheduled;
-        info!(
-            "  nr_running={} nr_waiting={} [nr_queued={} + nr_scheduled={}]",
-            nr_running, nr_waiting, nr_queued, nr_scheduled
-        );
-
-        // Show total page faults of the user-space scheduler.
-        self.print_faults();
-
-        log::logger().flush();
-    }
-
     fn sync_interactive_tasks(&mut self, stats: &[TaskStat]) {
         self.interactive_pids.clear();
 
@@ -524,10 +494,9 @@ impl<'a> Scheduler<'a> {
 
             // At least 10 context switches per sec are required to consider the
             // task as interactive.
-            if stat.nvcsw < 10 {
-                break;
+            if stat.nvcsw >= 10 {
+                self.interactive_pids.push(stat.pid);
             }
-            self.interactive_pids.push(stat.pid);
         }
     }
 
@@ -556,10 +525,6 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        // Sort by delta of nvcsw in descending order to ensure we always classify the tasks with
-        // greater nvcsw as interactive.
-        new_stats.sort_by(|a, b| b.nvcsw.cmp(&a.nvcsw));
-
         Ok(new_stats)
     }
 
@@ -577,22 +542,26 @@ impl<'a> Scheduler<'a> {
     }
 
     fn run(&mut self) -> Result<UserExitInfo> {
+        let (res_ch, req_ch) = self.stats_server.channels();
         let mut prev_ts = Self::now();
 
         while !self.bpf.exited() {
             // Call the main scheduler body.
             self.schedule();
 
+            // Handle monitor requests asynchronously.
+            match req_ch.try_recv() {
+                Ok(()) => res_ch.send(self.get_metrics())?,
+                Err(_) => {}
+            }
+
+            // Refresh tasks statistics.
             let now = Self::now();
             if now - prev_ts > NSEC_PER_SEC {
-                self.print_stats();
                 self.refresh_interactive_tasks().unwrap();
-
                 prev_ts = now;
             }
         }
-        // Dump scheduler statistics before exiting
-        self.print_stats();
 
         self.bpf.shutdown_and_report()
     }
@@ -618,6 +587,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    if opts.help_stats {
+        stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
+        return Ok(());
+    }
+
     let loglevel = simplelog::LevelFilter::Info;
 
     let mut lcfg = simplelog::ConfigBuilder::new();
@@ -631,6 +605,14 @@ fn main() -> Result<()> {
         simplelog::TerminalMode::Stderr,
         simplelog::ColorChoice::Auto,
     )?;
+
+    if let Some(intv) = opts.monitor.or(opts.stats) {
+        let jh = std::thread::spawn(move || stats::monitor(Duration::from_secs_f64(intv)).unwrap());
+        if opts.monitor.is_some() {
+            let _ = jh.join();
+            return Ok(());
+        }
+    }
 
     let mut open_object = MaybeUninit::uninit();
     loop {
