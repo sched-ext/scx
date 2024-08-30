@@ -250,23 +250,6 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 }
 
 /*
- * Return a local task context from a generic task, failing if it doesn't
- * exist.
- */
-struct task_ctx *lookup_task_ctx(const struct task_struct *p)
-{
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx) {
-		scx_bpf_error("Failed to lookup task ctx for %d (%s)",
-			      p->pid, p->comm);
-		return NULL;
-	}
-	return tctx;
-}
-
-/*
  * Return true if interactive tasks classification via voluntary context
  * switches is enabled, false otherwise.
  */
@@ -469,8 +452,11 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 	 * Make sure we can dispatch the task to the target CPU according to
 	 * its cpumask.
 	 */
-	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+		scx_bpf_error("%d %s can't be dispatched to CPU %d",
+			      p->pid, p->comm, cpu);
 		return -EINVAL;
+	}
 
 	scx_bpf_dispatch_vtime(p, dsq_id, SCX_SLICE_DFL, deadline, enq_flags);
 
@@ -521,23 +507,10 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
-		return prev_cpu;
+		return -ENOENT;
 	cctx = try_lookup_cpu_ctx(prev_cpu);
 	if (!cctx)
-		return prev_cpu;
-
-	/*
-	 * For tasks that can run only on a single CPU, we can simply verify if
-	 * their only allowed CPU is idle.
-	 */
-	if (p->nr_cpus_allowed == 1) {
-		cpu = bpf_cpumask_first(p->cpus_ptr);
-
-		if (scx_bpf_test_and_clear_cpu_idle(cpu))
-			return cpu;
-
 		return -ENOENT;
-	}
 
 	primary = primary_cpumask;
 	if (!primary)
@@ -553,6 +526,24 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 	online_cpumask = scx_bpf_get_online_cpumask();
 	idle_smtmask = scx_bpf_get_idle_smtmask();
 	idle_cpumask = scx_bpf_get_idle_cpumask();
+
+	/*
+	 * For tasks that can run only on a single CPU, we can simply verify if
+	 * their only allowed CPU is still usable, online and idle.
+	 *
+	 * Moreover, if local_kthreads is enabled, always dispatch per-CPU
+	 * kthreads directly to their target CPU, independently on its idle
+	 * state.
+	 */
+	if (p->nr_cpus_allowed == 1) {
+		if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
+		    bpf_cpumask_test_cpu(prev_cpu, online_cpumask) &&
+		    (local_kthreads || scx_bpf_test_and_clear_cpu_idle(prev_cpu)))
+			cpu = prev_cpu;
+		else
+			cpu = -ENOENT;
+		goto out_put_cpumask;
+	}
 
 	/*
 	 * Scheduling domains of the previously used CPU.
@@ -798,19 +789,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		handle_sync_wakeup(p);
 
 	/*
-	 * Always dispatch per-CPU kthreads directly on their target CPU if
-	 * local_kthreads is enabled.
-	 */
-	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
-		if (!dispatch_direct_cpu(p, prev_cpu, enq_flags)) {
-			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-			return;
-		}
-	}
-
-	/*
-	 * Second chance to find an idle CPU and try to contain the task on the
-	 * local CPU / cache / domain.
+	 * If we couldn't find an idle CPU in ops.select_cpu(), give the task
+	 * another chance here to keep using the same CPU / cache / domain.
 	 */
 	cpu = pick_idle_cpu(p, prev_cpu);
 	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
@@ -1053,7 +1033,7 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 
 	__sync_fetch_and_sub(&nr_running, 1);
 
-	tctx = lookup_task_ctx(p);
+	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
 
@@ -1130,7 +1110,7 @@ void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 	p->scx.dsq_vtime = vtime_now;
 
 	/* Initialize voluntary context switch timestamp */
-	tctx = lookup_task_ctx(p);
+	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
 	tctx->nvcsw = p->nvcsw;
