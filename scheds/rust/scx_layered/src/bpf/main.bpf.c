@@ -570,7 +570,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cctx);
 		u64 layer_slice_ns = layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, layer_slice_ns, 0);
 		return cpu;
 	} else {
 		return prev_cpu;
