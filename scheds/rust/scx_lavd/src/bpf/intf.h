@@ -89,6 +89,10 @@ enum consts {
 	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL /
 					   LAVD_SYS_STAT_INTERVAL_NS),
 
+	LAVD_AP_LOW_UTIL		= 50, /* powersave mode when cpu util <= 5% */
+	LAVD_AP_HIGH_UTIL		= 300, /* balanced mode when 5% < cpu util <= 30%,
+						  performance mode when cpu util > 30% */
+
 	LAVD_CPDOM_MAX_NR		= 32, /* maximum number of compute domain */
 	LAVD_CPDOM_MAX_DIST		= 4,  /* maximum distance from one compute domain to another */
 	LAVD_CPDOM_STARV_NS		= (5ULL * NSEC_PER_MSEC),
@@ -299,6 +303,8 @@ enum {
 	LAVD_PM_PERFORMANCE	= 0,
 	LAVD_PM_BALANCED	= 1,
 	LAVD_PM_POWERSAVE	= 2,
+
+	LAVD_PM_MAX		= 3
 };
 
 struct power_arg {

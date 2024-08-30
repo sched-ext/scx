@@ -229,10 +229,11 @@ static u64		cur_svc_time;
 /*
  * Options
  */
-volatile bool	no_core_compaction;
-volatile bool	no_freq_scaling;
-volatile bool	no_prefer_turbo_core;
-volatile bool	is_powersave_mode;
+volatile bool		no_core_compaction;
+volatile bool		no_freq_scaling;
+volatile bool		no_prefer_turbo_core;
+volatile bool		is_powersave_mode;
+const volatile bool	is_autopilot_on;
 const volatile u32 	is_smt_active;
 const volatile u8	verbose;
 
@@ -315,7 +316,7 @@ struct {
 } introspec_msg SEC(".maps");
 
 static u16 get_nice_prio(struct task_struct *p);
-static void adjust_slice_boost(struct cpu_ctx *cpuc, struct task_ctx *taskc);
+static int reinit_active_cpumask_for_performance(void);
 
 static u64 sigmoid_u64(u64 v, u64 max)
 {
@@ -593,6 +594,7 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 	c->stat_next = get_sys_stat_next();
 	c->now = bpf_ktime_get_ns();
 	c->duration = c->now - c->stat_cur->last_update_clk;
+	c->stat_next->last_update_clk = c->now;
 }
 
 static void collect_sys_stat(struct sys_stat_ctx *c)
@@ -649,7 +651,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 			bool ret = __sync_bool_compare_and_swap(
 					&cpuc->idle_start_clk, old_clk, c->now);
 			if (ret) {
-				c->idle_total += c->now - old_clk;
+				cpuc->idle_total += c->now - old_clk;
 				break;
 			}
 		}
@@ -660,6 +662,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		u64 compute = 0;
 		if (c->duration > cpuc->idle_total)
 			compute = c->duration - cpuc->idle_total;
+
 		c->new_util = (compute * LAVD_CPU_UTIL_MAX) / c->duration;
 		cpuc->util = calc_avg(cpuc->util, c->new_util);
 
@@ -691,9 +694,9 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 	c->duration_total = c->duration * nr_cpus_onln;
 	if (c->duration_total > c->idle_total)
 		c->compute_total = c->duration_total - c->idle_total;
-
-	c->new_util = (c->compute_total * LAVD_CPU_UTIL_MAX) /
-		      c->duration_total;
+	else
+		c->compute_total = 0;
+	c->new_util = (c->compute_total * LAVD_CPU_UTIL_MAX)/c->duration_total;
 
 	if (c->sched_nr == 0) {
 		/*
@@ -757,7 +760,6 @@ static void do_update_sys_stat(void)
 	/*
 	 * Make the next version atomically visible.
 	 */
-	c.stat_next->last_update_clk = c.now;
 	flip_sys_stat();
 }
 
@@ -772,7 +774,7 @@ static u64 calc_nr_active_cpus(struct sys_stat *stat_cur)
 	nr_active /= (LAVD_CC_PER_CORE_MAX_CTUIL * 1000);
 
 	/*
-	 * If a few CPUs are particularly busy, boost the overflow CPUs by 2x.
+	 * If a few CPUs are particularly busy, boost the active CPUs more.
 	 */
 	nr_active += min(LAVD_CC_NR_OVRFLW, (stat_cur->nr_violation) / 1000);
 	nr_active = max(min(nr_active, nr_cpus_onln),
@@ -900,9 +902,90 @@ unlock_out:
 	bpf_rcu_read_unlock();
 }
 
+int do_set_power_profile(s32 power_mode, int util)
+{
+	static s32 cur_mode = LAVD_PM_MAX;
+
+	/*
+	 * Skip setting the mode if alreay in the same mode.
+	 */
+	if (cur_mode == power_mode)
+		return 0;
+	cur_mode = power_mode;
+
+	/*
+	 * Change the power mode.
+	 */
+	switch (power_mode) {
+	case LAVD_PM_PERFORMANCE:
+		no_core_compaction = true;
+		no_freq_scaling = true;
+		no_prefer_turbo_core = false;
+		is_powersave_mode = false;
+
+		/*
+		 * Since the core compaction becomes off, we need to
+		 * reinitialize the active and overflow cpumask for performance
+		 * mode.
+		 */
+		reinit_active_cpumask_for_performance();
+		debugln("Set the scheduler's power profile to performance mode: %d", util);
+		break;
+	case LAVD_PM_BALANCED:
+		no_core_compaction = false;
+		no_freq_scaling = false;
+		no_prefer_turbo_core = false;
+		is_powersave_mode = false;
+		debugln("Set the scheduler's power profile to balanced mode: %d", util);
+		break;
+	case LAVD_PM_POWERSAVE:
+		no_core_compaction = false;
+		no_freq_scaling = false;
+		no_prefer_turbo_core = true;
+		is_powersave_mode = true;
+		debugln("Set the scheduler's power profile to power-save mode: %d", util);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static int do_autopilot(void)
+{
+	struct sys_stat *stat_cur = get_sys_stat_cur();
+
+	/*
+	 * If the CPU utiulization is very low (say <= 5%), it means high
+	 * performance is not required. We run the scheduler in powersave mode
+	 * to save energy consumption.
+	 */
+	if (stat_cur->util <= LAVD_AP_LOW_UTIL)
+		return do_set_power_profile(LAVD_PM_POWERSAVE, stat_cur->util);
+
+	/*
+	 * If the CPU utiulization is moderate (say > 5%, <= 30%), we run the
+	 * scheduler in balanced mode. Actually, balanced mode can save energy
+	 * consumption only under moderate CPU load.
+	 */
+	if (stat_cur->util <= LAVD_AP_HIGH_UTIL)
+		return do_set_power_profile(LAVD_PM_BALANCED, stat_cur->util);
+
+	/*
+	 * If the CPU utilization is high enough (say > 30%), we run the
+	 * scheduler in performance mode. The system indeed needs perrformance
+	 * also there is little energy benefit even under balanced mode anyway.
+	 */
+	return do_set_power_profile(LAVD_PM_PERFORMANCE, stat_cur->util);
+}
+
 static void update_sys_stat(void)
 {
 	do_update_sys_stat();
+
+	if (is_autopilot_on)
+		do_autopilot();
 
 	if (!no_core_compaction)
 		do_core_compaction();
@@ -1356,11 +1439,23 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	struct bpf_cpumask *active, *ovrflw, *big, *little, *cpdom_mask_prev;
 	s32 cpu_id;
 
-	bpf_rcu_read_lock();
+	/*
+	 * If a task can run only on a single CPU (e.g., per-CPU kworker), we
+	 * simply check if a task is still pinned on the prev_cpu and go.
+	 */
+	if (p->nr_cpus_allowed == 1 &&
+	    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			*is_idle = true;
+		cpu_id = prev_cpu;
+		goto out;
+	}
 
 	/*
 	 * Prepare cpumaks.
 	 */
+	bpf_rcu_read_lock();
+
 	cpuc = get_cpu_ctx();
 	cpuc_prev = get_cpu_ctx_id(prev_cpu);
 	if (!cpuc || !cpuc_prev || !taskc) {
@@ -1515,6 +1610,7 @@ start_any_mask:
 	 */
 unlock_out:
 	bpf_rcu_read_unlock();
+out:
 	return cpu_id;
 }
 
@@ -2852,6 +2948,50 @@ static u16 get_cputurbo_cap(void)
 	return turbo_cap;
 }
 
+static int reinit_active_cpumask_for_performance(void)
+{
+	struct cpu_ctx *cpuc;
+	struct bpf_cpumask *active, *ovrflw;
+	int cpu, err = 0;
+
+	barrier();
+	bpf_rcu_read_lock();
+
+	/*
+	 * Prepare cpumasks.
+	 */
+	active  = active_cpumask;
+	ovrflw  = ovrflw_cpumask;
+	if (!active || !ovrflw) {
+		scx_bpf_error("Failed to prepare cpumasks.");
+		err = -ENOMEM;
+		goto unlock_out;
+	}
+
+
+	/*
+	 * Once core compaction becomes off in performance mode,
+	 * reinitialize active/overflow cpumasks to reflect the mode change.
+	 */
+	bpf_for(cpu, 0, nr_cpus_onln) {
+		cpuc = get_cpu_ctx_id(cpu);
+		if (!cpuc) {
+			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
+			err = -ESRCH;
+			goto unlock_out;
+		}
+
+		if (cpuc->big_core)
+			bpf_cpumask_set_cpu(cpu, active);
+		else
+			bpf_cpumask_set_cpu(cpu, ovrflw);
+	}
+
+unlock_out:
+	bpf_rcu_read_unlock();
+	return err;
+}
+
 static s32 init_per_cpu_ctx(u64 now)
 {
 	struct cpu_ctx *cpuc;
@@ -3081,30 +3221,7 @@ void BPF_STRUCT_OPS(lavd_exit, struct scx_exit_info *ei)
 SEC("syscall")
 int set_power_profile(struct power_arg *input)
 {
-	switch (input->power_mode) {
-	case LAVD_PM_PERFORMANCE:
-		no_core_compaction = true;
-		no_freq_scaling = true;
-		no_prefer_turbo_core = false;
-		is_powersave_mode = false;
-		break;
-	case LAVD_PM_BALANCED:
-		no_core_compaction = false;
-		no_freq_scaling = false;
-		no_prefer_turbo_core = false;
-		is_powersave_mode = false;
-		break;
-	case LAVD_PM_POWERSAVE:
-		no_core_compaction = false;
-		no_freq_scaling = false;
-		no_prefer_turbo_core = true;
-		is_powersave_mode = true;
-		break;
-	default:
-		return -EINVAL;
-	}
-
-	return 0;
+	return do_set_power_profile(input->power_mode, 0);
 }
 
 SCX_OPS_DEFINE(lavd_ops,

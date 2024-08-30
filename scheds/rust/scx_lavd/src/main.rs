@@ -72,9 +72,14 @@ use rlimit::{getrlimit, setrlimit, Resource};
 /// See the more detailed overview of the LAVD design at main.bpf.c.
 #[derive(Debug, Parser)]
 struct Opts {
-    /// Automatically decide the power mode based on the current energy profile.
-    #[clap(long = "auto", action = clap::ArgAction::SetTrue)]
-    auto: bool,
+    /// Automatically decide the scheduler's power mode based on system load.
+    /// This is a recommended mode if you don't understand the following options:
+    #[clap(long = "autopilot", action = clap::ArgAction::SetTrue)]
+    autopilot: bool,
+
+    /// Automatically decide the scheduler's power mode based on the system's energy profile.
+    #[clap(long = "autopower", action = clap::ArgAction::SetTrue)]
+    autopower: bool,
 
     /// Run in performance mode to get maximum performance.
     #[clap(long = "performance", action = clap::ArgAction::SetTrue)]
@@ -551,6 +556,7 @@ impl<'a> Scheduler<'a> {
             Ok(ret) => (ret == 1) as u32,
             Err(_)  => 0,
         };
+        skel.maps.rodata_data.is_autopilot_on = opts.autopilot;
         skel.maps.rodata_data.verbose = opts.verbose;
     }
 
@@ -692,32 +698,43 @@ impl<'a> Scheduler<'a> {
         res.unwrap_or_else(|_| "none".to_string())
     }
 
-    fn update_power_profile(&mut self) -> bool {
+    fn update_power_profile(&mut self, prev_profile: String) -> (bool, String) {
         const LAVD_PM_PERFORMANCE: s32 = 0;
         const LAVD_PM_BALANCED: s32 = 1;
         const LAVD_PM_POWERSAVE: s32 = 2;
 
         let profile = Self::read_energy_profile();
-        if profile == "performance" {
-            let _ = self.set_power_profile(LAVD_PM_PERFORMANCE);
-        } else if profile == "balance_performance" {
-            let _ = self.set_power_profile(LAVD_PM_BALANCED);
-        } else if profile == "power" {
-            let _ = self.set_power_profile(LAVD_PM_POWERSAVE);
-        } else {
-            return false;
+        if profile == prev_profile {
+            // If the profile is the same, skip updaring the profile for BPF.
+            return (true, profile);
         }
 
-        true
+        if profile == "performance" {
+            let _ = self.set_power_profile(LAVD_PM_PERFORMANCE);
+            info!("Set the scheduler's power profile to performance mode.");
+        } else if profile == "balance_performance" {
+            let _ = self.set_power_profile(LAVD_PM_BALANCED);
+            info!("Set the scheduler's power profile to balanced mode.");
+        } else if profile == "power" {
+            let _ = self.set_power_profile(LAVD_PM_POWERSAVE);
+            info!("Set the scheduler's power profile to power-save mode.");
+        } else {
+            // We don't know how to handle an unknown energy profile,
+            // so we just give up updating the profile from now on.
+            return (false, profile);
+        }
+
+        (true, profile)
     }
 
-    fn run(&mut self, auto: bool, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+    fn run(&mut self, autopower: bool, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
-        let mut auto = auto;
+        let mut autopower = autopower;
+        let mut profile = "unknown".to_string();
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            if auto {
-                auto = self.update_power_profile();
+            if autopower {
+                (autopower, profile) = self.update_power_profile(profile);
             }
 
             match req_ch.recv_timeout(Duration::from_secs(1)) {
@@ -799,7 +816,7 @@ fn main() -> Result<()> {
             *build_id::SCX_FULL_VERSION
         );
         info!("scx_lavd scheduler starts running.");
-        if !sched.run(opts.auto, shutdown.clone())?.should_restart() {
+        if !sched.run(opts.autopower, shutdown.clone())?.should_restart() {
             break;
         }
     }
