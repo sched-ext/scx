@@ -593,6 +593,7 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 	c->stat_next = get_sys_stat_next();
 	c->now = bpf_ktime_get_ns();
 	c->duration = c->now - c->stat_cur->last_update_clk;
+	c->stat_next->last_update_clk = c->now;
 }
 
 static void collect_sys_stat(struct sys_stat_ctx *c)
@@ -649,7 +650,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 			bool ret = __sync_bool_compare_and_swap(
 					&cpuc->idle_start_clk, old_clk, c->now);
 			if (ret) {
-				c->idle_total += c->now - old_clk;
+				cpuc->idle_total += c->now - old_clk;
 				break;
 			}
 		}
@@ -660,6 +661,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		u64 compute = 0;
 		if (c->duration > cpuc->idle_total)
 			compute = c->duration - cpuc->idle_total;
+
 		c->new_util = (compute * LAVD_CPU_UTIL_MAX) / c->duration;
 		cpuc->util = calc_avg(cpuc->util, c->new_util);
 
@@ -691,9 +693,9 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 	c->duration_total = c->duration * nr_cpus_onln;
 	if (c->duration_total > c->idle_total)
 		c->compute_total = c->duration_total - c->idle_total;
-
-	c->new_util = (c->compute_total * LAVD_CPU_UTIL_MAX) /
-		      c->duration_total;
+	else
+		c->compute_total = 0;
+	c->new_util = (c->compute_total * LAVD_CPU_UTIL_MAX)/c->duration_total;
 
 	if (c->sched_nr == 0) {
 		/*
@@ -757,7 +759,6 @@ static void do_update_sys_stat(void)
 	/*
 	 * Make the next version atomically visible.
 	 */
-	c.stat_next->last_update_clk = c.now;
 	flip_sys_stat();
 }
 
@@ -772,7 +773,7 @@ static u64 calc_nr_active_cpus(struct sys_stat *stat_cur)
 	nr_active /= (LAVD_CC_PER_CORE_MAX_CTUIL * 1000);
 
 	/*
-	 * If a few CPUs are particularly busy, boost the overflow CPUs by 2x.
+	 * If a few CPUs are particularly busy, boost the active CPUs more.
 	 */
 	nr_active += min(LAVD_CC_NR_OVRFLW, (stat_cur->nr_violation) / 1000);
 	nr_active = max(min(nr_active, nr_cpus_onln),
