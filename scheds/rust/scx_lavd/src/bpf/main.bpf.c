@@ -1356,11 +1356,23 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	struct bpf_cpumask *active, *ovrflw, *big, *little, *cpdom_mask_prev;
 	s32 cpu_id;
 
-	bpf_rcu_read_lock();
+	/*
+	 * If a task can run only on a single CPU (e.g., per-CPU kworker), we
+	 * simply check if a task is still pinned on the prev_cpu and go.
+	 */
+	if (p->nr_cpus_allowed == 1 &&
+	    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			*is_idle = true;
+		cpu_id = prev_cpu;
+		goto out;
+	}
 
 	/*
 	 * Prepare cpumaks.
 	 */
+	bpf_rcu_read_lock();
+
 	cpuc = get_cpu_ctx();
 	cpuc_prev = get_cpu_ctx_id(prev_cpu);
 	if (!cpuc || !cpuc_prev || !taskc) {
@@ -1515,6 +1527,7 @@ start_any_mask:
 	 */
 unlock_out:
 	bpf_rcu_read_unlock();
+out:
 	return cpu_id;
 }
 
