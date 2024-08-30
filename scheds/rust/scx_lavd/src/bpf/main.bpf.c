@@ -2865,6 +2865,50 @@ static u16 get_cputurbo_cap(void)
 	return turbo_cap;
 }
 
+static int reinit_active_cpumask_for_performance(void)
+{
+	struct cpu_ctx *cpuc;
+	struct bpf_cpumask *active, *ovrflw;
+	int cpu, err = 0;
+
+	barrier();
+	bpf_rcu_read_lock();
+
+	/*
+	 * Prepare cpumasks.
+	 */
+	active  = active_cpumask;
+	ovrflw  = ovrflw_cpumask;
+	if (!active || !ovrflw) {
+		scx_bpf_error("Failed to prepare cpumasks.");
+		err = -ENOMEM;
+		goto unlock_out;
+	}
+
+
+	/*
+	 * Once core compaction becomes off in performance mode,
+	 * reinitialize active/overflow cpumasks to reflect the mode change.
+	 */
+	bpf_for(cpu, 0, nr_cpus_onln) {
+		cpuc = get_cpu_ctx_id(cpu);
+		if (!cpuc) {
+			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
+			err = -ESRCH;
+			goto unlock_out;
+		}
+
+		if (cpuc->big_core)
+			bpf_cpumask_set_cpu(cpu, active);
+		else
+			bpf_cpumask_set_cpu(cpu, ovrflw);
+	}
+
+unlock_out:
+	bpf_rcu_read_unlock();
+	return err;
+}
+
 static s32 init_per_cpu_ctx(u64 now)
 {
 	struct cpu_ctx *cpuc;
@@ -3100,6 +3144,13 @@ int set_power_profile(struct power_arg *input)
 		no_freq_scaling = true;
 		no_prefer_turbo_core = false;
 		is_powersave_mode = false;
+
+		/*
+		 * Since the core compaction becomes off, we need to
+		 * reinitialize the active and overflow cpumask for performance
+		 * mode.
+		 */
+		reinit_active_cpumask_for_performance();
 		break;
 	case LAVD_PM_BALANCED:
 		no_core_compaction = false;
