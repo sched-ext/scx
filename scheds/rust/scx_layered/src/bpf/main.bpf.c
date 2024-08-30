@@ -26,11 +26,13 @@ const volatile bool smt_enabled = true;
 const volatile bool disable_topology = false;
 const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
+const volatile bool allow_overrides = false;
 
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 struct layer layers[MAX_LAYERS];
 u32 fallback_cpu;
 static u32 preempt_cursor;
+static u64 override_gens[MAX_LAYERS];
 
 #define dbg(fmt, args...)	do { if (debug) bpf_printk(fmt, ##args); } while (0)
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
@@ -212,19 +214,19 @@ static void adj_load(u32 layer_idx, s64 adj, u64 now)
 struct {
         __uint(type, BPF_MAP_TYPE_ARRAY);
         __type(key, u32);
-        __type(value, struct user_ctx);
+        __type(value, struct override_ctx);
         __uint(max_entries, MAX_LAYERS);
 	__uint(map_flags, BPF_F_MMAPABLE);
-} user_ctxs SEC(".maps");
+} override_ctxs SEC(".maps");
 
-static struct user_ctx *lookup_user_ctx(int layer_idx)
+static struct override_ctx *lookup_override_ctx(int layer_idx)
 {
-	struct user_ctx *uctx;
+	struct override_ctx *uctx;
 
-	if ((uctx = bpf_map_lookup_elem(&user_ctxs, &layer_idx))) {
+	if ((uctx = bpf_map_lookup_elem(&override_ctxs, &layer_idx))) {
 		return uctx;
 	} else {
-		scx_bpf_error("no layer user_ctx");
+		scx_bpf_error("no layer override_ctx");
 		return NULL;
 	}
 }
@@ -323,7 +325,7 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *layered_cpumask;
 
 	bool			all_cpus_allowed;
-	bool			is_override;
+	u64			override_gen;
 	u64			runnable_at;
 	u64			running_at;
 };
@@ -428,32 +430,93 @@ int BPF_PROG(tp_task_rename, struct task_struct *p, const char *buf)
 	return 0;
 }
 
-static void refresh_hints(int idx)
+static void refresh_overrides(int nr_layers)
 {
-	int i;
+	int i, layer_idx;
+	u64 override_gen;
 	struct task_ctx *tctx;
-	struct user_ctx *uctx;
+	struct override_ctx *octx;
 	struct task_struct *p;
 
-
-	if (!(uctx = lookup_user_ctx(idx)))
-		return;
-
-	bpf_for(i, 0, uctx->nr_overrides) {
-		if (i > MAX_LAYER_OVERRIDES)
-			break;
-
-		p = bpf_task_from_pid(uctx->task_overrides[i]);
-		if (!p)
+	bpf_for(layer_idx, 0, nr_layers) {
+		struct layer *layer = &layers[layer_idx];
+		override_gen = override_gens[layer_idx];
+		if (!(octx = lookup_override_ctx(layer_idx)))
+			continue;
+		if (octx->gen == override_gen)
 			continue;
 
-		if (!(tctx = lookup_task_ctx(p))) {
-			bpf_task_release(p);
-			continue;
+		// If we had proper locks with userspace then this may be an
+		// allowed state for wrapping the override_gen. For now we'll
+		// allow resetting the gen to 0.
+		if (octx->gen < override_gen && octx->gen != 0) {
+			scx_bpf_error("override generation is lower than set generation");
+			return;
 		}
-		tctx->layer = idx;
-		tctx->is_override = true;
-		bpf_task_release(p);
+
+		override_gens[layer_idx] = octx->gen;
+
+		bpf_for(i, 0, octx->nr_overrides) {
+			if (i > MAX_LAYER_OVERRIDES) {
+				scx_bpf_error("too many overrides");
+				return;
+			}
+
+			p = bpf_task_from_pid(octx->task_overrides[i]);
+			if (!p)
+				continue;
+
+			if (!(tctx = lookup_task_ctx(p))) {
+				bpf_task_release(p);
+				continue;
+			}
+			if (octx->gen < tctx->override_gen && octx->gen != 0) {
+				bpf_task_release(p);
+				scx_bpf_error("task override generation is invalid");
+				return;
+			}
+			if (octx->gen == tctx->override_gen) {
+				bpf_task_release(p);
+				continue;
+			}
+			if (tctx->layer >= 0 && tctx->layer < nr_layers)
+				__sync_fetch_and_add(&layers[tctx->layer].nr_tasks, -1);
+			/*
+			 * XXX: Need to adjust the vtime delta with the
+			 * previous layer similar to maybe_refresh_layer.
+			 * However, from this context the value is read only so
+			 * it may be incorrect.
+			 *
+			 * p->scx.dsq_vtime = layer->vtime_now;
+			 *
+			 */
+			tctx->layer = layer_idx;
+			tctx->override_gen = octx->gen;
+			__sync_fetch_and_add(&layer->nr_tasks, 1);
+			bpf_task_release(p);
+		}
+
+		// To yield control back to the BPF scheduler userspace is
+		// allowed to yield a task. Reset all the yielded tasks.
+		bpf_for(i, 0, octx->nr_yields) {
+			if (i > MAX_OVERRIDE_YIELDS) {
+				scx_bpf_error("too many override yields");
+				return;
+			}
+
+			p = bpf_task_from_pid(octx->task_overrides[i]);
+			if (!p)
+				continue;
+
+			if (!(tctx = lookup_task_ctx(p))) {
+				bpf_task_release(p);
+				continue;
+			}
+			tctx->refresh_layer = true;
+			tctx->override_gen = 0;
+			bpf_task_release(p);
+		}
+		octx->yield_gen++;
 	}
 }
 
@@ -481,11 +544,13 @@ int BPF_PROG(sched_tick_fentry)
 {
 	int idx;
 
-	if (bpf_get_smp_processor_id() == 0)
+	if (bpf_get_smp_processor_id() == 0) {
 		bpf_for(idx, 0, nr_layers) {
 			refresh_cpumasks(idx);
-			refresh_hints(idx);
 		}
+		if (allow_overrides)
+			refresh_overrides(nr_layers);
+	}
 	return 0;
 }
 
@@ -1151,7 +1216,7 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *tctx)
 	u64 idx;	// XXX - int makes verifier unhappy
 	pid_t pid = p->pid;
 
-	if (!tctx->refresh_layer || tctx->is_override)
+	if (!tctx->refresh_layer || tctx->override_gen > 0)
 		return;
 	tctx->refresh_layer = false;
 
@@ -1456,6 +1521,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	tctx->pid = p->pid;
 	tctx->last_cpu = -1;
 	tctx->layer = -1;
+	tctx->override_gen = 0;
 	tctx->refresh_layer = true;
 
 	if (all_cpumask)
@@ -1575,7 +1641,7 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
 	struct bpf_cpumask *cpumask;
-	struct user_ctx *uctx;
+	struct override_ctx *octx;
 	int i, j, k, nr_online_cpus, ret;
 
 	ret = scx_bpf_create_dsq(HI_FALLBACK_DSQ, -1);
@@ -1624,9 +1690,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		    i, layer->min_exec_ns, layer->open, layer->preempt,
 		    layer->exclusive);
 
-		if (!(uctx = lookup_user_ctx(i)))
-			return -ENOENT;
-		uctx->nr_overrides = 0;
+		if (allow_overrides) {
+			if (!(octx = lookup_override_ctx(i)))
+				return -ENOENT;
+			octx->nr_overrides = 0;
+			octx->gen = 0;
+			override_gens[i] = 0;
+		}
 
 		if (layer->nr_match_ors > MAX_LAYER_MATCH_ORS) {
 			scx_bpf_error("too many ORs");

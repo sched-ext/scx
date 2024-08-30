@@ -408,9 +408,10 @@ struct Opts {
     #[clap(short = 'e', long)]
     example: Option<String>,
 
-    /// User context bpffs mount path
-    #[clap(short = 'm', long)]
-    user_ctx_mount: Option<String>,
+    /// User override bpffs mount path, if set it will mount a BPF map over override_ctx's per
+    /// layer. This can be used by userspace to control the layer of a task.
+    #[clap(short = 'o', long)]
+    override_ctx_mount: Option<String>,
 
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
@@ -1600,6 +1601,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         // Initialize skel according to @opts.
         skel.struct_ops.layered_mut().exit_dump_len = opts.exit_dump_len;
 
+        skel.maps.rodata_data.allow_overrides = opts.override_ctx_mount.is_some();
         skel.maps.rodata_data.debug = opts.verbose as u32;
         skel.maps.rodata_data.slice_ns = opts.slice_us * 1000;
         skel.maps.rodata_data.max_exec_ns = if opts.max_exec_us > 0 {
@@ -1621,9 +1623,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
 
-        if !skel.maps.user_ctxs.is_pinned() {
-            let path = opts.user_ctx_mount.clone().unwrap_or("/sys/fs/bpf/scx/user_ctxs".to_string());
-            skel.maps.user_ctxs.pin(path);
+        if opts.override_ctx_mount.is_some() {
+            if !skel.maps.override_ctxs.is_pinned() {
+                let path = opts.override_ctx_mount.clone().unwrap();
+                let _ = skel.maps.override_ctxs.pin(path);
+            }
         }
 
         let mut layers = vec![];
