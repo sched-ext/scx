@@ -2331,6 +2331,12 @@ static int calc_cpuperf_target(struct sys_stat *stat_cur,
 	if (!stat_cur || !taskc || !cpuc)
 		return -EINVAL;
 
+	if (no_freq_scaling) {
+		cpuc->cpuperf_task = SCX_CPUPERF_ONE;
+		cpuc->cpuperf_avg = SCX_CPUPERF_ONE;
+		return 0;
+	}
+
 	/*
 	 * We determine the clock frequency of a CPU using two factors: 1) the
 	 * current CPU utilization (cpuc->util) and 2) the current task's
@@ -2428,7 +2434,7 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
 	 * task continues to run.
 	 */
 freq_out:
-	if (!no_freq_scaling && !preempted)
+	if (!preempted)
 		try_decrease_cpuperf_target(cpuc_run);
 }
 
@@ -2514,10 +2520,8 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 * urgently increases according to task's target but it decreases
 	 * gradually according to EWMA of past performance targets.
 	 */
-	if (!no_freq_scaling) {
-		calc_cpuperf_target(stat_cur, taskc, cpuc);
-		try_increase_cpuperf_target(cpuc);
-	}
+	calc_cpuperf_target(stat_cur, taskc, cpuc);
+	try_increase_cpuperf_target(cpuc);
 
 	/*
 	 * Update running task's information for preemption
