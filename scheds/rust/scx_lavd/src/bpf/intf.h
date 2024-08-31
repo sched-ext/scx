@@ -80,18 +80,17 @@ enum consts {
 	LAVD_PREEMPT_KICK_MARGIN	= (1ULL * NSEC_PER_MSEC),
 	LAVD_PREEMPT_TICK_MARGIN	= (100ULL * NSEC_PER_USEC),
 
-	LAVD_SYS_STAT_INTERVAL_NS	= (25ULL * NSEC_PER_MSEC),
+	LAVD_SYS_STAT_INTERVAL_NS	= (50ULL * NSEC_PER_MSEC),
 	LAVD_CC_PER_CORE_MAX_CTUIL	= 500, /* maximum per-core CPU utilization */
 	LAVD_CC_PER_TURBO_CORE_MAX_CTUIL = 750, /* maximum per-core CPU utilization for a turbo core */
 	LAVD_CC_NR_ACTIVE_MIN		= 1, /* num of mininum active cores */
 	LAVD_CC_NR_OVRFLW		= 1, /* num of overflow cores */
-	LAVD_CC_CPU_PIN_INTERVAL	= (3ULL * LAVD_TIME_ONE_SEC),
+	LAVD_CC_CPU_PIN_INTERVAL	= (2ULL * LAVD_TIME_ONE_SEC),
 	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL /
 					   LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_AP_LOW_UTIL		= 50, /* powersave mode when cpu util <= 5% */
-	LAVD_AP_HIGH_UTIL		= 300, /* balanced mode when 5% < cpu util <= 30%,
-						  performance mode when cpu util > 30% */
+	LAVD_AP_HIGH_UTIL		= 700, /* balanced mode when 10% < cpu util <= 40%,
+						  performance mode when cpu util > 40% */
 
 	LAVD_CPDOM_MAX_NR		= 32, /* maximum number of compute domain */
 	LAVD_CPDOM_MAX_DIST		= 4,  /* maximum distance from one compute domain to another */

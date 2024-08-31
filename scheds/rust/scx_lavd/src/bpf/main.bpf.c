@@ -207,6 +207,8 @@ private(LAVD) struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active 
 private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
 private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR]; /* CPU mask for each compute domain */
 
+static u64		LAVD_AP_LOW_UTIL;
+
 /*
  * CPU topology
  */
@@ -1517,7 +1519,6 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	 * Pick an idle core among turbo boost-enabled CPUs with a matching
 	 * core type.
 	 */
-start_turbo_mask:
 	if (no_prefer_turbo_core || !turbo_cpumask)
 		goto start_llc_mask;
 
@@ -1559,7 +1560,6 @@ start_tmask:
 	/*
 	 * Pick a idle core among active CPUs.
 	 */
-start_amask:
 	cpu_id = pick_idle_cpu_in(a_cpumask);
 	if (cpu_id >= 0) {
 		*is_idle = true;
@@ -3171,6 +3171,24 @@ static s32 init_sys_stat(u64 now)
 	return 0;
 }
 
+static void init_autopilot_low_util(void)
+{
+	if (nr_cpus_big < nr_cpus_onln) {
+		/*
+		 * When there are little cores, we move up to the balanced mode
+		 * if one little core is fully utilized.
+		 */
+		LAVD_AP_LOW_UTIL = 1000 / nr_cpus_onln;
+	}
+	else {
+		/*
+		 * When there are only big cores, we move up to the balanced
+		 * mode if two big cores are fully utilized.
+		 */
+		LAVD_AP_LOW_UTIL = (2 * 1000) / nr_cpus_onln;
+	}
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 {
 	u64 now = bpf_ktime_get_ns();
@@ -3207,6 +3225,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(lavd_init)
 	err = init_sys_stat(now);
 	if (err)
 		return err;
+
+	/*
+	 * Initialize the low cpu watermark for autopilot mode.
+	 */
+	init_autopilot_low_util();
 
 	/*
 	 * Initilize the current logical clock and service time.
