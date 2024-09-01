@@ -1395,6 +1395,23 @@ static void update_stat_for_quiescent(struct task_struct *p,
 	cpuc->load_run_time_ns -= clamp_time_slice_ns(taskc->run_time_ns);
 }
 
+static bool match_task_core_type(struct task_ctx *taskc,
+				 struct cpu_ctx *cpuc_prev,
+				 struct sys_stat *stat_cur)
+{
+	/*
+	 * If a task is performance critical, it is better to run on a big core
+	 * even paying some cost looking for a big core.
+	 */
+	if (is_perf_cri(taskc, stat_cur) && !cpuc_prev->big_core)
+		return false;
+
+	/*
+	 * Otherwise, it doesn't matter where it runs.
+	 */
+	return true;
+}
+
 static bool could_run_on_prev(struct task_struct *p, s32 prev_cpu,
 			      struct bpf_cpumask *a_cpumask,
 			      struct bpf_cpumask *o_cpumask)
@@ -1494,7 +1511,8 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	bpf_cpumask_and(a_cpumask, p->cpus_ptr, cast_mask(active));
 	bpf_cpumask_and(o_cpumask, p->cpus_ptr, cast_mask(ovrflw));
 
-	if (could_run_on_prev(p, prev_cpu, a_cpumask, o_cpumask) &&
+	if (match_task_core_type(taskc, cpuc_prev, stat_cur) &&
+	    could_run_on_prev(p, prev_cpu, a_cpumask, o_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu_id = prev_cpu;
 		*is_idle = true;
