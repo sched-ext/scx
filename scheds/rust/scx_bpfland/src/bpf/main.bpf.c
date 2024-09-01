@@ -538,7 +538,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 	if (p->nr_cpus_allowed == 1) {
 		if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
 		    bpf_cpumask_test_cpu(prev_cpu, online_cpumask) &&
-		    (local_kthreads || scx_bpf_test_and_clear_cpu_idle(prev_cpu)))
+		    (is_kthread(p) && local_kthreads ||
+				scx_bpf_test_and_clear_cpu_idle(prev_cpu)))
 			cpu = prev_cpu;
 		else
 			cpu = -ENOENT;
