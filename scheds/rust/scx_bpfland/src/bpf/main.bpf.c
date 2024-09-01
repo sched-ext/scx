@@ -501,14 +501,13 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
  * to handle these mistakes in favor of a more efficient response and a reduced
  * scheduling overhead.
  */
-static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
+static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, bool do_turbo)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
 	struct bpf_cpumask *primary, *turbo, *l2_domain, *l3_domain;
 	struct bpf_cpumask *p_mask, *l2_mask, *l3_mask;
 	struct task_ctx *tctx;
 	struct cpu_ctx *cctx;
-	bool do_turbo = true;
 	s32 cpu;
 
 	tctx = try_lookup_task_ctx(p);
@@ -566,7 +565,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 	l3_domain = cctx->l3_cpumask;
 	if (!l3_domain)
 		l3_domain = primary;
-retry:
+
 	/*
 	 * Task's scheduling domains.
 	 */
@@ -664,6 +663,15 @@ retry:
 		}
 
 		/*
+		 * When considering the turbo domain (first idle CPU selection
+		 * pass) try to stay on the same LLC.
+		 */
+		if (do_turbo) {
+			cpu = -ENOENT;
+			goto out_put_cpumask;
+		}
+
+		/*
 		 * Search for any other full-idle core in the primary domain.
 		 */
 		cpu = bpf_cpumask_any_and_distribute(cast_mask(p_mask), idle_smtmask);
@@ -705,21 +713,21 @@ retry:
 	}
 
 	/*
+	 * When considering the turbo domain (first idle CPU selection pass)
+	 * try to stay on the same LLC.
+	 */
+	if (do_turbo) {
+		cpu = -ENOENT;
+		goto out_put_cpumask;
+	}
+
+	/*
 	 * Search for any idle CPU in the scheduling domain.
 	 */
 	cpu = bpf_cpumask_any_and_distribute(cast_mask(p_mask), idle_cpumask);
 	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(cpu))
 		goto out_put_cpumask;
-
-	/*
-	 * If we were looking for an idle CPU in the turbo domain and we
-	 * couldn't find any, re-try again with the whole primary domain.
-	 */
-	if (do_turbo) {
-		do_turbo = false;
-		goto retry;
-	}
 
 	/*
 	 * We couldn't find any idle CPU, so simply dispatch the task to the
@@ -747,7 +755,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 {
 	s32 cpu;
 
-	cpu = pick_idle_cpu(p, prev_cpu);
+	cpu = pick_idle_cpu(p, prev_cpu, true);
 	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return cpu;
@@ -804,7 +812,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * If we couldn't find an idle CPU in ops.select_cpu(), give the task
 	 * another chance here to keep using the same CPU / cache / domain.
 	 */
-	cpu = pick_idle_cpu(p, prev_cpu);
+	cpu = pick_idle_cpu(p, prev_cpu, false);
 	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;

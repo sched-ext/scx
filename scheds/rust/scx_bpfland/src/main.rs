@@ -286,7 +286,7 @@ impl<'a> Scheduler<'a> {
 
         // Initialize the primary scheduling domain (based on the --primary-domain option).
         let energy_profile = Self::read_energy_profile();
-        if let Err(err) = Self::init_turbo_domain(&mut skel, &opts.primary_domain, &energy_profile)
+        if let Err(err) = Self::init_turbo_domain(&mut skel, &opts.primary_domain)
         {
             warn!("failed to initialize turbo domain: error {}", err);
         }
@@ -404,27 +404,10 @@ impl<'a> Scheduler<'a> {
     fn init_turbo_domain(
         skel: &mut BpfSkel<'_>,
         primary_domain: &String,
-        energy_profile: &String,
     ) -> Result<()> {
-        // Scheduling only on the turbo boosted CPUs can actually help to save power, because we
-        // end up using less CPUs, for a shorter amount of time, and they can go idle quickly, so
-        // use the turbo boosted domain only when we are trying to save power.
         let domain = match primary_domain.as_str() {
-            "powersave" => {
-                Self::epp_to_cpumask(Powermode::Turbo)?
-            }
-            "performance" => {
-                Cpumask::new()?
-            }
             "auto" => {
-                match energy_profile.as_str() {
-                    "balance_power" | "power" => {
-                        Self::epp_to_cpumask(Powermode::Turbo)?
-                    }
-                    &_ => {
-                        Cpumask::new()?
-                    }
-                }
+                Self::epp_to_cpumask(Powermode::Turbo)?
             }
             &_ => {
                 Cpumask::new()?
@@ -538,7 +521,6 @@ impl<'a> Scheduler<'a> {
                     if let Err(err) = Self::init_turbo_domain(
                         &mut self.skel,
                         &self.opts.primary_domain,
-                        &energy_profile,
                     ) {
                         warn!("failed to refresh turbo domain: error {}", err);
                     }
