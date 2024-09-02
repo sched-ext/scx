@@ -235,6 +235,7 @@ volatile bool		no_core_compaction;
 volatile bool		no_freq_scaling;
 volatile bool		no_prefer_turbo_core;
 volatile bool		is_powersave_mode;
+volatile bool		reinit_cpumask_for_performance;
 const volatile bool	is_autopilot_on;
 const volatile u32 	is_smt_active;
 const volatile u8	verbose;
@@ -929,8 +930,12 @@ int do_set_power_profile(s32 power_mode, int util)
 		 * Since the core compaction becomes off, we need to
 		 * reinitialize the active and overflow cpumask for performance
 		 * mode.
+		 *
+		 * Note that a verifier in an old kernel does not allow calling
+		 * bpf_cpumask_set_cpu(), so we defer the actual update to our
+		 * timer handler, update_sys_stat().
 		 */
-		reinit_active_cpumask_for_performance();
+		reinit_cpumask_for_performance = true;
 		debugln("Set the scheduler's power profile to performance mode: %d", util);
 		break;
 	case LAVD_PM_BALANCED:
@@ -938,6 +943,7 @@ int do_set_power_profile(s32 power_mode, int util)
 		no_freq_scaling = false;
 		no_prefer_turbo_core = false;
 		is_powersave_mode = false;
+		reinit_cpumask_for_performance = false;
 		debugln("Set the scheduler's power profile to balanced mode: %d", util);
 		break;
 	case LAVD_PM_POWERSAVE:
@@ -945,6 +951,7 @@ int do_set_power_profile(s32 power_mode, int util)
 		no_freq_scaling = false;
 		no_prefer_turbo_core = true;
 		is_powersave_mode = true;
+		reinit_cpumask_for_performance = false;
 		debugln("Set the scheduler's power profile to power-save mode: %d", util);
 		break;
 	default:
@@ -991,6 +998,11 @@ static void update_sys_stat(void)
 
 	if (!no_core_compaction)
 		do_core_compaction();
+
+	if (reinit_cpumask_for_performance) {
+		reinit_cpumask_for_performance = false;
+		reinit_active_cpumask_for_performance();
+	}
 }
 
 static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
