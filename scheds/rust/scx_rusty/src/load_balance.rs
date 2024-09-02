@@ -325,6 +325,7 @@ impl LoadEntity {
 struct TaskInfo {
     pid: i32,
     load: OrderedFloat<f64>,
+    core_cookie: u32,
     dom_mask: u64,
     preferred_dom_mask: u64,
     migrated: Cell<bool>,
@@ -700,14 +701,17 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     load *= weight;
                 }
 
-                dom.tasks.insert(TaskInfo {
-                    pid,
-                    load: OrderedFloat(load),
-                    dom_mask: task_ctx.dom_mask,
-                    preferred_dom_mask: task_ctx.preferred_dom_mask,
-                    migrated: Cell::new(false),
-                    is_kworker: task_ctx.is_kworker,
-                });
+                dom.tasks.insert(
+                    TaskInfo {
+                        pid,
+                        load: OrderedFloat(load),
+                        core_cookie: task_ctx.core_cookie,
+                        dom_mask: task_ctx.dom_mask,
+                        preferred_dom_mask: task_ctx.preferred_dom_mask,
+                        migrated: Cell::new(false),
+                        is_kworker: task_ctx.is_kworker,
+                    },
+                );
             }
         }
 
@@ -749,14 +753,20 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         // counterpart while scanning right and picking the better of the
         // two.
         let pull_dom_id: u32 = pull_dom.id.try_into().unwrap();
+        let dom_key = unsafe { std::mem::transmute::<u32, [u8; 4]>(pull_dom_id) };
+        let dom_ctx_map_elem = &self.skel.maps.dom_data.lookup(&dom_key, libbpf_rs::MapFlags::ANY).context("Failed to lookup dom_ctx").unwrap();
+        let dom_ctx = unsafe { &*(dom_ctx_map_elem.as_slice().as_ptr() as *const bpf_intf::dom_ctx) };
+
         let tasks: Vec<TaskInfo> = std::mem::take(&mut push_dom.tasks)
             .into_vec()
             .into_iter()
-            .filter(|task| {
+            .filter(
+                |task|
                 task.dom_mask & (1 << pull_dom_id) != 0
-                    || !(self.skip_kworkers && task.is_kworker)
-                    || !task.migrated.get()
-            })
+                    && !(self.skip_kworkers && task.is_kworker)
+                    && !task.migrated.get()
+                    && (task.core_cookie == dom_ctx.dom_cookie)
+            )
             .collect();
 
         let (task, new_imbal) = match (

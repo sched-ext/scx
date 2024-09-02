@@ -100,6 +100,7 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *tmp_cpumask;
 	u32 dom_id;
 	u32 weight;
+	u32 core_cookie;
 	bool runnable;
 	u64 dom_active_pids_gen;
 	u64 deadline;
@@ -135,6 +136,9 @@ struct bucket_ctx {
 
 struct dom_ctx {
 	u32 id;
+
+	u32 dom_cookie;
+
 	struct bpf_cpumask __kptr *cpumask;
 	struct bpf_cpumask __kptr *direct_greedy_cpumask;
 	struct bpf_cpumask __kptr *node_cpumask;

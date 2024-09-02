@@ -141,6 +141,14 @@ struct {
 	__uint(map_flags, 0);
 } dom_dcycle_locks SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct lock_wrapper);
+	__uint(max_entries, MAX_DOMS);
+	__uint(map_flags, 0);
+} dom_cookie_locks SEC(".maps");
+
 struct dom_active_pids {
 	u64 gen;
 	u64 read_idx;
@@ -255,6 +263,18 @@ static struct lock_wrapper *lookup_dom_vtime_lock(u32 dom_id)
 	lockw = bpf_map_lookup_elem(&dom_vtime_locks, &idx);
 	if (!lockw)
 		scx_bpf_error("Failed to lookup dom lock");
+
+	return lockw;
+}
+
+static struct lock_wrapper *lookup_dom_cookie_lock(u32 dom_id)
+{
+	struct lock_wrapper *lockw;
+	u32 idx = dom_id;
+
+	lockw = bpf_map_lookup_elem(&dom_cookie_locks, &idx);
+	if (!lockw)
+		scx_bpf_error("Failed to lookup dom cookie");
 
 	return lockw;
 }
@@ -1380,6 +1400,19 @@ static void running_update_vtime(struct task_struct *p,
 	bpf_spin_unlock(&lockw->lock);
 }
 
+static void running_update_core_cookie(struct task_struct *p, struct task_ctx *taskc, struct dom_ctx *domc)
+{
+	struct lock_wrapper *lockw = lookup_dom_cookie_lock(domc->id);
+
+	if (!lockw)
+		return;
+
+	bpf_spin_lock(&lockw->lock);
+	WRITE_ONCE(domc->dom_cookie, p->core_cookie);
+	WRITE_ONCE(taskc->core_cookie, p->core_cookie);
+	bpf_spin_unlock(&lockw->lock);
+}
+
 void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 {
 	struct task_ctx *taskc;
@@ -1425,6 +1458,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 		return;
 
 	running_update_vtime(p, taskc, domc);
+	running_update_core_cookie(p, taskc, domc);
 	taskc->last_run_at = bpf_ktime_get_ns();
 }
 
@@ -1596,6 +1630,7 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 		.last_blocked_at = now,
 		.last_woke_at = now,
 		.preferred_dom_mask = 0,
+		.core_cookie = p->core_cookie,
 
 	};
 	struct task_ctx *map_value;
