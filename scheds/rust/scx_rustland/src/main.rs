@@ -118,10 +118,13 @@ struct Opts {
 const NSEC_PER_USEC: u64 = 1_000;
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 
+// Maximum factor used to scale down the task's vruntime in function of its average amount of
+// context switches per second.
+const RL_MAX_VTIME_FACTOR: u64 = 4;
+
 #[derive(Debug, Clone)]
 struct TaskStat {
     pid: i32,
-    comm: String,
     nvcsw: u64,
 }
 
@@ -129,13 +132,19 @@ fn parse_proc_pid_stat(pid: i32) -> std::io::Result<TaskStat> {
     let path = format!("/proc/{}/status", pid);
     let content = std::fs::read_to_string(&path)?;
 
-    let mut comm = String::new();
     let mut nvcsw = 0;
 
     for line in content.lines() {
         if line.starts_with("Name:") {
-            comm = line.split_whitespace().nth(1).unwrap_or("").to_string();
-        } else if line.starts_with("voluntary_ctxt_switches:") {
+            let name = line.split_whitespace().nth(1).unwrap_or("");
+            // Prioritize kthreads by assigning max nvcsw rate.
+            if name.starts_with('[') && name.ends_with(']') {
+                nvcsw = u64::MAX;
+                break;
+            }
+        }
+
+        if line.starts_with("voluntary_ctxt_switches:") {
             nvcsw = line
                 .split_whitespace()
                 .nth(1)
@@ -145,7 +154,7 @@ fn parse_proc_pid_stat(pid: i32) -> std::io::Result<TaskStat> {
         }
     }
 
-    Ok(TaskStat { pid, comm, nvcsw })
+    Ok(TaskStat { pid, nvcsw })
 }
 
 fn get_all_pids() -> std::io::Result<Vec<i32>> {
@@ -196,7 +205,6 @@ struct Task {
     qtask: QueuedTask,    // queued task
     vruntime: u64,        // total vruntime (that determines the order how tasks are dispatched)
     timestamp: u64,       // task enqueue timestamp
-    is_interactive: bool, // task is interactive
 }
 
 // Sort tasks by their interactive status first (interactive tasks are always scheduled before
@@ -204,10 +212,8 @@ struct Task {
 // pid.
 impl Ord for Task {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other
-            .is_interactive
-            .cmp(&self.is_interactive)
-            .then_with(|| self.vruntime.cmp(&other.vruntime))
+        self.vruntime
+            .cmp(&other.vruntime)
             .then_with(|| self.timestamp.cmp(&other.timestamp))
             .then_with(|| self.qtask.pid.cmp(&other.qtask.pid))
     }
@@ -260,7 +266,7 @@ struct Scheduler<'a> {
     task_pool: TaskTree,                    // tasks ordered by vruntime
     task_map: TaskInfoMap,                  // map pids to the corresponding task information
     proc_stats: HashMap<i32, u64>,          // Task statistics from procfs
-    interactive_pids: Vec<i32>,             // List of interactive tasks
+    interactive_pids: HashMap<i32, u64>,    // Map of task PIDs to their avg_nvcsw metric
     min_vruntime: u64,                      // Keep track of the minimum vruntime across all tasks
     init_page_faults: u64,                  // Initial page faults counter
     slice_ns: u64,                          // Default time slice (in ns)
@@ -282,7 +288,7 @@ impl<'a> Scheduler<'a> {
             task_pool: TaskTree::new(),
             task_map: TaskInfoMap::new(),
             proc_stats: HashMap::new(),
-            interactive_pids: Vec::new(),
+            interactive_pids: HashMap::new(),
             min_vruntime: 0,
             init_page_faults: 0,
             slice_ns: opts.slice_us * NSEC_PER_USEC,
@@ -363,8 +369,25 @@ impl<'a> Scheduler<'a> {
         // Update total task cputime.
         task_info.sum_exec_runtime = task.sum_exec_runtime;
 
+        // Evaluate the target vruntime for the task.
+        let mut vruntime = task_info.vruntime;
+
+        // Strongly prioritize interactive tasks by scaling their vruntime in function of their
+        // average amount of context switches.
+        //
+        // This essentially creates multiple priority lanes (up to RL_MAX_VTIME_FACTOR + 1), where
+        // tasks with a higher rate of average context are scheduled before others. Tasks with the
+        // same average context switch rate are still ordered by their weighted used time slice.
+        let avg_nvcsw = self.interactive_pids.get(&task.pid).copied().unwrap_or(0);
+        vruntime = vruntime / (avg_nvcsw.min(RL_MAX_VTIME_FACTOR) + 1) + slice * 100 / task.weight;
+
+        // Make sure to not de-prioritize tasks too much to prevent starvation.
+        if vruntime > self.min_vruntime + self.slice_ns {
+            vruntime = self.min_vruntime + self.slice_ns;
+        }
+
         // Return the task vruntime.
-        task_info.vruntime
+        vruntime
     }
 
     // Drain all the tasks from the queued list, update their vruntime (Self::update_enqueued()),
@@ -376,14 +399,12 @@ impl<'a> Scheduler<'a> {
                     // Update task information and determine vruntime.
                     let vruntime = self.update_enqueued(&task);
                     let timestamp = Self::now();
-                    let is_interactive = self.interactive_pids.contains(&task.pid);
 
                     // Insert task in the task pool (ordered by vruntime).
                     self.task_pool.push(Task {
                         qtask: task,
                         vruntime,
                         timestamp,
-                        is_interactive,
                     });
                 }
                 Ok(None) => {
@@ -406,7 +427,7 @@ impl<'a> Scheduler<'a> {
     }
 
     // Dispatch the first task from the task pool (sending them to the BPF dispatcher).
-    fn dispatch_task(&mut self) {
+    fn dispatch_tasks(&mut self) {
         match self.task_pool.pop() {
             Some(task) => {
                 // Update global minimum vruntime.
@@ -423,7 +444,7 @@ impl<'a> Scheduler<'a> {
                 // Create a new task to dispatch.
                 let mut dispatched_task = DispatchedTask::new(&task.qtask);
 
-                // Assign the time slice to the task.
+                // Assign the time slice to the task and propagate the vruntime.
                 dispatched_task.slice_ns = slice_ns;
 
                 // Try to pick an idle CPU for the task.
@@ -457,7 +478,7 @@ impl<'a> Scheduler<'a> {
     // and dispatch them to the BPF part via the dispatched list).
     fn schedule(&mut self) {
         self.drain_queued_tasks();
-        self.dispatch_task();
+        self.dispatch_tasks();
 
         // Notify the dispatcher if there are still peding tasks to be processed,
         self.bpf.notify_complete(self.task_pool.tasks.len() as u64);
@@ -487,16 +508,9 @@ impl<'a> Scheduler<'a> {
     }
 
     fn sync_interactive_tasks(&mut self, stats: &[TaskStat]) {
-        self.interactive_pids.clear();
-
         for i in 0..stats.len() {
             let stat = &stats[i];
-
-            // At least 10 context switches per sec are required to consider the
-            // task as interactive.
-            if stat.nvcsw >= 10 {
-                self.interactive_pids.push(stat.pid);
-            }
+            self.interactive_pids.insert(stat.pid, stat.nvcsw);
         }
     }
 
@@ -506,7 +520,7 @@ impl<'a> Scheduler<'a> {
         for pid in get_all_pids()? {
             if let Ok(stat) = parse_proc_pid_stat(pid) {
                 // Retrieve the previous nvcsw value, or 0 if not present.
-                let prev_nvcsw = self.proc_stats.get(&stat.pid).copied().unwrap_or_default();
+                let prev_nvcsw = self.proc_stats.get(&stat.pid).copied().unwrap_or(0);
 
                 // Update the proc_stats entry with the new nvcsw.
                 self.proc_stats.insert(stat.pid, stat.nvcsw);
@@ -518,7 +532,6 @@ impl<'a> Scheduler<'a> {
                     let delta_nvcsw = stat.nvcsw.saturating_sub(prev_nvcsw);
                     new_stats.push(TaskStat {
                         pid: stat.pid,
-                        comm: stat.comm,
                         nvcsw: delta_nvcsw,
                     });
                 }
