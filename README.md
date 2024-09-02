@@ -344,6 +344,79 @@ $ cargo install scx_rusty
 
 and `scx_rusty` will be built and installed as `~/.cargo/bin/scx_rusty`.
 
+## Checking scx_stats
+
+With the implementation of scx_stats, schedulers no longer display statistics by default. To display the statistics from the currently running scheduler, a manual user action is required.
+Below are examples of how to do this.
+
+- To check the scheduler statistics, use the
+
+```
+scx_SCHEDNAME --monitor $INTERVAL
+```
+
+for example 0.5 - this will print the output every half a second
+
+```
+scx_bpfland --monitor 0.5
+```
+Some schedulers may implement different or multiple monitoring options. Refer to --help of each scheduler for details.
+Most schedulers also accept ` --stats $INTERVAL` to print the statistics directly from the scheduling instance.
+
+#### Examples
+
+- scx_bpfland
+
+```
+❯ scx_bpfland --monitor 5
+[scx_bpfland] tasks -> run:  3/4  int: 2  wait: 3    | nvcsw: 3    | dispatch -> dir: 0     prio: 73    shr: 9
+[scx_bpfland] tasks -> run:  4/4  int: 2  wait: 2    | nvcsw: 3    | dispatch -> dir: 1     prio: 3498  shr: 1385
+[scx_bpfland] tasks -> run:  4/4  int: 2  wait: 2    | nvcsw: 3    | dispatch -> dir: 1     prio: 2492  shr: 1311
+[scx_bpfland] tasks -> run:  4/4  int: 2  wait: 3    | nvcsw: 3    | dispatch -> dir: 2     prio: 3270  shr: 1748
+```
+
+- scx_rusty
+
+```
+❯ scx_rusty --monitor 5
+###### Thu, 29 Aug 2024 14:42:37 +0200, load balance @  -265.1ms ######
+cpu=   0.00 load=    0.17 mig=0 task_err=0 lb_data_err=0 time_used= 0.0ms
+tot=     15 sync_prev_idle= 0.00 wsync= 0.00
+prev_idle= 0.00 greedy_idle= 0.00 pin= 0.00
+dir= 0.00 dir_greedy= 0.00 dir_greedy_far= 0.00
+dsq=100.00 greedy_local= 0.00 greedy_xnuma= 0.00
+kick_greedy= 0.00 rep= 0.00
+dl_clamp=33.33 dl_preset=93.33
+slice=20000us
+direct_greedy_cpus=f
+  kick_greedy_cpus=f
+  NODE[00] load=  0.17 imbal=  +0.00 delta=  +0.00
+   DOM[00] load=  0.17 imbal=  +0.00 delta=  +0.00
+```
+
+- scx_lavd
+
+```
+❯ scx_lavd --monitor-sched-samples 1
+    stat: ('L'atency-critical, 'R'egular) (performance-'H'ungry, performance-'I'nsensitive) ('B'ig, li'T'tle) ('E'ligigle, 'G'reedy) ('P'reempting, 'N'ot)
+|    428 |  111375 | scx_lavd          | RHBGN |    2 |   -1 |        8703000 |  3000000 |   34812 |       12 |      70 |       20 |       0 |         0 |   1702362 |         0 |         0 |       22 |       84 |      822 |       53 |      1 |
+|    429 |  111375 | scx_lavd          | RHBGP |    2 |    1 |         145411 |  3000000 |    2472 |       51 |      71 |       20 |       0 |      2976 |     95521 |     26907 |     10348 |       71 |       85 |      393 |       26 |      1 |
+|    430 |  111375 | scx_lavd          | RHBGN |    3 |   -1 |          83886 |  3000000 |    1482 |       53 |      72 |       20 |       0 |      5681 |     51129 |     16819 |     21793 |       72 |       85 |     1024 |       67 |      1 |
+|    431 |  105466 | scx_lavd          | RHBEN |    2 |   -1 |              0 |  3000000 |       1 |       71 |      72 |       20 |       0 |      2037 |     38775 |      1404 |      1969 |       60 |       86 |      919 |       50 |      1 |
+```
+
+- scx_rustland
+
+```
+❯ scx_rustland --monitor 5
+[RustLand] tasks -> r:  1/4  w: 3 /3  | pf: 0     | dispatch -> u: 4     k: 0     c: 0     b: 0     f: 0     | cg: 0
+[RustLand] tasks -> r:  1/4  w: 2 /2  | pf: 0     | dispatch -> u: 28385 k: 0     c: 0     b: 0     f: 0     | cg: 0
+[RustLand] tasks -> r:  0/4  w: 4 /0  | pf: 0     | dispatch -> u: 25288 k: 0     c: 0     b: 0     f: 0     | cg: 0
+[RustLand] tasks -> r:  0/4  w: 2 /0  | pf: 0     | dispatch -> u: 30580 k: 0     c: 0     b: 0     f: 0     | cg: 0
+[RustLand] tasks -> r:  0/4  w: 2 /0  | pf: 0     | dispatch -> u: 30824 k: 0     c: 0     b: 0     f: 0     | cg: 0
+[RustLand] tasks -> r:  1/4  w: 1 /1  | pf: 0     | dispatch -> u: 33178 k: 0     c: 0     b: 0     f: 0     | cg: 0
+```
+
 ## systemd services
 
 See: [services](services/README.md)
