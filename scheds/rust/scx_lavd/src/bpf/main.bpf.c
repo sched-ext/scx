@@ -235,6 +235,7 @@ volatile bool		no_core_compaction;
 volatile bool		no_freq_scaling;
 volatile bool		no_prefer_turbo_core;
 volatile bool		is_powersave_mode;
+volatile bool		reinit_cpumask_for_performance;
 const volatile bool	is_autopilot_on;
 const volatile u32 	is_smt_active;
 const volatile u8	verbose;
@@ -929,8 +930,12 @@ int do_set_power_profile(s32 power_mode, int util)
 		 * Since the core compaction becomes off, we need to
 		 * reinitialize the active and overflow cpumask for performance
 		 * mode.
+		 *
+		 * Note that a verifier in an old kernel does not allow calling
+		 * bpf_cpumask_set_cpu(), so we defer the actual update to our
+		 * timer handler, update_sys_stat().
 		 */
-		reinit_active_cpumask_for_performance();
+		reinit_cpumask_for_performance = true;
 		debugln("Set the scheduler's power profile to performance mode: %d", util);
 		break;
 	case LAVD_PM_BALANCED:
@@ -938,6 +943,7 @@ int do_set_power_profile(s32 power_mode, int util)
 		no_freq_scaling = false;
 		no_prefer_turbo_core = false;
 		is_powersave_mode = false;
+		reinit_cpumask_for_performance = false;
 		debugln("Set the scheduler's power profile to balanced mode: %d", util);
 		break;
 	case LAVD_PM_POWERSAVE:
@@ -945,6 +951,7 @@ int do_set_power_profile(s32 power_mode, int util)
 		no_freq_scaling = false;
 		no_prefer_turbo_core = true;
 		is_powersave_mode = true;
+		reinit_cpumask_for_performance = false;
 		debugln("Set the scheduler's power profile to power-save mode: %d", util);
 		break;
 	default:
@@ -991,6 +998,11 @@ static void update_sys_stat(void)
 
 	if (!no_core_compaction)
 		do_core_compaction();
+
+	if (reinit_cpumask_for_performance) {
+		reinit_cpumask_for_performance = false;
+		reinit_active_cpumask_for_performance();
+	}
 }
 
 static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
@@ -1395,6 +1407,23 @@ static void update_stat_for_quiescent(struct task_struct *p,
 	cpuc->load_run_time_ns -= clamp_time_slice_ns(taskc->run_time_ns);
 }
 
+static bool match_task_core_type(struct task_ctx *taskc,
+				 struct cpu_ctx *cpuc_prev,
+				 struct sys_stat *stat_cur)
+{
+	/*
+	 * If a task is performance critical, it is better to run on a big core
+	 * even paying some cost looking for a big core.
+	 */
+	if (is_perf_cri(taskc, stat_cur) && !cpuc_prev->big_core)
+		return false;
+
+	/*
+	 * Otherwise, it doesn't matter where it runs.
+	 */
+	return true;
+}
+
 static bool could_run_on_prev(struct task_struct *p, s32 prev_cpu,
 			      struct bpf_cpumask *a_cpumask,
 			      struct bpf_cpumask *o_cpumask)
@@ -1494,7 +1523,8 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	bpf_cpumask_and(a_cpumask, p->cpus_ptr, cast_mask(active));
 	bpf_cpumask_and(o_cpumask, p->cpus_ptr, cast_mask(ovrflw));
 
-	if (could_run_on_prev(p, prev_cpu, a_cpumask, o_cpumask) &&
+	if (match_task_core_type(taskc, cpuc_prev, stat_cur) &&
+	    could_run_on_prev(p, prev_cpu, a_cpumask, o_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu_id = prev_cpu;
 		*is_idle = true;

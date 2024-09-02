@@ -11,8 +11,9 @@ leveraging the task's latency-criticality information in making various
 scheduling decisions (e.g., task's deadline, time slice, etc.). As the name
 implies, LAVD is based on the foundation of deadline scheduling. This scheduler
 consists of the BPF part and the rust part. The BPF part makes all the
-scheduling decisions; the rust part loads the BPF code and conducts other
-chores (e.g., printing sampled scheduling decisions). 
+scheduling decisions; the rust part provides high-level information (e.g., CPU
+topology) to the BPF code, loads the BPF code and conducts other chores (e.g.,
+printing sampled scheduling decisions).
 
 ## Typical Use Case
 
@@ -23,8 +24,9 @@ gaming, which requires high throughput and low tail latencies.
 
 ## Production Ready?
 
-Yes, scx_lavd should be performant across various CPU architectures, but it
-mainly targets single CCX / single-socket systems. It creates a separate
-scheduling domain per-LLC, per-core type (e.g., P or E core on Intel, big or
-LITTLE on ARM), and per-NUMA domain, so the default balanced profile should be
-performant.
+Yes, scx_lavd should be performant across various CPU architectures. It creates
+a separate scheduling domain per-LLC, per-core type (e.g., P or E core on
+Intel, big or LITTLE on ARM), and per-NUMA domain, so the default balanced
+profile or autopilot mode should be performant. It mainly targets single CCX
+/ single-socket systems.
+
