@@ -94,6 +94,12 @@ const volatile u64 nvcsw_max_thresh = 10ULL;
 volatile u64 nvcsw_avg_thresh;
 
 /*
+ * The CPU frequency performance level: a negative value will not affect the
+ * performance level and will be ignored.
+ */
+volatile s64 cpufreq_perf_lvl;
+
+/*
  * Time threshold to prevent task starvation.
  *
  * The scheduler processes tasks from various DSQs in the following order:
@@ -991,6 +997,10 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 
 void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 {
+	s32 cpu = scx_bpf_task_cpu(p);
+	u32 cap, cur;
+	u64 perf_lvl;
+
 	/* Update global vruntime */
 	if (vtime_before(vtime_now, p->scx.dsq_vtime))
 		vtime_now = p->scx.dsq_vtime;
@@ -1000,6 +1010,15 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	 * assigned CPU.
 	 */
 	p->scx.slice = task_slice(p);
+
+	/*
+	 * Scale target CPU frequency based on the performance level selected
+	 * from user-space.
+	 */
+	if (cpufreq_perf_lvl >= 0) {
+		perf_lvl = MIN(cpufreq_perf_lvl, SCX_CPUPERF_ONE);
+		scx_bpf_cpuperf_set(cpu, perf_lvl);
+	}
 
 	/* Update CPU interactive state */
 	if (is_task_interactive(p))
