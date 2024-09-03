@@ -192,6 +192,9 @@ static u64 vtime_now;
  * Per-CPU context.
  */
 struct cpu_ctx {
+	u64 tot_runtime;
+	u64 prev_runtime;
+	u64 last_running;
 	struct bpf_cpumask __kptr *l2_cpumask;
 	struct bpf_cpumask __kptr *l3_cpumask;
 };
@@ -542,7 +545,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, bool do_turbo)
 	 * idle state.
 	 */
 	if (p->nr_cpus_allowed == 1) {
-		if (is_kthread(p) && local_kthreads ||
+		if ((is_kthread(p) && local_kthreads) ||
 				scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 			return prev_cpu;
 		return -ENOENT;
@@ -1008,12 +1011,61 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 		prev->scx.slice = task_slice(prev);
 }
 
+/*
+ * Scale target CPU frequency based on the performance level selected
+ * from user-space and the CPU utilization.
+ */
+static void update_cpuperf_target(struct task_struct *p)
+{
+	u64 now = bpf_ktime_get_ns();
+	s32 cpu = scx_bpf_task_cpu(p);
+	u64 perf_lvl, delta_runtime, delta_t;
+	struct cpu_ctx *cctx;
+
+	if (cpufreq_perf_lvl >= 0) {
+		/*
+		 * Apply fixed cpuperf scaling factor determined by user-space.
+		 */
+		perf_lvl = MIN(cpufreq_perf_lvl, SCX_CPUPERF_ONE);
+		scx_bpf_cpuperf_set(cpu, perf_lvl);
+		return;
+	}
+
+	/*
+	 * Auto mode: always tset max performance for interactive tasks.
+	 */
+	if (is_task_interactive(p)) {
+		scx_bpf_cpuperf_set(cpu, SCX_CPUPERF_ONE);
+		return;
+	}
+
+	/*
+	 * For non-interactive tasks determine their cpufreq scaling factor as
+	 * a function of their CPU utilization.
+	 */
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return;
+
+	/*
+	 * Evaluate dynamic cpuperf scaling factor using the average CPU
+	 * utilization, normalized in the range [0 .. SCX_CPUPERF_ONE].
+	 */
+	delta_t = now - cctx->last_running;
+	delta_runtime = cctx->tot_runtime - cctx->prev_runtime;
+	perf_lvl = MIN(delta_runtime * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE);
+
+	/*
+	 * Apply the dynamic cpuperf scaling factor.
+	 */
+	scx_bpf_cpuperf_set(cpu, perf_lvl);
+
+	cctx->last_running = bpf_ktime_get_ns();
+	cctx->prev_runtime = cctx->tot_runtime;
+}
+
 void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 {
-	s32 cpu = scx_bpf_task_cpu(p);
-	u32 cap, cur;
-	u64 perf_lvl;
-
 	/* Update global vruntime */
 	if (vtime_before(vtime_now, p->scx.dsq_vtime))
 		vtime_now = p->scx.dsq_vtime;
@@ -1025,15 +1077,13 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	p->scx.slice = task_slice(p);
 
 	/*
-	 * Scale target CPU frequency based on the performance level selected
-	 * from user-space.
+	 * Adjust target CPU frequency before the task starts to run.
 	 */
-	if (cpufreq_perf_lvl >= 0) {
-		perf_lvl = MIN(cpufreq_perf_lvl, SCX_CPUPERF_ONE);
-		scx_bpf_cpuperf_set(cpu, perf_lvl);
-	}
+	update_cpuperf_target(p);
 
-	/* Update CPU interactive state */
+	/*
+	 * Update CPU interactive state.
+	 */
 	if (is_task_interactive(p))
 		__sync_fetch_and_add(&nr_interactive, 1);
 
@@ -1061,8 +1111,14 @@ static void update_task_interactive(struct task_ctx *tctx)
 void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 {
 	u64 now = bpf_ktime_get_ns();
+	s32 cpu = scx_bpf_task_cpu(p);
 	s64 delta_t;
+	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (cctx)
+		cctx->tot_runtime += now - cctx->last_running;
 
 	__sync_fetch_and_sub(&nr_running, 1);
 
