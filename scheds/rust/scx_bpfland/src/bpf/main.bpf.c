@@ -526,31 +526,36 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 		return -ENOENT;
 
 	/*
+	 * If the task isn't allowed to use its previously used CPU it means
+	 * that it's rapidly changing affinity. In this case it's pointless to
+	 * find an optimal idle CPU, just return and let the task being
+	 * dispatched to a global DSQ.
+	 */
+	if (!bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
+		return -ENOENT;
+
+	/*
+	 * For tasks that can run only on a single CPU, we can simply verify if
+	 * their only allowed CPU is still idle.
+	 *
+	 * Moreover, if local_kthreads is enabled, always allow to dispatch
+	 * per-CPU kthreads directly to their target CPU, independently on the
+	 * idle state.
+	 */
+	if (p->nr_cpus_allowed == 1) {
+		if (is_kthread(p) && local_kthreads ||
+				scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			return prev_cpu;
+		return -ENOENT;
+	}
+
+	/*
 	 * Acquire the CPU masks to determine the online and idle CPUs in the
 	 * system.
 	 */
 	online_cpumask = scx_bpf_get_online_cpumask();
 	idle_smtmask = scx_bpf_get_idle_smtmask();
 	idle_cpumask = scx_bpf_get_idle_cpumask();
-
-	/*
-	 * For tasks that can run only on a single CPU, we can simply verify if
-	 * their only allowed CPU is still usable, online and idle.
-	 *
-	 * Moreover, if local_kthreads is enabled, always dispatch per-CPU
-	 * kthreads directly to their target CPU, independently on its idle
-	 * state.
-	 */
-	if (p->nr_cpus_allowed == 1) {
-		if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
-		    bpf_cpumask_test_cpu(prev_cpu, online_cpumask) &&
-		    (is_kthread(p) && local_kthreads ||
-				scx_bpf_test_and_clear_cpu_idle(prev_cpu)))
-			cpu = prev_cpu;
-		else
-			cpu = -ENOENT;
-		goto out_put_cpumask;
-	}
 
 	/*
 	 * Scheduling domains of the previously used CPU.
