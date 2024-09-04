@@ -135,6 +135,10 @@ struct Opts {
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
     version: bool,
+
+    /// Show descriptions for statistics.
+    #[clap(long)]
+    help_stats: bool,
 }
 
 impl Opts {
@@ -788,6 +792,11 @@ fn main() -> Result<()> {
 
     if opts.version {
         println!("scx_lavd {}", *build_id::SCX_FULL_VERSION);
+        return Ok(());
+    }
+
+    if opts.help_stats {
+        stats::server_data(0).describe_meta(&mut std::io::stdout(), None)?;
         return Ok(());
     }
 

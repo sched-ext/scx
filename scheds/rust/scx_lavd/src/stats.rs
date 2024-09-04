@@ -13,28 +13,51 @@ use std::thread::ThreadId;
 use std::time::Duration;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
+#[stat(top)]
 pub struct SchedSample {
+    #[stat(desc = "Sequence ID of task log")]
     pub mseq: u64,
+    #[stat(desc = "Process ID")]
     pub pid: i32,
+    #[stat(desc = "Task name")]
     pub comm: String,
+    #[stat(desc = "LR: 'L'atency-critical or 'R'egular, HI: performance-'H'ungry or performance-'I'nsensitive, BT: 'B'ig or li'T'tle, EG: 'E'ligigle or 'G'reedy, PN: 'P'reempting or 'N'ot")]
     pub stat: String,
+    #[stat(desc = "CPU id where this task is scheduled on")]
     pub cpu_id: u32,
+    #[stat(desc = "Victim CPU to be preempted out (-1 = no preemption)")]
     pub victim_cpu: i32,
+    #[stat(desc = "Assigned virtual deadline")]
     pub vdeadline_delta_ns: u64,
+    #[stat(desc = "Assigned time slice")]
     pub slice_ns: u64,
+    #[stat(desc = "How greedy this task is in using CPU time (1000 = fair)")]
     pub greedy_ratio: u32,
+    #[stat(desc = "Latency criticality of this task")]
     pub lat_cri: u32,
+    #[stat(desc = "Average latency criticality in a system")]
     pub avg_lat_cri: u32,
+    #[stat(desc = "Static priority (20 == nice 0)")]
     pub static_prio: u16,
+    #[stat(desc = "Slice boost factor (number of consecutive full slice exhaustions)")]
     pub slice_boost_prio: u16,
+    #[stat(desc = "How often this task is scheduled per second")]
     pub run_freq: u64,
+    #[stat(desc = "Average runtime per schedule")]
     pub run_time_ns: u64,
+    #[stat(desc = "How frequently this task waits for other tasks")]
     pub wait_freq: u64,
+    #[stat(desc = "How frequently this task wakes other tasks")]
     pub wake_freq: u64,
+    #[stat(desc = "Performance criticality of this task")]
     pub perf_cri: u32,
+    #[stat(desc = "Average performance criticality in a system")]
     pub avg_perf_cri: u32,
+    #[stat(desc = "Target performance level of this CPU")]
     pub cpuperf_cur: u32,
+    #[stat(desc = "CPU utilization of this particular CPU")]
     pub cpu_util: u64,
+    #[stat(desc = "Number of active CPUs when core compaction is enabled")]
     pub nr_active: u32,
 }
 
@@ -205,13 +228,6 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
 }
 
 pub fn monitor_sched_samples(nr_samples: u64, shutdown: Arc<AtomicBool>) -> Result<()> {
-    println!("## stats");
-    println!("  LR: 'L'atency-critical or 'R'egular");
-    println!("  HI: performance-'H'ungry or performance-'I'nsensitive");
-    println!("  BT: 'B'ig or li'T'tle");
-    println!("  EG: 'E'ligigle or 'G'reedy");
-    println!("  PN: 'P'reempting or 'N'ot");
-
     scx_utils::monitor_stats::<SchedSamples>(
         &vec![
             ("target".into(), "sched_samples".into()),
