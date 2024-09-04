@@ -240,6 +240,18 @@ const volatile bool	is_autopilot_on;
 const volatile u32 	is_smt_active;
 const volatile u8	verbose;
 
+/*
+ * Statistics
+ */
+volatile int		power_mode;
+volatile u64		last_power_mode_clk;
+volatile u64		performance_mode_ns;
+volatile u64		balanced_mode_ns;
+volatile u64		powersave_mode_ns;
+
+/*
+ * Exit infomation
+ */
 UEI_DEFINE(uei);
 
 #define debugln(fmt, ...)						\
@@ -320,6 +332,7 @@ struct {
 
 static u16 get_nice_prio(struct task_struct *p);
 static int reinit_active_cpumask_for_performance(void);
+static void update_power_mode_time(void);
 
 static u64 sigmoid_u64(u64 v, u64 max)
 {
@@ -582,7 +595,15 @@ struct sys_stat_ctx {
 	s32		max_lat_cri;
 	s32		avg_lat_cri;
 	u64		sum_lat_cri;
-	u32		sched_nr;
+	u32		nr_sched;
+	u32		nr_migration;
+	u32		nr_preemption;
+	u32		nr_greedy;
+	u32		nr_perf_cri;
+	u32		nr_lat_cri;
+	u32		nr_big;
+	u32		nr_pc_on_big;
+	u32		nr_lc_on_big;
 	u64		sum_perf_cri;
 	u32		avg_perf_cri;
 	u64		new_util;
@@ -618,6 +639,30 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		c->load_actual += cpuc->load_actual;
 		c->load_run_time_ns += cpuc->load_run_time_ns;
 		c->tot_svc_time += cpuc->tot_svc_time;
+		cpuc->tot_svc_time = 0;
+
+		/*
+		 * Accumulate statistics.
+		 */
+		if (cpuc->big_core) {
+			c->nr_big += cpuc->nr_sched;
+			c->nr_pc_on_big += cpuc->nr_perf_cri;
+			c->nr_lc_on_big += cpuc->nr_lat_cri;
+		}
+		c->nr_perf_cri += cpuc->nr_perf_cri;
+		cpuc->nr_perf_cri = 0;
+
+		c->nr_lat_cri += cpuc->nr_lat_cri;
+		cpuc->nr_lat_cri = 0;
+
+		c->nr_migration += cpuc->nr_migration;
+		cpuc->nr_migration = 0;
+
+		c->nr_preemption += cpuc->nr_preemption;
+		cpuc->nr_preemption = 0;
+
+		c->nr_greedy += cpuc->nr_greedy;
+		cpuc->nr_greedy = 0;
 
 		/*
 		 * Accumulate task's latency criticlity information.
@@ -629,8 +674,8 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		c->sum_lat_cri += cpuc->sum_lat_cri;
 		cpuc->sum_lat_cri = 0;
 
-		c->sched_nr += cpuc->sched_nr;
-		cpuc->sched_nr = 0;
+		c->nr_sched += cpuc->nr_sched;
+		cpuc->nr_sched = 0;
 
 		if (cpuc->max_lat_cri > c->max_lat_cri)
 			c->max_lat_cri = cpuc->max_lat_cri;
@@ -701,7 +746,7 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 		c->compute_total = 0;
 	c->new_util = (c->compute_total * LAVD_CPU_UTIL_MAX)/c->duration_total;
 
-	if (c->sched_nr == 0) {
+	if (c->nr_sched == 0) {
 		/*
 		 * When a system is completely idle, it is indeed possible
 		 * nothing scheduled for an interval.
@@ -711,13 +756,15 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 		c->avg_perf_cri = c->stat_cur->avg_perf_cri;
 	}
 	else {
-		c->avg_lat_cri = c->sum_lat_cri / c->sched_nr;
-		c->avg_perf_cri = c->sum_perf_cri / c->sched_nr;
+		c->avg_lat_cri = c->sum_lat_cri / c->nr_sched;
+		c->avg_perf_cri = c->sum_perf_cri / c->nr_sched;
 	}
 }
 
 static void update_sys_stat_next(struct sys_stat_ctx *c)
 {
+	static int cnt = 0;
+
 	/*
 	 * Update the CPU utilization to the next version.
 	 */
@@ -741,11 +788,45 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 	stat_next->nr_violation =
 		calc_avg32(stat_cur->nr_violation, c->nr_violation);
 
-	stat_next->avg_svc_time = (c->sched_nr == 0) ? 0 :
-				  c->tot_svc_time / c->sched_nr;
+	stat_next->avg_svc_time = (c->nr_sched == 0) ? 0 :
+				  c->tot_svc_time / c->nr_sched;
 
 	stat_next->nr_queued_task =
 		calc_avg(stat_cur->nr_queued_task, c->nr_queued_task);
+
+
+	/*
+	 * Half the statistics every minitue so the statistics hold the
+	 * information on a few minutes.
+	 */
+	if (cnt++ == LAVD_SYS_STAT_DECAY_TIMES) {
+		cnt = 0;
+		stat_next->nr_sched >>= 1;
+		stat_next->nr_migration >>= 1;
+		stat_next->nr_preemption >>= 1;
+		stat_next->nr_greedy >>= 1;
+		stat_next->nr_perf_cri >>= 1;
+		stat_next->nr_lat_cri >>= 1;
+		stat_next->nr_big >>= 1;
+		stat_next->nr_pc_on_big >>= 1;
+		stat_next->nr_lc_on_big >>= 1;
+
+		__sync_fetch_and_sub(&performance_mode_ns, performance_mode_ns/2);
+		__sync_fetch_and_sub(&balanced_mode_ns, balanced_mode_ns/2);
+		__sync_fetch_and_sub(&powersave_mode_ns, powersave_mode_ns/2);
+	}
+
+	stat_next->nr_sched += c->nr_sched;
+	stat_next->nr_migration += c->nr_migration;
+	stat_next->nr_preemption += c->nr_preemption;
+	stat_next->nr_greedy += c->nr_greedy;
+	stat_next->nr_perf_cri += c->nr_perf_cri;
+	stat_next->nr_lat_cri += c->nr_lat_cri;
+	stat_next->nr_big += c->nr_big;
+	stat_next->nr_pc_on_big += c->nr_pc_on_big;
+	stat_next->nr_lc_on_big += c->nr_lc_on_big;
+
+	update_power_mode_time();
 }
 
 static void do_update_sys_stat(void)
@@ -905,21 +986,49 @@ unlock_out:
 	bpf_rcu_read_unlock();
 }
 
-int do_set_power_profile(s32 power_mode, int util)
+static void update_power_mode_time(void)
 {
-	static s32 cur_mode = LAVD_PM_MAX;
+	u64 now = bpf_ktime_get_ns();
+	u64 delta;
 
+	if (last_power_mode_clk == 0)
+		last_power_mode_clk = now;
+
+	delta = now - last_power_mode_clk;
+	last_power_mode_clk = now;
+
+	switch (power_mode) {
+	case LAVD_PM_PERFORMANCE:
+		__sync_fetch_and_add(&performance_mode_ns, delta);
+		break;
+	case LAVD_PM_BALANCED:
+		__sync_fetch_and_add(&balanced_mode_ns, delta);
+		break;
+	case LAVD_PM_POWERSAVE:
+		__sync_fetch_and_add(&powersave_mode_ns, delta);
+		break;
+	}
+}
+
+
+static int do_set_power_profile(s32 pm, int util)
+{
 	/*
 	 * Skip setting the mode if alreay in the same mode.
 	 */
-	if (cur_mode == power_mode)
+	if (power_mode == pm)
 		return 0;
-	cur_mode = power_mode;
+
+	/*
+	 * Update power mode time
+	 */
+	update_power_mode_time();
+	power_mode = pm;
 
 	/*
 	 * Change the power mode.
 	 */
-	switch (power_mode) {
+	switch (pm) {
 	case LAVD_PM_PERFORMANCE:
 		no_core_compaction = true;
 		no_freq_scaling = true;
@@ -1274,6 +1383,7 @@ static void update_stat_for_running(struct task_struct *p,
 				    struct task_ctx *taskc,
 				    struct cpu_ctx *cpuc)
 {
+	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 wait_period, interval;
 	u64 now = bpf_ktime_get_ns();
 	u64 wait_freq_ft, wake_freq_ft, perf_cri;
@@ -1306,7 +1416,7 @@ static void update_stat_for_running(struct task_struct *p,
 	if (cpuc->max_lat_cri < taskc->lat_cri)
 		cpuc->max_lat_cri = taskc->lat_cri;
 	cpuc->sum_lat_cri += taskc->lat_cri;
-	cpuc->sched_nr++;
+	cpuc->nr_sched++;
 
 	/*
 	 * It is clear there is no need to consider the suspended duration
@@ -1345,6 +1455,30 @@ static void update_stat_for_running(struct task_struct *p,
 	 * Update task state when starts running.
 	 */
 	taskc->last_running_clk = now;
+
+	/*
+	 * Update statistics information.
+	 */
+	if (taskc->cpu_id != cpuc->cpu_id) {
+		taskc->cpu_id = cpuc->cpu_id;
+		cpuc->nr_migration++;
+	}
+
+	if (taskc->victim_cpu >= 0)
+		cpuc->nr_preemption++;
+	
+	if (is_lat_cri(taskc, stat_cur)) {
+		cpuc->nr_lat_cri++;
+//		debugln("------------------------ lc = %llu", cpuc->nr__cri);
+	}
+
+	if (is_perf_cri(taskc, stat_cur)) {
+		cpuc->nr_perf_cri++;
+//		debugln("------------------------ pc = %llu", cpuc->nr_perf_cri);
+	}
+
+	if (is_greedy(taskc))
+		cpuc->nr_greedy++;
 }
 
 static u64 calc_svc_time(struct task_struct *p, struct task_ctx *taskc)

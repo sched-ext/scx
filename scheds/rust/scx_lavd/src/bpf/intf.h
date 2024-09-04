@@ -81,6 +81,7 @@ enum consts {
 	LAVD_PREEMPT_TICK_MARGIN	= (100ULL * NSEC_PER_USEC),
 
 	LAVD_SYS_STAT_INTERVAL_NS	= (50ULL * NSEC_PER_MSEC),
+	LAVD_SYS_STAT_DECAY_TIMES	= (2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS,
 	LAVD_CC_PER_CORE_MAX_CTUIL	= 500, /* maximum per-core CPU utilization */
 	LAVD_CC_PER_TURBO_CORE_MAX_CTUIL = 750, /* maximum per-core CPU utilization for a turbo core */
 	LAVD_CC_NR_ACTIVE_MIN		= 1, /* num of mininum active cores */
@@ -122,6 +123,16 @@ struct sys_stat {
 
 	volatile u32	nr_violation;	/* number of utilization violation */
 	volatile u32	nr_active;	/* number of active cores */
+
+	volatile u64	nr_sched;	/* total scheduling so far */
+	volatile u64	nr_migration;	/* number of task migration */
+	volatile u64	nr_preemption;	/* number of preemption */
+	volatile u64	nr_greedy;	/* number of greedy tasks scheduled */
+	volatile u64	nr_perf_cri;	/* number of performance-critical tasks scheduled */
+	volatile u64	nr_lat_cri;	/* number of latency-critical tasks scheduled */
+	volatile u64	nr_big;		/* scheduled on big core */
+	volatile u64	nr_pc_on_big;	/* performance-critical tasks scheduled on big core */
+	volatile u64	nr_lc_on_big;	/* latency-critical tasks scheduled on big core */
 };
 
 /*
@@ -169,7 +180,7 @@ struct cpu_ctx {
 	 */
 	volatile u32	max_lat_cri;	/* maximum latency criticality */
 	volatile u32	sum_lat_cri;	/* sum of latency criticality */
-	volatile u32	sched_nr;	/* number of schedules */
+	volatile u32	nr_sched;	/* number of schedules */
 
 	/*
 	 * Information used to keep track of performance criticality
@@ -205,6 +216,15 @@ struct cpu_ctx {
 	struct bpf_cpumask __kptr *tmp_o_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_t_mask;	/* temporary cpu mask */
 	struct bpf_cpumask __kptr *tmp_t2_mask;	/* temporary cpu mask */
+
+	/*
+	 * Information for statistics.
+	 */
+	volatile u32	nr_migration;	/* number of migrations */
+	volatile u32	nr_preemption;	/* number of migrations */
+	volatile u32	nr_greedy;	/* number of greedy tasks scheduled */
+	volatile u32	nr_perf_cri;
+	volatile u32	nr_lat_cri;
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 /*
@@ -242,12 +262,18 @@ struct task_ctx {
 	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
 	u8	wakeup_ft;		/* regular wakeup = 1, sync wakeup = 2 */
+
 	/*
 	 * Task's performance criticality
 	 */
 	u8	on_big;			/* executable on a big core */
 	u8	on_little;		/* executable on a little core */
 	u32	perf_cri;		/* performance criticality of a task */
+
+	/*
+	 * Information for statistics collection
+	 */
+	u32	cpu_id;			/* CPU ID scheduled on */
 };
 
 /*
