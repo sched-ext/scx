@@ -197,8 +197,8 @@ char _license[] SEC("license") = "GPL";
 volatile u64		nr_cpus_onln;
 static volatile u64	nr_cpus_big;
 
-static struct sys_stat	__sys_stats[2];
-static volatile int	__sys_stat_idx;
+struct sys_stat	__sys_stats[2];
+volatile int	__sys_stat_idx;
 
 private(LAVD) struct bpf_cpumask __kptr *turbo_cpumask; /* CPU mask for turbo CPUs */
 private(LAVD) struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs */

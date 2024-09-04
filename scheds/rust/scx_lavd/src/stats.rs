@@ -13,9 +13,55 @@ use std::thread::ThreadId;
 use std::time::Duration;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
+pub struct SysStats {
+    #[stat(desc = "Sequence ID of this messge")]
+    pub mseq: u64,
+
+    #[stat(desc = "Average runtime per schedule")]
+    pub avg_svc_time: u64,
+
+    #[stat(desc = "Number of runnable tasks in runqueues")]
+    pub nr_queued_task: u64,
+
+    #[stat(desc = "Number of active CPUs when core compaction is enabled")]
+    pub nr_active: u32,
+}
+
+impl SysStats {
+    pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
+        writeln!(
+            w,
+            "| {} | {} | {} | {} |",
+            "mseq",
+            "avg_svc_time",
+            "nr_queued_task",
+            "nr_active",
+        )?;
+        Ok(())
+    }
+
+    fn format<W: Write>(&self, w: &mut W) -> Result<()> {
+        if self.mseq % 32 == 1 {
+            Self::format_header(w)?;
+        }
+
+        writeln!(
+            w,
+            "| {} | {} | {} | {} |",
+            self.mseq,
+            self.avg_svc_time,
+            self.nr_queued_task,
+            self.nr_active,
+        )?;
+        Ok(())
+    }
+
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct SchedSample {
-    #[stat(desc = "Sequence ID of task log")]
+    #[stat(desc = "Sequence ID of this message")]
     pub mseq: u64,
     #[stat(desc = "Process ID")]
     pub pid: i32,
@@ -149,6 +195,9 @@ pub struct SchedSamples {
 #[derive(Debug)]
 pub enum StatsReq {
     NewSampler(ThreadId),
+    SysStatsReq {
+        tid: ThreadId,
+    },
     SchedSamplesNr {
         tid: ThreadId,
         nr_samples: u64,
@@ -157,7 +206,15 @@ pub enum StatsReq {
 }
 
 impl StatsReq {
-    fn from_args(
+    fn from_args_stats(
+        tid: ThreadId,
+    ) -> Result<Self> {
+        Ok(Self::SysStatsReq {
+            tid,
+        })
+    }
+
+    fn from_args_samples(
         tid: ThreadId,
         nr_cpus_onln: u64,
         args: &BTreeMap<String, String>,
@@ -187,12 +244,12 @@ impl StatsReq {
 pub enum StatsRes {
     Ack,
     Bye,
+    SysStats(SysStats),
     SchedSamples(SchedSamples),
 }
 
 pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
-    let samples_open: Box<dyn StatsOpener<StatsReq, StatsRes>> =
-        Box::new(move |(req_ch, res_ch)| {
+    let open: Box<dyn StatsOpener<StatsReq, StatsRes>> = Box::new(move |(req_ch, res_ch)| {
             let tid = std::thread::current().id();
             req_ch.send(StatsReq::NewSampler(tid))?;
             match res_ch.recv()? {
@@ -202,7 +259,31 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
 
             let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
                 Box::new(move |args, (req_ch, res_ch)| {
-                    let req = StatsReq::from_args(tid, nr_cpus_onln, args)?;
+                    let req = StatsReq::from_args_stats(tid)?;
+                    req_ch.send(req)?;
+
+                    let stats = match res_ch.recv()? {
+                        StatsRes::SysStats(v) => v,
+                        StatsRes::Bye => bail!("preempted by another sampler"),
+                        res => bail!("invalid response: {:?}", &res),
+                    };
+
+                    stats.to_json()
+                });
+            Ok(read)
+        });
+
+    let samples_open: Box<dyn StatsOpener<StatsReq, StatsRes>> = Box::new(move |(req_ch, res_ch)| {
+            let tid = std::thread::current().id();
+            req_ch.send(StatsReq::NewSampler(tid))?;
+            match res_ch.recv()? {
+                StatsRes::Ack => {}
+                res => bail!("invalid response: {:?}", &res),
+            }
+
+            let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
+                Box::new(move |args, (req_ch, res_ch)| {
+                    let req = StatsReq::from_args_samples(tid, nr_cpus_onln, args)?;
                     req_ch.send(req)?;
 
                     let samples = match res_ch.recv()? {
@@ -217,6 +298,14 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
         });
 
     StatsServerData::new()
+        .add_meta(SysStats::meta())
+        .add_ops(
+            "top",
+            StatsOps {
+                open: open,
+                close: None,
+            },
+        )
         .add_meta(SchedSample::meta())
         .add_ops(
             "sched_samples",
@@ -243,4 +332,14 @@ pub fn monitor_sched_samples(nr_samples: u64, shutdown: Arc<AtomicBool>) -> Resu
             Ok(())
         },
     )
+}
+
+pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
+    scx_utils::monitor_stats::<SysStats>(
+        &vec![],
+        intv,
+        || shutdown.load(Ordering::Relaxed),
+        |sysstats| sysstats.format(&mut std::io::stdout()),
+    );
+    Ok(())
 }

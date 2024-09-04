@@ -12,6 +12,7 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 
 mod stats;
+use stats::SysStats;
 use stats::SchedSample;
 use stats::SchedSamples;
 use stats::StatsReq;
@@ -121,6 +122,14 @@ struct Opts {
     /// if desired.
     #[clap(long = "no-freq-scaling", action = clap::ArgAction::SetTrue)]
     no_freq_scaling: bool,
+
+    /// Enable stats monitoring with the specified interval.
+    #[clap(long)]
+    stats: Option<f64>,
+
+    /// Run in stats monitoring mode with the specified interval. Scheduler is not launched.
+    #[clap(long)]
+    monitor: Option<f64>,
 
     /// Run in monitoring mode. Show the specified number of scheduling
     /// samples every second.
@@ -452,8 +461,9 @@ struct Scheduler<'a> {
     rb_mgr: libbpf_rs::RingBuffer<'static>,
     intrspc: introspec,
     intrspc_rx: Receiver<SchedSample>,
-    sampler_tid: Option<ThreadId>,
+    monitor_tid: Option<ThreadId>,
     stats_server: StatsServer<StatsReq, StatsRes>,
+    mseq_id: u64,
 }
 
 impl<'a> Scheduler<'a> {
@@ -498,8 +508,9 @@ impl<'a> Scheduler<'a> {
             rb_mgr,
             intrspc: introspec::new(),
             intrspc_rx,
-            sampler_tid: None,
+            monitor_tid: None,
             stats_server,
+            mseq_id: 0,
         })
     }
 
@@ -634,15 +645,35 @@ impl<'a> Scheduler<'a> {
         Ok(match req {
             StatsReq::NewSampler(tid) => {
                 self.rb_mgr.consume().unwrap();
-                self.sampler_tid = Some(*tid);
+                self.monitor_tid = Some(*tid);
                 StatsRes::Ack
+            }
+            StatsReq::SysStatsReq {
+                tid,
+            } => {
+                if Some(*tid) != self.monitor_tid {
+                    return Ok(StatsRes::Bye);
+                }
+                self.mseq_id += 1;
+
+                let mseq = self.mseq_id;
+                let avg_svc_time = self.skel.maps.bss_data.__sys_stats[0].avg_svc_time;
+                let nr_queued_task = self.skel.maps.bss_data.__sys_stats[0].nr_queued_task;
+                let nr_active = self.skel.maps.bss_data.__sys_stats[0].nr_active;
+
+                StatsRes::SysStats(SysStats {
+                    mseq,
+                    avg_svc_time,
+                    nr_queued_task,
+                    nr_active,
+                })
             }
             StatsReq::SchedSamplesNr {
                 tid,
                 nr_samples,
                 interval_ms,
             } => {
-                if Some(*tid) != self.sampler_tid {
+                if Some(*tid) != self.monitor_tid {
                     return Ok(StatsRes::Bye);
                 }
 
@@ -815,6 +846,17 @@ fn main() -> Result<()> {
         let jh = std::thread::spawn(move || stats::monitor_sched_samples(nr_samples, shutdown_copy).unwrap());
         let _ = jh.join();
         return Ok(());
+    }
+
+    if let Some(intv) = opts.monitor.or(opts.stats) {
+        let shutdown_copy = shutdown.clone();
+        let jh = std::thread::spawn(move || {
+            stats::monitor(Duration::from_secs_f64(intv), shutdown_copy).unwrap()
+        });
+        if opts.monitor.is_some() {
+            let _ = jh.join();
+            return Ok(());
+        }
     }
 
     let mut open_object = MaybeUninit::uninit();
