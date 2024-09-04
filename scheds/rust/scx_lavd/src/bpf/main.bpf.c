@@ -1626,13 +1626,14 @@ start_omask:
 	/*
 	 * If the task cannot run on either active or overflow cores,
 	 * stay on the previous core (if it is okay) or one of its taskset.
+	 * Then, put the CPU to the overflow set.
 	 */
+start_any_mask:
 	if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
 		cpu_id = prev_cpu;
-	else {
-start_any_mask:
+	else
 		cpu_id = bpf_cpumask_any_distribute(p->cpus_ptr);
-	}
+	bpf_cpumask_set_cpu(cpu_id, ovrflw);
 
 	/*
 	 * Note that we don't need to kick the picked CPU here since the
