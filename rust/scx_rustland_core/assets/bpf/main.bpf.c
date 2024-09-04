@@ -267,6 +267,14 @@ static inline bool is_usersched_task(const struct task_struct *p)
 }
 
 /*
+ * Return true if the target task @p is a kernel thread.
+ */
+static inline bool is_kthread(const struct task_struct *p)
+{
+	return p->flags & PF_KTHREAD;
+}
+
+/*
  * Flag used to wake-up the user-space scheduler.
  */
 static volatile u32 usersched_needed;
@@ -639,6 +647,22 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (is_usersched_task(p))
 		return;
+
+	/*
+	 * Always dispatch per-CPU kthreads directly on their target CPU.
+	 *
+	 * This allows to prioritize critical kernel threads that may
+	 * potentially stall the entire system if they are blocked for too long
+	 * (i.e., ksoftirqd/N, rcuop/N, etc.).
+	 */
+	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
+		s32 cpu = scx_bpf_task_cpu(p);
+		u64 dsq_id = cpu_to_dsq(cpu);
+
+		scx_bpf_dispatch_vtime(p, dsq_id, SCX_SLICE_DFL, 0, 0);
+		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		return;
+	}
 
 	/*
 	 * Add tasks to the @queued list, they will be processed by the
