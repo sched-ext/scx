@@ -1294,13 +1294,6 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc,
 	}
 
 	/*
-	 * Boost time slice based on CPU's capacity to assign a longer time
-	 * slice for a more performant CPU for making each CPU's job processing
-	 * throughput similar.
-	 */
-	slice = slice * cpuc->capacity / 1024;
-
-	/*
 	 * If a task has yet to be scheduled (i.e., a freshly forked task or a
 	 * task just under sched_ext), don't give a fair amount of time slice
 	 * until knowing its properties. This helps to mitigate potential
