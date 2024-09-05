@@ -140,9 +140,9 @@ UEI_DEFINE(uei);
 private(BPFLAND) struct bpf_cpumask __kptr *primary_cpumask;
 
 /*
- * Mask of turbo boosted CPUs in the system.
+ * Mask of preferred CPUs in the system.
  */
-private(BPFLAND) struct bpf_cpumask __kptr *turbo_cpumask;
+private(BPFLAND) struct bpf_cpumask __kptr *preferred_cpumask;
 
 /*
  * Mask of offline CPUs, used to properly support CPU hotplugging.
@@ -504,10 +504,10 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
  * to handle these mistakes in favor of a more efficient response and a reduced
  * scheduling overhead.
  */
-static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, bool do_turbo)
+static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, bool do_preferred)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
-	struct bpf_cpumask *primary, *turbo, *l2_domain, *l3_domain;
+	struct bpf_cpumask *primary, *preferred, *l2_domain, *l3_domain;
 	struct bpf_cpumask *p_mask, *l2_mask, *l3_mask;
 	struct task_ctx *tctx;
 	struct cpu_ctx *cctx;
@@ -523,8 +523,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, bool do_turbo)
 	primary = primary_cpumask;
 	if (!primary)
 		return -ENOENT;
-	turbo = turbo_cpumask;
-	if (!turbo)
+	preferred = preferred_cpumask;
+	if (!preferred)
 		return -ENOENT;
 
 	/*
@@ -594,16 +594,16 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, bool do_turbo)
 	/*
 	 * Determine the task's scheduling domain.
 	 *
-	 * Try to dispatch on the turbo boosted CPUs first. If we can't find
-	 * any idle CPU, re-try again with the primary scheduling domain.
+	 * Try to dispatch on the preferred CPUs first. If we can't find any
+	 * idle CPU, re-try again with the primary scheduling domain.
 	 */
-	if (do_turbo &&
-	    !bpf_cpumask_empty(cast_mask(turbo)) &&
-	    !bpf_cpumask_equal(cast_mask(turbo), cast_mask(primary))) {
-		bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(turbo));
+	if (do_preferred &&
+	    !bpf_cpumask_empty(cast_mask(preferred)) &&
+	    !bpf_cpumask_equal(cast_mask(preferred), cast_mask(primary))) {
+		bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(preferred));
 	} else {
 		bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(primary));
-		do_turbo = false;
+		do_preferred = false;
 	}
 
 	/*
@@ -666,10 +666,10 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, bool do_turbo)
 		}
 
 		/*
-		 * When considering the turbo domain (first idle CPU selection
-		 * pass) try to stay on the same LLC.
+		 * When considering the preferred domain (first idle CPU
+		 * selection pass) try to stay on the same LLC.
 		 */
-		if (do_turbo) {
+		if (do_preferred) {
 			cpu = -ENOENT;
 			goto out_put_cpumask;
 		}
@@ -716,10 +716,10 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, bool do_turbo)
 	}
 
 	/*
-	 * When considering the turbo domain (first idle CPU selection pass)
-	 * try to stay on the same LLC.
+	 * When considering the preferred domain (first idle CPU selection
+	 * pass) try to stay on the same LLC.
 	 */
-	if (do_turbo) {
+	if (do_preferred) {
 		cpu = -ENOENT;
 		goto out_put_cpumask;
 	}
@@ -1351,20 +1351,20 @@ int enable_sibling_cpu(struct domain_arg *input)
 }
 
 SEC("syscall")
-int enable_turbo_cpu(struct cpu_arg *input)
+int enable_preferred_cpu(struct cpu_arg *input)
 {
 	struct bpf_cpumask *mask;
 	int err = 0;
 
 	/* Make sure the primary CPU mask is initialized */
-	err = init_cpumask(&turbo_cpumask);
+	err = init_cpumask(&preferred_cpumask);
 	if (err)
 		return err;
 	/*
-	 * Enable the target CPU in the turbo boost scheduling domain.
+	 * Enable the target CPU in the preferred scheduling domain.
 	 */
 	bpf_rcu_read_lock();
-	mask = turbo_cpumask;
+	mask = preferred_cpumask;
 	if (mask) {
 		s32 cpu = input->cpu_id;
 
@@ -1465,8 +1465,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	if (err)
 		return err;
 
-	/* Initialize the primary scheduling domain */
-	err = init_cpumask(&turbo_cpumask);
+	/* Initialize the preferred scheduling domain */
+	err = init_cpumask(&preferred_cpumask);
 	if (err)
 		return err;
 
