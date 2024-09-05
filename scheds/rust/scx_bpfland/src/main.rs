@@ -164,17 +164,26 @@ struct Opts {
     #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
     local_kthreads: bool,
 
+    /// Specifies a group of preferred CPUs, represented as a bitmask in hex (e.g., 0xff), that the
+    /// scheduler will try to prioritize to dispatch tasks.
+    ///
+    /// Special values:
+    ///  - "auto" = automaticlly detect the fastest CPUs based on the current scheduler and system
+    ///  energy profiles.
+    #[clap(short = 'M', long, default_value = "auto")]
+    preferred_domain: String,
+
     /// Specifies the initial set of CPUs, represented as a bitmask in hex (e.g., 0xff), that the
     /// scheduler will use to dispatch tasks, until the system becomes saturated, at which point
     /// tasks may overflow to other available CPUs.
     ///
     /// Special values:
+    ///  - "auto" = automatically detect the CPUs based on the current energy profile
     ///  - "performance" = automatically detect and prioritize the fastest CPUs
     ///  - "powersave" = automatically detect and prioritize the slowest CPUs
-    ///  - "auto" = automatically detect the CPUs based on the current energy profile
     ///  - "all" = all CPUs assigned to the primary domain
     ///  - "none" = no prioritization, tasks are dispatched on the first CPU available
-    #[clap(short = 'm', long, default_value = "all")]
+    #[clap(short = 'm', long, default_value = "auto")]
     primary_domain: String,
 
     /// Disable L2 cache awareness.
@@ -284,11 +293,11 @@ impl<'a> Scheduler<'a> {
         // Initialize CPU topology.
         let topo = Topology::new().unwrap();
 
-        // Initialize the primary scheduling domain (based on the --primary-domain option).
+        // Initialize the primary scheduling domain and the preferred domain.
         let energy_profile = Self::read_energy_profile();
-        if let Err(err) = Self::init_turbo_domain(&mut skel, &opts.primary_domain)
+        if let Err(err) = Self::init_preferred_domain(&mut skel, &opts.preferred_domain)
         {
-            warn!("failed to initialize turbo domain: error {}", err);
+            warn!("failed to initialize preferred domain: error {}", err);
         }
         if let Err(err) = Self::init_energy_domain(&mut skel, &opts.primary_domain, &energy_profile)
         {
@@ -371,8 +380,8 @@ impl<'a> Scheduler<'a> {
         res.unwrap_or_else(|_: String| "none".to_string())
     }
 
-    fn enable_turbo_cpu(skel: &mut BpfSkel<'_>, cpu: i32) -> Result<(), u32> {
-        let prog = &mut skel.progs.enable_turbo_cpu;
+    fn enable_preferred_cpu(skel: &mut BpfSkel<'_>, cpu: i32) -> Result<(), u32> {
+        let prog = &mut skel.progs.enable_preferred_cpu;
         let mut args = cpu_arg {
             cpu_id: cpu as c_int,
         };
@@ -401,29 +410,29 @@ impl<'a> Scheduler<'a> {
         Cpumask::from_str(&cpus_to_cpumask(&cpus))
     }
 
-    fn init_turbo_domain(
+    fn init_preferred_domain(
         skel: &mut BpfSkel<'_>,
-        primary_domain: &String,
+        preferred_domain: &String,
     ) -> Result<()> {
-        let domain = match primary_domain.as_str() {
+        let domain = match preferred_domain.as_str() {
             "auto" => {
                 Self::epp_to_cpumask(Powermode::Turbo)?
             }
             &_ => {
-                Cpumask::new()?
+                Cpumask::from_str(&preferred_domain)?
             }
         };
 
-        info!("Turbo CPU domain = 0x{:x}", domain);
+        info!("preferred CPU domain = 0x{:x}", domain);
 
-        // Clear the turbo domain by passing a negative CPU id.
-        if let Err(err) = Self::enable_turbo_cpu(skel, -1) {
-            warn!("failed to reset primary domain: error {}", err);
+        // Clear the preferred domain by passing a negative CPU id.
+        if let Err(err) = Self::enable_preferred_cpu(skel, -1) {
+            warn!("failed to reset preferred domain: error {}", err);
         }
         for cpu in 0..*NR_CPU_IDS {
             if domain.test_cpu(cpu) {
-                if let Err(err) = Self::enable_turbo_cpu(skel, cpu as i32) {
-                    warn!("failed to add CPU {} to turbo domain: error {}", cpu, err);
+                if let Err(err) = Self::enable_preferred_cpu(skel, cpu as i32) {
+                    warn!("failed to add CPU {} to preferred domain: error {}", cpu, err);
                 }
             }
         }
@@ -490,9 +499,9 @@ impl<'a> Scheduler<'a> {
     ) -> Result<()> {
         let perf_lvl: i64 = match primary_domain.as_str() {
             "auto" => match energy_profile.as_str() {
+                "performance" => 1024,
                 "power" | "powersave" => 0,
-                "balance_power" => -1,
-                &_ => 1024,
+                &_ => -1,
             },
             "performance" => 1024,
             "powersave" => 0,
@@ -500,10 +509,11 @@ impl<'a> Scheduler<'a> {
         };
         info!(
             "cpufreq performance level: {}",
-            if perf_lvl < 0 {
-                "auto".into()
-            } else {
-                perf_lvl.to_string()
+            match perf_lvl {
+                1024 => "max".into(),
+                0 => "min".into(),
+                n if n < 0 => "auto".into(),
+                _ => perf_lvl.to_string(),
             }
         );
         skel.maps.bss_data.cpufreq_perf_lvl = perf_lvl;
@@ -518,11 +528,11 @@ impl<'a> Scheduler<'a> {
                 self.energy_profile = energy_profile.clone();
 
                 if self.opts.primary_domain == "auto" {
-                    if let Err(err) = Self::init_turbo_domain(
+                    if let Err(err) = Self::init_preferred_domain(
                         &mut self.skel,
-                        &self.opts.primary_domain,
+                        &self.opts.preferred_domain,
                     ) {
-                        warn!("failed to refresh turbo domain: error {}", err);
+                        warn!("failed to refresh preferred domain: error {}", err);
                     }
                     if let Err(err) = Self::init_energy_domain(
                         &mut self.skel,
