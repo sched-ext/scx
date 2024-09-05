@@ -221,16 +221,17 @@ struct {
 	__type(value, struct task_ctx);
 } task_ctx_stor SEC(".maps");
 
-/* Return a local task context from a generic task */
-struct task_ctx *lookup_task_ctx(const struct task_struct *p)
+/*
+ * Return a local task context from a generic task or NULL if the context
+ * doesn't exist.
+ */
+struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 {
-	struct task_ctx *tctx;
-
-	tctx = bpf_task_storage_get(&task_ctx_stor, (struct task_struct *)p, 0, 0);
-	if (!tctx) {
-		scx_bpf_error("Failed to lookup task ctx for %s", p->comm);
-		return NULL;
-	}
+	struct task_ctx *tctx = bpf_task_storage_get(&task_ctx_stor,
+						(struct task_struct *)p, 0, 0);
+	if (!tctx)
+		dbg_msg("warning: failed to get task context for pid=%d (%s)",
+			p->pid, p->comm);
 	return tctx;
 }
 
@@ -357,7 +358,7 @@ static inline u64 task_slice(struct task_struct *p)
 {
 	struct task_ctx *tctx;
 
-	tctx = lookup_task_ctx(p);
+	tctx = try_lookup_task_ctx(p);
 	if (!tctx || !tctx->slice_ns)
 		return SCX_SLICE_DFL;
 	return tctx->slice_ns;
@@ -378,9 +379,15 @@ static void dispatch_task(struct task_struct *p, u64 dsq_id,
 	/*
 	 * Update task's time slice in its context.
 	 */
-	tctx = lookup_task_ctx(p);
-	if (!tctx)
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx) {
+		/*
+		 * Bounce to the shared DSQ if we can't find a valid task
+		 * context.
+		 */
+		scx_bpf_dispatch_vtime(p, dsq_id, SCX_SLICE_DFL, vtime, 0);
 		return;
+	}
 	tctx->slice_ns = slice;
 
 	/*
@@ -611,16 +618,13 @@ int rs_select_cpu(struct task_cpu_arg *input)
 static void
 get_task_info(struct queued_task_ctx *task, const struct task_struct *p)
 {
-	struct task_ctx *tctx;
+	struct task_ctx *tctx = try_lookup_task_ctx(p);
 
-	tctx = lookup_task_ctx(p);
-	if (!tctx)
-		return;
 	task->pid = p->pid;
-	task->cpumask_cnt = tctx->cpumask_cnt;
 	task->sum_exec_runtime = p->se.sum_exec_runtime;
 	task->weight = p->scx.weight;
 	task->cpu = scx_bpf_task_cpu(p);
+	task->cpumask_cnt = tctx ? tctx->cpumask_cnt : 0;
 }
 
 /*
@@ -899,7 +903,7 @@ void BPF_STRUCT_OPS(rustland_set_cpumask, struct task_struct *p,
 {
 	struct task_ctx *tctx;
 
-	tctx = lookup_task_ctx(p);
+	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
 	tctx->cpumask_cnt++;
