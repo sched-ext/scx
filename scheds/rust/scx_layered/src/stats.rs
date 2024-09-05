@@ -301,7 +301,7 @@ impl LayerStats {
 pub struct SysStats {
     #[stat(desc = "timestamp", _om_skip)]
     pub at: f64,
-    #[stat(desc = "# sched events duringg the period")]
+    #[stat(desc = "# sched events during the period")]
     pub total: u64,
     #[stat(desc = "% dispatched directly into an idle CPU")]
     pub local: f64,
