@@ -11,8 +11,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::ThreadId;
 use std::time::Duration;
+use gpoint::GPoint;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
+#[stat(top)]
 pub struct SysStats {
     #[stat(desc = "Sequence ID of this messge")]
     pub mseq: u64,
@@ -25,33 +27,98 @@ pub struct SysStats {
 
     #[stat(desc = "Number of active CPUs when core compaction is enabled")]
     pub nr_active: u32,
+
+    #[stat(desc = "Number of context switches")]
+    pub nr_sched: u64,
+
+    #[stat(desc = "% of task migration")]
+    pub pc_migration: f64,
+
+    #[stat(desc = "% of task preemption")]
+    pub pc_preemption: f64,
+
+    #[stat(desc = "% of greedy tasks")]
+    pub pc_greedy: f64,
+
+    #[stat(desc = "% of performance-critical tasks")]
+    pub pc_pc: f64,
+
+    #[stat(desc = "% of latency-critical tasks")]
+    pub pc_lc: f64,
+
+    #[stat(desc = "% of tasks scheduled on big cores")]
+    pub pc_big: f64,
+
+    #[stat(desc = "% of performance-critical tasks scheduled on big cores")]
+    pub pc_pc_on_big: f64,
+
+    #[stat(desc = "% of latency-critical tasks scheduled on big cores")]
+    pub pc_lc_on_big: f64,
+
+    #[stat(desc = "Current power mode")]
+    pub power_mode: String,
+
+    #[stat(desc = "% of performance mode")]
+    pub pc_performance: f64,
+
+    #[stat(desc = "% of balanced mode")]
+    pub pc_balanced: f64,
+
+    #[stat(desc = "% of powersave powersave")]
+    pub pc_powersave: f64,
 }
 
 impl SysStats {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "| {} | {} | {} | {} |",
-            "mseq",
-            "avg_svc_time",
-            "nr_queued_task",
-            "nr_active",
+            "\x1b[93m| {:8} | {:9} | {:9} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
+            "MSEQ",
+            "SVC_TIME",
+            "# Q TASK",
+            "# ACT CPU",
+            "# SCHED",
+            "MIGRATE%",
+            "PREEMPT%",
+            "GREEDY%",
+            "PERF-CR%",
+            "LAT-CR%",
+            "BIG%",
+            "PC/BIG%",
+            "LC/BIG%",
+            "POWER MODE",
+            "PERFORMANCE%",
+            "BALANCED%",
+            "POWERSAVE%",
         )?;
         Ok(())
     }
 
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
-        if self.mseq % 32 == 1 {
+        if self.mseq % 10 == 1 {
             Self::format_header(w)?;
         }
 
         writeln!(
             w,
-            "| {} | {} | {} | {} |",
+            "| {:8} | {:9} | {:9} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |",
             self.mseq,
             self.avg_svc_time,
             self.nr_queued_task,
             self.nr_active,
+            self.nr_sched,
+            GPoint(self.pc_migration),
+            GPoint(self.pc_preemption),
+            GPoint(self.pc_greedy),
+            GPoint(self.pc_pc),
+            GPoint(self.pc_lc),
+            GPoint(self.pc_big),
+            GPoint(self.pc_pc_on_big),
+            GPoint(self.pc_lc_on_big),
+            self.power_mode,
+            GPoint(self.pc_performance),
+            GPoint(self.pc_balanced),
+            GPoint(self.pc_powersave),
         )?;
         Ok(())
     }
@@ -59,7 +126,6 @@ impl SysStats {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
-#[stat(top)]
 pub struct SchedSample {
     #[stat(desc = "Sequence ID of this message")]
     pub mseq: u64,
@@ -111,42 +177,42 @@ impl SchedSample {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "| {:6} | {:7} | {:17} \
+            "\x1b[93m| {:6} | {:7} | {:17} \
                    | {:5} | {:4} | {:4} \
                    | {:14} | {:8} | {:7} \
                    | {:8} | {:7} | {:8} \
                    | {:7} | {:9} | {:9} \
                    | {:9} | {:9} | {:8} \
                    | {:8} | {:8} | {:8} \
-                   | {:6} |",
-            "mseq",
-            "pid",
-            "comm",
-            "stat",
-            "cpu",
-            "vtmc",
-            "vddln_ns",
-            "slc_ns",
-            "grdy_rt",
-            "lat_cri",
-            "avg_lc",
-            "st_prio",
-            "slc_bst",
-            "run_freq",
-            "run_tm_ns",
-            "wait_freq",
-            "wake_freq",
-            "perf_cri",
-            "avg_pc",
-            "cpufreq",
-            "cpu_util",
-            "nr_act",
+                   | {:6} |\x1b[0m",
+            "MSEQ",
+            "PID",
+            "COMM",
+            "STAT",
+            "CPU",
+            "VTMC",
+            "VDDLN_NS",
+            "SLC_NS",
+            "GRDY_RT",
+            "LAT_CRI",
+            "AVG_LC",
+            "ST_PRIO",
+            "SLC_BST",
+            "RUN_FREQ",
+            "RUN_TM_NS",
+            "WAIT_FREQ",
+            "WAKE_FREQ",
+            "PERF_CRI",
+            "AVG_PC",
+            "CPUFREQ",
+            "CPU_UTIL",
+            "NR_ACT",
         )?;
         Ok(())
     }
 
     pub fn format<W: Write>(&self, w: &mut W) -> Result<()> {
-        if self.mseq % 32 == 1 {
+        if self.mseq % 10 == 1 {
             Self::format_header(w)?;
         }
 
@@ -258,7 +324,7 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
             }
 
             let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
-                Box::new(move |args, (req_ch, res_ch)| {
+                Box::new(move |_args, (req_ch, res_ch)| {
                     let req = StatsReq::from_args_stats(tid)?;
                     req_ch.send(req)?;
 

@@ -641,6 +641,31 @@ impl<'a> Scheduler<'a> {
         self.skel.maps.bss_data.intrspc.cmd = LAVD_CMD_NOP;
     }
 
+    fn get_pc(x: u64, y: u64) -> f64 {
+        return 100. * x as f64 / y as f64;
+    }
+
+    fn get_power_mode(power_mode: s32) -> &'static str {
+        const LAVD_PM_PERFORMANCE: s32 = 0;
+        const LAVD_PM_BALANCED: s32 = 1;
+        const LAVD_PM_POWERSAVE: s32 = 2;
+
+        match power_mode {
+            LAVD_PM_PERFORMANCE => {
+                return &"performance";
+            }
+            LAVD_PM_BALANCED => {
+                return &"balanced";
+            }
+            LAVD_PM_POWERSAVE => {
+                return &"powersave";
+            }
+            _ => {
+                return &"unknown";
+            }
+        }
+    }
+
     fn stats_req_to_res(&mut self, req: &StatsReq) -> Result<StatsRes> {
         Ok(match req {
             StatsReq::NewSampler(tid) => {
@@ -656,16 +681,49 @@ impl<'a> Scheduler<'a> {
                 }
                 self.mseq_id += 1;
 
+                let bss_data = &self.skel.maps.bss_data;
+                let st = bss_data.__sys_stats[0];
+
                 let mseq = self.mseq_id;
-                let avg_svc_time = self.skel.maps.bss_data.__sys_stats[0].avg_svc_time;
-                let nr_queued_task = self.skel.maps.bss_data.__sys_stats[0].nr_queued_task;
-                let nr_active = self.skel.maps.bss_data.__sys_stats[0].nr_active;
+                let avg_svc_time = st.avg_svc_time;
+                let nr_queued_task = st.nr_queued_task;
+                let nr_active = st.nr_active;
+                let nr_sched = st.nr_sched;
+                let pc_migration = Self::get_pc(st.nr_migration, nr_sched);
+                let pc_preemption = Self::get_pc(st.nr_preemption, nr_sched);
+                let pc_greedy = Self::get_pc(st.nr_greedy, nr_sched);
+                let pc_pc = Self::get_pc(st.nr_perf_cri, nr_sched);
+                let pc_lc = Self::get_pc(st.nr_lat_cri, nr_sched);
+                let nr_big = st.nr_big;
+                let pc_big = Self::get_pc(nr_big, nr_sched);
+                let pc_pc_on_big = Self::get_pc(st.nr_pc_on_big, nr_big);
+                let pc_lc_on_big = Self::get_pc(st.nr_lc_on_big, nr_big);
+                let power_mode = Self::get_power_mode(bss_data.power_mode);
+                let total_time = bss_data.performance_mode_ns +
+                                 bss_data.balanced_mode_ns +
+                                 bss_data.powersave_mode_ns;
+                let pc_performance = Self::get_pc(bss_data.performance_mode_ns, total_time);
+                let pc_balanced = Self::get_pc(bss_data.balanced_mode_ns, total_time);
+                let pc_powersave = Self::get_pc(bss_data.powersave_mode_ns, total_time);
 
                 StatsRes::SysStats(SysStats {
                     mseq,
                     avg_svc_time,
                     nr_queued_task,
                     nr_active,
+                    nr_sched,
+                    pc_migration,
+                    pc_preemption,
+                    pc_greedy,
+                    pc_pc,
+                    pc_lc,
+                    pc_big,
+                    pc_pc_on_big,
+                    pc_lc_on_big,
+                    power_mode: power_mode.to_string(),
+                    pc_performance,
+                    pc_balanced,
+                    pc_powersave,
                 })
             }
             StatsReq::SchedSamplesNr {
