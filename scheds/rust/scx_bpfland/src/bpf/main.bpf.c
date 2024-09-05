@@ -496,6 +496,35 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 }
 
 /*
+ * Return true if priority DSQ is congested, false otherwise.
+ */
+static bool is_prio_congested(void)
+{
+	return scx_bpf_dsq_nr_queued(prio_dsq_id) > nr_online_cpus * 4;
+}
+
+/*
+ * Handle synchronous wake-up event for a task.
+ */
+static void handle_sync_wakeup(struct task_struct *p)
+{
+	struct task_ctx *tctx;
+
+	/*
+	 * If we are waking up a task immediately promote it as interactive, so
+	 * that it can be dispatched as soon as possible on the first CPU
+	 * available.
+	 *
+	 * However, if the priority queue is congested, we don't want to
+	 * promote additional interactive tasks, instead we give priority to
+	 * the tasks that are already classified as interactive.
+	 */
+	tctx = try_lookup_task_ctx(p);
+	if (tctx && is_nvcsw_enabled() && !is_prio_congested())
+		tctx->is_interactive = true;
+}
+
+/*
  * Find an idle CPU in the system.
  *
  * NOTE: the idle CPU selection doesn't need to be formally perfect, it is
@@ -504,7 +533,8 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
  * to handle these mistakes in favor of a more efficient response and a reduced
  * scheduling overhead.
  */
-static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, bool do_preferred)
+static s32 pick_idle_cpu(struct task_struct *p,
+			 s32 prev_cpu, u64 wake_flags, bool do_preferred)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
 	struct bpf_cpumask *primary, *preferred, *l2_domain, *l3_domain;
@@ -613,8 +643,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, bool do_preferred)
 	 * cpumask).
 	 */
 	bpf_cpumask_and(l2_mask, cast_mask(p_mask), cast_mask(l2_domain));
-	if (bpf_cpumask_empty(cast_mask(l2_mask)) ||
-	    bpf_cpumask_equal(cast_mask(l2_mask), cast_mask(p_mask)))
+	if (bpf_cpumask_empty(cast_mask(l2_mask)))
 		l2_mask = NULL;
 
 	/*
@@ -624,9 +653,40 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, bool do_preferred)
 	 * cpumask).
 	 */
 	bpf_cpumask_and(l3_mask, cast_mask(p_mask), cast_mask(l3_domain));
-	if (bpf_cpumask_empty(cast_mask(l3_mask)) ||
-	    bpf_cpumask_equal(cast_mask(l3_mask), cast_mask(p_mask)))
+	if (bpf_cpumask_empty(cast_mask(l3_mask)))
 		l3_mask = NULL;
+
+	/*
+	 * Try to prioritize newly awakened tasks by immediately promoting them
+	 * as interactive.
+	 */
+	if (wake_flags & SCX_WAKE_SYNC) {
+		struct task_struct *current = (void *)bpf_get_current_task_btf();
+
+		handle_sync_wakeup(p);
+
+		/*
+		 * If CPUs of the waker and the wakee share the same L3 cache,
+		 * try to re-use the same CPU, if idle.
+		 */
+		cpu = bpf_get_smp_processor_id();
+		if (l3_mask && bpf_cpumask_test_cpu(cpu, cast_mask(l3_mask)) &&
+		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+			cpu = prev_cpu;
+			goto out_put_cpumask;
+		}
+
+		/*
+		 * Try to run the task on the same CPU as the waker if it's in
+		 * the same scheduling domain and if it's not completely
+		 * saturated.
+		 */
+		if (bpf_cpumask_intersects(cast_mask(p_mask), idle_cpumask) &&
+		    bpf_cpumask_test_cpu(cpu, cast_mask(p_mask)) &&
+		    !(current->flags & PF_EXITING) &&
+		    scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) == 0)
+			goto out_put_cpumask;
+	}
 
 	/*
 	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
@@ -746,51 +806,17 @@ out_put_cpumask:
 	return cpu;
 }
 
-/*
- * Return true if priority DSQ is congested, false otherwise.
- */
-static bool is_prio_congested(void)
-{
-	return scx_bpf_dsq_nr_queued(prio_dsq_id) > nr_online_cpus * 4;
-}
-
 s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	s32 cpu;
 
-	cpu = pick_idle_cpu(p, prev_cpu, true);
+	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, true);
 	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return cpu;
 	}
 
 	return prev_cpu;
-}
-
-/*
- * Handle synchronous wake-up event for a task.
- */
-static void handle_sync_wakeup(struct task_struct *p)
-{
-	struct task_ctx *tctx;
-
-	if (!is_nvcsw_enabled())
-		return;
-
-	/*
-	 * If we are waking up a task immediately promote it as interactive, so
-	 * that it can be dispatched as soon as possible on the first CPU
-	 * available.
-	 *
-	 * However, if the priority queue is congested, we don't want to
-	 * promote additional interactive tasks, instead we give priority to
-	 * the tasks that are already classified as interactive.
-	 */
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-	if (!tctx->is_interactive && !is_prio_congested())
-		tctx->is_interactive = true;
 }
 
 /*
@@ -804,18 +830,10 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	s32 cpu, prev_cpu = scx_bpf_task_cpu(p);
 
 	/*
-	 * If the system is saturated and we couldn't dispatch directly in
-	 * select_cpu(), try to prioritize newly awakened tasks by immediately
-	 * promoting them as interactive.
-	 */
-	if (enq_flags & SCX_ENQ_WAKEUP)
-		handle_sync_wakeup(p);
-
-	/*
 	 * If we couldn't find an idle CPU in ops.select_cpu(), give the task
 	 * another chance here to keep using the same CPU / cache / domain.
 	 */
-	cpu = pick_idle_cpu(p, prev_cpu, false);
+	cpu = pick_idle_cpu(p, prev_cpu, 0, false);
 	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
