@@ -10,15 +10,6 @@ command="/usr/bin/$SCX_SCHEDULER"
 command_args="$SCX_FLAGS"
 command_user="${SCX_USER:-root}:${SCX_GROUP:-root}"
 
-output_log="/var/log/${RC_SVCNAME}/${RC_SVCNAME}.log"
-error_log="$output_log"
-
-start_pre() {
-	checkpath -q -d -m 0775 -o "${command_user}" /var/cache/"${RC_SVCNAME}"
-	checkpath -q -d -m 0775 -o "${command_user}" /var/log/"${RC_SVCNAME}"
-	checkpath -q -f -m 0644 -o "${command_user}" "$output_log"
-}
-
 # stop_post() {
 # 	rm -rf /var/cache/"${RC_SVCNAME}"
 # }
