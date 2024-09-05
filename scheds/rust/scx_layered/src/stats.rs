@@ -386,7 +386,7 @@ impl SysStats {
 
         writeln!(
             w,
-            "excl_coll={} excl_preempt={} excl_idle={} excl_wakeup={}",
+            "excl_coll={:.2} excl_preempt={:.2} excl_idle={:.2} excl_wakeup={:.2}",
             self.excl_collision, self.excl_preempt, self.excl_idle, self.excl_wakeup
         )?;
 
