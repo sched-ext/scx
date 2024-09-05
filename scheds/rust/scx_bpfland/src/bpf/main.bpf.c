@@ -94,6 +94,12 @@ const volatile u64 nvcsw_max_thresh = 10ULL;
 volatile u64 nvcsw_avg_thresh;
 
 /*
+ * The CPU frequency performance level: a negative value will not affect the
+ * performance level and will be ignored.
+ */
+volatile s64 cpufreq_perf_lvl;
+
+/*
  * Time threshold to prevent task starvation.
  *
  * The scheduler processes tasks from various DSQs in the following order:
@@ -186,6 +192,9 @@ static u64 vtime_now;
  * Per-CPU context.
  */
 struct cpu_ctx {
+	u64 tot_runtime;
+	u64 prev_runtime;
+	u64 last_running;
 	struct bpf_cpumask __kptr *l2_cpumask;
 	struct bpf_cpumask __kptr *l3_cpumask;
 };
@@ -495,14 +504,13 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
  * to handle these mistakes in favor of a more efficient response and a reduced
  * scheduling overhead.
  */
-static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
+static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, bool do_turbo)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
 	struct bpf_cpumask *primary, *turbo, *l2_domain, *l3_domain;
 	struct bpf_cpumask *p_mask, *l2_mask, *l3_mask;
 	struct task_ctx *tctx;
 	struct cpu_ctx *cctx;
-	bool do_turbo = true;
 	s32 cpu;
 
 	tctx = try_lookup_task_ctx(p);
@@ -520,31 +528,36 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 		return -ENOENT;
 
 	/*
+	 * If the task isn't allowed to use its previously used CPU it means
+	 * that it's rapidly changing affinity. In this case it's pointless to
+	 * find an optimal idle CPU, just return and let the task being
+	 * dispatched to a global DSQ.
+	 */
+	if (!bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
+		return -ENOENT;
+
+	/*
+	 * For tasks that can run only on a single CPU, we can simply verify if
+	 * their only allowed CPU is still idle.
+	 *
+	 * Moreover, if local_kthreads is enabled, always allow to dispatch
+	 * per-CPU kthreads directly to their target CPU, independently on the
+	 * idle state.
+	 */
+	if (p->nr_cpus_allowed == 1) {
+		if ((is_kthread(p) && local_kthreads) ||
+				scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			return prev_cpu;
+		return -ENOENT;
+	}
+
+	/*
 	 * Acquire the CPU masks to determine the online and idle CPUs in the
 	 * system.
 	 */
 	online_cpumask = scx_bpf_get_online_cpumask();
 	idle_smtmask = scx_bpf_get_idle_smtmask();
 	idle_cpumask = scx_bpf_get_idle_cpumask();
-
-	/*
-	 * For tasks that can run only on a single CPU, we can simply verify if
-	 * their only allowed CPU is still usable, online and idle.
-	 *
-	 * Moreover, if local_kthreads is enabled, always dispatch per-CPU
-	 * kthreads directly to their target CPU, independently on its idle
-	 * state.
-	 */
-	if (p->nr_cpus_allowed == 1) {
-		if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
-		    bpf_cpumask_test_cpu(prev_cpu, online_cpumask) &&
-		    (is_kthread(p) && local_kthreads ||
-				scx_bpf_test_and_clear_cpu_idle(prev_cpu)))
-			cpu = prev_cpu;
-		else
-			cpu = -ENOENT;
-		goto out_put_cpumask;
-	}
 
 	/*
 	 * Scheduling domains of the previously used CPU.
@@ -555,7 +568,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 	l3_domain = cctx->l3_cpumask;
 	if (!l3_domain)
 		l3_domain = primary;
-retry:
+
 	/*
 	 * Task's scheduling domains.
 	 */
@@ -653,6 +666,15 @@ retry:
 		}
 
 		/*
+		 * When considering the turbo domain (first idle CPU selection
+		 * pass) try to stay on the same LLC.
+		 */
+		if (do_turbo) {
+			cpu = -ENOENT;
+			goto out_put_cpumask;
+		}
+
+		/*
 		 * Search for any other full-idle core in the primary domain.
 		 */
 		cpu = bpf_cpumask_any_and_distribute(cast_mask(p_mask), idle_smtmask);
@@ -694,21 +716,21 @@ retry:
 	}
 
 	/*
+	 * When considering the turbo domain (first idle CPU selection pass)
+	 * try to stay on the same LLC.
+	 */
+	if (do_turbo) {
+		cpu = -ENOENT;
+		goto out_put_cpumask;
+	}
+
+	/*
 	 * Search for any idle CPU in the scheduling domain.
 	 */
 	cpu = bpf_cpumask_any_and_distribute(cast_mask(p_mask), idle_cpumask);
 	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(cpu))
 		goto out_put_cpumask;
-
-	/*
-	 * If we were looking for an idle CPU in the turbo domain and we
-	 * couldn't find any, re-try again with the whole primary domain.
-	 */
-	if (do_turbo) {
-		do_turbo = false;
-		goto retry;
-	}
 
 	/*
 	 * We couldn't find any idle CPU, so simply dispatch the task to the
@@ -736,7 +758,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 {
 	s32 cpu;
 
-	cpu = pick_idle_cpu(p, prev_cpu);
+	cpu = pick_idle_cpu(p, prev_cpu, true);
 	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return cpu;
@@ -793,7 +815,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * If we couldn't find an idle CPU in ops.select_cpu(), give the task
 	 * another chance here to keep using the same CPU / cache / domain.
 	 */
-	cpu = pick_idle_cpu(p, prev_cpu);
+	cpu = pick_idle_cpu(p, prev_cpu, false);
 	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
@@ -989,6 +1011,59 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 		prev->scx.slice = task_slice(prev);
 }
 
+/*
+ * Scale target CPU frequency based on the performance level selected
+ * from user-space and the CPU utilization.
+ */
+static void update_cpuperf_target(struct task_struct *p)
+{
+	u64 now = bpf_ktime_get_ns();
+	s32 cpu = scx_bpf_task_cpu(p);
+	u64 perf_lvl, delta_runtime, delta_t;
+	struct cpu_ctx *cctx;
+
+	if (cpufreq_perf_lvl >= 0) {
+		/*
+		 * Apply fixed cpuperf scaling factor determined by user-space.
+		 */
+		perf_lvl = MIN(cpufreq_perf_lvl, SCX_CPUPERF_ONE);
+		scx_bpf_cpuperf_set(cpu, perf_lvl);
+		return;
+	}
+
+	/*
+	 * Auto mode: always tset max performance for interactive tasks.
+	 */
+	if (is_task_interactive(p)) {
+		scx_bpf_cpuperf_set(cpu, SCX_CPUPERF_ONE);
+		return;
+	}
+
+	/*
+	 * For non-interactive tasks determine their cpufreq scaling factor as
+	 * a function of their CPU utilization.
+	 */
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return;
+
+	/*
+	 * Evaluate dynamic cpuperf scaling factor using the average CPU
+	 * utilization, normalized in the range [0 .. SCX_CPUPERF_ONE].
+	 */
+	delta_t = now - cctx->last_running;
+	delta_runtime = cctx->tot_runtime - cctx->prev_runtime;
+	perf_lvl = MIN(delta_runtime * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE);
+
+	/*
+	 * Apply the dynamic cpuperf scaling factor.
+	 */
+	scx_bpf_cpuperf_set(cpu, perf_lvl);
+
+	cctx->last_running = bpf_ktime_get_ns();
+	cctx->prev_runtime = cctx->tot_runtime;
+}
+
 void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 {
 	/* Update global vruntime */
@@ -1001,7 +1076,14 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	 */
 	p->scx.slice = task_slice(p);
 
-	/* Update CPU interactive state */
+	/*
+	 * Adjust target CPU frequency before the task starts to run.
+	 */
+	update_cpuperf_target(p);
+
+	/*
+	 * Update CPU interactive state.
+	 */
 	if (is_task_interactive(p))
 		__sync_fetch_and_add(&nr_interactive, 1);
 
@@ -1029,8 +1111,14 @@ static void update_task_interactive(struct task_ctx *tctx)
 void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 {
 	u64 now = bpf_ktime_get_ns();
+	s32 cpu = scx_bpf_task_cpu(p);
 	s64 delta_t;
+	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (cctx)
+		cctx->tot_runtime += now - cctx->last_running;
 
 	__sync_fetch_and_sub(&nr_running, 1);
 

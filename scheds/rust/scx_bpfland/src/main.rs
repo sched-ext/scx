@@ -58,9 +58,10 @@ const SCHEDULER_NAME: &'static str = "scx_bpfland";
 
 #[derive(PartialEq)]
 enum Powermode {
-    Powersave,
-    Performance,
     Turbo,
+    Performance,
+    Powersave,
+    Any,
 }
 
 fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
@@ -77,6 +78,7 @@ fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
             (Powermode::Performance, CoreType::Big { .. }) |
             // Powersave mode: add all the Little CPUs
             (Powermode::Powersave, CoreType::Little) => Some(*cpu_id),
+            (Powermode::Any, ..) => Some(*cpu_id),
             _ => None,
         })
         .collect();
@@ -87,7 +89,7 @@ fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
 // Convert an array of CPUs to the corresponding cpumask of any arbitrary size.
 fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
     if cpus.is_empty() {
-        return String::from("all");
+       return String::from("none");
     }
 
     // Determine the maximum CPU ID to create a sufficiently large byte vector.
@@ -111,22 +113,6 @@ fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
         .collect();
 
     format!("0x{}", hex_str)
-}
-
-fn parse_cpumask(cpu_str: &str) -> Result<Cpumask, anyhow::Error> {
-    match cpu_str {
-        "powersave" => {
-            let cpus = get_primary_cpus(Powermode::Powersave).unwrap();
-            Cpumask::from_str(&cpus_to_cpumask(&cpus))
-        }
-        "performance" => {
-            let cpus = get_primary_cpus(Powermode::Performance).unwrap();
-            Cpumask::from_str(&cpus_to_cpumask(&cpus))
-        }
-        "auto" => Cpumask::new(),
-        _ if !cpu_str.is_empty() => Cpumask::from_str(&cpu_str.to_string()),
-        _ => Cpumask::from_str(&"all".to_string()),
-    }
 }
 
 /// scx_bpfland: a vruntime-based sched_ext scheduler that prioritizes interactive workloads.
@@ -183,14 +169,13 @@ struct Opts {
     /// tasks may overflow to other available CPUs.
     ///
     /// Special values:
-    ///  - "performance" = automatically detect and use the fastest CPUs
-    ///  - "powersave" = automatically detect and use the slowest CPUs
+    ///  - "performance" = automatically detect and prioritize the fastest CPUs
+    ///  - "powersave" = automatically detect and prioritize the slowest CPUs
     ///  - "auto" = automatically detect the CPUs based on the current energy profile
     ///  - "all" = all CPUs assigned to the primary domain
-    ///
-    /// By default all CPUs are used for the primary scheduling domain.
-    #[clap(short = 'm', long, default_value = "all", value_parser = parse_cpumask)]
-    primary_domain: Cpumask,
+    ///  - "none" = no prioritization, tasks are dispatched on the first CPU available
+    #[clap(short = 'm', long, default_value = "all")]
+    primary_domain: String,
 
     /// Disable L2 cache awareness.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -301,13 +286,20 @@ impl<'a> Scheduler<'a> {
 
         // Initialize the primary scheduling domain (based on the --primary-domain option).
         let energy_profile = Self::read_energy_profile();
-        if let Err(err) = Self::init_turbo_domain(&mut skel, &opts.primary_domain, &energy_profile)
+        if let Err(err) = Self::init_turbo_domain(&mut skel, &opts.primary_domain)
         {
             warn!("failed to initialize turbo domain: error {}", err);
         }
         if let Err(err) = Self::init_energy_domain(&mut skel, &opts.primary_domain, &energy_profile)
         {
             warn!("failed to initialize primary domain: error {}", err);
+        }
+        if let Err(err) = Self::init_cpufreq_perf(&mut skel, &opts.primary_domain, &energy_profile)
+        {
+            warn!(
+                "failed to initialize cpufreq performance level: error {}",
+                err
+            );
         }
 
         // Initialize L2 cache domains.
@@ -356,15 +348,27 @@ impl<'a> Scheduler<'a> {
     }
 
     fn read_energy_profile() -> String {
-        let res =
-            File::open("/sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference")
-                .and_then(|mut file| {
-                    let mut contents = String::new();
-                    file.read_to_string(&mut contents)?;
-                    Ok(contents.trim().to_string())
-                });
+        let energy_pref_path =
+            "/sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference";
+        let scaling_governor_path = "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor";
 
-        res.unwrap_or_else(|_| "none".to_string())
+        let res = File::open(energy_pref_path)
+            .and_then(|mut file| {
+                let mut contents = String::new();
+                file.read_to_string(&mut contents)?;
+                Ok(contents.trim().to_string())
+            })
+            .or_else(|_| {
+                File::open(scaling_governor_path)
+                    .and_then(|mut file| {
+                        let mut contents = String::new();
+                        file.read_to_string(&mut contents)?;
+                        Ok(contents.trim().to_string())
+                    })
+                    .or_else(|_| Ok("none".to_string()))
+            });
+
+        res.unwrap_or_else(|_: String| "none".to_string())
     }
 
     fn enable_turbo_cpu(skel: &mut BpfSkel<'_>, cpu: i32) -> Result<(), u32> {
@@ -389,25 +393,25 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn epp_to_cpumask(profile: Powermode) -> Result<Cpumask> {
+        let mut cpus = get_primary_cpus(profile).unwrap_or(Vec::new());
+        if cpus.is_empty() {
+            cpus = get_primary_cpus(Powermode::Any).unwrap_or(Vec::new());
+        }
+        Cpumask::from_str(&cpus_to_cpumask(&cpus))
+    }
+
     fn init_turbo_domain(
         skel: &mut BpfSkel<'_>,
-        primary_domain: &Cpumask,
-        energy_profile: &String,
+        primary_domain: &String,
     ) -> Result<()> {
-        let domain = if primary_domain.is_empty() {
-            let cpus = match energy_profile.as_str() {
-                "balance_power" => get_primary_cpus(Powermode::Turbo).unwrap_or(Vec::new()),
-                &_ => Vec::new(),
-            };
-            // If no turbo-boosted CPUs are selected, use an empty CPU mask, so that tasks are
-            // scheduled directly to the primary domain, bypassing the turbo boost domain.
-            if cpus.is_empty() {
-                Cpumask::new()?
-            } else {
-                Cpumask::from_str(&cpus_to_cpumask(&cpus))?
+        let domain = match primary_domain.as_str() {
+            "auto" => {
+                Self::epp_to_cpumask(Powermode::Turbo)?
             }
-        } else {
-            primary_domain.clone()
+            &_ => {
+                Cpumask::new()?
+            }
         };
 
         info!("Turbo CPU domain = 0x{:x}", domain);
@@ -429,28 +433,35 @@ impl<'a> Scheduler<'a> {
 
     fn init_energy_domain(
         skel: &mut BpfSkel<'_>,
-        primary_domain: &Cpumask,
+        primary_domain: &String,
         energy_profile: &String,
     ) -> Result<()> {
-        let domain = if primary_domain.is_empty() {
-            let cpus = match energy_profile.as_str() {
-                "power" => get_primary_cpus(Powermode::Powersave).unwrap_or(Vec::new()),
-                "balance_power" => get_primary_cpus(Powermode::Performance).unwrap_or(Vec::new()),
-                "balance_performance" => {
-                    get_primary_cpus(Powermode::Performance).unwrap_or(Vec::new())
-                }
-                "performance" => get_primary_cpus(Powermode::Performance).unwrap_or(Vec::new()),
-                &_ => Vec::new(),
-            };
-            if cpus.is_empty() {
-                let mut cpumask = Cpumask::new()?;
-                cpumask.setall();
-                cpumask
-            } else {
-                Cpumask::from_str(&cpus_to_cpumask(&cpus))?
+        let domain = match primary_domain.as_str() {
+            "powersave" => {
+                Self::epp_to_cpumask(Powermode::Powersave)?
             }
-        } else {
-            primary_domain.clone()
+            "performance" => {
+                Self::epp_to_cpumask(Powermode::Performance)?
+            }
+            "auto" => {
+                match energy_profile.as_str() {
+                    "power" | "balance_power" | "powersave" => {
+                        Self::epp_to_cpumask(Powermode::Powersave)?
+                    }
+                    "balance_performance" | "performance" => {
+                        Self::epp_to_cpumask(Powermode::Performance)?
+                    }
+                    &_ => {
+                        Self::epp_to_cpumask(Powermode::Any)?
+                    }
+                }
+            }
+            "all" => {
+                Self::epp_to_cpumask(Powermode::Any)?
+            }
+            &_ => {
+                Cpumask::from_str(&primary_domain)?
+            }
         };
 
         info!("primary CPU domain = 0x{:x}", domain);
@@ -471,25 +482,62 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    // Update hint for the cpufreq governor.
+    fn init_cpufreq_perf(
+        skel: &mut BpfSkel<'_>,
+        primary_domain: &String,
+        energy_profile: &String,
+    ) -> Result<()> {
+        let perf_lvl: i64 = match primary_domain.as_str() {
+            "auto" => match energy_profile.as_str() {
+                "power" | "powersave" => 0,
+                "balance_power" => -1,
+                &_ => 1024,
+            },
+            "performance" => 1024,
+            "powersave" => 0,
+            _ => -1,
+        };
+        info!(
+            "cpufreq performance level: {}",
+            if perf_lvl < 0 {
+                "auto".into()
+            } else {
+                perf_lvl.to_string()
+            }
+        );
+        skel.maps.bss_data.cpufreq_perf_lvl = perf_lvl;
+
+        Ok(())
+    }
+
     fn refresh_sched_domain(&mut self) {
-        if self.opts.primary_domain.is_empty() && self.energy_profile != "none" {
+        if self.energy_profile != "none" {
             let energy_profile = Self::read_energy_profile();
             if energy_profile != self.energy_profile {
                 self.energy_profile = energy_profile.clone();
 
-                if let Err(err) = Self::init_turbo_domain(
-                    &mut self.skel,
-                    &self.opts.primary_domain,
-                    &energy_profile,
-                ) {
-                    warn!("failed to refresh turbo domain: error {}", err);
+                if self.opts.primary_domain == "auto" {
+                    if let Err(err) = Self::init_turbo_domain(
+                        &mut self.skel,
+                        &self.opts.primary_domain,
+                    ) {
+                        warn!("failed to refresh turbo domain: error {}", err);
+                    }
+                    if let Err(err) = Self::init_energy_domain(
+                        &mut self.skel,
+                        &self.opts.primary_domain,
+                        &energy_profile,
+                    ) {
+                        warn!("failed to refresh primary domain: error {}", err);
+                    }
                 }
-                if let Err(err) = Self::init_energy_domain(
+                if let Err(err) = Self::init_cpufreq_perf(
                     &mut self.skel,
                     &self.opts.primary_domain,
                     &energy_profile,
                 ) {
-                    warn!("failed to refresh primary domain: error {}", err);
+                    warn!("failed to refresh cpufreq performance level: error {}", err);
                 }
             }
         }
