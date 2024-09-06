@@ -3239,8 +3239,10 @@ static s32 init_per_cpu_ctx(u64 now)
 		}
 
 		cpuc->turbo_core = cpuc->capacity == turbo_cap;
-		if (cpuc->turbo_core)
+		if (cpuc->turbo_core) {
 			bpf_cpumask_set_cpu(cpu, turbo);
+			debugln("CPU %d is a turbo core.", cpu);
+		}
 	}
 
 	/*
