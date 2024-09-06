@@ -445,6 +445,12 @@ static bool is_greedy(struct task_ctx *taskc)
 	return taskc->greedy_ratio > 1000;
 }
 
+static bool is_eligible(struct task_ctx *taskc)
+{
+	return !is_greedy(taskc);
+}
+
+
 static __always_inline
 int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 {
@@ -764,6 +770,7 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 static void update_sys_stat_next(struct sys_stat_ctx *c)
 {
 	static int cnt = 0;
+	u64 avg_svc_time = 0;
 
 	/*
 	 * Update the CPU utilization to the next version.
@@ -788,8 +795,10 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 	stat_next->nr_violation =
 		calc_avg32(stat_cur->nr_violation, c->nr_violation);
 
-	stat_next->avg_svc_time = (c->nr_sched == 0) ? 0 :
-				  c->tot_svc_time / c->nr_sched;
+	if (c->nr_sched > 0)
+		avg_svc_time = c->tot_svc_time / c->nr_sched;
+	stat_next->avg_svc_time =
+		calc_avg(stat_cur->avg_svc_time, avg_svc_time);
 
 	stat_next->nr_queued_task =
 		calc_avg(stat_cur->nr_queued_task, c->nr_queued_task);
@@ -1168,11 +1177,6 @@ static u64 calc_freq_factor(u64 freq)
 	return ft + 1;
 }
 
-static bool is_eligible(struct task_ctx *taskc)
-{
-	return taskc->greedy_ratio <= 1000;
-}
-
 static s64 calc_static_prio_factor(struct task_struct *p)
 {
 	/*
@@ -1387,12 +1391,6 @@ static void update_stat_for_running(struct task_struct *p,
 	advance_cur_logical_clk(taskc);
 
 	/*
-	 * Update the current service time if necessary.
-	 */
-	if (cur_svc_time < taskc->svc_time)
-		WRITE_ONCE(cur_svc_time, taskc->svc_time);
-
-	/*
 	 * Since this is the start of a new schedule for @p, we update run
 	 * frequency in a second using an exponential weighted moving average.
 	 */
@@ -1460,26 +1458,14 @@ static void update_stat_for_running(struct task_struct *p,
 	if (taskc->victim_cpu >= 0)
 		cpuc->nr_preemption++;
 	
-	if (is_lat_cri(taskc, stat_cur)) {
+	if (is_lat_cri(taskc, stat_cur))
 		cpuc->nr_lat_cri++;
-//		debugln("------------------------ lc = %llu", cpuc->nr__cri);
-	}
 
-	if (is_perf_cri(taskc, stat_cur)) {
+	if (is_perf_cri(taskc, stat_cur))
 		cpuc->nr_perf_cri++;
-//		debugln("------------------------ pc = %llu", cpuc->nr_perf_cri);
-	}
 
 	if (is_greedy(taskc))
 		cpuc->nr_greedy++;
-}
-
-static u64 calc_svc_time(struct task_struct *p, struct task_ctx *taskc)
-{
-	/*
-	 * Scale the execution time by the inverse of the weight and charge.
-	 */
-	return (taskc->last_stopping_clk - taskc->last_running_clk) / p->scx.weight;
 }
 
 static void update_stat_for_stopping(struct task_struct *p,
@@ -1487,7 +1473,7 @@ static void update_stat_for_stopping(struct task_struct *p,
 				     struct cpu_ctx *cpuc)
 {
 	u64 now = bpf_ktime_get_ns();
-	u64 old_run_time_ns, suspended_duration, task_svc_time;
+	u64 old_run_time_ns, suspended_duration, task_run_time;
 
 	/*
 	 * Update task's run_time. When a task is scheduled consecutively
@@ -1500,13 +1486,12 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 */
 	old_run_time_ns = taskc->run_time_ns;
 	suspended_duration = get_suspended_duration_and_reset(cpuc);
-	taskc->acc_run_time_ns += now - taskc->last_running_clk -
-				  suspended_duration;
-	taskc->run_time_ns = calc_avg(taskc->run_time_ns,
-				      taskc->acc_run_time_ns);
+	task_run_time = now - taskc->last_running_clk - suspended_duration;
+	taskc->acc_run_time_ns += task_run_time;
+	taskc->run_time_ns = calc_avg(taskc->run_time_ns, taskc->acc_run_time_ns);
 	taskc->last_stopping_clk = now;
-	task_svc_time = calc_svc_time(p, taskc);
-	taskc->svc_time += task_svc_time;
+
+	taskc->svc_time += task_run_time / p->scx.weight;
 	taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
 
 	/*
@@ -1519,7 +1504,13 @@ static void update_stat_for_stopping(struct task_struct *p,
 	/*
 	 * Increase total service time of this CPU.
 	 */
-	cpuc->tot_svc_time += task_svc_time;
+	cpuc->tot_svc_time += taskc->svc_time;
+
+	/*
+	 * Update the current service time if necessary.
+	 */
+	if (READ_ONCE(cur_svc_time) < taskc->svc_time)
+		WRITE_ONCE(cur_svc_time, taskc->svc_time);
 }
 
 static void update_stat_for_quiescent(struct task_struct *p,
