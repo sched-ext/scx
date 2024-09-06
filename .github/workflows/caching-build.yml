@@ -134,5 +134,4 @@ jobs:
           prefix-key: "1"
       - run: cargo build  --manifest-path rust/Cargo.toml
       - run: cargo test --manifest-path rust/Cargo.toml --no-run
-      - run: vng -m10G --force-9p -r linux/arch/x86/boot/bzImage --net user --exec "cargo test --manifest-path rust/Cargo.toml"
-
+      - run: vng -v -m10G -c8 --force-9p -r linux/arch/x86/boot/bzImage  --net user -- cargo test --manifest-path rust/Cargo.toml

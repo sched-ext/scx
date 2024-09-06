@@ -19,8 +19,7 @@
 //!```
 //!     use scx_utils::Cpumask;
 //!     let all_zeroes = Cpumask::new();
-//!     let str = String::from("0xff00ff00");
-//!     let from_str_mask = Cpumask::from_str(&str);
+//!     let from_str_mask = Cpumask::from_str(&String::from("0xf0"));
 //!```
 //!
 //! The hexadecimal string also supports the special values "none" and "all",
