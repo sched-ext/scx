@@ -78,6 +78,7 @@ pub const RL_CPU_ANY: u64 = bpf_intf::RL_CPU_ANY as u64;
 pub struct QueuedTask {
     pub pid: i32,              // pid that uniquely identifies a task
     pub cpu: i32,              // CPU where the task is running
+    pub flags: u64,            // task enqueue flags
     pub sum_exec_runtime: u64, // Total cpu time
     pub weight: u64,           // Task static priority
     cpumask_cnt: u64,          // cpumask generation counter (private)
@@ -139,9 +140,10 @@ impl EnqueuedMessage {
         QueuedTask {
             pid: self.inner.pid,
             cpu: self.inner.cpu,
-            cpumask_cnt: self.inner.cpumask_cnt,
+            flags: self.inner.flags,
             sum_exec_runtime: self.inner.sum_exec_runtime,
             weight: self.inner.weight,
+            cpumask_cnt: self.inner.cpumask_cnt,
         }
     }
 }

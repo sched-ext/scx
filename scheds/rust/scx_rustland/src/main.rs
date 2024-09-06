@@ -202,9 +202,9 @@ impl TaskInfoMap {
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 struct Task {
-    qtask: QueuedTask,    // queued task
-    vruntime: u64,        // total vruntime (that determines the order how tasks are dispatched)
-    timestamp: u64,       // task enqueue timestamp
+    qtask: QueuedTask, // queued task
+    vruntime: u64,     // total vruntime (that determines the order how tasks are dispatched)
+    timestamp: u64,    // task enqueue timestamp
 }
 
 // Sort tasks by their interactive status first (interactive tasks are always scheduled before
@@ -448,9 +448,9 @@ impl<'a> Scheduler<'a> {
                 dispatched_task.slice_ns = slice_ns;
 
                 // Try to pick an idle CPU for the task.
-                let cpu = self
-                    .bpf
-                    .select_cpu(dispatched_task.pid, dispatched_task.cpu, 0);
+                let cpu =
+                    self.bpf
+                        .select_cpu(dispatched_task.pid, dispatched_task.cpu, task.qtask.flags);
                 if cpu >= 0 {
                     dispatched_task.cpu = cpu;
                 } else {

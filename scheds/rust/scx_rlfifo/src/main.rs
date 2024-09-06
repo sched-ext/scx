@@ -78,7 +78,7 @@ impl<'a> Scheduler<'a> {
             //
             // A call to select_cpu() will return the most suitable idle CPU for the task,
             // considering its previously used CPU.
-            let cpu = self.bpf.select_cpu(task.pid, task.cpu, 0);
+            let cpu = self.bpf.select_cpu(task.pid, task.cpu, task.flags);
             if cpu >= 0 {
                 dispatched_task.cpu = cpu;
             } else {

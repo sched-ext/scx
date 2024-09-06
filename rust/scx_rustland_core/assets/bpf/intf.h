@@ -73,6 +73,7 @@ struct task_cpu_arg {
 struct queued_task_ctx {
 	s32 pid;
 	s32 cpu; /* CPU where the task is running */
+	u64 flags; /* task enqueue flags */
 	u64 cpumask_cnt; /* cpumask generation counter */
 	u64 sum_exec_runtime; /* Total cpu time */
 	u64 weight; /* Task static priority */

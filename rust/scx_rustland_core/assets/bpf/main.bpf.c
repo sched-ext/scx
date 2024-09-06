@@ -385,7 +385,7 @@ static void dispatch_task(struct task_struct *p, u64 dsq_id,
 		 * Bounce to the shared DSQ if we can't find a valid task
 		 * context.
 		 */
-		scx_bpf_dispatch_vtime(p, dsq_id, SCX_SLICE_DFL, vtime, 0);
+		scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, vtime, 0);
 		return;
 	}
 	tctx->slice_ns = slice;
@@ -499,7 +499,7 @@ static bool dispatch_user_scheduler(void)
  * to handle these mistakes in favor of a more efficient response and a reduced
  * scheduling overhead.
  */
-static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
+static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
 	s32 cpu;
@@ -522,6 +522,27 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	online_cpumask = scx_bpf_get_online_cpumask();
 	idle_smtmask = scx_bpf_get_idle_smtmask();
 	idle_cpumask = scx_bpf_get_idle_cpumask();
+
+	/*
+	 * Try to prioritize newly awakened tasks by immediately promoting them
+	 * as interactive.
+	 */
+	if (enq_flags & SCX_ENQ_WAKEUP) {
+		struct task_struct *current = (void *)bpf_get_current_task_btf();
+
+		/*
+		 * Try to run the task on the same CPU as the waker, provided
+		 * the waker is still alive and the task's cpumask allows it.
+		 *
+		 * This allows to improve producer->consumer pipelines.
+		 */
+		if (!(current->flags & PF_EXITING)) {
+			cpu = bpf_get_smp_processor_id();
+			if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
+			    scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) == 0)
+				goto out_put_cpumask;
+		}
+	}
 
 	/*
 	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
@@ -615,13 +636,14 @@ int rs_select_cpu(struct task_cpu_arg *input)
  * Fill @task with all the information that need to be sent to the user-space
  * scheduler.
  */
-static void
-get_task_info(struct queued_task_ctx *task, const struct task_struct *p)
+static void get_task_info(struct queued_task_ctx *task,
+			  const struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx = try_lookup_task_ctx(p);
 
 	task->pid = p->pid;
 	task->sum_exec_runtime = p->se.sum_exec_runtime;
+	task->flags = enq_flags;
 	task->weight = p->scx.weight;
 	task->cpu = scx_bpf_task_cpu(p);
 	task->cpumask_cnt = tctx ? tctx->cpumask_cnt : 0;
@@ -683,7 +705,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
-	get_task_info(task, p);
+	get_task_info(task, p, enq_flags);
 	dbg_msg("enqueue: pid=%d (%s)", p->pid, p->comm);
 	bpf_ringbuf_submit(task, 0);
 
@@ -698,7 +720,7 @@ static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
 {
 	const struct dispatched_task_ctx *task;
 	struct task_struct *p;
-	u64 enq_flags = 0, dsq_id;
+	u64 dsq_id;
 
 	/* Get a pointer to the dispatched task */
 	task = bpf_dynptr_data(dynptr, 0, sizeof(*task));
