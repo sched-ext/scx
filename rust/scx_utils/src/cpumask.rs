@@ -17,36 +17,41 @@
 //! hexadecimal string:
 //!
 //!```
-//!     let all_zeroes = cpumask::new();
-//!     let str = "0xff00ff00";
-//!     let from_str_mask = cpumask::from_string(str);
+//!     use scx_utils::Cpumask;
+//!     let all_zeroes = Cpumask::new();
+//!     let from_str_mask = Cpumask::from_str(&String::from("0xf0"));
 //!```
 //!
 //! The hexadecimal string also supports the special values "none" and "all",
 //! respectively to specify no CPU (empty mask) or all CPUs (full mask):
 //!
 //!```
-//!     let str = "none";
-//!     let all_zeroes = cpumask::from_string(str);
+//!     use scx_utils::Cpumask;
+//!     let str = String::from("none");
+//!     let all_zeroes = Cpumask::from_str(&str);
 //!
-//!     let str = "all";
-//!     let all_ones = cpumask::from_string(str);
+//!     let str = String::from("all");
+//!     let all_ones = Cpumask::from_str(&str);
 //!```
 //!
 //! A Cpumask can be queried and updated using its helper functions:
 //!
-//!```
-//!     info!("{}", mask); // 32:<11111111000000001111111100000000>
+//!```rust
+//!     use log::info;
+//!     use scx_utils::Cpumask;
+//!     let str = String::from("none");
+//!     let mut mask = Cpumask::from_str(&str).unwrap();
+//!     info!("{:#?}", mask); // 32:<11111111000000001111111100000000>
 //!     assert!(!mask.test_cpu(0));
 //!     mask.set_cpu(0);
 //!     assert!(mask.test_cpu(0));
 //!
 //!     mask.clear();
-//!     info!("{}", mask); // 32:<00000000000000000000000000000000>
+//!     info!("{:#?}", mask); // 32:<00000000000000000000000000000000>
 //!     assert!(!mask.test_cpu(0));
 //!
 //!     mask.setall();
-//!     info!("{}", mask); // 32:<11111111111111111111111111111111>
+//!     info!("{:#?}", mask); // 32:<11111111111111111111111111111111>
 //!     assert!(mask.test_cpu(0));
 //!```
 
@@ -335,8 +340,11 @@ pub struct CpumaskIntoIterator {
 ///
 /// # Examples
 ///
-/// ```
-/// let mask = Cpumask::from_str(cpumask_str)?;
+/// ```rust
+/// use log::info;
+/// use scx_utils::Cpumask;
+/// let str = String::from("all");
+/// let mask = Cpumask::from_str(&str).unwrap();
 /// for cpu in mask.clone().into_iter() {
 ///     info!("cpu {} was set", cpu);
 /// }

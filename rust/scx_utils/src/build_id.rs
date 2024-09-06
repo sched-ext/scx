@@ -50,12 +50,12 @@ mod tests {
     #[test]
     fn test_cargo_ver() {
         //assert_eq!(super::*SCX_CARGO_VERSION, 1);
-        println!("{}", super::*SCX_CARGO_VERSION);
+        println!("{}", *super::SCX_CARGO_VERSION);
     }
 
     #[test]
     fn test_full_ver() {
         //assert_eq!(super::*SCX_CARGO_VERSION, 1);
-        println!("{}", super::*SCX_FULL_VERSION);
+        println!("{}", *super::SCX_FULL_VERSION);
     }
 }

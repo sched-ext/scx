@@ -30,10 +30,12 @@ use metrics_util::registry::Registry;
 ///
 /// Example:
 ///
-/// ```rust
+/// ```
+/// use std::time::Duration;
+/// use scx_utils::LogRecorderBuilder;
 /// LogRecorderBuilder::new()
 ///     .with_reporting_interval(Duration::from_secs(3))
-///     .install()?;
+///     .install().unwrap();
 /// ```
 pub struct LogRecorderBuilder {
     reporting_interval: Duration,
@@ -389,7 +391,7 @@ mod tests {
     #[test]
     fn test_default_format_counter_for_group() {
         let formatter = DefaultMetricFormatter;
-        let label = Label::new("test_label", "value");
+        let label = Label::new("test_counter", "test_label");
         let key = Key::from_parts("test_counter", vec![label]);
         let value = 100;
         let rate_per_sec = 10.5;

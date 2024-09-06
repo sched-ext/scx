@@ -109,7 +109,11 @@
 //!
 //! Assume we're on a 16-core (32-CPU) host with two core complexes:
 //!
-//!```
+//!```rust
+//!     use scx_utils::LoadAggregator;
+//!     use log::info;
+//! 
+//!     let mut aggregator = LoadAggregator::new(32, false);
 //!     // Create a LoadAggregator object, specifying the number of CPUs on the
 //!     // system, and whether it should only aggregate duty cycle.
 //!     let mut aggregator = LoadAggregator::new(32, false);
@@ -145,7 +149,7 @@
 //! example, if we had two tasks with weight 1 in domain 0, and an additional
 //! task with weight 100 in domain 1, we would record their loads as follows:
 //!
-//!```
+//!```rust,ignore
 //!     // Assume the same aggregator as above.
 //!
 //!     // In this version, domain 0 has 2 tasks with weight 1.0 and duty cycle
@@ -175,7 +179,9 @@
 //! infeasibility) for the whole system, or the sum of duty cycle for the whole
 //! system, or the sum of load for each domain (adjusted for infeasibility):
 //!
-//! ```
+//! ```rust
+//!     use scx_utils::LoadAggregator;
+//!     use log::info;
 //!     let mut aggregator = LoadAggregator::new(32, false);
 //!     aggregator.record_dom_load(0, 1, 1.0);
 //!     // ...

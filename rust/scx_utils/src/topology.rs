@@ -10,7 +10,7 @@
 //!
 //! A Topology is comprised of one or more Node objects, which themselves are
 //! comprised hierarchically of Cache -> Core -> Cpu objects respectively:
-//!
+//!```rust,ignore
 //!		                        	                                           Topology
 //!		                        	                                              |
 //!		                        	                        o---------------------o---------------------o
@@ -47,7 +47,7 @@
 //!                                                               | min_freq 400000                |         | min_freq 400000                 |
 //!                                                               | max_freq 5881000               |         | min_freq 5881000                |
 //!                                                               o--------------------------------o         o---------------------------------o
-//!
+//!```
 //! Every object contains a Cpumask that spans all CPUs in that point in the
 //! topological hierarchy.
 //!
@@ -56,8 +56,9 @@
 //!
 //! Topology objects are created using the static new function:
 //!
-//!```
-//!     let top = Topology::new()?;
+//!```  
+//!     use scx_utils::Topology;
+//!     let top = Topology::new().unwrap();
 //!```
 //!
 //! Querying Topology
@@ -386,8 +387,9 @@ impl Topology {
 /// # Example
 ///
 /// ```
-/// let topo = Topology::new()?;
-/// let topo_map = TopologyMap::new(topo)?;
+/// use scx_utils::{TopologyMap, Topology};
+/// let topo = Topology::new().unwrap();
+/// let topo_map = TopologyMap::new(&topo).unwrap();
 ///
 /// for (core_id, core) in topo_map.iter().enumerate() {
 ///     for cpu in core {
