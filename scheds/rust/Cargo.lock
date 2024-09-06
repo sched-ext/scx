@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "scx_bpfland"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "scx_lavd"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -1180,7 +1180,7 @@ dependencies = [
 
 [[package]]
 name = "scx_layered"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -1203,7 +1203,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rlfifo"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "ctrlc",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rusty"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "crossbeam",
@@ -1287,7 +1287,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats_derive"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1298,7 +1298,7 @@ dependencies = [
 
 [[package]]
 name = "scx_utils"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "anyhow",
  "bindgen",
