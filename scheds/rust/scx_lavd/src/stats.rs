@@ -406,6 +406,5 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
         intv,
         || shutdown.load(Ordering::Relaxed),
         |sysstats| sysstats.format(&mut std::io::stdout()),
-    );
-    Ok(())
+    )
 }

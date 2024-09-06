@@ -74,7 +74,7 @@ use rlimit::{getrlimit, setrlimit, Resource};
 #[derive(Debug, Parser)]
 struct Opts {
     /// Automatically decide the scheduler's power mode based on system load.
-    /// This is a recommended mode if you don't understand the following options:
+    /// This is a default mode if you don't specify the following options:
     #[clap(long = "autopilot", action = clap::ArgAction::SetTrue)]
     autopilot: bool,
 
@@ -151,22 +151,41 @@ struct Opts {
 }
 
 impl Opts {
+    fn nothing_specified(&self) -> bool {
+        return self.autopilot == false &&
+               self.autopower == false &&
+               self.performance == false &&
+               self.powersave == false &&
+               self.balanced == false &&
+               self.no_core_compaction == false &&
+               self.prefer_smt_core == false &&
+               self.prefer_little_core == false &&
+               self.no_prefer_turbo_core == false &&
+               self.no_freq_scaling == false &&
+               self.monitor == None &&
+               self.monitor_sched_samples == None;
+    }
+
     fn proc(&mut self) -> Option<&mut Self> {
+        if self.nothing_specified() {
+            self.autopilot = true;
+            info!("Autopilot mode is enabled by default.");
+            return Some(self);
+        }
+
         if self.performance {
             self.no_core_compaction = true;
             self.prefer_smt_core = false;
             self.prefer_little_core = false;
             self.no_prefer_turbo_core = false;
             self.no_freq_scaling = true;
-        }
-        if self.powersave {
+        } else if self.powersave {
             self.no_core_compaction = false;
             self.prefer_smt_core = true;
             self.prefer_little_core = true;
             self.no_prefer_turbo_core = true;
             self.no_freq_scaling = false;
-        }
-        if self.balanced {
+        } else if self.balanced {
             self.no_core_compaction = false;
             self.prefer_smt_core = false;
             self.prefer_little_core = false;
@@ -757,7 +776,7 @@ impl<'a> Scheduler<'a> {
         uei_exited!(&self.skel, uei)
     }
 
-    fn set_power_profile(&mut self, mode: i32) -> Result<(), u32> {
+    fn set_power_profile(&mut self, mode: u32) -> Result<(), u32> {
         let prog = &mut self.skel.progs.set_power_profile;
         let mut args = power_arg {
             power_mode: mode as c_int,
@@ -792,10 +811,6 @@ impl<'a> Scheduler<'a> {
     }
 
     fn update_power_profile(&mut self, prev_profile: String) -> (bool, String) {
-        const LAVD_PM_PERFORMANCE: s32 = 0;
-        const LAVD_PM_BALANCED: s32 = 1;
-        const LAVD_PM_POWERSAVE: s32 = 2;
-
         let profile = Self::read_energy_profile();
         if profile == prev_profile {
             // If the profile is the same, skip updaring the profile for BPF.
@@ -820,10 +835,18 @@ impl<'a> Scheduler<'a> {
         (true, profile)
     }
 
-    fn run(&mut self, autopower: bool, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
+    fn run(&mut self, opts: &Opts, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
-        let mut autopower = autopower;
+        let mut autopower = opts.autopower;
         let mut profile = "unknown".to_string();
+
+        if opts.performance {
+            let _ = self.set_power_profile(LAVD_PM_PERFORMANCE);
+        } else if opts.powersave {
+            let _ = self.set_power_profile(LAVD_PM_POWERSAVE);
+        } else {
+            let _ = self.set_power_profile(LAVD_PM_BALANCED);
+        }
 
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             if autopower {
@@ -877,7 +900,6 @@ fn init_log(opts: &Opts) {
 
 fn main() -> Result<()> {
     let mut opts = Opts::parse();
-    opts.proc().unwrap();
 
     if opts.version {
         println!("scx_lavd {}", *build_id::SCX_FULL_VERSION);
@@ -890,6 +912,8 @@ fn main() -> Result<()> {
     }
 
     init_log(&opts);
+
+    opts.proc().unwrap();
     debug!("{:#?}", opts);
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -925,7 +949,7 @@ fn main() -> Result<()> {
             *build_id::SCX_FULL_VERSION
         );
         info!("scx_lavd scheduler starts running.");
-        if !sched.run(opts.autopower, shutdown.clone())?.should_restart() {
+        if !sched.run(&opts, shutdown.clone())?.should_restart() {
             break;
         }
     }
