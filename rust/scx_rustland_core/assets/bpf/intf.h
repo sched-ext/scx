@@ -66,6 +66,15 @@ struct task_cpu_arg {
 };
 
 /*
+ * Specify a sibling CPU relationship for a specific scheduling domain.
+ */
+struct domain_arg {
+	s32 lvl_id;
+	s32 cpu_id;
+	s32 sibling_cpu_id;
+};
+
+/*
  * Task sent to the user-space scheduler by the BPF dispatcher.
  *
  * All attributes are collected from the kernel by the the BPF component.
@@ -73,6 +82,7 @@ struct task_cpu_arg {
 struct queued_task_ctx {
 	s32 pid;
 	s32 cpu; /* CPU where the task is running */
+	u64 flags; /* task enqueue flags */
 	u64 cpumask_cnt; /* cpumask generation counter */
 	u64 sum_exec_runtime; /* Total cpu time */
 	u64 weight; /* Task static priority */
