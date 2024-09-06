@@ -528,6 +528,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2fabcfbdc87f4758337ca535fb41a6d701b65693ce38287d856d1674551ec9b"
 
 [[package]]
+name = "gpoint"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c00f1d62d57408109a871dd9e12b76645ec4284406d5ec838d277777ef1ef6c"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1152,6 +1161,7 @@ dependencies = [
  "crossbeam",
  "ctrlc",
  "fb_procfs",
+ "gpoint",
  "hex",
  "itertools 0.13.0",
  "libbpf-rs",

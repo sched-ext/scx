@@ -11,30 +11,165 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::ThreadId;
 use std::time::Duration;
+use gpoint::GPoint;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
+#[stat(top)]
+pub struct SysStats {
+    #[stat(desc = "Sequence ID of this messge")]
+    pub mseq: u64,
+
+    #[stat(desc = "Average runtime per schedule")]
+    pub avg_svc_time: u64,
+
+    #[stat(desc = "Number of runnable tasks in runqueues")]
+    pub nr_queued_task: u64,
+
+    #[stat(desc = "Number of active CPUs when core compaction is enabled")]
+    pub nr_active: u32,
+
+    #[stat(desc = "Number of context switches")]
+    pub nr_sched: u64,
+
+    #[stat(desc = "% of task migration")]
+    pub pc_migration: f64,
+
+    #[stat(desc = "% of task preemption")]
+    pub pc_preemption: f64,
+
+    #[stat(desc = "% of greedy tasks")]
+    pub pc_greedy: f64,
+
+    #[stat(desc = "% of performance-critical tasks")]
+    pub pc_pc: f64,
+
+    #[stat(desc = "% of latency-critical tasks")]
+    pub pc_lc: f64,
+
+    #[stat(desc = "% of tasks scheduled on big cores")]
+    pub pc_big: f64,
+
+    #[stat(desc = "% of performance-critical tasks scheduled on big cores")]
+    pub pc_pc_on_big: f64,
+
+    #[stat(desc = "% of latency-critical tasks scheduled on big cores")]
+    pub pc_lc_on_big: f64,
+
+    #[stat(desc = "Current power mode")]
+    pub power_mode: String,
+
+    #[stat(desc = "% of performance mode")]
+    pub pc_performance: f64,
+
+    #[stat(desc = "% of balanced mode")]
+    pub pc_balanced: f64,
+
+    #[stat(desc = "% of powersave powersave")]
+    pub pc_powersave: f64,
+}
+
+impl SysStats {
+    pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
+        writeln!(
+            w,
+            "\x1b[93m| {:8} | {:9} | {:9} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
+            "MSEQ",
+            "SVC_TIME",
+            "# Q TASK",
+            "# ACT CPU",
+            "# SCHED",
+            "MIGRATE%",
+            "PREEMPT%",
+            "GREEDY%",
+            "PERF-CR%",
+            "LAT-CR%",
+            "BIG%",
+            "PC/BIG%",
+            "LC/BIG%",
+            "POWER MODE",
+            "PERFORMANCE%",
+            "BALANCED%",
+            "POWERSAVE%",
+        )?;
+        Ok(())
+    }
+
+    fn format<W: Write>(&self, w: &mut W) -> Result<()> {
+        if self.mseq % 10 == 1 {
+            Self::format_header(w)?;
+        }
+
+        writeln!(
+            w,
+            "| {:8} | {:9} | {:9} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |",
+            self.mseq,
+            self.avg_svc_time,
+            self.nr_queued_task,
+            self.nr_active,
+            self.nr_sched,
+            GPoint(self.pc_migration),
+            GPoint(self.pc_preemption),
+            GPoint(self.pc_greedy),
+            GPoint(self.pc_pc),
+            GPoint(self.pc_lc),
+            GPoint(self.pc_big),
+            GPoint(self.pc_pc_on_big),
+            GPoint(self.pc_lc_on_big),
+            self.power_mode,
+            GPoint(self.pc_performance),
+            GPoint(self.pc_balanced),
+            GPoint(self.pc_powersave),
+        )?;
+        Ok(())
+    }
+
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 pub struct SchedSample {
+    #[stat(desc = "Sequence ID of this message")]
     pub mseq: u64,
+    #[stat(desc = "Process ID")]
     pub pid: i32,
+    #[stat(desc = "Task name")]
     pub comm: String,
+    #[stat(desc = "LR: 'L'atency-critical or 'R'egular, HI: performance-'H'ungry or performance-'I'nsensitive, BT: 'B'ig or li'T'tle, EG: 'E'ligigle or 'G'reedy, PN: 'P'reempting or 'N'ot")]
     pub stat: String,
+    #[stat(desc = "CPU id where this task is scheduled on")]
     pub cpu_id: u32,
+    #[stat(desc = "Victim CPU to be preempted out (-1 = no preemption)")]
     pub victim_cpu: i32,
+    #[stat(desc = "Assigned virtual deadline")]
     pub vdeadline_delta_ns: u64,
+    #[stat(desc = "Assigned time slice")]
     pub slice_ns: u64,
+    #[stat(desc = "How greedy this task is in using CPU time (1000 = fair)")]
     pub greedy_ratio: u32,
+    #[stat(desc = "Latency criticality of this task")]
     pub lat_cri: u32,
+    #[stat(desc = "Average latency criticality in a system")]
     pub avg_lat_cri: u32,
+    #[stat(desc = "Static priority (20 == nice 0)")]
     pub static_prio: u16,
+    #[stat(desc = "Slice boost factor (number of consecutive full slice exhaustions)")]
     pub slice_boost_prio: u16,
+    #[stat(desc = "How often this task is scheduled per second")]
     pub run_freq: u64,
+    #[stat(desc = "Average runtime per schedule")]
     pub run_time_ns: u64,
+    #[stat(desc = "How frequently this task waits for other tasks")]
     pub wait_freq: u64,
+    #[stat(desc = "How frequently this task wakes other tasks")]
     pub wake_freq: u64,
+    #[stat(desc = "Performance criticality of this task")]
     pub perf_cri: u32,
+    #[stat(desc = "Average performance criticality in a system")]
     pub avg_perf_cri: u32,
+    #[stat(desc = "Target performance level of this CPU")]
     pub cpuperf_cur: u32,
+    #[stat(desc = "CPU utilization of this particular CPU")]
     pub cpu_util: u64,
+    #[stat(desc = "Number of active CPUs when core compaction is enabled")]
     pub nr_active: u32,
 }
 
@@ -42,42 +177,42 @@ impl SchedSample {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "| {:6} | {:7} | {:17} \
+            "\x1b[93m| {:6} | {:7} | {:17} \
                    | {:5} | {:4} | {:4} \
                    | {:14} | {:8} | {:7} \
                    | {:8} | {:7} | {:8} \
                    | {:7} | {:9} | {:9} \
                    | {:9} | {:9} | {:8} \
                    | {:8} | {:8} | {:8} \
-                   | {:6} |",
-            "mseq",
-            "pid",
-            "comm",
-            "stat",
-            "cpu",
-            "vtmc",
-            "vddln_ns",
-            "slc_ns",
-            "grdy_rt",
-            "lat_cri",
-            "avg_lc",
-            "st_prio",
-            "slc_bst",
-            "run_freq",
-            "run_tm_ns",
-            "wait_freq",
-            "wake_freq",
-            "perf_cri",
-            "avg_pc",
-            "cpufreq",
-            "cpu_util",
-            "nr_act",
+                   | {:6} |\x1b[0m",
+            "MSEQ",
+            "PID",
+            "COMM",
+            "STAT",
+            "CPU",
+            "VTMC",
+            "VDDLN_NS",
+            "SLC_NS",
+            "GRDY_RT",
+            "LAT_CRI",
+            "AVG_LC",
+            "ST_PRIO",
+            "SLC_BST",
+            "RUN_FREQ",
+            "RUN_TM_NS",
+            "WAIT_FREQ",
+            "WAKE_FREQ",
+            "PERF_CRI",
+            "AVG_PC",
+            "CPUFREQ",
+            "CPU_UTIL",
+            "NR_ACT",
         )?;
         Ok(())
     }
 
     pub fn format<W: Write>(&self, w: &mut W) -> Result<()> {
-        if self.mseq % 32 == 1 {
+        if self.mseq % 10 == 1 {
             Self::format_header(w)?;
         }
 
@@ -126,6 +261,9 @@ pub struct SchedSamples {
 #[derive(Debug)]
 pub enum StatsReq {
     NewSampler(ThreadId),
+    SysStatsReq {
+        tid: ThreadId,
+    },
     SchedSamplesNr {
         tid: ThreadId,
         nr_samples: u64,
@@ -134,7 +272,15 @@ pub enum StatsReq {
 }
 
 impl StatsReq {
-    fn from_args(
+    fn from_args_stats(
+        tid: ThreadId,
+    ) -> Result<Self> {
+        Ok(Self::SysStatsReq {
+            tid,
+        })
+    }
+
+    fn from_args_samples(
         tid: ThreadId,
         nr_cpus_onln: u64,
         args: &BTreeMap<String, String>,
@@ -164,12 +310,36 @@ impl StatsReq {
 pub enum StatsRes {
     Ack,
     Bye,
+    SysStats(SysStats),
     SchedSamples(SchedSamples),
 }
 
 pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
-    let samples_open: Box<dyn StatsOpener<StatsReq, StatsRes>> =
-        Box::new(move |(req_ch, res_ch)| {
+    let open: Box<dyn StatsOpener<StatsReq, StatsRes>> = Box::new(move |(req_ch, res_ch)| {
+            let tid = std::thread::current().id();
+            req_ch.send(StatsReq::NewSampler(tid))?;
+            match res_ch.recv()? {
+                StatsRes::Ack => {}
+                res => bail!("invalid response: {:?}", &res),
+            }
+
+            let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
+                Box::new(move |_args, (req_ch, res_ch)| {
+                    let req = StatsReq::from_args_stats(tid)?;
+                    req_ch.send(req)?;
+
+                    let stats = match res_ch.recv()? {
+                        StatsRes::SysStats(v) => v,
+                        StatsRes::Bye => bail!("preempted by another sampler"),
+                        res => bail!("invalid response: {:?}", &res),
+                    };
+
+                    stats.to_json()
+                });
+            Ok(read)
+        });
+
+    let samples_open: Box<dyn StatsOpener<StatsReq, StatsRes>> = Box::new(move |(req_ch, res_ch)| {
             let tid = std::thread::current().id();
             req_ch.send(StatsReq::NewSampler(tid))?;
             match res_ch.recv()? {
@@ -179,7 +349,7 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
 
             let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
                 Box::new(move |args, (req_ch, res_ch)| {
-                    let req = StatsReq::from_args(tid, nr_cpus_onln, args)?;
+                    let req = StatsReq::from_args_samples(tid, nr_cpus_onln, args)?;
                     req_ch.send(req)?;
 
                     let samples = match res_ch.recv()? {
@@ -194,6 +364,14 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
         });
 
     StatsServerData::new()
+        .add_meta(SysStats::meta())
+        .add_ops(
+            "top",
+            StatsOps {
+                open: open,
+                close: None,
+            },
+        )
         .add_meta(SchedSample::meta())
         .add_ops(
             "sched_samples",
@@ -205,13 +383,6 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
 }
 
 pub fn monitor_sched_samples(nr_samples: u64, shutdown: Arc<AtomicBool>) -> Result<()> {
-    println!("## stats");
-    println!("  LR: 'L'atency-critical or 'R'egular");
-    println!("  HI: performance-'H'ungry or performance-'I'nsensitive");
-    println!("  BT: 'B'ig or li'T'tle");
-    println!("  EG: 'E'ligigle or 'G'reedy");
-    println!("  PN: 'P'reempting or 'N'ot");
-
     scx_utils::monitor_stats::<SchedSamples>(
         &vec![
             ("target".into(), "sched_samples".into()),
@@ -227,4 +398,14 @@ pub fn monitor_sched_samples(nr_samples: u64, shutdown: Arc<AtomicBool>) -> Resu
             Ok(())
         },
     )
+}
+
+pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
+    scx_utils::monitor_stats::<SysStats>(
+        &vec![],
+        intv,
+        || shutdown.load(Ordering::Relaxed),
+        |sysstats| sysstats.format(&mut std::io::stdout()),
+    );
+    Ok(())
 }
