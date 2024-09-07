@@ -72,7 +72,7 @@ impl SysStats {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "\x1b[93m| {:8} | {:9} | {:9} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
+            "\x1b[93m| {:8} | {:13} | {:9} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
             "MSEQ",
             "SVC_TIME",
             "# Q TASK",
@@ -101,7 +101,7 @@ impl SysStats {
 
         writeln!(
             w,
-            "| {:8} | {:9} | {:9} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |",
+            "| {:8} | {:13} | {:9} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |",
             self.mseq,
             self.avg_svc_time,
             self.nr_queued_task,
@@ -406,6 +406,5 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
         intv,
         || shutdown.load(Ordering::Relaxed),
         |sysstats| sysstats.format(&mut std::io::stdout()),
-    );
-    Ok(())
+    )
 }
