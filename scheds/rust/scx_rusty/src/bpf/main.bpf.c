@@ -389,31 +389,18 @@ static u64 dom_min_vruntime(struct dom_ctx *domc)
 	return READ_ONCE(domc->min_vruntime);
 }
 
-int dom_xfer_task(pid_t pid, u32 new_dom_id, u64 now)
+static int dom_xfer_task(struct task_struct *p,
+			 struct task_ctx *taskc, u32 new_dom_id, u64 now)
 {
 	struct dom_ctx *from_domc, *to_domc;
-	struct task_ctx *taskc;
-	struct task_struct *p;
-
-	p = bpf_task_from_pid(pid);
-	if (!p) {
-		scx_bpf_error("Failed to lookup task %d", pid);
-		return 0;
-	}
-
-	taskc = lookup_task_ctx(p);
-	if (!taskc)
-		goto free_task;
 
 	from_domc = lookup_dom_ctx(taskc->dom_id);
 	to_domc = lookup_dom_ctx(new_dom_id);
 
 	if (!from_domc || !to_domc || !taskc)
-		goto free_task;
+		return -ENOENT;
 
 	dom_dcycle_xfer_task(p, taskc, from_domc, to_domc, now);
-free_task:
-	bpf_task_release(p);
 	return 0;
 }
 
@@ -784,8 +771,14 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 				   p->cpus_ptr)) {
 		u64 now = bpf_ktime_get_ns();
 
-		if (!init_dsq_vtime)
-			dom_xfer_task(p->pid, new_dom_id, now);
+		if (!init_dsq_vtime) {
+			int err = dom_xfer_task(p, taskc, new_dom_id, now);
+			if (err < 0) {
+				scx_bpf_error("dom_xfer_task err %d for %d (%s)",
+					       err, p->pid, p->comm);
+				return false;
+			}
+		}
 		taskc->dom_id = new_dom_id;
 		p->scx.dsq_vtime = dom_min_vruntime(new_domc);
 		taskc->deadline = p->scx.dsq_vtime +
