@@ -6,11 +6,6 @@ authors = ["Andrea Righi <andrea.righi@linux.dev>"]
 license = "GPL-2.0-only"
 repository = "https://github.com/sched-ext/scx"
 description = "Framework to implement sched_ext schedulers running in user space"
-include = [
-    "assets/bpf/intf.h",
-    "assets/bpf/main.bpf.c",
-    "assets/bpf.rs",
-]
 
 [dependencies]
 anyhow = "1.0.65"
@@ -27,4 +22,9 @@ scx_utils = { path = "../scx_utils", version = "1.0.4" }
 [lib]
 name = "scx_rustland_core"
 path = "src/lib.rs"
+include = [
+    "assets/bpf/intf.h",
+    "assets/bpf/main.bpf.c",
+    "assets/bpf.rs",
+]
 
