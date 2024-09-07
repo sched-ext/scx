@@ -1153,17 +1153,14 @@ impl Layer {
         let mut cpus = bitvec![0; cpu_pool.nr_cpus];
         cpus.fill(false);
         let mut allowed_cpus = bitvec![0; cpu_pool.nr_cpus];
-        let mut layer_growth_algo = LayerGrowthAlgo::Sticky;
         match &kind {
             LayerKind::Confined {
                 cpus_range,
                 util_range,
                 nodes,
                 llcs,
-                growth_algo,
                 ..
             } => {
-                layer_growth_algo = growth_algo.clone();
                 let cpus_range = cpus_range.unwrap_or((0, std::usize::MAX));
                 if cpus_range.0 > cpus_range.1 || cpus_range.1 == 0 {
                     bail!("invalid cpus_range {:?}", cpus_range);
@@ -1199,9 +1196,7 @@ impl Layer {
                     bail!("invalid util_range {:?}", util_range);
                 }
             }
-            LayerKind::Grouped { growth_algo, nodes, llcs, .. } |
-                LayerKind::Open { growth_algo, nodes, llcs, .. } => {
-                layer_growth_algo = growth_algo.clone();
+            LayerKind::Grouped { nodes, llcs, .. } | LayerKind::Open { nodes, llcs, .. } => {
                 if nodes.len() == 0 && llcs.len() == 0 {
                     allowed_cpus.fill(true);
                 } else {
@@ -1225,6 +1220,12 @@ impl Layer {
                 }
             }
         }
+
+        let layer_growth_algo = match &kind {
+            LayerKind::Confined { growth_algo, .. }
+            | LayerKind::Grouped { growth_algo, .. }
+            | LayerKind::Open { growth_algo, .. } => growth_algo.clone(),
+        };
 
         let core_order = layer_core_order(layer_growth_algo, idx, topo);
 
