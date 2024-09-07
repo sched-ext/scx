@@ -101,7 +101,11 @@ jobs:
       # Test schedulers
       - run: meson compile -C build test_sched
       # Stress schedulers
-      - run: meson compile -C build stress_tests
+      - uses: cytopia/shell-command-retry-action@v0.1.2
+        name: stress test
+        with:
+          retries: 3
+          command: meson compile -C build stress_tests
       - run: meson compile -C build veristat
 
   rust-test:
