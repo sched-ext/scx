@@ -48,7 +48,7 @@ def run_stress_test(
     timeout_sec = int(config.get("timeout_sec"))
     if vng_path:
         vm_input = f"{stress_cmd} & timeout --foreground --preserve-status {timeout_sec} {sched_cmd}"
-        cmd = [vng_path, "--user", "root", "--force-9p", "-v", "--", vm_input]
+        cmd = [vng_path, "--user", "root", "-v", "--", vm_input]
         err = sys.stderr if output == "-" else open(output, "w")
         out = sys.stdout if output == "-" else err
         proc = subprocess.Popen(
@@ -73,6 +73,9 @@ def stress_tests(args: Namespace) -> None:
     for test_name in configs.sections():
         if args.stress_test and test_name != args.stress_test:
             continue
+        if args.sched and configs[test_name].get('sched') != args.sched:
+            continue
+        print(f"Running stress test: {test_name}")
         return_codes[test_name] = run_stress_test(
             configs[test_name],
             args.build_dir,
@@ -106,6 +109,9 @@ if __name__ == "__main__":
         '-v', '--verbose', action='store_true', help='Verbose output')
     parser.add_argument(
         '--vng', action='store_true', default=True, help='Run in vng')
+    parser.add_argument(
+        '--sched', default='', help='Scheduler to test (default: all)'
+    )
 
     args = parser.parse_args()
     if args.verbose:

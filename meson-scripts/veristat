@@ -20,7 +20,7 @@ if [ -n "${SCHED}" ]; then
   echo "Running veristat on ${BPF_PATH}"
   if [ -n "${KERNEL}" ]; then
     timeout --preserve-status ${GUEST_TIMEOUT} \
-      vng -m 2G --force-9p -v --user root -r ${KERNEL} -- \
+      vng -m 2G -v --user root -r ${KERNEL} -- \
         sudo veristat ${BPF_PATH}
     exit $?
   else
@@ -32,7 +32,7 @@ fi
 for BPF_PATH in $(find ${BUILD_DIR} -type f -name bpf.bpf.o); do
   if [ -n "${KERNEL}" ]; then
     timeout --preserve-status ${GUEST_TIMEOUT} \
-      vng -m 2G --force-9p -v --user root -r ${KERNEL} -- \
+      vng -m 2G -v --user root -r ${KERNEL} -- \
         sudo veristat ${BPF_PATH}
   else
     echo "$BPF_PATH"
