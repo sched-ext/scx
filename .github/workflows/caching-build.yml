@@ -25,10 +25,21 @@ jobs:
         with:
           path: |
             linux
-          key: ${{ env.SCHED_EXT_KERNEL_COMMIT }}
+          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}
 
       - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
         uses: ./.github/actions/install-deps-action
+
+      # cache virtiofsd (goes away w/ 24.04)
+      - name: Cache virtiofsd
+        id: cache-virtiofsd
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/lib/virtiofsd
+          key: virtiofsd-binary
+      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' && steps.cache-kernel.outputs.cache-hit != 'true' }}
+        run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
 
       # cache bzImage alone for rust tests (disk space limit workaround)
       - name: Cache bzImage
@@ -37,7 +48,7 @@ jobs:
         with:
           path: |
             linux/arch/x86/boot/bzImage
-          key: ${{ env.SCHED_EXT_KERNEL_COMMIT }}
+          key: kernel-bzImage-${{ env.SCHED_EXT_KERNEL_COMMIT }}
 
       - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
         name: Clone Kernel
@@ -64,10 +75,23 @@ jobs:
   integration-test:
     runs-on: ubuntu-22.04
     needs: build-kernel
+    strategy:
+          matrix:
+            scheduler: [ scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty ]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-deps-action
-      # cache rust deps, invalidate when kernel commit changes
+      # cache virtiofsd (goes away w/ 24.04)
+      - name: Cache virtiofsd
+        id: cache-virtiofsd
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/lib/virtiofsd
+          key: virtiofsd-binary
+      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}          
+        run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
+
       # get latest head commit of sched_ext for-next
       - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git heads/for-next | awk '{print $1}')" >> $GITHUB_ENV
 
@@ -78,7 +102,7 @@ jobs:
         with:
           path: |
             linux
-          key: ${{ env.SCHED_EXT_KERNEL_COMMIT }}
+          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}
 
       # need to re-run job when kernel head changes between build and test running.
       - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
@@ -92,25 +116,42 @@ jobs:
 
       # The actual build:
       - run: meson setup build -Dkernel=$(pwd)/linux -Dkernel_headers=./linux/usr/include -Denable_stress=true
-      - run: meson compile -C build
+      - run: meson compile -C build ${{ matrix.scheduler }}
 
       # Print CPU model before running the tests (this can be useful for
       # debugging purposes)
       - run: grep 'model name' /proc/cpuinfo | head -1
 
       # Test schedulers
-      - run: meson compile -C build test_sched
+      - run: meson compile -C build test_sched_${{ matrix.scheduler }}
       # Stress schedulers
-      - run: meson compile -C build stress_tests
-      - run: meson compile -C build veristat
+      - uses: cytopia/shell-command-retry-action@v0.1.2
+        name: stress test
+        with:
+          retries: 3
+          command: meson compile -C build stress_tests_${{ matrix.scheduler }}
+      - run: meson compile -C build veristat_${{ matrix.scheduler }}
 
-  rust-test:
+  rust-test-core:
     runs-on: ubuntu-22.04
     needs: build-kernel
+    strategy:
+      matrix:
+        component: [scx_loader, scx_rustland_core, scx_stats, scx_utils]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-deps-action
-      # cache rust deps, invalidate when kernel commit changes
+      # cache virtiofsd (goes away w/ 24.04)
+      - name: Cache virtiofsd
+        id: cache-virtiofsd
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/lib/virtiofsd
+          key: virtiofsd-binary
+      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}          
+        run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
+
       # get latest head commit of sched_ext for-next
       - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git heads/for-next | awk '{print $1}')" >> $GITHUB_ENV
       # cache bzImage alone for rust tests
@@ -120,7 +161,7 @@ jobs:
         with:
           path: |
             linux/arch/x86/boot/bzImage
-          key: ${{ env.SCHED_EXT_KERNEL_COMMIT }}
+          key: kernel-bzImage-${{ env.SCHED_EXT_KERNEL_COMMIT }}
 
       # need to re-run job when kernel head changes between build and test running.
       - if: ${{ steps.cache-bzImage.outputs.cache-hit != 'true' }}
@@ -129,9 +170,55 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ env.SCHED_EXT_KERNEL_COMMIT }}
           workspaces: rust
+          key: ${{ matrix.component }}
           prefix-key: "1"
-      - run: cargo build  --manifest-path rust/Cargo.toml
-      - run: cargo test --manifest-path rust/Cargo.toml --no-run
-      - run: vng -v --memory 10G --cpu 8 --force-9p -r linux/arch/x86/boot/bzImage  --net user -- cargo test --manifest-path rust/Cargo.toml
+      - run: cargo build  --manifest-path rust/${{ matrix.component }}/Cargo.toml
+      - run: cargo test --manifest-path rust/${{ matrix.component }}/Cargo.toml --no-run
+      - run: vng -v --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --net user -- cargo test --manifest-path rust/${{ matrix.component }}/Cargo.toml
+
+  rust-test-schedulers:
+    runs-on: ubuntu-22.04
+    needs: build-kernel
+    strategy:
+      matrix:
+        scheduler: [ scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-deps-action
+      # cache virtiofsd (goes away w/ 24.04)
+      - name: Cache virtiofsd
+        id: cache-virtiofsd
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/lib/virtiofsd
+          key: virtiofsd-binary
+      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}          
+        run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
+
+      # get latest head commit of sched_ext for-next
+      - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git heads/for-next | awk '{print $1}')" >> $GITHUB_ENV
+      # cache bzImage alone for rust tests
+      - name: Cache bzImage
+        id: cache-bzImage
+        uses: actions/cache@v4
+        with:
+          path: |
+            linux/arch/x86/boot/bzImage
+          key: kernel-bzImage-${{ env.SCHED_EXT_KERNEL_COMMIT }}
+
+      # need to re-run job when kernel head changes between build and test running.
+      - if: ${{ steps.cache-bzImage.outputs.cache-hit != 'true' }}
+        name: exit if cache stale
+        run: exit -1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: scheds/rust
+          key: ${{ matrix.scheduler }}
+          prefix-key: "1"
+      - run: cargo build  --manifest-path scheds/rust/${{ matrix.scheduler }}/Cargo.toml
+      - run: cargo test --manifest-path scheds/rust/${{ matrix.scheduler }}/Cargo.toml --no-run
+      - run: vng -v --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --net user -- cargo test --manifest-path scheds/rust/${{ matrix.scheduler }}/Cargo.toml
+

@@ -12,12 +12,7 @@ custom_target('rust_scheds',
               build_by_default: true,
               build_always_stale: true)
 
-# per-scheduler targets
-rust_scheds = ['scx_lavd', 'scx_bpfland', 'scx_rustland', 'scx_rlfifo',
-               'scx_rusty',
-               'scx_layered'] # scx_mitosis temporarily excluded
-
-foreach sched: rust_scheds
+foreach sched: SCHEDULERS
   custom_target(sched,
                 output: sched + '@PLAINNAME@.__PHONY__',
                 input: 'Cargo.toml',

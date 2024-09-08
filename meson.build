@@ -330,8 +330,21 @@ endif
 
 run_target('test_sched', command: [test_sched, kernel])
 
+SCHEDULERS = ['scx_lavd', 'scx_bpfland', 'scx_rustland', 'scx_rlfifo',
+               'scx_rusty',
+               'scx_layered'] # scx_mitosis temporarily excluded                        
+
+foreach s : SCHEDULERS
+  run_target('test_sched_'+s, command: [test_sched, kernel, s])
+endforeach
+
 run_target('veristat', command: [run_veristat, meson.current_build_dir(),
                                  get_option('veristat_scheduler'), get_option('kernel')])
+foreach s : SCHEDULERS
+  run_target('veristat_'+s, command: [run_veristat, meson.current_build_dir(),
+                                 get_option('veristat_scheduler'), get_option('kernel'), s])
+endforeach
+
 run_target('veristat_diff', command: [run_veristat_diff, meson.current_build_dir(),
                                  get_option('veristat_scheduler'), get_option('kernel'),
                                  get_option('veristat_diff_dir')])
@@ -343,6 +356,10 @@ subdir('rust')
 if enable_stress
   run_target('stress_tests', command: [run_stress_tests, '-k', kernel, '-b',
     meson.current_build_dir()])
+foreach s : SCHEDULERS
+  run_target('stress_tests_'+s, command: [run_stress_tests, '-k', kernel, '-b',
+    meson.current_build_dir(), '--sched', s])
+endforeach
 endif
 
 systemd = dependency('systemd', required: get_option('systemd'))

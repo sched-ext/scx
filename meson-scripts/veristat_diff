@@ -21,12 +21,12 @@ if [ -n "${SCHED}" ]; then
   echo "Running veristat on ${BPF_PATH}"
   if [ -n "${KERNEL}" ]; then
     timeout --preserve-status ${GUEST_TIMEOUT} \
-      vng -m 2G --force-9p -v --rwdir "${DIFF_DIR}" --user root -r ${KERNEL} -- \
+      vng -m 2G -v --rwdir "${DIFF_DIR}" --user root -r ${KERNEL} -- \
         veristat ${BPF_PATH} -o csv > "${DIFF_DIR}/${SCHED}_new.csv" \
 	  || echo "failed to verify ${SCHED}: ${BPF_PATH}"
     if [ -n "${DIFF_DIR}" ]; then
       timeout --preserve-status ${GUEST_TIMEOUT} \
-        vng -m 2G --force-9p -v --rwdir "${DIFF_DIR}" --user root -r ${KERNEL} -- \
+        vng -m 2G -v --rwdir "${DIFF_DIR}" --user root -r ${KERNEL} -- \
           veristat -C "${DIFF_DIR}/${SCHED}_new.csv" "${DIFF_DIR}/${SCHED}.csv" \
 	    -e file,prog,verdict,insns \
 	    || echo "failed to compare ${SCHED}: ${BPF_PATH}"
@@ -47,12 +47,12 @@ for BPF_PATH in $(find ${BUILD_DIR} -type f -name bpf.bpf.o); do
   SCHED=$(echo "${BPF_PATH}" | sed 's/.*\/rust\///g' | sed 's/\/.*//g')
   if [ -n "${KERNEL}" ]; then
     timeout --preserve-status ${GUEST_TIMEOUT} \
-      vng -m 2G --force-9p -v --rwdir "${DIFF_DIR}" --user root -r ${KERNEL} -- \
+      vng -m 2G -v --rwdir "${DIFF_DIR}" --user root -r ${KERNEL} -- \
         veristat ${BPF_PATH} -o csv > "${DIFF_DIR}/${SCHED}_new.csv" \
           || echo "failed to verify ${SCHED}: ${BPF_PATH}"
     if [ -n "${DIFF_DIR}" ]; then
       timeout --preserve-status ${GUEST_TIMEOUT} \
-        vng -m 2G --force-9p -v --rwdir "${DIFF_DIR}" --user root -r ${KERNEL} -- \
+        vng -m 2G -v --rwdir "${DIFF_DIR}" --user root -r ${KERNEL} -- \
           veristat -C "${SCHED}_new.csv" "${DIFF_DIR}/${SCHED}.csv" \
 	    -e file,prog,verdict,insns \
             || echo "failed to compare ${SCHED}: ${BPF_PATH}"
