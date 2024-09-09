@@ -1,3 +1,0 @@
-[workspace]
-members = ["scx_utils", "scx_stats", "scx_stats/scx_stats_derive", "scx_rustland_core", "scx_loader"]
-resolver = "2"
