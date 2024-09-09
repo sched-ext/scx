@@ -13,19 +13,18 @@
 #include <asm-generic/errno.h>
 #include "user_exit_info.h"
 
-#define PF_WQ_WORKER			0x00000020	/* I'm a workqueue worker */
-#define PF_KTHREAD			0x00200000	/* I am a kernel thread */
-#define PF_EXITING			0x00000004
-#define CLOCK_MONOTONIC			1
+#define PF_WQ_WORKER 0x00000020 /* I'm a workqueue worker */
+#define PF_KTHREAD   0x00200000 /* I am a kernel thread */
+#define PF_EXITING   0x00000004
+#define CLOCK_MONOTONIC 1
 
 /*
  * Earlier versions of clang/pahole lost upper 32bits in 64bit enums which can
  * lead to really confusing misbehaviors. Let's trigger a build failure.
  */
-static inline void ___vmlinux_h_sanity_check___(void)
-{
+static inline void ___vmlinux_h_sanity_check___(void) {
 	_Static_assert(SCX_DSQ_FLAG_BUILTIN,
-		       "bpftool generated vmlinux.h is missing high bits for 64bit enums, upgrade clang and pahole");
+		"bpftool generated vmlinux.h is missing high bits for 64bit enums, upgrade clang and pahole");
 }
 
 s32 scx_bpf_create_dsq(u64 dsq_id, s32 node) __ksym;
@@ -70,29 +69,29 @@ void ___scx_bpf_bstr_format_checker(const char *fmt, ...) {}
  * bstr exit kfuncs. Callers to this function should use ___fmt and ___param to
  * refer to the initialized list of inputs to the bstr kfunc.
  */
-#define scx_bpf_bstr_preamble(fmt, args...)					\
-	static char ___fmt[] = fmt;						\
-	/*									\
-	 * Note that __param[] must have at least one				\
-	 * element to keep the verifier happy.					\
-	 */									\
-	unsigned long long ___param[___bpf_narg(args) ?: 1] = {};		\
-										\
-	_Pragma("GCC diagnostic push")						\
-	_Pragma("GCC diagnostic ignored \"-Wint-conversion\"")			\
-	___bpf_fill(___param, args);						\
-	_Pragma("GCC diagnostic pop")						\
+#define scx_bpf_bstr_preamble(fmt, args...) \
+	static char ___fmt[] = fmt; \
+	/* \
+	 * Note that __param[] must have at least one \
+	 * element to keep the verifier happy. \
+	 */ \
+	unsigned long long ___param[___bpf_narg(args) ?: 1] = {}; \
+	 \
+	_Pragma("GCC diagnostic push") \
+	_Pragma("GCC diagnostic ignored \"-Wint-conversion\"") \
+	___bpf_fill(___param, args); \
+	_Pragma("GCC diagnostic pop") \
 
 /*
  * scx_bpf_exit() wraps the scx_bpf_exit_bstr() kfunc with variadic arguments
  * instead of an array of u64. Using this macro will cause the scheduler to
  * exit cleanly with the specified exit code being passed to user space.
  */
-#define scx_bpf_exit(code, fmt, args...)					\
-({										\
-	scx_bpf_bstr_preamble(fmt, args)					\
-	scx_bpf_exit_bstr(code, ___fmt, ___param, sizeof(___param));		\
-	___scx_bpf_bstr_format_checker(fmt, ##args);				\
+#define scx_bpf_exit(code, fmt, args...) \
+({ \
+	scx_bpf_bstr_preamble(fmt, args) \
+	scx_bpf_exit_bstr(code, ___fmt, ___param, sizeof(___param)); \
+	___scx_bpf_bstr_format_checker(fmt, ##args); \
 })
 
 /*
@@ -101,30 +100,30 @@ void ___scx_bpf_bstr_format_checker(const char *fmt, ...) {}
  * exit in an erroneous state, with diagnostic information being passed to the
  * user.
  */
-#define scx_bpf_error(fmt, args...)						\
-({										\
-	scx_bpf_bstr_preamble(fmt, args)					\
-	scx_bpf_error_bstr(___fmt, ___param, sizeof(___param));			\
-	___scx_bpf_bstr_format_checker(fmt, ##args);				\
+#define scx_bpf_error(fmt, args...) \
+({ \
+	scx_bpf_bstr_preamble(fmt, args) \
+	scx_bpf_error_bstr(___fmt, ___param, sizeof(___param)); \
+	___scx_bpf_bstr_format_checker(fmt, ##args); \
 })
 
 /*
  * scx_bpf_dump() wraps the scx_bpf_dump_bstr() kfunc with variadic arguments
  * instead of an array of u64. To be used from ops.dump() and friends.
  */
-#define scx_bpf_dump(fmt, args...)						\
-({										\
-	scx_bpf_bstr_preamble(fmt, args)					\
-	scx_bpf_dump_bstr(___fmt, ___param, sizeof(___param));			\
-	___scx_bpf_bstr_format_checker(fmt, ##args);				\
+#define scx_bpf_dump(fmt, args...) \
+({ \
+	scx_bpf_bstr_preamble(fmt, args) \
+	scx_bpf_dump_bstr(___fmt, ___param, sizeof(___param)); \
+	___scx_bpf_bstr_format_checker(fmt, ##args); \
 })
 
-#define BPF_STRUCT_OPS(name, args...)						\
-SEC("struct_ops/"#name)								\
+#define BPF_STRUCT_OPS(name, args...) \
+SEC("struct_ops/"#name) \
 BPF_PROG(name, ##args)
 
-#define BPF_STRUCT_OPS_SLEEPABLE(name, args...)					\
-SEC("struct_ops.s/"#name)							\
+#define BPF_STRUCT_OPS_SLEEPABLE(name, args...) \
+SEC("struct_ops.s/"#name) \
 BPF_PROG(name, ##args)
 
 /**
@@ -173,21 +172,21 @@ BPF_PROG(name, ##args)
  * be a pointer to the area. Use `MEMBER_VPTR(*ptr, .member)` instead of
  * `MEMBER_VPTR(ptr, ->member)`.
  */
-#define MEMBER_VPTR(base, member) (typeof((base) member) *)			\
-({										\
-	u64 __base = (u64)&(base);						\
-	u64 __addr = (u64)&((base) member) - __base;				\
-	_Static_assert(sizeof(base) >= sizeof((base) member),			\
+#define MEMBER_VPTR(base, member) (typeof((base) member) *) \
+({ \
+	u64 __base = (u64)&(base); \
+	u64 __addr = (u64)&((base) member) - __base; \
+	_Static_assert(sizeof(base) >= sizeof((base) member), \
 		       "@base is smaller than @member, is @base a pointer?");	\
-	asm volatile (								\
-		"if %0 <= %[max] goto +2\n"					\
-		"%0 = 0\n"							\
-		"goto +1\n"							\
-		"%0 += %1\n"							\
-		: "+r"(__addr)							\
-		: "r"(__base),							\
-		  [max]"i"(sizeof(base) - sizeof((base) member)));		\
-	__addr;									\
+	asm volatile ( \
+		"if %0 <= %[max] goto +2\n" \
+		"%0 = 0\n" \
+		"goto +1\n" \
+		"%0 += %1\n" \
+		: "+r"(__addr) \
+		: "r"(__base), \
+		  [max]"i"(sizeof(base) - sizeof((base) member))); \
+	__addr; \
 })
 
 /**
@@ -204,19 +203,19 @@ BPF_PROG(name, ##args)
  * size of the array to compute the max, which will result in rejection by
  * the verifier.
  */
-#define ARRAY_ELEM_PTR(arr, i, n) (typeof(arr[i]) *)				\
-({										\
-	u64 __base = (u64)arr;							\
-	u64 __addr = (u64)&(arr[i]) - __base;					\
-	asm volatile (								\
-		"if %0 <= %[max] goto +2\n"					\
-		"%0 = 0\n"							\
-		"goto +1\n"							\
-		"%0 += %1\n"							\
-		: "+r"(__addr)							\
-		: "r"(__base),							\
-		  [max]"r"(sizeof(arr[0]) * ((n) - 1)));			\
-	__addr;									\
+#define ARRAY_ELEM_PTR(arr, i, n) (typeof(arr[i]) *) \
+({ \
+	u64 __base = (u64)arr; \
+	u64 __addr = (u64)&(arr[i]) - __base; \
+	asm volatile ( \
+		"if %0 <= %[max] goto +2\n" \
+		"%0 = 0\n" \
+		"goto +1\n" \
+		"%0 += %1\n" \
+		: "+r"(__addr) \
+		: "r"(__base), \
+		  [max]"r"(sizeof(arr[0]) * ((n) - 1))); \
+	__addr; \
 })
 
 
@@ -350,20 +349,20 @@ static __always_inline void __write_once_size(volatile void *p, void *res, int s
 	}
 }
 
-#define READ_ONCE(x)					\
-({							\
+#define READ_ONCE(x) \
+({ \
 	union { typeof(x) __val; char __c[1]; } __u =	\
-		{ .__c = { 0 } };			\
+		{ .__c = { 0 } }; \
 	__read_once_size(&(x), __u.__c, sizeof(x));	\
-	__u.__val;					\
+	__u.__val; \
 })
 
-#define WRITE_ONCE(x, val)				\
-({							\
+#define WRITE_ONCE(x, val) \
+({ \
 	union { typeof(x) __val; char __c[1]; } __u =	\
-		{ .__val = (val) }; 			\
+		{ .__val = (val) }; \
 	__write_once_size(&(x), __u.__c, sizeof(x));	\
-	__u.__val;					\
+	__u.__val; \
 })
 
 /*
@@ -372,15 +371,15 @@ static __always_inline void __write_once_size(volatile void *p, void *res, int s
  */
 static inline u32 log2_u32(u32 v)
 {
-        u32 r;
-        u32 shift;
+	u32 r;
+	u32 shift;
 
-        r = (v > 0xFFFF) << 4; v >>= r;
-        shift = (v > 0xFF) << 3; v >>= shift; r |= shift;
-        shift = (v > 0xF) << 2; v >>= shift; r |= shift;
-        shift = (v > 0x3) << 1; v >>= shift; r |= shift;
-        r |= (v >> 1);
-        return r;
+	r = (v > 0xFFFF) << 4; v >>= r;
+	shift = (v > 0xFF) << 3; v >>= shift; r |= shift;
+	shift = (v > 0xF) << 2; v >>= shift; r |= shift;
+	shift = (v > 0x3) << 1; v >>= shift; r |= shift;
+	r |= (v >> 1);
+	return r;
 }
 
 /*
@@ -389,13 +388,14 @@ static inline u32 log2_u32(u32 v)
  */
 static inline u32 log2_u64(u64 v)
 {
-        u32 hi = v >> 32;
-        if (hi)
-                return log2_u32(hi) + 32 + 1;
-        else
-                return log2_u32(v) + 1;
+	u32 hi = v >> 32;
+	if (hi)
+		return log2_u32(hi) + 32 + 1;
+	else
+		return log2_u32(v) + 1;
 }
 
 #include "compat.bpf.h"
 
 #endif	/* __SCX_COMMON_BPF_H */
+

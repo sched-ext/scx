@@ -8,23 +8,29 @@
 char _license[] SEC("license") = "GPL";
 
 /* Allow to use bpf_printk() only when @debug is set */
-#define dbg_msg(_fmt, ...) do {				\
-	if (debug)					\
-		bpf_printk(_fmt, ##__VA_ARGS__);	\
+#define dbg_msg(_fmt, ...) do { \
+	if (debug) \
+		bpf_printk(_fmt, ##__VA_ARGS__); \
 } while(0)
 
  /* Report additional debugging information */
 const volatile bool debug;
 
-/*
- * Priority DSQ used to dispatch interactive tasks.
- */
-static s32 prio_dsq_id;
+/* Global DSQ level iterator */
+enum {qidx_prio = 0, qidx_shared = 1};
+#define for_each_dsq_level(level) \
+	for(int level = 0; level < 2; level++)
+/* Cache layer iterator */
+enum {cidx_l3 = 0, cidx_l2 = 1, cidx_p = 2};
+int cla_disp_name(int index) {return 3 - index;}
+int codr_p_l2_l3 = 0xC6, codr_l2_l3_p = 0xE1, codr_l2_l3 = 0x31;
+#define for_each_cache_layer(layer, order) \
+	for (int layer = order; (layer & 3) != 3; layer >>= 2)
 
 /*
- * DSQ used to dispatch regular tasks.
+ * DSQs used to dispatch interactive ([0]) and regular ([1]) tasks.
  */
-static s32 shared_dsq_id;
+static s32 dsq_id[2];
 
 /*
  * Default task time slice.
@@ -115,8 +121,7 @@ volatile s64 cpufreq_perf_lvl;
  *  forced to consume a task from the corresponding DSQ.
  */
 const volatile u64 starvation_thresh_ns = 5ULL * NSEC_PER_MSEC;
-static u64 starvation_shared_ts;
-static u64 starvation_prio_ts;
+static u64 starvation_ts[2];
 
 /*
  * Scheduling statistics.
@@ -195,8 +200,7 @@ struct cpu_ctx {
 	u64 tot_runtime;
 	u64 prev_runtime;
 	u64 last_running;
-	struct bpf_cpumask __kptr *l2_cpumask;
-	struct bpf_cpumask __kptr *l3_cpumask;
+	struct bpf_cpumask __kptr *cpumask[2];
 };
 
 struct {
@@ -224,9 +228,7 @@ struct task_ctx {
 	/*
 	 * Temporary cpumask for calculating scheduling domains.
 	 */
-	struct bpf_cpumask __kptr *cpumask;
-	struct bpf_cpumask __kptr *l2_cpumask;
-	struct bpf_cpumask __kptr *l3_cpumask;
+	struct bpf_cpumask __kptr *cpumask[3];
 
 	/*
 	 * Voluntary context switches metrics.
@@ -272,12 +274,8 @@ static bool is_nvcsw_enabled(void)
  */
 static bool is_task_interactive(struct task_struct *p)
 {
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return false;
-	return tctx->is_interactive;
+	struct task_ctx *tctx = try_lookup_task_ctx(p);
+	return tctx ? tctx->is_interactive : false;
 }
 
 /*
@@ -363,12 +361,8 @@ static inline bool vtime_before(u64 a, u64 b)
  */
 static bool task_avg_nvcsw(struct task_struct *p)
 {
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return 0;
-	return tctx->avg_nvcsw;
+	struct task_ctx *tctx = try_lookup_task_ctx(p);
+	return tctx ? tctx->avg_nvcsw : false;
 }
 
 /*
@@ -409,8 +403,7 @@ static inline u64 task_deadline(struct task_struct *p)
  */
 static u64 nr_tasks_waiting(void)
 {
-	return scx_bpf_dsq_nr_queued(prio_dsq_id) +
-	       scx_bpf_dsq_nr_queued(shared_dsq_id);
+	return scx_bpf_dsq_nr_queued(dsq_id[qidx_prio]) + scx_bpf_dsq_nr_queued(dsq_id[qidx_shared]);
 }
 
 /*
@@ -442,7 +435,7 @@ static u64 cpu_to_dsq(s32 cpu)
 
 	if (cpu < 0 || cpu >= nr_cpu_ids) {
 		scx_bpf_error("Invalid cpu: %d", cpu);
-		return shared_dsq_id;
+		return dsq_id[qidx_shared];
 	}
 	return (u64)cpu;
 }
@@ -455,7 +448,7 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 {
 	struct bpf_cpumask *offline;
 	u64 deadline = task_deadline(p);
-	u64 dsq_id = cpu_to_dsq(cpu);
+	u64 _dsq_id = cpu_to_dsq(cpu);
 
 	/*
 	 * Make sure we can dispatch the task to the target CPU according to
@@ -467,7 +460,7 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
 		return -EINVAL;
 	}
 
-	scx_bpf_dispatch_vtime(p, dsq_id, SCX_SLICE_DFL, deadline, enq_flags);
+	scx_bpf_dispatch_vtime(p, _dsq_id, SCX_SLICE_DFL, deadline, enq_flags);
 
 	/*
 	 * If the CPU has gone offline notify that the task needs to be
@@ -500,7 +493,7 @@ static int dispatch_direct_cpu(struct task_struct *p, s32 cpu, u64 enq_flags)
  */
 static bool is_prio_congested(void)
 {
-	return scx_bpf_dsq_nr_queued(prio_dsq_id) > nr_online_cpus * 4;
+	return scx_bpf_dsq_nr_queued(dsq_id[qidx_prio]) > nr_online_cpus * 4;
 }
 
 /*
@@ -538,7 +531,8 @@ static s32 pick_idle_cpu(struct task_struct *p,
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
 	struct bpf_cpumask *primary, *preferred, *l2_domain, *l3_domain;
-	struct bpf_cpumask *p_mask, *l2_mask, *l3_mask;
+	struct bpf_cpumask *cache_domain[2];
+	struct bpf_cpumask *cache_mask[3];
 	struct task_ctx *tctx;
 	struct cpu_ctx *cctx;
 	s32 cpu;
@@ -592,33 +586,22 @@ static s32 pick_idle_cpu(struct task_struct *p,
 	/*
 	 * Scheduling domains of the previously used CPU.
 	 */
-	l2_domain = cctx->l2_cpumask;
-	if (!l2_domain)
-		l2_domain = primary;
-	l3_domain = cctx->l3_cpumask;
-	if (!l3_domain)
-		l3_domain = primary;
+	for_each_cache_layer(layer, codr_l2_l3) {
+		cache_domain[layer] = cctx->cpumask[layer];
+		if (!cache_domain[layer])
+			cache_domain[layer] = primary;
+	}
 
 	/*
 	 * Task's scheduling domains.
 	 */
-	p_mask = tctx->cpumask;
-	if (!p_mask) {
-		scx_bpf_error("cpumask not initialized");
-		cpu = prev_cpu;
-		goto out_put_cpumask;
-	}
-	l2_mask = tctx->l2_cpumask;
-	if (!l2_mask) {
-		scx_bpf_error("l2 cpumask not initialized");
-		cpu = prev_cpu;
-		goto out_put_cpumask;
-	}
-	l3_mask = tctx->l3_cpumask;
-	if (!l3_mask) {
-		scx_bpf_error("l3 cpumask not initialized");
-		cpu = prev_cpu;
-		goto out_put_cpumask;
+	for_each_cache_layer(layer, codr_p_l2_l3) {
+		cache_mask[layer] = tctx->cpumask[layer];
+		if (!cache_mask[layer]) {
+			scx_bpf_error("cpumask (layer %d) not initialized", cla_disp_name(layer));
+			cpu = prev_cpu;
+			goto out_put_cpumask;
+		}
 	}
 
 	/*
@@ -630,31 +613,23 @@ static s32 pick_idle_cpu(struct task_struct *p,
 	if (do_preferred &&
 	    !bpf_cpumask_empty(cast_mask(preferred)) &&
 	    !bpf_cpumask_equal(cast_mask(preferred), cast_mask(primary))) {
-		bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(preferred));
+		bpf_cpumask_and(cache_mask[cidx_p], p->cpus_ptr, cast_mask(preferred));
 	} else {
-		bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(primary));
+		bpf_cpumask_and(cache_mask[cidx_p], p->cpus_ptr, cast_mask(primary));
 		do_preferred = false;
 	}
 
 	/*
-	 * Determine the L2 cache domain as the intersection of the task's
-	 * primary cpumask and the L2 cache domain mask of the previously used
-	 * CPU (ignore if this cpumask completely overlaps with the task's
-	 * cpumask).
-	 */
-	bpf_cpumask_and(l2_mask, cast_mask(p_mask), cast_mask(l2_domain));
-	if (bpf_cpumask_empty(cast_mask(l2_mask)))
-		l2_mask = NULL;
-
-	/*
-	 * Determine the L3 cache domain as the intersection of the task's
+	 * Determine the L2/L3 cache domain as the intersection of the task's
 	 * primary cpumask and the L3 cache domain mask of the previously used
 	 * CPU (ignore if this cpumask completely overlaps with the task's
 	 * cpumask).
 	 */
-	bpf_cpumask_and(l3_mask, cast_mask(p_mask), cast_mask(l3_domain));
-	if (bpf_cpumask_empty(cast_mask(l3_mask)))
-		l3_mask = NULL;
+	for_each_cache_layer(layer, codr_l2_l3) {
+		bpf_cpumask_and(cache_mask[layer], cast_mask(cache_mask[cidx_p]), cast_mask(cache_domain[layer]));
+		if (bpf_cpumask_empty(cast_mask(cache_mask[layer])))
+			cache_mask[layer] = NULL;
+	}
 
 	/*
 	 * Try to prioritize newly awakened tasks by immediately promoting them
@@ -670,7 +645,7 @@ static s32 pick_idle_cpu(struct task_struct *p,
 		 * try to re-use the same CPU, if idle.
 		 */
 		cpu = bpf_get_smp_processor_id();
-		if (l3_mask && bpf_cpumask_test_cpu(cpu, cast_mask(l3_mask)) &&
+		if (cache_mask[cidx_l3] && bpf_cpumask_test_cpu(cpu, cast_mask(cache_mask[cidx_l3])) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			goto out_put_cpumask;
@@ -681,8 +656,8 @@ static s32 pick_idle_cpu(struct task_struct *p,
 		 * the same scheduling domain and if it's not completely
 		 * saturated.
 		 */
-		if (bpf_cpumask_intersects(cast_mask(p_mask), idle_cpumask) &&
-		    bpf_cpumask_test_cpu(cpu, cast_mask(p_mask)) &&
+		if (bpf_cpumask_intersects(cast_mask(cache_mask[cidx_p]), idle_cpumask) &&
+		    bpf_cpumask_test_cpu(cpu, cast_mask(cache_mask[cidx_p])) &&
 		    !(current->flags & PF_EXITING) &&
 		    scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) == 0)
 			goto out_put_cpumask;
@@ -696,101 +671,54 @@ static s32 pick_idle_cpu(struct task_struct *p,
 		 * If the task can still run on the previously used CPU and
 		 * it's a full-idle core, keep using it.
 		 */
-		if (bpf_cpumask_test_cpu(prev_cpu, cast_mask(p_mask)) &&
-		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		if (bpf_cpumask_test_cpu(prev_cpu, cast_mask(cache_mask[cidx_p])) &&
+			bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
+			scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			goto out_put_cpumask;
 		}
 
 		/*
-		 * Search for any full-idle CPU in the primary domain that
-		 * shares the same L2 cache.
+		 * Search for any full-idle CPU that shares the same L2/L3 cache,
+		 * and then for any full-idle core, in the primary domain.
 		 */
-		if (l2_mask) {
-			cpu = bpf_cpumask_any_and_distribute(cast_mask(l2_mask), idle_smtmask);
-			if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-			    scx_bpf_test_and_clear_cpu_idle(cpu))
-				goto out_put_cpumask;
-		}
-
-		/*
-		 * Search for any full-idle CPU in the primary domain that
-		 * shares the same L3 cache.
-		 */
-		if (l3_mask) {
-			cpu = bpf_cpumask_any_and_distribute(cast_mask(l3_mask), idle_smtmask);
-			if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-			    scx_bpf_test_and_clear_cpu_idle(cpu))
-				goto out_put_cpumask;
-		}
-
-		/*
-		 * When considering the preferred domain (first idle CPU
-		 * selection pass) try to stay on the same LLC.
-		 */
-		if (do_preferred) {
-			cpu = -ENOENT;
-			goto out_put_cpumask;
-		}
-
-		/*
-		 * Search for any other full-idle core in the primary domain.
-		 */
-		cpu = bpf_cpumask_any_and_distribute(cast_mask(p_mask), idle_smtmask);
-		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-		    scx_bpf_test_and_clear_cpu_idle(cpu))
-			goto out_put_cpumask;
+#define TRY_IDLE_MASK(layer, idle_mask_type) do { \
+	cpu = bpf_cpumask_any_and_distribute(cast_mask(cache_mask[layer]), idle_mask_type); \
+	if (bpf_cpumask_test_cpu(cpu, online_cpumask) && \
+			scx_bpf_test_and_clear_cpu_idle(cpu)) { \
+		goto out_put_cpumask; \
+}} while(0)
+#define TRY_IDLE_MASKS(idle_mask_type) do { \
+	for_each_cache_layer(layer, codr_l2_l3) { \
+		if (cache_mask[layer]) { \
+			TRY_IDLE_MASK(layer, idle_mask_type); \
+	}} \
+	if (do_preferred) { \
+		cpu = -ENOENT; \
+		goto out_put_cpumask; \
+	} \
+	TRY_IDLE_MASK(cidx_p, idle_mask_type); \
+} while(0)
+		TRY_IDLE_MASKS(idle_smtmask);
 	}
 
 	/*
 	 * If a full-idle core can't be found (or if this is not an SMT system)
 	 * try to re-use the same CPU, even if it's not in a full-idle core.
 	 */
-	if (bpf_cpumask_test_cpu(prev_cpu, cast_mask(p_mask)) &&
-	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+	if (bpf_cpumask_test_cpu(prev_cpu, cast_mask(cache_mask[cidx_p])) &&
+		scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu = prev_cpu;
 		goto out_put_cpumask;
 	}
 
 	/*
 	 * Search for any idle CPU in the primary domain that shares the same
-	 * L2 cache.
+	 * L2/L3 cache.
 	 */
-	if (l2_mask) {
-		cpu = bpf_cpumask_any_and_distribute(cast_mask(l2_mask), idle_cpumask);
-		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-		    scx_bpf_test_and_clear_cpu_idle(cpu))
-			goto out_put_cpumask;
-	}
-
-	/*
-	 * Search for any idle CPU in the primary domain that shares the same
-	 * L3 cache.
-	 */
-	if (l3_mask) {
-		cpu = bpf_cpumask_any_and_distribute(cast_mask(l3_mask), idle_cpumask);
-		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-		    scx_bpf_test_and_clear_cpu_idle(cpu))
-			goto out_put_cpumask;
-	}
-
-	/*
-	 * When considering the preferred domain (first idle CPU selection
-	 * pass) try to stay on the same LLC.
-	 */
-	if (do_preferred) {
-		cpu = -ENOENT;
-		goto out_put_cpumask;
-	}
-
-	/*
-	 * Search for any idle CPU in the scheduling domain.
-	 */
-	cpu = bpf_cpumask_any_and_distribute(cast_mask(p_mask), idle_cpumask);
-	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-	    scx_bpf_test_and_clear_cpu_idle(cpu))
-		goto out_put_cpumask;
+	TRY_IDLE_MASKS(idle_cpumask);
+#undef TRY_IDLE_MASK
+#undef TRY_IDLE_MASKS
 
 	/*
 	 * We couldn't find any idle CPU, so simply dispatch the task to the
@@ -848,15 +776,9 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * that can consume them) we can just dispatch them to the shared DSQ
 	 * and simply rely on the vruntime logic.
 	 */
-	if (is_task_interactive(p)) {
-		scx_bpf_dispatch_vtime(p, prio_dsq_id, SCX_SLICE_DFL,
-				       deadline, enq_flags);
-		__sync_fetch_and_add(&nr_prio_dispatches, 1);
-	} else {
-		scx_bpf_dispatch_vtime(p, shared_dsq_id, SCX_SLICE_DFL,
-				       deadline, enq_flags);
-		__sync_fetch_and_add(&nr_shared_dispatches, 1);
-	}
+	s32 _dsq_id = dsq_id[!is_task_interactive(p)];
+	scx_bpf_dispatch_vtime(p, _dsq_id, SCX_SLICE_DFL, deadline, enq_flags);
+	__sync_fetch_and_add(&nr_prio_dispatches, 1);
 
 	/*
 	 * If there are idle CPUs in the primary domain that are usable by the
@@ -899,14 +821,13 @@ static bool consume_offline_cpus(s32 cpu)
 	 * those that are offline.
 	 */
 	bpf_repeat(nr_cpu_ids - 1) {
-		s32 dsq_id;
+		s32 _dsq_id;
 
 		cpu = (cpu + 1) % nr_cpu_ids;
-		dsq_id = cpu_to_dsq(cpu);
+		_dsq_id = cpu_to_dsq(cpu);
 
-		if (!bpf_cpumask_test_cpu(cpu, cast_mask(offline)))
-			continue;
-		if (!scx_bpf_dsq_nr_queued(dsq_id))
+		if (!bpf_cpumask_test_cpu(cpu, cast_mask(offline)) ||
+			!scx_bpf_dsq_nr_queued(_dsq_id))
 			continue;
 		set_offline_needed();
 
@@ -914,7 +835,7 @@ static bool consume_offline_cpus(s32 cpu)
 		 * This CPU is offline, if a task has been dispatched there
 		 * consume it immediately on the current CPU.
 		 */
-		if (scx_bpf_consume(dsq_id)) {
+		if (scx_bpf_consume(_dsq_id)) {
 			ret = true;
 			break;
 		}
@@ -924,33 +845,15 @@ static bool consume_offline_cpus(s32 cpu)
 }
 
 /*
- * Consume a task from the priority DSQ, transferring it to the local CPU DSQ.
+ * Consume a task from the specified DSQ, transferring it to the local CPU DSQ.
  *
  * Return true if a task is consumed, false otherwise.
  */
-static bool consume_prio_task(u64 now)
+static bool consume_dsq_task(s32 dsq_index, u64 now)
 {
-	bool ret;
-
-	ret = scx_bpf_consume(prio_dsq_id);
+	bool ret = scx_bpf_consume(dsq_id[dsq_index]);
 	if (ret)
-		starvation_prio_ts = now;
-
-	return ret;
-}
-
-/*
- * Consume a task from the shared DSQ, transferring it to the local CPU DSQ.
- *
- * Return true if a task is consumed, false otherwise.
- */
-static bool consume_regular_task(u64 now)
-{
-	bool ret;
-
-	ret = scx_bpf_consume(shared_dsq_id);
-	if (ret)
-		starvation_shared_ts = now;
+		starvation_ts[dsq_index] = now;
 
 	return ret;
 }
@@ -966,15 +869,11 @@ static bool consume_starving_tasks(u64 now)
 {
 	if (!starvation_thresh_ns)
 		return false;
-
-	if (vtime_before(starvation_shared_ts + starvation_thresh_ns, now))
-		if (consume_regular_task(now))
+	for_each_dsq_level(dsq_index) {
+		if (vtime_before(starvation_ts[dsq_index] + starvation_thresh_ns, now) ||
+			consume_dsq_task(dsq_index, now))
 			return true;
-
-	if (vtime_before(starvation_prio_ts + starvation_thresh_ns, now))
-		if (consume_prio_task(now))
-			return true;
-
+	}
 	return false;
 }
 
@@ -986,32 +885,24 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * Try also to steal tasks directly dispatched to CPUs that have gone
 	 * offline (this allows to prevent indefinite task stalls).
 	 */
-	if (consume_offline_cpus(cpu))
-		return;
-
+	if (consume_offline_cpus(cpu) ||
 	/*
 	 * Make sure we are not staving tasks from the lower priority DSQs.
 	 */
-	if (consume_starving_tasks(now))
-		return;
-
+		consume_starving_tasks(now) ||
 	/*
 	 * Consume directly dispatched tasks, so that they can immediately use
 	 * the CPU assigned in select_cpu().
 	 */
-	if (scx_bpf_consume(cpu_to_dsq(cpu)))
-		return;
-
+		scx_bpf_consume(cpu_to_dsq(cpu)) ||
 	/*
 	 * Then always consume interactive tasks before regular tasks.
 	 */
-	if (consume_prio_task(now))
-		return;
-
+		consume_dsq_task(qidx_prio, now) ||
 	/*
 	 * Lastly, consume regular tasks from the shared DSQ.
 	 */
-	if (consume_regular_task(now))
+		consume_dsq_task(qidx_shared, now))
 		return;
 
 	/*
@@ -1211,13 +1102,11 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 
 void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 {
-	struct task_ctx *tctx;
-
 	/* Initialize task's vruntime */
 	p->scx.dsq_vtime = vtime_now;
 
 	/* Initialize voluntary context switch timestamp */
-	tctx = try_lookup_task_ctx(p);
+	struct task_ctx *tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
 	tctx->nvcsw = p->nvcsw;
@@ -1258,33 +1147,16 @@ s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 	if (!tctx)
 		return -ENOMEM;
 	/*
-	 * Create task's primary cpumask.
+	 * Create task's primary/L2/L3 cpumasks.
 	 */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-	/*
-	 * Create task's L2 cache cpumask.
-	 */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->l2_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-	/*
-	 * Create task's L3 cache cpumask.
-	 */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->l3_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-
+	for_each_cache_layer(layer, codr_p_l2_l3) {
+		cpumask = bpf_cpumask_create();
+		if (!cpumask)
+			return -ENOMEM;
+		cpumask = bpf_kptr_xchg(&tctx->cpumask[layer], cpumask);
+		if (cpumask)
+			bpf_cpumask_release(cpumask);
+	}
 	return 0;
 }
 
@@ -1312,13 +1184,12 @@ s32 get_nr_online_cpus(void)
 
 static int init_cpumask(struct bpf_cpumask **cpumask)
 {
-	struct bpf_cpumask *mask;
 	int err = 0;
 
 	/*
 	 * Do nothing if the mask is already initialized.
 	 */
-	mask = *cpumask;
+	struct bpf_cpumask *mask = *cpumask;
 	if (mask)
 		return 0;
 	/*
@@ -1347,10 +1218,10 @@ int enable_sibling_cpu(struct domain_arg *input)
 	/* Make sure the target CPU mask is initialized */
 	switch (input->lvl_id) {
 	case 2:
-		pmask = &cctx->l2_cpumask;
+		pmask = &cctx->cpumask[cidx_l2];
 		break;
 	case 3:
-		pmask = &cctx->l3_cpumask;
+		pmask = &cctx->cpumask[cidx_l3];
 		break;
 	default:
 		return -EINVAL;
@@ -1368,21 +1239,20 @@ int enable_sibling_cpu(struct domain_arg *input)
 	return err;
 }
 
-SEC("syscall")
-int enable_preferred_cpu(struct cpu_arg *input)
+int enable_global_cpumask(struct cpu_arg *input, struct bpf_cpumask **cpumask)
 {
 	struct bpf_cpumask *mask;
 	int err = 0;
 
-	/* Make sure the primary CPU mask is initialized */
-	err = init_cpumask(&preferred_cpumask);
+	/* Make sure the CPU mask is initialized */
+	err = init_cpumask(cpumask);
 	if (err)
 		return err;
 	/*
 	 * Enable the target CPU in the preferred scheduling domain.
 	 */
 	bpf_rcu_read_lock();
-	mask = preferred_cpumask;
+	mask = *cpumask;
 	if (mask) {
 		s32 cpu = input->cpu_id;
 
@@ -1397,33 +1267,13 @@ int enable_preferred_cpu(struct cpu_arg *input)
 }
 
 SEC("syscall")
-int enable_primary_cpu(struct cpu_arg *input)
-{
-	struct bpf_cpumask *mask;
-	int err = 0;
+int enable_preferred_cpu(struct cpu_arg *input) {
+	return enable_global_cpumask(input, &preferred_cpumask);
+}
 
-	/* Make sure the primary CPU mask is initialized */
-	err = init_cpumask(&primary_cpumask);
-	if (err)
-		return err;
-	/*
-	 * Enable the target CPU in the primary scheduling domain. If the
-	 * target CPU is a negative value, clear the whole mask (this can be
-	 * used to reset the primary domain).
-	 */
-	bpf_rcu_read_lock();
-	mask = primary_cpumask;
-	if (mask) {
-		s32 cpu = input->cpu_id;
-
-		if (cpu < 0)
-			bpf_cpumask_clear(mask);
-		else
-			bpf_cpumask_set_cpu(cpu, mask);
-	}
-	bpf_rcu_read_unlock();
-
-	return err;
+SEC("syscall")
+int enable_primary_cpu(struct cpu_arg *input) {
+	return enable_global_cpumask(input, &primary_cpumask);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
@@ -1447,27 +1297,17 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	}
 
 	/*
-	 * Create the global priority DSQ (for interactive tasks).
-	 *
-	 * Allocate a new DSQ id that does not clash with any valid CPU id.
-	 */
-	prio_dsq_id = nr_cpu_ids++;
-	err = scx_bpf_create_dsq(prio_dsq_id, -1);
-	if (err) {
-		scx_bpf_error("failed to create priority DSQ: %d", err);
-		return err;
-	}
-
-	/*
-	 * Create the global shared DSQ (for regular tasks).
+	 * Create the global priority/shared DSQs.
 	 *
 	 * Allocate a new DSQ id that does not clash with any valid CPU id..
 	 */
-	shared_dsq_id = nr_cpu_ids++;
-	err = scx_bpf_create_dsq(shared_dsq_id, -1);
-	if (err) {
-		scx_bpf_error("failed to create shared DSQ: %d", err);
-		return err;
+	for_each_dsq_level(dsq_index) {
+		dsq_id[dsq_index] = nr_cpu_ids++;
+		err = scx_bpf_create_dsq(dsq_id[dsq_index], -1);
+		if (err) {
+			scx_bpf_error("failed to create DSQ (level %d): %d", dsq_index, err);
+			return err;
+		}
 	}
 
 	/* Initialize the offline CPU mask */

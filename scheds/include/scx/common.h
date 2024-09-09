@@ -26,23 +26,22 @@ typedef int16_t s16;
 typedef int32_t s32;
 typedef int64_t s64;
 
-#define SCX_BUG(__fmt, ...)							\
-	do {									\
-		fprintf(stderr, "[SCX_BUG] %s:%d", __FILE__, __LINE__);		\
-		if (errno)							\
-			fprintf(stderr, " (%s)\n", strerror(errno));		\
-		else								\
-			fprintf(stderr, "\n");					\
-		fprintf(stderr, __fmt __VA_OPT__(,) __VA_ARGS__);		\
-		fprintf(stderr, "\n");						\
-										\
-		exit(EXIT_FAILURE);						\
+#define SCX_BUG(__fmt, ...) \
+	do { \
+		fprintf(stderr, "[SCX_BUG] %s:%d", __FILE__, __LINE__); \
+		if (errno) \
+			fprintf(stderr, " (%s)\n", strerror(errno)); \
+		else \
+			fprintf(stderr, "\n"); \
+		fprintf(stderr, __fmt, ##__VA_ARGS__); \
+		fprintf(stderr, "\n"); \
+		exit(EXIT_FAILURE); \
 	} while (0)
 
-#define SCX_BUG_ON(__cond, __fmt, ...)					\
-	do {								\
-		if (__cond)						\
-			SCX_BUG((__fmt) __VA_OPT__(,) __VA_ARGS__);	\
+#define SCX_BUG_ON(__cond, __fmt, ...) \
+	do { \
+		if (__cond) \
+			SCX_BUG((__fmt), ##__VA_ARGS__); \
 	} while (0)
 
 /**
@@ -60,13 +59,13 @@ typedef int64_t s64;
  * for that custom data section so that it points to the newly memory mapped
  * region.
  */
-#define RESIZE_ARRAY(__skel, elfsec, arr, n)						\
-	do {										\
-		size_t __sz;								\
-		bpf_map__set_value_size((__skel)->maps.elfsec##_##arr,			\
-				sizeof((__skel)->elfsec##_##arr->arr[0]) * (n));	\
-		(__skel)->elfsec##_##arr =						\
-			bpf_map__initial_value((__skel)->maps.elfsec##_##arr, &__sz);	\
+#define RESIZE_ARRAY(__skel, elfsec, arr, n) \
+	do { \
+		size_t __sz; \
+		bpf_map__set_value_size((__skel)->maps.elfsec##_##arr, \
+			sizeof((__skel)->elfsec##_##arr->arr[0]) * (n)); \
+		(__skel)->elfsec##_##arr = \
+			bpf_map__initial_value((__skel)->maps.elfsec##_##arr, &__sz); \
 	} while (0)
 
 #include "user_exit_info.h"
