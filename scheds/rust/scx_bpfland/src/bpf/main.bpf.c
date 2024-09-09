@@ -32,8 +32,8 @@ enum {qidx_prio = 0, qidx_shared = 1};
  */
 enum {cidx_l3 = 0, cidx_l2 = 1, cidx_p = 2};
 
-/* Cache Layer index -> Display Name Converter */
-int cidx_disp_name(int index) {return 3 - index;}
+/* Cache Layer Index -> Display Name Converter */
+static inline int cidx_disp_name(int index) {return 3 - index;}
 
 /* Cache Layer Iteration Access Orders */
 const int codr_p_l2_l3 = 0xC6, codr_l2_l3_p = 0xE1, codr_l2_l3 = 0x31;
