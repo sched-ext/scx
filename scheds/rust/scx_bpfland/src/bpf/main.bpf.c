@@ -23,9 +23,9 @@ enum {qidx_prio = 0, qidx_shared = 1};
 /* Cache layer iterator */
 enum {cidx_l3 = 0, cidx_l2 = 1, cidx_p = 2};
 int cla_disp_name(int index) {return 3 - index;}
-int codr_p_l2_l3 = 0xC6, codr_l2_l3_p = 0xE1, codr_l2_l3 = 0x31;
+const int codr_p_l2_l3 = 0xC6, codr_l2_l3_p = 0xE1, codr_l2_l3 = 0x31;
 #define for_each_cache_layer(layer, order) \
-	for (int layer = order; (layer & 3) != 3; layer >>= 2)
+	for (int i, layer = (i = order) & 3; layer != 3; layer = (i >>= 2) & 3)
 
 /*
  * DSQs used to dispatch interactive ([0]) and regular ([1]) tasks.
