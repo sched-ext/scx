@@ -34,7 +34,7 @@ use std::num::ParseIntError;
 
 /// Buddy allocator
 ///
-/// The following code is strongly based on https://github.com/jjyr/buddy-alloc and imported
+/// The following code is strongly based on <https://github.com/jjyr/buddy-alloc> and imported
 /// directly here to make packaging easier.
 
 const OOM_MSG: &str = "requires more memory space to initialize BuddyAlloc";

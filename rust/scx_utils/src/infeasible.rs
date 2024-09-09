@@ -88,7 +88,7 @@
 //! More details on load balancing and the infeasible weights problem are
 //! provided in the following Google Drive document:
 //!
-//! https://drive.google.com/file/d/1fAoWUlmW-HTp6akuATVpMxpUpvWcGSAv
+//! <https://drive.google.com/file/d/1fAoWUlmW-HTp6akuATVpMxpUpvWcGSAv>
 //!
 //! Using the Crate
 //! ---------------
@@ -434,7 +434,7 @@ impl LoadAggregator {
         //
         // All of this is described and proven in detail in the following pdf:
         //
-        // https://drive.google.com/file/d/1fAoWUlmW-HTp6akuATVpMxpUpvWcGSAv
+        // <https://drive.google.com/file/d/1fAoWUlmW-HTp6akuATVpMxpUpvWcGSAv>
         let p = self.nr_cpus as f64;
         let mut curr_dcycle_sum = 0.0f64;
         let mut curr_load_sum = self.global_load_sum;

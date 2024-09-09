@@ -222,3 +222,41 @@ jobs:
       - run: cargo test --manifest-path scheds/rust/${{ matrix.scheduler }}/Cargo.toml --no-run
       - run: vng -v --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --net user -- cargo test --manifest-path scheds/rust/${{ matrix.scheduler }}/Cargo.toml
 
+  pages:
+    runs-on: ubuntu-22.04
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write  # To push a branch
+      pages: write  # To push to a GitHub Pages site
+      id-token: write # To update the deployment status
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/install-deps-action
+      - name: Build Book and Linux Docs
+        run: |
+          curl https://sh.rustup.rs -sSf | sh -s -- -y
+          rustup install nightly
+          RUSTDOCFLAGS="--enable-index-page -Zunstable-options" ~/.cargo/bin/cargo +nightly doc --workspace --no-deps --bins --lib --examples --document-private-items --all-features
+          sudo apt update
+          sudo apt install build-essential graphviz sphinx-doc python3-sphinx-rtd-theme texlive-latex-recommended python3-yaml -y
+          cargo install htmlq
+          git clone --single-branch -b for-next --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git linux
+          cd linux
+          make DOCS_THEME=sphinx_rtd_theme SPHINXDIRS=scheduler htmldocs
+          make DOCS_THEME=sphinx_rtd_theme SPHINXDIRS=bpf htmldocs
+          cd ..
+          cp -a linux/Documentation/output/scheduler target/doc/
+          cp -a linux/Documentation/output/bpf target/doc/
+          sed -i 's%<li><a href="server/index.html">server</a></li>%<li><a href="server/index.html">server</a></li><li><a href="scheduler/sched-ext.html">Kernel Sched Ext Docs</a></li><li><a href="bpf/helpers.html">Kernel Bpf Helpers Docs</a></li>%' target/doc/index.html
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'target/doc'
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
