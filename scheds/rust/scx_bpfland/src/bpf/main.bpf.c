@@ -530,7 +530,7 @@ static s32 pick_idle_cpu(struct task_struct *p,
 			 s32 prev_cpu, u64 wake_flags, bool do_preferred)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
-	struct bpf_cpumask *primary, *preferred, *l2_domain, *l3_domain;
+	struct bpf_cpumask *primary, *preferred;
 	struct bpf_cpumask *cache_domain[2];
 	struct bpf_cpumask *cache_mask[3];
 	struct task_ctx *tctx;
