@@ -8,9 +8,9 @@
 char _license[] SEC("license") = "GPL";
 
 /* Allow to use bpf_printk() only when @debug is set */
-#define dbg_msg(_fmt, ...) do { \
-	if (debug) \
-		bpf_printk(_fmt, ##__VA_ARGS__); \
+#define dbg_msg(_fmt, ...) do {				\
+	if (debug)					\
+		bpf_printk(_fmt, ##__VA_ARGS__);	\
 } while(0)
 
  /* Report additional debugging information */
