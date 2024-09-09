@@ -709,23 +709,24 @@ static s32 pick_idle_cpu(struct task_struct *p,
 		 * Search for any full-idle CPU that shares the same L2/L3 cache,
 		 * and then for any full-idle core, in the primary domain.
 		 */
-#define TRY_IDLE_MASK(layer, idle_mask_type) do { \
-	cpu = bpf_cpumask_any_and_distribute(cast_mask(cache_mask[layer]), idle_mask_type); \
-	if (bpf_cpumask_test_cpu(cpu, online_cpumask) && \
-			scx_bpf_test_and_clear_cpu_idle(cpu)) { \
-		goto out_put_cpumask; \
-}} while(0)
-#define TRY_IDLE_MASKS(idle_mask_type) do { \
-	for_each_cache_layer(layer, codr_l2_l3) { \
-		if (cache_mask[layer]) { \
-			TRY_IDLE_MASK(layer, idle_mask_type); \
-	}} \
-	if (do_preferred) { \
-		cpu = -ENOENT; \
-		goto out_put_cpumask; \
-	} \
-	TRY_IDLE_MASK(cidx_p, idle_mask_type); \
-} while(0)
+		#define TRY_IDLE_MASK(layer, idle_mask_type) do { \
+			cpu = bpf_cpumask_any_and_distribute(cast_mask(cache_mask[layer]), idle_mask_type); \
+			if (bpf_cpumask_test_cpu(cpu, online_cpumask) && \
+					scx_bpf_test_and_clear_cpu_idle(cpu)) { \
+				goto out_put_cpumask; \
+		}} while(0)
+		
+		#define TRY_IDLE_MASKS(idle_mask_type) do { \
+			for_each_cache_layer(layer, codr_l2_l3) { \
+				if (cache_mask[layer]) { \
+					TRY_IDLE_MASK(layer, idle_mask_type); \
+			}} \
+			if (do_preferred) { \
+				cpu = -ENOENT; \
+				goto out_put_cpumask; \
+			} \
+			TRY_IDLE_MASK(cidx_p, idle_mask_type); \
+		} while(0)
 		TRY_IDLE_MASKS(idle_smtmask);
 	}
 
@@ -744,8 +745,8 @@ static s32 pick_idle_cpu(struct task_struct *p,
 	 * L2/L3 cache.
 	 */
 	TRY_IDLE_MASKS(idle_cpumask);
-#undef TRY_IDLE_MASK
-#undef TRY_IDLE_MASKS
+	#undef TRY_IDLE_MASK
+	#undef TRY_IDLE_MASKS
 
 	/*
 	 * We couldn't find any idle CPU, so simply dispatch the task to the
