@@ -16,14 +16,41 @@ char _license[] SEC("license") = "GPL";
  /* Report additional debugging information */
 const volatile bool debug;
 
-/* Global DSQ level iterator */
+/* Global DSQ Level Indexes */
 enum {qidx_prio = 0, qidx_shared = 1};
+
+/* Global DSQ Level iterator */
 #define for_each_dsq_level(level) \
 	for(int level = 0; level < 2; level++)
-/* Cache layer iterator */
+
+/*
+ * Cache Layer Access Indexes
+ *
+ * The indexes are in [L3, L2, Primary] ascending order,
+ * to make a natural, better match with the Domain Level counterpart
+ * which essentially lacks the "Primary" level. see pick_idle_cpu().
+ */
 enum {cidx_l3 = 0, cidx_l2 = 1, cidx_p = 2};
-int cla_disp_name(int index) {return 3 - index;}
+
+/* Cache Layer index -> Display Name Converter */
+int cidx_disp_name(int index) {return 3 - index;}
+
+/* Cache Layer Iteration Access Orders */
 const int codr_p_l2_l3 = 0xC6, codr_l2_l3_p = 0xE1, codr_l2_l3 = 0x31;
+
+/* 
+ * Cache Layer Iterator
+ *
+ * Each of the codr_* constants specifies which indexes of an array should
+ * be accessed consecutively in an ascending array of 2-bit integers.
+ * (Right-shift by 2 bits, mask it using & 3, and loop until it hits 0x3.)
+ *
+ * For example: codr_l2_l3_p = 0xE1 = 0b11100001
+ * This means that when we consume 2 bits at a time until we hit the stop
+ * indicator 0x3, the sequence 01 (=1), 00 (=0), 10 (=2), and 11 (=3)
+ * appears in order. This indicates that we should access the array by
+ * the corresponding indexes [L2 -> L3 -> Primary].
+ */
 #define for_each_cache_layer(layer, order) \
 	for (int i, layer = (i = order) & 3; layer != 3; layer = (i >>= 2) & 3)
 
@@ -598,7 +625,7 @@ static s32 pick_idle_cpu(struct task_struct *p,
 	for_each_cache_layer(layer, codr_p_l2_l3) {
 		cache_mask[layer] = tctx->cpumask[layer];
 		if (!cache_mask[layer]) {
-			scx_bpf_error("cpumask (layer %d) not initialized", cla_disp_name(layer));
+			scx_bpf_error("cpumask (layer %d) not initialized", cidx_disp_name(layer));
 			cpu = prev_cpu;
 			goto out_put_cpumask;
 		}
