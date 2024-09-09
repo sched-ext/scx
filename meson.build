@@ -25,10 +25,6 @@ veristat_scheduler = get_option('veristat_scheduler')
 
 veristat_diff_dir = get_option('veristat_diff_dir')
 
-if enable_rust
-  cargo = find_program(get_option('cargo'))
-endif
-
 if enable_stress
   run_stress_tests = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/run_stress_tests'))
@@ -52,10 +48,6 @@ fetch_bpftool = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/fetch_bpftool'))
 build_bpftool = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/build_bpftool'))
-if enable_rust
-  cargo_fetch = find_program(join_paths(meson.current_source_dir(),
-                                      'meson-scripts/cargo_fetch'))
-endif
 
 bpf_clang_ver = run_command(get_clang_ver, bpf_clang, check: true).stdout().strip()
 if bpf_clang_ver == ''
@@ -288,59 +280,94 @@ if get_option('offline')
   cargo_build_args += '--offline'
 endif
 
-cargo_env = environment()
-cargo_env.set('BPF_CLANG', bpf_clang.full_path())
-
-foreach flag: bpf_base_cflags
-  cargo_env.append('BPF_BASE_CFLAGS', flag, separator: ' ')
-endforeach
-
-if libbpf_a != ''
-  foreach header: libbpf_h
-    cargo_env.append('BPF_EXTRA_CFLAGS_PRE_INCL', '-I' + header, separator: ' ')
-  endforeach
-
-  cargo_env.append('RUSTFLAGS',
-                   '-C relocation-model=pic -C link-args=-lelf -C link-args=-lz -C link-args=-lzstd -L '
-                   + fs.parent(libbpf_a), separator: ' ')
-
-  #
-  # XXX - scx_rusty's original Cargo.toml contained a dependency matching
-  # the following. However, it doesn't seem necessary to enable linking to
-  # libbpf.a. Ask Dan Schatzberg about the role the dependency line plays.
-  #
-  #cargo_build_args += ['--config',
-  #                     'dependencies.libbpf-sys.version="1.2"',
-  #                     '--config',
-  #                     'dependencies.libbpf-sys.features=["novendor", "static"]']
-endif
-
-if get_option('cargo_home') != ''
-  cargo_env.set('CARGO_HOME', get_option('cargo_home'))
-endif
-
-if enable_rust
-  meson.add_install_script('meson-scripts/install_rust_user_scheds')
-  run_target('fetch', command: [cargo_fetch, cargo], env: cargo_env)
-endif
-
 if get_option('kernel') != ''
   kernel = get_option('kernel')
 endif
 
+if enable_rust
+  cargo = find_program(get_option('cargo'))
+  cargo_fetch = find_program(join_paths(meson.current_source_dir(),
+                                      'meson-scripts/cargo_fetch'))
+  cargo_env = environment()
+  cargo_env.set('BPF_CLANG', bpf_clang.full_path())
+
+  meson.add_install_script('meson-scripts/install_rust_user_scheds')
+
+  foreach flag: bpf_base_cflags
+    cargo_env.append('BPF_BASE_CFLAGS', flag, separator: ' ')
+  endforeach
+
+  if libbpf_a != ''
+    foreach header: libbpf_h
+      cargo_env.append('BPF_EXTRA_CFLAGS_PRE_INCL', '-I' + header, separator: ' ')
+    endforeach
+
+    cargo_env.append('RUSTFLAGS',
+                     '-C relocation-model=pic -C link-args=-lelf -C link-args=-lz -C link-args=-lzstd -L '
+                     + fs.parent(libbpf_a), separator: ' ')
+
+    #
+    # XXX - scx_rusty's original Cargo.toml contained a dependency matching
+    # the following. However, it doesn't seem necessary to enable linking to
+    # libbpf.a. Ask Dan Schatzberg about the role the dependency line plays.
+    #
+    #cargo_build_args += ['--config',
+    #                     'dependencies.libbpf-sys.version="1.2"',
+    #                     '--config',
+    #                     'dependencies.libbpf-sys.features=["novendor", "static"]']
+  endif
+
+  if get_option('cargo_home') != ''
+    cargo_env.set('CARGO_HOME', get_option('cargo_home'))
+  endif
+
+  run_target('fetch', command: [cargo_fetch, cargo], env: cargo_env)
+
+  rust_scheds = ['scx_lavd', 'scx_bpfland', 'scx_rustland', 'scx_rlfifo',
+                 'scx_rusty',
+                 'scx_layered'] # scx_mitosis temporarily excluded
+  rust_misc = ['scx_stats', 'scx_stats_derive', 'scx_utils',
+               'scx_rustland_core',
+               'scx_loader']
+
+  sched_deps = [libbpf, bpftool_target]
+  cargo_cmd = [cargo, 'build', '--manifest-path=@INPUT@', '--target-dir=@OUTDIR@',
+               cargo_build_args]
+
+  # target to compile all rust subprojects
+  custom_target('rust_all',
+                output: '@PLAINNAME@.__PHONY__',
+                input: 'Cargo.toml',
+                command: cargo_cmd,
+                env: cargo_env,
+                depends: sched_deps,
+                build_by_default: true,
+                build_always_stale: true)
+
+  # targets to build individual rust subprojects
+  foreach p : rust_scheds + rust_misc
+    custom_target(p,
+                  output: p + '@PLAINNAME@.__PHONY__',
+                  input: 'Cargo.toml',
+                  command: cargo_cmd + ['-p', p],
+                  env: cargo_env,
+                  depends: sched_deps,
+                  build_by_default: false,
+                  build_always_stale: true)
+  endforeach
+else
+  rust_scheds = []
+endif
+
 run_target('test_sched', command: [test_sched, kernel])
 
-SCHEDULERS = ['scx_lavd', 'scx_bpfland', 'scx_rustland', 'scx_rlfifo',
-               'scx_rusty',
-               'scx_layered'] # scx_mitosis temporarily excluded                        
-
-foreach s : SCHEDULERS
+foreach s : rust_scheds
   run_target('test_sched_'+s, command: [test_sched, kernel, s])
 endforeach
 
 run_target('veristat', command: [run_veristat, meson.current_build_dir(),
                                  get_option('veristat_scheduler'), get_option('kernel')])
-foreach s : SCHEDULERS
+foreach s : rust_scheds
   run_target('veristat_'+s, command: [run_veristat, meson.current_build_dir(),
                                  get_option('veristat_scheduler'), get_option('kernel'), s])
 endforeach
@@ -349,18 +376,16 @@ run_target('veristat_diff', command: [run_veristat_diff, meson.current_build_dir
                                  get_option('veristat_scheduler'), get_option('kernel'),
                                  get_option('veristat_diff_dir')])
 
-subdir('scheds')
-# currently only scx_loader is located there as binary
-subdir('rust')
-
 if enable_stress
   run_target('stress_tests', command: [run_stress_tests, '-k', kernel, '-b',
-    meson.current_build_dir()])
-foreach s : SCHEDULERS
-  run_target('stress_tests_'+s, command: [run_stress_tests, '-k', kernel, '-b',
-    meson.current_build_dir(), '--sched', s])
-endforeach
+                                       meson.current_build_dir()])
+  foreach s : rust_scheds
+    run_target('stress_tests_'+s, command: [run_stress_tests, '-k', kernel, '-b',
+                                            meson.current_build_dir(), '--sched', s])
+  endforeach
 endif
+
+subdir('scheds')
 
 systemd = dependency('systemd', required: get_option('systemd'))
 

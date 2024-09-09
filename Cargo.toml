@@ -1,0 +1,13 @@
+[workspace]
+members = ["rust/scx_stats",
+           "rust/scx_stats/scx_stats_derive",
+	   "rust/scx_utils",
+           "rust/scx_rustland_core",
+           "rust/scx_loader",
+	   "scheds/rust/scx_lavd",
+           "scheds/rust/scx_bpfland",
+           "scheds/rust/scx_rustland",
+           "scheds/rust/scx_rlfifo",
+           "scheds/rust/scx_rusty",
+           "scheds/rust/scx_layered"] # scx_mitosis temporarily excluded
+resolver = "2"
