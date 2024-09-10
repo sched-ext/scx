@@ -1090,6 +1090,7 @@ impl CpuPool {
 }
 
 fn layer_core_order(
+    spec: &LayerSpec,
     growth_algo: LayerGrowthAlgo,
     layer_idx: usize,
     topo: &Topology
@@ -1144,12 +1145,13 @@ struct Layer {
 
 impl Layer {
     fn new(
+        spec: &LayerSpec,
         idx: usize,
         cpu_pool: &CpuPool,
-        name: &str,
-        kind: LayerKind,
         topo: &Topology,
     ) -> Result<Self> {
+        let name = &spec.name;
+        let kind = spec.kind.clone();
         let mut cpus = bitvec![0; cpu_pool.nr_cpus];
         cpus.fill(false);
         let mut allowed_cpus = bitvec![0; cpu_pool.nr_cpus];
@@ -1227,7 +1229,7 @@ impl Layer {
             | LayerKind::Open { growth_algo, .. } => growth_algo.clone(),
         };
 
-        let core_order = layer_core_order(layer_growth_algo, idx, topo);
+        let core_order = layer_core_order(spec, layer_growth_algo, idx, topo);
 
         Ok(Self {
             name: name.into(),
@@ -1593,7 +1595,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         skel.maps.rodata_data.nr_llcs = 0;
 
         for node in topo.nodes() {
-            info!(
+            debug!(
                 "configuring node {}, LLCs {:?}",
                 node.id(),
                 node.llcs().len()
@@ -1601,7 +1603,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             skel.maps.rodata_data.nr_llcs += node.llcs().len() as u32;
 
             for (_, llc) in node.llcs() {
-                info!("configuring llc {:?} for node {:?}", llc.id(), node.id());
+                debug!("configuring llc {:?} for node {:?}", llc.id(), node.id());
                 skel.maps.rodata_data.llc_numa_id_map[llc.id()] = node.id() as u32;
             }
         }
@@ -1664,10 +1666,9 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         let mut layers = vec![];
         for (idx, spec) in layer_specs.iter().enumerate() {
             layers.push(Layer::new(
+                &spec,
                 idx,
                 &cpu_pool,
-                &spec.name,
-                spec.kind.clone(),
                 &topo,
             )?);
         }
