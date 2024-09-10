@@ -590,11 +590,9 @@ mod tests {
 
         println!("vmlinux.h: ver={:?} sha1={:?}", &ver, &sha1,);
 
-        assert!(
-            regex::Regex::new(r"^([1-9][0-9]*\.[1-9][0-9][a-z0-9-]*)$")
-                .unwrap()
-                .is_match(&ver)
-        );
+        assert!(regex::Regex::new(r"^([1-9][0-9]*\.[1-9][0-9][a-z0-9-]*)$")
+            .unwrap()
+            .is_match(&ver));
         assert!(regex::Regex::new(r"^[0-9a-z]{12}$")
             .unwrap()
             .is_match(&sha1));

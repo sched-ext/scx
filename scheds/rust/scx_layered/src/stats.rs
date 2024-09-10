@@ -1,17 +1,3 @@
-use crate::bpf_intf;
-use crate::BpfStats;
-use crate::Layer;
-use crate::LayerKind;
-use crate::Stats;
-use anyhow::{bail, Result};
-use bitvec::prelude::*;
-use chrono::DateTime;
-use chrono::Local;
-use log::warn;
-use scx_stats::prelude::*;
-use scx_stats_derive::Stats;
-use serde::Deserialize;
-use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
@@ -22,6 +8,23 @@ use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+
+use anyhow::bail;
+use anyhow::Result;
+use bitvec::prelude::*;
+use chrono::DateTime;
+use chrono::Local;
+use log::warn;
+use scx_stats::prelude::*;
+use scx_stats_derive::Stats;
+use serde::Deserialize;
+use serde::Serialize;
+
+use crate::bpf_intf;
+use crate::BpfStats;
+use crate::Layer;
+use crate::LayerKind;
+use crate::Stats;
 
 fn fmt_pct(v: f64) -> String {
     if v >= 99.995 {
@@ -147,11 +150,7 @@ impl LayerStats {
             }
         };
         let calc_frac = |a, b| {
-            if b != 0.0 {
-                a / b * 100.0
-            } else {
-                0.0
-            }
+            if b != 0.0 { a / b * 100.0 } else { 0.0 }
         };
 
         let is_excl = match &layer.kind {

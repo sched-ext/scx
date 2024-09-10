@@ -5,7 +5,6 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-
 use scx_utils::Cpumask;
 use scx_utils::Topology;
 

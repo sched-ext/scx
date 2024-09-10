@@ -610,7 +610,9 @@ fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 let Ok(nvidia_gpu) = nvml.device_by_index(i) else {
                     continue;
                 };
-                let graphics_boost_clock = nvidia_gpu.max_customer_boost_clock(Clock::Graphics).unwrap_or(0);
+                let graphics_boost_clock = nvidia_gpu
+                    .max_customer_boost_clock(Clock::Graphics)
+                    .unwrap_or(0);
                 let sm_boost_clock = nvidia_gpu.max_customer_boost_clock(Clock::SM).unwrap_or(0);
                 let Ok(memory_info) = nvidia_gpu.memory_info() else {
                     continue;
@@ -629,8 +631,8 @@ fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 let numa_path = format!("/sys/bus/pci/devices/{}/numa_node", fixed_bus_id);
                 let numa_node = read_file_usize(&Path::new(&numa_path)).unwrap_or(0);
 
-                let gpu = Gpu{
-                    index: GpuIndex::Nvidia{nvml_id: index},
+                let gpu = Gpu {
+                    index: GpuIndex::Nvidia { nvml_id: index },
                     node_id: numa_node as usize,
                     max_graphics_clock: graphics_boost_clock as usize,
                     max_sm_clock: sm_boost_clock as usize,
@@ -661,7 +663,7 @@ fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {
                 node_gpus.insert(gpu.index, gpu.clone());
             }
         }
-        _ => {},
+        _ => {}
     };
 
     let mut node = Node {
@@ -708,7 +710,7 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
                     node_gpus.insert(gpu.index, gpu.clone());
                 }
             }
-            _ => {},
+            _ => {}
         };
 
         let mut node = Node {

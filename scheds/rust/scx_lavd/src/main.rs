@@ -12,21 +12,14 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 
 mod stats;
-use stats::SysStats;
-use stats::SchedSample;
-use stats::SchedSamples;
-use stats::StatsReq;
-use stats::StatsRes;
-
-use libc::c_char;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::Read;
 use std::ffi::c_int;
 use std::ffi::CStr;
 use std::fmt;
+use std::fs::File;
+use std::io::Read;
 use std::mem;
 use std::mem::MaybeUninit;
 use std::str;
@@ -44,27 +37,32 @@ use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
 use crossbeam::channel::Sender;
 use crossbeam::channel::TrySendError;
+use itertools::iproduct;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
+use libc::c_char;
 use log::debug;
 use log::info;
 use log::warn;
+use plain::Plain;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
+use scx_utils::set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
-use scx_utils::set_rlimit_infinity;
-
-use itertools::iproduct;
-use plain::Plain;
+use stats::SchedSample;
+use stats::SchedSamples;
+use stats::StatsReq;
+use stats::StatsRes;
+use stats::SysStats;
 
 /// scx_lavd: Latency-criticality Aware Virtual Deadline (LAVD) scheduler
 ///
@@ -152,18 +150,18 @@ struct Opts {
 
 impl Opts {
     fn nothing_specified(&self) -> bool {
-        return self.autopilot == false &&
-               self.autopower == false &&
-               self.performance == false &&
-               self.powersave == false &&
-               self.balanced == false &&
-               self.no_core_compaction == false &&
-               self.prefer_smt_core == false &&
-               self.prefer_little_core == false &&
-               self.no_prefer_turbo_core == false &&
-               self.no_freq_scaling == false &&
-               self.monitor == None &&
-               self.monitor_sched_samples == None;
+        return self.autopilot == false
+            && self.autopower == false
+            && self.performance == false
+            && self.powersave == false
+            && self.balanced == false
+            && self.no_core_compaction == false
+            && self.prefer_smt_core == false
+            && self.prefer_little_core == false
+            && self.no_prefer_turbo_core == false
+            && self.no_freq_scaling == false
+            && self.monitor == None
+            && self.monitor_sched_samples == None;
     }
 
     fn proc(&mut self) -> Option<&mut Self> {
@@ -266,8 +264,7 @@ impl FlatTopology {
     pub fn new() -> Result<FlatTopology> {
         let (cpu_fids_performance, avg_freq, nr_cpus_online) =
             Self::build_cpu_fids(false, false).unwrap();
-        let (cpu_fids_powersave, _, _) =
-            Self::build_cpu_fids(true, true).unwrap();
+        let (cpu_fids_powersave, _, _) = Self::build_cpu_fids(true, true).unwrap();
 
         // Note that building compute domain is not dependent to CPU orer
         // so it is okay to use any cpu_fids_*.
@@ -559,7 +556,7 @@ impl<'a> Scheduler<'a> {
             const LAVD_CPDOM_MAX_NR: u8 = 32;
             const LAVD_CPDOM_MAX_DIST: usize = 4;
             if v.neighbor_map.borrow().iter().len() > LAVD_CPDOM_MAX_DIST {
-                    panic!("The processor topology is too complex to handle in BPF.");
+                panic!("The processor topology is too complex to handle in BPF.");
             }
 
             for (k, (_d, neighbors)) in v.neighbor_map.borrow().iter().enumerate() {
@@ -576,7 +573,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn is_powersave_mode(opts: &Opts) -> bool {
-            opts.prefer_smt_core  && opts.prefer_little_core
+        opts.prefer_smt_core && opts.prefer_little_core
     }
 
     fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, nr_cpus_onln: u64) {
@@ -587,7 +584,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.bss_data.is_powersave_mode = Self::is_powersave_mode(&opts);
         skel.maps.rodata_data.is_smt_active = match FlatTopology::is_smt_active() {
             Ok(ret) => (ret == 1) as u32,
-            Err(_)  => 0,
+            Err(_) => 0,
         };
         skel.maps.rodata_data.is_autopilot_on = opts.autopilot;
         skel.maps.rodata_data.verbose = opts.verbose;
@@ -691,9 +688,7 @@ impl<'a> Scheduler<'a> {
                 self.monitor_tid = Some(*tid);
                 StatsRes::Ack
             }
-            StatsReq::SysStatsReq {
-                tid,
-            } => {
+            StatsReq::SysStatsReq { tid } => {
                 if Some(*tid) != self.monitor_tid {
                     return Ok(StatsRes::Bye);
                 }
@@ -717,9 +712,9 @@ impl<'a> Scheduler<'a> {
                 let pc_pc_on_big = Self::get_pc(st.nr_pc_on_big, nr_big);
                 let pc_lc_on_big = Self::get_pc(st.nr_lc_on_big, nr_big);
                 let power_mode = Self::get_power_mode(bss_data.power_mode);
-                let total_time = bss_data.performance_mode_ns +
-                                 bss_data.balanced_mode_ns +
-                                 bss_data.powersave_mode_ns;
+                let total_time = bss_data.performance_mode_ns
+                    + bss_data.balanced_mode_ns
+                    + bss_data.powersave_mode_ns;
                 let pc_performance = Self::get_pc(bss_data.performance_mode_ns, total_time);
                 let pc_balanced = Self::get_pc(bss_data.balanced_mode_ns, total_time);
                 let pc_powersave = Self::get_pc(bss_data.powersave_mode_ns, total_time);
@@ -924,7 +919,9 @@ fn main() -> Result<()> {
 
     if let Some(nr_samples) = opts.monitor_sched_samples {
         let shutdown_copy = shutdown.clone();
-        let jh = std::thread::spawn(move || stats::monitor_sched_samples(nr_samples, shutdown_copy).unwrap());
+        let jh = std::thread::spawn(move || {
+            stats::monitor_sched_samples(nr_samples, shutdown_copy).unwrap()
+        });
         let _ = jh.join();
         return Ok(());
     }
