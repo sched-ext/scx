@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-kernel:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       # redundancy to exit fast
       - run: echo 'debconf debconf/frontend select Noninteractive' | sudo debconf-set-selections
@@ -73,7 +73,7 @@ jobs:
         run: cd linux && make headers
 
   integration-test:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: build-kernel
     strategy:
           matrix:
@@ -133,7 +133,7 @@ jobs:
       - run: meson compile -C build veristat_${{ matrix.scheduler }}
 
   rust-test-core:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: build-kernel
     strategy:
       matrix:
@@ -178,7 +178,7 @@ jobs:
       - run: vng -v --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --net user -- cargo test --manifest-path rust/${{ matrix.component }}/Cargo.toml
 
   rust-test-schedulers:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     needs: build-kernel
     strategy:
       matrix:
@@ -223,7 +223,7 @@ jobs:
       - run: vng -v --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --net user -- cargo test --manifest-path scheds/rust/${{ matrix.scheduler }}/Cargo.toml
 
   pages:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: github.ref == 'refs/heads/main'
     permissions:
       contents: write  # To push a branch
@@ -236,8 +236,9 @@ jobs:
       - uses: ./.github/actions/install-deps-action
       - name: Build Book and Linux Docs
         run: |
-          curl https://sh.rustup.rs -sSf | sh -s -- -y
+          curl https://sh.rustup.rs -sSf | RUSTUP_INIT_SKIP_PATH_CHECK=yes sh -s -- -y
           rustup install nightly
+          export PATH="~/.cargo/bin:$PATH"
           RUSTDOCFLAGS="--enable-index-page -Zunstable-options" ~/.cargo/bin/cargo +nightly doc --workspace --no-deps --bins --lib --examples --document-private-items --all-features
           sudo apt update
           sudo apt install build-essential graphviz sphinx-doc python3-sphinx-rtd-theme texlive-latex-recommended python3-yaml -y
