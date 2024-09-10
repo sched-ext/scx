@@ -68,7 +68,7 @@ pub struct LayerStats {
     pub min_exec: f64,
     #[stat(desc = "total exec durations extended due to min_exec_us")]
     pub min_exec_us: u64,
-    #[stat(desc = "% dispatche into idle CPUs occupied by other layers")]
+    #[stat(desc = "% dispatched into idle CPUs occupied by other layers")]
     pub open_idle: f64,
     #[stat(desc = "% preempted other tasks")]
     pub preempt: f64,
@@ -199,7 +199,7 @@ impl LayerStats {
     pub fn format<W: Write>(&self, w: &mut W, name: &str, header_width: usize) -> Result<()> {
         writeln!(
             w,
-            "  {:<width$}: util/frac={:7.1}/{:5.1} load/frac={:9.1}:{:5.1} tasks={:6}",
+            "  {:<width$}: util/frac={:7.1}/{:5.1} load/frac={:9.1}/{:5.1} tasks={:6}",
             name,
             self.util,
             self.util_frac,
