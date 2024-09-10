@@ -591,6 +591,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             let dom = *dom_id;
             let dom_key = unsafe { std::mem::transmute::<u32, [u8; 4]>(dom as u32) };
 
+            aggregator.init_domain(dom);
+
             if let Some(dom_ctx_map_elem) = dom_data
                 .lookup(&dom_key, libbpf_rs::MapFlags::ANY)
                 .context("Failed to lookup dom_ctx")?

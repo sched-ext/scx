@@ -311,6 +311,16 @@ impl LoadAggregator {
         }
     }
 
+    /// Init a domain and set default load values.
+    /// Does nothing if the domain already exists.
+    pub fn init_domain(&mut self, dom_id: usize) {
+        self.doms.entry(dom_id).or_insert(Domain {
+            loads: BTreeMap::new(),
+            dcycle_sum: 0.0f64,
+            load_sum: 0.0f64,
+        });
+    }
+
     /// Record an instance of some domain's load (by specifying its weight and
     /// dcycle). Returns an error if duty cycle is specified more than once
     /// for a given (Domain, weight) tuple.
