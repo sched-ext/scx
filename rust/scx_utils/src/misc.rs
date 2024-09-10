@@ -4,6 +4,7 @@ use scx_stats::prelude::*;
 use serde::Deserialize;
 use std::thread::sleep;
 use std::time::Duration;
+use libc;
 
 pub fn monitor_stats<T>(
     stats_args: &Vec<(String, String)>,
@@ -56,4 +57,18 @@ where
     }
 
     Ok(())
+}
+
+pub fn set_rlimit_infinity(){
+    unsafe {
+        // Call setrlimit to set the locked-in-memory limit to unlimited.
+        let new_rlimit = libc::rlimit {
+            rlim_cur: libc::RLIM_INFINITY,
+            rlim_max: libc::RLIM_INFINITY,
+        };
+        let res = libc::setrlimit(libc::RLIMIT_MEMLOCK, &new_rlimit);
+        if res != 0 {
+            panic!("setrlimit failed with error code: {}", res);
+        }
+    };
 }

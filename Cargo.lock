@@ -1591,15 +1591,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a66a03ae7c801facd77a29370b4faec201768915ac14a721ba36f20bc9c209b"
 
 [[package]]
-name = "rlimit"
-version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7043b63bd0cd1aaa628e476b80e6d4023a3b50eb32789f2728908107bd0c793a"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "rustc-demangle"
 version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1655,7 +1646,6 @@ dependencies = [
  "ctrlc",
  "libbpf-rs",
  "log",
- "rlimit",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -1681,7 +1671,6 @@ dependencies = [
  "log",
  "ordered-float 3.9.2",
  "plain",
- "rlimit",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
@@ -1838,6 +1827,7 @@ dependencies = [
  "lazy_static",
  "libbpf-cargo",
  "libbpf-rs",
+ "libc",
  "log",
  "metrics",
  "metrics-util",

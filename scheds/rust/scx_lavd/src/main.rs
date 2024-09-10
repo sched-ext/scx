@@ -61,10 +61,10 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
+use scx_utils::set_rlimit_infinity;
 
 use itertools::iproduct;
 use plain::Plain;
-use rlimit::{getrlimit, setrlimit, Resource};
 
 /// scx_lavd: Latency-criticality Aware Virtual Deadline (LAVD) scheduler
 ///
@@ -489,8 +489,7 @@ impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         // Increase MEMLOCK size since the BPF scheduler might use
         // more than the current limit
-        let (soft_limit, _) = getrlimit(Resource::MEMLOCK).unwrap();
-        setrlimit(Resource::MEMLOCK, soft_limit, rlimit::INFINITY).unwrap();
+        set_rlimit_infinity();
 
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
