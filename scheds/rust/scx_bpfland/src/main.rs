@@ -52,7 +52,6 @@ const SCHEDULER_NAME: &'static str = "scx_bpfland";
 
 #[derive(PartialEq)]
 enum Powermode {
-    Turbo,
     Performance,
     Powersave,
     Any,
@@ -66,8 +65,6 @@ fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
         .into_iter()
         .flat_map(|core| core.cpus())
         .filter_map(|(cpu_id, cpu)| match (&mode, &cpu.core_type) {
-            // Turbo mode: only add turbo-boosted CPUs
-            (Powermode::Turbo, CoreType::Big { turbo: true }) |
             // Performance mode: add all the Big CPUs (either Turbo or non-Turbo)
             (Powermode::Performance, CoreType::Big { .. }) |
             // Powersave mode: add all the Little CPUs
@@ -157,15 +154,6 @@ struct Opts {
     /// network traffic.
     #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
     local_kthreads: bool,
-
-    /// Specifies a group of preferred CPUs, represented as a bitmask in hex (e.g., 0xff), that the
-    /// scheduler will try to prioritize to dispatch tasks.
-    ///
-    /// Special values:
-    ///  - "auto" = automaticlly detect the fastest CPUs based on the current scheduler and system
-    ///  energy profiles.
-    #[clap(short = 'M', long, default_value = "auto")]
-    preferred_domain: String,
 
     /// Specifies the initial set of CPUs, represented as a bitmask in hex (e.g., 0xff), that the
     /// scheduler will use to dispatch tasks, until the system becomes saturated, at which point
@@ -288,9 +276,6 @@ impl<'a> Scheduler<'a> {
 
         // Initialize the primary scheduling domain and the preferred domain.
         let energy_profile = Self::read_energy_profile();
-        if let Err(err) = Self::init_preferred_domain(&mut skel, &opts.preferred_domain) {
-            warn!("failed to initialize preferred domain: error {}", err);
-        }
         if let Err(err) = Self::init_energy_domain(&mut skel, &opts.primary_domain, &energy_profile)
         {
             warn!("failed to initialize primary domain: error {}", err);
@@ -372,60 +357,12 @@ impl<'a> Scheduler<'a> {
         res.unwrap_or_else(|_: String| "none".to_string())
     }
 
-    fn enable_preferred_cpu(skel: &mut BpfSkel<'_>, cpu: i32) -> Result<(), u32> {
-        let prog = &mut skel.progs.enable_preferred_cpu;
-        let mut args = cpu_arg {
-            cpu_id: cpu as c_int,
-        };
-        let input = ProgramInput {
-            context_in: Some(unsafe {
-                std::slice::from_raw_parts_mut(
-                    &mut args as *mut _ as *mut u8,
-                    std::mem::size_of_val(&args),
-                )
-            }),
-            ..Default::default()
-        };
-        let out = prog.test_run(input).unwrap();
-        if out.return_value != 0 {
-            return Err(out.return_value);
-        }
-
-        Ok(())
-    }
-
     fn epp_to_cpumask(profile: Powermode) -> Result<Cpumask> {
         let mut cpus = get_primary_cpus(profile).unwrap_or(Vec::new());
         if cpus.is_empty() {
             cpus = get_primary_cpus(Powermode::Any).unwrap_or(Vec::new());
         }
         Cpumask::from_str(&cpus_to_cpumask(&cpus))
-    }
-
-    fn init_preferred_domain(skel: &mut BpfSkel<'_>, preferred_domain: &String) -> Result<()> {
-        let domain = match preferred_domain.as_str() {
-            "auto" => Self::epp_to_cpumask(Powermode::Turbo)?,
-            &_ => Cpumask::from_str(&preferred_domain)?,
-        };
-
-        info!("preferred CPU domain = 0x{:x}", domain);
-
-        // Clear the preferred domain by passing a negative CPU id.
-        if let Err(err) = Self::enable_preferred_cpu(skel, -1) {
-            warn!("failed to reset preferred domain: error {}", err);
-        }
-        for cpu in 0..*NR_CPU_IDS {
-            if domain.test_cpu(cpu) {
-                if let Err(err) = Self::enable_preferred_cpu(skel, cpu as i32) {
-                    warn!(
-                        "failed to add CPU {} to preferred domain: error {}",
-                        cpu, err
-                    );
-                }
-            }
-        }
-
-        Ok(())
     }
 
     fn init_energy_domain(
@@ -504,11 +441,6 @@ impl<'a> Scheduler<'a> {
                 self.energy_profile = energy_profile.clone();
 
                 if self.opts.primary_domain == "auto" {
-                    if let Err(err) =
-                        Self::init_preferred_domain(&mut self.skel, &self.opts.preferred_domain)
-                    {
-                        warn!("failed to refresh preferred domain: error {}", err);
-                    }
                     if let Err(err) = Self::init_energy_domain(
                         &mut self.skel,
                         &self.opts.primary_domain,
