@@ -229,6 +229,11 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *l3_cpumask;
 
 	/*
+	 * Total execution time of the task.
+	 */
+	u64 sum_exec_runtime;
+
+	/*
 	 * Voluntary context switches metrics.
 	 */
 	u64 nvcsw;
@@ -1084,10 +1089,6 @@ static void update_cpuperf_target(struct task_struct *p)
 
 void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 {
-	/* Update global vruntime */
-	if (vtime_before(vtime_now, p->scx.dsq_vtime))
-		vtime_now = p->scx.dsq_vtime;
-
 	/*
 	 * Refresh task's time slice immediately before it starts to run on its
 	 * assigned CPU.
@@ -1128,7 +1129,7 @@ static void update_task_interactive(struct task_ctx *tctx)
  */
 void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 {
-	u64 now = bpf_ktime_get_ns();
+	u64 now = bpf_ktime_get_ns(), task_slice;
 	s32 cpu = scx_bpf_task_cpu(p);
 	s64 delta_t;
 	struct cpu_ctx *cctx;
@@ -1149,19 +1150,15 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 
 	/*
 	 * Update task vruntime, charging the weighted used time slice.
-	 *
-	 * Note that using p->scx.slice here can excessively penalize tasks
-	 * that call sched_yield(), because in sched_ext, yielding is
-	 * implemented by setting p->scx.slice to 0, that is considered as if
-	 * the task has used up its entire budgeted time slice.
-	 *
-	 * However, this is balanced by the fact that yielding increases the
-	 * number of voluntary context switches (nvcsw), giving the task more
-	 * opportunities to be classified as interactive and dispatched to the
-	 * high priority DSQ (prio_dsq_id).
 	 */
-	if (slice_ns > p->scx.slice)
-		p->scx.dsq_vtime += (slice_ns - p->scx.slice) * 100 / p->scx.weight;
+	task_slice = p->se.sum_exec_runtime - tctx->sum_exec_runtime;
+	p->scx.dsq_vtime += task_slice * 100 / p->scx.weight;
+	tctx->sum_exec_runtime = p->se.sum_exec_runtime;
+
+	/*
+	 * Update global vruntime.
+	 */
+	vtime_now += task_slice * 100 / p->scx.weight;
 
 	/*
 	 * Refresh voluntary context switch metrics.
@@ -1220,6 +1217,7 @@ void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
+	tctx->sum_exec_runtime = p->se.sum_exec_runtime;
 	tctx->nvcsw = p->nvcsw;
 	tctx->nvcsw_ts = bpf_ktime_get_ns();
 	tctx->avg_nvcsw = p->nvcsw * NSEC_PER_SEC / tctx->nvcsw_ts;
