@@ -7,9 +7,9 @@ This is a single user-defined scheduler used within [sched_ext](https://github.c
 scx_bpfland: a vruntime-based sched_ext scheduler that prioritizes interactive
 workloads.
 
-This scheduler is derived from scx_rustland, but it is fully implemented in BPF
-with minimal user-space Rust part to process command line options, collect
-metrics and logs out scheduling statistics. The BPF part makes all the
+This scheduler is derived from scx_rustland, but it is fully implemented in BPF.
+It has a minimal user-space Rust part to process command line options, collect
+metrics and log out scheduling statistics. The BPF part makes all the
 scheduling decisions.
 
 Tasks are categorized as either interactive or regular based on their average
