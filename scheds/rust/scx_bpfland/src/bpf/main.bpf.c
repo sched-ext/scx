@@ -638,33 +638,51 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	if (bpf_cpumask_empty(cast_mask(l3_mask)))
 		l3_mask = NULL;
 
-	/*
-	 * Try to prioritize newly awakened tasks by immediately promoting them
-	 * as interactive.
-	 */
 	if (wake_flags & SCX_WAKE_SYNC) {
 		struct task_struct *current = (void *)bpf_get_current_task_btf();
+		bool share_llc, has_idle;
 
+		/*
+		 * Prioritize newly awakened tasks by immediately promoting
+		 * them as interactive.
+		 */
 		handle_sync_wakeup(p);
 
 		/*
-		 * If CPUs of the waker and the wakee share the same L3 cache,
-		 * try to re-use the same CPU, if idle.
+		 * Determine waker CPU scheduling domain.
 		 */
 		cpu = bpf_get_smp_processor_id();
-		if (l3_mask && bpf_cpumask_test_cpu(cpu, cast_mask(l3_mask)) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+
+		cctx = try_lookup_cpu_ctx(cpu);
+		if (!cctx) {
+			cpu = -ENOENT;
+			goto out_put_cpumask;
+		}
+
+		l3_domain = cctx->l3_cpumask;
+		if (!l3_domain) {
+			scx_bpf_error("CPU L3 cpumask not initialized");
+			cpu = -ENOENT;
+			goto out_put_cpumask;
+		}
+
+		/*
+		 * If both the waker and wakee share the same L3 cache keep
+		 * using the same CPU if possible.
+		 */
+		share_llc = bpf_cpumask_test_cpu(prev_cpu, cast_mask(l3_domain));
+		if (share_llc && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			goto out_put_cpumask;
 		}
 
 		/*
-		 * Try to run the task on the same CPU as the waker if it's in
-		 * the same scheduling domain and if it's not completely
-		 * saturated.
+		 * If the waker's L3 domain is not saturated attempt to migrate
+		 * the wakee on the same CPU as the waker.
 		 */
-		if (bpf_cpumask_intersects(cast_mask(p_mask), idle_cpumask) &&
-		    bpf_cpumask_test_cpu(cpu, cast_mask(p_mask)) &&
+		has_idle = bpf_cpumask_intersects(cast_mask(l3_domain), idle_cpumask);
+		if (has_idle &&
+		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
 		    !(current->flags & PF_EXITING) &&
 		    scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) == 0)
 			goto out_put_cpumask;
