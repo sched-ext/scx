@@ -32,8 +32,6 @@ use log::info;
 
 use log::warn;
 
-use rlimit::{getrlimit, setrlimit, Resource};
-
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
@@ -53,6 +51,7 @@ use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
+use scx_utils::set_rlimit_infinity;
 
 const SCHEDULER_NAME: &'static str = "scx_bpfland";
 
@@ -251,8 +250,7 @@ struct Scheduler<'a> {
 
 impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
-        let (soft_limit, _) = getrlimit(Resource::MEMLOCK).unwrap();
-        setrlimit(Resource::MEMLOCK, soft_limit, rlimit::INFINITY).unwrap();
+        set_rlimit_infinity();
 
         // Validate command line arguments.
         assert!(opts.slice_us >= opts.slice_us_min);

@@ -81,4 +81,5 @@ pub use log_recorder::LogRecorderBuilder;
 
 mod misc;
 pub use misc::monitor_stats;
+pub use misc::set_rlimit_infinity;
 
