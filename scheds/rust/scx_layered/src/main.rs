@@ -268,6 +268,11 @@ lazy_static::lazy_static! {
 ///
 /// - slice_us: Scheduling slice duration in microseconds.
 ///
+/// - growth_algo: When a layer is allocated new CPUs different algorithms can
+///   be used to determine which CPU should be allocated next. The default
+///   algorithm is a "sticky" algorithm that attempts to spread layers evenly
+///   across cores.
+///
 /// - perf: CPU performance target. 0 means no configuration. A value
 ///   between 1 and 1024 indicates the performance level CPUs running tasks
 ///   in this layer are configured to using scx_bpf_cpuperf_set().
@@ -450,9 +455,18 @@ enum LayerMatch {
 #[derive(Clone, Debug, Parser, Serialize, Deserialize)]
 #[clap(rename_all = "snake_case")]
 enum LayerGrowthAlgo {
+    /// Sticky attempts to place layers evenly spaced across cores.
     Sticky,
+    /// Linear starts with the lowest number CPU and grows towards the total
+    /// number of CPUs.
     Linear,
+    /// Random core selection order.
     Random,
+    /// Topo uses the order of the nodes/llcs in the layer config to determine
+    /// the order of CPUs to select when growing a layer. It starts from the
+    /// llcs configuration and then the NUMA configuration for any CPUs not
+    /// specified.
+    Topo,
 }
 
 impl Default for LayerGrowthAlgo {
@@ -558,6 +572,20 @@ impl LayerSpec {
             serde_json::from_str(input)?
         };
         Ok(config.specs)
+    }
+    fn nodes(&self) -> Vec<usize> {
+        match &self.kind {
+            LayerKind::Confined { nodes, .. }
+            | LayerKind::Open { nodes, .. }
+            | LayerKind::Grouped { nodes, .. } => nodes.clone(),
+        }
+    }
+    fn llcs(&self) -> Vec<usize> {
+        match &self.kind {
+            LayerKind::Confined { llcs, .. }
+            | LayerKind::Open { llcs, .. }
+            | LayerKind::Grouped { llcs, .. } => llcs.clone(),
+        }
     }
 }
 
@@ -1140,6 +1168,50 @@ fn layer_core_order(
             linear();
             fastrand::seed(layer_idx.try_into().unwrap());
             fastrand::shuffle(&mut core_order);
+        LayerGrowthAlgo::Topo => {
+            let spec_nodes = spec.nodes();
+            let spec_llcs = spec.llcs();
+            let topo_nodes = topo.nodes();
+
+            if spec_nodes.len() + spec_llcs.len() == 0 {
+                // XXX: fallback to something more sane (round robin when it exists)
+                linear();
+            } else {
+                let mut offset;
+                for spec_llc in &spec_llcs {
+                    offset = 0;
+                    for topo_node in topo_nodes {
+                        for topo_llc in topo_node.llcs().values() {
+                            if *spec_llc != topo_llc.id() {
+                                continue;
+                            }
+                            for (id, _core) in topo_llc.cores().keys().enumerate() {
+                                let core_id = id + offset;
+                                if !core_order.contains(&core_id) {
+                                    core_order.push(core_id);
+                                }
+                            }
+                        }
+                        offset += topo_node.cores().len();
+                    }
+                }
+                for spec_node in &spec_nodes {
+                    offset = 0;
+                    for topo_node in topo_nodes {
+                        if *spec_node != topo_node.id() {
+                            offset += topo_node.cores().len();
+                            continue;
+                        }
+                        for (id, _core) in topo_node.cores().keys().enumerate() {
+                            let core_id = id + offset;
+                            if !core_order.contains(&core_id) {
+                                core_order.push(core_id);
+                            }
+                        }
+                        offset += topo_node.cores().len();
+                    }
+                }
+            }
         }
     }
     core_order
