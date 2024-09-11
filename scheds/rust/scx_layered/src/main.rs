@@ -455,7 +455,9 @@ enum LayerGrowthAlgo {
 }
 
 impl Default for LayerGrowthAlgo {
-    fn default() -> Self { LayerGrowthAlgo::Sticky }
+    fn default() -> Self {
+        LayerGrowthAlgo::Sticky
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1093,8 +1095,8 @@ fn layer_core_order(
     spec: &LayerSpec,
     growth_algo: LayerGrowthAlgo,
     layer_idx: usize,
-    topo: &Topology
-    ) -> Vec<usize> {
+    topo: &Topology,
+) -> Vec<usize> {
     let mut core_order = vec![];
     match growth_algo {
         LayerGrowthAlgo::Sticky => {
@@ -1144,12 +1146,7 @@ struct Layer {
 }
 
 impl Layer {
-    fn new(
-        spec: &LayerSpec,
-        idx: usize,
-        cpu_pool: &CpuPool,
-        topo: &Topology,
-    ) -> Result<Self> {
+    fn new(spec: &LayerSpec, idx: usize, cpu_pool: &CpuPool, topo: &Topology) -> Result<Self> {
         let name = &spec.name;
         let kind = spec.kind.clone();
         let mut cpus = bitvec![0; cpu_pool.nr_cpus];
@@ -1601,6 +1598,15 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                 node.llcs().len()
             );
             skel.maps.rodata_data.nr_llcs += node.llcs().len() as u32;
+            let raw_numa_slice = node.span().as_raw_slice();
+            let node_cpumask_slice = &mut skel.maps.rodata_data.numa_cpumasks[node.id()];
+            let (left, _) = node_cpumask_slice.split_at_mut(raw_numa_slice.len());
+            left.clone_from_slice(raw_numa_slice);
+            debug!(
+                "node {} mask: {:?}",
+                node.id(),
+                skel.maps.rodata_data.numa_cpumasks[node.id()]
+            );
 
             for (_, llc) in node.llcs() {
                 debug!("configuring llc {:?} for node {:?}", llc.id(), node.id());
@@ -1665,12 +1671,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         let mut layers = vec![];
         for (idx, spec) in layer_specs.iter().enumerate() {
-            layers.push(Layer::new(
-                &spec,
-                idx,
-                &cpu_pool,
-                &topo,
-            )?);
+            layers.push(Layer::new(&spec, idx, &cpu_pool, &topo)?);
         }
 
         // Other stuff.
