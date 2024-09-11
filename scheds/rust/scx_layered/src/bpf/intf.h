@@ -71,6 +71,8 @@ enum layer_stat_idx {
 	LSTAT_YIELD,
 	LSTAT_YIELD_IGNORE,
 	LSTAT_MIGRATION,
+	LSTAT_XNUMA_MIGRATION,
+	LSTAT_XLLC_MIGRATION,
 	NR_LSTATS,
 };
 
@@ -86,6 +88,8 @@ struct cpu_ctx {
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
 	u64			ran_current_for;
 	u32			layer_idx;
+	u32			node_idx;
+	u32			cache_idx;
 };
 
 struct cache_ctx {
