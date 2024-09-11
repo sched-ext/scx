@@ -1121,6 +1121,7 @@ impl CpuPool {
 }
 
 fn layer_core_order(
+    cpu_pool: &CpuPool,
     spec: &LayerSpec,
     growth_algo: LayerGrowthAlgo,
     layer_idx: usize,
@@ -1168,6 +1169,7 @@ fn layer_core_order(
             linear();
             fastrand::seed(layer_idx.try_into().unwrap());
             fastrand::shuffle(&mut core_order);
+        }
         LayerGrowthAlgo::Topo => {
             let spec_nodes = spec.nodes();
             let spec_llcs = spec.llcs();
@@ -1177,40 +1179,37 @@ fn layer_core_order(
                 // XXX: fallback to something more sane (round robin when it exists)
                 linear();
             } else {
-                let mut offset;
-                for spec_llc in &spec_llcs {
-                    offset = 0;
-                    for topo_node in topo_nodes {
-                        for topo_llc in topo_node.llcs().values() {
-                            if *spec_llc != topo_llc.id() {
-                                continue;
+                let mut core_id = 0;
+                spec_llcs.iter().for_each(|spec_llc| {
+                    core_id = 0;
+                    topo_nodes.iter().for_each(|topo_node| {
+                        topo_node.cores().values().for_each(|core| {
+                            if core.llc_id != *spec_llc {
+                                core_id += 1;
+                                return;
                             }
-                            for (id, _core) in topo_llc.cores().keys().enumerate() {
-                                let core_id = id + offset;
-                                if !core_order.contains(&core_id) {
-                                    core_order.push(core_id);
-                                }
-                            }
-                        }
-                        offset += topo_node.cores().len();
-                    }
-                }
-                for spec_node in &spec_nodes {
-                    offset = 0;
-                    for topo_node in topo_nodes {
-                        if *spec_node != topo_node.id() {
-                            offset += topo_node.cores().len();
-                            continue;
-                        }
-                        for (id, _core) in topo_node.cores().keys().enumerate() {
-                            let core_id = id + offset;
                             if !core_order.contains(&core_id) {
                                 core_order.push(core_id);
                             }
+                            core_id += 1;
+                        });
+                    });
+                });
+                spec_nodes.iter().for_each(|spec_node| {
+                    core_id = 0;
+                    topo_nodes.iter().for_each(|topo_node| {
+                        if topo_node.id() != *spec_node {
+                            core_id += topo_node.cores().len();
+                            return;
                         }
-                        offset += topo_node.cores().len();
-                    }
-                }
+                        topo_node.cores().values().for_each(|_core| {
+                            if !core_order.contains(&core_id) {
+                                core_order.push(core_id);
+                            }
+                            core_id += 1;
+                        });
+                    });
+                });
             }
         }
     }
@@ -1309,7 +1308,7 @@ impl Layer {
             | LayerKind::Open { growth_algo, .. } => growth_algo.clone(),
         };
 
-        let core_order = layer_core_order(spec, layer_growth_algo.clone(), idx, topo);
+        let core_order = layer_core_order(cpu_pool, spec, layer_growth_algo.clone(), idx, topo);
         debug!(
             "layer: {} algo: {:?} core order: {:?}",
             name,
