@@ -1,4 +1,11 @@
-use crate::StatsCtx;
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::UNIX_EPOCH;
+
 use anyhow::Result;
 use chrono::DateTime;
 use chrono::Local;
@@ -7,13 +14,8 @@ use scx_stats_derive::Stats;
 use scx_utils::Cpumask;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::BTreeMap;
-use std::io::Write;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::time::Duration;
-use std::time::UNIX_EPOCH;
+
+use crate::StatsCtx;
 
 fn signed(x: f64) -> String {
     if x >= 0.0f64 {

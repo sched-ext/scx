@@ -26,11 +26,11 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use std::sync::Mutex;
 use std::alloc::{GlobalAlloc, Layout};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::num::ParseIntError;
+use std::sync::Mutex;
 
 /// Buddy allocator
 ///

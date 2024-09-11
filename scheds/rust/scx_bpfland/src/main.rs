@@ -11,8 +11,6 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 
 mod stats;
-use stats::Metrics;
-
 use std::collections::HashMap;
 use std::ffi::c_int;
 use std::fs::File;
@@ -28,22 +26,19 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
-use log::info;
-
-use log::warn;
-
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-
+use log::info;
+use log::warn;
 use scx_stats::prelude::*;
-
 use scx_utils::build_id;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
+use scx_utils::set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::CoreType;
@@ -51,7 +46,7 @@ use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
-use scx_utils::set_rlimit_infinity;
+use stats::Metrics;
 
 const SCHEDULER_NAME: &'static str = "scx_bpfland";
 
@@ -88,7 +83,7 @@ fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
 // Convert an array of CPUs to the corresponding cpumask of any arbitrary size.
 fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
     if cpus.is_empty() {
-       return String::from("none");
+        return String::from("none");
     }
 
     // Determine the maximum CPU ID to create a sufficiently large byte vector.
@@ -293,8 +288,7 @@ impl<'a> Scheduler<'a> {
 
         // Initialize the primary scheduling domain and the preferred domain.
         let energy_profile = Self::read_energy_profile();
-        if let Err(err) = Self::init_preferred_domain(&mut skel, &opts.preferred_domain)
-        {
+        if let Err(err) = Self::init_preferred_domain(&mut skel, &opts.preferred_domain) {
             warn!("failed to initialize preferred domain: error {}", err);
         }
         if let Err(err) = Self::init_energy_domain(&mut skel, &opts.primary_domain, &energy_profile)
@@ -408,17 +402,10 @@ impl<'a> Scheduler<'a> {
         Cpumask::from_str(&cpus_to_cpumask(&cpus))
     }
 
-    fn init_preferred_domain(
-        skel: &mut BpfSkel<'_>,
-        preferred_domain: &String,
-    ) -> Result<()> {
+    fn init_preferred_domain(skel: &mut BpfSkel<'_>, preferred_domain: &String) -> Result<()> {
         let domain = match preferred_domain.as_str() {
-            "auto" => {
-                Self::epp_to_cpumask(Powermode::Turbo)?
-            }
-            &_ => {
-                Cpumask::from_str(&preferred_domain)?
-            }
+            "auto" => Self::epp_to_cpumask(Powermode::Turbo)?,
+            &_ => Cpumask::from_str(&preferred_domain)?,
         };
 
         info!("preferred CPU domain = 0x{:x}", domain);
@@ -430,7 +417,10 @@ impl<'a> Scheduler<'a> {
         for cpu in 0..*NR_CPU_IDS {
             if domain.test_cpu(cpu) {
                 if let Err(err) = Self::enable_preferred_cpu(skel, cpu as i32) {
-                    warn!("failed to add CPU {} to preferred domain: error {}", cpu, err);
+                    warn!(
+                        "failed to add CPU {} to preferred domain: error {}",
+                        cpu, err
+                    );
                 }
             }
         }
@@ -444,31 +434,19 @@ impl<'a> Scheduler<'a> {
         energy_profile: &String,
     ) -> Result<()> {
         let domain = match primary_domain.as_str() {
-            "powersave" => {
-                Self::epp_to_cpumask(Powermode::Powersave)?
-            }
-            "performance" => {
-                Self::epp_to_cpumask(Powermode::Performance)?
-            }
-            "auto" => {
-                match energy_profile.as_str() {
-                    "power" | "balance_power" | "powersave" => {
-                        Self::epp_to_cpumask(Powermode::Powersave)?
-                    }
-                    "balance_performance" | "performance" => {
-                        Self::epp_to_cpumask(Powermode::Performance)?
-                    }
-                    &_ => {
-                        Self::epp_to_cpumask(Powermode::Any)?
-                    }
+            "powersave" => Self::epp_to_cpumask(Powermode::Powersave)?,
+            "performance" => Self::epp_to_cpumask(Powermode::Performance)?,
+            "auto" => match energy_profile.as_str() {
+                "power" | "balance_power" | "powersave" => {
+                    Self::epp_to_cpumask(Powermode::Powersave)?
                 }
-            }
-            "all" => {
-                Self::epp_to_cpumask(Powermode::Any)?
-            }
-            &_ => {
-                Cpumask::from_str(&primary_domain)?
-            }
+                "balance_performance" | "performance" => {
+                    Self::epp_to_cpumask(Powermode::Performance)?
+                }
+                &_ => Self::epp_to_cpumask(Powermode::Any)?,
+            },
+            "all" => Self::epp_to_cpumask(Powermode::Any)?,
+            &_ => Cpumask::from_str(&primary_domain)?,
         };
 
         info!("primary CPU domain = 0x{:x}", domain);
@@ -526,10 +504,9 @@ impl<'a> Scheduler<'a> {
                 self.energy_profile = energy_profile.clone();
 
                 if self.opts.primary_domain == "auto" {
-                    if let Err(err) = Self::init_preferred_domain(
-                        &mut self.skel,
-                        &self.opts.preferred_domain,
-                    ) {
+                    if let Err(err) =
+                        Self::init_preferred_domain(&mut self.skel, &self.opts.preferred_domain)
+                    {
                         warn!("failed to refresh preferred domain: error {}", err);
                     }
                     if let Err(err) = Self::init_energy_domain(

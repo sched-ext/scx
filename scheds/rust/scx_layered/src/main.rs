@@ -6,10 +6,6 @@ mod bpf_skel;
 mod stats;
 pub use bpf_skel::*;
 pub mod bpf_intf;
-use stats::LayerStats;
-use stats::StatsReq;
-use stats::StatsRes;
-use stats::SysStats;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -57,6 +53,10 @@ use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use serde::Deserialize;
 use serde::Serialize;
+use stats::LayerStats;
+use stats::StatsReq;
+use stats::StatsRes;
+use stats::SysStats;
 
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
@@ -455,7 +455,9 @@ enum LayerGrowthAlgo {
 }
 
 impl Default for LayerGrowthAlgo {
-    fn default() -> Self { LayerGrowthAlgo::Sticky }
+    fn default() -> Self {
+        LayerGrowthAlgo::Sticky
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1093,8 +1095,8 @@ fn layer_core_order(
     spec: &LayerSpec,
     growth_algo: LayerGrowthAlgo,
     layer_idx: usize,
-    topo: &Topology
-    ) -> Vec<usize> {
+    topo: &Topology,
+) -> Vec<usize> {
     let mut core_order = vec![];
     match growth_algo {
         LayerGrowthAlgo::Sticky => {
@@ -1144,12 +1146,7 @@ struct Layer {
 }
 
 impl Layer {
-    fn new(
-        spec: &LayerSpec,
-        idx: usize,
-        cpu_pool: &CpuPool,
-        topo: &Topology,
-    ) -> Result<Self> {
+    fn new(spec: &LayerSpec, idx: usize, cpu_pool: &CpuPool, topo: &Topology) -> Result<Self> {
         let name = &spec.name;
         let kind = spec.kind.clone();
         let mut cpus = bitvec![0; cpu_pool.nr_cpus];
@@ -1276,8 +1273,7 @@ impl Layer {
         {
             trace!(
                 "layer-{} needs more CPUs (util={:.3}) but is over the load fraction",
-                &self.name,
-                layer_util
+                &self.name, layer_util
             );
             return Ok(false);
         }
@@ -1665,12 +1661,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
         let mut layers = vec![];
         for (idx, spec) in layer_specs.iter().enumerate() {
-            layers.push(Layer::new(
-                &spec,
-                idx,
-                &cpu_pool,
-                &topo,
-            )?);
+            layers.push(Layer::new(&spec, idx, &cpu_pool, &topo)?);
         }
 
         // Other stuff.

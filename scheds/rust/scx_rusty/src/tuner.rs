@@ -5,16 +5,15 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::sub_or_zero;
-use crate::BpfSkel;
-use crate::DomainGroup;
-
 use ::fb_procfs as procfs;
 use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Result;
-
 use scx_utils::Cpumask;
+
+use crate::sub_or_zero;
+use crate::BpfSkel;
+use crate::DomainGroup;
 
 fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
     match (curr, prev) {

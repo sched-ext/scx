@@ -112,7 +112,7 @@
 //!```rust
 //!     use scx_utils::LoadAggregator;
 //!     use log::info;
-//! 
+//!
 //!     let mut aggregator = LoadAggregator::new(32, false);
 //!     // Create a LoadAggregator object, specifying the number of CPUs on the
 //!     // system, and whether it should only aggregate duty cycle.

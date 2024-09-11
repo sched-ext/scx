@@ -66,17 +66,15 @@ mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 
+#[rustfmt::skip]
 mod bpf;
-use bpf::*;
-
-use scx_utils::UserExitInfo;
-
-use libbpf_rs::OpenObject;
-
 use std::mem::MaybeUninit;
 use std::time::SystemTime;
 
 use anyhow::Result;
+use bpf::*;
+use libbpf_rs::OpenObject;
+use scx_utils::UserExitInfo;
 
 // Maximum time slice (in nanoseconds) that a task can use before it is re-enqueued.
 const SLICE_NS: u64 = 5_000_000;

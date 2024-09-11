@@ -131,14 +131,9 @@
 //! - We're not accounting for cgroups when performing load balancing.
 
 use core::cmp::Ordering;
-
-use crate::bpf_intf;
-use crate::bpf_skel::*;
-use crate::stats::DomainStats;
-use crate::stats::NodeStats;
-use crate::DomainGroup;
-
 use std::cell::Cell;
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 
@@ -153,8 +148,12 @@ use scx_utils::ravg::ravg_read;
 use scx_utils::LoadAggregator;
 use scx_utils::LoadLedger;
 use sorted_vec::SortedVec;
-use std::collections::BTreeMap;
-use std::collections::VecDeque;
+
+use crate::bpf_intf;
+use crate::bpf_skel::*;
+use crate::stats::DomainStats;
+use crate::stats::NodeStats;
+use crate::DomainGroup;
 
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 

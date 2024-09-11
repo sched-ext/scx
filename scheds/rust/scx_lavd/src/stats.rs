@@ -1,9 +1,3 @@
-use anyhow::bail;
-use anyhow::Result;
-use scx_stats::prelude::*;
-use scx_stats_derive::Stats;
-use serde::Deserialize;
-use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
@@ -11,7 +5,14 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::thread::ThreadId;
 use std::time::Duration;
+
+use anyhow::bail;
+use anyhow::Result;
 use gpoint::GPoint;
+use scx_stats::prelude::*;
+use scx_stats_derive::Stats;
+use serde::Deserialize;
+use serde::Serialize;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
@@ -122,7 +123,6 @@ impl SysStats {
         )?;
         Ok(())
     }
-
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
@@ -133,7 +133,9 @@ pub struct SchedSample {
     pub pid: i32,
     #[stat(desc = "Task name")]
     pub comm: String,
-    #[stat(desc = "LR: 'L'atency-critical or 'R'egular, HI: performance-'H'ungry or performance-'I'nsensitive, BT: 'B'ig or li'T'tle, EG: 'E'ligigle or 'G'reedy, PN: 'P'reempting or 'N'ot")]
+    #[stat(
+        desc = "LR: 'L'atency-critical or 'R'egular, HI: performance-'H'ungry or performance-'I'nsensitive, BT: 'B'ig or li'T'tle, EG: 'E'ligigle or 'G'reedy, PN: 'P'reempting or 'N'ot"
+    )]
     pub stat: String,
     #[stat(desc = "CPU id where this task is scheduled on")]
     pub cpu_id: u32,
@@ -272,12 +274,8 @@ pub enum StatsReq {
 }
 
 impl StatsReq {
-    fn from_args_stats(
-        tid: ThreadId,
-    ) -> Result<Self> {
-        Ok(Self::SysStatsReq {
-            tid,
-        })
+    fn from_args_stats(tid: ThreadId) -> Result<Self> {
+        Ok(Self::SysStatsReq { tid })
     }
 
     fn from_args_samples(
@@ -316,30 +314,31 @@ pub enum StatsRes {
 
 pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
     let open: Box<dyn StatsOpener<StatsReq, StatsRes>> = Box::new(move |(req_ch, res_ch)| {
-            let tid = std::thread::current().id();
-            req_ch.send(StatsReq::NewSampler(tid))?;
-            match res_ch.recv()? {
-                StatsRes::Ack => {}
-                res => bail!("invalid response: {:?}", &res),
-            }
+        let tid = std::thread::current().id();
+        req_ch.send(StatsReq::NewSampler(tid))?;
+        match res_ch.recv()? {
+            StatsRes::Ack => {}
+            res => bail!("invalid response: {:?}", &res),
+        }
 
-            let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
-                Box::new(move |_args, (req_ch, res_ch)| {
-                    let req = StatsReq::from_args_stats(tid)?;
-                    req_ch.send(req)?;
+        let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
+            Box::new(move |_args, (req_ch, res_ch)| {
+                let req = StatsReq::from_args_stats(tid)?;
+                req_ch.send(req)?;
 
-                    let stats = match res_ch.recv()? {
-                        StatsRes::SysStats(v) => v,
-                        StatsRes::Bye => bail!("preempted by another sampler"),
-                        res => bail!("invalid response: {:?}", &res),
-                    };
+                let stats = match res_ch.recv()? {
+                    StatsRes::SysStats(v) => v,
+                    StatsRes::Bye => bail!("preempted by another sampler"),
+                    res => bail!("invalid response: {:?}", &res),
+                };
 
-                    stats.to_json()
-                });
-            Ok(read)
-        });
+                stats.to_json()
+            });
+        Ok(read)
+    });
 
-    let samples_open: Box<dyn StatsOpener<StatsReq, StatsRes>> = Box::new(move |(req_ch, res_ch)| {
+    let samples_open: Box<dyn StatsOpener<StatsReq, StatsRes>> =
+        Box::new(move |(req_ch, res_ch)| {
             let tid = std::thread::current().id();
             req_ch.send(StatsReq::NewSampler(tid))?;
             match res_ch.recv()? {
@@ -365,13 +364,7 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
 
     StatsServerData::new()
         .add_meta(SysStats::meta())
-        .add_ops(
-            "top",
-            StatsOps {
-                open: open,
-                close: None,
-            },
-        )
+        .add_ops("top", StatsOps { open, close: None })
         .add_meta(SchedSample::meta())
         .add_ops(
             "sched_samples",

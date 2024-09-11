@@ -180,8 +180,7 @@ async fn worker_loop(mut receiver: UnboundedReceiver<ScxMessage>) -> Result<()> 
     // setup channel for scheduler runner
     let (runner_tx, runner_rx) = tokio::sync::mpsc::channel::<RunnerMessage>(1);
 
-    let run_sched_future =
-        tokio::spawn(async move { handle_child_process(runner_rx).await });
+    let run_sched_future = tokio::spawn(async move { handle_child_process(runner_rx).await });
 
     // prepare future for tokio
     tokio::pin!(run_sched_future);

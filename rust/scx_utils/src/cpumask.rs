@@ -95,12 +95,12 @@ impl Cpumask {
             "none" => {
                 let mask = bitvec![u64, Lsb0; 0; *NR_CPU_IDS];
                 return Ok(Self { mask });
-            },
+            }
             "all" => {
                 let mask = bitvec![u64, Lsb0; 1; *NR_CPU_IDS];
                 return Ok(Self { mask });
-            },
-            _ => {},
+            }
+            _ => {}
         }
         let hex_str = {
             let mut tmp_str = cpumask

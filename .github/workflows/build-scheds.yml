@@ -2,6 +2,21 @@ name: build-scheds
 run-name: ${{ github.actor }} PR run
 on: [pull_request]
 jobs:
+  lint:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install deps
+        run: |
+          curl https://sh.rustup.rs -sSf | RUSTUP_INIT_SKIP_PATH_CHECK=yes sh -s -- -y
+          rustup install nightly-2024-09-10
+          export PATH="~/.cargo/bin:$PATH"
+
+      - uses: actions/checkout@v4
+
+      # Lint code
+      - run: cargo +nightly-2024-09-10 fmt
+      - run: git diff --exit-code
+
   build-schedulers:
     runs-on: ubuntu-22.04
     steps:

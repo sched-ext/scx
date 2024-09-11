@@ -6,29 +6,28 @@ mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 
+#[rustfmt::skip]
 mod bpf;
 use bpf::*;
 
 mod stats;
-use scx_stats::prelude::*;
-use stats::Metrics;
-
-use scx_utils::UserExitInfo;
-
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
+use std::io::{self};
 use std::mem::MaybeUninit;
 use std::time::Duration;
 use std::time::SystemTime;
-
-use std::fs::File;
-use std::io::{self, Read};
 
 use anyhow::Result;
 use clap::Parser;
 use libbpf_rs::OpenObject;
 use log::info;
 use log::warn;
+use scx_stats::prelude::*;
+use scx_utils::UserExitInfo;
+use stats::Metrics;
 
 const SCHEDULER_NAME: &'static str = "RustLand";
 

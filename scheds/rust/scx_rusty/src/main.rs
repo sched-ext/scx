@@ -16,9 +16,6 @@ pub mod load_balance;
 use load_balance::LoadBalancer;
 
 mod stats;
-use stats::ClusterStats;
-use stats::NodeStats;
-
 use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
@@ -28,6 +25,9 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+
+use stats::ClusterStats;
+use stats::NodeStats;
 
 #[macro_use]
 extern crate static_assertions;
