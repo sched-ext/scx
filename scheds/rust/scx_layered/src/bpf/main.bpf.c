@@ -99,6 +99,62 @@ static __noinline u64 layer_dsq_id(u32 layer_id, u32 llc_id)
 	return (layer_id * nr_llcs) + llc_id;
 }
 
+static __noinline u32 cpu_to_llc_id(s32 cpu_id)
+{
+        const volatile u32 *llc_ptr;
+
+        llc_ptr = MEMBER_VPTR(cpu_llc_id_map, [cpu_id]);
+        if (!llc_ptr) {
+                scx_bpf_error("Couldn't look up llc ID for cpu %d", cpu_id);
+                return 0;
+        }
+        return *llc_ptr;
+}
+
+u32 llc_node_id(u32 llc_id)
+{
+        const volatile u32 *llc_ptr;
+
+        llc_ptr = MEMBER_VPTR(llc_numa_id_map, [llc_id]);
+        if (!llc_ptr) {
+                scx_bpf_error("Couldn't look up llc ID for %d", llc_id);
+                return 0;
+        }
+        return *llc_ptr;
+}
+
+static u64 llc_hi_fallback_dsq_id(u32 llc_id)
+{
+	return HI_FALLBACK_DSQ + llc_id;
+}
+
+static u64 llc_hi_fallback_dsq_iter_offset(int llc_offset, int idx)
+{
+	int offset = llc_offset + idx;
+
+	if (offset >= nr_llcs)
+		return llc_hi_fallback_dsq_id(offset - nr_llcs);
+
+	return llc_hi_fallback_dsq_id(idx + llc_offset);
+}
+
+static int llc_iter_cpu_offset(int idx, s32 cpu)
+{
+	int offset;
+
+	if (cpu <= 0)
+		return idx;
+
+	offset = (cpu % nr_llcs) + idx;
+
+	return offset >= nr_llcs ? offset - nr_llcs : offset;
+}
+
+static u64 cpu_hi_fallback_dsq_id(s32 cpu)
+{
+	return llc_hi_fallback_dsq_id(cpu_to_llc_id(cpu));
+}
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, u32);
@@ -122,18 +178,6 @@ static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	}
 
 	return cctx;
-}
-
-static u32 cpu_to_llc_id(s32 cpu_id)
-{
-        const volatile u32 *llc_ptr;
-
-        llc_ptr = MEMBER_VPTR(cpu_llc_id_map, [cpu_id]);
-        if (!llc_ptr) {
-                scx_bpf_error("Couldn't look up llc ID for cpu %d", cpu_id);
-                return 0;
-        }
-        return *llc_ptr;
 }
 
 struct {
@@ -301,18 +345,6 @@ static void refresh_cpumasks(int idx)
 	layer->nr_cpus = total;
 	__sync_fetch_and_add(&layer->cpus_seq, 1);
 	trace("LAYER[%d] now has %d cpus, seq=%llu", idx, layer->nr_cpus, layer->cpus_seq);
-}
-
-u32 llc_node_id(u32 llc_id)
-{
-        const volatile u32 *llc_ptr;
-
-        llc_ptr = MEMBER_VPTR(llc_numa_id_map, [llc_id]);
-        if (!llc_ptr) {
-                scx_bpf_error("Couldn't look up llc ID for %d", llc_id);
-                return 0;
-        }
-        return *llc_ptr;
 }
 
 SEC("fentry")
@@ -718,7 +750,8 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 
-		scx_bpf_dispatch(p, HI_FALLBACK_DSQ, layer_slice_ns, enq_flags);
+		idx = cpu_hi_fallback_dsq_id(task_cpu);
+		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
 		goto find_cpu;
 	}
 
@@ -739,9 +772,11 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		 * Longer term, we can address this by implementing layer
 		 * weights and applying that to fallback DSQs to avoid
 		 * starvation. For now, we just dispatch all affinitized tasks
-		 * to HI_FALLBACK_DSQ to avoid this starvation issue.
+		 * to the LLC local HI_FALLBACK_DSQ to avoid this starvation
+		 * issue.
 		 */
-		scx_bpf_dispatch(p, HI_FALLBACK_DSQ, layer_slice_ns, enq_flags);
+		idx = cpu_hi_fallback_dsq_id(task_cpu);
+		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
 		goto find_cpu;
 	}
 
@@ -940,7 +975,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		}
 	}
 
-	if (scx_bpf_consume(HI_FALLBACK_DSQ))
+	dsq_id = cpu_hi_fallback_dsq_id(cpu);
+	if (scx_bpf_consume(dsq_id))
 		return;
 
 	/* consume !open layers second */
@@ -1568,6 +1604,7 @@ static void dump_layer_cpumask(int idx)
 void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 {
 	u64 now = bpf_ktime_get_ns();
+	u64 dsq_id;
 	int i, j, idx;
 	struct layer *layer;
 
@@ -1596,10 +1633,12 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 		dump_layer_cpumask(i);
 		scx_bpf_dump("\n");
 	}
-
-	scx_bpf_dump("HI_FALLBACK nr_queued=%d -%llums\n",
-		     scx_bpf_dsq_nr_queued(HI_FALLBACK_DSQ),
-		     dsq_first_runnable_for_ms(HI_FALLBACK_DSQ, now));
+	bpf_for(i, 0, nr_llcs) {
+		dsq_id = llc_hi_fallback_dsq_id(i);
+		scx_bpf_dump("HI_FALLBACK[%d] nr_queued=%d -%llums\n",
+			     dsq_id, scx_bpf_dsq_nr_queued(dsq_id),
+			     dsq_first_runnable_for_ms(dsq_id, now));
+	}
 	scx_bpf_dump("LO_FALLBACK nr_queued=%d -%llums\n",
 		     scx_bpf_dsq_nr_queued(LO_FALLBACK_DSQ),
 		     dsq_first_runnable_for_ms(LO_FALLBACK_DSQ, now));
@@ -1609,10 +1648,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
 	struct bpf_cpumask *cpumask;
 	int i, j, k, nr_online_cpus, ret;
-
-	ret = scx_bpf_create_dsq(HI_FALLBACK_DSQ, -1);
-	if (ret < 0)
-		return ret;
 
 	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
 	if (ret < 0)
@@ -1648,6 +1683,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	bpf_for(i, 0, nr_llcs) {
 		ret = create_cache(i);
 		if (ret)
+			return ret;
+		ret = scx_bpf_create_dsq(llc_hi_fallback_dsq_id(i), llc_node_id(i));
+		if (ret < 0)
 			return ret;
 	}
 
