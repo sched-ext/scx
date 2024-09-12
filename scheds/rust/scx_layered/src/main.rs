@@ -49,6 +49,7 @@ use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cache;
+use scx_utils::Core;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use serde::Deserialize;
@@ -467,6 +468,10 @@ enum LayerGrowthAlgo {
     /// llcs configuration and then the NUMA configuration for any CPUs not
     /// specified.
     Topo,
+    /// Round Robin attempts to grow to a core in an unpopulated NUMA node else
+    /// an unpopulated LLC. It keeps the load balanced between NUMA and LLCs as
+    /// it continues to grow.
+    RoundRobin,
 }
 
 impl Default for LayerGrowthAlgo {
@@ -928,10 +933,11 @@ struct CpuPool {
     available_cores: BitVec,
     first_cpu: usize,
     fallback_cpu: usize, // next free or the first CPU if none is free
+    core_topology_to_id: BTreeMap<(usize, usize, usize), usize>, // (node_id -> llc_id -> id)
 }
 
 impl CpuPool {
-    fn new() -> Result<Self> {
+    fn new(topo: &Topology) -> Result<Self> {
         if *NR_POSSIBLE_CPUS > MAX_CPUS {
             bail!(
                 "NR_POSSIBLE_CPUS {} > MAX_CPUS {}",
@@ -1007,6 +1013,19 @@ impl CpuPool {
             }
         }
 
+        // Build core_topology_to_id
+        let mut core_topology_to_id = BTreeMap::new();
+        let mut next_topo_id: usize = 0;
+        for node in topo.nodes() {
+            for llc in node.llcs().values() {
+                for core in llc.cores().values() {
+                    core_topology_to_id
+                        .insert((core.node_id, core.llc_id, core.id()), next_topo_id);
+                    next_topo_id += 1;
+                }
+            }
+        }
+
         info!(
             "CPUs: online/possible={}/{} nr_cores={}",
             nr_cpus, *NR_POSSIBLE_CPUS, nr_cores,
@@ -1025,6 +1044,7 @@ impl CpuPool {
             available_cores: bitvec![1; nr_cores],
             first_cpu,
             fallback_cpu: first_cpu,
+            core_topology_to_id,
         };
         cpu_pool.update_fallback_cpu();
         Ok(cpu_pool)
@@ -1118,6 +1138,62 @@ impl CpuPool {
         }
         cpus
     }
+
+    fn get_core_topological_id(&self, core: &Core) -> usize {
+        *self
+            .core_topology_to_id
+            .get(&(core.node_id, core.llc_id, core.id()))
+            .expect("unrecognised core")
+    }
+}
+
+struct IteratorInterleaver<T>
+where
+    T: Iterator,
+{
+    empty: bool,
+    index: usize,
+    iters: Vec<T>,
+}
+
+impl<T> IteratorInterleaver<T>
+where
+    T: Iterator,
+{
+    fn new(iters: Vec<T>) -> Self {
+        Self {
+            empty: false,
+            index: 0,
+            iters,
+        }
+    }
+}
+
+impl<T> Iterator for IteratorInterleaver<T>
+where
+    T: Iterator,
+{
+    type Item = T::Item;
+
+    fn next(&mut self) -> Option<T::Item> {
+        if let Some(iter) = self.iters.get_mut(self.index) {
+            self.index += 1;
+            if let Some(value) = iter.next() {
+                self.empty = false;
+                Some(value)
+            } else {
+                self.next()
+            }
+        } else {
+            self.index = 0;
+            if self.empty {
+                None
+            } else {
+                self.empty = true;
+                self.next()
+            }
+        }
+    }
 }
 
 fn layer_core_order(
@@ -1127,16 +1203,42 @@ fn layer_core_order(
     layer_idx: usize,
     topo: &Topology,
 ) -> Vec<usize> {
-    let mut core_order = vec![];
+    let linear = || (0..topo.cores().len()).collect();
 
-    let mut linear = || {
-        for i in 0..topo.cores().len() {
-            core_order.push(i);
-        }
+    let round_robin = || {
+        fastrand::seed(layer_idx.try_into().unwrap());
+
+        let mut nodes: Vec<_> = topo.nodes().into_iter().collect();
+        fastrand::shuffle(&mut nodes);
+
+        let interleaved_llcs = IteratorInterleaver::new(
+            nodes
+                .iter()
+                .map(|n| {
+                    let mut llcs: Vec<_> = n.llcs().values().collect();
+                    fastrand::shuffle(&mut llcs);
+                    llcs.into_iter()
+                })
+                .collect(),
+        );
+
+        IteratorInterleaver::new(
+            interleaved_llcs
+                .map(|llc| {
+                    let mut cores: Vec<_> = llc.cores().values().collect();
+                    fastrand::shuffle(&mut cores);
+                    cores.into_iter()
+                })
+                .collect(),
+        )
+        .map(|core| cpu_pool.get_core_topological_id(core))
+        .collect()
     };
 
     match growth_algo {
         LayerGrowthAlgo::Sticky => {
+            let mut core_order = vec![];
+
             let is_left = layer_idx % 2 == 0;
             let rot_by = |layer_idx, len| -> usize {
                 if layer_idx <= len {
@@ -1161,14 +1263,16 @@ fn layer_core_order(
                     }
                 }
             }
+
+            core_order
         }
-        LayerGrowthAlgo::Linear => {
-            linear();
-        }
+        LayerGrowthAlgo::Linear => linear(),
+        LayerGrowthAlgo::RoundRobin => round_robin(),
         LayerGrowthAlgo::Random => {
-            linear();
+            let mut core_order = linear();
             fastrand::seed(layer_idx.try_into().unwrap());
             fastrand::shuffle(&mut core_order);
+            core_order
         }
         LayerGrowthAlgo::Topo => {
             let spec_nodes = spec.nodes();
@@ -1176,9 +1280,9 @@ fn layer_core_order(
             let topo_nodes = topo.nodes();
 
             if spec_nodes.len() + spec_llcs.len() == 0 {
-                // XXX: fallback to something more sane (round robin when it exists)
-                linear();
+                round_robin()
             } else {
+                let mut core_order = vec![];
                 let mut core_id = 0;
                 spec_llcs.iter().for_each(|spec_llc| {
                     core_id = 0;
@@ -1210,10 +1314,10 @@ fn layer_core_order(
                         });
                     });
                 });
+                core_order
             }
         }
     }
-    core_order
 }
 
 #[derive(Debug)]
@@ -1713,7 +1817,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
     ) -> Result<Self> {
         let nr_layers = layer_specs.len();
         let topo = Topology::new()?;
-        let cpu_pool = CpuPool::new()?;
+        let cpu_pool = CpuPool::new(&topo)?;
 
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
