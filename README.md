@@ -90,6 +90,7 @@ are provided for select distros.
 - [Arch Linux](INSTALL.md#arch-linux)
 - [Fedora](INSTALL.md#fedora)
 - [Nix](INSTALL.md#nix)
+- [openSUSE Tumbleweed](INSTALL.md#opensuse-tumbleweed)
 
 ## Repository Structure
 
