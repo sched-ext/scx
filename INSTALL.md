@@ -180,7 +180,7 @@ $ sudo zypper refresh
 #### Installing the Kernel
 
 ```
-$ sudo zypper install --repo sched-ext --force kernel-default-base
+$ sudo zypper install --repo sched-ext --force kernel-default
 $ sudo reboot
 ```
 
