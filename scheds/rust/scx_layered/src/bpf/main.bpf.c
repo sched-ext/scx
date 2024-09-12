@@ -136,9 +136,6 @@ static u32 cpu_to_llc_id(s32 cpu_id)
         return *llc_ptr;
 }
 
-/*
- * Numa node context
- */
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
@@ -146,6 +143,30 @@ struct {
 	__uint(max_entries, MAX_NUMA_NODES);
 	__uint(map_flags, 0);
 } node_data SEC(".maps");
+
+static struct node_ctx *lookup_node_ctx(u32 node)
+{
+	struct node_ctx *nodec;
+
+	nodec = bpf_map_lookup_elem(&node_data, &node);
+	return nodec;
+}
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct cache_ctx);
+	__uint(max_entries, MAX_DOMS);
+	__uint(map_flags, 0);
+} cache_data SEC(".maps");
+
+static struct cache_ctx *lookup_cache_ctx(u32 cache_idx)
+{
+	struct cache_ctx *cachec;
+
+	cachec = bpf_map_lookup_elem(&cache_data, &cache_idx);
+	return cachec;
+}
 
 static void gstat_inc(enum global_stat_idx idx, struct cpu_ctx *cctx)
 {
@@ -1166,6 +1187,7 @@ static s32 create_node(u32 node_id)
 	u32 cpu;
 	struct bpf_cpumask *cpumask;
 	struct node_ctx *nodec;
+	struct cpu_ctx *cctx;
 	s32 ret;
 
 	nodec = bpf_map_lookup_elem(&node_data, &node_id);
@@ -1198,8 +1220,58 @@ static s32 create_node(u32 node_id)
 			break;
 		}
 
-		if (*nmask & (1LLU << (cpu % 64)))
+		if (*nmask & (1LLU << (cpu % 64))) {
 			bpf_cpumask_set_cpu(cpu, cpumask);
+			if (!(cctx = lookup_cpu_ctx(-1))) {
+				scx_bpf_error("cpu ctx error");
+				ret = -ENOENT;
+				break;
+			}
+			cctx->node_idx = node_id;
+		}
+	}
+
+	bpf_rcu_read_unlock();
+	return ret;
+}
+
+static s32 create_cache(u32 cache_id)
+{
+	u32 cpu, llc_id;
+	struct bpf_cpumask *cpumask;
+	struct cache_ctx *cachec;
+	struct cpu_ctx *cctx;
+	s32 ret;
+
+	cachec = bpf_map_lookup_elem(&cache_data, &cache_id);
+	if (!cachec) {
+		scx_bpf_error("No cache%u", cache_id);
+		return -ENOENT;
+	}
+	cachec->id = cache_id;
+
+	ret = create_save_cpumask(&cachec->cpumask);
+	if (ret)
+		return ret;
+
+	bpf_rcu_read_lock();
+	cpumask = cachec->cpumask;
+	if (!cpumask) {
+		bpf_rcu_read_unlock();
+		scx_bpf_error("Failed to lookup node cpumask");
+		return -ENOENT;
+	}
+
+	bpf_for(cpu, 0, MAX_CPUS) {
+		llc_id = cpu_to_llc_id(cpu);
+		if (llc_id != cache_id)
+			continue;
+
+		bpf_cpumask_set_cpu(cpu, cpumask);
+		if (!(cctx = lookup_cpu_ctx(-1))) {
+			scx_bpf_error("cpu ctx error"); ret = -ENOENT; break;
+		}
+		cctx->cache_idx = cache_id;
 	}
 
 	bpf_rcu_read_unlock();
@@ -1225,14 +1297,27 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 	struct layer *layer;
+	struct node_ctx *nodec;
+	struct cache_ctx *cachec;
 	s32 task_cpu = scx_bpf_task_cpu(p);
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)) ||
 	    !(layer = lookup_layer(tctx->layer)))
 		return;
 
-	if (tctx->last_cpu >= 0 && tctx->last_cpu != task_cpu)
+	if (tctx->last_cpu >= 0 && tctx->last_cpu != task_cpu) {
 		lstat_inc(LSTAT_MIGRATION, layer, cctx);
+		if (!(nodec = lookup_node_ctx(cctx->node_idx)))
+			return;
+		if (nodec->cpumask &&
+		    !bpf_cpumask_test_cpu(tctx->last_cpu, nodec->cpumask))
+			lstat_inc(LSTAT_XNUMA_MIGRATION, layer, cctx);
+		if (!(cachec = lookup_cache_ctx(cctx->cache_idx)))
+			return;
+		if (cachec->cpumask &&
+		    !bpf_cpumask_test_cpu(tctx->last_cpu, cachec->cpumask))
+			lstat_inc(LSTAT_XLLC_MIGRATION, layer, cctx);
+	}
 	tctx->last_cpu = task_cpu;
 
 	if (vtime_before(layer->vtime_now, p->scx.dsq_vtime))
@@ -1557,6 +1642,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 
 	bpf_for(i, 0, nr_nodes) {
 		ret = create_node(i);
+		if (ret)
+			return ret;
+	}
+	bpf_for(i, 0, nr_llcs) {
+		ret = create_cache(i);
 		if (ret)
 			return ret;
 	}

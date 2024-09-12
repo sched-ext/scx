@@ -103,6 +103,10 @@ pub struct LayerStats {
     pub yield_ignore: u64,
     #[stat(desc = "% migrated across CPUs")]
     pub migration: f64,
+    #[stat(desc = "% migrated across NUMA nodes")]
+    pub xnuma_migration: f64,
+    #[stat(desc = "% migrated across LLCs")]
+    pub xllc_migration: f64,
     #[stat(desc = "mask of allocated CPUs", _om_skip)]
     pub cpus: Vec<u32>,
     #[stat(desc = "# of CPUs assigned")]
@@ -188,6 +192,8 @@ impl LayerStats {
             yielded: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_YIELD),
             yield_ignore: lstat(bpf_intf::layer_stat_idx_LSTAT_YIELD_IGNORE) as u64,
             migration: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIGRATION),
+            xnuma_migration: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_XNUMA_MIGRATION),
+            xllc_migration: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_XLLC_MIGRATION),
             cpus: Self::bitvec_to_u32s(&layer.cpus),
             cur_nr_cpus: layer.cpus.count_ones() as u32,
             min_nr_cpus: nr_cpus_range.0 as u32,
@@ -235,10 +241,12 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  open_idle={} mig={} affn_viol={}",
+            "  {:<width$}  open_idle={} mig={} xnuma_mig={} xllc_mig={} affn_viol={}",
             "",
             fmt_pct(self.open_idle),
             fmt_pct(self.migration),
+            fmt_pct(self.xnuma_migration),
+            fmt_pct(self.xllc_migration),
             fmt_pct(self.affn_viol),
             width = header_width,
         )?;
