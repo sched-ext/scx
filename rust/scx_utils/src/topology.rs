@@ -166,6 +166,8 @@ impl Cpu {
 #[derive(Debug, Clone)]
 pub struct Core {
     id: usize,
+    pub node_id: usize,
+    pub llc_id: usize,
     cpus: BTreeMap<usize, Cpu>,
     span: Cpumask,
     pub core_type: CoreType,
@@ -525,6 +527,8 @@ fn create_insert_cpu(
 
     let core = cache.cores.entry(core_id).or_insert(Core {
         id: core_id,
+        llc_id: llc_id,
+        node_id: node.id,
         cpus: BTreeMap::new(),
         span: Cpumask::new()?,
         core_type: core_type.clone(),
