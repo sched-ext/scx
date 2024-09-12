@@ -452,6 +452,7 @@ enum LayerMatch {
 enum LayerGrowthAlgo {
     Sticky,
     Linear,
+    Random,
 }
 
 impl Default for LayerGrowthAlgo {
@@ -1098,6 +1099,13 @@ fn layer_core_order(
     topo: &Topology,
 ) -> Vec<usize> {
     let mut core_order = vec![];
+
+    let mut linear = || {
+        for i in 0..topo.cores().len() {
+            core_order.push(i);
+        }
+    };
+
     match growth_algo {
         LayerGrowthAlgo::Sticky => {
             let is_left = layer_idx % 2 == 0;
@@ -1126,9 +1134,12 @@ fn layer_core_order(
             }
         }
         LayerGrowthAlgo::Linear => {
-            for i in 0..topo.cores().len() {
-                core_order.push(i);
-            }
+            linear();
+        }
+        LayerGrowthAlgo::Random => {
+            linear();
+            fastrand::seed(layer_idx.try_into().unwrap());
+            fastrand::shuffle(&mut core_order);
         }
     }
     core_order
@@ -1226,7 +1237,13 @@ impl Layer {
             | LayerKind::Open { growth_algo, .. } => growth_algo.clone(),
         };
 
-        let core_order = layer_core_order(spec, layer_growth_algo, idx, topo);
+        let core_order = layer_core_order(spec, layer_growth_algo.clone(), idx, topo);
+        debug!(
+            "layer: {} algo: {:?} core order: {:?}",
+            name,
+            layer_growth_algo.clone(),
+            core_order
+        );
 
         Ok(Self {
             name: name.into(),
