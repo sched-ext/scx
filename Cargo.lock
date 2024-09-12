@@ -1689,6 +1689,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
+ "fastrand",
  "fb_procfs",
  "lazy_static",
  "libbpf-rs",
