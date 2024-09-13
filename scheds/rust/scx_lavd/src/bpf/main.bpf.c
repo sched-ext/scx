@@ -208,6 +208,7 @@ private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflo
 private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR]; /* CPU mask for each compute domain */
 
 static u64		LAVD_AP_LOW_UTIL;
+static bool		have_turbo_core;
 
 /*
  * CPU topology
@@ -1667,7 +1668,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	 * Pick an idle core among turbo boost-enabled CPUs with a matching
 	 * core type.
 	 */
-	if (no_prefer_turbo_core || !turbo_cpumask)
+	if (!have_turbo_core || no_prefer_turbo_core || !turbo_cpumask)
 		goto start_llc_mask;
 
 	bpf_cpumask_and(t2_cpumask, cast_mask(t_cpumask), cast_mask(turbo_cpumask));
@@ -3241,6 +3242,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->turbo_core = cpuc->capacity == turbo_cap;
 		if (cpuc->turbo_core) {
 			bpf_cpumask_set_cpu(cpu, turbo);
+			have_turbo_core = true;
 			debugln("CPU %d is a turbo core.", cpu);
 		}
 	}
