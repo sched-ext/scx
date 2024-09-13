@@ -1188,6 +1188,11 @@ static s64 calc_static_prio_factor(struct task_struct *p)
 	return (20 - get_nice_prio(p)) >> 1;
 }
 
+static bool is_kernel_task(struct task_struct *p)
+{
+	return !!(p->flags & PF_KTHREAD);
+}
+
 static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 			u64 enq_flags)
 {
@@ -1230,6 +1235,13 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	taskc->wakeup_ft += !!(enq_flags & SCX_ENQ_WAKEUP);
 	lat_cri += taskc->wakeup_ft * LAVD_LC_WAKEUP_FT;
+
+	/*
+	 * Prioritize a kernel task since many kernel tasks serve
+	 * latency-critical jobs.
+	 */
+	if (is_kernel_task(p))
+		lat_cri += LAVD_LC_KTHREAD_FT;
 
 	/*
 	 * Make sure the lat_cri is non-zero.
@@ -2194,11 +2206,6 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	dsq_id = find_proper_dsq(taskc, cpuc_task);
 	scx_bpf_dispatch_vtime(p, dsq_id, p->scx.slice,
 			       taskc->vdeadline_log_clk, enq_flags);
-}
-
-static bool is_kernel_task(struct task_struct *p)
-{
-	return !!(p->flags & PF_KTHREAD);
 }
 
 static bool use_full_cpus(void)
