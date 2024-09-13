@@ -330,7 +330,7 @@ if enable_rust
   run_target('fetch', command: [cargo_fetch, cargo], env: cargo_env)
 
   rust_scheds = ['scx_lavd', 'scx_bpfland', 'scx_rustland', 'scx_rlfifo',
-                 'scx_rusty',
+                 'scx_fair', 'scx_rusty',
                  'scx_layered', 'scx_mitosis']
   rust_misc = ['scx_stats', 'scx_stats_derive', 'scx_utils',
                'scx_rustland_core',
