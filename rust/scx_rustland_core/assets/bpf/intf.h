@@ -53,7 +53,7 @@ enum {
 	 * The task will be dispatched to the global shared DSQ and it will run
 	 * on the first CPU available.
 	 */
-	RL_CPU_ANY = 1 << 0,
+	RL_CPU_ANY = 1 << 20,
 };
 
 /*
@@ -97,7 +97,7 @@ struct queued_task_ctx {
 struct dispatched_task_ctx {
 	s32 pid;
 	s32 cpu; /* CPU where the task should be dispatched */
-	u64 flags; /* special dispatch flags */
+	u64 flags; /* task enqueue flags */
 	u64 slice_ns; /* time slice assigned to the task (0=default) */
 	u64 vtime; /* task deadline / vruntime */
 	u64 cpumask_cnt; /* cpumask generation counter */

@@ -54,13 +54,26 @@
 //! struct DispatchedTask {
 //!     pub pid: i32,      // pid that uniquely identifies a task
 //!     pub cpu: i32,      // target CPU selected by the scheduler
-//!     pub flags: u64,    // special dispatch flags:
-//!                        //   - RL_CPU_ANY = dispatch on the first CPU available
+//!                        // (RL_CPU_ANY = dispatch on the first CPU available)
+//!     pub flags: u64,    // task's enqueue flags
 //!     pub slice_ns: u64, // time slice in nanoseconds assigned to the task
-//!                        // (0 = use default)
+//!                        // (0 = use default time slice)
 //!     pub vtime: u64,    // this value can be used to send the task's vruntime or deadline
 //!                        // directly to the underlying BPF dispatcher
 //! }
+//!
+//! Other internal statistics that can be used to implement better scheduling policies:
+//!
+//!  let n: u64 = *self.bpf.nr_online_cpus_mut();       // amount of online CPUs
+//!  let n: u64 = *self.bpf.nr_running_mut();           // amount of currently running tasks
+//!  let n: u64 = *self.bpf.nr_queued_mut();            // amount of tasks queued to be scheduled
+//!  let n: u64 = *self.bpf.nr_scheduled_mut();         // amount of tasks managed by the user-space scheduler
+//!  let n: u64 = *self.bpf.nr_user_dispatches_mut();   // amount of user-space dispatches
+//!  let n: u64 = *self.bpf.nr_kernel_dispatches_mut(); // amount of kernel dispatches
+//!  let n: u64 = *self.bpf.nr_cancel_dispatches_mut(); // amount of cancelled dispatches
+//!  let n: u64 = *self.bpf.nr_bounce_dispatches_mut(); // amount of bounced dispatches
+//!  let n: u64 = *self.bpf.nr_failed_dispatches_mut(); // amount of failed dispatches
+//!  let n: u64 = *self.bpf.nr_sched_congested_mut();   // amount of scheduler congestion events
 
 mod bpf_skel;
 pub use bpf_skel::*;
@@ -111,7 +124,7 @@ impl<'a> Scheduler<'a> {
             //
             // If we can't find any idle CPU, keep the task running on the same CPU.
             let cpu = self.bpf.select_cpu(task.pid, task.cpu, task.flags);
-            dispatched_task.cpu = if cpu < 0 { task.cpu } else { cpu };
+            dispatched_task.cpu = if cpu < 0 { task.cpu } else { RL_CPU_ANY };
 
             // Determine the task's time slice: assign value inversely proportional to the number
             // of tasks waiting to be scheduled.

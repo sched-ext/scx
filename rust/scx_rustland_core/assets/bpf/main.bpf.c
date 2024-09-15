@@ -402,132 +402,6 @@ static inline u64 task_slice(struct task_struct *p)
 }
 
 /*
- * Dispatch a task to a target per-CPU DSQ, waking up the corresponding CPU, if
- * needed.
- */
-static void dispatch_task(struct task_struct *p, u64 dsq_id,
-			  u64 cpumask_cnt, u64 slice, u64 vtime)
-{
-	struct task_ctx *tctx;
-	u64 curr_cpumask_cnt;
-	bool force_shared = false;
-	s32 cpu = scx_bpf_task_cpu(p);
-
-	/*
-	 * Update task's time slice in its context.
-	 */
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx) {
-		/*
-		 * Bounce to the shared DSQ if we can't find a valid task
-		 * context.
-		 */
-		scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, vtime, 0);
-		return;
-	}
-	tctx->slice_ns = slice;
-
-	/*
-	 * Dispatch task to the target DSQ.
-	 */
-	switch (dsq_id) {
-	case SHARED_DSQ:
-		scx_bpf_dispatch_vtime(p, dsq_id, SCX_SLICE_DFL, vtime, 0);
-		dbg_msg("dispatch: pid=%d (%s) dsq=%llu slice=%llu vtime=%llu",
-			p->pid, p->comm, dsq_id, slice, vtime);
-		break;
-	default:
-		/*
-		 * Dispatch a task to a specific per-CPU DSQ if the target CPU
-		 * can be used (according to the cpumask), otherwise redirect
-		 * the task to the first CPU available, using the shared DSQ
-		 * logic.
-		 *
-		 * This can happen if the user-space scheduler dispatches the
-		 * task to an invalid CPU, the redirection to the shared DSQ
-		 * allows to prevent potential stalls in the scheduler.
-		 *
-		 * If the cpumask is not valid anymore (determined by the
-		 * cpumask_cnt generation counter) we can simply cancel the
-		 * dispatch event, since the task will be re-enqueued by the
-		 * core sched-ext code, potentially selecting a different cpu
-		 * and a different cpumask.
-		 */
-		scx_bpf_dispatch_vtime(p, dsq_id, SCX_SLICE_DFL, vtime, 0);
-
-		/* Read current cpumask generation counter */
-		curr_cpumask_cnt = tctx->cpumask_cnt;
-
-		/* Check if the CPU is valid, according to the cpumask */
-		cpu = dsq_to_cpu(dsq_id);
-		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-			force_shared = true;
-
-		/* If the cpumask is not valid anymore, ignore the dispatch event */
-		if (curr_cpumask_cnt != cpumask_cnt) {
-			scx_bpf_dispatch_cancel();
-			__sync_fetch_and_add(&nr_cancel_dispatches, 1);
-
-			dbg_msg("dispatch: pid=%d (%s) dsq=%llu cancel",
-				p->pid, p->comm, dsq_id);
-			return;
-		}
-
-		/*
-		 * If the cpumask is valid, but the CPU is invalid, redirect
-		 * the task to the shared DSQ.
-		 */
-		if (force_shared) {
-			scx_bpf_dispatch_cancel();
-			__sync_fetch_and_add(&nr_bounce_dispatches, 1);
-
-			scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, vtime, 0);
-			dbg_msg("dispatch: pid=%d (%s) dsq=%llu slice=%llu vtime=%llu bounce",
-				p->pid, p->comm, dsq_id, slice, vtime);
-			return;
-		}
-
-		/* Requested dispatch was valid */
-		dbg_msg("dispatch: pid=%d (%s) dsq=%llu slice=%llu vtime=%llu",
-			p->pid, p->comm, dsq_id, slice, vtime);
-
-		break;
-	}
-
-	/*
-	 * Wake up the target CPU (only if idle and if we are bouncing
-	 * to a different CPU).
-	 */
-	if (cpu != bpf_get_smp_processor_id())
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-}
-
-/*
- * Dispatch the user-space scheduler.
- */
-static bool dispatch_user_scheduler(void)
-{
-	struct task_struct *p;
-
-	if (!test_and_clear_usersched_needed())
-		return false;
-
-	p = bpf_task_from_pid(usersched_pid);
-	if (!p) {
-		scx_bpf_error("Failed to find usersched task %d", usersched_pid);
-		return false;
-	}
-	/*
-	 * Dispatch the scheduler on the first CPU available, likely the
-	 * current one.
-	 */
-	dispatch_task(p, SHARED_DSQ, 0, SCX_SLICE_DFL, 0);
-	bpf_task_release(p);
-
-	return true;
-}
-
-/*
  * Find an idle CPU in the system for the task.
  *
  * NOTE: the idle CPU selection doesn't need to be formally perfect, it is
@@ -545,13 +419,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 	struct cpu_ctx *cctx;
 	s32 cpu;
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return -ENOENT;
-	cctx = try_lookup_cpu_ctx(prev_cpu);
-	if (!cctx)
-		return -ENOENT;
-
 	/*
 	 * If the task isn't allowed to use its previously used CPU it means
 	 * that it's rapidly changing affinity. In this case it's pointless to
@@ -562,15 +429,19 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 		return -ENOENT;
 
 	/*
-	 * For tasks that can run only on a single CPU, we can simply verify if
-	 * their only allowed CPU is idle.
+	 * For tasks that can run only on a single CPU, simply return the only
+	 * allowed CPU.
 	 */
-	if (p->nr_cpus_allowed == 1) {
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
-			return prev_cpu;
+	if (p->nr_cpus_allowed == 1)
+		return prev_cpu;
 
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
 		return -ENOENT;
-	}
+
+	cctx = try_lookup_cpu_ctx(prev_cpu);
+	if (!cctx)
+		return -ENOENT;
 
 	/*
 	 * Acquire the CPU masks to determine the online and idle CPUs in the
@@ -585,10 +456,11 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 	 */
 	l2_domain = cctx->l2_cpumask;
 	if (!l2_domain)
-		l2_domain = p->cpus_ptr;
+		l2_domain = (struct bpf_cpumask *)p->cpus_ptr;
+
 	l3_domain = cctx->l3_cpumask;
 	if (!l3_domain)
-		l3_domain = p->cpus_ptr;
+		l3_domain = (struct bpf_cpumask *)p->cpus_ptr;
 
 	/*
 	 * Task's scheduling domains.
@@ -596,13 +468,13 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 	l2_mask = tctx->l2_cpumask;
 	if (!l2_mask) {
 		scx_bpf_error("l2 cpumask not initialized");
-		cpu = prev_cpu;
+		cpu = -ENOENT;
 		goto out_put_cpumask;
 	}
 	l3_mask = tctx->l3_cpumask;
 	if (!l3_mask) {
 		scx_bpf_error("l3 cpumask not initialized");
-		cpu = prev_cpu;
+		cpu = -ENOENT;
 		goto out_put_cpumask;
 	}
 
@@ -622,39 +494,48 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 	 */
 	bpf_cpumask_and(l3_mask, p->cpus_ptr, cast_mask(l3_domain));
 
-	/*
-	 * Try to prioritize newly awakened tasks by immediately promoting them
-	 * as interactive.
-	 */
 	if (enq_flags & SCX_ENQ_WAKEUP) {
 		struct task_struct *current = (void *)bpf_get_current_task_btf();
+		bool share_llc, has_idle;
 
 		/*
-		 * If the CPUs of the waker and the wakee share the same L3
-		 * cache, we can try to re-use the same CPU, if it's a fully
-		 * idle core.
+		 * Determine waker CPU scheduling domain.
 		 */
 		cpu = bpf_get_smp_processor_id();
-		if (bpf_cpumask_test_cpu(cpu, cast_mask(l3_mask)) &&
-		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+
+		cctx = try_lookup_cpu_ctx(cpu);
+		if (!cctx) {
+			cpu = -ENOENT;
+			goto out_put_cpumask;
+		}
+
+		l3_domain = cctx->l3_cpumask;
+		if (!l3_domain) {
+			scx_bpf_error("CPU LLC cpumask not initialized");
+			cpu = -ENOENT;
+			goto out_put_cpumask;
+		}
+
+		/*
+		 * If both the waker and wakee share the same LLC keep using
+		 * the same CPU if possible.
+		 */
+		share_llc = bpf_cpumask_test_cpu(prev_cpu, cast_mask(l3_domain));
+		if (share_llc && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			goto out_put_cpumask;
 		}
 
 		/*
-		 * Otherwise try to run the task on the same CPU as the waker,
-		 * provided it's is still alive and the task's cpumask allows
-		 * it.
-		 *
-		 * This allows to improve producer->consumer pipelines.
+		 * If the waker's domain is not saturated attempt to migrate
+		 * the wakee on the same CPU as the waker.
 		 */
-		if (!(current->flags & PF_EXITING)) {
-			cpu = bpf_get_smp_processor_id();
-			if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
-			    scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) == 0)
-				goto out_put_cpumask;
-		}
+		has_idle = bpf_cpumask_intersects(cast_mask(l3_domain), idle_cpumask);
+		if (has_idle &&
+		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
+		    !(current->flags & PF_EXITING) &&
+		    scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) == 0)
+			goto out_put_cpumask;
 	}
 
 	/*
@@ -750,6 +631,99 @@ out_put_cpumask:
 	return cpu;
 }
 
+/*
+ * Dispatch a task to a target per-CPU DSQ, waking up the corresponding CPU, if
+ * needed.
+ */
+static void dispatch_task(const struct dispatched_task_ctx *task)
+{
+	struct task_struct *p;
+	struct task_ctx *tctx;
+	u64 dsq_id, curr_cpumask_cnt;
+	s32 cpu;
+
+	/* Ignore entry if the task doesn't exist anymore */
+	p = bpf_task_from_pid(task->pid);
+	if (!p)
+		return;
+
+	/*
+	 * Update task's time slice in its context.
+	 */
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx) {
+		/*
+		 * Bounce to the shared DSQ if we can't find a valid task
+		 * context.
+		 */
+		scx_bpf_dispatch_vtime(p, SHARED_DSQ,
+				       SCX_SLICE_DFL, task->vtime, task->flags);
+		__sync_fetch_and_add(&nr_bounce_dispatches, 1);
+		goto out_kick_idle_cpu;
+	}
+	tctx->slice_ns = task->slice_ns;
+
+	/*
+	 * Dispatch task to the target DSQ.
+	 */
+	if (task->cpu & RL_CPU_ANY) {
+		scx_bpf_dispatch_vtime(p, SHARED_DSQ,
+				       SCX_SLICE_DFL, task->vtime, task->flags);
+		goto out_kick_idle_cpu;
+	}
+
+	/*
+	 * Dispatch a task to a specific per-CPU DSQ if the target CPU can be
+	 * used (according to the cpumask), otherwise redirect the task to the
+	 * shared DSQ.
+	 *
+	 * This can happen if the user-space scheduler dispatches the task to
+	 * an invalid CPU. In this case the redirection to the shared DSQ
+	 * allows to prevent potential stalls in the scheduler.
+	 *
+	 * If the cpumask is not valid anymore (determined by the cpumask_cnt
+	 * generation counter) we can simply cancel the dispatch event, since
+	 * the task will be re-enqueued by the core sched-ext code, potentially
+	 * selecting a different cpu and a different cpumask.
+	 */
+	dsq_id = cpu_to_dsq(task->cpu);
+
+	/* Check if the CPU is valid, according to the cpumask */
+	if (!bpf_cpumask_test_cpu(task->cpu, p->cpus_ptr)) {
+		scx_bpf_dispatch_vtime(p, SHARED_DSQ,
+				       SCX_SLICE_DFL, task->vtime, task->flags);
+		__sync_fetch_and_add(&nr_bounce_dispatches, 1);
+		goto out_kick_idle_cpu;
+	}
+
+	/* Read current cpumask generation counter */
+	curr_cpumask_cnt = tctx->cpumask_cnt;
+
+	/* Dispatch the task to the target per-CPU DSQ */
+	scx_bpf_dispatch_vtime(p, dsq_id,
+			       SCX_SLICE_DFL, task->vtime, task->flags);
+
+	/* If the cpumask is not valid anymore, ignore the dispatch event */
+	if (curr_cpumask_cnt != task->cpumask_cnt) {
+		scx_bpf_dispatch_cancel();
+		__sync_fetch_and_add(&nr_cancel_dispatches, 1);
+		goto out_release;
+	}
+
+	if (task->cpu != bpf_get_smp_processor_id())
+		scx_bpf_kick_cpu(task->cpu, SCX_KICK_IDLE);
+
+	goto out_release;
+
+out_kick_idle_cpu:
+	cpu = pick_idle_cpu(p, task->cpu, task->flags);
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, 0);
+
+out_release:
+	bpf_task_release(p);
+}
+
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -832,9 +806,9 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
 		s32 cpu = scx_bpf_task_cpu(p);
-		u64 dsq_id = cpu_to_dsq(cpu);
 
-		scx_bpf_dispatch_vtime(p, dsq_id, SCX_SLICE_DFL, 0, 0);
+		scx_bpf_dispatch_vtime(p, cpu_to_dsq(cpu),
+				       SCX_SLICE_DFL, 0, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -850,7 +824,8 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	task = bpf_ringbuf_reserve(&queued, sizeof(*task), 0);
 	if (!task) {
 		sched_congested(p);
-		dispatch_task(p, SHARED_DSQ, 0, SCX_SLICE_DFL, 0);
+		scx_bpf_dispatch_vtime(p, SHARED_DSQ,
+				       SCX_SLICE_DFL, 0, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -862,47 +837,51 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 }
 
 /*
+ * Dispatch the user-space scheduler.
+ */
+static bool dispatch_user_scheduler(void)
+{
+	struct task_struct *p;
+	s32 cpu;
+
+	if (!test_and_clear_usersched_needed())
+		return false;
+
+	p = bpf_task_from_pid(usersched_pid);
+	if (!p) {
+		scx_bpf_error("Failed to find usersched task %d", usersched_pid);
+		return false;
+	}
+	/*
+	 * Use the highest vtime possible to give the scheduler itself the
+	 * lowest priority possible.
+	 */
+	scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, -1ULL, 0);
+
+	cpu = pick_idle_cpu(p, scx_bpf_task_cpu(p), 0);
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, 0);
+	bpf_task_release(p);
+
+	return true;
+}
+
+/*
  * Handle a task dispatched from user-space, performing the actual low-level
  * BPF dispatch.
  */
 static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
 {
 	const struct dispatched_task_ctx *task;
-	struct task_struct *p;
-	u64 dsq_id;
 
-	/* Get a pointer to the dispatched task */
 	task = bpf_dynptr_data(dynptr, 0, sizeof(*task));
 	if (!task)
 		return 0;
 
-	/* Ignore entry if the task doesn't exist anymore */
-	p = bpf_task_from_pid(task->pid);
-	if (!p)
-		return 0;
-
-	dbg_msg("usersched: pid=%d cpu=%d cpumask_cnt=%llu slice_ns=%llu flags=%llx",
-		task->pid, task->cpu, task->cpumask_cnt, task->slice_ns, task->flags);
-
-	/*
-	 * Check whether the user-space scheduler assigned a different
-	 * CPU to the task and migrate (if possible).
-	 *
-	 * If the task has been submitted with RL_CPU_ANY, then
-	 * dispatch it to the shared DSQ and run it on the first CPU
-	 * available.
-	 */
-	if (task->flags & RL_CPU_ANY)
-		dsq_id = SHARED_DSQ;
-	else
-		dsq_id = cpu_to_dsq(task->cpu);
-
-	dispatch_task(p, dsq_id, task->cpumask_cnt, task->slice_ns, task->vtime);
-	bpf_task_release(p);
-
+	dispatch_task(task);
 	__sync_fetch_and_add(&nr_user_dispatches, 1);
 
-	return !scx_bpf_dispatch_nr_slots();
+	return !!scx_bpf_dispatch_nr_slots();
 }
 
 /*
@@ -962,17 +941,16 @@ static bool consume_offline_cpus(s32 cpu)
 void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
-	 * Try also to steal tasks directly dispatched to CPUs that have gone
-	 * offline (this allows to prevent indefinite task stalls).
+	 * Consume all tasks from the @dispatched list and immediately dispatch
+	 * them on the target CPU decided by the user-space scheduler.
 	 */
-	if (consume_offline_cpus(cpu))
-		return;
+	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, 0);
 
 	/*
-	 * First check if the user-space scheduler needs to run, and in that
-	 * case try to dispatch it immediately.
+	 * Try to steal a task dispatched to CPUs that may have gone offline
+	 * (this allows to prevent indefinite task stalls).
 	 */
-	if (dispatch_user_scheduler())
+	if (consume_offline_cpus(cpu))
 		return;
 
 	/*
@@ -982,18 +960,15 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * Consume all tasks from the @dispatched list and immediately try to
-	 * dispatch them on their target CPU selected by the user-space
-	 * scheduler (at this point the proper ordering has been already
-	 * determined so we can simply dispatch them preserving the same
-	 * order).
+	 * Consume a task from the shared DSQ.
 	 */
-	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, 0);
+	if (scx_bpf_consume(SHARED_DSQ))
+		return;
 
 	/*
-	 * Consume the first task from the shared DSQ.
+	 * Check if the user-space scheduler needs to run.
 	 */
-	scx_bpf_consume(SHARED_DSQ);
+	dispatch_user_scheduler();
 }
 
 /*
@@ -1063,7 +1038,15 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 		 * immediately accept dispatched tasks.
 		 */
 		scx_bpf_kick_cpu(cpu, 0);
+		return;
 	}
+
+	/*
+	 * Kick the CPU if there are still tasks dispatched to the
+	 * corresponding per-CPU DSQ.
+	 */
+	if (scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) > 0)
+		scx_bpf_kick_cpu(cpu, 0);
 }
 
 /*

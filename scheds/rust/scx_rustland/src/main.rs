@@ -453,8 +453,7 @@ impl<'a> Scheduler<'a> {
                 if cpu >= 0 {
                     dispatched_task.cpu = cpu;
                 } else {
-                    // Dispatch task on the first CPU available.
-                    dispatched_task.flags |= RL_CPU_ANY;
+                    dispatched_task.cpu = RL_CPU_ANY;
                 }
 
                 // Send task to the BPF dispatcher.
