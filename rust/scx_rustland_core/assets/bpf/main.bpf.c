@@ -969,13 +969,6 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * First check if the user-space scheduler needs to run, and in that
-	 * case try to dispatch it immediately.
-	 */
-	if (dispatch_user_scheduler())
-		return;
-
-	/*
 	 * Consume a task from the per-CPU DSQ.
 	 */
 	if (scx_bpf_consume(cpu_to_dsq(cpu)))
@@ -993,7 +986,15 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * Consume the first task from the shared DSQ.
 	 */
-	scx_bpf_consume(SHARED_DSQ);
+	if (scx_bpf_consume(SHARED_DSQ))
+		return;
+
+	/*
+	 * Check if the user-space scheduler needs to run, and in that case try
+	 * to dispatch it immediately.
+	 */
+	if (dispatch_user_scheduler())
+		return;
 }
 
 /*
