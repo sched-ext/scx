@@ -140,11 +140,6 @@ UEI_DEFINE(uei);
 private(BPFLAND) struct bpf_cpumask __kptr *primary_cpumask;
 
 /*
- * Mask of preferred CPUs in the system.
- */
-private(BPFLAND) struct bpf_cpumask __kptr *preferred_cpumask;
-
-/*
  * Mask of offline CPUs, used to properly support CPU hotplugging.
  */
 private(BPFLAND) struct bpf_cpumask __kptr *offline_cpumask;
@@ -290,7 +285,7 @@ static bool is_task_interactive(struct task_struct *p)
  */
 static inline bool is_kthread(const struct task_struct *p)
 {
-	return !!(p->flags & PF_KTHREAD);
+	return p->flags & PF_KTHREAD;
 }
 
 /*
@@ -538,11 +533,10 @@ static void handle_sync_wakeup(struct task_struct *p)
  * to handle these mistakes in favor of a more efficient response and a reduced
  * scheduling overhead.
  */
-static s32 pick_idle_cpu(struct task_struct *p,
-			 s32 prev_cpu, u64 wake_flags, bool do_preferred)
+static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
-	struct bpf_cpumask *primary, *preferred, *l2_domain, *l3_domain;
+	struct bpf_cpumask *primary, *l2_domain, *l3_domain;
 	struct bpf_cpumask *p_mask, *l2_mask, *l3_mask;
 	struct task_ctx *tctx;
 	struct cpu_ctx *cctx;
@@ -558,9 +552,6 @@ static s32 pick_idle_cpu(struct task_struct *p,
 	primary = primary_cpumask;
 	if (!primary)
 		return -ENOENT;
-	preferred = preferred_cpumask;
-	if (!preferred)
-		return -ENOENT;
 
 	/*
 	 * If the task isn't allowed to use its previously used CPU it means
@@ -574,14 +565,9 @@ static s32 pick_idle_cpu(struct task_struct *p,
 	/*
 	 * For tasks that can run only on a single CPU, we can simply verify if
 	 * their only allowed CPU is still idle.
-	 *
-	 * Moreover, if local_kthreads is enabled, always allow to dispatch
-	 * per-CPU kthreads directly to their target CPU, independently on the
-	 * idle state.
 	 */
 	if (p->nr_cpus_allowed == 1) {
-		if ((is_kthread(p) && local_kthreads) ||
-				scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 			return prev_cpu;
 		return -ENOENT;
 	}
@@ -628,18 +614,9 @@ static s32 pick_idle_cpu(struct task_struct *p,
 
 	/*
 	 * Determine the task's scheduling domain.
-	 *
-	 * Try to dispatch on the preferred CPUs first. If we can't find any
 	 * idle CPU, re-try again with the primary scheduling domain.
 	 */
-	if (do_preferred &&
-	    !bpf_cpumask_empty(cast_mask(preferred)) &&
-	    !bpf_cpumask_equal(cast_mask(preferred), cast_mask(primary))) {
-		bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(preferred));
-	} else {
-		bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(primary));
-		do_preferred = false;
-	}
+	bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(primary));
 
 	/*
 	 * Determine the L2 cache domain as the intersection of the task's
@@ -661,33 +638,51 @@ static s32 pick_idle_cpu(struct task_struct *p,
 	if (bpf_cpumask_empty(cast_mask(l3_mask)))
 		l3_mask = NULL;
 
-	/*
-	 * Try to prioritize newly awakened tasks by immediately promoting them
-	 * as interactive.
-	 */
 	if (wake_flags & SCX_WAKE_SYNC) {
 		struct task_struct *current = (void *)bpf_get_current_task_btf();
+		bool share_llc, has_idle;
 
+		/*
+		 * Prioritize newly awakened tasks by immediately promoting
+		 * them as interactive.
+		 */
 		handle_sync_wakeup(p);
 
 		/*
-		 * If CPUs of the waker and the wakee share the same L3 cache,
-		 * try to re-use the same CPU, if idle.
+		 * Determine waker CPU scheduling domain.
 		 */
 		cpu = bpf_get_smp_processor_id();
-		if (l3_mask && bpf_cpumask_test_cpu(cpu, cast_mask(l3_mask)) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+
+		cctx = try_lookup_cpu_ctx(cpu);
+		if (!cctx) {
+			cpu = -ENOENT;
+			goto out_put_cpumask;
+		}
+
+		l3_domain = cctx->l3_cpumask;
+		if (!l3_domain) {
+			scx_bpf_error("CPU L3 cpumask not initialized");
+			cpu = -ENOENT;
+			goto out_put_cpumask;
+		}
+
+		/*
+		 * If both the waker and wakee share the same L3 cache keep
+		 * using the same CPU if possible.
+		 */
+		share_llc = bpf_cpumask_test_cpu(prev_cpu, cast_mask(l3_domain));
+		if (share_llc && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			goto out_put_cpumask;
 		}
 
 		/*
-		 * Try to run the task on the same CPU as the waker if it's in
-		 * the same scheduling domain and if it's not completely
-		 * saturated.
+		 * If the waker's L3 domain is not saturated attempt to migrate
+		 * the wakee on the same CPU as the waker.
 		 */
-		if (bpf_cpumask_intersects(cast_mask(p_mask), idle_cpumask) &&
-		    bpf_cpumask_test_cpu(cpu, cast_mask(p_mask)) &&
+		has_idle = bpf_cpumask_intersects(cast_mask(l3_domain), idle_cpumask);
+		if (has_idle &&
+		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
 		    !(current->flags & PF_EXITING) &&
 		    scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) == 0)
 			goto out_put_cpumask;
@@ -728,15 +723,6 @@ static s32 pick_idle_cpu(struct task_struct *p,
 			if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
 			    scx_bpf_test_and_clear_cpu_idle(cpu))
 				goto out_put_cpumask;
-		}
-
-		/*
-		 * When considering the preferred domain (first idle CPU
-		 * selection pass) try to stay on the same LLC.
-		 */
-		if (do_preferred) {
-			cpu = -ENOENT;
-			goto out_put_cpumask;
 		}
 
 		/*
@@ -781,15 +767,6 @@ static s32 pick_idle_cpu(struct task_struct *p,
 	}
 
 	/*
-	 * When considering the preferred domain (first idle CPU selection
-	 * pass) try to stay on the same LLC.
-	 */
-	if (do_preferred) {
-		cpu = -ENOENT;
-		goto out_put_cpumask;
-	}
-
-	/*
 	 * Search for any idle CPU in the scheduling domain.
 	 */
 	cpu = bpf_cpumask_any_and_distribute(cast_mask(p_mask), idle_cpumask);
@@ -815,7 +792,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 {
 	s32 cpu;
 
-	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, true);
+	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
 	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return cpu;
@@ -832,16 +809,18 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct bpf_cpumask *primary;
 	u64 deadline = task_deadline(p);
-	s32 cpu, prev_cpu = scx_bpf_task_cpu(p);
+	s32 cpu;
 
 	/*
-	 * If we couldn't find an idle CPU in ops.select_cpu(), give the task
-	 * another chance here to keep using the same CPU / cache / domain.
+	 * If local_kthreads is enabled, always dispatch per-CPU kthreads
+	 * directly to their target CPU.
 	 */
-	cpu = pick_idle_cpu(p, prev_cpu, 0, false);
-	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
-		__sync_fetch_and_add(&nr_direct_dispatches, 1);
-		return;
+	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
+		cpu = scx_bpf_task_cpu(p);
+		if (!dispatch_direct_cpu(p, cpu, enq_flags)) {
+			__sync_fetch_and_add(&nr_direct_dispatches, 1);
+			return;
+		}
 	}
 
 	/*
@@ -868,14 +847,9 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * task, wake them up to see whether they'd be able to steal the just
 	 * queued task.
 	 */
-	primary = primary_cpumask;
-	if (!primary)
-		return;
-	if (bpf_cpumask_subset(cast_mask(primary), p->cpus_ptr)) {
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(primary), 0);
-		if (cpu >= 0)
-			scx_bpf_kick_cpu(cpu, 0);
-	}
+	cpu = scx_bpf_pick_idle_cpu(cast_mask(p->cpus_ptr), 0);
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, 0);
 }
 
 /*
@@ -1367,34 +1341,6 @@ int enable_sibling_cpu(struct domain_arg *input)
 }
 
 SEC("syscall")
-int enable_preferred_cpu(struct cpu_arg *input)
-{
-	struct bpf_cpumask *mask;
-	int err = 0;
-
-	/* Make sure the primary CPU mask is initialized */
-	err = init_cpumask(&preferred_cpumask);
-	if (err)
-		return err;
-	/*
-	 * Enable the target CPU in the preferred scheduling domain.
-	 */
-	bpf_rcu_read_lock();
-	mask = preferred_cpumask;
-	if (mask) {
-		s32 cpu = input->cpu_id;
-
-		if (cpu < 0)
-			bpf_cpumask_clear(mask);
-		else
-			bpf_cpumask_set_cpu(cpu, mask);
-	}
-	bpf_rcu_read_unlock();
-
-	return err;
-}
-
-SEC("syscall")
 int enable_primary_cpu(struct cpu_arg *input)
 {
 	struct bpf_cpumask *mask;
@@ -1478,11 +1424,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 
 	/* Initialize the primary scheduling domain */
 	err = init_cpumask(&primary_cpumask);
-	if (err)
-		return err;
-
-	/* Initialize the preferred scheduling domain */
-	err = init_cpumask(&preferred_cpumask);
 	if (err)
 		return err;
 
