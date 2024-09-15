@@ -77,7 +77,7 @@ jobs:
     needs: build-kernel
     strategy:
           matrix:
-            scheduler: [ scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty ]
+            scheduler: [ scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rusty ]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-deps-action
@@ -89,7 +89,7 @@ jobs:
           path: |
             /usr/lib/virtiofsd
           key: virtiofsd-binary
-      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}          
+      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}
         run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
 
       # get latest head commit of sched_ext for-next
@@ -149,7 +149,7 @@ jobs:
           path: |
             /usr/lib/virtiofsd
           key: virtiofsd-binary
-      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}          
+      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}
         run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
 
       # get latest head commit of sched_ext for-next
@@ -182,7 +182,7 @@ jobs:
     needs: build-kernel
     strategy:
       matrix:
-        scheduler: [ scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty ]
+        scheduler: [ scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rusty ]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/install-deps-action
@@ -194,7 +194,7 @@ jobs:
           path: |
             /usr/lib/virtiofsd
           key: virtiofsd-binary
-      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}          
+      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}
         run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
 
       # get latest head commit of sched_ext for-next
