@@ -22,7 +22,7 @@ def request(f, req, args={}):
     f.flush()
     resp = json.loads(f.readline())
     if resp['errno'] != 0:
-        raise Exception(f'req: {req} args: {args} failed with {resp['errno']} ({resp['args']['resp']})')
+        raise Exception(f"req: {req} args: {args} failed with {resp['errno']} ({resp['args']['resp']})")
     return resp['args']['resp']
 
 def make_om_metrics(sname, omid, field, labels, meta_db, registry):
