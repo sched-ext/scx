@@ -1,0 +1,29 @@
+[package]
+name = "scx_rorke"
+version = "1.0.0"
+authors = ["Vahab Jabrayilov <vjabrayilov@cs.columbia.edu>", "Columbia University"]
+edition = "2021"
+description = "Scheduler designed for virtualization environment."
+license = "GPL-2.0-only"
+
+[dependencies]
+anyhow = "1.0.65"
+plain = "0.2.3"
+ctrlc = { version = "3.1", features = ["termination"] }
+libbpf-rs = "0.23.1"
+libc = "0.2.137"
+clap = "4.5.9"
+simplelog = "0.12.2"
+log = "0.4.22"
+
+# scx related dependencies
+scx_stats = { path = "../../../rust/scx_stats", version = "1.0.4" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.4" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.4" }
+
+[build-dependencies]
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.4" }
+
+
+[features]
+enable_backtrace = []
