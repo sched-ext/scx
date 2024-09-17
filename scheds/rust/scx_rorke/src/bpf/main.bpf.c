@@ -36,9 +36,6 @@ const volatile u64 timer_interval_ns = 100000;
 const volatile u64 vms[MAX_VMS];
 const volatile u64 cpu_to_vm[MAX_CPUS];
 
-/* base slice duration */
-const volatile u64 slice_ns = SCX_SLICE_DFL;
-
 const volatile u32 debug = 0;
 
 bool timer_pinned = true;
