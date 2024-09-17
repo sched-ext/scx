@@ -14,6 +14,8 @@ members = ["rust/scx_stats",
            "scheds/rust/scx_p2dq",
            "scheds/rust/scx_layered",
            "scheds/rust/scx_mitosis"]
+            "scheds/rust/scx_rorke",
+           "scheds/rust/scx_layered"] # scx_mitosis temporarily excluded
 resolver = "2"
 
 [profile.release]
