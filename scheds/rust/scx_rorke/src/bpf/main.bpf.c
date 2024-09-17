@@ -98,17 +98,15 @@ void BPF_STRUCT_OPS(rorke_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(rorke_dispatch, s32 cpu, struct task_struct *prev)
 {
-	s32 vm_id = SAFE_ACCESS(cpu, nr_cpus, cpu_to_vm, -1);
-	if (vm_id == -1) {
-		scx_bpf_error("rorke_dispatch: failed to find VM for CPU %d",
-			      cpu);
+	s32 vm_id = cpu < nr_cpus ? cpu_to_vm[cpu] : 0;
+	if (vm_id == 0) {
 		return;
 	}
-	if (scx_bpf_consume(vm_id)) {
-		trace("rorke_dispatch: CPU - %d, VM - %d\n", cpu, vm_id);
+	if (!scx_bpf_consume(vm_id)) {
+		trace("rorke_dispatch: VM - %d", vm_id);
 		return;
 	}
-	dbg("rorke_dispatch: failed to consume from VM %d", vm_id);
+	dbg("rorke_dispatch: failed to consume from VM - %d", vm_id);
 }
 
 void BPF_STRUCT_OPS(rorke_runnable, struct task_struct *p, u64 enq_flags)
@@ -177,7 +175,7 @@ static int central_timerfn(void *map, int *key, struct bpf_timer *timer)
 			continue;
 
 		scx_bpf_kick_cpu(curr_cpu, SCX_KICK_PREEMPT);
-        trace("central_timerfn: kicked CPU %d", curr_cpu);
+		trace("central_timerfn: kicked CPU %d", curr_cpu);
 	}
 
 	bpf_timer_start(timer, timer_interval_ns, BPF_F_TIMER_CPU_PIN);
