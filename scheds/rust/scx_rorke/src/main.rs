@@ -44,7 +44,7 @@ struct Opts {
     central_cpu: u32,
 
     /// Number of CPUs
-    #[clap(short = 'n', long, default_value = "1")]
+    #[clap(short = 'n', long, default_value = "2")]
     num_cpus: u32,
 
     /// Timer interval in microseconds
@@ -114,17 +114,16 @@ impl<'a> Scheduler<'a> {
             skel.maps.rodata_data.vms[i] = vm.vm_id;
         }
 
-        // central_cpu to VM 0 is special mapping
-        skel.maps.rodata_data.cpu_to_vm[opts.central_cpu as usize] = 0;
-
         // starting from central_cpu+1...central_cpu+nr_cpus-1 assign VMs
         for (i, vm_id) in cpu_allocation.iter().enumerate() {
-            info!(
-                "cpu_to_vm[{}] = {}",
-                opts.central_cpu as usize + 1 + i,
-                vm_id
-            );
-            skel.maps.rodata_data.cpu_to_vm[opts.central_cpu as usize + 1 + i] = *vm_id;
+            // info!(
+            //     "cpu_to_vm[{}] = {}",
+            //     opts.central_cpu as usize + i,
+            //     vm_id
+            // );
+            // skel.maps.rodata_data.cpu_to_vm[opts.central_cpu as usize + i] = *vm_id;
+            info!("cpu_to_vm[{}] = {}", i, vm_id);
+            skel.maps.rodata_data.cpu_to_vm[i] = *vm_id;
         }
 
         if opts.partial {
