@@ -273,6 +273,46 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 }
 
 /*
+ * Intercept when a task is executing sched_setaffinity().
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, __u32);
+	__type(value, __u64);
+	__uint(max_entries, MAX_ENQUEUED_TASKS);
+} pid_setaffinity_map SEC(".maps");
+
+SEC("kprobe/sched_setaffinity")
+int BPF_KPROBE(kprobe_sched_setaffinity, struct task_struct *task,
+			const struct cpumask *new_mask)
+{
+	pid_t pid = bpf_get_current_pid_tgid() >> 32;
+	u64 value = true;
+
+	bpf_map_update_elem(&pid_setaffinity_map, &pid, &value, BPF_ANY);
+
+	return 0;
+}
+
+SEC("kretprobe/sched_setaffinity")
+int BPF_KRETPROBE(kretprobe_sched_setaffinity)
+{
+	pid_t pid = bpf_get_current_pid_tgid() >> 32;
+	bpf_map_delete_elem(&pid_setaffinity_map, &pid);
+
+	return 0;
+}
+
+/*
+ * Return true if a task is executing sched_setaffinity(), false otherwise.
+ */
+static bool in_setaffinity(pid_t pid)
+{
+	u64 *value = bpf_map_lookup_elem(&pid_setaffinity_map, &pid);
+	return value != NULL;
+}
+
+/*
  * Heartbeat timer used to periodically trigger the check to run the user-space
  * scheduler.
  *
@@ -669,6 +709,18 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	if (task->cpu & RL_CPU_ANY) {
 		scx_bpf_dispatch_vtime(p, SHARED_DSQ,
 				       SCX_SLICE_DFL, task->vtime, task->flags);
+		goto out_kick_idle_cpu;
+	}
+
+	/*
+	 * Force tasks that are currently executing sched_setaffinity() to be
+	 * dispatched on the shared DSQ, otherwise we may introduce stalls in
+	 * the per-CPU DSQ.
+	 */
+	if (in_setaffinity(p->pid)) {
+		scx_bpf_dispatch_vtime(p, SHARED_DSQ,
+				       SCX_SLICE_DFL, task->vtime, task->flags);
+		__sync_fetch_and_add(&nr_bounce_dispatches, 1);
 		goto out_kick_idle_cpu;
 	}
 
