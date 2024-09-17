@@ -113,22 +113,23 @@ void BPF_STRUCT_OPS(rorke_dispatch, s32 cpu, struct task_struct *prev)
 
 void BPF_STRUCT_OPS(rorke_runnable, struct task_struct *p, u64 enq_flags)
 {
-    trace("rorke_runnable: VM: %d, vCPU: %d", p->tgid, p->pid);
+	trace("rorke_runnable: VM: %d, vCPU: %d", p->tgid, p->pid);
 }
 
 void BPF_STRUCT_OPS(rorke_running, struct task_struct *p)
 {
-    trace("rorke_running: VM: %d, vCPU: %d", p->tgid, p->pid);
+	trace("rorke_running: VM: %d, vCPU: %d", p->tgid, p->pid);
 }
 
 void BPF_STRUCT_OPS(rorke_stopping, struct task_struct *p, bool runnable)
 {
-    trace("rorke_stopping: VM: %d, vCPU: %d, runnable: %d", p->tgid, p->pid, runnable);
+	trace("rorke_stopping: VM: %d, vCPU: %d, runnable: %d", p->tgid, p->pid,
+	      runnable);
 }
 
 void BPF_STRUCT_OPS(rorke_quiescent, struct task_struct *p, u64 deq_flags)
 {
-    trace("rorke_quiescent: VM: %d, vCPU: %d", p->tgid, p->pid);
+	trace("rorke_quiescent: VM: %d, vCPU: %d", p->tgid, p->pid);
 }
 
 s32 BPF_STRUCT_OPS(rorke_init_task, struct task_struct *p,
@@ -176,6 +177,7 @@ static int central_timerfn(void *map, int *key, struct bpf_timer *timer)
 			continue;
 
 		scx_bpf_kick_cpu(curr_cpu, SCX_KICK_PREEMPT);
+        trace("central_timerfn: kicked CPU %d", curr_cpu);
 	}
 
 	bpf_timer_start(timer, timer_interval_ns, BPF_F_TIMER_CPU_PIN);
