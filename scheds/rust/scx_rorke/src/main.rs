@@ -2,10 +2,18 @@ mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 
+mod config;
+use config::*;
+
+use std::env;
+use std::fs;
 use std::mem::MaybeUninit;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+
+use libc::{cpu_set_t, pid_t, sched_setaffinity, CPU_SET};
 
 use anyhow::anyhow;
 use anyhow::Context;
@@ -31,6 +39,28 @@ use scx_utils::UserExitInfo;
 
 #[derive(Debug, Parser)]
 struct Opts {
+    /// Central CPU
+    #[clap(short = 'c', long, default_value = "0")]
+    central_cpu: u32,
+
+    /// Number of CPUs
+    #[clap(short = 'n', long, default_value = "1")]
+    num_cpus: u32,
+
+    /// Timer interval in microseconds
+    #[clap(short = 't', long, default_value = "100")]
+    timer_interval: u64,
+
+    /// Config file
+    #[clap(short = 'f', long)]
+    config_file: Option<String>,
+
+    /// If specified, only tasks which have their scheduling policy set to
+    /// SCHED_EXT using sched_setscheduler(2) are switched. Otherwise, all
+    /// tasks are switched.
+    #[clap(short = 'p', long, action = clap::ArgAction::SetTrue, default_value = "true")]
+    partial: bool,
+
     /// Enable verbose output including libbpf details.
     /// Specify multiple times to increase verbosity.
     #[clap(short='v', long, action = clap::ArgAction::Count)]
@@ -56,13 +86,65 @@ impl<'a> Scheduler<'a> {
             "Running scx_rorke (build_id: {})",
             *build_id::SCX_FULL_VERSION
         );
+        info!("Opts: {:?}", opts);
         let mut skel = scx_ops_open!(skel_builder, open_object, rorke).unwrap();
 
+        // Parse json config file
+
+        let config_path = match &opts.config_file {
+            Some(path) => PathBuf::from(path),
+            None => {
+                let home_dir = env::var("HOME").expect("Failed to get $HOME env variable");
+                PathBuf::from(home_dir).join("config.json")
+            }
+        };
+        let vm_config =
+            parse_vm_config(&fs::read_to_string(config_path).context("Failed to find file")?)
+                .context("Failed to parse config file")?;
+        let cpu_allocation = allocate_cpus_to_vms(&vm_config, opts.num_cpus);
+        info!("CPU allocation: {:?}", cpu_allocation);
+
         // Initialize skel
-        //
-        // TBD
-        //
-        //
+        skel.maps.rodata_data.central_cpu = opts.central_cpu;
+        skel.maps.rodata_data.nr_cpus = opts.num_cpus;
+        skel.maps.rodata_data.nr_vms = vm_config.len() as u32;
+        skel.maps.rodata_data.timer_interval_ns = opts.timer_interval * 1000;
+
+        for (i, vm) in vm_config.iter().enumerate() {
+            skel.maps.rodata_data.vms[i] = vm.vm_id;
+        }
+
+        // central_cpu to VM 0 is special mapping
+        skel.maps.rodata_data.cpu_to_vm[opts.central_cpu as usize] = 0;
+
+        // starting from central_cpu+1...central_cpu+nr_cpus-1 assign VMs
+        for (i, vm_id) in cpu_allocation.iter().enumerate() {
+            info!(
+                "cpu_to_vm[{}] = {}",
+                opts.central_cpu as usize + 1 + i,
+                vm_id
+            );
+            skel.maps.rodata_data.cpu_to_vm[opts.central_cpu as usize + 1 + i] = *vm_id;
+        }
+
+        if opts.partial {
+            skel.struct_ops.rorke_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
+        }
+
+        skel.maps.rodata_data.debug = opts.verbose as u32;
+
+        // Pin to central CPU before attaching eBPF program
+        unsafe {
+            let mut cpu_set: cpu_set_t = std::mem::zeroed();
+            CPU_SET(opts.central_cpu as usize, &mut cpu_set);
+
+            let tid: pid_t = libc::syscall(libc::SYS_gettid) as pid_t;
+
+            let result = sched_setaffinity(tid, std::mem::size_of_val(&cpu_set), &cpu_set);
+            if result != 0 {
+                return Err(anyhow!("Failed to pin to central CPU"));
+            }
+        }
         // Attach the eBPF program
         let mut skel = scx_ops_load!(skel, rorke, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, rorke)?);
