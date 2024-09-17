@@ -10,11 +10,13 @@ license = "GPL-2.0-only"
 anyhow = "1.0.65"
 plain = "0.2.3"
 ctrlc = { version = "3.1", features = ["termination"] }
-libbpf-rs = "0.23.1"
+libbpf-rs = "0.24.1"
 libc = "0.2.137"
-clap = "4.5.9"
+clap = { version = "4.1", features = ["derive", "env", "unicode", "wrap_help"] }
 simplelog = "0.12.2"
 log = "0.4.22"
+serde = { version = "1.0", features = ["derive"] }
+
 
 # scx related dependencies
 scx_stats = { path = "../../../rust/scx_stats", version = "1.0.4" }
@@ -23,7 +25,6 @@ scx_utils = { path = "../../../rust/scx_utils", version = "1.0.4" }
 
 [build-dependencies]
 scx_utils = { path = "../../../rust/scx_utils", version = "1.0.4" }
-
 
 [features]
 enable_backtrace = []
