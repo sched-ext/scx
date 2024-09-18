@@ -708,6 +708,8 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
+	struct cache_ctx *cachec;
+	struct node_ctx *nodec;
 	struct layer *layer;
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u64 vtime = p->scx.dsq_vtime;
@@ -823,16 +825,112 @@ find_cpu:
 			return;
 	}
 
-	bpf_for(idx, 0, nr_possible_cpus) {
-		s32 cand = (preempt_cursor + idx) % nr_possible_cpus;
-
-		if (try_preempt(cand, p, cctx, tctx, layer, false)) {
-			/*
-			 * Round-robining doesn't have to be strict. Let's
-			 * not bother with atomic ops on $preempt_cursor.
-			 */
-			preempt_cursor = (cand + 1) % nr_possible_cpus;
+	if (!disable_topology) {
+		if (!(cachec = lookup_cache_ctx(cctx->cache_idx)) ||
+		    !(nodec = lookup_node_ctx(cctx->node_idx)))
 			return;
+
+		struct bpf_cpumask *attempted = bpf_cpumask_create();
+		if (!attempted)
+			return;
+
+		struct bpf_cpumask *topo_cpus = bpf_cpumask_create();
+		if (!topo_cpus) {
+			bpf_cpumask_release(attempted);
+			return;
+		}
+
+		if (!cachec->cpumask) {
+			bpf_cpumask_release(attempted);
+			bpf_cpumask_release(topo_cpus);
+			return;
+		}
+
+		bpf_cpumask_copy(topo_cpus, (const struct cpumask*)cachec->cpumask);
+
+		/*
+		 * First try preempting in the local LLC
+		 */
+		bpf_for(idx, 0, cachec->nr_cpus) {
+			s32 preempt_cpu = bpf_cpumask_any_distribute((const struct cpumask*)topo_cpus);
+			if (preempt_cpu > cachec->nr_cpus)
+				break;
+
+			if (try_preempt(preempt_cpu, p, cctx, tctx, layer, false)) {
+				bpf_cpumask_release(attempted);
+				bpf_cpumask_release(topo_cpus);
+				return;
+			}
+			bpf_cpumask_clear_cpu(preempt_cpu, topo_cpus);
+			bpf_cpumask_set_cpu(preempt_cpu, attempted);
+		}
+
+		/*
+		 * Next try node local LLC
+		 */
+		if (!nodec->cpumask) {
+			bpf_cpumask_release(attempted);
+			bpf_cpumask_release(topo_cpus);
+			return;
+		}
+		bpf_cpumask_copy(topo_cpus, (const struct cpumask*)nodec->cpumask);
+		bpf_cpumask_xor(topo_cpus,
+				(const struct cpumask*)attempted,
+				(const struct cpumask*)topo_cpus);
+
+		bpf_for(idx, 0, nodec->nr_cpus) {
+			s32 preempt_cpu = bpf_cpumask_any_distribute((const struct cpumask*)topo_cpus);
+			if (try_preempt(preempt_cpu, p, cctx, tctx, layer, false)) {
+				bpf_cpumask_release(attempted);
+				bpf_cpumask_release(topo_cpus);
+				return;
+			}
+			bpf_cpumask_clear_cpu(preempt_cpu, topo_cpus);
+			bpf_cpumask_set_cpu(preempt_cpu, attempted);
+			if (bpf_cpumask_empty((const struct cpumask*)topo_cpus))
+				break;
+		}
+
+		/*
+		 * Finally try across nodes
+		 */
+		if (!all_cpumask) {
+			bpf_cpumask_release(attempted);
+			bpf_cpumask_release(topo_cpus);
+			return;
+		}
+		bpf_cpumask_copy(topo_cpus, (const struct cpumask*)all_cpumask);
+		bpf_cpumask_xor(topo_cpus,
+				(const struct cpumask*)attempted,
+				(const struct cpumask*)topo_cpus);
+
+		bpf_for(idx, 0, nr_possible_cpus) {
+			s32 preempt_cpu = bpf_cpumask_any_distribute((const struct cpumask*)topo_cpus);
+			if (try_preempt(preempt_cpu, p, cctx, tctx, layer, false)) {
+				bpf_cpumask_release(attempted);
+				bpf_cpumask_release(topo_cpus);
+				return;
+			}
+			bpf_cpumask_clear_cpu(preempt_cpu, topo_cpus);
+			bpf_cpumask_set_cpu(preempt_cpu, attempted);
+			if (bpf_cpumask_empty((const struct cpumask*)topo_cpus))
+				break;
+		}
+		bpf_cpumask_release(attempted);
+		bpf_cpumask_release(topo_cpus);
+	} else {
+
+		bpf_for(idx, 0, nr_possible_cpus) {
+			s32 cand = (preempt_cursor + idx) % nr_possible_cpus;
+
+			if (try_preempt(cand, p, cctx, tctx, layer, false)) {
+				/*
+				 * Round-robining doesn't have to be strict. Let's
+				 * not bother with atomic ops on $preempt_cursor.
+				 */
+				preempt_cursor = (cand + 1) % nr_possible_cpus;
+				return;
+			}
 		}
 	}
 
@@ -1014,7 +1112,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 					return;
 
 				if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
-				    (cpu <= nr_possible_cpus && cpu == fallback_cpu && 
+				    (cpu <= nr_possible_cpus && cpu == fallback_cpu &&
 				     MEMBER_VPTR(layer, ->nr_cpus) == 0)) {
 					if (scx_bpf_consume(dsq_id))
 						return;
@@ -1275,6 +1373,8 @@ static s32 create_node(u32 node_id)
 				break;
 			}
 			cctx->node_idx = node_id;
+			nodec->nr_cpus++;
+			nodec->llc_mask &= (1LLU << node_id);
 		}
 	}
 
@@ -1314,6 +1414,7 @@ static s32 create_cache(u32 cache_id)
 		if (llc_id != cache_id)
 			continue;
 
+		cachec->nr_cpus++;
 		bpf_cpumask_set_cpu(cpu, cpumask);
 		if (!(cctx = lookup_cpu_ctx(-1))) {
 			scx_bpf_error("cpu ctx error"); ret = -ENOENT; break;

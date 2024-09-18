@@ -88,19 +88,21 @@ struct cpu_ctx {
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
 	u64			ran_current_for;
 	u32			layer_idx;
-	u32			node_idx;
 	u32			cache_idx;
+	u32			node_idx;
 };
 
 struct cache_ctx {
 	u32 id;
 	struct bpf_cpumask __kptr *cpumask;
+	u32 nr_cpus;
 };
 
 struct node_ctx {
 	u32 id;
 	struct bpf_cpumask __kptr *cpumask;
 	u32 nr_llcs;
+	u32 nr_cpus;
 	u64 llc_mask;
 };
 
