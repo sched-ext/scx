@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use libc::{cpu_set_t, pid_t, sched_setaffinity, CPU_SET};
+use libc::{cpu_set_t, pid_t, sched_param, sched_setaffinity, sched_setscheduler, CPU_SET};
 
 use anyhow::anyhow;
 use anyhow::Context;
@@ -25,6 +25,7 @@ use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::OpenObject;
 
+use log::debug;
 use log::info;
 
 use scx_utils::build_id;
@@ -36,6 +37,8 @@ use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::UserExitInfo;
+
+const SCHED_EXT: i32 = 7;
 
 #[derive(Debug, Parser)]
 struct Opts {
@@ -116,12 +119,6 @@ impl<'a> Scheduler<'a> {
 
         // starting from central_cpu+1...central_cpu+nr_cpus-1 assign VMs
         for (i, vm_id) in cpu_allocation.iter().enumerate() {
-            // info!(
-            //     "cpu_to_vm[{}] = {}",
-            //     opts.central_cpu as usize + i,
-            //     vm_id
-            // );
-            // skel.maps.rodata_data.cpu_to_vm[opts.central_cpu as usize + i] = *vm_id;
             info!("cpu_to_vm[{}] = {}", i, vm_id);
             skel.maps.rodata_data.cpu_to_vm[i] = *vm_id;
         }
@@ -149,6 +146,23 @@ impl<'a> Scheduler<'a> {
         let struct_ops = Some(scx_ops_attach!(skel, rorke)?);
         info!("scx_rorke started");
 
+        // Set VMs to sched_ext class
+
+        for vm in vm_config.iter() {
+            let vcpus = &vm.vcpus;
+            debug!("vm_id: {:?} vcpus: {:?}", vm.vm_id, vcpus);
+
+            for vcpu in vcpus.iter() {
+                let param = sched_param { sched_priority: 0 }; // SCHED_BATCH doesn't require a priority
+                let result =
+                    unsafe { sched_setscheduler(*vcpu as i32, SCHED_EXT, &param as *const sched_param) };
+
+                if result == -1 {
+                    return Err(anyhow!("Failed to set SCHED_EXT for vcpu: {:?}", vcpu));
+                }
+                debug!("Set SCHED_EXT for vcpu: {:?}", vcpu);
+            }
+        }
         Ok(Self { skel, struct_ops })
     }
 
