@@ -1066,11 +1066,14 @@ int match_layer(u32 layer_id, pid_t pid, const char *cgrp_path)
 	if (!p)
 		return -EINVAL;
 
-	if (layer_id >= nr_layers || nr_match_ors > MAX_LAYER_MATCH_ORS)
+	if (layer_id >= nr_layers)
 		goto err;
 
 	layer = &layers[layer_id];
 	nr_match_ors = layer->nr_match_ors;
+
+	if (nr_match_ors > MAX_LAYER_MATCH_ORS)
+		goto err;
 
 	bpf_for(or_idx, 0, nr_match_ors) {
 		struct layer_match_ands *ands;
