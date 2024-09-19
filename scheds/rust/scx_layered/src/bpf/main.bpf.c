@@ -883,6 +883,7 @@ find_cpu:
 			if (try_preempt(preempt_cpu, p, cctx, tctx, layer, false)) {
 				bpf_cpumask_release(attempted);
 				bpf_cpumask_release(topo_cpus);
+				lstat_inc(LSTAT_PREEMPT_XLLC, layer, cctx);
 				return;
 			}
 			bpf_cpumask_clear_cpu(preempt_cpu, topo_cpus);
@@ -909,6 +910,7 @@ find_cpu:
 			if (try_preempt(preempt_cpu, p, cctx, tctx, layer, false)) {
 				bpf_cpumask_release(attempted);
 				bpf_cpumask_release(topo_cpus);
+				lstat_inc(LSTAT_PREEMPT_XNUMA, layer, cctx);
 				return;
 			}
 			bpf_cpumask_clear_cpu(preempt_cpu, topo_cpus);
@@ -929,6 +931,13 @@ find_cpu:
 				 * not bother with atomic ops on $preempt_cursor.
 				 */
 				preempt_cursor = (cand + 1) % nr_possible_cpus;
+				struct cpu_ctx *new_cctx;
+				if ((new_cctx = lookup_cpu_ctx(cand))) {
+					if (new_cctx->node_idx != nodec->id && new_cctx->node_idx == nodec->id)
+						lstat_inc(LSTAT_PREEMPT_XLLC, layer, cctx);
+					if (new_cctx->node_idx != nodec->id)
+						lstat_inc(LSTAT_PREEMPT_XLLC, layer, cctx);
+				}
 				return;
 			}
 		}

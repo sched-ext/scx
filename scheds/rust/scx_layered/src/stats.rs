@@ -75,6 +75,10 @@ pub struct LayerStats {
     pub open_idle: f64,
     #[stat(desc = "% preempted other tasks")]
     pub preempt: f64,
+    #[stat(desc = "% preempted XLLC tasks")]
+    pub preempt_xllc: f64,
+    #[stat(desc = "% preempted XNUMA tasks")]
+    pub preempt_xnuma: f64,
     #[stat(desc = "% first-preempted other tasks")]
     pub preempt_first: f64,
     #[stat(desc = "% idle-preempted other tasks")]
@@ -178,6 +182,8 @@ impl LayerStats {
             min_exec_us: (lstat(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC_NS) / 1000) as u64,
             open_idle: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE),
             preempt: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT),
+            preempt_xllc: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_XLLC),
+            preempt_xnuma: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_XNUMA),
             preempt_first: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FIRST),
             preempt_idle: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_IDLE),
             preempt_fail: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FAIL),
@@ -253,10 +259,12 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  preempt/first/idle/fail={}/{}/{}/{} min_exec={}/{:7.2}ms",
+            "  {:<width$}  preempt/first/xllc/xnuma/idle/fail={}/{}/{}/{}/{}/{} min_exec={}/{:7.2}ms",
             "",
             fmt_pct(self.preempt),
             fmt_pct(self.preempt_first),
+            fmt_pct(self.preempt_xllc),
+            fmt_pct(self.preempt_xnuma),
             fmt_pct(self.preempt_idle),
             fmt_pct(self.preempt_fail),
             fmt_pct(self.min_exec),
