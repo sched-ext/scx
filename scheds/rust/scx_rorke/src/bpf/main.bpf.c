@@ -102,11 +102,12 @@ void BPF_STRUCT_OPS(rorke_dispatch, s32 cpu, struct task_struct *prev)
 	if (vm_id == 0) {
 		return;
 	}
-	if (!scx_bpf_consume(vm_id)) {
+	if (scx_bpf_consume(vm_id)) {
 		trace("rorke_dispatch: VM - %d", vm_id);
+        __sync_fetch_and_sub(&nr_queued, 1);
 		return;
 	}
-	dbg("rorke_dispatch: failed to consume from VM - %d", vm_id);
+	dbg("rorke_dispatch: empty... didn't consumed from VM - %d", vm_id);
 }
 
 void BPF_STRUCT_OPS(rorke_runnable, struct task_struct *p, u64 enq_flags)
@@ -161,14 +162,15 @@ static int central_timerfn(void *map, int *key, struct bpf_timer *timer)
 	bpf_for(curr_cpu, 0, nr_cpus)
 	{
 		if (curr_cpu == central_cpu) {
-			trace("central_timerfn: curr_cpu[%d] == central_cpu[%d] skipping...",
-			      curr_cpu, central_cpu);
+			// trace("central_timerfn: curr_cpu[%d] == central_cpu[%d] skipping...",
+			// curr_cpu, central_cpu);
 			continue;
 		}
 
 		if (scx_bpf_dsq_nr_queued(FALLBACK_DSQ_ID) ||
 		    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | curr_cpu))
-			;
+			trace("central_timerfn: local non-empty, will kick CPU %d",
+                  curr_cpu);
 		else if (nr_to_kick)
 			nr_to_kick--;
 		else
@@ -254,7 +256,7 @@ SCX_OPS_DEFINE(rorke,
      * anything special. Enqueue the last tasks like any other tasks.
      */
 
-	       .flags = SCX_OPS_ENQ_LAST,
+	       // .flags = SCX_OPS_ENQ_LAST,
 	       .select_cpu = (void *)rorke_select_cpu,
 	       .enqueue = (void *)rorke_enqueue,
 	       .dispatch = (void *)rorke_dispatch,
