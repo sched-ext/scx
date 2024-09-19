@@ -254,6 +254,14 @@ static struct cpumask *lookup_layer_cpumask(int idx)
 	}
 }
 
+/*
+ * Access a cpumask in read-only mode (typically to check bits).
+ */
+static const struct cpumask *cast_mask(struct bpf_cpumask *mask)
+{
+	return (const struct cpumask *)mask;
+}
+
 static void refresh_cpumasks(int idx)
 {
 	struct layer_cpumask_wrapper *cpumaskw;
@@ -1313,12 +1321,12 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 		if (!(nodec = lookup_node_ctx(cctx->node_idx)))
 			return;
 		if (nodec->cpumask &&
-		    !bpf_cpumask_test_cpu(tctx->last_cpu, nodec->cpumask))
+		    !bpf_cpumask_test_cpu(tctx->last_cpu, cast_mask(nodec->cpumask)))
 			lstat_inc(LSTAT_XNUMA_MIGRATION, layer, cctx);
 		if (!(cachec = lookup_cache_ctx(cctx->cache_idx)))
 			return;
 		if (cachec->cpumask &&
-		    !bpf_cpumask_test_cpu(tctx->last_cpu, cachec->cpumask))
+		    !bpf_cpumask_test_cpu(tctx->last_cpu, cast_mask(cachec->cpumask)))
 			lstat_inc(LSTAT_XLLC_MIGRATION, layer, cctx);
 	}
 	tctx->last_cpu = task_cpu;
