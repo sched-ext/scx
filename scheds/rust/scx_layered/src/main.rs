@@ -76,6 +76,7 @@ const NR_GSTATS: usize = bpf_intf::global_stat_idx_NR_GSTATS as usize;
 const NR_LSTATS: usize = bpf_intf::layer_stat_idx_NR_LSTATS as usize;
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
 const CORE_CACHE_LEVEL: u32 = 2;
+const MIN_LAYER_WEIGHT: u32 = 1;
 
 #[rustfmt::skip]
 lazy_static::lazy_static! {
@@ -733,6 +734,10 @@ struct Stats {
     total_load: f64,
     layer_loads: Vec<f64>,
 
+    // infeasible stats
+    total_dcycle_sum: f64,
+    total_load_sum: f64,
+
     total_util: f64, // Running AVG of sum of layer_utils
     layer_utils: Vec<f64>,
     prev_layer_cycles: Vec<u64>,
@@ -800,6 +805,9 @@ impl Stats {
             total_load: 0.0,
             layer_loads: vec![0.0; nr_layers],
 
+            total_dcycle_sum: 0.0,
+            total_load_sum: 0.0,
+
             total_util: 0.0,
             layer_utils: vec![0.0; nr_layers],
             prev_layer_cycles: Self::read_layer_cycles(&cpu_ctxs, nr_layers),
@@ -836,6 +844,14 @@ impl Stats {
             .take(self.nr_layers)
             .map(|layer| layer.nr_tasks as usize)
             .collect();
+        let layer_weights: Vec<usize> = skel
+            .maps
+            .bss_data
+            .layers
+            .iter()
+            .take(self.nr_layers)
+            .map(|layer| layer.weight as usize)
+            .collect();
 
         let layer_slice_us: Vec<u64> = skel
             .maps
@@ -849,7 +865,7 @@ impl Stats {
         let (total_load, layer_loads) = Self::read_layer_loads(skel, self.nr_layers);
 
         let cur_layer_cycles = Self::read_layer_cycles(&cpu_ctxs, self.nr_layers);
-        cur_layer_cycles.iter().enumerate().map(|(layer_idx, usage)| load_agg.record_dom_load(layer_idx, 100/*weight*/, usage));
+        cur_layer_cycles.iter().zip(layer_weights).enumerate().map(|(layer_idx, (usage, weight))| load_agg.record_dom_load(layer_idx, weight, *usage as f64));
         let cur_layer_utils: Vec<f64> = cur_layer_cycles
             .iter()
             .zip(self.prev_layer_cycles.iter())
@@ -864,6 +880,7 @@ impl Stats {
             })
             .collect();
 
+        let load_ledger = load_agg.calculate();
         let cur_total_cpu = read_total_cpu(proc_reader)?;
         let cpu_busy = calc_util(&cur_total_cpu, &self.prev_total_cpu)?;
 
@@ -882,6 +899,9 @@ impl Stats {
 
             total_load,
             layer_loads,
+
+            total_dcycle_sum: load_ledger.global_dcycle_sum(),
+            total_load_sum: load_ledger.global_load_sum(),
 
             total_util: layer_utils.iter().sum(),
             layer_utils: layer_utils.try_into().unwrap(),
@@ -1851,11 +1871,12 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         cpus_ranges: &mut Vec<(usize, usize)>,
     ) -> Result<SysStats> {
         let bstats = &stats.bpf_stats;
+        let load_ledger = self.load_agg.calculate();
 
-        let mut sys_stats = SysStats::new(stats, bstats, self.cpu_pool.fallback_cpu)?;
+        let mut sys_stats = SysStats::new(stats, bstats, &load_ledger, self.cpu_pool.fallback_cpu)?;
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
-            let layer_stats = LayerStats::new(lidx, layer, stats, bstats, cpus_ranges[lidx]);
+            let layer_stats = LayerStats::new(lidx, layer, &load_ledger, stats, bstats, cpus_ranges[lidx]);
             sys_stats.layers.insert(spec.name.to_string(), layer_stats);
             cpus_ranges[lidx] = (layer.nr_cpus, layer.nr_cpus);
         }

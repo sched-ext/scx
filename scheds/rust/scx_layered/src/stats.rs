@@ -18,6 +18,7 @@ use log::warn;
 use scx_stats::prelude::*;
 use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
+use scx_utils::LoadLedger;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -55,6 +56,8 @@ pub struct LayerStats {
     pub util_frac: f64,
     #[stat(desc = "sum of weight * duty_cycle for tasks")]
     pub load: f64,
+    #[stat(desc = "layer load sum adjusted for infeasible weights")]
+    pub load_adj: f64,
     #[stat(desc = "fraction of total load")]
     pub load_frac: f64,
     #[stat(desc = "count of tasks")]
@@ -149,6 +152,7 @@ impl LayerStats {
     pub fn new(
         lidx: usize,
         layer: &Layer,
+        load_ledger: &LoadLedger,
         stats: &Stats,
         bstats: &BpfStats,
         nr_cpus_range: (usize, usize),
@@ -179,6 +183,7 @@ impl LayerStats {
             util: stats.layer_utils[lidx] * 100.0,
             util_frac: calc_frac(stats.layer_utils[lidx], stats.total_util),
             load: stats.layer_loads[lidx],
+            load_adj: load_ledger.dom_load_sums()[lidx],
             load_frac: calc_frac(stats.layer_loads[lidx], stats.total_load),
             tasks: stats.nr_layer_tasks[lidx] as u32,
             total: ltotal,
@@ -221,11 +226,12 @@ impl LayerStats {
     pub fn format<W: Write>(&self, w: &mut W, name: &str, header_width: usize) -> Result<()> {
         writeln!(
             w,
-            "  {:<width$}: util/frac={:7.1}/{:5.1} load/frac={:9.1}/{:5.1} tasks={:6}",
+            "  {:<width$}: util/frac={:7.1}/{:5.1} load/load_adj/frac={:9.1}/{:9.1}/{:5.1} tasks={:6}",
             name,
             self.util,
             self.util_frac,
             self.load,
+            self.load_adj,
             self.load_frac,
             self.tasks,
             width = header_width,
@@ -364,6 +370,8 @@ pub struct SysStats {
     pub util: f64,
     #[stat(desc = "sum of weight * duty_cycle for all tasks")]
     pub load: f64,
+    #[stat(desc = "adjusted load for all tasks with infeasible weights applied")]
+    pub load_adj: f64,
     #[stat(desc = "fallback CPU")]
     pub fallback_cpu: u32,
     #[stat(desc = "per-layer statistics")]
@@ -371,7 +379,7 @@ pub struct SysStats {
 }
 
 impl SysStats {
-    pub fn new(stats: &Stats, bstats: &BpfStats, fallback_cpu: usize) -> Result<Self> {
+    pub fn new(stats: &Stats, bstats: &BpfStats, load_ledger: &LoadLedger, fallback_cpu: usize) -> Result<Self> {
         let lsum = |idx| stats.bpf_stats.lstats_sums[idx as usize];
         let total = lsum(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
             + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
@@ -401,6 +409,7 @@ impl SysStats {
             busy: stats.cpu_busy * 100.0,
             util: stats.total_util * 100.0,
             load: stats.total_load,
+            load_adj: load_ledger.global_load_sum(),
             fallback_cpu: fallback_cpu as u32,
             layers: BTreeMap::new(),
         })
@@ -419,8 +428,8 @@ impl SysStats {
 
         writeln!(
             w,
-            "busy={:5.1} util={:7.1} load={:9.1} fallback_cpu={:3}",
-            self.busy, self.util, self.load, self.fallback_cpu,
+            "busy={:5.1} util={:7.1} load={:9.1} load_adj={:9.1} fallback_cpu={:3}",
+            self.busy, self.util, self.load, self.load_adj, self.fallback_cpu,
         )?;
 
         writeln!(
