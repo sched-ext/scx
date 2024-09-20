@@ -51,6 +51,7 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::LoadAggregator;
 use scx_utils::Cache;
 use scx_utils::Core;
 use scx_utils::Topology;
@@ -66,6 +67,7 @@ const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
 const MAX_COMM: usize = bpf_intf::consts_MAX_COMM as usize;
+const MAX_LAYER_WEIGHT: u32 = bpf_intf::consts_MAX_LAYER_WEIGHT;
 const MAX_LAYER_MATCH_ORS: usize = bpf_intf::consts_MAX_LAYER_MATCH_ORS as usize;
 const MAX_LAYERS: usize = bpf_intf::consts_MAX_LAYERS as usize;
 const USAGE_HALF_LIFE: u32 = bpf_intf::consts_USAGE_HALF_LIFE;
@@ -98,6 +100,7 @@ lazy_static::lazy_static! {
 			preempt_first: false,
 			exclusive: false,
                         slice_us: 20000,
+                        weight: 100,
                         growth_algo: LayerGrowthAlgo::Sticky,
 			perf: 1024,
 			nodes: vec![],
@@ -118,6 +121,7 @@ lazy_static::lazy_static! {
 			preempt_first: false,
 			exclusive: true,
                         slice_us: 20000,
+                        weight: 100,
                         growth_algo: LayerGrowthAlgo::Sticky,
 			perf: 1024,
 			nodes: vec![],
@@ -137,6 +141,7 @@ lazy_static::lazy_static! {
 			preempt_first: false,
 			exclusive: false,
                         slice_us: 20000,
+                        weight: 100,
                         growth_algo: LayerGrowthAlgo::Linear,
 			perf: 1024,
 			nodes: vec![],
@@ -272,6 +277,10 @@ lazy_static::lazy_static! {
 ///
 /// - slice_us: Scheduling slice duration in microseconds.
 ///
+/// - weight: Weight of the layer, which is a range from 1 to 10000 with a 
+///   default of 100. Layer weights are used during contention to balance load
+///   across layers.
+///
 /// - growth_algo: When a layer is allocated new CPUs different algorithms can
 ///   be used to determine which CPU should be allocated next. The default
 ///   algorithm is a "sticky" algorithm that attempts to spread layers evenly
@@ -363,9 +372,10 @@ struct Opts {
     #[clap(short = 'i', long, default_value = "0.1")]
     interval: f64,
 
-    /// Disable load-fraction based max layer CPU limit. ***NOTE***
-    /// load-fraction calculation is currently broken due to lack of
-    /// infeasible weight adjustments. Setting this option is recommended.
+    /// ***DEPRECATED*** Disable load-fraction based max layer CPU limit. 
+    /// ***NOTE*** load-fraction calculation is currently broken due to 
+    /// lack of infeasible weight adjustments. Setting this option is 
+    /// recommended.
     #[clap(short = 'n', long)]
     no_load_frac_limit: bool,
 
@@ -446,6 +456,8 @@ enum LayerKind {
         #[serde(default)]
         exclusive: bool,
         #[serde(default)]
+        weight: u32,
+        #[serde(default)]
         growth_algo: LayerGrowthAlgo,
         #[serde(default)]
         perf: u64,
@@ -471,6 +483,8 @@ enum LayerKind {
         #[serde(default)]
         exclusive: bool,
         #[serde(default)]
+        weight: u32,
+        #[serde(default)]
         growth_algo: LayerGrowthAlgo,
         #[serde(default)]
         perf: u64,
@@ -492,6 +506,8 @@ enum LayerKind {
         preempt_first: bool,
         #[serde(default)]
         exclusive: bool,
+        #[serde(default)]
+        weight: u32,
         #[serde(default)]
         growth_algo: LayerGrowthAlgo,
         #[serde(default)]
@@ -805,6 +821,7 @@ impl Stats {
         &mut self,
         skel: &mut BpfSkel,
         proc_reader: &procfs::ProcReader,
+        load_agg: &mut LoadAggregator,
         now: Instant,
         cur_processing_dur: Duration,
     ) -> Result<()> {
@@ -832,6 +849,7 @@ impl Stats {
         let (total_load, layer_loads) = Self::read_layer_loads(skel, self.nr_layers);
 
         let cur_layer_cycles = Self::read_layer_cycles(&cpu_ctxs, self.nr_layers);
+        cur_layer_cycles.iter().enumerate().map(|(layer_idx, usage)| load_agg.record_dom_load(layer_idx, 100/*weight*/, usage));
         let cur_layer_utils: Vec<f64> = cur_layer_cycles
             .iter()
             .zip(self.prev_layer_cycles.iter())
@@ -1280,7 +1298,6 @@ impl Layer {
         (_util_low, util_high): (f64, f64),
         (layer_load, total_load): (f64, f64),
         (layer_util, _total_util): (f64, f64),
-        no_load_frac_limit: bool,
     ) -> Result<bool> {
         let nr_cpus = self.cpus.count_ones();
         if nr_cpus >= cpus_max {
@@ -1292,19 +1309,6 @@ impl Layer {
         if nr_cpus >= cpus_min
             && (layer_util == 0.0 || (nr_cpus > 0 && layer_util / nr_cpus as f64 <= util_high))
         {
-            return Ok(false);
-        }
-
-        // Can't have more CPUs than our load fraction.
-        if !no_load_frac_limit
-            && nr_cpus >= cpus_min
-            && (total_load >= 0.0
-                && nr_cpus as f64 / cpu_pool.nr_cpus as f64 >= layer_load / total_load)
-        {
-            trace!(
-                "layer-{} needs more CPUs (util={:.3}) but is over the load fraction",
-                &self.name, layer_util
-            );
             return Ok(false);
         }
 
@@ -1334,7 +1338,6 @@ impl Layer {
         (util_low, util_high): (f64, f64),
         (layer_load, total_load): (f64, f64),
         (layer_util, _total_util): (f64, f64),
-        no_load_frac_limit: bool,
     ) -> Result<Option<BitVec>> {
         let nr_cpus = self.cpus.count_ones();
         if nr_cpus <= cpus_min {
@@ -1346,15 +1349,6 @@ impl Layer {
         };
 
         let nr_to_free = cpus_to_free.count_ones();
-
-        // If we'd be over the load fraction even after freeing
-        // $cpus_to_free, we have to free.
-        if !no_load_frac_limit
-            && total_load >= 0.0
-            && (nr_cpus - nr_to_free) as f64 / cpu_pool.nr_cpus as f64 >= layer_load / total_load
-        {
-            return Ok(Some(cpus_to_free));
-        }
 
         if layer_util / nr_cpus as f64 >= util_low {
             return Ok(None);
@@ -1384,7 +1378,6 @@ impl Layer {
         util_range: (f64, f64),
         load: (f64, f64),
         util: (f64, f64),
-        no_load_frac_limit: bool,
     ) -> Result<bool> {
         match self.cpus_to_free(
             cpu_pool,
@@ -1392,7 +1385,6 @@ impl Layer {
             util_range,
             load,
             util,
-            no_load_frac_limit,
         )? {
             Some(cpus_to_free) => {
                 trace!("{} freeing CPUs\n{}", self.name, &cpus_to_free);
@@ -1412,7 +1404,6 @@ impl Layer {
         util_range: (f64, f64),
         load: (f64, f64),
         util: (f64, f64),
-        no_load_frac_limit: bool,
     ) -> Result<i64> {
         let cpus_range = cpus_range.unwrap_or((0, std::usize::MAX));
         let mut adjusted = 0;
@@ -1423,7 +1414,6 @@ impl Layer {
             util_range,
             load,
             util,
-            no_load_frac_limit,
         )? {
             adjusted += 1;
             trace!("{} grew, adjusted={}", &self.name, adjusted);
@@ -1436,7 +1426,6 @@ impl Layer {
                 util_range,
                 load,
                 util,
-                no_load_frac_limit,
             )? {
                 adjusted -= 1;
                 trace!("{} shrunk, adjusted={}", &self.name, adjusted);
@@ -1456,10 +1445,11 @@ struct Scheduler<'a, 'b> {
     layer_specs: &'b Vec<LayerSpec>,
 
     sched_intv: Duration,
-    no_load_frac_limit: bool,
 
     cpu_pool: CpuPool,
     layers: Vec<Layer>,
+
+    load_agg: LoadAggregator,
 
     proc_reader: procfs::ProcReader,
     sched_stats: Stats,
@@ -1476,6 +1466,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         opts: &Opts,
         specs: &Vec<LayerSpec>,
         topo: &Topology,
+        load_agg: &mut LoadAggregator,
     ) -> Result<()> {
         skel.maps.rodata_data.nr_layers = specs.len() as u32;
         let mut perf_set = false;
@@ -1549,6 +1540,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     growth_algo,
                     nodes,
                     slice_us,
+                    weight,
                     ..
                 }
                 | LayerKind::Grouped {
@@ -1561,6 +1553,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     growth_algo,
                     nodes,
                     slice_us,
+                    weight,
                     ..
                 }
                 | LayerKind::Open {
@@ -1573,6 +1566,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     growth_algo,
                     nodes,
                     slice_us,
+                    weight,
                     ..
                 } => {
                     layer.slice_ns = if *slice_us > 0 {
@@ -1588,10 +1582,12 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     } else {
                         (layer.slice_ns as f64 * (1.0 - *yield_ignore)) as u64
                     };
+                    load_agg.init_domain(spec_i);
                     layer.preempt.write(*preempt);
                     layer.preempt_first.write(*preempt_first);
                     layer.exclusive.write(*exclusive);
                     layer.growth_algo = growth_algo.as_bpf_enum();
+                    layer.weight = *weight;
                     layer.perf = u32::try_from(*perf)?;
                     layer.node_mask = nodemask_from_nodes(nodes) as u64;
                     for topo_node in topo.nodes() {
@@ -1660,6 +1656,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         let nr_layers = layer_specs.len();
         let topo = Topology::new()?;
         let cpu_pool = CpuPool::new(&topo)?;
+        let mut load_agg = LoadAggregator::new(topo.cpus().len(), false);
 
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
@@ -1698,7 +1695,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         for cpu in cpu_pool.all_cpus.iter_ones() {
             skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
-        Self::init_layers(&mut skel, opts, layer_specs, &topo)?;
+        Self::init_layers(&mut skel, opts, layer_specs, &topo, &mut load_agg)?;
         Self::init_nodes(&mut skel, opts, &topo);
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
@@ -1726,10 +1723,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             layer_specs,
 
             sched_intv: Duration::from_secs_f64(opts.interval),
-            no_load_frac_limit: opts.no_load_frac_limit,
 
             cpu_pool,
             layers,
+
+            load_agg: load_agg,
 
             sched_stats: Stats::new(&mut skel, &proc_reader)?,
 
@@ -1788,7 +1786,6 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                         util_range,
                         load,
                         util,
-                        self.no_load_frac_limit,
                     )? != 0
                     {
                         Self::update_bpf_layer_cpumask(
@@ -1839,6 +1836,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         self.sched_stats.refresh(
             &mut self.skel,
             &self.proc_reader,
+            &mut self.load_agg,
             started_at,
             self.processing_dur,
         )?;
@@ -1902,7 +1900,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                             (self.layers[i].nr_cpus, self.layers[i].nr_cpus);
                     }
 
-                    stats.refresh(&mut self.skel, &self.proc_reader, now, self.processing_dur)?;
+                    stats.refresh(&mut self.skel, &self.proc_reader, &mut self.load_agg, now, self.processing_dur)?;
                     let sys_stats =
                         self.generate_sys_stats(&stats, cpus_ranges.get_mut(&tid).unwrap())?;
                     res_ch.send(StatsRes::Refreshed((stats, sys_stats)))?;

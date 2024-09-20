@@ -38,6 +38,7 @@ enum consts {
 	MAX_COMM		= 16,
 	MAX_LAYER_MATCH_ORS	= 32,
 	MAX_LAYERS		= 16,
+	MAX_LAYER_WEIGHT	= 10000,
 	USAGE_HALF_LIFE		= 100000000,	/* 100ms */
 
 	HI_FALLBACK_DSQ_BASE	= MAX_LAYERS * MAX_LLCS,
@@ -168,6 +169,7 @@ struct layer {
 	u64			max_exec_ns;
 	u64			yield_step_ns;
 	u64			slice_ns;
+	u32			weight;
 	bool			open;
 	bool			preempt;
 	bool			preempt_first;
