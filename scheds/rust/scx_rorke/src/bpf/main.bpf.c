@@ -104,7 +104,7 @@ void BPF_STRUCT_OPS(rorke_dispatch, s32 cpu, struct task_struct *prev)
 	}
 	if (scx_bpf_consume(vm_id)) {
 		trace("rorke_dispatch: VM - %d", vm_id);
-        __sync_fetch_and_sub(&nr_queued, 1);
+		__sync_fetch_and_sub(&nr_queued, 1);
 		return;
 	}
 	dbg("rorke_dispatch: empty... didn't consumed from VM - %d", vm_id);
@@ -148,6 +148,7 @@ void BPF_STRUCT_OPS(rorke_exit_task, struct task_struct *p,
 static int central_timerfn(void *map, int *key, struct bpf_timer *timer)
 {
 	// u64 now = bpf_ktime_get_ns();
+	trace("central_timerfn: timer fired");
 	u64 nr_to_kick = nr_queued;
 	s32 curr_cpu;
 
@@ -170,11 +171,14 @@ static int central_timerfn(void *map, int *key, struct bpf_timer *timer)
 		if (scx_bpf_dsq_nr_queued(FALLBACK_DSQ_ID) ||
 		    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | curr_cpu))
 			trace("central_timerfn: local non-empty, will kick CPU %d",
-                  curr_cpu);
+			      curr_cpu);
 		else if (nr_to_kick)
 			nr_to_kick--;
-		else
+		else {
+			trace("central_timerfn: nothing to do... skipping CPU %d",
+			      curr_cpu);
 			continue;
+		}
 
 		scx_bpf_kick_cpu(curr_cpu, SCX_KICK_PREEMPT);
 		trace("central_timerfn: kicked CPU %d", curr_cpu);
@@ -256,7 +260,7 @@ SCX_OPS_DEFINE(rorke,
      * anything special. Enqueue the last tasks like any other tasks.
      */
 
-	       // .flags = SCX_OPS_ENQ_LAST,
+	       .flags = SCX_OPS_ENQ_LAST,
 	       .select_cpu = (void *)rorke_select_cpu,
 	       .enqueue = (void *)rorke_enqueue,
 	       .dispatch = (void *)rorke_dispatch,
