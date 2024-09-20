@@ -254,6 +254,14 @@ static struct cpumask *lookup_layer_cpumask(int idx)
 	}
 }
 
+/*
+ * Access a cpumask in read-only mode (typically to check bits).
+ */
+static const struct cpumask *cast_mask(struct bpf_cpumask *mask)
+{
+	return (const struct cpumask *)mask;
+}
+
 static void refresh_cpumasks(int idx)
 {
 	struct layer_cpumask_wrapper *cpumaskw;
@@ -1066,11 +1074,14 @@ int match_layer(u32 layer_id, pid_t pid, const char *cgrp_path)
 	if (!p)
 		return -EINVAL;
 
-	if (layer_id >= nr_layers || nr_match_ors > MAX_LAYER_MATCH_ORS)
+	if (layer_id >= nr_layers)
 		goto err;
 
 	layer = &layers[layer_id];
 	nr_match_ors = layer->nr_match_ors;
+
+	if (nr_match_ors > MAX_LAYER_MATCH_ORS)
+		goto err;
 
 	bpf_for(or_idx, 0, nr_match_ors) {
 		struct layer_match_ands *ands;
@@ -1310,12 +1321,12 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 		if (!(nodec = lookup_node_ctx(cctx->node_idx)))
 			return;
 		if (nodec->cpumask &&
-		    !bpf_cpumask_test_cpu(tctx->last_cpu, nodec->cpumask))
+		    !bpf_cpumask_test_cpu(tctx->last_cpu, cast_mask(nodec->cpumask)))
 			lstat_inc(LSTAT_XNUMA_MIGRATION, layer, cctx);
 		if (!(cachec = lookup_cache_ctx(cctx->cache_idx)))
 			return;
 		if (cachec->cpumask &&
-		    !bpf_cpumask_test_cpu(tctx->last_cpu, cachec->cpumask))
+		    !bpf_cpumask_test_cpu(tctx->last_cpu, cast_mask(cachec->cpumask)))
 			lstat_inc(LSTAT_XLLC_MIGRATION, layer, cctx);
 	}
 	tctx->last_cpu = task_cpu;
