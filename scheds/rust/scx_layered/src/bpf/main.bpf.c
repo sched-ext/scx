@@ -1,7 +1,14 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates. */
+#ifdef LSP
+#define __bpf__
+#include "../../../../include/scx/common.bpf.h"
+#include "../../../../include/scx/ravg_impl.bpf.h"
+#include "intf.h"
+#else
 #include <scx/common.bpf.h>
 #include <scx/ravg_impl.bpf.h>
 #include "intf.h"
+#endif
 
 #include <errno.h>
 #include <stdbool.h>

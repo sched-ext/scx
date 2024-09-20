@@ -11,9 +11,17 @@
  * Each cell has an associated DSQ which it uses for vtime scheduling of the
  * cgroups belonging to the cell.
  */
+#ifdef LSP
+#define __bpf__ 
+#include "intf.h"
+#include "../../../../include/scx/common.bpf.h"
+#include "../../../../include/scx/ravg_impl.bpf.h"
+#else
 #include "intf.h"
 #include <scx/common.bpf.h>
 #include <scx/ravg_impl.bpf.h>
+#endif
+
 
 char _license[] SEC("license") = "GPL";
 

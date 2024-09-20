@@ -11,7 +11,12 @@ typedef unsigned int u32;
 typedef _Bool bool;
 #endif
 
+#ifdef LSP
+#define __bpf__
+#include "../../../../include/scx/ravg.bpf.h"
+#else
 #include <scx/ravg.bpf.h>
+#endif
 
 enum consts {
 	MAX_CPUS_SHIFT = 9,

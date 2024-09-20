@@ -1,0 +1,2 @@
+CompileFlags:
+  Add: [-DLSP, -Wno-missing-declarations, -Wno-typedef-redefinition, -Wno-ignored-attributes, -xc]

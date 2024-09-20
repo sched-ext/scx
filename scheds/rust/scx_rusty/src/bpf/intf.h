@@ -19,7 +19,12 @@ typedef unsigned int u32;
 typedef unsigned long long u64;
 #endif
 
+#ifdef LSP
+#define __bpf__
+#include "../../../../include/scx/ravg.bpf.h"
+#else
 #include <scx/ravg.bpf.h>
+#endif
 
 enum consts {
 	MAX_CPUS		= 512,
