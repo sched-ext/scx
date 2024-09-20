@@ -125,7 +125,7 @@ u32 llc_node_id(u32 llc_id)
 
 static u64 llc_hi_fallback_dsq_id(u32 llc_id)
 {
-	return HI_FALLBACK_DSQ + llc_id;
+	return HI_FALLBACK_DSQ_BASE + llc_id;
 }
 
 static u64 llc_hi_fallback_dsq_iter_offset(int llc_offset, int idx)
