@@ -3,12 +3,12 @@
 #define __bpf__
 #include "../../../../include/scx/common.bpf.h"
 #include "../../../../include/scx/ravg_impl.bpf.h"
-#include "intf.h"
 #else
 #include <scx/common.bpf.h>
 #include <scx/ravg_impl.bpf.h>
-#include "intf.h"
 #endif
+
+#include "intf.h"
 
 #include <errno.h>
 #include <stdbool.h>

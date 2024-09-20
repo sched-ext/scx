@@ -27,8 +27,6 @@ typedef unsigned long long u64;
 #include <scx/ravg.bpf.h>
 #endif
 
-#include "intf.h"
-
 enum consts {
 	MAX_CPUS_SHIFT		= 9,
 	MAX_CPUS		= 1 << MAX_CPUS_SHIFT,

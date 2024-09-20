@@ -30,12 +30,11 @@
 #ifdef LSP
 #define __bpf__
 #include "../../../../scheds/include/scx/common.bpf.h"
-#include "intf.h"
 #else
 #include <scx/common.bpf.h>
-#include "intf.h"
 #endif
 
+#include "intf.h"
 
 char _license[] SEC("license") = "GPL";
 
