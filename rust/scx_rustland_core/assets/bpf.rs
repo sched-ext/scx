@@ -518,7 +518,7 @@ impl<'cb> BpfScheduler<'cb> {
             LIBBPF_STOP => {
                 // A valid task is received, convert data to a proper task struct.
                 let task = unsafe { EnqueuedMessage::from_bytes(&BUF.0).to_queued_task() };
-                self.skel.maps.bss_data.nr_queued.saturating_sub(1);
+                let _ = self.skel.maps.bss_data.nr_queued.saturating_sub(1);
 
                 Ok(Some(task))
             }
