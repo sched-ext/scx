@@ -847,7 +847,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * task, wake them up to see whether they'd be able to steal the just
 	 * queued task.
 	 */
-	cpu = scx_bpf_pick_idle_cpu(cast_mask(p->cpus_ptr), 0);
+	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 	if (cpu >= 0)
 		scx_bpf_kick_cpu(cpu, 0);
 }
