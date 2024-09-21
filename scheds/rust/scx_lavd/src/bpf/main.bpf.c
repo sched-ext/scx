@@ -209,6 +209,7 @@ private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR]; /* CPU mask f
 
 static u64		LAVD_AP_LOW_UTIL;
 static bool		have_turbo_core;
+static bool		have_little_core;
 
 /*
  * CPU topology
@@ -1284,8 +1285,7 @@ static u64 clamp_time_slice_ns(u64 slice)
 	return slice;
 }
 
-static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc,
-			   struct cpu_ctx *cpuc)
+static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 nr_queued, slice;
@@ -1555,15 +1555,16 @@ static bool match_task_core_type(struct task_ctx *taskc,
 	return true;
 }
 
-static bool could_run_on_prev(struct task_struct *p, s32 prev_cpu,
-			      struct bpf_cpumask *a_cpumask,
-			      struct bpf_cpumask *o_cpumask)
+static __always_inline
+bool could_run_on(struct task_struct *p, s32 cpu,
+			 struct bpf_cpumask *a_cpumask,
+			 struct bpf_cpumask *o_cpumask)
 {
 	bool ret;
 
-	ret = bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
-	      (bpf_cpumask_test_cpu(prev_cpu, cast_mask(a_cpumask)) ||
-	       bpf_cpumask_test_cpu(prev_cpu, cast_mask(o_cpumask)));
+	ret = bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
+	      (bpf_cpumask_test_cpu(cpu, cast_mask(a_cpumask)) ||
+	       bpf_cpumask_test_cpu(cpu, cast_mask(o_cpumask)));
 
 	return ret;
 }
@@ -1596,10 +1597,11 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 			 s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
-	struct cpu_ctx *cpuc, *cpuc_prev;
+	struct cpu_ctx *cpuc, *cpuc_prev, *cpuc_waker;
 	struct bpf_cpumask *a_cpumask, *o_cpumask, *t_cpumask, *t2_cpumask;
-	struct bpf_cpumask *active, *ovrflw, *big, *little, *cpdom_mask_prev;
-	s32 cpu_id;
+	struct bpf_cpumask *active, *ovrflw, *big, *little;
+	struct bpf_cpumask *cpdom_mask_prev, *cpdom_mask_waker;
+	s32 cpu_id, waker_cpu;
 
 	/*
 	 * If a task can run only on a single CPU (e.g., per-CPU kworker), we
@@ -1648,16 +1650,44 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		goto unlock_out;
 	}
 
-	/*
-	 * Try to stay on the previous core if it is on active or ovrfw.
-	 */
+	waker_cpu = bpf_get_smp_processor_id();
+	cpuc_waker = get_cpu_ctx_id(waker_cpu);
+	if (!cpuc_waker) {
+		scx_bpf_error("Failed to lookup the current cpu_ctx");
+		cpu_id = -ENOENT;
+		goto unlock_out;
+	}
+
+	cpdom_mask_waker = MEMBER_VPTR(cpdom_cpumask, [cpuc_waker->cpdom_id]);
+	if (!cpdom_mask_waker) {
+		scx_bpf_error("Failed to lookup cpdom_cpumask for %d",
+			      cpuc_waker->cpdom_id);
+		cpu_id = -ENOENT;
+		goto unlock_out;
+	}
+
 	bpf_cpumask_and(a_cpumask, p->cpus_ptr, cast_mask(active));
 	bpf_cpumask_and(o_cpumask, p->cpus_ptr, cast_mask(ovrflw));
 
+	/*
+	 * Try to stay on the previous core if it is on active or ovrfw.
+	 */
 	if (match_task_core_type(taskc, cpuc_prev, stat_cur) &&
-	    could_run_on_prev(p, prev_cpu, a_cpumask, o_cpumask) &&
+	    could_run_on(p, prev_cpu, a_cpumask, o_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu_id = prev_cpu;
+		*is_idle = true;
+		goto unlock_out;
+	}
+
+	/*
+	 * Try to stay on the waker's core if it is on active or ovrfw.
+	 */
+	if (wake_flags & SCX_WAKE_SYNC && prev_cpu != waker_cpu &&
+	    match_task_core_type(taskc, cpuc_waker, stat_cur) &&
+	    could_run_on(p, waker_cpu, a_cpumask, o_cpumask) &&
+	    scx_bpf_test_and_clear_cpu_idle(waker_cpu)) {
+		cpu_id = waker_cpu;
 		*is_idle = true;
 		goto unlock_out;
 	}
@@ -1668,7 +1698,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	if (bpf_cpumask_empty(cast_mask(a_cpumask)))
 		goto start_omask;
 
-	if (is_perf_cri(taskc, stat_cur) || no_core_compaction ) {
+	if (!have_little_core || is_perf_cri(taskc, stat_cur) || no_core_compaction) {
 		bpf_cpumask_and(t_cpumask, cast_mask(a_cpumask), cast_mask(big));
 	}
 	else {
@@ -1709,13 +1739,31 @@ start_llc_mask:
 	}
 
 	/*
+	 * Pick an idle core among active CPUs with a matching core type within
+	 * the waker CPU's LLC domain.
+	 */
+	if (wake_flags & SCX_WAKE_SYNC && prev_cpu != waker_cpu) {
+		bpf_cpumask_and(t2_cpumask, cast_mask(t_cpumask), cast_mask(cpdom_mask_waker));
+		if (bpf_cpumask_empty(cast_mask(t2_cpumask)))
+			goto start_tmask;
+
+		cpu_id = pick_idle_cpu_in(t2_cpumask);
+		if (cpu_id >= 0) {
+			*is_idle = true;
+			goto unlock_out;
+		}
+	}
+
+	/*
 	 * Pick an idle core among active CPUs with a matching core type.
 	 */
 start_tmask:
-	cpu_id = pick_idle_cpu_in(t_cpumask);
-	if (cpu_id >= 0) {
-		*is_idle = true;
-		goto unlock_out;
+	if (have_little_core) {
+		cpu_id = pick_idle_cpu_in(t_cpumask);
+		if (cpu_id >= 0) {
+			*is_idle = true;
+			goto unlock_out;
+		}
 	}
 
 	/*
@@ -1787,11 +1835,11 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (!taskc)
 		return prev_cpu;
 
-	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
-
 	cpu_id = pick_idle_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
 	if (found_idle)
 		return cpu_id;
+
+	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
 
 	return (cpu_id >= 0) ? cpu_id : prev_cpu;
 }
@@ -2198,7 +2246,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Calculate the task's time slice.
 	 */
-	p->scx.slice = calc_time_slice(p, taskc, cpuc_task);
+	p->scx.slice = calc_time_slice(p, taskc);
 
 	/*
 	 * Enqueue the task to one of task's DSQs based on its virtual deadline.
@@ -2475,7 +2523,7 @@ consume_out:
 			scx_bpf_error("Failed to look up task context");
 			return;
 		}
-		prev->scx.slice = calc_time_slice(prev, taskc, cpuc);
+		prev->scx.slice = calc_time_slice(prev, taskc);
 	}
 }
 
@@ -2669,7 +2717,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	/*
 	 * Calculate the task's time slice.
 	 */
-	p->scx.slice = calc_time_slice(p, taskc, cpuc);
+	p->scx.slice = calc_time_slice(p, taskc);
 
 	/*
 	 * Calculate the task's CPU performance target and update if the new
@@ -3244,6 +3292,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		else {
 			bpf_cpumask_set_cpu(cpu, little);
 			bpf_cpumask_set_cpu(cpu, ovrflw);
+			have_little_core = true;
 		}
 
 		cpuc->turbo_core = cpuc->capacity == turbo_cap;
