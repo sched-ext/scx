@@ -107,6 +107,10 @@ pub struct LayerStats {
     pub xnuma_migration: f64,
     #[stat(desc = "% migrated across LLCs")]
     pub xllc_migration: f64,
+    #[stat(desc = "% wakers across layers")]
+    pub xlayer_wake: f64,
+    #[stat(desc = "% rewakers across layers where waker has waken the task previously")]
+    pub xlayer_rewake: f64,
     #[stat(desc = "mask of allocated CPUs", _om_skip)]
     pub cpus: Vec<u32>,
     #[stat(desc = "# of CPUs assigned")]
@@ -193,6 +197,8 @@ impl LayerStats {
             yield_ignore: lstat(bpf_intf::layer_stat_idx_LSTAT_YIELD_IGNORE) as u64,
             migration: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIGRATION),
             xnuma_migration: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_XNUMA_MIGRATION),
+            xlayer_wake: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_XLAYER_WAKE),
+            xlayer_rewake: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_XLAYER_REWAKE),
             xllc_migration: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_XLLC_MIGRATION),
             cpus: Self::bitvec_to_u32s(&layer.cpus),
             cur_nr_cpus: layer.cpus.count_ones() as u32,
@@ -241,13 +247,15 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  open_idle={} mig={} xnuma_mig={} xllc_mig={} affn_viol={}",
+            "  {:<width$}  open_idle={} mig={} xnuma_mig={} xllc_mig={} affn_viol={} xlayer_wake={} xlayer_rewake={}",
             "",
             fmt_pct(self.open_idle),
             fmt_pct(self.migration),
             fmt_pct(self.xnuma_migration),
             fmt_pct(self.xllc_migration),
             fmt_pct(self.affn_viol),
+            fmt_pct(self.xlayer_wake),
+            fmt_pct(self.xlayer_rewake),
             width = header_width,
         )?;
 
