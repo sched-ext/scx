@@ -1198,7 +1198,7 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 			u64 enq_flags)
 {
 	u64 wait_freq_ft, wake_freq_ft, runtime_ft;
-	s64 lat_cri;
+	u64 lat_cri;
 
 	/*
 	 * A task is more latency-critical as its wait or wake frequencies
@@ -1247,9 +1247,16 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 	/*
 	 * Make sure the lat_cri is non-zero.
 	 */
-	lat_cri = max(lat_cri, 1);
-	taskc->lat_cri = lat_cri;
-	return lat_cri;
+	taskc->lat_cri_self = max(lat_cri, 1);
+
+	/*
+	 * Determine latency criticality of a task in a context-aware manner by
+	 * considering which task wakes up this task. If its waker is more
+	 * latency-critcial, inherit waker's latency criticality.
+	 */
+	taskc->lat_cri = max(taskc->lat_cri_self, taskc->lat_cri_waker);
+
+	return taskc->lat_cri;
 }
 
 static void calc_virtual_deadline_delta(struct task_struct *p,
@@ -1506,6 +1513,12 @@ static void update_stat_for_stopping(struct task_struct *p,
 
 	taskc->svc_time += task_run_time / p->scx.weight;
 	taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
+
+	/*
+	 * Reset waker's latency criticality here to limit the latency boost of
+	 * a task. A task will be latency-boosted only once after wake-up.
+	 */
+	taskc->lat_cri_waker = 0;
 
 	/*
 	 * After getting updated task's runtime, compensate CPU's total
@@ -2080,9 +2093,8 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 					 struct cpu_ctx *cpuc_cur,
 					 u64 dsq_id)
 {
-	struct bpf_cpumask *cd_cpumask;
+	struct bpf_cpumask *cd_cpumask, *cpumask;
 	struct cpdom_ctx *cpdomc;
-	struct cpumask *cpumask;
 	struct cpu_ctx *victim_cpuc;
 	u64 victim_last_kick_clk;
 	bool ret = false;
@@ -2101,7 +2113,7 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 	/*
 	 * Find a victim CPU among CPUs that run lower-priority tasks.
 	 */
-	victim_cpuc = find_victim_cpu(cpumask, taskc, &victim_last_kick_clk);
+	victim_cpuc = find_victim_cpu(cast_mask(cpumask), taskc, &victim_last_kick_clk);
 
 	/*
 	 * If a victim CPU is chosen, preempt the victim by kicking it.
@@ -2643,12 +2655,6 @@ freq_out:
 		try_decrease_cpuperf_target(cpuc_run);
 }
 
-static bool are_related_tasks(struct task_struct *p, struct task_struct *q)
-{
-	return p->parent == q || q->parent == p ||
-	       p->tgid == q->tgid || p->parent == q->parent;
-}
-
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc;
@@ -2680,9 +2686,6 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * Filter out unrelated tasks.
 	 */
 	waker = bpf_get_current_task_btf();
-	if (!are_related_tasks(p, waker))
-		return;
-
 	waker_taskc = try_get_task_ctx(waker);
 	if (!waker_taskc) {
 		/*
@@ -2692,10 +2695,19 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 
+	/*
+	 * Update wake frequency.
+	 */
 	now = bpf_ktime_get_ns();
 	interval = now - waker_taskc->last_runnable_clk;
 	waker_taskc->wake_freq = calc_avg_freq(waker_taskc->wake_freq, interval);
 	waker_taskc->last_runnable_clk = now;
+
+	/*
+	 * Propagate waker's latency criticality to wakee. Note that we pass
+	 * task's self latency criticality to limit the context into one hop.
+	 */
+	p_taskc->lat_cri_waker = waker_taskc->lat_cri_self;
 }
 
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
