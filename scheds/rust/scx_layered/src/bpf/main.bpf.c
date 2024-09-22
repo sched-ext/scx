@@ -24,6 +24,7 @@ const volatile u32 nr_nodes = 32;	/* !0 for veristat, set during init */
 const volatile u32 nr_llcs = 32;	/* !0 for veristat, set during init */
 const volatile bool smt_enabled = true;
 const volatile bool disable_topology = false;
+const volatile bool xnuma_preemption = false;
 const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
@@ -853,6 +854,8 @@ find_cpu:
 		 */
 		bpf_for(idx, 0, cachec->nr_cpus) {
 			s32 preempt_cpu = bpf_cpumask_any_distribute(cast_mask(topo_cpus));
+			trace("PREEMPT attempt on cpu %d from cpu %d",
+			      preempt_cpu, bpf_get_smp_processor_id());
 			if (preempt_cpu > cachec->nr_cpus)
 				break;
 
@@ -893,26 +896,28 @@ find_cpu:
 		/*
 		 * Finally try across nodes
 		 */
-		if (!all_cpumask) {
-			bpf_cpumask_release(attempted);
-			bpf_cpumask_release(topo_cpus);
-			return;
-		}
-		bpf_cpumask_copy(topo_cpus, cast_mask(all_cpumask));
-		bpf_cpumask_xor(topo_cpus, cast_mask(attempted), cast_mask(topo_cpus));
-
-		bpf_for(idx, 0, nr_possible_cpus) {
-			s32 preempt_cpu = bpf_cpumask_any_distribute(cast_mask(topo_cpus));
-			if (try_preempt(preempt_cpu, p, cctx, tctx, layer, false)) {
+		if (xnuma_preemption) {
+			if (!all_cpumask) {
 				bpf_cpumask_release(attempted);
 				bpf_cpumask_release(topo_cpus);
-				lstat_inc(LSTAT_PREEMPT_XNUMA, layer, cctx);
 				return;
 			}
-			bpf_cpumask_clear_cpu(preempt_cpu, topo_cpus);
-			bpf_cpumask_set_cpu(preempt_cpu, attempted);
-			if (bpf_cpumask_empty(cast_mask(topo_cpus)))
-				break;
+			bpf_cpumask_copy(topo_cpus, cast_mask(all_cpumask));
+			bpf_cpumask_xor(topo_cpus, cast_mask(attempted), cast_mask(topo_cpus));
+
+			bpf_for(idx, 0, nr_possible_cpus) {
+				s32 preempt_cpu = bpf_cpumask_any_distribute(cast_mask(topo_cpus));
+				if (try_preempt(preempt_cpu, p, cctx, tctx, layer, false)) {
+					bpf_cpumask_release(attempted);
+					bpf_cpumask_release(topo_cpus);
+					lstat_inc(LSTAT_PREEMPT_XNUMA, layer, cctx);
+					return;
+				}
+				bpf_cpumask_clear_cpu(preempt_cpu, topo_cpus);
+				bpf_cpumask_set_cpu(preempt_cpu, attempted);
+				if (bpf_cpumask_empty(cast_mask(topo_cpus)))
+					break;
+			}
 		}
 		bpf_cpumask_release(attempted);
 		bpf_cpumask_release(topo_cpus);
