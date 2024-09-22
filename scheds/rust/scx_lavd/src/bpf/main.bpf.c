@@ -1883,20 +1883,6 @@ static int comp_preemption_info(struct preemption_info *prm_a,
 	return 0;
 }
 
-static int get_random_start_pos(u32 nuance)
-{
-	/*
-	 * Get a large enough random integer to increase or decrease the total
-	 * CPUs without worrying about over-/underflow.
-	 */
-	return (bpf_get_prandom_u32() + nuance + 1000) >> 1;
-}
-
-static int get_random_directional_inc(u32 nuance)
-{
-	return ((bpf_get_prandom_u32() + nuance) & 0x1) ? 1 : -1;
-}
-
 static  bool can_task1_kick_task2(struct preemption_info *prm_task1,
 				  struct preemption_info *prm_task2)
 {
@@ -1957,7 +1943,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	u64 now = bpf_ktime_get_ns();
 	struct cpu_ctx *cpuc;
 	struct preemption_info prm_task, prm_cpus[2], *victim_cpu;
-	int cpu_base, cpu_inc, cpu;
+	int cpu, nr_cpus;
 	int i, v = 0, cur_cpu = bpf_get_smp_processor_id();
 	int ret;
 
@@ -2003,19 +1989,17 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 * this if the traversal cost becomes problematic.
 	 */
 	barrier();
-	cpu_base = get_random_start_pos(cur_cpu);
-	cpu_inc = get_random_directional_inc(cur_cpu);
+	nr_cpus = bpf_cpumask_weight(cpumask);
 	bpf_for(i, 0, nr_cpus_onln) {
 		/*
 		 * Decide a CPU ID to examine.
 		 */
-		cpu = (cpu_base + (i * cpu_inc)) % nr_cpus_onln;
+		cpu = bpf_cpumask_any_distribute(cpumask);
 
 		/*
 		 * Check whether that CPU is qualified to run @p.
 		 */
-		if (cur_cpu == cpu || !can_cpu_be_kicked(now, cpuc) ||
-		    !bpf_cpumask_test_cpu(cpu, cpumask))
+		if (cur_cpu == cpu || !can_cpu_be_kicked(now, cpuc))
 			continue;
 
 		/*
@@ -2091,12 +2075,28 @@ static bool kick_cpu(struct cpu_ctx *victim_cpuc, u64 victim_last_kick_clk)
 	return ret;
 }
 
-static bool try_find_and_kick_victim_cpu(const struct cpumask *cpumask,
-					 struct task_ctx *taskc)
+static bool try_find_and_kick_victim_cpu(struct task_struct *p,
+					 struct task_ctx *taskc,
+					 struct cpu_ctx *cpuc_cur,
+					 u64 dsq_id)
 {
+	struct bpf_cpumask *cd_cpumask;
+	struct cpdom_ctx *cpdomc;
+	struct cpumask *cpumask;
 	struct cpu_ctx *victim_cpuc;
 	u64 victim_last_kick_clk;
 	bool ret = false;
+
+	/*
+	 * Prepare a cpumak so we find a victim @p's compute domain.
+	 */
+	cpumask = cpuc_cur->tmp_t_mask;
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
+	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [dsq_id]);
+	if (!cpdomc || !cd_cpumask || !cpumask)
+		return false;
+
+	bpf_cpumask_and(cpumask, cast_mask(cd_cpumask), cast_mask(p->cpus_ptr));
 
 	/*
 	 * Find a victim CPU among CPUs that run lower-priority tasks.
@@ -2221,6 +2221,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * right before running at ops.running().
 	 */
 	calc_when_to_run(p, taskc, enq_flags);
+	dsq_id = find_proper_dsq(taskc, cpuc_task);
 
 	/*
 	 * If a task is eligible, try to preempt a task.
@@ -2232,7 +2233,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		 * Try to find and kick a victim CPU, which runs a less urgent
 		 * task. The kick will be done asynchronously.
 		 */
-		try_find_and_kick_victim_cpu(p->cpus_ptr, taskc);
+		try_find_and_kick_victim_cpu(p, taskc, cpuc_cur, dsq_id);
 
 		/*
 		 * If the current task has something to yield, try preempt it.
@@ -2251,7 +2252,6 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Enqueue the task to one of task's DSQs based on its virtual deadline.
 	 */
-	dsq_id = find_proper_dsq(taskc, cpuc_task);
 	scx_bpf_dispatch_vtime(p, dsq_id, p->scx.slice,
 			       taskc->vdeadline_log_clk, enq_flags);
 }
