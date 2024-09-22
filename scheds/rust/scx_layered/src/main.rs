@@ -472,6 +472,12 @@ enum LayerGrowthAlgo {
     /// an unpopulated LLC. It keeps the load balanced between NUMA and LLCs as
     /// it continues to grow.
     RoundRobin,
+    /// BigLittle attempts to first grow across all big cores and then allocates
+    /// onto little cores after all big cores are allocated.
+    BigLittle,
+    /// LittleBig attempts to first grow across all little cores and then
+    /// allocates onto big cores after all little cores are allocated.
+    LittleBig,
 }
 
 impl Default for LayerGrowthAlgo {
@@ -1235,6 +1241,15 @@ fn layer_core_order(
         .collect()
     };
 
+    let big_little = || {
+        let mut cores: Vec<&Core> = topo.cores().into_iter().collect();
+        cores.sort_by(|a, b| a.core_type.cmp(&b.core_type));
+        cores
+            .into_iter()
+            .map(|core| cpu_pool.get_core_topological_id(core))
+            .collect()
+    };
+
     match growth_algo {
         LayerGrowthAlgo::Sticky => {
             let mut core_order = vec![];
@@ -1273,6 +1288,12 @@ fn layer_core_order(
             fastrand::seed(layer_idx.try_into().unwrap());
             fastrand::shuffle(&mut core_order);
             core_order
+        }
+        LayerGrowthAlgo::BigLittle => big_little(),
+        LayerGrowthAlgo::LittleBig => {
+            let mut cores = big_little();
+            cores.reverse();
+            cores
         }
         LayerGrowthAlgo::Topo => {
             let spec_nodes = spec.nodes();

@@ -68,7 +68,7 @@ use std::ops::BitOrAssign;
 use std::ops::BitXor;
 use std::ops::BitXorAssign;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Eq, Clone, Ord, PartialEq, PartialOrd)]
 pub struct Cpumask {
     mask: BitVec<u64, Lsb0>,
 }

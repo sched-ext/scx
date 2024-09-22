@@ -99,13 +99,13 @@ lazy_static::lazy_static! {
     pub static ref NR_CPUS_POSSIBLE: usize = libbpf_rs::num_possible_cpus().unwrap();
 }
 
-#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum CoreType {
     Big { turbo: bool },
     Little,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Cpu {
     id: usize,
     min_freq: usize,
@@ -163,7 +163,7 @@ impl Cpu {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Core {
     id: usize,
     pub node_id: usize,
