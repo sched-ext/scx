@@ -413,6 +413,10 @@ struct Opts {
     #[clap(short = 't', long)]
     disable_topology: bool,
 
+    /// Enable cross NUMA preemption.
+    #[clap(long)]
+    xnuma_preemption: bool,
+
     /// Write example layer specifications into the file and exit.
     #[clap(short = 'e', long)]
     example: Option<String>,
@@ -1870,6 +1874,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         skel.maps.rodata_data.nr_possible_cpus = *NR_POSSIBLE_CPUS as u32;
         skel.maps.rodata_data.smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
         skel.maps.rodata_data.disable_topology = opts.disable_topology;
+        skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
         for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
             skel.maps.rodata_data.__sibling_cpu[cpu] = *sib;
         }

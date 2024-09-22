@@ -63,6 +63,8 @@ enum layer_stat_idx {
 	LSTAT_KEEP_FAIL_BUSY,
 	LSTAT_PREEMPT,
 	LSTAT_PREEMPT_FIRST,
+	LSTAT_PREEMPT_XLLC,
+	LSTAT_PREEMPT_XNUMA,
 	LSTAT_PREEMPT_IDLE,
 	LSTAT_PREEMPT_FAIL,
 	LSTAT_EXCL_COLLISION,
@@ -88,19 +90,21 @@ struct cpu_ctx {
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
 	u64			ran_current_for;
 	u32			layer_idx;
-	u32			node_idx;
 	u32			cache_idx;
+	u32			node_idx;
 };
 
 struct cache_ctx {
 	u32 id;
 	struct bpf_cpumask __kptr *cpumask;
+	u32 nr_cpus;
 };
 
 struct node_ctx {
 	u32 id;
 	struct bpf_cpumask __kptr *cpumask;
 	u32 nr_llcs;
+	u32 nr_cpus;
 	u64 llc_mask;
 };
 
