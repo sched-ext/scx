@@ -850,12 +850,13 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Always dispatch all kthreads directly on their target CPU.
+	 * Always dispatch per-CPU kthreads directly on their target CPU.
 	 *
-	 * This allows to prevent critical kernel threads from being stuck in
-	 * user-space causing system hangs.
+	 * This allows to prioritize critical kernel threads that may
+	 * potentially stall the entire system if they are blocked for too long
+	 * (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
-	if (is_kthread(p)) {
+	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
 		s32 cpu = scx_bpf_task_cpu(p);
 
 		scx_bpf_dispatch_vtime(p, cpu_to_dsq(cpu),
