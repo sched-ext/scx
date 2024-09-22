@@ -370,7 +370,7 @@ struct task_ctx {
 	int			pid;
 	int			last_cpu;
 	int			layer;
-	int			waker_mask;
+	pid_t			last_waker;
 	bool			refresh_layer;
 	u64			layer_cpus_seq;
 	struct bpf_cpumask __kptr *layered_cpumask;
@@ -1342,13 +1342,14 @@ void on_wakeup(struct task_struct *p, struct task_ctx *tctx)
 	    !(waker_tctx = lookup_task_ctx_may_fail(waker)))
 		return;
 
+	// TODO: add handling for per layer wakers
 	if (tctx->layer == waker_tctx->layer)
 		return;
 
-	if ((pid_t)(tctx->waker_mask & waker->pid) == waker->pid)
+	if (tctx->last_waker == waker->pid)
 		lstat_inc(LSTAT_XLAYER_REWAKE, layer, cctx);
 
-	tctx->waker_mask |= waker->pid;
+	tctx->last_waker = waker->pid;
 	lstat_inc(LSTAT_XLAYER_WAKE, layer, cctx);
 }
 
