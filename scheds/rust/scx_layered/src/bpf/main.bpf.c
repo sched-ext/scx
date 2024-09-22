@@ -1334,10 +1334,8 @@ void on_wakeup(struct task_struct *p, struct task_ctx *tctx)
 	struct task_ctx *waker_tctx;
 	struct task_struct *waker;
 
-	if (!(cctx = lookup_cpu_ctx(-1)))
-		return;
-
-	if (!(layer = lookup_layer(tctx->layer)))
+	if (!(cctx = lookup_cpu_ctx(-1)) ||
+	    !(layer = lookup_layer(tctx->layer)))
 		return;
 
 	if (!(waker = bpf_get_current_task_btf()) ||
