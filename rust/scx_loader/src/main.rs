@@ -23,6 +23,9 @@ use zbus::interface;
 use zbus::Connection;
 use zvariant::Type;
 use zvariant::Value;
+use clap::Parser;
+use sysinfo::{System};
+use std::{process::{Child}, time::{Duration, Instant}, thread};
 
 #[derive(Debug, Clone, PartialEq)]
 enum SupportedSched {
@@ -61,6 +64,13 @@ struct ScxLoader {
     current_scx: Option<SupportedSched>,
     current_mode: SchedMode,
     channel: UnboundedSender<ScxMessage>,
+}
+
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+struct Args {
+    #[clap(long, short, action)]
+    monitor_no_dbus: bool,
 }
 
 #[interface(name = "org.scx.Loader")]
@@ -139,11 +149,73 @@ impl ScxLoader {
     }
 }
 
+// Monitors CPU utilization and enables scx_lavd when utilization of any CPUs is > 90%
+async fn monitor_cpu_util() -> Result<()> {
+    let mut system = System::new_all();
+    let mut running_sched: Option<Child> = None;
+    let mut cpu_above_threshold_since: Option<Instant> = None;
+    let mut cpu_below_threshold_since: Option<Instant> = None;
+    
+    let high_utilization_threshold = 90.0;
+    let low_utilization_threshold_duration = Duration::from_secs(30);
+    let high_utilization_trigger_duration = Duration::from_secs(5);
+    
+    loop {
+        system.refresh_cpu_all();
+        
+        let any_cpu_above_threshold = system.cpus().iter().any(|cpu| cpu.cpu_usage() > high_utilization_threshold);
+        
+        if any_cpu_above_threshold {
+            if cpu_above_threshold_since.is_none() {
+                cpu_above_threshold_since = Some(Instant::now());
+            }
+            
+            if cpu_above_threshold_since.unwrap().elapsed() > high_utilization_trigger_duration {
+                if running_sched.is_none() {
+                    println!("CPU Utilization exceeded 90% for 5 seconds, starting scx_lavd");
+                    running_sched = Some(std::process::Command::new("scx_lavd").spawn().expect("Failed to start scx_lavd"));
+                }
+                
+                cpu_below_threshold_since = None;
+            }
+        } else {
+            cpu_above_threshold_since = None;
+            
+            if cpu_below_threshold_since.is_none() {
+                cpu_below_threshold_since = Some(Instant::now());
+            }
+            
+            if cpu_below_threshold_since.unwrap().elapsed() > low_utilization_threshold_duration {
+                if let Some(mut running_sched_loc) = running_sched.take() {
+                    println!("CPU utilization dropped below 90% for more than 30 seconds, exiting latency-aware scheduler");
+                    running_sched_loc.kill().expect("Failed to kill scx_lavd");
+                    let lavd_exit_status = running_sched_loc.wait().expect("Failed to wait on scx_lavd");
+                    println!("scx_lavd exited with status: {}", lavd_exit_status);
+                }
+            }
+        }
+        
+        thread::sleep(Duration::from_secs(1));
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // initialize the logger
     logger::init_logger().expect("Failed to initialize logger");
 
+    let args = Args::parse();
+    
+    // If --monitor_no_dbus is passed, start scx_loader as a standard background process
+    // that swaps schedulers out automatically 
+    // based on CPU utilization without registering a dbus interface.
+    if args.monitor_no_dbus {
+        println!("Starting scx_loader monitor as standard process without dbus interface");
+        monitor_cpu_util().await?;
+        return Ok(());
+    }
+    
+    println!("Starting as dbus interface");
     // setup channel
     let (channel, rx) = tokio::sync::mpsc::unbounded_channel::<ScxMessage>();
 
