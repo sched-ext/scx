@@ -593,48 +593,47 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		return -1;
 	}
 
-	idle_cpumask = scx_bpf_get_idle_smtmask();
 	pref_idle_cpumask = bpf_cpumask_create();
 
-	/*
-	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
-	 * partially idle @prev_cpu.
-	 */
-	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
-				      idle_cpumask)) >= 0)
-		goto out_put;
-
-	/*
-	 * Next try a CPU in the current LLC
-	 */
-	// idle_cpumask = scx_bpf_get_idle_cpumask();
-	if (!pref_idle_cpumask || !idle_cpumask) {
-		cpu = -1;
-		goto out_put;
-	}
-	bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
-	bpf_cpumask_and(pref_idle_cpumask, cast_mask(cache_cpumask),
-			cast_mask(pref_idle_cpumask));
-	trace("pick_idle: llc idle_cpumask=%p", idle_cpumask);
-	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu, pref_idle_cpumask)) >= 0)
-		goto out_put;
-
-	/*
-	 * Next try a CPU in the current node
-	 */
-	if (nr_nodes > 1) {
+	if (disable_topology) {
+		/*
+		 * If CPU has SMT, any wholly idle CPU is likely a better pick than
+		 * partially idle @prev_cpu.
+		 */
+		idle_cpumask = scx_bpf_get_idle_smtmask();
+		if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
+					      idle_cpumask)) >= 0)
+			goto out_put;
+	} else {
+		/*
+		 * Try a CPU in the current LLC
+		 */
+		idle_cpumask = scx_bpf_get_idle_cpumask();
 		if (!pref_idle_cpumask || !idle_cpumask) {
 			cpu = -1;
 			goto out_put;
 		}
 		bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
-		bpf_cpumask_and(pref_idle_cpumask, node_cpumask, pref_idle_cpumask);
-		bpf_cpumask_and(pref_idle_cpumask, cast_mask(node_cpumask),
-				cast_mask(pref_idle_cpumask));
-		dbg("pick_idle: llc node_cpumask=%p", idle_cpumask);
-		if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
-					      pref_idle_cpumask)) >= 0)
+		bpf_cpumask_and(pref_idle_cpumask, cache_cpumask, pref_idle_cpumask);
+		trace("pick_idle: llc idle_cpumask=%p", pref_idle_cpumask);
+		if ((cpu = pick_idle_cpu_from(cache_cpumask, prev_cpu, pref_idle_cpumask)) >= 0)
+			goto out_put;
+
+		/*
+		 * Next try a CPU in the current node
+		 */
+		if (nr_nodes > 1) {
+			if (!pref_idle_cpumask || !idle_cpumask) {
+				cpu = -1;
 				goto out_put;
+			}
+			bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
+			bpf_cpumask_and(pref_idle_cpumask, node_cpumask, pref_idle_cpumask);
+			trace("pick_idle: node node_cpumask=%p", pref_idle_cpumask);
+			if ((cpu = pick_idle_cpu_from(node_cpumask, prev_cpu,
+						      pref_idle_cpumask)) >= 0)
+					goto out_put;
+		}
 	}
 
 	/*
