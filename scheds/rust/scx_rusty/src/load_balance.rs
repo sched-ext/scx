@@ -322,7 +322,7 @@ impl LoadEntity {
 
 #[derive(Debug)]
 struct TaskInfo {
-    pid: i32,
+    task_id: u64,
     load: OrderedFloat<f64>,
     dom_mask: u64,
     preferred_dom_mask: u64,
@@ -364,19 +364,19 @@ impl Domain {
         }
     }
 
-    fn transfer_load(&mut self, load: f64, pid: i32, other: &mut Domain, skel: &mut BpfSkel) {
-        let cpid = (pid as libc::pid_t).to_ne_bytes();
+    fn transfer_load(&mut self, load: f64, task_id: u64, other: &mut Domain, skel: &mut BpfSkel) {
+        let ctask_id = (task_id as u64).to_ne_bytes();
         let dom_id: u32 = other.id.try_into().unwrap();
 
         // Ask BPF code to execute the migration.
-        if let Err(e) =
-            skel.maps
-                .lb_data
-                .update(&cpid, &dom_id.to_ne_bytes(), libbpf_rs::MapFlags::NO_EXIST)
-        {
+        if let Err(e) = skel.maps.lb_data.update(
+            &ctask_id,
+            &dom_id.to_ne_bytes(),
+            libbpf_rs::MapFlags::NO_EXIST,
+        ) {
             warn!(
-                "Failed to update lb_data map for pid={} error={:?}",
-                pid, &e
+                "Failed to update lb_data map for task_id={} error={:?}",
+                task_id, &e
             );
         }
 
@@ -384,8 +384,8 @@ impl Domain {
         other.load.add_load(load);
 
         debug!(
-            "  DOM {} sending [pid: {:05}](load: {:.06}) --> DOM {} ",
-            self.id, pid, load, other.id
+            "  DOM {} sending [task_id: {:05}](load: {:.06}) --> DOM {} ",
+            self.id, task_id, load, other.id
         );
     }
 
@@ -657,16 +657,16 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         }
         dom.queried_tasks = true;
 
-        // Read active_pids and update read_idx and gen.
-        const MAX_PIDS: u64 = bpf_intf::consts_MAX_DOM_ACTIVE_PIDS as u64;
-        let active_pids = &mut self.skel.maps.bss_data.dom_active_pids[dom.id];
-        let (mut ridx, widx) = (active_pids.read_idx, active_pids.write_idx);
-        active_pids.read_idx = active_pids.write_idx;
-        active_pids.gen += 1;
+        // Read active_task_ids and update read_idx and gen.
+        const MAX_TASK_IDS: u64 = bpf_intf::consts_MAX_DOM_ACTIVE_TASK_IDS as u64;
+        let active_task_ids = &mut self.skel.maps.bss_data.dom_active_task_ids[dom.id];
+        let (mut ridx, widx) = (active_task_ids.read_idx, active_task_ids.write_idx);
+        active_task_ids.read_idx = active_task_ids.write_idx;
+        active_task_ids.gen += 1;
 
-        let active_pids = &self.skel.maps.bss_data.dom_active_pids[dom.id];
-        if widx - ridx > MAX_PIDS {
-            ridx = widx - MAX_PIDS;
+        let active_task_ids = &self.skel.maps.bss_data.dom_active_task_ids[dom.id];
+        if widx - ridx > MAX_TASK_IDS {
+            ridx = widx - MAX_TASK_IDS;
         }
 
         // Read task_ctx and load.
@@ -675,8 +675,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let now_mono = now_monotonic();
 
         for idx in ridx..widx {
-            let pid = active_pids.pids[(idx % MAX_PIDS) as usize];
-            let key = unsafe { std::mem::transmute::<i32, [u8; 4]>(pid) };
+            let task_id = active_task_ids.task_ids[(idx % MAX_TASK_IDS) as usize];
+            let key = unsafe { std::mem::transmute::<u64, [u8; 8]>(task_id) };
 
             if let Some(task_data_elem) = task_data.lookup(&key, libbpf_rs::MapFlags::ANY)? {
                 let task_ctx =
@@ -702,7 +702,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 }
 
                 dom.tasks.insert(TaskInfo {
-                    pid,
+                    task_id,
                     load: OrderedFloat(load),
                     dom_mask: task_ctx.dom_mask,
                     preferred_dom_mask: task_ctx.preferred_dom_mask,
@@ -715,7 +715,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         Ok(())
     }
 
-    // Find the first candidate pid which hasn't already been migrated and
+    // Find the first candidate task_id which hasn't already been migrated and
     // can run in @pull_dom.
     fn find_first_candidate<'d, I>(tasks_by_load: I) -> Option<&'d TaskInfo>
     where
@@ -797,11 +797,11 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         }
 
         let load = *(task.load);
-        let pid = task.pid;
+        let task_id = task.task_id;
         task.migrated.set(true);
         std::mem::swap(&mut push_dom.tasks, &mut SortedVec::from_unsorted(tasks));
 
-        push_dom.transfer_load(load, pid, pull_dom, &mut self.skel);
+        push_dom.transfer_load(load, task_id, pull_dom, &mut self.skel);
         Ok(Some(load))
     }
 

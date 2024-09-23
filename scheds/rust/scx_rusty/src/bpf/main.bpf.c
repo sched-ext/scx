@@ -141,21 +141,22 @@ struct {
 	__uint(map_flags, 0);
 } dom_dcycle_locks SEC(".maps");
 
-struct dom_active_pids {
+struct dom_active_task_ids {
 	u64 gen;
 	u64 read_idx;
 	u64 write_idx;
-	s32 pids[MAX_DOM_ACTIVE_PIDS];
+	/* track task ptrs (not pids) because these do not change */
+	u64 task_ids[MAX_DOM_ACTIVE_TASK_IDS];
 };
 
-struct dom_active_pids dom_active_pids[MAX_DOMS];
+struct dom_active_task_ids dom_active_task_ids[MAX_DOMS];
 
 const u64 ravg_1 = 1 << RAVG_FRAC_BITS;
 
-/* Map pid -> task_ctx */
+/* Map task_id -> task_ctx */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, pid_t);
+	__type(key, u64);
 	__type(value, struct task_ctx);
 	__uint(max_entries, 1000000);
 	__uint(map_flags, 0);
@@ -177,11 +178,18 @@ static struct dom_ctx *lookup_dom_ctx(u32 dom_id)
 	return domc;
 }
 
+static int get_task_from_id(u64 task_id, struct task_struct *p_in){
+	struct task_struct *p;
+	p_in = (struct task_struct*) task_id;
+	if(p) return 1;
+	return 0;
+}
+
 static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
 {
-	s32 pid = p->pid;
+	u64 task_id = (u64)p;
 
-	return bpf_map_lookup_elem(&task_data, &pid);
+	return bpf_map_lookup_elem(&task_data, &task_id);
 }
 
 static struct task_ctx *lookup_task_ctx(struct task_struct *p)
@@ -190,8 +198,11 @@ static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 
 	taskc = try_lookup_task_ctx(p);
 	if (!taskc)
-		scx_bpf_error("task_ctx lookup failed for pid %d", p->pid);
-
+		if(p){
+			scx_bpf_error("task_ctx lookup failed for pid %d", p->pid);
+		} else {
+			scx_bpf_error("task_ctx lookup failed for task struct");
+		}
 	return taskc;
 }
 
@@ -389,15 +400,14 @@ static u64 dom_min_vruntime(struct dom_ctx *domc)
 	return READ_ONCE(domc->min_vruntime);
 }
 
-int dom_xfer_task(pid_t pid, u32 new_dom_id, u64 now)
+static int dom_xfer_task(u64 task_id, u32 new_dom_id, u64 now)
 {
 	struct dom_ctx *from_domc, *to_domc;
 	struct task_ctx *taskc;
 	struct task_struct *p;
 
-	p = bpf_task_from_pid(pid);
-	if (!p) {
-		scx_bpf_error("Failed to lookup task %d", pid);
+	if (!get_task_from_id(task_id, p)) {
+		scx_bpf_error("Failed to lookup task_struct");
 		return 0;
 	}
 
@@ -413,7 +423,6 @@ int dom_xfer_task(pid_t pid, u32 new_dom_id, u64 now)
 
 	dom_dcycle_xfer_task(p, taskc, from_domc, to_domc, now);
 free_task:
-	bpf_task_release(p);
 	return 0;
 }
 
@@ -442,7 +451,7 @@ static inline void stat_add(enum stat_idx idx, u64 addend)
  */
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, pid_t);
+	__type(key, u64);
 	__type(value, u32);
 	__uint(max_entries, 1000);
 	__uint(map_flags, 0);
@@ -748,6 +757,9 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	struct dom_ctx *old_domc, *new_domc;
 	struct bpf_cpumask *d_cpumask, *t_cpumask;
 	u32 old_dom_id = taskc->dom_id;
+	u64 task_id;
+	
+	task_id = (u64)p;
 
 	t_cpumask = taskc->cpumask;
 	if (!t_cpumask) {
@@ -785,7 +797,7 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 		u64 now = bpf_ktime_get_ns();
 
 		if (!init_dsq_vtime)
-			dom_xfer_task(p->pid, new_dom_id, now);
+			dom_xfer_task(task_id, new_dom_id, now);
 		taskc->dom_id = new_dom_id;
 		p->scx.dsq_vtime = dom_min_vruntime(new_domc);
 		taskc->deadline = p->scx.dsq_vtime +
@@ -1090,7 +1102,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *taskc;
 	struct bpf_cpumask *p_cpumask;
-	pid_t pid = p->pid;
+	u64 task_id = (u64)p;
 	u32 *new_dom;
 	s32 cpu;
 
@@ -1104,7 +1116,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Migrate @p to a new domain if requested by userland through lb_data.
 	 */
-	new_dom = bpf_map_lookup_elem(&lb_data, &pid);
+	new_dom = bpf_map_lookup_elem(&lb_data, &task_id);
 	if (new_dom && *new_dom != taskc->dom_id &&
 	    task_set_domain(taskc, p, *new_dom, false)) {
 		stat_add(RUSTY_STAT_LOAD_BALANCE, 1);
@@ -1400,21 +1412,21 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	 * consider recently active tasks. Access synchronization rules aren't
 	 * strict. We just need to be right most of the time.
 	 */
-	dap_gen = dom_active_pids[dom_id].gen;
-	if (taskc->dom_active_pids_gen != dap_gen) {
-		u64 idx = __sync_fetch_and_add(&dom_active_pids[dom_id].write_idx, 1) %
-			MAX_DOM_ACTIVE_PIDS;
-		s32 *pidp;
+	dap_gen = dom_active_task_ids[dom_id].gen;
+	if (taskc->dom_active_task_ids_gen != dap_gen) {
+		u64 idx = __sync_fetch_and_add(&dom_active_task_ids[dom_id].write_idx, 1) %
+			MAX_DOM_ACTIVE_TASK_IDS;
+		u64 *task_idp;
 
-		pidp = MEMBER_VPTR(dom_active_pids, [dom_id].pids[idx]);
-		if (!pidp) {
-			scx_bpf_error("dom_active_pids[%u][%llu] indexing failed",
+		task_idp = MEMBER_VPTR(dom_active_task_ids, [dom_id].task_ids[idx]);
+		if (!task_idp) {
+			scx_bpf_error("dom_active_task_ids[%u][%llu] indexing failed",
 				      dom_id, idx);
 			return;
 		}
 
-		*pidp = p->pid;
-		taskc->dom_active_pids_gen = dap_gen;
+		*task_idp = (u64)p;
+		taskc->dom_active_task_ids_gen = dap_gen;
 	}
 
 	if (fifo_sched)
@@ -1470,7 +1482,8 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 	u64 now = bpf_ktime_get_ns(), interval;
 	struct task_ctx *taskc;
 	struct dom_ctx *domc;
-
+	u64 task_id;
+	task_id = (u64)p;
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
@@ -1549,15 +1562,22 @@ static void task_pick_and_set_domain(struct task_ctx *taskc,
 	if (nr_doms > 1)
 		dom_id = task_pick_domain(taskc, p, cpumask);
 
-	if (!task_set_domain(taskc, p, dom_id, init_dsq_vtime))
-		scx_bpf_error("Failed to set dom%d for %s[%d]",
-			      dom_id, p->comm, p->pid);
+	if (!task_set_domain(taskc, p, dom_id, init_dsq_vtime)){
+		if(p){
+			scx_bpf_error("Failed to set dom%d for %s[%d]",
+					dom_id, p->comm, p->pid);
+		} else {
+			scx_bpf_error("failed to set dom%d for missing task id", dom_id);
+		}
+	}
 }
 
 void BPF_STRUCT_OPS(rusty_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
 	struct task_ctx *taskc;
+	u64 task_id;
+	task_id = (u64)p;
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
@@ -1592,7 +1612,7 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 {
 	u64 now = bpf_ktime_get_ns();
 	struct task_ctx taskc = {
-		.dom_active_pids_gen = -1,
+		.dom_active_task_ids_gen = -1,
 		.last_blocked_at = now,
 		.last_woke_at = now,
 		.preferred_dom_mask = 0,
@@ -1600,16 +1620,15 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 	};
 	struct task_ctx *map_value;
 	long ret;
-	pid_t pid;
-
-	pid = p->pid;
+	u64 task_id;
+	task_id = (u64)p;
 
 	/*
 	 * XXX - We want BPF_NOEXIST but bpf_map_delete_elem() in .disable() may
 	 * fail spuriously due to BPF recursion protection triggering
 	 * unnecessarily.
 	 */
-	ret = bpf_map_update_elem(&task_data, &pid, &taskc, 0 /*BPF_NOEXIST*/);
+	ret = bpf_map_update_elem(&task_data, &task_id, &taskc, 0 /*BPF_NOEXIST*/);
 	if (ret) {
 		stat_add(RUSTY_STAT_TASK_GET_ERR, 1);
 		return ret;
@@ -1622,20 +1641,20 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 	 * Read the entry from the map immediately so we can add the cpumask
 	 * with bpf_kptr_xchg().
 	 */
-	map_value = bpf_map_lookup_elem(&task_data, &pid);
+	map_value = bpf_map_lookup_elem(&task_data, &task_id);
 	if (!map_value)
 		/* Should never happen -- it was just inserted above. */
 		return -EINVAL;
 
 	ret = create_save_cpumask(&map_value->cpumask);
 	if (ret) {
-		bpf_map_delete_elem(&task_data, &pid);
+		bpf_map_delete_elem(&task_data, &task_id);
 		return ret;
 	}
 
 	ret = create_save_cpumask(&map_value->tmp_cpumask);
 	if (ret) {
-		bpf_map_delete_elem(&task_data, &pid);
+		bpf_map_delete_elem(&task_data, &task_id);
 		return ret;
 	}
 
@@ -1647,7 +1666,7 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 void BPF_STRUCT_OPS(rusty_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
-	pid_t pid = p->pid;
+	u64 task_id = (u64)p;
 	long ret;
 
 	/*
@@ -1656,7 +1675,7 @@ void BPF_STRUCT_OPS(rusty_exit_task, struct task_struct *p,
 	 * deletions aren't reliable means that we sometimes leak task_ctx and
 	 * can't use BPF_NOEXIST on allocation in .prep_enable().
 	 */
-	ret = bpf_map_delete_elem(&task_data, &pid);
+	ret = bpf_map_delete_elem(&task_data, &task_id);
 	if (ret) {
 		stat_add(RUSTY_STAT_TASK_GET_ERR, 1);
 		return;
