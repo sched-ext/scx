@@ -371,6 +371,7 @@ struct task_ctx {
 	int			pid;
 	int			last_cpu;
 	int			layer;
+	pid_t			last_waker;
 	bool			refresh_layer;
 	u64			layer_cpus_seq;
 	struct bpf_cpumask __kptr *layered_cpumask;
@@ -1456,11 +1457,38 @@ static s32 create_cache(u32 cache_id)
 	return ret;
 }
 
+static __always_inline
+void on_wakeup(struct task_struct *p, struct task_ctx *tctx)
+{
+	struct cpu_ctx *cctx;
+	struct layer *layer;
+	struct task_ctx *waker_tctx;
+	struct task_struct *waker;
+
+	if (!(cctx = lookup_cpu_ctx(-1)) ||
+	    !(layer = lookup_layer(tctx->layer)))
+		return;
+
+	if (!(waker = bpf_get_current_task_btf()) ||
+	    !(waker_tctx = lookup_task_ctx_may_fail(waker)))
+		return;
+
+	// TODO: add handling for per layer wakers
+	if (tctx->layer == waker_tctx->layer)
+		return;
+
+	if (tctx->last_waker == waker->pid)
+		lstat_inc(LSTAT_XLAYER_REWAKE, layer, cctx);
+
+	tctx->last_waker = waker->pid;
+	lstat_inc(LSTAT_XLAYER_WAKE, layer, cctx);
+}
+
 
 void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 {
-	u64 now = bpf_ktime_get_ns();
 	struct task_ctx *tctx;
+	u64 now = bpf_ktime_get_ns();
 
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
@@ -1468,6 +1496,9 @@ void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 	tctx->runnable_at = now;
 	maybe_refresh_layer(p, tctx);
 	adj_load(tctx->layer, p->scx.weight, now);
+
+	if (enq_flags & SCX_ENQ_WAKEUP)
+		on_wakeup(p, tctx);
 }
 
 void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
@@ -1770,6 +1801,7 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 				scx_bpf_dump("LAYER[%d]DSQ[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
 					     i, idx, layers[i].nr_cpus, scx_bpf_dsq_nr_queued(idx),
 					     dsq_first_runnable_for_ms(idx, now));
+				scx_bpf_dump("\n");
 			}
 		}
 		dump_layer_cpumask(i);
