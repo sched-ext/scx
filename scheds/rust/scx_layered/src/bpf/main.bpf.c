@@ -1801,6 +1801,7 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 				scx_bpf_dump("LAYER[%d]DSQ[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
 					     i, idx, layers[i].nr_cpus, scx_bpf_dsq_nr_queued(idx),
 					     dsq_first_runnable_for_ms(idx, now));
+				scx_bpf_dump("\n");
 			}
 		}
 		dump_layer_cpumask(i);
