@@ -313,6 +313,46 @@ static bool in_setaffinity(pid_t pid)
 }
 
 /*
+ * Intercept when a task is executing __handle_mm_fault().
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, __u32);
+	__type(value, __u64);
+	__uint(max_entries, MAX_ENQUEUED_TASKS);
+} pid_mm_fault_map SEC(".maps");
+
+SEC("kprobe/__handle_mm_fault")
+int BPF_KPROBE(kprobe_handle_mm_fault, void *vma,
+			unsigned long address, unsigned int flags)
+{
+	pid_t pid = bpf_get_current_pid_tgid() >> 32;
+	u64 value = true;
+
+	bpf_map_update_elem(&pid_mm_fault_map, &pid, &value, BPF_ANY);
+
+	return 0;
+}
+
+SEC("kretprobe/__handle_mm_fault")
+int BPF_KRETPROBE(kretprobe_handle_mm_fault)
+{
+	pid_t pid = bpf_get_current_pid_tgid() >> 32;
+	bpf_map_delete_elem(&pid_mm_fault_map, &pid);
+
+	return 0;
+}
+
+/*
+ * Return true if a task is handling a page fault, false otherwise.
+ */
+static bool in_mm_fault(pid_t pid)
+{
+	u64 *value = bpf_map_lookup_elem(&pid_mm_fault_map, &pid);
+	return value != NULL;
+}
+
+/*
  * Heartbeat timer used to periodically trigger the check to run the user-space
  * scheduler.
  *
@@ -862,6 +902,16 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dispatch_vtime(p, cpu_to_dsq(cpu),
 				       SCX_SLICE_DFL, 0, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		return;
+	}
+
+	/*
+	 * Bypass user-space scheduling for faulting tasks to prevent potential
+	 * deadlock conditions. They can just be dispatched to the shared DSQ
+	 * using ith the highest priority.
+	 */
+	if (in_mm_fault(p->pid)) {
+		scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, 0, enq_flags);
 		return;
 	}
 
