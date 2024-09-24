@@ -16,7 +16,7 @@ use anyhow::Context;
 use anyhow::Result;
 use serde::Deserialize;
 use serde::Serialize;
-use tokio::process::Command;
+use tokio::{process::{Command, Child}, time::{Duration, Instant}};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use zbus::interface;
@@ -25,7 +25,6 @@ use zvariant::Type;
 use zvariant::Value;
 use clap::Parser;
 use sysinfo::{System};
-use std::{process::{Child}, time::{Duration, Instant}, thread};
 
 #[derive(Debug, Clone, PartialEq)]
 enum SupportedSched {
@@ -70,7 +69,7 @@ struct ScxLoader {
 #[clap(author, version, about, long_about = None)]
 struct Args {
     #[clap(long, short, action)]
-    monitor_no_dbus: bool,
+    auto: bool,
 }
 
 #[interface(name = "org.scx.Loader")]
@@ -172,8 +171,8 @@ async fn monitor_cpu_util() -> Result<()> {
             
             if cpu_above_threshold_since.unwrap().elapsed() > high_utilization_trigger_duration {
                 if running_sched.is_none() {
-                    println!("CPU Utilization exceeded 90% for 5 seconds, starting scx_lavd");
-                    running_sched = Some(std::process::Command::new("scx_lavd").spawn().expect("Failed to start scx_lavd"));
+                    log::info!("CPU Utilization exceeded 90% for 5 seconds, starting scx_lavd");
+                    running_sched = Some(Command::new(get_name_from_scx(&SupportedSched::Lavd)).spawn().expect("Failed to start scx_lavd"));
                 }
                 
                 cpu_below_threshold_since = None;
@@ -187,15 +186,15 @@ async fn monitor_cpu_util() -> Result<()> {
             
             if cpu_below_threshold_since.unwrap().elapsed() > low_utilization_threshold_duration {
                 if let Some(mut running_sched_loc) = running_sched.take() {
-                    println!("CPU utilization dropped below 90% for more than 30 seconds, exiting latency-aware scheduler");
-                    running_sched_loc.kill().expect("Failed to kill scx_lavd");
-                    let lavd_exit_status = running_sched_loc.wait().expect("Failed to wait on scx_lavd");
-                    println!("scx_lavd exited with status: {}", lavd_exit_status);
+                    log::info!("CPU utilization dropped below 90% for more than 30 seconds, exiting latency-aware scheduler");
+                    running_sched_loc.kill().await.expect("Failed to kill scx_lavd");
+                    let lavd_exit_status = running_sched_loc.wait().await.expect("Failed to wait on scx_lavd");
+                    log::info!("scx_lavd exited with status: {}", lavd_exit_status);
                 }
             }
         }
         
-        thread::sleep(Duration::from_secs(1));
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -206,16 +205,16 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     
-    // If --monitor_no_dbus is passed, start scx_loader as a standard background process
+    // If --auto is passed, start scx_loader as a standard background process
     // that swaps schedulers out automatically 
     // based on CPU utilization without registering a dbus interface.
-    if args.monitor_no_dbus {
-        println!("Starting scx_loader monitor as standard process without dbus interface");
+    if args.auto {
+        log::info!("Starting scx_loader monitor as standard process without dbus interface");
         monitor_cpu_util().await?;
         return Ok(());
     }
     
-    println!("Starting as dbus interface");
+    log::info!("Starting as dbus interface");
     // setup channel
     let (channel, rx) = tokio::sync::mpsc::unbounded_channel::<ScxMessage>();
 
