@@ -7,7 +7,13 @@
 #ifndef __SCX_COMMON_BPF_H
 #define __SCX_COMMON_BPF_H
 
+#ifdef LSP
+#define __bpf__
+#include "../vmlinux/vmlinux.h"
+#else
 #include "vmlinux.h"
+#endif
+
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <asm-generic/errno.h>

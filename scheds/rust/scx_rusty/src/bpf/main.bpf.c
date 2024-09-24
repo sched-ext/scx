@@ -35,8 +35,16 @@
  * task weight, dom mask and current dom in the task_data map and executes the
  * load balance based on userspace populating the lb_data map.
  */
+
+#ifdef LSP
+#define __bpf__
+#include "../../../../include/scx/common.bpf.h"
+#include "../../../../include/scx/ravg_impl.bpf.h"
+#else
 #include <scx/common.bpf.h>
 #include <scx/ravg_impl.bpf.h>
+#endif
+
 #include "intf.h"
 
 #include <errno.h>

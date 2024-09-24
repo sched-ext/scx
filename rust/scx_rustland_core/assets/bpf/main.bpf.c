@@ -27,7 +27,13 @@
  * This software may be used and distributed according to the terms of the
  * GNU General Public License version 2.
  */
+#ifdef LSP
+#define __bpf__
+#include "../../../../scheds/include/scx/common.bpf.h"
+#else
 #include <scx/common.bpf.h>
+#endif
+
 #include "intf.h"
 
 char _license[] SEC("license") = "GPL";
