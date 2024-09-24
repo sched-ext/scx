@@ -878,11 +878,6 @@ static u64 calc_nr_active_cpus(struct sys_stat *stat_cur)
 	return nr_active;
 }
 
-static const struct cpumask *cast_mask(struct bpf_cpumask *mask)
-{
-	return (const struct cpumask *)mask;
-}
-
 static bool clear_cpu_periodically(u32 cpu, struct bpf_cpumask *cpumask)
 {
 	u32 clear;

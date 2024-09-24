@@ -299,14 +299,6 @@ static struct cpumask *lookup_layer_cpumask(int idx)
 	}
 }
 
-/*
- * Access a cpumask in read-only mode (typically to check bits).
- */
-static const struct cpumask *cast_mask(struct bpf_cpumask *mask)
-{
-	return (const struct cpumask *)mask;
-}
-
 static void refresh_cpumasks(int idx)
 {
 	struct layer_cpumask_wrapper *cpumaskw;
