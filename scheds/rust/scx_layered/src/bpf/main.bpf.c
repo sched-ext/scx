@@ -1076,7 +1076,8 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 
 		/*
 		 * If @p is in an open layer, keep running if there's any idle
-		 * CPU. If confined, keep running if the layer has idle CPUs.
+		 * CPU. If confined, keep running if and only if the layer has
+		 * idle CPUs.
 		 */
 		if (layer->open) {
 			has_idle = !bpf_cpumask_empty(idle_cpumask);
