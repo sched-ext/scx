@@ -705,12 +705,14 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *tctx,
 {
 	struct bpf_cpumask *attempted, *topo_cpus;
 	struct cache_ctx *cachec;
+	struct cpumask *layer_cpumask;
 	struct cpu_ctx *cctx;
 	struct layer *layer;
 	struct node_ctx *nodec;
 	u32 idx;
 
-	if (!(layer = lookup_layer(tctx->layer)) || !(cctx = lookup_cpu_ctx(-1)))
+	if (!(layer = lookup_layer(tctx->layer)) || !(cctx = lookup_cpu_ctx(-1)) ||
+	    !(layer_cpumask = (lookup_layer_cpumask(layer->idx))))
 		return;
 
 	if (preempt_first) {
@@ -760,7 +762,7 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *tctx,
 		}
 
 		bpf_cpumask_copy(topo_cpus, cast_mask(cachec->cpumask));
-
+		bpf_cpumask_and(topo_cpus, cast_mask(topo_cpus), layer_cpumask);
 		/*
 		 * First try preempting in the local LLC
 		 */
@@ -768,8 +770,6 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *tctx,
 			s32 preempt_cpu = bpf_cpumask_any_distribute(cast_mask(topo_cpus));
 			trace("PREEMPT attempt on cpu %d from cpu %d",
 			      preempt_cpu, bpf_get_smp_processor_id());
-			if (preempt_cpu > cachec->nr_cpus)
-				break;
 
 			if (try_preempt_cpu(preempt_cpu, p, cctx, tctx, layer, false)) {
 				bpf_cpumask_release(attempted);
@@ -791,6 +791,7 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *tctx,
 
 		bpf_cpumask_copy(topo_cpus, cast_mask(nodec->cpumask));
 		bpf_cpumask_xor(topo_cpus, cast_mask(attempted), cast_mask(topo_cpus));
+		bpf_cpumask_and(topo_cpus, cast_mask(topo_cpus), layer_cpumask);
 
 		bpf_for(idx, 0, nodec->nr_cpus) {
 			s32 preempt_cpu = bpf_cpumask_any_distribute(cast_mask(topo_cpus));
@@ -817,6 +818,7 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *tctx,
 			}
 			bpf_cpumask_copy(topo_cpus, cast_mask(all_cpumask));
 			bpf_cpumask_xor(topo_cpus, cast_mask(attempted), cast_mask(topo_cpus));
+			bpf_cpumask_and(topo_cpus, cast_mask(topo_cpus), layer_cpumask);
 
 			bpf_for(idx, 0, nr_possible_cpus) {
 				s32 preempt_cpu = bpf_cpumask_any_distribute(cast_mask(topo_cpus));
