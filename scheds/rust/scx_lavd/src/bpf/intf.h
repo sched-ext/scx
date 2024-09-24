@@ -259,7 +259,9 @@ struct task_ctx {
 	u64	vdeadline_delta_ns;	/* time delta until task's virtual deadline */
 	u64	slice_ns;		/* time slice */
 	u32	greedy_ratio;		/* task's overscheduling ratio compared to its nice priority */
-	u32	lat_cri;		/* calculated latency criticality */
+	u32	lat_cri;		/* final context-aware latency criticality */
+	u32	lat_cri_self;		/* my latency criticality */
+	u32	lat_cri_waker;		/* waker's latency criticality */
 	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
 	u8	wakeup_ft;		/* regular wakeup = 1, sync wakeup = 2 */

@@ -289,14 +289,6 @@ static inline bool is_kthread(const struct task_struct *p)
 }
 
 /*
- * Access a cpumask in read-only mode (typically to check bits).
- */
-static const struct cpumask *cast_mask(struct bpf_cpumask *mask)
-{
-	return (const struct cpumask *)mask;
-}
-
-/*
  * Allocate/re-allocate a new cpumask.
  */
 static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
