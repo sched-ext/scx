@@ -763,8 +763,9 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *tctx,
 
 		bpf_cpumask_copy(topo_cpus, cast_mask(cachec->cpumask));
 		bpf_cpumask_and(topo_cpus, cast_mask(topo_cpus), layer_cpumask);
+
 		/*
-		 * First try preempting in the local LLC
+		 * First try preempting in the local LLC of available cpus in the layer mask
 		 */
 		bpf_for(idx, 0, cachec->nr_cpus) {
 			s32 preempt_cpu = bpf_cpumask_any_distribute(cast_mask(topo_cpus));
@@ -781,7 +782,7 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *tctx,
 		}
 
 		/*
-		 * Next try node local LLC
+		 * Next try node local LLCs in the layer cpumask
 		 */
 		if (!nodec->cpumask) {
 			bpf_cpumask_release(attempted);
