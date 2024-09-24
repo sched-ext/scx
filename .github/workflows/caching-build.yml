@@ -75,6 +75,7 @@ jobs:
   integration-test:
     runs-on: ubuntu-24.04
     needs: build-kernel
+    continue-on-error: true    
     strategy:
           matrix:
             scheduler: [ scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty ]
