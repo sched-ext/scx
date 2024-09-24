@@ -547,14 +547,23 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		  struct cpu_ctx *cctx, struct task_ctx *tctx, struct layer *layer,
 		  bool from_selcpu)
 {
-	const struct cpumask *idle_smtmask;
-	struct cpumask *layer_cpumask, *layered_cpumask;
+	const struct cpumask *idle_cpumask;
+	struct cache_ctx *cachec;
+	struct node_ctx *nodec;
+	struct bpf_cpumask *pref_idle_cpumask;
+	struct cpumask *layer_cpumask, *layered_cpumask, *cache_cpumask, *node_cpumask;
 	s32 cpu;
 
-	/* look up everything we need */
+	if (!(cachec = lookup_cache_ctx(cctx->cache_idx)) ||
+	    !(nodec = lookup_node_ctx(cctx->node_idx)))
+			return -1;
+
+	/* look up cpumasks */
 	if (!(layered_cpumask = (struct cpumask *)tctx->layered_cpumask) ||
-	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)))
-		return -1;
+	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)) ||
+	    !(cache_cpumask = (struct cpumask *)cachec->cpumask) ||
+	    !(node_cpumask = (struct cpumask *)nodec->cpumask))
+			return -1;
 
 	/* not much to do if bound to a single CPU */
 	if (p->nr_cpus_allowed == 1 && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
@@ -576,29 +585,66 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		return -1;
 	}
 
-	idle_smtmask = scx_bpf_get_idle_smtmask();
+	pref_idle_cpumask = bpf_cpumask_create();
 
-	/*
-	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
-	 * partially idle @prev_cpu.
-	 */
-	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
-				      idle_smtmask)) >= 0)
-		goto out_put;
+	if (disable_topology) {
+		/*
+		 * If CPU has SMT, any wholly idle CPU is likely a better pick than
+		 * partially idle @prev_cpu.
+		 */
+		idle_cpumask = scx_bpf_get_idle_smtmask();
+		if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
+					      idle_cpumask)) >= 0)
+			goto out_put;
+	} else {
+		/*
+		 * Try a CPU in the current LLC
+		 */
+		idle_cpumask = scx_bpf_get_idle_cpumask();
+		if (!pref_idle_cpumask || !idle_cpumask) {
+			cpu = -1;
+			goto out_put;
+		}
+		bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
+		bpf_cpumask_and(pref_idle_cpumask, cache_cpumask, pref_idle_cpumask);
+		bpf_cpumask_and(pref_idle_cpumask, layer_cpumask, pref_idle_cpumask);
+		trace("pick_idle: llc idle_cpumask=%p", pref_idle_cpumask);
+		if ((cpu = pick_idle_cpu_from(cache_cpumask, prev_cpu, pref_idle_cpumask)) >= 0)
+			goto out_put;
+
+		/*
+		 * Next try a CPU in the current node
+		 */
+		if (nr_nodes > 1) {
+			if (!pref_idle_cpumask || !idle_cpumask) {
+				cpu = -1;
+				goto out_put;
+			}
+			bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
+			bpf_cpumask_and(pref_idle_cpumask, node_cpumask, pref_idle_cpumask);
+			bpf_cpumask_and(pref_idle_cpumask, layer_cpumask, pref_idle_cpumask);
+			trace("pick_idle: node node_cpumask=%p", pref_idle_cpumask);
+			if ((cpu = pick_idle_cpu_from(node_cpumask, prev_cpu,
+						      pref_idle_cpumask)) >= 0)
+					goto out_put;
+		}
+	}
 
 	/*
 	 * If the layer is an open one, we can try the whole machine.
 	 */
 	if (layer->open &&
 	    ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu,
-				       idle_smtmask)) >= 0)) {
+				       idle_cpumask)) >= 0)) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cctx);
 		goto out_put;
 	}
 
 	cpu = -1;
 out_put:
-	scx_bpf_put_idle_cpumask(idle_smtmask);
+	if (pref_idle_cpumask)
+		bpf_cpumask_release(pref_idle_cpumask);
+	scx_bpf_put_idle_cpumask(idle_cpumask);
 	return cpu;
 }
 
@@ -678,7 +724,7 @@ bool try_preempt_cpu(s32 cand, struct task_struct *p, struct cpu_ctx *cctx,
 	scx_bpf_kick_cpu(cand, SCX_KICK_PREEMPT);
 
 	/*
-	 * $sib_cctx is set iff @p is an exclusive task, a sibling CPU
+	 * $sib_cctx is set if @p is an exclusive task, a sibling CPU
 	 * exists which is not running a preempt task. Let's preempt the
 	 * sibling CPU so that it can become idle. The ->maybe_idle test is
 	 * inaccurate and racy but should be good enough for best-effort
@@ -1025,7 +1071,8 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 
 		/*
 		 * If @p is in an open layer, keep running if there's any idle
-		 * CPU. If confined, keep running iff the layer has idle CPUs.
+		 * CPU. If confined, keep running if and only if the layer has
+		 * idle CPUs.
 		 */
 		if (layer->open) {
 			has_idle = !bpf_cpumask_empty(idle_cpumask);
