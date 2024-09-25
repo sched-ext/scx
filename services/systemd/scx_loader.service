@@ -1,0 +1,11 @@
+[Unit]
+Description=DBUS on-demand loader of sched-ext schedulers
+
+[Service]
+Type=dbus
+BusName=org.scx.Loader
+ExecStart=/usr/bin/scx_loader
+KillSignal=SIGINT
+
+[Install]
+WantedBy=graphical.target

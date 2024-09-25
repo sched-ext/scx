@@ -46,6 +46,42 @@
 
 **Note:** Replace the example scheduler names and arguments with the actual ones you want to use.
 
+## DBUS and Systemd Service
+
+`scx_loader` provides the `org.scx.Loader` DBUS service and is automatically started by `dbus-daemon` when an application calls into this service.  Users and administrators do not need to manually start the `scx_loader` daemon.
+
+`scx_loader` is managed by the `scx_loader.service` systemd unit. This service is distinct from the `scx.service` unit, which is used to manage schedulers directly (without DBUS).
+
+## Debugging
+
+In case of issues with `scx_loader`, you can debug the service using the following steps:
+
+1. **Check the service status:**
+   ```bash
+   systemctl status scx_loader.service
+   ```
+
+2. **View the service logs:**
+   ```bash
+   journalctl -u scx_loader.service
+   ```
+
+3. **Enable debug logging:** You can temporarily enable debug logging by modifying the systemd service file:
+
+   - Edit the service file:
+     ```bash
+     sudo systemctl edit scx_loader.service
+     ```
+   - Add the following lines under the `[Service]` section:
+     ```
+     Environment=RUST_LOG=trace
+     ```
+   - Restart the service:
+     ```bash
+     sudo systemctl restart scx_loader.service
+     ```
+   - Check the logs again for detailed debugging information.
+
 ## Development Status
 
 `scx_loader` is under active development.  Future improvements may include:
