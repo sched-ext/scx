@@ -25,6 +25,8 @@ veristat_scheduler = get_option('veristat_scheduler')
 
 veristat_diff_dir = get_option('veristat_diff_dir')
 
+build_outside_src = get_option('build_outside_src')
+
 if enable_stress
   run_stress_tests = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/run_stress_tests'))
@@ -121,7 +123,11 @@ if should_build_libbpf
 
   foreach path : libbpf_header_paths
     libbpf_h += ['@0@'.format(libbpf_path) + path]
-    libbpf_local_h += ['.@0@/libbpf'.format(local_build_path) +  path]
+    if not build_outside_src
+      libbpf_local_h += ['.@0@/libbpf'.format(local_build_path) +  path]
+    else
+      libbpf_local_h += ['@0@/libbpf'.format(local_build_path) +  path]
+    endif
   endforeach
 
   message('Fetching libbpf repo')

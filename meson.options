@@ -42,3 +42,9 @@ option(
   value: 'auto',
   description: 'install pacman hooks'
 )
+option(
+  'build_outside_src',
+  type: 'boolean',
+  value: false,
+  description: 'enable build cmds to work outside of src dir',
+)
