@@ -14,17 +14,20 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
+use clap::Parser;
 use serde::Deserialize;
 use serde::Serialize;
-use tokio::{process::{Command, Child}, time::{Duration, Instant}};
+use sysinfo::System;
+use tokio::process::Child;
+use tokio::process::Command;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::time::Duration;
+use tokio::time::Instant;
 use zbus::interface;
 use zbus::Connection;
 use zvariant::Type;
 use zvariant::Value;
-use clap::Parser;
-use sysinfo::{System};
 
 #[derive(Debug, Clone, PartialEq)]
 enum SupportedSched {
@@ -154,46 +157,61 @@ async fn monitor_cpu_util() -> Result<()> {
     let mut running_sched: Option<Child> = None;
     let mut cpu_above_threshold_since: Option<Instant> = None;
     let mut cpu_below_threshold_since: Option<Instant> = None;
-    
+
     let high_utilization_threshold = 90.0;
     let low_utilization_threshold_duration = Duration::from_secs(30);
     let high_utilization_trigger_duration = Duration::from_secs(5);
-    
+
     loop {
         system.refresh_cpu_all();
-        
-        let any_cpu_above_threshold = system.cpus().iter().any(|cpu| cpu.cpu_usage() > high_utilization_threshold);
-        
+
+        let any_cpu_above_threshold = system
+            .cpus()
+            .iter()
+            .any(|cpu| cpu.cpu_usage() > high_utilization_threshold);
+
         if any_cpu_above_threshold {
             if cpu_above_threshold_since.is_none() {
                 cpu_above_threshold_since = Some(Instant::now());
             }
-            
+
             if cpu_above_threshold_since.unwrap().elapsed() > high_utilization_trigger_duration {
                 if running_sched.is_none() {
                     log::info!("CPU Utilization exceeded 90% for 5 seconds, starting scx_lavd");
-                    running_sched = Some(Command::new(get_name_from_scx(&SupportedSched::Lavd)).spawn().expect("Failed to start scx_lavd"));
+                    running_sched = Some(
+                        Command::new(get_name_from_scx(&SupportedSched::Lavd))
+                            .spawn()
+                            .expect("Failed to start scx_lavd"),
+                    );
                 }
-                
+
                 cpu_below_threshold_since = None;
             }
         } else {
             cpu_above_threshold_since = None;
-            
+
             if cpu_below_threshold_since.is_none() {
                 cpu_below_threshold_since = Some(Instant::now());
             }
-            
+
             if cpu_below_threshold_since.unwrap().elapsed() > low_utilization_threshold_duration {
                 if let Some(mut running_sched_loc) = running_sched.take() {
-                    log::info!("CPU utilization dropped below 90% for more than 30 seconds, exiting latency-aware scheduler");
-                    running_sched_loc.kill().await.expect("Failed to kill scx_lavd");
-                    let lavd_exit_status = running_sched_loc.wait().await.expect("Failed to wait on scx_lavd");
+                    log::info!(
+                        "CPU utilization dropped below 90% for more than 30 seconds, exiting latency-aware scheduler"
+                    );
+                    running_sched_loc
+                        .kill()
+                        .await
+                        .expect("Failed to kill scx_lavd");
+                    let lavd_exit_status = running_sched_loc
+                        .wait()
+                        .await
+                        .expect("Failed to wait on scx_lavd");
                     log::info!("scx_lavd exited with status: {}", lavd_exit_status);
                 }
             }
         }
-        
+
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
@@ -204,16 +222,16 @@ async fn main() -> Result<()> {
     logger::init_logger().expect("Failed to initialize logger");
 
     let args = Args::parse();
-    
+
     // If --auto is passed, start scx_loader as a standard background process
-    // that swaps schedulers out automatically 
+    // that swaps schedulers out automatically
     // based on CPU utilization without registering a dbus interface.
     if args.auto {
         log::info!("Starting scx_loader monitor as standard process without dbus interface");
         monitor_cpu_util().await?;
         return Ok(());
     }
-    
+
     log::info!("Starting as dbus interface");
     // setup channel
     let (channel, rx) = tokio::sync::mpsc::unbounded_channel::<ScxMessage>();

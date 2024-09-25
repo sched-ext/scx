@@ -69,8 +69,8 @@
 //! hierarchy are entirely read-only. If the host topology were to change (due
 //! to e.g. hotplug), a new Topology object should be created.
 
-use crate::Cpumask;
 use crate::misc::read_file_usize;
+use crate::Cpumask;
 use anyhow::bail;
 use anyhow::Result;
 use glob::glob;
@@ -80,7 +80,7 @@ use std::path::Path;
 use std::slice::Iter;
 
 #[cfg(feature = "gpu-topology")]
-use crate::gpu::{create_gpus,Gpu,GpuIndex};
+use crate::gpu::{create_gpus, Gpu, GpuIndex};
 
 lazy_static::lazy_static! {
     /// The maximum possible number of CPU IDs in the system. As mentioned
@@ -574,8 +574,6 @@ fn avg_cpu_freq() -> Option<(usize, usize)> {
     Some((avg_base_freq / nr_cpus, top_max_freq))
 }
 
-
-
 fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {
     let mut nodes: Vec<Node> = Vec::with_capacity(1);
 
@@ -583,11 +581,11 @@ fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {
         id: 0,
         llcs: BTreeMap::new(),
         span: Cpumask::new()?,
-        #[cfg(feature="gpu-topology")]
+        #[cfg(feature = "gpu-topology")]
         gpus: BTreeMap::new(),
     };
 
-    #[cfg(feature="gpu-topology")]
+    #[cfg(feature = "gpu-topology")]
     {
         let system_gpus = create_gpus();
         match system_gpus.get(&0) {
@@ -599,7 +597,6 @@ fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {
             _ => {}
         };
     }
-
 
     if !Path::new("/sys/devices/system/cpu").exists() {
         bail!("/sys/devices/system/cpu sysfs node not found");
