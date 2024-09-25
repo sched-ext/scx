@@ -14,6 +14,7 @@ ctrlc = { version = "3.1", features = ["termination"] }
 log = "0.4.17"
 nix = { features = ["process", "signal"], default-features = false, version = "0.29" }
 serde = { version = "1.0", features = ["derive"] }
+sysinfo = "0.31.4"
 tokio = { version = "1.39", features = ["macros", "sync", "rt-multi-thread", "process"] }
 zbus = { version = "4", features = ["tokio"], default-features = false }
 zvariant = "4.2"
