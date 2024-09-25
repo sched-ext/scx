@@ -149,6 +149,16 @@ struct layer_match_ands {
 	int			nr_match_ands;
 };
 
+enum layer_growth_algo {
+    STICKY,
+    LINEAR,
+    RANDOM,
+    TOPO,
+    ROUND_ROBIN,
+    BIG_LITTLE,
+    LITTLE_BIG,
+};
+
 struct layer {
 	struct layer_match_ands	matches[MAX_LAYER_MATCH_ORS];
 	unsigned int		nr_match_ors;
@@ -161,6 +171,7 @@ struct layer {
 	bool			preempt;
 	bool			preempt_first;
 	bool			exclusive;
+	int			growth_algo;
 
 	u64			vtime_now;
 	u64			nr_tasks;
