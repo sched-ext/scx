@@ -383,11 +383,34 @@ run_target('veristat_diff', command: [run_veristat_diff, meson.current_build_dir
                                  get_option('veristat_diff_dir')])
 
 if enable_stress
+  # not sure there's a better way
+  # only different...
+  copys = [
+    custom_target('copy stress wrapper',
+      input : 'scripts/bpftrace_stress_wrapper.sh',
+      output :  'bpftrace_stress_wrapper.sh',
+      command : ['cp', '-a', '@INPUT@', '@OUTPUT@'],
+      install : false,
+      build_by_default : true),
+     custom_target('copy dsq_lat',
+      input : 'scripts/dsq_lat.bt',
+      output :  'dsq_lat.bt',
+      command : ['cp', '-a', '@INPUT@', '@OUTPUT@'],
+      install : false,
+      build_by_default : true),
+      custom_target('copy runq_lat',
+        input : 'scripts/process_runqlat.bt',
+        output :  'process_runqlat.bt',
+        command : ['cp', '-a', '@INPUT@', '@OUTPUT@'],
+        install : false,
+        build_by_default : true)
+    ]
+
   run_target('stress_tests', command: [run_stress_tests, '-k', kernel, '-b',
-                                       meson.current_build_dir()])
+                                       meson.current_build_dir()], depends: [copys])
   foreach s : rust_scheds
     run_target('stress_tests_'+s, command: [run_stress_tests, '-k', kernel, '-b',
-                                            meson.current_build_dir(), '--sched', s])
+                                            meson.current_build_dir(), '--sched', s], depends: [copys])
   endforeach
 endif
 

@@ -48,6 +48,8 @@ def run_stress_test(
     timeout_sec = int(config.get("timeout_sec"))
     if vng_path:
         vm_input = f"{stress_cmd} & timeout --foreground --preserve-status {timeout_sec} {sched_cmd}"
+        if bpftrace_scripts := config.get('bpftrace_scripts'):
+            vm_input = f"\"{build_dir}/bpftrace_stress_wrapper.sh\" '{stress_cmd}' '{sched_cmd}' '{timeout_sec}' '{bpftrace_scripts}'"
         cmd = [vng_path, "--user", "root", "-v", "--", vm_input]
         err = sys.stderr if output == "-" else open(output, "w")
         out = sys.stdout if output == "-" else err
