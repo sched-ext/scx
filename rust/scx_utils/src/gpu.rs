@@ -1,4 +1,4 @@
-#![cfg(feature="gpu-topology")]
+#![cfg(feature = "gpu-topology")]
 
 use crate::misc::read_file_usize;
 use nvml_wrapper::bitmasks::InitFlags;
@@ -77,5 +77,3 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
 
     gpus
 }
-
-
