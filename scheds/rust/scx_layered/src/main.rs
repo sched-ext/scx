@@ -72,6 +72,14 @@ const NR_LSTATS: usize = bpf_intf::layer_stat_idx_NR_LSTATS as usize;
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
 const CORE_CACHE_LEVEL: u32 = 2;
 
+const GROWTH_ALGO_STICKY: i32 = bpf_intf::layer_growth_algo_STICKY as i32;
+const GROWTH_ALGO_LINEAR: i32 = bpf_intf::layer_growth_algo_LINEAR as i32;
+const GROWTH_ALGO_RANDOM: i32 = bpf_intf::layer_growth_algo_RANDOM as i32;
+const GROWTH_ALGO_TOPO: i32 = bpf_intf::layer_growth_algo_TOPO as i32;
+const GROWTH_ALGO_ROUND_ROBIN: i32 = bpf_intf::layer_growth_algo_ROUND_ROBIN as i32;
+const GROWTH_ALGO_BIG_LITTLE: i32 = bpf_intf::layer_growth_algo_BIG_LITTLE as i32;
+const GROWTH_ALGO_LITTLE_BIG: i32 = bpf_intf::layer_growth_algo_LITTLE_BIG as i32;
+
 #[rustfmt::skip]
 lazy_static::lazy_static! {
     static ref NR_POSSIBLE_CPUS: usize = libbpf_rs::num_possible_cpus().unwrap();
@@ -482,6 +490,20 @@ enum LayerGrowthAlgo {
     /// LittleBig attempts to first grow across all little cores and then
     /// allocates onto big cores after all little cores are allocated.
     LittleBig,
+}
+
+impl LayerGrowthAlgo {
+    fn as_bpf_enum(&self) -> i32 {
+        match self {
+            LayerGrowthAlgo::Sticky => GROWTH_ALGO_STICKY,
+            LayerGrowthAlgo::Linear => GROWTH_ALGO_LINEAR,
+            LayerGrowthAlgo::Random => GROWTH_ALGO_RANDOM,
+            LayerGrowthAlgo::Topo => GROWTH_ALGO_TOPO,
+            LayerGrowthAlgo::RoundRobin => GROWTH_ALGO_ROUND_ROBIN,
+            LayerGrowthAlgo::BigLittle => GROWTH_ALGO_BIG_LITTLE,
+            LayerGrowthAlgo::LittleBig => GROWTH_ALGO_LITTLE_BIG,
+        }
+    }
 }
 
 impl Default for LayerGrowthAlgo {
@@ -1733,6 +1755,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     preempt,
                     preempt_first,
                     exclusive,
+                    growth_algo,
                     nodes,
                     slice_us,
                     ..
@@ -1744,6 +1767,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     preempt,
                     preempt_first,
                     exclusive,
+                    growth_algo,
                     nodes,
                     slice_us,
                     ..
@@ -1755,6 +1779,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     preempt,
                     preempt_first,
                     exclusive,
+                    growth_algo,
                     nodes,
                     slice_us,
                     ..
@@ -1775,6 +1800,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     layer.preempt.write(*preempt);
                     layer.preempt_first.write(*preempt_first);
                     layer.exclusive.write(*exclusive);
+                    layer.growth_algo = growth_algo.as_bpf_enum();
                     layer.perf = u32::try_from(*perf)?;
                     layer.node_mask = nodemask_from_nodes(nodes) as u64;
                     for topo_node in topo.nodes() {
