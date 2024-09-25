@@ -13,7 +13,6 @@ GUEST_TIMEOUT=60
 # List of schedulers to test
 #
 # TODO:
-#   - scx_flatcg, scx_pair: excluded until cgroup support lands upstream
 #   - scx_mitosis: not ready yet
 #
 declare -A SCHEDS
@@ -25,6 +24,8 @@ else
     SCHEDS["scx_simple"]=""
     SCHEDS["scx_central"]=""
     SCHEDS["scx_nest"]=""
+    SCHEDS["scx_flatcg"]=""
+    SCHEDS["scx_pair"]=""
     SCHEDS["scx_rusty"]=""
     SCHEDS["scx_rustland"]=""
     SCHEDS["scx_bpfland"]=""

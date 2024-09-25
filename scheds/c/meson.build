@@ -1,6 +1,5 @@
-# scx_flatcg and scx_pair are temporarily excluded until cgroup support
-# lands in the upstream kernel.
-c_scheds = ['scx_simple', 'scx_qmap', 'scx_central', 'scx_userland', 'scx_nest']
+c_scheds = ['scx_simple', 'scx_qmap', 'scx_central', 'scx_userland', 'scx_nest',
+            'scx_flatcg', 'scx_pair']
 
 foreach sched: c_scheds
   thread_dep = dependency('threads')
