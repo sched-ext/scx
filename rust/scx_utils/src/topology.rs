@@ -70,16 +70,17 @@
 //! to e.g. hotplug), a new Topology object should be created.
 
 use crate::Cpumask;
+use crate::misc::read_file_usize;
 use anyhow::bail;
 use anyhow::Result;
 use glob::glob;
-use nvml_wrapper::bitmasks::InitFlags;
-use nvml_wrapper::enum_wrappers::device::Clock;
-use nvml_wrapper::Nvml;
 use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::slice::Iter;
+
+#[cfg(feature = "gpu-topology")]
+use crate::gpu::{create_gpus,Gpu,GpuIndex};
 
 lazy_static::lazy_static! {
     /// The maximum possible number of CPU IDs in the system. As mentioned
@@ -223,25 +224,11 @@ impl Cache {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialOrd, PartialEq)]
-pub enum GpuIndex {
-    Nvidia { nvml_id: u32 },
-}
-
-#[derive(Debug, Clone)]
-pub struct Gpu {
-    pub index: GpuIndex,
-    pub node_id: usize,
-    pub max_graphics_clock: usize,
-    // AMD uses CU for this value
-    pub max_sm_clock: usize,
-    pub memory: u64,
-}
-
 #[derive(Debug, Clone)]
 pub struct Node {
     id: usize,
     llcs: BTreeMap<usize, Cache>,
+    #[cfg(feature = "gpu-topology")]
     gpus: BTreeMap<GpuIndex, Gpu>,
     span: Cpumask,
 }
@@ -280,6 +267,7 @@ impl Node {
     }
 
     // Get the map of all GPUs for this NUMA node.
+    #[cfg(feature = "gpu-topology")]
     pub fn gpus(&self) -> &BTreeMap<GpuIndex, Gpu> {
         &self.gpus
     }
@@ -353,6 +341,7 @@ impl Topology {
     }
 
     /// Get a vec of all GPUs on the hosts.
+    #[cfg(feature = "gpu-topology")]
     pub fn gpus(&self) -> BTreeMap<GpuIndex, &Gpu> {
         let mut gpus = BTreeMap::new();
         for node in &self.nodes {
@@ -427,22 +416,6 @@ impl TopologyMap {
 /**********************************************
  * Helper functions for creating the Topology *
  **********************************************/
-
-fn read_file_usize(path: &Path) -> Result<usize> {
-    let val = match std::fs::read_to_string(&path) {
-        Ok(val) => val,
-        Err(_) => {
-            bail!("Failed to open or read file {:?}", path);
-        }
-    };
-
-    match val.trim().parse::<usize>() {
-        Ok(parsed) => Ok(parsed),
-        Err(_) => {
-            bail!("Failed to parse {}", val);
-        }
-    }
-}
 
 fn cpus_online() -> Result<Cpumask> {
     let path = "/sys/devices/system/cpu/online";
@@ -601,81 +574,32 @@ fn avg_cpu_freq() -> Option<(usize, usize)> {
     Some((avg_base_freq / nr_cpus, top_max_freq))
 }
 
-fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
-    let mut gpus: BTreeMap<usize, Vec<Gpu>> = BTreeMap::new();
 
-    // Don't fail if the system has no NVIDIA GPUs.
-    let Ok(nvml) = Nvml::init_with_flags(InitFlags::NO_GPUS) else {
-        return BTreeMap::new();
-    };
-    match nvml.device_count() {
-        Ok(nvidia_gpu_count) => {
-            for i in 0..nvidia_gpu_count {
-                let Ok(nvidia_gpu) = nvml.device_by_index(i) else {
-                    continue;
-                };
-                let graphics_boost_clock = nvidia_gpu
-                    .max_customer_boost_clock(Clock::Graphics)
-                    .unwrap_or(0);
-                let sm_boost_clock = nvidia_gpu.max_customer_boost_clock(Clock::SM).unwrap_or(0);
-                let Ok(memory_info) = nvidia_gpu.memory_info() else {
-                    continue;
-                };
-                let Ok(pci_info) = nvidia_gpu.pci_info() else {
-                    continue;
-                };
-                let Ok(index) = nvidia_gpu.index() else {
-                    continue;
-                };
-
-                // The NVML library doesn't return a PCIe bus ID compatible with sysfs. It includes
-                // uppercase bus ID values and an extra four leading 0s.
-                let bus_id = pci_info.bus_id.to_lowercase();
-                let fixed_bus_id = bus_id.strip_prefix("0000").unwrap_or("");
-                let numa_path = format!("/sys/bus/pci/devices/{}/numa_node", fixed_bus_id);
-                let numa_node = read_file_usize(&Path::new(&numa_path)).unwrap_or(0);
-
-                let gpu = Gpu {
-                    index: GpuIndex::Nvidia { nvml_id: index },
-                    node_id: numa_node as usize,
-                    max_graphics_clock: graphics_boost_clock as usize,
-                    max_sm_clock: sm_boost_clock as usize,
-                    memory: memory_info.total,
-                };
-                if !gpus.contains_key(&numa_node) {
-                    gpus.insert(numa_node, vec![gpu]);
-                    continue;
-                }
-                if let Some(gpus) = gpus.get_mut(&numa_node) {
-                    gpus.push(gpu);
-                }
-            }
-        }
-        _ => {}
-    };
-
-    gpus
-}
 
 fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {
     let mut nodes: Vec<Node> = Vec::with_capacity(1);
-    let system_gpus = create_gpus();
-    let mut node_gpus = BTreeMap::new();
-    match system_gpus.get(&0) {
-        Some(gpus) => {
-            for gpu in gpus {
-                node_gpus.insert(gpu.index, gpu.clone());
-            }
-        }
-        _ => {}
-    };
 
     let mut node = Node {
         id: 0,
         llcs: BTreeMap::new(),
         span: Cpumask::new()?,
-        gpus: node_gpus,
+        #[cfg(feature="gpu-topology")]
+        gpus: BTreeMap::new(),
     };
+
+    #[cfg(feature="gpu-topology")]
+    {
+        let system_gpus = create_gpus();
+        match system_gpus.get(&0) {
+            Some(gpus) => {
+                for gpu in gpus {
+                    node.gpus.insert(gpu.index, gpu.clone());
+                }
+            }
+            _ => {}
+        };
+    }
+
 
     if !Path::new("/sys/devices/system/cpu").exists() {
         bail!("/sys/devices/system/cpu sysfs node not found");
@@ -695,6 +619,7 @@ fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {
 fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
     let mut nodes: Vec<Node> = Vec::new();
 
+    #[cfg(feature = "gpu-topology")]
     let system_gpus = create_gpus();
 
     let numa_paths = glob("/sys/devices/system/node/node*")?;
@@ -707,22 +632,25 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
             }
         };
 
-        let mut node_gpus = BTreeMap::new();
-        match system_gpus.get(&node_id) {
-            Some(gpus) => {
-                for gpu in gpus {
-                    node_gpus.insert(gpu.index, gpu.clone());
-                }
-            }
-            _ => {}
-        };
-
         let mut node = Node {
             id: node_id,
             llcs: BTreeMap::new(),
             span: Cpumask::new()?,
-            gpus: node_gpus,
+            #[cfg(feature = "gpu-topology")]
+            gpus: BTreeMap::new(),
         };
+
+        #[cfg(feature = "gpu-topology")]
+        {
+            match system_gpus.get(&node_id) {
+                Some(gpus) => {
+                    for gpu in gpus {
+                        node.gpus.insert(gpu.index, gpu.clone());
+                    }
+                }
+                _ => {}
+            };
+        }
 
         let cpu_pattern = numa_path.join("cpu[0-9]*");
         let cpu_paths = glob(cpu_pattern.to_string_lossy().as_ref())?;

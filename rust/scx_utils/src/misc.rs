@@ -1,8 +1,10 @@
+use anyhow::bail;
 use anyhow::Result;
 use libc;
 use log::info;
 use scx_stats::prelude::*;
 use serde::Deserialize;
+use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -71,4 +73,20 @@ pub fn set_rlimit_infinity() {
             panic!("setrlimit failed with error code: {}", res);
         }
     };
+}
+
+pub fn read_file_usize(path: &Path) -> Result<usize> {
+    let val = match std::fs::read_to_string(&path) {
+        Ok(val) => val,
+        Err(_) => {
+            bail!("Failed to open or read file {:?}", path);
+        }
+    };
+
+    match val.trim().parse::<usize>() {
+        Ok(parsed) => Ok(parsed),
+        Err(_) => {
+            bail!("Failed to parse {}", val);
+        }
+    }
 }

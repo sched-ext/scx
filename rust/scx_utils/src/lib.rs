@@ -72,6 +72,8 @@ pub use topology::NR_CPU_IDS;
 mod cpumask;
 pub use cpumask::Cpumask;
 
+mod gpu;
+
 mod infeasible;
 pub use infeasible::LoadAggregator;
 pub use infeasible::LoadLedger;
