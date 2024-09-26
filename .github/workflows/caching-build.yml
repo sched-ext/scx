@@ -6,7 +6,8 @@ on:
       - cron: "0 * * * *"
     push:
     pull_request:
-
+    merge_group:
+      
 jobs:
   lint:
     runs-on: ubuntu-24.04
