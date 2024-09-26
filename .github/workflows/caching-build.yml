@@ -188,10 +188,6 @@ jobs:
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar      
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.component }}
-          prefix-key: "4"
       - uses: ./.github/actions/install-deps-action
       # cache virtiofsd (goes away w/ 24.04)
       - name: Cache virtiofsd
@@ -235,10 +231,6 @@ jobs:
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar      
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.scheduler }}
-          prefix-key: "4"
       - uses: ./.github/actions/install-deps-action
       # cache virtiofsd (goes away w/ 24.04)
       - name: Cache virtiofsd
