@@ -162,8 +162,6 @@ jobs:
         if: always()
       - run: sudo cat /var/log/dmesg > host-dmesg.ci.log
         if: always()
-      - run: echo "NICE_REF=${{ github.event.pull_request && github.head_ref || github.ref_name }}" >> $GITHUB_ENV
-        if: always()
       - run: mkdir -p ./log_save/
         if: always()
       # no symlink following here (to avoid cycles)
@@ -173,7 +171,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.scheduler }}_logs_${{ env.NICE_REF }}_${{ github.run_id }}_${{ github.run_attempt }}
+          name: ${{ matrix.scheduler }}_logs_${{ github.run_id }}_${{ github.run_attempt }}
           path: ./log_save/*.ci.log
           # it's all txt files w/ 90 day retention, lets be nice.
           compression-level: 9
