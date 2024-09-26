@@ -40,6 +40,8 @@ def run_stress_test(
     vng_path: str,
     kernel: str,
     verbose: bool,
+    rw: bool,
+    headers: str,
 ) -> int:
     scheduler_args = config.get('scheduler_args')
     stress_cmd = config.get('stress_cmd')
@@ -47,14 +49,27 @@ def run_stress_test(
     sched_cmd = s_path + " " + config.get('sched_args')
     timeout_sec = int(config.get("timeout_sec"))
     if vng_path:
+        cmd = [vng_path, "--user", "root", "-v", "-r", kernel]
+        if config.get("qemu_opts"):
+            cmd += ['--qemu-opts']
+            cmd += [f"'{config.get("qemu_opts")}'"]
         vm_input = f"{stress_cmd} & timeout --foreground --preserve-status {timeout_sec} {sched_cmd}"
         if bpftrace_scripts := config.get('bpftrace_scripts'):
             vm_input = f"\"{build_dir}/bpftrace_stress_wrapper.sh\" '{stress_cmd}' '{sched_cmd}' '{timeout_sec}' '{bpftrace_scripts}'"
-        cmd = [vng_path, "--user", "root", "-v", "--", vm_input]
+            if headers:
+                vm_input += f" '{headers}'"
+        if rw and os.getenv('CI'):
+            print('mounting VNG as RW because CI')
+            cmd += ["--rw"]
+        elif rw:
+            print('not mounting VNG as RW because not CI')
+        cmd += ["--"]
+        cmd += [vm_input]
         err = sys.stderr if output == "-" else open(output, "w")
         out = sys.stdout if output == "-" else err
+        print(f"vng cmd is {cmd}")
         proc = subprocess.Popen(
-            cmd, env=os.environ, cwd=kernel, shell=False, stdout=out,
+            cmd, env=os.environ, shell=False, stdout=out,
             stderr=err, stdin=subprocess.PIPE, text=True)
         proc.wait()
         return proc.returncode
@@ -85,6 +100,8 @@ def stress_tests(args: Namespace) -> None:
             vng_path,
             args.kernel,
             args.verbose,
+            args.rw,
+            args.headers
         )
     for test_name, ret in return_codes.items():
         if ret not in (143, 0):
@@ -113,6 +130,12 @@ if __name__ == "__main__":
         '--vng', action='store_true', default=True, help='Run in vng')
     parser.add_argument(
         '--sched', default='', help='Scheduler to test (default: all)'
+    )
+    parser.add_argument(
+        '--rw', default=False, help='Mount VNG Directories as RW (dangerous)'
+    )
+    parser.add_argument(
+        '--headers', default='', help='Kernel Headers Path'
     )
 
     args = parser.parse_args()
