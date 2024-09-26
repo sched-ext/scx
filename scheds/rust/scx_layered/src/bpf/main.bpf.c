@@ -615,8 +615,8 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
 		bpf_cpumask_and(pref_idle_cpumask, cache_cpumask, pref_idle_cpumask);
 		bpf_cpumask_and(pref_idle_cpumask, layer_cpumask, pref_idle_cpumask);
-		trace("pick_idle: llc idle_cpumask=%p", pref_idle_cpumask);
-		if ((cpu = pick_idle_cpu_from(cache_cpumask, prev_cpu, pref_idle_cpumask)) >= 0)
+		if ((cpu = pick_idle_cpu_from(pref_idle_cpumask, prev_cpu,
+					      idle_cpumask)) >= 0)
 			goto out_put;
 
 		/*
@@ -628,13 +628,22 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 				goto out_put;
 			}
 			bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
-			bpf_cpumask_and(pref_idle_cpumask, node_cpumask, pref_idle_cpumask);
-			bpf_cpumask_and(pref_idle_cpumask, layer_cpumask, pref_idle_cpumask);
-			trace("pick_idle: node node_cpumask=%p", pref_idle_cpumask);
-			if ((cpu = pick_idle_cpu_from(node_cpumask, prev_cpu,
-						      pref_idle_cpumask)) >= 0)
-					goto out_put;
+			bpf_cpumask_and(pref_idle_cpumask, node_cpumask,
+					pref_idle_cpumask);
+			bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
+					pref_idle_cpumask);
+			if ((cpu = pick_idle_cpu_from(pref_idle_cpumask, prev_cpu,
+						      idle_cpumask)) >= 0)
+				goto out_put;
 		}
+		/*
+		 * At this point try the whole machine
+		 */
+		bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
+		bpf_cpumask_and(pref_idle_cpumask, layer_cpumask, pref_idle_cpumask);
+		if ((cpu = pick_idle_cpu_from(pref_idle_cpumask, prev_cpu,
+					      idle_cpumask)) >= 0)
+			goto out_put;
 	}
 
 	/*
