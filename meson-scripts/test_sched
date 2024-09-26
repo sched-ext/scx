@@ -17,6 +17,16 @@ GUEST_TIMEOUT=60
 #
 declare -A SCHEDS
 
+VNG_RW=''
+
+# Enable vng rw for when on ci.
+if [ $# -ge 3 ] ; then
+  if [ "$3" == "VNG_RW=true" ]; then
+    echo 'setting vng to mount rw'
+    VNG_RW=' --rw '
+  fi
+fi
+
 # enable running tests on individual schedulers
 if [ $# -ge 2 ] ; then
     SCHEDS[$2]=""
@@ -63,7 +73,7 @@ for sched in ${!SCHEDS[@]}; do
 
     rm -f /tmp/output
     timeout --preserve-status ${GUEST_TIMEOUT} \
-        vng -m 2G -v -r ${kernel} -- \
+        vng --user root -m 10G --cpu 8 $VNG_RW -v -r ${kernel} -- \
             "timeout --foreground --preserve-status ${TEST_TIMEOUT} ${sched_path} ${args}" \
                 2> >(tee /tmp/output) </dev/null
         grep -v " Speculative Return Stack Overflow" /tmp/output | \
@@ -79,4 +89,5 @@ for sched in ${!SCHEDS[@]}; do
     else
         echo "OK: ${sched}"
     fi
+    cp /tmp/output test_log.ci.log
 done

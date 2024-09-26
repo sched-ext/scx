@@ -48,3 +48,9 @@ option(
   value: false,
   description: 'enable build cmds to work outside of src dir',
 )
+option(
+  'vng_rw_mount',
+  type: 'boolean',
+  value: false,
+  description: 'make vng builds mount rw (for log upload)',
+)

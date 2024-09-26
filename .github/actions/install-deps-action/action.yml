@@ -4,23 +4,35 @@ runs:
   using: 'composite'
   steps:
     ### OTHER REPOS ####
-
-    # Hard turn-off interactive mode
-    - run: echo 'debconf debconf/frontend select Noninteractive' | sudo debconf-set-selections
-      shell: bash
-
-    # Refresh packages list
-    - run: sudo apt update
+    # turn off interactive, refresh pkgs, use apt fast
+    - run: |
+        echo 'debconf debconf/frontend select Noninteractive' | sudo debconf-set-selections
+        sudo rm /var/lib/man-db/auto-update
+        echo "deb [signed-by=/etc/apt/keyrings/apt-fast.gpg] http://ppa.launchpad.net/apt-fast/stable/ubuntu $(source /etc/os-release && echo $UBUNTU_CODENAME) main" | sudo tee /etc/apt/sources.list.d/apt-fast.list
+        wget -q -O- "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xBC5934FD3DEBD4DAEA544F791E2824A7F22B44BD" | sudo gpg --dearmor -o /etc/apt/keyrings/apt-fast.gpg
+        sudo apt-get update -y
+        sudo apt-get install -y apt-fast aria2 tasksel
+        echo 'debconf apt-fast/maxdownloads string 100' |  sudo debconf-set-selections
+        echo 'debconf apt-fast/dlflag boolean true' | sudo debconf-set-selections  
+        echo 'debconf apt-fast/aptmanager string apt-get' | sudo debconf-set-selections
+        sudo tasksel remove ubuntu-desktop
       shell: bash
 
     ### DOWNLOAD AND INSTALL DEPENDENCIES ###
 
     # Download dependencies packaged by Ubuntu
-    - run: sudo apt -y install bison busybox-static cargo cmake coreutils cpio elfutils file flex gcc gcc-multilib git iproute2 jq kbd kmod libcap-dev libelf-dev libunwind-dev libvirt-clients libzstd-dev linux-headers-generic linux-tools-common linux-tools-generic make ninja-build pahole pkg-config python3-dev python3-pip python3-requests qemu-kvm rsync rustc stress-ng udev zstd libseccomp-dev libcap-ng-dev llvm clang python3-full pipx curl meson
+    - run: | 
+        sudo apt-fast install -f -y bison busybox-static cmake coreutils \
+        cpio elfutils file flex gcc gcc-multilib git iproute2 jq kbd kmod \
+        libcap-dev libelf-dev libunwind-dev libvirt-clients libzstd-dev \
+        linux-headers-generic linux-tools-common linux-tools-generic make \
+        ninja-build pahole pkg-config python3-dev python3-pip python3-requests \
+        qemu-kvm rsync stress-ng udev zstd libseccomp-dev libcap-ng-dev \
+        llvm clang python3-full curl meson bpftrace cargo rustc dwarves
       shell: bash
 
     # virtme-ng
-    - run: pip3 install virtme-ng --break-system-packages
+    - run: sudo pip3 install virtme-ng --break-system-packages
       shell: bash
 
     # Setup KVM support

@@ -3,12 +3,18 @@ GUEST_TIMEOUT=25
 BUILD_DIR=$1
 SCHED=$2
 KERNEL=$3
+VNG_RW_ARG=$4
 
 if [ "${KERNEL}" == "vmlinuz" ]; then
   unset KERNEL
 fi
 
-cd $build_dir
+VNG_RW=''
+if [ "${VNG_RW_ARG}" == "VNG_RW=true" ]; then
+  VNG_RW=' --rw '
+fi
+
+cd $BUILD_DIR || exit 1
 
 if [ -n "${KERNEL}" ] && [ ! -x `which vng` ]; then
   echo "vng not found, please install virtme-ng to enable testing"
@@ -20,11 +26,11 @@ if [ -n "${SCHED}" ]; then
   echo "Running veristat on ${BPF_PATH}"
   if [ -n "${KERNEL}" ]; then
     timeout --preserve-status ${GUEST_TIMEOUT} \
-      vng -m 2G -v --user root -r ${KERNEL} -- \
-        sudo veristat ${BPF_PATH}
+      vng --user root -m 10G --cpu 8 -v --user root -r ${KERNEL} -- \
+        sudo veristat ${BPF_PATH} 2>&1 | tee veristat.ci.log
     exit $?
   else
-    sudo veristat ${BPF_PATH}
+    sudo veristat ${BPF_PATH} 2>&1 | tee veristat.ci.log
     exit $?
   fi
 fi
@@ -32,10 +38,10 @@ fi
 for BPF_PATH in $(find ${BUILD_DIR} -type f -name bpf.bpf.o); do
   if [ -n "${KERNEL}" ]; then
     timeout --preserve-status ${GUEST_TIMEOUT} \
-      vng -m 2G -v --user root -r ${KERNEL} -- \
-        sudo veristat ${BPF_PATH}
+      vng --user root -m 10G --cpu 8 $VNG_RW -v --user root -r ${KERNEL} -- \
+        sudo veristat ${BPF_PATH} 2>&1 | tee "$(basename "${BPF_PATH}")-veristat.ci.log"
   else
     echo "$BPF_PATH"
-    sudo veristat ${BPF_PATH}
+    sudo veristat ${BPF_PATH} 2>&1 | tee "$(basename "${BPF_PATH}")-veristat.ci.log"
   fi
 done

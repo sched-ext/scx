@@ -366,17 +366,22 @@ else
 endif
 
 run_target('test_sched', command: [test_sched, kernel])
-
-foreach s : rust_scheds
-  run_target('test_sched_'+s, command: [test_sched, kernel, s])
-endforeach
-
 run_target('veristat', command: [run_veristat, meson.current_build_dir(),
                                  get_option('veristat_scheduler'), get_option('kernel')])
-foreach s : rust_scheds
-  run_target('veristat_'+s, command: [run_veristat, meson.current_build_dir(),
-                                 get_option('veristat_scheduler'), get_option('kernel'), s])
-endforeach
+
+if get_option('vng_rw_mount') == true
+  foreach s : rust_scheds
+    run_target('test_sched_'+s, command: [test_sched, kernel, s, 'VNG_RW=true'])
+    run_target('veristat_'+s, command: [run_veristat, meson.current_build_dir(),
+                                   get_option('veristat_scheduler'), get_option('kernel'), s, 'VNG_RW=true'])
+  endforeach
+else
+  foreach s : rust_scheds
+    run_target('test_sched_'+s, command: [test_sched, kernel, s])
+    run_target('veristat_'+s, command: [run_veristat, meson.current_build_dir(),
+                                   get_option('veristat_scheduler'), get_option('kernel'), s])
+  endforeach
+endif
 
 run_target('veristat_diff', command: [run_veristat_diff, meson.current_build_dir(),
                                  get_option('veristat_scheduler'), get_option('kernel'),
@@ -405,13 +410,22 @@ if enable_stress
         install : false,
         build_by_default : true)
     ]
-
   run_target('stress_tests', command: [run_stress_tests, '-k', kernel, '-b',
                                        meson.current_build_dir()], depends: [copys])
-  foreach s : rust_scheds
-    run_target('stress_tests_'+s, command: [run_stress_tests, '-k', kernel, '-b',
-                                            meson.current_build_dir(), '--sched', s], depends: [copys])
-  endforeach
+
+  if get_option('vng_rw_mount') == true
+      foreach s : rust_scheds
+        run_target('stress_tests_'+s, command: [run_stress_tests, '-k', kernel, '-b',
+                                                meson.current_build_dir(), '--sched', s,
+                                                '--rw', 'true', '--headers', get_option('kernel_headers')],
+                                                depends: [copys])
+      endforeach
+  else
+      foreach s : rust_scheds
+        run_target('stress_tests_'+s, command: [run_stress_tests, '-k', kernel, '-b',
+                                                meson.current_build_dir(), '--sched', s], depends: [copys])
+      endforeach
+  endif
 endif
 
 subdir('scheds')

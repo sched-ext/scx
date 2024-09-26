@@ -6,7 +6,7 @@ on:
       - cron: "0 * * * *"
     push:
     pull_request:
-      
+
 jobs:
   lint:
     runs-on: ubuntu-24.04
@@ -32,8 +32,8 @@ jobs:
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
       # redundancy to exit fast
       - run: echo 'debconf debconf/frontend select Noninteractive' | sudo debconf-set-selections
-      - run: sudo apt update
-      - run: sudo apt install -y git --no-install-recommends
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y git --no-install-recommends
       # get latest head commit of sched_ext for-next
       - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git heads/for-next | awk '{print $1}')" >> $GITHUB_ENV
 
@@ -45,8 +45,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            linux
-          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}
+            linux/arch/x86/boot/bzImage
+            linux/usr/include
+            linux/**/*.h
+          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-4
 
       - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
         uses: ./.github/actions/install-deps-action
@@ -62,14 +64,6 @@ jobs:
       - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' && steps.cache-kernel.outputs.cache-hit != 'true' }}
         run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
 
-      # cache bzImage alone for rust tests (disk space limit workaround)
-      - name: Cache bzImage
-        id: cache-bzImage
-        uses: actions/cache@v4
-        with:
-          path: |
-            linux/arch/x86/boot/bzImage
-          key: kernel-bzImage-${{ env.SCHED_EXT_KERNEL_COMMIT }}
 
       - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
         name: Clone Kernel
@@ -96,14 +90,18 @@ jobs:
   integration-test:
     runs-on: ubuntu-24.04
     needs: build-kernel
-    continue-on-error: true    
     strategy:
           matrix:
             scheduler: [ scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty ]
+          fail-fast: false
     steps:
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar      
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.scheduler }}
+          prefix-key: "4"
       - uses: ./.github/actions/install-deps-action
       # cache virtiofsd (goes away w/ 24.04)
       - name: Cache virtiofsd
@@ -125,8 +123,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            linux
-          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}
+            linux/arch/x86/boot/bzImage
+            linux/usr/include
+            linux/**/*.h
+          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-4
 
       # need to re-run job when kernel head changes between build and test running.
       - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
@@ -139,7 +139,7 @@ jobs:
       - run: sudo chmod +x /usr/bin/veristat && sudo chmod 755 /usr/bin/veristat
 
       # The actual build:
-      - run: meson setup build -Dkernel=$(pwd)/linux -Dkernel_headers=./linux/usr/include -Denable_stress=true
+      - run: meson setup build -Dkernel=../linux/arch/x86/boot/bzImage -Dkernel_headers=../linux -Denable_stress=true -Dvng_rw_mount=true
       - run: meson compile -C build ${{ matrix.scheduler }}
 
       # Print CPU model before running the tests (this can be useful for
@@ -148,13 +148,35 @@ jobs:
 
       # Test schedulers
       - run: meson compile -C build test_sched_${{ matrix.scheduler }}
+      # this is where errors we want logs on start occurring, so always generate debug info and save logs
+        if: always()
       # Stress schedulers
       - uses: cytopia/shell-command-retry-action@v0.1.2
         name: stress test
+        if: always()
         with:
           retries: 3
           command: meson compile -C build stress_tests_${{ matrix.scheduler }}
       - run: meson compile -C build veristat_${{ matrix.scheduler }}
+        if: always()
+      - run: sudo cat /var/log/dmesg > host-dmesg.ci.log
+        if: always()
+      - run: echo "NICE_REF=${{ github.event.pull_request && github.head_ref || github.ref_name }}" >> $GITHUB_ENV
+        if: always()
+      - run: mkdir -p ./log_save/
+        if: always()
+      # no symlink following here (to avoid cycles)
+      - run: sudo find '/home/runner/' -iname '*.ci.log' -exec mv {} ./log_save/ \;
+        if: always()
+      - name: upload debug logs, bpftrace, veristat, dmesg, etc.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.scheduler }}_logs_${{ env.NICE_REF }}_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ./log_save/*.ci.log
+          # it's all txt files w/ 90 day retention, lets be nice.
+          compression-level: 9
+
 
   rust-test-core:
     runs-on: ubuntu-24.04
@@ -166,6 +188,10 @@ jobs:
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar      
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.component }}
+          prefix-key: "4"
       - uses: ./.github/actions/install-deps-action
       # cache virtiofsd (goes away w/ 24.04)
       - name: Cache virtiofsd
@@ -180,28 +206,24 @@ jobs:
 
       # get latest head commit of sched_ext for-next
       - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git heads/for-next | awk '{print $1}')" >> $GITHUB_ENV
-      # cache bzImage alone for rust tests
-      - name: Cache bzImage
-        id: cache-bzImage
+
+      - name: Cache Kernel
+        id: cache-kernel
         uses: actions/cache@v4
         with:
           path: |
             linux/arch/x86/boot/bzImage
-          key: kernel-bzImage-${{ env.SCHED_EXT_KERNEL_COMMIT }}
+            linux/usr/include
+            linux/**/*.h
+          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-4
 
       # need to re-run job when kernel head changes between build and test running.
-      - if: ${{ steps.cache-bzImage.outputs.cache-hit != 'true' }}
+      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
         name: exit if cache stale
         run: exit -1
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
-          key: ${{ matrix.component }}
-          prefix-key: "1"
       - run: cargo build  --manifest-path rust/${{ matrix.component }}/Cargo.toml
-      - run: cargo test --manifest-path rust/${{ matrix.component }}/Cargo.toml --no-run
-      - run: vng -v --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --net user -- cargo test --manifest-path rust/${{ matrix.component }}/Cargo.toml
+      - run: vng -v --rw --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --net user -- cargo test --manifest-path rust/${{ matrix.component }}/Cargo.toml
 
   rust-test-schedulers:
     runs-on: ubuntu-24.04
@@ -213,6 +235,10 @@ jobs:
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar      
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.scheduler }}
+          prefix-key: "4"
       - uses: ./.github/actions/install-deps-action
       # cache virtiofsd (goes away w/ 24.04)
       - name: Cache virtiofsd
@@ -227,28 +253,24 @@ jobs:
 
       # get latest head commit of sched_ext for-next
       - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git heads/for-next | awk '{print $1}')" >> $GITHUB_ENV
-      # cache bzImage alone for rust tests
-      - name: Cache bzImage
-        id: cache-bzImage
+      # Cache Kernel alone for rust tests
+      - name: Cache Kernel
+        id: cache-kernel
         uses: actions/cache@v4
         with:
           path: |
             linux/arch/x86/boot/bzImage
-          key: kernel-bzImage-${{ env.SCHED_EXT_KERNEL_COMMIT }}
+            linux/usr/include
+            linux/**/*.h
+          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-4
 
       # need to re-run job when kernel head changes between build and test running.
-      - if: ${{ steps.cache-bzImage.outputs.cache-hit != 'true' }}
+      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
         name: exit if cache stale
         run: exit -1
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: scheds/rust
-          key: ${{ matrix.scheduler }}
-          prefix-key: "1"
       - run: cargo build  --manifest-path scheds/rust/${{ matrix.scheduler }}/Cargo.toml
-      - run: cargo test --manifest-path scheds/rust/${{ matrix.scheduler }}/Cargo.toml --no-run
-      - run: vng -v --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --net user -- cargo test --manifest-path scheds/rust/${{ matrix.scheduler }}/Cargo.toml
+      - run: vng -v --rw --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --net user -- cargo test --manifest-path scheds/rust/${{ matrix.scheduler }}/Cargo.toml
 
   pages:
     runs-on: ubuntu-24.04
@@ -270,8 +292,7 @@ jobs:
           rustup install nightly
           export PATH="~/.cargo/bin:$PATH"
           RUSTDOCFLAGS="--enable-index-page -Zunstable-options" ~/.cargo/bin/cargo +nightly doc --workspace --no-deps --bins --lib --examples --document-private-items --all-features
-          sudo apt update
-          sudo apt install build-essential graphviz sphinx-doc python3-sphinx-rtd-theme texlive-latex-recommended python3-yaml -y
+          sudo apt-fast install build-essential graphviz sphinx-doc python3-sphinx-rtd-theme texlive-latex-recommended python3-yaml -y
           cargo install htmlq
           git clone --single-branch -b for-next --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git linux
           cd linux
