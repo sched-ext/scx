@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.scx.Loader
+Exec=/usr/bin/scx_loader
+User=root
+SystemdService=scx_loader.service
