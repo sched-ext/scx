@@ -120,7 +120,7 @@ struct sys_stat {
 	volatile u32	max_lat_cri;	/* maximum latency criticality (LC) */
 	volatile u32	thr_lat_cri;	/* latency criticality threshold for kicking */
 
-	volatile u32	avg_perf_cri;	/* average performance criticality */
+	volatile u32	thr_perf_cri;	/* performance criticality threshold */
 
 	volatile u32	nr_violation;	/* number of utilization violation */
 	volatile u32	nr_active;	/* number of active cores */
@@ -289,7 +289,7 @@ struct task_ctx_x {
 	u16	static_prio;	/* nice priority */
 	u32	cpu_id;		/* where a task ran */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
-	u32	avg_perf_cri;	/* average performance criticality */
+	u32	thr_perf_cri;	/* performance criticality threshold */
 	u32	avg_lat_cri;	/* average latency criticality */
 	u32	nr_active;	/* number of active cores */
 	u32	cpuperf_cur;	/* CPU's current performance target */

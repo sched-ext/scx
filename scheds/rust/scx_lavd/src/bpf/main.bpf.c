@@ -438,7 +438,7 @@ static bool is_lat_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
 static bool is_perf_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
 {
 	if (READ_ONCE(taskc->on_big) && READ_ONCE(taskc->on_little))
-		return taskc->perf_cri >= stat_cur->avg_perf_cri;
+		return taskc->perf_cri >= stat_cur->thr_perf_cri;
 	return READ_ONCE(taskc->on_big);
 }
 
@@ -475,7 +475,7 @@ int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 	m->taskc_x.cpu_util = cpuc->util / 10;
 	m->taskc_x.cpu_id = cpu_id;
 	m->taskc_x.avg_lat_cri = stat_cur->avg_lat_cri;
-	m->taskc_x.avg_perf_cri = stat_cur->avg_perf_cri;
+	m->taskc_x.thr_perf_cri = stat_cur->thr_perf_cri;
 	m->taskc_x.nr_active = stat_cur->nr_active;
 	m->taskc_x.cpuperf_cur = cpuc->cpuperf_cur;
 
@@ -613,7 +613,7 @@ struct sys_stat_ctx {
 	u32		nr_pc_on_big;
 	u32		nr_lc_on_big;
 	u64		sum_perf_cri;
-	u32		avg_perf_cri;
+	u32		thr_perf_cri;
 	u64		new_util;
 	u32		nr_violation;
 };
@@ -761,11 +761,11 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 		 */
 		c->max_lat_cri = c->stat_cur->max_lat_cri;
 		c->avg_lat_cri = c->stat_cur->avg_lat_cri;
-		c->avg_perf_cri = c->stat_cur->avg_perf_cri;
+		c->thr_perf_cri = c->stat_cur->thr_perf_cri;
 	}
 	else {
 		c->avg_lat_cri = c->sum_lat_cri / c->nr_sched;
-		c->avg_perf_cri = c->sum_perf_cri / c->nr_sched;
+		c->thr_perf_cri = c->sum_perf_cri / c->nr_sched;
 	}
 }
 
@@ -791,8 +791,8 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 		calc_avg32(stat_cur->avg_lat_cri, c->avg_lat_cri);
 	stat_next->thr_lat_cri = stat_next->max_lat_cri -
 		((stat_next->max_lat_cri - stat_next->avg_lat_cri) >> 1);
-	stat_next->avg_perf_cri =
-		calc_avg32(stat_cur->avg_perf_cri, c->avg_perf_cri);
+	stat_next->thr_perf_cri =
+		calc_avg32(stat_cur->thr_perf_cri, c->thr_perf_cri);
 
 	stat_next->nr_violation =
 		calc_avg32(stat_cur->nr_violation, c->nr_violation);
@@ -2554,7 +2554,7 @@ static int calc_cpuperf_target(struct sys_stat *stat_cur,
 	 * current CPU utilization (cpuc->util) and 2) the current task's
 	 * performance criticality (taskc->perf_cri) compared to the
 	 * system-wide average performance criticality
-	 * (stat_cur->avg_perf_cri).
+	 * (stat_cur->thr_perf_cri).
 	 *
 	 * When a current CPU utilization is 85% and the current task's
 	 * performance criticality is the same as the system-wide average
@@ -2567,7 +2567,7 @@ static int calc_cpuperf_target(struct sys_stat *stat_cur,
 	 * high when a non-performance-critical task is running (i.e.,
 	 * deboosting CPU frequency).
 	 */
-	max_load = stat_cur->avg_perf_cri * LAVD_CPU_UTIL_MAX_FOR_CPUPERF;
+	max_load = stat_cur->thr_perf_cri * LAVD_CPU_UTIL_MAX_FOR_CPUPERF;
 	cpu_load = taskc->perf_cri * cpuc->util;
 	cpuperf_target = (cpu_load * SCX_CPUPERF_ONE) / max_load;
 	cpuperf_target = min(cpuperf_target, SCX_CPUPERF_ONE);
