@@ -120,6 +120,9 @@ struct sys_stat {
 	volatile u32	max_lat_cri;	/* maximum latency criticality (LC) */
 	volatile u32	thr_lat_cri;	/* latency criticality threshold for kicking */
 
+	volatile u32	min_perf_cri;	/* minimum performance criticality */
+	volatile u32	avg_perf_cri;	/* average performance criticality */
+	volatile u32	max_perf_cri;	/* maximum performance criticality */
 	volatile u32	thr_perf_cri;	/* performance criticality threshold */
 
 	volatile u32	nr_violation;	/* number of utilization violation */
@@ -187,6 +190,8 @@ struct cpu_ctx {
 	 * Information used to keep track of performance criticality
 	 */
 	volatile u64	sum_perf_cri;	/* sum of performance criticality */
+	volatile u64	min_perf_cri;	/* mininum performance criticality */
+	volatile u64	max_perf_cri;	/* maximum performance criticality */
 
 	/*
 	 * Information of a current running task for preemption

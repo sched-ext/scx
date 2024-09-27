@@ -231,6 +231,16 @@ static u64		cur_logical_clk;
 static u64		cur_svc_time;
 
 /*
+ * Big core's compute ratio among currently active cores
+ */
+static u32		cur_big_core_ratio;
+
+/*
+ * Big core's compute ratio when all cores are active
+ */
+static u32		default_big_core_ratio;
+
+/*
  * Options
  */
 volatile bool		no_core_compaction;
@@ -612,6 +622,9 @@ struct sys_stat_ctx {
 	u32		nr_big;
 	u32		nr_pc_on_big;
 	u32		nr_lc_on_big;
+	u64		min_perf_cri;
+	u64		avg_perf_cri;
+	u64		max_perf_cri;
 	u64		sum_perf_cri;
 	u32		thr_perf_cri;
 	u64		new_util;
@@ -624,6 +637,7 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 
 	c->stat_cur = get_sys_stat_cur();
 	c->stat_next = get_sys_stat_next();
+	c->min_perf_cri = 1000;
 	c->now = bpf_ktime_get_ns();
 	c->duration = c->now - c->stat_cur->last_update_clk;
 	c->stat_next->last_update_clk = c->now;
@@ -692,6 +706,14 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		/*
 		 * Accumulate task's performance criticlity information.
 		 */
+		if (cpuc->min_perf_cri < c->min_perf_cri)
+			c->min_perf_cri = cpuc->min_perf_cri;
+		cpuc->min_perf_cri = 1000;
+
+		if (cpuc->max_perf_cri > c->max_perf_cri)
+			c->max_perf_cri = cpuc->max_perf_cri;
+		cpuc->max_perf_cri = 0;
+
 		c->sum_perf_cri += cpuc->sum_perf_cri;
 		cpuc->sum_perf_cri = 0;
 
@@ -761,11 +783,14 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 		 */
 		c->max_lat_cri = c->stat_cur->max_lat_cri;
 		c->avg_lat_cri = c->stat_cur->avg_lat_cri;
-		c->thr_perf_cri = c->stat_cur->thr_perf_cri;
+
+		c->min_perf_cri = c->stat_cur->min_perf_cri;
+		c->max_perf_cri = c->stat_cur->max_perf_cri;
+		c->avg_perf_cri = c->stat_cur->avg_perf_cri;
 	}
 	else {
 		c->avg_lat_cri = c->sum_lat_cri / c->nr_sched;
-		c->thr_perf_cri = c->sum_perf_cri / c->nr_sched;
+		c->avg_perf_cri = c->sum_perf_cri / c->nr_sched;
 	}
 }
 
@@ -791,8 +816,15 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 		calc_avg32(stat_cur->avg_lat_cri, c->avg_lat_cri);
 	stat_next->thr_lat_cri = stat_next->max_lat_cri -
 		((stat_next->max_lat_cri - stat_next->avg_lat_cri) >> 1);
+
+	stat_next->min_perf_cri =
+		calc_avg32(stat_cur->min_perf_cri, c->min_perf_cri);
+	stat_next->avg_perf_cri =
+		calc_avg32(stat_cur->avg_perf_cri, c->avg_perf_cri);
+	stat_next->max_perf_cri =
+		calc_avg32(stat_cur->max_perf_cri, c->max_perf_cri);
 	stat_next->thr_perf_cri =
-		calc_avg32(stat_cur->thr_perf_cri, c->thr_perf_cri);
+		c->stat_cur->thr_perf_cri; /* will be updated later */
 
 	stat_next->nr_violation =
 		calc_avg32(stat_cur->nr_violation, c->nr_violation);
@@ -900,6 +932,7 @@ static void do_core_compaction(void)
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *active, *ovrflw;
 	int nr_cpus, nr_active, nr_active_old, cpu, i;
+	u32 sum_capacity = 0, big_capacity = 0;
 	bool clear;
 	const volatile u16 *cpu_order;
 
@@ -957,6 +990,13 @@ static void do_core_compaction(void)
 				bpf_cpumask_clear_cpu(cpu, active);
 			}
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+
+			/*
+			 * Calculate big capacity ratio among active cores.
+			 */
+			sum_capacity += cpuc->capacity;
+			if (cpuc->big_core)
+				big_capacity += cpuc->capacity;
 		}
 		else {
 			if (i < nr_active_old) {
@@ -986,6 +1026,7 @@ static void do_core_compaction(void)
 		}
 	}
 
+	cur_big_core_ratio = (1000 * big_capacity) / sum_capacity;
 	stat_cur->nr_active = nr_active;
 
 unlock_out:
@@ -1104,6 +1145,83 @@ static int do_autopilot(void)
 	return do_set_power_profile(LAVD_PM_PERFORMANCE, stat_cur->util);
 }
 
+static void update_thr_perf_cri(void)
+{
+	struct sys_stat *stat_cur = get_sys_stat_cur();
+	u32 little_core_ratio, delta, diff, thr;
+
+	if (no_core_compaction || !have_little_core)
+		cur_big_core_ratio = default_big_core_ratio;
+
+	/*
+	 * If all active cores are big, all tasks should run on the big cores.
+	 */
+	if (cur_big_core_ratio == 1000) {
+		stat_cur->thr_perf_cri = 0;
+		return;
+	}
+
+	/*
+	 * We approximate the distribution of performance criticality of tasks
+	 * using min, avg, and max performance criticality of a given period.
+	 *
+	 *   min_perf_cri
+	 *   |         avg_perf_cri
+	 *   |         |                       max_perf_cri
+	 *   |         |                       |
+	 *   <--------><----------------------->
+	 *
+	 * The half of compute capacity should be assigned to the below average
+	 * tasks (< avg_perf_cri), and the other half should assigned to the
+	 * above average tasks (>= avg_perf_cri).
+	 *
+	 *   <------------><------------------->
+	 *   |            |                    |
+	 *   |            |                    1000
+	 *   |            1000 - big_core_ratio (i.e., little_core_ratio)
+	 *   0
+	 */
+	little_core_ratio = 1000 - cur_big_core_ratio;
+	if (little_core_ratio < 500) {
+		/*
+		 *   min_perf_cri
+		 *   |         avg_perf_cri
+		 *   |         |                       max_perf_cri
+		 *   |         |                       |
+		 *   <--------><----------------------->
+		 *
+		 *   <-///-><-------------------------->
+		 *   |     |                           |
+		 *   |     |                           1000
+		 *   |     little_core_ratio
+		 *   0
+		 */
+		delta = stat_cur->avg_perf_cri - stat_cur->min_perf_cri;
+		diff = (delta * little_core_ratio) / 1000;
+		thr = diff + stat_cur->min_perf_cri;
+	}
+	else {
+		/*
+		 *   min_perf_cri
+		 *   |         avg_perf_cri
+		 *   |         |                       max_perf_cri
+		 *   |         |                       |
+		 *   <--------><----------------------->
+		 *
+		 *   <---------------------><-////////->
+		 *   |                     |           |
+		 *   |                     |           1000
+		 *   |                     little_core_ratio
+		 *   0
+		 */
+		delta = stat_cur->max_perf_cri - stat_cur->avg_perf_cri;
+		diff = (delta * cur_big_core_ratio) / 1000;
+		thr = stat_cur->max_perf_cri - diff;
+	}
+
+	stat_cur->thr_perf_cri = thr;
+}
+
 static void update_sys_stat(void)
 {
 	do_update_sys_stat();
@@ -1113,6 +1231,8 @@ static void update_sys_stat(void)
 
 	if (!no_core_compaction)
 		do_core_compaction();
+
+	update_thr_perf_cri();
 
 	if (reinit_cpumask_for_performance) {
 		reinit_cpumask_for_performance = false;
@@ -1455,6 +1575,10 @@ static void update_stat_for_running(struct task_struct *p,
 	taskc->wakeup_ft = 0;
 
 	taskc->perf_cri = perf_cri;
+	if (cpuc->max_perf_cri < taskc->perf_cri)
+		cpuc->max_perf_cri = taskc->perf_cri;
+	if (cpuc->min_perf_cri > taskc->perf_cri)
+		cpuc->min_perf_cri = taskc->perf_cri;
 	cpuc->sum_perf_cri += taskc->perf_cri;
 
 	/*
@@ -3215,7 +3339,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	struct cpdom_ctx *cpdomc;
 	int cpu, i, j, err = 0;
 	u64 cpdom_id;
-	u32 sum_capacity = 0, avg_capacity;
+	u32 sum_capacity = 0, avg_capacity, big_capacity = 0;
 	u16 turbo_cap;
 	
 	bpf_rcu_read_lock();
@@ -3265,6 +3389,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->capacity = get_cpuperf_cap(cpu);
 		cpuc->offline_clk = now;
 		cpuc->cpdom_poll_pos = cpu % LAVD_CPDOM_MAX_NR;
+		cpuc->min_perf_cri = 1000;
 
 		sum_capacity += cpuc->capacity;
 	}
@@ -3289,6 +3414,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->big_core = cpuc->capacity >= avg_capacity;
 		if (cpuc->big_core) {
 			nr_cpus_big++;
+			big_capacity += cpuc->capacity;
 			bpf_cpumask_set_cpu(cpu, big);
 			/*
 			 * Initially, all big cores are in the active domain
@@ -3309,6 +3435,7 @@ static s32 init_per_cpu_ctx(u64 now)
 			debugln("CPU %d is a turbo core.", cpu);
 		}
 	}
+	default_big_core_ratio = (1000 * big_capacity) / sum_capacity;
 
 	/*
 	 * Initialize compute domain id.
