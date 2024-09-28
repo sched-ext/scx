@@ -637,7 +637,7 @@ impl<'a> Scheduler<'a> {
             wait_freq: tc.wait_freq,
             wake_freq: tc.wake_freq,
             perf_cri: tc.perf_cri,
-            avg_perf_cri: tx.avg_perf_cri,
+            thr_perf_cri: tx.thr_perf_cri,
             cpuperf_cur: tx.cpuperf_cur,
             cpu_util: tx.cpu_util,
             nr_active: tx.nr_active,
