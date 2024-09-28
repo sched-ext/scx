@@ -16,6 +16,7 @@ use chrono::DateTime;
 use chrono::Local;
 use log::warn;
 use scx_stats::prelude::*;
+use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
 use serde::Deserialize;
 use serde::Serialize;
@@ -44,6 +45,7 @@ fn fmt_num(v: u64) -> String {
     }
 }
 
+#[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(_om_prefix = "l_", _om_label = "layer_name")]
 pub struct LayerStats {
@@ -55,9 +57,9 @@ pub struct LayerStats {
     pub load: f64,
     #[stat(desc = "fraction of total load")]
     pub load_frac: f64,
-    #[stat(desc = "# tasks")]
+    #[stat(desc = "count of tasks")]
     pub tasks: u32,
-    #[stat(desc = "# sched events duringg the period")]
+    #[stat(desc = "count of sched events during the period")]
     pub total: u64,
     #[stat(desc = "% dispatched into idle CPU")]
     pub sel_local: f64,
@@ -67,7 +69,7 @@ pub struct LayerStats {
     pub enq_expire: f64,
     #[stat(desc = "% re-enqueued due to RT preemption")]
     pub enq_reenq: f64,
-    #[stat(desc = "# times exec duration < min_exec_us")]
+    #[stat(desc = "count of times exec duration < min_exec_us")]
     pub min_exec: f64,
     #[stat(desc = "total exec durations extended due to min_exec_us")]
     pub min_exec_us: u64,
@@ -95,7 +97,7 @@ pub struct LayerStats {
     pub keep_fail_busy: f64,
     #[stat(desc = "whether is exclusive", _om_skip)]
     pub is_excl: u32,
-    #[stat(desc = "# times an excl task skipped a CPU as the sibling was also excl")]
+    #[stat(desc = "count of times an excl task skipped a CPU as the sibling was also excl")]
     pub excl_collision: f64,
     #[stat(desc = "% a sibling CPU was preempted for an exclusive task")]
     pub excl_preempt: f64,
@@ -103,7 +105,7 @@ pub struct LayerStats {
     pub kick: f64,
     #[stat(desc = "% yielded")]
     pub yielded: f64,
-    #[stat(desc = "# times yield was ignored")]
+    #[stat(desc = "count of times yield was ignored")]
     pub yield_ignore: u64,
     #[stat(desc = "% migrated across CPUs")]
     pub migration: f64,
@@ -117,7 +119,7 @@ pub struct LayerStats {
     pub xlayer_rewake: f64,
     #[stat(desc = "mask of allocated CPUs", _om_skip)]
     pub cpus: Vec<u32>,
-    #[stat(desc = "# of CPUs assigned")]
+    #[stat(desc = "count of of CPUs assigned")]
     pub cur_nr_cpus: u32,
     #[stat(desc = "minimum # of CPUs assigned")]
     pub min_nr_cpus: u32,
@@ -326,12 +328,13 @@ impl LayerStats {
     }
 }
 
+#[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct SysStats {
     #[stat(desc = "timestamp", _om_skip)]
     pub at: f64,
-    #[stat(desc = "# sched events during the period")]
+    #[stat(desc = "count of sched events during the period")]
     pub total: u64,
     #[stat(desc = "% dispatched directly into an idle CPU")]
     pub local: f64,
@@ -339,13 +342,15 @@ pub struct SysStats {
     pub open_idle: f64,
     #[stat(desc = "% violated config due to CPU affinity")]
     pub affn_viol: f64,
-    #[stat(desc = "# times an excl task skipped a CPU as the sibling was also excl")]
+    #[stat(desc = "count of times an excl task skipped a CPU as the sibling was also excl")]
     pub excl_collision: f64,
-    #[stat(desc = "# times a sibling CPU was preempted for an excl task")]
+    #[stat(desc = "count of times a sibling CPU was preempted for an excl task")]
     pub excl_preempt: f64,
-    #[stat(desc = "# times a CPU skipped dispatching due to an excl task on the sibling")]
+    #[stat(desc = "count of times a CPU skipped dispatching due to an excl task on the sibling")]
     pub excl_idle: f64,
-    #[stat(desc = "# times an idle sibling CPU was woken up after an excl task is finished")]
+    #[stat(
+        desc = "count of times an idle sibling CPU was woken up after an excl task is finished"
+    )]
     pub excl_wakeup: f64,
     #[stat(desc = "CPU time this binary consumed during the period")]
     pub proc_ms: u64,

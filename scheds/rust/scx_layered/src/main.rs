@@ -331,6 +331,7 @@ lazy_static::lazy_static! {
 /// also an scx_stat server listening on /var/run/scx/root/stat that can
 /// be monitored by running `scx_layered --monitor INTERVAL` separately.
 ///
+///   ```bash
 ///   $ scx_layered --monitor 1
 ///   tot= 117909 local=86.20 open_idle= 0.21 affn_viol= 1.37 proc=6ms
 ///   busy= 34.2 util= 1733.6 load=  21744.1 fallback_cpu=  1
@@ -343,45 +344,11 @@ lazy_static::lazy_static! {
 ///     normal   : util/frac=  502.9/ 29.0 load/frac=    314.5:  1.4 tasks=  3512
 ///                tot=  45434 local=80.97 open_idle= 0.16 preempt= 0.00 affn_viol= 3.56
 ///                cpus= 50 [ 50, 50] fbfffffe 000fffff
+///   ```
 ///
-/// Global statistics:
+/// Global statistics: see [`SysStats`]
 ///
-/// - tot: Total scheduling events in the period.
-///
-/// - local: % that got scheduled directly into an idle CPU.
-///
-/// - open_idle: % of open layer tasks scheduled into occupied idle CPUs.
-///
-/// - affn_viol: % which violated configured policies due to CPU affinity
-///   restrictions.
-///
-/// - proc: CPU time this binary consumed during the period.
-///
-/// - busy: CPU busy % (100% means all CPUs were fully occupied)
-///
-/// - util: CPU utilization % (100% means one CPU was fully occupied)
-///
-/// - load: Sum of weight * duty_cycle for all tasks
-///
-/// Per-layer statistics:
-///
-/// - util/frac: CPU utilization and fraction % (sum of fractions across
-///   layers is always 100%).
-///
-/// - load/frac: Load sum and fraction %.
-///
-/// - tasks: Number of tasks.
-///
-/// - tot: Total scheduling events.
-///
-/// - open_idle: % of tasks scheduled into idle CPUs occupied by other layers.
-///
-/// - preempt: % of tasks that preempted other tasks.
-///
-/// - affn_viol: % which violated configured policies due to CPU affinity
-///   restrictions.
-///
-/// - cpus: CUR_NR_CPUS [MIN_NR_CPUS, MAX_NR_CPUS] CUR_CPU_MASK
+/// Per-layer statistics: see [`LayerStats`]
 ///
 #[derive(Debug, Parser)]
 #[command(verbatim_doc_comment)]

@@ -1827,6 +1827,7 @@ dependencies = [
  "crossbeam",
  "libc",
  "log",
+ "proc-macro2",
  "quote",
  "scx_stats_derive",
  "serde",

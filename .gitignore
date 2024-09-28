@@ -2,3 +2,5 @@ libbpf/
 *.gitignore
 PKGBUILD
 target
+*.swp
+.cache/
