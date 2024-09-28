@@ -154,6 +154,7 @@ struct dom_active_pids {
 	u64 read_idx;
 	u64 write_idx;
 	s32 pids[MAX_DOM_ACTIVE_PIDS];
+	struct task_struct *tasks[MAX_DOM_ACTIVE_PIDS];
 };
 
 struct dom_active_pids dom_active_pids[MAX_DOMS];
@@ -1413,6 +1414,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 		u64 idx = __sync_fetch_and_add(&dom_active_pids[dom_id].write_idx, 1) %
 			MAX_DOM_ACTIVE_PIDS;
 		s32 *pidp;
+		struct task_struct *taskp;
 
 		pidp = MEMBER_VPTR(dom_active_pids, [dom_id].pids[idx]);
 		if (!pidp) {
@@ -1421,8 +1423,16 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 			return;
 		}
 
+		taskp = MEMBER_VPTR(dom_active_pids, [dom_id].tasks[idx]);
+		if (!taskp) {
+			scx_bpf_error("dom_active_pids[%u][%llu] indexing failed",
+					  dom_id, idx);
+			return;
+		}
+
 		*pidp = p->pid;
 		taskc->dom_active_pids_gen = dap_gen;
+		taskp = p;
 	}
 
 	if (fifo_sched)
