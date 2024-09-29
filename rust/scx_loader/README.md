@@ -82,6 +82,38 @@ In case of issues with `scx_loader`, you can debug the service using the followi
      ```
    - Check the logs again for detailed debugging information.
 
+## D-Bus Introspection XML
+
+`scx_loader` provides a D-Bus Introspection XML file that describes its interface. This file can be used by language bindings and tools to interact with the service.
+
+**Using the Introspection XML:**
+
+The introspection XML can be accessed in two ways:
+
+1. **Through the D-Bus introspection interface:**
+
+   ```bash
+   dbus-send --system --print-reply --dest=org.scx.Loader /org/scx/Loader org.freedesktop.DBus.Introspectable.Introspect
+   ```
+
+   This will output the XML describing the `scx_loader` interface.
+
+2. **From the project repository:**
+
+   The XML file is also available in the provided file `org.scx.Loader.xml`.
+
+
+You can then use this XML with tools like `gdbus-codegen` or other language-specific D-Bus bindings to generate code that interacts with `scx_loader`.
+
+For example, with `gdbus-codegen`, you can generate C code for the interface:
+
+```bash
+gdbus-codegen --generate-c-code scx-loader-bindings org.scx.Loader.xml
+```
+
+This will produce header and source files that you can use to interact with `scx_loader` from your C code.
+
+
 ## Development Status
 
 `scx_loader` is under active development.  Future improvements may include:

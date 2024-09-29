@@ -1,0 +1,78 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <!--
+      org.scx.Loader:
+      @short_description: Scheduler Loader Service
+
+      The Scheduler Loader service provides an interface for managing schedulers
+      that can be used with sched-ext. It allows starting, stopping, and querying
+      the status of supported schedulers.
+  -->
+  <interface name="org.scx.Loader">
+
+    <!--
+        CurrentScheduler:
+
+        The name of the currently running scheduler. If no scheduler is active,
+        this property will be set to "unknown".
+    -->
+    <property name="CurrentScheduler" type="s" access="read"/>
+
+    <!--
+        SchedulerMode:
+        @sched_mode: 0 = Auto, 1 = Gaming, 2 = PowerSave, 3 = LowLatency
+
+        The currently active scheduler mode.  Scheduler modes allow you to
+        apply pre-defined configurations to a scheduler that are
+        optimized for different use cases. If no scheduler is active,
+        this property will be set to 0 (Auto).
+    -->
+    <property name="SchedulerMode" type="u" access="read"/>
+
+    <!--
+        SupportedSchedulers:
+
+        A list of the schedulers currently supported by the Scheduler Loader.
+        The names of the supported schedulers will be listed as strings in
+        this array.
+    -->
+    <property name="SupportedSchedulers" type="as" access="read"/>
+
+    <!--
+        StartScheduler:
+
+        Starts the specified scheduler with the given mode.
+
+        @scx_name: The name of the scheduler to start (e.g., "scx_rusty").
+        @sched_mode: The scheduler mode (profile) as an unsigned integer.
+                   See the SchedulerMode property for details.
+    -->
+    <method name="StartScheduler">
+      <arg name="scx_name" type="s" direction="in"/>
+      <arg name="sched_mode" type="u" direction="in"/>
+    </method>
+
+    <!--
+        StartSchedulerWithArgs:
+
+        Starts the specified scheduler with the provided arguments.
+
+        @scx_name: The name of the scheduler to start (e.g., "scx_bpfland").
+        @scx_args: An array of strings representing the CLI arguments to pass
+                    to the scheduler.
+    -->
+    <method name="StartSchedulerWithArgs">
+      <arg name="scx_name" type="s" direction="in"/>
+      <arg name="scx_args" type="as" direction="in"/>
+    </method>
+
+    <!--
+        StopScheduler:
+
+        Stops the currently running scheduler.
+    -->
+    <method name="StopScheduler">
+    </method>
+  </interface>
+</node>
