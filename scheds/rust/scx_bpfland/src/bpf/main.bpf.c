@@ -239,6 +239,11 @@ struct task_ctx {
 	 * Set to true if the task is classified as interactive.
 	 */
 	bool is_interactive;
+
+	/*
+	 * Determine if ops.select_cpu() has been called.
+	 */
+	bool select_cpu_done;
 };
 
 /* Map that contains task-local storage. */
@@ -561,6 +566,12 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	if (p->nr_cpus_allowed == 1) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 			return prev_cpu;
+		/*
+		 * If local_kthreads is enabled, always dispatch per-CPU
+		 * kthreads directly, even if their allowed CPU is not idle.
+		 */
+		if (local_kthreads && is_kthread(p))
+			return prev_cpu;
 		return -ENOENT;
 	}
 
@@ -782,15 +793,22 @@ out_put_cpumask:
 
 s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
+	struct task_ctx *tctx;
 	s32 cpu;
 
-	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
-	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
-		__sync_fetch_and_add(&nr_direct_dispatches, 1);
-		return cpu;
-	}
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return prev_cpu;
 
-	return prev_cpu;
+	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
+	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0))
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+	else
+		cpu = prev_cpu;
+
+	tctx->select_cpu_done = true;
+
+	return cpu;
 }
 
 /*
@@ -800,16 +818,25 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct bpf_cpumask *primary;
+	struct task_ctx *tctx;
 	u64 deadline = task_deadline(p);
-	s32 cpu;
+	s32 cpu = scx_bpf_task_cpu(p);
 
 	/*
-	 * If local_kthreads is enabled, always dispatch per-CPU kthreads
-	 * directly to their target CPU.
+	 * During ttwu, the kernel may decide to skip ->select_task_rq() (e.g.,
+	 * when only one CPU is allowed or migration is disabled). This causes
+	 * to call ops.enqueue() directly without having a chance to call
+	 * ops.select_cpu().
+	 *
+	 * Therefore, rely on the flag tctx->select_cpu_done to determine if
+	 * ops.select_cpu() was called, if not check for idle CPU directly here
+	 * from ops.enqueue(), giving the task a chance to be dispatched
+	 * directly on an idle CPU, without going to the shared DSQ.
 	 */
-	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
-		cpu = scx_bpf_task_cpu(p);
-		if (!dispatch_direct_cpu(p, cpu, enq_flags)) {
+	tctx = try_lookup_task_ctx(p);
+	if (tctx && !tctx->select_cpu_done) {
+		cpu = pick_idle_cpu(p, cpu, 0);
+		if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 			return;
 		}
@@ -835,9 +862,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * If there are idle CPUs in the primary domain that are usable by the
-	 * task, wake them up to see whether they'd be able to steal the just
-	 * queued task.
+	 * If there are idle CPUs that are usable by the task, wake them up to
+	 * see whether they'd be able to steal the just queued task.
 	 */
 	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 	if (cpu >= 0)
@@ -1113,6 +1139,8 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 
 	if (tctx->is_interactive)
 		__sync_fetch_and_sub(&nr_interactive, 1);
+
+	tctx->select_cpu_done = false;
 
 	/*
 	 * Update task vruntime, charging the weighted used time slice.
