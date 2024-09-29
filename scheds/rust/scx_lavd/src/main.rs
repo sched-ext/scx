@@ -566,7 +566,7 @@ impl<'a> Scheduler<'a> {
                 }
                 skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].nr_neighbors[k] = nr_neighbors;
                 for n in neighbors.borrow().iter() {
-                    skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].neighbor_bits[k] = 0x1 << n;
+                    skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].neighbor_bits[k] |= 0x1 << n;
                 }
             }
         }

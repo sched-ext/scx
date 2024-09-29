@@ -2131,7 +2131,8 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 		/*
 		 * Check whether that CPU is qualified to run @p.
 		 */
-		if (cur_cpu == cpu || !can_cpu_be_kicked(now, cpuc))
+		if (cpu >= nr_cpus_onln || cur_cpu == cpu ||
+		    !can_cpu_be_kicked(now, cpuc))
 			continue;
 
 		/*
