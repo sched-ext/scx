@@ -358,7 +358,7 @@ static inline bool vtime_before(u64 a, u64 b)
 /*
  * Return task's average amount of context switches per second.
  */
-static bool task_avg_nvcsw(struct task_struct *p)
+static u64 task_avg_nvcsw(struct task_struct *p)
 {
 	struct task_ctx *tctx;
 
