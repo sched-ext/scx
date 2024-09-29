@@ -411,22 +411,29 @@ static u64 nr_tasks_waiting(void)
 }
 
 /*
- * Return the task's unused portion of its previously assigned time slice in
- * the range a [slice_ns_min .. slice_ns].
+ * Return a value inversely proportional to the task's weight.
  */
-static inline u64 task_slice(struct task_struct *p)
+static inline u64 scale_inverse_fair(struct task_struct *p, u64 value)
 {
+	return value * 100 / p->scx.weight;
+}
+
+/*
+ * Evaluate task's time slice in function of the total amount of tasks that are
+ * waiting to be dispatched and the task's weight.
+ */
+static inline void task_refill_slice(struct task_struct *p)
+{
+	u64 slice;
+
 	/*
 	 * Refresh the amount of waiting tasks to get a more accurate scaling
 	 * factor for the time slice.
 	 */
 	nr_waiting = (nr_waiting + nr_tasks_waiting()) / 2;
 
-	/*
-	 * Scale the time slice based on the average number of waiting tasks
-	 * (more waiting tasks result in a shorter time slice).
-	 */
-	return MAX(slice_ns / (nr_waiting + 1), slice_ns_min);
+	slice = slice_ns / (nr_waiting + 1);
+	p->scx.slice = CLAMP(slice, slice_ns_min, slice_ns);
 }
 
 /*
@@ -817,7 +824,6 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
  */
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	struct bpf_cpumask *primary;
 	struct task_ctx *tctx;
 	u64 deadline = task_deadline(p);
 	s32 cpu = scx_bpf_task_cpu(p);
@@ -1012,9 +1018,9 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * If the current task expired its time slice, but no other task wants
-	 * to run, simply replenish its time slice and let it run for another
-	 * round on the same CPU.
+	 * If the current task expired its time slice, its CPU is still a
+	 * full-idle SMT core and no other task wants to run, simply replenish
+	 * its time slice and let it run for another round on the same CPU.
 	 *
 	 * Note that bpfland_stopping() won't be called if we replenish the
 	 * time slice here. As a result, the nvcsw statistics won't be updated,
@@ -1022,8 +1028,19 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * when the system is overloaded, which isn't the case when there are
 	 * no other tasks to run.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
-		prev->scx.slice = task_slice(prev);
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
+		const struct cpumask *idle_smtmask;
+
+		if (!smt_enabled) {
+			task_refill_slice(prev);
+			return;
+		}
+
+		idle_smtmask = scx_bpf_get_idle_smtmask();
+		if (bpf_cpumask_test_cpu(cpu, idle_smtmask))
+			task_refill_slice(prev);
+		scx_bpf_put_idle_cpumask(idle_smtmask);
+	}
 }
 
 /*
@@ -1085,7 +1102,7 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	 * Refresh task's time slice immediately before it starts to run on its
 	 * assigned CPU.
 	 */
-	p->scx.slice = task_slice(p);
+	task_refill_slice(p);
 
 	/*
 	 * Adjust target CPU frequency before the task starts to run.
@@ -1146,13 +1163,13 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 * Update task vruntime, charging the weighted used time slice.
 	 */
 	task_slice = p->se.sum_exec_runtime - tctx->sum_exec_runtime;
-	p->scx.dsq_vtime += task_slice * 100 / p->scx.weight;
+	p->scx.dsq_vtime += scale_inverse_fair(p, task_slice);
 	tctx->sum_exec_runtime = p->se.sum_exec_runtime;
 
 	/*
 	 * Update global vruntime.
 	 */
-	vtime_now += task_slice * 100 / p->scx.weight;
+	vtime_now += scale_inverse_fair(p, task_slice);
 
 	/*
 	 * Refresh voluntary context switch metrics.
