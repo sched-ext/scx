@@ -24,7 +24,7 @@ const volatile u64 slice_ns = SCX_SLICE_DFL;
 const volatile u64 max_exec_ns = 20 * SCX_SLICE_DFL;
 const volatile u32 nr_possible_cpus = 1;
 const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
-const volatile u32 llc_numa_id_map[MAX_DOMS];
+const volatile u32 llc_numa_id_map[MAX_LLCS];
 const volatile u32 cpu_llc_id_map[MAX_CPUS];
 const volatile u32 nr_layers = 1;
 const volatile u32 nr_nodes = 32;	/* !0 for veristat, set during init */
@@ -208,7 +208,7 @@ struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
 	__type(value, struct cache_ctx);
-	__uint(max_entries, MAX_DOMS);
+	__uint(max_entries, MAX_LLCS);
 	__uint(map_flags, 0);
 } cache_data SEC(".maps");
 
@@ -1444,7 +1444,7 @@ static s32 create_node(u32 node_id)
 		return -ENOENT;
 	}
 
-	bpf_for(cpu, 0, MAX_CPUS) {
+	bpf_for(cpu, 0, nr_possible_cpus) {
 		const volatile u64 *nmask;
 
 		nmask = MEMBER_VPTR(numa_cpumasks, [node_id][cpu / 64]);
@@ -1456,17 +1456,19 @@ static s32 create_node(u32 node_id)
 
 		if (*nmask & (1LLU << (cpu % 64))) {
 			bpf_cpumask_set_cpu(cpu, cpumask);
-			if (!(cctx = lookup_cpu_ctx(-1))) {
+			if (!(cctx = lookup_cpu_ctx(cpu))) {
 				scx_bpf_error("cpu ctx error");
 				ret = -ENOENT;
 				break;
 			}
+
 			cctx->node_idx = node_id;
 			nodec->nr_cpus++;
 			nodec->llc_mask &= (1LLU << node_id);
 		}
 	}
 
+	dbg("creating node %d with %d cpus", node_id, nodec->nr_cpus);
 	bpf_rcu_read_unlock();
 	return ret;
 }
@@ -1498,19 +1500,23 @@ static s32 create_cache(u32 cache_id)
 		return -ENOENT;
 	}
 
-	bpf_for(cpu, 0, MAX_CPUS) {
+	bpf_for(cpu, 0, nr_possible_cpus) {
+		if (!(cctx = lookup_cpu_ctx(cpu))) {
+			bpf_rcu_read_unlock();
+			scx_bpf_error("cpu ctx error");
+			return -ENOENT;
+		}
+
 		llc_id = cpu_to_llc_id(cpu);
 		if (llc_id != cache_id)
 			continue;
 
-		cachec->nr_cpus++;
 		bpf_cpumask_set_cpu(cpu, cpumask);
-		if (!(cctx = lookup_cpu_ctx(-1))) {
-			scx_bpf_error("cpu ctx error"); ret = -ENOENT; break;
-		}
+		cachec->nr_cpus++;
 		cctx->cache_idx = cache_id;
 	}
 
+	dbg("creating cache %d with %d cpus", cache_id, cachec->nr_cpus);
 	bpf_rcu_read_unlock();
 	return ret;
 }
@@ -2040,8 +2046,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		} else {
 			bpf_for(j, 0, nr_llcs) {
 				int node_id = llc_node_id(i);
-				dbg("creating dsq %llu for layer %d on node %d",
-				    llc_dsq_id, i, node_id);
+				dbg("creating dsq %llu for layer %d on node %d in llc %d",
+				    llc_dsq_id, i, node_id, j);
 				ret = scx_bpf_create_dsq(llc_dsq_id, node_id);
 				if (ret < 0)
 					return ret;
