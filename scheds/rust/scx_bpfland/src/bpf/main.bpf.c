@@ -239,6 +239,11 @@ struct task_ctx {
 	 * Set to true if the task is classified as interactive.
 	 */
 	bool is_interactive;
+
+	/*
+	 * Determine if ops.select_cpu() has been called.
+	 */
+	bool select_cpu_done;
 };
 
 /* Map that contains task-local storage. */
@@ -353,7 +358,7 @@ static inline bool vtime_before(u64 a, u64 b)
 /*
  * Return task's average amount of context switches per second.
  */
-static bool task_avg_nvcsw(struct task_struct *p)
+static u64 task_avg_nvcsw(struct task_struct *p)
 {
 	struct task_ctx *tctx;
 
@@ -406,22 +411,29 @@ static u64 nr_tasks_waiting(void)
 }
 
 /*
- * Return the task's unused portion of its previously assigned time slice in
- * the range a [slice_ns_min .. slice_ns].
+ * Return a value inversely proportional to the task's weight.
  */
-static inline u64 task_slice(struct task_struct *p)
+static inline u64 scale_inverse_fair(struct task_struct *p, u64 value)
 {
+	return value * 100 / p->scx.weight;
+}
+
+/*
+ * Evaluate task's time slice in function of the total amount of tasks that are
+ * waiting to be dispatched and the task's weight.
+ */
+static inline void task_refill_slice(struct task_struct *p)
+{
+	u64 slice;
+
 	/*
 	 * Refresh the amount of waiting tasks to get a more accurate scaling
 	 * factor for the time slice.
 	 */
 	nr_waiting = (nr_waiting + nr_tasks_waiting()) / 2;
 
-	/*
-	 * Scale the time slice based on the average number of waiting tasks
-	 * (more waiting tasks result in a shorter time slice).
-	 */
-	return MAX(slice_ns / (nr_waiting + 1), slice_ns_min);
+	slice = slice_ns / (nr_waiting + 1);
+	p->scx.slice = CLAMP(slice, slice_ns_min, slice_ns);
 }
 
 /*
@@ -560,6 +572,12 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	 */
 	if (p->nr_cpus_allowed == 1) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			return prev_cpu;
+		/*
+		 * If local_kthreads is enabled, always dispatch per-CPU
+		 * kthreads directly, even if their allowed CPU is not idle.
+		 */
+		if (local_kthreads && is_kthread(p))
 			return prev_cpu;
 		return -ENOENT;
 	}
@@ -782,15 +800,22 @@ out_put_cpumask:
 
 s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
+	struct task_ctx *tctx;
 	s32 cpu;
 
-	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
-	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
-		__sync_fetch_and_add(&nr_direct_dispatches, 1);
-		return cpu;
-	}
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return prev_cpu;
 
-	return prev_cpu;
+	cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
+	if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0))
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+	else
+		cpu = prev_cpu;
+
+	tctx->select_cpu_done = true;
+
+	return cpu;
 }
 
 /*
@@ -799,17 +824,25 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
  */
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	struct bpf_cpumask *primary;
+	struct task_ctx *tctx;
 	u64 deadline = task_deadline(p);
-	s32 cpu;
+	s32 cpu = scx_bpf_task_cpu(p);
 
 	/*
-	 * If local_kthreads is enabled, always dispatch per-CPU kthreads
-	 * directly to their target CPU.
+	 * During ttwu, the kernel may decide to skip ->select_task_rq() (e.g.,
+	 * when only one CPU is allowed or migration is disabled). This causes
+	 * to call ops.enqueue() directly without having a chance to call
+	 * ops.select_cpu().
+	 *
+	 * Therefore, rely on the flag tctx->select_cpu_done to determine if
+	 * ops.select_cpu() was called, if not check for idle CPU directly here
+	 * from ops.enqueue(), giving the task a chance to be dispatched
+	 * directly on an idle CPU, without going to the shared DSQ.
 	 */
-	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
-		cpu = scx_bpf_task_cpu(p);
-		if (!dispatch_direct_cpu(p, cpu, enq_flags)) {
+	tctx = try_lookup_task_ctx(p);
+	if (tctx && !tctx->select_cpu_done) {
+		cpu = pick_idle_cpu(p, cpu, 0);
+		if (cpu >= 0 && !dispatch_direct_cpu(p, cpu, 0)) {
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 			return;
 		}
@@ -835,9 +868,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * If there are idle CPUs in the primary domain that are usable by the
-	 * task, wake them up to see whether they'd be able to steal the just
-	 * queued task.
+	 * If there are idle CPUs that are usable by the task, wake them up to
+	 * see whether they'd be able to steal the just queued task.
 	 */
 	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 	if (cpu >= 0)
@@ -986,9 +1018,9 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * If the current task expired its time slice, but no other task wants
-	 * to run, simply replenish its time slice and let it run for another
-	 * round on the same CPU.
+	 * If the current task expired its time slice, its CPU is still a
+	 * full-idle SMT core and no other task wants to run, simply replenish
+	 * its time slice and let it run for another round on the same CPU.
 	 *
 	 * Note that bpfland_stopping() won't be called if we replenish the
 	 * time slice here. As a result, the nvcsw statistics won't be updated,
@@ -996,8 +1028,19 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * when the system is overloaded, which isn't the case when there are
 	 * no other tasks to run.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
-		prev->scx.slice = task_slice(prev);
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
+		const struct cpumask *idle_smtmask;
+
+		if (!smt_enabled) {
+			task_refill_slice(prev);
+			return;
+		}
+
+		idle_smtmask = scx_bpf_get_idle_smtmask();
+		if (bpf_cpumask_test_cpu(cpu, idle_smtmask))
+			task_refill_slice(prev);
+		scx_bpf_put_idle_cpumask(idle_smtmask);
+	}
 }
 
 /*
@@ -1059,7 +1102,7 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	 * Refresh task's time slice immediately before it starts to run on its
 	 * assigned CPU.
 	 */
-	p->scx.slice = task_slice(p);
+	task_refill_slice(p);
 
 	/*
 	 * Adjust target CPU frequency before the task starts to run.
@@ -1114,17 +1157,19 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	if (tctx->is_interactive)
 		__sync_fetch_and_sub(&nr_interactive, 1);
 
+	tctx->select_cpu_done = false;
+
 	/*
 	 * Update task vruntime, charging the weighted used time slice.
 	 */
 	task_slice = p->se.sum_exec_runtime - tctx->sum_exec_runtime;
-	p->scx.dsq_vtime += task_slice * 100 / p->scx.weight;
+	p->scx.dsq_vtime += scale_inverse_fair(p, task_slice);
 	tctx->sum_exec_runtime = p->se.sum_exec_runtime;
 
 	/*
 	 * Update global vruntime.
 	 */
-	vtime_now += task_slice * 100 / p->scx.weight;
+	vtime_now += scale_inverse_fair(p, task_slice);
 
 	/*
 	 * Refresh voluntary context switch metrics.
