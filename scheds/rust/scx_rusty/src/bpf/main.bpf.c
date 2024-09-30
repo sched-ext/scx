@@ -86,6 +86,9 @@ const volatile u32 debug;
 /* base slice duration */
 static u64 slice_ns = SCX_SLICE_DFL;
 
+/* map task ptrs to a pid-typed ctr to handle pid changes */
+volatile s32 fake_pid_ctr = 0;
+
 /*
  * Per-CPU context
  */
@@ -169,6 +172,23 @@ struct {
 	__uint(map_flags, 0);
 } task_data SEC(".maps");
 
+/* map task ptr to pid ctr*/
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, u64);
+	__type(value, pid_t);
+	__uint(max_entries, 1000000);
+	__uint(map_flags, 0);
+} task_ptr_fpid SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, pid_t);
+	__type(value, u64);
+	__uint(max_entries, 1000000);
+	__uint(map_flags, 0);
+} fpid_task_ptr SEC(".maps");
+
 static struct dom_ctx *try_lookup_dom_ctx(u32 dom_id)
 {
 	return bpf_map_lookup_elem(&dom_data, &dom_id);
@@ -185,20 +205,55 @@ static struct dom_ctx *lookup_dom_ctx(u32 dom_id)
 	return domc;
 }
 
+static pid_t get_fake_pid_for_task_ptr_u64(u64 task_ptr)
+{	
+	pid_t *fake_pid;
+	pid_t new_fake_pid;
+
+	fake_pid = bpf_map_lookup_elem(&task_ptr_fpid, &task_ptr);
+	if(fake_pid){
+		new_fake_pid = *fake_pid;
+	} else {
+		new_fake_pid = __sync_fetch_and_add(&fake_pid_ctr, 1);
+
+		if(bpf_map_update_elem(&task_ptr_fpid, &task_ptr, &new_fake_pid, 0 /*BPF_NOEXIST*/)
+		&&bpf_map_update_elem(&fpid_task_ptr, &new_fake_pid, &task_ptr, 0 /*BPF_NOEXIST*/)){
+			scx_bpf_error("Failed to set fake pid for task ptr %llu, fake_pid: %d", task_ptr, new_fake_pid);
+		}
+	}	
+	return new_fake_pid;
+}
+
+static pid_t get_fake_pid_for_task(struct task_struct *p)
+{
+	return get_fake_pid_for_task_ptr_u64((u64)p);
+}
+
+
+static struct task_ctx *try_lookup_task_ctx_for_fpid(pid_t fpid)
+{
+	return bpf_map_lookup_elem(&task_data, &fpid);
+}
+
 static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
 {
-	s32 pid = p->pid;
+	s32 pid;
+	pid = get_fake_pid_for_task(p);
 
 	return bpf_map_lookup_elem(&task_data, &pid);
 }
 
+static struct task_ctx *get_ctx_for_fake_pid(pid_t fake_pid)
+{
+	return try_lookup_task_ctx_for_fpid(fake_pid);
+}
 static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 {
 	struct task_ctx *taskc;
 
 	taskc = try_lookup_task_ctx(p);
 	if (!taskc)
-		scx_bpf_error("task_ctx lookup failed for pid %d", p->pid);
+		scx_bpf_error("task_ctx lookup failed for pid %d", get_fake_pid_for_task(p));
 
 	return taskc;
 }
@@ -318,7 +373,7 @@ static void dom_dcycle_adj(u32 dom_id, u32 weight, u64 now, bool runnable)
 	}
 }
 
-static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
+static void dom_dcycle_xfer_task(struct task_ctx *taskc,
 			         struct dom_ctx *from_domc,
 				 struct dom_ctx *to_domc, u64 now)
 {
@@ -401,17 +456,12 @@ int dom_xfer_task(pid_t pid, u32 new_dom_id, u64 now)
 {
 	struct dom_ctx *from_domc, *to_domc;
 	struct task_ctx *taskc;
-	struct task_struct *p;
 
-	p = bpf_task_from_pid(pid);
-	if (!p) {
+	taskc = get_ctx_for_fake_pid(pid);
+	if (!taskc) {
 		scx_bpf_error("Failed to lookup task %d", pid);
 		return 0;
 	}
-
-	taskc = lookup_task_ctx(p);
-	if (!taskc)
-		goto free_task;
 
 	from_domc = lookup_dom_ctx(taskc->dom_id);
 	to_domc = lookup_dom_ctx(new_dom_id);
@@ -419,9 +469,8 @@ int dom_xfer_task(pid_t pid, u32 new_dom_id, u64 now)
 	if (!from_domc || !to_domc || !taskc)
 		goto free_task;
 
-	dom_dcycle_xfer_task(p, taskc, from_domc, to_domc, now);
+	dom_dcycle_xfer_task(taskc, from_domc, to_domc, now);
 free_task:
-	bpf_task_release(p);
 	return 0;
 }
 
@@ -793,7 +842,7 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 		u64 now = bpf_ktime_get_ns();
 
 		if (!init_dsq_vtime)
-			dom_xfer_task(p->pid, new_dom_id, now);
+			dom_xfer_task(get_fake_pid_for_task(p), new_dom_id, now);
 		taskc->dom_id = new_dom_id;
 		p->scx.dsq_vtime = dom_min_vruntime(new_domc);
 		taskc->deadline = p->scx.dsq_vtime +
@@ -1098,7 +1147,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *taskc;
 	struct bpf_cpumask *p_cpumask;
-	pid_t pid = p->pid;
+	pid_t pid = get_fake_pid_for_task(p);
 	u32 *new_dom;
 	s32 cpu;
 
@@ -1421,7 +1470,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 			return;
 		}
 
-		*pidp = p->pid;
+		*pidp = get_fake_pid_for_task(p);
 		taskc->dom_active_pids_gen = dap_gen;
 	}
 
@@ -1504,7 +1553,7 @@ void BPF_STRUCT_OPS(rusty_set_weight, struct task_struct *p, u32 weight)
 		return;
 
 	if (debug >= 2)
-		bpf_printk("%s[%d]: SET_WEIGHT %u -> %u", p->comm, p->pid,
+		bpf_printk("%s[%d]: SET_WEIGHT %u -> %u", p->comm, get_fake_pid_for_task(p),
 			   taskc->weight, weight);
 
 	taskc->weight = weight;
@@ -1559,7 +1608,7 @@ static void task_pick_and_set_domain(struct task_ctx *taskc,
 
 	if (!task_set_domain(taskc, p, dom_id, init_dsq_vtime))
 		scx_bpf_error("Failed to set dom%d for %s[%d]",
-			      dom_id, p->comm, p->pid);
+			      dom_id, p->comm, get_fake_pid_for_task(p));
 }
 
 void BPF_STRUCT_OPS(rusty_set_cpumask, struct task_struct *p,
@@ -1610,7 +1659,7 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 	long ret;
 	pid_t pid;
 
-	pid = p->pid;
+	pid = get_fake_pid_for_task(p);
 
 	/*
 	 * XXX - We want BPF_NOEXIST but bpf_map_delete_elem() in .disable() may
@@ -1624,7 +1673,7 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 	}
 
 	if (debug >= 2)
-		bpf_printk("%s[%d]: INIT (weight %u))", p->comm, p->pid, p->scx.weight);
+		bpf_printk("%s[%d]: INIT (weight %u))", p->comm, get_fake_pid_for_task(p), p->scx.weight);
 
 	/*
 	 * Read the entry from the map immediately so we can add the cpumask
@@ -1655,7 +1704,7 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 void BPF_STRUCT_OPS(rusty_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
-	pid_t pid = p->pid;
+	pid_t pid = get_fake_pid_for_task(p);
 	long ret;
 
 	/*
