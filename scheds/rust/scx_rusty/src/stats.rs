@@ -10,6 +10,7 @@ use anyhow::Result;
 use chrono::DateTime;
 use chrono::Local;
 use scx_stats::prelude::*;
+use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
 use scx_utils::Cpumask;
 use serde::Deserialize;
@@ -25,6 +26,7 @@ fn signed(x: f64) -> String {
     }
 }
 
+#[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(_om_prefix = "d_", _om_label = "domain")]
 pub struct DomainStats {
@@ -50,6 +52,7 @@ impl DomainStats {
     }
 }
 
+#[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(_om_prefix = "n_", _om_label = "node")]
 pub struct NodeStats {
@@ -77,6 +80,7 @@ impl NodeStats {
     }
 }
 
+#[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct ClusterStats {
