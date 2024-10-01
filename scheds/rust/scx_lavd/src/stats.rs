@@ -10,10 +10,12 @@ use anyhow::bail;
 use anyhow::Result;
 use gpoint::GPoint;
 use scx_stats::prelude::*;
+use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
 use serde::Deserialize;
 use serde::Serialize;
 
+#[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct SysStats {
@@ -125,6 +127,7 @@ impl SysStats {
     }
 }
 
+#[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 pub struct SchedSample {
     #[stat(desc = "Sequence ID of this message")]

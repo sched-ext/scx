@@ -6,10 +6,12 @@ use std::time::Duration;
 
 use anyhow::Result;
 use scx_stats::prelude::*;
+use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
 use serde::Deserialize;
 use serde::Serialize;
 
+#[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct Metrics {
