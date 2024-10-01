@@ -68,6 +68,8 @@ const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
 const MAX_COMM: usize = bpf_intf::consts_MAX_COMM as usize;
 const MAX_LAYER_WEIGHT: u32 = bpf_intf::consts_MAX_LAYER_WEIGHT;
+const MIN_LAYER_WEIGHT: u32 = bpf_intf::consts_MIN_LAYER_WEIGHT;
+const DEFAULT_LAYER_WEIGHT: u32 = bpf_intf::consts_DEFAULT_LAYER_WEIGHT;
 const MAX_LAYER_MATCH_ORS: usize = bpf_intf::consts_MAX_LAYER_MATCH_ORS as usize;
 const MAX_LAYERS: usize = bpf_intf::consts_MAX_LAYERS as usize;
 const USAGE_HALF_LIFE: u32 = bpf_intf::consts_USAGE_HALF_LIFE;
@@ -76,7 +78,6 @@ const NR_GSTATS: usize = bpf_intf::global_stat_idx_NR_GSTATS as usize;
 const NR_LSTATS: usize = bpf_intf::layer_stat_idx_NR_LSTATS as usize;
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
 const CORE_CACHE_LEVEL: u32 = 2;
-const MIN_LAYER_WEIGHT: u32 = 1;
 
 #[rustfmt::skip]
 lazy_static::lazy_static! {
@@ -101,7 +102,7 @@ lazy_static::lazy_static! {
 			preempt_first: false,
 			exclusive: false,
                         slice_us: 20000,
-                        weight: 100,
+                        weight: DEFAULT_LAYER_WEIGHT,
                         growth_algo: LayerGrowthAlgo::Sticky,
 			perf: 1024,
 			nodes: vec![],
@@ -122,7 +123,7 @@ lazy_static::lazy_static! {
 			preempt_first: false,
 			exclusive: true,
                         slice_us: 20000,
-                        weight: 100,
+                        weight: DEFAULT_LAYER_WEIGHT,
                         growth_algo: LayerGrowthAlgo::Sticky,
 			perf: 1024,
 			nodes: vec![],
@@ -142,7 +143,7 @@ lazy_static::lazy_static! {
 			preempt_first: false,
 			exclusive: false,
                         slice_us: 20000,
-                        weight: 100,
+                        weight: DEFAULT_LAYER_WEIGHT,
                         growth_algo: LayerGrowthAlgo::Linear,
 			perf: 1024,
 			nodes: vec![],
@@ -1608,6 +1609,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     layer.exclusive.write(*exclusive);
                     layer.growth_algo = growth_algo.as_bpf_enum();
                     layer.weight = *weight;
+                    layer.weight = if *weight < MAX_LAYER_WEIGHT && *weight > MIN_LAYER_WEIGHT {
+                        *weight
+                    } else {
+                        DEFAULT_LAYER_WEIGHT
+                    };
                     layer.perf = u32::try_from(*perf)?;
                     layer.node_mask = nodemask_from_nodes(nodes) as u64;
                     for topo_node in topo.nodes() {
