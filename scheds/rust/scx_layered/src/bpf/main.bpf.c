@@ -613,10 +613,12 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 			goto out_put;
 		}
 		bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
-		bpf_cpumask_and(pref_idle_cpumask, cache_cpumask, pref_idle_cpumask);
-		bpf_cpumask_and(pref_idle_cpumask, layer_cpumask, pref_idle_cpumask);
-		if ((cpu = pick_idle_cpu_from(pref_idle_cpumask, prev_cpu,
-					      idle_cpumask)) >= 0)
+		bpf_cpumask_and(pref_idle_cpumask, cache_cpumask,
+				cast_mask(pref_idle_cpumask));
+		bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
+				cast_mask(pref_idle_cpumask));
+		if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
+					      prev_cpu, idle_cpumask)) >= 0)
 			goto out_put;
 
 		/*
@@ -629,20 +631,21 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 			}
 			bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
 			bpf_cpumask_and(pref_idle_cpumask, node_cpumask,
-					pref_idle_cpumask);
+					cast_mask(pref_idle_cpumask));
 			bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
-					pref_idle_cpumask);
-			if ((cpu = pick_idle_cpu_from(pref_idle_cpumask, prev_cpu,
-						      idle_cpumask)) >= 0)
+					cast_mask(pref_idle_cpumask));
+			if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
+						      prev_cpu, idle_cpumask)) >= 0)
 				goto out_put;
 		}
 		/*
 		 * At this point try the whole machine
 		 */
 		bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
-		bpf_cpumask_and(pref_idle_cpumask, layer_cpumask, pref_idle_cpumask);
-		if ((cpu = pick_idle_cpu_from(pref_idle_cpumask, prev_cpu,
-					      idle_cpumask)) >= 0)
+		bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
+				cast_mask(pref_idle_cpumask));
+		if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
+					      prev_cpu, idle_cpumask)) >= 0)
 			goto out_put;
 	}
 
@@ -1202,7 +1205,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 				if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
 				    (cpu <= nr_possible_cpus && cpu == fallback_cpu &&
-				     MEMBER_VPTR(layer, ->nr_cpus) == 0)) {
+				     layer->nr_cpus == 0)) {
 					if (scx_bpf_consume(dsq_id))
 						return;
 				}
@@ -1873,7 +1876,7 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 	}
 	bpf_for(i, 0, nr_llcs) {
 		dsq_id = llc_hi_fallback_dsq_id(i);
-		scx_bpf_dump("HI_FALLBACK[%d] nr_queued=%d -%llums\n",
+		scx_bpf_dump("HI_FALLBACK[%llu] nr_queued=%d -%llums\n",
 			     dsq_id, scx_bpf_dsq_nr_queued(dsq_id),
 			     dsq_first_runnable_for_ms(dsq_id, now));
 	}
