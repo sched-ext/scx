@@ -2128,22 +2128,25 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 		 */
 		cpu = bpf_cpumask_any_distribute(cpumask);
 
-		/*
-		 * Check whether that CPU is qualified to run @p.
-		 */
-		if (cpu >= nr_cpus_onln || cur_cpu == cpu ||
-		    !can_cpu_be_kicked(now, cpuc))
+		if (cpu >= nr_cpus_onln || cur_cpu == cpu)
 			continue;
 
 		/*
-		 * If that CPU runs a lower priority task, that's a victim
-		 * candidate.
+		 * Check whether that CPU is qualified to run @p.
 		 */
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
 			goto null_out;
 		}
+
+		if (!can_cpu_be_kicked(now, cpuc))
+			continue;
+
+		/*
+		 * If that CPU runs a lower priority task, that's a victim
+		 * candidate.
+		 */
 		ret = can_cpu1_kick_cpu2(&prm_task, &prm_cpus[v], cpuc);
 		if (ret == true && ++v >= 2)
 			break;
