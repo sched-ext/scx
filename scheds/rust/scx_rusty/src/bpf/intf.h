@@ -63,7 +63,7 @@ enum consts {
 	 * this isn't a practical problem as the LB rounds are best-effort
 	 * anyway and will be retried until loads are balanced.
 	 */
-	MAX_DOM_ACTIVE_PIDS	= 1024,
+	MAX_DOM_ACTIVE_TPTRS	= 1024,
 };
 
 /* Statistics */
@@ -106,7 +106,7 @@ struct task_ctx {
 	u32 dom_id;
 	u32 weight;
 	bool runnable;
-	u64 dom_active_pids_gen;
+	u64 dom_active_tptrs_gen;
 	u64 deadline;
 
 	u64 sum_runtime;
