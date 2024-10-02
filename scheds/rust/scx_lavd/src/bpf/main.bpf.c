@@ -1061,7 +1061,7 @@ static void update_power_mode_time(void)
 static int do_set_power_profile(s32 pm, int util)
 {
 	/*
-	 * Skip setting the mode if alreay in the same mode.
+	 * Skip setting the mode if already in the same mode.
 	 */
 	if (power_mode == pm)
 		return 0;
