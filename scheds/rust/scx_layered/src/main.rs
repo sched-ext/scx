@@ -736,7 +736,10 @@ struct Stats {
     layer_loads: Vec<f64>,
 
     // infeasible stats
+    effective_max_weight: f64,
+    dcycle_sums: Vec<f64>,
     total_dcycle_sum: f64,
+    load_sums: Vec<f64>,
     total_load_sum: f64,
 
     total_util: f64, // Running AVG of sum of layer_utils
@@ -806,7 +809,10 @@ impl Stats {
             total_load: 0.0,
             layer_loads: vec![0.0; nr_layers],
 
+            effective_max_weight: 0.0,
+            dcycle_sums: vec![0.0, nr_layers as f64],
             total_dcycle_sum: 0.0,
+            load_sums: vec![0.0, nr_layers as f64],
             total_load_sum: 0.0,
 
             total_util: 0.0,
@@ -866,7 +872,13 @@ impl Stats {
         let (total_load, layer_loads) = Self::read_layer_loads(skel, self.nr_layers);
 
         let cur_layer_cycles = Self::read_layer_cycles(&cpu_ctxs, self.nr_layers);
-        cur_layer_cycles.iter().zip(layer_weights).enumerate().map(|(layer_idx, (usage, weight))| load_agg.record_dom_load(layer_idx, weight, *usage as f64));
+        let _: Vec<_> = cur_layer_cycles.iter().
+            zip(layer_weights).
+            enumerate().
+            map(|(layer_idx, (usage, weight))|
+                load_agg.record_dom_load(layer_idx, weight, layer_loads[layer_idx])
+            ).
+            collect();
         let cur_layer_utils: Vec<f64> = cur_layer_cycles
             .iter()
             .zip(self.prev_layer_cycles.iter())
@@ -901,8 +913,11 @@ impl Stats {
             total_load,
             layer_loads,
 
+            effective_max_weight: load_ledger.effective_max_weight(),
+            dcycle_sums: load_ledger.dom_dcycle_sums().to_vec(),
             total_dcycle_sum: load_ledger.global_dcycle_sum(),
             total_load_sum: load_ledger.global_load_sum(),
+            load_sums: load_ledger.dom_load_sums().to_vec(),
 
             total_util: layer_utils.iter().sum(),
             layer_utils: layer_utils.try_into().unwrap(),
@@ -1470,8 +1485,6 @@ struct Scheduler<'a, 'b> {
     cpu_pool: CpuPool,
     layers: Vec<Layer>,
 
-    load_agg: LoadAggregator,
-
     proc_reader: procfs::ProcReader,
     sched_stats: Stats,
 
@@ -1487,7 +1500,6 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         opts: &Opts,
         specs: &Vec<LayerSpec>,
         topo: &Topology,
-        load_agg: &mut LoadAggregator,
     ) -> Result<()> {
         skel.maps.rodata_data.nr_layers = specs.len() as u32;
         let mut perf_set = false;
@@ -1603,13 +1615,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     } else {
                         (layer.slice_ns as f64 * (1.0 - *yield_ignore)) as u64
                     };
-                    load_agg.init_domain(spec_i);
                     layer.preempt.write(*preempt);
                     layer.preempt_first.write(*preempt_first);
                     layer.exclusive.write(*exclusive);
                     layer.growth_algo = growth_algo.as_bpf_enum();
-                    layer.weight = *weight;
-                    layer.weight = if *weight < MAX_LAYER_WEIGHT && *weight > MIN_LAYER_WEIGHT {
+                    layer.weight = if *weight <= MAX_LAYER_WEIGHT && *weight >= MIN_LAYER_WEIGHT {
                         *weight
                     } else {
                         DEFAULT_LAYER_WEIGHT
@@ -1682,7 +1692,6 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         let nr_layers = layer_specs.len();
         let topo = Topology::new()?;
         let cpu_pool = CpuPool::new(&topo)?;
-        let mut load_agg = LoadAggregator::new(topo.cpus().len(), false);
 
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
@@ -1721,7 +1730,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         for cpu in cpu_pool.all_cpus.iter_ones() {
             skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
-        Self::init_layers(&mut skel, opts, layer_specs, &topo, &mut load_agg)?;
+        Self::init_layers(&mut skel, opts, layer_specs, &topo)?;
         Self::init_nodes(&mut skel, opts, &topo);
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
@@ -1752,8 +1761,6 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
             cpu_pool,
             layers,
-
-            load_agg: load_agg,
 
             sched_stats: Stats::new(&mut skel, &proc_reader)?,
 
@@ -1859,10 +1866,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
     fn step(&mut self) -> Result<()> {
         let started_at = Instant::now();
+        let mut load_agg = LoadAggregator::new(self.cpu_pool.nr_cpus, false);
         self.sched_stats.refresh(
             &mut self.skel,
             &self.proc_reader,
-            &mut self.load_agg,
+            &mut load_agg,
             started_at,
             self.processing_dur,
         )?;
@@ -1874,10 +1882,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
     fn generate_sys_stats(
         &mut self,
         stats: &Stats,
+        load_agg: &mut LoadAggregator,
         cpus_ranges: &mut Vec<(usize, usize)>,
     ) -> Result<SysStats> {
         let bstats = &stats.bpf_stats;
-        let load_ledger = self.load_agg.calculate();
+        let load_ledger = load_agg.calculate();
 
         let mut sys_stats = SysStats::new(stats, bstats, &load_ledger, self.cpu_pool.fallback_cpu)?;
 
@@ -1927,9 +1936,10 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                             (self.layers[i].nr_cpus, self.layers[i].nr_cpus);
                     }
 
-                    stats.refresh(&mut self.skel, &self.proc_reader, &mut self.load_agg, now, self.processing_dur)?;
+                    let mut load_agg = LoadAggregator::new(self.cpu_pool.nr_cpus, false);
+                    stats.refresh(&mut self.skel, &self.proc_reader, &mut load_agg, now, self.processing_dur)?;
                     let sys_stats =
-                        self.generate_sys_stats(&stats, cpus_ranges.get_mut(&tid).unwrap())?;
+                        self.generate_sys_stats(&stats, &mut load_agg, cpus_ranges.get_mut(&tid).unwrap())?;
                     res_ch.send(StatsRes::Refreshed((stats, sys_stats)))?;
                 }
                 Ok(StatsReq::Bye(tid)) => {

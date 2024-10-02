@@ -183,7 +183,8 @@ impl LayerStats {
             util: stats.layer_utils[lidx] * 100.0,
             util_frac: calc_frac(stats.layer_utils[lidx], stats.total_util),
             load: stats.layer_loads[lidx],
-            load_adj: load_ledger.dom_load_sums()[lidx],
+            load_adj: stats.load_sums[lidx]/stats.total_load_sum,
+            // load_adj: stats.dcycle_sums[lidx]/stats.total_dcycle_sum,
             load_frac: calc_frac(stats.layer_loads[lidx], stats.total_load),
             tasks: stats.nr_layer_tasks[lidx] as u32,
             total: ltotal,
@@ -409,7 +410,7 @@ impl SysStats {
             busy: stats.cpu_busy * 100.0,
             util: stats.total_util * 100.0,
             load: stats.total_load,
-            load_adj: load_ledger.global_load_sum(),
+            load_adj: stats.total_dcycle_sum / stats.nr_layers as f64,
             fallback_cpu: fallback_cpu as u32,
             layers: BTreeMap::new(),
         })
