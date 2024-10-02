@@ -18,7 +18,6 @@ use log::warn;
 use scx_stats::prelude::*;
 use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
-use scx_utils::LoadLedger;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -152,7 +151,6 @@ impl LayerStats {
     pub fn new(
         lidx: usize,
         layer: &Layer,
-        load_ledger: &LoadLedger,
         stats: &Stats,
         bstats: &BpfStats,
         nr_cpus_range: (usize, usize),
@@ -380,7 +378,7 @@ pub struct SysStats {
 }
 
 impl SysStats {
-    pub fn new(stats: &Stats, bstats: &BpfStats, load_ledger: &LoadLedger, fallback_cpu: usize) -> Result<Self> {
+    pub fn new(stats: &Stats, bstats: &BpfStats, fallback_cpu: usize) -> Result<Self> {
         let lsum = |idx| stats.bpf_stats.lstats_sums[idx as usize];
         let total = lsum(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
             + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)

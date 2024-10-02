@@ -1886,12 +1886,10 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         cpus_ranges: &mut Vec<(usize, usize)>,
     ) -> Result<SysStats> {
         let bstats = &stats.bpf_stats;
-        let load_ledger = load_agg.calculate();
-
-        let mut sys_stats = SysStats::new(stats, bstats, &load_ledger, self.cpu_pool.fallback_cpu)?;
+        let mut sys_stats = SysStats::new(stats, bstats, self.cpu_pool.fallback_cpu)?;
 
         for (lidx, (spec, layer)) in self.layer_specs.iter().zip(self.layers.iter()).enumerate() {
-            let layer_stats = LayerStats::new(lidx, layer, &load_ledger, stats, bstats, cpus_ranges[lidx]);
+            let layer_stats = LayerStats::new(lidx, layer, stats, bstats, cpus_ranges[lidx]);
             sys_stats.layers.insert(spec.name.to_string(), layer_stats);
             cpus_ranges[lidx] = (layer.nr_cpus, layer.nr_cpus);
         }
