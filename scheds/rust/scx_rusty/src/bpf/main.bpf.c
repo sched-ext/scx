@@ -1839,6 +1839,12 @@ static s32 initialize_cpu(s32 cpu)
 	return -ENOENT;
 }
 
+void BPF_STRUCT_OPS(rusty_cpu_online, s32 cpu)
+{
+	if(initialize_cpu(cpu))
+		scx_bpf_error("Failed to initialize cpu");
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 {
 	s32 i, ret;
@@ -1891,6 +1897,7 @@ SCX_OPS_DEFINE(rusty,
 	       .running			= (void *)rusty_running,
 	       .stopping		= (void *)rusty_stopping,
 	       .quiescent		= (void *)rusty_quiescent,
+	       .cpu_online		= (void *)rusty_cpu_online,
 	       .set_weight		= (void *)rusty_set_weight,
 	       .set_cpumask		= (void *)rusty_set_cpumask,
 	       .init_task		= (void *)rusty_init_task,
