@@ -9,6 +9,9 @@ sched_ext enables safe and rapid iterations of scheduler implementations, thus
 radically widening the scope of scheduling strategies that can be experimented
 with and deployed; even in massive and complex production environments.
 
+You can find more information, links to blog posts and recordings, in the [wiki](https://github.com/sched-ext/scx/wiki).
+The following are a few highlights of this repository.
+
 - The [scx_layered case
   study](https://github.com/sched-ext/scx/blob/case-studies/case-studies/scx_layered.md)
   concretely demonstrates the power and benefits of sched_ext.
