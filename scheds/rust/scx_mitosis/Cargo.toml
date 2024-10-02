@@ -20,13 +20,13 @@ libc = "0.2.137"
 log = "0.4.17"
 maplit = "1.0.2"
 prometheus-client = "0.19"
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.4" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.5" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 simplelog = "0.12"
 
 [build-dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.4" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.5" }
 
 [features]
 enable_backtrace = []

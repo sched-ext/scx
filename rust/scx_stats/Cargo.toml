@@ -1,6 +1,6 @@
 [package]
 name = "scx_stats"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2021"
 authors = ["Tejun Heo <tj@kernel.org>"]
 license = "GPL-2.0-only"

@@ -1,6 +1,6 @@
 [package]
 name = "scx_bpfland"
-version = "1.0.4"
+version = "1.0.5"
 authors = ["Andrea Righi <andrea.righi@linux.dev>"]
 edition = "2021"
 description = "A vruntime-based sched_ext scheduler that prioritizes interactive workloads. https://github.com/sched-ext/scx/tree/main"
@@ -13,14 +13,14 @@ clap = { version = "4.1", features = ["derive", "env", "unicode", "wrap_help"] }
 crossbeam = "0.8.4"
 libbpf-rs = "0.24.1"
 log = "0.4.17"
-scx_stats = { path = "../../../rust/scx_stats", version = "1.0.4" }
-scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.4" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.4" }
+scx_stats = { path = "../../../rust/scx_stats", version = "1.0.5" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.5" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.5" }
 serde = { version = "1.0", features = ["derive"] }
 simplelog = "0.12"
 
 [build-dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.4" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.5" }
 
 [features]
 enable_backtrace = []

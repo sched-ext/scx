@@ -57,7 +57,8 @@ def get_rust_paths():
     lines = result.stdout.decode('utf-8').splitlines()
     paths = []
     for line in lines:
-        if line.endswith('Cargo.toml'):
+        # ignore root Cargo.toml
+        if line.endswith('Cargo.toml') and '/' in line:
             paths.append(line)
     return paths
 
