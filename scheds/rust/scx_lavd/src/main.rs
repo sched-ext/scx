@@ -58,11 +58,14 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
+use scx_utils::NR_CPU_IDS;
 use stats::SchedSample;
 use stats::SchedSamples;
 use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
+
+const LAVD_CPU_ID_MAX: usize = bpf_intf::consts_LAVD_CPU_ID_MAX as usize;
 
 /// scx_lavd: Latency-criticality Aware Virtual Deadline (LAVD) scheduler
 ///
@@ -241,7 +244,6 @@ struct FlatTopology {
     cpu_fids_performance: Vec<CpuFlatId>,
     cpu_fids_powersave: Vec<CpuFlatId>,
     cpdom_map: BTreeMap<ComputeDomainKey, ComputeDomainValue>,
-    nr_cpus_online: usize,
 }
 
 impl fmt::Display for FlatTopology {
@@ -262,9 +264,8 @@ impl fmt::Display for FlatTopology {
 impl FlatTopology {
     /// Build a flat-structured topology
     pub fn new() -> Result<FlatTopology> {
-        let (cpu_fids_performance, avg_freq, nr_cpus_online) =
-            Self::build_cpu_fids(false, false).unwrap();
-        let (cpu_fids_powersave, _, _) = Self::build_cpu_fids(true, true).unwrap();
+        let (cpu_fids_performance, avg_freq) = Self::build_cpu_fids(false, false).unwrap();
+        let (cpu_fids_powersave, _) = Self::build_cpu_fids(true, true).unwrap();
 
         // Note that building compute domain is not dependent to CPU orer
         // so it is okay to use any cpu_fids_*.
@@ -274,7 +275,6 @@ impl FlatTopology {
             cpu_fids_performance,
             cpu_fids_powersave,
             cpdom_map,
-            nr_cpus_online,
         })
     }
 
@@ -293,7 +293,7 @@ impl FlatTopology {
     fn build_cpu_fids(
         prefer_smt_core: bool,
         prefer_little_core: bool,
-    ) -> Option<(Vec<CpuFlatId>, usize, usize)> {
+    ) -> Option<(Vec<CpuFlatId>, usize)> {
         let topo = Topology::new().expect("Failed to build host topology");
         let mut cpu_fids = Vec::new();
 
@@ -386,7 +386,7 @@ impl FlatTopology {
             }
         }
 
-        Some((cpu_fids, avg_freq, topo.nr_cpus_online()))
+        Some((cpu_fids, avg_freq))
     }
 
     /// Build a list of compute domains
@@ -484,6 +484,13 @@ struct Scheduler<'a> {
 
 impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+        if *NR_CPU_IDS > LAVD_CPU_ID_MAX {
+            panic!(
+                "Num possible CPU IDs ({}) exceeds maximum of ({})",
+                *NR_CPU_IDS, LAVD_CPU_ID_MAX
+            );
+        }
+
         // Increase MEMLOCK size since the BPF scheduler might use
         // more than the current limit
         set_rlimit_infinity();
@@ -498,13 +505,12 @@ impl<'a> Scheduler<'a> {
         Self::init_cpus(&mut skel, &topo);
 
         // Initialize skel according to @opts.
-        let nr_cpus_onln = topo.nr_cpus_online as u64;
-        Self::init_globals(&mut skel, &opts, nr_cpus_onln);
+        Self::init_globals(&mut skel, &opts);
 
         // Attach.
         let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
         let struct_ops = Some(scx_ops_attach!(skel, lavd_ops)?);
-        let stats_server = StatsServer::new(stats::server_data(nr_cpus_onln)).launch()?;
+        let stats_server = StatsServer::new(stats::server_data(*NR_CPU_IDS as u64)).launch()?;
 
         // Build a ring buffer for instrumentation
         let (intrspc_tx, intrspc_rx) = channel::bounded(65536);
@@ -576,12 +582,12 @@ impl<'a> Scheduler<'a> {
         opts.prefer_smt_core && opts.prefer_little_core
     }
 
-    fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, nr_cpus_onln: u64) {
-        skel.maps.bss_data.nr_cpus_onln = nr_cpus_onln;
+    fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts) {
         skel.maps.bss_data.no_core_compaction = opts.no_core_compaction;
         skel.maps.bss_data.no_freq_scaling = opts.no_freq_scaling;
         skel.maps.bss_data.no_prefer_turbo_core = opts.no_prefer_turbo_core;
         skel.maps.bss_data.is_powersave_mode = Self::is_powersave_mode(&opts);
+        skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u64;
         skel.maps.rodata_data.is_smt_active = match FlatTopology::is_smt_active() {
             Ok(ret) => (ret == 1) as u32,
             Err(_) => 0,

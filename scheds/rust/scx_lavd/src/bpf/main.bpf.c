@@ -194,9 +194,6 @@ char _license[] SEC("license") = "GPL";
 /*
  * Sched related globals
  */
-volatile u64		nr_cpus_onln;
-static volatile u64	nr_cpus_big;
-
 struct sys_stat	__sys_stats[2];
 volatile int	__sys_stat_idx;
 
@@ -214,6 +211,10 @@ static bool		have_little_core;
 /*
  * CPU topology
  */
+const volatile u64	nr_cpu_ids;	/* maximum CPU IDs */
+static volatile u64	nr_cpus_onln;	/* current number of online CPUs */
+static volatile u64	nr_cpus_big;
+
 const volatile u16	cpu_order_performance[LAVD_CPU_ID_MAX]; /* CPU preference order for performance and balanced mode */
 const volatile u16	cpu_order_powersave[LAVD_CPU_ID_MAX]; /* CPU preference order for powersave mode */
 const volatile u16	__cpu_capacity_hint[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1000 */
@@ -648,7 +649,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	u64 dsq_id;
 	int cpu, nr;
 
-	bpf_for(cpu, 0, nr_cpus_onln) {
+	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			c->compute_total = 0;
@@ -962,7 +963,7 @@ static void do_core_compaction(void)
 	nr_active_old = stat_cur->nr_active;
 	nr_active = calc_nr_active_cpus(stat_cur);
 	nr_cpus = nr_active + LAVD_CC_NR_OVRFLW;
-	bpf_for(i, 0, nr_cpus_onln) {
+	bpf_for(i, 0, nr_cpu_ids) {
 		if (i >= LAVD_CPU_ID_MAX)
 			break;
 
@@ -2055,8 +2056,8 @@ static bool is_worth_kick_other_task(struct task_ctx *taskc)
 
 static bool can_cpu_be_kicked(u64 now, struct cpu_ctx *cpuc)
 {
-	u64 delta = now - cpuc->last_kick_clk;
-	return delta >= LAVD_PREEMPT_KICK_MARGIN;
+	return cpuc->is_online &&
+	       (now - cpuc->last_kick_clk) >= LAVD_PREEMPT_KICK_MARGIN;
 }
 
 static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
@@ -2122,13 +2123,13 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 */
 	barrier();
 	nr_cpus = bpf_cpumask_weight(cpumask);
-	bpf_for(i, 0, nr_cpus_onln) {
+	bpf_for(i, 0, nr_cpus) {
 		/*
 		 * Decide a CPU ID to examine.
 		 */
 		cpu = bpf_cpumask_any_distribute(cpumask);
 
-		if (cpu >= nr_cpus_onln || cur_cpu == cpu)
+		if (cpu >= nr_cpu_ids || cur_cpu == cpu)
 			continue;
 
 		/*
@@ -2231,7 +2232,7 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 	if (!cpdomc || !cd_cpumask || !cpumask)
 		return false;
 
-	bpf_cpumask_and(cpumask, cast_mask(cd_cpumask), cast_mask(p->cpus_ptr));
+	bpf_cpumask_and(cpumask, cast_mask(cd_cpumask), p->cpus_ptr);
 
 	/*
 	 * Find a victim CPU among CPUs that run lower-priority tasks.
@@ -3080,7 +3081,7 @@ static void set_on_core_type(struct task_ctx *taskc,
 	struct cpu_ctx *cpuc;
 	int cpu;
 
-	bpf_for(cpu, 0, nr_cpus_onln) {
+	bpf_for(cpu, 0, nr_cpu_ids) {
 		if (!bpf_cpumask_test_cpu(cpu, cpumask))
 			continue;
 
@@ -3221,9 +3222,9 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 
 static int init_cpumasks(void)
 {
+	const struct cpumask *online_cpumask;
 	struct bpf_cpumask *active;
 	int err = 0;
-	u32 cpu;
 
 	bpf_rcu_read_lock();
 	err = calloc_cpumask(&active_cpumask);
@@ -3248,11 +3249,12 @@ static int init_cpumasks(void)
 		goto out;
 
 	/*
-	 * Initially activate all CPUs until we know the system load.
+	 * Initially activate all online CPUs until we know the system load.
 	 */
-	bpf_for(cpu, 0, nr_cpus_onln) {
-		bpf_cpumask_set_cpu(cpu, active);
-	}
+	online_cpumask = scx_bpf_get_online_cpumask();
+	nr_cpus_onln = bpf_cpumask_weight(online_cpumask);
+	bpf_cpumask_copy(active, online_cpumask);
+	scx_bpf_put_cpumask(online_cpumask);
 
 out:
 	bpf_rcu_read_unlock();
@@ -3261,11 +3263,11 @@ out:
 
 static u16 get_cpuperf_cap(s32 cpu)
 {
-	if (cpu >= 0 && cpu < LAVD_CPU_ID_MAX)
+	if (cpu >= 0 && cpu < nr_cpu_ids && cpu < LAVD_CPU_ID_MAX)
 		return __cpu_capacity_hint[cpu];
 
-	scx_bpf_error("Infeasible CPU id: %d", cpu);
-	return 1;
+	debugln("Infeasible CPU id: %d", cpu);
+	return 0;
 }
 
 static u16 get_cputurbo_cap(void)
@@ -3276,7 +3278,7 @@ static u16 get_cputurbo_cap(void)
 	/*
 	 * Find the maximum CPU frequency
 	 */
-	for (cpu = 0; cpu < LAVD_CPU_ID_MAX; cpu++) {
+	for (cpu = 0; cpu < nr_cpu_ids && cpu < LAVD_CPU_ID_MAX; cpu++) {
 		if (__cpu_capacity_hint[cpu] > turbo_cap) {
 			turbo_cap = __cpu_capacity_hint[cpu];
 			nr_turbo++;
@@ -3317,7 +3319,7 @@ static int reinit_active_cpumask_for_performance(void)
 	 * Once core compaction becomes off in performance mode,
 	 * reinitialize active/overflow cpumasks to reflect the mode change.
 	 */
-	bpf_for(cpu, 0, nr_cpus_onln) {
+	bpf_for(cpu, 0, nr_cpu_ids) {
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
@@ -3341,7 +3343,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *turbo, *big, *little, *active, *ovrflw, *cd_cpumask;
 	struct cpdom_ctx *cpdomc;
-	int cpu, i, j, err = 0;
+	int cpu, i, j, err = 0, nr_cpus_non_zero = 0;
 	u64 cpdom_id;
 	u32 sum_capacity = 0, avg_capacity, big_capacity = 0;
 	u16 turbo_cap;
@@ -3365,7 +3367,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	/*
 	 * Initilize CPU info
 	 */
-	bpf_for(cpu, 0, nr_cpus_onln) {
+	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
@@ -3389,13 +3391,20 @@ static s32 init_per_cpu_ctx(u64 now)
 		if (err)
 			goto unlock_out;
 
-		cpu_ctx_init_online(cpuc, cpu, now);
+		if (bpf_cpumask_test_cpu(cpu, cast_mask(active)))
+			cpu_ctx_init_online(cpuc, cpu, now);
+		else
+			cpu_ctx_init_offline(cpuc, cpu, now);
+
 		cpuc->capacity = get_cpuperf_cap(cpu);
 		cpuc->offline_clk = now;
 		cpuc->cpdom_poll_pos = cpu % LAVD_CPDOM_MAX_NR;
 		cpuc->min_perf_cri = 1000;
 
-		sum_capacity += cpuc->capacity;
+		if (cpuc->capacity > 0) {
+			sum_capacity += cpuc->capacity;
+			nr_cpus_non_zero++;
+		}
 	}
 
 	/*
@@ -3406,8 +3415,8 @@ static s32 init_per_cpu_ctx(u64 now)
 	/*
 	 * Classify CPU into BIG or little cores based on their average capacity.
 	 */
-	avg_capacity = sum_capacity / nr_cpus_onln;
-	bpf_for(cpu, 0, nr_cpus_onln) {
+	avg_capacity = sum_capacity / nr_cpus_non_zero;
+	bpf_for(cpu, 0, nr_cpu_ids) {
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
@@ -3474,7 +3483,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		}
 	}
 
-	bpf_for(cpu, 0, nr_cpus_onln) {
+	bpf_for(cpu, 0, nr_cpu_ids) {
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
