@@ -10,23 +10,6 @@ on:
   # bpf-next == do everything the same but w/
   # bpf-next bzImage.
 jobs:
-  lint:
-    runs-on: ubuntu-24.04
-    steps:
-      # prevent cache permission errors
-      - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar      
-      - name: Install deps
-        run: |
-          curl https://sh.rustup.rs -sSf | RUSTUP_INIT_SKIP_PATH_CHECK=yes sh -s -- -y
-          rustup install nightly-2024-09-10
-          export PATH="~/.cargo/bin:$PATH"
-
-      - uses: actions/checkout@v4
-
-      # Lint code
-      - run: cargo +nightly-2024-09-10 fmt
-      - run: git diff --exit-code
-
   build-kernel:
     runs-on: ubuntu-24.04
     steps:
