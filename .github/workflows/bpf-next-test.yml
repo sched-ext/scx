@@ -54,7 +54,7 @@ jobs:
         name: Clone Kernel
         # Get the latest sched-ext enabled kernel directly from the korg
         # for-next branch
-        run: git clone --single-branch -b for-next --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git linux
+        run: git clone --single-branch -b for-next --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git linux
 
       # guard rail because we are caching
       - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
@@ -100,7 +100,7 @@ jobs:
         run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
 
       # get latest head commit of sched_ext for-next
-      - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git heads/for-next | awk '{print $1}')" >> $GITHUB_ENV
+      - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git heads/for-next | awk '{print $1}')" >> $GITHUB_ENV
 
       # use cached kernel if available, create after job if not
       - name: Cache Kernel
