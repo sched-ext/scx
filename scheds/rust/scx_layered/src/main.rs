@@ -51,9 +51,9 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::LoadAggregator;
 use scx_utils::Cache;
 use scx_utils::Core;
+use scx_utils::LoadAggregator;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use serde::Deserialize;
@@ -414,8 +414,8 @@ struct Opts {
     #[clap(long, default_value = "0.0")]
     layer_growth_weight_disable: f64,
 
-    /// When iterating over layer DSQs use the weight of the layer for iteration 
-    /// order. The default iteration order is semi-random except when topology 
+    /// When iterating over layer DSQs use the weight of the layer for iteration
+    /// order. The default iteration order is semi-random except when topology
     /// awareness is disabled.
     #[clap(long)]
     layer_weight_dsq_iter: bool,
@@ -892,16 +892,14 @@ impl Stats {
         let (total_load, layer_loads) = Self::read_layer_loads(skel, self.nr_layers);
 
         let cur_layer_cycles = Self::read_layer_cycles(&cpu_ctxs, self.nr_layers);
-        let _: Vec<_> = cur_layer_cycles.iter().
-            zip(layer_weights).
-            enumerate().
-            map(|(layer_idx, (usage, weight))|
-                {
-                // warn!("layer {} weight {}, usage {} load {}", layer_idx, weight, usage, layer_loads[layer_idx]);
+        let _: Vec<_> = cur_layer_cycles
+            .iter()
+            .zip(layer_weights)
+            .enumerate()
+            .map(|(layer_idx, (usage, weight))| {
                 load_agg.record_dom_load(layer_idx, weight, (*usage) as f64)
-                }
-            ).
-            collect();
+            })
+            .collect();
         let cur_layer_utils: Vec<f64> = cur_layer_cycles
             .iter()
             .zip(self.prev_layer_cycles.iter())
@@ -1299,8 +1297,7 @@ impl Layer {
                     bail!("invalid util_range {:?}", util_range);
                 }
             }
-            LayerKind::Grouped { nodes, llcs, .. } |
-            LayerKind::Open { nodes, llcs, .. } => {
+            LayerKind::Grouped { nodes, llcs, .. } | LayerKind::Open { nodes, llcs, .. } => {
                 if nodes.len() == 0 && llcs.len() == 0 {
                     allowed_cpus.fill(true);
                 } else {
@@ -1350,8 +1347,8 @@ impl Layer {
             core_order,
 
             nr_cpus: 0,
-	    preempt: preempt.clone(),
-	    can_preempt: preempt.clone(),
+            preempt: preempt.clone(),
+            can_preempt: preempt.clone(),
             cpus,
             allowed_cpus,
         })
@@ -1371,7 +1368,7 @@ impl Layer {
         (layer_util, _total_util): (f64, f64),
     ) -> Result<bool> {
         let nr_cpus = self.cpus.count_ones();
-	let free = self.cpus.count_zeros();
+        let free = self.cpus.count_zeros();
         if nr_cpus >= cpus_max {
             trace!("layer has {} max: {}", nr_cpus, cpus_max);
             return Ok(false);
@@ -1382,7 +1379,7 @@ impl Layer {
             && (layer_util == 0.0 || (nr_cpus > 0 && layer_util / nr_cpus as f64 <= util_high))
             && ((nr_cpus - free) as f64 / cpu_pool.nr_cpus as f64 >= layer_load / total_load)
             && layer_growth_weight_disable > 0.0
-            && layer_load/total_load > layer_growth_weight_disable
+            && layer_load / total_load > layer_growth_weight_disable
         {
             return Ok(false);
         }
@@ -1428,10 +1425,10 @@ impl Layer {
 
         // If we'd be over the load fraction even after freeing
         // $cpus_to_free, we have to free.
-        if layer_growth_weight_disable > 0.0 &&
-            layer_load / total_load >= layer_growth_weight_disable
+        if layer_growth_weight_disable > 0.0
+            && layer_load / total_load >= layer_growth_weight_disable
         {
-	    warn!("layer {} over load fraction, shrinking", self.name);
+            warn!("layer {} over load fraction, shrinking", self.name);
             return Ok(Some(cpus_to_free));
         }
 
@@ -1860,8 +1857,8 @@ impl<'a, 'b> Scheduler<'a, 'b> {
     }
 
     fn set_bpf_layer_preemption(layer: &mut Layer, bpf_layer: &mut types::layer, preempt: bool) {
-	layer.preempt = preempt;
-	bpf_layer.preempt.write(preempt);
+        layer.preempt = preempt;
+        bpf_layer.preempt.write(preempt);
     }
 
     fn refresh_cpumasks(&mut self) -> Result<()> {
@@ -1892,10 +1889,13 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     // If the layer is utilizing all the adjusted load, disable
                     // preemption
                     if self.layers[idx].can_preempt && self.layer_preempt_weight_disable > 0.0 {
-                        let weighted_load = load.0/load.1;
+                        let weighted_load = load.0 / load.1;
 
-                        if weighted_load < self.layer_preempt_weight_disable && !self.layers[idx].preempt {
-                            trace!("enabling bpf layer preemption for {} load {:2.3} < {:2.3}",
+                        if weighted_load < self.layer_preempt_weight_disable
+                            && !self.layers[idx].preempt
+                        {
+                            trace!(
+                                "enabling bpf layer preemption for {} load {:2.3} < {:2.3}",
                                 &self.layers[idx].name,
                                 weighted_load,
                                 self.layer_preempt_weight_disable,
@@ -1907,7 +1907,8 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                             );
                         }
                         if weighted_load >= self.layer_preempt_weight_disable {
-                            trace!("disabling bpf layer preemption for {} load {:2.3} > {:2.3}",
+                            trace!(
+                                "disabling bpf layer preemption for {} load {:2.3} > {:2.3}",
                                 &self.layers[idx].name,
                                 weighted_load,
                                 self.layer_preempt_weight_disable,
@@ -2042,7 +2043,13 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     }
 
                     let mut load_agg = LoadAggregator::new(self.cpu_pool.nr_cpus, false);
-                    stats.refresh(&mut self.skel, &self.proc_reader, &mut load_agg, now, self.processing_dur)?;
+                    stats.refresh(
+                        &mut self.skel,
+                        &self.proc_reader,
+                        &mut load_agg,
+                        now,
+                        self.processing_dur,
+                    )?;
                     let sys_stats =
                         self.generate_sys_stats(&stats, cpus_ranges.get_mut(&tid).unwrap())?;
                     res_ch.send(StatsRes::Refreshed((stats, sys_stats)))?;
@@ -2183,10 +2190,16 @@ fn main() -> Result<()> {
     // clap doesn't properly parse floats, so need to do a bounds check here, see:
     // https://github.com/clap-rs/clap/issues/4253
     if opts.layer_preempt_weight_disable < 0.0 || opts.layer_preempt_weight_disable > 1.0 {
-        bail!("invalid value {:2.2} for layer_preempt_weight_disable, must be 0.0..1.0", opts.layer_preempt_weight_disable);
+        bail!(
+            "invalid value {:2.2} for layer_preempt_weight_disable, must be 0.0..1.0",
+            opts.layer_preempt_weight_disable
+        );
     }
     if opts.layer_growth_weight_disable < 0.0 || opts.layer_growth_weight_disable > 1.0 {
-        bail!("invalid value {:2.2} for layer_growth_weight_disable, must be 0.0..1.0", opts.layer_growth_weight_disable);
+        bail!(
+            "invalid value {:2.2} for layer_growth_weight_disable, must be 0.0..1.0",
+            opts.layer_growth_weight_disable
+        );
     }
 
     let llv = match opts.verbose {
