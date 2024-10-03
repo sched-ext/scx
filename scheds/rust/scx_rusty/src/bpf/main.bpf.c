@@ -477,9 +477,6 @@ static u32 cpu_to_dom_id(s32 cpu)
 {
 	const volatile u32 *dom_idp;
 
-	if (nr_doms <= 1)
-		return 0;
-
 	dom_idp = MEMBER_VPTR(cpu_dom_id_map, [cpu]);
 	if (!dom_idp)
 		return MAX_DOMS;
