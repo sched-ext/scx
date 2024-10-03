@@ -5,6 +5,7 @@ high level documentation the kernel docs should be referenced.
 
 - [kernel documentation](https://docs.kernel.org/bpf/index.html)
 - [eBPF docs](https://ebpf-docs.dylanreimerink.nl/)
+- [rustdocs and sched_ext for-next docs](https://sched-ext.github.io/scx/)
 
 When working on schedulers the following documentation is rather useful as
 schedulers will use a combination of BPF cpumasks, helper functions, kfuncs and
