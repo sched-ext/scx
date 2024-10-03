@@ -73,8 +73,7 @@ const DEFAULT_LAYER_WEIGHT: u32 = bpf_intf::consts_DEFAULT_LAYER_WEIGHT;
 const MAX_LAYER_MATCH_ORS: usize = bpf_intf::consts_MAX_LAYER_MATCH_ORS as usize;
 const MAX_LAYERS: usize = bpf_intf::consts_MAX_LAYERS as usize;
 const USAGE_HALF_LIFE: u32 = bpf_intf::consts_USAGE_HALF_LIFE;
-// const USAGE_HALF_LIFE_F64: f64 = USAGE_HALF_LIFE as f64 / 1_000_000_000.0;
-const USAGE_HALF_LIFE_F64: f64 = USAGE_HALF_LIFE as f64 / 1.0;
+const USAGE_HALF_LIFE_F64: f64 = USAGE_HALF_LIFE as f64 / 1_000_000_000.0;
 const NR_GSTATS: usize = bpf_intf::global_stat_idx_NR_GSTATS as usize;
 const NR_LSTATS: usize = bpf_intf::layer_stat_idx_NR_LSTATS as usize;
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
@@ -376,8 +375,6 @@ struct Opts {
     interval: f64,
 
     /// ***DEPRECATED*** Disable load-fraction based max layer CPU limit.
-    /// ***NOTE*** load-fraction calculation is currently broken due to
-    /// lack of infeasible weight adjustments. Setting this option is
     /// recommended.
     #[clap(short = 'n', long)]
     no_load_frac_limit: bool,
@@ -754,9 +751,6 @@ struct Stats {
     layer_loads: Vec<f64>,
 
     // infeasible stats
-    effective_max_weight: f64,
-    dcycle_sums: Vec<f64>,
-    total_dcycle_sum: f64,
     load_sums: Vec<f64>,
     total_load_sum: f64,
 
@@ -829,9 +823,6 @@ impl Stats {
             total_load: 0.0,
             layer_loads: vec![0.0; nr_layers],
 
-            effective_max_weight: 0.0,
-            dcycle_sums: vec![0.0, nr_layers as f64],
-            total_dcycle_sum: 0.0,
             load_sums: vec![0.0, nr_layers as f64],
             total_load_sum: 0.0,
 
@@ -935,9 +926,6 @@ impl Stats {
             total_load,
             layer_loads,
 
-            effective_max_weight: load_ledger.effective_max_weight(),
-            dcycle_sums: load_ledger.dom_dcycle_sums().to_vec(),
-            total_dcycle_sum: load_ledger.global_dcycle_sum(),
             total_load_sum: load_ledger.global_load_sum(),
             load_sums: load_ledger.dom_load_sums().to_vec(),
 
@@ -1378,8 +1366,12 @@ impl Layer {
         if nr_cpus >= cpus_min
             && (layer_util == 0.0 || (nr_cpus > 0 && layer_util / nr_cpus as f64 <= util_high))
             && ((nr_cpus - free) as f64 / cpu_pool.nr_cpus as f64 >= layer_load / total_load)
-            && layer_growth_weight_disable > 0.0
-            && layer_load / total_load > layer_growth_weight_disable
+        {
+            return Ok(false);
+        }
+        if layer_growth_weight_disable > 0.0
+            && (layer_load / total_load > layer_growth_weight_disable
+                || layer_load / total_load == 0.0)
         {
             return Ok(false);
         }
