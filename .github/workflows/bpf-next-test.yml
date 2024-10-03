@@ -1,0 +1,179 @@
+name: bpf-next-test
+
+on:
+  # only runs on main, every 6 hours
+    schedule:
+      - cron: "0 */6 * * *"
+
+  # if development becomes intertwined,
+  # fold this into a matrix on the main job
+  # bpf-next == do everything the same but w/
+  # bpf-next bzImage.
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      # prevent cache permission errors
+      - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar      
+      - name: Install deps
+        run: |
+          curl https://sh.rustup.rs -sSf | RUSTUP_INIT_SKIP_PATH_CHECK=yes sh -s -- -y
+          rustup install nightly-2024-09-10
+          export PATH="~/.cargo/bin:$PATH"
+
+      - uses: actions/checkout@v4
+
+      # Lint code
+      - run: cargo +nightly-2024-09-10 fmt
+      - run: git diff --exit-code
+
+  build-kernel:
+    runs-on: ubuntu-24.04
+    steps:
+      # prevent cache permission errors
+      - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
+      # redundancy to exit fast
+      - run: echo 'debconf debconf/frontend select Noninteractive' | sudo debconf-set-selections
+      - run: sudo apt-get update
+      - run: sudo apt-get install -y git --no-install-recommends
+      # get latest head commit of sched_ext for-next
+      - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git heads/for-next | awk '{print $1}')" >> $GITHUB_ENV
+
+      - uses: actions/checkout@v4
+
+      # use cached kernel if available, create after job if not
+      - name: Cache Kernel
+        id: cache-kernel
+        uses: actions/cache@v4
+        with:
+          path: |
+            linux/arch/x86/boot/bzImage
+            linux/usr/include
+            linux/**/*.h
+          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-4
+
+      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
+        uses: ./.github/actions/install-deps-action
+
+      # cache virtiofsd (goes away w/ 24.04)
+      - name: Cache virtiofsd
+        id: cache-virtiofsd
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/lib/virtiofsd
+          key: virtiofsd-binary
+      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' && steps.cache-kernel.outputs.cache-hit != 'true' }}
+        run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
+
+
+      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
+        name: Clone Kernel
+        # Get the latest sched-ext enabled kernel directly from the korg
+        # for-next branch
+        run: git clone --single-branch -b for-next --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git linux
+
+      # guard rail because we are caching
+      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
+        run: cd linux && git checkout ${{ env.SCHED_EXT_KERNEL_COMMIT }}
+
+      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
+      # Print the latest commit of the checked out sched-ext kernel
+        run: cd linux && git log -1 --pretty=format:"%h %ad %s" --date=short
+
+      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
+      # Build a minimal kernel (with sched-ext enabled) using virtme-ng
+        run: cd linux && vng -v --build --config ../.github/workflows/sched-ext.config
+
+      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
+      # Generate kernel headers
+        run: cd linux && make headers
+
+  integration-test:
+    runs-on: ubuntu-24.04
+    needs: build-kernel
+    strategy:
+          matrix:
+            scheduler: [ scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty ]
+          fail-fast: false
+    steps:
+      # prevent cache permission errors
+      - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar      
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.scheduler }}
+          prefix-key: "4"
+      - uses: ./.github/actions/install-deps-action
+      # cache virtiofsd (goes away w/ 24.04)
+      - name: Cache virtiofsd
+        id: cache-virtiofsd
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/lib/virtiofsd
+          key: virtiofsd-binary
+      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}          
+        run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
+
+      # get latest head commit of sched_ext for-next
+      - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git heads/for-next | awk '{print $1}')" >> $GITHUB_ENV
+
+      # use cached kernel if available, create after job if not
+      - name: Cache Kernel
+        id: cache-kernel
+        uses: actions/cache@v4
+        with:
+          path: |
+            linux/arch/x86/boot/bzImage
+            linux/usr/include
+            linux/**/*.h
+          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-4
+
+      # need to re-run job when kernel head changes between build and test running.
+      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
+        name: exit if cache stale
+        run: exit -1
+
+      # veristat
+      - run: wget https://github.com/libbpf/veristat/releases/download/v0.3.2/veristat-v0.3.2-amd64.tar.gz
+      - run: tar -xvf veristat-v0.3.2-amd64.tar.gz && sudo cp veristat /usr/bin/
+      - run: sudo chmod +x /usr/bin/veristat && sudo chmod 755 /usr/bin/veristat
+
+      # The actual build:
+      - run: meson setup build -Dkernel=../linux/arch/x86/boot/bzImage -Dkernel_headers=../linux -Denable_stress=true -Dvng_rw_mount=true
+      - run: meson compile -C build ${{ matrix.scheduler }}
+
+      # Print CPU model before running the tests (this can be useful for
+      # debugging purposes)
+      - run: grep 'model name' /proc/cpuinfo | head -1
+
+      # Test schedulers
+      - run: meson compile -C build test_sched_${{ matrix.scheduler }}
+      # this is where errors we want logs on start occurring, so always generate debug info and save logs
+        if: always()
+      # Stress schedulers
+      - uses: cytopia/shell-command-retry-action@v0.1.2
+        name: stress test
+        if: always()
+        with:
+          retries: 3
+          command: meson compile -C build stress_tests_${{ matrix.scheduler }}
+      - run: meson compile -C build veristat_${{ matrix.scheduler }}
+        if: always()
+      - run: sudo cat /var/log/dmesg > host-dmesg.ci.log
+        if: always()
+      - run: mkdir -p ./log_save/
+        if: always()
+      # no symlink following here (to avoid cycles)
+      - run: sudo find '/home/runner/' -iname '*.ci.log' -exec mv {} ./log_save/ \;
+        if: always()
+      - name: upload debug logs, bpftrace, veristat, dmesg, etc.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.scheduler }}_logs_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ./log_save/*.ci.log
+          # it's all txt files w/ 90 day retention, lets be nice.
+          compression-level: 9
+
