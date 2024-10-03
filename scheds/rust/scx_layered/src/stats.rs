@@ -57,6 +57,8 @@ pub struct LayerStats {
     pub load: f64,
     #[stat(desc = "layer load sum adjusted for infeasible weights")]
     pub load_adj: f64,
+    #[stat(desc = "layer duty cycle")]
+    pub dcycle: f64,
     #[stat(desc = "fraction of total load")]
     pub load_frac: f64,
     #[stat(desc = "count of tasks")]
@@ -181,8 +183,8 @@ impl LayerStats {
             util: stats.layer_utils[lidx] * 100.0,
             util_frac: calc_frac(stats.layer_utils[lidx], stats.total_util),
             load: stats.layer_loads[lidx],
-            load_adj: stats.load_sums[lidx]/stats.total_load_sum,
-            // load_adj: stats.dcycle_sums[lidx]/stats.total_dcycle_sum,
+            load_adj: calc_frac(stats.load_sums[lidx], stats.total_load_sum),
+            dcycle: stats.dcycle_sums[lidx],
             load_frac: calc_frac(stats.layer_loads[lidx], stats.total_load),
             tasks: stats.nr_layer_tasks[lidx] as u32,
             total: ltotal,
@@ -225,10 +227,11 @@ impl LayerStats {
     pub fn format<W: Write>(&self, w: &mut W, name: &str, header_width: usize) -> Result<()> {
         writeln!(
             w,
-            "  {:<width$}: util/frac={:7.1}/{:5.1} load/load_adj/frac={:9.1}/{:9.1}/{:5.1} tasks={:6}",
+            "  {:<width$}: util/frac/dcycle={:7.1}/{:5.1}/{:7.1} load/load_adj/frac={:9.1}/{:9.1}/{:5.1} tasks={:6}",
             name,
             self.util,
             self.util_frac,
+            self.dcycle,
             self.load,
             self.load_adj,
             self.load_frac,
@@ -343,7 +346,9 @@ impl LayerStats {
 pub struct SysStats {
     #[stat(desc = "timestamp", _om_skip)]
     pub at: f64,
-    #[stat(desc = "count of sched events during the period")]
+    #[stat(desc = "# of NUMA nodes")]
+    pub nr_nodes: usize,
+    #[stat(desc = "# sched events during the period")]
     pub total: u64,
     #[stat(desc = "% dispatched directly into an idle CPU")]
     pub local: f64,
@@ -367,10 +372,16 @@ pub struct SysStats {
     pub busy: f64,
     #[stat(desc = "CPU util % (100% means one CPU)")]
     pub util: f64,
+    #[stat(desc = "sum of duty cycle")]
+    pub dcycle: f64,
     #[stat(desc = "sum of weight * duty_cycle for all tasks")]
     pub load: f64,
     #[stat(desc = "adjusted load for all tasks with infeasible weights applied")]
     pub load_adj: f64,
+    #[stat(desc = "effective max weight")]
+    pub max_weight: f64,
+    #[stat(desc = "average NUMA node adjusted load for all tasks with infeasible weights applied")]
+    pub node_load_adj_avg: f64,
     #[stat(desc = "fallback CPU")]
     pub fallback_cpu: u32,
     #[stat(desc = "per-layer statistics")]
@@ -391,9 +402,12 @@ impl SysStats {
                 0.0
             }
         };
+        let load_adj = stats.total_load_sum;
+        let max_weight = stats.effective_max_weight;
 
         Ok(Self {
             at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64(),
+            nr_nodes: stats.nr_nodes,
             total,
             local: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL),
             open_idle: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE),
@@ -408,7 +422,10 @@ impl SysStats {
             busy: stats.cpu_busy * 100.0,
             util: stats.total_util * 100.0,
             load: stats.total_load,
-            load_adj: stats.total_dcycle_sum / stats.nr_layers as f64,
+            load_adj: load_adj,
+            dcycle: stats.total_dcycle_sum,
+            max_weight: max_weight,
+            node_load_adj_avg: load_adj / stats.nr_nodes as f64,
             fallback_cpu: fallback_cpu as u32,
             layers: BTreeMap::new(),
         })
@@ -430,6 +447,14 @@ impl SysStats {
             "busy={:5.1} util={:7.1} load={:9.1} load_adj={:9.1} fallback_cpu={:3}",
             self.busy, self.util, self.load, self.load_adj, self.fallback_cpu,
         )?;
+
+        if self.nr_nodes > 1 {
+            writeln!(
+                w,
+                "nr_nodes={} dcycle_sum={:7.1} node_load_adj_avg={:7.1} max_weight={:7.0}",
+                self.nr_nodes, self.dcycle, self.node_load_adj_avg, self.max_weight,
+            )?;
+        }
 
         writeln!(
             w,
