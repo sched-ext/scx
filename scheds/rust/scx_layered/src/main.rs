@@ -414,6 +414,12 @@ struct Opts {
     #[clap(long, default_value = "0.0")]
     layer_growth_weight_disable: f64,
 
+    /// When iterating over layer DSQs use the weight of the layer for iteration 
+    /// order. The default iteration order is semi-random except when topology 
+    /// awareness is disabled.
+    #[clap(long)]
+    layer_weight_dsq_iter: bool,
+
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
     stats: Option<f64>,
@@ -1555,6 +1561,9 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         skel.maps.rodata_data.nr_layers = specs.len() as u32;
         let mut perf_set = false;
 
+        let mut layer_iteration_order = (0..specs.len()).collect::<Vec<_>>();
+        let mut layer_weights: Vec<usize> = vec![];
+
         for (spec_i, spec) in specs.iter().enumerate() {
             let layer = &mut skel.maps.bss_data.layers[spec_i];
 
@@ -1675,6 +1684,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     } else {
                         DEFAULT_LAYER_WEIGHT
                     };
+                    layer_weights.push(layer.weight.try_into().unwrap());
                     layer.perf = u32::try_from(*perf)?;
                     layer.node_mask = nodemask_from_nodes(nodes) as u64;
                     for topo_node in topo.nodes() {
@@ -1694,6 +1704,11 @@ impl<'a, 'b> Scheduler<'a, 'b> {
             }
 
             perf_set |= layer.perf > 0;
+        }
+
+        layer_iteration_order.sort_by(|i, j| layer_weights[*i].cmp(&layer_weights[*j]));
+        for (idx, layer_idx) in layer_iteration_order.iter().enumerate() {
+            skel.maps.rodata_data.layer_iteration_order[idx] = *layer_idx as u32;
         }
 
         if perf_set && !compat::ksym_exists("scx_bpf_cpuperf_set")? {
@@ -1775,6 +1790,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         skel.maps.rodata_data.smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
         skel.maps.rodata_data.disable_topology = opts.disable_topology;
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
+        skel.maps.rodata_data.layer_weight_dsq_iter = opts.layer_weight_dsq_iter;
         for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
             skel.maps.rodata_data.__sibling_cpu[cpu] = *sib;
         }
