@@ -207,8 +207,14 @@ static u64 cgrp_q_len[MAX_CGRPS];
  * This and cgrp_q_idx_hash combine into a poor man's IDR. This likely would be
  * useful to have as a map type.
  */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, MAX_CGRPS);
+	__type(key, s32);
+	__type(value, u64);
+} cgrp_q_busy SEC(".maps");
+
 static u32 cgrp_q_idx_cursor;
-static u64 cgrp_q_idx_busy[MAX_CGRPS];
 
 /*
  * All added up, the following is what we do:
@@ -568,16 +574,19 @@ s32 BPF_STRUCT_OPS(pair_cgroup_init, struct cgroup *cgrp)
 
 	bpf_for(i, 0, MAX_CGRPS) {
 		q_idx = __sync_fetch_and_add(&cgrp_q_idx_cursor, 1) % MAX_CGRPS;
-		if (!__sync_val_compare_and_swap(&cgrp_q_idx_busy[q_idx], 0, 1))
+		u64 *busy = bpf_map_lookup_elem(&cgrp_q_busy, &q_idx);
+		if (busy && !__sync_val_compare_and_swap(busy, 0, 1))
 			break;
 	}
 	if (i == MAX_CGRPS)
 		return -EBUSY;
 
 	if (bpf_map_update_elem(&cgrp_q_idx_hash, &cgid, &q_idx, BPF_ANY)) {
-		u64 *busy = MEMBER_VPTR(cgrp_q_idx_busy, [q_idx]);
-		if (busy)
-			*busy = 0;
+		u64 *busy = bpf_map_lookup_elem(&cgrp_q_busy, &q_idx);
+		if (busy) {
+			u64 value = 0;
+			bpf_map_update_elem(&cgrp_q_busy, &q_idx, &value, BPF_ANY);			
+		}
 		return -EBUSY;
 	}
 
@@ -591,9 +600,11 @@ void BPF_STRUCT_OPS(pair_cgroup_exit, struct cgroup *cgrp)
 
 	q_idx = bpf_map_lookup_elem(&cgrp_q_idx_hash, &cgid);
 	if (q_idx) {
-		u64 *busy = MEMBER_VPTR(cgrp_q_idx_busy, [*q_idx]);
-		if (busy)
-			*busy = 0;
+		u64 *busy = bpf_map_lookup_elem(&cgrp_q_busy, q_idx);
+		if (busy) {
+			u64 value = 0;
+			bpf_map_update_elem(&cgrp_q_busy, &q_idx, &value, BPF_ANY);			
+		}
 		bpf_map_delete_elem(&cgrp_q_idx_hash, &cgid);
 	}
 }
