@@ -65,8 +65,6 @@ use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
 
-const LAVD_CPU_ID_MAX: usize = bpf_intf::consts_LAVD_CPU_ID_MAX as usize;
-
 /// scx_lavd: Latency-criticality Aware Virtual Deadline (LAVD) scheduler
 ///
 /// The rust part is minimal. It processes command line options and logs out
@@ -484,7 +482,7 @@ struct Scheduler<'a> {
 
 impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
-        if *NR_CPU_IDS > LAVD_CPU_ID_MAX {
+        if *NR_CPU_IDS > LAVD_CPU_ID_MAX as usize {
             panic!(
                 "Num possible CPU IDs ({}) exceeds maximum of ({})",
                 *NR_CPU_IDS, LAVD_CPU_ID_MAX
@@ -559,15 +557,13 @@ impl<'a> Scheduler<'a> {
                 skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].__cpumask[i] |= 0x01 << j;
             }
 
-            const LAVD_CPDOM_MAX_NR: u8 = 32;
-            const LAVD_CPDOM_MAX_DIST: usize = 4;
-            if v.neighbor_map.borrow().iter().len() > LAVD_CPDOM_MAX_DIST {
+            if v.neighbor_map.borrow().iter().len() > LAVD_CPDOM_MAX_DIST as usize {
                 panic!("The processor topology is too complex to handle in BPF.");
             }
 
             for (k, (_d, neighbors)) in v.neighbor_map.borrow().iter().enumerate() {
                 let nr_neighbors = neighbors.borrow().len() as u8;
-                if nr_neighbors > LAVD_CPDOM_MAX_NR {
+                if nr_neighbors > LAVD_CPDOM_MAX_NR as u8 {
                     panic!("The processor topology is too complex to handle in BPF.");
                 }
                 skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].nr_neighbors[k] = nr_neighbors;
@@ -666,12 +662,8 @@ impl<'a> Scheduler<'a> {
         return 100. * x as f64 / y as f64;
     }
 
-    fn get_power_mode(power_mode: s32) -> &'static str {
-        const LAVD_PM_PERFORMANCE: s32 = 0;
-        const LAVD_PM_BALANCED: s32 = 1;
-        const LAVD_PM_POWERSAVE: s32 = 2;
-
-        match power_mode {
+    fn get_power_mode(power_mode: i32) -> &'static str {
+        match power_mode as u32 {
             LAVD_PM_PERFORMANCE => {
                 return &"performance";
             }
