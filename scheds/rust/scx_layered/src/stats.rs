@@ -57,6 +57,8 @@ pub struct LayerStats {
     pub load: f64,
     #[stat(desc = "layer load sum adjusted for infeasible weights")]
     pub load_adj: f64,
+    #[stat(desc = "layer duty cycle adjusted for infeasible weights")]
+    pub dcycle: f64,
     #[stat(desc = "fraction of total load")]
     pub load_frac: f64,
     #[stat(desc = "count of tasks")]
@@ -181,7 +183,8 @@ impl LayerStats {
             util: stats.layer_utils[lidx] * 100.0,
             util_frac: calc_frac(stats.layer_utils[lidx], stats.total_util),
             load: stats.layer_loads[lidx],
-            load_adj: stats.load_sums[lidx] / stats.total_load_sum,
+            load_adj: calc_frac(stats.load_sums[lidx], stats.total_load_sum),
+            dcycle: calc_frac(stats.layer_dcycle_sums[lidx], stats.total_dcycle_sum),
             load_frac: calc_frac(stats.layer_loads[lidx], stats.total_load),
             tasks: stats.nr_layer_tasks[lidx] as u32,
             total: ltotal,
@@ -224,9 +227,10 @@ impl LayerStats {
     pub fn format<W: Write>(&self, w: &mut W, name: &str, header_width: usize) -> Result<()> {
         writeln!(
             w,
-            "  {:<width$}: util/frac/{:5.1}/{:7.1} load/load_adj/frac={:9.2}/{:2.2}/{:5.1} tasks={:6}",
+            "  {:<width$}: util/dcycle/frac/{:5.1}/{:5.1}/{:7.1} load/load_adj/frac={:9.2}/{:2.2}/{:5.1} tasks={:6}",
             name,
             self.util,
+            self.dcycle,
             self.util_frac,
             self.load,
             self.load_adj,

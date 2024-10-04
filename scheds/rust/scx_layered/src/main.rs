@@ -753,6 +753,8 @@ struct Stats {
     // infeasible stats
     load_sums: Vec<f64>,
     total_load_sum: f64,
+    layer_dcycle_sums: Vec<f64>,
+    total_dcycle_sum: f64,
 
     total_util: f64, // Running AVG of sum of layer_utils
     layer_utils: Vec<f64>,
@@ -825,6 +827,8 @@ impl Stats {
 
             load_sums: vec![0.0, nr_layers as f64],
             total_load_sum: 0.0,
+            layer_dcycle_sums: vec![0.0, nr_layers as f64],
+            total_dcycle_sum: 0.0,
 
             total_util: 0.0,
             layer_utils: vec![0.0; nr_layers],
@@ -888,7 +892,11 @@ impl Stats {
             .zip(layer_weights)
             .enumerate()
             .map(|(layer_idx, (usage, weight))| {
-                load_agg.record_dom_load(layer_idx, weight, (*usage) as f64)
+                let mut load = 0.0;
+                if self.prev_layer_cycles[layer_idx] > 0 {
+                    load = (*usage - self.prev_layer_cycles[layer_idx]) as f64;
+                }
+                let _ = load_agg.record_dom_load(layer_idx, weight, load as f64);
             })
             .collect();
         let cur_layer_utils: Vec<f64> = cur_layer_cycles
@@ -928,6 +936,8 @@ impl Stats {
 
             total_load_sum: load_ledger.global_load_sum(),
             load_sums: load_ledger.dom_load_sums().to_vec(),
+            total_dcycle_sum: load_ledger.global_dcycle_sum(),
+            layer_dcycle_sums: load_ledger.dom_dcycle_sums().to_vec(),
 
             total_util: layer_utils.iter().sum(),
             layer_utils: layer_utils.try_into().unwrap(),
@@ -1420,7 +1430,6 @@ impl Layer {
         if layer_growth_weight_disable > 0.0
             && layer_load / total_load >= layer_growth_weight_disable
         {
-            warn!("layer {} over load fraction, shrinking", self.name);
             return Ok(Some(cpus_to_free));
         }
 
