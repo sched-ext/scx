@@ -42,10 +42,13 @@ enum ScxMessage {
     StopSched,
     StartSched((SupportedSched, SchedMode)),
     StartSchedArgs((SupportedSched, Vec<String>)),
+    SwitchSched((SupportedSched, SchedMode)),
+    SwitchSchedArgs((SupportedSched, Vec<String>)),
 }
 
 #[derive(Debug, PartialEq)]
 enum RunnerMessage {
+    Switch((SupportedSched, Vec<String>)),
     Start((SupportedSched, Vec<String>)),
     Stop,
 }
@@ -103,7 +106,7 @@ impl ScxLoader {
     async fn start_scheduler(
         &mut self,
         scx_name: &str,
-        sched_mode: SchedMode, /*, scx_flags: Vec<String>*/
+        sched_mode: SchedMode,
     ) -> zbus::fdo::Result<()> {
         let scx_name = get_scx_from_str(scx_name)?;
 
@@ -131,6 +134,44 @@ impl ScxLoader {
         let _ = self
             .channel
             .send(ScxMessage::StartSchedArgs((scx_name.clone(), scx_args)));
+        self.current_scx = Some(scx_name);
+        // reset mode to auto
+        self.current_mode = SchedMode::Auto;
+
+        Ok(())
+    }
+
+    async fn switch_scheduler(
+        &mut self,
+        scx_name: &str,
+        sched_mode: SchedMode,
+    ) -> zbus::fdo::Result<()> {
+        let scx_name = get_scx_from_str(scx_name)?;
+
+        log::info!("switching {scx_name:?} with mode {sched_mode:?}..");
+
+        let _ = self.channel.send(ScxMessage::SwitchSched((
+            scx_name.clone(),
+            sched_mode.clone(),
+        )));
+        self.current_scx = Some(scx_name);
+        self.current_mode = sched_mode;
+
+        Ok(())
+    }
+
+    async fn switch_scheduler_with_args(
+        &mut self,
+        scx_name: &str,
+        scx_args: Vec<String>,
+    ) -> zbus::fdo::Result<()> {
+        let scx_name = get_scx_from_str(scx_name)?;
+
+        log::info!("switching {scx_name:?} with args {scx_args:?}..");
+
+        let _ = self
+            .channel
+            .send(ScxMessage::SwitchSchedArgs((scx_name.clone(), scx_args)));
         self.current_scx = Some(scx_name);
         // reset mode to auto
         self.current_mode = SchedMode::Auto;
@@ -321,6 +362,28 @@ async fn worker_loop(mut receiver: UnboundedReceiver<ScxMessage>) -> Result<()> 
                     .send(RunnerMessage::Start((scx_sched, sched_args)))
                     .await?;
             }
+            ScxMessage::SwitchSched((scx_sched, sched_mode)) => {
+                log::info!("Got event to switch scheduler!");
+
+                // get scheduler args for the mode
+                let args: Vec<_> = get_scx_flags_for_mode(&scx_sched, sched_mode)
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+
+                // send message with scheduler and asociated args to the runner
+                runner_tx
+                    .send(RunnerMessage::Switch((scx_sched, args)))
+                    .await?;
+            }
+            ScxMessage::SwitchSchedArgs((scx_sched, sched_args)) => {
+                log::info!("Got event to switch scheduler with args!");
+
+                // send message with scheduler and asociated args to the runner
+                runner_tx
+                    .send(RunnerMessage::Switch((scx_sched, sched_args)))
+                    .await?;
+            }
         }
     }
 }
@@ -330,6 +393,21 @@ async fn handle_child_process(mut rx: tokio::sync::mpsc::Receiver<RunnerMessage>
 
     while let Some(message) = rx.recv().await {
         match message {
+            RunnerMessage::Switch((scx_sched, sched_args)) => {
+                // stop the sched if its running
+                if let Err(stop_err) = stop_scheduler(child_id.clone()).await {
+                    log::error!("Failed to stop previous scheduler: {stop_err}");
+                }
+
+                // overwise start scheduler
+                if let Err(sched_err) =
+                    start_scheduler(scx_sched, sched_args, child_id.clone()).await
+                {
+                    log::error!("Scheduler exited with err: {sched_err}");
+                } else {
+                    log::debug!("Scheduler exited");
+                }
+            }
             RunnerMessage::Start((scx_sched, sched_args)) => {
                 // check if sched is running or not
                 if child_id.load(Ordering::Relaxed) != 0 {
@@ -346,15 +424,8 @@ async fn handle_child_process(mut rx: tokio::sync::mpsc::Receiver<RunnerMessage>
                 }
             }
             RunnerMessage::Stop => {
-                // if child_proc is 0, then we assume the child process is terminated
-                let child_proc = child_id.load(Ordering::Relaxed);
-                if child_proc > 0 {
-                    // send SIGINT signal to child
-                    nix::sys::signal::kill(
-                        nix::unistd::Pid::from_raw(child_proc as i32),
-                        nix::sys::signal::SIGINT,
-                    )
-                    .context("Failed to send termination signal to the child")?;
+                if let Err(stop_err) = stop_scheduler(child_id.clone()).await {
+                    log::error!("Failed to stop scheduler: {stop_err}");
                 }
             }
         }
@@ -403,6 +474,30 @@ async fn start_scheduler(
         log::debug!("Child process exited with status: {status:?}");
         child_id.store(0, Ordering::Relaxed);
     });
+
+    Ok(())
+}
+
+async fn stop_scheduler(child_id: Arc<AtomicU32>) -> Result<()> {
+    // if child_proc is 0, then we assume the child process is terminated
+    let child_proc = child_id.load(Ordering::Relaxed);
+    if child_proc == 0 {
+        return Ok(());
+    }
+
+    // send SIGINT signal to child
+    log::debug!("Stopping already running scheduler..");
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(child_proc as i32),
+        nix::sys::signal::SIGINT,
+    )
+    .context("Failed to send termination signal to the child")?;
+
+    // Wait for the child process to exit and child_id to become 0
+    while child_id.load(Ordering::Relaxed) != 0 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    log::debug!("Scheduler was stopped");
 
     Ok(())
 }
