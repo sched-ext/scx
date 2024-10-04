@@ -38,6 +38,9 @@ enum consts {
 	MAX_COMM		= 16,
 	MAX_LAYER_MATCH_ORS	= 32,
 	MAX_LAYERS		= 16,
+	MAX_LAYER_WEIGHT	= 10000,
+	MIN_LAYER_WEIGHT	= 1,
+	DEFAULT_LAYER_WEIGHT	= 100,
 	USAGE_HALF_LIFE		= 100000000,	/* 100ms */
 
 	HI_FALLBACK_DSQ_BASE	= MAX_LAYERS * MAX_LLCS,
@@ -150,14 +153,21 @@ struct layer_match_ands {
 };
 
 enum layer_growth_algo {
-    STICKY,
-    LINEAR,
-    REVERSE,
-    RANDOM,
-    TOPO,
-    ROUND_ROBIN,
-    BIG_LITTLE,
-    LITTLE_BIG,
+	STICKY,
+	LINEAR,
+	REVERSE,
+	RANDOM,
+	TOPO,
+	ROUND_ROBIN,
+	BIG_LITTLE,
+	LITTLE_BIG,
+};
+
+enum dsq_iter_algo {
+	DSQ_ITER_LINEAR,
+	DSQ_ITER_ROUND_ROBIN,
+	DSQ_ITER_WEIGHT,
+	DSQ_ITER_REVERSE_WEIGHT,
 };
 
 struct layer {
@@ -168,6 +178,7 @@ struct layer {
 	u64			max_exec_ns;
 	u64			yield_step_ns;
 	u64			slice_ns;
+	u32			weight;
 	bool			open;
 	bool			preempt;
 	bool			preempt_first;

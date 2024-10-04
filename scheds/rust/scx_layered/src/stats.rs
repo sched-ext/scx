@@ -55,6 +55,10 @@ pub struct LayerStats {
     pub util_frac: f64,
     #[stat(desc = "sum of weight * duty_cycle for tasks")]
     pub load: f64,
+    #[stat(desc = "layer load sum adjusted for infeasible weights")]
+    pub load_adj: f64,
+    #[stat(desc = "layer duty cycle adjusted for infeasible weights")]
+    pub dcycle: f64,
     #[stat(desc = "fraction of total load")]
     pub load_frac: f64,
     #[stat(desc = "count of tasks")]
@@ -179,6 +183,8 @@ impl LayerStats {
             util: stats.layer_utils[lidx] * 100.0,
             util_frac: calc_frac(stats.layer_utils[lidx], stats.total_util),
             load: stats.layer_loads[lidx],
+            load_adj: calc_frac(stats.layer_load_sums[lidx], stats.total_load_sum),
+            dcycle: calc_frac(stats.layer_dcycle_sums[lidx], stats.total_dcycle_sum),
             load_frac: calc_frac(stats.layer_loads[lidx], stats.total_load),
             tasks: stats.nr_layer_tasks[lidx] as u32,
             total: ltotal,
@@ -221,11 +227,13 @@ impl LayerStats {
     pub fn format<W: Write>(&self, w: &mut W, name: &str, header_width: usize) -> Result<()> {
         writeln!(
             w,
-            "  {:<width$}: util/frac={:7.1}/{:5.1} load/frac={:9.1}/{:5.1} tasks={:6}",
+            "  {:<width$}: util/dcycle/frac/{:5.1}/{:5.1}/{:7.1} load/load_adj/frac={:9.2}/{:2.2}/{:5.1} tasks={:6}",
             name,
             self.util,
+            self.dcycle,
             self.util_frac,
             self.load,
+            self.load_adj,
             self.load_frac,
             self.tasks,
             width = header_width,
@@ -338,7 +346,9 @@ impl LayerStats {
 pub struct SysStats {
     #[stat(desc = "timestamp", _om_skip)]
     pub at: f64,
-    #[stat(desc = "count of sched events during the period")]
+    #[stat(desc = "# of NUMA nodes")]
+    pub nr_nodes: usize,
+    #[stat(desc = "# sched events during the period")]
     pub total: u64,
     #[stat(desc = "% dispatched directly into an idle CPU")]
     pub local: f64,
@@ -387,6 +397,7 @@ impl SysStats {
 
         Ok(Self {
             at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64(),
+            nr_nodes: stats.nr_nodes,
             total,
             local: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL),
             open_idle: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE),
@@ -409,12 +420,13 @@ impl SysStats {
     pub fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "tot={:7} local={} open_idle={} affn_viol={} proc={:?}ms",
+            "tot={:7} local={} open_idle={} affn_viol={} proc={:?}ms nodes={}",
             self.total,
             fmt_pct(self.local),
             fmt_pct(self.open_idle),
             fmt_pct(self.affn_viol),
             self.proc_ms,
+            self.nr_nodes,
         )?;
 
         writeln!(

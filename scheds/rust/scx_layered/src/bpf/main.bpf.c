@@ -32,8 +32,11 @@ const volatile u32 nr_llcs = 32;	/* !0 for veristat, set during init */
 const volatile bool smt_enabled = true;
 const volatile bool disable_topology = false;
 const volatile bool xnuma_preemption = false;
+const volatile bool layer_weight_dsq_iter = false;
 const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
+const volatile u32 layer_iteration_order[MAX_LAYERS];
+const volatile u32 dsq_iter_algo = DSQ_ITER_ROUND_ROBIN;
 
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 struct layer layers[MAX_LAYERS];
@@ -79,7 +82,15 @@ static u32 cpu_ctx_layer_idx_inc(struct cpu_ctx *cctx)
 	return cctx->layer_idx;
 }
 
-static __noinline u32 iter_layer_cpu_ctx(u32 layer_idx, int idx)
+/*
+ * Returns the iterator index of a layer ordered by weight.
+ */
+static u32 dsq_iter_weight_ctx(int idx)
+{
+	return *MEMBER_VPTR(layer_iteration_order, [idx]);
+}
+
+static u32 dsq_iter_rr_cpu_ctx(u32 layer_idx, int idx)
 {
 	u32 offset;
 
@@ -99,6 +110,33 @@ static __noinline u32 iter_layer_cpu_ctx(u32 layer_idx, int idx)
 		return 0;
 	}
 	return offset;
+}
+
+/*
+ * Returns the iterator context for iterating over DSQs using the configured
+ * DSQ iterator algorithm.
+ */
+static u32 iter_layer_dsq_ctx(int idx, u32 layer_idx)
+{
+	switch (dsq_iter_algo) {
+	case DSQ_ITER_LINEAR: {
+		return idx;
+	}
+	case DSQ_ITER_ROUND_ROBIN: {
+		return dsq_iter_rr_cpu_ctx(layer_idx, idx);
+	}
+	case DSQ_ITER_WEIGHT: {
+		return dsq_iter_weight_ctx(idx);
+	}
+	case DSQ_ITER_REVERSE_WEIGHT: {
+		// TODO: Correctly implement this algo, see:
+		// https://github.com/sched-ext/scx/issues/738
+		return dsq_iter_weight_ctx(idx);
+	}
+	default:
+		scx_bpf_error("unknown dsq iter algo");
+		return 0;
+	}
 }
 
 // return the dsq id for the layer based on the LLC id.
@@ -1160,14 +1198,15 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
-		layer_idx = iter_layer_cpu_ctx(cctx->layer_idx, idx);
 		if (disable_topology) {
-			if (MEMBER_VPTR(layers, [layer_idx].preempt) && scx_bpf_consume(layer_idx))
+			if (MEMBER_VPTR(layers, [idx].preempt) && scx_bpf_consume(idx))
 				return;
 		} else {
+			layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
 			bpf_for(llc_id, 0, nr_llcs) {
 				dsq_id = layer_dsq_id(layer_idx, llc_id);
-				if (MEMBER_VPTR(layers, [layer_idx].preempt) && scx_bpf_consume(dsq_id))
+				if (MEMBER_VPTR(layers, [layer_idx].preempt) &&
+				    scx_bpf_consume(dsq_id))
 					return;
 			}
 		}
@@ -1179,21 +1218,22 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
-		layer_idx = iter_layer_cpu_ctx(cctx->layer_idx, idx);
 		if (disable_topology) {
-			struct layer *layer = &layers[layer_idx];
+			layer_idx = idx;
+			struct layer *layer = &layers[idx];
 			struct cpumask *layer_cpumask;
 
 			/* consume matching layers */
-			if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
+			if (!(layer_cpumask = lookup_layer_cpumask(idx)))
 				return;
 
 			if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
 			    (cpu == fallback_cpu && layer->nr_cpus == 0)) {
-				if (scx_bpf_consume(layer_idx))
+				if (scx_bpf_consume(idx))
 					return;
 			}
 		} else {
+			layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
 			bpf_for(llc_id, 0, nr_llcs) {
 				struct layer *layer = &layers[layer_idx];
 				struct cpumask *layer_cpumask;
@@ -1205,7 +1245,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 				if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
 				    (cpu <= nr_possible_cpus && cpu == fallback_cpu &&
-				     layer->nr_cpus == 0)) {
+				     MEMBER_VPTR(layer, ->nr_cpus) == 0)) {
 					if (scx_bpf_consume(dsq_id))
 						return;
 				}
@@ -1215,12 +1255,12 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* consume !preempting open layers */
 	bpf_for(idx, 0, nr_layers) {
-		layer_idx = iter_layer_cpu_ctx(cctx->layer_idx, idx);
 		if (disable_topology) {
-			if (!layers[layer_idx].preempt && layers[layer_idx].open &&
-			    scx_bpf_consume(layer_idx))
+			if (!layers[idx].preempt && layers[idx].open &&
+			    scx_bpf_consume(idx))
 				return;
 		} else {
+			layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
 			bpf_for(llc_id, 0, nr_llcs) {
 				dsq_id = layer_dsq_id(layer_idx, llc_id);
 
@@ -1885,6 +1925,22 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 		     dsq_first_runnable_for_ms(LO_FALLBACK_DSQ, now));
 }
 
+static void print_iter_order() {
+	int i;
+	struct cpu_ctx *cctx;
+
+	if (!(cctx = lookup_cpu_ctx(-1))) {
+		scx_bpf_error("failed to get cpu ctx");
+		return;
+	}
+
+	trace("ITER algo: %d", dsq_iter_algo);
+	bpf_for(i, 0, nr_layers) {
+		trace("ITER order i: %d %d\n", i,
+		      iter_layer_dsq_ctx(i, cctx->layer_idx));
+	}
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
 	struct bpf_cpumask *cpumask;
@@ -2058,6 +2114,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			}
 		}
 	}
+
+	print_iter_order();
 
 	return 0;
 }
