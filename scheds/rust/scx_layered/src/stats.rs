@@ -125,6 +125,8 @@ pub struct LayerStats {
     pub min_nr_cpus: u32,
     #[stat(desc = "maximum # of CPUs assigned")]
     pub max_nr_cpus: u32,
+    #[stat(desc = "slice duration config")]
+    pub slice_us: u64,
 }
 
 impl LayerStats {
@@ -212,6 +214,7 @@ impl LayerStats {
             cur_nr_cpus: layer.cpus.count_ones() as u32,
             min_nr_cpus: nr_cpus_range.0 as u32,
             max_nr_cpus: nr_cpus_range.1 as u32,
+            slice_us: stats.layer_slice_us[lidx],
         }
     }
 
@@ -276,7 +279,7 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  preempt/first/xllc/xnuma/idle/fail={}/{}/{}/{}/{}/{} min_exec={}/{:7.2}ms",
+            "  {:<width$}  preempt/first/xllc/xnuma/idle/fail={}/{}/{}/{}/{}/{} min_exec={}/{:7.2}ms, slice={}ms",
             "",
             fmt_pct(self.preempt),
             fmt_pct(self.preempt_first),
@@ -286,6 +289,7 @@ impl LayerStats {
             fmt_pct(self.preempt_fail),
             fmt_pct(self.min_exec),
             self.min_exec_us as f64 / 1000.0,
+            self.slice_us as f64 / 1000.0,
             width = header_width,
         )?;
 

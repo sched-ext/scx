@@ -781,6 +781,8 @@ struct Stats {
 
     processing_dur: Duration,
     prev_processing_dur: Duration,
+
+    layer_slice_us: Vec<u64>,
 }
 
 impl Stats {
@@ -846,6 +848,8 @@ impl Stats {
 
             processing_dur: Default::default(),
             prev_processing_dur: Default::default(),
+
+            layer_slice_us: vec![0; nr_layers],
         })
     }
 
@@ -866,6 +870,15 @@ impl Stats {
             .iter()
             .take(self.nr_layers)
             .map(|layer| layer.nr_tasks as usize)
+            .collect();
+
+        let layer_slice_us: Vec<u64> = skel
+            .maps
+            .bss_data
+            .layers
+            .iter()
+            .take(self.nr_layers)
+            .map(|layer| layer.slice_ns / 1000 as u64)
             .collect();
 
         let (total_load, layer_loads) = Self::read_layer_loads(skel, self.nr_layers);
@@ -916,6 +929,8 @@ impl Stats {
 
             processing_dur,
             prev_processing_dur: cur_processing_dur,
+
+            layer_slice_us,
         };
         Ok(())
     }
