@@ -129,6 +129,8 @@ static u32 iter_layer_dsq_ctx(int idx, u32 layer_idx)
 		return dsq_iter_weight_ctx(idx);
 	}
 	case DSQ_ITER_REVERSE_WEIGHT: {
+		// TODO: Correctly implement this algo, see:
+		// https://github.com/sched-ext/scx/issues/738
 		return dsq_iter_weight_ctx(idx);
 	}
 	default:

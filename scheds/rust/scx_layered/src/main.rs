@@ -281,8 +281,10 @@ lazy_static::lazy_static! {
 /// - slice_us: Scheduling slice duration in microseconds.
 ///
 /// - weight: Weight of the layer, which is a range from 1 to 10000 with a
-///   default of 100. Layer weights are used during contention to balance load
-///   across layers.
+///   default of 100. Layer weights are used during contention to prevent
+///   starvation across layers. Weights are used in combination with
+///   utilization to determine the infeasible adjusted weight with higher
+///   weights having a larger adjustment in adjusted utilization.
 ///
 /// - growth_algo: When a layer is allocated new CPUs different algorithms can
 ///   be used to determine which CPU should be allocated next. The default
@@ -377,7 +379,7 @@ struct Opts {
 
     /// ***DEPRECATED*** Disable load-fraction based max layer CPU limit.
     /// recommended.
-    #[clap(short = 'n', long)]
+    #[clap(short = 'n', long, default_value = "false")]
     no_load_frac_limit: bool,
 
     /// Exit debug dump buffer length. 0 indicates default.
@@ -452,53 +454,6 @@ enum LayerMatch {
     PIDEquals(u32),
     PPIDEquals(u32),
     TGIDEquals(u32),
-}
-
-#[derive(Clone, Debug, Parser, Serialize, Deserialize)]
-#[clap(rename_all = "snake_case")]
-enum LayerGrowthAlgo {
-    /// Sticky attempts to place layers evenly spaced across cores.
-    Sticky,
-    /// Linear starts with the lowest number CPU and grows towards the total
-    /// number of CPUs.
-    Linear,
-    /// Random core selection order.
-    Random,
-    /// Topo uses the order of the nodes/llcs in the layer config to determine
-    /// the order of CPUs to select when growing a layer. It starts from the
-    /// llcs configuration and then the NUMA configuration for any CPUs not
-    /// specified.
-    Topo,
-    /// Round Robin attempts to grow to a core in an unpopulated NUMA node else
-    /// an unpopulated LLC. It keeps the load balanced between NUMA and LLCs as
-    /// it continues to grow.
-    RoundRobin,
-    /// BigLittle attempts to first grow across all big cores and then allocates
-    /// onto little cores after all big cores are allocated.
-    BigLittle,
-    /// LittleBig attempts to first grow across all little cores and then
-    /// allocates onto big cores after all little cores are allocated.
-    LittleBig,
-}
-
-impl LayerGrowthAlgo {
-    fn as_bpf_enum(&self) -> i32 {
-        match self {
-            LayerGrowthAlgo::Sticky => GROWTH_ALGO_STICKY,
-            LayerGrowthAlgo::Linear => GROWTH_ALGO_LINEAR,
-            LayerGrowthAlgo::Random => GROWTH_ALGO_RANDOM,
-            LayerGrowthAlgo::Topo => GROWTH_ALGO_TOPO,
-            LayerGrowthAlgo::RoundRobin => GROWTH_ALGO_ROUND_ROBIN,
-            LayerGrowthAlgo::BigLittle => GROWTH_ALGO_BIG_LITTLE,
-            LayerGrowthAlgo::LittleBig => GROWTH_ALGO_LITTLE_BIG,
-        }
-    }
-}
-
-impl Default for LayerGrowthAlgo {
-    fn default() -> Self {
-        LayerGrowthAlgo::Sticky
-    }
 }
 
 #[derive(ValueEnum, Clone, Debug, Parser, PartialEq, Serialize, Deserialize)]
@@ -1424,8 +1379,8 @@ impl Layer {
             core_order,
 
             nr_cpus: 0,
-            preempt: preempt.clone(),
-            can_preempt: preempt.clone(),
+            preempt,
+            can_preempt: preempt,
             cpus,
             allowed_cpus,
         })
