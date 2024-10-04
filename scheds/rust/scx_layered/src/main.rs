@@ -751,7 +751,7 @@ struct Stats {
     layer_loads: Vec<f64>,
 
     // infeasible stats
-    load_sums: Vec<f64>,
+    layer_load_sums: Vec<f64>,
     total_load_sum: f64,
     layer_dcycle_sums: Vec<f64>,
     total_dcycle_sum: f64,
@@ -825,7 +825,7 @@ impl Stats {
             total_load: 0.0,
             layer_loads: vec![0.0; nr_layers],
 
-            load_sums: vec![0.0, nr_layers as f64],
+            layer_load_sums: vec![0.0, nr_layers as f64],
             total_load_sum: 0.0,
             layer_dcycle_sums: vec![0.0, nr_layers as f64],
             total_dcycle_sum: 0.0,
@@ -935,7 +935,7 @@ impl Stats {
             layer_loads,
 
             total_load_sum: load_ledger.global_load_sum(),
-            load_sums: load_ledger.dom_load_sums().to_vec(),
+            layer_load_sums: load_ledger.dom_load_sums().to_vec(),
             total_dcycle_sum: load_ledger.global_dcycle_sum(),
             layer_dcycle_sums: load_ledger.dom_dcycle_sums().to_vec(),
 
@@ -1879,7 +1879,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     ..
                 } => {
                     let load = (
-                        self.sched_stats.load_sums[idx],
+                        self.sched_stats.layer_load_sums[idx],
                         self.sched_stats.total_load_sum,
                     );
                     let util = (

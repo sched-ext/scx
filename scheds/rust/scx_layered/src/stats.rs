@@ -183,7 +183,7 @@ impl LayerStats {
             util: stats.layer_utils[lidx] * 100.0,
             util_frac: calc_frac(stats.layer_utils[lidx], stats.total_util),
             load: stats.layer_loads[lidx],
-            load_adj: calc_frac(stats.load_sums[lidx], stats.total_load_sum),
+            load_adj: calc_frac(stats.layer_load_sums[lidx], stats.total_load_sum),
             dcycle: calc_frac(stats.layer_dcycle_sums[lidx], stats.total_dcycle_sum),
             load_frac: calc_frac(stats.layer_loads[lidx], stats.total_load),
             tasks: stats.nr_layer_tasks[lidx] as u32,
