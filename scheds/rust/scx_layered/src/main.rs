@@ -32,7 +32,6 @@ use anyhow::Result;
 use bitvec::prelude::*;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
-use layer_core_growth::layer_core_order;
 use layer_core_growth::LayerGrowthAlgo;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
@@ -1251,7 +1250,7 @@ impl Layer {
             | LayerKind::Open { growth_algo, .. } => growth_algo.clone(),
         };
 
-        let core_order = layer_core_order(cpu_pool, spec, layer_growth_algo.clone(), idx, topo);
+        let core_order = layer_growth_algo.layer_core_order(cpu_pool, spec, idx, topo);
         debug!(
             "layer: {} algo: {:?} core order: {:?}",
             name,

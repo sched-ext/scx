@@ -56,6 +56,30 @@ impl LayerGrowthAlgo {
             LayerGrowthAlgo::LittleBig => GROWTH_ALGO_LITTLE_BIG,
         }
     }
+
+    pub fn layer_core_order(
+        &self,
+        cpu_pool: &CpuPool,
+        spec: &LayerSpec,
+        layer_idx: usize,
+        topo: &Topology,
+    ) -> Vec<usize> {
+        let generator = LayerCoreOrderGenerator {
+            cpu_pool,
+            spec,
+            layer_idx,
+            topo,
+        };
+        match self {
+            LayerGrowthAlgo::Sticky => generator.grow_sticky(),
+            LayerGrowthAlgo::Linear => generator.grow_linear(),
+            LayerGrowthAlgo::RoundRobin => generator.grow_round_robin(),
+            LayerGrowthAlgo::Random => generator.grow_random(),
+            LayerGrowthAlgo::BigLittle => generator.grow_big_little(),
+            LayerGrowthAlgo::LittleBig => generator.grow_little_big(),
+            LayerGrowthAlgo::Topo => generator.grow_topo(),
+        }
+    }
 }
 
 impl Default for LayerGrowthAlgo {
@@ -64,19 +88,53 @@ impl Default for LayerGrowthAlgo {
     }
 }
 
-pub fn layer_core_order(
-    cpu_pool: &CpuPool,
-    spec: &LayerSpec,
-    growth_algo: LayerGrowthAlgo,
+struct LayerCoreOrderGenerator<'a> {
+    cpu_pool: &'a CpuPool,
+    spec: &'a LayerSpec,
     layer_idx: usize,
-    topo: &Topology,
-) -> Vec<usize> {
-    let linear = || (0..topo.cores().len()).collect();
+    topo: &'a Topology,
+}
 
-    let round_robin = || {
-        fastrand::seed(layer_idx.try_into().unwrap());
+impl<'a> LayerCoreOrderGenerator<'a> {
+    fn grow_sticky(&self) -> Vec<usize> {
+        let mut core_order = vec![];
 
-        let mut nodes: Vec<_> = topo.nodes().into_iter().collect();
+        let is_left = self.layer_idx % 2 == 0;
+        let rot_by = |layer_idx, len| -> usize {
+            if layer_idx <= len {
+                layer_idx
+            } else {
+                layer_idx % len
+            }
+        };
+
+        for i in 0..self.topo.cores().len() {
+            core_order.push(i);
+        }
+
+        for node in self.topo.nodes().iter() {
+            for (_, llc) in node.llcs() {
+                let llc_cores = llc.cores().len();
+                let rot = rot_by(llc_cores + (self.layer_idx << 1), llc_cores);
+                if is_left {
+                    core_order.rotate_left(rot);
+                } else {
+                    core_order.rotate_right(rot);
+                }
+            }
+        }
+
+        core_order
+    }
+
+    fn grow_linear(&self) -> Vec<usize> {
+        (0..self.topo.cores().len()).collect()
+    }
+
+    fn grow_round_robin(&self) -> Vec<usize> {
+        fastrand::seed(self.layer_idx.try_into().unwrap());
+
+        let mut nodes: Vec<_> = self.topo.nodes().into_iter().collect();
         fastrand::shuffle(&mut nodes);
 
         let interleaved_llcs = IteratorInterleaver::new(
@@ -99,106 +157,73 @@ pub fn layer_core_order(
                 })
                 .collect(),
         )
-        .map(|core| cpu_pool.get_core_topological_id(core))
+        .map(|core| self.cpu_pool.get_core_topological_id(core))
         .collect()
-    };
+    }
 
-    let big_little = || {
-        let mut cores: Vec<&Core> = topo.cores().into_iter().collect();
+    fn grow_random(&self) -> Vec<usize> {
+        let mut core_order = self.grow_linear();
+        fastrand::seed(self.layer_idx.try_into().unwrap());
+        fastrand::shuffle(&mut core_order);
+        core_order
+    }
+
+    fn grow_big_little(&self) -> Vec<usize> {
+        let mut cores: Vec<&Core> = self.topo.cores().into_iter().collect();
         cores.sort_by(|a, b| a.core_type.cmp(&b.core_type));
         cores
             .into_iter()
-            .map(|core| cpu_pool.get_core_topological_id(core))
+            .map(|core| self.cpu_pool.get_core_topological_id(core))
             .collect()
-    };
+    }
 
-    match growth_algo {
-        LayerGrowthAlgo::Sticky => {
+    fn grow_little_big(&self) -> Vec<usize> {
+        let mut cores = self.grow_big_little();
+        cores.reverse();
+        cores
+    }
+
+    fn grow_topo(&self) -> Vec<usize> {
+        let spec_nodes = self.spec.nodes();
+        let spec_llcs = self.spec.llcs();
+        let topo_nodes = self.topo.nodes();
+
+        if spec_nodes.len() + spec_llcs.len() == 0 {
+            self.grow_round_robin()
+        } else {
             let mut core_order = vec![];
-
-            let is_left = layer_idx % 2 == 0;
-            let rot_by = |layer_idx, len| -> usize {
-                if layer_idx <= len {
-                    layer_idx
-                } else {
-                    layer_idx % len
-                }
-            };
-
-            for i in 0..topo.cores().len() {
-                core_order.push(i);
-            }
-
-            for node in topo.nodes().iter() {
-                for (_, llc) in node.llcs() {
-                    let llc_cores = llc.cores().len();
-                    let rot = rot_by(llc_cores + (layer_idx << 1), llc_cores);
-                    if is_left {
-                        core_order.rotate_left(rot);
-                    } else {
-                        core_order.rotate_right(rot);
-                    }
-                }
-            }
-
-            core_order
-        }
-        LayerGrowthAlgo::Linear => linear(),
-        LayerGrowthAlgo::RoundRobin => round_robin(),
-        LayerGrowthAlgo::Random => {
-            let mut core_order = linear();
-            fastrand::seed(layer_idx.try_into().unwrap());
-            fastrand::shuffle(&mut core_order);
-            core_order
-        }
-        LayerGrowthAlgo::BigLittle => big_little(),
-        LayerGrowthAlgo::LittleBig => {
-            let mut cores = big_little();
-            cores.reverse();
-            cores
-        }
-        LayerGrowthAlgo::Topo => {
-            let spec_nodes = spec.nodes();
-            let spec_llcs = spec.llcs();
-            let topo_nodes = topo.nodes();
-
-            if spec_nodes.len() + spec_llcs.len() == 0 {
-                round_robin()
-            } else {
-                let mut core_order = vec![];
-                let mut core_id = 0;
-                spec_llcs.iter().for_each(|spec_llc| {
-                    core_id = 0;
-                    topo_nodes.iter().for_each(|topo_node| {
-                        topo_node.cores().values().for_each(|core| {
-                            if core.llc_id != *spec_llc {
-                                core_id += 1;
-                                return;
-                            }
-                            if !core_order.contains(&core_id) {
-                                core_order.push(core_id);
-                            }
+            let mut core_id = 0;
+            spec_llcs.iter().for_each(|spec_llc| {
+                core_id = 0;
+                topo_nodes.iter().for_each(|topo_node| {
+                    topo_node.cores().values().for_each(|core| {
+                        if core.llc_id != *spec_llc {
                             core_id += 1;
-                        });
-                    });
-                });
-                spec_nodes.iter().for_each(|spec_node| {
-                    core_id = 0;
-                    topo_nodes.iter().for_each(|topo_node| {
-                        if topo_node.id() != *spec_node {
-                            core_id += topo_node.cores().len();
                             return;
                         }
-                        topo_node.cores().values().for_each(|_core| {
-                            if !core_order.contains(&core_id) {
-                                core_order.push(core_id);
-                            }
-                            core_id += 1;
-                        });
+                        if !core_order.contains(&core_id) {
+                            core_order.push(core_id);
+                        }
+                        core_id += 1;
                     });
                 });
-                core_order
-            }
+            });
+            spec_nodes.iter().for_each(|spec_node| {
+                core_id = 0;
+                topo_nodes.iter().for_each(|topo_node| {
+                    if topo_node.id() != *spec_node {
+                        core_id += topo_node.cores().len();
+                        return;
+                    }
+                    topo_node.cores().values().for_each(|_core| {
+                        if !core_order.contains(&core_id) {
+                            core_order.push(core_id);
+                        }
+                        core_id += 1;
+                    });
+                });
+            });
+            core_order
         }
     }
 }
