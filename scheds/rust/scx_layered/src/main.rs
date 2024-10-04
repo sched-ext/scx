@@ -415,7 +415,7 @@ struct Opts {
     /// When iterating over layer DSQs use the weight of the layer for iteration
     /// order. The default iteration order is semi-random except when topology
     /// awareness is disabled.
-    #[clap(long, value_enum)]
+    #[clap(long, value_enum, default_value = "linear")]
     dsq_iter_algo: DsqIterAlgo,
 
     /// Enable stats monitoring with the specified interval.
