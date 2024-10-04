@@ -322,7 +322,7 @@ impl LoadEntity {
 
 #[derive(Debug)]
 struct TaskInfo {
-    pid: i32,
+    tptr: u64,
     load: OrderedFloat<f64>,
     dom_mask: u64,
     preferred_dom_mask: u64,
@@ -364,19 +364,19 @@ impl Domain {
         }
     }
 
-    fn transfer_load(&mut self, load: f64, pid: i32, other: &mut Domain, skel: &mut BpfSkel) {
-        let cpid = (pid as libc::pid_t).to_ne_bytes();
+    fn transfer_load(&mut self, load: f64, tptr: u64, other: &mut Domain, skel: &mut BpfSkel) {
+        let ctptr = (tptr as u64).to_ne_bytes();
         let dom_id: u32 = other.id.try_into().unwrap();
 
         // Ask BPF code to execute the migration.
         if let Err(e) =
             skel.maps
                 .lb_data
-                .update(&cpid, &dom_id.to_ne_bytes(), libbpf_rs::MapFlags::NO_EXIST)
+                .update(&ctptr, &dom_id.to_ne_bytes(), libbpf_rs::MapFlags::NO_EXIST)
         {
             warn!(
-                "Failed to update lb_data map for pid={} error={:?}",
-                pid, &e
+                "Failed to update lb_data map for tptr={} error={:?}",
+                tptr, &e
             );
         }
 
@@ -384,8 +384,8 @@ impl Domain {
         other.load.add_load(load);
 
         debug!(
-            "  DOM {} sending [pid: {:05}](load: {:.06}) --> DOM {} ",
-            self.id, pid, load, other.id
+            "  DOM {} sending [tptr: {:05}](load: {:.06}) --> DOM {} ",
+            self.id, tptr, load, other.id
         );
     }
 
@@ -657,16 +657,16 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         }
         dom.queried_tasks = true;
 
-        // Read active_pids and update read_idx and gen.
-        const MAX_PIDS: u64 = bpf_intf::consts_MAX_DOM_ACTIVE_PIDS as u64;
-        let active_pids = &mut self.skel.maps.bss_data.dom_active_pids[dom.id];
-        let (mut ridx, widx) = (active_pids.read_idx, active_pids.write_idx);
-        active_pids.read_idx = active_pids.write_idx;
-        active_pids.gen += 1;
+        // Read active_tptrs and update read_idx and gen.
+        const MAX_TPTRS: u64 = bpf_intf::consts_MAX_DOM_ACTIVE_TPTRS as u64;
+        let active_tptrs = &mut self.skel.maps.bss_data.dom_active_tptrs[dom.id];
+        let (mut ridx, widx) = (active_tptrs.read_idx, active_tptrs.write_idx);
+        active_tptrs.read_idx = active_tptrs.write_idx;
+        active_tptrs.gen += 1;
 
-        let active_pids = &self.skel.maps.bss_data.dom_active_pids[dom.id];
-        if widx - ridx > MAX_PIDS {
-            ridx = widx - MAX_PIDS;
+        let active_tptrs = &self.skel.maps.bss_data.dom_active_tptrs[dom.id];
+        if widx - ridx > MAX_TPTRS {
+            ridx = widx - MAX_TPTRS;
         }
 
         // Read task_ctx and load.
@@ -675,8 +675,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let now_mono = now_monotonic();
 
         for idx in ridx..widx {
-            let pid = active_pids.pids[(idx % MAX_PIDS) as usize];
-            let key = unsafe { std::mem::transmute::<i32, [u8; 4]>(pid) };
+            let tptr = active_tptrs.tptrs[(idx % MAX_TPTRS) as usize];
+            let key = unsafe { std::mem::transmute::<u64, [u8; 8]>(tptr) };
 
             if let Some(task_data_elem) = task_data.lookup(&key, libbpf_rs::MapFlags::ANY)? {
                 let task_ctx =
@@ -702,7 +702,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 }
 
                 dom.tasks.insert(TaskInfo {
-                    pid,
+                    tptr,
                     load: OrderedFloat(load),
                     dom_mask: task_ctx.dom_mask,
                     preferred_dom_mask: task_ctx.preferred_dom_mask,
@@ -715,7 +715,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         Ok(())
     }
 
-    // Find the first candidate pid which hasn't already been migrated and
+    // Find the first candidate tptr which hasn't already been migrated and
     // can run in @pull_dom.
     fn find_first_candidate<'d, I>(tasks_by_load: I) -> Option<&'d TaskInfo>
     where
@@ -797,11 +797,11 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         }
 
         let load = *(task.load);
-        let pid = task.pid;
+        let tptr = task.tptr;
         task.migrated.set(true);
         std::mem::swap(&mut push_dom.tasks, &mut SortedVec::from_unsorted(tasks));
 
-        push_dom.transfer_load(load, pid, pull_dom, &mut self.skel);
+        push_dom.transfer_load(load, tptr, pull_dom, &mut self.skel);
         Ok(Some(load))
     }
 
