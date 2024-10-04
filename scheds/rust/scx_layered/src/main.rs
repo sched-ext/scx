@@ -1399,7 +1399,6 @@ impl Layer {
         (layer_util, _total_util): (f64, f64),
     ) -> Result<bool> {
         let nr_cpus = self.cpus.count_ones();
-        let free = self.cpus.count_zeros();
         if nr_cpus >= cpus_max {
             trace!("layer has {} max: {}", nr_cpus, cpus_max);
             return Ok(false);
@@ -1408,14 +1407,17 @@ impl Layer {
         // Do we already have enough?
         if nr_cpus >= cpus_min
             && (layer_util == 0.0 || (nr_cpus > 0 && layer_util / nr_cpus as f64 <= util_high))
-            && ((nr_cpus - free) as f64 / cpu_pool.nr_cpus as f64 >= layer_load / total_load)
         {
             return Ok(false);
         }
-        if layer_growth_weight_disable > 0.0
-            && (layer_load / total_load > layer_growth_weight_disable
-                || layer_load / total_load == 0.0)
+        if total_load > 0.0
+            && layer_growth_weight_disable > 0.0
+            && layer_load / total_load > layer_growth_weight_disable
         {
+            trace!(
+                "layer-{} needs more CPUs (util={:.3}) but is over the load fraction",
+                &self.name, layer_util
+            );
             return Ok(false);
         }
 
