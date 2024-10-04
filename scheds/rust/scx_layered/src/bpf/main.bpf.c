@@ -1927,9 +1927,17 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 
 static void print_iter_order() {
 	int i;
+	struct cpu_ctx *cctx;
 
+	if (!(cctx = lookup_cpu_ctx(-1))) {
+		scx_bpf_error("failed to get cpu ctx");
+		return;
+	}
+
+	trace("ITER algo: %d", dsq_iter_algo);
 	bpf_for(i, 0, nr_layers) {
-		trace("ITER order i: %d %d\n", i, *MEMBER_VPTR(layer_iteration_order, [i]));
+		trace("ITER order i: %d %d\n", i,
+		      iter_layer_dsq_ctx(i, cctx->layer_idx));
 	}
 }
 
