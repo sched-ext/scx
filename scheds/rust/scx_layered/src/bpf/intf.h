@@ -152,6 +152,7 @@ struct layer_match_ands {
 enum layer_growth_algo {
     STICKY,
     LINEAR,
+    REVERSE,
     RANDOM,
     TOPO,
     ROUND_ROBIN,

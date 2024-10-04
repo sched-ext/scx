@@ -17,6 +17,9 @@ pub enum LayerGrowthAlgo {
     /// Linear starts with the lowest number CPU and grows towards the total
     /// number of CPUs.
     Linear,
+    /// Reverse order of [`LayerGrowthAlgo::Linear`]. Starts with the highest number CPU and grows towards the total
+    /// number of CPUs.
+    Reverse,
     /// Random core selection order.
     Random,
     /// Topo uses the order of the nodes/llcs in the layer config to determine
@@ -38,6 +41,7 @@ pub enum LayerGrowthAlgo {
 
 const GROWTH_ALGO_STICKY: i32 = bpf_intf::layer_growth_algo_STICKY as i32;
 const GROWTH_ALGO_LINEAR: i32 = bpf_intf::layer_growth_algo_LINEAR as i32;
+const GROWTH_ALGO_REVERSE: i32 = bpf_intf::layer_growth_algo_REVERSE as i32;
 const GROWTH_ALGO_RANDOM: i32 = bpf_intf::layer_growth_algo_RANDOM as i32;
 const GROWTH_ALGO_TOPO: i32 = bpf_intf::layer_growth_algo_TOPO as i32;
 const GROWTH_ALGO_ROUND_ROBIN: i32 = bpf_intf::layer_growth_algo_ROUND_ROBIN as i32;
@@ -49,6 +53,7 @@ impl LayerGrowthAlgo {
         match self {
             LayerGrowthAlgo::Sticky => GROWTH_ALGO_STICKY,
             LayerGrowthAlgo::Linear => GROWTH_ALGO_LINEAR,
+            LayerGrowthAlgo::Reverse => GROWTH_ALGO_REVERSE,
             LayerGrowthAlgo::Random => GROWTH_ALGO_RANDOM,
             LayerGrowthAlgo::Topo => GROWTH_ALGO_TOPO,
             LayerGrowthAlgo::RoundRobin => GROWTH_ALGO_ROUND_ROBIN,
@@ -73,6 +78,7 @@ impl LayerGrowthAlgo {
         match self {
             LayerGrowthAlgo::Sticky => generator.grow_sticky(),
             LayerGrowthAlgo::Linear => generator.grow_linear(),
+            LayerGrowthAlgo::Reverse => generator.grow_reverse(),
             LayerGrowthAlgo::RoundRobin => generator.grow_round_robin(),
             LayerGrowthAlgo::Random => generator.grow_random(),
             LayerGrowthAlgo::BigLittle => generator.grow_big_little(),
@@ -129,6 +135,12 @@ impl<'a> LayerCoreOrderGenerator<'a> {
 
     fn grow_linear(&self) -> Vec<usize> {
         (0..self.topo.cores().len()).collect()
+    }
+
+    fn grow_reverse(&self) -> Vec<usize> {
+        let mut cores = self.grow_linear();
+        cores.reverse();
+        cores
     }
 
     fn grow_round_robin(&self) -> Vec<usize> {
