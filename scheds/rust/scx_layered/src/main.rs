@@ -31,6 +31,7 @@ use anyhow::Context;
 use anyhow::Result;
 use bitvec::prelude::*;
 use clap::Parser;
+use clap::ValueEnum;
 use crossbeam::channel::RecvTimeoutError;
 use layer_core_growth::LayerGrowthAlgo;
 use libbpf_rs::skel::OpenSkel;
@@ -414,8 +415,8 @@ struct Opts {
     /// When iterating over layer DSQs use the weight of the layer for iteration
     /// order. The default iteration order is semi-random except when topology
     /// awareness is disabled.
-    #[clap(long)]
-    layer_weight_dsq_iter: bool,
+    #[clap(long, value_enum)]
+    dsq_iter_algo: DsqIterAlgo,
 
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
@@ -451,6 +452,84 @@ enum LayerMatch {
     PIDEquals(u32),
     PPIDEquals(u32),
     TGIDEquals(u32),
+}
+
+#[derive(Clone, Debug, Parser, Serialize, Deserialize)]
+#[clap(rename_all = "snake_case")]
+enum LayerGrowthAlgo {
+    /// Sticky attempts to place layers evenly spaced across cores.
+    Sticky,
+    /// Linear starts with the lowest number CPU and grows towards the total
+    /// number of CPUs.
+    Linear,
+    /// Random core selection order.
+    Random,
+    /// Topo uses the order of the nodes/llcs in the layer config to determine
+    /// the order of CPUs to select when growing a layer. It starts from the
+    /// llcs configuration and then the NUMA configuration for any CPUs not
+    /// specified.
+    Topo,
+    /// Round Robin attempts to grow to a core in an unpopulated NUMA node else
+    /// an unpopulated LLC. It keeps the load balanced between NUMA and LLCs as
+    /// it continues to grow.
+    RoundRobin,
+    /// BigLittle attempts to first grow across all big cores and then allocates
+    /// onto little cores after all big cores are allocated.
+    BigLittle,
+    /// LittleBig attempts to first grow across all little cores and then
+    /// allocates onto big cores after all little cores are allocated.
+    LittleBig,
+}
+
+impl LayerGrowthAlgo {
+    fn as_bpf_enum(&self) -> i32 {
+        match self {
+            LayerGrowthAlgo::Sticky => GROWTH_ALGO_STICKY,
+            LayerGrowthAlgo::Linear => GROWTH_ALGO_LINEAR,
+            LayerGrowthAlgo::Random => GROWTH_ALGO_RANDOM,
+            LayerGrowthAlgo::Topo => GROWTH_ALGO_TOPO,
+            LayerGrowthAlgo::RoundRobin => GROWTH_ALGO_ROUND_ROBIN,
+            LayerGrowthAlgo::BigLittle => GROWTH_ALGO_BIG_LITTLE,
+            LayerGrowthAlgo::LittleBig => GROWTH_ALGO_LITTLE_BIG,
+        }
+    }
+}
+
+impl Default for LayerGrowthAlgo {
+    fn default() -> Self {
+        LayerGrowthAlgo::Sticky
+    }
+}
+
+#[derive(ValueEnum, Clone, Debug, Parser, PartialEq, Serialize, Deserialize)]
+#[clap(rename_all = "snake_case")]
+enum DsqIterAlgo {
+    /// Linear starts with the first layer in the config and iterates over
+    /// layers sequentially.
+    Linear,
+    /// Iterates from lowest weight to highest weight.
+    Weight,
+    /// Iterates from the highest weigh to the lowest weight.
+    ReverseWeight,
+    /// Per CPU semi round robin ordering.
+    RoundRobin,
+}
+
+impl DsqIterAlgo {
+    fn as_bpf_enum(&self) -> u32 {
+        match self {
+            DsqIterAlgo::Linear => bpf_intf::dsq_iter_algo_DSQ_ITER_LINEAR,
+            DsqIterAlgo::Weight => bpf_intf::dsq_iter_algo_DSQ_ITER_WEIGHT,
+            DsqIterAlgo::ReverseWeight => bpf_intf::dsq_iter_algo_DSQ_ITER_REVERSE_WEIGHT,
+            DsqIterAlgo::RoundRobin => bpf_intf::dsq_iter_algo_DSQ_ITER_ROUND_ROBIN,
+        }
+    }
+}
+
+impl Default for DsqIterAlgo {
+    fn default() -> Self {
+        DsqIterAlgo::RoundRobin
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1788,7 +1867,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         skel.maps.rodata_data.smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
         skel.maps.rodata_data.disable_topology = opts.disable_topology;
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
-        skel.maps.rodata_data.layer_weight_dsq_iter = opts.layer_weight_dsq_iter;
+        skel.maps.rodata_data.dsq_iter_algo = opts.dsq_iter_algo.as_bpf_enum();
         for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
             skel.maps.rodata_data.__sibling_cpu[cpu] = *sib;
         }

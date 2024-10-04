@@ -153,14 +153,20 @@ struct layer_match_ands {
 };
 
 enum layer_growth_algo {
-    STICKY,
-    LINEAR,
-    REVERSE,
-    RANDOM,
-    TOPO,
-    ROUND_ROBIN,
-    BIG_LITTLE,
-    LITTLE_BIG,
+	STICKY,
+	LINEAR,
+	RANDOM,
+	TOPO,
+	ROUND_ROBIN,
+	BIG_LITTLE,
+	LITTLE_BIG,
+};
+
+enum dsq_iter_algo {
+	DSQ_ITER_LINEAR,
+	DSQ_ITER_ROUND_ROBIN,
+	DSQ_ITER_WEIGHT,
+	DSQ_ITER_REVERSE_WEIGHT,
 };
 
 struct layer {
