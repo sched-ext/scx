@@ -921,18 +921,17 @@ impl Stats {
         let (total_load, layer_loads) = Self::read_layer_loads(skel, self.nr_layers);
 
         let cur_layer_cycles = Self::read_layer_cycles(&cpu_ctxs, self.nr_layers);
-        let _: Vec<_> = cur_layer_cycles
+        cur_layer_cycles
             .iter()
             .zip(layer_weights)
             .enumerate()
-            .map(|(layer_idx, (usage, weight))| {
+            .for_each(|(layer_idx, (usage, weight))| {
                 let mut load = 0.0;
                 if self.prev_layer_cycles[layer_idx] > 0 {
                     load = (*usage - self.prev_layer_cycles[layer_idx]) as f64;
                 }
                 let _ = load_agg.record_dom_load(layer_idx, weight, load as f64);
-            })
-            .collect();
+            });
         let cur_layer_utils: Vec<f64> = cur_layer_cycles
             .iter()
             .zip(self.prev_layer_cycles.iter())
