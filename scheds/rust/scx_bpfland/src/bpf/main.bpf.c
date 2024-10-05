@@ -236,6 +236,21 @@ struct task_ctx {
 	u64 avg_nvcsw;
 
 	/*
+	 * Task's average used time slice.
+	 */
+	u64 avg_runtime;
+
+	/*
+	 * Last task's execution time.
+	 */
+	u64 last_running;
+
+	/*
+	 * Task's deadline.
+	 */
+	u64 deadline;
+
+	/*
 	 * Set to true if the task is classified as interactive.
 	 */
 	bool is_interactive;
@@ -270,6 +285,17 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 static bool is_nvcsw_enabled(void)
 {
 	return !!nvcsw_max_thresh;
+}
+
+/*
+ * Compare two vruntime values, returns true if the first value is less than
+ * the second one.
+ *
+ * Copied from scx_simple.
+ */
+static inline bool vtime_before(u64 a, u64 b)
+{
+	return (s64)(a - b) < 0;
 }
 
 /*
@@ -345,27 +371,46 @@ static u64 calc_avg_clamp(u64 old_val, u64 new_val, u64 low, u64 high)
 }
 
 /*
- * Compare two vruntime values, returns true if the first value is less than
- * the second one.
- *
- * Copied from scx_simple.
+ * Return a value inversely proportional to a weight.
  */
-static inline bool vtime_before(u64 a, u64 b)
+static u64 scale_inverse_fair(u64 value, u64 weight)
 {
-	return (s64)(a - b) < 0;
+	return value * 100 / weight;
 }
 
 /*
- * Return task's average amount of context switches per second.
+ * Compute the deadline component of a task (this value will be added to the
+ * task's vruntime to determine the actual deadline).
  */
-static u64 task_avg_nvcsw(struct task_struct *p)
+static s64 task_compute_dl(struct task_struct *p ,struct task_ctx *tctx)
 {
-	struct task_ctx *tctx;
+	/*
+	 * The amount of voluntary context switches contributes to determine
+	 * the task's priority.
+	 */
+	u64 task_prio = p->scx.weight + tctx->avg_nvcsw;
 
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
+	/*
+	 * If not in "lowlatency" mode, always apply a pure vruntime based
+	 * scheduling.
+	 */
+	if (!lowlatency)
 		return 0;
-	return tctx->avg_nvcsw;
+
+	/*
+	 * If the task has not ran during the previous slice_ns period, use its
+	 * vruntime as deadline to give it a priority boost. This allows to
+	 * speed up tasks that are mostly sleeping and they suddenly need to
+	 * react fast.
+	 */
+	if (vtime_before(tctx->last_running + slice_ns, bpf_ktime_get_ns()))
+		return 0;
+
+	/*
+	 * Return the deadline as a function of the average runtime and the
+	 * evaluated task's dynamic priority.
+	 */
+	return scale_inverse_fair(tctx->avg_runtime, task_prio);
 }
 
 /*
@@ -373,7 +418,12 @@ static u64 task_avg_nvcsw(struct task_struct *p)
  */
 static inline u64 task_deadline(struct task_struct *p)
 {
-	u64 dl_boost = lowlatency ? task_avg_nvcsw(p) * slice_ns : 0;
+	u64 min_vruntime = vtime_now - slice_ns_lag;
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return min_vruntime;
 
 	/*
 	 * Limit the vruntime to (vtime_now - slice_ns_lag) to avoid
@@ -387,18 +437,12 @@ static inline u64 task_deadline(struct task_struct *p)
 	 * performance (less spikey), smoothing the reordering of the vruntime
 	 * scheduling and making the scheduler closer to a FIFO.
 	 */
-	if (vtime_before(p->scx.dsq_vtime, vtime_now - slice_ns_lag))
-		p->scx.dsq_vtime = vtime_now - slice_ns_lag;
+	if (vtime_before(p->scx.dsq_vtime, min_vruntime)) {
+		p->scx.dsq_vtime = min_vruntime;
+		tctx->deadline = p->scx.dsq_vtime + task_compute_dl(p, tctx);
+	}
 
-	/*
-	 * Return the task's deadline as its vruntime, with a bonus that is
-	 * proportional to the task's average number of voluntary context
-	 * switches.
-	 *
-	 * Also make sure the bonus is limited to the starvation threshold (to
-	 * prevent starvation).
-	 */
-	return p->scx.dsq_vtime - MIN(dl_boost, starvation_thresh_ns);
+	return tctx->deadline;
 }
 
 /*
@@ -408,14 +452,6 @@ static u64 nr_tasks_waiting(void)
 {
 	return scx_bpf_dsq_nr_queued(prio_dsq_id) +
 	       scx_bpf_dsq_nr_queued(shared_dsq_id);
-}
-
-/*
- * Return a value inversely proportional to the task's weight.
- */
-static inline u64 scale_inverse_fair(struct task_struct *p, u64 value)
-{
-	return value * 100 / p->scx.weight;
 }
 
 /*
@@ -1098,6 +1134,8 @@ static void update_cpuperf_target(struct task_struct *p)
 
 void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 {
+	struct task_ctx *tctx;
+
 	/*
 	 * Refresh task's time slice immediately before it starts to run on its
 	 * assigned CPU.
@@ -1109,11 +1147,19 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	 */
 	update_cpuperf_target(p);
 
-	/*
-	 * Update CPU interactive state.
-	 */
-	if (is_task_interactive(p))
-		__sync_fetch_and_add(&nr_interactive, 1);
+	tctx = try_lookup_task_ctx(p);
+	if (tctx) {
+		/*
+		 * Update CPU interactive state.
+		 */
+		if (tctx->is_interactive)
+			__sync_fetch_and_add(&nr_interactive, 1);
+
+		/*
+		 * Update task's running timestamp.
+		 */
+		tctx->last_running = bpf_ktime_get_ns();
+	}
 
 	__sync_fetch_and_add(&nr_running, 1);
 }
@@ -1160,16 +1206,24 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	tctx->select_cpu_done = false;
 
 	/*
-	 * Update task vruntime, charging the weighted used time slice.
+	 * Update task's average runtime.
 	 */
 	task_slice = p->se.sum_exec_runtime - tctx->sum_exec_runtime;
-	p->scx.dsq_vtime += scale_inverse_fair(p, task_slice);
 	tctx->sum_exec_runtime = p->se.sum_exec_runtime;
+	tctx->avg_runtime = calc_avg(tctx->avg_runtime, task_slice);
+
+	/*
+	 * Update task vruntime and deadline, charging the weighted used time
+	 * slice.
+	 */
+	task_slice = scale_inverse_fair(task_slice, p->scx.weight);
+	p->scx.dsq_vtime += task_slice;
+	tctx->deadline = p->scx.dsq_vtime + task_compute_dl(p, tctx);
 
 	/*
 	 * Update global vruntime.
 	 */
-	vtime_now += scale_inverse_fair(p, task_slice);
+	vtime_now += task_slice;
 
 	/*
 	 * Refresh voluntary context switch metrics.
@@ -1219,6 +1273,7 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 
 void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 {
+	u64 now = bpf_ktime_get_ns();
 	struct task_ctx *tctx;
 
 	/* Initialize task's vruntime */
@@ -1230,8 +1285,11 @@ void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 		return;
 	tctx->sum_exec_runtime = p->se.sum_exec_runtime;
 	tctx->nvcsw = p->nvcsw;
-	tctx->nvcsw_ts = bpf_ktime_get_ns();
+	tctx->nvcsw_ts = now;
 	tctx->avg_nvcsw = p->nvcsw * NSEC_PER_SEC / tctx->nvcsw_ts;
+	tctx->avg_runtime = slice_ns;
+	tctx->deadline = vtime_now;
+	tctx->last_running = now;
 
 	update_task_interactive(tctx);
 }
