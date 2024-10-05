@@ -650,7 +650,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 					      idle_cpumask)) >= 0)
 			goto out_put;
 	} else {
-		idle_cpumask = scx_bpf_get_idle_cpumask();
+		idle_cpumask = scx_bpf_get_idle_smtmask();
 		if (!pref_idle_cpumask || !idle_cpumask) {
 			cpu = -1;
 			goto out_put;
