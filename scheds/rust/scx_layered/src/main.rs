@@ -1048,17 +1048,55 @@ impl Stats {
 }
 
 #[derive(Debug)]
+/// `CpuPool` represents the CPU core and logical CPU topology within the system.
+/// It manages the mapping and availability of physical and logical cores, including
+/// how resources are allocated for tasks across the available CPUs.
 struct CpuPool {
+    /// The number of physical cores available on the system.
     nr_cores: usize,
+
+    /// The total number of logical CPUs (including SMT threads).
+    /// This can be larger than `nr_cores` if SMT is enabled,
+    /// where each physical core may have a couple logical cores.
     nr_cpus: usize,
+
+    /// A bit mask representing all online logical cores.
+    /// Each bit corresponds to whether a logical core (CPU) is online and available
+    /// for processing tasks.
     all_cpus: BitVec,
+
+    /// A vector of bit masks, each representing the mapping between
+    /// physical cores and the logical cores that run on them.
+    /// The index in the vector represents the physical core, and each bit in the
+    /// corresponding `BitVec` represents whether a logical core belongs to that physical core.
     core_cpus: Vec<BitVec>,
+
+    /// A vector that maps the index of each logical core to the sibling core.
+    /// This represents the "next sibling" core within a package in systems that support SMT.
+    /// The sibling core is the other logical core that shares the physical resources
+    /// of the same physical core.
     sibling_cpu: Vec<i32>,
+
+    /// A list of physical core IDs.
+    /// Each entry in this vector corresponds to a unique physical core.
     cpu_core: Vec<usize>,
+
+    /// A bit mask representing all available physical cores.
+    /// Each bit corresponds to whether a physical core is available for task scheduling.
     available_cores: BitVec,
+
+    /// The ID of the first physical core in the system.
+    /// This core is often used as a default for initializing tasks.
     first_cpu: usize,
-    fallback_cpu: usize, // next free or the first CPU if none is free
-    core_topology_to_id: BTreeMap<(usize, usize, usize), usize>, // (node_id -> llc_id -> id)
+
+    /// The ID of the next free CPU or the fallback CPU if none are available.
+    /// This is used to allocate resources when a task needs to be assigned to a core.
+    fallback_cpu: usize,
+
+    /// A mapping of node IDs to last-level cache (LLC) IDs.
+    /// The map allows for the identification of which last-level cache
+    /// corresponds to each CPU based on its core topology.
+    core_topology_to_id: BTreeMap<(usize, usize, usize), usize>,
 }
 
 impl CpuPool {
