@@ -7,9 +7,9 @@ mod layer_core_growth;
 mod stats;
 
 pub use bpf_skel::*;
+use scx_utils::TopologyMap;
 pub mod bpf_intf;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs;
@@ -79,7 +79,6 @@ const USAGE_HALF_LIFE_F64: f64 = USAGE_HALF_LIFE as f64 / 1_000_000_000.0;
 const NR_GSTATS: usize = bpf_intf::global_stat_idx_NR_GSTATS as usize;
 const NR_LSTATS: usize = bpf_intf::layer_stat_idx_NR_LSTATS as usize;
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
-const CORE_CACHE_LEVEL: u32 = 2;
 
 #[rustfmt::skip]
 lazy_static::lazy_static! {
@@ -1135,72 +1134,14 @@ impl CpuPool {
             );
         }
 
-        let mut cpu_to_cache = vec![]; // (cpu_id, Option<cache_id>)
-        let mut cache_ids = BTreeSet::<usize>::new();
-        let mut nr_offline = 0;
+        let topo_map = TopologyMap::new(&topo).unwrap();
 
-        // Build cpu -> cache ID mapping.
-        for cpu in 0..*NR_POSSIBLE_CPUS {
-            let path = format!(
-                "/sys/devices/system/cpu/cpu{}/cache/index{}/id",
-                cpu, CORE_CACHE_LEVEL
-            );
-            let id = match std::fs::read_to_string(&path) {
-                Ok(val) => Some(val.trim().parse::<usize>().with_context(|| {
-                    format!("Failed to parse {:?}'s content {:?}", &path, &val)
-                })?),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    nr_offline += 1;
-                    None
-                }
-                Err(e) => return Err(e).with_context(|| format!("Failed to open {:?}", &path)),
-            };
-
-            cpu_to_cache.push(id);
-            if let Some(id) = id {
-                cache_ids.insert(id);
-            }
-        }
-
-        let nr_cpus = *NR_POSSIBLE_CPUS - nr_offline;
-
-        // Cache IDs may have holes. Assign consecutive core IDs to existing
-        // cache IDs.
-        let mut cache_to_core = BTreeMap::<usize, usize>::new();
-        let mut nr_cores = 0;
-        for cache_id in cache_ids.iter() {
-            cache_to_core.insert(*cache_id, nr_cores);
-            nr_cores += 1;
-        }
-
-        // Build core -> cpumask and cpu -> core mappings.
-        let mut all_cpus = bitvec![0; *NR_POSSIBLE_CPUS];
-        let mut core_cpus = vec![bitvec![0; *NR_POSSIBLE_CPUS]; nr_cores];
-        let mut cpu_core = vec![];
-
-        for (cpu, cache) in cpu_to_cache.iter().enumerate().take(*NR_POSSIBLE_CPUS) {
-            if let Some(cache_id) = cache {
-                let core_id = cache_to_core[cache_id];
-                all_cpus.set(cpu, true);
-                core_cpus[core_id].set(cpu, true);
-                cpu_core.push(core_id);
-            }
-        }
-
-        // Build sibling_cpu[]
-        let mut sibling_cpu = vec![-1i32; *NR_POSSIBLE_CPUS];
-        for cpus in &core_cpus {
-            let mut first = -1i32;
-            for cpu in cpus.iter_ones() {
-                if first < 0 {
-                    first = cpu as i32;
-                } else {
-                    sibling_cpu[first as usize] = cpu as i32;
-                    sibling_cpu[cpu as usize] = first;
-                    break;
-                }
-            }
-        }
+        let all_cpus = topo.cpus_bitvec();
+        let nr_cpus = topo.nr_cpus_online();
+        let core_cpus = topo_map.core_cpus_bitvec();
+        let nr_cores = topo.cores().len();
+        let sibling_cpu = topo.sibling_cpus();
+        let cpu_core = topo.cpu_core_ids();
 
         // Build core_topology_to_id
         let mut core_topology_to_id = BTreeMap::new();
