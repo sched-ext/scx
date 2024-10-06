@@ -2,7 +2,6 @@
 Type = Path
 Operation = Upgrade
 Target = etc/default/scx
-Target = etc/systemd/journald@sched-ext.conf
 Target = usr/bin/scx_*
 Target = usr/lib/systemd/system/scx.service
 
