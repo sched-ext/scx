@@ -368,6 +368,11 @@ impl Topology {
     pub fn nr_cpus_online(&self) -> usize {
         self.nr_cpus_online
     }
+
+    /// Returns whether the Topology has a hybrid architecture of big and little cores.
+    pub fn has_little_cores(&self) -> bool {
+        self.cores.iter().any(|c| c.core_type == CoreType::Little)
+    }
 }
 
 /// Generate a topology map from a Topology object, represented as an array of arrays.
