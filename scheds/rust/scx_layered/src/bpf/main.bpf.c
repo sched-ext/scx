@@ -1240,15 +1240,15 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		bool open = MEMBER_VPTR(layers, [layer_idx].open);
 		u32 layer_cpus = *MEMBER_VPTR(layers[layer_idx], .nr_cpus);
 		struct cpumask *layer_cpumask;
-	    bool have_layer_cpumask = layer_cpumask = lookup_layer_cpumask(idx);
+		bool have_layer_cpumask = layer_cpumask = lookup_layer_cpumask(idx);
 		bool cpumask_test = false;
 		if (have_layer_cpumask)
 			cpumask_test = bpf_cpumask_test_cpu(cpu, layer_cpumask);
 	    bool layer_matches = (have_layer_cpumask && 
-							 (cpumask_test ||
-							 (cpu <= nr_possible_cpus && 
-							  cpu == fallback_cpu &&
-							  layer_cpus == 0))); 
+							(cpumask_test ||
+							(cpu <= nr_possible_cpus && 
+							cpu == fallback_cpu &&
+							layer_cpus == 0))); 
 		
 		if (disable_topology) {
 			/* consume preempting layers first */
