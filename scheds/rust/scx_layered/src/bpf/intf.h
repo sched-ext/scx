@@ -184,6 +184,7 @@ struct layer {
 	bool			preempt;
 	bool			preempt_first;
 	bool			exclusive;
+	bool			idle_smt;
 	int			growth_algo;
 
 	u64			vtime_now;

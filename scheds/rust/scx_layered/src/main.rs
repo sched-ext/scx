@@ -103,6 +103,7 @@ lazy_static::lazy_static! {
 			preempt: false,
 			preempt_first: false,
 			exclusive: false,
+			idle_smt: false,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
                         growth_algo: LayerGrowthAlgo::Sticky,
@@ -124,6 +125,7 @@ lazy_static::lazy_static! {
 			preempt: true,
 			preempt_first: false,
 			exclusive: true,
+			idle_smt: false,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
                         growth_algo: LayerGrowthAlgo::Sticky,
@@ -144,6 +146,7 @@ lazy_static::lazy_static! {
 			preempt: false,
 			preempt_first: false,
 			exclusive: false,
+			idle_smt: false,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
                         growth_algo: LayerGrowthAlgo::Linear,
@@ -286,6 +289,9 @@ lazy_static::lazy_static! {
 ///   starvation across layers. Weights are used in combination with
 ///   utilization to determine the infeasible adjusted weight with higher
 ///   weights having a larger adjustment in adjusted utilization.
+///
+/// - idle_smt: When selecting an idle CPU for task task migration use
+///   only idle SMT CPUs. The default is to select any idle cpu.
 ///
 /// - growth_algo: When a layer is allocated new CPUs different algorithms can
 ///   be used to determine which CPU should be allocated next. The default
@@ -509,6 +515,8 @@ enum LayerKind {
         #[serde(default)]
         weight: u32,
         #[serde(default)]
+        idle_smt: bool,
+        #[serde(default)]
         growth_algo: LayerGrowthAlgo,
         #[serde(default)]
         perf: u64,
@@ -536,6 +544,8 @@ enum LayerKind {
         #[serde(default)]
         weight: u32,
         #[serde(default)]
+        idle_smt: bool,
+        #[serde(default)]
         growth_algo: LayerGrowthAlgo,
         #[serde(default)]
         perf: u64,
@@ -559,6 +569,8 @@ enum LayerKind {
         exclusive: bool,
         #[serde(default)]
         weight: u32,
+        #[serde(default)]
+        idle_smt: bool,
         #[serde(default)]
         growth_algo: LayerGrowthAlgo,
         #[serde(default)]
@@ -1707,6 +1719,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     preempt,
                     preempt_first,
                     exclusive,
+                    idle_smt,
                     growth_algo,
                     nodes,
                     slice_us,
@@ -1720,6 +1733,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     preempt,
                     preempt_first,
                     exclusive,
+                    idle_smt,
                     growth_algo,
                     nodes,
                     slice_us,
@@ -1733,6 +1747,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     preempt,
                     preempt_first,
                     exclusive,
+                    idle_smt,
                     growth_algo,
                     nodes,
                     slice_us,
@@ -1755,6 +1770,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
                     layer.preempt.write(*preempt);
                     layer.preempt_first.write(*preempt_first);
                     layer.exclusive.write(*exclusive);
+                    layer.idle_smt.write(*idle_smt);
                     layer.growth_algo = growth_algo.as_bpf_enum();
                     layer.weight = if *weight <= MAX_LAYER_WEIGHT && *weight >= MIN_LAYER_WEIGHT {
                         *weight
