@@ -596,10 +596,63 @@ bool should_try_preempt_first(s32 cand, struct layer *layer,
 }
 
 static __always_inline
+s32 pick_idle_no_topo(struct task_struct *p, s32 prev_cpu,
+		      struct cpu_ctx *cctx, struct task_ctx *tctx,
+		      struct layer *layer, bool from_selcpu)
+{
+	const struct cpumask *idle_cpumask;
+	struct cache_ctx *cachec;
+	struct node_ctx *nodec;
+	struct cpumask *layer_cpumask, *layered_cpumask;
+	s32 cpu;
+
+	/* look up cpumasks */
+	if (!(layered_cpumask = (struct cpumask *)tctx->layered_cpumask) ||
+	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)))
+			return -1;
+
+	/* not much to do if bound to a single CPU */
+	if (p->nr_cpus_allowed == 1 && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		if (!layer->open && !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
+			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
+		return prev_cpu;
+	}
+
+	maybe_refresh_layered_cpumask(layered_cpumask, p, tctx, layer_cpumask);
+
+	/*
+	 * If @p prefers to preempt @prev_cpu than finding an idle CPU and
+	 * @prev_cpu is preemptible, tell the enqueue path to try to preempt
+	 * @prev_cpu. The enqueue path will also retry to find an idle CPU if
+	 * the preemption attempt fails.
+	 */
+	if (from_selcpu && should_try_preempt_first(prev_cpu, layer, layered_cpumask)) {
+		cctx->try_preempt_first = true;
+		return -1;
+	}
+
+	/*
+	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
+	 * partially idle @prev_cpu.
+	 */
+	idle_cpumask = scx_bpf_get_idle_smtmask();
+	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
+				      idle_cpumask)) >= 0)
+		goto out_put;
+
+out_put:
+	scx_bpf_put_idle_cpumask(idle_cpumask);
+	return cpu;
+}
+
+static __always_inline
 s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		  struct cpu_ctx *cctx, struct task_ctx *tctx, struct layer *layer,
 		  bool from_selcpu)
 {
+	if (disable_topology)
+		return pick_idle_no_topo(p, prev_cpu, cctx, tctx, layer, from_selcpu);
+
 	const struct cpumask *idle_cpumask;
 	struct cache_ctx *cachec;
 	struct node_ctx *nodec;
@@ -607,16 +660,16 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	struct cpumask *layer_cpumask, *layered_cpumask, *cache_cpumask, *node_cpumask;
 	s32 cpu;
 
-	if (!(cachec = lookup_cache_ctx(cctx->cache_idx)) ||
-	    !(nodec = lookup_node_ctx(cctx->node_idx)))
-			return -1;
-
 	/* look up cpumasks */
 	if (!(layered_cpumask = (struct cpumask *)tctx->layered_cpumask) ||
 	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)) ||
-	    !(cache_cpumask = (struct cpumask *)cachec->cpumask) ||
-	    !(node_cpumask = (struct cpumask *)nodec->cpumask))
+	    !(cachec = lookup_cache_ctx(cctx->cache_idx)) ||
+	    !(nodec = lookup_node_ctx(cctx->node_idx)))
 			return -1;
+
+	if (!(cache_cpumask = (struct cpumask *)cachec->cpumask) ||
+	    !(node_cpumask = (struct cpumask *)nodec->cpumask))
+		return -1;
 
 	/* not much to do if bound to a single CPU */
 	if (p->nr_cpus_allowed == 1 && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
@@ -640,84 +693,64 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 
 	pref_idle_cpumask = bpf_cpumask_create();
 
-	if (disable_topology) {
-		/*
-		 * If CPU has SMT, any wholly idle CPU is likely a better pick than
-		 * partially idle @prev_cpu.
-		 */
+	if (layer->idle_smt) {
 		idle_cpumask = scx_bpf_get_idle_smtmask();
-		if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
-					      idle_cpumask)) >= 0)
-			goto out_put;
 	} else {
-		if (layer->idle_smt) {
-			idle_cpumask = scx_bpf_get_idle_smtmask();
-		} else {
-			idle_cpumask = scx_bpf_get_idle_cpumask();
-		}
+		idle_cpumask = scx_bpf_get_idle_cpumask();
+	}
 
+	if (!pref_idle_cpumask || !idle_cpumask) {
+		cpu = -1;
+		goto out_put;
+	}
+
+	/*
+	 * If the layer uses BigLittle growth algo try a big cpu first
+	 */
+	if (has_little_cores
+	    && big_cpumask
+	    && layer->growth_algo == GROWTH_ALGO_BIG_LITTLE)
+	{
+		if (!pref_idle_cpumask || !big_cpumask) {
+			cpu = -1;
+			goto out_put;
+		}
+		bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
+		if (!pref_idle_cpumask || !big_cpumask) {
+			cpu = -1;
+			goto out_put;
+		}
+		bpf_cpumask_and(pref_idle_cpumask, cast_mask(big_cpumask),
+				cast_mask(pref_idle_cpumask));
+
+		if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
+					      prev_cpu, idle_cpumask)) >= 0)
+			goto out_put;
+	}
+
+	/*
+	 * Try a CPU in the current LLC
+	 */
+	bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
+	bpf_cpumask_and(pref_idle_cpumask, cache_cpumask,
+			cast_mask(pref_idle_cpumask));
+	bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
+			cast_mask(pref_idle_cpumask));
+	if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
+				      prev_cpu, idle_cpumask)) >= 0)
+		goto out_put;
+
+	/*
+	 * Next try a CPU in the current node
+	 */
+	if (nr_nodes > 1) {
 		if (!pref_idle_cpumask || !idle_cpumask) {
 			cpu = -1;
 			goto out_put;
 		}
-
-		/*
-		 * If the layer uses BigLittle growth algo try a big cpu first
-		 */
-		if (has_little_cores
-		    && big_cpumask
-		    && layer->growth_algo == GROWTH_ALGO_BIG_LITTLE)
-		{
-			if (!pref_idle_cpumask || !big_cpumask) {
-				cpu = -1;
-				goto out_put;
-			}
-			bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
-			if (!pref_idle_cpumask || !big_cpumask) {
-				cpu = -1;
-				goto out_put;
-			}
-			bpf_cpumask_and(pref_idle_cpumask, cast_mask(big_cpumask),
-					cast_mask(pref_idle_cpumask));
-
-			if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
-						      prev_cpu, idle_cpumask)) >= 0)
-				goto out_put;
-		}
-
-		/*
-		 * Try a CPU in the current LLC
-		 */
 		bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
-		bpf_cpumask_and(pref_idle_cpumask, cache_cpumask,
+		bpf_cpumask_and(pref_idle_cpumask, node_cpumask,
 				cast_mask(pref_idle_cpumask));
-		bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
-				cast_mask(pref_idle_cpumask));
-		if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
-					      prev_cpu, idle_cpumask)) >= 0)
-			goto out_put;
-
-		/*
-		 * Next try a CPU in the current node
-		 */
-		if (nr_nodes > 1) {
-			if (!pref_idle_cpumask || !idle_cpumask) {
-				cpu = -1;
-				goto out_put;
-			}
-			bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
-			bpf_cpumask_and(pref_idle_cpumask, node_cpumask,
-					cast_mask(pref_idle_cpumask));
-			bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
-					cast_mask(pref_idle_cpumask));
-			if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
-						      prev_cpu, idle_cpumask)) >= 0)
-				goto out_put;
-		}
-		/*
-		 * At this point try the whole machine
-		 */
-		bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
 		bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
 				cast_mask(pref_idle_cpumask));
 		if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
@@ -736,6 +769,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	}
 
 	cpu = -1;
+
 out_put:
 	if (pref_idle_cpumask)
 		bpf_cpumask_release(pref_idle_cpumask);
@@ -1231,8 +1265,9 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	// Adjust the per cpu layer offset so that layers are iterated in a
-	// round robin order.
-	cpu_ctx_layer_idx_inc(cctx);
+	// round robin order if using that algorithm for dsq iteration.
+	if (!disable_topology && dsq_iter_algo == DSQ_ITER_ROUND_ROBIN)
+		cpu_ctx_layer_idx_inc(cctx);
 
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
