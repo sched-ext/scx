@@ -6,7 +6,7 @@
       @short_description: Scheduler Loader Service
 
       The Scheduler Loader service provides an interface for managing schedulers
-      that can be used with sched-ext. It allows starting, stopping, and querying
+      that can be used with sched-ext. It allows starting, stopping, switching and querying
       the status of supported schedulers.
   -->
   <interface name="org.scx.Loader">
@@ -63,6 +63,38 @@
                     to the scheduler.
     -->
     <method name="StartSchedulerWithArgs">
+      <arg name="scx_name" type="s" direction="in"/>
+      <arg name="scx_args" type="as" direction="in"/>
+    </method>
+
+    <!--
+        SwitchScheduler:
+
+        Switches to the specified scheduler with the given mode. This method
+        will stop the currently running scheduler (if any) and then start the
+        new scheduler.
+
+        @scx_name: The name of the scheduler to switch to (e.g., "scx_rusty").
+        @sched_mode: The scheduler mode (profile) as an unsigned integer.
+                   See the SchedulerMode property for details.
+    -->
+    <method name="SwitchScheduler">
+      <arg name="scx_name" type="s" direction="in"/>
+      <arg name="sched_mode" type="u" direction="in"/>
+    </method>
+
+    <!--
+        SwitchSchedulerWithArgs:
+
+        Switches to the specified scheduler with the provided arguments. This
+        method will stop the currently running scheduler (if any) and then
+        start the new scheduler with the given arguments.
+
+        @scx_name: The name of the scheduler to switch to (e.g., "scx_bpfland").
+        @scx_args: An array of strings representing the CLI arguments to pass
+                    to the scheduler.
+    -->
+    <method name="SwitchSchedulerWithArgs">
       <arg name="scx_name" type="s" direction="in"/>
       <arg name="scx_args" type="as" direction="in"/>
     </method>

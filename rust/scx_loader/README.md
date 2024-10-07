@@ -7,6 +7,8 @@
 * **`StartScheduler` Method:**  Launches a scheduler specified by its `scx_name` (e.g., "scx_rusty") and a scheduler mode (profile) represented as an unsigned integer.
 * **`StartSchedulerWithArgs` Method:** Starts a scheduler with its `scx_name` and allows passing arbitrary CLI arguments directly to the scheduler.
 * **`StopScheduler` Method:** Terminates the currently running scheduler.
+* **`SwitchScheduler` Method:** Stops the current scheduler and starts the specified scheduler with the given mode.
+* **`SwitchSchedulerWithArgs` Method:** Stops the current scheduler and starts the specified scheduler with the provided arguments.
 * **`CurrentScheduler` Property:** Returns the `scx_name` of the active scheduler or "unknown" if none is running.
 * **`SchedulerMode` Property:** Provides information about the currently active scheduler's mode (profile).
 * **`SupportedSchedulers` Property:**  Lists the schedulers currently supported by `scx_loader`.
@@ -33,6 +35,18 @@
   ```bash
   dbus-send --system --print-reply --dest=org.scx.Loader /org/scx/Loader org.scx.Loader.StopScheduler
   ```
+
+* **Switch Scheduler:**
+  ```bash
+  dbus-send --system --print-reply --dest=org.scx.Loader /org/scx/Loader org.scx.Loader.SwitchScheduler string:scx_lavd uint32:2
+  ```
+  (This switches to `scx_lavd` with scheduler mode 2)
+
+* **Switch Scheduler with Arguments:**
+  ```bash
+  dbus-send --system --print-reply --dest=org.scx.Loader /org/scx/Loader org.scx.Loader.SwitchSchedulerWithArgs string:scx_bpfland array:string:"-k","-c","0"
+  ```
+  (This switches to `scx_bpfland` with arguments `-k -c 0`)
 
 * **Get the Currently Active Scheduler:**
   ```bash
