@@ -95,6 +95,7 @@ struct cpu_ctx {
 	bool			maybe_idle;
 	bool			yielding;
 	bool			try_preempt_first;
+	bool			is_big;
 	u64			layer_cycles[MAX_LAYERS];
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
@@ -153,14 +154,14 @@ struct layer_match_ands {
 };
 
 enum layer_growth_algo {
-	STICKY,
-	LINEAR,
-	REVERSE,
-	RANDOM,
-	TOPO,
-	ROUND_ROBIN,
-	BIG_LITTLE,
-	LITTLE_BIG,
+	GROWTH_ALGO_STICKY,
+	GROWTH_ALGO_LINEAR,
+	GROWTH_ALGO_REVERSE,
+	GROWTH_ALGO_RANDOM,
+	GROWTH_ALGO_TOPO,
+	GROWTH_ALGO_ROUND_ROBIN,
+	GROWTH_ALGO_BIG_LITTLE,
+	GROWTH_ALGO_LITTLE_BIG,
 };
 
 enum dsq_iter_algo {

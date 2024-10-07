@@ -39,14 +39,14 @@ pub enum LayerGrowthAlgo {
     LittleBig,
 }
 
-const GROWTH_ALGO_STICKY: i32 = bpf_intf::layer_growth_algo_STICKY as i32;
-const GROWTH_ALGO_LINEAR: i32 = bpf_intf::layer_growth_algo_LINEAR as i32;
-const GROWTH_ALGO_REVERSE: i32 = bpf_intf::layer_growth_algo_REVERSE as i32;
-const GROWTH_ALGO_RANDOM: i32 = bpf_intf::layer_growth_algo_RANDOM as i32;
-const GROWTH_ALGO_TOPO: i32 = bpf_intf::layer_growth_algo_TOPO as i32;
-const GROWTH_ALGO_ROUND_ROBIN: i32 = bpf_intf::layer_growth_algo_ROUND_ROBIN as i32;
-const GROWTH_ALGO_BIG_LITTLE: i32 = bpf_intf::layer_growth_algo_BIG_LITTLE as i32;
-const GROWTH_ALGO_LITTLE_BIG: i32 = bpf_intf::layer_growth_algo_LITTLE_BIG as i32;
+const GROWTH_ALGO_STICKY: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_STICKY as i32;
+const GROWTH_ALGO_LINEAR: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_LINEAR as i32;
+const GROWTH_ALGO_REVERSE: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_REVERSE as i32;
+const GROWTH_ALGO_RANDOM: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_RANDOM as i32;
+const GROWTH_ALGO_TOPO: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_TOPO as i32;
+const GROWTH_ALGO_ROUND_ROBIN: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_ROUND_ROBIN as i32;
+const GROWTH_ALGO_BIG_LITTLE: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_BIG_LITTLE as i32;
+const GROWTH_ALGO_LITTLE_BIG: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_LITTLE_BIG as i32;
 
 impl LayerGrowthAlgo {
     pub fn as_bpf_enum(&self) -> i32 {

@@ -54,6 +54,7 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cache;
 use scx_utils::Core;
+use scx_utils::CoreType;
 use scx_utils::LoadAggregator;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
@@ -715,6 +716,49 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
         });
     }
     Ok(cpu_ctxs)
+}
+
+fn convert_cpu_ctxs(cpu_ctxs: Vec<bpf_intf::cpu_ctx>) -> Vec<Vec<u8>> {
+    cpu_ctxs
+        .into_iter()
+        .map(|cpu_ctx| {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &cpu_ctx as *const bpf_intf::cpu_ctx as *const u8,
+                    std::mem::size_of::<bpf_intf::cpu_ctx>(),
+                )
+            };
+            bytes.to_vec()
+        })
+        .collect()
+}
+
+fn initialize_cpu_ctxs(skel: &BpfSkel, topo: &Topology) -> Result<()> {
+    let key = (0_u32).to_ne_bytes();
+    let mut cpu_ctxs: Vec<bpf_intf::cpu_ctx> = vec![];
+    let cpu_ctxs_vec = skel
+        .maps
+        .cpu_ctxs
+        .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
+        .context("Failed to lookup cpu_ctx")?
+        .unwrap();
+
+    for cpu in 0..*NR_POSSIBLE_CPUS {
+        cpu_ctxs.push(*unsafe {
+            &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
+        });
+
+        let topo_cpu = topo.cpus().get(&cpu).unwrap();
+        let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
+        cpu_ctxs[cpu].is_big = is_big;
+    }
+
+    skel.maps
+        .cpu_ctxs
+        .update_percpu(&key, &convert_cpu_ctxs(cpu_ctxs), libbpf_rs::MapFlags::ANY)
+        .context("Failed to update cpu_ctx")?;
+
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -1821,6 +1865,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         };
         skel.maps.rodata_data.nr_possible_cpus = *NR_POSSIBLE_CPUS as u32;
         skel.maps.rodata_data.smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
+        skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.disable_topology = opts.disable_topology;
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
         skel.maps.rodata_data.dsq_iter_algo = opts.dsq_iter_algo.as_bpf_enum();
@@ -1839,6 +1884,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         for (idx, spec) in layer_specs.iter().enumerate() {
             layers.push(Layer::new(&spec, idx, &cpu_pool, &topo)?);
         }
+        initialize_cpu_ctxs(&skel, &topo).unwrap();
 
         // Other stuff.
         let proc_reader = procfs::ProcReader::new();

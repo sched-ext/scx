@@ -30,6 +30,7 @@ const volatile u32 nr_layers = 1;
 const volatile u32 nr_nodes = 32;	/* !0 for veristat, set during init */
 const volatile u32 nr_llcs = 32;	/* !0 for veristat, set during init */
 const volatile bool smt_enabled = true;
+const volatile bool has_little_cores = true;
 const volatile bool disable_topology = false;
 const volatile bool xnuma_preemption = false;
 const volatile bool layer_weight_dsq_iter = false;
@@ -39,6 +40,7 @@ const volatile u32 layer_iteration_order[MAX_LAYERS];
 const volatile u32 dsq_iter_algo = DSQ_ITER_ROUND_ROBIN;
 
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
+private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
 struct layer layers[MAX_LAYERS];
 u32 fallback_cpu;
 static u32 preempt_cursor;
@@ -348,6 +350,7 @@ static void refresh_cpumasks(int idx)
 {
 	struct layer_cpumask_wrapper *cpumaskw;
 	struct layer *layer;
+	struct cpu_ctx *cctx;
 	int cpu, total = 0;
 
 	if (!__sync_val_compare_and_swap(&layers[idx].refresh_cpus, 1, 0))
@@ -357,6 +360,11 @@ static void refresh_cpumasks(int idx)
 
 	bpf_for(cpu, 0, nr_possible_cpus) {
 		u8 *u8_ptr;
+
+		if (!(cctx = lookup_cpu_ctx(cpu))) {
+			scx_bpf_error("unknown cpu");
+			return;
+		}
 
 		if ((u8_ptr = MEMBER_VPTR(layers, [idx].cpus[cpu / 8]))) {
 			/*
@@ -642,14 +650,39 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 					      idle_cpumask)) >= 0)
 			goto out_put;
 	} else {
-		/*
-		 * Try a CPU in the current LLC
-		 */
 		idle_cpumask = scx_bpf_get_idle_cpumask();
 		if (!pref_idle_cpumask || !idle_cpumask) {
 			cpu = -1;
 			goto out_put;
 		}
+
+		/*
+		 * If the layer uses BigLittle growth algo try a big cpu first
+		 */
+		if (has_little_cores
+		    && big_cpumask
+		    && layer->growth_algo == GROWTH_ALGO_BIG_LITTLE)
+		{
+			if (!pref_idle_cpumask || !big_cpumask) {
+				cpu = -1;
+				goto out_put;
+			}
+			bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
+			if (!pref_idle_cpumask || !big_cpumask) {
+				cpu = -1;
+				goto out_put;
+			}
+			bpf_cpumask_and(pref_idle_cpumask, cast_mask(big_cpumask),
+					cast_mask(pref_idle_cpumask));
+
+			if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
+						      prev_cpu, idle_cpumask)) >= 0)
+				goto out_put;
+		}
+
+		/*
+		 * Try a CPU in the current LLC
+		 */
 		bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
 		bpf_cpumask_and(pref_idle_cpumask, cache_cpumask,
 				cast_mask(pref_idle_cpumask));
@@ -1943,7 +1976,8 @@ static void print_iter_order() {
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
-	struct bpf_cpumask *cpumask;
+	struct bpf_cpumask *cpumask, *tmp_big_cpumask;
+	struct cpu_ctx *cctx;
 	int i, j, k, nr_online_cpus, ret;
 
 	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
@@ -1954,14 +1988,28 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	if (!cpumask)
 		return -ENOMEM;
 
+	tmp_big_cpumask = bpf_cpumask_create();
+	if (!tmp_big_cpumask) {
+		bpf_cpumask_release(cpumask);
+		return -ENOMEM;
+	}
+
 	nr_online_cpus = 0;
 	bpf_for(i, 0, nr_possible_cpus) {
 		const volatile u8 *u8_ptr;
+
+		if (!(cctx = lookup_cpu_ctx(i))) {
+			bpf_cpumask_release(cpumask);
+			bpf_cpumask_release(tmp_big_cpumask);
+			return -ENOMEM;
+		}
 
 		if ((u8_ptr = MEMBER_VPTR(all_cpus, [i / 8]))) {
 			if (*u8_ptr & (1 << (i % 8))) {
 				bpf_cpumask_set_cpu(i, cpumask);
 				nr_online_cpus++;
+				if (cctx->is_big)
+					bpf_cpumask_set_cpu(i, tmp_big_cpumask);
 			}
 		} else {
 			return -EINVAL;
@@ -1971,6 +2019,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	cpumask = bpf_kptr_xchg(&all_cpumask, cpumask);
 	if (cpumask)
 		bpf_cpumask_release(cpumask);
+
+	tmp_big_cpumask = bpf_kptr_xchg(&big_cpumask, tmp_big_cpumask);
+	if (tmp_big_cpumask)
+		bpf_cpumask_release(tmp_big_cpumask);
 
 	bpf_for(i, 0, nr_nodes) {
 		ret = create_node(i);
@@ -1986,8 +2038,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			return ret;
 	}
 
-	dbg("CFG: Dumping configuration, nr_online_cpus=%d smt_enabled=%d",
-	    nr_online_cpus, smt_enabled);
+	dbg("CFG: Dumping configuration, nr_online_cpus=%d smt_enabled=%d little_cores=%d",
+	    nr_online_cpus, smt_enabled, has_little_cores);
 
 	bpf_for(i, 0, nr_layers) {
 		struct layer *layer = &layers[i];
