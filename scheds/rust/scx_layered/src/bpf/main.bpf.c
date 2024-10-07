@@ -1244,7 +1244,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		bool cpumask_test = false;
 		if (have_layer_cpumask)
 			cpumask_test = bpf_cpumask_test_cpu(cpu, layer_cpumask);
-	    bool layer_matches = (have_layer_cpumask && 
+		bool layer_matches = (have_layer_cpumask && 
 							(cpumask_test ||
 							(cpu <= nr_possible_cpus && 
 							cpu == fallback_cpu &&
