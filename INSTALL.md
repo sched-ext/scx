@@ -91,6 +91,14 @@ CachyOS does provide a kernel with an unstripped vmlinux, which can be used for 
 $ sudo pacman -Sy linux-cachyos-sched-ext-debug linux-cachyos-sched-ext-debug-headers
 ```
 
+## Gentoo
+Make sure you build the kernel with the right configuration, installation
+should be easy:
+```
+echo 'sys-kernel/scx ~amd64' >> /etc/portage/package.accept_keywords
+emerge sys-kernel/scx ~amd64
+```
+
 ## Fedora
 
 CachyOS provides a [community-maintained copr repository](https://copr.fedorainfracloud.org/coprs/bieszczaders/kernel-cachyos) for

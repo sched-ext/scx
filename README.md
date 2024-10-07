@@ -91,6 +91,7 @@ are provided for select distros.
 
 - [Ubuntu](INSTALL.md#ubuntu)
 - [Arch Linux](INSTALL.md#arch-linux)
+- [Gentoo Linux](INSTALL.md#gentoo-linux)
 - [Fedora](INSTALL.md#fedora)
 - [Nix](INSTALL.md#nix)
 - [openSUSE Tumbleweed](INSTALL.md#opensuse-tumbleweed)
