@@ -1240,22 +1240,23 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		bool open = MEMBER_VPTR(layers, [layer_idx].open);
 		u32 layer_cpus = *MEMBER_VPTR(layers[layer_idx], .nr_cpus);
 		struct cpumask *layer_cpumask;
-    bool have_layer_cpumask = layer_cpumask = lookup_layer_cpumask(idx);
+	    bool have_layer_cpumask = layer_cpumask = lookup_layer_cpumask(idx);
 		bool cpumask_test = false;
-    if (have_layer_cpumask) 
-      cpumask_test = bpf_cpumask_test_cpu(cpu, layer_cpumask);
-    bool layer_matches = (have_layer_cpumask && (cpumask_test ||
-						(cpu <= nr_possible_cpus && cpu == fallback_cpu &&
-						layer_cpus == 0))); 
+		if (have_layer_cpumask)
+			cpumask_test = bpf_cpumask_test_cpu(cpu, layer_cpumask);
+	    bool layer_matches = (have_layer_cpumask && 
+							 (cpumask_test ||
+							 (cpu <= nr_possible_cpus && 
+							  cpu == fallback_cpu &&
+							  layer_cpus == 0))); 
 		
 		if (disable_topology) {
-
 			/* consume preempting layers first */
 			if (preempt && scx_bpf_consume(idx))
 				return;
 
 			/* make sure hi fallback dsq is empty */
-      dsq_id = cpu_hi_fallback_dsq_id(cpu);
+		    dsq_id = cpu_hi_fallback_dsq_id(cpu);
 			if (scx_bpf_consume(dsq_id))
 				return;
 
@@ -1279,26 +1280,26 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			u64 non_preempting_open_dsq;
 
 			bpf_for(llc_id, 0, nr_llcs) {
-
-        dsq_id = layer_dsq_id(layer_idx, llc_id);
-	  		/* consume preempting layers first, with no delay */
+				dsq_id = layer_dsq_id(layer_idx, llc_id);
+				/* consume preempting layers first, with no delay */
 				if (preempt && scx_bpf_consume(dsq_id))
 					return;
-        dsq_id = llc_hi_fallback_dsq_id(llc_id);
+				dsq_id = llc_hi_fallback_dsq_id(llc_id);
 				/* make sure hi fallback dsq is empty, with no delay  */
 				if (scx_bpf_consume(dsq_id))
 					return;
 
 				/* consume matching layers */
 				if (layer_matches && !matching_dsq){ 
-            matching_dsq = dsq_id;
-            break;
+					matching_dsq = dsq_id;
+					break;
 				}
 				/* consume !preempting open layers */			
-				if ((!preempt && open) && !non_preempting_open_dsq
-            && matching_dsq)
-					non_preempting_open_dsq = dsq_id;
+				if ((!preempt && open) && !non_preempting_open_dsq 
+					&& matching_dsq)
+						non_preempting_open_dsq = dsq_id;
 			}
+
 			/* preserve priority order of dsq execution */
 			if(!matching_dsq) {
 				if (scx_bpf_consume(matching_dsq))
@@ -1308,9 +1309,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 				if (scx_bpf_consume(non_preempting_open_dsq))
 					return;
 			}
-
 		}
-
 	}
 	/* consume lo fallback dsq */
 	scx_bpf_consume(LO_FALLBACK_DSQ);
