@@ -705,7 +705,19 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	}
 
 	/*
-	 * If the layer uses BigLittle growth algo try a big cpu first
+	 * Try a CPU in the current LLC
+	 */
+	bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
+	bpf_cpumask_and(pref_idle_cpumask, cache_cpumask,
+			cast_mask(pref_idle_cpumask));
+	bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
+			cast_mask(pref_idle_cpumask));
+	if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
+				      prev_cpu, idle_cpumask)) >= 0)
+		goto out_put;
+
+	/*
+	 * If the layer uses BigLittle growth algo try a big cpu
 	 */
 	if (has_little_cores
 	    && big_cpumask
@@ -728,17 +740,6 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 			goto out_put;
 	}
 
-	/*
-	 * Try a CPU in the current LLC
-	 */
-	bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
-	bpf_cpumask_and(pref_idle_cpumask, cache_cpumask,
-			cast_mask(pref_idle_cpumask));
-	bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
-			cast_mask(pref_idle_cpumask));
-	if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
-				      prev_cpu, idle_cpumask)) >= 0)
-		goto out_put;
 
 	/*
 	 * Next try a CPU in the current node
