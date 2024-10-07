@@ -423,9 +423,9 @@ static struct task_struct *tptr_to_task(u64 tptr)
 
 	err_task = bpf_probe_read_kernel(&p, sizeof(struct task_struct *), &task);
 
-	if (err_task) 
+	if (err_task)
 		scx_bpf_error("Failed to retrieve task_struct for tptr %llu", tptr);
-	if (p) 
+	if (p)
 		return p;
 }
 
@@ -435,7 +435,7 @@ int dom_xfer_task(u64 tptr, u32 new_dom_id, u64 now)
 	struct task_ctx *taskc;
 	struct task_struct *p;
 
-	p = tptr_to_task(tptr); 
+	p = tptr_to_task(tptr);
 
 	if (!p) {
 		scx_bpf_error("Failed to lookup task %llu", tptr);
@@ -821,7 +821,7 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	if (bpf_cpumask_intersects((const struct cpumask *)d_cpumask,
 				   p->cpus_ptr)) {
 		u64 now = bpf_ktime_get_ns();
-		
+
 		if (!init_dsq_vtime)
 			dom_xfer_task(tptr, new_dom_id, now);
 
@@ -1004,7 +1004,19 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		struct dom_ctx *domc;
 		struct bpf_cpumask *tmp_direct_greedy, *node_mask;
 
-		if (!(domc = lookup_dom_ctx(dom_id)))
+		/*
+		 * CPU may be offline e.g. CPU was removed via hotplugging and scheduler
+		 * was restarted fast enough that default scheduler didn't get a chance
+		 * to move the task to another CPU. In this case, we don't account for
+		 * domain as we assume hotplugging is an infrequent operation. Thus,
+		 * we move the task in the order of preference:
+		 * 1. Move the task to idle CPU where greedy allocation is preferred
+		 * 2. Move the task to any CPU where greedy allocation is preferred
+		 * 3. Move the task to any CPU
+		 */
+		if (unlikely(is_offline_cpu(prev_cpu)))
+			domc = NULL;
+		else if (!(domc = lookup_dom_ctx(dom_id)))
 			goto enoent;
 
 		tmp_direct_greedy = direct_greedy_cpumask;
@@ -1020,7 +1032,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 * desirable when crossing NUMA boundaries as the task's
 		 * working set may end up spanning multiple NUMA nodes.
 		 */
-		if (!direct_greedy_numa) {
+		if (!direct_greedy_numa && domc) {
 			node_mask = domc->node_cpumask;
 			if (!node_mask) {
 				scx_bpf_error("Failed to lookup node mask");
@@ -1040,7 +1052,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 		/* Try to find an idle core in the previous and then any domain */
 		if (has_idle_cores) {
-			if (domc->direct_greedy_cpumask) {
+			if (domc && domc->direct_greedy_cpumask) {
 				cpu = scx_bpf_pick_idle_cpu((const struct cpumask *)
 							    domc->direct_greedy_cpumask,
 							    SCX_PICK_IDLE_CORE);
@@ -1064,7 +1076,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		/*
 		 * No idle core. Is there any idle CPU?
 		 */
-		if (domc->direct_greedy_cpumask) {
+		if (domc && domc->direct_greedy_cpumask) {
 			cpu = scx_bpf_pick_idle_cpu((const struct cpumask *)
 						    domc->direct_greedy_cpumask, 0);
 			if (cpu >= 0) {
