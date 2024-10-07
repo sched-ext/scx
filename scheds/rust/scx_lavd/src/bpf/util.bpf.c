@@ -156,6 +156,14 @@ static struct task_ctx *get_task_ctx(struct task_struct *p)
 	return taskc;
 }
 
+struct task_ctx *try_get_current_task_ctx(void)
+{
+	struct task_struct *p = bpf_get_current_task_btf();
+	struct task_ctx *taskc = try_get_task_ctx(p);
+
+	return taskc;
+}
+
 static struct cpu_ctx *get_cpu_ctx(void)
 {
 	const u32 idx = 0;
@@ -231,6 +239,11 @@ static bool is_greedy(struct task_ctx *taskc)
 static bool is_eligible(struct task_ctx *taskc)
 {
 	return !is_greedy(taskc);
+}
+
+static bool is_lock_holder(struct task_ctx *taskc)
+{
+	return (taskc->lock_cnt > 0) || (taskc->futex_boost > 0);
 }
 
 static bool have_scheduled(struct task_ctx *taskc)

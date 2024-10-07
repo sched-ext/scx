@@ -92,6 +92,8 @@ struct sys_stat {
 	volatile u64	nr_big;		/* scheduled on big core */
 	volatile u64	nr_pc_on_big;	/* performance-critical tasks scheduled on big core */
 	volatile u64	nr_lc_on_big;	/* latency-critical tasks scheduled on big core */
+
+	volatile u64	nr_lhp;		/* number of lock holder preemption */
 };
 
 /*
@@ -131,6 +133,10 @@ struct task_ctx {
 	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
 	u8	wakeup_ft;		/* regular wakeup = 1, sync wakeup = 2 */
+	volatile s16 lock_cnt;		/* number of locks holding */
+	volatile s16 lock_boost;	/* lock boost count */
+	volatile s16 futex_boost;	/* futex boost count */
+	volatile u32 *futex_uaddr;	/* futex uaddr */
 
 	/*
 	 * Task's performance criticality

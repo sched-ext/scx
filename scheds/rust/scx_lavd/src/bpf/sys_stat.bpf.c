@@ -46,6 +46,7 @@ struct sys_stat_ctx {
 	u32		nr_big;
 	u32		nr_pc_on_big;
 	u32		nr_lc_on_big;
+	u64		nr_lhp;
 	u64		min_perf_cri;
 	u64		avg_perf_cri;
 	u64		max_perf_cri;
@@ -109,6 +110,9 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 
 		c->nr_greedy += cpuc->nr_greedy;
 		cpuc->nr_greedy = 0;
+
+		c->nr_lhp += cpuc->nr_lhp;
+		cpuc->nr_lhp = 0;
 
 		/*
 		 * Accumulate task's latency criticlity information.
@@ -292,6 +296,7 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 	stat_next->nr_big += c->nr_big;
 	stat_next->nr_pc_on_big += c->nr_pc_on_big;
 	stat_next->nr_lc_on_big += c->nr_lc_on_big;
+	stat_next->nr_lhp += c->nr_lhp;
 
 	update_power_mode_time();
 }

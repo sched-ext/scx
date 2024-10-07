@@ -700,6 +700,7 @@ impl<'a> Scheduler<'a> {
                 let nr_queued_task = st.nr_queued_task;
                 let nr_active = st.nr_active;
                 let nr_sched = st.nr_sched;
+                let pc_lhp = Self::get_pc(st.nr_lhp, nr_sched);
                 let pc_migration = Self::get_pc(st.nr_migration, nr_sched);
                 let pc_preemption = Self::get_pc(st.nr_preemption, nr_sched);
                 let pc_greedy = Self::get_pc(st.nr_greedy, nr_sched);
@@ -723,6 +724,7 @@ impl<'a> Scheduler<'a> {
                     nr_queued_task,
                     nr_active,
                     nr_sched,
+                    pc_lhp,
                     pc_migration,
                     pc_preemption,
                     pc_greedy,

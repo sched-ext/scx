@@ -195,12 +195,12 @@ char _license[] SEC("license") = "GPL";
 /*
  * Include sub-modules
  */
-
 #include "util.bpf.c"
 #include "introspec.bpf.c"
 #include "power.bpf.c"
 #include "sys_stat.bpf.c"
 #include "preempt.bpf.c"
+#include "lock.bpf.c"
 
 /*
  * Logical current clock
@@ -609,6 +609,23 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 */
 	if (READ_ONCE(cur_svc_time) < taskc->svc_time)
 		WRITE_ONCE(cur_svc_time, taskc->svc_time);
+
+	/*
+	 * Update the lock holder preemption count if the task hold a lock.
+	 */
+	if (is_lock_holder(taskc)) {
+		cpuc->nr_lhp++;
+		traceln("LHP: %s(%d) = (%d, %d, %d)", p->comm, p->pid,
+			READ_ONCE(taskc->lock_cnt),
+			READ_ONCE(taskc->lock_boost),
+			READ_ONCE(taskc->futex_boost));
+	}
+
+	/*
+	 * Reset task's lock and futex boost count
+	 * for a lock holder to be boosted only once.
+	 */
+	reset_lock_futex_boost(taskc);
 }
 
 static void update_stat_for_quiescent(struct task_struct *p,

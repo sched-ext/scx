@@ -152,6 +152,7 @@ struct cpu_ctx {
 	volatile u32	nr_greedy;	/* number of greedy tasks scheduled */
 	volatile u32	nr_perf_cri;
 	volatile u32	nr_lat_cri;
+	volatile u32	nr_lhp;		/* number of lock holder preemption */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 
