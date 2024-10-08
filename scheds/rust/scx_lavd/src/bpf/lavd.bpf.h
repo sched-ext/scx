@@ -29,7 +29,8 @@ enum consts_internal  {
 	LAVD_LC_RUNTIME_MAX		= LAVD_TARGETED_LATENCY_NS,
 	LAVD_LC_RUNTIME_SHIFT		= 15,
 	LAVD_LC_WAKEUP_FT		= 30,
-	LAVD_LC_KTHREAD_FT		= 30,
+	LAVD_LC_KTHREAD_FT		= LAVD_LC_WAKEUP_FT,
+	LAVD_LC_LOCK_HOLDER_FT		= 300, /* 30% boost */
 
 	LAVD_SLICE_BOOST_MAX_FT		= 3, /* maximum additional 3x of slice */
 	LAVD_SLICE_BOOST_MAX_STEP	= 6, /* 6 slice exhausitions in a row */

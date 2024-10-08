@@ -219,6 +219,11 @@ static u64 calc_avg_freq(u64 old_freq, u64 interval)
 	return ewma_freq;
 }
 
+static bool is_kernel_task(struct task_struct *p)
+{
+	return !!(p->flags & PF_KTHREAD);
+}
+
 static bool is_lat_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
 {
 	return taskc->lat_cri >= stat_cur->avg_lat_cri;
@@ -243,7 +248,7 @@ static bool is_eligible(struct task_ctx *taskc)
 
 static bool is_lock_holder(struct task_ctx *taskc)
 {
-	return (taskc->lock_cnt > 0) || (taskc->futex_boost > 0);
+	return (taskc->lock_boost > 0) || (taskc->futex_boost > 0);
 }
 
 static bool have_scheduled(struct task_ctx *taskc)

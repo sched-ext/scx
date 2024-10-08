@@ -8,6 +8,7 @@
  * To be included to the main.bpf.c
  */
 
+#ifndef LAVD_DISABLE_TRACE_LOCKS
 #define LAVD_TRACE_SEM
 #define LAVD_TRACE_MUTEX
 #define LAVD_TRACE_WW_MUTEX
@@ -15,6 +16,7 @@
 #define LAVD_TRACE_RW_SEM
 #define LAVD_TRACE_PERCPU_RW_SEM 
 #define LAVD_TRACE_FUTEX
+#endif /* LAVD_DISABLE_TRACE_LOCKS */
 
 static void try_inc_lock_boost(struct task_ctx *taskc)
 {
@@ -83,7 +85,6 @@ static void dec_futex_boost(u32 *uaddr)
 
 static void reset_lock_futex_boost(struct task_ctx *taskc)
 {
-	taskc->lock_cnt = 0;
 	taskc->lock_boost = 0;
 	taskc->futex_boost = 0;
 	taskc->futex_uaddr = NULL;

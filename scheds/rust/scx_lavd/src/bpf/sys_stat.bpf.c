@@ -281,6 +281,7 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 		stat_next->nr_big >>= 1;
 		stat_next->nr_pc_on_big >>= 1;
 		stat_next->nr_lc_on_big >>= 1;
+		stat_next->nr_lhp >>= 1;
 
 		__sync_fetch_and_sub(&performance_mode_ns, performance_mode_ns/2);
 		__sync_fetch_and_sub(&balanced_mode_ns, balanced_mode_ns/2);

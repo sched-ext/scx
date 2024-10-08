@@ -257,13 +257,8 @@ static s64 calc_static_prio_factor(struct task_struct *p)
 	return (20 - get_nice_prio(p)) >> 1;
 }
 
-static bool is_kernel_task(struct task_struct *p)
-{
-	return !!(p->flags & PF_KTHREAD);
-}
-
 static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
-			u64 enq_flags)
+			struct cpu_ctx *cpuc_cur, u64 enq_flags)
 {
 	u64 wait_freq_ft, wake_freq_ft, runtime_ft;
 	u64 lat_cri;
@@ -313,6 +308,24 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 		lat_cri += LAVD_LC_KTHREAD_FT;
 
 	/*
+	 * Prioritize a lock holder for faster system-wide forward progress.
+	 */
+	if (is_lock_holder(taskc)) {
+		lat_cri += (lat_cri * LAVD_LC_LOCK_HOLDER_FT) / 1000;
+
+		/*
+		 * Update statistics.
+		 */
+		cpuc_cur->nr_lhp++;
+
+		/*
+		 * Reset task's lock and futex boost count
+		 * for a lock holder to be boosted only once.
+		 */
+		reset_lock_futex_boost(taskc);
+	}
+
+	/*
 	 * Make sure the lat_cri is non-zero.
 	 */
 	taskc->lat_cri_self = max(lat_cri, 1);
@@ -328,14 +341,16 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 }
 
 static void calc_virtual_deadline_delta(struct task_struct *p,
-					struct task_ctx *taskc, u64 enq_flags)
+					struct task_ctx *taskc,
+					struct cpu_ctx *cpuc_cur,
+					u64 enq_flags)
 {
 	u64 deadline, lat_cri, greedy_ratio;
 
 	/*
 	 * Calculate the deadline based on latency criticality and greedy ratio.
 	 */
-	lat_cri = calc_lat_cri(p, taskc, enq_flags);
+	lat_cri = calc_lat_cri(p, taskc, cpuc_cur, enq_flags);
 	greedy_ratio = calc_greedy_ratio(taskc);
 	deadline = (LAVD_SLICE_MAX_NS * greedy_ratio) / (1000 * lat_cri);
 	taskc->vdeadline_delta_ns = deadline;
@@ -609,23 +624,6 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 */
 	if (READ_ONCE(cur_svc_time) < taskc->svc_time)
 		WRITE_ONCE(cur_svc_time, taskc->svc_time);
-
-	/*
-	 * Update the lock holder preemption count if the task hold a lock.
-	 */
-	if (is_lock_holder(taskc)) {
-		cpuc->nr_lhp++;
-		traceln("LHP: %s(%d) = (%d, %d, %d)", p->comm, p->pid,
-			READ_ONCE(taskc->lock_cnt),
-			READ_ONCE(taskc->lock_boost),
-			READ_ONCE(taskc->futex_boost));
-	}
-
-	/*
-	 * Reset task's lock and futex boost count
-	 * for a lock holder to be boosted only once.
-	 */
-	reset_lock_futex_boost(taskc);
 }
 
 static void update_stat_for_quiescent(struct task_struct *p,
@@ -948,7 +946,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
-			     u64 enq_flags)
+			     struct cpu_ctx *cpuc_cur, u64 enq_flags)
 {
 	u64 vlc;
 
@@ -956,7 +954,7 @@ static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 	 * Before enqueueing a task to a run queue, we should decide when a
 	 * task should be scheduled.
 	 */
-	calc_virtual_deadline_delta(p, taskc, enq_flags);
+	calc_virtual_deadline_delta(p, taskc, cpuc_cur, enq_flags);
 
 	/*
 	 * Update the logical clock of the virtual deadline.
@@ -1015,7 +1013,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Note that the task's time slice will be calculated and reassigned
 	 * right before running at ops.running().
 	 */
-	calc_when_to_run(p, taskc, enq_flags);
+	calc_when_to_run(p, taskc, cpuc_cur, enq_flags);
 	dsq_id = find_proper_dsq(taskc, cpuc_task);
 
 	/*
@@ -1319,7 +1317,11 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
 	if (!cpuc_run || !taskc_run)
 		goto freq_out;
 
-	preempted = try_yield_current_cpu(p_run, cpuc_run, taskc_run);
+	/*
+	 * If a task holds a lock, nver yield.
+	 */
+	if (!is_lock_holder(taskc_run))
+		preempted = try_yield_current_cpu(p_run, cpuc_run, taskc_run);
 
 	/*
 	 * Update performance target of the current CPU if the current running

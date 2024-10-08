@@ -133,7 +133,6 @@ struct task_ctx {
 	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
 	u8	wakeup_ft;		/* regular wakeup = 1, sync wakeup = 2 */
-	volatile s16 lock_cnt;		/* number of locks holding */
 	volatile s16 lock_boost;	/* lock boost count */
 	volatile s16 futex_boost;	/* futex boost count */
 	volatile u32 *futex_uaddr;	/* futex uaddr */
