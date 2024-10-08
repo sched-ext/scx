@@ -1270,82 +1270,84 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (!disable_topology && dsq_iter_algo == DSQ_ITER_ROUND_ROBIN)
 		cpu_ctx_layer_idx_inc(cctx);
 
-	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
+		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
+		bool preempt = MEMBER_VPTR(layers, [layer_idx].preempt);
+		bool open = MEMBER_VPTR(layers, [layer_idx].open);
+		u32 layer_cpus = *MEMBER_VPTR(layers[layer_idx], .nr_cpus);
+		struct cpumask *layer_cpumask;
+		bool have_layer_cpumask = layer_cpumask = lookup_layer_cpumask(idx);
+		bool cpumask_test = false;
+		if (have_layer_cpumask)
+			cpumask_test = bpf_cpumask_test_cpu(cpu, layer_cpumask);
+		bool layer_matches = (have_layer_cpumask && 
+							(cpumask_test ||
+							(cpu <= nr_possible_cpus && 
+							cpu == fallback_cpu &&
+							layer_cpus == 0))); 
+		
 		if (disable_topology) {
-			if (MEMBER_VPTR(layers, [idx].preempt) && scx_bpf_consume(idx))
+			/* consume preempting layers first */
+			if (preempt && scx_bpf_consume(idx))
 				return;
-		} else {
-			layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
-			bpf_for(llc_id, 0, nr_llcs) {
-				dsq_id = layer_dsq_id(layer_idx, llc_id);
-				if (MEMBER_VPTR(layers, [layer_idx].preempt) &&
-				    scx_bpf_consume(dsq_id))
-					return;
-			}
-		}
-	}
 
-	dsq_id = cpu_hi_fallback_dsq_id(cpu);
-	if (scx_bpf_consume(dsq_id))
-		return;
-
-	/* consume !open layers second */
-	bpf_for(idx, 0, nr_layers) {
-		if (disable_topology) {
-			layer_idx = idx;
-			struct layer *layer = &layers[idx];
-			struct cpumask *layer_cpumask;
+			/* make sure hi fallback dsq is empty */
+		    dsq_id = cpu_hi_fallback_dsq_id(cpu);
+			if (scx_bpf_consume(dsq_id))
+				return;
 
 			/* consume matching layers */
-			if (!(layer_cpumask = lookup_layer_cpumask(idx)))
-				return;
-
-			if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
-			    (cpu == fallback_cpu && layer->nr_cpus == 0)) {
-				if (scx_bpf_consume(idx))
-					return;
-			}
-		} else {
-			layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
-			bpf_for(llc_id, 0, nr_llcs) {
-				struct layer *layer = &layers[layer_idx];
-				struct cpumask *layer_cpumask;
-				dsq_id = layer_dsq_id(layer_idx, llc_id);
-
-				/* consume matching layers */
-				if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
-					return;
-
-				if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
-				    (cpu <= nr_possible_cpus && cpu == fallback_cpu &&
-				     MEMBER_VPTR(layer, ->nr_cpus) == 0)) {
-					if (scx_bpf_consume(dsq_id))
+			if (have_layer_cpumask)
+			{
+				if (cpumask_test ||
+					(cpu == fallback_cpu && layer_cpus == 0)) {
+					if (scx_bpf_consume(idx))
 						return;
 				}
 			}
-		}
-	}
 
-	/* consume !preempting open layers */
-	bpf_for(idx, 0, nr_layers) {
-		if (disable_topology) {
+			/* consume !preempting open layers */			
 			if (!layers[idx].preempt && layers[idx].open &&
 			    scx_bpf_consume(idx))
 				return;
+
 		} else {
-			layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
+			u64 matching_dsq;
+			u64 non_preempting_open_dsq;
+
 			bpf_for(llc_id, 0, nr_llcs) {
 				dsq_id = layer_dsq_id(layer_idx, llc_id);
+				/* consume preempting layers first, with no delay */
+				if (preempt && scx_bpf_consume(dsq_id))
+					return;
+				dsq_id = llc_hi_fallback_dsq_id(llc_id);
+				/* make sure hi fallback dsq is empty, with no delay  */
+				if (scx_bpf_consume(dsq_id))
+					return;
 
-				if (!MEMBER_VPTR(layers, [layer_idx].preempt) &&
-				    MEMBER_VPTR(layers, [layer_idx].open) &&
-				    scx_bpf_consume(dsq_id))
+				/* consume matching layers */
+				if (layer_matches && !matching_dsq){ 
+					matching_dsq = dsq_id;
+					break;
+				}
+				/* consume !preempting open layers */			
+				if ((!preempt && open) && !non_preempting_open_dsq 
+					&& matching_dsq)
+						non_preempting_open_dsq = dsq_id;
+			}
+
+			/* preserve priority order of dsq execution */
+			if(!matching_dsq) {
+				if (scx_bpf_consume(matching_dsq))
+					return;
+			}
+			if(!non_preempting_open_dsq) {
+				if (scx_bpf_consume(non_preempting_open_dsq))
 					return;
 			}
 		}
 	}
-
+	/* consume lo fallback dsq */
 	scx_bpf_consume(LO_FALLBACK_DSQ);
 }
 
