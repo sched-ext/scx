@@ -43,7 +43,7 @@ else
 fi
 
 if [[ -v SCHEDS["scx_layered"] ]] ; then
-    SCHEDS["scx_layered"]="--run-example -v"
+    SCHEDS["scx_layered"]="--run-example -v --stats 1"
 fi
 
 printf "testing scheds:\n"
