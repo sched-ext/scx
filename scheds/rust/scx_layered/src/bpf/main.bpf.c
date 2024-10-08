@@ -601,8 +601,6 @@ s32 pick_idle_no_topo(struct task_struct *p, s32 prev_cpu,
 		      struct layer *layer, bool from_selcpu)
 {
 	const struct cpumask *idle_cpumask;
-	struct cache_ctx *cachec;
-	struct node_ctx *nodec;
 	struct cpumask *layer_cpumask, *layered_cpumask;
 	s32 cpu;
 
@@ -1018,21 +1016,8 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *tctx,
 		bpf_for(idx, 0, nr_possible_cpus) {
 			s32 cand = (preempt_cursor + idx) % nr_possible_cpus;
 
-			if (try_preempt_cpu(cand, p, cctx, tctx, layer, false)) {
-				/*
-				 * Round-robining doesn't have to be strict. Let's
-				 * not bother with atomic ops on $preempt_cursor.
-				 */
-				preempt_cursor = (cand + 1) % nr_possible_cpus;
-				struct cpu_ctx *new_cctx;
-				if ((new_cctx = lookup_cpu_ctx(cand))) {
-					if (new_cctx->node_idx != nodec->id && new_cctx->node_idx == nodec->id)
-						lstat_inc(LSTAT_PREEMPT_XLLC, layer, cctx);
-					if (new_cctx->node_idx != nodec->id)
-						lstat_inc(LSTAT_PREEMPT_XLLC, layer, cctx);
-				}
+			if (try_preempt_cpu(cand, p, cctx, tctx, layer, false))
 				return;
-			}
 		}
 	}
 
@@ -1312,7 +1297,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 				return;
 
 		} else {
-			u64 matching_dsq;
+			u64 matching_dsq = -1;
 			u64 non_preempting_open_dsq;
 
 			bpf_for(llc_id, 0, nr_llcs) {
@@ -1326,7 +1311,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 					return;
 
 				/* consume matching layers */
-				if (layer_matches && !matching_dsq){ 
+				if (layer_matches && matching_dsq == -1) {
 					matching_dsq = dsq_id;
 					break;
 				}
@@ -1337,7 +1322,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			}
 
 			/* preserve priority order of dsq execution */
-			if(!matching_dsq) {
+			if (matching_dsq != -1) {
 				if (scx_bpf_consume(matching_dsq))
 					return;
 			}
