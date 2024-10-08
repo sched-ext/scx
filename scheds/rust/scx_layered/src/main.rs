@@ -135,6 +135,32 @@ lazy_static::lazy_static! {
                     },
 		},
 		LayerSpec {
+                    name: "stress-ng".into(),
+                    comment: Some("stress-ng test layer".into()),
+                    matches: vec![vec![
+			LayerMatch::CommPrefix("stress-ng".into()),
+                    ],
+                    vec![
+			LayerMatch::PcommPrefix("stress-ng".into()),
+                    ]],
+                    kind: LayerKind::Confined {
+			cpus_range: None,
+			min_exec_us: 800,
+			yield_ignore: 0.0,
+			util_range: (0.2, 0.8),
+			preempt: true,
+			preempt_first: false,
+			exclusive: true,
+			idle_smt: false,
+                        slice_us: 800,
+                        weight: DEFAULT_LAYER_WEIGHT,
+                        growth_algo: LayerGrowthAlgo::Topo,
+			perf: 1024,
+			nodes: vec![],
+			llcs: vec![],
+                    },
+		},
+		LayerSpec {
                     name: "normal".into(),
                     comment: Some("the rest".into()),
                     matches: vec![vec![]],
