@@ -150,7 +150,7 @@ lazy_static::lazy_static! {
 			util_range: (0.2, 0.8),
 			preempt: true,
 			preempt_first: false,
-			exclusive: true,
+			exclusive: false,
 			idle_smt: false,
                         slice_us: 800,
                         weight: DEFAULT_LAYER_WEIGHT,
