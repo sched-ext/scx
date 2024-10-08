@@ -1335,7 +1335,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			}
 
 
-		  dsq_id = cpu_hi_fallback_dsq_id(cpu);
+			dsq_id = cpu_hi_fallback_dsq_id(cpu);
 			if (scx_bpf_consume(dsq_id))
 				return;
 
