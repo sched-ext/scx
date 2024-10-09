@@ -155,6 +155,7 @@ use crate::stats::DomainStats;
 use crate::stats::NodeStats;
 use crate::DomainGroup;
 
+const DEFAULT_WEIGHT: f64 = bpf_intf::consts_LB_DEFAULT_WEIGHT as f64;
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 
 fn now_monotonic() -> u64 {
@@ -446,20 +447,16 @@ impl NumaNode {
     }
 
     fn stats(&self) -> NodeStats {
-        let mut stats = NodeStats {
-            load: self.load.load_sum(),
-            imbal: self.load.imbal(),
-            delta: self.load.delta(),
-            doms: BTreeMap::new(),
-        };
+        let mut stats = NodeStats::new(
+            self.load.load_sum(),
+            self.load.imbal(),
+            self.load.delta(),
+            BTreeMap::new(),
+        );
         for dom in self.domains.iter() {
             stats.doms.insert(
                 dom.id,
-                DomainStats {
-                    load: dom.load.load_sum(),
-                    imbal: dom.load.imbal(),
-                    delta: dom.load.delta(),
-                },
+                DomainStats::new(dom.load.load_sum(), dom.load.imbal(), dom.load.delta()),
             );
         }
         stats
@@ -542,8 +539,13 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         let (dom_loads, total_load) = if !self.lb_apply_weight {
             (
-                ledger.dom_dcycle_sums().to_vec(),
-                ledger.global_dcycle_sum(),
+                ledger
+                    .dom_dcycle_sums()
+                    .to_vec()
+                    .into_iter()
+                    .map(|d| DEFAULT_WEIGHT * d)
+                    .collect(),
+                DEFAULT_WEIGHT * ledger.global_dcycle_sum(),
             )
         } else {
             self.infeas_threshold = ledger.effective_max_weight();
@@ -696,10 +698,12 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     RAVG_FRAC_BITS,
                 );
 
-                if self.lb_apply_weight {
-                    let weight = (task_ctx.weight as f64).min(self.infeas_threshold);
-                    load *= weight;
-                }
+                let weight = if self.lb_apply_weight {
+                    (task_ctx.weight as f64).min(self.infeas_threshold)
+                } else {
+                    DEFAULT_WEIGHT
+                };
+                load *= weight;
 
                 dom.tasks.insert(TaskInfo {
                     tptr,

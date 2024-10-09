@@ -12,6 +12,7 @@ use chrono::Local;
 use scx_stats::prelude::*;
 use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
+use scx_utils::normalize_load_metric;
 use scx_utils::Cpumask;
 use serde::Deserialize;
 use serde::Serialize;
@@ -39,6 +40,14 @@ pub struct DomainStats {
 }
 
 impl DomainStats {
+    pub fn new(load: f64, imbal: f64, delta: f64) -> Self {
+        Self {
+            load: normalize_load_metric(load),
+            imbal: normalize_load_metric(imbal),
+            delta: normalize_load_metric(delta),
+        }
+    }
+
     pub fn format<W: Write>(&self, w: &mut W, id: usize) -> Result<()> {
         writeln!(
             w,
@@ -67,6 +76,15 @@ pub struct NodeStats {
 }
 
 impl NodeStats {
+    pub fn new(load: f64, imbal: f64, delta: f64, doms: BTreeMap<usize, DomainStats>) -> Self {
+        Self {
+            load: normalize_load_metric(load),
+            imbal: normalize_load_metric(imbal),
+            delta: normalize_load_metric(delta),
+            doms,
+        }
+    }
+
     pub fn format<W: Write>(&self, w: &mut W, id: usize) -> Result<()> {
         writeln!(
             w,

@@ -18,6 +18,7 @@ use log::warn;
 use scx_stats::prelude::*;
 use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
+use scx_utils::normalize_load_metric;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -182,7 +183,7 @@ impl LayerStats {
         Self {
             util: stats.layer_utils[lidx] * 100.0,
             util_frac: calc_frac(stats.layer_utils[lidx], stats.total_util),
-            load: stats.layer_loads[lidx],
+            load: normalize_load_metric(stats.layer_loads[lidx]),
             load_adj: calc_frac(stats.layer_load_sums[lidx], stats.total_load_sum),
             dcycle: calc_frac(stats.layer_dcycle_sums[lidx], stats.total_dcycle_sum),
             load_frac: calc_frac(stats.layer_loads[lidx], stats.total_load),
@@ -411,7 +412,7 @@ impl SysStats {
             proc_ms: stats.processing_dur.as_millis() as u64,
             busy: stats.cpu_busy * 100.0,
             util: stats.total_util * 100.0,
-            load: stats.total_load,
+            load: normalize_load_metric(stats.total_load),
             fallback_cpu: fallback_cpu as u32,
             layers: BTreeMap::new(),
         })
