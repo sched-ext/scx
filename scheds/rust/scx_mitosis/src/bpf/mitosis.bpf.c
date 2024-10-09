@@ -15,14 +15,13 @@
 #include "intf.h"
 
 #ifdef LSP
-#define __bpf__ 
+#define __bpf__
 #include "../../../../include/scx/common.bpf.h"
 #include "../../../../include/scx/ravg_impl.bpf.h"
 #else
 #include <scx/common.bpf.h>
 #include <scx/ravg_impl.bpf.h>
 #endif
-
 
 char _license[] SEC("license") = "GPL";
 
@@ -66,8 +65,7 @@ static inline struct cgrp_lock_wrapper *lookup_cgrp_lock(struct cgroup *cgrp)
 {
 	struct cgrp_lock_wrapper *lockw;
 
-	if (!(lockw = bpf_cgrp_storage_get(&cgrp_locks, cgrp, 0,
-					   0))) {
+	if (!(lockw = bpf_cgrp_storage_get(&cgrp_locks, cgrp, 0, 0))) {
 		scx_bpf_error("cgrp_lock_wrapper lookup failed for cgid %llu",
 			      cgrp->kn->id);
 		return NULL;
@@ -101,8 +99,7 @@ static inline struct cgrp_ctx *lookup_cgrp_ctx(struct cgroup *cgrp)
 {
 	struct cgrp_ctx *cgc;
 
-	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctx, cgrp, 0,
-					 0))) {
+	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctx, cgrp, 0, 0))) {
 		scx_bpf_error("cgrp_ctx lookup failed for cgid %llu",
 			      cgrp->kn->id);
 		return NULL;
@@ -113,7 +110,8 @@ static inline struct cgrp_ctx *lookup_cgrp_ctx(struct cgroup *cgrp)
 
 static inline struct cgrp_ctx *lookup_cgrp_ctx_fallible(struct cgroup *cgrp)
 {
-	return bpf_cgrp_storage_get(&cgrp_ctx, cgrp, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
+	return bpf_cgrp_storage_get(&cgrp_ctx, cgrp, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
 }
 
 /* Map from cgrp -> cell populated by userspace for reconfiguration */
@@ -126,7 +124,7 @@ struct {
 
 static inline struct cgroup *task_cgroup(struct task_struct *p)
 {
-	struct cgroup *cgrp = scx_bpf_task_cgroup(p);
+	struct cgroup *cgrp = __COMPAT_scx_bpf_task_cgroup(p);
 	if (!cgrp) {
 		scx_bpf_error("Failed to get cgroup for task %d", p->pid);
 	}
@@ -201,7 +199,7 @@ static inline struct cell *lookup_cell(int idx)
 
 	cell = MEMBER_VPTR(cells, [idx]);
 	if (!cell) {
-        scx_bpf_error("Invalid cell %d", idx);
+		scx_bpf_error("Invalid cell %d", idx);
 		return NULL;
 	}
 	return cell;
@@ -377,7 +375,8 @@ int BPF_PROG(sched_tick_fentry)
 			if (!(cell = bpf_cgrp_storage_get(&cgrp_cell_assignment,
 							  pos->cgroup, 0, 0))) {
 				struct cgroup *cg, *parent_cg;
-				if (!(cgc = lookup_cgrp_ctx_fallible(pos->cgroup)))
+				if (!(cgc = lookup_cgrp_ctx_fallible(
+					      pos->cgroup)))
 					continue;
 				/*
 				 * We don't have any assignment from userspace, this cgroup must
@@ -474,7 +473,8 @@ static inline void adj_load(struct task_struct *p, struct task_ctx *tctx,
 	}
 }
 
-static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx)
+static inline int update_task_cpumask(struct task_struct *p,
+				      struct task_ctx *tctx)
 {
 	const struct cpumask *cell_cpumask;
 
@@ -777,9 +777,10 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 	}
 
 	// Just initialize the cgroup lock
-	if (!bpf_cgrp_storage_get(&cgrp_locks, cgrp, 0, BPF_LOCAL_STORAGE_GET_F_CREATE)) {
+	if (!bpf_cgrp_storage_get(&cgrp_locks, cgrp, 0,
+				  BPF_LOCAL_STORAGE_GET_F_CREATE)) {
 		scx_bpf_error("cgrp_lock_wrapper creation failed for cgid %llu",
-					  cgrp->kn->id);
+			      cgrp->kn->id);
 		return -ENOENT;
 	}
 
@@ -944,7 +945,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			bpf_cpumask_release(cpumask);
 			return -EINVAL;
 		}
-
 	}
 
 	return 0;
