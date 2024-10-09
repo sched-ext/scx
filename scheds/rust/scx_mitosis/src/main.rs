@@ -523,9 +523,7 @@ impl<'a> Scheduler<'a> {
         for (cell_idx, cell) in self.cells.iter() {
             trace!(
                 "Cell {}, Load: {}, Pinned Load: {}",
-                cell_idx,
-                cell.load,
-                cell.pinned_load
+                cell_idx, cell.load, cell.pinned_load
             );
         }
         let zero = 0 as libc::__u32;
@@ -659,7 +657,8 @@ impl<'a> Scheduler<'a> {
                     .ok_or(anyhow!("No cpus to allocate"))?;
                 trace!("Allocating {} to Cell {}", new_cpu, cell_idx);
                 cell.cpu_assignment.set(new_cpu, true);
-                self.skel.maps.bss_data.cells[*cell_idx as usize].cpus[new_cpu / 8] |= 1 << new_cpu % 8;
+                self.skel.maps.bss_data.cells[*cell_idx as usize].cpus[new_cpu / 8] |=
+                    1 << new_cpu % 8;
             }
         }
         for (cell_idx, cell) in self.skel.maps.bss_data.cells.iter().enumerate() {
