@@ -581,11 +581,11 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 
 	/*
 	 * If the task isn't allowed to use its previously used CPU it means
-	 * that it's changing affinity. In this case just pick a random CPU in
-	 * its new allowed CPU domain.
+	 * that it's changing affinity. In this case try to pick any random
+	 * idle CPU in its new allowed CPU domain.
 	 */
 	if (!bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
-		prev_cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
+		return scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 
 	/*
 	 * For tasks that can run only on a single CPU, we can simply verify if
