@@ -49,7 +49,7 @@ def run_stress_test(
     sched_cmd = s_path + " " + config.get('sched_args')
     timeout_sec = int(config.get("timeout_sec"))
     if vng_path:
-        cmd = [vng_path, "--user", "root", "-v", "-r", kernel]
+        cmd = [vng_path, "-m", "10G", "--cpus", "10", "--user", "root", "-v", "-r", kernel]
         if config.get("qemu_opts"):
             cmd += ['--qemu-opts']
             cmd += [f"'{config.get("qemu_opts")}'"]
