@@ -437,13 +437,13 @@ struct Opts {
     #[clap(short = 'e', long)]
     example: Option<String>,
 
-    /// Disables preemption if the weighted load of a layer exceeds the threshold.
-    /// The default is disabled (0.0).
+    /// Disables preemption if the weighted load fraction of a layer (load_frac_adj) exceeds the
+    /// threshold. The default is disabled (0.0).
     #[clap(long, default_value = "0.0")]
     layer_preempt_weight_disable: f64,
 
-    /// Disables layer growth if the weighted load of a layer exceeds the threshold.
-    /// The default is disabled (0.0).
+    /// Disables layer growth if the weighted load fraction of a layer (load_frac_adj) exceeds the
+    /// threshold. The default is disabled (0.0).
     #[clap(long, default_value = "0.0")]
     layer_growth_weight_disable: f64,
 
