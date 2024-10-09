@@ -138,11 +138,12 @@ struct Opts {
     #[clap(short = 'l', long, allow_hyphen_values = true, default_value = "0")]
     slice_us_lag: i64,
 
-    /// Shorten interactive tasks' deadline based on their average amount of voluntary context
-    /// switches.
+    /// With lowlatency enabled, instead of classifying tasks as interactive or non-interactive,
+    /// they all get a dynamic priority, which is adjusted in function of their average rate of
+    /// voluntary context switches.
     ///
-    /// Enabling this option can be beneficial in soft real-time scenarios, such as audio
-    /// processing, multimedia, etc.
+    /// This option guarantess less spikey behavior and it can be particularly useful in soft
+    /// real-time scenarios, such as audio processing, multimedia, etc.
     #[clap(short = 'L', long, action = clap::ArgAction::SetTrue)]
     lowlatency: bool,
 
@@ -260,9 +261,9 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.smt_enabled = smt_enabled;
         skel.maps.rodata_data.lowlatency = opts.lowlatency;
         skel.maps.rodata_data.local_kthreads = opts.local_kthreads;
-        skel.maps.rodata_data.slice_ns = opts.slice_us * 1000;
-        skel.maps.rodata_data.slice_ns_min = opts.slice_us_min * 1000;
-        skel.maps.rodata_data.slice_ns_lag = opts.slice_us_lag * 1000;
+        skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
+        skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
+        skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
         skel.maps.rodata_data.starvation_thresh_ns = opts.starvation_thresh_us * 1000;
         skel.maps.rodata_data.nvcsw_max_thresh = opts.nvcsw_max_thresh;
 
@@ -555,7 +556,8 @@ impl<'a> Scheduler<'a> {
             nr_running: self.skel.maps.bss_data.nr_running,
             nr_cpus: self.skel.maps.bss_data.nr_online_cpus,
             nr_interactive: self.skel.maps.bss_data.nr_interactive,
-            nr_waiting: self.skel.maps.bss_data.nr_waiting,
+            nr_prio_waiting: self.skel.maps.bss_data.nr_prio_waiting,
+            nr_shared_waiting: self.skel.maps.bss_data.nr_shared_waiting,
             nvcsw_avg_thresh: self.skel.maps.bss_data.nvcsw_avg_thresh,
             nr_kthread_dispatches: self.skel.maps.bss_data.nr_kthread_dispatches,
             nr_direct_dispatches: self.skel.maps.bss_data.nr_direct_dispatches,
