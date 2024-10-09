@@ -25,6 +25,8 @@ pub struct Metrics {
     pub nr_waiting: u64,
     #[stat(desc = "Average of voluntary context switches")]
     pub nvcsw_avg_thresh: u64,
+    #[stat(desc = "Number of kthread direct dispatches")]
+    pub nr_kthread_dispatches: u64,
     #[stat(desc = "Number of task direct dispatches")]
     pub nr_direct_dispatches: u64,
     #[stat(desc = "Number of interactive task dispatches")]
@@ -37,13 +39,14 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] tasks -> run: {:>2}/{:<2} int: {:<2} wait: {:<4} | nvcsw: {:<4} | dispatch -> dir: {:<5} prio: {:<5} shr: {:<5}",
+            "[{}] tasks -> run: {:>2}/{:<2} int: {:<2} wait: {:<4} | nvcsw: {:<4} | dispatch -> kth: {:<5} dir: {:<5} pri: {:<5} shr: {:<5}",
             crate::SCHEDULER_NAME,
             self.nr_running,
             self.nr_cpus,
             self.nr_interactive,
             self.nr_waiting,
             self.nvcsw_avg_thresh,
+            self.nr_kthread_dispatches,
             self.nr_direct_dispatches,
             self.nr_prio_dispatches,
             self.nr_shared_dispatches
@@ -53,6 +56,7 @@ impl Metrics {
 
     fn delta(&self, rhs: &Self) -> Self {
         Self {
+            nr_kthread_dispatches: self.nr_kthread_dispatches - rhs.nr_kthread_dispatches,
             nr_direct_dispatches: self.nr_direct_dispatches - rhs.nr_direct_dispatches,
             nr_prio_dispatches: self.nr_prio_dispatches - rhs.nr_prio_dispatches,
             nr_shared_dispatches: self.nr_shared_dispatches - rhs.nr_shared_dispatches,

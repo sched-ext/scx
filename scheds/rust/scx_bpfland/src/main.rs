@@ -146,12 +146,11 @@ struct Opts {
     #[clap(short = 'L', long, action = clap::ArgAction::SetTrue)]
     lowlatency: bool,
 
-    /// Enable per-CPU kthreads prioritization.
+    /// Enable kthreads prioritization.
     ///
-    /// Enabling this can enhance the performance of interrupt-driven workloads (e.g., networking
-    /// throughput) over regular system/user workloads. However, it may also introduce
-    /// interactivity issues or unfairness under heavy interrupt-driven loads, such as high RX
-    /// network traffic.
+    /// Enabling this can improve system performance, but it may also introduce interactivity
+    /// issues or unfairness in scenarios with high kthread activity, such as heavy I/O or network
+    /// traffic.
     #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
     local_kthreads: bool,
 
@@ -587,6 +586,7 @@ impl<'a> Scheduler<'a> {
             nr_interactive: self.skel.maps.bss_data.nr_interactive,
             nr_waiting: self.skel.maps.bss_data.nr_waiting,
             nvcsw_avg_thresh: self.skel.maps.bss_data.nvcsw_avg_thresh,
+            nr_kthread_dispatches: self.skel.maps.bss_data.nr_kthread_dispatches,
             nr_direct_dispatches: self.skel.maps.bss_data.nr_direct_dispatches,
             nr_prio_dispatches: self.skel.maps.bss_data.nr_prio_dispatches,
             nr_shared_dispatches: self.skel.maps.bss_data.nr_shared_dispatches,
