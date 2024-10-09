@@ -90,3 +90,25 @@ pub fn read_file_usize(path: &Path) -> Result<usize> {
         }
     }
 }
+
+/* Load is reported as weight * duty cycle
+ *
+ * In the Linux kernel, EEDVF uses default weight = 1 s.t.
+ * load for a nice-0 thread runnable for time slice = 1
+ *
+ * To conform with cgroup weights convention, sched-ext uses
+ * the convention of default weight = 100 with the formula
+ * 100 * nice ^ 1.5. This means load for a nice-0 thread
+ * runnable for time slice = 100.
+ *
+ * To ensure we report load metrics consistently with the Linux
+ * kernel, we divide load by 100.0 prior to reporting metrics.
+ * This is also more intuitive for users since 1 CPU roughly
+ * means 1 unit of load.
+ *
+ * We only do this prior to reporting as its easier to work with
+ * weight as integers in BPF / userspace than floating point.
+ */
+pub fn normalize_load_metric(metric: f64) -> f64 {
+    metric / 100.0
+}
