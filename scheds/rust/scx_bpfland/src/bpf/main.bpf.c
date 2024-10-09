@@ -1059,29 +1059,12 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * If the current task expired its time slice, its CPU is still a
-	 * full-idle SMT core and no other task wants to run, simply replenish
-	 * its time slice and let it run for another round on the same CPU.
-	 *
-	 * Note that bpfland_stopping() won't be called if we replenish the
-	 * time slice here. As a result, the nvcsw statistics won't be updated,
-	 * but this isn't an issue, because these statistics are only relevant
-	 * when the system is overloaded, which isn't the case when there are
-	 * no other tasks to run.
+	 * If the current task expired its time slice and no other task wants
+	 * to run, simply replenish its time slice and let it run for another
+	 * round on the same CPU.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
-		const struct cpumask *idle_smtmask;
-
-		if (!smt_enabled) {
-			task_refill_slice(prev);
-			return;
-		}
-
-		idle_smtmask = scx_bpf_get_idle_smtmask();
-		if (bpf_cpumask_test_cpu(cpu, idle_smtmask))
-			task_refill_slice(prev);
-		scx_bpf_put_idle_cpumask(idle_smtmask);
-	}
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
+		task_refill_slice(prev);
 }
 
 /*
