@@ -33,7 +33,6 @@ const volatile bool smt_enabled = true;
 const volatile bool has_little_cores = true;
 const volatile bool disable_topology = false;
 const volatile bool xnuma_preemption = false;
-const volatile bool layer_weight_dsq_iter = false;
 const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 const volatile u32 layer_iteration_order[MAX_LAYERS];
@@ -124,7 +123,7 @@ static u32 dsq_iter_rr_cpu_ctx(u32 layer_idx, int idx)
  * Returns the iterator context for iterating over DSQs using the configured
  * DSQ iterator algorithm.
  */
-static u32 iter_layer_dsq_ctx(int idx, u32 layer_idx)
+static __noinline u32 iter_layer_dsq_ctx(int idx, u32 layer_idx)
 {
 	switch (dsq_iter_algo) {
 	case DSQ_ITER_LINEAR: {
@@ -134,7 +133,13 @@ static u32 iter_layer_dsq_ctx(int idx, u32 layer_idx)
 		return dsq_iter_rr_cpu_ctx(layer_idx, idx);
 	}
 	case DSQ_ITER_WEIGHT: {
-		return dsq_iter_weight_ctx(idx);
+		u32 ret;
+		ret = dsq_iter_weight_ctx(idx);
+		if (ret >= nr_layers) {
+			scx_bpf_error("can't happen");
+			return ret;
+		}
+		return ret;
 	}
 	case DSQ_ITER_REVERSE_WEIGHT: {
 		// TODO: Correctly implement this algo, see:
@@ -1223,10 +1228,11 @@ no:
 static __noinline
 void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 {
-	s32 sib = sibling_cpu(cpu);
 	struct cpu_ctx *cctx, *sib_cctx;
-	u32 idx, llc_id, layer_idx;
+	struct layer *layer;
 	u64 dsq_id;
+	u32 idx, llc_id, layer_idx;
+	s32 sib = sibling_cpu(cpu);
 
 	if (!(cctx = lookup_cpu_ctx(-1)))
 		return;
@@ -1257,10 +1263,19 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 		return;
 	}
 
+	// Adjust the per cpu layer offset so that layers are iterated in a
+	// round robin order if using that algorithm for dsq iteration.
+	if (dsq_iter_algo == DSQ_ITER_ROUND_ROBIN)
+		cpu_ctx_layer_idx_inc(cctx);
+
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
-		struct layer *layer = &layers[layer_idx]; 
+		if (layer_idx >= nr_layers) {
+			scx_bpf_error("can't happen");
+			return;
+		}
+		layer = MEMBER_VPTR(layers, [layer_idx]);
 		if (layer->preempt && scx_bpf_consume(layer_idx))
 			return;
 	}
@@ -1272,7 +1287,11 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
-		struct layer *layer = &layers[layer_idx]; 
+		if (layer_idx >= nr_layers) {
+			scx_bpf_error("can't happen");
+			return;
+		}
+		layer = MEMBER_VPTR(layers, [layer_idx]);
 		struct cpumask *layer_cpumask;
 
 		/* consume matching layers */
@@ -1289,7 +1308,11 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	/* consume !preempting open layers */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
-		struct layer *layer = &layers[layer_idx]; 
+		if (layer_idx >= nr_layers) {
+			scx_bpf_error("can't happen");
+			return;
+		}
+		layer = MEMBER_VPTR(layers, [layer_idx]);
 		if (!layer->preempt && layers->open &&
 		    scx_bpf_consume(layer_idx))
 			return;
@@ -1303,10 +1326,11 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (disable_topology)
 		return layered_dispatch_no_topo(cpu, prev);
 
-	s32 sib = sibling_cpu(cpu);
 	struct cpu_ctx *cctx, *sib_cctx;
-	u32 idx, llc_idx, layer_idx;
+	struct layer *layer;
 	u64 dsq_id;
+	u32 idx, llc_idx, layer_idx;
+	s32 sib = sibling_cpu(cpu);
 
 	if (!(cctx = lookup_cpu_ctx(-1)))
 		return;
@@ -1337,18 +1361,25 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
+	// Adjust the per cpu layer offset so that layers are iterated in a
+	// round robin order if using that algorithm for dsq iteration.
+	if (dsq_iter_algo == DSQ_ITER_ROUND_ROBIN)
+		cpu_ctx_layer_idx_inc(cctx);
+
 	u32 my_llc_id = cpu_to_llc_id(cpu);
 
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
-		struct layer *layer = &layers[layer_idx]; 
+		if (layer_idx >= nr_layers) {
+			scx_bpf_error("can't happen");
+			return;
+		}
+		layer = MEMBER_VPTR(layers, [layer_idx]);
 		bpf_for(llc_idx, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
-
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
-			if (layer->preempt &&
-			    scx_bpf_consume(dsq_id))
+			if (layer->preempt && scx_bpf_consume(dsq_id))
 				return;
 		}
 	}
@@ -1360,10 +1391,13 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
-		struct layer *layer = &layers[layer_idx]; 
-			layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
-			bpf_for(llc_idx, 0, nr_llcs) {
-				u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+		if (layer_idx >= nr_layers) {
+			scx_bpf_error("can't happen");
+			return;
+		}
+		layer = MEMBER_VPTR(layers, [layer_idx]);
+		bpf_for(llc_idx, 0, nr_llcs) {
+			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
 			struct cpumask *layer_cpumask;
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
 
@@ -1383,7 +1417,11 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	/* consume !preempting open layers */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
-		struct layer *layer = &layers[layer_idx]; 
+		if (layer_idx >= nr_layers) {
+			scx_bpf_error("can't happen");
+			return;
+		}
+		layer = MEMBER_VPTR(layers, [layer_idx]);
 		bpf_for(llc_idx, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
@@ -2047,8 +2085,9 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 }
 
 static void print_iter_order() {
-	int i;
 	struct cpu_ctx *cctx;
+	int i;
+	u32 layer_idx;
 
 	if (!(cctx = lookup_cpu_ctx(-1))) {
 		scx_bpf_error("failed to get cpu ctx");
@@ -2057,8 +2096,8 @@ static void print_iter_order() {
 
 	trace("ITER algo: %d", dsq_iter_algo);
 	bpf_for(i, 0, nr_layers) {
-		trace("ITER order i: %d %d\n", i,
-		      iter_layer_dsq_ctx(i, cctx->layer_idx));
+		layer_idx = iter_layer_dsq_ctx(i, cctx->layer_idx);
+		trace("ITER order i: %d layer_idx: %d weight: %d", i, layer_idx, dsq_iter_weight_ctx(i));
 	}
 }
 
