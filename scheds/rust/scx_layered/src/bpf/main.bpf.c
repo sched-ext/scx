@@ -1670,7 +1670,7 @@ static s32 create_node(u32 node_id)
 		}
 	}
 
-	dbg("creating node %d with %d cpus", node_id, nodec->nr_cpus);
+	dbg("CFG creating node %d with %d cpus", node_id, nodec->nr_cpus);
 	bpf_rcu_read_unlock();
 	return ret;
 }
@@ -1718,7 +1718,7 @@ static s32 create_cache(u32 cache_id)
 		cctx->cache_idx = cache_id;
 	}
 
-	dbg("creating cache %d with %d cpus", cache_id, cachec->nr_cpus);
+	dbg("CFG creating cache %d with %d cpus", cache_id, cachec->nr_cpus);
 	bpf_rcu_read_unlock();
 	return ret;
 }
@@ -2094,10 +2094,10 @@ static void print_iter_order() {
 		return;
 	}
 
-	trace("ITER algo: %d", dsq_iter_algo);
+	trace("CFG iter algo: %d", dsq_iter_algo);
 	bpf_for(i, 0, nr_layers) {
 		layer_idx = iter_layer_dsq_ctx(i, cctx->layer_idx);
-		trace("ITER order i: %d layer_idx: %d weight: %d", i, layer_idx, dsq_iter_weight_ctx(i));
+		trace("CFG iter order i: %d layer_idx: %d weight: %d", i, layer_idx, dsq_iter_weight_ctx(i));
 	}
 }
 
@@ -2284,7 +2284,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		} else {
 			bpf_for(j, 0, nr_llcs) {
 				int node_id = llc_node_id(i);
-				dbg("creating dsq %llu for layer %d on node %d in llc %d",
+				dbg("CFG creating dsq %llu for layer %d on node %d in llc %d",
 				    llc_dsq_id, i, node_id, j);
 				ret = scx_bpf_create_dsq(llc_dsq_id, node_id);
 				if (ret < 0)
