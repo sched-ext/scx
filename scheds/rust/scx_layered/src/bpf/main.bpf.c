@@ -1250,21 +1250,17 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
-	// Adjust the per cpu layer offset so that layers are iterated in a
-	// round robin order if using that algorithm for dsq iteration.
-	if (!disable_topology && dsq_iter_algo == DSQ_ITER_ROUND_ROBIN)
-		cpu_ctx_layer_idx_inc(cctx);
-
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
+		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
+		struct layer *layer = &layers[layer_idx]; 
 		if (disable_topology) {
-			if (MEMBER_VPTR(layers, [idx].preempt) && scx_bpf_consume(idx))
+			if (layer->preempt && scx_bpf_consume(layer_idx))
 				return;
 		} else {
-			layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
 			bpf_for(llc_id, 0, nr_llcs) {
 				dsq_id = layer_dsq_id(layer_idx, llc_id);
-				if (MEMBER_VPTR(layers, [layer_idx].preempt) &&
+				if (layer->preempt &&
 				    scx_bpf_consume(dsq_id))
 					return;
 			}
@@ -1277,24 +1273,23 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
+		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
+		struct layer *layer = &layers[layer_idx]; 
 		if (disable_topology) {
-			layer_idx = idx;
-			struct layer *layer = &layers[idx];
 			struct cpumask *layer_cpumask;
 
 			/* consume matching layers */
-			if (!(layer_cpumask = lookup_layer_cpumask(idx)))
+			if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
 				return;
 
 			if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
 			    (cpu == fallback_cpu && layer->nr_cpus == 0)) {
-				if (scx_bpf_consume(idx))
+				if (scx_bpf_consume(layer_idx))
 					return;
 			}
 		} else {
 			layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
 			bpf_for(llc_id, 0, nr_llcs) {
-				struct layer *layer = &layers[layer_idx];
 				struct cpumask *layer_cpumask;
 				dsq_id = layer_dsq_id(layer_idx, llc_id);
 
@@ -1304,7 +1299,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 				if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
 				    (cpu <= nr_possible_cpus && cpu == fallback_cpu &&
-				     MEMBER_VPTR(layer, ->nr_cpus) == 0)) {
+				    layer->nr_cpus == 0)) {
 					if (scx_bpf_consume(dsq_id))
 						return;
 				}
@@ -1314,18 +1309,17 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* consume !preempting open layers */
 	bpf_for(idx, 0, nr_layers) {
+		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
+		struct layer *layer = &layers[layer_idx]; 
 		if (disable_topology) {
-			if (!layers[idx].preempt && layers[idx].open &&
-			    scx_bpf_consume(idx))
+			if (!layer->preempt && layers->open &&
+			    scx_bpf_consume(layer_idx))
 				return;
 		} else {
-			layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
 			bpf_for(llc_id, 0, nr_llcs) {
 				dsq_id = layer_dsq_id(layer_idx, llc_id);
 
-				if (!MEMBER_VPTR(layers, [layer_idx].preempt) &&
-				    MEMBER_VPTR(layers, [layer_idx].open) &&
-				    scx_bpf_consume(dsq_id))
+				if (!layer->preempt && layer->open && scx_bpf_consume(dsq_id))
 					return;
 			}
 		}
