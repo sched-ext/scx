@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fs::File;
+use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -27,6 +28,8 @@ use itertools::Itertools;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::MapCore as _;
+use libbpf_rs::OpenObject;
 use log::debug;
 use log::info;
 use log::trace;
@@ -276,8 +279,8 @@ impl<'a> Scheduler<'a> {
             false => "scheduler_tick",
         };
 
-        skel.progs_mut()
-            .sched_tick_fentry()
+        skel.progs
+            .sched_tick_fentry
             .set_attach_target(0, Some(sched_tick_name.into()))
             .context("Failed to set attach target for sched_tick_fentry()")?;
 
@@ -388,8 +391,8 @@ impl<'a> Scheduler<'a> {
             let cell_idx_slice = unsafe { any_as_u8_slice(&cell_idx_u32) };
             /* XXX: NO_EXIST should be correct here, but it fails */
             self.skel
-                .maps()
-                .cgrp_cell_assignment()
+                .maps
+                .cgrp_cell_assignment
                 .update(cg_fd_slice, cell_idx_slice, libbpf_rs::MapFlags::ANY)
                 .with_context(|| {
                     format!("Failed to update cgroup cell assignment for: {}", cg_path)
@@ -434,8 +437,8 @@ impl<'a> Scheduler<'a> {
             let cg_fd_slice = unsafe { any_as_u8_slice(&cg_fd) };
             if let Some(v) = self
                 .skel
-                .maps()
-                .cgrp_ctx()
+                .maps
+                .cgrp_ctx
                 .lookup(cg_fd_slice, libbpf_rs::MapFlags::ANY)
                 .with_context(|| {
                     format!(
@@ -529,8 +532,8 @@ impl<'a> Scheduler<'a> {
         let zero_slice = unsafe { any_as_u8_slice(&zero) };
         if let Some(v) = self
             .skel
-            .maps()
-            .cpu_ctxs()
+            .maps
+            .cpu_ctxs
             .lookup_percpu(zero_slice, libbpf_rs::MapFlags::ANY)
             .context("Failed to lookup cpu_ctxs map")?
         {

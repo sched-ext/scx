@@ -420,6 +420,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "cgroupfs"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66348822148cc35473745aaec1dfef694010fc8b437541ef6e64db5c223a0846"
+dependencies = [
+ "nix 0.25.1",
+ "openat",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1113,6 +1125,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7a70ba024b9dc04c27ea2f0c0548feb474ec5c54bba33a7f72f873a39d07b24"
 
 [[package]]
+name = "maplit"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e2e65a1a2e43cfcb47a895c4c8b10d1f4a61097f9f254f183aee60cad9c651d"
+
+[[package]]
 name = "memchr"
 version = "2.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1747,6 +1765,28 @@ dependencies = [
  "tokio",
  "zbus",
  "zvariant",
+]
+
+[[package]]
+name = "scx_mitosis"
+version = "0.0.4"
+dependencies = [
+ "anyhow",
+ "bitvec",
+ "cgroupfs",
+ "clap",
+ "ctrlc",
+ "fb_procfs",
+ "itertools 0.13.0",
+ "lazy_static",
+ "libbpf-rs",
+ "libc",
+ "log",
+ "maplit",
+ "scx_utils",
+ "serde",
+ "serde_json",
+ "simplelog",
 ]
 
 [[package]]

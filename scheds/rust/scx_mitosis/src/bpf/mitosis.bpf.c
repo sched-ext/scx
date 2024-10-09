@@ -126,7 +126,7 @@ struct {
 
 static inline struct cgroup *task_cgroup(struct task_struct *p)
 {
-	struct cgroup *cgrp = scx_bpf_task_cgroup(p);
+	struct cgroup *cgrp = __COMPAT_scx_bpf_task_cgroup(p);
 	if (!cgrp) {
 		scx_bpf_error("Failed to get cgroup for task %d", p->pid);
 	}

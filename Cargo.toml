@@ -9,5 +9,6 @@ members = ["rust/scx_stats",
            "scheds/rust/scx_rustland",
            "scheds/rust/scx_rlfifo",
            "scheds/rust/scx_rusty",
-           "scheds/rust/scx_layered"] # scx_mitosis temporarily excluded
+           "scheds/rust/scx_layered",
+           "scheds/rust/scx_mitosis"]
 resolver = "2"
