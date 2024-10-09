@@ -225,7 +225,6 @@ struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     opts: &'a Opts,
-    cpu_hotplug_cnt: u64,
     energy_profile: String,
     stats_server: StatsServer<(), Metrics>,
 }
@@ -304,7 +303,6 @@ impl<'a> Scheduler<'a> {
             skel,
             struct_ops,
             opts,
-            cpu_hotplug_cnt: 0,
             energy_profile,
             stats_server,
         })
@@ -552,33 +550,6 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    fn refresh_cache_domains(&mut self) {
-        // Check if we need to refresh the CPU cache information.
-        if self.cpu_hotplug_cnt == self.skel.maps.bss_data.cpu_hotplug_cnt {
-            return;
-        }
-
-        // Re-initialize CPU topology.
-        let topo = Topology::new().unwrap();
-
-        // Re-initialize L2 cache domains.
-        if !self.opts.disable_l2 {
-            if let Err(e) = Self::init_l2_cache_domains(&mut self.skel, &topo) {
-                warn!("failed to initialize L2 cache domains: {}", e);
-            }
-        }
-
-        // Re-initialize L3 cache domains.
-        if !self.opts.disable_l3 {
-            if let Err(e) = Self::init_l3_cache_domains(&mut self.skel, &topo) {
-                warn!("failed to initialize L3 cache domains: {}", e);
-            }
-        }
-
-        // Update CPU hotplug generation counter.
-        self.cpu_hotplug_cnt = self.skel.maps.bss_data.cpu_hotplug_cnt;
-    }
-
     fn get_metrics(&self) -> Metrics {
         Metrics {
             nr_running: self.skel.maps.bss_data.nr_running,
@@ -600,7 +571,6 @@ impl<'a> Scheduler<'a> {
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            self.refresh_cache_domains();
             self.refresh_sched_domain();
             match req_ch.recv_timeout(Duration::from_secs(1)) {
                 Ok(()) => res_ch.send(self.get_metrics())?,
