@@ -415,15 +415,35 @@ if enable_stress
 
   if get_option('vng_rw_mount') == true
       foreach s : rust_scheds
-        run_target('stress_tests_'+s, command: [run_stress_tests, '-k', kernel, '-b',
-                                                meson.current_build_dir(), '--sched', s,
-                                                '--rw', 'true', '--headers', get_option('kernel_headers')],
+      if get_option('kernel_headers') == ''
+        run_target('stress_tests_'+s, command: [run_stress_tests, '-k', kernel,
+                                                '-b', meson.current_build_dir(), '--sched', s,
+                                                '--rw', 'true',
+                                                '--extra-scheduler-args', get_option('extra_sched_args')],
                                                 depends: [copys])
+      else
+        run_target('stress_tests_'+s, command: [run_stress_tests, '-k', kernel,
+                                                '-b', meson.current_build_dir(), '--sched', s,
+                                                '--rw', 'true', 
+                                                '--headers', get_option('kernel_headers'),
+                                                '--extra-scheduler-args', get_option('extra_sched_args')],
+                                                depends: [copys])
+      endif
       endforeach
   else
       foreach s : rust_scheds
-        run_target('stress_tests_'+s, command: [run_stress_tests, '-k', kernel, '-b',
-                                                meson.current_build_dir(), '--sched', s], depends: [copys])
+        if get_option('kernel_headers') == ''
+          run_target('stress_tests_'+s, command: [run_stress_tests, '-k', kernel, 
+                                              '-b', meson.current_build_dir(), '--sched', s,
+                                              '--extra-scheduler-args', get_option('extra_sched_args')],
+                                              depends: [copys])
+        else
+          run_target('stress_tests_'+s, command: [run_stress_tests, '-k', kernel, 
+                                              '-b', meson.current_build_dir(), '--sched', s,
+                                              '--headers', get_option('kernel_headers'),
+                                              '--extra-scheduler-args', get_option('extra_sched_args')],
+                                              depends: [copys])
+        endif
       endforeach
   endif
 endif

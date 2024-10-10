@@ -164,7 +164,7 @@ jobs:
         if: always()
       - run: mkdir -p ./log_save/
         if: always()
-      # no symlink following here (to avoid cycles)
+      # no symlink following here (to avoid cycle`s)
       - run: sudo find '/home/runner/' -iname '*.ci.log' -exec mv {} ./log_save/ \;
         if: always()
       - name: upload debug logs, bpftrace, veristat, dmesg, etc.
@@ -172,6 +172,87 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.scheduler }}_logs_${{ github.run_id }}_${{ github.run_attempt }}
+          path: ./log_save/*.ci.log
+          # it's all txt files w/ 90 day retention, lets be nice.
+          compression-level: 9
+
+  layered-matrix:
+    runs-on: ubuntu-24.04
+    needs: build-kernel
+    strategy:
+          matrix:
+            scheduler: [ scx_layered ]
+            topo: ['', '-t']
+            dsq_iter_algo: [linear, round_robin, weight]
+          fail-fast: false
+    steps:
+      # prevent cache permission errors
+      - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar      
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.scheduler }}
+          prefix-key: "4"
+      - uses: ./.github/actions/install-deps-action
+      # cache virtiofsd (goes away w/ 24.04)
+      - name: Cache virtiofsd
+        id: cache-virtiofsd
+        uses: actions/cache@v4
+        with:
+          path: |
+            /usr/lib/virtiofsd
+          key: virtiofsd-binary
+      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}          
+        run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
+
+      # get latest head commit of sched_ext for-next
+      - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git heads/for-next | awk '{print $1}')" >> $GITHUB_ENV
+
+      # use cached kernel if available, create after job if not
+      - name: Cache Kernel
+        id: cache-kernel
+        uses: actions/cache@v4
+        with:
+          path: |
+            linux/arch/x86/boot/bzImage
+            linux/usr/include
+            linux/**/*.h
+          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-4
+
+      # need to re-run job when kernel head changes between build and test running.
+      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
+        name: exit if cache stale
+        run: exit -1
+
+      # The actual build:
+      - run: meson setup build -Dkernel=../linux/arch/x86/boot/bzImage -Dkernel_headers=../linux -Denable_stress=true -Dvng_rw_mount=true -Dextra_sched_args=" ${{ matrix.topo }} --dsq-iter-algo ${{ matrix.dsq_iter_algo }}"
+      - run: meson compile -C build ${{ matrix.scheduler }}
+
+      # Print CPU model before running the tests (this can be useful for
+      # debugging purposes)
+      - run: grep 'model name' /proc/cpuinfo | head -1
+
+      # Stress schedulers
+      - uses: cytopia/shell-command-retry-action@v0.1.2
+        name: stress test ${{ matrix.topo }} ${{ matrix.dsq_iter_algo }}
+        if: always()
+        with:
+          retries: 3
+          command: meson compile -C build stress_tests_${{ matrix.scheduler }}
+      - run: meson compile -C build veristat_${{ matrix.scheduler }}
+        if: always()
+      - run: sudo cat /var/log/dmesg > host-dmesg.ci.log
+        if: always()
+      - run: mkdir -p ./log_save/
+        if: always()
+        # no symlink following here (to avoid cycle`s)
+      - run: sudo find '/home/runner/' -iname '*.ci.log' -exec mv {} ./log_save/ \;
+        if: always()
+      - name: upload debug logs, bpftrace, dmesg, etc.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.scheduler }}_${{ matrix.topo }}_${{ matrix.dsq_iter_algo }}_${{ matrix.test_name }}_logs_${{ github.run_id }}_${{ github.run_attempt }}
           path: ./log_save/*.ci.log
           # it's all txt files w/ 90 day retention, lets be nice.
           compression-level: 9
