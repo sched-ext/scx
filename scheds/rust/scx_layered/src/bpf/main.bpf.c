@@ -142,9 +142,13 @@ static __noinline u32 iter_layer_dsq_ctx(int idx, u32 layer_idx)
 		return ret;
 	}
 	case DSQ_ITER_REVERSE_WEIGHT: {
-		// TODO: Correctly implement this algo, see:
-		// https://github.com/sched-ext/scx/issues/738
-		return dsq_iter_weight_ctx(idx);
+		u32 ret;
+		ret = dsq_iter_weight_ctx(nr_layers - 1 - idx);
+		if (ret >= nr_layers) {
+			scx_bpf_error("can't happen");
+			return ret;
+		}
+		return ret;
 	}
 	default:
 		scx_bpf_error("unknown dsq iter algo");
