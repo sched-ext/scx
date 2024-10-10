@@ -47,7 +47,7 @@ static u32 preempt_cursor;
 #define dbg(fmt, args...)	do { if (debug) bpf_printk(fmt, ##args); } while (0)
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
 
-#include "util.bpf.c"
+#include "util.bpf.inc"
 
 UEI_DEFINE(uei);
 
