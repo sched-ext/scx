@@ -120,11 +120,11 @@ struct Opts {
     exit_dump_len: u32,
 
     /// Maximum scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "5000")]
+    #[clap(short = 's', long, default_value = "20000")]
     slice_us: u64,
 
     /// Minimum scheduling slice duration in microseconds.
-    #[clap(short = 'S', long, default_value = "500")]
+    #[clap(short = 'S', long, default_value = "1000")]
     slice_us_min: u64,
 
     /// Maximum time slice lag in microseconds.
@@ -135,7 +135,7 @@ struct Opts {
     /// A negative value can make performance more consistent, but it can also reduce the
     /// responsiveness of interactive tasks (by smoothing the effect of the vruntime scheduling and
     /// making the task ordering closer to a FIFO).
-    #[clap(short = 'l', long, allow_hyphen_values = true, default_value = "0")]
+    #[clap(short = 'l', long, allow_hyphen_values = true, default_value = "20000")]
     slice_us_lag: i64,
 
     /// With lowlatency enabled, instead of classifying tasks as interactive or non-interactive,
@@ -183,7 +183,7 @@ struct Opts {
 
     /// Prevent starvation by making sure that at least one lower priority task is scheduled every
     /// starvation_thresh_us (0 = disable starvation prevention).
-    #[clap(short = 't', long, default_value = "5000")]
+    #[clap(short = 't', long, default_value = "1000")]
     starvation_thresh_us: u64,
 
     /// Enable stats monitoring with the specified interval.

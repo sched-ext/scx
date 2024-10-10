@@ -34,7 +34,7 @@ const volatile bool debug;
 /*
  * Default task time slice.
  */
-const volatile u64 slice_max = 5ULL * NSEC_PER_MSEC;
+const volatile u64 slice_max = 20ULL * NSEC_PER_MSEC;
 
 /*
  * Time slice used when system is over commissioned.
@@ -48,7 +48,7 @@ const volatile u64 slice_min = 1ULL * NSEC_PER_MSEC;
  * tasks at the cost of making regular and newly created tasks less responsive
  * (0 = disabled).
  */
-const volatile s64 slice_lag = 5ULL * NSEC_PER_MSEC;
+const volatile s64 slice_lag = 20ULL * NSEC_PER_MSEC;
 
 /*
  * When enabled always dispatch all kthreads directly.
@@ -103,7 +103,7 @@ volatile s64 cpufreq_perf_lvl;
  *  consuming a task, the scheduler will be forced to consume a task from the
  *  corresponding DSQ.
  */
-const volatile u64 starvation_thresh_ns = 5000ULL * NSEC_PER_MSEC;
+const volatile u64 starvation_thresh_ns = 1000ULL * NSEC_PER_MSEC;
 static u64 starvation_shared_ts;
 
 /*
