@@ -42,11 +42,14 @@ def run_stress_test(
     verbose: bool,
     rw: bool,
     headers: str,
+    extra_scheduler_args: str,
 ) -> int:
     scheduler_args = config.get('scheduler_args')
     stress_cmd = config.get('stress_cmd')
     s_path = sched_path(build_dir, config.get('sched'))
     sched_cmd = s_path + " " + config.get('sched_args')
+    if extra_scheduler_args:
+        sched_cmd = sched_cmd + " " + extra_scheduler_args
     timeout_sec = int(config.get("timeout_sec"))
     if vng_path:
         cmd = [vng_path, "-m", "10G", "--cpus", "10", "--user", "root", "-v", "-r", kernel]
@@ -101,7 +104,8 @@ def stress_tests(args: Namespace) -> None:
             args.kernel,
             args.verbose,
             args.rw,
-            args.headers
+            args.headers,
+            args.extra_scheduler_args,
         )
     for test_name, ret in return_codes.items():
         if ret not in (143, 0):
@@ -136,6 +140,9 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         '--headers', default='', help='Kernel Headers Path'
+    )
+    parser.add_argument(
+        '--extra-scheduler-args', default='', help='a quoted string of extra scheduler args'
     )
 
     args = parser.parse_args()
