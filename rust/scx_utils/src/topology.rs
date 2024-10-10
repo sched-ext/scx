@@ -73,6 +73,8 @@ use crate::misc::read_file_usize;
 use crate::Cpumask;
 use anyhow::bail;
 use anyhow::Result;
+use bitvec::bitvec;
+use bitvec::vec::BitVec;
 use glob::glob;
 use sscanf::sscanf;
 use std::collections::BTreeMap;
@@ -373,6 +375,49 @@ impl Topology {
     pub fn has_little_cores(&self) -> bool {
         self.cores.iter().any(|c| c.core_type == CoreType::Little)
     }
+
+    /// Returns a BitVec of online CPUs.
+    pub fn cpus_bitvec(&self) -> BitVec {
+        let mut cpus = bitvec![0; *NR_CPUS_POSSIBLE];
+        for (id, _) in self.cpus.iter() {
+            cpus.set(*id, true);
+        }
+        cpus
+    }
+
+    /// Returns a vector that maps the index of each logical core to the sibling core.
+    /// This represents the "next sibling" core within a package in systems that support SMT.
+    /// The sibling core is the other logical core that shares the physical resources
+    /// of the same physical core.
+    ///
+    /// Assuming each core holds exactly at most two cpus.
+    pub fn sibling_cpus(&self) -> Vec<i32> {
+        let mut sibling_cpu = vec![-1i32; *NR_CPUS_POSSIBLE];
+        for core in self.cores() {
+            let mut first = -1i32;
+            for (cpu_id, _) in core.cpus() {
+                let cpu = *cpu_id;
+                if first < 0 {
+                    first = cpu as i32;
+                } else {
+                    sibling_cpu[first as usize] = cpu as i32;
+                    sibling_cpu[cpu as usize] = first;
+                    break;
+                }
+            }
+        }
+        sibling_cpu
+    }
+
+    /// Returns a list of physical core IDs.
+    /// Each entry in this vector corresponds to a unique physical core.
+    pub fn cpu_core_ids(&self) -> Vec<usize> {
+        let mut cpu_core_ids = Vec::new();
+        for core in self.cores() {
+            cpu_core_ids.push(core.id());
+        }
+        cpu_core_ids
+    }
 }
 
 /// Generate a topology map from a Topology object, represented as an array of arrays.
@@ -415,6 +460,17 @@ impl TopologyMap {
 
     pub fn iter(&self) -> Iter<Vec<usize>> {
         self.map.iter()
+    }
+
+    pub fn core_cpus_bitvec(&self) -> Vec<BitVec> {
+        let mut core_cpus = Vec::<BitVec>::new();
+        for (core_id, core) in self.iter().enumerate() {
+            core_cpus.resize(core_id + 1, bitvec![0; *NR_CPUS_POSSIBLE]);
+            for cpu in core {
+                core_cpus[core_id].set(*cpu, true);
+            }
+        }
+        core_cpus
     }
 }
 
