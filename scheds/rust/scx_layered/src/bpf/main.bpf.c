@@ -700,13 +700,13 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		return -1;
 	}
 
-	pref_idle_cpumask = bpf_cpumask_create();
-
 	if (layer->idle_smt) {
 		idle_cpumask = scx_bpf_get_idle_smtmask();
 	} else {
 		idle_cpumask = scx_bpf_get_idle_cpumask();
 	}
+
+	pref_idle_cpumask = bpf_cpumask_create();
 
 	if (!pref_idle_cpumask || !idle_cpumask) {
 		cpu = -1;
@@ -748,7 +748,6 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 					      prev_cpu, idle_cpumask)) >= 0)
 			goto out_put;
 	}
-
 
 	/*
 	 * Next try a CPU in the current node
@@ -987,24 +986,21 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *tctx,
 	}
 
 	if (!(cachec = lookup_cache_ctx(cctx->cache_idx)) ||
-	    !(nodec = lookup_node_ctx(cctx->node_idx)))
+	    !(nodec = lookup_node_ctx(cctx->node_idx)) ||
+	    !cachec->cpumask) {
+		scx_bpf_error("can't happen");
 		return;
+	}
 
 	attempted = bpf_cpumask_create();
-	if (!attempted)
-		goto preempt_fail;
+	if (!attempted) {
+		lstat_inc(LSTAT_PREEMPT_FAIL, layer, cctx);
+		return;
+	}
 
 	topo_cpus = bpf_cpumask_create();
-	if (!topo_cpus) {
-		bpf_cpumask_release(attempted);
+	if (!topo_cpus || !cachec->cpumask)
 		goto preempt_fail;
-	}
-
-	if (!cachec->cpumask) {
-		bpf_cpumask_release(attempted);
-		bpf_cpumask_release(topo_cpus);
-		goto preempt_fail;
-	}
 
 	bpf_cpumask_copy(topo_cpus, cast_mask(cachec->cpumask));
 	bpf_cpumask_and(topo_cpus, cast_mask(topo_cpus), layer_cpumask);
@@ -1029,11 +1025,8 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *tctx,
 	/*
 	 * Next try node local LLCs in the layer cpumask
 	 */
-	if (!nodec->cpumask) {
-		bpf_cpumask_release(attempted);
-		bpf_cpumask_release(topo_cpus);
+	if (!nodec->cpumask)
 		goto preempt_fail;
-	}
 
 	bpf_cpumask_copy(topo_cpus, cast_mask(nodec->cpumask));
 	bpf_cpumask_xor(topo_cpus, cast_mask(attempted), cast_mask(topo_cpus));
@@ -1058,8 +1051,6 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *tctx,
 	 */
 	if (xnuma_preemption) {
 		if (!all_cpumask) {
-			bpf_cpumask_release(attempted);
-			bpf_cpumask_release(topo_cpus);
 			goto preempt_fail;
 		}
 		bpf_cpumask_copy(topo_cpus, cast_mask(all_cpumask));
@@ -1080,12 +1071,13 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *tctx,
 				break;
 		}
 	}
-	bpf_cpumask_release(attempted);
-	bpf_cpumask_release(topo_cpus);
-
-	lstat_inc(LSTAT_PREEMPT_FAIL, layer, cctx);
 
 preempt_fail:
+	if (attempted)
+		bpf_cpumask_release(attempted);
+	if (topo_cpus)
+		bpf_cpumask_release(topo_cpus);
+
 	lstat_inc(LSTAT_PREEMPT_FAIL, layer, cctx);
 }
 
