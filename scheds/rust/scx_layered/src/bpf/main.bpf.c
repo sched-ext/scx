@@ -36,7 +36,7 @@ const volatile bool xnuma_preemption = false;
 const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 const volatile u32 layer_iteration_order[MAX_LAYERS];
-const volatile u32 dsq_iter_algo = DSQ_ITER_ROUND_ROBIN;
+const volatile u32 dsq_iter_algo = DSQ_ITER_LINEAR;
 
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
