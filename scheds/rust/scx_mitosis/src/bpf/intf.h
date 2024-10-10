@@ -24,6 +24,9 @@ enum consts {
 	MAX_CPUS_U8 = MAX_CPUS / 8,
 	MAX_CELLS = 16,
 	USAGE_HALF_LIFE = 100000000, /* 100ms */
+
+	HI_FALLBACK_DSQ = MAX_CELLS,
+	LO_FALLBACK_DSQ = MAX_CELLS + 1,
 };
 
 /* Statistics */
