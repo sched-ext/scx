@@ -516,7 +516,7 @@ impl DsqIterAlgo {
 
 impl Default for DsqIterAlgo {
     fn default() -> Self {
-        DsqIterAlgo::RoundRobin
+        DsqIterAlgo::Linear
     }
 }
 
