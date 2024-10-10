@@ -18,19 +18,23 @@
 #define LAVD_TRACE_FUTEX
 #endif /* LAVD_DISABLE_TRACE_LOCKS */
 
-static void try_inc_lock_boost(struct task_ctx *taskc)
+static void try_inc_lock_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 {
-	if (taskc)
+	if (taskc && cpuc) {
 		taskc->lock_boost++;
+		cpuc->lock_holder = is_lock_holder(taskc);
+	}
 	/*
 	 * If taskc is null, the task is not under sched_ext so ignore the error.
 	 */
 }
 
-static void try_dec_lock_boost(struct task_ctx *taskc)
+static void try_dec_lock_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 {
-	if (taskc && taskc->lock_boost > 0)
+	if (taskc && cpuc && taskc->lock_boost > 0) {
 		taskc->lock_boost--;
+		cpuc->lock_holder = is_lock_holder(taskc);
+	}
 	/*
 	 * If taskc is null, the task is not under sched_ext so ignore the error.
 	 */
@@ -39,32 +43,36 @@ static void try_dec_lock_boost(struct task_ctx *taskc)
 static void inc_lock_boost(void)
 {
 	struct task_ctx *taskc = try_get_current_task_ctx();
-	try_inc_lock_boost(taskc);
+	struct cpu_ctx *cpuc = get_cpu_ctx();
+	try_inc_lock_boost(taskc, cpuc);
 }
 
 static void dec_lock_boost(void)
 {
 	struct task_ctx *taskc = try_get_current_task_ctx();
-	try_dec_lock_boost(taskc);
+	struct cpu_ctx *cpuc = get_cpu_ctx();
+	try_dec_lock_boost(taskc, cpuc);
 }
 
 
-static void try_inc_futex_boost(struct task_ctx *taskc, u32 *uaddr)
+static void try_inc_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc, u32 *uaddr)
 {
-	if (taskc && (taskc->futex_uaddr != uaddr)) {
+	if (taskc && cpuc && (taskc->futex_uaddr != uaddr)) {
 		taskc->futex_boost++;
 		taskc->futex_uaddr = uaddr;
+		cpuc->lock_holder = is_lock_holder(taskc);
 	}
 	/*
 	 * If taskc is null, the task is not under sched_ext so ignore the error.
 	 */
 }
 
-static void try_dec_futex_boost(struct task_ctx *taskc, u32 *uaddr)
+static void try_dec_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc, u32 *uaddr)
 {
-	if (taskc && taskc->futex_boost > 0) {
+	if (taskc && cpuc && taskc->futex_boost > 0) {
 		taskc->futex_boost--;
 		taskc->futex_uaddr = NULL;
+		cpuc->lock_holder = is_lock_holder(taskc);
 	}
 	/*
 	 * If taskc is null, the task is not under sched_ext so ignore the error.
@@ -74,13 +82,15 @@ static void try_dec_futex_boost(struct task_ctx *taskc, u32 *uaddr)
 static void inc_futex_boost(u32 *uaddr)
 {
 	struct task_ctx *taskc = try_get_current_task_ctx();
-	try_inc_futex_boost(taskc, uaddr);
+	struct cpu_ctx *cpuc = get_cpu_ctx();
+	try_inc_futex_boost(taskc, cpuc, uaddr);
 }
 
 static void dec_futex_boost(u32 *uaddr)
 {
 	struct task_ctx *taskc = try_get_current_task_ctx();
-	try_dec_futex_boost(taskc, uaddr);
+	struct cpu_ctx *cpuc = get_cpu_ctx();
+	try_dec_futex_boost(taskc, cpuc, uaddr);
 }
 
 static void reset_lock_futex_boost(struct task_ctx *taskc)

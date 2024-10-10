@@ -121,6 +121,7 @@ struct cpu_ctx {
 	volatile u64	stopping_tm_est_ns; /* estimated stopping time */
 	volatile u16	lat_cri;	/* latency criticality */
 	volatile u8	is_online;	/* is this CPU online? */
+	volatile bool	lock_holder;	/* is a lock holder running */
 	s32		cpu_id;		/* cpu id */
 
 	/*
