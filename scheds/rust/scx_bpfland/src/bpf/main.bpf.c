@@ -677,6 +677,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 
 	if (wake_flags & SCX_WAKE_SYNC) {
 		struct task_struct *current = (void *)bpf_get_current_task_btf();
+		struct bpf_cpumask *curr_l3_domain;
 		bool share_llc, has_idle;
 
 		/*
@@ -696,18 +697,15 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 			goto out_put_cpumask;
 		}
 
-		l3_domain = cctx->l3_cpumask;
-		if (!l3_domain) {
-			scx_bpf_error("CPU L3 cpumask not initialized");
-			cpu = -ENOENT;
-			goto out_put_cpumask;
-		}
+		curr_l3_domain = cctx->l3_cpumask;
+		if (!curr_l3_domain)
+			curr_l3_domain = primary;
 
 		/*
 		 * If both the waker and wakee share the same L3 cache keep
 		 * using the same CPU if possible.
 		 */
-		share_llc = bpf_cpumask_test_cpu(prev_cpu, cast_mask(l3_domain));
+		share_llc = bpf_cpumask_test_cpu(prev_cpu, cast_mask(curr_l3_domain));
 		if (share_llc && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			goto out_put_cpumask;
@@ -717,7 +715,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 		 * If the waker's L3 domain is not saturated attempt to migrate
 		 * the wakee on the same CPU as the waker.
 		 */
-		has_idle = bpf_cpumask_intersects(cast_mask(l3_domain), idle_cpumask);
+		has_idle = bpf_cpumask_intersects(cast_mask(curr_l3_domain), idle_cpumask);
 		if (has_idle &&
 		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
 		    !(current->flags & PF_EXITING) &&
