@@ -425,9 +425,10 @@ struct Opts {
     verbose: u8,
 
     /// Disable topology awareness. When enabled, the "nodes" and "llcs" settings on
-    /// a layer are ignored.
-    #[clap(short = 't', long)]
-    disable_topology: bool,
+    /// a layer are ignored. Defaults to false on topologies with multiple NUMA nodes
+    /// or LLCs, and true otherwise.
+    #[arg(short = 't', long, num_args = 0..=1, default_missing_value = "true")]
+    disable_topology: Option<bool>,
 
     /// Enable cross NUMA preemption.
     #[clap(long)]
@@ -1682,10 +1683,10 @@ impl Layer {
     }
 }
 
-struct Scheduler<'a, 'b> {
+struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
-    layer_specs: &'b Vec<LayerSpec>,
+    layer_specs: Vec<LayerSpec>,
 
     sched_intv: Duration,
 
@@ -1704,7 +1705,7 @@ struct Scheduler<'a, 'b> {
     stats_server: StatsServer<StatsReq, StatsRes>,
 }
 
-impl<'a, 'b> Scheduler<'a, 'b> {
+impl<'a> Scheduler<'a> {
     fn init_layers(
         skel: &mut OpenBpfSkel,
         opts: &Opts,
@@ -1909,12 +1910,50 @@ impl<'a, 'b> Scheduler<'a, 'b> {
 
     fn init(
         opts: &Opts,
-        layer_specs: &'b Vec<LayerSpec>,
+        layer_specs: &[LayerSpec],
         open_object: &'a mut MaybeUninit<OpenObject>,
     ) -> Result<Self> {
         let nr_layers = layer_specs.len();
         let topo = Topology::new()?;
         let cpu_pool = CpuPool::new(&topo)?;
+
+        let disable_topology = if let Some(val) = opts.disable_topology {
+            val
+        } else {
+            let val = if topo.nodes().len() > 1 {
+                false
+            } else {
+                topo.nodes().iter().all(|n| n.llcs().len() <= 1)
+            };
+            info!(
+                "Topology awareness not specified, selecting {} based on hardware",
+                if val { "disabled" } else { "enabled" }
+            );
+            val
+        };
+
+        // If disabling topology awareness clear out any set NUMA/LLC configs and
+        // it will fallback to using all cores.
+        let layer_specs: Vec<_> = if disable_topology {
+            info!("Disabling topology awareness");
+            layer_specs
+                .into_iter()
+                .cloned()
+                .map(|mut s| {
+                    match &mut s.kind {
+                        LayerKind::Confined { nodes, llcs, .. }
+                        | LayerKind::Open { nodes, llcs, .. }
+                        | LayerKind::Grouped { nodes, llcs, .. } => {
+                            nodes.truncate(0);
+                            llcs.truncate(0);
+                        }
+                    };
+                    s
+                })
+                .collect()
+        } else {
+            layer_specs.to_vec()
+        };
 
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
@@ -1946,7 +1985,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         skel.maps.rodata_data.nr_possible_cpus = *NR_POSSIBLE_CPUS as u32;
         skel.maps.rodata_data.smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
-        skel.maps.rodata_data.disable_topology = opts.disable_topology;
+        skel.maps.rodata_data.disable_topology = disable_topology;
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
         skel.maps.rodata_data.dsq_iter_algo = opts.dsq_iter_algo.as_bpf_enum();
         for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
@@ -1955,7 +1994,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
         for cpu in cpu_pool.all_cpus.iter_ones() {
             skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
-        Self::init_layers(&mut skel, opts, layer_specs, &topo)?;
+        Self::init_layers(&mut skel, opts, &layer_specs, &topo)?;
         Self::init_nodes(&mut skel, opts, &topo);
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
@@ -2230,7 +2269,7 @@ impl<'a, 'b> Scheduler<'a, 'b> {
     }
 }
 
-impl<'a, 'b> Drop for Scheduler<'a, 'b> {
+impl<'a> Drop for Scheduler<'a> {
     fn drop(&mut self) {
         if let Some(struct_ops) = self.struct_ops.take() {
             drop(struct_ops);
@@ -2420,23 +2459,6 @@ fn main() -> Result<()> {
 
     debug!("specs={}", serde_json::to_string_pretty(&layer_config)?);
     verify_layer_specs(&layer_config.specs)?;
-
-    // If disabling topology awareness clear out any set NUMA/LLC configs and
-    // it will fallback to using all cores.
-    if opts.disable_topology {
-        info!("Disabling topology awareness");
-        for i in 0..layer_config.specs.len() {
-            let kind = &mut layer_config.specs[i].kind;
-            match kind {
-                LayerKind::Confined { nodes, llcs, .. }
-                | LayerKind::Open { nodes, llcs, .. }
-                | LayerKind::Grouped { nodes, llcs, .. } => {
-                    nodes.truncate(0);
-                    llcs.truncate(0);
-                }
-            }
-        }
-    }
 
     let mut open_object = MaybeUninit::uninit();
     loop {
