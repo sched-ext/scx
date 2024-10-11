@@ -30,10 +30,10 @@ static int comp_preemption_info(struct preemption_info *prm_a,
 	/*
 	 * Check if one's latency priority _or_ deadline is smaller or not.
 	 */
-	if ((prm_a->lat_cri < prm_b->lat_cri) ||
+	if ((prm_a->lat_cri > prm_b->lat_cri) ||
 	    (prm_a->stopping_tm_est_ns < prm_b->stopping_tm_est_ns))
 		return -1;
-	if ((prm_a->lat_cri > prm_b->lat_cri) ||
+	if ((prm_a->lat_cri < prm_b->lat_cri) ||
 	    (prm_a->stopping_tm_est_ns > prm_b->stopping_tm_est_ns))
 		return 1;
 	return 0;
