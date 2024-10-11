@@ -280,7 +280,7 @@ struct {
 	__uint(max_entries, MAX_ENQUEUED_TASKS);
 } pid_mm_fault_map SEC(".maps");
 
-SEC("kprobe/__handle_mm_fault")
+SEC("kprobe/handle_mm_fault")
 int BPF_KPROBE(kprobe_handle_mm_fault, void *vma,
 			unsigned long address, unsigned int flags)
 {
@@ -292,7 +292,7 @@ int BPF_KPROBE(kprobe_handle_mm_fault, void *vma,
 	return 0;
 }
 
-SEC("kretprobe/__handle_mm_fault")
+SEC("kretprobe/handle_mm_fault")
 int BPF_KRETPROBE(kretprobe_handle_mm_fault)
 {
 	pid_t pid = bpf_get_current_pid_tgid() >> 32;
