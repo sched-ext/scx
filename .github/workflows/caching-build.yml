@@ -182,7 +182,7 @@ jobs:
     strategy:
           matrix:
             scheduler: [ scx_layered ]
-            topo: ['', '-t']
+            topo: ['--disable-topology=false', '--disable-topology=true']
             dsq_iter_algo: [linear, round_robin, weight]
           fail-fast: false
     steps:
