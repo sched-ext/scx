@@ -2,8 +2,11 @@
 
 #ifdef LSP
 #define __bpf__
+#ifndef LSP_INC
 #include "../../../../include/scx/common.bpf.h"
 #include "../../../../include/scx/ravg_impl.bpf.h"
+#endif
+
 #include "intf.h"
 
 #include <stdbool.h>
