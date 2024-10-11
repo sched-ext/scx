@@ -6,7 +6,6 @@ use serde::Serialize;
 
 use crate::bpf_intf;
 use crate::CpuPool;
-use crate::IteratorInterleaver;
 use crate::LayerSpec;
 
 #[derive(Clone, Debug, Parser, Serialize, Deserialize)]
@@ -236,6 +235,55 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                 });
             });
             core_order
+        }
+    }
+}
+
+struct IteratorInterleaver<T>
+where
+    T: Iterator,
+{
+    empty: bool,
+    index: usize,
+    iters: Vec<T>,
+}
+
+impl<T> IteratorInterleaver<T>
+where
+    T: Iterator,
+{
+    fn new(iters: Vec<T>) -> Self {
+        Self {
+            empty: false,
+            index: 0,
+            iters,
+        }
+    }
+}
+
+impl<T> Iterator for IteratorInterleaver<T>
+where
+    T: Iterator,
+{
+    type Item = T::Item;
+
+    fn next(&mut self) -> Option<T::Item> {
+        if let Some(iter) = self.iters.get_mut(self.index) {
+            self.index += 1;
+            if let Some(value) = iter.next() {
+                self.empty = false;
+                Some(value)
+            } else {
+                self.next()
+            }
+        } else {
+            self.index = 0;
+            if self.empty {
+                None
+            } else {
+                self.empty = true;
+                self.next()
+            }
         }
     }
 }
