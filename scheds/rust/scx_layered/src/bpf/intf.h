@@ -164,13 +164,6 @@ enum layer_growth_algo {
 	GROWTH_ALGO_LITTLE_BIG,
 };
 
-enum dsq_iter_algo {
-	DSQ_ITER_LINEAR,
-	DSQ_ITER_ROUND_ROBIN,
-	DSQ_ITER_WEIGHT,
-	DSQ_ITER_REVERSE_WEIGHT,
-};
-
 struct layer {
 	struct layer_match_ands	matches[MAX_LAYER_MATCH_ORS];
 	unsigned int		nr_match_ors;

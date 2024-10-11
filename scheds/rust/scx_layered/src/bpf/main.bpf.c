@@ -37,7 +37,6 @@ const volatile bool xnuma_preemption = false;
 const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 const volatile u32 layer_iteration_order[MAX_LAYERS];
-const volatile u32 dsq_iter_algo = DSQ_ITER_LINEAR;
 
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
@@ -74,87 +73,27 @@ static inline s32 sibling_cpu(s32 cpu)
 		return -1;
 }
 
-static u32 cpu_ctx_layer_idx_inc(struct cpu_ctx *cctx)
+static struct layer *lookup_layer(int idx)
 {
-	if (cctx->layer_idx >= nr_layers || cctx->layer_idx > MAX_LAYERS) {
-		cctx->layer_idx = 0;
-	} else {
-		cctx->layer_idx++;
+	if (idx < 0 || idx >= nr_layers) {
+		scx_bpf_error("invalid layer %d", idx);
+		return NULL;
 	}
-	return cctx->layer_idx;
+	return &layers[idx];
+}
+
+static __always_inline
+int rotate_layer_id(u32 base_layer_id, u32 rotation)
+{
+	if (base_layer_id >= MAX_LAYERS)
+		return rotation;
+	return (base_layer_id + rotation) % nr_layers;
 }
 
 static __always_inline
 u32 rotate_llc_id(u32 base_llc_id, u32 rotation)
 {
 	return (base_llc_id + rotation) % nr_llcs;
-}
-
-/*
- * Returns the iterator index of a layer ordered by weight.
- */
-static u32 dsq_iter_weight_ctx(int idx)
-{
-	return *MEMBER_VPTR(layer_iteration_order, [idx]);
-}
-
-static u32 dsq_iter_rr_cpu_ctx(u32 layer_idx, int idx)
-{
-	u32 offset;
-
-	// shouldn't happen, appease the verifier
-	if (idx < 0 || idx > MAX_LAYERS || idx > nr_layers)
-		return 0;
-
-	if (layer_idx > MAX_LAYERS || layer_idx > nr_layers)
-		return 0;
-
-	offset = (u32)idx & 0xfff + layer_idx;
-	if (offset > nr_layers)
-		offset -= nr_layers;
-
-	if (offset > MAX_LAYERS) {
-		scx_bpf_error("invalid layer id %u", layer_idx);
-		return 0;
-	}
-	return offset;
-}
-
-/*
- * Returns the iterator context for iterating over DSQs using the configured
- * DSQ iterator algorithm.
- */
-static __noinline u32 iter_layer_dsq_ctx(int idx, u32 layer_idx)
-{
-	switch (dsq_iter_algo) {
-	case DSQ_ITER_LINEAR: {
-		return idx;
-	}
-	case DSQ_ITER_ROUND_ROBIN: {
-		return dsq_iter_rr_cpu_ctx(layer_idx, idx);
-	}
-	case DSQ_ITER_WEIGHT: {
-		u32 ret;
-		ret = dsq_iter_weight_ctx(idx);
-		if (ret >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return ret;
-		}
-		return ret;
-	}
-	case DSQ_ITER_REVERSE_WEIGHT: {
-		u32 ret;
-		ret = dsq_iter_weight_ctx(nr_layers - 1 - idx);
-		if (ret >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return ret;
-		}
-		return ret;
-	}
-	default:
-		scx_bpf_error("unknown dsq iter algo");
-		return 0;
-	}
 }
 
 // return the dsq id for the layer based on the LLC id.
@@ -462,15 +401,6 @@ static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 		scx_bpf_error("task_ctx lookup failed");
 
 	return tctx;
-}
-
-static struct layer *lookup_layer(int idx)
-{
-	if (idx < 0 || idx >= nr_layers) {
-		scx_bpf_error("invalid layer %d", idx);
-		return NULL;
-	}
-	return &layers[idx];
 }
 
 /*
@@ -1308,14 +1238,9 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 		return;
 	}
 
-	// Adjust the per cpu layer offset so that layers are iterated in a
-	// round robin order if using that algorithm for dsq iteration.
-	if (dsq_iter_algo == DSQ_ITER_ROUND_ROBIN)
-		cpu_ctx_layer_idx_inc(cctx);
-
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
-		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
+		layer_idx = rotate_layer_id(cctx->layer_idx, idx);
 		if (layer_idx >= nr_layers) {
 			scx_bpf_error("can't happen");
 			return;
@@ -1331,7 +1256,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
-		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
+		layer_idx = rotate_layer_id(cctx->layer_idx, idx);
 		if (layer_idx >= nr_layers) {
 			scx_bpf_error("can't happen");
 			return;
@@ -1352,7 +1277,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 
 	/* consume !preempting open layers */
 	bpf_for(idx, 0, nr_layers) {
-		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
+		layer_idx = rotate_layer_id(cctx->layer_idx, idx);
 		if (layer_idx >= nr_layers) {
 			scx_bpf_error("can't happen");
 			return;
@@ -1406,16 +1331,11 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
-	// Adjust the per cpu layer offset so that layers are iterated in a
-	// round robin order if using that algorithm for dsq iteration.
-	if (dsq_iter_algo == DSQ_ITER_ROUND_ROBIN)
-		cpu_ctx_layer_idx_inc(cctx);
-
 	u32 my_llc_id = cpu_to_llc_id(cpu);
 
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
-		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
+		layer_idx = rotate_layer_id(cctx->layer_idx, idx);
 		if (layer_idx >= nr_layers) {
 			scx_bpf_error("can't happen");
 			return;
@@ -1435,7 +1355,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
-		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
+		layer_idx = rotate_layer_id(cctx->layer_idx, idx);
 		if (layer_idx >= nr_layers) {
 			scx_bpf_error("can't happen");
 			return;
@@ -1461,7 +1381,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* consume !preempting open layers */
 	bpf_for(idx, 0, nr_layers) {
-		layer_idx = iter_layer_dsq_ctx(idx, cctx->layer_idx);
+		layer_idx = rotate_layer_id(cctx->layer_idx, idx);
 		if (layer_idx >= nr_layers) {
 			scx_bpf_error("can't happen");
 			return;
@@ -1846,6 +1766,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	cctx->current_preempt = layer->preempt;
 	cctx->current_exclusive = layer->exclusive;
 	tctx->running_at = bpf_ktime_get_ns();
+	cctx->layer_idx = tctx->layer;
 
 	/*
 	 * If this CPU is transitioning from running an exclusive task to a
@@ -2129,23 +2050,6 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 		     dsq_first_runnable_for_ms(LO_FALLBACK_DSQ, now));
 }
 
-static void print_iter_order() {
-	struct cpu_ctx *cctx;
-	int i;
-	u32 layer_idx;
-
-	if (!(cctx = lookup_cpu_ctx(-1))) {
-		scx_bpf_error("failed to get cpu ctx");
-		return;
-	}
-
-	trace("CFG iter algo: %d", dsq_iter_algo);
-	bpf_for(i, 0, nr_layers) {
-		layer_idx = iter_layer_dsq_ctx(i, cctx->layer_idx);
-		trace("CFG iter order i: %d layer_idx: %d weight: %d", i, layer_idx, dsq_iter_weight_ctx(i));
-	}
-}
-
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
 	struct bpf_cpumask *cpumask, *tmp_big_cpumask;
@@ -2175,6 +2079,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			bpf_cpumask_release(tmp_big_cpumask);
 			return -ENOMEM;
 		}
+		cctx->layer_idx = MAX_LAYERS;
 
 		if ((u8_ptr = MEMBER_VPTR(all_cpus, [i / 8]))) {
 			if (*u8_ptr & (1 << (i % 8))) {
@@ -2338,8 +2243,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			}
 		}
 	}
-
-	print_iter_order();
 
 	return 0;
 }

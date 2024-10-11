@@ -27,7 +27,6 @@ use anyhow::Result;
 use bitvec::prelude::*;
 pub use bpf_skel::*;
 use clap::Parser;
-use clap::ValueEnum;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
@@ -53,8 +52,6 @@ use scx_utils::CoreType;
 use scx_utils::LoadAggregator;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
-use serde::Deserialize;
-use serde::Serialize;
 use stats::LayerStats;
 use stats::StatsReq;
 use stats::StatsRes;
@@ -441,12 +438,6 @@ struct Opts {
     #[clap(long, default_value = "0.0")]
     layer_growth_weight_disable: f64,
 
-    /// When iterating over layer DSQs use the weight of the layer for iteration
-    /// order. The default iteration order is semi-random except when topology
-    /// awareness is disabled.
-    #[clap(long, value_enum, default_value = "linear")]
-    dsq_iter_algo: DsqIterAlgo,
-
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
     stats: Option<f64>,
@@ -466,37 +457,6 @@ struct Opts {
 
     /// Layer specification. See --help.
     specs: Vec<String>,
-}
-
-#[derive(ValueEnum, Clone, Debug, Parser, PartialEq, Serialize, Deserialize)]
-#[clap(rename_all = "snake_case")]
-enum DsqIterAlgo {
-    /// Linear starts with the first layer in the config and iterates over
-    /// layers sequentially.
-    Linear,
-    /// Iterates from lowest weight to highest weight.
-    Weight,
-    /// Iterates from the highest weigh to the lowest weight.
-    ReverseWeight,
-    /// Per CPU semi round robin ordering.
-    RoundRobin,
-}
-
-impl DsqIterAlgo {
-    fn as_bpf_enum(&self) -> u32 {
-        match self {
-            DsqIterAlgo::Linear => bpf_intf::dsq_iter_algo_DSQ_ITER_LINEAR,
-            DsqIterAlgo::Weight => bpf_intf::dsq_iter_algo_DSQ_ITER_WEIGHT,
-            DsqIterAlgo::ReverseWeight => bpf_intf::dsq_iter_algo_DSQ_ITER_REVERSE_WEIGHT,
-            DsqIterAlgo::RoundRobin => bpf_intf::dsq_iter_algo_DSQ_ITER_ROUND_ROBIN,
-        }
-    }
-}
-
-impl Default for DsqIterAlgo {
-    fn default() -> Self {
-        DsqIterAlgo::Linear
-    }
 }
 
 fn now_monotonic() -> u64 {
@@ -1051,7 +1011,7 @@ impl Layer {
     ) -> Result<bool> {
         let nr_cpus = self.cpus.count_ones();
         if nr_cpus >= cpus_max {
-            trace!("layer has {} max: {}", nr_cpus, cpus_max);
+            trace!("layer {} has {} max: {}", &self.name, nr_cpus, cpus_max);
             return Ok(false);
         }
 
@@ -1520,7 +1480,6 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.disable_topology = disable_topology;
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
-        skel.maps.rodata_data.dsq_iter_algo = opts.dsq_iter_algo.as_bpf_enum();
         for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
             skel.maps.rodata_data.__sibling_cpu[cpu] = *sib;
         }
