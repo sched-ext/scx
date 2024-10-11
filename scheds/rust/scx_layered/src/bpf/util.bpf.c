@@ -1,5 +1,23 @@
 /* to be included in the main bpf.c file */
 
+#ifdef LSP
+#define __bpf__
+#ifndef LSP_INC
+#include "../../../../include/scx/common.bpf.h"
+#include "../../../../include/scx/ravg_impl.bpf.h"
+#endif
+
+#include "intf.h"
+
+#include <stdbool.h>
+#include <string.h>
+#include <bpf/bpf_core_read.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_tracing.h>
+#endif
+
+
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(key_size, sizeof(u32));
