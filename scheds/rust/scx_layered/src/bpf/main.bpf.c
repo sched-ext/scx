@@ -893,12 +893,9 @@ void try_preempt_no_topo(s32 task_cpu, struct task_struct *p,
 			 struct task_ctx *tctx, bool preempt_first,
 			 u64 enq_flags)
 {
-	struct bpf_cpumask *attempted, *topo_cpus;
-	struct cache_ctx *cachec;
 	struct cpumask *layer_cpumask;
 	struct cpu_ctx *cctx;
 	struct layer *layer;
-	struct node_ctx *nodec;
 	u32 idx;
 
 	if (!(layer = lookup_layer(tctx->layer)) ||
@@ -1279,7 +1276,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	struct cpu_ctx *cctx, *sib_cctx;
 	struct layer *layer;
 	u64 dsq_id;
-	u32 idx, llc_id, layer_idx;
+	u32 idx, layer_idx;
 	s32 sib = sibling_cpu(cpu);
 
 	if (!(cctx = lookup_cpu_ctx(-1)))
