@@ -464,14 +464,18 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 	 * dispatched to a global DSQ.
 	 */
 	if (!bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
-		return -ENOENT;
+		prev_cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
 
 	/*
-	 * For tasks that can run only on a single CPU, simply return the only
-	 * allowed CPU.
+	 * For tasks that can run only on a single CPU, we can simply verify if
+	 * their only allowed CPU is still idle.
 	 */
-	if (p->nr_cpus_allowed == 1)
-		return prev_cpu;
+	if (p->nr_cpus_allowed == 1 || p->migration_disabled) {
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			return prev_cpu;
+
+		return -ENOENT;
+	}
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -534,6 +538,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 
 	if (enq_flags & SCX_ENQ_WAKEUP) {
 		struct task_struct *current = (void *)bpf_get_current_task_btf();
+		struct bpf_cpumask *curr_l3_domain;
 		bool share_llc, has_idle;
 
 		/*
@@ -547,8 +552,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 			goto out_put_cpumask;
 		}
 
-		l3_domain = cctx->l3_cpumask;
-		if (!l3_domain) {
+		curr_l3_domain = cctx->l3_cpumask;
+		if (!curr_l3_domain) {
 			scx_bpf_error("CPU LLC cpumask not initialized");
 			cpu = -ENOENT;
 			goto out_put_cpumask;
@@ -558,7 +563,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 		 * If both the waker and wakee share the same LLC keep using
 		 * the same CPU if possible.
 		 */
-		share_llc = bpf_cpumask_test_cpu(prev_cpu, cast_mask(l3_domain));
+		share_llc = bpf_cpumask_test_cpu(prev_cpu, cast_mask(curr_l3_domain));
 		if (share_llc && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			goto out_put_cpumask;
@@ -568,7 +573,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 		 * If the waker's domain is not saturated attempt to migrate
 		 * the wakee on the same CPU as the waker.
 		 */
-		has_idle = bpf_cpumask_intersects(cast_mask(l3_domain), idle_cpumask);
+		has_idle = bpf_cpumask_intersects(cast_mask(curr_l3_domain), idle_cpumask);
 		if (has_idle &&
 		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
 		    !(current->flags & PF_EXITING) &&
@@ -843,10 +848,8 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
-		s32 cpu = scx_bpf_task_cpu(p);
-
-		scx_bpf_dispatch_vtime(p, cpu_to_dsq(cpu),
-				       SCX_SLICE_DFL, 0, enq_flags);
+                scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
+				 enq_flags | SCX_ENQ_PREEMPT);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
