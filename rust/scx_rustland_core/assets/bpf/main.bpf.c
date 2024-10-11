@@ -690,6 +690,9 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	if (!p)
 		return;
 
+	dbg_msg("dispatch: pid=%d (%s) cpu=0x%lx vtime=%llu slice=%llu",
+		p->pid, p->comm, task->cpu, task->vtime, task->slice_ns);
+
 	/*
 	 * Update task's time slice in its context.
 	 */
@@ -808,10 +811,13 @@ static void get_task_info(struct queued_task_ctx *task,
 	struct task_ctx *tctx = try_lookup_task_ctx(p);
 
 	task->pid = p->pid;
-	task->sum_exec_runtime = p->se.sum_exec_runtime;
-	task->flags = enq_flags;
-	task->weight = p->scx.weight;
 	task->cpu = scx_bpf_task_cpu(p);
+	task->flags = enq_flags;
+	task->sum_exec_runtime = p->se.sum_exec_runtime;
+	task->nvcsw = p->nvcsw;
+	task->weight = p->scx.weight;
+	task->slice = p->scx.slice;
+	task->vtime = p->scx.dsq_vtime;
 	task->cpumask_cnt = tctx ? tctx->cpumask_cnt : 0;
 }
 
@@ -903,6 +909,7 @@ static bool dispatch_user_scheduler(void)
 		scx_bpf_error("Failed to find usersched task %d", usersched_pid);
 		return false;
 	}
+
 	/*
 	 * Use the highest vtime possible to give the scheduler itself the
 	 * lowest priority possible.
@@ -998,6 +1005,11 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, 0);
 
 	/*
+	 * Check if the user-space scheduler needs to run.
+	 */
+	dispatch_user_scheduler();
+
+	/*
 	 * Try to steal a task dispatched to CPUs that may have gone offline
 	 * (this allows to prevent indefinite task stalls).
 	 */
@@ -1013,13 +1025,7 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * Consume a task from the shared DSQ.
 	 */
-	if (scx_bpf_consume(SHARED_DSQ))
-		return;
-
-	/*
-	 * Check if the user-space scheduler needs to run.
-	 */
-	dispatch_user_scheduler();
+	scx_bpf_consume(SHARED_DSQ);
 }
 
 /*
