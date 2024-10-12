@@ -29,7 +29,8 @@ enum consts_internal  {
 	LAVD_LC_RUNTIME_MAX		= LAVD_TARGETED_LATENCY_NS,
 	LAVD_LC_RUNTIME_SHIFT		= 15,
 	LAVD_LC_WAKEUP_FT		= 30,
-	LAVD_LC_KTHREAD_FT		= 30,
+	LAVD_LC_KTHREAD_FT		= LAVD_LC_WAKEUP_FT,
+	LAVD_LC_LOCK_HOLDER_FT		= 300, /* 30% boost */
 
 	LAVD_SLICE_BOOST_MAX_FT		= 3, /* maximum additional 3x of slice */
 	LAVD_SLICE_BOOST_MAX_STEP	= 6, /* 6 slice exhausitions in a row */
@@ -120,6 +121,7 @@ struct cpu_ctx {
 	volatile u64	stopping_tm_est_ns; /* estimated stopping time */
 	volatile u16	lat_cri;	/* latency criticality */
 	volatile u8	is_online;	/* is this CPU online? */
+	volatile bool	lock_holder;	/* is a lock holder running */
 	s32		cpu_id;		/* cpu id */
 
 	/*
@@ -152,6 +154,7 @@ struct cpu_ctx {
 	volatile u32	nr_greedy;	/* number of greedy tasks scheduled */
 	volatile u32	nr_perf_cri;
 	volatile u32	nr_lat_cri;
+	volatile u32	nr_lhp;		/* number of lock holder preemption */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 

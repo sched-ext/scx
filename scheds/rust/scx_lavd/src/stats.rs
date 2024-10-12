@@ -34,6 +34,9 @@ pub struct SysStats {
     #[stat(desc = "Number of context switches")]
     pub nr_sched: u64,
 
+    #[stat(desc = "% lock holder preemption")]
+    pub pc_lhp: f64,
+
     #[stat(desc = "% of task migration")]
     pub pc_migration: f64,
 
@@ -75,12 +78,13 @@ impl SysStats {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "\x1b[93m| {:8} | {:13} | {:9} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
+            "\x1b[93m| {:8} | {:13} | {:9} | {:9} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
             "MSEQ",
             "SVC_TIME",
             "# Q TASK",
             "# ACT CPU",
             "# SCHED",
+            "LHP%",
             "MIGRATE%",
             "PREEMPT%",
             "GREEDY%",
@@ -104,12 +108,13 @@ impl SysStats {
 
         writeln!(
             w,
-            "| {:8} | {:13} | {:9} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |",
+            "| {:8} | {:13} | {:9} | {:9} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |",
             self.mseq,
             self.avg_svc_time,
             self.nr_queued_task,
             self.nr_active,
             self.nr_sched,
+            GPoint(self.pc_lhp),
             GPoint(self.pc_migration),
             GPoint(self.pc_preemption),
             GPoint(self.pc_greedy),

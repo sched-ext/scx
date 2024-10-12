@@ -22,12 +22,18 @@ static int comp_preemption_info(struct preemption_info *prm_a,
 				struct preemption_info *prm_b)
 {
 	/*
+	 * Never preeempt a lock holder.
+	 */
+	if (prm_b->cpuc->lock_holder)
+		return 1;
+
+	/*
 	 * Check if one's latency priority _or_ deadline is smaller or not.
 	 */
-	if ((prm_a->lat_cri < prm_b->lat_cri) ||
+	if ((prm_a->lat_cri > prm_b->lat_cri) ||
 	    (prm_a->stopping_tm_est_ns < prm_b->stopping_tm_est_ns))
 		return -1;
-	if ((prm_a->lat_cri > prm_b->lat_cri) ||
+	if ((prm_a->lat_cri < prm_b->lat_cri) ||
 	    (prm_a->stopping_tm_est_ns > prm_b->stopping_tm_est_ns))
 		return 1;
 	return 0;
@@ -277,6 +283,12 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	struct preemption_info prm_run, prm_wait;
 	s32 cpu_id = scx_bpf_task_cpu(p_run), wait_vtm_cpu_id;
 	bool ret = false;
+
+	/*
+	 * If a task holds a lock, never yield.
+	 */
+	if (is_lock_holder(taskc_run))
+		return false;
 
 	/*
 	 * If there is a higher priority task waiting on the global rq, the
