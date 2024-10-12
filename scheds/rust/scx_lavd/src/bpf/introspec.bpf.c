@@ -64,6 +64,10 @@ static void proc_introspec_sched_n(struct task_struct *p,
 	u64 cur_nr, prev_nr;
 	int i;
 
+	/* do not introspect itself */
+	if (bpf_strncmp(p->comm, 8, "scx_lavd") == 0)
+		return;
+
 	/* introspec_arg is the number of schedules remaining */
 	cur_nr = intrspc.arg;
 
@@ -85,13 +89,6 @@ static void proc_introspec_sched_n(struct task_struct *p,
 		/* CAS failure: retry */
 		cur_nr = prev_nr;
 	}
-}
-
-static void proc_introspec_pid(struct task_struct *p, struct task_ctx *taskc,
-			       u32 cpu_id)
-{
-	if (p->pid == intrspc.arg)
-		submit_task_ctx(p, taskc, cpu_id);
 }
 
 static void try_proc_introspec_cmd(struct task_struct *p,
