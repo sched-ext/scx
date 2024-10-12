@@ -1,0 +1,30 @@
+#!/usr/bin/env bpftrace
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+
+// This software may be used and distributed according to the terms of the
+// GNU General Public License version 2.
+
+
+rawtracepoint:sched_wakeup,
+rawtracepoint:sched_wakeup_new,
+{
+	$task = (struct task_struct *)arg0;
+
+	if ($1 > 0 && $task->tgid != $1) {
+		return;
+	}
+
+	if ($task->scx.dsq->id >= 0) {
+		@dsq_vtime[$task->scx.dsq->id] = hist($task->scx.dsq_vtime);
+	}
+}
+
+
+interval:s:1 {
+	if ($1 >0) {
+		$scx_ops = kaddr("scx_ops");
+		$ops = (struct sched_ext_ops*)$scx_ops;
+		printf("scheduler: %s\n", $ops->name);
+	}
+	print(@dsq_vtime);
+}
