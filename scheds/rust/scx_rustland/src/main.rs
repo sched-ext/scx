@@ -316,38 +316,29 @@ impl<'a> Scheduler<'a> {
         }
 
         // Evaluate used task time slice.
-        let slice = task.sum_exec_runtime.saturating_sub(task_info.sum_exec_runtime).min(self.slice_ns);
+        let slice = task
+            .sum_exec_runtime
+            .saturating_sub(task_info.sum_exec_runtime)
+            .min(self.slice_ns);
 
         // Update total task cputime.
         task_info.sum_exec_runtime = task.sum_exec_runtime;
 
         // Update task's vruntime re-aligning it to min_vruntime, to avoid
         // over-prioritizing tasks with a mostly sleepy behavior.
-        let min_vruntime = self.min_vruntime - self.slice_ns * task.weight / 100;
-        if task_info.vruntime < min_vruntime {
-            task_info.vruntime = min_vruntime;
+        if task_info.vruntime < self.min_vruntime {
+            task_info.vruntime = self.min_vruntime;
         }
-        task_info.vruntime += slice * 100 / task.weight;
+        let vslice = slice * 100 / task.weight;
+        task_info.vruntime += vslice;
 
-        // Evaluate the target vruntime for the task.
-        let mut vruntime = task_info.vruntime;
-
-        // Strongly prioritize interactive tasks by scaling their vruntime in function of their
-        // average amount of context switches.
-        //
-        // This essentially creates multiple priority lanes (up to RL_MAX_VTIME_FACTOR + 1), where
-        // tasks with a higher rate of average context are scheduled before others. Tasks with the
-        // same average context switch rate are still ordered by their weighted used time slice.
-        let avg_nvcsw = task_info.avg_nvcsw;
-        vruntime = vruntime / (avg_nvcsw.min(RL_MAX_VTIME_FACTOR) + 1) + slice * 100 / task.weight;
-
-        // Make sure to not de-prioritize tasks too much to prevent starvation.
-        if vruntime > self.min_vruntime + self.slice_ns {
-            vruntime = self.min_vruntime + self.slice_ns;
-        }
+        // Update global minimum vruntime.
+        self.min_vruntime += vslice;
 
         // Return the task vruntime.
-        vruntime
+        //
+        task_info.vruntime / (task_info.avg_nvcsw.min(RL_MAX_VTIME_FACTOR) + 1)
+            + vslice * 100 / task.weight
     }
 
     // Drain all the tasks from the queued list, update their vruntime (Self::update_enqueued()),
@@ -390,16 +381,11 @@ impl<'a> Scheduler<'a> {
     fn dispatch_tasks(&mut self) {
         match self.task_pool.pop() {
             Some(task) => {
-                // Update global minimum vruntime.
-                if self.min_vruntime < task.vruntime {
-                    self.min_vruntime = task.vruntime;
-                }
-
                 // Scale time slice based on the amount of tasks that are waiting in the
                 // scheduler's queue and the previously unused time slice budget, but make sure
                 // to assign at least slice_us_min.
-                let slice_ns =
-                    (self.slice_ns / (self.nr_tasks_waiting() + 1)).max(self.slice_ns_min);
+                let nr_waiting = self.nr_tasks_waiting() + 1;
+                let slice_ns = (self.slice_ns / nr_waiting).max(self.slice_ns_min);
 
                 // Create a new task to dispatch.
                 let mut dispatched_task = DispatchedTask::new(&task.qtask);
@@ -408,14 +394,10 @@ impl<'a> Scheduler<'a> {
                 dispatched_task.slice_ns = slice_ns;
 
                 // Try to pick an idle CPU for the task.
-                let cpu =
-                    self.bpf
-                        .select_cpu(dispatched_task.pid, dispatched_task.cpu, task.qtask.flags);
-                if cpu >= 0 {
-                    dispatched_task.cpu = cpu;
-                } else {
-                    dispatched_task.cpu = RL_CPU_ANY;
-                }
+                let cpu = self
+                    .bpf
+                    .select_cpu(task.qtask.pid, task.qtask.cpu, task.qtask.flags);
+                dispatched_task.cpu = if cpu >= 0 { cpu } else { RL_CPU_ANY };
 
                 // Send task to the BPF dispatcher.
                 match self.bpf.dispatch_task(&dispatched_task) {
