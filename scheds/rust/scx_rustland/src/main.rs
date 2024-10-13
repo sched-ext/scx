@@ -117,9 +117,9 @@ struct Opts {
 const NSEC_PER_USEC: u64 = 1_000;
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 
-// Maximum factor used to scale down the task's vruntime in function of its average amount of
+// Maximum factor used to scale down the task's deadline in function of its average amount of
 // context switches per second.
-const RL_MAX_VTIME_FACTOR: u64 = 4;
+const RL_MAX_DEADLINE_FACTOR: u64 = 4;
 
 // Basic item stored in the task information map.
 #[derive(Debug)]
@@ -157,7 +157,7 @@ impl TaskInfoMap {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 struct Task {
     qtask: QueuedTask, // queued task
-    vruntime: u64,     // total vruntime (that determines the order how tasks are dispatched)
+    deadline: u64,     // task deadline (that determines the order how tasks are dispatched)
     timestamp: u64,    // task enqueue timestamp
 }
 
@@ -166,15 +166,15 @@ struct Task {
 // pid.
 impl Ord for Task {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.vruntime
-            .cmp(&other.vruntime)
+        self.deadline
+            .cmp(&other.deadline)
             .then_with(|| self.timestamp.cmp(&other.timestamp))
             .then_with(|| self.qtask.pid.cmp(&other.qtask.pid))
     }
 }
 
-// Task pool where all the tasks that needs to run are stored before dispatching
-// (ordered by vruntime using a BTreeSet).
+// Task pool where all the tasks that needs to run are stored before dispatching (ordered by their
+// shortest deadline using a BTreeSet).
 struct TaskTree {
     tasks: BTreeSet<Task>,
     task_map: HashMap<i32, Task>, // Map from pid to task
@@ -189,8 +189,8 @@ impl TaskTree {
         }
     }
 
-    // Add an item to the pool (item will be placed in the tree depending on its vruntime, items
-    // with the same vruntime will be sorted by pid).
+    // Add an item to the pool (item will be placed in the tree depending on its deadline, items
+    // with the same deadline will be sorted by pid).
     fn push(&mut self, task: Task) {
         // Check if task already exists.
         if let Some(prev_task) = self.task_map.get(&task.qtask.pid) {
@@ -202,7 +202,7 @@ impl TaskTree {
         self.task_map.insert(task.qtask.pid, task);
     }
 
-    // Pop the first item from the BTreeSet (item with the smallest vruntime).
+    // Pop the first item from the BTreeSet (item with the shortest deadline).
     fn pop(&mut self) -> Option<Task> {
         if let Some(task) = self.tasks.pop_first() {
             self.task_map.remove(&task.qtask.pid);
@@ -217,7 +217,7 @@ impl TaskTree {
 struct Scheduler<'a> {
     bpf: BpfScheduler<'a>,                  // BPF connector
     stats_server: StatsServer<(), Metrics>, // statistics
-    task_pool: TaskTree,                    // tasks ordered by vruntime
+    task_pool: TaskTree,                    // tasks ordered by deadline
     task_map: TaskInfoMap,                  // map pids to the corresponding task information
     min_vruntime: u64,                      // Keep track of the minimum vruntime across all tasks
     init_page_faults: u64,                  // Initial page faults counter
@@ -284,7 +284,7 @@ impl<'a> Scheduler<'a> {
     }
 
     // Update task's vruntime based on the information collected from the kernel and return to the
-    // caller the evaluated task's vruntime.
+    // caller the evaluated task's deadline.
     //
     // This method implements the main task ordering logic of the scheduler.
     fn update_enqueued(&mut self, task: &QueuedTask) -> u64 {
@@ -335,10 +335,9 @@ impl<'a> Scheduler<'a> {
         // Update global minimum vruntime.
         self.min_vruntime += vslice;
 
-        // Return the task vruntime.
-        //
-        task_info.vruntime / (task_info.avg_nvcsw.min(RL_MAX_VTIME_FACTOR) + 1)
-            + vslice * 100 / task.weight
+        // Return the task's deadline.
+        let latency_weight = task_info.avg_nvcsw.min(RL_MAX_DEADLINE_FACTOR) + 1;
+        task_info.vruntime / latency_weight + vslice * 100 / task.weight
     }
 
     // Drain all the tasks from the queued list, update their vruntime (Self::update_enqueued()),
@@ -348,13 +347,13 @@ impl<'a> Scheduler<'a> {
             match self.bpf.dequeue_task() {
                 Ok(Some(task)) => {
                     // Update task information and determine vruntime.
-                    let vruntime = self.update_enqueued(&task);
+                    let deadline = self.update_enqueued(&task);
                     let timestamp = Self::now();
 
                     // Insert task in the task pool (ordered by vruntime).
                     self.task_pool.push(Task {
                         qtask: task,
-                        vruntime,
+                        deadline,
                         timestamp,
                     });
                 }
