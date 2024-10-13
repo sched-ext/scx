@@ -129,6 +129,13 @@ void BPF_STRUCT_OPS(simple_stopping, struct task_struct *p, bool runnable)
 	p->scx.dsq_vtime += (SCX_SLICE_DFL - p->scx.slice) * 100 / p->scx.weight;
 }
 
+void BPF_STRUCT_OPS(simple_update_idle, s32 cpu, bool idle)
+{
+	if (!idle)
+		return;
+	scx_bpf_kick_cpu(cpu, 0);
+}
+
 void BPF_STRUCT_OPS(simple_enable, struct task_struct *p)
 {
 	p->scx.dsq_vtime = vtime_now;
@@ -150,7 +157,9 @@ SCX_OPS_DEFINE(simple_ops,
 	       .dispatch		= (void *)simple_dispatch,
 	       .running			= (void *)simple_running,
 	       .stopping		= (void *)simple_stopping,
+	       .update_idle		= (void *)simple_update_idle,
 	       .enable			= (void *)simple_enable,
 	       .init			= (void *)simple_init,
 	       .exit			= (void *)simple_exit,
+	       .flags			= SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
 	       .name			= "simple");
