@@ -352,7 +352,7 @@ static void calc_virtual_deadline_delta(struct task_struct *p,
 	 */
 	lat_cri = calc_lat_cri(p, taskc, cpuc_cur, enq_flags);
 	greedy_ratio = calc_greedy_ratio(taskc);
-	deadline = (LAVD_SLICE_MAX_NS * greedy_ratio) / (1000 * lat_cri);
+	deadline = (LAVD_SLICE_MAX_NS * greedy_ratio) / lat_cri;
 	taskc->vdeadline_delta_ns = deadline;
 }
 

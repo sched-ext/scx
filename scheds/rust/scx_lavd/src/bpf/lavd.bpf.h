@@ -105,8 +105,8 @@ struct cpu_ctx {
 	 * Information used to keep track of latency criticality
 	 */
 	volatile u32	max_lat_cri;	/* maximum latency criticality */
-	volatile u32	sum_lat_cri;	/* sum of latency criticality */
 	volatile u32	nr_sched;	/* number of schedules */
+	volatile u64	sum_lat_cri;	/* sum of latency criticality */
 
 	/*
 	 * Information used to keep track of performance criticality
