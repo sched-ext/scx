@@ -41,6 +41,19 @@ locally (with rustup) run:
     $ cargo +nightly-2024-09-10 fmt
 
 ## Useful Tools
+
+### [Perfetto](https://perfetto.dev/)
+[Perfetto](https://perfetto.dev/) is a profiling and trace visualization
+platform. It can be used to view scheduling data, which is useful for
+understanding scheduling decisions. The [`sched_ftrace.py`](scripts/sched_ftrace.py)
+script can be used to generate a ftrace compatible with Perfetto.
+
+```
+$ sudo ./scripts/sched_ftrace.py > sched.ftrace
+```
+The output of the script can then be loaded into the perfetto UI:
+![perfetto](https://github.com/user-attachments/assets/23e18bd4-8016-40e7-8b49-d2be8ef62f1b)
+
 ### perf
 
 The linux `perf` tool has a subcommand for profiling scheduling `perf sched`.
