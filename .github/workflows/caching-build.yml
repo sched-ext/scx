@@ -183,7 +183,6 @@ jobs:
           matrix:
             scheduler: [ scx_layered ]
             topo: ['--disable-topology=false', '--disable-topology=true']
-            dsq_iter_algo: [linear, round_robin, weight]
           fail-fast: false
     steps:
       # prevent cache permission errors
@@ -225,7 +224,7 @@ jobs:
         run: exit -1
 
       # The actual build:
-      - run: meson setup build -Dkernel=../linux/arch/x86/boot/bzImage -Dkernel_headers=../linux -Denable_stress=true -Dvng_rw_mount=true -Dextra_sched_args=" ${{ matrix.topo }} --dsq-iter-algo ${{ matrix.dsq_iter_algo }}"
+      - run: meson setup build -Dkernel=../linux/arch/x86/boot/bzImage -Dkernel_headers=../linux -Denable_stress=true -Dvng_rw_mount=true -Dextra_sched_args=" ${{ matrix.topo }}"
       - run: meson compile -C build ${{ matrix.scheduler }}
 
       # Print CPU model before running the tests (this can be useful for
@@ -234,7 +233,7 @@ jobs:
 
       # Stress schedulers
       - uses: cytopia/shell-command-retry-action@v0.1.2
-        name: stress test ${{ matrix.topo }} ${{ matrix.dsq_iter_algo }}
+        name: stress test ${{ matrix.topo }}
         if: always()
         with:
           retries: 3
@@ -252,7 +251,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.scheduler }}_${{ matrix.topo }}_${{ matrix.dsq_iter_algo }}_${{ matrix.test_name }}_logs_${{ github.run_id }}_${{ github.run_attempt }}
+          name: ${{ matrix.scheduler }}_${{ matrix.topo }}_${{ matrix.test_name }}_logs_${{ github.run_id }}_${{ github.run_attempt }}
           path: ./log_save/*.ci.log
           # it's all txt files w/ 90 day retention, lets be nice.
           compression-level: 9
