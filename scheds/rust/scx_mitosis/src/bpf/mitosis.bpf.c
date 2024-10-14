@@ -553,6 +553,50 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 	return scx_bpf_pick_idle_cpu(cand_cpumask, 0);
 }
 
+/* Check if we need to update the cell/cpumask mapping */
+static __always_inline int maybe_refresh_cell(struct task_struct *p,
+					      struct task_ctx *tctx)
+{
+	struct cgroup *cgrp;
+	if (tctx->global_seq != READ_ONCE(global_seq)) {
+		if (!(cgrp = task_cgroup(p)))
+			return -1;
+		if (update_task_cell(p, tctx, cgrp)) {
+			bpf_cgroup_release(cgrp);
+			return -1;
+		}
+		bpf_cgroup_release(cgrp);
+	}
+	return 0;
+}
+
+static __always_inline s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
+					 struct cpu_ctx *cctx,
+					 struct task_ctx *tctx)
+{
+	struct cpumask *task_cpumask;
+	const struct cpumask *idle_smtmask;
+	s32 cpu;
+
+	if (!(task_cpumask = (struct cpumask *)tctx->cpumask) ||
+	    !(idle_smtmask = scx_bpf_get_idle_smtmask())) {
+		scx_bpf_error("Failed to get task cpumask or idle smtmask");
+		return -1;
+	}
+
+	/* No overlap between cell cpus and task cpus, just find some idle cpu */
+	if (bpf_cpumask_empty(task_cpumask)) {
+		cstat_inc(CSTAT_AFFN_VIOL, tctx->cell, cctx);
+		cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu, idle_smtmask);
+		goto out;
+	}
+
+	cpu = pick_idle_cpu_from(task_cpumask, prev_cpu, idle_smtmask);
+out:
+	scx_bpf_put_idle_cpumask(idle_smtmask);
+	return cpu;
+}
+
 /*
  * select_cpu is where we update each task's cell assignment and then try to
  * dispatch to an idle core in the cell if possible
@@ -560,68 +604,45 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	struct cgroup *cgrp;
+	s32 cpu;
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
-	struct cpumask *task_cpumask;
-	const struct cpumask *idle_smtmask;
-	s32 cpu;
-	bool local = false;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return prev_cpu;
 
-	/* Check if we need to update the cell/cpumask mapping */
-	if (tctx->global_seq != READ_ONCE(global_seq)) {
-		if (!(cgrp = task_cgroup(p)))
-			return prev_cpu;
-		if (update_task_cell(p, tctx, cgrp)) {
-			bpf_cgroup_release(cgrp);
-			return prev_cpu;
-		}
-		bpf_cgroup_release(cgrp);
-	}
-
-	if (!(task_cpumask = (struct cpumask *)tctx->cpumask) ||
-	    !(idle_smtmask = scx_bpf_get_idle_smtmask()))
+	if (maybe_refresh_cell(p, tctx) < 0)
 		return prev_cpu;
 
-	/* No overlap between cell cpus and task cpus, just send it to global */
-	if (bpf_cpumask_empty(task_cpumask)) {
-		cstat_inc(CSTAT_AFFN_VIOL, tctx->cell, cctx);
-
-		if ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu,
-					      idle_smtmask)) >= 0)
-			goto dispatch_local;
-
-		cstat_inc(CSTAT_GLOBAL, tctx->cell, cctx);
-		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice_ns, 0);
-		scx_bpf_put_idle_cpumask(idle_smtmask);
-		return prev_cpu;
+	if ((cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx)) >= 0) {
+		cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		if (debug && !READ_ONCE(draining) && tctx->all_cpus_allowed &&
+		    (cctx = lookup_cpu_ctx(cpu)) && cctx->cell != tctx->cell)
+			scx_bpf_error(
+				"select_cpu returned cpu %d belonging to cell %d but task belongs to cell %d",
+				cpu, cctx->cell, tctx->cell);
+		return cpu;
 	}
 
-	if ((cpu = pick_idle_cpu_from(task_cpumask, prev_cpu, idle_smtmask)) >=
-	    0)
-		goto dispatch_local;
+	return prev_cpu;
+}
 
-	if (bpf_cpumask_test_cpu(prev_cpu, task_cpumask))
-		cpu = prev_cpu;
-	else
-		cpu = bpf_cpumask_any_distribute(task_cpumask);
-	goto out_put_idle_smtmask;
+static __always_inline bool pick_idle_cpu_and_kick(struct task_struct *p,
+						   s32 task_cpu,
+						   struct cpu_ctx *cctx,
+						   struct task_ctx *tctx)
+{
+	s32 cpu;
 
-dispatch_local:
-	local = true;
-	cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
-out_put_idle_smtmask:
-	scx_bpf_put_idle_cpumask(idle_smtmask);
-	if (debug && !READ_ONCE(draining) && tctx->all_cpus_allowed &&
-	    (cctx = lookup_cpu_ctx(cpu)) && cctx->cell != tctx->cell)
-		scx_bpf_error(
-			"select_cpu returned cpu %d belonging to cell %d but task belongs to cell %d, local %d",
-			cpu, cctx->cell, tctx->cell, local);
-	return cpu;
+	cpu = pick_idle_cpu(p, task_cpu, cctx, tctx);
+
+	if (cpu >= 0) {
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		return true;
+	} else {
+		return false;
+	}
 }
 
 static inline bool vtime_before(u64 a, u64 b)
@@ -634,10 +655,16 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 	struct cell *cell;
+	s32 task_cpu = scx_bpf_task_cpu(p);
 	u64 vtime = p->scx.dsq_vtime;
 
-	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)) ||
-	    !(cell = lookup_cell(tctx->cell)))
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
+		return;
+
+	if (maybe_refresh_cell(p, tctx) < 0)
+		return;
+
+	if (!(cell = lookup_cell(tctx->cell)))
 		return;
 
 	/*
@@ -648,6 +675,13 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		vtime = cell->vtime_now - slice_ns;
 
 	scx_bpf_dispatch_vtime(p, tctx->cell, slice_ns, vtime, enq_flags);
+
+	/*
+	 * If we aren't in the wakeup path, layered_select_cpu() hasn't run and thus
+	 * we haven't looked for and kicked an idle CPU. Let's do it now.
+	 */
+	if (!(enq_flags & SCX_ENQ_WAKEUP))
+		pick_idle_cpu_and_kick(p, task_cpu, cctx, tctx);
 }
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
