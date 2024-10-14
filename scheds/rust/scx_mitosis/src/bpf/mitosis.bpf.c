@@ -674,7 +674,14 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	if (vtime_before(vtime, cell->vtime_now - slice_ns))
 		vtime = cell->vtime_now - slice_ns;
 
-	scx_bpf_dispatch_vtime(p, tctx->cell, slice_ns, vtime, enq_flags);
+	if (p->flags & PF_KTHREAD && p->nr_cpus_allowed == 1) {
+		scx_bpf_dispatch(p, HI_FALLBACK_DSQ, slice_ns, 0);
+	} else if (!tctx->all_cpus_allowed) {
+		scx_bpf_dispatch(p, LO_FALLBACK_DSQ, slice_ns, 0);
+	} else {
+		scx_bpf_dispatch_vtime(p, tctx->cell, slice_ns, vtime,
+				       enq_flags);
+	}
 
 	/*
 	 * If we aren't in the wakeup path, layered_select_cpu() hasn't run and thus
@@ -695,6 +702,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	prev_cell = *(volatile u32 *)&cctx->prev_cell;
 	cell = *(volatile u32 *)&cctx->cell;
 
+	if (scx_bpf_consume(HI_FALLBACK_DSQ))
+		return;
+
 	/*
 	 * cpu <=> cell assignment can change dynamically. In order to deal with
 	 * scheduling racing with assignment change, we schedule from the previous
@@ -703,7 +713,10 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	if (prev_cell != cell && scx_bpf_consume(prev_cell))
 		return;
 
-	scx_bpf_consume(cell);
+	if (scx_bpf_consume(cell))
+		return;
+
+	scx_bpf_consume(LO_FALLBACK_DSQ);
 }
 
 static inline void runnable(struct task_struct *p, struct task_ctx *tctx,
@@ -919,6 +932,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	struct bpf_cpumask *cpumask;
 	u32 i;
 	s32 ret;
+
+	ret = scx_bpf_create_dsq(HI_FALLBACK_DSQ, -1);
+	if (ret < 0)
+		return ret;
+
+	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
+	if (ret < 0)
+		return ret;
 
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
