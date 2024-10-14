@@ -8,22 +8,22 @@
 
 BEGIN
 {
-  @bpftrace_pid = pid;
-  @sig = 0;
+	@bpftrace_pid = pid;
+	@sig = 0;
 
-  if ($1 == 0) {
-	// exit 137
-	@sig = 9;
-  }
+	if ($1 == 0) {
+		// exit 137
+		@sig = 9;
+	}
 }
 
 profile:hz:1
 {
-    @counts[cpu] = @counts[cpu] + 1;
-    if (@counts[cpu] == 15) {
-	// exit 0
-	@sig = 15;
-    }
+	@counts[cpu] = @counts[cpu] + 1;
+	if (@counts[cpu] == 15) {
+		// exit 0
+		@sig = 15;
+	}
 }
 
 rawtracepoint:sched_switch

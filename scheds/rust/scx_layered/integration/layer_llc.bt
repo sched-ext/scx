@@ -1,0 +1,65 @@
+#!/usr/bin/env -S bpftrace --unsafe -q
+
+/*
+ * Asserts that the `llc` layer config works properly by failing if the pid
+ * passed to the script runs on any other LLC besides LLC id 0. The layered
+ * config should restrict the pid passed to the script to run on a layer
+ * that only runs on LLC 0.
+ */
+
+BEGIN
+{
+	@bpftrace_pid = pid;
+	@sig = 0;
+
+	if ($1 == 0) {
+		// exit 137
+		@sig = 9;
+	}
+
+	// Credit to Alastair Robertson for this mapping of CPU to LLC
+	$num_cpus = *(uint32*)kaddr("__num_online_cpus");
+	$per_cpu_offsets = (uint64*)kaddr("__per_cpu_offset");
+	$cpu_to_node_map = kaddr("x86_cpu_to_node_map");
+	$ci_cpu_cacheinfo = kaddr("ci_cpu_cacheinfo");
+	$cpuid = 0;
+	while ($cpuid < $num_cpus && $cpuid < 500) {
+		$numa_id = *($cpu_to_node_map + *($per_cpu_offsets + $cpuid));
+		@cpu_to_node[$cpuid] = $numa_id;
+		$cpu_cacheinfo = (struct cpu_cacheinfo*)($ci_cpu_cacheinfo + *($per_cpu_offsets + $cpuid));
+		$l3_cacheinfo = $cpu_cacheinfo->info_list[3];
+		$l3_cacheid = $l3_cacheinfo.id;
+		@cpu_to_l3[$cpuid] = $l3_cacheid;
+		$cpuid++;
+	  }
+}
+
+profile:hz:1
+{
+	@counts[cpu] = @counts[cpu] + 1;
+	if (@counts[cpu] == 15) {
+		// exit 0
+		@sig = 15;
+	}
+}
+
+rawtracepoint:sched_switch
+{
+	$task = (struct task_struct *)arg1;
+
+	if (($task->parent->pid == $1 && @cpu_to_l3[cpu] != 0) ||
+	    ($task->real_parent->pid == $1 && @cpu_to_l3[cpu] != 0)) {
+		// exit 137
+		@sig = 9;
+	}
+}
+
+kprobe:__x64_sys_* / @bpftrace_pid == pid / {
+	if (@sig > 0) {
+		signal(@sig);
+	}
+}
+
+interval:s:1 {
+	print(("bpftrace monitoring pid", $1, "signal", @sig));
+}
