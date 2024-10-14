@@ -913,8 +913,14 @@ static bool dispatch_user_scheduler(void)
 	/*
 	 * Use the highest vtime possible to give the scheduler itself the
 	 * lowest priority possible.
+	 *
+	 * At the same time make sure to assign an infinite time slice, so that
+	 * it can completely drain all the pending tasks.
+	 *
+	 * The user-space scheduler will voluntarily yield the CPU upon
+	 * completion through BpfScheduler->notify_complete().
 	 */
-	scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, -1ULL, 0);
+	scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_INF, -1ULL, 0);
 
 	cpu = pick_idle_cpu(p, scx_bpf_task_cpu(p), 0);
 	if (cpu >= 0)
@@ -1062,15 +1068,8 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Mark the CPU as idle by setting the owner to 0.
 	 */
-	if (!is_usersched_task(p)) {
+	if (!is_usersched_task(p))
 		__sync_fetch_and_sub(&nr_running, 1);
-		/*
-		 * Kick the user-space scheduler immediately when a task
-		 * releases a CPU and speculate on the fact that most of the
-		 * time there is another task ready to run.
-		 */
-		set_usersched_needed();
-	}
 }
 
 /*
