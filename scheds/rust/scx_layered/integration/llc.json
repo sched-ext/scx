@@ -1,7 +1,7 @@
 [
   {
-    "name": "numa_0",
-    "comment": "numa0",
+    "name": "llc_0",
+    "comment": "llc0",
     "matches": [
       [
         {
@@ -20,7 +20,7 @@
           0.4,
           0.90
         ],
-        "nodes": [
+        "llcs": [
           0
         ]
       }

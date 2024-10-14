@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 
 layered_bin=${1:-../../../../target/release/scx_layered}
-test_scripts=( "layer_node.bt" )
+test_scripts=( "layer_node.bt" "layer_llc.bt" )
+test_configs=( "numa.json" "llc.json" )
 
-for test_script in "${test_scripts[@]}"; do
+for i in "${!test_scripts[@]}"; do
+	test_script="${test_scripts[$i]}"
+	test_config="${test_configs[$i]}"
+
 	sudo pkill -9 -f scx_layered
-	sudo "${layered_bin}" --stats 1 f:numa.json -v &
+	sudo "${layered_bin}" --stats 1 "f:${test_config}" -v &
 	layered_pid=$!
 
 	echo "layered pid ${layered_pid}"
