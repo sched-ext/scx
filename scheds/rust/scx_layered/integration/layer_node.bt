@@ -1,0 +1,48 @@
+#!/usr/bin/env -S bpftrace --unsafe -q
+
+/*
+ * Asserts that the `node` layer config works properly by failing if the pid
+ * passed to the script runs on NUMA node 1. The layered config should restrict
+ * the pid passed to the script to run on a layer that only runs on NUMA node 0.
+ */
+
+BEGIN
+{
+  @bpftrace_pid = pid;
+  @sig = 0;
+
+  if ($1 == 0) {
+	// exit 137
+	@sig = 9;
+  }
+}
+
+profile:hz:1
+{
+    @counts[cpu] = @counts[cpu] + 1;
+    if (@counts[cpu] == 15) {
+	// exit 0
+	@sig = 15;
+    }
+}
+
+rawtracepoint:sched_switch
+{
+	$task = (struct task_struct *)arg1;
+
+	if (($task->parent->pid == $1 && numaid == 1) ||
+	    ($task->real_parent->pid == $1 && numaid == 1)) {
+		// exit 137
+		@sig = 9;
+	}
+}
+
+kprobe:__x64_sys_* / @bpftrace_pid == pid / {
+	if (@sig > 0) {
+		signal(@sig);
+	}
+}
+
+interval:s:1 {
+	print(("bpftrace monitoring pid", $1, "signal", @sig));
+}

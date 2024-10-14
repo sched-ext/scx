@@ -1,0 +1,43 @@
+[
+  {
+    "name": "numa_0",
+    "comment": "numa0",
+    "matches": [
+      [
+        {
+          "CommPrefix": "stress-ng"
+        }
+      ],
+      [
+        {
+          "PcommPrefix": "stress-ng"
+        }
+      ]
+    ],
+    "kind": {
+      "Confined": {
+        "util_range": [
+          0.4,
+          0.90
+        ],
+	"growth_algo": "Linear",
+        "nodes": [
+          0
+        ]
+      }
+    }
+  },
+  {
+    "name": "reset",
+    "comment": "the rest",
+    "matches":[[]],
+    "kind": {
+      "Grouped": {
+        "util_range": [
+          0.05,
+          0.60
+        ]
+      }
+    }
+  }
+]
