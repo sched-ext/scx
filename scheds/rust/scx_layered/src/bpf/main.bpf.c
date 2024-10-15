@@ -99,6 +99,8 @@ u32 rotate_llc_id(u32 base_llc_id, u32 rotation)
 // return the dsq id for the layer based on the LLC id.
 static __noinline u64 layer_dsq_id(u32 layer_id, u32 llc_id)
 {
+	if (disable_topology)
+		return layer_id;
 	return (layer_id * nr_llcs) + llc_id;
 }
 
@@ -236,6 +238,17 @@ static void lstat_add(enum layer_stat_idx idx, struct layer *layer,
 		scx_bpf_error("invalid layer or stat idxs: %d, %d", idx, layer->idx);
 }
 
+static void lstat_set(enum layer_stat_idx idx, struct layer *layer,
+		      struct cpu_ctx *cctx, s64 val)
+{
+	u64 *vptr;
+
+	if ((vptr = MEMBER_VPTR(*cctx, .lstats[layer->idx][idx])))
+		(*vptr) = val;
+	else
+		scx_bpf_error("invalid layer or stat idxs: %d, %d", idx, layer->idx);
+}
+
 static void lstat_inc(enum layer_stat_idx idx, struct layer *layer,
 		      struct cpu_ctx *cctx)
 {
@@ -356,14 +369,26 @@ static void refresh_cpumasks(int idx)
 	trace("LAYER[%d] now has %d cpus, seq=%llu", idx, layer->nr_cpus, layer->cpus_seq);
 }
 
+static void decay_layer_vtime(int layer_idx)
+{
+	struct layer *layer;
+
+	layer = MEMBER_VPTR(layers, [layer_idx]);
+	// TODO: Make the decay value configurable
+	layer->vtime_decay = (layer->vtime_decay / 8) * 7;
+	trace("LAYER[%d] vtime_decay: %d", layer_idx, layer->vtime_decay);
+}
+
 SEC("fentry")
 int BPF_PROG(sched_tick_fentry)
 {
 	int idx;
 
 	if (bpf_get_smp_processor_id() == 0)
-		bpf_for(idx, 0, nr_layers)
+		bpf_for(idx, 0, nr_layers) {
 			refresh_cpumasks(idx);
+			decay_layer_vtime(idx);
+		}
 	return 0;
 }
 
@@ -1200,6 +1225,56 @@ no:
 	return false;
 }
 
+/*
+ * Helper function to consume layer DSQs when a system is under starvation.
+ */
+static __always_inline bool consume_starved(s32 cpu)
+{
+	struct layer *layer;
+	u32 idx;
+	u64 decay_vtime_sum = 0;
+	u64 layer_weight_sum = 0;
+	u64 decay_proportion_vtime = 0;
+	u64 vtime_weighted_decay = 0;
+
+	bpf_for(idx, 0, nr_layers) {
+		layer = MEMBER_VPTR(layers, [idx]);
+		decay_vtime_sum += layer->vtime_decay;
+		layer_weight_sum += layer->weight;
+	}
+
+	// Use a per cpu layer to consume from. With enough CPUs this
+	// should consume starved layers efficiently.
+	// TODO: Make this work for nr_layers > nr_possible_cpus
+	idx = ((u32)cpu & 0xfff) % nr_layers;
+	if (idx > nr_layers)
+		return false;
+
+	layer = MEMBER_VPTR(layers, [idx]);
+	if (!layer)
+		return false;
+
+	if (layer_weight_sum > decay_vtime_sum)
+		return false;
+
+	/*
+	 * If the weighted decayed vtime of the layer is less than the
+	 * proportional weighted vtime then the layer is potentially starved
+	 * and should be consumed from.
+	 */
+	vtime_weighted_decay = decay_vtime_sum / layer_weight_sum;
+	decay_proportion_vtime = vtime_weighted_decay * layer->weight;
+
+	if (layer->vtime_decay <= decay_proportion_vtime) {
+		u32 llc_id = cpu_to_llc_id(cpu);
+		u64 dsq_id = layer_dsq_id(layer->idx, llc_id);
+		if ( scx_bpf_consume(dsq_id))
+			return true;
+	}
+
+	return false;
+}
+
 static __noinline
 void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 {
@@ -1238,6 +1313,13 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 		return;
 	}
 
+	dsq_id = cpu_hi_fallback_dsq_id(cpu);
+	if (scx_bpf_consume(dsq_id))
+		return;
+
+	if (consume_starved(cpu))
+		return;
+
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = rotate_layer_id(cctx->layer_idx, idx);
@@ -1249,10 +1331,6 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 		if (layer->preempt && scx_bpf_consume(layer_idx))
 			return;
 	}
-
-	dsq_id = cpu_hi_fallback_dsq_id(cpu);
-	if (scx_bpf_consume(dsq_id))
-		return;
 
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
@@ -1333,6 +1411,14 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	u32 my_llc_id = cpu_to_llc_id(cpu);
 
+
+	dsq_id = cpu_hi_fallback_dsq_id(cpu);
+	if (scx_bpf_consume(dsq_id))
+		return;
+
+	if (consume_starved(cpu))
+		return;
+
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = rotate_layer_id(cctx->layer_idx, idx);
@@ -1348,10 +1434,6 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 				return;
 		}
 	}
-
-	dsq_id = cpu_hi_fallback_dsq_id(cpu);
-	if (scx_bpf_consume(dsq_id))
-		return;
 
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
@@ -1826,6 +1908,8 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	if (cctx->yielding && used < layer_slice_ns)
 		used = layer_slice_ns;
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
+	layer->vtime_decay += used * 100 / p->scx.weight;
+
 	cctx->maybe_idle = true;
 }
 

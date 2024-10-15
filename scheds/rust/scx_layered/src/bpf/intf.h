@@ -181,6 +181,7 @@ struct layer {
 	int			growth_algo;
 
 	u64			vtime_now;
+	u64			vtime_decay;
 	u64			nr_tasks;
 
 	u64			load;
