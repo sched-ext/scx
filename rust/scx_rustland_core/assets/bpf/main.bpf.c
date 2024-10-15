@@ -99,18 +99,6 @@ const volatile bool debug;
 const volatile bool smt_enabled = true;
 
 /*
- * Mask of offline CPUs, used to properly support CPU hotplugging.
- */
-private(BPFLAND) struct bpf_cpumask __kptr *offline_cpumask;
-
-/*
- * CPU hotplugging generation counter (used to notify the user-space
- * counterpart when a CPU hotplug event happened, allowing it to refresh the
- * topology information).
- */
-volatile u64 cpu_hotplug_cnt;
-
-/*
  * Set the state of a CPU in a cpumask.
  */
 static bool set_cpu_state(struct bpf_cpumask *cpumask, s32 cpu, bool state)
@@ -139,28 +127,6 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 		bpf_cpumask_release(cpumask);
 
 	return 0;
-}
-
-/*
- * Determine when we need to drain tasks dispatched to CPUs that went offline.
- */
-static int offline_needed;
-
-/*
- * Notify the scheduler that we need to drain and re-enqueue the tasks
- * dispatched to the offline CPU DSQs.
- */
-static void set_offline_needed(void)
-{
-	__sync_fetch_and_or(&offline_needed, 1);
-}
-
-/*
- * Check and clear the state of the offline CPUs re-enqueuing.
- */
-static bool test_and_clear_offline_needed(void)
-{
-	return __sync_fetch_and_and(&offline_needed, 0) == 1;
 }
 
 /*
@@ -949,50 +915,6 @@ static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
 }
 
 /*
- * Consume tasks dispatched to CPUs that have gone offline.
- *
- * These tasks will be consumed on other active CPUs to prevent indefinite
- * stalling.
- *
- * Return true if one task is consumed, false otherwise.
- */
-static bool consume_offline_cpus(s32 cpu)
-{
-	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
-	struct bpf_cpumask *offline;
-	bool ret = false;
-
-	if (!test_and_clear_offline_needed())
-		return false;
-
-	offline = offline_cpumask;
-	if (!offline)
-		return false;
-
-	/*
-	 * Cycle through all the CPUs and evenly consume tasks from the DSQs of
-	 * those that are offline.
-	 */
-	bpf_repeat(nr_cpu_ids - 1) {
-		cpu = (cpu + 1) % nr_cpu_ids;
-
-		if (!bpf_cpumask_test_cpu(cpu, cast_mask(offline)))
-			continue;
-		/*
-		 * This CPU is offline, if a task has been dispatched there
-		 * consume it immediately on the current CPU.
-		 */
-		if (scx_bpf_consume(cpu_to_dsq(cpu))) {
-			set_offline_needed();
-			ret = true;
-			break;
-		}
-	}
-
-	return ret;
-}
-
-/*
  * Dispatch tasks that are ready to run.
  *
  * This function is called when a CPU's local DSQ is empty and ready to accept
@@ -1014,13 +936,6 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 * Check if the user-space scheduler needs to run.
 	 */
 	dispatch_user_scheduler();
-
-	/*
-	 * Try to steal a task dispatched to CPUs that may have gone offline
-	 * (this allows to prevent indefinite task stalls).
-	 */
-	if (consume_offline_cpus(cpu))
-		return;
 
 	/*
 	 * Consume a task from the per-CPU DSQ.
@@ -1134,26 +1049,6 @@ void BPF_STRUCT_OPS(rustland_cpu_release, s32 cpu,
 	dbg_msg("cpu preemption: pid=%d (%s)", p->pid, p->comm);
 	if (is_usersched_task(p))
 		set_usersched_needed();
-}
-
-void BPF_STRUCT_OPS(rustland_cpu_online, s32 cpu)
-{
-	/* Set the CPU state to online */
-	set_cpu_state(offline_cpumask, cpu, false);
-
-	__sync_fetch_and_add(&nr_online_cpus, 1);
-	__sync_fetch_and_add(&cpu_hotplug_cnt, 1);
-}
-
-void BPF_STRUCT_OPS(rustland_cpu_offline, s32 cpu)
-{
-	/* Set the CPU state to offline */
-	set_cpu_state(offline_cpumask, cpu, true);
-
-	__sync_fetch_and_sub(&nr_online_cpus, 1);
-	__sync_fetch_and_add(&cpu_hotplug_cnt, 1);
-
-	set_offline_needed();
 }
 
 /*
@@ -1367,19 +1262,10 @@ int enable_sibling_cpu(struct domain_arg *input)
  */
 s32 BPF_STRUCT_OPS_SLEEPABLE(rustland_init)
 {
-	struct bpf_cpumask *mask;
 	int err;
 
 	/* Compile-time checks */
 	BUILD_BUG_ON((MAX_CPUS % 2));
-
-	/* Initialize the offline CPU mask */
-	err = calloc_cpumask(&offline_cpumask);
-	mask = offline_cpumask;
-	if (!mask)
-		err = -ENOMEM;
-	if (err)
-		return err;
 
 	/* Initialize rustland core */
 	err = dsq_init();
@@ -1412,8 +1298,6 @@ SCX_OPS_DEFINE(rustland,
 	       .update_idle		= (void *)rustland_update_idle,
 	       .set_cpumask		= (void *)rustland_set_cpumask,
 	       .cpu_release		= (void *)rustland_cpu_release,
-	       .cpu_online		= (void *)rustland_cpu_online,
-	       .cpu_offline		= (void *)rustland_cpu_offline,
 	       .init_task		= (void *)rustland_init_task,
 	       .init			= (void *)rustland_init,
 	       .exit			= (void *)rustland_exit,
