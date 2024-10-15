@@ -172,6 +172,15 @@ struct {
 struct cpu_ctx {
 	struct bpf_cpumask __kptr *l2_cpumask;
 	struct bpf_cpumask __kptr *l3_cpumask;
+	/*
+	 * Prevent the CPU from going idle.
+	 *
+	 * This is set when the CPU has no task to run, but the user-space
+	 * scheduler has still some pending activities to process. Keeping the
+	 * CPU alive allows to consume tasks from the user-space scheduler more
+	 * efficiently, preventing bubbles in the scheduling pipeline.
+	 */
+	bool prevent_idle;
 };
 
 struct {
@@ -747,7 +756,8 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 }
 
 /*
- * Select an idle CPU for a specific task from the user-space scheduler.
+ * Select and wake-up an idle CPU for a specific task from the user-space
+ * scheduler.
  */
 SEC("syscall")
 int rs_select_cpu(struct task_cpu_arg *input)
@@ -758,11 +768,15 @@ int rs_select_cpu(struct task_cpu_arg *input)
 	p = bpf_task_from_pid(input->pid);
 	if (!p)
 		return -EINVAL;
+
 	bpf_rcu_read_lock();
 	cpu = pick_idle_cpu(p, input->cpu, input->flags);
 	bpf_rcu_read_unlock();
 
 	bpf_task_release(p);
+
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, 0);
 
 	return cpu;
 }
@@ -926,6 +940,12 @@ static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
  */
 void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 {
+	struct cpu_ctx *cctx;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return;
+
 	/*
 	 * Consume all tasks from the @dispatched list and immediately dispatch
 	 * them on the target CPU decided by the user-space scheduler.
@@ -946,7 +966,15 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * Consume a task from the shared DSQ.
 	 */
-	scx_bpf_consume(SHARED_DSQ);
+	if (scx_bpf_consume(SHARED_DSQ))
+		return;
+
+	/*
+	 * No more tasks to process, check if we need to keep the CPU alive to
+	 * process pending tasks from the user-space scheduler.
+	 */
+	if (cctx->prevent_idle)
+		scx_bpf_kick_cpu(cpu, 0);
 }
 
 /*
@@ -992,12 +1020,21 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
  */
 void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 {
+	struct cpu_ctx *cctx;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return;
+
 	/*
 	 * Don't do anything if we exit from and idle state, a CPU owner will
 	 * be assigned in .running().
 	 */
-	if (!idle)
+	if (!idle) {
+		cctx->prevent_idle = false;
 		return;
+	}
+
 	/*
 	 * A CPU is now available, notify the user-space scheduler that tasks
 	 * can be dispatched.
@@ -1008,6 +1045,7 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 		 * Wake up the idle CPU and trigger a resched, so that it can
 		 * immediately accept dispatched tasks.
 		 */
+		cctx->prevent_idle = true;
 		scx_bpf_kick_cpu(cpu, 0);
 		return;
 	}
@@ -1016,8 +1054,16 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 	 * Kick the CPU if there are still tasks dispatched to the
 	 * corresponding per-CPU DSQ.
 	 */
-	if (scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) > 0)
+	if (scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) > 0) {
+		cctx->prevent_idle = true;
 		scx_bpf_kick_cpu(cpu, 0);
+		return;
+	}
+
+	/*
+	 * Nothing to do: allow the CPU to go idle.
+	 */
+	cctx->prevent_idle = false;
 }
 
 /*
