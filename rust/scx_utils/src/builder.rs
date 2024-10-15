@@ -3,9 +3,13 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use std::env;
-use std::fs::File;
-use std::path::PathBuf;
+use std::{
+    ffi::OsStr,
+    fs::{self, File},
+    path::{Path, PathBuf},
+};
+
+include!("clang_info.rs");
 
 const BPF_H: &str = "bpf_h";
 
@@ -33,8 +37,37 @@ impl Builder {
         }
     }
 
+    fn find_vmlinux_h<P: AsRef<Path> + AsRef<OsStr>>(
+        dest: P,
+        kernel_target: &str,
+    ) -> Result<String> {
+        let entries = fs::read_dir(&dest)?;
+
+        for entry in entries {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+
+            println!("{file_name_str}");
+            if file_name_str.contains(&kernel_target) {
+                return Ok(entry.path().to_string_lossy().into_owned());
+            }
+        }
+        Err(anyhow!("vmlinux.h for arch {} is not found", kernel_target))
+    }
+
     fn gen_bindings(&self) {
         let out_dir = env::var("OUT_DIR").unwrap();
+        let clang = ClangInfo::new().unwrap();
+        let vmlinux_dir = Path::new(&BPF_H)
+            .join("vmlinux")
+            .to_str()
+            .ok_or(anyhow!("{:?}/vimlinux can't be converted to str", BPF_H))
+            .unwrap()
+            .to_string();
+        let vmlinux_h =
+            Self::find_vmlinux_h(&vmlinux_dir, &clang.kernel_target().unwrap()).unwrap();
+
         // FIXME - bindgen's API changed between 0.68 and 0.69 so that
         // `bindgen::CargoCallbacks::new()` should be used instead of
         // `bindgen::CargoCallbacks`. Unfortunately, as of Dec 2023, fedora is
@@ -43,7 +76,7 @@ impl Builder {
         // fedora can be updated to bindgen >= 0.69.
         #[allow(deprecated)]
         let bindings = bindgen::Builder::default()
-            .header("bindings.h")
+            .header(vmlinux_h)
             .allowlist_type("scx_exit_kind")
             .allowlist_type("scx_consts")
             .parse_callbacks(Box::new(bindgen::CargoCallbacks))
