@@ -775,9 +775,6 @@ int rs_select_cpu(struct task_cpu_arg *input)
 
 	bpf_task_release(p);
 
-	if (cpu >= 0)
-		scx_bpf_kick_cpu(cpu, 0);
-
 	return cpu;
 }
 
@@ -808,6 +805,26 @@ static void sched_congested(struct task_struct *p)
 {
 	dbg_msg("congested: pid=%d (%s)", p->pid, p->comm);
 	__sync_fetch_and_add(&nr_sched_congested, 1);
+}
+
+/*
+ * Try to wake up the CPU that was assigned to task @p.
+ */
+static void kick_task_cpu(struct task_struct *p)
+{
+	s32 cpu = scx_bpf_task_cpu(p);
+
+	/*
+	 * If the assigned CPU is not usable pick any other CPU usable by the
+	 * task.
+	 */
+	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		cpu = scx_bpf_pick_any_cpu(p->cpus_ptr, 0);
+
+	/*
+	 * Wake up the selected CPU if idle.
+	 */
+	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
 /*
@@ -847,6 +864,8 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (in_mm_fault(p->pid)) {
 		scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, 0, enq_flags);
+		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		kick_task_cpu(p);
 		return;
 	}
 
@@ -864,6 +883,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dispatch_vtime(p, SHARED_DSQ,
 				       SCX_SLICE_DFL, 0, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		kick_task_cpu(p);
 		return;
 	}
 	get_task_info(task, p, enq_flags);
@@ -901,10 +921,8 @@ static bool dispatch_user_scheduler(void)
 	 * completion through BpfScheduler->notify_complete().
 	 */
 	scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_INF, -1ULL, 0);
+	kick_task_cpu(p);
 
-	cpu = pick_idle_cpu(p, scx_bpf_task_cpu(p), 0);
-	if (cpu >= 0)
-		scx_bpf_kick_cpu(cpu, 0);
 	bpf_task_release(p);
 
 	return true;
