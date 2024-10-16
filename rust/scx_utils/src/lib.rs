@@ -33,8 +33,6 @@
 pub use log::warn;
 pub use paste::paste;
 
-mod clang_info;
-
 mod bindings;
 
 mod bpf_builder;
