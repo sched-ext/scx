@@ -201,6 +201,22 @@ static struct node_ctx *lookup_node_ctx(u32 node)
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, int);
+	__type(value, struct dsq_ctx);
+	__uint(max_entries, LO_FALLBACK_DSQ);
+	__uint(map_flags, 0);
+} dsq_data SEC(".maps");
+
+static struct dsq_ctx *lookup_dsq_ctx(u64 dsq_idx)
+{
+	struct dsq_ctx *dsqc;
+
+	dsqc = bpf_map_lookup_elem(&dsq_data, &dsq_idx);
+	return dsqc;
+}
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
 	__type(value, struct cache_ctx);
 	__uint(max_entries, MAX_LLCS);
@@ -301,6 +317,45 @@ static struct cpumask *lookup_layer_cpumask(int idx)
 	}
 }
 
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, int);
+	__type(value, struct lock_wrapper);
+	__uint(max_entries, LO_FALLBACK_DSQ);
+	__uint(map_flags, 0);
+} dsq_ctx_locks SEC(".maps");
+
+static void calc_dsq_usage(u64 dsq_id)
+{
+	struct dsq_ctx *dsqc;
+	struct lock_wrapper *lockw;
+
+	if (!(dsqc = lookup_dsq_ctx(dsq_id)) ||
+	    !(lockw = bpf_map_lookup_elem(&dsq_ctx_locks, &dsq_id)))
+		return;
+
+	bpf_spin_lock(&lockw->lock);
+	dsqc->usage_avg = (dsqc->usage_avg / 8) * 7;
+	bpf_spin_unlock(&lockw->lock);
+}
+
+static void update_dsq_usage(u64 dsq_id, u64 vtime_now, u64 usage_avg_adj)
+{
+	struct dsq_ctx *dsqc;
+	struct lock_wrapper *lockw;
+	u64 now = bpf_ktime_get_ns();
+
+	if (!(dsqc = lookup_dsq_ctx(dsq_id)) ||
+	    !(lockw = bpf_map_lookup_elem(&dsq_ctx_locks, &dsq_id)))
+		return;
+
+	bpf_spin_lock(&lockw->lock);
+	dsqc->vtime_now = vtime_now;
+	dsqc->usage_avg += usage_avg_adj;
+	ravg_accumulate(&dsqc->vtime_rd, dsqc->vtime_now, now, USAGE_HALF_LIFE_SEC);
+	bpf_spin_unlock(&lockw->lock);
+}
+
 /*
  * Returns if any cpus were added to the layer.
  */
@@ -357,11 +412,23 @@ static bool refresh_cpumasks(int idx)
 SEC("fentry")
 int BPF_PROG(sched_tick_fentry)
 {
-	int idx;
+	int layer_idx, llc_idx;
+	u64 dsq_id;
 
-	if (bpf_get_smp_processor_id() == 0)
-		bpf_for(idx, 0, nr_layers)
-			refresh_cpumasks(idx);
+	if (bpf_get_smp_processor_id() == 0) {
+		bpf_for(layer_idx, 0, nr_layers) {
+			refresh_cpumasks(layer_idx);
+			bpf_for(llc_idx, 0, nr_llcs) {
+				dsq_id = layer_dsq_id(layer_idx, llc_idx);
+				calc_dsq_usage(dsq_id);
+			}
+		}
+		bpf_for(llc_idx, 0, nr_llcs) {
+			dsq_id = llc_hi_fallback_dsq_id(llc_idx);
+			calc_dsq_usage(dsq_id);
+		}
+		calc_dsq_usage(LO_FALLBACK_DSQ);
+	}
 	return 0;
 }
 
@@ -372,6 +439,7 @@ struct task_ctx {
 	pid_t			last_waker;
 	bool			refresh_layer;
 	u64			layer_cpus_seq;
+	u64			last_dsq;
 	struct bpf_cpumask __kptr *layered_cpumask;
 
 	bool			all_cpus_allowed;
@@ -742,6 +810,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cctx);
 		u64 layer_slice_ns = layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
+		tctx->last_dsq = SCX_DSQ_LOCAL;
 		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, layer_slice_ns, 0);
 		return cpu;
 	} else {
@@ -1066,6 +1135,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 
 		idx = cpu_hi_fallback_dsq_id(task_cpu);
+		tctx->last_dsq = idx;
 		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
 		goto preempt;
 	}
@@ -1091,16 +1161,19 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		 * issue.
 		 */
 		idx = cpu_hi_fallback_dsq_id(task_cpu);
+		tctx->last_dsq = idx;
 		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
 		goto preempt;
 	}
 
 	if (disable_topology) {
+		tctx->last_dsq = tctx->layer;
 		scx_bpf_dispatch_vtime(p, tctx->layer, layer_slice_ns, vtime, enq_flags);
 	} else {
 		u32 llc_id = cpu_to_llc_id(tctx->last_cpu >= 0 ? tctx->last_cpu :
 					   bpf_get_smp_processor_id());
 		idx = layer_dsq_id(layer->idx, llc_id);
+		tctx->last_dsq = idx;
 		scx_bpf_dispatch_vtime(p, idx, layer_slice_ns, vtime, enq_flags);
 	}
 
@@ -1798,7 +1871,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct task_ctx *tctx;
 	struct layer *layer;
 	s32 lidx;
-	u64 used;
+	u64 used, vtime_diff;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
@@ -1823,7 +1896,9 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	/* scale the execution time by the inverse of the weight and charge */
 	if (cctx->yielding && used < layer_slice_ns)
 		used = layer_slice_ns;
-	p->scx.dsq_vtime += used * 100 / p->scx.weight;
+	vtime_diff = used * 100 / p->scx.weight;
+	p->scx.dsq_vtime += vtime_diff;
+	update_dsq_usage(tctx->last_dsq, p->scx.dsq_vtime, vtime_diff);
 	cctx->maybe_idle = true;
 }
 
