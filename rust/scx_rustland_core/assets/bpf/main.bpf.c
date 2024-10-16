@@ -423,7 +423,7 @@ static inline u64 task_slice(struct task_struct *p)
  * to handle these mistakes in favor of a more efficient response and a reduced
  * scheduling overhead.
  */
-static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
+static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
 	struct bpf_cpumask *l2_domain, *l3_domain;
@@ -510,51 +510,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 	 * cpumask).
 	 */
 	bpf_cpumask_and(l3_mask, p->cpus_ptr, cast_mask(l3_domain));
-
-	if (enq_flags & SCX_ENQ_WAKEUP) {
-		struct task_struct *current = (void *)bpf_get_current_task_btf();
-		struct bpf_cpumask *curr_l3_domain;
-		bool share_llc, has_idle;
-
-		/*
-		 * Determine waker CPU scheduling domain.
-		 */
-		cpu = bpf_get_smp_processor_id();
-
-		cctx = try_lookup_cpu_ctx(cpu);
-		if (!cctx) {
-			cpu = -ENOENT;
-			goto out_put_cpumask;
-		}
-
-		curr_l3_domain = cctx->l3_cpumask;
-		if (!curr_l3_domain) {
-			scx_bpf_error("CPU LLC cpumask not initialized");
-			cpu = -ENOENT;
-			goto out_put_cpumask;
-		}
-
-		/*
-		 * If both the waker and wakee share the same LLC keep using
-		 * the same CPU if possible.
-		 */
-		share_llc = bpf_cpumask_test_cpu(prev_cpu, cast_mask(curr_l3_domain));
-		if (share_llc && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			cpu = prev_cpu;
-			goto out_put_cpumask;
-		}
-
-		/*
-		 * If the waker's domain is not saturated attempt to migrate
-		 * the wakee on the same CPU as the waker.
-		 */
-		has_idle = bpf_cpumask_intersects(cast_mask(curr_l3_domain), idle_cpumask);
-		if (has_idle &&
-		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
-		    !(current->flags & PF_EXITING) &&
-		    scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) == 0)
-			goto out_put_cpumask;
-	}
 
 	/*
 	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
@@ -737,7 +692,7 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	goto out_release;
 
 out_kick_idle_cpu:
-	cpu = pick_idle_cpu(p, task->cpu, task->flags);
+	cpu = pick_idle_cpu(p, task->cpu);
 	if (cpu >= 0)
 		scx_bpf_kick_cpu(cpu, 0);
 
@@ -770,7 +725,7 @@ int rs_select_cpu(struct task_cpu_arg *input)
 		return -EINVAL;
 
 	bpf_rcu_read_lock();
-	cpu = pick_idle_cpu(p, input->cpu, input->flags);
+	cpu = pick_idle_cpu(p, input->cpu);
 	bpf_rcu_read_unlock();
 
 	bpf_task_release(p);
