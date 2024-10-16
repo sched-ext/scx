@@ -393,12 +393,12 @@ static struct task_ctx *lookup_task_ctx_may_fail(struct task_struct *p)
 	return bpf_task_storage_get(&task_ctxs, p, 0, 0);
 }
 
-static struct task_ctx *lookup_task_ctx(struct task_struct *p)
+static struct task_ctx *lookup_task_ctx(struct task_struct *p, const char caller[])
 {
 	struct task_ctx *tctx = lookup_task_ctx_may_fail(p);
 
 	if (!tctx)
-		scx_bpf_error("task_ctx lookup failed");
+		scx_bpf_error("task_ctx lookup failed: %s", caller);
 
 	return tctx;
 }
@@ -453,7 +453,7 @@ int BPF_PROG(tp_cgroup_attach_task, struct cgroup *cgrp, const char *cgrp_path,
 			break;
 		}
 
-		if ((tctx = lookup_task_ctx(next)))
+		if ((tctx = lookup_task_ctx(next, __func__)))
 			tctx->refresh_layer = true;
 	}
 
@@ -728,7 +728,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	struct layer *layer;
 	s32 cpu;
 
-	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p, __func__)))
 		return prev_cpu;
 
 	/*
@@ -1023,7 +1023,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	bool try_preempt_first;
 	u32 idx;
 
-	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)) ||
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p, __func__)) ||
 	    !(layer = lookup_layer(tctx->layer)))
 		return;
 
@@ -1122,7 +1122,7 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 	if (!(p->scx.flags & SCX_TASK_QUEUED))
 		goto no;
 
-	if (!(tctx = lookup_task_ctx(p)) || !(layer = lookup_layer(tctx->layer)))
+	if (!(tctx = lookup_task_ctx(p, __func__)) || !(layer = lookup_layer(tctx->layer)))
 		goto no;
 
 	u64 layer_slice_ns = layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
@@ -1721,7 +1721,7 @@ void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *tctx;
 	u64 now = bpf_ktime_get_ns();
 
-	if (!(tctx = lookup_task_ctx(p)))
+	if (!(tctx = lookup_task_ctx(p, __func__)))
 		return;
 
 	tctx->runnable_at = now;
@@ -1741,7 +1741,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	struct cache_ctx *cachec;
 	s32 task_cpu = scx_bpf_task_cpu(p);
 
-	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)) ||
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p, __func__)) ||
 	    !(layer = lookup_layer(tctx->layer)))
 		return;
 
@@ -1802,7 +1802,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	s32 lidx;
 	u64 used;
 
-	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p, __func__)))
 		return;
 
 	lidx = tctx->layer;
@@ -1833,7 +1833,7 @@ void BPF_STRUCT_OPS(layered_quiescent, struct task_struct *p, u64 deq_flags)
 {
 	struct task_ctx *tctx;
 
-	if ((tctx = lookup_task_ctx(p)))
+	if ((tctx = lookup_task_ctx(p, __func__)))
 		adj_load(tctx->layer, -(s64)p->scx.weight, bpf_ktime_get_ns());
 }
 
@@ -1843,7 +1843,7 @@ bool BPF_STRUCT_OPS(layered_yield, struct task_struct *from, struct task_struct 
 	struct task_ctx *tctx;
 	struct layer *layer;
 
-	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(from)) ||
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(from, __func__)) ||
 	    !(layer = lookup_layer(tctx->layer)))
 		return false;
 
@@ -1871,7 +1871,7 @@ void BPF_STRUCT_OPS(layered_set_weight, struct task_struct *p, u32 weight)
 {
 	struct task_ctx *tctx;
 
-	if ((tctx = lookup_task_ctx(p)))
+	if ((tctx = lookup_task_ctx(p, __func__)))
 		tctx->refresh_layer = true;
 }
 
@@ -1880,7 +1880,7 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 {
 	struct task_ctx *tctx;
 
-	if (!(tctx = lookup_task_ctx(p)))
+	if (!(tctx = lookup_task_ctx(p, __func__)))
 		return;
 
 	if (!all_cpumask) {
@@ -1954,7 +1954,7 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 
-	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p, __func__)))
 		return;
 
 	if (tctx->layer >= 0 && tctx->layer < nr_layers)
@@ -1971,7 +1971,7 @@ static u64 dsq_first_runnable_for_ms(u64 dsq_id, u64 now)
 	bpf_for_each(scx_dsq, p, dsq_id, 0) {
 		struct task_ctx *tctx;
 
-		if ((tctx = lookup_task_ctx(p)))
+		if ((tctx = lookup_task_ctx(p, __func__)))
 			return (now - tctx->runnable_at) / 1000000;
 	}
 
