@@ -301,59 +301,57 @@ static struct cpumask *lookup_layer_cpumask(int idx)
 	}
 }
 
-static void refresh_cpumasks(int idx)
+/*
+ * Returns if any cpus were added to the layer.
+ */
+static bool refresh_cpumasks(int idx)
 {
+	struct bpf_cpumask *layer_cpumask;
 	struct layer_cpumask_wrapper *cpumaskw;
 	struct layer *layer;
 	struct cpu_ctx *cctx;
 	int cpu, total = 0;
 
-	if (!__sync_val_compare_and_swap(&layers[idx].refresh_cpus, 1, 0))
-		return;
+	layer = MEMBER_VPTR(layers, [idx]);
+	if (!layer) {
+		scx_bpf_error("can't happen");
+		return false;
+	}
 
-	cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &idx);
+	if (!__sync_val_compare_and_swap(&layer->refresh_cpus, 1, 0))
+		return false;
+
+	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &idx)) ||
+	    !(layer_cpumask = cpumaskw->cpumask)) {
+		scx_bpf_error("can't happen");
+		return false;
+	}
 
 	bpf_for(cpu, 0, nr_possible_cpus) {
 		u8 *u8_ptr;
 
 		if (!(cctx = lookup_cpu_ctx(cpu))) {
 			scx_bpf_error("unknown cpu");
-			return;
+			return false;
 		}
 
 		if ((u8_ptr = MEMBER_VPTR(layers, [idx].cpus[cpu / 8]))) {
-			/*
-			 * XXX - The following test should be outside the loop
-			 * but that makes the verifier think that
-			 * cpumaskw->cpumask might be NULL in the loop.
-			 */
-			barrier_var(cpumaskw);
-			if (!cpumaskw || !cpumaskw->cpumask) {
-				scx_bpf_error("can't happen");
-				return;
-			}
-
 			if (*u8_ptr & (1 << (cpu % 8))) {
-				bpf_cpumask_set_cpu(cpu, cpumaskw->cpumask);
+				bpf_cpumask_set_cpu(cpu, layer_cpumask);
 				total++;
 			} else {
-				bpf_cpumask_clear_cpu(cpu, cpumaskw->cpumask);
+				bpf_cpumask_clear_cpu(cpu, layer_cpumask);
 			}
 		} else {
 			scx_bpf_error("can't happen");
 		}
 	}
 
-	// XXX - shouldn't be necessary
-	layer = MEMBER_VPTR(layers, [idx]);
-	if (!layer) {
-		scx_bpf_error("can't happen");
-		return;
-	}
 
 	layer->nr_cpus = total;
 	__sync_fetch_and_add(&layer->cpus_seq, 1);
 	trace("LAYER[%d] now has %d cpus, seq=%llu", idx, layer->nr_cpus, layer->cpus_seq);
+	return total > 0;
 }
 
 SEC("fentry")
