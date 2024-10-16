@@ -132,11 +132,6 @@ impl<'a> Scheduler<'a> {
 
             // Dispatch the task.
             self.bpf.dispatch_task(&dispatched_task).unwrap();
-
-            // Stop dispatching if all the CPUs are busy (select_cpu() couldn't find an idle CPU).
-            if cpu < 0 {
-                break;
-            }
         }
 
         // Notify the BPF component that tasks have been dispatched.

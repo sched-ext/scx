@@ -83,9 +83,12 @@ struct queued_task_ctx {
 	s32 pid;
 	s32 cpu; /* CPU where the task is running */
 	u64 flags; /* task enqueue flags */
-	u64 cpumask_cnt; /* cpumask generation counter */
 	u64 sum_exec_runtime; /* Total cpu time */
+	u64 nvcsw; /* Total amount of voluntary context switches */
 	u64 weight; /* Task static priority */
+	u64 slice; /* Time slice budget */
+	u64 vtime; /* Current task's vruntime */
+	u64 cpumask_cnt; /* cpumask generation counter */
 };
 
 /*

@@ -99,18 +99,6 @@ const volatile bool debug;
 const volatile bool smt_enabled = true;
 
 /*
- * Mask of offline CPUs, used to properly support CPU hotplugging.
- */
-private(BPFLAND) struct bpf_cpumask __kptr *offline_cpumask;
-
-/*
- * CPU hotplugging generation counter (used to notify the user-space
- * counterpart when a CPU hotplug event happened, allowing it to refresh the
- * topology information).
- */
-volatile u64 cpu_hotplug_cnt;
-
-/*
  * Set the state of a CPU in a cpumask.
  */
 static bool set_cpu_state(struct bpf_cpumask *cpumask, s32 cpu, bool state)
@@ -139,28 +127,6 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 		bpf_cpumask_release(cpumask);
 
 	return 0;
-}
-
-/*
- * Determine when we need to drain tasks dispatched to CPUs that went offline.
- */
-static int offline_needed;
-
-/*
- * Notify the scheduler that we need to drain and re-enqueue the tasks
- * dispatched to the offline CPU DSQs.
- */
-static void set_offline_needed(void)
-{
-	__sync_fetch_and_or(&offline_needed, 1);
-}
-
-/*
- * Check and clear the state of the offline CPUs re-enqueuing.
- */
-static bool test_and_clear_offline_needed(void)
-{
-	return __sync_fetch_and_and(&offline_needed, 0) == 1;
 }
 
 /*
@@ -206,6 +172,15 @@ struct {
 struct cpu_ctx {
 	struct bpf_cpumask __kptr *l2_cpumask;
 	struct bpf_cpumask __kptr *l3_cpumask;
+	/*
+	 * Prevent the CPU from going idle.
+	 *
+	 * This is set when the CPU has no task to run, but the user-space
+	 * scheduler has still some pending activities to process. Keeping the
+	 * CPU alive allows to consume tasks from the user-space scheduler more
+	 * efficiently, preventing bubbles in the scheduling pipeline.
+	 */
+	bool prevent_idle;
 };
 
 struct {
@@ -448,7 +423,7 @@ static inline u64 task_slice(struct task_struct *p)
  * to handle these mistakes in favor of a more efficient response and a reduced
  * scheduling overhead.
  */
-static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
+static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
 	struct bpf_cpumask *l2_domain, *l3_domain;
@@ -464,14 +439,18 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 	 * dispatched to a global DSQ.
 	 */
 	if (!bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
-		return -ENOENT;
+		prev_cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
 
 	/*
-	 * For tasks that can run only on a single CPU, simply return the only
-	 * allowed CPU.
+	 * For tasks that can run only on a single CPU, we can simply verify if
+	 * their only allowed CPU is still idle.
 	 */
-	if (p->nr_cpus_allowed == 1)
-		return prev_cpu;
+	if (p->nr_cpus_allowed == 1 || p->migration_disabled) {
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			return prev_cpu;
+
+		return -ENOENT;
+	}
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -531,50 +510,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 enq_flags)
 	 * cpumask).
 	 */
 	bpf_cpumask_and(l3_mask, p->cpus_ptr, cast_mask(l3_domain));
-
-	if (enq_flags & SCX_ENQ_WAKEUP) {
-		struct task_struct *current = (void *)bpf_get_current_task_btf();
-		bool share_llc, has_idle;
-
-		/*
-		 * Determine waker CPU scheduling domain.
-		 */
-		cpu = bpf_get_smp_processor_id();
-
-		cctx = try_lookup_cpu_ctx(cpu);
-		if (!cctx) {
-			cpu = -ENOENT;
-			goto out_put_cpumask;
-		}
-
-		l3_domain = cctx->l3_cpumask;
-		if (!l3_domain) {
-			scx_bpf_error("CPU LLC cpumask not initialized");
-			cpu = -ENOENT;
-			goto out_put_cpumask;
-		}
-
-		/*
-		 * If both the waker and wakee share the same LLC keep using
-		 * the same CPU if possible.
-		 */
-		share_llc = bpf_cpumask_test_cpu(prev_cpu, cast_mask(l3_domain));
-		if (share_llc && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			cpu = prev_cpu;
-			goto out_put_cpumask;
-		}
-
-		/*
-		 * If the waker's domain is not saturated attempt to migrate
-		 * the wakee on the same CPU as the waker.
-		 */
-		has_idle = bpf_cpumask_intersects(cast_mask(l3_domain), idle_cpumask);
-		if (has_idle &&
-		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
-		    !(current->flags & PF_EXITING) &&
-		    scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) == 0)
-			goto out_put_cpumask;
-	}
 
 	/*
 	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
@@ -685,6 +620,9 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	if (!p)
 		return;
 
+	dbg_msg("dispatch: pid=%d (%s) cpu=0x%lx vtime=%llu slice=%llu",
+		p->pid, p->comm, task->cpu, task->vtime, task->slice_ns);
+
 	/*
 	 * Update task's time slice in its context.
 	 */
@@ -754,7 +692,7 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	goto out_release;
 
 out_kick_idle_cpu:
-	cpu = pick_idle_cpu(p, task->cpu, task->flags);
+	cpu = pick_idle_cpu(p, task->cpu);
 	if (cpu >= 0)
 		scx_bpf_kick_cpu(cpu, 0);
 
@@ -773,7 +711,8 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 }
 
 /*
- * Select an idle CPU for a specific task from the user-space scheduler.
+ * Select and wake-up an idle CPU for a specific task from the user-space
+ * scheduler.
  */
 SEC("syscall")
 int rs_select_cpu(struct task_cpu_arg *input)
@@ -784,8 +723,9 @@ int rs_select_cpu(struct task_cpu_arg *input)
 	p = bpf_task_from_pid(input->pid);
 	if (!p)
 		return -EINVAL;
+
 	bpf_rcu_read_lock();
-	cpu = pick_idle_cpu(p, input->cpu, input->flags);
+	cpu = pick_idle_cpu(p, input->cpu);
 	bpf_rcu_read_unlock();
 
 	bpf_task_release(p);
@@ -803,10 +743,13 @@ static void get_task_info(struct queued_task_ctx *task,
 	struct task_ctx *tctx = try_lookup_task_ctx(p);
 
 	task->pid = p->pid;
-	task->sum_exec_runtime = p->se.sum_exec_runtime;
-	task->flags = enq_flags;
-	task->weight = p->scx.weight;
 	task->cpu = scx_bpf_task_cpu(p);
+	task->flags = enq_flags;
+	task->sum_exec_runtime = p->se.sum_exec_runtime;
+	task->nvcsw = p->nvcsw;
+	task->weight = p->scx.weight;
+	task->slice = p->scx.slice;
+	task->vtime = p->scx.dsq_vtime;
 	task->cpumask_cnt = tctx ? tctx->cpumask_cnt : 0;
 }
 
@@ -817,6 +760,26 @@ static void sched_congested(struct task_struct *p)
 {
 	dbg_msg("congested: pid=%d (%s)", p->pid, p->comm);
 	__sync_fetch_and_add(&nr_sched_congested, 1);
+}
+
+/*
+ * Try to wake up the CPU that was assigned to task @p.
+ */
+static void kick_task_cpu(struct task_struct *p)
+{
+	s32 cpu = scx_bpf_task_cpu(p);
+
+	/*
+	 * If the assigned CPU is not usable pick any other CPU usable by the
+	 * task.
+	 */
+	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		cpu = scx_bpf_pick_any_cpu(p->cpus_ptr, 0);
+
+	/*
+	 * Wake up the selected CPU if idle.
+	 */
+	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
 /*
@@ -843,10 +806,8 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
-		s32 cpu = scx_bpf_task_cpu(p);
-
-		scx_bpf_dispatch_vtime(p, cpu_to_dsq(cpu),
-				       SCX_SLICE_DFL, 0, enq_flags);
+                scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
+				 enq_flags | SCX_ENQ_PREEMPT);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -858,6 +819,8 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (in_mm_fault(p->pid)) {
 		scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, 0, enq_flags);
+		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		kick_task_cpu(p);
 		return;
 	}
 
@@ -875,6 +838,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dispatch_vtime(p, SHARED_DSQ,
 				       SCX_SLICE_DFL, 0, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+		kick_task_cpu(p);
 		return;
 	}
 	get_task_info(task, p, enq_flags);
@@ -900,15 +864,20 @@ static bool dispatch_user_scheduler(void)
 		scx_bpf_error("Failed to find usersched task %d", usersched_pid);
 		return false;
 	}
+
 	/*
 	 * Use the highest vtime possible to give the scheduler itself the
 	 * lowest priority possible.
+	 *
+	 * At the same time make sure to assign an infinite time slice, so that
+	 * it can completely drain all the pending tasks.
+	 *
+	 * The user-space scheduler will voluntarily yield the CPU upon
+	 * completion through BpfScheduler->notify_complete().
 	 */
-	scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, -1ULL, 0);
+	scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_INF, -1ULL, 0);
+	kick_task_cpu(p);
 
-	cpu = pick_idle_cpu(p, scx_bpf_task_cpu(p), 0);
-	if (cpu >= 0)
-		scx_bpf_kick_cpu(cpu, 0);
 	bpf_task_release(p);
 
 	return true;
@@ -933,50 +902,6 @@ static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
 }
 
 /*
- * Consume tasks dispatched to CPUs that have gone offline.
- *
- * These tasks will be consumed on other active CPUs to prevent indefinite
- * stalling.
- *
- * Return true if one task is consumed, false otherwise.
- */
-static bool consume_offline_cpus(s32 cpu)
-{
-	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
-	struct bpf_cpumask *offline;
-	bool ret = false;
-
-	if (!test_and_clear_offline_needed())
-		return false;
-
-	offline = offline_cpumask;
-	if (!offline)
-		return false;
-
-	/*
-	 * Cycle through all the CPUs and evenly consume tasks from the DSQs of
-	 * those that are offline.
-	 */
-	bpf_repeat(nr_cpu_ids - 1) {
-		cpu = (cpu + 1) % nr_cpu_ids;
-
-		if (!bpf_cpumask_test_cpu(cpu, cast_mask(offline)))
-			continue;
-		/*
-		 * This CPU is offline, if a task has been dispatched there
-		 * consume it immediately on the current CPU.
-		 */
-		if (scx_bpf_consume(cpu_to_dsq(cpu))) {
-			set_offline_needed();
-			ret = true;
-			break;
-		}
-	}
-
-	return ret;
-}
-
-/*
  * Dispatch tasks that are ready to run.
  *
  * This function is called when a CPU's local DSQ is empty and ready to accept
@@ -988,6 +913,12 @@ static bool consume_offline_cpus(s32 cpu)
  */
 void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 {
+	struct cpu_ctx *cctx;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return;
+
 	/*
 	 * Consume all tasks from the @dispatched list and immediately dispatch
 	 * them on the target CPU decided by the user-space scheduler.
@@ -995,11 +926,9 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, 0);
 
 	/*
-	 * Try to steal a task dispatched to CPUs that may have gone offline
-	 * (this allows to prevent indefinite task stalls).
+	 * Check if the user-space scheduler needs to run.
 	 */
-	if (consume_offline_cpus(cpu))
-		return;
+	dispatch_user_scheduler();
 
 	/*
 	 * Consume a task from the per-CPU DSQ.
@@ -1014,9 +943,11 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
-	 * Check if the user-space scheduler needs to run.
+	 * No more tasks to process, check if we need to keep the CPU alive to
+	 * process pending tasks from the user-space scheduler.
 	 */
-	dispatch_user_scheduler();
+	if (cctx->prevent_idle)
+		scx_bpf_kick_cpu(cpu, 0);
 }
 
 /*
@@ -1053,15 +984,8 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Mark the CPU as idle by setting the owner to 0.
 	 */
-	if (!is_usersched_task(p)) {
+	if (!is_usersched_task(p))
 		__sync_fetch_and_sub(&nr_running, 1);
-		/*
-		 * Kick the user-space scheduler immediately when a task
-		 * releases a CPU and speculate on the fact that most of the
-		 * time there is another task ready to run.
-		 */
-		set_usersched_needed();
-	}
 }
 
 /*
@@ -1069,12 +993,21 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
  */
 void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 {
+	struct cpu_ctx *cctx;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return;
+
 	/*
 	 * Don't do anything if we exit from and idle state, a CPU owner will
 	 * be assigned in .running().
 	 */
-	if (!idle)
+	if (!idle) {
+		cctx->prevent_idle = false;
 		return;
+	}
+
 	/*
 	 * A CPU is now available, notify the user-space scheduler that tasks
 	 * can be dispatched.
@@ -1085,6 +1018,7 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 		 * Wake up the idle CPU and trigger a resched, so that it can
 		 * immediately accept dispatched tasks.
 		 */
+		cctx->prevent_idle = true;
 		scx_bpf_kick_cpu(cpu, 0);
 		return;
 	}
@@ -1093,8 +1027,16 @@ void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
 	 * Kick the CPU if there are still tasks dispatched to the
 	 * corresponding per-CPU DSQ.
 	 */
-	if (scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) > 0)
+	if (scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) > 0) {
+		cctx->prevent_idle = true;
 		scx_bpf_kick_cpu(cpu, 0);
+		return;
+	}
+
+	/*
+	 * Nothing to do: allow the CPU to go idle.
+	 */
+	cctx->prevent_idle = false;
 }
 
 /*
@@ -1126,26 +1068,6 @@ void BPF_STRUCT_OPS(rustland_cpu_release, s32 cpu,
 	dbg_msg("cpu preemption: pid=%d (%s)", p->pid, p->comm);
 	if (is_usersched_task(p))
 		set_usersched_needed();
-}
-
-void BPF_STRUCT_OPS(rustland_cpu_online, s32 cpu)
-{
-	/* Set the CPU state to online */
-	set_cpu_state(offline_cpumask, cpu, false);
-
-	__sync_fetch_and_add(&nr_online_cpus, 1);
-	__sync_fetch_and_add(&cpu_hotplug_cnt, 1);
-}
-
-void BPF_STRUCT_OPS(rustland_cpu_offline, s32 cpu)
-{
-	/* Set the CPU state to offline */
-	set_cpu_state(offline_cpumask, cpu, true);
-
-	__sync_fetch_and_sub(&nr_online_cpus, 1);
-	__sync_fetch_and_add(&cpu_hotplug_cnt, 1);
-
-	set_offline_needed();
 }
 
 /*
@@ -1359,19 +1281,10 @@ int enable_sibling_cpu(struct domain_arg *input)
  */
 s32 BPF_STRUCT_OPS_SLEEPABLE(rustland_init)
 {
-	struct bpf_cpumask *mask;
 	int err;
 
 	/* Compile-time checks */
 	BUILD_BUG_ON((MAX_CPUS % 2));
-
-	/* Initialize the offline CPU mask */
-	err = calloc_cpumask(&offline_cpumask);
-	mask = offline_cpumask;
-	if (!mask)
-		err = -ENOMEM;
-	if (err)
-		return err;
 
 	/* Initialize rustland core */
 	err = dsq_init();
@@ -1404,8 +1317,6 @@ SCX_OPS_DEFINE(rustland,
 	       .update_idle		= (void *)rustland_update_idle,
 	       .set_cpumask		= (void *)rustland_set_cpumask,
 	       .cpu_release		= (void *)rustland_cpu_release,
-	       .cpu_online		= (void *)rustland_cpu_online,
-	       .cpu_offline		= (void *)rustland_cpu_offline,
 	       .init_task		= (void *)rustland_init_task,
 	       .init			= (void *)rustland_init,
 	       .exit			= (void *)rustland_exit,

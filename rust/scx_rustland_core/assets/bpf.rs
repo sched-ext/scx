@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::Once;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -82,7 +83,10 @@ pub struct QueuedTask {
     pub cpu: i32,              // CPU where the task is running
     pub flags: u64,            // task enqueue flags
     pub sum_exec_runtime: u64, // Total cpu time
+    pub nvcsw: u64,            // Total amount of voluntary context switches
     pub weight: u64,           // Task static priority
+    pub slice: u64,            // Time slice budget
+    pub vtime: u64,            // Current vruntime
     cpumask_cnt: u64,          // cpumask generation counter (private)
 }
 
@@ -107,9 +111,9 @@ impl DispatchedTask {
             pid: task.pid,
             cpu: task.cpu,
             flags: task.flags,
-            cpumask_cnt: task.cpumask_cnt,
             slice_ns: 0, // use default time slice
             vtime: 0,
+            cpumask_cnt: task.cpumask_cnt,
         }
     }
 }
@@ -144,7 +148,10 @@ impl EnqueuedMessage {
             cpu: self.inner.cpu,
             flags: self.inner.flags,
             sum_exec_runtime: self.inner.sum_exec_runtime,
+            nvcsw: self.inner.nvcsw,
             weight: self.inner.weight,
+            slice: self.inner.slice,
+            vtime: self.inner.vtime,
             cpumask_cnt: self.inner.cpumask_cnt,
         }
     }
@@ -155,7 +162,6 @@ pub struct BpfScheduler<'cb> {
     shutdown: Arc<AtomicBool>,             // Determine scheduler shutdown
     queued: libbpf_rs::RingBuffer<'cb>,    // Ring buffer of queued tasks
     dispatched: libbpf_rs::UserRingBuffer, // User Ring buffer of dispatched tasks
-    cpu_hotplug_cnt: u64,                  // CPU hotplug generation counter
     struct_ops: Option<libbpf_rs::Link>,   // Low-level BPF methods
 }
 
@@ -184,6 +190,18 @@ fn is_smt_active() -> std::io::Result<bool> {
     Ok(smt_active == 1)
 }
 
+static SET_HANDLER: Once = Once::new();
+
+fn set_ctrlc_handler(shutdown: Arc<AtomicBool>) -> Result<(), anyhow::Error> {
+    SET_HANDLER.call_once(|| {
+        let shutdown_clone = shutdown.clone();
+        ctrlc::set_handler(move || {
+            shutdown_clone.store(true, Ordering::Relaxed);
+        }).expect("Error setting Ctrl-C handler");
+    });
+    Ok(())
+}
+
 impl<'cb> BpfScheduler<'cb> {
     pub fn init(
         open_object: &'cb mut MaybeUninit<OpenObject>,
@@ -192,11 +210,7 @@ impl<'cb> BpfScheduler<'cb> {
         debug: bool,
     ) -> Result<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
-        let shutdown_clone = shutdown.clone();
-        ctrlc::set_handler(move || {
-            shutdown_clone.store(true, Ordering::Relaxed);
-        })
-        .context("Error setting Ctrl-C handler")?;
+        set_ctrlc_handler(shutdown.clone()).context("Error setting Ctrl-C handler")?;
 
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
@@ -283,7 +297,6 @@ impl<'cb> BpfScheduler<'cb> {
                 shutdown,
                 queued,
                 dispatched,
-                cpu_hotplug_cnt: 0,
                 struct_ops,
             }),
             err => Err(anyhow::Error::msg(format!(
@@ -377,21 +390,6 @@ impl<'cb> BpfScheduler<'cb> {
         })
     }
 
-    fn refresh_cache_domains(&mut self) {
-        // Check if we need to refresh the CPU cache information.
-        if self.cpu_hotplug_cnt == self.skel.maps.bss_data.cpu_hotplug_cnt {
-            return;
-        }
-
-        // Re-initialize cache domains.
-        let topo = Topology::new().unwrap();
-        Self::init_l2_cache_domains(&mut self.skel, &topo).unwrap();
-        Self::init_l3_cache_domains(&mut self.skel, &topo).unwrap();
-
-        // Update CPU hotplug generation counter.
-        self.cpu_hotplug_cnt = self.skel.maps.bss_data.cpu_hotplug_cnt;
-    }
-
     // Notify the BPF component that the user-space scheduler has completed its scheduling cycle,
     // updating the amount tasks that are still peding.
     //
@@ -399,7 +397,6 @@ impl<'cb> BpfScheduler<'cb> {
     // some point, otherwise the BPF component will keep waking-up the user-space scheduler in a
     // busy loop, causing unnecessary high CPU consumption.
     pub fn notify_complete(&mut self, nr_pending: u64) {
-        self.refresh_cache_domains();
         self.skel.maps.bss_data.nr_scheduled = nr_pending;
         std::thread::yield_now();
     }
