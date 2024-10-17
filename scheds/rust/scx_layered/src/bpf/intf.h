@@ -42,6 +42,7 @@ enum consts {
 	MIN_LAYER_WEIGHT	= 1,
 	DEFAULT_LAYER_WEIGHT	= 100,
 	USAGE_HALF_LIFE		= 100000000,	/* 100ms */
+	USAGE_HALF_LIFE_SEC	= USAGE_HALF_LIFE * 10,	/* 1s */
 
 	HI_FALLBACK_DSQ_BASE	= MAX_LAYERS * MAX_LLCS,
 	LO_FALLBACK_DSQ		= (MAX_LAYERS * MAX_LLCS) + MAX_LLCS + 1,
@@ -103,6 +104,12 @@ struct cpu_ctx {
 	u32			layer_idx;
 	u32			cache_idx;
 	u32			node_idx;
+};
+
+struct dsq_ctx {
+	u64 vtime_now;
+	u64 usage_avg;
+	struct ravg_data vtime_rd;
 };
 
 struct cache_ctx {
