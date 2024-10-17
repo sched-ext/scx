@@ -162,6 +162,7 @@ enum layer_growth_algo {
 	GROWTH_ALGO_ROUND_ROBIN,
 	GROWTH_ALGO_BIG_LITTLE,
 	GROWTH_ALGO_LITTLE_BIG,
+	GROWTH_ALGO_RANDOM_TOPO,
 };
 
 struct layer {

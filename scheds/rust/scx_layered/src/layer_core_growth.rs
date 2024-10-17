@@ -36,6 +36,10 @@ pub enum LayerGrowthAlgo {
     /// LittleBig attempts to first grow across all little cores and then
     /// allocates onto big cores after all little cores are allocated.
     LittleBig,
+    /// RandomTopo is sticky to NUMA nodes/LLCs but randomises the order in which
+    /// it visits each. The layer will select a random NUMA node, then a random LLC
+    /// within it, then randomly iterate the cores in that LLC.
+    RandomTopo,
 }
 
 const GROWTH_ALGO_STICKY: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_STICKY as i32;
@@ -46,6 +50,7 @@ const GROWTH_ALGO_TOPO: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_TOPO as i3
 const GROWTH_ALGO_ROUND_ROBIN: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_ROUND_ROBIN as i32;
 const GROWTH_ALGO_BIG_LITTLE: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_BIG_LITTLE as i32;
 const GROWTH_ALGO_LITTLE_BIG: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_LITTLE_BIG as i32;
+const GROWTH_ALGO_RANDOM_TOPO: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_RANDOM_TOPO as i32;
 
 impl LayerGrowthAlgo {
     pub fn as_bpf_enum(&self) -> i32 {
@@ -58,6 +63,7 @@ impl LayerGrowthAlgo {
             LayerGrowthAlgo::RoundRobin => GROWTH_ALGO_ROUND_ROBIN,
             LayerGrowthAlgo::BigLittle => GROWTH_ALGO_BIG_LITTLE,
             LayerGrowthAlgo::LittleBig => GROWTH_ALGO_LITTLE_BIG,
+            LayerGrowthAlgo::RandomTopo => GROWTH_ALGO_RANDOM_TOPO,
         }
     }
 
@@ -83,6 +89,7 @@ impl LayerGrowthAlgo {
             LayerGrowthAlgo::BigLittle => generator.grow_big_little(),
             LayerGrowthAlgo::LittleBig => generator.grow_little_big(),
             LayerGrowthAlgo::Topo => generator.grow_topo(),
+            LayerGrowthAlgo::RandomTopo => generator.grow_random_topo(),
         }
     }
 }
@@ -236,6 +243,28 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             });
             core_order
         }
+    }
+
+    fn grow_random_topo(&self) -> Vec<usize> {
+        fastrand::seed(self.layer_idx.try_into().unwrap());
+
+        let mut nodes: Vec<_> = self.topo.nodes().into_iter().collect();
+        fastrand::shuffle(&mut nodes);
+
+        nodes
+            .into_iter()
+            .flat_map(|node| {
+                let mut llcs: Vec<_> = node.llcs().values().collect();
+                fastrand::shuffle(&mut llcs);
+                llcs.into_iter()
+            })
+            .flat_map(|llc| {
+                let mut cores: Vec<_> = llc.cores().values().collect();
+                fastrand::shuffle(&mut cores);
+                cores.into_iter()
+            })
+            .map(|c| self.cpu_pool.get_core_topological_id(c))
+            .collect()
     }
 }
 
