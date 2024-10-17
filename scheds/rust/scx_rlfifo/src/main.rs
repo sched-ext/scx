@@ -47,6 +47,9 @@
 //!     pub flags: u64,            // task's enqueue flags
 //!     pub sum_exec_runtime: u64, // Total cpu time in nanoseconds
 //!     pub weight: u64,           // Task priority in the range [1..10000] (default is 100)
+//!     pub nvcsw: u64,            // Total amount of voluntary context switches
+//!     pub slice: u64,            // Remaining time slice budget
+//!     pub vtime: u64,            // Current task vruntime / deadline (set by the scheduler)
 //! }
 //!
 //! Each task dispatched using dispatch_task() contains the following:

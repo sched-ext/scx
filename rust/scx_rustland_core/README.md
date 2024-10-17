@@ -105,6 +105,9 @@ impl<'a> Scheduler<'a> {
         //     pub cpu: i32,              // CPU where the task is running
         //     pub sum_exec_runtime: u64, // Total cpu time
         //     pub weight: u64,           // Task static priority
+        //     pub nvcsw: u64,            // Total amount of voluntary context switches
+        //     pub slice: u64,            // Remaining time slice budget
+        //     pub vtime: u64,            // Current task vruntime / deadline (set by the scheduler)
         // }
         //
         // Although the FIFO scheduler doesn't use these fields, they can provide valuable data for
