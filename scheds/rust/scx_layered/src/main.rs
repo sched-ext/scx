@@ -33,10 +33,6 @@ use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
-use log::debug;
-use log::info;
-use log::trace;
-use log::warn;
 use scx_layered::*;
 use scx_stats::prelude::*;
 use scx_utils::compat;
@@ -56,6 +52,10 @@ use stats::LayerStats;
 use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
+use tracing::debug;
+use tracing::info;
+use tracing::trace;
+use tracing::warn;
 
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
@@ -454,6 +454,10 @@ struct Opts {
     /// Show descriptions for statistics.
     #[clap(long)]
     help_stats: bool,
+
+    /// Emit logs as newline delimited json (jsonl)
+    #[clap(long, default_value = "false")]
+    json_log: bool,
 
     /// Layer specification. See --help.
     specs: Vec<String>,
@@ -1895,22 +1899,33 @@ fn main() -> Result<()> {
         );
     }
 
-    let llv = match opts.verbose {
-        0 => simplelog::LevelFilter::Info,
-        1 => simplelog::LevelFilter::Debug,
-        _ => simplelog::LevelFilter::Trace,
+    let mut llv = match opts.verbose {
+        0 => tracing::level_filters::LevelFilter::INFO,
+        1 => tracing::level_filters::LevelFilter::DEBUG,
+        _ => tracing::level_filters::LevelFilter::TRACE,
     };
-    let mut lcfg = simplelog::ConfigBuilder::new();
-    lcfg.set_time_level(simplelog::LevelFilter::Error)
-        .set_location_level(simplelog::LevelFilter::Off)
-        .set_target_level(simplelog::LevelFilter::Off)
-        .set_thread_level(simplelog::LevelFilter::Off);
-    simplelog::TermLogger::init(
-        llv,
-        lcfg.build(),
-        simplelog::TerminalMode::Stderr,
-        simplelog::ColorChoice::Auto,
-    )?;
+
+    if opts.json_log {
+        llv = tracing::level_filters::LevelFilter::TRACE;
+    }
+
+    if opts.json_log {
+        tracing_subscriber::fmt()
+            .with_max_level(llv)
+            .json()
+            .with_file(true)
+            .with_line_number(true)
+            .flatten_event(true)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .pretty()
+            .with_max_level(llv)
+            .with_file(true)
+            .with_line_number(true)
+            .with_ansi(true)
+            .init();
+    }
 
     debug!("opts={:?}", &opts);
 
@@ -1924,7 +1939,7 @@ fn main() -> Result<()> {
     if let Some(intv) = opts.monitor.or(opts.stats) {
         let shutdown_copy = shutdown.clone();
         let jh = std::thread::spawn(move || {
-            stats::monitor(Duration::from_secs_f64(intv), shutdown_copy).unwrap()
+            stats::monitor(Duration::from_secs_f64(intv), shutdown_copy, opts.json_log).unwrap()
         });
         if opts.monitor.is_some() {
             let _ = jh.join();

@@ -19,10 +19,10 @@ pub use config::LayerKind;
 pub use config::LayerMatch;
 pub use config::LayerSpec;
 pub use layer_core_growth::LayerGrowthAlgo;
-use log::debug;
-use log::info;
 use scx_utils::Core;
 use scx_utils::Topology;
+use tracing::debug;
+use tracing::info;
 
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 const CORE_CACHE_LEVEL: u32 = 2;

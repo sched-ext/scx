@@ -14,13 +14,16 @@ use anyhow::Result;
 use bitvec::prelude::*;
 use chrono::DateTime;
 use chrono::Local;
-use log::warn;
 use scx_stats::prelude::*;
 use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
 use scx_utils::normalize_load_metric;
 use serde::Deserialize;
 use serde::Serialize;
+use tracing::event;
+use tracing::span;
+use tracing::warn;
+use tracing::Level;
 
 use crate::bpf_intf;
 use crate::BpfStats;
@@ -339,6 +342,63 @@ impl LayerStats {
 
         Ok(())
     }
+
+    pub fn tracing_log(&self, name: &str) -> Result<()> {
+        let span = span!(Level::TRACE, "layer", name);
+        let _guard = span.enter();
+        let mut cpus = self
+            .cpus
+            .iter()
+            .fold(String::new(), |string, v| format!("{}{:08x} ", string, v));
+        cpus.pop();
+
+        event!(
+            Level::TRACE,
+            util = self.util,
+            dcycle = self.dcycle,
+            util_frac = self.util_frac,
+            load = self.load,
+            load_frac_adj = self.load_frac_adj,
+            load_frac = self.load_frac,
+            tasks = self.tasks,
+            total = self.total,
+            sel_local = fmt_pct(self.sel_local),
+            enq_wakeup = fmt_pct(self.enq_wakeup),
+            enq_expire = fmt_pct(self.enq_expire),
+            enq_reenq = fmt_pct(self.enq_reenq),
+            xlayer_wake = fmt_pct(self.xlayer_wake),
+            xlauyer_rewake = fmt_pct(self.xlayer_rewake),
+            keep = fmt_pct(self.keep),
+            keep_fail_max_exec = fmt_pct(self.keep_fail_max_exec),
+            keep_fail_busy = fmt_pct(self.keep_fail_busy),
+            kick = fmt_pct(self.kick),
+            yielded = fmt_pct(self.yielded),
+            yield_ignore = fmt_num(self.yield_ignore),
+            open_idle = fmt_pct(self.open_idle),
+            migration = fmt_pct(self.migration),
+            xnuma_migration = fmt_pct(self.xnuma_migration),
+            xllc_migration = fmt_pct(self.xllc_migration),
+            affn_viol = fmt_pct(self.affn_viol),
+            preempt = fmt_pct(self.preempt),
+            preempt_first = fmt_pct(self.preempt_first),
+            preempt_xllc = fmt_pct(self.preempt_xllc),
+            preempt_xnuma = fmt_pct(self.preempt_xnuma),
+            preempt_idle = fmt_pct(self.preempt_idle),
+            preempt_fail = fmt_pct(self.preempt_fail),
+            min_exec = fmt_pct(self.min_exec),
+            min_exec_us = self.min_exec_us as f64 / 1000.0,
+            slice_us = self.slice_us as f64 / 1000.0,
+            cpus = cpus,
+            cur_nr_cpus = self.cur_nr_cpus,
+            min_nr_cpus = self.min_nr_cpus,
+            max_nr_cpus = self.max_nr_cpus,
+            is_excl = self.is_excl != 0,
+            excl_warn = self.excl_collision != 0.0 || self.excl_preempt != 0.0,
+            excl_collision = fmt_pct(self.excl_collision),
+            excl_preempt = fmt_pct(self.excl_preempt),
+        );
+        Ok(())
+    }
 }
 
 #[stat_doc]
@@ -445,9 +505,32 @@ impl SysStats {
         Ok(())
     }
 
-    pub fn format_all<W: Write>(&self, w: &mut W) -> Result<()> {
-        self.format(w)?;
+    pub fn tracing_log(&self) -> Result<()> {
+        let span = span!(Level::TRACE, "system");
+        let _guard = span.enter();
 
+        event!(
+            Level::TRACE,
+            total = self.total,
+            local = fmt_pct(self.local),
+            open_idle = fmt_pct(self.open_idle),
+            affn_viol = fmt_pct(self.affn_viol),
+            proc_ms = self.proc_ms,
+            nr_nodes = self.nr_nodes,
+            busy = self.busy,
+            util = self.util,
+            load = self.load,
+            fallback_cpu = self.fallback_cpu,
+            excl_collision = self.excl_collision,
+            excl_preempt = self.excl_preempt,
+            excl_idle = self.excl_idle,
+            excl_wakeup = self.excl_wakeup
+        );
+
+        Ok(())
+    }
+
+    pub fn format_all<W: Write>(&self, w: &mut W) -> Result<()> {
         let header_width = self
             .layers
             .keys()
@@ -460,6 +543,13 @@ impl SysStats {
             layer.format(w, name, header_width)?;
         }
 
+        Ok(())
+    }
+    pub fn tracing_log_all(&self) -> Result<()> {
+        self.tracing_log()?;
+        for (name, layer) in self.layers.iter() {
+            layer.tracing_log(name)?
+        }
         Ok(())
     }
 }
@@ -521,15 +611,19 @@ pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
         )
 }
 
-pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
+pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>, json: bool) -> Result<()> {
     scx_utils::monitor_stats::<SysStats>(
         &vec![],
         intv,
         || shutdown.load(Ordering::Relaxed),
         |sst| {
-            let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
-            println!("###### {} ######", dt.to_rfc2822());
-            sst.format_all(&mut std::io::stdout())
+            if !json {
+                let dt = DateTime::<Local>::from(UNIX_EPOCH + Duration::from_secs_f64(sst.at));
+                println!("###### {} ######", dt.to_rfc2822());
+                sst.format_all(&mut std::io::stdout())
+            } else {
+                sst.tracing_log_all()
+            }
         },
     )
 }
