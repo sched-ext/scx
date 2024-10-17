@@ -27,14 +27,19 @@ const volatile bool debug;
 #define SHARED_DSQ	1
 
 /*
+ * Maximum multiplier for the dynamic task priority.
+ */
+#define MAX_LATENCY_WEIGHT	1000
+
+/*
  * Default task time slice.
  */
-const volatile u64 slice_ns = 5ULL * NSEC_PER_MSEC;
+const volatile u64 slice_max = 20ULL * NSEC_PER_MSEC;
 
 /*
  * Time slice used when system is over commissioned.
  */
-const volatile u64 slice_ns_min = 500ULL * NSEC_PER_USEC;
+const volatile u64 slice_min = 1ULL * NSEC_PER_MSEC;
 
 /*
  * Maximum time slice lag.
@@ -43,7 +48,7 @@ const volatile u64 slice_ns_min = 500ULL * NSEC_PER_USEC;
  * tasks at the cost of making regular and newly created tasks less responsive
  * (0 = disabled).
  */
-const volatile s64 slice_ns_lag;
+const volatile s64 slice_lag = 20ULL * NSEC_PER_MSEC;
 
 /*
  * When enabled always dispatch all kthreads directly.
@@ -56,23 +61,13 @@ const volatile s64 slice_ns_lag;
 const volatile bool local_kthreads;
 
 /*
- * Boost interactive tasks, by shortening their deadline as a function of their
- * average amount of voluntary context switches.
+ * With lowlatency enabled, instead of classifying tasks as interactive or
+ * non-interactive, they all get a dynamic priority, which is adjusted in
+ * function of their average rate of voluntary context switches.
  *
- * Tasks are already classified as interactive if their average amount of
- * context switches exceeds nvcsw_avg_thresh, which grants them higher
- * priority.
- *
- * When this option is enabled, tasks will receive a deadline boost in addition
- * to their interactive vs. regular classification, with the boost being
- * proportional to their average number of context switches.
- *
- * This ensures that within the main scheduling classes (interactive and
- * regular), tasks that more frequently voluntarily yield the CPU receive an
- * even higher priority.
- *
- * This option is particularly useful in soft real-time scenarios, such as
- * audio processing, multimedia, etc.
+ * This option guarantess less spikey behavior and it can be particularly
+ * useful in soft real-time scenarios, such as audio processing, multimedia,
+ * etc.
  */
 const volatile bool lowlatency;
 
@@ -108,7 +103,7 @@ volatile s64 cpufreq_perf_lvl;
  *  consuming a task, the scheduler will be forced to consume a task from the
  *  corresponding DSQ.
  */
-const volatile u64 starvation_thresh_ns = 5ULL * NSEC_PER_MSEC;
+const volatile u64 starvation_thresh_ns = 1000ULL * NSEC_PER_MSEC;
 static u64 starvation_shared_ts;
 
 /*
@@ -120,7 +115,12 @@ volatile u64 nr_kthread_dispatches, nr_direct_dispatches,
 /*
  * Amount of currently running tasks.
  */
-volatile u64 nr_running, nr_waiting, nr_interactive, nr_online_cpus;
+volatile u64 nr_running, nr_interactive, nr_shared_waiting, nr_prio_waiting;
+
+/*
+ * Amount of online CPUs.
+ */
+volatile u64 nr_online_cpus;
 
 /*
  * Exit information.
@@ -193,17 +193,16 @@ struct task_ctx {
 	 */
 	u64 nvcsw;
 	u64 nvcsw_ts;
-	u64 avg_nvcsw;
+
+	/*
+	 * Task's latency priority.
+	 */
+	u64 lat_weight;
 
 	/*
 	 * Task's average used time slice.
 	 */
 	u64 avg_runtime;
-
-	/*
-	 * Last task's execution time.
-	 */
-	u64 last_running;
 
 	/*
 	 * Task's deadline.
@@ -234,15 +233,6 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 }
 
 /*
- * Return true if interactive tasks classification via voluntary context
- * switches is enabled, false otherwise.
- */
-static bool is_nvcsw_enabled(void)
-{
-	return !!nvcsw_max_thresh;
-}
-
-/*
  * Compare two vruntime values, returns true if the first value is less than
  * the second one.
  *
@@ -251,19 +241,6 @@ static bool is_nvcsw_enabled(void)
 static inline bool vtime_before(u64 a, u64 b)
 {
 	return (s64)(a - b) < 0;
-}
-
-/*
- * Return true if the task is interactive, false otherwise.
- */
-static bool is_task_interactive(struct task_struct *p)
-{
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return false;
-	return tctx->is_interactive;
 }
 
 /*
@@ -313,11 +290,46 @@ static u64 calc_avg_clamp(u64 old_val, u64 new_val, u64 low, u64 high)
 }
 
 /*
- * Return a value inversely proportional to a weight.
+ * Return the dynamic priority multiplier (only applied in lowlatency mode).
+ *
+ * The multiplier is evaluated in function of the task's average rate of
+ * voluntary context switches per second.
  */
-static u64 scale_inverse_fair(u64 value, u64 weight)
+static u64 task_dyn_prio(struct task_struct *p)
 {
-	return value * 100 / weight;
+	struct task_ctx *tctx;
+
+	if (!lowlatency)
+		return 1;
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return 1;
+	return MAX(tctx->lat_weight, 1);
+}
+
+/*
+ * Return task's dynamic priority.
+ */
+static u64 task_prio(struct task_struct *p)
+{
+	return p->scx.weight * task_dyn_prio(p);
+}
+
+/*
+ * Return the task's allowed lag: used to determine how early its vruntime can
+ * be.
+ */
+static u64 task_lag(struct task_struct *p)
+{
+	return slice_lag * task_prio(p) / 100;
+}
+
+/*
+ * Return a value inversely proportional to the task's weight.
+ */
+static u64 scale_inverse_fair(struct task_struct *p, u64 value)
+{
+	return value * 100 / task_prio(p);
 }
 
 /*
@@ -327,40 +339,18 @@ static u64 scale_inverse_fair(u64 value, u64 weight)
 static s64 task_compute_dl(struct task_struct *p ,struct task_ctx *tctx)
 {
 	/*
-	 * The amount of voluntary context switches contributes to determine
-	 * the task's priority.
-	 */
-	u64 task_prio = p->scx.weight + tctx->avg_nvcsw;
-
-	/*
-	 * If not in "lowlatency" mode, always apply a pure vruntime based
-	 * scheduling.
-	 */
-	if (!lowlatency)
-		return 0;
-
-	/*
-	 * If the task has not ran during the previous slice_ns period, use its
-	 * vruntime as deadline to give it a priority boost. This allows to
-	 * speed up tasks that are mostly sleeping and they suddenly need to
-	 * react fast.
-	 */
-	if (vtime_before(tctx->last_running + slice_ns, bpf_ktime_get_ns()))
-		return 0;
-
-	/*
 	 * Return the deadline as a function of the average runtime and the
 	 * evaluated task's dynamic priority.
 	 */
-	return scale_inverse_fair(tctx->avg_runtime, task_prio);
+	return scale_inverse_fair(p, tctx->avg_runtime);
 }
 
 /*
- * Return task's evaluated deadline.
+ * Return task's evaluated vruntime.
  */
 static inline u64 task_deadline(struct task_struct *p)
 {
-	u64 min_vruntime = vtime_now - slice_ns_lag;
+	u64 min_vruntime = vtime_now - task_lag(p);
 	struct task_ctx *tctx;
 
 	tctx = try_lookup_task_ctx(p);
@@ -368,16 +358,7 @@ static inline u64 task_deadline(struct task_struct *p)
 		return min_vruntime;
 
 	/*
-	 * Limit the vruntime to (vtime_now - slice_ns_lag) to avoid
-	 * excessively penalizing tasks.
-	 *
-	 * A positive slice_ns_lag can enhance vruntime scheduling
-	 * effectiveness, but it may lead to more "spikey" performance as tasks
-	 * could remain in the queue for too long.
-	 *
-	 * Instead, a negative slice_ns_lag can result in more consistent
-	 * performance (less spikey), smoothing the reordering of the vruntime
-	 * scheduling and making the scheduler closer to a FIFO.
+	 * Limit the vruntime to to avoid excessively penalizing tasks.
 	 */
 	if (vtime_before(p->scx.dsq_vtime, min_vruntime)) {
 		p->scx.dsq_vtime = min_vruntime;
@@ -388,35 +369,35 @@ static inline u64 task_deadline(struct task_struct *p)
 }
 
 /*
- * Return the amount of tasks waiting to be dispatched.
- */
-static u64 nr_tasks_waiting(void)
-{
-	return scx_bpf_dsq_nr_queued(PRIO_DSQ) +
-	       scx_bpf_dsq_nr_queued(SHARED_DSQ);
-}
-
-/*
  * Evaluate task's time slice in function of the total amount of tasks that are
  * waiting to be dispatched and the task's weight.
  */
 static inline void task_refill_slice(struct task_struct *p)
 {
-	u64 slice;
+	u64 curr_prio_waiting = scx_bpf_dsq_nr_queued(PRIO_DSQ);
+	u64 curr_shared_waiting = scx_bpf_dsq_nr_queued(SHARED_DSQ);
+	u64 scale_factor;
 
 	/*
 	 * Refresh the amount of waiting tasks to get a more accurate scaling
 	 * factor for the time slice.
 	 */
-	nr_waiting = (nr_waiting + nr_tasks_waiting()) / 2;
+	nr_prio_waiting = calc_avg(nr_prio_waiting, curr_prio_waiting);
+	nr_shared_waiting = calc_avg(nr_shared_waiting, curr_shared_waiting);
 
-	slice = slice_ns / (nr_waiting + 1);
-	p->scx.slice = CLAMP(slice, slice_ns_min, slice_ns);
+	/*
+	 * Scale the time slice of an inversely proportional factor of the
+	 * total amount of tasks that are waiting (use a more immediate metric
+	 * in lowlatency mode and an average in normal mode).
+	 */
+	if (lowlatency)
+		scale_factor = curr_shared_waiting + 1;
+	else
+		scale_factor = nr_prio_waiting + nr_shared_waiting + 1;
+
+	p->scx.slice = CLAMP(slice_max / scale_factor, slice_min, slice_max);
 }
 
-/*
- * Return true if priority DSQ is congested, false otherwise.
- */
 static bool is_prio_congested(void)
 {
 	return scx_bpf_dsq_nr_queued(PRIO_DSQ) > nr_online_cpus * 4;
@@ -439,7 +420,7 @@ static void handle_sync_wakeup(struct task_struct *p)
 	 * the tasks that are already classified as interactive.
 	 */
 	tctx = try_lookup_task_ctx(p);
-	if (tctx && is_nvcsw_enabled() && !is_prio_congested())
+	if (tctx && !is_prio_congested())
 		tctx->is_interactive = true;
 }
 
@@ -738,7 +719,12 @@ static void kick_task_cpu(struct task_struct *p)
  */
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
+	struct task_ctx *tctx;
 	s32 dsq_id;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
 
 	/*
 	 * Per-CPU kthreads are critical for system responsiveness so make sure
@@ -757,12 +743,10 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Dispatch interactive tasks to the priority DSQ and regular tasks to
 	 * the shared DSQ.
 	 *
-	 * However, avoid queuing too many tasks to the priority DSQ: if we
-	 * have a storm of interactive tasks (more than 4x the amount of CPUs
-	 * that can consume them) we can just dispatch them to the shared DSQ
-	 * and simply rely on the vruntime logic.
+	 * When lowlatency is enabled, the separate priority DSQ is disabled,
+	 * so in this case always dispatch to the shared DSQ.
 	 */
-	if (is_task_interactive(p)) {
+	if (!lowlatency && tctx->is_interactive) {
 		dsq_id = PRIO_DSQ;
 		__sync_fetch_and_add(&nr_prio_dispatches, 1);
 	} else {
@@ -863,7 +847,7 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
  * Scale target CPU frequency based on the performance level selected
  * from user-space and the CPU utilization.
  */
-static void update_cpuperf_target(struct task_struct *p)
+static void update_cpuperf_target(struct task_struct *p, struct task_ctx *tctx)
 {
 	u64 now = bpf_ktime_get_ns();
 	s32 cpu = scx_bpf_task_cpu(p);
@@ -882,7 +866,7 @@ static void update_cpuperf_target(struct task_struct *p)
 	/*
 	 * Auto mode: always tset max performance for interactive tasks.
 	 */
-	if (is_task_interactive(p)) {
+	if (tctx->is_interactive) {
 		scx_bpf_cpuperf_set(cpu, SCX_CPUPERF_ONE);
 		return;
 	}
@@ -916,46 +900,28 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 {
 	struct task_ctx *tctx;
 
+	__sync_fetch_and_add(&nr_running, 1);
+
 	/*
 	 * Refresh task's time slice immediately before it starts to run on its
 	 * assigned CPU.
 	 */
 	task_refill_slice(p);
 
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
 	/*
 	 * Adjust target CPU frequency before the task starts to run.
 	 */
-	update_cpuperf_target(p);
+	update_cpuperf_target(p, tctx);
 
-	tctx = try_lookup_task_ctx(p);
-	if (tctx) {
-		/*
-		 * Update CPU interactive state.
-		 */
-		if (tctx->is_interactive)
-			__sync_fetch_and_add(&nr_interactive, 1);
-
-		/*
-		 * Update task's running timestamp.
-		 */
-		tctx->last_running = bpf_ktime_get_ns();
-	}
-
-	__sync_fetch_and_add(&nr_running, 1);
-}
-
-static void update_task_interactive(struct task_ctx *tctx)
-{
 	/*
-	 * Classify the task based on the average of voluntary context
-	 * switches.
-	 *
-	 * If the task has an average greater than the global average
-	 * (nvcsw_avg_thresh) it is classified as interactive, otherwise the
-	 * task is classified as regular.
+	 * Update CPU interactive state.
 	 */
-	if (is_nvcsw_enabled())
-		tctx->is_interactive = tctx->avg_nvcsw >= nvcsw_avg_thresh;
+	if (tctx->is_interactive)
+		__sync_fetch_and_add(&nr_interactive, 1);
 }
 
 /*
@@ -964,7 +930,7 @@ static void update_task_interactive(struct task_ctx *tctx)
  */
 void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 {
-	u64 now = bpf_ktime_get_ns(), task_slice;
+	u64 now = bpf_ktime_get_ns(), slice;
 	s32 cpu = scx_bpf_task_cpu(p);
 	s64 delta_t;
 	struct cpu_ctx *cctx;
@@ -986,22 +952,23 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Update task's average runtime.
 	 */
-	task_slice = p->se.sum_exec_runtime - tctx->sum_exec_runtime;
+	slice = p->se.sum_exec_runtime - tctx->sum_exec_runtime;
+	if (lowlatency)
+		slice = CLAMP(slice, slice_min, slice_max);
 	tctx->sum_exec_runtime = p->se.sum_exec_runtime;
-	tctx->avg_runtime = calc_avg(tctx->avg_runtime, task_slice);
+	tctx->avg_runtime = calc_avg(tctx->avg_runtime, slice);
 
 	/*
-	 * Update task vruntime and deadline, charging the weighted used time
-	 * slice.
+	 * Update task vruntime charging the weighted used time slice.
 	 */
-	task_slice = scale_inverse_fair(task_slice, p->scx.weight);
-	p->scx.dsq_vtime += task_slice;
+	slice = scale_inverse_fair(p, slice);
+	p->scx.dsq_vtime += slice;
 	tctx->deadline = p->scx.dsq_vtime + task_compute_dl(p, tctx);
 
 	/*
 	 * Update global vruntime.
 	 */
-	vtime_now += task_slice;
+	vtime_now += slice;
 
 	/*
 	 * Refresh voluntary context switch metrics.
@@ -1009,23 +976,25 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 * Evaluate the average number of voluntary context switches per second
 	 * using an exponentially weighted moving average, see calc_avg().
 	 */
-	if (!lowlatency && !is_nvcsw_enabled())
-		return;
 	delta_t = (s64)(now - tctx->nvcsw_ts);
 	if (delta_t > NSEC_PER_SEC) {
 		u64 delta_nvcsw = p->nvcsw - tctx->nvcsw;
 		u64 avg_nvcsw = delta_nvcsw * NSEC_PER_SEC / delta_t;
+		u64 max_lat_weight = lowlatency ? MAX_LATENCY_WEIGHT :
+					MIN(nvcsw_max_thresh, MAX_LATENCY_WEIGHT);
 
-		/*
-		 * Evaluate the average nvcsw for the task, limited to the
-		 * range [0 .. 1000] to prevent excessive spikes.
-		 */
-		tctx->avg_nvcsw = calc_avg_clamp(tctx->avg_nvcsw, avg_nvcsw,
-						 0, MAX(nvcsw_max_thresh, 1000));
 		tctx->nvcsw = p->nvcsw;
 		tctx->nvcsw_ts = now;
 
 		/*
+		 * Evaluate the latency weight of the task as its average rate
+		 * of voluntary context switches (limited to the max_lat_weight
+		 * to prevent excessive spikes).
+		 */
+		tctx->lat_weight = calc_avg_clamp(tctx->lat_weight, avg_nvcsw,
+						  0, max_lat_weight);
+
+                /*
 		 * Update the global voluntary context switches average using
 		 * an exponentially weighted moving average (EWMA) with the
 		 * formula:
@@ -1039,13 +1008,19 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 		 * Additionally, restrict the global nvcsw_avg_thresh average
 		 * to the range [1 .. nvcsw_max_thresh] to always allow the
 		 * classification of some tasks as interactive.
-		 */
+                 */
 		nvcsw_avg_thresh = calc_avg_clamp(nvcsw_avg_thresh, avg_nvcsw,
 						  1, nvcsw_max_thresh);
+
 		/*
-		 * Reresh task status: interactive or regular.
+		 * Classify the task based on the average of voluntary context
+		 * switches.
+		 *
+		 * If the task has an average greater than the global average
+		 * it is classified as interactive, otherwise the task is
+		 * classified as regular.
 		 */
-		update_task_interactive(tctx);
+		tctx->is_interactive = tctx->lat_weight >= nvcsw_max_thresh;
 	}
 }
 
@@ -1064,12 +1039,9 @@ void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 	tctx->sum_exec_runtime = p->se.sum_exec_runtime;
 	tctx->nvcsw = p->nvcsw;
 	tctx->nvcsw_ts = now;
-	tctx->avg_nvcsw = p->nvcsw * NSEC_PER_SEC / tctx->nvcsw_ts;
-	tctx->avg_runtime = slice_ns;
+	tctx->lat_weight = p->nvcsw * NSEC_PER_SEC / tctx->nvcsw_ts;
+	tctx->avg_runtime = slice_max;
 	tctx->deadline = vtime_now;
-	tctx->last_running = now;
-
-	update_task_interactive(tctx);
 }
 
 s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
