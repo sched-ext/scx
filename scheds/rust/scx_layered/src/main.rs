@@ -417,7 +417,7 @@ struct Opts {
     /// Disable topology awareness. When enabled, the "nodes" and "llcs" settings on
     /// a layer are ignored. Defaults to false on topologies with multiple NUMA nodes
     /// or LLCs, and true otherwise.
-    #[arg(short = 't', long, num_args = 0..=1, default_missing_value = "true")]
+    #[arg(short = 't', long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
     disable_topology: Option<bool>,
 
     /// Enable cross NUMA preemption.
