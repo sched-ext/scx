@@ -4,25 +4,20 @@ runs:
   using: 'composite'
   steps:
     ### OTHER REPOS ####
-    # turn off interactive, refresh pkgs, use apt fast
+    # turn off interactive, refresh pkgs
     - run: |
         echo 'debconf debconf/frontend select Noninteractive' | sudo debconf-set-selections
         sudo rm /var/lib/man-db/auto-update
-        echo "deb [signed-by=/etc/apt/keyrings/apt-fast.gpg] http://ppa.launchpad.net/apt-fast/stable/ubuntu $(source /etc/os-release && echo $UBUNTU_CODENAME) main" | sudo tee /etc/apt/sources.list.d/apt-fast.list
-        wget -q -O- "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xBC5934FD3DEBD4DAEA544F791E2824A7F22B44BD" | sudo gpg --dearmor -o /etc/apt/keyrings/apt-fast.gpg
         sudo apt-get update -y
-        sudo apt-get install -y apt-fast aria2 tasksel
-        echo 'debconf apt-fast/maxdownloads string 100' |  sudo debconf-set-selections
-        echo 'debconf apt-fast/dlflag boolean true' | sudo debconf-set-selections  
-        echo 'debconf apt-fast/aptmanager string apt-get' | sudo debconf-set-selections
+        sudo apt-get install -y tasksel
         sudo tasksel remove ubuntu-desktop
       shell: bash
 
     ### DOWNLOAD AND INSTALL DEPENDENCIES ###
 
     # Download dependencies packaged by Ubuntu
-    - run: | 
-        sudo apt-fast install -f -y bison busybox-static cmake coreutils \
+    - run: |
+        sudo apt install -f -y bison busybox-static cmake coreutils \
         cpio elfutils file flex gcc gcc-multilib git iproute2 jq kbd kmod \
         libcap-dev libelf-dev libunwind-dev libvirt-clients libzstd-dev \
         linux-headers-generic linux-tools-common linux-tools-generic make \
