@@ -3,43 +3,16 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use crate::clang_info::ClangInfo;
 use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use glob::glob;
 use libbpf_cargo::SkeletonBuilder;
-use sscanf::sscanf;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
-
-lazy_static::lazy_static! {
-    // Map clang archs to the __TARGET_ARCH list in
-    // tools/lib/bpf/bpf_tracing.h in the kernel tree.
-    static ref ARCH_MAP: HashMap<&'static str, &'static str> = vec![
-    ("x86", "x86"),
-    ("x86_64", "x86"),
-    ("s390", "s390"),
-    ("s390x", "s390"),
-    ("arm", "arm"),
-    ("aarch64", "arm64"),
-    ("mips", "mips"),
-    ("mips64", "mips"),
-    ("ppc32", "powerpc"),
-    ("ppc64", "powerpc"),
-    ("ppc64le", "powerpc"),
-    ("sparc", "sparc"),
-    ("sparcv9", "sparc"),
-    ("riscv32", "riscv"),
-    ("riscv64", "riscv"),
-    ("arc", "arc"),			// unsure this is supported
-    ("loongarch64", "loongarch"),	// ditto
-    ].into_iter().collect();
-}
 
 #[derive(Debug)]
 /// # Build helpers for sched_ext schedulers with Rust userspace component
@@ -209,7 +182,7 @@ lazy_static::lazy_static! {
 ///   -L$KERNEL/tools/bpf/bpftool/libbpf" cargo build --release
 /// ```
 pub struct BpfBuilder {
-    clang: (String, String, String), // (clang, ver, arch)
+    clang: ClangInfo,
     cflags: Vec<String>,
     out_dir: PathBuf,
 
@@ -219,140 +192,6 @@ pub struct BpfBuilder {
 }
 
 impl BpfBuilder {
-    fn skip_clang_version_prefix(line: &str) -> &str {
-        if let Some(index) = line.find("clang version") {
-            &line[index..]
-        } else {
-            line
-        }
-    }
-
-    fn find_clang() -> Result<(String, String, String)> {
-        let clang = env::var("BPF_CLANG").unwrap_or("clang".into());
-        let output = Command::new(&clang)
-            .args(["--version"])
-            .output()
-            .with_context(|| format!("Failed to run \"{} --version\"", &clang))?;
-
-        let stdout = String::from_utf8(output.stdout)?;
-        let (mut ver, mut arch) = (None, None);
-        for line in stdout.lines() {
-            if let Ok(v) = sscanf!(
-                Self::skip_clang_version_prefix(line),
-                "clang version {String}"
-            ) {
-                // Version could be followed by (URL SHA1). Only take
-                // the first word.
-                ver = Some(v.split_whitespace().next().unwrap().to_string());
-                continue;
-            }
-            if let Ok(v) = sscanf!(line, "Target: {String}") {
-                arch = Some(v.split('-').next().unwrap().to_string());
-                continue;
-            }
-        }
-
-        let (ver, arch) = (
-            ver.ok_or(anyhow!("Failed to read clang version"))?,
-            arch.ok_or(anyhow!("Failed to read clang target arch"))?,
-        );
-
-        if version_compare::compare(&ver, "16") == Ok(version_compare::Cmp::Lt) {
-            bail!(
-                "clang < 16 loses high 32 bits of 64 bit enums when compiling BPF ({:?} ver={:?})",
-                &clang,
-                &ver
-            );
-        }
-        if version_compare::compare(&ver, "17") == Ok(version_compare::Cmp::Lt) {
-            println!(
-                "cargo:warning=clang >= 17 recommended ({:?} ver={:?})",
-                &clang, &ver
-            );
-        }
-
-        Ok((clang, ver, arch))
-    }
-
-    fn determine_base_cflags(
-        (clang, _ver, arch): &(String, String, String),
-    ) -> Result<Vec<String>> {
-        // Determine kernel target arch.
-        let kernel_target = match ARCH_MAP.get(arch.as_str()) {
-            Some(v) => v,
-            None => bail!("CPU arch {:?} not found in ARCH_MAP", &arch),
-        };
-
-        // Determine system includes.
-        let output = Command::new(&clang)
-            .args(["-v", "-E", "-"])
-            .output()
-            .with_context(|| format!("Failed to run \"{} -v -E - < /dev/null", &clang))?;
-        let stderr = String::from_utf8(output.stderr)?;
-
-        let mut sys_incls = None;
-        for line in stderr.lines() {
-            if line == "#include <...> search starts here:" {
-                sys_incls = Some(vec![]);
-                continue;
-            }
-            if sys_incls.is_none() {
-                continue;
-            }
-            if line == "End of search list." {
-                break;
-            }
-
-            sys_incls.as_mut().unwrap().push(line.trim());
-        }
-        let sys_incls = match sys_incls {
-            Some(v) => v,
-            None => bail!("Failed to find system includes from {:?}", &clang),
-        };
-
-        // Determine endian.
-        let output = Command::new(&clang)
-            .args(["-dM", "-E", "-"])
-            .output()
-            .with_context(|| format!("Failed to run \"{} -dM E - < /dev/null", &clang))?;
-        let stdout = String::from_utf8(output.stdout)?;
-
-        let mut endian = None;
-        for line in stdout.lines() {
-            match sscanf!(line, "#define __BYTE_ORDER__ {str}") {
-                Ok(v) => {
-                    endian = Some(match v {
-                        "__ORDER_LITTLE_ENDIAN__" => "little",
-                        "__ORDER_BIG_ENDIAN__" => "big",
-                        v => bail!("Unknown __BYTE_ORDER__ {:?}", v),
-                    });
-                    break;
-                }
-                _ => {}
-            }
-        }
-        let endian = match endian {
-            Some(v) => v,
-            None => bail!("Failed to find __BYTE_ORDER__ from {:?}", &clang),
-        };
-
-        // Assemble cflags.
-        let mut cflags: Vec<String> = ["-g", "-O2", "-Wall", "-Wno-compare-distinct-pointer-types"]
-            .into_iter()
-            .map(|x| x.into())
-            .collect();
-        cflags.push(format!("-D__TARGET_ARCH_{}", &kernel_target));
-        cflags.push("-mcpu=v3".into());
-        cflags.push(format!("-m{}-endian", endian));
-        cflags.append(
-            &mut sys_incls
-                .into_iter()
-                .flat_map(|x| ["-idirafter".into(), x.into()])
-                .collect(),
-        );
-        Ok(cflags)
-    }
-
     const BPF_H_TAR: &'static [u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bpf_h.tar"));
 
     fn install_bpf_h<P: AsRef<Path>>(dest: P) -> Result<()> {
@@ -361,30 +200,7 @@ impl BpfBuilder {
         Ok(())
     }
 
-    /// Return `(VER, SHA1)` from which the bulit-in `vmlinux.h` is generated.
-    pub fn vmlinux_h_ver_sha1() -> (String, String) {
-        let mut ar = tar::Archive::new(Self::BPF_H_TAR);
-
-        for file in ar.entries().unwrap() {
-            let file = file.unwrap();
-            if file.header().path().unwrap() != Path::new("vmlinux/vmlinux.h") {
-                continue;
-            }
-
-            let name = file
-                .link_name()
-                .unwrap()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
-
-            return sscanf!(name, "vmlinux-v{String}-g{String}.h").unwrap();
-        }
-
-        panic!("vmlinux/vmlinux.h not found");
-    }
-
-    fn determine_cflags<P>(clang: &(String, String, String), out_dir: P) -> Result<Vec<String>>
+    fn determine_cflags<P>(clang: &ClangInfo, out_dir: P) -> Result<Vec<String>>
     where
         P: AsRef<Path> + std::fmt::Debug,
     {
@@ -403,7 +219,7 @@ impl BpfBuilder {
 
         cflags.append(&mut match env::var("BPF_BASE_CFLAGS") {
             Ok(v) => v.split_whitespace().map(|x| x.into()).collect(),
-            _ => Self::determine_base_cflags(&clang)?,
+            _ => clang.determine_base_cflags()?,
         });
 
         cflags.append(&mut match env::var("BPF_EXTRA_CFLAGS_PRE_INCL") {
@@ -412,7 +228,11 @@ impl BpfBuilder {
         });
 
         cflags.push(format!("-I{}", &bpf_h));
-        cflags.push(format!("-I{}/vmlinux", &bpf_h));
+        cflags.push(format!(
+            "-I{}/arch/{}",
+            &bpf_h,
+            &clang.kernel_target().unwrap()
+        ));
         cflags.push(format!("-I{}/bpf-compat", &bpf_h));
 
         cflags.append(&mut match env::var("BPF_EXTRA_CFLAGS_POST_INCL") {
@@ -429,7 +249,7 @@ impl BpfBuilder {
     pub fn new() -> Result<Self> {
         let out_dir = PathBuf::from(env::var("OUT_DIR")?);
 
-        let clang = Self::find_clang()?;
+        let clang = ClangInfo::new()?;
         let cflags = match env::var("BPF_CFLAGS") {
             Ok(v) => v.split_whitespace().map(|x| x.into()).collect(),
             _ => Self::determine_cflags(&clang, &out_dir)?,
@@ -527,7 +347,7 @@ impl BpfBuilder {
         SkeletonBuilder::new()
             .source(input)
             .obj(&obj)
-            .clang(&self.clang.0)
+            .clang(&self.clang.clang)
             .clang_args(&self.cflags)
             .build_and_generate(&skel_path)?;
 
@@ -578,6 +398,11 @@ impl BpfBuilder {
 
 #[cfg(test)]
 mod tests {
+    use regex::Regex;
+    use sscanf::sscanf;
+
+    use crate::builder::ClangInfo;
+
     #[test]
     fn test_bpf_builder_new() {
         let res = super::BpfBuilder::new();
@@ -586,15 +411,41 @@ mod tests {
 
     #[test]
     fn test_vmlinux_h_ver_sha1() {
-        let (ver, sha1) = super::BpfBuilder::vmlinux_h_ver_sha1();
+        let clang_info = ClangInfo::new().unwrap();
 
-        println!("vmlinux.h: ver={:?} sha1={:?}", &ver, &sha1,);
+        let mut ar = tar::Archive::new(super::BpfBuilder::BPF_H_TAR);
+        let mut found = false;
 
-        assert!(regex::Regex::new(r"^([1-9][0-9]*\.[1-9][0-9][a-z0-9-]*)$")
-            .unwrap()
-            .is_match(&ver));
-        assert!(regex::Regex::new(r"^[0-9a-z]{12}$")
-            .unwrap()
-            .is_match(&sha1));
+        let pattern = Regex::new(r"arch\/.*\/vmlinux-.*.h").unwrap();
+
+        for entry in ar.entries().unwrap() {
+            let entry = entry.unwrap();
+            let file_name = entry.header().path().unwrap();
+            let file_name_str = file_name.to_string_lossy().to_owned();
+            if file_name_str.contains(&clang_info.kernel_target().unwrap()) {
+                found = true;
+            }
+            if !pattern.find(&file_name_str).is_some() {
+                continue;
+            }
+
+            println!("checking {file_name_str}");
+
+            let (arch, ver, sha1) =
+                sscanf!(file_name_str, "arch/{String}/vmlinux-v{String}-g{String}.h").unwrap();
+            println!(
+                "vmlinux.h: arch={:?} ver={:?} sha1={:?}",
+                &arch, &ver, &sha1,
+            );
+
+            assert!(regex::Regex::new(r"^([1-9][0-9]*\.[1-9][0-9][a-z0-9-]*)$")
+                .unwrap()
+                .is_match(&ver));
+            assert!(regex::Regex::new(r"^[0-9a-z]{12}$")
+                .unwrap()
+                .is_match(&sha1));
+        }
+
+        assert!(found);
     }
 }
