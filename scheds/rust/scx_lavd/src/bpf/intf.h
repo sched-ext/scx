@@ -67,7 +67,6 @@ struct sys_stat {
 	volatile u64	last_update_clk;
 	volatile u64	util;		/* average of the CPU utilization */
 
-	volatile u64	load_actual;	/* average actual load of runnable tasks */
 	volatile u64	avg_svc_time;	/* average service time per task */
 	volatile u64	nr_queued_task;
 
@@ -117,7 +116,6 @@ struct task_ctx {
 	u64	wait_freq;		/* waiting frequency in a second */
 
 	u64	wake_freq;		/* waking-up frequency in a second */
-	u64	load_actual;		/* task load derived from run_time and run_freq */
 	u64	svc_time;		/* total CPU time consumed for this task */
 
 	/*
