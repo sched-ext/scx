@@ -425,8 +425,7 @@ static struct task_struct *tptr_to_task(u64 tptr)
 
 	if (err_task)
 		scx_bpf_error("Failed to retrieve task_struct for tptr %llu", tptr);
-	if (p)
-		return p;
+	return p;
 }
 
 int dom_xfer_task(u64 tptr, u32 new_dom_id, u64 now)
@@ -436,11 +435,6 @@ int dom_xfer_task(u64 tptr, u32 new_dom_id, u64 now)
 	struct task_struct *p;
 
 	p = tptr_to_task(tptr);
-
-	if (!p) {
-		scx_bpf_error("Failed to lookup task %llu", tptr);
-		return 0;
-	}
 
 	taskc = lookup_task_ctx(p);
 	if (!taskc)
