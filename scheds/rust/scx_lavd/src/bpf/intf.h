@@ -136,6 +136,7 @@ struct task_ctx {
 	volatile s16 lock_boost;	/* lock boost count */
 	volatile s16 futex_boost;	/* futex boost count */
 	volatile u32 *futex_uaddr;	/* futex uaddr */
+	volatile u8 need_lock_boost;	/* need to boost lock for deadline calculation */
 
 	/*
 	 * Task's performance criticality

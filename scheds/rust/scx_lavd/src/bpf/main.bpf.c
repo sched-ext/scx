@@ -308,21 +308,17 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 		lat_cri += LAVD_LC_KTHREAD_FT;
 
 	/*
+	 * Reset task's lock and futex boost count
+	 * for a lock holder to be boosted only once.
+	 */
+	reset_lock_futex_boost(taskc, cpuc_cur);
+
+	/*
 	 * Prioritize a lock holder for faster system-wide forward progress.
 	 */
-	if (is_lock_holder(taskc)) {
+	if (taskc->need_lock_boost) {
+		taskc->need_lock_boost = false;
 		lat_cri += (lat_cri * LAVD_LC_LOCK_HOLDER_FT) / 1000;
-
-		/*
-		 * Update statistics.
-		 */
-		cpuc_cur->nr_lhp++;
-
-		/*
-		 * Reset task's lock and futex boost count
-		 * for a lock holder to be boosted only once.
-		 */
-		reset_lock_futex_boost(taskc);
 	}
 
 	/*
@@ -363,7 +359,9 @@ static u64 calc_task_load_actual(struct task_ctx *taskc)
 	 * can be calculated from task's average run time and frequency.
 	 */
 	const s64 interval_adj = LAVD_TIME_ONE_SEC / LAVD_SYS_STAT_INTERVAL_NS;
-	return (taskc->run_time_ns * taskc->run_freq) / interval_adj;
+	u64 load = (taskc->run_time_ns * taskc->run_freq) / interval_adj;
+
+	return min(load, LAVD_TIME_ONE_SEC);
 }
 
 static u64 clamp_time_slice_ns(u64 slice)
@@ -595,12 +593,17 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 * place, the task will entirely consume the time slice. Hence, the
 	 * consecutive execution is accumulated and reflected in the
 	 * calculation of runtime statistics.
+	 *
+	 * taskc->run_time_ns should not exceed 1 sec since 1 sec is a baseline
+	 * for load and other calculation.
 	 */
 	old_run_time_ns = taskc->run_time_ns;
 	suspended_duration = get_suspended_duration_and_reset(cpuc);
 	task_run_time = now - taskc->last_running_clk - suspended_duration;
-	taskc->acc_run_time_ns += task_run_time;
-	taskc->run_time_ns = calc_avg(taskc->run_time_ns, taskc->acc_run_time_ns);
+	taskc->acc_run_time_ns = min(taskc->acc_run_time_ns + task_run_time,
+				     LAVD_TIME_ALMOST_INFINITY_NS);
+	taskc->run_time_ns = calc_avg(taskc->run_time_ns,
+				      taskc->acc_run_time_ns);
 	taskc->last_stopping_clk = now;
 
 	taskc->svc_time += task_run_time / p->scx.weight;
@@ -629,6 +632,12 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 */
 	if (READ_ONCE(cur_svc_time) < taskc->svc_time)
 		WRITE_ONCE(cur_svc_time, taskc->svc_time);
+
+	/*
+	 * Reset task's lock and futex boost count
+	 * for a lock holder to be boosted only once.
+	 */
+	reset_lock_futex_boost(taskc, cpuc);
 }
 
 static void update_stat_for_quiescent(struct task_struct *p,
@@ -641,6 +650,12 @@ static void update_stat_for_quiescent(struct task_struct *p,
 	 */
 	cpuc->load_actual -= taskc->load_actual;
 	cpuc->load_run_time_ns -= clamp_time_slice_ns(taskc->run_time_ns);
+
+	/*
+	 * Reset task's lock and futex boost count
+	 * for a lock holder to be boosted only once.
+	 */
+	reset_lock_futex_boost(taskc, cpuc);
 }
 
 static bool match_task_core_type(struct task_ctx *taskc,
@@ -1174,8 +1189,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	u64 now = bpf_ktime_get_ns();
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *active, *ovrflw;
-	struct task_struct *p;
-	struct task_ctx *taskc;
+	struct task_struct *p, *taskc;
 	u64 dsq_id = 0;
 	bool try_consume = false;
 
@@ -1289,20 +1303,27 @@ consume_out:
 	 */
 	if (!try_consume)
 		return;
+
 	if (consume_task(cpu, cpuc, now))
 		return;
 
 	/*
-	 * If no other task is consumed, the scheduler will keep continue to
-	 * run the prev task, so let's re-assigne its time slice.
+	 * Reset prev task's lock and futex boost count
+	 * for a lock holder to be boosted only once.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
+	if (prev) {
 		taskc = get_task_ctx(prev);
 		if (!taskc) {
 			scx_bpf_error("Failed to look up task context");
 			return;
 		}
-		prev->scx.slice = calc_time_slice(prev, taskc);
+		reset_lock_futex_boost(taskc, cpuc);
+
+		/*
+		 * If nothing to run, continue to run the previous task.
+		 */
+		if (prev->scx.flags & SCX_TASK_QUEUED)
+			prev->scx.slice = calc_time_slice(prev, taskc);
 	}
 }
 
@@ -1483,6 +1504,12 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 	 * Adjust slice boost for the task's next schedule.
 	 */
 	adjust_slice_boost(cpuc, taskc);
+
+	/*
+	 * Reset task's lock and futex boost count
+	 * for a lock holder to be boosted only once.
+	 */
+	reset_lock_futex_boost(taskc, cpuc);
 }
 
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)

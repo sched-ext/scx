@@ -18,6 +18,7 @@ enum consts_internal  {
 
 	LAVD_TIME_ONE_SEC		= (1000ULL * NSEC_PER_MSEC),
 	LAVD_TIME_INFINITY_NS		= SCX_SLICE_INF,
+	LAVD_TIME_ALMOST_INFINITY_NS	= (SCX_SLICE_INF >> 10), /* scaled down to avoid int overflow */
 	LAVD_MAX_RETRY			= 4,
 
 	LAVD_TARGETED_LATENCY_NS	= (20ULL * NSEC_PER_MSEC),
