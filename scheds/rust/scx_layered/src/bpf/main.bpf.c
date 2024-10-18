@@ -38,6 +38,7 @@ const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 const volatile u32 layer_iteration_order[MAX_LAYERS];
 
+
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
 struct layer layers[MAX_LAYERS];
@@ -48,6 +49,7 @@ static u32 preempt_cursor;
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
 
 #include "util.bpf.c"
+#include "token_bucket.bpf.c"
 
 UEI_DEFINE(uei);
 
@@ -157,6 +159,7 @@ static u64 cpu_hi_fallback_dsq_id(s32 cpu)
 {
 	return llc_hi_fallback_dsq_id(cpu_to_llc_id(cpu));
 }
+
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -309,8 +312,9 @@ static bool refresh_cpumasks(int idx)
 	struct bpf_cpumask *layer_cpumask;
 	struct layer_cpumask_wrapper *cpumaskw;
 	struct layer *layer;
+	struct token_bucket *cpu_buck, *parent_buck;
 	struct cpu_ctx *cctx;
-	int cpu, total = 0;
+	int cpu, total = 0, tokens = 0;
 
 	layer = MEMBER_VPTR(layers, [idx]);
 	if (!layer) {
@@ -334,6 +338,10 @@ static bool refresh_cpumasks(int idx)
 			scx_bpf_error("unknown cpu");
 			return false;
 		}
+		if (!(cpu_buck = lookup_cpu_token_bucket(idx, cpu))) {
+			scx_bpf_error("unknown bucket");
+			return false;
+		}
 
 		if ((u8_ptr = MEMBER_VPTR(layers, [idx].cpus[cpu / 8]))) {
 			if (*u8_ptr & (1 << (cpu % 8))) {
@@ -341,9 +349,51 @@ static bool refresh_cpumasks(int idx)
 				total++;
 			} else {
 				bpf_cpumask_clear_cpu(cpu, layer_cpumask);
+				// if confined or grouped we collect tokens for redistribution
+				if (cpu_buck->tokens > 0 &&
+				    (layer->kind == LAYER_KIND_CONFINED ||
+				     layer->kind == LAYER_KIND_GROUPED))
+					// take 50% from the non worker 
+					tokens += partial_drain_cpu_bucket(idx, cpu,
+									   cpu_buck->tokens / 2);
 			}
 		} else {
 			scx_bpf_error("can't happen");
+		}
+	}
+	if (tokens > 0) {
+		int needed_tokens;
+		int layer_cpus = bpf_cpumask_weight(layer_cpumask);
+		u64 token_per_bucket = 0;
+
+		if (tokens > layer_cpus) {
+			token_per_bucket = (u64)tokens / (u64)layer_cpus;
+		}
+
+		bpf_for(cpu, 0, nr_possible_cpus) {
+			if (tokens == 0)
+				break;
+			if (!bpf_cpumask_test_cpu(cpu, layer_cpumask))
+				continue;
+			if (token_per_bucket > 0) {
+				refresh_cpu_token_bucket(idx, cpu, (int)token_per_bucket);
+			} else {
+				if (!(cpu_buck = lookup_cpu_token_bucket(idx, cpu))) {
+					scx_bpf_error("unknown bucket");
+					return false;
+				}
+				needed_tokens = cpu_buck->capacity - cpu_buck->tokens;
+				if (needed_tokens == 0)
+					continue;
+				if (tokens - needed_tokens > 0) {
+					refresh_cpu_token_bucket(idx, cpu, needed_tokens);
+					tokens -= needed_tokens;
+				} else {
+					refresh_cpu_token_bucket(idx, cpu, tokens);
+					tokens = 0;
+				}
+
+			}
 		}
 	}
 
@@ -353,6 +403,7 @@ static bool refresh_cpumasks(int idx)
 	trace("LAYER[%d] now has %d cpus, seq=%llu", idx, layer->nr_cpus, layer->cpus_seq);
 	return total > 0;
 }
+
 
 SEC("fentry")
 int BPF_PROG(sched_tick_fentry)
@@ -772,8 +823,13 @@ bool try_preempt_cpu(s32 cand, struct task_struct *p, struct cpu_ctx *cctx,
 		     struct task_ctx *tctx, struct layer *layer,
 		     bool preempt_first)
 {
+	struct token_bucket *buckc;
 	struct cpu_ctx *cand_cctx, *sib_cctx = NULL;
 	s32 sib;
+
+	if (!(buckc = lookup_cpu_token_bucket(layer->idx, cand)) ||
+	    cpu_bucket_empty(buckc))
+		return false;
 
 	if (!bpf_cpumask_test_cpu(cand, p->cpus_ptr))
 		return false;
@@ -791,6 +847,9 @@ bool try_preempt_cpu(s32 cand, struct task_struct *p, struct cpu_ctx *cctx,
 		lstat_inc(LSTAT_EXCL_COLLISION, layer, cctx);
 		return false;
 	}
+
+	if (!consume_cpu_bucket(buckc, false))
+		return false;
 
 	scx_bpf_kick_cpu(cand, SCX_KICK_PREEMPT);
 
@@ -1294,6 +1353,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (disable_topology)
 		return layered_dispatch_no_topo(cpu, prev);
 
+	struct token_bucket *buckc;
 	struct cpu_ctx *cctx, *sib_cctx;
 	struct layer *layer;
 	u64 dsq_id;
@@ -1338,11 +1398,19 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			scx_bpf_error("can't happen");
 			return;
 		}
+		if (!(buckc = lookup_cpu_token_bucket(layer_idx, -1))) {
+			scx_bpf_error("can't happen");
+			return;
+		}
+		if (cpu_bucket_empty(buckc))
+			continue;
 		layer = MEMBER_VPTR(layers, [layer_idx]);
 		bpf_for(llc_idx, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
-			if (layer->preempt && scx_bpf_consume(dsq_id))
+			if (layer->preempt &&
+			    consume_cpu_bucket(buckc, false) &&
+			    scx_bpf_consume(dsq_id))
 				return;
 		}
 	}
@@ -1355,6 +1423,11 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = rotate_layer_id(cctx->layer_idx, idx);
 		if (layer_idx >= nr_layers) {
+			scx_bpf_error("can't happen");
+			return;
+		}
+		buckc = lookup_cpu_token_bucket(layer_idx, -1);
+		if (!buckc) {
 			scx_bpf_error("can't happen");
 			return;
 		}
@@ -1371,7 +1444,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
 			    (cpu <= nr_possible_cpus && cpu == fallback_cpu &&
 			    layer->nr_cpus == 0)) {
-				if (scx_bpf_consume(dsq_id))
+				if (consume_cpu_bucket(buckc, false) &&
+				    scx_bpf_consume(dsq_id))
 					return;
 			}
 		}
@@ -1384,12 +1458,20 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			scx_bpf_error("can't happen");
 			return;
 		}
+		buckc = lookup_cpu_token_bucket(layer_idx, -1);
+		if (!buckc) {
+			scx_bpf_error("can't happen");
+			return;
+		}
 		layer = MEMBER_VPTR(layers, [layer_idx]);
 		bpf_for(llc_idx, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
 
-			if (!layer->preempt && layer->open && scx_bpf_consume(dsq_id))
+			if (!layer->preempt &&
+			    layer->open &&
+			    consume_cpu_bucket(buckc, false) &&
+			    scx_bpf_consume(dsq_id))
 				return;
 		}
 	}
@@ -2053,6 +2135,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	struct bpf_cpumask *cpumask, *tmp_big_cpumask;
 	struct cpu_ctx *cctx;
 	int i, j, k, nr_online_cpus, ret;
+	u32 layer_weight_sum = 0;
+	u64 bucket_capacity, bucket_rate;
+
 
 	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
 	if (ret < 0)
@@ -2066,6 +2151,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	if (!tmp_big_cpumask) {
 		bpf_cpumask_release(cpumask);
 		return -ENOMEM;
+	}
+
+	bpf_for(j, 0, nr_layers) {
+		struct layer *layer = &layers[j];
+		layer_weight_sum += layer->weight;
 	}
 
 	nr_online_cpus = 0;
@@ -2088,6 +2178,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			}
 		} else {
 			return -EINVAL;
+		}
+
+		bpf_for(j, 0, nr_layers) {
+			struct layer *layer = &layers[j];
+			bucket_rate = (layer->weight * (NSEC_PER_SEC / layer->slice_ns)) / layer_weight_sum;
+			bucket_capacity = bucket_rate;
+			trace("BUCKET init per cpu bucket sum %llu cpu: %d layer:%d rate: %llu capacity: %llu",
+			      layer_weight_sum, i, j, bucket_rate, bucket_capacity);
+			initialize_cpu_bucket(i, j, bucket_capacity, bucket_rate, false);
 		}
 	}
 
@@ -2224,6 +2323,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		if (cpumask)
 			bpf_cpumask_release(cpumask);
 
+
 		// create the dsqs for the layer
 		if (disable_topology) {
 			ret = scx_bpf_create_dsq(i, -1);
@@ -2241,6 +2341,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			}
 		}
 	}
+
+	start_token_buckets(PER_CPU_REFRESH_TIMER);
 
 	return 0;
 }
