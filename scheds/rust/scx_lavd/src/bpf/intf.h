@@ -132,9 +132,10 @@ struct task_ctx {
 	u32	lat_cri_waker;		/* waker's latency criticality */
 	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
-	u8	wakeup_ft;		/* regular wakeup = 1, sync wakeup = 2 */
 	volatile s16 lock_boost;	/* lock boost count */
 	volatile s16 futex_boost;	/* futex boost count */
+	volatile u8 need_lock_boost;	/* need to boost lock for deadline calculation */
+	u8	wakeup_ft;		/* regular wakeup = 1, sync wakeup = 2 */
 	volatile u32 *futex_uaddr;	/* futex uaddr */
 
 	/*
@@ -176,7 +177,7 @@ enum {
 };
 
 enum {
-       LAVD_MSG_TASKC		= 0x1,
+       LAVD_MSG_TASKC		= 0x1
 };
 
 struct introspec {

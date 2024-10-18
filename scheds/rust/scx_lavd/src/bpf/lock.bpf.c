@@ -93,11 +93,17 @@ static void dec_futex_boost(u32 *uaddr)
 	try_dec_futex_boost(taskc, cpuc, uaddr);
 }
 
-static void reset_lock_futex_boost(struct task_ctx *taskc)
+static void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 {
+	if (is_lock_holder(taskc)) {
+		taskc->need_lock_boost = true;
+		cpuc->nr_lhp++;
+	}
+
 	taskc->lock_boost = 0;
 	taskc->futex_boost = 0;
 	taskc->futex_uaddr = NULL;
+	cpuc->lock_holder = false;
 }
 
 /**
