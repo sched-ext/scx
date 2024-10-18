@@ -8,10 +8,8 @@ mod layer_core_growth;
 pub mod bpf_intf;
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 
 use anyhow::bail;
-use anyhow::Context;
 use anyhow::Result;
 use bitvec::prelude::*;
 pub use config::LayerConfig;
@@ -23,9 +21,9 @@ use log::debug;
 use log::info;
 use scx_utils::Core;
 use scx_utils::Topology;
+use scx_utils::TopologyMap;
 
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
-const CORE_CACHE_LEVEL: u32 = 2;
 
 lazy_static::lazy_static! {
     static ref NR_POSSIBLE_CPUS: usize = libbpf_rs::num_possible_cpus().unwrap();
@@ -61,8 +59,9 @@ pub struct CpuPool {
     /// of the same physical core.
     pub sibling_cpu: Vec<i32>,
 
-    /// A list of physical core IDs.
-    /// Each entry in this vector corresponds to a unique physical core.
+    /// Mapping between logical core and physical core ids
+    /// The index in the vector represents the logical core, and each corresponding value
+    /// represents whether the physical core id of the logical core.
     cpu_core: Vec<usize>,
 
     /// A bit mask representing all available physical cores.
@@ -93,72 +92,14 @@ impl CpuPool {
             );
         }
 
-        let mut cpu_to_cache = vec![]; // (cpu_id, Option<cache_id>)
-        let mut cache_ids = BTreeSet::<usize>::new();
-        let mut nr_offline = 0;
+        let topo_map = TopologyMap::new(&topo).unwrap();
 
-        // Build cpu -> cache ID mapping.
-        for cpu in 0..*NR_POSSIBLE_CPUS {
-            let path = format!(
-                "/sys/devices/system/cpu/cpu{}/cache/index{}/id",
-                cpu, CORE_CACHE_LEVEL
-            );
-            let id = match std::fs::read_to_string(&path) {
-                Ok(val) => Some(val.trim().parse::<usize>().with_context(|| {
-                    format!("Failed to parse {:?}'s content {:?}", &path, &val)
-                })?),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    nr_offline += 1;
-                    None
-                }
-                Err(e) => return Err(e).with_context(|| format!("Failed to open {:?}", &path)),
-            };
-
-            cpu_to_cache.push(id);
-            if let Some(id) = id {
-                cache_ids.insert(id);
-            }
-        }
-
-        let nr_cpus = *NR_POSSIBLE_CPUS - nr_offline;
-
-        // Cache IDs may have holes. Assign consecutive core IDs to existing
-        // cache IDs.
-        let mut cache_to_core = BTreeMap::<usize, usize>::new();
-        let mut nr_cores = 0;
-        for cache_id in cache_ids.iter() {
-            cache_to_core.insert(*cache_id, nr_cores);
-            nr_cores += 1;
-        }
-
-        // Build core -> cpumask and cpu -> core mappings.
-        let mut all_cpus = bitvec![0; *NR_POSSIBLE_CPUS];
-        let mut core_cpus = vec![bitvec![0; *NR_POSSIBLE_CPUS]; nr_cores];
-        let mut cpu_core = vec![];
-
-        for (cpu, cache) in cpu_to_cache.iter().enumerate().take(*NR_POSSIBLE_CPUS) {
-            if let Some(cache_id) = cache {
-                let core_id = cache_to_core[cache_id];
-                all_cpus.set(cpu, true);
-                core_cpus[core_id].set(cpu, true);
-                cpu_core.push(core_id);
-            }
-        }
-
-        // Build sibling_cpu[]
-        let mut sibling_cpu = vec![-1i32; *NR_POSSIBLE_CPUS];
-        for cpus in &core_cpus {
-            let mut first = -1i32;
-            for cpu in cpus.iter_ones() {
-                if first < 0 {
-                    first = cpu as i32;
-                } else {
-                    sibling_cpu[first as usize] = cpu as i32;
-                    sibling_cpu[cpu as usize] = first;
-                    break;
-                }
-            }
-        }
+        let all_cpus = topo.cpus_bitvec();
+        let nr_cpus = topo.nr_cpus_online();
+        let core_cpus = topo_map.core_cpus_bitvec();
+        let nr_cores = topo.cores().len();
+        let sibling_cpu = topo.sibling_cpus();
+        let cpu_core = topo_map.cpu_core_mapping();
 
         // Build core_topology_to_id
         let mut core_topology_to_id = BTreeMap::new();
