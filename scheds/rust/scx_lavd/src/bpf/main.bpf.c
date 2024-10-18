@@ -352,18 +352,6 @@ static void calc_virtual_deadline_delta(struct task_struct *p,
 	taskc->vdeadline_delta_ns = deadline;
 }
 
-static u64 calc_task_load_actual(struct task_ctx *taskc)
-{
-	/*
-	 * The actual load is the CPU time consumed in a time interval, which
-	 * can be calculated from task's average run time and frequency.
-	 */
-	const s64 interval_adj = LAVD_TIME_ONE_SEC / LAVD_SYS_STAT_INTERVAL_NS;
-	u64 load = (taskc->run_time_ns * taskc->run_freq) / interval_adj;
-
-	return min(load, LAVD_TIME_ONE_SEC);
-}
-
 static u64 clamp_time_slice_ns(u64 slice)
 {
 	if (slice < LAVD_SLICE_MIN_NS)
@@ -446,10 +434,7 @@ static void update_stat_for_runnable(struct task_struct *p,
 	/*
 	 * Reflect task's load immediately.
 	 */
-	taskc->load_actual = calc_task_load_actual(taskc);
 	taskc->acc_run_time_ns = 0;
-	cpuc->load_actual += taskc->load_actual;
-	cpuc->load_run_time_ns += clamp_time_slice_ns(taskc->run_time_ns);
 }
 
 static void advance_cur_logical_clk(struct task_ctx *taskc)
@@ -611,13 +596,6 @@ static void update_stat_for_stopping(struct task_struct *p,
 	taskc->lat_cri_waker = 0;
 
 	/*
-	 * After getting updated task's runtime, compensate CPU's total
-	 * runtime.
-	 */
-	cpuc->load_run_time_ns = cpuc->load_run_time_ns -
-				 clamp_time_slice_ns(old_run_time_ns) +
-				 clamp_time_slice_ns(taskc->run_time_ns);
-	/*
 	 * Increase total service time of this CPU.
 	 */
 	cpuc->tot_svc_time += taskc->svc_time;
@@ -639,13 +617,6 @@ static void update_stat_for_quiescent(struct task_struct *p,
 				      struct task_ctx *taskc,
 				      struct cpu_ctx *cpuc)
 {
-	/*
-	 * When quiescent, reduce the per-CPU task load. Per-CPU task load will
-	 * be aggregated periodically at update_sys_cpu_load().
-	 */
-	cpuc->load_actual -= taskc->load_actual;
-	cpuc->load_run_time_ns -= clamp_time_slice_ns(taskc->run_time_ns);
-
 	/*
 	 * Reset task's lock and futex boost count
 	 * for a lock holder to be boosted only once.
