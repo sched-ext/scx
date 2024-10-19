@@ -1,5 +1,5 @@
 c_scheds = ['scx_simple', 'scx_qmap', 'scx_central', 'scx_userland', 'scx_nest',
-            'scx_flatcg', 'scx_pair']
+            'scx_flatcg', 'scx_pair', 'scx_sdt']
 
 foreach sched: c_scheds
   thread_dep = dependency('threads')
