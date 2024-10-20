@@ -51,9 +51,6 @@ rawtracepoint:sched_switch
 }
 
 interval:s:1 {
-    $scx_ops = kaddr("scx_ops");
-    $ops = (struct sched_ext_ops*)$scx_ops;
-    printf("scheduler: %s\n", $ops->name);
     print(@avg_lat);
     print(@usec_hist);
     print(@dsq_lat);

@@ -67,7 +67,6 @@ struct sys_stat {
 	volatile u64	last_update_clk;
 	volatile u64	util;		/* average of the CPU utilization */
 
-	volatile u64	load_actual;	/* average actual load of runnable tasks */
 	volatile u64	avg_svc_time;	/* average service time per task */
 	volatile u64	nr_queued_task;
 
@@ -117,7 +116,6 @@ struct task_ctx {
 	u64	wait_freq;		/* waiting frequency in a second */
 
 	u64	wake_freq;		/* waking-up frequency in a second */
-	u64	load_actual;		/* task load derived from run_time and run_freq */
 	u64	svc_time;		/* total CPU time consumed for this task */
 
 	/*
@@ -132,9 +130,10 @@ struct task_ctx {
 	u32	lat_cri_waker;		/* waker's latency criticality */
 	volatile s32 victim_cpu;
 	u16	slice_boost_prio;	/* how many times a task fully consumed the slice */
-	u8	wakeup_ft;		/* regular wakeup = 1, sync wakeup = 2 */
 	volatile s16 lock_boost;	/* lock boost count */
 	volatile s16 futex_boost;	/* futex boost count */
+	volatile u8 need_lock_boost;	/* need to boost lock for deadline calculation */
+	u8	wakeup_ft;		/* regular wakeup = 1, sync wakeup = 2 */
 	volatile u32 *futex_uaddr;	/* futex uaddr */
 
 	/*
@@ -176,7 +175,7 @@ enum {
 };
 
 enum {
-       LAVD_MSG_TASKC		= 0x1,
+       LAVD_MSG_TASKC		= 0x1
 };
 
 struct introspec {

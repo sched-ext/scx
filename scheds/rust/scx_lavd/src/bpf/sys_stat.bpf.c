@@ -30,10 +30,8 @@ struct sys_stat_ctx {
 	u64		duration_total;
 	u64		idle_total;
 	u64		compute_total;
-	u64		load_actual;
 	u64		tot_svc_time;
 	u64		nr_queued_task;
-	u64		load_run_time_ns;
 	s32		max_lat_cri;
 	s32		avg_lat_cri;
 	u64		sum_lat_cri;
@@ -83,8 +81,6 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		/*
 		 * Accumulate cpus' loads.
 		 */
-		c->load_actual += cpuc->load_actual;
-		c->load_run_time_ns += cpuc->load_run_time_ns;
 		c->tot_svc_time += cpuc->tot_svc_time;
 		cpuc->tot_svc_time = 0;
 
@@ -233,8 +229,6 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 	struct sys_stat *stat_cur = c->stat_cur;
 	struct sys_stat *stat_next = c->stat_next;
 
-	stat_next->load_actual =
-		calc_avg(stat_cur->load_actual, c->load_actual);
 	stat_next->util =
 		calc_avg(stat_cur->util, c->new_util);
 

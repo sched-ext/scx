@@ -308,21 +308,17 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 		lat_cri += LAVD_LC_KTHREAD_FT;
 
 	/*
+	 * Reset task's lock and futex boost count
+	 * for a lock holder to be boosted only once.
+	 */
+	reset_lock_futex_boost(taskc, cpuc_cur);
+
+	/*
 	 * Prioritize a lock holder for faster system-wide forward progress.
 	 */
-	if (is_lock_holder(taskc)) {
+	if (taskc->need_lock_boost) {
+		taskc->need_lock_boost = false;
 		lat_cri += (lat_cri * LAVD_LC_LOCK_HOLDER_FT) / 1000;
-
-		/*
-		 * Update statistics.
-		 */
-		cpuc_cur->nr_lhp++;
-
-		/*
-		 * Reset task's lock and futex boost count
-		 * for a lock holder to be boosted only once.
-		 */
-		reset_lock_futex_boost(taskc);
 	}
 
 	/*
@@ -354,16 +350,6 @@ static void calc_virtual_deadline_delta(struct task_struct *p,
 	greedy_ratio = calc_greedy_ratio(taskc);
 	deadline = (LAVD_SLICE_MAX_NS * greedy_ratio) / lat_cri;
 	taskc->vdeadline_delta_ns = deadline;
-}
-
-static u64 calc_task_load_actual(struct task_ctx *taskc)
-{
-	/*
-	 * The actual load is the CPU time consumed in a time interval, which
-	 * can be calculated from task's average run time and frequency.
-	 */
-	const s64 interval_adj = LAVD_TIME_ONE_SEC / LAVD_SYS_STAT_INTERVAL_NS;
-	return (taskc->run_time_ns * taskc->run_freq) / interval_adj;
 }
 
 static u64 clamp_time_slice_ns(u64 slice)
@@ -448,10 +434,7 @@ static void update_stat_for_runnable(struct task_struct *p,
 	/*
 	 * Reflect task's load immediately.
 	 */
-	taskc->load_actual = calc_task_load_actual(taskc);
 	taskc->acc_run_time_ns = 0;
-	cpuc->load_actual += taskc->load_actual;
-	cpuc->load_run_time_ns += clamp_time_slice_ns(taskc->run_time_ns);
 }
 
 static void advance_cur_logical_clk(struct task_ctx *taskc)
@@ -613,13 +596,6 @@ static void update_stat_for_stopping(struct task_struct *p,
 	taskc->lat_cri_waker = 0;
 
 	/*
-	 * After getting updated task's runtime, compensate CPU's total
-	 * runtime.
-	 */
-	cpuc->load_run_time_ns = cpuc->load_run_time_ns -
-				 clamp_time_slice_ns(old_run_time_ns) +
-				 clamp_time_slice_ns(taskc->run_time_ns);
-	/*
 	 * Increase total service time of this CPU.
 	 */
 	cpuc->tot_svc_time += taskc->svc_time;
@@ -629,6 +605,12 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 */
 	if (READ_ONCE(cur_svc_time) < taskc->svc_time)
 		WRITE_ONCE(cur_svc_time, taskc->svc_time);
+
+	/*
+	 * Reset task's lock and futex boost count
+	 * for a lock holder to be boosted only once.
+	 */
+	reset_lock_futex_boost(taskc, cpuc);
 }
 
 static void update_stat_for_quiescent(struct task_struct *p,
@@ -636,11 +618,10 @@ static void update_stat_for_quiescent(struct task_struct *p,
 				      struct cpu_ctx *cpuc)
 {
 	/*
-	 * When quiescent, reduce the per-CPU task load. Per-CPU task load will
-	 * be aggregated periodically at update_sys_cpu_load().
+	 * Reset task's lock and futex boost count
+	 * for a lock holder to be boosted only once.
 	 */
-	cpuc->load_actual -= taskc->load_actual;
-	cpuc->load_run_time_ns -= clamp_time_slice_ns(taskc->run_time_ns);
+	reset_lock_futex_boost(taskc, cpuc);
 }
 
 static bool match_task_core_type(struct task_ctx *taskc,
@@ -1174,8 +1155,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	u64 now = bpf_ktime_get_ns();
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *active, *ovrflw;
-	struct task_struct *p;
-	struct task_ctx *taskc;
+	struct task_struct *p, *taskc;
 	u64 dsq_id = 0;
 	bool try_consume = false;
 
@@ -1289,20 +1269,27 @@ consume_out:
 	 */
 	if (!try_consume)
 		return;
+
 	if (consume_task(cpu, cpuc, now))
 		return;
 
 	/*
-	 * If no other task is consumed, the scheduler will keep continue to
-	 * run the prev task, so let's re-assigne its time slice.
+	 * Reset prev task's lock and futex boost count
+	 * for a lock holder to be boosted only once.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
+	if (prev) {
 		taskc = get_task_ctx(prev);
 		if (!taskc) {
 			scx_bpf_error("Failed to look up task context");
 			return;
 		}
-		prev->scx.slice = calc_time_slice(prev, taskc);
+		reset_lock_futex_boost(taskc, cpuc);
+
+		/*
+		 * If nothing to run, continue to run the previous task.
+		 */
+		if (prev->scx.flags & SCX_TASK_QUEUED)
+			prev->scx.slice = calc_time_slice(prev, taskc);
 	}
 }
 
