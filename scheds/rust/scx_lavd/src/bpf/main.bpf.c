@@ -1173,6 +1173,24 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		scx_bpf_error("Failed to look up cpu context or task context");
 		return;
 	}
+
+	if (prev) {
+		taskc = get_task_ctx(prev);
+		if (!taskc) {
+			scx_bpf_error("Failed to look up task context");
+			return;
+		}
+
+		/*
+		 * If a task newly holds a lock, continue to execute it
+		 * to make system-wide forward progress.
+		 */
+		if ((prev->scx.flags & SCX_TASK_QUEUED) &&
+		    is_lock_holder(taskc)) {
+			goto lock_holder_extenstion;
+		}
+	}
+
 	dsq_id = cpuc->cpdom_id;
 
 	/*
@@ -1287,18 +1305,14 @@ consume_out:
 	 * for a lock holder to be boosted only once.
 	 */
 	if (prev) {
-		taskc = get_task_ctx(prev);
-		if (!taskc) {
-			scx_bpf_error("Failed to look up task context");
-			return;
-		}
-		reset_lock_futex_boost(taskc, cpuc);
-
 		/*
 		 * If nothing to run, continue to run the previous task.
 		 */
-		if (prev->scx.flags & SCX_TASK_QUEUED)
+		if (prev->scx.flags & SCX_TASK_QUEUED) {
+lock_holder_extenstion:
 			prev->scx.slice = calc_time_slice(prev, taskc);
+		}
+		reset_lock_futex_boost(taskc, cpuc);
 	}
 }
 
