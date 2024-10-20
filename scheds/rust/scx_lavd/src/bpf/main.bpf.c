@@ -911,6 +911,15 @@ out:
 	return cpu_id;
 }
 
+static void update_task_log_clk(struct task_ctx *taskc)
+{
+	/*
+	 * Update the logical clock of the virtual deadline.
+	 */
+	u64 vlc = READ_ONCE(cur_logical_clk) + taskc->vdeadline_delta_ns;
+	WRITE_ONCE(taskc->vdeadline_log_clk, vlc);
+}
+
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -923,31 +932,30 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		return prev_cpu;
 
 	cpu_id = pick_idle_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
-	if (found_idle)
+	if (found_idle) {
+		taskc->vdeadline_delta_ns = 0;
+		update_task_log_clk(taskc);
+		p->scx.slice = calc_time_slice(p, taskc);
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
+	
 		return cpu_id;
+	}
 
 	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
 
-	return (cpu_id >= 0) ? cpu_id : prev_cpu;
+	return prev_cpu;
 }
-
 
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 			     struct cpu_ctx *cpuc_cur, u64 enq_flags)
 {
-	u64 vlc;
-
 	/*
 	 * Before enqueueing a task to a run queue, we should decide when a
 	 * task should be scheduled.
 	 */
 	calc_virtual_deadline_delta(p, taskc, cpuc_cur, enq_flags);
 
-	/*
-	 * Update the logical clock of the virtual deadline.
-	 */
-	vlc = READ_ONCE(cur_logical_clk) + taskc->vdeadline_delta_ns;
-	WRITE_ONCE(taskc->vdeadline_log_clk, vlc);
+	update_task_log_clk(taskc);
 }
 
 static u64 find_proper_dsq(struct task_ctx *taskc, struct cpu_ctx *cpuc)
