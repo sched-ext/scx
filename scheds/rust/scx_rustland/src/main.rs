@@ -33,6 +33,9 @@ const SCHEDULER_NAME: &'static str = "RustLand";
 
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
+/// Task is being enqueued as a result of a wakeup event.
+const SCX_ENQ_WAKEUP: u64 = 1;
+
 /// scx_rustland: user-space scheduler written in Rust
 ///
 /// scx_rustland is designed to prioritize interactive workloads over background CPU-intensive
@@ -117,9 +120,8 @@ struct Opts {
 const NSEC_PER_USEC: u64 = 1_000;
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 
-// Maximum factor used to scale down the task's deadline in function of its average amount of
-// context switches per second.
-const RL_MAX_DEADLINE_FACTOR: u64 = 4;
+// Maximum multiplier for the dynamic task priority.
+const MAX_LATENCY_WEIGHT: u64 = 1_000;
 
 // Basic item stored in the task information map.
 #[derive(Debug)]
@@ -324,10 +326,26 @@ impl<'a> Scheduler<'a> {
         // Update total task cputime.
         task_info.sum_exec_runtime = task.sum_exec_runtime;
 
-        // Update task's vruntime re-aligning it to min_vruntime, to avoid
-        // over-prioritizing tasks with a mostly sleepy behavior.
-        if task_info.vruntime < self.min_vruntime {
-            task_info.vruntime = self.min_vruntime;
+        // Update task's vruntime re-aligning it to min_vruntime.
+        //
+        // The amount of vruntime budget an idle task can accumulate is adjusted in function of its
+        // latency weight, which is derived from the average number of voluntary context switches.
+        // This ensures that latency-sensitive tasks receive a priority boost.
+        let latency_weight = {
+            let base_weight = task_info.avg_nvcsw.min(MAX_LATENCY_WEIGHT);
+            // Boost tasks being enqueued as a result of a wakeup event by an additional 2x factor.
+            let weight_multiplier = if task.flags & SCX_ENQ_WAKEUP != 0 {
+                2
+            } else {
+                1
+            };
+            (base_weight * weight_multiplier) + 1
+        };
+        let min_vruntime = self
+            .min_vruntime
+            .saturating_sub(self.slice_ns * latency_weight);
+        if task_info.vruntime < min_vruntime {
+            task_info.vruntime = min_vruntime;
         }
         let vslice = slice * 100 / task.weight;
         task_info.vruntime += vslice;
@@ -336,8 +354,7 @@ impl<'a> Scheduler<'a> {
         self.min_vruntime += vslice;
 
         // Return the task's deadline.
-        let latency_weight = task_info.avg_nvcsw.min(RL_MAX_DEADLINE_FACTOR) + 1;
-        task_info.vruntime / latency_weight + vslice * 100 / task.weight
+        task_info.vruntime
     }
 
     // Drain all the tasks from the queued list, update their vruntime (Self::update_enqueued()),
@@ -391,6 +408,9 @@ impl<'a> Scheduler<'a> {
 
                 // Assign the time slice to the task and propagate the vruntime.
                 dispatched_task.slice_ns = slice_ns;
+
+                // Propagate the evaluated task's deadline to the scx_rustland_core backend.
+                dispatched_task.vtime = task.deadline;
 
                 // Try to pick an idle CPU for the task.
                 let cpu = self
