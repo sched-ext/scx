@@ -285,8 +285,9 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 	 * add +1 to guarantee the latency criticality (log2-ed) is always
 	 * positive.
 	 */
-	lat_cri = log2_u64(runtime_ft * wait_freq_ft + 1) +
-		  log2_u64(wake_freq_ft * wake_freq_ft + 1);
+	lat_cri = log2_u64(runtime_ft + 1);
+	lat_cri += log2_u64(wait_freq_ft + 1);
+	lat_cri += log2_u64(wake_freq_ft + 1);
 
 	/*
 	 * A user-provided nice value is a strong hint for latency-criticality.
@@ -348,7 +349,7 @@ static void calc_virtual_deadline_delta(struct task_struct *p,
 	 */
 	lat_cri = calc_lat_cri(p, taskc, cpuc_cur, enq_flags);
 	greedy_ratio = calc_greedy_ratio(taskc);
-	deadline = (LAVD_SLICE_MAX_NS * greedy_ratio) / lat_cri;
+	deadline = (taskc->run_time_ns / lat_cri) * greedy_ratio;
 	taskc->vdeadline_delta_ns = deadline;
 }
 
@@ -523,7 +524,7 @@ static void update_stat_for_running(struct task_struct *p,
 	 */
 	wait_freq_ft = calc_freq_factor(taskc->wait_freq);
 	wake_freq_ft = calc_freq_factor(taskc->wake_freq);
-	perf_cri = log2_u64(wait_freq_ft * wake_freq_ft * wake_freq_ft);
+	perf_cri = log2_u64(wait_freq_ft * wake_freq_ft);
 	perf_cri += log2_u64(max(taskc->run_freq, 1) *
 			     max(taskc->run_time_ns, 1));
 	perf_cri += calc_static_prio_factor(p);
