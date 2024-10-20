@@ -460,6 +460,59 @@ int BPF_PROG(tp_cgroup_attach_task, struct cgroup *cgrp, const char *cgrp_path,
 	return 0;
 }
 
+/*
+ * Intercept when a task is executing sched_setaffinity().
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, bool);
+} t_setaffinity_map SEC(".maps");
+
+SEC("kprobe/sched_setaffinity")
+int BPF_KPROBE(kprobe_sched_setaffinity, struct task_struct *task,
+			const struct cpumask *new_mask)
+{
+	struct task_struct *p;
+	bool *value_ptr;
+	p = bpf_get_current_task_btf();
+
+
+	value_ptr = bpf_task_storage_get(&t_setaffinity_map, p, NULL, BPF_LOCAL_STORAGE_GET_F_CREATE);
+
+	if (value_ptr) {
+		*value_ptr = true;
+	}
+
+	return 0;
+}
+
+SEC("kretprobe/sched_setaffinity")
+int BPF_KRETPROBE(kretprobe_sched_setaffinity)
+{
+	struct task_struct *p;
+	p = bpf_get_current_task_btf();
+
+	bpf_task_storage_delete(&t_setaffinity_map, p);
+
+	return 0;
+}
+
+/*
+ * Return true if a task is executing sched_setaffinity(), false otherwise.
+ */
+static bool in_setaffinity(struct task_struct *p)
+{
+	bool *value_ptr;
+	value_ptr = bpf_task_storage_get(&t_setaffinity_map, p, false, 0);
+	if (value_ptr && ((*value_ptr)==true)){
+		return true;
+	} else {
+		return false;
+	}
+}
+
 SEC("tp_btf/task_rename")
 int BPF_PROG(tp_task_rename, struct task_struct *p, const char *buf)
 {
@@ -742,7 +795,11 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cctx);
 		u64 layer_slice_ns = layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, layer_slice_ns, 0);
+		if (in_setaffinity(p)) {
+			scx_bpf_dispatch(p, AFFINITY_DSQ, layer_slice_ns, 0);
+		} else {
+			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, layer_slice_ns, 0);
+		}
 		return cpu;
 	} else {
 		return prev_cpu;
@@ -1066,6 +1123,8 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 
 		idx = cpu_hi_fallback_dsq_id(task_cpu);
+		if (in_setaffinity(p))
+			idx = AFFINITY_DSQ;
 		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
 		goto preempt;
 	}
@@ -1091,16 +1150,24 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		 * issue.
 		 */
 		idx = cpu_hi_fallback_dsq_id(task_cpu);
+		if (in_setaffinity(p))
+			idx = AFFINITY_DSQ;
 		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
 		goto preempt;
 	}
 
 	if (disable_topology) {
-		scx_bpf_dispatch_vtime(p, tctx->layer, layer_slice_ns, vtime, enq_flags);
+		if (in_setaffinity(p)){
+			scx_bpf_dispatch_vtime(p, AFFINITY_DSQ, layer_slice_ns, vtime, enq_flags);
+		} else {
+			scx_bpf_dispatch_vtime(p, tctx->layer, layer_slice_ns, vtime, enq_flags);
+		}
 	} else {
 		u32 llc_id = cpu_to_llc_id(tctx->last_cpu >= 0 ? tctx->last_cpu :
 					   bpf_get_smp_processor_id());
 		idx = layer_dsq_id(layer->idx, llc_id);
+		if (in_setaffinity(p))
+			idx = AFFINITY_DSQ;
 		scx_bpf_dispatch_vtime(p, idx, layer_slice_ns, vtime, enq_flags);
 	}
 
@@ -1252,6 +1319,12 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	if (scx_bpf_consume(dsq_id))
 		return;
 
+	/* shared dsq is used for tasks in sched setaffinity */
+	/* probably best to run tasks ran with such intent here */
+	dsq_id = AFFINITY_DSQ;
+	if(scx_bpf_consume(dsq_id))
+		return;
+
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = rotate_layer_id(cctx->layer_idx, idx);
@@ -1349,6 +1422,12 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	dsq_id = cpu_hi_fallback_dsq_id(cpu);
 	if (scx_bpf_consume(dsq_id))
+		return;
+
+	/* shared dsq is used for tasks in sched setaffinity */
+	/* probably best to run tasks ran with such intent here */
+	dsq_id = AFFINITY_DSQ;
+	if(scx_bpf_consume(dsq_id))
 		return;
 
 	/* consume !open layers second */
@@ -1963,7 +2042,7 @@ static u64 dsq_first_runnable_for_ms(u64 dsq_id, u64 now)
 {
 	struct task_struct *p;
 
-	if (dsq_id > LO_FALLBACK_DSQ)
+	if (dsq_id > AFFINITY_DSQ)
 		return 0;
 
 	bpf_for_each(scx_dsq, p, dsq_id, 0) {
@@ -2046,6 +2125,9 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 	scx_bpf_dump("LO_FALLBACK nr_queued=%d -%llums\n",
 		     scx_bpf_dsq_nr_queued(LO_FALLBACK_DSQ),
 		     dsq_first_runnable_for_ms(LO_FALLBACK_DSQ, now));
+	scx_bpf_dump("AFFINITY_DSQ nr_queued=%d -%llums\n",
+		     scx_bpf_dsq_nr_queued(AFFINITY_DSQ),
+		     dsq_first_runnable_for_ms(AFFINITY_DSQ, now));
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
@@ -2055,6 +2137,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	int i, j, k, nr_online_cpus, ret;
 
 	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
+	if (ret < 0)
+		return ret;
+
+	ret = scx_bpf_create_dsq(AFFINITY_DSQ, -1);
 	if (ret < 0)
 		return ret;
 
