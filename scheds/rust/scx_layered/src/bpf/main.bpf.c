@@ -1952,6 +1952,10 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 
+	if(args->cancelled){
+		return;
+	}
+
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
 
