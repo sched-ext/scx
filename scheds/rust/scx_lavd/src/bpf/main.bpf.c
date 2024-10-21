@@ -920,6 +920,14 @@ static void update_task_log_clk(struct task_ctx *taskc)
 	WRITE_ONCE(taskc->vdeadline_log_clk, vlc);
 }
 
+static void direct_dispatch(struct task_struct *p, struct task_ctx *taskc)
+{
+	taskc->vdeadline_delta_ns = 0;
+	update_task_log_clk(taskc);
+	p->scx.slice = calc_time_slice(p, taskc);
+	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
+}
+
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -933,17 +941,13 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	cpu_id = pick_idle_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
 	if (found_idle) {
-		taskc->vdeadline_delta_ns = 0;
-		update_task_log_clk(taskc);
-		p->scx.slice = calc_time_slice(p, taskc);
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
-	
+		direct_dispatch(p, taskc);
 		return cpu_id;
 	}
 
 	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
 
-	return prev_cpu;
+	return cpu_id >= 0 ? cpu_id : prev_cpu;
 }
 
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
