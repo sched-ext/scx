@@ -1652,6 +1652,16 @@ void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 	set_on_core_type(taskc, cpumask);
 }
 
+void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
+		    struct scx_cpu_release_args *args)
+{
+	/*
+	 * When a CPU is released to serve higher priority scheduler class,
+	 * requeue the tasks in a local DSQ to the global enqueue.
+	 */
+	scx_bpf_reenqueue_local();
+}
+
 void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
 {
 	struct task_ctx *taskc;
@@ -2025,6 +2035,7 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .cpu_offline		= (void *)lavd_cpu_offline,
 	       .update_idle		= (void *)lavd_update_idle,
 	       .set_cpumask		= (void *)lavd_set_cpumask,
+	       .cpu_release		= (void *)lavd_cpu_release,
 	       .enable			= (void *)lavd_enable,
 	       .init_task		= (void *)lavd_init_task,
 	       .init			= (void *)lavd_init,
