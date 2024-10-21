@@ -79,8 +79,7 @@ static bool is_worth_kick_other_task(struct task_ctx *taskc)
 
 static bool can_cpu_be_kicked(u64 now, struct cpu_ctx *cpuc)
 {
-	return cpuc->is_online &&
-	       (now - cpuc->last_kick_clk) >= LAVD_PREEMPT_KICK_MARGIN;
+	return cpuc->is_online && (now >= cpuc->last_kick_clk);
 }
 
 static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
@@ -106,8 +105,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	/*
 	 * Get task's preemption information for comparison.
 	 */
-	prm_task.stopping_tm_est_ns = get_est_stopping_time(taskc) +
-				      LAVD_PREEMPT_KICK_MARGIN;
+	prm_task.stopping_tm_est_ns = get_est_stopping_time(taskc);
 	prm_task.lat_cri = taskc->lat_cri;
 	prm_task.cpuc = cpuc = get_cpu_ctx();
 	if (!cpuc) {
@@ -296,8 +294,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	 * zero.
 	 */
 	prm_run.stopping_tm_est_ns = taskc_run->last_running_clk +
-				     taskc_run->run_time_ns -
-				     LAVD_PREEMPT_TICK_MARGIN;
+				     taskc_run->run_time_ns;
 	prm_run.lat_cri = taskc_run->lat_cri;
 
 	bpf_rcu_read_lock();
