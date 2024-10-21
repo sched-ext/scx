@@ -9,6 +9,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::bpf_intf;
 use crate::LayerGrowthAlgo;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -158,4 +159,14 @@ pub enum LayerKind {
         #[serde(default)]
         llcs: Vec<usize>,
     },
+}
+
+impl LayerKind {
+    pub fn as_bpf_enum(&self) -> i32 {
+        match self {
+            LayerKind::Confined { .. } => bpf_intf::layer_kind_LAYER_KIND_CONFINED as i32,
+            LayerKind::Grouped { .. } => bpf_intf::layer_kind_LAYER_KIND_GROUPED as i32,
+            LayerKind::Open { .. } => bpf_intf::layer_kind_LAYER_KIND_OPEN as i32,
+        }
+    }
 }

@@ -1268,6 +1268,7 @@ impl<'a> Scheduler<'a> {
             }
 
             layer.nr_match_ors = spec.matches.len() as u32;
+            layer.kind = spec.kind.as_bpf_enum();
 
             match &spec.kind {
                 LayerKind::Confined {
