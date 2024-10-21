@@ -235,26 +235,16 @@ out:
 	return ratio;
 }
 
-static u64 calc_runtime_factor(u64 runtime)
+static u64 calc_runtime_factor(u64 runtime, u64 weight)
 {
 	u64 ft = rsigmoid_u64(runtime, LAVD_LC_RUNTIME_MAX);
-	return (ft >> LAVD_LC_RUNTIME_SHIFT) + 1;
+	return (ft / weight) + 1;
 }
 
-static u64 calc_freq_factor(u64 freq)
+static u64 calc_freq_factor(u64 freq, u64 weight)
 {
 	u64 ft = sigmoid_u64(freq, LAVD_LC_FREQ_MAX);
-	return ft + 1;
-}
-
-static s64 calc_static_prio_factor(struct task_struct *p)
-{
-	/*
-	 * A nicer task with >20 static priority will get penalized with
-	 * negative latency-criticality. However, a greedier task with <20
-	 * static priority will get boosted.
-	 */
-	return (20 - get_nice_prio(p)) >> 1;
+	return (ft * weight) + 1;
 }
 
 static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
@@ -273,9 +263,9 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 	 * is monotonically increasing since higher frequencies mean more
 	 * latency-critical.
 	 */
-	wait_freq_ft = calc_freq_factor(taskc->wait_freq);
-	wake_freq_ft = calc_freq_factor(taskc->wake_freq);
-	runtime_ft = calc_runtime_factor(taskc->run_time_ns);
+	wait_freq_ft = calc_freq_factor(taskc->wait_freq, p->scx.weight);
+	wake_freq_ft = calc_freq_factor(taskc->wake_freq, p->scx.weight);
+	runtime_ft = calc_runtime_factor(taskc->run_time_ns, p->scx.weight);
 
 	/*
 	 * Wake frequency and wait frequency represent how much a task is used
@@ -288,11 +278,6 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 	lat_cri = log2_u64(runtime_ft + 1);
 	lat_cri += log2_u64(wait_freq_ft + 1);
 	lat_cri += log2_u64(wake_freq_ft + 1);
-
-	/*
-	 * A user-provided nice value is a strong hint for latency-criticality.
-	 */
-	lat_cri += calc_static_prio_factor(p);
 
 	/*
 	 * Prioritize a wake-up task since this is a clear sign of immediate
@@ -522,12 +507,11 @@ static void update_stat_for_running(struct task_struct *p,
 	 * We use the log-ed value since the raw value follows the highly
 	 * skewed distribution.
 	 */
-	wait_freq_ft = calc_freq_factor(taskc->wait_freq);
-	wake_freq_ft = calc_freq_factor(taskc->wake_freq);
+	wait_freq_ft = calc_freq_factor(taskc->wait_freq, p->scx.weight);
+	wake_freq_ft = calc_freq_factor(taskc->wake_freq, p->scx.weight);
 	perf_cri = log2_u64(wait_freq_ft * wake_freq_ft);
 	perf_cri += log2_u64(max(taskc->run_freq, 1) *
-			     max(taskc->run_time_ns, 1));
-	perf_cri += calc_static_prio_factor(p);
+			     max(taskc->run_time_ns, 1) * p->scx.weight);
 	perf_cri += taskc->wakeup_ft * LAVD_LC_WAKEUP_FT;
 	taskc->wakeup_ft = 0;
 
