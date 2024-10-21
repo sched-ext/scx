@@ -50,6 +50,12 @@ enum consts {
 	MAX_CGRP_PREFIXES = 32
 };
 
+enum layer_kind {
+	LAYER_KIND_OPEN,
+	LAYER_KIND_GROUPED,
+	LAYER_KIND_CONFINED,
+};
+
 /* Statistics */
 enum global_stat_idx {
 	GSTAT_EXCL_IDLE,
@@ -174,6 +180,8 @@ struct layer {
 	u64			yield_step_ns;
 	u64			slice_ns;
 	u32			weight;
+
+	int			kind;
 	bool			open;
 	bool			preempt;
 	bool			preempt_first;
