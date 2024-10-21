@@ -3,9 +3,12 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use std::env;
-use std::fs::File;
-use std::path::PathBuf;
+use std::{
+    fs::File,
+    path::{Path, PathBuf},
+};
+
+include!("clang_info.rs");
 
 const BPF_H: &str = "bpf_h";
 
@@ -35,6 +38,16 @@ impl Builder {
 
     fn gen_bindings(&self) {
         let out_dir = env::var("OUT_DIR").unwrap();
+        let clang = ClangInfo::new().unwrap();
+        let kernel_target = clang.kernel_target().unwrap();
+        let vmlinux_h = Path::new(&BPF_H)
+            .join("arch")
+            .join(kernel_target)
+            .join("vmlinux.h")
+            .to_str()
+            .unwrap()
+            .to_string();
+
         // FIXME - bindgen's API changed between 0.68 and 0.69 so that
         // `bindgen::CargoCallbacks::new()` should be used instead of
         // `bindgen::CargoCallbacks`. Unfortunately, as of Dec 2023, fedora is
@@ -43,7 +56,7 @@ impl Builder {
         // fedora can be updated to bindgen >= 0.69.
         #[allow(deprecated)]
         let bindings = bindgen::Builder::default()
-            .header("bindings.h")
+            .header(vmlinux_h)
             .allowlist_type("scx_exit_kind")
             .allowlist_type("scx_consts")
             .parse_callbacks(Box::new(bindgen::CargoCallbacks))
