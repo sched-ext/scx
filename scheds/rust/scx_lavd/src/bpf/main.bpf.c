@@ -235,63 +235,37 @@ out:
 	return ratio;
 }
 
-static u64 calc_runtime_factor(u64 runtime, u64 weight)
+static u64 calc_runtime_factor(u64 runtime, u64 weight_ft)
 {
 	u64 ft = rsigmoid_u64(runtime, LAVD_LC_RUNTIME_MAX);
-	return (ft / weight) + 1;
+	return (ft / weight_ft) + 1;
 }
 
-static u64 calc_freq_factor(u64 freq, u64 weight)
+static u64 calc_freq_factor(u64 freq, u64 weight_ft)
 {
 	u64 ft = sigmoid_u64(freq, LAVD_LC_FREQ_MAX);
-	return (ft * weight) + 1;
+	return (ft * weight_ft) + 1;
 }
 
-static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
-			struct cpu_ctx *cpuc_cur, u64 enq_flags)
+static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc,
+			      struct cpu_ctx *cpuc_cur, u64 enq_flags)
 {
-	u64 wait_freq_ft, wake_freq_ft, runtime_ft;
-	u64 lat_cri;
-
-	/*
-	 * A task is more latency-critical as its wait or wake frequencies
-	 * (i.e., wait_freq and wake_freq) are higher.
-	 *
-	 * Since those frequencies are unbounded and their upper limits are
-	 * unknown, we transform them using sigmoid-like functions. For wait
-	 * and wake frequencies, we use a sigmoid function (sigmoid_u64), which
-	 * is monotonically increasing since higher frequencies mean more
-	 * latency-critical.
-	 */
-	wait_freq_ft = calc_freq_factor(taskc->wait_freq, p->scx.weight);
-	wake_freq_ft = calc_freq_factor(taskc->wake_freq, p->scx.weight);
-	runtime_ft = calc_runtime_factor(taskc->run_time_ns, p->scx.weight);
-
-	/*
-	 * Wake frequency and wait frequency represent how much a task is used
-	 * for a producer and a consumer, respectively. If both are high, the
-	 * task is in the middle of a task chain. The ratio tends to follow an
-	 * exponentially skewed distribution, so we linearize it using log2. We
-	 * add +1 to guarantee the latency criticality (log2-ed) is always
-	 * positive.
-	 */
-	lat_cri = log2_u64(runtime_ft + 1);
-	lat_cri += log2_u64(wait_freq_ft + 1);
-	lat_cri += log2_u64(wake_freq_ft + 1);
+	u64 weight_boost = 1;
+	u64 weight_ft;
 
 	/*
 	 * Prioritize a wake-up task since this is a clear sign of immediate
 	 * consumer. If it is a synchronous wakeup, doule the prioritization.
 	 */
 	taskc->wakeup_ft += !!(enq_flags & SCX_ENQ_WAKEUP);
-	lat_cri += taskc->wakeup_ft * LAVD_LC_WAKEUP_FT;
+	weight_boost += taskc->wakeup_ft * LAVD_LC_WEIGHT_BOOST;
 
 	/*
 	 * Prioritize a kernel task since many kernel tasks serve
 	 * latency-critical jobs.
 	 */
 	if (is_kernel_task(p))
-		lat_cri += LAVD_LC_KTHREAD_FT;
+		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
 	 * Reset task's lock and futex boost count
@@ -304,8 +278,50 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	if (taskc->need_lock_boost) {
 		taskc->need_lock_boost = false;
-		lat_cri += (lat_cri * LAVD_LC_LOCK_HOLDER_FT) / 1000;
+		weight_boost += LAVD_LC_WEIGHT_BOOST;
 	}
+
+	weight_ft = p->scx.weight * weight_boost;
+	return weight_ft;
+}
+
+static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
+			struct cpu_ctx *cpuc_cur, u64 enq_flags)
+{
+	u64 weight_ft, wait_freq_ft, wake_freq_ft, runtime_ft;
+	u64 lat_cri;
+
+	/*
+	 * Adjust task's weight based on the scheduling context, such as
+	 * if it is a kernel task, lock holder, etc.
+	 */
+	weight_ft = calc_weight_factor(p, taskc, cpuc_cur, enq_flags);
+
+	/*
+	 * A task is more latency-critical as its wait or wake frequencies
+	 * (i.e., wait_freq and wake_freq) are higher.
+	 *
+	 * Since those frequencies are unbounded and their upper limits are
+	 * unknown, we transform them using sigmoid-like functions. For wait
+	 * and wake frequencies, we use a sigmoid function (sigmoid_u64), which
+	 * is monotonically increasing since higher frequencies mean more
+	 * latency-critical.
+	 */
+	wait_freq_ft = calc_freq_factor(taskc->wait_freq, weight_ft);
+	wake_freq_ft = calc_freq_factor(taskc->wake_freq, weight_ft);
+	runtime_ft = calc_runtime_factor(taskc->run_time_ns, weight_ft);
+
+	/*
+	 * Wake frequency and wait frequency represent how much a task is used
+	 * for a producer and a consumer, respectively. If both are high, the
+	 * task is in the middle of a task chain. The ratio tends to follow an
+	 * exponentially skewed distribution, so we linearize it using log2. We
+	 * add +1 to guarantee the latency criticality (log2-ed) is always
+	 * positive.
+	 */
+	lat_cri = log2_u64(runtime_ft + 1);
+	lat_cri += log2_u64(wait_freq_ft + 1);
+	lat_cri += log2_u64(wake_freq_ft + 1);
 
 	/*
 	 * Make sure the lat_cri is non-zero.
@@ -506,13 +522,14 @@ static void update_stat_for_running(struct task_struct *p,
 	 *
 	 * We use the log-ed value since the raw value follows the highly
 	 * skewed distribution.
+	 *
+	 * Note that we use unadjusted weight to reflect the pure task properties.
 	 */
 	wait_freq_ft = calc_freq_factor(taskc->wait_freq, p->scx.weight);
 	wake_freq_ft = calc_freq_factor(taskc->wake_freq, p->scx.weight);
 	perf_cri = log2_u64(wait_freq_ft * wake_freq_ft);
 	perf_cri += log2_u64(max(taskc->run_freq, 1) *
 			     max(taskc->run_time_ns, 1) * p->scx.weight);
-	perf_cri += taskc->wakeup_ft * LAVD_LC_WAKEUP_FT;
 	taskc->wakeup_ft = 0;
 
 	taskc->perf_cri = perf_cri;
