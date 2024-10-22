@@ -42,7 +42,6 @@ u64 nr_total, nr_locals, nr_queued, nr_lost_pids;
 u64 nr_timers, nr_dispatches, nr_mismatches, nr_retries;
 u64 nr_overflows;
 
-/* Exit information */
 
 struct central_timer {
   struct bpf_timer timer;
@@ -54,6 +53,28 @@ struct {
   __type(key, u32);
   __type(value, struct central_timer);
 } central_timer SEC(".maps");
+
+/*
+ * Per-CPU context.
+ */
+struct cpu_ctx {};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct cpu_ctx);
+	__uint(max_entries, 1);
+} cpu_ctx_stor SEC(".maps");
+
+/*
+ * Return a CPU context.
+ */
+struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
+{
+	const u32 idx = 0;
+	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
+}
+
 
 s32 BPF_STRUCT_OPS(rorke_select_cpu,
                    struct task_struct* p,
