@@ -47,7 +47,7 @@ enum consts {
 	LO_FALLBACK_DSQ		= (MAX_LAYERS * MAX_LLCS) + MAX_LLCS + 1,
 
 	/* XXX remove */
-	MAX_CGRP_PREFIXES = 32
+	MAX_CGRP_PREFIXES	= 32
 };
 
 enum layer_kind {
