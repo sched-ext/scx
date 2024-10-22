@@ -16,7 +16,6 @@
 #include <bpf/bpf_tracing.h>
 #include <errno.h>
 #include <stdbool.h>
-#include <string.h>
 
 #include "intf.h"
 
