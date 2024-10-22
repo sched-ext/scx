@@ -42,6 +42,9 @@ u64 nr_total, nr_locals, nr_queued, nr_lost_pids;
 u64 nr_timers, nr_dispatches, nr_mismatches, nr_retries;
 u64 nr_overflows;
 
+/* Scheduling statistics */
+volatile u64 nr_direct_dispatch_to_idle;
+
 struct central_timer {
   struct bpf_timer timer;
 };
@@ -96,41 +99,52 @@ struct task_ctx* try_lookup_task_ctx(const struct task_struct* p) {
 /*
  * Return true if the target task @p is a kernel thread.
  */
-static inline bool is_kthread(const struct task_struct *p)
-{
-	return p->flags & PF_KTHREAD;
+static inline bool is_kthread(const struct task_struct* p) {
+  return p->flags & PF_KTHREAD;
 }
 
 /*
  * Allocate/re-allocate a new cpumask.
  */
-static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
-{
-	struct bpf_cpumask *cpumask;
+static int calloc_cpumask(struct bpf_cpumask** p_cpumask) {
+  struct bpf_cpumask* cpumask;
 
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
+  cpumask = bpf_cpumask_create();
+  if (!cpumask)
+    return -ENOMEM;
 
-	cpumask = bpf_kptr_xchg(p_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
+  cpumask = bpf_kptr_xchg(p_cpumask, cpumask);
+  if (cpumask)
+    bpf_cpumask_release(cpumask);
 
-	return 0;
+  return 0;
+}
+
+static s32 pick_idle_cpu(struct task_struct* p, s32 prev_cpu, u64 wake_flags) {
+  if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+    return prev_cpu;
+
+  if (p->nr_cpus_allowed == 1 || p->migration_disabled)
+    return -EBUSY;
+
+  return scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 }
 
 s32 BPF_STRUCT_OPS(rorke_select_cpu,
                    struct task_struct* p,
                    s32 prev_cpu,
                    u64 wake_flags) {
-  /*
-   * Steer wakeups to the central CPU to avoid disturbing other CPUs.
-   * NOTE: This is a simple implementation. A more sophisticated approach
-   * would check to directly steer to the previously assigned CPU if idle.
-   */
   trace("rorke_select_cpu: VM: %d, vCPU: %d, prev_cpu: %d", p->tgid, p->pid,
         prev_cpu);
-  return central_cpu;
+  s32 cpu;
+
+  cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
+  if (cpu >= 0) {
+    scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_INF, 0);
+    __sync_fetch_and_add(&nr_direct_dispatch_to_idle, 1);
+    return cpu;
+  }
+  return prev_cpu;
 }
 
 void BPF_STRUCT_OPS(rorke_enqueue, struct task_struct* p, u64 enq_flags) {
