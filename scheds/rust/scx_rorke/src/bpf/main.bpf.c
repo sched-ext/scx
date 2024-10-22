@@ -93,6 +93,32 @@ struct task_ctx* try_lookup_task_ctx(const struct task_struct* p) {
   return bpf_task_storage_get(&task_ctx_stor, (struct task_struct*)p, 0, 0);
 }
 
+/*
+ * Return true if the target task @p is a kernel thread.
+ */
+static inline bool is_kthread(const struct task_struct *p)
+{
+	return p->flags & PF_KTHREAD;
+}
+
+/*
+ * Allocate/re-allocate a new cpumask.
+ */
+static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
+{
+	struct bpf_cpumask *cpumask;
+
+	cpumask = bpf_cpumask_create();
+	if (!cpumask)
+		return -ENOMEM;
+
+	cpumask = bpf_kptr_xchg(p_cpumask, cpumask);
+	if (cpumask)
+		bpf_cpumask_release(cpumask);
+
+	return 0;
+}
+
 s32 BPF_STRUCT_OPS(rorke_select_cpu,
                    struct task_struct* p,
                    s32 prev_cpu,
