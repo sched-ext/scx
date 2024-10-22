@@ -134,16 +134,20 @@ s32 BPF_STRUCT_OPS(rorke_select_cpu,
                    struct task_struct* p,
                    s32 prev_cpu,
                    u64 wake_flags) {
-  trace("rorke_select_cpu: VM: %d, vCPU: %d, prev_cpu: %d", p->tgid, p->pid,
-        prev_cpu);
   s32 cpu;
 
   cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
   if (cpu >= 0) {
     scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_INF, 0);
     __sync_fetch_and_add(&nr_direct_dispatch_to_idle, 1);
+    dbg(
+        "rorke_select_cpu: VM: %d, vCPU: %d, prev_cpu: %d direct dispatch to "
+        "idle cpu: %d",
+        p->tgid, p->pid, prev_cpu, cpu);
+
     return cpu;
   }
+
   return prev_cpu;
 }
 
