@@ -209,10 +209,6 @@ void BPF_STRUCT_OPS(rorke_dispatch, s32 cpu, struct task_struct* prev) {
   dbg("rorke_dispatch: empty... didn't consumed from VM - %d", vm_id);
 }
 
-void BPF_STRUCT_OPS(rorke_runnable, struct task_struct* p, u64 enq_flags) {
-  trace("rorke_runnable: VM: %d, vCPU: %d", p->tgid, p->pid);
-}
-
 void BPF_STRUCT_OPS(rorke_running, struct task_struct* p) {
   trace("rorke_running: VM: %d, vCPU: %d", p->tgid, p->pid);
 }
@@ -220,10 +216,6 @@ void BPF_STRUCT_OPS(rorke_running, struct task_struct* p) {
 void BPF_STRUCT_OPS(rorke_stopping, struct task_struct* p, bool runnable) {
   trace("rorke_stopping: VM: %d, vCPU: %d, runnable: %d", p->tgid, p->pid,
         runnable);
-}
-
-void BPF_STRUCT_OPS(rorke_quiescent, struct task_struct* p, u64 deq_flags) {
-  trace("rorke_quiescent: VM: %d, vCPU: %d", p->tgid, p->pid);
 }
 
 s32 BPF_STRUCT_OPS(rorke_init_task,
@@ -349,10 +341,8 @@ SCX_OPS_DEFINE(rorke,
                .select_cpu = (void*)rorke_select_cpu,
                .enqueue = (void*)rorke_enqueue,
                .dispatch = (void*)rorke_dispatch,
-               .runnable = (void*)rorke_runnable,
                .running = (void*)rorke_running,
                .stopping = (void*)rorke_stopping,
-               .quiescent = (void*)rorke_quiescent,
                .init_task = (void*)rorke_init_task,
                .exit_task = (void*)rorke_exit_task,
                .init = (void*)rorke_init,
