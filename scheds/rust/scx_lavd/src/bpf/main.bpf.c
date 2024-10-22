@@ -285,8 +285,9 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 	 * add +1 to guarantee the latency criticality (log2-ed) is always
 	 * positive.
 	 */
-	lat_cri = log2_u64(runtime_ft * wait_freq_ft + 1) +
-		  log2_u64(wake_freq_ft * wake_freq_ft + 1);
+	lat_cri = log2_u64(runtime_ft + 1);
+	lat_cri += log2_u64(wait_freq_ft + 1);
+	lat_cri += log2_u64(wake_freq_ft + 1);
 
 	/*
 	 * A user-provided nice value is a strong hint for latency-criticality.
@@ -348,7 +349,7 @@ static void calc_virtual_deadline_delta(struct task_struct *p,
 	 */
 	lat_cri = calc_lat_cri(p, taskc, cpuc_cur, enq_flags);
 	greedy_ratio = calc_greedy_ratio(taskc);
-	deadline = (LAVD_SLICE_MAX_NS * greedy_ratio) / lat_cri;
+	deadline = (taskc->run_time_ns / lat_cri) * greedy_ratio;
 	taskc->vdeadline_delta_ns = deadline;
 }
 
@@ -523,7 +524,7 @@ static void update_stat_for_running(struct task_struct *p,
 	 */
 	wait_freq_ft = calc_freq_factor(taskc->wait_freq);
 	wake_freq_ft = calc_freq_factor(taskc->wake_freq);
-	perf_cri = log2_u64(wait_freq_ft * wake_freq_ft * wake_freq_ft);
+	perf_cri = log2_u64(wait_freq_ft * wake_freq_ft);
 	perf_cri += log2_u64(max(taskc->run_freq, 1) *
 			     max(taskc->run_time_ns, 1));
 	perf_cri += calc_static_prio_factor(p);
@@ -910,6 +911,15 @@ out:
 	return cpu_id;
 }
 
+static void update_task_log_clk(struct task_ctx *taskc)
+{
+	/*
+	 * Update the logical clock of the virtual deadline.
+	 */
+	u64 vlc = READ_ONCE(cur_logical_clk) + taskc->vdeadline_delta_ns;
+	WRITE_ONCE(taskc->vdeadline_log_clk, vlc);
+}
+
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -922,31 +932,30 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		return prev_cpu;
 
 	cpu_id = pick_idle_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
-	if (found_idle)
+	if (found_idle) {
+		taskc->vdeadline_delta_ns = 0;
+		update_task_log_clk(taskc);
+		p->scx.slice = calc_time_slice(p, taskc);
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
+	
 		return cpu_id;
+	}
 
 	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
 
-	return (cpu_id >= 0) ? cpu_id : prev_cpu;
+	return prev_cpu;
 }
-
 
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 			     struct cpu_ctx *cpuc_cur, u64 enq_flags)
 {
-	u64 vlc;
-
 	/*
 	 * Before enqueueing a task to a run queue, we should decide when a
 	 * task should be scheduled.
 	 */
 	calc_virtual_deadline_delta(p, taskc, cpuc_cur, enq_flags);
 
-	/*
-	 * Update the logical clock of the virtual deadline.
-	 */
-	vlc = READ_ONCE(cur_logical_clk) + taskc->vdeadline_delta_ns;
-	WRITE_ONCE(taskc->vdeadline_log_clk, vlc);
+	update_task_log_clk(taskc);
 }
 
 static u64 find_proper_dsq(struct task_ctx *taskc, struct cpu_ctx *cpuc)
@@ -1164,6 +1173,24 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		scx_bpf_error("Failed to look up cpu context or task context");
 		return;
 	}
+
+	if (prev) {
+		taskc = get_task_ctx(prev);
+		if (!taskc) {
+			scx_bpf_error("Failed to look up task context");
+			return;
+		}
+
+		/*
+		 * If a task newly holds a lock, continue to execute it
+		 * to make system-wide forward progress.
+		 */
+		if ((prev->scx.flags & SCX_TASK_QUEUED) &&
+		    is_lock_holder(taskc)) {
+			goto lock_holder_extenstion;
+		}
+	}
+
 	dsq_id = cpuc->cpdom_id;
 
 	/*
@@ -1278,18 +1305,14 @@ consume_out:
 	 * for a lock holder to be boosted only once.
 	 */
 	if (prev) {
-		taskc = get_task_ctx(prev);
-		if (!taskc) {
-			scx_bpf_error("Failed to look up task context");
-			return;
-		}
-		reset_lock_futex_boost(taskc, cpuc);
-
 		/*
 		 * If nothing to run, continue to run the previous task.
 		 */
-		if (prev->scx.flags & SCX_TASK_QUEUED)
+		if (prev->scx.flags & SCX_TASK_QUEUED) {
+lock_holder_extenstion:
 			prev->scx.slice = calc_time_slice(prev, taskc);
+		}
+		reset_lock_futex_boost(taskc, cpuc);
 	}
 }
 
