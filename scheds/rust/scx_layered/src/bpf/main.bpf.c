@@ -10,6 +10,7 @@
 #endif
 
 #include "intf.h"
+#include "timer.bpf.h"
 
 #include <errno.h>
 #include <stdbool.h>
@@ -48,6 +49,23 @@ static u32 preempt_cursor;
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
 
 #include "util.bpf.c"
+
+
+static __always_inline bool run_timer_cb(int key)
+{
+	switch (key) {
+	case NOOP_TIMER:
+	case MAX_TIMERS:
+	default:
+		return false;
+	}
+}
+
+struct layered_timer layered_timers[MAX_TIMERS] = {
+	{0, CLOCK_BOOTTIME, 0},
+};
+
+#include "timer.bpf.c"
 
 UEI_DEFINE(uei);
 
@@ -2245,6 +2263,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			}
 		}
 	}
+	start_layered_timers();
 
 	return 0;
 }
