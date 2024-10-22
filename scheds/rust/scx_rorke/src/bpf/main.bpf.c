@@ -195,15 +195,17 @@ void BPF_STRUCT_OPS(rorke_enqueue, struct task_struct* p, u64 enq_flags) {
 }
 
 void BPF_STRUCT_OPS(rorke_dispatch, s32 cpu, struct task_struct* prev) {
+  /* TODO: replace following with per-cpu context */
   s32 vm_id = cpu < nr_cpus ? cpu_to_vm[cpu] : 0;
   if (vm_id == 0) {
     return;
   }
+
   if (scx_bpf_consume(vm_id)) {
-    trace("rorke_dispatch: VM - %d", vm_id);
-    __sync_fetch_and_sub(&nr_queued, 1);
+    trace("rorke_dispatch: consumed from VM - %d", vm_id);
     return;
   }
+
   dbg("rorke_dispatch: empty... didn't consumed from VM - %d", vm_id);
 }
 
