@@ -42,7 +42,6 @@ u64 nr_total, nr_locals, nr_queued, nr_lost_pids;
 u64 nr_timers, nr_dispatches, nr_mismatches, nr_retries;
 u64 nr_overflows;
 
-
 struct central_timer {
   struct bpf_timer timer;
 };
@@ -60,21 +59,39 @@ struct {
 struct cpu_ctx {};
 
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, u32);
-	__type(value, struct cpu_ctx);
-	__uint(max_entries, 1);
+  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+  __type(key, u32);
+  __type(value, struct cpu_ctx);
+  __uint(max_entries, 1);
 } cpu_ctx_stor SEC(".maps");
 
 /*
  * Return a CPU context.
  */
-struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
-{
-	const u32 idx = 0;
-	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
+struct cpu_ctx* try_lookup_cpu_ctx(s32 cpu) {
+  const u32 idx = 0;
+  return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
 }
 
+/*
+ * Per-task local storage.
+ */
+struct task_ctx {};
+
+/* Map that contains task-local storage. */
+struct {
+  __uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+  __uint(map_flags, BPF_F_NO_PREALLOC);
+  __type(key, int);
+  __type(value, struct task_ctx);
+} task_ctx_stor SEC(".maps");
+
+/*
+ * Return a local task context from a generic task.
+ */
+struct task_ctx* try_lookup_task_ctx(const struct task_struct* p) {
+  return bpf_task_storage_get(&task_ctx_stor, (struct task_struct*)p, 0, 0);
+}
 
 s32 BPF_STRUCT_OPS(rorke_select_cpu,
                    struct task_struct* p,
