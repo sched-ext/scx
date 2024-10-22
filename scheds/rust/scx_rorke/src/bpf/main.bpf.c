@@ -43,7 +43,8 @@ u64 nr_timers, nr_dispatches, nr_mismatches, nr_retries;
 u64 nr_overflows;
 
 /* Scheduling statistics */
-volatile u64 nr_direct_dispatch_to_idle;
+volatile u64 nr_direct_to_idle_dispatches, nr_kthread_dispatches,
+    nr_vm_dispatches;
 
 struct central_timer {
   struct bpf_timer timer;
@@ -139,9 +140,8 @@ s32 BPF_STRUCT_OPS(rorke_select_cpu,
   cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
   if (cpu >= 0) {
     scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_INF, 0);
-    __sync_fetch_and_add(&nr_direct_dispatch_to_idle, 1);
-    dbg(
-        "rorke_select_cpu: VM: %d, vCPU: %d, prev_cpu: %d direct dispatch to "
+    __sync_fetch_and_add(&nr_direct_to_idle_dispatches, 1);
+    dbg("rorke_select_cpu: VM: %d, vCPU: %d, prev_cpu: %d direct dispatch to "
         "idle cpu: %d",
         p->tgid, p->pid, prev_cpu, cpu);
 
@@ -151,11 +151,24 @@ s32 BPF_STRUCT_OPS(rorke_select_cpu,
   return prev_cpu;
 }
 
+/*
+ * Wake up an idle CPU for task @p.
+ */
+static void kick_task_cpu(struct task_struct* p) {
+  s32 cpu = scx_bpf_task_cpu(p);
+
+  cpu = pick_idle_cpu(p, cpu, 0);
+  if (cpu >= 0)
+    scx_bpf_kick_cpu(cpu, 0);
+}
+
+/*
+ * Dispatch all the other tasks that were not dispatched directly in
+ * select_cpu().
+ */
 void BPF_STRUCT_OPS(rorke_enqueue, struct task_struct* p, u64 enq_flags) {
   s32 pid = p->pid;
   s32 tgid = p->tgid;
-
-  __sync_fetch_and_add(&nr_total, 1);
 
   /*
    * Push per-cpu kthreads at the head of local dsq's and preempt the
@@ -163,18 +176,22 @@ void BPF_STRUCT_OPS(rorke_enqueue, struct task_struct* p, u64 enq_flags) {
    * behind other threads which is necessary for forward progress
    * guarantee as we depend on the BPF timer which may run from ksoftirqd.
    */
-  if ((p->flags & PF_KTHREAD) && p->nr_cpus_allowed == 1) {
-    __sync_fetch_and_add(&nr_locals, 1);
+  if (is_kthread(p) && p->nr_cpus_allowed == 1) {
+    trace("rorke_enqueue: enqueued local kthread %d", pid);
     scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_INF,
                      enq_flags | SCX_ENQ_PREEMPT);
-    trace("rorke_enqueue: enqueued local kthread %d", pid);
+    __sync_fetch_and_add(&nr_kthread_dispatches, 1);
     return;
   }
 
-  scx_bpf_dispatch(p, tgid, SCX_SLICE_INF, enq_flags);
   trace("rorke_enqueue: enqueued VM: %d vCPU: %d", tgid, pid);
+  scx_bpf_dispatch(p, tgid, SCX_SLICE_INF, enq_flags);
+  __sync_fetch_and_add(&nr_vm_dispatches, 1);
 
-  __sync_fetch_and_add(&nr_queued, 1);
+  /*
+   * If there is an idle cpu available for the task, wake it up.
+   */
+  kick_task_cpu(p);
 }
 
 void BPF_STRUCT_OPS(rorke_dispatch, s32 cpu, struct task_struct* prev) {
