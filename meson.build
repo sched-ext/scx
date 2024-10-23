@@ -1,10 +1,7 @@
 project('sched_ext schedulers', 'c',
         version: '1.0.5',
-        license: 'GPL-2.0',)
-
-if meson.version().version_compare('<1.2')
-  error('meson >= 1.2 required')
-endif
+        license: 'GPL-2.0',
+        meson_version : '>= 1.4.0',)
 
 fs = import('fs')
 
