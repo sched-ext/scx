@@ -5,6 +5,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+mod config;
 mod logger;
 
 use std::process::Stdio;
@@ -29,27 +30,40 @@ use zbus::Connection;
 use zvariant::Type;
 use zvariant::Value;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(field_identifier, rename_all = "lowercase")]
 enum SupportedSched {
+    #[serde(rename = "scx_bpfland")]
     Bpfland,
+    #[serde(rename = "scx_rusty")]
     Rusty,
+    #[serde(rename = "scx_lavd")]
     Lavd,
 }
 
 #[derive(Debug, PartialEq)]
 enum ScxMessage {
+    /// Quit the scx_loader
     Quit,
+    /// Stop the scheduler, if any
     StopSched,
+    /// Start the scheduler with the given mode
     StartSched((SupportedSched, SchedMode)),
+    /// Start the scheduler with the given scx arguments
     StartSchedArgs((SupportedSched, Vec<String>)),
+    /// Switch to another scheduler with the given mode
     SwitchSched((SupportedSched, SchedMode)),
+    /// Switch to another scheduler with the given scx arguments
     SwitchSchedArgs((SupportedSched, Vec<String>)),
 }
 
 #[derive(Debug, PartialEq)]
 enum RunnerMessage {
+    /// Switch to another scheduler with the given scx arguments
     Switch((SupportedSched, Vec<String>)),
+    /// Start the scheduler with the given scx arguments
     Start((SupportedSched, Vec<String>)),
+    /// Stop the scheduler, if any
     Stop,
 }
 
@@ -84,7 +98,7 @@ impl ScxLoader {
     #[zbus(property)]
     async fn current_scheduler(&self) -> String {
         if let Some(current_scx) = &self.current_scx {
-            let current_scx = get_name_from_scx(&current_scx).into();
+            let current_scx = get_name_from_scx(current_scx).into();
             log::info!("called {current_scx:?}");
             return current_scx;
         }
@@ -181,7 +195,7 @@ impl ScxLoader {
 
     async fn stop_scheduler(&mut self) -> zbus::fdo::Result<()> {
         if let Some(current_scx) = &self.current_scx {
-            let scx_name = get_name_from_scx(&current_scx);
+            let scx_name = get_name_from_scx(current_scx);
 
             log::info!("stopping {scx_name:?}..");
             let _ = self.channel.send(ScxMessage::StopSched);
@@ -190,6 +204,18 @@ impl ScxLoader {
 
         Ok(())
     }
+}
+
+#[zbus::proxy(
+    interface = "org.scx.Loader",
+    default_service = "org.scx.Loader",
+    default_path = "/org/scx/Loader"
+)]
+pub trait LoaderClient {
+    /// Method for switching to the specified scheduler with the given mode.
+    /// This method will stop the currently running scheduler (if any) and
+    /// then start the new scheduler.
+    fn switch_scheduler(&self, scx_name: &str, sched_mode: SchedMode) -> zbus::Result<()>;
 }
 
 // Monitors CPU utilization and enables scx_lavd when utilization of any CPUs is > 90%
@@ -264,6 +290,9 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // initialize the config
+    let config = config::init_config().context("Failed to initialize config")?;
+
     // If --auto is passed, start scx_loader as a standard background process
     // that swaps schedulers out automatically
     // based on CPU utilization without registering a dbus interface.
@@ -300,13 +329,28 @@ async fn main() -> Result<()> {
 
     connection.request_name("org.scx.Loader").await?;
 
+    // if user set default scheduler, then start it
+    if let Some(default_sched) = &config.default_sched {
+        log::info!("Starting default scheduler: {default_sched:?}");
+
+        let default_mode = config.default_mode.clone().unwrap_or(SchedMode::Auto);
+
+        let loader_client = LoaderClientProxy::new(&connection).await?;
+        loader_client
+            .switch_scheduler(get_name_from_scx(default_sched), default_mode)
+            .await?;
+    }
+
     // run worker/receiver loop
-    worker_loop(rx).await?;
+    worker_loop(config, rx).await?;
 
     Ok(())
 }
 
-async fn worker_loop(mut receiver: UnboundedReceiver<ScxMessage>) -> Result<()> {
+async fn worker_loop(
+    config: config::Config,
+    mut receiver: UnboundedReceiver<ScxMessage>,
+) -> Result<()> {
     // setup channel for scheduler runner
     let (runner_tx, runner_rx) = tokio::sync::mpsc::channel::<RunnerMessage>(1);
 
@@ -344,10 +388,7 @@ async fn worker_loop(mut receiver: UnboundedReceiver<ScxMessage>) -> Result<()> 
                 log::info!("Got event to start scheduler!");
 
                 // get scheduler args for the mode
-                let args: Vec<_> = get_scx_flags_for_mode(&scx_sched, sched_mode)
-                    .into_iter()
-                    .map(String::from)
-                    .collect();
+                let args = config::get_scx_flags_for_mode(&config, &scx_sched, sched_mode);
 
                 // send message with scheduler and asociated args to the runner
                 runner_tx
@@ -366,10 +407,7 @@ async fn worker_loop(mut receiver: UnboundedReceiver<ScxMessage>) -> Result<()> 
                 log::info!("Got event to switch scheduler!");
 
                 // get scheduler args for the mode
-                let args: Vec<_> = get_scx_flags_for_mode(&scx_sched, sched_mode)
-                    .into_iter()
-                    .map(String::from)
-                    .collect();
+                let args = config::get_scx_flags_for_mode(&config, &scx_sched, sched_mode);
 
                 // send message with scheduler and asociated args to the runner
                 runner_tx
@@ -520,27 +558,5 @@ fn get_name_from_scx(supported_sched: &SupportedSched) -> &'static str {
         SupportedSched::Bpfland => "scx_bpfland",
         SupportedSched::Rusty => "scx_rusty",
         SupportedSched::Lavd => "scx_lavd",
-    }
-}
-
-/// Get the scx flags for the given sched mode
-fn get_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedMode) -> Vec<&str> {
-    match scx_sched {
-        SupportedSched::Bpfland => match sched_mode {
-            SchedMode::Gaming => vec!["-c", "0", "-k", "-m", "performance"],
-            SchedMode::LowLatency => vec!["--lowlatency"],
-            SchedMode::PowerSave => vec!["-m", "powersave"],
-            SchedMode::Auto => vec![],
-        },
-        SupportedSched::Lavd => match sched_mode {
-            SchedMode::Gaming | SchedMode::LowLatency => vec!["--performance"],
-            SchedMode::PowerSave => vec!["--powersave"],
-            // NOTE: potentially adding --auto in future
-            SchedMode::Auto => vec![],
-        },
-        // scx_rusty doesn't support any of these modes
-        SupportedSched::Rusty => match sched_mode {
-            _ => vec![],
-        },
     }
 }
