@@ -235,78 +235,52 @@ out:
 	return ratio;
 }
 
-static u64 calc_runtime_factor(u64 runtime)
+static u32 calc_greedy_factor(u32 greedy_ratio)
+{
+	/*
+	 * For all under-utilized tasks, we treat them equally.
+	 */
+	if (greedy_ratio <= 1000)
+		return 1000;
+
+	/*
+	 * For over-utilized tasks, we give some mild penalty.
+	 */
+	return 1000 + ((greedy_ratio - 1000) / LAVD_LC_GREEDY_PENALTY);
+
+}
+
+static u64 calc_runtime_factor(u64 runtime, u64 weight_ft)
 {
 	u64 ft = rsigmoid_u64(runtime, LAVD_LC_RUNTIME_MAX);
-	return (ft >> LAVD_LC_RUNTIME_SHIFT) + 1;
+	return (ft / weight_ft) + 1;
 }
 
-static u64 calc_freq_factor(u64 freq)
+static u64 calc_freq_factor(u64 freq, u64 weight_ft)
 {
 	u64 ft = sigmoid_u64(freq, LAVD_LC_FREQ_MAX);
-	return ft + 1;
+	return (ft * weight_ft) + 1;
 }
 
-static s64 calc_static_prio_factor(struct task_struct *p)
+static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc,
+			      struct cpu_ctx *cpuc_cur, u64 enq_flags)
 {
-	/*
-	 * A nicer task with >20 static priority will get penalized with
-	 * negative latency-criticality. However, a greedier task with <20
-	 * static priority will get boosted.
-	 */
-	return (20 - get_nice_prio(p)) >> 1;
-}
-
-static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
-			struct cpu_ctx *cpuc_cur, u64 enq_flags)
-{
-	u64 wait_freq_ft, wake_freq_ft, runtime_ft;
-	u64 lat_cri;
-
-	/*
-	 * A task is more latency-critical as its wait or wake frequencies
-	 * (i.e., wait_freq and wake_freq) are higher.
-	 *
-	 * Since those frequencies are unbounded and their upper limits are
-	 * unknown, we transform them using sigmoid-like functions. For wait
-	 * and wake frequencies, we use a sigmoid function (sigmoid_u64), which
-	 * is monotonically increasing since higher frequencies mean more
-	 * latency-critical.
-	 */
-	wait_freq_ft = calc_freq_factor(taskc->wait_freq);
-	wake_freq_ft = calc_freq_factor(taskc->wake_freq);
-	runtime_ft = calc_runtime_factor(taskc->run_time_ns);
-
-	/*
-	 * Wake frequency and wait frequency represent how much a task is used
-	 * for a producer and a consumer, respectively. If both are high, the
-	 * task is in the middle of a task chain. The ratio tends to follow an
-	 * exponentially skewed distribution, so we linearize it using log2. We
-	 * add +1 to guarantee the latency criticality (log2-ed) is always
-	 * positive.
-	 */
-	lat_cri = log2_u64(runtime_ft + 1);
-	lat_cri += log2_u64(wait_freq_ft + 1);
-	lat_cri += log2_u64(wake_freq_ft + 1);
-
-	/*
-	 * A user-provided nice value is a strong hint for latency-criticality.
-	 */
-	lat_cri += calc_static_prio_factor(p);
+	u64 weight_boost = 1;
+	u64 weight_ft;
 
 	/*
 	 * Prioritize a wake-up task since this is a clear sign of immediate
 	 * consumer. If it is a synchronous wakeup, doule the prioritization.
 	 */
 	taskc->wakeup_ft += !!(enq_flags & SCX_ENQ_WAKEUP);
-	lat_cri += taskc->wakeup_ft * LAVD_LC_WAKEUP_FT;
+	weight_boost += taskc->wakeup_ft * LAVD_LC_WEIGHT_BOOST;
 
 	/*
 	 * Prioritize a kernel task since many kernel tasks serve
 	 * latency-critical jobs.
 	 */
 	if (is_kernel_task(p))
-		lat_cri += LAVD_LC_KTHREAD_FT;
+		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
 	 * Reset task's lock and futex boost count
@@ -319,8 +293,50 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	if (taskc->need_lock_boost) {
 		taskc->need_lock_boost = false;
-		lat_cri += (lat_cri * LAVD_LC_LOCK_HOLDER_FT) / 1000;
+		weight_boost += LAVD_LC_WEIGHT_BOOST;
 	}
+
+	weight_ft = p->scx.weight * weight_boost;
+	return weight_ft;
+}
+
+static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
+			struct cpu_ctx *cpuc_cur, u64 enq_flags)
+{
+	u64 weight_ft, wait_freq_ft, wake_freq_ft, runtime_ft;
+	u64 lat_cri;
+
+	/*
+	 * Adjust task's weight based on the scheduling context, such as
+	 * if it is a kernel task, lock holder, etc.
+	 */
+	weight_ft = calc_weight_factor(p, taskc, cpuc_cur, enq_flags);
+
+	/*
+	 * A task is more latency-critical as its wait or wake frequencies
+	 * (i.e., wait_freq and wake_freq) are higher.
+	 *
+	 * Since those frequencies are unbounded and their upper limits are
+	 * unknown, we transform them using sigmoid-like functions. For wait
+	 * and wake frequencies, we use a sigmoid function (sigmoid_u64), which
+	 * is monotonically increasing since higher frequencies mean more
+	 * latency-critical.
+	 */
+	wait_freq_ft = calc_freq_factor(taskc->wait_freq, weight_ft);
+	wake_freq_ft = calc_freq_factor(taskc->wake_freq, weight_ft);
+	runtime_ft = calc_runtime_factor(taskc->run_time_ns, weight_ft);
+
+	/*
+	 * Wake frequency and wait frequency represent how much a task is used
+	 * for a producer and a consumer, respectively. If both are high, the
+	 * task is in the middle of a task chain. The ratio tends to follow an
+	 * exponentially skewed distribution, so we linearize it using log2. We
+	 * add +1 to guarantee the latency criticality (log2-ed) is always
+	 * positive.
+	 */
+	lat_cri = log2_u64(runtime_ft + 1);
+	lat_cri += log2_u64(wait_freq_ft + 1);
+	lat_cri += log2_u64(wake_freq_ft + 1);
 
 	/*
 	 * Make sure the lat_cri is non-zero.
@@ -342,14 +358,17 @@ static void calc_virtual_deadline_delta(struct task_struct *p,
 					struct cpu_ctx *cpuc_cur,
 					u64 enq_flags)
 {
-	u64 deadline, lat_cri, greedy_ratio;
+	u64 deadline, lat_cri;
+	u32 greedy_ratio, greedy_ft;
 
 	/*
 	 * Calculate the deadline based on latency criticality and greedy ratio.
 	 */
 	lat_cri = calc_lat_cri(p, taskc, cpuc_cur, enq_flags);
 	greedy_ratio = calc_greedy_ratio(taskc);
-	deadline = (taskc->run_time_ns / lat_cri) * greedy_ratio;
+	greedy_ft = calc_greedy_factor(greedy_ratio);
+
+	deadline = (taskc->run_time_ns / lat_cri) * greedy_ft;
 	taskc->vdeadline_delta_ns = deadline;
 }
 
@@ -521,14 +540,14 @@ static void update_stat_for_running(struct task_struct *p,
 	 *
 	 * We use the log-ed value since the raw value follows the highly
 	 * skewed distribution.
+	 *
+	 * Note that we use unadjusted weight to reflect the pure task properties.
 	 */
-	wait_freq_ft = calc_freq_factor(taskc->wait_freq);
-	wake_freq_ft = calc_freq_factor(taskc->wake_freq);
+	wait_freq_ft = calc_freq_factor(taskc->wait_freq, p->scx.weight);
+	wake_freq_ft = calc_freq_factor(taskc->wake_freq, p->scx.weight);
 	perf_cri = log2_u64(wait_freq_ft * wake_freq_ft);
 	perf_cri += log2_u64(max(taskc->run_freq, 1) *
-			     max(taskc->run_time_ns, 1));
-	perf_cri += calc_static_prio_factor(p);
-	perf_cri += taskc->wakeup_ft * LAVD_LC_WAKEUP_FT;
+			     max(taskc->run_time_ns, 1) * p->scx.weight);
 	taskc->wakeup_ft = 0;
 
 	taskc->perf_cri = perf_cri;
@@ -569,7 +588,7 @@ static void update_stat_for_stopping(struct task_struct *p,
 				     struct cpu_ctx *cpuc)
 {
 	u64 now = bpf_ktime_get_ns();
-	u64 old_run_time_ns, suspended_duration, task_run_time;
+	u64 suspended_duration, task_run_time;
 
 	/*
 	 * Update task's run_time. When a task is scheduled consecutively
@@ -580,7 +599,6 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 * consecutive execution is accumulated and reflected in the
 	 * calculation of runtime statistics.
 	 */
-	old_run_time_ns = taskc->run_time_ns;
 	suspended_duration = get_suspended_duration_and_reset(cpuc);
 	task_run_time = now - taskc->last_running_clk - suspended_duration;
 	taskc->acc_run_time_ns += task_run_time;
@@ -920,6 +938,14 @@ static void update_task_log_clk(struct task_ctx *taskc)
 	WRITE_ONCE(taskc->vdeadline_log_clk, vlc);
 }
 
+static void direct_dispatch(struct task_struct *p, struct task_ctx *taskc)
+{
+	taskc->vdeadline_delta_ns = 0;
+	update_task_log_clk(taskc);
+	p->scx.slice = calc_time_slice(p, taskc);
+	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
+}
+
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -933,17 +959,13 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	cpu_id = pick_idle_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
 	if (found_idle) {
-		taskc->vdeadline_delta_ns = 0;
-		update_task_log_clk(taskc);
-		p->scx.slice = calc_time_slice(p, taskc);
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
-	
+		direct_dispatch(p, taskc);
 		return cpu_id;
 	}
 
 	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
 
-	return prev_cpu;
+	return cpu_id >= 0 ? cpu_id : prev_cpu;
 }
 
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
@@ -975,6 +997,17 @@ static u64 find_proper_dsq(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 	 * Otherwise, use the DSQ of an alternative core type.
 	 */
 	return cpuc->cpdom_alt_id;
+}
+
+static void kick_task_cpu(struct task_struct *p, struct task_ctx *taskc)
+{
+	bool found_idle = false;
+	s32 prev_cpu, cpu;
+
+	prev_cpu = scx_bpf_task_cpu(p);
+	cpu = pick_idle_cpu(p, taskc, prev_cpu, 0, &found_idle);
+	if (found_idle && cpu >= 0)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
@@ -1042,6 +1075,12 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	scx_bpf_dispatch_vtime(p, dsq_id, p->scx.slice,
 			       taskc->vdeadline_log_clk, enq_flags);
+
+	/*
+	 * If there is an idle cpu for the task, kick it up now
+	 * so it can consume the task immediately.
+	 */
+	kick_task_cpu(p, taskc);
 }
 
 static bool consume_dsq(s32 cpu, u64 dsq_id, u64 now)
@@ -1652,6 +1691,16 @@ void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 	set_on_core_type(taskc, cpumask);
 }
 
+void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
+		    struct scx_cpu_release_args *args)
+{
+	/*
+	 * When a CPU is released to serve higher priority scheduler class,
+	 * requeue the tasks in a local DSQ to the global enqueue.
+	 */
+	scx_bpf_reenqueue_local();
+}
+
 void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
 {
 	struct task_ctx *taskc;
@@ -2025,6 +2074,7 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .cpu_offline		= (void *)lavd_cpu_offline,
 	       .update_idle		= (void *)lavd_update_idle,
 	       .set_cpumask		= (void *)lavd_set_cpumask,
+	       .cpu_release		= (void *)lavd_cpu_release,
 	       .enable			= (void *)lavd_enable,
 	       .init_task		= (void *)lavd_init_task,
 	       .init			= (void *)lavd_init,
