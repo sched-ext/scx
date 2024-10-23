@@ -44,7 +44,7 @@ u64 nr_overflows;
 
 /* Scheduling statistics */
 volatile u64 nr_direct_to_idle_dispatches, nr_kthread_dispatches,
-    nr_vm_dispatches;
+    nr_vm_dispatches, nr_running;
 
 struct global_timer {
   struct bpf_timer timer;
@@ -215,11 +215,21 @@ void BPF_STRUCT_OPS(rorke_dispatch, s32 cpu, struct task_struct* prev) {
 
 void BPF_STRUCT_OPS(rorke_running, struct task_struct* p) {
   trace("rorke_running: VM: %d, vCPU: %d", p->tgid, p->pid);
+  u64 now = bpf_ktime_get_ns();
+  s32 cpu = scx_bpf_task_cpu(p);
+  struct cpu_ctx* cctx = try_lookup_cpu_ctx(cpu);
+
+  if (!cctx)
+    return;
+
+  cctx->last_running = now;
+  __sync_fetch_and_add(&nr_running, 1);
 }
 
 void BPF_STRUCT_OPS(rorke_stopping, struct task_struct* p, bool runnable) {
   trace("rorke_stopping: VM: %d, vCPU: %d, runnable: %d", p->tgid, p->pid,
         runnable);
+  __sync_fetch_and_sub(&nr_running, 1);
 }
 
 s32 BPF_STRUCT_OPS(rorke_init_task,
