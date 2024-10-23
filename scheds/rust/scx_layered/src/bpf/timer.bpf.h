@@ -20,7 +20,7 @@ struct layered_timer {
 	// if set to 0 the timer will only be scheduled once
 	u64 interval_ns;
 	u64 init_flags;
-	u64 start_flags;
+	int start_flags;
 };
 
 enum layer_timer_callbacks {
