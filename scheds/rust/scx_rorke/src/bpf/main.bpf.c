@@ -228,8 +228,8 @@ static int global_timer_fn(void* map, int* key, struct bpf_timer* timer) {
     }
 
     scx_bpf_kick_cpu(current_cpu, SCX_KICK_PREEMPT);
-    cctx->kicked++;
-    trace("global_timer_fn: kicked CPU %d", current_cpu);
+    cctx->preempted++;
+    trace("global_timer_fn: preempted CPU %d", current_cpu);
   }
 
   bpf_timer_start(timer, timer_interval_ns, BPF_F_TIMER_CPU_PIN);

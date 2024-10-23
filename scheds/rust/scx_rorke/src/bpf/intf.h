@@ -37,7 +37,7 @@ enum consts {
  */
 struct cpu_ctx {
   u64 last_running;
-  u64 kicked;
+  u64 preempted;
   u64 vm_id;
 };
 

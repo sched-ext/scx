@@ -5,6 +5,9 @@ pub mod bpf_intf;
 mod config;
 use config::*;
 
+mod stats;
+use stats::Metrics;
+
 use std::env;
 use std::fs;
 use std::mem::MaybeUninit;
@@ -12,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use libc::{cpu_set_t, pid_t, sched_param, sched_setaffinity, sched_setscheduler, CPU_SET};
 
@@ -19,6 +23,7 @@ use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use crossbeam::channel::RecvTimeoutError;
 
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
@@ -29,17 +34,20 @@ use libbpf_rs::OpenObject;
 use log::debug;
 use log::info;
 
+use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
+use scx_utils::set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::UserExitInfo;
 
 const SCHED_EXT: i32 = 7;
+const SCHEDULER_NAME: &'static str = "scx_rorke";
 
 lazy_static::lazy_static! {
     static ref NR_POSSIBLE_CPUS: usize = libbpf_rs::num_possible_cpus().unwrap();
@@ -77,6 +85,19 @@ struct Opts {
     /// Print version and exit.
     #[clap(long)]
     version: bool,
+
+    /// Enable stats monitoring with the specified interval.
+    #[clap(long)]
+    stats: Option<f64>,
+
+    /// Run in stats monitoring mode with the specified interval. Scheduler
+    /// is not launched.
+    #[clap(long)]
+    monitor: Option<f64>,
+
+    /// Show descriptions for statistics.
+    #[clap(long)]
+    help_stats: bool,
 }
 fn convert_cpu_ctxs(cpu_ctxs: Vec<bpf_intf::cpu_ctx>) -> Vec<Vec<u8>> {
     cpu_ctxs
@@ -91,6 +112,29 @@ fn convert_cpu_ctxs(cpu_ctxs: Vec<bpf_intf::cpu_ctx>) -> Vec<Vec<u8>> {
             bytes.to_vec()
         })
         .collect()
+}
+
+fn get_per_cpu_preempted(skel: &BpfSkel) -> Result<Vec<u64>> {
+    let key = (0_u32).to_ne_bytes();
+    let mut cpu_ctxs: Vec<bpf_intf::cpu_ctx> = vec![];
+    let cpu_ctxs_vec = skel
+        .maps
+        .cpu_ctx_stor
+        .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
+        .context("Failed to lookup cpu_ctx")?
+        .unwrap();
+
+    for cpu in 0..*NR_POSSIBLE_CPUS {
+        cpu_ctxs.push(*unsafe {
+            &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
+        });
+    }
+
+    let mut cpus_preempted = vec![];
+    for cpu_ctx in cpu_ctxs.iter() {
+        cpus_preempted.push(cpu_ctx.preempted);
+    }
+    return Ok(cpus_preempted);
 }
 
 fn initialize_cpu_ctxs(skel: &BpfSkel, cpu_allocation: &Vec<u64>) -> Result<()> {
@@ -125,10 +169,12 @@ fn initialize_cpu_ctxs(skel: &BpfSkel, cpu_allocation: &Vec<u64>) -> Result<()> 
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
+    stats_server: StatsServer<(), Metrics>,
 }
 
 impl<'a> Scheduler<'a> {
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+        set_rlimit_infinity();
         // Open the eBPF object for verification
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 0);
@@ -193,7 +239,6 @@ impl<'a> Scheduler<'a> {
         info!("scx_rorke started");
 
         // Set VMs to sched_ext class
-
         for vm in vm_config.iter() {
             let vcpus = &vm.vcpus;
             debug!("vm_id: {:?} vcpus: {:?}", vm.vm_id, vcpus);
@@ -210,11 +255,42 @@ impl<'a> Scheduler<'a> {
                 debug!("Set SCHED_EXT for vcpu: {:?}", vcpu);
             }
         }
-        Ok(Self { skel, struct_ops })
+
+        // Start stats server
+        let stats_server = StatsServer::new(stats::server_data()).launch()?;
+        Ok(Self {
+            skel,
+            struct_ops,
+            stats_server,
+        })
+    }
+
+    fn get_metrics(&self) -> Metrics {
+        Metrics {
+            nr_running: self.skel.maps.bss_data.nr_running,
+            nr_cpus: self.skel.maps.rodata_data.nr_cpus as u64,
+            nr_kthread_dispatches: self.skel.maps.bss_data.nr_kthread_dispatches,
+            nr_direct_to_idle_dispatches: self.skel.maps.bss_data.nr_direct_to_idle_dispatches,
+            nr_vm_dispatches: self.skel.maps.bss_data.nr_vm_dispatches,
+            per_cpu_preempted: get_per_cpu_preempted(&self.skel).expect("Failed to get per_cpu_preempted"),
+        }
+    }
+
+    pub fn exited(&mut self) -> bool {
+        uei_exited!(&self.skel, uei)
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
-        while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {}
+        let (res_ch, req_ch) = self.stats_server.channels();
+
+        while !shutdown.load(Ordering::Relaxed) && !self.exited() {
+            match req_ch.recv_timeout(Duration::from_secs(1)) {
+                Ok(()) => res_ch.send(self.get_metrics())?,
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(e) => Err(e)?,
+            }
+        }
+
         self.struct_ops.take();
         uei_report!(&self.skel, uei)
     }
@@ -222,9 +298,7 @@ impl<'a> Scheduler<'a> {
 
 impl<'a> Drop for Scheduler<'a> {
     fn drop(&mut self) {
-        if let Some(struct_ops) = self.struct_ops.take() {
-            drop(struct_ops);
-        }
+        info!("Unregister {} scheduler", SCHEDULER_NAME);
     }
 }
 
@@ -233,6 +307,11 @@ fn main() -> Result<()> {
 
     if opts.version {
         println!("scx_rorke: {}", *build_id::SCX_FULL_VERSION);
+        return Ok(());
+    }
+
+    if opts.help_stats {
+        stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
         return Ok(());
     }
 
@@ -259,6 +338,17 @@ fn main() -> Result<()> {
         shutdown_clone.store(true, Ordering::Relaxed);
     })
     .context("Failed to set Ctrl-C handler")?;
+
+    if let Some(intv) = opts.monitor.or(opts.stats) {
+        let shutdown_copy = shutdown.clone();
+        let jh = std::thread::spawn(move || {
+            stats::monitor(Duration::from_secs_f64(intv), shutdown_copy).unwrap()
+        });
+        if opts.monitor.is_some() {
+            let _ = jh.join();
+            return Ok(());
+        }
+    }
 
     let mut open_object = MaybeUninit::uninit();
     loop {
