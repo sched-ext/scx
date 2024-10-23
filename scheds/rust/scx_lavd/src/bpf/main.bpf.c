@@ -235,6 +235,21 @@ out:
 	return ratio;
 }
 
+static u32 calc_greedy_factor(u32 greedy_ratio)
+{
+	/*
+	 * For all under-utilized tasks, we treat them equally.
+	 */
+	if (greedy_ratio <= 1000)
+		return 1000;
+
+	/*
+	 * For over-utilized tasks, we give some mild penalty.
+	 */
+	return 1000 + ((greedy_ratio - 1000) / LAVD_LC_GREEDY_PENALTY);
+
+}
+
 static u64 calc_runtime_factor(u64 runtime, u64 weight_ft)
 {
 	u64 ft = rsigmoid_u64(runtime, LAVD_LC_RUNTIME_MAX);
@@ -343,14 +358,17 @@ static void calc_virtual_deadline_delta(struct task_struct *p,
 					struct cpu_ctx *cpuc_cur,
 					u64 enq_flags)
 {
-	u64 deadline, lat_cri, greedy_ratio;
+	u64 deadline, lat_cri;
+	u32 greedy_ratio, greedy_ft;
 
 	/*
 	 * Calculate the deadline based on latency criticality and greedy ratio.
 	 */
 	lat_cri = calc_lat_cri(p, taskc, cpuc_cur, enq_flags);
 	greedy_ratio = calc_greedy_ratio(taskc);
-	deadline = (taskc->run_time_ns / lat_cri) * greedy_ratio;
+	greedy_ft = calc_greedy_factor(greedy_ratio);
+
+	deadline = (taskc->run_time_ns / lat_cri) * greedy_ft;
 	taskc->vdeadline_delta_ns = deadline;
 }
 
@@ -570,7 +588,7 @@ static void update_stat_for_stopping(struct task_struct *p,
 				     struct cpu_ctx *cpuc)
 {
 	u64 now = bpf_ktime_get_ns();
-	u64 old_run_time_ns, suspended_duration, task_run_time;
+	u64 suspended_duration, task_run_time;
 
 	/*
 	 * Update task's run_time. When a task is scheduled consecutively
@@ -581,7 +599,6 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 * consecutive execution is accumulated and reflected in the
 	 * calculation of runtime statistics.
 	 */
-	old_run_time_ns = taskc->run_time_ns;
 	suspended_duration = get_suspended_duration_and_reset(cpuc);
 	task_run_time = now - taskc->last_running_clk - suspended_duration;
 	taskc->acc_run_time_ns += task_run_time;

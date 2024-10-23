@@ -28,6 +28,7 @@ enum consts_internal  {
 	LAVD_LC_FREQ_MAX		= 1000000,
 	LAVD_LC_RUNTIME_MAX		= LAVD_TIME_ONE_SEC,
 	LAVD_LC_WEIGHT_BOOST		= 128, /* 2^7 */
+	LAVD_LC_GREEDY_PENALTY		= 20,  /* 20% */
 
 	LAVD_SLICE_BOOST_MAX_FT		= 3, /* maximum additional 3x of slice */
 	LAVD_SLICE_BOOST_MAX_STEP	= 6, /* 6 slice exhausitions in a row */
@@ -40,14 +41,14 @@ enum consts_internal  {
 	LAVD_CPU_ID_NONE		= ((u32)-1),
 
 	LAVD_SYS_STAT_INTERVAL_NS	= (50ULL * NSEC_PER_MSEC),
-	LAVD_SYS_STAT_DECAY_TIMES	= (2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS,
+	LAVD_SYS_STAT_DECAY_TIMES	= ((2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS),
+
 	LAVD_CC_PER_CORE_MAX_CTUIL	= 500, /* maximum per-core CPU utilization */
 	LAVD_CC_PER_TURBO_CORE_MAX_CTUIL = 750, /* maximum per-core CPU utilization for a turbo core */
 	LAVD_CC_NR_ACTIVE_MIN		= 1, /* num of mininum active cores */
 	LAVD_CC_NR_OVRFLW		= 1, /* num of overflow cores */
 	LAVD_CC_CPU_PIN_INTERVAL	= (1ULL * LAVD_TIME_ONE_SEC),
-	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL /
-					   LAVD_SYS_STAT_INTERVAL_NS),
+	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL / LAVD_SYS_STAT_INTERVAL_NS),
 
 	LAVD_AP_HIGH_UTIL		= 700, /* balanced mode when 10% < cpu util <= 40%,
 						  performance mode when cpu util > 40% */
