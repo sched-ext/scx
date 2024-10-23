@@ -30,7 +30,15 @@ typedef unsigned long long u64;
 enum consts {
   MAX_CPUS = 128,
   MAX_VMS = 16,
-  FALLBACK_DSQ_ID = 0,
+};
+
+/*
+ * Per-CPU context.
+ */
+struct cpu_ctx {
+  u64 last_running;
+  u64 kicked;
+  u64 vm_id;
 };
 
 #endif /* __INTF_H */
