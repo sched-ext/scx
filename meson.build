@@ -1,7 +1,7 @@
 project('sched_ext schedulers', 'c',
         version: '1.0.5',
         license: 'GPL-2.0',
-        meson_version : '>= 1.4.0',)
+        meson_version : '>= 1.2.0',)
 
 fs = import('fs')
 
