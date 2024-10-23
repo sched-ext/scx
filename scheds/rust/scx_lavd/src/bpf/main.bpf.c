@@ -999,6 +999,17 @@ static u64 find_proper_dsq(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 	return cpuc->cpdom_alt_id;
 }
 
+static void kick_task_cpu(struct task_struct *p, struct task_ctx *taskc)
+{
+	bool found_idle = false;
+	s32 prev_cpu, cpu;
+
+	prev_cpu = scx_bpf_task_cpu(p);
+	cpu = pick_idle_cpu(p, taskc, prev_cpu, 0, &found_idle);
+	if (found_idle && cpu >= 0)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc_task, *cpuc_cur;
@@ -1064,6 +1075,12 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	scx_bpf_dispatch_vtime(p, dsq_id, p->scx.slice,
 			       taskc->vdeadline_log_clk, enq_flags);
+
+	/*
+	 * If there is an idle cpu for the task, kick it up now
+	 * so it can consume the task immediately.
+	 */
+	kick_task_cpu(p, taskc);
 }
 
 static bool consume_dsq(s32 cpu, u64 dsq_id, u64 now)
