@@ -4,7 +4,7 @@
  * TODO: Add a proper description
  *
  * Copyright(C) 2024 Vahab Jabrayilov<vjabrayilov@cs.columbia.edu>
- * Influenced by the scx_central scheduler
+ * Influenced by the scx_central & scx_bpfland schedulers
  */
 
 #include <scx/common.bpf.h>
@@ -46,7 +46,7 @@ u64 nr_overflows;
 volatile u64 nr_direct_to_idle_dispatches, nr_kthread_dispatches,
     nr_vm_dispatches;
 
-struct central_timer {
+struct global_timer {
   struct bpf_timer timer;
 };
 
@@ -54,13 +54,17 @@ struct {
   __uint(type, BPF_MAP_TYPE_ARRAY);
   __uint(max_entries, 1);
   __type(key, u32);
-  __type(value, struct central_timer);
-} central_timer SEC(".maps");
+  __type(value, struct global_timer);
+} global_timer SEC(".maps");
 
 /*
  * Per-CPU context.
  */
-struct cpu_ctx {};
+struct cpu_ctx {
+  u64 last_running;
+  u64 kicked;
+  u32 vm_id;
+};
 
 struct {
   __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -229,40 +233,47 @@ void BPF_STRUCT_OPS(rorke_exit_task,
                     struct scx_exit_task_args* args) {}
 
 /*
- * At every timer_interval_ns, preempts all CPUs other than central.
+ * TODO: Add description for timer functionality
  */
-static int central_timerfn(void* map, int* key, struct bpf_timer* timer) {
-  // u64 now = bpf_ktime_get_ns();
-  trace("central_timerfn: timer fired");
-  u64 nr_to_kick = nr_queued;
-  s32 curr_cpu;
+static int global_timer_fn(void* map, int* key, struct bpf_timer* timer) {
+  trace("global_timer_fn: timer fired");
 
-  curr_cpu = bpf_get_smp_processor_id();
-  if (timer_pinned && (curr_cpu != central_cpu)) {
-    scx_bpf_error("Central Timer ran on CPU %d, not central CPU %d\n", curr_cpu,
-                  central_cpu);
+  u64 now = bpf_ktime_get_ns();
+  s32 current_cpu = bpf_get_smp_processor_id();
+  struct cpu_ctx* cctx;
+  u64 delta;
+
+  if (timer_pinned && (current_cpu != central_cpu)) {
+    scx_bpf_error("Central Timer ran on CPU %d, not central CPU %d\n",
+                  current_cpu, central_cpu);
     return 0;
   }
 
-  bpf_for(curr_cpu, 0, nr_cpus) {
-    if (curr_cpu == central_cpu) {
-      // trace("central_timerfn: curr_cpu[%d] == central_cpu[%d] skipping...",
-      // curr_cpu, central_cpu);
+  bpf_for(current_cpu, 0, nr_cpus) {
+    if (current_cpu == central_cpu)
       continue;
-    }
 
-    if (scx_bpf_dsq_nr_queued(FALLBACK_DSQ_ID) ||
-        scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | curr_cpu))
-      trace("central_timerfn: local non-empty, will kick CPU %d", curr_cpu);
-    else if (nr_to_kick)
-      nr_to_kick--;
+    cctx = try_lookup_cpu_ctx(current_cpu);
+    if (!cctx)
+      continue;
+
+    delta = now - cctx->last_running;
+    if (delta < timer_interval_ns)
+      continue;
+
+    if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | current_cpu))
+      trace("global_timer_fn: local non-empty, will kick CPU %d", current_cpu);
+    else if (scx_bpf_dsq_nr_queued(cctx->vm_id))
+      trace("global_timer_fn: VM %d queue non-empty, will kick CPU %d",
+            cctx->vm_id, current_cpu);
     else {
-      trace("central_timerfn: nothing to do... skipping CPU %d", curr_cpu);
+      trace("global_timer_fn: nothing to do... skipping CPU %d", current_cpu);
       continue;
     }
 
-    scx_bpf_kick_cpu(curr_cpu, SCX_KICK_PREEMPT);
-    trace("central_timerfn: kicked CPU %d", curr_cpu);
+    scx_bpf_kick_cpu(current_cpu, SCX_KICK_PREEMPT);
+    cctx->kicked++;
+    trace("global_timer_fn: kicked CPU %d", current_cpu);
   }
 
   bpf_timer_start(timer, timer_interval_ns, BPF_F_TIMER_CPU_PIN);
@@ -270,14 +281,7 @@ static int central_timerfn(void* map, int* key, struct bpf_timer* timer) {
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(rorke_init) {
-  /* Create DSQ for fallback */
   int ret;
-  ret = scx_bpf_create_dsq(FALLBACK_DSQ_ID, -1);
-  if (ret) {
-    scx_bpf_error("Failed to create DSQ for fallback");
-    return ret;
-  }
-  info("Created DSQ for fallback");
 
   /* Create DSQ per VM */
   u32 i;
@@ -293,7 +297,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rorke_init) {
   /* Setup timer */
   struct bpf_timer* timer;
   u32 key = 0;
-  timer = bpf_map_lookup_elem(&central_timer, &key);
+  timer = bpf_map_lookup_elem(&global_timer, &key);
   if (!timer) {
     info("Failed to lookup timer");
     return -ESRCH;
@@ -304,8 +308,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rorke_init) {
     return EINVAL;
   }
 
-  bpf_timer_init(timer, &central_timer, CLOCK_MONOTONIC);
-  bpf_timer_set_callback(timer, central_timerfn);
+  bpf_timer_init(timer, &global_timer, CLOCK_MONOTONIC);
+  bpf_timer_set_callback(timer, global_timer_fn);
   info("Initialized timer\n");
 
   ret = bpf_timer_start(timer, timer_interval_ns, BPF_F_TIMER_CPU_PIN);
