@@ -37,15 +37,13 @@ const volatile u64 cpu_to_vm[MAX_CPUS];
 
 const volatile u32 debug = 0;
 
-bool timer_pinned = true;
-u64 nr_total, nr_locals, nr_queued, nr_lost_pids;
-u64 nr_timers, nr_dispatches, nr_mismatches, nr_retries;
-u64 nr_overflows;
-
 /* Scheduling statistics */
 volatile u64 nr_direct_to_idle_dispatches, nr_kthread_dispatches,
     nr_vm_dispatches, nr_running;
 
+/*
+ * Timer for preempting CPUs.
+ */
 struct global_timer {
   struct bpf_timer timer;
 };
@@ -56,6 +54,8 @@ struct {
   __type(key, u32);
   __type(value, struct global_timer);
 } global_timer SEC(".maps");
+
+bool timer_pinned = true;
 
 /*
  * Per-CPU context.
@@ -106,23 +106,6 @@ struct task_ctx* try_lookup_task_ctx(const struct task_struct* p) {
  */
 static inline bool is_kthread(const struct task_struct* p) {
   return p->flags & PF_KTHREAD;
-}
-
-/*
- * Allocate/re-allocate a new cpumask.
- */
-static int calloc_cpumask(struct bpf_cpumask** p_cpumask) {
-  struct bpf_cpumask* cpumask;
-
-  cpumask = bpf_cpumask_create();
-  if (!cpumask)
-    return -ENOMEM;
-
-  cpumask = bpf_kptr_xchg(p_cpumask, cpumask);
-  if (cpumask)
-    bpf_cpumask_release(cpumask);
-
-  return 0;
 }
 
 static s32 pick_idle_cpu(struct task_struct* p, s32 prev_cpu, u64 wake_flags) {
@@ -231,16 +214,6 @@ void BPF_STRUCT_OPS(rorke_stopping, struct task_struct* p, bool runnable) {
         runnable);
   __sync_fetch_and_sub(&nr_running, 1);
 }
-
-s32 BPF_STRUCT_OPS(rorke_init_task,
-                   struct task_struct* p,
-                   struct scx_init_task_args* args) {
-  return 0;
-}
-
-void BPF_STRUCT_OPS(rorke_exit_task,
-                    struct task_struct* p,
-                    struct scx_exit_task_args* args) {}
 
 /*
  * TODO: Add description for timer functionality
@@ -357,8 +330,6 @@ SCX_OPS_DEFINE(rorke,
                .dispatch = (void*)rorke_dispatch,
                .running = (void*)rorke_running,
                .stopping = (void*)rorke_stopping,
-               .init_task = (void*)rorke_init_task,
-               .exit_task = (void*)rorke_exit_task,
                .init = (void*)rorke_init,
                .exit = (void*)rorke_exit,
                .name = "rorke");
