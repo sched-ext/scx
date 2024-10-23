@@ -102,7 +102,7 @@ ___scx_bpf_bstr_format_checker(const char *fmt, ...) {}
  * refer to the initialized list of inputs to the bstr kfunc.
  */
 #define scx_bpf_bstr_preamble(fmt, args...)                                    \
-  static const char ___fmt[] = fmt;                                                  \
+  static typeof(fmt) ___fmt = fmt;                                             \
   /*                                                                           \
    * Note that __param[] must have at least one                                \
    * element to keep the verifier happy.                                       \
