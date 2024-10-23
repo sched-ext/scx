@@ -32,7 +32,6 @@ const volatile u32 nr_cpus = 1;
 const volatile u32 nr_vms = 1;
 const volatile u64 timer_interval_ns = 100000;
 const volatile u64 vms[MAX_VMS];
-const volatile u64 cpu_to_vm[MAX_CPUS];
 const volatile u32 debug = 0;
 
 /* Scheduling statistics */
@@ -152,7 +151,12 @@ void BPF_STRUCT_OPS(rorke_enqueue, struct task_struct* p, u64 enq_flags) {
 
 void BPF_STRUCT_OPS(rorke_dispatch, s32 cpu, struct task_struct* prev) {
   /* TODO: replace following with per-cpu context */
-  s32 vm_id = cpu < nr_cpus ? cpu_to_vm[cpu] : 0;
+  struct cpu_ctx* cctx = try_lookup_cpu_ctx(cpu);
+
+  if (!cctx)
+    return;
+
+  s32 vm_id = cctx->vm_id;
   if (vm_id == 0) {
     return;
   }

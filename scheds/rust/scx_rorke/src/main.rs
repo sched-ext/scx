@@ -39,7 +39,6 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::UserExitInfo;
 
-
 const SCHED_EXT: i32 = 7;
 
 lazy_static::lazy_static! {
@@ -112,6 +111,7 @@ fn initialize_cpu_ctxs(skel: &BpfSkel, cpu_allocation: &Vec<u64>) -> Result<()> 
 
     for (cpu, vm_id) in cpu_allocation.iter().enumerate() {
         cpu_ctxs[cpu].vm_id = *vm_id;
+        info!("cpu - {} assigned to vm - {}", cpu, *vm_id);
     }
 
     skel.maps
@@ -163,12 +163,6 @@ impl<'a> Scheduler<'a> {
 
         for (i, vm) in vm_config.iter().enumerate() {
             skel.maps.rodata_data.vms[i] = vm.vm_id;
-        }
-
-        // starting from central_cpu+1...central_cpu+nr_cpus-1 assign VMs
-        for (i, vm_id) in cpu_allocation.iter().enumerate() {
-            info!("cpu_to_vm[{}] = {}", i, vm_id);
-            skel.maps.rodata_data.cpu_to_vm[i] = *vm_id;
         }
 
         if opts.partial {
