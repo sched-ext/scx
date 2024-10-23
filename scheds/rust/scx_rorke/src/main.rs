@@ -23,6 +23,7 @@ use clap::Parser;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 
 use log::debug;
@@ -38,7 +39,12 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::UserExitInfo;
 
+
 const SCHED_EXT: i32 = 7;
+
+lazy_static::lazy_static! {
+    static ref NR_POSSIBLE_CPUS: usize = libbpf_rs::num_possible_cpus().unwrap();
+}
 
 #[derive(Debug, Parser)]
 struct Opts {
@@ -72,6 +78,48 @@ struct Opts {
     /// Print version and exit.
     #[clap(long)]
     version: bool,
+}
+fn convert_cpu_ctxs(cpu_ctxs: Vec<bpf_intf::cpu_ctx>) -> Vec<Vec<u8>> {
+    cpu_ctxs
+        .into_iter()
+        .map(|cpu_ctx| {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    &cpu_ctx as *const bpf_intf::cpu_ctx as *const u8,
+                    std::mem::size_of::<bpf_intf::cpu_ctx>(),
+                )
+            };
+            bytes.to_vec()
+        })
+        .collect()
+}
+
+fn initialize_cpu_ctxs(skel: &BpfSkel, cpu_allocation: &Vec<u64>) -> Result<()> {
+    let key = (0_u32).to_ne_bytes();
+    let mut cpu_ctxs: Vec<bpf_intf::cpu_ctx> = vec![];
+    let cpu_ctxs_vec = skel
+        .maps
+        .cpu_ctx_stor
+        .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
+        .context("Failed to lookup cpu_ctx")?
+        .unwrap();
+
+    for cpu in 0..*NR_POSSIBLE_CPUS {
+        cpu_ctxs.push(*unsafe {
+            &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
+        });
+    }
+
+    for (cpu, vm_id) in cpu_allocation.iter().enumerate() {
+        cpu_ctxs[cpu].vm_id = *vm_id;
+    }
+
+    skel.maps
+        .cpu_ctx_stor
+        .update_percpu(&key, &convert_cpu_ctxs(cpu_ctxs), libbpf_rs::MapFlags::ANY)
+        .context("Failed to update cpu_ctx")?;
+
+    Ok(())
 }
 
 struct Scheduler<'a> {
@@ -141,8 +189,12 @@ impl<'a> Scheduler<'a> {
                 return Err(anyhow!("Failed to pin to central CPU"));
             }
         }
-        // Attach the eBPF program
+        // Load and verify the eBPF program
         let mut skel = scx_ops_load!(skel, rorke, uei)?;
+
+        // Initialize cpu_ctxs
+        initialize_cpu_ctxs(&skel, &cpu_allocation)?;
+
         let struct_ops = Some(scx_ops_attach!(skel, rorke)?);
         info!("scx_rorke started");
 
@@ -154,8 +206,9 @@ impl<'a> Scheduler<'a> {
 
             for vcpu in vcpus.iter() {
                 let param = sched_param { sched_priority: 0 }; // SCHED_BATCH doesn't require a priority
-                let result =
-                    unsafe { sched_setscheduler(*vcpu as i32, SCHED_EXT, &param as *const sched_param) };
+                let result = unsafe {
+                    sched_setscheduler(*vcpu as i32, SCHED_EXT, &param as *const sched_param)
+                };
 
                 if result == -1 {
                     return Err(anyhow!("Failed to set SCHED_EXT for vcpu: {:?}", vcpu));

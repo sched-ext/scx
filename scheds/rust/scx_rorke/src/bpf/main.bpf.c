@@ -24,17 +24,15 @@ char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
 
 /*
- * const volatiles are set again during initialization
- * here we assign values just to pass the verifier
+ * Following are parameters to scheduler and  set again during initialization.
+ * Here we assign values just to pass the verifier.
  */
 const volatile u32 central_cpu = 0;
 const volatile u32 nr_cpus = 1;
 const volatile u32 nr_vms = 1;
 const volatile u64 timer_interval_ns = 100000;
-
 const volatile u64 vms[MAX_VMS];
 const volatile u64 cpu_to_vm[MAX_CPUS];
-
 const volatile u32 debug = 0;
 
 /* Scheduling statistics */
@@ -57,15 +55,6 @@ struct {
 
 bool timer_pinned = true;
 
-/*
- * Per-CPU context.
- */
-struct cpu_ctx {
-  u64 last_running;
-  u64 kicked;
-  u32 vm_id;
-};
-
 struct {
   __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
   __type(key, u32);
@@ -79,26 +68,6 @@ struct {
 struct cpu_ctx* try_lookup_cpu_ctx(s32 cpu) {
   const u32 idx = 0;
   return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
-}
-
-/*
- * Per-task local storage.
- */
-struct task_ctx {};
-
-/* Map that contains task-local storage. */
-struct {
-  __uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-  __uint(map_flags, BPF_F_NO_PREALLOC);
-  __type(key, int);
-  __type(value, struct task_ctx);
-} task_ctx_stor SEC(".maps");
-
-/*
- * Return a local task context from a generic task.
- */
-struct task_ctx* try_lookup_task_ctx(const struct task_struct* p) {
-  return bpf_task_storage_get(&task_ctx_stor, (struct task_struct*)p, 0, 0);
 }
 
 /*
