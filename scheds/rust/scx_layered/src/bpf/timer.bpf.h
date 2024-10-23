@@ -18,6 +18,7 @@ struct layered_timer {
 };
 
 enum layer_timer_callbacks {
+	LAYERED_MONITOR,
 	NOOP_TIMER,
 	MAX_TIMERS,
 };

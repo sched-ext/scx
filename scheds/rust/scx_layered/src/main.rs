@@ -424,6 +424,10 @@ struct Opts {
     #[clap(long)]
     xnuma_preemption: bool,
 
+    /// Disable monitor
+    #[clap(long)]
+    monitor_disable: bool,
+
     /// Write example layer specifications into the file and exit.
     #[clap(short = 'e', long)]
     example: Option<String>,
@@ -1481,6 +1485,9 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.disable_topology = disable_topology;
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
+        if opts.monitor_disable {
+            skel.maps.rodata_data.monitor_disable = opts.monitor_disable;
+        }
         for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
             skel.maps.rodata_data.__sibling_cpu[cpu] = *sib;
         }
