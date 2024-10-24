@@ -22,12 +22,6 @@ static int comp_preemption_info(struct preemption_info *prm_a,
 				struct preemption_info *prm_b)
 {
 	/*
-	 * Never preeempt a lock holder.
-	 */
-	if (prm_b->cpuc->lock_holder)
-		return 1;
-
-	/*
 	 * Check if one's latency priority _or_ deadline is smaller or not.
 	 */
 	if ((prm_a->lat_cri > prm_b->lat_cri) ||
@@ -42,6 +36,14 @@ static int comp_preemption_info(struct preemption_info *prm_a,
 static  bool can_task1_kick_task2(struct preemption_info *prm_task1,
 				  struct preemption_info *prm_task2)
 {
+	/*
+	 * A caller should ensure that task2 is not a lock holder.
+	 */
+
+	/*
+	 * If that CPU runs a lower priority task, that's a victim
+	 * candidate.
+	 */
 	return comp_preemption_info(prm_task1, prm_task2) < 0;
 }
 
@@ -58,10 +60,16 @@ static  bool can_cpu1_kick_cpu2(struct preemption_info *prm_cpu1,
 	prm_cpu2->last_kick_clk = cpuc2->last_kick_clk;
 
 	/*
+	 * Never preeempt a CPU running a lock holder.
+	 */
+	if (prm_cpu2->cpuc->lock_holder)
+		return false;
+
+	/*
 	 * If that CPU runs a lower priority task, that's a victim
 	 * candidate.
 	 */
-	return can_task1_kick_task2(prm_cpu1, prm_cpu2);
+	return comp_preemption_info(prm_cpu1, prm_cpu2) < 0;
 }
 
 static bool is_worth_kick_other_task(struct task_ctx *taskc)
@@ -168,6 +176,9 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 		/*
 		 * If that CPU runs a lower priority task, that's a victim
 		 * candidate.
+		 *
+		 * Note that a task running on cpu 2 (prm_cpus[v]) cannot
+		 * be a lock holder.
 		 */
 		ret = can_cpu1_kick_cpu2(&prm_task, &prm_cpus[v], cpuc);
 		if (ret == true && ++v >= 2)
@@ -178,7 +189,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 * Choose a final victim CPU.
 	 */
 	switch(v) {
-	case 2:	/* two dandidates */
+	case 2:	/* two candidates */
 		victim_cpu = can_task1_kick_task2(&prm_cpus[0], &prm_cpus[1]) ?
 				&prm_cpus[0] : &prm_cpus[1];
 		goto bingo_out;
