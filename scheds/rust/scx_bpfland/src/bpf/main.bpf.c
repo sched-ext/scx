@@ -123,6 +123,11 @@ volatile u64 nr_running, nr_interactive, nr_shared_waiting, nr_prio_waiting;
 volatile u64 nr_online_cpus;
 
 /*
+ * Cache the total amount of possible CPUs.
+ */
+static u64 nr_cpu_ids;
+
+/*
  * Exit information.
  */
 UEI_DEFINE(uei);
@@ -150,8 +155,7 @@ struct cpu_ctx {
 	u64 tot_runtime;
 	u64 prev_runtime;
 	u64 last_running;
-	struct bpf_cpumask __kptr *l2_cpumask;
-	struct bpf_cpumask __kptr *l3_cpumask;
+	struct bpf_cpumask __kptr *llc_cpumask;
 };
 
 struct {
@@ -177,11 +181,9 @@ struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
  */
 struct task_ctx {
 	/*
-	 * Temporary cpumask for calculating scheduling domains.
+	 * Temporary cpumask for calculating the LLC scheduling domain.
 	 */
-	struct bpf_cpumask __kptr *cpumask;
-	struct bpf_cpumask __kptr *l2_cpumask;
-	struct bpf_cpumask __kptr *l3_cpumask;
+	struct bpf_cpumask __kptr *llc_mask;
 
 	/*
 	 * Total execution time of the task.
@@ -425,6 +427,103 @@ static void handle_sync_wakeup(struct task_struct *p)
 }
 
 /*
+ * Scheduling domain types used for idle CPU selection.
+ */
+enum sched_dom_type {
+	SCHED_DOM_PRI,		/* Primary scheduling domain */
+	SCHED_DOM_LLC,		/* Last-level cache (LLC) domain */
+};
+
+static const struct cpumask *
+sched_domain(const struct task_struct *p, s32 cpu, enum sched_dom_type type)
+{
+	const struct cpumask *pri_dom = cast_mask(primary_cpumask) ? : p->cpus_ptr;
+	struct bpf_cpumask *llc_dom;
+	struct task_ctx *tctx;
+	struct cpu_ctx *cctx;
+
+	/*
+	 * Determine the scheduling domain only if the task is allowed to run
+	 * on all CPUs.
+	 *
+	 * This is done primarily for efficiency, as it avoids the overhead of
+	 * updating a cpumask every time we need to select an idle CPU (which
+	 * can be costly in large SMP systems), but it also aligns logically:
+	 * if a task's scheduling domain is restricted by user-space (through
+	 * CPU affinity), the task will simply use the flat scheduling domain
+	 * defined by user-space.
+	 */
+	if (p->nr_cpus_allowed < nr_cpu_ids)
+		return NULL;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return NULL;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return NULL;
+
+	/*
+	 * Check validity of task's temporary CPU masks.
+	 */
+	if (!tctx->llc_mask) {
+		scx_bpf_error("task's CPU masks not initialized");
+		return NULL;
+	}
+
+	switch (type) {
+	case SCHED_DOM_PRI:
+		return pri_dom;
+
+	case SCHED_DOM_LLC:
+		llc_dom = cctx->llc_cpumask;
+		if (!llc_dom)
+			return pri_dom;
+		/*
+		 * Determine the task's LLC domain as the intersection of the primary
+		 * domain and the LLC domain of the previously used CPU.
+		 */
+		bpf_cpumask_and(tctx->llc_mask, pri_dom, cast_mask(llc_dom));
+
+		return cast_mask(tctx->llc_mask);
+	default:
+		scx_bpf_error("bad scheduling domain type %d", type);
+		return NULL;
+	}
+}
+
+/*
+ * Maximum amount of retries in case of contention to acquire an idle CPU.
+ */
+#define MAX_RETRIES	4
+
+static s32 pick_any_idle_cpu(const struct cpumask *cpus,
+			     const struct cpumask *idle_smt,
+			     const struct cpumask *idle_cpu,
+			     u64 flags)
+{
+	int cpu = nr_cpu_ids;
+
+	bpf_repeat(MAX_RETRIES) {
+		if (smt_enabled) {
+			cpu = bpf_cpumask_any_and_distribute(idle_smt, cpus);
+			if (cpu >= nr_cpu_ids && flags & SCX_PICK_IDLE_CORE)
+				return -EBUSY;
+		}
+		if (cpu >= nr_cpu_ids) {
+			cpu = bpf_cpumask_any_and_distribute(idle_cpu, cpus);
+			if (cpu >= nr_cpu_ids)
+				return -EBUSY;
+		}
+		if (scx_bpf_test_and_clear_cpu_idle(cpu))
+			return cpu;
+	}
+
+	return -EBUSY;
+}
+
+/*
  * Find an idle CPU in the system.
  *
  * NOTE: the idle CPU selection doesn't need to be formally perfect, it is
@@ -435,105 +534,27 @@ static void handle_sync_wakeup(struct task_struct *p)
  */
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
-	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
-	struct bpf_cpumask *primary, *l2_domain, *l3_domain;
-	struct bpf_cpumask *p_mask, *l2_mask, *l3_mask;
-	struct task_ctx *tctx;
-	struct cpu_ctx *cctx;
+	const struct cpumask *idle_smtmask, *idle_cpumask;
+	const struct cpumask *pri_cpus, *llc_cpus;
 	s32 cpu;
-
-	/*
-	 * If the task isn't allowed to use its previously used CPU it means
-	 * that it's changing affinity. In this case try to pick any random
-	 * idle CPU in its new allowed CPU domain.
-	 */
-	if (!bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
-		return scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-
-	/*
-	 * For tasks that can run only on a single CPU, we can simply verify if
-	 * their only allowed CPU is still idle.
-	 */
-	if (p->nr_cpus_allowed == 1 || p->migration_disabled) {
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
-			return prev_cpu;
-		return -EBUSY;
-	}
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return -ENOENT;
-
-	cctx = try_lookup_cpu_ctx(prev_cpu);
-	if (!cctx)
-		return -EINVAL;
-
-	primary = primary_cpumask;
-	if (!primary)
-		return -EINVAL;
 
 	/*
 	 * Acquire the CPU masks to determine the online and idle CPUs in the
 	 * system.
 	 */
-	online_cpumask = scx_bpf_get_online_cpumask();
 	idle_smtmask = scx_bpf_get_idle_smtmask();
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 
 	/*
-	 * Scheduling domains of the previously used CPU.
+	 * Determine the scheduling domain of the task.
 	 */
-	l2_domain = cctx->l2_cpumask;
-	if (!l2_domain)
-		l2_domain = primary;
+	pri_cpus = sched_domain(p, prev_cpu, SCHED_DOM_PRI);
+	if (!pri_cpus)
+		pri_cpus = p->cpus_ptr;
 
-	l3_domain = cctx->l3_cpumask;
-	if (!l3_domain)
-		l3_domain = primary;
-
-	/*
-	 * Task's scheduling domains.
-	 */
-	p_mask = tctx->cpumask;
-	if (!p_mask) {
-		scx_bpf_error("cpumask not initialized");
-		cpu = -EINVAL;
-		goto out_put_cpumask;
-	}
-
-	l2_mask = tctx->l2_cpumask;
-	if (!l2_mask) {
-		scx_bpf_error("l2 cpumask not initialized");
-		cpu = -EINVAL;
-		goto out_put_cpumask;
-	}
-
-	l3_mask = tctx->l3_cpumask;
-	if (!l3_mask) {
-		scx_bpf_error("l3 cpumask not initialized");
-		cpu = -EINVAL;
-		goto out_put_cpumask;
-	}
-
-	/*
-	 * Determine the task's scheduling domain.
-	 * idle CPU, re-try again with the primary scheduling domain.
-	 */
-	bpf_cpumask_and(p_mask, p->cpus_ptr, cast_mask(primary));
-
-	/*
-	 * Determine the L2 cache domain as the intersection of the task's
-	 * primary cpumask and the L2 cache domain mask of the previously used
-	 * CPU.
-	 */
-	bpf_cpumask_and(l2_mask, cast_mask(p_mask), cast_mask(l2_domain));
-
-	/*
-	 * Determine the L3 cache domain as the intersection of the task's
-	 * primary cpumask and the L3 cache domain mask of the previously used
-	 * CPU.
-	 */
-	bpf_cpumask_and(l3_mask, cast_mask(p_mask), cast_mask(l3_domain));
+	llc_cpus = sched_domain(p, prev_cpu, SCHED_DOM_LLC);
+	if (!llc_cpus)
+		llc_cpus = pri_cpus;
 
 	/*
 	 * If the current task is waking up another task and releasing the CPU
@@ -542,7 +563,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	 */
 	if (wake_flags & SCX_WAKE_SYNC) {
 		struct task_struct *current = (void *)bpf_get_current_task_btf();
-		struct bpf_cpumask *curr_l3_domain;
+		const struct cpumask *curr_llc_domain;
+		struct cpu_ctx *cctx;
 		bool share_llc, has_idle;
 
 		/*
@@ -561,15 +583,15 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 			goto out_put_cpumask;
 		}
 
-		curr_l3_domain = cctx->l3_cpumask;
-		if (!curr_l3_domain)
-			curr_l3_domain = primary;
+		curr_llc_domain = cast_mask(cctx->llc_cpumask);
+		if (!curr_llc_domain)
+			curr_llc_domain = p->cpus_ptr;
 
 		/*
 		 * If both the waker and wakee share the same L3 cache keep
 		 * using the same CPU if possible.
 		 */
-		share_llc = bpf_cpumask_test_cpu(prev_cpu, cast_mask(curr_l3_domain));
+		share_llc = bpf_cpumask_test_cpu(prev_cpu, curr_llc_domain);
 		if (share_llc && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			goto out_put_cpumask;
@@ -580,7 +602,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 		 * the wakee on the same CPU as the waker (since it's going to
 		 * block and release the current CPU).
 		 */
-		has_idle = bpf_cpumask_intersects(cast_mask(curr_l3_domain), idle_cpumask);
+		has_idle = bpf_cpumask_intersects(curr_llc_domain, idle_cpumask);
 		if (has_idle &&
 		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
 		    !(current->flags & PF_EXITING) &&
@@ -596,7 +618,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 		 * If the task can still run on the previously used CPU and
 		 * it's a full-idle core, keep using it.
 		 */
-		if (bpf_cpumask_test_cpu(prev_cpu, cast_mask(p_mask)) &&
+		if (bpf_cpumask_test_cpu(prev_cpu, pri_cpus) &&
 		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
@@ -604,29 +626,19 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 		}
 
 		/*
-		 * Search for any full-idle CPU in the primary domain that
-		 * shares the same L2 cache.
+		 * Search for any full-idle CPU in the same LLC domain.
 		 */
-		cpu = bpf_cpumask_any_and_distribute(cast_mask(l2_mask), idle_smtmask);
-		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-		    scx_bpf_test_and_clear_cpu_idle(cpu))
-			goto out_put_cpumask;
-
-		/*
-		 * Search for any full-idle CPU in the primary domain that
-		 * shares the same L3 cache.
-		 */
-		cpu = bpf_cpumask_any_and_distribute(cast_mask(l3_mask), idle_smtmask);
-		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-		    scx_bpf_test_and_clear_cpu_idle(cpu))
+		cpu = pick_any_idle_cpu(llc_cpus, idle_smtmask, idle_cpumask,
+					SCX_PICK_IDLE_CORE);
+		if (cpu >= 0)
 			goto out_put_cpumask;
 
 		/*
 		 * Search for any other full-idle core in the primary domain.
 		 */
-		cpu = bpf_cpumask_any_and_distribute(cast_mask(p_mask), idle_smtmask);
-		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-		    scx_bpf_test_and_clear_cpu_idle(cpu))
+		cpu = pick_any_idle_cpu(pri_cpus, idle_smtmask, idle_cpumask,
+					SCX_PICK_IDLE_CORE);
+		if (cpu >= 0)
 			goto out_put_cpumask;
 	}
 
@@ -634,36 +646,24 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 	 * If a full-idle core can't be found (or if this is not an SMT system)
 	 * try to re-use the same CPU, even if it's not in a full-idle core.
 	 */
-	if (bpf_cpumask_test_cpu(prev_cpu, cast_mask(p_mask)) &&
+	if (bpf_cpumask_test_cpu(prev_cpu, pri_cpus) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu = prev_cpu;
 		goto out_put_cpumask;
 	}
 
 	/*
-	 * Search for any idle CPU in the primary domain that shares the same
-	 * L2 cache.
+	 * Search for any idle CPU in the same LLC domain.
 	 */
-	cpu = bpf_cpumask_any_and_distribute(cast_mask(l2_mask), idle_cpumask);
-	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-	    scx_bpf_test_and_clear_cpu_idle(cpu))
-		goto out_put_cpumask;
-
-	/*
-	 * Search for any idle CPU in the primary domain that shares the same
-	 * L3 cache.
-	 */
-	cpu = bpf_cpumask_any_and_distribute(cast_mask(l3_mask), idle_cpumask);
-	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-	    scx_bpf_test_and_clear_cpu_idle(cpu))
+	cpu = pick_any_idle_cpu(llc_cpus, idle_smtmask, idle_cpumask, 0);
+	if (cpu >= 0)
 		goto out_put_cpumask;
 
 	/*
 	 * Search for any idle CPU in the scheduling domain.
 	 */
-	cpu = bpf_cpumask_any_and_distribute(cast_mask(p_mask), idle_cpumask);
-	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-	    scx_bpf_test_and_clear_cpu_idle(cpu))
+	cpu = pick_any_idle_cpu(pri_cpus, idle_smtmask, idle_cpumask, 0);
+	if (cpu >= 0)
 		goto out_put_cpumask;
 
 	/*
@@ -675,7 +675,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 out_put_cpumask:
 	scx_bpf_put_cpumask(idle_cpumask);
 	scx_bpf_put_cpumask(idle_smtmask);
-	scx_bpf_put_cpumask(online_cpumask);
 
 	return cpu;
 }
@@ -708,7 +707,28 @@ static void kick_task_cpu(struct task_struct *p)
 {
 	s32 cpu = scx_bpf_task_cpu(p);
 
+	/*
+	 * If the task isn't allowed to use its previously used CPU it means
+	 * that it's changing affinity. In this case try to pick any random
+	 * idle CPU in its new allowed CPU domain.
+	 */
+	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		goto out_kick;
+	}
+
+	/*
+	 * For tasks that can run only on a single CPU, we can simply verify if
+	 * their only allowed CPU is still idle.
+	 */
+	if (p->nr_cpus_allowed == 1 || p->migration_disabled) {
+		if (!scx_bpf_test_and_clear_cpu_idle(cpu))
+			goto out_kick;
+		return;
+	}
 	cpu = pick_idle_cpu(p, cpu, 0);
+
+out_kick:
 	if (cpu >= 0)
 		scx_bpf_kick_cpu(cpu, 0);
 }
@@ -1055,30 +1075,12 @@ s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 	if (!tctx)
 		return -ENOMEM;
 	/*
-	 * Create task's primary cpumask.
+	 * Create task's LLC cpumask.
 	 */
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
 		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-	/*
-	 * Create task's L2 cache cpumask.
-	 */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->l2_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-	/*
-	 * Create task's L3 cache cpumask.
-	 */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->l3_cpumask, cpumask);
+	cpumask = bpf_kptr_xchg(&tctx->llc_mask, cpumask);
 	if (cpumask)
 		bpf_cpumask_release(cpumask);
 
@@ -1091,11 +1093,11 @@ s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
 s32 get_nr_online_cpus(void)
 {
 	const struct cpumask *online_cpumask;
-	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
 	int i, cpus = 0;
 
 	online_cpumask = scx_bpf_get_online_cpumask();
 
+	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 	bpf_for(i, 0, nr_cpu_ids) {
 		if (!bpf_cpumask_test_cpu(i, online_cpumask))
 			continue;
@@ -1143,11 +1145,8 @@ int enable_sibling_cpu(struct domain_arg *input)
 
 	/* Make sure the target CPU mask is initialized */
 	switch (input->lvl_id) {
-	case 2:
-		pmask = &cctx->l2_cpumask;
-		break;
 	case 3:
-		pmask = &cctx->l3_cpumask;
+		pmask = &cctx->llc_cpumask;
 		break;
 	default:
 		return -EINVAL;

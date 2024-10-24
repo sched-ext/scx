@@ -168,13 +168,9 @@ struct Opts {
     #[clap(short = 'm', long, default_value = "auto")]
     primary_domain: String,
 
-    /// Disable L2 cache awareness.
+    /// Disable LLC cache awareness.
     #[clap(long, action = clap::ArgAction::SetTrue)]
-    disable_l2: bool,
-
-    /// Disable L3 cache awareness.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    disable_l3: bool,
+    disable_llc: bool,
 
     /// Maximum threshold of voluntary context switches per second. This is used to classify interactive
     /// tasks (0 = disable interactive tasks classification).
@@ -287,13 +283,9 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        // Initialize L2 cache domains.
-        if !opts.disable_l2 {
-            Self::init_l2_cache_domains(&mut skel, &topo)?;
-        }
-        // Initialize L3 cache domains.
-        if !opts.disable_l3 {
-            Self::init_l3_cache_domains(&mut skel, &topo)?;
+        // Initialize LLC cache domains.
+        if !opts.disable_llc {
+            Self::init_llc_cache_domains(&mut skel, &topo)?;
         }
 
         // Attach the scheduler.
@@ -498,7 +490,6 @@ impl<'a> Scheduler<'a> {
         for core in topo.cores().into_iter() {
             for (cpu_id, cpu) in core.cpus() {
                 let cache_id = match cache_lvl {
-                    2 => cpu.l2_id(),
                     3 => cpu.l3_id(),
                     _ => panic!("invalid cache level {}", cache_lvl),
                 };
@@ -533,16 +524,7 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn init_l2_cache_domains(
-        skel: &mut BpfSkel<'_>,
-        topo: &Topology,
-    ) -> Result<(), std::io::Error> {
-        Self::init_cache_domains(skel, topo, 2, &|skel, lvl, cpu, sibling_cpu| {
-            Self::enable_sibling_cpu(skel, lvl, cpu, sibling_cpu)
-        })
-    }
-
-    fn init_l3_cache_domains(
+    fn init_llc_cache_domains(
         skel: &mut BpfSkel<'_>,
         topo: &Topology,
     ) -> Result<(), std::io::Error> {
