@@ -70,7 +70,11 @@ jobs:
         name: Clone Kernel
         # Get the latest sched-ext enabled kernel directly from the korg
         # for-next branch
-        run: git clone --single-branch -b for-next --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git linux
+        uses: cytopia/shell-command-retry-action@v0.1.2
+        with:
+          retries: 10
+          pause: 18
+          command: git clone --single-branch -b for-next --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git linux
 
       # guard rail because we are caching
       - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
