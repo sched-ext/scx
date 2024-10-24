@@ -9,7 +9,7 @@
 
 #ifdef LSP
 #define __bpf__
-#include "../vmlinux/vmlinux.h"
+#include "../vmlinux.h"
 #else
 #include "vmlinux.h"
 #endif
