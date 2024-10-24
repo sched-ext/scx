@@ -12,7 +12,7 @@ enum timer_consts {
 
 struct layered_timer {
 	// if set to 0 the timer will only be scheduled once
-	int interval_ns;
+	u64 interval_ns;
 	u64 init_flags;
 	u64 start_flags;
 };
@@ -22,4 +22,9 @@ enum layer_timer_callbacks {
 	NOOP_TIMER,
 	MAX_TIMERS,
 };
+
+static bool run_timer_cb(int key);
+
+extern struct layered_timer layered_timers[MAX_TIMERS];
+
 #endif /* __LAYERED_TIMER_H */

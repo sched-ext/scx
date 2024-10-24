@@ -2,6 +2,7 @@
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+#include "timer.bpf.h"
 
 
 struct timer_wrapper {

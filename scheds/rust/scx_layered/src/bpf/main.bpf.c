@@ -2072,7 +2072,7 @@ static bool layered_monitor(void)
 }
 
 
-static __always_inline bool run_timer_cb(int key)
+static bool run_timer_cb(int key)
 {
 	switch (key) {
 	case LAYERED_MONITOR:
@@ -2085,8 +2085,8 @@ static __always_inline bool run_timer_cb(int key)
 }
 
 struct layered_timer layered_timers[MAX_TIMERS] = {
-	{15 * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
-	{0, CLOCK_BOOTTIME, 0},
+	{15LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
+	{0LLU, CLOCK_BOOTTIME, 0},
 };
 
 // TODO: separate this out to a separate compilation unit
