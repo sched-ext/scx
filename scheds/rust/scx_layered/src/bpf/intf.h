@@ -28,6 +28,10 @@ typedef unsigned long long u64;
 #endif
 
 enum consts {
+	NSEC_PER_USEC		= 1000ULL,
+	NSEC_PER_MSEC		= (1000ULL * NSEC_PER_USEC),
+	MSEC_PER_SEC		= 1000ULL,
+	NSEC_PER_SEC		= NSEC_PER_MSEC * MSEC_PER_SEC,
 	MAX_CPUS_SHIFT		= 9,
 	MAX_CPUS		= 1 << MAX_CPUS_SHIFT,
 	MAX_CPUS_U8		= MAX_CPUS / 8,
