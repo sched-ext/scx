@@ -16,6 +16,7 @@
 
 struct timer_wrapper {
 	struct bpf_timer timer;
+	int	key;
 };
 
 struct {
@@ -28,16 +29,23 @@ struct {
 
 static int layered_timer_cb(void *map, int key, struct timer_wrapper *timerw)
 {
-	struct layered_timer *cb_timer = MEMBER_VPTR(layered_timers, [key]);
-	bool resched = run_timer_cb(key);
-
-	if (!resched || cb_timer->interval_ns == 0) {
+	if (timerw->key < 0 || timerw->key > MAX_TIMERS) {
 		return 0;
 	}
 
-	return bpf_timer_start(&timerw->timer,
-			       cb_timer->interval_ns,
-			       cb_timer->start_flags);
+	struct layered_timer *cb_timer = &layered_timers[timerw->key];
+	bool resched = run_timer_cb(timerw->key);
+
+	if (!resched || !cb_timer || cb_timer->interval_ns == 0) {
+		trace("TIMER timer %d stopped", timerw->key);
+		return 0;
+	}
+
+	bpf_timer_start(&timerw->timer,
+			cb_timer->interval_ns,
+			cb_timer->start_flags);
+
+	return 0;
 }
 
 static int start_layered_timers(void)
@@ -51,22 +59,28 @@ static int start_layered_timers(void)
 			scx_bpf_error("Failed to lookup layered timer");
 			return -ENOENT;
 		}
+		if (timer_id < 0 || timer_id > MAX_TIMERS) {
+			scx_bpf_error("Failed to lookup layered timer");
+			return -ENOENT;
+		}
 
-		struct layered_timer *new_timer = MEMBER_VPTR(layered_timers, [timer_id]);
+		struct layered_timer *new_timer = &layered_timers[timer_id];
 		if (!new_timer) {
 			scx_bpf_error("can't happen");
 			return -ENOENT;
 		}
+		timerw->key = timer_id;
 
 		err = bpf_timer_init(&timerw->timer,
-				     &layered_timer_data, new_timer->init_flags);
-		if (err) {
+				     &layered_timer_data,
+				     new_timer->init_flags);
+		if (err < 0) {
 			scx_bpf_error("can't happen");
 			return -ENOENT;
 		}
 
 		err = bpf_timer_set_callback(&timerw->timer, &layered_timer_cb);
-		if (err) {
+		if (err < 0) {
 			scx_bpf_error("can't happen");
 			return -ENOENT;
 		}
@@ -74,7 +88,7 @@ static int start_layered_timers(void)
 		err = bpf_timer_start(&timerw->timer,
 				      new_timer->interval_ns,
 				      new_timer->start_flags);
-		if (err) {
+		if (err < 0) {
 			scx_bpf_error("can't happen");
 			return -ENOENT;
 		}
