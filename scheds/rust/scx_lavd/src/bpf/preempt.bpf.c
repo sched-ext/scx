@@ -212,7 +212,7 @@ null_out:
 	return NULL;
 }
 
-static bool kick_cpu(struct cpu_ctx *victim_cpuc, u64 victim_last_kick_clk)
+static bool try_kick_cpu(struct cpu_ctx *victim_cpuc, u64 victim_last_kick_clk)
 {
 	/*
 	 * If the current CPU is a victim, we just reset the current task's
@@ -275,7 +275,7 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 	 * If a victim CPU is chosen, preempt the victim by kicking it.
 	 */
 	if (victim_cpuc)
-		ret = kick_cpu(victim_cpuc, victim_last_kick_clk);
+		ret = try_kick_cpu(victim_cpuc, victim_last_kick_clk);
 
 	if (!ret)
 		taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
@@ -330,7 +330,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 					&taskc_wait->victim_cpu,
 					(s32)LAVD_CPU_ID_NONE, cpu_id);
 			if (ret)
-				p_run->scx.slice = 0;
+				ret = try_kick_cpu(cpuc_run, cpuc_run->last_kick_clk);
 		}
 
 		/*
