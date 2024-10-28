@@ -46,6 +46,8 @@ struct layer layers[MAX_LAYERS];
 u32 fallback_cpu;
 static u32 preempt_cursor;
 
+static volatile uint32_t dsq_timer_check_flag = 0;
+
 #define dbg(fmt, args...)	do { if (debug) bpf_printk(fmt, ##args); } while (0)
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
 
@@ -1212,14 +1214,77 @@ static __noinline
 void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cctx, *sib_cctx;
+	struct task_struct *p;
+	struct task_ctx *tctx;
 	struct layer *layer;
 	struct cost *cost;
-	u64 dsq_id;
+	u64 dsq_id, now;
 	u32 idx, layer_idx;
 	s32 sib = sibling_cpu(cpu);
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(cost = lookup_cpu_cost(cpu)))
 		return;
+
+	if(dsq_timer_check_flag){
+		bpf_for(idx, 0, nr_layers) {
+			layer_idx = rotate_layer_id(cctx->layer_idx, idx);
+
+			// check non-fallback dsqs.
+			bpf_for_each(scx_dsq, p, layer_idx, 0) {
+				now = bpf_ktime_get_ns();
+
+				if ((tctx = lookup_task_ctx(p))) {
+					if(tctx->runnable_at) {
+						if(now - tctx->runnable_at > NSEC_PER_MSEC * 5) {
+							if(scx_bpf_consume(dsq_id))
+								return;
+						} else {
+							// if the first entry in a dsq is ok, the dsq is ok.
+							break;
+						}
+					}
+				}
+			}
+		}
+
+		// check fallback dsqs
+		dsq_id = cpu_hi_fallback_dsq_id(cpu);
+		bpf_for_each(scx_dsq, p, dsq_id, 0) {
+			now = bpf_ktime_get_ns();
+
+			if ((tctx = lookup_task_ctx(p))) {
+				if(tctx->runnable_at) {
+					if(now - tctx->runnable_at > NSEC_PER_MSEC * 5) {
+						if(scx_bpf_consume(dsq_id))
+							return;
+					} else {
+						// if the first entry in a dsq is ok, the dsq is ok.
+						break;
+					}
+				}
+			}
+		}
+
+		bpf_for_each(scx_dsq, p, LO_FALLBACK_DSQ, 0) {
+			now = bpf_ktime_get_ns();
+
+			if ((tctx = lookup_task_ctx(p))) {
+				if(tctx->runnable_at) {
+					if(now - tctx->runnable_at > NSEC_PER_MSEC * 5) {
+						if(scx_bpf_consume(LO_FALLBACK_DSQ))
+								return;
+					} else {
+						// if the first entry in a dsq is ok, the dsq is ok.
+						break;
+					}
+				}
+			}
+		}
+
+		// all dsqs are ok, clear check flag.
+		__sync_fetch_and_and(&dsq_timer_check_flag, 0);
+		return;
+	}
 
 	/*
 	 * if @prev was on SCX and is still runnable, we are here because @prev
@@ -2095,12 +2160,24 @@ static bool layered_monitor(void)
 	return true;
 }
 
+static bool hack_dsq_check_flag_reset(void){
+	if(dsq_timer_check_flag) {
+		// flag was not cleared, ignore this tick.
+		return true;
+	} else {
+		// flag was cleared, reset it.
+		__sync_fetch_and_or(&dsq_timer_check_flag, 1);
+	}
+	return true;
+}
 
 static bool run_timer_cb(int key)
 {
 	switch (key) {
 	case LAYERED_MONITOR:
 		return layered_monitor();
+	case HACK_DSQ_CHECK:
+		return hack_dsq_check_flag_reset();
 	case NOOP_TIMER:
 	case MAX_TIMERS:
 	default:
@@ -2111,6 +2188,7 @@ static bool run_timer_cb(int key)
 struct layered_timer layered_timers[MAX_TIMERS] = {
 	{15LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
 	{0LLU, CLOCK_BOOTTIME, 0},
+	{15LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
 };
 
 // TODO: separate this out to a separate compilation unit
