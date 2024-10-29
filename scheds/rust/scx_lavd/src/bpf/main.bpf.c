@@ -999,15 +999,19 @@ static u64 find_proper_dsq(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 	return cpuc->cpdom_alt_id;
 }
 
-static void kick_task_cpu(struct task_struct *p, struct task_ctx *taskc)
+static bool try_kick_task_idle_cpu(struct task_struct *p, struct task_ctx *taskc)
 {
 	bool found_idle = false;
 	s32 prev_cpu, cpu;
 
 	prev_cpu = scx_bpf_task_cpu(p);
 	cpu = pick_idle_cpu(p, taskc, prev_cpu, 0, &found_idle);
-	if (found_idle && cpu >= 0)
+	if (found_idle && cpu >= 0) {
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		return true;
+	}
+
+	return false;
 }
 
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
@@ -1016,6 +1020,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *taskc;
 	s32 cpu_id;
 	u64 dsq_id;
+	bool preempted = false, yield;
 
 	/*
 	 * Place a task to a run queue of current cpu's compute domain.
@@ -1045,27 +1050,6 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	dsq_id = find_proper_dsq(taskc, cpuc_task);
 
 	/*
-	 * If a task is eligible, try to preempt a task.
-	 */
-	if (is_eligible(taskc)) {
-		struct task_ctx *taskc_run;
-		struct task_struct *p_run;
-		/*
-		 * Try to find and kick a victim CPU, which runs a less urgent
-		 * task. The kick will be done asynchronously.
-		 */
-		try_find_and_kick_victim_cpu(p, taskc, cpuc_cur, dsq_id);
-
-		/*
-		 * If the current task has something to yield, try preempt it.
-		 */
-		p_run = bpf_get_current_task_btf();
-		taskc_run = try_get_task_ctx(p_run);
-		if (taskc_run && p_run->scx.slice != 0)
-			try_yield_current_cpu(p_run, cpuc_cur, taskc_run);
-	}
-
-	/*
 	 * Calculate the task's time slice.
 	 */
 	p->scx.slice = calc_time_slice(p, taskc);
@@ -1077,10 +1061,40 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 			       taskc->vdeadline_log_clk, enq_flags);
 
 	/*
-	 * If there is an idle cpu for the task, kick it up now
+	 * If there is an idle cpu for the task, try to kick it up now
 	 * so it can consume the task immediately.
 	 */
-	kick_task_cpu(p, taskc);
+	if (try_kick_task_idle_cpu(p, taskc))
+		return;
+
+	/*
+	 * If there is no idle cpu for an eligible task, try to preempt a task.
+	 */
+	if (is_eligible(taskc)) {
+		/*
+		 * Try to find and kick a victim CPU, which runs a less urgent
+		 * task. The kick will be done asynchronously.
+		 */
+		preempted = try_find_and_kick_victim_cpu(p, taskc, cpuc_cur, dsq_id);
+	}
+
+	/*
+	 * If the current ineligible task has something to yield,
+	 * try preempt it.
+	 */
+	if (!preempted) {
+		struct task_ctx *taskc_run;
+		struct task_struct *p_run;
+
+		p_run = bpf_get_current_task_btf();
+		taskc_run = try_get_task_ctx(p_run);
+
+		if (taskc_run && !is_eligible(taskc_run)) {
+			yield = try_yield_current_cpu(p_run, cpuc_cur, taskc_run);
+			if (yield)
+				try_kick_cpu(cpuc_cur, cpuc_cur->last_kick_clk);
+		}
+	}
 }
 
 static bool consume_dsq(s32 cpu, u64 dsq_id, u64 now)
@@ -1361,6 +1375,11 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
 	struct task_ctx *taskc_run;
 	bool preempted = false;
 
+	/*
+	 * If a task is eligible, don't consider its being preempted.
+	 */
+	if (is_eligible(p_run))
+		goto update_cpuperf;
 
 	/*
 	 * Try to yield the current CPU if there is a higher priority task in
@@ -1369,17 +1388,24 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
 	cpuc_run = get_cpu_ctx();
 	taskc_run = get_task_ctx(p_run);
 	if (!cpuc_run || !taskc_run)
-		goto freq_out;
+		goto update_cpuperf;
 
 	preempted = try_yield_current_cpu(p_run, cpuc_run, taskc_run);
 
 	/*
+	 * If decided to yield, give up its time slice.
+	 */
+	if (preempted) {
+		p_run->scx.slice = 0;
+	}
+	/*
 	 * Update performance target of the current CPU if the current running
 	 * task continues to run.
 	 */
-freq_out:
-	if (!preempted)
+	else {
+update_cpuperf:
 		try_decrease_cpuperf_target(cpuc_run);
+	}
 }
 
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)

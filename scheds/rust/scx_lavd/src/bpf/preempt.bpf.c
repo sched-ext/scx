@@ -212,12 +212,11 @@ null_out:
 	return NULL;
 }
 
-static bool kick_cpu(struct cpu_ctx *victim_cpuc, u64 victim_last_kick_clk)
+static bool try_kick_cpu(struct cpu_ctx *victim_cpuc, u64 victim_last_kick_clk)
 {
 	/*
-	 * If the current CPU is a victim, we just reset the current task's
-	 * time slice as an optimization. Othewise, kick the remote CPU for
-	 * preemption.
+	 * Kick a victim CPU if it is not victimized yet by another
+	 * concurrent kick task.
 	 *
 	 * Kicking the victim CPU does _not_ guarantee that task @p will run on
 	 * that CPU. Enqueuing @p to the global queue is one operation, and
@@ -225,19 +224,11 @@ static bool kick_cpu(struct cpu_ctx *victim_cpuc, u64 victim_last_kick_clk)
 	 * okay because, anyway, the victim CPU will run a higher-priority task
 	 * than @p.
 	 */
-	if (bpf_get_smp_processor_id() == victim_cpuc->cpu_id) {
-		struct task_struct *tsk = bpf_get_current_task_btf();
-		tsk->scx.slice = 0;
-		return true;
-	}
+	bool ret;
 
-	/*
-	 * Kick the remote victim CPU if it is not victimized yet by another
-	 * concurrent kick task.
-	 */
-	bool ret = __sync_bool_compare_and_swap(&victim_cpuc->last_kick_clk,
-						victim_last_kick_clk,
-						bpf_ktime_get_ns());
+	ret = __sync_bool_compare_and_swap(&victim_cpuc->last_kick_clk,
+					   victim_last_kick_clk,
+					   bpf_ktime_get_ns());
 	if (ret)
 		scx_bpf_kick_cpu(victim_cpuc->cpu_id, SCX_KICK_PREEMPT);
 
@@ -275,7 +266,7 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 	 * If a victim CPU is chosen, preempt the victim by kicking it.
 	 */
 	if (victim_cpuc)
-		ret = kick_cpu(victim_cpuc, victim_last_kick_clk);
+		ret = try_kick_cpu(victim_cpuc, victim_last_kick_clk);
 
 	if (!ret)
 		taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
@@ -329,8 +320,6 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 			ret = __sync_bool_compare_and_swap(
 					&taskc_wait->victim_cpu,
 					(s32)LAVD_CPU_ID_NONE, cpu_id);
-			if (ret)
-				p_run->scx.slice = 0;
 		}
 
 		/*
@@ -340,6 +329,11 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	}
 	bpf_rcu_read_unlock();
 
+	/*
+	 * If decided to yield (ret == ture), a caller should gives up
+	 * its time slice (at the ops.tick() path) or explictly kick a
+	 * victim CPU.
+	 */
 	return ret;
 }
 
