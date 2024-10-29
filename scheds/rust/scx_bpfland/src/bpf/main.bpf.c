@@ -950,6 +950,26 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 		__sync_fetch_and_sub(&nr_interactive, 1);
 
 	/*
+	 * If the time slice is not fully depleted, it means that the task
+	 * voluntarily relased the CPU, therefore update the voluntary context
+	 * switch counter.
+	 *
+	 * NOTE: the sched_ext core implements sched_yield() by setting the
+	 * time slice to 0, so we won't boost the priority of tasks that are
+	 * explicitly calling sched_yield().
+	 *
+	 * This is actually a good thing, because we want to prioritize tasks
+	 * that are releasing the CPU, because they're doing I/O, waiting for
+	 * input or sending output to other tasks.
+	 *
+	 * Tasks that are using sched_yield() don't really need the priority
+	 * boost and when they get the chance to run again they will be
+	 * naturally prioritized by the vruntime-based scheduling policy.
+	 */
+	if (p->scx.slice > 0)
+		tctx->nvcsw++;
+
+	/*
 	 * Update task's average runtime.
 	 */
 	slice = p->se.sum_exec_runtime - tctx->sum_exec_runtime;
@@ -978,12 +998,11 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 */
 	delta_t = (s64)(now - tctx->nvcsw_ts);
 	if (delta_t > NSEC_PER_SEC) {
-		u64 delta_nvcsw = p->nvcsw - tctx->nvcsw;
-		u64 avg_nvcsw = delta_nvcsw * NSEC_PER_SEC / delta_t;
+		u64 avg_nvcsw = tctx->nvcsw * NSEC_PER_SEC / delta_t;
 		u64 max_lat_weight = lowlatency ? MAX_LATENCY_WEIGHT :
 					MIN(nvcsw_max_thresh, MAX_LATENCY_WEIGHT);
 
-		tctx->nvcsw = p->nvcsw;
+		tctx->nvcsw = 0;
 		tctx->nvcsw_ts = now;
 
 		/*
@@ -1037,9 +1056,7 @@ void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 	if (!tctx)
 		return;
 	tctx->sum_exec_runtime = p->se.sum_exec_runtime;
-	tctx->nvcsw = p->nvcsw;
 	tctx->nvcsw_ts = now;
-	tctx->lat_weight = p->nvcsw * NSEC_PER_SEC / tctx->nvcsw_ts;
 	tctx->avg_runtime = slice_max;
 	tctx->deadline = vtime_now;
 }
