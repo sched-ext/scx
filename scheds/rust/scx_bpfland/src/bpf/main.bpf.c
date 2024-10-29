@@ -27,11 +27,6 @@ const volatile bool debug;
 #define SHARED_DSQ	1
 
 /*
- * Maximum multiplier for the dynamic task priority.
- */
-#define MAX_LATENCY_WEIGHT	1000
-
-/*
  * Default task time slice.
  */
 const volatile u64 slice_max = 20ULL * NSEC_PER_MSEC;
@@ -999,8 +994,7 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	delta_t = (s64)(now - tctx->nvcsw_ts);
 	if (delta_t > NSEC_PER_SEC) {
 		u64 avg_nvcsw = tctx->nvcsw * NSEC_PER_SEC / delta_t;
-		u64 max_lat_weight = lowlatency ? MAX_LATENCY_WEIGHT :
-					MIN(nvcsw_max_thresh, MAX_LATENCY_WEIGHT);
+		u64 max_lat_weight = nvcsw_max_thresh * 100;
 
 		tctx->nvcsw = 0;
 		tctx->nvcsw_ts = now;
