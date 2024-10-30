@@ -283,6 +283,12 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc,
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
+	 * A pinned-task tends to be latency-critical.
+	 */
+	if (p->nr_cpus_allowed == 1)
+		weight_boost += LAVD_LC_WEIGHT_BOOST;
+
+	/*
 	 * Prioritize a lock holder for faster system-wide forward progress.
 	 */
 	if (taskc->need_lock_boost) {
@@ -1056,9 +1062,6 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 	/*
 	 * Calculate when a tack can be scheduled.
-	 *
-	 * Note that the task's time slice will be calculated and reassigned
-	 * right before running at ops.running().
 	 */
 	calc_when_to_run(p, taskc, enq_flags);
 	dsq_id = find_proper_dsq(taskc, cpuc_task);
@@ -1072,7 +1075,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Enqueue the task to one of task's DSQs based on its virtual deadline.
 	 */
 	scx_bpf_dispatch_vtime(p, dsq_id, p->scx.slice,
-			       taskc->vdeadline_log_clk, enq_flags);
+		 taskc->vdeadline_log_clk, enq_flags);
 
 	/*
 	 * If there is an idle cpu for the task, try to kick it up now
