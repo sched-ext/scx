@@ -247,7 +247,7 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 	bool ret = false;
 
 	/*
-	 * Prepare a cpumak so we find a victim @p's compute domain.
+	 * Prepare a cpumak so we find a victim in @p's compute domain.
 	 */
 	cpumask = cpuc_cur->tmp_t_mask;
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);

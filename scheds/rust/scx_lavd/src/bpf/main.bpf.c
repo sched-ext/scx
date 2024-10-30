@@ -938,11 +938,25 @@ static void update_task_log_clk(struct task_ctx *taskc)
 	WRITE_ONCE(taskc->vdeadline_log_clk, vlc);
 }
 
-static void direct_dispatch(struct task_struct *p, struct task_ctx *taskc)
+static void direct_dispatch(struct task_struct *p, struct task_ctx *taskc,
+			    struct cpu_ctx *cpuc)
 {
+	/*
+	 * Calculate latency criticality for preemptability test.
+	 */
+	calc_lat_cri(p, taskc, cpuc, 0);
+
+	/*
+	 * Reset the vdeadline_delta_ns to update the task's logical clock.
+	 */
 	taskc->vdeadline_delta_ns = 0;
 	update_task_log_clk(taskc);
+
+	/*
+	 * Calculate the duration to run.
+	 */
 	p->scx.slice = calc_time_slice(p, taskc);
+
 	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
 }
 
@@ -951,20 +965,33 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 {
 	bool found_idle = false;
 	struct task_ctx *taskc;
+	struct cpu_ctx *cpuc;
 	s32 cpu_id;
 
 	taskc = get_task_ctx(p);
 	if (!taskc)
 		return prev_cpu;
+	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
 
 	cpu_id = pick_idle_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
 	if (found_idle) {
-		direct_dispatch(p, taskc);
+		/*
+		 * If there is an idle cpu,
+		 * disptach the task to the idle cpu right now.
+		 */
+		cpuc = get_cpu_ctx_id(cpu_id);
+		if (!cpuc) {
+			scx_bpf_error("Failed to look up cpu context context");
+			return cpu_id;
+		}
+
+		direct_dispatch(p, taskc, cpuc);
 		return cpu_id;
 	}
 
-	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
-
+	/*
+	 * Even if there is no idle cpu, still repect the chosen cpu.
+	 */
 	return cpu_id >= 0 ? cpu_id : prev_cpu;
 }
 
@@ -1223,7 +1250,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
-		scx_bpf_error("Failed to look up cpu context or task context");
+		scx_bpf_error("Failed to look up cpu context context");
 		return;
 	}
 
