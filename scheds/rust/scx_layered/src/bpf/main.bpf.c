@@ -1306,20 +1306,116 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	scx_bpf_consume(LO_FALLBACK_DSQ);
 }
 
+int consume_preempting(struct cost *costc, u32 my_llc_id)
+{
+	struct layer *layer;
+	u64 dsq_id;
+	u32 idx, llc_idx, layer_idx;
+
+	if (!costc)
+		return -EINVAL;
+
+	bpf_for(idx, 0, nr_layers) {
+		layer_idx = rotate_layer_id(costc->pref_layer, idx);
+		if (layer_idx >= nr_layers) {
+			scx_bpf_error("can't happen");
+			return -EINVAL;
+		}
+		layer = MEMBER_VPTR(layers, [layer_idx]);
+		if (has_budget(costc, layer) == 0)
+			continue;
+		bpf_for(llc_idx, 0, nr_llcs) {
+			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+			dsq_id = layer_dsq_id(layer_idx, llc_id);
+			if (layer->preempt && scx_bpf_consume(dsq_id))
+				return 0;
+		}
+	}
+
+	return -ENOENT;
+}
+
+int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
+{
+	struct layer *layer;
+	u64 dsq_id;
+	u32 idx, llc_idx, layer_idx;
+
+	if (!costc)
+		return -EINVAL;
+
+	bpf_for(idx, 0, nr_layers) {
+		layer_idx = rotate_layer_id(costc->pref_layer, idx);
+		if (layer_idx >= nr_layers) {
+			scx_bpf_error("can't happen");
+			return -EINVAL;
+		}
+		layer = MEMBER_VPTR(layers, [layer_idx]);
+		if (has_budget(costc, layer) == 0)
+			continue;
+		bpf_for(llc_idx, 0, nr_llcs) {
+			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+			struct cpumask *layer_cpumask;
+			dsq_id = layer_dsq_id(layer_idx, llc_id);
+
+			/* consume matching layers */
+			if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
+				return 0;
+
+			if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
+			    (cpu <= nr_possible_cpus && cpu == fallback_cpu &&
+			    layer->nr_cpus == 0)) {
+				if (scx_bpf_consume(dsq_id))
+					return 0;
+			}
+		}
+	}
+
+	return -ENOENT;
+}
+
+int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
+{
+	struct layer *layer;
+	u64 dsq_id;
+	u32 idx, llc_idx, layer_idx;
+
+	if (!costc)
+		return -EINVAL;
+
+	bpf_for(idx, 0, nr_layers) {
+		layer_idx = rotate_layer_id(costc->pref_layer, idx);
+		if (layer_idx >= nr_layers) {
+			scx_bpf_error("can't happen");
+			return -EINVAL;
+		}
+		layer = MEMBER_VPTR(layers, [layer_idx]);
+		if (has_budget(costc, layer) == 0)
+			continue;
+		bpf_for(llc_idx, 0, nr_llcs) {
+			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+			dsq_id = layer_dsq_id(layer_idx, llc_id);
+
+			if (!layer->preempt && layer->open && scx_bpf_consume(dsq_id))
+				return 0;
+		}
+	}
+
+	return -ENOENT;
+}
+
 void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 {
 	if (disable_topology)
 		return layered_dispatch_no_topo(cpu, prev);
 
 	struct cpu_ctx *cctx, *sib_cctx;
-	struct layer *layer;
-	struct cost *cost;
+	struct cost *costc;
 	u64 dsq_id;
-	u32 idx, llc_idx, layer_idx;
 	s32 sib = sibling_cpu(cpu);
 
 	if (!(cctx = lookup_cpu_ctx(-1)) ||
-	    !(cost = lookup_cpu_cost(cpu)))
+	    !(costc = lookup_cpu_cost(cpu)))
 		return;
 
 	/*
@@ -1351,73 +1447,20 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	u32 my_llc_id = cpu_to_llc_id(cpu);
 
 	/* consume preempting layers first */
-	bpf_for(idx, 0, nr_layers) {
-		layer_idx = rotate_layer_id(cost->pref_layer, idx);
-		if (layer_idx >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return;
-		}
-		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (has_budget(cost, layer) == 0)
-			continue;
-		bpf_for(llc_idx, 0, nr_llcs) {
-			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
-			dsq_id = layer_dsq_id(layer_idx, llc_id);
-			if (layer->preempt && scx_bpf_consume(dsq_id))
-				return;
-		}
-	}
+	if (consume_preempting(costc, my_llc_id) == 0)
+		return;
 
 	dsq_id = cpu_hi_fallback_dsq_id(cpu);
 	if (scx_bpf_consume(dsq_id))
 		return;
 
 	/* consume !open layers second */
-	bpf_for(idx, 0, nr_layers) {
-		layer_idx = rotate_layer_id(cost->pref_layer, idx);
-		if (layer_idx >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return;
-		}
-		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (has_budget(cost, layer) == 0)
-			continue;
-		bpf_for(llc_idx, 0, nr_llcs) {
-			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
-			struct cpumask *layer_cpumask;
-			dsq_id = layer_dsq_id(layer_idx, llc_id);
-
-			/* consume matching layers */
-			if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
-				return;
-
-			if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
-			    (cpu <= nr_possible_cpus && cpu == fallback_cpu &&
-			    layer->nr_cpus == 0)) {
-				if (scx_bpf_consume(dsq_id))
-					return;
-			}
-		}
-	}
+	if (consume_non_open(costc, cpu, my_llc_id) == 0)
+		return;
 
 	/* consume !preempting open layers */
-	bpf_for(idx, 0, nr_layers) {
-		layer_idx = rotate_layer_id(cost->pref_layer, idx);
-		if (layer_idx >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return;
-		}
-		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (has_budget(cost, layer) == 0)
-			continue;
-		bpf_for(llc_idx, 0, nr_llcs) {
-			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
-			dsq_id = layer_dsq_id(layer_idx, llc_id);
-
-			if (!layer->preempt && layer->open && scx_bpf_consume(dsq_id))
-				return;
-		}
-	}
+	if (consume_open_no_preempt(costc, my_llc_id) == 0)
+		return;
 
 	scx_bpf_consume(LO_FALLBACK_DSQ);
 }
