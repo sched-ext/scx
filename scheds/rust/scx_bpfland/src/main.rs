@@ -558,7 +558,6 @@ impl<'a> Scheduler<'a> {
             nr_interactive: self.skel.maps.bss_data.nr_interactive,
             nr_prio_waiting: self.skel.maps.bss_data.nr_prio_waiting,
             nr_shared_waiting: self.skel.maps.bss_data.nr_shared_waiting,
-            nvcsw_avg_thresh: self.skel.maps.bss_data.nvcsw_avg_thresh,
             nr_kthread_dispatches: self.skel.maps.bss_data.nr_kthread_dispatches,
             nr_direct_dispatches: self.skel.maps.bss_data.nr_direct_dispatches,
             nr_prio_dispatches: self.skel.maps.bss_data.nr_prio_dispatches,

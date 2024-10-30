@@ -68,17 +68,8 @@ const volatile bool lowlatency;
 
 /*
  * Maximum threshold of voluntary context switches.
- *
- * This limits the range of nvcsw_avg_thresh (see below).
  */
 const volatile u64 nvcsw_max_thresh = 10ULL;
-
-/*
- * Global average of voluntary context switches used to classify interactive
- * tasks: tasks with an average amount of voluntary context switches (nvcsw)
- * greater than this value will be classified as interactive.
- */
-volatile u64 nvcsw_avg_thresh;
 
 /*
  * The CPU frequency performance level: a negative value will not affect the
@@ -1001,29 +992,11 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 
 		/*
 		 * Evaluate the latency weight of the task as its average rate
-		 * of voluntary context switches (limited to the max_lat_weight
-		 * to prevent excessive spikes).
+		 * of voluntary context switches (limited to to prevent
+		 * excessive spikes).
 		 */
 		tctx->lat_weight = calc_avg_clamp(tctx->lat_weight, avg_nvcsw,
 						  0, max_lat_weight);
-
-                /*
-		 * Update the global voluntary context switches average using
-		 * an exponentially weighted moving average (EWMA) with the
-		 * formula:
-		 *
-		 *   avg(t) = avg(t - 1) * 0.75 - task_avg(t) * 0.25
-		 *
-		 * This approach is more efficient than iterating through all
-		 * tasks and it helps to prevent rapid fluctuations that may be
-		 * caused by bursts of voluntary context switch events.
-		 *
-		 * Additionally, restrict the global nvcsw_avg_thresh average
-		 * to the range [1 .. nvcsw_max_thresh] to always allow the
-		 * classification of some tasks as interactive.
-                 */
-		nvcsw_avg_thresh = calc_avg_clamp(nvcsw_avg_thresh, avg_nvcsw,
-						  1, nvcsw_max_thresh);
 
 		/*
 		 * Classify the task based on the average of voluntary context
