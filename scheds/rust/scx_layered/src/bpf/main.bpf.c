@@ -2093,8 +2093,9 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 		}
 
 		if (disable_topology) {
-			scx_bpf_dump("LAYER[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
-				     i, layers[i].nr_cpus, scx_bpf_dsq_nr_queued(i),
+			scx_bpf_dump("LAYER[%d][%s] nr_cpus=%u nr_queued=%d -%llums cpus=",
+				     i, layer->name, layer->nr_cpus,
+				     scx_bpf_dsq_nr_queued(i),
 				     dsq_first_runnable_for_ms(i, now));
 		} else {
 			bpf_for(j, 0, nr_llcs) {
@@ -2102,8 +2103,9 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 					continue;
 
 				idx = layer_dsq_id(layer->idx, j);
-				scx_bpf_dump("LAYER[%d]DSQ[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
-					     i, idx, layers[i].nr_cpus, scx_bpf_dsq_nr_queued(idx),
+				scx_bpf_dump("LAYER[%d][%s]DSQ[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
+					     i, idx, layer->name, layer->nr_cpus,
+					     scx_bpf_dsq_nr_queued(idx),
 					     dsq_first_runnable_for_ms(idx, now));
 				scx_bpf_dump("\n");
 			}
@@ -2231,8 +2233,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	bpf_for(i, 0, nr_layers) {
 		struct layer *layer = &layers[i];
 
-		dbg("CFG LAYER[%d] min_exec_ns=%lu open=%d preempt=%d exclusive=%d",
-		    i, layer->min_exec_ns, layer->open, layer->preempt,
+		dbg("CFG LAYER[%d][%s] min_exec_ns=%lu open=%d preempt=%d exclusive=%d",
+		    i, layer->name, layer->min_exec_ns, layer->open, layer->preempt,
 		    layer->exclusive);
 
 		if (layer->nr_match_ors > MAX_LAYER_MATCH_ORS) {
@@ -2317,6 +2319,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		struct layer_cpumask_wrapper *cpumaskw;
 
 		layers[i].idx = i;
+		struct layer *layer = &layers[i];
 
 		if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &i)))
 			return -ENOENT;
@@ -2344,8 +2347,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		} else {
 			bpf_for(j, 0, nr_llcs) {
 				int node_id = llc_node_id(i);
-				dbg("CFG creating dsq %llu for layer %d on node %d in llc %d",
-				    llc_dsq_id, i, node_id, j);
+				dbg("CFG creating dsq %llu for layer %d %s on node %d in llc %d",
+				    llc_dsq_id, i, layer->name, node_id, j);
 				ret = scx_bpf_create_dsq(llc_dsq_id, node_id);
 				if (ret < 0)
 					return ret;

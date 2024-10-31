@@ -70,6 +70,7 @@ const USAGE_HALF_LIFE_F64: f64 = USAGE_HALF_LIFE as f64 / 1_000_000_000.0;
 const NR_GSTATS: usize = bpf_intf::global_stat_idx_NR_GSTATS as usize;
 const NR_LSTATS: usize = bpf_intf::layer_stat_idx_NR_LSTATS as usize;
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
+const MAX_LAYER_NAME: usize = bpf_intf::consts_MAX_LAYER_NAME as usize;
 
 #[rustfmt::skip]
 lazy_static::lazy_static! {
@@ -1330,6 +1331,9 @@ impl<'a> Scheduler<'a> {
                     } else {
                         (layer.slice_ns as f64 * (1.0 - *yield_ignore)) as u64
                     };
+                    let mut layer_name: String = spec.name.clone();
+                    layer_name.truncate(MAX_LAYER_NAME);
+                    copy_into_cstr(&mut layer.name, layer_name.as_str());
                     layer.preempt.write(*preempt);
                     layer.preempt_first.write(*preempt_first);
                     layer.exclusive.write(*exclusive);
