@@ -42,7 +42,7 @@ const volatile u32 	is_smt_active;
 const volatile u8	verbose;
 
 /*
- * Exit infomation
+ * Exit information
  */
 UEI_DEFINE(uei);
 

@@ -333,7 +333,7 @@ impl FlatTopology {
             for cpu_fid in cpu_fids.iter_mut() {
                 cpu_fid.cpu_cap = 1024 as usize;
             }
-            warn!("System does not provide proper CPU frequency infomation.");
+            warn!("System does not provide proper CPU frequency information.");
         }
 
         // Sort the cpu_fids
