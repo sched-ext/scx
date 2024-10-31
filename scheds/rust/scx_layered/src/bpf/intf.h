@@ -37,6 +37,7 @@ enum consts {
 	MAX_LLCS		= 64,
 	MAX_COMM		= 16,
 	MAX_LAYER_MATCH_ORS	= 32,
+	MAX_LAYER_NAME		= 64,
 	MAX_LAYERS		= 16,
 	MAX_LAYER_WEIGHT	= 10000,
 	MIN_LAYER_WEIGHT	= 1,
@@ -207,6 +208,7 @@ struct layer {
 	unsigned char		cpus[MAX_CPUS_U8];
 	unsigned int		nr_cpus;	// managed from BPF side
 	unsigned int		perf;
+	char			name[MAX_LAYER_NAME];
 };
 
 #endif /* __INTF_H */
