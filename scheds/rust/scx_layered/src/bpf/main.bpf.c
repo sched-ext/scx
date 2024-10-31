@@ -1107,7 +1107,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		 * issue.
 		 */
 		idx = cpu_hi_fallback_dsq_id(task_cpu);
-		scx_bpf_dispatch(p, LO_FALLBACK_DSQ, slice_ns, enq_flags);
+		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
 		goto preempt;
 	}
 
@@ -1244,7 +1244,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 								return;
 						} else {
 							// if the first entry in a dsq is ok, the dsq is ok.
-							// break;
+							break;
 						}
 					}
 				}
@@ -1263,7 +1263,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 							return;
 					} else {
 						// if the first entry in a dsq is ok, the dsq is ok.
-						// break;
+						break;
 					}
 				}
 			}
@@ -1279,7 +1279,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 								return;
 					} else {
 						// if the first entry in a dsq is ok, the dsq is ok.
-						// break;
+						break;
 					}
 				}
 			}
