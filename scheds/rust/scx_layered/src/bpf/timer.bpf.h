@@ -26,7 +26,6 @@ struct layered_timer {
 enum layer_timer_callbacks {
 	LAYERED_MONITOR,
 	NOOP_TIMER,
-	HACK_DSQ_CHECK,
 	MAX_TIMERS,
 };
 
