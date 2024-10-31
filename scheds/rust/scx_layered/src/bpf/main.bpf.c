@@ -1062,6 +1062,10 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (vtime_before(vtime, layer->vtime_now - layer_slice_ns))
 		vtime = layer->vtime_now - layer_slice_ns;
 
+	if (!tctx->all_cpus_allowed){
+		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
+		goto preempt;
+	}
 	/*
 	 * Special-case per-cpu kthreads which aren't in a preempting layer so
 	 * that they run between preempting and non-preempting layers. This is
@@ -1103,7 +1107,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		 * issue.
 		 */
 		idx = cpu_hi_fallback_dsq_id(task_cpu);
-		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
+		scx_bpf_dispatch(p, LO_FALLBACK_DSQ, slice_ns, enq_flags);
 		goto preempt;
 	}
 
@@ -1227,7 +1231,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 
 	if(dsq_timer_check_flag){
 		bpf_for(idx, 0, nr_layers) {
-			layer_idx = rotate_layer_id(cctx->layer_idx, idx);
+			layer_idx = idx;
 
 			// check non-fallback dsqs.
 			bpf_for_each(scx_dsq, p, layer_idx, 0) {
@@ -1240,7 +1244,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 								return;
 						} else {
 							// if the first entry in a dsq is ok, the dsq is ok.
-							break;
+							// break;
 						}
 					}
 				}
@@ -1259,7 +1263,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 							return;
 					} else {
 						// if the first entry in a dsq is ok, the dsq is ok.
-						break;
+						// break;
 					}
 				}
 			}
@@ -1275,7 +1279,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 								return;
 					} else {
 						// if the first entry in a dsq is ok, the dsq is ok.
-						break;
+						// break;
 					}
 				}
 			}
