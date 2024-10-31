@@ -2078,6 +2078,43 @@ static void dump_layer_cpumask(int idx)
 	scx_bpf_dump("%s", buf);
 }
 
+int dump_cost(void)
+{
+	int i, j;
+	struct cost *costc;
+	struct layer *layer;
+
+	// Lookup global cost
+	if (!(costc = lookup_cost(0))) {
+		scx_bpf_error("unabled to lookup cost ");
+		return -EINVAL;
+	}
+	bpf_for(j, 0, nr_layers) {
+		layer = lookup_layer(j);
+		if (!layer) {
+			scx_bpf_error("unabled to lookup layer %d", j);
+			continue;
+		}
+		scx_bpf_dump("GLOBAL[%d][%s] budget=%lld capacity=%lld\n",
+			     j, layer->name,
+			     costc->budget[j], costc->capacity[j]);
+	}
+	// Per CPU costs
+	bpf_for(i, 0, nr_possible_cpus) {
+		bpf_for(j, 0, nr_layers) {
+			layer = lookup_layer(i);
+			if (!layer || !(costc = lookup_cpu_cost(j))) {
+				scx_bpf_error("unabled to lookup layer %d", i);
+				continue;
+			}
+			scx_bpf_dump("CPU[%d][%s][%d] budget=%lld capacity=%lld\n",
+				     i, j, layer->name,
+				     costc->budget[j], costc->capacity[j]);
+		}
+	}
+	return 0;
+}
+
 void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 {
 	u64 now = bpf_ktime_get_ns();
@@ -2122,6 +2159,8 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 	scx_bpf_dump("LO_FALLBACK nr_queued=%d -%llums\n",
 		     scx_bpf_dsq_nr_queued(LO_FALLBACK_DSQ),
 		     dsq_first_runnable_for_ms(LO_FALLBACK_DSQ, now));
+
+	dump_cost();
 }
 
 
