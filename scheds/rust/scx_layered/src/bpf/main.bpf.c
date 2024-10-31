@@ -1061,7 +1061,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		vtime = layer->vtime_now - layer_slice_ns;
 
 	if (!tctx->all_cpus_allowed){
-		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
+		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, slice_ns, enq_flags);
 		goto preempt;
 	}
 	/*
