@@ -152,9 +152,13 @@ void BPF_STRUCT_OPS(rorke_enqueue, struct task_struct* p, u64 enq_flags) {
 void BPF_STRUCT_OPS(rorke_dispatch, s32 cpu, struct task_struct* prev) {
   /* TODO: replace following with per-cpu context */
   struct cpu_ctx* cctx = try_lookup_cpu_ctx(cpu);
+  u64 now = bpf_ktime_get_ns();
 
   if (!cctx)
     return;
+
+  if(now - cctx->last_running < 20000)
+   return;
 
   s32 vm_id = cctx->vm_id;
   if (vm_id == 0) {
@@ -210,12 +214,16 @@ static int global_timer_fn(void* map, int* key, struct bpf_timer* timer) {
       continue;
 
     cctx = try_lookup_cpu_ctx(current_cpu);
-    if (!cctx)
+    if (!cctx){
+      trace("global_timer_fn: cpu ctx lookup failed");
       continue;
+    }
 
     delta = now - cctx->last_running;
-    if (delta < timer_interval_ns)
+    if (delta < timer_interval_ns - 5000){
+      trace("global_timer_fn delta not expired");
       continue;
+    }
 
     if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | current_cpu))
       trace("global_timer_fn: local non-empty, will kick CPU %d", current_cpu);
