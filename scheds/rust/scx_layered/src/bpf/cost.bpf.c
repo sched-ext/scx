@@ -1,4 +1,6 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates. */
+#include "intf.h"
+
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -137,14 +139,20 @@ static u32 preferred_cost(struct cost *costc)
 }
 
 /*
- * Refreshes the budget of a cost.
+ * Refreshes the budget of a cost globally accounting for refreshing the per-CPU
+ * budget.
  */
 int refresh_budget(int cost_id)
 {
-	struct cost *costc;
+	struct cost *local_cost, *global_cost;
+	s64 refresh_to;
 
-	if (!(costc = lookup_cost(cost_id))) {
+	if (!(global_cost = lookup_cost(cost_id))) {
 		scx_bpf_error("failed to lookup cost %d", cost_id);
+		return 0;
+	}
+	if (!(local_cost = lookup_cpu_cost(-1))) {
+		scx_bpf_error("failed to lookup cpu cost");
 		return 0;
 	}
 
@@ -156,16 +164,18 @@ int refresh_budget(int cost_id)
 			scx_bpf_error("invalid layer");
 			return 0;
 		}
-		s64 capacity = costc->capacity[layer_id];
-		__sync_lock_test_and_set(MEMBER_VPTR(*costc, .budget[layer_id]),
-					 capacity);
+
+		refresh_to = global_cost->capacity[layer_id] - local_cost->capacity[layer_id];
+		__sync_lock_test_and_set(MEMBER_VPTR(*global_cost, .budget[layer_id]),
+					 refresh_to);
+		local_cost->budget[layer_id] = local_cost->capacity[layer_id];
 	}
 
 	return 0;
 }
 
 /*
- * Refreshes all budgets for all costs.
+ * Refreshes all budgets for all costs including the caller's per-CPU bucket.
  */
 int refresh_budgets(void)
 {
@@ -175,31 +185,115 @@ int refresh_budgets(void)
 }
 
 /*
- * Acquires a budget from a parent cost account.
+ * Check if the local budgets all have at least one time slice.
  */
-s64 acquire_budget(struct cost *costc, u32 layer_id, s64 amount)
+int all_layers_have_local_budget()
 {
-	s64 budget = 0;
+	struct cost *cost;
+	struct layer *layer;
+	u32 layer_id;
+
+	if (!(cost = lookup_cpu_cost(-1))) {
+		scx_bpf_error("failed to lookup cpu cost");
+		return 0;
+	}
+
+	bpf_for(layer_id, 0, nr_layers) {
+		layer = &layers[layer_id];
+		if (layer->slice_ns > cost->budget[layer_id])
+			return 0;
+	}
+
+	return 1;
+}
+
+/*
+ * Acquires budget from a parent cost account. Attempts to acquire at least
+ * enough to run one full time slice, and up to a maximum of capacity. If unable
+ * to acquire to a full time slice it resets any changes.
+ */
+s64 acquire_budget(struct cost *costc, u32 layer_id)
+{
+	s64 gained = 0;
+	s64 desired, needed, parent_budget_before;
+	struct layer *layer;
 
 	if (layer_id >= MAX_LAYERS || layer_id < 0) {
 		scx_bpf_error("invalid parent cost");
-		return budget;
+		return gained;
 	}
-
 	if (!costc || !costc->has_parent)
-		return budget;
+		return gained;
 
+	layer = &layers[layer_id];
+	needed = layer->slice_ns - costc->budget[layer_id];
+	if (needed <= 0)
+		return gained;
+	desired = costc->capacity[layer_id] - costc->budget[layer_id];
 
 	struct cost *parent_cost;
 	if (!(parent_cost = lookup_cost(costc->idx)))
-		return budget;
+		return gained;
 
-	__sync_fetch_and_sub(&parent_cost->budget[layer_id], amount);
+	parent_budget_before = __sync_fetch_and_sub(&parent_cost->budget[layer_id], desired);
+	gained = desired;
 
-	if (parent_cost->budget[layer_id] < 0)
-		refresh_budgets();
+	if (parent_budget_before < needed) {
+		__sync_fetch_and_add(&parent_cost->budget[layer_id], desired);
+		gained -= desired;
+	} else if (parent_budget_before < desired) {
+		__sync_fetch_and_add(&parent_cost->budget[layer_id], desired - parent_budget_before);
+		gained = parent_budget_before;
 
-	return amount;
+	}
+
+	return gained;
+}
+
+/*
+ * Attempts to acquire at least one slice of budget for each layer in a local
+ * cost account, pulling from a parent cost account where possible. This does
+ * NOT add additional budget to a parent cost account. Call refresh_budgets()
+ * to reset budgets globally.
+ */
+s64 acquire_budgets()
+{
+	struct cost *cost;
+	struct layer *layer;
+	int layer_id;
+	s64 acquired;
+	bool needs_refresh = false;
+
+	cost = lookup_cpu_cost(-1);
+	if (!cost)
+		return 0;
+
+	// Attempt to fill each budget with a timeslice without refreshing parents
+	bpf_for(layer_id, 0, nr_layers) {
+		layer = &layers[layer_id];
+		if (layer->slice_ns <= cost->budget[layer_id])
+			continue;
+
+		acquired = acquire_budget(cost, layer_id);
+		cost->budget[layer_id] += acquired;
+		if (acquired == 0) {
+			needs_refresh = true;
+			break;
+		}
+	}
+
+	if (!needs_refresh)
+		return 0;
+
+	bpf_for(layer_id, 0, nr_layers) {
+		layer = &layers[layer_id];
+		if (layer->slice_ns <= cost->budget[layer_id])
+			continue;
+
+		cost->budget[layer_id] += acquire_budget(cost, layer_id);
+	}
+
+	return 0;
 }
 
 /*
@@ -215,17 +309,6 @@ static int record_cpu_cost(struct cost *costc, u32 layer_id, s64 amount)
 	}
 
 	__sync_fetch_and_sub(&costc->budget[layer_id], amount);
-
-	if (costc->budget[layer_id] <= 0) {
-		if (costc->has_parent) {
-			s64 budget = acquire_budget(costc, layer_id,
-						    costc->capacity[layer_id] + amount);
-			if (budget > 0) {
-				__sync_fetch_and_add(MEMBER_VPTR(*costc, .budget[layer_id]),
-						     costc->capacity[layer_id]);
-			}
-		}
-	}
 
 	u32 pref_layer = preferred_cost(costc);
 	if (pref_layer > nr_layers) {

@@ -1209,7 +1209,7 @@ no:
 }
 
 static __noinline
-void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
+bool layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cctx, *sib_cctx;
 	struct layer *layer;
@@ -1219,7 +1219,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	s32 sib = sibling_cpu(cpu);
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(cost = lookup_cpu_cost(cpu)))
-		return;
+		return true;
 
 	/*
 	 * if @prev was on SCX and is still runnable, we are here because @prev
@@ -1234,7 +1234,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	 * kernels, so let's make do with this for now.
 	 */
 	if (prev && keep_running(cctx, prev))
-		return;
+		return true;
 
 	/*
 	 * If the sibling CPU is running an exclusive task, keep this CPU idle.
@@ -1244,7 +1244,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	if (sib >= 0 && (sib_cctx = lookup_cpu_ctx(sib)) &&
 	    sib_cctx->current_exclusive) {
 		gstat_inc(GSTAT_EXCL_IDLE, cctx);
-		return;
+		return true;
 	}
 
 	/* consume preempting layers first */
@@ -1252,25 +1252,25 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 		layer_idx = rotate_layer_id(cost->pref_layer, idx);
 		if (layer_idx >= nr_layers) {
 			scx_bpf_error("can't happen");
-			return;
+			return true;
 		}
 		layer = MEMBER_VPTR(layers, [layer_idx]);
 		if (has_budget(cost, layer) == 0)
 			continue;
 		if (layer->preempt && scx_bpf_consume(layer_idx))
-			return;
+			return true;
 	}
 
 	dsq_id = cpu_hi_fallback_dsq_id(cpu);
 	if (scx_bpf_consume(dsq_id))
-		return;
+		return true;
 
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = rotate_layer_id(cost->pref_layer, idx);
 		if (layer_idx >= nr_layers) {
 			scx_bpf_error("can't happen");
-			return;
+			return true;
 		}
 		layer = MEMBER_VPTR(layers, [layer_idx]);
 		if (has_budget(cost, layer) == 0)
@@ -1279,12 +1279,12 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 
 		/* consume matching layers */
 		if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
-			return;
+			return true;
 
 		if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
 		    (cpu == fallback_cpu && layer->nr_cpus == 0)) {
 			if (scx_bpf_consume(layer_idx))
-				return;
+				return true;
 		}
 	}
 
@@ -1293,17 +1293,17 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 		layer_idx = rotate_layer_id(cost->pref_layer, idx);
 		if (layer_idx >= nr_layers) {
 			scx_bpf_error("can't happen");
-			return;
+			return true;
 		}
 		layer = MEMBER_VPTR(layers, [layer_idx]);
 		if (has_budget(cost, layer) == 0)
 			continue;
 		if (!layer->preempt && layers->open &&
 		    scx_bpf_consume(layer_idx))
-			return;
+			return true;
 	}
 
-	scx_bpf_consume(LO_FALLBACK_DSQ);
+	return scx_bpf_consume(LO_FALLBACK_DSQ);
 }
 
 int consume_preempting(struct cost *costc, u32 my_llc_id)
@@ -1404,10 +1404,9 @@ int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
 	return -ENOENT;
 }
 
-void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
+static __always_inline
+bool layered_dispatch_topo(s32 cpu, struct task_struct *prev)
 {
-	if (disable_topology)
-		return layered_dispatch_no_topo(cpu, prev);
 
 	struct cpu_ctx *cctx, *sib_cctx;
 	struct cost *costc;
@@ -1416,7 +1415,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	if (!(cctx = lookup_cpu_ctx(-1)) ||
 	    !(costc = lookup_cpu_cost(cpu)))
-		return;
+		return true;
 
 	/*
 	 * if @prev was on SCX and is still runnable, we are here because @prev
@@ -1431,7 +1430,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	 * kernels, so let's make do with this for now.
 	 */
 	if (prev && keep_running(cctx, prev))
-		return;
+		return true;
 
 	/*
 	 * If the sibling CPU is running an exclusive task, keep this CPU idle.
@@ -1441,28 +1440,65 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (sib >= 0 && (sib_cctx = lookup_cpu_ctx(sib)) &&
 	    sib_cctx->current_exclusive) {
 		gstat_inc(GSTAT_EXCL_IDLE, cctx);
-		return;
+		return true;
 	}
 
 	u32 my_llc_id = cpu_to_llc_id(cpu);
 
 	/* consume preempting layers first */
 	if (consume_preempting(costc, my_llc_id) == 0)
-		return;
+		return true;
 
 	dsq_id = cpu_hi_fallback_dsq_id(cpu);
 	if (scx_bpf_consume(dsq_id))
-		return;
+		return true;
 
 	/* consume !open layers second */
 	if (consume_non_open(costc, cpu, my_llc_id) == 0)
-		return;
+		return true;
 
 	/* consume !preempting open layers */
 	if (consume_open_no_preempt(costc, my_llc_id) == 0)
+		return true;
+
+	return scx_bpf_consume(LO_FALLBACK_DSQ);
+}
+
+void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
+{
+	if (disable_topology) {
+		if (layered_dispatch_no_topo(cpu, prev))
+			return;
+	} else {
+		if (layered_dispatch_topo(cpu, prev))
+			return;
+	}
+
+	// We were unable to schedule within existing budget constraints.
+	// Acquire more budget from the global stores and try again.
+	acquire_budgets();
+
+	if (disable_topology) {
+		if (layered_dispatch_no_topo(cpu, prev))
+			return;
+	} else {
+		if (layered_dispatch_topo(cpu, prev))
+			return;
+	}
+
+	// We couldn't schedule anything. Check if this is because there was no
+	// global budget or because we have nothing to schedule.
+	if (all_layers_have_local_budget())
 		return;
 
-	scx_bpf_consume(LO_FALLBACK_DSQ);
+	refresh_budgets();
+	if (disable_topology) {
+		if (layered_dispatch_no_topo(cpu, prev))
+			return;
+	} else {
+		if (layered_dispatch_topo(cpu, prev))
+			return;
+	}
 }
 
 static __noinline bool match_one(struct layer_match *match,
