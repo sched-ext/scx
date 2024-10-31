@@ -74,7 +74,7 @@ struct Opts {
     /// If specified, only tasks which have their scheduling policy set to
     /// SCHED_EXT using sched_setscheduler(2) are switched. Otherwise, all
     /// tasks are switched.
-    #[clap(short = 'p', long, action = clap::ArgAction::SetTrue, default_value = "true")]
+    #[clap(short = 'p', long, action = clap::ArgAction::SetTrue, default_value = "false")]
     partial: bool,
 
     /// Enable verbose output including libbpf details.
@@ -217,7 +217,7 @@ impl<'a> Scheduler<'a> {
 
         skel.maps.rodata_data.debug = opts.verbose as u32;
 
-        // Pin to central CPU before attaching eBPF program
+        //Pin to central CPU before attaching eBPF program
         unsafe {
             let mut cpu_set: cpu_set_t = std::mem::zeroed();
             CPU_SET(opts.central_cpu as usize, &mut cpu_set);
@@ -228,6 +228,7 @@ impl<'a> Scheduler<'a> {
             if result != 0 {
                 return Err(anyhow!("Failed to pin to central CPU"));
             }
+            info!("Pinned {:?} to CPU - {:?}", tid, opts.central_cpu);
         }
         // Load and verify the eBPF program
         let mut skel = scx_ops_load!(skel, rorke, uei)?;
