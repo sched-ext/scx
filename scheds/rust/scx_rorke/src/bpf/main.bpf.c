@@ -115,6 +115,8 @@ static void kick_task_cpu(struct task_struct* p) {
   cpu = pick_idle_cpu(p, cpu, 0);
   if (cpu >= 0)
     scx_bpf_kick_cpu(cpu, 0);
+  else
+    trace("kick_task_cpu: no idle CPU for VM: %d, vCPU: %d", p->tgid, p->pid);
 }
 
 /*
@@ -305,7 +307,7 @@ SCX_OPS_DEFINE(rorke,
                 * anything special. Enqueue the last tasks like any other tasks.
                 */
 
-               .flags = SCX_OPS_ENQ_LAST,
+               // .flags = SCX_OPS_ENQ_LAST,
                .select_cpu = (void*)rorke_select_cpu,
                .enqueue = (void*)rorke_enqueue,
                .dispatch = (void*)rorke_dispatch,
