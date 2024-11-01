@@ -320,7 +320,7 @@ int BPF_PROG(fexit_rt_mutex_lock, struct rt_mutex *lock)
 	return 0;
 }
 
-SEC("fexit/rt_mutex_lock_interruptible_nested")
+SEC("fexit/rt_mutex_lock_interruptible")
 int BPF_PROG(fexit_rt_mutex_lock_interruptible, struct rt_mutex *lock, int ret)
 {
 	if (ret == 0) {
@@ -332,7 +332,7 @@ int BPF_PROG(fexit_rt_mutex_lock_interruptible, struct rt_mutex *lock, int ret)
 	return 0;
 }
 
-SEC("fexit/rt_mutex_lock_killable_nested")
+SEC("fexit/rt_mutex_lock_killable")
 int BPF_PROG(fexit_rt_mutex_lock_killable, struct rt_mutex *lock, int ret)
 {
 	if (ret == 0) {
