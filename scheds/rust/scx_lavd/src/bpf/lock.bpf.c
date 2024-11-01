@@ -310,7 +310,7 @@ int BPF_PROG(fexit_ww_mutex_unlock, struct ww_mutex *lock)
 #ifdef LAVD_TRACE_RT_MUTEX
 struct rt_mutex;
 
-SEC("fexit/rt_mutex_lock")
+SEC("fexit/rt_mutex_lock_nested")
 int BPF_PROG(fexit_rt_mutex_lock, struct rt_mutex *lock)
 {
 	/*
@@ -320,7 +320,7 @@ int BPF_PROG(fexit_rt_mutex_lock, struct rt_mutex *lock)
 	return 0;
 }
 
-SEC("fexit/rt_mutex_lock_interruptible")
+SEC("fexit/rt_mutex_lock_interruptible_nested")
 int BPF_PROG(fexit_rt_mutex_lock_interruptible, struct rt_mutex *lock, int ret)
 {
 	if (ret == 0) {
@@ -332,7 +332,7 @@ int BPF_PROG(fexit_rt_mutex_lock_interruptible, struct rt_mutex *lock, int ret)
 	return 0;
 }
 
-SEC("fexit/rt_mutex_lock_killable")
+SEC("fexit/rt_mutex_lock_killable_nested")
 int BPF_PROG(fexit_rt_mutex_lock_killable, struct rt_mutex *lock, int ret)
 {
 	if (ret == 0) {
