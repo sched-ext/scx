@@ -191,7 +191,7 @@ int BPF_PROG(fexit_up, struct semaphore *sem)
  */
 #ifdef LAVD_TRACE_MUTEX
 struct mutex;
-SEC("fexit/mutex_lock")
+SEC("fexit/mutex_lock_nested")
 int BPF_PROG(fexit_mutex_lock, struct mutex *mutex)
 {
 	/*
@@ -201,7 +201,7 @@ int BPF_PROG(fexit_mutex_lock, struct mutex *mutex)
 	return 0;
 }
 
-SEC("fexit/mutex_lock_interruptible")
+SEC("fexit/mutex_lock_interruptible_nested")
 int BPF_PROG(fexit_mutex_lock_interruptible, struct mutex *mutex, int ret)
 {
 	if (ret == 0) {
@@ -213,7 +213,7 @@ int BPF_PROG(fexit_mutex_lock_interruptible, struct mutex *mutex, int ret)
 	return 0;
 }
 
-SEC("fexit/mutex_lock_killable")
+SEC("fexit/mutex_lock_killable_nested")
 int BPF_PROG(fexit_mutex_lock_killable, struct mutex *mutex, int ret)
 {
 	if (ret == 0) {
