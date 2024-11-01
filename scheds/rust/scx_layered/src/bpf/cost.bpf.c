@@ -303,8 +303,8 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 		layer_weight_dur = (layer->weight * ((u64)refresh_intvl_ns * nr_possible_cpus)) /
 				    layer_weight_sum;
 		initialize_cost_layer(costc, layer_id, (s64)layer_weight_dur);
-		trace("BUDGET init global layer %d budget %lld",
-		      layer_id, costc->budget[layer_id]);
+		trace("COST GLOBAL[%d][%s] budget %lld",
+		      layer_id, layer->name, costc->budget[layer_id]);
 
 		// TODO: add L3 budgets for topology awareness
 
@@ -318,9 +318,8 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 			layer_weight_dur = (layer->weight * layer_slice_ns * refresh_intvl_ns) /
 					    layer_weight_sum;
 			initialize_cost_layer(costc, layer_id, (s64)layer_weight_dur);
-			if (cpu == 0)
-				trace("BUDGET init cpu %d layer %d budget %lld",
-				      cpu, layer_id, costc->budget[layer_id]);
+			trace("COST CPU[%d][%d][%s] budget %lld",
+			      cpu, layer_id, layer->name, costc->budget[layer_id]);
 		}
 	}
 }
