@@ -1393,21 +1393,21 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
 	struct task_ctx *taskc_run;
 	bool preempted = false;
 
+	cpuc_run = get_cpu_ctx();
+	taskc_run = get_task_ctx(p_run);
+	if (!cpuc_run || !taskc_run)
+		goto update_cpuperf;
+
 	/*
 	 * If a task is eligible, don't consider its being preempted.
 	 */
-	if (is_eligible(p_run))
+	if (is_eligible(taskc_run))
 		goto update_cpuperf;
 
 	/*
 	 * Try to yield the current CPU if there is a higher priority task in
 	 * the run queue.
 	 */
-	cpuc_run = get_cpu_ctx();
-	taskc_run = get_task_ctx(p_run);
-	if (!cpuc_run || !taskc_run)
-		goto update_cpuperf;
-
 	preempted = try_yield_current_cpu(p_run, cpuc_run, taskc_run);
 
 	/*
@@ -2124,3 +2124,4 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .flags			= SCX_OPS_KEEP_BUILTIN_IDLE,
 	       .timeout_ms		= 30000U,
 	       .name			= "lavd");
+
