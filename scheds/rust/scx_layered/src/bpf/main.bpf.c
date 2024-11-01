@@ -2095,7 +2095,7 @@ int dump_cost(void)
 			scx_bpf_error("unabled to lookup layer %d", j);
 			continue;
 		}
-		scx_bpf_dump("GLOBAL[%d][%s] budget=%lld capacity=%lld\n",
+		scx_bpf_dump("COST GLOBAL[%d][%s] budget=%lld capacity=%lld\n",
 			     j, layer->name,
 			     costc->budget[j], costc->capacity[j]);
 	}
@@ -2107,7 +2107,7 @@ int dump_cost(void)
 				scx_bpf_error("unabled to lookup layer %d", i);
 				continue;
 			}
-			scx_bpf_dump("CPU[%d][%s][%d] budget=%lld capacity=%lld\n",
+			scx_bpf_dump("COST CPU[%d][%d][%s] budget=%lld capacity=%lld\n",
 				     i, j, layer->name,
 				     costc->budget[j], costc->capacity[j]);
 		}
