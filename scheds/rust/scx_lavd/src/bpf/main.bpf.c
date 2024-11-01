@@ -1144,7 +1144,13 @@ static bool consume_starving_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 	bool ret = false;
 	int i;
 
-	bpf_for(i, 0, LAVD_CPDOM_MAX_NR) {
+	if (nr_cpdoms == 1)
+		return false;
+
+	bpf_for(i, 0, nr_cpdoms) {
+		if (i >= LAVD_CPDOM_MAX_NR)
+			break;
+
 		dsq_id = (dsq_id + i) % LAVD_CPDOM_MAX_NR;
 
 		if (dsq_id == cpuc->cpdom_id)
@@ -1393,21 +1399,21 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
 	struct task_ctx *taskc_run;
 	bool preempted = false;
 
+	cpuc_run = get_cpu_ctx();
+	taskc_run = get_task_ctx(p_run);
+	if (!cpuc_run || !taskc_run)
+		goto update_cpuperf;
+
 	/*
 	 * If a task is eligible, don't consider its being preempted.
 	 */
-	if (is_eligible(p_run))
+	if (is_eligible(taskc_run))
 		goto update_cpuperf;
 
 	/*
 	 * Try to yield the current CPU if there is a higher priority task in
 	 * the run queue.
 	 */
-	cpuc_run = get_cpu_ctx();
-	taskc_run = get_task_ctx(p_run);
-	if (!cpuc_run || !taskc_run)
-		goto update_cpuperf;
-
 	preempted = try_yield_current_cpu(p_run, cpuc_run, taskc_run);
 
 	/*
@@ -1819,13 +1825,19 @@ static s32 init_cpdoms(u64 now)
 		WRITE_ONCE(cpdomc->last_consume_clk, now);
 
 		/*
-		 * Create an associated DSQ.
+		 * Create an associated DSQ on its associated NUMA domain.
 		 */
-		err = scx_bpf_create_dsq(cpdomc->id, -1);
+		err = scx_bpf_create_dsq(cpdomc->id, cpdomc->node_id);
 		if (err) {
-			scx_bpf_error("Failed to create a DSQ for cpdom %llu", cpdomc->id);
+			scx_bpf_error("Failed to create a DSQ for cpdom %llu on NUMA node %d",
+				      cpdomc->id, cpdomc->node_id);
 			return err;
 		}
+
+		/*
+		 * Update the number of compute domains.
+		 */
+		nr_cpdoms = i + 1;
 	}
 
 	return 0;
@@ -2001,7 +2013,10 @@ static s32 init_per_cpu_ctx(u64 now)
 	/*
 	 * Initialize compute domain id.
 	 */
-	bpf_for(cpdom_id, 0, LAVD_CPDOM_MAX_NR) {
+	bpf_for(cpdom_id, 0, nr_cpdoms) {
+		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
+			break;
+
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 		cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
 		if (!cpdomc || !cd_cpumask) {
@@ -2124,3 +2139,4 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .flags			= SCX_OPS_KEEP_BUILTIN_IDLE,
 	       .timeout_ms		= 30000U,
 	       .name			= "lavd");
+

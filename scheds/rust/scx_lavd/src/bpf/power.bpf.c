@@ -19,6 +19,7 @@ const volatile u16	cpu_order_performance[LAVD_CPU_ID_MAX]; /* CPU preference ord
 const volatile u16	cpu_order_powersave[LAVD_CPU_ID_MAX]; /* CPU preference order for powersave mode */
 const volatile u16	__cpu_capacity_hint[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1000 */
 struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR]; /* contexts for compute domains */
+static int		nr_cpdoms; /* number of compute domains */
 
 
 /*
