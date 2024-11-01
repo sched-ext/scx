@@ -1233,8 +1233,9 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
 	u64 now = bpf_ktime_get_ns();
 	struct cpu_ctx *cpuc;
+	struct task_ctx *taskc;
 	struct bpf_cpumask *active, *ovrflw;
-	struct task_struct *p, *taskc;
+	struct task_struct *p;
 	u64 dsq_id = 0;
 	bool try_consume = false;
 
