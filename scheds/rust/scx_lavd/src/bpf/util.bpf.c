@@ -16,11 +16,8 @@ private(LAVD) struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs *
 private(LAVD) struct bpf_cpumask __kptr *little_cpumask; /* CPU mask for little CPUs */
 private(LAVD) struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
 private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
-private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR+1]; /* CPU mask for each compute domain */
-								/* 
-								 * I am sure that +1 shouldn't be necessary here.
-								 * But it is added to workaround a verifier bug (?).
-								 */
+private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR]; /* CPU mask for each compute domain */
+private(LAVD) struct bpf_cpumask padding; /* Padding to work around a verifier bug (?) */
 
 const volatile u64	nr_cpu_ids;	/* maximum CPU IDs */
 static volatile u64	nr_cpus_onln;	/* current number of online CPUs */
