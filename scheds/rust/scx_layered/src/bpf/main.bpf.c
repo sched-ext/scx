@@ -1067,7 +1067,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * usually important for system performance and responsiveness.
 	 */
 	if (!layer->preempt &&
-	    (p->flags & PF_KTHREAD) && p->nr_cpus_allowed == 1) {
+	    (p->flags & PF_KTHREAD) && p->nr_cpus_allowed < nr_possible_cpus) {
 		struct cpumask *layer_cpumask;
 
 		if (!layer->open &&
@@ -1442,6 +1442,18 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	    sib_cctx->current_exclusive) {
 		gstat_inc(GSTAT_EXCL_IDLE, cctx);
 		return;
+	}
+
+	/*
+	 * Fallback DSQs don't have cost accounting. When the budget runs out
+	 * for a layer we do an extra consume of the fallback DSQ to ensure
+	 * that it doesn't stall out when the system is being saturated.
+	 */
+	if (costc->drain_fallback) {
+		costc->drain_fallback = false;
+		dsq_id = cpu_hi_fallback_dsq_id(cpu);
+		if (scx_bpf_consume(dsq_id))
+			return;
 	}
 
 	u32 my_llc_id = cpu_to_llc_id(cpu);
