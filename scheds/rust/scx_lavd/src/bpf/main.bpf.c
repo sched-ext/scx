@@ -1825,11 +1825,12 @@ static s32 init_cpdoms(u64 now)
 		WRITE_ONCE(cpdomc->last_consume_clk, now);
 
 		/*
-		 * Create an associated DSQ.
+		 * Create an associated DSQ on its associated NUMA domain.
 		 */
-		err = scx_bpf_create_dsq(cpdomc->id, -1);
+		err = scx_bpf_create_dsq(cpdomc->id, cpdomc->node_id);
 		if (err) {
-			scx_bpf_error("Failed to create a DSQ for cpdom %llu", cpdomc->id);
+			scx_bpf_error("Failed to create a DSQ for cpdom %llu on NUMA node %d",
+				      cpdomc->id, cpdomc->node_id);
 			return err;
 		}
 

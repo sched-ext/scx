@@ -61,9 +61,10 @@ enum consts_internal  {
  * - system > numa node > llc domain > compute domain per core type (P or E)
  */
 struct cpdom_ctx {
+	u64	last_consume_clk;		    /* when the associated DSQ was consumed */
 	u64	id;				    /* id of this compute domain (== dsq_id) */
 	u64	alt_id;				    /* id of the closest compute domain of alternative type (== dsq id) */
-	u64	last_consume_clk;		    /* when the associated DSQ was consumed */
+	u8	node_id;			    /* numa domain id */
 	u8	is_big;				    /* is it a big core or little core? */
 	u8	is_active;			    /* if this compute domain is active */
 	u8	nr_neighbors[LAVD_CPDOM_MAX_DIST];  /* number of neighbors per distance */
