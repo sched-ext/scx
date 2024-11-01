@@ -1144,7 +1144,13 @@ static bool consume_starving_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 	bool ret = false;
 	int i;
 
-	bpf_for(i, 0, LAVD_CPDOM_MAX_NR) {
+	if (nr_cpdoms == 1)
+		return false;
+
+	bpf_for(i, 0, nr_cpdoms) {
+		if (i >= LAVD_CPDOM_MAX_NR)
+			break;
+
 		dsq_id = (dsq_id + i) % LAVD_CPDOM_MAX_NR;
 
 		if (dsq_id == cpuc->cpdom_id)
@@ -1826,6 +1832,11 @@ static s32 init_cpdoms(u64 now)
 			scx_bpf_error("Failed to create a DSQ for cpdom %llu", cpdomc->id);
 			return err;
 		}
+
+		/*
+		 * Update the number of compute domains.
+		 */
+		nr_cpdoms = i + 1;
 	}
 
 	return 0;
@@ -2001,7 +2012,10 @@ static s32 init_per_cpu_ctx(u64 now)
 	/*
 	 * Initialize compute domain id.
 	 */
-	bpf_for(cpdom_id, 0, LAVD_CPDOM_MAX_NR) {
+	bpf_for(cpdom_id, 0, nr_cpdoms) {
+		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
+			break;
+
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
 		cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
 		if (!cpdomc || !cd_cpumask) {
