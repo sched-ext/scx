@@ -15,6 +15,7 @@ struct cost {
 	u32		idx;
 	bool		overflow;
 	bool		has_parent;
+	bool		drain_fallback;
 };
 
 
@@ -217,6 +218,7 @@ static int record_cpu_cost(struct cost *costc, u32 layer_id, s64 amount)
 	__sync_fetch_and_sub(&costc->budget[layer_id], amount);
 
 	if (costc->budget[layer_id] <= 0) {
+		costc->drain_fallback = true;
 		if (costc->has_parent) {
 			s64 budget = acquire_budget(costc, layer_id,
 						    costc->capacity[layer_id] + amount);
@@ -301,8 +303,8 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 		layer_weight_dur = (layer->weight * ((u64)refresh_intvl_ns * nr_possible_cpus)) /
 				    layer_weight_sum;
 		initialize_cost_layer(costc, layer_id, (s64)layer_weight_dur);
-		trace("BUDGET init global layer %d budget %lld",
-		      layer_id, costc->budget[layer_id]);
+		trace("COST GLOBAL[%d][%s] budget %lld",
+		      layer_id, layer->name, costc->budget[layer_id]);
 
 		// TODO: add L3 budgets for topology awareness
 
@@ -316,9 +318,8 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 			layer_weight_dur = (layer->weight * layer_slice_ns * refresh_intvl_ns) /
 					    layer_weight_sum;
 			initialize_cost_layer(costc, layer_id, (s64)layer_weight_dur);
-			if (cpu == 0)
-				trace("BUDGET init cpu %d layer %d budget %lld",
-				      cpu, layer_id, costc->budget[layer_id]);
+			trace("COST CPU[%d][%d][%s] budget %lld",
+			      cpu, layer_id, layer->name, costc->budget[layer_id]);
 		}
 	}
 }

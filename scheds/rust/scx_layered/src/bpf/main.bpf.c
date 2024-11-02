@@ -1067,7 +1067,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * usually important for system performance and responsiveness.
 	 */
 	if (!layer->preempt &&
-	    (p->flags & PF_KTHREAD) && p->nr_cpus_allowed == 1) {
+	    (p->flags & PF_KTHREAD) && p->nr_cpus_allowed < nr_possible_cpus) {
 		struct cpumask *layer_cpumask;
 
 		if (!layer->open &&
@@ -1442,6 +1442,18 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	    sib_cctx->current_exclusive) {
 		gstat_inc(GSTAT_EXCL_IDLE, cctx);
 		return;
+	}
+
+	/*
+	 * Fallback DSQs don't have cost accounting. When the budget runs out
+	 * for a layer we do an extra consume of the fallback DSQ to ensure
+	 * that it doesn't stall out when the system is being saturated.
+	 */
+	if (costc->drain_fallback) {
+		costc->drain_fallback = false;
+		dsq_id = cpu_hi_fallback_dsq_id(cpu);
+		if (scx_bpf_consume(dsq_id))
+			return;
 	}
 
 	u32 my_llc_id = cpu_to_llc_id(cpu);
@@ -2095,7 +2107,7 @@ int dump_cost(void)
 			scx_bpf_error("unabled to lookup layer %d", j);
 			continue;
 		}
-		scx_bpf_dump("GLOBAL[%d][%s] budget=%lld capacity=%lld\n",
+		scx_bpf_dump("COST GLOBAL[%d][%s] budget=%lld capacity=%lld\n",
 			     j, layer->name,
 			     costc->budget[j], costc->capacity[j]);
 	}
@@ -2107,7 +2119,7 @@ int dump_cost(void)
 				scx_bpf_error("unabled to lookup layer %d", i);
 				continue;
 			}
-			scx_bpf_dump("CPU[%d][%s][%d] budget=%lld capacity=%lld\n",
+			scx_bpf_dump("COST CPU[%d][%d][%s] budget=%lld capacity=%lld\n",
 				     i, j, layer->name,
 				     costc->budget[j], costc->capacity[j]);
 		}
@@ -2141,7 +2153,7 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 
 				idx = layer_dsq_id(layer->idx, j);
 				scx_bpf_dump("LAYER[%d][%s]DSQ[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
-					     i, idx, layer->name, layer->nr_cpus,
+					     i, layer->name, idx, layer->nr_cpus,
 					     scx_bpf_dsq_nr_queued(idx),
 					     dsq_first_runnable_for_ms(idx, now));
 				scx_bpf_dump("\n");

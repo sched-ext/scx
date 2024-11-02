@@ -298,12 +298,12 @@ impl FlatTopology {
         // Build a vector of cpu flat ids.
         let mut base_freq = 0;
         let mut avg_freq = 0;
-        for (node_id, node) in topo.nodes().iter().enumerate() {
+        for (node_pos, node) in topo.nodes().iter().enumerate() {
             for (llc_pos, (_llc_id, llc)) in node.llcs().iter().enumerate() {
                 for (core_pos, (_core_id, core)) in llc.cores().iter().enumerate() {
                     for (cpu_pos, (cpu_id, cpu)) in core.cpus().iter().enumerate() {
                         let cpu_fid = CpuFlatId {
-                            node_id,
+                            node_id: node.id(),
                             llc_pos,
                             max_freq: cpu.max_freq(),
                             core_pos,
@@ -333,7 +333,7 @@ impl FlatTopology {
             for cpu_fid in cpu_fids.iter_mut() {
                 cpu_fid.cpu_cap = 1024 as usize;
             }
-            warn!("System does not provide proper CPU frequency infomation.");
+            warn!("System does not provide proper CPU frequency information.");
         }
 
         // Sort the cpu_fids
@@ -549,6 +549,7 @@ impl<'a> Scheduler<'a> {
         for (k, v) in topo.cpdom_map.iter() {
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].id = v.cpdom_id as u64;
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].alt_id = v.cpdom_alt_id.get() as u64;
+            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].node_id = k.node_id as u8;
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_big = k.is_big as u8;
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_active = 1;
             for cpu_id in v.cpu_ids.iter() {
