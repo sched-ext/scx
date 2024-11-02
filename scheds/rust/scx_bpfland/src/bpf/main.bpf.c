@@ -296,7 +296,7 @@ static u64 task_dyn_prio(struct task_struct *p)
 /*
  * Return task's dynamic priority.
  */
-static u64 task_prio(struct task_struct *p)
+static u64 task_prio(const struct task_struct *p)
 {
 	return p->scx.weight * task_dyn_prio(p);
 }
@@ -305,7 +305,7 @@ static u64 task_prio(struct task_struct *p)
  * Return the task's allowed lag: used to determine how early its vruntime can
  * be.
  */
-static u64 task_lag(struct task_struct *p)
+static u64 task_lag(const struct task_struct *p)
 {
 	return slice_lag * task_prio(p) / 100;
 }
@@ -313,7 +313,7 @@ static u64 task_lag(struct task_struct *p)
 /*
  * Return a value inversely proportional to the task's weight.
  */
-static u64 scale_inverse_fair(struct task_struct *p, u64 value)
+static u64 scale_inverse_fair(const struct task_struct *p, u64 value)
 {
 	return value * 100 / task_prio(p);
 }
@@ -322,7 +322,8 @@ static u64 scale_inverse_fair(struct task_struct *p, u64 value)
  * Compute the deadline component of a task (this value will be added to the
  * task's vruntime to determine the actual deadline).
  */
-static s64 task_compute_dl(struct task_struct *p ,struct task_ctx *tctx)
+static s64 task_compute_dl(const struct task_struct *p,
+			   const struct task_ctx *tctx)
 {
 	/*
 	 * Return the deadline as a function of the average runtime and the
@@ -334,14 +335,9 @@ static s64 task_compute_dl(struct task_struct *p ,struct task_ctx *tctx)
 /*
  * Return task's evaluated vruntime.
  */
-static inline u64 task_deadline(struct task_struct *p)
+static u64 task_deadline(struct task_struct *p, struct task_ctx *tctx)
 {
 	u64 min_vruntime = vtime_now - task_lag(p);
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return min_vruntime;
 
 	/*
 	 * Limit the vruntime to to avoid excessively penalizing tasks.
@@ -667,6 +663,14 @@ static void kick_task_cpu(struct task_struct *p)
 		scx_bpf_kick_cpu(cpu, 0);
 }
 
+static bool is_task_interactive(const struct task_struct *p,
+				const struct task_ctx *tctx)
+{
+	if (!tctx->is_interactive)
+		return false;
+	return scx_bpf_dsq_nr_queued(PRIO_DSQ) < 100;
+}
+
 /*
  * Dispatch all the other tasks that were not dispatched directly in
  * select_cpu().
@@ -700,7 +704,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * When lowlatency is enabled, the separate priority DSQ is disabled,
 	 * so in this case always dispatch to the shared DSQ.
 	 */
-	if (!lowlatency && tctx->is_interactive) {
+	if (!lowlatency && is_task_interactive(p, tctx)) {
 		dsq_id = PRIO_DSQ;
 		__sync_fetch_and_add(&nr_prio_dispatches, 1);
 	} else {
@@ -708,7 +712,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		__sync_fetch_and_add(&nr_shared_dispatches, 1);
 	}
 	scx_bpf_dispatch_vtime(p, dsq_id, SCX_SLICE_DFL,
-			       task_deadline(p), enq_flags);
+			       task_deadline(p, tctx), enq_flags);
 
 	/*
 	 * If there is an idle CPU available for the task, wake it up so it can
@@ -993,7 +997,6 @@ void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 		return;
 	tctx->sum_exec_runtime = p->se.sum_exec_runtime;
 	tctx->nvcsw_ts = now;
-	tctx->avg_runtime = slice_max;
 	tctx->deadline = vtime_now;
 }
 
