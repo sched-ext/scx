@@ -384,32 +384,6 @@ static inline void task_refill_slice(struct task_struct *p)
 	p->scx.slice = CLAMP(slice_max / scale_factor, slice_min, slice_max);
 }
 
-static bool is_prio_congested(void)
-{
-	return scx_bpf_dsq_nr_queued(PRIO_DSQ) > nr_online_cpus * 4;
-}
-
-/*
- * Handle synchronous wake-up event for a task.
- */
-static void handle_sync_wakeup(struct task_struct *p)
-{
-	struct task_ctx *tctx;
-
-	/*
-	 * If we are waking up a task immediately promote it as interactive, so
-	 * that it can be dispatched as soon as possible on the first CPU
-	 * available.
-	 *
-	 * However, if the priority queue is congested, we don't want to
-	 * promote additional interactive tasks, instead we give priority to
-	 * the tasks that are already classified as interactive.
-	 */
-	tctx = try_lookup_task_ctx(p);
-	if (tctx && !is_prio_congested())
-		tctx->is_interactive = true;
-}
-
 /*
  * Find an idle CPU in the system.
  *
@@ -530,12 +504,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 		struct task_struct *current = (void *)bpf_get_current_task_btf();
 		struct bpf_cpumask *curr_l3_domain;
 		bool share_llc, has_idle;
-
-		/*
-		 * Prioritize newly awakened tasks by immediately promoting
-		 * them as interactive.
-		 */
-		handle_sync_wakeup(p);
 
 		/*
 		 * Determine waker CPU scheduling domain.
