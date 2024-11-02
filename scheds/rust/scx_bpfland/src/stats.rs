@@ -25,8 +25,6 @@ pub struct Metrics {
     pub nr_shared_waiting: u64,
     #[stat(desc = "Average amount of interactive tasks waiting to be dispatched")]
     pub nr_prio_waiting: u64,
-    #[stat(desc = "Average of voluntary context switches")]
-    pub nvcsw_avg_thresh: u64,
     #[stat(desc = "Number of kthread direct dispatches")]
     pub nr_kthread_dispatches: u64,
     #[stat(desc = "Number of task direct dispatches")]
@@ -41,14 +39,13 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] tasks -> r: {:>2}/{:<2} i: {:<2} pw: {:<4} w: {:<4} | nvcsw: {:<4} | dispatch -> k: {:<5} d: {:<5} p: {:<5} s: {:<5}",
+            "[{}] tasks -> r: {:>2}/{:<2} i: {:<2} pw: {:<4} w: {:<4} | dispatch -> k: {:<5} d: {:<5} p: {:<5} s: {:<5}",
             crate::SCHEDULER_NAME,
             self.nr_running,
             self.nr_cpus,
             self.nr_interactive,
             self.nr_prio_waiting,
             self.nr_shared_waiting,
-            self.nvcsw_avg_thresh,
             self.nr_kthread_dispatches,
             self.nr_direct_dispatches,
             self.nr_prio_dispatches,
