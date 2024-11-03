@@ -4,7 +4,9 @@
 // GNU General Public License version 2.
 use std::collections::BTreeMap;
 
+use anyhow::anyhow;
 use anyhow::Result;
+use scx_utils::CoreType;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
 
@@ -12,6 +14,7 @@ use scx_utils::Topology;
 pub struct Domain {
     id: usize,
     mask: Cpumask,
+    core_type: CoreType,
 }
 
 impl Domain {
@@ -60,7 +63,15 @@ impl DomainGroup {
             for mask_str in cpumasks.iter() {
                 let mask = Cpumask::from_str(&mask_str)?;
                 span |= mask.clone();
-                doms.insert(dom_id, Domain { id: dom_id, mask });
+                let core_type = CoreType::Big { turbo: false };
+                doms.insert(
+                    dom_id,
+                    Domain {
+                        id: dom_id,
+                        mask,
+                        core_type,
+                    },
+                );
                 dom_numa_map.insert(dom_id, 0);
                 dom_id += 1;
             }
@@ -71,7 +82,20 @@ impl DomainGroup {
                 for (_, llc) in node.llcs().iter() {
                     let mask = llc.span().clone();
                     span |= mask.clone();
-                    doms.insert(dom_id, Domain { id: dom_id, mask });
+                    let core_type = &llc
+                        .cores()
+                        .values()
+                        .next()
+                        .ok_or(anyhow!("no core"))?
+                        .core_type;
+                    doms.insert(
+                        dom_id,
+                        Domain {
+                            id: dom_id,
+                            mask,
+                            core_type: core_type.clone(),
+                        },
+                    );
                     dom_numa_map.insert(dom_id, node_id.clone());
                     dom_id += 1;
                 }
