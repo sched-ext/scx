@@ -12,7 +12,6 @@
 #define LAVD_TRACE_SEM
 #define LAVD_TRACE_MUTEX
 #define LAVD_TRACE_WW_MUTEX
-#define LAVD_TRACE_RT_MUTEX
 #define LAVD_TRACE_RW_SEM
 #define LAVD_TRACE_PERCPU_RW_SEM 
 #define LAVD_TRACE_FUTEX
@@ -181,6 +180,12 @@ int BPF_PROG(fexit_up, struct semaphore *sem)
  * - void __sched mutex_lock(struct mutex *lock)
  * - int __sched mutex_lock_interruptible(struct mutex *lock)
  * - int __sched mutex_lock_killable(struct mutex *lock)
+ * => They all calls `__mutex_lock()` in the slow path. However, tracing only
+ *    slowpath is not accurate since in the unlock path, there is no way to
+ *    diminish whether a lock is locked in the fast path or slow path. While,
+ *    it is in accurate, let's live with it for now.
+ * int __sched __mutex_lock(struct mutex *lock, unsigned int state, unsigned int subclass, struct lockdep_map *nest_lock, unsigned long ip)
+ *
  * - int __sched mutex_trylock(struct mutex *lock)
  * - void __sched mutex_unlock(struct mutex *lock)
  *
@@ -191,30 +196,10 @@ int BPF_PROG(fexit_up, struct semaphore *sem)
  */
 #ifdef LAVD_TRACE_MUTEX
 struct mutex;
-SEC("fexit/mutex_lock")
-int BPF_PROG(fexit_mutex_lock, struct mutex *mutex)
-{
-	/*
-	 * A mutex is successfully acquired.
-	 */
-	inc_lock_boost();
-	return 0;
-}
+struct lockdep_map;
 
-SEC("fexit/mutex_lock_interruptible")
-int BPF_PROG(fexit_mutex_lock_interruptible, struct mutex *mutex, int ret)
-{
-	if (ret == 0) {
-		/*
-		 * A mutex is successfully acquired.
-		 */
-		inc_lock_boost();
-	}
-	return 0;
-}
-
-SEC("fexit/mutex_lock_killable")
-int BPF_PROG(fexit_mutex_lock_killable, struct mutex *mutex, int ret)
+SEC("fexit/__mutex_lock")
+int BPF_PROG(fexit__mutex_lock, struct mutex *lock, unsigned int state, unsigned int subclass, struct lockdep_map *nest_lock, unsigned long ip, int ret)
 {
 	if (ret == 0) {
 		/*
@@ -299,73 +284,6 @@ int BPF_PROG(fexit_ww_mutex_unlock, struct ww_mutex *lock)
 }
 #endif /* LAVD_TRACE_WW_MUTEX */
 
-/**
- * RT-mutex in kernel (kernel/locking/rtmutex_api.c)
- * - void __sched rt_mutex_lock(struct rt_mutex *lock)
- * - int __sched rt_mutex_lock_interruptible(struct rt_mutex *lock)
- * - int __sched rt_mutex_lock_killable(struct rt_mutex *lock)
- * - int __sched rt_mutex_trylock(struct rt_mutex *lock)
- * - void __sched rt_mutex_unlock(struct rt_mutex *lock)
- */
-#ifdef LAVD_TRACE_RT_MUTEX
-struct rt_mutex;
-
-SEC("fexit/rt_mutex_lock")
-int BPF_PROG(fexit_rt_mutex_lock, struct rt_mutex *lock)
-{
-	/*
-	 * An rt_mutex is successfully acquired.
-	 */
-	inc_lock_boost();
-	return 0;
-}
-
-SEC("fexit/rt_mutex_lock_interruptible")
-int BPF_PROG(fexit_rt_mutex_lock_interruptible, struct rt_mutex *lock, int ret)
-{
-	if (ret == 0) {
-		/*
-		 * An rt_mutex is successfully acquired.
-		 */
-		inc_lock_boost();
-	}
-	return 0;
-}
-
-SEC("fexit/rt_mutex_lock_killable")
-int BPF_PROG(fexit_rt_mutex_lock_killable, struct rt_mutex *lock, int ret)
-{
-	if (ret == 0) {
-		/*
-		 * An rt_mutex is successfully acquired.
-		 */
-		inc_lock_boost();
-	}
-	return 0;
-}
-
-SEC("fexit/rt_mutex_trylock")
-int BPF_PROG(fexit_rt_mutex_trylock, struct rt_mutex *lock, int ret)
-{
-	if (ret == 1) {
-		/*
-		 * An rt_mutex is successfully acquired.
-		 */
-		inc_lock_boost();
-	}
-	return 0;
-}
-
-SEC("fexit/rt_mutex_unlock")
-int BPF_PROG(fexit_rt_mutex_unlock, struct rt_mutex *lock)
-{
-	/*
-	 * An rt_mutex is successfully released.
-	 */
-	dec_lock_boost();
-	return 0;
-}
-#endif /* LAVD_TRACE_RT_MUTEX */
 
 /**
  * Reader-writer semaphore in kernel (kernel/locking/rwsem.c)
