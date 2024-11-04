@@ -286,13 +286,13 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 		layer_weight_sum += layer->weight;
 	}
 
-	costc = initialize_cost(global, global, false, false, false);
-	if (!costc) {
-		scx_bpf_error("failed to initialize global budget");
-		return;
-	}
-
 	bpf_for(layer_id, 0, nr_layers) {
+		costc = initialize_cost(global, global, false, false, false);
+		if (!costc) {
+			scx_bpf_error("failed to initialize global budget");
+			return;
+		}
+
 		layer = &layers[layer_id];
 		if (!layer) {
 			scx_bpf_error("failed to lookup layer %d", layer_id);
