@@ -188,7 +188,6 @@ struct layer {
 	u32			weight;
 
 	int			kind;
-	bool			open;
 	bool			preempt;
 	bool			preempt_first;
 	bool			exclusive;
