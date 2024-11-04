@@ -13,6 +13,7 @@
 #include <libgen.h>
 #include <bpf/bpf.h>
 #include <scx/common.h>
+#include <scx/enums.h>
 #include "scx_central.bpf.skel.h"
 
 const char help_fmt[] =
@@ -62,7 +63,7 @@ restart:
 	while ((opt = getopt(argc, argv, "s:c:pvh")) != -1) {
 		switch (opt) {
 		case 's':
-			skel->rodata->slice_ns = strtoull(optarg, NULL, 0) * 1000;
+			skel->bss->slice_ns = strtoull(optarg, NULL, 0) * 1000;
 			break;
 		case 'c':
 			skel->rodata->central_cpu = strtoul(optarg, NULL, 0);
