@@ -1356,13 +1356,6 @@ impl<'a> Scheduler<'a> {
                 }
             }
 
-            match &spec.kind {
-                LayerKind::Open { .. } | LayerKind::Grouped { .. } => {
-                    layer.open.write(true);
-                }
-                _ => {}
-            }
-
             perf_set |= layer.perf > 0;
         }
 
