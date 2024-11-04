@@ -298,7 +298,7 @@ impl FlatTopology {
         // Build a vector of cpu flat ids.
         let mut base_freq = 0;
         let mut avg_freq = 0;
-        for (node_pos, node) in topo.nodes().iter().enumerate() {
+        for (_node_pos, node) in topo.nodes().iter().enumerate() {
             for (llc_pos, (_llc_id, llc)) in node.llcs().iter().enumerate() {
                 for (core_pos, (_core_id, core)) in llc.cores().iter().enumerate() {
                     for (cpu_pos, (cpu_id, cpu)) in core.cpus().iter().enumerate() {
