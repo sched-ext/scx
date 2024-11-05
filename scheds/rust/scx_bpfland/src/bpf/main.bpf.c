@@ -908,6 +908,12 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	 */
 	if (tctx->is_interactive)
 		__sync_fetch_and_add(&nr_interactive, 1);
+
+	/*
+	 * Update global vruntime.
+	 */
+	if (vtime_before(vtime_now, p->scx.dsq_vtime))
+		vtime_now = p->scx.dsq_vtime;
 }
 
 /*
@@ -970,11 +976,6 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	slice = scale_inverse_fair(p, slice);
 	p->scx.dsq_vtime += slice;
 	tctx->deadline = p->scx.dsq_vtime + task_compute_dl(p, tctx);
-
-	/*
-	 * Update global vruntime.
-	 */
-	vtime_now += slice;
 
 	/*
 	 * Refresh voluntary context switch metrics.
