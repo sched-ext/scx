@@ -1227,5 +1227,6 @@ SCX_OPS_DEFINE(bpfland_ops,
 	       .init_task		= (void *)bpfland_init_task,
 	       .init			= (void *)bpfland_init,
 	       .exit			= (void *)bpfland_exit,
+	       .flags			= SCX_OPS_ENQ_EXITING,
 	       .timeout_ms		= 5000,
 	       .name			= "bpfland");
