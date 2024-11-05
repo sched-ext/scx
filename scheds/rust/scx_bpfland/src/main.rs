@@ -138,15 +138,6 @@ struct Opts {
     #[clap(short = 'l', long, allow_hyphen_values = true, default_value = "20000")]
     slice_us_lag: i64,
 
-    /// With lowlatency enabled, instead of classifying tasks as interactive or non-interactive,
-    /// they all get a dynamic priority, which is adjusted in function of their average rate of
-    /// voluntary context switches.
-    ///
-    /// This option guarantess less spikey behavior and it can be particularly useful in soft
-    /// real-time scenarios, such as audio processing, multimedia, etc.
-    #[clap(short = 'L', long, action = clap::ArgAction::SetTrue)]
-    lowlatency: bool,
-
     /// Enable kthreads prioritization.
     ///
     /// Enabling this can improve system performance, but it may also introduce interactivity
@@ -180,11 +171,6 @@ struct Opts {
     /// tasks (0 = disable interactive tasks classification).
     #[clap(short = 'c', long, default_value = "10")]
     nvcsw_max_thresh: u64,
-
-    /// Prevent starvation by making sure that at least one lower priority task is scheduled every
-    /// starvation_thresh_us (0 = disable starvation prevention).
-    #[clap(short = 't', long, default_value = "1000")]
-    starvation_thresh_us: u64,
 
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
@@ -259,12 +245,10 @@ impl<'a> Scheduler<'a> {
         // Override default BPF scheduling parameters.
         skel.maps.rodata_data.debug = opts.debug;
         skel.maps.rodata_data.smt_enabled = smt_enabled;
-        skel.maps.rodata_data.lowlatency = opts.lowlatency;
         skel.maps.rodata_data.local_kthreads = opts.local_kthreads;
         skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
-        skel.maps.rodata_data.starvation_thresh_ns = opts.starvation_thresh_us * 1000;
         skel.maps.rodata_data.nvcsw_max_thresh = opts.nvcsw_max_thresh;
 
         // Load the BPF program for validation.
@@ -556,11 +540,8 @@ impl<'a> Scheduler<'a> {
             nr_running: self.skel.maps.bss_data.nr_running,
             nr_cpus: self.skel.maps.bss_data.nr_online_cpus,
             nr_interactive: self.skel.maps.bss_data.nr_interactive,
-            nr_prio_waiting: self.skel.maps.bss_data.nr_prio_waiting,
-            nr_shared_waiting: self.skel.maps.bss_data.nr_shared_waiting,
             nr_kthread_dispatches: self.skel.maps.bss_data.nr_kthread_dispatches,
             nr_direct_dispatches: self.skel.maps.bss_data.nr_direct_dispatches,
-            nr_prio_dispatches: self.skel.maps.bss_data.nr_prio_dispatches,
             nr_shared_dispatches: self.skel.maps.bss_data.nr_shared_dispatches,
         }
     }
