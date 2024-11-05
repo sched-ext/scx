@@ -759,8 +759,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             .into_iter()
             .filter(|task| {
                 task.dom_mask & (1 << pull_dom_id) != 0
-                    || !(self.skip_kworkers && task.is_kworker)
-                    || !task.migrated.get()
+                    && !(self.skip_kworkers && task.is_kworker)
+                    && !task.migrated.get()
             })
             .collect();
 
