@@ -9,47 +9,63 @@
 #ifndef __SCX_ENUMS_H
 #define __SCX_ENUMS_H
 
-struct scx_enums {
-	u64 SCX_OPS_NAME_LEN;
-	u64 SCX_SLICE_DFL;
-	u64 SCX_SLICE_INF;
+#define SCX_ENUM(name) __##name
 
-	u64 SCX_DSQ_FLAG_BUILTIN;
-	u64 SCX_DSQ_FLAG_LOCAL_ON;
-	u64 SCX_DSQ_INVALID;
-	u64 SCX_DSQ_GLOBAL;
-	u64 SCX_DSQ_LOCAL;
-	u64 SCX_DSQ_LOCAL_ON;
-	u64 SCX_DSQ_LOCAL_CPU_MASK;
+#ifndef __bpf__
 
-	u64 SCX_TASK_QUEUED;
-	u64 SCX_TASK_RESET_RUNNABLE_AT;
-	u64 SCX_TASK_DEQD_FOR_SLEEP;
-	u64 SCX_TASK_STATE_SHIFT;
-	u64 SCX_TASK_STATE_BITS;
-	u64 SCX_TASK_STATE_MASK;
-	u64 SCX_TASK_CURSOR;
+static inline void __ENUM_set(u64 *val, char *type, char *name)
+{
+	bool res;
 
-	u64 SCX_TASK_NONE;
-	u64 SCX_TASK_INIT;
-	u64 SCX_TASK_READY;
-	u64 SCX_TASK_ENABLED;
-	u64 SCX_TASK_NR_STATES;
+	res = __COMPAT_read_enum(type, name, val);
+	SCX_BUG_ON(!res, "enum not found(%s)", name);
+}
 
-	u64 SCX_TASK_DSQ_ON_PRIQ;
+#define SCX_ENUM_SET(skel, type, name) do {				\
+	__ENUM_set(&skel->rodata->SCX_ENUM(name), #type, #name);	\
+	} while (0)
 
-	u64 SCX_KICK_IDLE;
-	u64 SCX_KICK_PREEMPT;
-	u64 SCX_KICK_WAIT;
+#define SCX_ENUM_INIT(skel)						\
+	SCX_ENUM_SET(skel, scx_public_consts, SCX_OPS_NAME_LEN);	\
+	SCX_ENUM_SET(skel, scx_public_consts, SCX_SLICE_DFL);		\
+	SCX_ENUM_SET(skel, scx_public_consts, SCX_SLICE_INF);		\
+									\
+	SCX_ENUM_SET(skel, scx_dsq_id_flags, SCX_DSQ_FLAG_BUILTIN);	\
+	SCX_ENUM_SET(skel, scx_dsq_id_flags, SCX_DSQ_FLAG_LOCAL_ON);	\
+	SCX_ENUM_SET(skel, scx_dsq_id_flags, SCX_DSQ_INVALID);		\
+	SCX_ENUM_SET(skel, scx_dsq_id_flags, SCX_DSQ_GLOBAL);		\
+	SCX_ENUM_SET(skel, scx_dsq_id_flags, SCX_DSQ_LOCAL);		\
+	SCX_ENUM_SET(skel, scx_dsq_id_flags, SCX_DSQ_LOCAL_ON);		\
+	SCX_ENUM_SET(skel, scx_dsq_id_flags, SCX_DSQ_LOCAL_CPU_MASK);	\
+									\
+	SCX_ENUM_SET(skel, scx_ent_flags, SCX_TASK_QUEUED);		\
+	SCX_ENUM_SET(skel, scx_ent_flags, SCX_TASK_RESET_RUNNABLE_AT);	\
+	SCX_ENUM_SET(skel, scx_ent_flags, SCX_TASK_DEQD_FOR_SLEEP);	\
+	SCX_ENUM_SET(skel, scx_ent_flags, SCX_TASK_STATE_SHIFT);	\
+	SCX_ENUM_SET(skel, scx_ent_flags, SCX_TASK_STATE_BITS);		\
+	SCX_ENUM_SET(skel, scx_ent_flags, SCX_TASK_STATE_MASK);		\
+	SCX_ENUM_SET(skel, scx_ent_flags, SCX_TASK_CURSOR);		\
+									\
+	SCX_ENUM_SET(skel, scx_task_state, SCX_TASK_NONE);		\
+	SCX_ENUM_SET(skel, scx_task_state, SCX_TASK_INIT);		\
+	SCX_ENUM_SET(skel, scx_task_state, SCX_TASK_READY);		\
+	SCX_ENUM_SET(skel, scx_task_state, SCX_TASK_ENABLED);		\
+	SCX_ENUM_SET(skel, scx_task_state, SCX_TASK_NR_STATES);		\
+									\
+	SCX_ENUM_SET(skel, scx_ent_dsq_flags, SCX_TASK_DSQ_ON_PRIQ);	\
+									\
+	SCX_ENUM_SET(skel, scx_kick_flags, SCX_KICK_IDLE);		\
+	SCX_ENUM_SET(skel, scx_kick_flags, SCX_KICK_PREEMPT);		\
+	SCX_ENUM_SET(skel, scx_kick_flags, SCX_KICK_WAIT);		\
+									\
+	SCX_ENUM_SET(skel, scx_enq_flags, SCX_ENQ_WAKEUP);		\
+	SCX_ENUM_SET(skel, scx_enq_flags, SCX_ENQ_HEAD);		\
+	SCX_ENUM_SET(skel, scx_enq_flags, SCX_ENQ_PREEMPT);		\
+	SCX_ENUM_SET(skel, scx_enq_flags, SCX_ENQ_REENQ);		\
+	SCX_ENUM_SET(skel, scx_enq_flags, SCX_ENQ_LAST);		\
+	SCX_ENUM_SET(skel, scx_enq_flags, SCX_ENQ_CLEAR_OPSS);		\
+	SCX_ENUM_SET(skel, scx_enq_flags, SCX_ENQ_DSQ_PRIQ);
 
-	u64 SCX_ENQ_WAKEUP;
-	u64 SCX_ENQ_HEAD;
-	u64 SCX_ENQ_CPU_SELECTED;
-	u64 SCX_ENQ_PREEMPT;
-	u64 SCX_ENQ_REENQ;
-	u64 SCX_ENQ_LAST;
-	u64 SCX_ENQ_CLEAR_OPSS;
-	u64 SCX_ENQ_DSQ_PRIQ;
-};
+#endif /* !__bpf__ */
 
 #endif /* __SCX_ENUMS_H */

@@ -56,14 +56,16 @@ int main(int argc, char **argv)
 	signal(SIGTERM, sigint_handler);
 restart:
 	skel = SCX_OPS_OPEN(central_ops, scx_central);
+	SCX_ENUM_INIT(skel);
 
 	skel->rodata->central_cpu = 0;
 	skel->rodata->nr_cpu_ids = libbpf_num_possible_cpus();
+	skel->rodata->slice_ns = __COMPAT_ENUM_OR_ZERO("scx_public_consts", "SCX_SLICE_DFL");
 
 	while ((opt = getopt(argc, argv, "s:c:pvh")) != -1) {
 		switch (opt) {
 		case 's':
-			skel->bss->slice_ns = strtoull(optarg, NULL, 0) * 1000;
+			skel->rodata->slice_ns = strtoull(optarg, NULL, 0) * 1000;
 			break;
 		case 'c':
 			skel->rodata->central_cpu = strtoul(optarg, NULL, 0);

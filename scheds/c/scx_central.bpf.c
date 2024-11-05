@@ -58,8 +58,8 @@ enum {
 
 const volatile s32 central_cpu;
 const volatile u32 nr_cpu_ids = 1;	/* !0 for veristat, set during init */
+const volatile u64 slice_ns;
 
-u64 slice_ns = 0;
 bool timer_pinned = true;
 u64 nr_total, nr_locals, nr_queued, nr_lost_pids;
 u64 nr_timers, nr_dispatches, nr_mismatches, nr_retries;
@@ -121,21 +121,21 @@ void BPF_STRUCT_OPS(central_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if ((p->flags & PF_KTHREAD) && p->nr_cpus_allowed == 1) {
 		__sync_fetch_and_add(&nr_locals, 1);
-		scx_bpf_dispatch(p, SCX_ENUM(DSQ_LOCAL), SCX_ENUM(SLICE_INF),
-				 enq_flags | SCX_ENUM(ENQ_PREEMPT));
+		scx_bpf_dispatch(p, SCX_ENUM(SCX_DSQ_LOCAL), SCX_ENUM(SCX_SLICE_INF),
+				 enq_flags | SCX_ENUM(SCX_ENQ_PREEMPT));
 		return;
 	}
 
 	if (bpf_map_push_elem(&central_q, &pid, 0)) {
 		__sync_fetch_and_add(&nr_overflows, 1);
-		scx_bpf_dispatch(p, FALLBACK_DSQ_ID, SCX_ENUM(SLICE_INF), enq_flags);
+		scx_bpf_dispatch(p, FALLBACK_DSQ_ID, SCX_ENUM(SCX_SLICE_INF), enq_flags);
 		return;
 	}
 
 	__sync_fetch_and_add(&nr_queued, 1);
 
 	if (!scx_bpf_task_running(p))
-		scx_bpf_kick_cpu(central_cpu, SCX_ENUM(KICK_PREEMPT));
+		scx_bpf_kick_cpu(central_cpu, SCX_ENUM(SCX_KICK_PREEMPT));
 }
 
 static bool dispatch_to_cpu(s32 cpu)
@@ -161,7 +161,7 @@ static bool dispatch_to_cpu(s32 cpu)
 		 */
 		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
 			__sync_fetch_and_add(&nr_mismatches, 1);
-			scx_bpf_dispatch(p, FALLBACK_DSQ_ID, SCX_ENUM(SLICE_INF), 0);
+			scx_bpf_dispatch(p, FALLBACK_DSQ_ID, SCX_ENUM(SCX_SLICE_INF), 0);
 			bpf_task_release(p);
 			/*
 			 * We might run out of dispatch buffer slots if we continue dispatching
@@ -175,10 +175,10 @@ static bool dispatch_to_cpu(s32 cpu)
 		}
 
 		/* dispatch to local and mark that @cpu doesn't need more */
-		scx_bpf_dispatch(p, SCX_ENUM(DSQ_LOCAL_ON) | cpu, SCX_ENUM(SLICE_INF), 0);
+		scx_bpf_dispatch(p, SCX_ENUM(SCX_DSQ_LOCAL_ON) | cpu, SCX_ENUM(SCX_SLICE_INF), 0);
 
 		if (cpu != central_cpu)
-			scx_bpf_kick_cpu(cpu, SCX_ENUM(KICK_IDLE));
+			scx_bpf_kick_cpu(cpu, SCX_ENUM(SCX_KICK_IDLE));
 
 		bpf_task_release(p);
 		return true;
@@ -217,7 +217,7 @@ void BPF_STRUCT_OPS(central_dispatch, s32 cpu, struct task_struct *prev)
 		 */
 		if (!scx_bpf_dispatch_nr_slots()) {
 			__sync_fetch_and_add(&nr_retries, 1);
-			scx_bpf_kick_cpu(central_cpu, SCX_ENUM(KICK_PREEMPT));
+			scx_bpf_kick_cpu(central_cpu, SCX_ENUM(SCX_KICK_PREEMPT));
 			return;
 		}
 
@@ -239,7 +239,7 @@ void BPF_STRUCT_OPS(central_dispatch, s32 cpu, struct task_struct *prev)
 		 * Force dispatch on the scheduling CPU so that it finds a task
 		 * to run for us.
 		 */
-		scx_bpf_kick_cpu(central_cpu, SCX_ENUM(KICK_PREEMPT));
+		scx_bpf_kick_cpu(central_cpu, SCX_ENUM(SCX_KICK_PREEMPT));
 	}
 }
 
@@ -282,19 +282,19 @@ static int central_timerfn(void *map, int *key, struct bpf_timer *timer)
 		/* kick iff the current one exhausted its slice */
 		started_at = ARRAY_ELEM_PTR(cpu_started_at, cpu, nr_cpu_ids);
 		if (started_at && *started_at &&
-		    vtime_before(now, *started_at + SCX_ENUM(SLICE_DFL)))
+		    vtime_before(now, *started_at + SCX_ENUM(SCX_SLICE_DFL)))
 			continue;
 
 		/* and there's something pending */
 		if (scx_bpf_dsq_nr_queued(FALLBACK_DSQ_ID) ||
-		    scx_bpf_dsq_nr_queued(SCX_ENUM(DSQ_LOCAL_ON) | cpu))
+		    scx_bpf_dsq_nr_queued(SCX_ENUM(SCX_DSQ_LOCAL_ON) | cpu))
 			;
 		else if (nr_to_kick)
 			nr_to_kick--;
 		else
 			continue;
 
-		scx_bpf_kick_cpu(cpu, SCX_ENUM(KICK_PREEMPT));
+		scx_bpf_kick_cpu(cpu, SCX_ENUM(SCX_KICK_PREEMPT));
 	}
 
 	bpf_timer_start(timer, TIMER_INTERVAL_NS, BPF_F_TIMER_CPU_PIN);
@@ -307,14 +307,6 @@ int BPF_STRUCT_OPS_SLEEPABLE(central_init)
 	u32 key = 0;
 	struct bpf_timer *timer;
 	int ret;
-
-	ret = SCX_ENUM_INIT();
-	if (ret)
-		return ret;
-
-	/* Use the default slice size if the user didn't set it themselves. */
-	if (slice_ns == 0)
-		slice_ns = SCX_ENUM(SLICE_DFL);
 
 	ret = scx_bpf_create_dsq(FALLBACK_DSQ_ID, -1);
 	if (ret)
