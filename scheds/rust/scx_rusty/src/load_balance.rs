@@ -759,8 +759,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             .into_iter()
             .filter(|task| {
                 task.dom_mask & (1 << pull_dom_id) != 0
-                    || !(self.skip_kworkers && task.is_kworker)
-                    || !task.migrated.get()
+                    && !(self.skip_kworkers && task.is_kworker)
+                    && !task.migrated.get()
             })
             .collect();
 
@@ -779,7 +779,10 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     .filter(|x| x.load >= OrderedFloat(to_xfer) && task_filter(x, pull_dom_id)),
             ),
         ) {
-            (None, None) => return Ok(None),
+            (None, None) => {
+                std::mem::swap(&mut push_dom.tasks, &mut SortedVec::from_unsorted(tasks));
+                return Ok(None);
+            }
             (Some(task), None) | (None, Some(task)) => (task, calc_new_imbal(*task.load)),
             (Some(task0), Some(task1)) => {
                 let (new_imbal0, new_imbal1) =
