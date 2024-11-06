@@ -259,7 +259,7 @@ static u64 calc_runtime_factor(u64 runtime, u64 weight_ft)
 static u64 calc_freq_factor(u64 freq, u64 weight_ft)
 {
 	u64 ft = sigmoid_u64(freq, LAVD_LC_FREQ_MAX);
-	return (ft * weight_ft) + 1;
+	return (ft * weight_ft * LAVD_LC_FREQ_OVER_RUNTIME) + 1;
 }
 
 static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc,
@@ -367,7 +367,7 @@ static void calc_virtual_deadline_delta(struct task_struct *p,
 	greedy_ratio = calc_greedy_ratio(taskc);
 	greedy_ft = calc_greedy_factor(greedy_ratio);
 
-	deadline = (taskc->run_time_ns / lat_cri) * greedy_ft;
+	deadline = (LAVD_SLICE_MAX_NS / lat_cri) * greedy_ft;
 	taskc->vdeadline_delta_ns = deadline;
 }
 
