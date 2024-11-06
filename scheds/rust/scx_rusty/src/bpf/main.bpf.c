@@ -84,7 +84,7 @@ const volatile u32 greedy_threshold_x_numa;
 const volatile u32 debug;
 
 /* base slice duration */
-static u64 slice_ns = SCX_SLICE_DFL;
+volatile u64 slice_ns;
 
 /*
  * Per-CPU context

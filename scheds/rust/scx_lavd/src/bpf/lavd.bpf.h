@@ -17,13 +17,11 @@ enum consts_internal  {
 	NSEC_PER_MSEC			= (1000ULL * NSEC_PER_USEC),
 
 	LAVD_TIME_ONE_SEC		= (1000ULL * NSEC_PER_MSEC),
-	LAVD_TIME_INFINITY_NS		= SCX_SLICE_INF,
 	LAVD_MAX_RETRY			= 4,
 
 	LAVD_TARGETED_LATENCY_NS	= (20ULL * NSEC_PER_MSEC),
 	LAVD_SLICE_MIN_NS		= (300ULL * NSEC_PER_USEC), /* min time slice */
 	LAVD_SLICE_MAX_NS		= (3ULL * NSEC_PER_MSEC), /* max time slice */
-	LAVD_SLICE_UNDECIDED		= SCX_SLICE_INF,
 
 	LAVD_LC_FREQ_MAX		= 1000000,
 	LAVD_LC_RUNTIME_MAX		= LAVD_TIME_ONE_SEC,
@@ -55,6 +53,9 @@ enum consts_internal  {
 
 	LAVD_CPDOM_STARV_NS		= (5ULL * NSEC_PER_MSEC),
 };
+
+const volatile u64 LAVD_TIME_INFINITY_NS;
+const volatile u64 LAVD_SLICE_UNDECIDED;
 
 /*
  * Compute domain context

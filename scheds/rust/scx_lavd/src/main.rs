@@ -50,6 +50,7 @@ use log::warn;
 use plain::Plain;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
+use scx_utils::compat;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -498,6 +499,9 @@ impl<'a> Scheduler<'a> {
         skel_builder.obj_builder.debug(opts.verbose > 0);
         let mut skel = scx_ops_open!(skel_builder, open_object, lavd_ops)?;
 
+        // Initialize BPF program constants values from the running kernel
+        Self::init_rodata(&mut skel);
+
         // Initialize CPU topology
         let topo = FlatTopology::new().unwrap();
         Self::init_cpus(&mut skel, &topo);
@@ -531,6 +535,11 @@ impl<'a> Scheduler<'a> {
             stats_server,
             mseq_id: 0,
         })
+    }
+
+    fn init_rodata(skel: &mut OpenBpfSkel) {
+        skel.maps.rodata_data.LAVD_TIME_INFINITY_NS = *compat::SCX_SLICE_INF;
+        skel.maps.rodata_data.LAVD_SLICE_UNDECIDED = *compat::SCX_SLICE_INF;
     }
 
     fn init_cpus(skel: &mut OpenBpfSkel, topo: &FlatTopology) {

@@ -30,10 +30,11 @@ char _license[] SEC("license") = "GPL";
  */
 /* Adds additional checks to ensure correctness */
 const volatile bool debug = false;
-const volatile u64 slice_ns = SCX_SLICE_DFL;
 const volatile u32 nr_possible_cpus = 1;
 const volatile bool smt_enabled = true;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
+
+const volatile u64 slice_ns;
 
 /*
 * user_global_seq is bumped by userspace to indicate that a new configuration

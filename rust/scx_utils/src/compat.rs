@@ -17,6 +17,16 @@ lazy_static::lazy_static! {
     read_enum("scx_ops_flags", "SCX_OPS_SWITCH_PARTIAL").unwrap_or(0);
 }
 
+lazy_static::lazy_static! {
+    pub static ref SCX_SLICE_DFL: u64 =
+    read_enum("scx_public_consts", "SCX_SLICE_DFL").unwrap_or(0);
+}
+
+lazy_static::lazy_static! {
+    pub static ref SCX_SLICE_INF: u64 =
+    read_enum("scx_public_consts", "SCX_SLICE_INF").unwrap_or(0);
+}
+
 fn load_vmlinux_btf() -> &'static mut btf {
     let btf = unsafe { btf__load_vmlinux_btf() };
     if btf.is_null() {

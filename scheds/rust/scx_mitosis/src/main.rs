@@ -286,6 +286,8 @@ impl<'a> Scheduler<'a> {
 
         skel.struct_ops.mitosis_mut().exit_dump_len = opts.exit_dump_len;
 
+        skel.maps.rodata_data.slice_ns = *compat::SCX_SLICE_DFL;
+
         if opts.verbose >= 1 {
             skel.maps.rodata_data.debug = true;
         }

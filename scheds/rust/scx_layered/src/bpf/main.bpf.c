@@ -22,8 +22,8 @@
 char _license[] SEC("license") = "GPL";
 
 const volatile u32 debug = 0;
-const volatile u64 slice_ns = SCX_SLICE_DFL;
-const volatile u64 max_exec_ns = 20 * SCX_SLICE_DFL;
+const volatile u64 slice_ns;
+const volatile u64 max_exec_ns;
 const volatile u32 nr_possible_cpus = 1;
 const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 llc_numa_id_map[MAX_LLCS];

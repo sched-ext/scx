@@ -382,6 +382,8 @@ impl<'a> Scheduler<'a> {
             );
         }
 
+        skel.maps.bss_data.slice_ns = *compat::SCX_SLICE_DFL;
+
         skel.maps.rodata_data.nr_nodes = domains.nr_nodes() as u32;
         skel.maps.rodata_data.nr_doms = domains.nr_doms() as u32;
         skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
