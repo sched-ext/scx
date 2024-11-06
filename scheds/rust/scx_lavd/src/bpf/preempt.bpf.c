@@ -215,9 +215,6 @@ null_out:
 static bool try_kick_cpu(struct cpu_ctx *victim_cpuc, u64 victim_last_kick_clk)
 {
 	/*
-	 * Kick a victim CPU if it is not victimized yet by another
-	 * concurrent kick task.
-	 *
 	 * Kicking the victim CPU does _not_ guarantee that task @p will run on
 	 * that CPU. Enqueuing @p to the global queue is one operation, and
 	 * kicking the victim is another asynchronous operation. However, it is
@@ -226,9 +223,32 @@ static bool try_kick_cpu(struct cpu_ctx *victim_cpuc, u64 victim_last_kick_clk)
 	 */
 	bool ret;
 
+	/*
+	 * If the current CPU is a victim, we just reset the current task's
+	 * time slice as an optimization. Othewise, kick the remote CPU for
+	 * preemption.
+	 *
+	 * Resetting task's time slice to zero does not trigger an immediate
+	 * preemption. However, the cost of self-IPI is prohibitively expensive
+	 * for some scenarios. The actual preemption will happen at the next
+	 * ops.tick().
+	 */
+	if (bpf_get_smp_processor_id() == victim_cpuc->cpu_id) {
+		struct task_struct *tsk = bpf_get_current_task_btf();
+		tsk->scx.slice = 0;
+		return true;
+	}
+
+	/*
+	 * Kick a victim CPU if it is not victimized yet by another
+	 * concurrent kick task.
+	 */
 	ret = __sync_bool_compare_and_swap(&victim_cpuc->last_kick_clk,
 					   victim_last_kick_clk,
 					   bpf_ktime_get_ns());
+	/*
+	 * Kick the remote CPU for preemption.
+	 */
 	if (ret)
 		scx_bpf_kick_cpu(victim_cpuc->cpu_id, SCX_KICK_PREEMPT);
 
