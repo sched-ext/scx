@@ -13,6 +13,7 @@
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #define CLAMP(val, lo, hi) MIN(MAX(val, lo), hi)
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
 enum consts {
 	NSEC_PER_USEC = 1000ULL,
