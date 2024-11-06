@@ -707,6 +707,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	struct bpf_cpumask *active, *ovrflw, *big, *little;
 	struct bpf_cpumask *cpdom_mask_prev, *cpdom_mask_waker;
 	s32 cpu_id, waker_cpu;
+	int cpdom_id;
 
 	/*
 	 * If a task can run only on a single CPU (e.g., per-CPU kworker), we
@@ -747,7 +748,8 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		goto unlock_out;
 	}
 
-	cpdom_mask_prev = MEMBER_VPTR(cpdom_cpumask, [cpuc_prev->cpdom_id]);
+	cpdom_id = cpuc_prev->cpdom_id;
+	cpdom_mask_prev = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
 	if (!cpdom_mask_prev) {
 		scx_bpf_error("Failed to lookup cpdom_cpumask for %d",
 			      cpuc_prev->cpdom_id);
@@ -763,7 +765,8 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		goto unlock_out;
 	}
 
-	cpdom_mask_waker = MEMBER_VPTR(cpdom_cpumask, [cpuc_waker->cpdom_id]);
+	cpdom_id = cpuc_waker->cpdom_id;
+	cpdom_mask_waker = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
 	if (!cpdom_mask_waker) {
 		scx_bpf_error("Failed to lookup cpdom_cpumask for %d",
 			      cpuc_waker->cpdom_id);

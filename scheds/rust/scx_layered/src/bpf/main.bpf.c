@@ -532,7 +532,7 @@ bool should_try_preempt_first(s32 cand, struct layer *layer,
 	if (!layer->preempt || !layer->preempt_first)
 		return false;
 
-	if (!layer->open && !bpf_cpumask_test_cpu(cand, layered_cpumask))
+	if (layer->kind == LAYER_KIND_CONFINED && !bpf_cpumask_test_cpu(cand, layered_cpumask))
 		return false;
 
 	if (!(cand_cctx = lookup_cpu_ctx(cand)) || cand_cctx->current_preempt)
@@ -561,7 +561,7 @@ s32 pick_idle_no_topo(struct task_struct *p, s32 prev_cpu,
 
 	/* not much to do if bound to a single CPU */
 	if (p->nr_cpus_allowed == 1 && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		if (!layer->open && !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
+		if (layer->kind == LAYER_KIND_CONFINED && !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 		return prev_cpu;
 	}
@@ -621,7 +621,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 
 	/* not much to do if bound to a single CPU */
 	if (p->nr_cpus_allowed == 1 && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		if (!layer->open && !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
+		if (layer->kind == LAYER_KIND_CONFINED && !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 		return prev_cpu;
 	}
@@ -709,7 +709,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	/*
 	 * If the layer is an open one, we can try the whole machine.
 	 */
-	if (layer->open &&
+	if (layer->kind != LAYER_KIND_CONFINED &&
 	    ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu,
 				       idle_cpumask)) >= 0)) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cctx);
@@ -778,7 +778,7 @@ bool try_preempt_cpu(s32 cand, struct task_struct *p, struct cpu_ctx *cctx,
 		     struct task_ctx *tctx, struct layer *layer,
 		     bool preempt_first)
 {
-	struct cost *cost;
+	struct cost *costc;
 	struct cpu_ctx *cand_cctx, *sib_cctx = NULL;
 	s32 sib;
 
@@ -788,7 +788,7 @@ bool try_preempt_cpu(s32 cand, struct task_struct *p, struct cpu_ctx *cctx,
 	if (!(cand_cctx = lookup_cpu_ctx(cand)) || cand_cctx->current_preempt)
 		return false;
 
-	if (!(cost = lookup_cpu_cost(cand)) || has_budget(cost, layer) == 0)
+	if (!(costc = lookup_cpu_cost(cand)) || has_budget(costc, layer) == 0)
 		return false;
 
 	/*
@@ -1070,7 +1070,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	    (p->flags & PF_KTHREAD) && p->nr_cpus_allowed < nr_possible_cpus) {
 		struct cpumask *layer_cpumask;
 
-		if (!layer->open &&
+		if (layer->kind == LAYER_KIND_CONFINED &&
 		    (layer_cpumask = lookup_layer_cpumask(tctx->layer)) &&
 		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
@@ -1087,7 +1087,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * confined layer may fail to be consumed for an indefinite amount of
 	 * time. Queue them to the fallback DSQ.
 	 */
-	if (!layer->open && !tctx->all_cpus_allowed) {
+	if (layer->kind == LAYER_KIND_CONFINED && !tctx->all_cpus_allowed) {
 		lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 		/*
 		 * We were previously dispatching to LO_FALLBACK_DSQ for any
@@ -1183,7 +1183,7 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 		 * CPU. If confined, keep running if and only if the layer has
 		 * idle CPUs.
 		 */
-		if (layer->open) {
+		if (layer->kind != LAYER_KIND_CONFINED) {
 			has_idle = !bpf_cpumask_empty(idle_cpumask);
 		} else {
 			struct cpumask *layer_cpumask;
@@ -1213,12 +1213,12 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cctx, *sib_cctx;
 	struct layer *layer;
-	struct cost *cost;
+	struct cost *costc;
 	u64 dsq_id;
 	u32 idx, layer_idx;
 	s32 sib = sibling_cpu(cpu);
 
-	if (!(cctx = lookup_cpu_ctx(-1)) || !(cost = lookup_cpu_cost(cpu)))
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(costc = lookup_cpu_cost(cpu)))
 		return;
 
 	/*
@@ -1249,13 +1249,13 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
-		layer_idx = rotate_layer_id(cost->pref_layer, idx);
+		layer_idx = rotate_layer_id(costc->pref_layer, idx);
 		if (layer_idx >= nr_layers) {
 			scx_bpf_error("can't happen");
 			return;
 		}
 		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (has_budget(cost, layer) == 0)
+		if (has_budget(costc, layer) == 0)
 			continue;
 		if (layer->preempt && scx_bpf_consume(layer_idx))
 			return;
@@ -1267,13 +1267,13 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 
 	/* consume !open layers second */
 	bpf_for(idx, 0, nr_layers) {
-		layer_idx = rotate_layer_id(cost->pref_layer, idx);
+		layer_idx = rotate_layer_id(costc->pref_layer, idx);
 		if (layer_idx >= nr_layers) {
 			scx_bpf_error("can't happen");
 			return;
 		}
 		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (has_budget(cost, layer) == 0)
+		if (has_budget(costc, layer) == 0)
 			continue;
 		struct cpumask *layer_cpumask;
 
@@ -1290,15 +1290,15 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 
 	/* consume !preempting open layers */
 	bpf_for(idx, 0, nr_layers) {
-		layer_idx = rotate_layer_id(cost->pref_layer, idx);
+		layer_idx = rotate_layer_id(costc->pref_layer, idx);
 		if (layer_idx >= nr_layers) {
 			scx_bpf_error("can't happen");
 			return;
 		}
 		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (has_budget(cost, layer) == 0)
+		if (has_budget(costc, layer) == 0)
 			continue;
-		if (!layer->preempt && layers->open &&
+		if (!layer->preempt && layer->kind != LAYER_KIND_CONFINED &&
 		    scx_bpf_consume(layer_idx))
 			return;
 	}
@@ -1396,7 +1396,7 @@ int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
 			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
 
-			if (!layer->preempt && layer->open && scx_bpf_consume(dsq_id))
+			if (!layer->preempt && layer->kind != LAYER_KIND_CONFINED && scx_bpf_consume(dsq_id))
 				return 0;
 		}
 	}
@@ -1877,7 +1877,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 	struct layer *layer;
-	struct cost *cost;
+	struct cost *costc;
 	s32 lidx;
 	u64 used;
 
@@ -1885,7 +1885,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	lidx = tctx->layer;
-	if (!(layer = lookup_layer(lidx)) || !(cost = lookup_cpu_cost(-1)))
+	if (!(layer = lookup_layer(lidx)) || !(costc = lookup_cpu_cost(-1)))
 		return;
 
 	used = bpf_ktime_get_ns() - tctx->running_at;
@@ -1895,7 +1895,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		used = layer->min_exec_ns;
 	}
 
-	record_cpu_cost(cost, layer->idx, (s64)used);
+	record_cpu_cost(costc, layer->idx, (s64)used);
 	cctx->layer_cycles[lidx] += used;
 	cctx->current_preempt = false;
 	cctx->prev_exclusive = cctx->current_exclusive;
@@ -2285,7 +2285,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		struct layer *layer = &layers[i];
 
 		dbg("CFG LAYER[%d][%s] min_exec_ns=%lu open=%d preempt=%d exclusive=%d",
-		    i, layer->name, layer->min_exec_ns, layer->open, layer->preempt,
+		    i, layer->name, layer->min_exec_ns, layer->kind != LAYER_KIND_CONFINED, layer->preempt,
 		    layer->exclusive);
 
 		if (layer->nr_match_ors > MAX_LAYER_MATCH_ORS) {
