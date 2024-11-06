@@ -61,7 +61,7 @@ def gen_enums_bpf_h():
     with open(autogen, "w") as f:
         f.write(warning)
         for _, symbol in enums:
-            f.write("const volatile u64 {};\n".format(localvar(symbol)))
+            f.write("const volatile u64 {} __weak;\n".format(localvar(symbol)))
             f.write("#define {} {}\n".format(symbol, localvar(symbol)))
             f.write("\n")
 

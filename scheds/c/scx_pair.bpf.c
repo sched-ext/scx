@@ -124,7 +124,7 @@ char _license[] SEC("license") = "GPL";
 const volatile u32 nr_cpu_ids = 1;
 
 /* a pair of CPUs stay on a cgroup for this duration */
-const volatile u32 pair_batch_dur_ns = SCX_SLICE_DFL;
+const volatile u32 pair_batch_dur_ns;
 
 /* cpu ID -> pair cpu ID */
 const volatile s32 RESIZABLE_ARRAY(rodata, pair_cpu);

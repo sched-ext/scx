@@ -13,7 +13,6 @@
 #include <libgen.h>
 #include <bpf/bpf.h>
 #include <scx/common.h>
-#include <scx/enums.h>
 #include "scx_central.bpf.skel.h"
 
 const char help_fmt[] =
@@ -56,7 +55,6 @@ int main(int argc, char **argv)
 	signal(SIGTERM, sigint_handler);
 restart:
 	skel = SCX_OPS_OPEN(central_ops, scx_central);
-	SCX_ENUM_INIT(skel);
 
 	skel->rodata->central_cpu = 0;
 	skel->rodata->nr_cpu_ids = libbpf_num_possible_cpus();

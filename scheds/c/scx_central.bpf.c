@@ -46,7 +46,6 @@
  * Copyright (c) 2022 David Vernet <dvernet@meta.com>
  */
 #include <scx/common.bpf.h>
-#include <scx/enums.bpf.h>
 
 char _license[] SEC("license") = "GPL";
 
