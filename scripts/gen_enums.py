@@ -86,7 +86,7 @@ def gen_enums_rs():
         f.write("#[allow(non_snake_case)]\n")
         f.write("pub struct Enums {\n")
         for _, symbol in enums:
-            f.write("    pub {} : u64,\n".format(symbol))
+            f.write("    pub {}: u64,\n".format(symbol))
         f.write("}\n\n")
 
         # Step two: Create the enum singleton we expose to the schedulers
