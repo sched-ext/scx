@@ -75,10 +75,25 @@ def gen_enums_h():
             f.write("\tSCX_ENUM_SET(skel, {}, {}); \\\n".format(kind, symbol))
         f.write("} while (0)\n")
 
+def gen_enums_rs():
+    autogen = Path.cwd() / "rust" / "scx_utils" / "src" / "enums_autogen.rs"
+    with open(autogen, "w") as f:
+        f.write(warning)
+        f.write("pub mod enums_autogen {\n")
+        f.write("\tuse crate::compat::read_enum;\n\n")
+        for kind, symbol in enums:
+            f.write("\tlazy_static::lazy_static! {\n")
+            f.write("\t\tpub static ref {}: u64 =\n".format(symbol))
+            f.write("\t\tread_enum(\"{}\", \"{}\").unwrap_or(0);\n".format(kind, symbol))
+            f.write("\t}\n\n")
+        f.write("}")
+
+
 """
     Helper script for autogenerating relocatable enum headers.
 """
 if __name__ == "__main__":
     gen_enums_bpf_h()
     gen_enums_h()
+    gen_enums_rs()
 
