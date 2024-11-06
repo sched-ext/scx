@@ -50,7 +50,6 @@ use log::warn;
 use plain::Plain;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
-use scx_utils::compat;
 use scx_utils::import_enums;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
@@ -540,8 +539,8 @@ impl<'a> Scheduler<'a> {
     }
 
     fn init_rodata(skel: &mut OpenBpfSkel) {
-        skel.maps.rodata_data.LAVD_TIME_INFINITY_NS = *compat::SCX_SLICE_INF;
-        skel.maps.rodata_data.LAVD_SLICE_UNDECIDED = *compat::SCX_SLICE_INF;
+        skel.maps.rodata_data.LAVD_TIME_INFINITY_NS = scx_enums.SCX_SLICE_INF;
+        skel.maps.rodata_data.LAVD_SLICE_UNDECIDED = scx_enums.SCX_SLICE_INF;
     }
 
     fn init_cpus(skel: &mut OpenBpfSkel, topo: &FlatTopology) {

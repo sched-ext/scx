@@ -1457,8 +1457,8 @@ impl<'a> Scheduler<'a> {
         skel_builder.obj_builder.debug(opts.verbose > 1);
         init_libbpf_logging(None);
         let mut skel = scx_ops_open!(skel_builder, open_object, layered)?;
-        skel.maps.rodata_data.slice_ns = *compat::SCX_SLICE_DFL;
-        skel.maps.rodata_data.max_exec_ns = 20 * *compat::SCX_SLICE_DFL;
+        skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;
+        skel.maps.rodata_data.max_exec_ns = 20 * scx_enums.SCX_SLICE_DFL;
 
         // scheduler_tick() got renamed to sched_tick() during v6.10-rc.
         let sched_tick_name = match compat::ksym_exists("sched_tick")? {

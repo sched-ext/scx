@@ -384,7 +384,7 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        skel.maps.bss_data.slice_ns = *compat::SCX_SLICE_DFL;
+        skel.maps.bss_data.slice_ns = scx_enums.SCX_SLICE_DFL;
         println!("Value is {}", skel.maps.bss_data.slice_ns);
 
         skel.maps.rodata_data.nr_nodes = domains.nr_nodes() as u32;
