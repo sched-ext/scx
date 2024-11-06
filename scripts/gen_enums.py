@@ -76,16 +76,36 @@ def gen_enums_h():
         f.write("} while (0)\n")
 
 def gen_enums_rs():
-    autogen = Path.cwd() / "rust" / "scx_utils" / "src" / "enums_autogen.rs"
+    autogen = Path.cwd() / "rust" / "scx_utils" / "src" / "enums.rs"
     with open(autogen, "w") as f:
         f.write(warning)
-        f.write("pub mod enums_autogen {\n")
-        f.write("\tuse crate::compat::read_enum;\n\n")
+        f.write("use crate::compat::read_enum;\n\n")
+
+        # Step one: Create the enum struct with all the individual enums.
+        f.write("#[derive(Debug)]\n")
+        f.write("#[allow(non_snake_case)]\n")
+        f.write("pub struct Enums {\n")
+        for _, symbol in enums:
+            f.write("    pub {} : u64,\n".format(symbol))
+        f.write("}\n\n")
+
+        # Step two: Create the enum singleton we expose to the schedulers
+        f.write("lazy_static::lazy_static! {\n")
+        f.write("    pub static ref scx_enums: Enums = Enums {\n")
         for kind, symbol in enums:
-            f.write("\tlazy_static::lazy_static! {\n")
-            f.write("\t\tpub static ref {}: u64 =\n".format(symbol))
-            f.write("\t\tread_enum(\"{}\", \"{}\").unwrap_or(0);\n".format(kind, symbol))
-            f.write("\t}\n\n")
+            f.write("        {}: read_enum(\"{}\",\"{}\").unwrap(),\n".format(symbol, kind, symbol))
+        f.write("    };\n")
+        f.write("}\n\n")
+
+        # Step 3: Create the BPF .rodata setter macro
+        f.write("#[rustfmt::skip]\n")
+        f.write("#[macro_export]\n")
+        f.write("macro_rules! import_enums {\n")
+        f.write("    ($skel: ident) => { 'block : {\n")
+        for _, symbol in enums:
+            f.write("        $skel.maps.rodata_data.{} = scx_enums.{};\n".format(localvar(symbol), symbol))
+        f.write("    }};\n")
+
         f.write("}")
 
 

@@ -16,7 +16,7 @@
  * similar to other deadline-based scheduling algorithms. Under LAVD, a
  * runnable task has its time slice and virtual deadline. The LAVD scheduler
  * picks a task with the closest virtual deadline and allows it to execute for
- * the given time slice. 
+ * the given time slice.
  *
  *
  * 2. Latency criticality: how to determine how latency-critical a task is
@@ -572,7 +572,7 @@ static void update_stat_for_running(struct task_struct *p,
 
 	if (taskc->victim_cpu >= 0)
 		cpuc->nr_preemption++;
-	
+
 	if (is_lat_cri(taskc, stat_cur))
 		cpuc->nr_lat_cri++;
 
@@ -1158,13 +1158,13 @@ static bool consume_starving_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 
 		if (dsq_id == cpuc->cpdom_id)
 			continue;
-	
+
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
 		if (!cpdomc) {
 			scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_id);
 			goto out;
 		}
-	
+
 		if (cpdomc->is_active) {
 			dl = READ_ONCE(cpdomc->last_consume_clk) + LAVD_CPDOM_STARV_NS;
 			if (dl < now) {
@@ -1229,12 +1229,12 @@ static bool consume_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 
 			if (!cpdomc_pick->is_active)
 				continue;
-	
+
 			if (consume_dsq(cpu, dsq_id, now))
 				return true;
 		}
 	}
-	
+
 	return false;
 }
 
@@ -1910,7 +1910,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	u64 cpdom_id;
 	u32 sum_capacity = 0, avg_capacity, big_capacity = 0;
 	u16 turbo_cap;
-	
+
 	bpf_rcu_read_lock();
 
 	/*
