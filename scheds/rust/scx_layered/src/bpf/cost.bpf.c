@@ -122,7 +122,7 @@ static struct cost *initialize_cost(u32 cost_idx, u32 parent_idx,
 /*
  * Initializes a budget.
  */
-static void initialize_budget(struct cost *costc, u32 budget_id, s64 capacity)
+static __noinline void initialize_budget(struct cost *costc, u32 budget_id, s64 capacity)
 {
 	if (budget_id >= MAX_GLOBAL_BUDGETS) {
 		scx_bpf_error("invalid budget id %d", budget_id);

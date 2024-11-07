@@ -1335,17 +1335,17 @@ int consume_preempting(struct cost *costc, u32 my_llc_id)
 	if (!costc)
 		return -EINVAL;
 
-	bpf_for(idx, 0, nr_layers) {
-		layer_idx = rotate_layer_id(costc->pref_layer, idx);
-		if (layer_idx >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return -EINVAL;
-		}
-		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (has_budget(costc, layer) == 0)
-			continue;
-		bpf_for(llc_idx, 0, nr_llcs) {
-			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+	bpf_for(llc_idx, 0, nr_llcs) {
+		u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+		bpf_for(idx, 0, nr_layers) {
+			layer_idx = rotate_layer_id(costc->pref_layer, idx);
+			if (layer_idx >= nr_layers) {
+				scx_bpf_error("can't happen");
+				return -EINVAL;
+			}
+			layer = MEMBER_VPTR(layers, [layer_idx]);
+			if (has_budget(costc, layer) == 0)
+				continue;
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
 			if (layer->preempt && scx_bpf_consume(dsq_id))
 				return 0;
@@ -1355,6 +1355,7 @@ int consume_preempting(struct cost *costc, u32 my_llc_id)
 	return -ENOENT;
 }
 
+static __noinline
 int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
 {
 	struct layer *layer;
@@ -1364,17 +1365,17 @@ int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
 	if (!costc)
 		return -EINVAL;
 
-	bpf_for(idx, 0, nr_layers) {
-		layer_idx = rotate_layer_id(costc->pref_layer, idx);
-		if (layer_idx >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return -EINVAL;
-		}
-		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (has_budget(costc, layer) == 0)
-			continue;
-		bpf_for(llc_idx, 0, nr_llcs) {
-			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+	bpf_for(llc_idx, 0, nr_llcs) {
+		u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+		bpf_for(idx, 0, nr_layers) {
+			layer_idx = rotate_layer_id(costc->pref_layer, idx);
+			if (layer_idx >= nr_layers) {
+				scx_bpf_error("can't happen");
+				return -EINVAL;
+			}
+			layer = MEMBER_VPTR(layers, [layer_idx]);
+			if (has_budget(costc, layer) == 0)
+				continue;
 			struct cpumask *layer_cpumask;
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
 
