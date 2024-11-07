@@ -1264,7 +1264,7 @@ struct {
  *
  * Return: runnable_at delay, if any exists, in seconds.
  */
-int get_delay_sec(struct task_struct *p, u64 jiffies_now) 
+int get_delay_sec(struct task_struct *p, u64 jiffies_now)
 {
 	u64 runnable_at, delta_secs;
 	runnable_at = READ_ONCE(p->scx.runnable_at);
@@ -1282,9 +1282,9 @@ int get_delay_sec(struct task_struct *p, u64 jiffies_now)
  * antistall_consume() - consume delayed DSQ
  * @cpu: cpu number
  * @cctx: cpu context
- * 
+ *
  * This function consumes a delayed DSQ. This is meant to be called
- * from dispatch, before any other logic which could result in a 
+ * from dispatch, before any other logic which could result in a
  * DSQ being consumed.
  *
  * This is meant to prevent issues such as DSQs with affinitized tasks
@@ -1299,8 +1299,8 @@ bool antistall_consume(s32 cpu, struct cpu_ctx *cctx)
 	u32 zero;
 	bool consumed;
 	struct task_struct *p;
-	
-	cur_delay = 0;	
+
+	cur_delay = 0;
 	consumed = false;
 	zero = 0;
 
@@ -1309,9 +1309,9 @@ bool antistall_consume(s32 cpu, struct cpu_ctx *cctx)
 
 	if (!cctx || !cctx->layer_idx || !cpu)
 		return false;
-	
+
 	antistall_dsq = bpf_map_lookup_elem(&antistall_cpu_dsq, &zero);
-	
+
 	if (!antistall_dsq) {
 		scx_bpf_error("cant happen");
 		return false;
@@ -1319,12 +1319,12 @@ bool antistall_consume(s32 cpu, struct cpu_ctx *cctx)
 
 	if (*antistall_dsq == SCX_DSQ_INVALID)
 		return false;
-	
+
 	consumed = scx_bpf_consume(*antistall_dsq);
-	
-	if (!consumed) 
+
+	if (!consumed)
 		goto reset;
-	
+
 	jiffies_now = bpf_jiffies64();
 
 	bpf_for_each(scx_dsq, p, *antistall_dsq, 0) {
@@ -1332,10 +1332,10 @@ bool antistall_consume(s32 cpu, struct cpu_ctx *cctx)
 
 		if (cur_delay > antistall_sec)
 			return consumed;
-		
-		goto reset;	
+
+		goto reset;
 	}
-	
+
 reset:
 	trace("antistall reset DSQ[%llu] SELECTED_CPU[%llu] DELAY[%llu]", *antistall_dsq, cpu, cur_delay);
 	*antistall_dsq = SCX_DSQ_INVALID;
@@ -1462,18 +1462,17 @@ __weak int consume_preempting(struct cost *costc, u32 my_llc_id)
 	if (!costc)
 		return -EINVAL;
 
-	bpf_for(idx, 0, nr_layers) {
-		layer_idx = rotate_layer_id(costc->pref_layer, idx);
-		if (layer_idx >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return -EINVAL;
-		}
-		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (!layer->preempt || has_budget(costc, layer) == 0)
-			continue;
-
-		bpf_for(llc_idx, 0, nr_llcs) {
-			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+	bpf_for(llc_idx, 0, nr_llcs) {
+		u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+		bpf_for(idx, 0, nr_layers) {
+			layer_idx = rotate_layer_id(costc->pref_layer, idx);
+			if (layer_idx >= nr_layers) {
+				scx_bpf_error("can't happen");
+				return -EINVAL;
+			}
+			layer = MEMBER_VPTR(layers, [layer_idx]);
+			if (has_budget(costc, layer) == 0)
+				continue;
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
 			if (scx_bpf_consume(dsq_id))
 				return 0;
@@ -1483,7 +1482,7 @@ __weak int consume_preempting(struct cost *costc, u32 my_llc_id)
 	return -ENOENT;
 }
 
-__weak int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
+static __noinline int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
 {
 	struct layer *layer;
 	u64 dsq_id;
@@ -1492,27 +1491,29 @@ __weak int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
 	if (!costc)
 		return -EINVAL;
 
-	bpf_for(idx, 0, nr_layers) {
-		layer_idx = rotate_layer_id(costc->pref_layer, idx);
-		if (layer_idx >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return -EINVAL;
-		}
-		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (has_budget(costc, layer) == 0)
-			continue;
+	bpf_for(llc_idx, 0, nr_llcs) {
+		u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+		bpf_for(idx, 0, nr_layers) {
+			layer_idx = rotate_layer_id(costc->pref_layer, idx);
+			if (layer_idx >= nr_layers) {
+				scx_bpf_error("can't happen");
+				return -EINVAL;
+			}
+			layer = MEMBER_VPTR(layers, [layer_idx]);
+			if (has_budget(costc, layer) == 0)
+				continue;
 
-		struct cpumask *layer_cpumask;
-		if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
-			return -ENOENT;
-		if (!bpf_cpumask_test_cpu(cpu, layer_cpumask) &&
-		    (cpu > nr_possible_cpus || cpu != fallback_cpu || layer->nr_cpus != 0))
-			continue;
+			struct cpumask *layer_cpumask;
+			if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
+				return -ENOENT;
 
-		bpf_for(llc_idx, 0, nr_llcs) {
-			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+			if (!bpf_cpumask_test_cpu(cpu, layer_cpumask) &&
+			    (cpu > nr_possible_cpus ||
+			     cpu != fallback_cpu ||
+			     layer->nr_cpus != 0))
+				continue;
+
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
-
 			if (scx_bpf_consume(dsq_id))
 				return 0;
 		}
@@ -1530,21 +1531,21 @@ __weak int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
 	if (!costc)
 		return -EINVAL;
 
-	bpf_for(idx, 0, nr_layers) {
-		layer_idx = rotate_layer_id(costc->pref_layer, idx);
-		if (layer_idx >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return -EINVAL;
-		}
-		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (has_budget(costc, layer) == 0)
-			continue;
-		if (layer->preempt || layer->kind == LAYER_KIND_CONFINED)
-			continue;
-		bpf_for(llc_idx, 0, nr_llcs) {
-			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
-			dsq_id = layer_dsq_id(layer_idx, llc_id);
+	bpf_for(llc_idx, 0, nr_llcs) {
+		u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+		bpf_for(idx, 0, nr_layers) {
+			layer_idx = rotate_layer_id(costc->pref_layer, idx);
+			if (layer_idx >= nr_layers) {
+				scx_bpf_error("can't happen");
+				return -EINVAL;
+			}
+			layer = MEMBER_VPTR(layers, [layer_idx]);
+			if (has_budget(costc, layer) == 0)
+				continue;
+			if (layer->preempt || layer->kind == LAYER_KIND_CONFINED)
+				continue;
 
+			dsq_id = layer_dsq_id(layer_idx, llc_id);
 			if (scx_bpf_consume(dsq_id))
 				return 0;
 		}
@@ -1569,7 +1570,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	if (antistall_consume(cpu, cctx))
 		return;
-	
+
 	/*
 	 * if @prev was on SCX and is still runnable, we are here because @prev
 	 * has exhausted its slice. We may want to keep running it on this CPU
@@ -2385,7 +2386,7 @@ static bool layered_monitor(void)
  * If it cannot find such a CPU to flag, it will try to flag a CPU flagged to
  * process another with a lesser delay if one exists.
  */
-u64 antistall_set(u64 dsq_id, u64 jiffies_now) 
+u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 {
 	struct task_struct *p;
 	struct task_ctx *tctx;
@@ -2393,36 +2394,36 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 	u64 *antistall_dsq, *delay, cur_delay;
 	bool first_pass;
 	u32 zero;
-	
+
 	zero = 0;
 
 	if (!dsq_id || !jiffies_now)
 		return 0;
-	
+
 	// verifier
-	bpf_rcu_read_lock();	
+	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, p, dsq_id, 0) {
-		
+
 		if (!(tctx = lookup_task_ctx(p)))
 			goto unlock;
-		
+
 		cur_delay = get_delay_sec(p, jiffies_now);
 		if (cur_delay <= antistall_sec)
 			// check head task in dsq
 			goto unlock;
-		
+
 		first_pass = true;
 look_for_cpu:
 		bpf_for(cpu, 0, nr_possible_cpus) {
 			if (!tctx->layered_cpumask)
 				goto unlock;
-			
+
 			if (!bpf_cpumask_test_cpu(cpu,   cast_mask(tctx->layered_cpumask)))
 				continue;
-			
+
 			antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq, &zero, cpu);
 			delay = bpf_map_lookup_percpu_elem(&antistall_cpu_max_delay, &zero, cpu);
-			
+
 			if (!antistall_dsq || !delay) {
 				scx_bpf_error("cant happen");
 				goto unlock;
@@ -2437,15 +2438,15 @@ look_for_cpu:
 
 			if (first_pass)
 				continue;
-				
+
 			if (*delay < cur_delay) {
 				trace("antistall set DSQ[%llu] SELECTED_CPU[%llu] DELAY[%llu]", dsq_id, cpu, cur_delay);
 				*delay = cur_delay;
 				*antistall_dsq = dsq_id;
 				goto unlock;
 			}
-		}		
-		
+		}
+
 		if (first_pass) {
 			first_pass = false;
 			goto look_for_cpu;
@@ -2476,7 +2477,7 @@ static bool antistall_scan(void)
 		return true;
 
 	jiffies_now = bpf_jiffies64();
-	
+
 	bpf_for(dsq_id, 0, nr_layers) {
 		antistall_set(dsq_id, jiffies_now);
 	}
@@ -2485,11 +2486,11 @@ static bool antistall_scan(void)
 		dsq_id = cpu_hi_fallback_dsq_id(cpu);
 		antistall_set(dsq_id, jiffies_now);
 	}
-	
+
 	antistall_set(LO_FALLBACK_DSQ, jiffies_now);
-	
+
 	antistall_set(HI_FALLBACK_DSQ_BASE, jiffies_now);
-	
+
 	return true;
 }
 
@@ -2544,7 +2545,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	nr_online_cpus = 0;
 	bpf_for(i, 0, nr_possible_cpus) {
 		const volatile u8 *u8_ptr;
-		
+
 	  init_antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq, &zero, i);
 		if (init_antistall_dsq) {
 			*init_antistall_dsq = SCX_DSQ_INVALID;
