@@ -301,7 +301,7 @@ static struct cpumask *lookup_layer_cpumask(int idx)
 	struct layer_cpumask_wrapper *cpumaskw;
 
 	if ((cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &idx))) {
-		return (struct cpumask *)cpumaskw->cpumask;
+		return cast_mask(cpumaskw->cpumask);
 	} else {
 		scx_bpf_error("no layer_cpumask");
 		return NULL;
@@ -561,7 +561,7 @@ s32 pick_idle_no_topo(struct task_struct *p, s32 prev_cpu,
 	s32 cpu;
 
 	/* look up cpumasks */
-	if (!(layered_cpumask = (struct cpumask *)tctx->layered_cpumask) ||
+	if (!(layered_cpumask = cast_mask(tctx->layered_cpumask)) ||
 	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)))
 			return -1;
 
@@ -616,14 +616,14 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	s32 cpu;
 
 	/* look up cpumasks */
-	if (!(layered_cpumask = (struct cpumask *)tctx->layered_cpumask) ||
+	if (!(layered_cpumask = cast_mask(tctx->layered_cpumask)) ||
 	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)) ||
 	    !(cachec = lookup_cache_ctx(cctx->cache_idx)) ||
 	    !(nodec = lookup_node_ctx(cctx->node_idx)))
 			return -1;
 
-	if (!(cache_cpumask = (struct cpumask *)cachec->cpumask) ||
-	    !(node_cpumask = (struct cpumask *)nodec->cpumask))
+	if (!(cache_cpumask = cast_mask(cachec->cpumask)) ||
+	    !(node_cpumask = cast_mask(nodec->cpumask)))
 		return -1;
 
 	/* not much to do if bound to a single CPU */
@@ -2003,7 +2003,7 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 	}
 
 	tctx->all_cpus_allowed =
-		bpf_cpumask_subset((const struct cpumask *)all_cpumask, cpumask);
+		bpf_cpumask_subset(cast_mask(all_cpumask), cpumask);
 }
 
 void BPF_STRUCT_OPS(layered_cpu_release, s32 cpu,
@@ -2048,7 +2048,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 
 	if (all_cpumask)
 		tctx->all_cpus_allowed =
-			bpf_cpumask_subset((const struct cpumask *)all_cpumask, p->cpus_ptr);
+			bpf_cpumask_subset(cast_mask(all_cpumask), p->cpus_ptr);
 	else
 		scx_bpf_error("missing all_cpumask");
 
