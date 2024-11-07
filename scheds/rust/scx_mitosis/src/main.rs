@@ -36,8 +36,10 @@ use log::trace;
 use maplit::btreemap;
 use maplit::hashmap;
 use scx_utils::compat;
+use scx_utils::import_enums;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
+use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -285,6 +287,8 @@ impl<'a> Scheduler<'a> {
             .context("Failed to set attach target for sched_tick_fentry()")?;
 
         skel.struct_ops.mitosis_mut().exit_dump_len = opts.exit_dump_len;
+
+        skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;
 
         if opts.verbose >= 1 {
             skel.maps.rodata_data.debug = true;

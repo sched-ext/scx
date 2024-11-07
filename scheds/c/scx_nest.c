@@ -171,6 +171,7 @@ restart:
 
 	skel->rodata->nr_cpus = libbpf_num_possible_cpus();
 	skel->rodata->sampling_cadence_ns = SAMPLING_CADENCE_S * 1000 * 1000 * 1000;
+	skel->rodata->slice_ns = __COMPAT_ENUM_OR_ZERO("scx_public_consts", "SCX_SLICE_DFL");
 
 	while ((opt = getopt(argc, argv, "d:m:i:Is:vh")) != -1) {
 		switch (opt) {

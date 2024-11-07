@@ -47,7 +47,7 @@ enum {
 const volatile u64 p_remove_ns = 2 * NSEC_PER_MSEC;
 const volatile u64 r_max = 5;
 const volatile u64 r_impatient = 2;
-const volatile u64 slice_ns = SCX_SLICE_DFL;
+const volatile u64 slice_ns;
 const volatile bool find_fully_idle = false;
 const volatile u64 sampling_cadence_ns = 1 * NSEC_PER_SEC;
 const volatile u64 r_depth = 5;
