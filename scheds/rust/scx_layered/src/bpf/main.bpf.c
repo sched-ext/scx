@@ -1326,7 +1326,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	scx_bpf_consume(LO_FALLBACK_DSQ);
 }
 
-int consume_preempting(struct cost *costc, u32 my_llc_id)
+__weak int consume_preempting(struct cost *costc, u32 my_llc_id)
 {
 	struct layer *layer;
 	u64 dsq_id;
@@ -1342,12 +1342,13 @@ int consume_preempting(struct cost *costc, u32 my_llc_id)
 			return -EINVAL;
 		}
 		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (has_budget(costc, layer) == 0)
+		if (!layer->preempt || has_budget(costc, layer) == 0)
 			continue;
+
 		bpf_for(llc_idx, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
-			if (layer->preempt && scx_bpf_consume(dsq_id))
+			if (scx_bpf_consume(dsq_id))
 				return 0;
 		}
 	}
@@ -1355,7 +1356,7 @@ int consume_preempting(struct cost *costc, u32 my_llc_id)
 	return -ENOENT;
 }
 
-int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
+__weak int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
 {
 	struct layer *layer;
 	u64 dsq_id;
@@ -1373,28 +1374,27 @@ int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
 		layer = MEMBER_VPTR(layers, [layer_idx]);
 		if (has_budget(costc, layer) == 0)
 			continue;
+
+		struct cpumask *layer_cpumask;
+		if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
+			return 0;
+		if (!bpf_cpumask_test_cpu(cpu, layer_cpumask) &&
+		    (cpu > nr_possible_cpus || cpu != fallback_cpu || layer->nr_cpus != 0))
+			continue;
+
 		bpf_for(llc_idx, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
-			struct cpumask *layer_cpumask;
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
 
-			/* consume matching layers */
-			if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
+			if (scx_bpf_consume(dsq_id))
 				return 0;
-
-			if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
-			    (cpu <= nr_possible_cpus && cpu == fallback_cpu &&
-			    layer->nr_cpus == 0)) {
-				if (scx_bpf_consume(dsq_id))
-					return 0;
-			}
 		}
 	}
 
 	return -ENOENT;
 }
 
-int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
+__weak int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
 {
 	struct layer *layer;
 	u64 dsq_id;
@@ -1412,11 +1412,13 @@ int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
 		layer = MEMBER_VPTR(layers, [layer_idx]);
 		if (has_budget(costc, layer) == 0)
 			continue;
+		if (layer->preempt || layer->kind == LAYER_KIND_CONFINED)
+			continue;
 		bpf_for(llc_idx, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
 			dsq_id = layer_dsq_id(layer_idx, llc_id);
 
-			if (!layer->preempt && layer->kind != LAYER_KIND_CONFINED && scx_bpf_consume(dsq_id))
+			if (scx_bpf_consume(dsq_id))
 				return 0;
 		}
 	}
