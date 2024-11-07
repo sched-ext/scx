@@ -133,6 +133,11 @@ static u64 llc_hi_fallback_dsq_id(u32 llc_id)
 	return HI_FALLBACK_DSQ_BASE + llc_id;
 }
 
+static inline bool is_fallback_dsq(u64 dsq_id)
+{
+	return dsq_id > HI_FALLBACK_DSQ_BASE && dsq_id <= LO_FALLBACK_DSQ;
+}
+
 static u64 llc_hi_fallback_dsq_iter_offset(int llc_offset, int idx)
 {
 	int offset = llc_offset + idx;
@@ -383,6 +388,7 @@ struct task_ctx {
 	bool			all_cpus_allowed;
 	u64			runnable_at;
 	u64			running_at;
+	u64			last_dsq;
 };
 
 struct {
@@ -1076,6 +1082,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 
 		idx = cpu_hi_fallback_dsq_id(task_cpu);
+		tctx->last_dsq = idx;
 		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
 		goto preempt;
 	}
@@ -1102,15 +1109,18 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		 */
 		idx = cpu_hi_fallback_dsq_id(task_cpu);
 		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
+		tctx->last_dsq = idx;
 		goto preempt;
 	}
 
 	if (disable_topology) {
+		tctx->last_dsq = tctx->layer;
 		scx_bpf_dispatch_vtime(p, tctx->layer, layer_slice_ns, vtime, enq_flags);
 	} else {
 		u32 llc_id = cpu_to_llc_id(tctx->last_cpu >= 0 ? tctx->last_cpu :
 					   bpf_get_smp_processor_id());
 		idx = layer_dsq_id(layer->idx, llc_id);
+		tctx->last_dsq = idx;
 		scx_bpf_dispatch_vtime(p, idx, layer_slice_ns, vtime, enq_flags);
 	}
 
@@ -1245,6 +1255,16 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	    sib_cctx->current_exclusive) {
 		gstat_inc(GSTAT_EXCL_IDLE, cctx);
 		return;
+	}
+
+	/*
+	 * If one of the fallback DSQs has the most budget then consume from
+	 * it to prevent starvation.
+	 */
+	if (has_pref_fallback_budget(costc)) {
+		dsq_id = budget_id_to_fallback_dsq(costc->pref_budget);
+		if (scx_bpf_consume(dsq_id))
+			return;
 	}
 
 	/* consume preempting layers first */
@@ -1444,19 +1464,17 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
+	u32 my_llc_id = cpu_to_llc_id(cpu);
+
 	/*
-	 * Fallback DSQs don't have cost accounting. When the budget runs out
-	 * for a layer we do an extra consume of the fallback DSQ to ensure
-	 * that it doesn't stall out when the system is being saturated.
+	 * If one of the fallback DSQs has the most budget then consume from
+	 * it to prevent starvation.
 	 */
-	if (costc->drain_fallback) {
-		costc->drain_fallback = false;
-		dsq_id = cpu_hi_fallback_dsq_id(cpu);
+	if (has_pref_fallback_budget(costc)) {
+		dsq_id = budget_id_to_fallback_dsq(costc->pref_budget);
 		if (scx_bpf_consume(dsq_id))
 			return;
 	}
-
-	u32 my_llc_id = cpu_to_llc_id(cpu);
 
 	/* consume preempting layers first */
 	if (consume_preempting(costc, my_llc_id) == 0)
@@ -1878,6 +1896,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct task_ctx *tctx;
 	struct layer *layer;
 	struct cost *costc;
+	u32 budget_id;
 	s32 lidx;
 	u64 used;
 
@@ -1895,7 +1914,15 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		used = layer->min_exec_ns;
 	}
 
-	record_cpu_cost(costc, layer->idx, (s64)used);
+	// If the task ran on the hi fallback dsq then the cost should be
+	// charged to it.
+	if (is_fallback_dsq(tctx->last_dsq)) {
+		budget_id = fallback_dsq_cost_id(tctx->last_dsq);
+	} else {
+		budget_id = layer->idx;
+	}
+	record_cpu_cost(costc, budget_id, (s64)used);
+
 	cctx->layer_cycles[lidx] += used;
 	cctx->current_preempt = false;
 	cctx->prev_exclusive = cctx->current_exclusive;
