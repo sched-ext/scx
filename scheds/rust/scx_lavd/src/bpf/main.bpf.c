@@ -458,26 +458,36 @@ static void update_stat_for_runnable(struct task_struct *p,
 static void advance_cur_logical_clk(struct task_ctx *taskc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
-	u64 vlc, clc;
+	u64 vlc, clc, ret_clc;
 	u64 nr_queued, delta, new_clk;
 
-	/*
-	 * The clock should not go backward, so do nothing.
-	 */
 	vlc = READ_ONCE(taskc->vdeadline_log_clk);
 	clc = READ_ONCE(cur_logical_clk);
-	if (vlc <= clc)
-		return;
 
-	/*
-	 * Advance the clock up to the task's deadline. When overloaded,
-	 * advance the clock slower so other can jump in the run queue.
-	 */
-	nr_queued = max(stat_cur->nr_queued_task, 1);
-	delta = (vlc - clc) / nr_queued;
-	new_clk = clc + delta;
+	for (int i = 0; i < LAVD_MAX_RETRY; ++i) {
+		/*
+		 * The clock should not go backward, so do nothing.
+		 */
+		if (vlc <= clc)
+			return;
 
-	WRITE_ONCE(cur_logical_clk, new_clk);
+		/*
+		 * Advance the clock up to the task's deadline. When overloaded,
+		 * advance the clock slower so other can jump in the run queue.
+		 */
+		nr_queued = max(stat_cur->nr_queued_task, 1);
+		delta = (vlc - clc) / nr_queued;
+		new_clk = clc + delta;
+
+		ret_clc = __sync_val_compare_and_swap(&cur_logical_clk, clc, new_clk);
+		if (ret_clc == clc) /* CAS success */
+			return;
+
+		/*
+		 * Retry with the updated clc
+		 */
+		clc = ret_clc;
+	}
 }
 
 static void update_stat_for_running(struct task_struct *p,
