@@ -49,7 +49,7 @@ jobs:
             linux/arch/x86/boot/bzImage
             linux/usr/include
             linux/**/*.h
-          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-4
+          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-5
 
       - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
         uses: ./.github/actions/install-deps-action
@@ -131,7 +131,7 @@ jobs:
             linux/arch/x86/boot/bzImage
             linux/usr/include
             linux/**/*.h
-          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-4
+          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-5
 
       # need to re-run job when kernel head changes between build and test running.
       - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
@@ -220,7 +220,7 @@ jobs:
             linux/arch/x86/boot/bzImage
             linux/usr/include
             linux/**/*.h
-          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-4
+          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-5
 
       # need to re-run job when kernel head changes between build and test running.
       - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
@@ -294,7 +294,7 @@ jobs:
             linux/arch/x86/boot/bzImage
             linux/usr/include
             linux/**/*.h
-          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-4
+          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-5
 
       # need to re-run job when kernel head changes between build and test running.
       - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
@@ -337,7 +337,7 @@ jobs:
             linux/arch/x86/boot/bzImage
             linux/usr/include
             linux/**/*.h
-          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-4
+          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-5
 
       # need to re-run job when kernel head changes between build and test running.
       - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
