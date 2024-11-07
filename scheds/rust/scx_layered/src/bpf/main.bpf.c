@@ -502,7 +502,7 @@ static void maybe_refresh_layered_cpumask(struct cpumask *layered_cpumask,
 }
 
 static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
-			      const struct cpumask *idle_smtmask)
+			      const struct cpumask *idle_smtmask, bool pref_idle_smt)
 {
 	bool prev_in_cand = bpf_cpumask_test_cpu(prev_cpu, cand_cpumask);
 	s32 cpu;
@@ -511,7 +511,7 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
 	 * partially idle @prev_cpu.
 	 */
-	if (smt_enabled) {
+	if (smt_enabled && !pref_idle_smt) {
 		if (prev_in_cand &&
 		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
@@ -591,7 +591,8 @@ s32 pick_idle_no_topo(struct task_struct *p, s32 prev_cpu,
 	 */
 	idle_cpumask = scx_bpf_get_idle_smtmask();
 	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
-				      idle_cpumask)) >= 0)
+				      idle_cpumask,
+				      layer->idle_smt)) >= 0)
 		goto out_put;
 
 out_put:
@@ -667,7 +668,8 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
 			cast_mask(pref_idle_cpumask));
 	if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
-				      prev_cpu, idle_cpumask)) >= 0)
+				      prev_cpu, idle_cpumask,
+				      layer->idle_smt)) >= 0)
 		goto out_put;
 
 	/*
@@ -690,7 +692,8 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 				cast_mask(pref_idle_cpumask));
 
 		if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
-					      prev_cpu, idle_cpumask)) >= 0)
+					      prev_cpu, idle_cpumask,
+					      layer->idle_smt)) >= 0)
 			goto out_put;
 	}
 
@@ -708,7 +711,8 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
 				cast_mask(pref_idle_cpumask));
 		if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
-					      prev_cpu, idle_cpumask)) >= 0)
+					      prev_cpu, idle_cpumask,
+					      layer->idle_smt)) >= 0)
 			goto out_put;
 	}
 
@@ -717,7 +721,8 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 */
 	if (layer->kind != LAYER_KIND_CONFINED &&
 	    ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu,
-				       idle_cpumask)) >= 0)) {
+				       idle_cpumask,
+				       layer->idle_smt)) >= 0)) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cctx);
 		goto out_put;
 	}
