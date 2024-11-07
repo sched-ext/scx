@@ -398,7 +398,7 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 			layer_weight_dur = (HI_FALLBACK_DSQ_WEIGHT * slice_ns * refresh_intvl_ns) /
 					    layer_weight_sum;
 			initialize_budget(costc, budget_id, (s64)layer_weight_dur);
-			if (cpu == 0 && llc_id == 0)
+			if (cpu == 0 && llc_id == 0 && budget_id < MAX_GLOBAL_BUDGETS)
 				trace("COST CPU DSQ[%d][%d] budget %lld",
 				      cpu, budget_id, costc->budget[budget_id]);
 		}
