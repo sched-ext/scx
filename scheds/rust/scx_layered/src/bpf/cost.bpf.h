@@ -15,8 +15,8 @@
 
 enum cost_consts {
 	COST_GLOBAL_KEY		= 0,
-	HI_FALLBACK_DSQ_WEIGHT	= 50,
-	LO_FALLBACK_DSQ_WEIGHT	= 10,
+	HI_FALLBACK_DSQ_WEIGHT	= 95,
+	LO_FALLBACK_DSQ_WEIGHT	= 85,
 
 	/*
 	 * Max global budgets map fallback DSQs (per LLC) as well as layers.

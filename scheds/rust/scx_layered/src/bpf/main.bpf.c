@@ -822,8 +822,12 @@ bool try_preempt_cpu(s32 cand, struct task_struct *p, struct cpu_ctx *cctx,
 	if (!(cand_cctx = lookup_cpu_ctx(cand)) || cand_cctx->current_preempt)
 		return false;
 
-	if (!(costc = lookup_cpu_cost(cand)) || has_budget(costc, layer) == 0)
+	if (!(costc = lookup_cpu_cost(cand)) ||
+	    has_budget(costc, layer) == 0 ||
+	    !has_preempt_budget(costc, cand_cctx->layer_idx, tctx->layer)) {
+		trace("COST layer %s not enough budget to preempt", layer->name);
 		return false;
+	}
 
 	/*
 	 * If exclusive, we want to make sure the sibling CPU, if there's
@@ -1604,11 +1608,14 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	u32 my_llc_id = cpu_to_llc_id(cpu);
 
 	/*
-	 * If one of the fallback DSQs has the most budget then consume from
-	 * it to prevent starvation.
+	 * If one of the fallback DSQs has the most budget then consume from it
+	 * to prevent starvation.
 	 */
 	if (has_pref_fallback_budget(costc)) {
 		dsq_id = budget_id_to_fallback_dsq(costc->pref_budget);
+		trace("COST consuming fallback %lld", dsq_id);
+		if (dsq_id > LO_FALLBACK_DSQ)
+			scx_bpf_error("invalid fallback dsq %lld", dsq_id);
 		if (scx_bpf_consume(dsq_id))
 			return;
 	}
@@ -2058,13 +2065,14 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	} else {
 		budget_id = layer->idx;
 	}
-	record_cpu_cost(costc, budget_id, (s64)used);
+
+	u64 slice_ns = layer_slice_ns(layer);
+	record_cpu_cost(costc, budget_id, (s64)used, slice_ns);
 
 	cctx->layer_cycles[lidx] += used;
 	cctx->current_preempt = false;
 	cctx->prev_exclusive = cctx->current_exclusive;
 	cctx->current_exclusive = false;
-	u64 slice_ns = layer_slice_ns(layer);
 
 	/* scale the execution time by the inverse of the weight and charge */
 	if (cctx->yielding && used < slice_ns)
@@ -2279,7 +2287,7 @@ int dump_cost(void)
 	bpf_for(i, 0, nr_llcs) {
 		u64 dsq_id = llc_hi_fallback_dsq_id(i);
 		u32 budget_id = fallback_dsq_cost_id(dsq_id);
-		scx_bpf_dump("COST FALLBACK[%d][%d] budget=%lld capacity=%lld\n",
+		scx_bpf_dump("COST FALLBACK[%llu][%d] budget=%lld capacity=%lld\n",
 			     dsq_id, budget_id,
 			     costc->budget[budget_id], costc->capacity[budget_id]);
 	}
@@ -2305,8 +2313,8 @@ int dump_cost(void)
 			u32 budget_id = fallback_dsq_cost_id(dsq_id);
 			if (budget_id >= MAX_GLOBAL_BUDGETS)
 				continue;
-			scx_bpf_dump("COST CPU[%d]FALLBACK[%d][%d] budget=%lld capacity=%lld\n",
-				     i, j, dsq_id, budget_id,
+			scx_bpf_dump("COST CPU[%d]FALLBACK[%llu][%d] budget=%lld capacity=%lld\n",
+				     i, dsq_id, budget_id,
 				     costc->budget[budget_id], costc->capacity[budget_id]);
 		}
 	}
@@ -2725,7 +2733,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			}
 		}
 	}
-	initialize_budgets(1000LLU * NSEC_PER_MSEC);
+	initialize_budgets(15LLU * NSEC_PER_SEC);
 	ret = start_layered_timers();
 	if (ret < 0)
 		return ret;
