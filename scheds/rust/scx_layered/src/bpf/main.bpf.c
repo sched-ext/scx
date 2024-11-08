@@ -2145,11 +2145,24 @@ int dump_cost(void)
 			     j, layer->name,
 			     costc->budget[j], costc->capacity[j]);
 	}
+	// fallback DSQs
+	bpf_for(i, 0, nr_llcs) {
+		u64 dsq_id = llc_hi_fallback_dsq_id(i);
+		u32 budget_id = fallback_dsq_cost_id(dsq_id);
+		scx_bpf_dump("COST FALLBACK[%d][%d] budget=%lld capacity=%lld\n",
+			     dsq_id, budget_id,
+			     costc->budget[budget_id], costc->capacity[budget_id]);
+	}
+
 	// Per CPU costs
 	bpf_for(i, 0, nr_possible_cpus) {
+		if (!(costc = lookup_cpu_cost(j))) {
+			scx_bpf_error("unabled to lookup layer %d", i);
+			continue;
+		}
 		bpf_for(j, 0, nr_layers) {
 			layer = lookup_layer(i);
-			if (!layer || !(costc = lookup_cpu_cost(j))) {
+			if (!layer) {
 				scx_bpf_error("unabled to lookup layer %d", i);
 				continue;
 			}
@@ -2157,7 +2170,17 @@ int dump_cost(void)
 				     i, j, layer->name,
 				     costc->budget[j], costc->capacity[j]);
 		}
+		bpf_for(j, 0, nr_llcs) {
+			u64 dsq_id = llc_hi_fallback_dsq_id(j);
+			u32 budget_id = fallback_dsq_cost_id(dsq_id);
+			if (budget_id >= MAX_GLOBAL_BUDGETS)
+				continue;
+			scx_bpf_dump("COST CPU[%d]FALLBACK[%d][%d] budget=%lld capacity=%lld\n",
+				     i, j, dsq_id, budget_id,
+				     costc->budget[budget_id], costc->capacity[budget_id]);
+		}
 	}
+
 	return 0;
 }
 
