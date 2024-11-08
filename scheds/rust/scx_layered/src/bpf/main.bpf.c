@@ -104,7 +104,12 @@ static __noinline u64 layer_dsq_id(u32 layer_id, u32 llc_id)
 	return (layer_id * nr_llcs) + llc_id;
 }
 
-static __noinline u32 cpu_to_llc_id(s32 cpu_id)
+// XXX - cpu_to_llc_id() must not be inlined to not blow past ins limit when
+// topo is enabled but older kernels get confused by RCU state when subprogs are
+// called from sleepable functions. Use __always_inline variant from
+// layered_init() and __noinline from everywhere else. Remove this once we can
+// ignore the older kernels.
+static __always_inline u32 __cpu_to_llc_id(s32 cpu_id)
 {
         const volatile u32 *llc_ptr;
 
@@ -114,6 +119,11 @@ static __noinline u32 cpu_to_llc_id(s32 cpu_id)
                 return 0;
         }
         return *llc_ptr;
+}
+
+static __noinline u32 cpu_to_llc_id(u32 cpu_id)
+{
+	return __cpu_to_llc_id(cpu_id);
 }
 
 u32 llc_node_id(u32 llc_id)
@@ -1777,7 +1787,7 @@ static s32 create_cache(u32 cache_id)
 			return -ENOENT;
 		}
 
-		llc_id = cpu_to_llc_id(cpu);
+		llc_id = __cpu_to_llc_id(cpu);
 		if (llc_id != cache_id)
 			continue;
 
