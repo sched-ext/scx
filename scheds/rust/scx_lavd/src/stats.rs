@@ -19,7 +19,7 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct SysStats {
-    #[stat(desc = "Sequence ID of this messge")]
+    #[stat(desc = "Sequence ID of this message")]
     pub mseq: u64,
 
     #[stat(desc = "Average runtime per schedule")]

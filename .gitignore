@@ -4,3 +4,4 @@ PKGBUILD
 target
 *.swp
 .cache/
+.vscode/

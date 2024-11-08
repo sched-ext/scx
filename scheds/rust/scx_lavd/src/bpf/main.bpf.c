@@ -270,7 +270,7 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc,
 
 	/*
 	 * Prioritize a wake-up task since this is a clear sign of immediate
-	 * consumer. If it is a synchronous wakeup, doule the prioritization.
+	 * consumer. If it is a synchronous wakeup, double the prioritization.
 	 */
 	taskc->wakeup_ft += !!(enq_flags & SCX_ENQ_WAKEUP);
 	weight_boost += taskc->wakeup_ft * LAVD_LC_WEIGHT_BOOST;
@@ -515,7 +515,7 @@ static void update_stat_for_running(struct task_struct *p,
 	}
 
 	/*
-	 * Update per-CPU latency criticality information for ever-scheduled
+	 * Update per-CPU latency criticality information for every-scheduled
 	 * tasks.
 	 */
 	if (cpuc->max_lat_cri < taskc->lat_cri)
@@ -1074,7 +1074,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 
 	/*
-	 * Calculate when a tack can be scheduled.
+	 * Calculate when a task can be scheduled.
 	 */
 	calc_when_to_run(p, taskc, enq_flags);
 	dsq_id = find_proper_dsq(taskc, cpuc_task);
