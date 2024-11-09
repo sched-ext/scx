@@ -458,6 +458,14 @@ struct Opts {
     #[clap(long)]
     run_example: bool,
 
+    /// Disable antistall
+    #[clap(long, default_value = "false")]
+    disable_antistall: bool,
+
+    /// Maximum task runnable_at delay (in seconds) before antistall turns on
+    #[clap(long, default_value = "3")]
+    antistall_sec: u64,
+
     /// Show descriptions for statistics.
     #[clap(long)]
     help_stats: bool,
@@ -1486,8 +1494,12 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.disable_topology = disable_topology;
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
+        skel.maps.rodata_data.antistall_sec = opts.antistall_sec;
         if opts.monitor_disable {
             skel.maps.rodata_data.monitor_disable = opts.monitor_disable;
+        }
+        if opts.disable_antistall {
+            skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
         }
         for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
             skel.maps.rodata_data.__sibling_cpu[cpu] = *sib;
