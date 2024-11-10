@@ -77,7 +77,7 @@ enabling custom, userspace driven scheduling policies. Prior
 [presentations](https://lpc.events/event/16/contributions/1365/) at LPC have
 discussed ghOSt and how BPF can be used to accelerate scheduling.
 
-### Why can't we just explore directly with ?
+### Why can't we just explore directly with EEVDF?
 
 Experimenting with EEVDF directly or implementing a new sched_class from scratch
 is of course possible, but is often difficult and time consuming. Newcomers to
