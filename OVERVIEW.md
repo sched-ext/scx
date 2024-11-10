@@ -77,9 +77,9 @@ enabling custom, userspace driven scheduling policies. Prior
 [presentations](https://lpc.events/event/16/contributions/1365/) at LPC have
 discussed ghOSt and how BPF can be used to accelerate scheduling.
 
-### Why can't we just explore directly with CFS?
+### Why can't we just explore directly with ?
 
-Experimenting with CFS directly or implementing a new sched_class from scratch
+Experimenting with EEVDF directly or implementing a new sched_class from scratch
 is of course possible, but is often difficult and time consuming. Newcomers to
 the scheduler often require years to understand the codebase and become
 productive contributors. Even for seasoned kernel engineers, experimenting with
@@ -200,17 +200,17 @@ throughput improvement on an Nginx benchmark, with an 87% inference accuracy.
 This section discusses how sched_ext can enable users to run workloads on
 application-specific schedulers.
 
-### Why deploy custom schedulers rather than improving CFS?
+### Why deploy custom schedulers rather than improving EEVDF?
 
-Implementing application-specific schedulers and improving CFS are not
+Implementing application-specific schedulers and improving EEVDF are not
 conflicting goals. Scheduling features explored with sched_ext which yield
 beneficial results, and which are sufficiently generalizable, can and should
-be integrated into CFS. However, CFS is fundamentally designed to be a general
+be integrated into EEVDF. However, EEVDF is fundamentally designed to be a general
 purpose scheduler, and thus is not conducive to being extended with some
 highly targeted application or hardware specific changes.
 
 Targeted, bespoke scheduling has many potential use cases. For example, VM
-scheduling can make certain optimizations that are infeasible in CFS due to
+scheduling can make certain optimizations that are infeasible in EEVDF due to
 the constrained problem space (scheduling a static number of long-running
 VCPUs versus an arbitrary number of threads). Additionally, certain
 applications might want to make targeted policy decisions based on hints
@@ -236,9 +236,9 @@ bounded tail latencies, as well as longer blocks of uninterrupted time.
 Yet another interesting use case is the scx_flatcg scheduler, which provides a
 flattened hierarchical vtree for cgroups. This scheduler does not account for
 thundering herd problems among cgroups, and therefore may not be suitable for
-inclusion in CFS. However, in a simple benchmark using
+inclusion in EEVDF. However, in a simple benchmark using
 [wrk](https://github.com/wg/wrk) on apache serving a CGI script calculating
-sha1sum of a small file, it outperformed CFS by ~3% with CPU controller
+sha1sum of a small file, it outperformed EEVDF by ~3% with CPU controller
 disabled and by ~10% with two apache instances competing with 2:1 weight ratio
 nested four level deep.
 
@@ -327,7 +327,7 @@ affinity to limit the footprint of this low-priority workload to a small subset
 of CPUs, a preferable solution would be to implement a more featureful
 task-priority mechanism which automatically throttles lower-priority tasks
 which are causing memory contention for the rest of the system. Implementing
-this in CFS and rolling it out to the fleet could take a very long time.
+this in EEVDF and rolling it out to the fleet could take a very long time.
 
 sched_ext would directly address these gaps. If another hardware bug or
 resource contention issue comes in that requires scheduler support to mitigate,
