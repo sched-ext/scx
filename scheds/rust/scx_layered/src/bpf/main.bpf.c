@@ -1,6 +1,8 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates. */
 #ifdef LSP
+#ifndef __bpf__
 #define __bpf__
+#endif
 #define LSP_INC
 #include "../../../../include/scx/common.bpf.h"
 #include "../../../../include/scx/ravg_impl.bpf.h"
@@ -39,12 +41,18 @@ const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile bool monitor_disable = false;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 const volatile u32 layer_iteration_order[MAX_LAYERS];
+/* Flag to enable or disable antistall feature */
+const volatile bool enable_antistall = true;
+/* Delay permitted, in seconds, before antistall activates */
+const volatile u64 antistall_sec = 3;
 
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
 struct layer layers[MAX_LAYERS];
 u32 fallback_cpu;
 static u32 preempt_cursor;
+
+extern unsigned CONFIG_HZ __kconfig;
 
 #define dbg(fmt, args...)	do { if (debug) bpf_printk(fmt, ##args); } while (0)
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
@@ -1233,6 +1241,107 @@ no:
 	return false;
 }
 
+/* Mapping of cpu to most delayed DSQ it can consume */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, u64);
+	__uint(max_entries, 1);
+} antistall_cpu_dsq SEC(".maps");
+
+/* Mapping cpu to delay of highest delayed DSQ it can consume */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, u64);
+	__uint(max_entries, 1);
+} antistall_cpu_max_delay SEC(".maps");
+
+/**
+ * get_delay_sec() - get runnable_at delay of a task_struct in seconds.
+ * @p: task_struct *p
+ * @jiffies_now: time from which to measure delay, in jiffies.
+ *
+ * Return: runnable_at delay, if any exists, in seconds.
+ */
+int get_delay_sec(struct task_struct *p, u64 jiffies_now) 
+{
+	u64 runnable_at, delta_secs;
+	runnable_at = READ_ONCE(p->scx.runnable_at);
+
+	if (vtime_before(runnable_at, jiffies_now)) {
+		delta_secs = (jiffies_now - runnable_at) / CONFIG_HZ;
+	} else {
+		delta_secs = 0;
+	}
+
+	return delta_secs;
+}
+
+/**
+ * antistall_consume() - consume delayed DSQ
+ * @cpu: cpu number
+ * @cctx: cpu context
+ * 
+ * This function consumes a delayed DSQ. This is meant to be called
+ * from dispatch, before any other logic which could result in a 
+ * DSQ being consumed.
+ *
+ * This is meant to prevent issues such as DSQs with affinitized tasks
+ * stalling when all CPUs which can process them are continually consuming
+ * other DSQs.
+ *
+ * Return: bool indicating if a DSQ was consumed or not.
+ */
+bool antistall_consume(s32 cpu, struct cpu_ctx *cctx)
+{
+	u64 *antistall_dsq, jiffies_now, cur_delay;
+	u32 zero;
+	bool consumed;
+	struct task_struct *p;
+	
+	cur_delay = 0;	
+	consumed = false;
+	zero = 0;
+
+	if (!enable_antistall)
+		return false;
+
+	if (!cctx || !cctx->layer_idx || !cpu)
+		return false;
+	
+	antistall_dsq = bpf_map_lookup_elem(&antistall_cpu_dsq, &zero);
+	
+	if (!antistall_dsq) {
+		scx_bpf_error("cant happen");
+		return false;
+	}
+
+	if (*antistall_dsq == SCX_DSQ_INVALID)
+		return false;
+	
+	consumed = scx_bpf_consume(*antistall_dsq);
+	
+	if (!consumed) 
+		goto reset;
+	
+	jiffies_now = bpf_jiffies64();
+
+	bpf_for_each(scx_dsq, p, *antistall_dsq, 0) {
+		cur_delay = get_delay_sec(p, jiffies_now);
+
+		if (cur_delay > antistall_sec)
+			return consumed;
+		
+		goto reset;	
+	}
+	
+reset:
+	trace("antistall reset DSQ[%llu] SELECTED_CPU[%llu] DELAY[%llu]", *antistall_dsq, cpu, cur_delay);
+	*antistall_dsq = SCX_DSQ_INVALID;
+	return consumed;
+}
+
 static __noinline
 void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 {
@@ -1244,6 +1353,9 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	s32 sib = sibling_cpu(cpu);
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(costc = lookup_cpu_cost(cpu)))
+		return;
+
+	if (antistall_consume(cpu, cctx))
 		return;
 
 	/*
@@ -1455,6 +1567,9 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	    !(costc = lookup_cpu_cost(cpu)))
 		return;
 
+	if (antistall_consume(cpu, cctx))
+		return;
+	
 	/*
 	 * if @prev was on SCX and is still runnable, we are here because @prev
 	 * has exhausted its slice. We may want to keep running it on this CPU
@@ -2078,7 +2193,7 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 
-	if(args->cancelled){
+	if (args->cancelled) {
 		return;
 	}
 
@@ -2258,12 +2373,133 @@ static bool layered_monitor(void)
 	return true;
 }
 
+/**
+ * antistall_set() - set antistall flags.
+ * @dsq_id: Dsq to check for delayed tasks.
+ * @jiffies_now: Time to check against in jiffies.
+ *
+ * This function sets entries in antistall_cpu_dsq used by antistall.
+ * It checks the given DSQ to see if delay exceeds antistall_sec.
+ * It tries to find a CPU satisfying the constraints of "can run the first
+ * task in the provided DSQ" and "is not already flagged for use in antistall".
+ * If it cannot find such a CPU to flag, it will try to flag a CPU flagged to
+ * process another with a lesser delay if one exists.
+ */
+u64 antistall_set(u64 dsq_id, u64 jiffies_now) 
+{
+	struct task_struct *p;
+	struct task_ctx *tctx;
+	s32 cpu;
+	u64 *antistall_dsq, *delay, cur_delay;
+	bool first_pass;
+	u32 zero;
+	
+	zero = 0;
+
+	if (!dsq_id || !jiffies_now)
+		return 0;
+	
+	// verifier
+	bpf_rcu_read_lock();	
+	bpf_for_each(scx_dsq, p, dsq_id, 0) {
+		
+		if (!(tctx = lookup_task_ctx(p)))
+			goto unlock;
+		
+		cur_delay = get_delay_sec(p, jiffies_now);
+		if (cur_delay <= antistall_sec)
+			// check head task in dsq
+			goto unlock;
+		
+		first_pass = true;
+look_for_cpu:
+		bpf_for(cpu, 0, nr_possible_cpus) {
+			if (!tctx->layered_cpumask)
+				goto unlock;
+			
+			if (!bpf_cpumask_test_cpu(cpu,   cast_mask(tctx->layered_cpumask)))
+				continue;
+			
+			antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq, &zero, cpu);
+			delay = bpf_map_lookup_percpu_elem(&antistall_cpu_max_delay, &zero, cpu);
+			
+			if (!antistall_dsq || !delay) {
+				scx_bpf_error("cant happen");
+				goto unlock;
+			}
+
+			if (*antistall_dsq == SCX_DSQ_INVALID) {
+				trace("antistall set DSQ[%llu] SELECTED_CPU[%llu] DELAY[%llu]", dsq_id, cpu, cur_delay);
+				*delay = cur_delay;
+				*antistall_dsq = dsq_id;
+				goto unlock;
+			}
+
+			if (first_pass)
+				continue;
+				
+			if (*delay < cur_delay) {
+				trace("antistall set DSQ[%llu] SELECTED_CPU[%llu] DELAY[%llu]", dsq_id, cpu, cur_delay);
+				*delay = cur_delay;
+				*antistall_dsq = dsq_id;
+				goto unlock;
+			}
+		}		
+		
+		if (first_pass) {
+			first_pass = false;
+			goto look_for_cpu;
+		}
+
+		goto unlock;
+	}
+
+unlock:
+	bpf_rcu_read_unlock();
+	return 0;
+}
+
+/**
+ * antistall_scan() - call antistall_set on all DSQs.
+ *
+ * This function calls antistall_set on all DSQs.
+ * This is where antistall figures out what work, if any, needs
+ * to be prioritized to keep runnable_at delay at or below antistall_sec.
+ */
+static bool antistall_scan(void)
+{
+	s32 cpu;
+	u64 dsq_id;
+	u64 jiffies_now;
+
+	if (!enable_antistall)
+		return true;
+
+	jiffies_now = bpf_jiffies64();
+	
+	bpf_for(dsq_id, 0, nr_layers) {
+		antistall_set(dsq_id, jiffies_now);
+	}
+
+	bpf_for(cpu, 0, nr_possible_cpus) {
+		dsq_id = cpu_hi_fallback_dsq_id(cpu);
+		antistall_set(dsq_id, jiffies_now);
+	}
+	
+	antistall_set(LO_FALLBACK_DSQ, jiffies_now);
+	
+	antistall_set(HI_FALLBACK_DSQ_BASE, jiffies_now);
+	
+	return true;
+}
 
 static bool run_timer_cb(int key)
 {
 	switch (key) {
 	case LAYERED_MONITOR:
 		return layered_monitor();
+	case ANTISTALL_TIMER:
+		return antistall_scan();
 	case NOOP_TIMER:
 	case MAX_TIMERS:
 	default:
@@ -2273,6 +2509,7 @@ static bool run_timer_cb(int key)
 
 struct layered_timer layered_timers[MAX_TIMERS] = {
 	{15LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
+	{1LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
 	{0LLU, CLOCK_BOOTTIME, 0},
 };
 
@@ -2285,6 +2522,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	struct bpf_cpumask *cpumask, *tmp_big_cpumask;
 	struct cpu_ctx *cctx;
 	int i, j, k, nr_online_cpus, ret;
+	u64 *init_antistall_delay, *init_antistall_dsq;
+	u32 zero;
+
+	zero = 0;
 
 	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
 	if (ret < 0)
@@ -2303,6 +2544,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	nr_online_cpus = 0;
 	bpf_for(i, 0, nr_possible_cpus) {
 		const volatile u8 *u8_ptr;
+		
+	  init_antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq, &zero, i);
+		if (init_antistall_dsq) {
+			*init_antistall_dsq = SCX_DSQ_INVALID;
+		}
 
 		if (!(cctx = lookup_cpu_ctx(i))) {
 			bpf_cpumask_release(cpumask);
