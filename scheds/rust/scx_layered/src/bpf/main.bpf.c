@@ -1392,7 +1392,7 @@ __weak int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
 
 		struct cpumask *layer_cpumask;
 		if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
-			return 0;
+			return -ENOENT;
 		if (!bpf_cpumask_test_cpu(cpu, layer_cpumask) &&
 		    (cpu > nr_possible_cpus || cpu != fallback_cpu || layer->nr_cpus != 0))
 			continue;

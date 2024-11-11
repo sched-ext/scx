@@ -280,7 +280,7 @@ int record_cpu_cost(struct cost *costc, u32 budget_id, s64 amount)
 /*
  * Returns the slice_ns of a layer if there is appropriate budget.
  */
-int has_budget(struct cost *costc, struct layer *layer)
+__weak int has_budget(struct cost *costc, struct layer *layer)
 {
 	if (!layer || !costc) {
 		scx_bpf_error("can't happen");
