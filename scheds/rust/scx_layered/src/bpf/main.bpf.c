@@ -2286,12 +2286,12 @@ int dump_cost(void)
 
 	// Per CPU costs
 	bpf_for(i, 0, nr_possible_cpus) {
-		if (!(costc = lookup_cpu_cost(j))) {
+		if (!(costc = lookup_cpu_cost(i))) {
 			scx_bpf_error("unabled to lookup layer %d", i);
 			continue;
 		}
 		bpf_for(j, 0, nr_layers) {
-			layer = lookup_layer(i);
+			layer = lookup_layer(j);
 			if (!layer) {
 				scx_bpf_error("unabled to lookup layer %d", i);
 				continue;
