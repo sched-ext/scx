@@ -15,7 +15,19 @@ static __always_inline int fallback_dsq_cost_id(u64 fallback_dsq)
 		scx_bpf_error("invalid fallback dsq");
 		return 0;
 	}
-	return (int)fallback_dsq - HI_FALLBACK_DSQ_BASE;
+	return nr_layers + (int)fallback_dsq - HI_FALLBACK_DSQ_BASE;
+}
+
+/*
+ * Converts a llc DSQ to a cost id for accessing a cost struct.
+ */
+static __always_inline int fallback_llc_cost_id(int fallback_llc)
+{
+	if (fallback_llc > MAX_LLCS) {
+		scx_bpf_error("invalid fallback llc");
+		return 0;
+	}
+	return nr_layers + fallback_llc;
 }
 
 /*
@@ -24,16 +36,8 @@ static __always_inline int fallback_dsq_cost_id(u64 fallback_dsq)
 static u64 budget_id_to_fallback_dsq(u32 budget_id)
 {
 	if (budget_id == MAX_GLOBAL_BUDGETS)
-		return LO_FALLBACK_DSQ;
-	return HI_FALLBACK_DSQ_BASE + budget_id;
-}
-
-/*
- * Returns true if the cost has preferred fallback DSQ budget
- */
-static bool has_pref_fallback_budget(struct cost *costc)
-{
-	return costc->pref_budget > nr_layers && costc->pref_budget <= MAX_GLOBAL_BUDGETS;
+		return (u64)LO_FALLBACK_DSQ;
+	return (u64)HI_FALLBACK_DSQ_BASE + (u64)budget_id - nr_layers;
 }
 
 /*
@@ -125,7 +129,7 @@ static struct cost *initialize_cost(u32 cost_idx, u32 parent_idx,
 static __noinline void initialize_budget(struct cost *costc, u32 budget_id,
 					 s64 capacity)
 {
-	if (budget_id >= MAX_GLOBAL_BUDGETS) {
+	if (budget_id > MAX_GLOBAL_BUDGETS) {
 		scx_bpf_error("invalid budget id %d", budget_id);
 		return;
 	}
@@ -140,11 +144,10 @@ static void calc_preferred_cost(struct cost *costc)
 {
 	u32 layer_id, id, budget_id, pref_budget = 0, max_layer = 0;
 	s64 max_budget = 0;
-	u64 dsq_id;
 	u32 rotation = bpf_get_smp_processor_id() % nr_layers;
 
 	bpf_for(id, 0, nr_layers) {
-		/* 
+		/*
 		 * If there is two equally weighted layers that have the same
 		 * budget we rely on rotating the layers based on the cpu. This
 		 * may not work well on low core machines.
@@ -157,14 +160,16 @@ static void calc_preferred_cost(struct cost *costc)
 		if (costc->budget[layer_id] > max_budget) {
 			max_budget = costc->budget[layer_id];
 			max_layer = layer_id;
-			pref_budget = max_layer;
+			pref_budget = layer_id;
 		}
 	}
 	// Hi fallback DSQs
 	bpf_for(id, 0, nr_llcs) {
-		if (costc->budget[id] > max_budget) {
-			max_budget = costc->budget[id];
-			pref_budget = id;
+		budget_id = fallback_llc_cost_id(id);
+		if (costc->budget[budget_id] >= max_budget) {
+			max_budget = costc->budget[budget_id];
+			pref_budget = budget_id;
+			trace("COST pref fallback %d", budget_id);
 		}
 	}
 	budget_id = fallback_dsq_cost_id(LO_FALLBACK_DSQ);
@@ -178,8 +183,41 @@ static void calc_preferred_cost(struct cost *costc)
 
 	costc->pref_layer = max_layer;
 	costc->pref_budget = pref_budget;
+	if (costc->idx == 0 && pref_budget > nr_layers)
+	trace("COST pref_layer %d pref_budget %d budget %lld",
+	      max_layer, pref_budget, costc->budget[pref_budget]);
 
 	return;
+}
+
+/*
+ * Returns true if the cost has preferred fallback DSQ budget
+ */
+static bool has_pref_fallback_budget(struct cost *costc)
+{
+	return costc->pref_budget >= nr_layers &&
+	       costc->pref_budget < MAX_GLOBAL_BUDGETS;
+}
+
+/*
+ * Returns if a budget is allowed to preempt another budget. In general if the
+ * preempting budget is greater than the running budget then it is allowed to
+ * preempt.
+ */
+static __always_inline bool has_preempt_budget(struct cost *costc,
+					       u32 cur_budget, u32 budget_id)
+{
+	if (cur_budget >= MAX_GLOBAL_BUDGETS ||
+	     budget_id >= MAX_GLOBAL_BUDGETS)
+		return false;
+
+	/*
+	 * Fallback DSQs are always allowed to preempt
+	 */
+	if (budget_id > nr_layers)
+		return true;
+
+	return costc->budget[budget_id] > costc->budget[cur_budget];
 }
 
 /*
@@ -188,24 +226,42 @@ static void calc_preferred_cost(struct cost *costc)
 int refresh_budget(int cost_id)
 {
 	struct cost *costc;
+	s64 capacity;
 
 	if (!(costc = lookup_cost(cost_id))) {
 		scx_bpf_error("failed to lookup cost %d", cost_id);
 		return 0;
 	}
 
-	u32 layer_id, id;
+	u32 budget_id, id;
 	u32 rotation = bpf_get_smp_processor_id() % nr_layers;
 	bpf_for(id, 0, nr_layers) {
-		layer_id = rotate_layer_id(id, rotation);
-		if (layer_id > nr_layers) {
-			scx_bpf_error("invalid layer");
+		budget_id = rotate_layer_id(id, rotation);
+		if (budget_id > nr_layers) {
+			scx_bpf_error("invalid budget id");
 			return 0;
 		}
-		s64 capacity = costc->capacity[layer_id];
-		__sync_lock_test_and_set(MEMBER_VPTR(*costc, .budget[layer_id]),
+		capacity = costc->capacity[budget_id];
+		__sync_lock_test_and_set(MEMBER_VPTR(*costc, .budget[budget_id]),
 					 capacity);
 	}
+	// Hi fallback DSQs
+	bpf_for(id, 0, nr_llcs) {
+		budget_id = fallback_llc_cost_id(id);
+		capacity = costc->capacity[budget_id];
+		__sync_lock_test_and_set(MEMBER_VPTR(*costc, .budget[budget_id]),
+					 capacity);
+	}
+	budget_id = fallback_dsq_cost_id(LO_FALLBACK_DSQ);
+	if (budget_id > MAX_GLOBAL_BUDGETS) {
+		scx_bpf_error("invalid budget");
+		return 0;
+	}
+	capacity = costc->capacity[budget_id];
+	__sync_lock_test_and_set(MEMBER_VPTR(*costc, .budget[budget_id]),
+				 capacity);
+
+	trace("COST refreshed budget %d", cost_id);
 
 	return 0;
 }
@@ -223,11 +279,11 @@ int refresh_budgets(void)
 /*
  * Acquires a budget from a parent cost account.
  */
-s64 acquire_budget(struct cost *costc, u32 layer_id, s64 amount)
+s64 acquire_budget(struct cost *costc, u32 budget_id, s64 amount)
 {
 	s64 budget = 0;
 
-	if (layer_id >= MAX_LAYERS || layer_id < 0) {
+	if (budget_id >= MAX_GLOBAL_BUDGETS) {
 		scx_bpf_error("invalid parent cost");
 		return budget;
 	}
@@ -235,14 +291,15 @@ s64 acquire_budget(struct cost *costc, u32 layer_id, s64 amount)
 	if (!costc || !costc->has_parent)
 		return budget;
 
-
 	struct cost *parent_cost;
-	if (!(parent_cost = lookup_cost(costc->idx)))
+	if (!(parent_cost = lookup_cost(costc->idx))) {
+		scx_bpf_error("failed to find parent");
 		return budget;
+	}
 
-	__sync_fetch_and_sub(&parent_cost->budget[layer_id], amount);
+	__sync_fetch_and_sub(&parent_cost->budget[budget_id], amount);
 
-	if (parent_cost->budget[layer_id] < 0)
+	if (parent_cost->budget[budget_id] <= 0)
 		refresh_budgets();
 
 	return amount;
@@ -253,7 +310,7 @@ s64 acquire_budget(struct cost *costc, u32 layer_id, s64 amount)
  * acquire budget by either retrieving budget from the global context or
  * refreshing all budgets.
  */
-int record_cpu_cost(struct cost *costc, u32 budget_id, s64 amount)
+int record_cpu_cost(struct cost *costc, u32 budget_id, s64 amount, u64 slice_ns)
 {
 	if (budget_id > MAX_GLOBAL_BUDGETS || !costc) {
 		scx_bpf_error("invalid budget %d", budget_id);
@@ -262,10 +319,11 @@ int record_cpu_cost(struct cost *costc, u32 budget_id, s64 amount)
 
 	__sync_fetch_and_sub(&costc->budget[budget_id], amount);
 
-	if (costc->budget[budget_id] <= 0) {
+	if (costc->budget[budget_id] <= 0 ||
+	    costc->budget[budget_id] < slice_ns) {
 		if (costc->has_parent) {
-			s64 budget = acquire_budget(costc, budget_id,
-						    costc->capacity[budget_id] + amount);
+			s64 req_budget = costc->capacity[budget_id] - costc->budget[budget_id];
+			s64 budget = acquire_budget(costc, budget_id, req_budget);
 			if (budget > 0) {
 				__sync_fetch_and_add(&costc->budget[budget_id],
 						     costc->capacity[budget_id]);
@@ -296,7 +354,7 @@ __weak int has_budget(struct cost *costc, struct layer *layer)
 	s64 budget = *MEMBER_VPTR(*costc, .budget[layer_id]);
 	u64 layer_slice_ns = layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
 
-	if (budget > layer_slice_ns)
+	if (budget >= layer_slice_ns)
 		return slice_ns;
 
 	return 0;
@@ -310,7 +368,7 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 	struct layer *layer;
 	struct cost *costc, *global_costc;
 	int layer_id, llc_id;
-	u64 dsq_id, layer_weight_dur, layer_weight_sum = 0;
+	u64 layer_weight_dur, layer_weight_sum = 0;
 	s32 cpu;
 	u32 budget_id;
 
@@ -339,7 +397,7 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 			return;
 		}
 
-		layer_weight_dur = (layer->weight * ((u64)refresh_intvl_ns * slice_ns * nr_possible_cpus)) /
+		layer_weight_dur = (layer->weight * ((u64)refresh_intvl_ns * nr_possible_cpus)) /
 				    layer_weight_sum;
 		initialize_budget(global_costc, layer_id, (s64)layer_weight_dur);
 		trace("COST GLOBAL[%d][%s] budget %lld",
@@ -354,7 +412,7 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 				scx_bpf_error("failed to cpu budget: %d", cpu);
 				return;
 			}
-			layer_weight_dur = (layer->weight * slice_ns * refresh_intvl_ns) /
+			layer_weight_dur = (layer->weight * refresh_intvl_ns) /
 					    layer_weight_sum;
 			initialize_budget(costc, layer_id, (s64)layer_weight_dur);
 			if (cpu == 0)
@@ -367,16 +425,15 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 	 * XXX: since any task from any layer can get kicked to the fallback
 	 * DSQ we use the default slice to calculate the default budget.
 	 */
-	layer_weight_dur = (LO_FALLBACK_DSQ_WEIGHT * slice_ns * refresh_intvl_ns * nr_possible_cpus) /
+	layer_weight_dur = (LO_FALLBACK_DSQ_WEIGHT * refresh_intvl_ns * nr_possible_cpus) /
 			    layer_weight_sum;
-	initialize_budget(global_costc, fallback_dsq_cost_id(LO_FALLBACK_DSQ),
-			  (s64)layer_weight_dur);
+	budget_id = fallback_dsq_cost_id(LO_FALLBACK_DSQ);
+	initialize_budget(global_costc, budget_id, (s64)layer_weight_dur);
 
 	bpf_for(llc_id, 0, nr_llcs) {
-		dsq_id = llc_hi_fallback_dsq_id(llc_id);
-		budget_id = fallback_dsq_cost_id(dsq_id);
+		budget_id = fallback_llc_cost_id(llc_id);
 
-		layer_weight_dur = (HI_FALLBACK_DSQ_WEIGHT * slice_ns * refresh_intvl_ns * nr_possible_cpus) /
+		layer_weight_dur = (HI_FALLBACK_DSQ_WEIGHT * refresh_intvl_ns * nr_possible_cpus) /
 				    layer_weight_sum;
 		initialize_budget(global_costc, budget_id, (s64)layer_weight_dur);
 
@@ -390,14 +447,14 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 			// On first iteration always setup the lo fallback dsq budget.
 			if (llc_id == 0) {
 				budget_id = fallback_dsq_cost_id(LO_FALLBACK_DSQ);
-				layer_weight_dur = (LO_FALLBACK_DSQ_WEIGHT * slice_ns * refresh_intvl_ns) /
+				layer_weight_dur = (LO_FALLBACK_DSQ_WEIGHT * refresh_intvl_ns) /
 						    layer_weight_sum;
-				initialize_budget(costc, budget_id,
-						  (s64)layer_weight_dur);
+				initialize_budget(costc, budget_id, (s64)layer_weight_dur);
 			}
 
-			layer_weight_dur = (HI_FALLBACK_DSQ_WEIGHT * slice_ns * refresh_intvl_ns) /
+			layer_weight_dur = (HI_FALLBACK_DSQ_WEIGHT * refresh_intvl_ns) /
 					    layer_weight_sum;
+			budget_id = fallback_llc_cost_id(llc_id);
 			initialize_budget(costc, budget_id, (s64)layer_weight_dur);
 			if (cpu == 0 && llc_id == 0 && budget_id < MAX_GLOBAL_BUDGETS)
 				trace("COST CPU DSQ[%d][%d] budget %lld",
