@@ -93,6 +93,11 @@ static struct layer *lookup_layer(int idx)
 	return &layers[idx];
 }
 
+static __always_inline u64 layer_slice_ns(struct layer *layer)
+{
+	return layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
+}
+
 static __always_inline
 int rotate_layer_id(u32 base_layer_id, u32 rotation)
 {
@@ -777,8 +782,8 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cctx);
-		u64 layer_slice_ns = layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, layer_slice_ns, 0);
+		u64 slice_ns = layer_slice_ns(layer);
+		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		return cpu;
 	} else {
 		return prev_cpu;
@@ -818,8 +823,12 @@ bool try_preempt_cpu(s32 cand, struct task_struct *p, struct cpu_ctx *cctx,
 	if (!(cand_cctx = lookup_cpu_ctx(cand)) || cand_cctx->current_preempt)
 		return false;
 
-	if (!(costc = lookup_cpu_cost(cand)) || has_budget(costc, layer) == 0)
+	if (!(costc = lookup_cpu_cost(cand)) ||
+	    has_budget(costc, layer) == 0 ||
+	    !has_preempt_budget(costc, cand_cctx->layer_idx, tctx->layer)) {
+		trace("COST layer %s not enough budget to preempt", layer->name);
 		return false;
+	}
 
 	/*
 	 * If exclusive, we want to make sure the sibling CPU, if there's
@@ -1067,7 +1076,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 	try_preempt_first = cctx->try_preempt_first;
 	cctx->try_preempt_first = false;
-	u64 layer_slice_ns = layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
+	u64 slice_ns = layer_slice_ns(layer);
 
 	if (cctx->yielding) {
 		lstat_inc(LSTAT_YIELD, layer, cctx);
@@ -1087,8 +1096,8 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Limit the amount of budget that an idling task can accumulate
 	 * to one slice.
 	 */
-	if (vtime_before(vtime, layer->vtime_now - layer_slice_ns))
-		vtime = layer->vtime_now - layer_slice_ns;
+	if (vtime_before(vtime, layer->vtime_now - slice_ns))
+		vtime = layer->vtime_now - slice_ns;
 
 	/*
 	 * Special-case per-cpu kthreads which aren't in a preempting layer so
@@ -1139,13 +1148,13 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (disable_topology) {
 		tctx->last_dsq = tctx->layer;
-		scx_bpf_dispatch_vtime(p, tctx->layer, layer_slice_ns, vtime, enq_flags);
+		scx_bpf_dispatch_vtime(p, tctx->layer, slice_ns, vtime, enq_flags);
 	} else {
 		u32 llc_id = cpu_to_llc_id(tctx->last_cpu >= 0 ? tctx->last_cpu :
 					   bpf_get_smp_processor_id());
 		idx = layer_dsq_id(layer->idx, llc_id);
 		tctx->last_dsq = idx;
-		scx_bpf_dispatch_vtime(p, idx, layer_slice_ns, vtime, enq_flags);
+		scx_bpf_dispatch_vtime(p, idx, slice_ns, vtime, enq_flags);
 	}
 
 preempt:
@@ -1167,9 +1176,9 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 	if (!(tctx = lookup_task_ctx(p)) || !(layer = lookup_layer(tctx->layer)))
 		goto no;
 
-	u64 layer_slice_ns = layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
+	u64 slice_ns = layer_slice_ns(layer);
 	/* @p has fully consumed its slice and still wants to run */
-	cctx->ran_current_for += layer_slice_ns;
+	cctx->ran_current_for += slice_ns;
 
 	/*
 	 * There wasn't anything in the local or global DSQ, but there may be
@@ -1194,7 +1203,7 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 		 */
 		if (disable_topology) {
 			if (!scx_bpf_dsq_nr_queued(layer->idx)) {
-				p->scx.slice = layer_slice_ns;
+				p->scx.slice = slice_ns;
 				lstat_inc(LSTAT_KEEP, layer, cctx);
 				return true;
 			}
@@ -1203,7 +1212,7 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 						   tctx->last_cpu :
 						   bpf_get_smp_processor_id());
 			if (!scx_bpf_dsq_nr_queued(dsq_id)) {
-				p->scx.slice = layer_slice_ns;
+				p->scx.slice = slice_ns;
 				lstat_inc(LSTAT_KEEP, layer, cctx);
 				return true;
 			}
@@ -1230,7 +1239,7 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 		scx_bpf_put_idle_cpumask(idle_cpumask);
 
 		if (has_idle) {
-			p->scx.slice = layer_slice_ns;
+			p->scx.slice = slice_ns;
 			lstat_inc(LSTAT_KEEP, layer, cctx);
 			return true;
 		}
@@ -1672,11 +1681,14 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	u32 my_llc_id = cpu_to_llc_id(cpu);
 
 	/*
-	 * If one of the fallback DSQs has the most budget then consume from
-	 * it to prevent starvation.
+	 * If one of the fallback DSQs has the most budget then consume from it
+	 * to prevent starvation.
 	 */
 	if (has_pref_fallback_budget(costc)) {
 		dsq_id = budget_id_to_fallback_dsq(costc->pref_budget);
+		trace("COST consuming fallback %lld", dsq_id);
+		if (dsq_id > LO_FALLBACK_DSQ)
+			scx_bpf_error("invalid fallback dsq %lld", dsq_id);
 		if (scx_bpf_consume(dsq_id))
 			return;
 	}
@@ -2126,17 +2138,18 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	} else {
 		budget_id = layer->idx;
 	}
-	record_cpu_cost(costc, budget_id, (s64)used);
+
+	u64 slice_ns = layer_slice_ns(layer);
+	record_cpu_cost(costc, budget_id, (s64)used, slice_ns);
 
 	cctx->layer_cycles[lidx] += used;
 	cctx->current_preempt = false;
 	cctx->prev_exclusive = cctx->current_exclusive;
 	cctx->current_exclusive = false;
-	u64 layer_slice_ns = layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
 
 	/* scale the execution time by the inverse of the weight and charge */
-	if (cctx->yielding && used < layer_slice_ns)
-		used = layer_slice_ns;
+	if (cctx->yielding && used < slice_ns)
+		used = slice_ns;
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 	cctx->maybe_idle = true;
 }
@@ -2347,19 +2360,19 @@ int dump_cost(void)
 	bpf_for(i, 0, nr_llcs) {
 		u64 dsq_id = llc_hi_fallback_dsq_id(i);
 		u32 budget_id = fallback_dsq_cost_id(dsq_id);
-		scx_bpf_dump("COST FALLBACK[%d][%d] budget=%lld capacity=%lld\n",
+		scx_bpf_dump("COST FALLBACK[%llu][%d] budget=%lld capacity=%lld\n",
 			     dsq_id, budget_id,
 			     costc->budget[budget_id], costc->capacity[budget_id]);
 	}
 
 	// Per CPU costs
 	bpf_for(i, 0, nr_possible_cpus) {
-		if (!(costc = lookup_cpu_cost(j))) {
+		if (!(costc = lookup_cpu_cost(i))) {
 			scx_bpf_error("unabled to lookup layer %d", i);
 			continue;
 		}
 		bpf_for(j, 0, nr_layers) {
-			layer = lookup_layer(i);
+			layer = lookup_layer(j);
 			if (!layer) {
 				scx_bpf_error("unabled to lookup layer %d", i);
 				continue;
@@ -2373,8 +2386,8 @@ int dump_cost(void)
 			u32 budget_id = fallback_dsq_cost_id(dsq_id);
 			if (budget_id >= MAX_GLOBAL_BUDGETS)
 				continue;
-			scx_bpf_dump("COST CPU[%d]FALLBACK[%d][%d] budget=%lld capacity=%lld\n",
-				     i, j, dsq_id, budget_id,
+			scx_bpf_dump("COST CPU[%d]FALLBACK[%llu][%d] budget=%lld capacity=%lld\n",
+				     i, dsq_id, budget_id,
 				     costc->budget[budget_id], costc->capacity[budget_id]);
 		}
 	}
@@ -2793,7 +2806,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			}
 		}
 	}
-	initialize_budgets(1000LLU * NSEC_PER_MSEC);
+	initialize_budgets(15LLU * NSEC_PER_SEC);
 	ret = start_layered_timers();
 	if (ret < 0)
 		return ret;
