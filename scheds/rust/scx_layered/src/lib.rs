@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 use anyhow::bail;
 use anyhow::Result;
 use bitvec::prelude::*;
+pub use config::LayerCommon;
 pub use config::LayerConfig;
 pub use config::LayerKind;
 pub use config::LayerMatch;
