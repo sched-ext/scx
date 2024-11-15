@@ -37,6 +37,7 @@ const volatile bool smt_enabled = true;
 const volatile bool has_little_cores = true;
 const volatile bool disable_topology = false;
 const volatile bool xnuma_preemption = false;
+const volatile bool local_llc_iteration = true;
 const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile bool monitor_disable = false;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
@@ -1471,28 +1472,47 @@ __weak int consume_preempting(struct cost *costc, u32 my_llc_id)
 	if (!costc)
 		return -EINVAL;
 
-	bpf_for(idx, 0, nr_layers) {
-		layer_idx = rotate_layer_id(costc->pref_layer, idx);
-		if (layer_idx >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return -EINVAL;
-		}
-		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (!layer->preempt || has_budget(costc, layer) == 0)
-			continue;
-
+	if (local_llc_iteration) {
 		bpf_for(llc_idx, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
-			dsq_id = layer_dsq_id(layer_idx, llc_id);
-			if (scx_bpf_consume(dsq_id))
-				return 0;
+			bpf_for(idx, 0, nr_layers) {
+				layer_idx = rotate_layer_id(costc->pref_layer, idx);
+				if (layer_idx >= nr_layers) {
+					scx_bpf_error("can't happen");
+					return -EINVAL;
+				}
+				layer = MEMBER_VPTR(layers, [layer_idx]);
+				if (has_budget(costc, layer) == 0)
+					continue;
+				dsq_id = layer_dsq_id(layer_idx, llc_id);
+				if (scx_bpf_consume(dsq_id))
+					return 0;
+			}
+		}
+	} else {
+		bpf_for(idx, 0, nr_layers) {
+			layer_idx = rotate_layer_id(costc->pref_layer, idx);
+			if (layer_idx >= nr_layers) {
+				scx_bpf_error("can't happen");
+				return -EINVAL;
+			}
+			layer = MEMBER_VPTR(layers, [layer_idx]);
+			if (!layer->preempt || has_budget(costc, layer) == 0)
+				continue;
+
+			bpf_for(llc_idx, 0, nr_llcs) {
+				u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+				dsq_id = layer_dsq_id(layer_idx, llc_id);
+				if (scx_bpf_consume(dsq_id))
+					return 0;
+			}
 		}
 	}
 
 	return -ENOENT;
 }
 
-__weak int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
+static __noinline int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
 {
 	struct layer *layer;
 	u64 dsq_id;
@@ -1501,29 +1521,60 @@ __weak int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
 	if (!costc)
 		return -EINVAL;
 
-	bpf_for(idx, 0, nr_layers) {
-		layer_idx = rotate_layer_id(costc->pref_layer, idx);
-		if (layer_idx >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return -EINVAL;
-		}
-		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (has_budget(costc, layer) == 0)
-			continue;
-
-		struct cpumask *layer_cpumask;
-		if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
-			return -ENOENT;
-		if (!bpf_cpumask_test_cpu(cpu, layer_cpumask) &&
-		    (cpu > nr_possible_cpus || cpu != fallback_cpu || layer->nr_cpus != 0))
-			continue;
-
+	if (local_llc_iteration) {
 		bpf_for(llc_idx, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
-			dsq_id = layer_dsq_id(layer_idx, llc_id);
+			bpf_for(idx, 0, nr_layers) {
+				layer_idx = rotate_layer_id(costc->pref_layer, idx);
+				if (layer_idx >= nr_layers) {
+					scx_bpf_error("can't happen");
+					return -EINVAL;
+				}
+				layer = MEMBER_VPTR(layers, [layer_idx]);
+				if (has_budget(costc, layer) == 0)
+					continue;
 
-			if (scx_bpf_consume(dsq_id))
-				return 0;
+				struct cpumask *layer_cpumask;
+				if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
+					return -ENOENT;
+
+				if (!bpf_cpumask_test_cpu(cpu, layer_cpumask) &&
+				    (cpu > nr_possible_cpus ||
+				     cpu != fallback_cpu ||
+				     layer->nr_cpus != 0))
+					continue;
+
+				dsq_id = layer_dsq_id(layer_idx, llc_id);
+				if (scx_bpf_consume(dsq_id))
+					return 0;
+			}
+		}
+	} else {
+		bpf_for(idx, 0, nr_layers) {
+			layer_idx = rotate_layer_id(costc->pref_layer, idx);
+			if (layer_idx >= nr_layers) {
+				scx_bpf_error("can't happen");
+				return -EINVAL;
+			}
+			layer = MEMBER_VPTR(layers, [layer_idx]);
+			if (has_budget(costc, layer) == 0)
+				continue;
+
+			struct cpumask *layer_cpumask;
+			if (!(layer_cpumask = lookup_layer_cpumask(layer_idx)))
+				return -ENOENT;
+			if (!bpf_cpumask_test_cpu(cpu, layer_cpumask) &&
+			    (cpu > nr_possible_cpus || cpu != fallback_cpu ||
+			    layer->nr_cpus != 0))
+				continue;
+
+			bpf_for(llc_idx, 0, nr_llcs) {
+				u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+				dsq_id = layer_dsq_id(layer_idx, llc_id);
+
+				if (scx_bpf_consume(dsq_id))
+					return 0;
+			}
 		}
 	}
 
@@ -1539,23 +1590,45 @@ __weak int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
 	if (!costc)
 		return -EINVAL;
 
-	bpf_for(idx, 0, nr_layers) {
-		layer_idx = rotate_layer_id(costc->pref_layer, idx);
-		if (layer_idx >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return -EINVAL;
-		}
-		layer = MEMBER_VPTR(layers, [layer_idx]);
-		if (has_budget(costc, layer) == 0)
-			continue;
-		if (layer->preempt || layer->kind == LAYER_KIND_CONFINED)
-			continue;
+	if (local_llc_iteration) {
 		bpf_for(llc_idx, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
-			dsq_id = layer_dsq_id(layer_idx, llc_id);
+			bpf_for(idx, 0, nr_layers) {
+				layer_idx = rotate_layer_id(costc->pref_layer, idx);
+				if (layer_idx >= nr_layers) {
+					scx_bpf_error("can't happen");
+					return -EINVAL;
+				}
+				layer = MEMBER_VPTR(layers, [layer_idx]);
+				if (has_budget(costc, layer) == 0)
+					continue;
+				if (layer->preempt || layer->kind == LAYER_KIND_CONFINED)
+					continue;
 
-			if (scx_bpf_consume(dsq_id))
-				return 0;
+				dsq_id = layer_dsq_id(layer_idx, llc_id);
+				if (scx_bpf_consume(dsq_id))
+					return 0;
+			}
+		}
+	} else {
+		bpf_for(idx, 0, nr_layers) {
+			layer_idx = rotate_layer_id(costc->pref_layer, idx);
+			if (layer_idx >= nr_layers) {
+				scx_bpf_error("can't happen");
+				return -EINVAL;
+			}
+			layer = MEMBER_VPTR(layers, [layer_idx]);
+			if (has_budget(costc, layer) == 0)
+				continue;
+			if (layer->preempt || layer->kind == LAYER_KIND_CONFINED)
+				continue;
+			bpf_for(llc_idx, 0, nr_llcs) {
+				u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
+				dsq_id = layer_dsq_id(layer_idx, llc_id);
+
+				if (scx_bpf_consume(dsq_id))
+					return 0;
+			}
 		}
 	}
 

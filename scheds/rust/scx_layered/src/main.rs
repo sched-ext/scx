@@ -458,6 +458,10 @@ struct Opts {
     #[clap(long)]
     run_example: bool,
 
+    /// Enables iteration over local LLCs first for dispatch.
+    #[clap(long, default_value = "false")]
+    local_llc_iteration: bool,
+
     /// Disable antistall
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
@@ -1494,6 +1498,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.disable_topology = disable_topology;
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
+        skel.maps.rodata_data.local_llc_iteration = opts.local_llc_iteration;
         skel.maps.rodata_data.antistall_sec = opts.antistall_sec;
         if opts.monitor_disable {
             skel.maps.rodata_data.monitor_disable = opts.monitor_disable;
