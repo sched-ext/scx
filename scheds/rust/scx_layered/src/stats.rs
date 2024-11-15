@@ -170,7 +170,11 @@ impl LayerStats {
             }
         };
         let calc_frac = |a, b| {
-            if b != 0.0 { a / b * 100.0 } else { 0.0 }
+            if b != 0.0 {
+                a / b * 100.0
+            } else {
+                0.0
+            }
         };
 
         Self {
@@ -221,15 +225,22 @@ impl LayerStats {
     pub fn format<W: Write>(&self, w: &mut W, name: &str, header_width: usize) -> Result<()> {
         writeln!(
             w,
-            "  {:<width$}: util/dcycle/frac/{:5.1}/{:5.1}/{:7.1} load/load_frac_adj/frac={:9.2}/{:2.2}/{:5.1} tasks={:6}",
+            "  {:<width$}: util/dcycle/frac={:5.1}/{:5.1}/{:7.1} tasks={:6}",
             name,
             self.util,
             self.dcycle,
             self.util_frac,
+            self.tasks,
+            width = header_width,
+        )?;
+
+        writeln!(
+            w,
+            "  {:<width$}  load/load_frac_adj/frac={:9.2}/{:2.2}/{:5.1}",
+            "",
             self.load,
             self.load_frac_adj,
             self.load_frac,
-            self.tasks,
             width = header_width,
         )?;
 
@@ -281,7 +292,7 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  preempt/first/xllc/xnuma/idle/fail={}/{}/{}/{}/{}/{} min_exec={}/{:7.2}ms, slice={}ms",
+            "  {:<width$}  preempt/first/xllc/xnuma/idle/fail={}/{}/{}/{}/{}/{}",
             "",
             fmt_pct(self.preempt),
             fmt_pct(self.preempt_first),
@@ -289,10 +300,17 @@ impl LayerStats {
             fmt_pct(self.preempt_xnuma),
             fmt_pct(self.preempt_idle),
             fmt_pct(self.preempt_fail),
+            width = header_width,
+        )?;
+
+        writeln!(
+            w,
+            "  {:<width$}  slice={}ms min_exec={}/{:7.2}ms",
+            "",
+            self.slice_us as f64 / 1000.0,
             fmt_pct(self.min_exec),
             self.min_exec_us as f64 / 1000.0,
-            self.slice_us as f64 / 1000.0,
-            width = header_width,
+            width = header_width
         )?;
 
         let mut cpus = self
