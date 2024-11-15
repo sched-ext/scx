@@ -44,6 +44,7 @@ use scx_utils::compat;
 use scx_utils::import_enums;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
+use scx_utils::read_netdevs;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -53,6 +54,7 @@ use scx_utils::uei_report;
 use scx_utils::Cache;
 use scx_utils::CoreType;
 use scx_utils::LoadAggregator;
+use scx_utils::NetDev;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use stats::LayerStats;
@@ -470,6 +472,10 @@ struct Opts {
     /// Disable antistall
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
+
+    /// Enable netdev IRQ balancing
+    #[clap(long, default_value = "false")]
+    netdev_irq_balance: bool,
 
     /// Maximum task runnable_at delay (in seconds) before antistall turns on
     #[clap(long, default_value = "3")]
@@ -1215,6 +1221,7 @@ struct Scheduler<'a> {
     nr_layer_cpus_ranges: Vec<(usize, usize)>,
     processing_dur: Duration,
 
+    netdevs: BTreeMap<String, NetDev>,
     stats_server: StatsServer<StatsReq, StatsRes>,
 }
 
@@ -1403,6 +1410,11 @@ impl<'a> Scheduler<'a> {
         } else {
             Topology::new()?
         };
+        let netdevs = if opts.netdev_irq_balance {
+            read_netdevs()?
+        } else {
+            BTreeMap::new()
+        };
 
         if !disable_topology {
             if topo.nodes().len() == 1 && topo.nodes()[0].llcs().len() == 1 {
@@ -1529,6 +1541,7 @@ impl<'a> Scheduler<'a> {
             proc_reader,
             skel,
 
+            netdevs,
             stats_server,
         };
 
@@ -1546,6 +1559,26 @@ impl<'a> Scheduler<'a> {
             }
         }
         bpf_layer.refresh_cpus = 1;
+    }
+
+    fn update_netdev_cpumasks(&mut self) -> Result<()> {
+        let available_cpus = self.cpu_pool.available_cpus();
+        if available_cpus.is_empty() {
+            return Ok(());
+        }
+
+        for (iface, netdev) in self.netdevs.iter_mut() {
+            for (irq, irqmask) in netdev.irqs.iter_mut() {
+                irqmask.clear();
+                for cpu in available_cpus.iter_ones() {
+                    let _ = irqmask.set_cpu(cpu);
+                }
+                trace!("{} updating irq {} cpumask {:?}", iface, irq, irqmask);
+            }
+            netdev.apply_cpumasks()?;
+        }
+
+        Ok(())
     }
 
     fn set_bpf_layer_preemption(layer: &mut Layer, bpf_layer: &mut types::layer, preempt: bool) {
@@ -1662,6 +1695,7 @@ impl<'a> Scheduler<'a> {
             }
         }
 
+        let _ = self.update_netdev_cpumasks();
         Ok(())
     }
 

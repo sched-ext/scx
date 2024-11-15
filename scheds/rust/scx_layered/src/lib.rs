@@ -222,6 +222,15 @@ impl CpuPool {
         Ok(Some(&self.core_cpus[core]))
     }
 
+    pub fn available_cpus(&self) -> BitVec<u64, Lsb0> {
+        let mut cpus = bitvec![u64, Lsb0; 0; self.nr_cpus];
+        for core in self.available_cores.iter_ones() {
+            let core_cpus = self.core_cpus[core].clone();
+            cpus |= core_cpus.as_bitslice();
+        }
+        cpus
+    }
+
     pub fn available_cpus_in_mask(&self, allowed_cpus: &BitVec) -> BitVec {
         let mut cpus = bitvec![0; self.nr_cpus];
         for core in self.available_cores.iter_ones() {
