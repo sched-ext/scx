@@ -2631,7 +2631,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	bpf_for(i, 0, nr_possible_cpus) {
 		const volatile u8 *u8_ptr;
 
-	  init_antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq, &zero, i);
+		init_antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq,
+								&zero, i);
 		if (init_antistall_dsq) {
 			*init_antistall_dsq = SCX_DSQ_INVALID;
 		}
