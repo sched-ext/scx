@@ -226,7 +226,8 @@ static struct node_ctx *lookup_node_ctx(u32 node)
 {
 	struct node_ctx *nodec;
 
-	nodec = bpf_map_lookup_elem(&node_data, &node);
+	if (!(nodec = bpf_map_lookup_elem(&node_data, &node)))
+		scx_bpf_error("no node_ctx");
 	return nodec;
 }
 
@@ -242,7 +243,8 @@ static struct cache_ctx *lookup_cache_ctx(u32 cache_idx)
 {
 	struct cache_ctx *cachec;
 
-	cachec = bpf_map_lookup_elem(&cache_data, &cache_idx);
+	if (!(cachec = bpf_map_lookup_elem(&cache_data, &cache_idx)))
+		scx_bpf_error("no cache_ctx");
 	return cachec;
 }
 
@@ -413,6 +415,8 @@ struct task_ctx {
 	pid_t			last_waker;
 	bool			refresh_layer;
 	struct cached_cpus	layered_cpus;
+	struct cached_cpus	layered_cpus_llc;
+	struct cached_cpus	layered_cpus_node;
 	bool			all_cpus_allowed;
 	u64			runnable_at;
 	u64			running_at;
@@ -510,17 +514,15 @@ int BPF_PROG(tp_task_rename, struct task_struct *p, const char *buf)
 	return 0;
 }
 
-static bool should_refresh_cached_cpus(struct cached_cpus *ccpus, s64 id)
+static bool should_refresh_cached_cpus(struct cached_cpus *ccpus, s64 id, u64 cpus_seq)
 {
-	return ccpus->id != id || ccpus->seq != READ_ONCE(layers->cpus_seq);
+	return ccpus->id != id || ccpus->seq != cpus_seq;
 }
 
-static void refresh_cached_cpus(struct cached_cpus *ccpus, s64 id,
+static void refresh_cached_cpus(struct cached_cpus *ccpus, s64 id, u64 cpus_seq,
 				const struct cpumask *cpus_a,
 				const struct cpumask *cpus_b)
 {
-	u64 seq = READ_ONCE(layers->cpus_seq);
-
 	if (unlikely(!ccpus->mask || !cpus_a || !cpus_b)) {
 		scx_bpf_error("NULL ccpus->mask or cpus_a/b");
 		return;
@@ -533,16 +535,52 @@ static void refresh_cached_cpus(struct cached_cpus *ccpus, s64 id,
 	 */
 	bpf_cpumask_and((struct bpf_cpumask *)ccpus->mask, cpus_a, cpus_b);
 	ccpus->id = id;
-	ccpus->seq = seq;
+	ccpus->seq = cpus_seq;
 }
 
 static void maybe_refresh_layered_cpus(struct task_struct *p, struct task_ctx *tctx,
-				      const struct cpumask *layer_cpumask)
+				       const struct cpumask *layer_cpumask,
+				       u64 cpus_seq)
 {
-	if (should_refresh_cached_cpus(&tctx->layered_cpus, 0)) {
-		refresh_cached_cpus(&tctx->layered_cpus, 0, p->cpus_ptr, layer_cpumask);
+	if (should_refresh_cached_cpus(&tctx->layered_cpus, 0, cpus_seq)) {
+		refresh_cached_cpus(&tctx->layered_cpus, 0, cpus_seq,
+				    p->cpus_ptr, layer_cpumask);
 		trace("%s[%d] layered cpumask refreshed to seq=%llu",
 		      p->comm, p->pid, tctx->layered_cpus.seq);
+	}
+}
+
+static void maybe_refresh_layered_cpus_llc(struct task_struct *p, struct task_ctx *tctx,
+					   const struct cpumask *layer_cpumask,
+					   s32 llc_id, u64 cpus_seq)
+{
+	if (should_refresh_cached_cpus(&tctx->layered_cpus_llc, llc_id, cpus_seq)) {
+		struct cache_ctx *cachec;
+
+		if (!(cachec = lookup_cache_ctx(llc_id)))
+			return;
+		refresh_cached_cpus(&tctx->layered_cpus_llc, llc_id, cpus_seq,
+				    cast_mask(tctx->layered_cpus.mask),
+				    cast_mask(cachec->cpumask));
+		trace("%s[%d] layered llc cpumask refreshed to llc=%d seq=%llu",
+		      p->comm, p->pid, tctx->layered_cpus_llc.id, tctx->layered_cpus_llc.seq);
+	}
+}
+
+static void maybe_refresh_layered_cpus_node(struct task_struct *p, struct task_ctx *tctx,
+					    const struct cpumask *layer_cpumask,
+					    s32 node_id, u64 cpus_seq)
+{
+	if (should_refresh_cached_cpus(&tctx->layered_cpus_node, node_id, cpus_seq)) {
+		struct node_ctx *nodec;
+
+		if (!(nodec = lookup_node_ctx(node_id)))
+			return;
+		refresh_cached_cpus(&tctx->layered_cpus_node, node_id, cpus_seq,
+				    cast_mask(tctx->layered_cpus.mask),
+				    cast_mask(nodec->cpumask));
+		trace("%s[%d] layered node cpumask refreshed to node=%d seq=%llu",
+		      p->comm, p->pid, tctx->layered_cpus_node.id, tctx->layered_cpus_node.seq);
 	}
 }
 
@@ -601,7 +639,7 @@ s32 pick_idle_no_topo(struct task_struct *p, s32 prev_cpu,
 		      struct cpu_ctx *cctx, struct task_ctx *tctx,
 		      struct layer *layer, bool from_selcpu)
 {
-	const struct cpumask *idle_cpumask;
+	const struct cpumask *idle_smtmask;
 	struct cpumask *layer_cpumask, *layered_cpumask;
 	s32 cpu;
 
@@ -617,7 +655,7 @@ s32 pick_idle_no_topo(struct task_struct *p, s32 prev_cpu,
 		return prev_cpu;
 	}
 
-	maybe_refresh_layered_cpus(p, tctx, layer_cpumask);
+	maybe_refresh_layered_cpus(p, tctx, layer_cpumask, READ_ONCE(layers->cpus_seq));
 
 	/*
 	 * If @p prefers to preempt @prev_cpu than finding an idle CPU and
@@ -634,14 +672,14 @@ s32 pick_idle_no_topo(struct task_struct *p, s32 prev_cpu,
 	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
 	 * partially idle @prev_cpu.
 	 */
-	idle_cpumask = scx_bpf_get_idle_smtmask();
+	idle_smtmask = scx_bpf_get_idle_smtmask();
 	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
-				      idle_cpumask,
+				      idle_smtmask,
 				      layer->idle_smt)) >= 0)
 		goto out_put;
 
 out_put:
-	scx_bpf_put_idle_cpumask(idle_cpumask);
+	scx_bpf_put_idle_cpumask(idle_smtmask);
 	return cpu;
 }
 
@@ -653,22 +691,12 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	if (disable_topology)
 		return pick_idle_no_topo(p, prev_cpu, cctx, tctx, layer, from_selcpu);
 
-	const struct cpumask *idle_cpumask;
-	struct cache_ctx *cachec;
-	struct node_ctx *nodec;
-	struct bpf_cpumask *pref_idle_cpumask;
-	struct cpumask *layer_cpumask, *layered_cpumask, *cache_cpumask, *node_cpumask;
+	const struct cpumask *idle_smtmask, *layer_cpumask, *cpumask;
+	struct cpu_ctx *prev_cctx;
+	u64 cpus_seq;
 	s32 cpu;
 
-	/* look up cpumasks */
-	if (!(layered_cpumask = (struct cpumask *)(tctx->layered_cpus.mask)) ||
-	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)) ||
-	    !(cachec = lookup_cache_ctx(cctx->cache_idx)) ||
-	    !(nodec = lookup_node_ctx(cctx->node_idx)))
-			return -1;
-
-	if (!(cache_cpumask = (struct cpumask *)(cachec->cpumask)) ||
-	    !(node_cpumask = (struct cpumask *)(nodec->cpumask)))
+	if (!(layer_cpumask = lookup_layer_cpumask(tctx->layer)))
 		return -1;
 
 	/* not much to do if bound to a single CPU */
@@ -678,7 +706,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		return prev_cpu;
 	}
 
-	maybe_refresh_layered_cpus(p, tctx, layer_cpumask);
+	cpus_seq = READ_ONCE(layers->cpus_seq);
 
 	/*
 	 * If @p prefers to preempt @prev_cpu than finding an idle CPU and
@@ -686,59 +714,52 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 * @prev_cpu. The enqueue path will also retry to find an idle CPU if
 	 * the preemption attempt fails.
 	 */
-	if (from_selcpu && should_try_preempt_first(prev_cpu, layer, layered_cpumask)) {
+	maybe_refresh_layered_cpus(p, tctx, layer_cpumask, cpus_seq);
+	if (!(cpumask = cast_mask(tctx->layered_cpus.mask)))
+		return -1;
+	if (from_selcpu && should_try_preempt_first(prev_cpu, layer, cpumask)) {
 		cctx->try_preempt_first = true;
 		return -1;
 	}
 
-	if (layer->idle_smt) {
-		idle_cpumask = scx_bpf_get_idle_smtmask();
-	} else {
-		idle_cpumask = scx_bpf_get_idle_cpumask();
-	}
-
-	pref_idle_cpumask = bpf_cpumask_create();
-
-	if (!pref_idle_cpumask || !idle_cpumask) {
-		cpu = -1;
-		goto out_put;
-	}
+	if (!(prev_cctx = lookup_cpu_ctx(prev_cpu)) ||
+	    !(idle_smtmask = scx_bpf_get_idle_smtmask()))
+		return -1;
 
 	/*
 	 * Try a CPU in the current LLC
 	 */
-	bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
-	bpf_cpumask_and(pref_idle_cpumask, cache_cpumask,
-			cast_mask(pref_idle_cpumask));
-	bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
-			cast_mask(pref_idle_cpumask));
-	if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
-				      prev_cpu, idle_cpumask,
-				      layer->idle_smt)) >= 0)
-		goto out_put;
+	if (nr_llcs > 1) {
+		maybe_refresh_layered_cpus_llc(p, tctx, layer_cpumask,
+					       prev_cctx->cache_idx, cpus_seq);
+		if (!(cpumask = cast_mask(tctx->layered_cpus_llc.mask))) {
+			cpu = -1;
+			goto out_put;
+		}
+		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask,
+					      layer->idle_smt)) >= 0)
+			goto out_put;
+	}
 
 	/*
-	 * If the layer uses BigLittle growth algo try a big cpu
+	 * If the layer uses BigLittle growth algo try a big cpu.
+	 * TODO - Cache layered_cpus.mask & big_cpumask.
 	 */
-	if (has_little_cores
-	    && big_cpumask
-	    && layer->growth_algo == GROWTH_ALGO_BIG_LITTLE)
-	{
-		if (!pref_idle_cpumask || !big_cpumask) {
-			cpu = -1;
-			goto out_put;
-		}
-		bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
-		if (!pref_idle_cpumask || !big_cpumask) {
-			cpu = -1;
-			goto out_put;
-		}
-		bpf_cpumask_and(pref_idle_cpumask, cast_mask(big_cpumask),
-				cast_mask(pref_idle_cpumask));
+	if (has_little_cores && big_cpumask &&
+	    layer->growth_algo == GROWTH_ALGO_BIG_LITTLE) {
+		struct bpf_cpumask *tmp_cpumask;
 
-		if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
-					      prev_cpu, idle_cpumask,
-					      layer->idle_smt)) >= 0)
+		if (!(tmp_cpumask = bpf_cpumask_create())) {
+			cpu = -1;
+			goto out_put;
+		}
+		bpf_cpumask_and(tmp_cpumask, cast_mask(tctx->layered_cpus.mask),
+				cast_mask(big_cpumask));
+		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask),
+					 prev_cpu, idle_smtmask,
+					 layer->idle_smt);
+		bpf_cpumask_release(tmp_cpumask);
+		if (cpu >= 0)
 			goto out_put;
 	}
 
@@ -746,17 +767,13 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 * Next try a CPU in the current node
 	 */
 	if (nr_nodes > 1) {
-		if (!pref_idle_cpumask || !idle_cpumask) {
+		maybe_refresh_layered_cpus_node(p, tctx, layer_cpumask,
+						prev_cctx->node_idx, cpus_seq);
+		if (!(cpumask = cast_mask(tctx->layered_cpus_node.mask))) {
 			cpu = -1;
 			goto out_put;
 		}
-		bpf_cpumask_copy(pref_idle_cpumask, idle_cpumask);
-		bpf_cpumask_and(pref_idle_cpumask, node_cpumask,
-				cast_mask(pref_idle_cpumask));
-		bpf_cpumask_and(pref_idle_cpumask, layer_cpumask,
-				cast_mask(pref_idle_cpumask));
-		if ((cpu = pick_idle_cpu_from(cast_mask(pref_idle_cpumask),
-					      prev_cpu, idle_cpumask,
+		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask,
 					      layer->idle_smt)) >= 0)
 			goto out_put;
 	}
@@ -765,8 +782,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 * If the layer is an open one, we can try the whole machine.
 	 */
 	if (layer->kind != LAYER_KIND_CONFINED &&
-	    ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu,
-				       idle_cpumask,
+	    ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu, idle_smtmask,
 				       layer->idle_smt)) >= 0)) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cctx);
 		goto out_put;
@@ -775,9 +791,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	cpu = -1;
 
 out_put:
-	if (pref_idle_cpumask)
-		bpf_cpumask_release(pref_idle_cpumask);
-	scx_bpf_put_idle_cpumask(idle_cpumask);
+	scx_bpf_put_idle_cpumask(idle_smtmask);
 	return cpu;
 }
 
@@ -987,7 +1001,6 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *tctx,
 	if (!(cachec = lookup_cache_ctx(cctx->cache_idx)) ||
 	    !(nodec = lookup_node_ctx(cctx->node_idx)) ||
 	    !cachec->cpumask) {
-		scx_bpf_error("can't happen");
 		return;
 	}
 
@@ -1876,6 +1889,8 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *tctx)
 
 		tctx->layer = idx;
 		tctx->layered_cpus.seq = layer->cpus_seq - 1;
+		tctx->layered_cpus_llc.seq = layer->cpus_seq - 1;
+		tctx->layered_cpus_node.seq = layer->cpus_seq - 1;
 		__sync_fetch_and_add(&layer->nr_tasks, 1);
 		/*
 		 * XXX - To be correct, we'd need to calculate the vtime
@@ -2279,6 +2294,12 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	}
 
 	ret = init_cached_cpus(&tctx->layered_cpus);
+	if (ret)
+		return ret;
+	ret = init_cached_cpus(&tctx->layered_cpus_llc);
+	if (ret)
+		return ret;
+	ret = init_cached_cpus(&tctx->layered_cpus_node);
 	if (ret)
 		return ret;
 
