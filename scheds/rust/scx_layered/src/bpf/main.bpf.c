@@ -325,7 +325,7 @@ static struct cpumask *lookup_layer_cpumask(int idx)
 	struct layer_cpumask_wrapper *cpumaskw;
 
 	if ((cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &idx))) {
-		return cast_mask(cpumaskw->cpumask);
+		return (struct cpumask *)cpumaskw->cpumask;
 	} else {
 		scx_bpf_error("no layer_cpumask");
 		return NULL;
@@ -400,15 +400,19 @@ int BPF_PROG(sched_tick_fentry)
 	return 0;
 }
 
+struct cached_cpus {
+	s64			id;
+	u64			seq;
+	struct bpf_cpumask __kptr *mask;
+};
+
 struct task_ctx {
 	int			pid;
 	int			last_cpu;
 	int			layer;
 	pid_t			last_waker;
 	bool			refresh_layer;
-	u64			layer_cpus_seq;
-	struct bpf_cpumask __kptr *layered_cpumask;
-
+	struct cached_cpus	layered_cpus;
 	bool			all_cpus_allowed;
 	u64			runnable_at;
 	u64			running_at;
@@ -506,23 +510,40 @@ int BPF_PROG(tp_task_rename, struct task_struct *p, const char *buf)
 	return 0;
 }
 
-static void maybe_refresh_layered_cpumask(struct cpumask *layered_cpumask,
-					  struct task_struct *p, struct task_ctx *tctx,
-					  const struct cpumask *layer_cpumask)
+static bool should_refresh_cached_cpus(struct cached_cpus *ccpus, s64 id)
 {
-	u64 layer_seq = layers->cpus_seq;
+	return ccpus->id != id || ccpus->seq != READ_ONCE(layers->cpus_seq);
+}
 
-	if (tctx->layer_cpus_seq == layer_seq)
+static void refresh_cached_cpus(struct cached_cpus *ccpus, s64 id,
+				const struct cpumask *cpus_a,
+				const struct cpumask *cpus_b)
+{
+	u64 seq = READ_ONCE(layers->cpus_seq);
+
+	if (unlikely(!ccpus->mask || !cpus_a || !cpus_b)) {
+		scx_bpf_error("NULL ccpus->mask or cpus_a/b");
 		return;
+	}
 
 	/*
 	 * XXX - We're assuming that the updated @layer_cpumask matching the new
 	 * @layer_seq is visible which may not be true. For now, leave it as-is.
 	 * Let's update once BPF grows enough memory ordering constructs.
 	 */
-	bpf_cpumask_and((struct bpf_cpumask *)layered_cpumask, layer_cpumask, p->cpus_ptr);
-	tctx->layer_cpus_seq = layer_seq;
-	trace("%s[%d] cpumask refreshed to seq %llu", p->comm, p->pid, layer_seq);
+	bpf_cpumask_and((struct bpf_cpumask *)ccpus->mask, cpus_a, cpus_b);
+	ccpus->id = id;
+	ccpus->seq = seq;
+}
+
+static void maybe_refresh_layered_cpus(struct task_struct *p, struct task_ctx *tctx,
+				      const struct cpumask *layer_cpumask)
+{
+	if (should_refresh_cached_cpus(&tctx->layered_cpus, 0)) {
+		refresh_cached_cpus(&tctx->layered_cpus, 0, p->cpus_ptr, layer_cpumask);
+		trace("%s[%d] layered cpumask refreshed to seq=%llu",
+		      p->comm, p->pid, tctx->layered_cpus.seq);
+	}
 }
 
 static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
@@ -585,7 +606,7 @@ s32 pick_idle_no_topo(struct task_struct *p, s32 prev_cpu,
 	s32 cpu;
 
 	/* look up cpumasks */
-	if (!(layered_cpumask = cast_mask(tctx->layered_cpumask)) ||
+	if (!(layered_cpumask = (struct cpumask *)(tctx->layered_cpus.mask)) ||
 	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)))
 			return -1;
 
@@ -596,7 +617,7 @@ s32 pick_idle_no_topo(struct task_struct *p, s32 prev_cpu,
 		return prev_cpu;
 	}
 
-	maybe_refresh_layered_cpumask(layered_cpumask, p, tctx, layer_cpumask);
+	maybe_refresh_layered_cpus(p, tctx, layer_cpumask);
 
 	/*
 	 * If @p prefers to preempt @prev_cpu than finding an idle CPU and
@@ -640,14 +661,14 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	s32 cpu;
 
 	/* look up cpumasks */
-	if (!(layered_cpumask = cast_mask(tctx->layered_cpumask)) ||
+	if (!(layered_cpumask = (struct cpumask *)(tctx->layered_cpus.mask)) ||
 	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)) ||
 	    !(cachec = lookup_cache_ctx(cctx->cache_idx)) ||
 	    !(nodec = lookup_node_ctx(cctx->node_idx)))
 			return -1;
 
-	if (!(cache_cpumask = cast_mask(cachec->cpumask)) ||
-	    !(node_cpumask = cast_mask(nodec->cpumask)))
+	if (!(cache_cpumask = (struct cpumask *)(cachec->cpumask)) ||
+	    !(node_cpumask = (struct cpumask *)(nodec->cpumask)))
 		return -1;
 
 	/* not much to do if bound to a single CPU */
@@ -657,7 +678,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		return prev_cpu;
 	}
 
-	maybe_refresh_layered_cpumask(layered_cpumask, p, tctx, layer_cpumask);
+	maybe_refresh_layered_cpus(p, tctx, layer_cpumask);
 
 	/*
 	 * If @p prefers to preempt @prev_cpu than finding an idle CPU and
@@ -914,7 +935,6 @@ void try_preempt_no_topo(s32 task_cpu, struct task_struct *p,
 
 	lstat_inc(LSTAT_PREEMPT_FAIL, layer, cctx);
 
-preempt_fail:
 	lstat_inc(LSTAT_PREEMPT_FAIL, layer, cctx);
 }
 
@@ -1855,7 +1875,7 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *tctx)
 		struct layer *layer = &layers[idx];
 
 		tctx->layer = idx;
-		tctx->layer_cpus_seq = layer->cpus_seq - 1;
+		tctx->layered_cpus.seq = layer->cpus_seq - 1;
 		__sync_fetch_and_add(&layer->nr_tasks, 1);
 		/*
 		 * XXX - To be correct, we'd need to calculate the vtime
@@ -2223,11 +2243,28 @@ void BPF_STRUCT_OPS(layered_cpu_release, s32 cpu,
 	scx_bpf_reenqueue_local();
 }
 
+static int init_cached_cpus(struct cached_cpus *ccpus)
+{
+	struct bpf_cpumask *cpumask;
+
+	ccpus->id = -1;
+
+	if (!(cpumask = bpf_cpumask_create()))
+		return -ENOMEM;
+	if ((cpumask = bpf_kptr_xchg(&ccpus->mask, cpumask))) {
+		/* Should never happen as we just inserted it above. */
+		bpf_cpumask_release(cpumask);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
 	struct task_ctx *tctx;
-	struct bpf_cpumask *cpumask;
+	s32 ret;
 
 	/*
 	 * XXX - We want BPF_NOEXIST but bpf_map_delete_elem() in .disable() may
@@ -2241,16 +2278,9 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 		return -ENOMEM;
 	}
 
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-
-	cpumask = bpf_kptr_xchg(&tctx->layered_cpumask, cpumask);
-	if (cpumask) {
-		/* Should never happen as we just inserted it above. */
-		bpf_cpumask_release(cpumask);
-		return -EINVAL;
-	}
+	ret = init_cached_cpus(&tctx->layered_cpus);
+	if (ret)
+		return ret;
 
 	tctx->pid = p->pid;
 	tctx->last_cpu = -1;
@@ -2500,10 +2530,10 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 		first_pass = true;
 look_for_cpu:
 		bpf_for(cpu, 0, nr_possible_cpus) {
-			if (!tctx->layered_cpumask)
+			if (!tctx->layered_cpus.mask)
 				goto unlock;
 
-			if (!bpf_cpumask_test_cpu(cpu,   cast_mask(tctx->layered_cpumask)))
+			if (!bpf_cpumask_test_cpu(cpu, cast_mask(tctx->layered_cpus.mask)))
 				continue;
 
 			antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq, &zero, cpu);
@@ -2608,7 +2638,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	struct bpf_cpumask *cpumask, *tmp_big_cpumask;
 	struct cpu_ctx *cctx;
 	int i, j, k, nr_online_cpus, ret;
-	u64 *init_antistall_delay, *init_antistall_dsq;
+	u64 *init_antistall_dsq;
 	u32 zero;
 
 	zero = 0;
