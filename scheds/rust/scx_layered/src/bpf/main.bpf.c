@@ -1515,7 +1515,7 @@ __weak int consume_preempting(struct cost *costc, u32 my_llc_id)
 					return -EINVAL;
 				}
 				layer = MEMBER_VPTR(layers, [layer_idx]);
-				if (has_budget(costc, layer) == 0)
+				if (!layer->preempt || has_budget(costc, layer) == 0)
 					continue;
 				dsq_id = layer_dsq_id(layer_idx, llc_id);
 				if (scx_bpf_consume(dsq_id))
