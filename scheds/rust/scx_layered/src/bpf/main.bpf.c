@@ -1183,9 +1183,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		tctx->last_dsq = tctx->layer;
 		scx_bpf_dispatch_vtime(p, tctx->layer, slice_ns, vtime, enq_flags);
 	} else {
-		u32 llc_id = cpu_to_llc_id(tctx->last_cpu >= 0 ? tctx->last_cpu :
-					   bpf_get_smp_processor_id());
-		idx = layer_dsq_id(layer->idx, llc_id);
+		idx = layer_dsq_id(layer->idx, cpu_to_llc_id(task_cpu));
 		tctx->last_dsq = idx;
 		scx_bpf_dispatch_vtime(p, idx, slice_ns, vtime, enq_flags);
 	}
@@ -1241,9 +1239,7 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 				return true;
 			}
 		} else {
-			u32 dsq_id = cpu_to_llc_id(tctx->last_cpu >= 0 ?
-						   tctx->last_cpu :
-						   bpf_get_smp_processor_id());
+			u32 dsq_id = cpu_to_llc_id(bpf_get_smp_processor_id());
 			if (!scx_bpf_dsq_nr_queued(dsq_id)) {
 				p->scx.slice = slice_ns;
 				lstat_inc(LSTAT_KEEP, layer, cctx);
