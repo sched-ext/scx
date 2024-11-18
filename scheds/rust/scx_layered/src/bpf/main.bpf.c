@@ -1239,7 +1239,8 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 				return true;
 			}
 		} else {
-			u32 dsq_id = cpu_to_llc_id(bpf_get_smp_processor_id());
+			u32 dsq_id = layer_dsq_id(layer->idx,
+						  cpu_to_llc_id(bpf_get_smp_processor_id()));
 			if (!scx_bpf_dsq_nr_queued(dsq_id)) {
 				p->scx.slice = slice_ns;
 				lstat_inc(LSTAT_KEEP, layer, cctx);
@@ -2551,7 +2552,7 @@ look_for_cpu:
 		bpf_for(cpu, 0, nr_possible_cpus) {
 			const struct cpumask *cpumask;
 
-			if (!(cpumask = tctx->layered_cpus.mask))
+			if (!(cpumask = cast_mask(tctx->layered_cpus.mask)))
 				goto unlock;
 
 			/* for affinity violating tasks, target all allowed CPUs */
@@ -2600,8 +2601,8 @@ unlock:
  */
 static bool antistall_scan(void)
 {
-	s32 cpu;
-	u64 dsq_id;
+	s32 cpu, llc;
+	u64 layer_id;
 	u64 jiffies_now;
 
 	if (!enable_antistall)
@@ -2609,14 +2610,12 @@ static bool antistall_scan(void)
 
 	jiffies_now = bpf_jiffies64();
 
-	bpf_for(dsq_id, 0, nr_layers) {
-		antistall_set(dsq_id, jiffies_now);
-	}
+	bpf_for(layer_id, 0, nr_layers)
+		bpf_for(llc, 0, nr_llcs)
+			antistall_set(layer_dsq_id(layer_id, llc), jiffies_now);
 
-	bpf_for(cpu, 0, nr_possible_cpus) {
-		dsq_id = cpu_hi_fallback_dsq_id(cpu);
-		antistall_set(dsq_id, jiffies_now);
-	}
+	bpf_for(cpu, 0, nr_possible_cpus)
+		antistall_set(cpu_hi_fallback_dsq_id(cpu), jiffies_now);
 
 	antistall_set(LO_FALLBACK_DSQ, jiffies_now);
 
