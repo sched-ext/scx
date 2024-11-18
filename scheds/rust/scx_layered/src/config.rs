@@ -41,20 +41,20 @@ impl LayerSpec {
         Ok(config.specs)
     }
 
-    pub fn nodes(&self) -> Vec<usize> {
-        match &self.kind {
-            LayerKind::Confined { nodes, .. }
-            | LayerKind::Open { nodes, .. }
-            | LayerKind::Grouped { nodes, .. } => nodes.clone(),
-        }
+    pub fn nodes(&self) -> &Vec<usize> {
+        &self.kind.common().nodes
     }
 
-    pub fn llcs(&self) -> Vec<usize> {
-        match &self.kind {
-            LayerKind::Confined { llcs, .. }
-            | LayerKind::Open { llcs, .. }
-            | LayerKind::Grouped { llcs, .. } => llcs.clone(),
-        }
+    pub fn llcs(&self) -> &Vec<usize> {
+        &self.kind.common().llcs
+    }
+
+    pub fn nodes_mut(&mut self) -> &mut Vec<usize> {
+        &mut self.kind.common_mut().nodes
+    }
+
+    pub fn llcs_mut(&mut self) -> &mut Vec<usize> {
+        &mut self.kind.common_mut().llcs
     }
 }
 
@@ -74,90 +74,54 @@ pub enum LayerMatch {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LayerCommon {
+    #[serde(default)]
+    pub min_exec_us: u64,
+    #[serde(default)]
+    pub yield_ignore: f64,
+    #[serde(default)]
+    pub slice_us: u64,
+    #[serde(default)]
+    pub preempt: bool,
+    #[serde(default)]
+    pub preempt_first: bool,
+    #[serde(default)]
+    pub exclusive: bool,
+    #[serde(default)]
+    pub weight: u32,
+    #[serde(default)]
+    pub idle_smt: bool,
+    #[serde(default)]
+    pub growth_algo: LayerGrowthAlgo,
+    #[serde(default)]
+    pub perf: u64,
+    #[serde(default)]
+    pub nodes: Vec<usize>,
+    #[serde(default)]
+    pub llcs: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LayerKind {
     Confined {
         util_range: (f64, f64),
         #[serde(default)]
         cpus_range: Option<(usize, usize)>,
-        #[serde(default)]
-        min_exec_us: u64,
-        #[serde(default)]
-        yield_ignore: f64,
-        #[serde(default)]
-        slice_us: u64,
-        #[serde(default)]
-        preempt: bool,
-        #[serde(default)]
-        preempt_first: bool,
-        #[serde(default)]
-        exclusive: bool,
-        #[serde(default)]
-        weight: u32,
-        #[serde(default)]
-        idle_smt: bool,
-        #[serde(default)]
-        growth_algo: LayerGrowthAlgo,
-        #[serde(default)]
-        perf: u64,
-        #[serde(default)]
-        nodes: Vec<usize>,
-        #[serde(default)]
-        llcs: Vec<usize>,
+
+        #[serde(flatten)]
+        common: LayerCommon,
     },
     Grouped {
         util_range: (f64, f64),
         #[serde(default)]
         cpus_range: Option<(usize, usize)>,
-        #[serde(default)]
-        min_exec_us: u64,
-        #[serde(default)]
-        yield_ignore: f64,
-        #[serde(default)]
-        slice_us: u64,
-        #[serde(default)]
-        preempt: bool,
-        #[serde(default)]
-        preempt_first: bool,
-        #[serde(default)]
-        exclusive: bool,
-        #[serde(default)]
-        weight: u32,
-        #[serde(default)]
-        idle_smt: bool,
-        #[serde(default)]
-        growth_algo: LayerGrowthAlgo,
-        #[serde(default)]
-        perf: u64,
-        #[serde(default)]
-        nodes: Vec<usize>,
-        #[serde(default)]
-        llcs: Vec<usize>,
+
+        #[serde(flatten)]
+        common: LayerCommon,
     },
     Open {
-        #[serde(default)]
-        min_exec_us: u64,
-        #[serde(default)]
-        yield_ignore: f64,
-        #[serde(default)]
-        slice_us: u64,
-        #[serde(default)]
-        preempt: bool,
-        #[serde(default)]
-        preempt_first: bool,
-        #[serde(default)]
-        exclusive: bool,
-        #[serde(default)]
-        weight: u32,
-        #[serde(default)]
-        idle_smt: bool,
-        #[serde(default)]
-        growth_algo: LayerGrowthAlgo,
-        #[serde(default)]
-        perf: u64,
-        #[serde(default)]
-        nodes: Vec<usize>,
-        #[serde(default)]
-        llcs: Vec<usize>,
+        #[serde(flatten)]
+        common: LayerCommon,
     },
 }
 
@@ -167,6 +131,22 @@ impl LayerKind {
             LayerKind::Confined { .. } => bpf_intf::layer_kind_LAYER_KIND_CONFINED as i32,
             LayerKind::Grouped { .. } => bpf_intf::layer_kind_LAYER_KIND_GROUPED as i32,
             LayerKind::Open { .. } => bpf_intf::layer_kind_LAYER_KIND_OPEN as i32,
+        }
+    }
+
+    pub fn common(&self) -> &LayerCommon {
+        match self {
+            LayerKind::Confined { common, .. }
+            | LayerKind::Grouped { common, .. }
+            | LayerKind::Open { common, .. } => common,
+        }
+    }
+
+    pub fn common_mut(&mut self) -> &mut LayerCommon {
+        match self {
+            LayerKind::Confined { common, .. }
+            | LayerKind::Grouped { common, .. }
+            | LayerKind::Open { common, .. } => common,
         }
     }
 }
