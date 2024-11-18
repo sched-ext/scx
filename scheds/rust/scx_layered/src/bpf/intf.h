@@ -115,6 +115,7 @@ struct cpu_ctx {
 	u32			layer_idx;
 	u32			cache_idx;
 	u32			node_idx;
+	u32			perf;
 };
 
 struct cache_ctx {
