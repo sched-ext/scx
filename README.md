@@ -176,7 +176,7 @@ in different directories. The system libbpf version needs to match the minimum
 libbpf version for scx.
  ```
 $ cd $SCX
-$ meson setup build --prefix ~ -D libbpf_a=/usr/lib64/libbpf.a libbpf_h=/usr/include/bpf/
+$ meson setup build --prefix ~ -D libbpf_a=/usr/lib64/libbpf.a -D libbpf_h=/usr/include/bpf/
 $ meson compile -C build
 $ meson install -C build
 ```
