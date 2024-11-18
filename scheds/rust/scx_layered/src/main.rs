@@ -1336,7 +1336,7 @@ impl<'a> Scheduler<'a> {
                 layer.perf = u32::try_from(*perf)?;
                 layer.node_mask = nodemask_from_nodes(nodes) as u64;
                 for topo_node in topo.nodes() {
-                    if !nodes.contains(&topo_node.id()) {
+                    if !nodes.is_empty() && !nodes.contains(&topo_node.id()) {
                         continue;
                     }
                     layer.cache_mask |= cachemask_from_llcs(&topo_node.llcs()) as u64;
@@ -1396,23 +1396,29 @@ impl<'a> Scheduler<'a> {
         open_object: &'a mut MaybeUninit<OpenObject>,
     ) -> Result<Self> {
         let nr_layers = layer_specs.len();
-        let topo = Topology::new()?;
-        let cpu_pool = CpuPool::new(&topo)?;
+        let mut disable_topology = opts.disable_topology.unwrap_or(false);
 
-        let disable_topology = if let Some(val) = opts.disable_topology {
-            val
+        let topo = if disable_topology {
+            Topology::with_flattened_llc_node()?
         } else {
-            let val = if topo.nodes().len() > 1 {
-                false
-            } else {
-                topo.nodes().iter().all(|n| n.llcs().len() <= 1)
+            Topology::new()?
+        };
+
+        if !disable_topology {
+            if topo.nodes().len() == 1 && topo.nodes()[0].llcs().len() == 1 {
+                disable_topology = true;
             };
             info!(
                 "Topology awareness not specified, selecting {} based on hardware",
-                if val { "disabled" } else { "enabled" }
+                if disable_topology {
+                    "disabled"
+                } else {
+                    "enabled"
+                }
             );
-            val
         };
+
+        let cpu_pool = CpuPool::new(&topo)?;
 
         // If disabling topology awareness clear out any set NUMA/LLC configs and
         // it will fallback to using all cores.

@@ -290,18 +290,7 @@ pub struct Topology {
 }
 
 impl Topology {
-    /// Build a complete host Topology
-    pub fn new() -> Result<Topology> {
-        let span = cpus_online()?;
-        // If the kernel is compiled with CONFIG_NUMA, then build a topology
-        // from the NUMA hierarchy in sysfs. Otherwise, just make a single
-        // default node of ID 0 which contains all cores.
-        let nodes = if Path::new("/sys/devices/system/node").exists() {
-            create_numa_nodes(&span)?
-        } else {
-            create_default_node(&span)?
-        };
-
+    fn instantiate(span: Cpumask, nodes: Vec<Node>) -> Result<Self> {
         // For convenient and efficient lookup from the root topology object,
         // create two BTreeMaps to the full set of Core and Cpu objects on the
         // system. We clone the objects that are located further down in the
@@ -330,6 +319,27 @@ impl Topology {
             span,
             nr_cpus_online,
         })
+    }
+
+    /// Build a complete host Topology
+    pub fn new() -> Result<Topology> {
+        let span = cpus_online()?;
+        // If the kernel is compiled with CONFIG_NUMA, then build a topology
+        // from the NUMA hierarchy in sysfs. Otherwise, just make a single
+        // default node of ID 0 which contains all cores.
+        let nodes = if Path::new("/sys/devices/system/node").exists() {
+            create_numa_nodes(&span)?
+        } else {
+            create_default_node(&span, false)?
+        };
+
+        Self::instantiate(span, nodes)
+    }
+
+    pub fn with_flattened_llc_node() -> Result<Topology> {
+        let span = cpus_online()?;
+        let nodes = create_default_node(&span, true)?;
+        Self::instantiate(span, nodes)
     }
 
     /// Get a slice of the NUMA nodes on the host.
@@ -518,6 +528,7 @@ fn create_insert_cpu(
     node: &mut Node,
     online_mask: &Cpumask,
     avg_cpu_freq: Option<(usize, usize)>,
+    flatten_llc: bool,
 ) -> Result<()> {
     // CPU is offline. The Topology hierarchy is read-only, and assumes
     // that hotplug will cause the scheduler to restart. Thus, we can
@@ -542,7 +553,7 @@ fn create_insert_cpu(
     let l2_id = read_file_usize(&cache_path.join(format!("index{}", 2)).join("id")).unwrap_or(0);
     let l3_id = read_file_usize(&cache_path.join(format!("index{}", 3)).join("id")).unwrap_or(0);
     // Assume that LLC is always 3.
-    let llc_id = l3_id;
+    let llc_id = if flatten_llc { 0 } else { l3_id };
 
     // Min and max frequencies. If the kernel is not compiled with
     // CONFIG_CPU_FREQ, just assume 0 for both frequencies.
@@ -647,7 +658,7 @@ fn avg_cpu_freq() -> Option<(usize, usize)> {
     Some((avg_base_freq / nr_cpus, top_max_freq))
 }
 
-fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {
+fn create_default_node(online_mask: &Cpumask, flatten_llc: bool) -> Result<Vec<Node>> {
     let mut nodes: Vec<Node> = Vec::with_capacity(1);
 
     let mut node = Node {
@@ -678,7 +689,7 @@ fn create_default_node(online_mask: &Cpumask) -> Result<Vec<Node>> {
     let avg_cpu_freq = avg_cpu_freq();
     let cpu_ids = read_cpu_ids()?;
     for cpu_id in cpu_ids.iter() {
-        create_insert_cpu(*cpu_id, &mut node, &online_mask, avg_cpu_freq)?;
+        create_insert_cpu(*cpu_id, &mut node, &online_mask, avg_cpu_freq, flatten_llc)?;
     }
 
     nodes.push(node);
@@ -734,7 +745,7 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
                 }
             };
 
-            create_insert_cpu(cpu_id, &mut node, &online_mask, avg_cpu_freq)?;
+            create_insert_cpu(cpu_id, &mut node, &online_mask, avg_cpu_freq, false)?;
         }
 
         nodes.push(node);

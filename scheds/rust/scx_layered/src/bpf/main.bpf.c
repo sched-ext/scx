@@ -115,15 +115,15 @@ u32 rotate_llc_id(u32 base_llc_id, u32 rotation)
 // return the dsq id for the layer based on the LLC id.
 static __noinline u64 layer_dsq_id(u32 layer_id, u32 llc_id)
 {
-	return (layer_id * nr_llcs) + llc_id;
+	if (nr_llcs == 1)
+		return layer_id;
+	else
+		return (layer_id * nr_llcs) + llc_id;
 }
 
-// XXX - cpu_to_llc_id() must not be inlined to not blow past ins limit when
-// topo is enabled but older kernels get confused by RCU state when subprogs are
-// called from sleepable functions. Use __always_inline variant from
-// layered_init() and __noinline from everywhere else. Remove this once we can
-// ignore the older kernels.
-static __always_inline u32 __cpu_to_llc_id(s32 cpu_id)
+// XXX - older kernels get confused by RCU state when subprogs are called from
+// sleepable functions. Use __always_inline.
+static __always_inline u32 cpu_to_llc_id(s32 cpu_id)
 {
         const volatile u32 *llc_ptr;
 
@@ -133,11 +133,6 @@ static __always_inline u32 __cpu_to_llc_id(s32 cpu_id)
                 return 0;
         }
         return *llc_ptr;
-}
-
-static __noinline u32 cpu_to_llc_id(u32 cpu_id)
-{
-	return __cpu_to_llc_id(cpu_id);
 }
 
 u32 llc_node_id(u32 llc_id)
@@ -160,33 +155,6 @@ static u64 llc_hi_fallback_dsq_id(u32 llc_id)
 static inline bool is_fallback_dsq(u64 dsq_id)
 {
 	return dsq_id > HI_FALLBACK_DSQ_BASE && dsq_id <= LO_FALLBACK_DSQ;
-}
-
-static u64 llc_hi_fallback_dsq_iter_offset(int llc_offset, int idx)
-{
-	int offset = llc_offset + idx;
-
-	if (offset >= nr_llcs)
-		return llc_hi_fallback_dsq_id(offset - nr_llcs);
-
-	return llc_hi_fallback_dsq_id(idx + llc_offset);
-}
-
-static int llc_iter_cpu_offset(int idx, s32 cpu)
-{
-	int offset;
-
-	if (cpu <= 0)
-		return idx;
-
-	offset = (cpu % nr_llcs) + idx;
-
-	return offset >= nr_llcs ? offset - nr_llcs : offset;
-}
-
-static u64 cpu_hi_fallback_dsq_id(s32 cpu)
-{
-	return llc_hi_fallback_dsq_id(cpu_to_llc_id(cpu));
 }
 
 struct {
@@ -1108,16 +1076,15 @@ preempt_fail:
 
 void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	struct cpu_ctx *cctx;
+	struct cpu_ctx *cctx, *task_cctx;
 	struct task_ctx *tctx;
 	struct layer *layer;
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u64 vtime = p->scx.dsq_vtime;
 	bool try_preempt_first;
-	u32 idx;
 
-	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)) ||
-	    !(layer = lookup_layer(tctx->layer)))
+	if (!(cctx = lookup_cpu_ctx(-1)) || !(task_cctx = lookup_cpu_ctx(task_cpu)) ||
+	    !(tctx = lookup_task_ctx(p)) || !(layer = lookup_layer(tctx->layer)))
 		return;
 
 	try_preempt_first = cctx->try_preempt_first;
@@ -1160,9 +1127,8 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
 
-		idx = cpu_hi_fallback_dsq_id(task_cpu);
-		tctx->last_dsq = idx;
-		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
+		tctx->last_dsq = task_cctx->hi_fallback_dsq_id;
+		scx_bpf_dispatch(p, tctx->last_dsq, slice_ns, enq_flags);
 		goto preempt;
 	}
 
@@ -1186,22 +1152,13 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		 * to the LLC local HI_FALLBACK_DSQ to avoid this starvation
 		 * issue.
 		 */
-		idx = cpu_hi_fallback_dsq_id(task_cpu);
-		scx_bpf_dispatch(p, idx, slice_ns, enq_flags);
-		tctx->last_dsq = idx;
+		tctx->last_dsq = task_cctx->hi_fallback_dsq_id;
+		scx_bpf_dispatch(p, tctx->last_dsq, slice_ns, enq_flags);
 		goto preempt;
 	}
 
-	if (disable_topology) {
-		tctx->last_dsq = tctx->layer;
-		scx_bpf_dispatch_vtime(p, tctx->layer, slice_ns, vtime, enq_flags);
-	} else {
-		u32 llc_id = cpu_to_llc_id(tctx->last_cpu >= 0 ? tctx->last_cpu :
-					   bpf_get_smp_processor_id());
-		idx = layer_dsq_id(layer->idx, llc_id);
-		tctx->last_dsq = idx;
-		scx_bpf_dispatch_vtime(p, idx, slice_ns, vtime, enq_flags);
-	}
+	tctx->last_dsq = layer_dsq_id(layer->idx, task_cctx->cache_idx);
+	scx_bpf_dispatch_vtime(p, tctx->last_dsq, slice_ns, vtime, enq_flags);
 
 preempt:
 	try_preempt(task_cpu, p, tctx, try_preempt_first, enq_flags);
@@ -1247,21 +1204,11 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 		 * have tasks waiting, keep running it. If there are multiple
 		 * competing preempting layers, this won't work well.
 		 */
-		if (disable_topology) {
-			if (!scx_bpf_dsq_nr_queued(layer->idx)) {
-				p->scx.slice = slice_ns;
-				lstat_inc(LSTAT_KEEP, layer, cctx);
-				return true;
-			}
-		} else {
-			u32 dsq_id = cpu_to_llc_id(tctx->last_cpu >= 0 ?
-						   tctx->last_cpu :
-						   bpf_get_smp_processor_id());
-			if (!scx_bpf_dsq_nr_queued(dsq_id)) {
-				p->scx.slice = slice_ns;
-				lstat_inc(LSTAT_KEEP, layer, cctx);
-				return true;
-			}
+		u32 dsq_id = layer_dsq_id(layer->idx, cctx->cache_idx);
+		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
+			p->scx.slice = slice_ns;
+			lstat_inc(LSTAT_KEEP, layer, cctx);
+			return true;
 		}
 	} else {
 		const struct cpumask *idle_cpumask = scx_bpf_get_idle_cpumask();
@@ -1465,8 +1412,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 			return;
 	}
 
-	dsq_id = cpu_hi_fallback_dsq_id(cpu);
-	if (scx_bpf_consume(dsq_id))
+	if (scx_bpf_consume(cctx->hi_fallback_dsq_id))
 		return;
 
 	/* consume !open layers second */
@@ -1725,8 +1671,6 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
-	u32 my_llc_id = cpu_to_llc_id(cpu);
-
 	/*
 	 * If one of the fallback DSQs has the most budget then consume from it
 	 * to prevent starvation.
@@ -1741,19 +1685,18 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/* consume preempting layers first */
-	if (consume_preempting(costc, my_llc_id) == 0)
+	if (consume_preempting(costc, cctx->cache_idx) == 0)
 		return;
 
-	dsq_id = cpu_hi_fallback_dsq_id(cpu);
-	if (scx_bpf_consume(dsq_id))
+	if (scx_bpf_consume(cctx->hi_fallback_dsq_id))
 		return;
 
 	/* consume !open layers second */
-	if (consume_non_open(costc, cpu, my_llc_id) == 0)
+	if (consume_non_open(costc, cpu, cctx->cache_idx) == 0)
 		return;
 
 	/* consume !preempting open layers */
-	if (consume_open_no_preempt(costc, my_llc_id) == 0)
+	if (consume_open_no_preempt(costc, cctx->cache_idx) == 0)
 		return;
 
 	scx_bpf_consume(LO_FALLBACK_DSQ);
@@ -2036,13 +1979,14 @@ static s32 create_cache(u32 cache_id)
 			return -ENOENT;
 		}
 
-		llc_id = __cpu_to_llc_id(cpu);
+		llc_id = cpu_to_llc_id(cpu);
 		if (llc_id != cache_id)
 			continue;
 
 		bpf_cpumask_set_cpu(cpu, cpumask);
 		cachec->nr_cpus++;
 		cctx->cache_idx = cache_id;
+		cctx->hi_fallback_dsq_id = llc_hi_fallback_dsq_id(cache_id);
 	}
 
 	dbg("CFG creating cache %d with %d cpus", cache_id, cachec->nr_cpus);
@@ -2496,23 +2440,16 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 			continue;
 		}
 
-		if (disable_topology) {
-			scx_bpf_dump("LAYER[%d][%s] nr_cpus=%u nr_queued=%d -%llums cpus=",
-				     i, layer->name, layer->nr_cpus,
-				     scx_bpf_dsq_nr_queued(i),
-				     dsq_first_runnable_for_ms(i, now));
-		} else {
-			bpf_for(j, 0, nr_llcs) {
-				if (!(layer->cache_mask & (1 << j)))
-					continue;
+		bpf_for(j, 0, nr_llcs) {
+			if (!(layer->cache_mask & (1 << j)))
+				continue;
 
-				idx = layer_dsq_id(layer->idx, j);
-				scx_bpf_dump("LAYER[%d][%s]DSQ[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
-					     i, layer->name, idx, layer->nr_cpus,
-					     scx_bpf_dsq_nr_queued(idx),
-					     dsq_first_runnable_for_ms(idx, now));
-				scx_bpf_dump("\n");
-			}
+			idx = layer_dsq_id(layer->idx, j);
+			scx_bpf_dump("LAYER[%d][%s]DSQ[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
+				     i, layer->name, idx, layer->nr_cpus,
+				     scx_bpf_dsq_nr_queued(idx),
+				     dsq_first_runnable_for_ms(idx, now));
+			scx_bpf_dump("\n");
 		}
 		dump_layer_cpumask(i);
 		scx_bpf_dump("\n");
@@ -2638,8 +2575,8 @@ unlock:
  */
 static bool antistall_scan(void)
 {
-	s32 cpu;
-	u64 dsq_id;
+	s32 llc;
+	u64 layer_id;
 	u64 jiffies_now;
 
 	if (!enable_antistall)
@@ -2647,14 +2584,12 @@ static bool antistall_scan(void)
 
 	jiffies_now = bpf_jiffies64();
 
-	bpf_for(dsq_id, 0, nr_layers) {
-		antistall_set(dsq_id, jiffies_now);
-	}
+	bpf_for(layer_id, 0, nr_layers)
+		bpf_for(llc, 0, nr_llcs)
+			antistall_set(layer_dsq_id(layer_id, llc), jiffies_now);
 
-	bpf_for(cpu, 0, nr_possible_cpus) {
-		dsq_id = cpu_hi_fallback_dsq_id(cpu);
-		antistall_set(dsq_id, jiffies_now);
-	}
+	bpf_for(llc, 0, nr_llcs)
+		antistall_set(llc_hi_fallback_dsq_id(llc), jiffies_now);
 
 	antistall_set(LO_FALLBACK_DSQ, jiffies_now);
 
