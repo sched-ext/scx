@@ -18,3 +18,4 @@ main.rs or \*.bpf.c files.
 - [scx_rlfifo](scx_rlfifo/README.md)
 - [scx_lavd](scx_lavd/README.md)
 - [scx_bpfland](scx_bpfland/README.md)
+- [scx_flash](scx_flash/README.md)
