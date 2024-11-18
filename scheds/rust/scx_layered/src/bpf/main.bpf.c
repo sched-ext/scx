@@ -54,6 +54,7 @@ u32 fallback_cpu;
 static u32 preempt_cursor;
 
 extern unsigned CONFIG_HZ __kconfig;
+extern int LINUX_KERNEL_VERSION __kconfig;
 
 #define dbg(fmt, args...)	do { if (debug) bpf_printk(fmt, ##args); } while (0)
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
@@ -2568,6 +2569,9 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 	u32 zero;
 
 	zero = 0;
+
+	if (LINUX_KERNEL_VERSION <= KERNEL_VERSION(6, 9, 0))
+		return 0;
 
 	if (!dsq_id || !jiffies_now)
 		return 0;
