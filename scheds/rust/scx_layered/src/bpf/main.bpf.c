@@ -2553,10 +2553,16 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 		first_pass = true;
 look_for_cpu:
 		bpf_for(cpu, 0, nr_possible_cpus) {
-			if (!tctx->layered_cpus.mask)
+			const struct cpumask *cpumask;
+
+			if (!(cpumask = tctx->layered_cpus.mask))
 				goto unlock;
 
-			if (!bpf_cpumask_test_cpu(cpu, cast_mask(tctx->layered_cpus.mask)))
+			/* for affinity violating tasks, target all allowed CPUs */
+			if (bpf_cpumask_empty(cpumask))
+				cpumask = p->cpus_ptr;
+
+			if (!bpf_cpumask_test_cpu(cpu, cpumask))
 				continue;
 
 			antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq, &zero, cpu);
@@ -2567,17 +2573,8 @@ look_for_cpu:
 				goto unlock;
 			}
 
-			if (*antistall_dsq == SCX_DSQ_INVALID) {
-				trace("antistall set DSQ[%llu] SELECTED_CPU[%llu] DELAY[%llu]", dsq_id, cpu, cur_delay);
-				*delay = cur_delay;
-				*antistall_dsq = dsq_id;
-				goto unlock;
-			}
-
-			if (first_pass)
-				continue;
-
-			if (*delay < cur_delay) {
+			if ((first_pass && *antistall_dsq == SCX_DSQ_INVALID) ||
+			    (!first_pass && *delay < cur_delay)) {
 				trace("antistall set DSQ[%llu] SELECTED_CPU[%llu] DELAY[%llu]", dsq_id, cpu, cur_delay);
 				*delay = cur_delay;
 				*antistall_dsq = dsq_id;
