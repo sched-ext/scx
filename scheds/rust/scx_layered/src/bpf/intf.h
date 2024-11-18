@@ -112,6 +112,7 @@ struct cpu_ctx {
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
 	u64			ran_current_for;
+	u64			hi_fallback_dsq_id;
 	u32			layer_idx;
 	u32			cache_idx;
 	u32			node_idx;
