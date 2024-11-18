@@ -115,7 +115,10 @@ u32 rotate_llc_id(u32 base_llc_id, u32 rotation)
 // return the dsq id for the layer based on the LLC id.
 static __noinline u64 layer_dsq_id(u32 layer_id, u32 llc_id)
 {
-	return (layer_id * nr_llcs) + llc_id;
+	if (nr_llcs == 1)
+		return layer_id;
+	else
+		return (layer_id * nr_llcs) + llc_id;
 }
 
 // XXX - older kernels get confused by RCU state when subprogs are called from
@@ -1141,13 +1144,8 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		goto preempt;
 	}
 
-	if (disable_topology) {
-		tctx->last_dsq = tctx->layer;
-		scx_bpf_dispatch_vtime(p, tctx->layer, slice_ns, vtime, enq_flags);
-	} else {
-		tctx->last_dsq = layer_dsq_id(layer->idx, task_cctx->cache_idx);
-		scx_bpf_dispatch_vtime(p, tctx->last_dsq, slice_ns, vtime, enq_flags);
-	}
+	tctx->last_dsq = layer_dsq_id(layer->idx, task_cctx->cache_idx);
+	scx_bpf_dispatch_vtime(p, tctx->last_dsq, slice_ns, vtime, enq_flags);
 
 preempt:
 	try_preempt(task_cpu, p, tctx, try_preempt_first, enq_flags);
@@ -1193,19 +1191,11 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 		 * have tasks waiting, keep running it. If there are multiple
 		 * competing preempting layers, this won't work well.
 		 */
-		if (disable_topology) {
-			if (!scx_bpf_dsq_nr_queued(layer->idx)) {
-				p->scx.slice = slice_ns;
-				lstat_inc(LSTAT_KEEP, layer, cctx);
-				return true;
-			}
-		} else {
-			u32 dsq_id = layer_dsq_id(layer->idx, cctx->cache_idx);
-			if (!scx_bpf_dsq_nr_queued(dsq_id)) {
-				p->scx.slice = slice_ns;
-				lstat_inc(LSTAT_KEEP, layer, cctx);
-				return true;
-			}
+		u32 dsq_id = layer_dsq_id(layer->idx, cctx->cache_idx);
+		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
+			p->scx.slice = slice_ns;
+			lstat_inc(LSTAT_KEEP, layer, cctx);
+			return true;
 		}
 	} else {
 		const struct cpumask *idle_cpumask = scx_bpf_get_idle_cpumask();
@@ -2416,23 +2406,16 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 			continue;
 		}
 
-		if (disable_topology) {
-			scx_bpf_dump("LAYER[%d][%s] nr_cpus=%u nr_queued=%d -%llums cpus=",
-				     i, layer->name, layer->nr_cpus,
-				     scx_bpf_dsq_nr_queued(i),
-				     dsq_first_runnable_for_ms(i, now));
-		} else {
-			bpf_for(j, 0, nr_llcs) {
-				if (!(layer->cache_mask & (1 << j)))
-					continue;
+		bpf_for(j, 0, nr_llcs) {
+			if (!(layer->cache_mask & (1 << j)))
+				continue;
 
-				idx = layer_dsq_id(layer->idx, j);
-				scx_bpf_dump("LAYER[%d][%s]DSQ[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
-					     i, layer->name, idx, layer->nr_cpus,
-					     scx_bpf_dsq_nr_queued(idx),
-					     dsq_first_runnable_for_ms(idx, now));
-				scx_bpf_dump("\n");
-			}
+			idx = layer_dsq_id(layer->idx, j);
+			scx_bpf_dump("LAYER[%d][%s]DSQ[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
+				     i, layer->name, idx, layer->nr_cpus,
+				     scx_bpf_dsq_nr_queued(idx),
+				     dsq_first_runnable_for_ms(idx, now));
+			scx_bpf_dump("\n");
 		}
 		dump_layer_cpumask(i);
 		scx_bpf_dump("\n");
@@ -2558,7 +2541,7 @@ unlock:
  */
 static bool antistall_scan(void)
 {
-	s32 cpu, llc;
+	s32 llc;
 	u64 layer_id;
 	u64 jiffies_now;
 
