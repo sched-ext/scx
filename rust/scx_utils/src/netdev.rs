@@ -13,13 +13,31 @@ use anyhow::Result;
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct NetDev {
-    pub iface: String,
-    pub node: usize,
+    iface: String,
+    node: usize,
     pub irqs: BTreeMap<usize, Cpumask>,
-    pub irq_hints: BTreeMap<usize, Cpumask>,
+    irq_hints: BTreeMap<usize, Cpumask>,
 }
 
 impl NetDev {
+    pub fn iface(&self) -> &str {
+        &self.iface
+    }
+
+    pub fn node(&self) -> usize {
+        self.node
+    }
+
+    pub fn irq_hints(&self) -> &BTreeMap<usize, Cpumask> {
+        &self.irq_hints
+    }
+
+    pub fn update_irq_cpumask(&mut self, irq: usize, cpumask: Cpumask) {
+        if let Some(cur_cpumask) = self.irqs.get_mut(&irq) {
+            *cur_cpumask = cpumask;
+        }
+    }
+
     pub fn apply_cpumasks(&self) -> Result<()> {
         for (irq, cpumask) in self.irqs.iter() {
             let irq_path = format!("/proc/irq/{}/smp_affinity", irq);

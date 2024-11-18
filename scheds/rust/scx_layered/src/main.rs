@@ -473,7 +473,7 @@ struct Opts {
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
 
-    /// Enable netdev IRQ balancing
+    /// Enable netdev IRQ balancing. This is experimental and should be used with caution.
     #[clap(long, default_value = "false")]
     netdev_irq_balance: bool,
 
@@ -1221,6 +1221,7 @@ struct Scheduler<'a> {
     nr_layer_cpus_ranges: Vec<(usize, usize)>,
     processing_dur: Duration,
 
+    topo: Topology,
     netdevs: BTreeMap<String, NetDev>,
     stats_server: StatsServer<StatsReq, StatsRes>,
 }
@@ -1411,6 +1412,9 @@ impl<'a> Scheduler<'a> {
             Topology::new()?
         };
         let netdevs = if opts.netdev_irq_balance {
+            warn!(
+                "Experimental netdev IRQ balancing enabled. Reset IRQ masks of network devices after use!!!"
+            );
             read_netdevs()?
         } else {
             BTreeMap::new()
@@ -1541,6 +1545,7 @@ impl<'a> Scheduler<'a> {
             proc_reader,
             skel,
 
+            topo,
             netdevs,
             stats_server,
         };
@@ -1568,10 +1573,27 @@ impl<'a> Scheduler<'a> {
         }
 
         for (iface, netdev) in self.netdevs.iter_mut() {
+            let node = self
+                .topo
+                .nodes()
+                .into_iter()
+                .take_while(|n| n.id() == netdev.node())
+                .next()
+                .ok_or_else(|| anyhow!("Failed to get netdev node"))?;
+            let node_cpus = node.span();
             for (irq, irqmask) in netdev.irqs.iter_mut() {
                 irqmask.clear();
                 for cpu in available_cpus.iter_ones() {
+                    if !node_cpus.test_cpu(cpu) {
+                        continue;
+                    }
                     let _ = irqmask.set_cpu(cpu);
+                }
+                // If no CPUs are available in the node then spread the load across the node
+                if irqmask.weight() == 0 {
+                    for cpu in node_cpus.as_raw_bitvec().iter_ones() {
+                        let _ = irqmask.set_cpu(cpu);
+                    }
                 }
                 trace!("{} updating irq {} cpumask {:?}", iface, irq, irqmask);
             }
