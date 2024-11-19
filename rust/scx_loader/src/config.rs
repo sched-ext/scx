@@ -88,6 +88,10 @@ pub fn get_default_config() -> Config {
                 "scx_lavd".to_string(),
                 get_default_sched_for_config(&SupportedSched::Lavd),
             ),
+            (
+                "scx_flash".to_string(),
+                get_default_sched_for_config(&SupportedSched::Flash),
+            ),
         ]),
     }
 }
@@ -176,6 +180,8 @@ fn get_default_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedM
         },
         // scx_rusty doesn't support any of these modes
         SupportedSched::Rusty => vec![],
+        // scx_flash doesn't support any of these modes
+        SupportedSched::Flash => vec![],
     }
 }
 
@@ -205,6 +211,12 @@ auto_mode = []
 gaming_mode = ["--performance"]
 lowlatency_mode = ["--performance"]
 powersave_mode = ["--powersave"]
+
+[scheds.scx_flash]
+auto_mode = []
+gaming_mode = []
+lowlatency_mode = []
+powersave_mode = []
 "#;
 
         let parsed_config = parse_config_content(config_str).expect("Failed to parse config");
