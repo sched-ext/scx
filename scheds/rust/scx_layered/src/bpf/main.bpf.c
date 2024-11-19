@@ -2541,7 +2541,7 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 look_for_cpu:
 		bpf_for(cpu, 0, nr_possible_cpus) {
 			const struct cpumask *cpumask;
-			
+
 			if (!(cpumask = cast_mask(tctx->layered_mask)))
 				goto unlock;
 
