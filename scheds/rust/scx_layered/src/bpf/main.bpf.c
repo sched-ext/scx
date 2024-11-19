@@ -2497,7 +2497,7 @@ static bool layered_monitor(void)
  */
 u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 {
-	struct task_struct *p;
+	struct task_struct *__p, *p = NULL;
 	struct task_ctx *tctx;
 	s32 cpu;
 	u64 *antistall_dsq, *delay, cur_delay;
@@ -2511,7 +2511,12 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 
 	// verifier
 	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p, dsq_id, 0) {
+	bpf_for_each(scx_dsq, __p, dsq_id, 0) {
+		/* XXX verifier workaround: drop the following block later */
+		if (p)
+			bpf_task_release(p);
+		if (!(p = bpf_task_from_pid(__p->pid)))
+			continue;
 
 		if (!(tctx = lookup_task_ctx(p)))
 			goto unlock;
@@ -2562,6 +2567,8 @@ look_for_cpu:
 	}
 
 unlock:
+	if (p)
+		bpf_task_release(p);
 	bpf_rcu_read_unlock();
 	return 0;
 }
