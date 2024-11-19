@@ -46,6 +46,8 @@ const volatile u32 layer_iteration_order[MAX_LAYERS];
 const volatile bool enable_antistall = true;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
+const volatile bool track_layer_llc_latencies = true;
+const volatile u64 layer_llc_latency_update_delay_ns = 10 * NSEC_PER_MSEC;
 
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
@@ -214,6 +216,126 @@ static struct cache_ctx *lookup_cache_ctx(u32 cache_idx)
 	if (!(cachec = bpf_map_lookup_elem(&cache_data, &cache_idx)))
 		scx_bpf_error("no cache_ctx");
 	return cachec;
+}
+
+struct layer_latencies {
+	u64 next_decay_local_ns;
+	u64 local[MAX_LAYERS];
+	u64 last_updated_aggr_ns;
+	u64 aggr[MAX_LLCS][MAX_LAYERS];
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct layer_latencies);
+	__uint(max_entries, 1);
+} layer_latencies_map SEC(".maps");
+
+static struct layer_latencies *lookup_layer_latencies(int cpu)
+{
+	struct layer_latencies *lats;
+	u32 zero = 0;
+
+	if (cpu < 0)
+		lats = bpf_map_lookup_elem(&layer_latencies_map, &zero);
+	else
+		lats = bpf_map_lookup_percpu_elem(&layer_latencies_map, &zero, cpu);
+
+	if (!lats)
+		scx_bpf_error("no layer_latencies for cpu %d", cpu);
+	return lats;
+}
+
+static __always_inline
+bool layer_tracks_llc_latencies(struct layer* layer)
+{
+	return layer->steal_minimum_abs_ns || layer->steal_minimum_rel;
+}
+
+__weak
+u32 init_llc_latencies()
+{
+	struct layer_latencies *lats;
+	u32 cpu_idx;
+	u64 now = bpf_ktime_get_ns();
+
+	bpf_for(cpu_idx, 0, scx_bpf_nr_cpu_ids()) {
+		lats = lookup_layer_latencies(cpu_idx);
+		if (!lats)
+			continue;
+
+		lats->next_decay_local_ns = now;
+	}
+
+	return 0;
+}
+
+/*
+ * Update local LLC's average latency and update local LLC's view of remote
+ * latencies if they are stale by layer_llc_latency_update_delay_ns.
+ */
+u32 maybe_update_llc_latencies(u32 my_llc_id)
+{
+	struct cpu_ctx *cpuc;
+	struct layer_latencies *lats, *remotes;
+	struct layer *layer;
+	struct cache_ctx *cachec;
+	u32 llc_idx, layer_idx, cpu_idx;
+	u64 now = bpf_ktime_get_ns();
+
+	lats = lookup_layer_latencies(-1);
+	if (!lats)
+		return 0;
+
+	if (now > lats->next_decay_local_ns) {
+		lats->next_decay_local_ns += 100 * NSEC_PER_MSEC;
+		bpf_for(layer_idx, 0, MAX_LAYERS) {
+			lats->local[layer_idx] = (lats->local[layer_idx] * 15) / 16;
+		}
+	}
+
+	bool update_remote = (lats->last_updated_aggr_ns +
+			      layer_llc_latency_update_delay_ns) < now;
+
+	if (update_remote) {
+		bpf_for(llc_idx, 0, MAX_LLCS) {
+			bpf_for(layer_idx, 0, MAX_LAYERS) {
+				lats->aggr[llc_idx][layer_idx] = 0;
+			}
+		}
+	} else {
+		if (my_llc_id >= MAX_LLCS) {
+			scx_bpf_error("invalid llc_id provided: %u", my_llc_id);
+			return 0;
+		}
+		bpf_for(layer_idx, 0, MAX_LAYERS) {
+			lats->aggr[my_llc_id][layer_idx] = 0;
+		}
+	}
+	bpf_for(cpu_idx, 0, scx_bpf_nr_cpu_ids()) {
+		cpuc = lookup_cpu_ctx(cpu_idx);
+		if (!cpuc)
+			continue;
+		if ((llc_idx = cpuc->cache_idx) >= MAX_LLCS)
+			continue;
+		if (!update_remote && llc_idx != my_llc_id)
+			continue;
+
+		remotes = lookup_layer_latencies(cpu_idx);
+		cachec = lookup_cache_ctx(llc_idx);
+		if (!cachec || !remotes)
+			continue;
+
+		bpf_for(layer_idx, 0, MAX_LAYERS) {
+			lats->aggr[llc_idx][layer_idx] +=
+			 	*MEMBER_VPTR(remotes->local, [layer_idx]) / cachec->nr_cpus;
+		}
+	}
+
+	if (update_remote)
+		lats->last_updated_aggr_ns = now;
+	return 0;
 }
 
 static void gstat_inc(enum global_stat_idx idx, struct cpu_ctx *cctx)
@@ -1456,6 +1578,37 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	scx_bpf_consume(LO_FALLBACK_DSQ);
 }
 
+__weak
+bool should_work_steal(struct layer *layer __arg_nonnull, u32 dst_llc_idx, u32 src_llc_idx)
+{
+	if (!track_layer_llc_latencies || dst_llc_idx == src_llc_idx)
+		return true;
+	if (layer->steal_minimum_abs_ns == 0 && layer->steal_minimum_rel == 0)
+		return true;
+
+	dst_llc_idx = (u32)(((u64)dst_llc_idx) & 0xfff);
+	src_llc_idx = (u32)(((u64)src_llc_idx) & 0xfff);
+
+	struct layer_latencies *lats;
+	u64 dst_latency, src_latency, delta;
+
+	if (!(lats = lookup_layer_latencies(-1)))
+		return true;
+
+	if (layer->idx >= nr_layers || dst_llc_idx >= nr_llcs || src_llc_idx >= nr_llcs)
+		return true;
+
+	dst_latency = lats->aggr[dst_llc_idx][layer->idx];
+	src_latency = lats->aggr[src_llc_idx][layer->idx];
+
+	if (dst_latency > src_latency)
+		return false;
+
+	delta = src_latency - dst_latency;
+	return delta > layer->steal_minimum_abs_ns &&
+		delta > (dst_latency * layer->steal_minimum_rel) / 1024;
+}
+
 __weak int consume_preempting(struct cost *costc, u32 my_llc_id)
 {
 	struct layer *layer;
@@ -1478,7 +1631,8 @@ __weak int consume_preempting(struct cost *costc, u32 my_llc_id)
 				if (!layer->preempt || has_budget(costc, layer) == 0)
 					continue;
 				dsq_id = layer_dsq_id(layer_idx, llc_id);
-				if (scx_bpf_consume(dsq_id))
+				if (should_work_steal(layer, my_llc_id, llc_id) &&
+				     scx_bpf_consume(dsq_id))
 					return 0;
 			}
 		}
@@ -1496,7 +1650,8 @@ __weak int consume_preempting(struct cost *costc, u32 my_llc_id)
 			bpf_for(llc_idx, 0, nr_llcs) {
 				u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
 				dsq_id = layer_dsq_id(layer_idx, llc_id);
-				if (scx_bpf_consume(dsq_id))
+				if (should_work_steal(layer, my_llc_id, llc_id) &&
+				     scx_bpf_consume(dsq_id))
 					return 0;
 			}
 		}
@@ -1538,7 +1693,8 @@ static __noinline int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_i
 					continue;
 
 				dsq_id = layer_dsq_id(layer_idx, llc_id);
-				if (scx_bpf_consume(dsq_id))
+				if (should_work_steal(layer, my_llc_id, llc_id) &&
+				     scx_bpf_consume(dsq_id))
 					return 0;
 			}
 		}
@@ -1565,7 +1721,8 @@ static __noinline int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_i
 				u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
 				dsq_id = layer_dsq_id(layer_idx, llc_id);
 
-				if (scx_bpf_consume(dsq_id))
+				if (should_work_steal(layer, my_llc_id, llc_id) &&
+				     scx_bpf_consume(dsq_id))
 					return 0;
 			}
 		}
@@ -1599,7 +1756,8 @@ __weak int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
 					continue;
 
 				dsq_id = layer_dsq_id(layer_idx, llc_id);
-				if (scx_bpf_consume(dsq_id))
+				if (should_work_steal(layer, my_llc_id, llc_id) &&
+				     scx_bpf_consume(dsq_id))
 					return 0;
 			}
 		}
@@ -1619,7 +1777,8 @@ __weak int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
 				u32 llc_id = rotate_llc_id(my_llc_id, llc_idx);
 				dsq_id = layer_dsq_id(layer_idx, llc_id);
 
-				if (scx_bpf_consume(dsq_id))
+				if (should_work_steal(layer, my_llc_id, llc_id) &&
+				     scx_bpf_consume(dsq_id))
 					return 0;
 			}
 		}
@@ -1683,6 +1842,9 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		if (scx_bpf_consume(dsq_id))
 			return;
 	}
+
+	if (track_layer_llc_latencies)
+		maybe_update_llc_latencies(my_llc_id);
 
 	/* consume preempting layers first */
 	if (consume_preempting(costc, cctx->cache_idx) == 0)
@@ -2109,6 +2271,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct layer *layer;
 	struct cost *costc;
 	u32 budget_id;
+	struct layer_latencies *latencies;
 	s32 lidx;
 	u64 used;
 
@@ -2124,6 +2287,14 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		lstat_inc(LSTAT_MIN_EXEC, layer, cctx);
 		lstat_add(LSTAT_MIN_EXEC_NS, layer, cctx, layer->min_exec_ns - used);
 		used = layer->min_exec_ns;
+	}
+
+	if (track_layer_llc_latencies) {
+		if (!(latencies = lookup_layer_latencies(-1)))
+			return;
+		u64 scheduling_latency = tctx->running_at - tctx->runnable_at;
+		latencies->local[lidx] = (latencies->local[lidx] * 15) / 16 +
+					  scheduling_latency / 16;
 	}
 
 	// If the task ran on the hi fallback dsq then the cost should be
@@ -2838,6 +3009,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	ret = start_layered_timers();
 	if (ret < 0)
 		return ret;
+
+	if (track_layer_llc_latencies)
+		init_llc_latencies();
 
 	return 0;
 }

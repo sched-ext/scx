@@ -189,6 +189,9 @@ struct layer {
 	u64			slice_ns;
 	u32			weight;
 
+	u64			steal_minimum_abs_ns;
+	u32			steal_minimum_rel;
+
 	int			kind;
 	bool			preempt;
 	bool			preempt_first;

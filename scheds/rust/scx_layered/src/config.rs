@@ -90,6 +90,10 @@ pub struct LayerCommon {
     #[serde(default)]
     pub weight: u32,
     #[serde(default)]
+    pub steal_minimum_abs_us: u64,
+    #[serde(default)]
+    pub steal_minimum_rel: u32,
+    #[serde(default)]
     pub idle_smt: bool,
     #[serde(default)]
     pub growth_algo: LayerGrowthAlgo,

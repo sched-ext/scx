@@ -99,6 +99,8 @@ lazy_static! {
                         idle_smt: false,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        steal_minimum_abs_us: 0,
+                        steal_minimum_rel: 0,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
                         nodes: vec![],
@@ -123,6 +125,8 @@ lazy_static! {
                         idle_smt: false,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        steal_minimum_abs_us: 0,
+                        steal_minimum_rel: 0,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
                         nodes: vec![],
@@ -149,6 +153,8 @@ lazy_static! {
                         idle_smt: false,
                         slice_us: 800,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        steal_minimum_abs_us: 0,
+                        steal_minimum_rel: 0,
                         growth_algo: LayerGrowthAlgo::Topo,
                         perf: 1024,
                         nodes: vec![],
@@ -172,6 +178,8 @@ lazy_static! {
                         idle_smt: false,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        steal_minimum_abs_us: 0,
+                        steal_minimum_rel: 0,
                         growth_algo: LayerGrowthAlgo::Linear,
                         perf: 1024,
                         nodes: vec![],
@@ -313,6 +321,15 @@ lazy_static! {
 ///   starvation across layers. Weights are used in combination with
 ///   utilization to determine the infeasible adjusted weight with higher
 ///   weights having a larger adjustment in adjusted utilization.
+///
+/// - steal_minimum_abs_us: Latency differential required for work stealing
+///   across LLCs in microseconds. Enables tracking of scheduling latencies for
+///   each layer in each LLC and requires the layer work-stealing to schedule
+///   on average this much faster than the layer being stolen from.
+///
+/// - steal_minimum_rel: Latency differential required for work stealing across
+///   LLCs in 1024ths. The latency of the stolen from LLC must be greater than
+///   the latency of the stealing LLC *(1024+n)/1024 for stealing to occur.
 ///
 /// - idle_smt: When selecting an idle CPU for task task migration use
 ///   only idle SMT CPUs. The default is to select any idle cpu.
@@ -1303,6 +1320,8 @@ impl<'a> Scheduler<'a> {
                     nodes,
                     slice_us,
                     weight,
+                    steal_minimum_abs_us,
+                    steal_minimum_rel,
                     ..
                 } = spec.kind.common();
 
@@ -1332,6 +1351,8 @@ impl<'a> Scheduler<'a> {
                 } else {
                     DEFAULT_LAYER_WEIGHT
                 };
+                layer.steal_minimum_abs_ns = *steal_minimum_abs_us * 1000;
+                layer.steal_minimum_rel = *steal_minimum_rel;
                 layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
                 layer.node_mask = nodemask_from_nodes(nodes) as u64;
@@ -1473,6 +1494,9 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
         skel.maps.rodata_data.local_llc_iteration = opts.local_llc_iteration;
         skel.maps.rodata_data.antistall_sec = opts.antistall_sec;
+        skel.maps.rodata_data.track_layer_llc_latencies = layer_specs.iter().any(|s| {
+            s.kind.common().steal_minimum_abs_us > 0 || s.kind.common().steal_minimum_rel > 0
+        });
         if opts.monitor_disable {
             skel.maps.rodata_data.monitor_disable = opts.monitor_disable;
         }
