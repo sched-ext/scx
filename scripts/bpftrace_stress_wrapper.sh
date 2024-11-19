@@ -16,7 +16,7 @@ for a in $(echo "$BPFTRACE_SCRIPTS" | tr ',' ' '); do
    BPFTRACE_KERNEL_SOURCE=${KERNEL_HEADERS} bpftrace -o "$a.ci.log" $SCRIPT_DIR/$a &
 done
 
-$STRESS_CMD > stress_cmd.ci.log 2>&1 &
+$STRESS_CMD -Y stress_results.yml > stress_cmd.ci.log 2>&1 &
 
 STRESS_PID=$!
 

@@ -171,6 +171,29 @@ jobs:
       # no symlink following here (to avoid cycle`s)
       - run: sudo find '/home/runner/' -iname '*.ci.log' -exec mv {} ./log_save/ \;
         if: always()
+      # copy benchmark results
+      - run: find '/home/runner/' -iname 'stress_results.yml' -exec mv {} ./log_save/ \;
+        if: always()
+      - run: cat ./log_save/* || echo "no results"
+        if: always()
+      - run: ./scripts/parse_stress_results.sh ./log_save/stress_results.yml > ./log_save/bench.json
+        if: always()
+      # Download previous benchmark result from cache (if exists)
+      - name: Download previous benchmark data
+        uses: actions/cache@v4
+        with:
+          path: ./bench-cache
+          key: ${{ matrix.scheduler }}-benchmark
+      # Run `github-action-benchmark` action
+      - name: Store benchmark result
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          # What benchmark tool the output.txt came from
+          tool: 'customBiggerIsBetter'
+          # Where the output from the benchmark tool is stored
+          output-file-path: ./log_save/bench.json
+          # Where the previous data file is stored
+          external-data-json-path: ./bench-cache/benchmark-data.json
       - name: upload debug logs, bpftrace, veristat, dmesg, etc.
         if: always()
         uses: actions/upload-artifact@v4
