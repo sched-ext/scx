@@ -390,6 +390,7 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *layered_llc_mask;
 	struct cached_cpus	layered_cpus_node;
 	struct bpf_cpumask __kptr *layered_node_mask;
+	struct bpf_cpumask __kptr *task_cpumask;
 	bool			all_cpus_allowed;
 	u64			runnable_at;
 	u64			running_at;
@@ -2243,6 +2244,20 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 		scx_bpf_error("task_ctx allocation failure");
 		return -ENOMEM;
 	}
+	const struct cpumask * all_mask = cast_mask(all_cpumask);
+	if (!all_mask)
+		return -EINVAL;
+
+	if (!(cpumask = bpf_cpumask_create()))
+		return -ENOMEM;
+
+	bpf_cpumask_and(cpumask, all_mask, p->cpus_ptr);
+
+	if ((cpumask = bpf_kptr_xchg(&tctx->task_cpumask, cpumask))) {
+		/* Should never happen as we just inserted it above. */
+		bpf_cpumask_release(cpumask);
+		return -EINVAL;
+	}
 
 	// Layer setup
 	ret = init_cached_cpus(&tctx->layered_cpus);
@@ -2499,6 +2514,7 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 {
 	struct task_struct *p;
 	struct task_ctx *tctx;
+	struct cpumask *task_cpumask;
 	s32 cpu;
 	u64 *antistall_dsq, *delay, cur_delay;
 	bool first_pass;
@@ -2525,16 +2541,17 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 look_for_cpu:
 		bpf_for(cpu, 0, nr_possible_cpus) {
 			const struct cpumask *cpumask;
-
+			
 			if (!(cpumask = cast_mask(tctx->layered_mask)))
 				goto unlock;
 
 			/* for affinity violating tasks, target all allowed CPUs */
-			if (bpf_cpumask_empty(cpumask))
-				cpumask = p->cpus_ptr;
+			if (bpf_cpumask_empty(cpumask) && tctx->task_cpumask)
+				cpumask = cast_mask(tctx->task_cpumask);
 
-			if (!bpf_cpumask_test_cpu(cpu, cpumask))
+			if (cpumask && !bpf_cpumask_test_cpu(cpu, cpumask)) {
 				continue;
+			}
 
 			antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq, &zero, cpu);
 			delay = bpf_map_lookup_percpu_elem(&antistall_cpu_max_delay, &zero, cpu);
