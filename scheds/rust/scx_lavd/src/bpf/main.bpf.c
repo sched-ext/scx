@@ -334,9 +334,9 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 	 * add +1 to guarantee the latency criticality (log2-ed) is always
 	 * positive.
 	 */
-	lat_cri = log2_u64(runtime_ft + 1);
-	lat_cri += log2_u64(wait_freq_ft + 1);
-	lat_cri += log2_u64(wake_freq_ft + 1);
+	lat_cri = log2_u64(wait_freq_ft);
+	lat_cri += log2_u64(wake_freq_ft);
+	lat_cri += log2_u64(runtime_ft);
 
 	/*
 	 * Make sure the lat_cri is non-zero.
@@ -353,21 +353,33 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 	return taskc->lat_cri;
 }
 
+static u64 calc_adj_runtime(u64 runtime)
+{
+	/*
+	 * Convert highly skewed runtime distribution to
+	 * mildlyskewed distribution.
+	 */
+	u64 adj_runtime = log2_u64(runtime + 1);
+	return adj_runtime * adj_runtime;
+}
+
 static void calc_virtual_deadline_delta(struct task_struct *p,
 					struct task_ctx *taskc,
 					u64 enq_flags)
 {
-	u64 deadline, lat_cri;
+	u64 deadline, lat_cri, adj_runtime;
 	u32 greedy_ratio, greedy_ft;
 
 	/*
-	 * Calculate the deadline based on latency criticality and greedy ratio.
+	 * Calculate the deadline based on runtime,
+	 * latency criticality, and greedy ratio.
 	 */
 	lat_cri = calc_lat_cri(p, taskc, enq_flags);
 	greedy_ratio = calc_greedy_ratio(taskc);
 	greedy_ft = calc_greedy_factor(greedy_ratio);
+	adj_runtime = calc_adj_runtime(taskc->run_time_ns);
 
-	deadline = (LAVD_SLICE_MAX_NS / lat_cri) * greedy_ft;
+	deadline = (adj_runtime / lat_cri) * greedy_ft;
 	taskc->vdeadline_delta_ns = deadline;
 }
 
