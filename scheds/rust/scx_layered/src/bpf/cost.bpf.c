@@ -361,9 +361,10 @@ __weak int has_budget(struct cost *costc, struct layer *layer)
 }
 
 /*
- * Initializes all budgets.
+ * Initializes all budgets. This function is a global function because on older
+ * 6.9 kernels the verifier fails from too many instructions.
  */
-static void initialize_budgets(u64 refresh_intvl_ns)
+__weak int initialize_budgets(u64 refresh_intvl_ns)
 {
 	struct layer *layer;
 	struct cost *costc, *global_costc;
@@ -376,7 +377,7 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 		layer = &layers[layer_id];
 		if (!layer) {
 			scx_bpf_error("failed to lookup layer %d", layer_id);
-			return;
+			return 0;
 		}
 		layer_weight_sum += layer->weight;
 	}
@@ -387,14 +388,14 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 				       false, false, false);
 	if (!global_costc) {
 		scx_bpf_error("failed to initialize global budget");
-		return;
+		return 0;
 	}
 
 	bpf_for(layer_id, 0, nr_layers) {
 		layer = &layers[layer_id];
 		if (!layer) {
 			scx_bpf_error("failed to lookup layer %d", layer_id);
-			return;
+			return 0;
 		}
 
 		layer_weight_dur = (layer->weight * ((u64)refresh_intvl_ns * nr_possible_cpus)) /
@@ -410,7 +411,7 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 						true, false);
 			if (!costc) {
 				scx_bpf_error("failed to cpu budget: %d", cpu);
-				return;
+				return 0;
 			}
 			layer_weight_dur = (layer->weight * refresh_intvl_ns) /
 					    layer_weight_sum;
@@ -441,7 +442,7 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 			costc = lookup_cpu_cost(cpu);
 			if (!costc) {
 				scx_bpf_error("failed to cpu budget: %d", cpu);
-				return;
+				return 0;
 			}
 
 			// On first iteration always setup the lo fallback dsq budget.
@@ -461,4 +462,5 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 				      cpu, budget_id, costc->budget[budget_id]);
 		}
 	}
+	return 0;
 }
