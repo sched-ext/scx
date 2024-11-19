@@ -2549,9 +2549,9 @@ look_for_cpu:
 			if (bpf_cpumask_empty(cpumask) && tctx->task_cpumask)
 				cpumask = cast_mask(tctx->task_cpumask);
 
-			if (cpumask && !bpf_cpumask_test_cpu(cpu, cpumask)) {
+			if (cpumask && !bpf_cpumask_test_cpu(cpu, cpumask))
 				continue;
-			}
+			
 
 			antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq, &zero, cpu);
 			delay = bpf_map_lookup_percpu_elem(&antistall_cpu_max_delay, &zero, cpu);
