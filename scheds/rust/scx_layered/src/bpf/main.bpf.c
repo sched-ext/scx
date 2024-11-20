@@ -2501,7 +2501,7 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 	struct task_ctx *tctx;
 	s32 cpu;
 	u64 *antistall_dsq, *delay, cur_delay;
-	bool first_pass;
+	int pass;
 	u32 zero;
 
 	zero = 0;
@@ -2526,9 +2526,8 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 			// check head task in dsq
 			goto unlock;
 
-		first_pass = true;
-look_for_cpu:
-		bpf_for(cpu, 0, nr_possible_cpus) {
+		#pragma unroll
+		for (pass = 0; pass < 2; ++pass) bpf_for(cpu, 0, nr_possible_cpus) {
 			const struct cpumask *cpumask;
 
 			if (!(cpumask = cast_mask(tctx->layered_mask)))
@@ -2549,18 +2548,13 @@ look_for_cpu:
 				goto unlock;
 			}
 
-			if ((first_pass && *antistall_dsq == SCX_DSQ_INVALID) ||
-			    (!first_pass && *delay < cur_delay)) {
+			if ((pass == 0 && *antistall_dsq == SCX_DSQ_INVALID) ||
+			    (pass != 0 && *delay < cur_delay)) {
 				trace("antistall set DSQ[%llu] SELECTED_CPU[%llu] DELAY[%llu]", dsq_id, cpu, cur_delay);
 				*delay = cur_delay;
 				*antistall_dsq = dsq_id;
 				goto unlock;
 			}
-		}
-
-		if (first_pass) {
-			first_pass = false;
-			goto look_for_cpu;
 		}
 
 		goto unlock;
