@@ -49,6 +49,8 @@ fn fmt_num(v: u64) -> String {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(_om_prefix = "l_", _om_label = "layer_name")]
 pub struct LayerStats {
+    #[stat(desc = "index", _om_skip)]
+    pub index: usize,
     #[stat(desc = "CPU utilization (100% means one full CPU)")]
     pub util: f64,
     #[stat(desc = "fraction of total CPU utilization")]
@@ -164,10 +166,15 @@ impl LayerStats {
             }
         };
         let calc_frac = |a, b| {
-            if b != 0.0 { a / b * 100.0 } else { 0.0 }
+            if b != 0.0 {
+                a / b * 100.0
+            } else {
+                0.0
+            }
         };
 
         Self {
+            index: lidx,
             util: stats.layer_utils[lidx] * 100.0,
             util_frac: calc_frac(stats.layer_utils[lidx], stats.total_util),
             load: normalize_load_metric(stats.layer_loads[lidx]),
@@ -444,8 +451,13 @@ impl SysStats {
             .unwrap_or(0)
             .max(4);
 
-        for (name, layer) in self.layers.iter() {
-            layer.format(w, name, header_width)?;
+        let mut idx_to_name: Vec<(usize, &String)> =
+            self.layers.iter().map(|(k, v)| (v.index, k)).collect();
+
+        idx_to_name.sort();
+
+        for (_idx, name) in &idx_to_name {
+            self.layers[*name].format(w, name, header_width)?;
         }
 
         Ok(())
