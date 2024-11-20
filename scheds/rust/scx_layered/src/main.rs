@@ -439,13 +439,15 @@ struct Opts {
     #[clap(short = 'e', long)]
     example: Option<String>,
 
-    /// Disables preemption if the weighted load fraction of a layer (load_frac_adj) exceeds the
-    /// threshold. The default is disabled (0.0).
+    /// ***DEPRECATED*** Disables preemption if the weighted load fraction
+    /// of a layer (load_frac_adj) exceeds the threshold. The default is
+    /// disabled (0.0).
     #[clap(long, default_value = "0.0")]
     layer_preempt_weight_disable: f64,
 
-    /// Disables layer growth if the weighted load fraction of a layer (load_frac_adj) exceeds the
-    /// threshold. The default is disabled (0.0).
+    /// ***DEPRECATED*** Disables layer growth if the weighted load fraction
+    /// of a layer (load_frac_adj) exceeds the threshold. The default is
+    /// disabled (0.0).
     #[clap(long, default_value = "0.0")]
     layer_growth_weight_disable: f64,
 
@@ -907,8 +909,6 @@ struct Layer {
     core_order: Vec<usize>,
 
     nr_cpus: usize,
-    preempt: bool,
-    can_preempt: bool,
     cpus: BitVec,
     allowed_cpus: BitVec,
 }
@@ -995,7 +995,6 @@ impl Layer {
         }
 
         let layer_growth_algo = kind.common().growth_algo.clone();
-        let preempt = kind.common().preempt;
 
         let core_order = layer_growth_algo.layer_core_order(cpu_pool, spec, idx, topo);
         debug!(
@@ -1009,8 +1008,6 @@ impl Layer {
             core_order,
 
             nr_cpus: 0,
-            preempt,
-            can_preempt: preempt,
             cpus,
             allowed_cpus,
         })
@@ -1021,8 +1018,7 @@ impl Layer {
         cpu_pool: &mut CpuPool,
         (cpus_min, cpus_max): (usize, usize),
         (_util_low, util_high): (f64, f64),
-        layer_growth_weight_disable: f64,
-        (layer_load, total_load): (f64, f64),
+        (_layer_load, _total_load): (f64, f64),
         (layer_util, _total_util): (f64, f64),
     ) -> Result<bool> {
         let nr_cpus = self.cpus.count_ones();
@@ -1035,17 +1031,6 @@ impl Layer {
         if nr_cpus >= cpus_min
             && (layer_util == 0.0 || (nr_cpus > 0 && layer_util / nr_cpus as f64 <= util_high))
         {
-            return Ok(false);
-        }
-        if total_load > 0.0
-            && layer_growth_weight_disable > 0.0
-            && layer_load / total_load > layer_growth_weight_disable
-        {
-            trace!(
-                "layer-{} needs more CPUs (util={:.3}) but is over the load fraction",
-                &self.name,
-                layer_util
-            );
             return Ok(false);
         }
 
@@ -1076,8 +1061,7 @@ impl Layer {
         cpu_pool: &mut CpuPool,
         (cpus_min, _cpus_max): (usize, usize),
         (util_low, util_high): (f64, f64),
-        layer_growth_weight_disable: f64,
-        (layer_load, total_load): (f64, f64),
+        (_layer_load, _total_load): (f64, f64),
         (layer_util, _total_util): (f64, f64),
     ) -> Result<Option<BitVec>> {
         let nr_cpus = self.cpus.count_ones();
@@ -1090,14 +1074,6 @@ impl Layer {
         };
 
         let nr_to_free = cpus_to_free.count_ones();
-
-        // If we'd be over the load fraction even after freeing
-        // $cpus_to_free, we have to free.
-        if layer_growth_weight_disable > 0.0
-            && layer_load / total_load >= layer_growth_weight_disable
-        {
-            return Ok(Some(cpus_to_free));
-        }
 
         if layer_util / nr_cpus as f64 >= util_low {
             return Ok(None);
@@ -1125,18 +1101,10 @@ impl Layer {
         cpu_pool: &mut CpuPool,
         cpus_range: (usize, usize),
         util_range: (f64, f64),
-        layer_growth_weight_disable: f64,
         load: (f64, f64),
         util: (f64, f64),
     ) -> Result<bool> {
-        match self.cpus_to_free(
-            cpu_pool,
-            cpus_range,
-            util_range,
-            layer_growth_weight_disable,
-            load,
-            util,
-        )? {
+        match self.cpus_to_free(cpu_pool, cpus_range, util_range, load, util)? {
             Some(cpus_to_free) => {
                 trace!("{} freeing CPUs\n{}", self.name, &cpus_to_free);
                 self.cpus &= !cpus_to_free.clone();
@@ -1153,34 +1121,19 @@ impl Layer {
         cpu_pool: &mut CpuPool,
         cpus_range: Option<(usize, usize)>,
         util_range: (f64, f64),
-        layer_growth_weight_disable: f64,
         load: (f64, f64),
         util: (f64, f64),
     ) -> Result<i64> {
         let cpus_range = cpus_range.unwrap_or((0, std::usize::MAX));
         let mut adjusted = 0;
 
-        while self.grow_confined_or_grouped(
-            cpu_pool,
-            cpus_range,
-            util_range,
-            layer_growth_weight_disable,
-            load,
-            util,
-        )? {
+        while self.grow_confined_or_grouped(cpu_pool, cpus_range, util_range, load, util)? {
             adjusted += 1;
             trace!("{} grew, adjusted={}", &self.name, adjusted);
         }
 
         if adjusted == 0 {
-            while self.shrink_confined_or_grouped(
-                cpu_pool,
-                cpus_range,
-                util_range,
-                layer_growth_weight_disable,
-                load,
-                util,
-            )? {
+            while self.shrink_confined_or_grouped(cpu_pool, cpus_range, util_range, load, util)? {
                 adjusted -= 1;
                 trace!("{} shrunk, adjusted={}", &self.name, adjusted);
             }
@@ -1202,9 +1155,6 @@ struct Scheduler<'a> {
 
     cpu_pool: CpuPool,
     layers: Vec<Layer>,
-
-    layer_preempt_weight_disable: f64,
-    layer_growth_weight_disable: f64,
 
     proc_reader: procfs::ProcReader,
     sched_stats: Stats,
@@ -1515,9 +1465,6 @@ impl<'a> Scheduler<'a> {
             cpu_pool,
             layers,
 
-            layer_preempt_weight_disable: opts.layer_preempt_weight_disable,
-            layer_growth_weight_disable: opts.layer_growth_weight_disable,
-
             sched_stats: Stats::new(&mut skel, &proc_reader)?,
 
             nr_layer_cpus_ranges: vec![(0, 0); nr_layers],
@@ -1545,11 +1492,6 @@ impl<'a> Scheduler<'a> {
         bpf_layer.refresh_cpus = 1;
     }
 
-    fn set_bpf_layer_preemption(layer: &mut Layer, bpf_layer: &mut types::layer, preempt: bool) {
-        layer.preempt = preempt;
-        bpf_layer.preempt.write(preempt);
-    }
-
     fn refresh_cpumasks(&mut self) -> Result<()> {
         let mut updated = false;
         let num_layers = self.layers.len();
@@ -1575,46 +1517,10 @@ impl<'a> Scheduler<'a> {
                         self.sched_stats.total_util,
                     );
 
-                    // If the layer is utilizing all the adjusted load, disable
-                    // preemption
-                    if self.layers[idx].can_preempt && self.layer_preempt_weight_disable > 0.0 {
-                        let weighted_load = load.0 / load.1;
-
-                        if weighted_load < self.layer_preempt_weight_disable
-                            && !self.layers[idx].preempt
-                        {
-                            trace!(
-                                "enabling bpf layer preemption for {} load {:2.3} < {:2.3}",
-                                &self.layers[idx].name,
-                                weighted_load,
-                                self.layer_preempt_weight_disable,
-                            );
-                            Self::set_bpf_layer_preemption(
-                                &mut self.layers[idx],
-                                &mut self.skel.maps.bss_data.layers[idx],
-                                true,
-                            );
-                        }
-                        if weighted_load >= self.layer_preempt_weight_disable {
-                            trace!(
-                                "disabling bpf layer preemption for {} load {:2.3} > {:2.3}",
-                                &self.layers[idx].name,
-                                weighted_load,
-                                self.layer_preempt_weight_disable,
-                            );
-                            Self::set_bpf_layer_preemption(
-                                &mut self.layers[idx],
-                                &mut self.skel.maps.bss_data.layers[idx],
-                                false,
-                            );
-                        }
-                    }
-
                     if self.layers[idx].resize_confined_or_grouped(
                         &mut self.cpu_pool,
                         cpus_range,
                         util_range,
-                        self.layer_growth_weight_disable,
                         load,
                         util,
                     )? != 0
@@ -1867,19 +1773,15 @@ fn main() -> Result<()> {
         stats::server_data().describe_meta(&mut std::io::stdout(), None)?;
         return Ok(());
     }
-    // clap doesn't properly parse floats, so need to do a bounds check here, see:
-    // https://github.com/clap-rs/clap/issues/4253
-    if opts.layer_preempt_weight_disable < 0.0 || opts.layer_preempt_weight_disable > 1.0 {
-        bail!(
-            "invalid value {:2.2} for layer_preempt_weight_disable, must be 0.0..1.0",
-            opts.layer_preempt_weight_disable
-        );
+
+    if opts.no_load_frac_limit {
+	warn!("--no-load-frac-limit is deprecated and noop");
     }
-    if opts.layer_growth_weight_disable < 0.0 || opts.layer_growth_weight_disable > 1.0 {
-        bail!(
-            "invalid value {:2.2} for layer_growth_weight_disable, must be 0.0..1.0",
-            opts.layer_growth_weight_disable
-        );
+    if opts.layer_preempt_weight_disable != 0.0 {
+        warn!("--layer-preempt-weight-disable is deprecated and noop");
+    }
+    if opts.layer_growth_weight_disable != 0.0 {
+	warn!("--layer-growth-weight-disable is deprecated and noop");
     }
 
     let llv = match opts.verbose {
