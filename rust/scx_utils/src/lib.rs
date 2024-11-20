@@ -88,5 +88,9 @@ pub use misc::monitor_stats;
 pub use misc::normalize_load_metric;
 pub use misc::set_rlimit_infinity;
 
+mod netdev;
+pub use netdev::read_netdevs;
+pub use netdev::NetDev;
+
 pub mod enums;
 pub use enums::scx_enums;
