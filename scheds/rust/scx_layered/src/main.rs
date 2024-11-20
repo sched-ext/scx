@@ -698,12 +698,6 @@ struct Stats {
     total_load: f64,
     layer_loads: Vec<f64>,
 
-    // infeasible stats
-    layer_load_sums: Vec<f64>,
-    total_load_sum: f64,
-    layer_dcycle_sums: Vec<f64>,
-    total_dcycle_sum: f64,
-
     total_util: f64, // Running AVG of sum of layer_utils
     layer_utils: Vec<f64>,
     prev_layer_cycles: Vec<u64>,
@@ -773,11 +767,6 @@ impl Stats {
             total_load: 0.0,
             layer_loads: vec![0.0; nr_layers],
 
-            layer_load_sums: vec![0.0, nr_layers as f64],
-            total_load_sum: 0.0,
-            layer_dcycle_sums: vec![0.0, nr_layers as f64],
-            total_dcycle_sum: 0.0,
-
             total_util: 0.0,
             layer_utils: vec![0.0; nr_layers],
             prev_layer_cycles: Self::read_layer_cycles(&cpu_ctxs, nr_layers),
@@ -813,7 +802,7 @@ impl Stats {
             .take(self.nr_layers)
             .map(|layer| layer.nr_tasks as usize)
             .collect();
-        let layer_weights: Vec<usize> = skel
+        let _layer_weights: Vec<usize> = skel
             .maps
             .bss_data
             .layers
@@ -834,16 +823,6 @@ impl Stats {
         let (total_load, layer_loads) = Self::read_layer_loads(skel, self.nr_layers);
 
         let cur_layer_cycles = Self::read_layer_cycles(&cpu_ctxs, self.nr_layers);
-        let layer_dcycle_sums: Vec<f64> = cur_layer_cycles
-            .iter()
-            .zip(self.prev_layer_cycles.iter())
-            .map(|(cur, prev)| (cur - prev) as f64)
-            .collect();
-        let layer_load_sums: Vec<f64> = layer_dcycle_sums
-            .iter()
-            .zip(layer_weights)
-            .map(|(dcycle, weight)| dcycle * weight as f64)
-            .collect();
         let cur_layer_utils: Vec<f64> = cur_layer_cycles
             .iter()
             .zip(self.prev_layer_cycles.iter())
@@ -877,11 +856,6 @@ impl Stats {
             nr_nodes: self.nr_nodes,
             total_load,
             layer_loads,
-
-            total_load_sum: layer_load_sums.iter().sum(),
-            layer_load_sums,
-            total_dcycle_sum: layer_dcycle_sums.iter().sum(),
-            layer_dcycle_sums,
 
             total_util: layer_utils.iter().sum(),
             layer_utils: layer_utils.try_into().unwrap(),
@@ -1018,7 +992,6 @@ impl Layer {
         cpu_pool: &mut CpuPool,
         (cpus_min, cpus_max): (usize, usize),
         (_util_low, util_high): (f64, f64),
-        (_layer_load, _total_load): (f64, f64),
         (layer_util, _total_util): (f64, f64),
     ) -> Result<bool> {
         let nr_cpus = self.cpus.count_ones();
@@ -1061,7 +1034,6 @@ impl Layer {
         cpu_pool: &mut CpuPool,
         (cpus_min, _cpus_max): (usize, usize),
         (util_low, util_high): (f64, f64),
-        (_layer_load, _total_load): (f64, f64),
         (layer_util, _total_util): (f64, f64),
     ) -> Result<Option<BitVec>> {
         let nr_cpus = self.cpus.count_ones();
@@ -1101,10 +1073,9 @@ impl Layer {
         cpu_pool: &mut CpuPool,
         cpus_range: (usize, usize),
         util_range: (f64, f64),
-        load: (f64, f64),
         util: (f64, f64),
     ) -> Result<bool> {
-        match self.cpus_to_free(cpu_pool, cpus_range, util_range, load, util)? {
+        match self.cpus_to_free(cpu_pool, cpus_range, util_range, util)? {
             Some(cpus_to_free) => {
                 trace!("{} freeing CPUs\n{}", self.name, &cpus_to_free);
                 self.cpus &= !cpus_to_free.clone();
@@ -1121,19 +1092,18 @@ impl Layer {
         cpu_pool: &mut CpuPool,
         cpus_range: Option<(usize, usize)>,
         util_range: (f64, f64),
-        load: (f64, f64),
         util: (f64, f64),
     ) -> Result<i64> {
         let cpus_range = cpus_range.unwrap_or((0, std::usize::MAX));
         let mut adjusted = 0;
 
-        while self.grow_confined_or_grouped(cpu_pool, cpus_range, util_range, load, util)? {
+        while self.grow_confined_or_grouped(cpu_pool, cpus_range, util_range, util)? {
             adjusted += 1;
             trace!("{} grew, adjusted={}", &self.name, adjusted);
         }
 
         if adjusted == 0 {
-            while self.shrink_confined_or_grouped(cpu_pool, cpus_range, util_range, load, util)? {
+            while self.shrink_confined_or_grouped(cpu_pool, cpus_range, util_range, util)? {
                 adjusted -= 1;
                 trace!("{} shrunk, adjusted={}", &self.name, adjusted);
             }
@@ -1508,10 +1478,6 @@ impl<'a> Scheduler<'a> {
                     util_range,
                     ..
                 } => {
-                    let load = (
-                        self.sched_stats.layer_load_sums[idx],
-                        self.sched_stats.total_load_sum,
-                    );
                     let util = (
                         self.sched_stats.layer_utils[idx],
                         self.sched_stats.total_util,
@@ -1521,7 +1487,6 @@ impl<'a> Scheduler<'a> {
                         &mut self.cpu_pool,
                         cpus_range,
                         util_range,
-                        load,
                         util,
                     )? != 0
                     {
