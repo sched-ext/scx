@@ -53,7 +53,6 @@ static void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 		cpuc->nr_lhp++;
 	}
 
-	taskc->lock_boost = 0;
 	taskc->futex_boost = 0;
 	taskc->futex_uaddr = NULL;
 	cpuc->lock_holder = false;
@@ -99,7 +98,6 @@ static void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc)
  * - int futex_lock_pi(u32 *uaddr, unsigned int flags, ktime_t *time, int trylock)
  * - int futex_unlock_pi(u32 *uaddr, unsigned int flags)
  */
-#ifdef LAVD_TRACE_FUTEX
 struct futex_vector;
 struct hrtimer_sleeper;
 
@@ -192,8 +190,6 @@ int BPF_PROG(fexit_futex_unlock_pi, u32 *uaddr, unsigned int flags, int ret)
 	}
 	return 0;
 }
-#endif /* LAVD_TRACE_FUTEX */
-
 
 /**
  * TODO: NTsync driver in recent kernel (when ntsync is fully mainlined)
