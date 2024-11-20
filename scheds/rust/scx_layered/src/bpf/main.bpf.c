@@ -322,8 +322,10 @@ static bool refresh_cpumasks(int idx)
 	if (!__sync_val_compare_and_swap(&layer->refresh_cpus, 1, 0))
 		return false;
 
+	bpf_rcu_read_lock();
 	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &idx)) ||
 	    !(layer_cpumask = cpumaskw->cpumask)) {
+		bpf_rcu_read_unlock();
 		scx_bpf_error("can't happen");
 		return false;
 	}
@@ -332,6 +334,7 @@ static bool refresh_cpumasks(int idx)
 		u8 *u8_ptr;
 
 		if (!(cctx = lookup_cpu_ctx(cpu))) {
+			bpf_rcu_read_unlock();
 			scx_bpf_error("unknown cpu");
 			return false;
 		}
@@ -351,6 +354,7 @@ static bool refresh_cpumasks(int idx)
 
 	layer->nr_cpus = total;
 	__sync_fetch_and_add(&layer->cpus_seq, 1);
+	bpf_rcu_read_unlock();
 	trace("LAYER[%d] now has %d cpus, seq=%llu", idx, layer->nr_cpus, layer->cpus_seq);
 	return total > 0;
 }
@@ -359,14 +363,17 @@ static bool refresh_cpumasks(int idx)
 // defined after some helpers, but before it's helpers are used.
 #include "cost.bpf.c"
 
-SEC("fentry")
-int BPF_PROG(sched_tick_fentry)
+/*
+ * Refreshes all layer cpumasks, this is called via BPF_PROG_RUN from userspace.
+ */
+SEC("syscall")
+int BPF_PROG(refresh_layer_cpumasks)
 {
 	int idx;
 
-	if (bpf_get_smp_processor_id() == 0)
-		bpf_for(idx, 0, nr_layers)
-			refresh_cpumasks(idx);
+	bpf_for(idx, 0, nr_layers)
+		refresh_cpumasks(idx);
+
 	return 0;
 }
 

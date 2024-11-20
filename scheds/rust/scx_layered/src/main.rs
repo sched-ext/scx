@@ -34,6 +34,7 @@ use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 use log::debug;
 use log::info;
 use log::trace;
@@ -1461,17 +1462,6 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;
         skel.maps.rodata_data.max_exec_ns = 20 * scx_enums.SCX_SLICE_DFL;
 
-        // scheduler_tick() got renamed to sched_tick() during v6.10-rc.
-        let sched_tick_name = match compat::ksym_exists("sched_tick")? {
-            true => "sched_tick",
-            false => "scheduler_tick",
-        };
-
-        skel.progs
-            .sched_tick_fentry
-            .set_attach_target(0, Some(sched_tick_name.into()))
-            .context("Failed to set attach target for sched_tick_fentry()")?;
-
         // Initialize skel according to @opts.
         skel.struct_ops.layered_mut().exit_dump_len = opts.exit_dump_len;
 
@@ -1715,6 +1705,11 @@ impl<'a> Scheduler<'a> {
                     self.nr_layer_cpus_ranges[lidx].1.max(layer.nr_cpus),
                 );
             }
+            let input = ProgramInput {
+                ..Default::default()
+            };
+            let prog = &mut self.skel.progs.refresh_layer_cpumasks;
+            let _ = prog.test_run(input);
         }
 
         let _ = self.update_netdev_cpumasks();
