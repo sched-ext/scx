@@ -52,7 +52,6 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cache;
 use scx_utils::CoreType;
-use scx_utils::LoadAggregator;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use stats::LayerStats;
@@ -798,7 +797,6 @@ impl Stats {
         &mut self,
         skel: &mut BpfSkel,
         proc_reader: &procfs::ProcReader,
-        load_agg: &mut LoadAggregator,
         now: Instant,
         cur_processing_dur: Duration,
     ) -> Result<()> {
@@ -834,17 +832,16 @@ impl Stats {
         let (total_load, layer_loads) = Self::read_layer_loads(skel, self.nr_layers);
 
         let cur_layer_cycles = Self::read_layer_cycles(&cpu_ctxs, self.nr_layers);
-        cur_layer_cycles
+        let layer_dcycle_sums: Vec<f64> = cur_layer_cycles
+            .iter()
+            .zip(self.prev_layer_cycles.iter())
+            .map(|(cur, prev)| (cur - prev) as f64)
+            .collect();
+        let layer_load_sums: Vec<f64> = layer_dcycle_sums
             .iter()
             .zip(layer_weights)
-            .enumerate()
-            .for_each(|(layer_idx, (usage, weight))| {
-                let mut load = 0.0;
-                if self.prev_layer_cycles[layer_idx] > 0 {
-                    load = (*usage - self.prev_layer_cycles[layer_idx]) as f64;
-                }
-                let _ = load_agg.record_dom_load(layer_idx, weight, load as f64);
-            });
+            .map(|(dcycle, weight)| dcycle * weight as f64)
+            .collect();
         let cur_layer_utils: Vec<f64> = cur_layer_cycles
             .iter()
             .zip(self.prev_layer_cycles.iter())
@@ -859,7 +856,6 @@ impl Stats {
             })
             .collect();
 
-        let load_ledger = load_agg.calculate();
         let cur_total_cpu = read_total_cpu(proc_reader)?;
         let cpu_busy = calc_util(&cur_total_cpu, &self.prev_total_cpu)?;
 
@@ -880,10 +876,10 @@ impl Stats {
             total_load,
             layer_loads,
 
-            total_load_sum: load_ledger.global_load_sum(),
-            layer_load_sums: load_ledger.dom_load_sums().to_vec(),
-            total_dcycle_sum: load_ledger.global_dcycle_sum(),
-            layer_dcycle_sums: load_ledger.dom_dcycle_sums().to_vec(),
+            total_load_sum: layer_load_sums.iter().sum(),
+            layer_load_sums,
+            total_dcycle_sum: layer_dcycle_sums.iter().sum(),
+            layer_dcycle_sums,
 
             total_util: layer_utils.iter().sum(),
             layer_utils: layer_utils.try_into().unwrap(),
@@ -1047,7 +1043,8 @@ impl Layer {
         {
             trace!(
                 "layer-{} needs more CPUs (util={:.3}) but is over the load fraction",
-                &self.name, layer_util
+                &self.name,
+                layer_util
             );
             return Ok(false);
         }
@@ -1667,11 +1664,9 @@ impl<'a> Scheduler<'a> {
 
     fn step(&mut self) -> Result<()> {
         let started_at = Instant::now();
-        let mut load_agg = LoadAggregator::new(self.cpu_pool.nr_cpus, false);
         self.sched_stats.refresh(
             &mut self.skel,
             &self.proc_reader,
-            &mut load_agg,
             started_at,
             self.processing_dur,
         )?;
@@ -1734,14 +1729,7 @@ impl<'a> Scheduler<'a> {
                             (self.layers[i].nr_cpus, self.layers[i].nr_cpus);
                     }
 
-                    let mut load_agg = LoadAggregator::new(self.cpu_pool.nr_cpus, false);
-                    stats.refresh(
-                        &mut self.skel,
-                        &self.proc_reader,
-                        &mut load_agg,
-                        now,
-                        self.processing_dur,
-                    )?;
+                    stats.refresh(&mut self.skel, &self.proc_reader, now, self.processing_dur)?;
                     let sys_stats =
                         self.generate_sys_stats(&stats, cpus_ranges.get_mut(&tid).unwrap())?;
                     res_ch.send(StatsRes::Refreshed((stats, sys_stats)))?;
