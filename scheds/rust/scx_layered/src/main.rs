@@ -1462,6 +1462,11 @@ impl<'a> Scheduler<'a> {
         bpf_layer.refresh_cpus = 1;
     }
 
+    /// Calculate how many CPUs each layer would like to have if there were
+    /// no competition. The CPU range is determined by applying the inverse
+    /// of util_range and then capping by cpus_range. If the current
+    /// allocation is within the acceptable range, no change is made.
+    /// Returns (target, min) pair for each layer.
     fn calc_target_nr_cpus(&self) -> Vec<(usize, usize)> {
         let nr_cpus = self.cpu_pool.nr_cpus;
         let utils = &self.sched_stats.layer_utils;
@@ -1495,6 +1500,9 @@ impl<'a> Scheduler<'a> {
         targets
     }
 
+    /// Given (target, min) pair for each layer which was determined
+    /// assuming infinite number of CPUs, distribute the actual CPUs
+    /// according to their weights.
     fn weighted_target_nr_cpus(&self, targets: &Vec<(usize, usize)>) -> Vec<usize> {
         let mut nr_left = self.cpu_pool.nr_cpus;
         let weights: Vec<usize> = self
