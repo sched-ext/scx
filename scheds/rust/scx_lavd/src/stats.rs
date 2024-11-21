@@ -37,12 +37,6 @@ pub struct SysStats {
     #[stat(desc = "% lock holder preemption")]
     pub pc_lhp: f64,
 
-    #[stat(desc = "% of task migration")]
-    pub pc_migration: f64,
-
-    #[stat(desc = "% of task preemption")]
-    pub pc_preemption: f64,
-
     #[stat(desc = "% of greedy tasks")]
     pub pc_greedy: f64,
 
@@ -78,15 +72,13 @@ impl SysStats {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "\x1b[93m| {:8} | {:13} | {:9} | {:9} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
+            "\x1b[93m| {:8} | {:13} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
             "MSEQ",
             "SVC_TIME",
             "# Q TASK",
             "# ACT CPU",
             "# SCHED",
             "LHP%",
-            "MIGRATE%",
-            "PREEMPT%",
             "GREEDY%",
             "PERF-CR%",
             "LAT-CR%",
@@ -108,15 +100,13 @@ impl SysStats {
 
         writeln!(
             w,
-            "| {:8} | {:13} | {:9} | {:9} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |",
+            "| {:8} | {:13} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |",
             self.mseq,
             self.avg_svc_time,
             self.nr_queued_task,
             self.nr_active,
             self.nr_sched,
             GPoint(self.pc_lhp),
-            GPoint(self.pc_migration),
-            GPoint(self.pc_preemption),
             GPoint(self.pc_greedy),
             GPoint(self.pc_pc),
             GPoint(self.pc_lc),
@@ -147,14 +137,8 @@ pub struct SchedSample {
     pub stat: String,
     #[stat(desc = "CPU id where this task is scheduled on")]
     pub cpu_id: u32,
-    #[stat(desc = "Victim CPU to be preempted out (-1 = no preemption)")]
-    pub victim_cpu: i32,
-    #[stat(desc = "Assigned virtual deadline")]
-    pub vdeadline_delta_ns: u64,
     #[stat(desc = "Assigned time slice")]
-    pub slice_ns: u64,
-    #[stat(desc = "How greedy this task is in using CPU time (1000 = fair)")]
-    pub greedy_ratio: u32,
+    pub slice_ns: u32,
     #[stat(desc = "Latency criticality of this task")]
     pub lat_cri: u32,
     #[stat(desc = "Average latency criticality in a system")]
@@ -162,7 +146,7 @@ pub struct SchedSample {
     #[stat(desc = "Static priority (20 == nice 0)")]
     pub static_prio: u16,
     #[stat(desc = "Slice boost factor (number of consecutive full slice exhaustions)")]
-    pub slice_boost_prio: u16,
+    pub slice_boost_prio: u8,
     #[stat(desc = "How often this task is scheduled per second")]
     pub run_freq: u64,
     #[stat(desc = "Average runtime per schedule")]
@@ -187,23 +171,13 @@ impl SchedSample {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "\x1b[93m| {:6} | {:7} | {:17} \
-                   | {:5} | {:4} | {:4} \
-                   | {:14} | {:8} | {:7} \
-                   | {:8} | {:7} | {:8} \
-                   | {:7} | {:9} | {:9} \
-                   | {:9} | {:9} | {:8} \
-                   | {:8} | {:8} | {:8} \
-                   | {:6} |\x1b[0m",
+            "\x1b[93m| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:7} | {:8} | {:7} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:6} |\x1b[0m",
             "MSEQ",
             "PID",
             "COMM",
             "STAT",
             "CPU",
-            "VTMC",
-            "VDDLN_NS",
             "SLC_NS",
-            "GRDY_RT",
             "LAT_CRI",
             "AVG_LC",
             "ST_PRIO",
@@ -228,23 +202,12 @@ impl SchedSample {
 
         writeln!(
             w,
-            "| {:6} | {:7} | {:17} \
-               | {:5} | {:4} | {:4} \
-               | {:14} | {:8} | {:7} \
-               | {:8} | {:7} | {:8} \
-               | {:7} | {:9} | {:9} \
-               | {:9} | {:9} | {:8} \
-               | {:8} | {:8} | {:8} \
-               | {:6} |",
-            self.mseq,
+            "| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:7} | {:8} | {:7} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:6} |", self.mseq,
             self.pid,
             self.comm,
             self.stat,
             self.cpu_id,
-            self.victim_cpu,
-            self.vdeadline_delta_ns,
             self.slice_ns,
-            self.greedy_ratio,
             self.lat_cri,
             self.avg_lat_cri,
             self.static_prio,

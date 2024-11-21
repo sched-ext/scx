@@ -231,7 +231,7 @@ static u32 calc_greedy_ratio(struct task_ctx *taskc)
 	ratio = (1000 * taskc->svc_time) / stat_cur->avg_svc_time;
 
 out:
-	taskc->greedy_ratio = max(ratio, 1);
+	taskc->is_greedy = ratio > 1000;
 	return ratio;
 }
 
@@ -339,16 +339,11 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 	lat_cri += log2_u64(runtime_ft);
 
 	/*
-	 * Make sure the lat_cri is non-zero.
-	 */
-	taskc->lat_cri_self = max(lat_cri, 1);
-
-	/*
 	 * Determine latency criticality of a task in a context-aware manner by
 	 * considering which task wakes up this task. If its waker is more
 	 * latency-critcial, inherit waker's latency criticality.
 	 */
-	taskc->lat_cri = max(taskc->lat_cri_self, taskc->lat_cri_waker);
+	taskc->lat_cri = max(lat_cri, taskc->lat_cri_waker);
 
 	return taskc->lat_cri;
 }
@@ -363,7 +358,7 @@ static u64 calc_adj_runtime(u64 runtime)
 	return adj_runtime * adj_runtime;
 }
 
-static void calc_virtual_deadline_delta(struct task_struct *p,
+static u64 calc_virtual_deadline_delta(struct task_struct *p,
 					struct task_ctx *taskc,
 					u64 enq_flags)
 {
@@ -380,10 +375,11 @@ static void calc_virtual_deadline_delta(struct task_struct *p,
 	adj_runtime = calc_adj_runtime(taskc->run_time_ns);
 
 	deadline = (adj_runtime / lat_cri) * greedy_ft;
-	taskc->vdeadline_delta_ns = deadline;
+
+	return deadline;
 }
 
-static u64 clamp_time_slice_ns(u64 slice)
+static u32 clamp_time_slice_ns(u32 slice)
 {
 	if (slice < LAVD_SLICE_MIN_NS)
 		slice = LAVD_SLICE_MIN_NS;
@@ -395,7 +391,8 @@ static u64 clamp_time_slice_ns(u64 slice)
 static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
-	u64 nr_queued, slice;
+	u64 nr_queued;
+	u32 slice;
 
 	/*
 	 * The time slice should be short enough to schedule all runnable tasks
@@ -587,14 +584,6 @@ static void update_stat_for_running(struct task_struct *p,
 	/*
 	 * Update statistics information.
 	 */
-	if (taskc->cpu_id != cpuc->cpu_id) {
-		taskc->cpu_id = cpuc->cpu_id;
-		cpuc->nr_migration++;
-	}
-
-	if (taskc->victim_cpu >= 0)
-		cpuc->nr_preemption++;
-
 	if (is_lat_cri(taskc, stat_cur))
 		cpuc->nr_lat_cri++;
 
@@ -628,7 +617,6 @@ static void update_stat_for_stopping(struct task_struct *p,
 	taskc->last_stopping_clk = now;
 
 	taskc->svc_time += task_run_time / p->scx.weight;
-	taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
 
 	/*
 	 * Reset waker's latency criticality here to limit the latency boost of
@@ -954,12 +942,12 @@ out:
 	return cpu_id;
 }
 
-static void update_task_log_clk(struct task_ctx *taskc)
+static void update_task_log_clk(struct task_ctx *taskc, u64 deadline_ns)
 {
 	/*
 	 * Update the logical clock of the virtual deadline.
 	 */
-	u64 vlc = READ_ONCE(cur_logical_clk) + taskc->vdeadline_delta_ns;
+	u64 vlc = READ_ONCE(cur_logical_clk) + deadline_ns;
 	WRITE_ONCE(taskc->vdeadline_log_clk, vlc);
 }
 
@@ -972,10 +960,9 @@ static void direct_dispatch(struct task_struct *p, struct task_ctx *taskc,
 	calc_lat_cri(p, taskc, 0);
 
 	/*
-	 * Reset the vdeadline_delta_ns to update the task's logical clock.
+	 * Update the task's logical clock.
 	 */
-	taskc->vdeadline_delta_ns = 0;
-	update_task_log_clk(taskc);
+	update_task_log_clk(taskc, 0);
 
 	/*
 	 * Calculate the duration to run.
@@ -1016,13 +1003,14 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 static void calc_when_to_run(struct task_struct *p, struct task_ctx *taskc,
 			     u64 enq_flags)
 {
+	u64 deadline_ns;
+
 	/*
 	 * Before enqueueing a task to a run queue, we should decide when a
 	 * task should be scheduled.
 	 */
-	calc_virtual_deadline_delta(p, taskc, enq_flags);
-
-	update_task_log_clk(taskc);
+	deadline_ns = calc_virtual_deadline_delta(p, taskc, enq_flags);
+	update_task_log_clk(taskc, deadline_ns);
 }
 
 static u64 find_proper_dsq(struct task_ctx *taskc, struct cpu_ctx *cpuc)
@@ -1287,10 +1275,8 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * If a task newly holds a lock, continue to execute it
 		 * to make system-wide forward progress.
 		 */
-		if ((prev->scx.flags & SCX_TASK_QUEUED) &&
-		    is_lock_holder(taskc)) {
+		if (is_lock_holder(taskc))
 			goto lock_holder_extenstion;
-		}
 	}
 
 	dsq_id = cpuc->cpdom_id;
@@ -1407,13 +1393,12 @@ consume_out:
 	 * for a lock holder to be boosted only once.
 	 */
 	if (prev) {
+lock_holder_extenstion:
 		/*
 		 * If nothing to run, continue to run the previous task.
 		 */
-		if (prev->scx.flags & SCX_TASK_QUEUED) {
-lock_holder_extenstion:
+		if (prev->scx.flags & SCX_TASK_QUEUED)
 			prev->scx.slice = calc_time_slice(prev, taskc);
-		}
 		reset_lock_futex_boost(taskc, cpuc);
 	}
 }
@@ -1422,7 +1407,7 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
 {
 	struct cpu_ctx *cpuc_run;
 	struct task_ctx *taskc_run;
-	bool preempted = false;
+	bool preempted;
 
 	cpuc_run = get_cpu_ctx();
 	taskc_run = get_task_ctx(p_run);
@@ -1507,7 +1492,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * Propagate waker's latency criticality to wakee. Note that we pass
 	 * task's self latency criticality to limit the context into one hop.
 	 */
-	p_taskc->lat_cri_waker = waker_taskc->lat_cri_self;
+	p_taskc->lat_cri_waker = waker_taskc->lat_cri;
 }
 
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
@@ -1549,7 +1534,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	/*
 	 * If there is a relevant introspection command with @p, process it.
 	 */
-	try_proc_introspec_cmd(p, taskc, LAVD_CPU_ID_HERE);
+	try_proc_introspec_cmd(p, taskc);
 }
 
 static bool slice_fully_consumed(struct cpu_ctx *cpuc, struct task_ctx *taskc)
@@ -1799,7 +1784,6 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	taskc->last_running_clk = now; /* for run_time_ns */
 	taskc->last_stopping_clk = now; /* for run_time_ns */
 	taskc->run_time_ns = LAVD_SLICE_MAX_NS;
-	taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
 	taskc->svc_time = stat_cur->avg_svc_time * LAVD_NEW_PROC_PENALITY;
 
 	set_on_core_type(taskc, p->cpus_ptr);

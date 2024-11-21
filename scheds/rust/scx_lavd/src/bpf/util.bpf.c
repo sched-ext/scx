@@ -238,7 +238,7 @@ static bool is_perf_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
 
 static bool is_greedy(struct task_ctx *taskc)
 {
-	return taskc->greedy_ratio > 1000;
+	return taskc->is_greedy;
 }
 
 static bool is_eligible(struct task_ctx *taskc)
@@ -248,7 +248,7 @@ static bool is_eligible(struct task_ctx *taskc)
 
 static bool is_lock_holder(struct task_ctx *taskc)
 {
-	return (taskc->lock_boost > 0) || (taskc->futex_boost > 0);
+	return taskc->futex_boost > 0;
 }
 
 static bool have_scheduled(struct task_ctx *taskc)

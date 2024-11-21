@@ -203,12 +203,10 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	}
 
 bingo_out:
-	taskc->victim_cpu = victim_cpu->cpuc->cpu_id;
 	*p_old_last_kick_clk = victim_cpu->last_kick_clk;
 	return victim_cpu->cpuc;
 
 null_out:
-	taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
 	return NULL;
 }
 
@@ -288,9 +286,6 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 	if (victim_cpuc)
 		ret = try_kick_cpu(victim_cpuc, victim_last_kick_clk);
 
-	if (!ret)
-		taskc->victim_cpu = (s32)LAVD_CPU_ID_NONE;
-
 	return ret;
 }
 
@@ -325,22 +320,10 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 		if (!taskc_wait)
 			break;
 
-		wait_vtm_cpu_id = taskc_wait->victim_cpu;
-		if (wait_vtm_cpu_id != (s32)LAVD_CPU_ID_NONE)
-			break;
-
 		prm_wait.stopping_tm_est_ns = get_est_stopping_time(taskc_wait);
 		prm_wait.lat_cri = taskc_wait->lat_cri;
 
-		if (can_task1_kick_task2(&prm_wait, &prm_run)) {
-			/*
-			 * The atomic CAS guarantees only one task yield its
-			 * CPU for the waiting task.
-			 */
-			ret = __sync_bool_compare_and_swap(
-					&taskc_wait->victim_cpu,
-					(s32)LAVD_CPU_ID_NONE, cpu_id);
-		}
+		ret = can_task1_kick_task2(&prm_wait, &prm_run);
 
 		/*
 		 * Test only the first entry on the DSQ.
