@@ -34,11 +34,10 @@ common crate for calculating weights between scheduling domains. See the
 ## Rust
 We use `cargo fmt` to ensure consistency in our Rust code. This runs on PRs in
 the CI and will fail with a patch if your code doesn't match. We currently need
-a nightly version of Rust to format so have pinned this for consistency. To run
-locally (with rustup) run:
+a nightly version of Rust to format so have pinned this for consistency. If you
+have rustup installed this will use the version in `rust-toolchain.toml`.
 
-    $ rustup install nightly-2024-09-10
-    $ cargo +nightly-2024-09-10 fmt
+    $ cargo fmt
 
 ## Useful Tools
 
