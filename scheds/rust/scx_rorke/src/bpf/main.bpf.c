@@ -91,6 +91,11 @@ s32 BPF_STRUCT_OPS(rorke_select_cpu,
                    s32 prev_cpu,
                    u64 wake_flags) {
   s32 cpu;
+  s32 pid = p->pid;
+  s32 tgid = p->tgid;
+
+  trace("rorke_select_cpu: VM: %d, vCPU: %d, prev_cpu: %d", tgid, pid,
+        prev_cpu);
 
   cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
   if (cpu >= 0) {
@@ -102,6 +107,10 @@ s32 BPF_STRUCT_OPS(rorke_select_cpu,
 
     return cpu;
   }
+
+  dbg("rorke_enqueue: enqueued VM: %d vCPU: %d", tgid, pid);
+  scx_bpf_dispatch(p, tgid, SCX_SLICE_INF, 0);
+  __sync_fetch_and_add(&nr_vm_dispatches, 1);
 
   return prev_cpu;
 }
@@ -153,14 +162,15 @@ void BPF_STRUCT_OPS(rorke_enqueue, struct task_struct* p, u64 enq_flags) {
 
 void BPF_STRUCT_OPS(rorke_dispatch, s32 cpu, struct task_struct* prev) {
   /* TODO: replace following with per-cpu context */
+  // trace("rorke_dispatch: CPU: %d VM: %d vCPU: %d", cpu, prev->tgid, prev->pid);
   struct cpu_ctx* cctx = try_lookup_cpu_ctx(cpu);
-  u64 now = bpf_ktime_get_ns();
+  // u64 now = bpf_ktime_get_ns();
 
   if (!cctx)
     return;
 
-  if(now - cctx->last_running < 20000)
-   return;
+  // if (now - cctx->last_running < 20000)
+  //   return;
 
   s32 vm_id = cctx->vm_id;
   if (vm_id == 0) {
@@ -198,7 +208,6 @@ void BPF_STRUCT_OPS(rorke_stopping, struct task_struct* p, bool runnable) {
  * TODO: Add description for timer functionality
  */
 static int global_timer_fn(void* map, int* key, struct bpf_timer* timer) {
-  trace("global_timer_fn: timer fired");
 
   u64 now = bpf_ktime_get_ns();
   s32 current_cpu = bpf_get_smp_processor_id();
@@ -216,24 +225,27 @@ static int global_timer_fn(void* map, int* key, struct bpf_timer* timer) {
       continue;
 
     cctx = try_lookup_cpu_ctx(current_cpu);
-    if (!cctx){
+    if (!cctx) {
       trace("global_timer_fn: cpu ctx lookup failed");
       continue;
     }
 
-    delta = now - cctx->last_running;
-    if (delta < timer_interval_ns - 5000){
-      trace("global_timer_fn delta not expired");
+    now = bpf_ktime_get_ns();
+    delta = now - cctx->last_running + 5000;
+    // if (delta < timer_interval_ns - 5000) {
+    if (delta < timer_interval_ns) {
+      trace("global_timer_fn: CPU %d ran %d (< interval - %d) ago, skipping",
+            current_cpu, delta, timer_interval_ns);
       continue;
     }
-
+//
     if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | current_cpu))
       trace("global_timer_fn: local non-empty, will kick CPU %d", current_cpu);
     else if (scx_bpf_dsq_nr_queued(cctx->vm_id))
       trace("global_timer_fn: VM %d queue non-empty, will kick CPU %d",
             cctx->vm_id, current_cpu);
     else {
-      trace("global_timer_fn: nothing to do... skipping CPU %d", current_cpu);
+      // trace("global_timer_fn: nothing to do... skipping CPU %d", current_cpu);
       continue;
     }
 
@@ -307,7 +319,7 @@ SCX_OPS_DEFINE(rorke,
                 * anything special. Enqueue the last tasks like any other tasks.
                 */
 
-               // .flags = SCX_OPS_ENQ_LAST,
+               .flags = SCX_OPS_ENQ_LAST,
                .select_cpu = (void*)rorke_select_cpu,
                .enqueue = (void*)rorke_enqueue,
                .dispatch = (void*)rorke_dispatch,
