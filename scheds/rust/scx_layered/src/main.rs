@@ -1462,9 +1462,120 @@ impl<'a> Scheduler<'a> {
         bpf_layer.refresh_cpus = 1;
     }
 
+    fn calc_target_nr_cpus(&self) -> Vec<(usize, usize)> {
+        let nr_cpus = self.cpu_pool.nr_cpus;
+        let utils = &self.sched_stats.layer_utils;
+
+        let mut targets: Vec<(usize, usize)> = vec![];
+
+        for (idx, layer) in self.layers.iter().enumerate() {
+            targets.push(match &layer.kind {
+                LayerKind::Confined {
+                    util_range,
+                    cpus_range,
+                    ..
+                }
+                | LayerKind::Grouped {
+                    util_range,
+                    cpus_range,
+                    ..
+                } => {
+                    let util = if utils[idx] < 0.01 { 0.0 } else { utils[idx] };
+                    let low = (util / util_range.1).ceil() as usize;
+                    let high = ((util / util_range.0).floor() as usize).max(low);
+                    let target = layer.cpus.count_ones().clamp(low, high);
+                    let cpus_range = cpus_range.unwrap_or((0, nr_cpus));
+                    (target.clamp(cpus_range.0, cpus_range.1), cpus_range.0)
+                }
+                LayerKind::Open { .. } => (0, 0),
+            });
+        }
+
+        trace!("initial targets: {:?}", &targets);
+        targets
+    }
+
+    fn weighted_target_nr_cpus(&self, targets: &Vec<(usize, usize)>) -> Vec<usize> {
+        let mut nr_left = self.cpu_pool.nr_cpus;
+        let weights: Vec<usize> = self
+            .layers
+            .iter()
+            .map(|layer| layer.kind.common().weight as usize)
+            .collect();
+        let mut cands: BTreeMap<usize, (usize, usize, usize)> = targets
+            .iter()
+            .zip(&weights)
+            .enumerate()
+            .map(|(i, ((target, min), weight))| (i, (*target, *min, *weight)))
+            .collect();
+        let mut weight_sum: usize = weights.iter().sum();
+        let mut weighted: Vec<usize> = vec![0; self.layers.len()];
+
+        trace!("cands: {:?}", &cands);
+
+        // First, accept all layers that are <= min.
+        cands.retain(|&i, &mut (target, min, weight)| {
+            if target <= min {
+                let target = target.min(nr_left);
+                weighted[i] = target;
+                weight_sum -= weight;
+                nr_left -= target;
+                false
+            } else {
+                true
+            }
+        });
+
+        trace!("cands after accepting mins: {:?}", &cands);
+
+        // Keep accepting ones under their allotted share.
+        let calc_share = |nr_left, weight, weight_sum| {
+            (((nr_left * weight) as f64 / weight_sum as f64).ceil() as usize).min(nr_left)
+        };
+
+        while !cands.is_empty() {
+            let mut progress = false;
+
+            cands.retain(|&i, &mut (target, _min, weight)| {
+                let share = calc_share(nr_left, weight, weight_sum);
+                if target <= share {
+                    weighted[i] = target;
+                    weight_sum -= weight;
+                    nr_left -= target;
+                    progress = true;
+                    false
+                } else {
+                    true
+                }
+            });
+
+            if !progress {
+                break;
+            }
+        }
+
+        trace!("cands after accepting under allotted: {:?}", &cands);
+
+        // The remaining candidates are in contention with each other,
+        // distribute according to the shares.
+        let nr_to_share = nr_left;
+        for (i, (_target, _min, weight)) in cands.into_iter() {
+            let share = calc_share(nr_to_share, weight, weight_sum).min(nr_left);
+            weighted[i] = share;
+            nr_left -= share;
+        }
+
+        trace!("weighted: {:?}", &weighted);
+
+        weighted
+    }
+
     fn refresh_cpumasks(&mut self) -> Result<()> {
         let mut updated = false;
         let num_layers = self.layers.len();
+
+        let targets = self.calc_target_nr_cpus();
+        self.weighted_target_nr_cpus(&targets);
 
         for idx in 0..num_layers {
             match self.layers[idx].kind {
@@ -1740,13 +1851,13 @@ fn main() -> Result<()> {
     }
 
     if opts.no_load_frac_limit {
-	warn!("--no-load-frac-limit is deprecated and noop");
+        warn!("--no-load-frac-limit is deprecated and noop");
     }
     if opts.layer_preempt_weight_disable != 0.0 {
         warn!("--layer-preempt-weight-disable is deprecated and noop");
     }
     if opts.layer_growth_weight_disable != 0.0 {
-	warn!("--layer-growth-weight-disable is deprecated and noop");
+        warn!("--layer-growth-weight-disable is deprecated and noop");
     }
 
     let llv = match opts.verbose {
