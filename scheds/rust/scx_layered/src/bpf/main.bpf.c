@@ -1395,16 +1395,6 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 		return;
 	}
 
-	/*
-	 * If one of the fallback DSQs has the most budget then consume from
-	 * it to prevent starvation.
-	 */
-	if (has_pref_fallback_budget(costc)) {
-		dsq_id = budget_id_to_fallback_dsq(costc->pref_budget);
-		if (scx_bpf_consume(dsq_id))
-			return;
-	}
-
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = rotate_layer_id(costc->pref_layer, idx);
@@ -1676,19 +1666,6 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	    sib_cctx->current_exclusive) {
 		gstat_inc(GSTAT_EXCL_IDLE, cctx);
 		return;
-	}
-
-	/*
-	 * If one of the fallback DSQs has the most budget then consume from it
-	 * to prevent starvation.
-	 */
-	if (has_pref_fallback_budget(costc)) {
-		dsq_id = budget_id_to_fallback_dsq(costc->pref_budget);
-		trace("COST consuming fallback %lld", dsq_id);
-		if (dsq_id > LO_FALLBACK_DSQ)
-			scx_bpf_error("invalid fallback dsq %lld", dsq_id);
-		if (scx_bpf_consume(dsq_id))
-			return;
 	}
 
 	/* consume preempting layers first */
