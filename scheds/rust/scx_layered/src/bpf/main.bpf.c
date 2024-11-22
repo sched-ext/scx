@@ -621,68 +621,10 @@ bool should_try_preempt_first(s32 cand, struct layer *layer,
 }
 
 static __always_inline
-s32 pick_idle_no_topo(struct task_struct *p, s32 prev_cpu,
-		      struct cpu_ctx *cctx, struct task_ctx *tctx,
-		      struct layer *layer, bool from_selcpu)
-{
-	const struct cpumask *idle_smtmask;
-	struct cpumask *layer_cpumask, *layered_cpumask;
-	s32 cpu;
-
-	/* look up cpumasks */
-	if (!(layered_cpumask = (struct cpumask *)tctx->layered_mask) ||
-	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)))
-			return -1;
-
-	/* not much to do if bound to a single CPU */
-	if (p->nr_cpus_allowed == 1 && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		if (layer->kind == LAYER_KIND_CONFINED &&
-		    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
-			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
-		return prev_cpu;
-	}
-
-	maybe_refresh_layered_cpus(p, tctx, layer_cpumask, READ_ONCE(layers->cpus_seq));
-
-	/*
-	 * If @p prefers to preempt @prev_cpu than finding an idle CPU and
-	 * @prev_cpu is preemptible, tell the enqueue path to try to preempt
-	 * @prev_cpu. The enqueue path will also retry to find an idle CPU if
-	 * the preemption attempt fails.
-	 */
-	if (from_selcpu && should_try_preempt_first(prev_cpu, layer, layered_cpumask)) {
-		cctx->try_preempt_first = true;
-		return -1;
-	}
-
-	idle_smtmask = scx_bpf_get_idle_smtmask();
-	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
-				      idle_smtmask, layer->idle_smt)) >= 0)
-		goto out_put;
-
-	/*
-	 * If the layer is an open one, we can try the whole machine.
-	 */
-	if (layer->kind != LAYER_KIND_CONFINED &&
-	    ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu,
-				       idle_smtmask, layer->idle_smt)) >= 0)) {
-		lstat_inc(LSTAT_OPEN_IDLE, layer, cctx);
-		goto out_put;
-	}
-
-out_put:
-	scx_bpf_put_idle_cpumask(idle_smtmask);
-	return cpu;
-}
-
-static __always_inline
 s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		  struct cpu_ctx *cctx, struct task_ctx *tctx, struct layer *layer,
 		  bool from_selcpu)
 {
-	if (disable_topology)
-		return pick_idle_no_topo(p, prev_cpu, cctx, tctx, layer, from_selcpu);
-
 	const struct cpumask *idle_smtmask, *layer_cpumask, *layered_cpumask, *cpumask;
 	struct cpu_ctx *prev_cctx;
 	u64 cpus_seq;
@@ -715,8 +657,10 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		return -1;
 	}
 
-	if (!(prev_cctx = lookup_cpu_ctx(prev_cpu)) ||
-	    !(idle_smtmask = scx_bpf_get_idle_smtmask()))
+	if ((nr_llcs > 1 || nr_nodes > 1) &&
+	    !(prev_cctx = lookup_cpu_ctx(prev_cpu)))
+		return -1;
+	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
 		return -1;
 
 	/*
