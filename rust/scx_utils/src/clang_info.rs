@@ -18,6 +18,7 @@ lazy_static::lazy_static! {
     ("ppc32", "powerpc"),
     ("ppc64", "powerpc"),
     ("ppc64le", "powerpc"),
+    ("powerpc64le", "powerpc"),
     ("sparc", "sparc"),
     ("sparcv9", "sparc"),
     ("riscv32", "riscv"),
