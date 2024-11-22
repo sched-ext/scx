@@ -68,7 +68,7 @@ use std::ops::BitOrAssign;
 use std::ops::BitXor;
 use std::ops::BitXorAssign;
 
-#[derive(Debug, Eq, Clone, Ord, PartialEq, PartialOrd)]
+#[derive(Debug, Eq, Clone, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Cpumask {
     mask: BitVec<u64, Lsb0>,
 }
@@ -144,6 +144,10 @@ impl Cpumask {
         Self {
             mask: BitVec::from_vec(vec),
         }
+    }
+
+    pub fn from_bitvec(bitvec: BitVec<u64, Lsb0>) -> Self {
+        Self { mask: bitvec }
     }
 
     /// Return a slice of u64's whose bits reflect the Cpumask.

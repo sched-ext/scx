@@ -322,8 +322,10 @@ static bool refresh_cpumasks(int idx)
 	if (!__sync_val_compare_and_swap(&layer->refresh_cpus, 1, 0))
 		return false;
 
+	bpf_rcu_read_lock();
 	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &idx)) ||
 	    !(layer_cpumask = cpumaskw->cpumask)) {
+		bpf_rcu_read_unlock();
 		scx_bpf_error("can't happen");
 		return false;
 	}
@@ -332,6 +334,7 @@ static bool refresh_cpumasks(int idx)
 		u8 *u8_ptr;
 
 		if (!(cctx = lookup_cpu_ctx(cpu))) {
+			bpf_rcu_read_unlock();
 			scx_bpf_error("unknown cpu");
 			return false;
 		}
@@ -351,6 +354,7 @@ static bool refresh_cpumasks(int idx)
 
 	layer->nr_cpus = total;
 	__sync_fetch_and_add(&layer->cpus_seq, 1);
+	bpf_rcu_read_unlock();
 	trace("LAYER[%d] now has %d cpus, seq=%llu", idx, layer->nr_cpus, layer->cpus_seq);
 	return total > 0;
 }
@@ -359,14 +363,17 @@ static bool refresh_cpumasks(int idx)
 // defined after some helpers, but before it's helpers are used.
 #include "cost.bpf.c"
 
-SEC("fentry")
-int BPF_PROG(sched_tick_fentry)
+/*
+ * Refreshes all layer cpumasks, this is called via BPF_PROG_RUN from userspace.
+ */
+SEC("syscall")
+int BPF_PROG(refresh_layer_cpumasks)
 {
 	int idx;
 
-	if (bpf_get_smp_processor_id() == 0)
-		bpf_for(idx, 0, nr_layers)
-			refresh_cpumasks(idx);
+	bpf_for(idx, 0, nr_layers)
+		refresh_cpumasks(idx);
+
 	return 0;
 }
 
@@ -1388,16 +1395,6 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 		return;
 	}
 
-	/*
-	 * If one of the fallback DSQs has the most budget then consume from
-	 * it to prevent starvation.
-	 */
-	if (has_pref_fallback_budget(costc)) {
-		dsq_id = budget_id_to_fallback_dsq(costc->pref_budget);
-		if (scx_bpf_consume(dsq_id))
-			return;
-	}
-
 	/* consume preempting layers first */
 	bpf_for(idx, 0, nr_layers) {
 		layer_idx = rotate_layer_id(costc->pref_layer, idx);
@@ -1669,19 +1666,6 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	    sib_cctx->current_exclusive) {
 		gstat_inc(GSTAT_EXCL_IDLE, cctx);
 		return;
-	}
-
-	/*
-	 * If one of the fallback DSQs has the most budget then consume from it
-	 * to prevent starvation.
-	 */
-	if (has_pref_fallback_budget(costc)) {
-		dsq_id = budget_id_to_fallback_dsq(costc->pref_budget);
-		trace("COST consuming fallback %lld", dsq_id);
-		if (dsq_id > LO_FALLBACK_DSQ)
-			scx_bpf_error("invalid fallback dsq %lld", dsq_id);
-		if (scx_bpf_consume(dsq_id))
-			return;
 	}
 
 	/* consume preempting layers first */
@@ -2505,7 +2489,7 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 	struct task_ctx *tctx;
 	s32 cpu;
 	u64 *antistall_dsq, *delay, cur_delay;
-	bool first_pass;
+	int pass;
 	u32 zero;
 
 	zero = 0;
@@ -2530,9 +2514,8 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 			// check head task in dsq
 			goto unlock;
 
-		first_pass = true;
-look_for_cpu:
-		bpf_for(cpu, 0, nr_possible_cpus) {
+		#pragma unroll
+		for (pass = 0; pass < 2; ++pass) bpf_for(cpu, 0, nr_possible_cpus) {
 			const struct cpumask *cpumask;
 
 			if (!(cpumask = cast_mask(tctx->layered_mask)))
@@ -2553,18 +2536,13 @@ look_for_cpu:
 				goto unlock;
 			}
 
-			if ((first_pass && *antistall_dsq == SCX_DSQ_INVALID) ||
-			    (!first_pass && *delay < cur_delay)) {
+			if ((pass == 0 && *antistall_dsq == SCX_DSQ_INVALID) ||
+			    (pass != 0 && *delay < cur_delay)) {
 				trace("antistall set DSQ[%llu] SELECTED_CPU[%llu] DELAY[%llu]", dsq_id, cpu, cur_delay);
 				*delay = cur_delay;
 				*antistall_dsq = dsq_id;
 				goto unlock;
 			}
-		}
-
-		if (first_pass) {
-			first_pass = false;
-			goto look_for_cpu;
 		}
 
 		goto unlock;

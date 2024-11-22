@@ -627,7 +627,7 @@ impl<'a> Scheduler<'a> {
         let c_tx_cm_str: &CStr = unsafe { CStr::from_ptr(c_tx_cm) };
         let tx_comm: &str = c_tx_cm_str.to_str().unwrap();
 
-        let c_tx_st: *const c_char = (&tx.stat as *const [c_char; 6]) as *const c_char;
+        let c_tx_st: *const c_char = (&tx.stat as *const [c_char; 5]) as *const c_char;
         let c_tx_st_str: &CStr = unsafe { CStr::from_ptr(c_tx_st) };
         let tx_stat: &str = c_tx_st_str.to_str().unwrap();
 
@@ -637,10 +637,7 @@ impl<'a> Scheduler<'a> {
             comm: tx_comm.into(),
             stat: tx_stat.into(),
             cpu_id: tx.cpu_id,
-            victim_cpu: tc.victim_cpu,
-            vdeadline_delta_ns: tc.vdeadline_delta_ns,
             slice_ns: tc.slice_ns,
-            greedy_ratio: tc.greedy_ratio,
             lat_cri: tc.lat_cri,
             avg_lat_cri: tx.avg_lat_cri,
             static_prio: tx.static_prio,
@@ -712,8 +709,6 @@ impl<'a> Scheduler<'a> {
                 let nr_active = st.nr_active;
                 let nr_sched = st.nr_sched;
                 let pc_lhp = Self::get_pc(st.nr_lhp, nr_sched);
-                let pc_migration = Self::get_pc(st.nr_migration, nr_sched);
-                let pc_preemption = Self::get_pc(st.nr_preemption, nr_sched);
                 let pc_greedy = Self::get_pc(st.nr_greedy, nr_sched);
                 let pc_pc = Self::get_pc(st.nr_perf_cri, nr_sched);
                 let pc_lc = Self::get_pc(st.nr_lat_cri, nr_sched);
@@ -736,8 +731,6 @@ impl<'a> Scheduler<'a> {
                     nr_active,
                     nr_sched,
                     pc_lhp,
-                    pc_migration,
-                    pc_preemption,
                     pc_greedy,
                     pc_pc,
                     pc_lc,

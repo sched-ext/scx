@@ -39,6 +39,8 @@ enum SupportedSched {
     Rusty,
     #[serde(rename = "scx_lavd")]
     Lavd,
+    #[serde(rename = "scx_flash")]
+    Flash,
 }
 
 #[derive(Debug, PartialEq)]
@@ -114,7 +116,7 @@ impl ScxLoader {
     /// Get list of supported schedulers
     #[zbus(property)]
     async fn supported_schedulers(&self) -> Vec<&str> {
-        vec!["scx_bpfland", "scx_rusty", "scx_lavd"]
+        vec!["scx_bpfland", "scx_rusty", "scx_lavd", "scx_flash"]
     }
 
     async fn start_scheduler(
@@ -546,6 +548,7 @@ fn get_scx_from_str(scx_name: &str) -> zbus::fdo::Result<SupportedSched> {
         "scx_bpfland" => Ok(SupportedSched::Bpfland),
         "scx_rusty" => Ok(SupportedSched::Rusty),
         "scx_lavd" => Ok(SupportedSched::Lavd),
+        "scx_flash" => Ok(SupportedSched::Flash),
         _ => Err(zbus::fdo::Error::Failed(format!(
             "{scx_name} is not supported"
         ))),
@@ -558,5 +561,6 @@ fn get_name_from_scx(supported_sched: &SupportedSched) -> &'static str {
         SupportedSched::Bpfland => "scx_bpfland",
         SupportedSched::Rusty => "scx_rusty",
         SupportedSched::Lavd => "scx_lavd",
+        SupportedSched::Flash => "scx_flash",
     }
 }

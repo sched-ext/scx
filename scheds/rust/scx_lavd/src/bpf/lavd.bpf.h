@@ -36,8 +36,6 @@ enum consts_internal  {
 
 	LAVD_CPU_UTIL_MAX		= 1000, /* 100.0% */
 	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= 850, /* 85.0% */
-	LAVD_CPU_ID_HERE		= ((u32)-2),
-	LAVD_CPU_ID_NONE		= ((u32)-1),
 
 	LAVD_SYS_STAT_INTERVAL_NS	= (50ULL * NSEC_PER_MSEC),
 	LAVD_SYS_STAT_DECAY_TIMES	= ((2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS),
@@ -92,12 +90,6 @@ struct cpu_ctx {
 	volatile u64	last_kick_clk;	/* when the CPU was kicked */
 
 	/*
-	 * Information for cpu hotplug
-	 */
-	u64		online_clk;	/* when a CPU becomes online */
-	u64		offline_clk;	/* when a CPU becomes offline */
-
-	/*
 	 * Information used to keep track of latency criticality
 	 */
 	volatile u32	max_lat_cri;	/* maximum latency criticality */
@@ -145,12 +137,17 @@ struct cpu_ctx {
 	/*
 	 * Information for statistics.
 	 */
-	volatile u32	nr_migration;	/* number of migrations */
 	volatile u32	nr_preemption;	/* number of migrations */
 	volatile u32	nr_greedy;	/* number of greedy tasks scheduled */
 	volatile u32	nr_perf_cri;
 	volatile u32	nr_lat_cri;
 	volatile u32	nr_lhp;		/* number of lock holder preemption */
+
+	/*
+	 * Information for cpu hotplug
+	 */
+	u64		online_clk;	/* when a CPU becomes online */
+	u64		offline_clk;	/* when a CPU becomes offline */
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 

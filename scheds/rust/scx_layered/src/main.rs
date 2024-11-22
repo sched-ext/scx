@@ -34,6 +34,7 @@ use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 use log::debug;
 use log::info;
 use log::trace;
@@ -44,6 +45,7 @@ use scx_utils::compat;
 use scx_utils::import_enums;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
+use scx_utils::read_netdevs;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -52,6 +54,7 @@ use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cache;
 use scx_utils::CoreType;
+use scx_utils::NetDev;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use stats::LayerStats;
@@ -471,6 +474,10 @@ struct Opts {
     /// Disable antistall
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
+
+    /// Enable netdev IRQ balancing. This is experimental and should be used with caution.
+    #[clap(long, default_value = "false")]
+    netdev_irq_balance: bool,
 
     /// Maximum task runnable_at delay (in seconds) before antistall turns on
     #[clap(long, default_value = "3")]
@@ -1043,6 +1050,8 @@ struct Scheduler<'a> {
     nr_layer_cpus_ranges: Vec<(usize, usize)>,
     processing_dur: Duration,
 
+    topo: Topology,
+    netdevs: BTreeMap<String, NetDev>,
     stats_server: StatsServer<StatsReq, StatsRes>,
 }
 
@@ -1231,6 +1240,14 @@ impl<'a> Scheduler<'a> {
         } else {
             Topology::new()?
         };
+        let netdevs = if opts.netdev_irq_balance {
+            warn!(
+                "Experimental netdev IRQ balancing enabled. Reset IRQ masks of network devices after use!!!"
+            );
+            read_netdevs()?
+        } else {
+            BTreeMap::new()
+        };
 
         if !disable_topology {
             if topo.nodes().len() == 1 && topo.nodes()[0].llcs().len() == 1 {
@@ -1272,17 +1289,6 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, open_object, layered)?;
         skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;
         skel.maps.rodata_data.max_exec_ns = 20 * scx_enums.SCX_SLICE_DFL;
-
-        // scheduler_tick() got renamed to sched_tick() during v6.10-rc.
-        let sched_tick_name = match compat::ksym_exists("sched_tick")? {
-            true => "sched_tick",
-            false => "scheduler_tick",
-        };
-
-        skel.progs
-            .sched_tick_fentry
-            .set_attach_target(0, Some(sched_tick_name.into()))
-            .context("Failed to set attach target for sched_tick_fentry()")?;
 
         // Initialize skel according to @opts.
         skel.struct_ops.layered_mut().exit_dump_len = opts.exit_dump_len;
@@ -1354,6 +1360,8 @@ impl<'a> Scheduler<'a> {
             proc_reader,
             skel,
 
+            topo,
+            netdevs,
             stats_server,
         };
 
@@ -1372,6 +1380,43 @@ impl<'a> Scheduler<'a> {
             }
         }
         bpf_layer.refresh_cpus = 1;
+    }
+
+    fn update_netdev_cpumasks(&mut self) -> Result<()> {
+        let available_cpus = self.cpu_pool.available_cpus();
+        if available_cpus.is_empty() {
+            return Ok(());
+        }
+
+        for (iface, netdev) in self.netdevs.iter_mut() {
+            let node = self
+                .topo
+                .nodes()
+                .into_iter()
+                .take_while(|n| n.id() == netdev.node())
+                .next()
+                .ok_or_else(|| anyhow!("Failed to get netdev node"))?;
+            let node_cpus = node.span();
+            for (irq, irqmask) in netdev.irqs.iter_mut() {
+                irqmask.clear();
+                for cpu in available_cpus.iter_ones() {
+                    if !node_cpus.test_cpu(cpu) {
+                        continue;
+                    }
+                    let _ = irqmask.set_cpu(cpu);
+                }
+                // If no CPUs are available in the node then spread the load across the node
+                if irqmask.weight() == 0 {
+                    for cpu in node_cpus.as_raw_bitvec().iter_ones() {
+                        let _ = irqmask.set_cpu(cpu);
+                    }
+                }
+                trace!("{} updating irq {} cpumask {:?}", iface, irq, irqmask);
+            }
+            netdev.apply_cpumasks()?;
+        }
+
+        Ok(())
     }
 
     /// Calculate how many CPUs each layer would like to have if there were
@@ -1604,8 +1649,14 @@ impl<'a> Scheduler<'a> {
                     self.nr_layer_cpus_ranges[lidx].1.max(layer.nr_cpus),
                 );
             }
+            let input = ProgramInput {
+                ..Default::default()
+            };
+            let prog = &mut self.skel.progs.refresh_layer_cpumasks;
+            let _ = prog.test_run(input);
         }
 
+        let _ = self.update_netdev_cpumasks();
         Ok(())
     }
 

@@ -36,8 +36,6 @@ struct sys_stat_ctx {
 	s32		avg_lat_cri;
 	u64		sum_lat_cri;
 	u32		nr_sched;
-	u32		nr_migration;
-	u32		nr_preemption;
 	u32		nr_greedy;
 	u32		nr_perf_cri;
 	u32		nr_lat_cri;
@@ -97,12 +95,6 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 
 		c->nr_lat_cri += cpuc->nr_lat_cri;
 		cpuc->nr_lat_cri = 0;
-
-		c->nr_migration += cpuc->nr_migration;
-		cpuc->nr_migration = 0;
-
-		c->nr_preemption += cpuc->nr_preemption;
-		cpuc->nr_preemption = 0;
 
 		c->nr_greedy += cpuc->nr_greedy;
 		cpuc->nr_greedy = 0;
@@ -267,8 +259,6 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 	if (cnt++ == LAVD_SYS_STAT_DECAY_TIMES) {
 		cnt = 0;
 		stat_next->nr_sched >>= 1;
-		stat_next->nr_migration >>= 1;
-		stat_next->nr_preemption >>= 1;
 		stat_next->nr_greedy >>= 1;
 		stat_next->nr_perf_cri >>= 1;
 		stat_next->nr_lat_cri >>= 1;
@@ -283,8 +273,6 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 	}
 
 	stat_next->nr_sched += c->nr_sched;
-	stat_next->nr_migration += c->nr_migration;
-	stat_next->nr_preemption += c->nr_preemption;
 	stat_next->nr_greedy += c->nr_greedy;
 	stat_next->nr_perf_cri += c->nr_perf_cri;
 	stat_next->nr_lat_cri += c->nr_lat_cri;
