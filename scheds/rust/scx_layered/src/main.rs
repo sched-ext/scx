@@ -57,6 +57,7 @@ use scx_utils::Llc;
 use scx_utils::NetDev;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
+use scx_utils::NR_CPUS_POSSIBLE;
 use stats::LayerStats;
 use stats::StatsReq;
 use stats::StatsRes;
@@ -78,7 +79,6 @@ const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KI
 const MAX_LAYER_NAME: usize = bpf_intf::consts_MAX_LAYER_NAME as usize;
 
 lazy_static! {
-    static ref NR_POSSIBLE_CPUS: usize = libbpf_rs::num_possible_cpus().unwrap();
     static ref USAGE_DECAY: f64 = 0.5f64.powf(1.0 / USAGE_HALF_LIFE_F64);
     static ref EXAMPLE_CONFIG: LayerConfig = LayerConfig {
         specs: vec![
@@ -587,7 +587,7 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
         .lookup_percpu(&0u32.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
         .context("Failed to lookup cpu_ctx")?
         .unwrap();
-    for cpu in 0..*NR_POSSIBLE_CPUS {
+    for cpu in 0..*NR_CPUS_POSSIBLE {
         cpu_ctxs.push(*unsafe {
             &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
         });
@@ -620,7 +620,7 @@ fn initialize_cpu_ctxs(skel: &BpfSkel, topo: &Topology) -> Result<()> {
         .context("Failed to lookup cpu_ctx")?
         .unwrap();
 
-    for cpu in 0..*NR_POSSIBLE_CPUS {
+    for cpu in 0..*NR_CPUS_POSSIBLE {
         cpu_ctxs.push(*unsafe {
             &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
         });
@@ -650,7 +650,7 @@ impl BpfStats {
         let mut gstats = vec![0u64; NR_GSTATS];
         let mut lstats = vec![vec![0u64; NR_LSTATS]; nr_layers];
 
-        for cpu in 0..*NR_POSSIBLE_CPUS {
+        for cpu in 0..*NR_CPUS_POSSIBLE {
             for stat in 0..NR_GSTATS {
                 gstats[stat] += cpu_ctxs[cpu].gstats[stat];
             }
@@ -749,7 +749,7 @@ impl Stats {
     fn read_layer_cycles(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Vec<u64> {
         let mut layer_cycles = vec![0u64; nr_layers];
 
-        for cpu in 0..*NR_POSSIBLE_CPUS {
+        for cpu in 0..*NR_CPUS_POSSIBLE {
             for layer in 0..nr_layers {
                 layer_cycles[layer] += cpu_ctxs[cpu].layer_cycles[layer];
             }
@@ -1286,7 +1286,7 @@ impl<'a> Scheduler<'a> {
         } else {
             opts.slice_us * 1000 * 20
         };
-        skel.maps.rodata_data.nr_possible_cpus = *NR_POSSIBLE_CPUS as u32;
+        skel.maps.rodata_data.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         skel.maps.rodata_data.smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.disable_topology = disable_topology;
