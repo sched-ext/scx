@@ -987,26 +987,26 @@ impl Layer {
         })
     }
 
-    fn grow_confined_or_grouped(
-        &mut self,
-        cpu_pool: &mut CpuPool,
-        (cpus_min, cpus_max): (usize, usize),
-        (_util_low, util_high): (f64, f64),
-        (layer_util, _total_util): (f64, f64),
-    ) -> Result<bool> {
-        let nr_cpus = self.cpus.count_ones();
-        if nr_cpus >= cpus_max {
-            trace!("layer {} has {} max: {}", &self.name, nr_cpus, cpus_max);
-            return Ok(false);
-        }
+    fn free_some_cpus(&mut self, cpu_pool: &mut CpuPool, max_to_free: usize) -> Result<usize> {
+        let cpus_to_free = match cpu_pool.next_to_free(&self.cpus)? {
+            Some(ret) => ret.clone(),
+            None => return Ok(0),
+        };
 
-        // Do we already have enough?
-        if nr_cpus >= cpus_min
-            && (layer_util == 0.0 || (nr_cpus > 0 && layer_util / nr_cpus as f64 <= util_high))
-        {
-            return Ok(false);
-        }
+        let nr_to_free = cpus_to_free.count_ones();
 
+        Ok(if nr_to_free <= max_to_free {
+            trace!("[{}] freeing CPUs: {}", self.name, &cpus_to_free);
+            self.cpus &= !cpus_to_free.clone();
+            self.nr_cpus -= nr_to_free;
+            cpu_pool.free(&cpus_to_free)?;
+            nr_to_free
+        } else {
+            0
+        })
+    }
+
+    fn alloc_some_cpus(&mut self, cpu_pool: &mut CpuPool) -> Result<usize> {
         let new_cpus = match cpu_pool
             .alloc_cpus(&self.allowed_cpus, &self.core_order)
             .clone()
@@ -1014,105 +1014,16 @@ impl Layer {
             Some(ret) => ret.clone(),
             None => {
                 trace!("layer-{} can't grow, no CPUs", &self.name);
-                return Ok(false);
+                return Ok(0);
             }
         };
 
-        trace!(
-            "layer-{} adding {} CPUs to {} CPUs",
-            &self.name,
-            new_cpus.count_ones(),
-            nr_cpus,
-        );
+        let nr_new_cpus = new_cpus.count_ones();
+
+        trace!("[{}] adding CPUs: {}", &self.name, &new_cpus);
         self.cpus |= &new_cpus;
-        self.nr_cpus = self.cpus.count_ones();
-        Ok(true)
-    }
-
-    fn cpus_to_free(
-        &self,
-        cpu_pool: &mut CpuPool,
-        (cpus_min, _cpus_max): (usize, usize),
-        (util_low, util_high): (f64, f64),
-        (layer_util, _total_util): (f64, f64),
-    ) -> Result<Option<BitVec>> {
-        let nr_cpus = self.cpus.count_ones();
-        if nr_cpus <= cpus_min {
-            return Ok(None);
-        }
-        let cpus_to_free = match cpu_pool.next_to_free(&self.cpus)? {
-            Some(ret) => ret.clone(),
-            None => return Ok(None),
-        };
-
-        let nr_to_free = cpus_to_free.count_ones();
-
-        if layer_util / nr_cpus as f64 >= util_low {
-            return Ok(None);
-        }
-
-        // Can't shrink if losing the CPUs pushes us over @util_high.
-        match nr_cpus - nr_to_free {
-            0 => {
-                if layer_util > 0.0 {
-                    return Ok(None);
-                }
-            }
-            nr_left => {
-                if layer_util / nr_left as f64 >= util_high {
-                    return Ok(None);
-                }
-            }
-        }
-
-        return Ok(Some(cpus_to_free));
-    }
-
-    fn shrink_confined_or_grouped(
-        &mut self,
-        cpu_pool: &mut CpuPool,
-        cpus_range: (usize, usize),
-        util_range: (f64, f64),
-        util: (f64, f64),
-    ) -> Result<bool> {
-        match self.cpus_to_free(cpu_pool, cpus_range, util_range, util)? {
-            Some(cpus_to_free) => {
-                trace!("{} freeing CPUs\n{}", self.name, &cpus_to_free);
-                self.cpus &= !cpus_to_free.clone();
-                cpu_pool.free(&cpus_to_free)?;
-                self.nr_cpus = self.cpus.count_ones();
-                Ok(true)
-            }
-            None => Ok(false),
-        }
-    }
-
-    fn resize_confined_or_grouped(
-        &mut self,
-        cpu_pool: &mut CpuPool,
-        cpus_range: Option<(usize, usize)>,
-        util_range: (f64, f64),
-        util: (f64, f64),
-    ) -> Result<i64> {
-        let cpus_range = cpus_range.unwrap_or((0, std::usize::MAX));
-        let mut adjusted = 0;
-
-        while self.grow_confined_or_grouped(cpu_pool, cpus_range, util_range, util)? {
-            adjusted += 1;
-            trace!("{} grew, adjusted={}", &self.name, adjusted);
-        }
-
-        if adjusted == 0 {
-            while self.shrink_confined_or_grouped(cpu_pool, cpus_range, util_range, util)? {
-                adjusted -= 1;
-                trace!("{} shrunk, adjusted={}", &self.name, adjusted);
-            }
-        }
-
-        if adjusted != 0 {
-            trace!("{} done resizing, adjusted={}", &self.name, adjusted);
-        }
-        Ok(adjusted)
+        self.nr_cpus += nr_new_cpus;
+        Ok(nr_new_cpus)
     }
 }
 
@@ -1452,6 +1363,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn update_bpf_layer_cpumask(layer: &Layer, bpf_layer: &mut types::layer) {
+        trace!("[{}] Updating BPF CPUs: {}", layer.name, &layer.cpus);
         for bit in 0..layer.cpus.len() {
             if layer.cpus[bit] {
                 bpf_layer.cpus[bit / 8] |= 1 << (bit % 8);
@@ -1579,64 +1491,109 @@ impl<'a> Scheduler<'a> {
     }
 
     fn refresh_cpumasks(&mut self) -> Result<()> {
+        let layer_is_open = |layer: &Layer| match layer.kind {
+            LayerKind::Open { .. } => true,
+            _ => false,
+        };
+
         let mut updated = false;
-        let num_layers = self.layers.len();
-
         let targets = self.calc_target_nr_cpus();
-        self.weighted_target_nr_cpus(&targets);
+        let targets = self.weighted_target_nr_cpus(&targets);
 
-        for idx in 0..num_layers {
-            match self.layers[idx].kind {
-                LayerKind::Confined {
-                    cpus_range,
-                    util_range,
-                    ..
-                }
-                | LayerKind::Grouped {
-                    cpus_range,
-                    util_range,
-                    ..
-                } => {
-                    let util = (
-                        self.sched_stats.layer_utils[idx],
-                        self.sched_stats.total_util,
-                    );
+        // Shrink all layers first so that CPUs are available for
+        // redistribution.
+        for (idx, (layer, &target)) in self.layers.iter_mut().zip(targets.iter()).enumerate() {
+            if layer_is_open(layer) {
+                continue;
+            }
 
-                    if self.layers[idx].resize_confined_or_grouped(
-                        &mut self.cpu_pool,
-                        cpus_range,
-                        util_range,
-                        util,
-                    )? != 0
-                    {
-                        Self::update_bpf_layer_cpumask(
-                            &self.layers[idx],
-                            &mut self.skel.maps.bss_data.layers[idx],
-                        );
-                        updated = true;
-                    }
+            let nr_cur = layer.cpus.count_ones();
+            if nr_cur <= target {
+                continue;
+            }
+            let mut nr_to_free = nr_cur - target;
+
+            // There's some dampening built into util metrics but slow down
+            // freeing further to avoid unnecessary changes. This is solely
+            // based on intution. Drop or update according to real-world
+            // behavior.
+	    let nr_to_break_at = nr_to_free / 2;
+
+            let mut freed = false;
+
+            while nr_to_free > 0 {
+                let nr_freed = layer.free_some_cpus(&mut self.cpu_pool, nr_to_free)?;
+                if nr_freed == 0 {
+                    break;
                 }
-                _ => {}
+                nr_to_free -= nr_freed;
+                freed = true;
+
+		if nr_to_free <= nr_to_break_at {
+		    break;
+		}
+            }
+
+            if freed {
+                Self::update_bpf_layer_cpumask(layer, &mut self.skel.maps.bss_data.layers[idx]);
+                updated = true;
             }
         }
 
-        if updated {
-            for idx in 0..num_layers {
-                let layer = &mut self.layers[idx];
-                let bpf_layer = &mut self.skel.maps.bss_data.layers[idx];
-                match &layer.kind {
-                    LayerKind::Open { .. } => {
-                        let available_cpus =
-                            self.cpu_pool.available_cpus_in_mask(&layer.allowed_cpus);
-                        let nr_available_cpus = available_cpus.count_ones();
-                        // Open layers need the intersection of allowed
-                        // cpus and available cpus.
-                        layer.cpus.copy_from_bitslice(&available_cpus);
-                        layer.nr_cpus = nr_available_cpus;
-                        Self::update_bpf_layer_cpumask(layer, bpf_layer);
-                    }
-                    _ => {}
+        // Grow layers. Do so in the ascending target number of CPUs order
+        // so that we're always more generous to smaller layers. This avoids
+        // starving small layers and shouldn't make noticable difference for
+        // bigger layers as work conservation should still be achieved
+        // through open execution.
+        let mut ordered: Vec<(usize, usize)> = targets.iter().copied().enumerate().collect();
+        ordered.sort_by(|a, b| a.1.cmp(&b.1));
+
+        for &(idx, target) in &ordered {
+            let layer = &mut self.layers[idx];
+
+            if layer_is_open(layer) {
+                continue;
+            }
+
+            let nr_cur = layer.cpus.count_ones();
+            if nr_cur >= target {
+                continue;
+            }
+
+            let mut nr_to_alloc = target - nr_cur;
+            let mut alloced = false;
+
+            while nr_to_alloc > 0 {
+                let nr_alloced = layer.alloc_some_cpus(&mut self.cpu_pool)?;
+                if nr_alloced == 0 {
+                    break;
                 }
+                alloced = true;
+                nr_to_alloc -= nr_alloced.min(nr_to_alloc);
+            }
+
+            if alloced {
+                Self::update_bpf_layer_cpumask(layer, &mut self.skel.maps.bss_data.layers[idx]);
+                updated = true;
+            }
+        }
+
+        // Give the rest to the open layers.
+        if updated {
+            for (idx, layer) in self.layers.iter_mut().enumerate() {
+                if !layer_is_open(layer) {
+                    continue;
+                }
+
+                let bpf_layer = &mut self.skel.maps.bss_data.layers[idx];
+                let available_cpus = self.cpu_pool.available_cpus_in_mask(&layer.allowed_cpus);
+                let nr_available_cpus = available_cpus.count_ones();
+
+                // Open layers need the intersection of allowed cpus and
+                // available cpus.
+                layer.cpus.copy_from_bitslice(&available_cpus);
+                layer.nr_cpus = nr_available_cpus;
+                Self::update_bpf_layer_cpumask(layer, bpf_layer);
             }
 
             self.skel.maps.bss_data.fallback_cpu = self.cpu_pool.fallback_cpu as u32;
