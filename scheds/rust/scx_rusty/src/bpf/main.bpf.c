@@ -598,7 +598,7 @@ const int sched_prio_to_weight[DL_MAX_LAT_PRIO + 1] = {
  /*  15 */        36,        29,        23,        18,        15,
 };
 
-static u64 sched_prio_to_latency_weight(u64 prio)
+static __noinline u64 sched_prio_to_latency_weight(u64 prio)
 {
 	if (prio >= DL_MAX_LAT_PRIO) {
 		scx_bpf_error("Invalid prio index");
