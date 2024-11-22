@@ -603,7 +603,7 @@ bool should_try_preempt_first(s32 cand, struct layer *layer,
 	struct cpu_ctx *cand_cctx, *sib_cctx;
 	s32 sib;
 
-	if (!layered_cpumask || !layer->preempt || !layer->preempt_first)
+	if (!layer->preempt || !layer->preempt_first)
 		return false;
 
 	if (layer->kind == LAYER_KIND_CONFINED &&
@@ -621,64 +621,11 @@ bool should_try_preempt_first(s32 cand, struct layer *layer,
 }
 
 static __always_inline
-s32 pick_idle_no_topo(struct task_struct *p, s32 prev_cpu,
-		      struct cpu_ctx *cctx, struct task_ctx *tctx,
-		      struct layer *layer, bool from_selcpu)
-{
-	const struct cpumask *idle_smtmask;
-	struct cpumask *layer_cpumask, *layered_cpumask;
-	s32 cpu;
-
-	/* look up cpumasks */
-	if (!(layered_cpumask = (struct cpumask *)tctx->layered_mask) ||
-	    !(layer_cpumask = lookup_layer_cpumask(tctx->layer)))
-			return -1;
-
-	/* not much to do if bound to a single CPU */
-	if (p->nr_cpus_allowed == 1 && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		if (layer->kind == LAYER_KIND_CONFINED &&
-		    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
-			lstat_inc(LSTAT_AFFN_VIOL, layer, cctx);
-		return prev_cpu;
-	}
-
-	maybe_refresh_layered_cpus(p, tctx, layer_cpumask, READ_ONCE(layers->cpus_seq));
-
-	/*
-	 * If @p prefers to preempt @prev_cpu than finding an idle CPU and
-	 * @prev_cpu is preemptible, tell the enqueue path to try to preempt
-	 * @prev_cpu. The enqueue path will also retry to find an idle CPU if
-	 * the preemption attempt fails.
-	 */
-	if (from_selcpu && should_try_preempt_first(prev_cpu, layer, layered_cpumask)) {
-		cctx->try_preempt_first = true;
-		return -1;
-	}
-
-	/*
-	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
-	 * partially idle @prev_cpu.
-	 */
-	idle_smtmask = scx_bpf_get_idle_smtmask();
-	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
-				      idle_smtmask,
-				      layer->idle_smt)) >= 0)
-		goto out_put;
-
-out_put:
-	scx_bpf_put_idle_cpumask(idle_smtmask);
-	return cpu;
-}
-
-static __always_inline
 s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		  struct cpu_ctx *cctx, struct task_ctx *tctx, struct layer *layer,
 		  bool from_selcpu)
 {
-	if (disable_topology)
-		return pick_idle_no_topo(p, prev_cpu, cctx, tctx, layer, from_selcpu);
-
-	const struct cpumask *idle_smtmask, *layer_cpumask, *cpumask;
+	const struct cpumask *idle_smtmask, *layer_cpumask, *layered_cpumask, *cpumask;
 	struct cpu_ctx *prev_cctx;
 	u64 cpus_seq;
 	s32 cpu;
@@ -703,15 +650,37 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 * the preemption attempt fails.
 	 */
 	maybe_refresh_layered_cpus(p, tctx, layer_cpumask, cpus_seq);
-	if (!(cpumask = cast_mask(tctx->layered_mask)))
+	if (!(layered_cpumask = cast_mask(tctx->layered_mask)))
 		return -1;
-	if (from_selcpu && should_try_preempt_first(prev_cpu, layer, cpumask)) {
+	if (from_selcpu && should_try_preempt_first(prev_cpu, layer, layered_cpumask)) {
 		cctx->try_preempt_first = true;
 		return -1;
 	}
 
-	if (!(prev_cctx = lookup_cpu_ctx(prev_cpu)) ||
-	    !(idle_smtmask = scx_bpf_get_idle_smtmask()))
+	/*
+	 * When a layer stays saturated, there's no point in repeatedly
+	 * searching for an idle CPU at different levels. Short-circuit by
+	 * testing whether there are any eligible CPUs first.
+	 */
+	if (READ_ONCE(layer->check_no_idle)) {
+		bool has_idle;
+
+		cpumask = scx_bpf_get_idle_cpumask();
+
+		if (layer->kind == LAYER_KIND_CONFINED)
+			has_idle = bpf_cpumask_intersects(layered_cpumask, cpumask);
+		else
+			has_idle = bpf_cpumask_intersects(p->cpus_ptr, cpumask);
+
+		scx_bpf_put_idle_cpumask(cpumask);
+		if (!has_idle)
+			return -1;
+	}
+
+	if ((nr_llcs > 1 || nr_nodes > 1) &&
+	    !(prev_cctx = lookup_cpu_ctx(prev_cpu)))
+		return -1;
+	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
 		return -1;
 
 	/*
@@ -766,12 +735,16 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 			goto out_put;
 	}
 
+	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
+				      idle_smtmask, layer->idle_smt)) >= 0)
+		goto out_put;
+
 	/*
 	 * If the layer is an open one, we can try the whole machine.
 	 */
 	if (layer->kind != LAYER_KIND_CONFINED &&
-	    ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu, idle_smtmask,
-				       layer->idle_smt)) >= 0)) {
+	    ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu,
+				       idle_smtmask, layer->idle_smt)) >= 0)) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cctx);
 		goto out_put;
 	}
@@ -779,6 +752,20 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	cpu = -1;
 
 out_put:
+	/*
+	 * Update check_no_idle. Cleared if any idle CPU is found. Set if no
+	 * idle CPU is found for a task without affinity restriction. Use
+	 * READ/WRITE_ONCE() dance to avoid unnecessarily write-claiming the
+	 * cacheline.
+	 */
+	if (cpu >= 0) {
+		if (READ_ONCE(layer->check_no_idle))
+			WRITE_ONCE(layer->check_no_idle, false);
+	} else if (tctx->all_cpus_allowed) {
+		if (!READ_ONCE(layer->check_no_idle))
+			WRITE_ONCE(layer->check_no_idle, true);
+	}
+
 	scx_bpf_put_idle_cpumask(idle_smtmask);
 	return cpu;
 }
@@ -1359,7 +1346,6 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	struct cpu_ctx *cctx, *sib_cctx;
 	struct layer *layer;
 	struct cost *costc;
-	u64 dsq_id;
 	u32 idx, layer_idx;
 	s32 sib = sibling_cpu(cpu);
 
@@ -1632,7 +1618,6 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	struct cpu_ctx *cctx, *sib_cctx;
 	struct cost *costc;
-	u64 dsq_id;
 	s32 sib = sibling_cpu(cpu);
 
 	if (!(cctx = lookup_cpu_ctx(-1)) ||
