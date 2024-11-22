@@ -657,6 +657,11 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		return -1;
 	}
 
+	/*
+	 * When a layer stays saturated, there's no point in repeatedly
+	 * searching for an idle CPU at different levels. Short-circuit by
+	 * testing whether there are any eligible CPUs first.
+	 */
 	if (READ_ONCE(layer->check_no_idle)) {
 		bool has_idle;
 
@@ -747,6 +752,12 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	cpu = -1;
 
 out_put:
+	/*
+	 * Update check_no_idle. Cleared if any idle CPU is found. Set if no
+	 * idle CPU is found for a task without affinity restriction. Use
+	 * READ/WRITE_ONCE() dance to avoid unnecessarily write-claiming the
+	 * cacheline.
+	 */
 	if (cpu >= 0) {
 		if (READ_ONCE(layer->check_no_idle))
 			WRITE_ONCE(layer->check_no_idle, false);
@@ -754,6 +765,7 @@ out_put:
 		if (!READ_ONCE(layer->check_no_idle))
 			WRITE_ONCE(layer->check_no_idle, true);
 	}
+
 	scx_bpf_put_idle_cpumask(idle_smtmask);
 	return cpu;
 }
