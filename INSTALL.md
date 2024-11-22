@@ -91,7 +91,7 @@ CachyOS does provide a kernel with an unstripped vmlinux, which can be used for 
 $ sudo pacman -Sy linux-cachyos-sched-ext-debug linux-cachyos-sched-ext-debug-headers
 ```
 
-## Gentoo
+## Gentoo Linux
 Make sure you build the kernel with the right configuration, installation
 should be easy:
 ```
