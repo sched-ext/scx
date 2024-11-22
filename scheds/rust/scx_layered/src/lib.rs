@@ -203,22 +203,18 @@ impl CpuPool {
         Ok(())
     }
 
-    pub fn next_to_free<'a>(&'a self, cands: &BitVec) -> Result<Option<&'a BitVec>> {
-        let last = match cands.last_one() {
-            Some(ret) => ret,
-            None => return Ok(None),
-        };
-        let core = self.cpu_core[last];
-        if (self.core_cpus[core].clone() & !cands.clone()).count_ones() != 0 {
-            bail!(
-                "CPUs{} partially intersect with core {} ({})",
-                cands,
-                core,
-                self.core_cpus[core]
-            );
+    pub fn next_to_free<'a>(
+        &'a self,
+        cands: &BitVec,
+        core_order: impl Iterator<Item = &'a usize>,
+    ) -> Result<Option<&'a BitVec>> {
+        for pref_core in core_order {
+            let core_cpus = self.core_cpus[*pref_core].clone();
+            if (core_cpus & cands.clone()).count_ones() > 0 {
+                return Ok(Some(&self.core_cpus[*pref_core]));
+            }
         }
-
-        Ok(Some(&self.core_cpus[core]))
+        Ok(None)
     }
 
     pub fn available_cpus(&self) -> BitVec<u64, Lsb0> {

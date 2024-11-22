@@ -961,7 +961,12 @@ struct Layer {
 }
 
 impl Layer {
-    fn new(spec: &LayerSpec, idx: usize, cpu_pool: &CpuPool, topo: &Topology) -> Result<Self> {
+    fn new(
+        spec: &LayerSpec,
+        cpu_pool: &CpuPool,
+        topo: &Topology,
+        core_order: &Vec<usize>,
+    ) -> Result<Self> {
         let name = &spec.name;
         let kind = spec.kind.clone();
         let mut cpus = bitvec![0; cpu_pool.nr_cpus];
@@ -1043,7 +1048,6 @@ impl Layer {
 
         let layer_growth_algo = kind.common().growth_algo.clone();
 
-        let core_order = layer_growth_algo.layer_core_order(cpu_pool, spec, idx, topo);
         debug!(
             "layer: {} algo: {:?} core order: {:?}",
             name, &layer_growth_algo, core_order
@@ -1052,7 +1056,7 @@ impl Layer {
         Ok(Self {
             name: name.into(),
             kind,
-            core_order,
+            core_order: core_order.clone(),
 
             nr_cpus: 0,
             cpus,
@@ -1061,7 +1065,7 @@ impl Layer {
     }
 
     fn free_some_cpus(&mut self, cpu_pool: &mut CpuPool, max_to_free: usize) -> Result<usize> {
-        let cpus_to_free = match cpu_pool.next_to_free(&self.cpus)? {
+        let cpus_to_free = match cpu_pool.next_to_free(&self.cpus, self.core_order.iter().rev())? {
             Some(ret) => ret.clone(),
             None => return Ok(0),
         };
@@ -1386,8 +1390,13 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_load!(skel, layered, uei)?;
 
         let mut layers = vec![];
+        let layer_growth_orders =
+            LayerGrowthAlgo::layer_core_orders(&cpu_pool, &layer_specs, &topo);
         for (idx, spec) in layer_specs.iter().enumerate() {
-            layers.push(Layer::new(&spec, idx, &cpu_pool, &topo)?);
+            let growth_order = layer_growth_orders
+                .get(&idx)
+                .with_context(|| format!("layer has no growth order"))?;
+            layers.push(Layer::new(&spec, &cpu_pool, &topo, &growth_order)?);
         }
         initialize_cpu_ctxs(&skel, &topo).unwrap();
 
