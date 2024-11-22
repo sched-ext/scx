@@ -2104,11 +2104,6 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	used = bpf_ktime_get_ns() - tctx->running_at;
-	if (used < layer->min_exec_ns) {
-		lstat_inc(LSTAT_MIN_EXEC, layer, cctx);
-		lstat_add(LSTAT_MIN_EXEC_NS, layer, cctx, layer->min_exec_ns - used);
-		used = layer->min_exec_ns;
-	}
 
 	// If the task ran on the hi fallback dsq then the cost should be
 	// charged to it.
@@ -2126,7 +2121,16 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	cctx->prev_exclusive = cctx->current_exclusive;
 	cctx->current_exclusive = false;
 
-	/* scale the execution time by the inverse of the weight and charge */
+	/*
+	 * Apply min_exec_us, scale the execution time by the inverse of the
+	 * weight and charge.
+	 */
+	if (used < layer->min_exec_ns) {
+		lstat_inc(LSTAT_MIN_EXEC, layer, cctx);
+		lstat_add(LSTAT_MIN_EXEC_NS, layer, cctx, layer->min_exec_ns - used);
+		used = layer->min_exec_ns;
+	}
+
 	if (cctx->yielding && used < slice_ns)
 		used = slice_ns;
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
