@@ -205,7 +205,8 @@ struct layer {
 	u64			cpus_seq;
 	u64			node_mask;
 	u64			cache_mask;
-	unsigned int		refresh_cpus;
+	bool			check_no_idle;
+	u64			refresh_cpus;
 	unsigned char		cpus[MAX_CPUS_U8];
 	unsigned int		nr_cpus;	// managed from BPF side
 	unsigned int		perf;

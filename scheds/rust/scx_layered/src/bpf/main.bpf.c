@@ -657,6 +657,21 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		return -1;
 	}
 
+	if (READ_ONCE(layer->check_no_idle)) {
+		bool has_idle;
+
+		cpumask = scx_bpf_get_idle_cpumask();
+
+		if (layer->kind == LAYER_KIND_CONFINED)
+			has_idle = bpf_cpumask_intersects(layered_cpumask, cpumask);
+		else
+			has_idle = bpf_cpumask_intersects(p->cpus_ptr, cpumask);
+
+		scx_bpf_put_idle_cpumask(cpumask);
+		if (!has_idle)
+			return -1;
+	}
+
 	if ((nr_llcs > 1 || nr_nodes > 1) &&
 	    !(prev_cctx = lookup_cpu_ctx(prev_cpu)))
 		return -1;
@@ -732,6 +747,13 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	cpu = -1;
 
 out_put:
+	if (cpu >= 0) {
+		if (READ_ONCE(layer->check_no_idle))
+			WRITE_ONCE(layer->check_no_idle, false);
+	} else if (tctx->all_cpus_allowed) {
+		if (!READ_ONCE(layer->check_no_idle))
+			WRITE_ONCE(layer->check_no_idle, true);
+	}
 	scx_bpf_put_idle_cpumask(idle_smtmask);
 	return cpu;
 }
