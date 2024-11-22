@@ -809,15 +809,6 @@ impl Stats {
             .take(self.nr_layers)
             .map(|layer| layer.nr_tasks as usize)
             .collect();
-        let _layer_weights: Vec<usize> = skel
-            .maps
-            .bss_data
-            .layers
-            .iter()
-            .take(self.nr_layers)
-            .map(|layer| layer.weight as usize)
-            .collect();
-
         let layer_slice_us: Vec<u64> = skel
             .maps
             .bss_data
@@ -1562,7 +1553,7 @@ impl<'a> Scheduler<'a> {
             // freeing further to avoid unnecessary changes. This is solely
             // based on intution. Drop or update according to real-world
             // behavior.
-	    let nr_to_break_at = nr_to_free / 2;
+            let nr_to_break_at = nr_to_free / 2;
 
             let mut freed = false;
 
@@ -1574,9 +1565,9 @@ impl<'a> Scheduler<'a> {
                 nr_to_free -= nr_freed;
                 freed = true;
 
-		if nr_to_free <= nr_to_break_at {
-		    break;
-		}
+                if nr_to_free <= nr_to_break_at {
+                    break;
+                }
             }
 
             if freed {
