@@ -220,6 +220,13 @@ impl Cpumask {
         *NR_CPU_IDS
     }
 
+    /// Create a Cpumask that is the negation of the current Cpumask.
+    pub fn not(&self) -> Cpumask {
+	let mut new = self.clone();
+	new.mask = !new.mask;
+	new
+    }
+
     /// Create a Cpumask that is the AND of the current Cpumask and another.
     pub fn and(&self, other: &Cpumask) -> Cpumask {
         let mut new = self.clone();
