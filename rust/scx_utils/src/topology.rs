@@ -120,19 +120,25 @@ pub struct Cpu {
     pub trans_lat_ns: usize,
     pub l2_id: usize,
     pub l3_id: usize,
-    pub llc_id: usize,
     pub core_type: CoreType,
+
+    /// Ancestor IDs.
+    pub core_id: usize,
+    pub llc_id: usize,
+    pub node_id: usize,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Core {
     pub id: usize,
-    pub node_id: usize,
-    pub llc_id: usize,
     pub cpus: BTreeMap<usize, Arc<Cpu>>,
     /// Cpumask of all CPUs in this core.
     pub span: Cpumask,
     pub core_type: CoreType,
+
+    /// Ancestor IDs.
+    pub llc_id: usize,
+    pub node_id: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +147,9 @@ pub struct Llc {
     pub cores: BTreeMap<usize, Arc<Core>>,
     /// Cpumask of all CPUs in this llc.
     pub span: Cpumask,
+
+    /// Ancestor IDs.
+    pub node_id: usize,
 
     /// Skip indices to access lower level members easily.
     pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
@@ -456,6 +465,8 @@ fn create_insert_cpu(
         cores: BTreeMap::new(),
         span: Cpumask::new()?,
         all_cpus: BTreeMap::new(),
+
+	node_id: node.id,
     }));
     let llc_mut = Arc::get_mut(llc).unwrap();
 
@@ -474,11 +485,12 @@ fn create_insert_cpu(
 
     let core = llc_mut.cores.entry(core_id).or_insert(Arc::new(Core {
         id: core_id,
-        llc_id: llc_id,
-        node_id: node.id,
         cpus: BTreeMap::new(),
         span: Cpumask::new()?,
         core_type: core_type.clone(),
+
+        llc_id,
+        node_id: node.id,
     }));
     let core_mut = Arc::get_mut(core).unwrap();
 
@@ -492,8 +504,11 @@ fn create_insert_cpu(
             trans_lat_ns: trans_lat_ns,
             l2_id: l2_id,
             l3_id: l3_id,
-            llc_id: llc_id,
             core_type: core_type.clone(),
+
+            core_id,
+            llc_id,
+            node_id: node.id,
         }),
     );
 
