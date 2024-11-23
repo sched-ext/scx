@@ -100,8 +100,8 @@ struct cpu_ctx {
 	 * Information used to keep track of performance criticality
 	 */
 	volatile u64	sum_perf_cri;	/* sum of performance criticality */
-	volatile u64	min_perf_cri;	/* mininum performance criticality */
-	volatile u64	max_perf_cri;	/* maximum performance criticality */
+	volatile u32	min_perf_cri;	/* mininum performance criticality */
+	volatile u32	max_perf_cri;	/* maximum performance criticality */
 
 	/*
 	 * Information of a current running task for preemption
@@ -109,8 +109,7 @@ struct cpu_ctx {
 	volatile u64	stopping_tm_est_ns; /* estimated stopping time */
 	volatile u16	lat_cri;	/* latency criticality */
 	volatile u8	is_online;	/* is this CPU online? */
-	volatile bool	lock_holder;	/* is a lock holder running */
-	s32		cpu_id;		/* cpu id */
+	volatile u8	lock_holder;	/* is a lock holder running */
 
 	/*
 	 * Information for CPU frequency scaling
@@ -123,16 +122,13 @@ struct cpu_ctx {
 	 * Fields for core compaction
 	 *
 	 */
+	u16		cpu_id;		/* cpu id */
 	u16		capacity;	/* CPU capacity based on 1000 */
 	u8		big_core;	/* is it a big core? */
 	u8		turbo_core;	/* is it a turbo core? */
 	u8		cpdom_id;	/* compute domain id (== dsq_id) */
 	u8		cpdom_alt_id;	/* compute domain id of anternative type (== dsq_id) */
 	u8		cpdom_poll_pos;	/* index to check if a DSQ of a compute domain is starving */
-	struct bpf_cpumask __kptr *tmp_a_mask;	/* temporary cpu mask */
-	struct bpf_cpumask __kptr *tmp_o_mask;	/* temporary cpu mask */
-	struct bpf_cpumask __kptr *tmp_t_mask;	/* temporary cpu mask */
-	struct bpf_cpumask __kptr *tmp_t2_mask;	/* temporary cpu mask */
 
 	/*
 	 * Information for statistics.
@@ -145,6 +141,14 @@ struct cpu_ctx {
 	 */
 	u64		online_clk;	/* when a CPU becomes online */
 	u64		offline_clk;	/* when a CPU becomes offline */
+
+	/*
+	 * Temporary cpu masks
+	 */
+	struct bpf_cpumask __kptr *tmp_a_mask;
+	struct bpf_cpumask __kptr *tmp_o_mask;
+	struct bpf_cpumask __kptr *tmp_t_mask;
+	struct bpf_cpumask __kptr *tmp_t2_mask;
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 
