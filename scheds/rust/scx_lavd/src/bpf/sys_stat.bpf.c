@@ -122,16 +122,18 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		/*
 		 * Accumulate task's performance criticlity information.
 		 */
-		if (cpuc->min_perf_cri < c->min_perf_cri)
-			c->min_perf_cri = cpuc->min_perf_cri;
-		cpuc->min_perf_cri = 1000;
+		if (have_little_core) {
+			if (cpuc->min_perf_cri < c->min_perf_cri)
+				c->min_perf_cri = cpuc->min_perf_cri;
+			cpuc->min_perf_cri = 1000;
 
-		if (cpuc->max_perf_cri > c->max_perf_cri)
-			c->max_perf_cri = cpuc->max_perf_cri;
-		cpuc->max_perf_cri = 0;
+			if (cpuc->max_perf_cri > c->max_perf_cri)
+				c->max_perf_cri = cpuc->max_perf_cri;
+			cpuc->max_perf_cri = 0;
 
-		c->sum_perf_cri += cpuc->sum_perf_cri;
-		cpuc->sum_perf_cri = 0;
+			c->sum_perf_cri += cpuc->sum_perf_cri;
+			cpuc->sum_perf_cri = 0;
+		}
 
 		/*
 		 * If the CPU is in an idle state (i.e., idle_start_clk is
@@ -200,13 +202,16 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 		c->max_lat_cri = c->stat_cur->max_lat_cri;
 		c->avg_lat_cri = c->stat_cur->avg_lat_cri;
 
-		c->min_perf_cri = c->stat_cur->min_perf_cri;
-		c->max_perf_cri = c->stat_cur->max_perf_cri;
-		c->avg_perf_cri = c->stat_cur->avg_perf_cri;
+		if (have_little_core) {
+			c->min_perf_cri = c->stat_cur->min_perf_cri;
+			c->max_perf_cri = c->stat_cur->max_perf_cri;
+			c->avg_perf_cri = c->stat_cur->avg_perf_cri;
+		}
 	}
 	else {
 		c->avg_lat_cri = c->sum_lat_cri / c->nr_sched;
-		c->avg_perf_cri = c->sum_perf_cri / c->nr_sched;
+		if (have_little_core)
+			c->avg_perf_cri = c->sum_perf_cri / c->nr_sched;
 	}
 }
 
@@ -231,14 +236,16 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 	stat_next->thr_lat_cri = stat_next->max_lat_cri -
 		((stat_next->max_lat_cri - stat_next->avg_lat_cri) >> 1);
 
-	stat_next->min_perf_cri =
-		calc_avg32(stat_cur->min_perf_cri, c->min_perf_cri);
-	stat_next->avg_perf_cri =
-		calc_avg32(stat_cur->avg_perf_cri, c->avg_perf_cri);
-	stat_next->max_perf_cri =
-		calc_avg32(stat_cur->max_perf_cri, c->max_perf_cri);
-	stat_next->thr_perf_cri =
-		c->stat_cur->thr_perf_cri; /* will be updated later */
+	if (have_little_core) {
+		stat_next->min_perf_cri =
+			calc_avg32(stat_cur->min_perf_cri, c->min_perf_cri);
+		stat_next->avg_perf_cri =
+			calc_avg32(stat_cur->avg_perf_cri, c->avg_perf_cri);
+		stat_next->max_perf_cri =
+			calc_avg32(stat_cur->max_perf_cri, c->max_perf_cri);
+		stat_next->thr_perf_cri =
+			c->stat_cur->thr_perf_cri; /* will be updated later */
+	}
 
 	stat_next->nr_violation =
 		calc_avg32(stat_cur->nr_violation, c->nr_violation);
