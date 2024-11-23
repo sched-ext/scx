@@ -409,10 +409,8 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	/*
 	 * Boost time slice for CPU-bound tasks.
 	 */
-	if (is_eligible(taskc)) {
-		slice += (LAVD_SLICE_BOOST_MAX_FT * slice *
-			  taskc->slice_boost_prio) / LAVD_SLICE_BOOST_MAX_STEP;
-	}
+	slice += (LAVD_SLICE_BOOST_MAX_FT * slice *
+		  taskc->slice_boost_prio) / LAVD_SLICE_BOOST_MAX_STEP;
 
 	/*
 	 * If a task has yet to be scheduled (i.e., a freshly forked task or a
@@ -1119,7 +1117,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		p_run = bpf_get_current_task_btf();
 		taskc_run = try_get_task_ctx(p_run);
 
-		if (taskc_run && !is_eligible(taskc_run)) {
+		if (taskc_run && is_greedy(taskc_run)) {
 			yield = try_yield_current_cpu(p_run, cpuc_cur, taskc_run);
 			if (yield)
 				try_kick_cpu(cpuc_cur, cpuc_cur->last_kick_clk);
