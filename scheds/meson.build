@@ -8,4 +8,6 @@ bpf_includes = ['-I', join_paths(meson.current_source_dir(), 'include'),
 # passed in as executable::include_directories.
 user_c_includes = include_directories('include')
 
+install_subdir(join_paths(meson.current_source_dir(), 'include/scx'), install_dir: 'include', install_tag: 'devel')
+
 subdir('c')
