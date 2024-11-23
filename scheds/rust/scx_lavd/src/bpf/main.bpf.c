@@ -549,6 +549,18 @@ static void update_stat_for_running(struct task_struct *p,
 	}
 
 	/*
+	 * Update task state when starts running.
+	 */
+	taskc->wakeup_ft = 0;
+	taskc->last_running_clk = now;
+
+	/*
+	 * Reset task's lock and futex boost count
+	 * for a lock holder to be boosted only once.
+	 */
+	reset_lock_futex_boost(taskc, cpuc);
+
+	/*
 	 * Update per-CPU latency criticality information
 	 * for every-scheduled tasks.
 	 */
@@ -570,24 +582,6 @@ static void update_stat_for_running(struct task_struct *p,
 	}
 
 	/*
-	 * Reset task's lock and futex boost count
-	 * for a lock holder to be boosted only once.
-	 */
-	reset_lock_futex_boost(taskc, cpuc);
-
-	/*
-	 * It is clear there is no need to consider the suspended duration
-	 * while running a task, so reset the suspended duration to zero.
-	 */
-	reset_suspended_duration(cpuc);
-
-	/*
-	 * Update task state when starts running.
-	 */
-	taskc->wakeup_ft = 0;
-	taskc->last_running_clk = now;
-
-	/*
 	 * Update statistics information.
 	 */
 	if (is_lat_cri(taskc, stat_cur))
@@ -595,6 +589,12 @@ static void update_stat_for_running(struct task_struct *p,
 
 	if (is_perf_cri(taskc, stat_cur))
 		cpuc->nr_perf_cri++;
+
+	/*
+	 * It is clear there is no need to consider the suspended duration
+	 * while running a task, so reset the suspended duration to zero.
+	 */
+	reset_suspended_duration(cpuc);
 }
 
 static void update_stat_for_stopping(struct task_struct *p,
