@@ -2671,6 +2671,33 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			return ret;
 	}
 
+	dbg("CFG: Dumping CPU proxity map");
+	bpf_for(i, 0, nr_possible_cpus) {
+		struct cpu_ctx *cpuc;
+		struct cpu_prox_map *pmap;
+
+		cpuc = lookup_cpu_ctx(i);
+		if (!cpuc) {
+			scx_bpf_error("CPU[%d] no context", i);
+			return -EINVAL;
+		}
+		pmap = &cpuc->prox_map;
+
+		dbg("CFG: CPU[%d] core/llc/node/sys=%d/%d/%d/%d",
+		    i, pmap->core_end, pmap->llc_end, pmap->node_end, pmap->sys_end);
+		if (pmap->sys_end > nr_possible_cpus || pmap->sys_end > MAX_CPUS) {
+			scx_bpf_error("CPU %d  proximity map too long", i);
+			return -EINVAL;
+		}
+#if 0	// too much output, overruns trace buf, maybe come up with a way to compact
+		bpf_for(j, 0, pmap->sys_end) {
+			u16 *p = MEMBER_VPTR(pmap->cpus, [j]);
+			if (p)
+				dbg("CFG: CPU[%d] prox[%d]=%d", i, j, pmap->cpus[j]);
+		}
+#endif
+	}
+
 	dbg("CFG: Dumping configuration, nr_online_cpus=%d smt_enabled=%d little_cores=%d",
 	    nr_online_cpus, smt_enabled, has_little_cores);
 
