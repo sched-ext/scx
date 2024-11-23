@@ -216,7 +216,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             spec_llcs.iter().for_each(|spec_llc| {
                 core_id = 0;
                 topo_nodes.values().for_each(|topo_node| {
-                    topo_node.cores().values().for_each(|core| {
+                    topo_node.all_cores.values().for_each(|core| {
                         if core.llc_id != *spec_llc {
                             core_id += 1;
                             return;
@@ -232,10 +232,10 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                 core_id = 0;
                 topo_nodes.values().for_each(|topo_node| {
                     if topo_node.id != *spec_node {
-                        core_id += topo_node.cores().len();
+                        core_id += topo_node.all_cores.len();
                         return;
                     }
-                    topo_node.cores().values().for_each(|_core| {
+                    topo_node.all_cores.values().for_each(|_core| {
                         if !core_order.contains(&core_id) {
                             core_order.push(core_id);
                         }

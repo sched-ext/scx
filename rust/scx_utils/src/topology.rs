@@ -146,17 +146,6 @@ pub struct Llc {
     pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
 }
 
-impl Llc {
-    /// Get the map of all CPUs for this LLC.
-    pub fn cpus(&self) -> BTreeMap<usize, Arc<Cpu>> {
-        let mut cpus = BTreeMap::new();
-        for (_, core) in &self.cores {
-            cpus.append(&mut core.cpus.clone());
-        }
-        cpus
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Node {
     pub id: usize,
@@ -170,30 +159,6 @@ pub struct Node {
 
     #[cfg(feature = "gpu-topology")]
     pub gpus: BTreeMap<GpuIndex, Gpu>,
-}
-
-impl Node {
-    /// Get the map of all CPUs for this NUMA node.
-    pub fn cpus(&self) -> BTreeMap<usize, Arc<Cpu>> {
-        let mut cpus = BTreeMap::new();
-        for (_, llc) in &self.llcs {
-            for (_, core) in &llc.cores {
-                cpus.append(&mut core.cpus.clone());
-            }
-        }
-        cpus
-    }
-
-    /// Get the map of all Cores for this NUMA node.
-    pub fn cores(&self) -> BTreeMap<usize, Arc<Core>> {
-        let mut cores = BTreeMap::new();
-        for (_, llc) in &self.llcs {
-            for (core_id, core) in &llc.cores {
-                cores.insert(*core_id, core.clone());
-            }
-        }
-        cores
-    }
 }
 
 #[derive(Debug)]

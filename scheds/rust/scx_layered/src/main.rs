@@ -910,14 +910,14 @@ impl Layer {
                     for (node_id, node) in &topo.nodes {
                         // first do the matching for nodes
                         if nodes.contains(node_id) {
-                            for (id, _cpu) in node.cpus() {
+                            for (&id, _cpu) in &node.all_cpus {
                                 allowed_cpus.set(id, true);
                             }
                         }
                         // next match on any LLCs
                         for (llc_id, llc) in &node.llcs {
                             if llcs.contains(llc_id) {
-                                for (id, _cpu) in llc.cpus() {
+                                for (&id, _cpu) in &llc.all_cpus {
                                     allowed_cpus.set(id, true);
                                 }
                             }
@@ -949,14 +949,14 @@ impl Layer {
                     for (node_id, node) in &topo.nodes {
                         // first do the matching for nodes
                         if nodes.contains(node_id) {
-                            for (id, _cpu) in node.cpus() {
+                            for (&id, _cpu) in &node.all_cpus {
                                 allowed_cpus.set(id, true);
                             }
                         }
                         // next match on any LLCs
                         for (llc_id, llc) in &node.llcs {
                             if llcs.contains(llc_id) {
-                                for (id, _cpu) in llc.cpus() {
+                                for (&id, _cpu) in &llc.all_cpus {
                                     allowed_cpus.set(id, true);
                                 }
                             }
