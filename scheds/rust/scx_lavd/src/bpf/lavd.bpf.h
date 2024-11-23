@@ -137,11 +137,8 @@ struct cpu_ctx {
 	/*
 	 * Information for statistics.
 	 */
-	volatile u32	nr_preemption;	/* number of migrations */
-	volatile u32	nr_greedy;	/* number of greedy tasks scheduled */
 	volatile u32	nr_perf_cri;
 	volatile u32	nr_lat_cri;
-	volatile u32	nr_lhp;		/* number of lock holder preemption */
 
 	/*
 	 * Information for cpu hotplug

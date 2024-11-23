@@ -389,7 +389,7 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 					struct task_ctx *taskc,
 					u64 enq_flags)
 {
-	u64 deadline, lat_cri, adj_runtime;
+	u64 deadline, adj_runtime;
 	u32 greedy_ratio, greedy_ft;
 
 	/*
@@ -595,9 +595,6 @@ static void update_stat_for_running(struct task_struct *p,
 
 	if (is_perf_cri(taskc, stat_cur))
 		cpuc->nr_perf_cri++;
-
-	if (is_greedy(taskc))
-		cpuc->nr_greedy++;
 }
 
 static void update_stat_for_stopping(struct task_struct *p,

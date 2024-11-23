@@ -296,7 +296,6 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	struct task_struct *p_wait;
 	struct task_ctx *taskc_wait;
 	struct preemption_info prm_run, prm_wait;
-	s32 cpu_id = scx_bpf_task_cpu(p_run), wait_vtm_cpu_id;
 	bool ret = false;
 
 	/*
