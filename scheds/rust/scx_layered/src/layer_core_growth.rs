@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use clap::Parser;
 use scx_utils::Core;
 use scx_utils::Topology;
@@ -120,13 +122,13 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             }
         };
 
-        for i in 0..self.topo.cores().len() {
+        for i in 0..self.topo.all_cores.len() {
             core_order.push(i);
         }
 
-        for node in self.topo.nodes().iter() {
-            for (_, llc) in node.llcs() {
-                let llc_cores = llc.cores().len();
+        for node in self.topo.nodes.values() {
+            for (_, llc) in &node.llcs {
+                let llc_cores = llc.cores.len();
                 let rot = rot_by(llc_cores + (self.layer_idx << 1), llc_cores);
                 if is_left {
                     core_order.rotate_left(rot);
@@ -140,7 +142,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn grow_linear(&self) -> Vec<usize> {
-        (0..self.topo.cores().len()).collect()
+        (0..self.topo.all_cores.len()).collect()
     }
 
     fn grow_reverse(&self) -> Vec<usize> {
@@ -152,14 +154,14 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     fn grow_round_robin(&self) -> Vec<usize> {
         fastrand::seed(self.layer_idx.try_into().unwrap());
 
-        let mut nodes: Vec<_> = self.topo.nodes().into_iter().collect();
+        let mut nodes: Vec<_> = self.topo.nodes.values().collect();
         fastrand::shuffle(&mut nodes);
 
         let interleaved_llcs = IteratorInterleaver::new(
             nodes
                 .iter()
                 .map(|n| {
-                    let mut llcs: Vec<_> = n.llcs().values().collect();
+                    let mut llcs: Vec<_> = n.llcs.values().collect();
                     fastrand::shuffle(&mut llcs);
                     llcs.into_iter()
                 })
@@ -169,7 +171,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
         IteratorInterleaver::new(
             interleaved_llcs
                 .map(|llc| {
-                    let mut cores: Vec<_> = llc.cores().values().collect();
+                    let mut cores: Vec<_> = llc.cores.values().collect();
                     fastrand::shuffle(&mut cores);
                     cores.into_iter()
                 })
@@ -187,7 +189,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn grow_big_little(&self) -> Vec<usize> {
-        let mut cores: Vec<&Core> = self.topo.cores().into_iter().collect();
+        let mut cores: Vec<&Arc<Core>> = self.topo.all_cores.values().collect();
         cores.sort_by(|a, b| a.core_type.cmp(&b.core_type));
         cores
             .into_iter()
@@ -204,7 +206,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     fn grow_topo(&self) -> Vec<usize> {
         let spec_nodes = self.spec.nodes();
         let spec_llcs = self.spec.llcs();
-        let topo_nodes = self.topo.nodes();
+        let topo_nodes = &self.topo.nodes;
 
         if spec_nodes.len() + spec_llcs.len() == 0 {
             self.grow_round_robin()
@@ -213,8 +215,8 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             let mut core_id = 0;
             spec_llcs.iter().for_each(|spec_llc| {
                 core_id = 0;
-                topo_nodes.iter().for_each(|topo_node| {
-                    topo_node.cores().values().for_each(|core| {
+                topo_nodes.values().for_each(|topo_node| {
+                    topo_node.all_cores.values().for_each(|core| {
                         if core.llc_id != *spec_llc {
                             core_id += 1;
                             return;
@@ -228,12 +230,12 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             });
             spec_nodes.iter().for_each(|spec_node| {
                 core_id = 0;
-                topo_nodes.iter().for_each(|topo_node| {
-                    if topo_node.id() != *spec_node {
-                        core_id += topo_node.cores().len();
+                topo_nodes.values().for_each(|topo_node| {
+                    if topo_node.id != *spec_node {
+                        core_id += topo_node.all_cores.len();
                         return;
                     }
-                    topo_node.cores().values().for_each(|_core| {
+                    topo_node.all_cores.values().for_each(|_core| {
                         if !core_order.contains(&core_id) {
                             core_order.push(core_id);
                         }
@@ -248,18 +250,18 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     fn grow_random_topo(&self) -> Vec<usize> {
         fastrand::seed(self.layer_idx.try_into().unwrap());
 
-        let mut nodes: Vec<_> = self.topo.nodes().into_iter().collect();
+        let mut nodes: Vec<_> = self.topo.nodes.values().collect();
         fastrand::shuffle(&mut nodes);
 
         nodes
             .into_iter()
             .flat_map(|node| {
-                let mut llcs: Vec<_> = node.llcs().values().collect();
+                let mut llcs: Vec<_> = node.llcs.values().collect();
                 fastrand::shuffle(&mut llcs);
                 llcs.into_iter()
             })
             .flat_map(|llc| {
-                let mut cores: Vec<_> = llc.cores().values().collect();
+                let mut cores: Vec<_> = llc.cores.values().collect();
                 fastrand::shuffle(&mut cores);
                 cores.into_iter()
             })

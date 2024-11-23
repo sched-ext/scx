@@ -52,8 +52,8 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Cache;
 use scx_utils::CoreType;
+use scx_utils::Llc;
 use scx_utils::NetDev;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
@@ -571,10 +571,10 @@ fn nodemask_from_nodes(nodes: &Vec<usize>) -> usize {
     mask
 }
 
-fn cachemask_from_llcs(llcs: &BTreeMap<usize, Cache>) -> usize {
+fn cachemask_from_llcs(llcs: &BTreeMap<usize, Arc<Llc>>) -> usize {
     let mut mask = 0;
     for (_, cache) in llcs {
-        mask |= 1 << cache.id();
+        mask |= 1 << cache.id;
     }
     mask
 }
@@ -625,7 +625,7 @@ fn initialize_cpu_ctxs(skel: &BpfSkel, topo: &Topology) -> Result<()> {
             &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
         });
 
-        let topo_cpu = topo.cpus().get(&cpu).unwrap();
+        let topo_cpu = topo.all_cpus.get(&cpu).unwrap();
         let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
         cpu_ctxs[cpu].is_big = is_big;
     }
@@ -907,17 +907,17 @@ impl Layer {
                     allowed_cpus.fill(true);
                 } else {
                     // build up the cpus bitset
-                    for node in topo.nodes() {
+                    for (node_id, node) in &topo.nodes {
                         // first do the matching for nodes
-                        if nodes.contains(&(node.id() as usize)) {
-                            for (id, _cpu) in node.cpus() {
+                        if nodes.contains(node_id) {
+                            for (&id, _cpu) in &node.all_cpus {
                                 allowed_cpus.set(id, true);
                             }
                         }
                         // next match on any LLCs
-                        for (_, llc) in node.llcs() {
-                            if llcs.contains(&(llc.id() as usize)) {
-                                for (id, _cpu) in llc.cpus() {
+                        for (llc_id, llc) in &node.llcs {
+                            if llcs.contains(llc_id) {
+                                for (&id, _cpu) in &llc.all_cpus {
                                     allowed_cpus.set(id, true);
                                 }
                             }
@@ -946,17 +946,17 @@ impl Layer {
                     allowed_cpus.fill(true);
                 } else {
                     // build up the cpus bitset
-                    for node in topo.nodes() {
+                    for (node_id, node) in &topo.nodes {
                         // first do the matching for nodes
-                        if nodes.contains(&(node.id() as usize)) {
-                            for (id, _cpu) in node.cpus() {
+                        if nodes.contains(node_id) {
+                            for (&id, _cpu) in &node.all_cpus {
                                 allowed_cpus.set(id, true);
                             }
                         }
                         // next match on any LLCs
-                        for (_, llc) in node.llcs() {
-                            if llcs.contains(&(llc.id() as usize)) {
-                                for (id, _cpu) in llc.cpus() {
+                        for (llc_id, llc) in &node.llcs {
+                            if llcs.contains(llc_id) {
+                                for (&id, _cpu) in &llc.all_cpus {
                                     allowed_cpus.set(id, true);
                                 }
                             }
@@ -1163,11 +1163,11 @@ impl<'a> Scheduler<'a> {
                 layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
                 layer.node_mask = nodemask_from_nodes(nodes) as u64;
-                for topo_node in topo.nodes() {
-                    if !nodes.is_empty() && !nodes.contains(&topo_node.id()) {
+                for (topo_node_id, topo_node) in &topo.nodes {
+                    if !nodes.is_empty() && !nodes.contains(&topo_node_id) {
                         continue;
                     }
-                    layer.cache_mask |= cachemask_from_llcs(&topo_node.llcs()) as u64;
+                    layer.cache_mask |= cachemask_from_llcs(&topo_node.llcs) as u64;
                 }
             }
 
@@ -1187,34 +1187,29 @@ impl<'a> Scheduler<'a> {
     }
 
     fn init_nodes(skel: &mut OpenBpfSkel, _opts: &Opts, topo: &Topology) {
-        skel.maps.rodata_data.nr_nodes = topo.nodes().len() as u32;
+        skel.maps.rodata_data.nr_nodes = topo.nodes.len() as u32;
         skel.maps.rodata_data.nr_llcs = 0;
 
-        for node in topo.nodes() {
-            debug!(
-                "configuring node {}, LLCs {:?}",
-                node.id(),
-                node.llcs().len()
-            );
-            skel.maps.rodata_data.nr_llcs += node.llcs().len() as u32;
-            let raw_numa_slice = node.span().as_raw_slice();
-            let node_cpumask_slice = &mut skel.maps.rodata_data.numa_cpumasks[node.id()];
+        for (&node_id, node) in &topo.nodes {
+            debug!("configuring node {}, LLCs {:?}", node_id, node.llcs.len());
+            skel.maps.rodata_data.nr_llcs += node.llcs.len() as u32;
+            let raw_numa_slice = node.span.as_raw_slice();
+            let node_cpumask_slice = &mut skel.maps.rodata_data.numa_cpumasks[node_id];
             let (left, _) = node_cpumask_slice.split_at_mut(raw_numa_slice.len());
             left.clone_from_slice(raw_numa_slice);
             debug!(
                 "node {} mask: {:?}",
-                node.id(),
-                skel.maps.rodata_data.numa_cpumasks[node.id()]
+                node_id, skel.maps.rodata_data.numa_cpumasks[node_id]
             );
 
-            for (_, llc) in node.llcs() {
-                debug!("configuring llc {:?} for node {:?}", llc.id(), node.id());
-                skel.maps.rodata_data.llc_numa_id_map[llc.id()] = node.id() as u32;
+            for llc in node.llcs.values() {
+                debug!("configuring llc {:?} for node {:?}", llc.id, node_id);
+                skel.maps.rodata_data.llc_numa_id_map[llc.id] = node_id as u32;
             }
         }
 
-        for (_, cpu) in topo.cpus() {
-            skel.maps.rodata_data.cpu_llc_id_map[cpu.id()] = cpu.llc_id() as u32;
+        for cpu in topo.all_cpus.values() {
+            skel.maps.rodata_data.cpu_llc_id_map[cpu.id] = cpu.llc_id as u32;
         }
     }
 
@@ -1241,7 +1236,7 @@ impl<'a> Scheduler<'a> {
         };
 
         if !disable_topology {
-            if topo.nodes().len() == 1 && topo.nodes()[0].llcs().len() == 1 {
+            if topo.nodes.len() == 1 && topo.nodes[&0].llcs.len() == 1 {
                 disable_topology = true;
             };
             info!(
@@ -1382,12 +1377,12 @@ impl<'a> Scheduler<'a> {
         for (iface, netdev) in self.netdevs.iter_mut() {
             let node = self
                 .topo
-                .nodes()
-                .into_iter()
-                .take_while(|n| n.id() == netdev.node())
+                .nodes
+                .values()
+                .take_while(|n| n.id == netdev.node())
                 .next()
                 .ok_or_else(|| anyhow!("Failed to get netdev node"))?;
-            let node_cpus = node.span();
+            let node_cpus = node.span.clone();
             for (irq, irqmask) in netdev.irqs.iter_mut() {
                 irqmask.clear();
                 for cpu in available_cpus.iter_ones() {
