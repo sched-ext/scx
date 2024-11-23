@@ -105,7 +105,7 @@ impl CpuPool {
         // Build core_topology_to_id
         let mut core_topology_to_id = BTreeMap::new();
         let mut next_topo_id: usize = 0;
-        for node in &topo.nodes {
+        for node in topo.nodes.values() {
             for llc in node.llcs.values() {
                 for core in llc.cores.values() {
                     core_topology_to_id.insert((core.node_id, core.llc_id, core.id), next_topo_id);

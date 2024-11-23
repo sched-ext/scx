@@ -67,7 +67,7 @@ impl DomainGroup {
             (doms, 1)
         } else {
             let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
-            for (node_id, node) in top.nodes.iter().enumerate() {
+            for (node_id, node) in &top.nodes {
                 for (_, llc) in node.llcs.iter() {
                     let mask = llc.span.clone();
                     span |= mask.clone();

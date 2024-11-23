@@ -191,7 +191,7 @@ impl Node {
 
 #[derive(Debug)]
 pub struct Topology {
-    pub nodes: Vec<Node>,
+    pub nodes: BTreeMap<usize, Node>,
     pub span: Cpumask,
     pub nr_cpus_online: usize,
 
@@ -201,7 +201,7 @@ pub struct Topology {
 }
 
 impl Topology {
-    fn instantiate(span: Cpumask, mut nodes: Vec<Node>) -> Result<Self> {
+    fn instantiate(span: Cpumask, mut nodes: BTreeMap<usize, Node>) -> Result<Self> {
         // Build skip indices prefixed with all_ for easy lookups. As Arc
         // objects can only be modified while there's only one reference,
         // skip indices must be built from bottom to top.
@@ -209,7 +209,7 @@ impl Topology {
         let mut topo_cores = BTreeMap::new();
         let mut topo_cpus = BTreeMap::new();
 
-        for node in nodes.iter_mut() {
+        for (_node_id, node) in nodes.iter_mut() {
             let mut node_cores = BTreeMap::new();
             let mut node_cpus = BTreeMap::new();
 
@@ -575,8 +575,8 @@ fn avg_cpu_freq() -> Option<(usize, usize)> {
     Some((avg_base_freq / nr_cpus, top_max_freq))
 }
 
-fn create_default_node(online_mask: &Cpumask, flatten_llc: bool) -> Result<Vec<Node>> {
-    let mut nodes: Vec<Node> = Vec::with_capacity(1);
+fn create_default_node(online_mask: &Cpumask, flatten_llc: bool) -> Result<BTreeMap<usize, Node>> {
+    let mut nodes = BTreeMap::<usize, Node>::new();
 
     let mut node = Node {
         id: 0,
@@ -611,13 +611,13 @@ fn create_default_node(online_mask: &Cpumask, flatten_llc: bool) -> Result<Vec<N
         create_insert_cpu(*cpu_id, &mut node, &online_mask, avg_cpu_freq, flatten_llc)?;
     }
 
-    nodes.push(node);
+    nodes.insert(node.id, node);
 
     Ok(nodes)
 }
 
-fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
-    let mut nodes: Vec<Node> = Vec::new();
+fn create_numa_nodes(online_mask: &Cpumask) -> Result<BTreeMap<usize, Node>> {
+    let mut nodes = BTreeMap::<usize, Node>::new();
 
     #[cfg(feature = "gpu-topology")]
     let system_gpus = create_gpus();
@@ -671,7 +671,7 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
             create_insert_cpu(cpu_id, &mut node, &online_mask, avg_cpu_freq, false)?;
         }
 
-        nodes.push(node);
+        nodes.insert(node.id, node);
     }
     Ok(nodes)
 }

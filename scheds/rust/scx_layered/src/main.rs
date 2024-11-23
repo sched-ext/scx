@@ -907,16 +907,16 @@ impl Layer {
                     allowed_cpus.fill(true);
                 } else {
                     // build up the cpus bitset
-                    for node in &topo.nodes {
+                    for (node_id, node) in &topo.nodes {
                         // first do the matching for nodes
-                        if nodes.contains(&(node.id as usize)) {
+                        if nodes.contains(node_id) {
                             for (id, _cpu) in node.cpus() {
                                 allowed_cpus.set(id, true);
                             }
                         }
                         // next match on any LLCs
-                        for (_, llc) in &node.llcs {
-                            if llcs.contains(&(llc.id as usize)) {
+                        for (llc_id, llc) in &node.llcs {
+                            if llcs.contains(llc_id) {
                                 for (id, _cpu) in llc.cpus() {
                                     allowed_cpus.set(id, true);
                                 }
@@ -946,16 +946,16 @@ impl Layer {
                     allowed_cpus.fill(true);
                 } else {
                     // build up the cpus bitset
-                    for node in &topo.nodes {
+                    for (node_id, node) in &topo.nodes {
                         // first do the matching for nodes
-                        if nodes.contains(&(node.id as usize)) {
+                        if nodes.contains(node_id) {
                             for (id, _cpu) in node.cpus() {
                                 allowed_cpus.set(id, true);
                             }
                         }
                         // next match on any LLCs
-                        for (_, llc) in &node.llcs {
-                            if llcs.contains(&(llc.id as usize)) {
+                        for (llc_id, llc) in &node.llcs {
+                            if llcs.contains(llc_id) {
                                 for (id, _cpu) in llc.cpus() {
                                     allowed_cpus.set(id, true);
                                 }
@@ -1163,8 +1163,8 @@ impl<'a> Scheduler<'a> {
                 layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
                 layer.node_mask = nodemask_from_nodes(nodes) as u64;
-                for topo_node in &topo.nodes {
-                    if !nodes.is_empty() && !nodes.contains(&topo_node.id) {
+                for (topo_node_id, topo_node) in &topo.nodes {
+                    if !nodes.is_empty() && !nodes.contains(&topo_node_id) {
                         continue;
                     }
                     layer.cache_mask |= cachemask_from_llcs(&topo_node.llcs) as u64;
@@ -1190,21 +1190,21 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.nr_nodes = topo.nodes.len() as u32;
         skel.maps.rodata_data.nr_llcs = 0;
 
-        for node in &topo.nodes {
-            debug!("configuring node {}, LLCs {:?}", node.id, node.llcs.len());
+        for (&node_id, node) in &topo.nodes {
+            debug!("configuring node {}, LLCs {:?}", node_id, node.llcs.len());
             skel.maps.rodata_data.nr_llcs += node.llcs.len() as u32;
             let raw_numa_slice = node.span.as_raw_slice();
-            let node_cpumask_slice = &mut skel.maps.rodata_data.numa_cpumasks[node.id];
+            let node_cpumask_slice = &mut skel.maps.rodata_data.numa_cpumasks[node_id];
             let (left, _) = node_cpumask_slice.split_at_mut(raw_numa_slice.len());
             left.clone_from_slice(raw_numa_slice);
             debug!(
                 "node {} mask: {:?}",
-                node.id, skel.maps.rodata_data.numa_cpumasks[node.id]
+                node_id, skel.maps.rodata_data.numa_cpumasks[node_id]
             );
 
             for llc in node.llcs.values() {
-                debug!("configuring llc {:?} for node {:?}", llc.id, node.id);
-                skel.maps.rodata_data.llc_numa_id_map[llc.id] = node.id as u32;
+                debug!("configuring llc {:?} for node {:?}", llc.id, node_id);
+                skel.maps.rodata_data.llc_numa_id_map[llc.id] = node_id as u32;
             }
         }
 
@@ -1236,7 +1236,7 @@ impl<'a> Scheduler<'a> {
         };
 
         if !disable_topology {
-            if topo.nodes.len() == 1 && topo.nodes[0].llcs.len() == 1 {
+            if topo.nodes.len() == 1 && topo.nodes[&0].llcs.len() == 1 {
                 disable_topology = true;
             };
             info!(
@@ -1378,7 +1378,7 @@ impl<'a> Scheduler<'a> {
             let node = self
                 .topo
                 .nodes
-                .iter()
+                .values()
                 .take_while(|n| n.id == netdev.node())
                 .next()
                 .ok_or_else(|| anyhow!("Failed to get netdev node"))?;
