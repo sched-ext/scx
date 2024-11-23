@@ -114,6 +114,8 @@ pub struct Cpu {
     pub id: usize,
     pub min_freq: usize,
     pub max_freq: usize,
+    /// Base operational frqeuency. Only available on Intel Turbo Boost
+    /// CPUs. If not available, this will simply return maximum frequency.
     pub base_freq: usize,
     pub trans_lat_ns: usize,
     pub l2_id: usize,
@@ -128,6 +130,7 @@ pub struct Core {
     pub node_id: usize,
     pub llc_id: usize,
     pub cpus: BTreeMap<usize, Arc<Cpu>>,
+    /// Cpumask of all CPUs in this core.
     pub span: Cpumask,
     pub core_type: CoreType,
 }
@@ -136,8 +139,10 @@ pub struct Core {
 pub struct Llc {
     pub id: usize,
     pub cores: BTreeMap<usize, Arc<Core>>,
+    /// Cpumask of all CPUs in this llc.
     pub span: Cpumask,
 
+    /// Skip indices to access lower level members easily.
     pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
 }
 
@@ -156,8 +161,10 @@ impl Llc {
 pub struct Node {
     pub id: usize,
     pub llcs: BTreeMap<usize, Arc<Llc>>,
+    /// Cpumask of all CPUs in this node.
     pub span: Cpumask,
 
+    /// Skip indices to access lower level members easily.
     pub all_cores: BTreeMap<usize, Arc<Core>>,
     pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
 
@@ -192,9 +199,11 @@ impl Node {
 #[derive(Debug)]
 pub struct Topology {
     pub nodes: BTreeMap<usize, Node>,
+    /// Cpumask all CPUs in the system.
     pub span: Cpumask,
     pub nr_cpus_online: usize,
 
+    /// Skip indices to access lower level members easily.
     pub all_llcs: BTreeMap<usize, Arc<Llc>>,
     pub all_cores: BTreeMap<usize, Arc<Core>>,
     pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
