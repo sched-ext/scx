@@ -61,10 +61,10 @@ pub use libbpf_logger::init_libbpf_logging;
 pub mod ravg;
 
 mod topology;
-pub use topology::Cache;
 pub use topology::Core;
 pub use topology::CoreType;
 pub use topology::Cpu;
+pub use topology::Llc;
 pub use topology::Node;
 pub use topology::Topology;
 pub use topology::TopologyMap;
