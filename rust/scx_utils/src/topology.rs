@@ -80,6 +80,7 @@ use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::slice::Iter;
+use std::sync::Arc;
 
 #[cfg(feature = "gpu-topology")]
 use crate::gpu::{create_gpus, Gpu, GpuIndex};
@@ -126,7 +127,7 @@ pub struct Core {
     pub id: usize,
     pub node_id: usize,
     pub llc_id: usize,
-    pub cpus: BTreeMap<usize, Cpu>,
+    pub cpus: BTreeMap<usize, Arc<Cpu>>,
     pub span: Cpumask,
     pub core_type: CoreType,
 }
@@ -134,13 +135,13 @@ pub struct Core {
 #[derive(Debug, Clone)]
 pub struct Llc {
     pub id: usize,
-    pub cores: BTreeMap<usize, Core>,
+    pub cores: BTreeMap<usize, Arc<Core>>,
     pub span: Cpumask,
 }
 
 impl Llc {
     /// Get the map of all CPUs for this LLC.
-    pub fn cpus(&self) -> BTreeMap<usize, Cpu> {
+    pub fn cpus(&self) -> BTreeMap<usize, Arc<Cpu>> {
         let mut cpus = BTreeMap::new();
         for (_, core) in &self.cores {
             cpus.append(&mut core.cpus.clone());
@@ -152,7 +153,7 @@ impl Llc {
 #[derive(Debug, Clone)]
 pub struct Node {
     pub id: usize,
-    pub llcs: BTreeMap<usize, Llc>,
+    pub llcs: BTreeMap<usize, Arc<Llc>>,
     #[cfg(feature = "gpu-topology")]
     pub gpus: BTreeMap<GpuIndex, Gpu>,
     pub span: Cpumask,
@@ -160,7 +161,7 @@ pub struct Node {
 
 impl Node {
     /// Get the map of all CPUs for this NUMA node.
-    pub fn cpus(&self) -> BTreeMap<usize, Cpu> {
+    pub fn cpus(&self) -> BTreeMap<usize, Arc<Cpu>> {
         let mut cpus = BTreeMap::new();
         for (_, llc) in &self.llcs {
             for (_, core) in &llc.cores {
@@ -171,7 +172,7 @@ impl Node {
     }
 
     /// Get the map of all Cores for this NUMA node.
-    pub fn cores(&self) -> BTreeMap<usize, Core> {
+    pub fn cores(&self) -> BTreeMap<usize, Arc<Core>> {
         let mut cores = BTreeMap::new();
         for (_, llc) in &self.llcs {
             for (core_id, core) in &llc.cores {
@@ -185,8 +186,8 @@ impl Node {
 #[derive(Debug)]
 pub struct Topology {
     pub nodes: Vec<Node>,
-    pub cores: Vec<Core>,
-    pub cpus: BTreeMap<usize, Cpu>,
+    pub cores: Vec<Arc<Core>>,
+    pub cpus: BTreeMap<usize, Arc<Cpu>>,
     pub span: Cpumask,
     pub nr_cpus_online: usize,
 }
@@ -438,11 +439,12 @@ fn create_insert_cpu(
     let base_freq = read_file_usize(&freq_path.join("base_frequency")).unwrap_or(max_freq);
     let trans_lat_ns = read_file_usize(&freq_path.join("cpuinfo_transition_latency")).unwrap_or(0);
 
-    let llc = node.llcs.entry(llc_id).or_insert(Llc {
+    let llc = node.llcs.entry(llc_id).or_insert(Arc::new(Llc {
         id: llc_id,
         cores: BTreeMap::new(),
         span: Cpumask::new()?,
-    });
+    }));
+    let llc_mut = Arc::get_mut(llc).unwrap();
 
     let core_type = match avg_cpu_freq {
         Some((avg_base_freq, top_max_freq)) => {
@@ -457,18 +459,19 @@ fn create_insert_cpu(
         None => CoreType::Big { turbo: false },
     };
 
-    let core = llc.cores.entry(core_id).or_insert(Core {
+    let core = llc_mut.cores.entry(core_id).or_insert(Arc::new(Core {
         id: core_id,
         llc_id: llc_id,
         node_id: node.id,
         cpus: BTreeMap::new(),
         span: Cpumask::new()?,
         core_type: core_type.clone(),
-    });
+    }));
+    let core_mut = Arc::get_mut(core).unwrap();
 
-    core.cpus.insert(
+    core_mut.cpus.insert(
         cpu_id,
-        Cpu {
+        Arc::new(Cpu {
             id: cpu_id,
             min_freq: min_freq,
             max_freq: max_freq,
@@ -478,7 +481,7 @@ fn create_insert_cpu(
             l3_id: l3_id,
             llc_id: llc_id,
             core_type: core_type.clone(),
-        },
+        }),
     );
 
     if node.span.test_cpu(cpu_id) {
@@ -486,8 +489,8 @@ fn create_insert_cpu(
     }
 
     // Update all of the devices' spans to include this CPU.
-    core.span.set_cpu(cpu_id)?;
-    llc.span.set_cpu(cpu_id)?;
+    core_mut.span.set_cpu(cpu_id)?;
+    llc_mut.span.set_cpu(cpu_id)?;
     node.span.set_cpu(cpu_id)?;
 
     Ok(())

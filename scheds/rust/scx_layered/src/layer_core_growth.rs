@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use clap::Parser;
 use scx_utils::Core;
 use scx_utils::Topology;
@@ -187,7 +189,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn grow_big_little(&self) -> Vec<usize> {
-        let mut cores: Vec<&Core> = self.topo.cores.iter().collect();
+        let mut cores: Vec<&Arc<Core>> = self.topo.cores.iter().collect();
         cores.sort_by(|a, b| a.core_type.cmp(&b.core_type));
         cores
             .into_iter()
