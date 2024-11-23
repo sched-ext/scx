@@ -96,20 +96,19 @@ impl CpuPool {
         let topo_map = TopologyMap::new(&topo).unwrap();
 
         let all_cpus = topo.cpus_bitvec();
-        let nr_cpus = topo.nr_cpus_online();
+        let nr_cpus = topo.nr_cpus_online;
         let core_cpus = topo_map.core_cpus_bitvec();
-        let nr_cores = topo.cores().len();
+        let nr_cores = topo.cores.len();
         let sibling_cpu = topo.sibling_cpus();
         let cpu_core = topo_map.cpu_core_mapping();
 
         // Build core_topology_to_id
         let mut core_topology_to_id = BTreeMap::new();
         let mut next_topo_id: usize = 0;
-        for node in topo.nodes() {
-            for llc in node.llcs().values() {
-                for core in llc.cores().values() {
-                    core_topology_to_id
-                        .insert((core.node_id, core.llc_id, core.id()), next_topo_id);
+        for node in &topo.nodes {
+            for llc in node.llcs.values() {
+                for core in llc.cores.values() {
+                    core_topology_to_id.insert((core.node_id, core.llc_id, core.id), next_topo_id);
                     next_topo_id += 1;
                 }
             }
@@ -244,7 +243,7 @@ impl CpuPool {
     fn get_core_topological_id(&self, core: &Core) -> usize {
         *self
             .core_topology_to_id
-            .get(&(core.node_id, core.llc_id, core.id()))
+            .get(&(core.node_id, core.llc_id, core.id))
             .expect("unrecognised core")
     }
 }

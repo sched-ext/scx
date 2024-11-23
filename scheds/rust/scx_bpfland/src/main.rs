@@ -63,9 +63,9 @@ fn get_primary_cpus(mode: Powermode) -> std::io::Result<Vec<usize>> {
     let topo = Topology::new().unwrap();
 
     let cpus: Vec<usize> = topo
-        .cores()
-        .into_iter()
-        .flat_map(|core| core.cpus())
+        .cores
+        .iter()
+        .flat_map(|core| &core.cpus)
         .filter_map(|(cpu_id, cpu)| match (&mode, &cpu.core_type) {
             // Performance mode: add all the Big CPUs (either Turbo or non-Turbo)
             (Powermode::Performance, CoreType::Big { .. }) |
@@ -481,11 +481,11 @@ impl<'a> Scheduler<'a> {
     ) -> Result<(), std::io::Error> {
         // Determine the list of CPU IDs associated to each cache node.
         let mut cache_id_map: HashMap<usize, Vec<usize>> = HashMap::new();
-        for core in topo.cores().into_iter() {
-            for (cpu_id, cpu) in core.cpus() {
+        for core in topo.cores.iter() {
+            for (cpu_id, cpu) in &core.cpus {
                 let cache_id = match cache_lvl {
-                    2 => cpu.l2_id(),
-                    3 => cpu.l3_id(),
+                    2 => cpu.l2_id,
+                    3 => cpu.l3_id,
                     _ => panic!("invalid cache level {}", cache_lvl),
                 };
                 cache_id_map

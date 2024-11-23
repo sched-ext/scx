@@ -67,16 +67,16 @@ impl DomainGroup {
             (doms, 1)
         } else {
             let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
-            for (node_id, node) in top.nodes().iter().enumerate() {
-                for (_, llc) in node.llcs().iter() {
-                    let mask = llc.span().clone();
+            for (node_id, node) in top.nodes.iter().enumerate() {
+                for (_, llc) in node.llcs.iter() {
+                    let mask = llc.span.clone();
                     span |= mask.clone();
                     doms.insert(dom_id, Domain { id: dom_id, mask });
                     dom_numa_map.insert(dom_id, node_id.clone());
                     dom_id += 1;
                 }
             }
-            (doms, top.nodes().len())
+            (doms, top.nodes.len())
         };
 
         let mut cpu_dom_map = BTreeMap::new();

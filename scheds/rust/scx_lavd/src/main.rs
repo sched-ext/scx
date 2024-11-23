@@ -300,24 +300,24 @@ impl FlatTopology {
         // Build a vector of cpu flat ids.
         let mut base_freq = 0;
         let mut avg_freq = 0;
-        for (_node_pos, node) in topo.nodes().iter().enumerate() {
-            for (llc_pos, (_llc_id, llc)) in node.llcs().iter().enumerate() {
-                for (core_pos, (_core_id, core)) in llc.cores().iter().enumerate() {
-                    for (cpu_pos, (cpu_id, cpu)) in core.cpus().iter().enumerate() {
+        for (_node_pos, node) in topo.nodes.iter().enumerate() {
+            for (llc_pos, (_llc_id, llc)) in node.llcs.iter().enumerate() {
+                for (core_pos, (_core_id, core)) in llc.cores.iter().enumerate() {
+                    for (cpu_pos, (cpu_id, cpu)) in core.cpus.iter().enumerate() {
                         let cpu_fid = CpuFlatId {
-                            node_id: node.id(),
+                            node_id: node.id,
                             llc_pos,
-                            max_freq: cpu.max_freq(),
+                            max_freq: cpu.max_freq,
                             core_pos,
                             cpu_pos,
                             cpu_id: *cpu_id,
                             cpu_cap: 0,
                         };
                         cpu_fids.push(cpu_fid);
-                        if base_freq < cpu.max_freq() {
-                            base_freq = cpu.max_freq();
+                        if base_freq < cpu.max_freq {
+                            base_freq = cpu.max_freq;
                         }
-                        avg_freq += cpu.max_freq();
+                        avg_freq += cpu.max_freq;
                     }
                 }
             }

@@ -110,116 +110,39 @@ pub enum CoreType {
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Cpu {
-    id: usize,
-    min_freq: usize,
-    max_freq: usize,
-    base_freq: usize,
-    trans_lat_ns: usize,
-    l2_id: usize,
-    l3_id: usize,
-    llc_id: usize,
+    pub id: usize,
+    pub min_freq: usize,
+    pub max_freq: usize,
+    pub base_freq: usize,
+    pub trans_lat_ns: usize,
+    pub l2_id: usize,
+    pub l3_id: usize,
+    pub llc_id: usize,
     pub core_type: CoreType,
-}
-
-impl Cpu {
-    /// Get the ID of this Cpu
-    pub fn id(&self) -> usize {
-        self.id
-    }
-
-    /// Get the minimum scaling frequency of this CPU
-    pub fn min_freq(&self) -> usize {
-        self.min_freq
-    }
-
-    /// Get the maximum scaling frequency of this CPU
-    pub fn max_freq(&self) -> usize {
-        self.max_freq
-    }
-
-    /// Get the base operational frequency of this CPU
-    ///
-    /// This is only available on Intel Turbo Boost CPUs, if not available this will simply return
-    /// maximum frequency.
-    pub fn base_freq(&self) -> usize {
-        self.base_freq
-    }
-
-    /// Get the transition latency of the CPU in nanoseconds
-    pub fn trans_lat_ns(&self) -> usize {
-        self.trans_lat_ns
-    }
-
-    /// Get the L2 id of the this Cpu
-    pub fn l2_id(&self) -> usize {
-        self.l2_id
-    }
-
-    /// Get the L2 id of the this Cpu
-    pub fn l3_id(&self) -> usize {
-        self.l3_id
-    }
-
-    /// Get the LLC id of the this Cpu
-    pub fn llc_id(&self) -> usize {
-        self.llc_id
-    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Core {
-    id: usize,
+    pub id: usize,
     pub node_id: usize,
     pub llc_id: usize,
-    cpus: BTreeMap<usize, Cpu>,
-    span: Cpumask,
+    pub cpus: BTreeMap<usize, Cpu>,
+    pub span: Cpumask,
     pub core_type: CoreType,
-}
-
-impl Core {
-    /// Get the ID of this Core
-    pub fn id(&self) -> usize {
-        self.id
-    }
-
-    /// Get the map of CPUs inside this Core
-    pub fn cpus(&self) -> &BTreeMap<usize, Cpu> {
-        &self.cpus
-    }
-
-    /// Get a Cpumask of all SMT siblings in this Core
-    pub fn span(&self) -> &Cpumask {
-        &self.span
-    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Llc {
-    id: usize,
-    cores: BTreeMap<usize, Core>,
-    span: Cpumask,
+    pub id: usize,
+    pub cores: BTreeMap<usize, Core>,
+    pub span: Cpumask,
 }
 
 impl Llc {
-    /// Get the ID of this LLC
-    pub fn id(&self) -> usize {
-        self.id
-    }
-
-    /// Get the map of cores inside this LLC
-    pub fn cores(&self) -> &BTreeMap<usize, Core> {
-        &self.cores
-    }
-
-    /// Get a Cpumask of all CPUs in this LLC
-    pub fn span(&self) -> &Cpumask {
-        &self.span
-    }
-
     /// Get the map of all CPUs for this LLC.
     pub fn cpus(&self) -> BTreeMap<usize, Cpu> {
         let mut cpus = BTreeMap::new();
-        for (_, core) in self.cores() {
+        for (_, core) in &self.cores {
             cpus.append(&mut core.cpus.clone());
         }
         cpus
@@ -228,29 +151,19 @@ impl Llc {
 
 #[derive(Debug, Clone)]
 pub struct Node {
-    id: usize,
-    llcs: BTreeMap<usize, Llc>,
+    pub id: usize,
+    pub llcs: BTreeMap<usize, Llc>,
     #[cfg(feature = "gpu-topology")]
-    gpus: BTreeMap<GpuIndex, Gpu>,
-    span: Cpumask,
+    pub gpus: BTreeMap<GpuIndex, Gpu>,
+    pub span: Cpumask,
 }
 
 impl Node {
-    /// Get the ID of this NUMA node
-    pub fn id(&self) -> usize {
-        self.id
-    }
-
-    /// Get the map of LLCs inside this NUMA node
-    pub fn llcs(&self) -> &BTreeMap<usize, Llc> {
-        &self.llcs
-    }
-
     /// Get the map of all CPUs for this NUMA node.
     pub fn cpus(&self) -> BTreeMap<usize, Cpu> {
         let mut cpus = BTreeMap::new();
         for (_, llc) in &self.llcs {
-            for (_, core) in llc.cores() {
+            for (_, core) in &llc.cores {
                 cpus.append(&mut core.cpus.clone());
             }
         }
@@ -261,32 +174,21 @@ impl Node {
     pub fn cores(&self) -> BTreeMap<usize, Core> {
         let mut cores = BTreeMap::new();
         for (_, llc) in &self.llcs {
-            for (core_id, core) in llc.cores() {
+            for (core_id, core) in &llc.cores {
                 cores.insert(*core_id, core.clone());
             }
         }
         cores
     }
-
-    // Get the map of all GPUs for this NUMA node.
-    #[cfg(feature = "gpu-topology")]
-    pub fn gpus(&self) -> &BTreeMap<GpuIndex, Gpu> {
-        &self.gpus
-    }
-
-    /// Get a Cpumask of all CPUs in this NUMA node
-    pub fn span(&self) -> &Cpumask {
-        &self.span
-    }
 }
 
 #[derive(Debug)]
 pub struct Topology {
-    nodes: Vec<Node>,
-    cores: Vec<Core>,
-    cpus: BTreeMap<usize, Cpu>,
-    span: Cpumask,
-    nr_cpus_online: usize,
+    pub nodes: Vec<Node>,
+    pub cores: Vec<Core>,
+    pub cpus: BTreeMap<usize, Cpu>,
+    pub span: Cpumask,
+    pub nr_cpus_online: usize,
 }
 
 impl Topology {
@@ -342,16 +244,6 @@ impl Topology {
         Self::instantiate(span, nodes)
     }
 
-    /// Get a slice of the NUMA nodes on the host.
-    pub fn nodes(&self) -> &[Node] {
-        &self.nodes
-    }
-
-    /// Get a slice of all Cores on the host.
-    pub fn cores(&self) -> &[Core] {
-        &self.cores
-    }
-
     /// Get a vec of all GPUs on the hosts.
     #[cfg(feature = "gpu-topology")]
     pub fn gpus(&self) -> BTreeMap<GpuIndex, &Gpu> {
@@ -362,23 +254,6 @@ impl Topology {
             }
         }
         gpus
-    }
-
-    /// Get a hashmap of <CPU ID, Cpu> for all Cpus on the host.
-    pub fn cpus(&self) -> &BTreeMap<usize, Cpu> {
-        &self.cpus
-    }
-
-    /// Get a cpumask of all the online CPUs on the host
-    pub fn span(&self) -> &Cpumask {
-        &self.span
-    }
-
-    /// Get the number of CPUs that were online when the Topology was created.
-    /// Because Topology objects are read-only, this value will not change if a
-    /// CPU is onlined after a Topology object has been created.
-    pub fn nr_cpus_online(&self) -> usize {
-        self.nr_cpus_online
     }
 
     /// Returns whether the Topology has a hybrid architecture of big and little cores.
@@ -403,9 +278,9 @@ impl Topology {
     /// Assuming each core holds exactly at most two cpus.
     pub fn sibling_cpus(&self) -> Vec<i32> {
         let mut sibling_cpu = vec![-1i32; *NR_CPUS_POSSIBLE];
-        for core in self.cores() {
+        for core in &self.cores {
             let mut first = -1i32;
-            for (cpu_id, _) in core.cpus() {
+            for (cpu_id, _) in &core.cpus {
                 let cpu = *cpu_id;
                 if first < 0 {
                     first = cpu as i32;
@@ -447,9 +322,9 @@ impl TopologyMap {
     pub fn new(topo: &Topology) -> Result<TopologyMap> {
         let mut map: Vec<Vec<usize>> = Vec::new();
 
-        for core in topo.cores().into_iter() {
+        for core in &topo.cores {
             let mut cpu_ids: Vec<usize> = Vec::new();
-            for cpu_id in core.span().clone().into_iter() {
+            for cpu_id in core.span.clone().into_iter() {
                 cpu_ids.push(cpu_id);
             }
             map.push(cpu_ids);
