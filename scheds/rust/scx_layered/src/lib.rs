@@ -98,7 +98,7 @@ impl CpuPool {
         let all_cpus = topo.cpus_bitvec();
         let nr_cpus = topo.nr_cpus_online;
         let core_cpus = topo_map.core_cpus_bitvec();
-        let nr_cores = topo.cores.len();
+        let nr_cores = topo.all_cores.len();
         let sibling_cpu = topo.sibling_cpus();
         let cpu_core = topo_map.cpu_core_mapping();
 

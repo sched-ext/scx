@@ -122,7 +122,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             }
         };
 
-        for i in 0..self.topo.cores.len() {
+        for i in 0..self.topo.all_cores.len() {
             core_order.push(i);
         }
 
@@ -142,7 +142,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn grow_linear(&self) -> Vec<usize> {
-        (0..self.topo.cores.len()).collect()
+        (0..self.topo.all_cores.len()).collect()
     }
 
     fn grow_reverse(&self) -> Vec<usize> {
@@ -189,7 +189,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn grow_big_little(&self) -> Vec<usize> {
-        let mut cores: Vec<&Arc<Core>> = self.topo.cores.iter().collect();
+        let mut cores: Vec<&Arc<Core>> = self.topo.all_cores.values().collect();
         cores.sort_by(|a, b| a.core_type.cmp(&b.core_type));
         cores
             .into_iter()

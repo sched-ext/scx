@@ -137,6 +137,8 @@ pub struct Llc {
     pub id: usize,
     pub cores: BTreeMap<usize, Arc<Core>>,
     pub span: Cpumask,
+
+    pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
 }
 
 impl Llc {
@@ -154,9 +156,13 @@ impl Llc {
 pub struct Node {
     pub id: usize,
     pub llcs: BTreeMap<usize, Arc<Llc>>,
+    pub span: Cpumask,
+
+    pub all_cores: BTreeMap<usize, Arc<Core>>,
+    pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
+
     #[cfg(feature = "gpu-topology")]
     pub gpus: BTreeMap<GpuIndex, Gpu>,
-    pub span: Cpumask,
 }
 
 impl Node {
@@ -186,41 +192,71 @@ impl Node {
 #[derive(Debug)]
 pub struct Topology {
     pub nodes: Vec<Node>,
-    pub cores: Vec<Arc<Core>>,
-    pub cpus: BTreeMap<usize, Arc<Cpu>>,
     pub span: Cpumask,
     pub nr_cpus_online: usize,
+
+    pub all_llcs: BTreeMap<usize, Arc<Llc>>,
+    pub all_cores: BTreeMap<usize, Arc<Core>>,
+    pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
 }
 
 impl Topology {
-    fn instantiate(span: Cpumask, nodes: Vec<Node>) -> Result<Self> {
-        // For convenient and efficient lookup from the root topology object,
-        // create two BTreeMaps to the full set of Core and Cpu objects on the
-        // system. We clone the objects that are located further down in the
-        // hierarchy rather than dealing with references, as the entire
-        // Topology is read-only anyways.
-        let mut cores = Vec::new();
-        let mut cpus = BTreeMap::new();
-        for node in nodes.iter() {
-            for llc in node.llcs.values() {
-                for core in llc.cores.values() {
-                    cores.push(core.clone());
-                    for (cpu_id, cpu) in core.cpus.iter() {
-                        if let Some(_) = cpus.insert(*cpu_id, cpu.clone()) {
-                            bail!("Found duplicate CPU ID {}", cpu_id);
+    fn instantiate(span: Cpumask, mut nodes: Vec<Node>) -> Result<Self> {
+        // Build skip indices prefixed with all_ for easy lookups. As Arc
+        // objects can only be modified while there's only one reference,
+        // skip indices must be built from bottom to top.
+        let mut topo_llcs = BTreeMap::new();
+        let mut topo_cores = BTreeMap::new();
+        let mut topo_cpus = BTreeMap::new();
+
+        for node in nodes.iter_mut() {
+            let mut node_cores = BTreeMap::new();
+            let mut node_cpus = BTreeMap::new();
+
+            for (&llc_id, llc) in node.llcs.iter_mut() {
+                let llc_mut = Arc::get_mut(llc).unwrap();
+                let mut llc_cpus = BTreeMap::new();
+
+                for (&core_id, core) in llc_mut.cores.iter_mut() {
+                    for (&cpu_id, cpu) in core.cpus.iter() {
+                        if topo_cpus
+                            .insert(cpu_id, cpu.clone())
+                            .or(node_cpus.insert(cpu_id, cpu.clone()))
+                            .or(llc_cpus.insert(cpu_id, cpu.clone()))
+                            .is_some()
+                        {
+                            bail!("Duplicate CPU ID {}", cpu_id);
                         }
                     }
+
+                    if topo_cores
+                        .insert(core_id, core.clone())
+                        .or(node_cores.insert(core_id, core.clone()))
+                        .is_some()
+                    {
+                        bail!("Duplicate CORE ID {}", core_id);
+                    }
+                }
+
+                llc_mut.all_cpus = llc_cpus;
+
+                if topo_llcs.insert(llc_id, llc.clone()).is_some() {
+                    bail!("Duplicate LLC ID {}", llc_id);
                 }
             }
+
+            node.all_cores = node_cores;
+            node.all_cpus = node_cpus;
         }
 
         let nr_cpus_online = span.weight();
         Ok(Topology {
             nodes,
-            cores,
-            cpus,
             span,
             nr_cpus_online,
+            all_llcs: topo_llcs,
+            all_cores: topo_cores,
+            all_cpus: topo_cpus,
         })
     }
 
@@ -259,13 +295,15 @@ impl Topology {
 
     /// Returns whether the Topology has a hybrid architecture of big and little cores.
     pub fn has_little_cores(&self) -> bool {
-        self.cores.iter().any(|c| c.core_type == CoreType::Little)
+        self.all_cores
+            .values()
+            .any(|c| c.core_type == CoreType::Little)
     }
 
     /// Returns a BitVec of online CPUs.
     pub fn cpus_bitvec(&self) -> BitVec {
         let mut cpus = bitvec![0; *NR_CPUS_POSSIBLE];
-        for (id, _) in self.cpus.iter() {
+        for id in self.all_cpus.keys() {
             cpus.set(*id, true);
         }
         cpus
@@ -279,7 +317,7 @@ impl Topology {
     /// Assuming each core holds exactly at most two cpus.
     pub fn sibling_cpus(&self) -> Vec<i32> {
         let mut sibling_cpu = vec![-1i32; *NR_CPUS_POSSIBLE];
-        for core in &self.cores {
+        for core in self.all_cores.values() {
             let mut first = -1i32;
             for (cpu_id, _) in &core.cpus {
                 let cpu = *cpu_id;
@@ -323,7 +361,7 @@ impl TopologyMap {
     pub fn new(topo: &Topology) -> Result<TopologyMap> {
         let mut map: Vec<Vec<usize>> = Vec::new();
 
-        for core in &topo.cores {
+        for core in topo.all_cores.values() {
             let mut cpu_ids: Vec<usize> = Vec::new();
             for cpu_id in core.span.clone().into_iter() {
                 cpu_ids.push(cpu_id);
@@ -443,6 +481,7 @@ fn create_insert_cpu(
         id: llc_id,
         cores: BTreeMap::new(),
         span: Cpumask::new()?,
+        all_cpus: BTreeMap::new(),
     }));
     let llc_mut = Arc::get_mut(llc).unwrap();
 
@@ -545,6 +584,8 @@ fn create_default_node(online_mask: &Cpumask, flatten_llc: bool) -> Result<Vec<N
         span: Cpumask::new()?,
         #[cfg(feature = "gpu-topology")]
         gpus: BTreeMap::new(),
+        all_cores: BTreeMap::new(),
+        all_cpus: BTreeMap::new(),
     };
 
     #[cfg(feature = "gpu-topology")]
@@ -595,6 +636,10 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
             id: node_id,
             llcs: BTreeMap::new(),
             span: Cpumask::new()?,
+
+            all_cores: BTreeMap::new(),
+            all_cpus: BTreeMap::new(),
+
             #[cfg(feature = "gpu-topology")]
             gpus: BTreeMap::new(),
         };

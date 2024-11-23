@@ -625,7 +625,7 @@ fn initialize_cpu_ctxs(skel: &BpfSkel, topo: &Topology) -> Result<()> {
             &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
         });
 
-        let topo_cpu = topo.cpus.get(&cpu).unwrap();
+        let topo_cpu = topo.all_cpus.get(&cpu).unwrap();
         let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
         cpu_ctxs[cpu].is_big = is_big;
     }
@@ -1202,13 +1202,13 @@ impl<'a> Scheduler<'a> {
                 node.id, skel.maps.rodata_data.numa_cpumasks[node.id]
             );
 
-            for (_, llc) in &node.llcs {
+            for llc in node.llcs.values() {
                 debug!("configuring llc {:?} for node {:?}", llc.id, node.id);
                 skel.maps.rodata_data.llc_numa_id_map[llc.id] = node.id as u32;
             }
         }
 
-        for (_, cpu) in &topo.cpus {
+        for cpu in topo.all_cpus.values() {
             skel.maps.rodata_data.cpu_llc_id_map[cpu.id] = cpu.llc_id as u32;
         }
     }
