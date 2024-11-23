@@ -52,8 +52,8 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Cache;
 use scx_utils::CoreType;
+use scx_utils::Llc;
 use scx_utils::NetDev;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
@@ -571,7 +571,7 @@ fn nodemask_from_nodes(nodes: &Vec<usize>) -> usize {
     mask
 }
 
-fn cachemask_from_llcs(llcs: &BTreeMap<usize, Cache>) -> usize {
+fn cachemask_from_llcs(llcs: &BTreeMap<usize, Llc>) -> usize {
     let mut mask = 0;
     for (_, cache) in llcs {
         mask |= 1 << cache.id();

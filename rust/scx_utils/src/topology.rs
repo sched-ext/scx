@@ -9,21 +9,21 @@
 //! service of creating scheduling domains.
 //!
 //! A Topology is comprised of one or more Node objects, which themselves are
-//! comprised hierarchically of Cache -> Core -> Cpu objects respectively:
+//! comprised hierarchically of LLC -> Core -> Cpu objects respectively:
 //!```rust,ignore
 //!                                   Topology
 //!                                       |
 //! o--------------------------------o   ...   o----------------o---------------o
 //! |         Node                   |         |         Node                   |
 //! | ID      0                      |         | ID      1                      |
-//! | Caches  <id, Cache>            |         | Caches  <id, Cache>            |
+//! | LLCs    <id, Llc>              |         | LLCs    <id, Llc>              |
 //! | Span    0x00000fffff00000fffff |         | Span    0xfffff00000fffff00000 |
 //! o--------------------------------o         o--------------------------------o
 //!                 \
 //!                  --------------------
 //!                                      \
 //! o--------------------------------o   ...   o--------------------------------o
-//! |             Cache              |         |             Cache              |
+//! |             Llc                |         |             Llc                |
 //! | ID     0                       |         | ID     1                       |
 //! | Cores  <id, Core>              |         | Cores  <id, Core>              |
 //! | Span   0x00000ffc0000000ffc00  |         | Span   0x00000003ff00000003ff  |
@@ -194,13 +194,13 @@ impl Core {
 }
 
 #[derive(Debug, Clone)]
-pub struct Cache {
+pub struct Llc {
     id: usize,
     cores: BTreeMap<usize, Core>,
     span: Cpumask,
 }
 
-impl Cache {
+impl Llc {
     /// Get the ID of this LLC
     pub fn id(&self) -> usize {
         self.id
@@ -229,7 +229,7 @@ impl Cache {
 #[derive(Debug, Clone)]
 pub struct Node {
     id: usize,
-    llcs: BTreeMap<usize, Cache>,
+    llcs: BTreeMap<usize, Llc>,
     #[cfg(feature = "gpu-topology")]
     gpus: BTreeMap<GpuIndex, Gpu>,
     span: Cpumask,
@@ -242,7 +242,7 @@ impl Node {
     }
 
     /// Get the map of LLCs inside this NUMA node
-    pub fn llcs(&self) -> &BTreeMap<usize, Cache> {
+    pub fn llcs(&self) -> &BTreeMap<usize, Llc> {
         &self.llcs
     }
 
@@ -563,7 +563,7 @@ fn create_insert_cpu(
     let base_freq = read_file_usize(&freq_path.join("base_frequency")).unwrap_or(max_freq);
     let trans_lat_ns = read_file_usize(&freq_path.join("cpuinfo_transition_latency")).unwrap_or(0);
 
-    let cache = node.llcs.entry(llc_id).or_insert(Cache {
+    let llc = node.llcs.entry(llc_id).or_insert(Llc {
         id: llc_id,
         cores: BTreeMap::new(),
         span: Cpumask::new()?,
@@ -582,7 +582,7 @@ fn create_insert_cpu(
         None => CoreType::Big { turbo: false },
     };
 
-    let core = cache.cores.entry(core_id).or_insert(Core {
+    let core = llc.cores.entry(core_id).or_insert(Core {
         id: core_id,
         llc_id: llc_id,
         node_id: node.id,
@@ -612,7 +612,7 @@ fn create_insert_cpu(
 
     // Update all of the devices' spans to include this CPU.
     core.span.set_cpu(cpu_id)?;
-    cache.span.set_cpu(cpu_id)?;
+    llc.span.set_cpu(cpu_id)?;
     node.span.set_cpu(cpu_id)?;
 
     Ok(())
