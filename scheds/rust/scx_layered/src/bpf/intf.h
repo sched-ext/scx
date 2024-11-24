@@ -63,6 +63,13 @@ enum layer_kind {
 	LAYER_KIND_CONFINED,
 };
 
+enum layer_usage {
+	LAYER_USAGE_OWNED,
+	LAYER_USAGE_OPEN,
+
+	NR_LAYER_USAGES,
+};
+
 /* Statistics */
 enum global_stat_id {
 	GSTAT_EXCL_IDLE,
@@ -119,11 +126,12 @@ struct cpu_ctx {
 	bool			yielding;
 	bool			try_preempt_first;
 	bool			is_big;
-	u64			layer_usages[MAX_LAYERS];
+	u64			layer_usages[MAX_LAYERS][NR_LAYER_USAGES];
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
 	u64			ran_current_for;
 	u64			hi_fallback_dsq_id;
+	u32			layer_id;
 	u32			task_layer_id;
 	u32			cache_id;
 	u32			node_id;

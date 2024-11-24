@@ -339,9 +339,12 @@ static bool refresh_cpumasks(u32 layer_id)
 
 		if ((u8_ptr = MEMBER_VPTR(layers, [layer_id].cpus[cpu / 8]))) {
 			if (*u8_ptr & (1 << (cpu % 8))) {
+				cctx->layer_id = layer_id;
 				bpf_cpumask_set_cpu(cpu, layer_cpumask);
 				total++;
 			} else {
+				if (cctx->layer_id == layer_id)
+					cctx->layer_id = MAX_LAYERS;
 				bpf_cpumask_clear_cpu(cpu, layer_cpumask);
 			}
 		} else {
@@ -1956,7 +1959,11 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	u64 slice_ns = layer_slice_ns(layer);
 	record_cpu_cost(costc, budget_id, (s64)used, slice_ns);
 
-	cctx->layer_usages[lid] += used;
+	if (cctx->layer_id == tctx->layer_id)
+		cctx->layer_usages[lid][LAYER_USAGE_OWNED] += used;
+	else
+		cctx->layer_usages[lid][LAYER_USAGE_OPEN] += used;
+
 	cctx->current_preempt = false;
 	cctx->prev_exclusive = cctx->current_exclusive;
 	cctx->current_exclusive = false;
