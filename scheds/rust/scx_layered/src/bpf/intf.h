@@ -118,7 +118,7 @@ struct cpu_ctx {
 	bool			yielding;
 	bool			try_preempt_first;
 	bool			is_big;
-	u64			layer_cycles[MAX_LAYERS];
+	u64			layer_usages[MAX_LAYERS];
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
 	u64			ran_current_for;

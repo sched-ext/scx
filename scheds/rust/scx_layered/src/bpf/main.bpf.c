@@ -1959,7 +1959,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	u64 slice_ns = layer_slice_ns(layer);
 	record_cpu_cost(costc, budget_id, (s64)used, slice_ns);
 
-	cctx->layer_cycles[lidx] += used;
+	cctx->layer_usages[lidx] += used;
 	cctx->current_preempt = false;
 	cctx->prev_exclusive = cctx->current_exclusive;
 	cctx->current_exclusive = false;
