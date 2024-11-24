@@ -130,6 +130,10 @@ pub struct LayerStats {
     pub max_nr_cpus: u32,
     #[stat(desc = "slice duration config")]
     pub slice_us: u64,
+    #[stat(desc = "Per-LLC scheduling event fractions")]
+    pub llc_fracs: Vec<f64>,
+    #[stat(desc = "Per-LLC average latency")]
+    pub llc_lats: Vec<f64>,
 }
 
 impl LayerStats {
@@ -219,6 +223,24 @@ impl LayerStats {
             min_nr_cpus: nr_cpus_range.0 as u32,
             max_nr_cpus: nr_cpus_range.1 as u32,
             slice_us: stats.layer_slice_us[lidx],
+            llc_fracs: {
+                let sid = bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize;
+                let sum = bstats.llc_lstats[lidx]
+                    .iter()
+                    .map(|lstats| lstats[sid])
+                    .sum::<u64>() as f64;
+                bstats.llc_lstats[lidx]
+                    .iter()
+                    .map(|lstats| calc_frac(lstats[sid] as f64, sum))
+                    .collect()
+            },
+            llc_lats: bstats.llc_lstats[lidx]
+                .iter()
+                .map(|lstats| {
+                    lstats[bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize] as f64
+                        / 1_000_000_000.0
+                })
+                .collect(),
         }
     }
 
@@ -320,6 +342,27 @@ impl LayerStats {
             &cpus,
             width = header_width
         )?;
+
+        for (i, (&frac, &lat)) in self.llc_fracs.iter().zip(self.llc_lats.iter()).enumerate() {
+            if i == 0 {
+                write!(
+                    w,
+                    "  {:<width$}  LLC sched%/lat_ms",
+                    "",
+                    width = header_width
+                )?;
+            } else if (i % 4) == 0 {
+                writeln!(w, "")?;
+                write!(
+                    w,
+                    "  {:<width$}                   ",
+                    "",
+                    width = header_width
+                )?;
+            }
+            write!(w, " [{}/{:7.2}]", fmt_pct(frac), lat * 1_000.0)?;
+        }
+        writeln!(w, "")?;
 
         if self.is_excl != 0 {
             writeln!(

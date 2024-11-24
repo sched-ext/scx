@@ -81,6 +81,7 @@ const NR_LAYER_USAGES: usize = bpf_intf::layer_usage_NR_LAYER_USAGES as usize;
 
 const NR_GSTATS: usize = bpf_intf::global_stat_id_NR_GSTATS as usize;
 const NR_LSTATS: usize = bpf_intf::layer_stat_id_NR_LSTATS as usize;
+const NR_LLC_LSTATS: usize = bpf_intf::llc_layer_stat_id_NR_LLC_LSTATS as usize;
 
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
 
@@ -726,12 +727,16 @@ struct BpfStats {
     gstats: Vec<u64>,
     lstats: Vec<Vec<u64>>,
     lstats_sums: Vec<u64>,
+    llc_lstats: Vec<Vec<Vec<u64>>>, // [layer][llc][stat]
 }
 
 impl BpfStats {
-    fn read(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Self {
+    fn read(skel: &BpfSkel, cpu_ctxs: &[bpf_intf::cpu_ctx]) -> Self {
+        let nr_layers = skel.maps.rodata_data.nr_layers as usize;
+        let nr_llcs = skel.maps.rodata_data.nr_llcs as usize;
         let mut gstats = vec![0u64; NR_GSTATS];
         let mut lstats = vec![vec![0u64; NR_LSTATS]; nr_layers];
+        let mut llc_lstats = vec![vec![vec![0u64; NR_LLC_LSTATS]; nr_llcs]; nr_layers];
 
         for cpu in 0..*NR_CPUS_POSSIBLE {
             for stat in 0..NR_GSTATS {
@@ -751,10 +756,37 @@ impl BpfStats {
             }
         }
 
+        for llc_id in 0..nr_llcs {
+            // XXX - This would be a lot easier if llc_ctx were in
+            // the bss. Unfortunately, kernel < v6.12 crashes and
+            // kernel >= v6.12 fails verification after such
+            // conversion due to seemingly verifier bugs. Convert to
+            // bss maps later.
+            let key = llc_id as u32;
+            let llc_id_slice =
+                unsafe { std::slice::from_raw_parts((&key as *const u32) as *const u8, 4) };
+            let v = skel
+                .maps
+                .llc_data
+                .lookup(llc_id_slice, libbpf_rs::MapFlags::ANY)
+                .unwrap()
+                .unwrap();
+            let llcc = unsafe { *(v.as_slice().as_ptr() as *const bpf_intf::llc_ctx) };
+            //println!("llc {} id={} nr_cpus={}", llc_id, llcc.id, llcc.nr_cpus);
+
+            for layer_id in 0..nr_layers {
+                for stat_id in 0..NR_LLC_LSTATS {
+                    llc_lstats[layer_id][llc_id][stat_id] = llcc.lstats[layer_id][stat_id];
+                }
+            }
+        }
+        //println!("llc_lstats={:?}", &llc_lstats);
+
         Self {
             gstats,
             lstats,
             lstats_sums,
+            llc_lstats,
         }
     }
 }
@@ -773,6 +805,29 @@ impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
                 .map(|(l, r)| vec_sub(l, r))
                 .collect(),
             lstats_sums: vec_sub(&self.lstats_sums, &rhs.lstats_sums),
+            llc_lstats: self
+                .llc_lstats
+                .iter()
+                .zip(rhs.llc_lstats.iter())
+                .map(|(l_layer, r_layer)| {
+                    l_layer
+                        .iter()
+                        .zip(r_layer.iter())
+                        .map(|(l_llc, r_llc)| {
+                            let mut delta = vec_sub(l_llc, r_llc);
+                            // lat is not subtractable, take L side if there
+                            // were any sched events.
+                            delta[bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize] =
+                                if delta[bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize] > 0 {
+                                    l_llc[bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize]
+                                } else {
+                                    0
+                                };
+                            delta
+                        })
+                        .collect()
+                })
+                .collect(),
         }
     }
 }
@@ -846,7 +901,7 @@ impl Stats {
     fn new(skel: &mut BpfSkel, proc_reader: &procfs::ProcReader) -> Result<Self> {
         let nr_layers = skel.maps.rodata_data.nr_layers as usize;
         let cpu_ctxs = read_cpu_ctxs(skel)?;
-        let bpf_stats = BpfStats::read(&cpu_ctxs, nr_layers);
+        let bpf_stats = BpfStats::read(skel, &cpu_ctxs);
         let nr_nodes = skel.maps.rodata_data.nr_nodes as usize;
 
         Ok(Self {
@@ -933,7 +988,7 @@ impl Stats {
         let cur_total_cpu = read_total_cpu(proc_reader)?;
         let cpu_busy = calc_util(&cur_total_cpu, &self.prev_total_cpu)?;
 
-        let cur_bpf_stats = BpfStats::read(&cpu_ctxs, self.nr_layers);
+        let cur_bpf_stats = BpfStats::read(skel, &cpu_ctxs);
         let bpf_stats = &cur_bpf_stats - &self.prev_bpf_stats;
 
         let processing_dur = cur_processing_dur

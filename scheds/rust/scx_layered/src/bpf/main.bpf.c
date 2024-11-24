@@ -85,7 +85,7 @@ static inline s32 sibling_cpu(s32 cpu)
 		return -1;
 }
 
-static struct layer *lookup_layer(u32 id)
+static __always_inline struct layer *lookup_layer(u32 id)
 {
 	if (id >= nr_layers) {
 		scx_bpf_error("invalid layer %d", id);
@@ -182,6 +182,8 @@ static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	return cpuc;
 }
 
+// XXX - Converting this to bss array triggers verifier bugs. See
+// BpfStats::read().
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
@@ -199,6 +201,8 @@ static struct node_ctx *lookup_node_ctx(u32 node)
 	return nodec;
 }
 
+// XXX - Converting this to bss array triggers verifier bugs. See
+// BpfStats::read().
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
@@ -399,6 +403,7 @@ struct task_ctx {
 	struct cached_cpus	layered_cpus_node;
 	struct bpf_cpumask __kptr *layered_node_mask;
 	bool			all_cpus_allowed;
+	bool			first_run;
 	u64			runnable_at;
 	u64			running_at;
 	u64			last_dsq;
@@ -1723,12 +1728,8 @@ static s32 create_node(u32 node_id)
 	struct cpu_ctx *cpuc;
 	s32 ret;
 
-	nodec = bpf_map_lookup_elem(&node_data, &node_id);
-	if (!nodec) {
-		/* Should never happen, it's created statically at load time. */
-		scx_bpf_error("No node%u", node_id);
+	if (!(nodec = lookup_node_ctx(node_id)))
 		return -ENOENT;
-	}
 	nodec->id = node_id;
 
 	ret = create_save_cpumask(&nodec->cpumask);
@@ -1780,11 +1781,8 @@ static s32 create_llc(u32 llc_id)
 	struct cpu_ctx *cpuc;
 	s32 ret;
 
-	llcc = bpf_map_lookup_elem(&llc_data, &llc_id);
-	if (!llcc) {
-		scx_bpf_error("No llc%u", llc_id);
+	if (!(llcc = lookup_llc_ctx(llc_id)))
 		return -ENOENT;
-	}
 	llcc->id = llc_id;
 
 	ret = create_save_cpumask(&llcc->cpumask);
@@ -1857,6 +1855,7 @@ void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 
 	taskc->runnable_at = now;
+	taskc->first_run = true;
 	maybe_refresh_layer(p, taskc);
 	adj_load(taskc->layer_id, p->scx.weight, now);
 
@@ -1872,10 +1871,30 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	struct node_ctx *nodec;
 	struct llc_ctx *llcc;
 	s32 task_cpu = scx_bpf_task_cpu(p);
+	u32 layer_id;
 
-	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)) ||
-	    !(layer = lookup_layer(taskc->layer_id)))
+	if (!(cpuc = lookup_cpu_ctx(-1)) || !(llcc = lookup_llc_ctx(cpuc->llc_id)) ||
+	    !(taskc = lookup_task_ctx(p)))
 		return;
+
+	layer_id = taskc->layer_id;
+	if (!(layer = lookup_layer(layer_id)))
+		return;
+
+	if (taskc->first_run) {
+		u64 now = bpf_ktime_get_ns();
+		u64 lat = now - taskc->runnable_at;
+		u32 llc_id = cpuc->llc_id;
+		u64 *stats = llcc->lstats[layer_id];
+
+		// racy, don't care
+		stats[LLC_LSTAT_LAT] =
+			((LAYER_LAT_DECAY_FACTOR - 1) * stats[LLC_LSTAT_LAT] + lat) /
+			LAYER_LAT_DECAY_FACTOR;
+		stats[LLC_LSTAT_CNT]++;
+
+		taskc->first_run = false;
+	}
 
 	if (taskc->last_cpu >= 0 && taskc->last_cpu != task_cpu) {
 		lstat_inc(LSTAT_MIGRATION, layer, cpuc);
@@ -1884,8 +1903,6 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 		if (nodec->cpumask &&
 		    !bpf_cpumask_test_cpu(taskc->last_cpu, cast_mask(nodec->cpumask)))
 			lstat_inc(LSTAT_XNUMA_MIGRATION, layer, cpuc);
-		if (!(llcc = lookup_llc_ctx(cpuc->llc_id)))
-			return;
 		if (llcc->cpumask &&
 		    !bpf_cpumask_test_cpu(taskc->last_cpu, cast_mask(llcc->cpumask)))
 			lstat_inc(LSTAT_XLLC_MIGRATION, layer, cpuc);
