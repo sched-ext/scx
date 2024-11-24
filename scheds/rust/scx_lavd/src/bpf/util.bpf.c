@@ -229,13 +229,6 @@ static bool is_lat_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
 	return taskc->lat_cri >= stat_cur->avg_lat_cri;
 }
 
-static bool is_perf_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
-{
-	if (READ_ONCE(taskc->on_big) && READ_ONCE(taskc->on_little))
-		return taskc->perf_cri >= stat_cur->thr_perf_cri;
-	return READ_ONCE(taskc->on_big);
-}
-
 static bool is_greedy(struct task_ctx *taskc)
 {
 	return taskc->is_greedy;

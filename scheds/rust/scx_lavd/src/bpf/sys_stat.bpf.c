@@ -36,13 +36,11 @@ struct sys_stat_ctx {
 	s32		avg_lat_cri;
 	u64		sum_lat_cri;
 	u32		nr_sched;
-	u32		nr_greedy;
 	u32		nr_perf_cri;
 	u32		nr_lat_cri;
 	u32		nr_big;
 	u32		nr_pc_on_big;
 	u32		nr_lc_on_big;
-	u64		nr_lhp;
 	u64		min_perf_cri;
 	u64		avg_perf_cri;
 	u64		max_perf_cri;
@@ -96,12 +94,6 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		c->nr_lat_cri += cpuc->nr_lat_cri;
 		cpuc->nr_lat_cri = 0;
 
-		c->nr_greedy += cpuc->nr_greedy;
-		cpuc->nr_greedy = 0;
-
-		c->nr_lhp += cpuc->nr_lhp;
-		cpuc->nr_lhp = 0;
-
 		/*
 		 * Accumulate task's latency criticlity information.
 		 *
@@ -122,16 +114,18 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		/*
 		 * Accumulate task's performance criticlity information.
 		 */
-		if (cpuc->min_perf_cri < c->min_perf_cri)
-			c->min_perf_cri = cpuc->min_perf_cri;
-		cpuc->min_perf_cri = 1000;
+		if (have_little_core) {
+			if (cpuc->min_perf_cri < c->min_perf_cri)
+				c->min_perf_cri = cpuc->min_perf_cri;
+			cpuc->min_perf_cri = 1000;
 
-		if (cpuc->max_perf_cri > c->max_perf_cri)
-			c->max_perf_cri = cpuc->max_perf_cri;
-		cpuc->max_perf_cri = 0;
+			if (cpuc->max_perf_cri > c->max_perf_cri)
+				c->max_perf_cri = cpuc->max_perf_cri;
+			cpuc->max_perf_cri = 0;
 
-		c->sum_perf_cri += cpuc->sum_perf_cri;
-		cpuc->sum_perf_cri = 0;
+			c->sum_perf_cri += cpuc->sum_perf_cri;
+			cpuc->sum_perf_cri = 0;
+		}
 
 		/*
 		 * If the CPU is in an idle state (i.e., idle_start_clk is
@@ -200,13 +194,16 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 		c->max_lat_cri = c->stat_cur->max_lat_cri;
 		c->avg_lat_cri = c->stat_cur->avg_lat_cri;
 
-		c->min_perf_cri = c->stat_cur->min_perf_cri;
-		c->max_perf_cri = c->stat_cur->max_perf_cri;
-		c->avg_perf_cri = c->stat_cur->avg_perf_cri;
+		if (have_little_core) {
+			c->min_perf_cri = c->stat_cur->min_perf_cri;
+			c->max_perf_cri = c->stat_cur->max_perf_cri;
+			c->avg_perf_cri = c->stat_cur->avg_perf_cri;
+		}
 	}
 	else {
 		c->avg_lat_cri = c->sum_lat_cri / c->nr_sched;
-		c->avg_perf_cri = c->sum_perf_cri / c->nr_sched;
+		if (have_little_core)
+			c->avg_perf_cri = c->sum_perf_cri / c->nr_sched;
 	}
 }
 
@@ -231,14 +228,16 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 	stat_next->thr_lat_cri = stat_next->max_lat_cri -
 		((stat_next->max_lat_cri - stat_next->avg_lat_cri) >> 1);
 
-	stat_next->min_perf_cri =
-		calc_avg32(stat_cur->min_perf_cri, c->min_perf_cri);
-	stat_next->avg_perf_cri =
-		calc_avg32(stat_cur->avg_perf_cri, c->avg_perf_cri);
-	stat_next->max_perf_cri =
-		calc_avg32(stat_cur->max_perf_cri, c->max_perf_cri);
-	stat_next->thr_perf_cri =
-		c->stat_cur->thr_perf_cri; /* will be updated later */
+	if (have_little_core) {
+		stat_next->min_perf_cri =
+			calc_avg32(stat_cur->min_perf_cri, c->min_perf_cri);
+		stat_next->avg_perf_cri =
+			calc_avg32(stat_cur->avg_perf_cri, c->avg_perf_cri);
+		stat_next->max_perf_cri =
+			calc_avg32(stat_cur->max_perf_cri, c->max_perf_cri);
+		stat_next->thr_perf_cri =
+			c->stat_cur->thr_perf_cri; /* will be updated later */
+	}
 
 	stat_next->nr_violation =
 		calc_avg32(stat_cur->nr_violation, c->nr_violation);
@@ -259,13 +258,11 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 	if (cnt++ == LAVD_SYS_STAT_DECAY_TIMES) {
 		cnt = 0;
 		stat_next->nr_sched >>= 1;
-		stat_next->nr_greedy >>= 1;
 		stat_next->nr_perf_cri >>= 1;
 		stat_next->nr_lat_cri >>= 1;
 		stat_next->nr_big >>= 1;
 		stat_next->nr_pc_on_big >>= 1;
 		stat_next->nr_lc_on_big >>= 1;
-		stat_next->nr_lhp >>= 1;
 
 		__sync_fetch_and_sub(&performance_mode_ns, performance_mode_ns/2);
 		__sync_fetch_and_sub(&balanced_mode_ns, balanced_mode_ns/2);
@@ -273,13 +270,11 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 	}
 
 	stat_next->nr_sched += c->nr_sched;
-	stat_next->nr_greedy += c->nr_greedy;
 	stat_next->nr_perf_cri += c->nr_perf_cri;
 	stat_next->nr_lat_cri += c->nr_lat_cri;
 	stat_next->nr_big += c->nr_big;
 	stat_next->nr_pc_on_big += c->nr_pc_on_big;
 	stat_next->nr_lc_on_big += c->nr_lc_on_big;
-	stat_next->nr_lhp += c->nr_lhp;
 
 	update_power_mode_time();
 }

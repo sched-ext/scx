@@ -196,8 +196,8 @@ char _license[] SEC("license") = "GPL";
  * Include sub-modules
  */
 #include "util.bpf.c"
-#include "introspec.bpf.c"
 #include "power.bpf.c"
+#include "introspec.bpf.c"
 #include "sys_stat.bpf.c"
 #include "preempt.bpf.c"
 #include "lock.bpf.c"
@@ -300,8 +300,37 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc,
 	return weight_ft;
 }
 
-static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
-			u64 enq_flags)
+static void calc_perf_cri(struct task_struct *p, struct task_ctx *taskc)
+{
+	u64 wait_freq_ft, wake_freq_ft, perf_cri = 1000;
+
+	/*
+	 * A task is more CPU-performance sensitive when it meets the following
+	 * conditions:
+	 *
+	 * - It is in the middle of the task graph (high wait and wake
+	 *   frequencies).
+	 * - Its runtime and frequency are high;
+	 * - Its nice priority is high;
+	 *
+	 * We use the log-ed value since the raw value follows the highly
+	 * skewed distribution.
+	 *
+	 * Note that we use unadjusted weight to reflect the pure task priority.
+	 */
+	if (have_little_core) {
+		wait_freq_ft = calc_freq_factor(taskc->wait_freq, p->scx.weight);
+		wake_freq_ft = calc_freq_factor(taskc->wake_freq, p->scx.weight);
+		perf_cri = log2_u64(wait_freq_ft * wake_freq_ft);
+		perf_cri += log2_u64(max(taskc->run_freq, 1) *
+				     max(taskc->run_time_ns, 1) * p->scx.weight);
+	}
+
+	taskc->perf_cri = perf_cri;
+}
+
+static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
+			 u64 enq_flags)
 {
 	u64 weight_ft, wait_freq_ft, wake_freq_ft, runtime_ft;
 	u64 lat_cri;
@@ -344,8 +373,6 @@ static u64 calc_lat_cri(struct task_struct *p, struct task_ctx *taskc,
 	 * latency-critcial, inherit waker's latency criticality.
 	 */
 	taskc->lat_cri = max(lat_cri, taskc->lat_cri_waker);
-
-	return taskc->lat_cri;
 }
 
 static u64 calc_adj_runtime(u64 runtime)
@@ -362,19 +389,20 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 					struct task_ctx *taskc,
 					u64 enq_flags)
 {
-	u64 deadline, lat_cri, adj_runtime;
+	u64 deadline, adj_runtime;
 	u32 greedy_ratio, greedy_ft;
 
 	/*
 	 * Calculate the deadline based on runtime,
 	 * latency criticality, and greedy ratio.
 	 */
-	lat_cri = calc_lat_cri(p, taskc, enq_flags);
+	calc_perf_cri(p, taskc);
+	calc_lat_cri(p, taskc, enq_flags);
 	greedy_ratio = calc_greedy_ratio(taskc);
 	greedy_ft = calc_greedy_factor(greedy_ratio);
 	adj_runtime = calc_adj_runtime(taskc->run_time_ns);
 
-	deadline = (adj_runtime / lat_cri) * greedy_ft;
+	deadline = (adj_runtime / taskc->lat_cri) * greedy_ft;
 
 	return deadline;
 }
@@ -504,7 +532,6 @@ static void update_stat_for_running(struct task_struct *p,
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 wait_period, interval;
 	u64 now = bpf_ktime_get_ns();
-	u64 wait_freq_ft, wake_freq_ft, perf_cri;
 
 	/*
 	 * Update the current logical clock.
@@ -522,14 +549,10 @@ static void update_stat_for_running(struct task_struct *p,
 	}
 
 	/*
-	 * Update per-CPU latency criticality information for every-scheduled
-	 * tasks.
+	 * Update task state when starts running.
 	 */
-	if (cpuc->max_lat_cri < taskc->lat_cri)
-		cpuc->max_lat_cri = taskc->lat_cri;
-	cpuc->sum_lat_cri += taskc->lat_cri;
-	cpuc->nr_sched++;
-
+	taskc->wakeup_ft = 0;
+	taskc->last_running_clk = now;
 
 	/*
 	 * Reset task's lock and futex boost count
@@ -538,46 +561,25 @@ static void update_stat_for_running(struct task_struct *p,
 	reset_lock_futex_boost(taskc, cpuc);
 
 	/*
-	 * It is clear there is no need to consider the suspended duration
-	 * while running a task, so reset the suspended duration to zero.
+	 * Update per-CPU latency criticality information
+	 * for every-scheduled tasks.
 	 */
-	reset_suspended_duration(cpuc);
+	if (cpuc->max_lat_cri < taskc->lat_cri)
+		cpuc->max_lat_cri = taskc->lat_cri;
+	cpuc->sum_lat_cri += taskc->lat_cri;
+	cpuc->nr_sched++;
 
 	/*
-	 * Update task's performance criticality
-	 *
-	 * A task is more CPU-performance sensitive when it meets the following
-	 * conditions:
-	 *
-	 * - It is in the middle of the task graph (high wait and wake
-	 *   frequencies).
-	 * - Its runtime and frequency are high;
-	 * - Its nice priority is high;
-	 * - It is a woken-up task.
-	 *
-	 * We use the log-ed value since the raw value follows the highly
-	 * skewed distribution.
-	 *
-	 * Note that we use unadjusted weight to reflect the pure task properties.
+	 * Update per-CPU performanc criticality information
+	 * for every-scheduled tasks.
 	 */
-	wait_freq_ft = calc_freq_factor(taskc->wait_freq, p->scx.weight);
-	wake_freq_ft = calc_freq_factor(taskc->wake_freq, p->scx.weight);
-	perf_cri = log2_u64(wait_freq_ft * wake_freq_ft);
-	perf_cri += log2_u64(max(taskc->run_freq, 1) *
-			     max(taskc->run_time_ns, 1) * p->scx.weight);
-	taskc->wakeup_ft = 0;
-
-	taskc->perf_cri = perf_cri;
-	if (cpuc->max_perf_cri < taskc->perf_cri)
-		cpuc->max_perf_cri = taskc->perf_cri;
-	if (cpuc->min_perf_cri > taskc->perf_cri)
-		cpuc->min_perf_cri = taskc->perf_cri;
-	cpuc->sum_perf_cri += taskc->perf_cri;
-
-	/*
-	 * Update task state when starts running.
-	 */
-	taskc->last_running_clk = now;
+	if (have_little_core) {
+		if (cpuc->max_perf_cri < taskc->perf_cri)
+			cpuc->max_perf_cri = taskc->perf_cri;
+		if (cpuc->min_perf_cri > taskc->perf_cri)
+			cpuc->min_perf_cri = taskc->perf_cri;
+		cpuc->sum_perf_cri += taskc->perf_cri;
+	}
 
 	/*
 	 * Update statistics information.
@@ -588,8 +590,11 @@ static void update_stat_for_running(struct task_struct *p,
 	if (is_perf_cri(taskc, stat_cur))
 		cpuc->nr_perf_cri++;
 
-	if (is_greedy(taskc))
-		cpuc->nr_greedy++;
+	/*
+	 * It is clear there is no need to consider the suspended duration
+	 * while running a task, so reset the suspended duration to zero.
+	 */
+	reset_suspended_duration(cpuc);
 }
 
 static void update_stat_for_stopping(struct task_struct *p,
@@ -955,7 +960,7 @@ static void direct_dispatch(struct task_struct *p, struct task_ctx *taskc,
 	/*
 	 * Calculate latency criticality for preemptability test.
 	 */
-	calc_lat_cri(p, taskc, 0);
+	calc_lat_cri(p, taskc, enq_flags);
 
 	/*
 	 * Update the task's logical clock.

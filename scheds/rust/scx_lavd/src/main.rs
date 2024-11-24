@@ -704,12 +704,9 @@ impl<'a> Scheduler<'a> {
                 let st = bss_data.__sys_stats[0];
 
                 let mseq = self.mseq_id;
-                let avg_svc_time = st.avg_svc_time;
                 let nr_queued_task = st.nr_queued_task;
                 let nr_active = st.nr_active;
                 let nr_sched = st.nr_sched;
-                let pc_lhp = Self::get_pc(st.nr_lhp, nr_sched);
-                let pc_greedy = Self::get_pc(st.nr_greedy, nr_sched);
                 let pc_pc = Self::get_pc(st.nr_perf_cri, nr_sched);
                 let pc_lc = Self::get_pc(st.nr_lat_cri, nr_sched);
                 let nr_big = st.nr_big;
@@ -726,12 +723,9 @@ impl<'a> Scheduler<'a> {
 
                 StatsRes::SysStats(SysStats {
                     mseq,
-                    avg_svc_time,
                     nr_queued_task,
                     nr_active,
                     nr_sched,
-                    pc_lhp,
-                    pc_greedy,
                     pc_pc,
                     pc_lc,
                     pc_big,

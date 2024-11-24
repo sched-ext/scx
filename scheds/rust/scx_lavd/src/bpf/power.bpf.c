@@ -41,6 +41,16 @@ volatile u64		performance_mode_ns;
 volatile u64		balanced_mode_ns;
 volatile u64		powersave_mode_ns;
 
+static bool is_perf_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
+{
+	if (!have_little_core)
+		return true;
+
+	if (READ_ONCE(taskc->on_big) && READ_ONCE(taskc->on_little))
+		return taskc->perf_cri >= stat_cur->thr_perf_cri;
+	return READ_ONCE(taskc->on_big);
+}
+
 static u64 calc_nr_active_cpus(struct sys_stat *stat_cur)
 {
 	u64 nr_active;
