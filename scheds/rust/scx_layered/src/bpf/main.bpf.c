@@ -710,6 +710,11 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 			cpu = -1;
 			goto out_put;
 		}
+		if (!tctx->layered_mask || !big_cpumask) {
+			bpf_cpumask_release(tmp_cpumask);
+			cpu = -1;
+			goto out_put;
+		}
 		bpf_cpumask_and(tmp_cpumask, cast_mask(tctx->layered_mask),
 				cast_mask(big_cpumask));
 		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask),
