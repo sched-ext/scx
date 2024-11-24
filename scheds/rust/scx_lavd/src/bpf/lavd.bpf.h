@@ -50,7 +50,7 @@ enum consts_internal  {
 	LAVD_AP_HIGH_UTIL		= 700, /* balanced mode when 10% < cpu util <= 40%,
 						  performance mode when cpu util > 40% */
 
-	LAVD_CPDOM_STARV_NS		= (5ULL * NSEC_PER_MSEC),
+	LAVD_CPDOM_STARV_NS		= (2 * LAVD_SLICE_MAX_NS),
 };
 
 const volatile u64 LAVD_TIME_INFINITY_NS;
@@ -87,7 +87,6 @@ struct cpu_ctx {
 	 * Information used to keep track of load
 	 */
 	volatile u64	tot_svc_time;	/* total service time on a CPU */
-	volatile u64	last_kick_clk;	/* when the CPU was kicked */
 
 	/*
 	 * Information used to keep track of latency criticality
