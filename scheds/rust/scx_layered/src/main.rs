@@ -1636,9 +1636,22 @@ impl<'a> Scheduler<'a> {
         let targets = self.calc_target_nr_cpus();
         let targets = self.weighted_target_nr_cpus(&targets);
 
+        let mut ascending: Vec<(usize, usize)> = targets.iter().copied().enumerate().collect();
+        ascending.sort_by(|a, b| a.1.cmp(&b.1));
+
+        // If any layer is growing from 0 CPU, guarantee that the largest
+        // layer that is freeing CPUs frees at least one CPU.
+        let mut force_free = self
+            .layers
+            .iter()
+            .zip(targets.iter())
+            .any(|(layer, &target)| layer.nr_cpus == 0 && target > 0);
+
         // Shrink all layers first so that CPUs are available for
-        // redistribution.
-        for (idx, (layer, &target)) in self.layers.iter_mut().zip(targets.iter()).enumerate() {
+        // redistribution. Do so in the descending target number of CPUs
+        // order.
+        for &(idx, target) in ascending.iter().rev() {
+            let layer = &mut self.layers[idx];
             if layer_is_open(layer) {
                 continue;
             }
@@ -1658,7 +1671,14 @@ impl<'a> Scheduler<'a> {
             let mut freed = false;
 
             while nr_to_free > 0 {
-                let nr_freed = layer.free_some_cpus(&mut self.cpu_pool, nr_to_free)?;
+                let max_to_free = if force_free {
+                    force_free = false;
+                    layer.nr_cpus
+                } else {
+                    nr_to_free
+                };
+
+                let nr_freed = layer.free_some_cpus(&mut self.cpu_pool, max_to_free)?;
                 if nr_freed == 0 {
                     break;
                 }
@@ -1681,10 +1701,7 @@ impl<'a> Scheduler<'a> {
         // starving small layers and shouldn't make noticable difference for
         // bigger layers as work conservation should still be achieved
         // through open execution.
-        let mut ordered: Vec<(usize, usize)> = targets.iter().copied().enumerate().collect();
-        ordered.sort_by(|a, b| a.1.cmp(&b.1));
-
-        for &(idx, target) in &ordered {
+        for &(idx, target) in &ascending {
             let layer = &mut self.layers[idx];
 
             if layer_is_open(layer) {
