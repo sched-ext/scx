@@ -645,9 +645,9 @@ fn init_cpu_prox_map(topo: &Topology, cpu_ctxs: &mut Vec<bpf_intf::cpu_ctx>) {
         order.append(&mut node_order);
         let node_end = idx;
 
-	idx += sys_order.len();
+        idx += sys_order.len();
         order.append(&mut sys_order);
-	let sys_end = idx;
+        let sys_end = idx;
 
         debug!(
             "CPU proximity map[{}/{}/{}/{}]: {:?}",
@@ -662,7 +662,7 @@ fn init_cpu_prox_map(topo: &Topology, cpu_ctxs: &mut Vec<bpf_intf::cpu_ctx>) {
         pmap.core_end = core_end as u32;
         pmap.llc_end = llc_end as u32;
         pmap.node_end = node_end as u32;
-	pmap.sys_end = sys_end as u32;
+        pmap.sys_end = sys_end as u32;
     }
 }
 

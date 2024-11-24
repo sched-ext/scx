@@ -466,7 +466,7 @@ fn create_insert_cpu(
         span: Cpumask::new()?,
         all_cpus: BTreeMap::new(),
 
-	node_id: node.id,
+        node_id: node.id,
     }));
     let llc_mut = Arc::get_mut(llc).unwrap();
 
