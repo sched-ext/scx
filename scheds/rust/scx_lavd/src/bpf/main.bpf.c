@@ -1056,7 +1056,6 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *taskc;
 	s32 cpu_id;
 	u64 dsq_id;
-	bool preempted = false, yield;
 
 	/*
 	 * Place a task to a run queue of current cpu's compute domain.
@@ -1108,25 +1107,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		 * Try to find and kick a victim CPU, which runs a less urgent
 		 * task. The kick will be done asynchronously.
 		 */
-		preempted = try_find_and_kick_victim_cpu(p, taskc, cpuc_cur, dsq_id);
-	}
-
-	/*
-	 * If the current ineligible task has something to yield,
-	 * try preempt it.
-	 */
-	if (!preempted) {
-		struct task_ctx *taskc_run;
-		struct task_struct *p_run;
-
-		p_run = bpf_get_current_task_btf();
-		taskc_run = try_get_task_ctx(p_run);
-
-		if (taskc_run && is_greedy(taskc_run)) {
-			yield = try_yield_current_cpu(p_run, cpuc_cur, taskc_run);
-			if (yield)
-				try_kick_cpu(cpuc_cur, cpuc_cur->last_kick_clk);
-		}
+		try_find_and_kick_victim_cpu(p, taskc, cpuc_cur, dsq_id);
 	}
 }
 
@@ -1430,16 +1411,10 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
 	preempted = try_yield_current_cpu(p_run, cpuc_run, taskc_run);
 
 	/*
-	 * If decided to yield, give up its time slice.
-	 */
-	if (preempted) {
-		p_run->scx.slice = 0;
-	}
-	/*
 	 * Update performance target of the current CPU if the current running
 	 * task continues to run.
 	 */
-	else {
+	if (!preempted) {
 update_cpuperf:
 		try_decrease_cpuperf_target(cpuc_run);
 	}
