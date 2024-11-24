@@ -590,12 +590,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	}
 
 	/*
-	 * Check if the previously used CPU is still in the L3 task domain. If
-	 * not, we may want to move the task back to its original L3 domain.
-	 */
-	is_prev_llc_affine = bpf_cpumask_test_cpu(prev_cpu, l3_mask);
-
-	/*
 	 * If the current task is waking up another task and releasing the CPU
 	 * (WAKE_SYNC), attempt to migrate the wakee on the same CPU as the
 	 * waker.
@@ -646,6 +640,12 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 			goto out_put_cpumask;
 		}
 	}
+
+	/*
+	 * Check if the previously used CPU is still in the L3 task domain. If
+	 * not, we may want to move the task back to its original L3 domain.
+	 */
+	is_prev_llc_affine = bpf_cpumask_test_cpu(prev_cpu, l3_mask);
 
 	/*
 	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
@@ -832,18 +832,23 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 {
+	const struct cpumask *primary = cast_mask(primary_cpumask);
+
 	/*
 	 * Consume regular tasks from the shared DSQ, transferring them to the
 	 * local CPU DSQ.
 	 */
 	if (scx_bpf_consume(SHARED_DSQ))
 		return;
+
 	/*
 	 * If the current task expired its time slice and no other task wants
 	 * to run, simply replenish its time slice and let it run for another
-	 * round on the same CPU.
+	 * round on the same CPU (provided the CPU is in the primary scheduling
+	 * domain).
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
+	    primary && bpf_cpumask_test_cpu(cpu, cast_mask(primary)))
 		task_refill_slice(prev);
 }
 

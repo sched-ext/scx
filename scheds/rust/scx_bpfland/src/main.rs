@@ -216,6 +216,7 @@ struct Scheduler<'a> {
     opts: &'a Opts,
     energy_profile: String,
     stats_server: StatsServer<(), Metrics>,
+    user_restart: bool,
 }
 
 impl<'a> Scheduler<'a> {
@@ -292,6 +293,7 @@ impl<'a> Scheduler<'a> {
             opts,
             energy_profile,
             stats_server,
+            user_restart: false,
         })
     }
 
@@ -418,20 +420,14 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn refresh_sched_domain(&mut self) {
+    fn refresh_sched_domain(&mut self) -> bool {
         if self.energy_profile != "none" {
             let energy_profile = Self::read_energy_profile();
             if energy_profile != self.energy_profile {
                 self.energy_profile = energy_profile.clone();
 
                 if self.opts.primary_domain == "auto" {
-                    if let Err(err) = Self::init_energy_domain(
-                        &mut self.skel,
-                        &self.opts.primary_domain,
-                        &energy_profile,
-                    ) {
-                        warn!("failed to refresh primary domain: error {}", err);
-                    }
+                    return true;
                 }
                 if let Err(err) = Self::init_cpufreq_perf(
                     &mut self.skel,
@@ -442,6 +438,8 @@ impl<'a> Scheduler<'a> {
                 }
             }
         }
+
+        return false;
     }
 
     fn enable_sibling_cpu(
@@ -555,7 +553,10 @@ impl<'a> Scheduler<'a> {
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            self.refresh_sched_domain();
+            if self.refresh_sched_domain() {
+                self.user_restart = true;
+                break;
+            }
             match req_ch.recv_timeout(Duration::from_secs(1)) {
                 Ok(()) => res_ch.send(self.get_metrics())?,
                 Err(RecvTimeoutError::Timeout) => {}
@@ -623,6 +624,9 @@ fn main() -> Result<()> {
     loop {
         let mut sched = Scheduler::init(&opts, &mut open_object)?;
         if !sched.run(shutdown.clone())?.should_restart() {
+            if sched.user_restart {
+                continue;
+            }
             break;
         }
     }
