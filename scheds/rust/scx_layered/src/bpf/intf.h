@@ -16,6 +16,7 @@
 #ifndef __KERNEL__
 typedef int s32;
 typedef long long s64;
+typedef unsigned short u16;
 typedef unsigned u32;
 typedef unsigned long long u64;
 #endif
@@ -100,6 +101,15 @@ enum layer_stat_idx {
 	NR_LSTATS,
 };
 
+/* CPU proximity map from closest to farthest, starts with self */
+struct cpu_prox_map {
+	u16			cpus[MAX_CPUS];
+	u32			core_end;
+	u32			llc_end;
+	u32			node_end;
+	u32			sys_end;
+};
+
 struct cpu_ctx {
 	bool			current_preempt;
 	bool			current_exclusive;
@@ -117,6 +127,7 @@ struct cpu_ctx {
 	u32			cache_idx;
 	u32			node_idx;
 	u32			perf;
+	struct cpu_prox_map	prox_map;
 };
 
 struct cache_ctx {
