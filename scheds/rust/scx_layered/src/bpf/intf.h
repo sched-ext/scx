@@ -111,6 +111,7 @@ struct cpu_prox_map {
 };
 
 struct cpu_ctx {
+	s32			cpu;
 	bool			current_preempt;
 	bool			current_exclusive;
 	bool			prev_exclusive;

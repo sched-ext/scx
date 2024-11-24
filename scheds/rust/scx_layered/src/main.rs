@@ -699,6 +699,7 @@ fn initialize_cpu_ctxs(skel: &BpfSkel, topo: &Topology) -> Result<()> {
 
         let topo_cpu = topo.all_cpus.get(&cpu).unwrap();
         let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
+        cpu_ctxs[cpu].cpu = cpu as i32;
         cpu_ctxs[cpu].is_big = is_big;
     }
 

@@ -1133,7 +1133,6 @@ int get_delay_sec(struct task_struct *p, u64 jiffies_now)
 
 /**
  * antistall_consume() - consume delayed DSQ
- * @cpu: cpu number
  * @cctx: cpu context
  *
  * This function consumes a delayed DSQ. This is meant to be called
@@ -1146,7 +1145,7 @@ int get_delay_sec(struct task_struct *p, u64 jiffies_now)
  *
  * Return: bool indicating if a DSQ was consumed or not.
  */
-bool antistall_consume(s32 cpu, struct cpu_ctx *cctx)
+bool antistall_consume(struct cpu_ctx *cctx)
 {
 	u64 *antistall_dsq, jiffies_now, cur_delay;
 	u32 zero;
@@ -1157,10 +1156,7 @@ bool antistall_consume(s32 cpu, struct cpu_ctx *cctx)
 	consumed = false;
 	zero = 0;
 
-	if (!enable_antistall)
-		return false;
-
-	if (!cctx || !cctx->task_layer_id || !cpu)
+	if (!enable_antistall || !cctx)
 		return false;
 
 	antistall_dsq = bpf_map_lookup_elem(&antistall_cpu_dsq, &zero);
@@ -1191,7 +1187,7 @@ bool antistall_consume(s32 cpu, struct cpu_ctx *cctx)
 
 reset:
 	trace("antistall reset DSQ[%llu] SELECTED_CPU[%llu] DELAY[%llu]",
-	      *antistall_dsq, cpu, cur_delay);
+	      *antistall_dsq, cctx->cpu, cur_delay);
 	*antistall_dsq = SCX_DSQ_INVALID;
 	return consumed;
 }
@@ -1208,7 +1204,7 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(costc = lookup_cpu_cost(cpu)))
 		return;
 
-	if (antistall_consume(cpu, cctx))
+	if (antistall_consume(cctx))
 		return;
 
 	/*
@@ -1417,7 +1413,7 @@ __weak int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
 {
 	struct layer *layer;
 	u64 dsq_id;
-	u32 u, v, llc_id, layer_id;
+	u32 u, v, layer_id;
 
 	if (!costc)
 		return -EINVAL;
@@ -1480,7 +1476,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	    !(costc = lookup_cpu_cost(cpu)))
 		return;
 
-	if (antistall_consume(cpu, cctx))
+	if (antistall_consume(cctx))
 		return;
 
 	/*
