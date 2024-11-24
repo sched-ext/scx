@@ -95,6 +95,14 @@ struct Opts {
     #[clap(long = "balanced", action = clap::ArgAction::SetTrue)]
     balanced: bool,
 
+    /// Maximum scheduling slice duration in microseconds.
+    #[clap(long = "slice-max-us", default_value = "3000")]
+    slice_max_us: u64,
+
+    /// Minimum scheduling slice duration in microseconds.
+    #[clap(long = "slice-min-us", default_value = "300")]
+    slice_min_us: u64,
+
     /// Disable core compaction and schedule tasks across all online CPUs. Core compaction attempts
     /// to keep idle CPUs idle in favor of scheduling tasks on CPUs that are already
     /// awake. See main.bpf.c for more info. Normally set by the power mode, but can be set independently if
@@ -601,6 +609,8 @@ impl<'a> Scheduler<'a> {
         };
         skel.maps.rodata_data.is_autopilot_on = opts.autopilot;
         skel.maps.rodata_data.verbose = opts.verbose;
+        skel.maps.rodata_data.slice_max_ns = opts.slice_max_us * 1000;
+        skel.maps.rodata_data.slice_min_ns = opts.slice_min_us * 1000;
     }
 
     fn get_msg_seq_id() -> u64 {

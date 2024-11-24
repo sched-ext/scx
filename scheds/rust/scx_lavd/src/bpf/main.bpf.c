@@ -212,6 +212,13 @@ static u64		cur_logical_clk;
  */
 static u64		cur_svc_time;
 
+
+/*
+ * The minimum and maximum of time slice
+ */
+const volatile u64	slice_min_ns = LAVD_SLICE_MIN_NS_DFL;
+const volatile u64	slice_max_ns = LAVD_SLICE_MAX_NS_DFL;
+
 static u32 calc_greedy_ratio(struct task_ctx *taskc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
@@ -409,10 +416,10 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 
 static u32 clamp_time_slice_ns(u32 slice)
 {
-	if (slice < LAVD_SLICE_MIN_NS)
-		slice = LAVD_SLICE_MIN_NS;
-	else if (slice > LAVD_SLICE_MAX_NS)
-		slice = LAVD_SLICE_MAX_NS;
+	if (slice < slice_min_ns)
+		slice = slice_min_ns;
+	else if (slice > slice_max_ns)
+		slice = slice_max_ns;
 	return slice;
 }
 
@@ -430,7 +437,7 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	slice = (LAVD_TARGETED_LATENCY_NS * stat_cur->nr_active) / nr_queued;
 
 	/*
-	 * Keep the slice in [LAVD_SLICE_MIN_NS, LAVD_SLICE_MAX_NS].
+	 * Keep the slice in [slice_min_ns, slice_max_ns].
 	 */
 	slice = clamp_time_slice_ns(slice);
 
@@ -1761,7 +1768,7 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	memset(taskc, 0, sizeof(*taskc));
 	taskc->last_running_clk = now; /* for run_time_ns */
 	taskc->last_stopping_clk = now; /* for run_time_ns */
-	taskc->run_time_ns = LAVD_SLICE_MAX_NS;
+	taskc->run_time_ns = slice_max_ns;
 	taskc->svc_time = stat_cur->avg_svc_time * LAVD_NEW_PROC_PENALITY;
 
 	set_on_core_type(taskc, p->cpus_ptr);
