@@ -1523,7 +1523,16 @@ impl<'a> Scheduler<'a> {
                     cpus_range,
                     ..
                 } => {
-                    let util = utils[idx].iter().sum();
+                    // Guide layer sizing by utilization within each layer
+                    // to avoid oversizing grouped layers. As an empty layer
+                    // can only get CPU time through fallback or open
+                    // execution, use open cputime for empty layers.
+                    let util = if layer.nr_cpus > 0 {
+                        utils[idx][LAYER_USAGE_OWNED]
+                    } else {
+                        utils[idx][LAYER_USAGE_OPEN]
+                    };
+
                     let util = if util < 0.01 { 0.0 } else { util };
                     let low = (util / util_range.1).ceil() as usize;
                     let high = ((util / util_range.0).floor() as usize).max(low);
