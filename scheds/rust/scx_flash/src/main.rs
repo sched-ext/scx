@@ -197,11 +197,11 @@ impl<'a> Scheduler<'a> {
     ) -> Result<(), std::io::Error> {
         // Determine the list of CPU IDs associated to each cache node.
         let mut cache_id_map: HashMap<usize, Vec<usize>> = HashMap::new();
-        for core in topo.cores().into_iter() {
-            for (cpu_id, cpu) in core.cpus() {
+        for core in topo.all_cores.values() {
+            for (cpu_id, cpu) in &core.cpus {
                 let cache_id = match cache_lvl {
-                    2 => cpu.l2_id(),
-                    3 => cpu.l3_id(),
+                    2 => cpu.l2_id,
+                    3 => cpu.l3_id,
                     _ => panic!("invalid cache level {}", cache_lvl),
                 };
                 cache_id_map

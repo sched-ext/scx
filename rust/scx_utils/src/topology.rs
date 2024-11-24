@@ -9,44 +9,44 @@
 //! service of creating scheduling domains.
 //!
 //! A Topology is comprised of one or more Node objects, which themselves are
-//! comprised hierarchically of Cache -> Core -> Cpu objects respectively:
+//! comprised hierarchically of LLC -> Core -> Cpu objects respectively:
 //!```rust,ignore
-//!		                        	                                           Topology
-//!		                        	                                              |
-//!		                        	                        o---------------------o---------------------o
-//!		                        	                        |                     |                     |
-//!		                        	                        |                     |                     |
-//!		                                    o---------------o----------------o   ...   o----------------o---------------o
-//!		                                    |         Node                   |         |         Node                   |
-//!		                                    | ID      0                      |         | ID      1                      |
-//!		                                    | Caches  <id, Cache>            |         | Caches  <id, Cache>            |
-//!		                                    | Span    0x00000fffff00000fffff |         | Span    0xfffff00000fffff00000 |
-//!		                                    o--------------------------------o         o--------------------------------o
-//!		                                                    |
-//!		                                                    |
-//!                   o--------------------------------o   ...   o--------------------------------o
-//!                   |             Cache              |         |             Cache              |
-//!                   | ID     0                       |         | ID     1                       |
-//!                   | Cores  <id, Core>              |         | Cores  <id, Core>              |
-//!                   | Span   0x00000ffc0000000ffc00  |         | Span   0x00000003ff00000003ff  |
-//!                   o--------------------------------o         o----------------o---------------o
-//!		                                                                          |
-//!		                                                                          |
-//!                                         o--------------------------------o   ...   o--------------------------------o
-//!                                         |              Core              |         |              Core              |
-//!                                         | ID    0                        |         | ID    9                        |
-//!                                         | Cpus  <id, Cpu>                |         | Cpus  <id, Cpu>                |
-//!                                         | Span  0x00000000010000000001   |         | Span  0x00000002000000000200   |
-//!                                         o--------------------------------o         o----------------o---------------o
-//!		                                                                                                |
-//!		                                                                                                |
-//!                                                               o--------------------------------o   ...   o---------------------------------o
-//!                                                               |              Cpu               |         |               Cpu               |
-//!                                                               | ID       9                     |         | ID       49                     |
-//!                                                               | online   1                     |         | online   1                      |
-//!                                                               | min_freq 400000                |         | min_freq 400000                 |
-//!                                                               | max_freq 5881000               |         | min_freq 5881000                |
-//!                                                               o--------------------------------o         o---------------------------------o
+//!                                   Topology
+//!                                       |
+//! o--------------------------------o   ...   o----------------o---------------o
+//! |         Node                   |         |         Node                   |
+//! | ID      0                      |         | ID      1                      |
+//! | LLCs    <id, Llc>              |         | LLCs    <id, Llc>              |
+//! | Span    0x00000fffff00000fffff |         | Span    0xfffff00000fffff00000 |
+//! o--------------------------------o         o--------------------------------o
+//!                 \
+//!                  --------------------
+//!                                      \
+//! o--------------------------------o   ...   o--------------------------------o
+//! |             Llc                |         |             Llc                |
+//! | ID     0                       |         | ID     1                       |
+//! | Cores  <id, Core>              |         | Cores  <id, Core>              |
+//! | Span   0x00000ffc0000000ffc00  |         | Span   0x00000003ff00000003ff  |
+//! o--------------------------------o         o----------------o---------------o
+//!                                                             /
+//!                                        ---------------------
+//!                                       /
+//! o--------------------------------o   ...   o--------------------------------o
+//! |              Core              |         |              Core              |
+//! | ID     0                       |         | ID     9                       |
+//! | Cpus   <id, Cpu>               |         | Cpus   <id, Cpu>               |
+//! | Span   0x00000000010000000001  |         | Span   0x00000002000000000200  |
+//! o--------------------------------o         o----------------o---------------o
+//!                                                             /
+//!                                        ---------------------
+//!                                       /
+//! o--------------------------------o   ...   o---------------------------------o
+//! |              Cpu               |         |               Cpu               |
+//! | ID       9                     |         | ID       49                     |
+//! | online   1                     |         | online   1                      |
+//! | min_freq 400000                |         | min_freq 400000                 |
+//! | max_freq 5881000               |         | min_freq 5881000                |
+//! o--------------------------------o         o---------------------------------o
 //!```
 //! Every object contains a Cpumask that spans all CPUs in that point in the
 //! topological hierarchy.
@@ -80,6 +80,7 @@ use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::slice::Iter;
+use std::sync::Arc;
 
 #[cfg(feature = "gpu-topology")]
 use crate::gpu::{create_gpus, Gpu, GpuIndex};
@@ -110,214 +111,135 @@ pub enum CoreType {
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Cpu {
-    id: usize,
-    min_freq: usize,
-    max_freq: usize,
-    base_freq: usize,
-    trans_lat_ns: usize,
-    l2_id: usize,
-    l3_id: usize,
-    llc_id: usize,
+    pub id: usize,
+    pub min_freq: usize,
+    pub max_freq: usize,
+    /// Base operational frqeuency. Only available on Intel Turbo Boost
+    /// CPUs. If not available, this will simply return maximum frequency.
+    pub base_freq: usize,
+    pub trans_lat_ns: usize,
+    pub l2_id: usize,
+    pub l3_id: usize,
     pub core_type: CoreType,
-}
 
-impl Cpu {
-    /// Get the ID of this Cpu
-    pub fn id(&self) -> usize {
-        self.id
-    }
-
-    /// Get the minimum scaling frequency of this CPU
-    pub fn min_freq(&self) -> usize {
-        self.min_freq
-    }
-
-    /// Get the maximum scaling frequency of this CPU
-    pub fn max_freq(&self) -> usize {
-        self.max_freq
-    }
-
-    /// Get the base operational frequency of this CPU
-    ///
-    /// This is only available on Intel Turbo Boost CPUs, if not available this will simply return
-    /// maximum frequency.
-    pub fn base_freq(&self) -> usize {
-        self.base_freq
-    }
-
-    /// Get the transition latency of the CPU in nanoseconds
-    pub fn trans_lat_ns(&self) -> usize {
-        self.trans_lat_ns
-    }
-
-    /// Get the L2 id of the this Cpu
-    pub fn l2_id(&self) -> usize {
-        self.l2_id
-    }
-
-    /// Get the L2 id of the this Cpu
-    pub fn l3_id(&self) -> usize {
-        self.l3_id
-    }
-
-    /// Get the LLC id of the this Cpu
-    pub fn llc_id(&self) -> usize {
-        self.llc_id
-    }
+    /// Ancestor IDs.
+    pub core_id: usize,
+    pub llc_id: usize,
+    pub node_id: usize,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Core {
-    id: usize,
-    pub node_id: usize,
-    pub llc_id: usize,
-    cpus: BTreeMap<usize, Cpu>,
-    span: Cpumask,
+    pub id: usize,
+    pub cpus: BTreeMap<usize, Arc<Cpu>>,
+    /// Cpumask of all CPUs in this core.
+    pub span: Cpumask,
     pub core_type: CoreType,
-}
 
-impl Core {
-    /// Get the ID of this Core
-    pub fn id(&self) -> usize {
-        self.id
-    }
-
-    /// Get the map of CPUs inside this Core
-    pub fn cpus(&self) -> &BTreeMap<usize, Cpu> {
-        &self.cpus
-    }
-
-    /// Get a Cpumask of all SMT siblings in this Core
-    pub fn span(&self) -> &Cpumask {
-        &self.span
-    }
+    /// Ancestor IDs.
+    pub llc_id: usize,
+    pub node_id: usize,
 }
 
 #[derive(Debug, Clone)]
-pub struct Cache {
-    id: usize,
-    cores: BTreeMap<usize, Core>,
-    span: Cpumask,
-}
+pub struct Llc {
+    pub id: usize,
+    pub cores: BTreeMap<usize, Arc<Core>>,
+    /// Cpumask of all CPUs in this llc.
+    pub span: Cpumask,
 
-impl Cache {
-    /// Get the ID of this LLC
-    pub fn id(&self) -> usize {
-        self.id
-    }
+    /// Ancestor IDs.
+    pub node_id: usize,
 
-    /// Get the map of cores inside this LLC
-    pub fn cores(&self) -> &BTreeMap<usize, Core> {
-        &self.cores
-    }
-
-    /// Get a Cpumask of all CPUs in this LLC
-    pub fn span(&self) -> &Cpumask {
-        &self.span
-    }
-
-    /// Get the map of all CPUs for this LLC.
-    pub fn cpus(&self) -> BTreeMap<usize, Cpu> {
-        let mut cpus = BTreeMap::new();
-        for (_, core) in self.cores() {
-            cpus.append(&mut core.cpus.clone());
-        }
-        cpus
-    }
+    /// Skip indices to access lower level members easily.
+    pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Node {
-    id: usize,
-    llcs: BTreeMap<usize, Cache>,
+    pub id: usize,
+    pub llcs: BTreeMap<usize, Arc<Llc>>,
+    /// Cpumask of all CPUs in this node.
+    pub span: Cpumask,
+
+    /// Skip indices to access lower level members easily.
+    pub all_cores: BTreeMap<usize, Arc<Core>>,
+    pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
+
     #[cfg(feature = "gpu-topology")]
-    gpus: BTreeMap<GpuIndex, Gpu>,
-    span: Cpumask,
-}
-
-impl Node {
-    /// Get the ID of this NUMA node
-    pub fn id(&self) -> usize {
-        self.id
-    }
-
-    /// Get the map of LLCs inside this NUMA node
-    pub fn llcs(&self) -> &BTreeMap<usize, Cache> {
-        &self.llcs
-    }
-
-    /// Get the map of all CPUs for this NUMA node.
-    pub fn cpus(&self) -> BTreeMap<usize, Cpu> {
-        let mut cpus = BTreeMap::new();
-        for (_, llc) in &self.llcs {
-            for (_, core) in llc.cores() {
-                cpus.append(&mut core.cpus.clone());
-            }
-        }
-        cpus
-    }
-
-    /// Get the map of all Cores for this NUMA node.
-    pub fn cores(&self) -> BTreeMap<usize, Core> {
-        let mut cores = BTreeMap::new();
-        for (_, llc) in &self.llcs {
-            for (core_id, core) in llc.cores() {
-                cores.insert(*core_id, core.clone());
-            }
-        }
-        cores
-    }
-
-    // Get the map of all GPUs for this NUMA node.
-    #[cfg(feature = "gpu-topology")]
-    pub fn gpus(&self) -> &BTreeMap<GpuIndex, Gpu> {
-        &self.gpus
-    }
-
-    /// Get a Cpumask of all CPUs in this NUMA node
-    pub fn span(&self) -> &Cpumask {
-        &self.span
-    }
+    pub gpus: BTreeMap<GpuIndex, Gpu>,
 }
 
 #[derive(Debug)]
 pub struct Topology {
-    nodes: Vec<Node>,
-    cores: Vec<Core>,
-    cpus: BTreeMap<usize, Cpu>,
-    span: Cpumask,
-    nr_cpus_online: usize,
+    pub nodes: BTreeMap<usize, Node>,
+    /// Cpumask all CPUs in the system.
+    pub span: Cpumask,
+    pub nr_cpus_online: usize,
+
+    /// Skip indices to access lower level members easily.
+    pub all_llcs: BTreeMap<usize, Arc<Llc>>,
+    pub all_cores: BTreeMap<usize, Arc<Core>>,
+    pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
 }
 
 impl Topology {
-    fn instantiate(span: Cpumask, nodes: Vec<Node>) -> Result<Self> {
-        // For convenient and efficient lookup from the root topology object,
-        // create two BTreeMaps to the full set of Core and Cpu objects on the
-        // system. We clone the objects that are located further down in the
-        // hierarchy rather than dealing with references, as the entire
-        // Topology is read-only anyways.
-        let mut cores = Vec::new();
-        let mut cpus = BTreeMap::new();
-        for node in nodes.iter() {
-            for llc in node.llcs.values() {
-                for core in llc.cores.values() {
-                    cores.push(core.clone());
-                    for (cpu_id, cpu) in core.cpus.iter() {
-                        if let Some(_) = cpus.insert(*cpu_id, cpu.clone()) {
-                            bail!("Found duplicate CPU ID {}", cpu_id);
+    fn instantiate(span: Cpumask, mut nodes: BTreeMap<usize, Node>) -> Result<Self> {
+        // Build skip indices prefixed with all_ for easy lookups. As Arc
+        // objects can only be modified while there's only one reference,
+        // skip indices must be built from bottom to top.
+        let mut topo_llcs = BTreeMap::new();
+        let mut topo_cores = BTreeMap::new();
+        let mut topo_cpus = BTreeMap::new();
+
+        for (_node_id, node) in nodes.iter_mut() {
+            let mut node_cores = BTreeMap::new();
+            let mut node_cpus = BTreeMap::new();
+
+            for (&llc_id, llc) in node.llcs.iter_mut() {
+                let llc_mut = Arc::get_mut(llc).unwrap();
+                let mut llc_cpus = BTreeMap::new();
+
+                for (&core_id, core) in llc_mut.cores.iter_mut() {
+                    for (&cpu_id, cpu) in core.cpus.iter() {
+                        if topo_cpus
+                            .insert(cpu_id, cpu.clone())
+                            .or(node_cpus.insert(cpu_id, cpu.clone()))
+                            .or(llc_cpus.insert(cpu_id, cpu.clone()))
+                            .is_some()
+                        {
+                            bail!("Duplicate CPU ID {}", cpu_id);
                         }
                     }
+
+                    if topo_cores
+                        .insert(core_id, core.clone())
+                        .or(node_cores.insert(core_id, core.clone()))
+                        .is_some()
+                    {
+                        bail!("Duplicate CORE ID {}", core_id);
+                    }
+                }
+
+                llc_mut.all_cpus = llc_cpus;
+
+                if topo_llcs.insert(llc_id, llc.clone()).is_some() {
+                    bail!("Duplicate LLC ID {}", llc_id);
                 }
             }
+
+            node.all_cores = node_cores;
+            node.all_cpus = node_cpus;
         }
 
         let nr_cpus_online = span.weight();
         Ok(Topology {
             nodes,
-            cores,
-            cpus,
             span,
             nr_cpus_online,
+            all_llcs: topo_llcs,
+            all_cores: topo_cores,
+            all_cpus: topo_cpus,
         })
     }
 
@@ -342,16 +264,6 @@ impl Topology {
         Self::instantiate(span, nodes)
     }
 
-    /// Get a slice of the NUMA nodes on the host.
-    pub fn nodes(&self) -> &[Node] {
-        &self.nodes
-    }
-
-    /// Get a slice of all Cores on the host.
-    pub fn cores(&self) -> &[Core] {
-        &self.cores
-    }
-
     /// Get a vec of all GPUs on the hosts.
     #[cfg(feature = "gpu-topology")]
     pub fn gpus(&self) -> BTreeMap<GpuIndex, &Gpu> {
@@ -364,32 +276,17 @@ impl Topology {
         gpus
     }
 
-    /// Get a hashmap of <CPU ID, Cpu> for all Cpus on the host.
-    pub fn cpus(&self) -> &BTreeMap<usize, Cpu> {
-        &self.cpus
-    }
-
-    /// Get a cpumask of all the online CPUs on the host
-    pub fn span(&self) -> &Cpumask {
-        &self.span
-    }
-
-    /// Get the number of CPUs that were online when the Topology was created.
-    /// Because Topology objects are read-only, this value will not change if a
-    /// CPU is onlined after a Topology object has been created.
-    pub fn nr_cpus_online(&self) -> usize {
-        self.nr_cpus_online
-    }
-
     /// Returns whether the Topology has a hybrid architecture of big and little cores.
     pub fn has_little_cores(&self) -> bool {
-        self.cores.iter().any(|c| c.core_type == CoreType::Little)
+        self.all_cores
+            .values()
+            .any(|c| c.core_type == CoreType::Little)
     }
 
     /// Returns a BitVec of online CPUs.
     pub fn cpus_bitvec(&self) -> BitVec {
         let mut cpus = bitvec![0; *NR_CPUS_POSSIBLE];
-        for (id, _) in self.cpus.iter() {
+        for id in self.all_cpus.keys() {
             cpus.set(*id, true);
         }
         cpus
@@ -403,9 +300,9 @@ impl Topology {
     /// Assuming each core holds exactly at most two cpus.
     pub fn sibling_cpus(&self) -> Vec<i32> {
         let mut sibling_cpu = vec![-1i32; *NR_CPUS_POSSIBLE];
-        for core in self.cores() {
+        for core in self.all_cores.values() {
             let mut first = -1i32;
-            for (cpu_id, _) in core.cpus() {
+            for (cpu_id, _) in &core.cpus {
                 let cpu = *cpu_id;
                 if first < 0 {
                     first = cpu as i32;
@@ -447,9 +344,9 @@ impl TopologyMap {
     pub fn new(topo: &Topology) -> Result<TopologyMap> {
         let mut map: Vec<Vec<usize>> = Vec::new();
 
-        for core in topo.cores().into_iter() {
+        for core in topo.all_cores.values() {
             let mut cpu_ids: Vec<usize> = Vec::new();
-            for cpu_id in core.span().clone().into_iter() {
+            for cpu_id in core.span.clone().into_iter() {
                 cpu_ids.push(cpu_id);
             }
             map.push(cpu_ids);
@@ -563,11 +460,15 @@ fn create_insert_cpu(
     let base_freq = read_file_usize(&freq_path.join("base_frequency")).unwrap_or(max_freq);
     let trans_lat_ns = read_file_usize(&freq_path.join("cpuinfo_transition_latency")).unwrap_or(0);
 
-    let cache = node.llcs.entry(llc_id).or_insert(Cache {
+    let llc = node.llcs.entry(llc_id).or_insert(Arc::new(Llc {
         id: llc_id,
         cores: BTreeMap::new(),
         span: Cpumask::new()?,
-    });
+        all_cpus: BTreeMap::new(),
+
+        node_id: node.id,
+    }));
+    let llc_mut = Arc::get_mut(llc).unwrap();
 
     let core_type = match avg_cpu_freq {
         Some((avg_base_freq, top_max_freq)) => {
@@ -582,18 +483,20 @@ fn create_insert_cpu(
         None => CoreType::Big { turbo: false },
     };
 
-    let core = cache.cores.entry(core_id).or_insert(Core {
+    let core = llc_mut.cores.entry(core_id).or_insert(Arc::new(Core {
         id: core_id,
-        llc_id: llc_id,
-        node_id: node.id,
         cpus: BTreeMap::new(),
         span: Cpumask::new()?,
         core_type: core_type.clone(),
-    });
 
-    core.cpus.insert(
+        llc_id,
+        node_id: node.id,
+    }));
+    let core_mut = Arc::get_mut(core).unwrap();
+
+    core_mut.cpus.insert(
         cpu_id,
-        Cpu {
+        Arc::new(Cpu {
             id: cpu_id,
             min_freq: min_freq,
             max_freq: max_freq,
@@ -601,9 +504,12 @@ fn create_insert_cpu(
             trans_lat_ns: trans_lat_ns,
             l2_id: l2_id,
             l3_id: l3_id,
-            llc_id: llc_id,
             core_type: core_type.clone(),
-        },
+
+            core_id,
+            llc_id,
+            node_id: node.id,
+        }),
     );
 
     if node.span.test_cpu(cpu_id) {
@@ -611,8 +517,8 @@ fn create_insert_cpu(
     }
 
     // Update all of the devices' spans to include this CPU.
-    core.span.set_cpu(cpu_id)?;
-    cache.span.set_cpu(cpu_id)?;
+    core_mut.span.set_cpu(cpu_id)?;
+    llc_mut.span.set_cpu(cpu_id)?;
     node.span.set_cpu(cpu_id)?;
 
     Ok(())
@@ -658,8 +564,8 @@ fn avg_cpu_freq() -> Option<(usize, usize)> {
     Some((avg_base_freq / nr_cpus, top_max_freq))
 }
 
-fn create_default_node(online_mask: &Cpumask, flatten_llc: bool) -> Result<Vec<Node>> {
-    let mut nodes: Vec<Node> = Vec::with_capacity(1);
+fn create_default_node(online_mask: &Cpumask, flatten_llc: bool) -> Result<BTreeMap<usize, Node>> {
+    let mut nodes = BTreeMap::<usize, Node>::new();
 
     let mut node = Node {
         id: 0,
@@ -667,6 +573,8 @@ fn create_default_node(online_mask: &Cpumask, flatten_llc: bool) -> Result<Vec<N
         span: Cpumask::new()?,
         #[cfg(feature = "gpu-topology")]
         gpus: BTreeMap::new(),
+        all_cores: BTreeMap::new(),
+        all_cpus: BTreeMap::new(),
     };
 
     #[cfg(feature = "gpu-topology")]
@@ -692,13 +600,13 @@ fn create_default_node(online_mask: &Cpumask, flatten_llc: bool) -> Result<Vec<N
         create_insert_cpu(*cpu_id, &mut node, &online_mask, avg_cpu_freq, flatten_llc)?;
     }
 
-    nodes.push(node);
+    nodes.insert(node.id, node);
 
     Ok(nodes)
 }
 
-fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
-    let mut nodes: Vec<Node> = Vec::new();
+fn create_numa_nodes(online_mask: &Cpumask) -> Result<BTreeMap<usize, Node>> {
+    let mut nodes = BTreeMap::<usize, Node>::new();
 
     #[cfg(feature = "gpu-topology")]
     let system_gpus = create_gpus();
@@ -717,6 +625,10 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
             id: node_id,
             llcs: BTreeMap::new(),
             span: Cpumask::new()?,
+
+            all_cores: BTreeMap::new(),
+            all_cpus: BTreeMap::new(),
+
             #[cfg(feature = "gpu-topology")]
             gpus: BTreeMap::new(),
         };
@@ -748,7 +660,7 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<Vec<Node>> {
             create_insert_cpu(cpu_id, &mut node, &online_mask, avg_cpu_freq, false)?;
         }
 
-        nodes.push(node);
+        nodes.insert(node.id, node);
     }
     Ok(nodes)
 }
