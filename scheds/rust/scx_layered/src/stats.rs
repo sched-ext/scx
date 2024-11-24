@@ -154,10 +154,10 @@ impl LayerStats {
         nr_cpus_range: (usize, usize),
     ) -> Self {
         let lstat = |sidx| bstats.lstats[lidx][sidx as usize];
-        let ltotal = lstat(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
-            + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
-            + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
-            + lstat(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ);
+        let ltotal = lstat(bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL)
+            + lstat(bpf_intf::layer_stat_id_LSTAT_ENQ_WAKEUP)
+            + lstat(bpf_intf::layer_stat_id_LSTAT_ENQ_EXPIRE)
+            + lstat(bpf_intf::layer_stat_id_LSTAT_ENQ_REENQ);
         let lstat_pct = |sidx| {
             if ltotal != 0 {
                 lstat(sidx) as f64 / ltotal as f64 * 100.0
@@ -176,34 +176,34 @@ impl LayerStats {
             load: normalize_load_metric(stats.layer_loads[lidx]),
             tasks: stats.nr_layer_tasks[lidx] as u32,
             total: ltotal,
-            sel_local: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL),
-            enq_wakeup: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP),
-            enq_expire: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE),
-            enq_reenq: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ),
-            min_exec: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC),
-            min_exec_us: (lstat(bpf_intf::layer_stat_idx_LSTAT_MIN_EXEC_NS) / 1000) as u64,
-            open_idle: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE),
-            preempt: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT),
-            preempt_xllc: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_XLLC),
-            preempt_xnuma: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_XNUMA),
-            preempt_first: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FIRST),
-            preempt_idle: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_IDLE),
-            preempt_fail: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_PREEMPT_FAIL),
-            affn_viol: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL),
-            keep: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP),
-            keep_fail_max_exec: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP_FAIL_MAX_EXEC),
-            keep_fail_busy: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KEEP_FAIL_BUSY),
+            sel_local: lstat_pct(bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL),
+            enq_wakeup: lstat_pct(bpf_intf::layer_stat_id_LSTAT_ENQ_WAKEUP),
+            enq_expire: lstat_pct(bpf_intf::layer_stat_id_LSTAT_ENQ_EXPIRE),
+            enq_reenq: lstat_pct(bpf_intf::layer_stat_id_LSTAT_ENQ_REENQ),
+            min_exec: lstat_pct(bpf_intf::layer_stat_id_LSTAT_MIN_EXEC),
+            min_exec_us: (lstat(bpf_intf::layer_stat_id_LSTAT_MIN_EXEC_NS) / 1000) as u64,
+            open_idle: lstat_pct(bpf_intf::layer_stat_id_LSTAT_OPEN_IDLE),
+            preempt: lstat_pct(bpf_intf::layer_stat_id_LSTAT_PREEMPT),
+            preempt_xllc: lstat_pct(bpf_intf::layer_stat_id_LSTAT_PREEMPT_XLLC),
+            preempt_xnuma: lstat_pct(bpf_intf::layer_stat_id_LSTAT_PREEMPT_XNUMA),
+            preempt_first: lstat_pct(bpf_intf::layer_stat_id_LSTAT_PREEMPT_FIRST),
+            preempt_idle: lstat_pct(bpf_intf::layer_stat_id_LSTAT_PREEMPT_IDLE),
+            preempt_fail: lstat_pct(bpf_intf::layer_stat_id_LSTAT_PREEMPT_FAIL),
+            affn_viol: lstat_pct(bpf_intf::layer_stat_id_LSTAT_AFFN_VIOL),
+            keep: lstat_pct(bpf_intf::layer_stat_id_LSTAT_KEEP),
+            keep_fail_max_exec: lstat_pct(bpf_intf::layer_stat_id_LSTAT_KEEP_FAIL_MAX_EXEC),
+            keep_fail_busy: lstat_pct(bpf_intf::layer_stat_id_LSTAT_KEEP_FAIL_BUSY),
             is_excl: layer.kind.common().exclusive as u32,
-            excl_collision: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION),
-            excl_preempt: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT),
-            kick: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_KICK),
-            yielded: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_YIELD),
-            yield_ignore: lstat(bpf_intf::layer_stat_idx_LSTAT_YIELD_IGNORE) as u64,
-            migration: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_MIGRATION),
-            xnuma_migration: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_XNUMA_MIGRATION),
-            xlayer_wake: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_XLAYER_WAKE),
-            xlayer_rewake: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_XLAYER_REWAKE),
-            xllc_migration: lstat_pct(bpf_intf::layer_stat_idx_LSTAT_XLLC_MIGRATION),
+            excl_collision: lstat_pct(bpf_intf::layer_stat_id_LSTAT_EXCL_COLLISION),
+            excl_preempt: lstat_pct(bpf_intf::layer_stat_id_LSTAT_EXCL_PREEMPT),
+            kick: lstat_pct(bpf_intf::layer_stat_id_LSTAT_KICK),
+            yielded: lstat_pct(bpf_intf::layer_stat_id_LSTAT_YIELD),
+            yield_ignore: lstat(bpf_intf::layer_stat_id_LSTAT_YIELD_IGNORE) as u64,
+            migration: lstat_pct(bpf_intf::layer_stat_id_LSTAT_MIGRATION),
+            xnuma_migration: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XNUMA_MIGRATION),
+            xlayer_wake: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XLAYER_WAKE),
+            xlayer_rewake: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XLAYER_REWAKE),
+            xllc_migration: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XLLC_MIGRATION),
             cpus: Self::bitvec_to_u32s(&layer.cpus),
             cur_nr_cpus: layer.cpus.count_ones() as u32,
             min_nr_cpus: nr_cpus_range.0 as u32,
@@ -375,10 +375,10 @@ pub struct SysStats {
 impl SysStats {
     pub fn new(stats: &Stats, bstats: &BpfStats, fallback_cpu: usize) -> Result<Self> {
         let lsum = |idx| stats.bpf_stats.lstats_sums[idx as usize];
-        let total = lsum(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_WAKEUP)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_EXPIRE)
-            + lsum(bpf_intf::layer_stat_idx_LSTAT_ENQ_REENQ);
+        let total = lsum(bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL)
+            + lsum(bpf_intf::layer_stat_id_LSTAT_ENQ_WAKEUP)
+            + lsum(bpf_intf::layer_stat_id_LSTAT_ENQ_EXPIRE)
+            + lsum(bpf_intf::layer_stat_id_LSTAT_ENQ_REENQ);
         let lsum_pct = |idx| {
             if total != 0 {
                 lsum(idx) as f64 / total as f64 * 100.0
@@ -391,14 +391,14 @@ impl SysStats {
             at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64(),
             nr_nodes: stats.nr_nodes,
             total,
-            local: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_SEL_LOCAL),
-            open_idle: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_OPEN_IDLE),
-            affn_viol: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_AFFN_VIOL),
-            excl_collision: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_COLLISION),
-            excl_preempt: lsum_pct(bpf_intf::layer_stat_idx_LSTAT_EXCL_PREEMPT),
-            excl_idle: bstats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_IDLE as usize] as f64
+            local: lsum_pct(bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL),
+            open_idle: lsum_pct(bpf_intf::layer_stat_id_LSTAT_OPEN_IDLE),
+            affn_viol: lsum_pct(bpf_intf::layer_stat_id_LSTAT_AFFN_VIOL),
+            excl_collision: lsum_pct(bpf_intf::layer_stat_id_LSTAT_EXCL_COLLISION),
+            excl_preempt: lsum_pct(bpf_intf::layer_stat_id_LSTAT_EXCL_PREEMPT),
+            excl_idle: bstats.gstats[bpf_intf::global_stat_id_GSTAT_EXCL_IDLE as usize] as f64
                 / total as f64,
-            excl_wakeup: bstats.gstats[bpf_intf::global_stat_idx_GSTAT_EXCL_WAKEUP as usize] as f64
+            excl_wakeup: bstats.gstats[bpf_intf::global_stat_id_GSTAT_EXCL_WAKEUP as usize] as f64
                 / total as f64,
             proc_ms: stats.processing_dur.as_millis() as u64,
             busy: stats.cpu_busy * 100.0,

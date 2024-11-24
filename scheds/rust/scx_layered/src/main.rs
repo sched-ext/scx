@@ -73,8 +73,8 @@ const MAX_LAYER_MATCH_ORS: usize = bpf_intf::consts_MAX_LAYER_MATCH_ORS as usize
 const MAX_LAYERS: usize = bpf_intf::consts_MAX_LAYERS as usize;
 const USAGE_HALF_LIFE: u32 = bpf_intf::consts_USAGE_HALF_LIFE;
 const USAGE_HALF_LIFE_F64: f64 = USAGE_HALF_LIFE as f64 / 1_000_000_000.0;
-const NR_GSTATS: usize = bpf_intf::global_stat_idx_NR_GSTATS as usize;
-const NR_LSTATS: usize = bpf_intf::layer_stat_idx_NR_LSTATS as usize;
+const NR_GSTATS: usize = bpf_intf::global_stat_id_NR_GSTATS as usize;
+const NR_LSTATS: usize = bpf_intf::layer_stat_id_NR_LSTATS as usize;
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
 const MAX_LAYER_NAME: usize = bpf_intf::consts_MAX_LAYER_NAME as usize;
 
@@ -699,6 +699,7 @@ fn initialize_cpu_ctxs(skel: &BpfSkel, topo: &Topology) -> Result<()> {
 
         let topo_cpu = topo.all_cpus.get(&cpu).unwrap();
         let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
+        cpu_ctxs[cpu].cpu = cpu as i32;
         cpu_ctxs[cpu].is_big = is_big;
     }
 
@@ -781,7 +782,7 @@ struct Stats {
 
     total_util: f64, // Running AVG of sum of layer_utils
     layer_utils: Vec<f64>,
-    prev_layer_cycles: Vec<u64>,
+    prev_layer_usages: Vec<u64>,
 
     cpu_busy: f64, // Read from /proc, maybe higher than total_util
     prev_total_cpu: procfs::CpuStat,
@@ -820,16 +821,16 @@ impl Stats {
         (layer_loads.iter().sum(), layer_loads)
     }
 
-    fn read_layer_cycles(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Vec<u64> {
-        let mut layer_cycles = vec![0u64; nr_layers];
+    fn read_layer_usages(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Vec<u64> {
+        let mut layer_usages = vec![0u64; nr_layers];
 
         for cpu in 0..*NR_CPUS_POSSIBLE {
             for layer in 0..nr_layers {
-                layer_cycles[layer] += cpu_ctxs[cpu].layer_cycles[layer];
+                layer_usages[layer] += cpu_ctxs[cpu].layer_usages[layer];
             }
         }
 
-        layer_cycles
+        layer_usages
     }
 
     fn new(skel: &mut BpfSkel, proc_reader: &procfs::ProcReader) -> Result<Self> {
@@ -850,7 +851,7 @@ impl Stats {
 
             total_util: 0.0,
             layer_utils: vec![0.0; nr_layers],
-            prev_layer_cycles: Self::read_layer_cycles(&cpu_ctxs, nr_layers),
+            prev_layer_usages: Self::read_layer_usages(&cpu_ctxs, nr_layers),
 
             cpu_busy: 0.0,
             prev_total_cpu: read_total_cpu(&proc_reader)?,
@@ -894,10 +895,10 @@ impl Stats {
 
         let (total_load, layer_loads) = Self::read_layer_loads(skel, self.nr_layers);
 
-        let cur_layer_cycles = Self::read_layer_cycles(&cpu_ctxs, self.nr_layers);
-        let cur_layer_utils: Vec<f64> = cur_layer_cycles
+        let cur_layer_usages = Self::read_layer_usages(&cpu_ctxs, self.nr_layers);
+        let cur_layer_utils: Vec<f64> = cur_layer_usages
             .iter()
-            .zip(self.prev_layer_cycles.iter())
+            .zip(self.prev_layer_usages.iter())
             .map(|(cur, prev)| (cur - prev) as f64 / 1_000_000_000.0 / elapsed)
             .collect();
         let layer_utils: Vec<f64> = cur_layer_utils
@@ -931,7 +932,7 @@ impl Stats {
 
             total_util: layer_utils.iter().sum(),
             layer_utils: layer_utils.try_into().unwrap(),
-            prev_layer_cycles: cur_layer_cycles,
+            prev_layer_usages: cur_layer_usages,
 
             cpu_busy,
             prev_total_cpu: cur_total_cpu,
