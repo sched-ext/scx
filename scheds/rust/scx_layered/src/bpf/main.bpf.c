@@ -2670,20 +2670,14 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			bpf_cpumask_release(cpumask);
 
 		// create the dsqs for the layer
-		if (disable_topology) {
-			ret = scx_bpf_create_dsq(i, -1);
+		bpf_for(j, 0, nr_llcs) {
+			int node_id = llc_node_id(i);
+			dbg("CFG creating dsq %llu for layer %d %s on node %d in llc %d",
+			    llc_dsq_id, i, layer->name, node_id, j);
+			ret = scx_bpf_create_dsq(llc_dsq_id, node_id);
 			if (ret < 0)
 				return ret;
-		} else {
-			bpf_for(j, 0, nr_llcs) {
-				int node_id = llc_node_id(i);
-				dbg("CFG creating dsq %llu for layer %d %s on node %d in llc %d",
-				    llc_dsq_id, i, layer->name, node_id, j);
-				ret = scx_bpf_create_dsq(llc_dsq_id, node_id);
-				if (ret < 0)
-					return ret;
-				llc_dsq_id++;
-			}
+			llc_dsq_id++;
 		}
 	}
 	initialize_budgets(15LLU * NSEC_PER_SEC);
