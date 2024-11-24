@@ -64,13 +64,13 @@ enum layer_kind {
 };
 
 /* Statistics */
-enum global_stat_idx {
+enum global_stat_id {
 	GSTAT_EXCL_IDLE,
 	GSTAT_EXCL_WAKEUP,
 	NR_GSTATS,
 };
 
-enum layer_stat_idx {
+enum layer_stat_id {
 	LSTAT_SEL_LOCAL,
 	LSTAT_ENQ_WAKEUP,
 	LSTAT_ENQ_EXPIRE,
@@ -123,9 +123,9 @@ struct cpu_ctx {
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
 	u64			ran_current_for;
 	u64			hi_fallback_dsq_id;
-	u32			layer_idx;
-	u32			cache_idx;
-	u32			node_idx;
+	u32			task_layer_id;
+	u32			cache_id;
+	u32			node_id;
 	u32			perf;
 	struct cpu_prox_map	prox_map;
 };
@@ -193,7 +193,7 @@ enum layer_growth_algo {
 struct layer {
 	struct layer_match_ands	matches[MAX_LAYER_MATCH_ORS];
 	unsigned int		nr_match_ors;
-	unsigned int		idx;
+	unsigned int		id;
 	u64			min_exec_ns;
 	u64			max_exec_ns;
 	u64			yield_step_ns;

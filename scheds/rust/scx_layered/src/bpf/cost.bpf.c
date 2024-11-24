@@ -345,7 +345,7 @@ __weak int has_budget(struct cost *costc, struct layer *layer)
 		return 0;
 	}
 
-	u32 layer_id = layer->idx;
+	u32 layer_id = layer->id;
 	if (layer_id > nr_layers) {
 		scx_bpf_error("invalid layer %d", layer_id);
 		return 0;
