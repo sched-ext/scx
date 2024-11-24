@@ -2452,12 +2452,135 @@ struct layered_timer layered_timers[MAX_TIMERS] = {
 // TODO: separate this out to a separate compilation unit
 #include "timer.bpf.c"
 
+/*
+ * Initializes per-layer specific data structures.
+ */
+static s32 init_layer(int layer_id, u64 *fallback_dsq_id)
+{
+	struct bpf_cpumask *cpumask;
+	struct layer_cpumask_wrapper *cpumaskw;
+	struct layer *layer = &layers[layer_id];
+	int j, k, ret;
+
+	dbg("CFG LAYER[%d][%s] min_exec_ns=%lu open=%d preempt=%d exclusive=%d",
+	    layer_id, layer->name, layer->min_exec_ns,
+	    layer->kind != LAYER_KIND_CONFINED,
+	    layer->preempt, layer->exclusive);
+
+	if (layer->nr_match_ors > MAX_LAYER_MATCH_ORS) {
+		scx_bpf_error("too many ORs");
+		return -EINVAL;
+	}
+
+	bpf_for(j, 0, layer->nr_match_ors) {
+		struct layer_match_ands *ands = MEMBER_VPTR(layers, [layer_id].matches[j]);
+		if (!ands) {
+			scx_bpf_error("shouldn't happen");
+			return -EINVAL;
+		}
+
+		if (ands->nr_match_ands > NR_LAYER_MATCH_KINDS) {
+			scx_bpf_error("too many ANDs");
+			return -EINVAL;
+		}
+
+		dbg("CFG   OR[%02d]", j);
+
+		bpf_for(k, 0, ands->nr_match_ands) {
+			char header[32];
+			u64 header_data[1] = { k };
+			struct layer_match *match;
+
+			bpf_snprintf(header, sizeof(header), "CFG     AND[%02d]:",
+				     header_data, sizeof(header_data));
+
+			match = MEMBER_VPTR(layers, [layer_id].matches[j].matches[k]);
+			if (!match) {
+				scx_bpf_error("shouldn't happen");
+				return -EINVAL;
+			}
+
+			switch (match->kind) {
+			case MATCH_CGROUP_PREFIX:
+				dbg("%s CGROUP_PREFIX \"%s\"", header, match->cgroup_prefix);
+				break;
+			case MATCH_COMM_PREFIX:
+				dbg("%s COMM_PREFIX \"%s\"", header, match->comm_prefix);
+				break;
+			case MATCH_PCOMM_PREFIX:
+				dbg("%s PCOMM_PREFIX \"%s\"", header, match->pcomm_prefix);
+				break;
+			case MATCH_NICE_ABOVE:
+				dbg("%s NICE_ABOVE %d", header, match->nice);
+				break;
+			case MATCH_NICE_BELOW:
+				dbg("%s NICE_BELOW %d", header, match->nice);
+				break;
+			case MATCH_NICE_EQUALS:
+				dbg("%s NICE_EQUALS %d", header, match->nice);
+				break;
+			case MATCH_USER_ID_EQUALS:
+				dbg("%s USER_ID %u", header, match->user_id);
+				break;
+			case MATCH_GROUP_ID_EQUALS:
+				dbg("%s GROUP_ID %u", header, match->group_id);
+				break;
+			case MATCH_PID_EQUALS:
+				dbg("%s PID %u", header, match->pid);
+				break;
+			case MATCH_PPID_EQUALS:
+				dbg("%s PPID %u", header, match->ppid);
+				break;
+			case MATCH_TGID_EQUALS:
+				dbg("%s TGID %u", header, match->tgid);
+				break;
+			default:
+				scx_bpf_error("%s Invalid kind", header);
+				return -EINVAL;
+			}
+		}
+		if (ands->nr_match_ands == 0)
+			dbg("CFG     DEFAULT");
+	}
+
+
+	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)))
+		return -ENOENT;
+
+	cpumask = bpf_cpumask_create();
+	if (!cpumask)
+		return -ENOMEM;
+
+	/*
+	 * Start all layers with full cpumask so that everything runs
+	 * everywhere. This will soon be updated by refresh_cpumasks()
+	 * once the scheduler starts running.
+	 */
+	bpf_cpumask_setall(cpumask);
+
+	cpumask = bpf_kptr_xchg(&cpumaskw->cpumask, cpumask);
+	if (cpumask)
+		bpf_cpumask_release(cpumask);
+
+	// create the dsqs for the layer
+	bpf_for(j, 0, nr_llcs) {
+		int node_id = llc_node_id(j);
+		dbg("CFG creating dsq %llu for layer %d %s on node %d in llc %d",
+		    *fallback_dsq_id, layer_id, layer->name, node_id, j);
+		ret = scx_bpf_create_dsq(*fallback_dsq_id, node_id);
+		if (ret < 0)
+			return ret;
+		(*fallback_dsq_id)++;
+	}
+
+	return 0;
+}
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
 	struct bpf_cpumask *cpumask, *tmp_big_cpumask;
 	struct cpu_ctx *cctx;
-	int i, j, k, nr_online_cpus, ret;
+	int i, nr_online_cpus, ret;
 	u64 *init_antistall_dsq;
 	u32 zero;
 
@@ -2558,127 +2681,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	dbg("CFG: Dumping configuration, nr_online_cpus=%d smt_enabled=%d little_cores=%d",
 	    nr_online_cpus, smt_enabled, has_little_cores);
 
+	u64 fallback_dsq_id = 0;
 	bpf_for(i, 0, nr_layers) {
-		struct layer *layer = &layers[i];
-
-		dbg("CFG LAYER[%d][%s] min_exec_ns=%lu open=%d preempt=%d exclusive=%d",
-		    i, layer->name, layer->min_exec_ns,
-		    layer->kind != LAYER_KIND_CONFINED,
-		    layer->preempt, layer->exclusive);
-
-		if (layer->nr_match_ors > MAX_LAYER_MATCH_ORS) {
-			scx_bpf_error("too many ORs");
-			return -EINVAL;
-		}
-
-		bpf_for(j, 0, layer->nr_match_ors) {
-			struct layer_match_ands *ands = MEMBER_VPTR(layers, [i].matches[j]);
-			if (!ands) {
-				scx_bpf_error("shouldn't happen");
-				return -EINVAL;
-			}
-
-			if (ands->nr_match_ands > NR_LAYER_MATCH_KINDS) {
-				scx_bpf_error("too many ANDs");
-				return -EINVAL;
-			}
-
-			dbg("CFG   OR[%02d]", j);
-
-			bpf_for(k, 0, ands->nr_match_ands) {
-				char header[32];
-				u64 header_data[1] = { k };
-				struct layer_match *match;
-
-				bpf_snprintf(header, sizeof(header), "CFG     AND[%02d]:",
-					     header_data, sizeof(header_data));
-
-				match = MEMBER_VPTR(layers, [i].matches[j].matches[k]);
-				if (!match) {
-					scx_bpf_error("shouldn't happen");
-					return -EINVAL;
-				}
-
-				switch (match->kind) {
-				case MATCH_CGROUP_PREFIX:
-					dbg("%s CGROUP_PREFIX \"%s\"", header, match->cgroup_prefix);
-					break;
-				case MATCH_COMM_PREFIX:
-					dbg("%s COMM_PREFIX \"%s\"", header, match->comm_prefix);
-					break;
-				case MATCH_PCOMM_PREFIX:
-					dbg("%s PCOMM_PREFIX \"%s\"", header, match->pcomm_prefix);
-					break;
-				case MATCH_NICE_ABOVE:
-					dbg("%s NICE_ABOVE %d", header, match->nice);
-					break;
-				case MATCH_NICE_BELOW:
-					dbg("%s NICE_BELOW %d", header, match->nice);
-					break;
-				case MATCH_NICE_EQUALS:
-					dbg("%s NICE_EQUALS %d", header, match->nice);
-					break;
-				case MATCH_USER_ID_EQUALS:
-					dbg("%s USER_ID %u", header, match->user_id);
-					break;
-				case MATCH_GROUP_ID_EQUALS:
-					dbg("%s GROUP_ID %u", header, match->group_id);
-					break;
-				case MATCH_PID_EQUALS:
-					dbg("%s PID %u", header, match->pid);
-					break;
-				case MATCH_PPID_EQUALS:
-					dbg("%s PPID %u", header, match->ppid);
-					break;
-				case MATCH_TGID_EQUALS:
-					dbg("%s TGID %u", header, match->tgid);
-					break;
-				default:
-					scx_bpf_error("%s Invalid kind", header);
-					return -EINVAL;
-				}
-			}
-			if (ands->nr_match_ands == 0)
-				dbg("CFG     DEFAULT");
-		}
+		ret = init_layer(i, &fallback_dsq_id);
+		if (ret != 0)
+			return ret;
 	}
 
-	u64 llc_dsq_id = 0;
-	bpf_for(i, 0, nr_layers) {
-		struct layer_cpumask_wrapper *cpumaskw;
-
-		layers[i].id = i;
-		struct layer *layer = &layers[i];
-
-		if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &i)))
-			return -ENOENT;
-
-		cpumask = bpf_cpumask_create();
-		if (!cpumask)
-			return -ENOMEM;
-
-		/*
-		 * Start all layers with full cpumask so that everything runs
-		 * everywhere. This will soon be updated by refresh_cpumasks()
-		 * once the scheduler starts running.
-		 */
-		bpf_cpumask_setall(cpumask);
-
-		cpumask = bpf_kptr_xchg(&cpumaskw->cpumask, cpumask);
-		if (cpumask)
-			bpf_cpumask_release(cpumask);
-
-		// create the dsqs for the layer
-		bpf_for(j, 0, nr_llcs) {
-			int node_id = llc_node_id(i);
-			dbg("CFG creating dsq %llu for layer %d %s on node %d in llc %d",
-			    llc_dsq_id, i, layer->name, node_id, j);
-			ret = scx_bpf_create_dsq(llc_dsq_id, node_id);
-			if (ret < 0)
-				return ret;
-			llc_dsq_id++;
-		}
-	}
 	initialize_budgets(15LLU * NSEC_PER_SEC);
 	ret = start_layered_timers();
 	if (ret < 0)
