@@ -54,12 +54,10 @@ pub struct LayerStats {
     pub index: usize,
     #[stat(desc = "Total CPU utilization (100% means one full CPU)")]
     pub util: f64,
+    #[stat(desc = "Open CPU utilization %")]
+    pub util_open: f64,
     #[stat(desc = "fraction of total CPU utilization")]
     pub util_frac: f64,
-    #[stat(desc = "Open CPU utilization (100% means one full CPU)")]
-    pub open_util: f64,
-    #[stat(desc = "fraction of open CPU utilization")]
-    pub open_util_frac: f64,
     #[stat(desc = "sum of weight * duty_cycle for tasks")]
     pub load: f64,
     #[stat(desc = "layer load fraction adjusted for infeasible weights")]
@@ -174,12 +172,17 @@ impl LayerStats {
             if b != 0.0 { a / b * 100.0 } else { 0.0 }
         };
 
+        let util_sum = stats.layer_utils[lidx].iter().sum::<f64>();
+
         Self {
             index: lidx,
-            util: stats.layer_utils[lidx].iter().sum::<f64>() * 100.0,
-            util_frac: calc_frac(stats.layer_utils[lidx].iter().sum(), stats.total_util),
-            open_util: stats.layer_utils[lidx][LAYER_USAGE_OPEN] * 100.0,
-            open_util_frac: calc_frac(stats.layer_utils[lidx][LAYER_USAGE_OPEN], stats.total_util),
+            util: util_sum * 100.0,
+            util_open: if util_sum != 0.0 {
+                stats.layer_utils[lidx][LAYER_USAGE_OPEN] / util_sum * 100.0
+            } else {
+                0.0
+            },
+            util_frac: calc_frac(util_sum, stats.total_util),
             load: normalize_load_metric(stats.layer_loads[lidx]),
             tasks: stats.nr_layer_tasks[lidx] as u32,
             total: ltotal,
@@ -222,12 +225,11 @@ impl LayerStats {
     pub fn format<W: Write>(&self, w: &mut W, name: &str, header_width: usize) -> Result<()> {
         writeln!(
             w,
-            "  {:<width$}: util/frac={:5.1}/{:7.1} open/frac={:5.1}/{:7.1} tasks={:6} load={:9.2}",
+            "  {:<width$}: util/open/frac={:6.1}/{}/{:7.1} tasks={:6} load={:9.2}",
             name,
             self.util,
+            fmt_pct(self.util_open),
             self.util_frac,
-            self.open_util,
-            self.open_util_frac,
             self.tasks,
             self.load,
             width = header_width,
