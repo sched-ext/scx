@@ -202,18 +202,18 @@ static struct node_ctx *lookup_node_ctx(u32 node)
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
-	__type(value, struct cache_ctx);
+	__type(value, struct llc_ctx);
 	__uint(max_entries, MAX_LLCS);
 	__uint(map_flags, 0);
-} cache_data SEC(".maps");
+} llc_data SEC(".maps");
 
-static struct cache_ctx *lookup_cache_ctx(u32 cache_id)
+static struct llc_ctx *lookup_llc_ctx(u32 llc_id)
 {
-	struct cache_ctx *cachec;
+	struct llc_ctx *llcc;
 
-	if (!(cachec = bpf_map_lookup_elem(&cache_data, &cache_id)))
-		scx_bpf_error("no cache_ctx");
-	return cachec;
+	if (!(llcc = bpf_map_lookup_elem(&llc_data, &llc_id)))
+		scx_bpf_error("no llc_ctx");
+	return llcc;
 }
 
 static void gstat_inc(u32 id, struct cpu_ctx *cctx)
@@ -539,14 +539,14 @@ static void maybe_refresh_layered_cpus_llc(struct task_struct *p, struct task_ct
 					   s32 llc_id, u64 cpus_seq)
 {
 	if (should_refresh_cached_cpus(&tctx->layered_cpus_llc, llc_id, cpus_seq)) {
-		struct cache_ctx *cachec;
+		struct llc_ctx *llcc;
 
-		if (!(cachec = lookup_cache_ctx(llc_id)))
+		if (!(llcc = lookup_llc_ctx(llc_id)))
 			return;
 		refresh_cached_cpus(tctx->layered_llc_mask,
 				    &tctx->layered_cpus_llc, llc_id, cpus_seq,
 				    cast_mask(tctx->layered_mask),
-				    cast_mask(cachec->cpumask));
+				    cast_mask(llcc->cpumask));
 		trace("%s[%d] layered llc cpumask refreshed to llc=%d seq=%llu",
 		      p->comm, p->pid, tctx->layered_cpus_llc.id, tctx->layered_cpus_llc.seq);
 	}
@@ -689,7 +689,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 */
 	if (nr_llcs > 1) {
 		maybe_refresh_layered_cpus_llc(p, tctx, layer_cpumask,
-					       prev_cctx->cache_id, cpus_seq);
+					       prev_cctx->llc_id, cpus_seq);
 		if (!(cpumask = cast_mask(tctx->layered_llc_mask))) {
 			cpu = -1;
 			goto out_put;
@@ -1015,7 +1015,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		goto preempt;
 	}
 
-	tctx->last_dsq = layer_dsq_id(layer->id, task_cctx->cache_id);
+	tctx->last_dsq = layer_dsq_id(layer->id, task_cctx->llc_id);
 	scx_bpf_dispatch_vtime(p, tctx->last_dsq, slice_ns, vtime, enq_flags);
 
 preempt:
@@ -1062,7 +1062,7 @@ static bool keep_running(struct cpu_ctx *cctx, struct task_struct *p)
 		 * have tasks waiting, keep running it. If there are multiple
 		 * competing preempting layers, this won't work well.
 		 */
-		u32 dsq_id = layer_dsq_id(layer->id, cctx->cache_id);
+		u32 dsq_id = layer_dsq_id(layer->id, cctx->llc_id);
 		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
 			p->scx.slice = slice_ns;
 			lstat_inc(LSTAT_KEEP, layer, cctx);
@@ -1512,18 +1512,18 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/* consume preempting layers first */
-	if (consume_preempting(costc, cctx->cache_id) == 0)
+	if (consume_preempting(costc, cctx->llc_id) == 0)
 		return;
 
 	if (scx_bpf_consume(cctx->hi_fallback_dsq_id))
 		return;
 
 	/* consume !open layers second */
-	if (consume_non_open(costc, cpu, cctx->cache_id) == 0)
+	if (consume_non_open(costc, cpu, cctx->llc_id) == 0)
 		return;
 
 	/* consume !preempting open layers */
-	if (consume_open_no_preempt(costc, cctx->cache_id) == 0)
+	if (consume_open_no_preempt(costc, cctx->llc_id) == 0)
 		return;
 
 	scx_bpf_consume(LO_FALLBACK_DSQ);
@@ -1772,27 +1772,27 @@ static s32 create_node(u32 node_id)
 	return ret;
 }
 
-static s32 create_cache(u32 cache_id)
+static s32 create_llc(u32 llc_id)
 {
-	u32 cpu, llc_id;
+	u32 cpu;
 	struct bpf_cpumask *cpumask;
-	struct cache_ctx *cachec;
+	struct llc_ctx *llcc;
 	struct cpu_ctx *cctx;
 	s32 ret;
 
-	cachec = bpf_map_lookup_elem(&cache_data, &cache_id);
-	if (!cachec) {
-		scx_bpf_error("No cache%u", cache_id);
+	llcc = bpf_map_lookup_elem(&llc_data, &llc_id);
+	if (!llcc) {
+		scx_bpf_error("No llc%u", llc_id);
 		return -ENOENT;
 	}
-	cachec->id = cache_id;
+	llcc->id = llc_id;
 
-	ret = create_save_cpumask(&cachec->cpumask);
+	ret = create_save_cpumask(&llcc->cpumask);
 	if (ret)
 		return ret;
 
 	bpf_rcu_read_lock();
-	cpumask = cachec->cpumask;
+	cpumask = llcc->cpumask;
 	if (!cpumask) {
 		bpf_rcu_read_unlock();
 		scx_bpf_error("Failed to lookup node cpumask");
@@ -1806,17 +1806,16 @@ static s32 create_cache(u32 cache_id)
 			return -ENOENT;
 		}
 
-		llc_id = cpu_to_llc_id(cpu);
-		if (llc_id != cache_id)
+		if (cpu_to_llc_id(cpu) != llc_id)
 			continue;
 
 		bpf_cpumask_set_cpu(cpu, cpumask);
-		cachec->nr_cpus++;
-		cctx->cache_id = cache_id;
-		cctx->hi_fallback_dsq_id = llc_hi_fallback_dsq_id(cache_id);
+		llcc->nr_cpus++;
+		cctx->llc_id = llc_id;
+		cctx->hi_fallback_dsq_id = llc_hi_fallback_dsq_id(llc_id);
 	}
 
-	dbg("CFG creating cache %d with %d cpus", cache_id, cachec->nr_cpus);
+	dbg("CFG creating llc %d with %d cpus", llc_id, llcc->nr_cpus);
 	bpf_rcu_read_unlock();
 	return ret;
 }
@@ -1871,7 +1870,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	struct task_ctx *tctx;
 	struct layer *layer;
 	struct node_ctx *nodec;
-	struct cache_ctx *cachec;
+	struct llc_ctx *llcc;
 	s32 task_cpu = scx_bpf_task_cpu(p);
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)) ||
@@ -1885,10 +1884,10 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 		if (nodec->cpumask &&
 		    !bpf_cpumask_test_cpu(tctx->last_cpu, cast_mask(nodec->cpumask)))
 			lstat_inc(LSTAT_XNUMA_MIGRATION, layer, cctx);
-		if (!(cachec = lookup_cache_ctx(cctx->cache_id)))
+		if (!(llcc = lookup_llc_ctx(cctx->llc_id)))
 			return;
-		if (cachec->cpumask &&
-		    !bpf_cpumask_test_cpu(tctx->last_cpu, cast_mask(cachec->cpumask)))
+		if (llcc->cpumask &&
+		    !bpf_cpumask_test_cpu(tctx->last_cpu, cast_mask(llcc->cpumask)))
 			lstat_inc(LSTAT_XLLC_MIGRATION, layer, cctx);
 	}
 	tctx->last_cpu = task_cpu;
@@ -2276,7 +2275,7 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 		}
 
 		bpf_for(j, 0, nr_llcs) {
-			if (!(layer->cache_mask & (1 << j)))
+			if (!(layer->llc_mask & (1 << j)))
 				continue;
 
 			id = layer_dsq_id(layer->id, j);
@@ -2678,7 +2677,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			return ret;
 	}
 	bpf_for(i, 0, nr_llcs) {
-		ret = create_cache(i);
+		ret = create_llc(i);
 		if (ret)
 			return ret;
 		ret = scx_bpf_create_dsq(llc_hi_fallback_dsq_id(i), llc_node_id(i));

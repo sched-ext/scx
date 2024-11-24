@@ -577,7 +577,7 @@ fn nodemask_from_nodes(nodes: &Vec<usize>) -> usize {
     mask
 }
 
-fn cachemask_from_llcs(llcs: &BTreeMap<usize, Arc<Llc>>) -> usize {
+fn llcmask_from_llcs(llcs: &BTreeMap<usize, Arc<Llc>>) -> usize {
     let mut mask = 0;
     for (_, cache) in llcs {
         mask |= 1 << cache.id;
@@ -1262,7 +1262,7 @@ impl<'a> Scheduler<'a> {
                     if !nodes.is_empty() && !nodes.contains(&topo_node_id) {
                         continue;
                     }
-                    layer.cache_mask |= cachemask_from_llcs(&topo_node.llcs) as u64;
+                    layer.llc_mask |= llcmask_from_llcs(&topo_node.llcs) as u64;
                 }
             }
 

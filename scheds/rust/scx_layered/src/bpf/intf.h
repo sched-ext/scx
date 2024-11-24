@@ -133,13 +133,13 @@ struct cpu_ctx {
 	u64			hi_fallback_dsq_id;
 	u32			layer_id;
 	u32			task_layer_id;
-	u32			cache_id;
+	u32			llc_id;
 	u32			node_id;
 	u32			perf;
 	struct cpu_prox_map	prox_map;
 };
 
-struct cache_ctx {
+struct llc_ctx {
 	u32 id;
 	struct bpf_cpumask __kptr *cpumask;
 	u32 nr_cpus;
@@ -224,7 +224,7 @@ struct layer {
 
 	u64			cpus_seq;
 	u64			node_mask;
-	u64			cache_mask;
+	u64			llc_mask;
 	bool			check_no_idle;
 	u64			refresh_cpus;
 	unsigned char		cpus[MAX_CPUS_U8];
