@@ -26,6 +26,7 @@ use crate::bpf_intf;
 use crate::BpfStats;
 use crate::Layer;
 use crate::Stats;
+use crate::LAYER_USAGE_OPEN;
 
 fn fmt_pct(v: f64) -> String {
     if v >= 99.995 {
@@ -51,8 +52,10 @@ fn fmt_num(v: u64) -> String {
 pub struct LayerStats {
     #[stat(desc = "index", _om_skip)]
     pub index: usize,
-    #[stat(desc = "CPU utilization (100% means one full CPU)")]
+    #[stat(desc = "Total CPU utilization (100% means one full CPU)")]
     pub util: f64,
+    #[stat(desc = "Open CPU utilization %")]
+    pub util_open: f64,
     #[stat(desc = "fraction of total CPU utilization")]
     pub util_frac: f64,
     #[stat(desc = "sum of weight * duty_cycle for tasks")]
@@ -127,6 +130,10 @@ pub struct LayerStats {
     pub max_nr_cpus: u32,
     #[stat(desc = "slice duration config")]
     pub slice_us: u64,
+    #[stat(desc = "Per-LLC scheduling event fractions")]
+    pub llc_fracs: Vec<f64>,
+    #[stat(desc = "Per-LLC average latency")]
+    pub llc_lats: Vec<f64>,
 }
 
 impl LayerStats {
@@ -169,10 +176,17 @@ impl LayerStats {
             if b != 0.0 { a / b * 100.0 } else { 0.0 }
         };
 
+        let util_sum = stats.layer_utils[lidx].iter().sum::<f64>();
+
         Self {
             index: lidx,
-            util: stats.layer_utils[lidx] * 100.0,
-            util_frac: calc_frac(stats.layer_utils[lidx], stats.total_util),
+            util: util_sum * 100.0,
+            util_open: if util_sum != 0.0 {
+                stats.layer_utils[lidx][LAYER_USAGE_OPEN] / util_sum * 100.0
+            } else {
+                0.0
+            },
+            util_frac: calc_frac(util_sum, stats.total_util),
             load: normalize_load_metric(stats.layer_loads[lidx]),
             tasks: stats.nr_layer_tasks[lidx] as u32,
             total: ltotal,
@@ -209,15 +223,34 @@ impl LayerStats {
             min_nr_cpus: nr_cpus_range.0 as u32,
             max_nr_cpus: nr_cpus_range.1 as u32,
             slice_us: stats.layer_slice_us[lidx],
+            llc_fracs: {
+                let sid = bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize;
+                let sum = bstats.llc_lstats[lidx]
+                    .iter()
+                    .map(|lstats| lstats[sid])
+                    .sum::<u64>() as f64;
+                bstats.llc_lstats[lidx]
+                    .iter()
+                    .map(|lstats| calc_frac(lstats[sid] as f64, sum))
+                    .collect()
+            },
+            llc_lats: bstats.llc_lstats[lidx]
+                .iter()
+                .map(|lstats| {
+                    lstats[bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize] as f64
+                        / 1_000_000_000.0
+                })
+                .collect(),
         }
     }
 
     pub fn format<W: Write>(&self, w: &mut W, name: &str, header_width: usize) -> Result<()> {
         writeln!(
             w,
-            "  {:<width$}: util/frac={:5.1}/{:7.1} tasks={:6} load={:9.2}",
+            "  {:<width$}: util/open/frac={:6.1}/{}/{:7.1} tasks={:6} load={:9.2}",
             name,
             self.util,
+            fmt_pct(self.util_open),
             self.util_frac,
             self.tasks,
             self.load,
@@ -309,6 +342,27 @@ impl LayerStats {
             &cpus,
             width = header_width
         )?;
+
+        for (i, (&frac, &lat)) in self.llc_fracs.iter().zip(self.llc_lats.iter()).enumerate() {
+            if i == 0 {
+                write!(
+                    w,
+                    "  {:<width$}  LLC sched%/lat_ms",
+                    "",
+                    width = header_width
+                )?;
+            } else if (i % 4) == 0 {
+                writeln!(w, "")?;
+                write!(
+                    w,
+                    "  {:<width$}                   ",
+                    "",
+                    width = header_width
+                )?;
+            }
+            write!(w, " [{}/{:7.2}]", fmt_pct(frac), lat * 1_000.0)?;
+        }
+        writeln!(w, "")?;
 
         if self.is_excl != 0 {
             writeln!(

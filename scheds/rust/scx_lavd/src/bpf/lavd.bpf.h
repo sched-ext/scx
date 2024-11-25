@@ -20,8 +20,8 @@ enum consts_internal  {
 	LAVD_MAX_RETRY			= 4,
 
 	LAVD_TARGETED_LATENCY_NS	= (20ULL * NSEC_PER_MSEC),
-	LAVD_SLICE_MIN_NS		= (300ULL * NSEC_PER_USEC), /* min time slice */
-	LAVD_SLICE_MAX_NS		= (3ULL * NSEC_PER_MSEC), /* max time slice */
+	LAVD_SLICE_MIN_NS_DFL		= (300ULL * NSEC_PER_USEC), /* min time slice */
+	LAVD_SLICE_MAX_NS_DFL		= (3ULL * NSEC_PER_MSEC), /* max time slice */
 
 	LAVD_LC_FREQ_MAX		= 1000000,
 	LAVD_LC_RUNTIME_MAX		= LAVD_TIME_ONE_SEC,
@@ -50,7 +50,7 @@ enum consts_internal  {
 	LAVD_AP_HIGH_UTIL		= 700, /* balanced mode when 10% < cpu util <= 40%,
 						  performance mode when cpu util > 40% */
 
-	LAVD_CPDOM_STARV_NS		= (2 * LAVD_SLICE_MAX_NS),
+	LAVD_CPDOM_STARV_NS		= (2 * LAVD_SLICE_MAX_NS_DFL),
 };
 
 const volatile u64 LAVD_TIME_INFINITY_NS;
