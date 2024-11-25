@@ -605,7 +605,7 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
 fn init_cpu_prox_map(topo: &Topology, cpu_ctxs: &mut Vec<bpf_intf::cpu_ctx>) {
     for (&cpu_id, cpu) in &topo.all_cpus {
         // Collect the spans.
-        let mut core_span = topo.all_cores[&cpu.hw_id].span.clone();
+        let mut core_span = topo.all_cores[&cpu.core_id].span.clone();
         let llc_span = &topo.all_llcs[&cpu.llc_id].span;
         let node_span = &topo.nodes[&cpu.node_id].span;
         let sys_span = &topo.span;
