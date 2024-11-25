@@ -183,7 +183,8 @@ static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 }
 
 // XXX - Converting this to bss array triggers verifier bugs. See
-// BpfStats::read().
+// BpfStats::read(). Should also be cacheline aligned which doesn't work with
+// the array map.
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
@@ -202,7 +203,8 @@ static struct node_ctx *lookup_node_ctx(u32 node)
 }
 
 // XXX - Converting this to bss array triggers verifier bugs. See
-// BpfStats::read().
+// BpfStats::read(). Should also be cacheline aligned which doesn't work with
+// the array map.
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);

@@ -152,7 +152,7 @@ struct llc_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 	u32			nr_cpus;
 	u64			lstats[MAX_LAYERS][NR_LLC_LSTATS];
-} __attribute__((aligned(CACHELINE_SIZE)));
+};
 
 struct node_ctx {
 	u32			id;
@@ -160,7 +160,7 @@ struct node_ctx {
 	u32			nr_llcs;
 	u32			nr_cpus;
 	u64			llc_mask;
-} __attribute__((aligned(CACHELINE_SIZE)));
+};
 
 enum layer_match_kind {
 	MATCH_CGROUP_PREFIX,
