@@ -104,7 +104,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	struct cpu_ctx *cpuc;
 	struct preemption_info prm_task, prm_cpus[2], *victim_cpu;
 	int cpu, nr_cpus;
-	int i, v = 0, cur_cpu = bpf_get_smp_processor_id();
+	int i, v = 0, cur_cpu;
 	int ret;
 
 	/*
@@ -117,6 +117,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 		scx_bpf_error("Failed to lookup the current cpu_ctx");
 		goto null_out;
 	}
+	cur_cpu = cpuc->cpu_id;
 
 	/*
 	 * First, test the current CPU since it can skip the expensive IPI.
@@ -210,7 +211,8 @@ static void kick_current_cpu(struct task_struct *p, struct cpu_ctx *cpuc)
 	WRITE_ONCE(p->scx.slice, 0);
 }
 
-static bool try_kick_cpu(struct task_struct *p, struct cpu_ctx *victim_cpuc)
+static bool try_kick_cpu(struct task_struct *p, struct cpu_ctx *cpuc_cur,
+			 struct cpu_ctx *victim_cpuc)
 {
 	/*
 	 * Kicking the victim CPU does _not_ guarantee that task @p will run on
@@ -232,7 +234,7 @@ static bool try_kick_cpu(struct task_struct *p, struct cpu_ctx *victim_cpuc)
 	 * for some scenarios. The actual preemption will happen at the next
 	 * ops.tick().
 	 */
-	if (bpf_get_smp_processor_id() == victim_cpuc->cpu_id) {
+	if (cpuc_cur->cpu_id == victim_cpuc->cpu_id) {
 		struct task_struct *tsk = bpf_get_current_task_btf();
 		kick_current_cpu(tsk, victim_cpuc);
 		return true;
@@ -285,7 +287,7 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 	 * If a victim CPU is chosen, preempt the victim by kicking it.
 	 */
 	if (victim_cpuc)
-		ret = try_kick_cpu(p, victim_cpuc);
+		ret = try_kick_cpu(p, cpuc_cur, victim_cpuc);
 
 	return ret;
 }
