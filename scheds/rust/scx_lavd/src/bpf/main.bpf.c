@@ -777,13 +777,13 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		goto unlock_out;
 	}
 
-	waker_cpu = bpf_get_smp_processor_id();
-	cpuc_waker = get_cpu_ctx_id(waker_cpu);
+	cpuc_waker = get_cpu_ctx();
 	if (!cpuc_waker) {
 		scx_bpf_error("Failed to lookup the current cpu_ctx");
 		cpu_id = -ENOENT;
 		goto unlock_out;
 	}
+	waker_cpu = cpuc_waker->cpu_id;
 
 	cpdom_id = cpuc_waker->cpdom_id;
 	cpdom_mask_waker = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
