@@ -814,16 +814,17 @@ impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
                         .iter()
                         .zip(r_layer.iter())
                         .map(|(l_llc, r_llc)| {
-                            let mut delta = vec_sub(l_llc, r_llc);
-                            // lat is not subtractable, take L side if there
-                            // were any sched events.
-                            delta[bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize] =
-                                if delta[bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize] > 0 {
-                                    l_llc[bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize]
-                                } else {
-                                    0
-                                };
-                            delta
+                            let (mut l_llc, mut r_llc) = (l_llc.clone(), r_llc.clone());
+                            // Lat is not subtractable, take L side.
+                            r_llc[bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize] = 0;
+                            // If there were no sched events, zero it out.
+                            if l_llc[bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize]
+                                == r_llc[bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize]
+                            {
+                                l_llc[bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize] = 0;
+                            }
+
+                            vec_sub(&l_llc, &r_llc)
                         })
                         .collect()
                 })
