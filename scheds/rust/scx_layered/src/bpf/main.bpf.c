@@ -2455,20 +2455,22 @@ static s32 init_layer(int layer_id, u64 *fallback_dsq_id)
 	struct bpf_cpumask *cpumask;
 	struct layer_cpumask_wrapper *cpumaskw;
 	struct layer *layer = &layers[layer_id];
-	int j, k, ret;
+	int i, j, ret;
 
 	dbg("CFG LAYER[%d][%s] min_exec_ns=%lu open=%d preempt=%d exclusive=%d",
 	    layer_id, layer->name, layer->min_exec_ns,
 	    layer->kind != LAYER_KIND_CONFINED,
 	    layer->preempt, layer->exclusive);
 
+	layer->id = layer_id;
+
 	if (layer->nr_match_ors > MAX_LAYER_MATCH_ORS) {
 		scx_bpf_error("too many ORs");
 		return -EINVAL;
 	}
 
-	bpf_for(j, 0, layer->nr_match_ors) {
-		struct layer_match_ands *ands = MEMBER_VPTR(layers, [layer_id].matches[j]);
+	bpf_for(i, 0, layer->nr_match_ors) {
+		struct layer_match_ands *ands = MEMBER_VPTR(layers, [layer_id].matches[i]);
 		if (!ands) {
 			scx_bpf_error("shouldn't happen");
 			return -EINVAL;
@@ -2479,17 +2481,17 @@ static s32 init_layer(int layer_id, u64 *fallback_dsq_id)
 			return -EINVAL;
 		}
 
-		dbg("CFG   OR[%02d]", j);
+		dbg("CFG   OR[%02d]", i);
 
-		bpf_for(k, 0, ands->nr_match_ands) {
+		bpf_for(j, 0, ands->nr_match_ands) {
 			char header[32];
-			u64 header_data[1] = { k };
+			u64 header_data[1] = { j };
 			struct layer_match *match;
 
 			bpf_snprintf(header, sizeof(header), "CFG     AND[%02d]:",
 				     header_data, sizeof(header_data));
 
-			match = MEMBER_VPTR(layers, [layer_id].matches[j].matches[k]);
+			match = MEMBER_VPTR(layers, [layer_id].matches[i].matches[j]);
 			if (!match) {
 				scx_bpf_error("shouldn't happen");
 				return -EINVAL;
@@ -2538,7 +2540,6 @@ static s32 init_layer(int layer_id, u64 *fallback_dsq_id)
 			dbg("CFG     DEFAULT");
 	}
 
-
 	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)))
 		return -ENOENT;
 
@@ -2558,10 +2559,10 @@ static s32 init_layer(int layer_id, u64 *fallback_dsq_id)
 		bpf_cpumask_release(cpumask);
 
 	// create the dsqs for the layer
-	bpf_for(j, 0, nr_llcs) {
-		int node_id = llc_node_id(j);
+	bpf_for(i, 0, nr_llcs) {
+		int node_id = llc_node_id(i);
 		dbg("CFG creating dsq %llu for layer %d %s on node %d in llc %d",
-		    *fallback_dsq_id, layer_id, layer->name, node_id, j);
+		    *fallback_dsq_id, layer_id, layer->name, node_id, i);
 		ret = scx_bpf_create_dsq(*fallback_dsq_id, node_id);
 		if (ret < 0)
 			return ret;
