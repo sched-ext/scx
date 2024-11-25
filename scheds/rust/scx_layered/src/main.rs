@@ -68,15 +68,22 @@ const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
 const MAX_COMM: usize = bpf_intf::consts_MAX_COMM as usize;
 const MAX_LAYER_WEIGHT: u32 = bpf_intf::consts_MAX_LAYER_WEIGHT;
 const MIN_LAYER_WEIGHT: u32 = bpf_intf::consts_MIN_LAYER_WEIGHT;
-const DEFAULT_LAYER_WEIGHT: u32 = bpf_intf::consts_DEFAULT_LAYER_WEIGHT;
 const MAX_LAYER_MATCH_ORS: usize = bpf_intf::consts_MAX_LAYER_MATCH_ORS as usize;
+const MAX_LAYER_NAME: usize = bpf_intf::consts_MAX_LAYER_NAME as usize;
 const MAX_LAYERS: usize = bpf_intf::consts_MAX_LAYERS as usize;
+const DEFAULT_LAYER_WEIGHT: u32 = bpf_intf::consts_DEFAULT_LAYER_WEIGHT;
 const USAGE_HALF_LIFE: u32 = bpf_intf::consts_USAGE_HALF_LIFE;
 const USAGE_HALF_LIFE_F64: f64 = USAGE_HALF_LIFE as f64 / 1_000_000_000.0;
+
+const LAYER_USAGE_OWNED: usize = bpf_intf::layer_usage_LAYER_USAGE_OWNED as usize;
+const LAYER_USAGE_OPEN: usize = bpf_intf::layer_usage_LAYER_USAGE_OPEN as usize;
+const NR_LAYER_USAGES: usize = bpf_intf::layer_usage_NR_LAYER_USAGES as usize;
+
 const NR_GSTATS: usize = bpf_intf::global_stat_id_NR_GSTATS as usize;
 const NR_LSTATS: usize = bpf_intf::layer_stat_id_NR_LSTATS as usize;
+const NR_LLC_LSTATS: usize = bpf_intf::llc_layer_stat_id_NR_LLC_LSTATS as usize;
+
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
-const MAX_LAYER_NAME: usize = bpf_intf::consts_MAX_LAYER_NAME as usize;
 
 lazy_static! {
     static ref USAGE_DECAY: f64 = 0.5f64.powf(1.0 / USAGE_HALF_LIFE_F64);
@@ -571,7 +578,7 @@ fn nodemask_from_nodes(nodes: &Vec<usize>) -> usize {
     mask
 }
 
-fn cachemask_from_llcs(llcs: &BTreeMap<usize, Arc<Llc>>) -> usize {
+fn llcmask_from_llcs(llcs: &BTreeMap<usize, Arc<Llc>>) -> usize {
     let mut mask = 0;
     for (_, cache) in llcs {
         mask |= 1 << cache.id;
@@ -700,6 +707,8 @@ fn initialize_cpu_ctxs(skel: &BpfSkel, topo: &Topology) -> Result<()> {
         let topo_cpu = topo.all_cpus.get(&cpu).unwrap();
         let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
         cpu_ctxs[cpu].cpu = cpu as i32;
+        cpu_ctxs[cpu].layer_id = MAX_LAYERS as u32;
+        cpu_ctxs[cpu].task_layer_id = MAX_LAYERS as u32;
         cpu_ctxs[cpu].is_big = is_big;
     }
 
@@ -718,12 +727,16 @@ struct BpfStats {
     gstats: Vec<u64>,
     lstats: Vec<Vec<u64>>,
     lstats_sums: Vec<u64>,
+    llc_lstats: Vec<Vec<Vec<u64>>>, // [layer][llc][stat]
 }
 
 impl BpfStats {
-    fn read(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Self {
+    fn read(skel: &BpfSkel, cpu_ctxs: &[bpf_intf::cpu_ctx]) -> Self {
+        let nr_layers = skel.maps.rodata_data.nr_layers as usize;
+        let nr_llcs = skel.maps.rodata_data.nr_llcs as usize;
         let mut gstats = vec![0u64; NR_GSTATS];
         let mut lstats = vec![vec![0u64; NR_LSTATS]; nr_layers];
+        let mut llc_lstats = vec![vec![vec![0u64; NR_LLC_LSTATS]; nr_llcs]; nr_layers];
 
         for cpu in 0..*NR_CPUS_POSSIBLE {
             for stat in 0..NR_GSTATS {
@@ -743,10 +756,37 @@ impl BpfStats {
             }
         }
 
+        for llc_id in 0..nr_llcs {
+            // XXX - This would be a lot easier if llc_ctx were in
+            // the bss. Unfortunately, kernel < v6.12 crashes and
+            // kernel >= v6.12 fails verification after such
+            // conversion due to seemingly verifier bugs. Convert to
+            // bss maps later.
+            let key = llc_id as u32;
+            let llc_id_slice =
+                unsafe { std::slice::from_raw_parts((&key as *const u32) as *const u8, 4) };
+            let v = skel
+                .maps
+                .llc_data
+                .lookup(llc_id_slice, libbpf_rs::MapFlags::ANY)
+                .unwrap()
+                .unwrap();
+            let llcc = unsafe { *(v.as_slice().as_ptr() as *const bpf_intf::llc_ctx) };
+            //println!("llc {} id={} nr_cpus={}", llc_id, llcc.id, llcc.nr_cpus);
+
+            for layer_id in 0..nr_layers {
+                for stat_id in 0..NR_LLC_LSTATS {
+                    llc_lstats[layer_id][llc_id][stat_id] = llcc.lstats[layer_id][stat_id];
+                }
+            }
+        }
+        //println!("llc_lstats={:?}", &llc_lstats);
+
         Self {
             gstats,
             lstats,
             lstats_sums,
+            llc_lstats,
         }
     }
 }
@@ -765,6 +805,30 @@ impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
                 .map(|(l, r)| vec_sub(l, r))
                 .collect(),
             lstats_sums: vec_sub(&self.lstats_sums, &rhs.lstats_sums),
+            llc_lstats: self
+                .llc_lstats
+                .iter()
+                .zip(rhs.llc_lstats.iter())
+                .map(|(l_layer, r_layer)| {
+                    l_layer
+                        .iter()
+                        .zip(r_layer.iter())
+                        .map(|(l_llc, r_llc)| {
+                            let (mut l_llc, mut r_llc) = (l_llc.clone(), r_llc.clone());
+                            // Lat is not subtractable, take L side.
+                            r_llc[bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize] = 0;
+                            // If there were no sched events, zero it out.
+                            if l_llc[bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize]
+                                == r_llc[bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize]
+                            {
+                                l_llc[bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize] = 0;
+                            }
+
+                            vec_sub(&l_llc, &r_llc)
+                        })
+                        .collect()
+                })
+                .collect(),
         }
     }
 }
@@ -781,8 +845,8 @@ struct Stats {
     layer_loads: Vec<f64>,
 
     total_util: f64, // Running AVG of sum of layer_utils
-    layer_utils: Vec<f64>,
-    prev_layer_usages: Vec<u64>,
+    layer_utils: Vec<Vec<f64>>,
+    prev_layer_usages: Vec<Vec<u64>>,
 
     cpu_busy: f64, // Read from /proc, maybe higher than total_util
     prev_total_cpu: procfs::CpuStat,
@@ -821,12 +885,14 @@ impl Stats {
         (layer_loads.iter().sum(), layer_loads)
     }
 
-    fn read_layer_usages(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Vec<u64> {
-        let mut layer_usages = vec![0u64; nr_layers];
+    fn read_layer_usages(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Vec<Vec<u64>> {
+        let mut layer_usages = vec![vec![0u64; NR_LAYER_USAGES]; nr_layers];
 
         for cpu in 0..*NR_CPUS_POSSIBLE {
             for layer in 0..nr_layers {
-                layer_usages[layer] += cpu_ctxs[cpu].layer_usages[layer];
+                for usage in 0..NR_LAYER_USAGES {
+                    layer_usages[layer][usage] += cpu_ctxs[cpu].layer_usages[layer][usage];
+                }
             }
         }
 
@@ -836,7 +902,7 @@ impl Stats {
     fn new(skel: &mut BpfSkel, proc_reader: &procfs::ProcReader) -> Result<Self> {
         let nr_layers = skel.maps.rodata_data.nr_layers as usize;
         let cpu_ctxs = read_cpu_ctxs(skel)?;
-        let bpf_stats = BpfStats::read(&cpu_ctxs, nr_layers);
+        let bpf_stats = BpfStats::read(skel, &cpu_ctxs);
         let nr_nodes = skel.maps.rodata_data.nr_nodes as usize;
 
         Ok(Self {
@@ -850,7 +916,7 @@ impl Stats {
             layer_loads: vec![0.0; nr_layers],
 
             total_util: 0.0,
-            layer_utils: vec![0.0; nr_layers],
+            layer_utils: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
             prev_layer_usages: Self::read_layer_usages(&cpu_ctxs, nr_layers),
 
             cpu_busy: 0.0,
@@ -896,24 +962,34 @@ impl Stats {
         let (total_load, layer_loads) = Self::read_layer_loads(skel, self.nr_layers);
 
         let cur_layer_usages = Self::read_layer_usages(&cpu_ctxs, self.nr_layers);
-        let cur_layer_utils: Vec<f64> = cur_layer_usages
+        let cur_layer_utils: Vec<Vec<f64>> = cur_layer_usages
             .iter()
             .zip(self.prev_layer_usages.iter())
-            .map(|(cur, prev)| (cur - prev) as f64 / 1_000_000_000.0 / elapsed)
+            .map(|(cur, prev)| {
+                cur.iter()
+                    .zip(prev.iter())
+                    .map(|(c, p)| (c - p) as f64 / 1_000_000_000.0 / elapsed)
+                    .collect()
+            })
             .collect();
-        let layer_utils: Vec<f64> = cur_layer_utils
+        let layer_utils: Vec<Vec<f64>> = cur_layer_utils
             .iter()
             .zip(self.layer_utils.iter())
             .map(|(cur, prev)| {
-                let decay = USAGE_DECAY.powf(elapsed);
-                prev * decay + cur * (1.0 - decay)
+                cur.iter()
+                    .zip(prev.iter())
+                    .map(|(c, p)| {
+                        let decay = USAGE_DECAY.powf(elapsed);
+                        p * decay + c * (1.0 - decay)
+                    })
+                    .collect()
             })
             .collect();
 
         let cur_total_cpu = read_total_cpu(proc_reader)?;
         let cpu_busy = calc_util(&cur_total_cpu, &self.prev_total_cpu)?;
 
-        let cur_bpf_stats = BpfStats::read(&cpu_ctxs, self.nr_layers);
+        let cur_bpf_stats = BpfStats::read(skel, &cpu_ctxs);
         let bpf_stats = &cur_bpf_stats - &self.prev_bpf_stats;
 
         let processing_dur = cur_processing_dur
@@ -930,7 +1006,7 @@ impl Stats {
             total_load,
             layer_loads,
 
-            total_util: layer_utils.iter().sum(),
+            total_util: layer_utils.iter().flatten().sum(),
             layer_utils: layer_utils.try_into().unwrap(),
             prev_layer_usages: cur_layer_usages,
 
@@ -1242,7 +1318,7 @@ impl<'a> Scheduler<'a> {
                     if !nodes.is_empty() && !nodes.contains(&topo_node_id) {
                         continue;
                     }
-                    layer.cache_mask |= cachemask_from_llcs(&topo_node.llcs) as u64;
+                    layer.llc_mask |= llcmask_from_llcs(&topo_node.llcs) as u64;
                 }
             }
 
@@ -1301,6 +1377,23 @@ impl<'a> Scheduler<'a> {
         } else {
             Topology::new()?
         };
+
+        /*
+         * FIXME: scx_layered incorrectly assumes that node, LLC and CPU IDs
+         * are consecutive. Verify that they are on this system and bail if
+         * not. It's lucky that core ID is not used anywhere as core IDs are
+         * not consecutive on some Ryzen CPUs.
+         */
+        if topo.nodes.keys().enumerate().any(|(i, &k)| i != k) {
+            bail!("Holes in node IDs detected: {:?}", topo.nodes.keys());
+        }
+        if topo.all_llcs.keys().enumerate().any(|(i, &k)| i != k) {
+            bail!("Holes in LLC IDs detected: {:?}", topo.all_llcs.keys());
+        }
+        if topo.all_cpus.keys().enumerate().any(|(i, &k)| i != k) {
+            bail!("Holes in CPU IDs detected: {:?}", topo.all_cpus.keys());
+        }
+
         let netdevs = if opts.netdev_irq_balance {
             warn!(
                 "Experimental netdev IRQ balancing enabled. Reset IRQ masks of network devices after use!!!"
@@ -1503,7 +1596,17 @@ impl<'a> Scheduler<'a> {
                     cpus_range,
                     ..
                 } => {
-                    let util = if utils[idx] < 0.01 { 0.0 } else { utils[idx] };
+                    // Guide layer sizing by utilization within each layer
+                    // to avoid oversizing grouped layers. As an empty layer
+                    // can only get CPU time through fallback or open
+                    // execution, use open cputime for empty layers.
+                    let util = if layer.nr_cpus > 0 {
+                        utils[idx][LAYER_USAGE_OWNED]
+                    } else {
+                        utils[idx][LAYER_USAGE_OPEN]
+                    };
+
+                    let util = if util < 0.01 { 0.0 } else { util };
                     let low = (util / util_range.1).ceil() as usize;
                     let high = ((util / util_range.0).floor() as usize).max(low);
                     let target = layer.cpus.count_ones().clamp(low, high);
@@ -1606,9 +1709,22 @@ impl<'a> Scheduler<'a> {
         let targets = self.calc_target_nr_cpus();
         let targets = self.weighted_target_nr_cpus(&targets);
 
+        let mut ascending: Vec<(usize, usize)> = targets.iter().copied().enumerate().collect();
+        ascending.sort_by(|a, b| a.1.cmp(&b.1));
+
+        // If any layer is growing from 0 CPU, guarantee that the largest
+        // layer that is freeing CPUs frees at least one CPU.
+        let mut force_free = self
+            .layers
+            .iter()
+            .zip(targets.iter())
+            .any(|(layer, &target)| layer.nr_cpus == 0 && target > 0);
+
         // Shrink all layers first so that CPUs are available for
-        // redistribution.
-        for (idx, (layer, &target)) in self.layers.iter_mut().zip(targets.iter()).enumerate() {
+        // redistribution. Do so in the descending target number of CPUs
+        // order.
+        for &(idx, target) in ascending.iter().rev() {
+            let layer = &mut self.layers[idx];
             if layer_is_open(layer) {
                 continue;
             }
@@ -1628,7 +1744,14 @@ impl<'a> Scheduler<'a> {
             let mut freed = false;
 
             while nr_to_free > 0 {
-                let nr_freed = layer.free_some_cpus(&mut self.cpu_pool, nr_to_free)?;
+                let max_to_free = if force_free {
+                    force_free = false;
+                    layer.nr_cpus
+                } else {
+                    nr_to_free
+                };
+
+                let nr_freed = layer.free_some_cpus(&mut self.cpu_pool, max_to_free)?;
                 if nr_freed == 0 {
                     break;
                 }
@@ -1651,10 +1774,7 @@ impl<'a> Scheduler<'a> {
         // starving small layers and shouldn't make noticable difference for
         // bigger layers as work conservation should still be achieved
         // through open execution.
-        let mut ordered: Vec<(usize, usize)> = targets.iter().copied().enumerate().collect();
-        ordered.sort_by(|a, b| a.1.cmp(&b.1));
-
-        for &(idx, target) in &ordered {
+        for &(idx, target) in &ascending {
             let layer = &mut self.layers[idx];
 
             if layer_is_open(layer) {
