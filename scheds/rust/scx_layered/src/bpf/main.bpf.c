@@ -46,7 +46,7 @@ const volatile u32 layer_iteration_order[MAX_LAYERS];
 const volatile bool enable_antistall = true;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
-const u32 zero = 0;
+const u32 zero_u32 = 0;
 
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
@@ -168,12 +168,11 @@ struct {
 static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 {
 	struct cpu_ctx *cctx;
-	u32 zero = 0;
 
 	if (cpu < 0)
-		cctx = bpf_map_lookup_elem(&cpu_ctxs, &zero);
+		cctx = bpf_map_lookup_elem(&cpu_ctxs, &zero_u32);
 	else
-		cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &zero, cpu);
+		cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &zero_u32, cpu);
 
 	if (!cctx) {
 		scx_bpf_error("no cpu_ctx for cpu %d", cpu);
@@ -1154,18 +1153,16 @@ int get_delay_sec(struct task_struct *p, u64 jiffies_now)
 bool antistall_consume(struct cpu_ctx *cctx)
 {
 	u64 *antistall_dsq, jiffies_now, cur_delay;
-	u32 zero;
 	bool consumed;
 	struct task_struct *p;
 
 	cur_delay = 0;
 	consumed = false;
-	zero = 0;
 
 	if (!enable_antistall || !cctx)
 		return false;
 
-	antistall_dsq = bpf_map_lookup_elem(&antistall_cpu_dsq, &zero);
+	antistall_dsq = bpf_map_lookup_elem(&antistall_cpu_dsq, &zero_u32);
 
 	if (!antistall_dsq) {
 		scx_bpf_error("cant happen");
@@ -2333,9 +2330,6 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 	s32 cpu;
 	u64 *antistall_dsq, *delay, cur_delay;
 	int pass;
-	u32 zero;
-
-	zero = 0;
 
 	if (!dsq_id || !jiffies_now)
 		return 0;
@@ -2371,8 +2365,8 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 			if (!bpf_cpumask_test_cpu(cpu, cpumask))
 				continue;
 
-			antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq, &zero, cpu);
-			delay = bpf_map_lookup_percpu_elem(&antistall_cpu_max_delay, &zero, cpu);
+			antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq, &zero_u32, cpu);
+			delay = bpf_map_lookup_percpu_elem(&antistall_cpu_max_delay, &zero_u32, cpu);
 
 			if (!antistall_dsq || !delay) {
 				scx_bpf_error("cant happen");
@@ -2590,7 +2584,7 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 	int i;
 
 	init_antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq,
-							&zero, cpu);
+							&zero_u32, cpu);
 	if (init_antistall_dsq) {
 		*init_antistall_dsq = SCX_DSQ_INVALID;
 	}
@@ -2637,10 +2631,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	struct bpf_cpumask *cpumask, *tmp_big_cpumask;
 	struct cpu_ctx *cctx;
 	int i, nr_online_cpus, ret;
-	u64 *init_antistall_dsq;
-	u32 zero;
-
-	zero = 0;
 
 	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
 	if (ret < 0)
