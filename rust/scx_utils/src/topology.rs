@@ -126,6 +126,7 @@ pub struct Cpu {
     pub core_id: usize,
     pub llc_id: usize,
     pub node_id: usize,
+    pub hw_id: usize,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -139,6 +140,8 @@ pub struct Core {
     /// Ancestor IDs.
     pub llc_id: usize,
     pub node_id: usize,
+    /// A monotonically increasing id for each core that is unique.
+    pub hw_id: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -200,7 +203,7 @@ impl Topology {
                 let llc_mut = Arc::get_mut(llc).unwrap();
                 let mut llc_cpus = BTreeMap::new();
 
-                for (&core_id, core) in llc_mut.cores.iter_mut() {
+                for (&hw_id, core) in llc_mut.cores.iter_mut() {
                     for (&cpu_id, cpu) in core.cpus.iter() {
                         if topo_cpus
                             .insert(cpu_id, cpu.clone())
@@ -213,11 +216,11 @@ impl Topology {
                     }
 
                     if topo_cores
-                        .insert(core_id, core.clone())
-                        .or(node_cores.insert(core_id, core.clone()))
+                        .insert(hw_id, core.clone())
+                        .or(node_cores.insert(hw_id, core.clone()))
                         .is_some()
                     {
-                        bail!("Duplicate CORE ID {}", core_id);
+                        bail!("Duplicate hardware ID {}", hw_id);
                     }
                 }
 
@@ -246,21 +249,23 @@ impl Topology {
     /// Build a complete host Topology
     pub fn new() -> Result<Topology> {
         let span = cpus_online()?;
+        let mut hw_id: usize = 0;
         // If the kernel is compiled with CONFIG_NUMA, then build a topology
         // from the NUMA hierarchy in sysfs. Otherwise, just make a single
         // default node of ID 0 which contains all cores.
         let nodes = if Path::new("/sys/devices/system/node").exists() {
-            create_numa_nodes(&span)?
+            create_numa_nodes(&span, &mut hw_id)?
         } else {
-            create_default_node(&span, false)?
+            create_default_node(&span, &mut hw_id, false)?
         };
 
         Self::instantiate(span, nodes)
     }
 
     pub fn with_flattened_llc_node() -> Result<Topology> {
+        let mut hw_id = 0;
         let span = cpus_online()?;
-        let nodes = create_default_node(&span, true)?;
+        let nodes = create_default_node(&span, &mut hw_id, true)?;
         Self::instantiate(span, nodes)
     }
 
@@ -329,9 +334,9 @@ impl Topology {
 /// let topo = Topology::new().unwrap();
 /// let topo_map = TopologyMap::new(&topo).unwrap();
 ///
-/// for (core_id, core) in topo_map.iter().enumerate() {
+/// for (hw_id, core) in topo_map.iter().enumerate() {
 ///     for cpu in core {
-///         println!("core={} cpu={}", core_id, cpu);
+///         println!("core={} cpu={}", hw_id, cpu);
 ///     }
 /// }
 /// ```
@@ -365,12 +370,12 @@ impl TopologyMap {
     /// corresponding `BitVec` represents whether a logical core belongs to that physical core.
     pub fn core_cpus_bitvec(&self) -> Vec<BitVec> {
         let mut core_cpus = Vec::<BitVec>::new();
-        for (core_id, core) in self.iter().enumerate() {
-            if core_cpus.len() < core_id + 1 {
-                core_cpus.resize(core_id + 1, bitvec![0; *NR_CPUS_POSSIBLE]);
+        for (hw_id, core) in self.iter().enumerate() {
+            if core_cpus.len() < hw_id + 1 {
+                core_cpus.resize(hw_id + 1, bitvec![0; *NR_CPUS_POSSIBLE]);
             }
             for cpu in core {
-                core_cpus[core_id].set(*cpu, true);
+                core_cpus[hw_id].set(*cpu, true);
             }
         }
         core_cpus
@@ -381,12 +386,12 @@ impl TopologyMap {
     /// represents whether the physical core id of the logical core.
     pub fn cpu_core_mapping(&self) -> Vec<usize> {
         let mut cpu_core_mapping = Vec::new();
-        for (core_id, core) in self.iter().enumerate() {
+        for (hw_id, core) in self.iter().enumerate() {
             for cpu in core {
                 if cpu_core_mapping.len() < cpu + 1 {
                     cpu_core_mapping.resize(cpu + 1, 0);
                 }
-                cpu_core_mapping[*cpu] = core_id;
+                cpu_core_mapping[*cpu] = hw_id;
             }
         }
         cpu_core_mapping
@@ -424,6 +429,7 @@ fn create_insert_cpu(
     cpu_id: usize,
     node: &mut Node,
     online_mask: &Cpumask,
+    hw_id: &mut usize,
     avg_cpu_freq: Option<(usize, usize)>,
     flatten_llc: bool,
 ) -> Result<()> {
@@ -483,7 +489,13 @@ fn create_insert_cpu(
         None => CoreType::Big { turbo: false },
     };
 
-    let core = llc_mut.cores.entry(core_id).or_insert(Arc::new(Core {
+    let inc_core = if llc_mut.cores.contains_key(hw_id) || !flatten_llc {
+        true
+    } else {
+        false
+    };
+
+    let core = llc_mut.cores.entry(*hw_id).or_insert(Arc::new(Core {
         id: core_id,
         cpus: BTreeMap::new(),
         span: Cpumask::new()?,
@@ -491,6 +503,7 @@ fn create_insert_cpu(
 
         llc_id,
         node_id: node.id,
+        hw_id: *hw_id,
     }));
     let core_mut = Arc::get_mut(core).unwrap();
 
@@ -509,8 +522,13 @@ fn create_insert_cpu(
             core_id,
             llc_id,
             node_id: node.id,
+            hw_id: *hw_id,
         }),
     );
+
+    if inc_core {
+        *hw_id += 1;
+    }
 
     if node.span.test_cpu(cpu_id) {
         bail!("Node {} already had CPU {}", node.id, cpu_id);
@@ -564,7 +582,11 @@ fn avg_cpu_freq() -> Option<(usize, usize)> {
     Some((avg_base_freq / nr_cpus, top_max_freq))
 }
 
-fn create_default_node(online_mask: &Cpumask, flatten_llc: bool) -> Result<BTreeMap<usize, Node>> {
+fn create_default_node(
+    online_mask: &Cpumask,
+    hw_id: &mut usize,
+    flatten_llc: bool,
+) -> Result<BTreeMap<usize, Node>> {
     let mut nodes = BTreeMap::<usize, Node>::new();
 
     let mut node = Node {
@@ -597,7 +619,14 @@ fn create_default_node(online_mask: &Cpumask, flatten_llc: bool) -> Result<BTree
     let avg_cpu_freq = avg_cpu_freq();
     let cpu_ids = read_cpu_ids()?;
     for cpu_id in cpu_ids.iter() {
-        create_insert_cpu(*cpu_id, &mut node, &online_mask, avg_cpu_freq, flatten_llc)?;
+        create_insert_cpu(
+            *cpu_id,
+            &mut node,
+            &online_mask,
+            hw_id,
+            avg_cpu_freq,
+            flatten_llc,
+        )?;
     }
 
     nodes.insert(node.id, node);
@@ -605,7 +634,7 @@ fn create_default_node(online_mask: &Cpumask, flatten_llc: bool) -> Result<BTree
     Ok(nodes)
 }
 
-fn create_numa_nodes(online_mask: &Cpumask) -> Result<BTreeMap<usize, Node>> {
+fn create_numa_nodes(online_mask: &Cpumask, hw_id: &mut usize) -> Result<BTreeMap<usize, Node>> {
     let mut nodes = BTreeMap::<usize, Node>::new();
 
     #[cfg(feature = "gpu-topology")]
@@ -657,7 +686,7 @@ fn create_numa_nodes(online_mask: &Cpumask) -> Result<BTreeMap<usize, Node>> {
                 }
             };
 
-            create_insert_cpu(cpu_id, &mut node, &online_mask, avg_cpu_freq, false)?;
+            create_insert_cpu(cpu_id, &mut node, &online_mask, hw_id, avg_cpu_freq, false)?;
         }
 
         nodes.insert(node.id, node);
