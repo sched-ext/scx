@@ -1376,6 +1376,23 @@ impl<'a> Scheduler<'a> {
         } else {
             Topology::new()?
         };
+
+        /*
+         * FIXME: scx_layered incorrectly assumes that node, LLC and CPU IDs
+         * are consecutive. Verify that they are on this system and bail if
+         * not. It's lucky that core ID is not used anywhere as core IDs are
+         * not consecutive on some Ryzen CPUs.
+         */
+        if topo.nodes.keys().enumerate().any(|(i, &k)| i != k) {
+            bail!("Holes in node IDs detected: {:?}", topo.nodes.keys());
+        }
+        if topo.all_llcs.keys().enumerate().any(|(i, &k)| i != k) {
+            bail!("Holes in LLC IDs detected: {:?}", topo.all_llcs.keys());
+        }
+        if topo.all_cpus.keys().enumerate().any(|(i, &k)| i != k) {
+            bail!("Holes in CPU IDs detected: {:?}", topo.all_cpus.keys());
+        }
+
         let netdevs = if opts.netdev_irq_balance {
             warn!(
                 "Experimental netdev IRQ balancing enabled. Reset IRQ masks of network devices after use!!!"
