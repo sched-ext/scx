@@ -196,16 +196,27 @@ impl Topology {
             let mut node_cores = BTreeMap::new();
             let mut node_cpus = BTreeMap::new();
 
-            for (&llc_id, llc) in node.llcs.iter_mut() {
+            for (&(mut llc_id), llc) in node.llcs.iter_mut() {
                 let llc_mut = Arc::get_mut(llc).unwrap();
                 let mut llc_cpus = BTreeMap::new();
 
+                // The same LLC ID should not span across multiple NUMA nodes. If it does, create a
+                // new artificial LLC for each node. While this should never happen on physical
+                // hardware, it can occur in virtualized environments.
+                if topo_llcs.contains_key(&llc_id) {
+                    llc_id += 1;
+                }
+
                 for (&core_id, core) in llc_mut.cores.iter_mut() {
-                    for (&cpu_id, cpu) in core.cpus.iter() {
+                    let core_mut = Arc::get_mut(core).unwrap();
+                    for (&cpu_id, cpu) in core_mut.cpus.iter_mut() {
+                        let cpu_mut = Arc::get_mut(cpu).unwrap();
+                        cpu_mut.llc_id = llc_id;
+                        cpu_mut.l3_id = llc_id;
                         if topo_cpus
-                            .insert(cpu_id, cpu.clone())
-                            .or(node_cpus.insert(cpu_id, cpu.clone()))
-                            .or(llc_cpus.insert(cpu_id, cpu.clone()))
+                            .insert(cpu_id, cpu_mut.clone().into())
+                            .or(node_cpus.insert(cpu_id, cpu_mut.clone().into()))
+                            .or(llc_cpus.insert(cpu_id, cpu_mut.clone().into()))
                             .is_some()
                         {
                             bail!("Duplicate CPU ID {}", cpu_id);
