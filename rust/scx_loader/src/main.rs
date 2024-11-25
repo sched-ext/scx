@@ -480,6 +480,56 @@ async fn start_scheduler(
     args: Vec<String>,
     child_id: Arc<AtomicU32>,
 ) -> Result<()> {
+    // Ensure the child process exit is handled correctly in the runtime
+    tokio::spawn(async move {
+        let mut retries = 0u32;
+        let max_retries = 5u32;
+
+        while retries < max_retries {
+            let child = spawn_scheduler(scx_crate.clone(), args.clone(), child_id.clone()).await;
+
+            let mut failed = false;
+            if let Ok(mut child) = child {
+                let status = child
+                    .wait()
+                    .await
+                    .expect("child process encountered an error");
+
+                if !status.success() {
+                    failed = true;
+                }
+                log::debug!("Child process exited with status: {status:?}");
+            } else {
+                log::debug!("Failed to spawn child process");
+                failed = true;
+            }
+
+            // retrying if failed, otherwise exit
+            if !failed {
+                child_id.store(0, Ordering::Relaxed);
+                break;
+            }
+
+            retries += 1;
+            log::error!(
+                "Failed to start scheduler (attempt {}/{})",
+                retries,
+                max_retries,
+            );
+        }
+        child_id.store(0, Ordering::Relaxed);
+    });
+
+    Ok(())
+}
+
+/// Starts the scheduler as a child process and returns child object to manage lifecycle by the
+/// caller.
+async fn spawn_scheduler(
+    scx_crate: SupportedSched,
+    args: Vec<String>,
+    child_id: Arc<AtomicU32>,
+) -> Result<Child> {
     let sched_bin_name = get_name_from_scx(&scx_crate);
     log::info!("starting {sched_bin_name} command");
 
@@ -493,7 +543,7 @@ async fn start_scheduler(
     cmd.stdin(Stdio::null());
 
     // spawn process
-    let mut child = cmd.spawn().expect("failed to spawn command");
+    let child = cmd.spawn().expect("failed to spawn command");
 
     // NOTE: unsafe because the child might not exist, when we will try to stop it
     // set child id
@@ -504,18 +554,7 @@ async fn start_scheduler(
         Ordering::Relaxed,
     );
 
-    // Ensure the child process is exit is handled correctly in the runtime
-    tokio::spawn(async move {
-        let status = child
-            .wait()
-            .await
-            .expect("child process encountered an error");
-
-        log::debug!("Child process exited with status: {status:?}");
-        child_id.store(0, Ordering::Relaxed);
-    });
-
-    Ok(())
+    Ok(child)
 }
 
 async fn stop_scheduler(child_id: Arc<AtomicU32>) -> Result<()> {
