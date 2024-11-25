@@ -46,6 +46,7 @@ const volatile u32 layer_iteration_order[MAX_LAYERS];
 const volatile bool enable_antistall = true;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
+const u32 zero_u32 = 0;
 
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
@@ -167,12 +168,11 @@ struct {
 static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 {
 	struct cpu_ctx *cctx;
-	u32 zero = 0;
 
 	if (cpu < 0)
-		cctx = bpf_map_lookup_elem(&cpu_ctxs, &zero);
+		cctx = bpf_map_lookup_elem(&cpu_ctxs, &zero_u32);
 	else
-		cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &zero, cpu);
+		cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &zero_u32, cpu);
 
 	if (!cctx) {
 		scx_bpf_error("no cpu_ctx for cpu %d", cpu);
@@ -1153,18 +1153,16 @@ int get_delay_sec(struct task_struct *p, u64 jiffies_now)
 bool antistall_consume(struct cpu_ctx *cctx)
 {
 	u64 *antistall_dsq, jiffies_now, cur_delay;
-	u32 zero;
 	bool consumed;
 	struct task_struct *p;
 
 	cur_delay = 0;
 	consumed = false;
-	zero = 0;
 
 	if (!enable_antistall || !cctx)
 		return false;
 
-	antistall_dsq = bpf_map_lookup_elem(&antistall_cpu_dsq, &zero);
+	antistall_dsq = bpf_map_lookup_elem(&antistall_cpu_dsq, &zero_u32);
 
 	if (!antistall_dsq) {
 		scx_bpf_error("cant happen");
@@ -2332,9 +2330,6 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 	s32 cpu;
 	u64 *antistall_dsq, *delay, cur_delay;
 	int pass;
-	u32 zero;
-
-	zero = 0;
 
 	if (!dsq_id || !jiffies_now)
 		return 0;
@@ -2370,8 +2365,8 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 			if (!bpf_cpumask_test_cpu(cpu, cpumask))
 				continue;
 
-			antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq, &zero, cpu);
-			delay = bpf_map_lookup_percpu_elem(&antistall_cpu_max_delay, &zero, cpu);
+			antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq, &zero_u32, cpu);
+			delay = bpf_map_lookup_percpu_elem(&antistall_cpu_max_delay, &zero_u32, cpu);
 
 			if (!antistall_dsq || !delay) {
 				scx_bpf_error("cant happen");
@@ -2576,15 +2571,66 @@ static s32 init_layer(int layer_id, u64 *fallback_dsq_id)
 	return 0;
 }
 
+/*
+ * Initializes per CPU data structures.
+ */
+static s32 init_cpu(s32 cpu, int *nr_online_cpus,
+		    struct bpf_cpumask *cpumask,
+		    struct bpf_cpumask *tmp_big_cpumask)
+{
+	const volatile u8 *u8_ptr;
+	struct cpu_ctx *cctx;
+	u64 *init_antistall_dsq;
+	int i;
+
+	init_antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq,
+							&zero_u32, cpu);
+	if (init_antistall_dsq) {
+		*init_antistall_dsq = SCX_DSQ_INVALID;
+	}
+
+	if (!(cctx = lookup_cpu_ctx(cpu))) {
+		return -ENOMEM;
+	}
+	cctx->task_layer_id = MAX_LAYERS;
+
+	if ((u8_ptr = MEMBER_VPTR(all_cpus, [cpu / 8]))) {
+		if (*u8_ptr & (1 << (cpu % 8))) {
+			bpf_cpumask_set_cpu(cpu, cpumask);
+			(*nr_online_cpus)++;
+			if (cctx->is_big)
+				bpf_cpumask_set_cpu(cpu, tmp_big_cpumask);
+		}
+	} else {
+		return -EINVAL;
+	}
+
+	struct cpu_prox_map *pmap = &cctx->prox_map;
+	dbg("CFG: CPU[%d] core/llc/node/sys=%d/%d/%d/%d",
+	    cpu, pmap->core_end, pmap->llc_end, pmap->node_end, pmap->sys_end);
+	if (pmap->sys_end > nr_possible_cpus || pmap->sys_end > MAX_CPUS) {
+		scx_bpf_error("CPU %d  proximity map too long", i);
+		return -EINVAL;
+	}
+
+	// too much output, overruns trace buf, maybe come up with a way to compact
+	if (cpu == 0) {
+		dbg("CFG: Dumping CPU proxity map");
+		bpf_for(i, 0, pmap->sys_end) {
+			u16 *p = MEMBER_VPTR(pmap->cpus, [i]);
+			if (p)
+				dbg("CFG: CPU[%d] prox[%d]=%d", cpu, i, pmap->cpus[i]);
+		}
+	}
+
+	return 0;
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
 	struct bpf_cpumask *cpumask, *tmp_big_cpumask;
 	struct cpu_ctx *cctx;
 	int i, nr_online_cpus, ret;
-	u64 *init_antistall_dsq;
-	u32 zero;
-
-	zero = 0;
 
 	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
 	if (ret < 0)
@@ -2602,30 +2648,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 
 	nr_online_cpus = 0;
 	bpf_for(i, 0, nr_possible_cpus) {
-		const volatile u8 *u8_ptr;
-
-		init_antistall_dsq = bpf_map_lookup_percpu_elem(&antistall_cpu_dsq,
-								&zero, i);
-		if (init_antistall_dsq) {
-			*init_antistall_dsq = SCX_DSQ_INVALID;
-		}
-
-		if (!(cctx = lookup_cpu_ctx(i))) {
+		ret = init_cpu(i, &nr_online_cpus, cpumask, tmp_big_cpumask);
+		if (ret != 0) {
 			bpf_cpumask_release(cpumask);
 			bpf_cpumask_release(tmp_big_cpumask);
-			return -ENOMEM;
-		}
-		cctx->task_layer_id = MAX_LAYERS;
-
-		if ((u8_ptr = MEMBER_VPTR(all_cpus, [i / 8]))) {
-			if (*u8_ptr & (1 << (i % 8))) {
-				bpf_cpumask_set_cpu(i, cpumask);
-				nr_online_cpus++;
-				if (cctx->is_big)
-					bpf_cpumask_set_cpu(i, tmp_big_cpumask);
-			}
-		} else {
-			return -EINVAL;
+			return ret;
 		}
 	}
 
@@ -2649,33 +2676,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		ret = scx_bpf_create_dsq(llc_hi_fallback_dsq_id(i), llc_node_id(i));
 		if (ret < 0)
 			return ret;
-	}
-
-	dbg("CFG: Dumping CPU proxity map");
-	bpf_for(i, 0, nr_possible_cpus) {
-		struct cpu_ctx *cpuc;
-		struct cpu_prox_map *pmap;
-
-		cpuc = lookup_cpu_ctx(i);
-		if (!cpuc) {
-			scx_bpf_error("CPU[%d] no context", i);
-			return -EINVAL;
-		}
-		pmap = &cpuc->prox_map;
-
-		dbg("CFG: CPU[%d] core/llc/node/sys=%d/%d/%d/%d",
-		    i, pmap->core_end, pmap->llc_end, pmap->node_end, pmap->sys_end);
-		if (pmap->sys_end > nr_possible_cpus || pmap->sys_end > MAX_CPUS) {
-			scx_bpf_error("CPU %d  proximity map too long", i);
-			return -EINVAL;
-		}
-#if 0	// too much output, overruns trace buf, maybe come up with a way to compact
-		bpf_for(j, 0, pmap->sys_end) {
-			u16 *p = MEMBER_VPTR(pmap->cpus, [j]);
-			if (p)
-				dbg("CFG: CPU[%d] prox[%d]=%d", i, j, pmap->cpus[j]);
-		}
-#endif
 	}
 
 	dbg("CFG: Dumping configuration, nr_online_cpus=%d smt_enabled=%d little_cores=%d",
