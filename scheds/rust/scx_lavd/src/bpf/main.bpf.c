@@ -1615,7 +1615,7 @@ static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 	cpuc->idle_start_clk = 0;
 	cpuc->cpu_id = cpu_id;
 	cpuc->lat_cri = 0;
-	cpuc->stopping_tm_est_ns = LAVD_TIME_INFINITY_NS;
+	cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
 	WRITE_ONCE(cpuc->online_clk, now);
 	barrier();
 
@@ -1631,7 +1631,7 @@ static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 	barrier();
 
 	cpuc->lat_cri = 0;
-	cpuc->stopping_tm_est_ns = LAVD_TIME_INFINITY_NS;
+	cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
 }
 
 void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
@@ -1692,7 +1692,7 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 	if (idle) {
 		cpuc->idle_start_clk = bpf_ktime_get_ns();
 		cpuc->lat_cri = 0;
-		cpuc->stopping_tm_est_ns = LAVD_TIME_INFINITY_NS;
+		cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
 	}
 	/*
 	 * The CPU is exiting from the idle state.
