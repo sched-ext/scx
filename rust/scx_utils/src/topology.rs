@@ -420,6 +420,46 @@ fn cpus_online() -> Result<Cpumask> {
     Ok(mask)
 }
 
+// This constant defines the bit shift used to create unique topology IDs.
+const NODE_SHIFT: usize = (std::mem::size_of::<usize>() * 8) >> 1;
+
+/// Create a unique topology ID from a NUMA node ID and a local ID.
+///
+/// The topology ID is composed of two parts:
+///   - lower half bits represent the local ID (e.g., core or cache ID) within a NUMA node,
+///   - higher half bits represent the NUMA node ID.
+///
+/// Example usage:
+///
+/// ```rust
+/// # use scx_utils::{topology_id, topology_id_local, topology_id_node};
+///
+/// let node_id = 2;
+/// let local_id = 15;
+/// let topo_id = topology_id(node_id, local_id);
+/// assert_eq!(topology_id_local(topo_id), local_id);
+/// assert_eq!(topology_id_node(topo_id), node_id);
+/// ```
+pub fn topology_id(node_id: usize, id: usize) -> usize {
+    assert!(node_id < 1 << NODE_SHIFT);
+    assert!(id < 1 << NODE_SHIFT);
+    node_id << NODE_SHIFT | id
+}
+
+/// Extract the local ID from a topology ID.
+///
+/// This masks the higher bits (NUMA node ID) to retrieve only the lower bits.
+pub fn topology_id_local(topo_id: usize) -> usize {
+    topo_id & ((1 << NODE_SHIFT) - 1)
+}
+
+/// Extract the NUMA node ID from a topology ID.
+///
+/// This shifts the higher bits down to isolate the NUMA node ID.
+pub fn topology_id_node(topo_id: usize) -> usize {
+    topo_id >> NODE_SHIFT
+}
+
 fn create_insert_cpu(
     cpu_id: usize,
     node: &mut Node,
@@ -439,7 +479,7 @@ fn create_insert_cpu(
 
     // Physical core ID
     let top_path = cpu_path.join("topology");
-    let core_id = read_file_usize(&top_path.join("core_id"))?;
+    let core_id = topology_id(node.id, read_file_usize(&top_path.join("core_id"))?);
 
     // Evaluate L2, L3 and LLC cache IDs.
     //
@@ -447,8 +487,14 @@ fn create_insert_cpu(
     // if there's no cache information then we have no option but to assume a single unified cache
     // per node.
     let cache_path = cpu_path.join("cache");
-    let l2_id = read_file_usize(&cache_path.join(format!("index{}", 2)).join("id")).unwrap_or(0);
-    let l3_id = read_file_usize(&cache_path.join(format!("index{}", 3)).join("id")).unwrap_or(0);
+    let l2_id = topology_id(
+        node.id,
+        read_file_usize(&cache_path.join(format!("index{}", 2)).join("id")).unwrap_or(0),
+    );
+    let l3_id = topology_id(
+        node.id,
+        read_file_usize(&cache_path.join(format!("index{}", 3)).join("id")).unwrap_or(0),
+    );
     // Assume that LLC is always 3.
     let llc_id = if flatten_llc { 0 } else { l3_id };
 

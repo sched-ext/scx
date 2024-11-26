@@ -61,6 +61,9 @@ pub use libbpf_logger::init_libbpf_logging;
 pub mod ravg;
 
 mod topology;
+pub use topology::topology_id;
+pub use topology::topology_id_local;
+pub use topology::topology_id_node;
 pub use topology::Core;
 pub use topology::CoreType;
 pub use topology::Cpu;
