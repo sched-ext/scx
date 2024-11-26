@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -69,7 +70,23 @@ impl LayerGrowthAlgo {
         }
     }
 
-    pub fn layer_core_order(
+    pub fn layer_core_orders(
+        cpu_pool: &CpuPool,
+        layer_specs: &[LayerSpec],
+        topo: &Topology,
+    ) -> BTreeMap<usize, Vec<usize>> {
+        let mut core_orders = BTreeMap::new();
+
+        for (idx, spec) in layer_specs.iter().enumerate() {
+            let layer_growth_algo = spec.kind.common().growth_algo.clone();
+            let core_order = layer_growth_algo.layer_core_order(cpu_pool, spec, idx, topo);
+            core_orders.insert(idx, core_order);
+        }
+
+        core_orders
+    }
+
+    fn layer_core_order(
         &self,
         cpu_pool: &CpuPool,
         spec: &LayerSpec,
