@@ -53,9 +53,6 @@ enum consts_internal  {
 	LAVD_CPDOM_STARV_NS		= (2 * LAVD_SLICE_MAX_NS_DFL),
 };
 
-const volatile u64 LAVD_TIME_INFINITY_NS;
-const volatile u64 LAVD_SLICE_UNDECIDED;
-
 /*
  * Compute domain context
  * - system > numa node > llc domain > compute domain per core type (P or E)
