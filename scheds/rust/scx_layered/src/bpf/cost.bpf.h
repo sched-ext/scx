@@ -14,9 +14,9 @@
 #include <bpf/bpf_tracing.h>
 
 enum cost_consts {
-	COST_GLOBAL_KEY		= 0,
-	HI_FALLBACK_DSQ_WEIGHT	= 95,
-	LO_FALLBACK_DSQ_WEIGHT	= 85,
+	COST_GLOBAL_KEY		   = 0,
+	HI_FALLBACK_DSQ_WEIGHT = 95,
+	LO_FALLBACK_DSQ_WEIGHT = 85,
 
 	/*
 	 * Max global budgets map fallback DSQs (per LLC) as well as layers.
@@ -25,7 +25,7 @@ enum cost_consts {
 	 * level, which would simplify some things at the cost of the size of
 	 * the cost struct.
 	 */
-	MAX_GLOBAL_BUDGETS	= MAX_LLCS + MAX_LAYERS + 1,
+	MAX_GLOBAL_BUDGETS	   = MAX_LLCS + MAX_LAYERS + 1,
 };
 
 /*
@@ -33,13 +33,13 @@ enum cost_consts {
  * Budgets are allowed to recurse to parent structs.
  */
 struct cost {
-	s64		budget[MAX_GLOBAL_BUDGETS];
-	s64		capacity[MAX_GLOBAL_BUDGETS];
-	u32		pref_budget; // the cost with the most budget
-	u32		pref_layer; // the layer with the most budget.
-	u32		idx;
-	bool		overflow;
-	bool		has_parent;
+	s64 budget[MAX_GLOBAL_BUDGETS];
+	s64 capacity[MAX_GLOBAL_BUDGETS];
+	u32 pref_budget; // the cost with the most budget
+	u32 pref_layer;	 // the layer with the most budget.
+	u32 idx;
+	bool overflow;
+	bool has_parent;
 };
 
 

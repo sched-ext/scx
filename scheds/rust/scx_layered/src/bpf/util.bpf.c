@@ -42,9 +42,9 @@ struct {
 
 static char *format_cgrp_path(struct cgroup *cgrp)
 {
-	u32 zero = 0;
+	u32 zero   = 0;
 	char *path = bpf_map_lookup_elem(&cgrp_path_bufs, &zero);
-	u32 len = 0, level, max_level;
+	u32 len	   = 0, level, max_level;
 
 	if (!path) {
 		scx_bpf_error("cgrp_path_buf lookup failed");
@@ -55,7 +55,7 @@ static char *format_cgrp_path(struct cgroup *cgrp)
 	if (max_level > 127)
 		max_level = 127;
 
-	bpf_for(level, 1, max_level + 1) {
+	bpf_for (level, 1, max_level + 1) {
 		int ret;
 
 		if (level > 1 && len < MAX_PATH - 1)
@@ -67,7 +67,7 @@ static char *format_cgrp_path(struct cgroup *cgrp)
 		}
 
 		ret = bpf_probe_read_kernel_str(path + len, MAX_PATH - len - 1,
-						BPF_CORE_READ(cgrp, ancestors[level], kn, name));
+										BPF_CORE_READ(cgrp, ancestors[level], kn, name));
 		if (ret < 0) {
 			scx_bpf_error("bpf_probe_read_kernel_str failed");
 			return NULL;
@@ -80,7 +80,7 @@ static char *format_cgrp_path(struct cgroup *cgrp)
 		scx_bpf_error("cgrp_path_buf overflow");
 		return NULL;
 	}
-	path[len] = '/';
+	path[len]	  = '/';
 	path[len + 1] = '\0';
 
 	return path;
@@ -93,7 +93,7 @@ bool __noinline match_prefix(const char *prefix, const char *str, u32 max_len)
 
 	if (!prefix || !str || max_len > MAX_PATH) {
 		scx_bpf_error("invalid args: %s %s %u",
-			      prefix, str, max_len);
+					  prefix, str, max_len);
 		return false;
 	}
 
@@ -116,7 +116,7 @@ bool __noinline match_prefix(const char *prefix, const char *str, u32 max_len)
 		return false;
 	}
 
-	bpf_for(c, 0, max_len) {
+	bpf_for (c, 0, max_len) {
 		c &= 0xfff;
 		if (c > len) {
 			scx_bpf_error("invalid length");

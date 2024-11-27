@@ -16,7 +16,7 @@
 
 struct timer_wrapper {
 	struct bpf_timer timer;
-	int	key;
+	int key;
 };
 
 struct {
@@ -34,7 +34,7 @@ static int layered_timer_cb(void *map, int key, struct timer_wrapper *timerw)
 	}
 
 	struct layered_timer *cb_timer = &layered_timers[timerw->key];
-	bool resched = run_timer_cb(timerw->key);
+	bool resched				   = run_timer_cb(timerw->key);
 
 	if (!resched || !cb_timer || cb_timer->interval_ns == 0) {
 		trace("TIMER timer %d stopped", timerw->key);
@@ -42,8 +42,8 @@ static int layered_timer_cb(void *map, int key, struct timer_wrapper *timerw)
 	}
 
 	bpf_timer_start(&timerw->timer,
-			cb_timer->interval_ns,
-			cb_timer->start_flags);
+					cb_timer->interval_ns,
+					cb_timer->start_flags);
 
 	return 0;
 }
@@ -53,7 +53,7 @@ static int start_layered_timers(void)
 	struct timer_wrapper *timerw;
 	int timer_id, err;
 
-	bpf_for(timer_id, 0, MAX_TIMERS) {
+	bpf_for (timer_id, 0, MAX_TIMERS) {
 		timerw = bpf_map_lookup_elem(&layered_timer_data, &timer_id);
 		if (!timerw) {
 			scx_bpf_error("Failed to lookup layered timer");
@@ -71,9 +71,9 @@ static int start_layered_timers(void)
 		}
 		timerw->key = timer_id;
 
-		err = bpf_timer_init(&timerw->timer,
-				     &layered_timer_data,
-				     new_timer->init_flags);
+		err			= bpf_timer_init(&timerw->timer,
+									 &layered_timer_data,
+									 new_timer->init_flags);
 		if (err < 0) {
 			scx_bpf_error("can't happen");
 			return -ENOENT;
@@ -86,8 +86,8 @@ static int start_layered_timers(void)
 		}
 
 		err = bpf_timer_start(&timerw->timer,
-				      new_timer->interval_ns,
-				      new_timer->start_flags);
+							  new_timer->interval_ns,
+							  new_timer->start_flags);
 		if (err < 0) {
 			scx_bpf_error("can't happen");
 			return -ENOENT;

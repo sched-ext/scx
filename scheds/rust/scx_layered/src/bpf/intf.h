@@ -29,34 +29,34 @@ typedef unsigned long long u64;
 #endif
 
 enum consts {
-	CACHELINE_SIZE		= 64,
-	MAX_CPUS_SHIFT		= 9,
-	MAX_CPUS		= 1 << MAX_CPUS_SHIFT,
-	MAX_CPUS_U8		= MAX_CPUS / 8,
-	MAX_TASKS		= 131072,
-	MAX_PATH		= 4096,
-	MAX_NUMA_NODES		= 64,
-	MAX_LLCS		= 64,
-	MAX_COMM		= 16,
-	MAX_LAYER_MATCH_ORS	= 32,
-	MAX_LAYER_NAME		= 64,
-	MAX_LAYERS		= 16,
-	MAX_LAYER_WEIGHT	= 10000,
-	MIN_LAYER_WEIGHT	= 1,
-	DEFAULT_LAYER_WEIGHT	= 100,
-	USAGE_HALF_LIFE		= 100000000,	/* 100ms */
-	LAYER_LAT_DECAY_FACTOR	= 4,
+	CACHELINE_SIZE		   = 64,
+	MAX_CPUS_SHIFT		   = 9,
+	MAX_CPUS			   = 1 << MAX_CPUS_SHIFT,
+	MAX_CPUS_U8			   = MAX_CPUS / 8,
+	MAX_TASKS			   = 131072,
+	MAX_PATH			   = 4096,
+	MAX_NUMA_NODES		   = 64,
+	MAX_LLCS			   = 64,
+	MAX_COMM			   = 16,
+	MAX_LAYER_MATCH_ORS	   = 32,
+	MAX_LAYER_NAME		   = 64,
+	MAX_LAYERS			   = 16,
+	MAX_LAYER_WEIGHT	   = 10000,
+	MIN_LAYER_WEIGHT	   = 1,
+	DEFAULT_LAYER_WEIGHT   = 100,
+	USAGE_HALF_LIFE		   = 100000000, /* 100ms */
+	LAYER_LAT_DECAY_FACTOR = 4,
 
-	HI_FALLBACK_DSQ_BASE	= MAX_LAYERS * MAX_LLCS,
-	LO_FALLBACK_DSQ		= (MAX_LAYERS * MAX_LLCS) + MAX_LLCS + 1,
+	HI_FALLBACK_DSQ_BASE   = MAX_LAYERS * MAX_LLCS,
+	LO_FALLBACK_DSQ		   = (MAX_LAYERS * MAX_LLCS) + MAX_LLCS + 1,
 
 	/* XXX remove */
-	MAX_CGRP_PREFIXES	= 32,
+	MAX_CGRP_PREFIXES	   = 32,
 
-	NSEC_PER_USEC		= 1000ULL,
-	NSEC_PER_MSEC		= (1000ULL * NSEC_PER_USEC),
-	MSEC_PER_SEC		= 1000ULL,
-	NSEC_PER_SEC		= NSEC_PER_MSEC * MSEC_PER_SEC
+	NSEC_PER_USEC		   = 1000ULL,
+	NSEC_PER_MSEC		   = (1000ULL * NSEC_PER_USEC),
+	MSEC_PER_SEC		   = 1000ULL,
+	NSEC_PER_SEC		   = NSEC_PER_MSEC * MSEC_PER_SEC
 };
 
 enum layer_kind {
@@ -118,48 +118,48 @@ enum llc_layer_stat_id {
 
 /* CPU proximity map from closest to farthest, starts with self */
 struct cpu_prox_map {
-	u16			cpus[MAX_CPUS];
-	u32			core_end;
-	u32			llc_end;
-	u32			node_end;
-	u32			sys_end;
+	u16 cpus[MAX_CPUS];
+	u32 core_end;
+	u32 llc_end;
+	u32 node_end;
+	u32 sys_end;
 };
 
 struct cpu_ctx {
-	s32			cpu;
-	bool			current_preempt;
-	bool			current_exclusive;
-	bool			prev_exclusive;
-	bool			maybe_idle;
-	bool			yielding;
-	bool			try_preempt_first;
-	bool			is_big;
-	u64			layer_usages[MAX_LAYERS][NR_LAYER_USAGES];
-	u64			gstats[NR_GSTATS];
-	u64			lstats[MAX_LAYERS][NR_LSTATS];
-	u64			ran_current_for;
-	u64			hi_fallback_dsq_id;
-	u32			layer_id;
-	u32			task_layer_id;
-	u32			llc_id;
-	u32			node_id;
-	u32			perf;
-	struct cpu_prox_map	prox_map;
+	s32 cpu;
+	bool current_preempt;
+	bool current_exclusive;
+	bool prev_exclusive;
+	bool maybe_idle;
+	bool yielding;
+	bool try_preempt_first;
+	bool is_big;
+	u64 layer_usages[MAX_LAYERS][NR_LAYER_USAGES];
+	u64 gstats[NR_GSTATS];
+	u64 lstats[MAX_LAYERS][NR_LSTATS];
+	u64 ran_current_for;
+	u64 hi_fallback_dsq_id;
+	u32 layer_id;
+	u32 task_layer_id;
+	u32 llc_id;
+	u32 node_id;
+	u32 perf;
+	struct cpu_prox_map prox_map;
 };
 
 struct llc_ctx {
-	u32			id;
+	u32 id;
 	struct bpf_cpumask __kptr *cpumask;
-	u32			nr_cpus;
-	u64			lstats[MAX_LAYERS][NR_LLC_LSTATS];
+	u32 nr_cpus;
+	u64 lstats[MAX_LAYERS][NR_LLC_LSTATS];
 };
 
 struct node_ctx {
-	u32			id;
+	u32 id;
 	struct bpf_cpumask __kptr *cpumask;
-	u32			nr_llcs;
-	u32			nr_cpus;
-	u64			llc_mask;
+	u32 nr_llcs;
+	u32 nr_cpus;
+	u64 llc_mask;
 };
 
 enum layer_match_kind {
@@ -179,21 +179,21 @@ enum layer_match_kind {
 };
 
 struct layer_match {
-	int		kind;
-	char		cgroup_prefix[MAX_PATH];
-	char		comm_prefix[MAX_COMM];
-	char		pcomm_prefix[MAX_COMM];
-	int		nice;
-	u32		user_id;
-	u32		group_id;
-	u32		pid;
-	u32		ppid;
-	u32		tgid;
+	int kind;
+	char cgroup_prefix[MAX_PATH];
+	char comm_prefix[MAX_COMM];
+	char pcomm_prefix[MAX_COMM];
+	int nice;
+	u32 user_id;
+	u32 group_id;
+	u32 pid;
+	u32 ppid;
+	u32 tgid;
 };
 
 struct layer_match_ands {
-	struct layer_match	matches[NR_LAYER_MATCH_KINDS];
-	int			nr_match_ands;
+	struct layer_match matches[NR_LAYER_MATCH_KINDS];
+	int nr_match_ands;
 };
 
 enum layer_growth_algo {
@@ -209,37 +209,37 @@ enum layer_growth_algo {
 };
 
 struct layer {
-	struct layer_match_ands	matches[MAX_LAYER_MATCH_ORS];
-	unsigned int		nr_match_ors;
-	unsigned int		id;
-	u64			min_exec_ns;
-	u64			max_exec_ns;
-	u64			yield_step_ns;
-	u64			slice_ns;
-	u32			weight;
+	struct layer_match_ands matches[MAX_LAYER_MATCH_ORS];
+	unsigned int nr_match_ors;
+	unsigned int id;
+	u64 min_exec_ns;
+	u64 max_exec_ns;
+	u64 yield_step_ns;
+	u64 slice_ns;
+	u32 weight;
 
-	int			kind;
-	bool			preempt;
-	bool			preempt_first;
-	bool			exclusive;
-	bool			idle_smt;
-	int			growth_algo;
+	int kind;
+	bool preempt;
+	bool preempt_first;
+	bool exclusive;
+	bool idle_smt;
+	int growth_algo;
 
-	u64			vtime_now;
-	u64			nr_tasks;
+	u64 vtime_now;
+	u64 nr_tasks;
 
-	u64			load;
-	struct ravg_data	load_rd;
+	u64 load;
+	struct ravg_data load_rd;
 
-	u64			cpus_seq;
-	u64			node_mask;
-	u64			llc_mask;
-	bool			check_no_idle;
-	u64			refresh_cpus;
-	unsigned char		cpus[MAX_CPUS_U8];
-	unsigned int		nr_cpus;	// managed from BPF side
-	unsigned int		perf;
-	char			name[MAX_LAYER_NAME];
+	u64 cpus_seq;
+	u64 node_mask;
+	u64 llc_mask;
+	bool check_no_idle;
+	u64 refresh_cpus;
+	unsigned char cpus[MAX_CPUS_U8];
+	unsigned int nr_cpus; // managed from BPF side
+	unsigned int perf;
+	char name[MAX_LAYER_NAME];
 };
 
 #endif /* __INTF_H */

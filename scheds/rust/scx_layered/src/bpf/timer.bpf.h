@@ -13,7 +13,7 @@
 
 enum timer_consts {
 	// kernel definitions
-	CLOCK_BOOTTIME		= 7,
+	CLOCK_BOOTTIME = 7,
 };
 
 struct layered_timer {

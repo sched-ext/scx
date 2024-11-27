@@ -1,0 +1,39 @@
+---
+AlignConsecutiveAssignments: AcrossEmptyLinesAndComments
+AlignConsecutiveBitFields: AcrossEmptyLinesAndComments
+AlignConsecutiveMacros: AcrossEmptyLinesAndComments
+BasedOnStyle: LLVM
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  AfterControlStatement: false
+  AfterClass: false
+  AfterStruct: false
+  AfterEnum: false
+  BeforeElse: false
+  IndentBraces: false
+
+SpaceBeforeParens: ControlStatements
+SpacesInParentheses: false
+
+UseTab: Always
+IndentWidth: 4
+TabWidth: 4
+IndentCaseLabels: true
+AlignAfterOpenBracket: Align
+AllowShortFunctionsOnASingleLine: Inline
+
+ColumnLimit: 0
+
+ForEachMacros:
+  - bpf_for
+  - bpf_for_each
+StatementMacros:
+  - bpf_repeat
+
+SortIncludes: false
+ReflowComments: false
+MaxEmptyLinesToKeep: 9999
+KeepEmptyLinesAtTheStartOfBlocks: true
+---
+
