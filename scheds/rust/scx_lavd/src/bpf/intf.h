@@ -84,6 +84,7 @@ struct sys_stat {
 	volatile u64	nr_sched;	/* total scheduling so far */
 	volatile u64	nr_perf_cri;	/* number of performance-critical tasks scheduled */
 	volatile u64	nr_lat_cri;	/* number of latency-critical tasks scheduled */
+	volatile u64	nr_x_migration; /* number of cross domain migration */
 	volatile u64	nr_big;		/* scheduled on big core */
 	volatile u64	nr_pc_on_big;	/* performance-critical tasks scheduled on big core */
 	volatile u64	nr_lc_on_big;	/* latency-critical tasks scheduled on big core */

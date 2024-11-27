@@ -1179,7 +1179,7 @@ static bool consume_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 	 * If there is a starving DSQ, try to consume it first.
 	 */
 	if (consume_starving_task(cpu, cpuc, now))
-		return true;
+		goto x_domain_migration_out;
 
 	/*
 	 * Try to consume from CPU's associated DSQ.
@@ -1222,11 +1222,19 @@ static bool consume_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 				continue;
 
 			if (consume_dsq(cpu, dsq_id, now))
-				return true;
+				goto x_domain_migration_out;
 		}
 	}
 
 	return false;
+
+	/*
+	 * Task migration across compute domains happens.
+	 * Update the statistics.
+	 */
+x_domain_migration_out:
+	cpuc->nr_x_migration++;
+	return true;
 }
 
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
