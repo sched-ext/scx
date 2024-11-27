@@ -398,10 +398,6 @@ static bool refresh_cpumasks(u32 layer_id)
 	return total > 0;
 }
 
-// TODO: Refactor includes that have circular dependencies. This import must be
-// defined after some helpers, but before it's helpers are used.
-#include "cost.bpf.c"
-
 /*
  * Refreshes all layer cpumasks, this is called via BPF_PROG_RUN from userspace.
  */
@@ -868,7 +864,6 @@ bool try_preempt_cpu(s32 cand, struct task_struct *p, struct cpu_ctx *cpuc,
 		     struct task_ctx *taskc, struct layer *layer,
 		     bool preempt_first)
 {
-	struct cost *costc;
 	struct cpu_ctx *cand_cpuc, *sib_cpuc = NULL;
 	s32 sib;
 
@@ -878,13 +873,6 @@ bool try_preempt_cpu(s32 cand, struct task_struct *p, struct cpu_ctx *cpuc,
 	if (!(cand_cpuc = lookup_cpu_ctx(cand)) || cand_cpuc->current_preempt ||
 	    (cand_cpuc->protect_owned && cand_cpuc->running_owned))
 		return false;
-
-	if (!(costc = lookup_cpu_cost(cand)) ||
-	    has_budget(costc, layer) == 0 ||
-	    !has_preempt_budget(costc, cand_cpuc->task_layer_id, taskc->layer_id)) {
-		trace("COST layer %s not enough budget to preempt", layer->name);
-		return false;
-	}
 
 	/*
 	 * If exclusive, we want to make sure the sibling CPU, if there's
@@ -1243,11 +1231,10 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cpuc, *sib_cpuc;
 	struct layer *layer;
-	struct cost *costc;
-	u32 u, layer_id;
+	u32 layer_id;
 	s32 sib = sibling_cpu(cpu);
 
-	if (!(cpuc = lookup_cpu_ctx(-1)) || !(costc = lookup_cpu_cost(cpu)))
+	if (!(cpuc = lookup_cpu_ctx(-1)))
 		return;
 
 	if (antistall_consume(cpuc))
@@ -1280,15 +1267,8 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	}
 
 	/* consume preempting layers first */
-	bpf_for(u, 0, nr_layers) {
-		layer_id = rotate_layer_id(costc->pref_layer, u);
-		if (layer_id >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return;
-		}
+	bpf_for(layer_id, 0, nr_layers) {
 		layer = MEMBER_VPTR(layers, [layer_id]);
-		if (has_budget(costc, layer) == 0)
-			continue;
 		if (layer->preempt && scx_bpf_consume(layer_id))
 			return;
 	}
@@ -1297,15 +1277,8 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 		return;
 
 	/* consume !open layers second */
-	bpf_for(u, 0, nr_layers) {
-		layer_id = rotate_layer_id(costc->pref_layer, u);
-		if (layer_id >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return;
-		}
+	bpf_for(layer_id, 0, nr_layers) {
 		layer = MEMBER_VPTR(layers, [layer_id]);
-		if (has_budget(costc, layer) == 0)
-			continue;
 		struct cpumask *layer_cpumask;
 
 		/* consume matching layers */
@@ -1320,15 +1293,8 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	}
 
 	/* consume !preempting open layers */
-	bpf_for(u, 0, nr_layers) {
-		layer_id = rotate_layer_id(costc->pref_layer, u);
-		if (layer_id >= nr_layers) {
-			scx_bpf_error("can't happen");
-			return;
-		}
+	bpf_for(layer_id, 0, nr_layers) {
 		layer = MEMBER_VPTR(layers, [layer_id]);
-		if (has_budget(costc, layer) == 0)
-			continue;
 		if (!layer->preempt && layer->kind != LAYER_KIND_CONFINED &&
 		    scx_bpf_consume(layer_id))
 			return;
@@ -1337,26 +1303,18 @@ void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
 	scx_bpf_consume(LO_FALLBACK_DSQ);
 }
 
-__weak int consume_preempting(struct cost *costc, u32 my_llc_id)
+__weak int consume_preempting(u32 my_llc_id)
 {
 	struct layer *layer;
 	u64 dsq_id;
 	u32 u, v, layer_id;
 
-	if (!costc)
-		return -EINVAL;
-
 	if (local_llc_iteration) {
 		bpf_for(u, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, u);
-			bpf_for(v, 0, nr_layers) {
-				layer_id = rotate_layer_id(costc->pref_layer, v);
-				if (layer_id >= nr_layers) {
-					scx_bpf_error("can't happen");
-					return -EINVAL;
-				}
+			bpf_for(layer_id, 0, nr_layers) {
 				layer = MEMBER_VPTR(layers, [layer_id]);
-				if (!layer->preempt || has_budget(costc, layer) == 0)
+				if (!layer->preempt)
 					continue;
 				dsq_id = layer_dsq_id(layer_id, llc_id);
 				if (scx_bpf_consume(dsq_id))
@@ -1364,14 +1322,13 @@ __weak int consume_preempting(struct cost *costc, u32 my_llc_id)
 			}
 		}
 	} else {
-		bpf_for(u, 0, nr_layers) {
-			layer_id = rotate_layer_id(costc->pref_layer, u);
+		bpf_for(layer_id, 0, nr_layers) {
 			if (layer_id >= nr_layers) {
 				scx_bpf_error("can't happen");
 				return -EINVAL;
 			}
 			layer = MEMBER_VPTR(layers, [layer_id]);
-			if (!layer->preempt || has_budget(costc, layer) == 0)
+			if (!layer->preempt)
 				continue;
 
 			bpf_for(v, 0, nr_llcs) {
@@ -1386,27 +1343,17 @@ __weak int consume_preempting(struct cost *costc, u32 my_llc_id)
 	return -ENOENT;
 }
 
-static __noinline int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_id)
+static __noinline int consume_non_open(s32 cpu, u32 my_llc_id)
 {
 	struct layer *layer;
 	u64 dsq_id;
 	u32 u, v, layer_id;
 
-	if (!costc)
-		return -EINVAL;
-
 	if (local_llc_iteration) {
 		bpf_for(u, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, u);
-			bpf_for(v, 0, nr_layers) {
-				layer_id = rotate_layer_id(costc->pref_layer, v);
-				if (layer_id >= nr_layers) {
-					scx_bpf_error("can't happen");
-					return -EINVAL;
-				}
+			bpf_for(layer_id, 0, nr_layers) {
 				layer = MEMBER_VPTR(layers, [layer_id]);
-				if (has_budget(costc, layer) == 0)
-					continue;
 
 				struct cpumask *layer_cpumask;
 				if (!(layer_cpumask = lookup_layer_cpumask(layer_id)))
@@ -1424,15 +1371,8 @@ static __noinline int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_i
 			}
 		}
 	} else {
-		bpf_for(u, 0, nr_layers) {
-			layer_id = rotate_layer_id(costc->pref_layer, u);
-			if (layer_id >= nr_layers) {
-				scx_bpf_error("can't happen");
-				return -EINVAL;
-			}
+		bpf_for(layer_id, 0, nr_layers) {
 			layer = MEMBER_VPTR(layers, [layer_id]);
-			if (has_budget(costc, layer) == 0)
-				continue;
 
 			struct cpumask *layer_cpumask;
 			if (!(layer_cpumask = lookup_layer_cpumask(layer_id)))
@@ -1455,27 +1395,17 @@ static __noinline int consume_non_open(struct cost *costc, s32 cpu, u32 my_llc_i
 	return -ENOENT;
 }
 
-__weak int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
+__weak int consume_open_no_preempt(u32 my_llc_id)
 {
 	struct layer *layer;
 	u64 dsq_id;
 	u32 u, v, layer_id;
 
-	if (!costc)
-		return -EINVAL;
-
 	if (local_llc_iteration) {
 		bpf_for(u, 0, nr_llcs) {
 			u32 llc_id = rotate_llc_id(my_llc_id, u);
-			bpf_for(v, 0, nr_layers) {
-				layer_id = rotate_layer_id(costc->pref_layer, v);
-				if (layer_id >= nr_layers) {
-					scx_bpf_error("can't happen");
-					return -EINVAL;
-				}
+			bpf_for(layer_id, 0, nr_layers) {
 				layer = MEMBER_VPTR(layers, [layer_id]);
-				if (has_budget(costc, layer) == 0)
-					continue;
 				if (layer->preempt || layer->kind == LAYER_KIND_CONFINED)
 					continue;
 
@@ -1485,15 +1415,8 @@ __weak int consume_open_no_preempt(struct cost *costc, u32 my_llc_id)
 			}
 		}
 	} else {
-		bpf_for(u, 0, nr_layers) {
-			layer_id = rotate_layer_id(costc->pref_layer, u);
-			if (layer_id >= nr_layers) {
-				scx_bpf_error("can't happen");
-				return -EINVAL;
-			}
+		bpf_for(layer_id, 0, nr_layers) {
 			layer = MEMBER_VPTR(layers, [layer_id]);
-			if (has_budget(costc, layer) == 0)
-				continue;
 			if (layer->preempt || layer->kind == LAYER_KIND_CONFINED)
 				continue;
 			bpf_for(v, 0, nr_llcs) {
@@ -1515,11 +1438,9 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return layered_dispatch_no_topo(cpu, prev);
 
 	struct cpu_ctx *cpuc, *sib_cpuc;
-	struct cost *costc;
 	s32 sib = sibling_cpu(cpu);
 
-	if (!(cpuc = lookup_cpu_ctx(-1)) ||
-	    !(costc = lookup_cpu_cost(cpu)))
+	if (!(cpuc = lookup_cpu_ctx(-1)))
 		return;
 
 	if (antistall_consume(cpuc))
@@ -1558,21 +1479,21 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 
 	/* consume preempting layers first */
-	if (cpuc->protect_owned && consume_preempting(costc, cpuc->llc_id) == 0)
+	if (cpuc->protect_owned && consume_preempting(cpuc->llc_id) == 0)
 		return;
 
 	if (scx_bpf_consume(cpuc->hi_fallback_dsq_id))
 		return;
 
 	/* consume !open layers second */
-	if (consume_non_open(costc, cpu, cpuc->llc_id) == 0)
+	if (consume_non_open(cpu, cpuc->llc_id) == 0)
 		return;
 
-	if (!cpuc->protect_owned && consume_preempting(costc, cpuc->llc_id) == 0)
+	if (!cpuc->protect_owned && consume_preempting(cpuc->llc_id) == 0)
 		return;
 
 	/* consume !preempting open layers */
-	if (consume_open_no_preempt(costc, cpuc->llc_id) == 0)
+	if (consume_open_no_preempt(cpuc->llc_id) == 0)
 		return;
 
 	scx_bpf_consume(LO_FALLBACK_DSQ);
@@ -2000,9 +1921,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
 	struct layer *layer;
-	struct cost *costc;
 	u64 now = bpf_ktime_get_ns();
-	u32 budget_id;
 	s32 lid;
 	u64 used;
 
@@ -2010,21 +1929,12 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	lid = taskc->layer_id;
-	if (!(layer = lookup_layer(lid)) || !(costc = lookup_cpu_cost(-1)))
+	if (!(layer = lookup_layer(lid)))
 		return;
 
 	used = now - taskc->running_at;
 
-	// If the task ran on the hi fallback dsq then the cost should be
-	// charged to it.
-	if (is_fallback_dsq(taskc->last_dsq)) {
-		budget_id = fallback_dsq_cost_id(taskc->last_dsq);
-	} else {
-		budget_id = layer->id;
-	}
-
 	u64 slice_ns = layer_slice_ns(layer);
-	record_cpu_cost(costc, budget_id, (s64)used, slice_ns);
 
 	if (cpuc->running_owned) {
 		cpuc->layer_usages[lid][LAYER_USAGE_OWNED] += used;
@@ -2309,66 +2219,6 @@ static void dump_layer_cpumask(int id)
 	scx_bpf_dump("%s", buf);
 }
 
-int dump_cost(void)
-{
-	int i, j;
-	struct cost *costc;
-	struct layer *layer;
-
-	// Lookup global cost
-	if (!(costc = lookup_cost(0))) {
-		scx_bpf_error("unabled to lookup cost ");
-		return -EINVAL;
-	}
-	bpf_for(j, 0, nr_layers) {
-		layer = lookup_layer(j);
-		if (!layer) {
-			scx_bpf_error("unabled to lookup layer %d", j);
-			continue;
-		}
-		scx_bpf_dump("COST GLOBAL[%d][%s] budget=%lld capacity=%lld\n",
-			     j, layer->name,
-			     costc->budget[j], costc->capacity[j]);
-	}
-	// fallback DSQs
-	bpf_for(i, 0, nr_llcs) {
-		u64 dsq_id = llc_hi_fallback_dsq_id(i);
-		u32 budget_id = fallback_dsq_cost_id(dsq_id);
-		scx_bpf_dump("COST FALLBACK[%llu][%d] budget=%lld capacity=%lld\n",
-			     dsq_id, budget_id,
-			     costc->budget[budget_id], costc->capacity[budget_id]);
-	}
-
-	// Per CPU costs
-	bpf_for(i, 0, nr_possible_cpus) {
-		if (!(costc = lookup_cpu_cost(i))) {
-			scx_bpf_error("unabled to lookup layer %d", i);
-			continue;
-		}
-		bpf_for(j, 0, nr_layers) {
-			layer = lookup_layer(j);
-			if (!layer) {
-				scx_bpf_error("unabled to lookup layer %d", i);
-				continue;
-			}
-			scx_bpf_dump("COST CPU[%d][%d][%s] budget=%lld capacity=%lld\n",
-				     i, j, layer->name,
-				     costc->budget[j], costc->capacity[j]);
-		}
-		bpf_for(j, 0, nr_llcs) {
-			u64 dsq_id = llc_hi_fallback_dsq_id(j);
-			u32 budget_id = fallback_dsq_cost_id(dsq_id);
-			if (budget_id >= MAX_GLOBAL_BUDGETS)
-				continue;
-			scx_bpf_dump("COST CPU[%d]FALLBACK[%llu][%d] budget=%lld capacity=%lld\n",
-				     i, dsq_id, budget_id,
-				     costc->budget[budget_id], costc->capacity[budget_id]);
-		}
-	}
-
-	return 0;
-}
-
 void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 {
 	u64 now = bpf_ktime_get_ns();
@@ -2406,8 +2256,6 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 	scx_bpf_dump("LO_FALLBACK nr_queued=%d -%llums\n",
 		     scx_bpf_dsq_nr_queued(LO_FALLBACK_DSQ),
 		     dsq_first_runnable_for_ms(LO_FALLBACK_DSQ, now));
-
-	dump_cost();
 }
 
 
@@ -2725,7 +2573,7 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 	dbg("CFG: CPU[%d] core/llc/node/sys=%d/%d/%d/%d",
 	    cpu, pmap->core_end, pmap->llc_end, pmap->node_end, pmap->sys_end);
 	if (pmap->sys_end > nr_possible_cpus || pmap->sys_end > MAX_CPUS) {
-		scx_bpf_error("CPU %d  proximity map too long", i);
+		scx_bpf_error("CPU %d  proximity map too long", cpu);
 		return -EINVAL;
 	}
 
@@ -2745,7 +2593,6 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
 	struct bpf_cpumask *cpumask, *tmp_big_cpumask;
-	struct cpu_ctx *cpuc;
 	int i, nr_online_cpus, ret;
 
 	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
@@ -2804,7 +2651,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			return ret;
 	}
 
-	initialize_budgets(15LLU * NSEC_PER_SEC);
 	ret = start_layered_timers();
 	if (ret < 0)
 		return ret;
