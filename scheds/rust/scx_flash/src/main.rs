@@ -201,7 +201,7 @@ impl<'a> Scheduler<'a> {
             for (cpu_id, cpu) in &core.cpus {
                 let cache_id = match cache_lvl {
                     2 => cpu.l2_id,
-                    3 => cpu.l3_id,
+                    3 => cpu.llc_id,
                     _ => panic!("invalid cache level {}", cache_lvl),
                 };
                 cache_id_map
