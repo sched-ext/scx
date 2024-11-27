@@ -48,7 +48,9 @@ enum consts {
 	LAYER_LAT_DECAY_FACTOR	= 4,
 
 	HI_FALLBACK_DSQ_BASE	= MAX_LAYERS * MAX_LLCS,
-	LO_FALLBACK_DSQ		= (MAX_LAYERS * MAX_LLCS) + MAX_LLCS + 1,
+	LO_FALLBACK_DSQ		= HI_FALLBACK_DSQ_BASE + MAX_LLCS + 1,
+
+	MAX_DSQS		= LO_FALLBACK_DSQ + 1,
 
 	/* XXX remove */
 	MAX_CGRP_PREFIXES	= 32,
@@ -161,11 +163,18 @@ struct cpu_ctx {
 	struct cpu_prox_map	prox_map;
 };
 
+struct llc_prox_map {
+	u16			llcs[MAX_LLCS];
+	u32			node_end;
+	u32			sys_end;
+};
+
 struct llc_ctx {
 	u32			id;
 	struct bpf_cpumask __kptr *cpumask;
 	u32			nr_cpus;
 	u64			lstats[MAX_LAYERS][NR_LLC_LSTATS];
+	struct llc_prox_map	prox_map;
 };
 
 struct node_ctx {

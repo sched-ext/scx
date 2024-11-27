@@ -915,6 +915,7 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *taskc,
 {
 	struct cpu_ctx *cpuc, *task_cpuc;
 	struct layer *layer;
+	struct cpu_prox_map *pmap;
 	s32 i;
 
 	if (!(layer = lookup_layer(taskc->layer_id)) ||
@@ -947,7 +948,7 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *taskc,
 			return;
 	}
 
-	struct cpu_prox_map *pmap = &task_cpuc->prox_map;
+	pmap = &task_cpuc->prox_map;
 
 	bpf_for(i, 1, MAX_CPUS) {
 		if (i >= pmap->sys_end)
@@ -1740,11 +1741,12 @@ static s32 create_node(u32 node_id)
 
 static s32 create_llc(u32 llc_id)
 {
-	u32 cpu;
 	struct bpf_cpumask *cpumask;
 	struct llc_ctx *llcc;
 	struct cpu_ctx *cpuc;
-	s32 ret;
+	struct llc_prox_map *pmap;
+	u32 cpu;
+	s32 i, ret;
 
 	if (!(llcc = lookup_llc_ctx(llc_id)))
 		return -ENOENT;
@@ -1780,6 +1782,20 @@ static s32 create_llc(u32 llc_id)
 
 	dbg("CFG creating llc %d with %d cpus", llc_id, llcc->nr_cpus);
 	bpf_rcu_read_unlock();
+
+	pmap = &llcc->prox_map;
+	dbg("CFG: LLC[%d] prox_map node/sys=%d/%d",
+	    llc_id, pmap->node_end, pmap->sys_end);
+	if (pmap->sys_end > nr_possible_cpus || pmap->sys_end > MAX_CPUS) {
+		scx_bpf_error("CPU %d  proximity map too long", cpu);
+		return -EINVAL;
+	}
+
+	bpf_for(i, 0, pmap->sys_end) {
+		u16 *p = MEMBER_VPTR(pmap->llcs, [i]);
+		if (p)
+			dbg("CFG: LLC[%d] prox[%d]=%d", cpu, i, *p);
+	}
 	return ret;
 }
 
@@ -2544,6 +2560,7 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 {
 	const volatile u8 *u8_ptr;
 	struct cpu_ctx *cpuc;
+	struct cpu_prox_map *pmap;
 	u64 *init_antistall_dsq;
 	int i;
 
@@ -2569,8 +2586,8 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 		return -EINVAL;
 	}
 
-	struct cpu_prox_map *pmap = &cpuc->prox_map;
-	dbg("CFG: CPU[%d] core/llc/node/sys=%d/%d/%d/%d",
+	pmap = &cpuc->prox_map;
+	dbg("CFG: CPU[%d] prox_map core/llc/node/sys=%d/%d/%d/%d",
 	    cpu, pmap->core_end, pmap->llc_end, pmap->node_end, pmap->sys_end);
 	if (pmap->sys_end > nr_possible_cpus || pmap->sys_end > MAX_CPUS) {
 		scx_bpf_error("CPU %d  proximity map too long", cpu);
@@ -2583,7 +2600,7 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 		bpf_for(i, 0, pmap->sys_end) {
 			u16 *p = MEMBER_VPTR(pmap->cpus, [i]);
 			if (p)
-				dbg("CFG: CPU[%d] prox[%d]=%d", cpu, i, pmap->cpus[i]);
+				dbg("CFG: CPU[%d] prox[%d]=%d", cpu, i, *p);
 		}
 	}
 

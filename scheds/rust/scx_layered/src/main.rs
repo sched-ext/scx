@@ -654,7 +654,6 @@ impl BpfStats {
                 .unwrap()
                 .unwrap();
             let llcc = unsafe { *(v.as_slice().as_ptr() as *const bpf_intf::llc_ctx) };
-            //println!("llc {} id={} nr_cpus={}", llc_id, llcc.id, llcc.nr_cpus);
 
             for layer_id in 0..nr_layers {
                 for stat_id in 0..NR_LLC_LSTATS {
@@ -662,7 +661,6 @@ impl BpfStats {
                 }
             }
         }
-        //println!("llc_lstats={:?}", &llc_lstats);
 
         Self {
             gstats,
@@ -1279,7 +1277,7 @@ impl<'a> Scheduler<'a> {
             let node_span = &topo.nodes[&cpu.node_id].span;
             let sys_span = &topo.span;
 
-            // Make the spans exclusive and conver.
+            // Make the spans exclusive.
             let sys_span = sys_span.and(&node_span.not());
             let node_span = node_span.and(&llc_span.not());
             let llc_span = llc_span.and(&core_span.not());
@@ -1302,7 +1300,7 @@ impl<'a> Scheduler<'a> {
             fastrand::shuffle(&mut llc_order);
             fastrand::shuffle(&mut core_order);
 
-            // Concatenate them and record the topology boundaries.
+            // Concatenate and record the topology boundaries.
             let mut order: Vec<usize> = vec![];
             let mut idx: usize = 0;
 
@@ -1326,8 +1324,8 @@ impl<'a> Scheduler<'a> {
             let sys_end = idx;
 
             debug!(
-                "CPU proximity map[{}/{}/{}/{}]: {:?}",
-                core_end, llc_end, node_end, sys_end, &order
+                "CPU[{}] proximity map[{}/{}/{}/{}]: {:?}",
+                cpu_id, core_end, llc_end, node_end, sys_end, &order
             );
 
             // Record in cpu_ctx.
@@ -1391,6 +1389,80 @@ impl<'a> Scheduler<'a> {
                 libbpf_rs::MapFlags::ANY,
             )
             .context("Failed to update cpu_ctx")?;
+
+        Ok(())
+    }
+
+    fn init_llc_prox_map(skel: &mut BpfSkel, topo: &Topology) -> Result<()> {
+        for (&llc_id, llc) in &topo.all_llcs {
+            // Collect the orders.
+            let mut node_order: Vec<usize> =
+                topo.nodes[&llc.node_id].llcs.keys().cloned().collect();
+            let mut sys_order: Vec<usize> = topo.all_llcs.keys().cloned().collect();
+
+            // Make the orders exclusive.
+            sys_order.retain(|id| !node_order.contains(id));
+            node_order.retain(|&id| id != llc_id);
+
+            // Shufle so that different LLCs follow different orders. See
+            // init_cpu_prox_map().
+            fastrand::seed(llc_id as u64);
+            fastrand::shuffle(&mut sys_order);
+            fastrand::shuffle(&mut node_order);
+
+            // Concatenate and record the node boundary.
+            let mut order: Vec<usize> = vec![];
+            let mut idx: usize = 0;
+
+            idx += 1;
+            order.push(llc_id);
+
+            idx += node_order.len();
+            order.append(&mut node_order);
+            let node_end = idx;
+
+            idx += sys_order.len();
+            order.append(&mut sys_order);
+            let sys_end = idx;
+
+            debug!(
+                "LLC[{}] proximity map[{}/{}]: {:?}",
+                llc_id, node_end, sys_end, &order
+            );
+
+            // Record in llc_ctx.
+            //
+            // XXX - This would be a lot easier if llc_ctx were in the bss.
+            // See BpfStats::read().
+            let key = llc_id as u32;
+            let llc_id_slice =
+                unsafe { std::slice::from_raw_parts((&key as *const u32) as *const u8, 4) };
+            let v = skel
+                .maps
+                .llc_data
+                .lookup(llc_id_slice, libbpf_rs::MapFlags::ANY)
+                .unwrap()
+                .unwrap();
+            let mut llcc = unsafe { *(v.as_slice().as_ptr() as *const bpf_intf::llc_ctx) };
+
+            let pmap = &mut llcc.prox_map;
+            for (i, &llc_id) in order.iter().enumerate() {
+                pmap.llcs[i] = llc_id as u16;
+            }
+            pmap.node_end = node_end as u32;
+            pmap.sys_end = sys_end as u32;
+
+            let v = unsafe {
+                std::slice::from_raw_parts(
+                    &llcc as *const bpf_intf::llc_ctx as *const u8,
+                    std::mem::size_of::<bpf_intf::llc_ctx>(),
+                )
+            };
+
+            skel.maps
+                .llc_data
+                .update(llc_id_slice, v, libbpf_rs::MapFlags::ANY)?
+        }
 
         Ok(())
     }
@@ -1504,6 +1576,7 @@ impl<'a> Scheduler<'a> {
         for cpu in cpu_pool.all_cpus.iter_ones() {
             skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
+
         Self::init_layers(&mut skel, opts, &layer_specs, &topo)?;
         Self::init_nodes(&mut skel, opts, &topo);
 
@@ -1520,6 +1593,7 @@ impl<'a> Scheduler<'a> {
         }
 
         Self::init_cpus(&skel, &topo)?;
+        Self::init_llc_prox_map(&mut skel, &topo)?;
 
         // Other stuff.
         let proc_reader = procfs::ProcReader::new();
