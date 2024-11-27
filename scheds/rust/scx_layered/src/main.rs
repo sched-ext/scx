@@ -1630,13 +1630,13 @@ impl<'a> Scheduler<'a> {
                 } => {
                     // Guide layer sizing by utilization within each layer
                     // to avoid oversizing grouped layers. As an empty layer
-                    // can only get CPU time through fallback or open
-                    // execution, use open cputime for empty layers.
-                    let util = if layer.nr_cpus > 0 {
-                        utils[idx][LAYER_USAGE_OWNED]
-                    } else {
-                        utils[idx][LAYER_USAGE_OPEN]
-                    };
+                    // can only get CPU time through fallback (counted as
+                    // owned) or open execution, add open cputime for empty
+                    // layers.
+                    let mut util = utils[idx][LAYER_USAGE_OWNED];
+                    if layer.nr_cpus == 0 {
+                        util += utils[idx][LAYER_USAGE_OPEN];
+                    }
 
                     let util = if util < 0.01 { 0.0 } else { util };
                     let low = (util / util_range.1).ceil() as usize;
