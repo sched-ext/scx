@@ -650,17 +650,7 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 * for a lock holder to be boosted only once.
 	 */
 	reset_lock_futex_boost(taskc, cpuc);
-}
-
-static void update_stat_for_quiescent(struct task_struct *p,
-				      struct task_ctx *taskc,
-				      struct cpu_ctx *cpuc)
-{
-	/*
-	 * Reset task's lock and futex boost count
-	 * for a lock holder to be boosted only once.
-	 */
-	reset_lock_futex_boost(taskc, cpuc);
+	taskc->lock_holder_xted = false;
 }
 
 static bool match_task_core_type(struct task_ctx *taskc,
@@ -1247,7 +1237,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	struct bpf_cpumask *active, *ovrflw;
 	struct task_struct *p;
 	u64 dsq_id = 0;
-	bool try_consume = false;
+	bool try_consume = false, lock_holder = false;
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
@@ -1266,8 +1256,10 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * If a task newly holds a lock, continue to execute it
 		 * to make system-wide forward progress.
 		 */
-		if (is_lock_holder(taskc))
+		if (is_lock_holder(taskc)) {
+			lock_holder = true;
 			goto lock_holder_extenstion;
+		}
 	}
 
 	dsq_id = cpuc->cpdom_id;
@@ -1380,17 +1372,22 @@ consume_out:
 		return;
 
 	/*
-	 * Reset prev task's lock and futex boost count
-	 * for a lock holder to be boosted only once.
+	 * If nothing to run, continue to run the previous task.
 	 */
 	if (prev) {
 lock_holder_extenstion:
-		/*
-		 * If nothing to run, continue to run the previous task.
-		 */
-		if (prev->scx.flags & SCX_TASK_QUEUED)
+		if (prev->scx.flags & SCX_TASK_QUEUED) {
 			prev->scx.slice = calc_time_slice(prev, taskc);
-		reset_lock_futex_boost(taskc, cpuc);
+
+			/*
+			 * Reset prev task's lock and futex boost count
+			 * for a lock holder to be boosted only once.
+			 */
+			if (lock_holder) {
+				reset_lock_futex_boost(taskc, cpuc);
+				taskc->lock_holder_xted = true;
+			}
+		}
 	}
 }
 
@@ -1403,12 +1400,6 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
 	cpuc_run = get_cpu_ctx();
 	taskc_run = get_task_ctx(p_run);
 	if (!cpuc_run || !taskc_run)
-		goto update_cpuperf;
-
-	/*
-	 * If a task is eligible, don't consider its being preempted.
-	 */
-	if (is_eligible(taskc_run))
 		goto update_cpuperf;
 
 	/*
@@ -1590,8 +1581,6 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	taskc = get_task_ctx(p);
 	if (!cpuc || !taskc)
 		return;
-
-	update_stat_for_quiescent(p, taskc, cpuc);
 
 	/*
 	 * If a task @p is dequeued from a run queue for some other reason
