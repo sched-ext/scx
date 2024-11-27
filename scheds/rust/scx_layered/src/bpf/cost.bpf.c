@@ -153,11 +153,11 @@ static void calc_preferred_cost(struct cost *costc)
 		 * may not work well on low core machines.
 		 */
 		layer_id = rotate_layer_id(id, rotation);
-		if (layer_id > nr_layers) {
+		if (layer_id > MAX_LAYERS) {
 			scx_bpf_error("invalid layer");
 			return;
 		}
-		if (costc->budget[layer_id] > max_budget) {
+		if (*MEMBER_VPTR(*costc, .budget[layer_id]) > max_budget) {
 			max_budget = costc->budget[layer_id];
 			max_layer = layer_id;
 			pref_budget = layer_id;
@@ -363,7 +363,7 @@ __weak int has_budget(struct cost *costc, struct layer *layer)
 /*
  * Initializes all budgets.
  */
-static void initialize_budgets(u64 refresh_intvl_ns)
+__weak int initialize_budgets(u64 refresh_intvl_ns)
 {
 	struct layer *layer;
 	struct cost *costc, *global_costc;
@@ -376,7 +376,7 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 		layer = &layers[layer_id];
 		if (!layer) {
 			scx_bpf_error("failed to lookup layer %d", layer_id);
-			return;
+			return 0;
 		}
 		layer_weight_sum += layer->weight;
 	}
@@ -387,14 +387,14 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 				       false, false, false);
 	if (!global_costc) {
 		scx_bpf_error("failed to initialize global budget");
-		return;
+		return 0;
 	}
 
 	bpf_for(layer_id, 0, nr_layers) {
 		layer = &layers[layer_id];
 		if (!layer) {
 			scx_bpf_error("failed to lookup layer %d", layer_id);
-			return;
+			return 0;
 		}
 
 		layer_weight_dur = (layer->weight * ((u64)refresh_intvl_ns * nr_possible_cpus)) /
@@ -410,7 +410,7 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 						true, false);
 			if (!costc) {
 				scx_bpf_error("failed to cpu budget: %d", cpu);
-				return;
+				return 0;
 			}
 			layer_weight_dur = (layer->weight * refresh_intvl_ns) /
 					    layer_weight_sum;
@@ -441,7 +441,7 @@ static void initialize_budgets(u64 refresh_intvl_ns)
 			costc = lookup_cpu_cost(cpu);
 			if (!costc) {
 				scx_bpf_error("failed to cpu budget: %d", cpu);
-				return;
+				return 0;
 			}
 
 			// On first iteration always setup the lo fallback dsq budget.
