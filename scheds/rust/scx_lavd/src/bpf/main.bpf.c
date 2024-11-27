@@ -1108,7 +1108,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 }
 
-static bool consume_dsq(s32 cpu, u64 dsq_id, u64 now)
+static bool consume_dsq(u64 dsq_id)
 {
 	struct cpdom_ctx *cpdomc;
 
@@ -1129,28 +1129,11 @@ static bool consume_dsq(s32 cpu, u64 dsq_id, u64 now)
 	return false;
 }
 
-static bool consume_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
+static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 {
-	struct cpdom_ctx *cpdomc, *cpdomc_pick;
-	u64 dsq_id, nr_nbr;
+	struct cpdom_ctx *cpdomc_pick;
+	u64 nr_nbr, dsq_id;
 	s64 nuance;
-
-	/*
-	 * Try to consume from CPU's associated DSQ.
-	 */
-	dsq_id = cpuc->cpdom_id;
-	if (consume_dsq(cpu, dsq_id, now))
-		return true;
-
-	/*
-	 * If there is no task in the assssociated DSQ, traverse neighbor
-	 * compute domains in distance order -- task stealing.
-	 */
-	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
-	if (!cpdomc) {
-		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_id);
-		return false;
-	}
 
 	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
 		nr_nbr = min(cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
@@ -1158,7 +1141,7 @@ static bool consume_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 			break;
 
 		nuance = bpf_get_prandom_u32();
-		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = dsq_id + 1) {
+		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance++) {
 			if (j >= nr_nbr)
 				break;
 
@@ -1175,10 +1158,38 @@ static bool consume_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 			if (!cpdomc_pick->is_active)
 				continue;
 
-			if (consume_dsq(cpu, dsq_id, now))
-				goto x_domain_migration_out;
+			if (consume_dsq(dsq_id))
+				return true;
 		}
 	}
+
+	return false;
+}
+
+static bool consume_task(struct cpu_ctx *cpuc)
+{
+	struct cpdom_ctx *cpdomc;
+	u64 dsq_id;
+
+	/*
+	 * Try to consume from CPU's associated DSQ.
+	 */
+	dsq_id = cpuc->cpdom_id;
+	if (consume_dsq(dsq_id))
+		return true;
+
+	/*
+	 * If there is no task in the assssociated DSQ, traverse neighbor
+	 * compute domains in distance order -- task stealing.
+	 */
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
+	if (!cpdomc) {
+		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_id);
+		return false;
+	}
+
+	if (force_to_steal_task(cpdomc))
+		goto x_domain_migration_out;
 
 	return false;
 
@@ -1193,7 +1204,6 @@ x_domain_migration_out:
 
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
-	u64 now = bpf_ktime_get_ns();
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
 	struct bpf_cpumask *active, *ovrflw;
@@ -1330,7 +1340,7 @@ consume_out:
 	if (!try_consume)
 		return;
 
-	if (consume_task(cpu, cpuc, now))
+	if (consume_task(cpuc))
 		return;
 
 	/*
