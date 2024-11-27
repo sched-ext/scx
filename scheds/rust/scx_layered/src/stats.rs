@@ -27,6 +27,8 @@ use crate::BpfStats;
 use crate::Layer;
 use crate::Stats;
 use crate::LAYER_USAGE_OPEN;
+use crate::LAYER_USAGE_PROTECTED;
+use crate::LAYER_USAGE_SUM_UPTO;
 
 fn fmt_pct(v: f64) -> String {
     if v >= 99.995 {
@@ -54,6 +56,8 @@ pub struct LayerStats {
     pub index: usize,
     #[stat(desc = "Total CPU utilization (100% means one full CPU)")]
     pub util: f64,
+    #[stat(desc = "Protected CPU utilization %")]
+    pub util_protected: f64,
     #[stat(desc = "Open CPU utilization %")]
     pub util_open: f64,
     #[stat(desc = "fraction of total CPU utilization")]
@@ -176,11 +180,19 @@ impl LayerStats {
             if b != 0.0 { a / b * 100.0 } else { 0.0 }
         };
 
-        let util_sum = stats.layer_utils[lidx].iter().sum::<f64>();
+        let util_sum = stats.layer_utils[lidx]
+            .iter()
+            .take(LAYER_USAGE_SUM_UPTO)
+            .sum::<f64>();
 
         Self {
             index: lidx,
             util: util_sum * 100.0,
+            util_protected: if util_sum != 0.0 {
+                stats.layer_utils[lidx][LAYER_USAGE_PROTECTED] / util_sum * 100.0
+            } else {
+                0.0
+            },
             util_open: if util_sum != 0.0 {
                 stats.layer_utils[lidx][LAYER_USAGE_OPEN] / util_sum * 100.0
             } else {
@@ -247,9 +259,10 @@ impl LayerStats {
     pub fn format<W: Write>(&self, w: &mut W, name: &str, header_width: usize) -> Result<()> {
         writeln!(
             w,
-            "  {:<width$}: util/open/frac={:6.1}/{}/{:7.1} tasks={:6} load={:9.2}",
+            "  {:<width$}: util/prot/open/frac={:6.1}/{}/{}/{:7.1} tasks={:6} load={:9.2}",
             name,
             self.util,
+            fmt_pct(self.util_protected),
             fmt_pct(self.util_open),
             self.util_frac,
             self.tasks,

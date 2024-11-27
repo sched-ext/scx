@@ -68,6 +68,9 @@ enum layer_kind {
 enum layer_usage {
 	LAYER_USAGE_OWNED,
 	LAYER_USAGE_OPEN,
+	LAYER_USAGE_SUM_UPTO = LAYER_USAGE_OPEN,
+
+	LAYER_USAGE_PROTECTED,
 
 	NR_LAYER_USAGES,
 };
@@ -134,10 +137,21 @@ struct cpu_ctx {
 	bool			yielding;
 	bool			try_preempt_first;
 	bool			is_big;
+
+	bool			protect_owned;
+	bool			running_owned;
+
 	u64			layer_usages[MAX_LAYERS][NR_LAYER_USAGES];
 	u64			gstats[NR_GSTATS];
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
 	u64			ran_current_for;
+
+	u64			owned_usage;
+	u64			open_usage;
+	u64			prev_owned_usage[2];
+	u64			prev_open_usage[2];
+	u64			usage_at_idle;
+
 	u64			hi_fallback_dsq_id;
 	u32			layer_id;
 	u32			task_layer_id;
@@ -225,6 +239,7 @@ struct layer {
 	bool			idle_smt;
 	int			growth_algo;
 
+	u32			owned_usage_target_ppk;
 	u64			vtime_now;
 	u64			nr_tasks;
 
