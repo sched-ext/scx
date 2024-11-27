@@ -39,6 +39,7 @@ struct sys_stat_ctx {
 	u32		nr_perf_cri;
 	u32		nr_lat_cri;
 	u32		nr_x_migration;
+	u32		nr_stealee;
 	u32		nr_big;
 	u32		nr_pc_on_big;
 	u32		nr_lc_on_big;
@@ -63,10 +64,66 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 	c->stat_next->last_update_clk = c->now;
 }
 
+static void plan_x_cpdom_migration(struct sys_stat_ctx *c)
+{
+	struct cpdom_ctx *cpdomc;
+	u64 dsq_id;
+	u32 avg_nr_q_tasks_per_cpu = 0, nr_q_tasks, x_mig_delta;
+	u32 stealer_threshold, stealee_threshold;
+
+	/*
+	 * Calcualte average queued tasks per CPU per compute domain.
+	 */
+	bpf_for(dsq_id, 0, nr_cpdoms) {
+		if (dsq_id >= LAVD_CPDOM_MAX_NR)
+			break;
+
+		nr_q_tasks = scx_bpf_dsq_nr_queued(dsq_id);
+		c->nr_queued_task += nr_q_tasks;
+
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
+		cpdomc->nr_q_tasks_per_cpu = (nr_q_tasks * 1000) / cpdomc->nr_cpus;
+		avg_nr_q_tasks_per_cpu += cpdomc->nr_q_tasks_per_cpu;
+	}
+	avg_nr_q_tasks_per_cpu /= nr_cpdoms;
+
+	/*
+	 * Determine stealer and stealee domains.
+	 *
+	 * A stealer domain, whose per-CPU queue length is shorter than
+	 * the average, will steal a task from any of stealee domain,
+	 * whose per-CPU queue length is longer than the average.
+	 * Compute domain around average will not do anything.
+	 */
+	x_mig_delta = avg_nr_q_tasks_per_cpu >> LAVD_CPDOM_MIGRATION_SHIFT;
+	stealer_threshold = avg_nr_q_tasks_per_cpu - x_mig_delta;
+	stealee_threshold = avg_nr_q_tasks_per_cpu + x_mig_delta;
+
+	bpf_for(dsq_id, 0, nr_cpdoms) {
+		if (dsq_id >= LAVD_CPDOM_MAX_NR)
+			break;
+
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
+
+		if (cpdomc->nr_q_tasks_per_cpu < stealer_threshold) {
+			WRITE_ONCE(cpdomc->is_stealer, true);
+			WRITE_ONCE(cpdomc->is_stealee, false);
+		}
+		else if (cpdomc->nr_q_tasks_per_cpu > stealee_threshold) {
+			WRITE_ONCE(cpdomc->is_stealer, false);
+			WRITE_ONCE(cpdomc->is_stealee, true);
+			c->nr_stealee++;
+		}
+		else {
+			WRITE_ONCE(cpdomc->is_stealer, false);
+			WRITE_ONCE(cpdomc->is_stealee, false);
+		}
+	}
+}
+
 static void collect_sys_stat(struct sys_stat_ctx *c)
 {
-	u64 dsq_id;
-	int cpu, nr;
+	int cpu;
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
@@ -173,12 +230,6 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		c->idle_total += cpuc->idle_total;
 		cpuc->idle_total = 0;
 	}
- 
-	bpf_for(dsq_id, 0, LAVD_CPDOM_MAX_NR) {
-		nr = scx_bpf_dsq_nr_queued(dsq_id);
-		if (nr > 0)
-			c->nr_queued_task += nr;
-	}
 }
 
 static void calc_sys_stat(struct sys_stat_ctx *c)
@@ -243,6 +294,8 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 			c->stat_cur->thr_perf_cri; /* will be updated later */
 	}
 
+	stat_next->nr_stealee = c->nr_stealee;
+
 	stat_next->nr_violation =
 		calc_avg32(stat_cur->nr_violation, c->nr_violation);
 
@@ -293,6 +346,7 @@ static void do_update_sys_stat(void)
 	 * Collect and prepare the next version of stat.
 	 */
 	init_sys_stat_ctx(&c);
+	plan_x_cpdom_migration(&c);
 	collect_sys_stat(&c);
 	calc_sys_stat(&c);
 	update_sys_stat_next(&c);

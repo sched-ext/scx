@@ -51,6 +51,7 @@ enum consts_internal  {
 						  performance mode when cpu util > 40% */
 
 	LAVD_CPDOM_STARV_NS		= (2 * LAVD_SLICE_MAX_NS_DFL),
+	LAVD_CPDOM_MIGRATION_SHIFT	= 2, /* 1/2**2 = +/- 25% */
 };
 
 /*
@@ -58,12 +59,15 @@ enum consts_internal  {
  * - system > numa node > llc domain > compute domain per core type (P or E)
  */
 struct cpdom_ctx {
-	u64	last_consume_clk;		    /* when the associated DSQ was consumed */
 	u64	id;				    /* id of this compute domain (== dsq_id) */
 	u64	alt_id;				    /* id of the closest compute domain of alternative type (== dsq id) */
 	u8	node_id;			    /* numa domain id */
 	u8	is_big;				    /* is it a big core or little core? */
 	u8	is_active;			    /* if this compute domain is active */
+	u8	is_stealer;			    /* this domain should steal tasks from others */
+	u8	is_stealee;			    /* stealer doamin should steal tasks from this domain */
+	u16	nr_cpus;			    /* the number of CPUs in this compute domain */
+	u32	nr_q_tasks_per_cpu;		    /* the number of queued tasks per CPU in this domain (x1000) */
 	u8	nr_neighbors[LAVD_CPDOM_MAX_DIST];  /* number of neighbors per distance */
 	u64	neighbor_bits[LAVD_CPDOM_MAX_DIST]; /* bitmask of neighbor bitmask per distance */
 	u64	__cpumask[LAVD_CPU_ID_MAX/64];	    /* cpumasks belongs to this compute domain */

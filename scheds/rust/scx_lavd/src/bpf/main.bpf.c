@@ -1120,7 +1120,6 @@ static bool consume_dsq(s32 cpu, u64 dsq_id, u64 now)
 		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_id);
 		return false;
 	}
-	WRITE_ONCE(cpdomc->last_consume_clk, now);
 
 	/*
 	 * Try to consume a task on the associated DSQ.
@@ -1130,56 +1129,11 @@ static bool consume_dsq(s32 cpu, u64 dsq_id, u64 now)
 	return false;
 }
 
-static bool consume_starving_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
-{
-	struct cpdom_ctx *cpdomc;
-	u64 dsq_id = cpuc->cpdom_poll_pos;
-	u64 dl;
-	bool ret = false;
-	int i;
-
-	if (nr_cpdoms == 1)
-		return false;
-
-	bpf_for(i, 0, nr_cpdoms) {
-		if (i >= LAVD_CPDOM_MAX_NR)
-			break;
-
-		dsq_id = (dsq_id + i) % LAVD_CPDOM_MAX_NR;
-
-		if (dsq_id == cpuc->cpdom_id)
-			continue;
-
-		cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
-		if (!cpdomc) {
-			scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_id);
-			goto out;
-		}
-
-		if (cpdomc->is_active) {
-			dl = READ_ONCE(cpdomc->last_consume_clk) + LAVD_CPDOM_STARV_NS;
-			if (dl < now) {
-				ret = consume_dsq(cpu, dsq_id, now);
-			}
-			goto out;
-		}
-	}
-out:
-	cpuc->cpdom_poll_pos = (dsq_id + 1) % LAVD_CPDOM_MAX_NR;
-	return ret;
-}
-
 static bool consume_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 {
 	struct cpdom_ctx *cpdomc, *cpdomc_pick;
 	u64 dsq_id, nr_nbr;
 	s64 nuance;
-
-	/*
-	 * If there is a starving DSQ, try to consume it first.
-	 */
-	if (consume_starving_task(cpu, cpuc, now))
-		goto x_domain_migration_out;
 
 	/*
 	 * Try to consume from CPU's associated DSQ.
@@ -1813,8 +1767,6 @@ static s32 init_cpdoms(u64 now)
 		if (!cpdomc->is_active)
 			continue;
 
-		WRITE_ONCE(cpdomc->last_consume_clk, now);
-
 		/*
 		 * Create an associated DSQ on its associated NUMA domain.
 		 */
@@ -2032,6 +1984,7 @@ static s32 init_per_cpu_ctx(u64 now)
 					}
 					cpuc->cpdom_id = cpdomc->id;
 					cpuc->cpdom_alt_id = cpdomc->alt_id;
+					cpdomc->nr_cpus++;
 				}
 			}
 		}

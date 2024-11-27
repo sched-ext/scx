@@ -78,6 +78,7 @@ struct sys_stat {
 	volatile u32	max_perf_cri;	/* maximum performance criticality */
 	volatile u32	thr_perf_cri;	/* performance criticality threshold */
 
+	volatile u32	nr_stealee;	/* number of compute domains to be migrated */
 	volatile u32	nr_violation;	/* number of utilization violation */
 	volatile u32	nr_active;	/* number of active cores */
 
