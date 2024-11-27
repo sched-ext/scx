@@ -149,4 +149,13 @@ impl LayerKind {
             | LayerKind::Open { common, .. } => common,
         }
     }
+
+    pub fn util_range(&self) -> Option<(f64, f64)> {
+        match self {
+            LayerKind::Confined { util_range, .. } | LayerKind::Grouped { util_range, .. } => {
+                Some(*util_range)
+            }
+            _ => None,
+        }
+    }
 }
