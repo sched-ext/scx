@@ -662,6 +662,58 @@ bool should_try_preempt_first(s32 cand, struct layer *layer,
 }
 
 static __always_inline
+s32 pick_idle_big_little(struct layer *layer, struct task_ctx *taskc,
+			 const struct cpumask *idle_smtmask, s32 prev_cpu)
+{
+	s32 cpu = -1;
+
+	if (!has_little_cores || !big_cpumask)
+		return cpu;
+
+	struct bpf_cpumask *tmp_cpumask;
+	if (!taskc->layered_mask || !big_cpumask)
+		return cpu;
+
+	if (!(tmp_cpumask = bpf_cpumask_create()))
+		return cpu;
+
+	switch (layer->growth_algo) {
+	case GROWTH_ALGO_BIG_LITTLE: {
+		if (!taskc->layered_mask || !big_cpumask)
+			goto out_put;
+
+		bpf_cpumask_and(tmp_cpumask, cast_mask(taskc->layered_mask),
+				cast_mask(big_cpumask));
+		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask),
+					 prev_cpu, idle_smtmask,
+					 layer->idle_smt);
+		goto out_put;
+	}
+	case GROWTH_ALGO_LITTLE_BIG: {
+		bpf_cpumask_setall(tmp_cpumask);
+		if (!tmp_cpumask || !big_cpumask)
+			goto out_put;
+		bpf_cpumask_xor(tmp_cpumask, cast_mask(big_cpumask),
+				cast_mask(tmp_cpumask));
+		if (!tmp_cpumask || !taskc->layered_mask)
+			goto out_put;
+		bpf_cpumask_and(tmp_cpumask, cast_mask(taskc->layered_mask),
+				cast_mask(tmp_cpumask));
+		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask),
+					 prev_cpu, idle_smtmask,
+					 layer->idle_smt);
+		goto out_put;
+	}
+	default:
+		goto out_put;
+	}
+
+out_put:
+	bpf_cpumask_release(tmp_cpumask);
+	return cpu;
+}
+
+static __always_inline
 s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		  struct cpu_ctx *cpuc, struct task_ctx *taskc, struct layer *layer,
 		  bool from_selcpu)
@@ -725,6 +777,14 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		return -1;
 
 	/*
+	 * If the system has a big/little architecture and uses any related
+	 * layer growth algos try to find a cpu in that topology first.
+	 */
+	cpu = pick_idle_big_little(layer, taskc, idle_smtmask, prev_cpu);
+	if (cpu >=0)
+		goto out_put;
+
+	/*
 	 * Try a CPU in the current LLC
 	 */
 	if (nr_llcs > 1) {
@@ -736,33 +796,6 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		}
 		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask,
 					      layer->idle_smt)) >= 0)
-			goto out_put;
-	}
-
-	/*
-	 * If the layer uses BigLittle growth algo try a big cpu.
-	 * TODO - Cache layered_cpus.mask & big_cpumask.
-	 */
-	if (has_little_cores && big_cpumask &&
-	    layer->growth_algo == GROWTH_ALGO_BIG_LITTLE) {
-		struct bpf_cpumask *tmp_cpumask;
-
-		if (!(tmp_cpumask = bpf_cpumask_create())) {
-			cpu = -1;
-			goto out_put;
-		}
-		if (!taskc->layered_mask || !big_cpumask) {
-			bpf_cpumask_release(tmp_cpumask);
-			cpu = -1;
-			goto out_put;
-		}
-		bpf_cpumask_and(tmp_cpumask, cast_mask(taskc->layered_mask),
-				cast_mask(big_cpumask));
-		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask),
-					 prev_cpu, idle_smtmask,
-					 layer->idle_smt);
-		bpf_cpumask_release(tmp_cpumask);
-		if (cpu >= 0)
 			goto out_put;
 	}
 
