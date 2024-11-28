@@ -206,7 +206,7 @@ null_out:
 	return NULL;
 }
 
-static void kick_current_cpu(struct task_struct *p, struct cpu_ctx *cpuc)
+static void kick_current_cpu(struct task_struct *p)
 {
 	WRITE_ONCE(p->scx.slice, 0);
 }
@@ -236,7 +236,7 @@ static bool try_kick_cpu(struct task_struct *p, struct cpu_ctx *cpuc_cur,
 	 */
 	if (cpuc_cur->cpu_id == victim_cpuc->cpu_id) {
 		struct task_struct *tsk = bpf_get_current_task_btf();
-		kick_current_cpu(tsk, victim_cpuc);
+		kick_current_cpu(tsk);
 		return true;
 	}
 
@@ -308,6 +308,15 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 		return false;
 
 	/*
+	 * A slice-extended lock holder finally released the lock,
+	 * give up its extended time slice for fairness.
+	 */
+	if (taskc_run->lock_holder_xted) {
+		kick_current_cpu(p_run);
+		return true;
+	}
+
+	/*
 	 *  If a task already exhausted its time slice, there is nothing to do.
 	 */
 	if (READ_ONCE(p_run->scx.slice) == 0)
@@ -341,7 +350,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	bpf_rcu_read_unlock();
 
 	if (ret)
-		kick_current_cpu(p_run, cpuc_run);
+		kick_current_cpu(p_run);
 
 	return ret;
 }

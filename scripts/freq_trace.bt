@@ -1,0 +1,18 @@
+#!/usr/bin/env bpftrace
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+// This software may be used and distributed according to the terms of the
+// GNU General Public License version 2.
+
+rawtracepoint:cpu_frequency
+{
+	$freq = arg0;
+	$cpu = arg1;
+
+	@freq_hist = lhist($freq, 0, 6000000, 50000);
+	@avg_freq[$cpu] = avg($freq);
+}
+
+interval:s:1 {
+    print(@avg_freq);
+    print(@freq_hist);
+}

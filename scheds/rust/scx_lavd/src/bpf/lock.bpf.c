@@ -8,8 +8,12 @@
  * To be included to the main.bpf.c
  */
 
-static void try_inc_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc, u32 *uaddr)
+static void inc_futex_boost(u32 *uaddr)
 {
+	struct task_struct *p = bpf_get_current_task_btf();
+	struct task_ctx *taskc = try_get_task_ctx(p);
+	struct cpu_ctx *cpuc = get_cpu_ctx();
+
 	if (taskc && cpuc && (taskc->futex_uaddr != uaddr)) {
 		taskc->futex_boost++;
 		taskc->futex_uaddr = uaddr;
@@ -20,9 +24,13 @@ static void try_inc_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc, u3
 	 */
 }
 
-static void try_dec_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc, u32 *uaddr)
+static void dec_futex_boost(u32 *uaddr)
 {
-	if (taskc && cpuc && taskc->futex_boost > 0) {
+	struct task_struct *p = bpf_get_current_task_btf();
+	struct task_ctx *taskc = try_get_task_ctx(p);
+	struct cpu_ctx *cpuc = get_cpu_ctx();
+
+	if (p && taskc && cpuc && taskc->futex_boost > 0) {
 		taskc->futex_boost--;
 		taskc->futex_uaddr = NULL;
 		cpuc->lock_holder = is_lock_holder(taskc);
@@ -30,20 +38,6 @@ static void try_dec_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc, u3
 	/*
 	 * If taskc is null, the task is not under sched_ext so ignore the error.
 	 */
-}
-
-static void inc_futex_boost(u32 *uaddr)
-{
-	struct task_ctx *taskc = try_get_current_task_ctx();
-	struct cpu_ctx *cpuc = get_cpu_ctx();
-	try_inc_futex_boost(taskc, cpuc, uaddr);
-}
-
-static void dec_futex_boost(u32 *uaddr)
-{
-	struct task_ctx *taskc = try_get_current_task_ctx();
-	struct cpu_ctx *cpuc = get_cpu_ctx();
-	try_dec_futex_boost(taskc, cpuc, uaddr);
 }
 
 static void reset_lock_futex_boost(struct task_ctx *taskc, struct cpu_ctx *cpuc)
