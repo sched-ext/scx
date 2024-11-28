@@ -1264,7 +1264,6 @@ static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 {
 	u32 node_id;
 	u32 val = 0;
-	nodemask_t *node_mask = &p->mempolicy->nodes;
 	void *mask;
 
 	taskc->preferred_dom_mask = 0;
@@ -1286,7 +1285,7 @@ static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 		return;
 	}
 
-	mask = BPF_CORE_READ(node_mask, bits);
+	mask = BPF_CORE_READ(p, mempolicy, nodes.bits);
 	if (bpf_core_read(&val, sizeof(val), mask))
 		return;
 
