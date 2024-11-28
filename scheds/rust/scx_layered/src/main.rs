@@ -476,7 +476,8 @@ struct Opts {
     #[clap(long)]
     run_example: bool,
 
-    /// Enables iteration over local LLCs first for dispatch.
+    /// ***DEPRECATED *** Enables iteration over local LLCs first for
+    /// dispatch.
     #[clap(long, default_value = "false")]
     local_llc_iteration: bool,
 
@@ -604,126 +605,6 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
     Ok(cpu_ctxs)
 }
 
-fn init_cpu_prox_map(topo: &Topology, cpu_ctxs: &mut Vec<bpf_intf::cpu_ctx>) {
-    for (&cpu_id, cpu) in &topo.all_cpus {
-        // Collect the spans.
-        let mut core_span = topo.all_cores[&cpu.core_id].span.clone();
-        let llc_span = &topo.all_llcs[&cpu.llc_id].span;
-        let node_span = &topo.nodes[&cpu.node_id].span;
-        let sys_span = &topo.span;
-
-        // Make the spans exclusive and conver.
-        let sys_span = sys_span.and(&node_span.not());
-        let node_span = node_span.and(&llc_span.not());
-        let llc_span = llc_span.and(&core_span.not());
-        core_span.clear_cpu(cpu_id).unwrap();
-
-        // Convert them into arrays.
-        let mut sys_order: Vec<usize> = sys_span.into_iter().collect();
-        let mut node_order: Vec<usize> = node_span.into_iter().collect();
-        let mut llc_order: Vec<usize> = llc_span.into_iter().collect();
-        let mut core_order: Vec<usize> = core_span.into_iter().collect();
-
-        // Shuffle them so that different CPUs follow different orders.
-        // This isn't ideal as random shuffling won't give us complete
-        // fairness. Can be improved by making each CPU radiate in both
-        // directions. For shuffling, use predictable seeds so that
-        // orderings are reproducible.
-        fastrand::seed(cpu_id as u64);
-        fastrand::shuffle(&mut sys_order);
-        fastrand::shuffle(&mut node_order);
-        fastrand::shuffle(&mut llc_order);
-        fastrand::shuffle(&mut core_order);
-
-        // Concatenate them and record the topology boundaries.
-        let mut order: Vec<usize> = vec![];
-        let mut idx: usize = 0;
-
-        idx += 1;
-        order.push(cpu_id);
-
-        idx += core_order.len();
-        order.append(&mut core_order);
-        let core_end = idx;
-
-        idx += llc_order.len();
-        order.append(&mut llc_order);
-        let llc_end = idx;
-
-        idx += node_order.len();
-        order.append(&mut node_order);
-        let node_end = idx;
-
-        idx += sys_order.len();
-        order.append(&mut sys_order);
-        let sys_end = idx;
-
-        debug!(
-            "CPU proximity map[{}/{}/{}/{}]: {:?}",
-            core_end, llc_end, node_end, sys_end, &order
-        );
-
-        // Record in cpu_ctx.
-        let pmap = &mut cpu_ctxs[cpu_id].prox_map;
-        for (i, &cpu) in order.iter().enumerate() {
-            pmap.cpus[i] = cpu as u16;
-        }
-        pmap.core_end = core_end as u32;
-        pmap.llc_end = llc_end as u32;
-        pmap.node_end = node_end as u32;
-        pmap.sys_end = sys_end as u32;
-    }
-}
-
-fn convert_cpu_ctxs(cpu_ctxs: Vec<bpf_intf::cpu_ctx>) -> Vec<Vec<u8>> {
-    cpu_ctxs
-        .into_iter()
-        .map(|cpu_ctx| {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    &cpu_ctx as *const bpf_intf::cpu_ctx as *const u8,
-                    std::mem::size_of::<bpf_intf::cpu_ctx>(),
-                )
-            };
-            bytes.to_vec()
-        })
-        .collect()
-}
-
-fn initialize_cpu_ctxs(skel: &BpfSkel, topo: &Topology) -> Result<()> {
-    let key = (0_u32).to_ne_bytes();
-    let mut cpu_ctxs: Vec<bpf_intf::cpu_ctx> = vec![];
-    let cpu_ctxs_vec = skel
-        .maps
-        .cpu_ctxs
-        .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
-        .context("Failed to lookup cpu_ctx")?
-        .unwrap();
-
-    // FIXME - this incorrectly assumes all possible CPUs are consecutive.
-    for cpu in 0..*NR_CPUS_POSSIBLE {
-        cpu_ctxs.push(*unsafe {
-            &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
-        });
-
-        let topo_cpu = topo.all_cpus.get(&cpu).unwrap();
-        let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
-        cpu_ctxs[cpu].cpu = cpu as i32;
-        cpu_ctxs[cpu].layer_id = MAX_LAYERS as u32;
-        cpu_ctxs[cpu].task_layer_id = MAX_LAYERS as u32;
-        cpu_ctxs[cpu].is_big = is_big;
-    }
-
-    init_cpu_prox_map(topo, &mut cpu_ctxs);
-
-    skel.maps
-        .cpu_ctxs
-        .update_percpu(&key, &convert_cpu_ctxs(cpu_ctxs), libbpf_rs::MapFlags::ANY)
-        .context("Failed to update cpu_ctx")?;
-
-    Ok(())
-}
-
 #[derive(Clone, Debug)]
 struct BpfStats {
     gstats: Vec<u64>,
@@ -774,7 +655,6 @@ impl BpfStats {
                 .unwrap()
                 .unwrap();
             let llcc = unsafe { *(v.as_slice().as_ptr() as *const bpf_intf::llc_ctx) };
-            //println!("llc {} id={} nr_cpus={}", llc_id, llcc.id, llcc.nr_cpus);
 
             for layer_id in 0..nr_layers {
                 for stat_id in 0..NR_LLC_LSTATS {
@@ -782,7 +662,6 @@ impl BpfStats {
                 }
             }
         }
-        //println!("llc_lstats={:?}", &llc_lstats);
 
         Self {
             gstats,
@@ -1391,6 +1270,236 @@ impl<'a> Scheduler<'a> {
         }
     }
 
+    fn init_cpu_prox_map(topo: &Topology, cpu_ctxs: &mut Vec<bpf_intf::cpu_ctx>) {
+        for (&cpu_id, cpu) in &topo.all_cpus {
+            // Collect the spans.
+            let mut core_span = topo.all_cores[&cpu.core_id].span.clone();
+            let llc_span = &topo.all_llcs[&cpu.llc_id].span;
+            let node_span = &topo.nodes[&cpu.node_id].span;
+            let sys_span = &topo.span;
+
+            // Make the spans exclusive.
+            let sys_span = sys_span.and(&node_span.not());
+            let node_span = node_span.and(&llc_span.not());
+            let llc_span = llc_span.and(&core_span.not());
+            core_span.clear_cpu(cpu_id).unwrap();
+
+            // Convert them into arrays.
+            let mut sys_order: Vec<usize> = sys_span.into_iter().collect();
+            let mut node_order: Vec<usize> = node_span.into_iter().collect();
+            let mut llc_order: Vec<usize> = llc_span.into_iter().collect();
+            let mut core_order: Vec<usize> = core_span.into_iter().collect();
+
+            // Shuffle them so that different CPUs follow different orders.
+            // This isn't ideal as random shuffling won't give us complete
+            // fairness. Can be improved by making each CPU radiate in both
+            // directions. For shuffling, use predictable seeds so that
+            // orderings are reproducible.
+            fastrand::seed(cpu_id as u64);
+            fastrand::shuffle(&mut sys_order);
+            fastrand::shuffle(&mut node_order);
+            fastrand::shuffle(&mut llc_order);
+            fastrand::shuffle(&mut core_order);
+
+            // Concatenate and record the topology boundaries.
+            let mut order: Vec<usize> = vec![];
+            let mut idx: usize = 0;
+
+            idx += 1;
+            order.push(cpu_id);
+
+            idx += core_order.len();
+            order.append(&mut core_order);
+            let core_end = idx;
+
+            idx += llc_order.len();
+            order.append(&mut llc_order);
+            let llc_end = idx;
+
+            idx += node_order.len();
+            order.append(&mut node_order);
+            let node_end = idx;
+
+            idx += sys_order.len();
+            order.append(&mut sys_order);
+            let sys_end = idx;
+
+            debug!(
+                "CPU[{}] proximity map[{}/{}/{}/{}]: {:?}",
+                cpu_id, core_end, llc_end, node_end, sys_end, &order
+            );
+
+            // Record in cpu_ctx.
+            let pmap = &mut cpu_ctxs[cpu_id].prox_map;
+            for (i, &cpu) in order.iter().enumerate() {
+                pmap.cpus[i] = cpu as u16;
+            }
+            pmap.core_end = core_end as u32;
+            pmap.llc_end = llc_end as u32;
+            pmap.node_end = node_end as u32;
+            pmap.sys_end = sys_end as u32;
+        }
+    }
+
+    fn convert_cpu_ctxs(cpu_ctxs: Vec<bpf_intf::cpu_ctx>) -> Vec<Vec<u8>> {
+        cpu_ctxs
+            .into_iter()
+            .map(|cpu_ctx| {
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        &cpu_ctx as *const bpf_intf::cpu_ctx as *const u8,
+                        std::mem::size_of::<bpf_intf::cpu_ctx>(),
+                    )
+                };
+                bytes.to_vec()
+            })
+            .collect()
+    }
+
+    fn init_cpus(skel: &BpfSkel, layer_specs: &[LayerSpec], topo: &Topology) -> Result<()> {
+        let key = (0_u32).to_ne_bytes();
+        let mut cpu_ctxs: Vec<bpf_intf::cpu_ctx> = vec![];
+        let cpu_ctxs_vec = skel
+            .maps
+            .cpu_ctxs
+            .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
+            .context("Failed to lookup cpu_ctx")?
+            .unwrap();
+
+        let open_preempt_layers: Vec<u32> = layer_specs
+            .iter()
+            .enumerate()
+            .filter(|(_idx, spec)| match &spec.kind {
+                LayerKind::Open { .. } | LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                _ => false,
+            })
+            .map(|(idx, _)| idx as u32)
+            .collect();
+        let open_layers: Vec<u32> = layer_specs
+            .iter()
+            .enumerate()
+            .filter(|(_idx, spec)| match &spec.kind {
+                LayerKind::Open { .. } | LayerKind::Grouped { .. } => !spec.kind.common().preempt,
+                _ => false,
+            })
+            .map(|(idx, _)| idx as u32)
+            .collect();
+
+        // FIXME - this incorrectly assumes all possible CPUs are consecutive.
+        for cpu in 0..*NR_CPUS_POSSIBLE {
+            cpu_ctxs.push(*unsafe {
+                &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
+            });
+
+            let topo_cpu = topo.all_cpus.get(&cpu).unwrap();
+            let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
+            cpu_ctxs[cpu].cpu = cpu as i32;
+            cpu_ctxs[cpu].layer_id = MAX_LAYERS as u32;
+            cpu_ctxs[cpu].task_layer_id = MAX_LAYERS as u32;
+            cpu_ctxs[cpu].is_big = is_big;
+
+            let mut p_order = open_preempt_layers.clone();
+            let mut o_order = open_layers.clone();
+            fastrand::seed(cpu as u64);
+            fastrand::shuffle(&mut p_order);
+            fastrand::shuffle(&mut o_order);
+
+            for i in 0..MAX_LAYERS {
+                cpu_ctxs[cpu].open_preempt_layer_order[i] =
+                    p_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].open_layer_order[i] =
+                    o_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+            }
+        }
+
+        Self::init_cpu_prox_map(topo, &mut cpu_ctxs);
+
+        skel.maps
+            .cpu_ctxs
+            .update_percpu(
+                &key,
+                &Self::convert_cpu_ctxs(cpu_ctxs),
+                libbpf_rs::MapFlags::ANY,
+            )
+            .context("Failed to update cpu_ctx")?;
+
+        Ok(())
+    }
+
+    fn init_llc_prox_map(skel: &mut BpfSkel, topo: &Topology) -> Result<()> {
+        for (&llc_id, llc) in &topo.all_llcs {
+            // Collect the orders.
+            let mut node_order: Vec<usize> =
+                topo.nodes[&llc.node_id].llcs.keys().cloned().collect();
+            let mut sys_order: Vec<usize> = topo.all_llcs.keys().cloned().collect();
+
+            // Make the orders exclusive.
+            sys_order.retain(|id| !node_order.contains(id));
+            node_order.retain(|&id| id != llc_id);
+
+            // Shufle so that different LLCs follow different orders. See
+            // init_cpu_prox_map().
+            fastrand::seed(llc_id as u64);
+            fastrand::shuffle(&mut sys_order);
+            fastrand::shuffle(&mut node_order);
+
+            // Concatenate and record the node boundary.
+            let mut order: Vec<usize> = vec![];
+            let mut idx: usize = 0;
+
+            idx += 1;
+            order.push(llc_id);
+
+            idx += node_order.len();
+            order.append(&mut node_order);
+            let node_end = idx;
+
+            idx += sys_order.len();
+            order.append(&mut sys_order);
+            let sys_end = idx;
+
+            debug!(
+                "LLC[{}] proximity map[{}/{}]: {:?}",
+                llc_id, node_end, sys_end, &order
+            );
+
+            // Record in llc_ctx.
+            //
+            // XXX - This would be a lot easier if llc_ctx were in the bss.
+            // See BpfStats::read().
+            let key = llc_id as u32;
+            let llc_id_slice =
+                unsafe { std::slice::from_raw_parts((&key as *const u32) as *const u8, 4) };
+            let v = skel
+                .maps
+                .llc_data
+                .lookup(llc_id_slice, libbpf_rs::MapFlags::ANY)
+                .unwrap()
+                .unwrap();
+            let mut llcc = unsafe { *(v.as_slice().as_ptr() as *const bpf_intf::llc_ctx) };
+
+            let pmap = &mut llcc.prox_map;
+            for (i, &llc_id) in order.iter().enumerate() {
+                pmap.llcs[i] = llc_id as u16;
+            }
+            pmap.node_end = node_end as u32;
+            pmap.sys_end = sys_end as u32;
+
+            let v = unsafe {
+                std::slice::from_raw_parts(
+                    &llcc as *const bpf_intf::llc_ctx as *const u8,
+                    std::mem::size_of::<bpf_intf::llc_ctx>(),
+                )
+            };
+
+            skel.maps
+                .llc_data
+                .update(llc_id_slice, v, libbpf_rs::MapFlags::ANY)?
+        }
+
+        Ok(())
+    }
+
     fn init(
         opts: &Opts,
         layer_specs: &[LayerSpec],
@@ -1486,7 +1595,6 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.disable_topology = disable_topology;
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
-        skel.maps.rodata_data.local_llc_iteration = opts.local_llc_iteration;
         skel.maps.rodata_data.antistall_sec = opts.antistall_sec;
         if opts.monitor_disable {
             skel.maps.rodata_data.monitor_disable = opts.monitor_disable;
@@ -1500,6 +1608,28 @@ impl<'a> Scheduler<'a> {
         for cpu in cpu_pool.all_cpus.iter_ones() {
             skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
+
+        skel.maps.rodata_data.nr_open_preempt_layers = layer_specs
+            .iter()
+            .filter(|spec| match &spec.kind {
+                LayerKind::Open { .. } | LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                _ => false,
+            })
+            .count() as u32;
+        skel.maps.rodata_data.nr_open_layers = layer_specs
+            .iter()
+            .filter(|spec| match &spec.kind {
+                LayerKind::Open { .. } | LayerKind::Grouped { .. } => !spec.kind.common().preempt,
+                _ => false,
+            })
+            .count() as u32;
+
+        // Consider all layers empty at the beginning.
+        for i in 0..layer_specs.len() {
+            skel.maps.bss_data.empty_layer_ids[i] = i as u32;
+        }
+        skel.maps.bss_data.nr_empty_layer_ids = nr_layers as u32;
+
         Self::init_layers(&mut skel, opts, &layer_specs, &topo)?;
         Self::init_nodes(&mut skel, opts, &topo);
 
@@ -1514,7 +1644,9 @@ impl<'a> Scheduler<'a> {
                 .with_context(|| format!("layer has no growth order"))?;
             layers.push(Layer::new(&spec, &cpu_pool, &topo, &growth_order)?);
         }
-        initialize_cpu_ctxs(&skel, &topo).unwrap();
+
+        Self::init_cpus(&skel, &layer_specs, &topo)?;
+        Self::init_llc_prox_map(&mut skel, &topo)?;
 
         // Other stuff.
         let proc_reader = procfs::ProcReader::new();
@@ -1862,11 +1994,27 @@ impl<'a> Scheduler<'a> {
                     self.nr_layer_cpus_ranges[lidx].1.max(layer.nr_cpus),
                 );
             }
+
+            // Trigger updates on the BPF side.
             let input = ProgramInput {
                 ..Default::default()
             };
             let prog = &mut self.skel.progs.refresh_layer_cpumasks;
             let _ = prog.test_run(input);
+
+            // Update empty_layers.
+            let empty_layer_ids: Vec<u32> = self
+                .layers
+                .iter()
+                .enumerate()
+                .filter(|(_idx, layer)| layer.nr_cpus == 0)
+                .map(|(idx, _layer)| idx as u32)
+                .collect();
+            for i in 0..self.layers.len() {
+                self.skel.maps.bss_data.empty_layer_ids[i] =
+                    empty_layer_ids.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+            }
+            self.skel.maps.bss_data.nr_empty_layer_ids = empty_layer_ids.len() as u32;
         }
 
         let _ = self.update_netdev_cpumasks();
@@ -2112,6 +2260,9 @@ fn main() -> Result<()> {
     }
     if opts.layer_growth_weight_disable != 0.0 {
         warn!("--layer-growth-weight-disable is deprecated and noop");
+    }
+    if opts.local_llc_iteration {
+        warn!("--local_llc_iteration is deprecated and noop");
     }
 
     let llv = match opts.verbose {
