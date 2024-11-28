@@ -18,4 +18,4 @@ clang="$1"
 
 "$clang" -dM -E - < /dev/null \
     | grep '__riscv_xlen ' \
-    | awk '{printf("-D__riscv_xlen=%d -D__BITS_PER_LONG=%d", $$3, $$3)}'
+    | awk '{printf("-D__riscv_xlen=%d -D__BITS_PER_LONG=%d", $3, $3)}'
