@@ -11,7 +11,7 @@ pub mod bpf_intf;
 pub use bpf_intf::*;
 
 mod stats;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::ffi::c_int;
 use std::fs::File;
 use std::io::Read;
@@ -478,7 +478,7 @@ impl<'a> Scheduler<'a> {
         enable_sibling_cpu_fn: &dyn Fn(&mut BpfSkel<'_>, usize, usize, usize) -> Result<(), u32>,
     ) -> Result<(), std::io::Error> {
         // Determine the list of CPU IDs associated to each cache node.
-        let mut cache_id_map: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut cache_id_map: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         for core in topo.all_cores.values() {
             for (cpu_id, cpu) in &core.cpus {
                 let cache_id = match cache_lvl {
