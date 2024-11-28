@@ -56,10 +56,10 @@ pub struct LayerStats {
     pub index: usize,
     #[stat(desc = "Total CPU utilization (100% means one full CPU)")]
     pub util: f64,
-    #[stat(desc = "Protected CPU utilization %")]
-    pub util_protected: f64,
     #[stat(desc = "Open CPU utilization %")]
-    pub util_open: f64,
+    pub util_open_frac: f64,
+    #[stat(desc = "Protected CPU utilization %")]
+    pub util_protected_frac: f64,
     #[stat(desc = "fraction of total CPU utilization")]
     pub util_frac: f64,
     #[stat(desc = "sum of weight * duty_cycle for tasks")]
@@ -188,13 +188,13 @@ impl LayerStats {
         Self {
             index: lidx,
             util: util_sum * 100.0,
-            util_protected: if util_sum != 0.0 {
-                stats.layer_utils[lidx][LAYER_USAGE_PROTECTED] / util_sum * 100.0
+            util_open_frac: if util_sum != 0.0 {
+                stats.layer_utils[lidx][LAYER_USAGE_OPEN] / util_sum * 100.0
             } else {
                 0.0
             },
-            util_open: if util_sum != 0.0 {
-                stats.layer_utils[lidx][LAYER_USAGE_OPEN] / util_sum * 100.0
+            util_protected_frac: if util_sum != 0.0 {
+                stats.layer_utils[lidx][LAYER_USAGE_PROTECTED] / util_sum * 100.0
             } else {
                 0.0
             },
@@ -259,11 +259,11 @@ impl LayerStats {
     pub fn format<W: Write>(&self, w: &mut W, name: &str, header_width: usize) -> Result<()> {
         writeln!(
             w,
-            "  {:<width$}: util/prot/open/frac={:6.1}/{}/{}/{:7.1} tasks={:6} load={:9.2}",
+            "  {:<width$}: util/open/prot/frac={:6.1}/{}/{}/{:7.1} tasks={:6} load={:9.2}",
             name,
             self.util,
-            fmt_pct(self.util_protected),
-            fmt_pct(self.util_open),
+            fmt_pct(self.util_open_frac),
+            fmt_pct(self.util_protected_frac),
             self.util_frac,
             self.tasks,
             self.load,
