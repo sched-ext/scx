@@ -23,6 +23,8 @@
 
 char _license[] SEC("license") = "GPL";
 
+extern unsigned CONFIG_HZ __kconfig;
+
 const volatile u32 debug = 0;
 const volatile u64 slice_ns;
 const volatile u64 max_exec_ns;
@@ -37,11 +39,13 @@ const volatile bool smt_enabled = true;
 const volatile bool has_little_cores = true;
 const volatile bool disable_topology = false;
 const volatile bool xnuma_preemption = false;
-const volatile bool local_llc_iteration = true;
 const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile bool monitor_disable = false;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 const volatile u32 layer_iteration_order[MAX_LAYERS];
+const volatile u32 nr_open_preempt_layers;	/* open/grouped && preempt */
+const volatile u32 nr_open_layers;		/* open/grouped && !preempt */
+
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
 /* Delay permitted, in seconds, before antistall activates */
@@ -54,7 +58,8 @@ struct layer layers[MAX_LAYERS];
 u32 fallback_cpu;
 static u32 preempt_cursor;
 
-extern unsigned CONFIG_HZ __kconfig;
+u32 empty_layer_ids[MAX_LAYERS];
+u32 nr_empty_layer_ids;
 
 #define dbg(fmt, args...)	do { if (debug) bpf_printk(fmt, ##args); } while (0)
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
@@ -1227,218 +1232,57 @@ reset:
 	return consumed;
 }
 
-static __noinline
-void layered_dispatch_no_topo(s32 cpu, struct task_struct *prev)
+static __always_inline
+bool try_consume_layer(u32 layer_id, struct llc_ctx *llcc)
 {
-	struct cpu_ctx *cpuc, *sib_cpuc;
-	struct layer *layer;
-	u32 layer_id;
-	s32 sib = sibling_cpu(cpu);
+	struct llc_prox_map *llc_pmap = &llcc->prox_map;
+	u32 u;
 
-	if (!(cpuc = lookup_cpu_ctx(-1)))
-		return;
+	bpf_for(u, 0, llc_pmap->sys_end) {
+		u16 *llc_idp;
 
-	if (antistall_consume(cpuc))
-		return;
-
-	/*
-	 * if @prev was on SCX and is still runnable, we are here because @prev
-	 * has exhausted its slice. We may want to keep running it on this CPU
-	 * rather than giving this CPU to another task and then try to schedule
-	 * @prev somewhere else.
-	 *
-	 * Let's not dispatch any task if we want to keep running @prev. This
-	 * will trigger the automatic local enq behavior which will put @prev on
-	 * @cpu's local DSQ. A more straightforward way to implement this would
-	 * be extending slice from ops.tick() but that's not available in older
-	 * kernels, so let's make do with this for now.
-	 */
-	if (prev && keep_running(cpuc, prev))
-		return;
-
-	/*
-	 * If the sibling CPU is running an exclusive task, keep this CPU idle.
-	 * This test is a racy test but should be good enough for best-effort
-	 * optimization.
-	 */
-	if (sib >= 0 && (sib_cpuc = lookup_cpu_ctx(sib)) &&
-	    sib_cpuc->current_exclusive) {
-		gstat_inc(GSTAT_EXCL_IDLE, cpuc);
-		return;
-	}
-
-	/* consume preempting layers first */
-	bpf_for(layer_id, 0, nr_layers) {
-		layer = MEMBER_VPTR(layers, [layer_id]);
-		if (layer->preempt && scx_bpf_consume(layer_id))
-			return;
-	}
-
-	if (scx_bpf_consume(cpuc->hi_fallback_dsq_id))
-		return;
-
-	/* consume !open layers second */
-	bpf_for(layer_id, 0, nr_layers) {
-		layer = MEMBER_VPTR(layers, [layer_id]);
-		struct cpumask *layer_cpumask;
-
-		/* consume matching layers */
-		if (!(layer_cpumask = lookup_layer_cpumask(layer_id)))
-			return;
-
-		if (bpf_cpumask_test_cpu(cpu, layer_cpumask) ||
-		    (cpu == fallback_cpu && layer->nr_cpus == 0)) {
-			if (scx_bpf_consume(layer_id))
-				return;
+		if (!(llc_idp = MEMBER_VPTR(llc_pmap->llcs, [u]))) {
+			scx_bpf_error("llc_pmap->sys_end=%u too big", llc_pmap->sys_end);
+			return false;
 		}
+
+		if (scx_bpf_consume(layer_dsq_id(layer_id, *llc_idp)))
+			return true;
 	}
 
-	/* consume !preempting open layers */
-	bpf_for(layer_id, 0, nr_layers) {
-		layer = MEMBER_VPTR(layers, [layer_id]);
-		if (!layer->preempt && layer->kind != LAYER_KIND_CONFINED &&
-		    scx_bpf_consume(layer_id))
-			return;
-	}
-
-	scx_bpf_consume(LO_FALLBACK_DSQ);
+	return false;
 }
 
-__weak int consume_preempting(u32 my_llc_id)
+static __always_inline
+bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
+			struct llc_ctx *llcc)
 {
-	struct layer *layer;
-	u64 dsq_id;
-	u32 u, v, layer_id;
+	u32 u;
 
-	if (local_llc_iteration) {
-		bpf_for(u, 0, nr_llcs) {
-			u32 llc_id = rotate_llc_id(my_llc_id, u);
-			bpf_for(layer_id, 0, nr_layers) {
-				layer = MEMBER_VPTR(layers, [layer_id]);
-				if (!layer->preempt)
-					continue;
-				dsq_id = layer_dsq_id(layer_id, llc_id);
-				if (scx_bpf_consume(dsq_id))
-					return 0;
-			}
-		}
-	} else {
-		bpf_for(layer_id, 0, nr_layers) {
-			if (layer_id >= nr_layers) {
-				scx_bpf_error("can't happen");
-				return -EINVAL;
-			}
-			layer = MEMBER_VPTR(layers, [layer_id]);
-			if (!layer->preempt)
-				continue;
-
-			bpf_for(v, 0, nr_llcs) {
-				u32 llc_id = rotate_llc_id(my_llc_id, v);
-				dsq_id = layer_dsq_id(layer_id, llc_id);
-				if (scx_bpf_consume(dsq_id))
-					return 0;
-			}
-		}
+	if (nr >= MAX_LAYERS) {
+		scx_bpf_error("nr=%u too high", nr);
+		return false;
 	}
 
-	return -ENOENT;
-}
+	bpf_for(u, 0, nr) {
+		u32 layer_id = layer_order[u];
 
-static __noinline int consume_non_open(s32 cpu, u32 my_llc_id)
-{
-	struct layer *layer;
-	u64 dsq_id;
-	u32 u, v, layer_id;
+		if (layer_id == exclude_layer_id)
+			continue;
 
-	if (local_llc_iteration) {
-		bpf_for(u, 0, nr_llcs) {
-			u32 llc_id = rotate_llc_id(my_llc_id, u);
-			bpf_for(layer_id, 0, nr_layers) {
-				layer = MEMBER_VPTR(layers, [layer_id]);
-
-				struct cpumask *layer_cpumask;
-				if (!(layer_cpumask = lookup_layer_cpumask(layer_id)))
-					return -ENOENT;
-
-				if (!bpf_cpumask_test_cpu(cpu, layer_cpumask) &&
-				    (cpu > nr_possible_cpus ||
-				     cpu != fallback_cpu ||
-				     layer->nr_cpus != 0))
-					continue;
-
-				dsq_id = layer_dsq_id(layer_id, llc_id);
-				if (scx_bpf_consume(dsq_id))
-					return 0;
-			}
-		}
-	} else {
-		bpf_for(layer_id, 0, nr_layers) {
-			layer = MEMBER_VPTR(layers, [layer_id]);
-
-			struct cpumask *layer_cpumask;
-			if (!(layer_cpumask = lookup_layer_cpumask(layer_id)))
-				return -ENOENT;
-			if (!bpf_cpumask_test_cpu(cpu, layer_cpumask) &&
-			    (cpu > nr_possible_cpus || cpu != fallback_cpu ||
-			    layer->nr_cpus != 0))
-				continue;
-
-			bpf_for(v, 0, nr_llcs) {
-				u32 llc_id = rotate_llc_id(my_llc_id, v);
-				dsq_id = layer_dsq_id(layer_id, llc_id);
-
-				if (scx_bpf_consume(dsq_id))
-					return 0;
-			}
-		}
+		if (try_consume_layer(layer_id, llcc))
+			return true;
 	}
 
-	return -ENOENT;
-}
-
-__weak int consume_open_no_preempt(u32 my_llc_id)
-{
-	struct layer *layer;
-	u64 dsq_id;
-	u32 u, v, layer_id;
-
-	if (local_llc_iteration) {
-		bpf_for(u, 0, nr_llcs) {
-			u32 llc_id = rotate_llc_id(my_llc_id, u);
-			bpf_for(layer_id, 0, nr_layers) {
-				layer = MEMBER_VPTR(layers, [layer_id]);
-				if (layer->preempt || layer->kind == LAYER_KIND_CONFINED)
-					continue;
-
-				dsq_id = layer_dsq_id(layer_id, llc_id);
-				if (scx_bpf_consume(dsq_id))
-					return 0;
-			}
-		}
-	} else {
-		bpf_for(layer_id, 0, nr_layers) {
-			layer = MEMBER_VPTR(layers, [layer_id]);
-			if (layer->preempt || layer->kind == LAYER_KIND_CONFINED)
-				continue;
-			bpf_for(v, 0, nr_llcs) {
-				u32 llc_id = rotate_llc_id(my_llc_id, v);
-				dsq_id = layer_dsq_id(layer_id, llc_id);
-
-				if (scx_bpf_consume(dsq_id))
-					return 0;
-			}
-		}
-	}
-
-	return -ENOENT;
+	return false;
 }
 
 void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 {
-	if (disable_topology)
-		return layered_dispatch_no_topo(cpu, prev);
-
+	struct layer *owner_layer = NULL;
 	struct cpu_ctx *cpuc, *sib_cpuc;
+	struct llc_ctx *llcc;
+	bool tried_owner = false;
 	s32 sib = sibling_cpu(cpu);
 
 	if (!(cpuc = lookup_cpu_ctx(-1)))
@@ -1473,28 +1317,52 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
-	/*
-	 * XXX - cpuc->protect_owned implementation is not quite correct. It
-	 * protects only confined layers against grouped/open preempt layers.
-	 * This will be addressed soon.
-	 */
-
-	/* consume preempting layers first */
-	if (cpuc->protect_owned && consume_preempting(cpuc->llc_id) == 0)
+	if (!(llcc = lookup_llc_ctx(cpuc->llc_id)))
 		return;
 
+	if (cpuc->layer_id < MAX_LAYERS)
+		owner_layer = &layers[cpuc->layer_id];
+
+	/*
+	 * Always consume hi_fallback_dsq_id first for kthreads. This ends up
+	 * prioritizing tasks with custom affinities which will be solved by
+	 * implementing starvation prevention for lo fallback and queueing them
+	 * there.
+	 */
 	if (scx_bpf_consume(cpuc->hi_fallback_dsq_id))
 		return;
 
-	/* consume !open layers second */
-	if (consume_non_open(cpu, cpuc->llc_id) == 0)
+	/*
+	 * Prioritize empty layers on the fallback CPU. empty_layer_ids array
+	 * can be resized asynchronously by userland. As unoccupied slots are
+	 * filled with MAX_LAYERS, excluding IDs matching MAX_LAYERS makes it
+	 * safe.
+	 */
+	if (cpuc->cpu == fallback_cpu &&
+	    try_consume_layers(empty_layer_ids, nr_empty_layer_ids,
+			       MAX_LAYERS, llcc)) {
+	}
+
+	/* owner before preempt layers if protected or preempting */
+	if (owner_layer && (cpuc->protect_owned || owner_layer->preempt)) {
+		if (try_consume_layer(owner_layer->id, llcc))
+			return;
+		tried_owner = true;
+	}
+
+	/* grouped/open preempt layers */
+	if (try_consume_layers(cpuc->open_preempt_layer_order, nr_open_preempt_layers,
+			       cpuc->layer_id, llcc))
 		return;
 
-	if (!cpuc->protect_owned && consume_preempting(cpuc->llc_id) == 0)
+	/* try owner if not tried yet */
+	if (owner_layer && !tried_owner &&
+	    try_consume_layer(owner_layer->id, llcc))
 		return;
 
-	/* consume !preempting open layers */
-	if (consume_open_no_preempt(cpuc->llc_id) == 0)
+	/* grouped/open non-preempt layers */
+	if (try_consume_layers(cpuc->open_layer_order, nr_open_layers,
+			       cpuc->layer_id, llcc))
 		return;
 
 	scx_bpf_consume(LO_FALLBACK_DSQ);
@@ -2596,13 +2464,19 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 
 	// too much output, overruns trace buf, maybe come up with a way to compact
 	if (cpu == 0) {
-		dbg("CFG: Dumping CPU proxity map");
 		bpf_for(i, 0, pmap->sys_end) {
 			u16 *p = MEMBER_VPTR(pmap->cpus, [i]);
 			if (p)
 				dbg("CFG: CPU[%d] prox[%d]=%d", cpu, i, *p);
 		}
 	}
+
+	bpf_for(i, 0, nr_open_preempt_layers)
+		dbg("CFG: CPU[%d] open_preempt_layer_order[%d]=%d",
+		    cpu, i, cpuc->open_preempt_layer_order[i]);
+	bpf_for(i, 0, nr_open_layers)
+		dbg("CFG: CPU[%d] open_preempt_order[%d]=%d",
+		    cpu, i, cpuc->open_layer_order[i]);
 
 	return 0;
 }

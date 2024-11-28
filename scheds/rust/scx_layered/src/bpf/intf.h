@@ -160,6 +160,10 @@ struct cpu_ctx {
 	u32			llc_id;
 	u32			node_id;
 	u32			perf;
+
+	u32			open_preempt_layer_order[MAX_LAYERS];
+	u32			open_layer_order[MAX_LAYERS];
+
 	struct cpu_prox_map	prox_map;
 };
 

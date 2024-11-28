@@ -476,7 +476,8 @@ struct Opts {
     #[clap(long)]
     run_example: bool,
 
-    /// Enables iteration over local LLCs first for dispatch.
+    /// ***DEPRECATED *** Enables iteration over local LLCs first for
+    /// dispatch.
     #[clap(long, default_value = "false")]
     local_llc_iteration: bool,
 
@@ -1355,7 +1356,7 @@ impl<'a> Scheduler<'a> {
             .collect()
     }
 
-    fn init_cpus(skel: &BpfSkel, topo: &Topology) -> Result<()> {
+    fn init_cpus(skel: &BpfSkel, layer_specs: &[LayerSpec], topo: &Topology) -> Result<()> {
         let key = (0_u32).to_ne_bytes();
         let mut cpu_ctxs: Vec<bpf_intf::cpu_ctx> = vec![];
         let cpu_ctxs_vec = skel
@@ -1364,6 +1365,25 @@ impl<'a> Scheduler<'a> {
             .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
             .context("Failed to lookup cpu_ctx")?
             .unwrap();
+
+        let open_preempt_layers: Vec<u32> = layer_specs
+            .iter()
+            .enumerate()
+            .filter(|(_idx, spec)| match &spec.kind {
+                LayerKind::Open { .. } | LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                _ => false,
+            })
+            .map(|(idx, _)| idx as u32)
+            .collect();
+        let open_layers: Vec<u32> = layer_specs
+            .iter()
+            .enumerate()
+            .filter(|(_idx, spec)| match &spec.kind {
+                LayerKind::Open { .. } | LayerKind::Grouped { .. } => !spec.kind.common().preempt,
+                _ => false,
+            })
+            .map(|(idx, _)| idx as u32)
+            .collect();
 
         // FIXME - this incorrectly assumes all possible CPUs are consecutive.
         for cpu in 0..*NR_CPUS_POSSIBLE {
@@ -1377,6 +1397,19 @@ impl<'a> Scheduler<'a> {
             cpu_ctxs[cpu].layer_id = MAX_LAYERS as u32;
             cpu_ctxs[cpu].task_layer_id = MAX_LAYERS as u32;
             cpu_ctxs[cpu].is_big = is_big;
+
+            let mut p_order = open_preempt_layers.clone();
+            let mut o_order = open_layers.clone();
+            fastrand::seed(cpu as u64);
+            fastrand::shuffle(&mut p_order);
+            fastrand::shuffle(&mut o_order);
+
+            for i in 0..MAX_LAYERS {
+                cpu_ctxs[cpu].open_preempt_layer_order[i] =
+                    p_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].open_layer_order[i] =
+                    o_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+            }
         }
 
         Self::init_cpu_prox_map(topo, &mut cpu_ctxs);
@@ -1562,7 +1595,6 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.disable_topology = disable_topology;
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
-        skel.maps.rodata_data.local_llc_iteration = opts.local_llc_iteration;
         skel.maps.rodata_data.antistall_sec = opts.antistall_sec;
         if opts.monitor_disable {
             skel.maps.rodata_data.monitor_disable = opts.monitor_disable;
@@ -1576,6 +1608,27 @@ impl<'a> Scheduler<'a> {
         for cpu in cpu_pool.all_cpus.iter_ones() {
             skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
+
+        skel.maps.rodata_data.nr_open_preempt_layers = layer_specs
+            .iter()
+            .filter(|spec| match &spec.kind {
+                LayerKind::Open { .. } | LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                _ => false,
+            })
+            .count() as u32;
+        skel.maps.rodata_data.nr_open_layers = layer_specs
+            .iter()
+            .filter(|spec| match &spec.kind {
+                LayerKind::Open { .. } | LayerKind::Grouped { .. } => !spec.kind.common().preempt,
+                _ => false,
+            })
+            .count() as u32;
+
+        // Consider all layers empty at the beginning.
+        for i in 0..layer_specs.len() {
+            skel.maps.bss_data.empty_layer_ids[i] = i as u32;
+        }
+        skel.maps.bss_data.nr_empty_layer_ids = nr_layers as u32;
 
         Self::init_layers(&mut skel, opts, &layer_specs, &topo)?;
         Self::init_nodes(&mut skel, opts, &topo);
@@ -1592,7 +1645,7 @@ impl<'a> Scheduler<'a> {
             layers.push(Layer::new(&spec, &cpu_pool, &topo, &growth_order)?);
         }
 
-        Self::init_cpus(&skel, &topo)?;
+        Self::init_cpus(&skel, &layer_specs, &topo)?;
         Self::init_llc_prox_map(&mut skel, &topo)?;
 
         // Other stuff.
@@ -1941,11 +1994,27 @@ impl<'a> Scheduler<'a> {
                     self.nr_layer_cpus_ranges[lidx].1.max(layer.nr_cpus),
                 );
             }
+
+            // Trigger updates on the BPF side.
             let input = ProgramInput {
                 ..Default::default()
             };
             let prog = &mut self.skel.progs.refresh_layer_cpumasks;
             let _ = prog.test_run(input);
+
+            // Update empty_layers.
+            let empty_layer_ids: Vec<u32> = self
+                .layers
+                .iter()
+                .enumerate()
+                .filter(|(_idx, layer)| layer.nr_cpus == 0)
+                .map(|(idx, _layer)| idx as u32)
+                .collect();
+            for i in 0..self.layers.len() {
+                self.skel.maps.bss_data.empty_layer_ids[i] =
+                    empty_layer_ids.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+            }
+            self.skel.maps.bss_data.nr_empty_layer_ids = empty_layer_ids.len() as u32;
         }
 
         let _ = self.update_netdev_cpumasks();
@@ -2191,6 +2260,9 @@ fn main() -> Result<()> {
     }
     if opts.layer_growth_weight_disable != 0.0 {
         warn!("--layer-growth-weight-disable is deprecated and noop");
+    }
+    if opts.local_llc_iteration {
+        warn!("--local_llc_iteration is deprecated and noop");
     }
 
     let llv = match opts.verbose {
