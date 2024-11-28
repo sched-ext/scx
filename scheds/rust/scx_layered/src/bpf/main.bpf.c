@@ -25,7 +25,8 @@ char _license[] SEC("license") = "GPL";
 
 extern unsigned CONFIG_HZ __kconfig;
 
-const volatile u32 debug = 0;
+const volatile u32 debug;
+const volatile s32 layered_tgid;
 const volatile u64 slice_ns;
 const volatile u64 max_exec_ns;
 const volatile u32 nr_possible_cpus = 1;
@@ -1005,13 +1006,13 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		vtime = layer->vtime_now - slice_ns;
 
 	/*
-	 * Special-case per-cpu kthreads which aren't in a preempting layer so
-	 * that they run between preempting and non-preempting layers. This is
-	 * to give reasonable boost to per-cpu kthreads by default as they are
-	 * usually important for system performance and responsiveness.
+	 * Special-case per-cpu kthreads and scx_layered userspace so that they
+	 * run before preempting layers. This is to guarantee timely execution
+	 * of layered userspace code and give boost to per-cpu kthreads as they
+	 * are usually important for system performance and responsiveness.
 	 */
-	if (!layer->preempt &&
-	    (p->flags & PF_KTHREAD) && p->nr_cpus_allowed < nr_possible_cpus) {
+	if (((p->flags & PF_KTHREAD) && p->nr_cpus_allowed < nr_possible_cpus) ||
+	    p->tgid == layered_tgid) {
 		struct cpumask *layer_cpumask;
 
 		if (layer->kind == LAYER_KIND_CONFINED &&

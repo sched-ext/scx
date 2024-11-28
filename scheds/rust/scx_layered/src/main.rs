@@ -1584,6 +1584,9 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.layered_mut().exit_dump_len = opts.exit_dump_len;
 
         skel.maps.rodata_data.debug = opts.verbose as u32;
+        // Running scx_layered inside a PID namespace would break the
+        // following.
+        skel.maps.rodata_data.layered_tgid = unsafe { libc::getpid() };
         skel.maps.rodata_data.slice_ns = opts.slice_us * 1000;
         skel.maps.rodata_data.max_exec_ns = if opts.max_exec_us > 0 {
             opts.max_exec_us * 1000
