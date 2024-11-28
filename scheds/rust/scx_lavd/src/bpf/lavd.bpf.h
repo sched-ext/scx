@@ -51,7 +51,9 @@ enum consts_internal  {
 						  performance mode when cpu util > 40% */
 
 	LAVD_CPDOM_STARV_NS		= (2 * LAVD_SLICE_MAX_NS_DFL),
-	LAVD_CPDOM_MIGRATION_SHIFT	= 2, /* 1/2**2 = +/- 25% */
+	LAVD_CPDOM_MIGRATION_SHIFT	= 3, /* 1/2**3 = +/- 12.5% */
+	LAVD_CPDOM_X_PROB_FT		= (LAVD_SYS_STAT_INTERVAL_NS /
+					   (2 * LAVD_SLICE_MAX_NS_DFL)), /* roughly twice per interval */
 };
 
 /*
