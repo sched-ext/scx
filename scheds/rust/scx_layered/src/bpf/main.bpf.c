@@ -1805,52 +1805,67 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 {
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
-	struct layer *layer;
+	struct layer *task_layer, *cpu_layer = NULL;
 	u64 now = bpf_ktime_get_ns();
-	s32 lid;
-	u64 used;
+	bool is_fallback;
+	s32 task_lid, target_ppk;
+	u64 used, cpu_slice;
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
+	is_fallback = cpuc->cpu == fallback_cpu;
 
-	lid = taskc->layer_id;
-	if (!(layer = lookup_layer(lid)))
+	task_lid = taskc->layer_id;
+	if (!(task_layer = lookup_layer(task_lid)))
+		return;
+
+	if (cpuc->layer_id != MAX_LAYERS &&
+	    !(cpu_layer = lookup_layer(cpuc->layer_id)))
 		return;
 
 	used = now - taskc->running_at;
 
-	u64 slice_ns = layer_slice_ns(layer);
-
 	if (cpuc->running_owned) {
-		cpuc->layer_usages[lid][LAYER_USAGE_OWNED] += used;
+		cpuc->layer_usages[task_lid][LAYER_USAGE_OWNED] += used;
 		if (cpuc->protect_owned)
-			cpuc->layer_usages[lid][LAYER_USAGE_PROTECTED] += used;
+			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED] += used;
 		cpuc->owned_usage += used;
 	} else {
-		cpuc->layer_usages[lid][LAYER_USAGE_OPEN] += used;
+		cpuc->layer_usages[task_lid][LAYER_USAGE_OPEN] += used;
 		cpuc->open_usage += used;
 	}
 
 	/*
-	 * Apply owned protection iff the CPU stayed saturated for longer than
-	 * twice the slice.
+	 * Owned execution protection.
 	 */
-	if (layer->owned_usage_target_ppk &&
-	    (cpuc->owned_usage + cpuc->open_usage) - cpuc->usage_at_idle > 2 * slice_ns) {
+	if (cpu_layer) {
+		target_ppk = cpu_layer->owned_usage_target_ppk;
+		cpu_slice = layer_slice_ns(cpu_layer);
+	} else {
+		target_ppk = 0;
+		cpu_slice = slice_ns;
+	}
+
+	/*
+	 * For the fallback CPU, execution for layers without any CPU counts as
+	 * owned. Guarantee that at least half of the fallback CPU is used for
+	 * empty execution so that empty layers can easily ramp up even when
+	 * there are saturating preempt layers. Note that a fallback DSQ may
+	 * belong to a layer under saturation. In such cases, tasks from both
+	 * the owner and empty layers would count as owned with empty layers
+	 * being prioritized.
+	 */
+	if (is_fallback && target_ppk < 512)
+		target_ppk = 512;
+
+	/*
+	 * Apply owned protection iff the CPU stayed saturated for longer than
+	 * twice the default slice.
+	 */
+	if (target_ppk &&
+	    (cpuc->owned_usage + cpuc->open_usage) - cpuc->usage_at_idle > 2 * cpu_slice) {
 		u64 owned = cpuc->owned_usage - cpuc->prev_owned_usage[0];
 		u64 open = cpuc->open_usage - cpuc->prev_open_usage[0];
-		u32 target_ppk;
-
-		/*
-		 * For the fallback CPU, execution for layers without any CPU
-		 * counts as owned. Guarantee that at least half of the fallback
-		 * CPU is used for that so that empty layers can easily ramp up
-		 * even when there are saturating preempt layers.
-		 */
-		if (cpuc->cpu == fallback_cpu)
-			target_ppk = 512;
-		else
-			target_ppk = layer->owned_usage_target_ppk;
 
 		cpuc->protect_owned = 1024 * owned / (owned + open) <= target_ppk;
 	} else {
@@ -1865,10 +1880,10 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	 * Apply min_exec_us, scale the execution time by the inverse of the
 	 * weight and charge.
 	 */
-	if (used < layer->min_exec_ns) {
-		lstat_inc(LSTAT_MIN_EXEC, layer, cpuc);
-		lstat_add(LSTAT_MIN_EXEC_NS, layer, cpuc, layer->min_exec_ns - used);
-		used = layer->min_exec_ns;
+	if (used < task_layer->min_exec_ns) {
+		lstat_inc(LSTAT_MIN_EXEC, task_layer, cpuc);
+		lstat_add(LSTAT_MIN_EXEC_NS, task_layer, cpuc, task_layer->min_exec_ns - used);
+		used = task_layer->min_exec_ns;
 	}
 
 	if (cpuc->yielding && used < slice_ns)
@@ -1947,6 +1962,7 @@ void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
 	if (!idle || !(cpuc = lookup_cpu_ctx(cpu)))
 		return;
 
+	cpuc->protect_owned = false;
 	cpuc->usage_at_idle = cpuc->owned_usage + cpuc->open_usage;
 }
 
