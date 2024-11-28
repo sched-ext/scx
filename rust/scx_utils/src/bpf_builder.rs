@@ -306,13 +306,6 @@ impl BpfBuilder {
         // Tell cargo to invalidate the built crate whenever the wrapper changes
         deps.insert(input.to_string());
 
-        // FIXME - bindgen's API changed between 0.68 and 0.69 so that
-        // `bindgen::CargoCallbacks::new()` should be used instead of
-        // `bindgen::CargoCallbacks`. Unfortunately, as of Dec 2023, fedora
-        // is shipping 0.68. To accommodate fedora, allow both 0.68 and 0.69
-        // of bindgen and suppress deprecation warning. Remove the following
-        // once fedora can be updated to bindgen >= 0.69.
-        #[allow(deprecated)]
         // The bindgen::Builder is the main entry point to bindgen, and lets
         // you build up options for the resulting bindings.
         let bindings = bindgen::Builder::default()
@@ -326,7 +319,7 @@ impl BpfBuilder {
             .header(input)
             // Tell cargo to invalidate the built crate whenever any of the
             // included header files changed.
-            .parse_callbacks(Box::new(bindgen::CargoCallbacks))
+            .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
             .generate()
             .context("Unable to generate bindings")?;
 
