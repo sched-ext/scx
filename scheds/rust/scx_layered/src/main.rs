@@ -44,7 +44,6 @@ use scx_stats::prelude::*;
 use scx_utils::compat;
 use scx_utils::import_enums;
 use scx_utils::init_libbpf_logging;
-use scx_utils::ravg::ravg_read;
 use scx_utils::read_netdevs;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
@@ -63,7 +62,6 @@ use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
 
-const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
 const MAX_COMM: usize = bpf_intf::consts_MAX_COMM as usize;
 const MAX_LAYER_WEIGHT: u32 = bpf_intf::consts_MAX_LAYER_WEIGHT;
@@ -501,16 +499,6 @@ struct Opts {
     specs: Vec<String>,
 }
 
-fn now_monotonic() -> u64 {
-    let mut time = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
-    assert!(ret == 0);
-    time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
-}
-
 fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
     reader
         .read_stat()
@@ -716,14 +704,10 @@ impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
 
 #[derive(Clone, Debug)]
 struct Stats {
-    nr_layers: usize,
     at: Instant,
-
+    nr_layers: usize,
     nr_layer_tasks: Vec<usize>,
-
     nr_nodes: usize,
-    total_load: f64,
-    layer_loads: Vec<f64>,
 
     total_util: f64, // Running AVG of sum of layer_utils
     layer_utils: Vec<Vec<f64>>,
@@ -742,30 +726,6 @@ struct Stats {
 }
 
 impl Stats {
-    fn read_layer_loads(skel: &mut BpfSkel, nr_layers: usize) -> (f64, Vec<f64>) {
-        let now_mono = now_monotonic();
-        let layer_loads: Vec<f64> = skel
-            .maps
-            .bss_data
-            .layers
-            .iter()
-            .take(nr_layers)
-            .map(|layer| {
-                let rd = &layer.load_rd;
-                ravg_read(
-                    rd.val,
-                    rd.val_at,
-                    rd.old,
-                    rd.cur,
-                    now_mono,
-                    USAGE_HALF_LIFE,
-                    RAVG_FRAC_BITS,
-                )
-            })
-            .collect();
-        (layer_loads.iter().sum(), layer_loads)
-    }
-
     fn read_layer_usages(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Vec<Vec<u64>> {
         let mut layer_usages = vec![vec![0u64; NR_LAYER_USAGES]; nr_layers];
 
@@ -789,12 +749,8 @@ impl Stats {
         Ok(Self {
             at: Instant::now(),
             nr_layers,
-
             nr_layer_tasks: vec![0; nr_layers],
-
             nr_nodes,
-            total_load: 0.0,
-            layer_loads: vec![0.0; nr_layers],
 
             total_util: 0.0,
             layer_utils: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
@@ -840,8 +796,6 @@ impl Stats {
             .map(|layer| layer.slice_ns / 1000 as u64)
             .collect();
 
-        let (total_load, layer_loads) = Self::read_layer_loads(skel, self.nr_layers);
-
         let cur_layer_usages = Self::read_layer_usages(&cpu_ctxs, self.nr_layers);
         let cur_layer_utils: Vec<Vec<f64>> = cur_layer_usages
             .iter()
@@ -880,12 +834,8 @@ impl Stats {
         *self = Self {
             at: now,
             nr_layers: self.nr_layers,
-
             nr_layer_tasks,
-
             nr_nodes: self.nr_nodes,
-            total_load,
-            layer_loads,
 
             total_util: layer_utils.iter().flatten().sum(),
             layer_utils: layer_utils.try_into().unwrap(),

@@ -21,13 +21,6 @@ typedef unsigned u32;
 typedef unsigned long long u64;
 #endif
 
-#ifdef LSP
-#define __bpf__
-#include "../../../../include/scx/ravg.bpf.h"
-#else
-#include <scx/ravg.bpf.h>
-#endif
-
 enum consts {
 	CACHELINE_SIZE		= 64,
 	MAX_CPUS_SHIFT		= 9,
@@ -255,9 +248,6 @@ struct layer {
 	u32			owned_usage_target_ppk;
 	u64			vtime_now;
 	u64			nr_tasks;
-
-	u64			load;
-	struct ravg_data	load_rd;
 
 	u64			cpus_seq;
 	u64			node_mask;

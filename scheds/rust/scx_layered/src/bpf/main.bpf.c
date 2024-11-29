@@ -5,10 +5,8 @@
 #endif
 #define LSP_INC
 #include "../../../../include/scx/common.bpf.h"
-#include "../../../../include/scx/ravg_impl.bpf.h"
 #else
 #include <scx/common.bpf.h>
-#include <scx/ravg_impl.bpf.h>
 #endif
 
 #include "intf.h"
@@ -255,37 +253,6 @@ static void lstat_inc(u32 id, struct layer *layer, struct cpu_ctx *cpuc)
 struct lock_wrapper {
 	struct bpf_spin_lock	lock;
 };
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct lock_wrapper);
-	__uint(max_entries, MAX_LAYERS);
-	__uint(map_flags, 0);
-} layer_load_locks SEC(".maps");
-
-static void adj_load(u32 layer_id, s64 adj, u64 now)
-{
-	struct layer *layer;
-	struct lock_wrapper *lockw;
-
-	layer = MEMBER_VPTR(layers, [layer_id]);
-	lockw = bpf_map_lookup_elem(&layer_load_locks, &layer_id);
-
-	if (!layer || !lockw) {
-		scx_bpf_error("Can't access layer%d or its load_lock", layer_id);
-		return;
-	}
-
-	bpf_spin_lock(&lockw->lock);
-	layer->load += adj;
-	ravg_accumulate(&layer->load_rd, layer->load, now, USAGE_HALF_LIFE);
-	bpf_spin_unlock(&lockw->lock);
-
-	if (debug && adj < 0 && (s64)layer->load < 0)
-		scx_bpf_error("cpu%d layer%d load underflow (load=%lld adj=%lld)",
-			      bpf_get_smp_processor_id(), layer_id, layer->load, adj);
-}
 
 struct layer_cpumask_wrapper {
 	struct bpf_cpumask __kptr *cpumask;
@@ -1739,7 +1706,6 @@ void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 	taskc->runnable_at = now;
 	taskc->first_run = true;
 	maybe_refresh_layer(p, taskc);
-	adj_load(taskc->layer_id, p->scx.weight, now);
 
 	if (enq_flags & SCX_ENQ_WAKEUP)
 		on_wakeup(p, taskc);
@@ -1922,14 +1888,6 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		used = slice_ns;
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 	cpuc->maybe_idle = true;
-}
-
-void BPF_STRUCT_OPS(layered_quiescent, struct task_struct *p, u64 deq_flags)
-{
-	struct task_ctx *taskc;
-
-	if ((taskc = lookup_task_ctx(p)))
-		adj_load(taskc->layer_id, -(s64)p->scx.weight, bpf_ktime_get_ns());
 }
 
 bool BPF_STRUCT_OPS(layered_yield, struct task_struct *from, struct task_struct *to)
@@ -2610,7 +2568,6 @@ SCX_OPS_DEFINE(layered,
 	       .runnable		= (void *)layered_runnable,
 	       .running			= (void *)layered_running,
 	       .stopping		= (void *)layered_stopping,
-	       .quiescent		= (void *)layered_quiescent,
 	       .yield			= (void *)layered_yield,
 	       .set_weight		= (void *)layered_set_weight,
 	       .set_cpumask		= (void *)layered_set_cpumask,
