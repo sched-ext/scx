@@ -38,7 +38,8 @@ enum consts {
 	MIN_LAYER_WEIGHT	= 1,
 	DEFAULT_LAYER_WEIGHT	= 100,
 	USAGE_HALF_LIFE		= 100000000,	/* 100ms */
-	LAYER_LAT_DECAY_FACTOR	= 4,
+	RUNTIME_DECAY_FACTOR	= 4,
+	LAYER_LAT_DECAY_FACTOR	= 32,
 
 	HI_FALLBACK_DSQ_BASE	= MAX_LAYERS * MAX_LLCS,
 	LO_FALLBACK_DSQ		= HI_FALLBACK_DSQ_BASE + MAX_LLCS + 1,
@@ -170,6 +171,7 @@ struct llc_ctx {
 	u32			id;
 	struct bpf_cpumask __kptr *cpumask;
 	u32			nr_cpus;
+	u64			queued_runtime[MAX_LAYERS];
 	u64			lstats[MAX_LAYERS][NR_LLC_LSTATS];
 	struct llc_prox_map	prox_map;
 };

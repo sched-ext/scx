@@ -405,10 +405,10 @@ struct task_ctx {
 	struct cached_cpus	layered_cpus_node;
 	struct bpf_cpumask __kptr *layered_node_mask;
 	bool			all_cpus_allowed;
-	bool			first_run;
 	u64			runnable_at;
 	u64			running_at;
-	u64			last_dsq;
+	u64			runtime_avg;
+	u32			prev_llc_id;
 };
 
 struct {
@@ -970,13 +970,23 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc, *task_cpuc;
 	struct task_ctx *taskc;
+	struct llc_ctx *llcc;
 	struct layer *layer;
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u64 vtime = p->scx.dsq_vtime;
+	u32 layer_id;
 	bool try_preempt_first;
+	u64 queued_runtime;
+	u64 *lstats;
 
-	if (!(cpuc = lookup_cpu_ctx(-1)) || !(task_cpuc = lookup_cpu_ctx(task_cpu)) ||
-	    !(taskc = lookup_task_ctx(p)) || !(layer = lookup_layer(taskc->layer_id)))
+	if (!(cpuc = lookup_cpu_ctx(-1)) ||
+	    !(task_cpuc = lookup_cpu_ctx(task_cpu)) ||
+	    !(taskc = lookup_task_ctx(p)))
+		return;
+
+	layer_id = taskc->layer_id;
+
+	if (!(layer = lookup_layer(layer_id)))
 		return;
 
 	try_preempt_first = cpuc->try_preempt_first;
@@ -1019,8 +1029,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
 
-		taskc->last_dsq = task_cpuc->hi_fallback_dsq_id;
-		scx_bpf_dispatch(p, taskc->last_dsq, slice_ns, enq_flags);
+		scx_bpf_dispatch(p, task_cpuc->hi_fallback_dsq_id, slice_ns, enq_flags);
 		goto preempt;
 	}
 
@@ -1044,13 +1053,47 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		 * to the LLC local HI_FALLBACK_DSQ to avoid this starvation
 		 * issue.
 		 */
-		taskc->last_dsq = task_cpuc->hi_fallback_dsq_id;
-		scx_bpf_dispatch(p, taskc->last_dsq, slice_ns, enq_flags);
+		scx_bpf_dispatch(p, task_cpuc->hi_fallback_dsq_id, slice_ns, enq_flags);
 		goto preempt;
 	}
 
-	taskc->last_dsq = layer_dsq_id(layer->id, task_cpuc->llc_id);
-	scx_bpf_dispatch_vtime(p, taskc->last_dsq, slice_ns, vtime, enq_flags);
+	llcc = lookup_llc_ctx(task_cpuc->llc_id);
+	if (!llcc)
+		return;
+
+	/*
+	 * A task can be enqueued more than once before going through
+	 * ops.running() if the task's property changes which dequeues and
+	 * re-enqueues the task. The task does not go through ops.runnable()
+	 * again in such cases, so layer association would remain the same.
+	 *
+	 * It'd be nice if ops.dequeue() could be used to adjust queued_runtime
+	 * but ops.dequeue() is not called for tasks on a DSQ. Detect the
+	 * condition here and subtract the previous contribution.
+	 */
+	if (taskc->prev_llc_id < MAX_LAYERS) {
+		struct llc_ctx *prev_llcc;
+
+		if (!(prev_llcc = lookup_llc_ctx(taskc->prev_llc_id)))
+			return;
+		__sync_fetch_and_sub(&prev_llcc->queued_runtime[layer_id], taskc->runtime_avg);
+	}
+
+	taskc->prev_llc_id = task_cpuc->llc_id;
+	queued_runtime = __sync_fetch_and_add(&llcc->queued_runtime[layer_id],
+					      taskc->runtime_avg);
+	queued_runtime += taskc->runtime_avg;
+
+	lstats = llcc->lstats[layer_id];
+
+	// racy, don't care
+	lstats[LLC_LSTAT_LAT] =
+		((LAYER_LAT_DECAY_FACTOR - 1) * lstats[LLC_LSTAT_LAT] + queued_runtime) /
+		LAYER_LAT_DECAY_FACTOR;
+	lstats[LLC_LSTAT_CNT]++;
+
+	scx_bpf_dispatch_vtime(p, layer_dsq_id(layer_id, task_cpuc->llc_id),
+			       slice_ns, vtime, enq_flags);
 
 preempt:
 	try_preempt(task_cpu, p, taskc, try_preempt_first, enq_flags);
@@ -1704,7 +1747,6 @@ void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 
 	taskc->runnable_at = now;
-	taskc->first_run = true;
 	maybe_refresh_layer(p, taskc);
 
 	if (enq_flags & SCX_ENQ_WAKEUP)
@@ -1729,18 +1771,14 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	if (!(layer = lookup_layer(layer_id)))
 		return;
 
-	if (taskc->first_run) {
-		u64 now = bpf_ktime_get_ns();
-		u64 lat = now - taskc->runnable_at;
-		u64 *stats = llcc->lstats[layer_id];
+	if (taskc->prev_llc_id < MAX_LAYERS) {
+		struct llc_ctx *prev_llcc;
 
-		// racy, don't care
-		stats[LLC_LSTAT_LAT] =
-			((LAYER_LAT_DECAY_FACTOR - 1) * stats[LLC_LSTAT_LAT] + lat) /
-			LAYER_LAT_DECAY_FACTOR;
-		stats[LLC_LSTAT_CNT]++;
+		if (!(prev_llcc = lookup_llc_ctx(taskc->prev_llc_id)))
+			return;
 
-		taskc->first_run = false;
+		__sync_fetch_and_sub(&prev_llcc->queued_runtime[layer_id], taskc->runtime_avg);
+		taskc->prev_llc_id = MAX_LAYERS;
 	}
 
 	if (taskc->last_cpu >= 0 && taskc->last_cpu != task_cpu) {
@@ -1822,6 +1860,10 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	used = now - taskc->running_at;
+
+	taskc->runtime_avg =
+		((RUNTIME_DECAY_FACTOR - 1) * taskc->runtime_avg + used) /
+		RUNTIME_DECAY_FACTOR;
 
 	if (cpuc->running_owned) {
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OWNED] += used;
@@ -2031,6 +2073,14 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	taskc->last_cpu = -1;
 	taskc->layer_id = MAX_LAYERS;
 	taskc->refresh_layer = true;
+	taskc->prev_llc_id = MAX_LAYERS;
+
+	/*
+	 * Start runtime_avg at some arbitrary sane-ish value. If this becomes a
+	 * problem, we can track per-parent avg new task initial runtime avg and
+	 * used that instead.
+	 */
+	taskc->runtime_avg = slice_ns / 4;
 
 	if (all_cpumask)
 		taskc->all_cpus_allowed =
