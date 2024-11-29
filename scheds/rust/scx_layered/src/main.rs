@@ -1691,6 +1691,7 @@ impl<'a> Scheduler<'a> {
         let nr_cpus = self.cpu_pool.nr_cpus;
         let utils = &self.sched_stats.layer_utils;
 
+        let mut records: Vec<(u64, u64, u64, usize, usize, usize)> = vec![];
         let mut targets: Vec<(usize, usize)> = vec![];
 
         for (idx, layer) in self.layers.iter().enumerate() {
@@ -1710,9 +1711,12 @@ impl<'a> Scheduler<'a> {
                     // can only get CPU time through fallback (counted as
                     // owned) or open execution, add open cputime for empty
                     // layers.
-                    let mut util = utils[idx][LAYER_USAGE_OWNED];
+                    let owned = utils[idx][LAYER_USAGE_OWNED];
+                    let open = utils[idx][LAYER_USAGE_OPEN];
+
+                    let mut util = owned;
                     if layer.nr_cpus == 0 {
-                        util += utils[idx][LAYER_USAGE_OPEN];
+                        util += open;
                     }
 
                     let util = if util < 0.01 { 0.0 } else { util };
@@ -1720,6 +1724,16 @@ impl<'a> Scheduler<'a> {
                     let high = ((util / util_range.0).floor() as usize).max(low);
                     let target = layer.cpus.count_ones().clamp(low, high);
                     let cpus_range = cpus_range.unwrap_or((0, nr_cpus));
+
+                    records.push((
+                        (owned * 100.0) as u64,
+                        (open * 100.0) as u64,
+                        (util * 100.0) as u64,
+                        low,
+                        high,
+                        target,
+                    ));
+
                     (target.clamp(cpus_range.0, cpus_range.1), cpus_range.0)
                 }
                 LayerKind::Open { .. } => (0, 0),
@@ -1727,6 +1741,7 @@ impl<'a> Scheduler<'a> {
         }
 
         trace!("initial targets: {:?}", &targets);
+        trace!("(owned, open, util, low, high, target): {:?}", &records);
         targets
     }
 
