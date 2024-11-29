@@ -352,6 +352,8 @@ static bool refresh_cpumasks(u32 layer_id)
 				cpuc->layer_id = layer_id;
 				bpf_cpumask_set_cpu(cpu, layer_cpumask);
 				total++;
+
+				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			} else {
 				if (cpuc->layer_id == layer_id)
 					cpuc->layer_id = MAX_LAYERS;
