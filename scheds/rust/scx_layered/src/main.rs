@@ -44,7 +44,6 @@ use scx_stats::prelude::*;
 use scx_utils::compat;
 use scx_utils::import_enums;
 use scx_utils::init_libbpf_logging;
-use scx_utils::ravg::ravg_read;
 use scx_utils::read_netdevs;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
@@ -63,7 +62,6 @@ use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
 
-const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
 const MAX_COMM: usize = bpf_intf::consts_MAX_COMM as usize;
 const MAX_LAYER_WEIGHT: u32 = bpf_intf::consts_MAX_LAYER_WEIGHT;
@@ -695,16 +693,9 @@ impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
                         .iter()
                         .zip(r_layer.iter())
                         .map(|(l_llc, r_llc)| {
-                            let (mut l_llc, mut r_llc) = (l_llc.clone(), r_llc.clone());
+                            let (l_llc, mut r_llc) = (l_llc.clone(), r_llc.clone());
                             // Lat is not subtractable, take L side.
                             r_llc[bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize] = 0;
-                            // If there were no sched events, zero it out.
-                            if l_llc[bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize]
-                                == r_llc[bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize]
-                            {
-                                l_llc[bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize] = 0;
-                            }
-
                             vec_sub(&l_llc, &r_llc)
                         })
                         .collect()
@@ -716,14 +707,10 @@ impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
 
 #[derive(Clone, Debug)]
 struct Stats {
-    nr_layers: usize,
     at: Instant,
-
+    nr_layers: usize,
     nr_layer_tasks: Vec<usize>,
-
     nr_nodes: usize,
-    total_load: f64,
-    layer_loads: Vec<f64>,
 
     total_util: f64, // Running AVG of sum of layer_utils
     layer_utils: Vec<Vec<f64>>,
@@ -742,37 +729,38 @@ struct Stats {
 }
 
 impl Stats {
-    fn read_layer_loads(skel: &mut BpfSkel, nr_layers: usize) -> (f64, Vec<f64>) {
-        let now_mono = now_monotonic();
-        let layer_loads: Vec<f64> = skel
-            .maps
-            .bss_data
-            .layers
-            .iter()
-            .take(nr_layers)
-            .map(|layer| {
-                let rd = &layer.load_rd;
-                ravg_read(
-                    rd.val,
-                    rd.val_at,
-                    rd.old,
-                    rd.cur,
-                    now_mono,
-                    USAGE_HALF_LIFE,
-                    RAVG_FRAC_BITS,
-                )
-            })
-            .collect();
-        (layer_loads.iter().sum(), layer_loads)
-    }
-
     fn read_layer_usages(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Vec<Vec<u64>> {
+        let now = now_monotonic();
         let mut layer_usages = vec![vec![0u64; NR_LAYER_USAGES]; nr_layers];
 
         for cpu in 0..*NR_CPUS_POSSIBLE {
             for layer in 0..nr_layers {
                 for usage in 0..NR_LAYER_USAGES {
                     layer_usages[layer][usage] += cpu_ctxs[cpu].layer_usages[layer][usage];
+                }
+            }
+        }
+
+        // layer_usages are updated at ops.stopping(). If tasks in a layer
+        // keep running, it may not update the usage stats for a long time
+        // to the point where the reported usage stats fluctuate wildly
+        // making CPU allocation oscillate. Compensate for it by adding the
+        // time spent for the currently running task.
+        //
+        // This is racy but the error range is bound. Implement seq_lock
+        // equivalent to make this fully correct. Due to the raciness, it
+        // may be possible for usage stats to go backward. Use saturating
+        // sub when calculating delta. See cur_layer_utils calculation in
+        // Stats::refresh().
+        for cpuc in cpu_ctxs {
+            let layer = cpuc.task_layer_id as usize;
+            if layer < MAX_LAYERS {
+                let usage = match cpuc.running_owned {
+                    true => LAYER_USAGE_OWNED,
+                    false => LAYER_USAGE_OPEN,
+                };
+                if now > cpuc.running_at {
+                    layer_usages[layer][usage] += now - cpuc.running_at;
                 }
             }
         }
@@ -789,12 +777,8 @@ impl Stats {
         Ok(Self {
             at: Instant::now(),
             nr_layers,
-
             nr_layer_tasks: vec![0; nr_layers],
-
             nr_nodes,
-            total_load: 0.0,
-            layer_loads: vec![0.0; nr_layers],
 
             total_util: 0.0,
             layer_utils: vec![vec![0.0; NR_LAYER_USAGES]; nr_layers],
@@ -840,16 +824,15 @@ impl Stats {
             .map(|layer| layer.slice_ns / 1000 as u64)
             .collect();
 
-        let (total_load, layer_loads) = Self::read_layer_loads(skel, self.nr_layers);
-
         let cur_layer_usages = Self::read_layer_usages(&cpu_ctxs, self.nr_layers);
+        // See read_layer_usages() on why saturating_sub is used below.
         let cur_layer_utils: Vec<Vec<f64>> = cur_layer_usages
             .iter()
             .zip(self.prev_layer_usages.iter())
             .map(|(cur, prev)| {
                 cur.iter()
                     .zip(prev.iter())
-                    .map(|(c, p)| (c - p) as f64 / 1_000_000_000.0 / elapsed)
+                    .map(|(c, p)| (c.saturating_sub(*p)) as f64 / 1_000_000_000.0 / elapsed)
                     .collect()
             })
             .collect();
@@ -880,12 +863,8 @@ impl Stats {
         *self = Self {
             at: now,
             nr_layers: self.nr_layers,
-
             nr_layer_tasks,
-
             nr_nodes: self.nr_nodes,
-            total_load,
-            layer_loads,
 
             total_util: layer_utils.iter().flatten().sum(),
             layer_utils: layer_utils.try_into().unwrap(),
@@ -1596,7 +1575,6 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         skel.maps.rodata_data.smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
-        skel.maps.rodata_data.disable_topology = disable_topology;
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
         skel.maps.rodata_data.antistall_sec = opts.antistall_sec;
         if opts.monitor_disable {
@@ -1749,6 +1727,7 @@ impl<'a> Scheduler<'a> {
         let nr_cpus = self.cpu_pool.nr_cpus;
         let utils = &self.sched_stats.layer_utils;
 
+        let mut records: Vec<(u64, u64, u64, usize, usize, usize)> = vec![];
         let mut targets: Vec<(usize, usize)> = vec![];
 
         for (idx, layer) in self.layers.iter().enumerate() {
@@ -1768,9 +1747,12 @@ impl<'a> Scheduler<'a> {
                     // can only get CPU time through fallback (counted as
                     // owned) or open execution, add open cputime for empty
                     // layers.
-                    let mut util = utils[idx][LAYER_USAGE_OWNED];
+                    let owned = utils[idx][LAYER_USAGE_OWNED];
+                    let open = utils[idx][LAYER_USAGE_OPEN];
+
+                    let mut util = owned;
                     if layer.nr_cpus == 0 {
-                        util += utils[idx][LAYER_USAGE_OPEN];
+                        util += open;
                     }
 
                     let util = if util < 0.01 { 0.0 } else { util };
@@ -1778,6 +1760,16 @@ impl<'a> Scheduler<'a> {
                     let high = ((util / util_range.0).floor() as usize).max(low);
                     let target = layer.cpus.count_ones().clamp(low, high);
                     let cpus_range = cpus_range.unwrap_or((0, nr_cpus));
+
+                    records.push((
+                        (owned * 100.0) as u64,
+                        (open * 100.0) as u64,
+                        (util * 100.0) as u64,
+                        low,
+                        high,
+                        target,
+                    ));
+
                     (target.clamp(cpus_range.0, cpus_range.1), cpus_range.0)
                 }
                 LayerKind::Open { .. } => (0, 0),
@@ -1785,6 +1777,7 @@ impl<'a> Scheduler<'a> {
         }
 
         trace!("initial targets: {:?}", &targets);
+        trace!("(owned, open, util, low, high, target): {:?}", &records);
         targets
     }
 

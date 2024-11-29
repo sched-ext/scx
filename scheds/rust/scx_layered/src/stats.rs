@@ -18,7 +18,6 @@ use log::warn;
 use scx_stats::prelude::*;
 use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
-use scx_utils::normalize_load_metric;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -56,15 +55,13 @@ pub struct LayerStats {
     pub index: usize,
     #[stat(desc = "Total CPU utilization (100% means one full CPU)")]
     pub util: f64,
-    #[stat(desc = "Open CPU utilization %")]
-    pub util_open_frac: f64,
     #[stat(desc = "Protected CPU utilization %")]
     pub util_protected_frac: f64,
+    #[stat(desc = "Open CPU utilization %")]
+    pub util_open_frac: f64,
     #[stat(desc = "fraction of total CPU utilization")]
     pub util_frac: f64,
-    #[stat(desc = "sum of weight * duty_cycle for tasks")]
-    pub load: f64,
-    #[stat(desc = "layer load fraction adjusted for infeasible weights")]
+    #[stat(desc = "number of tasks")]
     pub tasks: u32,
     #[stat(desc = "count of sched events during the period")]
     pub total: u64,
@@ -199,7 +196,6 @@ impl LayerStats {
                 0.0
             },
             util_frac: calc_frac(util_sum, stats.total_util),
-            load: normalize_load_metric(stats.layer_loads[lidx]),
             tasks: stats.nr_layer_tasks[lidx] as u32,
             total: ltotal,
             sel_local: lstat_pct(bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL),
@@ -259,14 +255,13 @@ impl LayerStats {
     pub fn format<W: Write>(&self, w: &mut W, name: &str, header_width: usize) -> Result<()> {
         writeln!(
             w,
-            "  {:<width$}: util/open/prot/frac={:6.1}/{}/{}/{:7.1} tasks={:6} load={:9.2}",
+            "  {:<width$}: util/open/prot/frac={:6.1}/{}/{}/{:7.1} tasks={:6}",
             name,
             self.util,
             fmt_pct(self.util_open_frac),
             fmt_pct(self.util_protected_frac),
             self.util_frac,
             self.tasks,
-            self.load,
             width = header_width,
         )?;
 
@@ -431,8 +426,6 @@ pub struct SysStats {
     pub busy: f64,
     #[stat(desc = "CPU util % (100% means one CPU)")]
     pub util: f64,
-    #[stat(desc = "sum of weight * duty_cycle for all tasks")]
-    pub load: f64,
     #[stat(desc = "fallback CPU")]
     pub fallback_cpu: u32,
     #[stat(desc = "per-layer statistics")]
@@ -470,7 +463,6 @@ impl SysStats {
             proc_ms: stats.processing_dur.as_millis() as u64,
             busy: stats.cpu_busy * 100.0,
             util: stats.total_util * 100.0,
-            load: normalize_load_metric(stats.total_load),
             fallback_cpu: fallback_cpu as u32,
             layers: BTreeMap::new(),
         })
@@ -490,8 +482,8 @@ impl SysStats {
 
         writeln!(
             w,
-            "busy={:5.1} util={:7.1} load={:9.1} fallback_cpu={:3}",
-            self.busy, self.util, self.load, self.fallback_cpu,
+            "busy={:5.1} util={:7.1} fallback_cpu={:3}",
+            self.busy, self.util, self.fallback_cpu,
         )?;
 
         writeln!(
