@@ -136,6 +136,7 @@ struct cpu_ctx {
 
 	bool			protect_owned;
 	bool			running_owned;
+	u64			running_at;
 
 	u64			layer_usages[MAX_LAYERS][NR_LAYER_USAGES];
 	u64			gstats[NR_GSTATS];

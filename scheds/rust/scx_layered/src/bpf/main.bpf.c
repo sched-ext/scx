@@ -1763,6 +1763,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	struct node_ctx *nodec;
 	struct llc_ctx *llcc;
 	s32 task_cpu = scx_bpf_task_cpu(p);
+	u64 now = bpf_ktime_get_ns();
 	u32 layer_id;
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(llcc = lookup_llc_ctx(cpuc->llc_id)) ||
@@ -1801,8 +1802,9 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 
 	cpuc->current_preempt = layer->preempt;
 	cpuc->current_exclusive = layer->exclusive;
-	taskc->running_at = bpf_ktime_get_ns();
 	cpuc->task_layer_id = taskc->layer_id;
+	cpuc->running_at = now;
+	taskc->running_at = now;
 
 	/*
 	 * A CPU is running an owned task if the task is on the layer owning the
@@ -1917,6 +1919,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	cpuc->current_preempt = false;
 	cpuc->prev_exclusive = cpuc->current_exclusive;
 	cpuc->current_exclusive = false;
+	cpuc->task_layer_id = MAX_LAYERS;
 
 	/*
 	 * Apply min_exec_us, scale the execution time by the inverse of the
