@@ -1596,7 +1596,6 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         skel.maps.rodata_data.smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
-        skel.maps.rodata_data.disable_topology = disable_topology;
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
         skel.maps.rodata_data.antistall_sec = opts.antistall_sec;
         if opts.monitor_disable {
