@@ -89,8 +89,8 @@ pub struct LayerCommon {
     pub exclusive: bool,
     #[serde(default)]
     pub weight: u32,
-    #[serde(default)]
-    pub idle_smt: bool,
+    #[serde(default, skip_serializing)]
+    pub idle_smt: Option<bool>,
     #[serde(default)]
     pub growth_algo: LayerGrowthAlgo,
     #[serde(default)]

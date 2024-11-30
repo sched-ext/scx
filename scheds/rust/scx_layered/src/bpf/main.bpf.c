@@ -580,7 +580,7 @@ static void maybe_refresh_layered_cpus_node(struct task_struct *p, struct task_c
 }
 
 static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
-			      const struct cpumask *idle_smtmask, bool pref_idle_smt)
+			      const struct cpumask *idle_smtmask)
 {
 	bool prev_in_cand = bpf_cpumask_test_cpu(prev_cpu, cand_cpumask);
 	s32 cpu;
@@ -589,7 +589,7 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
 	 * partially idle @prev_cpu.
 	 */
-	if (smt_enabled && !pref_idle_smt) {
+	if (smt_enabled) {
 		if (prev_in_cand &&
 		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
@@ -654,8 +654,7 @@ s32 pick_idle_big_little(struct layer *layer, struct task_ctx *taskc,
 		bpf_cpumask_and(tmp_cpumask, cast_mask(taskc->layered_mask),
 				cast_mask(big_cpumask));
 		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask),
-					 prev_cpu, idle_smtmask,
-					 layer->idle_smt);
+					 prev_cpu, idle_smtmask);
 		goto out_put;
 	}
 	case GROWTH_ALGO_LITTLE_BIG: {
@@ -669,8 +668,7 @@ s32 pick_idle_big_little(struct layer *layer, struct task_ctx *taskc,
 		bpf_cpumask_and(tmp_cpumask, cast_mask(taskc->layered_mask),
 				cast_mask(tmp_cpumask));
 		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask),
-					 prev_cpu, idle_smtmask,
-					 layer->idle_smt);
+					 prev_cpu, idle_smtmask);
 		goto out_put;
 	}
 	default:
@@ -763,8 +761,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 			cpu = -1;
 			goto out_put;
 		}
-		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask,
-					      layer->idle_smt)) >= 0)
+		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask)) >= 0)
 			goto out_put;
 	}
 
@@ -778,21 +775,18 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 			cpu = -1;
 			goto out_put;
 		}
-		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask,
-					      layer->idle_smt)) >= 0)
+		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask)) >= 0)
 			goto out_put;
 	}
 
-	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu,
-				      idle_smtmask, layer->idle_smt)) >= 0)
+	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu, idle_smtmask)) >= 0)
 		goto out_put;
 
 	/*
 	 * If the layer is an open one, we can try the whole machine.
 	 */
 	if (layer->kind != LAYER_KIND_CONFINED &&
-	    ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu,
-				       idle_smtmask, layer->idle_smt)) >= 0)) {
+	    ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu, idle_smtmask) >= 0))) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
 		goto out_put;
 	}

@@ -105,7 +105,7 @@ lazy_static! {
                         preempt: false,
                         preempt_first: false,
                         exclusive: false,
-                        idle_smt: false,
+                        idle_smt: None,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
                         growth_algo: LayerGrowthAlgo::Sticky,
@@ -129,7 +129,7 @@ lazy_static! {
                         preempt: true,
                         preempt_first: false,
                         exclusive: true,
-                        idle_smt: false,
+                        idle_smt: None,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
                         growth_algo: LayerGrowthAlgo::Sticky,
@@ -155,7 +155,7 @@ lazy_static! {
                         preempt: true,
                         preempt_first: false,
                         exclusive: false,
-                        idle_smt: false,
+                        idle_smt: None,
                         slice_us: 800,
                         weight: DEFAULT_LAYER_WEIGHT,
                         growth_algo: LayerGrowthAlgo::Topo,
@@ -178,7 +178,7 @@ lazy_static! {
                         preempt: false,
                         preempt_first: false,
                         exclusive: false,
-                        idle_smt: false,
+                        idle_smt: None,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
                         growth_algo: LayerGrowthAlgo::Linear,
@@ -323,8 +323,7 @@ lazy_static! {
 ///   utilization to determine the infeasible adjusted weight with higher
 ///   weights having a larger adjustment in adjusted utilization.
 ///
-/// - idle_smt: When selecting an idle CPU for task task migration use
-///   only idle SMT CPUs. The default is to select any idle cpu.
+/// - idle_smt: *** DEPRECATED ****
 ///
 /// - growth_algo: When a layer is allocated new CPUs different algorithms can
 ///   be used to determine which CPU should be allocated next. The default
@@ -1160,7 +1159,6 @@ impl<'a> Scheduler<'a> {
                     preempt,
                     preempt_first,
                     exclusive,
-                    idle_smt,
                     growth_algo,
                     nodes,
                     slice_us,
@@ -1187,7 +1185,6 @@ impl<'a> Scheduler<'a> {
                 layer.preempt.write(*preempt);
                 layer.preempt_first.write(*preempt_first);
                 layer.exclusive.write(*exclusive);
-                layer.idle_smt.write(*idle_smt);
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = if *weight <= MAX_LAYER_WEIGHT && *weight >= MIN_LAYER_WEIGHT {
                     *weight
@@ -2313,6 +2310,12 @@ fn main() -> Result<()> {
             &mut LayerSpec::parse(input)
                 .context(format!("Failed to parse specs[{}] ({:?})", idx, input))?,
         );
+    }
+
+    for spec in &layer_config.specs {
+        if spec.kind.common().idle_smt.is_some() {
+            warn!("Layer {} has deprecated flag \"idle_smt\"", &spec.name);
+        }
     }
 
     debug!("specs={}", serde_json::to_string_pretty(&layer_config)?);
