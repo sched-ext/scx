@@ -37,6 +37,12 @@ pub struct SysStats {
     #[stat(desc = "% of latency-critical tasks")]
     pub pc_lc: f64,
 
+    #[stat(desc = "% of cross domain task migration")]
+    pub pc_x_migration: f64,
+
+    #[stat(desc = "Number of stealee domains")]
+    pub nr_stealee: u32,
+
     #[stat(desc = "% of tasks scheduled on big cores")]
     pub pc_big: f64,
 
@@ -63,13 +69,15 @@ impl SysStats {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "\x1b[93m| {:8} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
+            "\x1b[93m| {:8} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
             "MSEQ",
             "# Q TASK",
             "# ACT CPU",
             "# SCHED",
             "PERF-CR%",
             "LAT-CR%",
+            "X-MIG%",
+            "# STLEE",
             "BIG%",
             "PC/BIG%",
             "LC/BIG%",
@@ -88,13 +96,15 @@ impl SysStats {
 
         writeln!(
             w,
-            "| {:8} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |",
+            "| {:8} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |",
             self.mseq,
             self.nr_queued_task,
             self.nr_active,
             self.nr_sched,
             GPoint(self.pc_pc),
             GPoint(self.pc_lc),
+            GPoint(self.pc_x_migration),
+            self.nr_stealee,
             GPoint(self.pc_big),
             GPoint(self.pc_pc_on_big),
             GPoint(self.pc_lc_on_big),

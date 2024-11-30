@@ -711,6 +711,8 @@ impl<'a> Scheduler<'a> {
                 let nr_sched = st.nr_sched;
                 let pc_pc = Self::get_pc(st.nr_perf_cri, nr_sched);
                 let pc_lc = Self::get_pc(st.nr_lat_cri, nr_sched);
+                let pc_x_migration = Self::get_pc(st.nr_x_migration, nr_sched);
+                let nr_stealee = st.nr_stealee;
                 let nr_big = st.nr_big;
                 let pc_big = Self::get_pc(nr_big, nr_sched);
                 let pc_pc_on_big = Self::get_pc(st.nr_pc_on_big, nr_big);
@@ -730,6 +732,8 @@ impl<'a> Scheduler<'a> {
                     nr_sched,
                     pc_pc,
                     pc_lc,
+                    pc_x_migration,
+                    nr_stealee,
                     pc_big,
                     pc_pc_on_big,
                     pc_lc_on_big,

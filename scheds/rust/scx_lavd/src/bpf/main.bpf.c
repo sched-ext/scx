@@ -1108,7 +1108,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 }
 
-static bool consume_dsq(s32 cpu, u64 dsq_id, u64 now)
+static bool consume_dsq(u64 dsq_id)
 {
 	struct cpdom_ctx *cpdomc;
 
@@ -1120,7 +1120,6 @@ static bool consume_dsq(s32 cpu, u64 dsq_id, u64 now)
 		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_id);
 		return false;
 	}
-	WRITE_ONCE(cpdomc->last_consume_clk, now);
 
 	/*
 	 * Try to consume a task on the associated DSQ.
@@ -1130,81 +1129,110 @@ static bool consume_dsq(s32 cpu, u64 dsq_id, u64 now)
 	return false;
 }
 
-static bool consume_starving_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
+static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 {
-	struct cpdom_ctx *cpdomc;
-	u64 dsq_id = cpuc->cpdom_poll_pos;
-	u64 dl;
-	bool ret = false;
-	int i;
-
-	if (nr_cpdoms == 1)
-		return false;
-
-	bpf_for(i, 0, nr_cpdoms) {
-		if (i >= LAVD_CPDOM_MAX_NR)
-			break;
-
-		dsq_id = (dsq_id + i) % LAVD_CPDOM_MAX_NR;
-
-		if (dsq_id == cpuc->cpdom_id)
-			continue;
-
-		cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
-		if (!cpdomc) {
-			scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_id);
-			goto out;
-		}
-
-		if (cpdomc->is_active) {
-			dl = READ_ONCE(cpdomc->last_consume_clk) + LAVD_CPDOM_STARV_NS;
-			if (dl < now) {
-				ret = consume_dsq(cpu, dsq_id, now);
-			}
-			goto out;
-		}
-	}
-out:
-	cpuc->cpdom_poll_pos = (dsq_id + 1) % LAVD_CPDOM_MAX_NR;
-	return ret;
-}
-
-static bool consume_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
-{
-	struct cpdom_ctx *cpdomc, *cpdomc_pick;
-	u64 dsq_id, nr_nbr;
+	struct cpdom_ctx *cpdomc_pick;
+	u64 nr_nbr, dsq_id;
 	s64 nuance;
 
 	/*
-	 * If there is a starving DSQ, try to consume it first.
+	 * If all CPUs are not used -- i.e., the system is under-utilized,
+	 * there is no point of load balancing. It is better to make an
+	 * effort to increase the system utilization.
 	 */
-	if (consume_starving_task(cpu, cpuc, now))
-		return true;
-
-	/*
-	 * Try to consume from CPU's associated DSQ.
-	 */
-	dsq_id = cpuc->cpdom_id;
-	if (consume_dsq(cpu, dsq_id, now))
-		return true;
-
-	/*
-	 * If there is no task in the assssociated DSQ, traverse neighbor
-	 * compute domains in distance order -- task stealing.
-	 */
-	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
-	if (!cpdomc) {
-		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_id);
+	if (!use_full_cpus())
 		return false;
-	}
 
+	/*
+	 * Probabilistically make a go or no go decision to avoid the
+	 * thundering herd problem. In other words, one out of nr_cpus
+	 * will try to steal a task at a moment.
+	 */
+	if (!prob_x_out_of_y(1, cpdomc->nr_cpus * LAVD_CPDOM_X_PROB_FT))
+		return false;
+
+	/*
+	 * Traverse neighbor compute domains in distance order.
+	 */
+	nuance = bpf_get_prandom_u32();
 	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
 		nr_nbr = min(cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
 		if (nr_nbr == 0)
 			break;
 
-		nuance = bpf_get_prandom_u32();
-		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = dsq_id + 1) {
+		/*
+		 * Traverse neighbor in the same distance in arbitrary order.
+		 */
+		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance++) {
+			if (j >= nr_nbr)
+				break;
+
+			dsq_id = pick_any_bit(cpdomc->neighbor_bits[i], nuance);
+			if (dsq_id == -ENOENT)
+				continue;
+
+			cpdomc_pick = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
+			if (!cpdomc_pick) {
+				scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_id);
+				return false;
+			}
+
+			if (!cpdomc_pick->is_stealee || !cpdomc_pick->is_active)
+				continue;
+
+			/*
+			 * If task stealing is successful, mark the stealer
+			 * and the stealee's job done. By marking done,
+			 * those compute domains would not be involved in
+			 * load balancing until the end of this round,
+			 * so this helps gradual migration. Note that multiple
+			 * stealers can steal tasks from the same stealee.
+			 * However, we don't coordinate concurrent stealing
+			 * because the chance is low and there is no harm
+			 * in slight over-stealing.
+			 */
+			if (consume_dsq(dsq_id)) {
+				WRITE_ONCE(cpdomc_pick->is_stealee, false);
+				WRITE_ONCE(cpdomc->is_stealer, false);
+				return true;
+			}
+		}
+
+		/*
+		 * Now, we need to steal a task from a farther neighbor
+		 * for load balancing. Since task migration from a farther
+		 * neighbor is more expensive (e.g., crossing a NUMA boundary),
+		 * we will do this with a lot of hesitation. The chance of
+		 * further migration will decrease exponentially as distance
+		 * increases, so, on the other hand, it increases the chance
+		 * of closer migration.
+		 */
+		if (!prob_x_out_of_y(1, LAVD_CPDOM_X_PROB_FT))
+			break;
+	}
+
+	return false;
+}
+
+static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
+{
+	struct cpdom_ctx *cpdomc_pick;
+	u64 nr_nbr, dsq_id;
+	s64 nuance;
+
+	/*
+	 * Traverse neighbor compute domains in distance order.
+	 */
+	nuance = bpf_get_prandom_u32();
+	for (int i = 0; i < LAVD_CPDOM_MAX_DIST; i++) {
+		nr_nbr = min(cpdomc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
+		if (nr_nbr == 0)
+			break;
+
+		/*
+		 * Traverse neighbor in the same distance in arbitrary order.
+		 */
+		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance++) {
 			if (j >= nr_nbr)
 				break;
 
@@ -1221,7 +1249,7 @@ static bool consume_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 			if (!cpdomc_pick->is_active)
 				continue;
 
-			if (consume_dsq(cpu, dsq_id, now))
+			if (consume_dsq(dsq_id))
 				return true;
 		}
 	}
@@ -1229,9 +1257,51 @@ static bool consume_task(s32 cpu, struct cpu_ctx *cpuc, u64 now)
 	return false;
 }
 
+static bool consume_task(struct cpu_ctx *cpuc)
+{
+	struct cpdom_ctx *cpdomc;
+	u64 dsq_id;
+
+	dsq_id = cpuc->cpdom_id;
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
+	if (!cpdomc) {
+		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_id);
+		return false;
+	}
+
+	/*
+	 * If the current compute domain is a stealer, try to steal
+	 * a task from any of stealee domains probabilistically.
+	 */
+	if (cpdomc->is_stealer && try_to_steal_task(cpdomc))
+		goto x_domain_migration_out;
+
+	/*
+	 * Try to consume a task from CPU's associated DSQ.
+	 */
+	if (consume_dsq(dsq_id))
+		return true;
+
+	/*
+	 * If there is no task in the assssociated DSQ, traverse neighbor
+	 * compute domains in distance order -- task stealing.
+	 */
+	if (force_to_steal_task(cpdomc))
+		goto x_domain_migration_out;
+
+	return false;
+
+	/*
+	 * Task migration across compute domains happens.
+	 * Update the statistics.
+	 */
+x_domain_migration_out:
+	cpuc->nr_x_migration++;
+	return true;
+}
+
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
-	u64 now = bpf_ktime_get_ns();
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
 	struct bpf_cpumask *active, *ovrflw;
@@ -1365,10 +1435,7 @@ consume_out:
 	/*
 	 * Consume a task if requested.
 	 */
-	if (!try_consume)
-		return;
-
-	if (consume_task(cpu, cpuc, now))
+	if (try_consume && consume_task(cpuc))
 		return;
 
 	/*
@@ -1805,8 +1872,6 @@ static s32 init_cpdoms(u64 now)
 		if (!cpdomc->is_active)
 			continue;
 
-		WRITE_ONCE(cpdomc->last_consume_clk, now);
-
 		/*
 		 * Create an associated DSQ on its associated NUMA domain.
 		 */
@@ -2024,6 +2089,7 @@ static s32 init_per_cpu_ctx(u64 now)
 					}
 					cpuc->cpdom_id = cpdomc->id;
 					cpuc->cpdom_alt_id = cpdomc->alt_id;
+					cpdomc->nr_cpus++;
 				}
 			}
 		}

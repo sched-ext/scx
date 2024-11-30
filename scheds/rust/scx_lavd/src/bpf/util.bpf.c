@@ -299,3 +299,14 @@ static void set_on_core_type(struct task_ctx *taskc,
 	WRITE_ONCE(taskc->on_big, on_big);
 	WRITE_ONCE(taskc->on_little, on_little);
 }
+
+static bool prob_x_out_of_y(u32 x, u32 y)
+{
+	/*
+	 * [0, r, y)
+	 *  ---- x?
+	 */
+	u32 r = bpf_get_prandom_u32() % y;
+	return r < x;
+}
+

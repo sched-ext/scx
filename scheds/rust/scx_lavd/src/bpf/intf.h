@@ -78,12 +78,14 @@ struct sys_stat {
 	volatile u32	max_perf_cri;	/* maximum performance criticality */
 	volatile u32	thr_perf_cri;	/* performance criticality threshold */
 
+	volatile u32	nr_stealee;	/* number of compute domains to be migrated */
 	volatile u32	nr_violation;	/* number of utilization violation */
 	volatile u32	nr_active;	/* number of active cores */
 
 	volatile u64	nr_sched;	/* total scheduling so far */
 	volatile u64	nr_perf_cri;	/* number of performance-critical tasks scheduled */
 	volatile u64	nr_lat_cri;	/* number of latency-critical tasks scheduled */
+	volatile u64	nr_x_migration; /* number of cross domain migration */
 	volatile u64	nr_big;		/* scheduled on big core */
 	volatile u64	nr_pc_on_big;	/* performance-critical tasks scheduled on big core */
 	volatile u64	nr_lc_on_big;	/* latency-critical tasks scheduled on big core */
