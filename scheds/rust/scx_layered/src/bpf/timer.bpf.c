@@ -2,17 +2,21 @@
 
 #ifdef LSP
 #define __bpf__
-#ifndef LSP_INC
-#include "../../../../include/scx/common.bpf.h"
-#include "timer.bpf.h"
 #endif
+
+#if defined LSP && defined LSP_INC
+#include "../../../../include/scx/common.bpf.h"
+#else
+#include <scx/common.bpf.h>
 #endif
 
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
-#include "timer.bpf.h"
 
+#include "intf.h"
+#include "timer.bpf.h"
+#include "util.bpf.h"
 
 struct timer_wrapper {
 	struct bpf_timer timer;
@@ -48,7 +52,7 @@ static int layered_timer_cb(void *map, int key, struct timer_wrapper *timerw)
 	return 0;
 }
 
-static int start_layered_timers(void)
+int start_layered_timers(void)
 {
 	struct timer_wrapper *timerw;
 	int timer_id, err;

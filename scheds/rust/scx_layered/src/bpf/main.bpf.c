@@ -9,15 +9,16 @@
 #include <scx/common.bpf.h>
 #endif
 
-#include "intf.h"
-#include "timer.bpf.h"
-
 #include <errno.h>
 #include <stdbool.h>
 #include <string.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+
+#include "intf.h"
+#include "timer.bpf.h"
+#include "util.bpf.h"
 
 char _license[] SEC("license") = "GPL";
 
@@ -60,11 +61,6 @@ static u32 preempt_cursor;
 
 u32 empty_layer_ids[MAX_LAYERS];
 u32 nr_empty_layer_ids;
-
-#define dbg(fmt, args...)	do { if (debug) bpf_printk(fmt, ##args); } while (0)
-#define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
-
-#include "util.bpf.c"
 
 UEI_DEFINE(uei);
 
@@ -2366,7 +2362,7 @@ static bool antistall_scan(void)
 	return true;
 }
 
-static bool run_timer_cb(int key)
+bool run_timer_cb(int key)
 {
 	switch (key) {
 	case LAYERED_MONITOR:
@@ -2385,9 +2381,6 @@ struct layered_timer layered_timers[MAX_TIMERS] = {
 	{1LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
 	{0LLU, CLOCK_BOOTTIME, 0},
 };
-
-// TODO: separate this out to a separate compilation unit
-#include "timer.bpf.c"
 
 /*
  * Initializes per-layer specific data structures.

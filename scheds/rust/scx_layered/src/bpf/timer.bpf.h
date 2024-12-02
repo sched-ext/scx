@@ -30,7 +30,8 @@ enum layer_timer_callbacks {
 	MAX_TIMERS,
 };
 
-static bool run_timer_cb(int key);
+bool run_timer_cb(int key);
+int start_layered_timers(void);
 
 extern struct layered_timer layered_timers[MAX_TIMERS];
 
