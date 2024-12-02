@@ -5,3 +5,4 @@ target
 *.swp
 .cache/
 .vscode/
+tags
