@@ -13,28 +13,29 @@ use std::fs::File;
 use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
-use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
 use bitvec::prelude::*;
 use cgroupfs::CgroupReader;
 use clap::Parser;
 use itertools::Itertools;
+use libbpf_rs::MapCore as _;
+use libbpf_rs::OpenObject;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
-use libbpf_rs::MapCore as _;
-use libbpf_rs::OpenObject;
 use log::debug;
 use log::info;
 use log::trace;
 use maplit::btreemap;
 use maplit::hashmap;
+use scx_utils::UserExitInfo;
 use scx_utils::compat;
 use scx_utils::import_enums;
 use scx_utils::init_libbpf_logging;
@@ -45,7 +46,6 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::UserExitInfo;
 
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
@@ -506,14 +506,11 @@ impl<'a> Scheduler<'a> {
                         cell_idx
                     )
                 })?;
-                cell.cgroups.insert(
-                    name.clone(),
-                    Cgroup {
-                        name,
-                        load,
-                        pinned_load,
-                    },
-                );
+                cell.cgroups.insert(name.clone(), Cgroup {
+                    name,
+                    load,
+                    pinned_load,
+                });
                 cell.load += load;
                 cell.pinned_load += pinned_load;
             }
@@ -686,19 +683,16 @@ impl<'a> Scheduler<'a> {
                 .ok_or(anyhow!("Could not change cell of cgroup to be split"))?;
             *cg_cell = new_cell_idx;
         }
-        self.cells.insert(
-            new_cell_idx,
-            Cell {
-                cgroups: split
-                    .g2
-                    .into_iter()
-                    .map(|cg| (cg.name.clone(), cg))
-                    .collect(),
-                cpu_assignment: bitvec!(0; *NR_POSSIBLE_CPUS),
-                load: new_cell_load,
-                pinned_load: new_cell_pinned_load,
-            },
-        );
+        self.cells.insert(new_cell_idx, Cell {
+            cgroups: split
+                .g2
+                .into_iter()
+                .map(|cg| (cg.name.clone(), cg))
+                .collect(),
+            cpu_assignment: bitvec!(0; *NR_POSSIBLE_CPUS),
+            load: new_cell_load,
+            pinned_load: new_cell_pinned_load,
+        });
         let old_cell = self
             .cells
             .get_mut(&split.cell)

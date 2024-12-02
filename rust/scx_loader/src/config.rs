@@ -12,9 +12,9 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Deserialize;
 
-use crate::get_name_from_scx;
 use crate::SchedMode;
 use crate::SupportedSched;
+use crate::get_name_from_scx;
 
 #[derive(Debug, PartialEq, Default, Deserialize)]
 #[serde(default)]
