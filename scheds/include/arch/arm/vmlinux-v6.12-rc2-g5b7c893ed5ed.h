@@ -2507,7 +2507,7 @@ struct sched_statistics {
 };
 
 struct cpumask {
-	unsigned long bits[1];
+	unsigned long bits[128];
 };
 
 typedef struct cpumask cpumask_t;

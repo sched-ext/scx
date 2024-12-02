@@ -221,7 +221,7 @@ struct trace_seq {
 };
 
 struct cpumask {
-	unsigned long bits[4];
+	unsigned long bits[128];
 };
 
 typedef struct cpumask cpumask_var_t[1];
