@@ -410,7 +410,7 @@ struct task_ctx {
 	u64			runnable_at;
 	u64			running_at;
 	u64			runtime_avg;
-	u32			prev_llc_id;
+	u32			qrt_llc_id;	/* for llcc->queue_runtime */
 };
 
 struct {
@@ -1067,15 +1067,15 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * but ops.dequeue() is not called for tasks on a DSQ. Detect the
 	 * condition here and subtract the previous contribution.
 	 */
-	if (taskc->prev_llc_id < MAX_LAYERS) {
+	if (taskc->qrt_llc_id < MAX_LAYERS) {
 		struct llc_ctx *prev_llcc;
 
-		if (!(prev_llcc = lookup_llc_ctx(taskc->prev_llc_id)))
+		if (!(prev_llcc = lookup_llc_ctx(taskc->qrt_llc_id)))
 			return;
 		__sync_fetch_and_sub(&prev_llcc->queued_runtime[layer_id], taskc->runtime_avg);
 	}
 
-	taskc->prev_llc_id = task_cpuc->llc_id;
+	taskc->qrt_llc_id = task_cpuc->llc_id;
 	queued_runtime = __sync_fetch_and_add(&llcc->queued_runtime[layer_id],
 					      taskc->runtime_avg);
 	queued_runtime += taskc->runtime_avg;
@@ -1768,14 +1768,14 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	if (!(layer = lookup_layer(layer_id)))
 		return;
 
-	if (taskc->prev_llc_id < MAX_LAYERS) {
+	if (taskc->qrt_llc_id < MAX_LAYERS) {
 		struct llc_ctx *prev_llcc;
 
-		if (!(prev_llcc = lookup_llc_ctx(taskc->prev_llc_id)))
+		if (!(prev_llcc = lookup_llc_ctx(taskc->qrt_llc_id)))
 			return;
 
 		__sync_fetch_and_sub(&prev_llcc->queued_runtime[layer_id], taskc->runtime_avg);
-		taskc->prev_llc_id = MAX_LAYERS;
+		taskc->qrt_llc_id = MAX_LAYERS;
 	}
 
 	if (taskc->last_cpu >= 0 && taskc->last_cpu != task_cpu) {
@@ -2072,7 +2072,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	taskc->last_cpu = -1;
 	taskc->layer_id = MAX_LAYERS;
 	taskc->refresh_layer = true;
-	taskc->prev_llc_id = MAX_LAYERS;
+	taskc->qrt_llc_id = MAX_LAYERS;
 
 	/*
 	 * Start runtime_avg at some arbitrary sane-ish value. If this becomes a
