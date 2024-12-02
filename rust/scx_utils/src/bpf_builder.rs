@@ -9,8 +9,10 @@ use anyhow::Context;
 use anyhow::Result;
 use glob::glob;
 use libbpf_cargo::SkeletonBuilder;
+use libbpf_rs::Linker;
 use std::collections::BTreeSet;
 use std::env;
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -314,36 +316,79 @@ impl BpfBuilder {
             .context("Couldn't write bindings")
     }
 
+    fn gen_sources(
+        &self,
+        input: PathBuf,
+        deps: &mut BTreeSet<String>,
+    ) -> Result<BTreeSet<PathBuf>> {
+        let mut sources = BTreeSet::new();
+
+        let dir = match fs::metadata(&input).expect("file not found").is_dir() {
+            true => {
+                for path in
+                    glob(&format!("{}/*.bpf.c", input.to_string_lossy()))?.filter_map(Result::ok)
+                {
+                    sources.insert(path);
+                }
+
+                PathBuf::from(input)
+            }
+            false => {
+                let dir = input
+                    .parent()
+                    .ok_or(anyhow!("Source {:?} doesn't have parent dir", input))?;
+
+                sources.insert(input.clone());
+
+                PathBuf::from(dir)
+            }
+        };
+
+        for path in glob(&format!("{}/*.bpf.[hc]", dir.to_string_lossy()))?.filter_map(Result::ok) {
+            let name = path
+                .to_str()
+                .ok_or(anyhow!("Path {:?} is not a valid string", path))?;
+            deps.insert(name.to_string());
+        }
+
+        Ok(sources)
+    }
+
     fn gen_bpf_skel(&self, deps: &mut BTreeSet<String>) -> Result<()> {
         let (input, name) = match &self.skel_input_name {
             Some(pair) => pair,
             None => return Ok(()),
         };
 
-        let obj = self.out_dir.join(format!("{}.bpf.o", name));
+        let sources = self.gen_sources(input.into(), deps)?;
+
+        let linkobj = self.out_dir.join(format!("{}.bpf.o", name));
+        let mut linker = Linker::new(&linkobj)?;
+
+        for filename in sources.iter() {
+            let name = filename.file_name().unwrap().to_string_lossy();
+            let obj = self.out_dir.join(name.replace(".bpf.c", ".bpf.o"));
+
+            SkeletonBuilder::new()
+                .debug(true)
+                .source(filename)
+                .obj(&obj)
+                .clang(&self.clang.clang)
+                .clang_args(&self.cflags)
+                .build()?;
+
+            linker.add_file(&obj)?;
+        }
+
+        linker.link()?;
+
         let skel_path = self.out_dir.join(format!("{}_skel.rs", name));
 
         SkeletonBuilder::new()
-            .source(input)
-            .obj(&obj)
+            .obj(&linkobj)
             .clang(&self.clang.clang)
             .clang_args(&self.cflags)
-            .build_and_generate(&skel_path)?;
-
-        let c_path = PathBuf::from(input);
-        let dir = c_path
-            .parent()
-            .ok_or(anyhow!("Source {:?} doesn't have parent dir", c_path))?
-            .to_str()
-            .ok_or(anyhow!("Parent dir of {:?} isn't a UTF-8 string", c_path))?;
-
-        for path in glob(&format!("{}/*.[hc]", dir))?.filter_map(Result::ok) {
-            deps.insert(
-                path.to_str()
-                    .ok_or(anyhow!("Path {:?} is not a valid string", path))?
-                    .to_string(),
-            );
-        }
+            .generate(&skel_path)?;
 
         Ok(())
     }
