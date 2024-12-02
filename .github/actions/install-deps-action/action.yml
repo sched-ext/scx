@@ -15,6 +15,13 @@ runs:
 
     ### DOWNLOAD AND INSTALL DEPENDENCIES ###
 
+    # Get some packages from nixpkgs for newer revisions
+    - uses: DeterminateSystems/nix-installer-action@main
+    - run: |
+        nix registry add nixpkgs github:NixOS/nixpkgs/8edf06bea5bcbee082df1b7369ff973b91618b8d
+        echo "BPF_CLANG=$(nix build --print-out-paths --no-link nixpkgs#clang)/bin/clang" >> $GITHUB_ENV
+      shell: bash
+
     # Download dependencies packaged by Ubuntu
     - run: |
         sudo apt install -f -y bison busybox-static cmake coreutils \
