@@ -27802,7 +27802,7 @@ struct blk_mq_debugfs_attr {
 };
 
 struct cpumask {
-	long unsigned int bits[1];
+	long unsigned int bits[128];
 };
 
 typedef struct cpumask cpumask_var_t[1];

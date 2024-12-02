@@ -654,7 +654,7 @@ struct static_call_key {
 };
 
 struct cpumask {
-	long unsigned int bits[1];
+	long unsigned int bits[128];
 };
 
 typedef struct cpumask cpumask_t;

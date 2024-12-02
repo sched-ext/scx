@@ -325,7 +325,7 @@ struct sched_ext_entity {
 struct sched_statistics {};
 
 struct cpumask {
-	long unsigned int bits[1];
+	long unsigned int bits[128];
 };
 
 typedef struct cpumask cpumask_t;

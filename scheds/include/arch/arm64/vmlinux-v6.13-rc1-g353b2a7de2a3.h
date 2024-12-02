@@ -128,7 +128,7 @@ struct raw_spinlock {
 typedef struct raw_spinlock raw_spinlock_t;
 
 struct cpumask {
-	long unsigned int bits[1];
+	long unsigned int bits[128];
 };
 
 typedef struct cpumask cpumask_t;
