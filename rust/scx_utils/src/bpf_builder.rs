@@ -188,7 +188,6 @@ pub struct BpfBuilder {
 
     intf_input_output: Option<(String, String)>,
     skel_input_name: Option<(String, String)>,
-    skel_deps: Option<Vec<String>>,
 }
 
 impl BpfBuilder {
@@ -264,7 +263,6 @@ impl BpfBuilder {
 
             intf_input_output: None,
             skel_input_name: None,
-            skel_deps: None,
         })
     }
 
@@ -282,18 +280,6 @@ impl BpfBuilder {
     /// source code and `@output` is the `.rs` file to be generated.
     pub fn enable_skel(&mut self, input: &str, name: &str) -> &mut Self {
         self.skel_input_name = Some((input.into(), name.into()));
-        self
-    }
-
-    /// By default, all `.[hc]` files in the same directory as the source
-    /// BPF `.c` file are treated as dependencies and the skeleton is
-    /// regenerated if any has changed. This method replaces the automatic
-    /// dependencies with `@deps`.
-    pub fn set_skel_deps<'a, I>(&mut self, deps: I) -> &mut Self
-    where
-        I: IntoIterator<Item = &'a str>,
-    {
-        self.skel_deps = Some(deps.into_iter().map(|d| d.to_string()).collect());
         self
     }
 
@@ -344,29 +330,21 @@ impl BpfBuilder {
             .clang_args(&self.cflags)
             .build_and_generate(&skel_path)?;
 
-        match &self.skel_deps {
-            Some(skel_deps) => {
-                for path in skel_deps {
-                    deps.insert(path.to_string());
-                }
-            }
-            None => {
-                let c_path = PathBuf::from(input);
-                let dir = c_path
-                    .parent()
-                    .ok_or(anyhow!("Source {:?} doesn't have parent dir", c_path))?
-                    .to_str()
-                    .ok_or(anyhow!("Parent dir of {:?} isn't a UTF-8 string", c_path))?;
+        let c_path = PathBuf::from(input);
+        let dir = c_path
+            .parent()
+            .ok_or(anyhow!("Source {:?} doesn't have parent dir", c_path))?
+            .to_str()
+            .ok_or(anyhow!("Parent dir of {:?} isn't a UTF-8 string", c_path))?;
 
-                for path in glob(&format!("{}/*.[hc]", dir))?.filter_map(Result::ok) {
-                    deps.insert(
-                        path.to_str()
-                            .ok_or(anyhow!("Path {:?} is not a valid string", path))?
-                            .to_string(),
-                    );
-                }
-            }
+        for path in glob(&format!("{}/*.[hc]", dir))?.filter_map(Result::ok) {
+            deps.insert(
+                path.to_str()
+                    .ok_or(anyhow!("Path {:?} is not a valid string", path))?
+                    .to_string(),
+            );
         }
+
         Ok(())
     }
 
