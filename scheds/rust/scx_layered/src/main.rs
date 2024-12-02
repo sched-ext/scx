@@ -108,6 +108,7 @@ lazy_static! {
                         idle_smt: None,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
                         nodes: vec![],
@@ -132,6 +133,7 @@ lazy_static! {
                         idle_smt: None,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
                         nodes: vec![],
@@ -157,6 +159,7 @@ lazy_static! {
                         idle_smt: None,
                         slice_us: 800,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Topo,
                         perf: 1024,
                         nodes: vec![],
@@ -180,6 +183,7 @@ lazy_static! {
                         idle_smt: None,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Linear,
                         perf: 1024,
                         nodes: vec![],
@@ -1162,6 +1166,7 @@ impl<'a> Scheduler<'a> {
                     nodes,
                     slice_us,
                     weight,
+                    xllc_mig_min_us,
                     ..
                 } = spec.kind.common();
 
@@ -1190,6 +1195,7 @@ impl<'a> Scheduler<'a> {
                 } else {
                     DEFAULT_LAYER_WEIGHT
                 };
+                layer.xllc_mig_min_ns = (xllc_mig_min_us * 1000.0) as u64;
                 layer.owned_usage_target_ppk =
                     Self::layer_owned_usage_target_ppk(spec.kind.util_range(), 0.0);
                 layer_weights.push(layer.weight.try_into().unwrap());

@@ -73,6 +73,10 @@ pub enum LayerMatch {
     TGIDEquals(u32),
 }
 
+fn xllc_mig_min_us_dfl() -> f64 {
+    crate::XLLC_MIG_MIN_US_DFL
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LayerCommon {
     #[serde(default)]
@@ -89,6 +93,8 @@ pub struct LayerCommon {
     pub exclusive: bool,
     #[serde(default)]
     pub weight: u32,
+    #[serde(default="xllc_mig_min_us_dfl")]
+    pub xllc_mig_min_us: f64,
     #[serde(default, skip_serializing)]
     pub idle_smt: Option<bool>,
     #[serde(default)]
