@@ -66,9 +66,6 @@ use stats::SchedSamples;
 use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
-use zbus::blocking::Connection;
-use zbus::fdo;
-use zbus::proxy;
 
 /// scx_lavd: Latency-criticality Aware Virtual Deadline (LAVD) scheduler
 ///
@@ -482,16 +479,6 @@ impl FlatTopology {
     }
 }
 
-#[proxy(
-    interface = "net.hadess.PowerProfiles",
-    default_service = "net.hadess.PowerProfiles",
-    default_path = "/net/hadess/PowerProfiles"
-)]
-trait PowerProfiles {
-    #[zbus(property)]
-    fn active_profile(&self) -> fdo::Result<String>;
-}
-
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -501,15 +488,10 @@ struct Scheduler<'a> {
     monitor_tid: Option<ThreadId>,
     stats_server: StatsServer<StatsReq, StatsRes>,
     mseq_id: u64,
-    power_profiles_proxy: Option<&'a PowerProfilesProxyBlocking<'a>>,
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(
-        opts: &'a Opts,
-        open_object: &'a mut MaybeUninit<OpenObject>,
-        power_profiles_proxy: Option<&'a PowerProfilesProxyBlocking<'a>>,
-    ) -> Result<Self> {
+    fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         if *NR_CPU_IDS > LAVD_CPU_ID_MAX as usize {
             panic!(
                 "Num possible CPU IDs ({}) exceeds maximum of ({})",
@@ -558,7 +540,6 @@ impl<'a> Scheduler<'a> {
             monitor_tid: None,
             stats_server,
             mseq_id: 0,
-            power_profiles_proxy,
         })
     }
 
@@ -815,32 +796,40 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn fetch_power_profile(&self) -> String {
-        self.power_profiles_proxy
-            .map(|power_profiles_proxy| power_profiles_proxy.active_profile().ok())
-            .flatten()
-            .unwrap_or_default()
+    fn read_energy_profile() -> String {
+        let res =
+            File::open("/sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference")
+                .and_then(|mut file| {
+                    let mut contents = String::new();
+                    file.read_to_string(&mut contents)?;
+                    Ok(contents.trim().to_string())
+                });
+
+        res.unwrap_or_else(|_| "none".to_string())
     }
 
     fn update_power_profile(&mut self, prev_profile: String) -> (bool, String) {
-        let profile = self.fetch_power_profile();
+        let profile = Self::read_energy_profile();
         if profile == prev_profile {
             // If the profile is the same, skip updaring the profile for BPF.
             return (true, profile);
         }
 
-        let _ = match profile.as_str() {
-            "performance" => self.set_power_profile(LAVD_PM_PERFORMANCE),
-            "balanced" => self.set_power_profile(LAVD_PM_BALANCED),
-            "power-saver" => self.set_power_profile(LAVD_PM_POWERSAVE),
-            _ => {
-                // We don't know how to handle an unknown energy profile,
-                // so we just give up updating the profile from now on.
-                return (false, profile);
-            }
-        };
+        if profile == "performance" {
+            let _ = self.set_power_profile(LAVD_PM_PERFORMANCE);
+            info!("Set the scheduler's power profile to performance mode.");
+        } else if profile == "balance_performance" {
+            let _ = self.set_power_profile(LAVD_PM_BALANCED);
+            info!("Set the scheduler's power profile to balanced mode.");
+        } else if profile == "power" {
+            let _ = self.set_power_profile(LAVD_PM_POWERSAVE);
+            info!("Set the scheduler's power profile to power-save mode.");
+        } else {
+            // We don't know how to handle an unknown energy profile,
+            // so we just give up updating the profile from now on.
+            return (false, profile);
+        }
 
-        info!("Set the scheduler's power profile to {profile} mode.");
         (true, profile)
     }
 
@@ -952,15 +941,9 @@ fn main() -> Result<()> {
         }
     }
 
-    let system_bus = Connection::system().ok();
-    let power_profiles_proxy = system_bus
-        .as_ref()
-        .map(|system_bus| PowerProfilesProxyBlocking::new(system_bus).ok())
-        .flatten();
-
     let mut open_object = MaybeUninit::uninit();
     loop {
-        let mut sched = Scheduler::init(&opts, &mut open_object, power_profiles_proxy.as_ref())?;
+        let mut sched = Scheduler::init(&opts, &mut open_object)?;
         info!(
             "scx_lavd scheduler is initialized (build ID: {})",
             *build_id::SCX_FULL_VERSION
