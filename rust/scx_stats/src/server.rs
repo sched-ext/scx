@@ -280,15 +280,26 @@ where
         self.visit_meta(self.top.as_ref().unwrap(), &mut |_| Ok(()))
     }
 
-    pub fn describe_meta<W: Write>(&self, w: &mut W, from: Option<&str>) -> Result<()> {
-        let from = match from {
-            Some(v) => v,
-            None => self
-                .top
-                .as_ref()
-                .ok_or_else(|| anyhow!("don't know where to start "))?,
+    pub fn describe_meta<W: Write>(&self, w: &mut W, from: Option<&[&str]>) -> Result<()> {
+        let meta_names = match from {
+            Some(v) if !v.is_empty() => v,
+            Some(_) | None => {
+                let top = self
+                    .top
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("don't know where to start"))?;
+                return self.describe_meta_inner(w, top);
+            }
         };
 
+        for meta_name in meta_names {
+            self.describe_meta_inner(w, meta_name)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn describe_meta_inner<W: Write>(&self, w: &mut W, from: &str) -> Result<()> {
         let (mut nwidth, mut fwidth, mut dwidth) = (0usize, 0usize, 0usize);
 
         self.visit_meta(from, &mut |m| {

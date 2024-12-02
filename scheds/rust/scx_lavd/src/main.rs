@@ -893,7 +893,13 @@ fn main() -> Result<()> {
     }
 
     if opts.help_stats {
-        stats::server_data(0).describe_meta(&mut std::io::stdout(), None)?;
+        let sys_stats_meta_name = SysStats::meta().name;
+        let sched_sample_meta_name = SchedSample::meta().name;
+        let stats_meta_names: &[&str] = &[
+            sys_stats_meta_name.as_str(),
+            sched_sample_meta_name.as_str(),
+        ];
+        stats::server_data(0).describe_meta(&mut std::io::stdout(), Some(&stats_meta_names))?;
         return Ok(());
     }
 
