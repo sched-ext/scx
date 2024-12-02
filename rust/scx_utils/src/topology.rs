@@ -539,12 +539,12 @@ fn create_insert_cpu(
         cpu_id,
         Arc::new(Cpu {
             id: cpu_id,
-            min_freq: min_freq,
-            max_freq: max_freq,
-            base_freq: base_freq,
-            trans_lat_ns: trans_lat_ns,
-            l2_id: l2_id,
-            l3_id: l3_id,
+            min_freq,
+            max_freq,
+            base_freq,
+            trans_lat_ns,
+            l2_id,
+            l3_id,
             core_type: core_type.clone(),
 
             core_id: *core_id,

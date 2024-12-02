@@ -174,7 +174,11 @@ impl LayerStats {
             }
         };
         let calc_frac = |a, b| {
-            if b != 0.0 { a / b * 100.0 } else { 0.0 }
+            if b != 0.0 {
+                a / b * 100.0
+            } else {
+                0.0
+            }
         };
 
         let util_sum = stats.layer_utils[lidx]

@@ -527,7 +527,9 @@ impl<'a> Scheduler<'a> {
         for (cell_idx, cell) in self.cells.iter() {
             trace!(
                 "Cell {}, Load: {}, Pinned Load: {}",
-                cell_idx, cell.load, cell.pinned_load
+                cell_idx,
+                cell.load,
+                cell.pinned_load
             );
         }
         let zero = 0 as libc::__u32;
