@@ -119,6 +119,10 @@ jobs:
       - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}
         run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
 
+        # have lavd use an older version of rust to ensure compat https://github.com/sched-ext/scx/pull/1017#issuecomment-2510607780
+      - if: ${{ matrix.scheduler == 'scx_lavd' }}
+        run: echo "RUSTUP_TOOLCHAIN=nightly-2024-04-09" >> $GITHUB_ENV
+
       # get latest head commit of sched_ext for-next
       - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git heads/for-next | awk '{print $1}')" >> $GITHUB_ENV
 
@@ -326,6 +330,10 @@ jobs:
           key: virtiofsd-binary
       - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}
         run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
+
+      # have lavd use an older version of rust to ensure compat https://github.com/sched-ext/scx/pull/1017#issuecomment-2510607780
+      - if: ${{ matrix.scheduler == 'scx_lavd' }}
+        run: echo "RUSTUP_TOOLCHAIN=nightly-2024-04-09" >> $GITHUB_ENV
 
       # get latest head commit of sched_ext for-next
       - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git heads/for-next | awk '{print $1}')" >> $GITHUB_ENV
