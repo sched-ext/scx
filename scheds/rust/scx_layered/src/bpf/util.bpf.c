@@ -1,19 +1,23 @@
-/* to be included in the main bpf.c file */
-
 #ifdef LSP
+#ifndef __bpf__
 #define __bpf__
-#ifndef LSP_INC
+#endif
+#define LSP_INC
 #include "../../../../include/scx/common.bpf.h"
+#else
+#include <scx/common.bpf.h>
 #endif
 
-#include "intf.h"
-
+#include <errno.h>
 #include <stdbool.h>
 #include <string.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
-#endif
+
+#include "intf.h"
+#include "timer.bpf.h"
+#include "util.bpf.h"
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -37,7 +41,7 @@ struct {
 	__uint(max_entries, 1);
 } str_bufs SEC(".maps");
 
-static char *format_cgrp_path(struct cgroup *cgrp)
+__hidden char *format_cgrp_path(struct cgroup *cgrp)
 {
 	u32 zero = 0;
 	char *path = bpf_map_lookup_elem(&cgrp_path_bufs, &zero);
