@@ -1752,8 +1752,8 @@ impl<'a> Scheduler<'a> {
                     }
 
                     let util = if util < 0.01 { 0.0 } else { util };
-                    let low = (util / util_range.1).ceil() as usize;
-                    let high = ((util / util_range.0).floor() as usize).max(low);
+                    let low = (util / util_range.0).ceil() as usize;
+                    let high = ((util / util_range.1).floor() as usize).max(low);
                     let target = layer.cpus.count_ones().clamp(low, high);
                     let cpus_range = cpus_range.unwrap_or((0, nr_cpus));
 
