@@ -1,33 +1,33 @@
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::thread::current;
 use std::thread::ThreadId;
+use std::thread::current;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::bail;
 use bitvec::prelude::*;
 use chrono::DateTime;
 use chrono::Local;
 use log::warn;
 use scx_stats::prelude::*;
-use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
+use scx_stats_derive::stat_doc;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::bpf_intf;
 use crate::BpfStats;
-use crate::Layer;
-use crate::Stats;
 use crate::LAYER_USAGE_OPEN;
 use crate::LAYER_USAGE_PROTECTED;
 use crate::LAYER_USAGE_SUM_UPTO;
+use crate::Layer;
+use crate::Stats;
+use crate::bpf_intf;
 
 fn fmt_pct(v: f64) -> String {
     if v >= 99.995 {
@@ -567,13 +567,10 @@ pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
     StatsServerData::new()
         .add_meta(LayerStats::meta())
         .add_meta(SysStats::meta())
-        .add_ops(
-            "top",
-            StatsOps {
-                open,
-                close: Some(close),
-            },
-        )
+        .add_ops("top", StatsOps {
+            open,
+            close: Some(close),
+        })
 }
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {

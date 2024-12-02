@@ -16,24 +16,29 @@ use std::ffi::c_int;
 use std::fs::File;
 use std::io::Read;
 use std::mem::MaybeUninit;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::bail;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
-use libbpf_rs::OpenObject;
-use libbpf_rs::ProgramInput;
 use log::info;
 use log::warn;
 use scx_stats::prelude::*;
+use scx_utils::CoreType;
+use scx_utils::Cpumask;
+use scx_utils::NR_CPU_IDS;
+use scx_utils::Topology;
+use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::import_enums;
 use scx_utils::scx_enums;
@@ -43,11 +48,6 @@ use scx_utils::scx_ops_open;
 use scx_utils::set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::CoreType;
-use scx_utils::Cpumask;
-use scx_utils::Topology;
-use scx_utils::UserExitInfo;
-use scx_utils::NR_CPU_IDS;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &'static str = "scx_bpfland";
@@ -406,15 +406,12 @@ impl<'a> Scheduler<'a> {
             "powersave" => 0,
             _ => -1,
         };
-        info!(
-            "cpufreq performance level: {}",
-            match perf_lvl {
-                1024 => "max".into(),
-                0 => "min".into(),
-                n if n < 0 => "auto".into(),
-                _ => perf_lvl.to_string(),
-            }
-        );
+        info!("cpufreq performance level: {}", match perf_lvl {
+            1024 => "max".into(),
+            0 => "min".into(),
+            n if n < 0 => "auto".into(),
+            _ => perf_lvl.to_string(),
+        });
         skel.maps.bss_data.cpufreq_perf_lvl = perf_lvl;
 
         Ok(())

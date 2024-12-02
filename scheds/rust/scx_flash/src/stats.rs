@@ -6,9 +6,9 @@
 // GNU General Public License version 2.
 
 use std::io::Write;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
