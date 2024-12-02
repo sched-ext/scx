@@ -2131,7 +2131,7 @@ struct percpu_counter {
 };
 
 struct cpumask {
-	unsigned long bits[4];
+	unsigned long bits[128];
 };
 
 typedef struct cpumask cpumask_t;
