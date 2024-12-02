@@ -172,6 +172,7 @@ struct llc_ctx {
 	u32			id;
 	struct bpf_cpumask __kptr *cpumask;
 	u32			nr_cpus;
+	u64			vtime_now[MAX_LAYERS];
 	u64			queued_runtime[MAX_LAYERS];
 	u64			lstats[MAX_LAYERS][NR_LLC_LSTATS];
 	struct llc_prox_map	prox_map;
@@ -248,7 +249,6 @@ struct layer {
 	int			growth_algo;
 
 	u32			owned_usage_target_ppk;
-	u64			vtime_now;
 	u64			nr_tasks;
 
 	u64			cpus_seq;

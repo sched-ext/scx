@@ -410,6 +410,7 @@ struct task_ctx {
 	u64			runnable_at;
 	u64			running_at;
 	u64			runtime_avg;
+	u32			llc_id;
 	u32			qrt_llc_id;	/* for llcc->queue_runtime */
 };
 
@@ -812,6 +813,31 @@ out_put:
 	return cpu;
 }
 
+static __always_inline
+bool maybe_update_task_llc(struct task_struct *p, struct task_ctx *taskc, s32 new_cpu)
+{
+	u32 new_llc_id = cpu_to_llc_id(new_cpu);
+	struct llc_ctx *prev_llcc, *new_llcc;
+	u32 layer_id;
+	s64 vtime_delta;
+
+	if (taskc->llc_id == new_llc_id)
+		return false;
+
+	layer_id = taskc->layer_id;
+
+	if (layer_id >= MAX_LAYERS ||
+	    !(prev_llcc = lookup_llc_ctx(taskc->llc_id)) ||
+	    !(new_llcc = lookup_llc_ctx(new_llc_id)))
+		return false;
+
+	vtime_delta = p->scx.dsq_vtime - prev_llcc->vtime_now[layer_id];
+	p->scx.dsq_vtime = new_llcc->vtime_now[layer_id] + vtime_delta;
+
+	taskc->llc_id = new_llc_id;
+	return true;
+}
+
 s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	struct cpu_ctx *cpuc;
@@ -977,7 +1003,8 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) ||
 	    !(task_cpuc = lookup_cpu_ctx(task_cpu)) ||
-	    !(taskc = lookup_task_ctx(p)))
+	    !(taskc = lookup_task_ctx(p)) ||
+	    !(llcc = lookup_llc_ctx(task_cpuc->llc_id)))
 		return;
 
 	layer_id = taskc->layer_id;
@@ -1007,8 +1034,9 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Limit the amount of budget that an idling task can accumulate
 	 * to one slice.
 	 */
-	if (vtime_before(vtime, layer->vtime_now - slice_ns))
-		vtime = layer->vtime_now - slice_ns;
+	maybe_update_task_llc(p, taskc, task_cpu);
+	if (vtime_before(vtime, llcc->vtime_now[layer_id] - slice_ns))
+		vtime = llcc->vtime_now[layer_id] - slice_ns;
 
 	/*
 	 * Special-case per-cpu kthreads and scx_layered userspace so that they
@@ -1052,10 +1080,6 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dispatch(p, task_cpuc->hi_fallback_dsq_id, slice_ns, enq_flags);
 		goto preempt;
 	}
-
-	llcc = lookup_llc_ctx(task_cpuc->llc_id);
-	if (!llcc)
-		return;
 
 	/*
 	 * A task can be enqueued more than once before going through
@@ -1526,7 +1550,7 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 {
 	const char *cgrp_path;
 	bool matched = false;
-	u64 id;	// XXX - int makes verifier unhappy
+	u64 layer_id;	// XXX - int makes verifier unhappy
 	pid_t pid = p->pid;
 
 	if (!taskc->refresh_layer)
@@ -1539,17 +1563,23 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 	if (taskc->layer_id >= 0 && taskc->layer_id < nr_layers)
 		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
 
-	bpf_for(id, 0, nr_layers) {
-		if (match_layer(id, pid, cgrp_path) == 0) {
+	bpf_for(layer_id, 0, nr_layers) {
+		if (match_layer(layer_id, pid, cgrp_path) == 0) {
 			matched = true;
 			break;
 		}
 	}
 
 	if (matched) {
-		struct layer *layer = &layers[id];
+		struct layer *layer = &layers[layer_id];
+		struct cpu_ctx *cpuc;
+		struct llc_ctx *llcc;
 
-		taskc->layer_id = id;
+		if (!(cpuc = lookup_cpu_ctx(scx_bpf_task_cpu(p))) ||
+		    !(llcc = lookup_llc_ctx(cpuc->llc_id)))
+			return;
+
+		taskc->layer_id = layer_id;
 		taskc->layered_cpus.seq = layer->cpus_seq - 1;
 		taskc->layered_cpus_llc.seq = layer->cpus_seq - 1;
 		taskc->layered_cpus_node.seq = layer->cpus_seq - 1;
@@ -1564,7 +1594,7 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 		 * Revisit if high frequency dynamic layer switching
 		 * needs to be supported.
 		 */
-		p->scx.dsq_vtime = layer->vtime_now;
+		p->scx.dsq_vtime = llcc->vtime_now[layer_id];
 	} else {
 		scx_bpf_error("[%s]%d didn't match any layer", p->comm, p->pid);
 	}
@@ -1791,8 +1821,9 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	}
 	taskc->last_cpu = task_cpu;
 
-	if (vtime_before(layer->vtime_now, p->scx.dsq_vtime))
-		layer->vtime_now = p->scx.dsq_vtime;
+	maybe_update_task_llc(p, taskc, task_cpu);
+	if (vtime_before(llcc->vtime_now[layer_id], p->scx.dsq_vtime))
+		llcc->vtime_now[layer_id] = p->scx.dsq_vtime;
 
 	cpuc->current_preempt = layer->preempt;
 	cpuc->current_exclusive = layer->exclusive;
@@ -2072,6 +2103,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	taskc->last_cpu = -1;
 	taskc->layer_id = MAX_LAYERS;
 	taskc->refresh_layer = true;
+	taskc->llc_id = MAX_LAYERS;
 	taskc->qrt_llc_id = MAX_LAYERS;
 
 	/*
