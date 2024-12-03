@@ -29,6 +29,7 @@ version-compare = "0.1"
 metrics = "0.23.0"
 metrics-util = "0.17.0"
 libc = "0.2.137"
+zbus = { version = "5", optional = true }
 
 [build-dependencies]
 anyhow = "1.0.65"
@@ -45,3 +46,4 @@ walkdir = "2.4"
 [features]
 default = []
 gpu-topology = ["dep:nvml-wrapper"]
+autopower = ["dep:zbus"]
