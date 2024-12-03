@@ -104,6 +104,7 @@ enum layer_stat_id {
 	LSTAT_MIGRATION,
 	LSTAT_XNUMA_MIGRATION,
 	LSTAT_XLLC_MIGRATION,
+	LSTAT_XLLC_MIGRATION_SKIP,
 	LSTAT_XLAYER_WAKE,
 	LSTAT_XLAYER_REWAKE,
 	NR_LSTATS,
@@ -241,6 +242,7 @@ struct layer {
 	u64			yield_step_ns;
 	u64			slice_ns;
 	u32			weight;
+	u64			xllc_mig_min_ns;
 
 	int			kind;
 	bool			preempt;

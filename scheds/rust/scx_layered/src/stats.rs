@@ -117,6 +117,8 @@ pub struct LayerStats {
     pub xnuma_migration: f64,
     #[stat(desc = "% migrated across LLCs")]
     pub xllc_migration: f64,
+    #[stat(desc = "% migration skipped across LLCs due to xllc_mig_min_us")]
+    pub xllc_migration_skip: f64,
     #[stat(desc = "% wakers across layers")]
     pub xlayer_wake: f64,
     #[stat(desc = "% rewakers across layers where waker has waken the task previously")]
@@ -226,6 +228,7 @@ impl LayerStats {
             xlayer_wake: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XLAYER_WAKE),
             xlayer_rewake: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XLAYER_REWAKE),
             xllc_migration: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XLLC_MIGRATION),
+            xllc_migration_skip: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XLLC_MIGRATION_SKIP),
             cpus: Self::bitvec_to_u32s(&layer.cpus),
             cur_nr_cpus: layer.cpus.count_ones() as u32,
             min_nr_cpus: nr_cpus_range.0 as u32,
@@ -301,12 +304,13 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  open_idle={} mig={} xnuma_mig={} xllc_mig={} affn_viol={}",
+            "  {:<width$}  open_idle={} mig={} xnuma_mig={} xllc_mig/skip={}/{} affn_viol={}",
             "",
             fmt_pct(self.open_idle),
             fmt_pct(self.migration),
             fmt_pct(self.xnuma_migration),
             fmt_pct(self.xllc_migration),
+            fmt_pct(self.xllc_migration_skip),
             fmt_pct(self.affn_viol),
             width = header_width,
         )?;

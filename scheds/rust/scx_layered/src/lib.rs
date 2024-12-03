@@ -26,6 +26,8 @@ use scx_utils::TopologyMap;
 
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 
+pub const XLLC_MIG_MIN_US_DFL: f64 = 100.0;
+
 lazy_static::lazy_static! {
     static ref NR_POSSIBLE_CPUS: usize = libbpf_rs::num_possible_cpus().unwrap();
 }
