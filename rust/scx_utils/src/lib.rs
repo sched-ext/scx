@@ -94,3 +94,6 @@ pub use netdev::NetDev;
 
 pub mod enums;
 pub use enums::scx_enums;
+
+#[cfg(feature = "autopower")]
+pub mod autopower;
