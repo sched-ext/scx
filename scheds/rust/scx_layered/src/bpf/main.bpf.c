@@ -2198,6 +2198,8 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 	int i, j, id;
 	struct layer *layer;
 
+	scx_bpf_dump_header();
+
 	bpf_for(i, 0, nr_layers) {
 		layer = lookup_layer(i);
 		if (!layer) {
