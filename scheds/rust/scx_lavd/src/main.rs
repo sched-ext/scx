@@ -307,6 +307,7 @@ impl FlatTopology {
     ) -> Option<(Vec<CpuFlatId>, usize)> {
         let topo = Topology::new().expect("Failed to build host topology");
         let mut cpu_fids = Vec::new();
+        debug!("{:#?}", topo);
 
         // Build a vector of cpu flat ids.
         let mut base_freq = 0;
