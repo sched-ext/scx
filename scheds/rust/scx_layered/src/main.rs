@@ -401,15 +401,15 @@ lazy_static! {
 #[command(verbatim_doc_comment)]
 struct Opts {
     /// Scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "20000")]
-    slice_us: u64,
+    #[clap(short = 's', long)]
+    slice_us: Option<u64>,
 
     /// Maximum consecutive execution time in microseconds. A task may be
     /// allowed to keep executing on a CPU for this long. Note that this is
     /// the upper limit and a task may have to moved off the CPU earlier. 0
     /// indicates default - 20 * slice_us.
-    #[clap(short = 'M', long, default_value = "0")]
-    max_exec_us: u64,
+    #[clap(short = 'M', long)]
+    max_exec_us: Option<u64>,
 
     /// Scheduling interval in seconds.
     #[clap(short = 'i', long, default_value = "0.1")]
@@ -1165,11 +1165,7 @@ impl<'a> Scheduler<'a> {
                     ..
                 } = spec.kind.common();
 
-                layer.slice_ns = if *slice_us > 0 {
-                    *slice_us * 1000
-                } else {
-                    opts.slice_us * 1000
-                };
+                layer.slice_ns = *slice_us * 1000;
                 layer.min_exec_ns = min_exec_us * 1000;
                 layer.yield_step_ns = if *yield_ignore > 0.999 {
                     0
@@ -1552,8 +1548,6 @@ impl<'a> Scheduler<'a> {
         skel_builder.obj_builder.debug(opts.verbose > 1);
         init_libbpf_logging(None);
         let mut skel = scx_ops_open!(skel_builder, open_object, layered)?;
-        skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;
-        skel.maps.rodata_data.max_exec_ns = 20 * scx_enums.SCX_SLICE_DFL;
 
         // Initialize skel according to @opts.
         skel.struct_ops.layered_mut().exit_dump_len = opts.exit_dump_len;
@@ -1562,12 +1556,14 @@ impl<'a> Scheduler<'a> {
         // Running scx_layered inside a PID namespace would break the
         // following.
         skel.maps.rodata_data.layered_tgid = std::process::id() as i32;
-        skel.maps.rodata_data.slice_ns = opts.slice_us * 1000;
-        skel.maps.rodata_data.max_exec_ns = if opts.max_exec_us > 0 {
-            opts.max_exec_us * 1000
-        } else {
-            opts.slice_us * 1000 * 20
-        };
+
+        let slice_ns = opts
+            .slice_us
+            .map(|us| us * 1000)
+            .unwrap_or(scx_enums.SCX_SLICE_DFL);
+        skel.maps.rodata_data.slice_ns = slice_ns;
+        skel.maps.rodata_data.max_exec_ns = opts.max_exec_ns.unwrap_or(20 * slice_ns);
+
         skel.maps.rodata_data.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         skel.maps.rodata_data.smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
