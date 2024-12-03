@@ -9,9 +9,9 @@ mod config;
 mod logger;
 
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -25,8 +25,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Duration;
 use tokio::time::Instant;
-use zbus::Connection;
 use zbus::interface;
+use zbus::Connection;
 use zvariant::Type;
 use zvariant::Value;
 
@@ -319,11 +319,14 @@ async fn main() -> Result<()> {
     let connection = Connection::system().await?;
     connection
         .object_server()
-        .at("/org/scx/Loader", ScxLoader {
-            current_scx: None,
-            current_mode: SchedMode::Auto,
-            channel: channel.clone(),
-        })
+        .at(
+            "/org/scx/Loader",
+            ScxLoader {
+                current_scx: None,
+                current_mode: SchedMode::Auto,
+                channel: channel.clone(),
+            },
+        )
         .await?;
 
     connection.request_name("org.scx.Loader").await?;

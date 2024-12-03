@@ -9,8 +9,8 @@ pub mod bpf_intf;
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
 use anyhow::bail;
+use anyhow::Result;
 use bitvec::prelude::*;
 pub use config::LayerCommon;
 pub use config::LayerConfig;
