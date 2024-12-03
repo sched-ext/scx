@@ -7,25 +7,23 @@ description = "A BPF component (dispatcher) that implements the low level sched-
 license = "GPL-2.0-only"
 
 [dependencies]
-anyhow = "1.0.65"
-plain = "0.2.3"
-clap = { version = "4.1", features = ["derive", "env", "unicode", "wrap_help"] }
-ctrlc = { version = "3.1", features = ["termination"] }
-fb_procfs = "0.7"
-libbpf-rs = "0.24.1"
-libc = "0.2.137"
-log = "0.4.17"
-ordered-float = "3.4.0"
-serde = { version = "1.0", features = ["derive"] }
-scx_stats = { path = "../../../rust/scx_stats", version = "1.0.6" }
-scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.6" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.7" }
-scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.2.3" }
-simplelog = "0.12"
+anyhow = { workspace = true }
+plain = { workspace = true }
+clap = { workspace = true }
+ctrlc = { workspace = true }
+libbpf-rs = { workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+scx_stats = { workspace = true }
+scx_stats_derive = { workspace = true }
+scx_utils = { workspace = true }
+scx_rustland_core = { workspace = true }
+simplelog = { workspace = true }
 
 [build-dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.7" }
-scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.2.3" }
+scx_utils = { workspace = true }
+scx_rustland_core = { workspace = true }
 
 [features]
 enable_backtrace = []

@@ -1,15 +1,70 @@
 [workspace]
-members = ["rust/scx_stats",
-           "rust/scx_stats/scx_stats_derive",
-	   "rust/scx_utils",
-           "rust/scx_rustland_core",
-           "rust/scx_loader",
-	   "scheds/rust/scx_lavd",
-           "scheds/rust/scx_bpfland",
-           "scheds/rust/scx_flash",
-           "scheds/rust/scx_rustland",
-           "scheds/rust/scx_rlfifo",
-           "scheds/rust/scx_rusty",
-           "scheds/rust/scx_layered",
-           "scheds/rust/scx_mitosis"]
+members = [
+    "rust/scx_stats",
+    "rust/scx_stats/scx_stats_derive",
+    "rust/scx_utils",
+    "rust/scx_rustland_core",
+    "rust/scx_loader",
+    "scheds/rust/scx_lavd",
+    "scheds/rust/scx_bpfland",
+    "scheds/rust/scx_flash",
+    "scheds/rust/scx_rustland",
+    "scheds/rust/scx_rlfifo",
+    "scheds/rust/scx_rusty",
+    "scheds/rust/scx_layered",
+    "scheds/rust/scx_mitosis"
+]
 resolver = "2"
+
+[workspace.dependencies]
+anyhow = "1"
+bindgen = ">=0.69"
+bitvec = { version = "1.0", features = ["serde"] }
+cgroupfs = "0.8"
+chrono = "0.4"
+clap = { version = "4", features = ["derive", "env", "unicode", "wrap_help"] }
+colored = "2"
+crossbeam = "0.8"
+ctrlc = { version = "3", features = ["termination"] }
+fastrand = "2"
+fb_procfs = "0.8"
+glob = "0.3"
+gpoint = "0.2"
+hex = "0.4.3"
+itertools = "0.13"
+lazy_static = "1.4"
+libbpf-cargo = "0.24.1"
+libbpf-rs = "0.24"
+libc = "0.2"
+log = "0.4"
+maplit = "1"
+metrics = "0.24"
+metrics-util = "0.18"
+nix = "0.29"
+nvml-wrapper = "0.10"
+ordered-float = "4"
+paste = "1.0"
+plain = "0.2"
+proc-macro2 = "1"
+quote = "1"
+regex = "1.10"
+scx_rustland_core = { path = "rust/scx_rustland_core" }
+scx_stats = { path = "rust/scx_stats" }
+scx_stats_derive = { path = "rust/scx_stats/scx_stats_derive" }
+scx_utils = { path = "rust/scx_utils" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+simple_logger = "5"
+simplelog = "0.12"
+sorted-vec = "0.8"
+sscanf = "0.4"
+static_assertions = "1"
+syn = { version = "2", features = ["extra-traits", "full"] }
+sysinfo = "0.32"
+tar = "0.4"
+tokio = "1"
+toml = "0.8"
+vergen = { version = "8", features = ["cargo", "git", "gitcl"] }
+version-compare = "0.2"
+walkdir = "2.4"
+zbus = "5"

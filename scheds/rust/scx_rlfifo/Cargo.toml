@@ -7,17 +7,17 @@ description = "A simple FIFO scheduler in Rust that runs in user-space"
 license = "GPL-2.0-only"
 
 [dependencies]
-anyhow = "1.0.65"
-plain = "0.2.3"
-ctrlc = { version = "3.1", features = ["termination"] }
-libbpf-rs = "0.24.1"
-libc = "0.2.137"
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.7" }
-scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.2.3" }
+anyhow = { workspace = true }
+plain = { workspace = true }
+ctrlc = { workspace = true }
+libbpf-rs = { workspace = true }
+libc = { workspace = true }
+scx_utils = { workspace = true }
+scx_rustland_core = { workspace = true }
 
 [build-dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.7" }
-scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.2.3" }
+scx_utils = { workspace = true }
+scx_rustland_core = { workspace = true }
 
 [features]
 enable_backtrace = []

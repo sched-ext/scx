@@ -8,16 +8,15 @@ repository = "https://github.com/sched-ext/scx"
 description = "Statistics transport library for sched_ext schedulers"
 
 [dependencies]
-anyhow = "1.0.65"
-crossbeam = "0.8.4"
-libc = "0.2.137"
-log = "0.4.17"
-proc-macro2 = "1.0"
-quote = "1.0"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-syn = { version = "2.0", features = ["extra-traits", "full"] }
+anyhow = { workspace = true }
+crossbeam = { workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
+quote = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+syn = { workspace = true }
 
 [dev-dependencies]
-scx_stats_derive = { path = "scx_stats_derive" }
-simple_logger = "5.0"
+scx_stats_derive = { workspace = true }
+simple_logger = { workspace = true }

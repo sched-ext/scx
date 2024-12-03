@@ -26,9 +26,9 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use zbus::interface;
+use zbus::zvariant::Type;
+use zbus::zvariant::Value;
 use zbus::Connection;
-use zvariant::Type;
-use zvariant::Value;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(field_identifier, rename_all = "lowercase")]

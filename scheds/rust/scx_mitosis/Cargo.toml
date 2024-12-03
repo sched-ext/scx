@@ -7,25 +7,22 @@ description = "A dynamic affinity scheduler used within sched_ext, which is a Li
 license = "GPL-2.0-only"
 
 [dependencies]
-anyhow = "1.0.65"
-bitvec = "1.0"
-cgroupfs = "0.7"
-clap = { version = "4.1", features = ["derive", "env", "unicode", "wrap_help"] }
-ctrlc = { version = "3.1", features = ["termination"] }
-fb_procfs = "0.7"
-itertools = "0.13.0"
-lazy_static = "1.4"
-libbpf-rs = "0.24.1"
-libc = "0.2.137"
-log = "0.4.17"
-maplit = "1.0.2"
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.7" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-simplelog = "0.12"
+anyhow = { workspace = true }
+bitvec = { workspace = true }
+cgroupfs = { workspace = true }
+clap = { workspace = true }
+ctrlc = { workspace = true }
+itertools = { workspace = true }
+lazy_static = { workspace = true }
+libbpf-rs = { workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
+maplit = { workspace = true }
+scx_utils = { workspace = true }
+simplelog = { workspace = true }
 
 [build-dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.7" }
+scx_utils = { workspace = true }
 
 [features]
 enable_backtrace = []

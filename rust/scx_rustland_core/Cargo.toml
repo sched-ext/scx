@@ -8,23 +8,13 @@ repository = "https://github.com/sched-ext/scx"
 description = "Framework to implement sched_ext schedulers running in user space"
 
 [dependencies]
-anyhow = "1.0.65"
-plain = "0.2.3"
-libbpf-rs = "0.24.1"
-libc = "0.2.137"
-scx_utils = { path = "../scx_utils", version = "1.0.7" }
+anyhow = { workspace = true }
+libc = { workspace = true }
+scx_utils = { workspace = true }
 
 [build-dependencies]
-tar = "0.4"
-walkdir = "2.4"
-scx_utils = { path = "../scx_utils", version = "1.0.7" }
+scx_utils = { workspace = true }
 
 [lib]
 name = "scx_rustland_core"
 path = "src/lib.rs"
-include = [
-    "assets/bpf/intf.h",
-    "assets/bpf/main.bpf.c",
-    "assets/bpf.rs",
-]
-
