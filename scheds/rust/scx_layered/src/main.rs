@@ -1041,6 +1041,13 @@ impl Layer {
         self.nr_cpus += nr_new_cpus;
         Ok(nr_new_cpus)
     }
+
+    fn is_open(&self) -> bool {
+        return match self.kind {
+            LayerKind::Open { .. } => true,
+            _ => false,
+        };
+    }
 }
 
 struct Scheduler<'a> {
@@ -1862,18 +1869,14 @@ impl<'a> Scheduler<'a> {
         weighted
     }
 
-    fn refresh_cpumasks(&mut self) -> Result<()> {
-        let layer_is_open = |layer: &Layer| match layer.kind {
-            LayerKind::Open { .. } => true,
-            _ => false,
-        };
-
+    /// Shrinks layers when updating cpumasks across layers so that CPUs are available for
+    /// redistribution. Shrinks layers from a descending target number of CPUs.
+    fn shrink_layers(
+        &mut self,
+        ascending: &Vec<(usize, usize)>,
+        targets: &Vec<usize>,
+    ) -> Result<bool> {
         let mut updated = false;
-        let targets = self.calc_target_nr_cpus();
-        let targets = self.weighted_target_nr_cpus(&targets);
-
-        let mut ascending: Vec<(usize, usize)> = targets.iter().copied().enumerate().collect();
-        ascending.sort_by(|a, b| a.1.cmp(&b.1));
 
         // If any layer is growing from 0 CPU, guarantee that the largest
         // layer that is freeing CPUs frees at least one CPU.
@@ -1883,12 +1886,9 @@ impl<'a> Scheduler<'a> {
             .zip(targets.iter())
             .any(|(layer, &target)| layer.nr_cpus == 0 && target > 0);
 
-        // Shrink all layers first so that CPUs are available for
-        // redistribution. Do so in the descending target number of CPUs
-        // order.
         for &(idx, target) in ascending.iter().rev() {
             let layer = &mut self.layers[idx];
-            if layer_is_open(layer) {
+            if layer.is_open() {
                 continue;
             }
 
@@ -1931,16 +1931,20 @@ impl<'a> Scheduler<'a> {
                 updated = true;
             }
         }
+        Ok(updated)
+    }
 
-        // Grow layers. Do so in the ascending target number of CPUs order
-        // so that we're always more generous to smaller layers. This avoids
-        // starving small layers and shouldn't make noticable difference for
-        // bigger layers as work conservation should still be achieved
-        // through open execution.
-        for &(idx, target) in &ascending {
+    /// Grow non open layers. Do so in the ascending target number of CPUs order so that we're
+    /// always more generous to smaller layers. This avoids starving small layers and shouldn't
+    /// make noticable difference for bigger layers as work conservation should still be achieved
+    /// through open execution.
+    fn grow_non_open_layers(&mut self, ascending: &Vec<(usize, usize)>) -> Result<bool> {
+        let mut updated = false;
+
+        for &(idx, target) in ascending {
             let layer = &mut self.layers[idx];
 
-            if layer_is_open(layer) {
+            if layer.is_open() {
                 continue;
             }
 
@@ -1966,54 +1970,78 @@ impl<'a> Scheduler<'a> {
                 updated = true;
             }
         }
+        Ok(updated)
+    }
+
+    /// Refreshes cpumasks on the bpf side.
+    fn refresh_cpumasks_bpf(&mut self) {
+        let input = ProgramInput {
+            ..Default::default()
+        };
+        let prog = &mut self.skel.progs.refresh_layer_cpumasks;
+        let _ = prog.test_run(input);
+    }
+
+    /// Distributes remaining CPUs across open layers.
+    fn grow_open_layers(&mut self) -> Result<()> {
+        for (idx, layer) in self.layers.iter_mut().enumerate() {
+            if !layer.is_open() {
+                continue;
+            }
+
+            let bpf_layer = &mut self.skel.maps.bss_data.layers[idx];
+            let available_cpus = self.cpu_pool.available_cpus_in_mask(&layer.allowed_cpus);
+            let nr_available_cpus = available_cpus.count_ones();
+
+            // Open layers need the intersection of allowed cpus and
+            // available cpus.
+            layer.cpus.copy_from_bitslice(&available_cpus);
+            layer.nr_cpus = nr_available_cpus;
+            Self::update_bpf_layer_cpumask(layer, bpf_layer);
+        }
+
+        self.skel.maps.bss_data.fallback_cpu = self.cpu_pool.fallback_cpu as u32;
+
+        for (lidx, layer) in self.layers.iter().enumerate() {
+            self.nr_layer_cpus_ranges[lidx] = (
+                self.nr_layer_cpus_ranges[lidx].0.min(layer.nr_cpus),
+                self.nr_layer_cpus_ranges[lidx].1.max(layer.nr_cpus),
+            );
+        }
+
+        // Trigger updates on the BPF side.
+        self.refresh_cpumasks_bpf();
+
+        // Update empty_layers.
+        let empty_layer_ids: Vec<u32> = self
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(_idx, layer)| layer.nr_cpus == 0)
+            .map(|(idx, _layer)| idx as u32)
+            .collect();
+        for i in 0..self.layers.len() {
+            self.skel.maps.bss_data.empty_layer_ids[i] =
+                empty_layer_ids.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+        }
+        self.skel.maps.bss_data.nr_empty_layer_ids = empty_layer_ids.len() as u32;
+
+        Ok(())
+    }
+
+    fn refresh_cpumasks(&mut self) -> Result<()> {
+        let targets = self.calc_target_nr_cpus();
+        let targets = self.weighted_target_nr_cpus(&targets);
+
+        let mut ascending: Vec<(usize, usize)> = targets.iter().copied().enumerate().collect();
+        ascending.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let shrunk_layers = self.shrink_layers(&ascending, &targets)?;
+        let grew_layers = self.grow_non_open_layers(&ascending)?;
 
         // Give the rest to the open layers.
-        if updated {
-            for (idx, layer) in self.layers.iter_mut().enumerate() {
-                if !layer_is_open(layer) {
-                    continue;
-                }
-
-                let bpf_layer = &mut self.skel.maps.bss_data.layers[idx];
-                let available_cpus = self.cpu_pool.available_cpus_in_mask(&layer.allowed_cpus);
-                let nr_available_cpus = available_cpus.count_ones();
-
-                // Open layers need the intersection of allowed cpus and
-                // available cpus.
-                layer.cpus.copy_from_bitslice(&available_cpus);
-                layer.nr_cpus = nr_available_cpus;
-                Self::update_bpf_layer_cpumask(layer, bpf_layer);
-            }
-
-            self.skel.maps.bss_data.fallback_cpu = self.cpu_pool.fallback_cpu as u32;
-
-            for (lidx, layer) in self.layers.iter().enumerate() {
-                self.nr_layer_cpus_ranges[lidx] = (
-                    self.nr_layer_cpus_ranges[lidx].0.min(layer.nr_cpus),
-                    self.nr_layer_cpus_ranges[lidx].1.max(layer.nr_cpus),
-                );
-            }
-
-            // Trigger updates on the BPF side.
-            let input = ProgramInput {
-                ..Default::default()
-            };
-            let prog = &mut self.skel.progs.refresh_layer_cpumasks;
-            let _ = prog.test_run(input);
-
-            // Update empty_layers.
-            let empty_layer_ids: Vec<u32> = self
-                .layers
-                .iter()
-                .enumerate()
-                .filter(|(_idx, layer)| layer.nr_cpus == 0)
-                .map(|(idx, _layer)| idx as u32)
-                .collect();
-            for i in 0..self.layers.len() {
-                self.skel.maps.bss_data.empty_layer_ids[i] =
-                    empty_layer_ids.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
-            }
-            self.skel.maps.bss_data.nr_empty_layer_ids = empty_layer_ids.len() as u32;
+        if shrunk_layers || grew_layers {
+            self.grow_open_layers()?
         }
 
         let _ = self.update_netdev_cpumasks();
