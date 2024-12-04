@@ -86,7 +86,7 @@ const NR_LLC_LSTATS: usize = bpf_intf::llc_layer_stat_id_NR_LLC_LSTATS as usize;
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
 
 lazy_static! {
-    static ref USAGE_DECAY: f64 = 0.5f64.powf(1.0 / USAGE_HALF_LIFE_F64);
+    static ref USAGE_DECAY: f64 = 0.2f64.powf(1.0 / USAGE_HALF_LIFE_F64);
     static ref EXAMPLE_CONFIG: LayerConfig = LayerConfig {
         specs: vec![
             LayerSpec {
