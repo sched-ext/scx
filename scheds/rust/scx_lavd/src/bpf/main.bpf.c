@@ -1747,8 +1747,12 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 	 */
 	if (idle) {
 		cpuc->idle_start_clk = bpf_ktime_get_ns();
-		cpuc->lat_cri = 0;
-		cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+
+		/*
+		 * As an idle task cannot be preempted,
+		 * per-CPU preemption information should be cleared.
+		 */
+		reset_cpu_preemption_info(cpuc);
 	}
 	/*
 	 * The CPU is exiting from the idle state.
