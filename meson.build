@@ -47,6 +47,11 @@ fetch_bpftool = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/fetch_bpftool'))
 build_bpftool = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/build_bpftool'))
+compile_scx_lib = find_program(join_paths(meson.current_source_dir(),
+                                      'meson-scripts/compile_scx_lib'))
+
+scx_lib_name = 'lib'
+scx_lib_path = join_paths(meson.current_build_dir(), 'lib/', scx_lib_name)
 
 bpf_clang_ver = run_command(get_clang_ver, bpf_clang, check: true).stdout().strip()
 if bpf_clang_ver == ''
@@ -128,7 +133,7 @@ if should_build_libbpf
   endforeach
 
   message('Fetching libbpf repo')
-  libbpf_commit = '686f600bca59e107af4040d0838ca2b02c14ff50'
+  libbpf_commit = 'c5f22aca0f3aa855daa159b2777472b35e721804'
   run_command(fetch_libbpf, meson.current_build_dir(), libbpf_commit, check: true)
 
   make_jobs = 1
@@ -184,7 +189,7 @@ endif
 
 if should_build_bpftool
   message('Fetching bpftool repo')
-  bpftool_commit = '77a72987353fcae8ce330fd87d4c7afb7677a169'
+  bpftool_commit = '183e7010387d1fc9f08051426e9a9fbd5f8d409e'
   run_command(fetch_bpftool, meson.current_build_dir(), bpftool_commit, check: true)
 
   bpftool_target = custom_target('bpftool_target',
@@ -269,7 +274,20 @@ gen_bpf_o = generator(bpf_clang,
 gen_bpf_skel = generator(bpftool_build_skel,
                          output: ['@BASENAME@.skel.h','@BASENAME@.subskel.h' ],
                          depends: [libbpf, bpftool_target],
-                         arguments: [bpftool_exe_path, '@INPUT@', '@OUTPUT0@', '@OUTPUT1@'])
+                         arguments: [bpftool_exe_path, '@INPUT@', '@OUTPUT0@', '@OUTPUT1@', scx_lib_path])
+
+
+# BPF compilation uses the gen_bpf_o generator. The following should be
+# passed in as extra_args.
+bpf_includes = ['-I', join_paths(meson.current_source_dir(), 'scheds/include'),
+                '-I', join_paths(meson.current_source_dir(), 'scheds/include/arch/' + arch_dict[cpu]),
+                '-I', join_paths(meson.current_source_dir(), 'scheds/include/bpf-compat'),
+                '-I', join_paths(meson.current_source_dir(), 'lib/include'),]
+
+
+# Common include paths for user C compilation. The following should be
+# passed in as executable::include_directories.
+subdir('lib')
 
 #
 # For rust sub-projects.
@@ -444,6 +462,8 @@ if enable_stress
       endforeach
   endif
 endif
+
+thread_dep = dependency('threads')
 
 subdir('scheds')
 

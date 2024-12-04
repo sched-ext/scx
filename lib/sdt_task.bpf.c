@@ -4,9 +4,9 @@
  * Copyright (c) 2024 Tejun Heo <tj@kernel.org>
  * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
  */
-#pragma once
 
-#include "sdt_task.h"
+#include <scx/common.bpf.h>
+#include <lib/sdt_task.h>
 
 #define SDT_TASK_FN_ATTRS	inline __attribute__((unused, always_inline))
 
@@ -269,7 +269,7 @@ static SDT_TASK_FN_ATTRS int sdt_pool_set_size(struct sdt_task_pool __arena *poo
 }
 
 /* initialize the whole thing, maybe misnomer */
-static SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
+__hidden SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
 {
 	int ret;
 
@@ -429,7 +429,7 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 	return;
 }
 
-static SDT_TASK_FN_ATTRS
+__hidden SDT_TASK_FN_ATTRS
 void __arena *sdt_task_data(struct task_struct *p)
 {
 	struct sdt_task_data __arena *data;
@@ -447,7 +447,8 @@ void __arena *sdt_task_data(struct task_struct *p)
 }
 
 
-static SDT_TASK_FN_ATTRS void sdt_task_free(struct task_struct *p)
+__hidden SDT_TASK_FN_ATTRS
+void sdt_task_free(struct task_struct *p)
 {
 	struct sdt_task_map_val *mval;
 
@@ -539,7 +540,7 @@ int sdt_task_find_empty(struct sdt_task_desc __arena *desc,
 	return ret;
 }
 
-static SDT_TASK_FN_ATTRS
+__hidden SDT_TASK_FN_ATTRS
 void __arena *sdt_task_alloc(struct task_struct *p)
 {
 	struct sdt_alloc_stack __arena *stack = prealloc_stack;
