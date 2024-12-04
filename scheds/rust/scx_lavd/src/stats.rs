@@ -119,6 +119,7 @@ impl SysStats {
 
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
+#[stat(top, _om_prefix = "s_", _om_label = "sched_sample")]
 pub struct SchedSample {
     #[stat(desc = "Sequence ID of this message")]
     pub mseq: u64,
