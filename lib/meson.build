@@ -19,7 +19,7 @@ endforeach
 
 custom_target(scx_lib_name,
   output: scx_lib_name + '.bpf.o',
-  command: [compile_scx_lib, bpftool_exe_path, '@OUTPUT@'],
+  command: [compile_scx_lib, bpftool_exe_path, '@OUTPUT@', scx_lib_name],
   depends: objs,
   build_by_default: true,
   build_always_stale: true,

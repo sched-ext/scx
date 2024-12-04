@@ -47,11 +47,11 @@ fetch_bpftool = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/fetch_bpftool'))
 build_bpftool = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/build_bpftool'))
+scx_lib_name = 'lib'
+scx_lib_path = join_paths(meson.current_build_dir(), 'lib/', scx_lib_name)
 compile_scx_lib = find_program(join_paths(meson.current_source_dir(),
                                       'meson-scripts/compile_scx_lib'))
 
-scx_lib_name = 'lib'
-scx_lib_path = join_paths(meson.current_build_dir(), 'lib/', scx_lib_name)
 
 bpf_clang_ver = run_command(get_clang_ver, bpf_clang, check: true).stdout().strip()
 if bpf_clang_ver == ''
