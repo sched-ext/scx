@@ -1,17 +1,17 @@
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::thread::ThreadId;
 use std::time::Duration;
 
-use anyhow::Result;
 use anyhow::bail;
+use anyhow::Result;
 use gpoint::GPoint;
 use scx_stats::prelude::*;
-use scx_stats_derive::Stats;
 use scx_stats_derive::stat_doc;
+use scx_stats_derive::Stats;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -119,6 +119,7 @@ impl SysStats {
 
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
+#[stat(top, _om_prefix = "s_", _om_label = "sched_sample")]
 pub struct SchedSample {
     #[stat(desc = "Sequence ID of this message")]
     pub mseq: u64,
@@ -333,10 +334,13 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
         .add_meta(SysStats::meta())
         .add_ops("top", StatsOps { open, close: None })
         .add_meta(SchedSample::meta())
-        .add_ops("sched_samples", StatsOps {
-            open: samples_open,
-            close: None,
-        })
+        .add_ops(
+            "sched_samples",
+            StatsOps {
+                open: samples_open,
+                close: None,
+            },
+        )
 }
 
 pub fn monitor_sched_samples(nr_samples: u64, shutdown: Arc<AtomicBool>) -> Result<()> {

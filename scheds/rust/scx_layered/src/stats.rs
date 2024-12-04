@@ -1,33 +1,33 @@
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::thread::ThreadId;
+use std::sync::Arc;
 use std::thread::current;
+use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use anyhow::Result;
 use anyhow::bail;
+use anyhow::Result;
 use bitvec::prelude::*;
 use chrono::DateTime;
 use chrono::Local;
 use log::warn;
 use scx_stats::prelude::*;
-use scx_stats_derive::Stats;
 use scx_stats_derive::stat_doc;
+use scx_stats_derive::Stats;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::bpf_intf;
 use crate::BpfStats;
+use crate::Layer;
+use crate::Stats;
 use crate::LAYER_USAGE_OPEN;
 use crate::LAYER_USAGE_PROTECTED;
 use crate::LAYER_USAGE_SUM_UPTO;
-use crate::Layer;
-use crate::Stats;
-use crate::bpf_intf;
 
 fn fmt_pct(v: f64) -> String {
     if v >= 99.995 {
@@ -117,6 +117,8 @@ pub struct LayerStats {
     pub xnuma_migration: f64,
     #[stat(desc = "% migrated across LLCs")]
     pub xllc_migration: f64,
+    #[stat(desc = "% migration skipped across LLCs due to xllc_mig_min_us")]
+    pub xllc_migration_skip: f64,
     #[stat(desc = "% wakers across layers")]
     pub xlayer_wake: f64,
     #[stat(desc = "% rewakers across layers where waker has waken the task previously")]
@@ -174,7 +176,11 @@ impl LayerStats {
             }
         };
         let calc_frac = |a, b| {
-            if b != 0.0 { a / b * 100.0 } else { 0.0 }
+            if b != 0.0 {
+                a / b * 100.0
+            } else {
+                0.0
+            }
         };
 
         let util_sum = stats.layer_utils[lidx]
@@ -226,6 +232,7 @@ impl LayerStats {
             xlayer_wake: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XLAYER_WAKE),
             xlayer_rewake: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XLAYER_REWAKE),
             xllc_migration: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XLLC_MIGRATION),
+            xllc_migration_skip: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XLLC_MIGRATION_SKIP),
             cpus: Self::bitvec_to_u32s(&layer.cpus),
             cur_nr_cpus: layer.cpus.count_ones() as u32,
             min_nr_cpus: nr_cpus_range.0 as u32,
@@ -301,12 +308,13 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  open_idle={} mig={} xnuma_mig={} xllc_mig={} affn_viol={}",
+            "  {:<width$}  open_idle={} mig={} xnuma_mig={} xllc_mig/skip={}/{} affn_viol={}",
             "",
             fmt_pct(self.open_idle),
             fmt_pct(self.migration),
             fmt_pct(self.xnuma_migration),
             fmt_pct(self.xllc_migration),
+            fmt_pct(self.xllc_migration_skip),
             fmt_pct(self.affn_viol),
             width = header_width,
         )?;
@@ -567,10 +575,13 @@ pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
     StatsServerData::new()
         .add_meta(LayerStats::meta())
         .add_meta(SysStats::meta())
-        .add_ops("top", StatsOps {
-            open,
-            close: Some(close),
-        })
+        .add_ops(
+            "top",
+            StatsOps {
+                open,
+                close: Some(close),
+            },
+        )
 }
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {

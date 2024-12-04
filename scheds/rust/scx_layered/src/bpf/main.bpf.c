@@ -688,10 +688,11 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 {
 	const struct cpumask *idle_smtmask, *layer_cpumask, *layered_cpumask, *cpumask;
 	struct cpu_ctx *prev_cpuc;
+	u32 layer_id = layer->id;
 	u64 cpus_seq;
 	s32 cpu;
 
-	if (!(layer_cpumask = lookup_layer_cpumask(taskc->layer_id)))
+	if (layer_id >= MAX_LAYERS || !(layer_cpumask = lookup_layer_cpumask(layer_id)))
 		return -1;
 
 	/* not much to do if bound to a single CPU */
@@ -756,6 +757,8 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 * Try a CPU in the current LLC
 	 */
 	if (nr_llcs > 1) {
+		struct llc_ctx *prev_llcc;
+
 		maybe_refresh_layered_cpus_llc(p, taskc, layer_cpumask,
 					       prev_cpuc->llc_id, cpus_seq);
 		if (!(cpumask = cast_mask(taskc->layered_llc_mask))) {
@@ -764,6 +767,13 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		}
 		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask)) >= 0)
 			goto out_put;
+
+		if (!(prev_llcc = lookup_llc_ctx(prev_cpuc->llc_id)) ||
+		    prev_llcc->queued_runtime[layer_id] <= layer->xllc_mig_min_ns) {
+			lstat_inc(LSTAT_XLLC_MIGRATION_SKIP, layer, cpuc);
+			cpu = -1;
+			goto out_put;
+		}
 	}
 
 	/*
@@ -1295,11 +1305,16 @@ reset:
 	return consumed;
 }
 
-static __always_inline
-bool try_consume_layer(u32 layer_id, struct llc_ctx *llcc)
+static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc,
+					      struct llc_ctx *llcc)
 {
 	struct llc_prox_map *llc_pmap = &llcc->prox_map;
+	struct layer *layer;
+	bool xllc_mig_skipped = false;
 	u32 u;
+
+	if (!(layer = lookup_layer(layer_id)))
+		return false;
 
 	bpf_for(u, 0, llc_pmap->sys_end) {
 		u16 *llc_idp;
@@ -1309,16 +1324,31 @@ bool try_consume_layer(u32 layer_id, struct llc_ctx *llcc)
 			return false;
 		}
 
+		if (u > 0) {
+			struct llc_ctx *remote_llcc;
+
+			if (!(remote_llcc = lookup_llc_ctx(*llc_idp)))
+				return false;
+
+			if (remote_llcc->queued_runtime[layer_id] <= layer->xllc_mig_min_ns) {
+				xllc_mig_skipped = true;
+				continue;
+			}
+		}
+
 		if (scx_bpf_consume(layer_dsq_id(layer_id, *llc_idp)))
 			return true;
 	}
+
+	if (xllc_mig_skipped)
+		lstat_inc(LSTAT_XLLC_MIGRATION_SKIP, layer, cpuc);
 
 	return false;
 }
 
 static __always_inline
 bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
-			struct llc_ctx *llcc)
+			struct cpu_ctx *cpuc, struct llc_ctx *llcc)
 {
 	u32 u;
 
@@ -1333,7 +1363,7 @@ bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
 		if (layer_id == exclude_layer_id)
 			continue;
 
-		if (try_consume_layer(layer_id, llcc))
+		if (try_consume_layer(layer_id, cpuc, llcc))
 			return true;
 	}
 
@@ -1403,29 +1433,29 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (cpuc->cpu == fallback_cpu &&
 	    try_consume_layers(empty_layer_ids, nr_empty_layer_ids,
-			       MAX_LAYERS, llcc)) {
+			       MAX_LAYERS, cpuc, llcc)) {
 	}
 
 	/* owner before preempt layers if protected or preempting */
 	if (owner_layer && (cpuc->protect_owned || owner_layer->preempt)) {
-		if (try_consume_layer(owner_layer->id, llcc))
+		if (try_consume_layer(owner_layer->id, cpuc, llcc))
 			return;
 		tried_owner = true;
 	}
 
 	/* grouped/open preempt layers */
 	if (try_consume_layers(cpuc->open_preempt_layer_order, nr_open_preempt_layers,
-			       cpuc->layer_id, llcc))
+			       cpuc->layer_id, cpuc, llcc))
 		return;
 
 	/* try owner if not tried yet */
 	if (owner_layer && !tried_owner &&
-	    try_consume_layer(owner_layer->id, llcc))
+	    try_consume_layer(owner_layer->id, cpuc, llcc))
 		return;
 
 	/* grouped/open non-preempt layers */
 	if (try_consume_layers(cpuc->open_layer_order, nr_open_layers,
-			       cpuc->layer_id, llcc))
+			       cpuc->layer_id, cpuc, llcc))
 		return;
 
 	scx_bpf_consume(LO_FALLBACK_DSQ);
@@ -2197,6 +2227,8 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 	u64 dsq_id;
 	int i, j, id;
 	struct layer *layer;
+
+	scx_bpf_dump_header();
 
 	bpf_for(i, 0, nr_layers) {
 		layer = lookup_layer(i);

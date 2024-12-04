@@ -7,9 +7,9 @@ use scx_utils::Topology;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::bpf_intf;
 use crate::CpuPool;
 use crate::LayerSpec;
-use crate::bpf_intf;
 
 #[derive(Clone, Debug, Parser, Serialize, Deserialize)]
 #[clap(rename_all = "snake_case")]

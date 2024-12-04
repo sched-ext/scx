@@ -15,17 +15,17 @@ mod stats;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::ffi::CStr;
 use std::ffi::c_int;
+use std::ffi::CStr;
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
 use std::mem;
 use std::mem::MaybeUninit;
 use std::str;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::thread::ThreadId;
 use std::time::Duration;
 
@@ -38,20 +38,18 @@ use crossbeam::channel::RecvTimeoutError;
 use crossbeam::channel::Sender;
 use crossbeam::channel::TrySendError;
 use itertools::iproduct;
-use libbpf_rs::OpenObject;
-use libbpf_rs::ProgramInput;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 use libc::c_char;
 use log::debug;
 use log::info;
 use log::warn;
 use plain::Plain;
 use scx_stats::prelude::*;
-use scx_utils::NR_CPU_IDS;
-use scx_utils::Topology;
-use scx_utils::UserExitInfo;
+use scx_utils::autopower::fetch_power_profile;
 use scx_utils::build_id;
 use scx_utils::import_enums;
 use scx_utils::scx_enums;
@@ -61,14 +59,14 @@ use scx_utils::scx_ops_open;
 use scx_utils::set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Topology;
+use scx_utils::UserExitInfo;
+use scx_utils::NR_CPU_IDS;
 use stats::SchedSample;
 use stats::SchedSamples;
 use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
-use zbus::blocking::Connection;
-use zbus::fdo;
-use zbus::proxy;
 
 /// scx_lavd: Latency-criticality Aware Virtual Deadline (LAVD) scheduler
 ///
@@ -82,7 +80,8 @@ struct Opts {
     #[clap(long = "autopilot", action = clap::ArgAction::SetTrue)]
     autopilot: bool,
 
-    /// Automatically decide the scheduler's power mode based on the system's energy profile.
+    /// Automatically decide the scheduler's power mode based on the system's active power profile.
+    /// Require power-profiles-daemon being running.
     #[clap(long = "autopower", action = clap::ArgAction::SetTrue)]
     autopower: bool,
 
@@ -307,6 +306,7 @@ impl FlatTopology {
     ) -> Option<(Vec<CpuFlatId>, usize)> {
         let topo = Topology::new().expect("Failed to build host topology");
         let mut cpu_fids = Vec::new();
+        debug!("{:#?}", topo);
 
         // Build a vector of cpu flat ids.
         let mut base_freq = 0;
@@ -482,16 +482,6 @@ impl FlatTopology {
     }
 }
 
-#[proxy(
-    interface = "net.hadess.PowerProfiles",
-    default_service = "net.hadess.PowerProfiles",
-    default_path = "/net/hadess/PowerProfiles"
-)]
-trait PowerProfiles {
-    #[zbus(property)]
-    fn active_profile(&self) -> fdo::Result<String>;
-}
-
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -501,15 +491,10 @@ struct Scheduler<'a> {
     monitor_tid: Option<ThreadId>,
     stats_server: StatsServer<StatsReq, StatsRes>,
     mseq_id: u64,
-    power_profiles_proxy: Option<&'a PowerProfilesProxyBlocking<'a>>,
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(
-        opts: &'a Opts,
-        open_object: &'a mut MaybeUninit<OpenObject>,
-        power_profiles_proxy: Option<&'a PowerProfilesProxyBlocking<'a>>,
-    ) -> Result<Self> {
+    fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         if *NR_CPU_IDS > LAVD_CPU_ID_MAX as usize {
             panic!(
                 "Num possible CPU IDs ({}) exceeds maximum of ({})",
@@ -558,7 +543,6 @@ impl<'a> Scheduler<'a> {
             monitor_tid: None,
             stats_server,
             mseq_id: 0,
-            power_profiles_proxy,
         })
     }
 
@@ -815,15 +799,8 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn fetch_power_profile(&self) -> String {
-        self.power_profiles_proxy
-            .map(|power_profiles_proxy| power_profiles_proxy.active_profile().ok())
-            .flatten()
-            .unwrap_or_default()
-    }
-
     fn update_power_profile(&mut self, prev_profile: String) -> (bool, String) {
-        let profile = self.fetch_power_profile();
+        let profile = fetch_power_profile();
         if profile == prev_profile {
             // If the profile is the same, skip updaring the profile for BPF.
             return (true, profile);
@@ -916,7 +893,13 @@ fn main() -> Result<()> {
     }
 
     if opts.help_stats {
-        stats::server_data(0).describe_meta(&mut std::io::stdout(), None)?;
+        let sys_stats_meta_name = SysStats::meta().name;
+        let sched_sample_meta_name = SchedSample::meta().name;
+        let stats_meta_names: &[&str] = &[
+            sys_stats_meta_name.as_str(),
+            sched_sample_meta_name.as_str(),
+        ];
+        stats::server_data(0).describe_meta(&mut std::io::stdout(), Some(&stats_meta_names))?;
         return Ok(());
     }
 
@@ -952,15 +935,9 @@ fn main() -> Result<()> {
         }
     }
 
-    let system_bus = Connection::system().ok();
-    let power_profiles_proxy = system_bus
-        .as_ref()
-        .map(|system_bus| PowerProfilesProxyBlocking::new(system_bus).ok())
-        .flatten();
-
     let mut open_object = MaybeUninit::uninit();
     loop {
-        let mut sched = Scheduler::init(&opts, &mut open_object, power_profiles_proxy.as_ref())?;
+        let mut sched = Scheduler::init(&opts, &mut open_object)?;
         info!(
             "scx_lavd scheduler is initialized (build ID: {})",
             *build_id::SCX_FULL_VERSION

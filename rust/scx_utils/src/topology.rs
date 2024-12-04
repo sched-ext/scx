@@ -79,6 +79,7 @@ use glob::glob;
 use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::path::PathBuf;
 use std::slice::Iter;
 use std::sync::Arc;
 
@@ -218,13 +219,11 @@ impl Topology {
                         }
                     }
 
-                    if topo_cores
+                    // Note that in some weird architectures, core ids can be
+                    // duplicated in different LLC domains.
+                    topo_cores
                         .insert(core_id, core.clone())
-                        .or(node_cores.insert(core_id, core.clone()))
-                        .is_some()
-                    {
-                        bail!("Duplicate CORE ID {}", core_id);
-                    }
+                        .or(node_cores.insert(core_id, core.clone()));
                 }
 
                 llc_mut.all_cpus = llc_cpus;
@@ -410,15 +409,23 @@ struct TopoCtx {
     node_core_kernel_ids: BTreeMap<(usize, usize), usize>,
     /// Mapping of NUMA node LLC ids
     node_llc_kernel_ids: BTreeMap<(usize, usize), usize>,
+    /// Mapping of L2 ids
+    l2_ids: BTreeMap<String, usize>,
+    /// Mapping of L3 ids
+    l3_ids: BTreeMap<String, usize>,
 }
 
 impl TopoCtx {
     fn new() -> TopoCtx {
         let core_kernel_ids = BTreeMap::new();
         let llc_kernel_ids = BTreeMap::new();
+        let l2_ids = BTreeMap::new();
+        let l3_ids = BTreeMap::new();
         TopoCtx {
             node_core_kernel_ids: core_kernel_ids,
             node_llc_kernel_ids: llc_kernel_ids,
+            l2_ids,
+            l3_ids,
         }
     }
 }
@@ -444,6 +451,40 @@ fn cpus_online() -> Result<Cpumask> {
     }
 
     Ok(mask)
+}
+
+fn get_cache_id(topo_ctx: &mut TopoCtx, cache_level_path: &PathBuf, cache_level: usize) -> usize {
+    // Check if the cache id is already cached
+    let id_map = match cache_level {
+        2 => &mut topo_ctx.l2_ids,
+        3 => &mut topo_ctx.l3_ids,
+        _ => return usize::MAX,
+    };
+
+    let path = &cache_level_path.join("shared_cpu_list");
+    let key = match std::fs::read_to_string(&path) {
+        Ok(key) => key,
+        Err(_) => return usize::MAX,
+    };
+
+    let id = *id_map.get(&key).unwrap_or(&usize::MAX);
+    if id != usize::MAX {
+        return id;
+    }
+
+    // In case of a cache miss, try to get the id from the sysfs first.
+    let id = read_file_usize(&cache_level_path.join("id")).unwrap_or(usize::MAX);
+    if id != usize::MAX {
+        // Keep the id in the map
+        id_map.insert(key, id);
+        return id;
+    }
+
+    // If the id file does not exist, assign an id and keep it in the map.
+    let id = id_map.len();
+    id_map.insert(key, id);
+
+    id
 }
 
 fn create_insert_cpu(
@@ -474,10 +515,15 @@ fn create_insert_cpu(
     // if there's no cache information then we have no option but to assume a single unified cache
     // per node.
     let cache_path = cpu_path.join("cache");
-    let l2_id = read_file_usize(&cache_path.join(format!("index{}", 2)).join("id")).unwrap_or(0);
-    let l3_id = read_file_usize(&cache_path.join(format!("index{}", 3)).join("id")).unwrap_or(0);
-    // Assume that LLC is always 3.
-    let llc_kernel_id = if flatten_llc { 0 } else { l3_id };
+    let l2_id = get_cache_id(topo_ctx, &cache_path.join(format!("index{}", 2)), 2);
+    let l3_id = get_cache_id(topo_ctx, &cache_path.join(format!("index{}", 3)), 3);
+    let llc_kernel_id = if flatten_llc {
+        0
+    } else if l3_id == usize::MAX {
+        l2_id
+    } else {
+        l3_id
+    };
 
     // Min and max frequencies. If the kernel is not compiled with
     // CONFIG_CPU_FREQ, just assume 0 for both frequencies.

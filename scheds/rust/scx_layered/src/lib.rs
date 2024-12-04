@@ -9,8 +9,8 @@ pub mod bpf_intf;
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
 use anyhow::bail;
+use anyhow::Result;
 use bitvec::prelude::*;
 pub use config::LayerCommon;
 pub use config::LayerConfig;
@@ -25,6 +25,8 @@ use scx_utils::Topology;
 use scx_utils::TopologyMap;
 
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
+
+pub const XLLC_MIG_MIN_US_DFL: f64 = 100.0;
 
 lazy_static::lazy_static! {
     static ref NR_POSSIBLE_CPUS: usize = libbpf_rs::num_possible_cpus().unwrap();

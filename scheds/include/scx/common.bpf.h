@@ -23,6 +23,9 @@
 #define PF_KTHREAD 0x00200000   /* I am a kernel thread */
 #define PF_EXITING 0x00000004
 #define CLOCK_MONOTONIC 1
+extern int LINUX_KERNEL_VERSION __kconfig;
+extern const char CONFIG_CC_VERSION_TEXT[64] __kconfig __weak;
+extern const char CONFIG_LOCALVERSION[64] __kconfig __weak;
 
 /*
  * Earlier versions of clang/pahole lost upper 32bits in 64bit enums which can
@@ -148,6 +151,20 @@ ___scx_bpf_bstr_format_checker(const char *fmt, ...) {}
     scx_bpf_bstr_preamble(fmt, args)                                           \
         scx_bpf_dump_bstr(___fmt, ___param, sizeof(___param));                 \
     ___scx_bpf_bstr_format_checker(fmt, ##args);                               \
+  })
+
+/*
+ * scx_bpf_dump_header() is a wrapper around scx_bpf_dump that adds a header
+ * of system information for debugging.
+ */
+#define scx_bpf_dump_header()							\
+  ({										\
+    scx_bpf_dump("kernel: %d.%d.%d %s\ncc: %s\n",				\
+		 LINUX_KERNEL_VERSION >> 16,					\
+		 LINUX_KERNEL_VERSION >> 8 & 0xFF,				\
+		 LINUX_KERNEL_VERSION & 0xFF,					\
+		 CONFIG_LOCALVERSION,						\
+		 CONFIG_CC_VERSION_TEXT);					\
   })
 
 #define BPF_STRUCT_OPS(name, args...)                                          \

@@ -12,41 +12,35 @@ use std::fs;
 use std::io::Write;
 use std::mem::MaybeUninit;
 use std::ops::Sub;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::thread::ThreadId;
 use std::time::Duration;
 use std::time::Instant;
 
 use ::fb_procfs as procfs;
-use anyhow::Context;
-use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
+use anyhow::Context;
+use anyhow::Result;
 use bitvec::prelude::*;
 pub use bpf_skel::*;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use lazy_static::lazy_static;
-use libbpf_rs::MapCore as _;
-use libbpf_rs::OpenObject;
-use libbpf_rs::ProgramInput;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::MapCore as _;
+use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 use log::debug;
 use log::info;
 use log::trace;
 use log::warn;
 use scx_layered::*;
 use scx_stats::prelude::*;
-use scx_utils::CoreType;
-use scx_utils::Llc;
-use scx_utils::NR_CPUS_POSSIBLE;
-use scx_utils::NetDev;
-use scx_utils::Topology;
-use scx_utils::UserExitInfo;
 use scx_utils::compat;
 use scx_utils::import_enums;
 use scx_utils::init_libbpf_logging;
@@ -57,6 +51,12 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::CoreType;
+use scx_utils::Llc;
+use scx_utils::NetDev;
+use scx_utils::Topology;
+use scx_utils::UserExitInfo;
+use scx_utils::NR_CPUS_POSSIBLE;
 use stats::LayerStats;
 use stats::StatsReq;
 use stats::StatsRes;
@@ -108,6 +108,7 @@ lazy_static! {
                         idle_smt: None,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
                         nodes: vec![],
@@ -132,6 +133,7 @@ lazy_static! {
                         idle_smt: None,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
                         nodes: vec![],
@@ -142,9 +144,10 @@ lazy_static! {
             LayerSpec {
                 name: "stress-ng".into(),
                 comment: Some("stress-ng test layer".into()),
-                matches: vec![vec![LayerMatch::CommPrefix("stress-ng".into()),], vec![
-                    LayerMatch::PcommPrefix("stress-ng".into()),
-                ]],
+                matches: vec![
+                    vec![LayerMatch::CommPrefix("stress-ng".into()),],
+                    vec![LayerMatch::PcommPrefix("stress-ng".into()),]
+                ],
                 kind: LayerKind::Confined {
                     cpus_range: None,
                     util_range: (0.2, 0.8),
@@ -157,6 +160,7 @@ lazy_static! {
                         idle_smt: None,
                         slice_us: 800,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Topo,
                         perf: 1024,
                         nodes: vec![],
@@ -180,6 +184,7 @@ lazy_static! {
                         idle_smt: None,
                         slice_us: 20000,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Linear,
                         perf: 1024,
                         nodes: vec![],
@@ -1162,6 +1167,7 @@ impl<'a> Scheduler<'a> {
                     nodes,
                     slice_us,
                     weight,
+                    xllc_mig_min_us,
                     ..
                 } = spec.kind.common();
 
@@ -1190,6 +1196,7 @@ impl<'a> Scheduler<'a> {
                 } else {
                     DEFAULT_LAYER_WEIGHT
                 };
+                layer.xllc_mig_min_ns = (xllc_mig_min_us * 1000.0) as u64;
                 layer.owned_usage_target_ppk =
                     Self::layer_owned_usage_target_ppk(spec.kind.util_range(), 0.0);
                 layer_weights.push(layer.weight.try_into().unwrap());

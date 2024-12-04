@@ -162,6 +162,12 @@ language for BPF. When working with sched_ext `bpftrace` programs can be used
 for understanding scheduler run queue latency as other scheduler internals. See
 the `scripts` dir for examples.
 
+### `bpftop`
+[`bpftop`](https://github.com/Netflix/bpftop) is a top/htop like program that
+provides an overview of bpf program usage. It shows period and total average
+runtime for each eBPF program, which is useful in understanding each scheduler
+subprogram.
+
 ### `stress-ng`
 For generating synthetic load on a system
 [`stress-ng`](https://github.com/ColinIanKing/stress-ng) can be used.
