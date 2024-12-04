@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Copyright (c) 2022 Meta Platforms, Inc. and affiliates.
- * Copyright (c) 2022 Tejun Heo <tj@kernel.org>
+ * Copyright (c) 2024 Meta Platforms, Inc. and affiliates.
+ * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
+ * Copyright (c) 2024 Tejun Heo <tj@kernel.org>
  * Copyright (c) 2022 David Vernet <dvernet@meta.com>
  */
 #include <stdio.h>
@@ -38,26 +39,6 @@ static void sigint_handler(int sig)
 	exit_req = 1;
 }
 
-static void read_stats(struct scx_sdt *skel, __u64 *stats)
-{
-	int nr_cpus = libbpf_num_possible_cpus();
-	__u64 cnts[2][nr_cpus];
-	__u32 idx;
-
-	memset(stats, 0, sizeof(stats[0]) * 2);
-
-	for (idx = 0; idx < 2; idx++) {
-		int ret, cpu;
-
-		ret = bpf_map_lookup_elem(bpf_map__fd(skel->maps.stats),
-					  &idx, cnts[idx]);
-		if (ret < 0)
-			continue;
-		for (cpu = 0; cpu < nr_cpus; cpu++)
-			stats[idx] += cnts[idx][cpu];
-	}
-}
-
 int main(int argc, char **argv)
 {
 	struct scx_sdt *skel;
@@ -86,10 +67,25 @@ restart:
 	link = SCX_OPS_ATTACH(skel, sdt_ops, scx_sdt);
 
 	while (!exit_req && !UEI_EXITED(skel, uei)) {
-		__u64 stats[2];
+		printf("====SCHEDULING STATS====\n");
+		printf("enqueues=%llu\t", skel->bss->stat_enqueue);
+		printf("inits=%llu\t", skel->bss->stat_init);
+		printf("exits=%llu\t", skel->bss->stat_exit);
+		printf("\n");
 
-		read_stats(skel, stats);
-		printf("local=%llu global=%llu\n", stats[0], stats[1]);
+		printf("select_idle_cpu=%llu\t", skel->bss->stat_select_idle_cpu);
+		printf("select_busy_cpu=%llu\t", skel->bss->stat_select_busy_cpu);
+		printf("\n");
+
+		printf("====ALLOCATION STATS====\n");
+		printf("chunk allocs=%llu\t", skel->bss->sdt_stats.chunk_allocs);
+		printf("data_allocs=%llu\n", skel->bss->sdt_stats.data_allocs);
+		printf("alloc_ops=%llu\t", skel->bss->sdt_stats.alloc_ops);
+		printf("free_ops=%llu\t", skel->bss->sdt_stats.free_ops);
+		printf("active_allocs=%llu\t", skel->bss->sdt_stats.active_allocs);
+		printf("arena_pages_used=%llu\t", skel->bss->sdt_stats.arena_pages_used);
+		printf("\n\n");
+
 		fflush(stdout);
 		sleep(1);
 	}

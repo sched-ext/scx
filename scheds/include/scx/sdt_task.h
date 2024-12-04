@@ -1,17 +1,24 @@
+/*
+ * SPDX-License-Identifier: GPL-2.0
+ * Copyright (c) 2024 Meta Platforms, Inc. and affiliates.
+ * Copyright (c) 2024 Tejun Heo <tj@kernel.org>
+ * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
+ */
 #pragma once
-
-#include "bpf_arena.h"
+#include "bpf_arena_common.h"
 
 #ifndef div_round_up
 #define div_round_up(a, b) (((a) + (b) - 1) / (b))
 #endif
 
 enum sdt_task_consts {
-	SDT_TASK_LEVELS			= 3,	/* three levels of internal nodes */
-	SDT_TASK_ENT_SIZE		= sizeof(void *),
-	SDT_TASK_ENTS_PER_CHUNK_SHIFT	= 9,
-	SDT_TASK_ENTS_PER_CHUNK		= 1 << SDT_TASK_ENTS_PER_CHUNK_SHIFT,
+	SDT_TASK_ENTS_PER_PAGE_SHIFT	= 9,
+	SDT_TASK_LEVELS			= 3,
+	SDT_TASK_ENTS_PER_CHUNK		= 1 << SDT_TASK_ENTS_PER_PAGE_SHIFT,
 	SDT_TASK_CHUNK_BITMAP_U64S	= div_round_up(SDT_TASK_ENTS_PER_CHUNK, 64),
+	SDT_TASK_ALLOC_STACK_MIN	= 2 * SDT_TASK_LEVELS + 1,
+	SDT_TASK_ALLOC_STACK_MAX	= SDT_TASK_ALLOC_STACK_MIN * 5,
+	SDT_TASK_ALLOC_ATTEMPTS		= 128,
 };
 
 union sdt_task_id {
@@ -30,7 +37,7 @@ struct sdt_task_chunk;
  * which makes indexing cheaper.
  */
 struct sdt_task_desc {
-	__u64				bitmap[SDT_TASK_CHUNK_BITMAP_U64S];
+	__u64				allocated[SDT_TASK_CHUNK_BITMAP_U64S];
 	__u64				nr_free;
 	struct sdt_task_chunk __arena	*chunk;
 };
@@ -41,7 +48,7 @@ struct sdt_task_desc {
 struct sdt_task_data {
 	union sdt_task_id		tid;
 	__u64				tptr;
-	__u64				data[];
+	__u64				__arena payload[];
 };
 
 /*
@@ -55,14 +62,31 @@ struct sdt_task_chunk {
 };
 
 /*
- * Simple memory allocation pool to allocate the descriptors, intermediate and
- * leaf nodes.
+ * Stack structure to avoid chunk allocations/frees while under lock. The
+ * allocator preallocates enough arena pages before any operation to satisfy
+ * the maximum amount of chunk allocations:(2 * SDT_TASK_LEVELS + 1), two
+ * allocations per tree level, and one for the data itself. Preallocating
+ * ensures that the stack can satisfy these allocations, so we do not need
+ * to drop the lock to allocate pages from the arena in the middle of the
+ * top-level alloc. This in turn prevents races and simplifies the code.
  */
-struct sdt_task_pool_elem {
-	struct sdt_task_pool_elem __arena *next;
+struct sdt_alloc_stack {
+	__u64 idx;
+	void __arena *stack[SDT_TASK_ALLOC_STACK_MAX];
 };
 
 struct sdt_task_pool {
-	struct sdt_task_pool_elem __arena *first;
+	void				__arena *slab;
 	__u64				elem_size;
+	__u64				max_elems;
+	__u64				idx;
+};
+
+struct sdt_stats {
+	__u64	chunk_allocs;
+	__u64	data_allocs;
+	__u64	alloc_ops;
+	__u64	free_ops;
+	__u64	active_allocs;
+	__u64	arena_pages_used;
 };

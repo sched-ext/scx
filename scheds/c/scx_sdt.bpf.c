@@ -2,39 +2,58 @@
 #include <scx/common.bpf.h>
 #include <scx/sdt_task_impl.bpf.h>
 
+#include "scx_sdt.h"
+
 char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
 #define SHARED_DSQ 0
 
-struct sdt_task_ctx {
-	int seq;
-};
+#define DEFINE_SDT_STAT(metric)				\
+static SDT_TASK_FN_ATTRS void				\
+stat_inc_##metric(struct scx_stats __arena *stats)	\
+{							\
+	cast_kern(stats);				\
+	stats->metric += 1;				\
+}							\
+__u64 stat_##metric;					\
 
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__uint(key_size, sizeof(u32));
-	__uint(value_size, sizeof(u64));
-	__uint(max_entries, 2);			/* [local, global] */
-} stats SEC(".maps");
+DEFINE_SDT_STAT(enqueue);
+DEFINE_SDT_STAT(init);
+DEFINE_SDT_STAT(exit);
+DEFINE_SDT_STAT(select_idle_cpu);
+DEFINE_SDT_STAT(select_busy_cpu);
 
-static void stat_inc(u32 idx)
+static SDT_TASK_FN_ATTRS void
+scx_stat_global_update(struct scx_stats __arena *stats)
 {
-	u64 *cnt_p = bpf_map_lookup_elem(&stats, &idx);
-	if (cnt_p)
-		(*cnt_p)++;
+	cast_kern(stats);
+	__sync_fetch_and_add(&stat_enqueue, stats->enqueue);
+	__sync_fetch_and_add(&stat_init, stats->init);
+	__sync_fetch_and_add(&stat_exit, stats->exit);
+	__sync_fetch_and_add(&stat_select_idle_cpu, stats->select_idle_cpu);
+	__sync_fetch_and_add(&stat_select_busy_cpu, stats->select_busy_cpu);
 }
 
 s32 BPF_STRUCT_OPS(sdt_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
+	struct scx_stats __arena *stats;
 	bool is_idle = false;
 	s32 cpu;
 
+	stats = sdt_task_data(p);
+	if (!stats) {
+		scx_bpf_error("%s: no stats for pid %d", __func__, p->pid);
+		return 0;
+	}
+
 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
-		stat_inc(0);	/* count local queueing */
+		stat_inc_select_idle_cpu(stats);
 		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+	} else {
+		stat_inc_select_busy_cpu(stats);
 	}
 
 	return cpu;
@@ -42,7 +61,15 @@ s32 BPF_STRUCT_OPS(sdt_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake
 
 void BPF_STRUCT_OPS(sdt_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	stat_inc(1);	/* count global queueing */
+	struct scx_stats __arena *stats;
+
+	stats = sdt_task_data(p);
+	if (!stats) {
+		scx_bpf_error("%s: no stats for pid %d", __func__, p->pid);
+		return;
+	}
+
+	stat_inc_enqueue(stats);
 
 	scx_bpf_dispatch(p, SHARED_DSQ, SCX_SLICE_DFL, enq_flags);
 }
@@ -55,17 +82,35 @@ void BPF_STRUCT_OPS(sdt_dispatch, s32 cpu, struct task_struct *prev)
 s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init_task, struct task_struct *p,
 			     struct scx_init_task_args *args)
 {
-	/*struct sdt_task_data __arena *data;
+	struct scx_stats __arena *stats;
 
-	data = sdt_task_alloc(p);
-	if (!data)
-	return -ENOMEM;*/
+	stats = sdt_task_alloc(p);
+	if (!stats) {
+		scx_bpf_error("arena allocator out of memory");
+		return -ENOMEM;
+	}
+
+	stats->pid = p->pid;
+
+	stat_inc_init(stats);
+
 	return 0;
 }
 
-void BPF_STRUCT_OPS_SLEEPABLE(sdt_exit_task, struct task_struct *p,
+void BPF_STRUCT_OPS(sdt_exit_task, struct task_struct *p,
 			      struct scx_exit_task_args *args)
 {
+	struct scx_stats __arena *stats;
+
+	stats = sdt_task_data(p);
+	if (!stats) {
+		scx_bpf_error("%s: no stats for pid %d", __func__, p->pid);
+		return;
+	}
+
+	stat_inc_exit(stats);
+	scx_stat_global_update(stats);
+
 	sdt_task_free(p);
 }
 
@@ -73,9 +118,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init)
 {
 	int ret;
 
-	ret = sdt_task_init(sizeof(struct sdt_task_ctx));
-	if (ret < 0)
+	ret = sdt_task_init(sizeof(struct scx_stats));
+	if (ret < 0) {
+		scx_bpf_error("%s: failed with %d", __func__, ret);
 		return ret;
+	}
+
 	return scx_bpf_create_dsq(SHARED_DSQ, -1);
 }
 
