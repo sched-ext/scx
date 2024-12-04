@@ -1797,11 +1797,24 @@ void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
 		    struct scx_cpu_release_args *args)
 {
+	struct cpu_ctx *cpuc;
+
 	/*
 	 * When a CPU is released to serve higher priority scheduler class,
 	 * requeue the tasks in a local DSQ to the global enqueue.
 	 */
 	scx_bpf_reenqueue_local();
+
+	/*
+	 * When the scx scheduler loses control of a CPU,
+	 * reset the CPU's preemption information so it cannot be a victim.
+	 */
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc) {
+		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
+		return;
+	}
+	reset_cpu_preemption_info(cpuc);
 }
 
 void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
