@@ -355,4 +355,10 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	return ret;
 }
 
+static void reset_cpu_preemption_info(struct cpu_ctx *cpuc)
+{
+	cpuc->lat_cri = 0;
+	cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+}
+
 
