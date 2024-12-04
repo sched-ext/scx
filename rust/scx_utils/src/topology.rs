@@ -183,7 +183,7 @@ pub struct Topology {
     /// Cpumask all CPUs in the system.
     pub span: Cpumask,
     pub nr_cpus_online: usize,
-
+    pub cpus_online: Vec<usize>,
     /// Skip indices to access lower level members easily.
     pub all_llcs: BTreeMap<usize, Arc<Llc>>,
     pub all_cores: BTreeMap<usize, Arc<Core>>,
@@ -238,10 +238,12 @@ impl Topology {
         }
 
         let nr_cpus_online = span.weight();
+        let cpus_online = cpus_online_vec(&span);
         Ok(Topology {
             nodes,
             span,
             nr_cpus_online,
+            cpus_online,
             all_llcs: topo_llcs,
             all_cores: topo_cores,
             all_cpus: topo_cpus,
@@ -251,6 +253,7 @@ impl Topology {
     /// Build a complete host Topology
     pub fn new() -> Result<Topology> {
         let span = cpus_online()?;
+
         let mut topo_ctx = TopoCtx::new();
         // If the kernel is compiled with CONFIG_NUMA, then build a topology
         // from the NUMA hierarchy in sysfs. Otherwise, just make a single
@@ -428,6 +431,19 @@ impl TopoCtx {
             l3_ids,
         }
     }
+}
+
+/// Return a vec of the online CPUs.
+fn cpus_online_vec(cpumask: &Cpumask) -> Vec<usize> {
+    let mut cpus_online = Vec::new();
+    let mask = cpumask.as_raw_bitvec();
+    for (index, bit) in mask.iter().enumerate() {
+        if *bit {
+            cpus_online.push(index);
+        }
+    }
+
+    cpus_online
 }
 
 fn cpus_online() -> Result<Cpumask> {
