@@ -429,7 +429,7 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 	return;
 }
 
-__hidden SDT_TASK_FN_ATTRS
+__hidden
 void __arena *sdt_task_data(struct task_struct *p)
 {
 	struct sdt_task_data __arena *data;
@@ -447,7 +447,7 @@ void __arena *sdt_task_data(struct task_struct *p)
 }
 
 
-__hidden SDT_TASK_FN_ATTRS
+__hidden
 void sdt_task_free(struct task_struct *p)
 {
 	struct sdt_task_map_val *mval;
@@ -540,7 +540,7 @@ int sdt_task_find_empty(struct sdt_task_desc __arena *desc,
 	return ret;
 }
 
-__hidden SDT_TASK_FN_ATTRS
+__hidden
 void __arena *sdt_task_alloc(struct task_struct *p)
 {
 	struct sdt_alloc_stack __arena *stack = prealloc_stack;
