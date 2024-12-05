@@ -1101,7 +1101,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * but ops.dequeue() is not called for tasks on a DSQ. Detect the
 	 * condition here and subtract the previous contribution.
 	 */
-	if (taskc->qrt_llc_id < MAX_LAYERS) {
+	if (taskc->qrt_llc_id < MAX_LLCS) {
 		struct llc_ctx *prev_llcc;
 
 		if (!(prev_llcc = lookup_llc_ctx(taskc->qrt_llc_id)))
@@ -1610,6 +1610,7 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 			return;
 
 		taskc->layer_id = layer_id;
+		taskc->llc_id = cpuc->llc_id;
 		taskc->layered_cpus.seq = layer->cpus_seq - 1;
 		taskc->layered_cpus_llc.seq = layer->cpus_seq - 1;
 		taskc->layered_cpus_node.seq = layer->cpus_seq - 1;
@@ -1828,14 +1829,14 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	if (!(layer = lookup_layer(layer_id)))
 		return;
 
-	if (taskc->qrt_llc_id < MAX_LAYERS) {
+	if (taskc->qrt_llc_id < MAX_LLCS) {
 		struct llc_ctx *prev_llcc;
 
 		if (!(prev_llcc = lookup_llc_ctx(taskc->qrt_llc_id)))
 			return;
 
 		__sync_fetch_and_sub(&prev_llcc->queued_runtime[layer_id], taskc->runtime_avg);
-		taskc->qrt_llc_id = MAX_LAYERS;
+		taskc->qrt_llc_id = MAX_LLCS;
 	}
 
 	if (taskc->last_cpu >= 0 && taskc->last_cpu != task_cpu) {
@@ -2133,8 +2134,8 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	taskc->last_cpu = -1;
 	taskc->layer_id = MAX_LAYERS;
 	taskc->refresh_layer = true;
-	taskc->llc_id = MAX_LAYERS;
-	taskc->qrt_llc_id = MAX_LAYERS;
+	taskc->llc_id = MAX_LLCS;
+	taskc->qrt_llc_id = MAX_LLCS;
 
 	/*
 	 * Start runtime_avg at some arbitrary sane-ish value. If this becomes a
