@@ -1610,6 +1610,7 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 			return;
 
 		taskc->layer_id = layer_id;
+		taskc->llc_id = cpuc->llc_id;
 		taskc->layered_cpus.seq = layer->cpus_seq - 1;
 		taskc->layered_cpus_llc.seq = layer->cpus_seq - 1;
 		taskc->layered_cpus_node.seq = layer->cpus_seq - 1;
