@@ -987,7 +987,7 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *taskc,
 
 	pmap = &task_cpuc->prox_map;
 
-	bpf_for(i, 1, MAX_CPUS) {
+	bpf_for(i, 1, nr_possible_cpus) {
 		if (i >= pmap->sys_end)
 			break;
 		u16 *cpu_p = MEMBER_VPTR(pmap->cpus, [i]);
