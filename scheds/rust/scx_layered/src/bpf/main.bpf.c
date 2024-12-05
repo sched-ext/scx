@@ -1170,10 +1170,34 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 		 * competing preempting layers, this won't work well.
 		 */
 		u32 dsq_id = layer_dsq_id(layer->id, cpuc->llc_id);
-		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
-			p->scx.slice = slice_ns;
-			lstat_inc(LSTAT_KEEP, layer, cpuc);
-			return true;
+		u32 nr_queued = scx_bpf_dsq_nr_queued(dsq_id);
+
+		/*
+		 * Confined preempting layers are a special case in that it
+		 * needs to consider if a layer is able growth.
+		 */
+		if (layer->kind == LAYER_KIND_CONFINED) {
+			const struct cpumask *idle_cpumask = scx_bpf_get_idle_cpumask();
+			if (!idle_cpumask) {
+				scx_bpf_error("failed to lookup idle cpumask");
+				return false;
+			}
+
+			// XXX: Maybe this should check the LLC (DSQ) idle cpus
+			u32 nr_idle = bpf_cpumask_weight(idle_cpumask);
+			scx_bpf_put_idle_cpumask(idle_cpumask);
+
+			if (nr_queued < nr_idle) {
+				p->scx.slice = slice_ns;
+				lstat_inc(LSTAT_KEEP, layer, cpuc);
+				return true;
+			}
+		} else {
+			if (!nr_queued) {
+				p->scx.slice = slice_ns;
+				lstat_inc(LSTAT_KEEP, layer, cpuc);
+				return true;
+			}
 		}
 	} else {
 		const struct cpumask *idle_cpumask = scx_bpf_get_idle_cpumask();
