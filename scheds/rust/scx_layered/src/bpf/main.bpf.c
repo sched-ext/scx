@@ -1698,7 +1698,7 @@ static s32 create_node(u32 node_id)
 
 			cpuc->node_id = node_id;
 			nodec->nr_cpus++;
-			nodec->llc_mask &= (1LLU << node_id);
+			nodec->llc_mask |= (1LLU << node_id);
 		}
 	}
 
