@@ -263,20 +263,6 @@ if libbpf_a != ''
   endforeach
 endif
 
-#
-# Generators to build BPF skel file for C schedulers.
-#
-gen_bpf_o = generator(bpf_clang,
-                      output: '@BASENAME@.o',
-                      depends: [libbpf],
-                      arguments: [bpf_base_cflags, '-target', 'bpf', libbpf_c_headers, '@EXTRA_ARGS@',
-                                  '-c', '@INPUT@', '-o', '@OUTPUT@'])
-gen_bpf_skel = generator(bpftool_build_skel,
-                         output: ['@BASENAME@.skel.h','@BASENAME@.subskel.h' ],
-                         depends: [libbpf, bpftool_target],
-                         arguments: [bpftool_exe_path, '@INPUT@', '@OUTPUT0@', '@OUTPUT1@', scx_lib_path])
-
-
 # BPF compilation uses the gen_bpf_o generator. The following should be
 # passed in as extra_args.
 bpf_includes = ['-I', join_paths(meson.current_source_dir(), 'scheds/include'),
@@ -284,10 +270,20 @@ bpf_includes = ['-I', join_paths(meson.current_source_dir(), 'scheds/include'),
                 '-I', join_paths(meson.current_source_dir(), 'scheds/include/bpf-compat'),
                 '-I', join_paths(meson.current_source_dir(), 'lib/include'),]
 
+#
+# Generators to build BPF skel file for C schedulers.
+#
+gen_bpf_o = generator(bpf_clang,
+                      output: '@BASENAME@.o',
+                      depends: [libbpf],
+                      arguments: [bpf_base_cflags, '-target', 'bpf', libbpf_c_headers, bpf_includes,
+                                  '-c', '@INPUT@', '-o', '@OUTPUT@'])
 
-# Common include paths for user C compilation. The following should be
-# passed in as executable::include_directories.
-subdir('lib')
+gen_bpf_skel = generator(bpftool_build_skel,
+                         output: ['@BASENAME@.skel.h','@BASENAME@.subskel.h' ],
+                         depends: [libbpf, bpftool_target],
+                         arguments: [bpftool_exe_path, '@INPUT@', '@OUTPUT0@', '@OUTPUT1@', scx_lib_path])
+
 
 #
 # For rust sub-projects.
@@ -462,6 +458,9 @@ if enable_stress
       endforeach
   endif
 endif
+
+lib_objs = []
+subdir('lib')
 
 thread_dep = dependency('threads')
 

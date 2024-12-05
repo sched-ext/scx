@@ -10,6 +10,8 @@
 
 #define SDT_TASK_FN_ATTRS	inline __attribute__((unused, always_inline))
 
+char _license[] SEC("license") = "GPL";
+
 struct {
 	__uint(type, BPF_MAP_TYPE_ARENA);
 	__uint(map_flags, BPF_F_MMAPABLE);
