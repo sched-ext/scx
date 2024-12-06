@@ -848,7 +848,7 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * domain).
 	 */
 	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
-	    primary && bpf_cpumask_test_cpu(cpu, cast_mask(primary)))
+	    primary && bpf_cpumask_test_cpu(cpu, primary))
 		task_refill_slice(prev);
 }
 
