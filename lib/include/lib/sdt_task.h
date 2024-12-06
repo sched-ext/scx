@@ -11,6 +11,8 @@
 #define div_round_up(a, b) (((a) + (b) - 1) / (b))
 #endif
 
+typedef struct sdt_task_desc __arena sdt_task_desc_t;
+
 enum sdt_task_consts {
 	SDT_TASK_ENTS_PER_PAGE_SHIFT	= 9,
 	SDT_TASK_LEVELS			= 3,
@@ -48,7 +50,7 @@ struct sdt_task_desc {
 struct sdt_task_data {
 	union sdt_task_id		tid;
 	__u64				tptr;
-	__u64				__arena payload[];
+	__u64				payload[];
 };
 
 /*
@@ -56,7 +58,7 @@ struct sdt_task_data {
  */
 struct sdt_task_chunk {
 	union {
-		struct sdt_task_desc __arena *descs[SDT_TASK_ENTS_PER_CHUNK];
+		sdt_task_desc_t * descs[SDT_TASK_ENTS_PER_CHUNK];
 		struct sdt_task_data __arena *data[SDT_TASK_ENTS_PER_CHUNK];
 	};
 };
