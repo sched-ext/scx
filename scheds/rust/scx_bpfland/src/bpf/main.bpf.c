@@ -286,7 +286,7 @@ static u64 task_weight(const struct task_struct *p, const struct task_ctx *tctx)
 	 * Scale the static task weight by the average amount of voluntary
 	 * context switches to determine the dynamic weight.
 	 */
-	u64 prio = p->scx.weight * CLAMP(tctx->avg_nvcsw, 1, nvcsw_max_thresh);
+	u64 prio = p->scx.weight * CLAMP(tctx->avg_nvcsw, 1, nvcsw_max_thresh ? : 1);
 
 	return CLAMP(prio, 1, MAX_TASK_WEIGHT);
 }
