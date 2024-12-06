@@ -522,6 +522,28 @@ static void task_set_domain(struct task_struct *p, s32 cpu,
 	bpf_cpumask_and(l3_mask, cast_mask(p_mask), cast_mask(l3_domain));
 }
 
+static bool is_wake_sync(const struct task_struct *p,
+			 const struct task_struct *current,
+			 s32 prev_cpu, s32 cpu, u64 wake_flags)
+{
+	if (wake_flags & SCX_WAKE_SYNC)
+		return true;
+
+	/*
+	 * If the current task is a per-CPU kthread running on the wakee's
+	 * previous CPU, treat it as a synchronous wakeup.
+	 *
+	 * The assumption is that the wakee had queued work for the per-CPU
+	 * kthread, which has now finished, making the wakeup effectively
+	 * synchronous. An example of this behavior is seen in IO completions.
+	 */
+	if (is_kthread(current) && (p->nr_cpus_allowed == 1) &&
+	    (prev_cpu == cpu))
+		return true;
+
+	return false;
+}
+
 /*
  * Find an idle CPU in the system.
  *
@@ -535,6 +557,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 {
 	const struct cpumask *idle_smtmask, *idle_cpumask;
 	const struct cpumask *primary, *p_mask, *l2_mask, *l3_mask;
+	struct task_struct *current = (void *)bpf_get_current_task_btf();
 	struct task_ctx *tctx;
 	bool is_prev_llc_affine = false;
 	s32 cpu;
@@ -584,8 +607,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * (WAKE_SYNC), attempt to migrate the wakee on the same CPU as the
 	 * waker.
 	 */
-	if (wake_flags & SCX_WAKE_SYNC) {
-		struct task_struct *current = (void *)bpf_get_current_task_btf();
+	cpu = bpf_get_smp_processor_id();
+	if (is_wake_sync(p, current, cpu, prev_cpu, wake_flags)) {
 		const struct cpumask *curr_l3_domain;
 		struct cpu_ctx *cctx;
 		bool share_llc, has_idle;
@@ -593,7 +616,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		/*
 		 * Determine waker CPU scheduling domain.
 		 */
-		cpu = bpf_get_smp_processor_id();
 		cctx = try_lookup_cpu_ctx(cpu);
 		if (!cctx) {
 			cpu = -EINVAL;
@@ -615,6 +637,13 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 			*is_idle = true;
 			goto out_put_cpumask;
 		}
+
+		/*
+		 * Migrate the wakee to the same domain as the waker in case of
+		 * a sync wakeup.
+		 */
+		if (!share_llc)
+			task_set_domain(p, cpu, p->cpus_ptr);
 
 		/*
 		 * If the waker's L3 domain is not saturated attempt to migrate
