@@ -1607,7 +1607,7 @@ dependencies = [
 
 [[package]]
 name = "scx_bpfland"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1624,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "scx_flash"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -1641,7 +1641,7 @@ dependencies = [
 
 [[package]]
 name = "scx_lavd"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -1667,7 +1667,7 @@ dependencies = [
 
 [[package]]
 name = "scx_layered"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -1691,7 +1691,7 @@ dependencies = [
 
 [[package]]
 name = "scx_loader"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1709,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "scx_mitosis"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rlfifo"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "ctrlc",
@@ -1744,7 +1744,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1765,7 +1765,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland_core"
-version = "2.2.3"
+version = "2.2.4"
 dependencies = [
  "anyhow",
  "libbpf-rs",
@@ -1778,7 +1778,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rusty"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1801,7 +1801,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "crossbeam",
@@ -1818,7 +1818,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats_derive"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1829,7 +1829,7 @@ dependencies = [
 
 [[package]]
 name = "scx_utils"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "anyhow",
  "bindgen",

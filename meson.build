@@ -1,5 +1,5 @@
 project('sched_ext schedulers', 'c',
-        version: '1.0.6',
+        version: '1.0.7',
         license: 'GPL-2.0',
         meson_version : '>= 1.2.0',)
 
