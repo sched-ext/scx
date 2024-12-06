@@ -797,7 +797,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 * If the layer is an open one, we can try the whole machine.
 	 */
 	if (layer->kind != LAYER_KIND_CONFINED &&
-	    ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu, idle_smtmask) >= 0))) {
+	    (cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu, idle_smtmask)) >= 0) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
 		goto out_put;
 	}
