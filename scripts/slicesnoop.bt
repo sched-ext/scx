@@ -1,0 +1,55 @@
+#!/usr/bin/env bpftrace
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+
+// This software may be used and distributed according to the terms of the
+// GNU General Public License version 2.
+
+
+/*
+ * slicesnoop - Explore the slice distribution of DSQs
+ *
+ * This script is used to explore the distrubtion of slice intervals for
+ * schedulers aggregated by DSQ id.
+ *
+ * Processes can be filtered by passing a pid as the first parameter (0 for
+ * all pids):
+ *
+ * # filter pid 1234
+ * $ ./slicesnoop.bt 1234
+ * # all pids (default)
+ * $ ./slicesnoop.bt 0
+ *
+ * DSQs (above 0) can be filtered by passing the dsq id as the second parameter:
+ *
+ * # filter dsq 1234
+ * $ ./slicesnoop.bt 0 1234
+ */
+
+kprobe:scx_bpf_dsq_insert,
+kprobe:scx_bpf_dispatch,
+kprobe:scx_bpf_dsq_insert_vtime,
+kprobe:scx_bpf_dispatch_vtime,
+{
+	$task = (struct task_struct *)arg0;
+	$dsq = arg1;
+	$slice = arg2;
+
+	if ($1 > 0 && $task->tgid != $1) {
+		return;
+	}
+	if ($2 > 0 && $2 != $dsq) {
+		return;
+	}
+
+	if ($dsq >= 0 && $slice > 0) {
+		@dsq_slice_avg[$dsq] = avg($slice);
+		@dsq_slice[$dsq] = hist($slice);
+	}
+}
+
+
+interval:s:1 {
+	print("-----------------------------------");
+	print(@dsq_slice);
+	print(@dsq_slice_avg);
+}
