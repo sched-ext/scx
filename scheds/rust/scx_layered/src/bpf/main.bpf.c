@@ -1122,8 +1122,12 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		LAYER_LAT_DECAY_FACTOR;
 	lstats[LLC_LSTAT_CNT]++;
 
-	scx_bpf_dispatch_vtime(p, layer_dsq_id(layer_id, task_cpuc->llc_id),
-			       slice_ns, vtime, enq_flags);
+	if (layer->fifo)
+		scx_bpf_dispatch(p, layer_dsq_id(layer_id, task_cpuc->llc_id),
+				 slice_ns, enq_flags);
+	else
+		scx_bpf_dispatch_vtime(p, layer_dsq_id(layer_id, task_cpuc->llc_id),
+				       slice_ns, vtime, enq_flags);
 
 preempt:
 	try_preempt(task_cpu, p, taskc, try_preempt_first, enq_flags);

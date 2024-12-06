@@ -86,6 +86,8 @@ pub struct LayerCommon {
     #[serde(default)]
     pub slice_us: u64,
     #[serde(default)]
+    pub fifo: bool,
+    #[serde(default)]
     pub preempt: bool,
     #[serde(default)]
     pub preempt_first: bool,

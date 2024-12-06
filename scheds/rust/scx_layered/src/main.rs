@@ -107,6 +107,7 @@ lazy_static! {
                         exclusive: false,
                         idle_smt: None,
                         slice_us: 20000,
+                        fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
                         xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Sticky,
@@ -132,6 +133,7 @@ lazy_static! {
                         exclusive: true,
                         idle_smt: None,
                         slice_us: 20000,
+                        fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
                         xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Sticky,
@@ -159,6 +161,7 @@ lazy_static! {
                         exclusive: false,
                         idle_smt: None,
                         slice_us: 800,
+                        fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
                         xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Topo,
@@ -183,6 +186,7 @@ lazy_static! {
                         exclusive: false,
                         idle_smt: None,
                         slice_us: 20000,
+                        fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
                         xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Linear,
@@ -1165,12 +1169,14 @@ impl<'a> Scheduler<'a> {
                     growth_algo,
                     nodes,
                     slice_us,
+                    fifo,
                     weight,
                     xllc_mig_min_us,
                     ..
                 } = spec.kind.common();
 
                 layer.slice_ns = *slice_us * 1000;
+                layer.fifo.write(*fifo);
                 layer.min_exec_ns = min_exec_us * 1000;
                 layer.yield_step_ns = if *yield_ignore > 0.999 {
                     0
