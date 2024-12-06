@@ -5,7 +5,7 @@
  * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
  */
 #pragma once
-#include "bpf_arena_common.h"
+#include <scx/bpf_arena_common.h>
 
 #ifndef div_round_up
 #define div_round_up(a, b) (((a) + (b) - 1) / (b))
@@ -90,3 +90,23 @@ struct sdt_stats {
 	__u64	active_allocs;
 	__u64	arena_pages_used;
 };
+
+
+#ifdef __BPF__
+
+void __arena *sdt_task_data(struct task_struct *p);
+int sdt_task_init(__u64 data_size);
+void __arena *sdt_task_alloc(struct task_struct *p);
+void sdt_task_free(struct task_struct *p);
+
+/*
+ * The verifier does not support returning non-scalar values between BPF
+ * programs, even though returning arena pointers is both safe and valid.
+ * This macro typecasts the returned arena pointer on behalf of the caller.
+ */
+#define SDT_TASK_RETRIEVE(_p) ((void __arena *)sdt_task_retrieve(_p))
+#define SDT_TASK_ALLOC(_p) ((void __arena *)sdt_task_alloc(_p))
+/* For uniformity. */
+#define SDT_TASK_FREE(_p) (sdt_task_free(_p))
+
+#endif /* __BPF__ */

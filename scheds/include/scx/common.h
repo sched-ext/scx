@@ -72,5 +72,6 @@ typedef int64_t s64;
 #include "user_exit_info.h"
 #include "compat.h"
 #include "enums.h"
+#include <lib/sdt_task.h>
 
 #endif	/* __SCHED_EXT_COMMON_H */
