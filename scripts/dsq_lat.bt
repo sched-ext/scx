@@ -4,21 +4,42 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-#include <linux/sched.h>
-#include <linux/sched/ext.h>
+/*
+ * dsq_lat.bt - Observe DSQ latencies
+ *
+ * Prints an average and histogram of DSQ latencies by timestamping from when a
+ * task is enqueued to a DSQ to when a task is running.
+ *
+ * PIDs can be filtered by passing a parameter to dsq_lat.bt (0 for all pids):
+ *
+ * # filter PID 1234
+ * $ ./dsq_lat.bt 1234
+ *
+ * DSQs can be filtered by passing a second parameter:
+ *
+ * # filter DSQ 789
+ * $ ./dsq_lat.bt 0 789
+ *
+ */
 
-rawtracepoint:sched_wakeup,
-rawtracepoint:sched_wakeup_new,
+kprobe:scx_bpf_dsq_insert,
+kprobe:scx_bpf_dispatch,
+kprobe:scx_bpf_dsq_insert_vtime,
+kprobe:scx_bpf_dispatch_vtime,
 {
 	$task = (struct task_struct *)arg0;
+	$dsq = arg1;
 
 	if ($1 > 0 && $task->tgid != $1) {
 		return;
 	}
+	if ($2 > 0 && $2 != $dsq) {
+		return;
+	}
 
-	@qtime[$task->pid] = nsecs;
-	if ($task->scx.dsq->id >= 0) {
-		@dsq_time[$task->scx.dsq->id] = nsecs;
+	if ($dsq >= 0) {
+		@qtime[$task->pid] = nsecs;
+		@task_dsq[$task->pid] = $dsq;
 	}
 }
 
@@ -32,26 +53,28 @@ rawtracepoint:sched_switch
 		return;
 	}
 
-	if ($prev_state == TASK_RUNNING) {
-		@qtime[$prev->pid] = nsecs;
+	$start = @qtime[$next->pid];
+	$dsq = @task_dsq[$next->pid];
+	if ($2 > 0 && $2 != $dsq) {
+		delete(@qtime[$next->pid]);
+		delete(@task_dsq[$next->pid]);
+		return;
 	}
 
-	$nsec = @qtime[$next->pid];
-	if ($nsec) {
-		$usec = (nsecs - $nsec) / 1000;
-		@usec_total_stats = stats($usec);
-		@usec_hist = hist($usec);
-		@tasks[$next->comm, $next->pid] = stats($usec);
-		@avg_lat = avg($usec);
-		if ($prev->scx.dsq->id >= 0) {
-			@dsq_lat[$prev->scx.dsq->id] = avg($usec);
-		}
+	if ($start && $dsq > 0 && $dsq < 2<<16) {
+		$dur = nsecs - $start;
+		$usec = $dur / 1000;
+		@lat_avg_usec[$dsq] = avg($usec);
+		@dsq_hist_usec[$dsq] = hist($usec);
+		@dsq_lat_avg_usec[$dsq] = avg($usec);
 	}
 	delete(@qtime[$next->pid]);
+	delete(@task_dsq[$next->pid]);
 }
 
 interval:s:1 {
-    print(@avg_lat);
-    print(@usec_hist);
-    print(@dsq_lat);
+	print("------------------------------");
+	print(@lat_avg_usec);
+	print(@dsq_hist_usec);
+	print(@dsq_lat_avg_usec);
 }
