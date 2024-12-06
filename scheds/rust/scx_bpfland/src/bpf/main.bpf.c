@@ -787,7 +787,7 @@ static void kick_task_cpu(struct task_struct *p)
 
 	cpu = pick_idle_cpu(p, cpu, 0, &is_idle);
 	if (is_idle)
-		scx_bpf_kick_cpu(cpu, 0);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
 /*
