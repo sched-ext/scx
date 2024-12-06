@@ -541,16 +541,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 
 	*is_idle = false;
 
-	/*
-	 * For tasks that can run only on a single CPU, we can simply verify if
-	 * their only allowed CPU is still idle.
-	 */
-	if (p->nr_cpus_allowed == 1 || p->migration_disabled) {
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
-			*is_idle = true;
-		return prev_cpu;
-	}
-
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return -ENOENT;
@@ -778,29 +768,12 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 }
 
 /*
- * Wake up an idle CPU for task @p.
- */
-static void kick_task_cpu(struct task_struct *p)
-{
-	s32 cpu = scx_bpf_task_cpu(p);
-	bool is_idle = false;
-
-	cpu = pick_idle_cpu(p, cpu, 0, &is_idle);
-	if (is_idle)
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-}
-
-/*
  * Dispatch all the other tasks that were not dispatched directly in
  * select_cpu().
  */
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
 
 	/*
 	 * Per-CPU kthreads are critical for system responsiveness so make sure
@@ -819,15 +792,22 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Dispatch interactive tasks to the priority DSQ and regular tasks to
 	 * the shared DSQ.
 	 */
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
 	scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_DFL,
 			       task_vtime(p, tctx), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	/*
-	 * If there is an idle CPU available for the task, wake it up so it can
-	 * consume the task immediately.
+	 * If the task is limited to run only on certain CPUs make sure that at
+	 * least one of them is awake.
 	 */
-	kick_task_cpu(p);
+	if ((p->nr_cpus_allowed < nr_online_cpus) || p->migration_disabled) {
+		s32 cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		if (cpu >= 0)
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	}
 }
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
