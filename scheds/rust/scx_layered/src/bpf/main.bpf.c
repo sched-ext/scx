@@ -797,7 +797,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 * If the layer is an open one, we can try the whole machine.
 	 */
 	if (layer->kind != LAYER_KIND_CONFINED &&
-	    ((cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu, idle_smtmask) >= 0))) {
+	    (cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu, idle_smtmask)) >= 0) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
 		goto out_put;
 	}
@@ -1122,8 +1122,12 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		LAYER_LAT_DECAY_FACTOR;
 	lstats[LLC_LSTAT_CNT]++;
 
-	scx_bpf_dispatch_vtime(p, layer_dsq_id(layer_id, task_cpuc->llc_id),
-			       slice_ns, vtime, enq_flags);
+	if (layer->fifo)
+		scx_bpf_dispatch(p, layer_dsq_id(layer_id, task_cpuc->llc_id),
+				 slice_ns, enq_flags);
+	else
+		scx_bpf_dispatch_vtime(p, layer_dsq_id(layer_id, task_cpuc->llc_id),
+				       slice_ns, vtime, enq_flags);
 
 preempt:
 	try_preempt(task_cpu, p, taskc, try_preempt_first, enq_flags);

@@ -107,6 +107,7 @@ lazy_static! {
                         exclusive: false,
                         idle_smt: None,
                         slice_us: 20000,
+                        fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
                         xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Sticky,
@@ -132,6 +133,7 @@ lazy_static! {
                         exclusive: true,
                         idle_smt: None,
                         slice_us: 20000,
+                        fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
                         xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Sticky,
@@ -159,6 +161,7 @@ lazy_static! {
                         exclusive: false,
                         idle_smt: None,
                         slice_us: 800,
+                        fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
                         xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Topo,
@@ -183,6 +186,7 @@ lazy_static! {
                         exclusive: false,
                         idle_smt: None,
                         slice_us: 20000,
+                        fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
                         xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
                         growth_algo: LayerGrowthAlgo::Linear,
@@ -1084,12 +1088,7 @@ impl<'a> Scheduler<'a> {
         ((target * 1024.0) as u32).min(1024)
     }
 
-    fn init_layers(
-        skel: &mut OpenBpfSkel,
-        opts: &Opts,
-        specs: &Vec<LayerSpec>,
-        topo: &Topology,
-    ) -> Result<()> {
+    fn init_layers(skel: &mut OpenBpfSkel, specs: &Vec<LayerSpec>, topo: &Topology) -> Result<()> {
         skel.maps.rodata_data.nr_layers = specs.len() as u32;
         let mut perf_set = false;
 
@@ -1166,16 +1165,14 @@ impl<'a> Scheduler<'a> {
                     growth_algo,
                     nodes,
                     slice_us,
+                    fifo,
                     weight,
                     xllc_mig_min_us,
                     ..
                 } = spec.kind.common();
 
-                layer.slice_ns = if *slice_us > 0 {
-                    *slice_us * 1000
-                } else {
-                    opts.slice_us * 1000
-                };
+                layer.slice_ns = *slice_us * 1000;
+                layer.fifo.write(*fifo);
                 layer.min_exec_ns = min_exec_us * 1000;
                 layer.yield_step_ns = if *yield_ignore > 0.999 {
                     0
@@ -1191,11 +1188,7 @@ impl<'a> Scheduler<'a> {
                 layer.preempt_first.write(*preempt_first);
                 layer.exclusive.write(*exclusive);
                 layer.growth_algo = growth_algo.as_bpf_enum();
-                layer.weight = if *weight <= MAX_LAYER_WEIGHT && *weight >= MIN_LAYER_WEIGHT {
-                    *weight
-                } else {
-                    DEFAULT_LAYER_WEIGHT
-                };
+                layer.weight = *weight;
                 layer.xllc_mig_min_ns = (xllc_mig_min_us * 1000.0) as u64;
                 layer.owned_usage_target_ppk =
                     Self::layer_owned_usage_target_ppk(spec.kind.util_range(), 0.0);
@@ -1614,7 +1607,7 @@ impl<'a> Scheduler<'a> {
         }
         skel.maps.bss_data.nr_empty_layer_ids = nr_layers as u32;
 
-        Self::init_layers(&mut skel, opts, &layer_specs, &topo)?;
+        Self::init_layers(&mut skel, &layer_specs, &topo)?;
         Self::init_nodes(&mut skel, opts, &topo);
 
         let mut skel = scx_ops_load!(skel, layered, uei)?;
@@ -2318,8 +2311,19 @@ fn main() -> Result<()> {
         );
     }
 
-    for spec in &layer_config.specs {
-        if spec.kind.common().idle_smt.is_some() {
+    for spec in layer_config.specs.iter_mut() {
+        let common = spec.kind.common_mut();
+
+        if common.slice_us == 0 {
+            common.slice_us = opts.slice_us;
+        }
+
+        if common.weight == 0 {
+            common.weight = DEFAULT_LAYER_WEIGHT;
+        }
+        common.weight = common.weight.max(MIN_LAYER_WEIGHT).min(MAX_LAYER_WEIGHT);
+
+        if common.idle_smt.is_some() {
             warn!("Layer {} has deprecated flag \"idle_smt\"", &spec.name);
         }
     }
