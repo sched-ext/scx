@@ -1088,11 +1088,7 @@ impl<'a> Scheduler<'a> {
         ((target * 1024.0) as u32).min(1024)
     }
 
-    fn init_layers(
-        skel: &mut OpenBpfSkel,
-        specs: &Vec<LayerSpec>,
-        topo: &Topology,
-    ) -> Result<()> {
+    fn init_layers(skel: &mut OpenBpfSkel, specs: &Vec<LayerSpec>, topo: &Topology) -> Result<()> {
         skel.maps.rodata_data.nr_layers = specs.len() as u32;
         let mut perf_set = false;
 
