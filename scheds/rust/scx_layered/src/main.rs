@@ -715,6 +715,7 @@ impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
 #[derive(Clone, Debug)]
 struct Stats {
     at: Instant,
+    elapsed: Duration,
     nr_layers: usize,
     nr_layer_tasks: Vec<usize>,
     nr_nodes: usize,
@@ -783,6 +784,7 @@ impl Stats {
 
         Ok(Self {
             at: Instant::now(),
+            elapsed: Default::default(),
             nr_layers,
             nr_layer_tasks: vec![0; nr_layers],
             nr_nodes,
@@ -811,7 +813,8 @@ impl Stats {
         now: Instant,
         cur_processing_dur: Duration,
     ) -> Result<()> {
-        let elapsed = now.duration_since(self.at).as_secs_f64() as f64;
+        let elapsed = now.duration_since(self.at);
+        let elapsed_f64 = elapsed.as_secs_f64();
         let cpu_ctxs = read_cpu_ctxs(skel)?;
 
         let nr_layer_tasks: Vec<usize> = skel
@@ -839,7 +842,7 @@ impl Stats {
             .map(|(cur, prev)| {
                 cur.iter()
                     .zip(prev.iter())
-                    .map(|(c, p)| (c.saturating_sub(*p)) as f64 / 1_000_000_000.0 / elapsed)
+                    .map(|(c, p)| (c.saturating_sub(*p)) as f64 / 1_000_000_000.0 / elapsed_f64)
                     .collect()
             })
             .collect();
@@ -850,7 +853,7 @@ impl Stats {
                 cur.iter()
                     .zip(prev.iter())
                     .map(|(c, p)| {
-                        let decay = USAGE_DECAY.powf(elapsed);
+                        let decay = USAGE_DECAY.powf(elapsed_f64);
                         p * decay + c * (1.0 - decay)
                     })
                     .collect()
@@ -869,6 +872,7 @@ impl Stats {
 
         *self = Self {
             at: now,
+            elapsed,
             nr_layers: self.nr_layers,
             nr_layer_tasks,
             nr_nodes: self.nr_nodes,

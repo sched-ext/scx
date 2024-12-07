@@ -213,14 +213,19 @@ static struct llc_ctx *lookup_llc_ctx(u32 llc_id)
 	return llcc;
 }
 
-static void gstat_inc(u32 id, struct cpu_ctx *cpuc)
+static void gstat_add(u32 id, struct cpu_ctx *cpuc, s64 delta)
 {
 	if (id >= NR_GSTATS) {
 		scx_bpf_error("invalid global stat id %d", id);
 		return;
 	}
 
-	cpuc->gstats[id]++;
+	cpuc->gstats[id] += delta;
+}
+
+static void gstat_inc(u32 id, struct cpu_ctx *cpuc)
+{
+	gstat_add(id, cpuc, 1);
 }
 
 static void lstat_add(u32 id, struct layer *layer, struct cpu_ctx *cpuc, s64 delta)
@@ -398,6 +403,7 @@ struct task_ctx {
 	u64			runnable_at;
 	u64			running_at;
 	u64			runtime_avg;
+	u64			dsq_id;
 	u32			llc_id;
 	u32			qrt_llc_id;	/* for llcc->queue_runtime */
 };
@@ -859,7 +865,8 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cpuc);
 		u64 slice_ns = layer_slice_ns(layer);
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		taskc->dsq_id = SCX_DSQ_LOCAL;
+		scx_bpf_dispatch(p, taskc->dsq_id, slice_ns, 0);
 		return cpu;
 	} else {
 		return prev_cpu;
@@ -1051,7 +1058,8 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
 
-		scx_bpf_dispatch(p, task_cpuc->hi_fallback_dsq_id, slice_ns, enq_flags);
+		taskc->dsq_id = task_cpuc->hi_fallback_dsq_id;
+		scx_bpf_dispatch(p, taskc->dsq_id, slice_ns, enq_flags);
 		goto preempt;
 	}
 
@@ -1082,7 +1090,8 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		 * to the LLC local HI_FALLBACK_DSQ to avoid this starvation
 		 * issue.
 		 */
-		scx_bpf_dispatch(p, task_cpuc->hi_fallback_dsq_id, slice_ns, enq_flags);
+		taskc->dsq_id = task_cpuc->hi_fallback_dsq_id;
+		scx_bpf_dispatch(p, taskc->dsq_id, slice_ns, enq_flags);
 		goto preempt;
 	}
 
@@ -1117,12 +1126,11 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		LAYER_LAT_DECAY_FACTOR;
 	lstats[LLC_LSTAT_CNT]++;
 
+	taskc->dsq_id = layer_dsq_id(layer_id, task_cpuc->llc_id);
 	if (layer->fifo)
-		scx_bpf_dispatch(p, layer_dsq_id(layer_id, task_cpuc->llc_id),
-				 slice_ns, enq_flags);
+		scx_bpf_dispatch(p, taskc->dsq_id, slice_ns, enq_flags);
 	else
-		scx_bpf_dispatch_vtime(p, layer_dsq_id(layer_id, task_cpuc->llc_id),
-				       slice_ns, vtime, enq_flags);
+		scx_bpf_dispatch_vtime(p, taskc->dsq_id, slice_ns, vtime, enq_flags);
 
 preempt:
 	try_preempt(task_cpu, p, taskc, try_preempt_first, enq_flags);
@@ -1933,6 +1941,14 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	} else {
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OPEN] += used;
 		cpuc->open_usage += used;
+	}
+
+	if (taskc->dsq_id & HI_FALLBACK_DSQ_BASE) {
+		gstat_inc(GSTAT_HI_FALLBACK_EVENTS, cpuc);
+		gstat_add(GSTAT_HI_FALLBACK_USAGE, cpuc, used);
+	} else if (taskc->dsq_id & LO_FALLBACK_DSQ_BASE) {
+		gstat_inc(GSTAT_LO_FALLBACK_EVENTS, cpuc);
+		gstat_add(GSTAT_LO_FALLBACK_USAGE, cpuc, used);
 	}
 
 	/*
