@@ -133,6 +133,7 @@
 use core::cmp::Ordering;
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
@@ -343,6 +344,7 @@ struct Domain {
     queried_tasks: bool,
     load: LoadEntity,
     tasks: SortedVec<TaskInfo>,
+    active_tptr_set: HashSet<u64>,
 }
 
 impl Domain {
@@ -362,6 +364,7 @@ impl Domain {
                 load_avg,
             ),
             tasks: SortedVec::new(),
+            active_tptr_set: HashSet::new(),
         }
     }
 
@@ -680,6 +683,10 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             let tptr = active_tptrs.tptrs[(idx % MAX_TPTRS) as usize];
             let key = unsafe { std::mem::transmute::<u64, [u8; 8]>(tptr) };
 
+            if dom.active_tptr_set.contains(&tptr) {
+                continue;
+            }
+
             if let Some(task_data_elem) = task_data.lookup(&key, libbpf_rs::MapFlags::ANY)? {
                 let task_ctx =
                     unsafe { &*(task_data_elem.as_slice().as_ptr() as *const bpf_intf::task_ctx) };
@@ -705,6 +712,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 };
                 load *= weight;
 
+                dom.active_tptr_set.insert(tptr);
                 dom.tasks.insert(TaskInfo {
                     tptr,
                     load: OrderedFloat(load),
