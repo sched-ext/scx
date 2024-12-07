@@ -1073,8 +1073,15 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * regardless of its cpumask. However, a task with custom cpumask in a
 	 * confined layer may fail to be consumed for an indefinite amount of
 	 * time. Queue them to the fallback DSQ.
+	 *
+	 * XXX - An open or grouped layer is no longer always consumed from all
+	 * CPUs as owned protection can make a CPU execute only the owning
+	 * layer. For now, throw all tasks with custom affinities to hi fallback
+	 * DSQs. Later, implement starvation prevention for lo fallback DSQs and
+	 * put them there. Also, this should become node aware so that
+	 * node-affine tasks aren't thrown into the fallback DSQs.
 	 */
-	if (layer->kind == LAYER_KIND_CONFINED && !taskc->all_cpus_allowed) {
+	if (/*layer->kind == LAYER_KIND_CONFINED && */!taskc->all_cpus_allowed) {
 		lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
 		/*
 		 * We were previously dispatching to LO_FALLBACK_DSQ for any
