@@ -19,3 +19,10 @@ tokio = { version = "1.39", features = ["macros", "sync", "rt-multi-thread", "pr
 toml = "0.8.19"
 zbus = { version = "5", features = ["tokio"], default-features = false }
 zvariant = "5.1"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "scx_loader"
+path = "src/main.rs"

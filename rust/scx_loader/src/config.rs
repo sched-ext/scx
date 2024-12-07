@@ -11,12 +11,12 @@ use std::path::Path;
 
 use anyhow::Result;
 use serde::Deserialize;
+use serde::Serialize;
 
-use crate::get_name_from_scx;
 use crate::SchedMode;
 use crate::SupportedSched;
 
-#[derive(Debug, PartialEq, Default, Deserialize)]
+#[derive(Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub default_sched: Option<SupportedSched>,
@@ -24,7 +24,7 @@ pub struct Config {
     pub scheds: HashMap<String, Sched>,
 }
 
-#[derive(Debug, PartialEq, Default, Deserialize)]
+#[derive(Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct Sched {
     pub auto_mode: Option<Vec<String>>,
     pub gaming_mode: Option<Vec<String>>,
@@ -102,7 +102,8 @@ pub fn get_scx_flags_for_mode(
     scx_sched: &SupportedSched,
     sched_mode: SchedMode,
 ) -> Vec<String> {
-    if let Some(sched_config) = config.scheds.get(get_name_from_scx(scx_sched)) {
+    let scx_name: &str = scx_sched.into();
+    if let Some(sched_config) = config.scheds.get(scx_name) {
         let scx_flags = extract_scx_flags_from_config(sched_config, &sched_mode);
 
         // try to exact flags from config, otherwise fallback to hardcoded default
