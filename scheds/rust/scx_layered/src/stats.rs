@@ -29,6 +29,45 @@ use crate::LAYER_USAGE_OPEN;
 use crate::LAYER_USAGE_PROTECTED;
 use crate::LAYER_USAGE_SUM_UPTO;
 
+const GSTAT_EXCL_IDLE: usize = bpf_intf::global_stat_id_GSTAT_EXCL_IDLE as usize;
+const GSTAT_EXCL_WAKEUP: usize = bpf_intf::global_stat_id_GSTAT_EXCL_WAKEUP as usize;
+const GSTAT_HI_FALLBACK_EVENTS: usize = bpf_intf::global_stat_id_GSTAT_HI_FALLBACK_EVENTS as usize;
+const GSTAT_HI_FALLBACK_USAGE: usize = bpf_intf::global_stat_id_GSTAT_HI_FALLBACK_USAGE as usize;
+const GSTAT_LO_FALLBACK_EVENTS: usize = bpf_intf::global_stat_id_GSTAT_LO_FALLBACK_EVENTS as usize;
+const GSTAT_LO_FALLBACK_USAGE: usize = bpf_intf::global_stat_id_GSTAT_LO_FALLBACK_USAGE as usize;
+
+const LSTAT_SEL_LOCAL: usize = bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL as usize;
+const LSTAT_ENQ_WAKEUP: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_WAKEUP as usize;
+const LSTAT_ENQ_EXPIRE: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_EXPIRE as usize;
+const LSTAT_ENQ_REENQ: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_REENQ as usize;
+const LSTAT_MIN_EXEC: usize = bpf_intf::layer_stat_id_LSTAT_MIN_EXEC as usize;
+const LSTAT_MIN_EXEC_NS: usize = bpf_intf::layer_stat_id_LSTAT_MIN_EXEC_NS as usize;
+const LSTAT_OPEN_IDLE: usize = bpf_intf::layer_stat_id_LSTAT_OPEN_IDLE as usize;
+const LSTAT_AFFN_VIOL: usize = bpf_intf::layer_stat_id_LSTAT_AFFN_VIOL as usize;
+const LSTAT_KEEP: usize = bpf_intf::layer_stat_id_LSTAT_KEEP as usize;
+const LSTAT_KEEP_FAIL_MAX_EXEC: usize = bpf_intf::layer_stat_id_LSTAT_KEEP_FAIL_MAX_EXEC as usize;
+const LSTAT_KEEP_FAIL_BUSY: usize = bpf_intf::layer_stat_id_LSTAT_KEEP_FAIL_BUSY as usize;
+const LSTAT_PREEMPT: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT as usize;
+const LSTAT_PREEMPT_FIRST: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_FIRST as usize;
+const LSTAT_PREEMPT_XLLC: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_XLLC as usize;
+const LSTAT_PREEMPT_XNUMA: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_XNUMA as usize;
+const LSTAT_PREEMPT_IDLE: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_IDLE as usize;
+const LSTAT_PREEMPT_FAIL: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_FAIL as usize;
+const LSTAT_EXCL_COLLISION: usize = bpf_intf::layer_stat_id_LSTAT_EXCL_COLLISION as usize;
+const LSTAT_EXCL_PREEMPT: usize = bpf_intf::layer_stat_id_LSTAT_EXCL_PREEMPT as usize;
+const LSTAT_KICK: usize = bpf_intf::layer_stat_id_LSTAT_KICK as usize;
+const LSTAT_YIELD: usize = bpf_intf::layer_stat_id_LSTAT_YIELD as usize;
+const LSTAT_YIELD_IGNORE: usize = bpf_intf::layer_stat_id_LSTAT_YIELD_IGNORE as usize;
+const LSTAT_MIGRATION: usize = bpf_intf::layer_stat_id_LSTAT_MIGRATION as usize;
+const LSTAT_XNUMA_MIGRATION: usize = bpf_intf::layer_stat_id_LSTAT_XNUMA_MIGRATION as usize;
+const LSTAT_XLLC_MIGRATION: usize = bpf_intf::layer_stat_id_LSTAT_XLLC_MIGRATION as usize;
+const LSTAT_XLLC_MIGRATION_SKIP: usize = bpf_intf::layer_stat_id_LSTAT_XLLC_MIGRATION_SKIP as usize;
+const LSTAT_XLAYER_WAKE: usize = bpf_intf::layer_stat_id_LSTAT_XLAYER_WAKE as usize;
+const LSTAT_XLAYER_REWAKE: usize = bpf_intf::layer_stat_id_LSTAT_XLAYER_REWAKE as usize;
+
+const LLC_LSTAT_LAT: usize = bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize;
+const LLC_LSTAT_CNT: usize = bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize;
+
 fn fmt_pct(v: f64) -> String {
     if v >= 99.995 {
         format!("{:5.1}", v)
@@ -163,11 +202,11 @@ impl LayerStats {
         bstats: &BpfStats,
         nr_cpus_range: (usize, usize),
     ) -> Self {
-        let lstat = |sidx| bstats.lstats[lidx][sidx as usize];
-        let ltotal = lstat(bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL)
-            + lstat(bpf_intf::layer_stat_id_LSTAT_ENQ_WAKEUP)
-            + lstat(bpf_intf::layer_stat_id_LSTAT_ENQ_EXPIRE)
-            + lstat(bpf_intf::layer_stat_id_LSTAT_ENQ_REENQ);
+        let lstat = |sidx| bstats.lstats[lidx][sidx];
+        let ltotal = lstat(LSTAT_SEL_LOCAL)
+            + lstat(LSTAT_ENQ_WAKEUP)
+            + lstat(LSTAT_ENQ_EXPIRE)
+            + lstat(LSTAT_ENQ_REENQ);
         let lstat_pct = |sidx| {
             if ltotal != 0 {
                 lstat(sidx) as f64 / ltotal as f64 * 100.0
@@ -204,42 +243,42 @@ impl LayerStats {
             util_frac: calc_frac(util_sum, stats.total_util),
             tasks: stats.nr_layer_tasks[lidx] as u32,
             total: ltotal,
-            sel_local: lstat_pct(bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL),
-            enq_wakeup: lstat_pct(bpf_intf::layer_stat_id_LSTAT_ENQ_WAKEUP),
-            enq_expire: lstat_pct(bpf_intf::layer_stat_id_LSTAT_ENQ_EXPIRE),
-            enq_reenq: lstat_pct(bpf_intf::layer_stat_id_LSTAT_ENQ_REENQ),
-            min_exec: lstat_pct(bpf_intf::layer_stat_id_LSTAT_MIN_EXEC),
-            min_exec_us: (lstat(bpf_intf::layer_stat_id_LSTAT_MIN_EXEC_NS) / 1000) as u64,
-            open_idle: lstat_pct(bpf_intf::layer_stat_id_LSTAT_OPEN_IDLE),
-            preempt: lstat_pct(bpf_intf::layer_stat_id_LSTAT_PREEMPT),
-            preempt_xllc: lstat_pct(bpf_intf::layer_stat_id_LSTAT_PREEMPT_XLLC),
-            preempt_xnuma: lstat_pct(bpf_intf::layer_stat_id_LSTAT_PREEMPT_XNUMA),
-            preempt_first: lstat_pct(bpf_intf::layer_stat_id_LSTAT_PREEMPT_FIRST),
-            preempt_idle: lstat_pct(bpf_intf::layer_stat_id_LSTAT_PREEMPT_IDLE),
-            preempt_fail: lstat_pct(bpf_intf::layer_stat_id_LSTAT_PREEMPT_FAIL),
-            affn_viol: lstat_pct(bpf_intf::layer_stat_id_LSTAT_AFFN_VIOL),
-            keep: lstat_pct(bpf_intf::layer_stat_id_LSTAT_KEEP),
-            keep_fail_max_exec: lstat_pct(bpf_intf::layer_stat_id_LSTAT_KEEP_FAIL_MAX_EXEC),
-            keep_fail_busy: lstat_pct(bpf_intf::layer_stat_id_LSTAT_KEEP_FAIL_BUSY),
+            sel_local: lstat_pct(LSTAT_SEL_LOCAL),
+            enq_wakeup: lstat_pct(LSTAT_ENQ_WAKEUP),
+            enq_expire: lstat_pct(LSTAT_ENQ_EXPIRE),
+            enq_reenq: lstat_pct(LSTAT_ENQ_REENQ),
+            min_exec: lstat_pct(LSTAT_MIN_EXEC),
+            min_exec_us: (lstat(LSTAT_MIN_EXEC_NS) / 1000) as u64,
+            open_idle: lstat_pct(LSTAT_OPEN_IDLE),
+            preempt: lstat_pct(LSTAT_PREEMPT),
+            preempt_xllc: lstat_pct(LSTAT_PREEMPT_XLLC),
+            preempt_xnuma: lstat_pct(LSTAT_PREEMPT_XNUMA),
+            preempt_first: lstat_pct(LSTAT_PREEMPT_FIRST),
+            preempt_idle: lstat_pct(LSTAT_PREEMPT_IDLE),
+            preempt_fail: lstat_pct(LSTAT_PREEMPT_FAIL),
+            affn_viol: lstat_pct(LSTAT_AFFN_VIOL),
+            keep: lstat_pct(LSTAT_KEEP),
+            keep_fail_max_exec: lstat_pct(LSTAT_KEEP_FAIL_MAX_EXEC),
+            keep_fail_busy: lstat_pct(LSTAT_KEEP_FAIL_BUSY),
             is_excl: layer.kind.common().exclusive as u32,
-            excl_collision: lstat_pct(bpf_intf::layer_stat_id_LSTAT_EXCL_COLLISION),
-            excl_preempt: lstat_pct(bpf_intf::layer_stat_id_LSTAT_EXCL_PREEMPT),
-            kick: lstat_pct(bpf_intf::layer_stat_id_LSTAT_KICK),
-            yielded: lstat_pct(bpf_intf::layer_stat_id_LSTAT_YIELD),
-            yield_ignore: lstat(bpf_intf::layer_stat_id_LSTAT_YIELD_IGNORE) as u64,
-            migration: lstat_pct(bpf_intf::layer_stat_id_LSTAT_MIGRATION),
-            xnuma_migration: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XNUMA_MIGRATION),
-            xlayer_wake: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XLAYER_WAKE),
-            xlayer_rewake: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XLAYER_REWAKE),
-            xllc_migration: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XLLC_MIGRATION),
-            xllc_migration_skip: lstat_pct(bpf_intf::layer_stat_id_LSTAT_XLLC_MIGRATION_SKIP),
+            excl_collision: lstat_pct(LSTAT_EXCL_COLLISION),
+            excl_preempt: lstat_pct(LSTAT_EXCL_PREEMPT),
+            kick: lstat_pct(LSTAT_KICK),
+            yielded: lstat_pct(LSTAT_YIELD),
+            yield_ignore: lstat(LSTAT_YIELD_IGNORE) as u64,
+            migration: lstat_pct(LSTAT_MIGRATION),
+            xnuma_migration: lstat_pct(LSTAT_XNUMA_MIGRATION),
+            xlayer_wake: lstat_pct(LSTAT_XLAYER_WAKE),
+            xlayer_rewake: lstat_pct(LSTAT_XLAYER_REWAKE),
+            xllc_migration: lstat_pct(LSTAT_XLLC_MIGRATION),
+            xllc_migration_skip: lstat_pct(LSTAT_XLLC_MIGRATION_SKIP),
             cpus: Self::bitvec_to_u32s(&layer.cpus),
             cur_nr_cpus: layer.cpus.count_ones() as u32,
             min_nr_cpus: nr_cpus_range.0 as u32,
             max_nr_cpus: nr_cpus_range.1 as u32,
             slice_us: stats.layer_slice_us[lidx],
             llc_fracs: {
-                let sid = bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize;
+                let sid = LLC_LSTAT_CNT;
                 let sum = bstats.llc_lstats[lidx]
                     .iter()
                     .map(|lstats| lstats[sid])
@@ -251,10 +290,7 @@ impl LayerStats {
             },
             llc_lats: bstats.llc_lstats[lidx]
                 .iter()
-                .map(|lstats| {
-                    lstats[bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize] as f64
-                        / 1_000_000_000.0
-                })
+                .map(|lstats| lstats[LLC_LSTAT_LAT] as f64 / 1_000_000_000.0)
                 .collect(),
         }
     }
@@ -450,11 +486,11 @@ pub struct SysStats {
 
 impl SysStats {
     pub fn new(stats: &Stats, bstats: &BpfStats, fallback_cpu: usize) -> Result<Self> {
-        let lsum = |idx| stats.bpf_stats.lstats_sums[idx as usize];
-        let total = lsum(bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL)
-            + lsum(bpf_intf::layer_stat_id_LSTAT_ENQ_WAKEUP)
-            + lsum(bpf_intf::layer_stat_id_LSTAT_ENQ_EXPIRE)
-            + lsum(bpf_intf::layer_stat_id_LSTAT_ENQ_REENQ);
+        let lsum = |idx| stats.bpf_stats.lstats_sums[idx];
+        let total = lsum(LSTAT_SEL_LOCAL)
+            + lsum(LSTAT_ENQ_WAKEUP)
+            + lsum(LSTAT_ENQ_EXPIRE)
+            + lsum(LSTAT_ENQ_REENQ);
         let lsum_pct = |idx| {
             if total != 0 {
                 lsum(idx) as f64 / total as f64 * 100.0
@@ -469,36 +505,24 @@ impl SysStats {
             at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64(),
             nr_nodes: stats.nr_nodes,
             total,
-            local: lsum_pct(bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL),
-            open_idle: lsum_pct(bpf_intf::layer_stat_id_LSTAT_OPEN_IDLE),
-            affn_viol: lsum_pct(bpf_intf::layer_stat_id_LSTAT_AFFN_VIOL),
-            hi_fallback: stats.bpf_stats.gstats
-                [bpf_intf::global_stat_id_GSTAT_HI_FALLBACK_EVENTS as usize]
-                as f64
-                / total as f64
+            local: lsum_pct(LSTAT_SEL_LOCAL),
+            open_idle: lsum_pct(LSTAT_OPEN_IDLE),
+            affn_viol: lsum_pct(LSTAT_AFFN_VIOL),
+            hi_fallback: stats.bpf_stats.gstats[GSTAT_HI_FALLBACK_EVENTS] as f64 / total as f64
                 * 100.0,
-            lo_fallback: stats.bpf_stats.gstats
-                [bpf_intf::global_stat_id_GSTAT_LO_FALLBACK_EVENTS as usize]
-                as f64
-                / total as f64
+            lo_fallback: stats.bpf_stats.gstats[GSTAT_LO_FALLBACK_EVENTS] as f64 / total as f64
                 * 100.0,
-            excl_collision: lsum_pct(bpf_intf::layer_stat_id_LSTAT_EXCL_COLLISION),
-            excl_preempt: lsum_pct(bpf_intf::layer_stat_id_LSTAT_EXCL_PREEMPT),
-            excl_idle: bstats.gstats[bpf_intf::global_stat_id_GSTAT_EXCL_IDLE as usize] as f64
-                / total as f64,
-            excl_wakeup: bstats.gstats[bpf_intf::global_stat_id_GSTAT_EXCL_WAKEUP as usize] as f64
-                / total as f64,
+            excl_collision: lsum_pct(LSTAT_EXCL_COLLISION),
+            excl_preempt: lsum_pct(LSTAT_EXCL_PREEMPT),
+            excl_idle: bstats.gstats[GSTAT_EXCL_IDLE] as f64 / total as f64,
+            excl_wakeup: bstats.gstats[GSTAT_EXCL_WAKEUP] as f64 / total as f64,
             proc_ms: stats.processing_dur.as_millis() as u64,
             busy: stats.cpu_busy * 100.0,
             util: stats.total_util * 100.0,
-            hi_fallback_util: stats.bpf_stats.gstats
-                [bpf_intf::global_stat_id_GSTAT_HI_FALLBACK_USAGE as usize]
-                as f64
+            hi_fallback_util: stats.bpf_stats.gstats[GSTAT_HI_FALLBACK_USAGE] as f64
                 / elapsed_ns as f64
                 * 100.0,
-            lo_fallback_util: stats.bpf_stats.gstats
-                [bpf_intf::global_stat_id_GSTAT_LO_FALLBACK_USAGE as usize]
-                as f64
+            lo_fallback_util: stats.bpf_stats.gstats[GSTAT_LO_FALLBACK_USAGE] as f64
                 / elapsed_ns as f64
                 * 100.0,
             fallback_cpu: fallback_cpu as u32,
