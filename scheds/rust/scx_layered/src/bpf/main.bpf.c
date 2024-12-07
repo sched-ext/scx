@@ -102,27 +102,10 @@ static __always_inline u64 layer_slice_ns(struct layer *layer)
 	return layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
 }
 
-static __always_inline
-int rotate_layer_id(u32 base_layer_id, u32 rotation)
-{
-	if (base_layer_id >= MAX_LAYERS)
-		return rotation;
-	return (base_layer_id + rotation) % nr_layers;
-}
-
-static __always_inline
-u32 rotate_llc_id(u32 base_llc_id, u32 rotation)
-{
-	return (base_llc_id + rotation) % nr_llcs;
-}
-
 // return the dsq id for the layer based on the LLC id.
 static __noinline u64 layer_dsq_id(u32 layer_id, u32 llc_id)
 {
-	if (nr_llcs == 1)
-		return layer_id;
-	else
-		return (layer_id * nr_llcs) + llc_id;
+	return ((u64)layer_id << DSQ_ID_LAYER_SHIFT) | llc_id;
 }
 
 // XXX - older kernels get confused by RCU state when subprogs are called from
@@ -153,12 +136,12 @@ u32 llc_node_id(u32 llc_id)
 
 static u64 llc_hi_fallback_dsq_id(u32 llc_id)
 {
-	return HI_FALLBACK_DSQ_BASE + llc_id;
+	return HI_FALLBACK_DSQ_BASE | llc_id;
 }
 
 static inline bool is_fallback_dsq(u64 dsq_id)
 {
-	return dsq_id > HI_FALLBACK_DSQ_BASE && dsq_id <= LO_FALLBACK_DSQ;
+	return dsq_id & (HI_FALLBACK_DSQ_BASE | LO_FALLBACK_DSQ_BASE);
 }
 
 struct {
@@ -2398,8 +2381,6 @@ static bool antistall_scan(void)
 
 	antistall_set(LO_FALLBACK_DSQ, jiffies_now);
 
-	antistall_set(HI_FALLBACK_DSQ_BASE, jiffies_now);
-
 	return true;
 }
 
@@ -2429,7 +2410,7 @@ struct layered_timer layered_timers[MAX_TIMERS] = {
 /*
  * Initializes per-layer specific data structures.
  */
-static s32 init_layer(int layer_id, u64 *fallback_dsq_id)
+static s32 init_layer(int layer_id)
 {
 	struct bpf_cpumask *cpumask;
 	struct layer_cpumask_wrapper *cpumaskw;
@@ -2539,13 +2520,14 @@ static s32 init_layer(int layer_id, u64 *fallback_dsq_id)
 
 	// create the dsqs for the layer
 	bpf_for(i, 0, nr_llcs) {
+		u64 dsq_id = layer_dsq_id(layer_id, i);
 		int node_id = llc_node_id(i);
-		dbg("CFG creating dsq %llu for layer %d %s on node %d in llc %d",
-		    *fallback_dsq_id, layer_id, layer->name, node_id, i);
-		ret = scx_bpf_create_dsq(*fallback_dsq_id, node_id);
+
+		dbg("CFG creating DSQ 0x%llx for layer %d %s on LLC %d (node %d)",
+		    dsq_id, layer_id, layer->name, i, node_id);
+		ret = scx_bpf_create_dsq(dsq_id, node_id);
 		if (ret < 0)
 			return ret;
-		(*fallback_dsq_id)++;
 	}
 
 	return 0;
@@ -2618,10 +2600,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	struct bpf_cpumask *cpumask, *tmp_big_cpumask;
 	int i, nr_online_cpus, ret;
 
-	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
-	if (ret < 0)
-		return ret;
-
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
 		return -ENOMEM;
@@ -2659,20 +2637,30 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		ret = create_llc(i);
 		if (ret)
 			return ret;
-		ret = scx_bpf_create_dsq(llc_hi_fallback_dsq_id(i), llc_node_id(i));
-		if (ret < 0)
-			return ret;
 	}
 
 	dbg("CFG: Dumping configuration, nr_online_cpus=%d smt_enabled=%d little_cores=%d",
 	    nr_online_cpus, smt_enabled, has_little_cores);
 
-	u64 fallback_dsq_id = 0;
 	bpf_for(i, 0, nr_layers) {
-		ret = init_layer(i, &fallback_dsq_id);
+		ret = init_layer(i);
 		if (ret != 0)
 			return ret;
 	}
+
+	bpf_for(i, 0, nr_llcs) {
+		u64 dsq_id = llc_hi_fallback_dsq_id(i);
+
+		dbg("CFG creating hi fallback DSQ 0x%llx on LLC %d", dsq_id, i);
+		ret = scx_bpf_create_dsq(dsq_id, llc_node_id(i));
+		if (ret < 0)
+			return ret;
+	}
+
+	dbg("CFG creating lo fallback DSQ 0x%llx", LO_FALLBACK_DSQ);
+	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
+	if (ret < 0)
+		return ret;
 
 	ret = start_layered_timers();
 	if (ret < 0)
