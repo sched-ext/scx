@@ -335,7 +335,7 @@ static void dom_dcycle_adj(u32 dom_id, u32 weight, u64 now, bool runnable)
 	}
 }
 
-static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
+static void dom_dcycle_xfer_task(struct task_ctx *taskc,
 			         struct dom_ctx *from_domc,
 				 struct dom_ctx *to_domc, u64 now)
 {
@@ -454,7 +454,7 @@ int dom_xfer_task(u64 tptr, u32 new_dom_id, u64 now)
 	if (!from_domc || !to_domc || !taskc)
 		return 0;
 
-	dom_dcycle_xfer_task(p, taskc, from_domc, to_domc, now);
+	dom_dcycle_xfer_task(taskc, from_domc, to_domc, now);
 	return 0;
 }
 
@@ -1146,18 +1146,10 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Migrate @p to a new domain if requested by userland through lb_data.
+	 * Update @p's domain information.
 	 */
-	new_dom = bpf_map_lookup_elem(&lb_data, &tptr);
-	if (new_dom && *new_dom != taskc->dom_id &&
-	    task_set_domain(taskc, p, *new_dom, false)) {
-		stat_add(RUSTY_STAT_LOAD_BALANCE, 1);
-		taskc->dispatch_local = false;
-		cpu = scx_bpf_pick_any_cpu(cast_mask(p_cpumask), 0);
-		if (cpu >= 0)
-			scx_bpf_kick_cpu(cpu, 0);
-		goto dom_queue;
-	}
+	if (!(task_set_domain(taskc, p, taskc->dom_id, true)))
+		return;
 
 	if (taskc->dispatch_local) {
 		taskc->dispatch_local = false;
@@ -1207,6 +1199,34 @@ dom_queue:
 			scx_bpf_kick_cpu(cpu, 0);
 		}
 	}
+}
+
+
+SEC("syscall")
+int enqueue_migrate_queue(struct migrate_arg *input)
+{
+	u64 tptr = input->tptr;
+	u32 new_dom_id = input->new_dom_id;
+
+	struct dom_ctx *from_domc;
+	struct task_ctx *taskc;
+
+	taskc = bpf_map_lookup_elem(&task_data, &tptr);
+	if (!taskc)
+		return -EINVAL;
+
+	if (new_dom_id == taskc->dom_id || new_dom_id == NO_DOM_FOUND)
+		return -EINVAL;
+
+	u64 now = bpf_ktime_get_ns();
+	dom_xfer_task(tptr, new_dom_id, now);
+
+	taskc->dom_id = new_dom_id;
+	taskc->dispatch_local = false;
+
+	stat_add(RUSTY_STAT_LOAD_BALANCE, 1);
+
+	return 0;
 }
 
 static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
