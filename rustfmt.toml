@@ -1,0 +1,3 @@
+# this file is here to prevent build breakages on arch
+edition = "2021"
+
