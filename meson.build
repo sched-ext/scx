@@ -270,12 +270,15 @@ bpf_includes = ['-I', join_paths(meson.current_source_dir(), 'scheds/include'),
                 '-I', join_paths(meson.current_source_dir(), 'scheds/include/bpf-compat'),
                 '-I', join_paths(meson.current_source_dir(), 'lib/include'),]
 
+lib_objs = []
+subdir('lib')
+
 #
 # Generators to build BPF skel file for C schedulers.
 #
 gen_bpf_o = generator(bpf_clang,
                       output: '@BASENAME@.o',
-                      depends: [libbpf],
+                      depends: [libbpf, scx_lib],
                       arguments: [bpf_base_cflags, '-target', 'bpf', libbpf_c_headers, bpf_includes,
                                   '-c', '@INPUT@', '-o', '@OUTPUT@'])
 
@@ -458,9 +461,6 @@ if enable_stress
       endforeach
   endif
 endif
-
-lib_objs = []
-subdir('lib')
 
 thread_dep = dependency('threads')
 
