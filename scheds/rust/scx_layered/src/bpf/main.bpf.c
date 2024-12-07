@@ -134,9 +134,14 @@ u32 llc_node_id(u32 llc_id)
         return *llc_ptr;
 }
 
-static u64 llc_hi_fallback_dsq_id(u32 llc_id)
+static u64 hi_fallback_dsq_id(u32 llc_id)
 {
 	return HI_FALLBACK_DSQ_BASE | llc_id;
+}
+
+static u64 lo_fallback_dsq_id(u32 llc_id)
+{
+	return LO_FALLBACK_DSQ_BASE | llc_id;
 }
 
 static inline bool is_fallback_dsq(u64 dsq_id)
@@ -1452,7 +1457,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			       cpuc->layer_id, cpuc, llcc))
 		return;
 
-	scx_bpf_consume(LO_FALLBACK_DSQ);
+	scx_bpf_consume(cpuc->lo_fallback_dsq_id);
 }
 
 static __noinline bool match_one(struct layer_match *match,
@@ -1739,7 +1744,8 @@ static s32 create_llc(u32 llc_id)
 		bpf_cpumask_set_cpu(cpu, cpumask);
 		llcc->nr_cpus++;
 		cpuc->llc_id = llc_id;
-		cpuc->hi_fallback_dsq_id = llc_hi_fallback_dsq_id(llc_id);
+		cpuc->hi_fallback_dsq_id = hi_fallback_dsq_id(llc_id);
+		cpuc->lo_fallback_dsq_id = lo_fallback_dsq_id(llc_id);
 	}
 
 	dbg("CFG creating llc %d with %d cpus", llc_id, llcc->nr_cpus);
@@ -2175,9 +2181,6 @@ static u64 dsq_first_runnable_for_ms(u64 dsq_id, u64 now)
 {
 	struct task_struct *p;
 
-	if (dsq_id > LO_FALLBACK_DSQ)
-		return 0;
-
 	bpf_for_each(scx_dsq, p, dsq_id, 0) {
 		struct task_ctx *taskc;
 
@@ -2220,7 +2223,7 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 {
 	u64 now = bpf_ktime_get_ns();
 	u64 dsq_id;
-	int i, j, id;
+	int i, j;
 	struct layer *layer;
 
 	scx_bpf_dump_header();
@@ -2236,25 +2239,26 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 			if (!(layer->llc_mask & (1 << j)))
 				continue;
 
-			id = layer_dsq_id(layer->id, j);
-			scx_bpf_dump("LAYER[%d][%s]DSQ[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
-				     i, layer->name, id, layer->nr_cpus,
-				     scx_bpf_dsq_nr_queued(id),
-				     dsq_first_runnable_for_ms(id, now));
+			dsq_id = layer_dsq_id(layer->id, j);
+			scx_bpf_dump("LAYER[%d][%s]DSQ[%llx] nr_cpus=%u nr_queued=%d -%llums cpus=",
+				     i, layer->name, dsq_id, layer->nr_cpus,
+				     scx_bpf_dsq_nr_queued(dsq_id),
+				     dsq_first_runnable_for_ms(dsq_id, now));
 			scx_bpf_dump("\n");
 		}
 		dump_layer_cpumask(i);
 		scx_bpf_dump("\n");
 	}
 	bpf_for(i, 0, nr_llcs) {
-		dsq_id = llc_hi_fallback_dsq_id(i);
-		scx_bpf_dump("HI_FALLBACK[%llu] nr_queued=%d -%llums\n",
+		dsq_id = hi_fallback_dsq_id(i);
+		scx_bpf_dump("HI_FALLBACK[%llx] nr_queued=%d -%llums\n",
+			     dsq_id, scx_bpf_dsq_nr_queued(dsq_id),
+			     dsq_first_runnable_for_ms(dsq_id, now));
+		dsq_id = lo_fallback_dsq_id(i);
+		scx_bpf_dump("LO_FALLBACK[%llx] nr_queued=%d -%llums\n",
 			     dsq_id, scx_bpf_dsq_nr_queued(dsq_id),
 			     dsq_first_runnable_for_ms(dsq_id, now));
 	}
-	scx_bpf_dump("LO_FALLBACK nr_queued=%d -%llums\n",
-		     scx_bpf_dsq_nr_queued(LO_FALLBACK_DSQ),
-		     dsq_first_runnable_for_ms(LO_FALLBACK_DSQ, now));
 }
 
 
@@ -2376,10 +2380,10 @@ static bool antistall_scan(void)
 		bpf_for(llc, 0, nr_llcs)
 			antistall_set(layer_dsq_id(layer_id, llc), jiffies_now);
 
-	bpf_for(llc, 0, nr_llcs)
-		antistall_set(llc_hi_fallback_dsq_id(llc), jiffies_now);
-
-	antistall_set(LO_FALLBACK_DSQ, jiffies_now);
+	bpf_for(llc, 0, nr_llcs) {
+		antistall_set(hi_fallback_dsq_id(llc), jiffies_now);
+		antistall_set(lo_fallback_dsq_id(llc), jiffies_now);
+	}
 
 	return true;
 }
@@ -2649,18 +2653,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	}
 
 	bpf_for(i, 0, nr_llcs) {
-		u64 dsq_id = llc_hi_fallback_dsq_id(i);
+		u64 dsq_id;
 
+		dsq_id = hi_fallback_dsq_id(i);
 		dbg("CFG creating hi fallback DSQ 0x%llx on LLC %d", dsq_id, i);
 		ret = scx_bpf_create_dsq(dsq_id, llc_node_id(i));
 		if (ret < 0)
 			return ret;
-	}
 
-	dbg("CFG creating lo fallback DSQ 0x%llx", LO_FALLBACK_DSQ);
-	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
-	if (ret < 0)
-		return ret;
+		dsq_id = lo_fallback_dsq_id(i);
+		dbg("CFG creating lo fallback DSQ 0x%llx on LLC %d", dsq_id, i);
+		ret = scx_bpf_create_dsq(dsq_id, llc_node_id(i));
+		if (ret < 0)
+			return ret;
+	}
 
 	ret = start_layered_timers();
 	if (ret < 0)

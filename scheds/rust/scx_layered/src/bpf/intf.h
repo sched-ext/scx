@@ -44,7 +44,6 @@ enum consts {
 	DSQ_ID_SPECIAL_MASK	= 0xc0000000,
 	HI_FALLBACK_DSQ_BASE	= 0x40000000,
 	LO_FALLBACK_DSQ_BASE	= 0x80000000,
-	LO_FALLBACK_DSQ		= LO_FALLBACK_DSQ_BASE,
 
 	DSQ_ID_LAYER_SHIFT	= 16,
 	DSQ_ID_LLC_MASK		= (1LLU << DSQ_ID_LAYER_SHIFT) - 1,		/* 0x0000ffff */
@@ -162,6 +161,7 @@ struct cpu_ctx {
 	u64			usage_at_idle;
 
 	u64			hi_fallback_dsq_id;
+	u64			lo_fallback_dsq_id;
 	u32			layer_id;
 	u32			task_layer_id;
 	u32			llc_id;
