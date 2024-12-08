@@ -42,8 +42,8 @@ enum consts {
 	LAYER_LAT_DECAY_FACTOR	= 32,
 
 	DSQ_ID_SPECIAL_MASK	= 0xc0000000,
-	HI_FALLBACK_DSQ_BASE	= 0x40000000,
-	LO_FALLBACK_DSQ_BASE	= 0x80000000,
+	HI_FB_DSQ_BASE		= 0x40000000,
+	LO_FB_DSQ_BASE		= 0x80000000,
 
 	DSQ_ID_LAYER_SHIFT	= 16,
 	DSQ_ID_LLC_MASK		= (1LLU << DSQ_ID_LAYER_SHIFT) - 1,		/* 0x0000ffff */
@@ -85,10 +85,10 @@ enum layer_usage {
 enum global_stat_id {
 	GSTAT_EXCL_IDLE,
 	GSTAT_EXCL_WAKEUP,
-	GSTAT_HI_FALLBACK_EVENTS,
-	GSTAT_HI_FALLBACK_USAGE,
-	GSTAT_LO_FALLBACK_EVENTS,
-	GSTAT_LO_FALLBACK_USAGE,
+	GSTAT_HI_FB_EVENTS,
+	GSTAT_HI_FB_USAGE,
+	GSTAT_LO_FB_EVENTS,
+	GSTAT_LO_FB_USAGE,
 	NR_GSTATS,
 };
 
@@ -164,8 +164,8 @@ struct cpu_ctx {
 	u64			prev_open_usage[2];
 	u64			usage_at_idle;
 
-	u64			hi_fallback_dsq_id;
-	u64			lo_fallback_dsq_id;
+	u64			hi_fb_dsq_id;
+	u64			lo_fb_dsq_id;
 	u32			layer_id;
 	u32			task_layer_id;
 	u32			llc_id;

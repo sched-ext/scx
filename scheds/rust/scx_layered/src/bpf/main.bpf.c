@@ -134,19 +134,19 @@ u32 llc_node_id(u32 llc_id)
         return *llc_ptr;
 }
 
-static u64 hi_fallback_dsq_id(u32 llc_id)
+static u64 hi_fb_dsq_id(u32 llc_id)
 {
-	return HI_FALLBACK_DSQ_BASE | llc_id;
+	return HI_FB_DSQ_BASE | llc_id;
 }
 
-static u64 lo_fallback_dsq_id(u32 llc_id)
+static u64 lo_fb_dsq_id(u32 llc_id)
 {
-	return LO_FALLBACK_DSQ_BASE | llc_id;
+	return LO_FB_DSQ_BASE | llc_id;
 }
 
-static inline bool is_fallback_dsq(u64 dsq_id)
+static inline bool is_fb_dsq(u64 dsq_id)
 {
-	return dsq_id & (HI_FALLBACK_DSQ_BASE | LO_FALLBACK_DSQ_BASE);
+	return dsq_id & (HI_FB_DSQ_BASE | LO_FB_DSQ_BASE);
 }
 
 struct {
@@ -1058,7 +1058,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
 
-		taskc->dsq_id = task_cpuc->hi_fallback_dsq_id;
+		taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
 		scx_bpf_dispatch(p, taskc->dsq_id, slice_ns, enq_flags);
 		goto preempt;
 	}
@@ -1080,17 +1080,16 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (/*layer->kind == LAYER_KIND_CONFINED && */!taskc->all_cpus_allowed) {
 		lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
 		/*
-		 * We were previously dispatching to LO_FALLBACK_DSQ for any
+		 * We were previously dispatching to LO_FB_DSQ for any
 		 * affinitized, non-PCPU kthreads, but found that starvation
 		 * became an issue when the system was under heavy load.
 		 *
 		 * Longer term, we can address this by implementing layer
 		 * weights and applying that to fallback DSQs to avoid
 		 * starvation. For now, we just dispatch all affinitized tasks
-		 * to the LLC local HI_FALLBACK_DSQ to avoid this starvation
-		 * issue.
+		 * to the LLC local HI_FB_DSQ to avoid this starvation issue.
 		 */
-		taskc->dsq_id = task_cpuc->hi_fallback_dsq_id;
+		taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
 		scx_bpf_dispatch(p, taskc->dsq_id, slice_ns, enq_flags);
 		goto preempt;
 	}
@@ -1424,12 +1423,12 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		owner_layer = &layers[cpuc->layer_id];
 
 	/*
-	 * Always consume hi_fallback_dsq_id first for kthreads. This ends up
+	 * Always consume hi_fb_dsq_id first for kthreads. This ends up
 	 * prioritizing tasks with custom affinities which will be solved by
 	 * implementing starvation prevention for lo fallback and queueing them
 	 * there.
 	 */
-	if (scx_bpf_consume(cpuc->hi_fallback_dsq_id))
+	if (scx_bpf_consume(cpuc->hi_fb_dsq_id))
 		return;
 
 	/*
@@ -1465,7 +1464,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			       cpuc->layer_id, cpuc, llcc))
 		return;
 
-	scx_bpf_consume(cpuc->lo_fallback_dsq_id);
+	scx_bpf_consume(cpuc->lo_fb_dsq_id);
 }
 
 static __noinline bool match_one(struct layer_match *match,
@@ -1752,8 +1751,8 @@ static s32 create_llc(u32 llc_id)
 		bpf_cpumask_set_cpu(cpu, cpumask);
 		llcc->nr_cpus++;
 		cpuc->llc_id = llc_id;
-		cpuc->hi_fallback_dsq_id = hi_fallback_dsq_id(llc_id);
-		cpuc->lo_fallback_dsq_id = lo_fallback_dsq_id(llc_id);
+		cpuc->hi_fb_dsq_id = hi_fb_dsq_id(llc_id);
+		cpuc->lo_fb_dsq_id = lo_fb_dsq_id(llc_id);
 	}
 
 	dbg("CFG creating llc %d with %d cpus", llc_id, llcc->nr_cpus);
@@ -1943,12 +1942,12 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		cpuc->open_usage += used;
 	}
 
-	if (taskc->dsq_id & HI_FALLBACK_DSQ_BASE) {
-		gstat_inc(GSTAT_HI_FALLBACK_EVENTS, cpuc);
-		gstat_add(GSTAT_HI_FALLBACK_USAGE, cpuc, used);
-	} else if (taskc->dsq_id & LO_FALLBACK_DSQ_BASE) {
-		gstat_inc(GSTAT_LO_FALLBACK_EVENTS, cpuc);
-		gstat_add(GSTAT_LO_FALLBACK_USAGE, cpuc, used);
+	if (taskc->dsq_id & HI_FB_DSQ_BASE) {
+		gstat_inc(GSTAT_HI_FB_EVENTS, cpuc);
+		gstat_add(GSTAT_HI_FB_USAGE, cpuc, used);
+	} else if (taskc->dsq_id & LO_FB_DSQ_BASE) {
+		gstat_inc(GSTAT_LO_FB_EVENTS, cpuc);
+		gstat_add(GSTAT_LO_FB_USAGE, cpuc, used);
 	}
 
 	/*
@@ -2266,11 +2265,11 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 		scx_bpf_dump("\n");
 	}
 	bpf_for(i, 0, nr_llcs) {
-		dsq_id = hi_fallback_dsq_id(i);
-		scx_bpf_dump("HI_FALLBACK[%llx] nr_queued=%d -%llums\n",
+		dsq_id = hi_fb_dsq_id(i);
+		scx_bpf_dump("HI_[%llx] nr_queued=%d -%llums\n",
 			     dsq_id, scx_bpf_dsq_nr_queued(dsq_id),
 			     dsq_first_runnable_for_ms(dsq_id, now));
-		dsq_id = lo_fallback_dsq_id(i);
+		dsq_id = lo_fb_dsq_id(i);
 		scx_bpf_dump("LO_FALLBACK[%llx] nr_queued=%d -%llums\n",
 			     dsq_id, scx_bpf_dsq_nr_queued(dsq_id),
 			     dsq_first_runnable_for_ms(dsq_id, now));
@@ -2397,8 +2396,8 @@ static bool antistall_scan(void)
 			antistall_set(layer_dsq_id(layer_id, llc), jiffies_now);
 
 	bpf_for(llc, 0, nr_llcs) {
-		antistall_set(hi_fallback_dsq_id(llc), jiffies_now);
-		antistall_set(lo_fallback_dsq_id(llc), jiffies_now);
+		antistall_set(hi_fb_dsq_id(llc), jiffies_now);
+		antistall_set(lo_fb_dsq_id(llc), jiffies_now);
 	}
 
 	return true;
@@ -2671,13 +2670,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	bpf_for(i, 0, nr_llcs) {
 		u64 dsq_id;
 
-		dsq_id = hi_fallback_dsq_id(i);
+		dsq_id = hi_fb_dsq_id(i);
 		dbg("CFG creating hi fallback DSQ 0x%llx on LLC %d", dsq_id, i);
 		ret = scx_bpf_create_dsq(dsq_id, llc_node_id(i));
 		if (ret < 0)
 			return ret;
 
-		dsq_id = lo_fallback_dsq_id(i);
+		dsq_id = lo_fb_dsq_id(i);
 		dbg("CFG creating lo fallback DSQ 0x%llx on LLC %d", dsq_id, i);
 		ret = scx_bpf_create_dsq(dsq_id, llc_node_id(i));
 		if (ret < 0)

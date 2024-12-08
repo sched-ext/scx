@@ -31,10 +31,10 @@ use crate::LAYER_USAGE_SUM_UPTO;
 
 const GSTAT_EXCL_IDLE: usize = bpf_intf::global_stat_id_GSTAT_EXCL_IDLE as usize;
 const GSTAT_EXCL_WAKEUP: usize = bpf_intf::global_stat_id_GSTAT_EXCL_WAKEUP as usize;
-const GSTAT_HI_FALLBACK_EVENTS: usize = bpf_intf::global_stat_id_GSTAT_HI_FALLBACK_EVENTS as usize;
-const GSTAT_HI_FALLBACK_USAGE: usize = bpf_intf::global_stat_id_GSTAT_HI_FALLBACK_USAGE as usize;
-const GSTAT_LO_FALLBACK_EVENTS: usize = bpf_intf::global_stat_id_GSTAT_LO_FALLBACK_EVENTS as usize;
-const GSTAT_LO_FALLBACK_USAGE: usize = bpf_intf::global_stat_id_GSTAT_LO_FALLBACK_USAGE as usize;
+const GSTAT_HI_FB_EVENTS: usize = bpf_intf::global_stat_id_GSTAT_HI_FB_EVENTS as usize;
+const GSTAT_HI_FB_USAGE: usize = bpf_intf::global_stat_id_GSTAT_HI_FB_USAGE as usize;
+const GSTAT_LO_FB_EVENTS: usize = bpf_intf::global_stat_id_GSTAT_LO_FB_EVENTS as usize;
+const GSTAT_LO_FB_USAGE: usize = bpf_intf::global_stat_id_GSTAT_LO_FB_USAGE as usize;
 
 const LSTAT_SEL_LOCAL: usize = bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL as usize;
 const LSTAT_ENQ_WAKEUP: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_WAKEUP as usize;
@@ -455,9 +455,9 @@ pub struct SysStats {
     #[stat(desc = "% violated config due to CPU affinity")]
     pub affn_viol: f64,
     #[stat(desc = "% sent to hi fallback DSQs")]
-    pub hi_fallback: f64,
+    pub hi_fb: f64,
     #[stat(desc = "% sent to lo fallback DSQs")]
-    pub lo_fallback: f64,
+    pub lo_fb: f64,
     #[stat(desc = "count of times an excl task skipped a CPU as the sibling was also excl")]
     pub excl_collision: f64,
     #[stat(desc = "count of times a sibling CPU was preempted for an excl task")]
@@ -475,9 +475,9 @@ pub struct SysStats {
     #[stat(desc = "CPU util % (100% means one CPU)")]
     pub util: f64,
     #[stat(desc = "CPU util % used by hi fallback DSQs")]
-    pub hi_fallback_util: f64,
+    pub hi_fb_util: f64,
     #[stat(desc = "CPU util % used by lo fallback DSQs")]
-    pub lo_fallback_util: f64,
+    pub lo_fb_util: f64,
     #[stat(desc = "fallback CPU")]
     pub fallback_cpu: u32,
     #[stat(desc = "per-layer statistics")]
@@ -508,10 +508,8 @@ impl SysStats {
             local: lsum_pct(LSTAT_SEL_LOCAL),
             open_idle: lsum_pct(LSTAT_OPEN_IDLE),
             affn_viol: lsum_pct(LSTAT_AFFN_VIOL),
-            hi_fallback: stats.bpf_stats.gstats[GSTAT_HI_FALLBACK_EVENTS] as f64 / total as f64
-                * 100.0,
-            lo_fallback: stats.bpf_stats.gstats[GSTAT_LO_FALLBACK_EVENTS] as f64 / total as f64
-                * 100.0,
+            hi_fb: stats.bpf_stats.gstats[GSTAT_HI_FB_EVENTS] as f64 / total as f64 * 100.0,
+            lo_fb: stats.bpf_stats.gstats[GSTAT_LO_FB_EVENTS] as f64 / total as f64 * 100.0,
             excl_collision: lsum_pct(LSTAT_EXCL_COLLISION),
             excl_preempt: lsum_pct(LSTAT_EXCL_PREEMPT),
             excl_idle: bstats.gstats[GSTAT_EXCL_IDLE] as f64 / total as f64,
@@ -519,11 +517,9 @@ impl SysStats {
             proc_ms: stats.processing_dur.as_millis() as u64,
             busy: stats.cpu_busy * 100.0,
             util: stats.total_util * 100.0,
-            hi_fallback_util: stats.bpf_stats.gstats[GSTAT_HI_FALLBACK_USAGE] as f64
-                / elapsed_ns as f64
+            hi_fb_util: stats.bpf_stats.gstats[GSTAT_HI_FB_USAGE] as f64 / elapsed_ns as f64
                 * 100.0,
-            lo_fallback_util: stats.bpf_stats.gstats[GSTAT_LO_FALLBACK_USAGE] as f64
-                / elapsed_ns as f64
+            lo_fb_util: stats.bpf_stats.gstats[GSTAT_LO_FB_USAGE] as f64 / elapsed_ns as f64
                 * 100.0,
             fallback_cpu: fallback_cpu as u32,
             layers: BTreeMap::new(),
@@ -538,8 +534,8 @@ impl SysStats {
             fmt_pct(self.local),
             fmt_pct(self.open_idle),
             fmt_pct(self.affn_viol),
-            fmt_pct(self.hi_fallback),
-            fmt_pct(self.lo_fallback),
+            fmt_pct(self.hi_fb),
+            fmt_pct(self.lo_fb),
             self.proc_ms,
             self.nr_nodes,
         )?;
@@ -549,8 +545,8 @@ impl SysStats {
             "busy={:5.1} util/hi/lo={:7.1}/{}/{} fallback_cpu={:3}",
             self.busy,
             self.util,
-            fmt_pct(self.hi_fallback_util),
-            fmt_pct(self.lo_fallback_util),
+            fmt_pct(self.hi_fb_util),
+            fmt_pct(self.lo_fb_util),
             self.fallback_cpu,
         )?;
 
