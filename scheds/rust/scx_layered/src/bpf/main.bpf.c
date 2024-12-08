@@ -99,11 +99,6 @@ static __always_inline struct layer *lookup_layer(u32 id)
 	return &layers[id];
 }
 
-static __always_inline u64 layer_slice_ns(struct layer *layer)
-{
-	return layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
-}
-
 // return the dsq id for the layer based on the LLC id.
 static __noinline u64 layer_dsq_id(u32 layer_id, u32 llc_id)
 {
@@ -866,9 +861,8 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cpuc);
-		u64 slice_ns = layer_slice_ns(layer);
 		taskc->dsq_id = SCX_DSQ_LOCAL;
-		scx_bpf_dispatch(p, taskc->dsq_id, slice_ns, 0);
+		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, 0);
 		return cpu;
 	} else {
 		return prev_cpu;
@@ -1021,7 +1015,6 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 	try_preempt_first = cpuc->try_preempt_first;
 	cpuc->try_preempt_first = false;
-	u64 slice_ns = layer_slice_ns(layer);
 
 	if (cpuc->yielding) {
 		lstat_inc(LSTAT_YIELD, layer, cpuc);
@@ -1042,8 +1035,8 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * to one slice.
 	 */
 	maybe_update_task_llc(p, taskc, task_cpu);
-	if (vtime_before(vtime, llcc->vtime_now[layer_id] - slice_ns))
-		vtime = llcc->vtime_now[layer_id] - slice_ns;
+	if (vtime_before(vtime, llcc->vtime_now[layer_id] - layer->slice_ns))
+		vtime = llcc->vtime_now[layer_id] - layer->slice_ns;
 
 	/*
 	 * Special-case per-cpu kthreads and scx_layered userspace so that they
@@ -1061,7 +1054,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
 
 		taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
-		scx_bpf_dispatch(p, taskc->dsq_id, slice_ns, enq_flags);
+		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 		goto preempt;
 	}
 
@@ -1086,7 +1079,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		 */
 		if (!scx_bpf_dsq_nr_queued(taskc->dsq_id))
 			llcc->lo_fb_seq++;
-		scx_bpf_dispatch(p, taskc->dsq_id, slice_ns, enq_flags);
+		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 		goto preempt;
 	}
 
@@ -1123,9 +1116,9 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 	taskc->dsq_id = layer_dsq_id(layer_id, task_cpuc->llc_id);
 	if (layer->fifo)
-		scx_bpf_dispatch(p, taskc->dsq_id, slice_ns, enq_flags);
+		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 	else
-		scx_bpf_dispatch_vtime(p, taskc->dsq_id, slice_ns, vtime, enq_flags);
+		scx_bpf_dispatch_vtime(p, taskc->dsq_id, layer->slice_ns, vtime, enq_flags);
 
 preempt:
 	try_preempt(task_cpu, p, taskc, try_preempt_first, enq_flags);
@@ -1150,9 +1143,8 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 	if (taskc->dsq_id & LO_FB_DSQ_BASE)
 		goto no;
 
-	u64 slice_ns = layer_slice_ns(layer);
 	/* @p has fully consumed its slice and still wants to run */
-	cpuc->ran_current_for += slice_ns;
+	cpuc->ran_current_for += layer->slice_ns;
 
 	/*
 	 * There wasn't anything in the local or global DSQ, but there may be
@@ -1177,7 +1169,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 		 */
 		u32 dsq_id = layer_dsq_id(layer->id, cpuc->llc_id);
 		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
-			p->scx.slice = slice_ns;
+			p->scx.slice = layer->slice_ns;
 			lstat_inc(LSTAT_KEEP, layer, cpuc);
 			return true;
 		}
@@ -1203,7 +1195,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 		scx_bpf_put_idle_cpumask(idle_cpumask);
 
 		if (has_idle) {
-			p->scx.slice = slice_ns;
+			p->scx.slice = layer->slice_ns;
 			lstat_inc(LSTAT_KEEP, layer, cpuc);
 			return true;
 		}
@@ -1993,7 +1985,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	 */
 	if (cpu_layer) {
 		target_ppk = cpu_layer->owned_usage_target_ppk;
-		cpu_slice = layer_slice_ns(cpu_layer);
+		cpu_slice = cpu_layer->slice_ns;
 	} else {
 		target_ppk = 0;
 		cpu_slice = slice_ns;
@@ -2028,8 +2020,8 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		used = task_layer->min_exec_ns;
 	}
 
-	if (cpuc->yielding && used < slice_ns)
-		used = slice_ns;
+	if (cpuc->yielding && used < task_layer->slice_ns)
+		used = task_layer->slice_ns;
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 	cpuc->maybe_idle = true;
 }
