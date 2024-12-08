@@ -486,6 +486,18 @@ struct Opts {
     #[clap(long, default_value = "false")]
     local_llc_iteration: bool,
 
+    /// Low priority fallback DSQs are used to execute tasks with custom CPU
+    /// affinities. These DSQs are immediately executed iff a CPU is
+    /// otherwise idle. However, after the specified wait, they are
+    /// guranteed upto --lo-fb-share fraction of each CPU.
+    #[clap(long, default_value = "10000")]
+    lo_fb_wait_us: u64,
+
+    /// The fraction of CPU time guaranteed to low priority fallback DSQs.
+    /// See --lo-fb-wait-us.
+    #[clap(long, default_value = ".05")]
+    lo_fb_share: f64,
+
     /// Disable antistall
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
@@ -1577,12 +1589,11 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
         skel.maps.rodata_data.antistall_sec = opts.antistall_sec;
-        if opts.monitor_disable {
-            skel.maps.rodata_data.monitor_disable = opts.monitor_disable;
-        }
-        if opts.disable_antistall {
-            skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
-        }
+        skel.maps.rodata_data.monitor_disable = opts.monitor_disable;
+        skel.maps.rodata_data.lo_fb_wait_ns = opts.lo_fb_wait_us * 1000;
+        skel.maps.rodata_data.lo_fb_share_ppk = ((opts.lo_fb_share * 1024.0) as u32).clamp(1, 1024);
+        skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
+
         for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
             skel.maps.rodata_data.__sibling_cpu[cpu] = *sib;
         }

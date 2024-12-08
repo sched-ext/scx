@@ -43,6 +43,8 @@ const volatile unsigned char all_cpus[MAX_CPUS_U8];
 const volatile u32 layer_iteration_order[MAX_LAYERS];
 const volatile u32 nr_open_preempt_layers;	/* open/grouped && preempt */
 const volatile u32 nr_open_layers;		/* open/grouped && !preempt */
+const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
+const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
@@ -1064,32 +1066,22 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * As an open or grouped layer is consumed from all CPUs, a task which
-	 * belongs to such a layer can be safely put in the layer's DSQ
-	 * regardless of its cpumask. However, a task with custom cpumask in a
-	 * confined layer may fail to be consumed for an indefinite amount of
-	 * time. Queue them to the fallback DSQ.
+	 * Put tasks with custom affinities into a lo fallback DSQ which is
+	 * guaranteed the lo_fb_share_ppk fraction of each CPU once the tasks
+	 * have been queued on it longer than lo_fb_wait_ns.
 	 *
-	 * XXX - An open or grouped layer is no longer always consumed from all
-	 * CPUs as owned protection can make a CPU execute only the owning
-	 * layer. For now, throw all tasks with custom affinities to hi fallback
-	 * DSQs. Later, implement starvation prevention for lo fallback DSQs and
-	 * put them there. Also, this should become node aware so that
-	 * node-affine tasks aren't thrown into the fallback DSQs.
+	 * FIXME: This must be made node-aware so that tasks that are
+	 * node-affined don't get thrown into lo fallback DSQs.
 	 */
-	if (/*layer->kind == LAYER_KIND_CONFINED && */!taskc->all_cpus_allowed) {
-		lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
+	if (!taskc->all_cpus_allowed) {
+		taskc->dsq_id = task_cpuc->lo_fb_dsq_id;
 		/*
-		 * We were previously dispatching to LO_FB_DSQ for any
-		 * affinitized, non-PCPU kthreads, but found that starvation
-		 * became an issue when the system was under heavy load.
-		 *
-		 * Longer term, we can address this by implementing layer
-		 * weights and applying that to fallback DSQs to avoid
-		 * starvation. For now, we just dispatch all affinitized tasks
-		 * to the LLC local HI_FB_DSQ to avoid this starvation issue.
+		 * Start a new lo fallback queued region if the DSQ is empty.
+		 * While the following is racy, all that's needed is at least
+		 * one of the racing updates to succeed, which is guaranteed.
 		 */
-		taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
+		if (!scx_bpf_dsq_nr_queued(taskc->dsq_id))
+			llcc->lo_fb_seq++;
 		scx_bpf_dispatch(p, taskc->dsq_id, slice_ns, enq_flags);
 		goto preempt;
 	}
@@ -1141,13 +1133,17 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 	struct layer *layer;
 
 	if (cpuc->yielding || !max_exec_ns)
-		return false;
+		goto no;
 
 	/* does it wanna? */
 	if (!(p->scx.flags & SCX_TASK_QUEUED))
 		goto no;
 
 	if (!(taskc = lookup_task_ctx(p)) || !(layer = lookup_layer(taskc->layer_id)))
+		goto no;
+
+	/* tasks running in low fallback doesn't get to continue */
+	if (taskc->dsq_id & LO_FB_DSQ_BASE)
 		goto no;
 
 	u64 slice_ns = layer_slice_ns(layer);
@@ -1381,7 +1377,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	struct layer *owner_layer = NULL;
 	struct cpu_ctx *cpuc, *sib_cpuc;
 	struct llc_ctx *llcc;
-	bool tried_owner = false;
+	bool tried_owner = false, tried_lo_fb = false;
 	s32 sib = sibling_cpu(cpu);
 
 	if (!(cpuc = lookup_cpu_ctx(-1)))
@@ -1442,6 +1438,42 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			       MAX_LAYERS, cpuc, llcc)) {
 	}
 
+	/*
+	 * Low fallback DSQ execution is forced upto lo_fb_share_ppk fraction
+	 * after the DSQ had tasks queued for longer than lo_fb_wait_ns.
+	 */
+	if (scx_bpf_dsq_nr_queued(cpuc->lo_fb_dsq_id)) {
+		u64 now = bpf_ktime_get_ns();
+		u64 dur, usage;
+
+		/*
+		 * llcc->lo_fb_seq is bumped whenever the low fallback DSQ
+		 * transitions from empty, which triggers a new lo_fb_wait_ns
+		 * window on each CPU. CPUs would reach here at different times
+		 * hopefully avoiding thundering herd.
+		 */
+		if (cpuc->lo_fb_seq != llcc->lo_fb_seq) {
+			cpuc->lo_fb_seq_at = now;
+			cpuc->lo_fb_usage_base = cpuc->gstats[GSTAT_LO_FB_USAGE];
+			cpuc->lo_fb_seq = llcc->lo_fb_seq;
+		}
+
+		/*
+		 * lo_fb_share_ppk is applied only after lo_fb_wait_ns has
+		 * passed. Always add lo_fb_wait_ns to usage so that the wait
+		 * period doesn't contribute to the execution budget.
+		 */
+		dur = now - cpuc->lo_fb_seq_at;
+		usage = cpuc->gstats[GSTAT_LO_FB_USAGE] + lo_fb_wait_ns -
+			cpuc->lo_fb_usage_base;
+
+		if (dur > lo_fb_wait_ns && 1024 * usage < lo_fb_share_ppk * dur) {
+			if (scx_bpf_consume(cpuc->lo_fb_dsq_id))
+				return;
+			tried_lo_fb = true;
+		}
+	}
+
 	/* owner before preempt layers if protected or preempting */
 	if (owner_layer && (cpuc->protect_owned || owner_layer->preempt)) {
 		if (try_consume_layer(owner_layer->id, cpuc, llcc))
@@ -1464,7 +1496,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			       cpuc->layer_id, cpuc, llcc))
 		return;
 
-	scx_bpf_consume(cpuc->lo_fb_dsq_id);
+	if (!tried_lo_fb && scx_bpf_consume(cpuc->lo_fb_dsq_id))
+		return;
 }
 
 static __noinline bool match_one(struct layer_match *match,

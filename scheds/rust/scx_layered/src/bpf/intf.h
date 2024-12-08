@@ -172,6 +172,10 @@ struct cpu_ctx {
 	u32			node_id;
 	u32			perf;
 
+	u64			lo_fb_seq;
+	u64			lo_fb_seq_at;
+	u64			lo_fb_usage_base;
+
 	u32			open_preempt_layer_order[MAX_LAYERS];
 	u32			open_layer_order[MAX_LAYERS];
 
@@ -190,6 +194,7 @@ struct llc_ctx {
 	u32			nr_cpus;
 	u64			vtime_now[MAX_LAYERS];
 	u64			queued_runtime[MAX_LAYERS];
+	u64			lo_fb_seq;
 	u64			lstats[MAX_LAYERS][NR_LLC_LSTATS];
 	struct llc_prox_map	prox_map;
 };
