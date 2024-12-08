@@ -1066,14 +1066,18 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Put tasks with custom affinities into a lo fallback DSQ which is
-	 * guaranteed the lo_fb_share_ppk fraction of each CPU once the tasks
-	 * have been queued on it longer than lo_fb_wait_ns.
+	 * Put tasks with custom affinities or from empty layers into the low
+	 * fallback DSQ which is guaranteed the lo_fb_share_ppk fraction of each
+	 * CPU once the tasks have been queued on it longer than lo_fb_wait_ns.
+	 *
+	 * When racing against layer CPU allocation updates, tasks with full
+	 * affninty may end up in the DSQs of an empty layer. They are handled
+	 * by the fallback_cpu.
 	 *
 	 * FIXME: This must be made node-aware so that tasks that are
 	 * node-affined don't get thrown into lo fallback DSQs.
 	 */
-	if (!taskc->all_cpus_allowed) {
+	if (!taskc->all_cpus_allowed || !layer->nr_cpus) {
 		taskc->dsq_id = task_cpuc->lo_fb_dsq_id;
 		/*
 		 * Start a new lo fallback queued region if the DSQ is empty.
@@ -1436,6 +1440,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (cpuc->cpu == fallback_cpu &&
 	    try_consume_layers(empty_layer_ids, nr_empty_layer_ids,
 			       MAX_LAYERS, cpuc, llcc)) {
+		cpuc->running_fallback = true;
+		return;
 	}
 
 	/*
@@ -1902,12 +1908,8 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	cpuc->running_at = now;
 	taskc->running_at = now;
 
-	/*
-	 * A CPU is running an owned task if the task is on the layer owning the
-	 * CPU or the CPU is the fallback and the layer is empty.
-	 */
-	cpuc->running_owned = taskc->layer_id == cpuc->layer_id ||
-		(cpuc->cpu == fallback_cpu && !layer->nr_cpus);
+	/* running an owned task if the task is on the layer owning the CPU */
+	cpuc->running_owned = taskc->layer_id == cpuc->layer_id;
 
 	/*
 	 * If this CPU is transitioning from running an exclusive task to a
@@ -1943,13 +1945,11 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct task_ctx *taskc;
 	struct layer *task_layer, *cpu_layer = NULL;
 	u64 now = bpf_ktime_get_ns();
-	bool is_fallback;
 	s32 task_lid, target_ppk;
 	u64 used, cpu_slice;
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
-	is_fallback = cpuc->cpu == fallback_cpu;
 
 	task_lid = taskc->layer_id;
 	if (!(task_layer = lookup_layer(task_lid)))
@@ -1983,6 +1983,11 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		gstat_add(GSTAT_LO_FB_USAGE, cpuc, used);
 	}
 
+	if (cpuc->running_fallback) {
+		gstat_add(GSTAT_FB_CPU_USAGE, cpuc, used);
+		cpuc->running_fallback = false;
+	}
+
 	/*
 	 * Owned execution protection.
 	 */
@@ -1993,18 +1998,6 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		target_ppk = 0;
 		cpu_slice = slice_ns;
 	}
-
-	/*
-	 * For the fallback CPU, execution for layers without any CPU counts as
-	 * owned. Guarantee that at least half of the fallback CPU is used for
-	 * empty execution so that empty layers can easily ramp up even when
-	 * there are saturating preempt layers. Note that a fallback DSQ may
-	 * belong to a layer under saturation. In such cases, tasks from both
-	 * the owner and empty layers would count as owned with empty layers
-	 * being prioritized.
-	 */
-	if (is_fallback && target_ppk < 512)
-		target_ppk = 512;
 
 	/*
 	 * Apply owned protection iff the CPU stayed saturated for longer than

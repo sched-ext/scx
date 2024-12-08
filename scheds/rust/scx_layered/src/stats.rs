@@ -35,6 +35,7 @@ const GSTAT_HI_FB_EVENTS: usize = bpf_intf::global_stat_id_GSTAT_HI_FB_EVENTS as
 const GSTAT_HI_FB_USAGE: usize = bpf_intf::global_stat_id_GSTAT_HI_FB_USAGE as usize;
 const GSTAT_LO_FB_EVENTS: usize = bpf_intf::global_stat_id_GSTAT_LO_FB_EVENTS as usize;
 const GSTAT_LO_FB_USAGE: usize = bpf_intf::global_stat_id_GSTAT_LO_FB_USAGE as usize;
+const GSTAT_FB_CPU_USAGE: usize = bpf_intf::global_stat_id_GSTAT_FB_CPU_USAGE as usize;
 
 const LSTAT_SEL_LOCAL: usize = bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL as usize;
 const LSTAT_ENQ_WAKEUP: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_WAKEUP as usize;
@@ -481,6 +482,8 @@ pub struct SysStats {
     #[stat(desc = "fallback CPU")]
     pub fallback_cpu: u32,
     #[stat(desc = "per-layer statistics")]
+    pub fallback_cpu_util: f64,
+    #[stat(desc = "fallback CPU util %")]
     pub layers: BTreeMap<String, LayerStats>,
 }
 
@@ -522,6 +525,9 @@ impl SysStats {
             lo_fb_util: stats.bpf_stats.gstats[GSTAT_LO_FB_USAGE] as f64 / elapsed_ns as f64
                 * 100.0,
             fallback_cpu: fallback_cpu as u32,
+            fallback_cpu_util: stats.bpf_stats.gstats[GSTAT_FB_CPU_USAGE] as f64
+                / elapsed_ns as f64
+                * 100.0,
             layers: BTreeMap::new(),
         })
     }
@@ -542,12 +548,13 @@ impl SysStats {
 
         writeln!(
             w,
-            "busy={:5.1} util/hi/lo={:7.1}/{}/{} fallback_cpu={:3}",
+            "busy={:5.1} util/hi/lo={:7.1}/{}/{} fallback_cpu/util={:3}/{:4.1}",
             self.busy,
             self.util,
             fmt_pct(self.hi_fb_util),
             fmt_pct(self.lo_fb_util),
             self.fallback_cpu,
+            self.fallback_cpu_util,
         )?;
 
         writeln!(

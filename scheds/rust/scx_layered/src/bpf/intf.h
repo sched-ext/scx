@@ -89,6 +89,7 @@ enum global_stat_id {
 	GSTAT_HI_FB_USAGE,
 	GSTAT_LO_FB_EVENTS,
 	GSTAT_LO_FB_USAGE,
+	GSTAT_FB_CPU_USAGE,
 	NR_GSTATS,
 };
 
@@ -151,6 +152,7 @@ struct cpu_ctx {
 
 	bool			protect_owned;
 	bool			running_owned;
+	bool			running_fallback;
 	u64			running_at;
 
 	u64			layer_usages[MAX_LAYERS][NR_LAYER_USAGES];
