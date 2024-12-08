@@ -30,10 +30,10 @@ kprobe:scx_bpf_dispatch_vtime,
 	$task = (struct task_struct *)arg0;
 	$dsq = arg1;
 
-	if ($1 > 0 && $task->tgid != $1) {
+	if ($1 > 0 && $task->tgid != (int32) $1) {
 		return;
 	}
-	if ($2 > 0 && $2 != $dsq) {
+	if ($2 >= 0 && $2 != $dsq && $# == 2) {
 		return;
 	}
 
@@ -49,19 +49,19 @@ rawtracepoint:sched_switch
 	$next = (struct task_struct *)arg2;
 	$prev_state = arg3;
 
-	if ($1 > 0 && $next->tgid != $1) {
+	if ($1 > 0 && $next->tgid != (int32) $1) {
 		return;
 	}
 
 	$start = @qtime[$next->pid];
 	$dsq = @task_dsq[$next->pid];
-	if ($2 > 0 && $2 != $dsq) {
+	if ($2 >= 0 && $2 != $dsq && $# == 2) {
 		delete(@qtime[$next->pid]);
 		delete(@task_dsq[$next->pid]);
 		return;
 	}
 
-	if ($start && $dsq > 0 && $dsq < 2<<16) {
+	if ($start && $dsq >= 0 && $dsq < (uint64) 2<<16) {
 		$dur = nsecs - $start;
 		$usec = $dur / 1000;
 		@lat_avg_usec[$dsq] = avg($usec);
@@ -77,4 +77,9 @@ interval:s:1 {
 	print(@lat_avg_usec);
 	print(@dsq_hist_usec);
 	print(@dsq_lat_avg_usec);
+}
+
+END {
+	clear(@task_dsq);
+	clear(@qtime);
 }
