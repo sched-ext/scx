@@ -1,0 +1,340 @@
+#!/usr/bin/env bpftrace
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+
+// This software may be used and distributed according to the terms of the
+// GNU General Public License version 2.
+
+
+// (struct tty_struct *tty, const unsigned char *buf, int c)
+kprobe:pty_write
+/ arg2 == 1 /
+{
+	@key = *((int8*)arg1);
+}
+
+BEGIN
+{
+	@in_help = false;
+	@show_dsq = true;
+	@show_cpu = true;
+	printf("\033[H\033[2J"); // clear screen
+}
+
+profile:hz:99 {
+	@cpus[cpu] = cpu;
+}
+
+kprobe:scx_bpf_cpuperf_set
+{
+	$cpu = arg0;
+	$perf = arg1;
+
+	@freq[$cpu] = $perf;
+}
+
+kprobe:scx_bpf_dsq_insert_vtime,
+kprobe:scx_bpf_dispatch_vtime,
+{
+	$task = (struct task_struct *)arg0;
+	$dsq = arg1;
+	$vtime = arg3;
+
+	if ($dsq >= 0 && $dsq < 2<<14) {
+		@task_lat[$task->pid] = nsecs;
+		@task_dsqs[$task->pid] = $dsq;
+		// HACK add 1 to the dsq for handling
+		// zero values
+		$dsq_id = $dsq + 1;
+		if (!has_key(@vtime_dsqs, $dsq_id)) {
+			@vtime_dsqs[$dsq_id] = 1;
+		}
+	}
+}
+
+kprobe:scx_bpf_dsq_insert,
+kprobe:scx_bpf_dispatch,
+{
+	$task = (struct task_struct *)arg0;
+	$dsq = arg1;
+
+	if ($dsq >= 0 && $dsq < 2<<14) {
+		@task_lat[$task->pid] = nsecs;
+		@task_dsqs[$task->pid] = $dsq;
+		$dsq_id = $dsq + 1;
+		if (!has_key(@fifo_dsqs, $dsq_id)) {
+			@fifo_dsqs[$dsq_id] = 1;
+		}
+	}
+}
+
+rawtracepoint:sched_wakeup,
+rawtracepoint:sched_wakeup_new,
+{
+	// on wakeup track the depth of the dsq
+	$task = (struct task_struct *)arg0;
+	$dsq = $task->scx.dsq->id;
+
+	if ($dsq >= 0 && $dsq < 2<<14) {
+		$nr = $task->scx.dsq->nr;
+		$weight = $task->scx.weight;
+		// HACK: for all DSQs add 1
+		// because of zero value map values
+		$dsq_id = $dsq + 1;
+		$max = @dsq_nr_max[$dsq_id];
+		if ($nr > $max) {
+			@dsq_nr_max[$dsq_id] = $nr;
+		}
+		@dsq_nr_avg[$dsq_id] = avg($nr);
+		@dsq_weight_avg[$dsq_id] = avg($weight);
+		@dsq_weight_max[$dsq_id] = max($weight);
+	}
+}
+
+rawtracepoint:sched_switch
+{
+	$prev = (struct task_struct *)arg1;
+	$next = (struct task_struct *)arg2;
+	$prev_state = arg3;
+
+	$dsq = @task_dsqs[$next->pid];
+	$lat = (nsecs - @task_lat[$next->pid]) / 1000;
+	@cpu_dsqs[cpu, $dsq] = 1;
+	@cpu_lat_avg[cpu] = avg($lat);
+	$max_lat = @cpu_lat_max[cpu];
+	if ($lat > $max_lat) {
+		@cpu_lat_max[cpu] = $lat;
+	}
+
+	delete(@task_dsqs[$next->pid]);
+	delete(@task_lat[$next->pid]);
+}
+
+// TODO
+// hardware:cache-misses
+// {
+// 	@cache_misses[arg0] = count();
+// }
+
+interval:ms:250
+{
+	printf("\033[H\033[2J"); // clear screen
+	printf("\033[H"); // move cursor to top left
+	$max_lat = (uint64)0;
+	$max_freq = 0;
+	$max_dsq_nr = 0;
+	$scx_ops = kaddr("scx_ops");
+	$ops = (struct sched_ext_ops*)$scx_ops;
+	if ($ops->name == "\0") {
+		printf("\033[31mNo sched_ext scheduler running\033[0m\n");
+		return;
+	}
+
+	if (@key == 113) {
+		@in_help = false;
+	} else if (@key == 100) {
+		@show_dsq = !@show_dsq;
+	} else if (@key == 120) {
+		exit();
+	} else if (@key == 99) {
+		@show_cpu = !@show_cpu;
+	} else if (@key == 104 || @in_help) {
+		@in_help = true;
+		$enabled = "\033[32menabled\033[0m";
+		$disabled = "\033[31mdisabled\033[0m";
+		printf("\033[36mscxtop\033[0m key bindings:\n");
+		printf("\033[31mq\033[0m: exit help menu\n");
+		printf("\033[31mx\033[0m: exit scxtop\n");
+		printf("\033[32mc\033[0m: toggle CPU chart (%s)\n",
+			@show_cpu ? $enabled : $disabled);
+		printf("\033[32md\033[0m: toggle DSQ chart (%s)\n",
+			@show_dsq ? $enabled : $disabled);
+		return;
+	}
+
+	// guh... have to clear out tmp maps
+	for ($kv : @tmp_cpu_dsq) {
+		@tmp_cpu_dsq[$kv.0.0, $kv.0.1] = 0;
+	}
+	// manual clear
+	for ($kv : @cpu_dsq_count) {
+		@cpu_dsq_count[$kv.0] = 0;
+	}
+
+	// count the number of dsqs the cpu consumed from
+	for ($kv : @cpu_dsqs) {
+		$val = @tmp_cpu_dsq[$kv.0.0, $kv.0.1];
+		if ($val == 0) {
+			@cpu_dsq_count[$kv.0.0] += 1;
+			@tmp_cpu_dsq[$kv.0.0, $kv.0.1] = 1;
+		}
+	}
+
+	for ($kv : @cpus) {
+		$lat = @cpu_lat_max[$kv.0];
+		if ($lat > $max_lat) {
+			$max_lat = $lat;
+		}
+		$freq = (int64)@freq[$kv.0];
+		if ($freq > $max_freq) {
+			$max_freq = $freq;
+		}
+	}
+
+	$x = 0;
+	unroll(74) {
+		if ($x == 0) {
+			printf("╔");
+		} else if ($x == 73) {
+			printf("╗");
+		} else if ($x == 20) {
+			printf("scxtop");
+		} else if ($x < 20 || $x > 26) {
+			printf("═");
+		}
+		$x += 1;
+	}
+	printf("\n");
+
+	// loop twice, because we're nice
+	for ($kv : @cpus) {
+		$freq = @freq[$kv.0];
+		$lat_avg = (uint64)@cpu_lat_avg[$kv.0];
+		$lat_max = @cpu_lat_max[$kv.0];
+		$dsq_count = @cpu_dsq_count[$kv.0];
+		$freq_color = "\033[32m";
+		$freq_pad = "    ";
+		$clr_color = "\033[0m";
+		if ($freq >= 10 && $freq < 100) {
+			$freq_pad = "   ";
+		} else if ($freq >= 100 && $freq < 1000) {
+			$freq_pad = "  ";
+		} else if ($freq >= 1000) {
+			$freq_pad = " ";
+		}
+		if ($max_freq > 0 && $freq == $max_freq) {
+			$freq_color = "\033[31m";
+		} else if ($max_lat > 2 && $freq > $max_freq / 2) {
+			$freq_color = "\033[33m";
+		}
+		$pad = "\t";
+		if ($lat_avg == 0 && $lat_max == 0) {
+			$pad = "\t\t\t\t";
+		} else if ($lat_avg == 0 || $lat_max == 0) {
+			$pad = "\t\t";
+		} else if ($lat_avg < 1000 || $lat_max < 1000) {
+			$pad = "\t\t";
+		}
+		$lat_color = "\033[32m";
+		if ($lat_max == $max_lat) {
+			$lat_color = "\033[31m";
+		} else if ($lat_max > $max_lat / 2) {
+			$lat_color = "\033[33m";
+		} else {
+			$lat_color = "\033[32m";
+		}
+		if (@show_cpu) {
+			printf("║cpu:%d\tfreq:%s%d%s%sdsqs:%d lat_avg/lat_max%s(%lld,%lld)%s%s║\n",
+				$kv.0, $freq_color, $freq, $freq_pad, $clr_color,
+				$dsq_count, $lat_color, $lat_avg, $lat_max, $clr_color, $pad);
+		}
+	}
+	$x = 0;
+	unroll(73) {
+		if ($x == 0) {
+			printf("╚");
+		} else if ($x == 72) {
+			printf("╝");
+		} else {
+			printf("═");
+		}
+		$x += 1;
+	}
+	printf("\n");
+
+	// DSQs
+	$x = 0;
+	unroll(74) {
+		if ($x == 0) {
+			printf("╔");
+		} else if ($x == 73) {
+			printf("╗");
+		} else if ($x == 25) {
+			printf("DSQs");
+		} else if ($x < 25 || $x > 29) {
+			printf("═");
+		}
+		$x += 1;
+	}
+	printf("\n");
+	for ($kv : @dsq_nr_avg) {
+		$dsq_id = $kv.0;
+		$dsq = $dsq_id;
+		// HACK: correct dsq id
+		if ($dsq > 0) {
+			$dsq = $dsq_id - 1;
+		}
+		$nr_avg = $kv.1;
+		$nr_max = @dsq_nr_max[$dsq_id];
+		$weight_avg = (int64)@dsq_weight_avg[$dsq_id];
+		$weight_max = (int64)@dsq_weight_max[$dsq_id];
+		$is_vtime = has_key(@vtime_dsqs, $dsq_id);
+		$pad_rear = "\t";
+		$kind = "\033[35mvtime\033[0m";
+		if (!$is_vtime) {
+			$kind = "\033[36mfifo\033[0m";
+		}
+		if ($dsq_id > 0 && @show_dsq) {
+			printf("║dsq(%s):0x%08X nr_avg/nr_max(%lld,%lld)",
+				$kind, $dsq, (int64)$nr_avg, $nr_max);
+			printf(" wght_avg/wght_max(%d,%d)", $weight_avg, $weight_max);
+			printf("%s║\n", $pad_rear);
+		}
+	}
+	$x = 0;
+	unroll(73) {
+		if ($x == 0) {
+			printf("╚");
+		} else if ($x == 72) {
+			printf("╝");
+		} else {
+			printf("═");
+		}
+		$x += 1;
+	}
+	printf("\n");
+
+	// reset for next period
+	clear(@vtime_dsqs);
+	clear(@fifo_dsqs);
+	clear(@cpu_lat_avg);
+	clear(@cpu_lat_max);
+	clear(@cpu_dsqs);
+	clear(@freq);
+	clear(@dsq_nr_avg);
+	clear(@dsq_nr_max);
+	clear(@dsq_weight_avg);
+	clear(@dsq_weight_max);
+}
+
+END {
+	clear(@cpu_dsqs);
+	clear(@task_dsqs);
+	clear(@tmp_cpu_dsq);
+	clear(@cpus);
+	clear(@key);
+	clear(@freq);
+	clear(@vtime_dsqs);
+	clear(@fifo_dsqs);
+	clear(@cpu_lat_avg);
+	clear(@cpu_lat_max);
+	clear(@cpu_dsqs);
+	clear(@dsq_nr_avg);
+	clear(@dsq_nr_max);
+	clear(@dsq_weight_avg);
+	clear(@dsq_weight_max);
+	clear(@cpu_dsq_count);
+	clear(@task_lat);
+	clear(@in_help);
+	clear(@show_dsq);
+	clear(@show_cpu);
+}
