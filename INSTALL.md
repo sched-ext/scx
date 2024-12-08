@@ -2,36 +2,58 @@
 
 ## Ubuntu
 
-Experimental sched_ext support for Ubuntu is provided by the following
-launchpad project:
+`sched_ext` support for Ubuntu is currently provided by the linux-unstable
+kernel, available at
+[ppa:canonical-kernel-team/unstable](https://launchpad.net/~canonical-kernel-team/+archive/ubuntu/unstable).
 
- https://launchpad.net/~arighi/+archive/ubuntu/sched-ext
+#### Upgrading to 25.04 (Plucky Puffin) - recommended
 
-#### Upgrading to 24.04 (NobleNumbat)
-
-Currently, only the 24.04 release is supported. You can upgrade to 24.04
+Currently, only the 25.04 release is supported. You can upgrade to 25.04
 using the following command:
 
 ```
 $ sudo do-release-upgrade -d
 ```
 
-#### Installing the Kernel and Schedulers
+#### Enable ppa:canonical-kernel-team/unstable
 
 ```
-$ sudo add-apt-repository -y --enable-source ppa:arighi/sched-ext
-$ sudo apt install -y linux-generic-wip scx
+$ sudo add-apt-repository -y --enable-source ppa:canonical-kernel-team/unstable
+```
+
+If you are **not** on Ubuntu 25.04, make sure to select `plucky` as the release
+for the linux-unstable ppa:
+```
+$ sudo sed -i "s/^Suites: .*/Suites: plucky/" \
+  /etc/apt/sources.list.d/canonical-kernel-team-ubuntu-unstable-plucky.sources
+```
+
+#### Installing the linux-unstable Kernel
+
+```
+$ sudo apt install -y linux-generic-wip
 $ sudo reboot
 ```
-
-After the reboot, the scheduler binaries in `/usr/sbin/scx_*` should be usable.
-Note: they must be called with `sudo` like other BPF programs e.g. `sudo scx_simple`.
 
 #### Setting up Dev Environment
 
 ```
-$ apt source scx
-$ sudo apt build-dep scx
+$ sudo apt install -y build-essential meson cmake cargo rustc clang llvm pkg-config libelf-dev
+```
+
+#### Build the scx schedulers from source
+
+```
+$ git clone https://github.com/sched-ext/scx.git
+$ cd scx
+$ meson setup build
+$ meson compile -C build
+```
+
+#### Install the scx schedulers from source
+
+```
+$ meson install -C build
 ```
 
 ## Arch Linux
