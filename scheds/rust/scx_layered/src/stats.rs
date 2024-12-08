@@ -68,6 +68,14 @@ const LSTAT_XLAYER_REWAKE: usize = bpf_intf::layer_stat_id_LSTAT_XLAYER_REWAKE a
 const LLC_LSTAT_LAT: usize = bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize;
 const LLC_LSTAT_CNT: usize = bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize;
 
+fn calc_frac(a: f64, b: f64) -> f64 {
+    if b != 0.0 {
+        a / b * 100.0
+    } else {
+        0.0
+    }
+}
+
 fn fmt_pct(v: f64) -> String {
     if v >= 99.995 {
         format!("{:5.1}", v)
@@ -212,27 +220,16 @@ impl LayerStats {
                 0.0
             }
         };
-        let calc_frac = |a, b| {
-            if b != 0.0 {
-                a / b * 100.0
-            } else {
-                0.0
-            }
-        };
 
         let util_sum = stats.layer_utils[lidx]
             .iter()
-            .take(LAYER_USAGE_SUM_UPTO)
+            .take(LAYER_USAGE_SUM_UPTO + 1)
             .sum::<f64>();
 
         Self {
             index: lidx,
             util: util_sum * 100.0,
-            util_open_frac: if util_sum != 0.0 {
-                stats.layer_utils[lidx][LAYER_USAGE_OPEN] / util_sum * 100.0
-            } else {
-                0.0
-            },
+            util_open_frac: calc_frac(stats.layer_utils[lidx][LAYER_USAGE_OPEN], util_sum),
             util_frac: calc_frac(util_sum, stats.total_util),
             tasks: stats.nr_layer_tasks[lidx] as u32,
             total: ltotal,
@@ -502,8 +499,14 @@ impl SysStats {
             local: lsum_pct(LSTAT_SEL_LOCAL),
             open_idle: lsum_pct(LSTAT_OPEN_IDLE),
             affn_viol: lsum_pct(LSTAT_AFFN_VIOL),
-            hi_fb: stats.bpf_stats.gstats[GSTAT_HI_FB_EVENTS] as f64 / total as f64 * 100.0,
-            lo_fb: stats.bpf_stats.gstats[GSTAT_LO_FB_EVENTS] as f64 / total as f64 * 100.0,
+            hi_fb: calc_frac(
+                stats.bpf_stats.gstats[GSTAT_HI_FB_EVENTS] as f64,
+                total as f64,
+            ),
+            lo_fb: calc_frac(
+                stats.bpf_stats.gstats[GSTAT_LO_FB_EVENTS] as f64,
+                total as f64,
+            ),
             excl_collision: lsum_pct(LSTAT_EXCL_COLLISION),
             excl_preempt: lsum_pct(LSTAT_EXCL_PREEMPT),
             excl_idle: bstats.gstats[GSTAT_EXCL_IDLE] as f64 / total as f64,
