@@ -1862,13 +1862,13 @@ impl<'a> Scheduler<'a> {
         let mut ascending: Vec<(usize, usize)> = targets.iter().copied().enumerate().collect();
         ascending.sort_by(|a, b| a.1.cmp(&b.1));
 
-        // If any layer is growing from 0 CPU, guarantee that the largest
-        // layer that is freeing CPUs frees at least one CPU.
+        // If any layer is growing, guarantee that the largest layer that is
+        // freeing CPUs frees at least one CPU.
         let mut force_free = self
             .layers
             .iter()
             .zip(targets.iter())
-            .any(|(layer, &target)| layer.nr_cpus == 0 && target > 0);
+            .any(|(layer, &target)| layer.nr_cpus < target);
 
         // Shrink all layers first so that CPUs are available for
         // redistribution. Do so in the descending target number of CPUs
