@@ -160,10 +160,7 @@ struct cpu_ctx {
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
 	u64			ran_current_for;
 
-	u64			owned_usage;
-	u64			open_usage;
-	u64			prev_owned_usage[2];
-	u64			prev_open_usage[2];
+	u64			usage;
 	u64			usage_at_idle;
 
 	u64			hi_fb_dsq_id;
@@ -273,7 +270,6 @@ struct layer {
 	bool			exclusive;
 	int			growth_algo;
 
-	u32			owned_usage_target_ppk;
 	u64			nr_tasks;
 
 	u64			cpus_seq;

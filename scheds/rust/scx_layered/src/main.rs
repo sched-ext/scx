@@ -1085,25 +1085,6 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn layer_owned_usage_target_ppk(util_range: Option<(f64, f64)>, avg_util: f64) -> u32 {
-        let util_high = util_range.unwrap_or((0.0, 0.0)).1;
-
-        /*
-         * If avg_util is lower than high threshold, protect upto high
-         * threashold + 5%. If higher, avg_util + 10%. This guarantees that
-         * owned usage can always grow beyond the high threshold to trigger
-         * layer growth and the layer can eventually use all of the CPUs
-         * allocated to it when the machine is saturated.
-         */
-        let target = if avg_util < util_high {
-            util_high + 0.05
-        } else {
-            avg_util + 0.1
-        };
-
-        ((target * 1024.0) as u32).min(1024)
-    }
-
     fn init_layers(skel: &mut OpenBpfSkel, specs: &Vec<LayerSpec>, topo: &Topology) -> Result<()> {
         skel.maps.rodata_data.nr_layers = specs.len() as u32;
         let mut perf_set = false;
@@ -1206,8 +1187,6 @@ impl<'a> Scheduler<'a> {
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;
                 layer.xllc_mig_min_ns = (xllc_mig_min_us * 1000.0) as u64;
-                layer.owned_usage_target_ppk =
-                    Self::layer_owned_usage_target_ppk(spec.kind.util_range(), 0.0);
                 layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
                 layer.node_mask = nodemask_from_nodes(nodes) as u64;
@@ -2028,30 +2007,6 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn refresh_owned_usage_target_ppks(&mut self) {
-        // Update target_ppks according to the current avg utilization and
-        // CPU allocation. See layer_owned_usage_target_ppk().
-        let utils = &self.sched_stats.layer_utils;
-
-        for (idx, layer) in self.layers.iter().enumerate() {
-            let bpf_layer = &mut self.skel.maps.bss_data.layers[idx];
-
-            let util = utils[idx][LAYER_USAGE_OWNED];
-            // max(1) is for the fallback CPU.
-            let avg_util = util / layer.cpus.count_ones().max(1) as f64;
-
-            bpf_layer.owned_usage_target_ppk =
-                Self::layer_owned_usage_target_ppk(layer.kind.util_range(), avg_util);
-        }
-
-        // See main.bpf.c::cpuc_shift_owned_open_usages().
-        let input = ProgramInput {
-            ..Default::default()
-        };
-        let prog = &mut self.skel.progs.shift_owned_open_usages;
-        let _ = prog.test_run(input);
-    }
-
     fn step(&mut self) -> Result<()> {
         let started_at = Instant::now();
         self.sched_stats.refresh(
@@ -2061,7 +2016,6 @@ impl<'a> Scheduler<'a> {
             self.processing_dur,
         )?;
         self.refresh_cpumasks()?;
-        self.refresh_owned_usage_target_ppks();
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
     }

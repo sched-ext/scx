@@ -269,32 +269,6 @@ static struct cpumask *lookup_layer_cpumask(u32 layer_id)
 }
 
 /*
- * To determine whether to protect owned usage on this CPU, track owned and open
- * usages since the past two periods so that we are always considering at least
- * one full period.
- */
-static void cpuc_shift_owned_open_usages(struct cpu_ctx *cpuc)
-{
-	cpuc->prev_owned_usage[0] = cpuc->prev_owned_usage[1];
-	cpuc->prev_owned_usage[1] = cpuc->owned_usage;
-	cpuc->prev_open_usage[0] = cpuc->prev_open_usage[1];
-	cpuc->prev_open_usage[1] = cpuc->open_usage;
-}
-
-/* called before refresh_layer_cpumasks() on every period */
-SEC("syscall")
-int BPF_PROG(shift_owned_open_usages)
-{
-	struct cpu_ctx *cpuc;
-	s32 cpu;
-
-	bpf_for(cpu, 0, nr_possible_cpus)
-		if ((cpuc = lookup_cpu_ctx(cpu)))
-			cpuc_shift_owned_open_usages(cpuc);
-	return 0;
-}
-
-/*
  * Returns if any cpus were added to the layer.
  */
 static bool refresh_cpumasks(u32 layer_id)
@@ -332,13 +306,6 @@ static bool refresh_cpumasks(u32 layer_id)
 
 		if ((u8_ptr = MEMBER_VPTR(layers, [layer_id].cpus[cpu / 8]))) {
 			if (*u8_ptr & (1 << (cpu % 8))) {
-				/*
-				 * If $cpu has been assigned to a new layer,
-				 * history from the last period doesn't mean
-				 * anything. Shift it away.
-				 */
-				if (cpuc->layer_id != layer_id)
-					cpuc_shift_owned_open_usages(cpuc);
 				cpuc->layer_id = layer_id;
 				bpf_cpumask_set_cpu(cpu, layer_cpumask);
 				total++;
@@ -1937,8 +1904,8 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct task_ctx *taskc;
 	struct layer *task_layer, *cpu_layer = NULL;
 	u64 now = bpf_ktime_get_ns();
-	s32 task_lid, target_ppk;
-	u64 used, cpu_slice;
+	s32 task_lid;
+	u64 used;
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
@@ -1952,6 +1919,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	used = now - taskc->running_at;
+	cpuc->usage += used;
 
 	taskc->runtime_avg =
 		((RUNTIME_DECAY_FACTOR - 1) * taskc->runtime_avg + used) /
@@ -1961,10 +1929,8 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OWNED] += used;
 		if (cpuc->protect_owned)
 			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED] += used;
-		cpuc->owned_usage += used;
 	} else {
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OPEN] += used;
-		cpuc->open_usage += used;
 	}
 
 	if (taskc->dsq_id & HI_FB_DSQ_BASE) {
@@ -1981,29 +1947,11 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	}
 
 	/*
-	 * Owned execution protection.
+	 * Owned execution protection. Apply iff the CPU stayed saturated for
+	 * longer than twice the slice.
 	 */
-	if (cpu_layer) {
-		target_ppk = cpu_layer->owned_usage_target_ppk;
-		cpu_slice = cpu_layer->slice_ns;
-	} else {
-		target_ppk = 0;
-		cpu_slice = slice_ns;
-	}
-
-	/*
-	 * Apply owned protection iff the CPU stayed saturated for longer than
-	 * twice the default slice.
-	 */
-	if (target_ppk &&
-	    (cpuc->owned_usage + cpuc->open_usage) - cpuc->usage_at_idle > 2 * cpu_slice) {
-		u64 owned = cpuc->owned_usage - cpuc->prev_owned_usage[0];
-		u64 open = cpuc->open_usage - cpuc->prev_open_usage[0];
-
-		cpuc->protect_owned = 1024 * owned / (owned + open) <= target_ppk;
-	} else {
-		cpuc->protect_owned = false;
-	}
+	cpuc->protect_owned = cpu_layer &&
+		cpuc->usage - cpuc->usage_at_idle > 2 * cpu_layer->slice_ns;
 
 	cpuc->current_preempt = false;
 	cpuc->prev_exclusive = cpuc->current_exclusive;
@@ -2089,7 +2037,7 @@ void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
 		return;
 
 	cpuc->protect_owned = false;
-	cpuc->usage_at_idle = cpuc->owned_usage + cpuc->open_usage;
+	cpuc->usage_at_idle = cpuc->usage;
 }
 
 void BPF_STRUCT_OPS(layered_cpu_release, s32 cpu,
