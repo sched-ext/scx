@@ -9,4 +9,4 @@ dir="$PWD/lib"
 
 libs=`find $dir -type f -name *.bpf.o | grep -v $lib.bpf.o`
 
-bpftool gen object "$output" $libs
+"$bpftool" gen object "$output" $libs
