@@ -9,7 +9,7 @@ foreach src: libs
             input: src + '.bpf.c',
             command: [bpf_clang, bpf_base_cflags, '-target', 'bpf', libbpf_c_headers, bpf_includes,
                         '-c', '@INPUT@', '-o', '@OUTPUT@'],
-            depends: [libbpf]
+            depends: [libbpf, bpftool_target]
             )
 
   objs += [bpf_o]
