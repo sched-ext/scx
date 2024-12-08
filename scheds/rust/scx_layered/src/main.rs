@@ -1904,7 +1904,8 @@ impl<'a> Scheduler<'a> {
                 if nr_freed == 0 {
                     break;
                 }
-                nr_to_free -= nr_freed;
+
+                nr_to_free = nr_to_free.saturating_sub(nr_freed);
                 freed = true;
 
                 if nr_to_free <= nr_to_break_at {
