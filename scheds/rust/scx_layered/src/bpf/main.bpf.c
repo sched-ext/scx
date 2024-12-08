@@ -43,6 +43,8 @@ const volatile unsigned char all_cpus[MAX_CPUS_U8];
 const volatile u32 layer_iteration_order[MAX_LAYERS];
 const volatile u32 nr_open_preempt_layers;	/* open/grouped && preempt */
 const volatile u32 nr_open_layers;		/* open/grouped && !preempt */
+const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
+const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
@@ -97,32 +99,10 @@ static __always_inline struct layer *lookup_layer(u32 id)
 	return &layers[id];
 }
 
-static __always_inline u64 layer_slice_ns(struct layer *layer)
-{
-	return layer->slice_ns > 0 ? layer->slice_ns : slice_ns;
-}
-
-static __always_inline
-int rotate_layer_id(u32 base_layer_id, u32 rotation)
-{
-	if (base_layer_id >= MAX_LAYERS)
-		return rotation;
-	return (base_layer_id + rotation) % nr_layers;
-}
-
-static __always_inline
-u32 rotate_llc_id(u32 base_llc_id, u32 rotation)
-{
-	return (base_llc_id + rotation) % nr_llcs;
-}
-
 // return the dsq id for the layer based on the LLC id.
 static __noinline u64 layer_dsq_id(u32 layer_id, u32 llc_id)
 {
-	if (nr_llcs == 1)
-		return layer_id;
-	else
-		return (layer_id * nr_llcs) + llc_id;
+	return ((u64)layer_id << DSQ_ID_LAYER_SHIFT) | llc_id;
 }
 
 // XXX - older kernels get confused by RCU state when subprogs are called from
@@ -151,14 +131,19 @@ u32 llc_node_id(u32 llc_id)
         return *llc_ptr;
 }
 
-static u64 llc_hi_fallback_dsq_id(u32 llc_id)
+static u64 hi_fb_dsq_id(u32 llc_id)
 {
-	return HI_FALLBACK_DSQ_BASE + llc_id;
+	return HI_FB_DSQ_BASE | llc_id;
 }
 
-static inline bool is_fallback_dsq(u64 dsq_id)
+static u64 lo_fb_dsq_id(u32 llc_id)
 {
-	return dsq_id > HI_FALLBACK_DSQ_BASE && dsq_id <= LO_FALLBACK_DSQ;
+	return LO_FB_DSQ_BASE | llc_id;
+}
+
+static inline bool is_fb_dsq(u64 dsq_id)
+{
+	return dsq_id & (HI_FB_DSQ_BASE | LO_FB_DSQ_BASE);
 }
 
 struct {
@@ -225,14 +210,19 @@ static struct llc_ctx *lookup_llc_ctx(u32 llc_id)
 	return llcc;
 }
 
-static void gstat_inc(u32 id, struct cpu_ctx *cpuc)
+static void gstat_add(u32 id, struct cpu_ctx *cpuc, s64 delta)
 {
 	if (id >= NR_GSTATS) {
 		scx_bpf_error("invalid global stat id %d", id);
 		return;
 	}
 
-	cpuc->gstats[id]++;
+	cpuc->gstats[id] += delta;
+}
+
+static void gstat_inc(u32 id, struct cpu_ctx *cpuc)
+{
+	gstat_add(id, cpuc, 1);
 }
 
 static void lstat_add(u32 id, struct layer *layer, struct cpu_ctx *cpuc, s64 delta)
@@ -279,32 +269,6 @@ static struct cpumask *lookup_layer_cpumask(u32 layer_id)
 }
 
 /*
- * To determine whether to protect owned usage on this CPU, track owned and open
- * usages since the past two periods so that we are always considering at least
- * one full period.
- */
-static void cpuc_shift_owned_open_usages(struct cpu_ctx *cpuc)
-{
-	cpuc->prev_owned_usage[0] = cpuc->prev_owned_usage[1];
-	cpuc->prev_owned_usage[1] = cpuc->owned_usage;
-	cpuc->prev_open_usage[0] = cpuc->prev_open_usage[1];
-	cpuc->prev_open_usage[1] = cpuc->open_usage;
-}
-
-/* called before refresh_layer_cpumasks() on every period */
-SEC("syscall")
-int BPF_PROG(shift_owned_open_usages)
-{
-	struct cpu_ctx *cpuc;
-	s32 cpu;
-
-	bpf_for(cpu, 0, nr_possible_cpus)
-		if ((cpuc = lookup_cpu_ctx(cpu)))
-			cpuc_shift_owned_open_usages(cpuc);
-	return 0;
-}
-
-/*
  * Returns if any cpus were added to the layer.
  */
 static bool refresh_cpumasks(u32 layer_id)
@@ -342,13 +306,6 @@ static bool refresh_cpumasks(u32 layer_id)
 
 		if ((u8_ptr = MEMBER_VPTR(layers, [layer_id].cpus[cpu / 8]))) {
 			if (*u8_ptr & (1 << (cpu % 8))) {
-				/*
-				 * If $cpu has been assigned to a new layer,
-				 * history from the last period doesn't mean
-				 * anything. Shift it away.
-				 */
-				if (cpuc->layer_id != layer_id)
-					cpuc_shift_owned_open_usages(cpuc);
 				cpuc->layer_id = layer_id;
 				bpf_cpumask_set_cpu(cpu, layer_cpumask);
 				total++;
@@ -410,6 +367,7 @@ struct task_ctx {
 	u64			runnable_at;
 	u64			running_at;
 	u64			runtime_avg;
+	u64			dsq_id;
 	u32			llc_id;
 	u32			qrt_llc_id;	/* for llcc->queue_runtime */
 };
@@ -870,8 +828,8 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cpuc);
-		u64 slice_ns = layer_slice_ns(layer);
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		taskc->dsq_id = SCX_DSQ_LOCAL;
+		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, 0);
 		return cpu;
 	} else {
 		return prev_cpu;
@@ -1024,7 +982,6 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 	try_preempt_first = cpuc->try_preempt_first;
 	cpuc->try_preempt_first = false;
-	u64 slice_ns = layer_slice_ns(layer);
 
 	if (cpuc->yielding) {
 		lstat_inc(LSTAT_YIELD, layer, cpuc);
@@ -1045,8 +1002,8 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * to one slice.
 	 */
 	maybe_update_task_llc(p, taskc, task_cpu);
-	if (vtime_before(vtime, llcc->vtime_now[layer_id] - slice_ns))
-		vtime = llcc->vtime_now[layer_id] - slice_ns;
+	if (vtime_before(vtime, llcc->vtime_now[layer_id] - layer->slice_ns))
+		vtime = llcc->vtime_now[layer_id] - layer->slice_ns;
 
 	/*
 	 * Special-case per-cpu kthreads and scx_layered userspace so that they
@@ -1063,38 +1020,33 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
 
-		scx_bpf_dispatch(p, task_cpuc->hi_fallback_dsq_id, slice_ns, enq_flags);
+		taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
+		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 		goto preempt;
 	}
 
 	/*
-	 * As an open or grouped layer is consumed from all CPUs, a task which
-	 * belongs to such a layer can be safely put in the layer's DSQ
-	 * regardless of its cpumask. However, a task with custom cpumask in a
-	 * confined layer may fail to be consumed for an indefinite amount of
-	 * time. Queue them to the fallback DSQ.
+	 * Put tasks with custom affinities or from empty layers into the low
+	 * fallback DSQ which is guaranteed the lo_fb_share_ppk fraction of each
+	 * CPU once the tasks have been queued on it longer than lo_fb_wait_ns.
 	 *
-	 * XXX - An open or grouped layer is no longer always consumed from all
-	 * CPUs as owned protection can make a CPU execute only the owning
-	 * layer. For now, throw all tasks with custom affinities to hi fallback
-	 * DSQs. Later, implement starvation prevention for lo fallback DSQs and
-	 * put them there. Also, this should become node aware so that
-	 * node-affine tasks aren't thrown into the fallback DSQs.
+	 * When racing against layer CPU allocation updates, tasks with full
+	 * affninty may end up in the DSQs of an empty layer. They are handled
+	 * by the fallback_cpu.
+	 *
+	 * FIXME: This must be made node-aware so that tasks that are
+	 * node-affined don't get thrown into lo fallback DSQs.
 	 */
-	if (/*layer->kind == LAYER_KIND_CONFINED && */!taskc->all_cpus_allowed) {
-		lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
+	if (!taskc->all_cpus_allowed || !layer->nr_cpus) {
+		taskc->dsq_id = task_cpuc->lo_fb_dsq_id;
 		/*
-		 * We were previously dispatching to LO_FALLBACK_DSQ for any
-		 * affinitized, non-PCPU kthreads, but found that starvation
-		 * became an issue when the system was under heavy load.
-		 *
-		 * Longer term, we can address this by implementing layer
-		 * weights and applying that to fallback DSQs to avoid
-		 * starvation. For now, we just dispatch all affinitized tasks
-		 * to the LLC local HI_FALLBACK_DSQ to avoid this starvation
-		 * issue.
+		 * Start a new lo fallback queued region if the DSQ is empty.
+		 * While the following is racy, all that's needed is at least
+		 * one of the racing updates to succeed, which is guaranteed.
 		 */
-		scx_bpf_dispatch(p, task_cpuc->hi_fallback_dsq_id, slice_ns, enq_flags);
+		if (!scx_bpf_dsq_nr_queued(taskc->dsq_id))
+			llcc->lo_fb_seq++;
+		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 		goto preempt;
 	}
 
@@ -1129,12 +1081,11 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		LAYER_LAT_DECAY_FACTOR;
 	lstats[LLC_LSTAT_CNT]++;
 
+	taskc->dsq_id = layer_dsq_id(layer_id, task_cpuc->llc_id);
 	if (layer->fifo)
-		scx_bpf_dispatch(p, layer_dsq_id(layer_id, task_cpuc->llc_id),
-				 slice_ns, enq_flags);
+		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 	else
-		scx_bpf_dispatch_vtime(p, layer_dsq_id(layer_id, task_cpuc->llc_id),
-				       slice_ns, vtime, enq_flags);
+		scx_bpf_dispatch_vtime(p, taskc->dsq_id, layer->slice_ns, vtime, enq_flags);
 
 preempt:
 	try_preempt(task_cpu, p, taskc, try_preempt_first, enq_flags);
@@ -1146,7 +1097,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 	struct layer *layer;
 
 	if (cpuc->yielding || !max_exec_ns)
-		return false;
+		goto no;
 
 	/* does it wanna? */
 	if (!(p->scx.flags & SCX_TASK_QUEUED))
@@ -1155,9 +1106,12 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 	if (!(taskc = lookup_task_ctx(p)) || !(layer = lookup_layer(taskc->layer_id)))
 		goto no;
 
-	u64 slice_ns = layer_slice_ns(layer);
+	/* tasks running in low fallback doesn't get to continue */
+	if (taskc->dsq_id & LO_FB_DSQ_BASE)
+		goto no;
+
 	/* @p has fully consumed its slice and still wants to run */
-	cpuc->ran_current_for += slice_ns;
+	cpuc->ran_current_for += layer->slice_ns;
 
 	/*
 	 * There wasn't anything in the local or global DSQ, but there may be
@@ -1182,7 +1136,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 		 */
 		u32 dsq_id = layer_dsq_id(layer->id, cpuc->llc_id);
 		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
-			p->scx.slice = slice_ns;
+			p->scx.slice = layer->slice_ns;
 			lstat_inc(LSTAT_KEEP, layer, cpuc);
 			return true;
 		}
@@ -1208,7 +1162,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 		scx_bpf_put_idle_cpumask(idle_cpumask);
 
 		if (has_idle) {
-			p->scx.slice = slice_ns;
+			p->scx.slice = layer->slice_ns;
 			lstat_inc(LSTAT_KEEP, layer, cpuc);
 			return true;
 		}
@@ -1386,7 +1340,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	struct layer *owner_layer = NULL;
 	struct cpu_ctx *cpuc, *sib_cpuc;
 	struct llc_ctx *llcc;
-	bool tried_owner = false;
+	bool tried_owner = false, tried_lo_fb = false;
 	s32 sib = sibling_cpu(cpu);
 
 	if (!(cpuc = lookup_cpu_ctx(-1)))
@@ -1428,12 +1382,12 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		owner_layer = &layers[cpuc->layer_id];
 
 	/*
-	 * Always consume hi_fallback_dsq_id first for kthreads. This ends up
+	 * Always consume hi_fb_dsq_id first for kthreads. This ends up
 	 * prioritizing tasks with custom affinities which will be solved by
 	 * implementing starvation prevention for lo fallback and queueing them
 	 * there.
 	 */
-	if (scx_bpf_consume(cpuc->hi_fallback_dsq_id))
+	if (scx_bpf_consume(cpuc->hi_fb_dsq_id))
 		return;
 
 	/*
@@ -1445,6 +1399,44 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (cpuc->cpu == fallback_cpu &&
 	    try_consume_layers(empty_layer_ids, nr_empty_layer_ids,
 			       MAX_LAYERS, cpuc, llcc)) {
+		cpuc->running_fallback = true;
+		return;
+	}
+
+	/*
+	 * Low fallback DSQ execution is forced upto lo_fb_share_ppk fraction
+	 * after the DSQ had tasks queued for longer than lo_fb_wait_ns.
+	 */
+	if (scx_bpf_dsq_nr_queued(cpuc->lo_fb_dsq_id)) {
+		u64 now = bpf_ktime_get_ns();
+		u64 dur, usage;
+
+		/*
+		 * llcc->lo_fb_seq is bumped whenever the low fallback DSQ
+		 * transitions from empty, which triggers a new lo_fb_wait_ns
+		 * window on each CPU. CPUs would reach here at different times
+		 * hopefully avoiding thundering herd.
+		 */
+		if (cpuc->lo_fb_seq != llcc->lo_fb_seq) {
+			cpuc->lo_fb_seq_at = now;
+			cpuc->lo_fb_usage_base = cpuc->gstats[GSTAT_LO_FB_USAGE];
+			cpuc->lo_fb_seq = llcc->lo_fb_seq;
+		}
+
+		/*
+		 * lo_fb_share_ppk is applied only after lo_fb_wait_ns has
+		 * passed. Always add lo_fb_wait_ns to usage so that the wait
+		 * period doesn't contribute to the execution budget.
+		 */
+		dur = now - cpuc->lo_fb_seq_at;
+		usage = cpuc->gstats[GSTAT_LO_FB_USAGE] + lo_fb_wait_ns -
+			cpuc->lo_fb_usage_base;
+
+		if (dur > lo_fb_wait_ns && 1024 * usage < lo_fb_share_ppk * dur) {
+			if (scx_bpf_consume(cpuc->lo_fb_dsq_id))
+				return;
+			tried_lo_fb = true;
+		}
 	}
 
 	/* owner before preempt layers if protected or preempting */
@@ -1469,7 +1461,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			       cpuc->layer_id, cpuc, llcc))
 		return;
 
-	scx_bpf_consume(LO_FALLBACK_DSQ);
+	if (!tried_lo_fb && scx_bpf_consume(cpuc->lo_fb_dsq_id))
+		return;
 }
 
 static __noinline bool match_one(struct layer_match *match,
@@ -1756,7 +1749,8 @@ static s32 create_llc(u32 llc_id)
 		bpf_cpumask_set_cpu(cpu, cpumask);
 		llcc->nr_cpus++;
 		cpuc->llc_id = llc_id;
-		cpuc->hi_fallback_dsq_id = llc_hi_fallback_dsq_id(llc_id);
+		cpuc->hi_fb_dsq_id = hi_fb_dsq_id(llc_id);
+		cpuc->lo_fb_dsq_id = lo_fb_dsq_id(llc_id);
 	}
 
 	dbg("CFG creating llc %d with %d cpus", llc_id, llcc->nr_cpus);
@@ -1873,12 +1867,8 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	cpuc->running_at = now;
 	taskc->running_at = now;
 
-	/*
-	 * A CPU is running an owned task if the task is on the layer owning the
-	 * CPU or the CPU is the fallback and the layer is empty.
-	 */
-	cpuc->running_owned = taskc->layer_id == cpuc->layer_id ||
-		(cpuc->cpu == fallback_cpu && !layer->nr_cpus);
+	/* running an owned task if the task is on the layer owning the CPU */
+	cpuc->running_owned = taskc->layer_id == cpuc->layer_id;
 
 	/*
 	 * If this CPU is transitioning from running an exclusive task to a
@@ -1914,13 +1904,11 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct task_ctx *taskc;
 	struct layer *task_layer, *cpu_layer = NULL;
 	u64 now = bpf_ktime_get_ns();
-	bool is_fallback;
-	s32 task_lid, target_ppk;
-	u64 used, cpu_slice;
+	s32 task_lid;
+	u64 used;
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
-	is_fallback = cpuc->cpu == fallback_cpu;
 
 	task_lid = taskc->layer_id;
 	if (!(task_layer = lookup_layer(task_lid)))
@@ -1931,57 +1919,36 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	used = now - taskc->running_at;
+	cpuc->usage += used;
 
 	taskc->runtime_avg =
 		((RUNTIME_DECAY_FACTOR - 1) * taskc->runtime_avg + used) /
 		RUNTIME_DECAY_FACTOR;
 
-	if (cpuc->running_owned) {
+	if (cpuc->running_owned)
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OWNED] += used;
-		if (cpuc->protect_owned)
-			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED] += used;
-		cpuc->owned_usage += used;
-	} else {
+	else
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OPEN] += used;
-		cpuc->open_usage += used;
+
+	if (taskc->dsq_id & HI_FB_DSQ_BASE) {
+		gstat_inc(GSTAT_HI_FB_EVENTS, cpuc);
+		gstat_add(GSTAT_HI_FB_USAGE, cpuc, used);
+	} else if (taskc->dsq_id & LO_FB_DSQ_BASE) {
+		gstat_inc(GSTAT_LO_FB_EVENTS, cpuc);
+		gstat_add(GSTAT_LO_FB_USAGE, cpuc, used);
+	}
+
+	if (cpuc->running_fallback) {
+		gstat_add(GSTAT_FB_CPU_USAGE, cpuc, used);
+		cpuc->running_fallback = false;
 	}
 
 	/*
-	 * Owned execution protection.
+	 * Owned execution protection. Apply iff the CPU stayed saturated for
+	 * longer than twice the slice.
 	 */
-	if (cpu_layer) {
-		target_ppk = cpu_layer->owned_usage_target_ppk;
-		cpu_slice = layer_slice_ns(cpu_layer);
-	} else {
-		target_ppk = 0;
-		cpu_slice = slice_ns;
-	}
-
-	/*
-	 * For the fallback CPU, execution for layers without any CPU counts as
-	 * owned. Guarantee that at least half of the fallback CPU is used for
-	 * empty execution so that empty layers can easily ramp up even when
-	 * there are saturating preempt layers. Note that a fallback DSQ may
-	 * belong to a layer under saturation. In such cases, tasks from both
-	 * the owner and empty layers would count as owned with empty layers
-	 * being prioritized.
-	 */
-	if (is_fallback && target_ppk < 512)
-		target_ppk = 512;
-
-	/*
-	 * Apply owned protection iff the CPU stayed saturated for longer than
-	 * twice the default slice.
-	 */
-	if (target_ppk &&
-	    (cpuc->owned_usage + cpuc->open_usage) - cpuc->usage_at_idle > 2 * cpu_slice) {
-		u64 owned = cpuc->owned_usage - cpuc->prev_owned_usage[0];
-		u64 open = cpuc->open_usage - cpuc->prev_open_usage[0];
-
-		cpuc->protect_owned = 1024 * owned / (owned + open) <= target_ppk;
-	} else {
-		cpuc->protect_owned = false;
-	}
+	cpuc->protect_owned = cpu_layer &&
+		cpuc->usage - cpuc->usage_at_idle > 2 * cpu_layer->slice_ns;
 
 	cpuc->current_preempt = false;
 	cpuc->prev_exclusive = cpuc->current_exclusive;
@@ -1998,8 +1965,8 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		used = task_layer->min_exec_ns;
 	}
 
-	if (cpuc->yielding && used < slice_ns)
-		used = slice_ns;
+	if (cpuc->yielding && used < task_layer->slice_ns)
+		used = task_layer->slice_ns;
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 	cpuc->maybe_idle = true;
 }
@@ -2067,7 +2034,7 @@ void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
 		return;
 
 	cpuc->protect_owned = false;
-	cpuc->usage_at_idle = cpuc->owned_usage + cpuc->open_usage;
+	cpuc->usage_at_idle = cpuc->usage;
 }
 
 void BPF_STRUCT_OPS(layered_cpu_release, s32 cpu,
@@ -2192,9 +2159,6 @@ static u64 dsq_first_runnable_for_ms(u64 dsq_id, u64 now)
 {
 	struct task_struct *p;
 
-	if (dsq_id > LO_FALLBACK_DSQ)
-		return 0;
-
 	bpf_for_each(scx_dsq, p, dsq_id, 0) {
 		struct task_ctx *taskc;
 
@@ -2237,7 +2201,7 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 {
 	u64 now = bpf_ktime_get_ns();
 	u64 dsq_id;
-	int i, j, id;
+	int i, j;
 	struct layer *layer;
 
 	scx_bpf_dump_header();
@@ -2253,25 +2217,26 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 			if (!(layer->llc_mask & (1 << j)))
 				continue;
 
-			id = layer_dsq_id(layer->id, j);
-			scx_bpf_dump("LAYER[%d][%s]DSQ[%d] nr_cpus=%u nr_queued=%d -%llums cpus=",
-				     i, layer->name, id, layer->nr_cpus,
-				     scx_bpf_dsq_nr_queued(id),
-				     dsq_first_runnable_for_ms(id, now));
+			dsq_id = layer_dsq_id(layer->id, j);
+			scx_bpf_dump("LAYER[%d][%s]DSQ[%llx] nr_cpus=%u nr_queued=%d -%llums cpus=",
+				     i, layer->name, dsq_id, layer->nr_cpus,
+				     scx_bpf_dsq_nr_queued(dsq_id),
+				     dsq_first_runnable_for_ms(dsq_id, now));
 			scx_bpf_dump("\n");
 		}
 		dump_layer_cpumask(i);
 		scx_bpf_dump("\n");
 	}
 	bpf_for(i, 0, nr_llcs) {
-		dsq_id = llc_hi_fallback_dsq_id(i);
-		scx_bpf_dump("HI_FALLBACK[%llu] nr_queued=%d -%llums\n",
+		dsq_id = hi_fb_dsq_id(i);
+		scx_bpf_dump("HI_[%llx] nr_queued=%d -%llums\n",
+			     dsq_id, scx_bpf_dsq_nr_queued(dsq_id),
+			     dsq_first_runnable_for_ms(dsq_id, now));
+		dsq_id = lo_fb_dsq_id(i);
+		scx_bpf_dump("LO_FALLBACK[%llx] nr_queued=%d -%llums\n",
 			     dsq_id, scx_bpf_dsq_nr_queued(dsq_id),
 			     dsq_first_runnable_for_ms(dsq_id, now));
 	}
-	scx_bpf_dump("LO_FALLBACK nr_queued=%d -%llums\n",
-		     scx_bpf_dsq_nr_queued(LO_FALLBACK_DSQ),
-		     dsq_first_runnable_for_ms(LO_FALLBACK_DSQ, now));
 }
 
 
@@ -2393,12 +2358,10 @@ static bool antistall_scan(void)
 		bpf_for(llc, 0, nr_llcs)
 			antistall_set(layer_dsq_id(layer_id, llc), jiffies_now);
 
-	bpf_for(llc, 0, nr_llcs)
-		antistall_set(llc_hi_fallback_dsq_id(llc), jiffies_now);
-
-	antistall_set(LO_FALLBACK_DSQ, jiffies_now);
-
-	antistall_set(HI_FALLBACK_DSQ_BASE, jiffies_now);
+	bpf_for(llc, 0, nr_llcs) {
+		antistall_set(hi_fb_dsq_id(llc), jiffies_now);
+		antistall_set(lo_fb_dsq_id(llc), jiffies_now);
+	}
 
 	return true;
 }
@@ -2429,7 +2392,7 @@ struct layered_timer layered_timers[MAX_TIMERS] = {
 /*
  * Initializes per-layer specific data structures.
  */
-static s32 init_layer(int layer_id, u64 *fallback_dsq_id)
+static s32 init_layer(int layer_id)
 {
 	struct bpf_cpumask *cpumask;
 	struct layer_cpumask_wrapper *cpumaskw;
@@ -2539,13 +2502,14 @@ static s32 init_layer(int layer_id, u64 *fallback_dsq_id)
 
 	// create the dsqs for the layer
 	bpf_for(i, 0, nr_llcs) {
+		u64 dsq_id = layer_dsq_id(layer_id, i);
 		int node_id = llc_node_id(i);
-		dbg("CFG creating dsq %llu for layer %d %s on node %d in llc %d",
-		    *fallback_dsq_id, layer_id, layer->name, node_id, i);
-		ret = scx_bpf_create_dsq(*fallback_dsq_id, node_id);
+
+		dbg("CFG creating DSQ 0x%llx for layer %d %s on LLC %d (node %d)",
+		    dsq_id, layer_id, layer->name, i, node_id);
+		ret = scx_bpf_create_dsq(dsq_id, node_id);
 		if (ret < 0)
 			return ret;
-		(*fallback_dsq_id)++;
 	}
 
 	return 0;
@@ -2618,10 +2582,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	struct bpf_cpumask *cpumask, *tmp_big_cpumask;
 	int i, nr_online_cpus, ret;
 
-	ret = scx_bpf_create_dsq(LO_FALLBACK_DSQ, -1);
-	if (ret < 0)
-		return ret;
-
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
 		return -ENOMEM;
@@ -2659,18 +2619,30 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		ret = create_llc(i);
 		if (ret)
 			return ret;
-		ret = scx_bpf_create_dsq(llc_hi_fallback_dsq_id(i), llc_node_id(i));
-		if (ret < 0)
-			return ret;
 	}
 
 	dbg("CFG: Dumping configuration, nr_online_cpus=%d smt_enabled=%d little_cores=%d",
 	    nr_online_cpus, smt_enabled, has_little_cores);
 
-	u64 fallback_dsq_id = 0;
 	bpf_for(i, 0, nr_layers) {
-		ret = init_layer(i, &fallback_dsq_id);
+		ret = init_layer(i);
 		if (ret != 0)
+			return ret;
+	}
+
+	bpf_for(i, 0, nr_llcs) {
+		u64 dsq_id;
+
+		dsq_id = hi_fb_dsq_id(i);
+		dbg("CFG creating hi fallback DSQ 0x%llx on LLC %d", dsq_id, i);
+		ret = scx_bpf_create_dsq(dsq_id, llc_node_id(i));
+		if (ret < 0)
+			return ret;
+
+		dsq_id = lo_fb_dsq_id(i);
+		dbg("CFG creating lo fallback DSQ 0x%llx on LLC %d", dsq_id, i);
+		ret = scx_bpf_create_dsq(dsq_id, llc_node_id(i));
+		if (ret < 0)
 			return ret;
 	}
 

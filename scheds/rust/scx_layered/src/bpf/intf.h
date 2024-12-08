@@ -41,10 +41,13 @@ enum consts {
 	RUNTIME_DECAY_FACTOR	= 4,
 	LAYER_LAT_DECAY_FACTOR	= 32,
 
-	HI_FALLBACK_DSQ_BASE	= MAX_LAYERS * MAX_LLCS,
-	LO_FALLBACK_DSQ		= HI_FALLBACK_DSQ_BASE + MAX_LLCS + 1,
+	DSQ_ID_SPECIAL_MASK	= 0xc0000000,
+	HI_FB_DSQ_BASE		= 0x40000000,
+	LO_FB_DSQ_BASE		= 0x80000000,
 
-	MAX_DSQS		= LO_FALLBACK_DSQ + 1,
+	DSQ_ID_LAYER_SHIFT	= 16,
+	DSQ_ID_LLC_MASK		= (1LLU << DSQ_ID_LAYER_SHIFT) - 1,		/* 0x0000ffff */
+	DSQ_ID_LAYER_MASK	= ~DSQ_ID_LAYER_SHIFT & ~DSQ_ID_SPECIAL_MASK,	/* 0x3fff0000 */
 
 	/* XXX remove */
 	MAX_CGRP_PREFIXES	= 32,
@@ -54,6 +57,13 @@ enum consts {
 	MSEC_PER_SEC		= 1000ULL,
 	NSEC_PER_SEC		= NSEC_PER_MSEC * MSEC_PER_SEC
 };
+
+static inline void ___consts_sanity_check___(void) {
+	_Static_assert(MAX_LLCS <= (1 << DSQ_ID_LAYER_SHIFT),
+		       "MAX_LLCS too high");
+	_Static_assert(MAX_LAYERS <= (DSQ_ID_LAYER_MASK >> DSQ_ID_LAYER_SHIFT) + 1,
+		       "MAX_LAYERS too high");
+}
 
 enum layer_kind {
 	LAYER_KIND_OPEN,
@@ -66,8 +76,6 @@ enum layer_usage {
 	LAYER_USAGE_OPEN,
 	LAYER_USAGE_SUM_UPTO = LAYER_USAGE_OPEN,
 
-	LAYER_USAGE_PROTECTED,
-
 	NR_LAYER_USAGES,
 };
 
@@ -75,6 +83,11 @@ enum layer_usage {
 enum global_stat_id {
 	GSTAT_EXCL_IDLE,
 	GSTAT_EXCL_WAKEUP,
+	GSTAT_HI_FB_EVENTS,
+	GSTAT_HI_FB_USAGE,
+	GSTAT_LO_FB_EVENTS,
+	GSTAT_LO_FB_USAGE,
+	GSTAT_FB_CPU_USAGE,
 	NR_GSTATS,
 };
 
@@ -137,6 +150,7 @@ struct cpu_ctx {
 
 	bool			protect_owned;
 	bool			running_owned;
+	bool			running_fallback;
 	u64			running_at;
 
 	u64			layer_usages[MAX_LAYERS][NR_LAYER_USAGES];
@@ -144,18 +158,20 @@ struct cpu_ctx {
 	u64			lstats[MAX_LAYERS][NR_LSTATS];
 	u64			ran_current_for;
 
-	u64			owned_usage;
-	u64			open_usage;
-	u64			prev_owned_usage[2];
-	u64			prev_open_usage[2];
+	u64			usage;
 	u64			usage_at_idle;
 
-	u64			hi_fallback_dsq_id;
+	u64			hi_fb_dsq_id;
+	u64			lo_fb_dsq_id;
 	u32			layer_id;
 	u32			task_layer_id;
 	u32			llc_id;
 	u32			node_id;
 	u32			perf;
+
+	u64			lo_fb_seq;
+	u64			lo_fb_seq_at;
+	u64			lo_fb_usage_base;
 
 	u32			open_preempt_layer_order[MAX_LAYERS];
 	u32			open_layer_order[MAX_LAYERS];
@@ -175,6 +191,7 @@ struct llc_ctx {
 	u32			nr_cpus;
 	u64			vtime_now[MAX_LAYERS];
 	u64			queued_runtime[MAX_LAYERS];
+	u64			lo_fb_seq;
 	u64			lstats[MAX_LAYERS][NR_LLC_LSTATS];
 	struct llc_prox_map	prox_map;
 };
@@ -251,7 +268,6 @@ struct layer {
 	bool			exclusive;
 	int			growth_algo;
 
-	u32			owned_usage_target_ppk;
 	u64			nr_tasks;
 
 	u64			cpus_seq;

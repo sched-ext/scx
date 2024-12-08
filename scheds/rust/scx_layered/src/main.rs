@@ -76,7 +76,6 @@ const USAGE_HALF_LIFE_F64: f64 = USAGE_HALF_LIFE as f64 / 1_000_000_000.0;
 const LAYER_USAGE_OWNED: usize = bpf_intf::layer_usage_LAYER_USAGE_OWNED as usize;
 const LAYER_USAGE_OPEN: usize = bpf_intf::layer_usage_LAYER_USAGE_OPEN as usize;
 const LAYER_USAGE_SUM_UPTO: usize = bpf_intf::layer_usage_LAYER_USAGE_SUM_UPTO as usize;
-const LAYER_USAGE_PROTECTED: usize = bpf_intf::layer_usage_LAYER_USAGE_PROTECTED as usize;
 const NR_LAYER_USAGES: usize = bpf_intf::layer_usage_NR_LAYER_USAGES as usize;
 
 const NR_GSTATS: usize = bpf_intf::global_stat_id_NR_GSTATS as usize;
@@ -486,6 +485,18 @@ struct Opts {
     #[clap(long, default_value = "false")]
     local_llc_iteration: bool,
 
+    /// Low priority fallback DSQs are used to execute tasks with custom CPU
+    /// affinities. These DSQs are immediately executed iff a CPU is
+    /// otherwise idle. However, after the specified wait, they are
+    /// guranteed upto --lo-fb-share fraction of each CPU.
+    #[clap(long, default_value = "10000")]
+    lo_fb_wait_us: u64,
+
+    /// The fraction of CPU time guaranteed to low priority fallback DSQs.
+    /// See --lo-fb-wait-us.
+    #[clap(long, default_value = ".05")]
+    lo_fb_share: f64,
+
     /// Disable antistall
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
@@ -715,6 +726,7 @@ impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
 #[derive(Clone, Debug)]
 struct Stats {
     at: Instant,
+    elapsed: Duration,
     nr_layers: usize,
     nr_layer_tasks: Vec<usize>,
     nr_nodes: usize,
@@ -783,6 +795,7 @@ impl Stats {
 
         Ok(Self {
             at: Instant::now(),
+            elapsed: Default::default(),
             nr_layers,
             nr_layer_tasks: vec![0; nr_layers],
             nr_nodes,
@@ -811,7 +824,8 @@ impl Stats {
         now: Instant,
         cur_processing_dur: Duration,
     ) -> Result<()> {
-        let elapsed = now.duration_since(self.at).as_secs_f64() as f64;
+        let elapsed = now.duration_since(self.at);
+        let elapsed_f64 = elapsed.as_secs_f64();
         let cpu_ctxs = read_cpu_ctxs(skel)?;
 
         let nr_layer_tasks: Vec<usize> = skel
@@ -839,7 +853,7 @@ impl Stats {
             .map(|(cur, prev)| {
                 cur.iter()
                     .zip(prev.iter())
-                    .map(|(c, p)| (c.saturating_sub(*p)) as f64 / 1_000_000_000.0 / elapsed)
+                    .map(|(c, p)| (c.saturating_sub(*p)) as f64 / 1_000_000_000.0 / elapsed_f64)
                     .collect()
             })
             .collect();
@@ -850,7 +864,7 @@ impl Stats {
                 cur.iter()
                     .zip(prev.iter())
                     .map(|(c, p)| {
-                        let decay = USAGE_DECAY.powf(elapsed);
+                        let decay = USAGE_DECAY.powf(elapsed_f64);
                         p * decay + c * (1.0 - decay)
                     })
                     .collect()
@@ -869,6 +883,7 @@ impl Stats {
 
         *self = Self {
             at: now,
+            elapsed,
             nr_layers: self.nr_layers,
             nr_layer_tasks,
             nr_nodes: self.nr_nodes,
@@ -1069,25 +1084,6 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn layer_owned_usage_target_ppk(util_range: Option<(f64, f64)>, avg_util: f64) -> u32 {
-        let util_high = util_range.unwrap_or((0.0, 0.0)).1;
-
-        /*
-         * If avg_util is lower than high threshold, protect upto high
-         * threashold + 5%. If higher, avg_util + 10%. This guarantees that
-         * owned usage can always grow beyond the high threshold to trigger
-         * layer growth and the layer can eventually use all of the CPUs
-         * allocated to it when the machine is saturated.
-         */
-        let target = if avg_util < util_high {
-            util_high + 0.05
-        } else {
-            avg_util + 0.1
-        };
-
-        ((target * 1024.0) as u32).min(1024)
-    }
-
     fn init_layers(skel: &mut OpenBpfSkel, specs: &Vec<LayerSpec>, topo: &Topology) -> Result<()> {
         skel.maps.rodata_data.nr_layers = specs.len() as u32;
         let mut perf_set = false;
@@ -1190,8 +1186,6 @@ impl<'a> Scheduler<'a> {
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;
                 layer.xllc_mig_min_ns = (xllc_mig_min_us * 1000.0) as u64;
-                layer.owned_usage_target_ppk =
-                    Self::layer_owned_usage_target_ppk(spec.kind.util_range(), 0.0);
                 layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
                 layer.node_mask = nodemask_from_nodes(nodes) as u64;
@@ -1573,12 +1567,11 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
         skel.maps.rodata_data.antistall_sec = opts.antistall_sec;
-        if opts.monitor_disable {
-            skel.maps.rodata_data.monitor_disable = opts.monitor_disable;
-        }
-        if opts.disable_antistall {
-            skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
-        }
+        skel.maps.rodata_data.monitor_disable = opts.monitor_disable;
+        skel.maps.rodata_data.lo_fb_wait_ns = opts.lo_fb_wait_us * 1000;
+        skel.maps.rodata_data.lo_fb_share_ppk = ((opts.lo_fb_share * 1024.0) as u32).clamp(1, 1024);
+        skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
+
         for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
             skel.maps.rodata_data.__sibling_cpu[cpu] = *sib;
         }
@@ -1868,13 +1861,13 @@ impl<'a> Scheduler<'a> {
         let mut ascending: Vec<(usize, usize)> = targets.iter().copied().enumerate().collect();
         ascending.sort_by(|a, b| a.1.cmp(&b.1));
 
-        // If any layer is growing from 0 CPU, guarantee that the largest
-        // layer that is freeing CPUs frees at least one CPU.
+        // If any layer is growing, guarantee that the largest layer that is
+        // freeing CPUs frees at least one CPU.
         let mut force_free = self
             .layers
             .iter()
             .zip(targets.iter())
-            .any(|(layer, &target)| layer.nr_cpus == 0 && target > 0);
+            .any(|(layer, &target)| layer.nr_cpus < target);
 
         // Shrink all layers first so that CPUs are available for
         // redistribution. Do so in the descending target number of CPUs
@@ -2013,30 +2006,6 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn refresh_owned_usage_target_ppks(&mut self) {
-        // Update target_ppks according to the current avg utilization and
-        // CPU allocation. See layer_owned_usage_target_ppk().
-        let utils = &self.sched_stats.layer_utils;
-
-        for (idx, layer) in self.layers.iter().enumerate() {
-            let bpf_layer = &mut self.skel.maps.bss_data.layers[idx];
-
-            let util = utils[idx][LAYER_USAGE_OWNED];
-            // max(1) is for the fallback CPU.
-            let avg_util = util / layer.cpus.count_ones().max(1) as f64;
-
-            bpf_layer.owned_usage_target_ppk =
-                Self::layer_owned_usage_target_ppk(layer.kind.util_range(), avg_util);
-        }
-
-        // See main.bpf.c::cpuc_shift_owned_open_usages().
-        let input = ProgramInput {
-            ..Default::default()
-        };
-        let prog = &mut self.skel.progs.shift_owned_open_usages;
-        let _ = prog.test_run(input);
-    }
-
     fn step(&mut self) -> Result<()> {
         let started_at = Instant::now();
         self.sched_stats.refresh(
@@ -2046,7 +2015,6 @@ impl<'a> Scheduler<'a> {
             self.processing_dur,
         )?;
         self.refresh_cpumasks()?;
-        self.refresh_owned_usage_target_ppks();
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
     }
