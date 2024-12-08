@@ -5,8 +5,10 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-mod config;
 mod logger;
+
+use scx_loader::dbus::LoaderClientProxy;
+use scx_loader::*;
 
 use std::process::Stdio;
 use std::sync::atomic::AtomicU32;
@@ -16,8 +18,6 @@ use std::sync::Arc;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
-use serde::Deserialize;
-use serde::Serialize;
 use sysinfo::System;
 use tokio::process::Child;
 use tokio::process::Command;
@@ -27,21 +27,6 @@ use tokio::time::Duration;
 use tokio::time::Instant;
 use zbus::interface;
 use zbus::Connection;
-use zvariant::Type;
-use zvariant::Value;
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(field_identifier, rename_all = "lowercase")]
-enum SupportedSched {
-    #[serde(rename = "scx_bpfland")]
-    Bpfland,
-    #[serde(rename = "scx_rusty")]
-    Rusty,
-    #[serde(rename = "scx_lavd")]
-    Lavd,
-    #[serde(rename = "scx_flash")]
-    Flash,
-}
 
 #[derive(Debug, PartialEq)]
 enum ScxMessage {
@@ -69,18 +54,6 @@ enum RunnerMessage {
     Stop,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Type, Value, PartialEq)]
-enum SchedMode {
-    /// Default values for the scheduler
-    Auto = 0,
-    /// Applies flags for better gaming experience
-    Gaming = 1,
-    /// Applies flags for lower power usage
-    PowerSave = 2,
-    /// Starts scheduler in low latency mode
-    LowLatency = 3,
-}
-
 struct ScxLoader {
     current_scx: Option<SupportedSched>,
     current_mode: SchedMode,
@@ -100,9 +73,9 @@ impl ScxLoader {
     #[zbus(property)]
     async fn current_scheduler(&self) -> String {
         if let Some(current_scx) = &self.current_scx {
-            let current_scx = get_name_from_scx(current_scx).into();
+            let current_scx: &str = current_scx.into();
             log::info!("called {current_scx:?}");
-            return current_scx;
+            return current_scx.to_owned();
         }
         "unknown".to_owned()
     }
@@ -121,11 +94,9 @@ impl ScxLoader {
 
     async fn start_scheduler(
         &mut self,
-        scx_name: &str,
+        scx_name: SupportedSched,
         sched_mode: SchedMode,
     ) -> zbus::fdo::Result<()> {
-        let scx_name = get_scx_from_str(scx_name)?;
-
         log::info!("starting {scx_name:?} with mode {sched_mode:?}..");
 
         let _ = self.channel.send(ScxMessage::StartSched((
@@ -140,11 +111,9 @@ impl ScxLoader {
 
     async fn start_scheduler_with_args(
         &mut self,
-        scx_name: &str,
+        scx_name: SupportedSched,
         scx_args: Vec<String>,
     ) -> zbus::fdo::Result<()> {
-        let scx_name = get_scx_from_str(scx_name)?;
-
         log::info!("starting {scx_name:?} with args {scx_args:?}..");
 
         let _ = self
@@ -159,11 +128,9 @@ impl ScxLoader {
 
     async fn switch_scheduler(
         &mut self,
-        scx_name: &str,
+        scx_name: SupportedSched,
         sched_mode: SchedMode,
     ) -> zbus::fdo::Result<()> {
-        let scx_name = get_scx_from_str(scx_name)?;
-
         log::info!("switching {scx_name:?} with mode {sched_mode:?}..");
 
         let _ = self.channel.send(ScxMessage::SwitchSched((
@@ -178,11 +145,9 @@ impl ScxLoader {
 
     async fn switch_scheduler_with_args(
         &mut self,
-        scx_name: &str,
+        scx_name: SupportedSched,
         scx_args: Vec<String>,
     ) -> zbus::fdo::Result<()> {
-        let scx_name = get_scx_from_str(scx_name)?;
-
         log::info!("switching {scx_name:?} with args {scx_args:?}..");
 
         let _ = self
@@ -197,7 +162,7 @@ impl ScxLoader {
 
     async fn stop_scheduler(&mut self) -> zbus::fdo::Result<()> {
         if let Some(current_scx) = &self.current_scx {
-            let scx_name = get_name_from_scx(current_scx);
+            let scx_name: &str = current_scx.into();
 
             log::info!("stopping {scx_name:?}..");
             let _ = self.channel.send(ScxMessage::StopSched);
@@ -206,18 +171,6 @@ impl ScxLoader {
 
         Ok(())
     }
-}
-
-#[zbus::proxy(
-    interface = "org.scx.Loader",
-    default_service = "org.scx.Loader",
-    default_path = "/org/scx/Loader"
-)]
-pub trait LoaderClient {
-    /// Method for switching to the specified scheduler with the given mode.
-    /// This method will stop the currently running scheduler (if any) and
-    /// then start the new scheduler.
-    fn switch_scheduler(&self, scx_name: &str, sched_mode: SchedMode) -> zbus::Result<()>;
 }
 
 // Monitors CPU utilization and enables scx_lavd when utilization of any CPUs is > 90%
@@ -247,8 +200,10 @@ async fn monitor_cpu_util() -> Result<()> {
             if cpu_above_threshold_since.unwrap().elapsed() > high_utilization_trigger_duration {
                 if running_sched.is_none() {
                     log::info!("CPU Utilization exceeded 90% for 5 seconds, starting scx_lavd");
+
+                    let scx_name: &str = SupportedSched::Lavd.into();
                     running_sched = Some(
-                        Command::new(get_name_from_scx(&SupportedSched::Lavd))
+                        Command::new(scx_name)
                             .spawn()
                             .expect("Failed to start scx_lavd"),
                     );
@@ -339,7 +294,7 @@ async fn main() -> Result<()> {
 
         let loader_client = LoaderClientProxy::new(&connection).await?;
         loader_client
-            .switch_scheduler(get_name_from_scx(default_sched), default_mode)
+            .switch_scheduler(default_sched.clone(), default_mode)
             .await?;
     }
 
@@ -530,7 +485,7 @@ async fn spawn_scheduler(
     args: Vec<String>,
     child_id: Arc<AtomicU32>,
 ) -> Result<Child> {
-    let sched_bin_name = get_name_from_scx(&scx_crate);
+    let sched_bin_name: &str = scx_crate.into();
     log::info!("starting {sched_bin_name} command");
 
     let mut cmd = Command::new(sched_bin_name);
@@ -579,27 +534,4 @@ async fn stop_scheduler(child_id: Arc<AtomicU32>) -> Result<()> {
     log::debug!("Scheduler was stopped");
 
     Ok(())
-}
-
-/// Get the scx trait from the given scx name or return error if the given scx name is not supported
-fn get_scx_from_str(scx_name: &str) -> zbus::fdo::Result<SupportedSched> {
-    match scx_name {
-        "scx_bpfland" => Ok(SupportedSched::Bpfland),
-        "scx_rusty" => Ok(SupportedSched::Rusty),
-        "scx_lavd" => Ok(SupportedSched::Lavd),
-        "scx_flash" => Ok(SupportedSched::Flash),
-        _ => Err(zbus::fdo::Error::Failed(format!(
-            "{scx_name} is not supported"
-        ))),
-    }
-}
-
-/// Get the scx name from the given scx trait
-fn get_name_from_scx(supported_sched: &SupportedSched) -> &'static str {
-    match supported_sched {
-        SupportedSched::Bpfland => "scx_bpfland",
-        SupportedSched::Rusty => "scx_rusty",
-        SupportedSched::Lavd => "scx_lavd",
-        SupportedSched::Flash => "scx_flash",
-    }
 }
