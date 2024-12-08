@@ -1925,13 +1925,10 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		((RUNTIME_DECAY_FACTOR - 1) * taskc->runtime_avg + used) /
 		RUNTIME_DECAY_FACTOR;
 
-	if (cpuc->running_owned) {
+	if (cpuc->running_owned)
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OWNED] += used;
-		if (cpuc->protect_owned)
-			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED] += used;
-	} else {
+	else
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OPEN] += used;
-	}
 
 	if (taskc->dsq_id & HI_FB_DSQ_BASE) {
 		gstat_inc(GSTAT_HI_FB_EVENTS, cpuc);
