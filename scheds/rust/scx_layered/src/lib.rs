@@ -23,32 +23,20 @@ use log::info;
 use scx_utils::Core;
 use scx_utils::Topology;
 use scx_utils::TopologyMap;
+use scx_utils::NR_CPUS_POSSIBLE;
+use scx_utils::NR_CPU_IDS;
+use std::sync::Arc;
 
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 
 pub const XLLC_MIG_MIN_US_DFL: f64 = 100.0;
-
-lazy_static::lazy_static! {
-    static ref NR_POSSIBLE_CPUS: usize = libbpf_rs::num_possible_cpus().unwrap();
-}
 
 #[derive(Debug)]
 /// `CpuPool` represents the CPU core and logical CPU topology within the system.
 /// It manages the mapping and availability of physical and logical cores, including
 /// how resources are allocated for tasks across the available CPUs.
 pub struct CpuPool {
-    /// The number of physical cores available on the system.
-    pub nr_cores: usize,
-
-    /// The total number of logical CPUs (including SMT threads).
-    /// This can be larger than `nr_cores` if SMT is enabled,
-    /// where each physical core may have a couple logical cores.
-    pub nr_cpus: usize,
-
-    /// A bit mask representing all online logical cores.
-    /// Each bit corresponds to whether a logical core (CPU) is online and available
-    /// for processing tasks.
-    pub all_cpus: BitVec,
+    pub topo: Arc<Topology>,
 
     /// A vector of bit masks, each representing the mapping between
     /// physical cores and the logical cores that run on them.
@@ -61,11 +49,6 @@ pub struct CpuPool {
     /// The sibling core is the other logical core that shares the physical resources
     /// of the same physical core.
     pub sibling_cpu: Vec<i32>,
-
-    /// Mapping between logical core and physical core ids
-    /// The index in the vector represents the logical core, and each corresponding value
-    /// represents whether the physical core id of the logical core.
-    cpu_core: Vec<usize>,
 
     /// A bit mask representing all available physical cores.
     /// Each bit corresponds to whether a physical core is available for task scheduling.
@@ -86,23 +69,15 @@ pub struct CpuPool {
 }
 
 impl CpuPool {
-    pub fn new(topo: &Topology) -> Result<Self> {
-        if *NR_POSSIBLE_CPUS > MAX_CPUS {
-            bail!(
-                "NR_POSSIBLE_CPUS {} > MAX_CPUS {}",
-                *NR_POSSIBLE_CPUS,
-                MAX_CPUS
-            );
+    pub fn new(topo: Arc<Topology>) -> Result<Self> {
+        if *NR_CPU_IDS > MAX_CPUS {
+            bail!("NR_CPU_IDS {} > MAX_CPUS {}", *NR_CPU_IDS, MAX_CPUS);
         }
 
         let topo_map = TopologyMap::new(&topo).unwrap();
 
-        let all_cpus = topo.cpus_bitvec();
-        let nr_cpus = topo.nr_cpus_online;
         let core_cpus = topo_map.core_cpus_bitvec();
-        let nr_cores = topo.all_cores.len();
         let sibling_cpu = topo.sibling_cpus();
-        let cpu_core = topo_map.cpu_core_mapping();
 
         // Build core_topology_to_id
         let mut core_topology_to_id = BTreeMap::new();
@@ -118,23 +93,22 @@ impl CpuPool {
 
         info!(
             "CPUs: online/possible={}/{} nr_cores={}",
-            nr_cpus, *NR_POSSIBLE_CPUS, nr_cores,
+            topo.all_cpus.len(),
+            *NR_CPUS_POSSIBLE,
+            topo.all_cores.len(),
         );
-        debug!("CPUs: siblings={:?}", &sibling_cpu[..nr_cpus]);
+        debug!("CPUs: siblings={:?}", &sibling_cpu[..*NR_CPU_IDS]);
 
-        let first_cpu = core_cpus[0].first_one().unwrap();
+        let first_cpu = *topo.all_cpus.keys().next().unwrap();
 
         let mut cpu_pool = Self {
-            nr_cores,
-            nr_cpus,
-            all_cpus,
             core_cpus,
             sibling_cpu,
-            cpu_core,
-            available_cores: bitvec![1; nr_cores],
+            available_cores: bitvec![1; topo.all_cores.len()],
             first_cpu,
             fallback_cpu: first_cpu,
             core_topology_to_id,
+            topo,
         };
         cpu_pool.update_fallback_cpu();
         Ok(cpu_pool)
@@ -142,7 +116,9 @@ impl CpuPool {
 
     fn update_fallback_cpu(&mut self) {
         match self.available_cores.first_one() {
-            Some(next) => self.fallback_cpu = self.core_cpus[next].first_one().unwrap(),
+            Some(next) => {
+                self.fallback_cpu = *self.topo.all_cores[&next].cpus.keys().next().unwrap()
+            }
             None => self.fallback_cpu = self.first_cpu,
         }
     }
@@ -174,10 +150,10 @@ impl CpuPool {
 
     fn cpus_to_cores(&self, cpus_to_match: &BitVec) -> Result<BitVec> {
         let mut cpus = cpus_to_match.clone();
-        let mut cores = bitvec![0; self.nr_cores];
+        let mut cores = bitvec![0; self.topo.all_cores.len()];
 
         while let Some(cpu) = cpus.first_one() {
-            let core = self.cpu_core[cpu];
+            let core = self.topo.all_cpus[&cpu].core_id;
 
             if (self.core_cpus[core].clone() & !cpus.clone()).count_ones() != 0 {
                 bail!(
@@ -220,7 +196,7 @@ impl CpuPool {
     }
 
     pub fn available_cpus(&self) -> BitVec<u64, Lsb0> {
-        let mut cpus = bitvec![u64, Lsb0; 0; self.nr_cpus];
+        let mut cpus = bitvec![u64, Lsb0; 0; *NR_CPU_IDS];
         for core in self.available_cores.iter_ones() {
             let core_cpus = self.core_cpus[core].clone();
             cpus |= core_cpus.as_bitslice();
@@ -229,7 +205,7 @@ impl CpuPool {
     }
 
     pub fn available_cpus_in_mask(&self, allowed_cpus: &BitVec) -> BitVec {
-        let mut cpus = bitvec![0; self.nr_cpus];
+        let mut cpus = bitvec![0; *NR_CPU_IDS];
         for core in self.available_cores.iter_ones() {
             let mut core_cpus = self.core_cpus[core].clone();
             core_cpus &= allowed_cpus;

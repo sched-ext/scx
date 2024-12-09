@@ -182,7 +182,6 @@ pub struct Topology {
     pub nodes: BTreeMap<usize, Node>,
     /// Cpumask all CPUs in the system.
     pub span: Cpumask,
-    pub nr_cpus_online: usize,
 
     /// Skip indices to access lower level members easily.
     pub all_llcs: BTreeMap<usize, Arc<Llc>>,
@@ -237,11 +236,9 @@ impl Topology {
             node.all_cpus = node_cpus;
         }
 
-        let nr_cpus_online = span.weight();
         Ok(Topology {
             nodes,
             span,
-            nr_cpus_online,
             all_llcs: topo_llcs,
             all_cores: topo_cores,
             all_cpus: topo_cpus,
@@ -288,15 +285,6 @@ impl Topology {
         self.all_cores
             .values()
             .any(|c| c.core_type == CoreType::Little)
-    }
-
-    /// Returns a BitVec of online CPUs.
-    pub fn cpus_bitvec(&self) -> BitVec {
-        let mut cpus = bitvec![0; *NR_CPUS_POSSIBLE];
-        for id in self.all_cpus.keys() {
-            cpus.set(*id, true);
-        }
-        cpus
     }
 
     /// Returns a vector that maps the index of each logical core to the sibling core.
