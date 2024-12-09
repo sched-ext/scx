@@ -73,13 +73,11 @@ use crate::misc::read_file_usize;
 use crate::Cpumask;
 use anyhow::bail;
 use anyhow::Result;
-use bitvec::prelude::*;
 use glob::glob;
 use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
-use std::slice::Iter;
 use std::sync::Arc;
 
 #[cfg(feature = "gpu-topology")]
@@ -308,82 +306,6 @@ impl Topology {
             }
         }
         sibling_cpu
-    }
-}
-
-/// Generate a topology map from a Topology object, represented as an array of arrays.
-///
-/// Each inner array corresponds to a core containing its associated CPU IDs. This map can
-/// facilitate efficient iteration over the host's topology.
-///
-/// # Example
-///
-/// ```
-/// use scx_utils::{TopologyMap, Topology};
-/// let topo = Topology::new().unwrap();
-/// let topo_map = TopologyMap::new(&topo).unwrap();
-///
-/// for (core_id, core) in topo_map.iter().enumerate() {
-///     for cpu in core {
-///         println!("core={} cpu={}", core_id, cpu);
-///     }
-/// }
-/// ```
-#[derive(Debug)]
-pub struct TopologyMap {
-    map: Vec<Vec<usize>>,
-}
-
-impl TopologyMap {
-    pub fn new(topo: &Topology) -> Result<TopologyMap> {
-        let mut map: Vec<Vec<usize>> = Vec::new();
-
-        for core in topo.all_cores.values() {
-            let mut cpu_ids: Vec<usize> = Vec::new();
-            for cpu_id in core.span.clone().into_iter() {
-                cpu_ids.push(cpu_id);
-            }
-            map.push(cpu_ids);
-        }
-
-        Ok(TopologyMap { map })
-    }
-
-    pub fn iter(&self) -> Iter<Vec<usize>> {
-        self.map.iter()
-    }
-
-    /// Returns a vector of bit masks, each representing the mapping between
-    /// physical cores and the logical cores that run on them.
-    /// The index in the vector represents the physical core, and each bit in the
-    /// corresponding `BitVec` represents whether a logical core belongs to that physical core.
-    pub fn core_cpus_bitvec(&self) -> Vec<BitVec<u64, Lsb0>> {
-        let mut core_cpus = Vec::<BitVec<u64, Lsb0>>::new();
-        for (core_id, core) in self.iter().enumerate() {
-            if core_cpus.len() < core_id + 1 {
-                core_cpus.resize(core_id + 1, bitvec![u64, Lsb0; 0; *NR_CPUS_POSSIBLE]);
-            }
-            for cpu in core {
-                core_cpus[core_id].set(*cpu, true);
-            }
-        }
-        core_cpus
-    }
-
-    /// Returns mapping between logical core and physical core ids
-    /// The index in the vector represents the logical core, and each corresponding value
-    /// represents whether the physical core id of the logical core.
-    pub fn cpu_core_mapping(&self) -> Vec<usize> {
-        let mut cpu_core_mapping = Vec::new();
-        for (core_id, core) in self.iter().enumerate() {
-            for cpu in core {
-                if cpu_core_mapping.len() < cpu + 1 {
-                    cpu_core_mapping.resize(cpu + 1, 0);
-                }
-                cpu_core_mapping[*cpu] = core_id;
-            }
-        }
-        cpu_core_mapping
     }
 }
 

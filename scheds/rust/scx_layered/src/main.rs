@@ -1955,7 +1955,7 @@ impl<'a> Scheduler<'a> {
                 }
 
                 let bpf_layer = &mut self.skel.maps.bss_data.layers[idx];
-                let available_cpus = self.cpu_pool.available_cpus_in_mask(&layer.allowed_cpus);
+                let available_cpus = self.cpu_pool.available_cpus().and(&layer.allowed_cpus);
                 let nr_available_cpus = available_cpus.weight();
 
                 // Open layers need the intersection of allowed cpus and
