@@ -24,7 +24,6 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use bitvec::prelude::*;
 pub use bpf_skel::*;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
@@ -52,6 +51,7 @@ use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::CoreType;
+use scx_utils::Cpumask;
 use scx_utils::Llc;
 use scx_utils::NetDev;
 use scx_utils::Topology;
@@ -914,22 +914,15 @@ struct Layer {
     core_order: Vec<usize>,
 
     nr_cpus: usize,
-    cpus: BitVec,
-    allowed_cpus: BitVec,
+    cpus: Cpumask,
+    allowed_cpus: Cpumask,
 }
 
 impl Layer {
-    fn new(
-        spec: &LayerSpec,
-        cpu_pool: &CpuPool,
-        topo: &Topology,
-        core_order: &Vec<usize>,
-    ) -> Result<Self> {
+    fn new(spec: &LayerSpec, topo: &Topology, core_order: &Vec<usize>) -> Result<Self> {
         let name = &spec.name;
         let kind = spec.kind.clone();
-        let mut cpus = bitvec![0; cpu_pool.nr_cpus];
-        cpus.fill(false);
-        let mut allowed_cpus = bitvec![0; cpu_pool.nr_cpus];
+        let mut allowed_cpus = Cpumask::new();
         match &kind {
             LayerKind::Confined {
                 cpus_range,
@@ -942,21 +935,21 @@ impl Layer {
                     bail!("invalid cpus_range {:?}", cpus_range);
                 }
                 if nodes.len() == 0 && llcs.len() == 0 {
-                    allowed_cpus.fill(true);
+                    allowed_cpus.set_all();
                 } else {
                     // build up the cpus bitset
                     for (node_id, node) in &topo.nodes {
                         // first do the matching for nodes
                         if nodes.contains(node_id) {
                             for (&id, _cpu) in &node.all_cpus {
-                                allowed_cpus.set(id, true);
+                                allowed_cpus.set_cpu(id)?;
                             }
                         }
                         // next match on any LLCs
                         for (llc_id, llc) in &node.llcs {
                             if llcs.contains(llc_id) {
                                 for (&id, _cpu) in &llc.all_cpus {
-                                    allowed_cpus.set(id, true);
+                                    allowed_cpus.set_cpu(id)?;
                                 }
                             }
                         }
@@ -981,21 +974,21 @@ impl Layer {
                 ..
             } => {
                 if nodes.len() == 0 && llcs.len() == 0 {
-                    allowed_cpus.fill(true);
+                    allowed_cpus.set_all();
                 } else {
                     // build up the cpus bitset
                     for (node_id, node) in &topo.nodes {
                         // first do the matching for nodes
                         if nodes.contains(node_id) {
                             for (&id, _cpu) in &node.all_cpus {
-                                allowed_cpus.set(id, true);
+                                allowed_cpus.set_cpu(id)?;
                             }
                         }
                         // next match on any LLCs
                         for (llc_id, llc) in &node.llcs {
                             if llcs.contains(llc_id) {
                                 for (&id, _cpu) in &llc.all_cpus {
-                                    allowed_cpus.set(id, true);
+                                    allowed_cpus.set_cpu(id)?;
                                 }
                             }
                         }
@@ -1017,7 +1010,7 @@ impl Layer {
             core_order: core_order.clone(),
 
             nr_cpus: 0,
-            cpus,
+            cpus: Cpumask::new(),
             allowed_cpus,
         })
     }
@@ -1028,11 +1021,11 @@ impl Layer {
             None => return Ok(0),
         };
 
-        let nr_to_free = cpus_to_free.count_ones();
+        let nr_to_free = cpus_to_free.weight();
 
         Ok(if nr_to_free <= max_to_free {
             trace!("[{}] freeing CPUs: {}", self.name, &cpus_to_free);
-            self.cpus &= !cpus_to_free.clone();
+            self.cpus &= &cpus_to_free.not();
             self.nr_cpus -= nr_to_free;
             cpu_pool.free(&cpus_to_free)?;
             nr_to_free
@@ -1053,7 +1046,7 @@ impl Layer {
             }
         };
 
-        let nr_new_cpus = new_cpus.count_ones();
+        let nr_new_cpus = new_cpus.weight();
 
         trace!("[{}] adding CPUs: {}", &self.name, &new_cpus);
         self.cpus |= &new_cpus;
@@ -1078,7 +1071,7 @@ struct Scheduler<'a> {
     nr_layer_cpus_ranges: Vec<(usize, usize)>,
     processing_dur: Duration,
 
-    topo: Topology,
+    topo: Arc<Topology>,
     netdevs: BTreeMap<String, NetDev>,
     stats_server: StatsServer<StatsReq, StatsRes>,
 }
@@ -1477,11 +1470,11 @@ impl<'a> Scheduler<'a> {
         let nr_layers = layer_specs.len();
         let mut disable_topology = opts.disable_topology.unwrap_or(false);
 
-        let topo = if disable_topology {
+        let topo = Arc::new(if disable_topology {
             Topology::with_flattened_llc_node()?
         } else {
             Topology::new()?
-        };
+        });
 
         /*
          * FIXME: scx_layered incorrectly assumes that node, LLC and CPU IDs
@@ -1522,7 +1515,7 @@ impl<'a> Scheduler<'a> {
             );
         };
 
-        let cpu_pool = CpuPool::new(&topo)?;
+        let cpu_pool = CpuPool::new(topo.clone())?;
 
         // If disabling topology awareness clear out any set NUMA/LLC configs and
         // it will fallback to using all cores.
@@ -1563,7 +1556,7 @@ impl<'a> Scheduler<'a> {
             opts.slice_us * 1000 * 20
         };
         skel.maps.rodata_data.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
-        skel.maps.rodata_data.smt_enabled = cpu_pool.nr_cpus > cpu_pool.nr_cores;
+        skel.maps.rodata_data.smt_enabled = topo.all_cpus.len() > topo.all_cores.len();
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
         skel.maps.rodata_data.antistall_sec = opts.antistall_sec;
@@ -1572,10 +1565,10 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.lo_fb_share_ppk = ((opts.lo_fb_share * 1024.0) as u32).clamp(1, 1024);
         skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
 
-        for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
+        for (cpu, sib) in topo.sibling_cpus().iter().enumerate() {
             skel.maps.rodata_data.__sibling_cpu[cpu] = *sib;
         }
-        for cpu in cpu_pool.all_cpus.iter_ones() {
+        for cpu in topo.all_cpus.keys() {
             skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
@@ -1612,7 +1605,7 @@ impl<'a> Scheduler<'a> {
             let growth_order = layer_growth_orders
                 .get(&idx)
                 .with_context(|| format!("layer has no growth order"))?;
-            layers.push(Layer::new(&spec, &cpu_pool, &topo, &growth_order)?);
+            layers.push(Layer::new(&spec, &topo, &growth_order)?);
         }
 
         Self::init_cpus(&skel, &layer_specs, &topo)?;
@@ -1660,11 +1653,11 @@ impl<'a> Scheduler<'a> {
 
     fn update_bpf_layer_cpumask(layer: &Layer, bpf_layer: &mut types::layer) {
         trace!("[{}] Updating BPF CPUs: {}", layer.name, &layer.cpus);
-        for bit in 0..layer.cpus.len() {
-            if layer.cpus[bit] {
-                bpf_layer.cpus[bit / 8] |= 1 << (bit % 8);
+        for cpu in 0..layer.cpus.len() {
+            if layer.cpus.test_cpu(cpu) {
+                bpf_layer.cpus[cpu / 8] |= 1 << (cpu % 8);
             } else {
-                bpf_layer.cpus[bit / 8] &= !(1 << (bit % 8));
+                bpf_layer.cpus[cpu / 8] &= !(1 << (cpu % 8));
             }
         }
         bpf_layer.refresh_cpus = 1;
@@ -1686,8 +1679,8 @@ impl<'a> Scheduler<'a> {
                 .ok_or_else(|| anyhow!("Failed to get netdev node"))?;
             let node_cpus = node.span.clone();
             for (irq, irqmask) in netdev.irqs.iter_mut() {
-                irqmask.clear();
-                for cpu in available_cpus.iter_ones() {
+                irqmask.clear_all();
+                for cpu in available_cpus.as_raw_bitvec().iter_ones() {
                     if !node_cpus.test_cpu(cpu) {
                         continue;
                     }
@@ -1713,7 +1706,7 @@ impl<'a> Scheduler<'a> {
     /// allocation is within the acceptable range, no change is made.
     /// Returns (target, min) pair for each layer.
     fn calc_target_nr_cpus(&self) -> Vec<(usize, usize)> {
-        let nr_cpus = self.cpu_pool.nr_cpus;
+        let nr_cpus = self.cpu_pool.topo.all_cpus.len();
         let utils = &self.sched_stats.layer_utils;
 
         let mut records: Vec<(u64, u64, u64, usize, usize, usize)> = vec![];
@@ -1747,7 +1740,7 @@ impl<'a> Scheduler<'a> {
                     let util = if util < 0.01 { 0.0 } else { util };
                     let low = (util / util_range.1).ceil() as usize;
                     let high = ((util / util_range.0).floor() as usize).max(low);
-                    let target = layer.cpus.count_ones().clamp(low, high);
+                    let target = layer.cpus.weight().clamp(low, high);
                     let cpus_range = cpus_range.unwrap_or((0, nr_cpus));
 
                     records.push((
@@ -1774,7 +1767,7 @@ impl<'a> Scheduler<'a> {
     /// assuming infinite number of CPUs, distribute the actual CPUs
     /// according to their weights.
     fn weighted_target_nr_cpus(&self, targets: &Vec<(usize, usize)>) -> Vec<usize> {
-        let mut nr_left = self.cpu_pool.nr_cpus;
+        let mut nr_left = self.cpu_pool.topo.all_cpus.len();
         let weights: Vec<usize> = self
             .layers
             .iter()
@@ -1878,7 +1871,7 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
 
-            let nr_cur = layer.cpus.count_ones();
+            let nr_cur = layer.cpus.weight();
             if nr_cur <= target {
                 continue;
             }
@@ -1931,7 +1924,7 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
 
-            let nr_cur = layer.cpus.count_ones();
+            let nr_cur = layer.cpus.weight();
             if nr_cur >= target {
                 continue;
             }
@@ -1962,12 +1955,12 @@ impl<'a> Scheduler<'a> {
                 }
 
                 let bpf_layer = &mut self.skel.maps.bss_data.layers[idx];
-                let available_cpus = self.cpu_pool.available_cpus_in_mask(&layer.allowed_cpus);
-                let nr_available_cpus = available_cpus.count_ones();
+                let available_cpus = self.cpu_pool.available_cpus().and(&layer.allowed_cpus);
+                let nr_available_cpus = available_cpus.weight();
 
                 // Open layers need the intersection of allowed cpus and
                 // available cpus.
-                layer.cpus.copy_from_bitslice(&available_cpus);
+                layer.cpus = available_cpus;
                 layer.nr_cpus = nr_available_cpus;
                 Self::update_bpf_layer_cpumask(layer, bpf_layer);
             }

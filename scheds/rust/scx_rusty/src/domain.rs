@@ -48,7 +48,7 @@ pub struct DomainGroup {
 
 impl DomainGroup {
     pub fn new(top: &Topology, cpumasks: &[String]) -> Result<Self> {
-        let mut span = Cpumask::new()?;
+        let mut span = Cpumask::new();
         let mut dom_numa_map = BTreeMap::new();
         // Track the domain ID separate from the LLC ID, because LLC IDs can
         // have gaps if there are offlined CPUs, and domain IDs need to be
@@ -59,7 +59,7 @@ impl DomainGroup {
             let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
             for mask_str in cpumasks.iter() {
                 let mask = Cpumask::from_str(&mask_str)?;
-                span |= mask.clone();
+                span |= &mask;
                 doms.insert(dom_id, Domain { id: dom_id, mask });
                 dom_numa_map.insert(dom_id, 0);
                 dom_id += 1;
@@ -70,7 +70,7 @@ impl DomainGroup {
             for (node_id, node) in &top.nodes {
                 for (_, llc) in node.llcs.iter() {
                     let mask = llc.span.clone();
-                    span |= mask.clone();
+                    span |= &mask;
                     doms.insert(dom_id, Domain { id: dom_id, mask });
                     dom_numa_map.insert(dom_id, node_id.clone());
                     dom_id += 1;

@@ -94,8 +94,8 @@ impl Tuner {
             .ok_or_else(|| anyhow!("Expected cpus_map to exist"))?;
 
         Ok(Self {
-            direct_greedy_mask: Cpumask::new()?,
-            kick_greedy_mask: Cpumask::new()?,
+            direct_greedy_mask: Cpumask::new(),
+            kick_greedy_mask: Cpumask::new(),
             fully_utilized: false,
             direct_greedy_under: direct_greedy_under / 100.0,
             kick_greedy_under: kick_greedy_under / 100.0,
@@ -138,8 +138,8 @@ impl Tuner {
         avg_util /= self.dom_group.weight() as f64;
         self.fully_utilized = avg_util >= 0.99999;
 
-        self.direct_greedy_mask.clear();
-        self.kick_greedy_mask.clear();
+        self.direct_greedy_mask.clear_all();
+        self.kick_greedy_mask.clear_all();
         for (dom_id, dom) in self.dom_group.doms().iter() {
             // Calculate the domain avg util. If there are no active CPUs,
             // it doesn't really matter. Go with 0.0 as that's less likely
@@ -154,10 +154,10 @@ impl Tuner {
             let enable_kick = self.kick_greedy_under > 0.99999 || util < self.kick_greedy_under;
 
             if enable_direct {
-                self.direct_greedy_mask |= dom.mask();
+                self.direct_greedy_mask |= &dom.mask();
             }
             if enable_kick {
-                self.kick_greedy_mask |= dom.mask();
+                self.kick_greedy_mask |= &dom.mask();
             }
         }
 

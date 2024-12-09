@@ -73,14 +73,11 @@ use crate::misc::read_file_usize;
 use crate::Cpumask;
 use anyhow::bail;
 use anyhow::Result;
-use bitvec::bitvec;
-use bitvec::vec::BitVec;
 use glob::glob;
 use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
-use std::slice::Iter;
 use std::sync::Arc;
 
 #[cfg(feature = "gpu-topology")]
@@ -182,7 +179,6 @@ pub struct Topology {
     pub nodes: BTreeMap<usize, Node>,
     /// Cpumask all CPUs in the system.
     pub span: Cpumask,
-    pub nr_cpus_online: usize,
 
     /// Skip indices to access lower level members easily.
     pub all_llcs: BTreeMap<usize, Arc<Llc>>,
@@ -237,11 +233,9 @@ impl Topology {
             node.all_cpus = node_cpus;
         }
 
-        let nr_cpus_online = span.weight();
         Ok(Topology {
             nodes,
             span,
-            nr_cpus_online,
             all_llcs: topo_llcs,
             all_cores: topo_cores,
             all_cpus: topo_cpus,
@@ -290,27 +284,17 @@ impl Topology {
             .any(|c| c.core_type == CoreType::Little)
     }
 
-    /// Returns a BitVec of online CPUs.
-    pub fn cpus_bitvec(&self) -> BitVec {
-        let mut cpus = bitvec![0; *NR_CPUS_POSSIBLE];
-        for id in self.all_cpus.keys() {
-            cpus.set(*id, true);
-        }
-        cpus
-    }
-
-    /// Returns a vector that maps the index of each logical core to the sibling core.
-    /// This represents the "next sibling" core within a package in systems that support SMT.
-    /// The sibling core is the other logical core that shares the physical resources
-    /// of the same physical core.
+    /// Returns a vector that maps the index of each logical CPU to the
+    /// sibling CPU. This represents the "next sibling" CPU within a package
+    /// in systems that support SMT. The sibling CPU is the other logical
+    /// CPU that shares the physical resources of the same physical core.
     ///
     /// Assuming each core holds exactly at most two cpus.
     pub fn sibling_cpus(&self) -> Vec<i32> {
         let mut sibling_cpu = vec![-1i32; *NR_CPUS_POSSIBLE];
         for core in self.all_cores.values() {
             let mut first = -1i32;
-            for (cpu_id, _) in &core.cpus {
-                let cpu = *cpu_id;
+            for (&cpu, _) in &core.cpus {
                 if first < 0 {
                     first = cpu as i32;
                 } else {
@@ -321,82 +305,6 @@ impl Topology {
             }
         }
         sibling_cpu
-    }
-}
-
-/// Generate a topology map from a Topology object, represented as an array of arrays.
-///
-/// Each inner array corresponds to a core containing its associated CPU IDs. This map can
-/// facilitate efficient iteration over the host's topology.
-///
-/// # Example
-///
-/// ```
-/// use scx_utils::{TopologyMap, Topology};
-/// let topo = Topology::new().unwrap();
-/// let topo_map = TopologyMap::new(&topo).unwrap();
-///
-/// for (core_id, core) in topo_map.iter().enumerate() {
-///     for cpu in core {
-///         println!("core={} cpu={}", core_id, cpu);
-///     }
-/// }
-/// ```
-#[derive(Debug)]
-pub struct TopologyMap {
-    map: Vec<Vec<usize>>,
-}
-
-impl TopologyMap {
-    pub fn new(topo: &Topology) -> Result<TopologyMap> {
-        let mut map: Vec<Vec<usize>> = Vec::new();
-
-        for core in topo.all_cores.values() {
-            let mut cpu_ids: Vec<usize> = Vec::new();
-            for cpu_id in core.span.clone().into_iter() {
-                cpu_ids.push(cpu_id);
-            }
-            map.push(cpu_ids);
-        }
-
-        Ok(TopologyMap { map })
-    }
-
-    pub fn iter(&self) -> Iter<Vec<usize>> {
-        self.map.iter()
-    }
-
-    /// Returns a vector of bit masks, each representing the mapping between
-    /// physical cores and the logical cores that run on them.
-    /// The index in the vector represents the physical core, and each bit in the
-    /// corresponding `BitVec` represents whether a logical core belongs to that physical core.
-    pub fn core_cpus_bitvec(&self) -> Vec<BitVec> {
-        let mut core_cpus = Vec::<BitVec>::new();
-        for (core_id, core) in self.iter().enumerate() {
-            if core_cpus.len() < core_id + 1 {
-                core_cpus.resize(core_id + 1, bitvec![0; *NR_CPUS_POSSIBLE]);
-            }
-            for cpu in core {
-                core_cpus[core_id].set(*cpu, true);
-            }
-        }
-        core_cpus
-    }
-
-    /// Returns mapping between logical core and physical core ids
-    /// The index in the vector represents the logical core, and each corresponding value
-    /// represents whether the physical core id of the logical core.
-    pub fn cpu_core_mapping(&self) -> Vec<usize> {
-        let mut cpu_core_mapping = Vec::new();
-        for (core_id, core) in self.iter().enumerate() {
-            for cpu in core {
-                if cpu_core_mapping.len() < cpu + 1 {
-                    cpu_core_mapping.resize(cpu + 1, 0);
-                }
-                cpu_core_mapping[*cpu] = core_id;
-            }
-        }
-        cpu_core_mapping
     }
 }
 
@@ -434,7 +342,7 @@ fn cpus_online() -> Result<Cpumask> {
     let path = "/sys/devices/system/cpu/online";
     let online = std::fs::read_to_string(&path)?;
     let online_groups: Vec<&str> = online.split(',').collect();
-    let mut mask = Cpumask::new()?;
+    let mut mask = Cpumask::new();
     for group in online_groups.iter() {
         let (min, max) = match sscanf!(group.trim(), "{usize}-{usize}") {
             Ok((x, y)) => (x, y),
@@ -542,7 +450,7 @@ fn create_insert_cpu(
     let llc = node.llcs.entry(*llc_id).or_insert(Arc::new(Llc {
         id: *llc_id,
         cores: BTreeMap::new(),
-        span: Cpumask::new()?,
+        span: Cpumask::new(),
         all_cpus: BTreeMap::new(),
 
         node_id: node.id,
@@ -572,7 +480,7 @@ fn create_insert_cpu(
     let core = llc_mut.cores.entry(*core_id).or_insert(Arc::new(Core {
         id: *core_id,
         cpus: BTreeMap::new(),
-        span: Cpumask::new()?,
+        span: Cpumask::new(),
         core_type: core_type.clone(),
 
         llc_id: *llc_id,
@@ -661,7 +569,7 @@ fn create_default_node(
     let mut node = Node {
         id: 0,
         llcs: BTreeMap::new(),
-        span: Cpumask::new()?,
+        span: Cpumask::new(),
         #[cfg(feature = "gpu-topology")]
         gpus: BTreeMap::new(),
         all_cores: BTreeMap::new(),
@@ -725,7 +633,7 @@ fn create_numa_nodes(
         let mut node = Node {
             id: node_id,
             llcs: BTreeMap::new(),
-            span: Cpumask::new()?,
+            span: Cpumask::new(),
 
             all_cores: BTreeMap::new(),
             all_cpus: BTreeMap::new(),
