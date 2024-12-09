@@ -81,7 +81,7 @@ impl DomainGroup {
 
         let mut cpu_dom_map = BTreeMap::new();
         for (id, dom) in doms.iter() {
-            for cpu in dom.mask.clone().into_iter() {
+            for cpu in dom.mask.iter() {
                 cpu_dom_map.insert(cpu, *id);
             }
         }

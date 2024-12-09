@@ -399,7 +399,7 @@ impl<'a> Scheduler<'a> {
         }
 
         for (id, dom) in domains.doms().iter() {
-            for cpu in dom.mask().into_iter() {
+            for cpu in dom.mask().iter() {
                 skel.maps.rodata_data.cpu_dom_id_map[cpu] = id
                     .clone()
                     .try_into()
