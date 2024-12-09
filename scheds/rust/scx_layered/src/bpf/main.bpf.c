@@ -712,7 +712,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		goto out_put;
 
 	/*
-	 * Try a CPU in the current LLC
+	 * Try a CPU in the previous LLC.
 	 */
 	if (nr_llcs > 1) {
 		struct llc_ctx *prev_llcc;
@@ -727,7 +727,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 			goto out_put;
 
 		if (!(prev_llcc = lookup_llc_ctx(prev_cpuc->llc_id)) ||
-		    prev_llcc->queued_runtime[layer_id] <= layer->xllc_mig_min_ns) {
+		    prev_llcc->queued_runtime[layer_id] < layer->xllc_mig_min_ns) {
 			lstat_inc(LSTAT_XLLC_MIGRATION_SKIP, layer, cpuc);
 			cpu = -1;
 			goto out_put;
@@ -1295,7 +1295,7 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 			if (!(remote_llcc = lookup_llc_ctx(*llc_idp)))
 				return false;
 
-			if (remote_llcc->queued_runtime[layer_id] <= layer->xllc_mig_min_ns) {
+			if (remote_llcc->queued_runtime[layer_id] < layer->xllc_mig_min_ns) {
 				xllc_mig_skipped = true;
 				continue;
 			}
