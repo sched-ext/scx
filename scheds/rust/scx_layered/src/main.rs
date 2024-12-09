@@ -1565,7 +1565,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.lo_fb_share_ppk = ((opts.lo_fb_share * 1024.0) as u32).clamp(1, 1024);
         skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
 
-        for (cpu, sib) in cpu_pool.sibling_cpu.iter().enumerate() {
+        for (cpu, sib) in topo.sibling_cpus().iter().enumerate() {
             skel.maps.rodata_data.__sibling_cpu[cpu] = *sib;
         }
         for cpu in topo.all_cpus.keys() {

@@ -18,7 +18,6 @@ pub use config::LayerKind;
 pub use config::LayerMatch;
 pub use config::LayerSpec;
 pub use layer_core_growth::LayerGrowthAlgo;
-use log::debug;
 use log::info;
 use scx_utils::Core;
 use scx_utils::Cpumask;
@@ -37,12 +36,6 @@ pub const XLLC_MIG_MIN_US_DFL: f64 = 100.0;
 /// how resources are allocated for tasks across the available CPUs.
 pub struct CpuPool {
     pub topo: Arc<Topology>,
-
-    /// A vector that maps the index of each logical core to the sibling core.
-    /// This represents the "next sibling" core within a package in systems that support SMT.
-    /// The sibling core is the other logical core that shares the physical resources
-    /// of the same physical core.
-    pub sibling_cpu: Vec<i32>,
 
     /// A bit mask representing all available physical cores.
     /// Each bit corresponds to whether a physical core is available for task scheduling.
@@ -68,8 +61,6 @@ impl CpuPool {
             bail!("NR_CPU_IDS {} > MAX_CPUS {}", *NR_CPU_IDS, MAX_CPUS);
         }
 
-        let sibling_cpu = topo.sibling_cpus();
-
         // Build core_topology_to_id
         let mut core_topology_to_id = BTreeMap::new();
         let mut next_topo_id: usize = 0;
@@ -88,12 +79,10 @@ impl CpuPool {
             *NR_CPUS_POSSIBLE,
             topo.all_cores.len(),
         );
-        debug!("CPUs: siblings={:?}", &sibling_cpu[..*NR_CPU_IDS]);
 
         let first_cpu = *topo.all_cpus.keys().next().unwrap();
 
         let mut cpu_pool = Self {
-            sibling_cpu,
             available_cores: bitvec![1; topo.all_cores.len()],
             first_cpu,
             fallback_cpu: first_cpu,

@@ -284,18 +284,17 @@ impl Topology {
             .any(|c| c.core_type == CoreType::Little)
     }
 
-    /// Returns a vector that maps the index of each logical core to the sibling core.
-    /// This represents the "next sibling" core within a package in systems that support SMT.
-    /// The sibling core is the other logical core that shares the physical resources
-    /// of the same physical core.
+    /// Returns a vector that maps the index of each logical CPU to the
+    /// sibling CPU. This represents the "next sibling" CPU within a package
+    /// in systems that support SMT. The sibling CPU is the other logical
+    /// CPU that shares the physical resources of the same physical core.
     ///
     /// Assuming each core holds exactly at most two cpus.
     pub fn sibling_cpus(&self) -> Vec<i32> {
         let mut sibling_cpu = vec![-1i32; *NR_CPUS_POSSIBLE];
         for core in self.all_cores.values() {
             let mut first = -1i32;
-            for (cpu_id, _) in &core.cpus {
-                let cpu = *cpu_id;
+            for (&cpu, _) in &core.cpus {
                 if first < 0 {
                     first = cpu as i32;
                 } else {
