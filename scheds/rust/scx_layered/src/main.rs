@@ -1680,7 +1680,7 @@ impl<'a> Scheduler<'a> {
             let node_cpus = node.span.clone();
             for (irq, irqmask) in netdev.irqs.iter_mut() {
                 irqmask.clear_all();
-                for cpu in available_cpus.as_raw_bitvec().iter_ones() {
+                for cpu in available_cpus.iter() {
                     if !node_cpus.test_cpu(cpu) {
                         continue;
                     }
@@ -1688,7 +1688,7 @@ impl<'a> Scheduler<'a> {
                 }
                 // If no CPUs are available in the node then spread the load across the node
                 if irqmask.weight() == 0 {
-                    for cpu in node_cpus.as_raw_bitvec().iter_ones() {
+                    for cpu in node_cpus.iter() {
                         let _ = irqmask.set_cpu(cpu);
                     }
                 }
