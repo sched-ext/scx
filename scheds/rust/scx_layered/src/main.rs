@@ -1247,10 +1247,10 @@ impl<'a> Scheduler<'a> {
             core_span.clear_cpu(cpu_id).unwrap();
 
             // Convert them into arrays.
-            let mut sys_order: Vec<usize> = sys_span.into_iter().collect();
-            let mut node_order: Vec<usize> = node_span.into_iter().collect();
-            let mut llc_order: Vec<usize> = llc_span.into_iter().collect();
-            let mut core_order: Vec<usize> = core_span.into_iter().collect();
+            let mut sys_order: Vec<usize> = sys_span.iter().collect();
+            let mut node_order: Vec<usize> = node_span.iter().collect();
+            let mut llc_order: Vec<usize> = llc_span.iter().collect();
+            let mut core_order: Vec<usize> = core_span.iter().collect();
 
             // Shuffle them so that different CPUs follow different orders.
             // This isn't ideal as random shuffling won't give us complete

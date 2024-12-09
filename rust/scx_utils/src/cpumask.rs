@@ -244,9 +244,28 @@ impl Cpumask {
         new.mask ^= other.mask.clone();
         new
     }
-}
 
-impl Cpumask {
+    /// Iterate over each element of a Cpumask, and return the indices with bits
+    /// set.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use log::info;
+    /// use scx_utils::Cpumask;
+    /// let str = String::from("all");
+    /// let mask = Cpumask::from_str(&str).unwrap();
+    /// for cpu in mask.iter() {
+    ///     info!("cpu {} was set", cpu);
+    /// }
+    /// ```
+    pub fn iter(&self) -> CpumaskIterator {
+        CpumaskIterator {
+            mask: self,
+            index: 0,
+        }
+    }
+
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, case: char) -> fmt::Result {
         let mut masks: Vec<u32> = self
             .as_raw_slice()
@@ -278,6 +297,28 @@ impl Cpumask {
             }
         }
         Ok(())
+    }
+}
+
+pub struct CpumaskIterator<'a> {
+    mask: &'a Cpumask,
+    index: usize,
+}
+
+impl<'a> Iterator for CpumaskIterator<'a> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.index < *NR_CPU_IDS {
+            let index = self.index;
+            self.index += 1;
+            let bit_val = self.mask.test_cpu(index);
+            if bit_val {
+                return Some(index);
+            }
+        }
+
+        None
     }
 }
 
@@ -314,53 +355,5 @@ impl BitOrAssign<&Self> for Cpumask {
 impl BitXorAssign<&Self> for Cpumask {
     fn bitxor_assign(&mut self, rhs: &Self) {
         self.mask ^= &rhs.mask;
-    }
-}
-
-pub struct CpumaskIntoIterator {
-    mask: Cpumask,
-    index: usize,
-}
-
-/// Iterate over each element of a Cpumask, and return the indices with bits
-/// set.
-///
-/// # Examples
-///
-/// ```rust
-/// use log::info;
-/// use scx_utils::Cpumask;
-/// let str = String::from("all");
-/// let mask = Cpumask::from_str(&str).unwrap();
-/// for cpu in mask.clone().into_iter() {
-///     info!("cpu {} was set", cpu);
-/// }
-/// ```
-impl IntoIterator for Cpumask {
-    type Item = usize;
-    type IntoIter = CpumaskIntoIterator;
-
-    fn into_iter(self) -> CpumaskIntoIterator {
-        CpumaskIntoIterator {
-            mask: self,
-            index: 0,
-        }
-    }
-}
-
-impl Iterator for CpumaskIntoIterator {
-    type Item = usize;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.index < *NR_CPU_IDS {
-            let index = self.index;
-            self.index += 1;
-            let bit_val = self.mask.test_cpu(index);
-            if bit_val {
-                return Some(index);
-            }
-        }
-
-        None
     }
 }
