@@ -344,7 +344,7 @@ built and installed without cloning this repository as long as the necessary
 toolchains are available. Simply run:
 
 ```
-$ cargo install scx_rusty
+$ cargo install --locked scx_rusty
 ```
 
 and `scx_rusty` will be built and installed as `~/.cargo/bin/scx_rusty`.
