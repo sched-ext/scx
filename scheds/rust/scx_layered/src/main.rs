@@ -24,7 +24,6 @@ use anyhow::anyhow;
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use bitvec::prelude::*;
 pub use bpf_skel::*;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
@@ -52,12 +51,12 @@ use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::CoreType;
+use scx_utils::Cpumask;
 use scx_utils::Llc;
 use scx_utils::NetDev;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPUS_POSSIBLE;
-use scx_utils::NR_CPU_IDS;
 use stats::LayerStats;
 use stats::StatsReq;
 use stats::StatsRes;
@@ -915,21 +914,15 @@ struct Layer {
     core_order: Vec<usize>,
 
     nr_cpus: usize,
-    cpus: BitVec,
-    allowed_cpus: BitVec,
+    cpus: Cpumask,
+    allowed_cpus: Cpumask,
 }
 
 impl Layer {
-    fn new(
-        spec: &LayerSpec,
-        topo: &Topology,
-        core_order: &Vec<usize>,
-    ) -> Result<Self> {
+    fn new(spec: &LayerSpec, topo: &Topology, core_order: &Vec<usize>) -> Result<Self> {
         let name = &spec.name;
         let kind = spec.kind.clone();
-        let mut cpus = bitvec![0; *NR_CPU_IDS];
-        cpus.fill(false);
-        let mut allowed_cpus = bitvec![0; *NR_CPU_IDS];
+        let mut allowed_cpus = Cpumask::new()?;
         match &kind {
             LayerKind::Confined {
                 cpus_range,
@@ -942,21 +935,21 @@ impl Layer {
                     bail!("invalid cpus_range {:?}", cpus_range);
                 }
                 if nodes.len() == 0 && llcs.len() == 0 {
-                    allowed_cpus.fill(true);
+                    allowed_cpus.setall();
                 } else {
                     // build up the cpus bitset
                     for (node_id, node) in &topo.nodes {
                         // first do the matching for nodes
                         if nodes.contains(node_id) {
                             for (&id, _cpu) in &node.all_cpus {
-                                allowed_cpus.set(id, true);
+                                allowed_cpus.set_cpu(id)?;
                             }
                         }
                         // next match on any LLCs
                         for (llc_id, llc) in &node.llcs {
                             if llcs.contains(llc_id) {
                                 for (&id, _cpu) in &llc.all_cpus {
-                                    allowed_cpus.set(id, true);
+                                    allowed_cpus.set_cpu(id)?;
                                 }
                             }
                         }
@@ -981,21 +974,21 @@ impl Layer {
                 ..
             } => {
                 if nodes.len() == 0 && llcs.len() == 0 {
-                    allowed_cpus.fill(true);
+                    allowed_cpus.setall();
                 } else {
                     // build up the cpus bitset
                     for (node_id, node) in &topo.nodes {
                         // first do the matching for nodes
                         if nodes.contains(node_id) {
                             for (&id, _cpu) in &node.all_cpus {
-                                allowed_cpus.set(id, true);
+                                allowed_cpus.set_cpu(id)?;
                             }
                         }
                         // next match on any LLCs
                         for (llc_id, llc) in &node.llcs {
                             if llcs.contains(llc_id) {
                                 for (&id, _cpu) in &llc.all_cpus {
-                                    allowed_cpus.set(id, true);
+                                    allowed_cpus.set_cpu(id)?;
                                 }
                             }
                         }
@@ -1017,7 +1010,7 @@ impl Layer {
             core_order: core_order.clone(),
 
             nr_cpus: 0,
-            cpus,
+            cpus: Cpumask::new()?,
             allowed_cpus,
         })
     }
@@ -1028,11 +1021,11 @@ impl Layer {
             None => return Ok(0),
         };
 
-        let nr_to_free = cpus_to_free.count_ones();
+        let nr_to_free = cpus_to_free.weight();
 
         Ok(if nr_to_free <= max_to_free {
             trace!("[{}] freeing CPUs: {}", self.name, &cpus_to_free);
-            self.cpus &= !cpus_to_free.clone();
+            self.cpus &= cpus_to_free.not();
             self.nr_cpus -= nr_to_free;
             cpu_pool.free(&cpus_to_free)?;
             nr_to_free
@@ -1053,10 +1046,10 @@ impl Layer {
             }
         };
 
-        let nr_new_cpus = new_cpus.count_ones();
+        let nr_new_cpus = new_cpus.weight();
 
         trace!("[{}] adding CPUs: {}", &self.name, &new_cpus);
-        self.cpus |= &new_cpus;
+        self.cpus |= new_cpus;
         self.nr_cpus += nr_new_cpus;
         Ok(nr_new_cpus)
     }
@@ -1660,11 +1653,11 @@ impl<'a> Scheduler<'a> {
 
     fn update_bpf_layer_cpumask(layer: &Layer, bpf_layer: &mut types::layer) {
         trace!("[{}] Updating BPF CPUs: {}", layer.name, &layer.cpus);
-        for bit in 0..layer.cpus.len() {
-            if layer.cpus[bit] {
-                bpf_layer.cpus[bit / 8] |= 1 << (bit % 8);
+        for cpu in 0..layer.cpus.len() {
+            if layer.cpus.test_cpu(cpu) {
+                bpf_layer.cpus[cpu / 8] |= 1 << (cpu % 8);
             } else {
-                bpf_layer.cpus[bit / 8] &= !(1 << (bit % 8));
+                bpf_layer.cpus[cpu / 8] &= !(1 << (cpu % 8));
             }
         }
         bpf_layer.refresh_cpus = 1;
@@ -1687,7 +1680,7 @@ impl<'a> Scheduler<'a> {
             let node_cpus = node.span.clone();
             for (irq, irqmask) in netdev.irqs.iter_mut() {
                 irqmask.clear();
-                for cpu in available_cpus.iter_ones() {
+                for cpu in available_cpus.as_raw_bitvec().iter_ones() {
                     if !node_cpus.test_cpu(cpu) {
                         continue;
                     }
@@ -1747,7 +1740,7 @@ impl<'a> Scheduler<'a> {
                     let util = if util < 0.01 { 0.0 } else { util };
                     let low = (util / util_range.1).ceil() as usize;
                     let high = ((util / util_range.0).floor() as usize).max(low);
-                    let target = layer.cpus.count_ones().clamp(low, high);
+                    let target = layer.cpus.weight().clamp(low, high);
                     let cpus_range = cpus_range.unwrap_or((0, nr_cpus));
 
                     records.push((
@@ -1878,7 +1871,7 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
 
-            let nr_cur = layer.cpus.count_ones();
+            let nr_cur = layer.cpus.weight();
             if nr_cur <= target {
                 continue;
             }
@@ -1931,7 +1924,7 @@ impl<'a> Scheduler<'a> {
                 continue;
             }
 
-            let nr_cur = layer.cpus.count_ones();
+            let nr_cur = layer.cpus.weight();
             if nr_cur >= target {
                 continue;
             }
@@ -1963,11 +1956,11 @@ impl<'a> Scheduler<'a> {
 
                 let bpf_layer = &mut self.skel.maps.bss_data.layers[idx];
                 let available_cpus = self.cpu_pool.available_cpus_in_mask(&layer.allowed_cpus);
-                let nr_available_cpus = available_cpus.count_ones();
+                let nr_available_cpus = available_cpus.weight();
 
                 // Open layers need the intersection of allowed cpus and
                 // available cpus.
-                layer.cpus.copy_from_bitslice(&available_cpus);
+                layer.cpus = available_cpus;
                 layer.nr_cpus = nr_available_cpus;
                 Self::update_bpf_layer_cpumask(layer, bpf_layer);
             }

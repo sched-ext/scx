@@ -21,6 +21,7 @@ pub use layer_core_growth::LayerGrowthAlgo;
 use log::debug;
 use log::info;
 use scx_utils::Core;
+use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::TopologyMap;
 use scx_utils::NR_CPUS_POSSIBLE;
@@ -42,7 +43,7 @@ pub struct CpuPool {
     /// physical cores and the logical cores that run on them.
     /// The index in the vector represents the physical core, and each bit in the
     /// corresponding `BitVec` represents whether a logical core belongs to that physical core.
-    core_cpus: Vec<BitVec>,
+    core_cpus: Vec<BitVec<u64, Lsb0>>,
 
     /// A vector that maps the index of each logical core to the sibling core.
     /// This represents the "next sibling" core within a package in systems that support SMT.
@@ -52,7 +53,7 @@ pub struct CpuPool {
 
     /// A bit mask representing all available physical cores.
     /// Each bit corresponds to whether a physical core is available for task scheduling.
-    available_cores: BitVec,
+    available_cores: BitVec<u64, Lsb0>,
 
     /// The ID of the first physical core in the system.
     /// This core is often used as a default for initializing tasks.
@@ -104,7 +105,7 @@ impl CpuPool {
         let mut cpu_pool = Self {
             core_cpus,
             sibling_cpu,
-            available_cores: bitvec![1; topo.all_cores.len()],
+            available_cores: bitvec![u64, Lsb0; 1; topo.all_cores.len()],
             first_cpu,
             fallback_cpu: first_cpu,
             core_topology_to_id,
@@ -125,19 +126,19 @@ impl CpuPool {
 
     pub fn alloc_cpus<'a>(
         &'a mut self,
-        allowed_cpus: &BitVec,
+        allowed_cpus: &Cpumask,
         core_alloc_order: &[usize],
-    ) -> Option<&'a BitVec> {
-        let available_cpus = self.available_cpus_in_mask(&allowed_cpus);
+    ) -> Option<Cpumask> {
+        let available_cpus = self.available_cpus_in_mask(allowed_cpus);
         let available_cores = self.cpus_to_cores(&available_cpus).ok()?;
 
         for alloc_core in core_alloc_order {
-            match available_cores.get(*alloc_core) {
+            match available_cores.as_raw_bitvec().get(*alloc_core) {
                 Some(bit) => {
                     if *bit {
                         self.available_cores.set(*alloc_core, false);
                         self.update_fallback_cpu();
-                        return Some(&self.core_cpus[*alloc_core]);
+                        return Some(Cpumask::from_bitvec(self.core_cpus[*alloc_core].clone()));
                     }
                 }
                 None => {
@@ -148,9 +149,9 @@ impl CpuPool {
         None
     }
 
-    fn cpus_to_cores(&self, cpus_to_match: &BitVec) -> Result<BitVec> {
-        let mut cpus = cpus_to_match.clone();
-        let mut cores = bitvec![0; self.topo.all_cores.len()];
+    fn cpus_to_cores(&self, cpus_to_match: &Cpumask) -> Result<Cpumask> {
+        let mut cpus = cpus_to_match.as_raw_bitvec().clone();
+        let mut cores = bitvec![u64, Lsb0; 0; self.topo.all_cores.len()];
 
         while let Some(cpu) = cpus.first_one() {
             let core = self.topo.all_cpus[&cpu].core_id;
@@ -168,11 +169,11 @@ impl CpuPool {
             cores.set(core, true);
         }
 
-        Ok(cores)
+        Ok(Cpumask::from_bitvec(cores))
     }
 
-    pub fn free<'a>(&'a mut self, cpus_to_free: &BitVec) -> Result<()> {
-        let cores = self.cpus_to_cores(cpus_to_free)?;
+    pub fn free<'a>(&'a mut self, cpus_to_free: &Cpumask) -> Result<()> {
+        let cores = self.cpus_to_cores(cpus_to_free)?.as_raw_bitvec().clone();
         if (self.available_cores.clone() & &cores).any() {
             bail!("Some of CPUs {} are already free", cpus_to_free);
         }
@@ -183,35 +184,37 @@ impl CpuPool {
 
     pub fn next_to_free<'a>(
         &'a self,
-        cands: &BitVec,
+        cands: &Cpumask,
         core_order: impl Iterator<Item = &'a usize>,
-    ) -> Result<Option<&'a BitVec>> {
+    ) -> Result<Option<Cpumask>> {
         for pref_core in core_order {
             let core_cpus = self.core_cpus[*pref_core].clone();
-            if (core_cpus & cands.clone()).count_ones() > 0 {
-                return Ok(Some(&self.core_cpus[*pref_core]));
+            if (core_cpus & cands.as_raw_bitvec().clone()).count_ones() > 0 {
+                return Ok(Some(Cpumask::from_bitvec(
+                    self.core_cpus[*pref_core].clone(),
+                )));
             }
         }
         Ok(None)
     }
 
-    pub fn available_cpus(&self) -> BitVec<u64, Lsb0> {
+    pub fn available_cpus(&self) -> Cpumask {
         let mut cpus = bitvec![u64, Lsb0; 0; *NR_CPU_IDS];
         for core in self.available_cores.iter_ones() {
             let core_cpus = self.core_cpus[core].clone();
             cpus |= core_cpus.as_bitslice();
         }
-        cpus
+        Cpumask::from_bitvec(cpus)
     }
 
-    pub fn available_cpus_in_mask(&self, allowed_cpus: &BitVec) -> BitVec {
-        let mut cpus = bitvec![0; *NR_CPU_IDS];
+    pub fn available_cpus_in_mask(&self, allowed_cpus: &Cpumask) -> Cpumask {
+        let mut cpus = bitvec![u64, Lsb0; 0; *NR_CPU_IDS];
         for core in self.available_cores.iter_ones() {
             let mut core_cpus = self.core_cpus[core].clone();
-            core_cpus &= allowed_cpus;
+            core_cpus &= allowed_cpus.as_raw_bitvec();
             cpus |= core_cpus;
         }
-        cpus
+        Cpumask::from_bitvec(cpus)
     }
 
     fn get_core_topological_id(&self, core: &Core) -> usize {

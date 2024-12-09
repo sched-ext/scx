@@ -185,7 +185,7 @@ pub struct LayerStats {
 }
 
 impl LayerStats {
-    fn bitvec_to_u32s(bitvec: &BitVec) -> Vec<u32> {
+    fn bitvec_to_u32s(bitvec: &BitVec<u64, Lsb0>) -> Vec<u32> {
         let mut vals = Vec::<u32>::new();
         let mut val: u32 = 0;
         for (idx, bit) in bitvec.iter().enumerate() {
@@ -262,8 +262,8 @@ impl LayerStats {
             xlayer_rewake: lstat_pct(LSTAT_XLAYER_REWAKE),
             xllc_migration: lstat_pct(LSTAT_XLLC_MIGRATION),
             xllc_migration_skip: lstat_pct(LSTAT_XLLC_MIGRATION_SKIP),
-            cpus: Self::bitvec_to_u32s(&layer.cpus),
-            cur_nr_cpus: layer.cpus.count_ones() as u32,
+            cpus: Self::bitvec_to_u32s(layer.cpus.as_raw_bitvec()),
+            cur_nr_cpus: layer.cpus.weight() as u32,
             min_nr_cpus: nr_cpus_range.0 as u32,
             max_nr_cpus: nr_cpus_range.1 as u32,
             slice_us: stats.layer_slice_us[lidx],

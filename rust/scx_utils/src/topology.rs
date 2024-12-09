@@ -73,8 +73,7 @@ use crate::misc::read_file_usize;
 use crate::Cpumask;
 use anyhow::bail;
 use anyhow::Result;
-use bitvec::bitvec;
-use bitvec::vec::BitVec;
+use bitvec::prelude::*;
 use glob::glob;
 use sscanf::sscanf;
 use std::collections::BTreeMap;
@@ -358,11 +357,11 @@ impl TopologyMap {
     /// physical cores and the logical cores that run on them.
     /// The index in the vector represents the physical core, and each bit in the
     /// corresponding `BitVec` represents whether a logical core belongs to that physical core.
-    pub fn core_cpus_bitvec(&self) -> Vec<BitVec> {
-        let mut core_cpus = Vec::<BitVec>::new();
+    pub fn core_cpus_bitvec(&self) -> Vec<BitVec<u64, Lsb0>> {
+        let mut core_cpus = Vec::<BitVec<u64, Lsb0>>::new();
         for (core_id, core) in self.iter().enumerate() {
             if core_cpus.len() < core_id + 1 {
-                core_cpus.resize(core_id + 1, bitvec![0; *NR_CPUS_POSSIBLE]);
+                core_cpus.resize(core_id + 1, bitvec![u64, Lsb0; 0; *NR_CPUS_POSSIBLE]);
             }
             for cpu in core {
                 core_cpus[core_id].set(*cpu, true);
