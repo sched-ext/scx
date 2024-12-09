@@ -124,7 +124,7 @@ impl Tuner {
 
         let mut avg_util = 0.0f64;
         for (dom_id, dom) in self.dom_group.doms().iter() {
-            for cpu in dom.mask().into_iter() {
+            for cpu in dom.mask().iter() {
                 let cpu32 = cpu as u32;
                 if let (Some(curr), Some(prev)) =
                     (curr_cpu_stats.get(&cpu32), self.prev_cpu_stats.get(&cpu32))

@@ -1247,10 +1247,10 @@ impl<'a> Scheduler<'a> {
             core_span.clear_cpu(cpu_id).unwrap();
 
             // Convert them into arrays.
-            let mut sys_order: Vec<usize> = sys_span.into_iter().collect();
-            let mut node_order: Vec<usize> = node_span.into_iter().collect();
-            let mut llc_order: Vec<usize> = llc_span.into_iter().collect();
-            let mut core_order: Vec<usize> = core_span.into_iter().collect();
+            let mut sys_order: Vec<usize> = sys_span.iter().collect();
+            let mut node_order: Vec<usize> = node_span.iter().collect();
+            let mut llc_order: Vec<usize> = llc_span.iter().collect();
+            let mut core_order: Vec<usize> = core_span.iter().collect();
 
             // Shuffle them so that different CPUs follow different orders.
             // This isn't ideal as random shuffling won't give us complete
@@ -1680,7 +1680,7 @@ impl<'a> Scheduler<'a> {
             let node_cpus = node.span.clone();
             for (irq, irqmask) in netdev.irqs.iter_mut() {
                 irqmask.clear_all();
-                for cpu in available_cpus.as_raw_bitvec().iter_ones() {
+                for cpu in available_cpus.iter() {
                     if !node_cpus.test_cpu(cpu) {
                         continue;
                     }
@@ -1688,7 +1688,7 @@ impl<'a> Scheduler<'a> {
                 }
                 // If no CPUs are available in the node then spread the load across the node
                 if irqmask.weight() == 0 {
-                    for cpu in node_cpus.as_raw_bitvec().iter_ones() {
+                    for cpu in node_cpus.iter() {
                         let _ = irqmask.set_cpu(cpu);
                     }
                 }
