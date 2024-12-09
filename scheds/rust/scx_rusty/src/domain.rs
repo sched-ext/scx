@@ -48,7 +48,7 @@ pub struct DomainGroup {
 
 impl DomainGroup {
     pub fn new(top: &Topology, cpumasks: &[String]) -> Result<Self> {
-        let mut span = Cpumask::new()?;
+        let mut span = Cpumask::new();
         let mut dom_numa_map = BTreeMap::new();
         // Track the domain ID separate from the LLC ID, because LLC IDs can
         // have gaps if there are offlined CPUs, and domain IDs need to be

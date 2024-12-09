@@ -408,7 +408,7 @@ impl<'a> Scheduler<'a> {
         }
 
         for numa in 0..domains.nr_nodes() {
-            let mut numa_mask = Cpumask::new()?;
+            let mut numa_mask = Cpumask::new();
             let node_domains = domains.numa_doms(&numa);
             for dom in node_domains.iter() {
                 let dom_mask = dom.mask();

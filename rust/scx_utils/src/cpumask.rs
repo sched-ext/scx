@@ -83,10 +83,10 @@ impl Cpumask {
     }
 
     /// Build a new empty Cpumask object.
-    pub fn new() -> Result<Cpumask> {
-        Ok(Cpumask {
+    pub fn new() -> Cpumask {
+        Cpumask {
             mask: bitvec![u64, Lsb0; 0; *NR_CPU_IDS],
-        })
+        }
     }
 
     /// Build a Cpumask object from a hexadecimal string.
@@ -166,12 +166,12 @@ impl Cpumask {
     }
 
     /// Set all bits in the Cpumask to 1
-    pub fn setall(&mut self) {
+    pub fn set_all(&mut self) {
         self.mask.fill(true);
     }
 
     /// Set all bits in the Cpumask to 0
-    pub fn clear(&mut self) {
+    pub fn clear_all(&mut self) {
         self.mask.fill(false);
     }
 
@@ -304,7 +304,7 @@ impl fmt::UpperHex for Cpumask {
 
 impl BitAnd for Cpumask {
     type Output = Self;
-    fn bitand(self, rhs: Self) -> Self {
+    fn bitand(self, rhs: Cpumask) -> Self {
         self.and(&rhs)
     }
 }

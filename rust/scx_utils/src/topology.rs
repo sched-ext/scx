@@ -421,7 +421,7 @@ fn cpus_online() -> Result<Cpumask> {
     let path = "/sys/devices/system/cpu/online";
     let online = std::fs::read_to_string(&path)?;
     let online_groups: Vec<&str> = online.split(',').collect();
-    let mut mask = Cpumask::new()?;
+    let mut mask = Cpumask::new();
     for group in online_groups.iter() {
         let (min, max) = match sscanf!(group.trim(), "{usize}-{usize}") {
             Ok((x, y)) => (x, y),
@@ -529,7 +529,7 @@ fn create_insert_cpu(
     let llc = node.llcs.entry(*llc_id).or_insert(Arc::new(Llc {
         id: *llc_id,
         cores: BTreeMap::new(),
-        span: Cpumask::new()?,
+        span: Cpumask::new(),
         all_cpus: BTreeMap::new(),
 
         node_id: node.id,
@@ -559,7 +559,7 @@ fn create_insert_cpu(
     let core = llc_mut.cores.entry(*core_id).or_insert(Arc::new(Core {
         id: *core_id,
         cpus: BTreeMap::new(),
-        span: Cpumask::new()?,
+        span: Cpumask::new(),
         core_type: core_type.clone(),
 
         llc_id: *llc_id,
@@ -648,7 +648,7 @@ fn create_default_node(
     let mut node = Node {
         id: 0,
         llcs: BTreeMap::new(),
-        span: Cpumask::new()?,
+        span: Cpumask::new(),
         #[cfg(feature = "gpu-topology")]
         gpus: BTreeMap::new(),
         all_cores: BTreeMap::new(),
@@ -712,7 +712,7 @@ fn create_numa_nodes(
         let mut node = Node {
             id: node_id,
             llcs: BTreeMap::new(),
-            span: Cpumask::new()?,
+            span: Cpumask::new(),
 
             all_cores: BTreeMap::new(),
             all_cpus: BTreeMap::new(),

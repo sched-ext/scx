@@ -922,7 +922,7 @@ impl Layer {
     fn new(spec: &LayerSpec, topo: &Topology, core_order: &Vec<usize>) -> Result<Self> {
         let name = &spec.name;
         let kind = spec.kind.clone();
-        let mut allowed_cpus = Cpumask::new()?;
+        let mut allowed_cpus = Cpumask::new();
         match &kind {
             LayerKind::Confined {
                 cpus_range,
@@ -935,7 +935,7 @@ impl Layer {
                     bail!("invalid cpus_range {:?}", cpus_range);
                 }
                 if nodes.len() == 0 && llcs.len() == 0 {
-                    allowed_cpus.setall();
+                    allowed_cpus.set_all();
                 } else {
                     // build up the cpus bitset
                     for (node_id, node) in &topo.nodes {
@@ -974,7 +974,7 @@ impl Layer {
                 ..
             } => {
                 if nodes.len() == 0 && llcs.len() == 0 {
-                    allowed_cpus.setall();
+                    allowed_cpus.set_all();
                 } else {
                     // build up the cpus bitset
                     for (node_id, node) in &topo.nodes {
@@ -1010,7 +1010,7 @@ impl Layer {
             core_order: core_order.clone(),
 
             nr_cpus: 0,
-            cpus: Cpumask::new()?,
+            cpus: Cpumask::new(),
             allowed_cpus,
         })
     }
@@ -1679,7 +1679,7 @@ impl<'a> Scheduler<'a> {
                 .ok_or_else(|| anyhow!("Failed to get netdev node"))?;
             let node_cpus = node.span.clone();
             for (irq, irqmask) in netdev.irqs.iter_mut() {
-                irqmask.clear();
+                irqmask.clear_all();
                 for cpu in available_cpus.as_raw_bitvec().iter_ones() {
                     if !node_cpus.test_cpu(cpu) {
                         continue;
