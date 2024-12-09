@@ -1660,6 +1660,7 @@ impl<'a> Scheduler<'a> {
                 bpf_layer.cpus[cpu / 8] &= !(1 << (cpu % 8));
             }
         }
+        bpf_layer.nr_cpus = layer.nr_cpus as u32;
         bpf_layer.refresh_cpus = 1;
     }
 
