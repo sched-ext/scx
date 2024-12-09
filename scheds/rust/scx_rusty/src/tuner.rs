@@ -154,10 +154,10 @@ impl Tuner {
             let enable_kick = self.kick_greedy_under > 0.99999 || util < self.kick_greedy_under;
 
             if enable_direct {
-                self.direct_greedy_mask |= dom.mask();
+                self.direct_greedy_mask |= &dom.mask();
             }
             if enable_kick {
-                self.kick_greedy_mask |= dom.mask();
+                self.kick_greedy_mask |= &dom.mask();
             }
         }
 

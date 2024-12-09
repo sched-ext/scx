@@ -1025,7 +1025,7 @@ impl Layer {
 
         Ok(if nr_to_free <= max_to_free {
             trace!("[{}] freeing CPUs: {}", self.name, &cpus_to_free);
-            self.cpus &= cpus_to_free.not();
+            self.cpus &= &cpus_to_free.not();
             self.nr_cpus -= nr_to_free;
             cpu_pool.free(&cpus_to_free)?;
             nr_to_free
@@ -1049,7 +1049,7 @@ impl Layer {
         let nr_new_cpus = new_cpus.weight();
 
         trace!("[{}] adding CPUs: {}", &self.name, &new_cpus);
-        self.cpus |= new_cpus;
+        self.cpus |= &new_cpus;
         self.nr_cpus += nr_new_cpus;
         Ok(nr_new_cpus)
     }

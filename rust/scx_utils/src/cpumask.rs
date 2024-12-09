@@ -61,11 +61,8 @@ use anyhow::Context;
 use anyhow::Result;
 use bitvec::prelude::*;
 use std::fmt;
-use std::ops::BitAnd;
 use std::ops::BitAndAssign;
-use std::ops::BitOr;
 use std::ops::BitOrAssign;
-use std::ops::BitXor;
 use std::ops::BitXorAssign;
 
 #[derive(Debug, Eq, Clone, Hash, Ord, PartialEq, PartialOrd)]
@@ -302,41 +299,20 @@ impl fmt::UpperHex for Cpumask {
     }
 }
 
-impl BitAnd for Cpumask {
-    type Output = Self;
-    fn bitand(self, rhs: Cpumask) -> Self {
-        self.and(&rhs)
-    }
-}
-
-impl BitAndAssign for Cpumask {
-    fn bitand_assign(&mut self, rhs: Cpumask) {
+impl BitAndAssign<&Self> for Cpumask {
+    fn bitand_assign(&mut self, rhs: &Self) {
         self.mask &= &rhs.mask;
     }
 }
 
-impl BitOr for Cpumask {
-    type Output = Self;
-    fn bitor(self, rhs: Self) -> Self {
-        self.or(&rhs)
-    }
-}
-
-impl BitOrAssign for Cpumask {
-    fn bitor_assign(&mut self, rhs: Cpumask) {
+impl BitOrAssign<&Self> for Cpumask {
+    fn bitor_assign(&mut self, rhs: &Self) {
         self.mask |= &rhs.mask;
     }
 }
 
-impl BitXor for Cpumask {
-    type Output = Self;
-    fn bitxor(self, rhs: Self) -> Self {
-        self.xor(&rhs)
-    }
-}
-
-impl BitXorAssign for Cpumask {
-    fn bitxor_assign(&mut self, rhs: Cpumask) {
+impl BitXorAssign<&Self> for Cpumask {
+    fn bitxor_assign(&mut self, rhs: &Self) {
         self.mask ^= &rhs.mask;
     }
 }
