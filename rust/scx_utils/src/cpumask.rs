@@ -46,11 +46,11 @@
 //!     mask.set_cpu(0);
 //!     assert!(mask.test_cpu(0));
 //!
-//!     mask.clear();
+//!     mask.clear_all();
 //!     info!("{:#?}", mask); // 32:<00000000000000000000000000000000>
 //!     assert!(!mask.test_cpu(0));
 //!
-//!     mask.setall();
+//!     mask.set_all();
 //!     info!("{:#?}", mask); // 32:<11111111111111111111111111111111>
 //!     assert!(mask.test_cpu(0));
 //!```
