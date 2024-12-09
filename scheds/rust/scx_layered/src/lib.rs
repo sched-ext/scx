@@ -132,7 +132,7 @@ impl CpuPool {
         let mut cpus = cpus_to_match.clone();
         let mut cores = bitvec![0; topo.all_cores.len()];
 
-        while let Some(cpu) = cpus.as_raw_bitvec().first_one() {
+        while let Some(cpu) = cpus.iter().next() {
             let core = &topo.all_cores[&topo.all_cpus[&cpu].core_id];
 
             if core.span.and(&cpus_to_match.not()).weight() != 0 {
