@@ -80,9 +80,6 @@ mod infeasible;
 pub use infeasible::LoadAggregator;
 pub use infeasible::LoadLedger;
 
-mod log_recorder;
-pub use log_recorder::LogRecorderBuilder;
-
 mod misc;
 pub use misc::monitor_stats;
 pub use misc::normalize_load_metric;

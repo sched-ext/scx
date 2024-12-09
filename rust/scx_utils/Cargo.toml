@@ -26,8 +26,6 @@ sscanf = "0.4"
 tar = "0.4"
 walkdir = "2.4"
 version-compare = "0.1"
-metrics = "0.23.0"
-metrics-util = "0.17.0"
 libc = "0.2.137"
 zbus = { version = "5", optional = true }
 
