@@ -170,12 +170,14 @@ pub struct LayerStats {
     pub xlayer_rewake: f64,
     #[stat(desc = "mask of allocated CPUs", _om_skip)]
     pub cpus: Vec<u32>,
-    #[stat(desc = "count of of CPUs assigned")]
+    #[stat(desc = "count of CPUs assigned")]
     pub cur_nr_cpus: u32,
     #[stat(desc = "minimum # of CPUs assigned")]
     pub min_nr_cpus: u32,
     #[stat(desc = "maximum # of CPUs assigned")]
     pub max_nr_cpus: u32,
+    #[stat(desc = "count of CPUs assigned per LLC")]
+    pub nr_llc_cpus: Vec<u32>,
     #[stat(desc = "slice duration config")]
     pub slice_us: u64,
     #[stat(desc = "Per-LLC scheduling event fractions")]
@@ -266,6 +268,7 @@ impl LayerStats {
             cur_nr_cpus: layer.cpus.weight() as u32,
             min_nr_cpus: nr_cpus_range.0 as u32,
             max_nr_cpus: nr_cpus_range.1 as u32,
+            nr_llc_cpus: layer.nr_llc_cpus.iter().map(|&v| v as u32).collect(),
             slice_us: stats.layer_slice_us[lidx],
             llc_fracs: {
                 let sid = LLC_LSTAT_CNT;
@@ -384,24 +387,27 @@ impl LayerStats {
             width = header_width
         )?;
 
+        write!(
+            w,
+            "  {:<width$}  [LLC] nr_cpus: sched% lat_ms",
+            "",
+            width = header_width
+        )?;
+
         for (i, (&frac, &lat)) in self.llc_fracs.iter().zip(self.llc_lats.iter()).enumerate() {
-            if i == 0 {
-                write!(
-                    w,
-                    "  {:<width$}  LLC sched%/lat_ms",
-                    "",
-                    width = header_width
-                )?;
-            } else if (i % 4) == 0 {
+            if (i % 4) == 0 {
                 writeln!(w, "")?;
-                write!(
-                    w,
-                    "  {:<width$}                   ",
-                    "",
-                    width = header_width
-                )?;
+                write!(w, "  {:<width$}  [{:03}]", "", i, width = header_width)?;
+            } else {
+                write!(w, " |")?;
             }
-            write!(w, " [{}/{:7.2}]", fmt_pct(frac), lat * 1_000.0)?;
+            write!(
+                w,
+                " {:2}:{}%{:7.2}",
+                self.nr_llc_cpus[i],
+                fmt_pct(frac),
+                lat * 1_000.0
+            )?;
         }
         writeln!(w, "")?;
 

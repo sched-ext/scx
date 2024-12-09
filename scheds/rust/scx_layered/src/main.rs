@@ -914,6 +914,7 @@ struct Layer {
     core_order: Vec<usize>,
 
     nr_cpus: usize,
+    nr_llc_cpus: Vec<usize>,
     cpus: Cpumask,
     allowed_cpus: Cpumask,
 }
@@ -1010,6 +1011,7 @@ impl Layer {
             core_order: core_order.clone(),
 
             nr_cpus: 0,
+            nr_llc_cpus: vec![0; topo.all_llcs.len()],
             cpus: Cpumask::new(),
             allowed_cpus,
         })
@@ -1027,6 +1029,9 @@ impl Layer {
             trace!("[{}] freeing CPUs: {}", self.name, &cpus_to_free);
             self.cpus &= &cpus_to_free.not();
             self.nr_cpus -= nr_to_free;
+            for cpu in cpus_to_free.iter() {
+                self.nr_llc_cpus[cpu_pool.topo.all_cpus[&cpu].llc_id] -= 1;
+            }
             cpu_pool.free(&cpus_to_free)?;
             nr_to_free
         } else {
@@ -1051,6 +1056,9 @@ impl Layer {
         trace!("[{}] adding CPUs: {}", &self.name, &new_cpus);
         self.cpus |= &new_cpus;
         self.nr_cpus += nr_new_cpus;
+        for cpu in new_cpus.iter() {
+            self.nr_llc_cpus[cpu_pool.topo.all_cpus[&cpu].llc_id] += 1;
+        }
         Ok(nr_new_cpus)
     }
 }
