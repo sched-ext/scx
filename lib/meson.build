@@ -22,4 +22,4 @@ scx_lib = custom_target(scx_lib_name,
 )
 
 # Install include/lib as a lib/ subdir of our headers
-install_subdir(join_paths(meson.current_source_dir(), 'include/scx'), install_dir: 'include', install_tag: 'devel')
+install_subdir(join_paths(meson.current_source_dir(), 'include/lib'), install_dir: 'include', install_tag: 'devel')
