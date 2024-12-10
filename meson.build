@@ -201,8 +201,8 @@ else
   bpftool_ver = run_command(get_bpftool_ver, bpftool_exe_path, check: true).stdout().strip()
   bpftool_maj = bpftool_ver.split('.')[0].to_int()
   bpftool_min = bpftool_ver.split('.')[1].to_int()
-  if bpftool_maj < 7 or (bpftool_maj == 7 and bpftool_min < 4)
-    error('bpftool >= 7.4 required (@0@ ver=@1@)'.format(bpftool_exe_path, bpftool_ver))
+  if bpftool_maj < 7 or (bpftool_maj == 7 and bpftool_min < 5)
+    error('bpftool >= 7.5 required (@0@ ver=@1@)'.format(bpftool_exe_path, bpftool_ver))
   endif
   # this is a noop when we're not building bpftool ourselves
   bpftool_target = custom_target('bpftool_target',
