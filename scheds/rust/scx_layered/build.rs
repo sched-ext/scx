@@ -7,7 +7,9 @@ fn main() {
     scx_utils::BpfBuilder::new()
         .unwrap()
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
-        .enable_skel("src/bpf", "bpf")
-        .build()
+        .enable_skel("src/bpf/main.bpf.c", "bpf")
+        .add_source("src/bpf/timer.bpf.c")
+        .add_source("src/bpf/util.bpf.c")
+        .compile_link_gen()
         .unwrap();
 }

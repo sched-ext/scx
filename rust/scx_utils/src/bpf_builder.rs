@@ -12,7 +12,6 @@ use libbpf_cargo::SkeletonBuilder;
 use libbpf_rs::Linker;
 use std::collections::BTreeSet;
 use std::env;
-use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -187,6 +186,7 @@ pub struct BpfBuilder {
     clang: ClangInfo,
     cflags: Vec<String>,
     out_dir: PathBuf,
+    sources: BTreeSet<String>,
 
     intf_input_output: Option<(String, String)>,
     skel_input_name: Option<(String, String)>,
@@ -263,6 +263,7 @@ impl BpfBuilder {
             cflags,
             out_dir,
 
+            sources: BTreeSet::new(),
             intf_input_output: None,
             skel_input_name: None,
         })
@@ -282,17 +283,26 @@ impl BpfBuilder {
     /// source code and `@output` is the `.rs` file to be generated.
     pub fn enable_skel(&mut self, input: &str, name: &str) -> &mut Self {
         self.skel_input_name = Some((input.into(), name.into()));
+        self.sources.insert(input.into());
+
         self
     }
 
-    fn bindgen_bpf_intf(&self, deps: &mut BTreeSet<String>) -> Result<()> {
-        let (input, output) = match &self.intf_input_output {
+    fn input_insert_deps(&self, deps: &mut BTreeSet<String>) -> () {
+        let (input, _) = match &self.intf_input_output {
             Some(pair) => pair,
-            None => return Ok(()),
+            None => return (),
         };
 
         // Tell cargo to invalidate the built crate whenever the wrapper changes
         deps.insert(input.to_string());
+    }
+
+    fn bindgen_bpf_intf(&self) -> Result<()> {
+        let (input, output) = match &self.intf_input_output {
+            Some(pair) => pair,
+            None => return Ok(()),
+        };
 
         // The bindgen::Builder is the main entry point to bindgen, and lets
         // you build up options for the resulting bindings.
@@ -316,57 +326,24 @@ impl BpfBuilder {
             .context("Couldn't write bindings")
     }
 
-    fn gen_sources(
-        &self,
-        input: PathBuf,
-        deps: &mut BTreeSet<String>,
-    ) -> Result<BTreeSet<PathBuf>> {
-        let mut sources = BTreeSet::new();
-
-        let dir = match fs::metadata(&input).expect("file not found").is_dir() {
-            true => {
-                for path in
-                    glob(&format!("{}/*.bpf.c", input.to_string_lossy()))?.filter_map(Result::ok)
-                {
-                    sources.insert(path);
-                }
-
-                PathBuf::from(input)
-            }
-            false => {
-                let dir = input
-                    .parent()
-                    .ok_or(anyhow!("Source {:?} doesn't have parent dir", input))?;
-
-                sources.insert(input.clone());
-
-                PathBuf::from(dir)
-            }
-        };
-
-        for path in glob(&format!("{}/*.bpf.[hc]", dir.to_string_lossy()))?.filter_map(Result::ok) {
-            let name = path
-                .to_str()
-                .ok_or(anyhow!("Path {:?} is not a valid string", path))?;
-            deps.insert(name.to_string());
-        }
-
-        Ok(sources)
+    pub fn add_source(
+        &mut self,
+        input: &str,
+    ) -> &mut Self {
+        self.sources.insert(input.into());
+        self
     }
 
-    fn gen_bpf_skel(&self, deps: &mut BTreeSet<String>) -> Result<()> {
-        let (input, name) = match &self.skel_input_name {
-            Some(pair) => pair,
-            None => return Ok(()),
+    pub fn compile_link_gen(&self) -> Result<()> {
+        let (_, name) = match &self.skel_input_name {
+                Some(pair) => pair,
+                None => return Ok(()),
         };
-
-        let sources = self.gen_sources(input.into(), deps)?;
 
         let linkobj = self.out_dir.join(format!("{}.bpf.o", name));
         let mut linker = Linker::new(&linkobj)?;
 
-        for filename in sources.iter() {
-            let name = filename.file_name().unwrap().to_string_lossy();
+        for filename in self.sources.iter() {
             let obj = self.out_dir.join(name.replace(".bpf.c", ".bpf.o"));
 
             SkeletonBuilder::new()
@@ -382,6 +359,8 @@ impl BpfBuilder {
 
         linker.link()?;
 
+        self.bindgen_bpf_intf()?;
+
         let skel_path = self.out_dir.join(format!("{}_skel.rs", name));
 
         SkeletonBuilder::new()
@@ -393,11 +372,47 @@ impl BpfBuilder {
         Ok(())
     }
 
+    fn gen_bpf_skel(&self, deps: &mut BTreeSet<String>) -> Result<()> {
+        let (input, name) = match &self.skel_input_name {
+            Some(pair) => pair,
+            None => return Ok(()),
+        };
+
+        let obj = self.out_dir.join(format!("{}.bpf.o", name));
+        let skel_path = self.out_dir.join(format!("{}_skel.rs", name));
+
+        SkeletonBuilder::new()
+            .source(input)
+            .obj(&obj)
+            .clang(&self.clang.clang)
+            .clang_args(&self.cflags)
+            .build_and_generate(&skel_path)?;
+
+        let c_path = PathBuf::from(input);
+        let dir = c_path
+            .parent()
+            .ok_or(anyhow!("Source {:?} doesn't have parent dir", c_path))?
+            .to_str()
+            .ok_or(anyhow!("Parent dir of {:?} isn't a UTF-8 string", c_path))?;
+
+        for path in glob(&format!("{}/*.[hc]", dir))?.filter_map(Result::ok) {
+            deps.insert(
+                path.to_str()
+                    .ok_or(anyhow!("Path {:?} is not a valid string", path))?
+                    .to_string(),
+            );
+        }
+
+        Ok(())
+    }
+
     /// Build and generate the enabled bindings.
     pub fn build(&self) -> Result<()> {
         let mut deps = BTreeSet::new();
 
-        self.bindgen_bpf_intf(&mut deps)?;
+        self.input_insert_deps(&mut deps);
+
+        self.bindgen_bpf_intf()?;
         self.gen_bpf_skel(&mut deps)?;
 
         println!("cargo:rerun-if-env-changed=BPF_CLANG");
@@ -407,6 +422,9 @@ impl BpfBuilder {
         println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_POST_INCL");
         for dep in deps.iter() {
             println!("cargo:rerun-if-changed={}", dep);
+        }
+        for source in self.sources.iter() {
+            println!("cargo:rerun-if-changed={}", source);
         }
         Ok(())
     }
