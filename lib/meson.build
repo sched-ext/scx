@@ -15,13 +15,11 @@ foreach src: libs
   objs += [bpf_o]
 endforeach
 
-if bpftool_maj < 7 or (bpftool_maj == 7 and bpftool_min >= 5)
-  scx_lib = custom_target(scx_lib_name,
-    output: scx_lib_name + '.bpf.o',
-    command: [compile_scx_lib, bpftool_exe_path, '@OUTPUT@', scx_lib_name, objs],
-    depends: objs,
+scx_lib = custom_target(scx_lib_name,
+  output: scx_lib_name + '.bpf.o',
+  command: [compile_scx_lib, bpftool_exe_path, '@OUTPUT@', scx_lib_name, objs],
+  depends: objs,
 )
-endif
 
 # Install include/lib as a lib/ subdir of our headers
 install_subdir(join_paths(meson.current_source_dir(), 'include/lib'), install_dir: 'include', install_tag: 'devel')
