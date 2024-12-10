@@ -651,7 +651,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 * block and release the current CPU).
 		 */
 		has_idle = bpf_cpumask_intersects(curr_l3_domain, idle_cpumask);
-		if (has_idle &&
+		if ((!nvcsw_max_thresh || has_idle) &&
 		    bpf_cpumask_test_cpu(cpu, p_mask) &&
 		    !(current->flags & PF_EXITING) &&
 		    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) == 0) {
@@ -818,11 +818,25 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 
-	/*
-	 * Per-CPU tasks didn't get the chance to be dispatched directly from
-	 * ops.select_cpu(), so give them a chance here.
-	 */
 	if ((p->nr_cpus_allowed == 1) || p->migration_disabled) {
+		/*
+		 * If nvcsw_max_thresh is disabled we don't care much about
+		 * interactivity, so we can massively boost per-CPU tasks and
+		 * always dispatch them directly on their CPU.
+		 *
+		 * This can help to improve I/O workloads (like large parallel
+		 * builds).
+		 */
+		if (!nvcsw_max_thresh) {
+			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
+			__sync_fetch_and_add(&nr_direct_dispatches, 1);
+			return;
+		}
+
+		/*
+		 * Per-CPU tasks didn't get the chance to be dispatched directly from
+		 * ops.select_cpu(), so give them a chance here.
+		 */
 		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 		if (cpu >= 0) {
 			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
@@ -916,7 +930,16 @@ static void update_cpuperf_target(struct task_struct *p, struct task_ctx *tctx)
 	 */
 	delta_t = now - cctx->last_running;
 	delta_runtime = cctx->tot_runtime - cctx->prev_runtime;
-	perf_lvl = MIN(delta_runtime * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE);
+	perf_lvl = delta_runtime * SCX_CPUPERF_ONE / delta_t;
+
+	/*
+	 * If interactive tasks detection is disabled, always boost the
+	 * frequency to make sure it's at least 50%, to prevent being too
+	 * conservative.
+	 */
+	if (!nvcsw_max_thresh)
+		perf_lvl += SCX_CPUPERF_ONE / 2;
+	perf_lvl = MIN(perf_lvl, SCX_CPUPERF_ONE);
 
 	/*
 	 * Apply the dynamic cpuperf scaling factor.
@@ -988,6 +1011,22 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 		__sync_fetch_and_sub(&nr_interactive, 1);
 
 	/*
+	 * Update task's average runtime.
+	 */
+	slice = now - tctx->last_run_at;
+	tctx->sum_runtime += slice;
+	tctx->avg_runtime = calc_avg(tctx->avg_runtime, tctx->sum_runtime);
+
+	/*
+	 * Update task vruntime charging the weighted used time slice.
+	 */
+	p->scx.dsq_vtime += scale_inverse_fair(p, tctx, slice);
+	tctx->deadline = p->scx.dsq_vtime + task_deadline(p, tctx);
+
+	if (!nvcsw_max_thresh)
+		return;
+
+	/*
 	 * If the time slice is not fully depleted, it means that the task
 	 * voluntarily relased the CPU, therefore update the voluntary context
 	 * switch counter.
@@ -1006,19 +1045,6 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 */
 	if (p->scx.slice > 0)
 		tctx->nvcsw++;
-
-	/*
-	 * Update task's average runtime.
-	 */
-	slice = now - tctx->last_run_at;
-	tctx->sum_runtime += slice;
-	tctx->avg_runtime = calc_avg(tctx->avg_runtime, tctx->sum_runtime);
-
-	/*
-	 * Update task vruntime charging the weighted used time slice.
-	 */
-	p->scx.dsq_vtime += scale_inverse_fair(p, tctx, slice);
-	tctx->deadline = p->scx.dsq_vtime + task_deadline(p, tctx);
 
 	/*
 	 * Refresh voluntary context switch metrics.
