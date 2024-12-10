@@ -372,6 +372,17 @@ static u64 task_deadline(struct task_struct *p, struct task_ctx *tctx)
 	u64 freq_factor;
 
 	/*
+	 * Tasks that can only run on a single CPU can be penalized, because
+	 * they don't have the chance to migrate on another CPU if their only
+	 * usable CPU is busy.
+	 *
+	 * To compensate this always assign their deadline as zero and schedule
+	 * them purely in function of their vruntime.
+	 */
+	if ((p->nr_cpus_allowed == 1) || p->migration_disabled)
+		return 0;
+
+	/*
 	 * Limit the wait and wake-up frequencies to prevent spikes.
 	 */
 	waker_freq = CLAMP(tctx->waker_freq, 1, MAX_WAKEUP_FREQ);
