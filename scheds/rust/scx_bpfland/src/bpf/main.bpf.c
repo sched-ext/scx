@@ -803,6 +803,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
+	s32 cpu;
 
 	/*
 	 * Per-CPU kthreads are critical for system responsiveness so make sure
@@ -818,8 +819,20 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Dispatch interactive tasks to the priority DSQ and regular tasks to
-	 * the shared DSQ.
+	 * Per-CPU tasks didn't get the chance to be dispatched directly from
+	 * ops.select_cpu(), so give them a chance here.
+	 */
+	if ((p->nr_cpus_allowed == 1) || p->migration_disabled) {
+		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		if (cpu >= 0) {
+			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
+			__sync_fetch_and_add(&nr_direct_dispatches, 1);
+			return;
+		}
+	}
+
+	/*
+	 * Dispatch regular tasks to the shared DSQ.
 	 */
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
@@ -833,7 +846,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * least one of them is awake.
 	 */
 	if ((p->nr_cpus_allowed < nr_online_cpus) || p->migration_disabled) {
-		s32 cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 		if (cpu >= 0)
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	}
