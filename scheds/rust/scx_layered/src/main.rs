@@ -57,6 +57,7 @@ use scx_utils::NetDev;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPUS_POSSIBLE;
+use scx_utils::NR_CPU_IDS;
 use stats::LayerStats;
 use stats::StatsReq;
 use stats::StatsRes;
@@ -1563,6 +1564,7 @@ impl<'a> Scheduler<'a> {
         } else {
             opts.slice_us * 1000 * 20
         };
+        skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
         skel.maps.rodata_data.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         skel.maps.rodata_data.smt_enabled = topo.all_cpus.len() > topo.all_cores.len();
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
@@ -1668,7 +1670,12 @@ impl<'a> Scheduler<'a> {
                 bpf_layer.cpus[cpu / 8] &= !(1 << (cpu % 8));
             }
         }
+
         bpf_layer.nr_cpus = layer.nr_cpus as u32;
+        for (llc_id, &nr_llc_cpus) in layer.nr_llc_cpus.iter().enumerate() {
+            bpf_layer.nr_llc_cpus[llc_id] = nr_llc_cpus as u32;
+        }
+
         bpf_layer.refresh_cpus = 1;
     }
 

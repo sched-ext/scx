@@ -64,6 +64,8 @@ const LSTAT_XLLC_MIGRATION: usize = bpf_intf::layer_stat_id_LSTAT_XLLC_MIGRATION
 const LSTAT_XLLC_MIGRATION_SKIP: usize = bpf_intf::layer_stat_id_LSTAT_XLLC_MIGRATION_SKIP as usize;
 const LSTAT_XLAYER_WAKE: usize = bpf_intf::layer_stat_id_LSTAT_XLAYER_WAKE as usize;
 const LSTAT_XLAYER_REWAKE: usize = bpf_intf::layer_stat_id_LSTAT_XLAYER_REWAKE as usize;
+const LSTAT_LLC_DRAIN_TRY: usize = bpf_intf::layer_stat_id_LSTAT_LLC_DRAIN_TRY as usize;
+const LSTAT_LLC_DRAIN: usize = bpf_intf::layer_stat_id_LSTAT_LLC_DRAIN as usize;
 
 const LLC_LSTAT_LAT: usize = bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize;
 const LLC_LSTAT_CNT: usize = bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize;
@@ -79,6 +81,8 @@ fn calc_frac(a: f64, b: f64) -> f64 {
 fn fmt_pct(v: f64) -> String {
     if v >= 99.995 {
         format!("{:5.1}", v)
+    } else if v > 0.0 && v < 0.01 {
+        format!("{:5.2}", 0.01)
     } else {
         format!("{:5.2}", v)
     }
@@ -168,6 +172,10 @@ pub struct LayerStats {
     pub xlayer_wake: f64,
     #[stat(desc = "% rewakers across layers where waker has waken the task previously")]
     pub xlayer_rewake: f64,
+    #[stat(desc = "% LLC draining tried")]
+    pub llc_drain_try: f64,
+    #[stat(desc = "% LLC draining succeeded")]
+    pub llc_drain: f64,
     #[stat(desc = "mask of allocated CPUs", _om_skip)]
     pub cpus: Vec<u32>,
     #[stat(desc = "count of CPUs assigned")]
@@ -264,6 +272,8 @@ impl LayerStats {
             xlayer_rewake: lstat_pct(LSTAT_XLAYER_REWAKE),
             xllc_migration: lstat_pct(LSTAT_XLLC_MIGRATION),
             xllc_migration_skip: lstat_pct(LSTAT_XLLC_MIGRATION_SKIP),
+            llc_drain_try: lstat_pct(LSTAT_LLC_DRAIN_TRY),
+            llc_drain: lstat_pct(LSTAT_LLC_DRAIN),
             cpus: Self::bitvec_to_u32s(layer.cpus.as_raw_bitvec()),
             cur_nr_cpus: layer.cpus.weight() as u32,
             min_nr_cpus: nr_cpus_range.0 as u32,
@@ -314,15 +324,6 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  xlayer_wake={} xlayer_rewake={}",
-            "",
-            fmt_pct(self.xlayer_wake),
-            fmt_pct(self.xlayer_rewake),
-            width = header_width,
-        )?;
-
-        writeln!(
-            w,
             "  {:<width$}  keep/max/busy={}/{}/{} kick={} yield/ign={}/{}",
             "",
             fmt_pct(self.keep),
@@ -357,6 +358,17 @@ impl LayerStats {
             fmt_pct(self.preempt_xnuma),
             fmt_pct(self.preempt_idle),
             fmt_pct(self.preempt_fail),
+            width = header_width,
+        )?;
+
+        writeln!(
+            w,
+            "  {:<width$}  xlayer_wake/re={}/{} llc_drain/try={}/{}",
+            "",
+            fmt_pct(self.xlayer_wake),
+            fmt_pct(self.xlayer_rewake),
+            fmt_pct(self.llc_drain),
+            fmt_pct(self.llc_drain_try),
             width = header_width,
         )?;
 
