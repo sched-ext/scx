@@ -1242,6 +1242,21 @@ impl<'a> Scheduler<'a> {
     }
 
     fn init_cpu_prox_map(topo: &Topology, cpu_ctxs: &mut Vec<bpf_intf::cpu_ctx>) {
+        let radiate = |mut vec: Vec<usize>, center_id: usize| -> Vec<usize> {
+            vec.sort_by_key(|&id| ((id as i32 - center_id as i32).abs(), id.cmp(&center_id)));
+            vec
+        };
+        let radiate_cpu =
+            |mut vec: Vec<usize>, center_cpu: usize, center_core: usize| -> Vec<usize> {
+                vec.sort_by_key(|&id| {
+                    (
+                        (topo.all_cpus.get(&id).unwrap().core_id as i32 - center_core as i32).abs(),
+                        center_cpu.cmp(&id),
+                    )
+                });
+                vec
+            };
+
         for (&cpu_id, cpu) in &topo.all_cpus {
             // Collect the spans.
             let mut core_span = topo.all_cores[&cpu.core_id].span.clone();
@@ -1262,15 +1277,12 @@ impl<'a> Scheduler<'a> {
             let mut core_order: Vec<usize> = core_span.iter().collect();
 
             // Shuffle them so that different CPUs follow different orders.
-            // This isn't ideal as random shuffling won't give us complete
-            // fairness. Can be improved by making each CPU radiate in both
-            // directions. For shuffling, use predictable seeds so that
-            // orderings are reproducible.
-            fastrand::seed(cpu_id as u64);
-            fastrand::shuffle(&mut sys_order);
-            fastrand::shuffle(&mut node_order);
-            fastrand::shuffle(&mut llc_order);
-            fastrand::shuffle(&mut core_order);
+            // Each CPU radiates in based on the core/cpu id combination.
+
+            sys_order = radiate_cpu(sys_order, cpu_id, cpu.core_id);
+            node_order = radiate(node_order, cpu.node_id);
+            llc_order = radiate_cpu(llc_order, cpu_id, cpu.core_id);
+            core_order = radiate_cpu(core_order, cpu_id, cpu.core_id);
 
             // Concatenate and record the topology boundaries.
             let mut order: Vec<usize> = vec![];
