@@ -392,7 +392,10 @@ struct task_ctx {
 	u64			runtime_avg;
 	u64			dsq_id;
 	u32			llc_id;
-	u32			qrt_llc_id;	/* for llcc->queue_runtime */
+
+	/* for llcc->queue_runtime */
+	u32			qrt_layer_id;
+	u32			qrt_llc_id;
 };
 
 struct {
@@ -996,6 +999,19 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *taskc,
 	lstat_inc(LSTAT_PREEMPT_FAIL, layer, cpuc);
 }
 
+static void task_uncharge_qrt(struct task_ctx *taskc)
+{
+	struct llc_ctx *llcc;
+	u32 layer_id = taskc->qrt_layer_id;
+
+	if (layer_id >= MAX_LAYERS || !(llcc = lookup_llc_ctx(taskc->qrt_llc_id)))
+		return;
+
+	__sync_fetch_and_sub(&llcc->queued_runtime[layer_id], taskc->runtime_avg);
+	taskc->qrt_layer_id = MAX_LAYERS;
+	taskc->qrt_llc_id = MAX_LLCS;
+}
+
 static void layer_kick_idle_cpu(struct layer *layer)
 {
 	const struct cpumask *layer_cpumask, *idle_smtmask;;
@@ -1113,18 +1129,14 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * re-enqueues the task. The task does not go through ops.runnable()
 	 * again in such cases, so layer association would remain the same.
 	 *
-	 * It'd be nice if ops.dequeue() could be used to adjust queued_runtime
-	 * but ops.dequeue() is not called for tasks on a DSQ. Detect the
-	 * condition here and subtract the previous contribution.
+	 * XXX: It'd be nice if ops.dequeue() could be used to adjust
+	 * queued_runtime but ops.dequeue() is not called for tasks on a
+	 * DSQ. Detect the condition here and subtract the previous
+	 * contribution.
 	 */
-	if (taskc->qrt_llc_id < MAX_LLCS) {
-		struct llc_ctx *prev_llcc;
+	task_uncharge_qrt(taskc);
 
-		if (!(prev_llcc = lookup_llc_ctx(taskc->qrt_llc_id)))
-			return;
-		__sync_fetch_and_sub(&prev_llcc->queued_runtime[layer_id], taskc->runtime_avg);
-	}
-
+	taskc->qrt_layer_id = layer_id;
 	taskc->qrt_llc_id = llc_id;
 	queued_runtime = __sync_fetch_and_add(&llcc->queued_runtime[layer_id],
 					      taskc->runtime_avg);
@@ -1976,15 +1988,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	if (!(layer = lookup_layer(layer_id)))
 		return;
 
-	if (taskc->qrt_llc_id < MAX_LLCS) {
-		struct llc_ctx *prev_llcc;
-
-		if (!(prev_llcc = lookup_llc_ctx(taskc->qrt_llc_id)))
-			return;
-
-		__sync_fetch_and_sub(&prev_llcc->queued_runtime[layer_id], taskc->runtime_avg);
-		taskc->qrt_llc_id = MAX_LLCS;
-	}
+	task_uncharge_qrt(taskc);
 
 	if (taskc->last_cpu >= 0 && taskc->last_cpu != task_cpu) {
 		lstat_inc(LSTAT_MIGRATION, layer, cpuc);
@@ -2255,6 +2259,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	taskc->layer_id = MAX_LAYERS;
 	taskc->refresh_layer = true;
 	taskc->llc_id = MAX_LLCS;
+	taskc->qrt_layer_id = MAX_LLCS;
 	taskc->qrt_llc_id = MAX_LLCS;
 
 	/*
@@ -2295,6 +2300,20 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 
 	if (taskc->layer_id < nr_layers)
 		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
+}
+
+void BPF_STRUCT_OPS(layered_disable, struct task_struct *p)
+{
+	struct task_ctx *taskc;
+
+	if (!(taskc = lookup_task_ctx(p)))
+		return;
+
+	/*
+	 * XXX: Ideally, this should be in ops.dequeue(). See
+	 * layered_enqueue().
+	 */
+	task_uncharge_qrt(taskc);
 }
 
 static u64 dsq_first_runnable_for_ms(u64 dsq_id, u64 now)
@@ -2814,6 +2833,7 @@ SCX_OPS_DEFINE(layered,
 	       .cpu_release		= (void *)layered_cpu_release,
 	       .init_task		= (void *)layered_init_task,
 	       .exit_task		= (void *)layered_exit_task,
+	       .disable			= (void *)layered_disable,
 	       .dump			= (void *)layered_dump,
 	       .init			= (void *)layered_init,
 	       .exit			= (void *)layered_exit,
