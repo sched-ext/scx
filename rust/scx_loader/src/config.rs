@@ -30,6 +30,7 @@ pub struct Sched {
     pub gaming_mode: Option<Vec<String>>,
     pub lowlatency_mode: Option<Vec<String>>,
     pub powersave_mode: Option<Vec<String>>,
+    pub server_mode: Option<Vec<String>>,
 }
 
 /// Initialize config from first found config path, overwise fallback to default config
@@ -130,6 +131,7 @@ fn extract_scx_flags_from_config(
         SchedMode::Gaming => sched_config.gaming_mode.clone(),
         SchedMode::LowLatency => sched_config.lowlatency_mode.clone(),
         SchedMode::PowerSave => sched_config.powersave_mode.clone(),
+        SchedMode::Server => sched_config.server_mode.clone(),
         SchedMode::Auto => sched_config.auto_mode.clone(),
     }
 }
@@ -161,6 +163,12 @@ fn get_default_sched_for_config(scx_sched: &SupportedSched) -> Sched {
                 .map(String::from)
                 .collect(),
         ),
+        server_mode: Some(
+            get_default_scx_flags_for_mode(scx_sched, SchedMode::Server)
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        ),
     }
 }
 
@@ -171,13 +179,14 @@ fn get_default_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedM
             SchedMode::Gaming => vec!["-m", "performance"],
             SchedMode::LowLatency => vec!["-k", "-s", "5000", "-l", "5000"],
             SchedMode::PowerSave => vec!["-m", "powersave"],
+            SchedMode::Server => vec!["-c", "0"],
             SchedMode::Auto => vec![],
         },
         SupportedSched::Lavd => match sched_mode {
             SchedMode::Gaming | SchedMode::LowLatency => vec!["--performance"],
             SchedMode::PowerSave => vec!["--powersave"],
             // NOTE: potentially adding --auto in future
-            SchedMode::Auto => vec![],
+            SchedMode::Server | SchedMode::Auto => vec![],
         },
         // scx_rusty doesn't support any of these modes
         SupportedSched::Rusty => vec![],
@@ -200,24 +209,28 @@ auto_mode = []
 gaming_mode = ["-m", "performance"]
 lowlatency_mode = ["-k", "-s", "5000", "-l", "5000"]
 powersave_mode = ["-m", "powersave"]
+server_mode = ["-c", "0"]
 
 [scheds.scx_rusty]
 auto_mode = []
 gaming_mode = []
 lowlatency_mode = []
 powersave_mode = []
+server_mode = []
 
 [scheds.scx_lavd]
 auto_mode = []
 gaming_mode = ["--performance"]
 lowlatency_mode = ["--performance"]
 powersave_mode = ["--powersave"]
+server_mode = []
 
 [scheds.scx_flash]
 auto_mode = []
 gaming_mode = []
 lowlatency_mode = []
 powersave_mode = []
+server_mode = []
 "#;
 
         let parsed_config = parse_config_content(config_str).expect("Failed to parse config");

@@ -21,7 +21,7 @@
 
     <!--
         SchedulerMode:
-        @sched_mode: 0 = Auto, 1 = Gaming, 2 = PowerSave, 3 = LowLatency
+        @sched_mode: 0 = Auto, 1 = Gaming, 2 = PowerSave, 3 = LowLatency, 4 = Server
 
         The currently active scheduler mode.  Scheduler modes allow you to
         apply pre-defined configurations to a scheduler that are
