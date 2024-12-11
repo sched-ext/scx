@@ -15,6 +15,7 @@
 #include <bpf/bpf_tracing.h>
 
 #include "intf.h"
+#include "timer.bpf.h"
 #include "util.bpf.h"
 
 struct timer_wrapper {
