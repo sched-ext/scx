@@ -40,6 +40,8 @@ pub enum SchedMode {
     PowerSave = 2,
     /// Starts scheduler in low latency mode
     LowLatency = 3,
+    /// Starts scheduler in server-oriented mode
+    Server = 4,
 }
 
 impl From<&SupportedSched> for &str {

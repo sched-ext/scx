@@ -53,14 +53,14 @@ powersave_mode = []
 **`default_mode`:**
 
 * This field specifies the default scheduler mode that will be used when starting a scheduler without explicitly specifying a mode.
-* Possible values are: `"Auto"`, `"Gaming"`, `"LowLatency"`, `"PowerSave"`.
+* Possible values are: `"Auto"`, `"Gaming"`, `"LowLatency"`, `"PowerSave"`, `"Server"`.
 * If this field is not present, it defaults to `"Auto"`.
 
 **`[scheds.scx_name]`:**
 
 * This section defines the custom flags for a specific scheduler. Replace `scx_name` with the actual name of the scheduler (e.g., `scx_bpfland`, `scx_rusty`, `scx_lavd`, `scx_flash`).
 
-**`auto_mode`, `gaming_mode`, `lowlatency_mode`, `powersave_mode`:**
+**`auto_mode`, `gaming_mode`, `lowlatency_mode`, `powersave_mode`, `server_mode`:**
 
 * These fields specify the flags to be used for each scheduler mode.
 * Each field is an array of strings, where each string represents a flag.
