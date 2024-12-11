@@ -986,9 +986,9 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "libbpf-cargo"
-version = "0.24.4"
+version = "0.24.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e42b7b9b2836b25dd7a0e5ff3c2ec0e029a99b3025bfbef0202b55875654b45b"
+checksum = "704727a07f185a76c58faa7b8ed08fba3194661c212183aea1174fe2970ee185"
 dependencies = [
  "anyhow",
  "cargo_metadata 0.15.4",
@@ -1004,9 +1004,9 @@ dependencies = [
 
 [[package]]
 name = "libbpf-rs"
-version = "0.24.4"
+version = "0.24.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d51b943363864472bf306570a7076cbfa84571a403b98f59d18af4c4135271ca"
+checksum = "93edd9cd673087fa7518fd63ad6c87be2cd9b4e35034b1873f3e3258c018275b"
 dependencies = [
  "bitflags 2.6.0",
  "libbpf-sys",
@@ -1016,9 +1016,9 @@ dependencies = [
 
 [[package]]
 name = "libbpf-sys"
-version = "1.4.5+v1.4.5"
+version = "1.4.6+v1.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5cabee52b6f7e73308d6fd4f8e6bbbdcb97670f49f6e581c5897e4d2410b6019"
+checksum = "f30caf02dfece12c94e2835cab8daf7b52e5c62c1675f334f1dac24be5bd5f82"
 dependencies = [
  "cc",
  "nix 0.29.0",
@@ -1731,6 +1731,7 @@ dependencies = [
  "lazy_static",
  "libbpf-cargo",
  "libbpf-rs",
+ "libbpf-sys",
  "libc",
  "log",
  "nvml-wrapper",
