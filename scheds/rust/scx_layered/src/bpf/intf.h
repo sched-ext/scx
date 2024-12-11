@@ -14,10 +14,11 @@
 #endif
 
 #ifndef __KERNEL__
-typedef int s32;
-typedef long long s64;
+typedef unsigned char u8;
 typedef unsigned short u16;
+typedef int s32;
 typedef unsigned u32;
+typedef long long s64;
 typedef unsigned long long u64;
 #endif
 
@@ -59,8 +60,9 @@ enum consts {
 };
 
 static inline void ___consts_sanity_check___(void) {
-	_Static_assert(MAX_LLCS <= (1 << DSQ_ID_LAYER_SHIFT),
-		       "MAX_LLCS too high");
+	/* layer->llcs_to_drain uses u64 as LLC bitmap */
+	_Static_assert(MAX_LLCS <= 64, "MAX_LLCS too high");
+	_Static_assert(MAX_LLCS <= (1 << DSQ_ID_LAYER_SHIFT), "MAX_LLCS too high");
 	_Static_assert(MAX_LAYERS <= (DSQ_ID_LAYER_MASK >> DSQ_ID_LAYER_SHIFT) + 1,
 		       "MAX_LAYERS too high");
 }
@@ -120,6 +122,8 @@ enum layer_stat_id {
 	LSTAT_XLLC_MIGRATION_SKIP,
 	LSTAT_XLAYER_WAKE,
 	LSTAT_XLAYER_REWAKE,
+	LSTAT_LLC_DRAIN_TRY,
+	LSTAT_LLC_DRAIN,
 	NR_LSTATS,
 };
 
@@ -274,10 +278,16 @@ struct layer {
 	u64			node_mask;
 	u64			llc_mask;
 	bool			check_no_idle;
+	u32			perf;
 	u64			refresh_cpus;
-	unsigned char		cpus[MAX_CPUS_U8];
-	unsigned int		nr_cpus;	// managed from BPF side
-	unsigned int		perf;
+	u8			cpus[MAX_CPUS_U8];
+
+	u32			nr_cpus;
+	u32			nr_llc_cpus[MAX_LLCS];
+
+	u64			llcs_to_drain;
+	u32			llc_drain_cnt;
+
 	char			name[MAX_LAYER_NAME];
 };
 

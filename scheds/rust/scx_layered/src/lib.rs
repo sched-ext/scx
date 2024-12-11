@@ -28,8 +28,6 @@ use std::sync::Arc;
 
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 
-pub const XLLC_MIG_MIN_US_DFL: f64 = 100.0;
-
 #[derive(Debug)]
 /// `CpuPool` represents the CPU core and logical CPU topology within the system.
 /// It manages the mapping and availability of physical and logical cores, including

@@ -57,6 +57,7 @@ use scx_utils::NetDev;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPUS_POSSIBLE;
+use scx_utils::NR_CPU_IDS;
 use stats::LayerStats;
 use stats::StatsReq;
 use stats::StatsRes;
@@ -108,7 +109,7 @@ lazy_static! {
                         slice_us: 20000,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
-                        xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
+                        xllc_mig_min_us: 1000.0,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
                         nodes: vec![],
@@ -134,7 +135,7 @@ lazy_static! {
                         slice_us: 20000,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
-                        xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
+                        xllc_mig_min_us: 0.0,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
                         nodes: vec![],
@@ -162,7 +163,7 @@ lazy_static! {
                         slice_us: 800,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
-                        xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
+                        xllc_mig_min_us: 0.0,
                         growth_algo: LayerGrowthAlgo::Topo,
                         perf: 1024,
                         nodes: vec![],
@@ -187,7 +188,7 @@ lazy_static! {
                         slice_us: 20000,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
-                        xllc_mig_min_us: XLLC_MIG_MIN_US_DFL,
+                        xllc_mig_min_us: 100.0,
                         growth_algo: LayerGrowthAlgo::Linear,
                         perf: 1024,
                         nodes: vec![],
@@ -914,6 +915,7 @@ struct Layer {
     core_order: Vec<usize>,
 
     nr_cpus: usize,
+    nr_llc_cpus: Vec<usize>,
     cpus: Cpumask,
     allowed_cpus: Cpumask,
 }
@@ -1010,6 +1012,7 @@ impl Layer {
             core_order: core_order.clone(),
 
             nr_cpus: 0,
+            nr_llc_cpus: vec![0; topo.all_llcs.len()],
             cpus: Cpumask::new(),
             allowed_cpus,
         })
@@ -1027,6 +1030,9 @@ impl Layer {
             trace!("[{}] freeing CPUs: {}", self.name, &cpus_to_free);
             self.cpus &= &cpus_to_free.not();
             self.nr_cpus -= nr_to_free;
+            for cpu in cpus_to_free.iter() {
+                self.nr_llc_cpus[cpu_pool.topo.all_cpus[&cpu].llc_id] -= 1;
+            }
             cpu_pool.free(&cpus_to_free)?;
             nr_to_free
         } else {
@@ -1051,6 +1057,9 @@ impl Layer {
         trace!("[{}] adding CPUs: {}", &self.name, &new_cpus);
         self.cpus |= &new_cpus;
         self.nr_cpus += nr_new_cpus;
+        for cpu in new_cpus.iter() {
+            self.nr_llc_cpus[cpu_pool.topo.all_cpus[&cpu].llc_id] += 1;
+        }
         Ok(nr_new_cpus)
     }
 }
@@ -1233,6 +1242,21 @@ impl<'a> Scheduler<'a> {
     }
 
     fn init_cpu_prox_map(topo: &Topology, cpu_ctxs: &mut Vec<bpf_intf::cpu_ctx>) {
+        let radiate = |mut vec: Vec<usize>, center_id: usize| -> Vec<usize> {
+            vec.sort_by_key(|&id| (center_id as i32 - id as i32).abs());
+            vec
+        };
+        let radiate_cpu =
+            |mut vec: Vec<usize>, center_cpu: usize, center_core: usize| -> Vec<usize> {
+                vec.sort_by_key(|&id| {
+                    (
+                        (center_core as i32 - topo.all_cpus.get(&id).unwrap().core_id as i32).abs(),
+                        (center_cpu as i32 - id as i32).abs(),
+                    )
+                });
+                vec
+            };
+
         for (&cpu_id, cpu) in &topo.all_cpus {
             // Collect the spans.
             let mut core_span = topo.all_cores[&cpu.core_id].span.clone();
@@ -1253,15 +1277,13 @@ impl<'a> Scheduler<'a> {
             let mut core_order: Vec<usize> = core_span.iter().collect();
 
             // Shuffle them so that different CPUs follow different orders.
-            // This isn't ideal as random shuffling won't give us complete
-            // fairness. Can be improved by making each CPU radiate in both
-            // directions. For shuffling, use predictable seeds so that
-            // orderings are reproducible.
-            fastrand::seed(cpu_id as u64);
-            fastrand::shuffle(&mut sys_order);
-            fastrand::shuffle(&mut node_order);
-            fastrand::shuffle(&mut llc_order);
-            fastrand::shuffle(&mut core_order);
+            // Each CPU radiates in both directions based on the cpu id and
+            // radiates out to the closest cores based on core ids.
+
+            sys_order = radiate_cpu(sys_order, cpu_id, cpu.core_id);
+            node_order = radiate(node_order, cpu.node_id);
+            llc_order = radiate_cpu(llc_order, cpu_id, cpu.core_id);
+            core_order = radiate_cpu(core_order, cpu_id, cpu.core_id);
 
             // Concatenate and record the topology boundaries.
             let mut order: Vec<usize> = vec![];
@@ -1555,6 +1577,7 @@ impl<'a> Scheduler<'a> {
         } else {
             opts.slice_us * 1000 * 20
         };
+        skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
         skel.maps.rodata_data.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         skel.maps.rodata_data.smt_enabled = topo.all_cpus.len() > topo.all_cores.len();
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
@@ -1660,6 +1683,12 @@ impl<'a> Scheduler<'a> {
                 bpf_layer.cpus[cpu / 8] &= !(1 << (cpu % 8));
             }
         }
+
+        bpf_layer.nr_cpus = layer.nr_cpus as u32;
+        for (llc_id, &nr_llc_cpus) in layer.nr_llc_cpus.iter().enumerate() {
+            bpf_layer.nr_llc_cpus[llc_id] = nr_llc_cpus as u32;
+        }
+
         bpf_layer.refresh_cpus = 1;
     }
 

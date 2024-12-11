@@ -28,6 +28,7 @@ const volatile u32 debug;
 const volatile s32 layered_tgid;
 const volatile u64 slice_ns;
 const volatile u64 max_exec_ns;
+const volatile u32 nr_cpu_ids = 1;
 const volatile u32 nr_possible_cpus = 1;
 const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 llc_numa_id_map[MAX_LLCS];
@@ -236,10 +237,6 @@ static void lstat_inc(u32 id, struct layer *layer, struct cpu_ctx *cpuc)
 	lstat_add(id, layer, cpuc, 1);
 }
 
-struct lock_wrapper {
-	struct bpf_spin_lock	lock;
-};
-
 struct layer_cpumask_wrapper {
 	struct bpf_cpumask __kptr *cpumask;
 };
@@ -264,32 +261,42 @@ static struct cpumask *lookup_layer_cpumask(u32 layer_id)
 	}
 }
 
+static void layer_llc_drain_enable(struct layer *layer, u32 llc_id)
+{
+	__sync_or_and_fetch(&layer->llcs_to_drain, 1LLU << llc_id);
+}
+
+static void layer_llc_drain_disable(struct layer *layer, u32 llc_id)
+{
+	__sync_and_and_fetch(&layer->llcs_to_drain, ~(1LLU << llc_id));
+}
+
 /*
  * Returns if any cpus were added to the layer.
  */
-static bool refresh_cpumasks(u32 layer_id)
+static void refresh_cpumasks(u32 layer_id)
 {
 	struct bpf_cpumask *layer_cpumask;
 	struct layer_cpumask_wrapper *cpumaskw;
 	struct layer *layer;
 	struct cpu_ctx *cpuc;
-	int cpu, total = 0;
+	int cpu, llc_id;
 
 	layer = MEMBER_VPTR(layers, [layer_id]);
 	if (!layer) {
 		scx_bpf_error("can't happen");
-		return false;
+		return;
 	}
 
 	if (!__sync_val_compare_and_swap(&layer->refresh_cpus, 1, 0))
-		return false;
+		return;
 
 	bpf_rcu_read_lock();
 	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)) ||
 	    !(layer_cpumask = cpumaskw->cpumask)) {
 		bpf_rcu_read_unlock();
 		scx_bpf_error("can't happen");
-		return false;
+		return;
 	}
 
 	bpf_for(cpu, 0, nr_possible_cpus) {
@@ -297,16 +304,13 @@ static bool refresh_cpumasks(u32 layer_id)
 
 		if (!(cpuc = lookup_cpu_ctx(cpu))) {
 			bpf_rcu_read_unlock();
-			return false;
+			return;
 		}
 
 		if ((u8_ptr = MEMBER_VPTR(layers, [layer_id].cpus[cpu / 8]))) {
 			if (*u8_ptr & (1 << (cpu % 8))) {
 				cpuc->layer_id = layer_id;
 				bpf_cpumask_set_cpu(cpu, layer_cpumask);
-				total++;
-
-				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			} else {
 				if (cpuc->layer_id == layer_id)
 					cpuc->layer_id = MAX_LAYERS;
@@ -317,12 +321,31 @@ static bool refresh_cpumasks(u32 layer_id)
 		}
 	}
 
-
-	layer->nr_cpus = total;
-	__sync_fetch_and_add(&layer->cpus_seq, 1);
 	bpf_rcu_read_unlock();
+
+	__sync_fetch_and_add(&layer->cpus_seq, 1);	/* MB, see below */
 	trace("LAYER[%d] now has %d cpus, seq=%llu", layer_id, layer->nr_cpus, layer->cpus_seq);
-	return total > 0;
+
+	/*
+	 * layer->nr_llc_cpus[] were updated by the userspace and we've passed a
+	 * full MB in the above layer->cpus_seq update. This is interlocked with
+	 * layered_enqueue() to guarantee that a task is never left in an empty
+	 * LLC without draining enabled. Either they see 0 nr_llcs_cpus and
+	 * enable drain or we see the task it enqueued and enable drain.
+	 */
+	bpf_for(llc_id, 0, nr_llcs) {
+		if (layer->nr_llc_cpus[llc_id])
+			layer_llc_drain_disable(layer, llc_id);
+		else if (scx_bpf_dsq_nr_queued(layer_dsq_id(layer->id, llc_id)))
+			layer_llc_drain_enable(layer, llc_id);
+	}
+
+	bpf_for(cpu, 0, nr_possible_cpus) {
+		if (!(cpuc = lookup_cpu_ctx(cpu)))
+			return;
+		if (cpuc->layer_id == layer_id)
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	}
 }
 
 /*
@@ -365,7 +388,10 @@ struct task_ctx {
 	u64			runtime_avg;
 	u64			dsq_id;
 	u32			llc_id;
-	u32			qrt_llc_id;	/* for llcc->queue_runtime */
+
+	/* for llcc->queue_runtime */
+	u32			qrt_layer_id;
+	u32			qrt_llc_id;
 };
 
 struct {
@@ -708,7 +734,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		goto out_put;
 
 	/*
-	 * Try a CPU in the current LLC
+	 * Try a CPU in the previous LLC.
 	 */
 	if (nr_llcs > 1) {
 		struct llc_ctx *prev_llcc;
@@ -723,7 +749,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 			goto out_put;
 
 		if (!(prev_llcc = lookup_llc_ctx(prev_cpuc->llc_id)) ||
-		    prev_llcc->queued_runtime[layer_id] <= layer->xllc_mig_min_ns) {
+		    prev_llcc->queued_runtime[layer_id] < layer->xllc_mig_min_ns) {
 			lstat_inc(LSTAT_XLLC_MIGRATION_SKIP, layer, cpuc);
 			cpu = -1;
 			goto out_put;
@@ -827,9 +853,26 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 		taskc->dsq_id = SCX_DSQ_LOCAL;
 		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, 0);
 		return cpu;
-	} else {
-		return prev_cpu;
 	}
+
+	/*
+	 * Didn't find an idle CPU. If @p gets queued on an LLC without CPUs
+	 * assigned, it will trigger LLC draining which isn't great. Find an
+	 * in-layer CPU and put it there instead.
+	 *
+	 * TODO - This should become node aware.
+	 */
+	if (taskc->all_cpus_allowed) {
+		const struct cpumask *layer_cpumask;
+
+		if (!(layer_cpumask = lookup_layer_cpumask(taskc->layer_id)))
+			return prev_cpu;
+
+		if ((cpu = bpf_cpumask_any_distribute(layer_cpumask)) < nr_cpu_ids)
+			return cpu;
+	}
+
+	return prev_cpu;
 }
 
 static __always_inline
@@ -952,6 +995,34 @@ void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *taskc,
 	lstat_inc(LSTAT_PREEMPT_FAIL, layer, cpuc);
 }
 
+static void task_uncharge_qrt(struct task_ctx *taskc)
+{
+	struct llc_ctx *llcc;
+	u32 layer_id = taskc->qrt_layer_id;
+
+	if (layer_id >= MAX_LAYERS || !(llcc = lookup_llc_ctx(taskc->qrt_llc_id)))
+		return;
+
+	__sync_fetch_and_sub(&llcc->queued_runtime[layer_id], taskc->runtime_avg);
+	taskc->qrt_layer_id = MAX_LAYERS;
+	taskc->qrt_llc_id = MAX_LLCS;
+}
+
+static void layer_kick_idle_cpu(struct layer *layer)
+{
+	const struct cpumask *layer_cpumask, *idle_smtmask;;
+	s32 cpu;
+
+	if (!(layer_cpumask = lookup_layer_cpumask(layer->id)) ||
+	    !(idle_smtmask = scx_bpf_get_idle_smtmask()))
+		return;
+
+	if ((cpu = pick_idle_cpu_from(layer_cpumask, 0, idle_smtmask)) >= 0)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+
+	scx_bpf_put_idle_cpumask(idle_smtmask);
+}
+
 void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc, *task_cpuc;
@@ -960,20 +1031,22 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	struct layer *layer;
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u64 vtime = p->scx.dsq_vtime;
-	u32 layer_id;
+	u32 llc_id, layer_id;
 	bool try_preempt_first;
 	u64 queued_runtime;
 	u64 *lstats;
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) ||
 	    !(task_cpuc = lookup_cpu_ctx(task_cpu)) ||
-	    !(taskc = lookup_task_ctx(p)) ||
-	    !(llcc = lookup_llc_ctx(task_cpuc->llc_id)))
+	    !(taskc = lookup_task_ctx(p)))
 		return;
 
+	llc_id = task_cpuc->llc_id;
 	layer_id = taskc->layer_id;
 
-	if (!(layer = lookup_layer(layer_id)))
+	if (llc_id >= MAX_LLCS ||
+	    !(llcc = lookup_llc_ctx(llc_id)) ||
+	    !(layer = lookup_layer(layer_id)))
 		return;
 
 	try_preempt_first = cpuc->try_preempt_first;
@@ -1052,36 +1125,46 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * re-enqueues the task. The task does not go through ops.runnable()
 	 * again in such cases, so layer association would remain the same.
 	 *
-	 * It'd be nice if ops.dequeue() could be used to adjust queued_runtime
-	 * but ops.dequeue() is not called for tasks on a DSQ. Detect the
-	 * condition here and subtract the previous contribution.
+	 * XXX: It'd be nice if ops.dequeue() could be used to adjust
+	 * queued_runtime but ops.dequeue() is not called for tasks on a
+	 * DSQ. Detect the condition here and subtract the previous
+	 * contribution.
 	 */
-	if (taskc->qrt_llc_id < MAX_LLCS) {
-		struct llc_ctx *prev_llcc;
+	task_uncharge_qrt(taskc);
 
-		if (!(prev_llcc = lookup_llc_ctx(taskc->qrt_llc_id)))
-			return;
-		__sync_fetch_and_sub(&prev_llcc->queued_runtime[layer_id], taskc->runtime_avg);
-	}
-
-	taskc->qrt_llc_id = task_cpuc->llc_id;
+	taskc->qrt_layer_id = layer_id;
+	taskc->qrt_llc_id = llc_id;
 	queued_runtime = __sync_fetch_and_add(&llcc->queued_runtime[layer_id],
 					      taskc->runtime_avg);
 	queued_runtime += taskc->runtime_avg;
 
 	lstats = llcc->lstats[layer_id];
 
-	// racy, don't care
+	/* racy, don't care */
 	lstats[LLC_LSTAT_LAT] =
 		((LAYER_LAT_DECAY_FACTOR - 1) * lstats[LLC_LSTAT_LAT] + queued_runtime) /
 		LAYER_LAT_DECAY_FACTOR;
 	lstats[LLC_LSTAT_CNT]++;
 
-	taskc->dsq_id = layer_dsq_id(layer_id, task_cpuc->llc_id);
+	taskc->dsq_id = layer_dsq_id(layer_id, llc_id);
 	if (layer->fifo)
 		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 	else
 		scx_bpf_dispatch_vtime(p, taskc->dsq_id, layer->slice_ns, vtime, enq_flags);
+
+	/*
+	 * Interlocked with refresh_cpumasks(). scx_bpf_dispatch[_vtime]()
+	 * always goes through spin lock/unlock and has enough barriers to
+	 * guarantee that either they see the task we enqueeud or we see zero
+	 * nr_llc_cpus.
+	 *
+	 * Also interlocked with opportunistic disabling in
+	 * try_drain_layer_llcs(). See there.
+	 */
+	if (!layer->nr_llc_cpus[llc_id]) {
+		layer_llc_drain_enable(layer, llc_id);
+		layer_kick_idle_cpu(layer);
+	}
 
 preempt:
 	try_preempt(task_cpu, p, taskc, try_preempt_first, enq_flags);
@@ -1266,6 +1349,66 @@ reset:
 	return consumed;
 }
 
+static bool try_drain_layer_llcs(struct layer *layer, struct cpu_ctx *cpuc)
+{
+	u32 cnt = layer->llc_drain_cnt++;
+	u32 u;
+
+	/* alternate between prioritizing draining and owned */
+	if (cnt & 1)
+		return false;
+
+	lstat_inc(LSTAT_LLC_DRAIN_TRY, layer, cpuc);
+
+	bpf_for(u, 0, nr_llcs) {
+		u32 llc_id = (u + cnt / 2) % nr_llcs;
+		u64 dsq_id = layer_dsq_id(layer->id, llc_id);
+		u32 *vptr;
+		bool disabled = false, consumed;
+
+		if (!(layer->llcs_to_drain & (1LLU << llc_id)))
+			continue;
+
+		if ((vptr = MEMBER_VPTR(layer->nr_llc_cpus, [llc_id])) && *vptr)
+			continue;
+
+		/*
+		 * Draining is relatively expensive and we want to turn it off
+		 * as soon as possible. However, we can't turn it off after
+		 * consuming as we can race against enabling and end up turning
+		 * off draining and leave the new task in the unserviced DSQ.
+		 *
+		 * Instead, turn it off if it's likely that the DSQ is going to
+		 * be empty after consuming and re-enable afterwards if
+		 * necessary to guarantee that draining never stays disabled
+		 * with tasks in the DSQ.
+		 */
+		if (scx_bpf_dsq_nr_queued(dsq_id) <= 1) {
+			layer_llc_drain_disable(layer, llc_id);
+			disabled = true;
+		}
+
+		consumed = scx_bpf_consume(dsq_id);
+
+		/*
+		 * Interlocked with enabling in layered_enqueue(). Either we see
+		 * increased nr_queued or they see disable and re-enable. Note
+		 * that we can race against nr_llc_cpus update or other draining
+		 * CPUs and re-enable unnecessarily. Doesn't matter. Will be
+		 * re-tried on the next draining attempt.
+		 */
+		if (disabled && scx_bpf_dsq_nr_queued(dsq_id))
+			layer_llc_drain_enable(layer, llc_id);
+
+		if (consumed) {
+			lstat_inc(LSTAT_LLC_DRAIN, layer, cpuc);
+			return true;
+		}
+	}
+
+	return false;
+}
+
 static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc,
 					      struct llc_ctx *llcc)
 {
@@ -1291,7 +1434,7 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 			if (!(remote_llcc = lookup_llc_ctx(*llc_idp)))
 				return false;
 
-			if (remote_llcc->queued_runtime[layer_id] <= layer->xllc_mig_min_ns) {
+			if (remote_llcc->queued_runtime[layer_id] < layer->xllc_mig_min_ns) {
 				xllc_mig_skipped = true;
 				continue;
 			}
@@ -1336,7 +1479,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	struct layer *owner_layer = NULL;
 	struct cpu_ctx *cpuc, *sib_cpuc;
 	struct llc_ctx *llcc;
-	bool tried_owner = false, tried_lo_fb = false;
+	bool tried_preempting = false, tried_lo_fb = false;
 	s32 sib = sibling_cpu(cpu);
 
 	if (!(cpuc = lookup_cpu_ctx(-1)))
@@ -1435,21 +1578,32 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		}
 	}
 
-	/* owner before preempt layers if protected or preempting */
-	if (owner_layer && (cpuc->protect_owned || owner_layer->preempt)) {
-		if (try_consume_layer(owner_layer->id, cpuc, llcc))
+	/*
+	 * Grouped/open preempt layers first if there's no owner layer or the
+	 * owner layer is not protected or preempting.
+	 */
+	if (!owner_layer || (!cpuc->protect_owned && !owner_layer->preempt)) {
+		if (try_consume_layers(cpuc->open_preempt_layer_order,
+				       nr_open_preempt_layers,
+				       cpuc->layer_id, cpuc, llcc))
 			return;
-		tried_owner = true;
+
+		tried_preempting = true;
 	}
 
-	/* grouped/open preempt layers */
-	if (try_consume_layers(cpuc->open_preempt_layer_order, nr_open_preempt_layers,
-			       cpuc->layer_id, cpuc, llcc))
-		return;
+	/* owner layer */
+	if (owner_layer) {
+		if (owner_layer->llcs_to_drain &&
+		    try_drain_layer_llcs(owner_layer, cpuc))
+			return;
+		if (try_consume_layer(owner_layer->id, cpuc, llcc))
+			return;
+	}
 
-	/* try owner if not tried yet */
-	if (owner_layer && !tried_owner &&
-	    try_consume_layer(owner_layer->id, cpuc, llcc))
+	/* try grouped/open preempting if not tried yet */
+	if (!tried_preempting &&
+	    try_consume_layers(cpuc->open_preempt_layer_order, nr_open_preempt_layers,
+			       cpuc->layer_id, cpuc, llcc))
 		return;
 
 	/* grouped/open non-preempt layers */
@@ -1830,15 +1984,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	if (!(layer = lookup_layer(layer_id)))
 		return;
 
-	if (taskc->qrt_llc_id < MAX_LLCS) {
-		struct llc_ctx *prev_llcc;
-
-		if (!(prev_llcc = lookup_llc_ctx(taskc->qrt_llc_id)))
-			return;
-
-		__sync_fetch_and_sub(&prev_llcc->queued_runtime[layer_id], taskc->runtime_avg);
-		taskc->qrt_llc_id = MAX_LLCS;
-	}
+	task_uncharge_qrt(taskc);
 
 	if (taskc->last_cpu >= 0 && taskc->last_cpu != task_cpu) {
 		lstat_inc(LSTAT_MIGRATION, layer, cpuc);
@@ -2109,6 +2255,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	taskc->layer_id = MAX_LAYERS;
 	taskc->refresh_layer = true;
 	taskc->llc_id = MAX_LLCS;
+	taskc->qrt_layer_id = MAX_LLCS;
 	taskc->qrt_llc_id = MAX_LLCS;
 
 	/*
@@ -2149,6 +2296,20 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 
 	if (taskc->layer_id < nr_layers)
 		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
+}
+
+void BPF_STRUCT_OPS(layered_disable, struct task_struct *p)
+{
+	struct task_ctx *taskc;
+
+	if (!(taskc = lookup_task_ctx(p)))
+		return;
+
+	/*
+	 * XXX: Ideally, this should be in ops.dequeue(). See
+	 * layered_enqueue().
+	 */
+	task_uncharge_qrt(taskc);
 }
 
 static u64 dsq_first_runnable_for_ms(u64 dsq_id, u64 now)
@@ -2665,6 +2826,7 @@ SCX_OPS_DEFINE(layered,
 	       .cpu_release		= (void *)layered_cpu_release,
 	       .init_task		= (void *)layered_init_task,
 	       .exit_task		= (void *)layered_exit_task,
+	       .disable			= (void *)layered_disable,
 	       .dump			= (void *)layered_dump,
 	       .init			= (void *)layered_init,
 	       .exit			= (void *)layered_exit,
