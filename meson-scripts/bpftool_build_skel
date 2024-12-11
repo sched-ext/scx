@@ -12,21 +12,14 @@ stem="${input%.o}"
 name="${input%.bpf.o}"
 name="${name##*/}"
 
-if [ ! -z $lib ] && [ `basename $lib` == $name ];
+if [ `basename $lib` == $name ];
 then
 	"$bpftool" gen object "$stem".l1o "$input"
-	exit 0
-fi
-
-if [ ! -z $lib ];
-then
-	"$bpftool" gen object "$stem".l1o "$input" "$lib".bpf.o
 else
-	"$bpftool" gen object "$stem".l1o "$input"
+	"$bpftool" gen object "$stem".l1o "$input" "$lib".bpf.o
+	"$bpftool" gen object "$stem".l2o "$stem".l1o
+	"$bpftool" gen object "$stem".l3o "$stem".l2o
+	cmp "$stem".l2o "$stem".l3o
+	"$bpftool" gen skeleton "$stem".l3o name "$name" > "$skel"
+	"$bpftool" gen subskeleton "$stem".l3o name "$name" > "$subskel"
 fi
-
-"$bpftool" gen object "$stem".l2o "$stem".l1o
-"$bpftool" gen object "$stem".l3o "$stem".l2o
-cmp "$stem".l2o "$stem".l3o
-"$bpftool" gen skeleton "$stem".l3o name "$name" > "$skel"
-"$bpftool" gen subskeleton "$stem".l3o name "$name" > "$subskel"
