@@ -192,10 +192,6 @@ if should_build_bpftool
   bpftool_commit = '183e7010387d1fc9f08051426e9a9fbd5f8d409e'
   run_command(fetch_bpftool, meson.current_build_dir(), bpftool_commit, check: true)
 
-  bpftool_ver = '7.5'
-  bpftool_maj = 7
-  bpftool_min = 4
-
   bpftool_target = custom_target('bpftool_target',
               output: '@PLAINNAME@.__PHONY__',
               input: 'meson-scripts/bpftool_dummy.c',
@@ -205,23 +201,15 @@ else
   bpftool_ver = run_command(get_bpftool_ver, bpftool_exe_path, check: true).stdout().strip()
   bpftool_maj = bpftool_ver.split('.')[0].to_int()
   bpftool_min = bpftool_ver.split('.')[1].to_int()
-
+  if bpftool_maj < 7 or (bpftool_maj == 7 and bpftool_min < 5)
+    error('bpftool >= 7.5 required (@0@ ver=@1@)'.format(bpftool_exe_path, bpftool_ver))
+  endif
   # this is a noop when we're not building bpftool ourselves
   bpftool_target = custom_target('bpftool_target',
               output: '@PLAINNAME@.__PHONY__',
               input: 'meson-scripts/bpftool_dummy.c',
               command: ['echo'],
               build_by_default: true)
-endif
-
-bpftool_no_lib = bpftool_maj < 7 or (bpftool_maj == 7 and bpftool_min < 5)
-
-if bpftool_maj < 7 or (bpftool_maj == 7 and bpftool_min < 4)
-  error('bpftool >= 7.4 required (@0@ ver=@1@)'.format(bpftool_exe_path, bpftool_ver))
-endif
-
-if bpftool_no_lib
-  message('[WARNING] bpftool >= 7.5 required for BPF libraries(@0@ ver=@1@)'.format(bpftool_exe_path, bpftool_ver))
 endif
 # end libbpf/bpftool stuff
 
@@ -286,23 +274,8 @@ lib_objs = []
 subdir('lib')
 
 #
-# Generators to build BPF skel file for C schedulers. For bpftool < 7.5 we
-# have to work around a libbpf bug that prevents linking BPF objects by not
-# compiling the library.
+# Generators to build BPF skel file for C schedulers.
 #
-
-if bpftool_no_lib
-gen_bpf_o = generator(bpf_clang,
-                      output: '@BASENAME@.o',
-                      depends: [libbpf],
-                      arguments: [bpf_base_cflags, '-target', 'bpf', libbpf_c_headers, bpf_includes,
-                                  '-c', '@INPUT@', '-o', '@OUTPUT@'])
-
-gen_bpf_skel = generator(bpftool_build_skel,
-                         output: ['@BASENAME@.skel.h','@BASENAME@.subskel.h' ],
-                         depends: [libbpf, bpftool_target],
-                         arguments: [bpftool_exe_path, '@INPUT@', '@OUTPUT0@', '@OUTPUT1@'])
-else
 gen_bpf_o = generator(bpf_clang,
                       output: '@BASENAME@.o',
                       depends: [libbpf, scx_lib],
@@ -313,7 +286,7 @@ gen_bpf_skel = generator(bpftool_build_skel,
                          output: ['@BASENAME@.skel.h','@BASENAME@.subskel.h' ],
                          depends: [libbpf, bpftool_target],
                          arguments: [bpftool_exe_path, '@INPUT@', '@OUTPUT0@', '@OUTPUT1@', scx_lib_path])
-endif
+
 
 #
 # For rust sub-projects.
