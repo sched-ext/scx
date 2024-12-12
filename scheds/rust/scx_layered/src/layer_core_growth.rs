@@ -79,7 +79,8 @@ impl LayerGrowthAlgo {
 
         for (idx, spec) in layer_specs.iter().enumerate() {
             let layer_growth_algo = spec.kind.common().growth_algo.clone();
-            let core_order = layer_growth_algo.layer_core_order(cpu_pool, spec, idx, topo);
+            let core_order =
+                layer_growth_algo.layer_core_order(cpu_pool, layer_specs, spec, idx, topo);
             core_orders.insert(idx, core_order);
         }
 
@@ -89,12 +90,14 @@ impl LayerGrowthAlgo {
     fn layer_core_order(
         &self,
         cpu_pool: &CpuPool,
+        layer_specs: &[LayerSpec],
         spec: &LayerSpec,
         layer_idx: usize,
         topo: &Topology,
     ) -> Vec<usize> {
         let generator = LayerCoreOrderGenerator {
             cpu_pool,
+            layer_specs,
             spec,
             layer_idx,
             topo,
@@ -121,12 +124,20 @@ impl Default for LayerGrowthAlgo {
 
 struct LayerCoreOrderGenerator<'a> {
     cpu_pool: &'a CpuPool,
+    layer_specs: &'a [LayerSpec],
     spec: &'a LayerSpec,
     layer_idx: usize,
     topo: &'a Topology,
 }
 
 impl<'a> LayerCoreOrderGenerator<'a> {
+    fn rotate_layer_offset(&self, vec: &'a mut Vec<usize>) -> &Vec<usize> {
+        let num_cores = self.topo.all_cores.len();
+        let chunk = num_cores.div_ceil(self.layer_specs.len()) as usize;
+        vec.rotate_right((chunk * self.layer_idx).min(num_cores));
+        vec
+    }
+
     fn grow_sticky(&self) -> Vec<usize> {
         let mut core_order = vec![];
 
@@ -142,6 +153,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
         for i in 0..self.topo.all_cores.len() {
             core_order.push(i);
         }
+        self.rotate_layer_offset(&mut core_order);
 
         for node in self.topo.nodes.values() {
             for (_, llc) in &node.llcs {
@@ -159,7 +171,9 @@ impl<'a> LayerCoreOrderGenerator<'a> {
     }
 
     fn grow_linear(&self) -> Vec<usize> {
-        (0..self.topo.all_cores.len()).collect()
+        let mut order = (0..self.topo.all_cores.len()).collect::<Vec<usize>>();
+        self.rotate_layer_offset(&mut order);
+        order
     }
 
     fn grow_reverse(&self) -> Vec<usize> {
@@ -260,6 +274,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                     });
                 });
             });
+            self.rotate_layer_offset(&mut core_order);
             core_order
         }
     }
