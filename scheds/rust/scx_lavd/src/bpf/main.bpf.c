@@ -185,7 +185,6 @@
 #include "lavd.bpf.h"
 #include <errno.h>
 #include <stdbool.h>
-#include <string.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -1838,7 +1837,7 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 now = bpf_ktime_get_ns();
 
-	memset(taskc, 0, sizeof(*taskc));
+	__builtin_memset(taskc, 0, sizeof(*taskc));
 	taskc->last_running_clk = now; /* for run_time_ns */
 	taskc->last_stopping_clk = now; /* for run_time_ns */
 	taskc->run_time_ns = slice_max_ns;

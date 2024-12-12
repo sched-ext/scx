@@ -11,7 +11,6 @@
 
 #include <errno.h>
 #include <stdbool.h>
-#include <string.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -1649,13 +1648,13 @@ static __noinline bool match_one(struct layer_match *match,
 	}
 	case MATCH_COMM_PREFIX: {
 		char comm[MAX_COMM];
-		memcpy(comm, p->comm, MAX_COMM);
+		__builtin_memcpy(comm, p->comm, MAX_COMM);
 		return match_prefix(match->comm_prefix, comm, MAX_COMM);
 	}
 	case MATCH_PCOMM_PREFIX: {
 		char pcomm[MAX_COMM];
 
-		memcpy(pcomm, p->group_leader->comm, MAX_COMM);
+		__builtin_memcpy(pcomm, p->group_leader->comm, MAX_COMM);
 		return match_prefix(match->pcomm_prefix, pcomm, MAX_COMM);
 	}
 	case MATCH_NICE_ABOVE:

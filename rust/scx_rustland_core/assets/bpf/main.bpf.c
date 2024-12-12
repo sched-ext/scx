@@ -255,9 +255,9 @@ struct {
 	__uint(max_entries, MAX_ENQUEUED_TASKS);
 } pid_mm_fault_map SEC(".maps");
 
-SEC("kprobe/handle_mm_fault")
-int BPF_KPROBE(kprobe_handle_mm_fault, void *vma,
-			unsigned long address, unsigned int flags)
+SEC("fentry/handle_mm_fault")
+int BPF_PROG(kprobe_handle_mm_fault, void *vma,
+	     unsigned long address, unsigned int flags)
 {
 	pid_t pid = bpf_get_current_pid_tgid() >> 32;
 	u64 value = true;
@@ -267,8 +267,8 @@ int BPF_KPROBE(kprobe_handle_mm_fault, void *vma,
 	return 0;
 }
 
-SEC("kretprobe/handle_mm_fault")
-int BPF_KRETPROBE(kretprobe_handle_mm_fault)
+SEC("fexit/handle_mm_fault")
+int BPF_PROG(kretprobe_handle_mm_fault)
 {
 	pid_t pid = bpf_get_current_pid_tgid() >> 32;
 	bpf_map_delete_elem(&pid_mm_fault_map, &pid);
