@@ -25,7 +25,6 @@ char _license[] SEC("license") = "GPL";
 extern unsigned CONFIG_HZ __kconfig;
 
 const volatile u32 debug;
-const volatile s32 layered_tgid;
 const volatile u64 slice_ns;
 const volatile u64 max_exec_ns;
 const volatile u32 nr_cpu_ids = 1;
@@ -59,6 +58,7 @@ private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
 struct layer layers[MAX_LAYERS];
 u32 fallback_cpu;
 static u32 preempt_cursor;
+u32 layered_root_tgid = 0;
 
 u32 empty_layer_ids[MAX_LAYERS];
 u32 nr_empty_layer_ids;
@@ -141,6 +141,11 @@ static u64 lo_fb_dsq_id(u32 llc_id)
 static inline bool is_fb_dsq(u64 dsq_id)
 {
 	return dsq_id & (HI_FB_DSQ_BASE | LO_FB_DSQ_BASE);
+}
+
+static __always_inline bool is_scheduler_task(struct task_struct *p)
+{
+	return (u32)p->tgid == layered_root_tgid;
 }
 
 struct {
@@ -482,6 +487,23 @@ int BPF_PROG(tp_task_rename, struct task_struct *p, const char *buf)
 
 	if ((taskc = lookup_task_ctx_may_fail(p)))
 		taskc->refresh_layer = true;
+	return 0;
+}
+
+/*
+ * Initializes the scheduler to support running in a pid namespace.
+ */
+SEC("syscall")
+int BPF_PROG(initialize_pid_namespace)
+{
+	struct task_struct *p;
+
+	if (!(p = (struct task_struct*)bpf_get_current_task_btf()))
+		return -ENOENT;
+
+	layered_root_tgid = BPF_PROBE_READ(p, tgid);
+	trace("CFG layered running with tgid: %d", layered_root_tgid);
+
 	return 0;
 }
 
@@ -1081,7 +1103,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * are usually important for system performance and responsiveness.
 	 */
 	if (((p->flags & PF_KTHREAD) && p->nr_cpus_allowed < nr_possible_cpus) ||
-	    p->tgid == layered_tgid) {
+	    is_scheduler_task(p)) {
 		struct cpumask *layer_cpumask;
 
 		if (layer->kind == LAYER_KIND_CONFINED &&

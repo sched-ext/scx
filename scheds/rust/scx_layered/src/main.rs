@@ -1568,9 +1568,6 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.layered_mut().exit_dump_len = opts.exit_dump_len;
 
         skel.maps.rodata_data.debug = opts.verbose as u32;
-        // Running scx_layered inside a PID namespace would break the
-        // following.
-        skel.maps.rodata_data.layered_tgid = std::process::id() as i32;
         skel.maps.rodata_data.slice_ns = opts.slice_us * 1000;
         skel.maps.rodata_data.max_exec_ns = if opts.max_exec_us > 0 {
             opts.max_exec_us * 1000
@@ -1636,6 +1633,13 @@ impl<'a> Scheduler<'a> {
 
         // Other stuff.
         let proc_reader = procfs::ProcReader::new();
+
+        // Handle setup if layered is running in a pid namespace.
+        let input = ProgramInput {
+            ..Default::default()
+        };
+        let prog = &mut skel.progs.initialize_pid_namespace;
+        let _ = prog.test_run(input);
 
         // XXX If we try to refresh the cpumasks here before attaching, we
         // sometimes (non-deterministically) don't see the updated values in
