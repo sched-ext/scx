@@ -103,7 +103,7 @@ pub fn get_scx_flags_for_mode(
     scx_sched: &SupportedSched,
     sched_mode: SchedMode,
 ) -> Vec<String> {
-    let scx_name: &str = scx_sched.into();
+    let scx_name: &str = scx_sched.clone().into();
     if let Some(sched_config) = config.scheds.get(scx_name) {
         let scx_flags = extract_scx_flags_from_config(sched_config, &sched_mode);
 
