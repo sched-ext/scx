@@ -44,23 +44,6 @@ pub enum SchedMode {
     Server = 4,
 }
 
-impl From<&SupportedSched> for &str {
-    fn from(scx_name: &SupportedSched) -> &'static str {
-        match scx_name {
-            SupportedSched::Bpfland => "scx_bpfland",
-            SupportedSched::Rusty => "scx_rusty",
-            SupportedSched::Lavd => "scx_lavd",
-            SupportedSched::Flash => "scx_flash",
-        }
-    }
-}
-
-impl From<SupportedSched> for &str {
-    fn from(scx_name: SupportedSched) -> &'static str {
-        scx_name.into()
-    }
-}
-
 impl FromStr for SupportedSched {
     type Err = anyhow::Error;
 
@@ -71,6 +54,24 @@ impl FromStr for SupportedSched {
             "scx_lavd" => Ok(SupportedSched::Lavd),
             "scx_flash" => Ok(SupportedSched::Flash),
             _ => Err(anyhow::anyhow!("{scx_name} is not supported")),
+        }
+    }
+}
+
+impl TryFrom<&str> for SupportedSched {
+    type Error = <SupportedSched as FromStr>::Err;
+    fn try_from(s: &str) -> Result<SupportedSched, Self::Error> {
+        <SupportedSched as FromStr>::from_str(s)
+    }
+}
+
+impl From<SupportedSched> for &str {
+    fn from(scx_name: SupportedSched) -> Self {
+        match scx_name {
+            SupportedSched::Bpfland => "scx_bpfland",
+            SupportedSched::Rusty => "scx_rusty",
+            SupportedSched::Lavd => "scx_lavd",
+            SupportedSched::Flash => "scx_flash",
         }
     }
 }

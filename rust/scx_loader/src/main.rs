@@ -73,7 +73,7 @@ impl ScxLoader {
     #[zbus(property)]
     async fn current_scheduler(&self) -> String {
         if let Some(current_scx) = &self.current_scx {
-            let current_scx: &str = current_scx.into();
+            let current_scx: &str = current_scx.clone().into();
             log::info!("called {current_scx:?}");
             return current_scx.to_owned();
         }
@@ -162,7 +162,7 @@ impl ScxLoader {
 
     async fn stop_scheduler(&mut self) -> zbus::fdo::Result<()> {
         if let Some(current_scx) = &self.current_scx {
-            let scx_name: &str = current_scx.into();
+            let scx_name: &str = current_scx.clone().into();
 
             log::info!("stopping {scx_name:?}..");
             let _ = self.channel.send(ScxMessage::StopSched);
