@@ -267,6 +267,8 @@ lazy_static! {
 ///
 /// - TGIDEquals: Matches if the task's tgid matches the value.
 ///
+/// - NSPIDEquals: Matches if the task's namespace id and pid matches the values.
+///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
 ///
@@ -1143,6 +1145,11 @@ impl<'a> Scheduler<'a> {
                         LayerMatch::TGIDEquals(tgid) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_TGID_EQUALS as i32;
                             mt.tgid = *tgid;
+                        }
+                        LayerMatch::NSPIDEquals(nsid, pid) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_NSPID_EQUALS as i32;
+                            mt.nsid = *nsid;
+                            mt.pid = *pid;
                         }
                     }
                 }
