@@ -418,8 +418,9 @@ def_iter_destroy(online);
 /*
  * Access a cpumask in read-only mode (typically to check bits).
  */
-const inline struct cpumask *cast_mask(struct bpf_cpumask *mask) {
-  return (const struct cpumask *)mask;
+static __always_inline const struct cpumask *cast_mask(struct bpf_cpumask *mask)
+{
+	return (const struct cpumask *)mask;
 }
 
 /* rcu */
