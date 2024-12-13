@@ -1261,12 +1261,6 @@ static u64 node_dom_mask(u32 node_id)
 static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 						  struct task_ctx *taskc)
 {
-#warning "FIXME - See the comment"
-	/*
-	 * XXX - p->mempolicy no longer exists on v6.13. Disable mempolicy
-	 * handling for now.
-	 */
-#if 0
 	u32 node_id;
 	u32 val = 0;
 	void *mask;
@@ -1302,7 +1296,6 @@ static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 	}
 
 	return;
-#endif
 }
 
 void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
