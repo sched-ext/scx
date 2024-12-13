@@ -726,7 +726,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	if ((cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx)) >= 0) {
 		cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		if (debug && !READ_ONCE(draining) && tctx->all_cpus_allowed &&
 		    (cctx = lookup_cpu_ctx(cpu)) && cctx->cell != tctx->cell)
 			scx_bpf_error(
@@ -794,12 +794,12 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		vtime = cell->vtime_now - slice_ns;
 
 	if (p->flags & PF_KTHREAD && p->nr_cpus_allowed == 1) {
-		scx_bpf_dispatch(p, HI_FALLBACK_DSQ, slice_ns, 0);
+		scx_bpf_dsq_insert(p, HI_FALLBACK_DSQ, slice_ns, 0);
 	} else if (!tctx->all_cpus_allowed) {
-		scx_bpf_dispatch(p, LO_FALLBACK_DSQ, slice_ns, 0);
+		scx_bpf_dsq_insert(p, LO_FALLBACK_DSQ, slice_ns, 0);
 	} else {
-		scx_bpf_dispatch_vtime(p, tctx->cell, slice_ns, vtime,
-				       enq_flags);
+		scx_bpf_dsq_insert_vtime(p, tctx->cell, slice_ns, vtime,
+					 enq_flags);
 	}
 
 	/*

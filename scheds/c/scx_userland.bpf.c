@@ -175,7 +175,7 @@ static void dispatch_user_scheduler(void)
 
 	p = usersched_task();
 	if (p) {
-		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
 		bpf_task_release(p);
 	}
 }
@@ -194,7 +194,7 @@ static void enqueue_task_in_user_space(struct task_struct *p, u64 enq_flags)
 		 * directly on the global DSQ.
 		 */
 		__sync_fetch_and_add(&nr_failed_enqueues, 1);
-		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, enq_flags);
 	} else {
 		__sync_fetch_and_add(&nr_user_enqueues, 1);
 		set_usersched_needed();
@@ -216,7 +216,7 @@ void BPF_STRUCT_OPS(userland_enqueue, struct task_struct *p, u64 enq_flags)
 		if (tctx->force_local)
 			dsq_id = SCX_DSQ_LOCAL;
 		tctx->force_local = false;
-		scx_bpf_dispatch(p, dsq_id, SCX_SLICE_DFL, enq_flags);
+		scx_bpf_dsq_insert(p, dsq_id, SCX_SLICE_DFL, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_enqueues, 1);
 		return;
 	} else if (!is_usersched_task(p)) {
@@ -245,7 +245,7 @@ void BPF_STRUCT_OPS(userland_dispatch, s32 cpu, struct task_struct *prev)
 		if (!p)
 			continue;
 
-		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
 		bpf_task_release(p);
 	}
 }

@@ -872,7 +872,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cpuc);
 		taskc->dsq_id = SCX_DSQ_LOCAL;
-		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, 0);
+		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, 0);
 		return cpu;
 	}
 
@@ -1111,7 +1111,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
 
 		taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
-		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 		goto preempt;
 	}
 
@@ -1136,7 +1136,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		 */
 		if (!scx_bpf_dsq_nr_queued(taskc->dsq_id))
 			llcc->lo_fb_seq++;
-		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 		goto preempt;
 	}
 
@@ -1169,12 +1169,12 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 	taskc->dsq_id = layer_dsq_id(layer_id, llc_id);
 	if (layer->fifo)
-		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 	else
-		scx_bpf_dispatch_vtime(p, taskc->dsq_id, layer->slice_ns, vtime, enq_flags);
+		scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, layer->slice_ns, vtime, enq_flags);
 
 	/*
-	 * Interlocked with refresh_cpumasks(). scx_bpf_dispatch[_vtime]()
+	 * Interlocked with refresh_cpumasks(). scx_bpf_dsq_insert[_vtime]()
 	 * always goes through spin lock/unlock and has enough barriers to
 	 * guarantee that either they see the task we enqueeud or we see zero
 	 * nr_llc_cpus.

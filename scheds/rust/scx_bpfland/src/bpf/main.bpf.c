@@ -789,7 +789,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	}
 
@@ -812,8 +812,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * If local_kthread is specified dispatch all kthreads directly.
 	 */
 	if (is_kthread(p) && (local_kthreads || p->nr_cpus_allowed == 1)) {
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
-				 enq_flags | SCX_ENQ_PREEMPT);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
+				   enq_flags | SCX_ENQ_PREEMPT);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		return;
 	}
@@ -828,7 +828,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		 * builds).
 		 */
 		if (!nvcsw_max_thresh) {
-			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 			return;
 		}
@@ -839,7 +839,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		 */
 		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 		if (cpu >= 0) {
-			scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 			return;
 		}
@@ -851,8 +851,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
-	scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_DFL,
-			       task_vtime(p, tctx), enq_flags);
+	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_DFL,
+				 task_vtime(p, tctx), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	/*

@@ -968,7 +968,7 @@ static void direct_dispatch(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	p->scx.slice = calc_time_slice(p, taskc);
 
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, p->scx.slice, enq_flags);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, enq_flags);
 }
 
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
@@ -1085,8 +1085,8 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Enqueue the task to one of task's DSQs based on its virtual deadline.
 	 */
-	scx_bpf_dispatch_vtime(p, dsq_id, p->scx.slice,
-		 taskc->vdeadline_log_clk, enq_flags);
+	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
+				 taskc->vdeadline_log_clk, enq_flags);
 
 	/*
 	 * If there is an idle cpu for the task, try to kick it up now

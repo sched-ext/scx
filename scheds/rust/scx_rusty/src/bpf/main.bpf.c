@@ -1124,8 +1124,8 @@ static void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
 			  u64 enq_flags)
 {
 	clamp_task_vtime(p, taskc, enq_flags);
-	scx_bpf_dispatch_vtime(p, taskc->dom_id, slice_ns, taskc->deadline,
-			       enq_flags);
+	scx_bpf_dsq_insert_vtime(p, taskc->dom_id, slice_ns, taskc->deadline,
+				 enq_flags);
 }
 
 void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
@@ -1160,7 +1160,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (taskc->dispatch_local) {
 		taskc->dispatch_local = false;
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
 		return;
 	}
 
@@ -1180,7 +1180,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 
 dom_queue:
 	if (fifo_sched)
-		scx_bpf_dispatch(p, taskc->dom_id, slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, taskc->dom_id, slice_ns, enq_flags);
 	else
 		place_task_dl(p, taskc, enq_flags);
 
