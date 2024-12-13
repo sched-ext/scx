@@ -874,7 +874,7 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * Consume regular tasks from the shared DSQ, transferring them to the
 	 * local CPU DSQ.
 	 */
-	if (scx_bpf_consume(SHARED_DSQ))
+	if (scx_bpf_dsq_move_to_local(SHARED_DSQ))
 		return;
 
 	/*

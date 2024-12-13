@@ -823,7 +823,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	prev_cell = *(volatile u32 *)&cctx->prev_cell;
 	cell = *(volatile u32 *)&cctx->cell;
 
-	if (scx_bpf_consume(HI_FALLBACK_DSQ))
+	if (scx_bpf_dsq_move_to_local(HI_FALLBACK_DSQ))
 		return;
 
 	/*
@@ -831,13 +831,13 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	 * scheduling racing with assignment change, we schedule from the previous
 	 * cell first to make sure it drains.
 	 */
-	if (prev_cell != cell && scx_bpf_consume(prev_cell))
+	if (prev_cell != cell && scx_bpf_dsq_move_to_local(prev_cell))
 		return;
 
-	if (scx_bpf_consume(cell))
+	if (scx_bpf_dsq_move_to_local(cell))
 		return;
 
-	scx_bpf_consume(LO_FALLBACK_DSQ);
+	scx_bpf_dsq_move_to_local(LO_FALLBACK_DSQ);
 }
 
 static inline void runnable(struct task_struct *p, struct task_ctx *tctx,

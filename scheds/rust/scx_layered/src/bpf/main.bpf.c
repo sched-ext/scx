@@ -1347,7 +1347,7 @@ bool antistall_consume(struct cpu_ctx *cpuc)
 	if (*antistall_dsq == SCX_DSQ_INVALID)
 		return false;
 
-	consumed = scx_bpf_consume(*antistall_dsq);
+	consumed = scx_bpf_dsq_move_to_local(*antistall_dsq);
 
 	if (!consumed)
 		goto reset;
@@ -1409,7 +1409,7 @@ static bool try_drain_layer_llcs(struct layer *layer, struct cpu_ctx *cpuc)
 			disabled = true;
 		}
 
-		consumed = scx_bpf_consume(dsq_id);
+		consumed = scx_bpf_dsq_move_to_local(dsq_id);
 
 		/*
 		 * Interlocked with enabling in layered_enqueue(). Either we see
@@ -1461,7 +1461,7 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 			}
 		}
 
-		if (scx_bpf_consume(layer_dsq_id(layer_id, *llc_idp)))
+		if (scx_bpf_dsq_move_to_local(layer_dsq_id(layer_id, *llc_idp)))
 			return true;
 	}
 
@@ -1547,7 +1547,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	 * implementing starvation prevention for lo fallback and queueing them
 	 * there.
 	 */
-	if (scx_bpf_consume(cpuc->hi_fb_dsq_id))
+	if (scx_bpf_dsq_move_to_local(cpuc->hi_fb_dsq_id))
 		return;
 
 	/*
@@ -1593,7 +1593,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			cpuc->lo_fb_usage_base;
 
 		if (dur > lo_fb_wait_ns && 1024 * usage < lo_fb_share_ppk * dur) {
-			if (scx_bpf_consume(cpuc->lo_fb_dsq_id))
+			if (scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id))
 				return;
 			tried_lo_fb = true;
 		}
@@ -1632,7 +1632,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			       cpuc->layer_id, cpuc, llcc))
 		return;
 
-	if (!tried_lo_fb && scx_bpf_consume(cpuc->lo_fb_dsq_id))
+	if (!tried_lo_fb && scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id))
 		return;
 }
 

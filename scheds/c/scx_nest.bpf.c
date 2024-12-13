@@ -432,7 +432,7 @@ void BPF_STRUCT_OPS(nest_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
-	if (!scx_bpf_consume(FALLBACK_DSQ_ID)) {
+	if (!scx_bpf_dsq_move_to_local(FALLBACK_DSQ_ID)) {
 		in_primary = bpf_cpumask_test_cpu(cpu, cast_mask(primary));
 
 		if (prev && (prev->scx.flags & SCX_TASK_QUEUED) && in_primary) {

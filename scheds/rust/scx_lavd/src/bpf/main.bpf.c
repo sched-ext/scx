@@ -1123,7 +1123,7 @@ static bool consume_dsq(u64 dsq_id)
 	/*
 	 * Try to consume a task on the associated DSQ.
 	 */
-	if (scx_bpf_consume(dsq_id))
+	if (scx_bpf_dsq_move_to_local(dsq_id))
 		return true;
 	return false;
 }
@@ -1409,11 +1409,11 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * Otherwise, that means there is a task that should run on
 		 * this particular CPU. So, consume one of such tasks.
 		 *
-		 * Note that this path is not optimized since scx_bpf_consume()
-		 * should traverse until it finds any task that can run on this
-		 * CPU. The scheduled task might be runnable on the active
-		 * cores. We will optimize this path after introducing per-core
-		 * DSQ.
+		 * Note that this path is not optimized since
+		 * scx_bpf_dsq_move_to_local() should traverse until it finds
+		 * any task that can run on this CPU. The scheduled task might
+		 * be runnable on the active cores. We will optimize this path
+		 * after introducing per-core DSQ.
 		 */
 		try_consume = true;
 

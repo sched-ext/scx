@@ -831,7 +831,7 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * Select a new task to run.
 	 */
-	if (scx_bpf_consume(SHARED_DSQ))
+	if (scx_bpf_dsq_move_to_local(SHARED_DSQ))
 		return;
 
 	/*

@@ -942,13 +942,13 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * Consume a task from the per-CPU DSQ.
 	 */
-	if (scx_bpf_consume(cpu_to_dsq(cpu)))
+	if (scx_bpf_dsq_move_to_local(cpu_to_dsq(cpu)))
 		return;
 
 	/*
 	 * Consume a task from the shared DSQ.
 	 */
-	if (scx_bpf_consume(SHARED_DSQ))
+	if (scx_bpf_dsq_move_to_local(SHARED_DSQ))
 		return;
 
 	/*
