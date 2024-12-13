@@ -5,8 +5,10 @@
 #endif
 #define LSP_INC
 #include "../../../../include/scx/common.bpf.h"
+#include "../../../../include/scx/namespace_impl.bpf.h"
 #else
 #include <scx/common.bpf.h>
+#include <scx/namespace_impl.bpf.h>
 #endif
 
 #include <errno.h>
@@ -1684,6 +1686,20 @@ static __noinline bool match_one(struct layer_match *match,
 		return p->real_parent->pid == match->ppid;
 	case MATCH_TGID_EQUALS:
 		return p->tgid == match->tgid;
+	case MATCH_NSPID_EQUALS:
+		// To do namespace pid matching we need to translate the root
+		// pid from bpf side to the namespace pid.
+		bpf_rcu_read_lock();
+		struct pid *p_pid = get_task_pid_ptr(p, PIDTYPE_PID);
+		struct pid_namespace *pid_ns = get_task_pid_ns(p, PIDTYPE_TGID);
+		if (!p_pid || !pid_ns) {
+			bpf_rcu_read_unlock();
+			return result;
+		}
+		pid_t nspid = get_pid_nr_ns(p_pid, pid_ns);
+		u64 nsid = BPF_CORE_READ(pid_ns, ns.inum);
+		bpf_rcu_read_unlock();
+		return (u32)nspid == match->pid && nsid == match->nsid;
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
 		return result;
@@ -2648,6 +2664,10 @@ static s32 init_layer(int layer_id)
 				break;
 			case MATCH_TGID_EQUALS:
 				dbg("%s TGID %u", header, match->tgid);
+				break;
+			case MATCH_NSPID_EQUALS:
+				dbg("%s NSID %lld PID %d",
+				    header, match->nsid, match->pid);
 				break;
 			default:
 				scx_bpf_error("%s Invalid kind", header);
