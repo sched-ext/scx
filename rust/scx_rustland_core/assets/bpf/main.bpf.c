@@ -863,7 +863,6 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 static bool dispatch_user_scheduler(void)
 {
 	struct task_struct *p;
-	s32 cpu;
 
 	if (!test_and_clear_usersched_needed())
 		return false;
@@ -1170,7 +1169,7 @@ static int usersched_timer_init(void)
 /*
  * Evaluate the amount of online CPUs.
  */
-s32 get_nr_online_cpus(void)
+static s32 get_nr_online_cpus(void)
 {
 	const struct cpumask *online_cpumask;
 	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();

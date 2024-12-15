@@ -452,6 +452,7 @@ impl UserAllocator {
         f(alloc)
     }
 
+    #[allow(static_mut_refs)]
     pub fn lock_memory(&self) {
         unsafe {
             match VM.save() {
@@ -477,6 +478,7 @@ impl UserAllocator {
         };
     }
 
+    #[allow(static_mut_refs)]
     pub fn unlock_memory(&self) {
         unsafe {
             match VM.restore() {
@@ -520,6 +522,7 @@ static mut HEAP: AlignedHeap<HEAP_SIZE> = AlignedHeap([0u8; HEAP_SIZE]);
 // designed to operate on a pre-allocated buffer. This, coupled with the memory locking achieved
 // through mlockall(), prevents page faults from occurring during the execution of the user-space
 // scheduler.
+#[allow(static_mut_refs)]
 #[cfg_attr(not(test), global_allocator)]
 pub static ALLOCATOR: UserAllocator =
     unsafe { UserAllocator::new(BuddyAllocParam::new(HEAP.0.as_ptr(), HEAP_SIZE, LEAF_SIZE)) };
