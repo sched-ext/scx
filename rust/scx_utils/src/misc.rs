@@ -54,7 +54,7 @@ where
                         warn!("error on handling stats_server result {}", &e);
                         sleep(Duration::from_secs(1));
                         break;
-                    },
+                    }
                 },
             };
             output(stats)?;
