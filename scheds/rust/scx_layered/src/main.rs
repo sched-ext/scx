@@ -2293,7 +2293,10 @@ fn main() -> Result<()> {
                     debug!("stats monitor thread finished successfully")
                 }
                 Err(error_object) => {
-                    warn!("stats monitor thread finished because of an error {}", error_object)
+                    warn!(
+                        "stats monitor thread finished because of an error {}",
+                        error_object
+                    )
                 }
             }
         });
