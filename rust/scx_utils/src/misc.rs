@@ -1,7 +1,7 @@
 use anyhow::bail;
 use anyhow::Result;
 use libc;
-use log::info;
+use log::{info, warn};
 use scx_stats::prelude::*;
 use serde::Deserialize;
 use std::path::Path;
@@ -30,7 +30,7 @@ where
             Err(e) => match e.downcast_ref::<std::io::Error>() {
                 Some(ioe) if RETRYABLE_ERRORS.contains(&ioe.kind()) => {
                     if retry_cnt == 1 {
-                        info!("Stats server not avaliable, retrying...");
+                        info!("Stats server not available, retrying...");
                     }
                     retry_cnt += 1;
                     sleep(Duration::from_secs(1));
@@ -50,7 +50,11 @@ where
                         sleep(Duration::from_secs(1));
                         break;
                     }
-                    None => Err(e)?,
+                    None => {
+                        warn!("error on handling stats_server result {}", &e);
+                        sleep(Duration::from_secs(1));
+                        break;
+                    }
                 },
             };
             output(stats)?;

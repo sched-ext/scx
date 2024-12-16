@@ -2288,7 +2288,17 @@ fn main() -> Result<()> {
     if let Some(intv) = opts.monitor.or(opts.stats) {
         let shutdown_copy = shutdown.clone();
         let jh = std::thread::spawn(move || {
-            stats::monitor(Duration::from_secs_f64(intv), shutdown_copy).unwrap()
+            match stats::monitor(Duration::from_secs_f64(intv), shutdown_copy) {
+                Ok(_) => {
+                    debug!("stats monitor thread finished successfully")
+                }
+                Err(error_object) => {
+                    warn!(
+                        "stats monitor thread finished because of an error {}",
+                        error_object
+                    )
+                }
+            }
         });
         if opts.monitor.is_some() {
             let _ = jh.join();
