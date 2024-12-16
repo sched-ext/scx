@@ -534,11 +534,10 @@ static void advance_cur_logical_clk(struct task_ctx *taskc)
 
 static void update_stat_for_running(struct task_struct *p,
 				    struct task_ctx *taskc,
-				    struct cpu_ctx *cpuc)
+				    struct cpu_ctx *cpuc, u64 now)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 wait_period, interval;
-	u64 now = bpf_ktime_get_ns();
 
 	/*
 	 * Update the current logical clock.
@@ -1052,7 +1051,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	struct cpu_ctx *cpuc_task, *cpuc_cur;
 	struct task_ctx *taskc;
 	s32 cpu_id;
-	u64 dsq_id;
+	u64 dsq_id, now;
 
 	/*
 	 * Place a task to a run queue of current cpu's compute domain.
@@ -1104,7 +1103,8 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 		 * Try to find and kick a victim CPU, which runs a less urgent
 		 * task. The kick will be done asynchronously.
 		 */
-		try_find_and_kick_victim_cpu(p, taskc, cpuc_cur, dsq_id);
+		now = bpf_ktime_get_ns();
+		try_find_and_kick_victim_cpu(p, taskc, cpuc_cur, dsq_id, now);
 	}
 }
 
@@ -1462,6 +1462,7 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
 {
 	struct cpu_ctx *cpuc_run;
 	struct task_ctx *taskc_run;
+	u64 now;
 	bool preempted;
 
 	cpuc_run = get_cpu_ctx();
@@ -1473,7 +1474,8 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
 	 * Try to yield the current CPU if there is a higher priority task in
 	 * the run queue.
 	 */
-	preempted = try_yield_current_cpu(p_run, cpuc_run, taskc_run);
+	now = bpf_ktime_get_ns();
+	preempted = try_yield_current_cpu(p_run, cpuc_run, taskc_run, now);
 
 	/*
 	 * Update performance target of the current CPU if the current running
@@ -1543,6 +1545,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
+	u64 now = bpf_ktime_get_ns();
 
 	/*
 	 * Update task statistics
@@ -1552,7 +1555,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	if (!cpuc || !taskc)
 		return;
 
-	update_stat_for_running(p, taskc, cpuc);
+	update_stat_for_running(p, taskc, cpuc, now);
 
 	/*
 	 * Calculate the task's time slice.
@@ -1572,7 +1575,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 * Update running task's information for preemption
 	 */
 	cpuc->lat_cri = taskc->lat_cri;
-	cpuc->stopping_tm_est_ns = get_est_stopping_time(taskc);
+	cpuc->stopping_tm_est_ns = get_est_stopping_time(taskc, now);
 
 	/*
 	 * If there is a relevant introspection command with @p, process it.

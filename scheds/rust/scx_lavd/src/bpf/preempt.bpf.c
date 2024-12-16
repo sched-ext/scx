@@ -12,9 +12,9 @@ struct preemption_info {
 	struct cpu_ctx	*cpuc;
 };
 
-static u64 get_est_stopping_time(struct task_ctx *taskc)
+static u64 get_est_stopping_time(struct task_ctx *taskc, u64 now)
 {
-	return bpf_ktime_get_ns() + taskc->run_time_ns;
+	return now + taskc->run_time_ns;
 }
 
 static int comp_preemption_info(struct preemption_info *prm_a,
@@ -89,7 +89,7 @@ static bool can_cpu_be_kicked(u64 now, struct cpu_ctx *cpuc)
 }
 
 static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
-				       struct task_ctx *taskc)
+				       struct task_ctx *taskc, u64 now)
 {
 	/*
 	 * We see preemption as a load-balancing problem. In a system with N
@@ -100,7 +100,6 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	 * least latency critical task. Hence, we use the 'power of two random
 	 * choices' technique.
 	 */
-	u64 now = bpf_ktime_get_ns();
 	struct cpu_ctx *cpuc;
 	struct preemption_info prm_task, prm_cpus[2], *victim_cpu;
 	int cpu, nr_cpus;
@@ -110,7 +109,7 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	/*
 	 * Get task's preemption information for comparison.
 	 */
-	prm_task.stopping_tm_est_ns = get_est_stopping_time(taskc);
+	prm_task.stopping_tm_est_ns = get_est_stopping_time(taskc, now);
 	prm_task.lat_cri = taskc->lat_cri;
 	prm_task.cpuc = cpuc = get_cpu_ctx();
 	if (!cpuc) {
@@ -260,7 +259,7 @@ static bool try_kick_cpu(struct task_struct *p, struct cpu_ctx *cpuc_cur,
 static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 					 struct task_ctx *taskc,
 					 struct cpu_ctx *cpuc_cur,
-					 u64 dsq_id)
+					 u64 dsq_id, u64 now)
 {
 	struct bpf_cpumask *cd_cpumask, *cpumask;
 	struct cpdom_ctx *cpdomc;
@@ -281,7 +280,7 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 	/*
 	 * Find a victim CPU among CPUs that run lower-priority tasks.
 	 */
-	victim_cpuc = find_victim_cpu(cast_mask(cpumask), taskc);
+	victim_cpuc = find_victim_cpu(cast_mask(cpumask), taskc, now);
 
 	/*
 	 * If a victim CPU is chosen, preempt the victim by kicking it.
@@ -294,7 +293,8 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 
 static bool try_yield_current_cpu(struct task_struct *p_run,
 				  struct cpu_ctx *cpuc_run,
-				  struct task_ctx *taskc_run)
+				  struct task_ctx *taskc_run,
+				  u64 now)
 {
 	struct task_struct *p_wait;
 	struct task_ctx *taskc_wait;
@@ -337,7 +337,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 		if (!taskc_wait)
 			break;
 
-		prm_wait.stopping_tm_est_ns = get_est_stopping_time(taskc_wait);
+		prm_wait.stopping_tm_est_ns = get_est_stopping_time(taskc_wait, now);
 		prm_wait.lat_cri = taskc_wait->lat_cri;
 
 		ret = can_task1_kick_task2(&prm_wait, &prm_run);
