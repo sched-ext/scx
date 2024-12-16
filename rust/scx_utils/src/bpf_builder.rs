@@ -366,6 +366,8 @@ impl BpfBuilder {
             .clang_args(&self.cflags)
             .generate(&skel_path)?;
 
+        self.gen_cargo_reruns(None)?;
+
         Ok(())
     }
 
@@ -403,6 +405,29 @@ impl BpfBuilder {
         Ok(())
     }
 
+    fn gen_cargo_reruns(&self, dependencies: Option<&BTreeSet<String>>) -> Result<()> {
+        println!("cargo:rerun-if-env-changed=BPF_CLANG");
+        println!("cargo:rerun-if-env-changed=BPF_CFLAGS");
+        println!("cargo:rerun-if-env-changed=BPF_BASE_CFLAGS");
+        println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_PRE_INCL");
+        println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_POST_INCL");
+        match dependencies {
+            Some(deps) => {
+                for dep in deps.iter() {
+                    println!("cargo:rerun-if-changed={}", dep);
+                }
+            }
+
+            None => (),
+        };
+
+        for source in self.sources.iter() {
+            println!("cargo:rerun-if-changed={}", source);
+        }
+
+        Ok(())
+    }
+
     /// Build and generate the enabled bindings.
     pub fn build(&self) -> Result<()> {
         let mut deps = BTreeSet::new();
@@ -411,18 +436,7 @@ impl BpfBuilder {
 
         self.bindgen_bpf_intf()?;
         self.gen_bpf_skel(&mut deps)?;
-
-        println!("cargo:rerun-if-env-changed=BPF_CLANG");
-        println!("cargo:rerun-if-env-changed=BPF_CFLAGS");
-        println!("cargo:rerun-if-env-changed=BPF_BASE_CFLAGS");
-        println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_PRE_INCL");
-        println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_POST_INCL");
-        for dep in deps.iter() {
-            println!("cargo:rerun-if-changed={}", dep);
-        }
-        for source in self.sources.iter() {
-            println!("cargo:rerun-if-changed={}", source);
-        }
+        self.gen_cargo_reruns(Some(&deps))?;
         Ok(())
     }
 }
