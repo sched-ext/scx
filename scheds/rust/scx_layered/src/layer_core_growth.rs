@@ -16,6 +16,10 @@ use crate::LayerSpec;
 pub enum LayerGrowthAlgo {
     /// Sticky attempts to place layers evenly spaced across cores.
     Sticky,
+    /// StickyTopo attempts to place layers as far out spaced across cores.
+    /// It tries to find an assignment to minimize inference between layers,
+    /// while ensuring LLC and NUMA locality.
+    StickyTopo,
     /// Linear starts with the lowest number CPU and grows towards the total
     /// number of CPUs.
     Linear,
@@ -46,6 +50,7 @@ pub enum LayerGrowthAlgo {
 }
 
 const GROWTH_ALGO_STICKY: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_STICKY as i32;
+const GROWTH_ALGO_STICKY_TOPO: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_STICKY_TOPO as i32;
 const GROWTH_ALGO_LINEAR: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_LINEAR as i32;
 const GROWTH_ALGO_REVERSE: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_REVERSE as i32;
 const GROWTH_ALGO_RANDOM: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_RANDOM as i32;
@@ -59,6 +64,7 @@ impl LayerGrowthAlgo {
     pub fn as_bpf_enum(&self) -> i32 {
         match self {
             LayerGrowthAlgo::Sticky => GROWTH_ALGO_STICKY,
+            LayerGrowthAlgo::StickyTopo => GROWTH_ALGO_STICKY_TOPO,
             LayerGrowthAlgo::Linear => GROWTH_ALGO_LINEAR,
             LayerGrowthAlgo::Reverse => GROWTH_ALGO_REVERSE,
             LayerGrowthAlgo::Random => GROWTH_ALGO_RANDOM,
@@ -95,15 +101,17 @@ impl LayerGrowthAlgo {
         layer_idx: usize,
         topo: &Topology,
     ) -> Vec<usize> {
-        let generator = LayerCoreOrderGenerator {
+        let mut generator = LayerCoreOrderGenerator {
             cpu_pool,
             layer_specs,
             spec,
             layer_idx,
             topo,
+            llc_dir: vec![],
         };
         match self {
             LayerGrowthAlgo::Sticky => generator.grow_sticky(),
+            LayerGrowthAlgo::StickyTopo => generator.grow_sticky_topo(),
             LayerGrowthAlgo::Linear => generator.grow_linear(),
             LayerGrowthAlgo::Reverse => generator.grow_reverse(),
             LayerGrowthAlgo::RoundRobin => generator.grow_round_robin(),
@@ -128,6 +136,7 @@ struct LayerCoreOrderGenerator<'a> {
     spec: &'a LayerSpec,
     layer_idx: usize,
     topo: &'a Topology,
+    llc_dir: Vec<i32>,
 }
 
 impl<'a> LayerCoreOrderGenerator<'a> {
@@ -165,6 +174,104 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                     core_order.rotate_right(rot);
                 }
             }
+        }
+
+        core_order
+    }
+
+    fn grow_sticky_topo(&mut self) -> Vec<usize> {
+        let mut core_order = vec![];
+
+        // 1 means left, 2 means right in llc_dir elements.
+        if self.llc_dir.len() == 0 {
+            for _ in 0..self.topo.all_llcs.len() {
+                self.llc_dir.push(0);
+            }
+        }
+
+        // We assume core total order is by NUMA (w/ LLCs) and in order, so
+        // sequential traversal covers same LLC, crosses LLC boundary within
+        // same NUMA, then crosses NUMA boundary, etc.
+        //
+        // Select 2 endpoints and then begin placing layers. After layers >
+        // LLCs, we don't have segments to split anymore.
+        if self.layer_idx == 0 {
+            for c in self.topo.all_cores.iter() {
+                core_order.push(c.1.id);
+            }
+            self.llc_dir[0] = 2;
+            return core_order;
+        } else if self.layer_idx == 1 {
+            for c in self.topo.all_cores.iter().rev() {
+                core_order.push(c.1.id);
+            }
+            self.llc_dir[self.topo.all_llcs.len() - 1] = 1;
+            return core_order;
+        }
+
+        // Now find midpoints of allocated LLC gaps.
+        // Do a linear search, we could use a max heap but we expect
+        // LLCs to be low in count (10s) so stick to linear search.
+        let mut max_seglen = 0;
+        let mut segment = (0, 0);
+        let mut max_segment = (0, 0);
+
+        for (i, &dir) in self.llc_dir.iter().enumerate() {
+            if segment.0 == 0 && dir != 0 {
+                segment.0 = i;
+                continue;
+            } else if segment.1 == 0 && dir != 0 {
+                segment.1 = i;
+                let seglen = segment.1 - segment.0 + 1;
+                if max_seglen < seglen {
+                    max_seglen = seglen;
+                    max_segment.0 = segment.0;
+                    max_segment.1 = segment.1;
+                }
+                segment.0 = segment.1;
+                segment.1 = 0;
+                continue;
+            }
+        }
+
+        let start_llc = (max_segment.0 + max_segment.1).div_ceil(2);
+        let start_dir = if max_segment.1 - start_llc > start_llc - max_segment.0 {
+            // Right
+            2
+        } else {
+            // Left
+            1
+        };
+
+        println!(
+            "layer: {} start_llc: {} start_dir: {} ",
+            self.layer_idx, start_llc, start_dir
+        );
+
+        if self.llc_dir[start_llc] == 0 {
+            self.llc_dir[start_llc] = start_dir;
+        }
+
+        let cores = &self
+            .topo
+            .all_llcs
+            .get_key_value(&start_llc)
+            .unwrap()
+            .1
+            .cores;
+        let start_core = cores.first_key_value().unwrap().1.id;
+        let end_core = cores.last_key_value().unwrap().1.id;
+
+        println!(
+            "layer: {} start_llc: {} start_dir: {} start_core: {} end_core: {}",
+            self.layer_idx, start_llc, start_dir, start_core, end_core
+        );
+
+        for i in (0..=end_core).rev() {
+            core_order.push(i);
+        }
+        for i in (end_core + 1)..self.topo.all_cores.len() {
+            core_order.push(i);
         }
 
         core_order

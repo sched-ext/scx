@@ -1003,7 +1003,7 @@ impl Layer {
 
         let layer_growth_algo = kind.common().growth_algo.clone();
 
-        debug!(
+        println!(
             "layer: {} algo: {:?} core order: {:?}",
             name, &layer_growth_algo, core_order
         );
