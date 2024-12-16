@@ -1,6 +1,6 @@
 [package]
 name = "scx_rustland_core"
-version = "2.2.4"
+version = "2.2.5"
 edition = "2021"
 authors = ["Andrea Righi <andrea.righi@linux.dev>"]
 license = "GPL-2.0-only"
@@ -12,12 +12,12 @@ anyhow = "1.0.65"
 plain = "0.2.3"
 libbpf-rs = "=0.24.8"
 libc = "0.2.137"
-scx_utils = { path = "../scx_utils", version = "1.0.8" }
+scx_utils = { path = "../scx_utils", version = "1.0.9" }
 
 [build-dependencies]
 tar = "0.4"
 walkdir = "2.4"
-scx_utils = { path = "../scx_utils", version = "1.0.8" }
+scx_utils = { path = "../scx_utils", version = "1.0.9" }
 
 [lib]
 name = "scx_rustland_core"
