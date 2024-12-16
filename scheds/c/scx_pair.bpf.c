@@ -477,7 +477,7 @@ static int try_dispatch(s32 cpu)
 	p = bpf_task_from_pid(pid);
 	if (p) {
 		__sync_fetch_and_add(&nr_dispatched, 1);
-		scx_bpf_dispatch(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, 0);
 		bpf_task_release(p);
 	} else {
 		/* we don't handle dequeues, retry on lost tasks */

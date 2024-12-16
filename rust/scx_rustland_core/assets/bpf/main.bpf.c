@@ -255,9 +255,9 @@ struct {
 	__uint(max_entries, MAX_ENQUEUED_TASKS);
 } pid_mm_fault_map SEC(".maps");
 
-SEC("kprobe/handle_mm_fault")
-int BPF_KPROBE(kprobe_handle_mm_fault, void *vma,
-			unsigned long address, unsigned int flags)
+SEC("fentry/handle_mm_fault")
+int BPF_PROG(kprobe_handle_mm_fault, void *vma,
+	     unsigned long address, unsigned int flags)
 {
 	pid_t pid = bpf_get_current_pid_tgid() >> 32;
 	u64 value = true;
@@ -267,8 +267,8 @@ int BPF_KPROBE(kprobe_handle_mm_fault, void *vma,
 	return 0;
 }
 
-SEC("kretprobe/handle_mm_fault")
-int BPF_KRETPROBE(kretprobe_handle_mm_fault)
+SEC("fexit/handle_mm_fault")
+int BPF_PROG(kretprobe_handle_mm_fault)
 {
 	pid_t pid = bpf_get_current_pid_tgid() >> 32;
 	bpf_map_delete_elem(&pid_mm_fault_map, &pid);
@@ -632,8 +632,8 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 		 * Bounce to the shared DSQ if we can't find a valid task
 		 * context.
 		 */
-		scx_bpf_dispatch_vtime(p, SHARED_DSQ,
-				       SCX_SLICE_DFL, task->vtime, task->flags);
+		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ,
+					 SCX_SLICE_DFL, task->vtime, task->flags);
 		__sync_fetch_and_add(&nr_bounce_dispatches, 1);
 		goto out_kick_idle_cpu;
 	}
@@ -643,8 +643,8 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	 * Dispatch task to the target DSQ.
 	 */
 	if (task->cpu & RL_CPU_ANY) {
-		scx_bpf_dispatch_vtime(p, SHARED_DSQ,
-				       SCX_SLICE_DFL, task->vtime, task->flags);
+		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ,
+					 SCX_SLICE_DFL, task->vtime, task->flags);
 		goto out_kick_idle_cpu;
 	}
 
@@ -666,8 +666,8 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 
 	/* Check if the CPU is valid, according to the cpumask */
 	if (!bpf_cpumask_test_cpu(task->cpu, p->cpus_ptr)) {
-		scx_bpf_dispatch_vtime(p, SHARED_DSQ,
-				       SCX_SLICE_DFL, task->vtime, task->flags);
+		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ,
+					 SCX_SLICE_DFL, task->vtime, task->flags);
 		__sync_fetch_and_add(&nr_bounce_dispatches, 1);
 		goto out_kick_idle_cpu;
 	}
@@ -676,8 +676,8 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	curr_cpumask_cnt = tctx->cpumask_cnt;
 
 	/* Dispatch the task to the target per-CPU DSQ */
-	scx_bpf_dispatch_vtime(p, dsq_id,
-			       SCX_SLICE_DFL, task->vtime, task->flags);
+	scx_bpf_dsq_insert_vtime(p, dsq_id,
+				 SCX_SLICE_DFL, task->vtime, task->flags);
 
 	/* If the cpumask is not valid anymore, ignore the dispatch event */
 	if (curr_cpumask_cnt != task->cpumask_cnt) {
@@ -815,8 +815,8 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
-                scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
-				 enq_flags | SCX_ENQ_PREEMPT);
+                scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
+				   enq_flags | SCX_ENQ_PREEMPT);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -827,7 +827,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * using ith the highest priority.
 	 */
 	if (in_mm_fault(p->pid)) {
-		scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, 0, enq_flags);
+		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, 0, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		kick_task_cpu(p);
 		return;
@@ -844,8 +844,8 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	task = bpf_ringbuf_reserve(&queued, sizeof(*task), 0);
 	if (!task) {
 		sched_congested(p);
-		scx_bpf_dispatch_vtime(p, SHARED_DSQ,
-				       SCX_SLICE_DFL, 0, enq_flags);
+		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ,
+					 SCX_SLICE_DFL, 0, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		kick_task_cpu(p);
 		return;
@@ -884,7 +884,7 @@ static bool dispatch_user_scheduler(void)
 	 * The user-space scheduler will voluntarily yield the CPU upon
 	 * completion through BpfScheduler->notify_complete().
 	 */
-	scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_INF, -1ULL, 0);
+	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_INF, -1ULL, 0);
 	kick_task_cpu(p);
 
 	bpf_task_release(p);
@@ -942,13 +942,13 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * Consume a task from the per-CPU DSQ.
 	 */
-	if (scx_bpf_consume(cpu_to_dsq(cpu)))
+	if (scx_bpf_dsq_move_to_local(cpu_to_dsq(cpu)))
 		return;
 
 	/*
 	 * Consume a task from the shared DSQ.
 	 */
-	if (scx_bpf_consume(SHARED_DSQ))
+	if (scx_bpf_dsq_move_to_local(SHARED_DSQ))
 		return;
 
 	/*

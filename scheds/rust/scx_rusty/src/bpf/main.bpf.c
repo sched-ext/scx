@@ -49,7 +49,6 @@
 
 #include <errno.h>
 #include <stdbool.h>
-#include <string.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -1125,8 +1124,8 @@ static void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
 			  u64 enq_flags)
 {
 	clamp_task_vtime(p, taskc, enq_flags);
-	scx_bpf_dispatch_vtime(p, taskc->dom_id, slice_ns, taskc->deadline,
-			       enq_flags);
+	scx_bpf_dsq_insert_vtime(p, taskc->dom_id, slice_ns, taskc->deadline,
+				 enq_flags);
 }
 
 void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
@@ -1161,7 +1160,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (taskc->dispatch_local) {
 		taskc->dispatch_local = false;
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
 		return;
 	}
 
@@ -1181,7 +1180,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 
 dom_queue:
 	if (fifo_sched)
-		scx_bpf_dispatch(p, taskc->dom_id, slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, taskc->dom_id, slice_ns, enq_flags);
 	else
 		place_task_dl(p, taskc, enq_flags);
 
@@ -1315,7 +1314,7 @@ void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 	if (unlikely(is_offline_cpu(cpu)))
 		return;
 
-	if (scx_bpf_consume(curr_dom)) {
+	if (scx_bpf_dsq_move_to_local(curr_dom)) {
 		stat_add(RUSTY_STAT_DSQ_DISPATCH, 1);
 		return;
 	}
@@ -1335,7 +1334,7 @@ void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 		if (dom == curr_dom || dom_node_id(dom) != my_node)
 			continue;
 
-		if (scx_bpf_consume(dom)) {
+		if (scx_bpf_dsq_move_to_local(dom)) {
 			stat_add(RUSTY_STAT_GREEDY_LOCAL, 1);
 			return;
 		}
@@ -1352,7 +1351,7 @@ void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 		    scx_bpf_dsq_nr_queued(dom) >= greedy_threshold_x_numa)
 			continue;
 
-		if (scx_bpf_consume(dom)) {
+		if (scx_bpf_dsq_move_to_local(dom)) {
 			stat_add(RUSTY_STAT_GREEDY_XNUMA, 1);
 			return;
 		}

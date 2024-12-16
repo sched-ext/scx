@@ -52,7 +52,7 @@ s32 BPF_STRUCT_OPS(sdt_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake
 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
 		stat_inc_select_idle_cpu(stats);
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
 	} else {
 		stat_inc_select_busy_cpu(stats);
 	}
@@ -72,12 +72,12 @@ void BPF_STRUCT_OPS(sdt_enqueue, struct task_struct *p, u64 enq_flags)
 
 	stat_inc_enqueue(stats);
 
-	scx_bpf_dispatch(p, SHARED_DSQ, SCX_SLICE_DFL, enq_flags);
+	scx_bpf_dsq_insert(p, SHARED_DSQ, SCX_SLICE_DFL, enq_flags);
 }
 
 void BPF_STRUCT_OPS(sdt_dispatch, s32 cpu, struct task_struct *prev)
 {
-	scx_bpf_consume(SHARED_DSQ);
+	scx_bpf_dsq_move_to_local(SHARED_DSQ);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init_task, struct task_struct *p,

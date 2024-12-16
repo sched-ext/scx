@@ -54,7 +54,7 @@ struct sys_stat_ctx {
 
 static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 {
-	memset(c, 0, sizeof(*c));
+	__builtin_memset(c, 0, sizeof(*c));
 
 	c->stat_cur = get_sys_stat_cur();
 	c->stat_next = get_sys_stat_next();
@@ -394,7 +394,7 @@ static s32 init_sys_stat(u64 now)
 	u32 key = 0;
 	int err;
 
-	memset(__sys_stats, 0, sizeof(__sys_stats));
+	__builtin_memset(__sys_stats, 0, sizeof(__sys_stats));
 	__sys_stats[0].last_update_clk = now;
 	__sys_stats[1].last_update_clk = now;
 	__sys_stats[0].nr_active = nr_cpus_big;

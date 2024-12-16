@@ -386,7 +386,7 @@ migrate_primary:
 	}
 	bpf_rcu_read_unlock();
 	update_attached(tctx, prev_cpu, cpu);
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, slice_ns, 0);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 	return cpu;
 }
 
@@ -408,8 +408,8 @@ void BPF_STRUCT_OPS(nest_enqueue, struct task_struct *p, u64 enq_flags)
 	if (vtime_before(vtime, vtime_now - slice_ns))
 		vtime = vtime_now - slice_ns;
 
-	scx_bpf_dispatch_vtime(p, FALLBACK_DSQ_ID, slice_ns, vtime,
-			       enq_flags);
+	scx_bpf_dsq_insert_vtime(p, FALLBACK_DSQ_ID, slice_ns, vtime,
+				 enq_flags);
 }
 
 void BPF_STRUCT_OPS(nest_dispatch, s32 cpu, struct task_struct *prev)
@@ -432,11 +432,11 @@ void BPF_STRUCT_OPS(nest_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
-	if (!scx_bpf_consume(FALLBACK_DSQ_ID)) {
+	if (!scx_bpf_dsq_move_to_local(FALLBACK_DSQ_ID)) {
 		in_primary = bpf_cpumask_test_cpu(cpu, cast_mask(primary));
 
 		if (prev && (prev->scx.flags & SCX_TASK_QUEUED) && in_primary) {
-			scx_bpf_dispatch(prev, SCX_DSQ_LOCAL, slice_ns, 0);
+			scx_bpf_dsq_insert(prev, SCX_DSQ_LOCAL, slice_ns, 0);
 			return;
 		}
 

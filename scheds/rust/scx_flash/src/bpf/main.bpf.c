@@ -732,7 +732,7 @@ s32 BPF_STRUCT_OPS(flash_select_cpu, struct task_struct *p,
 
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	}
 
@@ -794,8 +794,8 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	 * before any other task.
 	 */
 	if (is_kthread(p) && (local_kthreads || p->nr_cpus_allowed == 1)) {
-		scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
-				 enq_flags | SCX_ENQ_PREEMPT);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
+				   enq_flags | SCX_ENQ_PREEMPT);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		return;
 	}
@@ -804,8 +804,8 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Enqueue the task to the global DSQ. The task will be dispatched on
 	 * the first CPU that becomes available.
 	 */
-	scx_bpf_dispatch_vtime(p, SHARED_DSQ, SCX_SLICE_DFL,
-			       task_vtime(p, tctx), enq_flags);
+	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_DFL,
+				 task_vtime(p, tctx), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	/*
@@ -831,7 +831,7 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * Select a new task to run.
 	 */
-	if (scx_bpf_consume(SHARED_DSQ))
+	if (scx_bpf_dsq_move_to_local(SHARED_DSQ))
 		return;
 
 	/*

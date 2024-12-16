@@ -35,7 +35,7 @@ int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 
 	m->hdr.kind = LAVD_MSG_TASKC;
 	m->taskc_x.pid = p->pid;
-	memcpy(m->taskc_x.comm, p->comm, TASK_COMM_LEN);
+	__builtin_memcpy(m->taskc_x.comm, p->comm, TASK_COMM_LEN);
 	m->taskc_x.static_prio = get_nice_prio(p);
 	m->taskc_x.cpu_util = cpuc->util / 10;
 	m->taskc_x.cpu_id = cpu_id;
@@ -50,7 +50,7 @@ int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 	m->taskc_x.stat[3] = is_greedy(taskc) ? 'G' : 'E';
 	m->taskc_x.stat[4] = '\0';
 
-	memcpy(&m->taskc, taskc, sizeof(m->taskc));
+	__builtin_memcpy(&m->taskc, taskc, sizeof(m->taskc));
 
 	bpf_ringbuf_submit(m, 0);
 

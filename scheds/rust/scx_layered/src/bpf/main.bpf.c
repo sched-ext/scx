@@ -13,7 +13,6 @@
 
 #include <errno.h>
 #include <stdbool.h>
-#include <string.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -875,7 +874,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cpuc);
 		taskc->dsq_id = SCX_DSQ_LOCAL;
-		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, 0);
+		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, 0);
 		return cpu;
 	}
 
@@ -1114,7 +1113,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
 
 		taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
-		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 		goto preempt;
 	}
 
@@ -1139,7 +1138,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		 */
 		if (!scx_bpf_dsq_nr_queued(taskc->dsq_id))
 			llcc->lo_fb_seq++;
-		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 		goto preempt;
 	}
 
@@ -1172,12 +1171,12 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 	taskc->dsq_id = layer_dsq_id(layer_id, llc_id);
 	if (layer->fifo)
-		scx_bpf_dispatch(p, taskc->dsq_id, layer->slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 	else
-		scx_bpf_dispatch_vtime(p, taskc->dsq_id, layer->slice_ns, vtime, enq_flags);
+		scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, layer->slice_ns, vtime, enq_flags);
 
 	/*
-	 * Interlocked with refresh_cpumasks(). scx_bpf_dispatch[_vtime]()
+	 * Interlocked with refresh_cpumasks(). scx_bpf_dsq_insert[_vtime]()
 	 * always goes through spin lock/unlock and has enough barriers to
 	 * guarantee that either they see the task we enqueeud or we see zero
 	 * nr_llc_cpus.
@@ -1350,7 +1349,7 @@ bool antistall_consume(struct cpu_ctx *cpuc)
 	if (*antistall_dsq == SCX_DSQ_INVALID)
 		return false;
 
-	consumed = scx_bpf_consume(*antistall_dsq);
+	consumed = scx_bpf_dsq_move_to_local(*antistall_dsq);
 
 	if (!consumed)
 		goto reset;
@@ -1412,7 +1411,7 @@ static bool try_drain_layer_llcs(struct layer *layer, struct cpu_ctx *cpuc)
 			disabled = true;
 		}
 
-		consumed = scx_bpf_consume(dsq_id);
+		consumed = scx_bpf_dsq_move_to_local(dsq_id);
 
 		/*
 		 * Interlocked with enabling in layered_enqueue(). Either we see
@@ -1464,7 +1463,7 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 			}
 		}
 
-		if (scx_bpf_consume(layer_dsq_id(layer_id, *llc_idp)))
+		if (scx_bpf_dsq_move_to_local(layer_dsq_id(layer_id, *llc_idp)))
 			return true;
 	}
 
@@ -1550,7 +1549,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	 * implementing starvation prevention for lo fallback and queueing them
 	 * there.
 	 */
-	if (scx_bpf_consume(cpuc->hi_fb_dsq_id))
+	if (scx_bpf_dsq_move_to_local(cpuc->hi_fb_dsq_id))
 		return;
 
 	/*
@@ -1596,7 +1595,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			cpuc->lo_fb_usage_base;
 
 		if (dur > lo_fb_wait_ns && 1024 * usage < lo_fb_share_ppk * dur) {
-			if (scx_bpf_consume(cpuc->lo_fb_dsq_id))
+			if (scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id))
 				return;
 			tried_lo_fb = true;
 		}
@@ -1635,7 +1634,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			       cpuc->layer_id, cpuc, llcc))
 		return;
 
-	if (!tried_lo_fb && scx_bpf_consume(cpuc->lo_fb_dsq_id))
+	if (!tried_lo_fb && scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id))
 		return;
 }
 
@@ -1651,13 +1650,13 @@ static __noinline bool match_one(struct layer_match *match,
 	}
 	case MATCH_COMM_PREFIX: {
 		char comm[MAX_COMM];
-		memcpy(comm, p->comm, MAX_COMM);
+		__builtin_memcpy(comm, p->comm, MAX_COMM);
 		return match_prefix(match->comm_prefix, comm, MAX_COMM);
 	}
 	case MATCH_PCOMM_PREFIX: {
 		char pcomm[MAX_COMM];
 
-		memcpy(pcomm, p->group_leader->comm, MAX_COMM);
+		__builtin_memcpy(pcomm, p->group_leader->comm, MAX_COMM);
 		return match_prefix(match->pcomm_prefix, pcomm, MAX_COMM);
 	}
 	case MATCH_NICE_ABOVE:

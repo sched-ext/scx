@@ -185,7 +185,6 @@
 #include "lavd.bpf.h"
 #include <errno.h>
 #include <stdbool.h>
-#include <string.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -969,7 +968,7 @@ static void direct_dispatch(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	p->scx.slice = calc_time_slice(p, taskc);
 
-	scx_bpf_dispatch(p, SCX_DSQ_LOCAL, p->scx.slice, enq_flags);
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, enq_flags);
 }
 
 s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
@@ -1086,8 +1085,8 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Enqueue the task to one of task's DSQs based on its virtual deadline.
 	 */
-	scx_bpf_dispatch_vtime(p, dsq_id, p->scx.slice,
-		 taskc->vdeadline_log_clk, enq_flags);
+	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
+				 taskc->vdeadline_log_clk, enq_flags);
 
 	/*
 	 * If there is an idle cpu for the task, try to kick it up now
@@ -1124,7 +1123,7 @@ static bool consume_dsq(u64 dsq_id)
 	/*
 	 * Try to consume a task on the associated DSQ.
 	 */
-	if (scx_bpf_consume(dsq_id))
+	if (scx_bpf_dsq_move_to_local(dsq_id))
 		return true;
 	return false;
 }
@@ -1410,11 +1409,11 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * Otherwise, that means there is a task that should run on
 		 * this particular CPU. So, consume one of such tasks.
 		 *
-		 * Note that this path is not optimized since scx_bpf_consume()
-		 * should traverse until it finds any task that can run on this
-		 * CPU. The scheduled task might be runnable on the active
-		 * cores. We will optimize this path after introducing per-core
-		 * DSQ.
+		 * Note that this path is not optimized since
+		 * scx_bpf_dsq_move_to_local() should traverse until it finds
+		 * any task that can run on this CPU. The scheduled task might
+		 * be runnable on the active cores. We will optimize this path
+		 * after introducing per-core DSQ.
 		 */
 		try_consume = true;
 
@@ -1838,7 +1837,7 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 now = bpf_ktime_get_ns();
 
-	memset(taskc, 0, sizeof(*taskc));
+	__builtin_memset(taskc, 0, sizeof(*taskc));
 	taskc->last_running_clk = now; /* for run_time_ns */
 	taskc->last_stopping_clk = now; /* for run_time_ns */
 	taskc->run_time_ns = slice_max_ns;
