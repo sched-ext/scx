@@ -75,7 +75,7 @@ Make sure you build the kernel with the right configuration, installation
 should be easy:
 ```
 echo 'sys-kernel/scx ~amd64' >> /etc/portage/package.accept_keywords
-emerge sys-kernel/scx ~amd64
+emerge sys-kernel/scx
 ```
 
 ## Fedora
