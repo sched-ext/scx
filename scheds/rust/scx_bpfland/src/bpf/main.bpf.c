@@ -553,20 +553,16 @@ static bool is_wake_sync(const struct task_struct *p,
  * to handle these mistakes in favor of a more efficient response and a reduced
  * scheduling overhead.
  */
-static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bool *is_idle)
+static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *tctx,
+			 s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
 	const struct cpumask *idle_smtmask, *idle_cpumask;
 	const struct cpumask *primary, *p_mask, *l2_mask, *l3_mask;
 	struct task_struct *current = (void *)bpf_get_current_task_btf();
-	struct task_ctx *tctx;
 	bool is_prev_llc_affine = false;
 	s32 cpu;
 
 	*is_idle = false;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return -ENOENT;
 
 	primary = cast_mask(primary_cpumask);
 	if (!primary)
@@ -784,16 +780,57 @@ out_put_cpumask:
 s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 			s32 prev_cpu, u64 wake_flags)
 {
-	bool is_idle = false;
+	struct task_ctx *tctx;
+	bool is_idle;
 	s32 cpu;
 
-	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return -ENOENT;
+
+	cpu = pick_idle_cpu(p, tctx, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	}
 
 	return cpu;
+}
+
+static void kick_idle_cpu(struct task_struct *p, struct task_ctx *tctx)
+{
+	const struct cpumask *p_mask;
+	s32 prev_cpu = scx_bpf_task_cpu(p), cpu;
+
+	if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
+		/*
+		 * If the previous CPU assigned to the task is still usable
+		 * and it's not idle don't do anything, the task will be
+		 * likely dispatched on the same CPU.
+		 */
+		if (!scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+			return;
+
+		/*
+		 * If the previous CPU is still usable and idle, just kick
+		 * it.
+		 */
+		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+		return;
+	}
+
+	/*
+	 * If the previously used CPU isn't allowed anymore, try to find
+	 * any idle CPU in the system and kick it.
+	 */
+	p_mask = cast_mask(tctx->cpumask);
+	if (!p_mask)
+		return;
+	cpu = scx_bpf_pick_idle_cpu(p_mask, 0);
+	if (cpu >= 0) {
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		return;
+	}
 }
 
 /*
@@ -803,7 +840,6 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
-	s32 cpu;
 
 	/*
 	 * Per-CPU kthreads are critical for system responsiveness so make sure
@@ -818,31 +854,19 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 
-	if ((p->nr_cpus_allowed == 1) || p->migration_disabled) {
-		/*
-		 * If nvcsw_max_thresh is disabled we don't care much about
-		 * interactivity, so we can massively boost per-CPU tasks and
-		 * always dispatch them directly on their CPU.
-		 *
-		 * This can help to improve I/O workloads (like large parallel
-		 * builds).
-		 */
-		if (!nvcsw_max_thresh) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
-			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-			return;
-		}
-
-		/*
-		 * Per-CPU tasks didn't get the chance to be dispatched directly from
-		 * ops.select_cpu(), so give them a chance here.
-		 */
-		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-		if (cpu >= 0) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
-			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-			return;
-		}
+	/*
+	 * If nvcsw_max_thresh is disabled we don't care much about
+	 * interactivity, so dispatch tasks with migration disabled
+	 * directly on their assigned CPU, giving them a big priority
+	 * boost.
+	 *
+	 * This can help to improve I/O workloads (like large parallel
+	 * builds).
+	 */
+	if (!nvcsw_max_thresh && p->migration_disabled) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		return;
 	}
 
 	/*
@@ -856,14 +880,10 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	/*
-	 * If the task is limited to run only on certain CPUs make sure that at
-	 * least one of them is awake.
+	 * Check if there's any idle CPU that can immediately consume the
+	 * task.
 	 */
-	if ((p->nr_cpus_allowed < nr_online_cpus) || p->migration_disabled) {
-		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-		if (cpu >= 0)
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-	}
+	kick_idle_cpu(p, tctx);
 }
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
