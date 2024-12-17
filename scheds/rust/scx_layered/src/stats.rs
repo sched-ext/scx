@@ -35,6 +35,7 @@ const GSTAT_HI_FB_USAGE: usize = bpf_intf::global_stat_id_GSTAT_HI_FB_USAGE as u
 const GSTAT_LO_FB_EVENTS: usize = bpf_intf::global_stat_id_GSTAT_LO_FB_EVENTS as usize;
 const GSTAT_LO_FB_USAGE: usize = bpf_intf::global_stat_id_GSTAT_LO_FB_USAGE as usize;
 const GSTAT_FB_CPU_USAGE: usize = bpf_intf::global_stat_id_GSTAT_FB_CPU_USAGE as usize;
+const GSTAT_CPU_RELEASE: usize = bpf_intf::global_stat_id_GSTAT_CPU_RELEASE as usize;
 
 const LSTAT_SEL_LOCAL: usize = bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL as usize;
 const LSTAT_ENQ_WAKEUP: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_WAKEUP as usize;
@@ -455,6 +456,8 @@ pub struct SysStats {
     pub nr_nodes: usize,
     #[stat(desc = "# sched events during the period")]
     pub total: u64,
+    #[stat(desc = "# CPU released during the period")]
+    pub cpus_released: u64,
     #[stat(desc = "% dispatched directly into an idle CPU")]
     pub local: f64,
     #[stat(desc = "% open layer tasks scheduled into allocated but idle CPUs")]
@@ -529,6 +532,7 @@ impl SysStats {
             excl_preempt: lsum_pct(LSTAT_EXCL_PREEMPT),
             excl_idle: bstats.gstats[GSTAT_EXCL_IDLE] as f64 / total as f64,
             excl_wakeup: bstats.gstats[GSTAT_EXCL_WAKEUP] as f64 / total as f64,
+            cpus_released: bstats.gstats[GSTAT_CPU_RELEASE] as u64,
             proc_ms: stats.processing_dur.as_millis() as u64,
             busy: stats.cpu_busy * 100.0,
             util: stats.total_util * 100.0,
@@ -547,8 +551,9 @@ impl SysStats {
     pub fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "tot={:7} local={} open_idle={} affn_viol={} hi/lo={}/{} proc={:?}ms nodes={}",
+            "tot={:7} cpus_released={} local={} open_idle={} affn_viol={} hi/lo={}/{} proc={:?}ms nodes={}",
             self.total,
+            self.cpus_released,
             fmt_pct(self.local),
             fmt_pct(self.open_idle),
             fmt_pct(self.affn_viol),

@@ -2219,6 +2219,11 @@ void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
 void BPF_STRUCT_OPS(layered_cpu_release, s32 cpu,
 		    struct scx_cpu_release_args *args)
 {
+	struct cpu_ctx *cpuc;
+
+	if ((cpuc = lookup_cpu_ctx(cpu)))
+		gstat_inc(GSTAT_CPU_RELEASE, cpuc);
+
 	scx_bpf_reenqueue_local();
 }
 
