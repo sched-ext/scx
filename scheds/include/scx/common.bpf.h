@@ -7,6 +7,13 @@
 #ifndef __SCX_COMMON_BPF_H
 #define __SCX_COMMON_BPF_H
 
+/*
+ * The generated kfunc prototypes in vmlinux.h are missing address space
+ * attributes which cause build failures. For now, suppress the generated
+ * prototypes. See https://github.com/sched-ext/scx/issues/1111.
+ */
+#define BPF_NO_KFUNC_PROTOTYPES
+
 #ifdef LSP
 #define __bpf__
 #include "../vmlinux.h"
