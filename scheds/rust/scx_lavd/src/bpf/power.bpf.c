@@ -416,10 +416,14 @@ static int reinit_active_cpumask_for_performance(void)
 			goto unlock_out;
 		}
 
-		if (cpuc->big_core)
+		if (cpuc->big_core) {
 			bpf_cpumask_set_cpu(cpu, active);
-		else
+			bpf_cpumask_clear_cpu(cpu, ovrflw);
+		}
+		else {
 			bpf_cpumask_set_cpu(cpu, ovrflw);
+			bpf_cpumask_clear_cpu(cpu, active);
+		}
 	}
 
 unlock_out:
