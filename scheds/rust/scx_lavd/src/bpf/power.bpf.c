@@ -239,7 +239,7 @@ static int do_set_power_profile(s32 pm, int util)
 	switch (pm) {
 	case LAVD_PM_PERFORMANCE:
 		no_core_compaction = true;
-		no_freq_scaling = true;
+		no_freq_scaling = false;
 		no_prefer_turbo_core = false;
 		is_powersave_mode = false;
 
