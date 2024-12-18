@@ -372,6 +372,18 @@ static u64 task_deadline(struct task_struct *p, struct task_ctx *tctx)
 	u64 freq_factor;
 
 	/*
+	 * Tasks that are unable to migrate to a different CPU can
+	 * experience significant delays if their only available CPU is
+	 * busy, leading to system slowness.
+	 *
+	 * To mitigate this, always assign such tasks the minimum possible
+	 * deadline, allowing them to complete their operation quickly and
+	 * (potentially) relax their migration-disabled constraint.
+	 */
+	if (p->migration_disabled)
+		return 0;
+
+	/*
 	 * Limit the wait and wake-up frequencies to prevent spikes.
 	 */
 	waker_freq = CLAMP(tctx->waker_freq, 1, MAX_WAKEUP_FREQ);
