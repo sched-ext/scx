@@ -682,6 +682,18 @@ bool could_run_on(struct task_struct *p, s32 cpu,
 	return ret;
 }
 
+static bool have_idle_cpus(void)
+{
+	const struct cpumask *idle_mask;
+	bool ret;
+
+	idle_mask = scx_bpf_get_idle_cpumask();
+	ret = !bpf_cpumask_empty(idle_mask);
+	scx_bpf_put_idle_cpumask(idle_mask);
+
+	return ret;
+}
+
 static __always_inline
 s32 pick_idle_cpu_in(struct bpf_cpumask *cpumask)
 {
@@ -716,6 +728,14 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	struct bpf_cpumask *cpdom_mask_prev, *cpdom_mask_waker;
 	s32 cpu_id, waker_cpu;
 	int cpdom_id;
+
+	/*
+	 * If there is no idle cpu, stay on the previous cpu.
+	 */
+	if (!have_idle_cpus()) {
+		cpu_id = prev_cpu;
+		goto out;
+	}
 
 	/*
 	 * If a task can run only on a single CPU (e.g., per-CPU kworker), we
@@ -930,13 +950,14 @@ start_any_mask:
 		cpu_id = bpf_cpumask_any_distribute(p->cpus_ptr);
 	bpf_cpumask_set_cpu(cpu_id, ovrflw);
 
+unlock_out:
+	bpf_rcu_read_unlock();
+
+out:
 	/*
 	 * Note that we don't need to kick the picked CPU here since the
 	 * ops.select_cpu() path internally triggers kicking cpu if necessary.
 	 */
-unlock_out:
-	bpf_rcu_read_unlock();
-out:
 	return cpu_id;
 }
 
