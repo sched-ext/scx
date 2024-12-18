@@ -239,7 +239,7 @@ static int do_set_power_profile(s32 pm, int util)
 	switch (pm) {
 	case LAVD_PM_PERFORMANCE:
 		no_core_compaction = true;
-		no_freq_scaling = true;
+		no_freq_scaling = false;
 		no_prefer_turbo_core = false;
 		is_powersave_mode = false;
 
@@ -416,10 +416,14 @@ static int reinit_active_cpumask_for_performance(void)
 			goto unlock_out;
 		}
 
-		if (cpuc->big_core)
+		if (cpuc->big_core) {
 			bpf_cpumask_set_cpu(cpu, active);
-		else
+			bpf_cpumask_clear_cpu(cpu, ovrflw);
+		}
+		else {
 			bpf_cpumask_set_cpu(cpu, ovrflw);
+			bpf_cpumask_clear_cpu(cpu, active);
+		}
 	}
 
 unlock_out:
