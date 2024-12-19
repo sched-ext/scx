@@ -82,9 +82,10 @@ volatile u64 nr_kthread_dispatches, nr_direct_dispatches, nr_shared_dispatches;
 volatile u64 nr_running, nr_interactive;
 
 /*
- * Amount of online CPUs.
+ * Amount of online and possible CPUs.
  */
 volatile u64 nr_online_cpus;
+static u64 nr_cpu_ids;
 
 /*
  * Exit information.
@@ -694,8 +695,8 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *tctx,
 		 * Search for any full-idle CPU in the primary domain that
 		 * shares the same L2 cache.
 		 */
-		cpu = scx_bpf_pick_idle_cpu(l2_mask, SCX_PICK_IDLE_CORE);
-		if (cpu >= 0) {
+		cpu = bpf_cpumask_any_and_distribute(l2_mask, idle_smtmask);
+		if (cpu < nr_cpu_ids) {
 			*is_idle = true;
 			goto out_put_cpumask;
 		}
@@ -704,8 +705,8 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *tctx,
 		 * Search for any full-idle CPU in the primary domain that
 		 * shares the same L3 cache.
 		 */
-		cpu = scx_bpf_pick_idle_cpu(l3_mask, SCX_PICK_IDLE_CORE);
-		if (cpu >= 0) {
+		cpu = bpf_cpumask_any_and_distribute(l3_mask, idle_smtmask);
+		if (cpu < nr_cpu_ids) {
 			*is_idle = true;
 			goto out_put_cpumask;
 		}
@@ -713,8 +714,8 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *tctx,
 		/*
 		 * Search for any other full-idle core in the primary domain.
 		 */
-		cpu = scx_bpf_pick_idle_cpu(p_mask, SCX_PICK_IDLE_CORE);
-		if (cpu >= 0) {
+		cpu = bpf_cpumask_any_and_distribute(p_mask, idle_smtmask);
+		if (cpu < nr_cpu_ids) {
 			*is_idle = true;
 			goto out_put_cpumask;
 		}
@@ -735,8 +736,8 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *tctx,
 	 * Search for any idle CPU in the primary domain that shares the same
 	 * L2 cache.
 	 */
-	cpu = scx_bpf_pick_idle_cpu(l2_mask, 0);
-	if (cpu >= 0) {
+	cpu = bpf_cpumask_any_and_distribute(l2_mask, idle_cpumask);
+	if (cpu < nr_cpu_ids) {
 		*is_idle = true;
 		goto out_put_cpumask;
 	}
@@ -745,8 +746,8 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *tctx,
 	 * Search for any idle CPU in the primary domain that shares the same
 	 * L3 cache.
 	 */
-	cpu = scx_bpf_pick_idle_cpu(l3_mask, 0);
-	if (cpu >= 0) {
+	cpu = bpf_cpumask_any_and_distribute(l3_mask, idle_cpumask);
+	if (cpu < nr_cpu_ids) {
 		*is_idle = true;
 		goto out_put_cpumask;
 	}
@@ -754,8 +755,8 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *tctx,
 	/*
 	 * Search for any idle CPU in the scheduling domain.
 	 */
-	cpu = scx_bpf_pick_idle_cpu(p_mask, 0);
-	if (cpu >= 0) {
+	cpu = bpf_cpumask_any_and_distribute(p_mask, idle_cpumask);
+	if (cpu < nr_cpu_ids) {
 		*is_idle = true;
 		goto out_put_cpumask;
 	}
@@ -1324,8 +1325,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 {
 	int err;
 
-	/* Initialize amount of online CPUs */
+	/* Initialize amount of online and possible CPUs */
 	nr_online_cpus = get_nr_online_cpus();
+	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
 	/*
 	 * Create the global shared DSQ.
