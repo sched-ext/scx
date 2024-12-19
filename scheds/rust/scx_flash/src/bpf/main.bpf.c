@@ -825,7 +825,6 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	    is_task_locked(prev)) {
 		task_unlock(prev);
 		task_refill_slice(prev);
-		return;
 	}
 
 	/*
