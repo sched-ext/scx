@@ -818,29 +818,21 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
-	 * If the task can still run and it's holding a user-space lock, let it
-	 * run for another round.
+	 * If the task can still run, let it run for another round on the
+	 * same CPU. Usually these are the tasks which we want to prioritize
+	 * (i.e. shorter runtime), so let it finish earlier leads to better
+	 * latency outcome.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
-	    is_task_locked(prev)) {
-		task_unlock(prev);
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
+		if (is_task_locked(prev))
+			task_unlock(prev);
 		task_refill_slice(prev);
-		return;
 	}
 
 	/*
 	 * Select a new task to run.
 	 */
-	if (scx_bpf_dsq_move_to_local(SHARED_DSQ))
-		return;
-
-	/*
-	 * If the current task expired its time slice and no other task wants
-	 * to run, simply replenish its time slice and let it run for another
-	 * round on the same CPU.
-	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
-		task_refill_slice(prev);
+	scx_bpf_dsq_move_to_local(SHARED_DSQ);
 }
 
 void BPF_STRUCT_OPS(flash_running, struct task_struct *p)
