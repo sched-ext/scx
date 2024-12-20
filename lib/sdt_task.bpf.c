@@ -63,15 +63,14 @@ static SDT_TASK_FN_ATTRS void sdt_arena_verify(void)
 }
 
 
-static sdt_task_desc_t *sdt_task_desc_root; /* radix tree root */
-
 private(LOCK) struct bpf_spin_lock sdt_task_lock;
 private(POOL_LOCK) struct bpf_spin_lock sdt_task_pool_alloc_lock;
 
 /* allocation pools */
 struct sdt_task_pool sdt_task_desc_pool;
 struct sdt_task_pool sdt_task_chunk_pool;
-struct sdt_task_pool sdt_task_data_pool;
+
+struct sdt_allocator sdt_task_allocator;
 
 /* Protected by sdt_task_lock. */
 struct sdt_stats sdt_stats;
@@ -271,7 +270,7 @@ static SDT_TASK_FN_ATTRS int sdt_pool_set_size(struct sdt_task_pool *pool, __u64
 }
 
 /* initialize the whole thing, maybe misnomer */
-__hidden SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
+__hidden SDT_TASK_FN_ATTRS int sdt_init(struct sdt_allocator *alloc, __u64 data_size)
 {
 	int ret;
 
@@ -290,7 +289,7 @@ __hidden SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
 	data_size += sizeof(struct sdt_task_data);
 	data_size = div_round_up(data_size, 8) * 8;
 
-	ret = sdt_pool_set_size(&sdt_task_data_pool, data_size);
+	ret = sdt_pool_set_size(&alloc->pool, data_size);
 	if (ret != 0)
 		return ret;
 
@@ -303,7 +302,7 @@ __hidden SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
 	if (ret != 0)
 		return ret;
 
-	sdt_task_desc_root = sdt_alloc_chunk(prealloc_stack);
+	alloc->root = sdt_alloc_chunk(prealloc_stack);
 
 	bpf_spin_unlock(&sdt_task_lock);
 
@@ -331,7 +330,8 @@ int sdt_set_idx_state(sdt_task_desc_t *desc, __u64 pos, bool state)
 	return 0;
 }
 
-static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
+static SDT_TASK_FN_ATTRS
+void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 {
 	const __u64 mask = (1 << SDT_TASK_ENTS_PER_PAGE_SHIFT) - 1;
 	sdt_task_desc_t *lv_desc[SDT_TASK_LEVELS];
@@ -346,7 +346,7 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 
 	bpf_spin_lock(&sdt_task_lock);
 
-	desc = sdt_task_desc_root;
+	desc = alloc->root;
 	if (unlikely(!desc)) {
 		bpf_spin_unlock(&sdt_task_lock);
 		scx_bpf_error("%s: root not allocated", __func__);
@@ -394,7 +394,7 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 		};
 
 		/* Zero out one word at a time. */
-		bpf_for(i, 0, sdt_task_data_pool.elem_size / 8) {
+		bpf_for(i, 0, alloc->pool.elem_size / 8) {
 			data->payload[i] = 0;
 		}
 	}
@@ -456,7 +456,7 @@ void sdt_task_free(struct task_struct *p)
 	if (!mval)
 		return;
 
-	sdt_task_free_idx(mval->tid.idx);
+	sdt_free_idx(&sdt_task_allocator, mval->tid.idx);
 	mval->data = NULL;
 }
 
@@ -534,7 +534,7 @@ sdt_task_desc_t * sdt_task_find_empty(sdt_task_desc_t *desc,
 }
 
 static
-struct sdt_task_data __arena *sdt_alloc(struct sdt_task_pool *sdt_data_pool)
+struct sdt_task_data __arena *sdt_alloc(struct sdt_allocator *alloc)
 {
 	struct sdt_alloc_stack __arena *stack = prealloc_stack;
 	struct sdt_task_data __arena *data = NULL, __arena *val;
@@ -549,7 +549,7 @@ struct sdt_task_data __arena *sdt_alloc(struct sdt_task_pool *sdt_data_pool)
 		return NULL;
 
 	/* We unlock if we encounter an error in the function. */
-	desc = sdt_task_find_empty(sdt_task_desc_root, stack, &idx);
+	desc = sdt_task_find_empty(alloc->root, stack, &idx);
 	if (unlikely(desc == NULL)) {
 		bpf_spin_unlock(&sdt_task_lock);
 		bpf_printk("%s: failed to find empty tree key", __func__);
@@ -565,10 +565,10 @@ struct sdt_task_data __arena *sdt_alloc(struct sdt_task_pool *sdt_data_pool)
 	pos = idx & (SDT_TASK_ENTS_PER_CHUNK - 1);
 	data = chunk->data[pos];
 	if (!data) {
-		data = sdt_task_alloc_from_pool(sdt_data_pool, stack);
+		data = sdt_task_alloc_from_pool(&alloc->pool, stack);
 		if (!data) {
 			bpf_spin_unlock(&sdt_task_lock);
-			sdt_task_free_idx(idx);
+			sdt_free_idx(alloc, idx);
 			bpf_printk("%s: failed to allocate data from pool", __func__);
 			return NULL;
 		}
@@ -605,11 +605,16 @@ void __arena *sdt_task_alloc(struct task_struct *p)
 	if (!mval)
 		return NULL;
 
-	data = sdt_alloc(&sdt_task_data_pool);
+	data = sdt_alloc(&sdt_task_allocator);
 	cast_kern(data);
 
 	mval->tid = data->tid;
 	mval->data = data;
 
 	return (void __arena *)data->payload;
+}
+
+__hidden SDT_TASK_FN_ATTRS int sdt_task_init(__u64 data_size)
+{
+	return sdt_init(&sdt_task_allocator, data_size);
 }

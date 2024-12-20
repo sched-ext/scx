@@ -92,6 +92,10 @@ struct sdt_stats {
 	__u64	arena_pages_used;
 };
 
+struct sdt_allocator {
+	struct sdt_task_pool pool;
+	sdt_task_desc_t *root;
+};
 
 #ifdef __BPF__
 
