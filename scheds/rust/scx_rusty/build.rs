@@ -9,6 +9,7 @@ fn main() {
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
         .enable_skel("src/bpf/main.bpf.c", "bpf")
         .add_source("../../../lib/sdt_task.bpf.c")
+        .add_source("../../../lib/sdt_alloc.bpf.c")
         .compile_link_gen()
         .unwrap();
 }
