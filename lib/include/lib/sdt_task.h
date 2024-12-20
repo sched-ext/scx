@@ -49,7 +49,6 @@ struct sdt_task_desc {
  */
 struct sdt_task_data {
 	union sdt_task_id		tid;
-	__u64				tptr;
 	__u64				payload[];
 };
 
