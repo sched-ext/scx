@@ -11,9 +11,9 @@
 #define div_round_up(a, b) (((a) + (b) - 1) / (b))
 #endif
 
-typedef struct sdt_task_desc __arena sdt_task_desc_t;
+typedef struct sdt_desc __arena sdt_desc_t;
 
-enum sdt_task_consts {
+enum sdt_consts {
 	SDT_TASK_ENTS_PER_PAGE_SHIFT	= 9,
 	SDT_TASK_LEVELS			= 3,
 	SDT_TASK_ENTS_PER_CHUNK		= 1 << SDT_TASK_ENTS_PER_PAGE_SHIFT,
@@ -23,7 +23,7 @@ enum sdt_task_consts {
 	SDT_TASK_ALLOC_ATTEMPTS		= 128,
 };
 
-union sdt_task_id {
+union sdt_id {
 	__s64				val;
 	struct {
 		__s32			idx;	/* index in the radix tree */
@@ -31,34 +31,34 @@ union sdt_task_id {
 	};
 };
 
-struct sdt_task_chunk;
+struct sdt_chunk;
 
 /*
  * Each index page is described by the following descriptor which carries the
  * bitmap. This way the actual index can host power-of-two numbers of entries
  * which makes indexing cheaper.
  */
-struct sdt_task_desc {
+struct sdt_desc {
 	__u64				allocated[SDT_TASK_CHUNK_BITMAP_U64S];
 	__u64				nr_free;
-	struct sdt_task_chunk __arena	*chunk;
+	struct sdt_chunk __arena	*chunk;
 };
 
 /*
  * Leaf node containing per-task data.
  */
-struct sdt_task_data {
-	union sdt_task_id		tid;
+struct sdt_data {
+	union sdt_id		tid;
 	__u64				payload[];
 };
 
 /*
  * Intermediate node pointing to another intermediate node or leaf node.
  */
-struct sdt_task_chunk {
+struct sdt_chunk {
 	union {
-		sdt_task_desc_t * descs[SDT_TASK_ENTS_PER_CHUNK];
-		struct sdt_task_data __arena *data[SDT_TASK_ENTS_PER_CHUNK];
+		sdt_desc_t * descs[SDT_TASK_ENTS_PER_CHUNK];
+		struct sdt_data __arena *data[SDT_TASK_ENTS_PER_CHUNK];
 	};
 };
 
@@ -76,7 +76,7 @@ struct sdt_alloc_stack {
 	void __arena *stack[SDT_TASK_ALLOC_STACK_MAX];
 };
 
-struct sdt_task_pool {
+struct sdt_pool {
 	void				__arena *slab;
 	__u64				elem_size;
 	__u64				max_elems;
@@ -93,8 +93,8 @@ struct sdt_stats {
 };
 
 struct sdt_allocator {
-	struct sdt_task_pool pool;
-	sdt_task_desc_t *root;
+	struct sdt_pool pool;
+	sdt_desc_t *root;
 };
 
 #ifdef __BPF__
@@ -106,7 +106,7 @@ void sdt_task_free(struct task_struct *p);
 void sdt_arena_verify(void);
 
 int sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size);
-struct sdt_task_data __arena __arena *sdt_alloc(struct sdt_allocator *alloc);
+struct sdt_data __arena __arena *sdt_alloc(struct sdt_allocator *alloc);
 void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx);
 
 #endif /* __BPF__ */

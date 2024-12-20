@@ -13,8 +13,8 @@
  * area allocated in arena.
  */
 struct sdt_task_map_val {
-	union sdt_task_id		tid;
-	struct sdt_task_data __arena	*data;
+	union sdt_id		tid;
+	struct sdt_data __arena	*data;
 };
 
 struct {
@@ -29,7 +29,7 @@ struct sdt_allocator sdt_task_allocator;
 __hidden
 void __arena *sdt_task_alloc(struct task_struct *p)
 {
-	struct sdt_task_data __arena *data = NULL;
+	struct sdt_data __arena *data = NULL;
 	struct sdt_task_map_val *mval;
 
 	mval = bpf_task_storage_get(&sdt_task_map, p, 0,
@@ -55,7 +55,7 @@ int sdt_task_init(__u64 data_size)
 __hidden
 void __arena *sdt_task_data(struct task_struct *p)
 {
-	struct sdt_task_data __arena *data;
+	struct sdt_data __arena *data;
 	struct sdt_task_map_val *mval;
 
 	sdt_arena_verify();

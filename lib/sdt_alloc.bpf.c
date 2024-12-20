@@ -47,14 +47,14 @@ __hidden void sdt_arena_verify(void)
 }
 
 
-private(LOCK) struct bpf_spin_lock sdt_task_lock;
-private(POOL_LOCK) struct bpf_spin_lock sdt_task_pool_alloc_lock;
+private(LOCK) struct bpf_spin_lock sdt_lock;
+private(POOL_LOCK) struct bpf_spin_lock sdt_pool_alloc_lock;
 
 /* allocation pools */
-struct sdt_task_pool sdt_task_desc_pool;
-struct sdt_task_pool sdt_task_chunk_pool;
+struct sdt_pool sdt_desc_pool;
+struct sdt_pool sdt_chunk_pool;
 
-/* Protected by sdt_task_lock. */
+/* Protected by sdt_lock. */
 struct sdt_stats sdt_stats;
 
 static SDT_TASK_FN_ATTRS int sdt_ffs(__u64 word)
@@ -95,7 +95,7 @@ static SDT_TASK_FN_ATTRS int sdt_ffs(__u64 word)
 }
 
 /* find the first empty slot */
-static SDT_TASK_FN_ATTRS __u64 sdt_chunk_find_empty(sdt_task_desc_t *desc)
+static SDT_TASK_FN_ATTRS __u64 sdt_chunk_find_empty(sdt_desc_t *desc)
 {
 	__u64 freeslots;
 	__u64 i;
@@ -138,17 +138,17 @@ int sdt_alloc_stack(struct sdt_alloc_stack __arena *stack)
 
 	cast_kern(stack);
 
-	bpf_spin_lock(&sdt_task_lock);
+	bpf_spin_lock(&sdt_lock);
 	if (stack->idx >= SDT_TASK_ALLOC_STACK_MIN)
 		return 0;
 
-	bpf_spin_unlock(&sdt_task_lock);
+	bpf_spin_unlock(&sdt_lock);
 
 	slab = bpf_arena_alloc_pages(&arena, NULL, 1, NUMA_NO_NODE, 0);
 	if (slab == NULL)
 		return -ENOMEM;
 
-	bpf_spin_lock(&sdt_task_lock);
+	bpf_spin_lock(&sdt_lock);
 
 	/*
 	 * Edge case where so many threads tried to allocate that our
@@ -156,7 +156,7 @@ int sdt_alloc_stack(struct sdt_alloc_stack __arena *stack)
 	 */
 	if (stack->idx >= SDT_TASK_ALLOC_STACK_MAX) {
 
-		bpf_spin_unlock(&sdt_task_lock);
+		bpf_spin_unlock(&sdt_lock);
 
 		bpf_arena_free_pages(&arena, slab, 1);
 		return -EAGAIN;
@@ -166,7 +166,7 @@ int sdt_alloc_stack(struct sdt_alloc_stack __arena *stack)
 	stack->idx += 1;
 
 	sdt_stats.arena_pages_used += 1;
-	bpf_spin_unlock(&sdt_task_lock);
+	bpf_spin_unlock(&sdt_lock);
 
 	return -EAGAIN;
 }
@@ -184,7 +184,7 @@ int sdt_alloc_attempt(struct sdt_alloc_stack __arena *stack)
 
 /* Allocate element from the pool. Must be called with a then pool lock held. */
 static SDT_TASK_FN_ATTRS
-void __arena *sdt_task_alloc_from_pool(struct sdt_task_pool *pool,
+void __arena *sdt_alloc_from_pool(struct sdt_pool *pool,
 	struct sdt_alloc_stack __arena *stack)
 {
 	__u64 elem_size, max_elems;
@@ -210,14 +210,14 @@ void __arena *sdt_task_alloc_from_pool(struct sdt_task_pool *pool,
 
 /* Alloc desc and associated chunk. Called with the task spinlock held. */
 static SDT_TASK_FN_ATTRS
-sdt_task_desc_t *sdt_alloc_chunk(struct sdt_alloc_stack __arena *stack)
+sdt_desc_t *sdt_alloc_chunk(struct sdt_alloc_stack __arena *stack)
 {
-	struct sdt_task_chunk __arena *chunk;
-	sdt_task_desc_t *desc;
-	sdt_task_desc_t *out;
+	struct sdt_chunk __arena *chunk;
+	sdt_desc_t *desc;
+	sdt_desc_t *out;
 
-	chunk = sdt_task_alloc_from_pool(&sdt_task_chunk_pool, stack);
-	desc = sdt_task_alloc_from_pool(&sdt_task_desc_pool, stack);
+	chunk = sdt_alloc_from_pool(&sdt_chunk_pool, stack);
+	desc = sdt_alloc_from_pool(&sdt_desc_pool, stack);
 
 	out = desc;
 
@@ -231,7 +231,7 @@ sdt_task_desc_t *sdt_alloc_chunk(struct sdt_alloc_stack __arena *stack)
 	return out;
 }
 
-static SDT_TASK_FN_ATTRS int sdt_pool_set_size(struct sdt_task_pool *pool, __u64 data_size)
+static SDT_TASK_FN_ATTRS int sdt_pool_set_size(struct sdt_pool *pool, __u64 data_size)
 {
 	if (unlikely(data_size > PAGE_SIZE)) {
 		scx_bpf_error("%s: allocation size %llu too large", __func__, data_size);
@@ -257,19 +257,19 @@ sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size)
 {
 	int ret;
 
-	_Static_assert(sizeof(struct sdt_task_chunk)  == PAGE_SIZE,
+	_Static_assert(sizeof(struct sdt_chunk)  == PAGE_SIZE,
 		"chunk size must be equal to a page");
 
-	ret = sdt_pool_set_size(&sdt_task_chunk_pool, sizeof(struct sdt_task_chunk));
+	ret = sdt_pool_set_size(&sdt_chunk_pool, sizeof(struct sdt_chunk));
 	if (ret != 0)
 		return ret;
 
-	ret = sdt_pool_set_size(&sdt_task_desc_pool, sizeof(struct sdt_task_desc));
+	ret = sdt_pool_set_size(&sdt_desc_pool, sizeof(struct sdt_desc));
 	if (ret != 0)
 		return ret;
 
 	/* Wrap data into a descriptor and word align. */
-	data_size += sizeof(struct sdt_task_data);
+	data_size += sizeof(struct sdt_data);
 	data_size = div_round_up(data_size, 8) * 8;
 
 	ret = sdt_pool_set_size(&alloc->pool, data_size);
@@ -287,13 +287,13 @@ sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size)
 
 	alloc->root = sdt_alloc_chunk(prealloc_stack);
 
-	bpf_spin_unlock(&sdt_task_lock);
+	bpf_spin_unlock(&sdt_lock);
 
 	return 0;
 }
 
 static SDT_TASK_FN_ATTRS
-int sdt_set_idx_state(sdt_task_desc_t *desc, __u64 pos, bool state)
+int sdt_set_idx_state(sdt_desc_t *desc, __u64 pos, bool state)
 {
 	__u64 __arena *allocated = desc->allocated;
 	__u64 bit;
@@ -317,11 +317,11 @@ __hidden
 void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 {
 	const __u64 mask = (1 << SDT_TASK_ENTS_PER_PAGE_SHIFT) - 1;
-	sdt_task_desc_t *lv_desc[SDT_TASK_LEVELS];
-	sdt_task_desc_t * __arena *desc_children;
-	struct sdt_task_chunk __arena *chunk;
-	sdt_task_desc_t *desc;
-	struct sdt_task_data __arena *data;
+	sdt_desc_t *lv_desc[SDT_TASK_LEVELS];
+	sdt_desc_t * __arena *desc_children;
+	struct sdt_chunk __arena *chunk;
+	sdt_desc_t *desc;
+	struct sdt_data __arena *data;
 	__u64 u, level, shift, pos;
 	__u64 lv_pos[SDT_TASK_LEVELS];
 	int ret;
@@ -329,11 +329,11 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 
 	sdt_arena_verify();
 
-	bpf_spin_lock(&sdt_task_lock);
+	bpf_spin_lock(&sdt_lock);
 
 	desc = alloc->root;
 	if (unlikely(!desc)) {
-		bpf_spin_unlock(&sdt_task_lock);
+		bpf_spin_unlock(&sdt_lock);
 		scx_bpf_error("%s: root not allocated", __func__);
 		return;
 	}
@@ -353,11 +353,11 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 		chunk = desc->chunk;
 		cast_kern(chunk);
 
-		desc_children = (sdt_task_desc_t * __arena *)chunk->descs;
+		desc_children = (sdt_desc_t * __arena *)chunk->descs;
 		desc = desc_children[pos];
 
 		if (unlikely(!desc)) {
-			bpf_spin_unlock(&sdt_task_lock);
+			bpf_spin_unlock(&sdt_lock);
 			scx_bpf_error("%s: freeing nonexistent idx [0x%llx] (level %llu)",
 				__func__, idx, level);
 			return;
@@ -374,7 +374,7 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 	if (likely(!data)) {
 		cast_kern(data);
 
-		data[pos] = (struct sdt_task_data) {
+		data[pos] = (struct sdt_data) {
 			.tid.gen = data->tid.gen + 1,
 		};
 
@@ -393,7 +393,7 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 		/* Failed calls return unlocked. */
 		ret = sdt_set_idx_state(desc, lv_pos[level], false);
 		if (unlikely(ret != 0)) {
-			bpf_spin_unlock(&sdt_task_lock);
+			bpf_spin_unlock(&sdt_lock);
 			return;
 		}
 
@@ -407,7 +407,7 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 	sdt_stats.active_allocs -= 1;
 	sdt_stats.free_ops += 1;
 
-	bpf_spin_unlock(&sdt_task_lock);
+	bpf_spin_unlock(&sdt_lock);
 
 	return;
 }
@@ -417,14 +417,14 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
  * Called with the task spinlock held.
  */
 static SDT_TASK_FN_ATTRS
-sdt_task_desc_t * sdt_task_find_empty(sdt_task_desc_t *desc,
+sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
 	struct sdt_alloc_stack __arena *stack,
 	__u64 *idxp)
 {
-	sdt_task_desc_t *lv_desc[SDT_TASK_LEVELS];
-	sdt_task_desc_t * __arena *desc_children;
-	struct sdt_task_chunk __arena *chunk;
-	sdt_task_desc_t *tmp;
+	sdt_desc_t *lv_desc[SDT_TASK_LEVELS];
+	sdt_desc_t * __arena *desc_children;
+	struct sdt_chunk __arena *chunk;
+	sdt_desc_t *tmp;
 	__u64 lv_pos[SDT_TASK_LEVELS];
 	__u64 u, pos, level;
 	__u64 idx = 0;
@@ -456,7 +456,7 @@ sdt_task_desc_t * sdt_task_find_empty(sdt_task_desc_t *desc,
 		chunk = desc->chunk;
 		cast_kern(chunk);
 
-		desc_children = (sdt_task_desc_t * __arena *)chunk->descs;
+		desc_children = (sdt_desc_t * __arena *)chunk->descs;
 		desc = desc_children[pos];
 		if (!desc) {
 			desc = sdt_alloc_chunk(stack);
@@ -485,12 +485,12 @@ sdt_task_desc_t * sdt_task_find_empty(sdt_task_desc_t *desc,
 }
 
 __hidden
-struct sdt_task_data __arena *sdt_alloc(struct sdt_allocator *alloc)
+struct sdt_data __arena *sdt_alloc(struct sdt_allocator *alloc)
 {
 	struct sdt_alloc_stack __arena *stack = prealloc_stack;
-	struct sdt_task_data __arena *data = NULL, __arena *val;
-	sdt_task_desc_t *desc;
-	struct sdt_task_chunk __arena *chunk;
+	struct sdt_data __arena *data = NULL, __arena *val;
+	sdt_desc_t *desc;
+	struct sdt_chunk __arena *chunk;
 	__u64 idx, pos;
 	int ret;
 
@@ -500,9 +500,9 @@ struct sdt_task_data __arena *sdt_alloc(struct sdt_allocator *alloc)
 		return NULL;
 
 	/* We unlock if we encounter an error in the function. */
-	desc = sdt_task_find_empty(alloc->root, stack, &idx);
+	desc = sdt_find_empty(alloc->root, stack, &idx);
 	if (unlikely(desc == NULL)) {
-		bpf_spin_unlock(&sdt_task_lock);
+		bpf_spin_unlock(&sdt_lock);
 		bpf_printk("%s: failed to find empty tree key", __func__);
 		return NULL;
 	}
@@ -516,9 +516,9 @@ struct sdt_task_data __arena *sdt_alloc(struct sdt_allocator *alloc)
 	pos = idx & (SDT_TASK_ENTS_PER_CHUNK - 1);
 	data = chunk->data[pos];
 	if (!data) {
-		data = sdt_task_alloc_from_pool(&alloc->pool, stack);
+		data = sdt_alloc_from_pool(&alloc->pool, stack);
 		if (!data) {
-			bpf_spin_unlock(&sdt_task_lock);
+			bpf_spin_unlock(&sdt_lock);
 			sdt_free_idx(alloc, idx);
 			bpf_printk("%s: failed to allocate data from pool", __func__);
 			return NULL;
@@ -540,7 +540,7 @@ struct sdt_task_data __arena *sdt_alloc(struct sdt_allocator *alloc)
 
 	data->tid.idx = idx;
 
-	bpf_spin_unlock(&sdt_task_lock);
+	bpf_spin_unlock(&sdt_lock);
 
 	return val;
 }
