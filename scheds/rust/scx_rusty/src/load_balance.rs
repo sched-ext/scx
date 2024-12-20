@@ -133,6 +133,7 @@
 use core::cmp::Ordering;
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
@@ -141,6 +142,7 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use libbpf_rs::MapCore as _;
+use libbpf_rs::ProgramInput;
 use log::debug;
 use log::warn;
 use ordered_float::OrderedFloat;
@@ -150,6 +152,7 @@ use scx_utils::LoadLedger;
 use sorted_vec::SortedVec;
 
 use crate::bpf_intf;
+use crate::bpf_intf::migrate_arg;
 use crate::bpf_skel::*;
 use crate::stats::DomainStats;
 use crate::stats::NodeStats;
@@ -343,6 +346,7 @@ struct Domain {
     queried_tasks: bool,
     load: LoadEntity,
     tasks: SortedVec<TaskInfo>,
+    active_tptr_set: HashSet<u64>,
 }
 
 impl Domain {
@@ -362,6 +366,7 @@ impl Domain {
                 load_avg,
             ),
             tasks: SortedVec::new(),
+            active_tptr_set: HashSet::new(),
         }
     }
 
@@ -680,6 +685,10 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             let tptr = active_tptrs.tptrs[(idx % MAX_TPTRS) as usize];
             let key = unsafe { std::mem::transmute::<u64, [u8; 8]>(tptr) };
 
+            if dom.active_tptr_set.contains(&tptr) {
+                continue;
+            }
+
             if let Some(task_data_elem) = task_data.lookup(&key, libbpf_rs::MapFlags::ANY)? {
                 let task_ctx =
                     unsafe { &*(task_data_elem.as_slice().as_ptr() as *const bpf_intf::task_ctx) };
@@ -705,6 +714,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 };
                 load *= weight;
 
+                dom.active_tptr_set.insert(tptr);
                 dom.tasks.insert(TaskInfo {
                     tptr,
                     load: OrderedFloat(load),
@@ -809,6 +819,28 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         std::mem::swap(&mut push_dom.tasks, &mut SortedVec::from_unsorted(tasks));
 
         push_dom.transfer_load(load, tptr, pull_dom, &mut self.skel);
+
+        let prog = &mut self.skel.progs.enqueue_migrate_queue;
+        let mut args = migrate_arg {
+            tptr,
+            new_dom_id: pull_dom.id.try_into().unwrap(),
+        };
+        let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
+            ..Default::default()
+        };
+
+        if let Err(e) = prog.test_run(input) {
+            warn!(
+                "Failed to execute task migration immediately for tptr={} error={:?}",
+                tptr, &e
+            );
+        }
         Ok(Some(load))
     }
 
