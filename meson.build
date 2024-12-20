@@ -268,7 +268,7 @@ endif
 bpf_includes = ['-I', join_paths(meson.current_source_dir(), 'scheds/include'),
                 '-I', join_paths(meson.current_source_dir(), 'scheds/include/arch/' + arch_dict[cpu]),
                 '-I', join_paths(meson.current_source_dir(), 'scheds/include/bpf-compat'),
-                '-I', join_paths(meson.current_source_dir(), 'lib/include'),]
+                '-I', join_paths(meson.current_source_dir(), 'scheds/include/lib'),]
 
 lib_objs = []
 subdir('lib')
