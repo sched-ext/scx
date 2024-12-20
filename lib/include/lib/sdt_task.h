@@ -103,15 +103,10 @@ void __arena *sdt_task_data(struct task_struct *p);
 int sdt_task_init(__u64 data_size);
 void __arena *sdt_task_alloc(struct task_struct *p);
 void sdt_task_free(struct task_struct *p);
+void sdt_arena_verify(void);
 
-/*
- * The verifier does not support returning non-scalar values between BPF
- * programs, even though returning arena pointers is both safe and valid.
- * This macro typecasts the returned arena pointer on behalf of the caller.
- */
-#define SDT_TASK_RETRIEVE(_p) ((void __arena *)sdt_task_retrieve(_p))
-#define SDT_TASK_ALLOC(_p) ((void __arena *)sdt_task_alloc(_p))
-/* For uniformity. */
-#define SDT_TASK_FREE(_p) (sdt_task_free(_p))
+int sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size);
+struct sdt_task_data __arena __arena *sdt_alloc(struct sdt_allocator *alloc);
+void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx);
 
 #endif /* __BPF__ */
