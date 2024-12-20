@@ -1010,6 +1010,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 * disptach the task to the idle cpu right now.
 		 */
 		direct_dispatch(p, taskc, 0);
+		scx_bpf_kick_cpu(cpu_id, SCX_KICK_IDLE);
 		return cpu_id;
 	}
 
