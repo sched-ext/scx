@@ -177,8 +177,8 @@ struct cpu_ctx {
 	u64			lo_fb_seq_at;
 	u64			lo_fb_usage_base;
 
-	u32			open_preempt_layer_order[MAX_LAYERS];
-	u32			open_layer_order[MAX_LAYERS];
+	u32			ogp_layer_order[MAX_LAYERS]; /* open/grouped preempt */
+	u32			ogn_layer_order[MAX_LAYERS]; /* open/grouped non-preempt */
 
 	struct cpu_prox_map	prox_map;
 };

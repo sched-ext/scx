@@ -43,8 +43,8 @@ const volatile s32 __sibling_cpu[MAX_CPUS];
 const volatile bool monitor_disable = false;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 const volatile u32 layer_iteration_order[MAX_LAYERS];
-const volatile u32 nr_open_preempt_layers;	/* open/grouped && preempt */
-const volatile u32 nr_open_layers;		/* open/grouped && !preempt */
+const volatile u32 nr_ogp_layers;	/* open/grouped && preempt */
+const volatile u32 nr_ogn_layers;	/* open/grouped && !preempt */
 const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 
@@ -1606,8 +1606,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	 * owner layer is not protected or preempting.
 	 */
 	if (!owner_layer || (!cpuc->protect_owned && !owner_layer->preempt)) {
-		if (try_consume_layers(cpuc->open_preempt_layer_order,
-				       nr_open_preempt_layers,
+		if (try_consume_layers(cpuc->ogp_layer_order, nr_ogp_layers,
 				       cpuc->layer_id, cpuc, llcc))
 			return;
 
@@ -1625,12 +1624,12 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* try grouped/open preempting if not tried yet */
 	if (!tried_preempting &&
-	    try_consume_layers(cpuc->open_preempt_layer_order, nr_open_preempt_layers,
+	    try_consume_layers(cpuc->ogp_layer_order, nr_ogp_layers,
 			       cpuc->layer_id, cpuc, llcc))
 		return;
 
 	/* grouped/open non-preempt layers */
-	if (try_consume_layers(cpuc->open_layer_order, nr_open_layers,
+	if (try_consume_layers(cpuc->ogn_layer_order, nr_ogn_layers,
 			       cpuc->layer_id, cpuc, llcc))
 		return;
 
@@ -2762,12 +2761,12 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 		}
 	}
 
-	bpf_for(i, 0, nr_open_preempt_layers)
-		dbg("CFG: CPU[%d] open_preempt_layer_order[%d]=%d",
-		    cpu, i, cpuc->open_preempt_layer_order[i]);
-	bpf_for(i, 0, nr_open_layers)
-		dbg("CFG: CPU[%d] open_preempt_order[%d]=%d",
-		    cpu, i, cpuc->open_layer_order[i]);
+	bpf_for(i, 0, nr_ogp_layers)
+		dbg("CFG: CPU[%d] ogp_layer_order[%d]=%d",
+		    cpu, i, cpuc->ogp_layer_order[i]);
+	bpf_for(i, 0, nr_ogn_layers)
+		dbg("CFG: CPU[%d] ogn_layer_order[%d]=%d",
+		    cpu, i, cpuc->ogn_layer_order[i]);
 
 	return 0;
 }

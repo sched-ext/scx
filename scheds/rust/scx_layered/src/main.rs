@@ -1357,7 +1357,7 @@ impl<'a> Scheduler<'a> {
             .context("Failed to lookup cpu_ctx")?
             .unwrap();
 
-        let open_preempt_layers: Vec<u32> = layer_specs
+        let ogp_layers: Vec<u32> = layer_specs
             .iter()
             .enumerate()
             .filter(|(_idx, spec)| match &spec.kind {
@@ -1366,7 +1366,7 @@ impl<'a> Scheduler<'a> {
             })
             .map(|(idx, _)| idx as u32)
             .collect();
-        let open_layers: Vec<u32> = layer_specs
+        let ogn_layers: Vec<u32> = layer_specs
             .iter()
             .enumerate()
             .filter(|(_idx, spec)| match &spec.kind {
@@ -1389,17 +1389,17 @@ impl<'a> Scheduler<'a> {
             cpu_ctxs[cpu].task_layer_id = MAX_LAYERS as u32;
             cpu_ctxs[cpu].is_big = is_big;
 
-            let mut p_order = open_preempt_layers.clone();
-            let mut o_order = open_layers.clone();
+            let mut ogp_order = ogp_layers.clone();
+            let mut ogn_order = ogn_layers.clone();
             fastrand::seed(cpu as u64);
-            fastrand::shuffle(&mut p_order);
-            fastrand::shuffle(&mut o_order);
+            fastrand::shuffle(&mut ogp_order);
+            fastrand::shuffle(&mut ogn_order);
 
             for i in 0..MAX_LAYERS {
-                cpu_ctxs[cpu].open_preempt_layer_order[i] =
-                    p_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
-                cpu_ctxs[cpu].open_layer_order[i] =
-                    o_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].ogp_layer_order[i] =
+                    ogp_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].ogn_layer_order[i] =
+                    ogn_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
             }
         }
 
@@ -1599,14 +1599,14 @@ impl<'a> Scheduler<'a> {
             skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
-        skel.maps.rodata_data.nr_open_preempt_layers = layer_specs
+        skel.maps.rodata_data.nr_ogp_layers = layer_specs
             .iter()
             .filter(|spec| match &spec.kind {
                 LayerKind::Open { .. } | LayerKind::Grouped { .. } => spec.kind.common().preempt,
                 _ => false,
             })
             .count() as u32;
-        skel.maps.rodata_data.nr_open_layers = layer_specs
+        skel.maps.rodata_data.nr_ogn_layers = layer_specs
             .iter()
             .filter(|spec| match &spec.kind {
                 LayerKind::Open { .. } | LayerKind::Grouped { .. } => !spec.kind.common().preempt,
