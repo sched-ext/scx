@@ -391,7 +391,6 @@ static SDT_TASK_FN_ATTRS void sdt_task_free_idx(__u64 idx)
 
 		data[pos] = (struct sdt_task_data) {
 			.tid.gen = data->tid.gen + 1,
-			.tptr = 0,
 		};
 
 		/* Zero out one word at a time. */
@@ -534,21 +533,15 @@ sdt_task_desc_t * sdt_task_find_empty(sdt_task_desc_t *desc,
 	return desc;
 }
 
-__hidden
-void __arena *sdt_task_alloc(struct task_struct *p)
+static
+struct sdt_task_data __arena *sdt_alloc(struct sdt_task_pool *sdt_data_pool)
 {
 	struct sdt_alloc_stack __arena *stack = prealloc_stack;
-	struct sdt_task_data __arena *data = NULL;
+	struct sdt_task_data __arena *data = NULL, __arena *val;
 	sdt_task_desc_t *desc;
 	struct sdt_task_chunk __arena *chunk;
-	struct sdt_task_map_val *mval;
 	__u64 idx, pos;
 	int ret;
-
-	mval = bpf_task_storage_get(&sdt_task_map, p, 0,
-				    BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!mval)
-		return NULL;
 
 	/* On success, call returns with the lock taken. */
 	ret = sdt_alloc_attempt(stack);
@@ -572,7 +565,7 @@ void __arena *sdt_task_alloc(struct task_struct *p)
 	pos = idx & (SDT_TASK_ENTS_PER_CHUNK - 1);
 	data = chunk->data[pos];
 	if (!data) {
-		data = sdt_task_alloc_from_pool(&sdt_task_data_pool, stack);
+		data = sdt_task_alloc_from_pool(sdt_data_pool, stack);
 		if (!data) {
 			bpf_spin_unlock(&sdt_task_lock);
 			sdt_task_free_idx(idx);
@@ -586,19 +579,37 @@ void __arena *sdt_task_alloc(struct task_struct *p)
 		chunk->data[pos] = data;
 	}
 
+	val = data;
+
 	/* init and return */
 	cast_kern(data);
-
-	data->tid.idx = idx;
-	data->tptr = (__u64)p;
-
-	mval->tid = data->tid;
-	mval->data = data;
 
 	sdt_stats.alloc_ops += 1;
 	sdt_stats.active_allocs += 1;
 
+	data->tid.idx = idx;
+
 	bpf_spin_unlock(&sdt_task_lock);
+
+	return val;
+}
+
+__hidden
+void __arena *sdt_task_alloc(struct task_struct *p)
+{
+	struct sdt_task_data __arena *data = NULL;
+	struct sdt_task_map_val *mval;
+
+	mval = bpf_task_storage_get(&sdt_task_map, p, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!mval)
+		return NULL;
+
+	data = sdt_alloc(&sdt_task_data_pool);
+	cast_kern(data);
+
+	mval->tid = data->tid;
+	mval->data = data;
 
 	return (void __arena *)data->payload;
 }
