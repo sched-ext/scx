@@ -1357,20 +1357,38 @@ impl<'a> Scheduler<'a> {
             .context("Failed to lookup cpu_ctx")?
             .unwrap();
 
-        let ogp_layers: Vec<u32> = layer_specs
+        let op_layers: Vec<u32> = layer_specs
             .iter()
             .enumerate()
             .filter(|(_idx, spec)| match &spec.kind {
-                LayerKind::Open { .. } | LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                LayerKind::Open { .. } => spec.kind.common().preempt,
                 _ => false,
             })
             .map(|(idx, _)| idx as u32)
             .collect();
-        let ogn_layers: Vec<u32> = layer_specs
+        let on_layers: Vec<u32> = layer_specs
             .iter()
             .enumerate()
             .filter(|(_idx, spec)| match &spec.kind {
-                LayerKind::Open { .. } | LayerKind::Grouped { .. } => !spec.kind.common().preempt,
+                LayerKind::Open { .. } => !spec.kind.common().preempt,
+                _ => false,
+            })
+            .map(|(idx, _)| idx as u32)
+            .collect();
+        let gp_layers: Vec<u32> = layer_specs
+            .iter()
+            .enumerate()
+            .filter(|(_idx, spec)| match &spec.kind {
+                LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                _ => false,
+            })
+            .map(|(idx, _)| idx as u32)
+            .collect();
+        let gn_layers: Vec<u32> = layer_specs
+            .iter()
+            .enumerate()
+            .filter(|(_idx, spec)| match &spec.kind {
+                LayerKind::Grouped { .. } => !spec.kind.common().preempt,
                 _ => false,
             })
             .map(|(idx, _)| idx as u32)
@@ -1389,10 +1407,14 @@ impl<'a> Scheduler<'a> {
             cpu_ctxs[cpu].task_layer_id = MAX_LAYERS as u32;
             cpu_ctxs[cpu].is_big = is_big;
 
-            let mut ogp_order = ogp_layers.clone();
-            let mut ogn_order = ogn_layers.clone();
             fastrand::seed(cpu as u64);
+
+            let mut ogp_order = op_layers.clone();
+            ogp_order.append(&mut gp_layers.clone());
             fastrand::shuffle(&mut ogp_order);
+
+            let mut ogn_order = on_layers.clone();
+            ogn_order.append(&mut gn_layers.clone());
             fastrand::shuffle(&mut ogn_order);
 
             for i in 0..MAX_LAYERS {
