@@ -265,6 +265,7 @@ int BPF_PROG(fexit_vfs_fsync_range, struct file *file, u64 start, u64 end, int d
 	tctx = try_lookup_task_ctx(p);
 	if (tctx)
 		tctx->avg_nvcsw = 0;
+	return 0;
 }
 
 /*
