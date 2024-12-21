@@ -1621,17 +1621,31 @@ impl<'a> Scheduler<'a> {
             skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
-        skel.maps.rodata_data.nr_ogp_layers = layer_specs
+        skel.maps.rodata_data.nr_op_layers = layer_specs
             .iter()
             .filter(|spec| match &spec.kind {
-                LayerKind::Open { .. } | LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                LayerKind::Open { .. } => spec.kind.common().preempt,
                 _ => false,
             })
             .count() as u32;
-        skel.maps.rodata_data.nr_ogn_layers = layer_specs
+        skel.maps.rodata_data.nr_on_layers = layer_specs
             .iter()
             .filter(|spec| match &spec.kind {
-                LayerKind::Open { .. } | LayerKind::Grouped { .. } => !spec.kind.common().preempt,
+                LayerKind::Open { .. } => !spec.kind.common().preempt,
+                _ => false,
+            })
+            .count() as u32;
+        skel.maps.rodata_data.nr_gp_layers = layer_specs
+            .iter()
+            .filter(|spec| match &spec.kind {
+                LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                _ => false,
+            })
+            .count() as u32;
+        skel.maps.rodata_data.nr_gn_layers = layer_specs
+            .iter()
+            .filter(|spec| match &spec.kind {
+                LayerKind::Grouped { .. } => !spec.kind.common().preempt,
                 _ => false,
             })
             .count() as u32;
