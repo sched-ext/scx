@@ -98,7 +98,7 @@ struct Opts {
     balanced: bool,
 
     /// Maximum scheduling slice duration in microseconds.
-    #[clap(long = "slice-max-us", default_value = "3000")]
+    #[clap(long = "slice-max-us", default_value = "5000")]
     slice_max_us: u64,
 
     /// Minimum scheduling slice duration in microseconds.

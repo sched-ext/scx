@@ -21,7 +21,7 @@ enum consts_internal  {
 
 	LAVD_TARGETED_LATENCY_NS	= (20ULL * NSEC_PER_MSEC),
 	LAVD_SLICE_MIN_NS_DFL		= (300ULL * NSEC_PER_USEC), /* min time slice */
-	LAVD_SLICE_MAX_NS_DFL		= (3ULL * NSEC_PER_MSEC), /* max time slice */
+	LAVD_SLICE_MAX_NS_DFL		= (5ULL * NSEC_PER_MSEC), /* max time slice */
 
 	LAVD_LC_FREQ_MAX		= 1000000,
 	LAVD_LC_RUNTIME_MAX		= LAVD_TIME_ONE_SEC,
@@ -50,7 +50,6 @@ enum consts_internal  {
 	LAVD_AP_HIGH_UTIL		= 700, /* balanced mode when 10% < cpu util <= 40%,
 						  performance mode when cpu util > 40% */
 
-	LAVD_CPDOM_STARV_NS		= (2 * LAVD_SLICE_MAX_NS_DFL),
 	LAVD_CPDOM_MIGRATION_SHIFT	= 3, /* 1/2**3 = +/- 12.5% */
 	LAVD_CPDOM_X_PROB_FT		= (LAVD_SYS_STAT_INTERVAL_NS /
 					   (2 * LAVD_SLICE_MAX_NS_DFL)), /* roughly twice per interval */
