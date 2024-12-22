@@ -1182,7 +1182,7 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 		/*
 		 * Traverse neighbor in the same distance in arbitrary order.
 		 */
-		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance++) {
+		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = dsq_id + 1) {
 			if (j >= nr_nbr)
 				break;
 
@@ -1251,7 +1251,7 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 		/*
 		 * Traverse neighbor in the same distance in arbitrary order.
 		 */
-		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance++) {
+		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = dsq_id + 1) {
 			if (j >= nr_nbr)
 				break;
 
