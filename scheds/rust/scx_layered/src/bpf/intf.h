@@ -167,6 +167,7 @@ struct cpu_ctx {
 
 	u64			hi_fb_dsq_id;
 	u64			lo_fb_dsq_id;
+	bool			in_open_layers;
 	u32			layer_id;
 	u32			task_layer_id;
 	u32			llc_id;
@@ -177,8 +178,13 @@ struct cpu_ctx {
 	u64			lo_fb_seq_at;
 	u64			lo_fb_usage_base;
 
-	u32			open_preempt_layer_order[MAX_LAYERS];
-	u32			open_layer_order[MAX_LAYERS];
+	u32			ogp_layer_order[MAX_LAYERS];	/* open/grouped preempt */
+	u32			ogn_layer_order[MAX_LAYERS];	/* open/grouped non-preempt */
+
+	u32			op_layer_order[MAX_LAYERS];	/* open preempt */
+	u32			on_layer_order[MAX_LAYERS];	/* open non-preempt */
+	u32			gp_layer_order[MAX_LAYERS];	/* grouped preempt */
+	u32			gn_layer_order[MAX_LAYERS];	/* grouped non-preempt */
 
 	struct cpu_prox_map	prox_map;
 };

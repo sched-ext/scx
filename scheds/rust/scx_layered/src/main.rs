@@ -1357,20 +1357,38 @@ impl<'a> Scheduler<'a> {
             .context("Failed to lookup cpu_ctx")?
             .unwrap();
 
-        let open_preempt_layers: Vec<u32> = layer_specs
+        let op_layers: Vec<u32> = layer_specs
             .iter()
             .enumerate()
             .filter(|(_idx, spec)| match &spec.kind {
-                LayerKind::Open { .. } | LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                LayerKind::Open { .. } => spec.kind.common().preempt,
                 _ => false,
             })
             .map(|(idx, _)| idx as u32)
             .collect();
-        let open_layers: Vec<u32> = layer_specs
+        let on_layers: Vec<u32> = layer_specs
             .iter()
             .enumerate()
             .filter(|(_idx, spec)| match &spec.kind {
-                LayerKind::Open { .. } | LayerKind::Grouped { .. } => !spec.kind.common().preempt,
+                LayerKind::Open { .. } => !spec.kind.common().preempt,
+                _ => false,
+            })
+            .map(|(idx, _)| idx as u32)
+            .collect();
+        let gp_layers: Vec<u32> = layer_specs
+            .iter()
+            .enumerate()
+            .filter(|(_idx, spec)| match &spec.kind {
+                LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                _ => false,
+            })
+            .map(|(idx, _)| idx as u32)
+            .collect();
+        let gn_layers: Vec<u32> = layer_specs
+            .iter()
+            .enumerate()
+            .filter(|(_idx, spec)| match &spec.kind {
+                LayerKind::Grouped { .. } => !spec.kind.common().preempt,
                 _ => false,
             })
             .map(|(idx, _)| idx as u32)
@@ -1389,17 +1407,42 @@ impl<'a> Scheduler<'a> {
             cpu_ctxs[cpu].task_layer_id = MAX_LAYERS as u32;
             cpu_ctxs[cpu].is_big = is_big;
 
-            let mut p_order = open_preempt_layers.clone();
-            let mut o_order = open_layers.clone();
             fastrand::seed(cpu as u64);
-            fastrand::shuffle(&mut p_order);
-            fastrand::shuffle(&mut o_order);
+
+            let mut ogp_order = op_layers.clone();
+            ogp_order.append(&mut gp_layers.clone());
+            fastrand::shuffle(&mut ogp_order);
+
+            let mut ogn_order = on_layers.clone();
+            ogn_order.append(&mut gn_layers.clone());
+            fastrand::shuffle(&mut ogn_order);
+
+            let mut op_order = op_layers.clone();
+            fastrand::shuffle(&mut op_order);
+
+            let mut on_order = on_layers.clone();
+            fastrand::shuffle(&mut on_order);
+
+            let mut gp_order = gp_layers.clone();
+            fastrand::shuffle(&mut gp_order);
+
+            let mut gn_order = gn_layers.clone();
+            fastrand::shuffle(&mut gn_order);
 
             for i in 0..MAX_LAYERS {
-                cpu_ctxs[cpu].open_preempt_layer_order[i] =
-                    p_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
-                cpu_ctxs[cpu].open_layer_order[i] =
-                    o_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].ogp_layer_order[i] =
+                    ogp_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].ogn_layer_order[i] =
+                    ogn_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+
+                cpu_ctxs[cpu].op_layer_order[i] =
+                    op_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].on_layer_order[i] =
+                    on_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].gp_layer_order[i] =
+                    gp_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].gn_layer_order[i] =
+                    gn_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
             }
         }
 
@@ -1599,20 +1642,44 @@ impl<'a> Scheduler<'a> {
             skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
-        skel.maps.rodata_data.nr_open_preempt_layers = layer_specs
+        skel.maps.rodata_data.nr_op_layers = layer_specs
             .iter()
             .filter(|spec| match &spec.kind {
-                LayerKind::Open { .. } | LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                LayerKind::Open { .. } => spec.kind.common().preempt,
                 _ => false,
             })
             .count() as u32;
-        skel.maps.rodata_data.nr_open_layers = layer_specs
+        skel.maps.rodata_data.nr_on_layers = layer_specs
             .iter()
             .filter(|spec| match &spec.kind {
-                LayerKind::Open { .. } | LayerKind::Grouped { .. } => !spec.kind.common().preempt,
+                LayerKind::Open { .. } => !spec.kind.common().preempt,
                 _ => false,
             })
             .count() as u32;
+        skel.maps.rodata_data.nr_gp_layers = layer_specs
+            .iter()
+            .filter(|spec| match &spec.kind {
+                LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                _ => false,
+            })
+            .count() as u32;
+        skel.maps.rodata_data.nr_gn_layers = layer_specs
+            .iter()
+            .filter(|spec| match &spec.kind {
+                LayerKind::Grouped { .. } => !spec.kind.common().preempt,
+                _ => false,
+            })
+            .count() as u32;
+
+        skel.maps.rodata_data.min_open_layer_slice_ns = layer_specs
+            .iter()
+            .filter_map(|spec| match &spec.kind {
+                LayerKind::Open { .. } => Some(spec.kind.common().slice_us),
+                _ => None,
+            })
+            .min()
+            .unwrap_or(opts.slice_us)
+            * 1000;
 
         // Consider all layers empty at the beginning.
         for i in 0..layer_specs.len() {
