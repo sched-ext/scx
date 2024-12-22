@@ -1417,11 +1417,32 @@ impl<'a> Scheduler<'a> {
             ogn_order.append(&mut gn_layers.clone());
             fastrand::shuffle(&mut ogn_order);
 
+            let mut op_order = op_layers.clone();
+            fastrand::shuffle(&mut op_order);
+
+            let mut on_order = on_layers.clone();
+            fastrand::shuffle(&mut on_order);
+
+            let mut gp_order = gp_layers.clone();
+            fastrand::shuffle(&mut gp_order);
+
+            let mut gn_order = gn_layers.clone();
+            fastrand::shuffle(&mut gn_order);
+
             for i in 0..MAX_LAYERS {
                 cpu_ctxs[cpu].ogp_layer_order[i] =
                     ogp_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
                 cpu_ctxs[cpu].ogn_layer_order[i] =
                     ogn_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+
+                cpu_ctxs[cpu].op_layer_order[i] =
+                    op_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].on_layer_order[i] =
+                    on_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].gp_layer_order[i] =
+                    gp_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].gn_layer_order[i] =
+                    gn_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
             }
         }
 
@@ -1649,6 +1670,16 @@ impl<'a> Scheduler<'a> {
                 _ => false,
             })
             .count() as u32;
+
+        skel.maps.rodata_data.min_open_layer_slice_ns = layer_specs
+            .iter()
+            .filter_map(|spec| match &spec.kind {
+                LayerKind::Open { .. } => Some(spec.kind.common().slice_us),
+                _ => None,
+            })
+            .min()
+            .unwrap_or(opts.slice_us)
+            * 1000;
 
         // Consider all layers empty at the beginning.
         for i in 0..layer_specs.len() {

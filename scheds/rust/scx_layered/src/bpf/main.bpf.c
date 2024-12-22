@@ -47,6 +47,7 @@ const volatile u32 nr_op_layers;	/* open && preempt */
 const volatile u32 nr_on_layers;	/* open && !preempt */
 const volatile u32 nr_gp_layers;	/* grouped && preempt */
 const volatile u32 nr_gn_layers;	/* grouped && !preempt */
+const volatile u64 min_open_layer_slice_ns;
 const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 
@@ -173,6 +174,14 @@ static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 	}
 
 	return cpuc;
+}
+
+static bool cpuc_in_layer(struct cpu_ctx *cpuc, struct layer *layer)
+{
+	if (layer->kind == LAYER_KIND_OPEN)
+		return cpuc->in_open_layers;
+	else
+		return cpuc->layer_id == layer->id;
 }
 
 // XXX - Converting this to bss array triggers verifier bugs. See
@@ -317,10 +326,19 @@ static void refresh_cpumasks(u32 layer_id)
 
 		if ((u8_ptr = MEMBER_VPTR(layers, [layer_id].cpus[cpu / 8]))) {
 			if (*u8_ptr & (1 << (cpu % 8))) {
-				cpuc->layer_id = layer_id;
+				/* a CPU can be shared by multiple open layers */
+				if (layer->kind == LAYER_KIND_OPEN) {
+					cpuc->in_open_layers = true;
+					cpuc->layer_id = MAX_LAYERS;
+				} else {
+					cpuc->in_open_layers = false;
+					cpuc->layer_id = layer_id;
+				}
 				bpf_cpumask_set_cpu(cpu, layer_cpumask);
 			} else {
-				if (cpuc->layer_id == layer_id)
+				if (layer->kind == LAYER_KIND_OPEN)
+					cpuc->in_open_layers = false;
+				else if (cpuc->layer_id == layer_id)
 					cpuc->layer_id = MAX_LAYERS;
 				bpf_cpumask_clear_cpu(cpu, layer_cpumask);
 			}
@@ -351,7 +369,7 @@ static void refresh_cpumasks(u32 layer_id)
 	bpf_for(cpu, 0, nr_possible_cpus) {
 		if (!(cpuc = lookup_cpu_ctx(cpu)))
 			return;
-		if (cpuc->layer_id == layer_id)
+		if (cpuc_in_layer(cpuc, layer))
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	}
 }
@@ -1501,11 +1519,12 @@ bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
 
 void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 {
-	struct layer *owner_layer = NULL;
 	struct cpu_ctx *cpuc, *sib_cpuc;
 	struct llc_ctx *llcc;
 	bool tried_preempting = false, tried_lo_fb = false;
 	s32 sib = sibling_cpu(cpu);
+	u32 nr_ogp_layers = nr_op_layers + nr_gp_layers;
+	u32 nr_ogn_layers = nr_on_layers + nr_gn_layers;
 
 	if (!(cpuc = lookup_cpu_ctx(-1)))
 		return;
@@ -1541,9 +1560,6 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	if (!(llcc = lookup_llc_ctx(cpuc->llc_id)))
 		return;
-
-	if (cpuc->layer_id < MAX_LAYERS)
-		owner_layer = &layers[cpuc->layer_id];
 
 	/*
 	 * Always consume hi_fb_dsq_id first for kthreads. This ends up
@@ -1603,39 +1619,75 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		}
 	}
 
-	/*
-	 * Grouped/open preempt layers first if there's no owner layer or the
-	 * owner layer is not protected or preempting.
-	 */
-	if (!owner_layer || (!cpuc->protect_owned && !owner_layer->preempt)) {
-		if (try_consume_layers(cpuc->ogp_layer_order,
-				       nr_op_layers + nr_gp_layers,
+	if (cpuc->in_open_layers) {
+		/*
+		 * CPU is in an open layer.
+		 */
+		if (cpuc->protect_owned) {
+			if (try_consume_layers(cpuc->op_layer_order, nr_op_layers,
+					       MAX_LAYERS, cpuc, llcc))
+				return;
+			if (try_consume_layers(cpuc->on_layer_order, nr_on_layers,
+					       MAX_LAYERS, cpuc, llcc))
+				return;
+			if (try_consume_layers(cpuc->gp_layer_order, nr_gp_layers,
+					       MAX_LAYERS, cpuc, llcc))
+				return;
+			if (try_consume_layers(cpuc->gn_layer_order, nr_gn_layers,
+					       MAX_LAYERS, cpuc, llcc))
+				return;
+		} else {
+			if (try_consume_layers(cpuc->op_layer_order, nr_op_layers,
+					       MAX_LAYERS, cpuc, llcc))
+				return;
+			if (try_consume_layers(cpuc->gp_layer_order, nr_gp_layers,
+					       MAX_LAYERS, cpuc, llcc))
+				return;
+			if (try_consume_layers(cpuc->ogn_layer_order, nr_ogn_layers,
+					       MAX_LAYERS, cpuc, llcc))
+				return;
+		}
+	} else {
+		/*
+		 * CPU is in a grouped or confined layer or not assigned.
+		 */
+		struct layer *owner_layer = NULL;
+
+		if (cpuc->layer_id < MAX_LAYERS)
+			owner_layer = &layers[cpuc->layer_id];
+
+		/*
+		 * Grouped/open preempt layers first if there's no owner layer
+		 * or the owner layer is not protected or preempting.
+		 */
+		if (!owner_layer || (!cpuc->protect_owned && !owner_layer->preempt)) {
+			if (try_consume_layers(cpuc->ogp_layer_order, nr_ogp_layers,
+					       cpuc->layer_id, cpuc, llcc))
+				return;
+
+			tried_preempting = true;
+		}
+
+		/* owner layer */
+		if (owner_layer) {
+			if (owner_layer->llcs_to_drain &&
+			    try_drain_layer_llcs(owner_layer, cpuc))
+				return;
+			if (try_consume_layer(owner_layer->id, cpuc, llcc))
+				return;
+		}
+
+		/* try grouped/open preempting if not tried yet */
+		if (!tried_preempting &&
+		    try_consume_layers(cpuc->ogp_layer_order, nr_ogp_layers,
 				       cpuc->layer_id, cpuc, llcc))
 			return;
 
-		tried_preempting = true;
-	}
-
-	/* owner layer */
-	if (owner_layer) {
-		if (owner_layer->llcs_to_drain &&
-		    try_drain_layer_llcs(owner_layer, cpuc))
-			return;
-		if (try_consume_layer(owner_layer->id, cpuc, llcc))
+		/* grouped/open non-preempt layers */
+		if (try_consume_layers(cpuc->ogn_layer_order, nr_ogn_layers,
+				       cpuc->layer_id, cpuc, llcc))
 			return;
 	}
-
-	/* try grouped/open preempting if not tried yet */
-	if (!tried_preempting &&
-	    try_consume_layers(cpuc->ogp_layer_order,
-			       nr_op_layers + nr_gp_layers,
-			       cpuc->layer_id, cpuc, llcc))
-		return;
-
-	/* grouped/open non-preempt layers */
-	if (try_consume_layers(cpuc->ogn_layer_order, nr_on_layers + nr_gn_layers,
-			       cpuc->layer_id, cpuc, llcc))
-		return;
 
 	if (!tried_lo_fb && scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id))
 		return;
@@ -2050,7 +2102,10 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	taskc->running_at = now;
 
 	/* running an owned task if the task is on the layer owning the CPU */
-	cpuc->running_owned = taskc->layer_id == cpuc->layer_id;
+	if (layer->kind == LAYER_KIND_OPEN)
+		cpuc->running_owned = cpuc->in_open_layers;
+	else
+		cpuc->running_owned = taskc->layer_id == cpuc->layer_id;
 
 	/*
 	 * If this CPU is transitioning from running an exclusive task to a
@@ -2084,8 +2139,9 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 {
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
-	struct layer *task_layer, *cpu_layer = NULL;
+	struct layer *task_layer;
 	u64 now = bpf_ktime_get_ns();
+	u64 usage_since_idle;
 	s32 task_lid;
 	u64 used;
 
@@ -2094,10 +2150,6 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 
 	task_lid = taskc->layer_id;
 	if (!(task_layer = lookup_layer(task_lid)))
-		return;
-
-	if (cpuc->layer_id != MAX_LAYERS &&
-	    !(cpu_layer = lookup_layer(cpuc->layer_id)))
 		return;
 
 	used = now - taskc->running_at;
@@ -2129,8 +2181,20 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	 * Owned execution protection. Apply iff the CPU stayed saturated for
 	 * longer than twice the slice.
 	 */
-	cpuc->protect_owned = cpu_layer &&
-		cpuc->usage - cpuc->usage_at_idle > 2 * cpu_layer->slice_ns;
+	usage_since_idle = cpuc->usage - cpuc->usage_at_idle;
+	if (cpuc->in_open_layers) {
+		cpuc->protect_owned = task_layer->kind == LAYER_KIND_OPEN &&
+			usage_since_idle > 2 * min_open_layer_slice_ns;
+	} else {
+		struct layer *cpu_layer = NULL;
+
+		if (cpuc->layer_id != MAX_LAYERS &&
+		    !(cpu_layer = lookup_layer(cpuc->layer_id)))
+			return;
+
+		cpuc->protect_owned = cpu_layer &&
+			usage_since_idle > 2 * cpu_layer->slice_ns;
+	}
 
 	cpuc->current_preempt = false;
 	cpuc->prev_exclusive = cpuc->current_exclusive;
@@ -2771,6 +2835,19 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 	bpf_for(i, 0, nr_on_layers + nr_gn_layers)
 		dbg("CFG: CPU[%d] ogn_layer_order[%d]=%d",
 		    cpu, i, cpuc->ogn_layer_order[i]);
+
+	bpf_for(i, 0, nr_op_layers)
+		dbg("CFG: CPU[%d] op_layer_order[%d]=%d",
+		    cpu, i, cpuc->op_layer_order[i]);
+	bpf_for(i, 0, nr_on_layers)
+		dbg("CFG: CPU[%d] on_layer_order[%d]=%d",
+		    cpu, i, cpuc->on_layer_order[i]);
+	bpf_for(i, 0, nr_gp_layers)
+		dbg("CFG: CPU[%d] gp_layer_order[%d]=%d",
+		    cpu, i, cpuc->gp_layer_order[i]);
+	bpf_for(i, 0, nr_gn_layers)
+		dbg("CFG: CPU[%d] gn_layer_order[%d]=%d",
+		    cpu, i, cpuc->gn_layer_order[i]);
 
 	return 0;
 }
