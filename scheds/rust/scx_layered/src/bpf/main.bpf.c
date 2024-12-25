@@ -47,7 +47,7 @@ const volatile u32 nr_op_layers;	/* open && preempt */
 const volatile u32 nr_on_layers;	/* open && !preempt */
 const volatile u32 nr_gp_layers;	/* grouped && preempt */
 const volatile u32 nr_gn_layers;	/* grouped && !preempt */
-const volatile u64 min_open_layer_slice_ns;
+const volatile u64 min_open_layer_disallow_open_after_ns;
 const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 
@@ -2187,7 +2187,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	usage_since_idle = cpuc->usage - cpuc->usage_at_idle;
 	if (cpuc->in_open_layers) {
 		cpuc->protect_owned = task_layer->kind == LAYER_KIND_OPEN &&
-			usage_since_idle > 2 * min_open_layer_slice_ns;
+			usage_since_idle > min_open_layer_disallow_open_after_ns;
 	} else {
 		struct layer *cpu_layer = NULL;
 
@@ -2196,7 +2196,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 			return;
 
 		cpuc->protect_owned = cpu_layer &&
-			usage_since_idle > 2 * cpu_layer->slice_ns;
+			usage_since_idle > cpu_layer->disallow_open_after_ns;
 	}
 
 	cpuc->current_preempt = false;
@@ -2664,6 +2664,7 @@ static s32 init_layer(int layer_id)
 	    layer_id, layer->name, layer->min_exec_ns,
 	    layer->kind != LAYER_KIND_CONFINED,
 	    layer->preempt, layer->exclusive);
+	dbg("CFG      disallow_open_after=%lu", layer->disallow_open_after_ns);
 
 	layer->id = layer_id;
 
@@ -2901,6 +2902,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 
 	dbg("CFG: Dumping configuration, nr_online_cpus=%d smt_enabled=%d little_cores=%d",
 	    nr_online_cpus, smt_enabled, has_little_cores);
+	dbg("CFG: min_open_layer_disallow_open_after=%lu",
+	    min_open_layer_disallow_open_after_ns);
 
 	bpf_for(i, 0, nr_layers) {
 		ret = init_layer(i);

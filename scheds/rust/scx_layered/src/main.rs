@@ -88,6 +88,7 @@ const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KI
 
 lazy_static! {
     static ref USAGE_DECAY: f64 = 0.5f64.powf(1.0 / USAGE_HALF_LIFE_F64);
+    static ref DFL_DISALLOW_OPEN_AFTER_US: u64 = 2 * scx_enums.SCX_SLICE_DFL / 1000;
     static ref EXAMPLE_CONFIG: LayerConfig = LayerConfig {
         specs: vec![
             LayerSpec {
@@ -110,6 +111,7 @@ lazy_static! {
                         slice_us: 20000,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        disallow_open_after_us: None,
                         xllc_mig_min_us: 1000.0,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
@@ -136,6 +138,7 @@ lazy_static! {
                         slice_us: 20000,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        disallow_open_after_us: None,
                         xllc_mig_min_us: 0.0,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
@@ -164,6 +167,7 @@ lazy_static! {
                         slice_us: 800,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        disallow_open_after_us: None,
                         xllc_mig_min_us: 0.0,
                         growth_algo: LayerGrowthAlgo::Topo,
                         perf: 1024,
@@ -189,6 +193,7 @@ lazy_static! {
                         slice_us: 20000,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        disallow_open_after_us: None,
                         xllc_mig_min_us: 100.0,
                         growth_algo: LayerGrowthAlgo::Linear,
                         perf: 1024,
@@ -1173,6 +1178,7 @@ impl<'a> Scheduler<'a> {
                     slice_us,
                     fifo,
                     weight,
+                    disallow_open_after_us,
                     xllc_mig_min_us,
                     ..
                 } = spec.kind.common();
@@ -1195,6 +1201,7 @@ impl<'a> Scheduler<'a> {
                 layer.exclusive.write(*exclusive);
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;
+                layer.disallow_open_after_ns = disallow_open_after_us.unwrap() * 1000;
                 layer.xllc_mig_min_ns = (xllc_mig_min_us * 1000.0) as u64;
                 layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
@@ -1672,14 +1679,14 @@ impl<'a> Scheduler<'a> {
             })
             .count() as u32;
 
-        skel.maps.rodata_data.min_open_layer_slice_ns = layer_specs
+        skel.maps.rodata_data.min_open_layer_disallow_open_after_ns = layer_specs
             .iter()
             .filter_map(|spec| match &spec.kind {
-                LayerKind::Open { .. } => Some(spec.kind.common().slice_us),
+                LayerKind::Open { .. } => Some(spec.kind.common().disallow_open_after_us.unwrap()),
                 _ => None,
             })
             .min()
-            .unwrap_or(opts.slice_us)
+            .unwrap_or(*DFL_DISALLOW_OPEN_AFTER_US)
             * 1000;
 
         // Consider all layers empty at the beginning.
@@ -2402,6 +2409,10 @@ fn main() -> Result<()> {
             common.weight = DEFAULT_LAYER_WEIGHT;
         }
         common.weight = common.weight.max(MIN_LAYER_WEIGHT).min(MAX_LAYER_WEIGHT);
+
+        if common.disallow_open_after_us.is_none() {
+            common.disallow_open_after_us = Some(*DFL_DISALLOW_OPEN_AFTER_US);
+        }
 
         if common.idle_smt.is_some() {
             warn!("Layer {} has deprecated flag \"idle_smt\"", &spec.name);

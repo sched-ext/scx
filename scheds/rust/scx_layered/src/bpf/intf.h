@@ -274,6 +274,7 @@ struct layer {
 	u64			slice_ns;
 	bool			fifo;
 	u32			weight;
+	u64			disallow_open_after_ns;
 	u64			xllc_mig_min_ns;
 
 	int			kind;
