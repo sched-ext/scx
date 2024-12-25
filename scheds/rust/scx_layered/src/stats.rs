@@ -26,6 +26,7 @@ use crate::BpfStats;
 use crate::Layer;
 use crate::Stats;
 use crate::LAYER_USAGE_OPEN;
+use crate::LAYER_USAGE_PROTECTED;
 use crate::LAYER_USAGE_SUM_UPTO;
 
 const GSTAT_EXCL_IDLE: usize = bpf_intf::global_stat_id_GSTAT_EXCL_IDLE as usize;
@@ -106,6 +107,8 @@ pub struct LayerStats {
     pub index: usize,
     #[stat(desc = "Total CPU utilization (100% means one full CPU)")]
     pub util: f64,
+    #[stat(desc = "Protected CPU utilization %")]
+    pub util_protected_frac: f64,
     #[stat(desc = "Open CPU utilization %")]
     pub util_open_frac: f64,
     #[stat(desc = "fraction of total CPU utilization")]
@@ -240,6 +243,10 @@ impl LayerStats {
             index: lidx,
             util: util_sum * 100.0,
             util_open_frac: calc_frac(stats.layer_utils[lidx][LAYER_USAGE_OPEN], util_sum),
+            util_protected_frac: calc_frac(
+                stats.layer_utils[lidx][LAYER_USAGE_PROTECTED],
+                util_sum,
+            ),
             util_frac: calc_frac(util_sum, stats.total_util),
             tasks: stats.nr_layer_tasks[lidx] as u32,
             total: ltotal,
@@ -301,10 +308,11 @@ impl LayerStats {
     pub fn format<W: Write>(&self, w: &mut W, name: &str, header_width: usize) -> Result<()> {
         writeln!(
             w,
-            "  {:<width$}: util/open/frac={:6.1}/{}/{:7.1} tasks={:6}",
+            "  {:<width$}: util/open/prot/frac={:6.1}/{}/{}/{:7.1} tasks={:6}",
             name,
             self.util,
             fmt_pct(self.util_open_frac),
+            fmt_pct(self.util_protected_frac),
             self.util_frac,
             self.tasks,
             width = header_width,
