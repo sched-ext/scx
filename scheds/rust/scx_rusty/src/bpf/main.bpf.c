@@ -43,6 +43,7 @@
 #else
 #include <scx/common.bpf.h>
 #include <scx/ravg_impl.bpf.h>
+#include <lib/sdt_task.h>
 #endif
 
 #include "intf.h"
@@ -220,6 +221,14 @@ struct {
 	__uint(map_flags, 0);
 } task_data SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, struct task_struct *);
+	__type(value, struct bpfmask_wrapper);
+	__uint(max_entries, 1000000);
+	__uint(map_flags, 0);
+} task_masks SEC(".maps");
+
 static struct dom_ctx *try_lookup_dom_ctx(u32 dom_id)
 {
 	return bpf_map_lookup_elem(&dom_data, &dom_id);
@@ -258,18 +267,50 @@ static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
 	return bpf_map_lookup_elem(&task_data, &tptr);
 }
 
+static struct bpf_cpumask *lookup_task_bpfmask(struct task_struct *p)
+{
+	struct bpfmask_wrapper *wrapper;
+
+	wrapper = bpf_map_lookup_elem(&task_masks, &p);
+	if (!wrapper) {
+		scx_bpf_error("lookup_mask_bpfmask failed for task %p", p);
+		return NULL;
+	}
+
+	return wrapper->instance;
+}
+
 static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 {
 	struct task_ctx *taskc;
-	u64 tptr;
-	tptr = t_to_tptr(p);
 
 	taskc = try_lookup_task_ctx(p);
 	if (!taskc)
-		scx_bpf_error("task_ctx lookup failed for tptr %llu", tptr);
+		scx_bpf_error("task_ctx lookup failed for tptr %p", p);
 
 	return taskc;
 }
+
+static struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, struct bpf_cpumask **p_cpumaskp)
+{
+	struct task_ctx *taskc;
+
+	if (p_cpumaskp == NULL) {
+		scx_bpf_error("no mask pointer provided");
+		return NULL;
+	}
+
+	taskc = lookup_task_ctx(p);
+	if (!taskc)
+		scx_bpf_error("task_ctx lookup failed for tptr %p", p);
+
+	*p_cpumaskp = lookup_task_bpfmask(p);
+	if (*p_cpumaskp == NULL)
+		scx_bpf_error("task bpf_cpumask lookup failed for tptr %p", p);
+
+	return taskc;
+}
+
 
 static struct pcpu_ctx *lookup_pcpu_ctx(s32 cpu)
 {
@@ -840,7 +881,7 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 	u32 old_dom_id = taskc->dom_id;
 	tptr = t_to_tptr(p);
 
-	t_cpumask = taskc->cpumask;
+	t_cpumask = lookup_task_bpfmask(p);
 	if (!t_cpumask) {
 		scx_bpf_error("Failed to look up task cpumask");
 		return false;
@@ -952,7 +993,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	refresh_tune_params();
 
-	if (!(taskc = lookup_task_ctx(p)) || !(p_cpumask = taskc->cpumask))
+	if (!(taskc = lookup_task_ctx_mask(p, &p_cpumask)) || !p_cpumask)
 		goto enoent;
 
 	if (p->nr_cpus_allowed == 1) {
@@ -1179,12 +1220,8 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 	s32 cpu;
 	tptr = t_to_tptr(p);
 
-	if (!(taskc = lookup_task_ctx(p)))
+	if (!(taskc = lookup_task_ctx_mask(p, &p_cpumask)) || !p_cpumask)
 		return;
-	if (!(p_cpumask = taskc->cpumask)) {
-		scx_bpf_error("NULL cpumask");
-		return;
-	}
 
 	/*
 	 * Migrate @p to a new domain if requested by userland through lb_data.
@@ -1303,14 +1340,17 @@ static u64 node_dom_mask(u32 node_id)
 static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 						  struct task_ctx *taskc)
 {
+	struct bpf_cpumask *p_cpumask;
 	u32 node_id;
 	u32 val = 0;
 	void *mask;
 
 	taskc->preferred_dom_mask = 0;
 
+	p_cpumask = lookup_task_bpfmask(p);
+
 	if (!mempolicy_affinity || !bpf_core_field_exists(p->mempolicy) ||
-	    !p->mempolicy || !taskc->cpumask)
+	    !p->mempolicy || !p_cpumask)
 		return;
 
 	if (!(p->mempolicy->mode & (MPOL_BIND|MPOL_PREFERRED|MPOL_PREFERRED_MANY)))
@@ -1667,6 +1707,9 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 		.preferred_dom_mask = 0,
 
 	};
+	struct task_struct *p_map;
+	struct bpfmask_wrapper wrapper;
+	struct bpfmask_wrapper *mask_map_value;
 	struct task_ctx *map_value;
 	long ret;
 	u64 tptr;
@@ -1688,16 +1731,39 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 		bpf_printk("%s[%llu]: INIT (weight %u))", p->comm, tptr, p->scx.weight);
 
 	/*
-	 * Read the entry from the map immediately so we can add the cpumask
-	 * with bpf_kptr_xchg().
+	 * Read the entry from the map immediately so we can pass it to
+	 * task_pick_and_set_domain() below.
 	 */
 	map_value = bpf_map_lookup_elem(&task_data, &tptr);
 	if (!map_value)
 		/* Should never happen -- it was just inserted above. */
 		return -EINVAL;
 
-	ret = create_save_cpumask(&map_value->cpumask);
+
+	wrapper.instance = NULL;
+
+	/*
+	 * XXX Passing a trusted pointer as a key to the map turns it into a
+	 * scalar for the verifier, preventing us from using it further. Make
+	 * a temporary copy of our struct task_struct to pass it to the map.
+	 */
+	p_map = p;
+
+	ret = bpf_map_update_elem(&task_masks, &p_map, &wrapper, 0 /*BPF NOEXIST*/);
 	if (ret) {
+		bpf_map_delete_elem(&task_data, &tptr);
+		return ret;
+	}
+
+	mask_map_value = bpf_map_lookup_elem(&task_masks, &p_map);
+	if (!mask_map_value) {
+		bpf_map_delete_elem(&task_data, &tptr);
+		return -EINVAL;
+	}
+
+	ret = create_save_cpumask(&mask_map_value->instance);
+	if (ret) {
+		bpf_map_delete_elem(&task_masks, &p_map);
 		bpf_map_delete_elem(&task_data, &tptr);
 		return ret;
 	}
@@ -1719,11 +1785,16 @@ void BPF_STRUCT_OPS(rusty_exit_task, struct task_struct *p,
 	 * deletions aren't reliable means that we sometimes leak task_ctx and
 	 * can't use BPF_NOEXIST on allocation in .prep_enable().
 	 */
+	ret = bpf_map_delete_elem(&task_masks, &p);
+	if (ret)
+		stat_add(RUSTY_STAT_TASK_GET_ERR, 1);
+
 	ret = bpf_map_delete_elem(&task_data, &tptr);
 	if (ret) {
 		stat_add(RUSTY_STAT_TASK_GET_ERR, 1);
 		return;
 	}
+
 }
 
 static s32 create_node(u32 node_id)
