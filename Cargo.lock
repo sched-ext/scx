@@ -986,14 +986,14 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 
 [[package]]
 name = "libbpf-cargo"
-version = "0.24.8"
+version = "0.25.0-beta.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "704727a07f185a76c58faa7b8ed08fba3194661c212183aea1174fe2970ee185"
+checksum = "d78971d366f266fd02f310b68e8cbf08ebaa35d7dd458ba98360448d8bb25467"
 dependencies = [
  "anyhow",
  "cargo_metadata 0.15.4",
  "clap",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1",
  "memmap2",
  "regex",
  "semver",
@@ -1007,6 +1007,18 @@ name = "libbpf-rs"
 version = "0.24.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93edd9cd673087fa7518fd63ad6c87be2cd9b4e35034b1873f3e3258c018275b"
+dependencies = [
+ "bitflags 2.6.0",
+ "libbpf-sys",
+ "libc",
+ "vsprintf",
+]
+
+[[package]]
+name = "libbpf-rs"
+version = "0.25.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad0b2c8f481a850c965da7642f3a844c6d32d7f8709b5afb74c5f6bff1e37582"
 dependencies = [
  "bitflags 2.6.0",
  "libbpf-sys",
@@ -1505,7 +1517,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs",
+ "libbpf-rs 0.24.8",
  "log",
  "scx_stats",
  "scx_stats_derive",
@@ -1522,7 +1534,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs",
+ "libbpf-rs 0.24.8",
  "log",
  "scx_stats",
  "scx_stats_derive",
@@ -1544,7 +1556,7 @@ dependencies = [
  "gpoint",
  "hex",
  "itertools 0.13.0",
- "libbpf-rs",
+ "libbpf-rs 0.24.8",
  "libc",
  "log",
  "ordered-float",
@@ -1570,7 +1582,7 @@ dependencies = [
  "fastrand",
  "fb_procfs",
  "lazy_static",
- "libbpf-rs",
+ "libbpf-rs 0.24.8",
  "libc",
  "log",
  "scx_stats",
@@ -1611,7 +1623,7 @@ dependencies = [
  "fb_procfs",
  "itertools 0.13.0",
  "lazy_static",
- "libbpf-rs",
+ "libbpf-rs 0.24.8",
  "libc",
  "log",
  "maplit",
@@ -1627,7 +1639,7 @@ version = "1.0.8"
 dependencies = [
  "anyhow",
  "ctrlc",
- "libbpf-rs",
+ "libbpf-rs 0.24.8",
  "libc",
  "plain",
  "scx_rustland_core",
@@ -1642,7 +1654,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "fb_procfs",
- "libbpf-rs",
+ "libbpf-rs 0.24.8",
  "libc",
  "log",
  "ordered-float",
@@ -1660,7 +1672,7 @@ name = "scx_rustland_core"
 version = "2.2.5"
 dependencies = [
  "anyhow",
- "libbpf-rs",
+ "libbpf-rs 0.24.8",
  "libc",
  "plain",
  "scx_utils",
@@ -1678,7 +1690,7 @@ dependencies = [
  "crossbeam",
  "ctrlc",
  "fb_procfs",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1",
  "libc",
  "log",
  "ordered-float",
@@ -1730,7 +1742,7 @@ dependencies = [
  "hex",
  "lazy_static",
  "libbpf-cargo",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1",
  "libbpf-sys",
  "libc",
  "log",
