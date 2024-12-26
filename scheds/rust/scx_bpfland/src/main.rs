@@ -21,7 +21,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
@@ -229,7 +228,7 @@ impl<'a> Scheduler<'a> {
         // Check host topology to determine if we need to enable SMT capabilities.
         let smt_enabled = match is_smt_active() {
             Ok(value) => value == 1,
-            Err(e) => bail!("Failed to read SMT status: {}", e),
+            Err(_) => false,
         };
         info!(
             "{} {} {}",
