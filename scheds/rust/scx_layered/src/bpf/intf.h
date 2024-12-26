@@ -78,6 +78,9 @@ enum layer_usage {
 	LAYER_USAGE_OPEN,
 	LAYER_USAGE_SUM_UPTO = LAYER_USAGE_OPEN,
 
+	LAYER_USAGE_PROTECTED,
+	LAYER_USAGE_PROTECTED_PREEMPT,
+
 	NR_LAYER_USAGES,
 };
 
@@ -153,6 +156,7 @@ struct cpu_ctx {
 	bool			is_big;
 
 	bool			protect_owned;
+	bool			protect_owned_preempt;
 	bool			running_owned;
 	bool			running_fallback;
 	u64			running_at;
@@ -272,6 +276,8 @@ struct layer {
 	u64			slice_ns;
 	bool			fifo;
 	u32			weight;
+	u64			disallow_open_after_ns;
+	u64			disallow_preempt_after_ns;
 	u64			xllc_mig_min_ns;
 
 	int			kind;
