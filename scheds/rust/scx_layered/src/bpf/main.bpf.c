@@ -2174,6 +2174,11 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		((RUNTIME_DECAY_FACTOR - 1) * taskc->runtime_avg + used) /
 		RUNTIME_DECAY_FACTOR;
 
+	/*
+	 * protect_owned/preempt accounting is a bit wrong in that they charge
+	 * the execution duration to the layer that just ran which may be
+	 * different from the layer that is protected on the CPU. Oh well...
+	 */
 	if (cpuc->running_owned) {
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OWNED] += used;
 		if (cpuc->protect_owned)
@@ -2207,7 +2212,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	cpuc->protect_owned_preempt = false;
 
 	if (cpuc->in_open_layers) {
-		if (task_layer->kind == LAYER_KIND_OPEN) {
+		if (task_layer->kind == LAYER_KIND_OPEN && !task_layer->preempt) {
 			cpuc->protect_owned = usage_since_idle > min_open_layer_disallow_open_after_ns;
 			cpuc->protect_owned_preempt = usage_since_idle > min_open_layer_disallow_preempt_after_ns;
 		}
