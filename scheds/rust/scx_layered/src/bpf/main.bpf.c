@@ -48,6 +48,7 @@ const volatile u32 nr_on_layers;	/* open && !preempt */
 const volatile u32 nr_gp_layers;	/* grouped && preempt */
 const volatile u32 nr_gn_layers;	/* grouped && !preempt */
 const volatile u64 min_open_layer_disallow_open_after_ns;
+const volatile u64 min_open_layer_disallow_preempt_after_ns;
 const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 
@@ -948,7 +949,7 @@ bool try_preempt_cpu(s32 cand, struct task_struct *p, struct cpu_ctx *cpuc,
 		return false;
 
 	if (!(cand_cpuc = lookup_cpu_ctx(cand)) || cand_cpuc->current_preempt ||
-	    (cand_cpuc->protect_owned && cand_cpuc->running_owned))
+	    (cand_cpuc->protect_owned_preempt && cand_cpuc->running_owned))
 		return false;
 
 	/*
@@ -2163,6 +2164,8 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OWNED] += used;
 		if (cpuc->protect_owned)
 			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED] += used;
+		if (cpuc->protect_owned_preempt)
+			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED_PREEMPT] += used;
 	} else {
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OPEN] += used;
 	}
@@ -2185,9 +2188,15 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	 * longer than twice the slice.
 	 */
 	usage_since_idle = cpuc->usage - cpuc->usage_at_idle;
+
+	cpuc->protect_owned = false;
+	cpuc->protect_owned_preempt = false;
+
 	if (cpuc->in_open_layers) {
-		cpuc->protect_owned = task_layer->kind == LAYER_KIND_OPEN &&
-			usage_since_idle > min_open_layer_disallow_open_after_ns;
+		if (task_layer->kind == LAYER_KIND_OPEN) {
+			cpuc->protect_owned = usage_since_idle > min_open_layer_disallow_open_after_ns;
+			cpuc->protect_owned_preempt = usage_since_idle > min_open_layer_disallow_preempt_after_ns;
+		}
 	} else {
 		struct layer *cpu_layer = NULL;
 
@@ -2195,8 +2204,10 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		    !(cpu_layer = lookup_layer(cpuc->layer_id)))
 			return;
 
-		cpuc->protect_owned = cpu_layer &&
-			usage_since_idle > cpu_layer->disallow_open_after_ns;
+		if (cpu_layer) {
+			cpuc->protect_owned = usage_since_idle > cpu_layer->disallow_open_after_ns;
+			cpuc->protect_owned_preempt = usage_since_idle > cpu_layer->disallow_preempt_after_ns;
+		}
 	}
 
 	cpuc->current_preempt = false;
@@ -2664,7 +2675,8 @@ static s32 init_layer(int layer_id)
 	    layer_id, layer->name, layer->min_exec_ns,
 	    layer->kind != LAYER_KIND_CONFINED,
 	    layer->preempt, layer->exclusive);
-	dbg("CFG      disallow_open_after=%lu", layer->disallow_open_after_ns);
+	dbg("CFG      disallow_open/preempt_after=%lu/%lu",
+	    layer->disallow_open_after_ns, layer->disallow_preempt_after_ns);
 
 	layer->id = layer_id;
 
@@ -2902,8 +2914,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 
 	dbg("CFG: Dumping configuration, nr_online_cpus=%d smt_enabled=%d little_cores=%d",
 	    nr_online_cpus, smt_enabled, has_little_cores);
-	dbg("CFG: min_open_layer_disallow_open_after=%lu",
-	    min_open_layer_disallow_open_after_ns);
+	dbg("CFG: min_open_layer_disallow_open/preempt_after=%lu/%lu",
+	    min_open_layer_disallow_open_after_ns, min_open_layer_disallow_preempt_after_ns);
 
 	bpf_for(i, 0, nr_layers) {
 		ret = init_layer(i);

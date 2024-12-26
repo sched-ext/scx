@@ -95,6 +95,8 @@ pub struct LayerCommon {
     #[serde(default)]
     pub disallow_open_after_us: Option<u64>,
     #[serde(default)]
+    pub disallow_preempt_after_us: Option<u64>,
+    #[serde(default)]
     pub xllc_mig_min_us: f64,
     #[serde(default, skip_serializing)]
     pub idle_smt: Option<bool>,
