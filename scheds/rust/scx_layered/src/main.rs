@@ -1209,8 +1209,14 @@ impl<'a> Scheduler<'a> {
                 layer.exclusive.write(*exclusive);
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;
-                layer.disallow_open_after_ns = disallow_open_after_us.unwrap() * 1000;
-                layer.disallow_preempt_after_ns = disallow_preempt_after_us.unwrap() * 1000;
+                layer.disallow_open_after_ns = match disallow_open_after_us.unwrap() {
+                    v if v == u64::MAX => v,
+                    v => v * 1000,
+                };
+                layer.disallow_preempt_after_ns = match disallow_preempt_after_us.unwrap() {
+                    v if v == u64::MAX => v,
+                    v => v * 1000,
+                };
                 layer.xllc_mig_min_ns = (xllc_mig_min_us * 1000.0) as u64;
                 layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
