@@ -948,8 +948,19 @@ bool try_preempt_cpu(s32 cand, struct task_struct *p, struct cpu_ctx *cpuc,
 	if (cand >= nr_possible_cpus || !bpf_cpumask_test_cpu(cand, p->cpus_ptr))
 		return false;
 
-	if (!(cand_cpuc = lookup_cpu_ctx(cand)) || cand_cpuc->current_preempt ||
-	    (cand_cpuc->protect_owned_preempt && cand_cpuc->running_owned))
+	if (!(cand_cpuc = lookup_cpu_ctx(cand)))
+		return false;
+
+	if (cand_cpuc->current_preempt)
+		return false;
+
+	/*
+	 * Don't preempt if protection against is in effect. However, open
+	 * layers share CPUs and using the same mechanism between non-preempt
+	 * and preempt open layers doesn't make sense. Exclude for now.
+	 */
+	if (cand_cpuc->protect_owned_preempt && cand_cpuc->running_owned &&
+	    !(layer->kind == LAYER_KIND_OPEN && cand_cpuc->running_open))
 		return false;
 
 	/*
@@ -2103,10 +2114,13 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	taskc->running_at = now;
 
 	/* running an owned task if the task is on the layer owning the CPU */
-	if (layer->kind == LAYER_KIND_OPEN)
+	if (layer->kind == LAYER_KIND_OPEN) {
 		cpuc->running_owned = cpuc->in_open_layers;
-	else
+		cpuc->running_open = true;
+	} else {
 		cpuc->running_owned = taskc->layer_id == cpuc->layer_id;
+		cpuc->running_open = false;
+	}
 
 	/*
 	 * If this CPU is transitioning from running an exclusive task to a
@@ -2160,6 +2174,11 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		((RUNTIME_DECAY_FACTOR - 1) * taskc->runtime_avg + used) /
 		RUNTIME_DECAY_FACTOR;
 
+	/*
+	 * protect_owned/preempt accounting is a bit wrong in that they charge
+	 * the execution duration to the layer that just ran which may be
+	 * different from the layer that is protected on the CPU. Oh well...
+	 */
 	if (cpuc->running_owned) {
 		cpuc->layer_usages[task_lid][LAYER_USAGE_OWNED] += used;
 		if (cpuc->protect_owned)
@@ -2193,7 +2212,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	cpuc->protect_owned_preempt = false;
 
 	if (cpuc->in_open_layers) {
-		if (task_layer->kind == LAYER_KIND_OPEN) {
+		if (task_layer->kind == LAYER_KIND_OPEN && !task_layer->preempt) {
 			cpuc->protect_owned = usage_since_idle > min_open_layer_disallow_open_after_ns;
 			cpuc->protect_owned_preempt = usage_since_idle > min_open_layer_disallow_preempt_after_ns;
 		}

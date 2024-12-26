@@ -1209,8 +1209,14 @@ impl<'a> Scheduler<'a> {
                 layer.exclusive.write(*exclusive);
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;
-                layer.disallow_open_after_ns = disallow_open_after_us.unwrap() * 1000;
-                layer.disallow_preempt_after_ns = disallow_preempt_after_us.unwrap() * 1000;
+                layer.disallow_open_after_ns = match disallow_open_after_us.unwrap() {
+                    v if v == u64::MAX => v,
+                    v => v * 1000,
+                };
+                layer.disallow_preempt_after_ns = match disallow_preempt_after_us.unwrap() {
+                    v if v == u64::MAX => v,
+                    v => v * 1000,
+                };
                 layer.xllc_mig_min_ns = (xllc_mig_min_us * 1000.0) as u64;
                 layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
@@ -1688,29 +1694,26 @@ impl<'a> Scheduler<'a> {
             })
             .count() as u32;
 
-        skel.maps.rodata_data.min_open_layer_disallow_open_after_ns = layer_specs
-            .iter()
-            .filter_map(|spec| match &spec.kind {
-                LayerKind::Open { .. } => Some(spec.kind.common().disallow_open_after_us.unwrap()),
-                _ => None,
-            })
-            .min()
-            .unwrap_or(*DFL_DISALLOW_OPEN_AFTER_US)
-            * 1000;
+        let mut min_open = u64::MAX;
+        let mut min_preempt = u64::MAX;
 
+        for spec in layer_specs.iter() {
+            if let LayerKind::Open { common, .. } = &spec.kind {
+                min_open = min_open.min(common.disallow_open_after_us.unwrap());
+                min_preempt = min_preempt.min(common.disallow_preempt_after_us.unwrap());
+            }
+        }
+
+        skel.maps.rodata_data.min_open_layer_disallow_open_after_ns = match min_open {
+            u64::MAX => *DFL_DISALLOW_OPEN_AFTER_US,
+            v => v,
+        };
         skel.maps
             .rodata_data
-            .min_open_layer_disallow_preempt_after_ns = layer_specs
-            .iter()
-            .filter_map(|spec| match &spec.kind {
-                LayerKind::Open { .. } => {
-                    Some(spec.kind.common().disallow_preempt_after_us.unwrap())
-                }
-                _ => None,
-            })
-            .min()
-            .unwrap_or(*DFL_DISALLOW_PREEMPT_AFTER_US)
-            * 1000;
+            .min_open_layer_disallow_preempt_after_ns = match min_preempt {
+            u64::MAX => *DFL_DISALLOW_PREEMPT_AFTER_US,
+            v => v,
+        };
 
         // Consider all layers empty at the beginning.
         for i in 0..layer_specs.len() {
@@ -2433,12 +2436,29 @@ fn main() -> Result<()> {
         }
         common.weight = common.weight.max(MIN_LAYER_WEIGHT).min(MAX_LAYER_WEIGHT);
 
-        if common.disallow_open_after_us.is_none() {
-            common.disallow_open_after_us = Some(*DFL_DISALLOW_OPEN_AFTER_US);
-        }
+        if common.preempt {
+            if common.disallow_open_after_us.is_some() {
+                warn!(
+                    "Preempt layer {} has non-null disallow_open_after_us, ignored",
+                    &spec.name
+                );
+            }
+            if common.disallow_preempt_after_us.is_some() {
+                warn!(
+                    "Preempt layer {} has non-null disallow_preempt_after_us, ignored",
+                    &spec.name
+                );
+            }
+            common.disallow_open_after_us = Some(u64::MAX);
+            common.disallow_preempt_after_us = Some(u64::MAX);
+        } else {
+            if common.disallow_open_after_us.is_none() {
+                common.disallow_open_after_us = Some(*DFL_DISALLOW_OPEN_AFTER_US);
+            }
 
-        if common.disallow_preempt_after_us.is_none() {
-            common.disallow_preempt_after_us = Some(*DFL_DISALLOW_PREEMPT_AFTER_US);
+            if common.disallow_preempt_after_us.is_none() {
+                common.disallow_preempt_after_us = Some(*DFL_DISALLOW_PREEMPT_AFTER_US);
+            }
         }
 
         if common.idle_smt.is_some() {
