@@ -158,6 +158,7 @@ struct cpu_ctx {
 	bool			protect_owned;
 	bool			protect_owned_preempt;
 	bool			running_owned;
+	bool			running_open;
 	bool			running_fallback;
 	u64			running_at;
 
