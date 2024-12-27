@@ -171,7 +171,7 @@ int sdt_alloc_stack(struct sdt_alloc_stack __arena *stack)
 	return -EAGAIN;
 }
 
-static SDT_TASK_FN_ATTRS
+static __noinline
 int sdt_alloc_attempt(struct sdt_alloc_stack __arena *stack)
 {
 	bpf_repeat(SDT_TASK_ALLOC_ATTEMPTS) {
