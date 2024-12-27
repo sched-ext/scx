@@ -47,6 +47,7 @@
 #endif
 
 #include "intf.h"
+#include "sdt_dom.h"
 
 #include <errno.h>
 #include <stdbool.h>
