@@ -138,10 +138,6 @@ struct bucket_ctx {
 
 struct dom_ctx {
 	u32 id;
-	struct bpf_cpumask __kptr *cpumask;
-	struct bpf_cpumask __kptr *direct_greedy_cpumask;
-	struct bpf_cpumask __kptr *node_cpumask;
-
 	u64 min_vruntime;
 
 	u64 dbg_dcycle_printed_at;

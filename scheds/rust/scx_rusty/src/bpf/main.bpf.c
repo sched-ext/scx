@@ -221,22 +221,6 @@ struct {
 	__uint(map_flags, 0);
 } task_masks SEC(".maps");
 
-static struct dom_ctx *try_lookup_dom_ctx(u32 dom_id)
-{
-	return bpf_map_lookup_elem(&dom_data, &dom_id);
-}
-
-static struct dom_ctx *lookup_dom_ctx(u32 dom_id)
-{
-	struct dom_ctx *domc;
-
-	domc = try_lookup_dom_ctx(dom_id);
-	if (!domc)
-		scx_bpf_error("Failed to lookup dom[%u]", dom_id);
-
-	return domc;
-}
-
 static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
 {
 	struct task_ctx __arena *taskc = sdt_task_data(p);
@@ -320,7 +304,7 @@ static struct bucket_ctx *lookup_dom_bucket(struct dom_ctx *dom_ctx,
 	struct bucket_ctx *bucket;
 
 	*bucket_id = idx;
-	bucket = MEMBER_VPTR(dom_ctx->buckets, [idx]);
+	bucket = &dom_ctx->buckets[idx];
 	if (bucket)
 		return bucket;
 
@@ -578,24 +562,24 @@ static void refresh_tune_params(void)
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		u32 dom_id = cpu_to_dom_id(cpu);
-		struct dom_ctx *domc;
+		struct sdt_dom_map_val *dval;
 
 		if (is_offline_cpu(cpu))
 			continue;
 
-		if (!(domc = lookup_dom_ctx(dom_id)))
+		if (!(dval = sdt_dom_val(dom_id)))
 			return;
 
 		if (tune_input.direct_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
 			if (direct_greedy_cpumask)
 				bpf_cpumask_set_cpu(cpu, direct_greedy_cpumask);
-			if (domc->direct_greedy_cpumask)
-				bpf_cpumask_set_cpu(cpu, domc->direct_greedy_cpumask);
+			if (dval->direct_greedy_cpumask)
+				bpf_cpumask_set_cpu(cpu, dval->direct_greedy_cpumask);
 		} else {
 			if (direct_greedy_cpumask)
 				bpf_cpumask_clear_cpu(cpu, direct_greedy_cpumask);
-			if (domc->direct_greedy_cpumask)
-				bpf_cpumask_clear_cpu(cpu, domc->direct_greedy_cpumask);
+			if (dval->direct_greedy_cpumask)
+				bpf_cpumask_clear_cpu(cpu, dval->direct_greedy_cpumask);
 		}
 
 		if (tune_input.kick_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
@@ -829,6 +813,7 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 {
 	struct dom_ctx *old_domc, *new_domc;
 	struct bpf_cpumask *d_cpumask, *t_cpumask;
+	struct sdt_dom_map_val *new_dval;
 	struct task_ctx *taskc;
 	u32 old_dom_id;
 
@@ -852,7 +837,13 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 	if (!new_domc)
 		return false;
 
-	d_cpumask = new_domc->cpumask;
+	new_dval = sdt_dom_val(new_dom_id);
+	if (!new_dval) {
+		scx_bpf_error("no dval for dom%d\n", new_dom_id);
+		return false;
+	}
+
+	d_cpumask = new_dval->cpumask;
 	if (!d_cpumask) {
 		scx_bpf_error("Failed to get dom%u cpumask kptr",
 			      new_dom_id);
@@ -888,7 +879,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 	s32 cpu;
 	const struct cpumask *idle_cpumask;
 	bool share_llc, has_idle;
-	struct dom_ctx *domc;
+	struct sdt_dom_map_val *dval;
 	struct bpf_cpumask *d_cpumask;
 	struct pcpu_ctx *pcpuc;
 
@@ -897,11 +888,11 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 	if (!pcpuc)
 		return -ENOENT;
 
-	domc = lookup_dom_ctx(pcpuc->dom_id);
-	if (!domc)
+	dval = sdt_dom_val(pcpuc->dom_id);
+	if (!dval)
 		return -ENOENT;
 
-	d_cpumask = domc->cpumask;
+	d_cpumask = dval->cpumask;
 	if (!d_cpumask) {
 		scx_bpf_error("Failed to acquire dom%u cpumask kptr",
 				taskc->dom_id);
@@ -1042,6 +1033,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	    !bpf_cpumask_empty(cast_mask(direct_greedy_cpumask))) {
 		u32 dom_id = cpu_to_dom_id(prev_cpu);
 		struct dom_ctx *domc;
+		struct sdt_dom_map_val *dval;
 		struct bpf_cpumask *tmp_direct_greedy, *node_mask;
 
 		/*
@@ -1059,6 +1051,11 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		else if (!(domc = lookup_dom_ctx(dom_id)))
 			goto enoent;
 
+		if (!(dval = sdt_dom_val(domc->id))) {
+			scx_bpf_error("Failed to lookup domain map value");
+			goto enoent;
+		}
+
 		tmp_direct_greedy = direct_greedy_cpumask;
 		if (!tmp_direct_greedy) {
 			scx_bpf_error("Failed to lookup direct_greedy mask");
@@ -1073,7 +1070,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 * working set may end up spanning multiple NUMA nodes.
 		 */
 		if (!direct_greedy_numa && domc) {
-			node_mask = domc->node_cpumask;
+			node_mask = dval->node_cpumask;
 			if (!node_mask) {
 				scx_bpf_error("Failed to lookup node mask");
 				goto enoent;
@@ -1092,8 +1089,8 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 		/* Try to find an idle core in the previous and then any domain */
 		if (has_idle_cores) {
-			if (domc && domc->direct_greedy_cpumask) {
-				cpu = scx_bpf_pick_idle_cpu(cast_mask(domc->direct_greedy_cpumask),
+			if (domc && dval->direct_greedy_cpumask) {
+				cpu = scx_bpf_pick_idle_cpu(cast_mask(dval->direct_greedy_cpumask),
 							    SCX_PICK_IDLE_CORE);
 				if (cpu >= 0) {
 					stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
@@ -1114,8 +1111,8 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		/*
 		 * No idle core. Is there any idle CPU?
 		 */
-		if (domc && domc->direct_greedy_cpumask) {
-			cpu = scx_bpf_pick_idle_cpu(cast_mask(domc->direct_greedy_cpumask), 0);
+		if (domc && dval->direct_greedy_cpumask) {
+			cpu = scx_bpf_pick_idle_cpu(cast_mask(dval->direct_greedy_cpumask), 0);
 			if (cpu >= 0) {
 				stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
 				goto direct;
@@ -1240,14 +1237,14 @@ dom_queue:
 
 static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
 {
-	struct dom_ctx *domc;
+	struct sdt_dom_map_val *dval;
 	struct bpf_cpumask *dmask;
 
-	domc = lookup_dom_ctx(dom_id);
-	if (!domc)
+	dval = sdt_dom_val(dom_id);
+	if (!dval)
 		return false;
 
-	dmask = domc->cpumask;
+	dmask = dval->cpumask;
 	if (!dmask)
 		return false;
 
@@ -1771,6 +1768,7 @@ static s32 create_dom(u32 dom_id)
 	struct dom_ctx *domc;
 	struct node_ctx *nodec;
 	struct bpf_cpumask *dom_mask, *node_mask, *all_mask;
+	struct sdt_dom_map_val *dval;
 	u32 cpu, node_id;
 	s32 ret;
 
@@ -1781,24 +1779,31 @@ static s32 create_dom(u32 dom_id)
 
 	node_id = dom_node_id(dom_id);
 
+	domc = sdt_dom_alloc(node_id);
+	if (!domc)
+		return -ENOMEM;
+
+	dval = sdt_dom_val(dom_id);
+	if (!dval) {
+		scx_bpf_error("could not retrieve dom%d data\n", dom_id);
+		sdt_dom_free(domc);
+		return -EINVAL;
+	}
+
 	ret = scx_bpf_create_dsq(dom_id, node_id);
 	if (ret < 0) {
 		scx_bpf_error("Failed to create dsq %u (%d)", dom_id, ret);
 		return ret;
 	}
 
-	domc = lookup_dom_ctx(dom_id);
-	if (!domc)
-		return -ENOENT;
-
 	domc->id = dom_id;
 
-	ret = create_save_cpumask(&domc->cpumask);
+	ret = create_save_cpumask(&dval->cpumask);
 	if (ret)
 		return ret;
 
 	bpf_rcu_read_lock();
-	dom_mask = domc->cpumask;
+	dom_mask = dval->cpumask;
 	all_mask = all_cpumask;
 	if (!dom_mask || !all_mask) {
 		bpf_rcu_read_unlock();
@@ -1825,7 +1830,7 @@ static s32 create_dom(u32 dom_id)
 	if (ret)
 		return ret;
 
-	ret = create_save_cpumask(&domc->direct_greedy_cpumask);
+	ret = create_save_cpumask(&dval->direct_greedy_cpumask);
 	if (ret)
 		return ret;
 
@@ -1835,13 +1840,13 @@ static s32 create_dom(u32 dom_id)
 		scx_bpf_error("No node%u", node_id);
 		return -ENOENT;
 	}
-	ret = create_save_cpumask(&domc->node_cpumask);
+	ret = create_save_cpumask(&dval->node_cpumask);
 	if (ret)
 		return ret;
 
 	bpf_rcu_read_lock();
 	node_mask = nodec->cpumask;
-	dom_mask = domc->node_cpumask;
+	dom_mask = dval->node_cpumask;
 	if (!node_mask || !dom_mask) {
 		bpf_rcu_read_unlock();
 		scx_bpf_error("cpumask lookup failed");
@@ -1865,14 +1870,14 @@ static s32 initialize_cpu(s32 cpu)
 	pcpuc->dom_rr_cur = cpu;
 	bpf_for(i, 0, nr_doms) {
 		bool in_dom;
-		struct dom_ctx *domc;
+		struct sdt_dom_map_val *dval;
 
-		domc = lookup_dom_ctx(i);
-		if (!domc)
+		dval = sdt_dom_val(i);
+		if (!dval)
 			return -ENOENT;
 
 		bpf_rcu_read_lock();
-		cpumask = domc->cpumask;
+		cpumask = dval->cpumask;
 		if (!cpumask) {
 			bpf_rcu_read_unlock();
 			scx_bpf_error("Failed to lookup dom node cpumask");
@@ -1895,6 +1900,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 	s32 i, ret;
 
 	ret = sdt_task_init(sizeof(struct task_ctx));
+	if (ret)
+		return ret;
+
+	ret = sdt_dom_init();
 	if (ret)
 		return ret;
 
