@@ -212,15 +212,6 @@ struct dom_active_tptrs dom_active_tptrs[MAX_DOMS];
 
 const u64 ravg_1 = 1 << RAVG_FRAC_BITS;
 
-/* Map tptr -> task_ctx */
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, u64);
-	__type(value, struct task_ctx);
-	__uint(max_entries, 1000000);
-	__uint(map_flags, 0);
-} task_data SEC(".maps");
-
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, struct task_struct *);
@@ -261,10 +252,9 @@ static u64 t_to_tptr(struct task_struct *p)
 
 static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
 {
-	u64 tptr;
-	tptr = t_to_tptr(p);
-
-	return bpf_map_lookup_elem(&task_data, &tptr);
+	struct task_ctx __arena *taskc = sdt_task_data(p);
+	cast_kern(taskc);
+	return taskc;
 }
 
 static struct bpf_cpumask *lookup_task_bpfmask(struct task_struct *p)
@@ -506,35 +496,10 @@ static u64 dom_min_vruntime(struct dom_ctx *domc)
 	return READ_ONCE(domc->min_vruntime);
 }
 
-static struct task_struct *tptr_to_task(u64 tptr)
-{
-	struct task_struct *p, *task;
-	int err_task;
-
-	task = (struct task_struct *)tptr;
-
-	err_task = bpf_probe_read_kernel(&p, sizeof(struct task_struct *), &task);
-	if (err_task) {
-		scx_bpf_error("Failed to retrieve task_struct for tptr %llu",
-			      tptr);
-		return NULL;
-	}
-
-	return p;
-}
-
-int dom_xfer_task(u64 tptr, u32 new_dom_id, u64 now)
+int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now)
 {
 	struct dom_ctx *from_domc, *to_domc;
 	struct task_ctx *taskc;
-	struct task_struct *p;
-
-	p = tptr_to_task(tptr);
-
-	if (!p) {
-		scx_bpf_error("Failed to lookup task %llu", tptr);
-		return 0;
-	}
 
 	taskc = lookup_task_ctx(p);
 	if (!taskc)
@@ -872,21 +837,24 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 	}
 }
 
-static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
+static bool task_set_domain(struct task_struct *p __arg_trusted,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
 	struct dom_ctx *old_domc, *new_domc;
 	struct bpf_cpumask *d_cpumask, *t_cpumask;
+	struct task_ctx *taskc;
+	u32 old_dom_id;
 	u64 tptr;
-	u32 old_dom_id = taskc->dom_id;
+
 	tptr = t_to_tptr(p);
 
-	t_cpumask = lookup_task_bpfmask(p);
-	if (!t_cpumask) {
+	taskc = lookup_task_ctx_mask(p, &t_cpumask);
+	if (!taskc || !t_cpumask) {
 		scx_bpf_error("Failed to look up task cpumask");
 		return false;
 	}
 
+	old_dom_id = taskc->dom_id;
 	old_domc = lookup_dom_ctx(old_dom_id);
 	if (!old_domc)
 		return false;
@@ -916,7 +884,7 @@ static bool task_set_domain(struct task_ctx *taskc, struct task_struct *p,
 		u64 now = bpf_ktime_get_ns();
 
 		if (!init_dsq_vtime)
-			dom_xfer_task(tptr, new_dom_id, now);
+			dom_xfer_task(p, new_dom_id, now);
 
 		taskc->dom_id = new_dom_id;
 		p->scx.dsq_vtime = dom_min_vruntime(new_domc);
@@ -1211,24 +1179,25 @@ static void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
 				 enq_flags);
 }
 
-void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
+void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
 {
 	struct task_ctx *taskc;
 	struct bpf_cpumask *p_cpumask;
 	u64 tptr;
 	u32 *new_dom;
 	s32 cpu;
-	tptr = t_to_tptr(p);
 
 	if (!(taskc = lookup_task_ctx_mask(p, &p_cpumask)) || !p_cpumask)
 		return;
+
+	tptr = t_to_tptr(p);
 
 	/*
 	 * Migrate @p to a new domain if requested by userland through lb_data.
 	 */
 	new_dom = bpf_map_lookup_elem(&lb_data, &tptr);
 	if (new_dom && *new_dom != taskc->dom_id &&
-	    task_set_domain(taskc, p, *new_dom, false)) {
+	    task_set_domain(p, *new_dom, false)) {
 		stat_add(RUSTY_STAT_LOAD_BALANCE, 1);
 		taskc->dispatch_local = false;
 		cpu = scx_bpf_pick_any_cpu(cast_mask(p_cpumask), 0);
@@ -1615,10 +1584,11 @@ void BPF_STRUCT_OPS(rusty_set_weight, struct task_struct *p, u32 weight)
 {
 	struct task_ctx *taskc;
 	u64 tptr;
-	tptr = t_to_tptr(p);
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
+
+	tptr = t_to_tptr(p);
 
 	if (debug >= 2)
 		bpf_printk("%s[%llu]: SET_WEIGHT %u -> %u", p->comm, tptr,
@@ -1669,17 +1639,14 @@ static void task_pick_and_set_domain(struct task_ctx *taskc,
 				     const struct cpumask *cpumask,
 				     bool init_dsq_vtime)
 {
-	u64 tptr;
 	u32 dom_id = 0;
-
-	tptr = t_to_tptr(p);
 
 	if (nr_doms > 1)
 		dom_id = task_pick_domain(taskc, p, cpumask);
 
-	if (!task_set_domain(taskc, p, dom_id, init_dsq_vtime))
-		scx_bpf_error("Failed to set dom%d for %s[%llu]",
-			      dom_id, p->comm, tptr);
+	if (!task_set_domain(p, dom_id, init_dsq_vtime))
+		scx_bpf_error("Failed to set dom%d for %s[%p]",
+			      dom_id, p->comm, p);
 }
 
 void BPF_STRUCT_OPS(rusty_set_cpumask, struct task_struct *p,
@@ -1696,51 +1663,34 @@ void BPF_STRUCT_OPS(rusty_set_cpumask, struct task_struct *p,
 			bpf_cpumask_subset(cast_mask(all_cpumask), cpumask);
 }
 
-s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
+s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
 	u64 now = bpf_ktime_get_ns();
-	struct task_ctx taskc = {
+	struct task_struct *p_map;
+	struct bpfmask_wrapper wrapper;
+	struct bpfmask_wrapper *mask_map_value;
+	struct task_ctx *taskc;
+	long ret;
+	u64 tptr;
+
+	taskc = sdt_task_alloc(p);
+	if (!taskc)
+		return -ENOMEM;
+
+	tptr = t_to_tptr(p);
+
+	*taskc = (struct task_ctx) {
 		.dom_active_tptrs_gen = -1,
 		.last_blocked_at = now,
 		.last_woke_at = now,
 		.preferred_dom_mask = 0,
 
 	};
-	struct task_struct *p_map;
-	struct bpfmask_wrapper wrapper;
-	struct bpfmask_wrapper *mask_map_value;
-	struct task_ctx *map_value;
-	long ret;
-	u64 tptr;
-
-	tptr = t_to_tptr(p);
-
-	/*
-	 * XXX - We want BPF_NOEXIST but bpf_map_delete_elem() in .disable() may
-	 * fail spuriously due to BPF recursion protection triggering
-	 * unnecessarily.
-	 */
-	ret = bpf_map_update_elem(&task_data, &tptr, &taskc, 0 /*BPF_NOEXIST*/);
-	if (ret) {
-		stat_add(RUSTY_STAT_TASK_GET_ERR, 1);
-		return ret;
-	}
 
 	if (debug >= 2)
 		bpf_printk("%s[%llu]: INIT (weight %u))", p->comm, tptr, p->scx.weight);
 
-	/*
-	 * Read the entry from the map immediately so we can pass it to
-	 * task_pick_and_set_domain() below.
-	 */
-	map_value = bpf_map_lookup_elem(&task_data, &tptr);
-	if (!map_value)
-		/* Should never happen -- it was just inserted above. */
-		return -EINVAL;
-
-
-	wrapper.instance = NULL;
 
 	/*
 	 * XXX Passing a trusted pointer as a key to the map turns it into a
@@ -1751,24 +1701,26 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 
 	ret = bpf_map_update_elem(&task_masks, &p_map, &wrapper, 0 /*BPF NOEXIST*/);
 	if (ret) {
-		bpf_map_delete_elem(&task_data, &tptr);
+		sdt_task_free(p);
 		return ret;
 	}
 
 	mask_map_value = bpf_map_lookup_elem(&task_masks, &p_map);
 	if (!mask_map_value) {
-		bpf_map_delete_elem(&task_data, &tptr);
+		sdt_task_free(p);
 		return -EINVAL;
 	}
 
 	ret = create_save_cpumask(&mask_map_value->instance);
 	if (ret) {
 		bpf_map_delete_elem(&task_masks, &p_map);
-		bpf_map_delete_elem(&task_data, &tptr);
+		sdt_task_free(p);
 		return ret;
 	}
 
-	task_pick_and_set_domain(map_value, p, p->cpus_ptr, true);
+	bpf_rcu_read_lock();
+	task_pick_and_set_domain(taskc, p, p->cpus_ptr, true);
+	bpf_rcu_read_unlock();
 
 	return 0;
 }
@@ -1776,20 +1728,17 @@ s32 BPF_STRUCT_OPS(rusty_init_task, struct task_struct *p,
 void BPF_STRUCT_OPS(rusty_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
-	u64 tptr = t_to_tptr(p);
 	long ret;
+
+	sdt_task_free(p);
 
 	/*
 	 * XXX - There's no reason delete should fail here but BPF's recursion
 	 * protection can unnecessarily fail the operation. The fact that
-	 * deletions aren't reliable means that we sometimes leak task_ctx and
+	 * deletions aren't reliable means that we sometimes leak bpf_cpumask and
 	 * can't use BPF_NOEXIST on allocation in .prep_enable().
 	 */
 	ret = bpf_map_delete_elem(&task_masks, &p);
-	if (ret)
-		stat_add(RUSTY_STAT_TASK_GET_ERR, 1);
-
-	ret = bpf_map_delete_elem(&task_data, &tptr);
 	if (ret) {
 		stat_add(RUSTY_STAT_TASK_GET_ERR, 1);
 		return;
@@ -1968,6 +1917,10 @@ static s32 initialize_cpu(s32 cpu)
 s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 {
 	s32 i, ret;
+
+	ret = sdt_task_init(sizeof(struct task_ctx));
+	if (ret)
+		return ret;
 
 	ret = create_save_cpumask(&all_cpumask);
 	if (ret)
