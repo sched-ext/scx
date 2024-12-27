@@ -184,10 +184,16 @@ pub struct Topology {
     pub all_llcs: BTreeMap<usize, Arc<Llc>>,
     pub all_cores: BTreeMap<usize, Arc<Core>>,
     pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
+
+    pub possible_cpus: Cpumask,
 }
 
 impl Topology {
-    fn instantiate(span: Cpumask, mut nodes: BTreeMap<usize, Node>) -> Result<Self> {
+    fn instantiate(
+        span: Cpumask,
+        possible_cpus: Cpumask,
+        mut nodes: BTreeMap<usize, Node>,
+    ) -> Result<Self> {
         // Build skip indices prefixed with all_ for easy lookups. As Arc
         // objects can only be modified while there's only one reference,
         // skip indices must be built from bottom to top.
@@ -239,12 +245,15 @@ impl Topology {
             all_llcs: topo_llcs,
             all_cores: topo_cores,
             all_cpus: topo_cpus,
+            possible_cpus,
         })
     }
 
     /// Build a complete host Topology
     pub fn new() -> Result<Topology> {
         let span = cpus_online()?;
+        let possible = cpus_possible()?;
+
         let mut topo_ctx = TopoCtx::new();
         // If the kernel is compiled with CONFIG_NUMA, then build a topology
         // from the NUMA hierarchy in sysfs. Otherwise, just make a single
@@ -255,14 +264,16 @@ impl Topology {
             create_default_node(&span, &mut topo_ctx, false)?
         };
 
-        Self::instantiate(span, nodes)
+        Self::instantiate(span, possible, nodes)
     }
 
     pub fn with_flattened_llc_node() -> Result<Topology> {
         let span = cpus_online()?;
+        let possible = cpus_possible()?;
+
         let mut topo_ctx = TopoCtx::new();
         let nodes = create_default_node(&span, &mut topo_ctx, true)?;
-        Self::instantiate(span, nodes)
+        Self::instantiate(span, possible, nodes)
     }
 
     /// Get a vec of all GPUs on the hosts.
@@ -339,17 +350,24 @@ impl TopoCtx {
 }
 
 fn cpus_online() -> Result<Cpumask> {
-    let path = "/sys/devices/system/cpu/online";
-    let online = std::fs::read_to_string(&path)?;
-    let online_groups: Vec<&str> = online.split(',').collect();
+    parse_cpus("/sys/devices/system/cpu/online")
+}
+
+fn cpus_possible() -> Result<Cpumask> {
+    parse_cpus("/sys/devices/system/cpu/possible")
+}
+
+fn parse_cpus(path: &str) -> Result<Cpumask> {
+    let cpus = std::fs::read_to_string(&path)?;
+    let cpus: Vec<&str> = cpus.split(',').collect();
     let mut mask = Cpumask::new();
-    for group in online_groups.iter() {
+    for group in cpus.iter() {
         let (min, max) = match sscanf!(group.trim(), "{usize}-{usize}") {
             Ok((x, y)) => (x, y),
             Err(_) => match sscanf!(group.trim(), "{usize}") {
                 Ok(x) => (x, x),
                 Err(_) => {
-                    bail!("Failed to parse online cpus {}", group.trim());
+                    bail!("Failed to parse cpus from {}: {}", path, group.trim());
                 }
             },
         };
