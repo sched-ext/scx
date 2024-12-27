@@ -365,19 +365,19 @@ impl Domain {
         }
     }
 
-    fn transfer_load(&mut self, load: f64, tptr: u64, other: &mut Domain, skel: &mut BpfSkel) {
-        let ctptr = (tptr as u64).to_ne_bytes();
+    fn transfer_load(&mut self, load: f64, task: u64, other: &mut Domain, skel: &mut BpfSkel) {
+        let ctask = (task as u64).to_ne_bytes();
         let dom_id: u32 = other.id.try_into().unwrap();
 
         // Ask BPF code to execute the migration.
         if let Err(e) =
             skel.maps
                 .lb_data
-                .update(&ctptr, &dom_id.to_ne_bytes(), libbpf_rs::MapFlags::NO_EXIST)
+                .update(&ctask, &dom_id.to_ne_bytes(), libbpf_rs::MapFlags::NO_EXIST)
         {
             warn!(
-                "Failed to update lb_data map for tptr={} error={:?}",
-                tptr, &e
+                "Failed to update lb_data map for task={} error={:?}",
+                task, &e
             );
         }
 
@@ -385,8 +385,8 @@ impl Domain {
         other.load.add_load(load);
 
         debug!(
-            "  DOM {} sending [tptr: {:05}](load: {:.06}) --> DOM {} ",
-            self.id, tptr, load, other.id
+            "  DOM {} sending [task: {:05}](load: {:.06}) --> DOM {} ",
+            self.id, task, load, other.id
         );
     }
 
@@ -659,14 +659,14 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         }
         dom.queried_tasks = true;
 
-        // Read active_tptrs and update read_idx and gen.
+        // Read active_tasks and update read_idx and gen.
         const MAX_TPTRS: u64 = bpf_intf::consts_MAX_DOM_ACTIVE_TPTRS as u64;
-        let active_tptrs = &mut self.skel.maps.bss_data.dom_active_tptrs[dom.id];
-        let (mut ridx, widx) = (active_tptrs.read_idx, active_tptrs.write_idx);
-        active_tptrs.read_idx = active_tptrs.write_idx;
-        active_tptrs.gen += 1;
+        let active_tasks = &mut self.skel.maps.bss_data.dom_active_tasks[dom.id];
+        let (mut ridx, widx) = (active_tasks.read_idx, active_tasks.write_idx);
+        active_tasks.read_idx = active_tasks.write_idx;
+        active_tasks.gen += 1;
 
-        let active_tptrs = &self.skel.maps.bss_data.dom_active_tptrs[dom.id];
+        let active_tasks = &self.skel.maps.bss_data.dom_active_tasks[dom.id];
         if widx - ridx > MAX_TPTRS {
             ridx = widx - MAX_TPTRS;
         }
@@ -676,7 +676,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let now_mono = now_monotonic();
 
         for idx in ridx..widx {
-            let taskc = active_tptrs.tptrs[(idx % MAX_TPTRS) as usize];
+            let taskc = active_tasks.tasks[(idx % MAX_TPTRS) as usize];
             let task_ctx = unsafe { &*(taskc as *const bpf_intf::task_ctx) };
 
             if task_ctx.dom_id as usize != dom.id {
@@ -714,7 +714,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         Ok(())
     }
 
-    // Find the first candidate tptr which hasn't already been migrated and
+    // Find the first candidate task which hasn't already been migrated and
     // can run in @pull_dom.
     fn find_first_candidate<'d, I>(tasks_by_load: I) -> Option<&'d TaskInfo>
     where
@@ -799,11 +799,11 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         }
 
         let load = *(task.load);
-        let tptr = task.taskc;
+        let taskc = task.taskc;
         task.migrated.set(true);
         std::mem::swap(&mut push_dom.tasks, &mut SortedVec::from_unsorted(tasks));
 
-        push_dom.transfer_load(load, tptr, pull_dom, &mut self.skel);
+        push_dom.transfer_load(load, taskc, pull_dom, &mut self.skel);
         Ok(Some(load))
     }
 

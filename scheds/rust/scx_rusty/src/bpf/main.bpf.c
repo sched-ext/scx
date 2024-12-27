@@ -201,14 +201,14 @@ struct {
 	__uint(map_flags, 0);
 } dom_dcycle_locks SEC(".maps");
 
-struct dom_active_tptrs {
+struct dom_active_tasks {
 	u64 gen;
 	u64 read_idx;
 	u64 write_idx;
-	u64 tptrs[MAX_DOM_ACTIVE_TPTRS];
+	struct task_struct *tasks[MAX_DOM_ACTIVE_TPTRS];
 };
 
-struct dom_active_tptrs dom_active_tptrs[MAX_DOMS];
+struct dom_active_tasks dom_active_tasks[MAX_DOMS];
 
 const u64 ravg_1 = 1 << RAVG_FRAC_BITS;
 
@@ -234,20 +234,6 @@ static struct dom_ctx *lookup_dom_ctx(u32 dom_id)
 		scx_bpf_error("Failed to lookup dom[%u]", dom_id);
 
 	return domc;
-}
-
-static u64 t_to_tptr(struct task_struct *p)
-{
-	u64 tptr;
-	int err;
-
-	err = bpf_probe_read_kernel(&tptr, sizeof(tptr), &p);
-
-	if (err){
-		scx_bpf_error("Failed to cast task_struct addr to tptr");
-		return 0;
-	}
-	return tptr;
 }
 
 static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
@@ -276,7 +262,7 @@ static struct task_ctx *lookup_task_ctx(struct task_struct *p)
 
 	taskc = try_lookup_task_ctx(p);
 	if (!taskc)
-		scx_bpf_error("task_ctx lookup failed for tptr %p", p);
+		scx_bpf_error("task_ctx lookup failed for task %p", p);
 
 	return taskc;
 }
@@ -292,11 +278,11 @@ static struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, struct bpf_c
 
 	taskc = lookup_task_ctx(p);
 	if (!taskc)
-		scx_bpf_error("task_ctx lookup failed for tptr %p", p);
+		scx_bpf_error("task_ctx lookup failed for task %p", p);
 
 	*p_cpumaskp = lookup_task_bpfmask(p);
 	if (*p_cpumaskp == NULL)
-		scx_bpf_error("task bpf_cpumask lookup failed for tptr %p", p);
+		scx_bpf_error("task bpf_cpumask lookup failed for task %p", p);
 
 	return taskc;
 }
@@ -535,7 +521,7 @@ static inline void stat_add(enum stat_idx idx, u64 addend)
 }
 
 /*
- * This is populated from userspace to indicate which tptrs should be reassigned
+ * This is populated from userspace to indicate which tasks should be reassigned
  * to new doms.
  */
 struct {
@@ -844,9 +830,6 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 	struct bpf_cpumask *d_cpumask, *t_cpumask;
 	struct task_ctx *taskc;
 	u32 old_dom_id;
-	u64 tptr;
-
-	tptr = t_to_tptr(p);
 
 	taskc = lookup_task_ctx_mask(p, &t_cpumask);
 	if (!taskc || !t_cpumask) {
@@ -1182,20 +1165,18 @@ static void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
 void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
 {
 	struct task_ctx *taskc;
+	struct task_struct *key = p;
 	struct bpf_cpumask *p_cpumask;
-	u64 tptr;
 	u32 *new_dom;
 	s32 cpu;
 
 	if (!(taskc = lookup_task_ctx_mask(p, &p_cpumask)) || !p_cpumask)
 		return;
 
-	tptr = t_to_tptr(p);
-
 	/*
 	 * Migrate @p to a new domain if requested by userland through lb_data.
 	 */
-	new_dom = bpf_map_lookup_elem(&lb_data, &tptr);
+	new_dom = bpf_map_lookup_elem(&lb_data, &key);
 	if (new_dom && *new_dom != taskc->dom_id &&
 	    task_set_domain(p, *new_dom, false)) {
 		stat_add(RUSTY_STAT_LOAD_BALANCE, 1);
@@ -1492,21 +1473,21 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	 * consider recently active tasks. Access synchronization rules aren't
 	 * strict. We just need to be right most of the time.
 	 */
-	dap_gen = dom_active_tptrs[dom_id].gen;
-	if (taskc->dom_active_tptrs_gen != dap_gen) {
-		u64 idx = __sync_fetch_and_add(&dom_active_tptrs[dom_id].write_idx, 1) %
+	dap_gen = dom_active_tasks[dom_id].gen;
+	if (taskc->dom_active_tasks_gen != dap_gen) {
+		u64 idx = __sync_fetch_and_add(&dom_active_tasks[dom_id].write_idx, 1) %
 			MAX_DOM_ACTIVE_TPTRS;
-		u64 *tptrp;
+		struct task_struct **taskp;
 
-		tptrp = MEMBER_VPTR(dom_active_tptrs, [dom_id].tptrs[idx]);
-		if (!tptrp) {
-			scx_bpf_error("dom_active_tptrs[%u][%llu] indexing failed",
+		taskp = MEMBER_VPTR(dom_active_tasks, [dom_id].tasks[idx]);
+		if (!taskp) {
+			scx_bpf_error("dom_active_tasks[%u][%llu] indexing failed",
 				      dom_id, idx);
 			return;
 		}
 
-		*tptrp = t_to_tptr(p);
-		taskc->dom_active_tptrs_gen = dap_gen;
+		*taskp = p;
+		taskc->dom_active_tasks_gen = dap_gen;
 	}
 
 	if (fifo_sched)
@@ -1583,15 +1564,12 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 void BPF_STRUCT_OPS(rusty_set_weight, struct task_struct *p, u32 weight)
 {
 	struct task_ctx *taskc;
-	u64 tptr;
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	tptr = t_to_tptr(p);
-
 	if (debug >= 2)
-		bpf_printk("%s[%llu]: SET_WEIGHT %u -> %u", p->comm, tptr,
+		bpf_printk("%s[%p]: SET_WEIGHT %u -> %u", p->comm, p,
 			   taskc->weight, weight);
 
 	taskc->weight = weight;
@@ -1672,16 +1650,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 	struct bpfmask_wrapper *mask_map_value;
 	struct task_ctx *taskc;
 	long ret;
-	u64 tptr;
 
 	taskc = sdt_task_alloc(p);
 	if (!taskc)
 		return -ENOMEM;
 
-	tptr = t_to_tptr(p);
-
 	*taskc = (struct task_ctx) {
-		.dom_active_tptrs_gen = -1,
+		.dom_active_tasks_gen = -1,
 		.last_blocked_at = now,
 		.last_woke_at = now,
 		.preferred_dom_mask = 0,
@@ -1689,7 +1664,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 	};
 
 	if (debug >= 2)
-		bpf_printk("%s[%llu]: INIT (weight %u))", p->comm, tptr, p->scx.weight);
+		bpf_printk("%s[%p]: INIT (weight %u))", p->comm, p, p->scx.weight);
 
 
 	/*
