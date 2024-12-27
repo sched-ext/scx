@@ -81,16 +81,22 @@ struct sdt_dom_map_val *sdt_dom_val(u32 dom_id)
 	return bpf_map_lookup_elem(&sdt_dom_map, &dom_id);
 }
 
-static struct dom_ctx *try_lookup_dom_ctx(u32 dom_id)
+static struct dom_ctx *try_lookup_dom_ctx_arena(u32 dom_id)
 {
 	struct sdt_dom_map_val *mval;
-	struct dom_ctx __arena *domc;
 
 	mval = sdt_dom_val(dom_id);
 	if (!mval)
 		return NULL;
 
-	domc = mval->domc;
+	return mval->domc;
+}
+
+static struct dom_ctx *try_lookup_dom_ctx(u32 dom_id)
+{
+	struct dom_ctx __arena *domc;
+
+	domc = try_lookup_dom_ctx_arena(dom_id);
 
 	cast_kern(domc);
 

@@ -101,6 +101,9 @@ struct task_ctx {
 	u64 dom_mask;
 	u64 preferred_dom_mask;
 
+	/* Arena pointer to this task's domain. */
+	struct dom_ctx *domc;
+
 	u32 dom_id;
 	u32 weight;
 	bool runnable;

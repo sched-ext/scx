@@ -272,6 +272,14 @@ static struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, struct bpf_c
 	return taskc;
 }
 
+static struct dom_ctx *task_domain(struct task_ctx *taskc)
+{
+	struct dom_ctx *domc = taskc->domc;
+
+	cast_kern(domc);
+
+	return domc;
+}
 
 static struct pcpu_ctx *lookup_pcpu_ctx(s32 cpu)
 {
@@ -476,7 +484,7 @@ int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now)
 	if (!taskc)
 		return 0;
 
-	from_domc = lookup_dom_ctx(taskc->dom_id);
+	from_domc = task_domain(taskc);
 	to_domc = lookup_dom_ctx(new_dom_id);
 
 	if (!from_domc || !to_domc || !taskc)
@@ -788,7 +796,7 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 	u64 dom_vruntime, min_vruntime;
 	struct dom_ctx *domc;
 
-	if (!(domc = lookup_dom_ctx(taskc->dom_id)))
+	if (!(domc = task_domain(taskc)))
 		return;
 
 	dom_vruntime = dom_min_vruntime(domc);
@@ -811,7 +819,7 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 static bool task_set_domain(struct task_struct *p __arg_trusted,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
-	struct dom_ctx *old_domc, *new_domc;
+	struct dom_ctx *old_domc, __arena *new_domc;
 	struct bpf_cpumask *d_cpumask, *t_cpumask;
 	struct sdt_dom_map_val *new_dval;
 	struct task_ctx *taskc;
@@ -833,7 +841,7 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 		return !(p->scx.flags & SCX_TASK_QUEUED);
 	}
 
-	new_domc = lookup_dom_ctx(new_dom_id);
+	new_domc = try_lookup_dom_ctx_arena(new_dom_id);
 	if (!new_domc)
 		return false;
 
@@ -862,6 +870,9 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 			dom_xfer_task(p, new_dom_id, now);
 
 		taskc->dom_id = new_dom_id;
+		taskc->domc = new_domc;
+
+		cast_kern(new_domc);
 		p->scx.dsq_vtime = dom_min_vruntime(new_domc);
 		taskc->deadline = p->scx.dsq_vtime +
 				  scale_inverse_fair(taskc->avg_runtime, taskc->weight);
@@ -1543,7 +1554,7 @@ void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	if (!(domc = lookup_dom_ctx(taskc->dom_id)))
+	if (!(domc = task_domain(taskc)))
 		return;
 
 	stopping_update_vtime(p, taskc, domc);
@@ -1564,7 +1575,7 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 	if (fifo_sched)
 		return;
 
-	if (!(domc = lookup_dom_ctx(taskc->dom_id)))
+	if (!(domc = task_domain(taskc)))
 		return;
 
 	interval = now - taskc->last_blocked_at;
