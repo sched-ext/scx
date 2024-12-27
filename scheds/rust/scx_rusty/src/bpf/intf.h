@@ -139,12 +139,20 @@ struct bucket_ctx {
 	struct ravg_data rd;
 };
 
+struct dom_active_tasks {
+	u64 gen;
+	u64 read_idx;
+	u64 write_idx;
+	struct task_struct *tasks[MAX_DOM_ACTIVE_TPTRS];
+};
+
 struct dom_ctx {
 	u32 id;
 	u64 min_vruntime;
 
 	u64 dbg_dcycle_printed_at;
 	struct bucket_ctx buckets[LB_LOAD_BUCKETS];
+	struct dom_active_tasks active_tasks;
 };
 
 struct node_ctx {

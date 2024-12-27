@@ -194,15 +194,6 @@ struct {
 	__uint(map_flags, 0);
 } dom_dcycle_locks SEC(".maps");
 
-struct dom_active_tasks {
-	u64 gen;
-	u64 read_idx;
-	u64 write_idx;
-	struct task_struct *tasks[MAX_DOM_ACTIVE_TPTRS];
-};
-
-struct dom_active_tasks dom_active_tasks[MAX_DOMS];
-
 const u64 ravg_1 = 1 << RAVG_FRAC_BITS;
 
 struct {
@@ -1465,8 +1456,8 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	dom_id = taskc->dom_id;
-	if (dom_id >= MAX_DOMS) {
+	domc = task_domain(domc);
+	if (!domc) {
 		scx_bpf_error("Invalid dom ID");
 		return;
 	}
@@ -1476,28 +1467,22 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	 * consider recently active tasks. Access synchronization rules aren't
 	 * strict. We just need to be right most of the time.
 	 */
-	dap_gen = dom_active_tasks[dom_id].gen;
+	dap_gen = domc->active_tasks.gen;
 	if (taskc->dom_active_tasks_gen != dap_gen) {
-		u64 idx = __sync_fetch_and_add(&dom_active_tasks[dom_id].write_idx, 1) %
+		u64 idx = __sync_fetch_and_add(&domc->active_tasks.write_idx, 1) %
 			MAX_DOM_ACTIVE_TPTRS;
-		struct task_struct **taskp;
 
-		taskp = MEMBER_VPTR(dom_active_tasks, [dom_id].tasks[idx]);
-		if (!taskp) {
-			scx_bpf_error("dom_active_tasks[%u][%llu] indexing failed",
+		if (idx >= MAX_DOM_ACTIVE_TPTRS) {
+			scx_bpf_error("dom_active_tasks[%u][%llu] out of bounds indexing",
 				      dom_id, idx);
 			return;
 		}
 
-		*taskp = p;
+		domc->active_tasks.tasks[idx] = p;
 		taskc->dom_active_tasks_gen = dap_gen;
 	}
 
 	if (fifo_sched)
-		return;
-
-	domc = lookup_dom_ctx(dom_id);
-	if (!domc)
 		return;
 
 	running_update_vtime(p, taskc, domc);
