@@ -7,6 +7,7 @@
 struct sdt_dom_map_val {
 	union sdt_id		tid;
 
+	struct bpf_spin_lock vtime_lock;
 	struct bpf_cpumask __kptr *cpumask;
 	struct bpf_cpumask __kptr *direct_greedy_cpumask;
 	struct bpf_cpumask __kptr *node_cpumask;
@@ -114,3 +115,15 @@ static struct dom_ctx *lookup_dom_ctx(u32 dom_id)
 	return domc;
 }
 
+static struct bpf_spin_lock *lookup_dom_vtime_lock(struct dom_ctx *domc)
+{
+	struct sdt_dom_map_val *mval;
+
+	mval = sdt_dom_val(domc->id);
+	if (!mval) {
+		scx_bpf_error("Failed to lookup dom map value");
+		return NULL;
+	}
+
+	return &mval->vtime_lock;
+}

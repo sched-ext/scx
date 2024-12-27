@@ -190,14 +190,6 @@ struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
 	__type(value, struct lock_wrapper);
-	__uint(max_entries, MAX_DOMS);
-	__uint(map_flags, 0);
-} dom_vtime_locks SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct lock_wrapper);
 	__uint(max_entries, MAX_DOMS * LB_LOAD_BUCKETS);
 	__uint(map_flags, 0);
 } dom_dcycle_locks SEC(".maps");
@@ -333,17 +325,6 @@ static struct lock_wrapper *lookup_dom_bkt_lock(u32 dom_id, u32 weight)
 	return NULL;
 }
 
-static struct lock_wrapper *lookup_dom_vtime_lock(u32 dom_id)
-{
-	struct lock_wrapper *lockw;
-	u32 idx = dom_id;
-
-	lockw = bpf_map_lookup_elem(&dom_vtime_locks, &idx);
-	if (!lockw)
-		scx_bpf_error("Failed to lookup dom lock");
-
-	return lockw;
-}
 
 static inline bool vtime_before(u64 a, u64 b)
 {
@@ -1464,15 +1445,15 @@ static void running_update_vtime(struct task_struct *p,
 				 struct task_ctx *taskc,
 				 struct dom_ctx *domc)
 {
-	struct lock_wrapper* lockw = lookup_dom_vtime_lock(domc->id);
+	struct bpf_spin_lock * lock = lookup_dom_vtime_lock(domc);
 
-	if (!lockw)
+	if (!lock)
 		return;
 
-	bpf_spin_lock(&lockw->lock);
+	bpf_spin_lock(lock);
 	if (vtime_before(dom_min_vruntime(domc), p->scx.dsq_vtime))
 		WRITE_ONCE(domc->min_vruntime, p->scx.dsq_vtime);
-	bpf_spin_unlock(&lockw->lock);
+	bpf_spin_unlock(lock);
 }
 
 void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
@@ -1527,11 +1508,7 @@ static void stopping_update_vtime(struct task_struct *p,
 				  struct task_ctx *taskc,
 				  struct dom_ctx *domc)
 {
-	struct lock_wrapper* lockw = lookup_dom_vtime_lock(domc->id);
 	u64 now, delta;
-
-	if (!lockw)
-		return;
 
 	now = bpf_ktime_get_ns();
 	delta = now - taskc->last_run_at;
