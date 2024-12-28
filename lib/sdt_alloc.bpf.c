@@ -488,7 +488,8 @@ __hidden
 struct sdt_data __arena *sdt_alloc(struct sdt_allocator *alloc)
 {
 	struct sdt_alloc_stack __arena *stack = prealloc_stack;
-	struct sdt_data __arena *data = NULL, __arena *val;
+	struct sdt_data __arena *data = NULL;
+	struct sdt_data __arena *val;
 	sdt_desc_t *desc;
 	struct sdt_chunk __arena *chunk;
 	__u64 idx, pos;
