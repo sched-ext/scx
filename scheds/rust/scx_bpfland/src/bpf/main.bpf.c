@@ -169,7 +169,6 @@ struct task_ctx {
 	/*
 	 * Task's average used time slice.
 	 */
-	u64 avg_runtime;
 	u64 sum_runtime;
 	u64 last_run_at;
 
@@ -379,7 +378,7 @@ static u64 task_deadline(struct task_struct *p, struct task_ctx *tctx)
 {
 	u64 waker_freq, blocked_freq;
 	u64 lat_prio, lat_weight;
-	u64 avg_run_scaled, avg_run;
+	u64 sum_run_scaled, sum_run;
 	u64 freq_factor;
 
 	/*
@@ -403,26 +402,26 @@ static u64 task_deadline(struct task_struct *p, struct task_ctx *tctx)
 	 * Evaluate the "latency priority" as a function of the wake-up, block
 	 * frequencies and average runtime, using the following formula:
 	 *
-	 *   lat_prio = log(freq_factor / avg_run_scaled)
+	 *   lat_prio = log(freq_factor / sum_run_scaled)
 	 *
 	 * Frequencies can grow very quickly, almost exponential, so use
 	 * log2_u64() to get a more linear metric that can be used as a
 	 * priority.
 	 *
-	 * The avg_run_scaled component is used to scale the latency priority
+	 * The sum_run_scaled component is used to scale the latency priority
 	 * proportionally to the task's weight and inversely proportional to
 	 * its runtime, so that a task with a higher weight / shorter runtime
 	 * gets a higher latency priority than a task with a lower weight /
 	 * higher runtime.
 	 */
-	avg_run_scaled = scale_inverse_fair(p, tctx, tctx->avg_runtime);
-	avg_run = log2_u64(avg_run_scaled + 1);
+	sum_run_scaled = scale_inverse_fair(p, tctx, tctx->sum_runtime);
+	sum_run = log2_u64(sum_run_scaled + 1);
 
 	lat_prio = log2_u64(freq_factor);
 	lat_prio = MIN(lat_prio, max_sched_prio());
 
-	if (lat_prio >= avg_run)
-		lat_prio -= avg_run;
+	if (lat_prio >= sum_run)
+		lat_prio -= sum_run;
 	else
 		lat_prio = 0;
 
@@ -432,7 +431,7 @@ static u64 task_deadline(struct task_struct *p, struct task_ctx *tctx)
 	 */
 	lat_weight = sched_prio_to_latency_weight(lat_prio);
 
-	return tctx->avg_runtime * 100 / lat_weight;
+	return tctx->sum_runtime * 100 / lat_weight;
 }
 
 /*
@@ -445,10 +444,9 @@ static u64 task_vtime(struct task_struct *p, struct task_ctx *tctx)
 	/*
 	 * Limit the vruntime to to avoid excessively penalizing tasks.
 	 */
-	if (vtime_before(p->scx.dsq_vtime, min_vruntime)) {
+	if (vtime_before(p->scx.dsq_vtime, min_vruntime))
 		p->scx.dsq_vtime = min_vruntime;
-		tctx->deadline = p->scx.dsq_vtime + task_deadline(p, tctx);
-	}
+	tctx->deadline = p->scx.dsq_vtime + scale_inverse_fair(p, tctx, tctx->sum_runtime);
 
 	return tctx->deadline;
 }
@@ -1006,7 +1004,6 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 */
 	slice = now - tctx->last_run_at;
 	tctx->sum_runtime += slice;
-	tctx->avg_runtime = calc_avg(tctx->avg_runtime, tctx->sum_runtime);
 
 	/*
 	 * Update task vruntime charging the weighted used time slice.
