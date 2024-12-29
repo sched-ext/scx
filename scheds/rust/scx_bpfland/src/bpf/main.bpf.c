@@ -843,17 +843,6 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 			return;
 		}
-
-		/*
-		 * Per-CPU tasks didn't get the chance to be dispatched directly from
-		 * ops.select_cpu(), so give them a chance here.
-		 */
-		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-		if (cpu >= 0) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
-			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-			return;
-		}
 	}
 
 	/*
@@ -862,16 +851,18 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
+
 	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_DFL,
 				 task_vtime(p, tctx), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	/*
-	 * If the task is limited to run only on certain CPUs make sure that at
-	 * least one of them is awake.
+	 * If the task can run on multiple CPUs, attempt to wake up any
+	 * usable idle CPU, so that it can process the task immediately.
 	 */
-	if ((p->nr_cpus_allowed < nr_online_cpus) || is_migration_disabled(p)) {
-		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+	if (p->nr_cpus_allowed > 1 && !is_migration_disabled(p)) {
+		s32 cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+
 		if (cpu >= 0)
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	}
