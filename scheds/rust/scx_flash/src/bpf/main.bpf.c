@@ -47,6 +47,12 @@ const volatile u64 slice_lag = 20ULL * NSEC_PER_MSEC;
 const volatile bool local_kthreads;
 
 /*
+ * When enabled, threads who's hold a user-space lock and still able to run
+ * will be dispatch first. See flash_dispatch() for details.
+ */
+const volatile bool user_lock_boost;
+
+/*
  * Scheduling statistics.
  */
 volatile u64 nr_kthread_dispatches, nr_direct_dispatches, nr_shared_dispatches;
@@ -822,7 +828,7 @@ void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 	 * If the task can still run and it's holding a user-space lock, let it
 	 * run for another round.
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
+	if (user_lock_boost && prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
 	    is_task_locked(prev)) {
 		task_unlock(prev);
 		task_refill_slice(prev);
