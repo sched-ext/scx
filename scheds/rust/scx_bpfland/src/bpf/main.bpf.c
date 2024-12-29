@@ -1001,9 +1001,14 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 
 	/*
 	 * Update task's average runtime.
+	 *
+	 * Limit the total accumulated runtime to 1s to avoid excessive
+	 * de-prioritization of pure CPU-intensive tasks and avoid
+	 * potential starvation.
 	 */
 	slice = now - tctx->last_run_at;
-	tctx->sum_runtime += slice;
+	if (tctx->sum_runtime < NSEC_PER_SEC)
+		tctx->sum_runtime += slice;
 
 	/*
 	 * Update task vruntime charging the weighted used time slice.
