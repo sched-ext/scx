@@ -271,17 +271,11 @@ static u64 nr_tasks_waiting(void)
 }
 
 /*
- * Return task's dynamic weight.
+ * Return task's weight.
  */
 static u64 task_weight(const struct task_struct *p, const struct task_ctx *tctx)
 {
-	/*
-	 * Scale the static task weight by the average amount of voluntary
-	 * context switches to determine the dynamic weight.
-	 */
-	u64 prio = p->scx.weight * CLAMP(tctx->avg_nvcsw, 1, nvcsw_max_thresh ? : 1);
-
-	return CLAMP(prio, 1, MAX_TASK_WEIGHT);
+	return p->scx.weight;
 }
 
 /*
