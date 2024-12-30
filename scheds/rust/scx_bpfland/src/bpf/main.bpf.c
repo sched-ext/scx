@@ -722,17 +722,6 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_DFL,
 				 task_deadline(p, tctx), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
-
-	/*
-	 * If the task can run on multiple CPUs, attempt to wake up any
-	 * usable idle CPU, so that it can process the task immediately.
-	 */
-	if (p->nr_cpus_allowed > 1 && !is_migration_disabled(p)) {
-		s32 cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-
-		if (cpu >= 0)
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-	}
 }
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
