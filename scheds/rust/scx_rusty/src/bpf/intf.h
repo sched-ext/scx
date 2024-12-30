@@ -154,4 +154,9 @@ struct node_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 };
 
+struct migrate_arg {
+	u64 tptr;
+	u32 new_dom_id;
+};
+
 #endif /* __INTF_H */
