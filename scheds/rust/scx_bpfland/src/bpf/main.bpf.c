@@ -670,6 +670,8 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 	if (is_idle) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+
+		scx_bpf_kick_cpu(cpu, 0);
 	}
 
 	return cpu;
@@ -682,6 +684,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
+	s32 cpu = scx_bpf_task_cpu(p);
 
 	/*
 	 * Per-CPU kthreads are critical for system responsiveness so make sure
@@ -693,6 +696,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
 				   enq_flags | SCX_ENQ_PREEMPT);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
+
+		scx_bpf_kick_cpu(cpu, 0);
 		return;
 	}
 
@@ -708,6 +713,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!nvcsw_max_thresh) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
+
+			scx_bpf_kick_cpu(cpu, 0);
 			return;
 		}
 	}
@@ -722,6 +729,10 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_DFL,
 				 task_deadline(p, tctx), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
+
+	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, 0);
 }
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
