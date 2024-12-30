@@ -77,6 +77,9 @@ const USAGE_HALF_LIFE_F64: f64 = USAGE_HALF_LIFE as f64 / 1_000_000_000.0;
 const LAYER_USAGE_OWNED: usize = bpf_intf::layer_usage_LAYER_USAGE_OWNED as usize;
 const LAYER_USAGE_OPEN: usize = bpf_intf::layer_usage_LAYER_USAGE_OPEN as usize;
 const LAYER_USAGE_SUM_UPTO: usize = bpf_intf::layer_usage_LAYER_USAGE_SUM_UPTO as usize;
+const LAYER_USAGE_PROTECTED: usize = bpf_intf::layer_usage_LAYER_USAGE_PROTECTED as usize;
+const LAYER_USAGE_PROTECTED_PREEMPT: usize =
+    bpf_intf::layer_usage_LAYER_USAGE_PROTECTED_PREEMPT as usize;
 const NR_LAYER_USAGES: usize = bpf_intf::layer_usage_NR_LAYER_USAGES as usize;
 
 const NR_GSTATS: usize = bpf_intf::global_stat_id_NR_GSTATS as usize;
@@ -87,6 +90,8 @@ const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KI
 
 lazy_static! {
     static ref USAGE_DECAY: f64 = 0.5f64.powf(1.0 / USAGE_HALF_LIFE_F64);
+    static ref DFL_DISALLOW_OPEN_AFTER_US: u64 = 2 * scx_enums.SCX_SLICE_DFL / 1000;
+    static ref DFL_DISALLOW_PREEMPT_AFTER_US: u64 = 4 * scx_enums.SCX_SLICE_DFL / 1000;
     static ref EXAMPLE_CONFIG: LayerConfig = LayerConfig {
         specs: vec![
             LayerSpec {
@@ -109,6 +114,8 @@ lazy_static! {
                         slice_us: 20000,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        disallow_open_after_us: None,
+                        disallow_preempt_after_us: None,
                         xllc_mig_min_us: 1000.0,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
@@ -135,6 +142,8 @@ lazy_static! {
                         slice_us: 20000,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        disallow_open_after_us: None,
+                        disallow_preempt_after_us: None,
                         xllc_mig_min_us: 0.0,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
@@ -163,6 +172,8 @@ lazy_static! {
                         slice_us: 800,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        disallow_open_after_us: None,
+                        disallow_preempt_after_us: None,
                         xllc_mig_min_us: 0.0,
                         growth_algo: LayerGrowthAlgo::Topo,
                         perf: 1024,
@@ -188,6 +199,8 @@ lazy_static! {
                         slice_us: 20000,
                         fifo: false,
                         weight: DEFAULT_LAYER_WEIGHT,
+                        disallow_open_after_us: None,
+                        disallow_preempt_after_us: None,
                         xllc_mig_min_us: 100.0,
                         growth_algo: LayerGrowthAlgo::Linear,
                         perf: 1024,
@@ -1172,6 +1185,8 @@ impl<'a> Scheduler<'a> {
                     slice_us,
                     fifo,
                     weight,
+                    disallow_open_after_us,
+                    disallow_preempt_after_us,
                     xllc_mig_min_us,
                     ..
                 } = spec.kind.common();
@@ -1194,6 +1209,14 @@ impl<'a> Scheduler<'a> {
                 layer.exclusive.write(*exclusive);
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;
+                layer.disallow_open_after_ns = match disallow_open_after_us.unwrap() {
+                    v if v == u64::MAX => v,
+                    v => v * 1000,
+                };
+                layer.disallow_preempt_after_ns = match disallow_preempt_after_us.unwrap() {
+                    v if v == u64::MAX => v,
+                    v => v * 1000,
+                };
                 layer.xllc_mig_min_ns = (xllc_mig_min_us * 1000.0) as u64;
                 layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
@@ -1357,20 +1380,38 @@ impl<'a> Scheduler<'a> {
             .context("Failed to lookup cpu_ctx")?
             .unwrap();
 
-        let open_preempt_layers: Vec<u32> = layer_specs
+        let op_layers: Vec<u32> = layer_specs
             .iter()
             .enumerate()
             .filter(|(_idx, spec)| match &spec.kind {
-                LayerKind::Open { .. } | LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                LayerKind::Open { .. } => spec.kind.common().preempt,
                 _ => false,
             })
             .map(|(idx, _)| idx as u32)
             .collect();
-        let open_layers: Vec<u32> = layer_specs
+        let on_layers: Vec<u32> = layer_specs
             .iter()
             .enumerate()
             .filter(|(_idx, spec)| match &spec.kind {
-                LayerKind::Open { .. } | LayerKind::Grouped { .. } => !spec.kind.common().preempt,
+                LayerKind::Open { .. } => !spec.kind.common().preempt,
+                _ => false,
+            })
+            .map(|(idx, _)| idx as u32)
+            .collect();
+        let gp_layers: Vec<u32> = layer_specs
+            .iter()
+            .enumerate()
+            .filter(|(_idx, spec)| match &spec.kind {
+                LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                _ => false,
+            })
+            .map(|(idx, _)| idx as u32)
+            .collect();
+        let gn_layers: Vec<u32> = layer_specs
+            .iter()
+            .enumerate()
+            .filter(|(_idx, spec)| match &spec.kind {
+                LayerKind::Grouped { .. } => !spec.kind.common().preempt,
                 _ => false,
             })
             .map(|(idx, _)| idx as u32)
@@ -1389,17 +1430,42 @@ impl<'a> Scheduler<'a> {
             cpu_ctxs[cpu].task_layer_id = MAX_LAYERS as u32;
             cpu_ctxs[cpu].is_big = is_big;
 
-            let mut p_order = open_preempt_layers.clone();
-            let mut o_order = open_layers.clone();
             fastrand::seed(cpu as u64);
-            fastrand::shuffle(&mut p_order);
-            fastrand::shuffle(&mut o_order);
+
+            let mut ogp_order = op_layers.clone();
+            ogp_order.append(&mut gp_layers.clone());
+            fastrand::shuffle(&mut ogp_order);
+
+            let mut ogn_order = on_layers.clone();
+            ogn_order.append(&mut gn_layers.clone());
+            fastrand::shuffle(&mut ogn_order);
+
+            let mut op_order = op_layers.clone();
+            fastrand::shuffle(&mut op_order);
+
+            let mut on_order = on_layers.clone();
+            fastrand::shuffle(&mut on_order);
+
+            let mut gp_order = gp_layers.clone();
+            fastrand::shuffle(&mut gp_order);
+
+            let mut gn_order = gn_layers.clone();
+            fastrand::shuffle(&mut gn_order);
 
             for i in 0..MAX_LAYERS {
-                cpu_ctxs[cpu].open_preempt_layer_order[i] =
-                    p_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
-                cpu_ctxs[cpu].open_layer_order[i] =
-                    o_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].ogp_layer_order[i] =
+                    ogp_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].ogn_layer_order[i] =
+                    ogn_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+
+                cpu_ctxs[cpu].op_layer_order[i] =
+                    op_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].on_layer_order[i] =
+                    on_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].gp_layer_order[i] =
+                    gp_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                cpu_ctxs[cpu].gn_layer_order[i] =
+                    gn_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
             }
         }
 
@@ -1599,20 +1665,55 @@ impl<'a> Scheduler<'a> {
             skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
-        skel.maps.rodata_data.nr_open_preempt_layers = layer_specs
+        skel.maps.rodata_data.nr_op_layers = layer_specs
             .iter()
             .filter(|spec| match &spec.kind {
-                LayerKind::Open { .. } | LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                LayerKind::Open { .. } => spec.kind.common().preempt,
                 _ => false,
             })
             .count() as u32;
-        skel.maps.rodata_data.nr_open_layers = layer_specs
+        skel.maps.rodata_data.nr_on_layers = layer_specs
             .iter()
             .filter(|spec| match &spec.kind {
-                LayerKind::Open { .. } | LayerKind::Grouped { .. } => !spec.kind.common().preempt,
+                LayerKind::Open { .. } => !spec.kind.common().preempt,
                 _ => false,
             })
             .count() as u32;
+        skel.maps.rodata_data.nr_gp_layers = layer_specs
+            .iter()
+            .filter(|spec| match &spec.kind {
+                LayerKind::Grouped { .. } => spec.kind.common().preempt,
+                _ => false,
+            })
+            .count() as u32;
+        skel.maps.rodata_data.nr_gn_layers = layer_specs
+            .iter()
+            .filter(|spec| match &spec.kind {
+                LayerKind::Grouped { .. } => !spec.kind.common().preempt,
+                _ => false,
+            })
+            .count() as u32;
+
+        let mut min_open = u64::MAX;
+        let mut min_preempt = u64::MAX;
+
+        for spec in layer_specs.iter() {
+            if let LayerKind::Open { common, .. } = &spec.kind {
+                min_open = min_open.min(common.disallow_open_after_us.unwrap());
+                min_preempt = min_preempt.min(common.disallow_preempt_after_us.unwrap());
+            }
+        }
+
+        skel.maps.rodata_data.min_open_layer_disallow_open_after_ns = match min_open {
+            u64::MAX => *DFL_DISALLOW_OPEN_AFTER_US,
+            v => v,
+        };
+        skel.maps
+            .rodata_data
+            .min_open_layer_disallow_preempt_after_ns = match min_preempt {
+            u64::MAX => *DFL_DISALLOW_PREEMPT_AFTER_US,
+            v => v,
+        };
 
         // Consider all layers empty at the beginning.
         for i in 0..layer_specs.len() {
@@ -2334,6 +2435,31 @@ fn main() -> Result<()> {
             common.weight = DEFAULT_LAYER_WEIGHT;
         }
         common.weight = common.weight.max(MIN_LAYER_WEIGHT).min(MAX_LAYER_WEIGHT);
+
+        if common.preempt {
+            if common.disallow_open_after_us.is_some() {
+                warn!(
+                    "Preempt layer {} has non-null disallow_open_after_us, ignored",
+                    &spec.name
+                );
+            }
+            if common.disallow_preempt_after_us.is_some() {
+                warn!(
+                    "Preempt layer {} has non-null disallow_preempt_after_us, ignored",
+                    &spec.name
+                );
+            }
+            common.disallow_open_after_us = Some(u64::MAX);
+            common.disallow_preempt_after_us = Some(u64::MAX);
+        } else {
+            if common.disallow_open_after_us.is_none() {
+                common.disallow_open_after_us = Some(*DFL_DISALLOW_OPEN_AFTER_US);
+            }
+
+            if common.disallow_preempt_after_us.is_none() {
+                common.disallow_preempt_after_us = Some(*DFL_DISALLOW_PREEMPT_AFTER_US);
+            }
+        }
 
         if common.idle_smt.is_some() {
             warn!("Layer {} has deprecated flag \"idle_smt\"", &spec.name);
