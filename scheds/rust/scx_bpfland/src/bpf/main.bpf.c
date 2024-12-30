@@ -221,6 +221,17 @@ static inline bool is_kthread(const struct task_struct *p)
 }
 
 /*
+ * Return true if the task can only run on its assigned CPU, false
+ * otherwise.
+ */
+static bool is_migration_disabled(struct task_struct *p)
+{
+	if (bpf_core_field_exists(p->migration_disabled))
+		return p->migration_disabled;
+	return false;
+}
+
+/*
  * Allocate/re-allocate a new cpumask.
  */
 static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
@@ -818,7 +829,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 
-	if ((p->nr_cpus_allowed == 1) || p->migration_disabled) {
+	if ((p->nr_cpus_allowed == 1) || is_migration_disabled(p)) {
 		/*
 		 * If nvcsw_max_thresh is disabled we don't care much about
 		 * interactivity, so we can massively boost per-CPU tasks and
@@ -859,7 +870,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * If the task is limited to run only on certain CPUs make sure that at
 	 * least one of them is awake.
 	 */
-	if ((p->nr_cpus_allowed < nr_online_cpus) || p->migration_disabled) {
+	if ((p->nr_cpus_allowed < nr_online_cpus) || is_migration_disabled(p)) {
 		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 		if (cpu >= 0)
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
