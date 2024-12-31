@@ -1092,10 +1092,13 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * stalls as all in-domain CPUs may be idle by the time @p gets
 	 * enqueued.
 	 */
-	if (prev_domestic)
+	if (prev_domestic) {
 		cpu = prev_cpu;
-	else
-		cpu = scx_bpf_pick_any_cpu(cast_mask(p_cpumask), 0);
+	} else {
+		cpu = bpf_cpumask_any_distribute(cast_mask(p_cpumask));
+		if (cpu >= nr_cpu_ids)
+			cpu = prev_cpu;
+	}
 
 	if (tmp_cpumask) {
 		tmp_cpumask = bpf_kptr_xchg(&taskc->tmp_cpumask, tmp_cpumask);
@@ -1152,8 +1155,8 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 	    task_set_domain(taskc, p, *new_dom, false)) {
 		stat_add(RUSTY_STAT_LOAD_BALANCE, 1);
 		taskc->dispatch_local = false;
-		cpu = scx_bpf_pick_any_cpu(cast_mask(p_cpumask), 0);
-		if (cpu >= 0)
+		cpu = bpf_cpumask_any_distribute(cast_mask(p_cpumask));
+		if (cpu < nr_cpu_ids)
 			scx_bpf_kick_cpu(cpu, 0);
 		goto dom_queue;
 	}
@@ -1173,8 +1176,9 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p, u64 enq_flags)
 	 * stalls. Kick a domestic CPU if @p is on a foreign domain.
 	 */
 	if (!bpf_cpumask_test_cpu(scx_bpf_task_cpu(p), cast_mask(p_cpumask))) {
-		cpu = scx_bpf_pick_any_cpu(cast_mask(p_cpumask), 0);
-		scx_bpf_kick_cpu(cpu, 0);
+		cpu = bpf_cpumask_any_distribute(cast_mask(p_cpumask));
+		if (cpu < nr_cpu_ids)
+			scx_bpf_kick_cpu(cpu, 0);
 		stat_add(RUSTY_STAT_REPATRIATE, 1);
 	}
 
@@ -1199,11 +1203,20 @@ dom_queue:
 	 * CPUs are highly loaded while KICK_GREEDY doesn't. Even under fairly
 	 * high utilization, KICK_GREEDY can slightly improve work-conservation.
 	 */
-	if (taskc->all_cpus && kick_greedy_cpumask) {
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(kick_greedy_cpumask), 0);
+	if (taskc->all_cpus) {
+		const struct cpumask *idle_cpumask;
+
+		idle_cpumask = scx_bpf_get_idle_cpumask();
+		if (kick_greedy_cpumask) {
+			cpu = bpf_cpumask_any_and_distribute(cast_mask(kick_greedy_cpumask), idle_cpumask);
+			if (cpu >= nr_cpu_ids)
+				cpu = -EBUSY;
+		}
+		scx_bpf_put_cpumask(idle_cpumask);
+
 		if (cpu >= 0) {
 			stat_add(RUSTY_STAT_KICK_GREEDY, 1);
-			scx_bpf_kick_cpu(cpu, 0);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		}
 	}
 }
