@@ -87,6 +87,11 @@ volatile u64 nr_running, nr_interactive;
 volatile u64 nr_online_cpus;
 
 /*
+ * Maximum possible CPU number.
+ */
+static u64 nr_cpu_ids;
+
+/*
  * Exit information.
  */
 UEI_DEFINE(uei);
@@ -206,7 +211,7 @@ static inline bool is_kthread(const struct task_struct *p)
  * Return true if the task can only run on its assigned CPU, false
  * otherwise.
  */
-static bool is_migration_disabled(struct task_struct *p)
+static bool is_migration_disabled(const struct task_struct *p)
 {
 	if (bpf_core_field_exists(p->migration_disabled))
 		return p->migration_disabled;
@@ -620,12 +625,20 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 
 	/*
 	 * We couldn't find any idle CPU, return the previous CPU if it is in
-	 * the task's L3 domain, otherwise pick any other CPU in the L3 domain.
+	 * the task's L3 domain.
 	 */
-	if (is_prev_llc_affine)
+	if (is_prev_llc_affine) {
 		cpu = prev_cpu;
-	else
-		cpu = scx_bpf_pick_any_cpu(l3_mask, 0);
+		goto out_put_cpumask;
+	}
+
+	/*
+	 * Otherwise, return a random CPU in the task's L3 domain (if
+	 * available).
+	 */
+	cpu = bpf_cpumask_any_distribute(l3_mask);
+	if (cpu >= nr_cpu_ids)
+		cpu = prev_cpu;
 
 out_put_cpumask:
 	scx_bpf_put_cpumask(idle_cpumask);
@@ -660,6 +673,43 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 	}
 
 	return cpu;
+}
+
+/*
+ * Try to wake up an idle CPU that can immediately process the task.
+ */
+static void kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tctx)
+{
+	const struct cpumask *idle_cpumask;
+	struct bpf_cpumask *l3_mask;
+	s32 cpu;
+
+	/*
+	 * If the task can only run on a single CPU, it's pointless to wake
+	 * up any other CPU, so do nothing in this case.
+	 */
+	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p))
+		return;
+
+	/*
+	 * Look for an idle CPU in the same L3 domain that can immediately
+	 * execute the task.
+	 *
+	 * Note that we do not want to mark the CPU as busy, since we don't
+	 * know at this stage if we will actually dispatch any task on it.
+	 */
+	l3_mask = cast_mask(tctx->l3_cpumask);
+	if (!l3_mask) {
+		scx_bpf_error("l3 cpumask not initialized");
+		return;
+	}
+
+	idle_cpumask = scx_bpf_get_idle_cpumask();
+	cpu = bpf_cpumask_any_and_distribute(l3_mask, idle_cpumask);
+	scx_bpf_put_cpumask(idle_cpumask);
+
+	if (cpu < nr_cpu_ids)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
 /*
@@ -710,6 +760,12 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, slice,
 				 task_deadline(p, tctx), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
+
+	/*
+	 * Try to proactively wake up an idle CPU, so that it can
+	 * immediately execute the task in case its current CPU is busy.
+	 */
+	kick_idle_cpu(p, tctx);
 }
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
@@ -1107,8 +1163,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 {
 	int err;
 
-	/* Initialize amount of online CPUs */
+	/* Initialize amount of online and possible CPUs */
 	nr_online_cpus = get_nr_online_cpus();
+	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
 	/*
 	 * Create the global shared DSQ.
