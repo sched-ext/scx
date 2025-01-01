@@ -99,19 +99,6 @@ const volatile bool debug;
 const volatile bool smt_enabled = true;
 
 /*
- * Set the state of a CPU in a cpumask.
- */
-static bool set_cpu_state(struct bpf_cpumask *cpumask, s32 cpu, bool state)
-{
-	if (!cpumask)
-		return false;
-	if (state)
-		return bpf_cpumask_test_and_set_cpu(cpu, cpumask);
-	else
-		return bpf_cpumask_test_and_clear_cpu(cpu, cpumask);
-}
-
-/*
  * Allocate/re-allocate a new cpumask.
  */
 static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
@@ -374,18 +361,6 @@ static bool test_and_clear_usersched_needed(void)
 static bool usersched_has_pending_tasks(void)
 {
 	return nr_queued || nr_scheduled;
-}
-
-/*
- * Return the corresponding CPU associated to a DSQ.
- */
-static s32 dsq_to_cpu(u64 dsq_id)
-{
-	if (dsq_id >= MAX_CPUS) {
-		scx_bpf_error("Invalid dsq_id: %llu", dsq_id);
-		return -EINVAL;
-	}
-	return (s32)dsq_id;
 }
 
 /*
