@@ -728,26 +728,23 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * If local_kthread is specified dispatch all kthreads directly.
 	 */
 	if (is_kthread(p) && (local_kthreads || p->nr_cpus_allowed == 1)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
-				   enq_flags | SCX_ENQ_PREEMPT);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		return;
 	}
 
-	if ((p->nr_cpus_allowed == 1) || is_migration_disabled(p)) {
-		/*
-		 * If nvcsw_max_thresh is disabled we don't care much about
-		 * interactivity, so we can massively boost per-CPU tasks and
-		 * always dispatch them directly on their CPU.
-		 *
-		 * This can help to improve I/O workloads (like large parallel
-		 * builds).
-		 */
-		if (!nvcsw_max_thresh) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
-			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-			return;
-		}
+	/*
+	 * If nvcsw_max_thresh is disabled we don't care much about
+	 * interactivity, so we can massively boost per-CPU tasks and
+	 * always dispatch them directly on their CPU.
+	 *
+	 * This can help to improve I/O workloads (like large parallel
+	 * builds).
+	 */
+	if (!nvcsw_max_thresh && ((p->nr_cpus_allowed == 1) || is_migration_disabled(p))) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		return;
 	}
 
 	/*
@@ -786,8 +783,17 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * domain).
 	 */
 	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
-	    primary && bpf_cpumask_test_cpu(cpu, primary))
+	    primary && bpf_cpumask_test_cpu(cpu, primary)) {
 		task_refill_slice(prev);
+		return;
+	}
+
+	/*
+	 * Make sure the CPU doesn't go idle if there are still tasks in
+	 * the local DSQ (this shouldn't be necessary).
+	 */
+	if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu))
+		scx_bpf_kick_cpu(cpu, 0);
 }
 
 /*
