@@ -194,6 +194,10 @@ void __arena *sdt_alloc_from_pool(struct sdt_pool *pool,
 	elem_size = pool->elem_size;
 	max_elems = pool->max_elems;
 
+	/* Nonsleepable allocations not supported for large data structures. */
+	if (elem_size > PAGE_SIZE)
+	  return NULL;
+
 	/* If the chunk is spent, get a new one. */
 	if (pool->idx >= max_elems) {
 		slab = sdt_alloc_stack_pop(stack);
@@ -256,20 +260,20 @@ sdt_desc_t *sdt_alloc_chunk(struct sdt_alloc_stack __arena *stack)
 	return out;
 }
 
-static SDT_TASK_FN_ATTRS int sdt_pool_set_size(struct sdt_pool *pool, __u64 data_size)
+static SDT_TASK_FN_ATTRS int sdt_pool_set_size(struct sdt_pool *pool, __u64 data_size, __u64 alloc_size)
 {
-	if (unlikely(data_size > PAGE_SIZE)) {
-		scx_bpf_error("%s: allocation size %llu too large", __func__, data_size);
-		return -E2BIG;
-	}
-
 	if (unlikely(data_size % 8)) {
 		scx_bpf_error("%s: allocation size %llu not word aligned", __func__, data_size);
 		return -EINVAL;
 	}
 
+	if (unlikely(alloc_size == 0)) {
+	      scx_bpf_error("%s: allocation size is 0", __func__);
+	      return -EINVAL;
+	}
+
 	pool->elem_size = data_size;
-	pool->max_elems = PAGE_SIZE / pool->elem_size;
+	pool->max_elems = (PAGE_SIZE * alloc_size) / pool->elem_size;
 	/* Populate the pool slab on the first allocation. */
 	pool->idx = pool->max_elems;
 
@@ -280,16 +284,17 @@ static SDT_TASK_FN_ATTRS int sdt_pool_set_size(struct sdt_pool *pool, __u64 data
 __hidden int
 sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size)
 {
+	size_t min_chunk_size;
 	int ret;
 
 	_Static_assert(sizeof(struct sdt_chunk)  == PAGE_SIZE,
 		"chunk size must be equal to a page");
 
-	ret = sdt_pool_set_size(&sdt_chunk_pool, sizeof(struct sdt_chunk));
+	ret = sdt_pool_set_size(&sdt_chunk_pool, sizeof(struct sdt_chunk), 1);
 	if (ret != 0)
 		return ret;
 
-	ret = sdt_pool_set_size(&sdt_desc_pool, sizeof(struct sdt_desc));
+	ret = sdt_pool_set_size(&sdt_desc_pool, sizeof(struct sdt_desc), 1);
 	if (ret != 0)
 		return ret;
 
@@ -297,7 +302,12 @@ sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size)
 	data_size += sizeof(struct sdt_data);
 	data_size = div_round_up(data_size, 8) * 8;
 
-	ret = sdt_pool_set_size(&alloc->pool, data_size);
+	/*
+	 * Ensure we allocate large enough chunks from the arena to avoid excessive
+	 * internal fragmentation when turning chunks it into structs.
+	 */
+	min_chunk_size = div_round_up(SDT_TASK_MIN_ELEM_PER_ALLOC * data_size, PAGE_SIZE);
+	ret = sdt_pool_set_size(&alloc->pool, data_size, min_chunk_size);
 	if (ret != 0)
 		return ret;
 
