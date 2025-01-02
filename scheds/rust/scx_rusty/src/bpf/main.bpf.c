@@ -1766,7 +1766,7 @@ static s32 create_dom(u32 dom_id)
 
 	node_id = dom_node_id(dom_id);
 
-	domc = sdt_dom_alloc(node_id);
+	domc = sdt_dom_alloc(dom_id);
 	if (!domc)
 		return -ENOMEM;
 
@@ -1791,6 +1791,10 @@ static s32 create_dom(u32 dom_id)
 	ret = create_save_cpumask(&dval->cpumask);
 	if (ret)
 		return ret;
+
+	bpf_printk("Created domain %d (%p)", dom_id, &dval->cpumask);
+	if (!dval->cpumask)
+		scx_bpf_error("NULL");
 
 	bpf_rcu_read_lock();
 	dom_mask = dval->cpumask;
@@ -1850,7 +1854,6 @@ static s32 create_dom(u32 dom_id)
 
 static s32 initialize_cpu(s32 cpu)
 {
-	struct bpf_cpumask *cpumask;
 	struct pcpu_ctx *pcpuc = lookup_pcpu_ctx(cpu);
 	u32 i;
 
@@ -1867,14 +1870,13 @@ static s32 initialize_cpu(s32 cpu)
 			return -ENOENT;
 
 		bpf_rcu_read_lock();
-		cpumask = dval->cpumask;
-		if (!cpumask) {
+		if (!dval->cpumask) {
 			bpf_rcu_read_unlock();
-			scx_bpf_error("Failed to lookup dom node cpumask");
+			scx_bpf_error("Failed to lookup dom node %d cpumask %p", i, &dval->cpumask);
 			return -ENOENT;
 		}
 
-		in_dom = bpf_cpumask_test_cpu(cpu, cast_mask(cpumask));
+		in_dom = bpf_cpumask_test_cpu(cpu, cast_mask(dval->cpumask));
 		bpf_rcu_read_unlock();
 		if (in_dom) {
 			pcpuc->dom_id = i;
