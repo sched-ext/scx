@@ -62,7 +62,6 @@ private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
 struct layer layers[MAX_LAYERS];
 u32 fallback_cpu;
-static u32 preempt_cursor;
 u32 layered_root_tgid = 0;
 
 u32 empty_layer_ids[MAX_LAYERS];
@@ -141,11 +140,6 @@ static u64 hi_fb_dsq_id(u32 llc_id)
 static u64 lo_fb_dsq_id(u32 llc_id)
 {
 	return LO_FB_DSQ_BASE | llc_id;
-}
-
-static inline bool is_fb_dsq(u64 dsq_id)
-{
-	return dsq_id & (HI_FB_DSQ_BASE | LO_FB_DSQ_BASE);
 }
 
 static __always_inline bool is_scheduler_task(struct task_struct *p)
