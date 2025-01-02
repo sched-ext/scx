@@ -207,6 +207,31 @@ void __arena *sdt_alloc_from_pool(struct sdt_pool *pool,
 	return ptr;
 }
 
+/* Allocate element from the pool. Must be called with a then pool lock held. */
+static SDT_TASK_FN_ATTRS
+void __arena *sdt_alloc_from_pool_sleepable(struct sdt_pool *pool)
+{
+	__u64 elem_size, max_elems;
+	void __arena *slab;
+	void __arena *ptr;
+
+	elem_size = pool->elem_size;
+	max_elems = pool->max_elems;
+
+	/* If the chunk is spent, get a new one. */
+	if (pool->idx >= max_elems) {
+		slab = bpf_arena_alloc_pages(&arena, NULL,
+			div_round_up(max_elems * elem_size, PAGE_SIZE), NUMA_NO_NODE, 0);
+		pool->slab = slab;
+		pool->idx = 0;
+	}
+
+	ptr = (void __arena *)((__u64) pool->slab + elem_size * pool->idx);
+	pool->idx += 1;
+
+	return ptr;
+}
+
 
 /* Alloc desc and associated chunk. Called with the task spinlock held. */
 static SDT_TASK_FN_ATTRS
@@ -534,7 +559,7 @@ struct sdt_data __arena *sdt_alloc(struct sdt_allocator *alloc)
 	pos = idx & (SDT_TASK_ENTS_PER_CHUNK - 1);
 	data = chunk->data[pos];
 	if (!data) {
-		data = sdt_alloc_from_pool(&alloc->pool, stack);
+		data = sdt_alloc_from_pool_sleepable(&alloc->pool);
 		if (!data) {
 			sdt_free_idx(alloc, idx);
 			bpf_printk("%s: failed to allocate data from pool", __func__);
