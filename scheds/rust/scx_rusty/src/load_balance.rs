@@ -661,12 +661,13 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         // Read active_tasks and update read_idx and gen.
         const MAX_TPTRS: u64 = bpf_intf::consts_MAX_DOM_ACTIVE_TPTRS as u64;
-        let active_tasks = &mut self.skel.maps.bss_data.dom_active_tasks[dom.id];
+        let dom_ctx = unsafe { &mut *(self.skel.maps.bss_data.doms[dom.id] as *mut bpf_intf::dom_ctx) };
+        let active_tasks = &mut dom_ctx.active_tasks;
+
         let (mut ridx, widx) = (active_tasks.read_idx, active_tasks.write_idx);
         active_tasks.read_idx = active_tasks.write_idx;
         active_tasks.gen += 1;
 
-        let active_tasks = &self.skel.maps.bss_data.dom_active_tasks[dom.id];
         if widx - ridx > MAX_TPTRS {
             ridx = widx - MAX_TPTRS;
         }

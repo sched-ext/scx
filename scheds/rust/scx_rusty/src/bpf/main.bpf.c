@@ -127,6 +127,7 @@ const volatile u32 dom_numa_id_map[MAX_DOMS];
 const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
 const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 load_half_life = 1000000000	/* 1s */;
+const volatile struct dom_ctx __arena *doms[MAX_DOMS];
 
 const volatile bool kthreads_local;
 const volatile bool fifo_sched;
@@ -1451,12 +1452,12 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 {
 	struct task_ctx *taskc;
 	struct dom_ctx *domc;
-	u32 dom_id, dap_gen;
+	u32 dap_gen;
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	domc = task_domain(domc);
+	domc = task_domain(taskc);
 	if (!domc) {
 		scx_bpf_error("Invalid dom ID");
 		return;
@@ -1474,7 +1475,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 
 		if (idx >= MAX_DOM_ACTIVE_TPTRS) {
 			scx_bpf_error("dom_active_tasks[%u][%llu] out of bounds indexing",
-				      dom_id, idx);
+				      domc->id, idx);
 			return;
 		}
 
@@ -1768,6 +1769,9 @@ static s32 create_dom(u32 dom_id)
 	domc = sdt_dom_alloc(node_id);
 	if (!domc)
 		return -ENOMEM;
+
+	doms[dom_id] = domc;
+	cast_user(doms[dom_id]);
 
 	dval = sdt_dom_val(dom_id);
 	if (!dval) {
