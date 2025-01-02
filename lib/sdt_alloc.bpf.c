@@ -194,9 +194,38 @@ void __arena *sdt_alloc_from_pool(struct sdt_pool *pool,
 	elem_size = pool->elem_size;
 	max_elems = pool->max_elems;
 
+	/* Nonsleepable allocations not supported for large data structures. */
+	if (elem_size > PAGE_SIZE)
+	  return NULL;
+
 	/* If the chunk is spent, get a new one. */
 	if (pool->idx >= max_elems) {
 		slab = sdt_alloc_stack_pop(stack);
+		pool->slab = slab;
+		pool->idx = 0;
+	}
+
+	ptr = (void __arena *)((__u64) pool->slab + elem_size * pool->idx);
+	pool->idx += 1;
+
+	return ptr;
+}
+
+/* Allocate element from the pool. Must be called with a then pool lock held. */
+static SDT_TASK_FN_ATTRS
+void __arena *sdt_alloc_from_pool_sleepable(struct sdt_pool *pool)
+{
+	__u64 elem_size, max_elems;
+	void __arena *slab;
+	void __arena *ptr;
+
+	elem_size = pool->elem_size;
+	max_elems = pool->max_elems;
+
+	/* If the chunk is spent, get a new one. */
+	if (pool->idx >= max_elems) {
+		slab = bpf_arena_alloc_pages(&arena, NULL,
+			div_round_up(max_elems * elem_size, PAGE_SIZE), NUMA_NO_NODE, 0);
 		pool->slab = slab;
 		pool->idx = 0;
 	}
@@ -231,20 +260,20 @@ sdt_desc_t *sdt_alloc_chunk(struct sdt_alloc_stack __arena *stack)
 	return out;
 }
 
-static SDT_TASK_FN_ATTRS int sdt_pool_set_size(struct sdt_pool *pool, __u64 data_size)
+static SDT_TASK_FN_ATTRS int sdt_pool_set_size(struct sdt_pool *pool, __u64 data_size, __u64 alloc_size)
 {
-	if (unlikely(data_size > PAGE_SIZE)) {
-		scx_bpf_error("%s: allocation size %llu too large", __func__, data_size);
-		return -E2BIG;
-	}
-
 	if (unlikely(data_size % 8)) {
 		scx_bpf_error("%s: allocation size %llu not word aligned", __func__, data_size);
 		return -EINVAL;
 	}
 
+	if (unlikely(alloc_size == 0)) {
+	      scx_bpf_error("%s: allocation size is 0", __func__);
+	      return -EINVAL;
+	}
+
 	pool->elem_size = data_size;
-	pool->max_elems = PAGE_SIZE / pool->elem_size;
+	pool->max_elems = (PAGE_SIZE * alloc_size) / pool->elem_size;
 	/* Populate the pool slab on the first allocation. */
 	pool->idx = pool->max_elems;
 
@@ -255,16 +284,17 @@ static SDT_TASK_FN_ATTRS int sdt_pool_set_size(struct sdt_pool *pool, __u64 data
 __hidden int
 sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size)
 {
+	size_t min_chunk_size;
 	int ret;
 
 	_Static_assert(sizeof(struct sdt_chunk)  == PAGE_SIZE,
 		"chunk size must be equal to a page");
 
-	ret = sdt_pool_set_size(&sdt_chunk_pool, sizeof(struct sdt_chunk));
+	ret = sdt_pool_set_size(&sdt_chunk_pool, sizeof(struct sdt_chunk), 1);
 	if (ret != 0)
 		return ret;
 
-	ret = sdt_pool_set_size(&sdt_desc_pool, sizeof(struct sdt_desc));
+	ret = sdt_pool_set_size(&sdt_desc_pool, sizeof(struct sdt_desc), 1);
 	if (ret != 0)
 		return ret;
 
@@ -272,7 +302,12 @@ sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size)
 	data_size += sizeof(struct sdt_data);
 	data_size = div_round_up(data_size, 8) * 8;
 
-	ret = sdt_pool_set_size(&alloc->pool, data_size);
+	/*
+	 * Ensure we allocate large enough chunks from the arena to avoid excessive
+	 * internal fragmentation when turning chunks it into structs.
+	 */
+	min_chunk_size = div_round_up(SDT_TASK_MIN_ELEM_PER_ALLOC * data_size, PAGE_SIZE);
+	ret = sdt_pool_set_size(&alloc->pool, data_size, min_chunk_size);
 	if (ret != 0)
 		return ret;
 
@@ -484,13 +519,29 @@ sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
 	return desc;
 }
 
+static SDT_TASK_FN_ATTRS
+void sdt_alloc_finish(struct sdt_data __arena *data, __u64 idx)
+{
+	bpf_spin_lock(&sdt_lock);
+
+	/* The data counts as a chunk */
+	sdt_stats.data_allocs += 1;
+	sdt_stats.alloc_ops += 1;
+	sdt_stats.active_allocs += 1;
+
+	bpf_spin_unlock(&sdt_lock);
+
+	cast_kern(data);
+	data->tid.idx = idx;
+}
+
 __hidden
 struct sdt_data __arena *sdt_alloc(struct sdt_allocator *alloc)
 {
 	struct sdt_alloc_stack __arena *stack = prealloc_stack;
-	struct sdt_data __arena *data = NULL, __arena *val;
-	sdt_desc_t *desc;
+	struct sdt_data __arena *data = NULL;
 	struct sdt_chunk __arena *chunk;
+	sdt_desc_t *desc;
 	__u64 idx, pos;
 	int ret;
 
@@ -501,8 +552,10 @@ struct sdt_data __arena *sdt_alloc(struct sdt_allocator *alloc)
 
 	/* We unlock if we encounter an error in the function. */
 	desc = sdt_find_empty(alloc->root, stack, &idx);
+
+	bpf_spin_unlock(&sdt_lock);
+
 	if (unlikely(desc == NULL)) {
-		bpf_spin_unlock(&sdt_lock);
 		bpf_printk("%s: failed to find empty tree key", __func__);
 		return NULL;
 	}
@@ -516,31 +569,17 @@ struct sdt_data __arena *sdt_alloc(struct sdt_allocator *alloc)
 	pos = idx & (SDT_TASK_ENTS_PER_CHUNK - 1);
 	data = chunk->data[pos];
 	if (!data) {
-		data = sdt_alloc_from_pool(&alloc->pool, stack);
+		data = sdt_alloc_from_pool_sleepable(&alloc->pool);
 		if (!data) {
-			bpf_spin_unlock(&sdt_lock);
 			sdt_free_idx(alloc, idx);
 			bpf_printk("%s: failed to allocate data from pool", __func__);
 			return NULL;
 		}
-
-		/* The data counts as a chunk*/
-		sdt_stats.data_allocs += 1;
-
-		chunk->data[pos] = data;
 	}
 
-	val = data;
+	chunk->data[pos] = data;
 
-	/* init and return */
-	cast_kern(data);
+	sdt_alloc_finish(data, idx);
 
-	sdt_stats.alloc_ops += 1;
-	sdt_stats.active_allocs += 1;
-
-	data->tid.idx = idx;
-
-	bpf_spin_unlock(&sdt_lock);
-
-	return val;
+	return data;
 }

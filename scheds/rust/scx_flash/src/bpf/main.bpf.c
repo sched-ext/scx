@@ -73,6 +73,11 @@ const volatile bool smt_enabled = true;
 static u64 vtime_now;
 
 /*
+ * Maximum possible CPU number.
+ */
+static u64 nr_cpu_ids;
+
+/*
  * Per-CPU context.
  */
 struct cpu_ctx {
@@ -329,6 +334,17 @@ static inline bool vtime_before(u64 a, u64 b)
 static inline bool is_kthread(const struct task_struct *p)
 {
 	return p->flags & PF_KTHREAD;
+}
+
+/*
+ * Return true if the task can only run on its assigned CPU, false
+ * otherwise.
+ */
+static bool is_migration_disabled(const struct task_struct *p)
+{
+	if (bpf_core_field_exists(p->migration_disabled))
+		return p->migration_disabled;
+	return false;
 }
 
 /*
@@ -703,13 +719,19 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 
 	/*
 	 * We couldn't find any idle CPU, return the previous CPU if it is in
-	 * the task's LLC domain, otherwise pick any other CPU in the LLC
-	 * domain.
+	 * the task's LLC domain.
 	 */
-	if (is_prev_llc_affine)
+	if (is_prev_llc_affine) {
 		cpu = prev_cpu;
-	else
-		cpu = scx_bpf_pick_any_cpu(llc_mask, 0);
+		goto out_put_cpumask;
+	}
+
+	/*
+	 * Otherwise, return a random CPU in the task's LLC domain.
+	 */
+	cpu = bpf_cpumask_any_distribute(llc_mask);
+	if (cpu >= nr_cpu_ids)
+		cpu = prev_cpu;
 
 out_put_cpumask:
 	scx_bpf_put_cpumask(idle_cpumask);
@@ -747,40 +769,39 @@ s32 BPF_STRUCT_OPS(flash_select_cpu, struct task_struct *p,
 }
 
 /*
- * Wake up an idle CPU for task @p.
+ * Try to wake up an idle CPU that can immediately process the task.
  */
-static void kick_task_cpu(struct task_struct *p)
+static void kick_task_cpu(const struct task_struct *p, const struct task_ctx *tctx)
 {
-	s32 cpu = scx_bpf_task_cpu(p);
-	bool is_idle = false;
+	const struct cpumask *idle_cpumask, *llc_mask;
+	s32 cpu;
 
 	/*
-	 * If the task changed CPU affinity just try to kick any usable idle
-	 * CPU.
+	 * If the task can only run on a single CPU, it's pointless to wake
+	 * up any other CPU, so do nothing in this case.
 	 */
-	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
-		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-		if (cpu >= 0)
-			scx_bpf_kick_cpu(cpu, 0);
+	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p))
+		return;
+
+	/*
+	 * Look for an idle CPU in the task's LLC domain that can
+	 * immediately execute the task.
+	 *
+	 * Note that we do not want to mark the CPU as busy, since we don't
+	 * know at this stage if we will actually dispatch any task on it.
+	 */
+	llc_mask = cast_mask(tctx->llc_mask);
+	if (!llc_mask) {
+		scx_bpf_error("l3 cpumask not initialized");
 		return;
 	}
 
-	/*
-	 * For tasks that can run only on a single CPU, we can simply verify if
-	 * their only allowed CPU is still idle.
-	 */
-	if (p->nr_cpus_allowed == 1 || p->migration_disabled) {
-		if (scx_bpf_test_and_clear_cpu_idle(cpu))
-			scx_bpf_kick_cpu(cpu, 0);
-		return;
-	}
+	idle_cpumask = scx_bpf_get_idle_cpumask();
+	cpu = bpf_cpumask_any_and_distribute(llc_mask, idle_cpumask);
+	scx_bpf_put_cpumask(idle_cpumask);
 
-	/*
-	 * Otherwise try to kick the best idle CPU for the task.
-	 */
-	cpu = pick_idle_cpu(p, cpu, 0, &is_idle);
-	if (is_idle)
-		scx_bpf_kick_cpu(cpu, 0);
+	if (cpu < nr_cpu_ids)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
 /*
@@ -790,10 +811,6 @@ static void kick_task_cpu(struct task_struct *p)
 void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
 
 	/*
 	 * Per-CPU kthreads can be critical for system responsiveness, when
@@ -811,15 +828,18 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Enqueue the task to the global DSQ. The task will be dispatched on
 	 * the first CPU that becomes available.
 	 */
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
 	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_DFL,
 				 task_vtime(p, tctx), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	/*
-	 * If there is an idle CPU available for the task, wake it up so it can
-	 * consume the task immediately.
+	 * Try to proactively wake up an idle CPU, so that it can
+	 * immediately execute the task in case its current CPU is busy.
 	 */
-	kick_task_cpu(p);
+	kick_task_cpu(p, tctx);
 }
 
 void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
@@ -1055,6 +1075,9 @@ int enable_sibling_cpu(struct domain_arg *input)
 s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 {
 	int err;
+
+	/* Initialize the amount of possible CPUs */
+	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
 	/*
 	 * Create the shared DSQ.
