@@ -1153,7 +1153,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 	struct task_struct *key = p;
 	struct bpf_cpumask *p_cpumask;
 	u32 *new_dom;
-	s32 cpu;
+	s32 cpu = -1;
 
 	if (!(taskc = lookup_task_ctx_mask(p, &p_cpumask)) || !p_cpumask)
 		return;
