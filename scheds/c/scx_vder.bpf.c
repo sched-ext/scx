@@ -102,29 +102,6 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 }
 
 /*
- * Return true if @p is a per-CPU kthread, false otherwise.
- */
-static inline bool is_kthread(const struct task_struct *p)
-{
-	return p->flags & PF_KTHREAD;
-}
-
-/*
- * Return true if the task can only run on its assigned CPU, false
- * otherwise.
- */
-static bool is_migration_disabled(const struct task_struct *p)
-{
-	if (p->nr_cpus_allowed == 1)
-		return true;
-
-	if (bpf_core_field_exists(p->migration_disabled))
-		return p->migration_disabled;
-
-	return false;
-}
-
-/*
  * Return true if vtime @a is before vtime @b, false otherwise.
  */
 static inline bool vtime_before(u64 a, u64 b)
@@ -199,16 +176,6 @@ void BPF_STRUCT_OPS(vder_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
 	u64 vtime_min;
-
-	/*
-	 * Per-CPU kthreads (e.g., ksoftirqd/N, rcuop/N, etc.) are crucial
-	 * for the entire system responsiveness. To prioritize them over
-	 * regular tasks dispatch them immediately on their assigned CPU.
-	 */
-	if (is_kthread(p) && is_migration_disabled(p)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
-		return;
-	}
 
 	/*
 	 * Get the task context, if a context doesn't exist we can ignore
