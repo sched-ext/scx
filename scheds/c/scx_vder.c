@@ -74,7 +74,7 @@ restart:
 	fflush(stderr);
 
 	while (!exit_req && !UEI_EXITED(skel, uei))
-		pause();
+		sleep(5);
 
 	bpf_link__destroy(link);
 	ecode = UEI_REPORT(skel, uei);
