@@ -125,14 +125,6 @@ static bool is_migration_disabled(const struct task_struct *p)
 }
 
 /*
- * Return true if @p still wants to run, false otherwise.
- */
-static bool is_queued(const struct task_struct *p)
-{
-	return p->scx.flags & SCX_TASK_QUEUED;
-}
-
-/*
  * Return true if vtime @a is before vtime @b, false otherwise.
  */
 static inline bool vtime_before(u64 a, u64 b)
@@ -154,14 +146,6 @@ static u64 scale_fair(const struct task_struct *p, u64 value)
 static u64 scale_inverse_fair(const struct task_struct *p, u64 value)
 {
 	return value * 100 / p->scx.weight;
-}
-
-/*
- * Return the number of tasks that are waiting to run.
- */
-static u64 nr_tasks_waiting(void)
-{
-	return scx_bpf_dsq_nr_queued(SHARED_DSQ) + 1;
 }
 
 /*
@@ -274,16 +258,7 @@ void BPF_STRUCT_OPS(vder_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * Consume the first task from SHARED_DSQ.
 	 */
-	if (scx_bpf_dsq_move_to_local(SHARED_DSQ))
-		return;
-
-	/*
-	 * If the current task expired its time slice and no other task wants
-	 * to run on the CPU, simply replenish its time slice and let it
-	 * run for another round on the same CPU.
-	 */
-	if (prev && is_queued(prev))
-		prev->scx.slice = slice_ns / nr_tasks_waiting();
+	scx_bpf_dsq_move_to_local(SHARED_DSQ);
 }
 
 /*
@@ -326,12 +301,6 @@ void BPF_STRUCT_OPS(vder_running, struct task_struct *p)
 	 */
 	if (vtime_before(vtime_now, tctx->deadline))
 		vtime_now = tctx->deadline;
-
-	/*
-	 * Try to split the maximum time slice among all the tasks that are
-	 * waiting to run in the system.
-	 */
-	p->scx.slice = slice_ns / nr_tasks_waiting();
 }
 
 /*
