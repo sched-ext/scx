@@ -329,19 +329,21 @@ void BPF_STRUCT_OPS(vder_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Update task's partial execution time (sum_runtime).
 	 *
-	 * Some kthreads (e.g., ksoftirqd/N, rcuop/N, etc.) are crucial for
-	 * the entire system responsiveness. To prioritize them over
-	 * regular tasks, do not track their partial runtime (sum_runtime).
+	 * Some per-CPU kthreads (e.g., ksoftirqd/N, rcuop/N, etc.) are
+	 * crucial for the entire system responsiveness. To prioritize them
+	 * over regular tasks, do not track their partial runtime
+	 * (sum_runtime).
 	 *
-	 * As a result, their deadline will be based exclusively on their
-	 * vruntime, ensuring they receive higher priority while still
-	 * preserving a reasonable level of fairness.
+	 * As a result, never account vruntime for per-CPU kthreads, so
+	 * that they will be always dispatched before any other task.
 	 *
 	 * Moreover, never account more than 1 sec of runtime to prevent
 	 * excessive de-prioritization of CPU-intensive tasks (which could
 	 * lead to starvation).
 	 */
-	if (!is_kthread(p) && tctx->sum_runtime < NSEC_PER_SEC)
+	if (is_kthread(p) && p->nr_cpus_allowed == 1)
+		return;
+	if (tctx->sum_runtime < NSEC_PER_SEC)
 		tctx->sum_runtime += slice;
 
 	/*
