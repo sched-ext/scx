@@ -46,11 +46,6 @@ static u64 vtime_now;
  */
 struct task_ctx {
 	/*
-	 * Timestamp (in ns) when the task ran last time.
-	 */
-	u64 last_run_at;
-
-	/*
 	 * The task's deadline (vruntime).
 	 */
 	u64 deadline;
@@ -201,11 +196,6 @@ void BPF_STRUCT_OPS(vder_running, struct task_struct *p)
 		return;
 
 	/*
-	 * Update the run timestamp (used to evaluate the used time slice).
-	 */
-	tctx->last_run_at = bpf_ktime_get_ns();
-
-	/*
 	 * Update the global vruntime as a new task is starting to use a
 	 * CPU.
 	 */
@@ -228,7 +218,9 @@ void BPF_STRUCT_OPS(vder_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Evaluate the time slice used by the task.
 	 */
-	slice = bpf_ktime_get_ns() - tctx->last_run_at;
+	slice = slice_ns - p->scx.slice;
+	if (slice > slice_ns)
+		slice = slice_ns;
 
 	/*
 	 * Update task's vruntime.
