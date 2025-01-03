@@ -110,14 +110,6 @@ static inline bool vtime_before(u64 a, u64 b)
 }
 
 /*
- * Scale value proportionally to the weight of @p.
- */
-static u64 scale_fair(const struct task_struct *p, u64 value)
-{
-	return value * p->scx.weight / 100;
-}
-
-/*
  * Scale value inversely proportional to the weight of @p.
  */
 static u64 scale_inverse_fair(const struct task_struct *p, u64 value)
@@ -193,7 +185,7 @@ void BPF_STRUCT_OPS(vder_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Tasks with a higher weight get a bigger "bucket" for their
 	 * allowed accumulated time budget.
 	 */
-	vtime_min = vtime_now - scale_fair(p, slice_ns);
+	vtime_min = vtime_now - slice_ns;
 	if (vtime_before(p->scx.dsq_vtime, vtime_min))
 		tctx->deadline = vtime_min;
 
