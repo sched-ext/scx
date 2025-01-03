@@ -2,8 +2,6 @@
 
 #include <lib/sdt_task.h>
 
-#define SCX_CPUMASK_MAX_SIZE (4)
-
 struct sdt_dom_map_val {
 	union sdt_id		tid;
 
