@@ -194,6 +194,23 @@ static void kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 }
 
 /*
+ * Return the task's next evaluated deadline.
+ */
+static u64 task_deadline(const struct task_struct *p, const struct task_ctx *tctx)
+{
+	/*
+	 * Some kthreads (e.g., ksoftirqd/N, rcuop/N, etc.) are crucial for
+	 * the entire system responsiveness, therefore set their deadline
+	 * to zero, so that they will be always consumed before any other
+	 * task.
+	 */
+	if (is_kthread(p) && p->nr_cpus_allowed == 1)
+		return 0;
+
+	return tctx->deadline;
+}
+
+/*
  * Task @p has been queued to the scheduler.
  */
 void BPF_STRUCT_OPS(vder_enqueue, struct task_struct *p, u64 enq_flags)
@@ -232,7 +249,7 @@ void BPF_STRUCT_OPS(vder_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Tasks are ordered by their deadline, the task with the earliest
 	 * deadline will be consumed first in ops.dispatch().
 	 */
-	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, slice_ns, tctx->deadline, enq_flags);
+	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, slice_ns, task_deadline(p, tctx), enq_flags);
 
 	/*
 	 * Try to proactively wake up an idle CPU, so that it can
@@ -327,22 +344,11 @@ void BPF_STRUCT_OPS(vder_stopping, struct task_struct *p, bool runnable)
 	slice = bpf_ktime_get_ns() - tctx->last_run_at;
 
 	/*
-	 * Update task's partial execution time (sum_runtime).
-	 *
-	 * Some per-CPU kthreads (e.g., ksoftirqd/N, rcuop/N, etc.) are
-	 * crucial for the entire system responsiveness. To prioritize them
-	 * over regular tasks, do not track their partial runtime
-	 * (sum_runtime).
-	 *
-	 * As a result, never account vruntime for per-CPU kthreads, so
-	 * that they will be always dispatched before any other task.
-	 *
-	 * Moreover, never account more than 1 sec of runtime to prevent
-	 * excessive de-prioritization of CPU-intensive tasks (which could
-	 * lead to starvation).
+	 * Update task's partial execution time (sum_runtime), but never
+	 * account more than 1 sec of runtime to prevent excessive
+	 * de-prioritization of CPU-intensive tasks (which could lead to
+	 * starvation).
 	 */
-	if (is_kthread(p) && p->nr_cpus_allowed == 1)
-		return;
 	if (tctx->sum_runtime < NSEC_PER_SEC)
 		tctx->sum_runtime += slice;
 
