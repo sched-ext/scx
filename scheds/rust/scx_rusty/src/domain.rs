@@ -40,7 +40,6 @@ impl Domain {
 #[derive(Debug)]
 pub struct DomainGroup {
     doms: BTreeMap<usize, Domain>,
-    cpu_dom_map: BTreeMap<usize, usize>,
     dom_numa_map: BTreeMap<usize, usize>,
     num_numa_nodes: usize,
     span: Cpumask,
@@ -79,16 +78,8 @@ impl DomainGroup {
             (doms, top.nodes.len())
         };
 
-        let mut cpu_dom_map = BTreeMap::new();
-        for (id, dom) in doms.iter() {
-            for cpu in dom.mask.iter() {
-                cpu_dom_map.insert(cpu, *id);
-            }
-        }
-
         Ok(Self {
             doms,
-            cpu_dom_map,
             dom_numa_map,
             num_numa_nodes,
             span,
@@ -117,10 +108,6 @@ impl DomainGroup {
 
     pub fn nr_nodes(&self) -> usize {
         self.num_numa_nodes
-    }
-
-    pub fn cpu_dom_id(&self, cpu: &usize) -> Option<usize> {
-        self.cpu_dom_map.get(cpu).copied()
     }
 
     pub fn dom_numa_id(&self, dom_id: &usize) -> Option<usize> {
