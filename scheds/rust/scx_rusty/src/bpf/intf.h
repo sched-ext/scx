@@ -101,12 +101,10 @@ struct task_ctx {
 	u64 dom_mask;
 	u64 preferred_dom_mask;
 
-	struct bpf_cpumask __kptr *cpumask;
-	struct bpf_cpumask __kptr *tmp_cpumask;
 	u32 dom_id;
 	u32 weight;
 	bool runnable;
-	u64 dom_active_tptrs_gen;
+	u64 dom_active_tasks_gen;
 	u64 deadline;
 
 	u64 sum_runtime;
@@ -140,10 +138,6 @@ struct bucket_ctx {
 
 struct dom_ctx {
 	u32 id;
-	struct bpf_cpumask __kptr *cpumask;
-	struct bpf_cpumask __kptr *direct_greedy_cpumask;
-	struct bpf_cpumask __kptr *node_cpumask;
-
 	u64 min_vruntime;
 
 	u64 dbg_dcycle_printed_at;

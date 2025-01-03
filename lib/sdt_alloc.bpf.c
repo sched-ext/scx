@@ -171,7 +171,7 @@ int sdt_alloc_stack(struct sdt_alloc_stack __arena *stack)
 	return -EAGAIN;
 }
 
-static SDT_TASK_FN_ATTRS
+static __noinline
 int sdt_alloc_attempt(struct sdt_alloc_stack __arena *stack)
 {
 	bpf_repeat(SDT_TASK_ALLOC_ATTEMPTS) {
@@ -488,8 +488,7 @@ __hidden
 struct sdt_data __arena *sdt_alloc(struct sdt_allocator *alloc)
 {
 	struct sdt_alloc_stack __arena *stack = prealloc_stack;
-	struct sdt_data __arena *data = NULL;
-	struct sdt_data __arena *val;
+	struct sdt_data __arena *data = NULL, __arena *val;
 	sdt_desc_t *desc;
 	struct sdt_chunk __arena *chunk;
 	__u64 idx, pos;
