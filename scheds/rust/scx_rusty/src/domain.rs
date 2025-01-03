@@ -3,15 +3,19 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 use std::collections::BTreeMap;
+use crate::bpf_intf;
 
 use anyhow::Result;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 #[derive(Clone, Debug)]
 pub struct Domain {
     id: usize,
     mask: Cpumask,
+    pub ctx: Arc<Mutex<Option<*mut bpf_intf::dom_ctx>>>,
 }
 
 impl Domain {
@@ -34,6 +38,19 @@ impl Domain {
     /// The number of CPUs in the domain.
     pub fn weight(&self) -> usize {
         self.mask.weight()
+    }
+
+    pub fn ctx(&self) -> Option<&mut bpf_intf::dom_ctx> {
+        let domc = self.ctx.lock().unwrap();
+
+        // Ideally we would be storing the dom_ctx as a reference in struct Domain,
+        // in the first place. Rust makes embedding references to structs into other
+        // structs very difficult, so this is more pragmatic.
+        match *domc {
+            Some(ptr) => Some(unsafe { &mut *(ptr) }),
+            None => None
+        }
+
     }
 }
 
@@ -59,7 +76,7 @@ impl DomainGroup {
             for mask_str in cpumasks.iter() {
                 let mask = Cpumask::from_str(&mask_str)?;
                 span |= &mask;
-                doms.insert(dom_id, Domain { id: dom_id, mask });
+                doms.insert(dom_id, Domain { id: dom_id, mask, ctx: Arc::new(Mutex::new(None)) });
                 dom_numa_map.insert(dom_id, 0);
                 dom_id += 1;
             }
@@ -70,7 +87,7 @@ impl DomainGroup {
                 for (_, llc) in node.llcs.iter() {
                     let mask = llc.span.clone();
                     span |= &mask;
-                    doms.insert(dom_id, Domain { id: dom_id, mask });
+                    doms.insert(dom_id, Domain { id: dom_id, mask, ctx: Arc::new(Mutex::new(None)) });
                     dom_numa_map.insert(dom_id, node_id.clone());
                     dom_id += 1;
                 }

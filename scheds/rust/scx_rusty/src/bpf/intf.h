@@ -143,7 +143,7 @@ struct dom_active_tasks {
 	u64 gen;
 	u64 read_idx;
 	u64 write_idx;
-	struct task_struct *tasks[MAX_DOM_ACTIVE_TPTRS];
+	struct task_ctx *tasks[MAX_DOM_ACTIVE_TPTRS];
 };
 
 struct dom_ctx {

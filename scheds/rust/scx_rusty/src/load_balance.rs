@@ -138,7 +138,6 @@ use std::fmt;
 use std::sync::Arc;
 
 use anyhow::bail;
-use anyhow::Context;
 use anyhow::Result;
 use libbpf_rs::MapCore as _;
 use log::debug;
@@ -583,44 +582,35 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         const NUM_BUCKETS: u64 = bpf_intf::consts_LB_LOAD_BUCKETS as u64;
         let now_mono = now_monotonic();
         let load_half_life = self.skel.maps.rodata_data.load_half_life;
-        let dom_data = &self.skel.maps.dom_data;
 
         let mut aggregator =
             LoadAggregator::new(self.dom_group.weight(), !self.lb_apply_weight.clone());
 
-        for dom_id in self.dom_group.doms().keys() {
-            let dom = *dom_id;
-            let dom_key = unsafe { std::mem::transmute::<u32, [u8; 4]>(dom as u32) };
+        for (dom_id, dom) in self.dom_group.doms() {
+            aggregator.init_domain(*dom_id);
 
-            aggregator.init_domain(dom);
+            let dom_ctx = dom.ctx().unwrap();
+            println!("Retrieved {:p} for {}", dom_ctx, dom.id());
 
-            if let Some(dom_ctx_map_elem) = dom_data
-                .lookup(&dom_key, libbpf_rs::MapFlags::ANY)
-                .context("Failed to lookup dom_ctx")?
-            {
-                let dom_ctx =
-                    unsafe { &*(dom_ctx_map_elem.as_slice().as_ptr() as *const bpf_intf::dom_ctx) };
+            for bucket in 0..NUM_BUCKETS {
+                let bucket_ctx = &dom_ctx.buckets[bucket as usize];
+                let rd = &bucket_ctx.rd;
+                let duty_cycle = ravg_read(
+                    rd.val,
+                    rd.val_at,
+                    rd.old,
+                    rd.cur,
+                    now_mono,
+                    load_half_life,
+                    RAVG_FRAC_BITS,
+                );
 
-                for bucket in 0..NUM_BUCKETS {
-                    let bucket_ctx = dom_ctx.buckets[bucket as usize];
-                    let rd = &bucket_ctx.rd;
-                    let duty_cycle = ravg_read(
-                        rd.val,
-                        rd.val_at,
-                        rd.old,
-                        rd.cur,
-                        now_mono,
-                        load_half_life,
-                        RAVG_FRAC_BITS,
-                    );
-
-                    if duty_cycle == 0.0f64 {
-                        continue;
-                    }
-
-                    let weight = self.bucket_weight(bucket);
-                    aggregator.record_dom_load(dom, weight, duty_cycle)?;
+                if duty_cycle == 0.0f64 {
+                    continue;
                 }
+
+                let weight = self.bucket_weight(bucket);
+                aggregator.record_dom_load(*dom_id, weight, duty_cycle)?;
             }
         }
 

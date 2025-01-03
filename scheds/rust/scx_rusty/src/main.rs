@@ -452,6 +452,19 @@ impl<'a> Scheduler<'a> {
         let struct_ops = Some(scx_ops_attach!(skel, rusty)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
+        for (id, dom) in domains.doms().iter() {
+            let id: usize = id
+                .clone()
+                .try_into()
+                .expect("Could not turn domain ID into usize");
+
+            let mut ctx = dom.ctx.lock().unwrap();
+            
+            *ctx = Some(skel.maps.bss_data.doms[id] as *mut bpf_intf::dom_ctx) ;
+
+
+        }
+
         info!("Rusty scheduler started! Run `scx_rusty --monitor` for metrics.");
 
         // Other stuff.
