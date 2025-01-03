@@ -51,33 +51,7 @@ struct task_ctx {
 	u64 last_run_at;
 
 	/*
-	 * Sum of the task's used runtime from when it becomes runnable
-	 * (ready to run on a CPU) to when the task voluntarily releases
-	 * the CPU (either by completing its execution or waiting for an
-	 * event).
-	 */
-	u64 sum_runtime;
-
-	/*
-	 * The task's deadline, defined as:
-         *
-         *   deadline = vruntime + partial_vruntime
-         *
-	 * Here, vruntime represents the task's total runtime, scaled
-	 * inversely by its weight, while partial_vruntime accounts for the
-	 * vruntime accumulated from the moment the task becomes runnable
-	 * until it voluntarily releases the CPU (which is, essentially,
-	 * the task's sum_runtime scaled by its weight).
-         *
-	 * Fairness is ensured through vruntime, whereas partial_vruntime
-	 * helps in prioritizing latency-sensitive tasks: tasks that are
-	 * frequently blocked waiting for an event (typically latency
-	 * sensitive) will accumulate a smaller partial_vruntime, compared
-	 * to tasks that continuously consume CPU without interruption.
-	 *
-	 * As a result, tasks with a smaller partial_vruntime will have a
-	 * shorter deadline and will be dispatched earlier, ensuring better
-	 * responsiveness for latency-sensitive tasks.
+	 * The task's deadline (vruntime).
 	 */
 	u64 deadline;
 };
@@ -190,11 +164,6 @@ void BPF_STRUCT_OPS(vder_enqueue, struct task_struct *p, u64 enq_flags)
 		tctx->deadline = vtime_min;
 
 	/*
-	 * Update task's deadline.
-	 */
-	tctx->deadline += scale_inverse_fair(p, tctx->sum_runtime);
-
-	/*
 	 * Queue the task to the global shared DSQ.
 	 *
 	 * Tasks are ordered by their deadline, the task with the earliest
@@ -218,24 +187,6 @@ void BPF_STRUCT_OPS(vder_dispatch, s32 cpu, struct task_struct *prev)
 	 * Consume the first task from SHARED_DSQ.
 	 */
 	scx_bpf_dsq_move_to_local(SHARED_DSQ);
-}
-
-/*
- * Task @p is ready to run.
- */
-void BPF_STRUCT_OPS(vder_runnable, struct task_struct *p, u64 enq_flags)
-{
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-
-	/*
-	 * Reset the partial runtime, as we are starting the task either
-	 * from the beginning of its lifetime or after it has been blocked.
-	 */
-	tctx->sum_runtime = 0;
 }
 
 /*
@@ -278,15 +229,6 @@ void BPF_STRUCT_OPS(vder_stopping, struct task_struct *p, bool runnable)
 	 * Evaluate the time slice used by the task.
 	 */
 	slice = bpf_ktime_get_ns() - tctx->last_run_at;
-
-	/*
-	 * Update task's partial execution time (sum_runtime), but never
-	 * account more than 1 sec of runtime to prevent excessive
-	 * de-prioritization of CPU-intensive tasks (which could lead to
-	 * starvation).
-	 */
-	if (tctx->sum_runtime < NSEC_PER_SEC)
-		tctx->sum_runtime += slice;
 
 	/*
 	 * Update task's vruntime.
@@ -341,7 +283,6 @@ SCX_OPS_DEFINE(vder_ops,
 	       .select_cpu		= (void *)vder_select_cpu,
 	       .enqueue			= (void *)vder_enqueue,
 	       .dispatch		= (void *)vder_dispatch,
-	       .runnable		= (void *)vder_runnable,
 	       .running			= (void *)vder_running,
 	       .stopping		= (void *)vder_stopping,
 	       .enable			= (void *)vder_enable,
