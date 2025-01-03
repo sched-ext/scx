@@ -106,31 +106,6 @@ s32 BPF_STRUCT_OPS(vder_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 }
 
 /*
- * Try to wake up an idle CPU that can immediately process the task.
- */
-static void kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tctx)
-{
-	const struct cpumask *idle_cpumask;
-	s32 cpu;
-
-	/*
-	 * Look for an idle CPU that can immediately execute the task.
-	 *
-	 * Note that we do not want to mark the CPU as busy, since we don't
-	 * know at this stage if we'll actually dispatch any task on it.
-	 */
-	idle_cpumask = scx_bpf_get_idle_cpumask();
-	cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, idle_cpumask);
-	scx_bpf_put_cpumask(idle_cpumask);
-
-	/*
-	 * Try to wake up the idle CPU, if we have found one.
-	 */
-	if (cpu < scx_bpf_nr_cpu_ids())
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-}
-
-/*
  * Task @p has been queued to the scheduler.
  */
 void BPF_STRUCT_OPS(vder_enqueue, struct task_struct *p, u64 enq_flags)
@@ -165,12 +140,6 @@ void BPF_STRUCT_OPS(vder_enqueue, struct task_struct *p, u64 enq_flags)
 	 * deadline will be consumed first in ops.dispatch().
 	 */
 	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, slice_ns, tctx->deadline, enq_flags);
-
-	/*
-	 * Try to proactively wake up an idle CPU, so that it can
-	 * immediately execute the task in case its current CPU is busy.
-	 */
-	kick_idle_cpu(p, tctx);
 }
 
 /*
