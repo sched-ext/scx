@@ -257,17 +257,6 @@ static u64 calc_avg_clamp(u64 old_val, u64 new_val, u64 low, u64 high)
 }
 
 /*
- * Evaluate the average frequency of an event over time.
- */
-static u64 update_freq(u64 freq, u64 delta)
-{
-	u64 new_freq;
-
-	new_freq = NSEC_PER_SEC / delta;
-	return calc_avg(freq, new_freq);
-}
-
-/*
  * Return the total amount of tasks that are currently waiting to be scheduled.
  */
 static u64 nr_tasks_waiting(void)
@@ -680,8 +669,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
  */
 static void kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tctx)
 {
-	const struct cpumask *idle_cpumask;
-	struct bpf_cpumask *l3_mask;
+	const struct cpumask *idle_cpumask, *l3_mask;
 	s32 cpu;
 
 	/*
