@@ -139,7 +139,7 @@ struct Opts {
     #[clap(short = 'l', long, allow_hyphen_values = true, default_value = "20000")]
     slice_us_lag: i64,
 
-    /// Enable kthreads prioritization.
+    /// Enable per-CPU kthreads prioritization.
     ///
     /// Enabling this can improve system performance, but it may also introduce interactivity
     /// issues or unfairness in scenarios with high kthread activity, such as heavy I/O or network

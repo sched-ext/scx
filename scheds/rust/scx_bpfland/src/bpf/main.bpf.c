@@ -51,7 +51,7 @@ const volatile u64 slice_min = 1ULL * NSEC_PER_MSEC;
 const volatile s64 slice_lag = 20ULL * NSEC_PER_MSEC;
 
 /*
- * When enabled always dispatch all kthreads directly.
+ * When enabled always dispatch per-CPU kthreads directly.
  *
  * This allows to prioritize critical kernel threads that may potentially slow
  * down the entire system if they are blocked for too long, but it may also
@@ -213,8 +213,12 @@ static inline bool is_kthread(const struct task_struct *p)
  */
 static bool is_migration_disabled(const struct task_struct *p)
 {
+	if (p->nr_cpus_allowed == 1)
+		return true;
+
 	if (bpf_core_field_exists(p->migration_disabled))
 		return p->migration_disabled;
+
 	return false;
 }
 
@@ -305,6 +309,14 @@ static u64 task_lag(const struct task_struct *p, const struct task_ctx *tctx)
 static u64 task_deadline(struct task_struct *p, struct task_ctx *tctx)
 {
 	u64 min_vruntime = vtime_now - task_lag(p, tctx);
+
+	/*
+	 * Per-CPU kthreads are critical for the entire system
+	 * responsiveness, so make sure they are dispatched before any
+	 * other task.
+	 */
+	if (is_kthread(p) && p->nr_cpus_allowed == 1)
+		return min_vruntime;
 
 	/*
 	 * Limit the vruntime to to avoid excessively penalizing tasks.
@@ -676,7 +688,7 @@ static void kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 	 * If the task can only run on a single CPU, it's pointless to wake
 	 * up any other CPU, so do nothing in this case.
 	 */
-	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p))
+	if (is_migration_disabled(p))
 		return;
 
 	/*
@@ -710,31 +722,27 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	u64 slice;
 
 	/*
-	 * Per-CPU kthreads are critical for system responsiveness so make sure
-	 * they are dispatched before any other task.
-	 *
-	 * If local_kthread is specified dispatch all kthreads directly.
+	 * If local_kthread is specified dispatch per-CPU kthreads
+	 * directly on their assigned CPU.
 	 */
-	if (is_kthread(p) && (local_kthreads || p->nr_cpus_allowed == 1)) {
+	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		return;
 	}
 
-	if ((p->nr_cpus_allowed == 1) || is_migration_disabled(p)) {
-		/*
-		 * If nvcsw_max_thresh is disabled we don't care much about
-		 * interactivity, so we can massively boost per-CPU tasks and
-		 * always dispatch them directly on their CPU.
-		 *
-		 * This can help to improve I/O workloads (like large parallel
-		 * builds).
-		 */
-		if (!nvcsw_max_thresh) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
-			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-			return;
-		}
+	/*
+	 * If nvcsw_max_thresh is disabled we don't care much about
+	 * interactivity, so we can boost per-CPU tasks and always dispatch
+	 * them directly on their CPU.
+	 *
+	 * This can help to improve I/O workloads (like large parallel
+	 * builds).
+	 */
+	if (!nvcsw_max_thresh && is_migration_disabled(p)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		return;
 	}
 
 	/*
