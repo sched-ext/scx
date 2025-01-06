@@ -35,6 +35,8 @@ get_bpftool_ver = find_program(join_paths(meson.current_source_dir(),
                                           'meson-scripts/get_bpftool_ver'))
 bpftool_build_skel = find_program(join_paths(meson.current_source_dir(),
                                              'meson-scripts/bpftool_build_skel'))
+bpftool_build_skel_lib = find_program(join_paths(meson.current_source_dir(),
+                                             'meson-scripts/bpftool_build_skel_lib'))
 get_sys_incls = find_program(join_paths(meson.current_source_dir(),
                                         'meson-scripts/get_sys_incls'))
 test_sched  = find_program(join_paths(meson.current_source_dir(),
@@ -284,9 +286,13 @@ gen_bpf_o = generator(bpf_clang,
 
 gen_bpf_skel = generator(bpftool_build_skel,
                          output: ['@BASENAME@.skel.h','@BASENAME@.subskel.h' ],
+                         depends: [libbpf, bpftool_target],
+                         arguments: [bpftool_exe_path, '@INPUT@', '@OUTPUT0@', '@OUTPUT1@'])
+
+gen_bpf_skel_lib = generator(bpftool_build_skel_lib,
+                         output: ['@BASENAME@.skel.h','@BASENAME@.subskel.h' ],
                          depends: [libbpf, bpftool_target, scx_lib],
                          arguments: [bpftool_exe_path, '@INPUT@', '@OUTPUT0@', '@OUTPUT1@', scx_lib_path])
-
 
 #
 # For rust sub-projects.
