@@ -713,14 +713,12 @@ static void kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 }
 
 /*
- * Dispatch all the other tasks that were not dispatched directly in
- * select_cpu().
+ * Attempt to dispatch a task directly to its assigned CPU.
+ *
+ * Return true if the task is dispatched, false otherwise.
  */
-void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
+static bool try_direct_dispatch(struct task_struct *p, u64 enq_flags)
 {
-	struct task_ctx *tctx;
-	u64 slice;
-
 	/*
 	 * If local_kthread is specified dispatch per-CPU kthreads
 	 * directly on their assigned CPU.
@@ -728,8 +726,17 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
-		return;
+		return true;
 	}
+
+	/*
+	 * If a task has been re-enqueued because its assigned CPU has been
+	 * taken by a higher priority scheduling class, force it to follow
+	 * the regular scheduling path and give it a chance to run on a
+	 * different CPU.
+	 */
+	if (enq_flags & SCX_ENQ_REENQ)
+		return false;
 
 	/*
 	 * If ops.select_cpu() has been skipped, try direct dispatch.
@@ -746,7 +753,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
 					   slice_max, enq_flags);
-			return;
+			__sync_fetch_and_add(&nr_direct_dispatches, 1);
+			return true;
 		}
 	}
 
@@ -761,8 +769,30 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!nvcsw_max_thresh && is_migration_disabled(p)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
-		return;
+		return true;
 	}
+
+	/*
+	 * Direct dispatch not possible, follow the regular scheduling
+	 * path.
+	 */
+	return false;
+}
+
+/*
+ * Dispatch all the other tasks that were not dispatched directly in
+ * select_cpu().
+ */
+void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
+{
+	struct task_ctx *tctx;
+	u64 slice;
+
+	/*
+	 * Try to dispatch the task directly, if possible.
+	 */
+	if (try_direct_dispatch(p, enq_flags))
+		return;
 
 	/*
 	 * Dispatch regular tasks to the shared DSQ.
@@ -1004,6 +1034,16 @@ void BPF_STRUCT_OPS(bpfland_runnable, struct task_struct *p, u64 enq_flags)
 	tctx->sum_runtime = 0;
 }
 
+void BPF_STRUCT_OPS(bpfland_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
+{
+	/*
+	 * When a CPU is taken by a higher priority scheduler class,
+	 * re-enqueue all the tasks that are waiting in the local DSQ, so
+	 * that we can give them a chance to run on another CPU.
+	 */
+	scx_bpf_reenqueue_local();
+}
+
 void BPF_STRUCT_OPS(bpfland_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
@@ -1211,6 +1251,7 @@ SCX_OPS_DEFINE(bpfland_ops,
 	       .running			= (void *)bpfland_running,
 	       .stopping		= (void *)bpfland_stopping,
 	       .runnable		= (void *)bpfland_runnable,
+	       .cpu_release		= (void *)bpfland_cpu_release,
 	       .set_cpumask		= (void *)bpfland_set_cpumask,
 	       .enable			= (void *)bpfland_enable,
 	       .init_task		= (void *)bpfland_init_task,
