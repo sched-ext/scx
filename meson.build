@@ -278,13 +278,13 @@ subdir('lib')
 #
 gen_bpf_o = generator(bpf_clang,
                       output: '@BASENAME@.o',
-                      depends: [libbpf, scx_lib],
+                      depends: [libbpf],
                       arguments: [bpf_base_cflags, '-target', 'bpf', libbpf_c_headers, bpf_includes,
                                   '-c', '@INPUT@', '-o', '@OUTPUT@'])
 
 gen_bpf_skel = generator(bpftool_build_skel,
                          output: ['@BASENAME@.skel.h','@BASENAME@.subskel.h' ],
-                         depends: [libbpf, bpftool_target],
+                         depends: [libbpf, bpftool_target, scx_lib],
                          arguments: [bpftool_exe_path, '@INPUT@', '@OUTPUT0@', '@OUTPUT1@', scx_lib_path])
 
 
