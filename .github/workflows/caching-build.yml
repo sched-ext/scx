@@ -303,7 +303,7 @@ jobs:
         run: exit -1
 
       - run: cargo build  --manifest-path rust/${{ matrix.component }}/Cargo.toml
-      - run: vng -v --rw --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --net user -- cargo test --manifest-path rust/${{ matrix.component }}/Cargo.toml
+      - run: vng -v --rw --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --network user -- cargo test --manifest-path rust/${{ matrix.component }}/Cargo.toml
 
   rust-test-schedulers:
     runs-on: ubuntu-24.04
@@ -346,7 +346,7 @@ jobs:
         run: exit -1
 
       - run: cargo build  --manifest-path scheds/rust/${{ matrix.scheduler }}/Cargo.toml
-      - run: vng -v --rw --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --net user -- cargo test --manifest-path scheds/rust/${{ matrix.scheduler }}/Cargo.toml
+      - run: vng -v --rw --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --network user -- cargo test --manifest-path scheds/rust/${{ matrix.scheduler }}/Cargo.toml
 
   pages:
     runs-on: ubuntu-24.04
