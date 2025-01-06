@@ -732,6 +732,25 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
+	 * If ops.select_cpu() has been skipped, try direct dispatch.
+	 */
+	if (!(enq_flags & SCX_ENQ_CPU_SELECTED)) {
+		s32 prev_cpu = scx_bpf_task_cpu(p);
+
+		/*
+		 * If the local DSQ of the assigned CPU is empty and the
+		 * previous CPU can still be used by the task, perform the
+		 * direct dispatch.
+		 */
+		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
+		    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
+					   slice_max, enq_flags);
+			return;
+		}
+	}
+
+	/*
 	 * If nvcsw_max_thresh is disabled we don't care much about
 	 * interactivity, so we can boost per-CPU tasks and always dispatch
 	 * them directly on their CPU.
