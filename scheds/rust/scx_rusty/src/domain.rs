@@ -105,6 +105,7 @@ impl DomainGroup {
 
     pub fn numa_doms(&self, numa_id: &usize) -> Vec<Domain> {
         let mut numa_doms = Vec::new();
+        // XXX dom_numa_map never gets updated even if we cross NUMA nodes
         for (d_id, n_id) in self.dom_numa_map.iter() {
             if n_id == numa_id {
                 let dom = self.doms.get(&d_id).unwrap();

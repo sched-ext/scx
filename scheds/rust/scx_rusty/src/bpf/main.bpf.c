@@ -487,18 +487,6 @@ static inline void stat_add(enum stat_idx idx, u64 addend)
 }
 
 /*
- * This is populated from userspace to indicate which tasks should be reassigned
- * to new doms.
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, u64);
-	__type(value, u32);
-	__uint(max_entries, 1000);
-	__uint(map_flags, 0);
-} lb_data SEC(".maps");
-
-/*
  * Userspace tuner will frequently update the following struct with tuning
  * parameters and bump its gen. refresh_tune_params() converts them into forms
  * that can be used directly in the scheduling paths.
@@ -1150,20 +1138,22 @@ static void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
 void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
 {
 	struct task_ctx *taskc;
-	struct task_struct *key = p;
+	struct dom_ctx *domc;
 	struct bpf_cpumask *p_cpumask;
-	u32 *new_dom;
 	s32 cpu = -1;
 
 	if (!(taskc = lookup_task_ctx_mask(p, &p_cpumask)) || !p_cpumask)
 		return;
 
+	domc = task_domain(taskc);
+	if (!domc)
+		return;
+
 	/*
 	 * Migrate @p to a new domain if requested by userland through lb_data.
 	 */
-	new_dom = bpf_map_lookup_elem(&lb_data, &key);
-	if (new_dom && *new_dom != taskc->dom_id &&
-	    task_set_domain(p, *new_dom, false)) {
+	if (domc->id != taskc->dom_id &&
+	    task_set_domain(p, domc->id, false)) {
 		stat_add(RUSTY_STAT_LOAD_BALANCE, 1);
 		taskc->dispatch_local = false;
 		cpu = bpf_cpumask_any_distribute(cast_mask(p_cpumask));
