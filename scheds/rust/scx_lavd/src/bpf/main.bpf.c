@@ -292,13 +292,7 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc,
 	 * Prioritize a migration-disabled task since it has restrictions
 	 * in placement so it tends to be delayed.
 	 */
-	if (bpf_core_field_exists(p->migration_disabled) && p->migration_disabled)
-		weight_boost += LAVD_LC_WEIGHT_BOOST;
-
-	/*
-	 * A pinned-task tends to be latency-critical.
-	 */
-	if (p->nr_cpus_allowed == 1)
+	if (is_migration_disabled(p))
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
@@ -748,7 +742,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	 * If a task can run only on a single CPU (e.g., per-CPU kworker), we
 	 * simply check if a task is still pinned on the prev_cpu and go.
 	 */
-	if (p->nr_cpus_allowed == 1 &&
+	if (is_migration_disabled(p) &&
 	    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 			*is_idle = true;
