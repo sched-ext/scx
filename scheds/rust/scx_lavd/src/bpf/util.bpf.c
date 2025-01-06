@@ -216,6 +216,17 @@ static bool is_kernel_task(struct task_struct *p)
 	return !!(p->flags & PF_KTHREAD);
 }
 
+static bool is_migration_disabled(const struct task_struct *p)
+{
+	if (p->nr_cpus_allowed == 1)
+		return true;
+
+	if (bpf_core_field_exists(p->migration_disabled))
+		return p->migration_disabled;
+
+	return false;
+}
+
 static bool is_lat_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
 {
 	return taskc->lat_cri >= stat_cur->avg_lat_cri;
