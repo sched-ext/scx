@@ -24,6 +24,17 @@ struct {
 struct sdt_alloc_stack __arena *prealloc_stack;
 
 /*
+ * Necessary for cond_break/can_loop's semantics. According to kernel commit
+ * 011832b, the loop counter variable must be seen as imprecise and bounded
+ * by the verifier. Initializing it from a constant (e.g., i = 0;), then,
+ * makes it precise and prevents may_goto from helping with converging the
+ * loop. For these loops we must initialize the loop counter from a variable
+ * whose value the verifier cannot reason about when checking the program, so
+ * that the loop counter's value is imprecise.
+ */
+static __u64 zero = 0;
+
+/*
  * XXX Hack to get the verifier to find the arena for sdt_exit_task.
  * As of 6.12-rc5, The verifier associates arenas with programs by
  * checking LD.IMM instruction operands for an arena and populating
@@ -174,7 +185,17 @@ int sdt_alloc_stack(struct sdt_alloc_stack __arena *stack)
 static SDT_TASK_FN_ATTRS
 int sdt_alloc_attempt(struct sdt_alloc_stack __arena *stack)
 {
-	bpf_repeat(SDT_TASK_ALLOC_ATTEMPTS) {
+	int i;
+
+	/*
+	 * Use can_loop to help with verification. The can_loop macro was
+	 * introduced in kernel commit ba39486 and wraps around the may_goto
+	 * instruction that helps with verifiying for loops. Using may_goto
+	 * embeds a switch into the loop that ensures it is considered
+	 * terminable by the verifier by adding a hidden switch to the loop
+	 * and counting down with every iteration.
+	 */
+	for (i = zero; i < SDT_TASK_ALLOC_ATTEMPTS && can_loop; i++) {
 		if (sdt_alloc_stack(stack) == 0)
 			return 0;
 	}
@@ -348,6 +369,34 @@ int sdt_set_idx_state(sdt_desc_t *desc, __u64 pos, bool state)
 	return 0;
 }
 
+static __noinline
+int sdt_mark_nodes_avail(sdt_desc_t *lv_desc[SDT_TASK_LEVELS], __u64 lv_pos[SDT_TASK_LEVELS])
+{
+	sdt_desc_t *desc;
+	__u64 u, level;
+	int ret;
+
+	for (u = zero; u < SDT_TASK_LEVELS && can_loop; u++) {
+		level = SDT_TASK_LEVELS - 1 - u;
+
+		/* Only propagate upwards if we are the parent's only free chunk. */
+		desc = lv_desc[level];
+
+		/* Failed calls return unlocked. */
+		ret = sdt_set_idx_state(desc, lv_pos[level], false);
+		if (unlikely(ret != 0))
+			return ret;
+
+		cast_kern(desc);
+
+		desc->nr_free += 1;
+		if (desc->nr_free > 1)
+			return 0;
+	}
+
+	return 0;
+}
+
 __hidden
 void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 {
@@ -357,7 +406,7 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 	struct sdt_chunk __arena *chunk;
 	sdt_desc_t *desc;
 	struct sdt_data __arena *data;
-	__u64 u, level, shift, pos;
+	__u64 level, shift, pos;
 	__u64 lv_pos[SDT_TASK_LEVELS];
 	int ret;
 	int i;
@@ -373,7 +422,13 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 		return;
 	}
 
-	bpf_for(level, 0, SDT_TASK_LEVELS) {
+	/* To appease the verifier. */
+	for (level = zero; level < SDT_TASK_LEVELS && can_loop; level++) {
+		lv_desc[level] = NULL;
+		lv_pos[level] = 0;
+	}
+
+	for (level = zero; level < SDT_TASK_LEVELS && can_loop; level++) {
 		shift = (SDT_TASK_LEVELS - 1 - level) * SDT_TASK_ENTS_PER_PAGE_SHIFT;
 		pos = (idx >> shift) & mask;
 
@@ -414,29 +469,15 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 		};
 
 		/* Zero out one word at a time. */
-		bpf_for(i, 0, alloc->pool.elem_size / 8) {
+		for (i = zero; i < alloc->pool.elem_size / 8 && can_loop; i++) {
 			data->payload[i] = 0;
 		}
 	}
 
-	bpf_for(u, 0, SDT_TASK_LEVELS) {
-		level = SDT_TASK_LEVELS - 1 - u;
-
-		/* Only propagate upwards if we are the parent's only free chunk. */
-		desc = lv_desc[level];
-
-		/* Failed calls return unlocked. */
-		ret = sdt_set_idx_state(desc, lv_pos[level], false);
-		if (unlikely(ret != 0)) {
-			bpf_spin_unlock(&sdt_lock);
-			return;
-		}
-
-		cast_kern(desc);
-
-		desc->nr_free += 1;
-		if (desc->nr_free > 1)
-			break;
+	ret = sdt_mark_nodes_avail(lv_desc, lv_pos);
+	if (unlikely(ret != 0)) {
+		bpf_spin_unlock(&sdt_lock);
+		return;
 	}
 
 	sdt_stats.active_allocs -= 1;
@@ -465,7 +506,7 @@ sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
 	__u64 idx = 0;
 	int ret;
 
-	bpf_for(level, 0, SDT_TASK_LEVELS) {
+	for (level = zero; level < SDT_TASK_LEVELS && can_loop; level++) {
 		pos = sdt_chunk_find_empty(desc);
 
 		/* Something has gone terribly wrong. */
@@ -499,7 +540,7 @@ sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
 		}
 	}
 
-	bpf_for(u, 0, SDT_TASK_LEVELS) {
+	for (u = zero; u < SDT_TASK_LEVELS && can_loop; u++) {
 		level = SDT_TASK_LEVELS - 1 - u;
 		tmp = lv_desc[level];
 
