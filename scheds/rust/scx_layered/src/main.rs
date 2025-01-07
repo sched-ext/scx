@@ -282,6 +282,8 @@ lazy_static! {
 ///
 /// - NSPIDEquals: Matches if the task's namespace id and pid matches the values.
 ///
+/// - NSEquals: Matches if the task's namespace id matches the values.
+///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
 ///
@@ -1163,6 +1165,10 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_NSPID_EQUALS as i32;
                             mt.nsid = *nsid;
                             mt.pid = *pid;
+                        }
+                        LayerMatch::NSEquals(nsid) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_NS_EQUALS as i32;
+                            mt.nsid = *nsid as u64;
                         }
                     }
                 }
