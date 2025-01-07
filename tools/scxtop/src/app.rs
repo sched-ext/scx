@@ -336,6 +336,7 @@ impl<'a> App<'a> {
                         Borders::LEFT | Borders::RIGHT
                     })
                     .style(self.theme.border_style())
+                    .border_type(BorderType::Rounded)
                     .title_alignment(Alignment::Left)
                     .title(format!(
                         "LLC {} avg {} max {} min {}",
@@ -365,6 +366,7 @@ impl<'a> App<'a> {
                     } else {
                         Borders::LEFT | Borders::RIGHT
                     })
+                    .border_type(BorderType::Rounded)
                     .style(self.theme.border_style())
                     .title_alignment(Alignment::Left)
                     .title(format!(
@@ -376,17 +378,15 @@ impl<'a> App<'a> {
 
     /// Renders the llc application state.
     fn render_llc(&mut self, frame: &mut Frame) -> Result<()> {
-        let [horiz] =
-            Layout::horizontal([Constraint::Length(self.max_cpu_events.try_into().unwrap()); 1])
-                .areas(frame.area());
-        let [_top_left, _bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(horiz);
+        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
+        let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
         let num_llcs = self.topo.all_llcs.len();
 
         let mut llcs_constraints = vec![Constraint::Length(1)];
         for _ in 0..num_llcs {
             llcs_constraints.push(Constraint::Ratio(1, num_llcs as u32));
         }
-        let llcs_verticle = Layout::vertical(llcs_constraints).split(horiz);
+        let llcs_verticle = Layout::vertical(llcs_constraints).split(right);
 
         let llc_iter = self
             .llc_data
@@ -405,11 +405,20 @@ impl<'a> App<'a> {
             .collect();
 
         let llc_block = Block::bordered()
-            .title(format!(
-                "LLCs ({}) avg {} max {} min {}",
-                self.active_hw_event.event, stats.avg, stats.max, stats.min
-            ))
-            .title_style(self.theme.title_style())
+            .title_top(
+                Line::from(format!(
+                    "LLCs ({}) avg {} max {} min {}",
+                    self.active_hw_event.event, stats.avg, stats.max, stats.min
+                ))
+                .style(self.theme.title_style())
+                .centered(),
+            )
+            .border_type(BorderType::Rounded)
+            .title_top(
+                Line::from(format!("{}ms", self.tick_rate_ms))
+                    .style(self.theme.text_important_color())
+                    .right_aligned(),
+            )
             .title_alignment(Alignment::Center)
             .style(self.theme.border_style());
 
@@ -421,22 +430,22 @@ impl<'a> App<'a> {
                 frame.render_widget(llc_sparkline, llcs_verticle[i + 1]);
             });
 
+        self.render_scheduler(frame, top_left, true)?;
+        self.render_dsq_vtime(frame, bottom_left, false)?;
         Ok(())
     }
 
     /// Renders the node application state.
     fn render_node(&mut self, frame: &mut Frame) -> Result<()> {
-        let [horiz] =
-            Layout::horizontal([Constraint::Length(self.max_cpu_events.try_into().unwrap()); 1])
-                .areas(frame.area());
-        let [_top_left, _bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(horiz);
+        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
+        let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
         let num_nodes = self.topo.nodes.len();
 
         let mut node_constraints = vec![Constraint::Length(1)];
         for _ in 0..num_nodes {
             node_constraints.push(Constraint::Ratio(1, num_nodes as u32));
         }
-        let nodes_verticle = Layout::vertical(node_constraints).split(horiz);
+        let nodes_verticle = Layout::vertical(node_constraints).split(right);
 
         let node_iter = self
             .node_data
@@ -455,12 +464,20 @@ impl<'a> App<'a> {
             .collect();
 
         let node_block = Block::bordered()
-            .title(format!(
-                "Node ({}) avg {} max {} min {}",
-                self.active_hw_event.event, stats.avg, stats.max, stats.min
-            ))
-            .title_style(self.theme.title_style())
-            .title_alignment(Alignment::Center)
+            .title_top(
+                Line::from(format!(
+                    "Node ({}) avg {} max {} min {}",
+                    self.active_hw_event.event, stats.avg, stats.max, stats.min
+                ))
+                .style(self.theme.title_style())
+                .centered(),
+            )
+            .title_top(
+                Line::from(format!("{}ms", self.tick_rate_ms))
+                    .style(self.theme.text_important_color())
+                    .right_aligned(),
+            )
+            .border_type(BorderType::Rounded)
             .style(self.theme.border_style());
 
         frame.render_widget(node_block, nodes_verticle[0]);
@@ -471,6 +488,8 @@ impl<'a> App<'a> {
                 frame.render_widget(node_sparkline, nodes_verticle[i + 1]);
             });
 
+        self.render_scheduler(frame, top_left, true)?;
+        self.render_dsq_vtime(frame, bottom_left, false)?;
         Ok(())
     }
 
@@ -558,9 +577,11 @@ impl<'a> App<'a> {
         let mut dsq_constraints = Vec::new();
         if num_dsqs == 0 {
             let block = Block::default()
-                .title(format!("{}", self.scheduler))
-                .title_alignment(Alignment::Center)
-                .title_style(self.theme.title_style())
+                .title_top(
+                    Line::from(self.scheduler.clone())
+                        .style(self.theme.title_style())
+                        .centered(),
+                )
                 .style(self.theme.border_style())
                 .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
                 .border_type(BorderType::Rounded);
@@ -630,9 +651,11 @@ impl<'a> App<'a> {
             .count();
         if num_dsqs == 0 {
             let block = Block::default()
-                .title(format!("{}", self.scheduler))
-                .title_alignment(Alignment::Center)
-                .title_style(self.theme.title_style())
+                .title_top(
+                    Line::from(self.scheduler.clone())
+                        .style(self.theme.title_style())
+                        .centered(),
+                )
                 .style(self.theme.border_style())
                 .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
                 .border_type(BorderType::Rounded);
@@ -702,9 +725,11 @@ impl<'a> App<'a> {
             .count();
         if num_dsqs == 0 {
             let block = Block::default()
-                .title(format!("{}", self.scheduler))
-                .title_alignment(Alignment::Center)
-                .title_style(self.theme.title_style())
+                .title_top(
+                    Line::from(self.scheduler.clone())
+                        .style(self.theme.title_style())
+                        .centered(),
+                )
                 .style(self.theme.border_style())
                 .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
                 .border_type(BorderType::Rounded);
@@ -774,9 +799,11 @@ impl<'a> App<'a> {
         let num_dsqs = self.dsq_data.len();
         if num_dsqs == 0 {
             let block = Block::default()
-                .title(format!("{}", self.scheduler))
-                .title_alignment(Alignment::Center)
-                .title_style(self.theme.title_style())
+                .title_top(
+                    Line::from(self.scheduler.clone())
+                        .style(self.theme.title_style())
+                        .centered(),
+                )
                 .style(self.theme.border_style())
                 .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
                 .border_type(BorderType::Rounded);
@@ -1069,8 +1096,8 @@ impl<'a> App<'a> {
         let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
 
         self.render_event(frame, right)?;
-        self.render_dsq_vtime(frame, top_left, true)?;
-        self.render_scheduler(frame, bottom_left, false)?;
+        self.render_scheduler(frame, top_left, true)?;
+        self.render_dsq_vtime(frame, bottom_left, false)?;
         Ok(())
     }
 
@@ -1210,8 +1237,7 @@ impl<'a> App<'a> {
             Paragraph::new(text)
                 .block(
                     Block::default()
-                        .title(APP)
-                        .title_alignment(Alignment::Center)
+                        .title_top(Line::from(APP).style(self.theme.title_style()).centered())
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded),
                 )
