@@ -321,19 +321,6 @@ static u64 task_deadline(struct task_struct *p, struct task_ctx *tctx)
 	return p->scx.dsq_vtime + scale_inverse_fair(p, tctx, tctx->sum_runtime);
 }
 
-/*
- * Evaluate task's time slice in function of the total amount of tasks that are
- * waiting to be dispatched and the task's weight.
- */
-static inline void task_refill_slice(struct task_struct *p)
-{
-	/*
-	 * Scale the time slice of an inversely proportional factor of the
-	 * total amount of tasks that are waiting.
-	 */
-	p->scx.slice = CLAMP(slice_max / nr_tasks_waiting(), slice_min, slice_max);
-}
-
 static void task_set_domain(struct task_struct *p, s32 cpu,
 			    const struct cpumask *cpumask)
 {
@@ -668,7 +655,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	}
 
@@ -682,6 +669,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
+	u64 slice;
 
 	/*
 	 * Per-CPU kthreads are critical for system responsiveness so make sure
@@ -690,8 +678,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * If local_kthread is specified dispatch all kthreads directly.
 	 */
 	if (is_kthread(p) && (local_kthreads || p->nr_cpus_allowed == 1)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
-				   enq_flags | SCX_ENQ_PREEMPT);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		return;
 	}
@@ -706,7 +693,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		 * builds).
 		 */
 		if (!nvcsw_max_thresh) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 			return;
 		}
@@ -719,7 +706,8 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 
-	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_DFL,
+	slice = CLAMP(slice_max / nr_tasks_waiting(), slice_min, slice_max);
+	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, slice,
 				 task_deadline(p, tctx), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 }
@@ -743,7 +731,7 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
 	    primary && bpf_cpumask_test_cpu(cpu, primary))
-		task_refill_slice(prev);
+		prev->scx.slice = slice_max;
 }
 
 /*
@@ -813,12 +801,6 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	struct task_ctx *tctx;
 
 	__sync_fetch_and_add(&nr_running, 1);
-
-	/*
-	 * Refresh task's time slice immediately before it starts to run on its
-	 * assigned CPU.
-	 */
-	task_refill_slice(p);
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
