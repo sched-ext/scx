@@ -257,7 +257,6 @@ void __arena *sdt_alloc_from_pool_sleepable(struct sdt_pool *pool)
 	return ptr;
 }
 
-
 /* Alloc desc and associated chunk. Called with the task spinlock held. */
 static SDT_TASK_FN_ATTRS
 sdt_desc_t *sdt_alloc_chunk(struct sdt_alloc_stack __arena *stack)
