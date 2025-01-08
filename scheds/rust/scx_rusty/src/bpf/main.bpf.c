@@ -128,7 +128,7 @@ const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 load_half_life = 1000000000	/* 1s */;
 
 const volatile bool kthreads_local;
-const volatile bool fifo_sched;
+const volatile bool fifo_sched = false;
 const volatile bool direct_greedy_numa;
 const volatile bool mempolicy_affinity;
 const volatile u32 greedy_threshold;
@@ -1171,7 +1171,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 	struct task_struct *key = p;
 	struct bpf_cpumask *p_cpumask;
 	u32 *new_dom;
-	s32 cpu;
+	s32 cpu = -1;
 
 	if (!(taskc = lookup_task_ctx_mask(p, &p_cpumask)) || !p_cpumask)
 		return;
