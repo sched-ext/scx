@@ -240,7 +240,7 @@ static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
 {
 	struct task_ctx __arena *taskc = sdt_task_data(p);
 	cast_kern(taskc);
-	return taskc;
+	return (struct task_ctx *)taskc;
 }
 
 static struct bpf_cpumask *lookup_task_bpfmask(struct task_struct *p)
@@ -1664,7 +1664,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 	struct task_ctx *taskc;
 	long ret;
 
-	taskc = sdt_task_alloc(p);
+	taskc = (struct task_ctx *)sdt_task_alloc(p);
 	if (!taskc)
 		return -ENOMEM;
 
