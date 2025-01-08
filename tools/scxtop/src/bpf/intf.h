@@ -30,12 +30,14 @@ struct bpf_event {
 	u64		dsq_lat_us;
 	u32		dsq_nr;
 	u64		dsq_vtime;
+	u64		slice_ns;
 };
 
 struct task_ctx {
 	u64		dsq_id;
 	u64		dsq_insert_time;
 	u64		dsq_vtime;
+	u64		slice_ns;
 };
 
 #endif /* __INTF_H */
