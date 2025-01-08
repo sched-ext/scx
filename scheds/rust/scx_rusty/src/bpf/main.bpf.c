@@ -58,58 +58,6 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
-struct bpfmask_wrapper {
-	struct bpf_cpumask __kptr *instance;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, u32);
-	__type(value, struct bpfmask_wrapper);
-	__uint(max_entries, 1);
-} scx_singleton_bpfmask_map SEC(".maps");
-
-static s32 create_save_cpumask(struct bpf_cpumask **kptr)
-{
-	struct bpf_cpumask *cpumask;
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask) {
-		scx_bpf_error("Failed to create cpumask");
-		return -ENOMEM;
-	}
-
-	cpumask = bpf_kptr_xchg(kptr, cpumask);
-	if (cpumask) {
-		scx_bpf_error("kptr already had cpumask");
-		bpf_cpumask_release(cpumask);
-	}
-
-	return 0;
-}
-
-static struct bpf_cpumask *scx_singleton_bpf_cpumask_t(void)
-{
-	void *map = &scx_singleton_bpfmask_map;
-	struct bpfmask_wrapper *instancep;
-	const u32 zero = 0;
-
-	instancep = bpf_map_lookup_elem(map, &zero);
-	if (!instancep) {
-		/* Should be impossible. */
-		scx_bpf_error("Did not find map entry");
-		return NULL;
-	}
-
-	if (!instancep->instance)
-		create_save_cpumask(&instancep->instance);
-
-	if (!instancep->instance)
-		scx_bpf_error("Did not properly initialize singleton");
-
-	return instancep->instance;
-}
-
 /*
  * const volatiles are set during initialization and treated as consts by the
  * jit compiler.
@@ -139,6 +87,81 @@ const volatile u32 debug;
 volatile u64 slice_ns;
 
 typedef struct task_ctx __arena * task_ctx_usrptr;
+
+struct bpfmask_wrapper {
+	struct bpf_cpumask __kptr *instance;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct bpfmask_wrapper);
+	__uint(max_entries, 1);
+} scx_percpu_bpfmask_map SEC(".maps");
+
+static s32 create_save_cpumask(struct bpf_cpumask **kptr)
+{
+	struct bpf_cpumask *cpumask;
+
+	cpumask = bpf_cpumask_create();
+	if (!cpumask) {
+		scx_bpf_error("Failed to create cpumask");
+		return -ENOMEM;
+	}
+
+	cpumask = bpf_kptr_xchg(kptr, cpumask);
+	if (cpumask) {
+		scx_bpf_error("kptr already had cpumask");
+		bpf_cpumask_release(cpumask);
+	}
+
+	return 0;
+}
+
+static int scx_percpu_tmpmask_init(void)
+{
+	void *map = &scx_percpu_bpfmask_map;
+	struct bpfmask_wrapper *instancep;
+	const u32 zero = 0;
+	int ret, i;
+
+	bpf_for (i, 0, nr_cpu_ids) {
+		instancep = bpf_map_lookup_percpu_elem(map, &zero, i);
+		if (!instancep) {
+			/* Should be impossible. */
+			scx_bpf_error("Did not find map entry");
+			return -EINVAL;
+		}
+
+		ret = create_save_cpumask(&instancep->instance);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static struct bpf_cpumask *scx_percpu_tmpmask(void)
+{
+	void *map = &scx_percpu_bpfmask_map;
+	struct bpfmask_wrapper *instancep;
+	const u32 zero = 0;
+
+	instancep = bpf_map_lookup_elem(map, &zero);
+	if (!instancep) {
+		/* Should be impossible. */
+		scx_bpf_error("Did not find map entry");
+		return NULL;
+	}
+
+	if (!instancep->instance)
+		create_save_cpumask(&instancep->instance);
+
+	if (!instancep->instance)
+		scx_bpf_error("Did not properly initialize singleton");
+
+	return instancep->instance;
+}
 
 /*
  * Per-CPU context
@@ -1080,7 +1103,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 				goto enoent;
 			}
 
-			tmp_cpumask = scx_singleton_bpf_cpumask_t();
+			tmp_cpumask = scx_percpu_tmpmask();
 			if (!tmp_cpumask) {
 				scx_bpf_error("Failed to lookup tmp cpumask");
 				goto enoent;
@@ -1911,6 +1934,10 @@ static s32 initialize_cpu(s32 cpu)
 s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 {
 	s32 i, ret;
+
+	ret = scx_percpu_tmpmask_init();
+	if (ret)
+		return ret;
 
 	ret = sdt_task_init(sizeof(struct task_ctx));
 	if (ret)
