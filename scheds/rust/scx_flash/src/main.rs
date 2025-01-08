@@ -74,6 +74,14 @@ struct Opts {
     #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
     local_kthreads: bool,
 
+    /// Enable user-space lock owner prioritization.
+    ///
+    /// Enabling this can improve workload performance when the workload tends to trigger
+    /// large amount of futex() syscall. For some workloads such as database transaction,
+    /// it might not be beneficial and even degrade the performance.
+    #[clap(short = 'u', long, action = clap::ArgAction::SetTrue)]
+    user_lock_boost: bool,
+
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
     stats: Option<f64>,
@@ -139,6 +147,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_max = opts.slice_us_max * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
         skel.maps.rodata_data.local_kthreads = opts.local_kthreads;
+        skel.maps.rodata_data.user_lock_boost = opts.user_lock_boost;
 
         skel.maps.rodata_data.smt_enabled = smt_enabled;
 

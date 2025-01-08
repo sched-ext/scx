@@ -343,13 +343,17 @@ impl BpfBuilder {
         for filename in self.sources.iter() {
             let obj = self.out_dir.join(name.replace(".bpf.c", ".bpf.o"));
 
-            SkeletonBuilder::new()
+            let output = SkeletonBuilder::new()
                 .debug(true)
                 .source(filename)
                 .obj(&obj)
                 .clang(&self.clang.clang)
                 .clang_args(&self.cflags)
                 .build()?;
+
+            for line in String::from_utf8_lossy(output.stderr()).lines() {
+                println!("cargo:warning={}", line);
+            }
 
             linker.add_file(&obj)?;
         }
@@ -380,12 +384,16 @@ impl BpfBuilder {
         let obj = self.out_dir.join(format!("{}.bpf.o", name));
         let skel_path = self.out_dir.join(format!("{}_skel.rs", name));
 
-        SkeletonBuilder::new()
+        let output = SkeletonBuilder::new()
             .source(input)
             .obj(&obj)
             .clang(&self.clang.clang)
             .clang_args(&self.cflags)
             .build_and_generate(&skel_path)?;
+
+        for line in String::from_utf8_lossy(output.stderr()).lines() {
+            println!("cargo:warning={}", line);
+        }
 
         let c_path = PathBuf::from(input);
         let dir = c_path

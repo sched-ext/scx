@@ -738,6 +738,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	cpu = prev_cpu;
 out:
 	critical_section_exit();
+	return cpu;
 }
 
 static __always_inline bool pick_idle_cpu_and_kick(struct task_struct *p,

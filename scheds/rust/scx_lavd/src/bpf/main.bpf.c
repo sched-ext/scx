@@ -289,9 +289,10 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc,
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
-	 * A pinned-task tends to be latency-critical.
+	 * Prioritize a migration-disabled task since it has restrictions
+	 * in placement so it tends to be delayed.
 	 */
-	if (p->nr_cpus_allowed == 1)
+	if (is_migration_disabled(p))
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
@@ -741,7 +742,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	 * If a task can run only on a single CPU (e.g., per-CPU kworker), we
 	 * simply check if a task is still pinned on the prev_cpu and go.
 	 */
-	if (p->nr_cpus_allowed == 1 &&
+	if (is_migration_disabled(p) &&
 	    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 			*is_idle = true;
@@ -1010,6 +1011,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 * disptach the task to the idle cpu right now.
 		 */
 		direct_dispatch(p, taskc, 0);
+		scx_bpf_kick_cpu(cpu_id, SCX_KICK_IDLE);
 		return cpu_id;
 	}
 
@@ -1144,9 +1146,7 @@ static bool consume_dsq(u64 dsq_id)
 	/*
 	 * Try to consume a task on the associated DSQ.
 	 */
-	if (scx_bpf_dsq_move_to_local(dsq_id))
-		return true;
-	return false;
+	return scx_bpf_dsq_move_to_local(dsq_id);
 }
 
 static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
@@ -1183,7 +1183,7 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 		/*
 		 * Traverse neighbor in the same distance in arbitrary order.
 		 */
-		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance++) {
+		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = dsq_id + 1) {
 			if (j >= nr_nbr)
 				break;
 
@@ -1252,7 +1252,7 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 		/*
 		 * Traverse neighbor in the same distance in arbitrary order.
 		 */
-		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance++) {
+		for (int j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = dsq_id + 1) {
 			if (j >= nr_nbr)
 				break;
 
@@ -1293,7 +1293,7 @@ static bool consume_task(struct cpu_ctx *cpuc)
 	 * If the current compute domain is a stealer, try to steal
 	 * a task from any of stealee domains probabilistically.
 	 */
-	if (cpdomc->is_stealer && try_to_steal_task(cpdomc))
+	if (READ_ONCE(cpdomc->is_stealer) && try_to_steal_task(cpdomc))
 		goto x_domain_migration_out;
 
 	/*
@@ -1320,21 +1320,48 @@ x_domain_migration_out:
 	return true;
 }
 
+static bool try_continue_lock_holder(struct task_struct *prev,
+				     struct task_ctx *taskc,
+				     struct cpu_ctx *cpuc)
+{
+	if (!(prev->scx.flags & SCX_TASK_QUEUED) || !is_lock_holder(taskc))
+		return false;
+
+	/*
+	 * Refill the time slice.
+	 */
+	prev->scx.slice = calc_time_slice(prev, taskc);
+
+	/*
+	 * Reset prev task's lock and futex boost count
+	 * for a lock holder to be boosted only once.
+	 */
+	reset_lock_futex_boost(taskc, cpuc);
+	taskc->lock_holder_xted = true;
+
+	return true;
+}
+
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
 	struct bpf_cpumask *active, *ovrflw;
 	struct task_struct *p;
-	u64 dsq_id = 0;
-	bool try_consume = false, lock_holder = false;
+	u64 dsq_id;
+	bool try_consume = false;
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
 		scx_bpf_error("Failed to look up cpu context context");
 		return;
 	}
+	dsq_id = cpuc->cpdom_id;
 
+	/*
+	 * If a task newly holds a lock, continue to execute it
+	 * to make system-wide forward progress.
+	 */
 	if (prev) {
 		taskc = get_task_ctx(prev);
 		if (!taskc) {
@@ -1342,17 +1369,9 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 			return;
 		}
 
-		/*
-		 * If a task newly holds a lock, continue to execute it
-		 * to make system-wide forward progress.
-		 */
-		if (is_lock_holder(taskc)) {
-			lock_holder = true;
-			goto lock_holder_extenstion;
-		}
+		if (try_continue_lock_holder(prev, taskc, cpuc))
+			return;
 	}
-
-	dsq_id = cpuc->cpdom_id;
 
 	/*
 	 * If all CPUs are using, directly consume without checking CPU masks.
@@ -1461,21 +1480,8 @@ consume_out:
 	/*
 	 * If nothing to run, continue to run the previous task.
 	 */
-	if (prev) {
-lock_holder_extenstion:
-		if (prev->scx.flags & SCX_TASK_QUEUED) {
-			prev->scx.slice = calc_time_slice(prev, taskc);
-
-			/*
-			 * Reset prev task's lock and futex boost count
-			 * for a lock holder to be boosted only once.
-			 */
-			if (lock_holder) {
-				reset_lock_futex_boost(taskc, cpuc);
-				taskc->lock_holder_xted = true;
-			}
-		}
-	}
+	if (prev && prev->scx.flags & SCX_TASK_QUEUED)
+		prev->scx.slice = calc_time_slice(prev, taskc);
 }
 
 void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)

@@ -14,6 +14,7 @@
  */
 struct sdt_task_map_val {
 	union sdt_id		tid;
+	__u64			tptr;
 	struct sdt_data __arena	*data;
 };
 
@@ -41,6 +42,7 @@ void __arena *sdt_task_alloc(struct task_struct *p)
 	cast_kern(data);
 
 	mval->tid = data->tid;
+	mval->tptr = (__u64) p;
 	mval->data = data;
 
 	return (void __arena *)data->payload;
@@ -82,4 +84,5 @@ void sdt_task_free(struct task_struct *p)
 
 	sdt_free_idx(&sdt_task_allocator, mval->tid.idx);
 	mval->data = NULL;
+	mval->tptr = 0;
 }

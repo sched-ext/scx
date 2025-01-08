@@ -155,28 +155,10 @@ struct task_ctx {
 	u64 avg_nvcsw;
 
 	/*
-	 * Frequency with which a task is blocked (consumer).
-	 */
-	u64 blocked_freq;
-	u64 last_blocked_at;
-
-	/*
-	 * Frequency with which a task wakes other tasks (producer).
-	 */
-	u64 waker_freq;
-	u64 last_woke_at;
-
-	/*
 	 * Task's average used time slice.
 	 */
-	u64 avg_runtime;
 	u64 sum_runtime;
 	u64 last_run_at;
-
-	/*
-	 * Task's deadline.
-	 */
-	u64 deadline;
 
 	/*
 	 * Set to true if the task is classified as interactive.
@@ -218,6 +200,17 @@ static inline bool vtime_before(u64 a, u64 b)
 static inline bool is_kthread(const struct task_struct *p)
 {
 	return p->flags & PF_KTHREAD;
+}
+
+/*
+ * Return true if the task can only run on its assigned CPU, false
+ * otherwise.
+ */
+static bool is_migration_disabled(struct task_struct *p)
+{
+	if (bpf_core_field_exists(p->migration_disabled))
+		return p->migration_disabled;
+	return false;
 }
 
 /*
@@ -278,17 +271,11 @@ static u64 nr_tasks_waiting(void)
 }
 
 /*
- * Return task's dynamic weight.
+ * Return task's weight.
  */
 static u64 task_weight(const struct task_struct *p, const struct task_ctx *tctx)
 {
-	/*
-	 * Scale the static task weight by the average amount of voluntary
-	 * context switches to determine the dynamic weight.
-	 */
-	u64 prio = p->scx.weight * CLAMP(tctx->avg_nvcsw, 1, nvcsw_max_thresh ? : 1);
-
-	return CLAMP(prio, 1, MAX_TASK_WEIGHT);
+	return p->scx.weight;
 }
 
 /*
@@ -319,127 +306,19 @@ static u64 task_lag(const struct task_struct *p, const struct task_ctx *tctx)
 }
 
 /*
- * ** Taken directly from fair.c in the Linux kernel **
- *
- * The "10% effect" is relative and cumulative: from _any_ nice level,
- * if you go up 1 level, it's -10% CPU usage, if you go down 1 level
- * it's +10% CPU usage. (to achieve that we use a multiplier of 1.25.
- * If a task goes up by ~10% and another task goes down by ~10% then
- * the relative distance between them is ~25%.)
- */
-const int sched_prio_to_weight[40] = {
- /* -20 */     88761,     71755,     56483,     46273,     36291,
- /* -15 */     29154,     23254,     18705,     14949,     11916,
- /* -10 */      9548,      7620,      6100,      4904,      3906,
- /*  -5 */      3121,      2501,      1991,      1586,      1277,
- /*   0 */      1024,       820,       655,       526,       423,
- /*   5 */       335,       272,       215,       172,       137,
- /*  10 */       110,        87,        70,        56,        45,
- /*  15 */        36,        29,        23,        18,        15,
-};
-
-static u64 max_sched_prio(void)
-{
-	return ARRAY_SIZE(sched_prio_to_weight);
-}
-
-/*
- * Convert task priority to weight (following fair.c logic).
- */
-static u64 sched_prio_to_latency_weight(u64 prio)
-{
-	u64 max_prio = max_sched_prio();
-
-	if (prio >= max_prio) {
-		scx_bpf_error("invalid priority");
-		return 0;
-	}
-
-	return sched_prio_to_weight[max_prio - prio - 1];
-}
-
-/*
- * Evaluate task's deadline.
- *
- * Reuse a logic similar to scx_rusty or scx_lavd and evaluate the deadline as
- * a function of the waiting and wake-up events and the average task's runtime.
+ * Return task's evaluated deadline.
  */
 static u64 task_deadline(struct task_struct *p, struct task_ctx *tctx)
-{
-	u64 waker_freq, blocked_freq;
-	u64 lat_prio, lat_weight;
-	u64 avg_run_scaled, avg_run;
-	u64 freq_factor;
-
-	/*
-	 * Limit the wait and wake-up frequencies to prevent spikes.
-	 */
-	waker_freq = CLAMP(tctx->waker_freq, 1, MAX_WAKEUP_FREQ);
-	blocked_freq = CLAMP(tctx->blocked_freq, 1, MAX_WAKEUP_FREQ);
-
-	/*
-	 * We want to prioritize producers (waker tasks) more than consumers
-	 * (blocked tasks), using the following formula:
-	 *
-	 *   freq_factor = blocked_freq * waker_freq^2
-	 *
-	 * This seems to improve the overall responsiveness of
-	 * producer/consumer pipelines.
-	 */
-	freq_factor = blocked_freq * waker_freq * waker_freq;
-
-	/*
-	 * Evaluate the "latency priority" as a function of the wake-up, block
-	 * frequencies and average runtime, using the following formula:
-	 *
-	 *   lat_prio = log(freq_factor / avg_run_scaled)
-	 *
-	 * Frequencies can grow very quickly, almost exponential, so use
-	 * log2_u64() to get a more linear metric that can be used as a
-	 * priority.
-	 *
-	 * The avg_run_scaled component is used to scale the latency priority
-	 * proportionally to the task's weight and inversely proportional to
-	 * its runtime, so that a task with a higher weight / shorter runtime
-	 * gets a higher latency priority than a task with a lower weight /
-	 * higher runtime.
-	 */
-	avg_run_scaled = scale_inverse_fair(p, tctx, tctx->avg_runtime);
-	avg_run = log2_u64(avg_run_scaled + 1);
-
-	lat_prio = log2_u64(freq_factor);
-	lat_prio = MIN(lat_prio, max_sched_prio());
-
-	if (lat_prio >= avg_run)
-		lat_prio -= avg_run;
-	else
-		lat_prio = 0;
-
-	/*
-	 * Lastly, translate the latency priority into a weight and apply it to
-	 * the task's average runtime to determine the task's deadline.
-	 */
-	lat_weight = sched_prio_to_latency_weight(lat_prio);
-
-	return tctx->avg_runtime * 100 / lat_weight;
-}
-
-/*
- * Return task's evaluated deadline applied to its vruntime.
- */
-static u64 task_vtime(struct task_struct *p, struct task_ctx *tctx)
 {
 	u64 min_vruntime = vtime_now - task_lag(p, tctx);
 
 	/*
 	 * Limit the vruntime to to avoid excessively penalizing tasks.
 	 */
-	if (vtime_before(p->scx.dsq_vtime, min_vruntime)) {
+	if (vtime_before(p->scx.dsq_vtime, min_vruntime))
 		p->scx.dsq_vtime = min_vruntime;
-		tctx->deadline = p->scx.dsq_vtime + task_deadline(p, tctx);
-	}
 
-	return tctx->deadline;
+	return p->scx.dsq_vtime + scale_inverse_fair(p, tctx, tctx->sum_runtime);
 }
 
 /*
@@ -803,7 +682,6 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
-	s32 cpu;
 
 	/*
 	 * Per-CPU kthreads are critical for system responsiveness so make sure
@@ -818,7 +696,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 
-	if ((p->nr_cpus_allowed == 1) || p->migration_disabled) {
+	if ((p->nr_cpus_allowed == 1) || is_migration_disabled(p)) {
 		/*
 		 * If nvcsw_max_thresh is disabled we don't care much about
 		 * interactivity, so we can massively boost per-CPU tasks and
@@ -832,17 +710,6 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 			return;
 		}
-
-		/*
-		 * Per-CPU tasks didn't get the chance to be dispatched directly from
-		 * ops.select_cpu(), so give them a chance here.
-		 */
-		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-		if (cpu >= 0) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
-			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-			return;
-		}
 	}
 
 	/*
@@ -851,19 +718,10 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
-	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_DFL,
-				 task_vtime(p, tctx), enq_flags);
-	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
-	/*
-	 * If the task is limited to run only on certain CPUs make sure that at
-	 * least one of them is awake.
-	 */
-	if ((p->nr_cpus_allowed < nr_online_cpus) || p->migration_disabled) {
-		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-		if (cpu >= 0)
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-	}
+	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_DFL,
+				 task_deadline(p, tctx), enq_flags);
+	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 }
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
@@ -1012,16 +870,19 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 
 	/*
 	 * Update task's average runtime.
+	 *
+	 * Limit the total accumulated runtime to 1s to avoid excessive
+	 * de-prioritization of pure CPU-intensive tasks and avoid
+	 * potential starvation.
 	 */
 	slice = now - tctx->last_run_at;
-	tctx->sum_runtime += slice;
-	tctx->avg_runtime = calc_avg(tctx->avg_runtime, tctx->sum_runtime);
+	if (tctx->sum_runtime < NSEC_PER_SEC)
+		tctx->sum_runtime += slice;
 
 	/*
 	 * Update task vruntime charging the weighted used time slice.
 	 */
 	p->scx.dsq_vtime += scale_inverse_fair(p, tctx, slice);
-	tctx->deadline = p->scx.dsq_vtime + task_deadline(p, tctx);
 
 	if (!nvcsw_max_thresh)
 		return;
@@ -1081,37 +942,13 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 
 void BPF_STRUCT_OPS(bpfland_runnable, struct task_struct *p, u64 enq_flags)
 {
-	u64 now = bpf_ktime_get_ns(), delta;
-	struct task_struct *waker;
 	struct task_ctx *tctx;
 
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
+
 	tctx->sum_runtime = 0;
-
-	waker = bpf_get_current_task_btf();
-	tctx = try_lookup_task_ctx(waker);
-	if (!tctx)
-		return;
-
-	delta = MAX(now - tctx->last_woke_at, 1);
-	tctx->waker_freq = update_freq(tctx->waker_freq, delta);
-	tctx->last_woke_at = now;
-}
-
-void BPF_STRUCT_OPS(bpfland_quiescent, struct task_struct *p, u64 deq_flags)
-{
-	u64 now = bpf_ktime_get_ns(), delta;
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-
-	delta = MAX(now - tctx->last_blocked_at, 1);
-	tctx->blocked_freq = update_freq(tctx->blocked_freq, delta);
-	tctx->last_blocked_at = now;
 }
 
 void BPF_STRUCT_OPS(bpfland_set_cpumask, struct task_struct *p,
@@ -1135,10 +972,6 @@ void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 	if (!tctx)
 		return;
 	tctx->nvcsw_ts = now;
-	tctx->last_woke_at = now;
-	tctx->last_blocked_at = now;
-
-	tctx->deadline = p->scx.dsq_vtime + task_deadline(p, tctx);
 }
 
 s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
@@ -1324,7 +1157,6 @@ SCX_OPS_DEFINE(bpfland_ops,
 	       .running			= (void *)bpfland_running,
 	       .stopping		= (void *)bpfland_stopping,
 	       .runnable		= (void *)bpfland_runnable,
-	       .quiescent		= (void *)bpfland_quiescent,
 	       .set_cpumask		= (void *)bpfland_set_cpumask,
 	       .enable			= (void *)bpfland_enable,
 	       .init_task		= (void *)bpfland_init_task,

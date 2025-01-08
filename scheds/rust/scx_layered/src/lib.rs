@@ -100,8 +100,8 @@ impl CpuPool {
         }
     }
 
-    pub fn alloc_cpus<'a>(
-        &'a mut self,
+    pub fn alloc_cpus(
+        &mut self,
         allowed_cpus: &Cpumask,
         core_alloc_order: &[usize],
     ) -> Option<&Cpumask> {
@@ -148,7 +148,7 @@ impl CpuPool {
         Ok(cores)
     }
 
-    pub fn free<'a>(&'a mut self, cpus_to_free: &Cpumask) -> Result<()> {
+    pub fn free(&mut self, cpus_to_free: &Cpumask) -> Result<()> {
         let cores = self.cpus_to_cores(cpus_to_free)?;
         if (self.available_cores.clone() & &cores).any() {
             bail!("Some of CPUs {} are already free", cpus_to_free);
@@ -162,7 +162,7 @@ impl CpuPool {
         &'a self,
         cands: &Cpumask,
         core_order: impl Iterator<Item = &'a usize>,
-    ) -> Result<Option<&Cpumask>> {
+    ) -> Result<Option<&'a Cpumask>> {
         for pref_core in core_order.map(|i| &self.topo.all_cores[i]) {
             if pref_core.span.and(cands).weight() > 0 {
                 return Ok(Some(&pref_core.span));

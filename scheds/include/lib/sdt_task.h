@@ -18,8 +18,9 @@ enum sdt_consts {
 	SDT_TASK_LEVELS			= 3,
 	SDT_TASK_ENTS_PER_CHUNK		= 1 << SDT_TASK_ENTS_PER_PAGE_SHIFT,
 	SDT_TASK_CHUNK_BITMAP_U64S	= div_round_up(SDT_TASK_ENTS_PER_CHUNK, 64),
-	SDT_TASK_ALLOC_STACK_MIN	= 2 * SDT_TASK_LEVELS + 1,
+	SDT_TASK_ALLOC_STACK_MIN	= 2 * SDT_TASK_LEVELS,
 	SDT_TASK_ALLOC_STACK_MAX	= SDT_TASK_ALLOC_STACK_MIN * 5,
+	SDT_TASK_MIN_ELEM_PER_ALLOC = 8,
 	SDT_TASK_ALLOC_ATTEMPTS		= 128,
 };
 
@@ -106,7 +107,7 @@ void sdt_task_free(struct task_struct *p);
 void sdt_arena_verify(void);
 
 int sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size);
-struct sdt_data __arena __arena *sdt_alloc(struct sdt_allocator *alloc);
+struct sdt_data __arena *sdt_alloc(struct sdt_allocator *alloc);
 void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx);
 
 #endif /* __BPF__ */

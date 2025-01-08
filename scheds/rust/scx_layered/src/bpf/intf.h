@@ -78,6 +78,9 @@ enum layer_usage {
 	LAYER_USAGE_OPEN,
 	LAYER_USAGE_SUM_UPTO = LAYER_USAGE_OPEN,
 
+	LAYER_USAGE_PROTECTED,
+	LAYER_USAGE_PROTECTED_PREEMPT,
+
 	NR_LAYER_USAGES,
 };
 
@@ -153,7 +156,9 @@ struct cpu_ctx {
 	bool			is_big;
 
 	bool			protect_owned;
+	bool			protect_owned_preempt;
 	bool			running_owned;
+	bool			running_open;
 	bool			running_fallback;
 	u64			running_at;
 
@@ -167,6 +172,7 @@ struct cpu_ctx {
 
 	u64			hi_fb_dsq_id;
 	u64			lo_fb_dsq_id;
+	bool			in_open_layers;
 	u32			layer_id;
 	u32			task_layer_id;
 	u32			llc_id;
@@ -177,8 +183,13 @@ struct cpu_ctx {
 	u64			lo_fb_seq_at;
 	u64			lo_fb_usage_base;
 
-	u32			open_preempt_layer_order[MAX_LAYERS];
-	u32			open_layer_order[MAX_LAYERS];
+	u32			ogp_layer_order[MAX_LAYERS];	/* open/grouped preempt */
+	u32			ogn_layer_order[MAX_LAYERS];	/* open/grouped non-preempt */
+
+	u32			op_layer_order[MAX_LAYERS];	/* open preempt */
+	u32			on_layer_order[MAX_LAYERS];	/* open non-preempt */
+	u32			gp_layer_order[MAX_LAYERS];	/* grouped preempt */
+	u32			gn_layer_order[MAX_LAYERS];	/* grouped non-preempt */
 
 	struct cpu_prox_map	prox_map;
 };
@@ -266,6 +277,8 @@ struct layer {
 	u64			slice_ns;
 	bool			fifo;
 	u32			weight;
+	u64			disallow_open_after_ns;
+	u64			disallow_preempt_after_ns;
 	u64			xllc_mig_min_ns;
 
 	int			kind;
