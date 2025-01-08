@@ -30,7 +30,7 @@ u32 sample_rate = 128;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 256 * 1024);
+	__uint(max_entries, 10 * 1024 * 1024 /* 10Mib */);
 } events SEC(".maps");
 
 static __always_inline u32 get_random_sample(u32 n)
@@ -67,6 +67,31 @@ static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
 	tptr = t_to_tptr(p);
 
 	return bpf_map_lookup_elem(&task_data, &tptr);
+}
+
+static int update_task_ctx(struct task_struct *p, u64 dsq, u64 vtime, u64 slice_ns)
+{
+	if (!enable_bpf_events)
+		return 0;
+
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx) {
+		struct task_ctx new_tctx;
+		tctx = &new_tctx;
+	}
+
+	u64 tptr;
+	tptr = t_to_tptr(p);
+
+	tctx->dsq_insert_time = bpf_ktime_get_ns();
+	tctx->dsq_id = dsq;
+	tctx->dsq_vtime = vtime;
+	tctx->slice_ns = slice_ns;
+	bpf_map_update_elem(&task_data, &tptr, tctx, BPF_ANY);
+
+	return 0;
 }
 
 SEC("kprobe/bpf_scx_reg")
@@ -125,40 +150,16 @@ int BPF_KPROBE(on_sched_cpu_perf, s32 cpu, u32 perf)
 	return 0;
 }
 
-static int on_insert_vtime(struct task_struct *p, u64 dsq, u64 vtime)
-{
-	if (!enable_bpf_events)
-		return 0;
-
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx) {
-		struct task_ctx new_tctx;
-		tctx = &new_tctx;
-	}
-
-	u64 tptr;
-	tptr = t_to_tptr(p);
-
-	tctx->dsq_insert_time = bpf_ktime_get_ns();
-	tctx->dsq_id = dsq;
-	tctx->dsq_vtime = vtime;
-	bpf_map_update_elem(&task_data, &tptr, tctx, BPF_ANY);
-
-	return 0;
-}
-
 SEC("kprobe/scx_bpf_dsq_insert_vtime")
 int BPF_KPROBE(scx_insert_vtime, struct task_struct *p, u64 dsq, u64 slice_ns, u64 vtime)
 {
-	return on_insert_vtime(p, dsq, vtime);
+	return update_task_ctx(p, dsq, vtime, slice_ns);
 }
 
 SEC("kprobe/scx_bpf_dispatch_vtime")
 int BPF_KPROBE(scx_dispatch_vtime, struct task_struct *p, u64 dsq, u64 slice_ns, u64 vtime)
 {
-	return on_insert_vtime(p, dsq, vtime);
+	return update_task_ctx(p, dsq, vtime, slice_ns);
 }
 
 static int on_insert(struct task_struct *p, u64 dsq)
@@ -186,16 +187,163 @@ static int on_insert(struct task_struct *p, u64 dsq)
 }
 
 
+SEC("kprobe/scx_bpf_dsq_insert")
+int BPF_KPROBE(scx_insert, struct task_struct *p, u64 dsq)
+{
+	return on_insert(p, dsq);
+}
+
 SEC("kprobe/scx_bpf_dispatch")
 int BPF_KPROBE(scx_dispatch, struct task_struct *p, u64 dsq)
 {
 	return on_insert(p, dsq);
 }
 
-SEC("kprobe/scx_bpf_dsq_insert")
-int BPF_KPROBE(scx_insert, struct task_struct *p, u64 dsq)
+static int on_dsq_move(struct task_struct *p, u64 dsq)
 {
-	return on_insert(p, dsq);
+	if (!enable_bpf_events)
+		return 0;
+
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx) {
+		struct task_ctx new_tctx;
+		tctx = &new_tctx;
+	}
+
+	u64 tptr;
+	tptr = t_to_tptr(p);
+
+	tctx->dsq_id = dsq;
+	tctx->dsq_vtime = 0;
+	bpf_map_update_elem(&task_data, &tptr, tctx, BPF_ANY);
+
+	return 0;
+}
+
+SEC("kprobe/scx_bpf_dsq_move")
+int BPF_KPROBE(scx_dsq_move, struct bpf_iter_scx_dsq *it__iter,
+	       struct task_struct *p, u64 dsq_id, u64 enq_flags)
+{
+	return on_dsq_move(p, dsq_id);
+}
+
+SEC("kprobe/scx_bpf_dispatch_from_dsq")
+int BPF_KPROBE(scx_dispatch_from_dsq, struct bpf_iter_scx_dsq *it__iter,
+	       struct task_struct *p, u64 dsq_id, u64 enq_flags)
+{
+	return on_dsq_move(p, dsq_id);
+}
+
+static int on_dsq_move_vtime(struct task_struct *p, u64 dsq)
+{
+	if (!enable_bpf_events)
+		return 0;
+
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx) {
+		struct task_ctx new_tctx;
+		tctx = &new_tctx;
+	}
+
+	u64 tptr;
+	tptr = t_to_tptr(p);
+
+	tctx->dsq_id = dsq;
+	bpf_core_read(&tctx->dsq_vtime, sizeof(u64), &p->scx.dsq_vtime);
+	bpf_map_update_elem(&task_data, &tptr, tctx, BPF_ANY);
+
+	return 0;
+}
+
+SEC("kprobe/scx_bpf_dsq_move_vtime")
+int BPF_KPROBE(scx_dsq_move_vtime, struct bpf_iter_scx_dsq *it__iter,
+	       struct task_struct *p, u64 dsq_id, u64 enq_flags)
+{
+	return on_dsq_move_vtime(p, dsq_id);
+}
+
+SEC("kprobe/scx_bpf_dispatch_vtime_from_dsq")
+int BPF_KPROBE(scx_dispatch_vtime_from_dsq, struct bpf_iter_scx_dsq *it__iter,
+	       struct task_struct *p, u64 dsq_id, u64 enq_flags)
+{
+	return on_dsq_move_vtime(p, dsq_id);
+}
+
+static int on_move_set_slice(struct task_struct *p, u64 slice)
+{
+	if (!enable_bpf_events || !p)
+		return 0;
+
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx) {
+		struct task_ctx new_tctx;
+		tctx = &new_tctx;
+	}
+
+	u64 tptr;
+	tptr = t_to_tptr(p);
+
+	tctx->slice_ns = slice;
+	bpf_map_update_elem(&task_data, &tptr, tctx, BPF_ANY);
+
+	return 0;
+}
+
+SEC("kprobe/scx_bpf_dsq_move_set_slice")
+int BPF_KPROBE(scx_dsq_move_set_slice, struct bpf_iter_scx_dsq *it__iter, u64 slice)
+{
+	// TODO: figure out how to return task from iterator without consuming.
+	return on_move_set_slice(NULL, slice);
+}
+
+SEC("kprobe/scx_bpf_dispatch_from_dsq_set_slice")
+int BPF_KPROBE(scx_dispatch_from_dsq_set_slice, struct bpf_iter_scx_dsq *it__iter,
+	       u64 slice)
+{
+	// TODO: figure out how to return task from iterator without consuming.
+	return on_move_set_slice(NULL, slice);
+}
+
+static int on_move_set_vtime(struct task_struct *p, u64 vtime)
+{
+	if (!enable_bpf_events || !p)
+		return 0;
+
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx) {
+		struct task_ctx new_tctx;
+		tctx = &new_tctx;
+	}
+
+	u64 tptr;
+	tptr = t_to_tptr(p);
+
+	tctx->dsq_vtime = vtime;
+	bpf_map_update_elem(&task_data, &tptr, tctx, BPF_ANY);
+
+	return 0;
+}
+
+SEC("kprobe/scx_bpf_dsq_move_set_vtime")
+int BPF_KPROBE(scx_dsq_move_set_vtime, struct bpf_iter_scx_dsq *it__iter, u64 vtime)
+{
+	// TODO: figure out how to return task from iterator without consuming.
+	return on_move_set_vtime(NULL, vtime);
+}
+
+SEC("kprobe/scx_bpf_dispatch_from_dsq_set_vtime")
+int BPF_KPROBE(scx_dispatch_from_dsq_set_vtime, struct bpf_iter_scx_dsq *it__iter, u64 vtime)
+{
+	// TODO: figure out how to return task from iterator without consuming.
+	return on_move_set_vtime(NULL, vtime);
 }
 
 static __always_inline int __on_sched_wakeup(struct task_struct *p)
