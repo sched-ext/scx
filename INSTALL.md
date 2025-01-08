@@ -110,43 +110,21 @@ No additional steps needed here other than what is mentioned in the main README.
 
 ## Nix
 
-[Chaotic Nyx](https://github.com/chaotic-cx/nyx) is maintaining the linux-cachyos kernel and scx-scheds package in a flake.
+From NixOS 24.11 onwards, `scx` is available on Nixpkgs. Using a kernel of version 6.12+ or later is required.
 
-#### Integrate the repository using flake
-
-<pre lang="nix"><code class="language-nix">
+```nix
 {
-  description = "My configuration";
-
-  inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    chaotic.url = "github:chaotic-cx/nyx/nyxpkgs-unstable";
-  };
-
-  outputs = { nixpkgs, chaotic, ... }: {
-    nixosConfigurations = {
-      hostname = nixpkgs.lib.nixosSystem {
-        system = "x86_64-linux";
-        modules = [
-          ./configuration.nix # Your system configuration.
-          chaotic.nixosModules.default # OUR DEFAULT MODULE
-        ];
-      };
-    };
-  };
+  services.scx.enable = true;
+  services.scx.scheduler = "scx_lavd"; # default is "scx_rustland"
+  boot.kernelPackages = pkgs.linuxPackages_latest;
 }
-</code></pre>
+```
 
-#### Add this to your configuration to install the kernel
+Then rebuild and reboot your system. You can check if the scheduler is running by:
 
-<pre lang="nix"><code class="language-nix">
-{
-  boot.kernelPackages = pkgs.linuxPackages_cachyos;
-  environment.systemPackages =  [ pkgs.scx ];
-}
-</code></pre>
-
-Then install the package and reboot your system. After you can use all provided example schedulers.
+```shell
+  systemctl status scx.service
+```
 
 ## openSUSE Tumbleweed
 
