@@ -121,6 +121,48 @@ async fn run() -> Result<()> {
     {
         links.push(link);
     }
+    if let Ok(link) = skel
+        .progs
+        .scx_dispatch_from_dsq_set_vtime
+        .attach_kprobe(false, "scx_bpf_dispatch_from_dsq_set_vtime")
+    {
+        links.push(link);
+    }
+    if let Ok(link) = skel
+        .progs
+        .scx_dsq_move_set_vtime
+        .attach_kprobe(false, "scx_bpf_dsq_move_set_vtime")
+    {
+        links.push(link);
+    }
+    if let Ok(link) = skel
+        .progs
+        .scx_dsq_move_set_slice
+        .attach_kprobe(false, "scx_bpf_dsq_move_set_slice")
+    {
+        links.push(link);
+    }
+    if let Ok(link) = skel
+        .progs
+        .scx_dispatch_from_dsq_set_slice
+        .attach_kprobe(false, "scx_bpf_dispatch_from_dsq_set_slice")
+    {
+        links.push(link);
+    }
+    if let Ok(link) = skel
+        .progs
+        .scx_dispatch_from_dsq
+        .attach_kprobe(false, "scx_bpf_dispatch_from_dsq")
+    {
+        links.push(link);
+    }
+    if let Ok(link) = skel
+        .progs
+        .scx_dsq_move
+        .attach_kprobe(false, "scx_bpf_dsq_move")
+    {
+        links.push(link);
+    }
 
     let keymap = KeyMap::default();
     let tui = Tui::new(keymap.clone(), args.tick_rate_ms)?;
