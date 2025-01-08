@@ -138,6 +138,8 @@ const volatile u32 debug;
 /* base slice duration */
 volatile u64 slice_ns;
 
+typedef struct task_ctx __arena * task_ctx_usrptr;
+
 /*
  * Per-CPU context
  */
@@ -205,7 +207,7 @@ struct dom_active_tasks {
 	u64 gen;
 	u64 read_idx;
 	u64 write_idx;
-	struct task_struct *tasks[MAX_DOM_ACTIVE_TPTRS];
+	task_ctx_usrptr tasks[MAX_DOM_ACTIVE_TPTRS];
 };
 
 struct dom_active_tasks dom_active_tasks[MAX_DOMS];
@@ -1468,6 +1470,8 @@ static void running_update_vtime(struct task_struct *p,
 
 void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 {
+	task_ctx_usrptr usrptr = sdt_task_data(p);
+	task_ctx_usrptr *taskp;
 	struct task_ctx *taskc;
 	struct dom_ctx *domc;
 	u32 dom_id, dap_gen;
@@ -1490,7 +1494,6 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	if (taskc->dom_active_tasks_gen != dap_gen) {
 		u64 idx = __sync_fetch_and_add(&dom_active_tasks[dom_id].write_idx, 1) %
 			MAX_DOM_ACTIVE_TPTRS;
-		struct task_struct **taskp;
 
 		taskp = MEMBER_VPTR(dom_active_tasks, [dom_id].tasks[idx]);
 		if (!taskp) {
@@ -1499,7 +1502,10 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 			return;
 		}
 
-		*taskp = p;
+		usrptr = sdt_task_data(p);
+		cast_user(usrptr);
+
+		*taskp = usrptr;
 		taskc->dom_active_tasks_gen = dap_gen;
 	}
 
