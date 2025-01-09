@@ -127,7 +127,7 @@ const volatile u32 dom_numa_id_map[MAX_DOMS];
 const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
 const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 load_half_life = 1000000000	/* 1s */;
-const volatile struct dom_ctx __arena *doms[MAX_DOMS];
+const volatile dom_ptr doms[MAX_DOMS];
 
 const volatile bool kthreads_local;
 const volatile bool fifo_sched;
@@ -256,9 +256,9 @@ static struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, struct bpf_c
 	return taskc;
 }
 
-static struct dom_ctx *task_domain(struct task_ctx *taskc)
+static dom_ptr task_domain(struct task_ctx *taskc)
 {
-	struct dom_ctx *domc = taskc->domc;
+	dom_ptr domc = taskc->domc;
 
 	cast_kern(domc);
 
@@ -289,7 +289,7 @@ static void task_load_adj(struct task_ctx *taskc,
 	ravg_accumulate(&taskc->dcyc_rd, taskc->runnable, now, load_half_life);
 }
 
-static struct bucket_ctx *lookup_dom_bucket(struct dom_ctx *dom_ctx,
+static struct bucket_ctx *lookup_dom_bucket(dom_ptr dom_ctx,
 					    u32 weight, u32 *bucket_id)
 {
 	u32 idx = weight_to_bucket_idx(weight);
@@ -335,7 +335,7 @@ static u64 scale_inverse_fair(u64 value, u64 weight)
 
 static void dom_dcycle_adj(u32 dom_id, u32 weight, u64 now, bool runnable)
 {
-	struct dom_ctx *domc;
+	dom_ptr domc;
 	struct bucket_ctx *bucket;
 	struct lock_wrapper *lockw;
 	s64 adj = runnable ? 1 : -1;
@@ -370,8 +370,8 @@ static void dom_dcycle_adj(u32 dom_id, u32 weight, u64 now, bool runnable)
 }
 
 static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
-			         struct dom_ctx *from_domc,
-				 struct dom_ctx *to_domc, u64 now)
+			         dom_ptr from_domc,
+				 dom_ptr to_domc, u64 now)
 {
 	struct bucket_ctx *from_bucket, *to_bucket;
 	u32 idx = 0, weight = taskc->weight;
@@ -443,14 +443,14 @@ static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
 			   to_dcycle[1] >> RAVG_FRAC_BITS);
 }
 
-static u64 dom_min_vruntime(struct dom_ctx *domc)
+static u64 dom_min_vruntime(dom_ptr domc)
 {
 	return READ_ONCE(domc->min_vruntime);
 }
 
 int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now)
 {
-	struct dom_ctx *from_domc, *to_domc;
+	dom_ptr from_domc, *to_domc;
 	struct task_ctx *taskc;
 
 	taskc = lookup_task_ctx(p);
@@ -755,7 +755,7 @@ static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
 static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 enq_flags)
 {
 	u64 dom_vruntime, min_vruntime;
-	struct dom_ctx *domc;
+	dom_ptr domc;
 
 	if (!(domc = task_domain(taskc)))
 		return;
@@ -780,7 +780,7 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 static bool task_set_domain(struct task_struct *p __arg_trusted,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
-	struct dom_ctx *old_domc, __arena *new_domc;
+	dom_ptr old_domc, __arena *new_domc;
 	struct bpf_cpumask *d_cpumask, *t_cpumask;
 	struct sdt_dom_map_val *new_dval;
 	struct task_ctx *taskc;
@@ -1004,7 +1004,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (taskc->all_cpus && direct_greedy_cpumask &&
 	    !bpf_cpumask_empty(cast_mask(direct_greedy_cpumask))) {
 		u32 dom_id = cpu_to_dom_id(prev_cpu);
-		struct dom_ctx *domc;
+		dom_ptr domc;
 		struct sdt_dom_map_val *dval;
 		struct bpf_cpumask *tmp_direct_greedy, *node_mask;
 
@@ -1138,7 +1138,7 @@ static void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
 void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
 {
 	struct task_ctx *taskc;
-	struct dom_ctx *domc;
+	dom_ptr domc;
 	struct bpf_cpumask *p_cpumask;
 	s32 cpu = -1;
 
@@ -1425,7 +1425,7 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 
 static void running_update_vtime(struct task_struct *p,
 				 struct task_ctx *taskc,
-				 struct dom_ctx *domc)
+				 dom_ptr domc)
 {
 	struct bpf_spin_lock * lock = lookup_dom_vtime_lock(domc);
 
@@ -1442,7 +1442,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 {
 	struct task_ctx __arena *usertaskc;
 	struct task_ctx *taskc;
-	struct dom_ctx *domc;
+	dom_ptr domc;
 	u32 dap_gen;
 
 	if (!(taskc = lookup_task_ctx(p)))
@@ -1486,7 +1486,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 
 static void stopping_update_vtime(struct task_struct *p,
 				  struct task_ctx *taskc,
-				  struct dom_ctx *domc)
+				  dom_ptr domc)
 {
 	u64 now, delta;
 
@@ -1503,7 +1503,7 @@ static void stopping_update_vtime(struct task_struct *p,
 void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
 {
 	struct task_ctx *taskc;
-	struct dom_ctx *domc;
+	dom_ptr domc;
 
 	if (fifo_sched)
 		return;
@@ -1521,7 +1521,7 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 {
 	u64 now = bpf_ktime_get_ns(), interval;
 	struct task_ctx *taskc;
-	struct dom_ctx *domc;
+	dom_ptr domc;
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
@@ -1746,7 +1746,7 @@ static s32 create_node(u32 node_id)
 
 static s32 create_dom(u32 dom_id)
 {
-	struct dom_ctx *domc;
+	dom_ptr domc;
 	struct node_ctx *nodec;
 	struct bpf_cpumask *dom_mask, *node_mask, *all_mask;
 	struct sdt_dom_map_val *dval;

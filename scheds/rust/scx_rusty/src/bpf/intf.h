@@ -155,6 +155,8 @@ struct dom_ctx {
 	struct dom_active_tasks active_tasks;
 };
 
+typedef struct dom_ctx __arena * dom_ptr;
+
 struct node_ctx {
 	struct bpf_cpumask __kptr *cpumask;
 };

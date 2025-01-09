@@ -10,7 +10,7 @@ struct sdt_dom_map_val {
 	struct bpf_cpumask __kptr *direct_greedy_cpumask;
 	struct bpf_cpumask __kptr *node_cpumask;
 
-	struct dom_ctx __arena	*domc;
+	dom_ptr domc;
 };
 
 struct {
@@ -30,18 +30,18 @@ int sdt_dom_init(void)
 }
 
 __hidden __noinline
-struct dom_ctx __arena *sdt_dom_alloc(u32 dom_id)
+dom_ptr sdt_dom_alloc(u32 dom_id)
 {
 	struct sdt_data __arena *data = NULL;
 	struct sdt_dom_map_val mval;
-	struct dom_ctx *domc;
+	dom_ptr domc;
 	int ret;
 
 	data = sdt_alloc(&sdt_dom_allocator);
 	cast_kern(data);
 
 	mval.tid = data->tid;
-	mval.domc = (struct dom_ctx __arena *)data->payload;
+	mval.domc = (dom_ptr)data->payload;
 
 	ret = bpf_map_update_elem(&sdt_dom_map, &dom_id, &mval,
 				    BPF_EXIST);
@@ -57,7 +57,7 @@ struct dom_ctx __arena *sdt_dom_alloc(u32 dom_id)
 }
 
 __hidden
-void sdt_dom_free(struct dom_ctx *domc)
+void sdt_dom_free(dom_ptr domc)
 {
 	struct sdt_dom_map_val *mval;
 	u32 key = domc->id;
@@ -80,7 +80,7 @@ struct sdt_dom_map_val *sdt_dom_val(u32 dom_id)
 	return bpf_map_lookup_elem(&sdt_dom_map, &dom_id);
 }
 
-static struct dom_ctx *try_lookup_dom_ctx_arena(u32 dom_id)
+static dom_ptr try_lookup_dom_ctx_arena(u32 dom_id)
 {
 	struct sdt_dom_map_val *mval;
 
@@ -91,9 +91,9 @@ static struct dom_ctx *try_lookup_dom_ctx_arena(u32 dom_id)
 	return mval->domc;
 }
 
-static struct dom_ctx *try_lookup_dom_ctx(u32 dom_id)
+static dom_ptr try_lookup_dom_ctx(u32 dom_id)
 {
-	struct dom_ctx __arena *domc;
+	dom_ptr domc;
 
 	domc = try_lookup_dom_ctx_arena(dom_id);
 
@@ -102,9 +102,9 @@ static struct dom_ctx *try_lookup_dom_ctx(u32 dom_id)
 	return domc;
 }
 
-static struct dom_ctx *lookup_dom_ctx(u32 dom_id)
+static dom_ptr lookup_dom_ctx(u32 dom_id)
 {
-	struct dom_ctx *domc;
+	dom_ptr domc;
 
 	domc = try_lookup_dom_ctx(dom_id);
 	if (!domc)
@@ -113,7 +113,7 @@ static struct dom_ctx *lookup_dom_ctx(u32 dom_id)
 	return domc;
 }
 
-static struct bpf_spin_lock *lookup_dom_vtime_lock(struct dom_ctx *domc)
+static struct bpf_spin_lock *lookup_dom_vtime_lock(dom_ptr domc)
 {
 	struct sdt_dom_map_val *mval;
 
