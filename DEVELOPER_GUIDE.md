@@ -41,6 +41,12 @@ have rustup installed this will use the version in `rust-toolchain.toml`.
 
 ## Useful Tools
 
+## [scxtop](https://github.com/sched-ext/scx/blob/main/tools/scxtop/README.md)
+`scxtop` is a top like tool that collects and aggregates various perf and
+sched_ext events. See the
+[README](https://github.com/sched-ext/scx/blob/main/tools/scxtop/README.md) for
+more details.
+
 ### [Perfetto](https://perfetto.dev/)
 [Perfetto](https://perfetto.dev/) is a profiling and trace visualization
 platform. It can be used to view scheduling data, which is useful for
