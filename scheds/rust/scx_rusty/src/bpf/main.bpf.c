@@ -75,6 +75,7 @@ const volatile u32 dom_numa_id_map[MAX_DOMS];
 const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
 const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 load_half_life = 1000000000	/* 1s */;
+volatile dom_ptr doms[MAX_DOMS];
 
 const volatile bool kthreads_local;
 const volatile bool fifo_sched = false;
@@ -86,8 +87,6 @@ const volatile u32 debug;
 
 /* base slice duration */
 volatile u64 slice_ns;
-
-typedef struct task_ctx __arena * task_ctx_usrptr;
 
 struct bpfmask_wrapper {
 	struct bpf_cpumask __kptr *instance;
@@ -320,7 +319,7 @@ static struct bucket_ctx *lookup_dom_bucket(dom_ptr dom_ctx,
 	struct bucket_ctx *bucket;
 
 	*bucket_id = idx;
-	bucket = &dom_ctx->buckets[idx];
+	bucket = (struct bucket_ctx *)&dom_ctx->buckets[idx];
 	if (bucket)
 		return bucket;
 
@@ -469,12 +468,12 @@ static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
 
 static u64 dom_min_vruntime(dom_ptr domc)
 {
-	return READ_ONCE(domc->min_vruntime);
+	return domc->min_vruntime;
 }
 
 int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now)
 {
-	dom_ptr from_domc, *to_domc;
+	dom_ptr from_domc, to_domc;
 	struct task_ctx *taskc;
 
 	taskc = lookup_task_ctx(p);
@@ -804,7 +803,7 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 static bool task_set_domain(struct task_struct *p __arg_trusted,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
-	dom_ptr old_domc, __arena *new_domc;
+	dom_ptr old_domc, new_domc;
 	struct bpf_cpumask *d_cpumask, *t_cpumask;
 	struct sdt_dom_map_val *new_dval;
 	struct task_ctx *taskc;
@@ -1458,14 +1457,13 @@ static void running_update_vtime(struct task_struct *p,
 
 	bpf_spin_lock(lock);
 	if (vtime_before(dom_min_vruntime(domc), p->scx.dsq_vtime))
-		WRITE_ONCE(domc->min_vruntime, p->scx.dsq_vtime);
+		domc->min_vruntime = p->scx.dsq_vtime;
 	bpf_spin_unlock(lock);
 }
 
 void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 {
-	task_ctx_usrptr usrptr = sdt_task_data(p);
-	task_ctx_usrptr *taskp;
+	task_ptr usrptr = sdt_task_data(p);
 	struct task_ctx *taskc;
 	dom_ptr domc;
 	u32 dap_gen;
@@ -1498,7 +1496,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 		usrptr = sdt_task_data(p);
 		cast_user(usrptr);
 
-		*taskp = usrptr;
+		domc->active_tasks.tasks[idx] = usrptr;
 		taskc->dom_active_tasks_gen = dap_gen;
 	}
 

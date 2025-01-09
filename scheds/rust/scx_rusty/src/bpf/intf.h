@@ -96,13 +96,15 @@ enum stat_idx {
 	RUSTY_NR_STATS,
 };
 
+struct dom_ctx;
+
 struct task_ctx {
 	/* The domains this task can run on */
 	u64 dom_mask;
 	u64 preferred_dom_mask;
 
 	/* Arena pointer to this task's domain. */
-	struct dom_ctx *domc;
+	struct dom_ctx __attribute__((address_space(1))) *domc;
 
 	u32 dom_id;
 	u32 weight;
@@ -134,6 +136,8 @@ struct task_ctx {
 	struct ravg_data dcyc_rd;
 };
 
+typedef struct task_ctx __attribute__((address_space(1))) * task_ptr;
+
 struct bucket_ctx {
 	u64 dcycle;
 	struct ravg_data rd;
@@ -143,7 +147,7 @@ struct dom_active_tasks {
 	u64 gen;
 	u64 read_idx;
 	u64 write_idx;
-	struct task_ctx *tasks[MAX_DOM_ACTIVE_TPTRS];
+	task_ptr tasks[MAX_DOM_ACTIVE_TPTRS];
 };
 
 struct dom_ctx {
@@ -155,7 +159,7 @@ struct dom_ctx {
 	struct dom_active_tasks active_tasks;
 };
 
-typedef struct dom_ctx __arena * dom_ptr;
+typedef struct dom_ctx __attribute__((address_space(1))) * dom_ptr;
 
 struct node_ctx {
 	struct bpf_cpumask __kptr *cpumask;
