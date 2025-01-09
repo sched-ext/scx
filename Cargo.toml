@@ -3,6 +3,7 @@ members = ["rust/scx_stats",
            "rust/scx_stats/scx_stats_derive",
 	   "rust/scx_utils",
            "rust/scx_rustland_core",
+           "tools/scxtop",
            "rust/scx_loader",
 	   "scheds/rust/scx_lavd",
            "scheds/rust/scx_bpfland",
@@ -13,3 +14,6 @@ members = ["rust/scx_stats",
            "scheds/rust/scx_layered",
            "scheds/rust/scx_mitosis"]
 resolver = "2"
+
+[profile.release]
+lto = true

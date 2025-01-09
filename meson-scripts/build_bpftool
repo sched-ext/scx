@@ -23,6 +23,13 @@ for arg in ${args[@]:(idx+1)}; do
     esac
 done
 
+extra_args=()
+# When using clang, `LLVM=1` needs to be passed as an argument. Otherwise some
+# parts of the build system will attempt to invoke GCC.
+if cc --version 2>&1 | grep clang; then
+    extra_args+="LLVM=1"
+fi
+
 cd $3
-make_out=$(env CC="$cc" CFLAGS="$cflags" "$2" -j"$4")
+make_out=$(env CC="$cc" CFLAGS="$cflags" "$2" -j"$4" $extra_args)
 exit $?

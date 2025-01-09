@@ -59,6 +59,36 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
+/*
+ * const volatiles are set during initialization and treated as consts by the
+ * jit compiler.
+ */
+
+/*
+ * Domains and cpus
+ */
+const volatile u32 nr_doms = 32;	/* !0 for veristat, set during init */
+const volatile u32 nr_nodes = 32;	/* !0 for veristat, set during init */
+const volatile u32 nr_cpu_ids = 64;	/* !0 for veristat, set during init */
+const volatile u32 cpu_dom_id_map[MAX_CPUS];
+const volatile u32 dom_numa_id_map[MAX_DOMS];
+const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
+const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
+const volatile u32 load_half_life = 1000000000	/* 1s */;
+
+const volatile bool kthreads_local;
+const volatile bool fifo_sched = false;
+const volatile bool direct_greedy_numa;
+const volatile bool mempolicy_affinity;
+const volatile u32 greedy_threshold;
+const volatile u32 greedy_threshold_x_numa;
+const volatile u32 debug;
+
+/* base slice duration */
+volatile u64 slice_ns;
+
+typedef struct task_ctx __arena * task_ctx_usrptr;
+
 struct bpfmask_wrapper {
 	struct bpf_cpumask __kptr *instance;
 };
@@ -68,7 +98,7 @@ struct {
 	__type(key, u32);
 	__type(value, struct bpfmask_wrapper);
 	__uint(max_entries, 1);
-} scx_singleton_bpfmask_map SEC(".maps");
+} scx_percpu_bpfmask_map SEC(".maps");
 
 static s32 create_save_cpumask(struct bpf_cpumask **kptr)
 {
@@ -89,9 +119,32 @@ static s32 create_save_cpumask(struct bpf_cpumask **kptr)
 	return 0;
 }
 
-static struct bpf_cpumask *scx_singleton_bpf_cpumask_t(void)
+static int scx_percpu_tmpmask_init(void)
 {
-	void *map = &scx_singleton_bpfmask_map;
+	void *map = &scx_percpu_bpfmask_map;
+	struct bpfmask_wrapper *instancep;
+	const u32 zero = 0;
+	int ret, i;
+
+	bpf_for (i, 0, nr_cpu_ids) {
+		instancep = bpf_map_lookup_percpu_elem(map, &zero, i);
+		if (!instancep) {
+			/* Should be impossible. */
+			scx_bpf_error("Did not find map entry");
+			return -EINVAL;
+		}
+
+		ret = create_save_cpumask(&instancep->instance);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static struct bpf_cpumask *scx_percpu_tmpmask(void)
+{
+	void *map = &scx_percpu_bpfmask_map;
 	struct bpfmask_wrapper *instancep;
 	const u32 zero = 0;
 
@@ -110,35 +163,6 @@ static struct bpf_cpumask *scx_singleton_bpf_cpumask_t(void)
 
 	return instancep->instance;
 }
-
-/*
- * const volatiles are set during initialization and treated as consts by the
- * jit compiler.
- */
-
-/*
- * Domains and cpus
- */
-const volatile u32 nr_doms = 32;	/* !0 for veristat, set during init */
-const volatile u32 nr_nodes = 32;	/* !0 for veristat, set during init */
-const volatile u32 nr_cpu_ids = 64;	/* !0 for veristat, set during init */
-const volatile u32 cpu_dom_id_map[MAX_CPUS];
-const volatile u32 dom_numa_id_map[MAX_DOMS];
-const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
-const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
-const volatile u32 load_half_life = 1000000000	/* 1s */;
-const volatile dom_ptr doms[MAX_DOMS];
-
-const volatile bool kthreads_local;
-const volatile bool fifo_sched;
-const volatile bool direct_greedy_numa;
-const volatile bool mempolicy_affinity;
-const volatile u32 greedy_threshold;
-const volatile u32 greedy_threshold_x_numa;
-const volatile u32 debug;
-
-/* base slice duration */
-volatile u64 slice_ns;
 
 /*
  * Per-CPU context
@@ -209,7 +233,7 @@ static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
 {
 	struct task_ctx __arena *taskc = sdt_task_data(p);
 	cast_kern(taskc);
-	return taskc;
+	return (struct task_ctx *)taskc;
 }
 
 static struct bpf_cpumask *lookup_task_bpfmask(struct task_struct *p)
@@ -1048,7 +1072,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 				goto enoent;
 			}
 
-			tmp_cpumask = scx_singleton_bpf_cpumask_t();
+			tmp_cpumask = scx_percpu_tmpmask();
 			if (!tmp_cpumask) {
 				scx_bpf_error("Failed to lookup tmp cpumask");
 				goto enoent;
@@ -1440,7 +1464,8 @@ static void running_update_vtime(struct task_struct *p,
 
 void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 {
-	struct task_ctx __arena *usertaskc;
+	task_ctx_usrptr usrptr = sdt_task_data(p);
+	task_ctx_usrptr *taskp;
 	struct task_ctx *taskc;
 	dom_ptr domc;
 	u32 dap_gen;
@@ -1470,10 +1495,10 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 			return;
 		}
 
-		usertaskc = sdt_task_data(p);
-		cast_user(usertaskc);
+		usrptr = sdt_task_data(p);
+		cast_user(usrptr);
 
-		domc->active_tasks.tasks[idx] = usertaskc;
+		*taskp = usrptr;
 		taskc->dom_active_tasks_gen = dap_gen;
 	}
 
@@ -1630,7 +1655,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 	struct task_ctx *taskc;
 	long ret;
 
-	taskc = sdt_task_alloc(p);
+	taskc = (struct task_ctx *)sdt_task_alloc(p);
 	if (!taskc)
 		return -ENOMEM;
 
@@ -1884,6 +1909,10 @@ static s32 initialize_cpu(s32 cpu)
 s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 {
 	s32 i, ret;
+
+	ret = scx_percpu_tmpmask_init();
+	if (ret)
+		return ret;
 
 	ret = sdt_task_init(sizeof(struct task_ctx));
 	if (ret)

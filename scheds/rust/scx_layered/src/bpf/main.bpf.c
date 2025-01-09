@@ -1746,7 +1746,7 @@ static __noinline bool match_one(struct layer_match *match,
 		return p->real_parent->pid == match->ppid;
 	case MATCH_TGID_EQUALS:
 		return p->tgid == match->tgid;
-	case MATCH_NSPID_EQUALS:
+	case MATCH_NSPID_EQUALS: {
 		// To do namespace pid matching we need to translate the root
 		// pid from bpf side to the namespace pid.
 		bpf_rcu_read_lock();
@@ -1760,6 +1760,19 @@ static __noinline bool match_one(struct layer_match *match,
 		u64 nsid = BPF_CORE_READ(pid_ns, ns.inum);
 		bpf_rcu_read_unlock();
 		return (u32)nspid == match->pid && nsid == match->nsid;
+	}
+	case MATCH_NS_EQUALS: {
+		bpf_rcu_read_lock();
+		struct pid *p_pid = get_task_pid_ptr(p, PIDTYPE_PID);
+		struct pid_namespace *pid_ns = get_task_pid_ns(p, PIDTYPE_TGID);
+		if (!p_pid || !pid_ns) {
+			bpf_rcu_read_unlock();
+			return result;
+		}
+		u64 nsid = BPF_CORE_READ(pid_ns, ns.inum);
+		bpf_rcu_read_unlock();
+		return nsid == match->nsid;
+	}
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
 		return result;
@@ -2763,6 +2776,9 @@ static s32 init_layer(int layer_id)
 			case MATCH_NSPID_EQUALS:
 				dbg("%s NSID %lld PID %d",
 				    header, match->nsid, match->pid);
+				break;
+			case MATCH_NS_EQUALS:
+				dbg("%s NSID %lld", header, match->nsid);
 				break;
 			default:
 				scx_bpf_error("%s Invalid kind", header);

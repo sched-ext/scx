@@ -20,6 +20,3 @@ scx_lib = custom_target(scx_lib_name,
   command: [compile_scx_lib, bpftool_exe_path, '@OUTPUT@', scx_lib_name, objs],
   depends: objs,
 )
-
-# Install include/lib as a lib/ subdir of our headers
-install_subdir(join_paths(meson.current_source_dir(), 'include/lib'), install_dir: 'include', install_tag: 'devel')
