@@ -551,7 +551,7 @@ static void refresh_tune_params(void)
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		u32 dom_id = cpu_to_dom_id(cpu);
-		struct sdt_dom_map_val *dval;
+		struct lb_domain *dval;
 
 		if (is_offline_cpu(cpu))
 			continue;
@@ -802,7 +802,7 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 {
 	dom_ptr old_domc, new_domc;
 	struct bpf_cpumask *d_cpumask, *t_cpumask;
-	struct sdt_dom_map_val *new_dval;
+	struct lb_domain *new_dval;
 	struct task_ctx *taskc;
 	u32 old_dom_id;
 
@@ -871,7 +871,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 	s32 cpu;
 	const struct cpumask *idle_cpumask;
 	bool share_llc, has_idle;
-	struct sdt_dom_map_val *dval;
+	struct lb_domain *dval;
 	struct bpf_cpumask *d_cpumask;
 	struct pcpu_ctx *pcpuc;
 
@@ -1025,7 +1025,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	    !bpf_cpumask_empty(cast_mask(direct_greedy_cpumask))) {
 		u32 dom_id = cpu_to_dom_id(prev_cpu);
 		dom_ptr domc;
-		struct sdt_dom_map_val *dval;
+		struct lb_domain *dval;
 		struct bpf_cpumask *tmp_direct_greedy, *node_mask;
 
 		/*
@@ -1244,7 +1244,7 @@ dom_queue:
 
 static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
 {
-	struct sdt_dom_map_val *dval;
+	struct lb_domain *dval;
 	struct bpf_cpumask *dmask;
 
 	dval = sdt_dom_val(dom_id);
@@ -1769,7 +1769,7 @@ static s32 create_dom(u32 dom_id)
 	dom_ptr domc;
 	struct node_ctx *nodec;
 	struct bpf_cpumask *dom_mask, *node_mask, *all_mask;
-	struct sdt_dom_map_val *dval;
+	struct lb_domain *dval;
 	u32 cpu, node_id;
 	s32 ret;
 
@@ -1877,7 +1877,7 @@ static s32 initialize_cpu(s32 cpu)
 	pcpuc->dom_rr_cur = cpu;
 	bpf_for(i, 0, nr_doms) {
 		bool in_dom;
-		struct sdt_dom_map_val *dval;
+		struct lb_domain *dval;
 
 		dval = sdt_dom_val(i);
 		if (!dval)
