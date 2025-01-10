@@ -363,7 +363,6 @@ impl Domain {
 
         self.load.add_load(-load);
         other.load.add_load(load);
-
     }
 
     fn xfer_between(&self, other: &Domain) -> f64 {
@@ -627,7 +626,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         // Read active_tasks and update read_idx and gen.
         const MAX_TPTRS: u64 = bpf_intf::consts_MAX_DOM_ACTIVE_TPTRS as u64;
-        let dom_ctx = unsafe { &mut *(self.skel.maps.bss_data.doms[dom.id] as *mut bpf_intf::dom_ctx) };
+        let dom_ctx =
+            unsafe { &mut *(self.skel.maps.bss_data.doms[dom.id] as *mut bpf_intf::dom_ctx) };
         let active_tasks = &mut dom_ctx.active_tasks;
 
         let (mut ridx, widx) = (active_tasks.read_idx, active_tasks.write_idx);
@@ -770,7 +770,11 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         task.migrated.set(true);
         std::mem::swap(&mut push_dom.tasks, &mut SortedVec::from_unsorted(tasks));
 
-        push_dom.transfer_load(load, unsafe { &mut *(taskc as *mut bpf_intf::task_ctx) }, pull_dom);
+        push_dom.transfer_load(
+            load,
+            unsafe { &mut *(taskc as *mut bpf_intf::task_ctx) },
+            pull_dom,
+        );
         Ok(Some(load))
     }
 
@@ -1052,7 +1056,6 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     }
 
     fn perform_balancing(&mut self) -> Result<()> {
-
         // First balance load between the NUMA nodes. Balancing here has a
         // higher cost function than balancing between domains inside of NUMA
         // nodes, but the mechanics are the same. Adjustments made here are
