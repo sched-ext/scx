@@ -236,15 +236,15 @@ static u64 task_slice(const struct task_struct *p, struct task_ctx *tctx)
 	u64 nr_waiting;
 
 	/*
-         * Assign a time slice that is inversely proportional to the square
-         * of the number of tasks waiting in the shared DSQ.
+	 * Assign a time slice that is inversely proportional to the number
+	 * of tasks waiting in the shared DSQ.
          *
 	 * This can help to improve system responsiveness, reducing average
 	 * runqueue latency, when the system is overcommitted.
          */
 	nr_waiting = scx_bpf_dsq_nr_queued(SHARED_DSQ) + 1;
 
-	return slice_ns / (nr_waiting * nr_waiting);
+	return slice_ns / nr_waiting;
 }
 
 /*
