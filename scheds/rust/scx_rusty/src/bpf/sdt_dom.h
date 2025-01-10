@@ -38,7 +38,7 @@ dom_ptr sdt_dom_alloc(u32 dom_id)
 	int ret;
 
 	data = sdt_alloc(&sdt_dom_allocator);
-	cast_kern(data);
+//	cast_kern(data);
 
 	mval.tid = data->tid;
 	mval.domc = (dom_ptr)data->payload;
