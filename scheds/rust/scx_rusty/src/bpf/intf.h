@@ -113,7 +113,7 @@ struct task_ctx {
 	/* Arena pointer to this task's domain. */
 	dom_ptr domc;
 
-	u32 dom_id;
+	u32 target_dom;
 	u32 weight;
 	bool runnable;
 	u64 dom_active_tasks_gen;

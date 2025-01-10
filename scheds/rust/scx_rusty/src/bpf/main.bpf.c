@@ -812,7 +812,7 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 		return false;
 	}
 
-	old_dom_id = taskc->dom_id;
+	old_dom_id = taskc->target_dom;
 	old_domc = lookup_dom_ctx(old_dom_id);
 	if (!old_domc)
 		return false;
@@ -850,7 +850,7 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 		if (!init_dsq_vtime)
 			dom_xfer_task(p, new_dom_id, now);
 
-		taskc->dom_id = new_dom_id;
+		taskc->target_dom = new_dom_id;
 		taskc->domc = new_domc;
 
 		cast_kern(new_domc);
@@ -860,7 +860,7 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 		bpf_cpumask_and(t_cpumask, cast_mask(d_cpumask), p->cpus_ptr);
 	}
 
-	return taskc->dom_id == new_dom_id;
+	return taskc->target_dom == new_dom_id;
 }
 
 
@@ -887,7 +887,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 	d_cpumask = dval->cpumask;
 	if (!d_cpumask) {
 		scx_bpf_error("Failed to acquire dom%u cpumask kptr",
-				taskc->dom_id);
+				taskc->target_dom);
 		return -ENOENT;
 	}
 
@@ -904,7 +904,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 	has_idle = bpf_cpumask_intersects(cast_mask(d_cpumask), idle_cpumask);
 
 	if (has_idle && bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
-	    !(current->flags & PF_EXITING) && taskc->dom_id < MAX_DOMS &&
+	    !(current->flags & PF_EXITING) && taskc->target_dom < MAX_DOMS &&
 	    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) == 0) {
 		stat_add(RUSTY_STAT_WAKE_SYNC, 1);
 		goto out;
@@ -1151,7 +1151,7 @@ static void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
 			  u64 enq_flags)
 {
 	clamp_task_vtime(p, taskc, enq_flags);
-	scx_bpf_dsq_insert_vtime(p, taskc->dom_id, slice_ns, taskc->deadline,
+	scx_bpf_dsq_insert_vtime(p, taskc->target_dom, slice_ns, taskc->deadline,
 				 enq_flags);
 }
 
@@ -1172,7 +1172,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 	/*
 	 * Migrate @p to a new domain if requested by userland through lb_data.
 	 */
-	if (domc->id != taskc->dom_id &&
+	if (domc->id != taskc->target_dom &&
 	    task_set_domain(p, domc->id, false)) {
 		stat_add(RUSTY_STAT_LOAD_BALANCE, 1);
 		taskc->dispatch_local = false;
@@ -1205,7 +1205,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 
 dom_queue:
 	if (fifo_sched)
-		scx_bpf_dsq_insert(p, taskc->dom_id, slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, taskc->target_dom, slice_ns, enq_flags);
 	else
 		place_task_dl(p, taskc, enq_flags);
 

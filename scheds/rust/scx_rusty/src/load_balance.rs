@@ -359,7 +359,7 @@ impl Domain {
     fn transfer_load(&mut self, load: f64, taskc: &mut bpf_intf::task_ctx, other: &mut Domain) {
         let dom_id: u32 = other.id.try_into().unwrap();
 
-        taskc.dom_id = dom_id;
+        taskc.target_dom = dom_id;
 
         self.load.add_load(-load);
         other.load.add_load(load);
@@ -647,7 +647,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             let taskc = active_tasks.tasks[(idx % MAX_TPTRS) as usize];
             let task_ctx = unsafe { &*(taskc as *const bpf_intf::task_ctx) };
 
-            if task_ctx.dom_id as usize != dom.id {
+            if task_ctx.target_dom as usize != dom.id {
                 continue;
             }
 
