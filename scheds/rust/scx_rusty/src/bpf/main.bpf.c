@@ -465,7 +465,7 @@ static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
 
 static u64 dom_min_vruntime(dom_ptr domc)
 {
-	return domc->min_vruntime;
+	return READ_ONCE_ARENA(u64, domc->min_vruntime);
 }
 
 int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now)
@@ -1454,7 +1454,7 @@ static void running_update_vtime(struct task_struct *p,
 
 	bpf_spin_lock(lock);
 	if (vtime_before(dom_min_vruntime(domc), p->scx.dsq_vtime))
-		domc->min_vruntime = p->scx.dsq_vtime;
+		WRITE_ONCE_ARENA(u64, domc->min_vruntime, p->scx.dsq_vtime);
 	bpf_spin_unlock(lock);
 }
 
