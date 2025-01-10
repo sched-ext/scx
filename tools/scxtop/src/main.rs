@@ -71,26 +71,10 @@ async fn run() -> Result<()> {
 
     let mut links = Vec::new();
     // Attach probes
-    links.push(
-        skel.progs
-            .on_sched_cpu_perf
-            .attach_kprobe(false, "scx_bpf_cpuperf_set")?,
-    );
-    links.push(
-        skel.progs
-            .scx_sched_reg
-            .attach_kprobe(false, "bpf_scx_reg")?,
-    );
-    links.push(
-        skel.progs
-            .scx_sched_unreg
-            .attach_kprobe(false, "bpf_scx_unreg")?,
-    );
-    links.push(
-        skel.progs
-            .on_sched_switch
-            .attach_raw_tracepoint("sched_switch")?,
-    );
+    links.push(skel.progs.on_sched_cpu_perf.attach()?);
+    links.push(skel.progs.scx_sched_reg.attach()?);
+    links.push(skel.progs.scx_sched_unreg.attach()?);
+    links.push(skel.progs.on_sched_switch.attach()?);
 
     // 6.13 compatability
     if let Ok(link) = skel
@@ -195,9 +179,13 @@ async fn run() -> Result<()> {
             event_type_SCHED_SWITCH => {
                 let action = Action::SchedSwitch {
                     cpu: event.cpu,
-                    dsq_id: event.dsq_id,
-                    dsq_lat_us: event.dsq_lat_us,
-                    dsq_vtime: event.dsq_vtime,
+                    next_dsq_id: event.next_dsq_id,
+                    next_dsq_lat_us: event.next_dsq_lat_us,
+                    next_dsq_vtime: event.next_dsq_vtime,
+                    next_slice_ns: event.next_slice_ns,
+                    prev_dsq_id: event.prev_dsq_id,
+                    prev_used_slice_ns: event.prev_slice_ns,
+                    prev_slice_ns: event.prev_slice_ns,
                 };
                 tx.send(action).ok();
             }
