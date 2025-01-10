@@ -356,16 +356,13 @@ static u64 scale_inverse_fair(u64 value, u64 weight)
 	return value * 100 / weight;
 }
 
-static void dom_dcycle_adj(u32 dom_id, u32 weight, u64 now, bool runnable)
+static void dom_dcycle_adj(dom_ptr domc, u32 weight, u64 now, bool runnable)
 {
-	dom_ptr domc;
 	struct bucket_ctx *bucket;
 	struct lock_wrapper *lockw;
 	s64 adj = runnable ? 1 : -1;
 	u32 bucket_idx = 0;
-
-	if (!(domc = lookup_dom_ctx(dom_id)))
-		return;
+	u32 dom_id = domc->id;
 
 	bucket = lookup_dom_bucket(domc, weight, &bucket_idx);
 	lockw = lookup_dom_bkt_lock(dom_id, weight);
@@ -1430,7 +1427,7 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 	wakee_ctx->is_kworker = p->flags & PF_WQ_WORKER;
 
 	task_load_adj(wakee_ctx, now, true);
-	dom_dcycle_adj(wakee_ctx->dom_id, wakee_ctx->weight, now, true);
+	dom_dcycle_adj(wakee_ctx->domc, wakee_ctx->weight, now, true);
 
 	if (fifo_sched)
 		return;
@@ -1549,13 +1546,13 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	task_load_adj(taskc, now, false);
-	dom_dcycle_adj(taskc->dom_id, taskc->weight, now, false);
-
-	if (fifo_sched)
+	if (!(domc = task_domain(taskc)))
 		return;
 
-	if (!(domc = task_domain(taskc)))
+	task_load_adj(taskc, now, false);
+	dom_dcycle_adj(domc, taskc->weight, now, false);
+
+	if (fifo_sched)
 		return;
 
 	interval = now - taskc->last_blocked_at;
