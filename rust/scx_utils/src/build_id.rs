@@ -29,7 +29,7 @@ lazy_static::lazy_static! {
     };
 }
 
-fn full_version(semver: &str) -> String {
+pub fn full_version(semver: &str) -> String {
     let mut ver = semver.to_string();
     if GIT_VERSION.len() > 0 {
         write!(ver, "-{}", &*GIT_VERSION).unwrap();
