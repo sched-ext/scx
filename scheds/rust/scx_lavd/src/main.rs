@@ -888,7 +888,10 @@ fn main() -> Result<()> {
     let mut opts = Opts::parse();
 
     if opts.version {
-        println!("scx_lavd {}", *build_id::SCX_FULL_VERSION);
+        println!(
+            "scx_lavd {}",
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
         return Ok(());
     }
 
@@ -940,7 +943,7 @@ fn main() -> Result<()> {
         let mut sched = Scheduler::init(&opts, &mut open_object)?;
         info!(
             "scx_lavd scheduler is initialized (build ID: {})",
-            *build_id::SCX_FULL_VERSION
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
         info!("scx_lavd scheduler starts running.");
         if !sched.run(&opts, shutdown.clone())?.should_restart() {
