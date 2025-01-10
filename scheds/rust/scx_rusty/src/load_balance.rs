@@ -567,7 +567,6 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             aggregator.init_domain(*dom_id);
 
             let dom_ctx = dom.ctx().unwrap();
-            println!("Retrieved {:p} for {}", dom_ctx, dom.id());
 
             for bucket in 0..NUM_BUCKETS {
                 let bucket_ctx = &dom_ctx.buckets[bucket as usize];
