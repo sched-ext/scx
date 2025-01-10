@@ -13,9 +13,9 @@
  * they are round-robined to a domain.
  *
  * rusty_select_cpu is the primary scheduling logic, invoked when a task
- * becomes runnable. The lb_data map is populated by userspace to inform the BPF
- * scheduler that a task should be migrated to a new domain. Otherwise, the task
- * is scheduled in priority order as follows:
+ * becomes runnable. A task's target_dom field is populated by userspace to inform 
+ * the BPF scheduler that a task should be migrated to a new domain. Otherwise, 
+ * the task is scheduled in priority order as follows:
  * * The current core if the task was woken up synchronously and there are idle
  *   cpus in the system
  * * The previous core, if idle
@@ -32,8 +32,8 @@
  * queue to run.
  *
  * Load balancing is almost entirely handled by userspace. BPF populates the
- * task weight, dom mask and current dom in the task_data map and executes the
- * load balance based on userspace populating the lb_data map.
+ * task weight, dom mask and current dom in the task map and executes the
+ * load balance based on userspace's setting of the target_dom field.
  */
 
 #ifdef LSP
@@ -1170,7 +1170,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 		return;
 
 	/*
-	 * Migrate @p to a new domain if requested by userland through lb_data.
+	 * Migrate @p to a new domain if requested by userland by setting target_dom.
 	 */
 	if (domc->id != taskc->target_dom &&
 	    task_set_domain(p, domc->id, false)) {
