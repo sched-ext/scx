@@ -5,6 +5,7 @@
 
 use crate::available_perf_events;
 use crate::bpf_skel::BpfSkel;
+use crate::format_hz;
 use crate::read_file_string;
 use crate::Action;
 use crate::AppState;
@@ -33,8 +34,10 @@ use ratatui::{
     },
     Frame,
 };
+use scx_utils::misc::read_file_usize;
 use scx_utils::Topology;
 use std::collections::{BTreeMap, HashSet};
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -57,6 +60,7 @@ pub struct App<'a> {
     pub action_tx: UnboundedSender<Action>,
     pub skel: BpfSkel<'a>,
     topo: Topology,
+    collect_cpu_freq: bool,
     event_scroll_state: ScrollbarState,
     event_scroll: u16,
 
@@ -124,6 +128,7 @@ impl<'a> App<'a> {
             action_tx: action_tx,
             skel: skel,
             topo: topo,
+            collect_cpu_freq: true,
             cpu_data: cpu_data,
             llc_data: llc_data,
             node_data: node_data,
@@ -219,6 +224,27 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    fn record_cpu_freq(&mut self) -> Result<()> {
+        for cpu_id in self.topo.all_cpus.keys() {
+            let file = format!(
+                "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq",
+                *cpu_id
+            );
+            let path = Path::new(&file);
+            let freq = read_file_usize(path).unwrap_or(0);
+            let cpu_data = self.cpu_data.entry(*cpu_id).or_insert(CpuData::new(
+                *cpu_id,
+                0,
+                0,
+                0,
+                self.max_cpu_events,
+            ));
+
+            cpu_data.add_event_data("cpu_freq".to_string(), freq as u64);
+        }
+        Ok(())
+    }
+
     /// Runs callbacks to update application state on tick.
     fn on_tick(&mut self) -> Result<()> {
         // Add entry for nodes
@@ -258,6 +284,9 @@ impl<'a> App<'a> {
                 .or_insert(NodeData::new(cpu_data.node, self.max_cpu_events));
             node_data.add_cpu_event_data(event.event.clone(), val);
         }
+        if self.collect_cpu_freq {
+            self.record_cpu_freq()?;
+        }
         Ok(())
     }
 
@@ -273,13 +302,32 @@ impl<'a> App<'a> {
             .unwrap_or(0 as u64);
         Bar::default()
             .value(value)
-            .label(Line::from(format!("{}", cpu)))
+            .label(Line::from(format!(
+                "{}{}",
+                cpu,
+                if self.collect_cpu_freq {
+                    let cpu_data = self.cpu_data.get(&cpu).unwrap();
+                    format!(
+                        " {}",
+                        format_hz(
+                            cpu_data
+                                .event_data_immut("cpu_freq".to_string())
+                                .last()
+                                .copied()
+                                .unwrap_or(0)
+                        )
+                    )
+                } else {
+                    "".to_string()
+                }
+            )))
             .text_value(format!("{}", value))
     }
 
     /// Creates a sparkline for a cpu.
     fn cpu_sparkline(&self, cpu: usize, max: u64, borders: Borders, small: bool) -> Sparkline {
         let mut perf: u64 = 0;
+        let mut cpu_freq: u64 = 0;
         let data = if self.cpu_data.contains_key(&cpu) {
             let cpu_data = self.cpu_data.get(&cpu).unwrap();
             perf = cpu_data
@@ -287,6 +335,13 @@ impl<'a> App<'a> {
                 .last()
                 .copied()
                 .unwrap_or(0);
+            if self.collect_cpu_freq {
+                cpu_freq = cpu_data
+                    .event_data_immut("cpu_freq".to_string())
+                    .last()
+                    .copied()
+                    .unwrap_or(0);
+            }
             cpu_data.event_data_immut(self.active_hw_event.event.clone())
         } else {
             Vec::new()
@@ -300,12 +355,17 @@ impl<'a> App<'a> {
             .block(
                 Block::new()
                     .title(format!(
-                        "{} perf({})",
+                        "{} perf({}){}",
                         cpu,
                         if perf == 0 {
                             "".to_string()
                         } else {
                             format!("{}", perf)
+                        },
+                        if self.collect_cpu_freq {
+                            format!(" {}", format_hz(cpu_freq))
+                        } else {
+                            "".to_string()
                         }
                     ))
                     .borders(borders)
@@ -1242,6 +1302,14 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
+                    "{}: Enable CPU frequency ({})",
+                    self.keymap.action_keys_string(Action::ToggleCpuFreq),
+                    self.collect_cpu_freq
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
                     "{}: show CPU event menu ({})",
                     self.keymap.action_keys_string(Action::SetState {
                         state: AppState::Event
@@ -1559,6 +1627,7 @@ impl<'a> App<'a> {
             Action::TickRateChange { tick_rate_ms } => {
                 self.tick_rate_ms = tick_rate_ms as usize;
             }
+            Action::ToggleCpuFreq => self.collect_cpu_freq = !self.collect_cpu_freq,
             Action::IncBpfSampleRate => {
                 let sample_rate = self.skel.maps.data_data.sample_rate;
                 if sample_rate == 0 {
