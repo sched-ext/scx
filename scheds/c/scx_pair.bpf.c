@@ -313,7 +313,7 @@ static int try_dispatch(s32 cpu)
 	struct pair_ctx *pairc;
 	struct bpf_map *cgq_map;
 	struct task_struct *p;
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 	bool kick_pair = false;
 	bool expired, pair_preempted;
 	u32 *vptr, in_pair_mask;
