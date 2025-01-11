@@ -249,6 +249,12 @@ static u64 task_slice(const struct task_struct *p, struct task_ctx *tctx)
 	u64 nr_waiting;
 
 	/*
+	 * Use all the task's time slice budget before refilling it.
+	 */
+	if (p->scx.slice)
+		return p->scx.slice;
+
+	/*
 	 * Assign a time slice that is inversely proportional to the number
 	 * of tasks waiting in the shared DSQ.
          *
