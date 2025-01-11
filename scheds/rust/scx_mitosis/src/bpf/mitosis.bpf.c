@@ -848,7 +848,7 @@ static inline void runnable(struct task_struct *p, struct task_ctx *tctx,
 		tctx->cell = cgc->cell;
 	}
 
-	adj_load(p, tctx, cgrp, p->scx.weight, bpf_ktime_get_ns());
+	adj_load(p, tctx, cgrp, p->scx.weight, scx_bpf_now());
 }
 
 void BPF_STRUCT_OPS(mitosis_runnable, struct task_struct *p, u64 enq_flags)
@@ -878,7 +878,7 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	if (time_before(cell->vtime_now, p->scx.dsq_vtime))
 		cell->vtime_now = p->scx.dsq_vtime;
 
-	tctx->started_running_at = bpf_ktime_get_ns();
+	tctx->started_running_at = scx_bpf_now();
 }
 
 void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
@@ -896,7 +896,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	if (!(cell = lookup_cell(cidx)))
 		return;
 
-	used = bpf_ktime_get_ns() - tctx->started_running_at;
+	used = scx_bpf_now() - tctx->started_running_at;
 	/* scale the execution time by the inverse of the weight and charge */
 	p->scx.dsq_vtime += used * 100 / p->scx.weight;
 
@@ -916,7 +916,7 @@ static inline void quiescent(struct task_struct *p, struct cgroup *cgrp)
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
-	adj_load(p, tctx, cgrp, -(s64)p->scx.weight, bpf_ktime_get_ns());
+	adj_load(p, tctx, cgrp, -(s64)p->scx.weight, scx_bpf_now());
 }
 
 void BPF_STRUCT_OPS(mitosis_quiescent, struct task_struct *p, u64 deq_flags)
