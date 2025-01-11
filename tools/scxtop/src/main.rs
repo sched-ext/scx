@@ -77,74 +77,34 @@ async fn run() -> Result<()> {
     links.push(skel.progs.on_sched_switch.attach()?);
 
     // 6.13 compatability
-    if let Ok(link) = skel
-        .progs
-        .scx_insert_vtime
-        .attach_kprobe(false, "scx_bpf_dsq_insert_vtime")
-    {
+    if let Ok(link) = skel.progs.scx_insert_vtime.attach() {
         links.push(link);
     }
-    if let Ok(link) = skel
-        .progs
-        .scx_dispatch_vtime
-        .attach_kprobe(false, "scx_bpf_dispatch_vtime")
-    {
+    if let Ok(link) = skel.progs.scx_dispatch_vtime.attach() {
         links.push(link);
     }
-    if let Ok(link) = skel
-        .progs
-        .scx_insert
-        .attach_kprobe(false, "scx_bpf_dsq_insert")
-    {
+    if let Ok(link) = skel.progs.scx_insert.attach() {
         links.push(link);
     }
-    if let Ok(link) = skel
-        .progs
-        .scx_dispatch
-        .attach_kprobe(false, "scx_bpf_dispatch")
-    {
+    if let Ok(link) = skel.progs.scx_dispatch.attach() {
         links.push(link);
     }
-    if let Ok(link) = skel
-        .progs
-        .scx_dispatch_from_dsq_set_vtime
-        .attach_kprobe(false, "scx_bpf_dispatch_from_dsq_set_vtime")
-    {
+    if let Ok(link) = skel.progs.scx_dispatch_from_dsq_set_vtime.attach() {
         links.push(link);
     }
-    if let Ok(link) = skel
-        .progs
-        .scx_dsq_move_set_vtime
-        .attach_kprobe(false, "scx_bpf_dsq_move_set_vtime")
-    {
+    if let Ok(link) = skel.progs.scx_dsq_move_set_vtime.attach() {
         links.push(link);
     }
-    if let Ok(link) = skel
-        .progs
-        .scx_dsq_move_set_slice
-        .attach_kprobe(false, "scx_bpf_dsq_move_set_slice")
-    {
+    if let Ok(link) = skel.progs.scx_dsq_move_set_slice.attach() {
         links.push(link);
     }
-    if let Ok(link) = skel
-        .progs
-        .scx_dispatch_from_dsq_set_slice
-        .attach_kprobe(false, "scx_bpf_dispatch_from_dsq_set_slice")
-    {
+    if let Ok(link) = skel.progs.scx_dispatch_from_dsq_set_slice.attach() {
         links.push(link);
     }
-    if let Ok(link) = skel
-        .progs
-        .scx_dispatch_from_dsq
-        .attach_kprobe(false, "scx_bpf_dispatch_from_dsq")
-    {
+    if let Ok(link) = skel.progs.scx_dispatch_from_dsq.attach() {
         links.push(link);
     }
-    if let Ok(link) = skel
-        .progs
-        .scx_dsq_move
-        .attach_kprobe(false, "scx_bpf_dsq_move")
-    {
+    if let Ok(link) = skel.progs.scx_dsq_move.attach() {
         links.push(link);
     }
 
