@@ -1589,7 +1589,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	 * after the DSQ had tasks queued for longer than lo_fb_wait_ns.
 	 */
 	if (scx_bpf_dsq_nr_queued(cpuc->lo_fb_dsq_id)) {
-		u64 now = bpf_ktime_get_ns();
+		u64 now = scx_bpf_now();
 		u64 dur, usage;
 
 		/*
@@ -2059,7 +2059,7 @@ void on_wakeup(struct task_struct *p, struct task_ctx *taskc)
 void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *taskc;
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
@@ -2079,7 +2079,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	struct node_ctx *nodec;
 	struct llc_ctx *llcc;
 	s32 task_cpu = scx_bpf_task_cpu(p);
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 	u32 layer_id;
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(llcc = lookup_llc_ctx(cpuc->llc_id)) ||
@@ -2157,7 +2157,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
 	struct layer *task_layer;
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 	u64 usage_since_idle;
 	s32 task_lid;
 	u64 used;
@@ -2495,7 +2495,7 @@ static void dump_layer_cpumask(int id)
 
 void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 {
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 	u64 dsq_id;
 	int i, j;
 	struct layer *layer;
