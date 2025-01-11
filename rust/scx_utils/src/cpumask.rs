@@ -305,7 +305,7 @@ pub struct CpumaskIterator<'a> {
     index: usize,
 }
 
-impl<'a> Iterator for CpumaskIterator<'a> {
+impl Iterator for CpumaskIterator<'_> {
     type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {
