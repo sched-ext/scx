@@ -69,11 +69,6 @@ u32 nr_empty_layer_ids;
 
 UEI_DEFINE(uei);
 
-static inline bool vtime_before(u64 a, u64 b)
-{
-	return (s64)(a - b) < 0;
-}
-
 static inline s32 prio_to_nice(s32 static_prio)
 {
 	/* See DEFAULT_PRIO and PRIO_TO_NICE in include/linux/sched/prio.h */
@@ -1120,7 +1115,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * to one slice.
 	 */
 	maybe_update_task_llc(p, taskc, task_cpu);
-	if (vtime_before(vtime, llcc->vtime_now[layer_id] - layer->slice_ns))
+	if (time_before(vtime, llcc->vtime_now[layer_id] - layer->slice_ns))
 		vtime = llcc->vtime_now[layer_id] - layer->slice_ns;
 
 	/*
@@ -1330,7 +1325,7 @@ int get_delay_sec(struct task_struct *p, u64 jiffies_now)
 	u64 runnable_at, delta_secs;
 	runnable_at = READ_ONCE(p->scx.runnable_at);
 
-	if (vtime_before(runnable_at, jiffies_now)) {
+	if (time_before(runnable_at, jiffies_now)) {
 		delta_secs = (jiffies_now - runnable_at) / CONFIG_HZ;
 	} else {
 		delta_secs = 0;
@@ -1594,7 +1589,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	 * after the DSQ had tasks queued for longer than lo_fb_wait_ns.
 	 */
 	if (scx_bpf_dsq_nr_queued(cpuc->lo_fb_dsq_id)) {
-		u64 now = bpf_ktime_get_ns();
+		u64 now = scx_bpf_now();
 		u64 dur, usage;
 
 		/*
@@ -2064,7 +2059,7 @@ void on_wakeup(struct task_struct *p, struct task_ctx *taskc)
 void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *taskc;
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
@@ -2084,7 +2079,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	struct node_ctx *nodec;
 	struct llc_ctx *llcc;
 	s32 task_cpu = scx_bpf_task_cpu(p);
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 	u32 layer_id;
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(llcc = lookup_llc_ctx(cpuc->llc_id)) ||
@@ -2111,7 +2106,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	taskc->last_cpu = task_cpu;
 
 	maybe_update_task_llc(p, taskc, task_cpu);
-	if (vtime_before(llcc->vtime_now[layer_id], p->scx.dsq_vtime))
+	if (time_before(llcc->vtime_now[layer_id], p->scx.dsq_vtime))
 		llcc->vtime_now[layer_id] = p->scx.dsq_vtime;
 
 	cpuc->current_preempt = layer->preempt;
@@ -2162,7 +2157,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
 	struct layer *task_layer;
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 	u64 usage_since_idle;
 	s32 task_lid;
 	u64 used;
@@ -2500,7 +2495,7 @@ static void dump_layer_cpumask(int id)
 
 void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 {
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 	u64 dsq_id;
 	int i, j;
 	struct layer *layer;

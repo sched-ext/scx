@@ -239,11 +239,6 @@ u64 nr_cgrp_next, nr_cgrp_coll, nr_cgrp_empty;
 
 UEI_DEFINE(uei);
 
-static bool time_before(u64 a, u64 b)
-{
-	return (s64)(a - b) < 0;
-}
-
 void BPF_STRUCT_OPS(pair_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cgroup *cgrp;
@@ -318,7 +313,7 @@ static int try_dispatch(s32 cpu)
 	struct pair_ctx *pairc;
 	struct bpf_map *cgq_map;
 	struct task_struct *p;
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 	bool kick_pair = false;
 	bool expired, pair_preempted;
 	u32 *vptr, in_pair_mask;

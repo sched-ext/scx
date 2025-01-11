@@ -196,7 +196,7 @@ unlock_out:
 
 static void update_power_mode_time(void)
 {
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 	u64 delta;
 
 	if (last_power_mode_clk == 0)

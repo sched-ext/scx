@@ -59,7 +59,7 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 	c->stat_cur = get_sys_stat_cur();
 	c->stat_next = get_sys_stat_next();
 	c->min_perf_cri = 1000;
-	c->now = bpf_ktime_get_ns();
+	c->now = scx_bpf_now();
 	c->duration = c->now - c->stat_cur->last_update_clk;
 	c->stat_next->last_update_clk = c->now;
 }
