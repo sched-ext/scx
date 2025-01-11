@@ -96,12 +96,24 @@ enum stat_idx {
 	RUSTY_NR_STATS,
 };
 
+/*
+ * Bindgen does not recognize __arena as a valid attribute, and does not
+ * allow for using #define directives to do so. Use
+ * __attribute__((address_space(1)) to mark pointers as arena pointers.
+ */
+
+struct dom_ctx;
+typedef struct dom_ctx __attribute__((address_space(1))) * dom_ptr;
+
 struct task_ctx {
 	/* The domains this task can run on */
 	u64 dom_mask;
 	u64 preferred_dom_mask;
 
-	u32 dom_id;
+	/* Arena pointer to this task's domain. */
+	dom_ptr domc;
+
+	u32 target_dom;
 	u32 weight;
 	bool runnable;
 	u64 dom_active_tasks_gen;
@@ -131,21 +143,28 @@ struct task_ctx {
 	struct ravg_data dcyc_rd;
 };
 
+/* Same rationale for using __attribute__((address_space(1)) as for dom_ctx. */
+typedef struct task_ctx __attribute__((address_space(1))) * task_ptr;
+
 struct bucket_ctx {
 	u64 dcycle;
 	struct ravg_data rd;
 };
 
+struct dom_active_tasks {
+	u64 gen;
+	u64 read_idx;
+	u64 write_idx;
+	task_ptr tasks[MAX_DOM_ACTIVE_TPTRS];
+};
+
 struct dom_ctx {
 	u32 id;
-	struct bpf_cpumask __kptr *cpumask;
-	struct bpf_cpumask __kptr *direct_greedy_cpumask;
-	struct bpf_cpumask __kptr *node_cpumask;
-
 	u64 min_vruntime;
 
 	u64 dbg_dcycle_printed_at;
 	struct bucket_ctx buckets[LB_LOAD_BUCKETS];
+	struct dom_active_tasks active_tasks;
 };
 
 struct node_ctx {
