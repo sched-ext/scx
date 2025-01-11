@@ -44,6 +44,7 @@ impl KeyMap {
                 state: AppState::Event,
             },
         );
+        bindings.insert(Key::Char('f'), Action::ToggleCpuFreq);
         bindings.insert(
             Key::Char('h'),
             Action::SetState {
