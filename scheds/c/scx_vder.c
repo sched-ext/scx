@@ -20,6 +20,7 @@ const char help_fmt[] =
 "Usage: %s [-s NUM] [-f] [-v]\n"
 "\n"
 "  -s NUM        Set default task time slice (in us), default is 20ms\n"
+"  -k            Dispatch per-CPU kthreads directly\n"
 "  -v            Print libbpf debug messages\n"
 "  -h            Display this help and exit\n";
 
@@ -53,8 +54,11 @@ restart:
 
 	skel->rodata->slice_ns = __COMPAT_ENUM_OR_ZERO("scx_public_consts", "SCX_SLICE_DFL");
 
-	while ((opt = getopt(argc, argv, "s:vh")) != -1) {
+	while ((opt = getopt(argc, argv, "s:kvh")) != -1) {
 		switch (opt) {
+		case 'k':
+			skel->rodata->local_kthreads = true;
+			break;
 		case 's':
 			skel->rodata->slice_ns = strtoull(optarg, NULL, 0) * 1000;
 			break;

@@ -25,6 +25,11 @@ UEI_DEFINE(uei);
 const volatile u64 slice_ns;
 
 /*
+ * Dispatch per-CPU kthreads directly.
+ */
+const volatile bool local_kthreads;
+
+/*
  * Keep track of the current global vruntime.
  *
  * The vuntime is defined as the task's runtime inversely scaled using the
@@ -166,6 +171,14 @@ static void kick_idle_cpu(const struct task_struct *p,
  */
 static bool try_direct_dispatch(struct task_struct *p, u64 enq_flags)
 {
+	/*
+	 * Dispatch per-CPU kthreads directly if local kthreads is enabled.
+	 */
+	if (local_kthreads && (p->flags & PF_KTHREAD) && p->nr_cpus_allowed == 1) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
+		return true;
+	}
+
 	/*
 	 * If a task has been re-enqueued because its assigned CPU has been
 	 * taken by a higher priority scheduling class, force it to follow
