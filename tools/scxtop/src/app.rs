@@ -479,12 +479,6 @@ impl<'a> App<'a> {
         let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
         let num_nodes = self.topo.nodes.len();
 
-        let mut node_constraints = vec![Constraint::Length(1)];
-        for _ in 0..num_nodes {
-            node_constraints.push(Constraint::Ratio(1, num_nodes as u32));
-        }
-        let nodes_verticle = Layout::vertical(node_constraints).split(right);
-
         let node_iter = self
             .node_data
             .values()
@@ -494,37 +488,79 @@ impl<'a> App<'a> {
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&node_iter, true, true, true, None);
 
-        let node_sparklines: Vec<Sparkline> = self
-            .topo
-            .nodes
-            .keys()
-            .map(|node_id| self.node_sparkline(node_id.clone(), *node_id == num_nodes - 1))
-            .collect();
+        match self.view_state {
+            ViewState::Sparkline => {
+                let mut node_constraints = vec![Constraint::Length(1)];
+                for _ in 0..num_nodes {
+                    node_constraints.push(Constraint::Ratio(1, num_nodes as u32));
+                }
+                let nodes_verticle = Layout::vertical(node_constraints).split(right);
 
-        let node_block = Block::bordered()
-            .title_top(
-                Line::from(format!(
-                    "Node ({}) avg {} max {} min {}",
-                    self.active_hw_event.event, stats.avg, stats.max, stats.min
-                ))
-                .style(self.theme.title_style())
-                .centered(),
-            )
-            .title_top(
-                Line::from(format!("{}ms", self.tick_rate_ms))
-                    .style(self.theme.text_important_color())
-                    .right_aligned(),
-            )
-            .border_type(BorderType::Rounded)
-            .style(self.theme.border_style());
+                let node_sparklines: Vec<Sparkline> = self
+                    .topo
+                    .nodes
+                    .keys()
+                    .map(|node_id| self.node_sparkline(node_id.clone(), *node_id == num_nodes - 1))
+                    .collect();
 
-        frame.render_widget(node_block, nodes_verticle[0]);
-        let _ = node_sparklines
-            .iter()
-            .enumerate()
-            .for_each(|(i, node_sparkline)| {
-                frame.render_widget(node_sparkline, nodes_verticle[i + 1]);
-            });
+                let node_block = Block::bordered()
+                    .title_top(
+                        Line::from(format!(
+                            "Node ({}) avg {} max {} min {}",
+                            self.active_hw_event.event, stats.avg, stats.max, stats.min
+                        ))
+                        .style(self.theme.title_style())
+                        .centered(),
+                    )
+                    .title_top(
+                        Line::from(format!("{}ms", self.tick_rate_ms))
+                            .style(self.theme.text_important_color())
+                            .right_aligned(),
+                    )
+                    .border_type(BorderType::Rounded)
+                    .style(self.theme.border_style());
+
+                frame.render_widget(node_block, nodes_verticle[0]);
+                let _ = node_sparklines
+                    .iter()
+                    .enumerate()
+                    .for_each(|(i, node_sparkline)| {
+                        frame.render_widget(node_sparkline, nodes_verticle[i + 1]);
+                    });
+            }
+            ViewState::BarChart => {
+                let node_block = Block::default()
+                    .title_top(
+                        Line::from(format!(
+                            "NUMA Nodes ({}) avg {} max {} min {}",
+                            self.active_hw_event.event, stats.avg, stats.max, stats.min,
+                        ))
+                        .style(self.theme.title_style())
+                        .centered(),
+                    )
+                    .title_top(
+                        Line::from(format!("{}ms", self.tick_rate_ms))
+                            .style(self.theme.text_important_color())
+                            .right_aligned(),
+                    )
+                    .style(self.theme.border_style())
+                    .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                    .border_type(BorderType::Rounded);
+
+                let node_bars: Vec<Bar> = self.node_bars(self.active_hw_event.event.clone());
+
+                let barchart = BarChart::default()
+                    .data(BarGroup::default().bars(&node_bars))
+                    .block(node_block)
+                    .max(stats.max)
+                    .direction(Direction::Horizontal)
+                    .bar_style(self.theme.sparkline_style())
+                    .bar_gap(0)
+                    .bar_width(1);
+
+                frame.render_widget(barchart, right);
+            }
+        }
 
         self.render_scheduler("dsq_lat_us".to_string(), frame, top_left, true)?;
         self.render_dsq_vtime(frame, bottom_left, false)?;
@@ -605,12 +641,12 @@ impl<'a> App<'a> {
     }
 
     /// Generates a LLC bar chart.
-    fn llc_bar(&self, llc: usize, value: u64, avg: u64, max: u64, min: u64) -> Bar {
+    fn event_bar(&self, id: usize, value: u64, avg: u64, max: u64, min: u64) -> Bar {
         Bar::default()
             .value(value)
             .label(Line::from(format!(
                 "{} avg {} max {} min {}",
-                llc, avg, max, min
+                id, avg, max, min
             )))
             .text_value(format!("{}", value))
     }
@@ -624,7 +660,21 @@ impl<'a> App<'a> {
                 let values = llc_data.event_data_immut(event.clone());
                 let value = values.last().copied().unwrap_or(0 as u64);
                 let stats = VecStats::new(&values, true, true, true, None);
-                self.llc_bar(*llc_id, value, stats.avg, stats.max, stats.min)
+                self.event_bar(*llc_id, value, stats.avg, stats.max, stats.min)
+            })
+            .collect()
+    }
+
+    /// Generates Node bar charts.
+    fn node_bars(&self, event: String) -> Vec<Bar> {
+        self.llc_data
+            .iter()
+            .filter(|(_node_id, node_data)| node_data.data.data.contains_key(&event.clone()))
+            .map(|(node_id, node_data)| {
+                let values = node_data.event_data_immut(event.clone());
+                let value = values.last().copied().unwrap_or(0 as u64);
+                let stats = VecStats::new(&values, true, true, true, None);
+                self.event_bar(*node_id, value, stats.avg, stats.max, stats.min)
             })
             .collect()
     }
