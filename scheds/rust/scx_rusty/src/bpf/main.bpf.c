@@ -377,11 +377,6 @@ static struct lock_wrapper *lookup_dom_vtime_lock(u32 dom_id)
 	return lockw;
 }
 
-static inline bool vtime_before(u64 a, u64 b)
-{
-	return (s64)(a - b) < 0;
-}
-
 static u64 scale_up_fair(u64 value, u64 weight)
 {
 	return value * weight / 100;
@@ -839,7 +834,7 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 	 * and then coming back and having essentially full use of the CPU for
 	 * an entire day until it's caught up to the other tasks' vtimes.
 	 */
-	if (vtime_before(p->scx.dsq_vtime, min_vruntime)) {
+	if (time_before(p->scx.dsq_vtime, min_vruntime)) {
 		p->scx.dsq_vtime = min_vruntime;
 		taskc->deadline = p->scx.dsq_vtime + task_compute_dl(p, taskc, enq_flags);
 		stat_add(RUSTY_STAT_DL_CLAMP, 1);
@@ -1486,7 +1481,7 @@ static void running_update_vtime(struct task_struct *p,
 		return;
 
 	bpf_spin_lock(&lockw->lock);
-	if (vtime_before(dom_min_vruntime(domc), p->scx.dsq_vtime))
+	if (time_before(dom_min_vruntime(domc), p->scx.dsq_vtime))
 		WRITE_ONCE(domc->min_vruntime, p->scx.dsq_vtime);
 	bpf_spin_unlock(&lockw->lock);
 }
