@@ -872,7 +872,7 @@ void BPF_STRUCT_OPS(flash_running, struct task_struct *p)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
-	tctx->last_run_at = bpf_ktime_get_ns();
+	tctx->last_run_at = scx_bpf_now();
 
 	/*
 	 * Update global vruntime.
@@ -883,7 +883,7 @@ void BPF_STRUCT_OPS(flash_running, struct task_struct *p)
 
 void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 {
-	u64 now = bpf_ktime_get_ns(), slice;
+	u64 now = scx_bpf_now(), slice;
 	s64 delta_t;
 	struct task_ctx *tctx;
 
@@ -967,7 +967,7 @@ void BPF_STRUCT_OPS(flash_set_cpumask, struct task_struct *p,
 
 void BPF_STRUCT_OPS(flash_enable, struct task_struct *p)
 {
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 	struct task_ctx *tctx;
 
 	p->scx.dsq_vtime = vtime_now;
