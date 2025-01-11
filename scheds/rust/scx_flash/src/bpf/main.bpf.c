@@ -318,17 +318,6 @@ static u64 calc_avg_clamp(u64 old_val, u64 new_val, u64 low, u64 high)
 }
 
 /*
- * Compare two vruntime values, returns true if the first value is less than
- * the second one.
- *
- * Copied from scx_simple.
- */
-static inline bool vtime_before(u64 a, u64 b)
-{
-	return (s64)(a - b) < 0;
-}
-
-/*
  * Return true if the target task @p is a kernel thread, false instead.
  */
 static inline bool is_kthread(const struct task_struct *p)
@@ -490,7 +479,7 @@ static u64 task_vtime(struct task_struct *p, struct task_ctx *tctx)
 	/*
 	 * Limit the vruntime to to avoid excessively penalizing tasks.
 	 */
-	if (vtime_before(p->scx.dsq_vtime, min_vruntime)) {
+	if (time_before(p->scx.dsq_vtime, min_vruntime)) {
 		p->scx.dsq_vtime = min_vruntime;
 		tctx->deadline = p->scx.dsq_vtime + task_deadline(p, tctx);
 	}
@@ -888,7 +877,7 @@ void BPF_STRUCT_OPS(flash_running, struct task_struct *p)
 	/*
 	 * Update global vruntime.
 	 */
-	if (vtime_before(vtime_now, p->scx.dsq_vtime))
+	if (time_before(vtime_now, p->scx.dsq_vtime))
 		vtime_now = p->scx.dsq_vtime;
 }
 
