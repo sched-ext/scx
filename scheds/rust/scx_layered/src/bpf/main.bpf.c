@@ -69,11 +69,6 @@ u32 nr_empty_layer_ids;
 
 UEI_DEFINE(uei);
 
-static inline bool vtime_before(u64 a, u64 b)
-{
-	return (s64)(a - b) < 0;
-}
-
 static inline s32 prio_to_nice(s32 static_prio)
 {
 	/* See DEFAULT_PRIO and PRIO_TO_NICE in include/linux/sched/prio.h */
@@ -1120,7 +1115,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * to one slice.
 	 */
 	maybe_update_task_llc(p, taskc, task_cpu);
-	if (vtime_before(vtime, llcc->vtime_now[layer_id] - layer->slice_ns))
+	if (time_before(vtime, llcc->vtime_now[layer_id] - layer->slice_ns))
 		vtime = llcc->vtime_now[layer_id] - layer->slice_ns;
 
 	/*
@@ -1330,7 +1325,7 @@ int get_delay_sec(struct task_struct *p, u64 jiffies_now)
 	u64 runnable_at, delta_secs;
 	runnable_at = READ_ONCE(p->scx.runnable_at);
 
-	if (vtime_before(runnable_at, jiffies_now)) {
+	if (time_before(runnable_at, jiffies_now)) {
 		delta_secs = (jiffies_now - runnable_at) / CONFIG_HZ;
 	} else {
 		delta_secs = 0;
@@ -2111,7 +2106,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	taskc->last_cpu = task_cpu;
 
 	maybe_update_task_llc(p, taskc, task_cpu);
-	if (vtime_before(llcc->vtime_now[layer_id], p->scx.dsq_vtime))
+	if (time_before(llcc->vtime_now[layer_id], p->scx.dsq_vtime))
 		llcc->vtime_now[layer_id] = p->scx.dsq_vtime;
 
 	cpuc->current_preempt = layer->preempt;
