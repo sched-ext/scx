@@ -266,6 +266,7 @@ enum layer_growth_algo {
 	GROWTH_ALGO_BIG_LITTLE,
 	GROWTH_ALGO_LITTLE_BIG,
 	GROWTH_ALGO_RANDOM_TOPO,
+	GROWTH_ALGO_STICKY_TOPO,
 };
 
 struct layer {
