@@ -124,7 +124,7 @@ pub fn struct_has_field(type_name: &str, field: &str) -> Result<bool> {
         }
     }
 
-    return Ok(false);
+    Ok(false)
 }
 
 pub fn ksym_exists(ksym: &str) -> Result<bool> {
