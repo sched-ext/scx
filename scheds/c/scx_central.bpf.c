@@ -87,11 +87,6 @@ struct {
 	__type(value, struct central_timer);
 } central_timer SEC(".maps");
 
-static bool vtime_before(u64 a, u64 b)
-{
-	return (s64)(a - b) < 0;
-}
-
 s32 BPF_STRUCT_OPS(central_select_cpu, struct task_struct *p,
 		   s32 prev_cpu, u64 wake_flags)
 {
@@ -245,7 +240,7 @@ void BPF_STRUCT_OPS(central_running, struct task_struct *p)
 	s32 cpu = scx_bpf_task_cpu(p);
 	u64 *started_at = ARRAY_ELEM_PTR(cpu_started_at, cpu, nr_cpu_ids);
 	if (started_at)
-		*started_at = bpf_ktime_get_ns() ?: 1;	/* 0 indicates idle */
+		*started_at = scx_bpf_now() ?: 1;	/* 0 indicates idle */
 }
 
 void BPF_STRUCT_OPS(central_stopping, struct task_struct *p, bool runnable)
@@ -258,7 +253,7 @@ void BPF_STRUCT_OPS(central_stopping, struct task_struct *p, bool runnable)
 
 static int central_timerfn(void *map, int *key, struct bpf_timer *timer)
 {
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 	u64 nr_to_kick = nr_queued;
 	s32 i, curr_cpu;
 
@@ -279,7 +274,7 @@ static int central_timerfn(void *map, int *key, struct bpf_timer *timer)
 		/* kick iff the current one exhausted its slice */
 		started_at = ARRAY_ELEM_PTR(cpu_started_at, cpu, nr_cpu_ids);
 		if (started_at && *started_at &&
-		    vtime_before(now, *started_at + slice_ns))
+		    time_before(now, *started_at + slice_ns))
 			continue;
 
 		/* and there's something pending */
