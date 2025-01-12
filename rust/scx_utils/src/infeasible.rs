@@ -339,7 +339,7 @@ impl LoadAggregator {
             load_sum: 0.0f64,
         });
 
-        if let Some(_) = domain.loads.insert(weight, dcycle) {
+        if domain.loads.insert(weight, dcycle).is_some() {
             bail!("Domain {} already had load for weight {}", dom_id, weight);
         }
 

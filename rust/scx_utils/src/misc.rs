@@ -80,7 +80,7 @@ pub fn set_rlimit_infinity() {
 }
 
 pub fn read_file_usize(path: &Path) -> Result<usize> {
-    let val = match std::fs::read_to_string(&path) {
+    let val = match std::fs::read_to_string(path) {
         Ok(val) => val,
         Err(_) => {
             bail!("Failed to open or read file {:?}", path);

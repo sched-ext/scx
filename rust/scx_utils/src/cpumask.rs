@@ -270,8 +270,7 @@ impl Cpumask {
         let mut masks: Vec<u32> = self
             .as_raw_slice()
             .iter()
-            .map(|x| [*x as u32, (x >> 32) as u32])
-            .flatten()
+            .flat_map(|x| [*x as u32, (x >> 32) as u32])
             .collect();
 
         // Throw out possible stray from u64 -> u32.
