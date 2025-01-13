@@ -123,6 +123,7 @@ pub enum Action {
     },
     NextViewState,
     ToggleCpuFreq,
+    ToggleUncoreFreq,
     TickRateChange {
         tick_rate_ms: u64,
     },

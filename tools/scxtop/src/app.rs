@@ -22,6 +22,7 @@ use crate::APP;
 use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use anyhow::Result;
+use glob::glob;
 use ratatui::prelude::Constraint;
 use ratatui::{
     layout::{Alignment, Direction, Layout, Rect},
@@ -34,6 +35,7 @@ use ratatui::{
     },
     Frame,
 };
+use regex::Regex;
 use scx_utils::misc::read_file_usize;
 use scx_utils::Topology;
 use std::collections::{BTreeMap, HashSet};
@@ -61,6 +63,7 @@ pub struct App<'a> {
     pub skel: BpfSkel<'a>,
     topo: Topology,
     collect_cpu_freq: bool,
+    collect_uncore_freq: bool,
     event_scroll_state: ScrollbarState,
     event_scroll: u16,
 
@@ -129,6 +132,7 @@ impl<'a> App<'a> {
             skel: skel,
             topo: topo,
             collect_cpu_freq: true,
+            collect_uncore_freq: true,
             cpu_data: cpu_data,
             llc_data: llc_data,
             node_data: node_data,
@@ -245,6 +249,51 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    fn record_uncore_freq(&mut self) -> Result<()> {
+        // XXX: this only works with intel uncore frequency kernel module
+        let base_path = Path::new("/sys/devices/system/cpu/intel_uncore_frequency");
+        if self.collect_uncore_freq && !base_path.exists() {
+            self.collect_uncore_freq = false;
+            return Ok(());
+        }
+
+        let glob_match = glob("/sys/devices/system/cpu/intel_uncore_frequency/*/current_freq_khz");
+        match glob_match {
+            Ok(entries) => {
+                for entry in entries {
+                    match entry {
+                        Ok(raw_path) => {
+                            let path = Path::new(&raw_path);
+                            let uncore_freq = read_file_usize(path).unwrap_or(0);
+                            let re = Regex::new(r"package_(\d+)_die_\d+").unwrap();
+                            if let Some(caps) =
+                                re.captures(raw_path.to_str().expect("failed to get str from path"))
+                            {
+                                let package_id: usize = caps[1].parse().unwrap();
+                                for cpu in self.topo.all_cpus.values() {
+                                    if cpu.package_id != package_id {
+                                        continue;
+                                    }
+                                    let node_data = self
+                                        .node_data
+                                        .entry(cpu.node_id)
+                                        .or_insert(NodeData::new(cpu.node_id, self.max_cpu_events));
+                                    node_data.add_event_data(
+                                        "uncore_freq".to_string(),
+                                        uncore_freq as u64,
+                                    );
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Runs callbacks to update application state on tick.
     fn on_tick(&mut self) -> Result<()> {
         // Add entry for nodes
@@ -286,6 +335,9 @@ impl<'a> App<'a> {
         }
         if self.collect_cpu_freq {
             self.record_cpu_freq()?;
+        }
+        if self.collect_uncore_freq {
+            self.record_uncore_freq()?;
         }
         Ok(())
     }
@@ -397,11 +449,14 @@ impl<'a> App<'a> {
                     })
                     .style(self.theme.border_style())
                     .border_type(BorderType::Rounded)
-                    .title_alignment(Alignment::Left)
-                    .title(format!(
-                        "LLC {} avg {} max {} min {}",
-                        llc, stats.avg, stats.max, stats.min
-                    )),
+                    .title_top(
+                        Line::from(format!(
+                            "LLC {} avg {} max {} min {}",
+                            llc, stats.avg, stats.max, stats.min
+                        ))
+                        .style(self.theme.title_style())
+                        .left_aligned(),
+                    ),
             )
     }
 
@@ -428,11 +483,35 @@ impl<'a> App<'a> {
                     })
                     .border_type(BorderType::Rounded)
                     .style(self.theme.border_style())
-                    .title_alignment(Alignment::Left)
-                    .title(format!(
-                        "Node {} avg {} max {} min {}",
-                        node, stats.avg, stats.max, stats.min
-                    )),
+                    .title_top(
+                        Line::from(format!(
+                            "{}",
+                            if self.collect_uncore_freq {
+                                "uncore ".to_string()
+                                    + &format_hz(
+                                        self.node_data
+                                            .get(&node)
+                                            .unwrap()
+                                            .event_data_immut("uncore_freq".to_string())
+                                            .last()
+                                            .copied()
+                                            .unwrap_or(0 as u64),
+                                    )
+                            } else {
+                                "".to_string()
+                            }
+                        ))
+                        .style(self.theme.text_important_color())
+                        .right_aligned(),
+                    )
+                    .title_top(
+                        Line::from(format!(
+                            "Node {} avg {} max {} min {}",
+                            node, stats.avg, stats.max, stats.min
+                        ))
+                        .style(self.theme.title_style())
+                        .left_aligned(),
+                    ),
             )
     }
 
@@ -474,7 +553,6 @@ impl<'a> App<'a> {
                             .style(self.theme.text_important_color())
                             .right_aligned(),
                     )
-                    .title_alignment(Alignment::Center)
                     .style(self.theme.border_style());
 
                 frame.render_widget(llc_block, llcs_verticle[0]);
@@ -1139,6 +1217,27 @@ impl<'a> App<'a> {
                         } else {
                             Line::from("")
                         })
+                        .title_top(
+                            Line::from(format!(
+                                "{}",
+                                if self.collect_uncore_freq {
+                                    "uncore ".to_string()
+                                        + &format_hz(
+                                            self.node_data
+                                                .get(&node.id)
+                                                .unwrap()
+                                                .event_data_immut("uncore_freq".to_string())
+                                                .last()
+                                                .copied()
+                                                .unwrap_or(0 as u64),
+                                        )
+                                } else {
+                                    "".to_string()
+                                }
+                            ))
+                            .style(self.theme.text_important_color())
+                            .left_aligned(),
+                        )
                         .border_type(BorderType::Rounded)
                         .style(self.theme.border_style());
 
@@ -1233,6 +1332,27 @@ impl<'a> App<'a> {
                         } else {
                             Line::from("")
                         })
+                        .title_top(
+                            Line::from(format!(
+                                "{}",
+                                if self.collect_uncore_freq {
+                                    "uncore ".to_string()
+                                        + &format_hz(
+                                            self.node_data
+                                                .get(&node.id)
+                                                .unwrap()
+                                                .event_data_immut("uncore_freq".to_string())
+                                                .last()
+                                                .copied()
+                                                .unwrap_or(0 as u64),
+                                        )
+                                } else {
+                                    "".to_string()
+                                }
+                            ))
+                            .style(self.theme.text_important_color())
+                            .left_aligned(),
+                        )
                         .border_type(BorderType::Rounded)
                         .style(self.theme.border_style());
 
@@ -1355,6 +1475,14 @@ impl<'a> App<'a> {
                     "{}: Enable CPU frequency ({})",
                     self.keymap.action_keys_string(Action::ToggleCpuFreq),
                     self.collect_cpu_freq
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: Enable uncore frequency ({})",
+                    self.keymap.action_keys_string(Action::ToggleUncoreFreq),
+                    self.collect_uncore_freq
                 ),
                 Style::default(),
             )),
@@ -1678,6 +1806,7 @@ impl<'a> App<'a> {
                 self.tick_rate_ms = tick_rate_ms as usize;
             }
             Action::ToggleCpuFreq => self.collect_cpu_freq = !self.collect_cpu_freq,
+            Action::ToggleUncoreFreq => self.collect_uncore_freq = !self.collect_uncore_freq,
             Action::IncBpfSampleRate => {
                 let sample_rate = self.skel.maps.data_data.sample_rate;
                 if sample_rate == 0 {

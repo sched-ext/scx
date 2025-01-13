@@ -45,6 +45,7 @@ impl KeyMap {
             },
         );
         bindings.insert(Key::Char('f'), Action::ToggleCpuFreq);
+        bindings.insert(Key::Char('u'), Action::ToggleUncoreFreq);
         bindings.insert(
             Key::Char('h'),
             Action::SetState {

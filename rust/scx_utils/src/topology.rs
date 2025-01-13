@@ -124,6 +124,7 @@ pub struct Cpu {
     pub core_id: usize,
     pub llc_id: usize,
     pub node_id: usize,
+    pub package_id: usize,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -416,6 +417,7 @@ fn create_insert_cpu(
     // Physical core ID
     let top_path = cpu_path.join("topology");
     let core_kernel_id = read_file_usize(&top_path.join("core_id"))?;
+    let package_id = read_file_usize(&top_path.join("physical_package_id"))?;
 
     // Evaluate L2, L3 and LLC cache IDs.
     //
@@ -504,6 +506,7 @@ fn create_insert_cpu(
             core_id: *core_id,
             llc_id: *llc_id,
             node_id: node.id,
+            package_id: package_id,
         }),
     );
 
