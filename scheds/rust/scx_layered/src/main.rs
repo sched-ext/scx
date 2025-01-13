@@ -960,14 +960,14 @@ impl Layer {
                     for (node_id, node) in &topo.nodes {
                         // first do the matching for nodes
                         if nodes.contains(node_id) {
-                            for (&id, _cpu) in &node.all_cpus {
+                            for &id in node.all_cpus.keys() {
                                 allowed_cpus.set_cpu(id)?;
                             }
                         }
                         // next match on any LLCs
                         for (llc_id, llc) in &node.llcs {
                             if llcs.contains(llc_id) {
-                                for (&id, _cpu) in &llc.all_cpus {
+                                for &id in llc.all_cpus.keys() {
                                     allowed_cpus.set_cpu(id)?;
                                 }
                             }
