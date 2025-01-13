@@ -24,7 +24,7 @@ impl RustLandBuilder {
 
     fn create_file(&self, file_name: &str, content: &[u8]) {
         let path = Path::new(file_name);
-        let mut file = File::create(&path).expect("Unable to create file");
+        let mut file = File::create(path).expect("Unable to create file");
         file.write_all(content).expect("Unable to write to file");
     }
 
