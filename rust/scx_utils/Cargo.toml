@@ -46,3 +46,7 @@ walkdir = "2.4"
 default = []
 gpu-topology = ["dep:nvml-wrapper"]
 autopower = ["dep:zbus"]
+
+[lints.clippy]
+not_unsafe_ptr_arg_deref = "allow"
+
