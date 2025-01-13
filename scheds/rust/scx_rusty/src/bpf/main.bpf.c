@@ -47,7 +47,7 @@
 #endif
 
 #include "intf.h"
-#include "sdt_dom.h"
+#include "lb_domain.h"
 
 #include <scx/bpf_arena_common.h>
 #include <errno.h>
@@ -551,24 +551,24 @@ static void refresh_tune_params(void)
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		u32 dom_id = cpu_to_dom_id(cpu);
-		struct lb_domain *dval;
+		struct lb_domain *lb_domain;
 
 		if (is_offline_cpu(cpu))
 			continue;
 
-		if (!(dval = sdt_dom_val(dom_id)))
+		if (!(lb_domain = lb_domain_val(dom_id)))
 			return;
 
 		if (tune_input.direct_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
 			if (direct_greedy_cpumask)
 				bpf_cpumask_set_cpu(cpu, direct_greedy_cpumask);
-			if (dval->direct_greedy_cpumask)
-				bpf_cpumask_set_cpu(cpu, dval->direct_greedy_cpumask);
+			if (lb_domain->direct_greedy_cpumask)
+				bpf_cpumask_set_cpu(cpu, lb_domain->direct_greedy_cpumask);
 		} else {
 			if (direct_greedy_cpumask)
 				bpf_cpumask_clear_cpu(cpu, direct_greedy_cpumask);
-			if (dval->direct_greedy_cpumask)
-				bpf_cpumask_clear_cpu(cpu, dval->direct_greedy_cpumask);
+			if (lb_domain->direct_greedy_cpumask)
+				bpf_cpumask_clear_cpu(cpu, lb_domain->direct_greedy_cpumask);
 		}
 
 		if (tune_input.kick_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
@@ -802,7 +802,7 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 {
 	dom_ptr old_domc, new_domc;
 	struct bpf_cpumask *d_cpumask, *t_cpumask;
-	struct lb_domain *new_dval;
+	struct lb_domain *new_lb_domain;
 	struct task_ctx *taskc;
 	u32 old_dom_id;
 
@@ -826,13 +826,13 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 	if (!new_domc)
 		return false;
 
-	new_dval = sdt_dom_val(new_dom_id);
-	if (!new_dval) {
-		scx_bpf_error("no dval for dom%d\n", new_dom_id);
+	new_lb_domain = lb_domain_val(new_dom_id);
+	if (!new_lb_domain) {
+		scx_bpf_error("no lb_domain for dom%d\n", new_dom_id);
 		return false;
 	}
 
-	d_cpumask = new_dval->cpumask;
+	d_cpumask = new_lb_domain->cpumask;
 	if (!d_cpumask) {
 		scx_bpf_error("Failed to get dom%u cpumask kptr",
 			      new_dom_id);
@@ -871,7 +871,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 	s32 cpu;
 	const struct cpumask *idle_cpumask;
 	bool share_llc, has_idle;
-	struct lb_domain *dval;
+	struct lb_domain *lb_domain;
 	struct bpf_cpumask *d_cpumask;
 	struct pcpu_ctx *pcpuc;
 
@@ -880,11 +880,11 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 	if (!pcpuc)
 		return -ENOENT;
 
-	dval = sdt_dom_val(pcpuc->dom_id);
-	if (!dval)
+	lb_domain = lb_domain_val(pcpuc->dom_id);
+	if (!lb_domain)
 		return -ENOENT;
 
-	d_cpumask = dval->cpumask;
+	d_cpumask = lb_domain->cpumask;
 	if (!d_cpumask) {
 		scx_bpf_error("Failed to acquire dom%u cpumask kptr",
 				taskc->target_dom);
@@ -1025,7 +1025,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	    !bpf_cpumask_empty(cast_mask(direct_greedy_cpumask))) {
 		u32 dom_id = cpu_to_dom_id(prev_cpu);
 		dom_ptr domc;
-		struct lb_domain *dval;
+		struct lb_domain *lb_domain;
 		struct bpf_cpumask *tmp_direct_greedy, *node_mask;
 
 		/*
@@ -1043,7 +1043,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		else if (!(domc = lookup_dom_ctx(dom_id)))
 			goto enoent;
 
-		if (!(dval = sdt_dom_val(domc->id))) {
+		if (!(lb_domain = lb_domain_val(domc->id))) {
 			scx_bpf_error("Failed to lookup domain map value");
 			goto enoent;
 		}
@@ -1062,7 +1062,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 * working set may end up spanning multiple NUMA nodes.
 		 */
 		if (!direct_greedy_numa && domc) {
-			node_mask = dval->node_cpumask;
+			node_mask = lb_domain->node_cpumask;
 			if (!node_mask) {
 				scx_bpf_error("Failed to lookup node mask");
 				goto enoent;
@@ -1081,8 +1081,8 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 		/* Try to find an idle core in the previous and then any domain */
 		if (has_idle_cores) {
-			if (domc && dval->direct_greedy_cpumask) {
-				cpu = scx_bpf_pick_idle_cpu(cast_mask(dval->direct_greedy_cpumask),
+			if (domc && lb_domain->direct_greedy_cpumask) {
+				cpu = scx_bpf_pick_idle_cpu(cast_mask(lb_domain->direct_greedy_cpumask),
 							    SCX_PICK_IDLE_CORE);
 				if (cpu >= 0) {
 					stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
@@ -1103,8 +1103,8 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		/*
 		 * No idle core. Is there any idle CPU?
 		 */
-		if (domc && dval->direct_greedy_cpumask) {
-			cpu = scx_bpf_pick_idle_cpu(cast_mask(dval->direct_greedy_cpumask), 0);
+		if (domc && lb_domain->direct_greedy_cpumask) {
+			cpu = scx_bpf_pick_idle_cpu(cast_mask(lb_domain->direct_greedy_cpumask), 0);
 			if (cpu >= 0) {
 				stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
 				goto direct;
@@ -1244,14 +1244,14 @@ dom_queue:
 
 static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
 {
-	struct lb_domain *dval;
+	struct lb_domain *lb_domain;
 	struct bpf_cpumask *dmask;
 
-	dval = sdt_dom_val(dom_id);
-	if (!dval)
+	lb_domain = lb_domain_val(dom_id);
+	if (!lb_domain)
 		return false;
 
-	dmask = dval->cpumask;
+	dmask = lb_domain->cpumask;
 	if (!dmask)
 		return false;
 
@@ -1769,7 +1769,7 @@ static s32 create_dom(u32 dom_id)
 	dom_ptr domc;
 	struct node_ctx *nodec;
 	struct bpf_cpumask *dom_mask, *node_mask, *all_mask;
-	struct lb_domain *dval;
+	struct lb_domain *lb_domain;
 	u32 cpu, node_id;
 	s32 ret;
 
@@ -1780,17 +1780,17 @@ static s32 create_dom(u32 dom_id)
 
 	node_id = dom_node_id(dom_id);
 
-	domc = sdt_dom_alloc(dom_id);
+	domc = lb_domain_alloc(dom_id);
 	if (!domc)
 		return -ENOMEM;
 
 	doms[dom_id] = domc;
 	cast_user(doms[dom_id]);
 
-	dval = sdt_dom_val(dom_id);
-	if (!dval) {
+	lb_domain = lb_domain_val(dom_id);
+	if (!lb_domain) {
 		scx_bpf_error("could not retrieve dom%d data\n", dom_id);
-		sdt_dom_free(domc);
+		lb_domain_free(domc);
 		return -EINVAL;
 	}
 
@@ -1802,16 +1802,16 @@ static s32 create_dom(u32 dom_id)
 
 	domc->id = dom_id;
 
-	ret = create_save_cpumask(&dval->cpumask);
+	ret = create_save_cpumask(&lb_domain->cpumask);
 	if (ret)
 		return ret;
 
-	bpf_printk("Created domain %d (%p)", dom_id, &dval->cpumask);
-	if (!dval->cpumask)
+	bpf_printk("Created domain %d (%p)", dom_id, &lb_domain->cpumask);
+	if (!lb_domain->cpumask)
 		scx_bpf_error("NULL");
 
 	bpf_rcu_read_lock();
-	dom_mask = dval->cpumask;
+	dom_mask = lb_domain->cpumask;
 	all_mask = all_cpumask;
 	if (!dom_mask || !all_mask) {
 		bpf_rcu_read_unlock();
@@ -1838,7 +1838,7 @@ static s32 create_dom(u32 dom_id)
 	if (ret)
 		return ret;
 
-	ret = create_save_cpumask(&dval->direct_greedy_cpumask);
+	ret = create_save_cpumask(&lb_domain->direct_greedy_cpumask);
 	if (ret)
 		return ret;
 
@@ -1848,13 +1848,13 @@ static s32 create_dom(u32 dom_id)
 		scx_bpf_error("No node%u", node_id);
 		return -ENOENT;
 	}
-	ret = create_save_cpumask(&dval->node_cpumask);
+	ret = create_save_cpumask(&lb_domain->node_cpumask);
 	if (ret)
 		return ret;
 
 	bpf_rcu_read_lock();
 	node_mask = nodec->cpumask;
-	dom_mask = dval->node_cpumask;
+	dom_mask = lb_domain->node_cpumask;
 	if (!node_mask || !dom_mask) {
 		bpf_rcu_read_unlock();
 		scx_bpf_error("cpumask lookup failed");
@@ -1877,20 +1877,20 @@ static s32 initialize_cpu(s32 cpu)
 	pcpuc->dom_rr_cur = cpu;
 	bpf_for(i, 0, nr_doms) {
 		bool in_dom;
-		struct lb_domain *dval;
+		struct lb_domain *lb_domain;
 
-		dval = sdt_dom_val(i);
-		if (!dval)
+		lb_domain = lb_domain_val(i);
+		if (!lb_domain)
 			return -ENOENT;
 
 		bpf_rcu_read_lock();
-		if (!dval->cpumask) {
+		if (!lb_domain->cpumask) {
 			bpf_rcu_read_unlock();
-			scx_bpf_error("Failed to lookup dom node %d cpumask %p", i, &dval->cpumask);
+			scx_bpf_error("Failed to lookup dom node %d cpumask %p", i, &lb_domain->cpumask);
 			return -ENOENT;
 		}
 
-		in_dom = bpf_cpumask_test_cpu(cpu, cast_mask(dval->cpumask));
+		in_dom = bpf_cpumask_test_cpu(cpu, cast_mask(lb_domain->cpumask));
 		bpf_rcu_read_unlock();
 		if (in_dom) {
 			pcpuc->dom_id = i;
@@ -1913,7 +1913,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 	if (ret)
 		return ret;
 
-	ret = sdt_dom_init();
+	ret = lb_domain_init();
 	if (ret)
 		return ret;
 
