@@ -134,6 +134,10 @@ impl UserExitInfo {
     /// user_exit_info, so we can't take the type directly. Instead, this
     /// method takes each member field. Use the macro uei_read!() on the C
     /// type which then calls this method with the individual fields.
+    ///
+    /// NOTE: do not remove, pointer accesses here are safe and self
+    /// contained into unsafe blocks
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn new(
         kind_ptr: *const i32,
         exit_code_ptr: *const i64,
