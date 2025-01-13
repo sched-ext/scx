@@ -26,3 +26,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "scx_loader"
 path = "src/main.rs"
+
+[lints.clippy]
+not_unsafe_ptr_arg_deref = "allow"

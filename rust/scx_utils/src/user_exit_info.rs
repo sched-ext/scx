@@ -58,15 +58,13 @@ macro_rules! uei_read {
                 _ => std::ptr::null(),
             };
 
-            unsafe {
-                scx_utils::UserExitInfo::new(
-                    &bpf_uei.kind as *const _,
-                    exit_code_ptr,
-                    bpf_uei.reason.as_ptr() as *const _,
-                    bpf_uei.msg.as_ptr() as *const _,
-                    bpf_dump,
-                )
-            }
+            scx_utils::UserExitInfo::new(
+                &bpf_uei.kind as *const _,
+                exit_code_ptr,
+                bpf_uei.reason.as_ptr() as *const _,
+                bpf_uei.msg.as_ptr() as *const _,
+                bpf_dump,
+            )
         }
     }};
 }
@@ -136,7 +134,7 @@ impl UserExitInfo {
     /// user_exit_info, so we can't take the type directly. Instead, this
     /// method takes each member field. Use the macro uei_read!() on the C
     /// type which then calls this method with the individual fields.
-    pub unsafe fn new(
+    pub fn new(
         kind_ptr: *const i32,
         exit_code_ptr: *const i64,
         reason_ptr: *const c_char,
