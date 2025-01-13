@@ -60,7 +60,7 @@ void __arena *sdt_task_data(struct task_struct *p)
 	struct sdt_data __arena *data;
 	struct sdt_task_map_val *mval;
 
-	sdt_arena_verify();
+	sdt_subprog_init_arena();
 
 	mval = bpf_task_storage_get(&sdt_task_map, p, 0, 0);
 	if (!mval)
@@ -76,7 +76,7 @@ void sdt_task_free(struct task_struct *p)
 {
 	struct sdt_task_map_val *mval;
 
-	sdt_arena_verify();
+	sdt_subprog_init_arena();
 
 	mval = bpf_task_storage_get(&sdt_task_map, p, 0, 0);
 	if (!mval)
