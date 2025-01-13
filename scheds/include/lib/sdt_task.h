@@ -104,7 +104,7 @@ void __arena *sdt_task_data(struct task_struct *p);
 int sdt_task_init(__u64 data_size);
 void __arena *sdt_task_alloc(struct task_struct *p);
 void sdt_task_free(struct task_struct *p);
-void sdt_arena_verify(void);
+void sdt_subprog_init_arena(void);
 
 int sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size);
 struct sdt_data __arena *sdt_alloc(struct sdt_allocator *alloc);
