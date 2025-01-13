@@ -76,7 +76,6 @@ const volatile u32 dom_numa_id_map[MAX_DOMS];
 const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
 const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 load_half_life = 1000000000	/* 1s */;
-volatile dom_ptr doms[MAX_DOMS];
 
 const volatile bool kthreads_local;
 const volatile bool fifo_sched = false;
@@ -1784,8 +1783,8 @@ static s32 create_dom(u32 dom_id)
 	if (!domc)
 		return -ENOMEM;
 
-	doms[dom_id] = domc;
-	cast_user(doms[dom_id]);
+	dom_ctxs[dom_id] = domc;
+	cast_user(dom_ctxs[dom_id]);
 
 	lb_domain = lb_domain_val(dom_id);
 	if (!lb_domain) {

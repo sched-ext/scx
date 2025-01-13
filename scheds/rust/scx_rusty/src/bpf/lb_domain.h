@@ -21,6 +21,7 @@ struct {
 	__uint(map_flags, 0);
 } lb_domain_map SEC(".maps");
 
+volatile dom_ptr dom_ctxs[MAX_DOMS];
 struct sdt_allocator lb_domain_allocator;
 
 __hidden __noinline
