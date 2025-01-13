@@ -1455,7 +1455,7 @@ static void running_update_vtime(struct task_struct *p,
 
 void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 {
-	task_ptr usrptr = sdt_task_data(p);
+	task_ptr usrptr = (task_ptr)sdt_task_data(p);
 	struct task_ctx *taskc;
 	dom_ptr domc;
 	u32 dap_gen;
@@ -1485,7 +1485,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 			return;
 		}
 
-		usrptr = sdt_task_data(p);
+		usrptr = (task_ptr)sdt_task_data(p);
 		cast_user(usrptr);
 
 		domc->active_tasks.tasks[idx] = usrptr;
