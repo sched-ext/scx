@@ -377,11 +377,6 @@ static struct lock_wrapper *lookup_dom_vtime_lock(u32 dom_id)
 	return lockw;
 }
 
-static inline bool vtime_before(u64 a, u64 b)
-{
-	return (s64)(a - b) < 0;
-}
-
 static u64 scale_up_fair(u64 value, u64 weight)
 {
 	return value * weight / 100;
@@ -839,7 +834,7 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 	 * and then coming back and having essentially full use of the CPU for
 	 * an entire day until it's caught up to the other tasks' vtimes.
 	 */
-	if (vtime_before(p->scx.dsq_vtime, min_vruntime)) {
+	if (time_before(p->scx.dsq_vtime, min_vruntime)) {
 		p->scx.dsq_vtime = min_vruntime;
 		taskc->deadline = p->scx.dsq_vtime + task_compute_dl(p, taskc, enq_flags);
 		stat_add(RUSTY_STAT_DL_CLAMP, 1);
@@ -889,7 +884,7 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 	 * here and @p might not be able to run in @dom_id anymore. Verify.
 	 */
 	if (bpf_cpumask_intersects(cast_mask(d_cpumask), p->cpus_ptr)) {
-		u64 now = bpf_ktime_get_ns();
+		u64 now = scx_bpf_now();
 
 		if (!init_dsq_vtime)
 			dom_xfer_task(p, new_dom_id, now);
@@ -1450,7 +1445,7 @@ static u64 update_freq(u64 freq, u64 interval)
 
 void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 {
-	u64 now = bpf_ktime_get_ns(), interval;
+	u64 now = scx_bpf_now(), interval;
 	struct task_struct *waker;
 	struct task_ctx *wakee_ctx, *waker_ctx;
 
@@ -1486,7 +1481,7 @@ static void running_update_vtime(struct task_struct *p,
 		return;
 
 	bpf_spin_lock(&lockw->lock);
-	if (vtime_before(dom_min_vruntime(domc), p->scx.dsq_vtime))
+	if (time_before(dom_min_vruntime(domc), p->scx.dsq_vtime))
 		WRITE_ONCE(domc->min_vruntime, p->scx.dsq_vtime);
 	bpf_spin_unlock(&lockw->lock);
 }
@@ -1540,7 +1535,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 		return;
 
 	running_update_vtime(p, taskc, domc);
-	taskc->last_run_at = bpf_ktime_get_ns();
+	taskc->last_run_at = scx_bpf_now();
 }
 
 static void stopping_update_vtime(struct task_struct *p,
@@ -1553,7 +1548,7 @@ static void stopping_update_vtime(struct task_struct *p,
 	if (!lockw)
 		return;
 
-	now = bpf_ktime_get_ns();
+	now = scx_bpf_now();
 	delta = now - taskc->last_run_at;
 
 	taskc->sum_runtime += delta;
@@ -1582,7 +1577,7 @@ void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
 
 void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 {
-	u64 now = bpf_ktime_get_ns(), interval;
+	u64 now = scx_bpf_now(), interval;
 	struct task_ctx *taskc;
 	struct dom_ctx *domc;
 
@@ -1686,7 +1681,7 @@ void BPF_STRUCT_OPS(rusty_set_cpumask, struct task_struct *p,
 s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 	struct task_struct *p_map;
 	struct bpfmask_wrapper wrapper;
 	struct bpfmask_wrapper *mask_map_value;
