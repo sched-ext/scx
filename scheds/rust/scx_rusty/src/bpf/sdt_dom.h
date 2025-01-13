@@ -62,7 +62,7 @@ void sdt_dom_free(dom_ptr domc)
 	struct lb_domain *mval;
 	u32 key = domc->id;
 
-	sdt_arena_verify();
+	sdt_subprog_init_arena();
 
 	mval = bpf_map_lookup_elem(&sdt_dom_map, &key);
 	if (!mval)

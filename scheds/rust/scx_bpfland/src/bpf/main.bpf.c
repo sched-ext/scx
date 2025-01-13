@@ -657,7 +657,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 	s32 cpu;
 
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
-	if (is_idle) {
+	if (is_idle && !scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	}
@@ -734,11 +734,12 @@ static bool try_direct_dispatch(struct task_struct *p, u64 enq_flags)
 		s32 prev_cpu = scx_bpf_task_cpu(p);
 
 		/*
-		 * If the local DSQ of the assigned CPU is empty and the
+		 * If both the local and shared DSQs are empty and the
 		 * previous CPU can still be used by the task, perform the
 		 * direct dispatch.
 		 */
 		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
+		    !scx_bpf_dsq_nr_queued(SHARED_DSQ) &&
 		    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
 					   slice_max, enq_flags);

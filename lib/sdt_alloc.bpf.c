@@ -48,7 +48,7 @@ static bool sdt_verify_once;
 
 #define SDT_TASK_FN_ATTRS	inline __attribute__((unused, always_inline))
 
-__hidden void sdt_arena_verify(void)
+__hidden void sdt_subprog_init_arena(void)
 {
 	if (sdt_verify_once)
 		return;
@@ -410,7 +410,7 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 	int ret;
 	int i;
 
-	sdt_arena_verify();
+	sdt_subprog_init_arena();
 
 	bpf_spin_lock(&sdt_lock);
 

@@ -294,12 +294,12 @@ impl Topology {
         let mut sibling_cpu = vec![-1i32; *NR_CPUS_POSSIBLE];
         for core in self.all_cores.values() {
             let mut first = -1i32;
-            for (&cpu, _) in &core.cpus {
+            for &cpu in core.cpus.keys() {
                 if first < 0 {
                     first = cpu as i32;
                 } else {
                     sibling_cpu[first as usize] = cpu as i32;
-                    sibling_cpu[cpu as usize] = first;
+                    sibling_cpu[cpu] = first;
                     break;
                 }
             }
@@ -340,7 +340,7 @@ impl TopoCtx {
 
 fn cpus_online() -> Result<Cpumask> {
     let path = "/sys/devices/system/cpu/online";
-    let online = std::fs::read_to_string(&path)?;
+    let online = std::fs::read_to_string(path)?;
     let online_groups: Vec<&str> = online.split(',').collect();
     let mut mask = Cpumask::new();
     for group in online_groups.iter() {
@@ -370,7 +370,7 @@ fn get_cache_id(topo_ctx: &mut TopoCtx, cache_level_path: &PathBuf, cache_level:
     };
 
     let path = &cache_level_path.join("shared_cpu_list");
-    let key = match std::fs::read_to_string(&path) {
+    let key = match std::fs::read_to_string(path) {
         Ok(key) => key,
         Err(_) => return usize::MAX,
     };
@@ -396,7 +396,7 @@ fn get_cache_id(topo_ctx: &mut TopoCtx, cache_level_path: &PathBuf, cache_level:
 }
 
 fn create_insert_cpu(
-    cpu_id: usize,
+    id: usize,
     node: &mut Node,
     online_mask: &Cpumask,
     topo_ctx: &mut TopoCtx,
@@ -406,11 +406,11 @@ fn create_insert_cpu(
     // CPU is offline. The Topology hierarchy is read-only, and assumes
     // that hotplug will cause the scheduler to restart. Thus, we can
     // just skip this CPU altogether.
-    if !online_mask.test_cpu(cpu_id) {
+    if !online_mask.test_cpu(id) {
         return Ok(());
     }
 
-    let cpu_str = format!("/sys/devices/system/cpu/cpu{}", cpu_id);
+    let cpu_str = format!("/sys/devices/system/cpu/cpu{}", id);
     let cpu_path = Path::new(&cpu_str);
 
     // Physical core ID
@@ -490,15 +490,15 @@ fn create_insert_cpu(
     let core_mut = Arc::get_mut(core).unwrap();
 
     core_mut.cpus.insert(
-        cpu_id,
+        id,
         Arc::new(Cpu {
-            id: cpu_id,
-            min_freq: min_freq,
-            max_freq: max_freq,
-            base_freq: base_freq,
-            trans_lat_ns: trans_lat_ns,
-            l2_id: l2_id,
-            l3_id: l3_id,
+            id,
+            min_freq,
+            max_freq,
+            base_freq,
+            trans_lat_ns,
+            l2_id,
+            l3_id,
             core_type: core_type.clone(),
 
             core_id: *core_id,
@@ -507,14 +507,14 @@ fn create_insert_cpu(
         }),
     );
 
-    if node.span.test_cpu(cpu_id) {
-        bail!("Node {} already had CPU {}", node.id, cpu_id);
+    if node.span.test_cpu(id) {
+        bail!("Node {} already had CPU {}", node.id, id);
     }
 
     // Update all of the devices' spans to include this CPU.
-    core_mut.span.set_cpu(cpu_id)?;
-    llc_mut.span.set_cpu(cpu_id)?;
-    node.span.set_cpu(cpu_id)?;
+    core_mut.span.set_cpu(id)?;
+    llc_mut.span.set_cpu(id)?;
+    node.span.set_cpu(id)?;
 
     Ok(())
 }
@@ -599,7 +599,7 @@ fn create_default_node(
         create_insert_cpu(
             *cpu_id,
             &mut node,
-            &online_mask,
+            online_mask,
             topo_ctx,
             avg_cpu_freq,
             flatten_llc,
@@ -669,7 +669,7 @@ fn create_numa_nodes(
             create_insert_cpu(
                 cpu_id,
                 &mut node,
-                &online_mask,
+                online_mask,
                 topo_ctx,
                 avg_cpu_freq,
                 false,
