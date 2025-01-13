@@ -555,7 +555,7 @@ static void refresh_tune_params(void)
 		if (is_offline_cpu(cpu))
 			continue;
 
-		if (!(lb_domain = lb_domain_val(dom_id)))
+		if (!(lb_domain = lb_domain_get(dom_id)))
 			return;
 
 		if (tune_input.direct_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
@@ -825,7 +825,7 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 	if (!new_domc)
 		return false;
 
-	new_lb_domain = lb_domain_val(new_dom_id);
+	new_lb_domain = lb_domain_get(new_dom_id);
 	if (!new_lb_domain) {
 		scx_bpf_error("no lb_domain for dom%d\n", new_dom_id);
 		return false;
@@ -879,7 +879,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 	if (!pcpuc)
 		return -ENOENT;
 
-	lb_domain = lb_domain_val(pcpuc->dom_id);
+	lb_domain = lb_domain_get(pcpuc->dom_id);
 	if (!lb_domain)
 		return -ENOENT;
 
@@ -1042,7 +1042,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		else if (!(domc = lookup_dom_ctx(dom_id)))
 			goto enoent;
 
-		if (!(lb_domain = lb_domain_val(domc->id))) {
+		if (!(lb_domain = lb_domain_get(domc->id))) {
 			scx_bpf_error("Failed to lookup domain map value");
 			goto enoent;
 		}
@@ -1246,7 +1246,7 @@ static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
 	struct lb_domain *lb_domain;
 	struct bpf_cpumask *dmask;
 
-	lb_domain = lb_domain_val(dom_id);
+	lb_domain = lb_domain_get(dom_id);
 	if (!lb_domain)
 		return false;
 
@@ -1786,7 +1786,7 @@ static s32 create_dom(u32 dom_id)
 	dom_ctxs[dom_id] = domc;
 	cast_user(dom_ctxs[dom_id]);
 
-	lb_domain = lb_domain_val(dom_id);
+	lb_domain = lb_domain_get(dom_id);
 	if (!lb_domain) {
 		scx_bpf_error("could not retrieve dom%d data\n", dom_id);
 		lb_domain_free(domc);
@@ -1878,14 +1878,15 @@ static s32 initialize_cpu(s32 cpu)
 		bool in_dom;
 		struct lb_domain *lb_domain;
 
-		lb_domain = lb_domain_val(i);
+		lb_domain = lb_domain_get(i);
 		if (!lb_domain)
 			return -ENOENT;
 
 		bpf_rcu_read_lock();
 		if (!lb_domain->cpumask) {
 			bpf_rcu_read_unlock();
-			scx_bpf_error("Failed to lookup dom node %d cpumask %p", i, &lb_domain->cpumask);
+			scx_bpf_error("Failed to lookup dom node %d cpumask %p",
+				i, &lb_domain->cpumask);
 			return -ENOENT;
 		}
 

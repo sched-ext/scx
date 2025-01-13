@@ -76,7 +76,7 @@ void lb_domain_free(dom_ptr domc)
 }
 
 static __always_inline
-struct lb_domain *lb_domain_val(u32 dom_id)
+struct lb_domain *lb_domain_get(u32 dom_id)
 {
 	return bpf_map_lookup_elem(&lb_domain_map, &dom_id);
 }
@@ -85,7 +85,7 @@ static dom_ptr try_lookup_dom_ctx_arena(u32 dom_id)
 {
 	struct lb_domain *lb_domain;
 
-	lb_domain = lb_domain_val(dom_id);
+	lb_domain = lb_domain_get(dom_id);
 	if (!lb_domain)
 		return NULL;
 
@@ -118,7 +118,7 @@ static struct bpf_spin_lock *lookup_dom_vtime_lock(dom_ptr domc)
 {
 	struct lb_domain *lb_domain;
 
-	lb_domain = lb_domain_val(domc->id);
+	lb_domain = lb_domain_get(domc->id);
 	if (!lb_domain) {
 		scx_bpf_error("Failed to lookup dom map value");
 		return NULL;
