@@ -727,7 +727,7 @@ impl<'a> App<'a> {
 
     /// Generates Node bar charts.
     fn node_bars(&self, event: String) -> Vec<Bar> {
-        self.llc_data
+        self.node_data
             .iter()
             .filter(|(_node_id, node_data)| node_data.data.data.contains_key(&event.clone()))
             .map(|(node_id, node_data)| {
