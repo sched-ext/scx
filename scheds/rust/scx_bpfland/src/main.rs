@@ -233,7 +233,7 @@ impl<'a> Scheduler<'a> {
         info!(
             "{} {} {}",
             SCHEDULER_NAME,
-            *build_id::SCX_FULL_VERSION,
+            build_id::full_version(env!("CARGO_PKG_VERSION")),
             if smt_enabled { "SMT on" } else { "SMT off" }
         );
 
@@ -578,7 +578,11 @@ fn main() -> Result<()> {
     let opts = Opts::parse();
 
     if opts.version {
-        println!("{} {}", SCHEDULER_NAME, *build_id::SCX_FULL_VERSION);
+        println!(
+            "{} {}",
+            SCHEDULER_NAME,
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
         return Ok(());
     }
 

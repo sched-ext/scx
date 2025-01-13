@@ -9,7 +9,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 pub fn monitor_stats<T>(
-    stats_args: &Vec<(String, String)>,
+    stats_args: &[(String, String)],
     intv: Duration,
     mut should_exit: impl FnMut() -> bool,
     mut output: impl FnMut(T) -> Result<()>,
@@ -42,7 +42,7 @@ where
         retry_cnt = 0;
 
         while !should_exit() {
-            let stats = match client.request::<T>("stats", stats_args.clone()) {
+            let stats = match client.request::<T>("stats", stats_args.to_owned()) {
                 Ok(v) => v,
                 Err(e) => match e.downcast_ref::<std::io::Error>() {
                     Some(ioe) => {

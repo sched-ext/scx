@@ -436,7 +436,7 @@ where
         loop {
             let mut line = String::new();
             stream_reader.read_line(&mut line)?;
-            if line.len() == 0 {
+            if line.is_empty() {
                 return Ok(());
             }
             if exit.load(Ordering::Relaxed) {

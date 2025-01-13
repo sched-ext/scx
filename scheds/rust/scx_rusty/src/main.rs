@@ -360,7 +360,7 @@ impl<'a> Scheduler<'a> {
         init_libbpf_logging(None);
         info!(
             "Running scx_rusty (build ID: {})",
-            *build_id::SCX_FULL_VERSION
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
         let mut skel = scx_ops_open!(skel_builder, open_object, rusty).unwrap();
 
@@ -636,7 +636,10 @@ fn main() -> Result<()> {
     let opts = Opts::parse();
 
     if opts.version {
-        println!("scx_rusty: {}", *build_id::SCX_FULL_VERSION);
+        println!(
+            "scx_rusty: {}",
+            build_id::full_version(env!("CARGO_PKG_VERSION"))
+        );
         return Ok(());
     }
 

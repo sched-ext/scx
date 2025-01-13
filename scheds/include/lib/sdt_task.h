@@ -49,7 +49,7 @@ struct sdt_desc {
  * Leaf node containing per-task data.
  */
 struct sdt_data {
-	union sdt_id		tid;
+	union sdt_id			tid;
 	__u64				payload[];
 };
 
@@ -74,28 +74,28 @@ struct sdt_chunk {
  */
 struct sdt_alloc_stack {
 	__u64 idx;
-	void __arena *stack[SDT_TASK_ALLOC_STACK_MAX];
+	void __arena	*stack[SDT_TASK_ALLOC_STACK_MAX];
 };
 
 struct sdt_pool {
-	void				__arena *slab;
-	__u64				elem_size;
-	__u64				max_elems;
-	__u64				idx;
+	void __arena	*slab;
+	__u64		elem_size;
+	__u64		max_elems;
+	__u64		idx;
 };
 
 struct sdt_stats {
-	__u64	chunk_allocs;
-	__u64	data_allocs;
-	__u64	alloc_ops;
-	__u64	free_ops;
-	__u64	active_allocs;
-	__u64	arena_pages_used;
+	__u64		chunk_allocs;
+	__u64		data_allocs;
+	__u64		alloc_ops;
+	__u64		free_ops;
+	__u64		active_allocs;
+	__u64		arena_pages_used;
 };
 
 struct sdt_allocator {
-	struct sdt_pool pool;
-	sdt_desc_t *root;
+	struct sdt_pool	pool;
+	sdt_desc_t	*root;
 };
 
 #ifdef __BPF__

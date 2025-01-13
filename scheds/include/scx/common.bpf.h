@@ -85,6 +85,12 @@ struct rq *scx_bpf_cpu_rq(s32 cpu) __ksym;
 struct cgroup *scx_bpf_task_cgroup(struct task_struct *p) __ksym __weak;
 
 /*
+ * Return a monotonically non-decreasing time in nanoseconds,
+ * use bpf_ktime_get_ns() if you have high-precision timing requirements
+ */
+u64 scx_bpf_now(void) __ksym __weak;
+
+/*
  * Use the following as @it__iter when calling scx_bpf_dsq_move[_vtime]() from
  * within bpf_for_each() loops.
  */
@@ -414,6 +420,99 @@ static __always_inline const struct cpumask *cast_mask(struct bpf_cpumask *mask)
 void bpf_rcu_read_lock(void) __ksym;
 void bpf_rcu_read_unlock(void) __ksym;
 
+/*
+ * Time helpers, most of which are from jiffies.h.
+ */
+
+/**
+ * time_delta - Calculate the delta between new and old time stamp
+ * @after: first comparable as u64
+ * @before: second comparable as u64
+ *
+ * Return: the time difference, which is >= 0
+ */
+static inline s64 time_delta(u64 after, u64 before)
+{
+	return (s64)(after - before) > 0 ? : 0;
+}
+
+/**
+ * time_after - returns true if the time a is after time b.
+ * @a: first comparable as u64
+ * @b: second comparable as u64
+ *
+ * Do this with "<0" and ">=0" to only test the sign of the result. A
+ * good compiler would generate better code (and a really good compiler
+ * wouldn't care). Gcc is currently neither.
+ *
+ * Return: %true is time a is after time b, otherwise %false.
+ */
+static inline bool time_after(u64 a, u64 b)
+{
+	 return (s64)(b - a) < 0;
+}
+
+/**
+ * time_before - returns true if the time a is before time b.
+ * @a: first comparable as u64
+ * @b: second comparable as u64
+ *
+ * Return: %true is time a is before time b, otherwise %false.
+ */
+static inline bool time_before(u64 a, u64 b)
+{
+	return time_after(b, a);
+}
+
+/**
+ * time_after_eq - returns true if the time a is after or the same as time b.
+ * @a: first comparable as u64
+ * @b: second comparable as u64
+ *
+ * Return: %true is time a is after or the same as time b, otherwise %false.
+ */
+static inline bool time_after_eq(u64 a, u64 b)
+{
+	 return (s64)(a - b) >= 0;
+}
+
+/**
+ * time_before_eq - returns true if the time a is before or the same as time b.
+ * @a: first comparable as u64
+ * @b: second comparable as u64
+ *
+ * Return: %true is time a is before or the same as time b, otherwise %false.
+ */
+static inline bool time_before_eq(u64 a, u64 b)
+{
+	return time_after_eq(b, a);
+}
+
+/**
+ * time_in_range - Calculate whether a is in the range of [b, c].
+ * @a: time to test
+ * @b: beginning of the range
+ * @c: end of the range
+ *
+ * Return: %true is time a is in the range [b, c], otherwise %false.
+ */
+static inline bool time_in_range(u64 a, u64 b, u64 c)
+{
+	return time_after_eq(a, b) && time_before_eq(a, c);
+}
+
+/**
+ * time_in_range_open - Calculate whether a is in the range of [b, c).
+ * @a: time to test
+ * @b: beginning of the range
+ * @c: end of the range
+ *
+ * Return: %true is time a is in the range [b, c), otherwise %false.
+ */
+static inline bool time_in_range_open(u64 a, u64 b, u64 c)
+{
+	return time_after_eq(a, b) && time_before(a, c);
+}
 
 /*
  * Other helpers

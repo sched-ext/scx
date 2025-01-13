@@ -32,6 +32,7 @@ pub use stats::VecStats;
 pub use theme::AppTheme;
 pub use tui::Event;
 pub use tui::Tui;
+pub use util::format_hz;
 pub use util::read_file_string;
 
 pub use plain::Plain;
@@ -109,14 +110,19 @@ pub enum Action {
     },
     SchedSwitch {
         cpu: u32,
-        dsq_id: u64,
-        dsq_lat_us: u64,
-        dsq_vtime: u64,
+        next_dsq_id: u64,
+        next_dsq_lat_us: u64,
+        next_dsq_vtime: u64,
+        next_slice_ns: u64,
+        prev_dsq_id: u64,
+        prev_used_slice_ns: u64,
+        prev_slice_ns: u64,
     },
     SetState {
         state: AppState,
     },
     NextViewState,
+    ToggleCpuFreq,
     TickRateChange {
         tick_rate_ms: u64,
     },

@@ -189,17 +189,6 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 }
 
 /*
- * Compare two vruntime values, returns true if the first value is less than
- * the second one.
- *
- * Copied from scx_simple.
- */
-static inline bool vtime_before(u64 a, u64 b)
-{
-	return (s64)(a - b) < 0;
-}
-
-/*
  * Return true if the target task @p is a kernel thread.
  */
 static inline bool is_kthread(const struct task_struct *p)
@@ -321,7 +310,7 @@ static u64 task_deadline(struct task_struct *p, struct task_ctx *tctx)
 	/*
 	 * Limit the vruntime to to avoid excessively penalizing tasks.
 	 */
-	if (vtime_before(p->scx.dsq_vtime, min_vruntime))
+	if (time_before(p->scx.dsq_vtime, min_vruntime))
 		p->scx.dsq_vtime = min_vruntime;
 
 	return p->scx.dsq_vtime + scale_inverse_fair(p, tctx, tctx->sum_runtime);
@@ -841,7 +830,7 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
  */
 static void update_cpuperf_target(struct task_struct *p, struct task_ctx *tctx)
 {
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 	s32 cpu = scx_bpf_task_cpu(p);
 	u64 perf_lvl, delta_runtime, delta_t;
 	struct cpu_ctx *cctx;
@@ -893,7 +882,7 @@ static void update_cpuperf_target(struct task_struct *p, struct task_ctx *tctx)
 	 */
 	scx_bpf_cpuperf_set(cpu, perf_lvl);
 
-	cctx->last_running = bpf_ktime_get_ns();
+	cctx->last_running = scx_bpf_now();
 	cctx->prev_runtime = cctx->tot_runtime;
 }
 
@@ -906,7 +895,7 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
-	tctx->last_run_at = bpf_ktime_get_ns();
+	tctx->last_run_at = scx_bpf_now();
 
 	/*
 	 * Adjust target CPU frequency before the task starts to run.
@@ -922,7 +911,7 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	/*
 	 * Update global vruntime.
 	 */
-	if (vtime_before(vtime_now, p->scx.dsq_vtime))
+	if (time_before(vtime_now, p->scx.dsq_vtime))
 		vtime_now = p->scx.dsq_vtime;
 }
 
@@ -932,7 +921,7 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
  */
 void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 {
-	u64 now = bpf_ktime_get_ns(), slice;
+	u64 now = scx_bpf_now(), slice;
 	s32 cpu = scx_bpf_task_cpu(p);
 	s64 delta_t;
 	struct cpu_ctx *cctx;
@@ -1054,7 +1043,7 @@ void BPF_STRUCT_OPS(bpfland_set_cpumask, struct task_struct *p,
 
 void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 {
-	u64 now = bpf_ktime_get_ns();
+	u64 now = scx_bpf_now();
 	struct task_ctx *tctx;
 
 	/* Initialize task's vruntime */

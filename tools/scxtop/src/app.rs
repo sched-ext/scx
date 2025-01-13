@@ -5,6 +5,7 @@
 
 use crate::available_perf_events;
 use crate::bpf_skel::BpfSkel;
+use crate::format_hz;
 use crate::read_file_string;
 use crate::Action;
 use crate::AppState;
@@ -33,8 +34,10 @@ use ratatui::{
     },
     Frame,
 };
+use scx_utils::misc::read_file_usize;
 use scx_utils::Topology;
 use std::collections::{BTreeMap, HashSet};
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -57,6 +60,7 @@ pub struct App<'a> {
     pub action_tx: UnboundedSender<Action>,
     pub skel: BpfSkel<'a>,
     topo: Topology,
+    collect_cpu_freq: bool,
     event_scroll_state: ScrollbarState,
     event_scroll: u16,
 
@@ -124,6 +128,7 @@ impl<'a> App<'a> {
             action_tx: action_tx,
             skel: skel,
             topo: topo,
+            collect_cpu_freq: true,
             cpu_data: cpu_data,
             llc_data: llc_data,
             node_data: node_data,
@@ -219,6 +224,27 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    fn record_cpu_freq(&mut self) -> Result<()> {
+        for cpu_id in self.topo.all_cpus.keys() {
+            let file = format!(
+                "/sys/devices/system/cpu/cpu{}/cpufreq/scaling_cur_freq",
+                *cpu_id
+            );
+            let path = Path::new(&file);
+            let freq = read_file_usize(path).unwrap_or(0);
+            let cpu_data = self.cpu_data.entry(*cpu_id).or_insert(CpuData::new(
+                *cpu_id,
+                0,
+                0,
+                0,
+                self.max_cpu_events,
+            ));
+
+            cpu_data.add_event_data("cpu_freq".to_string(), freq as u64);
+        }
+        Ok(())
+    }
+
     /// Runs callbacks to update application state on tick.
     fn on_tick(&mut self) -> Result<()> {
         // Add entry for nodes
@@ -258,6 +284,9 @@ impl<'a> App<'a> {
                 .or_insert(NodeData::new(cpu_data.node, self.max_cpu_events));
             node_data.add_cpu_event_data(event.event.clone(), val);
         }
+        if self.collect_cpu_freq {
+            self.record_cpu_freq()?;
+        }
         Ok(())
     }
 
@@ -273,13 +302,32 @@ impl<'a> App<'a> {
             .unwrap_or(0 as u64);
         Bar::default()
             .value(value)
-            .label(Line::from(format!("{}", cpu)))
+            .label(Line::from(format!(
+                "{}{}",
+                cpu,
+                if self.collect_cpu_freq {
+                    let cpu_data = self.cpu_data.get(&cpu).unwrap();
+                    format!(
+                        " {}",
+                        format_hz(
+                            cpu_data
+                                .event_data_immut("cpu_freq".to_string())
+                                .last()
+                                .copied()
+                                .unwrap_or(0)
+                        )
+                    )
+                } else {
+                    "".to_string()
+                }
+            )))
             .text_value(format!("{}", value))
     }
 
     /// Creates a sparkline for a cpu.
     fn cpu_sparkline(&self, cpu: usize, max: u64, borders: Borders, small: bool) -> Sparkline {
         let mut perf: u64 = 0;
+        let mut cpu_freq: u64 = 0;
         let data = if self.cpu_data.contains_key(&cpu) {
             let cpu_data = self.cpu_data.get(&cpu).unwrap();
             perf = cpu_data
@@ -287,6 +335,13 @@ impl<'a> App<'a> {
                 .last()
                 .copied()
                 .unwrap_or(0);
+            if self.collect_cpu_freq {
+                cpu_freq = cpu_data
+                    .event_data_immut("cpu_freq".to_string())
+                    .last()
+                    .copied()
+                    .unwrap_or(0);
+            }
             cpu_data.event_data_immut(self.active_hw_event.event.clone())
         } else {
             Vec::new()
@@ -300,12 +355,17 @@ impl<'a> App<'a> {
             .block(
                 Block::new()
                     .title(format!(
-                        "{} perf({})",
+                        "{} perf({}){}",
                         cpu,
                         if perf == 0 {
                             "".to_string()
                         } else {
                             format!("{}", perf)
+                        },
+                        if self.collect_cpu_freq {
+                            format!(" {}", format_hz(cpu_freq))
+                        } else {
+                            "".to_string()
                         }
                     ))
                     .borders(borders)
@@ -382,12 +442,6 @@ impl<'a> App<'a> {
         let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
         let num_llcs = self.topo.all_llcs.len();
 
-        let mut llcs_constraints = vec![Constraint::Length(1)];
-        for _ in 0..num_llcs {
-            llcs_constraints.push(Constraint::Ratio(1, num_llcs as u32));
-        }
-        let llcs_verticle = Layout::vertical(llcs_constraints).split(right);
-
         let llc_iter = self
             .llc_data
             .values()
@@ -397,41 +451,85 @@ impl<'a> App<'a> {
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&llc_iter, true, true, true, None);
 
-        let llc_sparklines: Vec<Sparkline> = self
-            .topo
-            .all_llcs
-            .keys()
-            .map(|llc_id| self.llc_sparkline(llc_id.clone(), *llc_id == num_llcs - 1))
-            .collect();
+        match self.view_state {
+            ViewState::Sparkline => {
+                let mut llcs_constraints = vec![Constraint::Length(1)];
+                for _ in 0..num_llcs {
+                    llcs_constraints.push(Constraint::Ratio(1, num_llcs as u32));
+                }
+                let llcs_verticle = Layout::vertical(llcs_constraints).split(right);
 
-        let llc_block = Block::bordered()
-            .title_top(
-                Line::from(format!(
-                    "LLCs ({}) avg {} max {} min {}",
-                    self.active_hw_event.event, stats.avg, stats.max, stats.min
-                ))
-                .style(self.theme.title_style())
-                .centered(),
-            )
-            .border_type(BorderType::Rounded)
-            .title_top(
-                Line::from(format!("{}ms", self.tick_rate_ms))
-                    .style(self.theme.text_important_color())
-                    .right_aligned(),
-            )
-            .title_alignment(Alignment::Center)
-            .style(self.theme.border_style());
+                let llc_block = Block::bordered()
+                    .title_top(
+                        Line::from(format!(
+                            "LLCs ({}) avg {} max {} min {}",
+                            self.active_hw_event.event, stats.avg, stats.max, stats.min
+                        ))
+                        .style(self.theme.title_style())
+                        .centered(),
+                    )
+                    .border_type(BorderType::Rounded)
+                    .title_top(
+                        Line::from(format!("{}ms", self.tick_rate_ms))
+                            .style(self.theme.text_important_color())
+                            .right_aligned(),
+                    )
+                    .title_alignment(Alignment::Center)
+                    .style(self.theme.border_style());
 
-        frame.render_widget(llc_block, llcs_verticle[0]);
-        let _ = llc_sparklines
-            .iter()
-            .enumerate()
-            .for_each(|(i, llc_sparkline)| {
-                frame.render_widget(llc_sparkline, llcs_verticle[i + 1]);
-            });
+                frame.render_widget(llc_block, llcs_verticle[0]);
 
-        self.render_scheduler(frame, top_left, true)?;
+                let llc_sparklines: Vec<Sparkline> = self
+                    .topo
+                    .all_llcs
+                    .keys()
+                    .map(|llc_id| self.llc_sparkline(llc_id.clone(), *llc_id == num_llcs - 1))
+                    .collect();
+
+                let _ = llc_sparklines
+                    .iter()
+                    .enumerate()
+                    .for_each(|(i, llc_sparkline)| {
+                        frame.render_widget(llc_sparkline, llcs_verticle[i + 1]);
+                    });
+            }
+            ViewState::BarChart => {
+                let llc_block = Block::default()
+                    .title_top(
+                        Line::from(format!(
+                            "LLCs ({}) avg {} max {} min {}",
+                            self.active_hw_event.event, stats.avg, stats.max, stats.min,
+                        ))
+                        .style(self.theme.title_style())
+                        .centered(),
+                    )
+                    .title_top(
+                        Line::from(format!("{}ms", self.tick_rate_ms))
+                            .style(self.theme.text_important_color())
+                            .right_aligned(),
+                    )
+                    .style(self.theme.border_style())
+                    .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                    .border_type(BorderType::Rounded);
+
+                let llc_bars: Vec<Bar> = self.llc_bars(self.active_hw_event.event.clone());
+
+                let barchart = BarChart::default()
+                    .data(BarGroup::default().bars(&llc_bars))
+                    .block(llc_block)
+                    .max(stats.max)
+                    .direction(Direction::Horizontal)
+                    .bar_style(self.theme.sparkline_style())
+                    .bar_gap(0)
+                    .bar_width(1);
+
+                frame.render_widget(barchart, right);
+            }
+        }
+
+        self.render_scheduler("dsq_lat_us".to_string(), frame, top_left, true)?;
         self.render_dsq_vtime(frame, bottom_left, false)?;
+
         Ok(())
     }
 
@@ -440,12 +538,6 @@ impl<'a> App<'a> {
         let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
         let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
         let num_nodes = self.topo.nodes.len();
-
-        let mut node_constraints = vec![Constraint::Length(1)];
-        for _ in 0..num_nodes {
-            node_constraints.push(Constraint::Ratio(1, num_nodes as u32));
-        }
-        let nodes_verticle = Layout::vertical(node_constraints).split(right);
 
         let node_iter = self
             .node_data
@@ -456,39 +548,81 @@ impl<'a> App<'a> {
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&node_iter, true, true, true, None);
 
-        let node_sparklines: Vec<Sparkline> = self
-            .topo
-            .nodes
-            .keys()
-            .map(|node_id| self.node_sparkline(node_id.clone(), *node_id == num_nodes - 1))
-            .collect();
+        match self.view_state {
+            ViewState::Sparkline => {
+                let mut node_constraints = vec![Constraint::Length(1)];
+                for _ in 0..num_nodes {
+                    node_constraints.push(Constraint::Ratio(1, num_nodes as u32));
+                }
+                let nodes_verticle = Layout::vertical(node_constraints).split(right);
 
-        let node_block = Block::bordered()
-            .title_top(
-                Line::from(format!(
-                    "Node ({}) avg {} max {} min {}",
-                    self.active_hw_event.event, stats.avg, stats.max, stats.min
-                ))
-                .style(self.theme.title_style())
-                .centered(),
-            )
-            .title_top(
-                Line::from(format!("{}ms", self.tick_rate_ms))
-                    .style(self.theme.text_important_color())
-                    .right_aligned(),
-            )
-            .border_type(BorderType::Rounded)
-            .style(self.theme.border_style());
+                let node_sparklines: Vec<Sparkline> = self
+                    .topo
+                    .nodes
+                    .keys()
+                    .map(|node_id| self.node_sparkline(node_id.clone(), *node_id == num_nodes - 1))
+                    .collect();
 
-        frame.render_widget(node_block, nodes_verticle[0]);
-        let _ = node_sparklines
-            .iter()
-            .enumerate()
-            .for_each(|(i, node_sparkline)| {
-                frame.render_widget(node_sparkline, nodes_verticle[i + 1]);
-            });
+                let node_block = Block::bordered()
+                    .title_top(
+                        Line::from(format!(
+                            "Node ({}) avg {} max {} min {}",
+                            self.active_hw_event.event, stats.avg, stats.max, stats.min
+                        ))
+                        .style(self.theme.title_style())
+                        .centered(),
+                    )
+                    .title_top(
+                        Line::from(format!("{}ms", self.tick_rate_ms))
+                            .style(self.theme.text_important_color())
+                            .right_aligned(),
+                    )
+                    .border_type(BorderType::Rounded)
+                    .style(self.theme.border_style());
 
-        self.render_scheduler(frame, top_left, true)?;
+                frame.render_widget(node_block, nodes_verticle[0]);
+                let _ = node_sparklines
+                    .iter()
+                    .enumerate()
+                    .for_each(|(i, node_sparkline)| {
+                        frame.render_widget(node_sparkline, nodes_verticle[i + 1]);
+                    });
+            }
+            ViewState::BarChart => {
+                let node_block = Block::default()
+                    .title_top(
+                        Line::from(format!(
+                            "NUMA Nodes ({}) avg {} max {} min {}",
+                            self.active_hw_event.event, stats.avg, stats.max, stats.min,
+                        ))
+                        .style(self.theme.title_style())
+                        .centered(),
+                    )
+                    .title_top(
+                        Line::from(format!("{}ms", self.tick_rate_ms))
+                            .style(self.theme.text_important_color())
+                            .right_aligned(),
+                    )
+                    .style(self.theme.border_style())
+                    .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                    .border_type(BorderType::Rounded);
+
+                let node_bars: Vec<Bar> = self.node_bars(self.active_hw_event.event.clone());
+
+                let barchart = BarChart::default()
+                    .data(BarGroup::default().bars(&node_bars))
+                    .block(node_block)
+                    .max(stats.max)
+                    .direction(Direction::Horizontal)
+                    .bar_style(self.theme.sparkline_style())
+                    .bar_gap(0)
+                    .bar_width(1);
+
+                frame.render_widget(barchart, right);
+            }
+        }
+
+        self.render_scheduler("dsq_lat_us".to_string(), frame, top_left, true)?;
         self.render_dsq_vtime(frame, bottom_left, false)?;
         Ok(())
     }
@@ -566,9 +700,49 @@ impl<'a> App<'a> {
             .collect()
     }
 
+    /// Generates a LLC bar chart.
+    fn event_bar(&self, id: usize, value: u64, avg: u64, max: u64, min: u64) -> Bar {
+        Bar::default()
+            .value(value)
+            .label(Line::from(format!(
+                "{} avg {} max {} min {}",
+                id, avg, max, min
+            )))
+            .text_value(format!("{}", value))
+    }
+
+    /// Generates LLC bar charts.
+    fn llc_bars(&self, event: String) -> Vec<Bar> {
+        self.llc_data
+            .iter()
+            .filter(|(_llc_id, llc_data)| llc_data.data.data.contains_key(&event.clone()))
+            .map(|(llc_id, llc_data)| {
+                let values = llc_data.event_data_immut(event.clone());
+                let value = values.last().copied().unwrap_or(0 as u64);
+                let stats = VecStats::new(&values, true, true, true, None);
+                self.event_bar(*llc_id, value, stats.avg, stats.max, stats.min)
+            })
+            .collect()
+    }
+
+    /// Generates Node bar charts.
+    fn node_bars(&self, event: String) -> Vec<Bar> {
+        self.llc_data
+            .iter()
+            .filter(|(_node_id, node_data)| node_data.data.data.contains_key(&event.clone()))
+            .map(|(node_id, node_data)| {
+                let values = node_data.event_data_immut(event.clone());
+                let value = values.last().copied().unwrap_or(0 as u64);
+                let stats = VecStats::new(&values, true, true, true, None);
+                self.event_bar(*node_id, value, stats.avg, stats.max, stats.min)
+            })
+            .collect()
+    }
+
     /// Renders the scheduler state as sparklines.
     fn render_scheduler_sparklines(
         &mut self,
+        event: String,
         frame: &mut Frame,
         area: Rect,
         render_sample_rate: bool,
@@ -598,7 +772,7 @@ impl<'a> App<'a> {
         let dsq_global_iter = self
             .dsq_data
             .values()
-            .map(|dsq_data| dsq_data.event_data_immut("dsq_lat_us".to_string()))
+            .map(|dsq_data| dsq_data.event_data_immut(event.clone()))
             .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
@@ -608,8 +782,8 @@ impl<'a> App<'a> {
         let block = Block::default()
             .title_top(
                 Line::from(format!(
-                    "{} DSQ Latency (us) avg {} max {} min {}",
-                    self.scheduler, stats.avg, stats.max, stats.min,
+                    "{} {} avg {} max {} min {}",
+                    self.scheduler, event, stats.avg, stats.max, stats.min,
                 ))
                 .style(self.theme.title_style())
                 .centered(),
@@ -627,7 +801,7 @@ impl<'a> App<'a> {
         frame.render_widget(block, dsqs_verticle[0]);
 
         let _ = self
-            .dsq_sparklines("dsq_lat_us".to_string())
+            .dsq_sparklines(event.clone())
             .iter()
             .enumerate()
             .for_each(|(j, dsq_sparkline)| {
@@ -640,6 +814,7 @@ impl<'a> App<'a> {
     /// Returns the dsq vtime chart.
     fn render_dsq_vtime_sparklines(
         &self,
+        event: String,
         frame: &mut Frame,
         area: Rect,
         render_sample_rate: bool,
@@ -647,7 +822,7 @@ impl<'a> App<'a> {
         let num_dsqs = self
             .dsq_data
             .iter()
-            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key("dsq_vtime"))
+            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(&event.clone()))
             .count();
         if num_dsqs == 0 {
             let block = Block::default()
@@ -672,7 +847,7 @@ impl<'a> App<'a> {
         let dsq_global_iter = self
             .dsq_data
             .values()
-            .map(|dsq_data| dsq_data.event_data_immut("dsq_vtime".to_string()))
+            .map(|dsq_data| dsq_data.event_data_immut(event.clone()))
             .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
@@ -701,7 +876,7 @@ impl<'a> App<'a> {
         frame.render_widget(block, dsqs_verticle[0]);
 
         let _ = self
-            .dsq_sparklines("dsq_vtime".to_string())
+            .dsq_sparklines(event.clone())
             .iter()
             .enumerate()
             .for_each(|(j, dsq_sparkline)| {
@@ -714,6 +889,7 @@ impl<'a> App<'a> {
     /// Returns the dsq vtime chart.
     fn render_dsq_vtime_barchart(
         &self,
+        event: String,
         frame: &mut Frame,
         area: Rect,
         render_sample_rate: bool,
@@ -721,7 +897,7 @@ impl<'a> App<'a> {
         let num_dsqs = self
             .dsq_data
             .iter()
-            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key("dsq_vtime"))
+            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(&event.clone()))
             .count();
         if num_dsqs == 0 {
             let block = Block::default()
@@ -746,8 +922,8 @@ impl<'a> App<'a> {
         let vtime_global_iter: Vec<u64> = self
             .dsq_data
             .iter()
-            .filter(|(_dsq_id, event_data)| event_data.data.contains_key("dsq_vtime"))
-            .map(|(_dsq_id, event_data)| event_data.event_data_immut("dsq_vtime".to_string()))
+            .filter(|(_dsq_id, event_data)| event_data.data.contains_key(&event.clone()))
+            .map(|(_dsq_id, event_data)| event_data.event_data_immut(event.clone()))
             .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
@@ -757,8 +933,8 @@ impl<'a> App<'a> {
         let bar_block = Block::default()
             .title_top(
                 Line::from(format!(
-                    "{} DSQ vtime delta avg {} max {} min {}",
-                    self.scheduler, stats.avg, stats.max, stats.min,
+                    "{} {} avg {} max {} min {}",
+                    self.scheduler, event, stats.avg, stats.max, stats.min,
                 ))
                 .style(self.theme.title_style())
                 .centered(),
@@ -774,7 +950,7 @@ impl<'a> App<'a> {
             .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
             .border_type(BorderType::Rounded);
 
-        let dsq_bars: Vec<Bar> = self.dsq_bars("dsq_vtime".to_string());
+        let dsq_bars: Vec<Bar> = self.dsq_bars(event.clone());
 
         let barchart = BarChart::default()
             .data(BarGroup::default().bars(&dsq_bars))
@@ -792,6 +968,7 @@ impl<'a> App<'a> {
     /// Renders the scheduler state as barcharts.
     fn render_scheduler_barchart(
         &mut self,
+        event: String,
         frame: &mut Frame,
         area: Rect,
         render_sample_rate: bool,
@@ -819,7 +996,7 @@ impl<'a> App<'a> {
         let dsq_global_iter = self
             .dsq_data
             .values()
-            .map(|dsq_data| dsq_data.event_data_immut("dsq_lat_us".to_string()))
+            .map(|dsq_data| dsq_data.event_data_immut(event.clone()))
             .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
@@ -828,8 +1005,8 @@ impl<'a> App<'a> {
         let bar_block = Block::default()
             .title_top(
                 Line::from(format!(
-                    "{} DSQ Latency (us) avg {} max {} min {}",
-                    self.scheduler, stats.avg, stats.max, stats.min,
+                    "{} {} avg {} max {} min {}",
+                    self.scheduler, event, stats.avg, stats.max, stats.min,
                 ))
                 .style(self.theme.title_style())
                 .centered(),
@@ -845,7 +1022,7 @@ impl<'a> App<'a> {
             .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
             .border_type(BorderType::Rounded);
 
-        let dsq_bars: Vec<Bar> = self.dsq_bars("dsq_lat_us".to_string());
+        let dsq_bars: Vec<Bar> = self.dsq_bars(event.clone());
 
         let barchart = BarChart::default()
             .data(BarGroup::default().bars(&dsq_bars))
@@ -863,15 +1040,18 @@ impl<'a> App<'a> {
     /// Renders the scheduler application state.
     fn render_scheduler(
         &mut self,
+        event: String,
         frame: &mut Frame,
         area: Rect,
         render_sample_rate: bool,
     ) -> Result<()> {
         match self.view_state {
             ViewState::Sparkline => {
-                self.render_scheduler_sparklines(frame, area, render_sample_rate)
+                self.render_scheduler_sparklines(event, frame, area, render_sample_rate)
             }
-            ViewState::BarChart => self.render_scheduler_barchart(frame, area, render_sample_rate),
+            ViewState::BarChart => {
+                self.render_scheduler_barchart(event, frame, area, render_sample_rate)
+            }
         }
     }
 
@@ -883,10 +1063,18 @@ impl<'a> App<'a> {
         render_sample_rate: bool,
     ) -> Result<()> {
         match self.view_state {
-            ViewState::Sparkline => {
-                self.render_dsq_vtime_sparklines(frame, area, render_sample_rate)
-            }
-            ViewState::BarChart => self.render_dsq_vtime_barchart(frame, area, render_sample_rate),
+            ViewState::Sparkline => self.render_dsq_vtime_sparklines(
+                "dsq_vtime_delta".to_string(),
+                frame,
+                area,
+                render_sample_rate,
+            ),
+            ViewState::BarChart => self.render_dsq_vtime_barchart(
+                "dsq_vtime_delta".to_string(),
+                frame,
+                area,
+                render_sample_rate,
+            ),
         }
     }
 
@@ -1096,7 +1284,7 @@ impl<'a> App<'a> {
         let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
 
         self.render_event(frame, right)?;
-        self.render_scheduler(frame, top_left, true)?;
+        self.render_scheduler("dsq_lat_us".to_string(), frame, top_left, true)?;
         self.render_dsq_vtime(frame, bottom_left, false)?;
         Ok(())
     }
@@ -1159,6 +1347,14 @@ impl<'a> App<'a> {
                     "{}: increase bpf sample rate ({})",
                     self.keymap.action_keys_string(Action::IncBpfSampleRate),
                     self.skel.maps.data_data.sample_rate
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: Enable CPU frequency ({})",
+                    self.keymap.action_keys_string(Action::ToggleCpuFreq),
+                    self.collect_cpu_freq
                 ),
                 Style::default(),
             )),
@@ -1293,7 +1489,13 @@ impl<'a> App<'a> {
             AppState::Event => self.render_event_list(frame),
             AppState::Node => self.render_node(frame),
             AppState::Llc => self.render_llc(frame),
-            AppState::Scheduler => self.render_scheduler(frame, frame.area(), true),
+            AppState::Scheduler => {
+                let [top, center, bottom] =
+                    Layout::vertical([Constraint::Fill(1); 3]).areas(frame.area());
+                self.render_scheduler("dsq_lat_us".to_string(), frame, top, true)?;
+                self.render_scheduler("dsq_slice_consumed".to_string(), frame, center, false)?;
+                self.render_scheduler("dsq_vtime_delta".to_string(), frame, bottom, false)
+            }
             _ => self.render_default(frame),
         }
     }
@@ -1351,7 +1553,17 @@ impl<'a> App<'a> {
     }
 
     /// Updates the app when a task is scheduled.
-    fn on_sched_switch(&mut self, cpu: u32, dsq_id: u64, dsq_lat_us: u64, dsq_vtime: u64) {
+    fn on_sched_switch(
+        &mut self,
+        cpu: u32,
+        next_dsq_id: u64,
+        next_dsq_lat_us: u64,
+        next_dsq_vtime: u64,
+        _next_slice_ns: u64,
+        prev_dsq_id: u64,
+        prev_used_slice_ns: u64,
+        _prev_slice_ns: u64,
+    ) {
         if self.scheduler == "none" {
             return;
         }
@@ -1363,26 +1575,32 @@ impl<'a> App<'a> {
             0,
             self.max_cpu_events,
         ));
-        cpu_data.add_event_data("dsq_lat_us".to_string(), dsq_lat_us);
-        let dsq_data = self
+        cpu_data.add_event_data("dsq_lat_us".to_string(), next_dsq_lat_us);
+        let next_dsq_data = self
             .dsq_data
-            .entry(dsq_id)
+            .entry(next_dsq_id)
             .or_insert(EventData::new(self.max_cpu_events * 2));
-        dsq_data.add_event_data("dsq_lat_us".to_string(), dsq_lat_us);
-        if dsq_vtime > 0 {
+        next_dsq_data.add_event_data("dsq_lat_us".to_string(), next_dsq_lat_us);
+        if next_dsq_vtime > 0 {
             // vtime is special because we want the delta
-            let last = dsq_data
-                .event_data_immut("dsq_vtime".to_string())
+            let last = next_dsq_data
+                .event_data_immut("dsq_vtime_delta".to_string())
                 .last()
                 .copied()
                 .unwrap_or(0 as u64);
-            if dsq_vtime - last < DSQ_VTIME_CUTOFF {
-                dsq_data.add_event_data(
-                    "dsq_vtime".to_string(),
-                    if last > 0 { dsq_vtime - last } else { 0 },
+            if next_dsq_vtime - last < DSQ_VTIME_CUTOFF {
+                next_dsq_data.add_event_data(
+                    "dsq_vtime_delta".to_string(),
+                    if last > 0 { next_dsq_vtime - last } else { 0 },
                 );
             }
         }
+
+        let prev_dsq_data = self
+            .dsq_data
+            .entry(prev_dsq_id)
+            .or_insert(EventData::new(self.max_cpu_events * 2));
+        prev_dsq_data.add_event_data("dsq_slice_consumed".to_string(), prev_used_slice_ns);
     }
 
     /// Updates the bpf bpf sampling rate.
@@ -1433,11 +1651,24 @@ impl<'a> App<'a> {
             }
             Action::SchedSwitch {
                 cpu,
-                dsq_id,
-                dsq_lat_us,
-                dsq_vtime,
+                next_dsq_id,
+                next_dsq_lat_us,
+                next_dsq_vtime,
+                next_slice_ns,
+                prev_dsq_id,
+                prev_used_slice_ns,
+                prev_slice_ns,
             } => {
-                self.on_sched_switch(cpu, dsq_id, dsq_lat_us, dsq_vtime);
+                self.on_sched_switch(
+                    cpu,
+                    next_dsq_id,
+                    next_dsq_lat_us,
+                    next_dsq_vtime,
+                    next_slice_ns,
+                    prev_dsq_id,
+                    prev_used_slice_ns,
+                    prev_slice_ns,
+                );
             }
             Action::ClearEvent => self.stop_perf_events(),
             Action::ChangeTheme => {
@@ -1446,6 +1677,7 @@ impl<'a> App<'a> {
             Action::TickRateChange { tick_rate_ms } => {
                 self.tick_rate_ms = tick_rate_ms as usize;
             }
+            Action::ToggleCpuFreq => self.collect_cpu_freq = !self.collect_cpu_freq,
             Action::IncBpfSampleRate => {
                 let sample_rate = self.skel.maps.data_data.sample_rate;
                 if sample_rate == 0 {
