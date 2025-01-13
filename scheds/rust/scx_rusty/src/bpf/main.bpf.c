@@ -49,6 +49,7 @@
 #include "intf.h"
 #include "sdt_dom.h"
 
+#include <scx/bpf_arena_common.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>
@@ -357,7 +358,11 @@ static void dom_dcycle_adj(dom_ptr domc, u32 weight, u64 now, bool runnable)
 	struct lock_wrapper *lockw;
 	s64 adj = runnable ? 1 : -1;
 	u32 bucket_idx = 0;
-	u32 dom_id = domc->id;
+	u32 dom_id;
+
+	cast_kern(domc);
+
+	dom_id = domc->id;
 
 	bucket = lookup_dom_bucket(domc, weight, &bucket_idx);
 	lockw = lookup_dom_bkt_lock(dom_id, weight);
