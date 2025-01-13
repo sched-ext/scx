@@ -195,17 +195,6 @@ struct {
 	__uint(map_flags, 0);
 } node_data SEC(".maps");
 
-/*
- * Domain context
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct dom_ctx);
-	__uint(max_entries, MAX_DOMS);
-	__uint(map_flags, 0);
-} dom_data SEC(".maps");
-
 struct lock_wrapper {
 	struct bpf_spin_lock lock;
 };
