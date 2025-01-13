@@ -43,7 +43,7 @@ pub fn stat(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
         }
     }
     };
-    output.extend(trait_body.into_iter());
+    output.extend(trait_body);
 
     output.into()
 }

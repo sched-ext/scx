@@ -207,26 +207,26 @@ struct Split {
 
 impl std::fmt::Display for Split {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "Split Cell({}), Score({})\n", self.cell, self.score)?;
-        write!(f, "g1:\n")?;
+        writeln!(f, "Split Cell({}), Score({})", self.cell, self.score)?;
+        writeln!(f, "g1:")?;
         for cg in self.g1.iter() {
             if cg.load == 0.0 && cg.pinned_load == 0.0 {
                 continue;
             }
-            write!(
+            writeln!(
                 f,
-                "/{}: load={} pinned_load={}\n",
+                "/{}: load={} pinned_load={}",
                 cg.name, cg.load, cg.pinned_load
             )?;
         }
-        write!(f, "g2:\n")?;
+        writeln!(f, "g2:")?;
         for cg in self.g2.iter() {
             if cg.load == 0.0 && cg.pinned_load == 0.0 {
                 continue;
             }
-            write!(
+            writeln!(
                 f,
-                "/{}: load={} pinned_load={}\n",
+                "/{}: load={} pinned_load={}",
                 cg.name, cg.load, cg.pinned_load
             )?;
         }

@@ -508,6 +508,7 @@ impl<'cb> BpfScheduler<'cb> {
     }
 
     // Receive a task to be scheduled from the BPF dispatcher.
+    #[allow(static_mut_refs)]
     pub fn dequeue_task(&mut self) -> Result<Option<QueuedTask>, i32> {
         match self.queued.consume_raw() {
             0 => {

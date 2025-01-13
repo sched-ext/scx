@@ -438,7 +438,7 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        return false;
+        false
     }
 
     fn enable_sibling_cpu(
