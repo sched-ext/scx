@@ -32,6 +32,7 @@ pub use stats::VecStats;
 pub use theme::AppTheme;
 pub use tui::Event;
 pub use tui::Tui;
+pub use util::format_hz;
 pub use util::read_file_string;
 
 pub use plain::Plain;
@@ -121,6 +122,7 @@ pub enum Action {
         state: AppState,
     },
     NextViewState,
+    ToggleCpuFreq,
     TickRateChange {
         tick_rate_ms: u64,
     },
