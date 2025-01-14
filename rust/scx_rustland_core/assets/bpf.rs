@@ -205,6 +205,7 @@ fn set_ctrlc_handler(shutdown: Arc<AtomicBool>) -> Result<(), anyhow::Error> {
 }
 
 impl<'cb> BpfScheduler<'cb> {
+    #[allow(static_mut_refs)]
     pub fn init(
         open_object: &'cb mut MaybeUninit<OpenObject>,
         exit_dump_len: u32,
