@@ -234,6 +234,7 @@ impl<'cb> BpfScheduler<'cb> {
         //
         // Use of a `str` whose contents are not valid UTF-8 is undefined behavior.
         fn callback(data: &[u8]) -> i32 {
+            #[allow(static_mut_refs)]
             unsafe {
                 // SAFETY: copying from the BPF ring buffer to BUF is safe, since the size of BUF
                 // is exactly the size of QueuedTask and the callback operates in chunks of
