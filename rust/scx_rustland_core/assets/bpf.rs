@@ -205,7 +205,6 @@ fn set_ctrlc_handler(shutdown: Arc<AtomicBool>) -> Result<(), anyhow::Error> {
 }
 
 impl<'cb> BpfScheduler<'cb> {
-    #[allow(static_mut_refs)]
     pub fn init(
         open_object: &'cb mut MaybeUninit<OpenObject>,
         exit_dump_len: u32,
@@ -235,6 +234,7 @@ impl<'cb> BpfScheduler<'cb> {
         //
         // Use of a `str` whose contents are not valid UTF-8 is undefined behavior.
         fn callback(data: &[u8]) -> i32 {
+            #[allow(static_mut_refs)]
             unsafe {
                 // SAFETY: copying from the BPF ring buffer to BUF is safe, since the size of BUF
                 // is exactly the size of QueuedTask and the callback operates in chunks of
