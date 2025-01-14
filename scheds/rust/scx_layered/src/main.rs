@@ -935,6 +935,17 @@ struct Layer {
     nr_llc_cpus: Vec<usize>,
     cpus: Cpumask,
     allowed_cpus: Cpumask,
+
+    llcs_assigned: BTreeMap<usize, Arc<Llc>>,
+    last_llcs_assigned: BTreeMap<usize, Arc<Llc>>,
+    // TODO(kkd): Needs to be ascertained automatically, for now set for
+    // specific slices manually to test
+    is_sticky: bool,
+    util_low: f64,  // e.g. 0.6
+    util_high: f64, // e.g. 0.8
+    above_count: u32,
+    below_count: u32,
+    intervals_required: u32,
 }
 
 impl Layer {
@@ -1032,6 +1043,16 @@ impl Layer {
             nr_llc_cpus: vec![0; topo.all_llcs.len()],
             cpus: Cpumask::new(),
             allowed_cpus,
+
+            llcs_assigned: BTreeMap::new(),
+            last_llcs_assigned: BTreeMap::new(),
+            is_sticky: false,
+            util_low: 0.6,  /* TODO(kkd): Fix, needs to be configurable */
+            util_high: 0.8, /* TODO(kkd): Fix, needs to be configurable */
+            above_count: 0,
+            below_count: 0,
+            // TODO(kkd): Need to determine heuristically
+            intervals_required: 2,
         })
     }
 
@@ -2147,6 +2168,239 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn calc_target_llcs(&self) -> Vec<usize> {
+        let nr_llcs = self.cpu_pool.topo.all_llcs.len();
+        let mut wants = vec![0; self.layers.len()];
+
+        for (i, layer) in self.layers.iter().enumerate() {
+            let owned = self.sched_stats.layer_utils[i][LAYER_USAGE_OWNED];
+            let open = self.sched_stats.layer_utils[i][LAYER_USAGE_OPEN];
+            let total_util = owned + open;
+
+            // "raw" guess ignoring hysteresis
+            let raw = (total_util * nr_llcs as f64).ceil() as usize;
+            // Always have one LLC
+            let raw_clamped = raw.clamp(1, nr_llcs);
+
+            // current assigned
+            let curr = layer.llcs_assigned.len().max(1);
+
+            // If we've been above threshold enough intervals => grow
+            if layer.above_count >= layer.intervals_required {
+                wants[i] = (curr + 1).max(raw_clamped);
+            }
+            // If we've been below threshold => shrink
+            else if layer.below_count >= layer.intervals_required {
+                let new_count = if curr > 1 { curr - 1 } else { curr };
+                wants[i] = new_count.min(raw_clamped);
+            }
+            // Otherwise, we stay as-is
+            else {
+                wants[i] = curr;
+            }
+
+            if layer.is_sticky && wants[i] < curr {
+                wants[i] = curr;
+            }
+        }
+        wants
+    }
+
+    fn weighted_target_llcs(&self, raw_wants: &[usize]) -> Vec<usize> {
+        let total_llcs = self.cpu_pool.topo.all_llcs.len();
+        let mut assigned = vec![0; raw_wants.len()];
+
+        // We'll distribute the total among layers by weight
+        let weights: Vec<usize> = self
+            .layers
+            .iter()
+            .map(|l| l.kind.common().weight as usize)
+            .collect();
+
+        let mut nr_left = total_llcs;
+        let mut weight_sum: usize = weights.iter().sum();
+
+        // For each layer, try to allocate a "share" of the leftover
+        for (i, want) in raw_wants.iter().enumerate() {
+            if weight_sum == 0 || nr_left == 0 {
+                break;
+            }
+            let share_float = (weights[i] as f64 / weight_sum as f64) * nr_left as f64;
+            let share = share_float.ceil() as usize;
+
+            let taken = share.min(*want).min(nr_left);
+            assigned[i] = taken;
+            nr_left -= taken;
+            weight_sum -= weights[i];
+        }
+        assigned
+    }
+
+    fn assign_llcs(&mut self, llcs_wanted: &[usize]) {
+        let mut free_llcs: Vec<usize> = self.cpu_pool.topo.all_llcs.keys().cloned().collect();
+
+        for (_, layer) in self.layers.iter_mut().enumerate() {
+            let assigned_count = layer.llcs_assigned.len();
+            if layer.is_sticky && assigned_count > 0 {
+                // remove from free_llcs
+                for &llc_id in layer.llcs_assigned.keys() {
+                    if let Some(pos) = free_llcs.iter().position(|&x| x == llc_id) {
+                        free_llcs.swap_remove(pos);
+                    }
+                }
+            } else {
+                // non-sticky or can reassign => clear them
+                layer.llcs_assigned.clear();
+            }
+        }
+
+        let mut layers_by_util: Vec<(usize, f64)> = self
+            .layers
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                let owned = self.sched_stats.layer_utils[i][LAYER_USAGE_OWNED];
+                let open = self.sched_stats.layer_utils[i][LAYER_USAGE_OPEN];
+                (i, owned + open)
+            })
+            .collect();
+        layers_by_util.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+        for &(layer_idx, _) in &layers_by_util {
+            let want = llcs_wanted[layer_idx];
+            let layer = &mut self.layers[layer_idx];
+
+            let have = layer.llcs_assigned.len();
+            if have >= want {
+                continue;
+            }
+
+            let need = want - have;
+            let to_take = need.min(free_llcs.len());
+
+            for _ in 0..to_take {
+                let llc_id = free_llcs.pop().unwrap();
+                let llc_arc = self.cpu_pool.topo.all_llcs[&llc_id].clone();
+                layer.llcs_assigned.insert(llc_id, llc_arc);
+            }
+        }
+
+        for &(layer_idx, _) in &layers_by_util {
+            let layer = &mut self.layers[layer_idx];
+            if !layer.is_sticky {
+                continue;
+            }
+
+            let want = llcs_wanted[layer_idx];
+            if layer.llcs_assigned.len() < want {
+                let need = want - layer.llcs_assigned.len();
+                self.forcibly_reassign(layer_idx, need);
+            }
+        }
+    }
+
+    fn forcibly_reassign(&mut self, sticky_idx: usize, mut needed: usize) {
+        // gather layers sorted ascending by usage
+        let mut usage_sorted: Vec<(usize, f64)> = self
+            .layers
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != sticky_idx)
+            .map(|(i, _)| {
+                let owned = self.sched_stats.layer_utils[i][LAYER_USAGE_OWNED];
+                let open = self.sched_stats.layer_utils[i][LAYER_USAGE_OPEN];
+                (i, owned + open)
+            })
+            .collect();
+        usage_sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+
+        // forcibly remove LLCs from the smallest layers
+        for (other_idx, _) in usage_sorted {
+            if needed == 0 {
+                break;
+            }
+            let other = &mut self.layers[other_idx];
+
+            // skip if other is sticky
+            if other.is_sticky {
+                continue;
+            }
+
+            // TODO(kkd): Fix Rust borrow checker complains when directly
+            // pushing to self.layers since we borrowed other above, so work
+            // around with temporary vector.
+            let mut stolen_llcs = Vec::new();
+
+            while !other.llcs_assigned.is_empty() && needed > 0 {
+                if let Some((llc_id, llc_arc)) = other.llcs_assigned.pop_last() {
+                    stolen_llcs.push((llc_id, llc_arc));
+                    needed -= 1;
+                }
+            }
+
+            let sticky = &mut self.layers[sticky_idx];
+            for (llc_id, llc_arc) in stolen_llcs {
+                sticky.llcs_assigned.insert(llc_id, llc_arc);
+            }
+        }
+    }
+
+    fn compact_low_layers(&mut self) {
+        let usage_threshold = 0.2; // TODO(kkd): Needs to be fixed. Currently
+                                   // hardcoded based on testing scenario.
+        let mut low_idxs = vec![];
+
+        // find layers below threshold
+        for (i, layer) in self.layers.iter().enumerate() {
+            let owned = self.sched_stats.layer_utils[i][LAYER_USAGE_OWNED];
+            let open = self.sched_stats.layer_utils[i][LAYER_USAGE_OPEN];
+            let util = owned + open;
+
+            if !layer.is_sticky && util < usage_threshold {
+                low_idxs.push(i);
+            }
+        }
+
+        // if we have >2 low layers, unify them on the first
+        if low_idxs.len() > 1 {
+            let primary_idx = low_idxs[0];
+            for &other_idx in &low_idxs[1..] {
+                // forcibly remove all LLCs from the other layer
+                while let Some((llc_id, llc_arc)) = self.layers[other_idx].llcs_assigned.pop_first()
+                {
+                    self.layers[primary_idx]
+                        .llcs_assigned
+                        .insert(llc_id, llc_arc);
+                }
+            }
+        }
+    }
+
+    fn refresh_llcs(&mut self) -> Result<()> {
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let mut new_mask = Cpumask::new();
+
+            // Gather all CPUs from each assigned LLC
+            for (_, llc_arc) in &layer.llcs_assigned {
+                for cpu_id in llc_arc.span.iter() {
+                    new_mask.set_cpu(cpu_id)?;
+                }
+            }
+
+            // On changes, update BPF side bpf_cpumask
+            if new_mask != layer.cpus {
+                layer.cpus = new_mask;
+                layer.nr_cpus = layer.cpus.weight();
+                Self::update_bpf_layer_cpumask(layer, &mut self.skel.maps.bss_data.layers[i]);
+            }
+        }
+
+        // Finally, call the BPF function to refresh
+        let prog = &mut self.skel.progs.refresh_layer_cpumasks;
+        let _ = prog.test_run(Default::default());
+        Ok(())
+    }
+
     fn step(&mut self) -> Result<()> {
         let started_at = Instant::now();
         self.sched_stats.refresh(
@@ -2155,7 +2409,36 @@ impl<'a> Scheduler<'a> {
             started_at,
             self.processing_dur,
         )?;
-        self.refresh_cpumasks()?;
+
+        // Hysteresis logic
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            let owned = self.sched_stats.layer_utils[i][LAYER_USAGE_OWNED];
+            let open = self.sched_stats.layer_utils[i][LAYER_USAGE_OPEN];
+            let total_util = owned + open;
+
+            let llc_count = layer.llcs_assigned.len().max(1) as f64;
+            let per_llc_util = total_util / llc_count;
+
+            if per_llc_util > layer.util_high {
+                layer.above_count += 1;
+                layer.below_count = 0;
+            } else if per_llc_util < layer.util_low {
+                layer.below_count += 1;
+                layer.above_count = 0;
+            } else {
+                layer.above_count = 0;
+                layer.below_count = 0;
+            }
+        }
+
+        // Decide how many LLCs each layer wants
+        let raw_wants = self.calc_target_llcs();
+        let final_wants = self.weighted_target_llcs(&raw_wants);
+
+        self.assign_llcs(&final_wants);
+        self.compact_low_layers();
+        self.refresh_llcs()?;
+
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
     }
