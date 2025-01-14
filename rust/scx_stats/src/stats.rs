@@ -46,10 +46,7 @@ impl StatsKind {
     }
 
     pub fn can_be_dict_key(&self) -> bool {
-        match self {
-            Self::I64 | Self::U64 | Self::String => true,
-            _ => false,
-        }
+        matches!(self, Self::I64 | Self::U64 | Self::String)
     }
 }
 
@@ -97,7 +94,7 @@ impl StatsData {
 
         if let PathArguments::AngleBracketed(ab) = &path.segments.last().unwrap().arguments {
             let args = &ab.args;
-            if args.len() < 1 {
+            if args.is_empty() {
                 return Err(Error::new(
                     args.span(),
                     "scx_stats: T generic argument missing",
@@ -105,7 +102,7 @@ impl StatsData {
             }
 
             match &args[0] {
-                GenericArgument::Type(ty) => Ok(Some(Self::Array(StatsKind::new(&ty, paths)?))),
+                GenericArgument::Type(ty) => Ok(Some(Self::Array(StatsKind::new(ty, paths)?))),
                 _ => Ok(None),
             }
         } else {
@@ -143,8 +140,8 @@ impl StatsData {
 
             match (&args[0], &args[1]) {
                 (GenericArgument::Type(ty0), GenericArgument::Type(ty1)) => {
-                    let kind0 = StatsKind::new(&ty0, paths)?;
-                    let kind1 = StatsKind::new(&ty1, paths)?;
+                    let kind0 = StatsKind::new(ty0, paths)?;
+                    let kind1 = StatsKind::new(ty1, paths)?;
 
                     if kind0.can_be_dict_key() {
                         Ok(Some(Self::Dict {
