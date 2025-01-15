@@ -89,7 +89,7 @@ impl KeyMap {
         bindings.insert(Key::Code(KeyCode::Down), Action::Down);
         bindings.insert(Key::Code(KeyCode::Up), Action::Up);
 
-        Self { bindings: bindings }
+        Self { bindings }
     }
 
     /// Maps the Key to an Action.

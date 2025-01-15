@@ -163,7 +163,7 @@ struct Opts {
 
 impl Opts {
     fn nothing_specified(&self) -> bool {
-        return self.autopilot == false
+        self.autopilot == false
             && self.autopower == false
             && self.performance == false
             && self.powersave == false
@@ -174,7 +174,7 @@ impl Opts {
             && self.no_prefer_turbo_core == false
             && self.no_freq_scaling == false
             && self.monitor == None
-            && self.monitor_sched_samples == None;
+            && self.monitor_sched_samples == None
     }
 
     fn proc(&mut self) -> Option<&mut Self> {
@@ -677,18 +677,10 @@ impl<'a> Scheduler<'a> {
 
     fn get_power_mode(power_mode: i32) -> &'static str {
         match power_mode as u32 {
-            LAVD_PM_PERFORMANCE => {
-                return &"performance";
-            }
-            LAVD_PM_BALANCED => {
-                return &"balanced";
-            }
-            LAVD_PM_POWERSAVE => {
-                return &"powersave";
-            }
-            _ => {
-                return &"unknown";
-            }
+            LAVD_PM_PERFORMANCE => "performance",
+            LAVD_PM_BALANCED => "balanced",
+            LAVD_PM_POWERSAVE => "powersave",
+            _ => "unknown",
         }
     }
 

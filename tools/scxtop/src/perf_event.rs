@@ -100,9 +100,9 @@ impl PerfEvent {
     /// Creates a PerfEvent.
     pub fn new(subsystem: String, event: String, cpu: usize) -> Self {
         Self {
-            subsystem: subsystem,
-            event: event,
-            cpu: cpu,
+            subsystem,
+            event,
+            cpu,
             fd: 0,
             freq: 0,
         }
