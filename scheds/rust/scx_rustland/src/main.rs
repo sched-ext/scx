@@ -175,6 +175,12 @@ impl Ord for Task {
     }
 }
 
+impl PartialOrd for Task {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 // Task pool where all the tasks that needs to run are stored before dispatching (ordered by their
 // shortest deadline using a BTreeSet).
 struct TaskTree {
