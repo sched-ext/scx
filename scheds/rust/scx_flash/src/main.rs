@@ -215,7 +215,7 @@ impl<'a> Scheduler<'a> {
                 };
                 cache_id_map
                     .entry(cache_id)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(*cpu_id);
             }
         }

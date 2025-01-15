@@ -566,7 +566,7 @@ impl<'a> Scheduler<'a> {
         if self.cells.len() < 2 {
             // Find the best scoring split out of all the Cells.
             for (cell_idx, cell) in self.cells.iter() {
-                let split = self.find_best_split(cell, *cell_idx as u32)?;
+                let split = self.find_best_split(cell, *cell_idx)?;
                 if let Some(ref sp) = split {
                     match ret {
                         Some(SplitOrMerge::Split(ref bsp)) if bsp.score > sp.score => {}

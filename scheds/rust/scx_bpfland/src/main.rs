@@ -343,9 +343,9 @@ impl<'a> Scheduler<'a> {
     }
 
     fn epp_to_cpumask(profile: Powermode) -> Result<Cpumask> {
-        let mut cpus = get_primary_cpus(profile).unwrap_or(Vec::new());
+        let mut cpus = get_primary_cpus(profile).unwrap_or_default();
         if cpus.is_empty() {
-            cpus = get_primary_cpus(Powermode::Any).unwrap_or(Vec::new());
+            cpus = get_primary_cpus(Powermode::Any).unwrap_or_default();
         }
         Cpumask::from_str(&cpus_to_cpumask(&cpus))
     }
@@ -368,7 +368,7 @@ impl<'a> Scheduler<'a> {
                 &_ => Self::epp_to_cpumask(Powermode::Any)?,
             },
             "all" => Self::epp_to_cpumask(Powermode::Any)?,
-            &_ => Cpumask::from_str(&primary_domain)?,
+            &_ => Cpumask::from_str(primary_domain)?,
         };
 
         info!("primary CPU domain = 0x{:x}", domain);
@@ -487,7 +487,7 @@ impl<'a> Scheduler<'a> {
                 };
                 cache_id_map
                     .entry(cache_id)
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(*cpu_id);
             }
         }
