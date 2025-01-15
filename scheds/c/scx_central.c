@@ -96,7 +96,7 @@ restart:
 	 */
 	cpuset = CPU_ALLOC(skel->rodata->nr_cpu_ids);
 	SCX_BUG_ON(!cpuset, "Failed to allocate cpuset");
-	CPU_ZERO(cpuset);
+	CPU_ZERO_S(CPU_ALLOC_SIZE(skel->rodata->nr_cpu_ids), cpuset);
 	CPU_SET(skel->rodata->central_cpu, cpuset);
 	SCX_BUG_ON(sched_setaffinity(0, sizeof(*cpuset), cpuset),
 		   "Failed to affinitize to central CPU %d (max %d)",
