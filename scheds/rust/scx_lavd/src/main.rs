@@ -677,18 +677,10 @@ impl<'a> Scheduler<'a> {
 
     fn get_power_mode(power_mode: i32) -> &'static str {
         match power_mode as u32 {
-            LAVD_PM_PERFORMANCE => {
-                "performance"
-            }
-            LAVD_PM_BALANCED => {
-                "balanced"
-            }
-            LAVD_PM_POWERSAVE => {
-                "powersave"
-            }
-            _ => {
-                "unknown"
-            }
+            LAVD_PM_PERFORMANCE => "performance",
+            LAVD_PM_BALANCED => "balanced",
+            LAVD_PM_POWERSAVE => "powersave",
+            _ => "unknown",
         }
     }
 

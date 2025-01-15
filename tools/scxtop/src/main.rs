@@ -131,7 +131,7 @@ async fn run() -> Result<()> {
             event_type_CPU_PERF_SET => {
                 let action = Action::SchedCpuPerfSet {
                     cpu: event.cpu,
-                    perf: event.perf as u32,
+                    perf: event.perf,
                 };
                 tx.send(action).ok();
             }

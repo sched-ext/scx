@@ -485,10 +485,7 @@ impl<'a> Scheduler<'a> {
                     3 => cpu.llc_id,
                     _ => panic!("invalid cache level {}", cache_lvl),
                 };
-                cache_id_map
-                    .entry(cache_id)
-                    .or_default()
-                    .push(*cpu_id);
+                cache_id_map.entry(cache_id).or_default().push(*cpu_id);
             }
         }
 

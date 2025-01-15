@@ -95,7 +95,7 @@ impl<'a> App<'a> {
         let mut node_data = BTreeMap::new();
         let mut active_perf_events = BTreeMap::new();
         let active_hw_event = PerfEvent::new("hw".to_string(), "cycles".to_string(), 0);
-        let perf_events = available_perf_events()?;
+        let available_perf_events = available_perf_events()?;
         let available_events = PerfEvent::default_events();
         for cpu in topo.all_cpus.values() {
             let mut event = PerfEvent::new("hw".to_string(), "cycles".to_string(), cpu.id);
@@ -118,32 +118,32 @@ impl<'a> App<'a> {
         }
 
         let app = Self {
-            scheduler: scheduler,
-            max_cpu_events: max_cpu_events,
-            keymap: keymap,
+            scheduler,
+            max_cpu_events,
+            keymap,
             theme: AppTheme::Default,
             state: AppState::Default,
             view_state: ViewState::BarChart,
             prev_state: AppState::Default,
             counter: 0,
-            tick_rate_ms: tick_rate_ms,
+            tick_rate_ms,
             should_quit: Arc::new(AtomicBool::new(false)),
-            action_tx: action_tx,
-            skel: skel,
-            topo: topo,
+            action_tx,
+            skel,
+            topo,
             collect_cpu_freq: true,
             collect_uncore_freq: true,
-            cpu_data: cpu_data,
-            llc_data: llc_data,
-            node_data: node_data,
+            cpu_data,
+            llc_data,
+            node_data,
             dsq_data: BTreeMap::new(),
-            event_scroll_state: ScrollbarState::new(perf_events.len()).position(0),
+            event_scroll_state: ScrollbarState::new(available_perf_events.len()).position(0),
             event_scroll: 0,
             active_hw_event_id: 0,
-            active_hw_event: active_hw_event,
-            available_perf_events: perf_events,
-            active_perf_events: active_perf_events,
-            available_events: available_events,
+            active_hw_event,
+            available_perf_events,
+            active_perf_events,
+            available_events,
         };
 
         Ok(app)
@@ -189,7 +189,7 @@ impl<'a> App<'a> {
         let perf_event = &self.available_events[self.active_hw_event_id].clone();
 
         self.active_hw_event = perf_event.clone();
-        self.activate_perf_event(&perf_event)
+        self.activate_perf_event(perf_event)
     }
 
     /// Activates the previous event.
@@ -203,7 +203,7 @@ impl<'a> App<'a> {
         let perf_event = &self.available_events[self.active_hw_event_id].clone();
 
         self.active_hw_event = perf_event.clone();
-        self.activate_perf_event(&perf_event)
+        self.activate_perf_event(perf_event)
     }
 
     /// Activates the next view state.
@@ -258,38 +258,27 @@ impl<'a> App<'a> {
         }
 
         let glob_match = glob("/sys/devices/system/cpu/intel_uncore_frequency/*/current_freq_khz");
-        match glob_match {
-            Ok(entries) => {
-                for entry in entries {
-                    match entry {
-                        Ok(raw_path) => {
-                            let path = Path::new(&raw_path);
-                            let uncore_freq = read_file_usize(path).unwrap_or(0);
-                            let re = Regex::new(r"package_(\d+)_die_\d+").unwrap();
-                            if let Some(caps) =
-                                re.captures(raw_path.to_str().expect("failed to get str from path"))
-                            {
-                                let package_id: usize = caps[1].parse().unwrap();
-                                for cpu in self.topo.all_cpus.values() {
-                                    if cpu.package_id != package_id {
-                                        continue;
-                                    }
-                                    let node_data = self
-                                        .node_data
-                                        .entry(cpu.node_id)
-                                        .or_insert(NodeData::new(cpu.node_id, self.max_cpu_events));
-                                    node_data.add_event_data(
-                                        "uncore_freq".to_string(),
-                                        uncore_freq as u64,
-                                    );
-                                }
-                            }
+        if let Ok(entries) = glob_match {
+            for raw_path in entries.flatten() {
+                let path = Path::new(&raw_path);
+                let uncore_freq = read_file_usize(path).unwrap_or(0);
+                let re = Regex::new(r"package_(\d+)_die_\d+").unwrap();
+                if let Some(caps) =
+                    re.captures(raw_path.to_str().expect("failed to get str from path"))
+                {
+                    let package_id: usize = caps[1].parse().unwrap();
+                    for cpu in self.topo.all_cpus.values() {
+                        if cpu.package_id != package_id {
+                            continue;
                         }
-                        _ => {}
+                        let node_data = self
+                            .node_data
+                            .entry(cpu.node_id)
+                            .or_insert(NodeData::new(cpu.node_id, self.max_cpu_events));
+                        node_data.add_event_data("uncore_freq".to_string(), uncore_freq as u64);
                     }
                 }
             }
-            _ => {}
         }
         Ok(())
     }
