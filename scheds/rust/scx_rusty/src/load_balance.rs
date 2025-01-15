@@ -590,7 +590,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         for dom_id in self.dom_group.doms().keys() {
             let dom = *dom_id;
-            let dom_key = unsafe { std::mem::transmute::<u32, [u8; 4]>(dom as u32) };
+            let dom_key = (dom as u32).to_ne_bytes();
 
             aggregator.init_domain(dom);
 
@@ -803,7 +803,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         task.migrated.set(true);
         std::mem::swap(&mut push_dom.tasks, &mut SortedVec::from_unsorted(tasks));
 
-        push_dom.transfer_load(load, taskc, pull_dom, &mut self.skel);
+        push_dom.transfer_load(load, taskc, pull_dom, self.skel);
         Ok(Some(load))
     }
 
@@ -816,7 +816,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         let push_imbal = push_node.load.imbal();
         let pull_imbal = pull_node.load.imbal();
-        let xfer = push_node.xfer_between(&pull_node);
+        let xfer = push_node.xfer_between(pull_node);
 
         if push_imbal <= 0.0f64 || pull_imbal >= 0.0f64 {
             bail!(
@@ -870,7 +870,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     break;
                 }
             }
-            while pullers.len() > 0 {
+            while !pullers.is_empty() {
                 pull_node.domains.insert(pullers.pop().unwrap());
             }
             pushers.push_back(push_dom);
@@ -878,7 +878,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 break;
             }
         }
-        while pushers.len() > 0 {
+        while !pushers.is_empty() {
             push_node.domains.insert(pushers.pop_front().unwrap());
         }
 
@@ -968,7 +968,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     );
                 }
             }
-            while pullers.len() > 0 {
+            while !pullers.is_empty() {
                 self.nodes.insert(pullers.pop().unwrap());
             }
 
@@ -978,7 +978,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             pushers.push_back(push_node);
         }
 
-        while pushers.len() > 0 {
+        while !pushers.is_empty() {
             self.nodes.insert(pushers.pop_front().unwrap());
         }
 
