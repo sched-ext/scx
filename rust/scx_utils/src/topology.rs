@@ -112,6 +112,10 @@ pub struct Cpu {
     pub id: usize,
     pub min_freq: usize,
     pub max_freq: usize,
+    /// Currently used by AMD CPUs to show which cores to use vs others.
+    /// The higher the number then the higher the priority the core.
+    /// This is set at boot time but can change at runtime via tunables.
+    pub pref_rank: usize,
     /// Base operational frqeuency. Only available on Intel Turbo Boost
     /// CPUs. If not available, this will simply return maximum frequency.
     pub base_freq: usize,
@@ -442,6 +446,7 @@ fn create_insert_cpu(
     let max_freq = read_file_usize(&freq_path.join("scaling_max_freq")).unwrap_or(0);
     let base_freq = read_file_usize(&freq_path.join("base_frequency")).unwrap_or(max_freq);
     let trans_lat_ns = read_file_usize(&freq_path.join("cpuinfo_transition_latency")).unwrap_or(0);
+    let pref_rank = read_file_usize(&freq_path.join("amd_pstate_prefcore_ranking")).unwrap_or(0);
 
     let num_llcs = topo_ctx.node_llc_kernel_ids.len();
     let llc_id = topo_ctx
@@ -498,6 +503,7 @@ fn create_insert_cpu(
             min_freq,
             max_freq,
             base_freq,
+            pref_rank,
             trans_lat_ns,
             l2_id,
             l3_id,
