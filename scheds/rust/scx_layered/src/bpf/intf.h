@@ -243,6 +243,7 @@ enum layer_match_kind {
 	MATCH_SCXCMD_JOIN,
 
 	NR_LAYER_MATCH_KINDS,
+	MATCH_PID_TGID_EQUALS,
 };
 
 struct layer_match {
@@ -257,6 +258,7 @@ struct layer_match {
 	u32		ppid;
 	u32		tgid;
 	u64		nsid;
+	u32		pid_tgid_eq;
 };
 
 struct layer_match_ands {

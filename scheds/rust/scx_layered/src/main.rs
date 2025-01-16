@@ -1183,6 +1183,10 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::consts_SCXCMD_OP_JOIN as i32;
                             copy_into_cstr(&mut mt.comm_prefix, joincmd);
                         }
+                        LayerMatch::TgidPidEq(polarity) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_PID_TGID_EQUALS as i32;
+                            mt.pid_tgid_eq = *polarity;
+                        }
                     }
                 }
                 layer.matches[or_i].nr_match_ands = or.len() as i32;

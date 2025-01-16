@@ -1838,6 +1838,11 @@ static __noinline bool match_one(struct layer_match *match,
 		return match_prefix(match->comm_prefix, taskc->join_layer,
 			SCXCMD_COMLEN);
 	}
+	case MATCH_PID_TGID_EQUALS: {
+		// There is nuance to this around exec(2)s and group leader swaps.
+		// See https://github.com/sched-ext/scx/issues/610 for more details.
+		return p->tgid == p->pid && match->pid_tgid_eq;
+	}
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
 		return result;
@@ -2859,6 +2864,9 @@ static s32 init_layer(int layer_id)
 				break;
 			case MATCH_NS_EQUALS:
 				dbg("%s NSID %lld", header, match->nsid);
+				break;
+			case MATCH_PID_TGID_EQUALS:
+				dbg("%s PID %d", header, match->pid_tgid_eq);
 				break;
 			default:
 				scx_bpf_error("%s Invalid kind", header);
