@@ -259,14 +259,14 @@ impl<'a> App<'a> {
 
         let glob_match = glob("/sys/devices/system/cpu/intel_uncore_frequency/*/current_freq_khz");
         if let Ok(entries) = glob_match {
+            let re = Regex::new(r"package_(\d+)_die_\d+").unwrap();
             for raw_path in entries.flatten() {
                 let path = Path::new(&raw_path);
-                let uncore_freq = read_file_usize(path).unwrap_or(0);
-                let re = Regex::new(r"package_(\d+)_die_\d+").unwrap();
                 if let Some(caps) =
                     re.captures(raw_path.to_str().expect("failed to get str from path"))
                 {
                     let package_id: usize = caps[1].parse().unwrap();
+                    let uncore_freq = read_file_usize(path).unwrap_or(0);
                     for cpu in self.topo.all_cpus.values() {
                         if cpu.package_id != package_id {
                             continue;
@@ -340,7 +340,7 @@ impl<'a> App<'a> {
             .event_data_immut(event.clone())
             .last()
             .copied()
-            .unwrap_or(0 as u64);
+            .unwrap_or(0_u64);
         Bar::default()
             .value(value)
             .label(Line::from(format!(
@@ -484,7 +484,7 @@ impl<'a> App<'a> {
                                             .event_data_immut("uncore_freq".to_string())
                                             .last()
                                             .copied()
-                                            .unwrap_or(0 as u64),
+                                            .unwrap_or(0_u64),
                                     )
                             } else {
                                 "".to_string()
@@ -760,7 +760,7 @@ impl<'a> App<'a> {
             .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(&event.clone()))
             .map(|(dsq_id, dsq_data)| {
                 let values = dsq_data.event_data_immut(event.clone());
-                let value = values.last().copied().unwrap_or(0 as u64);
+                let value = values.last().copied().unwrap_or(0_u64);
                 let stats = VecStats::new(&values, true, true, true, None);
                 self.dsq_bar(*dsq_id, value, stats.avg, stats.max, stats.min)
             })
@@ -785,7 +785,7 @@ impl<'a> App<'a> {
             .filter(|(_llc_id, llc_data)| llc_data.data.data.contains_key(&event.clone()))
             .map(|(llc_id, llc_data)| {
                 let values = llc_data.event_data_immut(event.clone());
-                let value = values.last().copied().unwrap_or(0 as u64);
+                let value = values.last().copied().unwrap_or(0_u64);
                 let stats = VecStats::new(&values, true, true, true, None);
                 self.event_bar(*llc_id, value, stats.avg, stats.max, stats.min)
             })
@@ -799,7 +799,7 @@ impl<'a> App<'a> {
             .filter(|(_node_id, node_data)| node_data.data.data.contains_key(&event.clone()))
             .map(|(node_id, node_data)| {
                 let values = node_data.event_data_immut(event.clone());
-                let value = values.last().copied().unwrap_or(0 as u64);
+                let value = values.last().copied().unwrap_or(0_u64);
                 let stats = VecStats::new(&values, true, true, true, None);
                 self.event_bar(*node_id, value, stats.avg, stats.max, stats.min)
             })
@@ -1218,7 +1218,7 @@ impl<'a> App<'a> {
                                                 .event_data_immut("uncore_freq".to_string())
                                                 .last()
                                                 .copied()
-                                                .unwrap_or(0 as u64),
+                                                .unwrap_or(0_u64),
                                         )
                                 } else {
                                     "".to_string()
@@ -1333,7 +1333,7 @@ impl<'a> App<'a> {
                                                 .event_data_immut("uncore_freq".to_string())
                                                 .last()
                                                 .copied()
-                                                .unwrap_or(0 as u64),
+                                                .unwrap_or(0_u64),
                                         )
                                 } else {
                                     "".to_string()
@@ -1704,7 +1704,7 @@ impl<'a> App<'a> {
                 .event_data_immut("dsq_vtime_delta".to_string())
                 .last()
                 .copied()
-                .unwrap_or(0 as u64);
+                .unwrap_or(0_u64);
             if next_dsq_vtime - last < DSQ_VTIME_CUTOFF {
                 next_dsq_data.add_event_data(
                     "dsq_vtime_delta".to_string(),
@@ -1747,12 +1747,12 @@ impl<'a> App<'a> {
                 }
             }
             Action::NextEvent => {
-                if let Err(_) = self.next_event() {
+                if self.next_event().is_err() {
                     // XXX handle error
                 }
             }
             Action::PrevEvent => {
-                if let Err(_) = self.prev_event() {
+                if self.prev_event().is_err() {
                     // XXX handle error
                 }
             }
@@ -1799,7 +1799,7 @@ impl<'a> App<'a> {
             Action::IncBpfSampleRate => {
                 let sample_rate = self.skel.maps.data_data.sample_rate;
                 if sample_rate == 0 {
-                    self.update_bpf_sample_rate(8 as u32);
+                    self.update_bpf_sample_rate(8_u32);
                 } else {
                     self.update_bpf_sample_rate(sample_rate << 2);
                 }
