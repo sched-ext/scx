@@ -311,6 +311,34 @@ impl Topology {
         }
         sibling_cpu
     }
+
+    /// Returns whether AMD preferred core ranking is enabled on this system
+    pub fn has_pref_rank(&self) -> bool {
+        if !Path::new("/sys/devices/system/cpu/amd_pstate/prefcore").exists() {
+            return false;
+        }
+        match std::fs::read_to_string("/sys/devices/system/cpu/amd_pstate/prefcore") {
+            Ok(contents) => contents.trim() == "enabled",
+            Err(_) => false,
+        }
+    }
+
+    /// Update the pref_rank values for all CPUs in the topology by reading from sysfs
+    pub fn update_pref_ranks(&mut self) -> Result<()> {
+        if !self.has_pref_rank() {
+            return Ok(());
+        }
+    
+        for cpu in self.all_cpus.values_mut() {
+            if let Some(cpu_mut) = Arc::get_mut(cpu) {
+                let cpu_path = Path::new("/sys/devices/system/cpu").join(format!("cpu{}", cpu_mut.id));
+                let freq_path = cpu_path.join("cpufreq");
+                cpu_mut.pref_rank = read_file_usize(&freq_path.join("amd_pstate_prefcore_ranking")).unwrap_or(0);
+            }
+        }
+    
+        Ok(())
+    }
 }
 
 /******************************************************
