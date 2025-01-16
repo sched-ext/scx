@@ -270,7 +270,7 @@ impl Topology {
     #[cfg(feature = "gpu-topology")]
     pub fn gpus(&self) -> BTreeMap<GpuIndex, &Gpu> {
         let mut gpus = BTreeMap::new();
-        for node in &self.nodes {
+        for (_, node) in &self.nodes {
             for (idx, gpu) in &node.gpus {
                 gpus.insert(idx.clone(), gpu);
             }
