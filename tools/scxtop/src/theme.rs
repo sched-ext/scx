@@ -4,7 +4,6 @@
 // GNU General Public License version 2.
 
 use ratatui::style::{Color, Style};
-use serde;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
