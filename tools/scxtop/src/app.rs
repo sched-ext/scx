@@ -514,7 +514,6 @@ impl<'a> App<'a> {
             .llc_data
             .values()
             .map(|llc_data| llc_data.event_data_immut(self.active_hw_event.event.clone()))
-            .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&llc_iter, true, true, true, None);
@@ -610,7 +609,6 @@ impl<'a> App<'a> {
             .node_data
             .values()
             .map(|node_data| node_data.event_data_immut(self.active_hw_event.event.clone()))
-            .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&node_iter, true, true, true, None);
@@ -840,7 +838,6 @@ impl<'a> App<'a> {
             .dsq_data
             .values()
             .map(|dsq_data| dsq_data.event_data_immut(event.clone()))
-            .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&dsq_global_iter, true, true, true, None);
@@ -904,7 +901,8 @@ impl<'a> App<'a> {
             frame.render_widget(block, area);
             return Ok(());
         }
-        let mut dsq_constraints = vec![Constraint::Percentage(2)];
+        let mut dsq_constraints = Vec::with_capacity(num_dsqs + 1);
+        dsq_constraints.push(Constraint::Percentage(2));
 
         for _ in 0..num_dsqs {
             dsq_constraints.push(Constraint::Ratio(1, num_dsqs as u32));
@@ -915,7 +913,6 @@ impl<'a> App<'a> {
             .dsq_data
             .values()
             .map(|dsq_data| dsq_data.event_data_immut(event.clone()))
-            .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&dsq_global_iter, true, true, true, None);
@@ -980,9 +977,7 @@ impl<'a> App<'a> {
             return Ok(());
         }
 
-        let mut dsq_constraints = Vec::new();
-        dsq_constraints.push(Constraint::Percentage(1));
-        dsq_constraints.push(Constraint::Percentage(99));
+        let dsq_constraints = vec![Constraint::Percentage(1), Constraint::Percentage(99)];
         let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
         let sample_rate = self.skel.maps.data_data.sample_rate;
 
@@ -991,7 +986,6 @@ impl<'a> App<'a> {
             .iter()
             .filter(|(_dsq_id, event_data)| event_data.data.contains_key(&event.clone()))
             .map(|(_dsq_id, event_data)| event_data.event_data_immut(event.clone()))
-            .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
 
@@ -1054,9 +1048,7 @@ impl<'a> App<'a> {
             frame.render_widget(block, area);
             return Ok(());
         }
-        let mut dsq_constraints = Vec::new();
-        dsq_constraints.push(Constraint::Percentage(1));
-        dsq_constraints.push(Constraint::Percentage(99));
+        let dsq_constraints = vec![Constraint::Percentage(1), Constraint::Percentage(99)];
         let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
         let sample_rate = self.skel.maps.data_data.sample_rate;
 
@@ -1064,7 +1056,6 @@ impl<'a> App<'a> {
             .dsq_data
             .values()
             .map(|dsq_data| dsq_data.event_data_immut(event.clone()))
-            .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&dsq_global_iter, true, true, true, None);
@@ -1155,13 +1146,12 @@ impl<'a> App<'a> {
                 let node_areas = Layout::vertical(constraints).split(area);
 
                 for (i, node) in self.topo.nodes.values().enumerate() {
-                    let mut node_constraints = Vec::new();
+                    let node_constraints =
+                        vec![Constraint::Percentage(2), Constraint::Percentage(98)];
                     let node_cpus = node.all_cpus.len();
-                    node_constraints.push(Constraint::Percentage(2));
-                    node_constraints.push(Constraint::Percentage(98));
                     let [top, center] = Layout::vertical(node_constraints).areas(node_areas[i]);
-                    let mut cpus_constraints = vec![];
                     let col_scale = if node_cpus <= 128 { 2 } else { 4 };
+                    let mut cpus_constraints = Vec::with_capacity(node_cpus / col_scale);
                     for _ in 0..node_cpus / col_scale {
                         cpus_constraints.push(Constraint::Ratio(1, (node_cpus / col_scale) as u32));
                     }
@@ -1181,7 +1171,6 @@ impl<'a> App<'a> {
                         .map(|cpu_data| {
                             cpu_data.event_data_immut(self.active_hw_event.event.clone())
                         })
-                        .into_iter()
                         .flatten()
                         .collect::<Vec<u64>>();
                     let stats = VecStats::new(&node_iter, true, true, true, None);
@@ -1277,9 +1266,8 @@ impl<'a> App<'a> {
                 let node_areas = Layout::vertical(constraints).split(area);
 
                 for (i, node) in self.topo.nodes.values().enumerate() {
-                    let mut node_constraints = Vec::new();
-                    node_constraints.push(Constraint::Percentage(2));
-                    node_constraints.push(Constraint::Percentage(98));
+                    let node_constraints =
+                        vec![Constraint::Percentage(2), Constraint::Percentage(98)];
                     let [top, bottom] = Layout::vertical(node_constraints).areas(node_areas[i]);
 
                     let node_cpus = node.all_cpus.len();
@@ -1296,7 +1284,6 @@ impl<'a> App<'a> {
                         .map(|cpu_data| {
                             cpu_data.event_data_immut(self.active_hw_event.event.clone())
                         })
-                        .into_iter()
                         .flatten()
                         .collect::<Vec<u64>>();
                     let stats = VecStats::new(&node_iter, true, true, true, None);
