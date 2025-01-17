@@ -576,6 +576,22 @@ static __always_inline void __write_once_size(volatile void *p, void *res, int s
 	__u.__val;					\
 })
 
+#define READ_ONCE_ARENA(type, x)				\
+({								\
+	union { type __val; char __c[1]; } __u =		\
+		{ .__c = { 0 } };				\
+	__read_once_size((void *)&(x), __u.__c, sizeof(x));	\
+	__u.__val;						\
+})
+
+#define WRITE_ONCE_ARENA(type, x, val)				\
+({								\
+	union { type __val; char __c[1]; } __u =		\
+		{ .__val = (val) }; 				\
+	__write_once_size((void *)&(x), __u.__c, sizeof(x));	\
+	__u.__val;						\
+})
+
 /*
  * log2_u32 - Compute the base 2 logarithm of a 32-bit exponential value.
  * @v: The value for which we're computing the base 2 logarithm.

@@ -343,7 +343,6 @@ struct Scheduler<'a> {
     lb_at: SystemTime,
     lb_stats: BTreeMap<usize, NodeStats>,
     time_used: Duration,
-    nr_lb_data_errors: u64,
 
     tuner: Tuner,
     stats_server: StatsServer<StatsCtx, (StatsCtx, ClusterStats)>,
@@ -448,6 +447,17 @@ impl<'a> Scheduler<'a> {
         let struct_ops = Some(scx_ops_attach!(skel, rusty)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
+        for (id, dom) in domains.doms().iter() {
+            let id: usize = id
+                .clone()
+                .try_into()
+                .expect("Could not turn domain ID into usize");
+
+            let mut ctx = dom.ctx.lock().unwrap();
+
+            *ctx = Some(skel.maps.bss_data.doms[id] as *mut bpf_intf::dom_ctx);
+        }
+
         info!("Rusty scheduler started! Run `scx_rusty --monitor` for metrics.");
 
         // Other stuff.
@@ -468,7 +478,6 @@ impl<'a> Scheduler<'a> {
             lb_at: SystemTime::now(),
             lb_stats: BTreeMap::new(),
             time_used: Duration::default(),
-            nr_lb_data_errors: 0,
 
             tuner: Tuner::new(
                 domains,
@@ -524,7 +533,6 @@ impl<'a> Scheduler<'a> {
             nr_migrations: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
 
             task_get_err: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR as usize],
-            lb_data_err: self.nr_lb_data_errors,
             time_used: sc.time_used.as_secs_f64(),
 
             sync_prev_idle: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_SYNC_PREV_IDLE),

@@ -138,11 +138,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use anyhow::bail;
-use anyhow::Context;
 use anyhow::Result;
-use libbpf_rs::MapCore as _;
 use log::debug;
-use log::warn;
 use ordered_float::OrderedFloat;
 use scx_utils::ravg::ravg_read;
 use scx_utils::LoadAggregator;
@@ -166,12 +163,6 @@ fn now_monotonic() -> u64 {
     let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
     assert!(ret == 0);
     time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
-}
-
-fn clear_map(map: &libbpf_rs::Map) {
-    for key in map.keys() {
-        let _ = map.delete(&key);
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -365,29 +356,13 @@ impl Domain {
         }
     }
 
-    fn transfer_load(&mut self, load: f64, task: u64, other: &mut Domain, skel: &mut BpfSkel) {
-        let ctask = (task as u64).to_ne_bytes();
+    fn transfer_load(&mut self, load: f64, taskc: &mut bpf_intf::task_ctx, other: &mut Domain) {
         let dom_id: u32 = other.id.try_into().unwrap();
 
-        // Ask BPF code to execute the migration.
-        if let Err(e) =
-            skel.maps
-                .lb_data
-                .update(&ctask, &dom_id.to_ne_bytes(), libbpf_rs::MapFlags::NO_EXIST)
-        {
-            warn!(
-                "Failed to update lb_data map for task={} error={:?}",
-                task, &e
-            );
-        }
+        taskc.target_dom = dom_id;
 
         self.load.add_load(-load);
         other.load.add_load(load);
-
-        debug!(
-            "  DOM {} sending [task: {:05}](load: {:.06}) --> DOM {} ",
-            self.id, task, load, other.id
-        );
     }
 
     fn xfer_between(&self, other: &Domain) -> f64 {
@@ -583,44 +558,34 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         const NUM_BUCKETS: u64 = bpf_intf::consts_LB_LOAD_BUCKETS as u64;
         let now_mono = now_monotonic();
         let load_half_life = self.skel.maps.rodata_data.load_half_life;
-        let dom_data = &self.skel.maps.dom_data;
 
         let mut aggregator =
             LoadAggregator::new(self.dom_group.weight(), !self.lb_apply_weight.clone());
 
-        for dom_id in self.dom_group.doms().keys() {
-            let dom = *dom_id;
-            let dom_key = (dom as u32).to_ne_bytes();
+        for (dom_id, dom) in self.dom_group.doms() {
+            aggregator.init_domain(*dom_id);
 
-            aggregator.init_domain(dom);
+            let dom_ctx = dom.ctx().unwrap();
 
-            if let Some(dom_ctx_map_elem) = dom_data
-                .lookup(&dom_key, libbpf_rs::MapFlags::ANY)
-                .context("Failed to lookup dom_ctx")?
-            {
-                let dom_ctx =
-                    unsafe { &*(dom_ctx_map_elem.as_slice().as_ptr() as *const bpf_intf::dom_ctx) };
+            for bucket in 0..NUM_BUCKETS {
+                let bucket_ctx = &dom_ctx.buckets[bucket as usize];
+                let rd = &bucket_ctx.rd;
+                let duty_cycle = ravg_read(
+                    rd.val,
+                    rd.val_at,
+                    rd.old,
+                    rd.cur,
+                    now_mono,
+                    load_half_life,
+                    RAVG_FRAC_BITS,
+                );
 
-                for bucket in 0..NUM_BUCKETS {
-                    let bucket_ctx = dom_ctx.buckets[bucket as usize];
-                    let rd = &bucket_ctx.rd;
-                    let duty_cycle = ravg_read(
-                        rd.val,
-                        rd.val_at,
-                        rd.old,
-                        rd.cur,
-                        now_mono,
-                        load_half_life,
-                        RAVG_FRAC_BITS,
-                    );
-
-                    if duty_cycle == 0.0f64 {
-                        continue;
-                    }
-
-                    let weight = self.bucket_weight(bucket);
-                    aggregator.record_dom_load(dom, weight, duty_cycle)?;
+                if duty_cycle == 0.0f64 {
+                    continue;
                 }
+
+                let weight = self.bucket_weight(bucket);
+                aggregator.record_dom_load(*dom_id, weight, duty_cycle)?;
             }
         }
 
@@ -661,12 +626,14 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         // Read active_tasks and update read_idx and gen.
         const MAX_TPTRS: u64 = bpf_intf::consts_MAX_DOM_ACTIVE_TPTRS as u64;
-        let active_tasks = &mut self.skel.maps.bss_data.dom_active_tasks[dom.id];
+        let dom_ctx =
+            unsafe { &mut *(self.skel.maps.bss_data.doms[dom.id] as *mut bpf_intf::dom_ctx) };
+        let active_tasks = &mut dom_ctx.active_tasks;
+
         let (mut ridx, widx) = (active_tasks.read_idx, active_tasks.write_idx);
         active_tasks.read_idx = active_tasks.write_idx;
         active_tasks.gen += 1;
 
-        let active_tasks = &self.skel.maps.bss_data.dom_active_tasks[dom.id];
         if widx - ridx > MAX_TPTRS {
             ridx = widx - MAX_TPTRS;
         }
@@ -679,7 +646,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             let taskc = active_tasks.tasks[(idx % MAX_TPTRS) as usize];
             let task_ctx = unsafe { &*(taskc as *const bpf_intf::task_ctx) };
 
-            if task_ctx.dom_id as usize != dom.id {
+            if task_ctx.target_dom as usize != dom.id {
                 continue;
             }
 
@@ -803,7 +770,11 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         task.migrated.set(true);
         std::mem::swap(&mut push_dom.tasks, &mut SortedVec::from_unsorted(tasks));
 
-        push_dom.transfer_load(load, taskc, pull_dom, self.skel);
+        push_dom.transfer_load(
+            load,
+            unsafe { &mut *(taskc as *mut bpf_intf::task_ctx) },
+            pull_dom,
+        );
         Ok(Some(load))
     }
 
@@ -1085,8 +1056,6 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     }
 
     fn perform_balancing(&mut self) -> Result<()> {
-        clear_map(&self.skel.maps.lb_data);
-
         // First balance load between the NUMA nodes. Balancing here has a
         // higher cost function than balancing between domains inside of NUMA
         // nodes, but the mechanics are the same. Adjustments made here are

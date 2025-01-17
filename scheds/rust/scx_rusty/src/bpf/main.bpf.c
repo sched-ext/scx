@@ -13,9 +13,9 @@
  * they are round-robined to a domain.
  *
  * rusty_select_cpu is the primary scheduling logic, invoked when a task
- * becomes runnable. The lb_data map is populated by userspace to inform the BPF
- * scheduler that a task should be migrated to a new domain. Otherwise, the task
- * is scheduled in priority order as follows:
+ * becomes runnable. A task's target_dom field is populated by userspace to inform 
+ * the BPF scheduler that a task should be migrated to a new domain. Otherwise, 
+ * the task is scheduled in priority order as follows:
  * * The current core if the task was woken up synchronously and there are idle
  *   cpus in the system
  * * The previous core, if idle
@@ -32,8 +32,8 @@
  * queue to run.
  *
  * Load balancing is almost entirely handled by userspace. BPF populates the
- * task weight, dom mask and current dom in the task_data map and executes the
- * load balance based on userspace populating the lb_data map.
+ * task weight, dom mask and current dom in the task map and executes the
+ * load balance based on userspace's setting of the target_dom field.
  */
 
 #ifdef LSP
@@ -47,7 +47,9 @@
 #endif
 
 #include "intf.h"
+#include "sdt_dom.h"
 
+#include <scx/bpf_arena_common.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>
@@ -74,6 +76,7 @@ const volatile u32 dom_numa_id_map[MAX_DOMS];
 const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
 const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 load_half_life = 1000000000	/* 1s */;
+volatile dom_ptr doms[MAX_DOMS];
 
 const volatile bool kthreads_local;
 const volatile bool fifo_sched = false;
@@ -85,8 +88,6 @@ const volatile u32 debug;
 
 /* base slice duration */
 volatile u64 slice_ns;
-
-typedef struct task_ctx __arena * task_ctx_usrptr;
 
 struct bpfmask_wrapper {
 	struct bpf_cpumask __kptr *instance;
@@ -214,26 +215,9 @@ struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
 	__type(value, struct lock_wrapper);
-	__uint(max_entries, MAX_DOMS);
-	__uint(map_flags, 0);
-} dom_vtime_locks SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct lock_wrapper);
 	__uint(max_entries, MAX_DOMS * LB_LOAD_BUCKETS);
 	__uint(map_flags, 0);
 } dom_dcycle_locks SEC(".maps");
-
-struct dom_active_tasks {
-	u64 gen;
-	u64 read_idx;
-	u64 write_idx;
-	task_ctx_usrptr tasks[MAX_DOM_ACTIVE_TPTRS];
-};
-
-struct dom_active_tasks dom_active_tasks[MAX_DOMS];
 
 const u64 ravg_1 = 1 << RAVG_FRAC_BITS;
 
@@ -244,22 +228,6 @@ struct {
 	__uint(max_entries, 1000000);
 	__uint(map_flags, 0);
 } task_masks SEC(".maps");
-
-static struct dom_ctx *try_lookup_dom_ctx(u32 dom_id)
-{
-	return bpf_map_lookup_elem(&dom_data, &dom_id);
-}
-
-static struct dom_ctx *lookup_dom_ctx(u32 dom_id)
-{
-	struct dom_ctx *domc;
-
-	domc = try_lookup_dom_ctx(dom_id);
-	if (!domc)
-		scx_bpf_error("Failed to lookup dom[%u]", dom_id);
-
-	return domc;
-}
 
 static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
 {
@@ -312,6 +280,14 @@ static struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, struct bpf_c
 	return taskc;
 }
 
+static dom_ptr task_domain(struct task_ctx *taskc)
+{
+	dom_ptr domc = taskc->domc;
+
+	cast_kern(domc);
+
+	return domc;
+}
 
 static struct pcpu_ctx *lookup_pcpu_ctx(s32 cpu)
 {
@@ -337,14 +313,14 @@ static void task_load_adj(struct task_ctx *taskc,
 	ravg_accumulate(&taskc->dcyc_rd, taskc->runnable, now, load_half_life);
 }
 
-static struct bucket_ctx *lookup_dom_bucket(struct dom_ctx *dom_ctx,
+static struct bucket_ctx *lookup_dom_bucket(dom_ptr dom_ctx,
 					    u32 weight, u32 *bucket_id)
 {
 	u32 idx = weight_to_bucket_idx(weight);
 	struct bucket_ctx *bucket;
 
 	*bucket_id = idx;
-	bucket = MEMBER_VPTR(dom_ctx->buckets, [idx]);
+	bucket = (struct bucket_ctx *)&dom_ctx->buckets[idx];
 	if (bucket)
 		return bucket;
 
@@ -365,17 +341,6 @@ static struct lock_wrapper *lookup_dom_bkt_lock(u32 dom_id, u32 weight)
 	return NULL;
 }
 
-static struct lock_wrapper *lookup_dom_vtime_lock(u32 dom_id)
-{
-	struct lock_wrapper *lockw;
-	u32 idx = dom_id;
-
-	lockw = bpf_map_lookup_elem(&dom_vtime_locks, &idx);
-	if (!lockw)
-		scx_bpf_error("Failed to lookup dom lock");
-
-	return lockw;
-}
 
 static u64 scale_up_fair(u64 value, u64 weight)
 {
@@ -387,16 +352,17 @@ static u64 scale_inverse_fair(u64 value, u64 weight)
 	return value * 100 / weight;
 }
 
-static void dom_dcycle_adj(u32 dom_id, u32 weight, u64 now, bool runnable)
+static void dom_dcycle_adj(dom_ptr domc, u32 weight, u64 now, bool runnable)
 {
-	struct dom_ctx *domc;
 	struct bucket_ctx *bucket;
 	struct lock_wrapper *lockw;
 	s64 adj = runnable ? 1 : -1;
 	u32 bucket_idx = 0;
+	u32 dom_id;
 
-	if (!(domc = lookup_dom_ctx(dom_id)))
-		return;
+	cast_kern(domc);
+
+	dom_id = domc->id;
 
 	bucket = lookup_dom_bucket(domc, weight, &bucket_idx);
 	lockw = lookup_dom_bkt_lock(dom_id, weight);
@@ -424,8 +390,8 @@ static void dom_dcycle_adj(u32 dom_id, u32 weight, u64 now, bool runnable)
 }
 
 static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
-			         struct dom_ctx *from_domc,
-				 struct dom_ctx *to_domc, u64 now)
+			         dom_ptr from_domc,
+				 dom_ptr to_domc, u64 now)
 {
 	struct bucket_ctx *from_bucket, *to_bucket;
 	u32 idx = 0, weight = taskc->weight;
@@ -497,21 +463,21 @@ static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
 			   to_dcycle[1] >> RAVG_FRAC_BITS);
 }
 
-static u64 dom_min_vruntime(struct dom_ctx *domc)
+static u64 dom_min_vruntime(dom_ptr domc)
 {
-	return READ_ONCE(domc->min_vruntime);
+	return READ_ONCE_ARENA(u64, domc->min_vruntime);
 }
 
 int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now)
 {
-	struct dom_ctx *from_domc, *to_domc;
+	dom_ptr from_domc, to_domc;
 	struct task_ctx *taskc;
 
 	taskc = lookup_task_ctx(p);
 	if (!taskc)
 		return 0;
 
-	from_domc = lookup_dom_ctx(taskc->dom_id);
+	from_domc = task_domain(taskc);
 	to_domc = lookup_dom_ctx(new_dom_id);
 
 	if (!from_domc || !to_domc || !taskc)
@@ -539,18 +505,6 @@ static inline void stat_add(enum stat_idx idx, u64 addend)
 	if (cnt_p)
 		(*cnt_p) += addend;
 }
-
-/*
- * This is populated from userspace to indicate which tasks should be reassigned
- * to new doms.
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, u64);
-	__type(value, u32);
-	__uint(max_entries, 1000);
-	__uint(map_flags, 0);
-} lb_data SEC(".maps");
 
 /*
  * Userspace tuner will frequently update the following struct with tuning
@@ -597,24 +551,24 @@ static void refresh_tune_params(void)
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		u32 dom_id = cpu_to_dom_id(cpu);
-		struct dom_ctx *domc;
+		struct lb_domain *dval;
 
 		if (is_offline_cpu(cpu))
 			continue;
 
-		if (!(domc = lookup_dom_ctx(dom_id)))
+		if (!(dval = sdt_dom_val(dom_id)))
 			return;
 
 		if (tune_input.direct_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
 			if (direct_greedy_cpumask)
 				bpf_cpumask_set_cpu(cpu, direct_greedy_cpumask);
-			if (domc->direct_greedy_cpumask)
-				bpf_cpumask_set_cpu(cpu, domc->direct_greedy_cpumask);
+			if (dval->direct_greedy_cpumask)
+				bpf_cpumask_set_cpu(cpu, dval->direct_greedy_cpumask);
 		} else {
 			if (direct_greedy_cpumask)
 				bpf_cpumask_clear_cpu(cpu, direct_greedy_cpumask);
-			if (domc->direct_greedy_cpumask)
-				bpf_cpumask_clear_cpu(cpu, domc->direct_greedy_cpumask);
+			if (dval->direct_greedy_cpumask)
+				bpf_cpumask_clear_cpu(cpu, dval->direct_greedy_cpumask);
 		}
 
 		if (tune_input.kick_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
@@ -821,9 +775,9 @@ static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
 static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 enq_flags)
 {
 	u64 dom_vruntime, min_vruntime;
-	struct dom_ctx *domc;
+	dom_ptr domc;
 
-	if (!(domc = lookup_dom_ctx(taskc->dom_id)))
+	if (!(domc = task_domain(taskc)))
 		return;
 
 	dom_vruntime = dom_min_vruntime(domc);
@@ -846,8 +800,9 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 static bool task_set_domain(struct task_struct *p __arg_trusted,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
-	struct dom_ctx *old_domc, *new_domc;
+	dom_ptr old_domc, new_domc;
 	struct bpf_cpumask *d_cpumask, *t_cpumask;
+	struct lb_domain *new_dval;
 	struct task_ctx *taskc;
 	u32 old_dom_id;
 
@@ -857,7 +812,7 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 		return false;
 	}
 
-	old_dom_id = taskc->dom_id;
+	old_dom_id = taskc->target_dom;
 	old_domc = lookup_dom_ctx(old_dom_id);
 	if (!old_domc)
 		return false;
@@ -867,11 +822,17 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 		return !(p->scx.flags & SCX_TASK_QUEUED);
 	}
 
-	new_domc = lookup_dom_ctx(new_dom_id);
+	new_domc = try_lookup_dom_ctx_arena(new_dom_id);
 	if (!new_domc)
 		return false;
 
-	d_cpumask = new_domc->cpumask;
+	new_dval = sdt_dom_val(new_dom_id);
+	if (!new_dval) {
+		scx_bpf_error("no dval for dom%d\n", new_dom_id);
+		return false;
+	}
+
+	d_cpumask = new_dval->cpumask;
 	if (!d_cpumask) {
 		scx_bpf_error("Failed to get dom%u cpumask kptr",
 			      new_dom_id);
@@ -889,14 +850,17 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 		if (!init_dsq_vtime)
 			dom_xfer_task(p, new_dom_id, now);
 
-		taskc->dom_id = new_dom_id;
+		taskc->target_dom = new_dom_id;
+		taskc->domc = new_domc;
+
+		cast_kern(new_domc);
 		p->scx.dsq_vtime = dom_min_vruntime(new_domc);
 		taskc->deadline = p->scx.dsq_vtime +
 				  scale_inverse_fair(taskc->avg_runtime, taskc->weight);
 		bpf_cpumask_and(t_cpumask, cast_mask(d_cpumask), p->cpus_ptr);
 	}
 
-	return taskc->dom_id == new_dom_id;
+	return taskc->target_dom == new_dom_id;
 }
 
 
@@ -907,7 +871,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 	s32 cpu;
 	const struct cpumask *idle_cpumask;
 	bool share_llc, has_idle;
-	struct dom_ctx *domc;
+	struct lb_domain *dval;
 	struct bpf_cpumask *d_cpumask;
 	struct pcpu_ctx *pcpuc;
 
@@ -916,14 +880,14 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 	if (!pcpuc)
 		return -ENOENT;
 
-	domc = lookup_dom_ctx(pcpuc->dom_id);
-	if (!domc)
+	dval = sdt_dom_val(pcpuc->dom_id);
+	if (!dval)
 		return -ENOENT;
 
-	d_cpumask = domc->cpumask;
+	d_cpumask = dval->cpumask;
 	if (!d_cpumask) {
 		scx_bpf_error("Failed to acquire dom%u cpumask kptr",
-				taskc->dom_id);
+				taskc->target_dom);
 		return -ENOENT;
 	}
 
@@ -940,7 +904,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 	has_idle = bpf_cpumask_intersects(cast_mask(d_cpumask), idle_cpumask);
 
 	if (has_idle && bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
-	    !(current->flags & PF_EXITING) && taskc->dom_id < MAX_DOMS &&
+	    !(current->flags & PF_EXITING) && taskc->target_dom < MAX_DOMS &&
 	    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) == 0) {
 		stat_add(RUSTY_STAT_WAKE_SYNC, 1);
 		goto out;
@@ -1060,7 +1024,8 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (taskc->all_cpus && direct_greedy_cpumask &&
 	    !bpf_cpumask_empty(cast_mask(direct_greedy_cpumask))) {
 		u32 dom_id = cpu_to_dom_id(prev_cpu);
-		struct dom_ctx *domc;
+		dom_ptr domc;
+		struct lb_domain *dval;
 		struct bpf_cpumask *tmp_direct_greedy, *node_mask;
 
 		/*
@@ -1078,6 +1043,11 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		else if (!(domc = lookup_dom_ctx(dom_id)))
 			goto enoent;
 
+		if (!(dval = sdt_dom_val(domc->id))) {
+			scx_bpf_error("Failed to lookup domain map value");
+			goto enoent;
+		}
+
 		tmp_direct_greedy = direct_greedy_cpumask;
 		if (!tmp_direct_greedy) {
 			scx_bpf_error("Failed to lookup direct_greedy mask");
@@ -1092,7 +1062,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 * working set may end up spanning multiple NUMA nodes.
 		 */
 		if (!direct_greedy_numa && domc) {
-			node_mask = domc->node_cpumask;
+			node_mask = dval->node_cpumask;
 			if (!node_mask) {
 				scx_bpf_error("Failed to lookup node mask");
 				goto enoent;
@@ -1111,8 +1081,8 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 		/* Try to find an idle core in the previous and then any domain */
 		if (has_idle_cores) {
-			if (domc && domc->direct_greedy_cpumask) {
-				cpu = scx_bpf_pick_idle_cpu(cast_mask(domc->direct_greedy_cpumask),
+			if (domc && dval->direct_greedy_cpumask) {
+				cpu = scx_bpf_pick_idle_cpu(cast_mask(dval->direct_greedy_cpumask),
 							    SCX_PICK_IDLE_CORE);
 				if (cpu >= 0) {
 					stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
@@ -1133,8 +1103,8 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		/*
 		 * No idle core. Is there any idle CPU?
 		 */
-		if (domc && domc->direct_greedy_cpumask) {
-			cpu = scx_bpf_pick_idle_cpu(cast_mask(domc->direct_greedy_cpumask), 0);
+		if (domc && dval->direct_greedy_cpumask) {
+			cpu = scx_bpf_pick_idle_cpu(cast_mask(dval->direct_greedy_cpumask), 0);
 			if (cpu >= 0) {
 				stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
 				goto direct;
@@ -1181,27 +1151,29 @@ static void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
 			  u64 enq_flags)
 {
 	clamp_task_vtime(p, taskc, enq_flags);
-	scx_bpf_dsq_insert_vtime(p, taskc->dom_id, slice_ns, taskc->deadline,
+	scx_bpf_dsq_insert_vtime(p, taskc->target_dom, slice_ns, taskc->deadline,
 				 enq_flags);
 }
 
 void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
 {
 	struct task_ctx *taskc;
-	struct task_struct *key = p;
+	dom_ptr domc;
 	struct bpf_cpumask *p_cpumask;
-	u32 *new_dom;
 	s32 cpu = -1;
 
 	if (!(taskc = lookup_task_ctx_mask(p, &p_cpumask)) || !p_cpumask)
 		return;
 
+	domc = task_domain(taskc);
+	if (!domc)
+		return;
+
 	/*
-	 * Migrate @p to a new domain if requested by userland through lb_data.
+	 * Migrate @p to a new domain if requested by userland by setting target_dom.
 	 */
-	new_dom = bpf_map_lookup_elem(&lb_data, &key);
-	if (new_dom && *new_dom != taskc->dom_id &&
-	    task_set_domain(p, *new_dom, false)) {
+	if (domc->id != taskc->target_dom &&
+	    task_set_domain(p, domc->id, false)) {
 		stat_add(RUSTY_STAT_LOAD_BALANCE, 1);
 		taskc->dispatch_local = false;
 		cpu = bpf_cpumask_any_distribute(cast_mask(p_cpumask));
@@ -1233,7 +1205,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 
 dom_queue:
 	if (fifo_sched)
-		scx_bpf_dsq_insert(p, taskc->dom_id, slice_ns, enq_flags);
+		scx_bpf_dsq_insert(p, taskc->target_dom, slice_ns, enq_flags);
 	else
 		place_task_dl(p, taskc, enq_flags);
 
@@ -1272,14 +1244,14 @@ dom_queue:
 
 static bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
 {
-	struct dom_ctx *domc;
+	struct lb_domain *dval;
 	struct bpf_cpumask *dmask;
 
-	domc = lookup_dom_ctx(dom_id);
-	if (!domc)
+	dval = sdt_dom_val(dom_id);
+	if (!dval)
 		return false;
 
-	dmask = domc->cpumask;
+	dmask = dval->cpumask;
 	if (!dmask)
 		return false;
 
@@ -1455,7 +1427,7 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 	wakee_ctx->is_kworker = p->flags & PF_WQ_WORKER;
 
 	task_load_adj(wakee_ctx, now, true);
-	dom_dcycle_adj(wakee_ctx->dom_id, wakee_ctx->weight, now, true);
+	dom_dcycle_adj(wakee_ctx->domc, wakee_ctx->weight, now, true);
 
 	if (fifo_sched)
 		return;
@@ -1473,32 +1445,31 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 
 static void running_update_vtime(struct task_struct *p,
 				 struct task_ctx *taskc,
-				 struct dom_ctx *domc)
+				 dom_ptr domc)
 {
-	struct lock_wrapper* lockw = lookup_dom_vtime_lock(domc->id);
+	struct bpf_spin_lock * lock = lookup_dom_vtime_lock(domc);
 
-	if (!lockw)
+	if (!lock)
 		return;
 
-	bpf_spin_lock(&lockw->lock);
+	bpf_spin_lock(lock);
 	if (time_before(dom_min_vruntime(domc), p->scx.dsq_vtime))
-		WRITE_ONCE(domc->min_vruntime, p->scx.dsq_vtime);
-	bpf_spin_unlock(&lockw->lock);
+		WRITE_ONCE_ARENA(u64, domc->min_vruntime, p->scx.dsq_vtime);
+	bpf_spin_unlock(lock);
 }
 
 void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 {
-	task_ctx_usrptr usrptr = sdt_task_data(p);
-	task_ctx_usrptr *taskp;
+	task_ptr usrptr = (task_ptr)sdt_task_data(p);
 	struct task_ctx *taskc;
-	struct dom_ctx *domc;
-	u32 dom_id, dap_gen;
+	dom_ptr domc;
+	u32 dap_gen;
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	dom_id = taskc->dom_id;
-	if (dom_id >= MAX_DOMS) {
+	domc = task_domain(taskc);
+	if (!domc) {
 		scx_bpf_error("Invalid dom ID");
 		return;
 	}
@@ -1508,30 +1479,25 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	 * consider recently active tasks. Access synchronization rules aren't
 	 * strict. We just need to be right most of the time.
 	 */
-	dap_gen = dom_active_tasks[dom_id].gen;
+	dap_gen = domc->active_tasks.gen;
 	if (taskc->dom_active_tasks_gen != dap_gen) {
-		u64 idx = __sync_fetch_and_add(&dom_active_tasks[dom_id].write_idx, 1) %
+		u64 idx = __sync_fetch_and_add(&domc->active_tasks.write_idx, 1) %
 			MAX_DOM_ACTIVE_TPTRS;
 
-		taskp = MEMBER_VPTR(dom_active_tasks, [dom_id].tasks[idx]);
-		if (!taskp) {
-			scx_bpf_error("dom_active_tasks[%u][%llu] indexing failed",
-				      dom_id, idx);
+		if (idx >= MAX_DOM_ACTIVE_TPTRS) {
+			scx_bpf_error("dom_active_tasks[%u][%llu] out of bounds indexing",
+				      domc->id, idx);
 			return;
 		}
 
-		usrptr = sdt_task_data(p);
+		usrptr = (task_ptr)sdt_task_data(p);
 		cast_user(usrptr);
 
-		*taskp = usrptr;
+		domc->active_tasks.tasks[idx] = usrptr;
 		taskc->dom_active_tasks_gen = dap_gen;
 	}
 
 	if (fifo_sched)
-		return;
-
-	domc = lookup_dom_ctx(dom_id);
-	if (!domc)
 		return;
 
 	running_update_vtime(p, taskc, domc);
@@ -1540,13 +1506,9 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 
 static void stopping_update_vtime(struct task_struct *p,
 				  struct task_ctx *taskc,
-				  struct dom_ctx *domc)
+				  dom_ptr domc)
 {
-	struct lock_wrapper* lockw = lookup_dom_vtime_lock(domc->id);
 	u64 now, delta;
-
-	if (!lockw)
-		return;
 
 	now = scx_bpf_now();
 	delta = now - taskc->last_run_at;
@@ -1561,7 +1523,7 @@ static void stopping_update_vtime(struct task_struct *p,
 void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
 {
 	struct task_ctx *taskc;
-	struct dom_ctx *domc;
+	dom_ptr domc;
 
 	if (fifo_sched)
 		return;
@@ -1569,7 +1531,7 @@ void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	if (!(domc = lookup_dom_ctx(taskc->dom_id)))
+	if (!(domc = task_domain(taskc)))
 		return;
 
 	stopping_update_vtime(p, taskc, domc);
@@ -1579,18 +1541,18 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 {
 	u64 now = scx_bpf_now(), interval;
 	struct task_ctx *taskc;
-	struct dom_ctx *domc;
+	dom_ptr domc;
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	task_load_adj(taskc, now, false);
-	dom_dcycle_adj(taskc->dom_id, taskc->weight, now, false);
-
-	if (fifo_sched)
+	if (!(domc = task_domain(taskc)))
 		return;
 
-	if (!(domc = lookup_dom_ctx(taskc->dom_id)))
+	task_load_adj(taskc, now, false);
+	dom_dcycle_adj(domc, taskc->weight, now, false);
+
+	if (fifo_sched)
 		return;
 
 	interval = now - taskc->last_blocked_at;
@@ -1804,9 +1766,10 @@ static s32 create_node(u32 node_id)
 
 static s32 create_dom(u32 dom_id)
 {
-	struct dom_ctx *domc;
+	dom_ptr domc;
 	struct node_ctx *nodec;
 	struct bpf_cpumask *dom_mask, *node_mask, *all_mask;
+	struct lb_domain *dval;
 	u32 cpu, node_id;
 	s32 ret;
 
@@ -1817,24 +1780,38 @@ static s32 create_dom(u32 dom_id)
 
 	node_id = dom_node_id(dom_id);
 
+	domc = sdt_dom_alloc(dom_id);
+	if (!domc)
+		return -ENOMEM;
+
+	doms[dom_id] = domc;
+	cast_user(doms[dom_id]);
+
+	dval = sdt_dom_val(dom_id);
+	if (!dval) {
+		scx_bpf_error("could not retrieve dom%d data\n", dom_id);
+		sdt_dom_free(domc);
+		return -EINVAL;
+	}
+
 	ret = scx_bpf_create_dsq(dom_id, node_id);
 	if (ret < 0) {
 		scx_bpf_error("Failed to create dsq %u (%d)", dom_id, ret);
 		return ret;
 	}
 
-	domc = lookup_dom_ctx(dom_id);
-	if (!domc)
-		return -ENOENT;
-
 	domc->id = dom_id;
 
-	ret = create_save_cpumask(&domc->cpumask);
+	ret = create_save_cpumask(&dval->cpumask);
 	if (ret)
 		return ret;
 
+	bpf_printk("Created domain %d (%p)", dom_id, &dval->cpumask);
+	if (!dval->cpumask)
+		scx_bpf_error("NULL");
+
 	bpf_rcu_read_lock();
-	dom_mask = domc->cpumask;
+	dom_mask = dval->cpumask;
 	all_mask = all_cpumask;
 	if (!dom_mask || !all_mask) {
 		bpf_rcu_read_unlock();
@@ -1861,7 +1838,7 @@ static s32 create_dom(u32 dom_id)
 	if (ret)
 		return ret;
 
-	ret = create_save_cpumask(&domc->direct_greedy_cpumask);
+	ret = create_save_cpumask(&dval->direct_greedy_cpumask);
 	if (ret)
 		return ret;
 
@@ -1871,13 +1848,13 @@ static s32 create_dom(u32 dom_id)
 		scx_bpf_error("No node%u", node_id);
 		return -ENOENT;
 	}
-	ret = create_save_cpumask(&domc->node_cpumask);
+	ret = create_save_cpumask(&dval->node_cpumask);
 	if (ret)
 		return ret;
 
 	bpf_rcu_read_lock();
 	node_mask = nodec->cpumask;
-	dom_mask = domc->node_cpumask;
+	dom_mask = dval->node_cpumask;
 	if (!node_mask || !dom_mask) {
 		bpf_rcu_read_unlock();
 		scx_bpf_error("cpumask lookup failed");
@@ -1891,7 +1868,6 @@ static s32 create_dom(u32 dom_id)
 
 static s32 initialize_cpu(s32 cpu)
 {
-	struct bpf_cpumask *cpumask;
 	struct pcpu_ctx *pcpuc = lookup_pcpu_ctx(cpu);
 	u32 i;
 
@@ -1901,21 +1877,20 @@ static s32 initialize_cpu(s32 cpu)
 	pcpuc->dom_rr_cur = cpu;
 	bpf_for(i, 0, nr_doms) {
 		bool in_dom;
-		struct dom_ctx *domc;
+		struct lb_domain *dval;
 
-		domc = lookup_dom_ctx(i);
-		if (!domc)
+		dval = sdt_dom_val(i);
+		if (!dval)
 			return -ENOENT;
 
 		bpf_rcu_read_lock();
-		cpumask = domc->cpumask;
-		if (!cpumask) {
+		if (!dval->cpumask) {
 			bpf_rcu_read_unlock();
-			scx_bpf_error("Failed to lookup dom node cpumask");
+			scx_bpf_error("Failed to lookup dom node %d cpumask %p", i, &dval->cpumask);
 			return -ENOENT;
 		}
 
-		in_dom = bpf_cpumask_test_cpu(cpu, cast_mask(cpumask));
+		in_dom = bpf_cpumask_test_cpu(cpu, cast_mask(dval->cpumask));
 		bpf_rcu_read_unlock();
 		if (in_dom) {
 			pcpuc->dom_id = i;
@@ -1935,6 +1910,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 		return ret;
 
 	ret = sdt_task_init(sizeof(struct task_ctx));
+	if (ret)
+		return ret;
+
+	ret = sdt_dom_init();
 	if (ret)
 		return ret;
 

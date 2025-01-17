@@ -120,8 +120,6 @@ pub struct ClusterStats {
 
     #[stat(desc = "# of BPF task get errors")]
     pub task_get_err: u64,
-    #[stat(desc = "# of BPF lb data get errros")]
-    pub lb_data_err: u64,
     #[stat(desc = "time spent running scheduler userspace")]
     pub time_used: f64,
 
@@ -169,12 +167,11 @@ impl ClusterStats {
     pub fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "cpu={:7.2} load={:8.2} mig={} task_err={} lb_data_err={} time_used={:4.1}ms",
+            "cpu={:7.2} load={:8.2} mig={} task_err={} time_used={:4.1}ms",
             self.cpu_busy,
             self.load,
             self.nr_migrations,
             self.task_get_err,
-            self.lb_data_err,
             self.time_used * 1000.0,
         )?;
         writeln!(
