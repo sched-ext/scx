@@ -2290,6 +2290,18 @@ void BPF_STRUCT_OPS(layered_set_weight, struct task_struct *p, u32 weight)
 		taskc->refresh_layer = true;
 }
 
+static void refresh_cpus_flags(struct task_ctx *taskc,
+			       const struct cpumask *cpumask)
+{
+	if (!all_cpumask) {
+		scx_bpf_error("NULL all_cpumask");
+		return;
+	}
+
+	taskc->all_cpus_allowed =
+		bpf_cpumask_subset(cast_mask(all_cpumask), cpumask);
+}
+
 void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
@@ -2298,13 +2310,7 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	if (!all_cpumask) {
-		scx_bpf_error("NULL all_cpumask");
-		return;
-	}
-
-	taskc->all_cpus_allowed =
-		bpf_cpumask_subset(cast_mask(all_cpumask), cpumask);
+	refresh_cpus_flags(taskc, cpumask);
 }
 
 void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
@@ -2404,11 +2410,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	 */
 	taskc->runtime_avg = slice_ns / 4;
 
-	if (all_cpumask)
-		taskc->all_cpus_allowed =
-			bpf_cpumask_subset(cast_mask(all_cpumask), p->cpus_ptr);
-	else
-		scx_bpf_error("missing all_cpumask");
+	refresh_cpus_flags(taskc, p->cpus_ptr);
 
 	/*
 	 * We are matching cgroup hierarchy path directly rather than the CPU
