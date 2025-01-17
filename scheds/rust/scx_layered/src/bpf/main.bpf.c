@@ -894,7 +894,10 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	 * assigned, it will trigger LLC draining which isn't great. Find an
 	 * in-layer CPU and put it there instead.
 	 *
-	 * TODO - This should become node aware.
+	 * FIXME: This is most likely wrong and causing unnecessary xllc
+	 * migrations while saturated. Always returning @prev_cpu is likely a
+	 * better behavior. Ideally, this should be scoped so that it returns
+	 * the closest allowed layer CPU to @prev_cpu.
 	 */
 	if (taskc->all_cpus_allowed) {
 		const struct cpumask *layer_cpumask;
