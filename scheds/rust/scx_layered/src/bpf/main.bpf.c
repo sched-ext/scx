@@ -408,6 +408,8 @@ struct task_ctx {
 	/* for llcc->queue_runtime */
 	u32			qrt_layer_id;
 	u32			qrt_llc_id;
+
+	char 			join_layer[SCXCMD_COMLEN];
 };
 
 struct {
@@ -491,13 +493,59 @@ int BPF_PROG(tp_cgroup_attach_task, struct cgroup *cgrp, const char *cgrp_path,
 	return 0;
 }
 
+static int handle_cmd(struct task_ctx *taskc, struct scx_cmd *cmd)
+{
+
+	_Static_assert(sizeof(*cmd) == MAX_COMM, "scx_cmd has wrong size");
+
+	bpf_printk("received cmd");
+
+	/* Is this a valid command? */
+	if (cmd->prefix != SCXCMD_PREFIX)
+		return 0;
+
+	switch (cmd->opcode) {
+	case SCXCMD_OP_NONE:
+		break;
+
+	case SCXCMD_OP_JOIN:
+		__builtin_memcpy(taskc->join_layer, cmd->cmd, SCXCMD_COMLEN);
+		break;
+
+	case SCXCMD_OP_LEAVE:
+		__builtin_memset(taskc->join_layer, 0, SCXCMD_COMLEN);
+		break;
+
+	default:
+		break;
+	}
+
+	return 0;
+}
+
+
 SEC("tp_btf/task_rename")
 int BPF_PROG(tp_task_rename, struct task_struct *p, const char *buf)
 {
 	struct task_ctx *taskc;
+	struct scx_cmd cmd;
+	int ret;
 
-	if ((taskc = lookup_task_ctx_may_fail(p)))
-		taskc->refresh_layer = true;
+	if (!(taskc = lookup_task_ctx_may_fail(p))) {
+		bpf_printk("could not find task on rename");
+		return -EINVAL;
+	}
+
+	taskc->refresh_layer = true;
+
+	ret = bpf_probe_read_str(&cmd, sizeof(cmd), buf);
+	if (ret < 0) {
+		bpf_printk("could not new task name on rename");
+		return -EINVAL;
+	}
+
+	handle_cmd(taskc, &cmd);
+
 	return 0;
 }
 

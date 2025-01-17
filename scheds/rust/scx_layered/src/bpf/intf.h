@@ -56,7 +56,14 @@ enum consts {
 	NSEC_PER_USEC		= 1000ULL,
 	NSEC_PER_MSEC		= (1000ULL * NSEC_PER_USEC),
 	MSEC_PER_SEC		= 1000ULL,
-	NSEC_PER_SEC		= NSEC_PER_MSEC * MSEC_PER_SEC
+	NSEC_PER_SEC		= NSEC_PER_MSEC * MSEC_PER_SEC,
+
+	SCXCMD_OP_NONE 		= 0,
+	SCXCMD_OP_JOIN 		= 1,
+	SCXCMD_OP_LEAVE 	= 2,
+
+	SCXCMD_PREFIX		= 0x5C10,
+	SCXCMD_COMLEN		= 13,
 };
 
 static inline void ___consts_sanity_check___(void) {
@@ -306,5 +313,11 @@ struct layer {
 
 	char			name[MAX_LAYER_NAME];
 };
+
+struct scx_cmd {
+	u16			prefix;
+	u8 			opcode;
+	u8			cmd[SCXCMD_COMLEN];
+} __attribute__((packed));
 
 #endif /* __INTF_H */
