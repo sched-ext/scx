@@ -455,7 +455,7 @@ impl<'a> Scheduler<'a> {
 
             let mut ctx = dom.ctx.lock().unwrap();
 
-            *ctx = Some(skel.maps.bss_data.doms[id] as *mut bpf_intf::dom_ctx);
+            *ctx = Some(skel.maps.bss_data.dom_ctxs[id] as *mut bpf_intf::dom_ctx);
         }
 
         info!("Rusty scheduler started! Run `scx_rusty --monitor` for metrics.");
