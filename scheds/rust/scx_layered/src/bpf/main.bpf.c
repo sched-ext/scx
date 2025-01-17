@@ -2475,18 +2475,12 @@ static void dump_layer_cpumask(int id)
 		return;
 
 	bpf_for(cpu, 0, scx_bpf_nr_cpu_ids()) {
-		if (!(p = MEMBER_VPTR(buf, [id++])))
+		if (!(p = MEMBER_VPTR(buf, [cpu])))
 			break;
 		if (bpf_cpumask_test_cpu(cpu, layer_cpumask))
-			*p++ = '0' + cpu % 10;
+			*p = '0' + cpu % 10;
 		else
-			*p++ = '.';
-
-		if ((cpu & 7) == 7) {
-			if (!(p = MEMBER_VPTR(buf, [id++])))
-				break;
-			*p++ = '|';
-		}
+			*p = '.';
 	}
 	buf[sizeof(buf) - 1] = '\0';
 

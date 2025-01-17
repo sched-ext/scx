@@ -207,26 +207,26 @@ struct Split {
 
 impl std::fmt::Display for Split {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "Split Cell({}), Score({})\n", self.cell, self.score)?;
-        write!(f, "g1:\n")?;
+        writeln!(f, "Split Cell({}), Score({})", self.cell, self.score)?;
+        writeln!(f, "g1:")?;
         for cg in self.g1.iter() {
             if cg.load == 0.0 && cg.pinned_load == 0.0 {
                 continue;
             }
-            write!(
+            writeln!(
                 f,
-                "/{}: load={} pinned_load={}\n",
+                "/{}: load={} pinned_load={}",
                 cg.name, cg.load, cg.pinned_load
             )?;
         }
-        write!(f, "g2:\n")?;
+        writeln!(f, "g2:")?;
         for cg in self.g2.iter() {
             if cg.load == 0.0 && cg.pinned_load == 0.0 {
                 continue;
             }
-            write!(
+            writeln!(
                 f,
-                "/{}: load={} pinned_load={}\n",
+                "/{}: load={} pinned_load={}",
                 cg.name, cg.load, cg.pinned_load
             )?;
         }
@@ -566,7 +566,7 @@ impl<'a> Scheduler<'a> {
         if self.cells.len() < 2 {
             // Find the best scoring split out of all the Cells.
             for (cell_idx, cell) in self.cells.iter() {
-                let split = self.find_best_split(cell, *cell_idx as u32)?;
+                let split = self.find_best_split(cell, *cell_idx)?;
                 if let Some(ref sp) = split {
                     match ret {
                         Some(SplitOrMerge::Split(ref bsp)) if bsp.score > sp.score => {}

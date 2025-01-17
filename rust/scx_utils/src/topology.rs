@@ -124,6 +124,7 @@ pub struct Cpu {
     pub core_id: usize,
     pub llc_id: usize,
     pub node_id: usize,
+    pub package_id: usize,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -269,7 +270,7 @@ impl Topology {
     #[cfg(feature = "gpu-topology")]
     pub fn gpus(&self) -> BTreeMap<GpuIndex, &Gpu> {
         let mut gpus = BTreeMap::new();
-        for node in &self.nodes {
+        for (_, node) in &self.nodes {
             for (idx, gpu) in &node.gpus {
                 gpus.insert(idx.clone(), gpu);
             }
@@ -416,6 +417,7 @@ fn create_insert_cpu(
     // Physical core ID
     let top_path = cpu_path.join("topology");
     let core_kernel_id = read_file_usize(&top_path.join("core_id"))?;
+    let package_id = read_file_usize(&top_path.join("physical_package_id"))?;
 
     // Evaluate L2, L3 and LLC cache IDs.
     //
@@ -504,6 +506,7 @@ fn create_insert_cpu(
             core_id: *core_id,
             llc_id: *llc_id,
             node_id: node.id,
+            package_id: package_id,
         }),
     );
 

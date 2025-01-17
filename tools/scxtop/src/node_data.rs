@@ -22,9 +22,9 @@ impl NodeData {
             data.event_data(event.event.clone());
         }
         Self {
-            node: node,
-            data: data,
-            max_data_size: max_data_size,
+            node,
+            data,
+            max_data_size,
         }
     }
 

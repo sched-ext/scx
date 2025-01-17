@@ -100,9 +100,9 @@ impl PerfEvent {
     /// Creates a PerfEvent.
     pub fn new(subsystem: String, event: String, cpu: usize) -> Self {
         Self {
-            subsystem: subsystem,
-            event: event,
-            cpu: cpu,
+            subsystem,
+            event,
+            cpu,
             fd: 0,
             freq: 0,
         }
@@ -305,10 +305,8 @@ impl PerfEvent {
             {
                 return Err(anyhow!("failed to read perf event {:?}", self));
             }
-            if reset {
-                if perf::ioctls::RESET(self.fd as i32, 0) < 0 {
-                    return Err(anyhow!("failed to reset perf event: {}", self.event));
-                }
+            if reset && perf::ioctls::RESET(self.fd as i32, 0) < 0 {
+                return Err(anyhow!("failed to reset perf event: {}", self.event));
             }
         }
         Ok(count)

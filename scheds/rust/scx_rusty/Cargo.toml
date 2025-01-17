@@ -30,3 +30,6 @@ scx_utils = { path = "../../../rust/scx_utils", version = "1.0.9" }
 
 [features]
 enable_backtrace = []
+
+[lints.clippy]
+non_canonical_partial_ord_impl = "allow"

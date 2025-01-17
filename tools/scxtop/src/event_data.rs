@@ -17,7 +17,7 @@ impl EventData {
     pub fn new(max_data_size: usize) -> EventData {
         Self {
             data: BTreeMap::new(),
-            max_data_size: max_data_size,
+            max_data_size,
         }
     }
 

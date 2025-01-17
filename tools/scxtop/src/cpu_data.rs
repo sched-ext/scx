@@ -25,12 +25,12 @@ impl CpuData {
             data.event_data(event.event.clone());
         }
         Self {
-            llc: llc,
-            node: node,
-            core: core,
-            cpu: cpu,
-            data: data,
-            max_data_size: max_data_size,
+            llc,
+            node,
+            core,
+            cpu,
+            data,
+            max_data_size,
         }
     }
 

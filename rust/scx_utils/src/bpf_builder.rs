@@ -291,7 +291,7 @@ impl BpfBuilder {
     fn input_insert_deps(&self, deps: &mut BTreeSet<String>) -> () {
         let (input, _) = match &self.intf_input_output {
             Some(pair) => pair,
-            None => return (),
+            None => return,
         };
 
         // Tell cargo to invalidate the built crate whenever the wrapper changes
@@ -419,14 +419,10 @@ impl BpfBuilder {
         println!("cargo:rerun-if-env-changed=BPF_BASE_CFLAGS");
         println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_PRE_INCL");
         println!("cargo:rerun-if-env-changed=BPF_EXTRA_CFLAGS_POST_INCL");
-        match dependencies {
-            Some(deps) => {
-                for dep in deps.iter() {
-                    println!("cargo:rerun-if-changed={}", dep);
-                }
+        if let Some(deps) = dependencies {
+            for dep in deps.iter() {
+                println!("cargo:rerun-if-changed={}", dep);
             }
-
-            None => (),
         };
 
         for source in self.sources.iter() {

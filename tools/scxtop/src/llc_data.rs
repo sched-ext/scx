@@ -24,10 +24,10 @@ impl LlcData {
         }
 
         Self {
-            llc: llc,
-            node: node,
-            data: data,
-            max_data_size: max_data_size,
+            llc,
+            node,
+            data,
+            max_data_size,
         }
     }
 

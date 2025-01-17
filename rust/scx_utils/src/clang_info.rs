@@ -139,16 +139,13 @@ impl ClangInfo {
 
         let mut endian = None;
         for line in stdout.lines() {
-            match sscanf!(line, "#define __BYTE_ORDER__ {str}") {
-                Ok(v) => {
-                    endian = Some(match v {
-                        "__ORDER_LITTLE_ENDIAN__" => "little",
-                        "__ORDER_BIG_ENDIAN__" => "big",
-                        v => bail!("Unknown __BYTE_ORDER__ {:?}", v),
-                    });
-                    break;
-                }
-                _ => {}
+            if let Ok(v) = sscanf!(line, "#define __BYTE_ORDER__ {str}") {
+                endian = Some(match v {
+                    "__ORDER_LITTLE_ENDIAN__" => "little",
+                    "__ORDER_BIG_ENDIAN__" => "big",
+                    v => bail!("Unknown __BYTE_ORDER__ {:?}", v),
+                });
+                break;
             }
         }
         let endian = match endian {

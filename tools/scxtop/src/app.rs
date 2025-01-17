@@ -22,6 +22,7 @@ use crate::APP;
 use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use anyhow::Result;
+use glob::glob;
 use ratatui::prelude::Constraint;
 use ratatui::{
     layout::{Alignment, Direction, Layout, Rect},
@@ -34,6 +35,7 @@ use ratatui::{
     },
     Frame,
 };
+use regex::Regex;
 use scx_utils::misc::read_file_usize;
 use scx_utils::Topology;
 use std::collections::{BTreeMap, HashSet};
@@ -61,6 +63,7 @@ pub struct App<'a> {
     pub skel: BpfSkel<'a>,
     topo: Topology,
     collect_cpu_freq: bool,
+    collect_uncore_freq: bool,
     event_scroll_state: ScrollbarState,
     event_scroll: u16,
 
@@ -92,7 +95,7 @@ impl<'a> App<'a> {
         let mut node_data = BTreeMap::new();
         let mut active_perf_events = BTreeMap::new();
         let active_hw_event = PerfEvent::new("hw".to_string(), "cycles".to_string(), 0);
-        let perf_events = available_perf_events()?;
+        let available_perf_events = available_perf_events()?;
         let available_events = PerfEvent::default_events();
         for cpu in topo.all_cpus.values() {
             let mut event = PerfEvent::new("hw".to_string(), "cycles".to_string(), cpu.id);
@@ -115,31 +118,32 @@ impl<'a> App<'a> {
         }
 
         let app = Self {
-            scheduler: scheduler,
-            max_cpu_events: max_cpu_events,
-            keymap: keymap,
+            scheduler,
+            max_cpu_events,
+            keymap,
             theme: AppTheme::Default,
             state: AppState::Default,
             view_state: ViewState::BarChart,
             prev_state: AppState::Default,
             counter: 0,
-            tick_rate_ms: tick_rate_ms,
+            tick_rate_ms,
             should_quit: Arc::new(AtomicBool::new(false)),
-            action_tx: action_tx,
-            skel: skel,
-            topo: topo,
+            action_tx,
+            skel,
+            topo,
             collect_cpu_freq: true,
-            cpu_data: cpu_data,
-            llc_data: llc_data,
-            node_data: node_data,
+            collect_uncore_freq: true,
+            cpu_data,
+            llc_data,
+            node_data,
             dsq_data: BTreeMap::new(),
-            event_scroll_state: ScrollbarState::new(perf_events.len()).position(0),
+            event_scroll_state: ScrollbarState::new(available_perf_events.len()).position(0),
             event_scroll: 0,
             active_hw_event_id: 0,
-            active_hw_event: active_hw_event,
-            available_perf_events: perf_events,
-            active_perf_events: active_perf_events,
-            available_events: available_events,
+            active_hw_event,
+            available_perf_events,
+            active_perf_events,
+            available_events,
         };
 
         Ok(app)
@@ -185,7 +189,7 @@ impl<'a> App<'a> {
         let perf_event = &self.available_events[self.active_hw_event_id].clone();
 
         self.active_hw_event = perf_event.clone();
-        self.activate_perf_event(&perf_event)
+        self.activate_perf_event(perf_event)
     }
 
     /// Activates the previous event.
@@ -199,7 +203,7 @@ impl<'a> App<'a> {
         let perf_event = &self.available_events[self.active_hw_event_id].clone();
 
         self.active_hw_event = perf_event.clone();
-        self.activate_perf_event(&perf_event)
+        self.activate_perf_event(perf_event)
     }
 
     /// Activates the next view state.
@@ -241,6 +245,40 @@ impl<'a> App<'a> {
             ));
 
             cpu_data.add_event_data("cpu_freq".to_string(), freq as u64);
+        }
+        Ok(())
+    }
+
+    fn record_uncore_freq(&mut self) -> Result<()> {
+        // XXX: this only works with intel uncore frequency kernel module
+        let base_path = Path::new("/sys/devices/system/cpu/intel_uncore_frequency");
+        if self.collect_uncore_freq && !base_path.exists() {
+            self.collect_uncore_freq = false;
+            return Ok(());
+        }
+
+        let glob_match = glob("/sys/devices/system/cpu/intel_uncore_frequency/*/current_freq_khz");
+        if let Ok(entries) = glob_match {
+            let re = Regex::new(r"package_(\d+)_die_\d+").unwrap();
+            for raw_path in entries.flatten() {
+                let path = Path::new(&raw_path);
+                if let Some(caps) =
+                    re.captures(raw_path.to_str().expect("failed to get str from path"))
+                {
+                    let package_id: usize = caps[1].parse().unwrap();
+                    let uncore_freq = read_file_usize(path).unwrap_or(0);
+                    for cpu in self.topo.all_cpus.values() {
+                        if cpu.package_id != package_id {
+                            continue;
+                        }
+                        let node_data = self
+                            .node_data
+                            .entry(cpu.node_id)
+                            .or_insert(NodeData::new(cpu.node_id, self.max_cpu_events));
+                        node_data.add_event_data("uncore_freq".to_string(), uncore_freq as u64);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -287,6 +325,9 @@ impl<'a> App<'a> {
         if self.collect_cpu_freq {
             self.record_cpu_freq()?;
         }
+        if self.collect_uncore_freq {
+            self.record_uncore_freq()?;
+        }
         Ok(())
     }
 
@@ -299,7 +340,7 @@ impl<'a> App<'a> {
             .event_data_immut(event.clone())
             .last()
             .copied()
-            .unwrap_or(0 as u64);
+            .unwrap_or(0_u64);
         Bar::default()
             .value(value)
             .label(Line::from(format!(
@@ -397,11 +438,14 @@ impl<'a> App<'a> {
                     })
                     .style(self.theme.border_style())
                     .border_type(BorderType::Rounded)
-                    .title_alignment(Alignment::Left)
-                    .title(format!(
-                        "LLC {} avg {} max {} min {}",
-                        llc, stats.avg, stats.max, stats.min
-                    )),
+                    .title_top(
+                        Line::from(format!(
+                            "LLC {} avg {} max {} min {}",
+                            llc, stats.avg, stats.max, stats.min
+                        ))
+                        .style(self.theme.title_style())
+                        .left_aligned(),
+                    ),
             )
     }
 
@@ -428,11 +472,35 @@ impl<'a> App<'a> {
                     })
                     .border_type(BorderType::Rounded)
                     .style(self.theme.border_style())
-                    .title_alignment(Alignment::Left)
-                    .title(format!(
-                        "Node {} avg {} max {} min {}",
-                        node, stats.avg, stats.max, stats.min
-                    )),
+                    .title_top(
+                        Line::from(format!(
+                            "{}",
+                            if self.collect_uncore_freq {
+                                "uncore ".to_string()
+                                    + &format_hz(
+                                        self.node_data
+                                            .get(&node)
+                                            .unwrap()
+                                            .event_data_immut("uncore_freq".to_string())
+                                            .last()
+                                            .copied()
+                                            .unwrap_or(0_u64),
+                                    )
+                            } else {
+                                "".to_string()
+                            }
+                        ))
+                        .style(self.theme.text_important_color())
+                        .right_aligned(),
+                    )
+                    .title_top(
+                        Line::from(format!(
+                            "Node {} avg {} max {} min {}",
+                            node, stats.avg, stats.max, stats.min
+                        ))
+                        .style(self.theme.title_style())
+                        .left_aligned(),
+                    ),
             )
     }
 
@@ -446,7 +514,6 @@ impl<'a> App<'a> {
             .llc_data
             .values()
             .map(|llc_data| llc_data.event_data_immut(self.active_hw_event.event.clone()))
-            .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&llc_iter, true, true, true, None);
@@ -474,7 +541,6 @@ impl<'a> App<'a> {
                             .style(self.theme.text_important_color())
                             .right_aligned(),
                     )
-                    .title_alignment(Alignment::Center)
                     .style(self.theme.border_style());
 
                 frame.render_widget(llc_block, llcs_verticle[0]);
@@ -543,7 +609,6 @@ impl<'a> App<'a> {
             .node_data
             .values()
             .map(|node_data| node_data.event_data_immut(self.active_hw_event.event.clone()))
-            .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&node_iter, true, true, true, None);
@@ -693,7 +758,7 @@ impl<'a> App<'a> {
             .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(&event.clone()))
             .map(|(dsq_id, dsq_data)| {
                 let values = dsq_data.event_data_immut(event.clone());
-                let value = values.last().copied().unwrap_or(0 as u64);
+                let value = values.last().copied().unwrap_or(0_u64);
                 let stats = VecStats::new(&values, true, true, true, None);
                 self.dsq_bar(*dsq_id, value, stats.avg, stats.max, stats.min)
             })
@@ -718,7 +783,7 @@ impl<'a> App<'a> {
             .filter(|(_llc_id, llc_data)| llc_data.data.data.contains_key(&event.clone()))
             .map(|(llc_id, llc_data)| {
                 let values = llc_data.event_data_immut(event.clone());
-                let value = values.last().copied().unwrap_or(0 as u64);
+                let value = values.last().copied().unwrap_or(0_u64);
                 let stats = VecStats::new(&values, true, true, true, None);
                 self.event_bar(*llc_id, value, stats.avg, stats.max, stats.min)
             })
@@ -732,7 +797,7 @@ impl<'a> App<'a> {
             .filter(|(_node_id, node_data)| node_data.data.data.contains_key(&event.clone()))
             .map(|(node_id, node_data)| {
                 let values = node_data.event_data_immut(event.clone());
-                let value = values.last().copied().unwrap_or(0 as u64);
+                let value = values.last().copied().unwrap_or(0_u64);
                 let stats = VecStats::new(&values, true, true, true, None);
                 self.event_bar(*node_id, value, stats.avg, stats.max, stats.min)
             })
@@ -773,7 +838,6 @@ impl<'a> App<'a> {
             .dsq_data
             .values()
             .map(|dsq_data| dsq_data.event_data_immut(event.clone()))
-            .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&dsq_global_iter, true, true, true, None);
@@ -837,7 +901,8 @@ impl<'a> App<'a> {
             frame.render_widget(block, area);
             return Ok(());
         }
-        let mut dsq_constraints = vec![Constraint::Percentage(2)];
+        let mut dsq_constraints = Vec::with_capacity(num_dsqs + 1);
+        dsq_constraints.push(Constraint::Percentage(2));
 
         for _ in 0..num_dsqs {
             dsq_constraints.push(Constraint::Ratio(1, num_dsqs as u32));
@@ -848,7 +913,6 @@ impl<'a> App<'a> {
             .dsq_data
             .values()
             .map(|dsq_data| dsq_data.event_data_immut(event.clone()))
-            .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&dsq_global_iter, true, true, true, None);
@@ -913,9 +977,7 @@ impl<'a> App<'a> {
             return Ok(());
         }
 
-        let mut dsq_constraints = Vec::new();
-        dsq_constraints.push(Constraint::Percentage(1));
-        dsq_constraints.push(Constraint::Percentage(99));
+        let dsq_constraints = vec![Constraint::Percentage(1), Constraint::Percentage(99)];
         let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
         let sample_rate = self.skel.maps.data_data.sample_rate;
 
@@ -924,7 +986,6 @@ impl<'a> App<'a> {
             .iter()
             .filter(|(_dsq_id, event_data)| event_data.data.contains_key(&event.clone()))
             .map(|(_dsq_id, event_data)| event_data.event_data_immut(event.clone()))
-            .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
 
@@ -987,9 +1048,7 @@ impl<'a> App<'a> {
             frame.render_widget(block, area);
             return Ok(());
         }
-        let mut dsq_constraints = Vec::new();
-        dsq_constraints.push(Constraint::Percentage(1));
-        dsq_constraints.push(Constraint::Percentage(99));
+        let dsq_constraints = vec![Constraint::Percentage(1), Constraint::Percentage(99)];
         let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
         let sample_rate = self.skel.maps.data_data.sample_rate;
 
@@ -997,7 +1056,6 @@ impl<'a> App<'a> {
             .dsq_data
             .values()
             .map(|dsq_data| dsq_data.event_data_immut(event.clone()))
-            .into_iter()
             .flatten()
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&dsq_global_iter, true, true, true, None);
@@ -1088,13 +1146,12 @@ impl<'a> App<'a> {
                 let node_areas = Layout::vertical(constraints).split(area);
 
                 for (i, node) in self.topo.nodes.values().enumerate() {
-                    let mut node_constraints = Vec::new();
+                    let node_constraints =
+                        vec![Constraint::Percentage(2), Constraint::Percentage(98)];
                     let node_cpus = node.all_cpus.len();
-                    node_constraints.push(Constraint::Percentage(2));
-                    node_constraints.push(Constraint::Percentage(98));
                     let [top, center] = Layout::vertical(node_constraints).areas(node_areas[i]);
-                    let mut cpus_constraints = vec![];
                     let col_scale = if node_cpus <= 128 { 2 } else { 4 };
+                    let mut cpus_constraints = Vec::with_capacity(node_cpus / col_scale);
                     for _ in 0..node_cpus / col_scale {
                         cpus_constraints.push(Constraint::Ratio(1, (node_cpus / col_scale) as u32));
                     }
@@ -1114,7 +1171,6 @@ impl<'a> App<'a> {
                         .map(|cpu_data| {
                             cpu_data.event_data_immut(self.active_hw_event.event.clone())
                         })
-                        .into_iter()
                         .flatten()
                         .collect::<Vec<u64>>();
                     let stats = VecStats::new(&node_iter, true, true, true, None);
@@ -1139,6 +1195,27 @@ impl<'a> App<'a> {
                         } else {
                             Line::from("")
                         })
+                        .title_top(
+                            Line::from(format!(
+                                "{}",
+                                if self.collect_uncore_freq {
+                                    "uncore ".to_string()
+                                        + &format_hz(
+                                            self.node_data
+                                                .get(&node.id)
+                                                .unwrap()
+                                                .event_data_immut("uncore_freq".to_string())
+                                                .last()
+                                                .copied()
+                                                .unwrap_or(0_u64),
+                                        )
+                                } else {
+                                    "".to_string()
+                                }
+                            ))
+                            .style(self.theme.text_important_color())
+                            .left_aligned(),
+                        )
                         .border_type(BorderType::Rounded)
                         .style(self.theme.border_style());
 
@@ -1189,9 +1266,8 @@ impl<'a> App<'a> {
                 let node_areas = Layout::vertical(constraints).split(area);
 
                 for (i, node) in self.topo.nodes.values().enumerate() {
-                    let mut node_constraints = Vec::new();
-                    node_constraints.push(Constraint::Percentage(2));
-                    node_constraints.push(Constraint::Percentage(98));
+                    let node_constraints =
+                        vec![Constraint::Percentage(2), Constraint::Percentage(98)];
                     let [top, bottom] = Layout::vertical(node_constraints).areas(node_areas[i]);
 
                     let node_cpus = node.all_cpus.len();
@@ -1208,7 +1284,6 @@ impl<'a> App<'a> {
                         .map(|cpu_data| {
                             cpu_data.event_data_immut(self.active_hw_event.event.clone())
                         })
-                        .into_iter()
                         .flatten()
                         .collect::<Vec<u64>>();
                     let stats = VecStats::new(&node_iter, true, true, true, None);
@@ -1233,6 +1308,27 @@ impl<'a> App<'a> {
                         } else {
                             Line::from("")
                         })
+                        .title_top(
+                            Line::from(format!(
+                                "{}",
+                                if self.collect_uncore_freq {
+                                    "uncore ".to_string()
+                                        + &format_hz(
+                                            self.node_data
+                                                .get(&node.id)
+                                                .unwrap()
+                                                .event_data_immut("uncore_freq".to_string())
+                                                .last()
+                                                .copied()
+                                                .unwrap_or(0_u64),
+                                        )
+                                } else {
+                                    "".to_string()
+                                }
+                            ))
+                            .style(self.theme.text_important_color())
+                            .left_aligned(),
+                        )
                         .border_type(BorderType::Rounded)
                         .style(self.theme.border_style());
 
@@ -1355,6 +1451,14 @@ impl<'a> App<'a> {
                     "{}: Enable CPU frequency ({})",
                     self.keymap.action_keys_string(Action::ToggleCpuFreq),
                     self.collect_cpu_freq
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: Enable uncore frequency ({})",
+                    self.keymap.action_keys_string(Action::ToggleUncoreFreq),
+                    self.collect_uncore_freq
                 ),
                 Style::default(),
             )),
@@ -1587,7 +1691,7 @@ impl<'a> App<'a> {
                 .event_data_immut("dsq_vtime_delta".to_string())
                 .last()
                 .copied()
-                .unwrap_or(0 as u64);
+                .unwrap_or(0_u64);
             if next_dsq_vtime - last < DSQ_VTIME_CUTOFF {
                 next_dsq_data.add_event_data(
                     "dsq_vtime_delta".to_string(),
@@ -1630,12 +1734,12 @@ impl<'a> App<'a> {
                 }
             }
             Action::NextEvent => {
-                if let Err(_) = self.next_event() {
+                if self.next_event().is_err() {
                     // XXX handle error
                 }
             }
             Action::PrevEvent => {
-                if let Err(_) = self.prev_event() {
+                if self.prev_event().is_err() {
                     // XXX handle error
                 }
             }
@@ -1678,10 +1782,11 @@ impl<'a> App<'a> {
                 self.tick_rate_ms = tick_rate_ms as usize;
             }
             Action::ToggleCpuFreq => self.collect_cpu_freq = !self.collect_cpu_freq,
+            Action::ToggleUncoreFreq => self.collect_uncore_freq = !self.collect_uncore_freq,
             Action::IncBpfSampleRate => {
                 let sample_rate = self.skel.maps.data_data.sample_rate;
                 if sample_rate == 0 {
-                    self.update_bpf_sample_rate(8 as u32);
+                    self.update_bpf_sample_rate(8_u32);
                 } else {
                     self.update_bpf_sample_rate(sample_rate << 2);
                 }

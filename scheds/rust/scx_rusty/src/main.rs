@@ -256,11 +256,7 @@ fn read_cpu_busy_and_total(reader: &procfs::ProcReader) -> Result<(u64, u64)> {
 }
 
 pub fn sub_or_zero(curr: &u64, prev: &u64) -> u64 {
-    if let Some(res) = curr.checked_sub(*prev) {
-        res
-    } else {
-        0
-    }
+    curr.checked_sub(*prev).unwrap_or(0u64)
 }
 
 #[derive(Clone, Debug)]
