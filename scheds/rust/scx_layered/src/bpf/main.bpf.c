@@ -399,6 +399,7 @@ struct task_ctx {
 	struct cached_cpus	layered_cpus_node;
 	struct bpf_cpumask __kptr *layered_node_mask;
 	bool			all_cpus_allowed;
+	bool			cpus_node_aligned;
 	u64			runnable_at;
 	u64			running_at;
 	u64			runtime_avg;
@@ -2293,13 +2294,32 @@ void BPF_STRUCT_OPS(layered_set_weight, struct task_struct *p, u32 weight)
 static void refresh_cpus_flags(struct task_ctx *taskc,
 			       const struct cpumask *cpumask)
 {
+	u32 node_id;
+
 	if (!all_cpumask) {
 		scx_bpf_error("NULL all_cpumask");
 		return;
 	}
 
-	taskc->all_cpus_allowed =
-		bpf_cpumask_subset(cast_mask(all_cpumask), cpumask);
+	taskc->all_cpus_allowed = bpf_cpumask_subset(cast_mask(all_cpumask), cpumask);
+
+	taskc->cpus_node_aligned = true;
+
+	bpf_for(node_id, 0, nr_nodes) {
+		struct node_ctx *nodec;
+		const struct cpumask *node_cpumask;
+
+		if (!(nodec = lookup_node_ctx(node_id)) ||
+		    !(node_cpumask = cast_mask(nodec->cpumask)))
+			return;
+
+		/* not llc aligned if partially overlaps */
+		if (bpf_cpumask_intersects(node_cpumask, cpumask) &&
+		    !bpf_cpumask_subset(node_cpumask, cpumask)) {
+			taskc->cpus_node_aligned = false;
+			break;
+		}
+	}
 }
 
 void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
