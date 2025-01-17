@@ -1140,18 +1140,22 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Put tasks with custom affinities or from empty layers into the low
-	 * fallback DSQ which is guaranteed the lo_fb_share_ppk fraction of each
-	 * CPU once the tasks have been queued on it longer than lo_fb_wait_ns.
+	 * Tasks with custom affinities or from empty layers can stall if put
+	 * into layer DSQs. Put them into a low fallback DSQ which is guaranteed
+	 * the lo_fb_share_ppk fraction of each CPU once the tasks have been
+	 * queued on it longer than lo_fb_wait_ns.
 	 *
 	 * When racing against layer CPU allocation updates, tasks with full
 	 * affninty may end up in the DSQs of an empty layer. They are handled
 	 * by the fallback_cpu.
 	 *
-	 * FIXME: This must be made node-aware so that tasks that are
-	 * node-affined don't get thrown into lo fallback DSQs.
+	 * FIXME: ->allow_node_aligned is a hack to support node-affine tasks
+	 * without making the whole scheduler node aware and should only be used
+	 * with open layers on non-saturated machines to avoid possible stalls.
 	 */
-	if (!taskc->all_cpus_allowed || !layer->nr_cpus) {
+	if ((!taskc->all_cpus_allowed &&
+	     !(layer->allow_node_aligned && taskc->cpus_node_aligned)) ||
+	    !layer->nr_cpus) {
 		taskc->dsq_id = task_cpuc->lo_fb_dsq_id;
 		/*
 		 * Start a new lo fallback queued region if the DSQ is empty.

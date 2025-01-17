@@ -286,6 +286,7 @@ struct layer {
 	bool			preempt;
 	bool			preempt_first;
 	bool			exclusive;
+	bool			allow_node_aligned;
 	int			growth_algo;
 
 	u64			nr_tasks;
