@@ -73,6 +73,7 @@ pub enum LayerMatch {
     TGIDEquals(u32),
     NSPIDEquals(u64, u32),
     NSEquals(u32),
+    CmdJoin(String),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -1170,6 +1170,10 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_NS_EQUALS as i32;
                             mt.nsid = *nsid as u64;
                         }
+                        LayerMatch::CmdJoin(joincmd) => {
+                            mt.kind = bpf_intf::consts_SCXCMD_OP_JOIN as i32;
+                            copy_into_cstr(&mut mt.comm_prefix, joincmd);
+                        }
                     }
                 }
                 layer.matches[or_i].nr_match_ands = or.len() as i32;

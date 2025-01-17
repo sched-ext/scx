@@ -1816,6 +1816,20 @@ static __noinline bool match_one(struct layer_match *match,
 		bpf_rcu_read_unlock();
 		return nsid == match->nsid;
 	}
+	case MATCH_SCXCMD_JOIN: {
+		struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
+		if (!taskc) {
+			scx_bpf_error("could not find task");
+			return false;
+		}
+
+		/* The empty string means "no join command". */
+		if (!taskc->join_layer[0])
+			return false;
+
+		return match_prefix(match->comm_prefix, taskc->join_layer,
+			SCXCMD_COMLEN);
+	}
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
 		return result;
