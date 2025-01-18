@@ -148,6 +148,11 @@ impl PerfEvent {
             "stalled-cycles-frontend".to_string(),
             0,
         ));
+        avail_events.push(PerfEvent::new(
+            "hw".to_string(),
+            "bus-cycles".to_string(),
+            0,
+        ));
 
         avail_events
     }
@@ -228,6 +233,9 @@ impl PerfEvent {
                     }
                     "stalled-cycles-frontend" => {
                         attrs.config = perf::bindings::PERF_COUNT_HW_STALLED_CYCLES_FRONTEND as u64;
+                    }
+                    "bus-cycles" | "bus_cycles" => {
+                        attrs.config = perf::bindings::PERF_COUNT_HW_BUS_CYCLES as u64;
                     }
                     _ => {
                         return Err(anyhow!("unknown event"));
