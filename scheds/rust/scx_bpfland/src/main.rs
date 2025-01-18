@@ -177,6 +177,12 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_l3: bool,
 
+    /// Enable CPU frequency control (only with schedutil governor).
+    ///
+    /// With this option enabled the CPU frequency will be automatically scaled based on the load.
+    #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
+    cpufreq: bool,
+
     /// [DEPRECATED] Maximum threshold of voluntary context switches per second. This is used to
     /// classify interactive.
     ///
@@ -276,8 +282,7 @@ impl<'a> Scheduler<'a> {
         {
             warn!("failed to initialize primary domain: error {}", err);
         }
-        if let Err(err) = Self::init_cpufreq_perf(&mut skel, &opts.primary_domain, &energy_profile)
-        {
+        if let Err(err) = Self::init_cpufreq_perf(&mut skel, &opts.primary_domain, opts.cpufreq) {
             warn!(
                 "failed to initialize cpufreq performance level: error {}",
                 err
@@ -404,17 +409,14 @@ impl<'a> Scheduler<'a> {
     fn init_cpufreq_perf(
         skel: &mut BpfSkel<'_>,
         primary_domain: &String,
-        energy_profile: &String,
+        auto: bool,
     ) -> Result<()> {
+        // If we are using the powersave profile always scale the CPU frequency to the minimum,
+        // otherwise use the maximum, unless automatic frequency scaling is enabled.
         let perf_lvl: i64 = match primary_domain.as_str() {
-            "auto" => match energy_profile.as_str() {
-                "performance" | "balance_performance" => 1024,
-                "power" | "powersave" => 0,
-                &_ => -1,
-            },
-            "performance" => 1024,
             "powersave" => 0,
-            _ => -1,
+            _ if auto => -1,
+            _ => 1024,
         };
         info!(
             "cpufreq performance level: {}",
@@ -442,7 +444,7 @@ impl<'a> Scheduler<'a> {
                 if let Err(err) = Self::init_cpufreq_perf(
                     &mut self.skel,
                     &self.opts.primary_domain,
-                    &energy_profile,
+                    self.opts.cpufreq,
                 ) {
                     warn!("failed to refresh cpufreq performance level: error {}", err);
                 }
