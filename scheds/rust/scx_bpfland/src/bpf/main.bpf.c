@@ -79,7 +79,7 @@ volatile u64 nr_kthread_dispatches, nr_direct_dispatches, nr_shared_dispatches;
 /*
  * Amount of currently running tasks.
  */
-volatile u64 nr_running, nr_interactive;
+volatile u64 nr_running;
 
 /*
  * Amount of online CPUs.
@@ -153,13 +153,6 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *l3_cpumask;
 
 	/*
-	 * Voluntary context switches metrics.
-	 */
-	u64 nvcsw;
-	u64 nvcsw_ts;
-	u64 avg_nvcsw;
-
-	/*
 	 * Task's average used time slice.
 	 */
 	u64 exec_runtime;
@@ -186,11 +179,6 @@ struct task_ctx {
 	 * for latency-sensitive tasks.
 	 */
 	u64 deadline;
-
-	/*
-	 * Set to true if the task is classified as interactive.
-	 */
-	bool is_interactive;
 };
 
 /* Map that contains task-local storage. */
@@ -257,26 +245,6 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 		bpf_cpumask_release(cpumask);
 
 	return 0;
-}
-
-/*
- * Exponential weighted moving average (EWMA).
- *
- * Copied from scx_lavd. Returns the new average as:
- *
- *	new_avg := (old_avg * .75) + (new_val * .25);
- */
-static u64 calc_avg(u64 old_val, u64 new_val)
-{
-	return (old_val - (old_val >> 2)) + (new_val >> 2);
-}
-
-/*
- * Evaluate the EWMA limited to the range [low ... high]
- */
-static u64 calc_avg_clamp(u64 old_val, u64 new_val, u64 low, u64 high)
-{
-	return CLAMP(calc_avg(old_val, new_val), low, high);
 }
 
 /*
@@ -858,14 +826,6 @@ static void update_cpuperf_target(struct task_struct *p, struct task_ctx *tctx)
 		return;
 
 	/*
-	 * Auto mode: always tset max performance for interactive tasks.
-	 */
-	if (tctx->is_interactive) {
-		scx_bpf_cpuperf_set(cpu, SCX_CPUPERF_ONE);
-		return;
-	}
-
-	/*
 	 * For non-interactive tasks determine their cpufreq scaling factor as
 	 * a function of their CPU utilization.
 	 */
@@ -881,13 +841,6 @@ static void update_cpuperf_target(struct task_struct *p, struct task_ctx *tctx)
 	delta_runtime = cctx->tot_runtime - cctx->prev_runtime;
 	perf_lvl = delta_runtime * SCX_CPUPERF_ONE / delta_t;
 
-	/*
-	 * If interactive tasks detection is disabled, always boost the
-	 * frequency to make sure it's at least 50%, to prevent being too
-	 * conservative.
-	 */
-	if (!nvcsw_max_thresh)
-		perf_lvl += SCX_CPUPERF_ONE / 2;
 	perf_lvl = MIN(perf_lvl, SCX_CPUPERF_ONE);
 
 	/*
@@ -916,12 +869,6 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	update_cpuperf_target(p, tctx);
 
 	/*
-	 * Update CPU interactive state.
-	 */
-	if (tctx->is_interactive)
-		__sync_fetch_and_add(&nr_interactive, 1);
-
-	/*
 	 * Update the global vruntime as a new task is starting to use a
 	 * CPU.
 	 */
@@ -937,7 +884,6 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 {
 	u64 now = scx_bpf_now(), slice;
 	s32 cpu = scx_bpf_task_cpu(p);
-	s64 delta_t;
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 
@@ -952,9 +898,6 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
-
-	if (tctx->is_interactive)
-		__sync_fetch_and_sub(&nr_interactive, 1);
 
 	/*
 	 * Evaluate the time slice used by the task.
@@ -974,61 +917,6 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 * Update task's vruntime.
 	 */
 	tctx->deadline += scale_inverse_fair(p, slice);
-
-	if (!nvcsw_max_thresh)
-		return;
-
-	/*
-	 * If the time slice is not fully depleted, it means that the task
-	 * voluntarily relased the CPU, therefore update the voluntary context
-	 * switch counter.
-	 *
-	 * NOTE: the sched_ext core implements sched_yield() by setting the
-	 * time slice to 0, so we won't boost the priority of tasks that are
-	 * explicitly calling sched_yield().
-	 *
-	 * This is actually a good thing, because we want to prioritize tasks
-	 * that are releasing the CPU, because they're doing I/O, waiting for
-	 * input or sending output to other tasks.
-	 *
-	 * Tasks that are using sched_yield() don't really need the priority
-	 * boost and when they get the chance to run again they will be
-	 * naturally prioritized by the vruntime-based scheduling policy.
-	 */
-	if (p->scx.slice > 0)
-		tctx->nvcsw++;
-
-	/*
-	 * Refresh voluntary context switch metrics.
-	 *
-	 * Evaluate the average number of voluntary context switches per second
-	 * using an exponentially weighted moving average, see calc_avg().
-	 */
-	delta_t = (s64)(now - tctx->nvcsw_ts);
-	if (delta_t > NSEC_PER_SEC) {
-		u64 avg_nvcsw = tctx->nvcsw * NSEC_PER_SEC / delta_t;
-		u64 max_nvcsw = nvcsw_max_thresh * 100;
-
-		tctx->nvcsw = 0;
-		tctx->nvcsw_ts = now;
-
-		/*
-		 * Evaluate the latency weight of the task as its average rate
-		 * of voluntary context switches (limited to to prevent
-		 * excessive spikes).
-		 */
-		tctx->avg_nvcsw = calc_avg_clamp(tctx->avg_nvcsw, avg_nvcsw, 0, max_nvcsw);
-
-		/*
-		 * Classify the task based on the average of voluntary context
-		 * switches.
-		 *
-		 * If the task has an average greater than the global average
-		 * it is classified as interactive, otherwise the task is
-		 * classified as regular.
-		 */
-		tctx->is_interactive = tctx->avg_nvcsw >= nvcsw_max_thresh;
-	}
 }
 
 void BPF_STRUCT_OPS(bpfland_runnable, struct task_struct *p, u64 enq_flags)
@@ -1062,14 +950,12 @@ void BPF_STRUCT_OPS(bpfland_set_cpumask, struct task_struct *p,
 
 void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 {
-	u64 now = scx_bpf_now();
 	struct task_ctx *tctx;
 
 	/* Initialize voluntary context switch timestamp */
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
-	tctx->nvcsw_ts = now;
 
 	/*
 	 * Initialize the task vruntime to the current global vruntime.
