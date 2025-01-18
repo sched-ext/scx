@@ -397,7 +397,7 @@ impl<'a> Scheduler<'a> {
     ) -> Result<()> {
         let perf_lvl: i64 = match primary_domain.as_str() {
             "auto" => match energy_profile.as_str() {
-                "performance" => 1024,
+                "performance" | "balance_performance" => 1024,
                 "power" | "powersave" => 0,
                 &_ => -1,
             },
