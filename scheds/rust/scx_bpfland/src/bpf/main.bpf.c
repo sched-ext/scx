@@ -258,38 +258,11 @@ static u64 nr_tasks_waiting(void)
 }
 
 /*
- * Return task's weight.
- */
-static u64 task_weight(const struct task_struct *p, const struct task_ctx *tctx)
-{
-	return p->scx.weight;
-}
-
-/*
- * Return a value proportionally scaled to the task's priority.
- */
-static u64 scale_up_fair(const struct task_struct *p,
-			 const struct task_ctx *tctx, u64 value)
-{
-	return value * task_weight(p, tctx) / 100;
-}
-
-/*
  * Return a value inversely proportional to the task's priority.
  */
-static u64 scale_inverse_fair(const struct task_struct *p,
-			      const struct task_ctx *tctx, u64 value)
+static u64 scale_inverse_fair(const struct task_struct *p, u64 value)
 {
-	return value * 100 / task_weight(p, tctx);
-}
-
-/*
- * Return the task's allowed lag: used to determine how early its vruntime can
- * be.
- */
-static u64 task_lag(const struct task_struct *p, const struct task_ctx *tctx)
-{
-	return scale_up_fair(p, tctx, slice_lag);
+	return value * 100 / p->scx.weight;
 }
 
 /*
@@ -297,7 +270,7 @@ static u64 task_lag(const struct task_struct *p, const struct task_ctx *tctx)
  */
 static u64 task_deadline(struct task_struct *p, struct task_ctx *tctx)
 {
-	u64 min_vruntime = vtime_now - task_lag(p, tctx);
+	u64 min_vruntime = vtime_now - slice_lag;
 
 	/*
 	 * Per-CPU kthreads are critical for the entire system
@@ -313,7 +286,7 @@ static u64 task_deadline(struct task_struct *p, struct task_ctx *tctx)
 	if (time_before(p->scx.dsq_vtime, min_vruntime))
 		p->scx.dsq_vtime = min_vruntime;
 
-	return p->scx.dsq_vtime + scale_inverse_fair(p, tctx, tctx->sum_runtime);
+	return p->scx.dsq_vtime + scale_inverse_fair(p, tctx->sum_runtime);
 }
 
 static void task_set_domain(struct task_struct *p, s32 cpu,
@@ -951,7 +924,7 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Update task vruntime charging the weighted used time slice.
 	 */
-	p->scx.dsq_vtime += scale_inverse_fair(p, tctx, slice);
+	p->scx.dsq_vtime += scale_inverse_fair(p, slice);
 
 	if (!nvcsw_max_thresh)
 		return;
