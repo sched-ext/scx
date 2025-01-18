@@ -836,14 +836,8 @@ static void update_cpuperf_target(struct task_struct *p, struct task_ctx *tctx)
 	u64 perf_lvl, delta_runtime, delta_t;
 	struct cpu_ctx *cctx;
 
-	if (cpufreq_perf_lvl >= 0) {
-		/*
-		 * Apply fixed cpuperf scaling factor determined by user-space.
-		 */
-		perf_lvl = MIN(cpufreq_perf_lvl, SCX_CPUPERF_ONE);
-		scx_bpf_cpuperf_set(cpu, perf_lvl);
+	if (cpufreq_perf_lvl >= 0)
 		return;
-	}
 
 	/*
 	 * Auto mode: always tset max performance for interactive tasks.
@@ -928,9 +922,11 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (cctx)
-		cctx->tot_runtime += now - cctx->last_running;
+	if (cpufreq_perf_lvl < 0) {
+		cctx = try_lookup_cpu_ctx(cpu);
+		if (cctx)
+			cctx->tot_runtime += now - cctx->last_running;
+	}
 
 	__sync_fetch_and_sub(&nr_running, 1);
 
@@ -1204,6 +1200,28 @@ int enable_primary_cpu(struct cpu_arg *input)
 	return err;
 }
 
+/*
+ * Initialize cpufreq performance level on all the online CPUs.
+ */
+static void init_cpuperf_target(void)
+{
+	const struct cpumask *online_cpumask;
+	u64 perf_lvl;
+	s32 cpu;
+
+	if (cpufreq_perf_lvl < 0)
+		return;
+
+	online_cpumask = scx_bpf_get_online_cpumask();
+	bpf_for (cpu, 0, nr_cpu_ids) {
+		if (!bpf_cpumask_test_cpu(cpu, online_cpumask))
+			continue;
+		perf_lvl = MIN(cpufreq_perf_lvl, SCX_CPUPERF_ONE);
+		scx_bpf_cpuperf_set(cpu, perf_lvl);
+	}
+	scx_bpf_put_cpumask(online_cpumask);
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 {
 	int err;
@@ -1211,6 +1229,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	/* Initialize amount of online and possible CPUs */
 	nr_online_cpus = get_nr_online_cpus();
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
+
+	/* Initialize cpufreq profile */
+	init_cpuperf_target();
 
 	/*
 	 * Create the global shared DSQ.
