@@ -96,24 +96,28 @@ impl<'a> App<'a> {
         let mut active_perf_events = BTreeMap::new();
         let active_hw_event = PerfEvent::new("hw".to_string(), "cycles".to_string(), 0);
         let available_perf_events = available_perf_events()?;
-        let available_events = PerfEvent::default_events();
+        let default_events = PerfEvent::default_events();
+        let default_events_str = default_events
+            .iter()
+            .map(|event| event.event.clone())
+            .collect::<Vec<String>>();
         for cpu in topo.all_cpus.values() {
             let mut event = PerfEvent::new("hw".to_string(), "cycles".to_string(), cpu.id);
             event.attach()?;
             active_perf_events.insert(cpu.id, event);
             let mut data =
                 CpuData::new(cpu.id, cpu.core_id, cpu.llc_id, cpu.node_id, max_cpu_events);
-            data.add_event_data(active_hw_event.event.clone(), 0);
+            data.initialize_events(&default_events_str);
             cpu_data.insert(cpu.id, data);
         }
         for llc in topo.all_llcs.values() {
             let mut data = LlcData::new(llc.id, llc.node_id, max_cpu_events);
-            data.add_event_data(active_hw_event.event.clone(), 0);
+            data.initialize_events(&default_events_str);
             llc_data.insert(llc.id, data);
         }
         for node in topo.nodes.values() {
             let mut data = NodeData::new(node.id, max_cpu_events);
-            data.add_event_data(active_hw_event.event.clone(), 0);
+            data.initialize_events(&default_events_str);
             node_data.insert(node.id, data);
         }
 
@@ -143,7 +147,7 @@ impl<'a> App<'a> {
             active_hw_event,
             available_perf_events,
             active_perf_events,
-            available_events,
+            available_events: default_events,
         };
 
         Ok(app)
