@@ -60,10 +60,16 @@ const volatile s64 slice_lag = 20ULL * NSEC_PER_MSEC;
  */
 const volatile bool local_kthreads;
 
-/*
- * Maximum threshold of voluntary context switches.
+ /*
+ * Prioritize per-CPU tasks (tasks that can only run on a single CPU).
+ *
+ * This allows to prioritize per-CPU tasks that usually tend to be
+ * de-prioritized (since they can't be migrated when their only usable CPU
+ * is busy). Enabling this option can introduce unfairness and potentially
+ * trigger stalls, but it can improve performance of server-type workloads
+ * (such as large parallel builds).
  */
-const volatile u64 nvcsw_max_thresh = 10ULL;
+const volatile bool local_pcpu;
 
 /*
  * The CPU frequency performance level: a negative value will not affect the
@@ -212,21 +218,6 @@ static inline bool is_kthread(const struct task_struct *p)
 static bool is_queued(const struct task_struct *p)
 {
 	return p->scx.flags & SCX_TASK_QUEUED;
-}
-
-/*
- * Return true if the task can only run on its assigned CPU, false
- * otherwise.
- */
-static bool is_migration_disabled(const struct task_struct *p)
-{
-	if (p->nr_cpus_allowed == 1)
-		return true;
-
-	if (bpf_core_field_exists(p->migration_disabled))
-		return p->migration_disabled;
-
-	return false;
 }
 
 /*
@@ -486,7 +477,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 * block and release the current CPU).
 		 */
 		has_idle = bpf_cpumask_intersects(curr_l3_domain, idle_cpumask);
-		if ((!nvcsw_max_thresh || has_idle) &&
+		if (has_idle &&
 		    bpf_cpumask_test_cpu(cpu, p_mask) &&
 		    !(current->flags & PF_EXITING) &&
 		    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) == 0) {
@@ -649,7 +640,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 	s32 cpu;
 
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
-	if (is_idle && !scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
+	if (is_idle && (local_pcpu || !scx_bpf_dsq_nr_queued(SHARED_DSQ))) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	}
@@ -664,13 +655,6 @@ static void kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 {
 	const struct cpumask *idle_cpumask;
 	s32 cpu;
-
-	/*
-	 * If the task can only run on a single CPU, it's pointless to wake
-	 * up any other CPU, so do nothing in this case.
-	 */
-	if (is_migration_disabled(p))
-		return;
 
 	/*
 	 * Look for any idle CPU usable by the task that can immediately
@@ -698,7 +682,7 @@ static bool try_direct_dispatch(struct task_struct *p, u64 enq_flags)
 	 * If local_kthread is specified dispatch per-CPU kthreads
 	 * directly on their assigned CPU.
 	 */
-	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
+	if (local_kthreads && is_kthread(p)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		return true;
@@ -725,7 +709,7 @@ static bool try_direct_dispatch(struct task_struct *p, u64 enq_flags)
 		 * direct dispatch.
 		 */
 		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
-		    !scx_bpf_dsq_nr_queued(SHARED_DSQ) &&
+		    (local_pcpu || !scx_bpf_dsq_nr_queued(SHARED_DSQ)) &&
 		    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
 					   slice_max, enq_flags);
@@ -735,14 +719,13 @@ static bool try_direct_dispatch(struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * If nvcsw_max_thresh is disabled we don't care much about
-	 * interactivity, so we can boost per-CPU tasks and always dispatch
-	 * them directly on their CPU.
+	 * If local_pcpu is enabled always dispatch tasks that can only run
+	 * on one CPU directly.
 	 *
 	 * This can help to improve I/O workloads (like large parallel
 	 * builds).
 	 */
-	if (!nvcsw_max_thresh && is_migration_disabled(p)) {
+	if (local_pcpu && p->nr_cpus_allowed == 1) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return true;
