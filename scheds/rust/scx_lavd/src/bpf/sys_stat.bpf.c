@@ -60,7 +60,7 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 	c->stat_next = get_sys_stat_next();
 	c->min_perf_cri = 1000;
 	c->now = scx_bpf_now();
-	c->duration = c->now - c->stat_cur->last_update_clk;
+	c->duration = time_delta(c->now, c->stat_cur->last_update_clk);
 	c->stat_next->last_update_clk = c->now;
 }
 
@@ -200,7 +200,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 			bool ret = __sync_bool_compare_and_swap(
 					&cpuc->idle_start_clk, old_clk, c->now);
 			if (ret) {
-				cpuc->idle_total += c->now - old_clk;
+				cpuc->idle_total += time_delta(c->now, old_clk);
 				break;
 			}
 		}
