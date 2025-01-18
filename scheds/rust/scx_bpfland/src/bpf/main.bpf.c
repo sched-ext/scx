@@ -162,8 +162,30 @@ struct task_ctx {
 	/*
 	 * Task's average used time slice.
 	 */
-	u64 sum_runtime;
+	u64 exec_runtime;
 	u64 last_run_at;
+
+	/*
+	 * Task's deadline, defined as:
+	 *
+	 *   deadline = vruntime + exec_vruntime
+	 *
+	 * Here, vruntime represents the task's total runtime, scaled inversely by
+	 * its weight, while exec_vruntime accounts for the vruntime accumulated
+	 * from the moment the task becomes runnable until it voluntarily releases
+	 * the CPU.
+	 *
+	 * Fairness is ensured through vruntime, whereas exec_vruntime helps in
+	 * prioritizing latency-sensitive tasks: tasks that are frequently blocked
+	 * waiting for an event (typically latency sensitive) will accumulate a
+	 * smaller exec_vruntime, compared to tasks that continuously consume CPU
+	 * without interruption.
+	 *
+	 * As a result, tasks with a smaller exec_vruntime will have a shorter
+	 * deadline and will be dispatched earlier, ensuring better responsiveness
+	 * for latency-sensitive tasks.
+	 */
+	u64 deadline;
 
 	/*
 	 * Set to true if the task is classified as interactive.
@@ -194,6 +216,14 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 static inline bool is_kthread(const struct task_struct *p)
 {
 	return p->flags & PF_KTHREAD;
+}
+
+/*
+ * Return true if @p still wants to run, false otherwise.
+ */
+static bool is_queued(const struct task_struct *p)
+{
+	return p->scx.flags & SCX_TASK_QUEUED;
 }
 
 /*
@@ -266,27 +296,30 @@ static u64 scale_inverse_fair(const struct task_struct *p, u64 value)
 }
 
 /*
- * Return task's evaluated deadline.
+ * Update and return the task's deadline.
  */
-static u64 task_deadline(struct task_struct *p, struct task_ctx *tctx)
+static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
 {
-	u64 min_vruntime = vtime_now - slice_lag;
+	u64 vtime_min;
 
 	/*
-	 * Per-CPU kthreads are critical for the entire system
-	 * responsiveness, so make sure they are dispatched before any
-	 * other task.
+	 * Limit the amount of vtime budget that an idling task can
+	 * accumulate to prevent excessive prioritization of sleeping
+	 * tasks.
+	 *
+	 * Tasks with a higher weight get a bigger "bucket" for their
+	 * allowed accumulated time budget.
 	 */
-	if (is_kthread(p) && p->nr_cpus_allowed == 1)
-		return min_vruntime;
+	vtime_min = vtime_now - slice_max;
+	if (time_before(tctx->deadline, vtime_min))
+		tctx->deadline = vtime_min;
 
 	/*
-	 * Limit the vruntime to to avoid excessively penalizing tasks.
+	 * Add the execution vruntime to the deadline.
 	 */
-	if (time_before(p->scx.dsq_vtime, min_vruntime))
-		p->scx.dsq_vtime = min_vruntime;
+	tctx->deadline += scale_inverse_fair(p, tctx->exec_runtime);
 
-	return p->scx.dsq_vtime + scale_inverse_fair(p, tctx->sum_runtime);
+	return tctx->deadline;
 }
 
 static void task_set_domain(struct task_struct *p, s32 cpu,
@@ -793,7 +826,7 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * round on the same CPU (provided the CPU is in the primary scheduling
 	 * domain).
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
+	if (prev && is_queued(prev) &&
 	    primary && bpf_cpumask_test_cpu(cpu, primary))
 		prev->scx.slice = slice_max;
 }
@@ -877,10 +910,11 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 		__sync_fetch_and_add(&nr_interactive, 1);
 
 	/*
-	 * Update global vruntime.
+	 * Update the global vruntime as a new task is starting to use a
+	 * CPU.
 	 */
-	if (time_before(vtime_now, p->scx.dsq_vtime))
-		vtime_now = p->scx.dsq_vtime;
+	if (time_before(vtime_now, tctx->deadline))
+		vtime_now = tctx->deadline;
 }
 
 /*
@@ -911,20 +945,23 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 		__sync_fetch_and_sub(&nr_interactive, 1);
 
 	/*
-	 * Update task's average runtime.
-	 *
-	 * Limit the total accumulated runtime to 1s to avoid excessive
-	 * de-prioritization of pure CPU-intensive tasks and avoid
-	 * potential starvation.
+	 * Evaluate the time slice used by the task.
 	 */
-	slice = now - tctx->last_run_at;
-	if (tctx->sum_runtime < NSEC_PER_SEC)
-		tctx->sum_runtime += slice;
+	slice = bpf_ktime_get_ns() - tctx->last_run_at;
 
 	/*
-	 * Update task vruntime charging the weighted used time slice.
+	 * Update task's execution time (exec_runtime), but never account
+	 * more than 10 slices of runtime to prevent excessive
+	 * de-prioritization of CPU-intensive tasks (which could lead to
+	 * starvation).
 	 */
-	p->scx.dsq_vtime += scale_inverse_fair(p, slice);
+	if (tctx->exec_runtime < 10 * slice_max)
+		tctx->exec_runtime += slice;
+
+	/*
+	 * Update task's vruntime.
+	 */
+	tctx->deadline += scale_inverse_fair(p, slice);
 
 	if (!nvcsw_max_thresh)
 		return;
@@ -990,7 +1027,7 @@ void BPF_STRUCT_OPS(bpfland_runnable, struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 
-	tctx->sum_runtime = 0;
+	tctx->exec_runtime = 0;
 }
 
 void BPF_STRUCT_OPS(bpfland_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
@@ -1016,14 +1053,16 @@ void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 	u64 now = scx_bpf_now();
 	struct task_ctx *tctx;
 
-	/* Initialize task's vruntime */
-	p->scx.dsq_vtime = vtime_now;
-
 	/* Initialize voluntary context switch timestamp */
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
 	tctx->nvcsw_ts = now;
+
+	/*
+	 * Initialize the task vruntime to the current global vruntime.
+	 */
+	tctx->deadline = vtime_now;
 }
 
 s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
