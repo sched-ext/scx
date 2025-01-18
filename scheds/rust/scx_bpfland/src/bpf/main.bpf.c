@@ -577,6 +577,15 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 			*is_idle = true;
 			goto out_put_cpumask;
 		}
+
+		/*
+		 * Search for any full-idle core usable by the task.
+		 */
+		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, SCX_PICK_IDLE_CORE);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto out_put_cpumask;
+		}
 	}
 
 	/*
@@ -614,6 +623,15 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * Search for any idle CPU in the scheduling domain.
 	 */
 	cpu = scx_bpf_pick_idle_cpu(p_mask, 0);
+	if (cpu >= 0) {
+		*is_idle = true;
+		goto out_put_cpumask;
+	}
+
+	/*
+	 * Search for any idle CPU usable by the task.
+	 */
+	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 	if (cpu >= 0) {
 		*is_idle = true;
 		goto out_put_cpumask;
@@ -676,7 +694,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
  */
 static void kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tctx)
 {
-	const struct cpumask *idle_cpumask, *l3_mask;
+	const struct cpumask *idle_cpumask;
 	s32 cpu;
 
 	/*
@@ -687,20 +705,14 @@ static void kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 		return;
 
 	/*
-	 * Look for an idle CPU in the same L3 domain that can immediately
+	 * Look for any idle CPU usable by the task that can immediately
 	 * execute the task.
 	 *
 	 * Note that we do not want to mark the CPU as busy, since we don't
 	 * know at this stage if we will actually dispatch any task on it.
 	 */
-	l3_mask = cast_mask(tctx->l3_cpumask);
-	if (!l3_mask) {
-		scx_bpf_error("l3 cpumask not initialized");
-		return;
-	}
-
 	idle_cpumask = scx_bpf_get_idle_cpumask();
-	cpu = bpf_cpumask_any_and_distribute(l3_mask, idle_cpumask);
+	cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, idle_cpumask);
 	scx_bpf_put_cpumask(idle_cpumask);
 
 	if (cpu < nr_cpu_ids)
