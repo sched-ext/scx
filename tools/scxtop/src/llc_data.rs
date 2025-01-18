@@ -33,9 +33,7 @@ impl LlcData {
 
     /// Initializes events with default values.
     pub fn initialize_events(&mut self, events: &Vec<String>) {
-        for event in events {
-            self.data.event_data(event.to_string());
-        }
+        self.data.initialize_events(&events);
     }
 
     /// Returns the data for an event and updates if no entry is present.
