@@ -38,7 +38,7 @@ use ratatui::{
 use regex::Regex;
 use scx_utils::misc::read_file_usize;
 use scx_utils::Topology;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -67,16 +67,22 @@ pub struct App<'a> {
     event_scroll_state: ScrollbarState,
     event_scroll: u16,
 
-    active_hw_event: PerfEvent,
+    active_event: PerfEvent,
     active_hw_event_id: usize,
     active_perf_events: BTreeMap<usize, PerfEvent>,
     available_events: Vec<PerfEvent>,
 
-    available_perf_events: BTreeMap<String, HashSet<String>>,
+    available_perf_events_list: Vec<String>,
     cpu_data: BTreeMap<usize, CpuData>,
     llc_data: BTreeMap<usize, LlcData>,
     node_data: BTreeMap<usize, NodeData>,
     dsq_data: BTreeMap<u64, EventData>,
+
+    // layout releated
+    num_perf_events: u16,
+    events_list_size: u16,
+    selected_event: usize,
+    non_hw_event_active: bool,
 }
 
 impl<'a> App<'a> {
@@ -93,9 +99,8 @@ impl<'a> App<'a> {
         let mut cpu_data = BTreeMap::new();
         let mut llc_data = BTreeMap::new();
         let mut node_data = BTreeMap::new();
+        let active_event = PerfEvent::new("hw".to_string(), "cycles".to_string(), 0);
         let mut active_perf_events = BTreeMap::new();
-        let active_hw_event = PerfEvent::new("hw".to_string(), "cycles".to_string(), 0);
-        let available_perf_events = available_perf_events()?;
         let default_events = PerfEvent::default_events();
         let default_events_str = default_events
             .iter()
@@ -121,6 +126,16 @@ impl<'a> App<'a> {
             node_data.insert(node.id, data);
         }
 
+        let available_perf_events_list: Vec<String> = available_perf_events()?
+            .iter()
+            .flat_map(|(subsystem, events)| {
+                events
+                    .iter()
+                    .map(|event| format!("{}:{}", subsystem.clone(), event.clone()))
+            })
+            .collect();
+        let num_perf_events: u16 = available_perf_events_list.len() as u16;
+
         let app = Self {
             scheduler,
             max_cpu_events,
@@ -141,13 +156,17 @@ impl<'a> App<'a> {
             llc_data,
             node_data,
             dsq_data: BTreeMap::new(),
-            event_scroll_state: ScrollbarState::new(available_perf_events.len()).position(0),
+            event_scroll_state: ScrollbarState::new(num_perf_events.into()).position(0),
             event_scroll: 0,
             active_hw_event_id: 0,
-            active_hw_event,
-            available_perf_events,
+            active_event,
             active_perf_events,
             available_events: default_events,
+            available_perf_events_list,
+            num_perf_events: num_perf_events,
+            events_list_size: 1,
+            selected_event: 0,
+            non_hw_event_active: false,
         };
 
         Ok(app)
@@ -192,7 +211,8 @@ impl<'a> App<'a> {
         }
         let perf_event = &self.available_events[self.active_hw_event_id].clone();
 
-        self.active_hw_event = perf_event.clone();
+        self.active_event = perf_event.clone();
+        self.non_hw_event_active = false;
         self.activate_perf_event(perf_event)
     }
 
@@ -206,7 +226,8 @@ impl<'a> App<'a> {
         }
         let perf_event = &self.available_events[self.active_hw_event_id].clone();
 
-        self.active_hw_event = perf_event.clone();
+        self.active_event = perf_event.clone();
+        self.non_hw_event_active = false;
         self.activate_perf_event(perf_event)
     }
 
@@ -295,7 +316,7 @@ impl<'a> App<'a> {
                 .node_data
                 .entry(*node)
                 .or_insert(NodeData::new(*node, self.max_cpu_events));
-            node_data.add_event_data(self.active_hw_event.event.clone(), 0);
+            node_data.add_event_data(self.active_event.event.clone(), 0);
         }
         // Add entry for llcs
         for llc in self.topo.all_llcs.keys() {
@@ -303,7 +324,7 @@ impl<'a> App<'a> {
                 self.llc_data
                     .entry(*llc)
                     .or_insert(LlcData::new(*llc, 0, self.max_cpu_events));
-            llc_data.add_event_data(self.active_hw_event.event.clone(), 0);
+            llc_data.add_event_data(self.active_event.event.clone(), 0);
         }
 
         for (cpu, event) in &mut self.active_perf_events {
@@ -387,7 +408,7 @@ impl<'a> App<'a> {
                     .copied()
                     .unwrap_or(0);
             }
-            cpu_data.event_data_immut(self.active_hw_event.event.clone())
+            cpu_data.event_data_immut(self.active_event.event.clone())
         } else {
             Vec::new()
         };
@@ -423,7 +444,7 @@ impl<'a> App<'a> {
     fn llc_sparkline(&self, llc: usize, bottom_border: bool) -> Sparkline {
         let data = if self.llc_data.contains_key(&llc) {
             let llc_data = self.llc_data.get(&llc).unwrap();
-            llc_data.event_data_immut(self.active_hw_event.event.clone())
+            llc_data.event_data_immut(self.active_event.event.clone())
         } else {
             Vec::new()
         };
@@ -457,7 +478,7 @@ impl<'a> App<'a> {
     fn node_sparkline(&self, node: usize, bottom_border: bool) -> Sparkline {
         let data = if self.llc_data.contains_key(&node) {
             let node_data = self.node_data.get(&node).unwrap();
-            node_data.event_data_immut(self.active_hw_event.event.clone())
+            node_data.event_data_immut(self.active_event.event.clone())
         } else {
             Vec::new()
         };
@@ -517,7 +538,7 @@ impl<'a> App<'a> {
         let llc_iter = self
             .llc_data
             .values()
-            .map(|llc_data| llc_data.event_data_immut(self.active_hw_event.event.clone()))
+            .map(|llc_data| llc_data.event_data_immut(self.active_event.event.clone()))
             .flatten()
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&llc_iter, true, true, true, None);
@@ -534,7 +555,7 @@ impl<'a> App<'a> {
                     .title_top(
                         Line::from(format!(
                             "LLCs ({}) avg {} max {} min {}",
-                            self.active_hw_event.event, stats.avg, stats.max, stats.min
+                            self.active_event.event, stats.avg, stats.max, stats.min
                         ))
                         .style(self.theme.title_style())
                         .centered(),
@@ -568,7 +589,7 @@ impl<'a> App<'a> {
                     .title_top(
                         Line::from(format!(
                             "LLCs ({}) avg {} max {} min {}",
-                            self.active_hw_event.event, stats.avg, stats.max, stats.min,
+                            self.active_event.event, stats.avg, stats.max, stats.min,
                         ))
                         .style(self.theme.title_style())
                         .centered(),
@@ -582,7 +603,7 @@ impl<'a> App<'a> {
                     .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
                     .border_type(BorderType::Rounded);
 
-                let llc_bars: Vec<Bar> = self.llc_bars(self.active_hw_event.event.clone());
+                let llc_bars: Vec<Bar> = self.llc_bars(self.active_event.event.clone());
 
                 let barchart = BarChart::default()
                     .data(BarGroup::default().bars(&llc_bars))
@@ -612,7 +633,7 @@ impl<'a> App<'a> {
         let node_iter = self
             .node_data
             .values()
-            .map(|node_data| node_data.event_data_immut(self.active_hw_event.event.clone()))
+            .map(|node_data| node_data.event_data_immut(self.active_event.event.clone()))
             .flatten()
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&node_iter, true, true, true, None);
@@ -636,7 +657,7 @@ impl<'a> App<'a> {
                     .title_top(
                         Line::from(format!(
                             "Node ({}) avg {} max {} min {}",
-                            self.active_hw_event.event, stats.avg, stats.max, stats.min
+                            self.active_event.event, stats.avg, stats.max, stats.min
                         ))
                         .style(self.theme.title_style())
                         .centered(),
@@ -662,7 +683,7 @@ impl<'a> App<'a> {
                     .title_top(
                         Line::from(format!(
                             "NUMA Nodes ({}) avg {} max {} min {}",
-                            self.active_hw_event.event, stats.avg, stats.max, stats.min,
+                            self.active_event.event, stats.avg, stats.max, stats.min,
                         ))
                         .style(self.theme.title_style())
                         .centered(),
@@ -676,7 +697,7 @@ impl<'a> App<'a> {
                     .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
                     .border_type(BorderType::Rounded);
 
-                let node_bars: Vec<Bar> = self.node_bars(self.active_hw_event.event.clone());
+                let node_bars: Vec<Bar> = self.node_bars(self.active_event.event.clone());
 
                 let barchart = BarChart::default()
                     .data(BarGroup::default().bars(&node_bars))
@@ -1172,9 +1193,7 @@ impl<'a> App<'a> {
                         .cpu_data
                         .values()
                         .filter(|cpu_data| cpu_data.node == node.id)
-                        .map(|cpu_data| {
-                            cpu_data.event_data_immut(self.active_hw_event.event.clone())
-                        })
+                        .map(|cpu_data| cpu_data.event_data_immut(self.active_event.event.clone()))
                         .flatten()
                         .collect::<Vec<u64>>();
                     let stats = VecStats::new(&node_iter, true, true, true, None);
@@ -1183,11 +1202,7 @@ impl<'a> App<'a> {
                         .title_top(
                             Line::from(format!(
                                 "Node{} ({}) avg {} max {} min {}",
-                                node.id,
-                                self.active_hw_event.event,
-                                stats.avg,
-                                stats.max,
-                                stats.min
+                                node.id, self.active_event.event, stats.avg, stats.max, stats.min
                             ))
                             .style(self.theme.title_style())
                             .centered(),
@@ -1285,9 +1300,7 @@ impl<'a> App<'a> {
                         .cpu_data
                         .values()
                         .filter(|cpu_data| cpu_data.node == node.id)
-                        .map(|cpu_data| {
-                            cpu_data.event_data_immut(self.active_hw_event.event.clone())
-                        })
+                        .map(|cpu_data| cpu_data.event_data_immut(self.active_event.event.clone()))
                         .flatten()
                         .collect::<Vec<u64>>();
                     let stats = VecStats::new(&node_iter, true, true, true, None);
@@ -1296,11 +1309,7 @@ impl<'a> App<'a> {
                         .title_top(
                             Line::from(format!(
                                 "Node{} ({}) avg {} max {} min {}",
-                                node.id,
-                                self.active_hw_event.event,
-                                stats.avg,
-                                stats.max,
-                                stats.min
+                                node.id, self.active_event.event, stats.avg, stats.max, stats.min
                             ))
                             .style(self.theme.title_style())
                             .centered(),
@@ -1342,7 +1351,7 @@ impl<'a> App<'a> {
                         .keys()
                         .enumerate()
                         .map(|(j, cpu)| {
-                            let cpu_bar = self.cpu_bar(*cpu, self.active_hw_event.event.clone());
+                            let cpu_bar = self.cpu_bar(*cpu, self.active_event.event.clone());
                             bar_col_data[j % col_scale as usize].push(cpu_bar);
                         })
                         .collect();
@@ -1472,7 +1481,7 @@ impl<'a> App<'a> {
                     self.keymap.action_keys_string(Action::SetState {
                         state: AppState::Event
                     }),
-                    self.active_hw_event.event
+                    self.active_event.event
                 ),
                 Style::default(),
             )),
@@ -1558,20 +1567,36 @@ impl<'a> App<'a> {
         let default_style = Style::default().fg(self.theme.text_color());
         let chunks = Layout::vertical([Constraint::Min(1), Constraint::Percentage(99)]).split(area);
 
+        let height = if area.height > 0 { area.height - 1 } else { 1 };
+        if height != self.events_list_size {
+            self.events_list_size = height
+        }
+
         let events: Vec<Line> = self
-            .available_perf_events
+            .available_perf_events_list
             .iter()
-            .flat_map(|(subsystem, events)| {
-                events
-                    .iter()
-                    .map(|event| Line::from(format!("{}:{}", subsystem.clone(), event)))
+            .enumerate()
+            .map(|(i, event)| {
+                if i == self.selected_event {
+                    Line::from(event.clone()).fg(self.theme.text_important_color())
+                } else {
+                    Line::from(event.clone()).fg(self.theme.text_color())
+                }
             })
             .collect();
 
         let title = Block::new()
             .style(default_style)
             .title_alignment(Alignment::Center)
-            .title("Use ▲ ▼ to scroll ".bold());
+            .title(
+                format!(
+                    "Use ▲ ▼  ({}/{}) to scroll, {} to select",
+                    self.keymap.action_keys_string(Action::PageUp),
+                    self.keymap.action_keys_string(Action::PageDown),
+                    self.keymap.action_keys_string(Action::Enter),
+                )
+                .bold(),
+            );
         frame.render_widget(title, chunks[0]);
 
         let paragraph = Paragraph::new(events.clone())
@@ -1612,7 +1637,10 @@ impl<'a> App<'a> {
     fn on_down(&mut self) {
         match self.state {
             AppState::Event => {
-                self.event_scroll += 1;
+                if self.event_scroll <= self.num_perf_events {
+                    self.event_scroll += 1;
+                    self.selected_event += 1
+                }
             }
             _ => {}
         }
@@ -1622,8 +1650,56 @@ impl<'a> App<'a> {
     fn on_up(&mut self) {
         match self.state {
             AppState::Event => {
-                if self.event_scroll > 1 {
+                if self.event_scroll > 0 {
                     self.event_scroll -= 1;
+                    self.selected_event -= 1
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Updates app state when page down or mapped key is pressed.
+    fn on_pg_down(&mut self) {
+        match self.state {
+            AppState::Event => {
+                if self.event_scroll <= self.num_perf_events - self.events_list_size {
+                    self.event_scroll += self.events_list_size - 1;
+                    self.selected_event += (self.events_list_size - 1) as usize;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Updates app state when page up or mapped key is pressed.
+    fn on_pg_up(&mut self) {
+        match self.state {
+            AppState::Event => {
+                if self.event_scroll > 1 {
+                    self.event_scroll -= self.events_list_size - 1;
+                    self.selected_event -= (self.events_list_size - 1) as usize;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Updates app state when the enter key is pressed.
+    fn on_enter(&mut self) {
+        match self.state {
+            AppState::Event => {
+                if let Some((subsystem, event)) =
+                    self.available_perf_events_list[self.selected_event].split_once(":")
+                {
+                    let perf_event = PerfEvent::new(subsystem.to_string(), event.to_string(), 0);
+                    self.active_perf_events.clear();
+                    self.active_event = perf_event.clone();
+                    let _ = self.activate_perf_event(&perf_event);
+                    self.non_hw_event_active = true;
+                    let prev_state = self.prev_state.clone();
+                    self.prev_state = self.state.clone();
+                    self.state = prev_state;
                 }
             }
             _ => {}
@@ -1730,6 +1806,9 @@ impl<'a> App<'a> {
             }
             Action::Down => self.on_down(),
             Action::Up => self.on_up(),
+            Action::PageUp => self.on_pg_up(),
+            Action::PageDown => self.on_pg_down(),
+            Action::Enter => self.on_enter(),
             Action::SetState { state } => {
                 if state == self.state {
                     self.set_state(self.prev_state.clone());

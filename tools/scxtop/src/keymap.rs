@@ -88,6 +88,9 @@ impl KeyMap {
         bindings.insert(Key::Char('v'), Action::NextViewState);
         bindings.insert(Key::Code(KeyCode::Down), Action::Down);
         bindings.insert(Key::Code(KeyCode::Up), Action::Up);
+        bindings.insert(Key::Code(KeyCode::PageDown), Action::PageDown);
+        bindings.insert(Key::Code(KeyCode::PageUp), Action::PageUp);
+        bindings.insert(Key::Code(KeyCode::Enter), Action::Enter);
 
         Self { bindings }
     }
