@@ -110,6 +110,7 @@ lazy_static! {
                         preempt: false,
                         preempt_first: false,
                         exclusive: false,
+                        allow_node_aligned: false,
                         idle_smt: None,
                         slice_us: 20000,
                         fifo: false,
@@ -138,6 +139,7 @@ lazy_static! {
                         preempt: true,
                         preempt_first: false,
                         exclusive: true,
+                        allow_node_aligned: true,
                         idle_smt: None,
                         slice_us: 20000,
                         fifo: false,
@@ -168,6 +170,7 @@ lazy_static! {
                         preempt: true,
                         preempt_first: false,
                         exclusive: false,
+                        allow_node_aligned: false,
                         idle_smt: None,
                         slice_us: 800,
                         fifo: false,
@@ -195,6 +198,7 @@ lazy_static! {
                         preempt: false,
                         preempt_first: false,
                         exclusive: false,
+                        allow_node_aligned: false,
                         idle_smt: None,
                         slice_us: 20000,
                         fifo: false,
@@ -339,6 +343,11 @@ lazy_static! {
 /// - exclusive: If true, tasks in the layer will occupy the whole core. The
 ///   other logical CPUs sharing the same core will be kept idle. This isn't
 ///   a hard guarantee, so don't depend on it for security purposes.
+///
+/// - allow_node_aligned: Put node aligned tasks on layer DSQs instead of lo
+///   fallback. This is a hack to support node-affine tasks without making
+///   the whole scheduler node aware and should only be used with open
+///   layers on non-saturated machines to avoid possible stalls.
 ///
 /// - slice_us: Scheduling slice duration in microseconds.
 ///
@@ -1190,6 +1199,7 @@ impl<'a> Scheduler<'a> {
                     preempt,
                     preempt_first,
                     exclusive,
+                    allow_node_aligned,
                     growth_algo,
                     nodes,
                     slice_us,
@@ -1217,6 +1227,7 @@ impl<'a> Scheduler<'a> {
                 layer.preempt.write(*preempt);
                 layer.preempt_first.write(*preempt_first);
                 layer.exclusive.write(*exclusive);
+                layer.allow_node_aligned.write(*allow_node_aligned);
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;
                 layer.disallow_open_after_ns = match disallow_open_after_us.unwrap() {

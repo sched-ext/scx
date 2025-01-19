@@ -399,6 +399,7 @@ struct task_ctx {
 	struct cached_cpus	layered_cpus_node;
 	struct bpf_cpumask __kptr *layered_node_mask;
 	bool			all_cpus_allowed;
+	bool			cpus_node_aligned;
 	u64			runnable_at;
 	u64			running_at;
 	u64			runtime_avg;
@@ -941,7 +942,10 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	 * assigned, it will trigger LLC draining which isn't great. Find an
 	 * in-layer CPU and put it there instead.
 	 *
-	 * TODO - This should become node aware.
+	 * FIXME: This is most likely wrong and causing unnecessary xllc
+	 * migrations while saturated. Always returning @prev_cpu is likely a
+	 * better behavior. Ideally, this should be scoped so that it returns
+	 * the closest allowed layer CPU to @prev_cpu.
 	 */
 	if (taskc->all_cpus_allowed) {
 		const struct cpumask *layer_cpumask;
@@ -1187,18 +1191,22 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * Put tasks with custom affinities or from empty layers into the low
-	 * fallback DSQ which is guaranteed the lo_fb_share_ppk fraction of each
-	 * CPU once the tasks have been queued on it longer than lo_fb_wait_ns.
+	 * Tasks with custom affinities or from empty layers can stall if put
+	 * into layer DSQs. Put them into a low fallback DSQ which is guaranteed
+	 * the lo_fb_share_ppk fraction of each CPU once the tasks have been
+	 * queued on it longer than lo_fb_wait_ns.
 	 *
 	 * When racing against layer CPU allocation updates, tasks with full
 	 * affninty may end up in the DSQs of an empty layer. They are handled
 	 * by the fallback_cpu.
 	 *
-	 * FIXME: This must be made node-aware so that tasks that are
-	 * node-affined don't get thrown into lo fallback DSQs.
+	 * FIXME: ->allow_node_aligned is a hack to support node-affine tasks
+	 * without making the whole scheduler node aware and should only be used
+	 * with open layers on non-saturated machines to avoid possible stalls.
 	 */
-	if (!taskc->all_cpus_allowed || !layer->nr_cpus) {
+	if ((!taskc->all_cpus_allowed &&
+	     !(layer->allow_node_aligned && taskc->cpus_node_aligned)) ||
+	    !layer->nr_cpus) {
 		taskc->dsq_id = task_cpuc->lo_fb_dsq_id;
 		/*
 		 * Start a new lo fallback queued region if the DSQ is empty.
@@ -2352,6 +2360,37 @@ void BPF_STRUCT_OPS(layered_set_weight, struct task_struct *p, u32 weight)
 		taskc->refresh_layer = true;
 }
 
+static void refresh_cpus_flags(struct task_ctx *taskc,
+			       const struct cpumask *cpumask)
+{
+	u32 node_id;
+
+	if (!all_cpumask) {
+		scx_bpf_error("NULL all_cpumask");
+		return;
+	}
+
+	taskc->all_cpus_allowed = bpf_cpumask_subset(cast_mask(all_cpumask), cpumask);
+
+	taskc->cpus_node_aligned = true;
+
+	bpf_for(node_id, 0, nr_nodes) {
+		struct node_ctx *nodec;
+		const struct cpumask *node_cpumask;
+
+		if (!(nodec = lookup_node_ctx(node_id)) ||
+		    !(node_cpumask = cast_mask(nodec->cpumask)))
+			return;
+
+		/* not llc aligned if partially overlaps */
+		if (bpf_cpumask_intersects(node_cpumask, cpumask) &&
+		    !bpf_cpumask_subset(node_cpumask, cpumask)) {
+			taskc->cpus_node_aligned = false;
+			break;
+		}
+	}
+}
+
 void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
@@ -2360,13 +2399,7 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	if (!all_cpumask) {
-		scx_bpf_error("NULL all_cpumask");
-		return;
-	}
-
-	taskc->all_cpus_allowed =
-		bpf_cpumask_subset(cast_mask(all_cpumask), cpumask);
+	refresh_cpus_flags(taskc, cpumask);
 }
 
 void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
@@ -2466,11 +2499,7 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	 */
 	taskc->runtime_avg = slice_ns / 4;
 
-	if (all_cpumask)
-		taskc->all_cpus_allowed =
-			bpf_cpumask_subset(cast_mask(all_cpumask), p->cpus_ptr);
-	else
-		scx_bpf_error("missing all_cpumask");
+	refresh_cpus_flags(taskc, p->cpus_ptr);
 
 	/*
 	 * We are matching cgroup hierarchy path directly rather than the CPU
