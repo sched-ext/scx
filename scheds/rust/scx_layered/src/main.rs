@@ -288,6 +288,10 @@ lazy_static! {
 ///
 /// - NSEquals: Matches if the task's namespace id matches the values.
 ///
+/// - IsGroupLeader: Bool. When true, matches if the task is group leader
+///   (i.e. PID == TGID), aka the thread from which other threads are made.
+///   When false, matches if the task is *not* the group leader (i.e. the rest).
+///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
 ///
@@ -1183,9 +1187,9 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::consts_SCXCMD_OP_JOIN as i32;
                             copy_into_cstr(&mut mt.comm_prefix, joincmd);
                         }
-                        LayerMatch::TgidPidEq(polarity) => {
-                            mt.kind = bpf_intf::layer_match_kind_MATCH_PID_TGID_EQUALS as i32;
-                            mt.pid_tgid_eq = *polarity;
+                        LayerMatch::IsGroupLeader(polarity) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_IS_GROUP_LEADER as i32;
+                            mt.is_group_leader.write(*polarity);
                         }
                     }
                 }
