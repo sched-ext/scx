@@ -16,6 +16,7 @@ nix = { features = ["process", "signal"], default-features = false, version = "0
 serde = { version = "1.0", features = ["derive"] }
 sysinfo = "0.31.4"
 tokio = { version = "1.39", features = ["macros", "sync", "rt-multi-thread", "process"] }
+tokio-util = "0.7"
 toml = "0.8.19"
 zbus = { version = "5", features = ["tokio"], default-features = false }
 zvariant = "5.1"
