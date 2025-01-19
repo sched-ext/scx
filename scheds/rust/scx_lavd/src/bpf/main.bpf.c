@@ -683,57 +683,45 @@ bool could_run_on(struct task_struct *p, s32 cpu,
 	return ret;
 }
 
-static bool have_idle_cpus(void)
-{
-	const struct cpumask *idle_mask;
-	bool ret;
-
-	idle_mask = scx_bpf_get_idle_cpumask();
-	ret = !bpf_cpumask_empty(idle_mask);
-	scx_bpf_put_idle_cpumask(idle_mask);
-
-	return ret;
-}
-
 static __always_inline
 s32 pick_idle_cpu_in(struct bpf_cpumask *cpumask)
 {
 	s32 cpu_id;
 
-	if (is_smt_active) {
+	if (reserve_cpu) {
 		/*
-		 * Pick a fully idle core within a cpumask.
-		 */
-		cpu_id = scx_bpf_pick_idle_cpu(cast_mask(cpumask),
-					       SCX_PICK_IDLE_CORE);
-	}
-
-	if (!is_smt_active || cpu_id < 0) {
-		/*
-		 * Pick a fully idle core within a cpumask even if its
-		 * hypertwin is in use.
+		 * Pick a fully idle core within a cpumask, then pick an
+		 * any idle core if there is no.
 		 */
 		cpu_id = scx_bpf_pick_idle_cpu(cast_mask(cpumask), 0);
+	} else {
+		cpu_id = bpf_cpumask_any_and_distribute(cast_mask(cpumask), idle_mask);
+		if (cpu_id >= nr_cpu_ids)
+			cpu_id = -EBUSY;
 	}
 
 	return cpu_id;
 }
 
-static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
-			 s32 prev_cpu, u64 wake_flags, bool *is_idle)
+static s32 find_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
+			 s32 prev_cpu, u64 wake_flags, bool reserve_cpu,
+			 bool *is_idle)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	struct cpu_ctx *cpuc, *cpuc_prev, *cpuc_waker;
 	struct bpf_cpumask *a_cpumask, *o_cpumask, *t_cpumask, *t2_cpumask;
 	struct bpf_cpumask *active, *ovrflw, *big, *little;
 	struct bpf_cpumask *cpdom_mask_prev, *cpdom_mask_waker;
+	const struct cpumask *idle_mask;
 	s32 cpu_id, waker_cpu;
 	int cpdom_id;
+
+	idle_mask = scx_bpf_get_idle_cpumask();
 
 	/*
 	 * If there is no idle cpu, stay on the previous cpu.
 	 */
-	if (!have_idle_cpus()) {
+	if (!have_idle_cpus(idle_mask)) {
 		cpu_id = prev_cpu;
 		goto out;
 	}
@@ -955,6 +943,8 @@ unlock_out:
 	bpf_rcu_read_unlock();
 
 out:
+	scx_bpf_put_idle_cpumask(idle_mask);
+
 	/*
 	 * Note that we don't need to kick the picked CPU here since the
 	 * ops.select_cpu() path internally triggers kicking cpu if necessary.
@@ -1004,7 +994,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		return prev_cpu;
 	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
 
-	cpu_id = pick_idle_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
+	cpu_id = find_idle_cpu(p, taskc, prev_cpu, wake_flags, true, &found_idle);
 	if (found_idle) {
 		/*
 		 * If there is an idle cpu,
@@ -1059,7 +1049,7 @@ static bool try_kick_task_idle_cpu(struct task_struct *p, struct task_ctx *taskc
 	s32 prev_cpu, cpu;
 
 	prev_cpu = scx_bpf_task_cpu(p);
-	cpu = pick_idle_cpu(p, taskc, prev_cpu, 0, &found_idle);
+	cpu = find_idle_cpu(p, taskc, prev_cpu, 0, false, &found_idle);
 	if (found_idle && cpu >= 0) {
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return true;
