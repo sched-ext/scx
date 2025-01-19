@@ -202,7 +202,7 @@ static void update_power_mode_time(void)
 	if (last_power_mode_clk == 0)
 		last_power_mode_clk = now;
 
-	delta = now - last_power_mode_clk;
+	delta = time_delta(now, last_power_mode_clk);
 	last_power_mode_clk = now;
 
 	switch (power_mode) {

@@ -478,7 +478,7 @@ static u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc)
 	u64 duration = 0;
 
 	if (cpuc->online_clk > cpuc->offline_clk) {
-		duration = cpuc->online_clk - cpuc->offline_clk;
+		duration = time_delta(cpuc->online_clk, cpuc->offline_clk);
 		/*
 		 * Once calculated, reset the duration to zero.
 		 */
@@ -549,7 +549,7 @@ static void update_stat_for_running(struct task_struct *p,
 	 * frequency in a second using an exponential weighted moving average.
 	 */
 	if (have_scheduled(taskc)) {
-		wait_period = now - taskc->last_quiescent_clk;
+		wait_period = time_delta(now, taskc->last_quiescent_clk);
 		interval = taskc->run_time_ns + wait_period;
 		taskc->run_freq = calc_avg_freq(taskc->run_freq, interval);
 	}
@@ -1555,7 +1555,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * Update wake frequency.
 	 */
 	now = scx_bpf_now();
-	interval = now - waker_taskc->last_runnable_clk;
+	interval = time_delta(now, waker_taskc->last_runnable_clk);
 	waker_taskc->wake_freq = calc_avg_freq(waker_taskc->wake_freq, interval);
 	waker_taskc->last_runnable_clk = now;
 
@@ -1613,17 +1613,8 @@ static bool slice_fully_consumed(struct cpu_ctx *cpuc, struct task_ctx *taskc)
 {
 	u64 run_time_ns;
 
-	/*
-	 * Sanity check just to make sure the runtime is positive.
-	 */
-	if (taskc->last_stopping_clk < taskc->last_running_clk) {
-		scx_bpf_error("run_time_ns is negative: 0x%llu - 0x%llu",
-			      taskc->last_stopping_clk, taskc->last_running_clk);
-	}
-
-	run_time_ns = taskc->last_stopping_clk - taskc->last_running_clk;
-
-	return run_time_ns >= taskc->slice_ns;
+	run_time_ns = time_delta(taskc->last_stopping_clk, taskc->last_running_clk);
+	return run_time_ns > 0 && run_time_ns >= taskc->slice_ns;
 }
 
 static void adjust_slice_boost(struct cpu_ctx *cpuc, struct task_ctx *taskc)
@@ -1690,7 +1681,7 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	 * When a task @p goes to sleep, its associated wait_freq is updated.
 	 */
 	now = scx_bpf_now();
-	interval = now - taskc->last_quiescent_clk;
+	interval = time_delta(now, taskc->last_quiescent_clk);
 	taskc->wait_freq = calc_avg_freq(taskc->wait_freq, interval);
 	taskc->last_quiescent_clk = now;
 }
@@ -1766,16 +1757,19 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 	 */
 
 	struct cpu_ctx *cpuc;
+	u64 now;
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc)
 		return;
 
+	now = scx_bpf_now();
+
 	/*
 	 * The CPU is entering into the idle state.
 	 */
 	if (idle) {
-		cpuc->idle_start_clk = scx_bpf_now();
+		cpuc->idle_start_clk = now;
 
 		/*
 		 * As an idle task cannot be preempted,
@@ -1800,7 +1794,7 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 			 * timer already took the idle_time duration. Hence the
 			 * idle duration should not be accumulated.
 			 */
-			u64 duration = scx_bpf_now() - old_clk;
+			u64 duration = time_delta(now, old_clk);
 			bool ret = __sync_bool_compare_and_swap(
 					&cpuc->idle_start_clk, old_clk, 0);
 			if (ret)
