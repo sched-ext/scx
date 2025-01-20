@@ -128,14 +128,7 @@ Then rebuild and reboot your system. You can check if the scheduler is running b
 
 ## openSUSE Tumbleweed
 
-#### Adding the Repository
-
-Add the proper repository using:
-
-```
-$ sudo zypper addrepo https://download.opensuse.org/repositories/Base:System/openSUSE_Tumbleweed/Base:System.repo
-$ sudo zypper refresh
-```
+The scx package is included in openSUSE Factory and can be installed directly from Tumbleweed.
 
 #### Installing the Schedulers
 
