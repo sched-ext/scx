@@ -683,57 +683,55 @@ bool could_run_on(struct task_struct *p, s32 cpu,
 	return ret;
 }
 
-static bool have_idle_cpus(void)
+static __always_inline
+bool test_and_clear_cpu_idle(s32 cpu, const struct cpumask *idle_mask,
+			     bool reserve_cpu)
 {
-	const struct cpumask *idle_mask;
-	bool ret;
-
-	idle_mask = scx_bpf_get_idle_cpumask();
-	ret = !bpf_cpumask_empty(idle_mask);
-	scx_bpf_put_idle_cpumask(idle_mask);
-
-	return ret;
+	if (reserve_cpu)
+		return scx_bpf_test_and_clear_cpu_idle(cpu);
+	return bpf_cpumask_test_cpu(cpu, idle_mask);
 }
 
 static __always_inline
-s32 pick_idle_cpu_in(struct bpf_cpumask *cpumask)
+s32 find_idle_cpu_in(struct bpf_cpumask *cpumask,
+		     const struct cpumask *idle_mask, bool reserve_cpu)
 {
 	s32 cpu_id;
 
-	if (is_smt_active) {
+	if (reserve_cpu) {
 		/*
-		 * Pick a fully idle core within a cpumask.
-		 */
-		cpu_id = scx_bpf_pick_idle_cpu(cast_mask(cpumask),
-					       SCX_PICK_IDLE_CORE);
-	}
-
-	if (!is_smt_active || cpu_id < 0) {
-		/*
-		 * Pick a fully idle core within a cpumask even if its
-		 * hypertwin is in use.
+		 * Pick a fully idle core within a cpumask, then pick an
+		 * any idle core if there is no.
 		 */
 		cpu_id = scx_bpf_pick_idle_cpu(cast_mask(cpumask), 0);
+	} else {
+		cpu_id = bpf_cpumask_any_and_distribute(cast_mask(cpumask), idle_mask);
+		if (cpu_id >= nr_cpu_ids)
+			cpu_id = -EBUSY;
 	}
 
 	return cpu_id;
 }
 
-static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
-			 s32 prev_cpu, u64 wake_flags, bool *is_idle)
+static __always_inline
+s32 find_idle_cpu(struct task_struct *p, struct task_ctx *taskc, s32 prev_cpu,
+		  u64 wake_flags, bool reserve_cpu, bool *is_idle)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	struct cpu_ctx *cpuc, *cpuc_prev, *cpuc_waker;
 	struct bpf_cpumask *a_cpumask, *o_cpumask, *t_cpumask, *t2_cpumask;
 	struct bpf_cpumask *active, *ovrflw, *big, *little;
 	struct bpf_cpumask *cpdom_mask_prev, *cpdom_mask_waker;
+	const struct cpumask *idle_mask;
 	s32 cpu_id, waker_cpu;
 	int cpdom_id;
+
+	idle_mask = scx_bpf_get_idle_cpumask();
 
 	/*
 	 * If there is no idle cpu, stay on the previous cpu.
 	 */
-	if (!have_idle_cpus()) {
+	if (!have_idle_cpus(idle_mask)) {
 		cpu_id = prev_cpu;
 		goto out;
 	}
@@ -744,7 +742,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	if (is_migration_disabled(p) &&
 	    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+		if (test_and_clear_cpu_idle(prev_cpu, idle_mask, reserve_cpu))
 			*is_idle = true;
 		cpu_id = prev_cpu;
 		goto out;
@@ -811,7 +809,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	if (match_task_core_type(taskc, cpuc_prev, stat_cur) &&
 	    could_run_on(p, prev_cpu, a_cpumask, o_cpumask) &&
-	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+	    test_and_clear_cpu_idle(prev_cpu, idle_mask, reserve_cpu)) {
 		cpu_id = prev_cpu;
 		*is_idle = true;
 		goto unlock_out;
@@ -823,7 +821,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	if (wake_flags & SCX_WAKE_SYNC && prev_cpu != waker_cpu &&
 	    match_task_core_type(taskc, cpuc_waker, stat_cur) &&
 	    could_run_on(p, waker_cpu, a_cpumask, o_cpumask) &&
-	    scx_bpf_test_and_clear_cpu_idle(waker_cpu)) {
+	    test_and_clear_cpu_idle(waker_cpu, idle_mask, reserve_cpu)) {
 		cpu_id = waker_cpu;
 		*is_idle = true;
 		goto unlock_out;
@@ -854,7 +852,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	if (bpf_cpumask_empty(cast_mask(t2_cpumask)))
 		goto start_llc_mask;
 
-	cpu_id = pick_idle_cpu_in(t2_cpumask);
+	cpu_id = find_idle_cpu_in(t2_cpumask, idle_mask, reserve_cpu);
 	if (cpu_id >= 0) {
 		*is_idle = true;
 		goto unlock_out;
@@ -869,7 +867,7 @@ start_llc_mask:
 	if (bpf_cpumask_empty(cast_mask(t2_cpumask)))
 		goto start_tmask;
 
-	cpu_id = pick_idle_cpu_in(t2_cpumask);
+	cpu_id = find_idle_cpu_in(t2_cpumask, idle_mask, reserve_cpu);
 	if (cpu_id >= 0) {
 		*is_idle = true;
 		goto unlock_out;
@@ -884,7 +882,7 @@ start_llc_mask:
 		if (bpf_cpumask_empty(cast_mask(t2_cpumask)))
 			goto start_tmask;
 
-		cpu_id = pick_idle_cpu_in(t2_cpumask);
+		cpu_id = find_idle_cpu_in(t2_cpumask, idle_mask, reserve_cpu);
 		if (cpu_id >= 0) {
 			*is_idle = true;
 			goto unlock_out;
@@ -896,7 +894,7 @@ start_llc_mask:
 	 */
 start_tmask:
 	if (have_little_core) {
-		cpu_id = pick_idle_cpu_in(t_cpumask);
+		cpu_id = find_idle_cpu_in(t_cpumask, idle_mask, reserve_cpu);
 		if (cpu_id >= 0) {
 			*is_idle = true;
 			goto unlock_out;
@@ -906,7 +904,7 @@ start_tmask:
 	/*
 	 * Pick a idle core among active CPUs.
 	 */
-	cpu_id = pick_idle_cpu_in(a_cpumask);
+	cpu_id = find_idle_cpu_in(a_cpumask, idle_mask, reserve_cpu);
 	if (cpu_id >= 0) {
 		*is_idle = true;
 		goto unlock_out;
@@ -919,7 +917,7 @@ start_omask:
 	if (bpf_cpumask_empty(cast_mask(o_cpumask)))
 		goto start_any_mask;
 
-	cpu_id = scx_bpf_pick_idle_cpu(cast_mask(o_cpumask), 0);
+	cpu_id = find_idle_cpu_in(o_cpumask, idle_mask, reserve_cpu);
 	if (cpu_id >= 0) {
 		*is_idle = true;
 		goto unlock_out;
@@ -955,6 +953,8 @@ unlock_out:
 	bpf_rcu_read_unlock();
 
 out:
+	scx_bpf_put_idle_cpumask(idle_mask);
+
 	/*
 	 * Note that we don't need to kick the picked CPU here since the
 	 * ops.select_cpu() path internally triggers kicking cpu if necessary.
@@ -1004,7 +1004,11 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		return prev_cpu;
 	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
 
-	cpu_id = pick_idle_cpu(p, taskc, prev_cpu, wake_flags, &found_idle);
+	/*
+	 * Find an idle cpu and reserve it since the task @p will run
+	 * on the idle cpu.
+	 */
+	cpu_id = find_idle_cpu(p, taskc, prev_cpu, wake_flags, true, &found_idle);
 	if (found_idle) {
 		/*
 		 * If there is an idle cpu,
@@ -1058,11 +1062,40 @@ static bool try_kick_task_idle_cpu(struct task_struct *p, struct task_ctx *taskc
 	bool found_idle = false;
 	s32 prev_cpu, cpu;
 
+	/*
+	 * Find an idle cpu but do not reserve the idle cpu. That is because
+	 * there is no guarantee the idle cpu will be picked up at this point.
+	 */
 	prev_cpu = scx_bpf_task_cpu(p);
-	cpu = pick_idle_cpu(p, taskc, prev_cpu, 0, &found_idle);
+	cpu = find_idle_cpu(p, taskc, prev_cpu, 0, false, &found_idle);
 	if (found_idle && cpu >= 0) {
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return true;
+	}
+
+	return false;
+}
+
+static bool can_direct_dispatch(struct task_struct *p, u64 enq_flags,
+				s32 prev_cpu)
+{
+	/*
+	 * If a task is re-enqueued since the prev_cpu is taken by a higher
+	 * scheduling class (e.g., RT), directly dispatching to the prev_cpu
+	 * does not makes sense.
+	 */
+	if (enq_flags & SCX_ENQ_REENQ)
+		return false;
+
+	/*
+	 * If ops.select_cpu() has been skipped since the task is not
+	 * migratable, check whether the CPU is idle. If the CPU is idle,
+	 * dispatch the task to the local DSQ directly.
+	 */
+	if (!(enq_flags & SCX_ENQ_CPU_SELECTED)) {
+		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
+		    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
+			return true;
 	}
 
 	return false;
@@ -1072,7 +1105,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc_task, *cpuc_cur;
 	struct task_ctx *taskc;
-	s32 cpu_id;
+	s32 cpu_id, prev_cpu;
 	u64 dsq_id, now;
 
 	/*
@@ -1097,7 +1130,6 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Calculate when a task can be scheduled.
 	 */
 	calc_when_to_run(p, taskc, enq_flags);
-	dsq_id = find_proper_dsq(taskc, cpuc_task);
 
 	/*
 	 * Calculate the task's time slice.
@@ -1107,8 +1139,15 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Enqueue the task to one of task's DSQs based on its virtual deadline.
 	 */
-	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
-				 taskc->vdeadline_log_clk, enq_flags);
+	dsq_id = find_proper_dsq(taskc, cpuc_task);
+	prev_cpu = scx_bpf_task_cpu(p);
+	if (can_direct_dispatch(p, enq_flags, prev_cpu)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
+				   p->scx.slice, enq_flags);
+	} else {
+		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
+					 taskc->vdeadline_log_clk, enq_flags);
+	}
 
 	/*
 	 * If there is an idle cpu for the task, try to kick it up now
