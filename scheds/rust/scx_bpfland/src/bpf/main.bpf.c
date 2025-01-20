@@ -60,10 +60,16 @@ const volatile s64 slice_lag = 20ULL * NSEC_PER_MSEC;
  */
 const volatile bool local_kthreads;
 
-/*
- * Maximum threshold of voluntary context switches.
+ /*
+ * Prioritize per-CPU tasks (tasks that can only run on a single CPU).
+ *
+ * This allows to prioritize per-CPU tasks that usually tend to be
+ * de-prioritized (since they can't be migrated when their only usable CPU
+ * is busy). Enabling this option can introduce unfairness and potentially
+ * trigger stalls, but it can improve performance of server-type workloads
+ * (such as large parallel builds).
  */
-const volatile u64 nvcsw_max_thresh = 10ULL;
+const volatile bool local_pcpu;
 
 /*
  * The CPU frequency performance level: a negative value will not affect the
@@ -79,7 +85,7 @@ volatile u64 nr_kthread_dispatches, nr_direct_dispatches, nr_shared_dispatches;
 /*
  * Amount of currently running tasks.
  */
-volatile u64 nr_running, nr_interactive;
+volatile u64 nr_running;
 
 /*
  * Amount of online CPUs.
@@ -153,22 +159,32 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *l3_cpumask;
 
 	/*
-	 * Voluntary context switches metrics.
-	 */
-	u64 nvcsw;
-	u64 nvcsw_ts;
-	u64 avg_nvcsw;
-
-	/*
 	 * Task's average used time slice.
 	 */
-	u64 sum_runtime;
+	u64 exec_runtime;
 	u64 last_run_at;
 
 	/*
-	 * Set to true if the task is classified as interactive.
+	 * Task's deadline, defined as:
+	 *
+	 *   deadline = vruntime + exec_vruntime
+	 *
+	 * Here, vruntime represents the task's total runtime, scaled inversely by
+	 * its weight, while exec_vruntime accounts for the vruntime accumulated
+	 * from the moment the task becomes runnable until it voluntarily releases
+	 * the CPU.
+	 *
+	 * Fairness is ensured through vruntime, whereas exec_vruntime helps in
+	 * prioritizing latency-sensitive tasks: tasks that are frequently blocked
+	 * waiting for an event (typically latency sensitive) will accumulate a
+	 * smaller exec_vruntime, compared to tasks that continuously consume CPU
+	 * without interruption.
+	 *
+	 * As a result, tasks with a smaller exec_vruntime will have a shorter
+	 * deadline and will be dispatched earlier, ensuring better responsiveness
+	 * for latency-sensitive tasks.
 	 */
-	bool is_interactive;
+	u64 deadline;
 };
 
 /* Map that contains task-local storage. */
@@ -197,18 +213,11 @@ static inline bool is_kthread(const struct task_struct *p)
 }
 
 /*
- * Return true if the task can only run on its assigned CPU, false
- * otherwise.
+ * Return true if @p still wants to run, false otherwise.
  */
-static bool is_migration_disabled(const struct task_struct *p)
+static bool is_queued(const struct task_struct *p)
 {
-	if (p->nr_cpus_allowed == 1)
-		return true;
-
-	if (bpf_core_field_exists(p->migration_disabled))
-		return p->migration_disabled;
-
-	return false;
+	return p->scx.flags & SCX_TASK_QUEUED;
 }
 
 /*
@@ -230,26 +239,6 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 }
 
 /*
- * Exponential weighted moving average (EWMA).
- *
- * Copied from scx_lavd. Returns the new average as:
- *
- *	new_avg := (old_avg * .75) + (new_val * .25);
- */
-static u64 calc_avg(u64 old_val, u64 new_val)
-{
-	return (old_val - (old_val >> 2)) + (new_val >> 2);
-}
-
-/*
- * Evaluate the EWMA limited to the range [low ... high]
- */
-static u64 calc_avg_clamp(u64 old_val, u64 new_val, u64 low, u64 high)
-{
-	return CLAMP(calc_avg(old_val, new_val), low, high);
-}
-
-/*
  * Return the total amount of tasks that are currently waiting to be scheduled.
  */
 static u64 nr_tasks_waiting(void)
@@ -258,62 +247,38 @@ static u64 nr_tasks_waiting(void)
 }
 
 /*
- * Return task's weight.
- */
-static u64 task_weight(const struct task_struct *p, const struct task_ctx *tctx)
-{
-	return p->scx.weight;
-}
-
-/*
- * Return a value proportionally scaled to the task's priority.
- */
-static u64 scale_up_fair(const struct task_struct *p,
-			 const struct task_ctx *tctx, u64 value)
-{
-	return value * task_weight(p, tctx) / 100;
-}
-
-/*
  * Return a value inversely proportional to the task's priority.
  */
-static u64 scale_inverse_fair(const struct task_struct *p,
-			      const struct task_ctx *tctx, u64 value)
+static u64 scale_inverse_fair(const struct task_struct *p, u64 value)
 {
-	return value * 100 / task_weight(p, tctx);
+	return value * 100 / p->scx.weight;
 }
 
 /*
- * Return the task's allowed lag: used to determine how early its vruntime can
- * be.
+ * Update and return the task's deadline.
  */
-static u64 task_lag(const struct task_struct *p, const struct task_ctx *tctx)
+static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
 {
-	return scale_up_fair(p, tctx, slice_lag);
-}
-
-/*
- * Return task's evaluated deadline.
- */
-static u64 task_deadline(struct task_struct *p, struct task_ctx *tctx)
-{
-	u64 min_vruntime = vtime_now - task_lag(p, tctx);
+	u64 vtime_min;
 
 	/*
-	 * Per-CPU kthreads are critical for the entire system
-	 * responsiveness, so make sure they are dispatched before any
-	 * other task.
+	 * Limit the amount of vtime budget that an idling task can
+	 * accumulate to prevent excessive prioritization of sleeping
+	 * tasks.
+	 *
+	 * Tasks with a higher weight get a bigger "bucket" for their
+	 * allowed accumulated time budget.
 	 */
-	if (is_kthread(p) && p->nr_cpus_allowed == 1)
-		return min_vruntime;
+	vtime_min = vtime_now - slice_max;
+	if (time_before(tctx->deadline, vtime_min))
+		tctx->deadline = vtime_min;
 
 	/*
-	 * Limit the vruntime to to avoid excessively penalizing tasks.
+	 * Add the execution vruntime to the deadline.
 	 */
-	if (time_before(p->scx.dsq_vtime, min_vruntime))
-		p->scx.dsq_vtime = min_vruntime;
+	tctx->deadline += scale_inverse_fair(p, tctx->exec_runtime);
 
-	return p->scx.dsq_vtime + scale_inverse_fair(p, tctx, tctx->sum_runtime);
+	return tctx->deadline;
 }
 
 static void task_set_domain(struct task_struct *p, s32 cpu,
@@ -512,7 +477,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 * block and release the current CPU).
 		 */
 		has_idle = bpf_cpumask_intersects(curr_l3_domain, idle_cpumask);
-		if ((!nvcsw_max_thresh || has_idle) &&
+		if (has_idle &&
 		    bpf_cpumask_test_cpu(cpu, p_mask) &&
 		    !(current->flags & PF_EXITING) &&
 		    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) == 0) {
@@ -571,6 +536,15 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 			*is_idle = true;
 			goto out_put_cpumask;
 		}
+
+		/*
+		 * Search for any full-idle core usable by the task.
+		 */
+		cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, SCX_PICK_IDLE_CORE);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto out_put_cpumask;
+		}
 	}
 
 	/*
@@ -608,6 +582,15 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * Search for any idle CPU in the scheduling domain.
 	 */
 	cpu = scx_bpf_pick_idle_cpu(p_mask, 0);
+	if (cpu >= 0) {
+		*is_idle = true;
+		goto out_put_cpumask;
+	}
+
+	/*
+	 * Search for any idle CPU usable by the task.
+	 */
+	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 	if (cpu >= 0) {
 		*is_idle = true;
 		goto out_put_cpumask;
@@ -657,7 +640,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 	s32 cpu;
 
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
-	if (is_idle && !scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
+	if (is_idle && (local_pcpu || !scx_bpf_dsq_nr_queued(SHARED_DSQ))) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	}
@@ -670,31 +653,18 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
  */
 static void kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tctx)
 {
-	const struct cpumask *idle_cpumask, *l3_mask;
+	const struct cpumask *idle_cpumask;
 	s32 cpu;
 
 	/*
-	 * If the task can only run on a single CPU, it's pointless to wake
-	 * up any other CPU, so do nothing in this case.
-	 */
-	if (is_migration_disabled(p))
-		return;
-
-	/*
-	 * Look for an idle CPU in the same L3 domain that can immediately
+	 * Look for any idle CPU usable by the task that can immediately
 	 * execute the task.
 	 *
 	 * Note that we do not want to mark the CPU as busy, since we don't
 	 * know at this stage if we will actually dispatch any task on it.
 	 */
-	l3_mask = cast_mask(tctx->l3_cpumask);
-	if (!l3_mask) {
-		scx_bpf_error("l3 cpumask not initialized");
-		return;
-	}
-
 	idle_cpumask = scx_bpf_get_idle_cpumask();
-	cpu = bpf_cpumask_any_and_distribute(l3_mask, idle_cpumask);
+	cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, idle_cpumask);
 	scx_bpf_put_cpumask(idle_cpumask);
 
 	if (cpu < nr_cpu_ids)
@@ -712,7 +682,7 @@ static bool try_direct_dispatch(struct task_struct *p, u64 enq_flags)
 	 * If local_kthread is specified dispatch per-CPU kthreads
 	 * directly on their assigned CPU.
 	 */
-	if (local_kthreads && is_kthread(p) && p->nr_cpus_allowed == 1) {
+	if (local_kthreads && is_kthread(p)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
 		return true;
@@ -739,7 +709,7 @@ static bool try_direct_dispatch(struct task_struct *p, u64 enq_flags)
 		 * direct dispatch.
 		 */
 		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
-		    !scx_bpf_dsq_nr_queued(SHARED_DSQ) &&
+		    (local_pcpu || !scx_bpf_dsq_nr_queued(SHARED_DSQ)) &&
 		    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
 					   slice_max, enq_flags);
@@ -749,14 +719,13 @@ static bool try_direct_dispatch(struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
-	 * If nvcsw_max_thresh is disabled we don't care much about
-	 * interactivity, so we can boost per-CPU tasks and always dispatch
-	 * them directly on their CPU.
+	 * If local_pcpu is enabled always dispatch tasks that can only run
+	 * on one CPU directly.
 	 *
 	 * This can help to improve I/O workloads (like large parallel
 	 * builds).
 	 */
-	if (!nvcsw_max_thresh && is_migration_disabled(p)) {
+	if (local_pcpu && p->nr_cpus_allowed == 1) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return true;
@@ -820,7 +789,7 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	 * round on the same CPU (provided the CPU is in the primary scheduling
 	 * domain).
 	 */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
+	if (prev && is_queued(prev) &&
 	    primary && bpf_cpumask_test_cpu(cpu, primary))
 		prev->scx.slice = slice_max;
 }
@@ -836,22 +805,8 @@ static void update_cpuperf_target(struct task_struct *p, struct task_ctx *tctx)
 	u64 perf_lvl, delta_runtime, delta_t;
 	struct cpu_ctx *cctx;
 
-	if (cpufreq_perf_lvl >= 0) {
-		/*
-		 * Apply fixed cpuperf scaling factor determined by user-space.
-		 */
-		perf_lvl = MIN(cpufreq_perf_lvl, SCX_CPUPERF_ONE);
-		scx_bpf_cpuperf_set(cpu, perf_lvl);
+	if (cpufreq_perf_lvl >= 0)
 		return;
-	}
-
-	/*
-	 * Auto mode: always tset max performance for interactive tasks.
-	 */
-	if (tctx->is_interactive) {
-		scx_bpf_cpuperf_set(cpu, SCX_CPUPERF_ONE);
-		return;
-	}
 
 	/*
 	 * For non-interactive tasks determine their cpufreq scaling factor as
@@ -869,13 +824,6 @@ static void update_cpuperf_target(struct task_struct *p, struct task_ctx *tctx)
 	delta_runtime = cctx->tot_runtime - cctx->prev_runtime;
 	perf_lvl = delta_runtime * SCX_CPUPERF_ONE / delta_t;
 
-	/*
-	 * If interactive tasks detection is disabled, always boost the
-	 * frequency to make sure it's at least 50%, to prevent being too
-	 * conservative.
-	 */
-	if (!nvcsw_max_thresh)
-		perf_lvl += SCX_CPUPERF_ONE / 2;
 	perf_lvl = MIN(perf_lvl, SCX_CPUPERF_ONE);
 
 	/*
@@ -904,16 +852,11 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	update_cpuperf_target(p, tctx);
 
 	/*
-	 * Update CPU interactive state.
+	 * Update the global vruntime as a new task is starting to use a
+	 * CPU.
 	 */
-	if (tctx->is_interactive)
-		__sync_fetch_and_add(&nr_interactive, 1);
-
-	/*
-	 * Update global vruntime.
-	 */
-	if (time_before(vtime_now, p->scx.dsq_vtime))
-		vtime_now = p->scx.dsq_vtime;
+	if (time_before(vtime_now, tctx->deadline))
+		vtime_now = tctx->deadline;
 }
 
 /*
@@ -924,13 +867,14 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 {
 	u64 now = scx_bpf_now(), slice;
 	s32 cpu = scx_bpf_task_cpu(p);
-	s64 delta_t;
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (cctx)
-		cctx->tot_runtime += now - cctx->last_running;
+	if (cpufreq_perf_lvl < 0) {
+		cctx = try_lookup_cpu_ctx(cpu);
+		if (cctx)
+			cctx->tot_runtime += now - cctx->last_running;
+	}
 
 	__sync_fetch_and_sub(&nr_running, 1);
 
@@ -938,79 +882,24 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	if (!tctx)
 		return;
 
-	if (tctx->is_interactive)
-		__sync_fetch_and_sub(&nr_interactive, 1);
+	/*
+	 * Evaluate the time slice used by the task.
+	 */
+	slice = bpf_ktime_get_ns() - tctx->last_run_at;
 
 	/*
-	 * Update task's average runtime.
-	 *
-	 * Limit the total accumulated runtime to 1s to avoid excessive
-	 * de-prioritization of pure CPU-intensive tasks and avoid
-	 * potential starvation.
+	 * Update task's execution time (exec_runtime), but never account
+	 * more than 10 slices of runtime to prevent excessive
+	 * de-prioritization of CPU-intensive tasks (which could lead to
+	 * starvation).
 	 */
-	slice = now - tctx->last_run_at;
-	if (tctx->sum_runtime < NSEC_PER_SEC)
-		tctx->sum_runtime += slice;
+	if (tctx->exec_runtime < 10 * slice_max)
+		tctx->exec_runtime += slice;
 
 	/*
-	 * Update task vruntime charging the weighted used time slice.
+	 * Update task's vruntime.
 	 */
-	p->scx.dsq_vtime += scale_inverse_fair(p, tctx, slice);
-
-	if (!nvcsw_max_thresh)
-		return;
-
-	/*
-	 * If the time slice is not fully depleted, it means that the task
-	 * voluntarily relased the CPU, therefore update the voluntary context
-	 * switch counter.
-	 *
-	 * NOTE: the sched_ext core implements sched_yield() by setting the
-	 * time slice to 0, so we won't boost the priority of tasks that are
-	 * explicitly calling sched_yield().
-	 *
-	 * This is actually a good thing, because we want to prioritize tasks
-	 * that are releasing the CPU, because they're doing I/O, waiting for
-	 * input or sending output to other tasks.
-	 *
-	 * Tasks that are using sched_yield() don't really need the priority
-	 * boost and when they get the chance to run again they will be
-	 * naturally prioritized by the vruntime-based scheduling policy.
-	 */
-	if (p->scx.slice > 0)
-		tctx->nvcsw++;
-
-	/*
-	 * Refresh voluntary context switch metrics.
-	 *
-	 * Evaluate the average number of voluntary context switches per second
-	 * using an exponentially weighted moving average, see calc_avg().
-	 */
-	delta_t = (s64)(now - tctx->nvcsw_ts);
-	if (delta_t > NSEC_PER_SEC) {
-		u64 avg_nvcsw = tctx->nvcsw * NSEC_PER_SEC / delta_t;
-		u64 max_nvcsw = nvcsw_max_thresh * 100;
-
-		tctx->nvcsw = 0;
-		tctx->nvcsw_ts = now;
-
-		/*
-		 * Evaluate the latency weight of the task as its average rate
-		 * of voluntary context switches (limited to to prevent
-		 * excessive spikes).
-		 */
-		tctx->avg_nvcsw = calc_avg_clamp(tctx->avg_nvcsw, avg_nvcsw, 0, max_nvcsw);
-
-		/*
-		 * Classify the task based on the average of voluntary context
-		 * switches.
-		 *
-		 * If the task has an average greater than the global average
-		 * it is classified as interactive, otherwise the task is
-		 * classified as regular.
-		 */
-		tctx->is_interactive = tctx->avg_nvcsw >= nvcsw_max_thresh;
-	}
+	tctx->deadline += scale_inverse_fair(p, slice);
 }
 
 void BPF_STRUCT_OPS(bpfland_runnable, struct task_struct *p, u64 enq_flags)
@@ -1021,7 +910,7 @@ void BPF_STRUCT_OPS(bpfland_runnable, struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 
-	tctx->sum_runtime = 0;
+	tctx->exec_runtime = 0;
 }
 
 void BPF_STRUCT_OPS(bpfland_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
@@ -1044,17 +933,17 @@ void BPF_STRUCT_OPS(bpfland_set_cpumask, struct task_struct *p,
 
 void BPF_STRUCT_OPS(bpfland_enable, struct task_struct *p)
 {
-	u64 now = scx_bpf_now();
 	struct task_ctx *tctx;
-
-	/* Initialize task's vruntime */
-	p->scx.dsq_vtime = vtime_now;
 
 	/* Initialize voluntary context switch timestamp */
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
-	tctx->nvcsw_ts = now;
+
+	/*
+	 * Initialize the task vruntime to the current global vruntime.
+	 */
+	tctx->deadline = vtime_now;
 }
 
 s32 BPF_STRUCT_OPS(bpfland_init_task, struct task_struct *p,
@@ -1204,6 +1093,28 @@ int enable_primary_cpu(struct cpu_arg *input)
 	return err;
 }
 
+/*
+ * Initialize cpufreq performance level on all the online CPUs.
+ */
+static void init_cpuperf_target(void)
+{
+	const struct cpumask *online_cpumask;
+	u64 perf_lvl;
+	s32 cpu;
+
+	if (cpufreq_perf_lvl < 0)
+		return;
+
+	online_cpumask = scx_bpf_get_online_cpumask();
+	bpf_for (cpu, 0, nr_cpu_ids) {
+		if (!bpf_cpumask_test_cpu(cpu, online_cpumask))
+			continue;
+		perf_lvl = MIN(cpufreq_perf_lvl, SCX_CPUPERF_ONE);
+		scx_bpf_cpuperf_set(cpu, perf_lvl);
+	}
+	scx_bpf_put_cpumask(online_cpumask);
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 {
 	int err;
@@ -1211,6 +1122,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	/* Initialize amount of online and possible CPUs */
 	nr_online_cpus = get_nr_online_cpus();
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
+
+	/* Initialize cpufreq profile */
+	init_cpuperf_target();
 
 	/*
 	 * Create the global shared DSQ.

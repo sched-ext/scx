@@ -139,7 +139,16 @@ struct Opts {
     #[clap(short = 'l', long, allow_hyphen_values = true, default_value = "20000")]
     slice_us_lag: i64,
 
-    /// Enable per-CPU kthreads prioritization.
+    /// Enable per-CPU tasks prioritization.
+    ///
+    /// This allows to prioritize per-CPU tasks that usually tend to be de-prioritized (since they
+    /// can't be migrated when their only usable CPU is busy). Enabling this option can introduce
+    /// unfairness and potentially trigger stalls, but it can improve performance of server-type
+    /// workloads (such as large parallel builds).
+    #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
+    local_pcpu: bool,
+
+    /// Enable kthreads prioritization.
     ///
     /// Enabling this can improve system performance, but it may also introduce interactivity
     /// issues or unfairness in scenarios with high kthread activity, such as heavy I/O or network
@@ -168,9 +177,17 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_l3: bool,
 
-    /// Maximum threshold of voluntary context switches per second. This is used to classify interactive
+    /// Enable CPU frequency control (only with schedutil governor).
+    ///
+    /// With this option enabled the CPU frequency will be automatically scaled based on the load.
+    #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
+    cpufreq: bool,
+
+    /// [DEPRECATED] Maximum threshold of voluntary context switches per second. This is used to
+    /// classify interactive.
+    ///
     /// tasks (0 = disable interactive tasks classification).
-    #[clap(short = 'c', long, default_value = "10")]
+    #[clap(short = 'c', long, default_value = "10", hide = true)]
     nvcsw_max_thresh: u64,
 
     /// Enable stats monitoring with the specified interval.
@@ -247,11 +264,11 @@ impl<'a> Scheduler<'a> {
         // Override default BPF scheduling parameters.
         skel.maps.rodata_data.debug = opts.debug;
         skel.maps.rodata_data.smt_enabled = smt_enabled;
+        skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
         skel.maps.rodata_data.local_kthreads = opts.local_kthreads;
         skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
-        skel.maps.rodata_data.nvcsw_max_thresh = opts.nvcsw_max_thresh;
 
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, bpfland_ops, uei)?;
@@ -265,8 +282,7 @@ impl<'a> Scheduler<'a> {
         {
             warn!("failed to initialize primary domain: error {}", err);
         }
-        if let Err(err) = Self::init_cpufreq_perf(&mut skel, &opts.primary_domain, &energy_profile)
-        {
+        if let Err(err) = Self::init_cpufreq_perf(&mut skel, &opts.primary_domain, opts.cpufreq) {
             warn!(
                 "failed to initialize cpufreq performance level: error {}",
                 err
@@ -393,17 +409,14 @@ impl<'a> Scheduler<'a> {
     fn init_cpufreq_perf(
         skel: &mut BpfSkel<'_>,
         primary_domain: &String,
-        energy_profile: &String,
+        auto: bool,
     ) -> Result<()> {
+        // If we are using the powersave profile always scale the CPU frequency to the minimum,
+        // otherwise use the maximum, unless automatic frequency scaling is enabled.
         let perf_lvl: i64 = match primary_domain.as_str() {
-            "auto" => match energy_profile.as_str() {
-                "performance" => 1024,
-                "power" | "powersave" => 0,
-                &_ => -1,
-            },
-            "performance" => 1024,
             "powersave" => 0,
-            _ => -1,
+            _ if auto => -1,
+            _ => 1024,
         };
         info!(
             "cpufreq performance level: {}",
@@ -431,7 +444,7 @@ impl<'a> Scheduler<'a> {
                 if let Err(err) = Self::init_cpufreq_perf(
                     &mut self.skel,
                     &self.opts.primary_domain,
-                    &energy_profile,
+                    self.opts.cpufreq,
                 ) {
                     warn!("failed to refresh cpufreq performance level: error {}", err);
                 }
@@ -535,7 +548,6 @@ impl<'a> Scheduler<'a> {
         Metrics {
             nr_running: self.skel.maps.bss_data.nr_running,
             nr_cpus: self.skel.maps.bss_data.nr_online_cpus,
-            nr_interactive: self.skel.maps.bss_data.nr_interactive,
             nr_kthread_dispatches: self.skel.maps.bss_data.nr_kthread_dispatches,
             nr_direct_dispatches: self.skel.maps.bss_data.nr_direct_dispatches,
             nr_shared_dispatches: self.skel.maps.bss_data.nr_shared_dispatches,

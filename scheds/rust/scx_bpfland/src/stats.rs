@@ -19,8 +19,6 @@ pub struct Metrics {
     pub nr_running: u64,
     #[stat(desc = "Number of online CPUs")]
     pub nr_cpus: u64,
-    #[stat(desc = "Number of running interactive tasks")]
-    pub nr_interactive: u64,
     #[stat(desc = "Number of kthread direct dispatches")]
     pub nr_kthread_dispatches: u64,
     #[stat(desc = "Number of task direct dispatches")]
@@ -33,11 +31,10 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] tasks -> r: {:>2}/{:<2} i: {:<2} | dispatch -> k: {:<5} d: {:<5} s: {:<5}",
+            "[{}] tasks -> r: {:>2}/{:<2} | dispatch -> k: {:<5} d: {:<5} s: {:<5}",
             crate::SCHEDULER_NAME,
             self.nr_running,
             self.nr_cpus,
-            self.nr_interactive,
             self.nr_kthread_dispatches,
             self.nr_direct_dispatches,
             self.nr_shared_dispatches
