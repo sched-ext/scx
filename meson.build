@@ -1,7 +1,10 @@
 project('sched_ext schedulers', 'c',
         version: '1.0.8',
         license: 'GPL-2.0',
-        meson_version : '>= 1.2.0',)
+        meson_version : '>= 1.2.0',
+        default_options : [
+          'optimization=3',
+        ])
 
 fs = import('fs')
 
@@ -247,7 +250,7 @@ if cpu not in arch_dict
 endif
 
 sys_incls = run_command(get_sys_incls, bpf_clang, check: true).stdout().splitlines()
-bpf_base_cflags = ['-g', '-O2', '-Wall', '-Wno-compare-distinct-pointer-types',
+bpf_base_cflags = ['-g', '-O3', '-Wall', '-Wno-compare-distinct-pointer-types',
                    '-D__TARGET_ARCH_' + arch_dict[cpu], '-mcpu=v3',
                    '-m@0@-endian'.format(host_machine.endian())] + sys_incls
 
