@@ -1507,6 +1507,20 @@ impl<'a> App<'a> {
                 Style::default(),
             )),
             Line::from(Span::styled(
+                format!(
+                    "{}: perf event list scroll up",
+                    self.keymap.action_keys_string(Action::PageUp)
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: perf event list scroll down",
+                    self.keymap.action_keys_string(Action::PageDown)
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
                 format!("{}: quit", self.keymap.action_keys_string(Action::Quit),),
                 Style::default(),
             )),
