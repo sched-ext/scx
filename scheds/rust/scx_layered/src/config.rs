@@ -74,6 +74,7 @@ pub enum LayerMatch {
     NSPIDEquals(u64, u32),
     NSEquals(u32),
     CmdJoin(String),
+    IsGroupLeader(bool),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
