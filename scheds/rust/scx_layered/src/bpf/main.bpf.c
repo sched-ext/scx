@@ -72,6 +72,7 @@ u32 layered_root_tgid = 0;
 
 u32 empty_layer_ids[MAX_LAYERS];
 u32 nr_empty_layer_ids;
+static u32 do_refresh_layer_cpumasks = 0;
 
 UEI_DEFINE(uei);
 
@@ -445,17 +446,26 @@ static void refresh_cpumasks(u32 layer_id)
 	}
 }
 
-/*
- * Refreshes all layer cpumasks, this is called via BPF_PROG_RUN from userspace.
- */
-SEC("syscall")
-int BPF_PROG(refresh_layer_cpumasks)
+static bool maybe_refresh_layer_cpumasks()
 {
 	u32 id;
+
+	if (!__sync_lock_test_and_set(&do_refresh_layer_cpumasks, 0))
+		return false;
 
 	bpf_for(id, 0, nr_layers)
 		refresh_cpumasks(id);
 
+	return true;
+}
+
+/*
+ * Refreshes all layer cpumasks, this is called via BPF_PROG_RUN from userspace.
+ */
+SEC("syscall")
+__weak s32 BPF_PROG(refresh_layer_cpumasks)
+{
+	__sync_fetch_and_or(&do_refresh_layer_cpumasks, 1);
 	return 0;
 }
 
@@ -1078,6 +1088,7 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	struct layer *layer;
 	s32 cpu;
 
+	maybe_refresh_layer_cpumasks();
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return prev_cpu;
 
@@ -1217,7 +1228,10 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	u64 queued_runtime;
 	u64 *lstats;
 
-	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
+	maybe_refresh_layer_cpumasks();
+	if (!(cpuc = lookup_cpu_ctx(-1)) ||
+	    !(task_cpuc = lookup_cpu_ctx(task_cpu)) ||
+	    !(taskc = lookup_task_ctx(p)))
 		return;
 
 	layer_id = taskc->layer_id;
@@ -1779,6 +1793,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	s32 sib = sibling_cpu(cpu);
 	u32 nr_ogp_layers = nr_op_layers + nr_gp_layers;
 	u32 nr_ogn_layers = nr_on_layers + nr_gn_layers;
+
+	maybe_refresh_layer_cpumasks();
 
 	if (!(cpuc = lookup_cpu_ctx(-1)))
 		return;
