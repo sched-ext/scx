@@ -499,8 +499,6 @@ static int handle_cmd(struct task_ctx *taskc, struct scx_cmd *cmd)
 
 	_Static_assert(sizeof(*cmd) == MAX_COMM, "scx_cmd has wrong size");
 
-	bpf_printk("received cmd");
-
 	/* Is this a valid command? */
 	if (cmd->prefix != SCXCMD_PREFIX)
 		return 0;
@@ -2864,6 +2862,9 @@ static s32 init_layer(int layer_id)
 				break;
 			case MATCH_NS_EQUALS:
 				dbg("%s NSID %lld", header, match->nsid);
+				break;
+			case MATCH_SCXCMD_JOIN:
+				dbg("%s SCXCMD_JOIN \"%s\"", header, match->comm_prefix);
 				break;
 			case MATCH_IS_GROUP_LEADER:
 				dbg("%s PID %d", header, match->is_group_leader);
