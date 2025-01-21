@@ -1690,9 +1690,12 @@ impl<'a> App<'a> {
     fn on_pg_up(&mut self) {
         match self.state {
             AppState::Event => {
-                if self.event_scroll > 1 {
+                if self.event_scroll > self.events_list_size {
                     self.event_scroll -= self.events_list_size - 1;
                     self.selected_event -= (self.events_list_size - 1) as usize;
+                } else {
+                    self.event_scroll = 0;
+                    self.selected_event = 0;
                 }
             }
             _ => {}
