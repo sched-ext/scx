@@ -242,6 +242,7 @@ enum layer_match_kind {
 	MATCH_NS_EQUALS,
 	MATCH_SCXCMD_JOIN,
 	MATCH_IS_GROUP_LEADER,
+	MATCH_HAS_BEEN_RENAMED,
 
 	NR_LAYER_MATCH_KINDS,
 };
@@ -259,6 +260,7 @@ struct layer_match {
 	u32		tgid;
 	u64		nsid;
 	bool		is_group_leader;
+	bool		has_been_renamed;
 };
 
 struct layer_match_ands {

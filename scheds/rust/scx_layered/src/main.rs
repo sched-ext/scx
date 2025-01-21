@@ -294,6 +294,8 @@ lazy_static! {
 ///
 /// - CmdJoin: Matches when the task uses pthread_setname_np to send a join/leave
 /// command to the scheduler. See examples/cmdjoin.c for more details.
+/// - HasBeenRenamed: Bool. Match tasks that have been renamed, or not been renamed. Useful, e.g.,
+/// for preventing a task from renaming itself to get a priority boost.
 ///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
@@ -1193,6 +1195,10 @@ impl<'a> Scheduler<'a> {
                         LayerMatch::IsGroupLeader(polarity) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_IS_GROUP_LEADER as i32;
                             mt.is_group_leader.write(*polarity);
+                        }
+                        LayerMatch::HasBeenRenamed(renamed) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_IS_GROUP_LEADER as i32;
+                            mt.has_been_renamed.write(*renamed);
                         }
                     }
                 }

@@ -411,6 +411,7 @@ struct task_ctx {
 	u32			qrt_llc_id;
 
 	char 			join_layer[SCXCMD_COMLEN];
+	bool			has_been_renamed;
 };
 
 struct {
@@ -535,6 +536,7 @@ int BPF_PROG(tp_task_rename, struct task_struct *p, const char *buf)
 		return -EINVAL;
 	}
 
+	taskc->has_been_renamed = true;
 	taskc->refresh_layer = true;
 
 	ret = bpf_probe_read_str(&cmd, sizeof(cmd), buf);
@@ -1840,6 +1842,15 @@ static __noinline bool match_one(struct layer_match *match,
 		// There is nuance to this around exec(2)s and group leader swaps.
 		// See https://github.com/sched-ext/scx/issues/610 for more details.
 		return p->tgid == p->pid && match->is_group_leader;
+	}
+	case MATCH_HAS_BEEN_RENAMED: {
+		struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
+		if (!taskc) {
+			scx_bpf_error("could not find task");
+			return false;
+		}
+
+		return taskc->has_been_renamed == match->has_been_renamed;
 	}
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);

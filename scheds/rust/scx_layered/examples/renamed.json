@@ -1,0 +1,83 @@
+[
+  {
+    "name": "renamed_to_stress_ng",
+    "comment": "matches all tasks that have been renamed to 'stress-ng'",
+    "matches": [
+      [
+        {
+          "CommPrefix": "stress-ng"
+        },
+	{
+	  "HasBeenRenamed": true
+	}
+      ],
+      [
+        {
+          "PcommPrefix": "stress-ng"
+        },
+	{
+	  "HasBeenRenamed": true
+	}
+      ]
+    ],
+    "kind": {
+      "Confined": {
+        "util_range": [
+          0.4,
+          0.90
+        ]
+      }
+    }
+  },
+  {
+    "name": "other_renamed",
+    "comment": "all other renamed tasks",
+    "matches": [
+      [
+	{
+	  "HasBeenRenamed": true
+	}
+      ]
+    ],
+    "kind": {
+      "Confined": {
+        "util_range": [
+          0.4,
+          0.90
+        ]
+      }
+    }
+  },
+  {
+    "name": "non_renamed",
+    "comment": "all tasks that have not renamed themselves",
+    "matches": [
+      [
+	{
+	  "HasBeenRenamed": false
+	}
+      ]
+    ],
+    "kind": {
+      "Confined": {
+        "util_range": [
+          0.4,
+          0.90
+        ]
+      }
+    }
+  },
+  {
+    "name": "everything_else",
+    "comment": "the rest",
+    "matches":[[]],
+    "kind": {
+      "Grouped": {
+        "util_range": [
+          0.05,
+          0.60
+        ]
+      }
+    }
+  }
+]
