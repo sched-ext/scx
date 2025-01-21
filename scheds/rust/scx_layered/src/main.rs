@@ -1184,7 +1184,7 @@ impl<'a> Scheduler<'a> {
                             mt.nsid = *nsid as u64;
                         }
                         LayerMatch::CmdJoin(joincmd) => {
-                            mt.kind = bpf_intf::consts_SCXCMD_OP_JOIN as i32;
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_SCXCMD_JOIN as i32;
                             copy_into_cstr(&mut mt.comm_prefix, joincmd);
                         }
                         LayerMatch::IsGroupLeader(polarity) => {
