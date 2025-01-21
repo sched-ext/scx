@@ -164,6 +164,27 @@ simple scheduling policy.
 
 --------------------------------------------------------------------------------
 
+## scx_prev
+
+### Overview
+
+A variation on scx_simple with CPU selection that prioritizes an idle previous
+CPU over finding a fully idle core (as is done in scx_simple and scx_rusty).
+
+### Typical Use Case
+
+This scheduler outperforms the in-kernel fair class, scx_simple, and scx_rusty
+on OLTP workloads run on systems with simple topology (i.e. non-NUMA, single
+LLC).
+
+### Production Ready?
+
+scx_prev has not been tested in a production environment, but given its
+similarity to scx_simple, it might be production ready for specific workloads
+on hardware with simple topology.
+
+--------------------------------------------------------------------------------
+
 ## scx_userland
 
 ### Overview
