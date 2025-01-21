@@ -52,6 +52,7 @@ pub struct App<'a> {
     keymap: KeyMap,
     scheduler: String,
     max_cpu_events: usize,
+    max_sched_events: usize,
     state: AppState,
     prev_state: AppState,
     theme: AppTheme,
@@ -62,6 +63,7 @@ pub struct App<'a> {
     pub action_tx: UnboundedSender<Action>,
     pub skel: BpfSkel<'a>,
     topo: Topology,
+    large_core_count: bool,
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
     event_scroll_state: ScrollbarState,
@@ -139,6 +141,7 @@ impl<'a> App<'a> {
         let app = Self {
             scheduler,
             max_cpu_events,
+            max_sched_events: max_cpu_events,
             keymap,
             theme: AppTheme::Default,
             state: AppState::Default,
@@ -149,6 +152,7 @@ impl<'a> App<'a> {
             should_quit: Arc::new(AtomicBool::new(false)),
             action_tx,
             skel,
+            large_core_count: topo.all_cpus.len() >= 128,
             topo,
             collect_cpu_freq: true,
             collect_uncore_freq: true,
@@ -306,6 +310,42 @@ impl<'a> App<'a> {
             }
         }
         Ok(())
+    }
+
+    /// resizes existing sched event data based on new max value.
+    fn resize_sched_events(&mut self, max_events: usize) {
+        for events in self.dsq_data.values_mut() {
+            events.set_max_size(max_events);
+        }
+    }
+
+    /// resizes existing events based on new max value.
+    fn resize_events(&mut self, max_events: usize) {
+        for node in self.topo.nodes.keys() {
+            let node_data = self
+                .node_data
+                .entry(*node)
+                .or_insert(NodeData::new(*node, self.max_cpu_events));
+            node_data.data.set_max_size(max_events);
+        }
+        for llc in self.topo.all_llcs.keys() {
+            let llc_data =
+                self.llc_data
+                    .entry(*llc)
+                    .or_insert(LlcData::new(*llc, 0, self.max_cpu_events));
+            llc_data.data.set_max_size(max_events);
+        }
+        for cpu in self.active_perf_events.keys() {
+            let cpu_data = self.cpu_data.entry(*cpu).or_insert(CpuData::new(
+                *cpu,
+                0,
+                0,
+                0,
+                self.max_cpu_events,
+            ));
+            cpu_data.data.set_max_size(max_events);
+        }
+        self.max_cpu_events = max_events;
     }
 
     /// Runs callbacks to update application state on tick.
@@ -531,7 +571,12 @@ impl<'a> App<'a> {
 
     /// Renders the llc application state.
     fn render_llc(&mut self, frame: &mut Frame) -> Result<()> {
-        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
+        let area = frame.area();
+        let area_events = (area.width / 2) as usize;
+        if self.max_cpu_events != area_events {
+            self.resize_events(area_events);
+        }
+        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
         let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
         let num_llcs = self.topo.all_llcs.len();
 
@@ -626,7 +671,12 @@ impl<'a> App<'a> {
 
     /// Renders the node application state.
     fn render_node(&mut self, frame: &mut Frame) -> Result<()> {
-        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
+        let area = frame.area();
+        let area_events = (area.width / 2) as usize;
+        if self.max_cpu_events != area_events {
+            self.resize_events(area_events);
+        }
+        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(area);
         let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
         let num_nodes = self.topo.nodes.len();
 
@@ -839,6 +889,12 @@ impl<'a> App<'a> {
     ) -> Result<()> {
         let num_dsqs = self.dsq_data.len();
         let mut dsq_constraints = Vec::new();
+
+        let area_width = area.width as usize;
+        if area_width != self.max_sched_events {
+            self.resize_sched_events(area_width);
+        }
+
         if num_dsqs == 0 {
             let block = Block::default()
                 .title_top(
@@ -1169,6 +1225,16 @@ impl<'a> App<'a> {
                 let constraints =
                     vec![Constraint::Ratio(1, num_nodes.try_into().unwrap()); num_nodes];
                 let node_areas = Layout::vertical(constraints).split(area);
+
+                let area = frame.area();
+                let area_events = if !self.large_core_count {
+                    (area.width / 4) as usize
+                } else {
+                    (area.width / 8) as usize
+                };
+                if self.max_cpu_events != area_events {
+                    self.resize_events(area_events);
+                }
 
                 for (i, node) in self.topo.nodes.values().enumerate() {
                     let node_constraints =

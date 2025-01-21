@@ -45,6 +45,14 @@ impl EventData {
         }
     }
 
+    /// Sets the max size and truncates events greater than the max.
+    pub fn set_max_size(&mut self, max_data_size: usize) {
+        self.max_data_size = max_data_size;
+        for event_data in self.data.values_mut() {
+            event_data.truncate(self.max_data_size);
+        }
+    }
+
     /// Clears an event.
     pub fn clear_event(&mut self, event: String) {
         self.data.remove(&event);
