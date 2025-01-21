@@ -1717,6 +1717,7 @@ impl<'a> App<'a> {
                     let prev_state = self.prev_state.clone();
                     self.prev_state = self.state.clone();
                     self.state = prev_state;
+                    self.available_events.push(perf_event.clone());
                 }
             }
             _ => {}
