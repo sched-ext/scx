@@ -292,6 +292,9 @@ lazy_static! {
 ///   (i.e. PID == TGID), aka the thread from which other threads are made.
 ///   When false, matches if the task is *not* the group leader (i.e. the rest).
 ///
+/// - CmdJoin: Matches when the task uses pthread_setname_np to send a join/leave
+/// command to the scheduler. See examples/cmdjoin.c for more details.
+///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
 ///

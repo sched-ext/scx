@@ -1,0 +1,34 @@
+[
+  {
+    "name": "cmd",
+    "comment": "Layers join using pthread_setname_np() to send a command to the scheduler. See examples/cmdjoin.c for more details.",
+    "matches": [
+      [
+        {
+          "CmdJoin": "test"
+        }
+      ]
+    ],
+    "kind": {
+      "Confined": {
+        "util_range": [
+          0.4,
+          0.90
+        ]
+      }
+    }
+  },
+  {
+    "name": "reset",
+    "comment": "the rest",
+    "matches":[[]],
+    "kind": {
+      "Grouped": {
+        "util_range": [
+          0.05,
+          0.60
+        ]
+      }
+    }
+  }
+]
