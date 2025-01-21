@@ -14,11 +14,10 @@ trait PowerProfiles {
     fn active_profile(&self) -> Result<String>;
 }
 
-static POWER_PROFILES_PROXY: OnceLock<Option<PowerProfilesProxyBlocking<'static>>> =
-    OnceLock::new();
-
 pub fn fetch_power_profile() -> String {
-    POWER_PROFILES_PROXY
+    let power_profile: OnceLock<Option<PowerProfilesProxyBlocking<'static>>> = OnceLock::new();
+
+    power_profile
         .get_or_init(|| {
             let system_bus = Connection::system().ok()?;
             let system_bus = Box::leak(Box::new(system_bus));
