@@ -2145,6 +2145,7 @@ dependencies = [
  "serde",
  "sysinfo",
  "tokio",
+ "tokio-util",
  "toml",
  "zbus",
  "zvariant",
