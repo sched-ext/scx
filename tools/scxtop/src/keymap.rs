@@ -76,6 +76,8 @@ impl KeyMap {
                 state: AppState::Scheduler,
             },
         );
+        bindings.insert(Key::Char('a'), Action::RecordTrace);
+        bindings.insert(Key::Char('P'), Action::RecordTrace);
         bindings.insert(Key::Char('x'), Action::ClearEvent);
         bindings.insert(Key::Char('j'), Action::PrevEvent);
         bindings.insert(Key::Char('k'), Action::NextEvent);

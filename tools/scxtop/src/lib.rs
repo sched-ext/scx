@@ -12,6 +12,8 @@ mod keymap;
 mod llc_data;
 mod node_data;
 mod perf_event;
+mod perfetto_trace;
+pub mod protos;
 mod stats;
 mod theme;
 mod tui;
@@ -27,6 +29,8 @@ pub use llc_data::LlcData;
 pub use node_data::NodeData;
 pub use perf_event::available_perf_events;
 pub use perf_event::PerfEvent;
+pub use perfetto_trace::PerfettoTraceManager;
+pub use protos::*;
 pub use stats::StatAggregation;
 pub use stats::VecStats;
 pub use theme::AppTheme;
@@ -61,6 +65,8 @@ pub enum AppState {
     Node,
     /// Application is in the scheduler state.
     Scheduler,
+    /// Application is in the tracing  state.
+    Tracing,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -116,19 +122,46 @@ pub enum Action {
         raw: String,
     },
     SchedSwitch {
+        ts: u64,
         cpu: u32,
+        preempt: bool,
         next_dsq_id: u64,
         next_dsq_lat_us: u64,
+        next_dsq_nr_queued: u32,
         next_dsq_vtime: u64,
         next_slice_ns: u64,
+        next_pid: u32,
+        next_tgid: u32,
+        next_prio: i32,
+        next_comm: String,
         prev_dsq_id: u64,
         prev_used_slice_ns: u64,
         prev_slice_ns: u64,
+        prev_pid: u32,
+        prev_tgid: u32,
+        prev_prio: i32,
+        prev_comm: String,
+        prev_state: u64,
+    },
+    SchedWakeup {
+        ts: u64,
+        cpu: u32,
+        pid: u32,
+        prio: i32,
+        comm: String,
+    },
+    SchedWakeupNew {
+        ts: u64,
+        cpu: u32,
+        pid: u32,
+        prio: i32,
+        comm: String,
     },
     SetState {
         state: AppState,
     },
     NextViewState,
+    RecordTrace,
     ToggleCpuFreq,
     ToggleUncoreFreq,
     TickRateChange {

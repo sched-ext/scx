@@ -35,9 +35,16 @@ struct {
 
 static __always_inline u32 get_random_sample(u32 n)
 {
-    u32 val = bpf_get_prandom_u32();
+	u32 val = bpf_get_prandom_u32();
 
-    return (val % n) + 1;
+	return (val % n) + 1;
+}
+
+static bool should_sample(void)
+{
+	if (sample_rate == 0 || (sample_rate > 1 && get_random_sample(sample_rate) > 1))
+		return false;
+	return true;
 }
 
 struct {
@@ -76,7 +83,7 @@ static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
 	tctx = bpf_map_lookup_elem(&task_data, &tptr);
 	if (!tctx) {
 		struct task_ctx new_tctx;
-		new_tctx.dsq_id = 0;
+		new_tctx.dsq_id = SCX_DSQ_INVALID;
 		new_tctx.dsq_vtime = 0;
 		new_tctx.slice_ns = 0;
 		new_tctx.last_run_ns = 0;
@@ -157,7 +164,7 @@ int BPF_KPROBE(on_sched_cpu_perf, s32 cpu, u32 perf)
 
 	event->type = CPU_PERF_SET;
 	event->cpu = cpu;
-	event->perf = perf;
+	event->event.perf.perf = perf;
 	bpf_ringbuf_submit(event, 0);
 
 	return 0;
@@ -326,24 +333,27 @@ int BPF_KPROBE(scx_dispatch_from_dsq_set_vtime, struct bpf_iter_scx_dsq *it__ite
 
 static __always_inline int __on_sched_wakeup(struct task_struct *p)
 {
+	struct task_ctx *tctx;
 	struct bpf_event *event;
 
-	if (!p || !p->scx.dsq)
+	if (!p || !should_sample())
 		return 0;
 
-	u32 val = get_random_sample(sample_rate);
-	if (val > 1) {
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
 		return 0;
-	}
 
 	event = bpf_ringbuf_reserve(&events, sizeof(struct bpf_event), 0);
 	if (!event)
-		return 1;
+		return 0;
 
+	tctx->wakeup_ts = bpf_ktime_get_ns();
 	event->type = SCHED_WAKEUP;
+	event->ts = tctx->wakeup_ts;
 	event->cpu = bpf_get_smp_processor_id();
-	bpf_core_read(&event->next_dsq_id, sizeof(u64), &p->scx.dsq->id);
-	bpf_core_read(&event->next_dsq_nr, sizeof(u32), &p->scx.dsq->nr);
+	event->event.wakeup.pid = p->pid;
+	event->event.wakeup.prio = (int)p->prio;
+	__builtin_memcpy(&event->event.wakeup.comm, &p->comm, MAX_COMM);
 	bpf_ringbuf_submit(event, 0);
 
 	return 0;
@@ -362,35 +372,69 @@ int BPF_PROG(on_sched_wakeup_new, struct task_struct *p)
 }
 
 
-SEC("tp_btf/sched_switch")
-int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev, struct task_struct *next)
+static int on_sched_switch_non_scx(bool preempt, struct task_struct *prev,
+				   struct task_struct *next, u64 prev_state)
 {
-	struct task_ctx *next_tctx, *prev_tctx;
 	struct bpf_event *event;
 
-	if (!enable_bpf_events)
-		return 0;
-
-	u32 val = get_random_sample(sample_rate);
-	if (val > 1) {
-		return -EAGAIN;
-	}
-
-	next_tctx = try_lookup_task_ctx(next);
-	if (!next_tctx || next_tctx->dsq_id == SCX_DSQ_INVALID || next_tctx->dsq_insert_time == 0)
-		return -ENOENT;
-
-	prev_tctx = try_lookup_task_ctx(prev);
-	if (!prev_tctx || prev_tctx->dsq_id == SCX_DSQ_INVALID)
+	if (!prev || !next)
 		return -ENOENT;
 
 	event = bpf_ringbuf_reserve(&events, sizeof(struct bpf_event), 0);
 	if (!event)
 		return -ENOENT;
 
+	event->event.sched_switch.preempt = preempt;
+	event->event.sched_switch.next_pid = next->pid;
+	event->event.sched_switch.next_tgid = next->tgid;
+	event->event.sched_switch.next_prio = (int)next->prio;
+	event->event.sched_switch.next_dsq_id = SCX_DSQ_INVALID;
+	event->event.sched_switch.prev_pid = prev->pid;
+	event->event.sched_switch.prev_tgid = prev->tgid;
+	event->event.sched_switch.prev_prio = (int)prev->prio;
+	event->event.sched_switch.prev_dsq_id = SCX_DSQ_INVALID;
+	event->event.sched_switch.prev_state = prev_state;
+	__builtin_memcpy(&event->event.sched_switch.next_comm, &next->comm, MAX_COMM);
+	__builtin_memcpy(&event->event.sched_switch.prev_comm, &prev->comm, MAX_COMM);
+
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
+
+SEC("tp_btf/sched_switch")
+int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
+	     struct task_struct *next, u64 prev_state)
+{
+	struct task_ctx *next_tctx, *prev_tctx;
+	struct bpf_event *event;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	next_tctx = try_lookup_task_ctx(next);
+	if (!next_tctx || next_tctx->dsq_id == SCX_DSQ_INVALID || next_tctx->dsq_insert_time == 0) {
+		if (sample_rate == 1)
+			return on_sched_switch_non_scx(preempt, prev, next, prev_state);
+		return -ENOENT;
+	}
+
+	prev_tctx = try_lookup_task_ctx(prev);
+	if (!prev_tctx || prev_tctx->dsq_id == SCX_DSQ_INVALID) {
+		if (sample_rate == 1)
+			return on_sched_switch_non_scx(preempt, prev, next, prev_state);
+		return -ENOENT;
+	}
+
+	event = bpf_ringbuf_reserve(&events, sizeof(struct bpf_event), 0);
+	if (!event)
+		return -ENOENT;
+
+	u64 now = bpf_ktime_get_ns();
 	event->type = SCHED_SWITCH;
 	event->cpu = bpf_get_smp_processor_id();
-	u64 now = bpf_ktime_get_ns();
+	event->ts = now;
 
 	/*
 	 * Tracking vtime **and** the dsq a task was inserted to is kind of
@@ -401,12 +445,22 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev, struct tas
 	 * store it in a map for the task. There still needs to be handling for
 	 * when tasks are moved from iterators.
 	 */
-	event->next_dsq_id = next_tctx->dsq_id;
-	event->next_dsq_lat_us = (now - next_tctx->dsq_insert_time) / 1000;
-	event->prev_used_slice_ns = prev_tctx->last_run_ns - now;
-	event->prev_dsq_id = prev_tctx->dsq_id;
-	// bpf_core_read(&event->prev_slice_ns, sizeof(u64), &prev->scx.slice);
-	event->prev_slice_ns = prev_tctx->slice_ns;
+	event->event.sched_switch.preempt = preempt;
+	event->event.sched_switch.next_pid = next->pid;
+	event->event.sched_switch.next_tgid = next->tgid;
+	event->event.sched_switch.next_prio = (int)next->prio;
+	event->event.sched_switch.next_dsq_id = next_tctx->dsq_id;
+	event->event.sched_switch.next_dsq_lat_us = (now - next_tctx->dsq_insert_time) / 1000;
+	event->event.sched_switch.next_dsq_nr = scx_bpf_dsq_nr_queued(next_tctx->dsq_id);
+	event->event.sched_switch.prev_pid = prev->pid;
+	event->event.sched_switch.prev_tgid = prev->tgid;
+	event->event.sched_switch.prev_prio = (int)prev->prio;
+	event->event.sched_switch.prev_state = prev_state;
+	event->event.sched_switch.prev_used_slice_ns = prev_tctx->last_run_ns - now;
+	event->event.sched_switch.prev_dsq_id = prev_tctx->dsq_id;
+	__builtin_memcpy(&event->event.sched_switch.next_comm, &next->comm, MAX_COMM);
+	event->event.sched_switch.prev_slice_ns = prev_tctx->slice_ns;
+	__builtin_memcpy(&event->event.sched_switch.prev_comm, &prev->comm, MAX_COMM);
 
 	/*
 	 * XXX: if a task gets moved to another dsq and the vtime is updated
@@ -415,15 +469,17 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev, struct tas
 	 * updated the tctx needs to be updated.
 	 */
 	// bpf_core_read(&event->dsq_vtime, sizeof(u64), &p->scx.dsq_vtime);
-	event->next_dsq_vtime = next_tctx->dsq_vtime;
+	event->event.sched_switch.next_dsq_vtime = next_tctx->dsq_vtime;
 	bpf_ringbuf_submit(event, 0);
 
 	next_tctx->last_run_ns = bpf_ktime_get_ns();
 	next_tctx->dsq_vtime = 0;
 	next_tctx->dsq_insert_time = 0;
-	prev_tctx->dsq_id = 0;
+	next_tctx->wakeup_ts = 0;
+	prev_tctx->dsq_id = SCX_DSQ_INVALID;
 	prev_tctx->dsq_vtime = 0;
-	next_tctx->dsq_insert_time = 0;
+	prev_tctx->wakeup_ts = 0;
+	prev_tctx->dsq_insert_time = 0;
 
 	return 0;
 }
