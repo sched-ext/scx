@@ -506,7 +506,7 @@ fn create_insert_cpu(
             core_id: *core_id,
             llc_id: *llc_id,
             node_id: node.id,
-            package_id: package_id,
+            package_id,
         }),
     );
 

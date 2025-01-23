@@ -876,7 +876,7 @@ impl Stats {
             .layers
             .iter()
             .take(self.nr_layers)
-            .map(|layer| layer.slice_ns / 1000 as u64)
+            .map(|layer| layer.slice_ns / 1000_u64)
             .collect();
 
         let cur_layer_usages = Self::read_layer_usages(&cpu_ctxs, self.nr_layers);
@@ -969,7 +969,7 @@ impl Layer {
                 if cpus_range.0 > cpus_range.1 || cpus_range.1 == 0 {
                     bail!("invalid cpus_range {:?}", cpus_range);
                 }
-                if nodes.len() == 0 && llcs.len() == 0 {
+                if nodes.is_empty() && llcs.is_empty() {
                     allowed_cpus.set_all();
                 } else {
                     // build up the cpus bitset
@@ -1008,21 +1008,21 @@ impl Layer {
                 common: LayerCommon { nodes, llcs, .. },
                 ..
             } => {
-                if nodes.len() == 0 && llcs.len() == 0 {
+                if nodes.is_empty() && llcs.is_empty() {
                     allowed_cpus.set_all();
                 } else {
                     // build up the cpus bitset
                     for (node_id, node) in &topo.nodes {
                         // first do the matching for nodes
                         if nodes.contains(node_id) {
-                            for (&id, _cpu) in &node.all_cpus {
+                            for &id in node.all_cpus.keys() {
                                 allowed_cpus.set_cpu(id)?;
                             }
                         }
                         // next match on any LLCs
                         for (llc_id, llc) in &node.llcs {
                             if llcs.contains(llc_id) {
-                                for (&id, _cpu) in &llc.all_cpus {
+                                for &id in llc.all_cpus.keys() {
                                     allowed_cpus.set_cpu(id)?;
                                 }
                             }

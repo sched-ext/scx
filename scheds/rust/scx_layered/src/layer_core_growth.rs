@@ -133,7 +133,7 @@ struct LayerCoreOrderGenerator<'a> {
 impl<'a> LayerCoreOrderGenerator<'a> {
     fn rotate_layer_offset(&self, vec: &'a mut Vec<usize>) -> &Vec<usize> {
         let num_cores = self.topo.all_cores.len();
-        let chunk = num_cores.div_ceil(self.layer_specs.len()) as usize;
+        let chunk = num_cores.div_ceil(self.layer_specs.len());
         vec.rotate_right((chunk * self.layer_idx).min(num_cores));
         vec
     }
@@ -156,7 +156,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
         self.rotate_layer_offset(&mut core_order);
 
         for node in self.topo.nodes.values() {
-            for (_, llc) in &node.llcs {
+            for llc in node.llcs.values() {
                 let llc_cores = llc.cores.len();
                 let rot = rot_by(llc_cores + (self.layer_idx << 1), llc_cores);
                 if is_left {
