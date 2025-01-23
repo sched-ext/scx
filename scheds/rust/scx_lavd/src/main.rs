@@ -223,7 +223,7 @@ impl introspec {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct CpuFlatId {
     node_id: usize,
     llc_pos: usize,
@@ -231,6 +231,10 @@ struct CpuFlatId {
     core_pos: usize,
     cpu_pos: usize,
     cpu_id: usize,
+    core_id: usize,
+    l2_id: usize,
+    l3_id: usize,
+    sharing_lvl: usize,
     cpu_cap: usize,
 }
 
@@ -313,7 +317,7 @@ impl FlatTopology {
         let mut avg_freq = 0;
         for (&node_id, node) in topo.nodes.iter() {
             for (llc_pos, (_llc_id, llc)) in node.llcs.iter().enumerate() {
-                for (core_pos, (_core_id, core)) in llc.cores.iter().enumerate() {
+                for (core_pos, (core_id, core)) in llc.cores.iter().enumerate() {
                     for (cpu_pos, (cpu_id, cpu)) in core.cpus.iter().enumerate() {
                         let cpu_fid = CpuFlatId {
                             node_id,
@@ -322,9 +326,13 @@ impl FlatTopology {
                             core_pos,
                             cpu_pos,
                             cpu_id: *cpu_id,
+                            core_id: *core_id,
+                            l2_id: cpu.l2_id,
+                            l3_id: cpu.l3_id,
+                            sharing_lvl: 0,
                             cpu_cap: 0,
                         };
-                        cpu_fids.push(cpu_fid);
+                        cpu_fids.push(RefCell::new(cpu_fid));
                         if base_freq < cpu.max_freq {
                             base_freq = cpu.max_freq;
                         }
@@ -338,60 +346,94 @@ impl FlatTopology {
         // Initialize cpu capacity
         if base_freq > 0 {
             for cpu_fid in cpu_fids.iter_mut() {
+                let mut cpu_fid = cpu_fid.borrow_mut();
                 cpu_fid.cpu_cap = ((cpu_fid.max_freq * 1024) / base_freq) as usize;
             }
         } else {
             // Unfortunately, the frequency information in sysfs seems not
             // always correct in some distributions.
             for cpu_fid in cpu_fids.iter_mut() {
-                cpu_fid.cpu_cap = 1024 as usize;
+                cpu_fid.borrow_mut().cpu_cap = 1024 as usize;
             }
             warn!("System does not provide proper CPU frequency information.");
         }
 
+        // Initialize cpu's hardware resource sharing level
+        for (a_id, cpu_fid_a) in cpu_fids.iter().enumerate() {
+            for (b_id, cpu_fid_b) in cpu_fids.iter().enumerate() {
+                if a_id == b_id {
+                    continue;
+                }
+
+                let mut a = cpu_fid_a.borrow_mut();
+                let b = cpu_fid_b.borrow();
+
+                if a.core_id == b.core_id {
+                    a.sharing_lvl += 1;
+                }
+                if a.l2_id == b.l2_id {
+                    a.sharing_lvl += 1;
+                }
+                if a.l3_id == b.l3_id {
+                    a.sharing_lvl += 1;
+                }
+            }
+        }
+
+        // Convert a vector of RefCell to a vector of plain cpu_fids
+        let mut cpu_fids2 = Vec::new();
+        for cpu_fid in cpu_fids.iter() {
+            cpu_fids2.push(cpu_fid.borrow().clone());
+        }
+        let mut cpu_fids = cpu_fids2;
+
         // Sort the cpu_fids
         match (prefer_smt_core, prefer_little_core) {
             (true, false) => {
-                // Sort the cpu_fids by node, llc, ^max_freq, core, and cpu order
+                // Sort the cpu_fids by node, llc, ^max_freq, ^sharing_lvl, core, and cpu order
                 cpu_fids.sort_by(|a, b| {
                     a.node_id
                         .cmp(&b.node_id)
                         .then_with(|| a.llc_pos.cmp(&b.llc_pos))
                         .then_with(|| b.max_freq.cmp(&a.max_freq))
+                        .then_with(|| b.sharing_lvl.cmp(&a.sharing_lvl))
                         .then_with(|| a.core_pos.cmp(&b.core_pos))
                         .then_with(|| a.cpu_pos.cmp(&b.cpu_pos))
                 });
             }
             (true, true) => {
-                // Sort the cpu_fids by node, llc, max_freq, core, and cpu order
+                // Sort the cpu_fids by node, llc, max_freq, ^sharing_lvl, core, and cpu order
                 cpu_fids.sort_by(|a, b| {
                     a.node_id
                         .cmp(&b.node_id)
                         .then_with(|| a.llc_pos.cmp(&b.llc_pos))
                         .then_with(|| a.max_freq.cmp(&b.max_freq))
+                        .then_with(|| b.sharing_lvl.cmp(&a.sharing_lvl))
                         .then_with(|| a.core_pos.cmp(&b.core_pos))
                         .then_with(|| a.cpu_pos.cmp(&b.cpu_pos))
                 });
             }
             (false, false) => {
-                // Sort the cpu_fids by cpu, node, llc, ^max_freq, and core order
+                // Sort the cpu_fids by cpu, node, llc, ^max_freq, sharing_lvl, and core order
                 cpu_fids.sort_by(|a, b| {
                     a.cpu_pos
                         .cmp(&b.cpu_pos)
                         .then_with(|| a.node_id.cmp(&b.node_id))
                         .then_with(|| a.llc_pos.cmp(&b.llc_pos))
                         .then_with(|| b.max_freq.cmp(&a.max_freq))
+                        .then_with(|| a.sharing_lvl.cmp(&b.sharing_lvl))
                         .then_with(|| a.core_pos.cmp(&b.core_pos))
                 });
             }
             (false, true) => {
-                // Sort the cpu_fids by cpu, node, llc, max_freq, and core order
+                // Sort the cpu_fids by cpu, node, llc, max_freq, sharing_lvl, and core order
                 cpu_fids.sort_by(|a, b| {
                     a.cpu_pos
                         .cmp(&b.cpu_pos)
                         .then_with(|| a.node_id.cmp(&b.node_id))
                         .then_with(|| a.llc_pos.cmp(&b.llc_pos))
                         .then_with(|| a.max_freq.cmp(&b.max_freq))
+                        .then_with(|| a.sharing_lvl.cmp(&b.sharing_lvl))
                         .then_with(|| a.core_pos.cmp(&b.core_pos))
                 });
             }
