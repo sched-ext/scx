@@ -167,7 +167,7 @@ impl<'a> App<'a> {
             active_perf_events,
             available_events: default_events,
             available_perf_events_list,
-            num_perf_events: num_perf_events,
+            num_perf_events,
             events_list_size: 1,
             selected_event: 0,
             non_hw_event_active: false,
@@ -583,8 +583,7 @@ impl<'a> App<'a> {
         let llc_iter = self
             .llc_data
             .values()
-            .map(|llc_data| llc_data.event_data_immut(self.active_event.event.clone()))
-            .flatten()
+            .flat_map(|llc_data| llc_data.event_data_immut(self.active_event.event.clone()))
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&llc_iter, true, true, true, None);
 
@@ -683,8 +682,7 @@ impl<'a> App<'a> {
         let node_iter = self
             .node_data
             .values()
-            .map(|node_data| node_data.event_data_immut(self.active_event.event.clone()))
-            .flatten()
+            .flat_map(|node_data| node_data.event_data_immut(self.active_event.event.clone()))
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&node_iter, true, true, true, None);
 
@@ -918,8 +916,7 @@ impl<'a> App<'a> {
         let dsq_global_iter = self
             .dsq_data
             .values()
-            .map(|dsq_data| dsq_data.event_data_immut(event.clone()))
-            .flatten()
+            .flat_map(|dsq_data| dsq_data.event_data_immut(event.clone()))
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&dsq_global_iter, true, true, true, None);
         let sample_rate = self.skel.maps.data_data.sample_rate;
@@ -993,8 +990,7 @@ impl<'a> App<'a> {
         let dsq_global_iter = self
             .dsq_data
             .values()
-            .map(|dsq_data| dsq_data.event_data_immut(event.clone()))
-            .flatten()
+            .flat_map(|dsq_data| dsq_data.event_data_immut(event.clone()))
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&dsq_global_iter, true, true, true, None);
         let sample_rate = self.skel.maps.data_data.sample_rate;
@@ -1066,8 +1062,7 @@ impl<'a> App<'a> {
             .dsq_data
             .iter()
             .filter(|(_dsq_id, event_data)| event_data.data.contains_key(&event.clone()))
-            .map(|(_dsq_id, event_data)| event_data.event_data_immut(event.clone()))
-            .flatten()
+            .flat_map(|(_dsq_id, event_data)| event_data.event_data_immut(event.clone()))
             .collect::<Vec<u64>>();
 
         let stats = VecStats::new(&vtime_global_iter, true, true, true, None);
@@ -1136,8 +1131,7 @@ impl<'a> App<'a> {
         let dsq_global_iter = self
             .dsq_data
             .values()
-            .map(|dsq_data| dsq_data.event_data_immut(event.clone()))
-            .flatten()
+            .flat_map(|dsq_data| dsq_data.event_data_immut(event.clone()))
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&dsq_global_iter, true, true, true, None);
 
@@ -1259,8 +1253,9 @@ impl<'a> App<'a> {
                         .cpu_data
                         .values()
                         .filter(|cpu_data| cpu_data.node == node.id)
-                        .map(|cpu_data| cpu_data.event_data_immut(self.active_event.event.clone()))
-                        .flatten()
+                        .flat_map(|cpu_data| {
+                            cpu_data.event_data_immut(self.active_event.event.clone())
+                        })
                         .collect::<Vec<u64>>();
                     let stats = VecStats::new(&node_iter, true, true, true, None);
 
@@ -1366,8 +1361,9 @@ impl<'a> App<'a> {
                         .cpu_data
                         .values()
                         .filter(|cpu_data| cpu_data.node == node.id)
-                        .map(|cpu_data| cpu_data.event_data_immut(self.active_event.event.clone()))
-                        .flatten()
+                        .flat_map(|cpu_data| {
+                            cpu_data.event_data_immut(self.active_event.event.clone())
+                        })
                         .collect::<Vec<u64>>();
                     let stats = VecStats::new(&node_iter, true, true, true, None);
 
