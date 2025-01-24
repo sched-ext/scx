@@ -19,7 +19,6 @@ const char help_fmt[] =
 "\n"
 "Usage: %s [-s NUM] [-f] [-v]\n"
 "\n"
-"  -s NUM        Set default task time slice (in us), default is 20ms\n"
 "  -v            Print libbpf debug messages\n"
 "  -h            Display this help and exit\n";
 
@@ -51,13 +50,8 @@ int main(int argc, char **argv)
 restart:
 	skel = SCX_OPS_OPEN(vder_ops, scx_vder);
 
-	skel->rodata->slice_ns = __COMPAT_ENUM_OR_ZERO("scx_public_consts", "SCX_SLICE_DFL");
-
-	while ((opt = getopt(argc, argv, "s:vh")) != -1) {
+	while ((opt = getopt(argc, argv, "vh")) != -1) {
 		switch (opt) {
-		case 's':
-			skel->rodata->slice_ns = strtoull(optarg, NULL, 0) * 1000;
-			break;
 		case 'v':
 			verbose = true;
 			break;
