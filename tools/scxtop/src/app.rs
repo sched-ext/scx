@@ -706,7 +706,7 @@ impl<'a> App<'a> {
                             .right_aligned(),
                     )
                     .style(self.theme.border_style())
-                    .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                    .borders(Borders::ALL)
                     .border_type(BorderType::Rounded);
 
                 let llc_bars: Vec<Bar> = self.llc_bars(self.active_event.event.clone());
@@ -724,8 +724,8 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_scheduler("dsq_lat_us".to_string(), frame, top_left, true)?;
-        self.render_dsq_vtime(frame, bottom_left, false)?;
+        self.render_scheduler("dsq_lat_us".to_string(), frame, top_left, true, true)?;
+        self.render_dsq_vtime(frame, bottom_left, true, false)?;
 
         Ok(())
     }
@@ -804,7 +804,7 @@ impl<'a> App<'a> {
                             .right_aligned(),
                     )
                     .style(self.theme.border_style())
-                    .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                    .borders(Borders::ALL)
                     .border_type(BorderType::Rounded);
 
                 let node_bars: Vec<Bar> = self.node_bars(self.active_event.event.clone());
@@ -822,13 +822,20 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_scheduler("dsq_lat_us".to_string(), frame, top_left, true)?;
-        self.render_dsq_vtime(frame, bottom_left, false)?;
+        self.render_scheduler("dsq_lat_us".to_string(), frame, top_left, true, true)?;
+        self.render_dsq_vtime(frame, bottom_left, true, false)?;
         Ok(())
     }
 
     /// Creates a sparkline for a dsq.
-    fn dsq_sparkline(&self, event: String, dsq_id: u64, borders: Borders) -> Sparkline {
+    fn dsq_sparkline(
+        &self,
+        event: String,
+        dsq_id: u64,
+        borders: Borders,
+        render_title: bool,
+        render_sample_rate: bool,
+    ) -> Sparkline {
         let data = if self.dsq_data.contains_key(&dsq_id) {
             let dsq_data = self.dsq_data.get(&dsq_id).unwrap();
             dsq_data.event_data_immut(event.clone())
@@ -847,16 +854,41 @@ impl<'a> App<'a> {
                     .borders(borders)
                     .border_type(BorderType::Rounded)
                     .style(self.theme.border_style())
-                    .title_alignment(Alignment::Left)
-                    .title(format!(
-                        "dsq {:#X} avg {} max {} min {}",
-                        dsq_id, stats.avg, stats.max, stats.min
-                    )),
+                    .title_top(if render_sample_rate {
+                        Line::from(format!(
+                            "sample rate {}",
+                            self.skel.maps.data_data.sample_rate
+                        ))
+                        .style(self.theme.text_important_color())
+                        .right_aligned()
+                    } else {
+                        Line::from("".to_string())
+                    })
+                    .title_top(if render_title {
+                        Line::from(format!("{} ", event.clone()))
+                            .style(self.theme.title_style())
+                            .left_aligned()
+                    } else {
+                        Line::from("".to_string())
+                    })
+                    .title_top(
+                        Line::from(format!(
+                            "dsq {:#X} avg {} max {} min {}",
+                            dsq_id, stats.avg, stats.max, stats.min
+                        ))
+                        .style(self.theme.title_style())
+                        .centered(),
+                    ),
             )
     }
 
     /// Generates dsq sparklines.
-    fn dsq_sparklines(&self, event: String) -> Vec<Sparkline> {
+    fn dsq_sparklines(
+        &self,
+        event: String,
+        render_title: bool,
+        render_sample_rate: bool,
+    ) -> Vec<Sparkline> {
         self.dsq_data
             .iter()
             .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(&event.clone()))
@@ -865,11 +897,9 @@ impl<'a> App<'a> {
                 self.dsq_sparkline(
                     event.clone(),
                     dsq_id.clone(),
-                    if j < 1 {
-                        Borders::LEFT | Borders::RIGHT | Borders::BOTTOM
-                    } else {
-                        Borders::TOP | Borders::LEFT | Borders::RIGHT | Borders::BOTTOM
-                    },
+                    Borders::ALL,
+                    j == 0 && render_title,
+                    j == 0 && render_sample_rate,
                 )
             })
             .collect()
@@ -967,9 +997,15 @@ impl<'a> App<'a> {
         event: String,
         frame: &mut Frame,
         area: Rect,
+        render_title: bool,
         render_sample_rate: bool,
     ) -> Result<()> {
-        let num_dsqs = self.dsq_data.len();
+        let num_dsqs = self
+            .dsq_data
+            .iter()
+            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(&event.clone()))
+            .count();
+
         let mut dsq_constraints = Vec::new();
 
         let area_width = area.width as usize;
@@ -985,53 +1021,23 @@ impl<'a> App<'a> {
                         .centered(),
                 )
                 .style(self.theme.border_style())
-                .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                .borders(Borders::ALL)
                 .border_type(BorderType::Rounded);
             frame.render_widget(block, area);
             return Ok(());
-        } else {
-            dsq_constraints.push(Constraint::Percentage(2));
         }
+
         for _ in 0..num_dsqs {
             dsq_constraints.push(Constraint::Ratio(1, num_dsqs as u32));
         }
         let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
 
-        let dsq_global_iter = self
-            .dsq_data
-            .values()
-            .flat_map(|dsq_data| dsq_data.event_data_immut(event.clone()))
-            .collect::<Vec<u64>>();
-        let stats = VecStats::new(&dsq_global_iter, true, true, true, None);
-        let sample_rate = self.skel.maps.data_data.sample_rate;
-
-        let block = Block::default()
-            .title_top(
-                Line::from(format!(
-                    "{} {} avg {} max {} min {}",
-                    self.scheduler, event, stats.avg, stats.max, stats.min,
-                ))
-                .style(self.theme.title_style())
-                .centered(),
-            )
-            .title_top(if render_sample_rate {
-                Line::from(format!("sample rate {}", sample_rate))
-                    .style(self.theme.text_important_color())
-                    .right_aligned()
-            } else {
-                Line::from("")
-            })
-            .style(self.theme.border_style())
-            .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
-            .border_type(BorderType::Rounded);
-        frame.render_widget(block, dsqs_verticle[0]);
-
         let _ = self
-            .dsq_sparklines(event.clone())
+            .dsq_sparklines(event.clone(), render_title, render_sample_rate)
             .iter()
             .enumerate()
             .for_each(|(j, dsq_sparkline)| {
-                frame.render_widget(dsq_sparkline, dsqs_verticle[j + 1]);
+                frame.render_widget(dsq_sparkline, dsqs_verticle[j]);
             });
 
         Ok(())
@@ -1043,6 +1049,7 @@ impl<'a> App<'a> {
         event: String,
         frame: &mut Frame,
         area: Rect,
+        render_title: bool,
         render_sample_rate: bool,
     ) -> Result<()> {
         let num_dsqs = self
@@ -1058,54 +1065,24 @@ impl<'a> App<'a> {
                         .centered(),
                 )
                 .style(self.theme.border_style())
-                .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                .borders(Borders::ALL)
                 .border_type(BorderType::Rounded);
             frame.render_widget(block, area);
             return Ok(());
         }
         let mut dsq_constraints = vec![];
-        dsq_constraints.push(Constraint::Percentage(2));
 
         for _ in 0..num_dsqs {
             dsq_constraints.push(Constraint::Ratio(1, num_dsqs as u32));
         }
         let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
 
-        let dsq_global_iter = self
-            .dsq_data
-            .values()
-            .flat_map(|dsq_data| dsq_data.event_data_immut(event.clone()))
-            .collect::<Vec<u64>>();
-        let stats = VecStats::new(&dsq_global_iter, true, true, true, None);
-        let sample_rate = self.skel.maps.data_data.sample_rate;
-
-        let block = Block::default()
-            .title_top(
-                Line::from(format!(
-                    "{} DSQ vtime delta avg {} max {} min {}",
-                    self.scheduler, stats.avg, stats.max, stats.min,
-                ))
-                .style(self.theme.title_style())
-                .centered(),
-            )
-            .title_top(if render_sample_rate {
-                Line::from(format!("sample rate {}", sample_rate))
-                    .style(self.theme.text_important_color())
-                    .right_aligned()
-            } else {
-                Line::from("")
-            })
-            .style(self.theme.border_style())
-            .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
-            .border_type(BorderType::Rounded);
-        frame.render_widget(block, dsqs_verticle[0]);
-
         let _ = self
-            .dsq_sparklines(event.clone())
+            .dsq_sparklines(event.clone(), render_title, render_sample_rate)
             .iter()
             .enumerate()
             .for_each(|(j, dsq_sparkline)| {
-                frame.render_widget(dsq_sparkline, dsqs_verticle[j + 1]);
+                frame.render_widget(dsq_sparkline, dsqs_verticle[j]);
             });
 
         Ok(())
@@ -1132,7 +1109,7 @@ impl<'a> App<'a> {
                         .centered(),
                 )
                 .style(self.theme.border_style())
-                .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                .borders(Borders::ALL)
                 .border_type(BorderType::Rounded);
             frame.render_widget(block, area);
             return Ok(());
@@ -1168,7 +1145,7 @@ impl<'a> App<'a> {
                 Line::from("")
             })
             .style(self.theme.border_style())
-            .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+            .borders(Borders::ALL)
             .border_type(BorderType::Rounded);
 
         let dsq_bars: Vec<Bar> = self.dsq_bars(event.clone());
@@ -1203,7 +1180,7 @@ impl<'a> App<'a> {
                         .centered(),
                 )
                 .style(self.theme.border_style())
-                .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                .borders(Borders::ALL)
                 .border_type(BorderType::Rounded);
             frame.render_widget(block, area);
             return Ok(());
@@ -1236,7 +1213,7 @@ impl<'a> App<'a> {
                 Line::from("")
             })
             .style(self.theme.border_style())
-            .borders(Borders::TOP | Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+            .borders(Borders::ALL)
             .border_type(BorderType::Rounded);
 
         let dsq_bars: Vec<Bar> = self.dsq_bars(event.clone());
@@ -1260,12 +1237,17 @@ impl<'a> App<'a> {
         event: String,
         frame: &mut Frame,
         area: Rect,
+        render_title: bool,
         render_sample_rate: bool,
     ) -> Result<()> {
         match self.view_state {
-            ViewState::Sparkline => {
-                self.render_scheduler_sparklines(event, frame, area, render_sample_rate)
-            }
+            ViewState::Sparkline => self.render_scheduler_sparklines(
+                event,
+                frame,
+                area,
+                render_title,
+                render_sample_rate,
+            ),
             ViewState::BarChart => {
                 self.render_scheduler_barchart(event, frame, area, render_sample_rate)
             }
@@ -1277,6 +1259,7 @@ impl<'a> App<'a> {
         &mut self,
         frame: &mut Frame,
         area: Rect,
+        render_title: bool,
         render_sample_rate: bool,
     ) -> Result<()> {
         match self.view_state {
@@ -1284,6 +1267,7 @@ impl<'a> App<'a> {
                 "dsq_vtime_delta".to_string(),
                 frame,
                 area,
+                render_title,
                 render_sample_rate,
             ),
             ViewState::BarChart => self.render_dsq_vtime_barchart(
@@ -1539,8 +1523,8 @@ impl<'a> App<'a> {
         let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
 
         self.render_event(frame, right)?;
-        self.render_scheduler("dsq_lat_us".to_string(), frame, top_left, true)?;
-        self.render_dsq_vtime(frame, bottom_left, false)?;
+        self.render_scheduler("dsq_lat_us".to_string(), frame, top_left, true, true)?;
+        self.render_dsq_vtime(frame, bottom_left, true, false)?;
         Ok(())
     }
 
@@ -1786,9 +1770,15 @@ impl<'a> App<'a> {
                 let [left, right] =
                     Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
                 let [top, center, bottom] = Layout::vertical([Constraint::Fill(1); 3]).areas(left);
-                self.render_scheduler("dsq_lat_us".to_string(), frame, top, true)?;
-                self.render_scheduler("dsq_slice_consumed".to_string(), frame, center, false)?;
-                self.render_scheduler("dsq_vtime_delta".to_string(), frame, bottom, false)?;
+                self.render_scheduler("dsq_lat_us".to_string(), frame, top, true, true)?;
+                self.render_scheduler(
+                    "dsq_slice_consumed".to_string(),
+                    frame,
+                    center,
+                    true,
+                    false,
+                )?;
+                self.render_scheduler("dsq_vtime_delta".to_string(), frame, bottom, true, false)?;
                 self.render_scheduler_stats(frame, right)
             }
             _ => self.render_default(frame),
