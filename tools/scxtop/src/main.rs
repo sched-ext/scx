@@ -20,6 +20,7 @@ use scxtop::KeyMap;
 use scxtop::Tui;
 use scxtop::APP;
 use scxtop::SCHED_NAME_PATH;
+use scxtop::STATS_SOCKET_PATH;
 use std::mem::MaybeUninit;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
@@ -39,7 +40,10 @@ struct Args {
     debug: bool,
     /// Exclude bpf event tracking.
     #[arg(short, long, default_value_t = false)]
-    excluse_bpf: bool,
+    exclude_bpf: bool,
+    /// Stats unix socket path.
+    #[arg(short, long, default_value_t = STATS_SOCKET_PATH.to_string())]
+    stats_socket_path: String,
 }
 
 fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {
@@ -157,6 +161,7 @@ async fn run() -> Result<()> {
     let scheduler = read_file_string(SCHED_NAME_PATH).unwrap_or("none".to_string());
 
     let mut app = App::new(
+        args.stats_socket_path,
         scheduler,
         keymap.clone(),
         100,

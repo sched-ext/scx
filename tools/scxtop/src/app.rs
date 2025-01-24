@@ -36,19 +36,27 @@ use ratatui::{
     Frame,
 };
 use regex::Regex;
+use scx_stats::prelude::StatsClient;
 use scx_utils::misc::read_file_usize;
 use scx_utils::Topology;
+use serde_json;
+use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::RwLock;
 
 const DSQ_VTIME_CUTOFF: u64 = 1_000_000_000_000_000;
 
 /// App is the struct for scxtop application state.
 pub struct App<'a> {
+    stats_client: Arc<RwLock<StatsClient>>,
+    stats_socket_path: String,
+    sched_stats_raw: String,
+
     keymap: KeyMap,
     scheduler: String,
     max_cpu_events: usize,
@@ -90,6 +98,7 @@ pub struct App<'a> {
 impl<'a> App<'a> {
     /// Creates a new appliation.
     pub fn new(
+        stats_socket_path: String,
         scheduler: String,
         keymap: KeyMap,
         max_cpu_events: usize,
@@ -137,8 +146,22 @@ impl<'a> App<'a> {
             })
             .collect();
         let num_perf_events: u16 = available_perf_events_list.len() as u16;
+        let mut stats_client = StatsClient::new();
+        if !stats_socket_path.is_empty() {
+            stats_client = stats_client.set_path(stats_socket_path.clone());
+        }
+        stats_client = stats_client.connect().unwrap_or_else(|_| {
+            let mut client = StatsClient::new();
+            if !stats_socket_path.is_empty() {
+                client = client.set_path(stats_socket_path.clone());
+            }
+            client
+        });
 
         let app = Self {
+            stats_client: Arc::new(RwLock::new(stats_client)),
+            sched_stats_raw: "".to_string(),
+            stats_socket_path: stats_socket_path.clone(),
             scheduler,
             max_cpu_events,
             max_sched_events: max_cpu_events,
@@ -348,8 +371,47 @@ impl<'a> App<'a> {
         self.max_cpu_events = max_events;
     }
 
+    /// Handles when scheduler stats are received.
+    fn on_sched_stats(&mut self, stats_raw: String) {
+        self.sched_stats_raw = stats_raw;
+    }
+
     /// Runs callbacks to update application state on tick.
     fn on_tick(&mut self) -> Result<()> {
+        match self.state {
+            AppState::Scheduler => {
+                if !self.scheduler.is_empty() {
+                    let stats_client_read = self.stats_client.clone();
+                    let stats_socket_path = self.stats_socket_path.clone();
+                    let tx = self.action_tx.clone();
+                    tokio::spawn(async move {
+                        let mut client = stats_client_read.write().await;
+
+                        let result = client.request::<JsonValue>("stats", vec![]);
+                        match result {
+                            Ok(stats) => {
+                                tx.send(Action::SchedStats {
+                                    raw: serde_json::to_string_pretty(&stats).unwrap(),
+                                })
+                                .unwrap();
+                            }
+                            Err(_) => {
+                                // On error it could be the scheduler was loaded/unloaded so try
+                                // reconnecting.
+                                let mut new_client = StatsClient::new();
+                                new_client = new_client.connect()?;
+                                if !stats_socket_path.is_empty() {
+                                    new_client = new_client.set_path(stats_socket_path);
+                                }
+                                *client = new_client;
+                            }
+                        }
+                        Ok::<(), anyhow::Error>(())
+                    });
+                }
+            }
+            _ => {}
+        }
         // Add entry for nodes
         for node in self.topo.nodes.keys() {
             let node_data = self
@@ -877,6 +939,28 @@ impl<'a> App<'a> {
             .collect()
     }
 
+    /// Renders scheduler stats.
+    fn render_scheduler_stats(&mut self, frame: &mut Frame, area: Rect) -> Result<()> {
+        let paragraph = Paragraph::new(self.sched_stats_raw.clone());
+        let block = Block::bordered()
+            .title_top(
+                Line::from(self.scheduler.clone())
+                    .style(self.theme.title_style())
+                    .centered(),
+            )
+            .title_top(
+                Line::from(format!("{}ms", self.tick_rate_ms))
+                    .style(self.theme.text_important_color())
+                    .right_aligned(),
+            )
+            .style(self.theme.border_style())
+            .border_type(BorderType::Rounded);
+
+        frame.render_widget(paragraph.block(block), area);
+
+        Ok(())
+    }
+
     /// Renders the scheduler state as sparklines.
     fn render_scheduler_sparklines(
         &mut self,
@@ -979,7 +1063,7 @@ impl<'a> App<'a> {
             frame.render_widget(block, area);
             return Ok(());
         }
-        let mut dsq_constraints = Vec::with_capacity(num_dsqs + 1);
+        let mut dsq_constraints = vec![];
         dsq_constraints.push(Constraint::Percentage(2));
 
         for _ in 0..num_dsqs {
@@ -1699,11 +1783,13 @@ impl<'a> App<'a> {
             AppState::Node => self.render_node(frame),
             AppState::Llc => self.render_llc(frame),
             AppState::Scheduler => {
-                let [top, center, bottom] =
-                    Layout::vertical([Constraint::Fill(1); 3]).areas(frame.area());
+                let [left, right] =
+                    Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
+                let [top, center, bottom] = Layout::vertical([Constraint::Fill(1); 3]).areas(left);
                 self.render_scheduler("dsq_lat_us".to_string(), frame, top, true)?;
                 self.render_scheduler("dsq_slice_consumed".to_string(), frame, center, false)?;
-                self.render_scheduler("dsq_vtime_delta".to_string(), frame, bottom, false)
+                self.render_scheduler("dsq_vtime_delta".to_string(), frame, bottom, false)?;
+                self.render_scheduler_stats(frame, right)
             }
             _ => self.render_default(frame),
         }
@@ -1789,6 +1875,7 @@ impl<'a> App<'a> {
     /// Updates the app when a scheduler is unloaded.
     fn on_scheduler_unload(&mut self) {
         self.scheduler = "none".to_string();
+        self.sched_stats_raw = "".to_string();
         self.dsq_data.clear();
         let _ = self
             .cpu_data
@@ -1799,6 +1886,7 @@ impl<'a> App<'a> {
     /// Updates the app when a scheduler is loaded.
     fn on_scheduler_load(&mut self) -> Result<()> {
         self.dsq_data.clear();
+        self.sched_stats_raw = "".to_string();
         self.scheduler = read_file_string(SCHED_NAME_PATH)?;
         Ok(())
     }
@@ -1912,6 +2000,9 @@ impl<'a> App<'a> {
             }
             Action::SchedUnreg => {
                 self.on_scheduler_unload();
+            }
+            Action::SchedStats { raw } => {
+                self.on_sched_stats(raw);
             }
             Action::SchedCpuPerfSet { cpu, perf } => {
                 self.on_cpu_perf(cpu, perf);

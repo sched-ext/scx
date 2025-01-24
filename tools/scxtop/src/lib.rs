@@ -39,6 +39,7 @@ pub use plain::Plain;
 // Generate serialization types for handling events from the bpf ring buffer.
 unsafe impl Plain for crate::bpf_skel::types::bpf_event {}
 
+pub const STATS_SOCKET_PATH: &'static str = "/var/run/scx/root/stats";
 pub const APP: &'static str = "scxtop";
 pub const LICENSE: &'static str = "Copyright (c) Meta Platforms, Inc. and affiliates. 
 
@@ -110,6 +111,9 @@ pub enum Action {
     SchedCpuPerfSet {
         cpu: u32,
         perf: u32,
+    },
+    SchedStats {
+        raw: String,
     },
     SchedSwitch {
         cpu: u32,
