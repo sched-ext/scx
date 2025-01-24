@@ -4,6 +4,8 @@
  *
  * Copyright (c) 2025 Andrea Righi <arighi@nvidia.com>
  */
+#define _GNU_SOURCE
+#include <sched.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <signal.h>
@@ -19,7 +21,9 @@ const char help_fmt[] =
 "\n"
 "Usage: %s [-s NUM] [-f] [-v]\n"
 "\n"
-"  -s NUM        Set default task time slice (in us), default is 20ms\n"
+"  -s SLICE_US   Override slice duration\n"
+"  -c CPU        Override the central CPU (default: 0)\n"
+"  -f HZ         Override the default HZ (default: CONFIG_HZ)\n"
 "  -v            Print libbpf debug messages\n"
 "  -h            Display this help and exit\n";
 
@@ -40,6 +44,7 @@ static void sigint_handler(int num)
 
 int main(int argc, char **argv)
 {
+	cpu_set_t *cpuset;
 	struct scx_vder *skel;
 	struct bpf_link *link;
 	__u32 opt;
@@ -51,12 +56,26 @@ int main(int argc, char **argv)
 restart:
 	skel = SCX_OPS_OPEN(vder_ops, scx_vder);
 
+	skel->rodata->central_cpu = 0;
+	skel->rodata->nr_cpu_ids = libbpf_num_possible_cpus();
 	skel->rodata->slice_ns = __COMPAT_ENUM_OR_ZERO("scx_public_consts", "SCX_SLICE_DFL");
 
-	while ((opt = getopt(argc, argv, "s:vh")) != -1) {
+	while ((opt = getopt(argc, argv, "s:c:f:pvh")) != -1) {
 		switch (opt) {
 		case 's':
 			skel->rodata->slice_ns = strtoull(optarg, NULL, 0) * 1000;
+			break;
+		case 'c': {
+			u32 central_cpu = strtoul(optarg, NULL, 0);
+			if (central_cpu >= skel->rodata->nr_cpu_ids) {
+				fprintf(stderr, "invalid central CPU id value, %u given (%u max)\n", central_cpu, skel->rodata->nr_cpu_ids);
+				return -1;
+			}
+			skel->rodata->central_cpu = (s32)central_cpu;
+			break;
+		}
+		case 'f':
+			skel->rodata->config_hz = strtoull(optarg, NULL, 0);
 			break;
 		case 'v':
 			verbose = true;
@@ -67,7 +86,20 @@ restart:
 		}
 	}
 
+	RESIZE_ARRAY(skel, data, idle_cpus, skel->rodata->nr_cpu_ids);
+	RESIZE_ARRAY(skel, data, cpu_started_at, skel->rodata->nr_cpu_ids);
+
 	SCX_OPS_LOAD(skel, vder_ops, scx_vder, uei);
+
+	cpuset = CPU_ALLOC(skel->rodata->nr_cpu_ids);
+	SCX_BUG_ON(!cpuset, "Failed to allocate cpuset");
+	CPU_ZERO_S(CPU_ALLOC_SIZE(skel->rodata->nr_cpu_ids), cpuset);
+	CPU_SET(skel->rodata->central_cpu, cpuset);
+	SCX_BUG_ON(sched_setaffinity(0, sizeof(*cpuset), cpuset),
+		   "Failed to affinitize to central CPU %d (max %d)",
+		   skel->rodata->central_cpu, skel->rodata->nr_cpu_ids - 1);
+	CPU_FREE(cpuset);
+
 	link = SCX_OPS_ATTACH(skel, vder_ops, scx_vder);
 
 	fprintf(stderr, "scx_vder is running\n");
