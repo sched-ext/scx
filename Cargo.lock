@@ -2320,6 +2320,7 @@ dependencies = [
  "plain",
  "ratatui",
  "regex",
+ "scx_stats",
  "scx_utils",
  "serde",
  "serde_json",

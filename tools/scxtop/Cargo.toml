@@ -19,6 +19,7 @@ clap = { version = "4.1", features = [
 ] }
 libbpf-rs = "=0.24.8"
 scx_utils = { path = "../../rust/scx_utils", version = "1.0.8" }
+scx_stats = { path = "../../rust/scx_stats", version = "1.0.8" }
 config = "0.14.1"
 crossterm = { version = "0.28.1", features = ["serde", "event-stream"] }
 derive_deref = "1.1.1"
@@ -45,3 +46,4 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "serde"] }
 
 [build-dependencies]
 scx_utils = { path = "../../rust/scx_utils", version = "1.0.8" }
+scx_stats = { path = "../../rust/scx_stats", version = "1.0.8" }
