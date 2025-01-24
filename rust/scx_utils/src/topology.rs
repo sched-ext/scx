@@ -270,9 +270,9 @@ impl Topology {
     #[cfg(feature = "gpu-topology")]
     pub fn gpus(&self) -> BTreeMap<GpuIndex, &Gpu> {
         let mut gpus = BTreeMap::new();
-        for (_, node) in &self.nodes {
+        for node in self.nodes.values() {
             for (idx, gpu) in &node.gpus {
-                gpus.insert(idx.clone(), gpu);
+                gpus.insert(*idx, gpu);
             }
         }
         gpus
@@ -582,14 +582,11 @@ fn create_default_node(
     #[cfg(feature = "gpu-topology")]
     {
         let system_gpus = create_gpus();
-        match system_gpus.get(&0) {
-            Some(gpus) => {
-                for gpu in gpus {
-                    node.gpus.insert(gpu.index, gpu.clone());
-                }
+        if let Some(gpus) = system_gpus.get(&0) {
+            for gpu in gpus {
+                node.gpus.insert(gpu.index, gpu.clone());
             }
-            _ => {}
-        };
+        }
     }
 
     if !Path::new("/sys/devices/system/cpu").exists() {
@@ -647,14 +644,11 @@ fn create_numa_nodes(
 
         #[cfg(feature = "gpu-topology")]
         {
-            match system_gpus.get(&node_id) {
-                Some(gpus) => {
-                    for gpu in gpus {
-                        node.gpus.insert(gpu.index, gpu.clone());
-                    }
+            if let Some(gpus) = system_gpus.get(&node_id) {
+                for gpu in gpus {
+                    node.gpus.insert(gpu.index, gpu.clone());
                 }
-                _ => {}
-            };
+            }
         }
 
         let cpu_pattern = numa_path.join("cpu[0-9]*");
