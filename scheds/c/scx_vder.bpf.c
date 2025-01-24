@@ -15,9 +15,9 @@ char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
 
 /*
- * Custom global DSQ.
+ * Amount of possible CPUs in the system.
  */
-#define SHARED_DSQ 0
+static u64 nr_cpu_ids;
 
 /*
  * Default task time slice (task's time budget).
@@ -91,6 +91,19 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 }
 
 /*
+ * Return the associated dispatch queue (DSQ) for a CPU.
+ */
+static u64 cpu_to_dsq(s32 cpu)
+{
+	if (cpu < 0 || cpu >= nr_cpu_ids) {
+		scx_bpf_error("invalid CPU %d", cpu);
+		return -EINVAL;
+	}
+
+	return (u64)cpu;
+}
+
+/*
  * Return true if @p still wants to run, false otherwise.
  */
 static bool is_queued(const struct task_struct *p)
@@ -112,104 +125,6 @@ static inline bool vtime_before(u64 a, u64 b)
 static u64 scale_inverse_fair(const struct task_struct *p, u64 value)
 {
 	return value * 100 / p->scx.weight;
-}
-
-/*
- * Find the optimal CPU to run @p, if an idle CPU is found dispatch @p
- * directly, otherwise try to keep @p on the same CPU.
- */
-s32 BPF_STRUCT_OPS(vder_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
-{
-	bool is_idle = false;
-	s32 cpu;
-
-	/*
-	 * Completely rely on the in-kernel built-in idle selection policy
-	 * and dispatch directly if an idle CPU is found.
-	 *
-	 * Note that we should avoid direct dispatch if there are tasks
-	 * waiting in the shared DSQ, as tasks that frequently receive
-	 * wakeup events may continue to be directly dispatched on the same
-	 * local DSQ from here, monopolizing a CPU.
-	 *
-	 * This could lead to starvation of tasks that are waiting in the
-	 * shared DSQ, in particular those that can only run on a single
-	 * CPU (per-CPU tasks).
-	 */
-	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-	if (is_idle && !scx_bpf_dsq_nr_queued(SHARED_DSQ))
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
-
-	return cpu;
-}
-
-/*
- * Try to wake up an idle CPU that can immediately process the task.
- */
-static void kick_idle_cpu(const struct task_struct *p,
-			  const struct task_ctx *tctx)
-{
-	const struct cpumask *idle_cpumask;
-	s32 cpu;
-
-	/*
-	 * Look for an idle CPU that can immediately execute the task.
-	 *
-	 * Note that we do not want to mark the CPU as busy, since we don't
-	 * know at this stage if we'll actually dispatch any task on it.
-	 */
-	idle_cpumask = scx_bpf_get_idle_cpumask();
-	cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, idle_cpumask);
-	scx_bpf_put_cpumask(idle_cpumask);
-
-	/*
-	 * Try to wake up the idle CPU, if we have found one.
-	 */
-	if (cpu < scx_bpf_nr_cpu_ids())
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-}
-
-/*
- * Attempt to dispatch a task directly to its assigned CPU.
- *
- * Return true if the task is dispatched, false otherwise.
- */
-static bool try_direct_dispatch(struct task_struct *p, u64 enq_flags)
-{
-	/*
-	 * If a task has been re-enqueued because its assigned CPU has been
-	 * taken by a higher priority scheduling class, force it to follow
-	 * the regular scheduling path and give it a chance to run on a
-	 * different CPU.
-	 */
-	if (enq_flags & SCX_ENQ_REENQ)
-		return false;
-
-	/*
-	 * If ops.select_cpu() has been skipped, try direct dispatch.
-	 */
-	if (!(enq_flags & SCX_ENQ_CPU_SELECTED)) {
-		s32 prev_cpu = scx_bpf_task_cpu(p);
-
-		/*
-		 * If both the local and shared DSQs are empty and the
-		 * previous CPU can still be used by the task, perform the
-		 * direct dispatch.
-		 */
-		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
-		    !scx_bpf_dsq_nr_queued(SHARED_DSQ) &&
-		    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
-					   slice_ns, enq_flags);
-			return true;
-		}
-	}
-
-	/*
-	 * Direct dispatch not possible, follow the regular scheduling
-	 * path.
-	 */
-	return false;
 }
 
 /*
@@ -242,9 +157,9 @@ static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
 /*
  * Evaluate and return the task's time slice.
  */
-static u64 task_slice(const struct task_struct *p, struct task_ctx *tctx)
+static u64 task_slice(const struct task_struct *p, struct task_ctx *tctx, s32 cpu)
 {
-	u64 nr_waiting;
+	u64 nr_waiting = scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) + 1;
 
 	/*
 	 * Assign a time slice that is inversely proportional to the number
@@ -253,9 +168,44 @@ static u64 task_slice(const struct task_struct *p, struct task_ctx *tctx)
 	 * This can help to improve system responsiveness, reducing average
 	 * runqueue latency, when the system is overcommitted.
          */
-	nr_waiting = scx_bpf_dsq_nr_queued(SHARED_DSQ) + 1;
-
 	return slice_ns / nr_waiting;
+}
+
+/*
+ * Try to wake up an idle CPU that can immediately process the task.
+ */
+static void kick_idle_cpu(const struct task_struct *p,
+			  const struct task_ctx *tctx)
+{
+	s32 cpu;
+
+	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
+/*
+ * Find the optimal CPU to run @p, if an idle CPU is found dispatch @p
+ * directly, otherwise try to keep @p on the same CPU.
+ */
+s32 BPF_STRUCT_OPS(vder_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
+{
+	struct task_ctx *tctx;
+	bool is_idle = false;
+	s32 cpu;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return prev_cpu;
+
+	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+	if (is_idle) {
+		u64 deadline = task_deadline(p, tctx);
+
+		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), slice_ns, deadline, 0);
+	}
+
+	return cpu;
 }
 
 /*
@@ -265,12 +215,17 @@ void BPF_STRUCT_OPS(vder_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
 	u64 deadline, slice;
+	s32 prev_cpu = scx_bpf_task_cpu(p);
 
 	/*
-	 * Attempt to dispatch the task directly on its assigned CPU.
+	 * If a task has been re-enqueued because its assigned CPU has been
+	 * taken by a higher priority scheduling class, bounce it to the global
+	 * DSQ, so that it can be picked by the first CPU available.
 	 */
-	if (try_direct_dispatch(p, enq_flags))
+	if (enq_flags & SCX_ENQ_REENQ) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, slice_ns, enq_flags);
 		return;
+	}
 
 	/*
 	 * Get the task context, if a context doesn't exist it is safe to
@@ -280,8 +235,8 @@ void BPF_STRUCT_OPS(vder_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 
+	slice = task_slice(p, tctx, prev_cpu);
 	deadline = task_deadline(p, tctx);
-	slice = task_slice(p, tctx);
 
 	/*
 	 * Queue the task to the shared DSQ.
@@ -289,7 +244,7 @@ void BPF_STRUCT_OPS(vder_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Tasks are ordered by their deadline, the task with the earliest
 	 * deadline will be consumed first in ops.dispatch().
 	 */
-	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, slice, deadline, enq_flags);
+	scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu), slice, deadline, enq_flags);
 
 	/*
 	 * Try to proactively wake up an idle CPU, so that it can
@@ -303,15 +258,33 @@ void BPF_STRUCT_OPS(vder_enqueue, struct task_struct *p, u64 enq_flags)
  */
 void BPF_STRUCT_OPS(vder_dispatch, s32 cpu, struct task_struct *prev)
 {
+	u64 max_nr_wait = 0ULL;
+	s32 remote_cpu = cpu, i;
+
 	/*
-	 * Consume the first task from SHARED_DSQ.
+	 * Consume the first task from the local DSQ.
 	 */
-	if (scx_bpf_dsq_move_to_local(SHARED_DSQ))
+	if (scx_bpf_dsq_move_to_local(cpu_to_dsq(cpu)))
+		return;
+
+	/*
+	 * Otherwise, try to steal a task from the busiest DSQ.
+	 */
+	bpf_for(i, 0, nr_cpu_ids) {
+		u64 nr_wait = scx_bpf_dsq_nr_queued(cpu_to_dsq(i));
+
+		if (nr_wait > max_nr_wait) {
+			max_nr_wait = nr_wait;
+			remote_cpu = i;
+		}
+	}
+	if (remote_cpu != cpu &&
+	    scx_bpf_dsq_move_to_local(cpu_to_dsq(remote_cpu)))
 		return;
 
 	/*
 	 * If the current task expired its time slice and no other task wants
-	 * to run on the CPU, simply replenish its time slice and let it
+	 * to run on this CPU, simply replenish its time slice and let it
 	 * run for another round on the same CPU.
 	 */
 	if (prev && is_queued(prev))
@@ -393,15 +366,6 @@ void BPF_STRUCT_OPS(vder_stopping, struct task_struct *p, bool runnable)
 }
 
 /*
- * Task @p is becoming non-runnable, because it's sleeping, moved to
- * another CPU or temporarily taken off the queue for attribute change).
- */
-void BPF_STRUCT_OPS(vder_quiescent, struct task_struct *p, u64 deq_flags)
-{
-	/* Do nothing */
-}
-
-/*
  * Task @p is entering the BPF scheduler.
  */
 void BPF_STRUCT_OPS(vder_enable, struct task_struct *p)
@@ -446,7 +410,20 @@ void BPF_STRUCT_OPS(vder_cpu_release, s32 cpu, struct scx_cpu_release_args *args
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(vder_init)
 {
-	return scx_bpf_create_dsq(SHARED_DSQ, -1);
+	s32 cpu;
+
+	nr_cpu_ids = scx_bpf_nr_cpu_ids();
+
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		int err = scx_bpf_create_dsq(cpu_to_dsq(cpu), -1);
+		if (err) {
+			scx_bpf_error("failed to create pcpu DSQ %d: %d",
+				      cpu, err);
+			return err;
+		}
+	}
+
+	return 0;
 }
 
 void BPF_STRUCT_OPS(vder_exit, struct scx_exit_info *ei)
@@ -461,7 +438,6 @@ SCX_OPS_DEFINE(vder_ops,
 	       .runnable		= (void *)vder_runnable,
 	       .running			= (void *)vder_running,
 	       .stopping		= (void *)vder_stopping,
-	       .quiescent		= (void *)vder_quiescent,
 	       .enable			= (void *)vder_enable,
 	       .init_task		= (void *)vder_init_task,
 	       .cpu_release		= (void *)vder_cpu_release,
