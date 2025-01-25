@@ -49,7 +49,7 @@ use log::info;
 use log::warn;
 use plain::Plain;
 use scx_stats::prelude::*;
-use scx_utils::autopower::fetch_power_profile;
+use scx_utils::autopower::{fetch_power_profile, PowerProfile};
 use scx_utils::build_id;
 use scx_utils::import_enums;
 use scx_utils::scx_enums;
@@ -832,18 +832,18 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn update_power_profile(&mut self, prev_profile: String) -> (bool, String) {
+    fn update_power_profile(&mut self, prev_profile: PowerProfile) -> (bool, PowerProfile) {
         let profile = fetch_power_profile(false);
         if profile == prev_profile {
             // If the profile is the same, skip updaring the profile for BPF.
             return (true, profile);
         }
 
-        let _ = match profile.as_str() {
-            "performance" => self.set_power_profile(LAVD_PM_PERFORMANCE),
-            "balanced" => self.set_power_profile(LAVD_PM_BALANCED),
-            "power-saver" => self.set_power_profile(LAVD_PM_POWERSAVE),
-            _ => {
+        let _ = match profile {
+            PowerProfile::Performance => self.set_power_profile(LAVD_PM_PERFORMANCE),
+            PowerProfile::Balanced => self.set_power_profile(LAVD_PM_BALANCED),
+            PowerProfile::Powersave => self.set_power_profile(LAVD_PM_POWERSAVE),
+            PowerProfile::Unknown => {
                 // We don't know how to handle an unknown energy profile,
                 // so we just give up updating the profile from now on.
                 return (false, profile);
@@ -857,7 +857,7 @@ impl<'a> Scheduler<'a> {
     fn run(&mut self, opts: &Opts, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
         let mut autopower = opts.autopower;
-        let mut profile = "unknown".to_string();
+        let mut profile = PowerProfile::Unknown;
 
         if opts.performance {
             let _ = self.set_power_profile(LAVD_PM_PERFORMANCE);

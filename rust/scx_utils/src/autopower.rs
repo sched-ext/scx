@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
@@ -22,43 +23,70 @@ static POWER_PROFILES_PROXY: OnceLock<PowerProfilesProxyBlocking<'static>> = Onc
 static RETRIES: AtomicUsize = AtomicUsize::new(0);
 const MAX_RETRIES: usize = 10;
 
-fn read_energy_profile() -> String {
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum PowerProfile {
+    Powersave,
+    Balanced,
+    Performance,
+    Unknown,
+}
+
+impl fmt::Display for PowerProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PowerProfile::Powersave => "powersave",
+            PowerProfile::Balanced => "balanced",
+            PowerProfile::Performance => "performance",
+            PowerProfile::Unknown => "unknown",
+        }
+        .fmt(f)
+    }
+}
+
+fn read_energy_profile() -> PowerProfile {
     let energy_pref_path = "/sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference";
     let scaling_governor_path = "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor";
 
     fs::read_to_string(energy_pref_path)
         .ok()
         .or_else(|| fs::read_to_string(scaling_governor_path).ok())
-        .and_then(|s| {
-            Some(match s.trim_end() {
-                "power" | "balance_power" | "powersave" => "power-saver",
-                "balance_performance" => "balanced",
-                "performance" => "performance",
-                _ => return None,
-            })
+        .map(|s| match s.trim_end() {
+            "power" | "balance_power" | "powersave" => PowerProfile::Powersave,
+            "balance_performance" => PowerProfile::Balanced,
+            "performance" => PowerProfile::Performance,
+            _ => PowerProfile::Unknown,
         })
-        .unwrap_or_default()
-        .to_string()
+        .unwrap_or(PowerProfile::Unknown)
 }
 
-pub fn fetch_power_profile(no_ppd: bool) -> String {
+pub fn fetch_power_profile(no_ppd: bool) -> PowerProfile {
     if no_ppd {
         return read_energy_profile();
     }
     let proxy = POWER_PROFILES_PROXY.get();
     if let Some(proxy) = proxy {
-        proxy.active_profile().unwrap_or_else(|e| {
-            warn!("failed to fetch the active power profile from ppd: {e}");
-            read_energy_profile()
-        })
+        proxy.active_profile().map_or_else(
+            |e| {
+                warn!("failed to fetch the active power profile from ppd: {e}");
+                read_energy_profile()
+            },
+            |profile| match profile.as_str() {
+                "power-saver" => PowerProfile::Powersave,
+                "balanced" => PowerProfile::Balanced,
+                "performance" => PowerProfile::Performance,
+                _ => PowerProfile::Unknown,
+            },
+        )
     } else {
         let retries = RETRIES.fetch_add(1, Ordering::Relaxed);
         if retries < MAX_RETRIES {
-            let proxy = (|| {
-                let system_bus = Connection::system().ok()?;
-                let system_bus = Box::leak(Box::new(system_bus));
-                PowerProfilesProxyBlocking::new(system_bus).ok()
-            })();
+            let proxy = Connection::system()
+                .ok()
+                .map(Box::new)
+                .map(Box::leak)
+                .as_deref()
+                .map(PowerProfilesProxyBlocking::new)
+                .and_then(Result::ok);
             if let Some(proxy) = proxy {
                 let _ = POWER_PROFILES_PROXY.set(proxy);
                 fetch_power_profile(false)

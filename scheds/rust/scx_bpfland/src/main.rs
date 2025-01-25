@@ -33,7 +33,7 @@ use libbpf_rs::ProgramInput;
 use log::warn;
 use log::{debug, info};
 use scx_stats::prelude::*;
-use scx_utils::autopower::fetch_power_profile;
+use scx_utils::autopower::{fetch_power_profile, PowerProfile};
 use scx_utils::build_id;
 use scx_utils::import_enums;
 use scx_utils::scx_enums;
@@ -231,7 +231,7 @@ struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     opts: &'a Opts,
-    power_profile: String,
+    power_profile: PowerProfile,
     stats_server: StatsServer<(), Metrics>,
     user_restart: bool,
 }
@@ -279,8 +279,7 @@ impl<'a> Scheduler<'a> {
 
         // Initialize the primary scheduling domain and the preferred domain.
         let power_profile = fetch_power_profile(false);
-        if let Err(err) = Self::init_energy_domain(&mut skel, &opts.primary_domain, &power_profile)
-        {
+        if let Err(err) = Self::init_energy_domain(&mut skel, &opts.primary_domain, power_profile) {
             warn!("failed to initialize primary domain: error {}", err);
         }
         if let Err(err) = Self::init_cpufreq_perf(&mut skel, &opts.primary_domain, opts.cpufreq) {
@@ -346,15 +345,17 @@ impl<'a> Scheduler<'a> {
     fn init_energy_domain(
         skel: &mut BpfSkel<'_>,
         primary_domain: &String,
-        power_profile: &String,
+        power_profile: PowerProfile,
     ) -> Result<()> {
         let domain = match primary_domain.as_str() {
             "powersave" => Self::epp_to_cpumask(Powermode::Powersave)?,
             "performance" => Self::epp_to_cpumask(Powermode::Performance)?,
-            "auto" => match power_profile.as_str() {
-                "power-saver" => Self::epp_to_cpumask(Powermode::Powersave)?,
-                "performance" | "balanced" => Self::epp_to_cpumask(Powermode::Performance)?,
-                &_ => Self::epp_to_cpumask(Powermode::Any)?,
+            "auto" => match power_profile {
+                PowerProfile::Powersave => Self::epp_to_cpumask(Powermode::Powersave)?,
+                PowerProfile::Performance | PowerProfile::Balanced => {
+                    Self::epp_to_cpumask(Powermode::Performance)?
+                }
+                PowerProfile::Unknown => Self::epp_to_cpumask(Powermode::Any)?,
             },
             "all" => Self::epp_to_cpumask(Powermode::Any)?,
             &_ => Cpumask::from_str(primary_domain)?,
@@ -406,10 +407,10 @@ impl<'a> Scheduler<'a> {
     }
 
     fn refresh_sched_domain(&mut self) -> bool {
-        if self.power_profile != "none" {
+        if self.power_profile != PowerProfile::Unknown {
             let power_profile = fetch_power_profile(false);
             if power_profile != self.power_profile {
-                self.power_profile = power_profile.clone();
+                self.power_profile = power_profile;
 
                 if self.opts.primary_domain == "auto" {
                     return true;
