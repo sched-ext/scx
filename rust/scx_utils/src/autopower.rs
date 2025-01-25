@@ -1,5 +1,4 @@
-use std::fs::File;
-use std::io::Read;
+use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
@@ -27,23 +26,19 @@ fn read_energy_profile() -> String {
     let energy_pref_path = "/sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference";
     let scaling_governor_path = "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor";
 
-    let res = File::open(energy_pref_path)
-        .and_then(|mut file| {
-            let mut contents = String::new();
-            file.read_to_string(&mut contents)?;
-            Ok(contents.trim().to_string())
+    fs::read_to_string(energy_pref_path)
+        .ok()
+        .or_else(|| fs::read_to_string(scaling_governor_path).ok())
+        .and_then(|s| {
+            Some(match s.trim_end() {
+                "power" | "balance_power" | "powersave" => "power-saver",
+                "balance_performance" => "balanced",
+                "performance" => "performance",
+                _ => return None,
+            })
         })
-        .or_else(|_| {
-            File::open(scaling_governor_path)
-                .and_then(|mut file| {
-                    let mut contents = String::new();
-                    file.read_to_string(&mut contents)?;
-                    Ok(contents.trim().to_string())
-                })
-                .or_else(|_| Ok("none".to_string()))
-        });
-
-    res.unwrap_or_else(|_: String| "none".to_string())
+        .unwrap_or_default()
+        .to_string()
 }
 
 pub fn fetch_power_profile() -> String {
