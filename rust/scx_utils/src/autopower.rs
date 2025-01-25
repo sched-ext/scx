@@ -60,6 +60,15 @@ fn read_energy_profile() -> PowerProfile {
 }
 
 pub fn fetch_power_profile(no_ppd: bool) -> PowerProfile {
+    fn parse_profile(profile: &str) -> PowerProfile {
+        match profile {
+            "power-saver" => PowerProfile::Powersave,
+            "balanced" => PowerProfile::Balanced,
+            "performance" => PowerProfile::Performance,
+            _ => PowerProfile::Unknown,
+        }
+    }
+
     if no_ppd {
         return read_energy_profile();
     }
@@ -70,29 +79,29 @@ pub fn fetch_power_profile(no_ppd: bool) -> PowerProfile {
                 warn!("failed to fetch the active power profile from ppd: {e}");
                 read_energy_profile()
             },
-            |profile| match profile.as_str() {
-                "power-saver" => PowerProfile::Powersave,
-                "balanced" => PowerProfile::Balanced,
-                "performance" => PowerProfile::Performance,
-                _ => PowerProfile::Unknown,
-            },
+            |profile| parse_profile(&profile),
         )
     } else {
         let retries = RETRIES.fetch_add(1, Ordering::Relaxed);
         if retries < MAX_RETRIES {
-            let proxy = Connection::system()
-                .ok()
-                .map(Box::new)
-                .map(Box::leak)
-                .as_deref()
-                .map(PowerProfilesProxyBlocking::new)
-                .and_then(Result::ok);
-            if let Some(proxy) = proxy {
-                let _ = POWER_PROFILES_PROXY.set(proxy);
-                fetch_power_profile(false)
-            } else {
-                warn!("failed to communicate with ppd: retry {retries}");
-                read_energy_profile()
+            let proxy = Connection::system().map(Box::new).map(Box::leak).map(|bus|
+                    // This cannot fail. Proxy::new() does not check the existence of interface
+                    PowerProfilesProxyBlocking::new(bus).unwrap());
+            match proxy {
+                Ok(proxy) => match proxy.active_profile() {
+                    Ok(profile) => {
+                        let _ = POWER_PROFILES_PROXY.set(proxy);
+                        parse_profile(&profile)
+                    }
+                    Err(e) => {
+                        warn!("failed to communicate with ppd (retry {retries}): {e}");
+                        read_energy_profile()
+                    }
+                },
+                Err(e) => {
+                    warn!("failed to communicate with dbus (retry {retries}): {e}");
+                    read_energy_profile()
+                }
             }
         } else {
             read_energy_profile()
