@@ -278,7 +278,7 @@ impl<'a> Scheduler<'a> {
         let topo = Topology::new().unwrap();
 
         // Initialize the primary scheduling domain and the preferred domain.
-        let power_profile = fetch_power_profile();
+        let power_profile = fetch_power_profile(false);
         if let Err(err) = Self::init_energy_domain(&mut skel, &opts.primary_domain, &power_profile)
         {
             warn!("failed to initialize primary domain: error {}", err);
@@ -407,7 +407,7 @@ impl<'a> Scheduler<'a> {
 
     fn refresh_sched_domain(&mut self) -> bool {
         if self.power_profile != "none" {
-            let power_profile = fetch_power_profile();
+            let power_profile = fetch_power_profile(false);
             if power_profile != self.power_profile {
                 self.power_profile = power_profile.clone();
 

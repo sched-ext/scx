@@ -833,7 +833,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn update_power_profile(&mut self, prev_profile: String) -> (bool, String) {
-        let profile = fetch_power_profile();
+        let profile = fetch_power_profile(false);
         if profile == prev_profile {
             // If the profile is the same, skip updaring the profile for BPF.
             return (true, profile);
