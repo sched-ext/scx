@@ -81,7 +81,6 @@ struct Opts {
     autopilot: bool,
 
     /// Automatically decide the scheduler's power mode based on the system's active power profile.
-    /// Require power-profiles-daemon being running.
     #[clap(long = "autopower", action = clap::ArgAction::SetTrue)]
     autopower: bool,
 

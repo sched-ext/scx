@@ -162,8 +162,7 @@ struct Opts {
     /// tasks may overflow to other available CPUs.
     ///
     /// Special values:
-    ///  - "auto" = automatically detect the CPUs based on the active power profile;
-    ///     require power-profiles-daemon being running.
+    ///  - "auto" = automatically detect the CPUs based on the active power profile
     ///  - "performance" = automatically detect and prioritize the fastest CPUs
     ///  - "powersave" = automatically detect and prioritize the slowest CPUs
     ///  - "all" = all CPUs assigned to the primary domain
