@@ -1,8 +1,13 @@
+use std::fs::File;
+use std::io::Read;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use zbus::blocking::Connection;
 use zbus::proxy;
 use zbus::Result;
+
+use crate::warn;
 
 #[proxy(
     interface = "net.hadess.PowerProfiles",
@@ -14,18 +19,57 @@ trait PowerProfiles {
     fn active_profile(&self) -> Result<String>;
 }
 
-static POWER_PROFILES_PROXY: OnceLock<Option<PowerProfilesProxyBlocking<'static>>> =
-    OnceLock::new();
+static POWER_PROFILES_PROXY: OnceLock<PowerProfilesProxyBlocking<'static>> = OnceLock::new();
+static RETRIES: AtomicUsize = AtomicUsize::new(0);
+const MAX_RETRIES: usize = 10;
+
+fn read_energy_profile() -> String {
+    let energy_pref_path = "/sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference";
+    let scaling_governor_path = "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor";
+
+    let res = File::open(energy_pref_path)
+        .and_then(|mut file| {
+            let mut contents = String::new();
+            file.read_to_string(&mut contents)?;
+            Ok(contents.trim().to_string())
+        })
+        .or_else(|_| {
+            File::open(scaling_governor_path)
+                .and_then(|mut file| {
+                    let mut contents = String::new();
+                    file.read_to_string(&mut contents)?;
+                    Ok(contents.trim().to_string())
+                })
+                .or_else(|_| Ok("none".to_string()))
+        });
+
+    res.unwrap_or_else(|_: String| "none".to_string())
+}
 
 pub fn fetch_power_profile() -> String {
-    POWER_PROFILES_PROXY
-        .get_or_init(|| {
-            let system_bus = Connection::system().ok()?;
-            let system_bus = Box::leak(Box::new(system_bus));
-            PowerProfilesProxyBlocking::new(system_bus).ok()
+    let proxy = POWER_PROFILES_PROXY.get();
+    if let Some(proxy) = proxy {
+        proxy.active_profile().unwrap_or_else(|e| {
+            warn!("failed to fetch the active power profile from ppd: {e}");
+            read_energy_profile()
         })
-        .as_ref()
-        .map(|power_profiles_proxy| power_profiles_proxy.active_profile().ok())
-        .flatten()
-        .unwrap_or_default()
+    } else {
+        let retries = RETRIES.fetch_add(1, Ordering::Relaxed);
+        if retries < MAX_RETRIES {
+            let proxy = (|| {
+                let system_bus = Connection::system().ok()?;
+                let system_bus = Box::leak(Box::new(system_bus));
+                PowerProfilesProxyBlocking::new(system_bus).ok()
+            })();
+            if let Some(proxy) = proxy {
+                let _ = POWER_PROFILES_PROXY.set(proxy);
+                fetch_power_profile()
+            } else {
+                warn!("failed to communicate with ppd: retry {retries}");
+                read_energy_profile()
+            }
+        } else {
+            read_energy_profile()
+        }
+    }
 }
