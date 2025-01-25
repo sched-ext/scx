@@ -42,6 +42,9 @@ fn read_energy_profile() -> String {
 }
 
 pub fn fetch_power_profile() -> String {
+    if std::env::var("SCX_NO_PPD").is_ok_and(|s| s == "1") {
+        return read_energy_profile();
+    }
     let proxy = POWER_PROFILES_PROXY.get();
     if let Some(proxy) = proxy {
         proxy.active_profile().unwrap_or_else(|e| {
