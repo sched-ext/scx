@@ -33,6 +33,7 @@ use libbpf_rs::ProgramInput;
 use log::warn;
 use log::{debug, info};
 use scx_stats::prelude::*;
+use scx_utils::autopower::fetch_power_profile;
 use scx_utils::build_id;
 use scx_utils::import_enums;
 use scx_utils::scx_enums;
@@ -161,7 +162,8 @@ struct Opts {
     /// tasks may overflow to other available CPUs.
     ///
     /// Special values:
-    ///  - "auto" = automatically detect the CPUs based on the current energy profile
+    ///  - "auto" = automatically detect the CPUs based on the active power profile;
+    ///     require power-profiles-daemon being running.
     ///  - "performance" = automatically detect and prioritize the fastest CPUs
     ///  - "powersave" = automatically detect and prioritize the slowest CPUs
     ///  - "all" = all CPUs assigned to the primary domain
@@ -230,7 +232,7 @@ struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     opts: &'a Opts,
-    energy_profile: String,
+    power_profile: String,
     stats_server: StatsServer<(), Metrics>,
     user_restart: bool,
 }
@@ -277,8 +279,8 @@ impl<'a> Scheduler<'a> {
         let topo = Topology::new().unwrap();
 
         // Initialize the primary scheduling domain and the preferred domain.
-        let energy_profile = Self::read_energy_profile();
-        if let Err(err) = Self::init_energy_domain(&mut skel, &opts.primary_domain, &energy_profile)
+        let power_profile = fetch_power_profile();
+        if let Err(err) = Self::init_energy_domain(&mut skel, &opts.primary_domain, &power_profile)
         {
             warn!("failed to initialize primary domain: error {}", err);
         }
@@ -306,7 +308,7 @@ impl<'a> Scheduler<'a> {
             skel,
             struct_ops,
             opts,
-            energy_profile,
+            power_profile,
             stats_server,
             user_restart: false,
         })
@@ -334,30 +336,6 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn read_energy_profile() -> String {
-        let energy_pref_path =
-            "/sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference";
-        let scaling_governor_path = "/sys/devices/system/cpu/cpufreq/policy0/scaling_governor";
-
-        let res = File::open(energy_pref_path)
-            .and_then(|mut file| {
-                let mut contents = String::new();
-                file.read_to_string(&mut contents)?;
-                Ok(contents.trim().to_string())
-            })
-            .or_else(|_| {
-                File::open(scaling_governor_path)
-                    .and_then(|mut file| {
-                        let mut contents = String::new();
-                        file.read_to_string(&mut contents)?;
-                        Ok(contents.trim().to_string())
-                    })
-                    .or_else(|_| Ok("none".to_string()))
-            });
-
-        res.unwrap_or_else(|_: String| "none".to_string())
-    }
-
     fn epp_to_cpumask(profile: Powermode) -> Result<Cpumask> {
         let mut cpus = get_primary_cpus(profile).unwrap_or_default();
         if cpus.is_empty() {
@@ -369,18 +347,14 @@ impl<'a> Scheduler<'a> {
     fn init_energy_domain(
         skel: &mut BpfSkel<'_>,
         primary_domain: &String,
-        energy_profile: &String,
+        power_profile: &String,
     ) -> Result<()> {
         let domain = match primary_domain.as_str() {
             "powersave" => Self::epp_to_cpumask(Powermode::Powersave)?,
             "performance" => Self::epp_to_cpumask(Powermode::Performance)?,
-            "auto" => match energy_profile.as_str() {
-                "power" | "balance_power" | "powersave" => {
-                    Self::epp_to_cpumask(Powermode::Powersave)?
-                }
-                "balance_performance" | "performance" => {
-                    Self::epp_to_cpumask(Powermode::Performance)?
-                }
+            "auto" => match power_profile.as_str() {
+                "power-saver" => Self::epp_to_cpumask(Powermode::Powersave)?,
+                "performance" | "balanced" => Self::epp_to_cpumask(Powermode::Performance)?,
                 &_ => Self::epp_to_cpumask(Powermode::Any)?,
             },
             "all" => Self::epp_to_cpumask(Powermode::Any)?,
@@ -433,10 +407,10 @@ impl<'a> Scheduler<'a> {
     }
 
     fn refresh_sched_domain(&mut self) -> bool {
-        if self.energy_profile != "none" {
-            let energy_profile = Self::read_energy_profile();
-            if energy_profile != self.energy_profile {
-                self.energy_profile = energy_profile.clone();
+        if self.power_profile != "none" {
+            let power_profile = fetch_power_profile();
+            if power_profile != self.power_profile {
+                self.power_profile = power_profile.clone();
 
                 if self.opts.primary_domain == "auto" {
                     return true;
