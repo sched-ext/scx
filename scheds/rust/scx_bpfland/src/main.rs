@@ -140,6 +140,13 @@ struct Opts {
     #[clap(short = 'l', long, allow_hyphen_values = true, default_value = "20000")]
     slice_us_lag: i64,
 
+    /// Disable preemption.
+    ///
+    /// Never allow tasks to preempt others before their assigned time slice expires. This can help
+    /// to increase system throughput over responsiveness.
+    #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
+    no_preempt: bool,
+
     /// Enable per-CPU tasks prioritization.
     ///
     /// This allows to prioritize per-CPU tasks that usually tend to be de-prioritized (since they
@@ -270,6 +277,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.smt_enabled = smt_enabled;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
         skel.maps.rodata_data.local_kthreads = opts.local_kthreads;
+        skel.maps.rodata_data.no_preempt = opts.no_preempt;
         skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
