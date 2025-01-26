@@ -1,12 +1,16 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates. */
 #ifndef __LAYERED_TIMER_H
 #define __LAYERED_TIMER_H
+
 #ifdef LSP
+#ifndef __bpf__
 #define __bpf__
-#ifndef LSP_INC
+#endif
 #include "../../../../include/scx/common.bpf.h"
+#else
+#include <scx/common.bpf.h>
 #endif
-#endif
+
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>

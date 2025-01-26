@@ -1,8 +1,8 @@
+
 #ifdef LSP
 #ifndef __bpf__
 #define __bpf__
 #endif
-#define LSP_INC
 #include "../../../../include/scx/common.bpf.h"
 #else
 #include <scx/common.bpf.h>
