@@ -177,9 +177,11 @@ fn get_default_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedM
     match scx_sched {
         SupportedSched::Bpfland => match sched_mode {
             SchedMode::Gaming => vec!["-m", "performance"],
-            SchedMode::LowLatency => vec!["-k", "-s", "5000", "-l", "5000"],
+            SchedMode::LowLatency => {
+                vec!["-s", "5000", "-S", "500", "-l", "5000", "-m", "performance"]
+            }
             SchedMode::PowerSave => vec!["-m", "powersave"],
-            SchedMode::Server => vec!["-c", "0"],
+            SchedMode::Server => vec!["-p"],
             SchedMode::Auto => vec![],
         },
         SupportedSched::Lavd => match sched_mode {
@@ -207,9 +209,9 @@ default_mode = "Auto"
 [scheds.scx_bpfland]
 auto_mode = []
 gaming_mode = ["-m", "performance"]
-lowlatency_mode = ["-k", "-s", "5000", "-l", "5000"]
+lowlatency_mode = ["-s", "5000", "-S", "500", "-l", "5000", "-m", "performance"]
 powersave_mode = ["-m", "powersave"]
-server_mode = ["-c", "0"]
+server_mode = ["-p"]
 
 [scheds.scx_rusty]
 auto_mode = []

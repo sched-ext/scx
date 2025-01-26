@@ -27,9 +27,9 @@
 
 * **Start a Scheduler with Arguments:**
   ```bash
-  dbus-send --system --print-reply --dest=org.scx.Loader /org/scx/Loader org.scx.Loader.StartSchedulerWithArgs string:scx_bpfland array:string:"-k","-c","0"
+  dbus-send --system --print-reply --dest=org.scx.Loader /org/scx/Loader org.scx.Loader.StartSchedulerWithArgs string:scx_bpfland array:string:"-p","-s","5000"
   ```
-  (This starts `scx_bpfland` with arguments `-k -c 0`)
+  (This starts `scx_bpfland` with arguments `-p -s 5000`)
 
 * **Stop the Current Scheduler:**
   ```bash
@@ -44,9 +44,9 @@
 
 * **Switch Scheduler with Arguments:**
   ```bash
-  dbus-send --system --print-reply --dest=org.scx.Loader /org/scx/Loader org.scx.Loader.SwitchSchedulerWithArgs string:scx_bpfland array:string:"-k","-c","0"
+  dbus-send --system --print-reply --dest=org.scx.Loader /org/scx/Loader org.scx.Loader.SwitchSchedulerWithArgs string:scx_bpfland array:string:"-p","-s","5000"
   ```
-  (This switches to `scx_bpfland` with arguments `-k -c 0`)
+  (This switches to `scx_bpfland` with arguments `-p -s 5000`)
 
 * **Get the Currently Active Scheduler:**
   ```bash

@@ -22,7 +22,7 @@ default_mode = "Auto"
 [scheds.scx_bpfland]
 auto_mode = []
 gaming_mode = ["-m", "performance"]
-lowlatency_mode = ["-k", "-s", "5000", "-l", "5000"]
+lowlatency_mode = ["-s", "5000", "-S", "500", "-l", "5000", "-m", "performance"]
 powersave_mode = ["-m", "powersave"]
 
 [scheds.scx_rusty]
@@ -72,7 +72,7 @@ The example configuration above shows how to set custom flags for different sche
 
 * For `scx_bpfland`:
     * Gaming mode: `-m performance`
-    * Low Latency mode: `-k -s 5000 -l 5000`
+    * Low Latency mode: `-s 5000 -S 500 -l 5000`
     * Power Save mode: `-m powersave`
 * For `scx_rusty`:
     * No custom flags are defined, so the default flags for each mode will be used.
