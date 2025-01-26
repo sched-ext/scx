@@ -148,11 +148,14 @@ struct Opts {
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     local_pcpu: bool,
 
-    /// Enable kthreads prioritization.
+    /// Enable kthreads prioritization (EXPERIMENTAL).
     ///
-    /// Enabling this can improve system performance, but it may also introduce interactivity
-    /// issues or unfairness in scenarios with high kthread activity, such as heavy I/O or network
-    /// traffic.
+    /// Enabling this can improve system performance, but it may also introduce noticeable
+    /// interactivity issues or unfairness in scenarios with high kthread activity, such as heavy
+    /// I/O or network traffic.
+    ///
+    /// Use it only when conducting specific experiments or if you have a clear understanding of
+    /// its implications.
     #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
     local_kthreads: bool,
 
