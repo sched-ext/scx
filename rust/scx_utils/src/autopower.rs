@@ -7,8 +7,6 @@ use zbus::blocking::Connection;
 use zbus::proxy;
 use zbus::Result;
 
-use crate::warn;
-
 #[proxy(
     interface = "net.hadess.PowerProfiles",
     default_service = "net.hadess.PowerProfiles",
@@ -76,7 +74,7 @@ pub fn fetch_power_profile(no_ppd: bool) -> PowerProfile {
     if let Some(proxy) = proxy {
         proxy.active_profile().map_or_else(
             |e| {
-                warn!("failed to fetch the active power profile from ppd: {e}");
+                log::debug!("failed to fetch the active power profile from ppd: {e}");
                 read_energy_profile()
             },
             |profile| parse_profile(&profile),
@@ -94,12 +92,12 @@ pub fn fetch_power_profile(no_ppd: bool) -> PowerProfile {
                         parse_profile(&profile)
                     }
                     Err(e) => {
-                        warn!("failed to communicate with ppd (retry {retries}): {e}");
+                        log::debug!("failed to communicate with ppd (retry {retries}): {e}");
                         read_energy_profile()
                     }
                 },
                 Err(e) => {
-                    warn!("failed to communicate with dbus (retry {retries}): {e}");
+                    log::debug!("failed to communicate with dbus (retry {retries}): {e}");
                     read_energy_profile()
                 }
             }
