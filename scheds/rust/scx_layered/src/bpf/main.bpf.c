@@ -1839,7 +1839,7 @@ static __noinline bool match_one(struct layer_match *match,
 	case MATCH_IS_GROUP_LEADER: {
 		// There is nuance to this around exec(2)s and group leader swaps.
 		// See https://github.com/sched-ext/scx/issues/610 for more details.
-		return p->tgid == p->pid && match->is_group_leader;
+		return (p->tgid == p->pid) == match->is_group_leader;
 	}
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
