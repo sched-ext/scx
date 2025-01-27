@@ -1,9 +1,9 @@
 /* Copyright (c) Meta Platforms, Inc. and affiliates. */
+
 #ifdef LSP
 #ifndef __bpf__
 #define __bpf__
 #endif
-#define LSP_INC
 #include "../../../../include/scx/common.bpf.h"
 #include "../../../../include/scx/namespace_impl.bpf.h"
 #else
