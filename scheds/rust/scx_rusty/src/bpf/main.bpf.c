@@ -57,6 +57,8 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
+#include "cpumask.h"
+
 char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
