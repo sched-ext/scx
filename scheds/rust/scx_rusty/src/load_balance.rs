@@ -329,6 +329,7 @@ impl LoadOrdered for TaskInfo {
 }
 impl_ord_for_type!(TaskInfo);
 
+#[derive(Debug)]
 struct Domain {
     id: usize,
     queried_tasks: bool,
@@ -377,6 +378,7 @@ impl LoadOrdered for Domain {
 }
 impl_ord_for_type!(Domain);
 
+#[derive(Debug)]
 struct NumaNode {
     id: usize,
     load: LoadEntity,
