@@ -326,17 +326,6 @@ static inline bool is_kthread(const struct task_struct *p)
 }
 
 /*
- * Return true if the task can only run on its assigned CPU, false
- * otherwise.
- */
-static bool is_migration_disabled(const struct task_struct *p)
-{
-	if (bpf_core_field_exists(p->migration_disabled))
-		return p->migration_disabled;
-	return false;
-}
-
-/*
  * Return the amount of tasks that are waiting to run.
  */
 static inline u64 nr_tasks_waiting(void)
