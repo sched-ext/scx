@@ -159,15 +159,6 @@ struct {
 struct cpu_ctx {
 	struct bpf_cpumask __kptr *l2_cpumask;
 	struct bpf_cpumask __kptr *l3_cpumask;
-	/*
-	 * Prevent the CPU from going idle.
-	 *
-	 * This is set when the CPU has no task to run, but the user-space
-	 * scheduler has still some pending activities to process. Keeping the
-	 * CPU alive allows to consume tasks from the user-space scheduler more
-	 * efficiently, preventing bubbles in the scheduling pipeline.
-	 */
-	bool prevent_idle;
 };
 
 struct {
@@ -928,8 +919,10 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 * No more tasks to process, check if we need to keep the CPU alive to
 	 * process pending tasks from the user-space scheduler.
 	 */
-	if (cctx->prevent_idle)
+	if (usersched_has_pending_tasks()) {
+		set_usersched_needed();
 		scx_bpf_kick_cpu(cpu, 0);
+	}
 }
 
 /*
@@ -968,57 +961,6 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 	 */
 	if (!is_usersched_task(p))
 		__sync_fetch_and_sub(&nr_running, 1);
-}
-
-/*
- * A CPU is about to change its idle state.
- */
-void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
-{
-	struct cpu_ctx *cctx;
-
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (!cctx)
-		return;
-
-	/*
-	 * Don't do anything if we exit from and idle state, a CPU owner will
-	 * be assigned in .running().
-	 */
-	if (!idle) {
-		cctx->prevent_idle = false;
-		return;
-	}
-
-	/*
-	 * A CPU is now available, notify the user-space scheduler that tasks
-	 * can be dispatched.
-	 */
-	if (usersched_has_pending_tasks()) {
-		set_usersched_needed();
-		/*
-		 * Wake up the idle CPU and trigger a resched, so that it can
-		 * immediately accept dispatched tasks.
-		 */
-		cctx->prevent_idle = true;
-		scx_bpf_kick_cpu(cpu, 0);
-		return;
-	}
-
-	/*
-	 * Kick the CPU if there are still tasks dispatched to the
-	 * corresponding per-CPU DSQ.
-	 */
-	if (scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) > 0) {
-		cctx->prevent_idle = true;
-		scx_bpf_kick_cpu(cpu, 0);
-		return;
-	}
-
-	/*
-	 * Nothing to do: allow the CPU to go idle.
-	 */
-	cctx->prevent_idle = false;
 }
 
 /*
@@ -1296,13 +1238,12 @@ SCX_OPS_DEFINE(rustland,
 	       .dispatch		= (void *)rustland_dispatch,
 	       .running			= (void *)rustland_running,
 	       .stopping		= (void *)rustland_stopping,
-	       .update_idle		= (void *)rustland_update_idle,
 	       .set_cpumask		= (void *)rustland_set_cpumask,
 	       .cpu_release		= (void *)rustland_cpu_release,
 	       .init_task		= (void *)rustland_init_task,
 	       .init			= (void *)rustland_init,
 	       .exit			= (void *)rustland_exit,
-	       .flags			= SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
+	       .flags			= SCX_OPS_ENQ_LAST,
 	       .timeout_ms		= 5000,
 	       .dispatch_max_batch	= MAX_DISPATCH_SLOT,
 	       .name			= "rustland");
