@@ -300,7 +300,10 @@ static NVML_CELL: once_cell::sync::OnceCell<Nvml> = once_cell::sync::OnceCell::n
 /// - CmdJoin: Matches when the task uses pthread_setname_np to send a join/leave
 /// command to the scheduler. See examples/cmdjoin.c for more details.
 ///
-/// - IsUsingGpu: Bool. When true, matches if the task is using a gpu
+/// - UsingGpu: Bool. When true, matches if the task is using a gpu
+///   as of the last time NVML was polled. When false, inverted.
+///
+/// - UsedGpu: Bool. When true, matches if the task has ever used a gpu
 ///   as of the last time NVML was polled. When false, inverted.
 ///
 /// - IsGroupLeader: Bool. When true, matches if the task has, since scheduler
@@ -1210,11 +1213,11 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_IS_GROUP_LEADER as i32;
                             mt.is_group_leader.write(*polarity);
                         }
-                        LayerMatch::IsUsingGpu(polarity) => {
+                        LayerMatch::UsingGpu(polarity) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_USING_GPU as i32;
                             mt.using_gpu.write(*polarity);
                         }
-                        LayerMatch::IsOrHasUsedGpu(polarity) => {
+                        LayerMatch::UsedGpu(polarity) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_USED_GPU as i32;
                             mt.used_gpu.write(*polarity);
                         }
