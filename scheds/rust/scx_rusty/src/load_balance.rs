@@ -21,50 +21,50 @@
 //! 2. Create a hierarchy representing load using NumaNode and Domain objects
 //!    as follows:
 //!
-//!                                                              o--------------------------------o
-//!                                                              |             LB Root            |
-//!                                                              |                                |
-//!                                                              | PushNodes: <Load, NumaNode>    |
-//!                                                              | PullNodes: <Load, NumaNode>    |
-//!                                                              | BalancedNodes: <Load, NumaNode>|
-//!                                                              o----------------o---------------o
-//!                                                                               |
-//!                                                         o---------------------o---------------------o
-//!                                                         |                     |                     |
-//!                                                         |                     |                     |
-//!                                         o---------------o----------------o   ...   o----------------o---------------o
-//!                                         |           NumaNode             |         |            NumaNode            |
-//!                                         | ID    0                        |         | ID    1                        |
-//!                                         | PushDomains <Load, Domain>     |         | PushDomains <Load, Domain>     |
-//!                                         | PullDomains <Load, Domain>     |         | PullDomains <Load, Domain>     |
-//!                                         | BalancedDomains <Domain>       |         | BalancedDomains <Domain>       |
-//!                                         | LoadSum f64                    |         | LoadSum f64                    |
-//!                                         | LoadAvg f64                    |         | LoadAvg f64                    |
-//!                                         | LoadImbal f64                  |         | LoadImbal f64                  |
-//!                                         | BalanceCost f64                |         | BalanceCost f64                |
-//!                                         | ...                            |         | ...                            |
-//!                                         o---------------o----------------o         o--------------------------------o
-//!                                                         |
-//!                                                         |
-//!                   o--------------------------------o   ...   o--------------------------------o
-//!                   |            Domain              |         |            Domain              |
-//!                   | ID    0                        |         | ID    1                        |
-//!                   | Tasks   <Load, Task>           |         | Tasks  <Load, Task>            |
-//!                   | LoadSum f64                    |         | LoadSum f64                    |
-//!                   | LoadAvg f64                    |         | LoadAvg f64                    |
-//!                   | LoadImbal f64                  |         | LoadImbal f64                  |
-//!                   | BalanceCost f64                |         | BalanceCost f64                |
-//!                   | ...                            |         | ...                            |
-//!                   o--------------------------------o         o----------------o---------------o
-//!                                                                               |
-//!                                                                               |
-//!                                         o--------------------------------o   ...   o--------------------------------o
-//!                                         |              Task              |         |              Task              |
-//!                                         | PID   0                        |         | PID   1                        |
-//!                                         | Load  f64                      |         | Load  f64                      |
-//!                                         | Migrated bool                  |         | Migrated bool                  |
-//!                                         | IsKworker bool                 |         | IsKworker bool                 |
-//!                                         o--------------------------------o         o--------------------------------o
+//!                                 o--------------------------------o
+//!                                 |             LB Root            |
+//!                                 |                                |
+//!                                 | PushNodes: <Load, NumaNode>    |
+//!                                 | PullNodes: <Load, NumaNode>    |
+//!                                 | BalancedNodes: <Load, NumaNode>|
+//!                                 o----------------o---------------o
+//!                                                  |
+//!                              o-------------------o-------------------o
+//!                              |                   |                   |
+//!                              |                   |                   |
+//!                o-------------o--------------o   ...   o--------------o-------------o
+//!                |          NumaNode          |         |           NumaNode         |
+//!                | ID    0                    |         | ID    1                    |
+//!                | PushDomains <Load, Domain> |         | PushDomains <Load, Domain> |
+//!                | PullDomains <Load, Domain> |         | PullDomains <Load, Domain> |
+//!                | BalancedDomains <Domain>   |         | BalancedDomains <Domain>   |
+//!                | LoadSum f64                |         | LoadSum f64                |
+//!                | LoadAvg f64                |         | LoadAvg f64                |
+//!                | LoadImbal f64              |         | LoadImbal f64              |
+//!                | BalanceCost f64            |         | BalanceCost f64            |
+//!                | ...                        |         | ...                        |
+//!                o-------------o--------------o         o----------------------------o
+//!                              |
+//!                              |
+//!  o----------------------o   ...   o---------------------o
+//!  |        Domain        |         |        Domain       |
+//!  | ID    0              |         | ID    1             |
+//!  | Tasks   <Load, Task> |         | Tasks  <Load, Task> |
+//!  | LoadSum f64          |         | LoadSum f64         |
+//!  | LoadAvg f64          |         | LoadAvg f64         |
+//!  | LoadImbal f64        |         | LoadImbal f64       |
+//!  | BalanceCost f64      |         | BalanceCost f64     |
+//!  | ...                  |         | ...                 |
+//!  o----------------------o         o----------o----------o
+//!                                              |
+//!                                              |
+//!                        o----------------o   ...   o----------------o
+//!                        |      Task      |         |      Task      |
+//!                        | PID   0        |         | PID   1        |
+//!                        | Load  f64      |         | Load  f64      |
+//!                        | Migrated bool  |         | Migrated bool  |
+//!                        | IsKworker bool |         | IsKworker bool |
+//!                        o----------------o         o----------------o
 //!
 //! As mentioned above, the hierarchy is created by querying BPF for each
 //! domain's duty cycle, and using the infeasible.rs crate to determine load
