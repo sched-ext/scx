@@ -306,9 +306,6 @@ static NVML_CELL: once_cell::sync::OnceCell<Nvml> = once_cell::sync::OnceCell::n
 /// - UsedGpu: Bool. When true, matches if the task has ever used a gpu
 ///   as of the last time NVML was polled. When false, inverted.
 ///
-/// - IsGroupLeader: Bool. When true, matches if the task has, since scheduler
-///   start, used a GPU. When false, inverted.
-///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
 ///
