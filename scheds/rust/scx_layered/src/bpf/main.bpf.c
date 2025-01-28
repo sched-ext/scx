@@ -182,7 +182,7 @@ struct {
 	__type(key, u32);
 	__type(value, u32);
 	__uint(max_entries, MAX_GPU_PIDS);
-	__uint(map_flags, 0);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 } all_gpu_pid SEC(".maps");
 
 
@@ -192,7 +192,7 @@ struct {
 	__type(key, u32);
 	__type(value, u32);
 	__uint(max_entries, MAX_GPU_PIDS);
-	__uint(map_flags, 0);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
 } cur_gpu_pid SEC(".maps");
 
 // XXX - Converting this to bss array triggers verifier bugs. See
