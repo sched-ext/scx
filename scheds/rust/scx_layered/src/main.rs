@@ -7,6 +7,7 @@ mod stats;
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs;
 use std::io::Write;
@@ -32,12 +33,14 @@ use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::MapCore as _;
+use libbpf_rs::MapHandle;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use log::debug;
 use log::info;
 use log::trace;
 use log::warn;
+use nvml_wrapper::Nvml;
 use scx_layered::*;
 use scx_stats::prelude::*;
 use scx_utils::compat;
@@ -217,6 +220,8 @@ lazy_static! {
     };
 }
 
+static NVML_CELL: once_cell::sync::OnceCell<Nvml> = once_cell::sync::OnceCell::new();
+
 /// scx_layered: A highly configurable multi-layer sched_ext scheduler
 ///
 /// scx_layered allows classifying tasks into multiple layers and applying
@@ -294,6 +299,15 @@ lazy_static! {
 ///
 /// - CmdJoin: Matches when the task uses pthread_setname_np to send a join/leave
 /// command to the scheduler. See examples/cmdjoin.c for more details.
+///
+/// - UsingGpu: Bool. When true, matches if the task is using a gpu
+///   as of the last time NVML was polled. When false, inverted.
+///
+/// - UsedGpu: Bool. When true, matches if the task has ever used a gpu
+///   as of the last time NVML was polled. When false, inverted.
+///
+/// - IsGroupLeader: Bool. When true, matches if the task has, since scheduler
+///   start, used a GPU. When false, inverted.
 ///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
@@ -534,6 +548,10 @@ struct Opts {
     /// Disable antistall
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
+
+    /// Disable gpu support
+    #[clap(long, default_value = "false")]
+    enable_gpu_support: bool,
 
     /// Enable netdev IRQ balancing. This is experimental and should be used with caution.
     #[clap(long, default_value = "false")]
@@ -1116,6 +1134,7 @@ struct Scheduler<'a> {
     topo: Arc<Topology>,
     netdevs: BTreeMap<String, NetDev>,
     stats_server: StatsServer<StatsReq, StatsRes>,
+    opts: &'a Opts,
 }
 
 impl<'a> Scheduler<'a> {
@@ -1193,6 +1212,14 @@ impl<'a> Scheduler<'a> {
                         LayerMatch::IsGroupLeader(polarity) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_IS_GROUP_LEADER as i32;
                             mt.is_group_leader.write(*polarity);
+                        }
+                        LayerMatch::UsingGpu(polarity) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_USING_GPU as i32;
+                            mt.using_gpu.write(*polarity);
+                        }
+                        LayerMatch::UsedGpu(polarity) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_USED_GPU as i32;
+                            mt.used_gpu.write(*polarity);
                         }
                     }
                 }
@@ -1590,7 +1617,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn init(
-        opts: &Opts,
+        opts: &'a Opts,
         layer_specs: &[LayerSpec],
         open_object: &'a mut MaybeUninit<OpenObject>,
     ) -> Result<Self> {
@@ -1689,6 +1716,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.lo_fb_wait_ns = opts.lo_fb_wait_us * 1000;
         skel.maps.rodata_data.lo_fb_share_ppk = ((opts.lo_fb_share * 1024.0) as u32).clamp(1, 1024);
         skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
+        skel.maps.rodata_data.enable_gpu_support = opts.enable_gpu_support;
 
         for (cpu, sib) in topo.sibling_cpus().iter().enumerate() {
             skel.maps.rodata_data.__sibling_cpu[cpu] = *sib;
@@ -1811,6 +1839,7 @@ impl<'a> Scheduler<'a> {
             topo,
             netdevs,
             stats_server,
+            opts,
         };
 
         info!("Layered Scheduler Attached. Run `scx_layered --monitor` for metrics.");
@@ -1868,6 +1897,76 @@ impl<'a> Scheduler<'a> {
                 trace!("{} updating irq {} cpumask {:?}", iface, irq, irqmask);
             }
             netdev.apply_cpumasks()?;
+        }
+
+        Ok(())
+    }
+
+    fn update_gpu_pids(&mut self) -> Result<()> {
+        if !self.opts.enable_gpu_support {
+            return Ok(());
+        }
+
+        let nvml = NVML_CELL.get_or_try_init(|| Nvml::init())?;
+
+        let device_count = nvml.device_count()?;
+
+        let mut pids = HashSet::new();
+
+        // Iterate over all devices and gather running processes
+        for i in 0..device_count {
+            let device = nvml.device_by_index(i)?;
+
+            let procs = device.running_compute_processes()?;
+
+            for proc_info in procs {
+                pids.insert(proc_info.pid);
+            }
+        }
+
+        // ensure current pids only have current pids.
+        let zero = 0;
+        let all_pid_bpf_map = MapHandle::try_from(&self.skel.maps.all_gpu_pid)?;
+        let cur_pid_bpf_map = MapHandle::try_from(&self.skel.maps.cur_gpu_pid)?;
+
+        // get deletes for current, state of the world for all.
+        let mut cur_pid_bpf_set = HashSet::new();
+        let mut all_pid_bpf_set = HashSet::new();
+
+        for key in cur_pid_bpf_map.keys() {
+            let sized_bytes: [u8; 4] = key
+                .try_into()
+                .expect("failed to convert pid bytes to sized bytes");
+            let pid: u32 = u32::from_ne_bytes(sized_bytes);
+            cur_pid_bpf_set.insert(pid);
+        }
+        for key in all_pid_bpf_map.keys() {
+            let sized_bytes: [u8; 4] = key
+                .try_into()
+                .expect("failed to convert pid bytes to sized bytes");
+            let pid: u32 = u32::from_ne_bytes(sized_bytes);
+            all_pid_bpf_set.insert(pid);
+        }
+
+        let cur_delete_set = cur_pid_bpf_set.difference(&pids);
+        let cur_add_set = pids.difference(&pids);
+        let all_add_set = pids.difference(&all_pid_bpf_set);
+
+        let zero_bytes: &[u8; 4] = unsafe { std::mem::transmute(&zero) };
+        use libbpf_rs::MapFlags;
+        for pid in cur_add_set {
+            let pid_bytes: &[u8; 4] = unsafe { std::mem::transmute(&pid) };
+            cur_pid_bpf_map.update(pid_bytes, zero_bytes, MapFlags::ANY)?;
+        }
+
+        for pid in cur_delete_set {
+            let pid_bytes: &[u8; 4] = unsafe { std::mem::transmute(&pid) };
+            cur_pid_bpf_map.delete(pid_bytes)?;
+        }
+
+        for pid in all_add_set {
+            let pid_bytes: &[u8; 4] = unsafe { std::mem::transmute(&pid) };
+            all_pid_bpf_map.update(pid_bytes, zero_bytes, MapFlags::ANY)?;
         }
 
         Ok(())
@@ -2182,6 +2281,7 @@ impl<'a> Scheduler<'a> {
             self.processing_dur,
         )?;
         self.refresh_cpumasks()?;
+        self.update_gpu_pids()?;
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
     }
