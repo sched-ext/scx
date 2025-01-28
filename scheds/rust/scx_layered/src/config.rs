@@ -75,6 +75,8 @@ pub enum LayerMatch {
     NSEquals(u32),
     CmdJoin(String),
     IsGroupLeader(bool),
+    UsingGpu(bool),
+    UsedGpu(bool),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

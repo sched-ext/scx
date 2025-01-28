@@ -54,6 +54,7 @@ const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
+const volatile bool enable_gpu_support = false;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
 const u32 zero_u32 = 0;
@@ -173,6 +174,26 @@ static bool cpuc_in_layer(struct cpu_ctx *cpuc, struct layer *layer)
 	else
 		return cpuc->layer_id == layer->id;
 }
+
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	// u32 comes from nvml
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, MAX_GPU_PIDS);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} all_gpu_pid SEC(".maps");
+
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	// u32 comes from nvml
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, MAX_GPU_PIDS);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} cur_gpu_pid SEC(".maps");
 
 // XXX - Converting this to bss array triggers verifier bugs. See
 // BpfStats::read(). Should also be cacheline aligned which doesn't work with
@@ -1841,6 +1862,39 @@ static __noinline bool match_one(struct layer_match *match,
 		// See https://github.com/sched-ext/scx/issues/610 for more details.
 		return (p->tgid == p->pid) == match->is_group_leader;
 	}
+	case MATCH_USING_GPU: {
+			u32 pid;
+			u32 gpu_pid;
+			bool pid_present = false;
+
+			if (!enable_gpu_support)
+				return match->used_gpu;
+
+			pid = p->pid;
+			gpu_pid = bpf_map_lookup_elem(&cur_gpu_pid, &pid) == 0;
+
+			if (gpu_pid)
+				pid_present = true;
+
+			return pid_present == match->used_gpu;
+	}
+	case MATCH_USED_GPU: {
+			u32 pid;
+			u32 gpu_pid;
+			bool pid_present = false;
+
+			if (!enable_gpu_support)
+				return match->used_gpu;
+
+			pid = p->pid;
+			gpu_pid = bpf_map_lookup_elem(&all_gpu_pid, &pid) == 0;
+
+			if (gpu_pid)
+				pid_present = true;
+
+			return pid_present == match->used_gpu;
+	}
+
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
 		return result;
@@ -2868,6 +2922,12 @@ static s32 init_layer(int layer_id)
 				break;
 			case MATCH_IS_GROUP_LEADER:
 				dbg("%s PID %d", header, match->is_group_leader);
+				break;
+			case MATCH_USING_GPU:
+				dbg("%s PID %d", header, match->using_gpu);
+				break;
+			case MATCH_USED_GPU:
+				dbg("%s PID %d", header, match->used_gpu);
 				break;
 			default:
 				scx_bpf_error("%s Invalid kind", header);
