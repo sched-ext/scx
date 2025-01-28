@@ -64,6 +64,7 @@ enum consts {
 
 	SCXCMD_PREFIX		= 0x5C10,
 	SCXCMD_COMLEN		= 13,
+	MAX_GPU_PIDS 		= 100000,
 };
 
 static inline void ___consts_sanity_check___(void) {
@@ -242,6 +243,8 @@ enum layer_match_kind {
 	MATCH_NS_EQUALS,
 	MATCH_SCXCMD_JOIN,
 	MATCH_IS_GROUP_LEADER,
+	MATCH_USING_GPU,
+	MATCH_USED_GPU,
 
 	NR_LAYER_MATCH_KINDS,
 };
@@ -259,6 +262,8 @@ struct layer_match {
 	u32		tgid;
 	u64		nsid;
 	bool		is_group_leader;
+	bool	using_gpu;
+	bool	used_gpu;
 };
 
 struct layer_match_ands {
