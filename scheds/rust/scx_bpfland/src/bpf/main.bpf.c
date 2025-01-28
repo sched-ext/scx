@@ -51,6 +51,12 @@ const volatile u64 slice_min = 1ULL * NSEC_PER_MSEC;
 const volatile s64 slice_lag = 20ULL * NSEC_PER_MSEC;
 
 /*
+ * If enabled, never allow tasks to preempt others before their assigned
+ * time slice expires.
+ */
+const volatile bool no_preempt;
+
+/*
  * When enabled always dispatch per-CPU kthreads directly.
  *
  * This allows to prioritize critical kernel threads that may potentially slow
@@ -676,18 +682,9 @@ static void kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
  *
  * Return true if the task is dispatched, false otherwise.
  */
-static bool try_direct_dispatch(struct task_struct *p, u64 enq_flags)
+static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
+				u64 slice, u64 enq_flags)
 {
-	/*
-	 * If local_kthread is specified dispatch per-CPU kthreads
-	 * directly on their assigned CPU.
-	 */
-	if (local_kthreads && is_kthread(p)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
-		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
-		return true;
-	}
-
 	/*
 	 * If a task has been re-enqueued because its assigned CPU has been
 	 * taken by a higher priority scheduling class, force it to follow
@@ -698,37 +695,61 @@ static bool try_direct_dispatch(struct task_struct *p, u64 enq_flags)
 		return false;
 
 	/*
+	 * If local_kthread is specified dispatch per-CPU kthreads
+	 * directly on their assigned CPU.
+	 */
+	if (local_kthreads && is_kthread(p)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
+		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
+
+		return true;
+	}
+
+	/*
 	 * If ops.select_cpu() has been skipped, try direct dispatch.
 	 */
 	if (!(enq_flags & SCX_ENQ_CPU_SELECTED)) {
 		s32 prev_cpu = scx_bpf_task_cpu(p);
+		struct rq *rq = scx_bpf_cpu_rq(prev_cpu);
 
 		/*
-		 * If both the local and shared DSQs are empty and the
-		 * previous CPU can still be used by the task, perform the
+		 * Allow to preempt the task currently running on the
+		 * assigned CPU if our deadline is earlier.
+		 */
+		if (!no_preempt && tctx->deadline < rq->curr->scx.dsq_vtime) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
+					   slice, enq_flags | SCX_ENQ_PREEMPT);
+			__sync_fetch_and_add(&nr_direct_dispatches, 1);
+
+			return true;
+		}
+
+		/*
+		 * If both the local and shared DSQs are empty, perform the
 		 * direct dispatch.
 		 */
 		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
-		    (local_pcpu || !scx_bpf_dsq_nr_queued(SHARED_DSQ)) &&
-		    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
+		    (local_pcpu || !scx_bpf_dsq_nr_queued(SHARED_DSQ))) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
 					   slice_max, enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
+
 			return true;
 		}
-	}
 
-	/*
-	 * If local_pcpu is enabled always dispatch tasks that can only run
-	 * on one CPU directly.
-	 *
-	 * This can help to improve I/O workloads (like large parallel
-	 * builds).
-	 */
-	if (local_pcpu && p->nr_cpus_allowed == 1) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
-		__sync_fetch_and_add(&nr_direct_dispatches, 1);
-		return true;
+		/*
+		 * If local_pcpu is enabled always dispatch tasks that can only run
+		 * on one CPU directly.
+		 *
+		 * This can help to improve I/O workloads (like large parallel
+		 * builds).
+		 */
+		if (local_pcpu && p->nr_cpus_allowed == 1) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, enq_flags);
+			__sync_fetch_and_add(&nr_direct_dispatches, 1);
+
+			return true;
+		}
 	}
 
 	/*
@@ -745,13 +766,7 @@ static bool try_direct_dispatch(struct task_struct *p, u64 enq_flags)
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
-	u64 slice;
-
-	/*
-	 * Try to dispatch the task directly, if possible.
-	 */
-	if (try_direct_dispatch(p, enq_flags))
-		return;
+	u64 slice, deadline;
 
 	/*
 	 * Dispatch regular tasks to the shared DSQ.
@@ -759,10 +774,16 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
-
+	deadline = task_deadline(p, tctx);
 	slice = CLAMP(slice_max / nr_tasks_waiting(), slice_min, slice_max);
-	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, slice,
-				 task_deadline(p, tctx), enq_flags);
+
+	/*
+	 * Try to dispatch the task directly, if possible.
+	 */
+	if (try_direct_dispatch(p, tctx, slice, enq_flags))
+		return;
+
+	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, slice, deadline, enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	/*
