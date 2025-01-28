@@ -216,13 +216,10 @@ static bool is_kernel_task(struct task_struct *p)
 	return !!(p->flags & PF_KTHREAD);
 }
 
-static bool is_migration_disabled(const struct task_struct *p)
+static bool is_per_cpu_task(const struct task_struct *p)
 {
-	if (p->nr_cpus_allowed == 1)
+	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p))
 		return true;
-
-	if (bpf_core_field_exists(p->migration_disabled))
-		return p->migration_disabled;
 
 	return false;
 }
