@@ -314,7 +314,7 @@ impl LoadEntity {
 
 #[derive(Debug)]
 struct TaskInfo {
-    taskc: u64,
+    taskc_p: *mut bpf_intf::task_ctx,
     load: OrderedFloat<f64>,
     dom_mask: u64,
     preferred_dom_mask: u64,
@@ -643,14 +643,14 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let now_mono = now_monotonic();
 
         for idx in ridx..widx {
-            let taskc = active_tasks.tasks[(idx % MAX_TPTRS) as usize];
-            let task_ctx = unsafe { &*(taskc as *const bpf_intf::task_ctx) };
+            let taskc_p = active_tasks.tasks[(idx % MAX_TPTRS) as usize] as *mut bpf_intf::task_ctx;
+            let taskc = unsafe { &mut *taskc_p };
 
-            if task_ctx.target_dom as usize != dom.id {
+            if taskc.target_dom as usize != dom.id {
                 continue;
             }
 
-            let rd = &task_ctx.dcyc_rd;
+            let rd = &taskc.dcyc_rd;
             let mut load = ravg_read(
                 rd.val,
                 rd.val_at,
@@ -662,19 +662,19 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             );
 
             let weight = if self.lb_apply_weight {
-                (task_ctx.weight as f64).min(self.infeas_threshold)
+                (taskc.weight as f64).min(self.infeas_threshold)
             } else {
                 DEFAULT_WEIGHT
             };
             load *= weight;
 
             dom.tasks.insert(TaskInfo {
-                taskc: taskc as u64,
+                taskc_p,
                 load: OrderedFloat(load),
-                dom_mask: task_ctx.dom_mask,
-                preferred_dom_mask: task_ctx.preferred_dom_mask,
+                dom_mask: taskc.dom_mask,
+                preferred_dom_mask: taskc.preferred_dom_mask,
                 migrated: Cell::new(false),
-                is_kworker: task_ctx.is_kworker,
+                is_kworker: taskc.is_kworker,
             });
         }
 
@@ -766,15 +766,11 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         }
 
         let load = *(task.load);
-        let taskc = task.taskc;
+        let taskc_p = task.taskc_p;
         task.migrated.set(true);
         std::mem::swap(&mut push_dom.tasks, &mut SortedVec::from_unsorted(tasks));
 
-        push_dom.transfer_load(
-            load,
-            unsafe { &mut *(taskc as *mut bpf_intf::task_ctx) },
-            pull_dom,
-        );
+        push_dom.transfer_load(load, unsafe { &mut *taskc_p }, pull_dom);
         Ok(Some(load))
     }
 
