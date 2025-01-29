@@ -1753,7 +1753,7 @@ static s32 create_node(u32 node_id)
 	return ret;
 }
 
-static s32 create_dom(u32 dom_id)
+__weak s32 create_dom(u32 dom_id)
 {
 	dom_ptr domc;
 	struct node_ctx *nodec;
