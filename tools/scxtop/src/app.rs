@@ -16,13 +16,16 @@ use crate::KeyMap;
 use crate::LlcData;
 use crate::NodeData;
 use crate::PerfEvent;
+use crate::PerfettoTraceManager;
 use crate::VecStats;
 use crate::ViewState;
 use crate::APP;
 use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
+
 use anyhow::Result;
 use glob::glob;
+use protobuf::Message;
 use ratatui::prelude::Constraint;
 use ratatui::{
     layout::{Alignment, Direction, Layout, Rect},
@@ -30,8 +33,8 @@ use ratatui::{
     symbols::bar::{NINE_LEVELS, THREE_LEVELS},
     text::{Line, Span},
     widgets::{
-        Bar, BarChart, BarGroup, Block, BorderType, Borders, Paragraph, RenderDirection, Scrollbar,
-        ScrollbarOrientation, ScrollbarState, Sparkline,
+        Bar, BarChart, BarGroup, Block, BorderType, Borders, Gauge, Paragraph, RenderDirection,
+        Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline,
     },
     Frame,
 };
@@ -41,13 +44,14 @@ use scx_utils::misc::read_file_usize;
 use scx_utils::Topology;
 use serde_json;
 use serde_json::Value as JsonValue;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::RwLock;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::RwLock;
 
 const DSQ_VTIME_CUTOFF: u64 = 1_000_000_000_000_000;
 
@@ -93,12 +97,19 @@ pub struct App<'a> {
     events_list_size: u16,
     selected_event: usize,
     non_hw_event_active: bool,
+
+    // trace releated
+    trace_manager: PerfettoTraceManager<'a>,
+    trace_tick: usize,
+    max_trace_ticks: usize,
+    prev_bpf_sample_rate: u32,
 }
 
 impl<'a> App<'a> {
     /// Creates a new appliation.
     pub fn new(
         stats_socket_path: String,
+        trace_file_prefix: &'a str,
         scheduler: String,
         keymap: KeyMap,
         max_cpu_events: usize,
@@ -157,6 +168,7 @@ impl<'a> App<'a> {
             }
             client
         });
+        let sample_rate = skel.maps.data_data.sample_rate;
 
         let app = Self {
             stats_client: Arc::new(RwLock::new(stats_client)),
@@ -194,6 +206,10 @@ impl<'a> App<'a> {
             events_list_size: 1,
             selected_event: 0,
             non_hw_event_active: false,
+            prev_bpf_sample_rate: sample_rate,
+            trace_tick: 0,
+            max_trace_ticks: 5,
+            trace_manager: PerfettoTraceManager::new(&trace_file_prefix, None),
         };
 
         Ok(app)
@@ -408,6 +424,13 @@ impl<'a> App<'a> {
                         }
                         Ok::<(), anyhow::Error>(())
                     });
+                }
+            }
+            AppState::Tracing => {
+                self.trace_tick += 1;
+                // trace for max ticks and then exit tracing mode
+                if self.trace_tick == self.max_trace_ticks {
+                    return self.record_trace();
                 }
             }
             _ => {}
@@ -1559,6 +1582,13 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
+                    "{}: record perfetto trace",
+                    self.keymap.action_keys_string(Action::RecordTrace),
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
                     "{}: decrease tick rate ({}ms)",
                     self.keymap.action_keys_string(Action::DecTickRate),
                     self.tick_rate_ms
@@ -1759,6 +1789,32 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    /// Renders the tracing state.
+    fn render_tracing(&mut self, frame: &mut Frame) -> Result<()> {
+        let block = Block::new()
+            .title_top(
+                Line::from(self.scheduler.clone())
+                    .style(self.theme.title_style())
+                    .centered(),
+            )
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .style(self.theme.border_style());
+
+        let label = Span::styled(
+            format!("recording trace to {}", self.trace_manager.trace_file()),
+            self.theme.title_style(),
+        );
+        let gauge = Gauge::default()
+            .block(block)
+            .gauge_style(self.theme.text_important_color())
+            .ratio(self.trace_tick as f64 / self.max_trace_ticks as f64)
+            .label(label);
+        frame.render_widget(gauge, frame.area());
+
+        Ok(())
+    }
+
     /// Renders the application to the frame.
     pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
         match self.state {
@@ -1781,6 +1837,7 @@ impl<'a> App<'a> {
                 self.render_scheduler("dsq_vtime_delta".to_string(), frame, bottom, true, false)?;
                 self.render_scheduler_stats(frame, right)
             }
+            AppState::Tracing => self.render_tracing(frame),
             _ => self.render_default(frame),
         }
     }
@@ -1862,9 +1919,30 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Records the trace to perfetto output.
+    fn record_trace(&mut self) -> Result<()> {
+        self.skel.maps.data_data.sample_rate = self.prev_bpf_sample_rate;
+        self.state = self.prev_state.clone();
+        self.trace_manager.stop()
+    }
+
+    /// Starts recording a trace.
+    fn start_trace(&mut self) -> Result<()> {
+        self.prev_state = self.state.clone();
+        self.state = AppState::Tracing;
+        self.trace_tick = 0;
+        self.trace_manager.start()?;
+
+        // set bpf sampling to every event
+        self.prev_bpf_sample_rate = self.skel.maps.data_data.sample_rate;
+        self.skel.maps.data_data.sample_rate = 1;
+
+        Ok(())
+    }
+
     /// Updates the app when a scheduler is unloaded.
     fn on_scheduler_unload(&mut self) {
-        self.scheduler = "none".to_string();
+        self.scheduler = "".to_string();
         self.sched_stats_raw = "".to_string();
         self.dsq_data.clear();
         let _ = self
@@ -1883,7 +1961,6 @@ impl<'a> App<'a> {
 
     /// Updates the app when a CPUs performance is changed by the scheduler.
     fn on_cpu_perf(&mut self, cpu: u32, perf: u32) {
-        // XXX fixme
         let cpu_data = self.cpu_data.entry(cpu as usize).or_insert(CpuData::new(
             cpu as usize,
             0,
@@ -1894,55 +1971,79 @@ impl<'a> App<'a> {
         cpu_data.add_event_data("perf".to_string(), perf as u64);
     }
 
-    /// Updates the app when a task is scheduled.
-    fn on_sched_switch(
-        &mut self,
-        cpu: u32,
-        next_dsq_id: u64,
-        next_dsq_lat_us: u64,
-        next_dsq_vtime: u64,
-        _next_slice_ns: u64,
-        prev_dsq_id: u64,
-        prev_used_slice_ns: u64,
-        _prev_slice_ns: u64,
-    ) {
-        if self.scheduler == "none" {
-            return;
-        }
-        // XXX fixme
-        let cpu_data = self.cpu_data.entry(cpu as usize).or_insert(CpuData::new(
-            cpu as usize,
-            0,
-            0,
-            0,
-            self.max_cpu_events,
-        ));
-        cpu_data.add_event_data("dsq_lat_us".to_string(), next_dsq_lat_us);
-        let next_dsq_data = self
-            .dsq_data
-            .entry(next_dsq_id)
-            .or_insert(EventData::new(self.max_cpu_events * 2));
-        next_dsq_data.add_event_data("dsq_lat_us".to_string(), next_dsq_lat_us);
-        if next_dsq_vtime > 0 {
-            // vtime is special because we want the delta
-            let last = next_dsq_data
-                .event_data_immut("dsq_vtime_delta".to_string())
-                .last()
-                .copied()
-                .unwrap_or(0_u64);
-            if next_dsq_vtime - last < DSQ_VTIME_CUTOFF {
-                next_dsq_data.add_event_data(
-                    "dsq_vtime_delta".to_string(),
-                    if last > 0 { next_dsq_vtime - last } else { 0 },
-                );
+    /// Updates the app when a task wakes.
+    fn on_sched_wakeup(&mut self, action: &Action) {
+        match action {
+            Action::SchedWakeup { .. } => {
+                if self.state == AppState::Tracing {
+                    self.trace_manager.on_sched_wakeup(action);
+                    return;
+                }
+            }
+            _ => {
+                panic!("Invalid calling context");
             }
         }
+    }
 
-        let prev_dsq_data = self
-            .dsq_data
-            .entry(prev_dsq_id)
-            .or_insert(EventData::new(self.max_cpu_events * 2));
-        prev_dsq_data.add_event_data("dsq_slice_consumed".to_string(), prev_used_slice_ns);
+    /// Updates the app when a task is scheduled.
+    fn on_sched_switch(&mut self, action: &Action) {
+        match action {
+            Action::SchedSwitch {
+                cpu,
+                next_dsq_id,
+                next_dsq_lat_us,
+                next_dsq_vtime,
+                prev_dsq_id,
+                prev_used_slice_ns,
+                ..
+            } => {
+                if self.state == AppState::Tracing {
+                    self.trace_manager.on_sched_switch(action);
+                    return;
+                }
+                if self.scheduler.is_empty() {
+                    return;
+                }
+
+                let cpu_data = self.cpu_data.entry(*cpu as usize).or_insert(CpuData::new(
+                    *cpu as usize,
+                    0,
+                    0,
+                    0,
+                    self.max_cpu_events,
+                ));
+                cpu_data.add_event_data("dsq_lat_us".to_string(), *next_dsq_lat_us);
+                let next_dsq_data = self
+                    .dsq_data
+                    .entry(*next_dsq_id)
+                    .or_insert(EventData::new(self.max_cpu_events));
+                next_dsq_data.add_event_data("dsq_lat_us".to_string(), *next_dsq_lat_us);
+                if *next_dsq_vtime > 0 {
+                    // vtime is special because we want the delta
+                    let last = next_dsq_data
+                        .event_data_immut("dsq_vtime_delta".to_string())
+                        .last()
+                        .copied()
+                        .unwrap_or(0_u64);
+                    if next_dsq_vtime - last < DSQ_VTIME_CUTOFF {
+                        next_dsq_data.add_event_data(
+                            "dsq_vtime_delta".to_string(),
+                            if last > 0 { *next_dsq_vtime - last } else { 0 },
+                        );
+                    }
+                }
+
+                let prev_dsq_data = self
+                    .dsq_data
+                    .entry(*prev_dsq_id)
+                    .or_insert(EventData::new(self.max_cpu_events));
+                prev_dsq_data.add_event_data("dsq_slice_consumed".to_string(), *prev_used_slice_ns);
+            }
+            _ => {
+                panic!("invalid call to on_sched_switch");
+            }
+        }
     }
 
     /// Updates the bpf bpf sampling rate.
@@ -1997,26 +2098,14 @@ impl<'a> App<'a> {
             Action::SchedCpuPerfSet { cpu, perf } => {
                 self.on_cpu_perf(cpu, perf);
             }
-            Action::SchedSwitch {
-                cpu,
-                next_dsq_id,
-                next_dsq_lat_us,
-                next_dsq_vtime,
-                next_slice_ns,
-                prev_dsq_id,
-                prev_used_slice_ns,
-                prev_slice_ns,
-            } => {
-                self.on_sched_switch(
-                    cpu,
-                    next_dsq_id,
-                    next_dsq_lat_us,
-                    next_dsq_vtime,
-                    next_slice_ns,
-                    prev_dsq_id,
-                    prev_used_slice_ns,
-                    prev_slice_ns,
-                );
+            Action::RecordTrace => {
+                self.start_trace()?;
+            }
+            Action::SchedSwitch { .. } => {
+                self.on_sched_switch(&action);
+            }
+            Action::SchedWakeup { .. } => {
+                self.on_sched_wakeup(&action);
             }
             Action::ClearEvent => self.stop_perf_events(),
             Action::ChangeTheme => {

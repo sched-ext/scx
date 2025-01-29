@@ -7,6 +7,9 @@ license = "GPL-2.0-only"
 repository = "https://github.com/sched-ext/scx"
 description = "sched_ext scheduler tool for observability"
 
+[lints.rust]
+unused_imports = "allow"
+
 [dependencies]
 anyhow = "1.0.65"
 clap = { version = "4.1", features = [
@@ -32,6 +35,7 @@ libc = "0.2.137"
 log = "0.4.17"
 perf-event-open-sys = "4.0.0"
 plain = "0.2.3"
+rand = "0.8.5"
 ratatui = { version = "0.29.0", features = ["serde", "macros"] }
 regex = "1.11.1"
 serde = { version = "1.0.215", features = ["derive"] }
@@ -43,7 +47,9 @@ tokio-util = "0.7.13"
 tracing = "0.1.41"
 tracing-error = "0.2.1"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "serde"] }
+protobuf = "3.7.1"
 
 [build-dependencies]
 scx_utils = { path = "../../rust/scx_utils", version = "1.0.8" }
 scx_stats = { path = "../../rust/scx_stats", version = "1.0.8" }
+protobuf-codegen = "3.7.1"
