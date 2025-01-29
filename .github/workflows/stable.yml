@@ -156,3 +156,18 @@ jobs:
           # it's all txt files w/ 90 day retention, lets be nice.
           compression-level: 9
 
+  notify-job:
+    runs-on: ubuntu-latest
+    if: ${{ (needs.integration-test.result == 'failure' || needs.integration-test.result == 'cancelled') }}
+    needs:
+      - integration-test
+    steps:
+    - uses: actions/checkout@v2
+    - name: Slack Notification
+      uses: rtCamp/action-slack-notify@v2
+      env:
+        SLACK_USERNAME: ci
+        SLACK_TITLE: Workflow ${{ needs.integration-test.result }}
+        MSG_MINIMAL: stable ci job failed.
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        

@@ -344,3 +344,19 @@ jobs:
 
       - run: cargo build  --manifest-path scheds/rust/${{ matrix.scheduler }}/Cargo.toml
       - run: vng -v --rw --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --network user -- cargo test --manifest-path scheds/rust/${{ matrix.scheduler }}/Cargo.toml
+
+  notify-job:
+    runs-on: ubuntu-latest
+    if: ${{ (needs.integration-test.result == 'failure' || needs.integration-test.result == 'cancelled') }}
+    needs:
+      - integration-test
+    steps:
+    - uses: actions/checkout@v2
+    - name: Slack Notification
+      uses: rtCamp/action-slack-notify@v2
+      env:
+        SLACK_USERNAME: ci
+        SLACK_TITLE: Workflow ${{ needs.integration-test.result }}
+        MSG_MINIMAL: for-next ci job failed.
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+    
