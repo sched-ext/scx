@@ -154,6 +154,9 @@ struct task_ctx {
 	/* select_cpu() telling enqueue() to queue directly on the DSQ */
 	bool dispatch_local;
 
+	/* For visibility from userspace, may become stale after multithreaded exec */
+	u32 pid;
+
 	struct ravg_data dcyc_rd;
 };
 

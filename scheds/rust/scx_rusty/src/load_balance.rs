@@ -140,6 +140,7 @@ use std::sync::Arc;
 use anyhow::bail;
 use anyhow::Result;
 use log::debug;
+use log::trace;
 use ordered_float::OrderedFloat;
 use scx_utils::ravg::ravg_read;
 use scx_utils::LoadAggregator;
@@ -358,8 +359,9 @@ impl Domain {
     }
 
     fn transfer_load(&mut self, load: f64, taskc: &mut bpf_intf::task_ctx, other: &mut Domain) {
-        let dom_id: u32 = other.id.try_into().unwrap();
+        trace!("XFER pid={} dom={}->{}", taskc.pid, self.id, other.id);
 
+        let dom_id: u32 = other.id.try_into().unwrap();
         taskc.target_dom = dom_id;
 
         self.load.add_load(-load);
