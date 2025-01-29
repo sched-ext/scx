@@ -87,8 +87,8 @@ impl Cpumask {
     }
 
     /// Build a Cpumask object from a hexadecimal string.
-    pub fn from_str(cpumask: &String) -> Result<Cpumask> {
-        match cpumask.as_str() {
+    pub fn from_str(cpumask: &str) -> Result<Cpumask> {
+        match cpumask {
             "none" => {
                 let mask = bitvec![u64, Lsb0; 0; *NR_CPU_IDS];
                 return Ok(Self { mask });

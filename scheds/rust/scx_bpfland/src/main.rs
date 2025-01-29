@@ -355,10 +355,10 @@ impl<'a> Scheduler<'a> {
 
     fn init_energy_domain(
         skel: &mut BpfSkel<'_>,
-        primary_domain: &String,
+        primary_domain: &str,
         power_profile: PowerProfile,
     ) -> Result<()> {
-        let domain = match primary_domain.as_str() {
+        let domain = match primary_domain {
             "powersave" => Self::epp_to_cpumask(Powermode::Powersave)?,
             "performance" => Self::epp_to_cpumask(Powermode::Performance)?,
             "auto" => match power_profile {
