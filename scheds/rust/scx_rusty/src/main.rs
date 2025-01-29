@@ -225,6 +225,12 @@ struct Opts {
     /// Show descriptions for statistics.
     #[clap(long)]
     help_stats: bool,
+
+    /// Tunable for prioritizing CPU performance by configuring the CPU frequency governor.
+    /// Valid values are [0, 1024]. Higher values prioritize performance, lower values
+    /// prioritize energy efficiency. When in doubt, use 0 or 1024.
+    #[clap(long, default_value = "0")]
+    perf: u32,
 }
 
 fn read_cpu_busy_and_total(reader: &procfs::ProcReader) -> Result<(u64, u64)> {
@@ -441,6 +447,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.direct_greedy_numa = opts.direct_greedy_numa;
         skel.maps.rodata_data.mempolicy_affinity = opts.mempolicy_affinity;
         skel.maps.rodata_data.debug = opts.verbose as u32;
+        skel.maps.rodata_data.rusty_perf_mode = opts.perf;
 
         // Attach.
         let mut skel = scx_ops_load!(skel, rusty, uei)?;

@@ -84,6 +84,7 @@ const volatile bool direct_greedy_numa;
 const volatile bool mempolicy_affinity;
 const volatile u32 greedy_threshold;
 const volatile u32 greedy_threshold_x_numa;
+const volatile u32 rusty_perf_mode;
 const volatile u32 debug;
 
 /* base slice duration */
@@ -1760,6 +1761,7 @@ __weak s32 create_dom(u32 dom_id)
 	struct bpf_cpumask *dom_mask, *node_mask, *all_mask;
 	struct lb_domain *lb_domain;
 	u32 cpu, node_id;
+	int perf;
 	s32 ret;
 
 	if (dom_id >= MAX_DOMS) {
@@ -1810,6 +1812,7 @@ __weak s32 create_dom(u32 dom_id)
 
 	bpf_for(cpu, 0, MAX_CPUS) {
 		const volatile u64 *dmask;
+		bool cpu_in_domain;
 
 		dmask = MEMBER_VPTR(dom_cpumasks, [dom_id][cpu / 64]);
 		if (!dmask) {
@@ -1818,10 +1821,20 @@ __weak s32 create_dom(u32 dom_id)
 			break;
 		}
 
-		if (*dmask & (1LLU << (cpu % 64))) {
-			bpf_cpumask_set_cpu(cpu, dom_mask);
-			bpf_cpumask_set_cpu(cpu, all_mask);
-		}
+		cpu_in_domain = *dmask & (1LLU << (cpu % 64));
+		if (!cpu_in_domain)
+			continue;
+
+		bpf_cpumask_set_cpu(cpu, dom_mask);
+		bpf_cpumask_set_cpu(cpu, all_mask);
+
+		/*
+		 * Perf has to be within [0, 1024]. Set it regardless
+		 * of value to clean up any previous settings, since
+		 * it persists even after removing the scheduler.
+		 */
+		perf = min(SCX_CPUPERF_ONE, rusty_perf_mode);
+		scx_bpf_cpuperf_set(cpu, perf);
 	}
 	bpf_rcu_read_unlock();
 	if (ret)
