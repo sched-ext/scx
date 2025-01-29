@@ -1043,15 +1043,17 @@ static bool try_kick_task_idle_cpu(struct task_struct *p, struct task_ctx *taskc
 	return false;
 }
 
-static bool can_direct_dispatch(struct task_struct *p, u64 enq_flags,
-				s32 prev_cpu)
+static __always_inline
+bool can_direct_dispatch(struct task_struct *p, struct task_ctx *taskc,
+			 struct cpu_ctx *cpuc_task, s32 cpu_id, u64 *enq_flags,
+			 u64 now)
 {
 	/*
 	 * If a task is re-enqueued since the prev_cpu is taken by a higher
 	 * scheduling class (e.g., RT), directly dispatching to the prev_cpu
 	 * does not makes sense.
 	 */
-	if (enq_flags & SCX_ENQ_REENQ)
+	if (*enq_flags & SCX_ENQ_REENQ)
 		return false;
 
 	/*
@@ -1059,10 +1061,17 @@ static bool can_direct_dispatch(struct task_struct *p, u64 enq_flags,
 	 * migratable, check whether the CPU is idle. If the CPU is idle,
 	 * dispatch the task to the local DSQ directly.
 	 */
-	if (!(enq_flags & SCX_ENQ_CPU_SELECTED)) {
-		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
-		    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
+	if (!(*enq_flags & SCX_ENQ_CPU_SELECTED)) {
+		if (!bpf_cpumask_test_cpu(cpu_id, p->cpus_ptr))
+			return false;
+
+		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu_id))
 			return true;
+
+		if (can_task1_kick_cpu2(taskc, cpuc_task, now)) {
+			*enq_flags |= SCX_ENQ_PREEMPT;
+			return true;
+		}
 	}
 
 	return false;
@@ -1072,7 +1081,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc_task, *cpuc_cur;
 	struct task_ctx *taskc;
-	s32 cpu_id, prev_cpu;
+	s32 cpu_id;
 	u64 dsq_id, now;
 
 	/*
@@ -1104,14 +1113,15 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Enqueue the task to one of task's DSQs based on its virtual deadline.
 	 */
 	dsq_id = find_proper_dsq(taskc, cpuc_task);
-	prev_cpu = scx_bpf_task_cpu(p);
-	if (can_direct_dispatch(p, enq_flags, prev_cpu)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
+	now = scx_bpf_now();
+	if (can_direct_dispatch(p, taskc, cpuc_task, cpu_id, &enq_flags, now)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu_id,
 				   p->scx.slice, enq_flags);
-	} else {
-		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
-					 p->scx.dsq_vtime, enq_flags);
+		return;
 	}
+
+	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
+				 p->scx.dsq_vtime, enq_flags);
 
 	/*
 	 * If there is an idle cpu for the task, try to kick it up now
@@ -1122,15 +1132,10 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 	/*
 	 * If there is no idle cpu for an eligible task, try to preempt a task.
+	 * Try to find and kick a victim CPU, which runs a less urgent
+	 * task. The kick will be done asynchronously.
 	 */
-	if (is_eligible(taskc)) {
-		/*
-		 * Try to find and kick a victim CPU, which runs a less urgent
-		 * task. The kick will be done asynchronously.
-		 */
-		now = scx_bpf_now();
-		try_find_and_kick_victim_cpu(p, taskc, cpuc_cur, dsq_id, now);
-	}
+	try_find_and_kick_victim_cpu(p, taskc, cpuc_cur, dsq_id, now);
 }
 
 static bool consume_dsq(u64 dsq_id)
