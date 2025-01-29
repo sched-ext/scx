@@ -47,6 +47,7 @@
 #endif
 
 #include "intf.h"
+#include "types.h"
 #include "lb_domain.h"
 
 #include <scx/bpf_arena_common.h>
@@ -1648,7 +1649,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 		.last_blocked_at = now,
 		.last_woke_at = now,
 		.preferred_dom_mask = 0,
-
+		.pid = p->pid,
 	};
 
 	if (debug >= 2)

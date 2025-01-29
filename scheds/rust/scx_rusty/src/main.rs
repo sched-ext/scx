@@ -227,7 +227,7 @@ struct Opts {
     help_stats: bool,
 
     /// Tunable for prioritizing CPU performance by configuring the CPU frequency governor.
-    /// Valid values are [0, 1024]. Higher values prioritize performance, lower values 
+    /// Valid values are [0, 1024]. Higher values prioritize performance, lower values
     /// prioritize energy efficiency. When in doubt, use 0 or 1024.
     #[clap(long, default_value = "0")]
     perf: u32,
@@ -462,7 +462,7 @@ impl<'a> Scheduler<'a> {
 
             let mut ctx = dom.ctx.lock().unwrap();
 
-            *ctx = Some(skel.maps.bss_data.dom_ctxs[id] as *mut bpf_intf::dom_ctx);
+            *ctx = Some(skel.maps.bss_data.dom_ctxs[id]);
         }
 
         info!("Rusty scheduler started! Run `scx_rusty --monitor` for metrics.");

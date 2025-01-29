@@ -75,7 +75,7 @@ pub fn server_data() -> StatsServerData<(), Metrics> {
 
 pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
     scx_utils::monitor_stats::<Metrics>(
-        &vec![],
+        &[],
         intv,
         || shutdown.load(Ordering::Relaxed),
         |metrics| metrics.format(&mut std::io::stdout()),

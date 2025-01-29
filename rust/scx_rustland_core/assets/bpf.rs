@@ -338,12 +338,14 @@ impl<'cb> BpfScheduler<'cb> {
         Ok(())
     }
 
-    fn init_cache_domains(
+    fn init_cache_domains<SiblingCpuFn>(
         skel: &mut BpfSkel<'_>,
         topo: &Topology,
         cache_lvl: usize,
-        enable_sibling_cpu_fn: &dyn Fn(&mut BpfSkel<'_>, usize, usize, usize) -> Result<(), u32>,
-    ) -> Result<(), std::io::Error> {
+        enable_sibling_cpu_fn: &SiblingCpuFn,
+    ) -> Result<(), std::io::Error>
+        where SiblingCpuFn: Fn(&mut BpfSkel<'_>, usize, usize, usize) -> Result<(), u32>
+    {
         // Determine the list of CPU IDs associated to each cache node.
         let mut cache_id_map: HashMap<usize, Vec<usize>> = HashMap::new();
         for core in topo.all_cores.values() {

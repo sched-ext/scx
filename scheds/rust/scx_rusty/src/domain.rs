@@ -2,9 +2,9 @@
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
-use crate::bpf_intf;
 use std::collections::BTreeMap;
 
+use crate::bpf_skel::*;
 use anyhow::Result;
 use scx_utils::Cpumask;
 use scx_utils::Topology;
@@ -15,7 +15,7 @@ use std::sync::Mutex;
 pub struct Domain {
     id: usize,
     mask: Cpumask,
-    pub ctx: Arc<Mutex<Option<*mut bpf_intf::dom_ctx>>>,
+    pub ctx: Arc<Mutex<Option<*mut types::dom_ctx>>>,
 }
 
 impl Domain {
@@ -40,7 +40,7 @@ impl Domain {
         self.mask.weight()
     }
 
-    pub fn ctx(&self) -> Option<&mut bpf_intf::dom_ctx> {
+    pub fn ctx(&self) -> Option<&mut types::dom_ctx> {
         let domc = self.ctx.lock().unwrap();
 
         // Ideally we would be storing the dom_ctx as a reference in struct Domain,

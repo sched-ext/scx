@@ -5,10 +5,6 @@ on:
     schedule:
       - cron: "0 */6 * * *"
 
-  # if development becomes intertwined,
-  # fold this into a matrix on the main job
-  # bpf-next == do everything the same but w/
-  # bpf-next bzImage.
 jobs:
   build-kernel:
     runs-on: ubuntu-24.04
