@@ -101,6 +101,7 @@ pub struct App<'a> {
     // trace releated
     trace_manager: PerfettoTraceManager<'a>,
     trace_tick: usize,
+    trace_tick_warmup: usize,
     max_trace_ticks: usize,
     prev_bpf_sample_rate: u32,
 }
@@ -114,6 +115,8 @@ impl<'a> App<'a> {
         keymap: KeyMap,
         max_cpu_events: usize,
         tick_rate_ms: usize,
+        trace_ticks: usize,
+        trace_tick_warmup: usize,
         action_tx: UnboundedSender<Action>,
         skel: BpfSkel<'a>,
     ) -> Result<Self> {
@@ -208,7 +211,8 @@ impl<'a> App<'a> {
             non_hw_event_active: false,
             prev_bpf_sample_rate: sample_rate,
             trace_tick: 0,
-            max_trace_ticks: 5,
+            trace_tick_warmup: trace_tick_warmup,
+            max_trace_ticks: trace_ticks,
             trace_manager: PerfettoTraceManager::new(&trace_file_prefix, None),
         };
 
@@ -429,7 +433,7 @@ impl<'a> App<'a> {
             AppState::Tracing => {
                 self.trace_tick += 1;
                 // trace for max ticks and then exit tracing mode
-                if self.trace_tick == self.max_trace_ticks {
+                if self.trace_tick > self.max_trace_ticks + self.trace_tick_warmup {
                     return self.record_trace();
                 }
             }
@@ -1808,7 +1812,7 @@ impl<'a> App<'a> {
         let gauge = Gauge::default()
             .block(block)
             .gauge_style(self.theme.text_important_color())
-            .ratio(self.trace_tick as f64 / self.max_trace_ticks as f64)
+            .ratio(self.trace_tick as f64 / (self.max_trace_ticks + self.trace_tick_warmup) as f64)
             .label(label);
         frame.render_widget(gauge, frame.area());
 
@@ -1999,7 +2003,9 @@ impl<'a> App<'a> {
                 ..
             } => {
                 if self.state == AppState::Tracing {
-                    self.trace_manager.on_sched_switch(action);
+                    if self.trace_tick > self.trace_tick_warmup {
+                        self.trace_manager.on_sched_switch(action);
+                    }
                     return;
                 }
                 if self.scheduler.is_empty() {
