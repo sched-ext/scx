@@ -74,7 +74,6 @@ restart:
 				fprintf(stderr, "invalid central CPU id value, %u given (%u max)\n", central_cpu, skel->rodata->nr_cpu_ids);
 				return -1;
 			}
-			/* does central_cpu have to be a signed type ? */
 			skel->rodata->central_cpu = (s32)central_cpu;
 			break;
 		}
