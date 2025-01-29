@@ -1647,7 +1647,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 		.last_blocked_at = now,
 		.last_woke_at = now,
 		.preferred_dom_mask = 0,
-
+		.pid = p->pid,
 	};
 
 	if (debug >= 2)
