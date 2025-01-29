@@ -47,6 +47,7 @@
 #endif
 
 #include "intf.h"
+#include "types.h"
 #include "lb_domain.h"
 
 #include <scx/bpf_arena_common.h>

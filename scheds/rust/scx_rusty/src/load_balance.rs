@@ -315,7 +315,7 @@ impl LoadEntity {
 
 #[derive(Debug)]
 struct TaskInfo {
-    taskc_p: *mut bpf_intf::task_ctx,
+    taskc_p: *mut types::task_ctx,
     load: OrderedFloat<f64>,
     dom_mask: u64,
     preferred_dom_mask: u64,
@@ -358,7 +358,7 @@ impl Domain {
         }
     }
 
-    fn transfer_load(&mut self, load: f64, taskc: &mut bpf_intf::task_ctx, other: &mut Domain) {
+    fn transfer_load(&mut self, load: f64, taskc: &mut types::task_ctx, other: &mut Domain) {
         trace!("XFER pid={} dom={}->{}", taskc.pid, self.id, other.id);
 
         let dom_id: u32 = other.id.try_into().unwrap();
@@ -630,8 +630,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         // Read active_tasks and update read_idx and gen.
         const MAX_TPTRS: u64 = bpf_intf::consts_MAX_DOM_ACTIVE_TPTRS as u64;
-        let dom_ctx =
-            unsafe { &mut *(self.skel.maps.bss_data.dom_ctxs[dom.id] as *mut bpf_intf::dom_ctx) };
+        let dom_ctx = unsafe { &mut *self.skel.maps.bss_data.dom_ctxs[dom.id] };
         let active_tasks = &mut dom_ctx.active_tasks;
 
         let (mut ridx, widx) = (active_tasks.read_idx, active_tasks.write_idx);
@@ -647,7 +646,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         let now_mono = now_monotonic();
 
         for idx in ridx..widx {
-            let taskc_p = active_tasks.tasks[(idx % MAX_TPTRS) as usize] as *mut bpf_intf::task_ctx;
+            let taskc_p = active_tasks.tasks[(idx % MAX_TPTRS) as usize];
             let taskc = unsafe { &mut *taskc_p };
 
             if taskc.target_dom as usize != dom.id {
@@ -678,7 +677,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 dom_mask: taskc.dom_mask,
                 preferred_dom_mask: taskc.preferred_dom_mask,
                 migrated: Cell::new(false),
-                is_kworker: taskc.is_kworker,
+                is_kworker: unsafe { taskc.is_kworker.assume_init() },
             });
         }
 
