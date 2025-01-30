@@ -85,12 +85,13 @@ async fn run() -> Result<()> {
     let open_skel = builder.open(&mut open_object)?;
     let skel = open_skel.load()?;
 
-    let mut links = Vec::new();
     // Attach probes
-    links.push(skel.progs.on_sched_cpu_perf.attach()?);
-    links.push(skel.progs.scx_sched_reg.attach()?);
-    links.push(skel.progs.scx_sched_unreg.attach()?);
-    links.push(skel.progs.on_sched_switch.attach()?);
+    let mut links = vec![
+        skel.progs.on_sched_cpu_perf.attach()?,
+        skel.progs.scx_sched_reg.attach()?,
+        skel.progs.scx_sched_unreg.attach()?,
+        skel.progs.on_sched_switch.attach()?,
+    ];
 
     // 6.13 compatability
     if let Ok(link) = skel.progs.scx_insert_vtime.attach() {

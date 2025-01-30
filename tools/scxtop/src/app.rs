@@ -211,7 +211,7 @@ impl<'a> App<'a> {
             non_hw_event_active: false,
             prev_bpf_sample_rate: sample_rate,
             trace_tick: 0,
-            trace_tick_warmup: trace_tick_warmup,
+            trace_tick_warmup,
             max_trace_ticks: trace_ticks,
             trace_manager: PerfettoTraceManager::new(&trace_file_prefix, None),
         };
@@ -1981,7 +1981,6 @@ impl<'a> App<'a> {
             Action::SchedWakeup { .. } => {
                 if self.state == AppState::Tracing {
                     self.trace_manager.on_sched_wakeup(action);
-                    return;
                 }
             }
             _ => {
