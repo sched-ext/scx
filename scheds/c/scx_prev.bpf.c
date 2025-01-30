@@ -35,15 +35,6 @@ s32 BPF_STRUCT_OPS(prev_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 {
 	s32 cpu;
 
-	if (p->nr_cpus_allowed == 1) {
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			cpu = prev_cpu;
-			goto insert;
-		} else {
-			return prev_cpu;
-		}
-	}
-
 	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		stat_inc(2);	/* prev_cpu */
 		cpu = prev_cpu;
