@@ -278,6 +278,12 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 	bool ret = false;
 
 	/*
+	 * Don't even try to perform expensive preemption for greedy tasks.
+	 */
+	if (!is_eligible(taskc))
+		return false;
+
+	/*
 	 * Prepare a cpumak so we find a victim in @p's compute domain.
 	 */
 	cpumask = cpuc_cur->tmp_t_mask;

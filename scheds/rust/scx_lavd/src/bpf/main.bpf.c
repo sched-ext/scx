@@ -1068,7 +1068,8 @@ bool can_direct_dispatch(struct task_struct *p, struct task_ctx *taskc,
 		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu_id))
 			return true;
 
-		if (can_task1_kick_cpu2(taskc, cpuc_task, now)) {
+		if (is_eligible(taskc) &&
+		    can_task1_kick_cpu2(taskc, cpuc_task, now)) {
 			*enq_flags |= SCX_ENQ_PREEMPT;
 			return true;
 		}
