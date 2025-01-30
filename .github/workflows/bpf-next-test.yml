@@ -95,24 +95,10 @@ jobs:
       - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}
         run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
 
-      # get latest head commit of sched_ext for-next
-      - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git heads/for-next | awk '{print $1}')" >> $GITHUB_ENV
-
-      # use cached kernel if available, create after job if not
-      - name: Cache Kernel
-        id: cache-kernel
-        uses: actions/cache@v4
+      - uses: ./.github/actions/restore-kernel-cache
         with:
-          path: |
-            linux/arch/x86/boot/bzImage
-            linux/usr/include
-            linux/**/*.h
-          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-bpf-1
-
-      # need to re-run job when kernel head changes between build and test running.
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-        name: exit if cache stale
-        run: exit -1
+          git-repo: "https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git"
+          branch: for-next
 
       # veristat
       - run: wget https://github.com/libbpf/veristat/releases/download/v0.3.2/veristat-v0.3.2-amd64.tar.gz
