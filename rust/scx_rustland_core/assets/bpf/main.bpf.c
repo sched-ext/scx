@@ -964,6 +964,42 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 }
 
 /*
+ * A CPU is about to change its idle state.
+ */
+void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
+{
+	/*
+	 * Don't do anything if we exit from and idle state, a CPU owner will
+	 * be assigned in .running().
+	 */
+	if (!idle)
+		return;
+
+	/*
+	 * A CPU is now available, notify the user-space scheduler that tasks
+	 * can be dispatched.
+	 */
+	if (usersched_has_pending_tasks()) {
+		set_usersched_needed();
+		/*
+		 * Wake up the idle CPU and trigger a resched, so that it can
+		 * immediately accept dispatched tasks.
+		 */
+		scx_bpf_kick_cpu(cpu, 0);
+		return;
+	}
+
+	/*
+	 * Kick the CPU if there are still tasks dispatched to the
+	 * corresponding per-CPU DSQ.
+	 */
+	if (scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu)) > 0) {
+		scx_bpf_kick_cpu(cpu, 0);
+		return;
+	}
+}
+
+/*
  * Task @p changes cpumask: update its local cpumask generation counter.
  */
 void BPF_STRUCT_OPS(rustland_set_cpumask, struct task_struct *p,
@@ -1238,12 +1274,13 @@ SCX_OPS_DEFINE(rustland,
 	       .dispatch		= (void *)rustland_dispatch,
 	       .running			= (void *)rustland_running,
 	       .stopping		= (void *)rustland_stopping,
+	       .update_idle		= (void *)rustland_update_idle,
 	       .set_cpumask		= (void *)rustland_set_cpumask,
 	       .cpu_release		= (void *)rustland_cpu_release,
 	       .init_task		= (void *)rustland_init_task,
 	       .init			= (void *)rustland_init,
 	       .exit			= (void *)rustland_exit,
-	       .flags			= SCX_OPS_ENQ_LAST,
+	       .flags			= SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
 	       .timeout_ms		= 5000,
 	       .dispatch_max_batch	= MAX_DISPATCH_SLOT,
 	       .name			= "rustland");
