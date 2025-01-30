@@ -157,7 +157,7 @@ jobs:
           compression-level: 9
   notify-job:
     runs-on: ubuntu-latest
-    if: ${{ always() && (needs.integration-test.result == 'failure' || needs.integration-test.result == 'cancelled') }}
+    if: ${{ failure() && github.ref == 'refs/heads/main' }}
     needs:
       - integration-test
     steps:
@@ -167,7 +167,7 @@ jobs:
       env:
         SLACK_USERNAME: ci
         SLACK_ICON: https://www.dictionary.com/e/wp-content/uploads/2018/03/thisisfine-1.jpg
-        SLACK_TITLE: Workflow ${{ needs.integration-test.result }}
+        SLACK_TITLE: Workflow failed
         SLACK_MESSAGE: bpf-next ci job failed.
         SLACK_COLOR: failure
         SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
