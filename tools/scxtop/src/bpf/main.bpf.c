@@ -372,8 +372,8 @@ int BPF_PROG(on_sched_wakeup_new, struct task_struct *p)
 }
 
 
-static int on_sched_switch_non_scx(bool preempt, struct task_struct *prev,
-				   struct task_struct *next, u64 prev_state)
+static __always_inline int on_sched_switch_non_scx(bool preempt, struct task_struct *prev,
+						   struct task_struct *next, u64 prev_state)
 {
 	struct bpf_event *event;
 
@@ -384,6 +384,10 @@ static int on_sched_switch_non_scx(bool preempt, struct task_struct *prev,
 	if (!event)
 		return -ENOENT;
 
+	u64 now = bpf_ktime_get_ns();
+	event->type = SCHED_SWITCH;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = now;
 	event->event.sched_switch.preempt = preempt;
 	event->event.sched_switch.next_pid = next->pid;
 	event->event.sched_switch.next_tgid = next->tgid;
