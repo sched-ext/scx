@@ -6,6 +6,12 @@ on:
     - cron: "0 */6 * * *"
 
 jobs:
+  build-kernel-nix:
+    uses: ./.github/workflows/build-kernel.yml
+    with:
+      git-repo: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
+      branch: linux-rolling-stable
+
   build-kernel:
     runs-on: ubuntu-24.04
     steps:

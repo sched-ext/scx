@@ -27,63 +27,10 @@ jobs:
       - run: git diff --exit-code
 
   build-kernel-nix:
-    runs-on: [ "self-hosted", "linux", "x64" ]
-    steps:
-      # Uncomment these if reverting to GitHub hosted runners
-      # - name: Install Nix
-      #   uses: DeterminateSystems/nix-installer-action@main
-
-      # Make very basic dependencies available in PATH
-      - name: Install basic dependencies
-        run: |
-          nix profile install nixpkgs#{git,openssl,gawk,gnutar,zstd}
-          echo "$HOME/.nix-profile/bin" >> $GITHUB_PATH
-
-      # get latest head commit of sched_ext for-next
-      - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git heads/for-6.13 | awk '{print $1}')" >> $GITHUB_ENV
-
-      # check for cached kernel without downloading
-      - name: Cache Kernel
-        id: cache-kernel
-        uses: actions/cache@v4
-        with:
-          path: |
-            linux/arch/x86/boot/bzImage
-            linux/usr/include
-            linux/**/*.h
-          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-7
-          lookup-only: true
-
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-        uses: actions/checkout@v4
-
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-        uses: nicknovitski/nix-develop@v1
-        with:
-          arguments: ./.github/workflows#build-kernel
-
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-        name: Clone Kernel
-        uses: cytopia/shell-command-retry-action@v0.1.2
-        with:
-          retries: 10
-          pause: 18
-          command: git clone --single-branch -b for-6.13 --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git linux
-
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-        name: Select correct commit for cache hash
-        run: |
-          cd linux
-          git switch --detach ${{ env.SCHED_EXT_KERNEL_COMMIT }}
-          git log -1 --pretty=format:"%h %ad %s" --date=short
-
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-      # Build a minimal kernel (with sched-ext enabled) using virtme-ng
-        run: cd linux && virtme-ng -v --build --config ../.github/workflows/sched-ext.config
-
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-      # Generate kernel headers
-        run: cd linux && make headers
+    uses: ./.github/workflows/build-kernel.yml
+    with:
+      git-repo: "https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git"
+      branch: for-6.13
 
   build-kernel:
     runs-on: ubuntu-24.04
