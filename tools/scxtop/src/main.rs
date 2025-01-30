@@ -126,83 +126,80 @@ async fn run() -> Result<()> {
         let mut event = bpf_event::default();
         // This works because the plain types were created in lib.rs
         plain::copy_from_bytes(&mut event, data).expect("Event data buffer was too short");
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            let event_type = event.r#type as u32;
-            match event_type {
-                #[allow(non_upper_case_globals)]
-                event_type_SCHED_REG => {
-                    tx.send(Action::SchedReg.clone()).ok();
-                }
-                #[allow(non_upper_case_globals)]
-                event_type_SCHED_UNREG => {
-                    tx.send(Action::SchedUnreg.clone()).ok();
-                }
-                #[allow(non_upper_case_globals)]
-                event_type_CPU_PERF_SET => {
-                    let action = unsafe {
-                        Action::SchedCpuPerfSet {
-                            cpu: event.cpu,
-                            perf: event.event.perf.perf,
-                        }
-                    };
-                    tx.send(action).ok();
-                }
-                #[allow(non_upper_case_globals)]
-                event_type_SCHED_WAKEUP => unsafe {
-                    let comm = std::str::from_utf8(std::slice::from_raw_parts(
-                        event.event.wakeup.comm.as_ptr() as *const u8,
-                        16,
-                    ))
-                    .unwrap();
-                    let action = Action::SchedWakeup {
-                        ts: event.ts,
-                        cpu: event.cpu,
-                        pid: event.event.wakeup.pid,
-                        prio: event.event.wakeup.prio,
-                        comm: comm.to_string(),
-                    };
-                    tx.send(action).ok();
-                },
-                #[allow(non_upper_case_globals)]
-                event_type_SCHED_SWITCH => unsafe {
-                    let prev_comm = std::str::from_utf8(std::slice::from_raw_parts(
-                        event.event.sched_switch.prev_comm.as_ptr() as *const u8,
-                        16,
-                    ))
-                    .unwrap();
-                    let next_comm = std::str::from_utf8(std::slice::from_raw_parts(
-                        event.event.sched_switch.next_comm.as_ptr() as *const u8,
-                        16,
-                    ))
-                    .unwrap();
-                    let action = Action::SchedSwitch {
-                        ts: event.ts,
-                        cpu: event.cpu,
-                        preempt: event.event.sched_switch.preempt.assume_init(),
-                        next_dsq_id: event.event.sched_switch.next_dsq_id,
-                        next_dsq_lat_us: event.event.sched_switch.next_dsq_lat_us,
-                        next_dsq_nr_queued: event.event.sched_switch.next_dsq_nr,
-                        next_dsq_vtime: event.event.sched_switch.next_dsq_vtime,
-                        next_slice_ns: event.event.sched_switch.next_slice_ns,
-                        next_pid: event.event.sched_switch.next_pid,
-                        next_tgid: event.event.sched_switch.next_tgid,
-                        next_prio: event.event.sched_switch.next_prio,
-                        next_comm: next_comm.to_string(),
-                        prev_dsq_id: event.event.sched_switch.prev_dsq_id,
-                        prev_used_slice_ns: event.event.sched_switch.prev_slice_ns,
-                        prev_slice_ns: event.event.sched_switch.prev_slice_ns,
-                        prev_pid: event.event.sched_switch.prev_pid,
-                        prev_tgid: event.event.sched_switch.prev_tgid,
-                        prev_comm: prev_comm.to_string(),
-                        prev_prio: event.event.sched_switch.prev_prio,
-                        prev_state: event.event.sched_switch.prev_state,
-                    };
-                    tx.send(action).ok();
-                },
-                _ => {}
+        let event_type = event.r#type as u32;
+        match event_type {
+            #[allow(non_upper_case_globals)]
+            event_type_SCHED_REG => {
+                tx.send(Action::SchedReg.clone()).ok();
             }
-        });
+            #[allow(non_upper_case_globals)]
+            event_type_SCHED_UNREG => {
+                tx.send(Action::SchedUnreg.clone()).ok();
+            }
+            #[allow(non_upper_case_globals)]
+            event_type_CPU_PERF_SET => {
+                let action = unsafe {
+                    Action::SchedCpuPerfSet {
+                        cpu: event.cpu,
+                        perf: event.event.perf.perf,
+                    }
+                };
+                tx.send(action).ok();
+            }
+            #[allow(non_upper_case_globals)]
+            event_type_SCHED_WAKEUP => unsafe {
+                let comm = std::str::from_utf8(std::slice::from_raw_parts(
+                    event.event.wakeup.comm.as_ptr() as *const u8,
+                    16,
+                ))
+                .unwrap();
+                let action = Action::SchedWakeup {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    pid: event.event.wakeup.pid,
+                    prio: event.event.wakeup.prio,
+                    comm: comm.to_string(),
+                };
+                tx.send(action).ok();
+            },
+            #[allow(non_upper_case_globals)]
+            event_type_SCHED_SWITCH => unsafe {
+                let prev_comm = std::str::from_utf8(std::slice::from_raw_parts(
+                    event.event.sched_switch.prev_comm.as_ptr() as *const u8,
+                    16,
+                ))
+                .unwrap();
+                let next_comm = std::str::from_utf8(std::slice::from_raw_parts(
+                    event.event.sched_switch.next_comm.as_ptr() as *const u8,
+                    16,
+                ))
+                .unwrap();
+                let action = Action::SchedSwitch {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    preempt: event.event.sched_switch.preempt.assume_init(),
+                    next_dsq_id: event.event.sched_switch.next_dsq_id,
+                    next_dsq_lat_us: event.event.sched_switch.next_dsq_lat_us,
+                    next_dsq_nr_queued: event.event.sched_switch.next_dsq_nr,
+                    next_dsq_vtime: event.event.sched_switch.next_dsq_vtime,
+                    next_slice_ns: event.event.sched_switch.next_slice_ns,
+                    next_pid: event.event.sched_switch.next_pid,
+                    next_tgid: event.event.sched_switch.next_tgid,
+                    next_prio: event.event.sched_switch.next_prio,
+                    next_comm: next_comm.to_string(),
+                    prev_dsq_id: event.event.sched_switch.prev_dsq_id,
+                    prev_used_slice_ns: event.event.sched_switch.prev_slice_ns,
+                    prev_slice_ns: event.event.sched_switch.prev_slice_ns,
+                    prev_pid: event.event.sched_switch.prev_pid,
+                    prev_tgid: event.event.sched_switch.prev_tgid,
+                    prev_comm: prev_comm.to_string(),
+                    prev_prio: event.event.sched_switch.prev_prio,
+                    prev_state: event.event.sched_switch.prev_state,
+                };
+                tx.send(action).ok();
+            },
+            _ => {}
+        }
         0
     })?;
     let rb = rbb.build()?;
