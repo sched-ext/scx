@@ -35,7 +35,7 @@ const TRACE_FILE_PREFIX: &'static str = "scxtop_trace";
 #[command(about = APP)]
 struct Args {
     /// App tick rate in milliseconds.
-    #[arg(short, long, default_value_t = 250)]
+    #[arg(short = 'r', long, default_value_t = 250)]
     tick_rate_ms: usize,
     /// Extra verbose output.
     #[arg(short, long, default_value_t = false)]
@@ -85,12 +85,13 @@ async fn run() -> Result<()> {
     let open_skel = builder.open(&mut open_object)?;
     let skel = open_skel.load()?;
 
-    let mut links = Vec::new();
     // Attach probes
-    links.push(skel.progs.on_sched_cpu_perf.attach()?);
-    links.push(skel.progs.scx_sched_reg.attach()?);
-    links.push(skel.progs.scx_sched_unreg.attach()?);
-    links.push(skel.progs.on_sched_switch.attach()?);
+    let mut links = vec![
+        skel.progs.on_sched_cpu_perf.attach()?,
+        skel.progs.scx_sched_reg.attach()?,
+        skel.progs.scx_sched_unreg.attach()?,
+        skel.progs.on_sched_switch.attach()?,
+    ];
 
     // 6.13 compatability
     if let Ok(link) = skel.progs.scx_insert_vtime.attach() {
