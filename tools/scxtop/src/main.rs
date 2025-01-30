@@ -49,6 +49,12 @@ struct Args {
     /// Trace file prefix for perfetto traces
     #[arg(short, long, default_value_t = TRACE_FILE_PREFIX.to_string())]
     trace_file_prefix: String,
+    /// Number of ticks for traces.
+    #[arg(long, default_value_t = 5)]
+    trace_ticks: usize,
+    /// Number of ticks to warmup before collecting traces.
+    #[arg(long, default_value_t = 3)]
+    trace_tick_warmup: usize,
 }
 
 fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {
@@ -75,6 +81,7 @@ async fn run() -> Result<()> {
     if args.debug {
         builder.obj_builder.debug(true);
     }
+
     let open_skel = builder.open(&mut open_object)?;
     let skel = open_skel.load()?;
 
@@ -212,6 +219,8 @@ async fn run() -> Result<()> {
         keymap.clone(),
         100,
         args.tick_rate_ms,
+        args.trace_ticks,
+        args.trace_tick_warmup,
         action_tx.clone(),
         skel,
     )?;
