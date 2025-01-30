@@ -77,7 +77,7 @@ jobs:
           fail-fast: false
     steps:
       # prevent cache permission errors
-      - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar      
+      - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
         with:
@@ -92,7 +92,7 @@ jobs:
           path: |
             /usr/lib/virtiofsd
           key: virtiofsd-binary
-      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}          
+      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}
         run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
 
       # get latest head commit of sched_ext for-next
@@ -157,7 +157,7 @@ jobs:
           compression-level: 9
   notify-job:
     runs-on: ubuntu-latest
-    if: ${{ (needs.integration-test.result == 'failure' || needs.integration-test.result == 'cancelled') }}
+    if: ${{ always() && (needs.integration-test.result == 'failure' || needs.integration-test.result == 'cancelled') }}
     needs:
       - integration-test
     steps:
@@ -166,8 +166,10 @@ jobs:
       uses: rtCamp/action-slack-notify@v2
       env:
         SLACK_USERNAME: ci
+        SLACK_ICON: https://www.dictionary.com/e/wp-content/uploads/2018/03/thisisfine-1.jpg
         SLACK_TITLE: Workflow ${{ needs.integration-test.result }}
-        MSG_MINIMAL: bpf-next ci job failed.
+        SLACK_MESSAGE: bpf-next ci job failed.
+        SLACK_COLOR: failure
         SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
 
 
