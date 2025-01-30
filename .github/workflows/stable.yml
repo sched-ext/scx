@@ -170,6 +170,6 @@ jobs:
         SLACK_ICON: https://www.dictionary.com/e/wp-content/uploads/2018/03/thisisfine-1.jpg
         SLACK_TITLE: Workflow ${{ needs.integration-test.result }}
         SLACK_MESSAGE: stable ci job failed.
-        SLACK_COLOR: red
+        SLACK_COLOR: failure
         SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
 
