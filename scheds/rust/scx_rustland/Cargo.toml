@@ -19,13 +19,13 @@ ordered-float = "3.4.0"
 serde = { version = "1.0", features = ["derive"] }
 scx_stats = { path = "../../../rust/scx_stats", version = "1.0.8" }
 scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.8" }
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.9" }
-scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.2.6" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.10" }
+scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.2.7" }
 simplelog = "0.12"
 
 [build-dependencies]
-scx_utils = { path = "../../../rust/scx_utils", version = "1.0.9" }
-scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.2.6" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.10" }
+scx_rustland_core = { path = "../../../rust/scx_rustland_core", version = "2.2.7" }
 
 [features]
 enable_backtrace = []
