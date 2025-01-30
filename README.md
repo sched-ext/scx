@@ -28,7 +28,7 @@ The following are a few highlights of this repository.
 
 [scx_rustland-terraria](https://github.com/sched-ext/scx/assets/1051723/42ec3bf2-9f1f-4403-80ab-bf5d66b7c2d5)
 
-sched_ext is supported by the upstream kernel starting from version 6.12. Both 
+sched_ext is supported by the upstream kernel starting from version 6.12. Both
 Meta and Google are fully committed to sched_ext and Meta is in the process of
 mass production deployment. See (#kernel-feature-status) for more details.
 
