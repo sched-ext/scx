@@ -35,7 +35,7 @@ const TRACE_FILE_PREFIX: &'static str = "scxtop_trace";
 #[command(about = APP)]
 struct Args {
     /// App tick rate in milliseconds.
-    #[arg(short, long, default_value_t = 250)]
+    #[arg(short = 'r', long, default_value_t = 250)]
     tick_rate_ms: usize,
     /// Extra verbose output.
     #[arg(short, long, default_value_t = false)]
