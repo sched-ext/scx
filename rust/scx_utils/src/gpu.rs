@@ -51,6 +51,9 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
             };
 
             let cpu_mask = if let Ok(cpu_affinity) = nvidia_gpu.cpu_affinity(*NR_CPUS_POSSIBLE) {
+                // Note: nvml returns it as an arch dependent array of integrals
+                #[cfg(target_pointer_width = "32")]
+                let cpu_affinity = cpu_affinity.into_iter().map(|aff| aff as u64).collect();
                 Cpumask::from_vec(cpu_affinity)
             } else {
                 Cpumask::new()
