@@ -1024,16 +1024,16 @@ static u64 find_proper_dsq(struct task_ctx *taskc, struct cpu_ctx *cpuc)
 	return cpuc->cpdom_alt_id;
 }
 
-static bool try_kick_task_idle_cpu(struct task_struct *p, struct task_ctx *taskc)
+static bool try_kick_task_idle_cpu(struct task_struct *p,
+				   struct task_ctx *taskc, s32 prev_cpu)
 {
 	bool found_idle = false;
-	s32 prev_cpu, cpu;
+	s32 cpu;
 
 	/*
 	 * Find an idle cpu but do not reserve the idle cpu. That is because
 	 * there is no guarantee the idle cpu will be picked up at this point.
 	 */
-	prev_cpu = scx_bpf_task_cpu(p);
 	cpu = find_idle_cpu(p, taskc, prev_cpu, 0, false, &found_idle);
 	if (found_idle && cpu >= 0) {
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
@@ -1082,7 +1082,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc_task, *cpuc_cur;
 	struct task_ctx *taskc;
-	s32 cpu_id;
+	s32 prev_cpu;
 	u64 dsq_id, now;
 
 	/*
@@ -1096,9 +1096,9 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * always put the task to the global DSQ, so any idle CPU can pick it
 	 * up.
 	 */
-	cpu_id = scx_bpf_task_cpu(p);
 	taskc = get_task_ctx(p);
-	cpuc_task = get_cpu_ctx_id(cpu_id);
+	prev_cpu = scx_bpf_task_cpu(p);
+	cpuc_task = get_cpu_ctx_id(prev_cpu);
 	cpuc_cur = get_cpu_ctx();
 	if (!cpuc_cur || !cpuc_task || !taskc)
 		return;
@@ -1115,8 +1115,8 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	dsq_id = find_proper_dsq(taskc, cpuc_task);
 	now = scx_bpf_now();
-	if (can_direct_dispatch(p, taskc, cpuc_task, cpu_id, &enq_flags, now)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu_id,
+	if (can_direct_dispatch(p, taskc, cpuc_task, prev_cpu, &enq_flags, now)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
 				   p->scx.slice, enq_flags);
 		return;
 	}
@@ -1128,7 +1128,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * If there is an idle cpu for the task, try to kick it up now
 	 * so it can consume the task immediately.
 	 */
-	if (try_kick_task_idle_cpu(p, taskc))
+	if (try_kick_task_idle_cpu(p, taskc, prev_cpu))
 		return;
 
 	/*
