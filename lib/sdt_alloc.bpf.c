@@ -629,3 +629,95 @@ u64 sdt_alloc_internal(struct sdt_allocator *alloc)
 
 	return (u64)data;
 }
+
+
+/*
+ * Static allocation module used to allocate arena memory for
+ * whose lifetime is that of the BPF program. Data is rarely
+ * allocated, mostly at program init, and never freed. The
+ * memory returned by this code is typeless so it avoids us
+ * having to define an allocator for each type.
+ */
+
+struct sdt_static {
+	size_t max_alloc_bytes;
+	void __arena *memory;
+	size_t off;
+};
+
+struct sdt_static sdt_static;
+
+__hidden
+void __arena *sdt_static_alloc(size_t bytes)
+{
+	void __arena *memory, *old;
+	void __arena *ptr;
+
+	bpf_spin_lock(&sdt_lock);
+	if (bytes > sdt_static.max_alloc_bytes) {
+		bpf_spin_unlock(&sdt_lock);
+		scx_bpf_error("invalid request %ld, max is %ld\n", bytes,
+			      sdt_static.max_alloc_bytes);
+		return NULL;
+	}
+
+	/*
+	 * The code assumes that the maximum static allocation
+	 * size is significantly larger than the typical allocation
+	 * size, so it does not attempt to alleviate memory
+	 * fragmentation.
+	 */
+	if (sdt_static.off + bytes  > sdt_static.max_alloc_bytes) {
+		old = sdt_static.memory;
+
+		bpf_spin_unlock(&sdt_lock);
+
+		/*
+		 * No free operation so just forget about the previous
+		 * allocation memory.
+		 */
+
+		memory = bpf_arena_alloc_pages(&arena, NULL,
+					       sdt_static.max_alloc_bytes / PAGE_SIZE,
+					       NUMA_NO_NODE, 0);
+		if (!sdt_static.memory)
+			return NULL;
+
+		bpf_spin_lock(&sdt_lock);
+
+		/* Error out if we raced with another allocation. */
+		if (sdt_static.memory != old) {
+			bpf_spin_unlock(&sdt_lock);
+			bpf_arena_free_pages(&arena, memory, sdt_static.max_alloc_bytes);
+
+			scx_bpf_error("concurrent static memory allocations unsupported");
+			return NULL;
+		}
+	}
+
+	ptr = (void __arena *)((__u64) sdt_static.memory + sdt_static.off);
+	sdt_static.off += bytes;
+
+	return ptr;
+}
+
+__weak
+int sdt_static_init(size_t alloc_pages)
+{
+	size_t max_bytes = alloc_pages * PAGE_SIZE;
+	void __arena *memory;
+
+	memory = bpf_arena_alloc_pages(&arena, NULL, alloc_pages, NUMA_NO_NODE, 0);
+	if (!memory)
+		return -ENOMEM;
+
+	bpf_spin_lock(&sdt_lock);
+	sdt_static = (struct sdt_static) {
+		.max_alloc_bytes = max_bytes,
+		.off = 0,
+		.memory = memory,
+	};
+	bpf_spin_unlock(&sdt_lock);
+
+	return 0;
+}
