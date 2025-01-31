@@ -1,6 +1,7 @@
 #![cfg(feature = "gpu-topology")]
 
 use crate::misc::read_file_usize;
+use crate::{Cpumask, NR_CPUS_POSSIBLE};
 use nvml_wrapper::bitmasks::InitFlags;
 use nvml_wrapper::enum_wrappers::device::Clock;
 use nvml_wrapper::Nvml;
@@ -20,6 +21,7 @@ pub struct Gpu {
     // AMD uses CU for this value
     pub max_sm_clock: usize,
     pub memory: u64,
+    pub cpu_mask: Cpumask,
 }
 
 pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
@@ -48,6 +50,12 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 continue;
             };
 
+            let cpu_mask = if let Ok(cpu_affinity) = nvidia_gpu.cpu_affinity(*NR_CPUS_POSSIBLE) {
+                Cpumask::from_vec(cpu_affinity)
+            } else {
+                Cpumask::new()
+            };
+
             // The NVML library doesn't return a PCIe bus ID compatible with sysfs. It includes
             // uppercase bus ID values and an extra four leading 0s.
             let bus_id = pci_info.bus_id.to_lowercase();
@@ -61,6 +69,7 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 max_graphics_clock: graphics_boost_clock as usize,
                 max_sm_clock: sm_boost_clock as usize,
                 memory: memory_info.total,
+                cpu_mask,
             };
             if !gpus.contains_key(&numa_node) {
                 gpus.insert(numa_node, vec![gpu]);
