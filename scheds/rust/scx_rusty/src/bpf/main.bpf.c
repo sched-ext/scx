@@ -94,10 +94,14 @@ struct bpfmask_wrapper {
 	struct bpf_cpumask __kptr *instance;
 };
 
+struct rusty_percpu_storage {
+	struct bpf_cpumask __kptr *bpfmask;
+};
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, u32);
-	__type(value, struct bpfmask_wrapper);
+	__type(value, struct rusty_percpu_storage);
 	__uint(max_entries, 1);
 } scx_percpu_bpfmask_map SEC(".maps");
 
@@ -120,22 +124,22 @@ static s32 create_save_cpumask(struct bpf_cpumask **kptr)
 	return 0;
 }
 
-static int scx_percpu_tmpmask_init(void)
+static int scx_rusty_percpu_storage_init(void)
 {
 	void *map = &scx_percpu_bpfmask_map;
-	struct bpfmask_wrapper *instancep;
+	struct rusty_percpu_storage *storage;
 	const u32 zero = 0;
 	int ret, i;
 
 	bpf_for (i, 0, nr_cpu_ids) {
-		instancep = bpf_map_lookup_percpu_elem(map, &zero, i);
-		if (!instancep) {
+		storage = bpf_map_lookup_percpu_elem(map, &zero, i);
+		if (!storage) {
 			/* Should be impossible. */
 			scx_bpf_error("Did not find map entry");
 			return -EINVAL;
 		}
 
-		ret = create_save_cpumask(&instancep->instance);
+		ret = create_save_cpumask(&storage->bpfmask);
 		if (ret)
 			return ret;
 	}
@@ -143,26 +147,23 @@ static int scx_percpu_tmpmask_init(void)
 	return 0;
 }
 
-static struct bpf_cpumask *scx_percpu_tmpmask(void)
+static struct bpf_cpumask *scx_percpu_bpfmask(void)
 {
+	struct rusty_percpu_storage *storage;
 	void *map = &scx_percpu_bpfmask_map;
-	struct bpfmask_wrapper *instancep;
 	const u32 zero = 0;
 
-	instancep = bpf_map_lookup_elem(map, &zero);
-	if (!instancep) {
+	storage = bpf_map_lookup_elem(map, &zero);
+	if (!storage) {
 		/* Should be impossible. */
 		scx_bpf_error("Did not find map entry");
 		return NULL;
 	}
 
-	if (!instancep->instance)
-		create_save_cpumask(&instancep->instance);
-
-	if (!instancep->instance)
+	if (!storage->bpfmask)
 		scx_bpf_error("Did not properly initialize singleton");
 
-	return instancep->instance;
+	return storage->bpfmask;
 }
 
 /*
@@ -1058,7 +1059,7 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 				goto enoent;
 			}
 
-			tmp_cpumask = scx_percpu_tmpmask();
+			tmp_cpumask = scx_percpu_bpfmask();
 			if (!tmp_cpumask) {
 				scx_bpf_error("Failed to lookup tmp cpumask");
 				goto enoent;
@@ -1908,10 +1909,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 {
 	s32 i, ret;
 
-	ret = scx_percpu_tmpmask_init();
-	if (ret)
-		return ret;
-
 	ret = sdt_task_init(sizeof(struct task_ctx));
 	if (ret)
 		return ret;
@@ -1929,6 +1926,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 		return ret;
 
 	ret = create_save_cpumask(&kick_greedy_cpumask);
+	if (ret)
+		return ret;
+
+	ret = scx_rusty_percpu_storage_init();
 	if (ret)
 		return ret;
 
