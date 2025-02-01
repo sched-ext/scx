@@ -343,10 +343,22 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	return ret;
 }
 
-static void reset_cpu_preemption_info(struct cpu_ctx *cpuc)
+static void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released)
 {
-	cpuc->lat_cri = 0;
-	cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+	if (released) {
+		/*
+		 * When the CPU is taken by high priority scheduler,
+		 * set things impossible to preempt.
+		 */
+		cpuc->lat_cri = SCX_SLICE_INF;
+		cpuc->stopping_tm_est_ns = 0;
+	} else {
+		/*
+		 * When the CPU is idle,
+		 * set things easy to preempt.
+		 */
+		cpuc->lat_cri = 0;
+		cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+	}
 }
-
 

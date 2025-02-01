@@ -1784,7 +1784,7 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 		 * As an idle task cannot be preempted,
 		 * per-CPU preemption information should be cleared.
 		 */
-		reset_cpu_preemption_info(cpuc);
+		reset_cpu_preemption_info(cpuc, false);
 	}
 	/*
 	 * The CPU is exiting from the idle state.
@@ -1832,12 +1832,6 @@ void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
 	struct cpu_ctx *cpuc;
 
 	/*
-	 * When a CPU is released to serve higher priority scheduler class,
-	 * requeue the tasks in a local DSQ to the global enqueue.
-	 */
-	scx_bpf_reenqueue_local();
-
-	/*
 	 * When the scx scheduler loses control of a CPU,
 	 * reset the CPU's preemption information so it cannot be a victim.
 	 */
@@ -1846,7 +1840,13 @@ void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
 		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return;
 	}
-	reset_cpu_preemption_info(cpuc);
+	reset_cpu_preemption_info(cpuc, true);
+
+	/*
+	 * When a CPU is released to serve higher priority scheduler class,
+	 * requeue the tasks in a local DSQ to the global enqueue.
+	 */
+	scx_bpf_reenqueue_local();
 }
 
 void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
