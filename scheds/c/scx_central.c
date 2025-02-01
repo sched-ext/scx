@@ -49,7 +49,17 @@ int main(int argc, char **argv)
 	struct bpf_link *link;
 	__u64 seq = 0, ecode;
 	__s32 opt;
-	cpu_set_t *cpuset;
+	__u32 max_cpu_ids, nr_cpu_ids = 0, i = 0;
+	cpu_set_t *cpuset, curcpuset;
+
+	max_cpu_ids = libbpf_num_possible_cpus();
+	CPU_ZERO(&curcpuset);
+	SCX_BUG_ON(sched_getaffinity(0, sizeof(curcpuset), &curcpuset),
+		   "Failed to get current CPU topology");
+	for (i = 0; i < max_cpu_ids; i ++) {
+		if (CPU_ISSET(i, &curcpuset))
+			nr_cpu_ids ++;
+	}
 
 	libbpf_set_print(libbpf_print_fn);
 	signal(SIGINT, sigint_handler);
@@ -58,7 +68,7 @@ restart:
 	skel = SCX_OPS_OPEN(central_ops, scx_central);
 
 	skel->rodata->central_cpu = 0;
-	skel->rodata->nr_cpu_ids = libbpf_num_possible_cpus();
+	skel->rodata->nr_cpu_ids = nr_cpu_ids;
 	skel->rodata->slice_ns = __COMPAT_ENUM_OR_ZERO("scx_public_consts", "SCX_SLICE_DFL");
 
 	assert(skel->rodata->nr_cpu_ids <= INT32_MAX);
@@ -72,6 +82,9 @@ restart:
 			u32 central_cpu = strtoul(optarg, NULL, 0);
 			if (central_cpu >= skel->rodata->nr_cpu_ids) {
 				fprintf(stderr, "invalid central CPU id value, %u given (%u max)\n", central_cpu, skel->rodata->nr_cpu_ids);
+				return -1;
+			} else if (!CPU_ISSET(central_cpu, &curcpuset)) {
+				fprintf(stderr, "invalid central CPU id value, %u is offline\n", central_cpu);
 				return -1;
 			}
 			skel->rodata->central_cpu = (s32)central_cpu;
