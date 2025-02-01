@@ -130,18 +130,8 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	cur_cpu = cpuc->cpu_id;
 
 	/*
-	 * First, test the current CPU since it can skip the expensive IPI.
-	 */
-	if (can_cpu_be_kicked(now, cpuc) &&
-	    bpf_cpumask_test_cpu(cur_cpu, cpumask) &&
-	    can_cpu1_kick_cpu2(&prm_task, &prm_cpus[0], cpuc)) {
-		victim_cpu = &prm_task;
-		goto bingo_out;
-	}
-
-	/*
-	 * If the current CPU cannot be a victim, let's check if it is worth to
-	 * try to kick other CPU at the expense of IPI.
+	 * First check if it is worth to try to kick other CPU
+	 * at the expense of IPI.
 	 */
 	if (!is_worth_kick_other_task(taskc))
 		goto null_out;
@@ -216,11 +206,6 @@ null_out:
 	return NULL;
 }
 
-static void kick_current_cpu(struct task_struct *p)
-{
-	WRITE_ONCE(p->scx.slice, 0);
-}
-
 static bool try_kick_cpu(struct task_struct *p, struct cpu_ctx *cpuc_cur,
 			 struct cpu_ctx *victim_cpuc)
 {
@@ -235,28 +220,14 @@ static bool try_kick_cpu(struct task_struct *p, struct cpu_ctx *cpuc_cur,
 	bool ret = false;
 
 	/*
-	 * If the current CPU is a victim, we just reset the current task's
-	 * time slice as an optimization. Othewise, kick the remote CPU for
-	 * preemption.
-	 *
-	 * Resetting task's time slice to zero does not trigger an immediate
-	 * preemption. However, the cost of self-IPI is prohibitively expensive
-	 * for some scenarios. The actual preemption will happen at the next
-	 * ops.tick().
-	 */
-	if (cpuc_cur->cpu_id == victim_cpuc->cpu_id) {
-		struct task_struct *tsk = bpf_get_current_task_btf();
-		kick_current_cpu(tsk);
-		return true;
-	}
-
-	/*
 	 * Kick a victim CPU if it is not victimized yet by another
 	 * concurrent kick task.
+	 *
+	 *
 	 */
 	old = p->scx.slice;
-	if (old != 0)
-		ret = __sync_bool_compare_and_swap(&p->scx.slice, old, 0);
+	if (old != 1 && old != 0)
+		ret = __sync_bool_compare_and_swap(&p->scx.slice, old, 1);
 
 	/*
 	 * Kick the remote CPU for preemption.
@@ -329,7 +300,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	 * give up its extended time slice for fairness.
 	 */
 	if (taskc_run->lock_holder_xted) {
-		kick_current_cpu(p_run);
+		p_run->scx.slice = 0;
 		return true;
 	}
 
@@ -367,15 +338,27 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	bpf_rcu_read_unlock();
 
 	if (ret)
-		kick_current_cpu(p_run);
+		p_run->scx.slice = 0;
 
 	return ret;
 }
 
-static void reset_cpu_preemption_info(struct cpu_ctx *cpuc)
+static void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released)
 {
-	cpuc->lat_cri = 0;
-	cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+	if (released) {
+		/*
+		 * When the CPU is taken by high priority scheduler,
+		 * set things impossible to preempt.
+		 */
+		cpuc->lat_cri = SCX_SLICE_INF;
+		cpuc->stopping_tm_est_ns = 0;
+	} else {
+		/*
+		 * When the CPU is idle,
+		 * set things easy to preempt.
+		 */
+		cpuc->lat_cri = 0;
+		cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+	}
 }
-
 
