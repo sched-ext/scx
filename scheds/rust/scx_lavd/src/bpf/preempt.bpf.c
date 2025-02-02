@@ -70,17 +70,6 @@ static bool can_cpu1_kick_cpu2(struct preemption_info *prm_cpu1,
 	return comp_preemption_info(prm_cpu1, prm_cpu2) < 0;
 }
 
-static bool can_task1_kick_cpu2(struct task_ctx *taskc1, struct cpu_ctx *cpuc2,
-				u64 now)
-{
-	struct preemption_info prm_task1, prm_cpu2;
-
-	prm_task1.stopping_tm_est_ns = get_est_stopping_time(taskc1, now);
-	prm_task1.lat_cri = taskc1->lat_cri;
-
-	return can_cpu1_kick_cpu2(&prm_task1, &prm_cpu2, cpuc2);
-}
-
 static bool is_worth_kick_other_task(struct task_ctx *taskc)
 {
 	/*
