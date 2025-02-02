@@ -65,6 +65,7 @@ use stats::LayerStats;
 use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
+use sysinfo::System;
 
 const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
 const MAX_COMM: usize = bpf_intf::consts_MAX_COMM as usize;
@@ -546,9 +547,18 @@ struct Opts {
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
 
-    /// Disable gpu support
+    /// Enable gpu support
     #[clap(long, default_value = "false")]
     enable_gpu_support: bool,
+
+    /// On each user space update loop, use NVML to update GPU pids.
+    /// The alternative (and default) is to use loose heuristics
+    /// (i.e. start_time/existence of prior gpu process) to
+    /// reduce NVML calls (at the expense of scheduling accuracy).
+    /// This is to reduce the odds of taking systems offline due to NVML
+    /// triggering crashes when concurrently called.
+    #[clap(long, default_value = "false")]
+    aggressive_nvml_polling: bool,
 
     /// Enable netdev IRQ balancing. This is experimental and should be used with caution.
     #[clap(long, default_value = "false")]
@@ -770,6 +780,13 @@ impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
                 .collect(),
         }
     }
+}
+
+#[derive(Debug)]
+struct GpuMonData {
+    sysinfo_sys: sysinfo::System,
+    last_nvml_poll: std::time::SystemTime,
+    gpu_pidmap: HashMap<u32, u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -1132,6 +1149,7 @@ struct Scheduler<'a> {
     netdevs: BTreeMap<String, NetDev>,
     stats_server: StatsServer<StatsReq, StatsRes>,
     opts: &'a Opts,
+    gpu_mon_data: GpuMonData,
 }
 
 impl<'a> Scheduler<'a> {
@@ -1815,6 +1833,14 @@ impl<'a> Scheduler<'a> {
         // Attach.
         let struct_ops = scx_ops_attach!(skel, layered)?;
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
+        let gpu_mon_data = GpuMonData {
+            sysinfo_sys: System::new_with_specifics(
+                sysinfo::RefreshKind::nothing()
+                    .with_processes(sysinfo::ProcessRefreshKind::everything()),
+            ),
+            last_nvml_poll: std::time::SystemTime::now(),
+            gpu_pidmap: HashMap::new(),
+        };
 
         let sched = Self {
             struct_ops: Some(struct_ops),
@@ -1837,6 +1863,7 @@ impl<'a> Scheduler<'a> {
             netdevs,
             stats_server,
             opts,
+            gpu_mon_data,
         };
 
         info!("Layered Scheduler Attached. Run `scx_layered --monitor` for metrics.");
@@ -1905,67 +1932,131 @@ impl<'a> Scheduler<'a> {
         }
 
         let nvml = NVML_CELL.get_or_try_init(|| Nvml::init())?;
+        let mut missing_gpu_pid = false;
 
-        let device_count = nvml.device_count()?;
-
-        let mut pids = HashSet::new();
-
-        // Iterate over all devices and gather running processes
-        for i in 0..device_count {
-            let device = nvml.device_by_index(i)?;
-
-            let procs = device.running_compute_processes()?;
-
-            for proc_info in procs {
-                pids.insert(proc_info.pid);
+        if !self.opts.aggressive_nvml_polling {
+            self.gpu_mon_data.sysinfo_sys.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::All,
+                true,
+                sysinfo::ProcessRefreshKind::nothing(),
+            );
+            let current_pidmap = self.gpu_mon_data.sysinfo_sys.processes();
+            if self.gpu_mon_data.gpu_pidmap.is_empty() {
+                missing_gpu_pid = true;
+            } else {
+                for (k, v) in self.gpu_mon_data.gpu_pidmap.iter() {
+                    let k_pid = sysinfo::Pid::from_u32(k.clone());
+                    if current_pidmap.contains_key(&k_pid) {
+                        if v.clone() < current_pidmap.get(&k_pid).unwrap().start_time() {
+                            missing_gpu_pid = true;
+                            break;
+                        }
+                    } else {
+                        missing_gpu_pid = true;
+                        break;
+                    }
+                }
             }
         }
 
-        // ensure current pids only have current pids.
-        let zero = 0;
-        let all_pid_bpf_map = MapHandle::try_from(&self.skel.maps.all_gpu_pid)?;
-        let cur_pid_bpf_map = MapHandle::try_from(&self.skel.maps.cur_gpu_pid)?;
+        let time_since_last_update = std::time::SystemTime::now()
+            .duration_since(self.gpu_mon_data.last_nvml_poll)?
+            .as_secs();
+        let since_last_update_30s = time_since_last_update > 30;
+        let since_last_update_600s = time_since_last_update > 600;
 
-        // get deletes for current, state of the world for all.
-        let mut cur_pid_bpf_set = HashSet::new();
-        let mut all_pid_bpf_set = HashSet::new();
+        if self.opts.aggressive_nvml_polling
+            || (missing_gpu_pid && since_last_update_30s)
+            || (since_last_update_600s)
+        {
+            debug!("calling NVML to update GPU pids");
+            self.gpu_mon_data.last_nvml_poll = std::time::SystemTime::now();
+            let device_count = nvml.device_count()?;
 
-        for key in cur_pid_bpf_map.keys() {
-            let sized_bytes: [u8; 4] = key
-                .try_into()
-                .expect("failed to convert pid bytes to sized bytes");
-            let pid: u32 = u32::from_ne_bytes(sized_bytes);
-            cur_pid_bpf_set.insert(pid);
+            let mut pids = HashSet::new();
+
+            // Iterate over all devices and gather running processes
+            for i in 0..device_count {
+                let device = nvml.device_by_index(i)?;
+
+                let procs = device.running_compute_processes()?;
+
+                for proc_info in procs {
+                    pids.insert(proc_info.pid);
+                }
+            }
+
+            // ensure current pids only have current pids.
+            let zero = 0;
+            let all_pid_bpf_map = MapHandle::try_from(&self.skel.maps.all_gpu_pid)?;
+            let cur_pid_bpf_map = MapHandle::try_from(&self.skel.maps.cur_gpu_pid)?;
+
+            // get deletes for current, state of the world for all.
+            let mut cur_pid_bpf_set = HashSet::new();
+            let mut all_pid_bpf_set = HashSet::new();
+
+            for key in cur_pid_bpf_map.keys() {
+                let sized_bytes: [u8; 4] = key
+                    .try_into()
+                    .expect("failed to convert pid bytes to sized bytes");
+                let pid: u32 = u32::from_ne_bytes(sized_bytes);
+                cur_pid_bpf_set.insert(pid);
+            }
+            for key in all_pid_bpf_map.keys() {
+                let sized_bytes: [u8; 4] = key
+                    .try_into()
+                    .expect("failed to convert pid bytes to sized bytes");
+                let pid: u32 = u32::from_ne_bytes(sized_bytes);
+                all_pid_bpf_set.insert(pid);
+            }
+
+            let cur_delete_set = cur_pid_bpf_set.difference(&pids);
+            let cur_add_set = pids.difference(&pids);
+            let all_add_set = pids.difference(&all_pid_bpf_set);
+
+            let zero_bytes: &[u8; 4] = unsafe { std::mem::transmute(&zero) };
+            use libbpf_rs::MapFlags;
+            for pid in cur_add_set {
+                let pid_bytes: &[u8; 4] = unsafe { std::mem::transmute(&pid) };
+                cur_pid_bpf_map.update(pid_bytes, zero_bytes, MapFlags::ANY)?;
+            }
+
+            for pid in cur_delete_set {
+                let pid_bytes: &[u8; 4] = unsafe { std::mem::transmute(&pid) };
+                cur_pid_bpf_map.delete(pid_bytes)?;
+            }
+
+            for pid in all_add_set {
+                let pid_bytes: &[u8; 4] = unsafe { std::mem::transmute(&pid) };
+                all_pid_bpf_map.update(pid_bytes, zero_bytes, MapFlags::ANY)?;
+            }
+            // bookkeeping for non-agressive mode
+            self.gpu_mon_data.sysinfo_sys.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::All,
+                true,
+                sysinfo::ProcessRefreshKind::nothing(),
+            );
+            self.gpu_mon_data.gpu_pidmap.clear();
+            for x in pids {
+                let x_pid = sysinfo::Pid::from_u32(x);
+                if self
+                    .gpu_mon_data
+                    .sysinfo_sys
+                    .processes()
+                    .contains_key(&x_pid)
+                {
+                    let proc = self
+                        .gpu_mon_data
+                        .sysinfo_sys
+                        .processes()
+                        .get(&x_pid)
+                        .unwrap();
+                    self.gpu_mon_data.gpu_pidmap.insert(x, proc.start_time());
+                } else {
+                    self.gpu_mon_data.gpu_pidmap.insert(x, 0);
+                }
+            }
         }
-        for key in all_pid_bpf_map.keys() {
-            let sized_bytes: [u8; 4] = key
-                .try_into()
-                .expect("failed to convert pid bytes to sized bytes");
-            let pid: u32 = u32::from_ne_bytes(sized_bytes);
-            all_pid_bpf_set.insert(pid);
-        }
-
-        let cur_delete_set = cur_pid_bpf_set.difference(&pids);
-        let cur_add_set = pids.difference(&pids);
-        let all_add_set = pids.difference(&all_pid_bpf_set);
-
-        let zero_bytes: &[u8; 4] = unsafe { std::mem::transmute(&zero) };
-        use libbpf_rs::MapFlags;
-        for pid in cur_add_set {
-            let pid_bytes: &[u8; 4] = unsafe { std::mem::transmute(&pid) };
-            cur_pid_bpf_map.update(pid_bytes, zero_bytes, MapFlags::ANY)?;
-        }
-
-        for pid in cur_delete_set {
-            let pid_bytes: &[u8; 4] = unsafe { std::mem::transmute(&pid) };
-            cur_pid_bpf_map.delete(pid_bytes)?;
-        }
-
-        for pid in all_add_set {
-            let pid_bytes: &[u8; 4] = unsafe { std::mem::transmute(&pid) };
-            all_pid_bpf_map.update(pid_bytes, zero_bytes, MapFlags::ANY)?;
-        }
-
         Ok(())
     }
 
