@@ -33,11 +33,13 @@ pub struct ClangInfo {
     pub clang: String,
     pub ver: String,
     pub arch: String,
+    pub bpfver: u8,
 }
 
 impl ClangInfo {
     pub fn new() -> Result<ClangInfo> {
         let clang = env::var("BPF_CLANG").unwrap_or("clang".into());
+        let mut bpfver = 3u8;
         let output = Command::new(&clang)
             .args(["--version"])
             .output()
@@ -79,8 +81,18 @@ impl ClangInfo {
                 &clang, &ver
             );
         }
+        if version_compare::compare(&ver, "18") == Ok(version_compare::Cmp::Ge) {
+            // quicker than parsing clang -target bpf -mcpu=help
+            // it is known to be supported from this point
+            bpfver += 1;
+        }
 
-        Ok(ClangInfo { clang, ver, arch })
+        Ok(ClangInfo {
+            clang,
+            ver,
+            arch,
+            bpfver,
+        })
     }
 
     fn skip_clang_version_prefix(line: &str) -> &str {
@@ -159,7 +171,7 @@ impl ClangInfo {
             .map(|x| x.into())
             .collect();
         cflags.push(format!("-D__TARGET_ARCH_{}", &kernel_target));
-        cflags.push("-mcpu=v3".into());
+        cflags.push(format!("-mcpu=v{}", self.bpfver).into());
         cflags.push(format!("-m{}-endian", endian));
         cflags.append(
             &mut sys_incls
