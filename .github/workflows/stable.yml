@@ -6,73 +6,11 @@ on:
     - cron: "0 */6 * * *"
 
 jobs:
-  build-kernel-nix:
+  build-kernel:
     uses: ./.github/workflows/build-kernel.yml
     with:
       git-repo: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
       branch: linux-rolling-stable
-
-  build-kernel:
-    runs-on: ubuntu-24.04
-    steps:
-      # prevent cache permission errors
-      - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
-      # redundancy to exit fast
-      - run: echo 'debconf debconf/frontend select Noninteractive' | sudo debconf-set-selections
-      - run: sudo apt-get update
-      - run: sudo apt-get install -y git --no-install-recommends
-      # get latest head commit of sched_ext linux-rolling-stable
-      - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git heads/linux-rolling-stable | awk '{print $1}')" >> $GITHUB_ENV
-
-      - uses: actions/checkout@v4
-
-      # use cached kernel if available, create after job if not
-      - name: Cache Kernel
-        id: cache-kernel
-        uses: actions/cache@v4
-        with:
-          path: |
-            linux/arch/x86/boot/bzImage
-            linux/usr/include
-            linux/**/*.h
-          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-stable-1
-
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-        uses: ./.github/actions/install-deps-action
-
-      # cache virtiofsd (goes away w/ 24.04)
-      - name: Cache virtiofsd
-        id: cache-virtiofsd
-        uses: actions/cache@v4
-        with:
-          path: |
-            /usr/lib/virtiofsd
-          key: virtiofsd-binary
-      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' && steps.cache-kernel.outputs.cache-hit != 'true' }}
-        run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
-
-
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-        name: Clone Kernel
-        # Get the latest sched-ext enabled kernel directly from the korg
-        # linux-rolling-stable branch
-        run: git clone --single-branch -b linux-rolling-stable --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git linux
-
-      # guard rail because we are caching
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-        run: cd linux && git checkout ${{ env.SCHED_EXT_KERNEL_COMMIT }}
-
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-      # Print the latest commit of the checked out sched-ext kernel
-        run: cd linux && git log -1 --pretty=format:"%h %ad %s" --date=short
-
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-      # Build a minimal kernel (with sched-ext enabled) using virtme-ng
-        run: cd linux && vng -v --build --config ../.github/workflows/sched-ext.config
-
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-      # Generate kernel headers
-        run: cd linux && make headers
 
   integration-test:
     runs-on: ubuntu-24.04
@@ -82,9 +20,15 @@ jobs:
             scheduler: [ scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty ]
           fail-fast: false
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/restore-kernel-cache
+        with:
+          git-repo: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
+          branch: linux-rolling-stable
+
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
-      - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.scheduler }}
@@ -100,25 +44,6 @@ jobs:
           key: virtiofsd-binary
       - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}
         run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
-
-      # get latest head commit of linux-rolling-stable
-      - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git heads/linux-rolling-stable | awk '{print $1}')" >> $GITHUB_ENV
-
-      # use cached kernel if available, create after job if not
-      - name: Cache Kernel
-        id: cache-kernel
-        uses: actions/cache@v4
-        with:
-          path: |
-            linux/arch/x86/boot/bzImage
-            linux/usr/include
-            linux/**/*.h
-          key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-stable-1
-
-      # need to re-run job when kernel head changes between build and test running.
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-        name: exit if cache stale
-        run: exit -1
 
       # veristat
       - run: wget https://github.com/libbpf/veristat/releases/download/v0.3.2/veristat-v0.3.2-amd64.tar.gz
