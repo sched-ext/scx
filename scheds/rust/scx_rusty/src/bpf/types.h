@@ -63,6 +63,8 @@ struct task_ctx {
 	u32 pid;
 
 	struct ravg_data dcyc_rd;
+
+	scx_cpumask_t cpumask;
 };
 
 /* XXXETSAL Same rationale as for dom_ptr. Remove once we dump Clang 18.*/
@@ -95,7 +97,7 @@ struct dom_ctx {
 };
 
 struct node_ctx {
-	struct bpf_cpumask __kptr *cpumask;
+	scx_cpumask_t cpumask;
 };
 
 #endif /* __TYPES_H */

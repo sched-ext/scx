@@ -1,22 +1,26 @@
+extern const volatile u32 nr_cpu_ids;
 size_t mask_size;
 
+/* XXX HACK hardcoded MAX_CPUS / 8 from src/bpf/intf.h, right now this header is a mess */
 struct scx_cpumask {
 	union sdt_id tid;
-	u8 mask[(MAX_CPUS + 7) / 8];
+	u8 mask[64];
 };
 
-typedef struct scx_cpumask __arena * scx_cpumask_t;
+typedef struct scx_cpumask __arena * __arg_arena scx_cpumask_t;
 
 struct sdt_allocator scx_mask_allocator;
 
-static inline
-int scx_mask_init(__u64 mask_size)
+__weak
+int scx_mask_init(__u64 total_mask_size)
 {
+	mask_size = total_mask_size;
+
 	return sdt_alloc_init(&scx_mask_allocator, mask_size + sizeof(union sdt_id));
 }
 
-static inline
-scx_cpumask_t scx_mask_alloc(struct task_struct *p)
+static
+scx_cpumask_t scx_mask_alloc(void)
 {
 	struct sdt_data __arena *data = NULL;
 	scx_cpumask_t mask;
@@ -34,55 +38,67 @@ scx_cpumask_t scx_mask_alloc(struct task_struct *p)
 	return mask;
 }
 
-static inline
-void scx_mask_free(scx_cpumask_t mask)
+/*
+ * XXXETSAL: Ideally these functions would have a void return type,
+ * but as of 6.13 the verifier requires global functions to return a scalar.
+ */
+
+__weak
+int scx_mask_free(scx_cpumask_t __arg_arena mask)
 {
 	sdt_subprog_init_arena();
 
 	sdt_free_idx(&scx_mask_allocator, mask->tid.idx);
+	return 0;
 }
 
 
-static inline
-void scxmask_set_cpu(int cpu, scx_cpumask_t mask)
+__weak
+int scxmask_set_cpu(u32 cpu, scx_cpumask_t __arg_arena mask)
 {
 	mask->mask[cpu / 8] |= 1 << (cpu % 8);
+	return 0;
 }
 
-static inline
-void scxmask_clear_cpu(int cpu, scx_cpumask_t mask)
+__weak
+int scxmask_clear_cpu(u32 cpu, scx_cpumask_t __arg_arena mask)
 {
 	mask->mask[cpu / 8] &= 1 << ~(cpu % 8);
+	return 0;
 }
 
-static inline
-bool scxmask_test_cpu(int cpu, scx_cpumask_t mask)
+__weak
+bool scxmask_test_cpu(u32 cpu, scx_cpumask_t __arg_arena mask)
 {
 	return mask->mask[cpu / 8] & (1 << (cpu % 8));
 }
 
-static inline
-void scxmask_clear(scx_cpumask_t mask)
+__weak
+int scxmask_clear(scx_cpumask_t __arg_arena mask)
 {
 	int i;
 
 	bpf_for(i, 0, mask_size) {
 		mask->mask[i] = 0;
 	}
+
+	return 0;
 }
 
-static inline
-void scxmask_and(scx_cpumask_t dst, scx_cpumask_t src1, scx_cpumask_t src2)
+__weak
+int scxmask_and(scx_cpumask_t __arg_arena dst, scx_cpumask_t __arg_arena src1, scx_cpumask_t __arg_arena src2)
 {
 	int i;
 
 	bpf_for(i, 0, mask_size) {
 		dst->mask[i] = src1->mask[i] & src2->mask[i];
 	}
+
+	return 0;
 }
 
-static inline
-bool scxmask_empty(scx_cpumask_t mask)
+__weak
+bool scxmask_empty(scx_cpumask_t __arg_arena mask)
 {
 	int i;
 
@@ -94,42 +110,90 @@ bool scxmask_empty(scx_cpumask_t mask)
 	return true;
 }
 
-static inline
-bool scxmask_subset(scx_cpumask_t big, scx_cpumask_t small)
+static void
+scxmask_to_bpf(struct bpf_cpumask __kptr *bpfmask __arg_trusted,
+		   scx_cpumask_t __arg_arena scxmask)
+{
+	int i;
+
+	bpf_for(i, 0, nr_cpu_ids) {
+		if (scxmask_test_cpu(i, scxmask))
+			bpf_cpumask_set_cpu(i, bpfmask);
+		else
+			bpf_cpumask_clear_cpu(i, bpfmask);
+	}
+}
+
+
+/*
+ * XXX Terrible implementations. We require a kfunc pair to do this properly.
+ */
+static void
+scxmask_from_bpf(scx_cpumask_t __arg_arena scxmask,
+		     const struct cpumask *bpfmask __arg_trusted)
+{
+	int i;
+
+	bpf_for(i, 0, nr_cpu_ids) {
+		if (bpf_cpumask_test_cpu(i, bpfmask))
+			scxmask_set_cpu(i, scxmask);
+		else
+			scxmask_clear_cpu(i, scxmask);
+	}
+
+}
+
+__weak
+int scxmask_copy(scx_cpumask_t __arg_arena dst, scx_cpumask_t __arg_arena src)
 {
 	int i;
 
 	bpf_for(i, 0, mask_size) {
-		if (big->mask[i] & ~small->mask[i])
+		dst->mask[i] = src->mask[i];
+	}
+
+	return 0;
+}
+
+static
+bool scxmask_subset_cpumask(scx_cpumask_t __arg_arena big, const struct cpumask *small)
+{
+	int i;
+
+	bpf_for(i, 0, nr_cpu_ids) {
+		if (!scxmask_test_cpu(i, big) && bpf_cpumask_test_cpu(i, small))
 			return false;
 	}
 
 	return true;
 }
 
-static inline
-bool scxmask_intersects(scx_cpumask_t src1, scx_cpumask_t src2)
+static
+bool scxmask_intersects_cpumask(scx_cpumask_t __arg_arena scx, const struct cpumask *cpu)
 {
 	int i;
 
-	bpf_for(i, 0, mask_size) {
-		if (src1->mask[i] & src2->mask[i])
+	bpf_for(i, 0, nr_cpu_ids) {
+		if (scxmask_test_cpu(i, scx) && bpf_cpumask_test_cpu(i, cpu))
 			return true;
 	}
 
 	return false;
 }
 
-static inline
-void scxmask_to_bpf(struct bpf_cpumask *bpfmask, scx_cpumask_t scxmask)
+static
+int scxmask_and_cpumask(scx_cpumask_t dst __arg_arena,
+			       scx_cpumask_t scx __arg_arena,
+			       const struct cpumask *cpu __arg_trusted)
 {
-	scx_bpf_error("unimplemented");
+	int i;
+
+	bpf_for(i, 0, nr_cpu_ids) {
+		if (scxmask_test_cpu(i, scx) && bpf_cpumask_test_cpu(i, cpu))
+			scxmask_set_cpu(i, dst);
+		else
+			scxmask_clear_cpu(i, dst);
+	}
+
+	return 0;
 }
-
-
-static inline
-void scxmask_from_bpf(scx_cpumask_t scxmask, struct bpf_cpumask *bpfmask)
-{
-	scx_bpf_error("unimplemented");
-}
-
