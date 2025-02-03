@@ -1,0 +1,26 @@
+name: 'Restore kernel cache'
+description: 'Restore a previously built kernel cache, failing if not available'
+inputs:
+  git-repo:
+    required: true
+    type: string
+  branch:
+    required: true
+    type: string
+
+runs:
+  using: "composite"
+  steps:
+    - name: Get hash from repo/branch
+      run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote ${{ inputs.git-repo }} heads/${{ inputs.branch }} | awk '{print $1}')" >> $GITHUB_ENV
+      shell: bash
+
+    - name: Load cache
+      uses: actions/cache/restore@v4
+      with:
+        fail-on-cache-miss: true
+        key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-7
+        path:  |
+          linux/arch/x86/boot/bzImage
+          linux/usr/include
+          linux/**/*.h
