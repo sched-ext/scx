@@ -551,6 +551,10 @@ struct Opts {
     #[clap(long, default_value = "false")]
     enable_gpu_support: bool,
 
+    /// GPU Pid Poll Short Interval, if gpu support enabled.
+    #[clap(long, default_value = "180")]
+    gpu_poll_short_interval: u64,
+
     /// On each user space update loop, use NVML to update GPU pids.
     /// The alternative (and default) is to use loose heuristics
     /// (i.e. start_time/existence of prior gpu process) to
@@ -1962,11 +1966,11 @@ impl<'a> Scheduler<'a> {
         let time_since_last_update = std::time::SystemTime::now()
             .duration_since(self.gpu_mon_data.last_nvml_poll)?
             .as_secs();
-        let since_last_update_30s = time_since_last_update > 30;
+        let since_last_update_short = time_since_last_update > self.opts.gpu_poll_short_interval;
         let since_last_update_600s = time_since_last_update > 600;
 
         if self.opts.aggressive_nvml_polling
-            || (missing_gpu_pid && since_last_update_30s)
+            || (missing_gpu_pid && since_last_update_short)
             || (since_last_update_600s)
         {
             debug!("calling NVML to update GPU pids");
