@@ -64,6 +64,8 @@ enum consts {
 	 * anyway and will be retried until loads are balanced.
 	 */
 	MAX_DOM_ACTIVE_TPTRS	= 1024,
+
+	STATIC_ALLOC_PAGES_GRANULARITY = 1,
 };
 
 /* Statistics */
