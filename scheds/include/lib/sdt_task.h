@@ -107,7 +107,9 @@ void sdt_task_free(struct task_struct *p);
 void sdt_subprog_init_arena(void);
 
 int sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size);
-struct sdt_data __arena *sdt_alloc(struct sdt_allocator *alloc);
-void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx);
+u64 sdt_alloc_internal(struct sdt_allocator *alloc);
+int sdt_free_idx(struct sdt_allocator *alloc, __u64 idx);
+
+#define sdt_alloc(alloc) ((struct sdt_data __arena *)sdt_alloc_internal((alloc)))
 
 #endif /* __BPF__ */

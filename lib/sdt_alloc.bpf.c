@@ -396,8 +396,8 @@ int sdt_mark_nodes_avail(sdt_desc_t *lv_desc[SDT_TASK_LEVELS], __u64 lv_pos[SDT_
 	return 0;
 }
 
-__hidden
-void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
+__weak
+int sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 {
 	const __u64 mask = (1 << SDT_TASK_ENTS_PER_PAGE_SHIFT) - 1;
 	sdt_desc_t *lv_desc[SDT_TASK_LEVELS];
@@ -412,13 +412,16 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 
 	sdt_subprog_init_arena();
 
+	if (!alloc)
+		return 0;
+
 	bpf_spin_lock(&sdt_lock);
 
 	desc = alloc->root;
 	if (unlikely(!desc)) {
 		bpf_spin_unlock(&sdt_lock);
 		scx_bpf_error("%s: root not allocated", __func__);
-		return;
+		return 0;
 	}
 
 	/* To appease the verifier. */
@@ -449,7 +452,7 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 			bpf_spin_unlock(&sdt_lock);
 			scx_bpf_error("%s: freeing nonexistent idx [0x%llx] (level %llu)",
 				__func__, idx, level);
-			return;
+			return 0;
 		}
 	}
 
@@ -476,7 +479,7 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 	ret = sdt_mark_nodes_avail(lv_desc, lv_pos);
 	if (unlikely(ret != 0)) {
 		bpf_spin_unlock(&sdt_lock);
-		return;
+		return 0;
 	}
 
 	sdt_stats.active_allocs -= 1;
@@ -484,7 +487,7 @@ void sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 
 	bpf_spin_unlock(&sdt_lock);
 
-	return;
+	return 0;
 }
 
 /*
@@ -575,8 +578,8 @@ void sdt_alloc_finish(struct sdt_data __arena *data, __u64 idx)
 	data->tid.idx = idx;
 }
 
-__hidden
-struct sdt_data __arena *sdt_alloc(struct sdt_allocator *alloc)
+__weak
+u64 sdt_alloc_internal(struct sdt_allocator *alloc)
 {
 	struct sdt_alloc_stack __arena *stack = prealloc_stack;
 	struct sdt_data __arena *data = NULL;
@@ -585,10 +588,13 @@ struct sdt_data __arena *sdt_alloc(struct sdt_allocator *alloc)
 	__u64 idx, pos;
 	int ret;
 
+	if (!alloc)
+		return (u64)NULL;
+
 	/* On success, call returns with the lock taken. */
 	ret = sdt_alloc_attempt(stack);
 	if (ret != 0)
-		return NULL;
+		return (u64)NULL;
 
 	/* We unlock if we encounter an error in the function. */
 	desc = sdt_find_empty(alloc->root, stack, &idx);
@@ -597,7 +603,7 @@ struct sdt_data __arena *sdt_alloc(struct sdt_allocator *alloc)
 
 	if (unlikely(desc == NULL)) {
 		bpf_printk("%s: failed to find empty tree key", __func__);
-		return NULL;
+		return (u64)NULL;
 	}
 
 	cast_kern(desc);
@@ -613,7 +619,7 @@ struct sdt_data __arena *sdt_alloc(struct sdt_allocator *alloc)
 		if (!data) {
 			sdt_free_idx(alloc, idx);
 			bpf_printk("%s: failed to allocate data from pool", __func__);
-			return NULL;
+			return (u64)NULL;
 		}
 	}
 
@@ -621,5 +627,5 @@ struct sdt_data __arena *sdt_alloc(struct sdt_allocator *alloc)
 
 	sdt_alloc_finish(data, idx);
 
-	return data;
+	return (u64)data;
 }
