@@ -1,3 +1,6 @@
+int bpf_cpumask_from_mem(struct bpf_cpumask *dst, void *src, size_t src__sz) __ksym __weak;
+int bpf_cpumask_to_mem(void *dst, size_t dst__sz, struct bpf_cpumask *src) __ksym __weak;
+
 extern const volatile u32 nr_cpu_ids;
 size_t mask_size;
 
@@ -52,6 +55,24 @@ int scx_mask_free(scx_cpumask_t __arg_arena mask)
 	return 0;
 }
 
+__weak
+int scxmask_copy_to_stack(struct scx_cpumask *dst, scx_cpumask_t __arg_arena src)
+{
+	int i;
+
+	if (!src || !dst) {
+		scx_bpf_error("invalid pointer args to pointer copy");
+		return 0;
+	}
+
+	bpf_for(i, 0, mask_size) {
+		if (i >= 64 || i < 0)
+			return 0;
+		dst->mask[i] = src->mask[i];
+	}
+
+	return 0;
+}
 
 __weak
 int scxmask_set_cpu(u32 cpu, scx_cpumask_t __arg_arena mask)
@@ -114,7 +135,17 @@ static void
 scxmask_to_bpf(struct bpf_cpumask __kptr *bpfmask __arg_trusted,
 		   scx_cpumask_t __arg_arena scxmask)
 {
-	int i;
+	struct scx_cpumask tmp;
+	int ret, i;
+
+	if (bpf_ksym_exists(bpf_cpumask_from_mem)) {
+		scxmask_copy_to_stack(&tmp, scxmask);
+		ret = bpf_cpumask_from_mem(bpfmask, &tmp, sizeof(tmp));
+		if (ret)
+			scx_bpf_error("error");
+
+		return;
+	}
 
 	bpf_for(i, 0, nr_cpu_ids) {
 		if (scxmask_test_cpu(i, scxmask))
