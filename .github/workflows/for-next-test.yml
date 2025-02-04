@@ -1,9 +1,9 @@
 name: for-next-test
 
 on:
-  # only runs on main, every 6 hours
-    schedule:
-      - cron: "0 */6 * * *"
+  # only runs on main, every 6 hours. specify hours explicitly so scheduled runs can be offset and use a random minute.
+  schedule:
+    - cron: "22 1,7,13,19 * * *"
 
 jobs:
   build-kernel:
