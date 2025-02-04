@@ -708,7 +708,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	/*
 	 * If ops.select_cpu() has been skipped, try direct dispatch.
 	 */
-	if (!(enq_flags & SCX_ENQ_CPU_SELECTED)) {
+	if (!is_enq_cpu_selected(enq_flags)) {
 		s32 prev_cpu = scx_bpf_task_cpu(p);
 		struct rq *rq = scx_bpf_cpu_rq(prev_cpu);
 
