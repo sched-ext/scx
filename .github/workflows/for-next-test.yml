@@ -185,7 +185,13 @@ jobs:
         run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
 
       - run: cargo build --all-targets --package ${{ matrix.package }}
-      - run: vng -v --rw --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --network user -- cargo test --package ${{ matrix.package }}
+
+      # virtme-ng runs as a different user than the runner, so loses the rustup and cargo roots. specify them explicitly to avoid a rebuild.
+      - run: |
+          vng -v --rw --memory 10G --cpu 8 -r linux/arch/x86/boot/bzImage  --network user -- \
+            RUSTUP_HOME=$(realpath ~/.rustup) \
+            CARGO_HOME=$(realpath ~/.cargo) \
+            cargo test --package ${{ matrix.package }}
 
   notify-job:
     runs-on: ubuntu-latest
