@@ -1,12 +1,12 @@
 name: build-and-test
 
 on:
-  # only runs on main, hourly cache update used by all branches
-    schedule:
-      - cron: "0 * * * *"
-    push:
-    pull_request:
-    merge_group:
+  # only runs on main, hourly cache update used by all branches. random minute to avoid synchronised scheduled workflows.
+  schedule:
+    - cron: "8 * * * *"
+  push:
+  pull_request:
+  merge_group:
 
 jobs:
   lint:

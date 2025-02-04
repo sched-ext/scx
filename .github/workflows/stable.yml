@@ -1,9 +1,9 @@
 name: stable-test
 
 on:
-  # only runs on main, every 6 hours
+  # only runs on main, every 6 hours. specify hours explicitly so scheduled runs can be offset and use a random minute.
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "40 2,8,14,20 * * *"
 
 jobs:
   build-kernel:
