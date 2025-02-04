@@ -1334,25 +1334,13 @@ dependencies = [
  "anyhow",
  "cargo_metadata 0.15.4",
  "clap",
- "libbpf-rs 0.25.0-beta.1",
+ "libbpf-rs",
  "memmap2",
  "regex",
  "semver",
  "serde",
  "serde_json",
  "tempfile",
-]
-
-[[package]]
-name = "libbpf-rs"
-version = "0.24.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93edd9cd673087fa7518fd63ad6c87be2cd9b4e35034b1873f3e3258c018275b"
-dependencies = [
- "bitflags 2.6.0",
- "libbpf-sys",
- "libc",
- "vsprintf",
 ]
 
 [[package]]
@@ -2155,13 +2143,13 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scx_bpfland"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "anyhow",
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs 0.25.0-beta.1",
+ "libbpf-rs",
  "log",
  "scx_stats",
  "scx_stats_derive",
@@ -2172,13 +2160,13 @@ dependencies = [
 
 [[package]]
 name = "scx_flash"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs 0.25.0-beta.1",
+ "libbpf-rs",
  "log",
  "scx_stats",
  "scx_stats_derive",
@@ -2200,7 +2188,7 @@ dependencies = [
  "gpoint",
  "hex",
  "itertools",
- "libbpf-rs 0.25.0-beta.1",
+ "libbpf-rs",
  "libc",
  "log",
  "ordered-float",
@@ -2215,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "scx_layered"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -2226,7 +2214,7 @@ dependencies = [
  "fastrand",
  "fb_procfs",
  "lazy_static",
- "libbpf-rs 0.25.0-beta.1",
+ "libbpf-rs",
  "libc",
  "log",
  "nvml-wrapper",
@@ -2237,12 +2225,12 @@ dependencies = [
  "serde",
  "serde_json",
  "simplelog",
- "sysinfo 0.33.1",
+ "sysinfo",
 ]
 
 [[package]]
 name = "scx_loader"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -2251,7 +2239,7 @@ dependencies = [
  "log",
  "nix 0.29.0",
  "serde",
- "sysinfo 0.31.4",
+ "sysinfo",
  "tokio",
  "tokio-util",
  "toml",
@@ -2261,7 +2249,7 @@ dependencies = [
 
 [[package]]
 name = "scx_mitosis"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -2271,7 +2259,7 @@ dependencies = [
  "fb_procfs",
  "itertools",
  "lazy_static",
- "libbpf-rs 0.25.0-beta.1",
+ "libbpf-rs",
  "libc",
  "log",
  "maplit",
@@ -2283,11 +2271,11 @@ dependencies = [
 
 [[package]]
 name = "scx_rlfifo"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "anyhow",
  "ctrlc",
- "libbpf-rs 0.25.0-beta.1",
+ "libbpf-rs",
  "libc",
  "plain",
  "scx_rustland_core",
@@ -2296,13 +2284,13 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
  "fb_procfs",
- "libbpf-rs 0.25.0-beta.1",
+ "libbpf-rs",
  "libc",
  "log",
  "ordered-float",
@@ -2317,10 +2305,10 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland_core"
-version = "2.2.7"
+version = "2.2.8"
 dependencies = [
  "anyhow",
- "libbpf-rs 0.25.0-beta.1",
+ "libbpf-rs",
  "libc",
  "plain",
  "scx_utils",
@@ -2330,7 +2318,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rusty"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2338,7 +2326,7 @@ dependencies = [
  "crossbeam",
  "ctrlc",
  "fb_procfs",
- "libbpf-rs 0.25.0-beta.1",
+ "libbpf-rs",
  "libc",
  "log",
  "ordered-float",
@@ -2353,7 +2341,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "anyhow",
  "crossbeam",
@@ -2370,7 +2358,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats_derive"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2381,7 +2369,7 @@ dependencies = [
 
 [[package]]
 name = "scx_utils"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -2390,7 +2378,7 @@ dependencies = [
  "hex",
  "lazy_static",
  "libbpf-cargo",
- "libbpf-rs 0.25.0-beta.1",
+ "libbpf-rs",
  "libbpf-sys",
  "libc",
  "log",
@@ -2409,7 +2397,7 @@ dependencies = [
 
 [[package]]
 name = "scxtop"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -2421,7 +2409,7 @@ dependencies = [
  "glob",
  "json5",
  "lazy_static",
- "libbpf-rs 0.24.8",
+ "libbpf-rs",
  "libc",
  "log",
  "perf-event-open-sys",
@@ -2711,20 +2699,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "sysinfo"
-version = "0.31.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "355dbe4f8799b304b05e1b0f05fc59b2a18d36645cf169607da45bde2f69a1be"
-dependencies = [
- "core-foundation-sys",
- "libc",
- "memchr",
- "ntapi",
- "rayon",
- "windows",
 ]
 
 [[package]]

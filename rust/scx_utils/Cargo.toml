@@ -1,6 +1,6 @@
 [package]
 name = "scx_utils"
-version = "1.0.10"
+version = "1.0.11"
 edition = "2021"
 authors = ["Tejun Heo <tj@kernel.org>"]
 license = "GPL-2.0-only"
@@ -11,18 +11,18 @@ description = "Utilities for sched_ext schedulers"
 anyhow = "1.0.65"
 bitvec = { version = "1.0", features = ["serde"] }
 bindgen = ">=0.69"
-glob = "0.3"
+glob = "0.3.2"
 hex = "0.4.3"
-lazy_static = "1.4"
+lazy_static = "1.5.0"
 libbpf-sys = "=1.4.6"
 libbpf-cargo = "=0.25.0-beta.1"
 libbpf-rs = "=0.25.0-beta.1"
 log = "0.4.17"
 nvml-wrapper = { version = "0.10.0", optional = true }
 paste = "1.0"
-regex = "1.10"
-scx_stats = { path = "../scx_stats", version = "1.0.8" }
-serde = { version = "1.0", features = ["derive"] }
+regex = "1.11.1"
+scx_stats = { path = "../scx_stats", version = "1.0.9" }
+serde = { version = "1.0.215", features = ["derive"] }
 sscanf = "0.4"
 tar = "0.4"
 walkdir = "2.4"
@@ -33,8 +33,8 @@ zbus = { version = "5", optional = true }
 [build-dependencies]
 anyhow = "1.0.65"
 bindgen = ">=0.69"
-glob = "0.3"
-lazy_static = "1.4"
+glob = "0.3.2"
+lazy_static = "1.5.0"
 libbpf-cargo = "=0.25.0-beta.1"
 sscanf = "0.4"
 tar = "0.4"
