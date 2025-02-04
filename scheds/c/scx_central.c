@@ -43,23 +43,18 @@ static void sigint_handler(int dummy)
 	exit_req = 1;
 }
 
+extern int parse_cpu_mask_file(const char *, bool **, int *);
+
 int main(int argc, char **argv)
 {
 	struct scx_central *skel;
 	struct bpf_link *link;
 	__u64 seq = 0, ecode;
-	__s32 opt;
-	__u32 max_cpu_ids, nr_cpu_ids = 0, i = 0;
-	cpu_set_t *cpuset, curcpuset;
+	__s32 opt, ncpu;
+	cpu_set_t *cpuset;
+	bool *cpumask;
 
-	max_cpu_ids = libbpf_num_possible_cpus();
-	CPU_ZERO(&curcpuset);
-	SCX_BUG_ON(sched_getaffinity(0, sizeof(curcpuset), &curcpuset),
-		   "Failed to get current CPU topology");
-	for (i = 0; i < max_cpu_ids; i ++) {
-		if (CPU_ISSET(i, &curcpuset))
-			nr_cpu_ids ++;
-	}
+	SCX_BUG_ON(parse_cpu_mask_file("/sys/devices/system/cpu/online", &cpumask, &ncpu), "Failed to parse online cpus");
 
 	libbpf_set_print(libbpf_print_fn);
 	signal(SIGINT, sigint_handler);
@@ -68,7 +63,7 @@ restart:
 	skel = SCX_OPS_OPEN(central_ops, scx_central);
 
 	skel->rodata->central_cpu = 0;
-	skel->rodata->nr_cpu_ids = nr_cpu_ids;
+	skel->rodata->nr_cpu_ids = libbpf_num_possible_cpus();
 	skel->rodata->slice_ns = __COMPAT_ENUM_OR_ZERO("scx_public_consts", "SCX_SLICE_DFL");
 
 	assert(skel->rodata->nr_cpu_ids <= INT32_MAX);
@@ -82,9 +77,11 @@ restart:
 			u32 central_cpu = strtoul(optarg, NULL, 0);
 			if (central_cpu >= skel->rodata->nr_cpu_ids) {
 				fprintf(stderr, "invalid central CPU id value, %u given (%u max)\n", central_cpu, skel->rodata->nr_cpu_ids);
+				free(cpumask);
 				return -1;
-			} else if (!CPU_ISSET(central_cpu, &curcpuset)) {
+			} else if (central_cpu >= ncpu || !cpumask[central_cpu]) {
 				fprintf(stderr, "invalid central CPU id value, %u is offline\n", central_cpu);
+				free(cpumask);
 				return -1;
 			}
 			skel->rodata->central_cpu = (s32)central_cpu;
@@ -95,9 +92,12 @@ restart:
 			break;
 		default:
 			fprintf(stderr, help_fmt, basename(argv[0]));
+			free(cpumask);
 			return opt != 'h';
 		}
 	}
+
+	free(cpumask);
 
 	/* Resize arrays so their element count is equal to cpu count. */
 	RESIZE_ARRAY(skel, data, cpu_gimme_task, skel->rodata->nr_cpu_ids);
