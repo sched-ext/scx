@@ -10,11 +10,11 @@ on:
 
 jobs:
   build-kernel:
-    runs-on: [ "self-hosted", "linux", "x64" ]
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64" ]') || 'ubuntu-latest' }}
     steps:
-      # Uncomment these if reverting to GitHub hosted runners
-      # - name: Install Nix
-      #   uses: DeterminateSystems/nix-installer-action@main
+      - name: Install Nix
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: DeterminateSystems/nix-installer-action@main
 
       # Make very basic dependencies available in PATH
       - name: Install basic dependencies
