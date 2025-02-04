@@ -529,6 +529,23 @@ static inline bool time_in_range_open(u64 a, u64 b, u64 c)
  * Other helpers
  */
 
+static inline bool is_enq_cpu_selected(u64 enq_flags)
+{
+	u64 flag;
+
+	/*
+	 * When the kernel did not have SCX_ENQ_CPU_SELECTED,
+	 * select_task_rq_scx() has never been skipped. Thus, this case
+	 * should be considered that the CPU has already been selected.
+	 */
+	if (!bpf_core_enum_value_exists(enum scx_enq_flags,
+					SCX_ENQ_CPU_SELECTED))
+		return true;
+
+	flag = bpf_core_enum_value(enum scx_enq_flags, SCX_ENQ_CPU_SELECTED);
+	return enq_flags & flag;
+}
+
 /* useful compiler attributes */
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
