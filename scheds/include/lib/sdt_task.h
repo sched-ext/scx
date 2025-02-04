@@ -98,6 +98,12 @@ struct sdt_allocator {
 	sdt_desc_t	*root;
 };
 
+struct sdt_static {
+	size_t max_alloc_bytes;
+	void __arena *memory;
+	size_t off;
+};
+
 #ifdef __BPF__
 
 void __arena *sdt_task_data(struct task_struct *p);

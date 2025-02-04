@@ -639,12 +639,6 @@ u64 sdt_alloc_internal(struct sdt_allocator *alloc)
  * having to define an allocator for each type.
  */
 
-struct sdt_static {
-	size_t max_alloc_bytes;
-	void __arena *memory;
-	size_t off;
-};
-
 struct sdt_static sdt_static;
 
 __hidden
