@@ -875,7 +875,7 @@ impl Stats {
             prev_layer_usages: Self::read_layer_usages(&cpu_ctxs, nr_layers),
 
             cpu_busy: 0.0,
-            prev_total_cpu: read_total_cpu(&proc_reader)?,
+            prev_total_cpu: read_total_cpu(proc_reader)?,
 
             bpf_stats: bpf_stats.clone(),
             prev_bpf_stats: bpf_stats,
@@ -959,7 +959,7 @@ impl Stats {
             nr_nodes: self.nr_nodes,
 
             total_util: layer_utils.iter().flatten().sum(),
-            layer_utils: layer_utils.try_into().unwrap(),
+            layer_utils: layer_utils,
             prev_layer_usages: cur_layer_usages,
 
             cpu_busy,
@@ -1157,7 +1157,7 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn init_layers(skel: &mut OpenBpfSkel, specs: &Vec<LayerSpec>, topo: &Topology) -> Result<()> {
+    fn init_layers(skel: &mut OpenBpfSkel, specs: &[LayerSpec], topo: &Topology) -> Result<()> {
         skel.maps.rodata_data.nr_layers = specs.len() as u32;
         let mut perf_set = false;
 
@@ -1300,7 +1300,7 @@ impl<'a> Scheduler<'a> {
                 layer.perf = u32::try_from(*perf)?;
                 layer.node_mask = nodemask_from_nodes(nodes) as u64;
                 for (topo_node_id, topo_node) in &topo.nodes {
-                    if !nodes.is_empty() && !nodes.contains(&topo_node_id) {
+                    if !nodes.is_empty() && !nodes.contains(topo_node_id) {
                         continue;
                     }
                     layer.llc_mask |= llcmask_from_llcs(&topo_node.llcs) as u64;
@@ -1349,7 +1349,7 @@ impl<'a> Scheduler<'a> {
         }
     }
 
-    fn init_cpu_prox_map(topo: &Topology, cpu_ctxs: &mut Vec<bpf_intf::cpu_ctx>) {
+    fn init_cpu_prox_map(topo: &Topology, cpu_ctxs: &mut [bpf_intf::cpu_ctx]) {
         let radiate = |mut vec: Vec<usize>, center_id: usize| -> Vec<usize> {
             vec.sort_by_key(|&id| (center_id as i32 - id as i32).abs());
             vec
@@ -1695,7 +1695,7 @@ impl<'a> Scheduler<'a> {
         let layer_specs: Vec<_> = if disable_topology {
             info!("Disabling topology awareness");
             layer_specs
-                .into_iter()
+                .iter()
                 .cloned()
                 .map(|mut s| {
                     s.kind.common_mut().nodes.clear();
@@ -1811,8 +1811,8 @@ impl<'a> Scheduler<'a> {
         for (idx, spec) in layer_specs.iter().enumerate() {
             let growth_order = layer_growth_orders
                 .get(&idx)
-                .with_context(|| format!("layer has no growth order"))?;
-            layers.push(Layer::new(&spec, &topo, &growth_order)?);
+                .with_context(|| "layer has no growth order".to_string())?;
+            layers.push(Layer::new(spec, &topo, growth_order)?);
         }
 
         Self::init_cpus(&skel, &layer_specs, &topo)?;
@@ -2130,7 +2130,7 @@ impl<'a> Scheduler<'a> {
     /// Given (target, min) pair for each layer which was determined
     /// assuming infinite number of CPUs, distribute the actual CPUs
     /// according to their weights.
-    fn weighted_target_nr_cpus(&self, targets: &Vec<(usize, usize)>) -> Vec<usize> {
+    fn weighted_target_nr_cpus(&self, targets: &[(usize, usize)]) -> Vec<usize> {
         let mut nr_left = self.cpu_pool.topo.all_cpus.len();
         let weights: Vec<usize> = self
             .layers
@@ -2206,10 +2206,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn refresh_cpumasks(&mut self) -> Result<()> {
-        let layer_is_open = |layer: &Layer| match layer.kind {
-            LayerKind::Open { .. } => true,
-            _ => false,
-        };
+        let layer_is_open = |layer: &Layer| matches!(layer.kind, LayerKind::Open { .. });
 
         let mut updated = false;
         let targets = self.calc_target_nr_cpus();
@@ -2381,7 +2378,7 @@ impl<'a> Scheduler<'a> {
     fn generate_sys_stats(
         &mut self,
         stats: &Stats,
-        cpus_ranges: &mut Vec<(usize, usize)>,
+        cpus_ranges: &mut [(usize, usize)],
     ) -> Result<SysStats> {
         let bstats = &stats.bpf_stats;
         let mut sys_stats = SysStats::new(stats, bstats, self.cpu_pool.fallback_cpu)?;
@@ -2478,11 +2475,11 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
 
     for (idx, spec) in specs.iter().enumerate() {
         if idx < nr_specs - 1 {
-            if spec.matches.len() == 0 {
+            if spec.matches.is_empty() {
                 bail!("Non-terminal spec {:?} has NULL matches", spec.name);
             }
         } else {
-            if spec.matches.len() != 1 || spec.matches[0].len() != 0 {
+            if spec.matches.len() != 1 || !spec.matches[0].is_empty() {
                 bail!("Terminal spec {:?} must have an empty match", spec.name);
             }
         }
@@ -2658,7 +2655,7 @@ fn main() -> Result<()> {
         if common.weight == 0 {
             common.weight = DEFAULT_LAYER_WEIGHT;
         }
-        common.weight = common.weight.max(MIN_LAYER_WEIGHT).min(MAX_LAYER_WEIGHT);
+        common.weight = common.weight.clamp(MIN_LAYER_WEIGHT, MAX_LAYER_WEIGHT);
 
         if common.preempt {
             if common.disallow_open_after_us.is_some() {
