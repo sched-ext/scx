@@ -20,7 +20,7 @@ clap = { version = "4.1", features = [
     "string",
     "unstable-styles",
 ] }
-libbpf-rs = "=0.24.8"
+libbpf-rs = "=0.25.0-beta.1"
 scx_utils = { path = "../../rust/scx_utils", version = "1.0.10" }
 scx_stats = { path = "../../rust/scx_stats", version = "1.0.8" }
 config = "0.14.1"
