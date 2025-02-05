@@ -616,7 +616,7 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 * calculation of runtime statistics.
 	 */
 	suspended_duration = get_suspended_duration_and_reset(cpuc);
-	task_run_time = now - taskc->last_running_clk - suspended_duration;
+	task_run_time = time_delta(now, taskc->last_running_clk + suspended_duration);
 	taskc->acc_run_time_ns += task_run_time;
 	taskc->run_time_ns = calc_avg(taskc->run_time_ns, taskc->acc_run_time_ns);
 	taskc->last_stopping_clk = now;
