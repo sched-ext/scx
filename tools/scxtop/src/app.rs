@@ -7,7 +7,6 @@ use crate::available_perf_events;
 use crate::bpf_skel::BpfSkel;
 use crate::format_hz;
 use crate::read_file_string;
-use crate::Action;
 use crate::AppState;
 use crate::AppTheme;
 use crate::CpuData;
@@ -22,6 +21,7 @@ use crate::ViewState;
 use crate::APP;
 use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
+use crate::{Action, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction};
 
 use anyhow::Result;
 use glob::glob;
@@ -410,9 +410,9 @@ impl<'a> App<'a> {
                         let result = client.request::<JsonValue>("stats", vec![]);
                         match result {
                             Ok(stats) => {
-                                tx.send(Action::SchedStats {
-                                    raw: serde_json::to_string_pretty(&stats).unwrap(),
-                                })
+                                tx.send(Action::SchedStats(
+                                    serde_json::to_string_pretty(&stats).unwrap(),
+                                ))
                                 .unwrap();
                             }
                             Err(_) => {
@@ -1570,9 +1570,8 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: (press to exit help)",
-                    self.keymap.action_keys_string(Action::SetState {
-                        state: AppState::Help,
-                    })
+                    self.keymap
+                        .action_keys_string(Action::SetState(AppState::Help))
                 ),
                 Style::default(),
             )),
@@ -1642,9 +1641,8 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: show CPU event menu ({})",
-                    self.keymap.action_keys_string(Action::SetState {
-                        state: AppState::Event
-                    }),
+                    self.keymap
+                        .action_keys_string(Action::SetState(AppState::Event)),
                     self.active_event.event
                 ),
                 Style::default(),
@@ -1691,27 +1689,24 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: display LLC view",
-                    self.keymap.action_keys_string(Action::SetState {
-                        state: AppState::Llc,
-                    })
+                    self.keymap
+                        .action_keys_string(Action::SetState(AppState::Llc))
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
                     "{}: display NUMA Node view",
-                    self.keymap.action_keys_string(Action::SetState {
-                        state: AppState::Node,
-                    })
+                    self.keymap
+                        .action_keys_string(Action::SetState(AppState::Node))
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
                     "{}: display scheduler view",
-                    self.keymap.action_keys_string(Action::SetState {
-                        state: AppState::Scheduler,
-                    })
+                    self.keymap
+                        .action_keys_string(Action::SetState(AppState::Scheduler))
                 ),
                 Style::default(),
             )),
@@ -1976,79 +1971,67 @@ impl<'a> App<'a> {
     }
 
     /// Updates the app when a task wakes.
-    fn on_sched_wakeup(&mut self, action: &Action) {
-        match action {
-            Action::SchedWakeup { .. } => {
-                if self.state == AppState::Tracing {
-                    self.trace_manager.on_sched_wakeup(action);
-                }
-            }
-            _ => {
-                panic!("Invalid calling context");
-            }
+    fn on_sched_wakeup(&mut self, action: &SchedWakeupAction) {
+        if self.state == AppState::Tracing {
+            self.trace_manager.on_sched_wakeup(action);
         }
     }
 
     /// Updates the app when a task is scheduled.
-    fn on_sched_switch(&mut self, action: &Action) {
-        match action {
-            Action::SchedSwitch {
-                cpu,
-                next_dsq_id,
-                next_dsq_lat_us,
-                next_dsq_vtime,
-                prev_dsq_id,
-                prev_used_slice_ns,
-                ..
-            } => {
-                if self.state == AppState::Tracing {
-                    if self.trace_tick > self.trace_tick_warmup {
-                        self.trace_manager.on_sched_switch(action);
-                    }
-                    return;
-                }
-                if self.scheduler.is_empty() {
-                    return;
-                }
+    fn on_sched_switch(&mut self, action: &SchedSwitchAction) {
+        let SchedSwitchAction {
+            cpu,
+            next_dsq_id,
+            next_dsq_lat_us,
+            next_dsq_vtime,
+            prev_dsq_id,
+            prev_used_slice_ns,
+            ..
+        } = action;
 
-                let cpu_data = self.cpu_data.entry(*cpu as usize).or_insert(CpuData::new(
-                    *cpu as usize,
-                    0,
-                    0,
-                    0,
-                    self.max_cpu_events,
-                ));
-                cpu_data.add_event_data("dsq_lat_us".to_string(), *next_dsq_lat_us);
-                let next_dsq_data = self
-                    .dsq_data
-                    .entry(*next_dsq_id)
-                    .or_insert(EventData::new(self.max_cpu_events));
-                next_dsq_data.add_event_data("dsq_lat_us".to_string(), *next_dsq_lat_us);
-                if *next_dsq_vtime > 0 {
-                    // vtime is special because we want the delta
-                    let last = next_dsq_data
-                        .event_data_immut("dsq_vtime_delta".to_string())
-                        .last()
-                        .copied()
-                        .unwrap_or(0_u64);
-                    if next_dsq_vtime - last < DSQ_VTIME_CUTOFF {
-                        next_dsq_data.add_event_data(
-                            "dsq_vtime_delta".to_string(),
-                            if last > 0 { *next_dsq_vtime - last } else { 0 },
-                        );
-                    }
-                }
-
-                let prev_dsq_data = self
-                    .dsq_data
-                    .entry(*prev_dsq_id)
-                    .or_insert(EventData::new(self.max_cpu_events));
-                prev_dsq_data.add_event_data("dsq_slice_consumed".to_string(), *prev_used_slice_ns);
+        if self.state == AppState::Tracing {
+            if self.trace_tick > self.trace_tick_warmup {
+                self.trace_manager.on_sched_switch(action);
             }
-            _ => {
-                panic!("invalid call to on_sched_switch");
+            return;
+        }
+        if self.scheduler.is_empty() {
+            return;
+        }
+
+        let cpu_data = self.cpu_data.entry(*cpu as usize).or_insert(CpuData::new(
+            *cpu as usize,
+            0,
+            0,
+            0,
+            self.max_cpu_events,
+        ));
+        cpu_data.add_event_data("dsq_lat_us".to_string(), *next_dsq_lat_us);
+        let next_dsq_data = self
+            .dsq_data
+            .entry(*next_dsq_id)
+            .or_insert(EventData::new(self.max_cpu_events));
+        next_dsq_data.add_event_data("dsq_lat_us".to_string(), *next_dsq_lat_us);
+        if *next_dsq_vtime > 0 {
+            // vtime is special because we want the delta
+            let last = next_dsq_data
+                .event_data_immut("dsq_vtime_delta".to_string())
+                .last()
+                .copied()
+                .unwrap_or(0_u64);
+            if next_dsq_vtime - last < DSQ_VTIME_CUTOFF {
+                next_dsq_data.add_event_data(
+                    "dsq_vtime_delta".to_string(),
+                    if last > 0 { *next_dsq_vtime - last } else { 0 },
+                );
             }
         }
+
+        let prev_dsq_data = self
+            .dsq_data
+            .entry(*prev_dsq_id)
+            .or_insert(EventData::new(self.max_cpu_events));
+        prev_dsq_data.add_event_data("dsq_slice_consumed".to_string(), *prev_used_slice_ns);
     }
 
     /// Updates the bpf bpf sampling rate.
@@ -2073,13 +2056,14 @@ impl<'a> App<'a> {
             Action::PageUp => self.on_pg_up(),
             Action::PageDown => self.on_pg_down(),
             Action::Enter => self.on_enter(),
-            Action::SetState { state } => {
+            Action::SetState(state) => {
                 if state == self.state {
                     self.set_state(self.prev_state.clone());
                 } else {
                     self.set_state(state);
                 }
             }
+
             Action::NextEvent => {
                 if self.next_event().is_err() {
                     // XXX handle error
@@ -2097,27 +2081,27 @@ impl<'a> App<'a> {
             Action::SchedUnreg => {
                 self.on_scheduler_unload();
             }
-            Action::SchedStats { raw } => {
+            Action::SchedStats(raw) => {
                 self.on_sched_stats(raw);
             }
-            Action::SchedCpuPerfSet { cpu, perf } => {
+            Action::SchedCpuPerfSet(SchedCpuPerfSetAction { cpu, perf }) => {
                 self.on_cpu_perf(cpu, perf);
             }
             Action::RecordTrace => {
                 self.start_trace()?;
             }
-            Action::SchedSwitch { .. } => {
-                self.on_sched_switch(&action);
+            Action::SchedSwitch(a) => {
+                self.on_sched_switch(&a);
             }
-            Action::SchedWakeup { .. } => {
-                self.on_sched_wakeup(&action);
+            Action::SchedWakeup(a) => {
+                self.on_sched_wakeup(&a);
             }
             Action::ClearEvent => self.stop_perf_events(),
             Action::ChangeTheme => {
                 self.set_theme(self.theme().next());
             }
-            Action::TickRateChange { tick_rate_ms } => {
-                self.tick_rate_ms = tick_rate_ms as usize;
+            Action::TickRateChange(dur) => {
+                self.tick_rate_ms = dur.as_millis().try_into().unwrap();
             }
             Action::ToggleCpuFreq => self.collect_cpu_freq = !self.collect_cpu_freq,
             Action::ToggleUncoreFreq => self.collect_uncore_freq = !self.collect_uncore_freq,

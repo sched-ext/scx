@@ -12,7 +12,6 @@ use scxtop::bpf_intf::*;
 use scxtop::bpf_skel::types::bpf_event;
 use scxtop::bpf_skel::*;
 use scxtop::read_file_string;
-use scxtop::Action;
 use scxtop::App;
 use scxtop::Event;
 use scxtop::Key;
@@ -21,6 +20,7 @@ use scxtop::Tui;
 use scxtop::APP;
 use scxtop::SCHED_NAME_PATH;
 use scxtop::STATS_SOCKET_PATH;
+use scxtop::{Action, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction};
 use std::mem::MaybeUninit;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
@@ -61,7 +61,9 @@ fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {
     match event {
         Event::Error => Action::None,
         Event::Tick => Action::Tick,
-        Event::TickRateChange(tick_rate_ms) => Action::TickRateChange { tick_rate_ms },
+        Event::TickRateChange(tick_rate_ms) => {
+            Action::TickRateChange(std::time::Duration::from_millis(tick_rate_ms))
+        }
         Event::Render => Action::Render,
         Event::Key(key) => match key.code {
             Char(c) => keymap.action(&Key::Char(c)),
@@ -146,12 +148,10 @@ async fn run() -> Result<()> {
             }
             #[allow(non_upper_case_globals)]
             event_type_CPU_PERF_SET => {
-                let action = unsafe {
-                    Action::SchedCpuPerfSet {
-                        cpu: event.cpu,
-                        perf: event.event.perf.perf,
-                    }
-                };
+                let action = Action::SchedCpuPerfSet(SchedCpuPerfSetAction {
+                    cpu: event.cpu,
+                    perf: unsafe { event.event.perf.perf },
+                });
                 tx.send(action).ok();
             }
             #[allow(non_upper_case_globals)]
@@ -161,13 +161,13 @@ async fn run() -> Result<()> {
                     16,
                 ))
                 .unwrap();
-                let action = Action::SchedWakeup {
+                let action = Action::SchedWakeup(SchedWakeupAction {
                     ts: event.ts,
                     cpu: event.cpu,
                     pid: event.event.wakeup.pid,
                     prio: event.event.wakeup.prio,
                     comm: comm.to_string(),
-                };
+                });
                 tx.send(action).ok();
             },
             #[allow(non_upper_case_globals)]
@@ -182,7 +182,7 @@ async fn run() -> Result<()> {
                     16,
                 ))
                 .unwrap();
-                let action = Action::SchedSwitch {
+                let action = Action::SchedSwitch(SchedSwitchAction {
                     ts: event.ts,
                     cpu: event.cpu,
                     preempt: event.event.sched_switch.preempt.assume_init(),
@@ -203,7 +203,7 @@ async fn run() -> Result<()> {
                     prev_comm: prev_comm.to_string(),
                     prev_prio: event.event.sched_switch.prev_prio,
                     prev_state: event.event.sched_switch.prev_state,
-                };
+                });
                 tx.send(action).ok();
             },
             _ => {}
@@ -245,9 +245,9 @@ async fn run() -> Result<()> {
         match e {
             Event::Quit => action_tx.send(Action::Quit)?,
             Event::Tick => action_tx.send(Action::Tick)?,
-            Event::TickRateChange(tick_rate_ms) => {
-                action_tx.send(Action::TickRateChange { tick_rate_ms })?
-            }
+            Event::TickRateChange(tick_rate_ms) => action_tx.send(Action::TickRateChange(
+                std::time::Duration::from_millis(tick_rate_ms),
+            ))?,
             Event::Render => action_tx.send(Action::Render)?,
             Event::Key(_) => {
                 let action = get_action(&app, &keymap, e);

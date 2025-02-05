@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::Action;
+use crate::{Action, SchedSwitchAction, SchedWakeupAction};
 
 use crate::protos_gen::perfetto_scx::counter_descriptor::Unit::UNIT_COUNT;
 use crate::protos_gen::perfetto_scx::trace_packet::Data::TrackDescriptor as DataTrackDescriptor;
@@ -204,41 +204,36 @@ impl<'a> PerfettoTraceManager<'a> {
     }
 
     /// Adds events for on sched_wakeup.
-    pub fn on_sched_wakeup(&mut self, action: &Action) {
-        match action {
-            Action::SchedWakeup {
-                ts,
-                cpu,
-                pid,
-                prio,
-                comm,
-            } => {
-                let _ = self
-                    .ftrace_events
-                    .entry(*cpu)
-                    .or_insert_with(Vec::new)
-                    .push({
-                        let mut ftrace_event = FtraceEvent::new();
-                        let mut wakeup_event = SchedWakeupFtraceEvent::new();
-                        let pid = *pid as u32;
-                        let cpu = *cpu as i32;
+    pub fn on_sched_wakeup(&mut self, action: &SchedWakeupAction) {
+        let SchedWakeupAction {
+            ts,
+            cpu,
+            pid,
+            prio,
+            comm,
+        } = action;
 
-                        wakeup_event.set_pid(pid.try_into().unwrap());
-                        wakeup_event.set_prio(*prio);
-                        wakeup_event.set_comm(comm.clone());
-                        wakeup_event.set_target_cpu(cpu);
+        let _ = self
+            .ftrace_events
+            .entry(*cpu)
+            .or_insert_with(Vec::new)
+            .push({
+                let mut ftrace_event = FtraceEvent::new();
+                let mut wakeup_event = SchedWakeupFtraceEvent::new();
+                let pid = *pid as u32;
+                let cpu = *cpu as i32;
 
-                        ftrace_event.set_timestamp(*ts);
-                        ftrace_event.set_sched_wakeup(wakeup_event);
-                        ftrace_event.set_pid(pid);
+                wakeup_event.set_pid(pid.try_into().unwrap());
+                wakeup_event.set_prio(*prio);
+                wakeup_event.set_comm(comm.clone());
+                wakeup_event.set_target_cpu(cpu);
 
-                        ftrace_event
-                    });
-            }
-            _ => {
-                panic!("Invalid Action");
-            }
-        }
+                ftrace_event.set_timestamp(*ts);
+                ftrace_event.set_sched_wakeup(wakeup_event);
+                ftrace_event.set_pid(pid);
+
+                ftrace_event
+            });
     }
 
     /// Adds events for on sched_wakeup_new.
@@ -247,91 +242,86 @@ impl<'a> PerfettoTraceManager<'a> {
     }
 
     /// Adds events for the sched_switch event.
-    pub fn on_sched_switch(&mut self, action: &Action) {
-        match action {
-            Action::SchedSwitch {
-                ts,
-                cpu,
-                next_dsq_id,
-                next_dsq_nr_queued,
-                next_dsq_lat_us,
-                next_pid,
-                next_prio,
-                next_comm,
-                prev_pid,
-                prev_prio,
-                prev_comm,
-                prev_state,
-                ..
-            } => {
-                let _ = self
-                    .ftrace_events
-                    .entry(*cpu)
-                    .or_insert_with(Vec::new)
-                    .push({
-                        let mut ftrace_event = FtraceEvent::new();
-                        let mut switch_event = SchedSwitchFtraceEvent::new();
-                        let prev_pid: i32 = *prev_pid as i32;
-                        let next_pid: i32 = *next_pid as i32;
+    pub fn on_sched_switch(&mut self, action: &SchedSwitchAction) {
+        let SchedSwitchAction {
+            ts,
+            cpu,
+            next_dsq_id,
+            next_dsq_nr_queued,
+            next_dsq_lat_us,
+            next_pid,
+            next_prio,
+            next_comm,
+            prev_pid,
+            prev_prio,
+            prev_comm,
+            prev_state,
+            ..
+        } = action;
 
-                        switch_event.set_next_pid(next_pid);
-                        switch_event.set_next_comm(next_comm.clone());
-                        switch_event.set_next_prio(*next_prio);
-                        switch_event.set_prev_pid(prev_pid);
-                        switch_event.set_prev_prio(*prev_prio);
-                        switch_event.set_prev_comm(prev_comm.clone());
-                        switch_event.set_prev_state(*prev_state as i64);
-                        ftrace_event.set_timestamp(*ts);
-                        ftrace_event.set_sched_switch(switch_event);
-                        ftrace_event.set_pid(prev_pid.try_into().unwrap());
+        let _ = self
+            .ftrace_events
+            .entry(*cpu)
+            .or_insert_with(Vec::new)
+            .push({
+                let mut ftrace_event = FtraceEvent::new();
+                let mut switch_event = SchedSwitchFtraceEvent::new();
+                let prev_pid: i32 = *prev_pid as i32;
+                let next_pid: i32 = *next_pid as i32;
 
-                        ftrace_event
-                    });
+                switch_event.set_next_pid(next_pid);
+                switch_event.set_next_comm(next_comm.clone());
+                switch_event.set_next_prio(*next_prio);
+                switch_event.set_prev_pid(prev_pid);
+                switch_event.set_prev_prio(*prev_prio);
+                switch_event.set_prev_comm(prev_comm.clone());
+                switch_event.set_prev_state(*prev_state as i64);
+                ftrace_event.set_timestamp(*ts);
+                ftrace_event.set_sched_switch(switch_event);
+                ftrace_event.set_pid(prev_pid.try_into().unwrap());
 
-                // Skip handling DSQ data if the sched_switch event didn't have
-                // any DSQ data.
-                if *next_dsq_id == scx_enums.SCX_DSQ_INVALID {
-                    return;
-                }
+                ftrace_event
+            });
 
-                let next_dsq_uuid = self
-                    .dsq_uuids
-                    .entry(*next_dsq_id)
-                    .or_insert_with(|| self.rng.next_u64());
-                let _ = self
-                    .dsq_lat_events
-                    .entry(*next_dsq_id)
-                    .or_insert_with(Vec::new)
-                    .push({
-                        let mut event = TrackEvent::new();
-                        let ts: i64 = (*ts).try_into().unwrap();
-                        event.set_type(TrackEventType::TYPE_COUNTER);
-                        event.set_track_uuid(*next_dsq_uuid);
-                        event.set_counter_value((*next_dsq_lat_us).try_into().unwrap());
-                        event.set_timestamp_absolute_us(ts / 1000);
-
-                        event
-                    });
-                let _ = self
-                    .dsq_nr_queued_events
-                    .entry(*next_dsq_id)
-                    .or_insert_with(Vec::new)
-                    .push({
-                        let mut event = TrackEvent::new();
-                        let ts: i64 = (*ts).try_into().unwrap();
-                        event.set_type(TrackEventType::TYPE_COUNTER);
-                        // Each track needs a separate unique UUID, so we'll add one to the dsq for
-                        // the nr_queued events.
-                        event.set_track_uuid(*next_dsq_uuid + 1);
-                        event.set_counter_value(*next_dsq_nr_queued as i64);
-                        event.set_timestamp_absolute_us(ts / 1000);
-
-                        event
-                    });
-            }
-            _ => {
-                panic!("Invalid Action");
-            }
+        // Skip handling DSQ data if the sched_switch event didn't have
+        // any DSQ data.
+        if *next_dsq_id == scx_enums.SCX_DSQ_INVALID {
+            return;
         }
+
+        let next_dsq_uuid = self
+            .dsq_uuids
+            .entry(*next_dsq_id)
+            .or_insert_with(|| self.rng.next_u64());
+        let _ = self
+            .dsq_lat_events
+            .entry(*next_dsq_id)
+            .or_insert_with(Vec::new)
+            .push({
+                let mut event = TrackEvent::new();
+                let ts: i64 = (*ts).try_into().unwrap();
+                event.set_type(TrackEventType::TYPE_COUNTER);
+                event.set_track_uuid(*next_dsq_uuid);
+                event.set_counter_value((*next_dsq_lat_us).try_into().unwrap());
+                event.set_timestamp_absolute_us(ts / 1000);
+
+                event
+            });
+        let _ = self
+            .dsq_nr_queued_events
+            .entry(*next_dsq_id)
+            .or_insert_with(Vec::new)
+            .push({
+                let mut event = TrackEvent::new();
+                let ts: i64 = (*ts).try_into().unwrap();
+                event.set_type(TrackEventType::TYPE_COUNTER);
+                // Each track needs a separate unique UUID, so we'll add one to the dsq for
+                // the nr_queued events.
+                event.set_track_uuid(*next_dsq_uuid + 1);
+                event.set_counter_value(*next_dsq_nr_queued as i64);
+                event.set_timestamp_absolute_us(ts / 1000);
+
+                event
+            });
     }
 }
