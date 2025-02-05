@@ -221,7 +221,7 @@ static scx_cpumask_t scx_percpu_scxmask(void)
 static scx_cpumask_t scxmask_get_idle_smtmask()
 {
 	scx_cpumask_t scx = scx_percpu_scxmask();
-	const struct cpumask *bpf = scx_bpf_get_idle_smtmask();
+	const struct cpumask __kptr *bpf = scx_bpf_get_idle_smtmask();
 
 	if (!bpf) {
 		scx_bpf_error("failed to retrieve CPU-local storage");
@@ -237,7 +237,7 @@ static scx_cpumask_t scxmask_get_idle_smtmask()
 
 static s32 scxmask_pick_idle_cpu(scx_cpumask_t mask __arg_arena, int flags)
 {
-	struct bpf_cpumask *bpf = scx_percpu_bpfmask();
+	struct bpf_cpumask __kptr *bpf = scx_percpu_bpfmask();
 	s32 cpu;
 
 	if (!bpf)
@@ -247,7 +247,7 @@ static s32 scxmask_pick_idle_cpu(scx_cpumask_t mask __arg_arena, int flags)
 
 	cpu = scx_bpf_pick_idle_cpu(cast_mask(bpf), flags);
 
-	scxmask_from_bpf(mask, cast_mask(bpf));
+	scxmask_from_bpf(mask, (const cpumask_t __kptr *)bpf);
 
 	return cpu;
 }
