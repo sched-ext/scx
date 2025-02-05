@@ -1,6 +1,6 @@
 [package]
 name = "scx_lavd"
-version = "1.0.8"
+version = "1.0.9"
 authors = ["Changwoo Min <changwoo@igalia.com>", "Igalia"]
 edition = "2021"
 description = "A Latency-criticality Aware Virtual Deadline (LAVD) scheduler based on sched_ext, which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. https://github.com/sched-ext/scx/tree/main"
