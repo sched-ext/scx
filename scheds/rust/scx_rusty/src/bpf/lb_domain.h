@@ -6,9 +6,9 @@ struct lb_domain {
 	union sdt_id		tid;
 
 	struct bpf_spin_lock vtime_lock;
-	struct bpf_cpumask __kptr *cpumask;
-	struct bpf_cpumask __kptr *direct_greedy_cpumask;
-	struct bpf_cpumask __kptr *node_cpumask;
+	scx_cpumask_t cpumask;
+	scx_cpumask_t direct_greedy_cpumask;
+	scx_cpumask_t node_cpumask;
 
 	dom_ptr domc;
 };
@@ -24,7 +24,7 @@ struct {
 volatile dom_ptr dom_ctxs[MAX_DOMS];
 struct sdt_allocator lb_domain_allocator;
 
-__hidden __noinline
+__weak
 int lb_domain_init(void)
 {
 	return sdt_alloc_init(&lb_domain_allocator, sizeof(struct dom_ctx));
