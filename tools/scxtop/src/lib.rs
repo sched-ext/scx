@@ -95,6 +95,54 @@ impl std::fmt::Display for ViewState {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SchedCpuPerfSetAction {
+    pub cpu: u32,
+    pub perf: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SchedSwitchAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub preempt: bool,
+    pub next_dsq_id: u64,
+    pub next_dsq_lat_us: u64,
+    pub next_dsq_nr_queued: u32,
+    pub next_dsq_vtime: u64,
+    pub next_slice_ns: u64,
+    pub next_pid: u32,
+    pub next_tgid: u32,
+    pub next_prio: i32,
+    pub next_comm: String,
+    pub prev_dsq_id: u64,
+    pub prev_used_slice_ns: u64,
+    pub prev_slice_ns: u64,
+    pub prev_pid: u32,
+    pub prev_tgid: u32,
+    pub prev_prio: i32,
+    pub prev_comm: String,
+    pub prev_state: u64,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SchedWakeupAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub pid: u32,
+    pub prio: i32,
+    pub comm: String,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SchedWakeupNewAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub pid: u32,
+    pub prio: i32,
+    pub comm: String,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
     Tick,
     Increment,
@@ -114,59 +162,17 @@ pub enum Action {
     Render,
     SchedReg,
     SchedUnreg,
-    SchedCpuPerfSet {
-        cpu: u32,
-        perf: u32,
-    },
-    SchedStats {
-        raw: String,
-    },
-    SchedSwitch {
-        ts: u64,
-        cpu: u32,
-        preempt: bool,
-        next_dsq_id: u64,
-        next_dsq_lat_us: u64,
-        next_dsq_nr_queued: u32,
-        next_dsq_vtime: u64,
-        next_slice_ns: u64,
-        next_pid: u32,
-        next_tgid: u32,
-        next_prio: i32,
-        next_comm: String,
-        prev_dsq_id: u64,
-        prev_used_slice_ns: u64,
-        prev_slice_ns: u64,
-        prev_pid: u32,
-        prev_tgid: u32,
-        prev_prio: i32,
-        prev_comm: String,
-        prev_state: u64,
-    },
-    SchedWakeup {
-        ts: u64,
-        cpu: u32,
-        pid: u32,
-        prio: i32,
-        comm: String,
-    },
-    SchedWakeupNew {
-        ts: u64,
-        cpu: u32,
-        pid: u32,
-        prio: i32,
-        comm: String,
-    },
-    SetState {
-        state: AppState,
-    },
+    SchedCpuPerfSet(SchedCpuPerfSetAction),
+    SchedStats(String),
+    SchedSwitch(SchedSwitchAction),
+    SchedWakeup(SchedWakeupAction),
+    SchedWakeupNew(SchedWakeupNewAction),
+    SetState(AppState),
     NextViewState,
     RecordTrace,
     ToggleCpuFreq,
     ToggleUncoreFreq,
-    TickRateChange {
-        tick_rate_ms: u64,
-    },
+    TickRateChange(std::time::Duration),
     IncTickRate,
     DecTickRate,
     IncBpfSampleRate,
