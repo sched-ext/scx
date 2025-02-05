@@ -331,8 +331,8 @@ impl BpfBuilder {
         self
     }
 
-    pub fn compile_link_gen(&self) -> Result<()> {
-        let (_, name) = match &self.skel_input_name {
+    pub fn compile_link_gen(&mut self) -> Result<()> {
+        let (input, name) = match &self.skel_input_name {
             Some(pair) => pair,
             None => return Ok(()),
         };
@@ -370,7 +370,13 @@ impl BpfBuilder {
             .clang_args(&self.cflags)
             .generate(&skel_path)?;
 
-        self.gen_cargo_reruns(None)?;
+        let mut deps = BTreeSet::new();
+        self.add_src_deps(&mut deps, &input)?;
+        for filename in self.sources.iter() {
+            deps.insert(filename.to_string());
+        }
+
+        self.gen_cargo_reruns(Some(&mut deps))?;
 
         Ok(())
     }
@@ -395,6 +401,12 @@ impl BpfBuilder {
             println!("cargo:warning={}", line);
         }
 
+        self.add_src_deps(deps, &input)?;
+
+        Ok(())
+    }
+
+    fn add_src_deps(&self, deps: &mut BTreeSet<String>, input: &str) -> Result<()> {
         let c_path = PathBuf::from(input);
         let dir = c_path
             .parent()
