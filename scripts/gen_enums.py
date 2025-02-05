@@ -46,6 +46,7 @@ enums = [
 
             ("scx_enq_flags", "SCX_ENQ_WAKEUP"),
             ("scx_enq_flags", "SCX_ENQ_HEAD"),
+            ("scx_enq_flags", "SCX_ENQ_CPU_SELECTED"),
             ("scx_enq_flags", "SCX_ENQ_PREEMPT"),
             ("scx_enq_flags", "SCX_ENQ_REENQ"),
             ("scx_enq_flags", "SCX_ENQ_LAST"),
