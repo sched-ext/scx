@@ -4,7 +4,9 @@ use crate::misc::read_file_usize;
 use crate::{Cpumask, NR_CPU_IDS};
 use nvml_wrapper::bitmasks::InitFlags;
 use nvml_wrapper::enum_wrappers::device::Clock;
+use nvml_wrapper::error::{nvml_sym, nvml_try};
 use nvml_wrapper::Nvml;
+use nvml_wrapper_sys::bindings::{nvmlDeviceAttributes_t, NvmlLib};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -22,6 +24,8 @@ pub struct Gpu {
     pub max_sm_clock: usize,
     pub memory: u64,
     pub cpu_mask: Cpumask,
+    // Max Streaming Multiprocessors supported
+    pub multiproc_count: u32,
 }
 
 pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
@@ -62,6 +66,25 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 Cpumask::new()
             };
 
+            // FIXME: maybe update nvml-wrapper so it wraps this binding and not
+            // loading twice NVML ?
+            let multiproc_count;
+            unsafe {
+                let mut attrs: nvmlDeviceAttributes_t = std::mem::zeroed();
+                let lib: NvmlLib = NvmlLib::new("libnvidia-ml.so").unwrap();
+                let nvml_device_get_attributes_v2 =
+                    nvml_sym(lib.nvmlDeviceGetAttributes_v2.as_ref()).unwrap();
+                // Allows for workload estimate/distribution, some other attributes
+                // are either redundant or not useful for here (except gpuInstanceSliceCount ?)
+                multiproc_count = match nvml_try(nvml_device_get_attributes_v2(
+                    nvidia_gpu.handle(),
+                    &mut attrs,
+                )) {
+                    Ok(()) => attrs.multiprocessorCount,
+                    _ => 0,
+                };
+            }
+
             // The NVML library doesn't return a PCIe bus ID compatible with sysfs. It includes
             // uppercase bus ID values and an extra four leading 0s.
             let bus_id = pci_info.bus_id.to_lowercase();
@@ -76,6 +99,7 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 max_sm_clock: sm_boost_clock as usize,
                 memory: memory_info.total,
                 cpu_mask,
+                multiproc_count,
             };
             if !gpus.contains_key(&numa_node) {
                 gpus.insert(numa_node, vec![gpu]);

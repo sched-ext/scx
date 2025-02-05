@@ -2383,6 +2383,7 @@ dependencies = [
  "libc",
  "log",
  "nvml-wrapper",
+ "nvml-wrapper-sys",
  "paste",
  "regex",
  "scx_stats",
