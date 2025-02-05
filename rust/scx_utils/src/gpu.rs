@@ -83,6 +83,8 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                     Ok(()) => attrs.multiprocessorCount,
                     _ => 0,
                 };
+
+                let _ = std::mem::ManuallyDrop::new(lib);
             }
 
             // The NVML library doesn't return a PCIe bus ID compatible with sysfs. It includes
