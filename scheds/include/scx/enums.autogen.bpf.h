@@ -88,6 +88,9 @@ const volatile u64 __SCX_ENQ_WAKEUP __weak;
 const volatile u64 __SCX_ENQ_HEAD __weak;
 #define SCX_ENQ_HEAD __SCX_ENQ_HEAD
 
+const volatile u64 __SCX_ENQ_CPU_SELECTED __weak;
+#define SCX_ENQ_CPU_SELECTED __SCX_ENQ_CPU_SELECTED
+
 const volatile u64 __SCX_ENQ_PREEMPT __weak;
 #define SCX_ENQ_PREEMPT __SCX_ENQ_PREEMPT
 

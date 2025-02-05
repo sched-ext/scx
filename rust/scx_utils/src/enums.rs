@@ -37,6 +37,7 @@ pub struct Enums {
     pub SCX_KICK_WAIT: u64,
     pub SCX_ENQ_WAKEUP: u64,
     pub SCX_ENQ_HEAD: u64,
+    pub SCX_ENQ_CPU_SELECTED: u64,
     pub SCX_ENQ_PREEMPT: u64,
     pub SCX_ENQ_REENQ: u64,
     pub SCX_ENQ_LAST: u64,
@@ -74,6 +75,7 @@ lazy_static::lazy_static! {
         SCX_KICK_WAIT: read_enum("scx_kick_flags","SCX_KICK_WAIT").unwrap(),
         SCX_ENQ_WAKEUP: read_enum("scx_enq_flags","SCX_ENQ_WAKEUP").unwrap(),
         SCX_ENQ_HEAD: read_enum("scx_enq_flags","SCX_ENQ_HEAD").unwrap(),
+        SCX_ENQ_CPU_SELECTED: read_enum("scx_enq_flags","SCX_ENQ_CPU_SELECTED").unwrap(),
         SCX_ENQ_PREEMPT: read_enum("scx_enq_flags","SCX_ENQ_PREEMPT").unwrap(),
         SCX_ENQ_REENQ: read_enum("scx_enq_flags","SCX_ENQ_REENQ").unwrap(),
         SCX_ENQ_LAST: read_enum("scx_enq_flags","SCX_ENQ_LAST").unwrap(),
@@ -114,6 +116,7 @@ macro_rules! import_enums {
         $skel.maps.rodata_data.__SCX_KICK_WAIT = scx_enums.SCX_KICK_WAIT;
         $skel.maps.rodata_data.__SCX_ENQ_WAKEUP = scx_enums.SCX_ENQ_WAKEUP;
         $skel.maps.rodata_data.__SCX_ENQ_HEAD = scx_enums.SCX_ENQ_HEAD;
+        $skel.maps.rodata_data.__SCX_ENQ_CPU_SELECTED = scx_enums.SCX_ENQ_CPU_SELECTED;
         $skel.maps.rodata_data.__SCX_ENQ_PREEMPT = scx_enums.SCX_ENQ_PREEMPT;
         $skel.maps.rodata_data.__SCX_ENQ_REENQ = scx_enums.SCX_ENQ_REENQ;
         $skel.maps.rodata_data.__SCX_ENQ_LAST = scx_enums.SCX_ENQ_LAST;
