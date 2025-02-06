@@ -153,6 +153,11 @@ impl PerfEvent {
             "bus-cycles".to_string(),
             0,
         ));
+        avail_events.push(PerfEvent::new(
+            "hw".to_string(),
+            "L1-dcache-load-misses".to_string(),
+            0,
+        ));
 
         avail_events
     }
@@ -236,6 +241,9 @@ impl PerfEvent {
                     }
                     "bus-cycles" | "bus_cycles" => {
                         attrs.config = perf::bindings::PERF_COUNT_HW_BUS_CYCLES as u64;
+                    }
+                    "L1-dcache-load-misses" => {
+                        attrs.config = perf::bindings::PERF_COUNT_HW_CACHE_RESULT_MISS as u64;
                     }
                     _ => {
                         return Err(anyhow!("unknown event"));

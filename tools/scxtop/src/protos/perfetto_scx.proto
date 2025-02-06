@@ -926,7 +926,7 @@ message PerfEvents {
     // emulation-faults
     SW_EMULATION_FAULTS = 9;
     // dummy
-    SW_DUMMY = 20;
+    SW_DUMMY = 21;
 
     // cpu-cycles, cycles
     HW_CPU_CYCLES = 10;
@@ -948,6 +948,8 @@ message PerfEvents {
     HW_STALLED_CYCLES_BACKEND = 18;
     // ref-cycles
     HW_REF_CPU_CYCLES = 19;
+    // l1-dcache-load-misses
+    HW_CACHE_RESULT_MISS = 20;
   }
 
   message Tracepoint {
