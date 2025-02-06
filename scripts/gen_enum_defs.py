@@ -86,8 +86,10 @@ def gen_enum_defs(vmlinux_h, enum_defs_h, prefixes):
                     (enum, val) = get_enum_val(line)
                     if enum == None:
                         continue
-                    if enum.startswith("SCX_") or enum.startswith("__SCX_"):
-                        gen_enum_have(fe, enum)
+                    for prefix in prefixes:
+                        if enum.startswith(prefix):
+                            gen_enum_have(fe, enum)
+                            break
             gen_enum_footer(fe)
 
 def parse_args(args):
