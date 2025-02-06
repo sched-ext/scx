@@ -1059,14 +1059,10 @@ static bool can_direct_dispatch(struct task_struct *p, u64 enq_flags,
 	 * migratable, check whether the CPU is idle. If the CPU is idle,
 	 * dispatch the task to the local DSQ directly.
 	 */
-	if (bpf_core_enum_value_exists(enum scx_enq_flags, SCX_ENQ_CPU_SELECTED)) {
-		u64 flag = bpf_core_enum_value(enum scx_enq_flags,
-					       SCX_ENQ_CPU_SELECTED);
-		if (!(enq_flags & flag)) {
-			if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
-				bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
-				return true;
-		}
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
+		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
+			bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
+			return true;
 	}
 
 	return false;
