@@ -20,7 +20,9 @@ use scxtop::Tui;
 use scxtop::APP;
 use scxtop::SCHED_NAME_PATH;
 use scxtop::STATS_SOCKET_PATH;
-use scxtop::{Action, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction};
+use scxtop::{
+    Action, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction,
+};
 use std::mem::MaybeUninit;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
@@ -73,7 +75,8 @@ fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {
     }
 }
 
-async fn run() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let (action_tx, mut action_rx) = mpsc::unbounded_channel();
 
     let args = Args::parse();
@@ -170,6 +173,22 @@ async fn run() -> Result<()> {
                 });
                 tx.send(action).ok();
             },
+            #[allow(non_upper_case_globals)]
+            event_type_SCHED_WAKING => {
+                let waking = unsafe { &event.event.waking };
+                let comm = std::str::from_utf8(unsafe {
+                    std::slice::from_raw_parts(waking.comm.as_ptr() as *const u8, 16)
+                })
+                .unwrap();
+                let action = Action::SchedWaking(SchedWakingAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    pid: waking.pid,
+                    prio: waking.prio,
+                    comm: comm.to_string(),
+                });
+                tx.send(action).ok();
+            }
             #[allow(non_upper_case_globals)]
             event_type_SCHED_SWITCH => unsafe {
                 let prev_comm = std::str::from_utf8(std::slice::from_raw_parts(
@@ -272,15 +291,6 @@ async fn run() -> Result<()> {
     }
     main_tui.write().unwrap().exit()?;
     drop(links);
-
-    Ok(())
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    let result = run().await;
-
-    result?;
 
     Ok(())
 }

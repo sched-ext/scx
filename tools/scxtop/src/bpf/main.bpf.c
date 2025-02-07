@@ -371,6 +371,26 @@ int BPF_PROG(on_sched_wakeup_new, struct task_struct *p)
 	return __on_sched_wakeup(p);
 }
 
+SEC("tp_btf/sched_waking")
+int BPF_PROG(on_sched_waking, struct task_struct *p)
+{
+	struct bpf_event *event;
+
+	event = bpf_ringbuf_reserve(&events, sizeof(struct bpf_event), 0);
+	if (!event)
+		return 0;
+
+	event->type = SCHED_WAKING;
+	event->ts = bpf_ktime_get_ns();
+	event->cpu = bpf_get_smp_processor_id();
+	event->event.wakeup.pid = p->pid;
+	event->event.wakeup.prio = (int)p->prio;
+	__builtin_memcpy(&event->event.wakeup.comm, &p->comm, MAX_COMM);
+
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
 
 static __always_inline int on_sched_switch_non_scx(bool preempt, struct task_struct *prev,
 						   struct task_struct *next, u64 prev_state)
