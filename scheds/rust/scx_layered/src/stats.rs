@@ -37,6 +37,7 @@ const GSTAT_HI_FB_USAGE: usize = bpf_intf::global_stat_id_GSTAT_HI_FB_USAGE as u
 const GSTAT_LO_FB_EVENTS: usize = bpf_intf::global_stat_id_GSTAT_LO_FB_EVENTS as usize;
 const GSTAT_LO_FB_USAGE: usize = bpf_intf::global_stat_id_GSTAT_LO_FB_USAGE as usize;
 const GSTAT_FB_CPU_USAGE: usize = bpf_intf::global_stat_id_GSTAT_FB_CPU_USAGE as usize;
+const GSTAT_ANTISTALL: usize = bpf_intf::global_stat_id_GSTAT_ANTISTALL as usize;
 
 const LSTAT_SEL_LOCAL: usize = bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL as usize;
 const LSTAT_ENQ_LOCAL: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_LOCAL as usize;
@@ -504,6 +505,8 @@ pub struct SysStats {
     pub hi_fb_util: f64,
     #[stat(desc = "CPU util % used by lo fallback DSQs")]
     pub lo_fb_util: f64,
+    #[stat(desc = "Number of tasks dispatched via antistall")]
+    pub antistall: u64,
     #[stat(desc = "fallback CPU")]
     pub fallback_cpu: u32,
     #[stat(desc = "per-layer statistics")]
@@ -557,6 +560,7 @@ impl SysStats {
                 * 100.0,
             lo_fb_util: stats.bpf_stats.gstats[GSTAT_LO_FB_USAGE] as f64 / elapsed_ns as f64
                 * 100.0,
+            antistall: stats.bpf_stats.gstats[GSTAT_ANTISTALL],
             fallback_cpu: fallback_cpu as u32,
             fallback_cpu_util: stats.bpf_stats.gstats[GSTAT_FB_CPU_USAGE] as f64
                 / elapsed_ns as f64
@@ -580,7 +584,7 @@ impl SysStats {
 
         writeln!(
             w,
-            "busy={:5.1} util/hi/lo={:7.1}/{}/{} fallback_cpu/util={:3}/{:4.1} proc={:?}ms",
+            "busy={:5.1} util/hi/lo={:7.1}/{}/{} fallback_cpu/util={:3}/{:4.1} proc={:?}ms antistall={}",
             self.busy,
             self.util,
             fmt_pct(self.hi_fb_util),
@@ -588,6 +592,7 @@ impl SysStats {
             self.fallback_cpu,
             self.fallback_cpu_util,
             self.proc_ms,
+            self.antistall,
         )?;
 
         writeln!(
