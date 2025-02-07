@@ -223,7 +223,6 @@ struct {
 static struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
 {
 	struct task_ctx __arena *taskc = sdt_task_data(p);
-	cast_kern(taskc);
 	return (struct task_ctx *)taskc;
 }
 
@@ -269,15 +268,6 @@ static struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, struct bpf_c
 		scx_bpf_error("task bpf_cpumask lookup failed for task %p", p);
 
 	return taskc;
-}
-
-static dom_ptr task_domain(struct task_ctx *taskc)
-{
-	dom_ptr domc = taskc->domc;
-
-	cast_kern(domc);
-
-	return domc;
 }
 
 static struct pcpu_ctx *lookup_pcpu_ctx(s32 cpu)
@@ -350,8 +340,6 @@ static void dom_dcycle_adj(dom_ptr domc, u32 weight, u64 now, bool runnable)
 	s64 adj = runnable ? 1 : -1;
 	u32 bucket_idx = 0;
 	u32 dom_id;
-
-	cast_kern(domc);
 
 	dom_id = domc->id;
 
@@ -468,7 +456,7 @@ int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now)
 	if (!taskc)
 		return 0;
 
-	from_domc = task_domain(taskc);
+	from_domc = taskc->domc;
 	to_domc = lookup_dom_ctx(new_dom_id);
 
 	if (!from_domc || !to_domc || !taskc)
@@ -768,7 +756,7 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 	u64 dom_vruntime, min_vruntime;
 	dom_ptr domc;
 
-	if (!(domc = task_domain(taskc)))
+	if (!(domc = taskc->domc))
 		return;
 
 	dom_vruntime = dom_min_vruntime(domc);
@@ -844,7 +832,6 @@ static bool task_set_domain(struct task_struct *p __arg_trusted,
 		taskc->target_dom = new_dom_id;
 		taskc->domc = new_domc;
 
-		cast_kern(new_domc);
 		p->scx.dsq_vtime = dom_min_vruntime(new_domc);
 		taskc->deadline = p->scx.dsq_vtime +
 				  scale_inverse_fair(taskc->avg_runtime, taskc->weight);
@@ -1156,7 +1143,7 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 	if (!(taskc = lookup_task_ctx_mask(p, &p_cpumask)) || !p_cpumask)
 		return;
 
-	domc = task_domain(taskc);
+	domc = taskc->domc;
 	if (!domc)
 		return;
 
@@ -1459,7 +1446,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	domc = task_domain(taskc);
+	domc = taskc->domc;
 	if (!domc) {
 		scx_bpf_error("Invalid dom ID");
 		return;
@@ -1522,7 +1509,7 @@ void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	if (!(domc = task_domain(taskc)))
+	if (!(domc = taskc->domc))
 		return;
 
 	stopping_update_vtime(p, taskc, domc);
@@ -1537,7 +1524,7 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	if (!(domc = task_domain(taskc)))
+	if (!(domc = taskc->domc))
 		return;
 
 	task_load_adj(taskc, now, false);

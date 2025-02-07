@@ -1,4 +1,3 @@
-#include <scx/common.bpf.h>
 
 #include <lib/sdt_task.h>
 
@@ -39,7 +38,6 @@ dom_ptr lb_domain_alloc(u32 dom_id)
 	int ret;
 
 	data = sdt_alloc(&lb_domain_allocator);
-	cast_kern(data);
 
 	lb_domain.tid = data->tid;
 	lb_domain.domc = (dom_ptr)data->payload;
@@ -52,7 +50,6 @@ dom_ptr lb_domain_alloc(u32 dom_id)
 	}
 
 	domc = lb_domain.domc;
-	cast_kern(domc);
 
 	return domc;
 }
@@ -97,8 +94,6 @@ static dom_ptr try_lookup_dom_ctx(u32 dom_id)
 	dom_ptr domc;
 
 	domc = try_lookup_dom_ctx_arena(dom_id);
-
-	cast_kern(domc);
 
 	return domc;
 }
