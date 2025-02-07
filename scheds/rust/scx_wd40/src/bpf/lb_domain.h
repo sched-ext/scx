@@ -12,112 +12,52 @@ struct lb_domain {
 	dom_ptr domc;
 };
 
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct lb_domain);
-	__uint(max_entries, MAX_DOMS);
-	__uint(map_flags, 0);
-} lb_domain_map SEC(".maps");
+extern volatile dom_ptr dom_ctxs[MAX_DOMS];
+extern struct sdt_allocator lb_domain_allocator;
 
-volatile dom_ptr dom_ctxs[MAX_DOMS];
-struct sdt_allocator lb_domain_allocator;
+int lb_domain_init(void);
+dom_ptr lb_domain_alloc(u32 dom_id);
+void lb_domain_free(dom_ptr domc);
+struct lb_domain *lb_domain_get(u32 dom_id);
+dom_ptr try_lookup_dom_ctx(u32 dom_id);
+dom_ptr lookup_dom_ctx(u32 dom_id);
+struct bpf_spin_lock *lookup_dom_vtime_lock(dom_ptr domc);
 
-__hidden __noinline
-int lb_domain_init(void)
+__weak s32 create_node(u32 node_id);
+__weak s32 create_dom(u32 dom_id);
+int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now);
+
+extern const volatile u32 load_half_life;
+extern const volatile u32 debug;
+extern const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
+
+struct task_ctx *lookup_task_ctx(struct task_struct *p);
+struct task_ctx *try_lookup_task_ctx(struct task_struct *p);
+extern struct bpf_cpumask __kptr *all_cpumask;
+u32 dom_node_id(u32 dom_id);
+void dom_dcycle_adj(dom_ptr domc, u32 weight, u64 now, bool runnable);
+
+static inline u64 min(u64 a, u64 b)
 {
-	return sdt_alloc_init(&lb_domain_allocator, sizeof(struct dom_ctx));
+	return a <= b ? a : b;
 }
 
-__hidden __noinline
-dom_ptr lb_domain_alloc(u32 dom_id)
+static inline
+s32 create_save_cpumask(struct bpf_cpumask **kptr)
 {
-	struct sdt_data __arena *data = NULL;
-	struct lb_domain lb_domain;
-	dom_ptr domc;
-	int ret;
+	struct bpf_cpumask *cpumask;
 
-	data = sdt_alloc(&lb_domain_allocator);
-
-	lb_domain.tid = data->tid;
-	lb_domain.domc = (dom_ptr)data->payload;
-
-	ret = bpf_map_update_elem(&lb_domain_map, &dom_id, &lb_domain,
-				    BPF_EXIST);
-	if (ret) {
-		sdt_free_idx(&lb_domain_allocator, data->tid.idx);
-		return NULL;
+	cpumask = bpf_cpumask_create();
+	if (!cpumask) {
+		scx_bpf_error("Failed to create cpumask");
+		return -ENOMEM;
 	}
 
-	domc = lb_domain.domc;
-
-	return domc;
-}
-
-__hidden
-void lb_domain_free(dom_ptr domc)
-{
-	struct lb_domain *lb_domain;
-	u32 key = domc->id;
-
-	sdt_subprog_init_arena();
-
-	lb_domain = bpf_map_lookup_elem(&lb_domain_map, &key);
-	if (!lb_domain)
-		return;
-
-	sdt_free_idx(&lb_domain_allocator, lb_domain->tid.idx);
-	lb_domain->domc = NULL;
-
-	bpf_map_delete_elem(&lb_domain_map, &key);
-}
-
-static __always_inline
-struct lb_domain *lb_domain_get(u32 dom_id)
-{
-	return bpf_map_lookup_elem(&lb_domain_map, &dom_id);
-}
-
-static dom_ptr try_lookup_dom_ctx_arena(u32 dom_id)
-{
-	struct lb_domain *lb_domain;
-
-	lb_domain = lb_domain_get(dom_id);
-	if (!lb_domain)
-		return NULL;
-
-	return lb_domain->domc;
-}
-
-static dom_ptr try_lookup_dom_ctx(u32 dom_id)
-{
-	dom_ptr domc;
-
-	domc = try_lookup_dom_ctx_arena(dom_id);
-
-	return domc;
-}
-
-static dom_ptr lookup_dom_ctx(u32 dom_id)
-{
-	dom_ptr domc;
-
-	domc = try_lookup_dom_ctx(dom_id);
-	if (!domc)
-		scx_bpf_error("Failed to lookup dom[%u]", dom_id);
-
-	return domc;
-}
-
-static struct bpf_spin_lock *lookup_dom_vtime_lock(dom_ptr domc)
-{
-	struct lb_domain *lb_domain;
-
-	lb_domain = lb_domain_get(domc->id);
-	if (!lb_domain) {
-		scx_bpf_error("Failed to lookup dom map value");
-		return NULL;
+	cpumask = bpf_kptr_xchg(kptr, cpumask);
+	if (cpumask) {
+		scx_bpf_error("kptr already had cpumask");
+		bpf_cpumask_release(cpumask);
 	}
 
-	return &lb_domain->vtime_lock;
+	return 0;
 }
