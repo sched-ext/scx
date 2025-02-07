@@ -22,6 +22,32 @@ const volatile u32 dom_numa_id_map[MAX_DOMS];
 const volatile u32 debug;
 const volatile u32 load_half_life = 1000000000	/* 1s */;
 
+/* base slice duration */
+volatile u64 slice_ns;
+
+/*
+ * Statistics
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(key_size, sizeof(u32));
+	__uint(value_size, sizeof(u64));
+	__uint(max_entries, RUSTY_NR_STATS);
+} stats SEC(".maps");
+
+__weak
+int stat_add(enum stat_idx idx, u64 addend)
+{
+	u32 idx_v = idx;
+
+	u64 *cnt_p = bpf_map_lookup_elem(&stats, &idx_v);
+	if (cnt_p)
+		(*cnt_p) += addend;
+
+	return 0;
+}
+
+
 __hidden
 u32 dom_node_id(u32 dom_id)
 {
@@ -52,24 +78,4 @@ struct task_ctx *lookup_task_ctx(struct task_struct *p)
 		scx_bpf_error("task_ctx lookup failed for task %p", p);
 
 	return taskc;
-}
-
-__weak
-s32 create_save_cpumask(struct bpf_cpumask **kptr)
-{
-	struct bpf_cpumask *cpumask;
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask) {
-		scx_bpf_error("Failed to create cpumask");
-		return -ENOMEM;
-	}
-
-	cpumask = bpf_kptr_xchg(kptr, cpumask);
-	if (cpumask) {
-		scx_bpf_error("kptr already had cpumask");
-		bpf_cpumask_release(cpumask);
-	}
-
-	return 0;
 }

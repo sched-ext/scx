@@ -30,6 +30,7 @@ int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now);
 extern const volatile u32 load_half_life;
 extern const volatile u32 debug;
 extern const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
+extern volatile u64 slice_ns;
 
 struct task_ctx *lookup_task_ctx(struct task_struct *p);
 struct task_ctx *try_lookup_task_ctx(struct task_struct *p);
@@ -61,3 +62,21 @@ s32 create_save_cpumask(struct bpf_cpumask **kptr)
 
 	return 0;
 }
+
+int stat_add(enum stat_idx idx, u64 addend);
+static inline u64 dom_min_vruntime(dom_ptr domc)
+{
+	return READ_ONCE_ARENA(u64, domc->min_vruntime);
+}
+
+void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
+			  u64 enq_flags);
+
+void running_update_vtime(struct task_struct *p,
+				 struct task_ctx *taskc,
+				 dom_ptr domc);
+void stopping_update_vtime(struct task_struct *p, struct task_ctx *taskc,
+				  dom_ptr domc);
+
+u64 update_freq(u64 freq, u64 interval);
+void init_vtime(struct task_struct *p, struct task_ctx *taskc);
