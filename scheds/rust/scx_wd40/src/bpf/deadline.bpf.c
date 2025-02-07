@@ -294,6 +294,8 @@ void running_update_vtime(struct task_struct *p, struct task_ctx *taskc,
 	if (time_before(dom_min_vruntime(domc), p->scx.dsq_vtime))
 		WRITE_ONCE_ARENA(u64, domc->min_vruntime, p->scx.dsq_vtime);
 	bpf_spin_unlock(lock);
+
+	taskc->last_run_at = scx_bpf_now();
 }
 
 

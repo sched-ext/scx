@@ -471,4 +471,3 @@ __weak s32 create_dom(u32 dom_id)
 
 	return 0;
 }
-

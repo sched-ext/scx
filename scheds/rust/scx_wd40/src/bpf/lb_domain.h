@@ -106,7 +106,6 @@ void task_pick_and_set_domain(struct task_ctx *taskc,
 				     bool init_dsq_vtime);
 bool task_set_domain(struct task_struct *p __arg_trusted,
 			    u32 new_dom_id, bool init_dsq_vtime);
-struct bpf_cpumask *lookup_task_bpfmask(struct task_struct *p);
 struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, struct bpf_cpumask **p_cpumaskp);
 
 /*
@@ -115,17 +114,39 @@ struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, struct bpf_cpumask 
 struct pcpu_ctx {
 	u32 dom_rr_cur; /* used when scanning other doms */
 	u32 dom_id;
-	/*
-	 * Add some padding so that libbpf-rs can generate the rest of the
-	 * padding to CACHELINE_SIZE. This is necessary for now because most
-	 * versions of rust can't generate Default impls for arrays of more
-	 * than 32 elements, so if the struct requires more than 32 bytes of
-	 * padding, rustc will error out.
-	 *
-	 * This is currently being fixed in libbpf-cargo, so we should be able
-	 * to remove this workaround soon.
-	 */
-	u32 pad[8];
+	struct bpf_cpumask __kptr *bpfmask;
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 extern struct pcpu_ctx pcpu_ctx[MAX_CPUS];
+
+/*
+ * XXX We do not want to be sharing functions from main to other modules,
+ * but since we are implementing arena CPU masks the code below is on its
+ * way out anyway.
+ */
+
+struct bpfmask_wrapper {
+	struct bpf_cpumask __kptr *instance;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, struct task_struct *);
+	__type(value, struct bpfmask_wrapper);
+	__uint(max_entries, 1000000);
+	__uint(map_flags, 0);
+} task_masks __weak SEC(".maps");
+
+static inline
+struct bpf_cpumask *lookup_task_bpfmask(struct task_struct *p)
+{
+	struct bpfmask_wrapper *wrapper;
+
+	wrapper = bpf_map_lookup_elem(&task_masks, &p);
+	if (!wrapper) {
+		scx_bpf_error("lookup_mask_bpfmask failed for task %p", p);
+		return NULL;
+	}
+
+	return wrapper->instance;
+}

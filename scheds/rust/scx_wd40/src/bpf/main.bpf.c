@@ -80,10 +80,6 @@ const volatile bool direct_greedy_numa;
 const volatile u32 greedy_threshold;
 const volatile u32 greedy_threshold_x_numa;
 
-struct bpfmask_wrapper {
-	struct bpf_cpumask __kptr *instance;
-};
-
 struct rusty_percpu_storage {
 	struct bpf_cpumask __kptr *bpfmask;
 };
@@ -140,33 +136,6 @@ static struct bpf_cpumask *scx_percpu_bpfmask(void)
 struct pcpu_ctx pcpu_ctx[MAX_CPUS];
 
 const u64 ravg_1 = 1 << RAVG_FRAC_BITS;
-
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, struct task_struct *);
-	__type(value, struct bpfmask_wrapper);
-	__uint(max_entries, 1000000);
-	__uint(map_flags, 0);
-} task_masks SEC(".maps");
-
-/*
- * XXX We do not want to be sharing functions from main to other modules,
- * but since we are implementing arena CPU masks this function is on its
- * way out anyway.
- */
-__weak
-struct bpf_cpumask *lookup_task_bpfmask(struct task_struct *p)
-{
-	struct bpfmask_wrapper *wrapper;
-
-	wrapper = bpf_map_lookup_elem(&task_masks, &p);
-	if (!wrapper) {
-		scx_bpf_error("lookup_mask_bpfmask failed for task %p", p);
-		return NULL;
-	}
-
-	return wrapper->instance;
-}
 
 __hidden
 struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, struct bpf_cpumask **p_cpumaskp)
@@ -335,13 +304,119 @@ out:
 	return cpu;
 }
 
+static
+int select_cpu_idle_x_numa(struct task_ctx *taskc, u32 prev_cpu, bool has_idle_cores, s32 *cpu)
+{
+
+	u32 dom_id = cpu_to_dom_id(prev_cpu);
+	struct lb_domain *lb_domain;
+	struct bpf_cpumask *tmp_direct_greedy, *node_mask;
+	struct bpf_cpumask *tmp_cpumask;
+	dom_ptr domc;
+
+	*cpu = -1;
+
+	/*
+	 * CPU may be offline e.g. CPU was removed via hotplugging and scheduler
+	 * was restarted fast enough that default scheduler didn't get a chance
+	 * to move the task to another CPU. In this case, we don't account for
+	 * domain as we assume hotplugging is an infrequent operation. Thus,
+	 * we move the task in the order of preference:
+	 * 1. Move the task to idle CPU where greedy allocation is preferred
+	 * 2. Move the task to any CPU where greedy allocation is preferred
+	 * 3. Move the task to any CPU
+	 */
+	if (unlikely(is_offline_cpu(prev_cpu)))
+		domc = NULL;
+	else if (!(domc = lookup_dom_ctx(dom_id)))
+		return -ENOENT;
+
+	if (!(lb_domain = lb_domain_get(domc->id))) {
+		scx_bpf_error("Failed to lookup domain map value");
+		return -ENOENT;
+	}
+
+	tmp_direct_greedy = direct_greedy_cpumask;
+	if (!tmp_direct_greedy) {
+		scx_bpf_error("Failed to lookup direct_greedy mask");
+		return -ENOENT;
+	}
+	/*
+	 * By default, only look for an idle core in the current NUMA
+	 * node when looking for direct greedy CPUs outside of the
+	 * current domain. Stealing work temporarily is fine when
+	 * you're going across domain boundaries, but it may be less
+	 * desirable when crossing NUMA boundaries as the task's
+	 * working set may end up spanning multiple NUMA nodes.
+	 */
+	if (!direct_greedy_numa && domc) {
+		node_mask = lb_domain->node_cpumask;
+		if (!node_mask) {
+			scx_bpf_error("Failed to lookup node mask");
+			return -ENOENT;
+		}
+
+		tmp_cpumask = scx_percpu_bpfmask();
+		if (!tmp_cpumask) {
+			scx_bpf_error("Failed to lookup tmp cpumask");
+			return -ENOENT;
+		}
+		bpf_cpumask_and(tmp_cpumask,
+				cast_mask(node_mask),
+				cast_mask(tmp_direct_greedy));
+		tmp_direct_greedy = tmp_cpumask;
+	}
+
+	/* Try to find an idle core in the previous and then any domain */
+	if (has_idle_cores) {
+		if (domc && lb_domain->direct_greedy_cpumask) {
+			*cpu = scx_bpf_pick_idle_cpu(cast_mask(lb_domain->direct_greedy_cpumask),
+						    SCX_PICK_IDLE_CORE);
+			if (*cpu >= 0) {
+				stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
+				return 0;
+			}
+		}
+
+		if (direct_greedy_cpumask) {
+			*cpu = scx_bpf_pick_idle_cpu(cast_mask(tmp_direct_greedy),
+						    SCX_PICK_IDLE_CORE);
+			if (*cpu >= 0) {
+				stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
+				return 0;
+			}
+		}
+	}
+
+	/*
+	 * No idle core. Is there any idle CPU?
+	 */
+	if (domc && lb_domain->direct_greedy_cpumask) {
+		*cpu = scx_bpf_pick_idle_cpu(cast_mask(lb_domain->direct_greedy_cpumask), 0);
+		if (*cpu >= 0) {
+			stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
+			return 0;
+		}
+	}
+
+	if (direct_greedy_cpumask) {
+		*cpu = scx_bpf_pick_idle_cpu(cast_mask(tmp_direct_greedy), 0);
+		if (*cpu >= 0) {
+			stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
+			return 0;
+		}
+	}
+
+	return 0;
+}
+
 s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
 	const struct cpumask *idle_smtmask = scx_bpf_get_idle_smtmask();
 	struct task_ctx *taskc;
 	bool prev_domestic, has_idle_cores;
-	struct bpf_cpumask *p_cpumask, *tmp_cpumask;
+	struct bpf_cpumask *p_cpumask;
 	s32 cpu;
 
 	refresh_tune_params();
@@ -441,101 +516,11 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 */
 	if (taskc->all_cpus && direct_greedy_cpumask &&
 	    !bpf_cpumask_empty(cast_mask(direct_greedy_cpumask))) {
-		u32 dom_id = cpu_to_dom_id(prev_cpu);
-		dom_ptr domc;
-		struct lb_domain *lb_domain;
-		struct bpf_cpumask *tmp_direct_greedy, *node_mask;
-
-		/*
-		 * CPU may be offline e.g. CPU was removed via hotplugging and scheduler
-		 * was restarted fast enough that default scheduler didn't get a chance
-		 * to move the task to another CPU. In this case, we don't account for
-		 * domain as we assume hotplugging is an infrequent operation. Thus,
-		 * we move the task in the order of preference:
-		 * 1. Move the task to idle CPU where greedy allocation is preferred
-		 * 2. Move the task to any CPU where greedy allocation is preferred
-		 * 3. Move the task to any CPU
-		 */
-		if (unlikely(is_offline_cpu(prev_cpu)))
-			domc = NULL;
-		else if (!(domc = lookup_dom_ctx(dom_id)))
+		if (select_cpu_idle_x_numa(taskc, prev_cpu, has_idle_cores, &cpu))
 			goto enoent;
 
-		if (!(lb_domain = lb_domain_get(domc->id))) {
-			scx_bpf_error("Failed to lookup domain map value");
-			goto enoent;
-		}
-
-		tmp_direct_greedy = direct_greedy_cpumask;
-		if (!tmp_direct_greedy) {
-			scx_bpf_error("Failed to lookup direct_greedy mask");
-			goto enoent;
-		}
-		/*
-		 * By default, only look for an idle core in the current NUMA
-		 * node when looking for direct greedy CPUs outside of the
-		 * current domain. Stealing work temporarily is fine when
-		 * you're going across domain boundaries, but it may be less
-		 * desirable when crossing NUMA boundaries as the task's
-		 * working set may end up spanning multiple NUMA nodes.
-		 */
-		if (!direct_greedy_numa && domc) {
-			node_mask = lb_domain->node_cpumask;
-			if (!node_mask) {
-				scx_bpf_error("Failed to lookup node mask");
-				goto enoent;
-			}
-
-			tmp_cpumask = scx_percpu_bpfmask();
-			if (!tmp_cpumask) {
-				scx_bpf_error("Failed to lookup tmp cpumask");
-				goto enoent;
-			}
-			bpf_cpumask_and(tmp_cpumask,
-					cast_mask(node_mask),
-					cast_mask(tmp_direct_greedy));
-			tmp_direct_greedy = tmp_cpumask;
-		}
-
-		/* Try to find an idle core in the previous and then any domain */
-		if (has_idle_cores) {
-			if (domc && lb_domain->direct_greedy_cpumask) {
-				cpu = scx_bpf_pick_idle_cpu(cast_mask(lb_domain->direct_greedy_cpumask),
-							    SCX_PICK_IDLE_CORE);
-				if (cpu >= 0) {
-					stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
-					goto direct;
-				}
-			}
-
-			if (direct_greedy_cpumask) {
-				cpu = scx_bpf_pick_idle_cpu(cast_mask(tmp_direct_greedy),
-							    SCX_PICK_IDLE_CORE);
-				if (cpu >= 0) {
-					stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
-					goto direct;
-				}
-			}
-		}
-
-		/*
-		 * No idle core. Is there any idle CPU?
-		 */
-		if (domc && lb_domain->direct_greedy_cpumask) {
-			cpu = scx_bpf_pick_idle_cpu(cast_mask(lb_domain->direct_greedy_cpumask), 0);
-			if (cpu >= 0) {
-				stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
-				goto direct;
-			}
-		}
-
-		if (direct_greedy_cpumask) {
-			cpu = scx_bpf_pick_idle_cpu(cast_mask(tmp_direct_greedy), 0);
-			if (cpu >= 0) {
-				stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
-				goto direct;
-			}
-		}
+		if (cpu >= 0)
+			goto direct;
 	}
 
 	/*
@@ -652,11 +637,58 @@ dom_queue:
 	}
 }
 
+static bool
+dispatch_steal_local_numa(u32 curr_dom, struct pcpu_ctx *pcpuc)
+{
+	u32 my_node;
+	u32 dom;
+
+	my_node = dom_node_id(curr_dom);
+
+	/* try to steal a task from domains on the current NUMA node */
+	bpf_repeat(nr_doms - 1) {
+		dom = pcpuc->dom_rr_cur++ % nr_doms;
+		if (dom == curr_dom || dom_node_id(dom) != my_node)
+			continue;
+
+		if (scx_bpf_dsq_move_to_local(dom)) {
+			stat_add(RUSTY_STAT_GREEDY_LOCAL, 1);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool
+dispatch_steal_x_numa(u32 curr_dom, struct pcpu_ctx *pcpuc)
+{
+	u32 my_node;
+	u32 dom;
+
+	my_node = dom_node_id(curr_dom);
+
+	/* try to steal a task from domains on other NUMA nodes */
+	bpf_repeat(nr_doms - 1) {
+		dom = pcpuc->dom_rr_cur++ % nr_doms;
+
+		if (dom_node_id(dom) == my_node || dom == curr_dom ||
+		    scx_bpf_dsq_nr_queued(dom) >= greedy_threshold_x_numa)
+			continue;
+
+		if (scx_bpf_dsq_move_to_local(dom)) {
+			stat_add(RUSTY_STAT_GREEDY_XNUMA, 1);
+			return true;
+		}
+	}
+
+	return false;
+}
+
 void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 {
-	u32 curr_dom = cpu_to_dom_id(cpu), dom;
+	u32 curr_dom = cpu_to_dom_id(cpu);
 	struct pcpu_ctx *pcpuc;
-	u32 my_node;
 
 	/*
 	 * In older kernels, we may receive an ops.dispatch() callback when a
@@ -680,43 +712,33 @@ void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
 	if (!pcpuc)
 		return;
 
-	my_node = dom_node_id(curr_dom);
-
-	/* try to steal a task from domains on the current NUMA node */
-	bpf_repeat(nr_doms - 1) {
-		dom = pcpuc->dom_rr_cur++ % nr_doms;
-		if (dom == curr_dom || dom_node_id(dom) != my_node)
-			continue;
-
-		if (scx_bpf_dsq_move_to_local(dom)) {
-			stat_add(RUSTY_STAT_GREEDY_LOCAL, 1);
-			return;
-		}
-	}
+	if (dispatch_steal_local_numa(curr_dom, pcpuc))
+		return;
 
 	if (!greedy_threshold_x_numa || nr_nodes == 1)
 		return;
 
-	/* try to steal a task from domains on other NUMA nodes */
-	bpf_repeat(nr_doms - 1) {
-		dom = pcpuc->dom_rr_cur++ % nr_doms;
+	dispatch_steal_x_numa(curr_dom, pcpuc);
+}
 
-		if (dom_node_id(dom) == my_node || dom == curr_dom ||
-		    scx_bpf_dsq_nr_queued(dom) >= greedy_threshold_x_numa)
-			continue;
+static void
+update_task_wake_freq(struct task_struct *p, u64 now)
+{
+	struct task_ctx *taskc;
+	u64 interval;
 
-		if (scx_bpf_dsq_move_to_local(dom)) {
-			stat_add(RUSTY_STAT_GREEDY_XNUMA, 1);
-			return;
-		}
-	}
+	if (!(taskc = try_lookup_task_ctx(p)))
+		return;
+
+	interval = now - taskc->last_woke_at;
+	taskc->waker_freq = update_freq(taskc->waker_freq, interval);
+	taskc->last_woke_at = now;
 }
 
 void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 {
-	u64 now = scx_bpf_now(), interval;
-	struct task_struct *waker;
-	struct task_ctx *wakee_ctx, *waker_ctx;
+	u64 now = scx_bpf_now();
+	struct task_ctx *wakee_ctx;
 
 	if (!(wakee_ctx = lookup_task_ctx(p)))
 		return;
@@ -731,30 +753,14 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 
 	wakee_ctx->sum_runtime = 0;
 
-	waker = bpf_get_current_task_btf();
-	if (!(waker_ctx = try_lookup_task_ctx(waker)))
-		return;
-
-	interval = now - waker_ctx->last_woke_at;
-	waker_ctx->waker_freq = update_freq(waker_ctx->waker_freq, interval);
-	waker_ctx->last_woke_at = now;
+	update_task_wake_freq(bpf_get_current_task_btf(), now);
 }
 
-void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
+static
+void lb_record_run(struct task_struct *p, dom_ptr domc, struct task_ctx *taskc)
 {
 	task_ptr usrptr = (task_ptr)sdt_task_data(p);
-	struct task_ctx *taskc;
-	dom_ptr domc;
 	u32 dap_gen;
-
-	if (!(taskc = lookup_task_ctx(p)))
-		return;
-
-	domc = taskc->domc;
-	if (!domc) {
-		scx_bpf_error("Invalid dom ID");
-		return;
-	}
 
 	/*
 	 * Record that @p has been active in @domc. Load balancer will only
@@ -778,12 +784,28 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 		domc->active_tasks.tasks[idx] = usrptr;
 		taskc->dom_active_tasks_gen = dap_gen;
 	}
+}
+
+void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
+{
+	struct task_ctx *taskc;
+	dom_ptr domc;
+
+	if (!(taskc = lookup_task_ctx(p)))
+		return;
+
+	domc = taskc->domc;
+	if (!domc) {
+		scx_bpf_error("Invalid dom ID");
+		return;
+	}
+
+	lb_record_run(p, domc, taskc);
 
 	if (fifo_sched)
 		return;
 
 	running_update_vtime(p, taskc, domc);
-	taskc->last_run_at = scx_bpf_now();
 }
 
 void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
