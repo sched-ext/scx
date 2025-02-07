@@ -31,6 +31,8 @@ extern const volatile u32 load_half_life;
 extern const volatile u32 debug;
 extern const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 extern volatile u64 slice_ns;
+extern const volatile u32 nr_doms;
+extern const volatile u32 nr_nodes;
 
 struct task_ctx *lookup_task_ctx(struct task_struct *p);
 struct task_ctx *try_lookup_task_ctx(struct task_struct *p);
@@ -63,6 +65,24 @@ s32 create_save_cpumask(struct bpf_cpumask **kptr)
 	return 0;
 }
 
+static inline
+bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
+{
+	struct lb_domain *lb_domain;
+	struct bpf_cpumask *dmask;
+
+	lb_domain = lb_domain_get(dom_id);
+	if (!lb_domain)
+		return false;
+
+	dmask = lb_domain->cpumask;
+	if (!dmask)
+		return false;
+
+	return bpf_cpumask_intersects(cpumask, cast_mask(dmask));
+}
+
+
 int stat_add(enum stat_idx idx, u64 addend);
 static inline u64 dom_min_vruntime(dom_ptr domc)
 {
@@ -80,3 +100,32 @@ void stopping_update_vtime(struct task_struct *p, struct task_ctx *taskc,
 
 u64 update_freq(u64 freq, u64 interval);
 void init_vtime(struct task_struct *p, struct task_ctx *taskc);
+void task_pick_and_set_domain(struct task_ctx *taskc,
+				     struct task_struct *p,
+				     const struct cpumask *cpumask,
+				     bool init_dsq_vtime);
+bool task_set_domain(struct task_struct *p __arg_trusted,
+			    u32 new_dom_id, bool init_dsq_vtime);
+struct bpf_cpumask *lookup_task_bpfmask(struct task_struct *p);
+struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, struct bpf_cpumask **p_cpumaskp);
+
+/*
+ * Per-CPU context
+ */
+struct pcpu_ctx {
+	u32 dom_rr_cur; /* used when scanning other doms */
+	u32 dom_id;
+	/*
+	 * Add some padding so that libbpf-rs can generate the rest of the
+	 * padding to CACHELINE_SIZE. This is necessary for now because most
+	 * versions of rust can't generate Default impls for arrays of more
+	 * than 32 elements, so if the struct requires more than 32 bytes of
+	 * padding, rustc will error out.
+	 *
+	 * This is currently being fixed in libbpf-cargo, so we should be able
+	 * to remove this workaround soon.
+	 */
+	u32 pad[8];
+} __attribute__((aligned(CACHELINE_SIZE)));
+
+extern struct pcpu_ctx pcpu_ctx[MAX_CPUS];
