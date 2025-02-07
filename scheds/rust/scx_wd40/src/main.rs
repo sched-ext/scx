@@ -64,7 +64,9 @@ use scx_utils::NR_CPU_IDS;
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 
-/// scx_rusty: A multi-domain BPF / userspace hybrid scheduler
+/// scx_wd40: A fork of the scx_rusty multi-domain scheduler. 
+///
+/// The message below is from the original scx_rusty codebase:
 ///
 /// The BPF part does simple vtime or round robin scheduling in each domain
 /// while tracking average load of each domain and duty cycle of each task.
@@ -361,7 +363,7 @@ impl<'a> Scheduler<'a> {
         skel_builder.obj_builder.debug(opts.verbose > 0);
         init_libbpf_logging(None);
         info!(
-            "Running scx_rusty (build ID: {})",
+            "Running scx_wd40 (build ID: {})",
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
         let mut skel = scx_ops_open!(skel_builder, open_object, rusty).unwrap();
@@ -465,7 +467,7 @@ impl<'a> Scheduler<'a> {
             *ctx = Some(skel.maps.bss_data.dom_ctxs[id]);
         }
 
-        info!("Rusty scheduler started! Run `scx_rusty --monitor` for metrics.");
+        info!("WD40 scheduler started! Run `scx_wd40 --monitor` for metrics.");
 
         // Other stuff.
         let proc_reader = procfs::ProcReader::new();
@@ -640,7 +642,7 @@ fn main() -> Result<()> {
 
     if opts.version {
         println!(
-            "scx_rusty: {}",
+            "scx_wd40: {}",
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
         return Ok(());
