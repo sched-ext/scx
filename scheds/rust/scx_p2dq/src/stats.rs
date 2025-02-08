@@ -27,25 +27,41 @@ pub struct Metrics {
     pub pick2: u64,
     #[stat(desc = "Number of times a task migrated LLCs")]
     pub llc_migrations: u64,
+    #[stat(desc = "Number of times a task migrated NUMA nodes")]
+    pub node_migrations: u64,
+    #[stat(desc = "Number of times tasks have directly been dispatched to local per CPU DSQs")]
+    pub direct: u64,
+    #[stat(desc = "Number of times tasks have dispatched to an idle local per CPU DSQs")]
+    pub idle: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "same_dsq: {} dsq_change: {} keep: {} pick2: {}\n\tllc_migrations: {}",
-            self.same_dsq, self.dsq_change, self.keep, self.pick2, self.llc_migrations
+            "direct/idle {}/{}\n\tdsq same/migrate {}/{}\n\tkeep {} pick2 {}\n\tmigrations llc/node: {}/{}",
+            self.direct,
+            self.idle,
+            self.same_dsq,
+            self.dsq_change,
+            self.keep,
+            self.pick2,
+            self.llc_migrations,
+            self.node_migrations
         )?;
         Ok(())
     }
 
     fn delta(&self, rhs: &Self) -> Self {
         Self {
+            direct: self.direct - rhs.direct,
+            idle: self.idle - rhs.idle,
             dsq_change: self.dsq_change - rhs.dsq_change,
             same_dsq: self.same_dsq - rhs.same_dsq,
             keep: self.keep - rhs.keep,
             pick2: self.pick2 - rhs.pick2,
             llc_migrations: self.llc_migrations - rhs.llc_migrations,
+            node_migrations: self.node_migrations - rhs.node_migrations,
             ..self.clone()
         }
     }

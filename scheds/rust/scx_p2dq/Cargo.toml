@@ -3,7 +3,7 @@ name = "scx_p2dq"
 version = "1.0.8"
 authors = ["Daniel Hodges <hodges.daniel.scott@gmail.com>"]
 edition = "2021"
-description = ""
+description = "scx_p2dq A simple pick two load balancing scheduler in BPF"
 license = "GPL-2.0-only"
 
 [dependencies]

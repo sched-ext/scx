@@ -19,12 +19,6 @@ typedef unsigned int u32;
 typedef unsigned long long u64;
 #endif
 
-#ifdef LSP
-#define __bpf__
-#include "../../../../include/scx/ravg.bpf.h"
-#else
-#include <scx/ravg.bpf.h>
-#endif
 
 enum consts {
 	MAX_CPUS		= 512,
@@ -34,9 +28,12 @@ enum consts {
 };
 
 enum stat_idx {
+	P2DQ_STAT_DIRECT,
 	P2DQ_STAT_DSQ_SAME,
 	P2DQ_STAT_DSQ_CHANGE,
+	P2DQ_STAT_IDLE,
 	P2DQ_STAT_LLC_MIGRATION,
+	P2DQ_STAT_NODE_MIGRATION,
 	P2DQ_STAT_KEEP,
 	P2DQ_STAT_PICK2,
 	P2DQ_NR_STATS,
@@ -51,6 +48,7 @@ struct task_ctx {
 	int			dsq_index;
 	u32			cpu;
 	u32			llc_id;
+	u32			node_id;
 	bool			runnable;
 	u32			weight;
 	u64			last_dsq_id;
@@ -78,7 +76,6 @@ struct cpu_ctx {
 	u64				dsqs[MAX_DSQS_PER_LLC];
 	u64				dsq_load[MAX_DSQS_PER_LLC];
 	u64				max_load_dsq;
-	struct bpf_cpumask __kptr	*tmp_cpumask;
 };
 
 struct llc_ctx {
