@@ -1495,55 +1495,57 @@ impl<'a> Scheduler<'a> {
             .map(|(idx, _)| idx as u32)
             .collect();
 
-        // FIXME - this incorrectly assumes all possible CPUs are consecutive.
         for cpu in 0..*NR_CPUS_POSSIBLE {
             cpu_ctxs.push(*unsafe {
                 &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
             });
 
-            let topo_cpu = topo.all_cpus.get(&cpu).unwrap();
-            let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
-            cpu_ctxs[cpu].cpu = cpu as i32;
-            cpu_ctxs[cpu].layer_id = MAX_LAYERS as u32;
-            cpu_ctxs[cpu].task_layer_id = MAX_LAYERS as u32;
-            cpu_ctxs[cpu].is_big = is_big;
+            if let Some(topo_cpu) = topo.all_cpus.get(&cpu) {
+                let is_big = topo_cpu.core_type == CoreType::Big { turbo: true };
+                cpu_ctxs[cpu].cpu = cpu as i32;
+                cpu_ctxs[cpu].layer_id = MAX_LAYERS as u32;
+                cpu_ctxs[cpu].task_layer_id = MAX_LAYERS as u32;
+                cpu_ctxs[cpu].is_big = is_big;
 
-            fastrand::seed(cpu as u64);
+                fastrand::seed(cpu as u64);
 
-            let mut ogp_order = op_layers.clone();
-            ogp_order.append(&mut gp_layers.clone());
-            fastrand::shuffle(&mut ogp_order);
+                let mut ogp_order = op_layers.clone();
+                ogp_order.append(&mut gp_layers.clone());
+                fastrand::shuffle(&mut ogp_order);
 
-            let mut ogn_order = on_layers.clone();
-            ogn_order.append(&mut gn_layers.clone());
-            fastrand::shuffle(&mut ogn_order);
+                let mut ogn_order = on_layers.clone();
+                ogn_order.append(&mut gn_layers.clone());
+                fastrand::shuffle(&mut ogn_order);
 
-            let mut op_order = op_layers.clone();
-            fastrand::shuffle(&mut op_order);
+                let mut op_order = op_layers.clone();
+                fastrand::shuffle(&mut op_order);
 
-            let mut on_order = on_layers.clone();
-            fastrand::shuffle(&mut on_order);
+                let mut on_order = on_layers.clone();
+                fastrand::shuffle(&mut on_order);
 
-            let mut gp_order = gp_layers.clone();
-            fastrand::shuffle(&mut gp_order);
+                let mut gp_order = gp_layers.clone();
+                fastrand::shuffle(&mut gp_order);
 
-            let mut gn_order = gn_layers.clone();
-            fastrand::shuffle(&mut gn_order);
+                let mut gn_order = gn_layers.clone();
+                fastrand::shuffle(&mut gn_order);
 
-            for i in 0..MAX_LAYERS {
-                cpu_ctxs[cpu].ogp_layer_order[i] =
-                    ogp_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
-                cpu_ctxs[cpu].ogn_layer_order[i] =
-                    ogn_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                for i in 0..MAX_LAYERS {
+                    cpu_ctxs[cpu].ogp_layer_order[i] =
+                        ogp_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                    cpu_ctxs[cpu].ogn_layer_order[i] =
+                        ogn_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
 
-                cpu_ctxs[cpu].op_layer_order[i] =
-                    op_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
-                cpu_ctxs[cpu].on_layer_order[i] =
-                    on_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
-                cpu_ctxs[cpu].gp_layer_order[i] =
-                    gp_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
-                cpu_ctxs[cpu].gn_layer_order[i] =
-                    gn_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                    cpu_ctxs[cpu].op_layer_order[i] =
+                        op_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                    cpu_ctxs[cpu].on_layer_order[i] =
+                        on_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                    cpu_ctxs[cpu].gp_layer_order[i] =
+                        gp_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                    cpu_ctxs[cpu].gn_layer_order[i] =
+                        gn_order.get(i).cloned().unwrap_or(MAX_LAYERS as u32);
+                }
+            } else {
+                warn!("CPU ID not part of the topology: {:?}", cpu);
             }
         }
 
@@ -1649,12 +1651,6 @@ impl<'a> Scheduler<'a> {
             Topology::new()?
         });
 
-        /*
-         * FIXME: scx_layered incorrectly assumes that node, LLC and CPU IDs
-         * are consecutive. Verify that they are on this system and bail if
-         * not. It's lucky that core ID is not used anywhere as core IDs are
-         * not consecutive on some Ryzen CPUs.
-         */
         if topo.nodes.keys().enumerate().any(|(i, &k)| i != k) {
             bail!("Holes in node IDs detected: {:?}", topo.nodes.keys());
         }
