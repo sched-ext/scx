@@ -198,23 +198,26 @@ pub struct Topology {
 const RANKED_CPU_CACHE_DURATION: Duration = Duration::from_secs(10);
 
 /// Cached list of ranked CPUs
-#[derive(Debug)]
-struct RankedCpuCache {
+#[derive(Debug, Clone)]
+pub struct RankedCpuCache {
     /// List of CPU IDs sorted by their ranking (highest to lowest)
-    cpu_ids: Vec<usize>,
+    pub cpu_ids: Vec<usize>,
     /// When this cache was last updated
-    last_updated: Instant,
+    pub last_updated: Instant,
+    /// Generation number that increments each time the order changes
+    pub generation: u64,
 }
 
 impl RankedCpuCache {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             cpu_ids: Vec::new(),
             last_updated: Instant::now() - RANKED_CPU_CACHE_DURATION,
+            generation: 0,
         }
     }
 
-    fn is_valid(&self) -> bool {
+    pub fn is_valid(&self) -> bool {
         self.last_updated.elapsed() < RANKED_CPU_CACHE_DURATION
     }
 }
@@ -357,12 +360,16 @@ impl Topology {
         }
     }
 
-    /// Returns a sorted list of CPU IDs from highest to lowest rank.
+    /// Returns the cached ranked CPU list.
     /// The list is cached internally and refreshed every 10 seconds.
-    /// If preferred core ranking is not enabled, returns an empty slice.
-    pub fn get_ranked_cpus(&mut self) -> Vec<usize> {
+    /// If preferred core ranking is not enabled, returns an empty cache.
+    pub fn get_ranked_cpus(&mut self) -> Arc<RankedCpuCache> {
         if !*HAS_PREF_RANK {
-            return Vec::new();
+            return Arc::new(RankedCpuCache {
+                cpu_ids: Vec::new(),
+                last_updated: Instant::now(),
+                generation: 0,
+            });
         }
 
         let mut cache = self.ranked_cpus.lock().unwrap();
@@ -385,20 +392,20 @@ impl Topology {
                 b_val.cmp(&a_val).then_with(|| a.0.cmp(&b.0))
             });
 
-            // Get a mutable reference to update the ranks
             for (cpu_id, rank) in cpu_ranks.iter() {
                 if let Some(arc_cpu) = self.all_cpus.get_mut(cpu_id) {
                     Arc::make_mut(arc_cpu).rank = *rank;
                 }
             }
 
-            let mut new_cache = RankedCpuCache::new();
-            new_cache.cpu_ids = cpu_ranks.iter().map(|(id, _)| *id).collect();
-            new_cache.last_updated = Instant::now();
-            *cache = Arc::new(new_cache);
+            let inner = Arc::make_mut(&mut *cache);
+            inner.cpu_ids.clear();
+            inner.cpu_ids.extend(cpu_ranks.iter().map(|(id, _)| *id));
+            inner.last_updated = Instant::now();
+            inner.generation += 1;
         }
 
-        cache.cpu_ids.clone()
+        Arc::clone(&cache)
     }
 }
 
