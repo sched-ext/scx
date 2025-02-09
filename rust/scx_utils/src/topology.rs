@@ -78,7 +78,7 @@ use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "gpu-topology")]
@@ -100,6 +100,9 @@ lazy_static::lazy_static! {
     /// disabled CPUs that may not be onlined, whose IDs are lower than the
     /// IDs of other CPUs that may be onlined.
     pub static ref NR_CPUS_POSSIBLE: usize = libbpf_rs::num_possible_cpus().unwrap();
+
+    /// Whether AMD preferred core ranking is enabled on this system
+    pub static ref HAS_PREF_RANK: bool = has_pref_rank();
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -126,6 +129,7 @@ pub struct Cpu {
     pub llc_id: usize,
     pub node_id: usize,
     pub package_id: usize,
+    pub rank: AtomicU32,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -337,14 +341,19 @@ impl Topology {
         sibling_cpu
     }
 
-    /// Returns whether AMD preferred core ranking is enabled on this system
-    pub fn has_pref_rank(&self) -> bool {
-        if !Path::new("/sys/devices/system/cpu/amd_pstate/prefcore").exists() {
+    /// Returns true if cpu_a has a higher rank than cpu_b.
+    /// If ranking is not enabled or either CPU is invalid, returns false.
+    pub fn is_higher_ranked(&self, cpu_a: usize, cpu_b: usize) -> bool {
+        if !*HAS_PREF_RANK {
             return false;
         }
-        match std::fs::read_to_string("/sys/devices/system/cpu/amd_pstate/prefcore") {
-            Ok(contents) => contents.trim() == "enabled",
-            Err(_) => false,
+
+        let cpu_a_rank = self.all_cpus.get(&cpu_a).map(|cpu| cpu.rank.load(Ordering::Relaxed));
+        let cpu_b_rank = self.all_cpus.get(&cpu_b).map(|cpu| cpu.rank.load(Ordering::Relaxed));
+
+        match (cpu_a_rank, cpu_b_rank) {
+            (Some(rank_a), Some(rank_b)) => rank_a > rank_b,
+            _ => false,
         }
     }
 
@@ -352,13 +361,13 @@ impl Topology {
     /// The list is cached internally and refreshed every 10 seconds.
     /// If preferred core ranking is not enabled, returns an empty slice.
     pub fn get_ranked_cpus(&self) -> Vec<usize> {
-        if !self.has_pref_rank() {
+        if !*HAS_PREF_RANK {
             return Vec::new();
         }
 
         let mut cache = self.ranked_cpus.lock().unwrap();
         if !cache.is_valid() {
-            let mut cpu_ranks: Vec<(usize, usize)> = Vec::new();
+            let mut cpu_ranks: Vec<(usize, u32)> = Vec::new();
 
             for &cpu_id in self.all_cpus.keys() {
                 let cpu_path = Path::new("/sys/devices/system/cpu")
@@ -366,31 +375,21 @@ impl Topology {
                     .join("cpufreq");
 
                 if let Ok(rank) = read_file_usize(&cpu_path.join("amd_pstate_prefcore_ranking")) {
-                    cpu_ranks.push((cpu_id, rank));
+                    cpu_ranks.push((cpu_id, rank as u32));
                 }
             }
 
             cpu_ranks.sort_by(|a, b| b.1.cmp(&a.1));
+
+            for (cpu_id, rank) in cpu_ranks {
+                self.all_cpus.get(&cpu_id).unwrap().rank.store(rank, Ordering::Relaxed);
+            }
 
             cache.cpu_ids = cpu_ranks.into_iter().map(|(id, _)| id).collect();
             cache.last_updated = Instant::now();
         }
 
         cache.cpu_ids.clone()
-    }
-
-    /// Returns true if cpu_a has a higher rank than cpu_b.
-    /// If ranking is not enabled or either CPU is invalid, returns false.
-    pub fn is_higher_ranked(&self, cpu_a: usize, cpu_b: usize) -> bool {
-        let ranked_cpus = self.get_ranked_cpus();
-        if let (Some(pos_a), Some(pos_b)) = (
-            ranked_cpus.iter().position(|&id| id == cpu_a),
-            ranked_cpus.iter().position(|&id| id == cpu_b),
-        ) {
-            pos_a < pos_b
-        } else {
-            false
-        }
     }
 }
 
@@ -592,6 +591,7 @@ fn create_insert_cpu(
             llc_id: *llc_id,
             node_id: node.id,
             package_id,
+            rank: AtomicU32::new(0),
         }),
     );
 
@@ -761,4 +761,14 @@ fn create_numa_nodes(
         nodes.insert(node.id, node);
     }
     Ok(nodes)
+}
+
+fn has_pref_rank() -> bool {
+    if !Path::new("/sys/devices/system/cpu/amd_pstate/prefcore").exists() {
+        return false;
+    }
+    match std::fs::read_to_string("/sys/devices/system/cpu/amd_pstate/prefcore") {
+        Ok(contents) => contents.trim() == "enabled",
+        Err(_) => false,
+    }
 }
