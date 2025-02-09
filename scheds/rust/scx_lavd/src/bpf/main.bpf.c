@@ -995,7 +995,6 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		p->scx.dsq_vtime = calc_when_to_run(p, taskc);
 		p->scx.slice = calc_time_slice(p, taskc);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
-		scx_bpf_kick_cpu(cpu_id, SCX_KICK_IDLE);
 		return cpu_id;
 	}
 
