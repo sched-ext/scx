@@ -353,7 +353,7 @@ static __always_inline int __on_sched_wakeup(struct task_struct *p)
 	event->cpu = bpf_get_smp_processor_id();
 	event->event.wakeup.pid = p->pid;
 	event->event.wakeup.prio = (int)p->prio;
-	__builtin_memcpy(&event->event.wakeup.comm, &p->comm, MAX_COMM);
+	__builtin_memcpy_inline(&event->event.wakeup.comm, &p->comm, MAX_COMM);
 	bpf_ringbuf_submit(event, 0);
 
 	return 0;
@@ -398,8 +398,8 @@ static __always_inline int on_sched_switch_non_scx(bool preempt, struct task_str
 	event->event.sched_switch.prev_prio = (int)prev->prio;
 	event->event.sched_switch.prev_dsq_id = SCX_DSQ_INVALID;
 	event->event.sched_switch.prev_state = prev_state;
-	__builtin_memcpy(&event->event.sched_switch.next_comm, &next->comm, MAX_COMM);
-	__builtin_memcpy(&event->event.sched_switch.prev_comm, &prev->comm, MAX_COMM);
+	__builtin_memcpy_inline(&event->event.sched_switch.next_comm, &next->comm, MAX_COMM);
+	__builtin_memcpy_inline(&event->event.sched_switch.prev_comm, &prev->comm, MAX_COMM);
 
 	bpf_ringbuf_submit(event, 0);
 
