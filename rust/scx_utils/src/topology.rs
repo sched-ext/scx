@@ -78,7 +78,7 @@ use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "gpu-topology")]
@@ -111,7 +111,7 @@ pub enum CoreType {
     Little,
 }
 
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Cpu {
     pub id: usize,
     pub min_freq: usize,
@@ -129,7 +129,7 @@ pub struct Cpu {
     pub llc_id: usize,
     pub node_id: usize,
     pub package_id: usize,
-    pub rank: AtomicU32,
+    pub rank: usize,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -192,7 +192,7 @@ pub struct Topology {
     pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
 
     /// Cached list of ranked CPUs
-    ranked_cpus: Mutex<RankedCpuCache>,
+    ranked_cpus: Mutex<Arc<RankedCpuCache>>,
 }
 
 const RANKED_CPU_CACHE_DURATION: Duration = Duration::from_secs(10);
@@ -272,7 +272,7 @@ impl Topology {
             all_llcs: topo_llcs,
             all_cores: topo_cores,
             all_cpus: topo_cpus,
-            ranked_cpus: Mutex::new(RankedCpuCache::new()),
+            ranked_cpus: Mutex::new(Arc::new(RankedCpuCache::new())),
         })
     }
 
@@ -348,8 +348,8 @@ impl Topology {
             return false;
         }
 
-        let cpu_a_rank = self.all_cpus.get(&cpu_a).map(|cpu| cpu.rank.load(Ordering::Relaxed));
-        let cpu_b_rank = self.all_cpus.get(&cpu_b).map(|cpu| cpu.rank.load(Ordering::Relaxed));
+        let cpu_a_rank = self.all_cpus.get(&cpu_a).map(|cpu| cpu.rank);
+        let cpu_b_rank = self.all_cpus.get(&cpu_b).map(|cpu| cpu.rank);
 
         match (cpu_a_rank, cpu_b_rank) {
             (Some(rank_a), Some(rank_b)) => rank_a > rank_b,
@@ -360,14 +360,14 @@ impl Topology {
     /// Returns a sorted list of CPU IDs from highest to lowest rank.
     /// The list is cached internally and refreshed every 10 seconds.
     /// If preferred core ranking is not enabled, returns an empty slice.
-    pub fn get_ranked_cpus(&self) -> Vec<usize> {
+    pub fn get_ranked_cpus(&mut self) -> Vec<usize> {
         if !*HAS_PREF_RANK {
             return Vec::new();
         }
 
         let mut cache = self.ranked_cpus.lock().unwrap();
         if !cache.is_valid() {
-            let mut cpu_ranks: Vec<(usize, u32)> = Vec::new();
+            let mut cpu_ranks: Vec<(usize, usize)> = Vec::new();
 
             for &cpu_id in self.all_cpus.keys() {
                 let cpu_path = Path::new("/sys/devices/system/cpu")
@@ -375,18 +375,27 @@ impl Topology {
                     .join("cpufreq");
 
                 if let Ok(rank) = read_file_usize(&cpu_path.join("amd_pstate_prefcore_ranking")) {
-                    cpu_ranks.push((cpu_id, rank as u32));
+                    cpu_ranks.push((cpu_id, rank));
                 }
             }
 
-            cpu_ranks.sort_by(|a, b| b.1.cmp(&a.1));
+            cpu_ranks.sort_by(|a, b| {
+                let a_val = a.1;
+                let b_val = b.1;
+                b_val.cmp(&a_val).then_with(|| a.0.cmp(&b.0))
+            });
 
-            for (cpu_id, rank) in cpu_ranks {
-                self.all_cpus.get(&cpu_id).unwrap().rank.store(rank, Ordering::Relaxed);
+            // Get a mutable reference to update the ranks
+            for (cpu_id, rank) in cpu_ranks.iter() {
+                if let Some(arc_cpu) = self.all_cpus.get_mut(cpu_id) {
+                    Arc::make_mut(arc_cpu).rank = *rank;
+                }
             }
 
-            cache.cpu_ids = cpu_ranks.into_iter().map(|(id, _)| id).collect();
-            cache.last_updated = Instant::now();
+            let mut new_cache = RankedCpuCache::new();
+            new_cache.cpu_ids = cpu_ranks.iter().map(|(id, _)| *id).collect();
+            new_cache.last_updated = Instant::now();
+            *cache = Arc::new(new_cache);
         }
 
         cache.cpu_ids.clone()
@@ -591,7 +600,7 @@ fn create_insert_cpu(
             llc_id: *llc_id,
             node_id: node.id,
             package_id,
-            rank: AtomicU32::new(0),
+            rank: 0,
         }),
     );
 
