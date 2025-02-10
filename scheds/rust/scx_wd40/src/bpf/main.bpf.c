@@ -410,6 +410,75 @@ int select_cpu_idle_x_numa(struct task_ctx *taskc, u32 prev_cpu, bool has_idle_c
 	return 0;
 }
 
+static
+s32 select_cpu_retain_prev(const struct cpumask *idle_smtmask, bool prev_domestic, u32 prev_cpu)
+{
+	s32 cpu = -1;
+
+	/*
+	 * See if we want to keep @prev_cpu. We want to keep @prev_cpu if the
+	 * whole physical core is idle. If the sibling[s] are busy, it's likely
+	 * more advantageous to look for wholly idle cores first.
+	 */
+	if (prev_domestic) {
+		if (bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
+		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+			stat_add(RUSTY_STAT_PREV_IDLE, 1);
+			cpu = prev_cpu;
+		}
+
+		return cpu;
+	}
+
+	/*
+	 * @prev_cpu is foreign. Linger iff the domain isn't too busy as
+	 * indicated by direct_greedy_cpumask. There may also be an idle
+	 * CPU in the domestic domain
+	 */
+	if (direct_greedy_cpumask &&
+	    bpf_cpumask_test_cpu(prev_cpu, cast_mask(direct_greedy_cpumask)) &&
+	    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
+	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		stat_add(RUSTY_STAT_GREEDY_IDLE, 1);
+		cpu = prev_cpu;
+	}
+
+	return cpu;
+}
+
+static
+s32 select_cpu_pick_local(struct bpf_cpumask *p_cpumask, bool prev_domestic, bool has_idle_cores, u32 prev_cpu)
+{
+	s32 cpu;
+
+	/* If there is a domestic idle core, dispatch directly */
+	if (has_idle_cores) {
+		cpu = scx_bpf_pick_idle_cpu(cast_mask(p_cpumask), SCX_PICK_IDLE_CORE);
+		if (cpu >= 0) {
+			stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
+			return cpu;
+		}
+	}
+
+	/*
+	 * If @prev_cpu was domestic and is idle itself even though the core
+	 * isn't, picking @prev_cpu may improve L1/2 locality.
+	 */
+	if (prev_domestic && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
+		return prev_cpu;
+	}
+
+	/* If there is any domestic idle CPU, dispatch directly */
+	cpu = scx_bpf_pick_idle_cpu(cast_mask(p_cpumask), 0);
+	if (cpu >= 0) {
+		stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
+		return cpu;
+	}
+
+	return -1;
+}
+
 s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -444,70 +513,23 @@ s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
 			goto direct;
 	}
 
-	has_idle_cores = !bpf_cpumask_empty(idle_smtmask);
-
 	/* did @p get pulled out to a foreign domain by e.g. greedy execution? */
 	prev_domestic = bpf_cpumask_test_cpu(prev_cpu, cast_mask(p_cpumask));
-
-	/*
-	 * See if we want to keep @prev_cpu. We want to keep @prev_cpu if the
-	 * whole physical core is idle. If the sibling[s] are busy, it's likely
-	 * more advantageous to look for wholly idle cores first.
-	 */
-	if (prev_domestic) {
-		if (bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			stat_add(RUSTY_STAT_PREV_IDLE, 1);
-			cpu = prev_cpu;
-			goto direct;
-		}
-	} else {
-		/*
-		 * @prev_cpu is foreign. Linger iff the domain isn't too busy as
-		 * indicated by direct_greedy_cpumask. There may also be an idle
-		 * CPU in the domestic domain
-		 */
-		if (direct_greedy_cpumask &&
-		    bpf_cpumask_test_cpu(prev_cpu, cast_mask(direct_greedy_cpumask)) &&
-		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			stat_add(RUSTY_STAT_GREEDY_IDLE, 1);
-			cpu = prev_cpu;
-			goto direct;
-		}
-	}
+	cpu = select_cpu_retain_prev(idle_smtmask, prev_domestic, prev_cpu);
+	if (cpu >= 0)
+		goto direct;
 
 	/*
 	 * @prev_cpu didn't work out. Let's see whether there's an idle CPU @p
 	 * can be directly dispatched to. We'll first try to find the best idle
 	 * domestic CPU and then move onto foreign.
 	 */
+	has_idle_cores = !bpf_cpumask_empty(idle_smtmask);
 
-	/* If there is a domestic idle core, dispatch directly */
-	if (has_idle_cores) {
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(p_cpumask), SCX_PICK_IDLE_CORE);
-		if (cpu >= 0) {
-			stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
-			goto direct;
-		}
-	}
 
-	/*
-	 * If @prev_cpu was domestic and is idle itself even though the core
-	 * isn't, picking @prev_cpu may improve L1/2 locality.
-	 */
-	if (prev_domestic && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
-		cpu = prev_cpu;
+	cpu = select_cpu_pick_local(p_cpumask, prev_domestic, has_idle_cores, prev_cpu);
+	if (cpu >= 0)
 		goto direct;
-	}
-
-	/* If there is any domestic idle CPU, dispatch directly */
-	cpu = scx_bpf_pick_idle_cpu(cast_mask(p_cpumask), 0);
-	if (cpu >= 0) {
-		stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
-		goto direct;
-	}
 
 	/*
 	 * Domestic domain is fully booked. If there are CPUs which are idle and
@@ -577,6 +599,9 @@ void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 		goto dom_queue;
 	}
 
+	/*
+	 * Did we decide on direct dispatch during select_cpu()?
+	 */
 	if (taskc->dispatch_local) {
 		taskc->dispatch_local = false;
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
