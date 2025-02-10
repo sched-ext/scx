@@ -2396,6 +2396,7 @@ impl<'a> Scheduler<'a> {
         let (res_ch, req_ch) = self.stats_server.channels();
         let mut next_sched_at = Instant::now() + self.sched_intv;
         let mut cpus_ranges = HashMap::<ThreadId, Vec<(usize, usize)>>::new();
+        let mut last_stats_request_time = Instant::now();
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             let now = Instant::now();
@@ -2406,9 +2407,16 @@ impl<'a> Scheduler<'a> {
                     next_sched_at += self.sched_intv;
                 }
             }
+            if now.duration_since(last_stats_request_time).as_secs() > 30 {
+                self.skel.maps.bss_data.stats_disabled = true;
+            }
 
             match req_ch.recv_deadline(next_sched_at) {
                 Ok(StatsReq::Hello(tid)) => {
+                    last_stats_request_time = now;
+                    if self.skel.maps.bss_data.stats_disabled {
+                        self.skel.maps.bss_data.stats_disabled = false;
+                    }
                     cpus_ranges.insert(
                         tid,
                         self.layers.iter().map(|l| (l.nr_cpus, l.nr_cpus)).collect(),
@@ -2417,6 +2425,10 @@ impl<'a> Scheduler<'a> {
                     res_ch.send(StatsRes::Hello(stats))?;
                 }
                 Ok(StatsReq::Refresh(tid, mut stats)) => {
+                    last_stats_request_time = now;
+                    if self.skel.maps.bss_data.stats_disabled {
+                        self.skel.maps.bss_data.stats_disabled = false;
+                    }
                     // Propagate self's layer cpu ranges into each stat's.
                     for i in 0..self.nr_layer_cpus_ranges.len() {
                         for (_, ranges) in cpus_ranges.iter_mut() {

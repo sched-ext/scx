@@ -64,6 +64,7 @@ private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
 struct layer layers[MAX_LAYERS];
 u32 fallback_cpu;
 u32 layered_root_tgid = 0;
+bool stats_disabled = false;
 
 u32 empty_layer_ids[MAX_LAYERS];
 u32 nr_empty_layer_ids;
@@ -241,6 +242,8 @@ static void gstat_add(u32 id, struct cpu_ctx *cpuc, s64 delta)
 		scx_bpf_error("invalid global stat id %d", id);
 		return;
 	}
+	if (stats_disabled)
+		return;
 
 	cpuc->gstats[id] += delta;
 }
@@ -253,6 +256,9 @@ static void gstat_inc(u32 id, struct cpu_ctx *cpuc)
 static void lstat_add(u32 id, struct layer *layer, struct cpu_ctx *cpuc, s64 delta)
 {
 	u64 *vptr;
+
+	if (stats_disabled)
+		return;
 
 	if ((vptr = MEMBER_VPTR(*cpuc, .lstats[layer->id][id])))
 		(*vptr) += delta;
