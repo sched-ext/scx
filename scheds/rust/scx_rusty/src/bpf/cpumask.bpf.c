@@ -5,6 +5,7 @@
 #include "percpu.h"
 
 static struct sdt_allocator scx_mask_allocator;
+size_t mask_size;
 
 __weak
 int scx_mask_init(__u64 total_mask_size)
@@ -129,19 +130,17 @@ __weak int
 scxmask_to_bpf(struct bpf_cpumask __kptr *bpfmask __arg_trusted,
 		   scx_cpumask_t __arg_arena scxmask)
 {
-	cpumask_t *tmp;
+	struct scx_cpumask *tmp;
 	int ret, i;
 
 	if (bpf_ksym_exists(bpf_cpumask_from_bpf_mem)) {
-		tmp = scx_percpu_cpumask();
+		tmp = scx_percpu_scxmask_stack();
 		scxmask_copy_to_stack(tmp, scxmask);
 
 		ret = bpf_cpumask_from_bpf_mem(bpfmask, tmp, sizeof(*tmp));
 		if (ret)
 			scx_bpf_error("error");
 
-
-		scx_bpf_error("called");
 
 		return 0;
 	}
@@ -169,13 +168,31 @@ int scxmask_copy(scx_cpumask_t __arg_arena dst, scx_cpumask_t __arg_arena src)
 	return 0;
 }
 
-__weak
-bool scxmask_subset_cpumask(scx_cpumask_t __arg_arena big, const struct cpumask *small __arg_trusted)
+__weak int
+scxmask_from_bpf(scx_cpumask_t __arg_arena scxmask, const cpumask_t *bpfmask __arg_trusted)
 {
 	int i;
 
-	bpf_for(i, 0, nr_cpu_ids) {
-		if (!scxmask_test_cpu(i, big) && bpf_cpumask_test_cpu(i, small))
+	#pragma unroll
+	for (i = 0; i < sizeof(cpumask_t) / 8; i++) {
+		if (i >= mask_size)
+			break;
+		scxmask->bits[i] = bpfmask->bits[i];
+	}
+
+	return 0;
+}
+
+__weak
+bool scxmask_subset_cpumask(scx_cpumask_t __arg_arena big, const struct cpumask *small __arg_trusted)
+{
+	scx_cpumask_t tmp = scx_percpu_scxmask();
+	int i;
+
+	scxmask_from_bpf(tmp, small);
+
+	bpf_for(i, 0, mask_size) {
+		if (~big->bits[i] & tmp->bits[i])
 			return false;
 	}
 
@@ -183,12 +200,15 @@ bool scxmask_subset_cpumask(scx_cpumask_t __arg_arena big, const struct cpumask 
 }
 
 __weak
-bool scxmask_intersects_cpumask(scx_cpumask_t __arg_arena scx, const struct cpumask *cpu __arg_trusted)
+bool scxmask_intersects_cpumask(scx_cpumask_t __arg_arena scx, const struct cpumask *bpf __arg_trusted)
 {
+	scx_cpumask_t tmp = scx_percpu_scxmask();
 	int i;
 
-	bpf_for(i, 0, nr_cpu_ids) {
-		if (scxmask_test_cpu(i, scx) && bpf_cpumask_test_cpu(i, cpu))
+	scxmask_from_bpf(tmp, bpf);
+
+	bpf_for(i, 0, mask_size) {
+		if (scx->bits[i] & tmp->bits[i])
 			return true;
 	}
 
@@ -198,16 +218,13 @@ bool scxmask_intersects_cpumask(scx_cpumask_t __arg_arena scx, const struct cpum
 __weak
 int scxmask_and_cpumask(scx_cpumask_t dst __arg_arena,
 			       scx_cpumask_t scx __arg_arena,
-			       const struct cpumask *cpu __arg_trusted)
+			       const struct cpumask *bpf __arg_trusted)
 {
-	int i;
+	scx_cpumask_t tmp = scx_percpu_scxmask();
 
-	bpf_for(i, 0, nr_cpu_ids) {
-		if (scxmask_test_cpu(i, scx) && bpf_cpumask_test_cpu(i, cpu))
-			scxmask_set_cpu(i, dst);
-		else
-			scxmask_clear_cpu(i, dst);
-	}
+	scxmask_from_bpf(tmp, bpf);
+
+	scxmask_and(dst, scx, tmp);
 
 	return 0;
 }

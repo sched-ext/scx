@@ -122,11 +122,11 @@ static s32 scxmask_pick_idle_cpu(scx_cpumask_t mask __arg_arena, int flags)
 	if (!bpf)
 		return -1;
 
-	scxmask_to_bpf(bpf, mask);
+	scxmask_to_bpf(cast_mask(bpf), mask);
 
 	cpu = scx_bpf_pick_idle_cpu(cast_mask(bpf), flags);
 
-	scxmask_from_bpf(mask, (const cpumask_t __kptr *)bpf);
+	scxmask_from_bpf(mask, cast_mask(bpf));
 
 	return cpu;
 }
@@ -139,7 +139,7 @@ static s32 scxmask_any_distribute(scx_cpumask_t mask __arg_arena)
 	if (!bpf)
 		return -1;
 
-	scxmask_to_bpf(bpf, mask);
+	scxmask_to_bpf(cast_mask(bpf), mask);
 	cpu = bpf_cpumask_any_distribute(cast_mask(bpf));
 
 	return cpu;
@@ -153,7 +153,7 @@ static s32 scxmask_any_and_distribute(scx_cpumask_t scx, const struct cpumask *b
 	if (!bpf || !tmp)
 		return -1;
 
-	scxmask_to_bpf(tmp, scx);
+	scxmask_to_bpf(cast_mask(tmp), scx);
 	cpu = bpf_cpumask_any_and_distribute(cast_mask(tmp), bpf);
 
 	return cpu;
@@ -1434,7 +1434,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 
 	domc = task_domain(taskc);
 	if (!domc) {
-		scx_bpf_error("Invalid dom ID");
+		scx_bpf_error("no domain for task");
 		return;
 	}
 
@@ -1852,11 +1852,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 	if (ret)
 		return ret;
 
-	ret = sdt_task_init(sizeof(struct task_ctx));
+	ret = scx_mask_init(MAX_CPUS / 8);
 	if (ret)
 		return ret;
 
-	ret = scx_mask_init(MAX_CPUS / 8);
+	ret = sdt_task_init(sizeof(struct task_ctx));
 	if (ret)
 		return ret;
 

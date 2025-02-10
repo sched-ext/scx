@@ -6,6 +6,7 @@ struct rusty_percpu_storage {
 	struct bpf_cpumask __kptr *bpfmask;
 	scx_cpumask_t scxmask;
 	cpumask_t cpumask;
+	struct scx_cpumask scxmask_stack;
 };
 
 /*
@@ -139,4 +140,20 @@ static cpumask_t *scx_percpu_cpumask(void)
 	}
 
 	return &storage->cpumask;
+}
+
+static struct scx_cpumask *scx_percpu_scxmask_stack(void)
+{
+	struct rusty_percpu_storage *storage;
+	void *map = &scx_percpu_storage_map;
+	const u32 zero = 0;
+
+	storage = bpf_map_lookup_elem(map, &zero);
+	if (!storage) {
+		/* Should be impossible. */
+		scx_bpf_error("Did not find map entry");
+		return NULL;
+	}
+
+	return &storage->scxmask_stack;
 }
