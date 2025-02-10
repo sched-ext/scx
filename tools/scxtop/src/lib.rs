@@ -125,7 +125,7 @@ pub struct SchedSwitchAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct SchedWakeupAction {
+pub struct SchedWakeActionCtx {
     pub ts: u64,
     pub cpu: u32,
     pub pid: u32,
@@ -133,14 +133,9 @@ pub struct SchedWakeupAction {
     pub comm: String,
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct SchedWakeupNewAction {
-    pub ts: u64,
-    pub cpu: u32,
-    pub pid: u32,
-    pub prio: i32,
-    pub comm: String,
-}
+pub type SchedWakeupNewAction = SchedWakeActionCtx;
+pub type SchedWakingAction = SchedWakeActionCtx;
+pub type SchedWakeupAction = SchedWakeActionCtx;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
@@ -167,6 +162,7 @@ pub enum Action {
     SchedSwitch(SchedSwitchAction),
     SchedWakeup(SchedWakeupAction),
     SchedWakeupNew(SchedWakeupNewAction),
+    SchedWaking(SchedWakingAction),
     SetState(AppState),
     NextViewState,
     RecordTrace,
