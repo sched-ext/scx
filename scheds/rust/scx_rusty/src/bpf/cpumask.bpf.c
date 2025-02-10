@@ -2,6 +2,7 @@
 #include <lib/sdt_task.h>
 
 #include "cpumask.h"
+#include "percpu.h"
 
 static struct sdt_allocator scx_mask_allocator;
 
@@ -124,25 +125,26 @@ bool scxmask_empty(scx_cpumask_t __arg_arena mask)
 	return true;
 }
 
-cpumask_t tmpmask;
-
 __weak int
 scxmask_to_bpf(struct bpf_cpumask __kptr *bpfmask __arg_trusted,
 		   scx_cpumask_t __arg_arena scxmask)
 {
-	struct scx_cpumask tmp;
+	cpumask_t *tmp;
 	int ret, i;
 
-#if 0
 	if (bpf_ksym_exists(bpf_cpumask_from_bpf_mem)) {
-		scxmask_copy_to_stack(&tmp, scxmask);
-		ret = bpf_cpumask_from_bpf_mem(bpfmask, &tmp, sizeof(tmp));
+		tmp = scx_percpu_cpumask();
+		scxmask_copy_to_stack(tmp, scxmask);
+
+		ret = bpf_cpumask_from_bpf_mem(bpfmask, tmp, sizeof(*tmp));
 		if (ret)
 			scx_bpf_error("error");
 
+
+		scx_bpf_error("called");
+
 		return 0;
 	}
-#endif
 
 	bpf_for(i, 0, nr_cpu_ids) {
 		if (scxmask_test_cpu(i, scxmask))
