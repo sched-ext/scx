@@ -4,30 +4,30 @@
 #include "cpumask.h"
 #include "percpu.h"
 
-static struct sdt_allocator scx_mask_allocator;
+static struct sdt_allocator scx_bitmap_allocator;
 size_t mask_size;
 
 __weak
-int scx_mask_init(__u64 total_mask_size)
+int scx_bitmap_init(__u64 total_mask_size)
 {
 	mask_size = div_round_up(total_mask_size, 8);
 
-	return sdt_alloc_init(&scx_mask_allocator, mask_size * 8 + sizeof(union sdt_id));
+	return sdt_alloc_init(&scx_bitmap_allocator, mask_size * 8 + sizeof(union sdt_id));
 }
 
 __weak
-u64 scx_mask_alloc_internal(void)
+u64 scx_bitmap_alloc_internal(void)
 {
 	struct sdt_data __arena *data = NULL;
-	scx_cpumask_t mask;
+	scx_bitmap_t mask;
 	int i;
 
-	data = sdt_alloc(&scx_mask_allocator);
+	data = sdt_alloc(&scx_bitmap_allocator);
 	cast_kern(data);
 	if (!data)
 		return (u64)(NULL);
 
-	mask = (scx_cpumask_t)data->payload;
+	mask = (scx_bitmap_t)data->payload;
 	mask->tid = data->tid;
 	bpf_for(i, 0, mask_size) {
 		mask->bits[i] = 0ULL;
@@ -42,16 +42,16 @@ u64 scx_mask_alloc_internal(void)
  */
 
 __weak
-int scx_mask_free(scx_cpumask_t __arg_arena mask)
+int scx_bitmap_free(scx_bitmap_t __arg_arena mask)
 {
 	sdt_subprog_init_arena();
 
-	sdt_free_idx(&scx_mask_allocator, mask->tid.idx);
+	sdt_free_idx(&scx_bitmap_allocator, mask->tid.idx);
 	return 0;
 }
 
 __weak
-int scxmask_copy_to_stack(struct scx_cpumask *dst, scx_cpumask_t __arg_arena src)
+int scx_bitmap_copy_to_stack(struct scx_bitmap *dst, scx_bitmap_t __arg_arena src)
 {
 	int i;
 
@@ -70,27 +70,27 @@ int scxmask_copy_to_stack(struct scx_cpumask *dst, scx_cpumask_t __arg_arena src
 }
 
 __weak
-int scxmask_set_cpu(u32 cpu, scx_cpumask_t __arg_arena mask)
+int scx_bitmap_set_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
 {
 	mask->bits[cpu / 64] |= 1 << (cpu % 64);
 	return 0;
 }
 
 __weak
-int scxmask_clear_cpu(u32 cpu, scx_cpumask_t __arg_arena mask)
+int scx_bitmap_clear_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
 {
 	mask->bits[cpu / 64] &= 1 << ~(cpu % 64);
 	return 0;
 }
 
 __weak
-bool scxmask_test_cpu(u32 cpu, scx_cpumask_t __arg_arena mask)
+bool scx_bitmap_test_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
 {
 	return mask->bits[cpu / 64] & (1 << (cpu % 64));
 }
 
 __weak
-int scxmask_clear(scx_cpumask_t __arg_arena mask)
+int scx_bitmap_clear(scx_bitmap_t __arg_arena mask)
 {
 	int i;
 
@@ -102,7 +102,7 @@ int scxmask_clear(scx_cpumask_t __arg_arena mask)
 }
 
 __weak
-int scxmask_and(scx_cpumask_t __arg_arena dst, scx_cpumask_t __arg_arena src1, scx_cpumask_t __arg_arena src2)
+int scx_bitmap_and(scx_bitmap_t __arg_arena dst, scx_bitmap_t __arg_arena src1, scx_bitmap_t __arg_arena src2)
 {
 	int i;
 
@@ -114,7 +114,7 @@ int scxmask_and(scx_cpumask_t __arg_arena dst, scx_cpumask_t __arg_arena src1, s
 }
 
 __weak
-bool scxmask_empty(scx_cpumask_t __arg_arena mask)
+bool scx_bitmap_empty(scx_bitmap_t __arg_arena mask)
 {
 	int i;
 
@@ -127,15 +127,15 @@ bool scxmask_empty(scx_cpumask_t __arg_arena mask)
 }
 
 __weak int
-scxmask_to_bpf(struct bpf_cpumask __kptr *bpfmask __arg_trusted,
-		   scx_cpumask_t __arg_arena scxmask)
+scx_bitmap_to_bpf(struct bpf_cpumask __kptr *bpfmask __arg_trusted,
+		   scx_bitmap_t __arg_arena scx_bitmap)
 {
-	struct scx_cpumask *tmp;
+	struct scx_bitmap *tmp;
 	int ret, i;
 
 	if (bpf_ksym_exists(bpf_cpumask_from_bpf_mem)) {
-		tmp = scx_percpu_scxmask_stack();
-		scxmask_copy_to_stack(tmp, scxmask);
+		tmp = scx_percpu_scx_bitmap_stack();
+		scx_bitmap_copy_to_stack(tmp, scx_bitmap);
 
 		ret = bpf_cpumask_from_bpf_mem(bpfmask, tmp, sizeof(*tmp));
 		if (ret)
@@ -146,7 +146,7 @@ scxmask_to_bpf(struct bpf_cpumask __kptr *bpfmask __arg_trusted,
 	}
 
 	bpf_for(i, 0, nr_cpu_ids) {
-		if (scxmask_test_cpu(i, scxmask))
+		if (scx_bitmap_test_cpu(i, scx_bitmap))
 			bpf_cpumask_set_cpu(i, bpfmask);
 		else
 			bpf_cpumask_clear_cpu(i, bpfmask);
@@ -157,7 +157,7 @@ scxmask_to_bpf(struct bpf_cpumask __kptr *bpfmask __arg_trusted,
 
 
 __weak
-int scxmask_copy(scx_cpumask_t __arg_arena dst, scx_cpumask_t __arg_arena src)
+int scx_bitmap_copy(scx_bitmap_t __arg_arena dst, scx_bitmap_t __arg_arena src)
 {
 	int i;
 
@@ -169,7 +169,7 @@ int scxmask_copy(scx_cpumask_t __arg_arena dst, scx_cpumask_t __arg_arena src)
 }
 
 __weak int
-scxmask_from_bpf(scx_cpumask_t __arg_arena scxmask, const cpumask_t *bpfmask __arg_trusted)
+scx_bitmap_from_bpf(scx_bitmap_t __arg_arena scx_bitmap, const cpumask_t *bpfmask __arg_trusted)
 {
 	int i;
 
@@ -177,19 +177,19 @@ scxmask_from_bpf(scx_cpumask_t __arg_arena scxmask, const cpumask_t *bpfmask __a
 	for (i = 0; i < sizeof(cpumask_t) / 8; i++) {
 		if (i >= mask_size)
 			break;
-		scxmask->bits[i] = bpfmask->bits[i];
+		scx_bitmap->bits[i] = bpfmask->bits[i];
 	}
 
 	return 0;
 }
 
 __weak
-bool scxmask_subset_cpumask(scx_cpumask_t __arg_arena big, const struct cpumask *small __arg_trusted)
+bool scx_bitmap_subset_cpumask(scx_bitmap_t __arg_arena big, const struct cpumask *small __arg_trusted)
 {
-	scx_cpumask_t tmp = scx_percpu_scxmask();
+	scx_bitmap_t tmp = scx_percpu_scx_bitmap();
 	int i;
 
-	scxmask_from_bpf(tmp, small);
+	scx_bitmap_from_bpf(tmp, small);
 
 	bpf_for(i, 0, mask_size) {
 		if (~big->bits[i] & tmp->bits[i])
@@ -200,12 +200,12 @@ bool scxmask_subset_cpumask(scx_cpumask_t __arg_arena big, const struct cpumask 
 }
 
 __weak
-bool scxmask_intersects_cpumask(scx_cpumask_t __arg_arena scx, const struct cpumask *bpf __arg_trusted)
+bool scx_bitmap_intersects_cpumask(scx_bitmap_t __arg_arena scx, const struct cpumask *bpf __arg_trusted)
 {
-	scx_cpumask_t tmp = scx_percpu_scxmask();
+	scx_bitmap_t tmp = scx_percpu_scx_bitmap();
 	int i;
 
-	scxmask_from_bpf(tmp, bpf);
+	scx_bitmap_from_bpf(tmp, bpf);
 
 	bpf_for(i, 0, mask_size) {
 		if (scx->bits[i] & tmp->bits[i])
@@ -216,15 +216,15 @@ bool scxmask_intersects_cpumask(scx_cpumask_t __arg_arena scx, const struct cpum
 }
 
 __weak
-int scxmask_and_cpumask(scx_cpumask_t dst __arg_arena,
-			       scx_cpumask_t scx __arg_arena,
+int scx_bitmap_and_cpumask(scx_bitmap_t dst __arg_arena,
+			       scx_bitmap_t scx __arg_arena,
 			       const struct cpumask *bpf __arg_trusted)
 {
-	scx_cpumask_t tmp = scx_percpu_scxmask();
+	scx_bitmap_t tmp = scx_percpu_scx_bitmap();
 
-	scxmask_from_bpf(tmp, bpf);
+	scx_bitmap_from_bpf(tmp, bpf);
 
-	scxmask_and(dst, scx, tmp);
+	scx_bitmap_and(dst, scx, tmp);
 
 	return 0;
 }

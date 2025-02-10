@@ -64,7 +64,7 @@ struct task_ctx {
 
 	struct ravg_data dcyc_rd;
 
-	scx_cpumask_t cpumask;
+	scx_bitmap_t cpumask;
 };
 
 /* XXXETSAL Same rationale as for dom_ptr. Remove once we dump Clang 18.*/
@@ -97,7 +97,7 @@ struct dom_ctx {
 };
 
 struct node_ctx {
-	scx_cpumask_t cpumask;
+	scx_bitmap_t cpumask;
 };
 
 #endif /* __TYPES_H */

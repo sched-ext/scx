@@ -4,9 +4,9 @@
 
 struct rusty_percpu_storage {
 	struct bpf_cpumask __kptr *bpfmask;
-	scx_cpumask_t scxmask;
+	scx_bitmap_t scx_bitmap;
 	cpumask_t cpumask;
-	struct scx_cpumask scxmask_stack;
+	struct scx_bitmap scx_bitmap_stack;
 };
 
 /*
@@ -20,15 +20,15 @@ struct {
 	__uint(max_entries, 1);
 } scx_percpu_storage_map __weak SEC(".maps");
 
-static s32 create_save_scxmask(scx_cpumask_t *maskp)
+static s32 create_save_scx_bitmap(scx_bitmap_t *maskp)
 {
-	scx_cpumask_t mask;
+	scx_bitmap_t mask;
 
-	mask = scx_mask_alloc();
+	mask = scx_bitmap_alloc();
 	if (!mask)
 		return -ENOMEM;
 
-	scxmask_clear(mask);
+	scx_bitmap_clear(mask);
 
 	*maskp = mask;
 
@@ -72,7 +72,7 @@ __weak int scx_rusty__storage_init_single(u32 cpu)
 	if (ret)
 		return ret;
 
-	return create_save_scxmask(&storage->scxmask);
+	return create_save_scx_bitmap(&storage->scx_bitmap);
 }
 
 __weak int scx_percpu_storage_init(void)
@@ -88,7 +88,8 @@ __weak int scx_percpu_storage_init(void)
 	return 0;
 }
 
-static struct bpf_cpumask *scx_percpu_bpfmask(void)
+static __maybe_unused
+struct bpf_cpumask *scx_percpu_bpfmask(void)
 {
 	struct rusty_percpu_storage *storage;
 	void *map = &scx_percpu_storage_map;
@@ -107,7 +108,8 @@ static struct bpf_cpumask *scx_percpu_bpfmask(void)
 	return storage->bpfmask;
 }
 
-static scx_cpumask_t scx_percpu_scxmask(void)
+static __maybe_unused
+scx_bitmap_t scx_percpu_scx_bitmap(void)
 {
 	struct rusty_percpu_storage *storage;
 	void *map = &scx_percpu_storage_map;
@@ -120,13 +122,14 @@ static scx_cpumask_t scx_percpu_scxmask(void)
 		return NULL;
 	}
 
-	if (!storage->scxmask)
-		scx_bpf_error("Did not properly initialize singleton scxmask");
+	if (!storage->scx_bitmap)
+		scx_bpf_error("Did not properly initialize singleton scx_bitmap");
 
-	return storage->scxmask;
+	return storage->scx_bitmap;
 }
 
-static cpumask_t *scx_percpu_cpumask(void)
+static __maybe_unused
+cpumask_t *scx_percpu_cpumask(void)
 {
 	struct rusty_percpu_storage *storage;
 	void *map = &scx_percpu_storage_map;
@@ -142,7 +145,8 @@ static cpumask_t *scx_percpu_cpumask(void)
 	return &storage->cpumask;
 }
 
-static struct scx_cpumask *scx_percpu_scxmask_stack(void)
+static __maybe_unused
+struct scx_bitmap *scx_percpu_scx_bitmap_stack(void)
 {
 	struct rusty_percpu_storage *storage;
 	void *map = &scx_percpu_storage_map;
@@ -155,5 +159,5 @@ static struct scx_cpumask *scx_percpu_scxmask_stack(void)
 		return NULL;
 	}
 
-	return &storage->scxmask_stack;
+	return &storage->scx_bitmap_stack;
 }

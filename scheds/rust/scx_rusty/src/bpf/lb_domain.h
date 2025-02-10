@@ -6,9 +6,9 @@ struct lb_domain {
 	union sdt_id		tid;
 
 	struct bpf_spin_lock vtime_lock;
-	scx_cpumask_t cpumask;
-	scx_cpumask_t direct_greedy_cpumask;
-	scx_cpumask_t node_cpumask;
+	scx_bitmap_t cpumask;
+	scx_bitmap_t direct_greedy_cpumask;
+	scx_bitmap_t node_cpumask;
 
 	dom_ptr domc;
 };
