@@ -1733,7 +1733,14 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
         skel.maps.rodata_data.enable_gpu_support = opts.enable_gpu_support;
 
-        for (cpu, sib) in topo.sibling_cpus().iter().enumerate() {
+        let sibling_cpus = topo.sibling_cpus();
+        if sibling_cpus[0] != -1i32 {
+            if sibling_cpus.windows(2).all(|cpu| cpu[0] == cpu[1]) {
+                bail!("Holes in sibling CPU IDs detected: {:?}", sibling_cpus);
+            }
+        }
+
+        for (cpu, sib) in sibling_cpus.iter().enumerate() {
             skel.maps.rodata_data.__sibling_cpu[cpu] = *sib;
         }
         for cpu in topo.all_cpus.keys() {
