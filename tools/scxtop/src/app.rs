@@ -21,7 +21,9 @@ use crate::ViewState;
 use crate::APP;
 use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
-use crate::{Action, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction};
+use crate::{
+    Action, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction,
+};
 
 use anyhow::Result;
 use glob::glob;
@@ -1977,6 +1979,12 @@ impl<'a> App<'a> {
         }
     }
 
+    fn on_sched_waking(&mut self, action: &SchedWakingAction) {
+        if self.state == AppState::Tracing {
+            self.trace_manager.on_sched_waking(action);
+        }
+    }
+
     /// Updates the app when a task is scheduled.
     fn on_sched_switch(&mut self, action: &SchedSwitchAction) {
         let SchedSwitchAction {
@@ -2095,6 +2103,9 @@ impl<'a> App<'a> {
             }
             Action::SchedWakeup(a) => {
                 self.on_sched_wakeup(&a);
+            }
+            Action::SchedWaking(a) => {
+                self.on_sched_waking(&a);
             }
             Action::ClearEvent => self.stop_perf_events(),
             Action::ChangeTheme => {

@@ -14,14 +14,15 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{Action, SchedSwitchAction, SchedWakeupAction};
+use crate::{Action, SchedSwitchAction, SchedWakeupAction, SchedWakingAction};
 
 use crate::protos_gen::perfetto_scx::counter_descriptor::Unit::UNIT_COUNT;
 use crate::protos_gen::perfetto_scx::trace_packet::Data::TrackDescriptor as DataTrackDescriptor;
 use crate::protos_gen::perfetto_scx::track_event::Type as TrackEventType;
 use crate::protos_gen::perfetto_scx::{
     CounterDescriptor, FtraceEvent, FtraceEventBundle, SchedSwitchFtraceEvent,
-    SchedWakeupFtraceEvent, Trace, TracePacket, TrackDescriptor, TrackEvent,
+    SchedWakeupFtraceEvent, SchedWakingFtraceEvent, Trace, TracePacket, TrackDescriptor,
+    TrackEvent,
 };
 
 /// Handler for perfetto traces. For details on data flow in perfetto see:
@@ -239,6 +240,39 @@ impl<'a> PerfettoTraceManager<'a> {
     /// Adds events for on sched_wakeup_new.
     pub fn on_sched_wakeup_new(&mut self, _action: &Action) {
         // TODO
+    }
+
+    /// Adds events for on sched_waking.
+    pub fn on_sched_waking(&mut self, action: &SchedWakingAction) {
+        let SchedWakingAction {
+            ts,
+            cpu,
+            pid,
+            prio,
+            comm,
+        } = action;
+
+        let _ = self
+            .ftrace_events
+            .entry(*cpu)
+            .or_insert_with(Vec::new)
+            .push({
+                let mut ftrace_event = FtraceEvent::new();
+                let mut waking_event = SchedWakingFtraceEvent::new();
+                let pid = *pid as u32;
+                let cpu = *cpu as i32;
+
+                waking_event.set_pid(pid.try_into().unwrap());
+                waking_event.set_prio(*prio);
+                waking_event.set_comm(comm.clone());
+                waking_event.set_target_cpu(cpu);
+
+                ftrace_event.set_timestamp(*ts);
+                ftrace_event.set_sched_waking(waking_event);
+                ftrace_event.set_pid(pid);
+
+                ftrace_event
+            });
     }
 
     /// Adds events for the sched_switch event.

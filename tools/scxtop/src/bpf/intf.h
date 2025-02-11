@@ -24,6 +24,7 @@ enum event_type {
 	SCHED_UNREG,
 	SCHED_SWITCH,
 	SCHED_WAKEUP,
+	SCHED_WAKING,
 	EVENT_MAX,
 };
 
@@ -65,6 +66,7 @@ struct bpf_event {
 	u32		cpu;
 	union {
 		struct	sched_switch_event sched_switch;
+		struct	wakeup_event waking;
 		struct	wakeup_event wakeup;
 		struct	set_perf_event perf;
 	} event;
