@@ -14,7 +14,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -43,10 +42,13 @@ use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 
 use crate::bpf_intf::stat_idx_P2DQ_NR_STATS;
+use crate::bpf_intf::stat_idx_P2DQ_STAT_DIRECT;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DSQ_CHANGE;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DSQ_SAME;
+use crate::bpf_intf::stat_idx_P2DQ_STAT_IDLE;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_KEEP;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_LLC_MIGRATION;
+use crate::bpf_intf::stat_idx_P2DQ_STAT_NODE_MIGRATION;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_PICK2;
 
 /// scx_p2dq: A pick 2 dumb queuing load balancing scheduler.
@@ -59,6 +61,18 @@ struct Opts {
     /// Disables per-cpu kthreads directly dispatched into local dsqs.
     #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
     disable_kthreads_local: bool,
+
+    /// Eager load balancing.
+    #[clap(short = 'e', long, action = clap::ArgAction::SetTrue)]
+    eager_load_balance: bool,
+
+    /// Interactive tasks stay sticky to their CPU if no idle CPU is found.
+    #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
+    interactive_sticky: bool,
+
+    /// Enable tasks to run beyond their timeslice if the CPU is idle.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    keep_running: bool,
 
     /// Scheduling min slice duration in microseconds.
     #[clap(short = 's', long, default_value = "500")]
@@ -114,7 +128,6 @@ struct Scheduler<'a> {
     struct_ops: Option<libbpf_rs::Link>,
 
     stats_server: StatsServer<(), Metrics>,
-    sched_interval: Duration,
 }
 
 impl<'a> Scheduler<'a> {
@@ -168,7 +181,10 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.init_dsq_index = opts.init_dsq_index as i32;
         skel.maps.rodata_data.nr_llcs = topo.all_llcs.clone().keys().len() as u32;
         skel.maps.rodata_data.nr_nodes = topo.nodes.clone().keys().len() as u32;
+        skel.maps.rodata_data.eager_load_balance = opts.eager_load_balance;
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
+        skel.maps.rodata_data.interactive_sticky = opts.interactive_sticky;
+        skel.maps.rodata_data.keep_running_enabled = opts.keep_running;
         skel.maps.rodata_data.smt_enabled =
             read_file_usize(Path::new("/sys/devices/system/cpu/smt/active")).unwrap_or(0) == 1;
 
@@ -183,7 +199,6 @@ impl<'a> Scheduler<'a> {
                 };
             skel.maps.bss_data.cpu_llc_ids[cpu.id] = cpu.llc_id as u64;
             skel.maps.bss_data.cpu_node_ids[cpu.id] = cpu.node_id as u64;
-            info!("cpu {} node {} llc {}", cpu.id, cpu.node_id, cpu.llc_id);
         }
 
         let struct_ops = Some(scx_ops_attach!(skel, p2dq)?);
@@ -196,7 +211,6 @@ impl<'a> Scheduler<'a> {
             skel,
             struct_ops,
             stats_server,
-            sched_interval: Duration::from_secs_f64(0.5),
         })
     }
 
@@ -215,30 +229,22 @@ impl<'a> Scheduler<'a> {
             stats[stat as usize] = sum;
         }
         Metrics {
+            direct: stats[stat_idx_P2DQ_STAT_DIRECT as usize],
+            idle: stats[stat_idx_P2DQ_STAT_IDLE as usize],
             sched_mode: self.skel.maps.bss_data.sched_mode,
             dsq_change: stats[stat_idx_P2DQ_STAT_DSQ_CHANGE as usize],
             same_dsq: stats[stat_idx_P2DQ_STAT_DSQ_SAME as usize],
             keep: stats[stat_idx_P2DQ_STAT_KEEP as usize],
             pick2: stats[stat_idx_P2DQ_STAT_PICK2 as usize],
             llc_migrations: stats[stat_idx_P2DQ_STAT_LLC_MIGRATION as usize],
+            node_migrations: stats[stat_idx_P2DQ_STAT_NODE_MIGRATION as usize],
         }
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
-        let now = Instant::now();
-        let mut next_sched_at = now + self.sched_interval;
         let (res_ch, req_ch) = self.stats_server.channels();
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
-            let now = Instant::now();
-
-            if now >= next_sched_at {
-                next_sched_at += self.sched_interval;
-                if next_sched_at < now {
-                    next_sched_at = now + self.sched_interval;
-                }
-            }
-
             match req_ch.recv_timeout(Duration::from_secs(1)) {
                 Ok(()) => res_ch.send(self.get_metrics())?,
                 Err(RecvTimeoutError::Timeout) => {}

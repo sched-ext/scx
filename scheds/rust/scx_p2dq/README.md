@@ -11,3 +11,6 @@ consume more than half the slice are moved to shorter slice DSQs. The DSQs with
 the shortest slice lengths are then determined to be "interactive". All DSQs on
 the same LLC share the same vtime and there is special handling for
 (non)interactive tasks.
+
+The scheduler handles all scheduling decisions in BPF and the userspace
+component is only for metric reporting.
