@@ -1295,6 +1295,8 @@ static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 
 	p_cpumask = lookup_task_bpfmask(p);
 
+// TODO: add __aarch64__ support
+#if __x86_64__
 	if (!mempolicy_affinity || !bpf_core_field_exists(p->mempolicy) ||
 	    !p->mempolicy || !p_cpumask)
 		return;
@@ -1322,6 +1324,7 @@ static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 
 		taskc->preferred_dom_mask |= node_dom_mask(node_id);
 	}
+#endif /* __x86_64__ */
 
 	return;
 }
