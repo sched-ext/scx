@@ -1037,58 +1037,6 @@ bool try_preempt_cpu(s32 cand, struct task_struct *p, struct cpu_ctx *cpuc,
 	return true;
 }
 
-static __always_inline
-void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *taskc,
-		 bool preempt_first, u64 enq_flags)
-{
-	struct cpu_ctx *cpuc, *task_cpuc;
-	struct layer *layer;
-	struct cpu_prox_map *pmap;
-	s32 i;
-
-	if (!(layer = lookup_layer(taskc->layer_id)) ||
-	    !(cpuc = lookup_cpu_ctx(-1)) ||
-	    !(task_cpuc = lookup_cpu_ctx(task_cpu)))
-		return;
-
-	if (preempt_first) {
-		/*
-		 * @p prefers to preempt its previous CPU even when there are
-		 * other idle CPUs.
-		 */
-		if (try_preempt_cpu(task_cpu, p, cpuc, taskc, layer, true))
-			return;
-		/* we skipped idle CPU picking in select_cpu. Do it here. */
-		if (pick_idle_cpu_and_kick(p, task_cpu, cpuc, taskc, layer))
-			return;
-	} else {
-		/*
-		 * If we aren't in the wakeup path, layered_select_cpu() hasn't
-		 * run and thus we haven't looked for and kicked an idle CPU.
-		 * Let's do it now.
-		 */
-		if (!(enq_flags & SCX_ENQ_WAKEUP) &&
-		    pick_idle_cpu_and_kick(p, task_cpu, cpuc, taskc, layer))
-			return;
-		if (!layer->preempt)
-			return;
-		if (try_preempt_cpu(task_cpu, p, cpuc, taskc, layer, false))
-			return;
-	}
-
-	pmap = &task_cpuc->prox_map;
-
-	bpf_for(i, 1, MAX_CPUS) {
-		if (i >= pmap->sys_end)
-			break;
-		u16 *cpu_p = MEMBER_VPTR(pmap->cpus, [i]);
-		if (cpu_p && try_preempt_cpu(*cpu_p, p, cpuc, taskc, layer, false))
-			return;
-	}
-
-	lstat_inc(LSTAT_PREEMPT_FAIL, layer, cpuc);
-}
-
 static void task_uncharge_qrt(struct task_ctx *taskc)
 {
 	struct llc_ctx *llcc;
@@ -1123,9 +1071,10 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *taskc;
 	struct llc_ctx *llcc;
 	struct layer *layer;
+	struct cpu_prox_map *pmap;
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	u64 vtime = p->scx.dsq_vtime;
-	u32 llc_id, layer_id;
+	u32 llc_id, layer_id, cpu;
 	bool try_preempt_first;
 	u64 queued_runtime;
 	u64 *lstats;
@@ -1185,7 +1134,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 		taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
 		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
-		goto preempt;
+		goto enqueued;
 	}
 
 	/*
@@ -1214,7 +1163,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!scx_bpf_dsq_nr_queued(taskc->dsq_id))
 			llcc->lo_fb_seq++;
 		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
-		goto preempt;
+		goto enqueued;
 	}
 
 	/*
@@ -1264,8 +1213,43 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		layer_kick_idle_cpu(layer);
 	}
 
-preempt:
-	try_preempt(task_cpu, p, taskc, try_preempt_first, enq_flags);
+enqueued:
+	if (try_preempt_first) {
+		/*
+		 * @p prefers to preempt its previous CPU even when there are
+		 * other idle CPUs.
+		 */
+		if (try_preempt_cpu(task_cpu, p, cpuc, taskc, layer, true))
+			return;
+		/* we skipped idle CPU picking in select_cpu. Do it here. */
+		if (pick_idle_cpu_and_kick(p, task_cpu, cpuc, taskc, layer))
+			return;
+	} else {
+		/*
+		 * If we aren't in the wakeup path, layered_select_cpu() hasn't
+		 * run and thus we haven't looked for and kicked an idle CPU.
+		 * Let's do it now.
+		 */
+		if (!(enq_flags & SCX_ENQ_WAKEUP) &&
+		    pick_idle_cpu_and_kick(p, task_cpu, cpuc, taskc, layer))
+			return;
+		if (!layer->preempt)
+			return;
+		if (try_preempt_cpu(task_cpu, p, cpuc, taskc, layer, false))
+			return;
+	}
+
+	pmap = &task_cpuc->prox_map;
+
+	bpf_for(cpu, 1, MAX_CPUS) {
+		if (cpu >= pmap->sys_end)
+			break;
+		u16 *cpu_p = MEMBER_VPTR(pmap->cpus, [cpu]);
+		if (cpu_p && try_preempt_cpu(*cpu_p, p, cpuc, taskc, layer, false))
+			return;
+	}
+
+	lstat_inc(LSTAT_PREEMPT_FAIL, layer, cpuc);
 }
 
 static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
