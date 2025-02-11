@@ -1935,7 +1935,10 @@ impl<'a> Scheduler<'a> {
             return Ok(());
         }
 
-        let nvml = NVML_CELL.get_or_try_init(|| Nvml::init())?;
+        let nvml = NVML_CELL.get_or_try_init(|| {
+            Nvml::init().context("enabling GPU support requires a nvidia device")
+        })?;
+
         let mut missing_gpu_pid = false;
 
         if !self.opts.aggressive_nvml_polling {
