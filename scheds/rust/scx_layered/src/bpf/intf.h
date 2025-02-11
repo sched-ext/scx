@@ -106,6 +106,7 @@ enum global_stat_id {
 
 enum layer_stat_id {
 	LSTAT_SEL_LOCAL,
+	LSTAT_ENQ_LOCAL,
 	LSTAT_ENQ_WAKEUP,
 	LSTAT_ENQ_EXPIRE,
 	LSTAT_ENQ_REENQ,

@@ -39,6 +39,7 @@ const GSTAT_LO_FB_USAGE: usize = bpf_intf::global_stat_id_GSTAT_LO_FB_USAGE as u
 const GSTAT_FB_CPU_USAGE: usize = bpf_intf::global_stat_id_GSTAT_FB_CPU_USAGE as usize;
 
 const LSTAT_SEL_LOCAL: usize = bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL as usize;
+const LSTAT_ENQ_LOCAL: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_LOCAL as usize;
 const LSTAT_ENQ_WAKEUP: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_WAKEUP as usize;
 const LSTAT_ENQ_EXPIRE: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_EXPIRE as usize;
 const LSTAT_ENQ_REENQ: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_REENQ as usize;
@@ -120,8 +121,10 @@ pub struct LayerStats {
     pub tasks: u32,
     #[stat(desc = "count of sched events during the period")]
     pub total: u64,
-    #[stat(desc = "% dispatched into idle CPU")]
+    #[stat(desc = "% dispatched into idle CPU from select_cpu")]
     pub sel_local: f64,
+    #[stat(desc = "% dispatched into idle CPU from enqueue")]
+    pub enq_local: f64,
     #[stat(desc = "% enqueued after wakeup")]
     pub enq_wakeup: f64,
     #[stat(desc = "% enqueued after slice expiration")]
@@ -226,6 +229,7 @@ impl LayerStats {
     ) -> Self {
         let lstat = |sidx| bstats.lstats[lidx][sidx];
         let ltotal = lstat(LSTAT_SEL_LOCAL)
+            + lstat(LSTAT_ENQ_LOCAL)
             + lstat(LSTAT_ENQ_WAKEUP)
             + lstat(LSTAT_ENQ_EXPIRE)
             + lstat(LSTAT_ENQ_REENQ);
@@ -258,6 +262,7 @@ impl LayerStats {
             tasks: stats.nr_layer_tasks[lidx] as u32,
             total: ltotal,
             sel_local: lstat_pct(LSTAT_SEL_LOCAL),
+            enq_local: lstat_pct(LSTAT_ENQ_LOCAL),
             enq_wakeup: lstat_pct(LSTAT_ENQ_WAKEUP),
             enq_expire: lstat_pct(LSTAT_ENQ_EXPIRE),
             enq_reenq: lstat_pct(LSTAT_ENQ_REENQ),
@@ -328,10 +333,11 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  tot={:7} local={} wake/exp/reenq={}/{}/{}",
+            "  {:<width$}  tot={:7} local_sel/enq={}/{} wake/exp/reenq={}/{}/{}",
             "",
             self.total,
             fmt_pct(self.sel_local),
+            fmt_pct(self.enq_local),
             fmt_pct(self.enq_wakeup),
             fmt_pct(self.enq_expire),
             fmt_pct(self.enq_reenq),
@@ -471,8 +477,10 @@ pub struct SysStats {
     pub nr_nodes: usize,
     #[stat(desc = "# sched events during the period")]
     pub total: u64,
-    #[stat(desc = "% dispatched directly into an idle CPU")]
-    pub local: f64,
+    #[stat(desc = "% dispatched directly into an idle CPU from select_cpu")]
+    pub local_sel: f64,
+    #[stat(desc = "% dispatched directly into an idle CPU from enqueue")]
+    pub local_enq: f64,
     #[stat(desc = "% open layer tasks scheduled into allocated but idle CPUs")]
     pub open_idle: f64,
     #[stat(desc = "% violated config due to CPU affinity")]
@@ -513,6 +521,7 @@ impl SysStats {
     pub fn new(stats: &Stats, bstats: &BpfStats, fallback_cpu: usize) -> Result<Self> {
         let lsum = |idx| stats.bpf_stats.lstats_sums[idx];
         let total = lsum(LSTAT_SEL_LOCAL)
+            + lsum(LSTAT_ENQ_LOCAL)
             + lsum(LSTAT_ENQ_WAKEUP)
             + lsum(LSTAT_ENQ_EXPIRE)
             + lsum(LSTAT_ENQ_REENQ);
@@ -530,7 +539,8 @@ impl SysStats {
             at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs_f64(),
             nr_nodes: stats.nr_nodes,
             total,
-            local: lsum_pct(LSTAT_SEL_LOCAL),
+            local_sel: lsum_pct(LSTAT_SEL_LOCAL),
+            local_enq: lsum_pct(LSTAT_ENQ_LOCAL),
             open_idle: lsum_pct(LSTAT_OPEN_IDLE),
             affn_viol: lsum_pct(LSTAT_AFFN_VIOL),
             hi_fb: calc_frac(
@@ -563,26 +573,26 @@ impl SysStats {
     pub fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "tot={:7} local={} open_idle={} affn_viol={} hi/lo={}/{} proc={:?}ms nodes={}",
+            "tot={:7} local_sel/enq={}/{} open_idle={} affn_viol={} hi/lo={}/{}",
             self.total,
-            fmt_pct(self.local),
+            fmt_pct(self.local_sel),
+            fmt_pct(self.local_enq),
             fmt_pct(self.open_idle),
             fmt_pct(self.affn_viol),
             fmt_pct(self.hi_fb),
             fmt_pct(self.lo_fb),
-            self.proc_ms,
-            self.nr_nodes,
         )?;
 
         writeln!(
             w,
-            "busy={:5.1} util/hi/lo={:7.1}/{}/{} fallback_cpu/util={:3}/{:4.1}",
+            "busy={:5.1} util/hi/lo={:7.1}/{}/{} fallback_cpu/util={:3}/{:4.1} proc={:?}ms",
             self.busy,
             self.util,
             fmt_pct(self.hi_fb_util),
             fmt_pct(self.lo_fb_util),
             self.fallback_cpu,
             self.fallback_cpu_util,
+            self.proc_ms,
         )?;
 
         writeln!(

@@ -1072,24 +1072,35 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	struct llc_ctx *llcc;
 	struct layer *layer;
 	struct cpu_prox_map *pmap;
-	s32 task_cpu = scx_bpf_task_cpu(p);
+	s32 cpu, task_cpu = scx_bpf_task_cpu(p);
 	u64 vtime = p->scx.dsq_vtime;
-	u32 llc_id, layer_id, cpu;
+	u32 llc_id, layer_id;
 	bool try_preempt_first;
 	u64 queued_runtime;
 	u64 *lstats;
 
-	if (!(cpuc = lookup_cpu_ctx(-1)) ||
-	    !(task_cpuc = lookup_cpu_ctx(task_cpu)) ||
-	    !(taskc = lookup_task_ctx(p)))
+	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
+		return;
+
+	layer_id = taskc->layer_id;
+	if (!(layer = lookup_layer(layer_id)))
+		return;
+
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
+		cpu = pick_idle_cpu(p, task_cpu, cpuc, taskc, layer, true);
+		if (cpu >= 0) {
+			lstat_inc(LSTAT_ENQ_LOCAL, layer, cpuc);
+			taskc->dsq_id = SCX_DSQ_LOCAL_ON | cpu;
+			scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, 0);
+			return;
+		}
+	}
+
+	if (!(task_cpuc = lookup_cpu_ctx(task_cpu)))
 		return;
 
 	llc_id = task_cpuc->llc_id;
-	layer_id = taskc->layer_id;
-
-	if (llc_id >= MAX_LLCS ||
-	    !(llcc = lookup_llc_ctx(llc_id)) ||
-	    !(layer = lookup_layer(layer_id)))
+	if (llc_id >= MAX_LLCS || !(llcc = lookup_llc_ctx(llc_id)))
 		return;
 
 	try_preempt_first = cpuc->try_preempt_first;
@@ -1225,14 +1236,6 @@ enqueued:
 		if (pick_idle_cpu_and_kick(p, task_cpu, cpuc, taskc, layer))
 			return;
 	} else {
-		/*
-		 * If we aren't in the wakeup path, layered_select_cpu() hasn't
-		 * run and thus we haven't looked for and kicked an idle CPU.
-		 * Let's do it now.
-		 */
-		if (!(enq_flags & SCX_ENQ_WAKEUP) &&
-		    pick_idle_cpu_and_kick(p, task_cpu, cpuc, taskc, layer))
-			return;
 		if (!layer->preempt)
 			return;
 		if (try_preempt_cpu(task_cpu, p, cpuc, taskc, layer, false))
