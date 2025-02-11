@@ -948,32 +948,11 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 		return prev_cpu;
 
 	cpu = pick_idle_cpu(p, prev_cpu, cpuc, taskc, layer, true);
-
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cpuc);
 		taskc->dsq_id = SCX_DSQ_LOCAL;
 		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, 0);
 		return cpu;
-	}
-
-	/*
-	 * Didn't find an idle CPU. If @p gets queued on an LLC without CPUs
-	 * assigned, it will trigger LLC draining which isn't great. Find an
-	 * in-layer CPU and put it there instead.
-	 *
-	 * FIXME: This is most likely wrong and causing unnecessary xllc
-	 * migrations while saturated. Always returning @prev_cpu is likely a
-	 * better behavior. Ideally, this should be scoped so that it returns
-	 * the closest allowed layer CPU to @prev_cpu.
-	 */
-	if (taskc->all_cpus_allowed) {
-		const struct cpumask *layer_cpumask;
-
-		if (!(layer_cpumask = lookup_layer_cpumask(taskc->layer_id)))
-			return prev_cpu;
-
-		if ((cpu = bpf_cpumask_any_distribute(layer_cpumask)) < nr_cpu_ids)
-			return cpu;
 	}
 
 	return prev_cpu;
