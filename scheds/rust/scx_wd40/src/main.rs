@@ -366,7 +366,7 @@ impl<'a> Scheduler<'a> {
             "Running scx_wd40 (build ID: {})",
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
-        let mut skel = scx_ops_open!(skel_builder, open_object, rusty).unwrap();
+        let mut skel = scx_ops_open!(skel_builder, open_object, wd40).unwrap();
 
         // Initialize skel according to @opts.
         let domains = Arc::new(DomainGroup::new(&Topology::new()?, &opts.cpumasks)?);
@@ -437,9 +437,9 @@ impl<'a> Scheduler<'a> {
         }
 
         if opts.partial {
-            skel.struct_ops.rusty_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
+            skel.struct_ops.wd40_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
         }
-        skel.struct_ops.rusty_mut().exit_dump_len = opts.exit_dump_len;
+        skel.struct_ops.wd40_mut().exit_dump_len = opts.exit_dump_len;
 
         skel.maps.rodata_data.load_half_life = (opts.load_half_life * 1000000000.0) as u32;
         skel.maps.rodata_data.kthreads_local = opts.kthreads_local;
@@ -449,11 +449,11 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.direct_greedy_numa = opts.direct_greedy_numa;
         skel.maps.rodata_data.mempolicy_affinity = opts.mempolicy_affinity;
         skel.maps.rodata_data.debug = opts.verbose as u32;
-        skel.maps.rodata_data.rusty_perf_mode = opts.perf;
+        skel.maps.rodata_data.wd40_perf_mode = opts.perf;
 
         // Attach.
-        let mut skel = scx_ops_load!(skel, rusty, uei)?;
-        let struct_ops = Some(scx_ops_attach!(skel, rusty)?);
+        let mut skel = scx_ops_load!(skel, wd40, uei)?;
+        let struct_ops = Some(scx_ops_attach!(skel, wd40)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         for (id, dom) in domains.doms().iter() {

@@ -6,12 +6,12 @@
 //! # Rusty load balancer
 //!
 //! The module that includes logic for performing load balancing in the
-//! scx_rusty scheduler.
+//! scx_wd40 scheduler.
 //!
 //! Load Balancing
 //! --------------
 //!
-//! scx_rusty performs load balancing using the following general workflow:
+//! scx_wd40 performs load balancing using the following general workflow:
 //!
 //! 1. Determine domain load averages from the duty cycle buckets in the
 //!    dom_ctx_map_elem map, aggregate the load using

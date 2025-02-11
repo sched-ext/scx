@@ -3,16 +3,19 @@
  * This software may be used and distributed according to the terms of the
  * GNU General Public License version 2.
  *
- * scx_rusty is a multi-domain BPF / userspace hybrid scheduler where the BPF
+ * The below message is as in the original scx_rusty scheduler with the name
+ * updated to avoid confusion.
+ *
+ * scx_wd40 is a multi-domain BPF / userspace hybrid scheduler where the BPF
  * part does simple round robin in each domain and the userspace part
  * calculates the load factor of each domain and tells the BPF part how to load
  * balance the domains.
  *
  * Every task has an entry in the task_data map which lists which domain the
- * task belongs to. When a task first enters the system (rusty_prep_enable),
+ * task belongs to. When a task first enters the system (wd40_prep_enable),
  * they are round-robined to a domain.
  *
- * rusty_select_cpu is the primary scheduling logic, invoked when a task
+ * wd40_select_cpu is the primary scheduling logic, invoked when a task
  * becomes runnable. A task's target_dom field is populated by userspace to inform 
  * the BPF scheduler that a task should be migrated to a new domain. Otherwise, 
  * the task is scheduled in priority order as follows:
@@ -23,11 +26,11 @@
  * * Any idle cpu in the domain
  *
  * If none of the above conditions are met, then the task is enqueued to a
- * dispatch queue corresponding to the domain (rusty_enqueue).
+ * dispatch queue corresponding to the domain (wd40_enqueue).
  *
- * rusty_dispatch will attempt to consume a task from its domain's
+ * wd40_dispatch will attempt to consume a task from its domain's
  * corresponding dispatch queue (this occurs after scheduling any tasks directly
- * assigned to it due to the logic in rusty_select_cpu). If no task is found,
+ * assigned to it due to the logic in wd40_select_cpu). If no task is found,
  * then greedy load stealing will attempt to find a task on another dispatch
  * queue to run.
  *
@@ -80,21 +83,21 @@ const volatile bool direct_greedy_numa;
 const volatile u32 greedy_threshold;
 const volatile u32 greedy_threshold_x_numa;
 
-struct rusty_percpu_storage {
+struct wd40_percpu_storage {
 	struct bpf_cpumask __kptr *bpfmask;
 };
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, u32);
-	__type(value, struct rusty_percpu_storage);
+	__type(value, struct wd40_percpu_storage);
 	__uint(max_entries, 1);
 } scx_percpu_bpfmask_map SEC(".maps");
 
-static int scx_rusty_percpu_storage_init(void)
+static int scx_wd40_percpu_storage_init(void)
 {
 	void *map = &scx_percpu_bpfmask_map;
-	struct rusty_percpu_storage *storage;
+	struct wd40_percpu_storage *storage;
 	const u32 zero = 0;
 	int ret, i;
 
@@ -116,7 +119,7 @@ static int scx_rusty_percpu_storage_init(void)
 
 static struct bpf_cpumask *scx_percpu_bpfmask(void)
 {
-	struct rusty_percpu_storage *storage;
+	struct wd40_percpu_storage *storage;
 	void *map = &scx_percpu_bpfmask_map;
 	const u32 zero = 0;
 
@@ -479,7 +482,7 @@ s32 select_cpu_pick_local(struct bpf_cpumask *p_cpumask, bool prev_domestic, boo
 	return -1;
 }
 
-s32 BPF_STRUCT_OPS(rusty_select_cpu, struct task_struct *p, s32 prev_cpu,
+s32 BPF_STRUCT_OPS(wd40_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
 	const struct cpumask *idle_smtmask = scx_bpf_get_idle_smtmask();
@@ -572,7 +575,7 @@ enoent:
 	return -ENOENT;
 }
 
-void BPF_STRUCT_OPS(rusty_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
+void BPF_STRUCT_OPS(wd40_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
 {
 	struct task_ctx *taskc;
 	dom_ptr domc;
@@ -710,7 +713,7 @@ dispatch_steal_x_numa(u32 curr_dom, struct pcpu_ctx *pcpuc)
 	return false;
 }
 
-void BPF_STRUCT_OPS(rusty_dispatch, s32 cpu, struct task_struct *prev)
+void BPF_STRUCT_OPS(wd40_dispatch, s32 cpu, struct task_struct *prev)
 {
 	u32 curr_dom = cpu_to_dom_id(cpu);
 	struct pcpu_ctx *pcpuc;
@@ -760,7 +763,7 @@ update_task_wake_freq(struct task_struct *p, u64 now)
 	taskc->last_woke_at = now;
 }
 
-void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
+void BPF_STRUCT_OPS(wd40_runnable, struct task_struct *p, u64 enq_flags)
 {
 	u64 now = scx_bpf_now();
 	struct task_ctx *wakee_ctx;
@@ -811,7 +814,7 @@ void lb_record_run(struct task_struct *p, dom_ptr domc, struct task_ctx *taskc)
 	}
 }
 
-void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
+void BPF_STRUCT_OPS(wd40_running, struct task_struct *p)
 {
 	struct task_ctx *taskc;
 	dom_ptr domc;
@@ -833,7 +836,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	running_update_vtime(p, taskc, domc);
 }
 
-void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
+void BPF_STRUCT_OPS(wd40_stopping, struct task_struct *p, bool runnable)
 {
 	struct task_ctx *taskc;
 	dom_ptr domc;
@@ -850,7 +853,7 @@ void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
 	stopping_update_vtime(p, taskc, domc);
 }
 
-void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
+void BPF_STRUCT_OPS(wd40_quiescent, struct task_struct *p, u64 deq_flags)
 {
 	u64 now = scx_bpf_now(), interval;
 	struct task_ctx *taskc;
@@ -873,7 +876,7 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 	taskc->last_blocked_at = now;
 }
 
-void BPF_STRUCT_OPS(rusty_set_weight, struct task_struct *p, u32 weight)
+void BPF_STRUCT_OPS(wd40_set_weight, struct task_struct *p, u32 weight)
 {
 	struct task_ctx *taskc;
 
@@ -887,7 +890,7 @@ void BPF_STRUCT_OPS(rusty_set_weight, struct task_struct *p, u32 weight)
 	taskc->weight = weight;
 }
 
-void BPF_STRUCT_OPS(rusty_set_cpumask, struct task_struct *p,
+void BPF_STRUCT_OPS(wd40_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
 	struct task_ctx *taskc;
@@ -901,7 +904,7 @@ void BPF_STRUCT_OPS(rusty_set_cpumask, struct task_struct *p,
 			bpf_cpumask_subset(cast_mask(all_cpumask), cpumask);
 }
 
-s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
+s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
 	u64 now = scx_bpf_now();
@@ -960,7 +963,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init_task, struct task_struct *p,
 	return 0;
 }
 
-void BPF_STRUCT_OPS(rusty_exit_task, struct task_struct *p,
+void BPF_STRUCT_OPS(wd40_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
 	long ret;
@@ -1017,7 +1020,7 @@ static s32 initialize_cpu(s32 cpu)
 	return -ENOENT;
 }
 
-s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
+s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init)
 {
 	s32 i, ret;
 
@@ -1045,7 +1048,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 	if (ret)
 		return ret;
 
-	ret = scx_rusty_percpu_storage_init();
+	ret = scx_wd40_percpu_storage_init();
 	if (ret)
 		return ret;
 
@@ -1072,24 +1075,24 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rusty_init)
 	return 0;
 }
 
-void BPF_STRUCT_OPS(rusty_exit, struct scx_exit_info *ei)
+void BPF_STRUCT_OPS(wd40_exit, struct scx_exit_info *ei)
 {
 	UEI_RECORD(uei, ei);
 }
 
-SCX_OPS_DEFINE(rusty,
-	       .select_cpu		= (void *)rusty_select_cpu,
-	       .enqueue			= (void *)rusty_enqueue,
-	       .dispatch		= (void *)rusty_dispatch,
-	       .runnable		= (void *)rusty_runnable,
-	       .running			= (void *)rusty_running,
-	       .stopping		= (void *)rusty_stopping,
-	       .quiescent		= (void *)rusty_quiescent,
-	       .set_weight		= (void *)rusty_set_weight,
-	       .set_cpumask		= (void *)rusty_set_cpumask,
-	       .init_task		= (void *)rusty_init_task,
-	       .exit_task		= (void *)rusty_exit_task,
-	       .init			= (void *)rusty_init,
-	       .exit			= (void *)rusty_exit,
+SCX_OPS_DEFINE(wd40,
+	       .select_cpu		= (void *)wd40_select_cpu,
+	       .enqueue			= (void *)wd40_enqueue,
+	       .dispatch		= (void *)wd40_dispatch,
+	       .runnable		= (void *)wd40_runnable,
+	       .running			= (void *)wd40_running,
+	       .stopping		= (void *)wd40_stopping,
+	       .quiescent		= (void *)wd40_quiescent,
+	       .set_weight		= (void *)wd40_set_weight,
+	       .set_cpumask		= (void *)wd40_set_cpumask,
+	       .init_task		= (void *)wd40_init_task,
+	       .exit_task		= (void *)wd40_exit_task,
+	       .init			= (void *)wd40_init,
+	       .exit			= (void *)wd40_exit,
 	       .timeout_ms		= 10000,
-	       .name			= "rusty");
+	       .name			= "wd40");

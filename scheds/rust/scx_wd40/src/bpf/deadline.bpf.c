@@ -84,7 +84,7 @@ static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
 	 * Min. Though the implementations for determining latency criticality
 	 * are quite different in many ways, individuals familiar with both
 	 * schedulers will feel an eerie sense of deja-vu. The details of
-	 * interactivity boosting for rusty are described below.
+	 * interactivity boosting for wd40 are described below.
 	 */
 
 	/*

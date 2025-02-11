@@ -19,7 +19,7 @@
 #include <bpf/bpf_tracing.h>
 
 const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
-const volatile u32 rusty_perf_mode;
+const volatile u32 wd40_perf_mode;
 
 struct lock_wrapper {
 	struct bpf_spin_lock lock;
@@ -437,7 +437,7 @@ __weak s32 create_dom(u32 dom_id)
 		 * of value to clean up any previous settings, since
 		 * it persists even after removing the scheduler.
 		 */
-		perf = min(SCX_CPUPERF_ONE, rusty_perf_mode);
+		perf = min(SCX_CPUPERF_ONE, wd40_perf_mode);
 		scx_bpf_cpuperf_set(cpu, perf);
 	}
 	bpf_rcu_read_unlock();
