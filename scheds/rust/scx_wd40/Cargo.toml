@@ -1,0 +1,35 @@
+[package]
+name = "scx_rusty"
+version = "1.0.9"
+authors = ["Dan Schatzberg <dschatzberg@meta.com>", "Meta"]
+edition = "2021"
+description = "A multi-domain, BPF / user space hybrid scheduler used within sched_ext, which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. https://github.com/sched-ext/scx/tree/main"
+license = "GPL-2.0-only"
+
+[dependencies]
+anyhow = "1.0.65"
+chrono = "0.4"
+clap = { version = "4.1", features = ["derive", "env", "unicode", "wrap_help"] }
+crossbeam = "0.8.4"
+ctrlc = { version = "3.1", features = ["termination"] }
+fb_procfs = "0.7"
+libbpf-rs = "=0.25.0-beta.1"
+libc = "0.2.137"
+log = "0.4.17"
+ordered-float = "3.4.0"
+scx_stats = { path = "../../../rust/scx_stats", version = "1.0.9" }
+scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.9" }
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.11" }
+serde = { version = "1.0.215", features = ["derive"] }
+simplelog = "0.12"
+sorted-vec = "0.8.3"
+static_assertions = "1.1.0"
+
+[build-dependencies]
+scx_utils = { path = "../../../rust/scx_utils", version = "1.0.11" }
+
+[features]
+enable_backtrace = []
+
+[lints.clippy]
+non_canonical_partial_ord_impl = "allow"
