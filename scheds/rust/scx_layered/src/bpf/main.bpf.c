@@ -777,11 +777,15 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		return -1;
 
 	/* not much to do if bound to a single CPU */
-	if (p->nr_cpus_allowed == 1 && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		if (layer->kind == LAYER_KIND_CONFINED &&
-		    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
-			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
-		return prev_cpu;
+	if (p->nr_cpus_allowed == 1) {
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+			if (layer->kind == LAYER_KIND_CONFINED &&
+			    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
+				lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
+			return prev_cpu;
+		} else {
+			return -1;
+		}
 	}
 
 	cpus_seq = READ_ONCE(layers->cpus_seq);
