@@ -585,7 +585,7 @@ impl<'cb> BpfScheduler<'cb> {
 }
 
 // Disconnect the low-level BPF scheduler.
-impl<'a> Drop for BpfScheduler<'a> {
+impl Drop for BpfScheduler<'_> {
     fn drop(&mut self) {
         if let Some(struct_ops) = self.struct_ops.take() {
             drop(struct_ops);

@@ -486,7 +486,7 @@ impl<'a> Scheduler<'a> {
 }
 
 // Unregister the scheduler.
-impl<'a> Drop for Scheduler<'a> {
+impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
         info!("Unregister {} scheduler", SCHEDULER_NAME);
     }
