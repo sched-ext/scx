@@ -58,7 +58,6 @@ const LSTAT_PREEMPT_IDLE: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_IDLE as 
 const LSTAT_PREEMPT_FAIL: usize = bpf_intf::layer_stat_id_LSTAT_PREEMPT_FAIL as usize;
 const LSTAT_EXCL_COLLISION: usize = bpf_intf::layer_stat_id_LSTAT_EXCL_COLLISION as usize;
 const LSTAT_EXCL_PREEMPT: usize = bpf_intf::layer_stat_id_LSTAT_EXCL_PREEMPT as usize;
-const LSTAT_KICK: usize = bpf_intf::layer_stat_id_LSTAT_KICK as usize;
 const LSTAT_YIELD: usize = bpf_intf::layer_stat_id_LSTAT_YIELD as usize;
 const LSTAT_YIELD_IGNORE: usize = bpf_intf::layer_stat_id_LSTAT_YIELD_IGNORE as usize;
 const LSTAT_MIGRATION: usize = bpf_intf::layer_stat_id_LSTAT_MIGRATION as usize;
@@ -163,8 +162,6 @@ pub struct LayerStats {
     pub excl_collision: f64,
     #[stat(desc = "% a sibling CPU was preempted for an exclusive task")]
     pub excl_preempt: f64,
-    #[stat(desc = "% kicked a CPU from enqueue path")]
-    pub kick: f64,
     #[stat(desc = "% yielded")]
     pub yielded: f64,
     #[stat(desc = "count of times yield was ignored")]
@@ -282,7 +279,6 @@ impl LayerStats {
             is_excl: layer.kind.common().exclusive as u32,
             excl_collision: lstat_pct(LSTAT_EXCL_COLLISION),
             excl_preempt: lstat_pct(LSTAT_EXCL_PREEMPT),
-            kick: lstat_pct(LSTAT_KICK),
             yielded: lstat_pct(LSTAT_YIELD),
             yield_ignore: lstat(LSTAT_YIELD_IGNORE) as u64,
             migration: lstat_pct(LSTAT_MIGRATION),
@@ -346,12 +342,11 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  keep/max/busy={}/{}/{} kick={} yield/ign={}/{}",
+            "  {:<width$}  keep/max/busy={}/{}/{} yield/ign={}/{}",
             "",
             fmt_pct(self.keep),
             fmt_pct(self.keep_fail_max_exec),
             fmt_pct(self.keep_fail_busy),
-            fmt_pct(self.kick),
             fmt_pct(self.yielded),
             fmt_num(self.yield_ignore),
             width = header_width,
