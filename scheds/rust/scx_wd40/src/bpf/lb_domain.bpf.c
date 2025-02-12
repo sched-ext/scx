@@ -8,9 +8,12 @@
 #include <scx/ravg_impl.bpf.h>
 #include <lib/sdt_task.h>
 
+#include "cpumask.h"
+
 #include "intf.h"
 #include "types.h"
 #include "lb_domain.h"
+#include "percpu.h"
 
 #include <scx/bpf_arena_common.h>
 #include <errno.h>
@@ -55,7 +58,7 @@ struct {
 volatile dom_ptr dom_ctxs[MAX_DOMS];
 struct sdt_allocator lb_domain_allocator;
 
-__hidden
+__weak
 int lb_domain_init(void)
 {
 	return sdt_alloc_init(&lb_domain_allocator, sizeof(struct dom_ctx));
@@ -316,7 +319,7 @@ __weak
 s32 create_node(u32 node_id)
 {
 	u32 cpu;
-	struct bpf_cpumask *cpumask;
+	scx_bitmap_t cpumask;
 	struct node_ctx *nodec;
 	s32 ret;
 
@@ -327,7 +330,7 @@ s32 create_node(u32 node_id)
 		return -ENOENT;
 	}
 
-	ret = create_save_cpumask(&nodec->cpumask);
+	ret = create_save_scx_bitmap(&nodec->cpumask);
 	if (ret)
 		return ret;
 
@@ -350,7 +353,7 @@ s32 create_node(u32 node_id)
 		}
 
 		if (*nmask & (1LLU << (cpu % 64)))
-			bpf_cpumask_set_cpu(cpu, cpumask);
+			scx_bitmap_set_cpu(cpu, cpumask);
 	}
 
 	bpf_rcu_read_unlock();
@@ -362,7 +365,7 @@ __weak s32 create_dom(u32 dom_id)
 {
 	dom_ptr domc;
 	struct node_ctx *nodec;
-	struct bpf_cpumask *dom_mask, *node_mask, *all_mask;
+	scx_bitmap_t dom_mask, node_mask, all_mask;
 	struct lb_domain *lb_domain;
 	u32 cpu, node_id;
 	int perf;
@@ -397,7 +400,7 @@ __weak s32 create_dom(u32 dom_id)
 
 	domc->id = dom_id;
 
-	ret = create_save_cpumask(&lb_domain->cpumask);
+	ret = create_save_scx_bitmap(&lb_domain->cpumask);
 	if (ret)
 		return ret;
 
@@ -429,8 +432,8 @@ __weak s32 create_dom(u32 dom_id)
 		if (!cpu_in_domain)
 			continue;
 
-		bpf_cpumask_set_cpu(cpu, dom_mask);
-		bpf_cpumask_set_cpu(cpu, all_mask);
+		scx_bitmap_set_cpu(cpu, dom_mask);
+		scx_bitmap_set_cpu(cpu, all_mask);
 
 		/*
 		 * Perf has to be within [0, 1024]. Set it regardless
@@ -444,7 +447,7 @@ __weak s32 create_dom(u32 dom_id)
 	if (ret)
 		return ret;
 
-	ret = create_save_cpumask(&lb_domain->direct_greedy_cpumask);
+	ret = create_save_scx_bitmap(&lb_domain->direct_greedy_cpumask);
 	if (ret)
 		return ret;
 
@@ -454,7 +457,7 @@ __weak s32 create_dom(u32 dom_id)
 		scx_bpf_error("No node%u", node_id);
 		return -ENOENT;
 	}
-	ret = create_save_cpumask(&lb_domain->node_cpumask);
+	ret = create_save_scx_bitmap(&lb_domain->node_cpumask);
 	if (ret)
 		return ret;
 
@@ -466,7 +469,7 @@ __weak s32 create_dom(u32 dom_id)
 		scx_bpf_error("cpumask lookup failed");
 		return -ENOENT;
 	}
-	bpf_cpumask_copy(dom_mask, cast_mask(node_mask));
+	scx_bitmap_copy(dom_mask, node_mask);
 	bpf_rcu_read_unlock();
 
 	return 0;
