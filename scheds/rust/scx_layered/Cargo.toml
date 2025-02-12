@@ -34,3 +34,7 @@ scx_utils = { path = "../../../rust/scx_utils", version = "1.0.11" }
 
 [features]
 enable_backtrace = []
+
+[package.metadata.appimage]
+auto_link = true
+
