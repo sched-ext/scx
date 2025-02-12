@@ -33,6 +33,31 @@ struct {
 	__uint(max_entries, 10 * 1024 * 1024 /* 10Mib */);
 } events SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(key_size, sizeof(u32));
+	__uint(value_size, sizeof(u64));
+	__uint(max_entries, NR_SCXTOP_STATS);
+} stats SEC(".maps");
+
+static __always_inline void stat_inc(u32 idx)
+{
+	u64 *cnt_p = bpf_map_lookup_elem(&stats, &idx);
+	if (cnt_p)
+		(*cnt_p)++;
+}
+
+static __always_inline struct bpf_event* try_reserve_event()
+{
+	struct bpf_event *event = NULL;
+
+	if (!(event = bpf_ringbuf_reserve(&events, sizeof(struct bpf_event), 0)))
+		stat_inc(STAT_DROPPED_EVENTS);
+
+	return event;
+
+}
+
 static __always_inline u32 get_random_sample(u32 n)
 {
 	u32 val = bpf_get_prandom_u32();
@@ -122,8 +147,7 @@ int BPF_KPROBE(scx_sched_reg)
 	if (!enable_bpf_events)
 		return 0;
 
-	event = bpf_ringbuf_reserve(&events, sizeof(struct bpf_event), 0);
-	if (!event)
+	if (!(event = try_reserve_event()))
 		return -ENOENT;
 
 	event->type = SCHED_REG;
@@ -140,8 +164,7 @@ int BPF_KPROBE(scx_sched_unreg)
 	if (!enable_bpf_events)
 		return 0;
 
-	event = bpf_ringbuf_reserve(&events, sizeof(struct bpf_event), 0);
-	if (!event)
+	if (!(event = try_reserve_event()))
 		return -ENOENT;
 
 	event->type = SCHED_UNREG;
@@ -158,8 +181,7 @@ int BPF_KPROBE(on_sched_cpu_perf, s32 cpu, u32 perf)
 	if (!enable_bpf_events)
 		return 0;
 
-	event = bpf_ringbuf_reserve(&events, sizeof(struct bpf_event), 0);
-	if (!event)
+	if (!(event = try_reserve_event()))
 		return -ENOENT;
 
 	event->type = CPU_PERF_SET;
@@ -343,8 +365,7 @@ static __always_inline int __on_sched_wakeup(struct task_struct *p)
 	if (!tctx)
 		return 0;
 
-	event = bpf_ringbuf_reserve(&events, sizeof(struct bpf_event), 0);
-	if (!event)
+	if (!(event = try_reserve_event()))
 		return 0;
 
 	tctx->wakeup_ts = bpf_ktime_get_ns();
@@ -400,8 +421,7 @@ static __always_inline int on_sched_switch_non_scx(bool preempt, struct task_str
 	if (!prev || !next)
 		return -ENOENT;
 
-	event = bpf_ringbuf_reserve(&events, sizeof(struct bpf_event), 0);
-	if (!event)
+	if (!(event = try_reserve_event()))
 		return -ENOENT;
 
 	u64 now = bpf_ktime_get_ns();
@@ -451,8 +471,7 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 		return -ENOENT;
 	}
 
-	event = bpf_ringbuf_reserve(&events, sizeof(struct bpf_event), 0);
-	if (!event)
+	if (!(event = try_reserve_event()))
 		return -ENOENT;
 
 	u64 now = bpf_ktime_get_ns();
