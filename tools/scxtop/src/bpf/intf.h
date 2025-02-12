@@ -18,6 +18,11 @@ enum consts {
 	MAX_COMM	= 16,
 };
 
+enum stat_id {
+	STAT_DROPPED_EVENTS,
+	NR_SCXTOP_STATS,
+};
+
 enum event_type {
 	CPU_PERF_SET,
 	SCHED_REG,

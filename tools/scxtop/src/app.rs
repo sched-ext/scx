@@ -5,6 +5,7 @@
 
 use crate::available_perf_events;
 use crate::bpf_skel::BpfSkel;
+use crate::bpf_stats::BpfStats;
 use crate::format_hz;
 use crate::read_file_string;
 use crate::AppState;
@@ -93,6 +94,9 @@ pub struct App<'a> {
     llc_data: BTreeMap<usize, LlcData>,
     node_data: BTreeMap<usize, NodeData>,
     dsq_data: BTreeMap<u64, EventData>,
+
+    // stats from scxtop's bpf side
+    bpf_stats: BpfStats,
 
     // layout releated
     num_perf_events: u16,
@@ -216,6 +220,7 @@ impl<'a> App<'a> {
             trace_tick_warmup,
             max_trace_ticks: trace_ticks,
             trace_manager: PerfettoTraceManager::new(&trace_file_prefix, None),
+            bpf_stats: Default::default(),
         };
 
         Ok(app)
@@ -400,6 +405,9 @@ impl<'a> App<'a> {
 
     /// Runs callbacks to update application state on tick.
     fn on_tick(&mut self) -> Result<()> {
+        // always grab updated stats
+        self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
+
         match self.state {
             AppState::Scheduler => {
                 if !self.scheduler.is_empty() {
@@ -1803,7 +1811,11 @@ impl<'a> App<'a> {
             .style(self.theme.border_style());
 
         let label = Span::styled(
-            format!("recording trace to {}", self.trace_manager.trace_file()),
+            format!(
+                "recording trace to {}. {} dropped events.",
+                self.trace_manager.trace_file(),
+                self.bpf_stats.dropped_events
+            ),
             self.theme.title_style(),
         );
         let gauge = Gauge::default()

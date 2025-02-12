@@ -6,6 +6,7 @@
 mod app;
 pub mod bpf_intf;
 pub mod bpf_skel;
+mod bpf_stats;
 mod cpu_data;
 mod event_data;
 mod keymap;
