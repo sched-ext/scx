@@ -1434,8 +1434,10 @@ bool antistall_consume(struct cpu_ctx *cpuc)
 	bpf_for_each(scx_dsq, p, *antistall_dsq, 0) {
 		cur_delay = get_delay_sec(p, jiffies_now);
 
-		if (cur_delay > antistall_sec)
+		if (cur_delay > antistall_sec) {
+			gstat_inc(GSTAT_ASTALL, cpuc);
 			return consumed;
+		}
 
 		goto reset;
 	}
