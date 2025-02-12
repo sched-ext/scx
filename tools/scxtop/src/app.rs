@@ -2132,9 +2132,14 @@ impl<'a> App<'a> {
                     self.update_bpf_sample_rate(if new_rate >= 8 { new_rate } else { 0 });
                 }
             }
-            Action::Quit => {
-                self.should_quit.store(true, Ordering::Relaxed);
-            }
+            Action::Quit => match self.state {
+                AppState::Help => {
+                    self.handle_action(Action::SetState(AppState::Help))?;
+                }
+                _ => {
+                    self.should_quit.store(true, Ordering::Relaxed);
+                }
+            },
             _ => {}
         };
         Ok(())
