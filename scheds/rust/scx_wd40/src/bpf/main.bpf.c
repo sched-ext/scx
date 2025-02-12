@@ -49,10 +49,14 @@
 #include <lib/sdt_task.h>
 #endif
 
+#include "cpumask.h"
+
 #include "intf.h"
 #include "types.h"
 #include "lb_domain.h"
 #include "deadline.h"
+
+#include "percpu.h"
 
 #include <scx/bpf_arena_common.h>
 #include <errno.h>
@@ -83,65 +87,76 @@ const volatile bool direct_greedy_numa;
 const volatile u32 greedy_threshold;
 const volatile u32 greedy_threshold_x_numa;
 
-struct wd40_percpu_storage {
-	struct bpf_cpumask __kptr *bpfmask;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, u32);
-	__type(value, struct wd40_percpu_storage);
-	__uint(max_entries, 1);
-} scx_percpu_bpfmask_map SEC(".maps");
-
-static int scx_wd40_percpu_storage_init(void)
-{
-	void *map = &scx_percpu_bpfmask_map;
-	struct wd40_percpu_storage *storage;
-	const u32 zero = 0;
-	int ret, i;
-
-	bpf_for (i, 0, nr_cpu_ids) {
-		storage = bpf_map_lookup_percpu_elem(map, &zero, i);
-		if (!storage) {
-			/* Should be impossible. */
-			scx_bpf_error("Did not find map entry");
-			return -EINVAL;
-		}
-
-		ret = create_save_cpumask(&storage->bpfmask);
-		if (ret)
-			return ret;
-	}
-
-	return 0;
-}
-
-static struct bpf_cpumask *scx_percpu_bpfmask(void)
-{
-	struct wd40_percpu_storage *storage;
-	void *map = &scx_percpu_bpfmask_map;
-	const u32 zero = 0;
-
-	storage = bpf_map_lookup_elem(map, &zero);
-	if (!storage) {
-		/* Should be impossible. */
-		scx_bpf_error("Did not find map entry");
-		return NULL;
-	}
-
-	if (!storage->bpfmask)
-		scx_bpf_error("Did not properly initialize singleton");
-
-	return storage->bpfmask;
-}
-
 struct pcpu_ctx pcpu_ctx[MAX_CPUS];
 
-const u64 ravg_1 = 1 << RAVG_FRAC_BITS;
+static scx_bitmap_t scx_bitmap_get_idle_smtmask()
+{
+	scx_bitmap_t scx = scx_percpu_scx_bitmap();
+	const struct cpumask __kptr *bpf = scx_bpf_get_idle_smtmask();
+
+	if (!bpf) {
+		scx_bpf_error("failed to retrieve CPU-local storage");
+		return NULL;
+	}
+	scx_bitmap_from_bpf(scx, bpf);
+
+	scx_bpf_put_idle_cpumask(bpf);
+
+	return scx;
+}
+
+static s32 scx_bitmap_pick_idle_cpu(scx_bitmap_t mask __arg_arena, int flags)
+{
+	struct bpf_cpumask __kptr *bpf = scx_percpu_bpfmask();
+	s32 cpu;
+
+	if (!bpf)
+		return -1;
+
+	scx_bitmap_to_bpf(bpf, mask);
+	cpu = scx_bpf_pick_idle_cpu(cast_mask(bpf), flags);
+
+	scx_bitmap_from_bpf(mask, cast_mask(bpf));
+
+	return cpu;
+}
+
+static s32 scx_bitmap_any_distribute(scx_bitmap_t mask __arg_arena)
+{
+	struct bpf_cpumask __kptr *bpf = scx_percpu_bpfmask();
+	s32 cpu;
+
+	if (!bpf)
+		return -1;
+	scx_bitmap_to_bpf(bpf, mask);
+	cpu = bpf_cpumask_any_distribute(cast_mask(bpf));
+
+	return cpu;
+}
+
+static s32 scx_bitmap_any_and_distribute(scx_bitmap_t scx, const struct cpumask *bpf)
+{
+	struct bpf_cpumask *tmp = scx_percpu_bpfmask();
+	s32 cpu;
+
+	if (!bpf || !tmp)
+		return -1;
+
+	scx_bitmap_to_bpf(tmp, scx);
+	cpu = bpf_cpumask_any_and_distribute(cast_mask(tmp), bpf);
+
+	return cpu;
+}
+
+static scx_bitmap_t lookup_task_scx_bitmap(struct task_struct *p)
+{
+	struct task_ctx *taskc = try_lookup_task_ctx(p);
+
+	return taskc->cpumask;
+}
 
 __hidden
-struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, struct bpf_cpumask **p_cpumaskp)
+struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, scx_bitmap_t *p_cpumaskp)
 {
 	struct task_ctx *taskc;
 
@@ -154,9 +169,9 @@ struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, struct bpf_cpumask 
 	if (!taskc)
 		scx_bpf_error("task_ctx lookup failed for task %p", p);
 
-	*p_cpumaskp = lookup_task_bpfmask(p);
+	*p_cpumaskp = lookup_task_scx_bitmap(p);
 	if (*p_cpumaskp == NULL)
-		scx_bpf_error("task bpf_cpumask lookup failed for task %p", p);
+		scx_bpf_error("task mask lookup failed for task %p", p);
 
 	return taskc;
 }
@@ -192,9 +207,9 @@ struct tune_input{
 } tune_input;
 
 u64 tune_params_gen;
-private(A) struct bpf_cpumask __kptr *all_cpumask;
-private(A) struct bpf_cpumask __kptr *direct_greedy_cpumask;
-private(A) struct bpf_cpumask __kptr *kick_greedy_cpumask;
+private(A) scx_bitmap_t all_cpumask;
+private(A) scx_bitmap_t direct_greedy_cpumask;
+private(A) scx_bitmap_t kick_greedy_cpumask;
 
 static u32 cpu_to_dom_id(s32 cpu)
 {
@@ -234,22 +249,22 @@ static void refresh_tune_params(void)
 
 		if (tune_input.direct_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
 			if (direct_greedy_cpumask)
-				bpf_cpumask_set_cpu(cpu, direct_greedy_cpumask);
+				scx_bitmap_set_cpu(cpu, direct_greedy_cpumask);
 			if (lb_domain->direct_greedy_cpumask)
-				bpf_cpumask_set_cpu(cpu, lb_domain->direct_greedy_cpumask);
+				scx_bitmap_set_cpu(cpu, lb_domain->direct_greedy_cpumask);
 		} else {
 			if (direct_greedy_cpumask)
-				bpf_cpumask_clear_cpu(cpu, direct_greedy_cpumask);
+				scx_bitmap_clear_cpu(cpu, direct_greedy_cpumask);
 			if (lb_domain->direct_greedy_cpumask)
-				bpf_cpumask_clear_cpu(cpu, lb_domain->direct_greedy_cpumask);
+				scx_bitmap_clear_cpu(cpu, lb_domain->direct_greedy_cpumask);
 		}
 
 		if (tune_input.kick_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
 			if (kick_greedy_cpumask)
-				bpf_cpumask_set_cpu(cpu, kick_greedy_cpumask);
+				scx_bitmap_set_cpu(cpu, kick_greedy_cpumask);
 		} else {
 			if (kick_greedy_cpumask)
-				bpf_cpumask_clear_cpu(cpu, kick_greedy_cpumask);
+				scx_bitmap_clear_cpu(cpu, kick_greedy_cpumask);
 		}
 	}
 }
@@ -262,7 +277,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 	const struct cpumask *idle_cpumask;
 	bool share_llc, has_idle;
 	struct lb_domain *lb_domain;
-	struct bpf_cpumask *d_cpumask;
+	scx_bitmap_t d_cpumask;
 	struct pcpu_ctx *pcpuc;
 
 	cpu = bpf_get_smp_processor_id();
@@ -283,7 +298,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 
-	share_llc = bpf_cpumask_test_cpu(prev_cpu, cast_mask(d_cpumask));
+	share_llc = scx_bitmap_test_cpu(prev_cpu, d_cpumask);
 	if (share_llc && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		stat_add(RUSTY_STAT_SYNC_PREV_IDLE, 1);
 
@@ -291,7 +306,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 		goto out;
 	}
 
-	has_idle = bpf_cpumask_intersects(cast_mask(d_cpumask), idle_cpumask);
+	has_idle = scx_bitmap_intersects_cpumask(d_cpumask, idle_cpumask);
 
 	if (has_idle && bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
 	    !(current->flags & PF_EXITING) && taskc->target_dom < MAX_DOMS &&
@@ -313,8 +328,8 @@ int select_cpu_idle_x_numa(struct task_ctx *taskc, u32 prev_cpu, bool has_idle_c
 
 	u32 dom_id = cpu_to_dom_id(prev_cpu);
 	struct lb_domain *lb_domain;
-	struct bpf_cpumask *tmp_direct_greedy, *node_mask;
-	struct bpf_cpumask *tmp_cpumask;
+	scx_bitmap_t tmp_direct_greedy, node_mask;
+	scx_bitmap_t tmp_cpumask;
 	dom_ptr domc;
 
 	*cpu = -1;
@@ -359,21 +374,19 @@ int select_cpu_idle_x_numa(struct task_ctx *taskc, u32 prev_cpu, bool has_idle_c
 			return -ENOENT;
 		}
 
-		tmp_cpumask = scx_percpu_bpfmask();
+		tmp_cpumask = scx_percpu_scx_bitmap();
 		if (!tmp_cpumask) {
 			scx_bpf_error("Failed to lookup tmp cpumask");
 			return -ENOENT;
 		}
-		bpf_cpumask_and(tmp_cpumask,
-				cast_mask(node_mask),
-				cast_mask(tmp_direct_greedy));
+		scx_bitmap_and(tmp_cpumask, node_mask, tmp_direct_greedy);
 		tmp_direct_greedy = tmp_cpumask;
 	}
 
 	/* Try to find an idle core in the previous and then any domain */
 	if (has_idle_cores) {
 		if (domc && lb_domain->direct_greedy_cpumask) {
-			*cpu = scx_bpf_pick_idle_cpu(cast_mask(lb_domain->direct_greedy_cpumask),
+			*cpu = scx_bitmap_pick_idle_cpu(lb_domain->direct_greedy_cpumask,
 						    SCX_PICK_IDLE_CORE);
 			if (*cpu >= 0) {
 				stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
@@ -382,7 +395,7 @@ int select_cpu_idle_x_numa(struct task_ctx *taskc, u32 prev_cpu, bool has_idle_c
 		}
 
 		if (direct_greedy_cpumask) {
-			*cpu = scx_bpf_pick_idle_cpu(cast_mask(tmp_direct_greedy),
+			*cpu = scx_bitmap_pick_idle_cpu(tmp_direct_greedy,
 						    SCX_PICK_IDLE_CORE);
 			if (*cpu >= 0) {
 				stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
@@ -395,7 +408,7 @@ int select_cpu_idle_x_numa(struct task_ctx *taskc, u32 prev_cpu, bool has_idle_c
 	 * No idle core. Is there any idle CPU?
 	 */
 	if (domc && lb_domain->direct_greedy_cpumask) {
-		*cpu = scx_bpf_pick_idle_cpu(cast_mask(lb_domain->direct_greedy_cpumask), 0);
+		*cpu = scx_bitmap_pick_idle_cpu(lb_domain->direct_greedy_cpumask, 0);
 		if (*cpu >= 0) {
 			stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
 			return 0;
@@ -403,7 +416,7 @@ int select_cpu_idle_x_numa(struct task_ctx *taskc, u32 prev_cpu, bool has_idle_c
 	}
 
 	if (direct_greedy_cpumask) {
-		*cpu = scx_bpf_pick_idle_cpu(cast_mask(tmp_direct_greedy), 0);
+		*cpu = scx_bitmap_pick_idle_cpu(tmp_direct_greedy, 0);
 		if (*cpu >= 0) {
 			stat_add(RUSTY_STAT_DIRECT_GREEDY_FAR, 1);
 			return 0;
@@ -439,7 +452,7 @@ s32 select_cpu_retain_prev(const struct cpumask *idle_smtmask, bool prev_domesti
 	 * CPU in the domestic domain
 	 */
 	if (direct_greedy_cpumask &&
-	    bpf_cpumask_test_cpu(prev_cpu, cast_mask(direct_greedy_cpumask)) &&
+	    scx_bitmap_test_cpu(prev_cpu, direct_greedy_cpumask) &&
 	    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		stat_add(RUSTY_STAT_GREEDY_IDLE, 1);
@@ -450,13 +463,13 @@ s32 select_cpu_retain_prev(const struct cpumask *idle_smtmask, bool prev_domesti
 }
 
 static
-s32 select_cpu_pick_local(struct bpf_cpumask *p_cpumask, bool prev_domestic, bool has_idle_cores, u32 prev_cpu)
+s32 select_cpu_pick_local(scx_bitmap_t p_cpumask, bool prev_domestic, bool has_idle_cores, u32 prev_cpu)
 {
 	s32 cpu;
 
 	/* If there is a domestic idle core, dispatch directly */
 	if (has_idle_cores) {
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(p_cpumask), SCX_PICK_IDLE_CORE);
+		cpu = scx_bitmap_pick_idle_cpu(p_cpumask, SCX_PICK_IDLE_CORE);
 		if (cpu >= 0) {
 			stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
 			return cpu;
@@ -473,7 +486,7 @@ s32 select_cpu_pick_local(struct bpf_cpumask *p_cpumask, bool prev_domestic, boo
 	}
 
 	/* If there is any domestic idle CPU, dispatch directly */
-	cpu = scx_bpf_pick_idle_cpu(cast_mask(p_cpumask), 0);
+	cpu = scx_bitmap_pick_idle_cpu(p_cpumask, 0);
 	if (cpu >= 0) {
 		stat_add(RUSTY_STAT_DIRECT_DISPATCH, 1);
 		return cpu;
@@ -488,7 +501,7 @@ s32 BPF_STRUCT_OPS(wd40_select_cpu, struct task_struct *p, s32 prev_cpu,
 	const struct cpumask *idle_smtmask = scx_bpf_get_idle_smtmask();
 	struct task_ctx *taskc;
 	bool prev_domestic, has_idle_cores;
-	struct bpf_cpumask *p_cpumask;
+	scx_bitmap_t p_cpumask;
 	s32 cpu;
 
 	refresh_tune_params();
@@ -517,7 +530,7 @@ s32 BPF_STRUCT_OPS(wd40_select_cpu, struct task_struct *p, s32 prev_cpu,
 	}
 
 	/* did @p get pulled out to a foreign domain by e.g. greedy execution? */
-	prev_domestic = bpf_cpumask_test_cpu(prev_cpu, cast_mask(p_cpumask));
+	prev_domestic = scx_bitmap_test_cpu(prev_cpu, p_cpumask);
 	cpu = select_cpu_retain_prev(idle_smtmask, prev_domestic, prev_cpu);
 	if (cpu >= 0)
 		goto direct;
@@ -540,7 +553,7 @@ s32 BPF_STRUCT_OPS(wd40_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * boundaries) and push the task there. Try to find an idle core first.
 	 */
 	if (taskc->all_cpus && direct_greedy_cpumask &&
-	    !bpf_cpumask_empty(cast_mask(direct_greedy_cpumask))) {
+	    !scx_bitmap_empty(direct_greedy_cpumask)) {
 		if (select_cpu_idle_x_numa(taskc, prev_cpu, has_idle_cores, &cpu))
 			goto enoent;
 
@@ -557,7 +570,7 @@ s32 BPF_STRUCT_OPS(wd40_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (prev_domestic) {
 		cpu = prev_cpu;
 	} else {
-		cpu = bpf_cpumask_any_distribute(cast_mask(p_cpumask));
+		cpu = scx_bitmap_any_distribute(p_cpumask);
 		if (cpu >= nr_cpu_ids)
 			cpu = prev_cpu;
 	}
@@ -579,7 +592,7 @@ void BPF_STRUCT_OPS(wd40_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 {
 	struct task_ctx *taskc;
 	dom_ptr domc;
-	struct bpf_cpumask *p_cpumask;
+	scx_bitmap_t p_cpumask;
 	s32 cpu = -1;
 
 	if (!(taskc = lookup_task_ctx_mask(p, &p_cpumask)) || !p_cpumask)
@@ -596,7 +609,7 @@ void BPF_STRUCT_OPS(wd40_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 	    task_set_domain(p, domc->id, false)) {
 		stat_add(RUSTY_STAT_LOAD_BALANCE, 1);
 		taskc->dispatch_local = false;
-		cpu = bpf_cpumask_any_distribute(cast_mask(p_cpumask));
+		cpu = scx_bitmap_any_distribute(p_cpumask);
 		if (cpu < nr_cpu_ids)
 			scx_bpf_kick_cpu(cpu, 0);
 		goto dom_queue;
@@ -619,8 +632,8 @@ void BPF_STRUCT_OPS(wd40_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 	 * the domain would be woken up which can induce temporary execution
 	 * stalls. Kick a domestic CPU if @p is on a foreign domain.
 	 */
-	if (!bpf_cpumask_test_cpu(scx_bpf_task_cpu(p), cast_mask(p_cpumask))) {
-		cpu = bpf_cpumask_any_distribute(cast_mask(p_cpumask));
+	if (!scx_bitmap_test_cpu(scx_bpf_task_cpu(p), p_cpumask)) {
+		cpu = scx_bitmap_any_distribute(p_cpumask);
 		if (cpu < nr_cpu_ids)
 			scx_bpf_kick_cpu(cpu, 0);
 		stat_add(RUSTY_STAT_REPATRIATE, 1);
@@ -652,7 +665,7 @@ dom_queue:
 
 		idle_cpumask = scx_bpf_get_idle_cpumask();
 		if (kick_greedy_cpumask) {
-			cpu = bpf_cpumask_any_and_distribute(cast_mask(kick_greedy_cpumask), idle_cpumask);
+			cpu = scx_bitmap_any_and_distribute(kick_greedy_cpumask, idle_cpumask);
 			if (cpu >= nr_cpu_ids)
 				cpu = -EBUSY;
 		}
@@ -900,8 +913,7 @@ void BPF_STRUCT_OPS(wd40_set_cpumask, struct task_struct *p,
 
 	task_pick_and_set_domain(taskc, p, cpumask, false);
 	if (all_cpumask)
-		taskc->all_cpus =
-			bpf_cpumask_subset(cast_mask(all_cpumask), cpumask);
+		taskc->all_cpus = scx_bitmap_subset_cpumask(all_cpumask, cpumask);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init_task, struct task_struct *p,
@@ -930,30 +942,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init_task, struct task_struct *p,
 		bpf_printk("%s[%p]: INIT (weight %u))", p->comm, p, p->scx.weight);
 
 
-	/*
-	 * XXX Passing a trusted pointer as a key to the map turns it into a
-	 * scalar for the verifier, preventing us from using it further. Make
-	 * a temporary copy of our struct task_struct to pass it to the map.
-	 */
-	p_map = p;
-
-	ret = bpf_map_update_elem(&task_masks, &p_map, &wrapper, 0 /*BPF NOEXIST*/);
-	if (ret) {
+	taskc->cpumask = scx_bitmap_alloc();
+	if (!taskc->cpumask) {
 		sdt_task_free(p);
-		return ret;
-	}
-
-	mask_map_value = bpf_map_lookup_elem(&task_masks, &p_map);
-	if (!mask_map_value) {
-		sdt_task_free(p);
-		return -EINVAL;
-	}
-
-	ret = create_save_cpumask(&mask_map_value->instance);
-	if (ret) {
-		bpf_map_delete_elem(&task_masks, &p_map);
-		sdt_task_free(p);
-		return ret;
+		return -ENOMEM;
 	}
 
 	bpf_rcu_read_lock();
@@ -969,19 +961,6 @@ void BPF_STRUCT_OPS(wd40_exit_task, struct task_struct *p,
 	long ret;
 
 	sdt_task_free(p);
-
-	/*
-	 * XXX - There's no reason delete should fail here but BPF's recursion
-	 * protection can unnecessarily fail the operation. The fact that
-	 * deletions aren't reliable means that we sometimes leak bpf_cpumask and
-	 * can't use BPF_NOEXIST on allocation in .prep_enable().
-	 */
-	ret = bpf_map_delete_elem(&task_masks, &p);
-	if (ret) {
-		stat_add(RUSTY_STAT_TASK_GET_ERR, 1);
-		return;
-	}
-
 }
 
 static s32 initialize_cpu(s32 cpu)
@@ -1009,7 +988,7 @@ static s32 initialize_cpu(s32 cpu)
 			return -ENOENT;
 		}
 
-		in_dom = bpf_cpumask_test_cpu(cpu, cast_mask(lb_domain->cpumask));
+		in_dom = scx_bitmap_test_cpu(cpu, lb_domain->cpumask);
 		bpf_rcu_read_unlock();
 		if (in_dom) {
 			pcpuc->dom_id = i;
@@ -1028,7 +1007,23 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init)
 	if (ret)
 		return ret;
 
-	ret = sdt_task_init(sizeof(struct task_ctx));
+	ret = scx_bitmap_init(sizeof(struct scx_bitmap));
+	if (ret)
+		return ret;
+
+	ret = scx_percpu_storage_init();
+	if (ret)
+		return ret;
+
+	ret = create_save_scx_bitmap(&all_cpumask);
+	if (ret)
+		return ret;
+
+	ret = create_save_scx_bitmap(&direct_greedy_cpumask);
+	if (ret)
+		return ret;
+
+	ret = create_save_scx_bitmap(&kick_greedy_cpumask);
 	if (ret)
 		return ret;
 
@@ -1036,19 +1031,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init)
 	if (ret)
 		return ret;
 
-	ret = create_save_cpumask(&all_cpumask);
-	if (ret)
-		return ret;
-
-	ret = create_save_cpumask(&direct_greedy_cpumask);
-	if (ret)
-		return ret;
-
-	ret = create_save_cpumask(&kick_greedy_cpumask);
-	if (ret)
-		return ret;
-
-	ret = scx_wd40_percpu_storage_init();
+	ret = sdt_task_init(sizeof(struct task_ctx));
 	if (ret)
 		return ret;
 

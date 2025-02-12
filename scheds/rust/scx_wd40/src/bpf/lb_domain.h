@@ -5,9 +5,9 @@ struct lb_domain {
 	union sdt_id		tid;
 
 	struct bpf_spin_lock vtime_lock;
-	struct bpf_cpumask __kptr *cpumask;
-	struct bpf_cpumask __kptr *direct_greedy_cpumask;
-	struct bpf_cpumask __kptr *node_cpumask;
+	scx_bitmap_t cpumask;
+	scx_bitmap_t direct_greedy_cpumask;
+	scx_bitmap_t node_cpumask;
 
 	dom_ptr domc;
 };
@@ -36,7 +36,7 @@ extern const volatile u32 nr_nodes;
 
 struct task_ctx *lookup_task_ctx(struct task_struct *p);
 struct task_ctx *try_lookup_task_ctx(struct task_struct *p);
-extern struct bpf_cpumask __kptr *all_cpumask;
+extern scx_bitmap_t all_cpumask;
 u32 dom_node_id(u32 dom_id);
 void dom_dcycle_adj(dom_ptr domc, u32 weight, u64 now, bool runnable);
 
@@ -69,7 +69,7 @@ static inline
 bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
 {
 	struct lb_domain *lb_domain;
-	struct bpf_cpumask *dmask;
+	scx_bitmap_t dmask;
 
 	lb_domain = lb_domain_get(dom_id);
 	if (!lb_domain)
@@ -79,7 +79,7 @@ bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
 	if (!dmask)
 		return false;
 
-	return bpf_cpumask_intersects(cpumask, cast_mask(dmask));
+	return scx_bitmap_intersects_cpumask(dmask, cpumask);
 }
 
 
@@ -106,7 +106,7 @@ void task_pick_and_set_domain(struct task_ctx *taskc,
 				     bool init_dsq_vtime);
 bool task_set_domain(struct task_struct *p __arg_trusted,
 			    u32 new_dom_id, bool init_dsq_vtime);
-struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, struct bpf_cpumask **p_cpumaskp);
+struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, scx_bitmap_t *p_cpumaskp);
 
 /*
  * Per-CPU context
@@ -117,36 +117,21 @@ struct pcpu_ctx {
 	struct bpf_cpumask __kptr *bpfmask;
 } __attribute__((aligned(CACHELINE_SIZE)));
 
-extern struct pcpu_ctx pcpu_ctx[MAX_CPUS];
-
-/*
- * XXX We do not want to be sharing functions from main to other modules,
- * but since we are implementing arena CPU masks the code below is on its
- * way out anyway.
- */
-
 struct bpfmask_wrapper {
 	struct bpf_cpumask __kptr *instance;
 };
 
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, struct task_struct *);
-	__type(value, struct bpfmask_wrapper);
-	__uint(max_entries, 1000000);
-	__uint(map_flags, 0);
-} task_masks __weak SEC(".maps");
+extern struct pcpu_ctx pcpu_ctx[MAX_CPUS];
 
 static inline
-struct bpf_cpumask *lookup_task_bpfmask(struct task_struct *p)
+scx_bitmap_t lookup_task_bpfmask(struct task_struct *p)
 {
-	struct bpfmask_wrapper *wrapper;
+	task_ptr taskc;
 
-	wrapper = bpf_map_lookup_elem(&task_masks, &p);
-	if (!wrapper) {
-		scx_bpf_error("lookup_mask_bpfmask failed for task %p", p);
+	taskc = sdt_task_data(p);
+	if (!taskc)
 		return NULL;
-	}
 
-	return wrapper->instance;
+
+	return taskc->cpumask;
 }

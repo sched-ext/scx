@@ -9,6 +9,8 @@
 #include <scx/ravg_impl.bpf.h>
 #include <lib/sdt_task.h>
 
+#include "cpumask.h"
+
 #include "intf.h"
 #include "types.h"
 #include "lb_domain.h"

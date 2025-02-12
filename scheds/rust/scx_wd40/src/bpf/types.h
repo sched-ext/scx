@@ -43,6 +43,8 @@ struct task_ctx {
 	u32 pid;
 
 	struct ravg_data dcyc_rd;
+
+	scx_bitmap_t cpumask;
 };
 
 typedef struct task_ctx __arena *task_ptr;
@@ -69,7 +71,7 @@ struct dom_ctx {
 };
 
 struct node_ctx {
-	struct bpf_cpumask __kptr *cpumask;
+	scx_bitmap_t cpumask;
 };
 
 #endif /* __TYPES_H */
