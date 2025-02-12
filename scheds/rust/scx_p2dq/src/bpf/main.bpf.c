@@ -595,6 +595,10 @@ void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 		__sync_val_compare_and_swap(&llcx->vtime, llcx->vtime, p->scx.dsq_vtime);
 	else
 		p->scx.dsq_vtime = llcx->vtime;
+
+	if (sched_mode == MODE_PERFORMANCE && taskc->dsq_index == 0) {
+		scx_bpf_cpuperf_set(task_cpu, 1024);
+	}
 }
 
 
