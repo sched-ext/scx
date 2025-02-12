@@ -307,8 +307,8 @@ sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size)
 	size_t min_chunk_size;
 	int ret;
 
-	_Static_assert(sizeof(struct sdt_chunk)  == PAGE_SIZE,
-		"chunk size must be equal to a page");
+	_Static_assert(sizeof(struct sdt_chunk) <= PAGE_SIZE,
+		"chunk size must fit into a page");
 
 	ret = sdt_pool_set_size(&sdt_chunk_pool, sizeof(struct sdt_chunk), 1);
 	if (ret != 0)

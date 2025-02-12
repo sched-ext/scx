@@ -1287,6 +1287,7 @@ static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 						  struct task_ctx *taskc)
 {
 	struct bpf_cpumask *p_cpumask;
+	struct mempolicy *mempolicy;
 	u32 node_id;
 	u32 val = 0;
 	void *mask;
@@ -1295,24 +1296,27 @@ static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 
 	p_cpumask = lookup_task_bpfmask(p);
 
-	if (!mempolicy_affinity || !bpf_core_field_exists(p->mempolicy) ||
-	    !p->mempolicy || !p_cpumask)
+	if (!mempolicy_affinity || !bpf_core_field_exists(p->mempolicy) || !p_cpumask)
 		return;
 
-	if (!(p->mempolicy->mode & (MPOL_BIND|MPOL_PREFERRED|MPOL_PREFERRED_MANY)))
+	mempolicy = BPF_CORE_READ(p, mempolicy);
+	if (!mempolicy)
+		return;
+
+	if (!(mempolicy->mode & (MPOL_BIND|MPOL_PREFERRED|MPOL_PREFERRED_MANY)))
 		return;
 
 	// MPOL_BIND and MPOL_PREFERRED_MANY use the home_node field on the
 	// mempolicy struct, so use that for now. In the future the memory
 	// usage of the node can be checked to follow the same algorithm for
 	// where memory allocations will occur.
-	if ((int)p->mempolicy->home_node >= 0) {
+	if ((int)mempolicy->home_node >= 0) {
 		taskc->preferred_dom_mask =
-			node_dom_mask((u32)p->mempolicy->home_node);
+			node_dom_mask((u32)mempolicy->home_node);
 		return;
 	}
 
-	mask = BPF_CORE_READ(p, mempolicy, nodes.bits);
+	mask = BPF_CORE_READ(mempolicy, nodes.bits);
 	if (bpf_core_read(&val, sizeof(val), mask))
 		return;
 
