@@ -22,6 +22,13 @@ static inline void __COMPAT_load_vmlinux_btf(void)
 	}
 }
 
+static __attribute__((destructor)) void __COMPAT_unload_vmlinux_btf(void)
+{
+	if (__COMPAT_vmlinux_btf) {
+		btf__free(__COMPAT_vmlinux_btf);
+	}
+}
+
 static inline bool __COMPAT_read_enum(const char *type, const char *name, u64 *v)
 {
 	const struct btf_type *t;
