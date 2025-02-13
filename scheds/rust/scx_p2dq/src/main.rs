@@ -75,7 +75,7 @@ struct Opts {
     keep_running: bool,
 
     /// Scheduling min slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "500")]
+    #[clap(short = 's', long, default_value = "100")]
     min_slice_us: u64,
 
     /// Manual definition of slice intervals in microseconds for DSQs, must be equal to number of
@@ -84,7 +84,7 @@ struct Opts {
     dsq_time_slices: Vec<u64>,
 
     /// DSQ scaling shift, each queue min timeslice is shifted by the scaling shift.
-    #[clap(short = 'x', long, default_value = "2")]
+    #[clap(short = 'x', long, default_value = "4")]
     dsq_shift: u64,
 
     /// Number of dumb DSQs.
