@@ -78,7 +78,8 @@ use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 #[cfg(feature = "gpu-topology")]
 use crate::gpu::{create_gpus, Gpu, GpuIndex};
@@ -99,6 +100,9 @@ lazy_static::lazy_static! {
     /// disabled CPUs that may not be onlined, whose IDs are lower than the
     /// IDs of other CPUs that may be onlined.
     pub static ref NR_CPUS_POSSIBLE: usize = libbpf_rs::num_possible_cpus().unwrap();
+
+    /// Whether AMD preferred core ranking is enabled on this system
+    pub static ref HAS_PREF_RANK: bool = has_pref_rank();
 }
 
 #[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -107,7 +111,7 @@ pub enum CoreType {
     Little,
 }
 
-#[derive(Debug, Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Cpu {
     pub id: usize,
     pub min_freq: usize,
@@ -125,6 +129,7 @@ pub struct Cpu {
     pub llc_id: usize,
     pub node_id: usize,
     pub package_id: usize,
+    pub rank: usize,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -185,6 +190,36 @@ pub struct Topology {
     pub all_llcs: BTreeMap<usize, Arc<Llc>>,
     pub all_cores: BTreeMap<usize, Arc<Core>>,
     pub all_cpus: BTreeMap<usize, Arc<Cpu>>,
+
+    /// Cached list of ranked CPUs
+    ranked_cpus: Mutex<Arc<RankedCpuCache>>,
+}
+
+const RANKED_CPU_CACHE_DURATION: Duration = Duration::from_secs(10);
+
+/// Cached list of ranked CPUs
+#[derive(Debug, Clone)]
+pub struct RankedCpuCache {
+    /// List of CPU IDs sorted by their ranking (highest to lowest)
+    pub cpu_ids: Vec<usize>,
+    /// When this cache was last updated
+    pub last_updated: Instant,
+    /// Generation number that increments each time the order changes
+    pub generation: u64,
+}
+
+impl RankedCpuCache {
+    pub fn new() -> Self {
+        Self {
+            cpu_ids: Vec::new(),
+            last_updated: Instant::now() - RANKED_CPU_CACHE_DURATION,
+            generation: 0,
+        }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.last_updated.elapsed() < RANKED_CPU_CACHE_DURATION
+    }
 }
 
 impl Topology {
@@ -240,6 +275,7 @@ impl Topology {
             all_llcs: topo_llcs,
             all_cores: topo_cores,
             all_cpus: topo_cpus,
+            ranked_cpus: Mutex::new(Arc::new(RankedCpuCache::new())),
         })
     }
 
@@ -306,6 +342,70 @@ impl Topology {
             }
         }
         sibling_cpu
+    }
+
+    /// Returns true if cpu_a has a higher rank than cpu_b.
+    /// If ranking is not enabled or either CPU is invalid, returns false.
+    pub fn is_higher_ranked(&self, cpu_a: usize, cpu_b: usize) -> bool {
+        if !*HAS_PREF_RANK {
+            return false;
+        }
+
+        let cpu_a_rank = self.all_cpus.get(&cpu_a).map(|cpu| cpu.rank);
+        let cpu_b_rank = self.all_cpus.get(&cpu_b).map(|cpu| cpu.rank);
+
+        match (cpu_a_rank, cpu_b_rank) {
+            (Some(rank_a), Some(rank_b)) => rank_a > rank_b,
+            _ => false,
+        }
+    }
+
+    /// Returns the cached ranked CPU list.
+    /// The list is cached internally and refreshed every 10 seconds.
+    /// If preferred core ranking is not enabled, returns an empty cache.
+    pub fn get_ranked_cpus(&mut self) -> Arc<RankedCpuCache> {
+        if !*HAS_PREF_RANK {
+            return Arc::new(RankedCpuCache {
+                cpu_ids: Vec::new(),
+                last_updated: Instant::now(),
+                generation: 0,
+            });
+        }
+
+        let mut cache = self.ranked_cpus.lock().unwrap();
+        if !cache.is_valid() {
+            let mut cpu_ranks: Vec<(usize, usize)> = Vec::new();
+
+            for &cpu_id in self.all_cpus.keys() {
+                let cpu_path = Path::new("/sys/devices/system/cpu")
+                    .join(format!("cpu{}", cpu_id))
+                    .join("cpufreq");
+
+                if let Ok(rank) = read_file_usize(&cpu_path.join("amd_pstate_prefcore_ranking")) {
+                    cpu_ranks.push((cpu_id, rank));
+                }
+            }
+
+            cpu_ranks.sort_by(|a, b| {
+                let a_val = a.1;
+                let b_val = b.1;
+                b_val.cmp(&a_val).then_with(|| a.0.cmp(&b.0))
+            });
+
+            for (cpu_id, rank) in cpu_ranks.iter() {
+                if let Some(arc_cpu) = self.all_cpus.get_mut(cpu_id) {
+                    Arc::make_mut(arc_cpu).rank = *rank;
+                }
+            }
+
+            let inner = Arc::make_mut(&mut *cache);
+            inner.cpu_ids.clear();
+            inner.cpu_ids.extend(cpu_ranks.iter().map(|(id, _)| *id));
+            inner.last_updated = Instant::now();
+            inner.generation += 1;
+        }
+
+        Arc::clone(&cache)
     }
 }
 
@@ -507,6 +607,7 @@ fn create_insert_cpu(
             llc_id: *llc_id,
             node_id: node.id,
             package_id,
+            rank: 0,
         }),
     );
 
@@ -676,4 +777,14 @@ fn create_numa_nodes(
         nodes.insert(node.id, node);
     }
     Ok(nodes)
+}
+
+fn has_pref_rank() -> bool {
+    if !Path::new("/sys/devices/system/cpu/amd_pstate/prefcore").exists() {
+        return false;
+    }
+    match std::fs::read_to_string("/sys/devices/system/cpu/amd_pstate/prefcore") {
+        Ok(contents) => contents.trim() == "enabled",
+        Err(_) => false,
+    }
 }
