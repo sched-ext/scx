@@ -22,6 +22,7 @@ use scxtop::SCHED_NAME_PATH;
 use scxtop::STATS_SOCKET_PATH;
 use scxtop::{
     Action, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction,
+    SoftIRQAction,
 };
 use std::mem::MaybeUninit;
 use std::sync::atomic::Ordering;
@@ -96,6 +97,7 @@ async fn main() -> Result<()> {
         skel.progs.scx_sched_reg.attach()?,
         skel.progs.scx_sched_unreg.attach()?,
         skel.progs.on_sched_switch.attach()?,
+        skel.progs.on_sched_wakeup.attach()?,
     ];
 
     // 6.13 compatability
@@ -132,9 +134,9 @@ async fn main() -> Result<()> {
 
     let keymap = KeyMap::default();
     let mut tui = Tui::new(keymap.clone(), args.tick_rate_ms)?;
-    let mut rbb = RingBufferBuilder::new();
+    let mut event_rbb = RingBufferBuilder::new();
     let tx = action_tx.clone();
-    rbb.add(&skel.maps.events, move |data: &[u8]| {
+    let event_handler = move |data: &[u8]| {
         let mut event = bpf_event::default();
         // This works because the plain types were created in lib.rs
         plain::copy_from_bytes(&mut event, data).expect("Event data buffer was too short");
@@ -156,6 +158,17 @@ async fn main() -> Result<()> {
                 });
                 tx.send(action).ok();
             }
+            #[allow(non_upper_case_globals)]
+            event_type_SOFTIRQ => unsafe {
+                let action = Action::SoftIRQ(SoftIRQAction {
+                    cpu: event.cpu,
+                    pid: event.event.softirq.pid,
+                    entry_ts: event.event.softirq.entry_ts,
+                    exit_ts: event.event.softirq.exit_ts,
+                    softirq_nr: event.event.softirq.softirq_nr as usize,
+                });
+                tx.send(action).ok();
+            },
             #[allow(non_upper_case_globals)]
             event_type_SCHED_WAKEUP => unsafe {
                 let comm = std::str::from_utf8(std::slice::from_raw_parts(
@@ -227,8 +240,9 @@ async fn main() -> Result<()> {
             _ => {}
         }
         0
-    })?;
-    let rb = rbb.build()?;
+    };
+    event_rbb.add(&skel.maps.events, event_handler)?;
+    let event_rb = event_rbb.build()?;
     let scheduler = read_file_string(SCHED_NAME_PATH).unwrap_or("".to_string());
 
     let mut app = App::new(
@@ -249,7 +263,7 @@ async fn main() -> Result<()> {
     let shutdown = app.should_quit.clone();
     tokio::spawn(async move {
         loop {
-            let _ = rb.poll(Duration::from_millis(1));
+            let _ = event_rb.poll(Duration::from_millis(1));
             if shutdown.load(Ordering::Relaxed) {
                 break;
             }

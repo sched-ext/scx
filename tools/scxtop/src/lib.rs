@@ -139,6 +139,15 @@ pub type SchedWakingAction = SchedWakeActionCtx;
 pub type SchedWakeupAction = SchedWakeActionCtx;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SoftIRQAction {
+    pub cpu: u32,
+    pub pid: u32,
+    pub entry_ts: u64,
+    pub exit_ts: u64,
+    pub softirq_nr: usize,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
     Tick,
     Increment,
@@ -165,6 +174,7 @@ pub enum Action {
     SchedWakeupNew(SchedWakeupNewAction),
     SchedWaking(SchedWakingAction),
     SetState(AppState),
+    SoftIRQ(SoftIRQAction),
     NextViewState,
     RecordTrace,
     ToggleCpuFreq,

@@ -27,6 +27,7 @@ struct bpf_event _event = {0};
 bool enable_bpf_events = true;
 u32 sample_rate = 128;
 
+const int zero_int = 0;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -79,6 +80,19 @@ struct {
 	__uint(max_entries, 1000000);
 	__uint(map_flags, 0);
 } task_data SEC(".maps");
+
+
+struct __softirq_event {
+	u32		pid;
+	u64		start_ts;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, int);
+	__type(value, struct __softirq_event);
+	__uint(max_entries, 1);
+} softirq_events SEC(".maps");
 
 
 static __always_inline u64 t_to_tptr(struct task_struct *p)
@@ -523,6 +537,61 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 	prev_tctx->dsq_vtime = 0;
 	prev_tctx->wakeup_ts = 0;
 	prev_tctx->dsq_insert_time = 0;
+
+	return 0;
+}
+
+SEC("tp_btf/softirq_entry")
+int BPF_PROG(on_softirq_entry, unsigned int nr)
+{
+	struct task_struct *p;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	p = (struct task_struct *)bpf_get_current_task();
+
+	struct __softirq_event event;
+	event.start_ts = bpf_ktime_get_ns();
+	if (p)
+		event.pid = BPF_CORE_READ(p, pid);
+	else
+		event.pid = 0;
+
+	bpf_map_update_elem(&softirq_events, &zero_int, &event, BPF_ANY);
+
+	return 0;
+}
+
+SEC("tp_btf/softirq_exit")
+int BPF_PROG(on_softirq_exit, unsigned int nr)
+{
+	struct bpf_event *event;
+	struct __softirq_event *softirq_event;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	u64 exit_ts = bpf_ktime_get_ns();
+
+	softirq_event = bpf_map_lookup_elem(&softirq_events, &zero_int);
+	if (!softirq_event)
+		return 0;
+
+	bpf_map_delete_elem(&softirq_events, &zero_int);
+
+	if (!(event = try_reserve_event()))
+		return -ENOENT;
+
+	event->type = SOFTIRQ;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = exit_ts;
+	event->event.softirq.pid = softirq_event->pid;
+	event->event.softirq.entry_ts = softirq_event->start_ts;
+	event->event.softirq.exit_ts = exit_ts;
+	event->event.softirq.softirq_nr = nr;
+
+	bpf_ringbuf_submit(event, 0);
 
 	return 0;
 }
