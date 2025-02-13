@@ -1294,13 +1294,13 @@ static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 
 	taskc->preferred_dom_mask = 0;
 
-	p_cpumask = lookup_task_bpfmask(p);
-
-	if (!mempolicy_affinity || !bpf_core_field_exists(p->mempolicy) || !p_cpumask)
-		return;
-
 	mempolicy = BPF_CORE_READ(p, mempolicy);
 	if (!mempolicy)
+		return;
+
+	p_cpumask = lookup_task_bpfmask(p);
+
+	if (!mempolicy_affinity || !p_cpumask)
 		return;
 
 	if (!(mempolicy->mode & (MPOL_BIND|MPOL_PREFERRED|MPOL_PREFERRED_MANY)))
