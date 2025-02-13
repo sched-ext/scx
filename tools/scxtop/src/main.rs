@@ -131,8 +131,7 @@ async fn main() -> Result<()> {
     }
 
     let keymap = KeyMap::default();
-    let tui = Tui::new(keymap.clone(), args.tick_rate_ms)?;
-    let arc_tui = Arc::new(RwLock::new(tui));
+    let mut tui = Tui::new(keymap.clone(), args.tick_rate_ms)?;
     let mut rbb = RingBufferBuilder::new();
     let tx = action_tx.clone();
     rbb.add(&skel.maps.events, move |data: &[u8]| {
@@ -245,8 +244,7 @@ async fn main() -> Result<()> {
         skel,
     )?;
 
-    let main_tui = arc_tui.clone();
-    main_tui.write().unwrap().enter()?;
+    tui.enter()?;
 
     let shutdown = app.should_quit.clone();
     tokio::spawn(async move {
@@ -259,8 +257,7 @@ async fn main() -> Result<()> {
     });
 
     loop {
-        let loop_tui = arc_tui.clone();
-        let e = loop_tui.write().unwrap().next().await?;
+        let e = tui.next().await?;
         match e {
             Event::Quit => action_tx.send(Action::Quit)?,
             Event::Tick => action_tx.send(Action::Tick)?,
@@ -278,10 +275,7 @@ async fn main() -> Result<()> {
         while let Ok(action) = action_rx.try_recv() {
             app.handle_action(action.clone())?;
             if let Action::Render = action {
-                loop_tui
-                    .write()
-                    .expect("Failed to draw application")
-                    .draw(|f| app.render(f).expect("Failed to render application"))?;
+                tui.draw(|f| app.render(f).expect("Failed to render application"))?;
             }
         }
 
@@ -289,7 +283,7 @@ async fn main() -> Result<()> {
             break;
         }
     }
-    main_tui.write().unwrap().exit()?;
+    tui.exit()?;
     drop(links);
 
     Ok(())
