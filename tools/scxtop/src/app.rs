@@ -23,8 +23,8 @@ use crate::APP;
 use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
-    Action, RecordTraceAction, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction,
-    SchedWakingAction, SoftIRQAction,
+    Action, IPIAction, RecordTraceAction, SchedCpuPerfSetAction, SchedSwitchAction,
+    SchedWakeupAction, SchedWakingAction, SoftIRQAction,
 };
 
 use anyhow::Result;
@@ -1912,6 +1912,7 @@ impl<'a> App<'a> {
         self.trace_links = vec![
             self.skel.progs.on_softirq_entry.attach()?,
             self.skel.progs.on_softirq_exit.attach()?,
+            self.skel.progs.on_ipi_send_cpu.attach()?,
         ];
 
         Ok(())
@@ -2043,10 +2044,17 @@ impl<'a> App<'a> {
         prev_dsq_data.add_event_data("dsq_slice_consumed".to_string(), *prev_used_slice_ns);
     }
 
-    /// Handles softirq events
+    /// Handles softirq events.
     pub fn on_softirq(&mut self, action: &SoftIRQAction) {
         if self.trace_tick > self.trace_tick_warmup {
             self.trace_manager.on_softirq(action);
+        }
+    }
+
+    /// Handles IPI events.
+    pub fn on_ipi(&mut self, action: &IPIAction) {
+        if self.trace_tick > self.trace_tick_warmup {
+            self.trace_manager.on_ipi(action);
         }
     }
 
@@ -2117,6 +2125,9 @@ impl<'a> App<'a> {
             }
             Action::SoftIRQ(a) => {
                 self.on_softirq(&a);
+            }
+            Action::IPI(a) => {
+                self.on_ipi(&a);
             }
             Action::ClearEvent => self.stop_perf_events(),
             Action::ChangeTheme => {
