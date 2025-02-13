@@ -14,15 +14,15 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{Action, SchedSwitchAction, SchedWakeupAction, SchedWakingAction};
+use crate::{Action, SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction};
 
 use crate::protos_gen::perfetto_scx::counter_descriptor::Unit::UNIT_COUNT;
 use crate::protos_gen::perfetto_scx::trace_packet::Data::TrackDescriptor as DataTrackDescriptor;
 use crate::protos_gen::perfetto_scx::track_event::Type as TrackEventType;
 use crate::protos_gen::perfetto_scx::{
     CounterDescriptor, FtraceEvent, FtraceEventBundle, SchedSwitchFtraceEvent,
-    SchedWakeupFtraceEvent, SchedWakingFtraceEvent, Trace, TracePacket, TrackDescriptor,
-    TrackEvent,
+    SchedWakeupFtraceEvent, SchedWakingFtraceEvent, SoftirqEntryFtraceEvent,
+    SoftirqExitFtraceEvent, Trace, TracePacket, TrackDescriptor, TrackEvent,
 };
 
 /// Handler for perfetto traces. For details on data flow in perfetto see:
@@ -272,6 +272,31 @@ impl<'a> PerfettoTraceManager<'a> {
                 ftrace_event.set_pid(pid);
 
                 ftrace_event
+            });
+    }
+
+    /// Adds events for the softirq entry/exit events.
+    pub fn on_softirq(&mut self, action: &SoftIRQAction) {
+        let _ = self
+            .ftrace_events
+            .entry(action.cpu)
+            .or_insert_with(Vec::new)
+            .extend({
+                let mut entry_ftrace_event = FtraceEvent::new();
+                let mut exit_ftrace_event = FtraceEvent::new();
+                let mut entry_event = SoftirqEntryFtraceEvent::new();
+                let mut exit_event = SoftirqExitFtraceEvent::new();
+                entry_event.set_vec(action.softirq_nr as u32);
+                exit_event.set_vec(action.softirq_nr as u32);
+
+                entry_ftrace_event.set_timestamp(action.entry_ts);
+                entry_ftrace_event.set_softirq_entry(entry_event);
+                entry_ftrace_event.set_pid(action.pid);
+                exit_ftrace_event.set_timestamp(action.exit_ts);
+                exit_ftrace_event.set_softirq_exit(exit_event);
+                exit_ftrace_event.set_pid(action.pid);
+
+                vec![entry_ftrace_event, exit_ftrace_event]
             });
     }
 

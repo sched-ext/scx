@@ -24,10 +24,12 @@ use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
     Action, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction,
+    SoftIRQAction,
 };
 
 use anyhow::Result;
 use glob::glob;
+use libbpf_rs::Link;
 use protobuf::Message;
 use ratatui::prelude::Constraint;
 use ratatui::{
@@ -110,6 +112,7 @@ pub struct App<'a> {
     trace_tick_warmup: usize,
     max_trace_ticks: usize,
     prev_bpf_sample_rate: u32,
+    trace_links: Vec<Link>,
 }
 
 impl<'a> App<'a> {
@@ -221,6 +224,7 @@ impl<'a> App<'a> {
             max_trace_ticks: trace_ticks,
             trace_manager: PerfettoTraceManager::new(&trace_file_prefix, None),
             bpf_stats: Default::default(),
+            trace_links: vec![],
         };
 
         Ok(app)
@@ -1932,11 +1936,24 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Attaches any BPF programs required for perfetto traces.
+    fn attach_trace_progs(&mut self) -> Result<()> {
+        self.trace_links = vec![
+            self.skel.progs.on_softirq_entry.attach()?,
+            self.skel.progs.on_softirq_exit.attach()?,
+        ];
+
+        Ok(())
+    }
+
     /// Records the trace to perfetto output.
     fn record_trace(&mut self) -> Result<()> {
         self.skel.maps.data_data.sample_rate = self.prev_bpf_sample_rate;
         self.state = self.prev_state.clone();
-        self.trace_manager.stop()
+        self.trace_manager.stop()?;
+        self.trace_links.clear();
+
+        Ok(())
     }
 
     /// Starts recording a trace.
@@ -1949,6 +1966,7 @@ impl<'a> App<'a> {
         // set bpf sampling to every event
         self.prev_bpf_sample_rate = self.skel.maps.data_data.sample_rate;
         self.skel.maps.data_data.sample_rate = 1;
+        self.attach_trace_progs()?;
 
         Ok(())
     }
@@ -1987,13 +2005,17 @@ impl<'a> App<'a> {
     /// Updates the app when a task wakes.
     fn on_sched_wakeup(&mut self, action: &SchedWakeupAction) {
         if self.state == AppState::Tracing {
-            self.trace_manager.on_sched_wakeup(action);
+            if self.trace_tick > self.trace_tick_warmup {
+                self.trace_manager.on_sched_wakeup(action);
+            }
         }
     }
 
     fn on_sched_waking(&mut self, action: &SchedWakingAction) {
         if self.state == AppState::Tracing {
-            self.trace_manager.on_sched_waking(action);
+            if self.trace_tick > self.trace_tick_warmup {
+                self.trace_manager.on_sched_waking(action);
+            }
         }
     }
 
@@ -2052,6 +2074,13 @@ impl<'a> App<'a> {
             .entry(*prev_dsq_id)
             .or_insert(EventData::new(self.max_cpu_events));
         prev_dsq_data.add_event_data("dsq_slice_consumed".to_string(), *prev_used_slice_ns);
+    }
+
+    /// Handles softirq events
+    pub fn on_softirq(&mut self, action: &SoftIRQAction) {
+        if self.trace_tick > self.trace_tick_warmup {
+            self.trace_manager.on_softirq(action);
+        }
     }
 
     /// Updates the bpf bpf sampling rate.
@@ -2118,6 +2147,9 @@ impl<'a> App<'a> {
             }
             Action::SchedWaking(a) => {
                 self.on_sched_waking(&a);
+            }
+            Action::SoftIRQ(a) => {
+                self.on_softirq(&a);
             }
             Action::ClearEvent => self.stop_perf_events(),
             Action::ChangeTheme => {
