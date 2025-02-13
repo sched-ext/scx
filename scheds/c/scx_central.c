@@ -82,6 +82,7 @@ restart:
 			break;
 		default:
 			fprintf(stderr, help_fmt, basename(argv[0]));
+			scx_central__destroy(skel);
 			return opt != 'h';
 		}
 	}
