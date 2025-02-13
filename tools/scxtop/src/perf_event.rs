@@ -242,7 +242,7 @@ impl PerfEvent {
                     "bus-cycles" | "bus_cycles" => {
                         attrs.config = perf::bindings::PERF_COUNT_HW_BUS_CYCLES as u64;
                     }
-                    "L1-dcache-load-misses" => {
+                    "l1-dcache-load-misses" => {
                         attrs.config = perf::bindings::PERF_COUNT_HW_CACHE_RESULT_MISS as u64;
                     }
                     _ => {
