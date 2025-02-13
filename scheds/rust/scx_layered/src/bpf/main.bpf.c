@@ -776,8 +776,11 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	if (layer_id >= MAX_LAYERS || !(layer_cpumask = lookup_layer_cpumask(layer_id)))
 		return -1;
 
-	/* not much to do if bound to a single CPU */
-	if (p->nr_cpus_allowed == 1) {
+	/*
+	 * Not much to do if bound to a single CPU. Explicitly handle migration
+	 * disabled tasks for kernels before SCX_OPS_ENQ_MIGRATION_DISABLED.
+	 */
+	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			if (layer->kind == LAYER_KIND_CONFINED &&
 			    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
