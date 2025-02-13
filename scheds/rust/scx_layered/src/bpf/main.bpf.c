@@ -1967,9 +1967,9 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 
 		taskc->layer_id = layer_id;
 		taskc->llc_id = cpuc->llc_id;
-		taskc->layered_cpus.seq = layer->cpus_seq - 1;
-		taskc->layered_cpus_llc.seq = layer->cpus_seq - 1;
-		taskc->layered_cpus_node.seq = layer->cpus_seq - 1;
+		taskc->layered_cpus.seq = -1;
+		taskc->layered_cpus_llc.seq = -1;
+		taskc->layered_cpus_node.seq = -1;
 		__sync_fetch_and_add(&layer->nr_tasks, 1);
 		/*
 		 * XXX - To be correct, we'd need to calculate the vtime
@@ -2426,6 +2426,11 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 		return;
 
 	refresh_cpus_flags(taskc, cpumask);
+
+	/* invalidate all cached cpumasks */
+	taskc->layered_cpus.seq = -1;
+	taskc->layered_cpus_llc.seq = -1;
+	taskc->layered_cpus_node.seq = -1;
 }
 
 void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
