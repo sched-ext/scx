@@ -28,9 +28,9 @@ pub struct KeyMap {
     bindings: HashMap<Key, Action>,
 }
 
-impl KeyMap {
+impl Default for KeyMap {
     /// Returns the default keymap.
-    pub fn default() -> Self {
+    fn default() -> Self {
         let mut bindings = HashMap::new();
         bindings.insert(Key::Char('d'), Action::SetState(AppState::Default));
         bindings.insert(Key::Char('e'), Action::SetState(AppState::Event));
@@ -61,7 +61,9 @@ impl KeyMap {
 
         Self { bindings }
     }
+}
 
+impl KeyMap {
     /// Maps the Key to an Action.
     pub fn action(&self, key: &Key) -> Action {
         self.bindings.get(key).cloned().unwrap_or(Action::None)
@@ -81,13 +83,10 @@ impl KeyMap {
     /// Returns a String of the keys for an Action.
     pub fn action_keys_string(&self, action: Action) -> String {
         let action_keys = self.action_keys(action);
-        format!(
-            "{}",
-            action_keys
-                .iter()
-                .map(|k| k.to_string())
-                .collect::<Vec<_>>()
-                .join("/")
-        )
+        action_keys
+            .iter()
+            .map(|k| k.to_string())
+            .collect::<Vec<_>>()
+            .join("/")
     }
 }
