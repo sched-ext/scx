@@ -269,27 +269,23 @@ impl<'a> PerfettoTraceManager<'a> {
 
     /// Adds events for the softirq entry/exit events.
     pub fn on_softirq(&mut self, action: &SoftIRQAction) {
-        let _ = self
-            .ftrace_events
-            .entry(action.cpu)
-            .or_insert_with(Vec::new)
-            .extend({
-                let mut entry_ftrace_event = FtraceEvent::new();
-                let mut exit_ftrace_event = FtraceEvent::new();
-                let mut entry_event = SoftirqEntryFtraceEvent::new();
-                let mut exit_event = SoftirqExitFtraceEvent::new();
-                entry_event.set_vec(action.softirq_nr as u32);
-                exit_event.set_vec(action.softirq_nr as u32);
+        self.ftrace_events.entry(action.cpu).or_default().extend({
+            let mut entry_ftrace_event = FtraceEvent::new();
+            let mut exit_ftrace_event = FtraceEvent::new();
+            let mut entry_event = SoftirqEntryFtraceEvent::new();
+            let mut exit_event = SoftirqExitFtraceEvent::new();
+            entry_event.set_vec(action.softirq_nr as u32);
+            exit_event.set_vec(action.softirq_nr as u32);
 
-                entry_ftrace_event.set_timestamp(action.entry_ts);
-                entry_ftrace_event.set_softirq_entry(entry_event);
-                entry_ftrace_event.set_pid(action.pid);
-                exit_ftrace_event.set_timestamp(action.exit_ts);
-                exit_ftrace_event.set_softirq_exit(exit_event);
-                exit_ftrace_event.set_pid(action.pid);
+            entry_ftrace_event.set_timestamp(action.entry_ts);
+            entry_ftrace_event.set_softirq_entry(entry_event);
+            entry_ftrace_event.set_pid(action.pid);
+            exit_ftrace_event.set_timestamp(action.exit_ts);
+            exit_ftrace_event.set_softirq_exit(exit_event);
+            exit_ftrace_event.set_pid(action.pid);
 
-                vec![entry_ftrace_event, exit_ftrace_event]
-            });
+            [entry_ftrace_event, exit_ftrace_event]
+        });
     }
 
     /// Adds events for the sched_switch event.

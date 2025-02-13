@@ -1969,18 +1969,14 @@ impl<'a> App<'a> {
 
     /// Updates the app when a task wakes.
     fn on_sched_wakeup(&mut self, action: &SchedWakeupAction) {
-        if self.state == AppState::Tracing {
-            if self.trace_tick > self.trace_tick_warmup {
-                self.trace_manager.on_sched_wakeup(action);
-            }
+        if self.state == AppState::Tracing && self.trace_tick > self.trace_tick_warmup {
+            self.trace_manager.on_sched_wakeup(action);
         }
     }
 
     fn on_sched_waking(&mut self, action: &SchedWakingAction) {
-        if self.state == AppState::Tracing {
-            if self.trace_tick > self.trace_tick_warmup {
-                self.trace_manager.on_sched_waking(action);
-            }
+        if self.state == AppState::Tracing && self.trace_tick > self.trace_tick_warmup {
+            self.trace_manager.on_sched_waking(action);
         }
     }
 
