@@ -30,7 +30,7 @@ impl NodeData {
 
     /// Initializes events with default values.
     pub fn initialize_events(&mut self, events: &Vec<String>) {
-        self.data.initialize_events(&events);
+        self.data.initialize_events(events);
     }
 
     /// Returns the data for an event and updates if no entry is present.

@@ -32,7 +32,7 @@ use std::time::Duration;
 use ratatui::crossterm::event::KeyCode::Char;
 use tokio::sync::mpsc;
 
-const TRACE_FILE_PREFIX: &'static str = "scxtop_trace";
+const TRACE_FILE_PREFIX: &str = "scxtop_trace";
 
 #[derive(Parser, Debug)]
 #[command(about = APP)]

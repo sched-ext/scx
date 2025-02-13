@@ -180,7 +180,7 @@ jobs:
     needs: build-kernel
     strategy:
       matrix:
-        package: [ scx_loader, scx_rustland_core, scx_stats, scx_utils, scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty ]
+        package: [ scx_loader, scx_rustland_core, scx_stats, scx_utils, scxtop, scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty ]
     steps:
       - uses: actions/checkout@v4
 
@@ -204,6 +204,10 @@ jobs:
         run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
 
       - run: cargo build --all-targets --package ${{ matrix.package }}
+
+      - name: Clippy
+        if: contains(fromJSON('["scxtop"]'), matrix.package)
+        run: cargo clippy --no-deps -p ${{ matrix.package }} -- -Dwarnings
 
       # virtme-ng runs as a different user than the runner, so loses the rustup and cargo roots. specify them explicitly to avoid a rebuild.
       - run: |

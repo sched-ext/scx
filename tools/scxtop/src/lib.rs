@@ -44,13 +44,13 @@ pub use plain::Plain;
 // Generate serialization types for handling events from the bpf ring buffer.
 unsafe impl Plain for crate::bpf_skel::types::bpf_event {}
 
-pub const STATS_SOCKET_PATH: &'static str = "/var/run/scx/root/stats";
-pub const APP: &'static str = "scxtop";
-pub const LICENSE: &'static str = "Copyright (c) Meta Platforms, Inc. and affiliates. 
+pub const STATS_SOCKET_PATH: &str = "/var/run/scx/root/stats";
+pub const APP: &str = "scxtop";
+pub const LICENSE: &str = "Copyright (c) Meta Platforms, Inc. and affiliates.
 
 This software may be used and distributed according to the terms of the 
 GNU General Public License version 2.";
-pub const SCHED_NAME_PATH: &'static str = "/sys/kernel/sched_ext/root/ops";
+pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum AppState {

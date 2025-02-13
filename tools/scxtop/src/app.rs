@@ -47,7 +47,6 @@ use regex::Regex;
 use scx_stats::prelude::StatsClient;
 use scx_utils::misc::read_file_usize;
 use scx_utils::Topology;
-use serde_json;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::RwLock;
@@ -117,6 +116,7 @@ pub struct App<'a> {
 
 impl<'a> App<'a> {
     /// Creates a new appliation.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stats_socket_path: String,
         trace_file_prefix: &'a str,
@@ -222,7 +222,7 @@ impl<'a> App<'a> {
             trace_tick: 0,
             trace_tick_warmup,
             max_trace_ticks: trace_ticks,
-            trace_manager: PerfettoTraceManager::new(&trace_file_prefix, None),
+            trace_manager: PerfettoTraceManager::new(trace_file_prefix, None),
             bpf_stats: Default::default(),
             trace_links: vec![],
         };
@@ -641,23 +641,20 @@ impl<'a> App<'a> {
                     .border_type(BorderType::Rounded)
                     .style(self.theme.border_style())
                     .title_top(
-                        Line::from(format!(
-                            "{}",
-                            if self.collect_uncore_freq {
-                                "uncore ".to_string()
-                                    + &format_hz(
-                                        self.node_data
-                                            .get(&node)
-                                            .unwrap()
-                                            .event_data_immut("uncore_freq".to_string())
-                                            .last()
-                                            .copied()
-                                            .unwrap_or(0_u64),
-                                    )
-                            } else {
-                                "".to_string()
-                            }
-                        ))
+                        Line::from(if self.collect_uncore_freq {
+                            "uncore ".to_string()
+                                + &format_hz(
+                                    self.node_data
+                                        .get(&node)
+                                        .unwrap()
+                                        .event_data_immut("uncore_freq".to_string())
+                                        .last()
+                                        .copied()
+                                        .unwrap_or(0_u64),
+                                )
+                        } else {
+                            "".to_string()
+                        })
                         .style(self.theme.text_important_color())
                         .right_aligned(),
                     )
@@ -717,15 +714,10 @@ impl<'a> App<'a> {
 
                 frame.render_widget(llc_block, llcs_verticle[0]);
 
-                let llc_sparklines: Vec<Sparkline> = self
-                    .topo
+                self.topo
                     .all_llcs
                     .keys()
-                    .map(|llc_id| self.llc_sparkline(llc_id.clone(), *llc_id == num_llcs - 1))
-                    .collect();
-
-                let _ = llc_sparklines
-                    .iter()
+                    .map(|llc_id| self.llc_sparkline(*llc_id, *llc_id == num_llcs - 1))
                     .enumerate()
                     .for_each(|(i, llc_sparkline)| {
                         frame.render_widget(llc_sparkline, llcs_verticle[i + 1]);
@@ -801,7 +793,7 @@ impl<'a> App<'a> {
                     .topo
                     .nodes
                     .keys()
-                    .map(|node_id| self.node_sparkline(node_id.clone(), *node_id == num_nodes - 1))
+                    .map(|node_id| self.node_sparkline(*node_id, *node_id == num_nodes - 1))
                     .collect();
 
                 let node_block = Block::bordered()
@@ -822,7 +814,7 @@ impl<'a> App<'a> {
                     .style(self.theme.border_style());
 
                 frame.render_widget(node_block, nodes_verticle[0]);
-                let _ = node_sparklines
+                node_sparklines
                     .iter()
                     .enumerate()
                     .for_each(|(i, node_sparkline)| {
@@ -937,7 +929,7 @@ impl<'a> App<'a> {
             .map(|(j, (dsq_id, _data))| {
                 self.dsq_sparkline(
                     event.clone(),
-                    dsq_id.clone(),
+                    *dsq_id,
                     Borders::ALL,
                     j == 0 && render_title,
                     j == 0 && render_sample_rate,
@@ -1073,8 +1065,7 @@ impl<'a> App<'a> {
         }
         let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
 
-        let _ = self
-            .dsq_sparklines(event.clone(), render_title, render_sample_rate)
+        self.dsq_sparklines(event.clone(), render_title, render_sample_rate)
             .iter()
             .enumerate()
             .for_each(|(j, dsq_sparkline)| {
@@ -1118,8 +1109,7 @@ impl<'a> App<'a> {
         }
         let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
 
-        let _ = self
-            .dsq_sparklines(event.clone(), render_title, render_sample_rate)
+        self.dsq_sparklines(event.clone(), render_title, render_sample_rate)
             .iter()
             .enumerate()
             .for_each(|(j, dsq_sparkline)| {
@@ -1385,23 +1375,20 @@ impl<'a> App<'a> {
                             Line::from("")
                         })
                         .title_top(
-                            Line::from(format!(
-                                "{}",
-                                if self.collect_uncore_freq {
-                                    "uncore ".to_string()
-                                        + &format_hz(
-                                            self.node_data
-                                                .get(&node.id)
-                                                .unwrap()
-                                                .event_data_immut("uncore_freq".to_string())
-                                                .last()
-                                                .copied()
-                                                .unwrap_or(0_u64),
-                                        )
-                                } else {
-                                    "".to_string()
-                                }
-                            ))
+                            Line::from(if self.collect_uncore_freq {
+                                "uncore ".to_string()
+                                    + &format_hz(
+                                        self.node_data
+                                            .get(&node.id)
+                                            .unwrap()
+                                            .event_data_immut("uncore_freq".to_string())
+                                            .last()
+                                            .copied()
+                                            .unwrap_or(0_u64),
+                                    )
+                            } else {
+                                "".to_string()
+                            })
                             .style(self.theme.text_important_color())
                             .left_aligned(),
                         )
@@ -1418,7 +1405,7 @@ impl<'a> App<'a> {
                         .enumerate()
                         .map(|(j, cpu)| {
                             self.cpu_sparkline(
-                                cpu.id.clone(),
+                                cpu.id,
                                 stats.max,
                                 if j > col_scale && j == node_cpus - col_scale {
                                     Borders::LEFT | Borders::BOTTOM
@@ -1438,7 +1425,7 @@ impl<'a> App<'a> {
                         })
                         .collect();
 
-                    let _ = cpu_sparklines
+                    cpu_sparklines
                         .iter()
                         .enumerate()
                         .for_each(|(j, cpu_sparkline)| {
@@ -1493,23 +1480,20 @@ impl<'a> App<'a> {
                             Line::from("")
                         })
                         .title_top(
-                            Line::from(format!(
-                                "{}",
-                                if self.collect_uncore_freq {
-                                    "uncore ".to_string()
-                                        + &format_hz(
-                                            self.node_data
-                                                .get(&node.id)
-                                                .unwrap()
-                                                .event_data_immut("uncore_freq".to_string())
-                                                .last()
-                                                .copied()
-                                                .unwrap_or(0_u64),
-                                        )
-                                } else {
-                                    "".to_string()
-                                }
-                            ))
+                            Line::from(if self.collect_uncore_freq {
+                                "uncore ".to_string()
+                                    + &format_hz(
+                                        self.node_data
+                                            .get(&node.id)
+                                            .unwrap()
+                                            .event_data_immut("uncore_freq".to_string())
+                                            .last()
+                                            .copied()
+                                            .unwrap_or(0_u64),
+                                    )
+                            } else {
+                                "".to_string()
+                            })
                             .style(self.theme.text_important_color())
                             .left_aligned(),
                         )
@@ -1544,7 +1528,7 @@ impl<'a> App<'a> {
                             .style(self.theme.border_style());
                         let bar_chart = BarChart::default()
                             .block(cpu_block)
-                            .data(BarGroup::default().bars(&col_data))
+                            .data(BarGroup::default().bars(col_data))
                             .max(stats.max)
                             .direction(Direction::Horizontal)
                             .bar_style(self.theme.sparkline_style())
@@ -1861,78 +1845,59 @@ impl<'a> App<'a> {
 
     /// Updates app state when the down arrow or mapped key is pressed.
     fn on_down(&mut self) {
-        match self.state {
-            AppState::Event => {
-                if self.event_scroll <= self.num_perf_events {
-                    self.event_scroll += 1;
-                    self.selected_event += 1
-                }
-            }
-            _ => {}
+        if self.state == AppState::Event && self.event_scroll <= self.num_perf_events {
+            self.event_scroll += 1;
+            self.selected_event += 1
         }
     }
 
     /// Updates app state when the up arrow or mapped key is pressed.
     fn on_up(&mut self) {
-        match self.state {
-            AppState::Event => {
-                if self.event_scroll > 0 {
-                    self.event_scroll -= 1;
-                    self.selected_event -= 1
-                }
-            }
-            _ => {}
+        if self.state == AppState::Event && self.event_scroll > 0 {
+            self.event_scroll -= 1;
+            self.selected_event -= 1
         }
     }
 
     /// Updates app state when page down or mapped key is pressed.
     fn on_pg_down(&mut self) {
-        match self.state {
-            AppState::Event => {
-                if self.event_scroll <= self.num_perf_events - self.events_list_size {
-                    self.event_scroll += self.events_list_size - 1;
-                    self.selected_event += (self.events_list_size - 1) as usize;
-                }
-            }
-            _ => {}
+        if self.state == AppState::Event
+            && self.event_scroll <= self.num_perf_events - self.events_list_size
+        {
+            self.event_scroll += self.events_list_size - 1;
+            self.selected_event += (self.events_list_size - 1) as usize;
         }
     }
 
     /// Updates app state when page up or mapped key is pressed.
     fn on_pg_up(&mut self) {
-        match self.state {
-            AppState::Event => {
-                if self.event_scroll > self.events_list_size {
-                    self.event_scroll -= self.events_list_size - 1;
-                    self.selected_event -= (self.events_list_size - 1) as usize;
-                } else {
-                    self.event_scroll = 0;
-                    self.selected_event = 0;
-                }
+        if self.state == AppState::Event {
+            if self.event_scroll > self.events_list_size {
+                self.event_scroll -= self.events_list_size - 1;
+                self.selected_event -= (self.events_list_size - 1) as usize;
+            } else {
+                self.event_scroll = 0;
+                self.selected_event = 0;
             }
-            _ => {}
         }
     }
 
     /// Updates app state when the enter key is pressed.
     fn on_enter(&mut self) {
-        match self.state {
-            AppState::Event => {
-                if let Some((subsystem, event)) =
-                    self.available_perf_events_list[self.selected_event].split_once(":")
-                {
-                    let perf_event = PerfEvent::new(subsystem.to_string(), event.to_string(), 0);
-                    self.active_perf_events.clear();
-                    self.active_event = perf_event.clone();
-                    let _ = self.activate_perf_event(&perf_event);
-                    self.non_hw_event_active = true;
-                    let prev_state = self.prev_state.clone();
-                    self.prev_state = self.state.clone();
-                    self.state = prev_state;
-                    self.available_events.push(perf_event.clone());
-                }
+        if self.state == AppState::Event {
+            if let Some((subsystem, event)) =
+                self.available_perf_events_list[self.selected_event].split_once(":")
+            {
+                let perf_event = PerfEvent::new(subsystem.to_string(), event.to_string(), 0);
+                self.active_perf_events.clear();
+                self.active_event = perf_event.clone();
+                let _ = self.activate_perf_event(&perf_event);
+                self.non_hw_event_active = true;
+                let prev_state = self.prev_state.clone();
+                self.prev_state = self.state.clone();
+                self.state = prev_state;
+                self.available_events.push(perf_event.clone());
             }
-            _ => {}
         }
     }
 
