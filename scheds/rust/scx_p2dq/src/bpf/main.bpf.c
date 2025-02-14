@@ -72,6 +72,23 @@ static __always_inline u64 dsq_time_slice(int dsq_id)
 	return dsq_time_slices[dsq_id];
 }
 
+struct p2dq_timer p2dq_timers[MAX_TIMERS] = {
+	{500LLU * NSEC_PER_MSEC, CLOCK_BOOTTIME, 0},
+};
+
+struct timer_wrapper {
+	struct bpf_timer timer;
+	int	key;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, MAX_TIMERS);
+	__type(key, int);
+	__type(value, struct timer_wrapper);
+} timer_data SEC(".maps");
+
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, u32);
@@ -240,8 +257,37 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 	return true;
 }
 
-static s32 pick_two(struct task_ctx *taskc, bool *is_idle)
+static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *left, struct llc_ctx *right, bool most_loaded)
 {
+	s32 left_queued = 0, right_queued = 0;
+	u64 left_load = 0, right_load = 0;
+	int i;
+
+	if (!left || !right)
+		return left;
+
+	bpf_for(i, 0, nr_llcs) {
+		if (i >= nr_dsqs_per_llc || i < 0)
+			continue;
+
+		u64 left_dsq_id = *MEMBER_VPTR(left->dsqs, [i]);
+		left_queued += scx_bpf_dsq_nr_queued(left_dsq_id);
+		left_load += *MEMBER_VPTR(left->dsq_load, [i]);
+		u64 right_dsq_id = *MEMBER_VPTR(right->dsqs, [i]);
+		right_queued += scx_bpf_dsq_nr_queued(right_dsq_id);
+		right_load += *MEMBER_VPTR(right->dsq_load, [i]);
+	}
+
+	if (((left_queued > 0 || right_queued > 0) && left_queued < right_queued) ||
+	    left_load > right_load)
+		return most_loaded ? right : left;
+
+	return most_loaded ? left : right;
+}
+
+static s32 pick_two_cpu(struct task_ctx *taskc, bool *is_idle)
+{
+	struct llc_ctx *chosen;
 	struct llc_ctx *left = rand_llc_ctx();
 	struct llc_ctx *right = rand_llc_ctx();
 	int dsq_index = taskc->dsq_index;
@@ -260,45 +306,43 @@ static s32 pick_two(struct task_ctx *taskc, bool *is_idle)
 
 	u64 left_dsq_id = *MEMBER_VPTR(left->dsqs, [dsq_index]);
 	s32 left_queued = scx_bpf_dsq_nr_queued(left_dsq_id);
+	u64 left_load = *MEMBER_VPTR(left->dsq_load, [dsq_index]);
 	u64 right_dsq_id = *MEMBER_VPTR(right->dsqs, [dsq_index]);
 	s32 right_queued = scx_bpf_dsq_nr_queued(right_dsq_id);
+	u64 right_load = *MEMBER_VPTR(right->dsq_load, [dsq_index]);
 
 	stat_inc(P2DQ_STAT_PICK2);
-	if (left_queued < right_queued) {
-		if (!left->cpumask)
-			return -EINVAL;
 
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(left->cpumask), 0);
-		if (cpu < nr_cpus && cpu >= 0) {
-			*is_idle = true;
-			return cpu;
-		}
-
-		// couldn't find idle, but still return a CPU.
-		if (!left->cpumask)
-			return -EINVAL;
-		cpu = bpf_cpumask_any_distribute(cast_mask(left->cpumask));
-		if (cpu < nr_cpus)
-			return cpu;
+	if (((left_queued > 0 || right_queued > 0) && left_queued < right_queued) ||
+	    left_load > right_load) {
+		chosen = left;
+		goto pick_llc;
 	} else {
-		if (!right->cpumask)
-			return -EINVAL;
-
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(right->cpumask), 0);
-		if (cpu < nr_cpus && cpu >= 0) {
-			*is_idle = true;
-			return cpu;
-		}
-
-		// couldn't find idle, but still return a CPU.
-		if (!right->cpumask)
-			return -EINVAL;
-		cpu = bpf_cpumask_any_distribute(cast_mask(right->cpumask));
-		if (cpu < nr_cpus)
-			return cpu;
+		chosen = right;
+		goto pick_llc;
 	}
 
-	return -ENOENT;
+pick_llc:
+	if (!chosen)
+		return -EINVAL;
+
+	if (!chosen->cpumask)
+		return -EINVAL;
+
+	cpu = scx_bpf_pick_idle_cpu(cast_mask(chosen->cpumask), 0);
+	if (cpu < nr_cpus && cpu >= 0) {
+		*is_idle = true;
+		return cpu;
+	}
+
+	// couldn't find idle, but still return a CPU.
+	if (!chosen->cpumask)
+		return -EINVAL;
+	cpu = bpf_cpumask_any_distribute(cast_mask(chosen->cpumask));
+	if (cpu < nr_cpus)
+		return cpu;
+
+	return -EINVAL;
 }
 
 static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
@@ -338,20 +382,18 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 
 	// If last CPU is idle then run again
 	if (is_prev_llc_affine &&
-	    bpf_cpumask_test_cpu(prev_cpu, idle_cpumask) &&
+	    bpf_cpumask_test_cpu(prev_cpu, smt_enabled ? idle_smtmask : idle_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu = prev_cpu;
 		*is_idle = true;
 		goto out_put_cpumask;
 	}
 
-	if (eager_load_balance) {
-		if (!interactive) {
-			cpu = pick_two(taskc, is_idle);
-			// Only eagerly load balance if we found something idle.
-			if (cpu >= 0 && *is_idle) {
-				goto out_put_cpumask;
-			}
+	if (eager_load_balance && nr_llcs > 1) {
+		llcx = pick_two_llc_ctx(rand_llc_ctx(), rand_llc_ctx(), false);
+		if (!llcx) {
+			cpu = prev_cpu;
+			goto out_put_cpumask;
 		}
 	}
 
@@ -391,7 +433,8 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 			/*
 			 * If not interactive try a big core in the local domain first.
 			 */
-			cpu = bpf_cpumask_any_and_distribute(idle_cpumask, cast_mask(llcx->big_cpumask));
+			cpu = bpf_cpumask_any_and_distribute(smt_enabled ? idle_smtmask : idle_cpumask,
+							     cast_mask(llcx->big_cpumask));
 			if (cpu < nr_cpus) {
 				*is_idle = true;
 				goto out_put_cpumask;
@@ -402,7 +445,8 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 			/*
 			 * Next try a big core in the local node.
 			 */
-			cpu = bpf_cpumask_any_and_distribute(idle_cpumask, cast_mask(nodec->big_cpumask));
+			cpu = bpf_cpumask_any_and_distribute(smt_enabled ? idle_smtmask : idle_cpumask,
+							     cast_mask(nodec->big_cpumask));
 			if (cpu < nr_cpus) {
 				*is_idle = true;
 				goto out_put_cpumask;
@@ -420,6 +464,11 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		goto out_put_cpumask;
 	}
 
+	if (interactive_sticky && interactive) {
+		cpu = prev_cpu;
+		goto out_put_cpumask;
+	}
+
 	if (!nodec->cpumask)
 		goto out_put_cpumask;
 
@@ -430,15 +479,13 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		goto out_put_cpumask;
 	}
 
-	if (interactive_sticky && interactive) {
-		cpu = prev_cpu;
-		goto out_put_cpumask;
+	if (nr_llcs > 1) {
+		cpu = pick_two_cpu(taskc, is_idle);
+		if (cpu >= 0) {
+			goto out_put_cpumask;
+		}
 	}
 
-	cpu = pick_two(taskc, is_idle);
-	if (cpu >= 0) {
-		goto out_put_cpumask;
-	}
 	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 	if (cpu < nr_cpus) {
 		*is_idle = true;
@@ -633,6 +680,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	cpuc->dsq_index = dsq_index;
 	__sync_fetch_and_add(&llcx->vtime, used);
 	__sync_fetch_and_add(&llcx->dsq_max_vtime[dsq_index], used);
+	__sync_fetch_and_add(&llcx->dsq_load[dsq_index], used);
 
 	// On stopping determine if the task can move to a longer DSQ by
 	// comparing the used time to the scaled DSQ slice.
@@ -677,6 +725,12 @@ void BPF_STRUCT_OPS(p2dq_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
+	if (eager_load_balance && nr_llcs > 1) {
+		llcx = pick_two_llc_ctx(llcx, rand_llc_ctx(), false);
+		if (!llcx)
+			return;
+	}
+
 	u64 min_vtime = llcx->vtime;
 	bpf_for(i, 0, nr_dsqs_per_llc) {
 		if (llcx->dsq_max_vtime[i] < min_vtime) {
@@ -699,6 +753,13 @@ void BPF_STRUCT_OPS(p2dq_dispatch, s32 cpu, struct task_struct *prev)
 		    scx_bpf_dsq_move_to_local(cpuc->dsqs[i]))
 		    return;
 	}
+
+	// Last ditch effort try a random LLC for the same type of DSQ.
+	llcx = rand_llc_ctx();
+	if (!llcx || cpuc->dsq_index < 0 || cpuc->dsq_index > nr_dsqs_per_llc)
+		return;
+
+	scx_bpf_dsq_move_to_local(llcx->dsqs[cpuc->dsq_index]);
 }
 
 void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
@@ -906,6 +967,103 @@ static s32 init_cpu(int cpu)
 	return 0;
 }
 
+static bool load_balance_timer(void)
+{
+	struct llc_ctx *llcx;
+	int llc_id, j;
+
+	if (nr_llcs == 1)
+		return false;
+
+	// Reset load values until next load balancing.
+	bpf_for(llc_id, 0, nr_llcs) {
+		if (!(llcx = lookup_llc_ctx(llc_id)))
+			return false;
+
+		bpf_for(j, 0, nr_dsqs_per_llc) {
+			llcx->dsq_load[j] = 0;
+		}
+	}
+
+	return true;
+}
+
+static bool run_timer_cb(int key)
+{
+	switch (key) {
+	case EAGER_LOAD_BALANCER_TMR:
+		return load_balance_timer();
+	default:
+		return false;
+	}
+}
+
+
+static int timer_cb(void *map, int key, struct timer_wrapper *timerw)
+{
+	if (timerw->key < 0 || timerw->key > MAX_TIMERS) {
+		return 0;
+	}
+
+	struct p2dq_timer *cb_timer = &p2dq_timers[timerw->key];
+	bool resched = run_timer_cb(timerw->key);
+
+	if (!resched || !cb_timer || cb_timer->interval_ns == 0) {
+		trace("TIMER timer %d stopped", timerw->key);
+		return 0;
+	}
+
+	bpf_timer_start(&timerw->timer,
+			cb_timer->interval_ns,
+			cb_timer->start_flags);
+
+	return 0;
+}
+
+
+s32 static start_timers(void)
+{
+	struct timer_wrapper *timerw;
+	int timer_id, err;
+
+	bpf_for(timer_id, 0, MAX_TIMERS) {
+		timerw = bpf_map_lookup_elem(&timer_data, &timer_id);
+		if (!timerw || timer_id < 0 || timer_id > MAX_TIMERS) {
+			scx_bpf_error("Failed to lookup timer");
+			return -ENOENT;
+		}
+
+		struct p2dq_timer *new_timer = &p2dq_timers[timer_id];
+		if (!new_timer) {
+			scx_bpf_error("can't happen");
+			return -ENOENT;
+		}
+		timerw->key = timer_id;
+
+		err = bpf_timer_init(&timerw->timer, &timer_data, new_timer->init_flags);
+		if (err < 0) {
+			scx_bpf_error("can't happen");
+			return -ENOENT;
+		}
+
+		err = bpf_timer_set_callback(&timerw->timer, &timer_cb);
+		if (err < 0) {
+			scx_bpf_error("can't happen");
+			return -ENOENT;
+		}
+
+		err = bpf_timer_start(&timerw->timer,
+				      new_timer->interval_ns,
+				      new_timer->start_flags);
+		if (err < 0) {
+			scx_bpf_error("can't happen");
+			return -ENOENT;
+		}
+	}
+
+	return 0;
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init)
 {
 	int i, ret;
@@ -990,6 +1148,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init)
 	}
 
 	max_exec_ns = 10 * dsq_time_slice(nr_dsqs_per_llc);
+
+	if (start_timers() < 0)
+		return -EINVAL;
 
 	return 0;
 }

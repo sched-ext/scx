@@ -25,6 +25,19 @@ enum consts {
 	MAX_NUMA_NODES		= 64,
 	MAX_LLCS		= 64,
 	MAX_DSQS_PER_LLC	= 8,
+
+	NSEC_PER_USEC		= 1000ULL,
+	NSEC_PER_MSEC		= (1000ULL * NSEC_PER_USEC),
+	MSEC_PER_SEC		= 1000ULL,
+	NSEC_PER_SEC		= NSEC_PER_MSEC * MSEC_PER_SEC,
+
+	// kernel definitions
+	CLOCK_BOOTTIME		= 7,
+};
+
+enum p2dq_timers_defs {
+	EAGER_LOAD_BALANCER_TMR,
+	MAX_TIMERS,
 };
 
 enum stat_idx {
@@ -32,6 +45,8 @@ enum stat_idx {
 	P2DQ_STAT_DSQ_SAME,
 	P2DQ_STAT_DSQ_CHANGE,
 	P2DQ_STAT_IDLE,
+	P2DQ_STAT_LB_SELECT,
+	P2DQ_STAT_LB_DISPATCH,
 	P2DQ_STAT_LLC_MIGRATION,
 	P2DQ_STAT_NODE_MIGRATION,
 	P2DQ_STAT_KEEP,
@@ -41,6 +56,13 @@ enum stat_idx {
 
 enum scheduler_mode {
 	MODE_PERFORMANCE,
+};
+
+struct p2dq_timer {
+	// if set to 0 the timer will only be scheduled once
+	u64 interval_ns;
+	u64 init_flags;
+	int start_flags;
 };
 
 struct task_ctx {
@@ -74,7 +96,6 @@ struct cpu_ctx {
 	bool				is_big;
 	u64				ran_for;
 	u64				dsqs[MAX_DSQS_PER_LLC];
-	u64				dsq_load[MAX_DSQS_PER_LLC];
 	u64				max_load_dsq;
 };
 
@@ -86,6 +107,7 @@ struct llc_ctx {
 	bool				all_big;
 	u64				dsqs[MAX_DSQS_PER_LLC];
 	u64				dsq_max_vtime[MAX_DSQS_PER_LLC];
+	u64				dsq_load[MAX_DSQS_PER_LLC];
 	struct bpf_cpumask __kptr	*cpumask;
 	struct bpf_cpumask __kptr	*big_cpumask;
 };
