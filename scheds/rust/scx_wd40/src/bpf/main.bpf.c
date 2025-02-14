@@ -144,8 +144,7 @@ static struct pcpu_ctx *lookup_pcpu_ctx(s32 cpu)
 	return pcpuc;
 }
 
-static void task_load_adj(task_ptr taskc,
-			  u64 now, bool runnable)
+static void task_load_adj(task_ptr taskc, u64 now, bool runnable)
 {
 	struct ravg_data rdp;
 
@@ -609,8 +608,7 @@ dom_queue:
 	}
 }
 
-static bool
-dispatch_steal_local_numa(u32 curr_dom, struct pcpu_ctx *pcpuc)
+static bool dispatch_steal_local_numa(u32 curr_dom, struct pcpu_ctx *pcpuc)
 {
 	u32 my_node;
 	u32 dom;
@@ -632,8 +630,7 @@ dispatch_steal_local_numa(u32 curr_dom, struct pcpu_ctx *pcpuc)
 	return false;
 }
 
-static bool
-dispatch_steal_x_numa(u32 curr_dom, struct pcpu_ctx *pcpuc)
+static bool dispatch_steal_x_numa(u32 curr_dom, struct pcpu_ctx *pcpuc)
 {
 	u32 my_node;
 	u32 dom;
@@ -693,8 +690,7 @@ void BPF_STRUCT_OPS(wd40_dispatch, s32 cpu, struct task_struct *prev)
 	dispatch_steal_x_numa(curr_dom, pcpuc);
 }
 
-static void
-update_task_wake_freq(struct task_struct *p, u64 now)
+static void update_task_wake_freq(struct task_struct *p, u64 now)
 {
 	task_ptr taskc;
 	u64 interval;
@@ -725,8 +721,7 @@ void BPF_STRUCT_OPS(wd40_runnable, struct task_struct *p, u64 enq_flags)
 	update_task_wake_freq(bpf_get_current_task_btf(), now);
 }
 
-static
-void lb_record_run(task_ptr taskc)
+static void lb_record_run(task_ptr taskc)
 {
 	dom_ptr domc = taskc->domc;
 	u32 dap_gen;
