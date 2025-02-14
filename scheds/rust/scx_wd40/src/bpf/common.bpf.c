@@ -64,22 +64,3 @@ u32 dom_node_id(u32 dom_id)
 	}
 	return *nid_ptr;
 }
-
-__hidden
-struct task_ctx *try_lookup_task_ctx(struct task_struct *p)
-{
-	struct task_ctx __arena *taskc = sdt_task_data(p);
-	return (struct task_ctx *)taskc;
-}
-
-__hidden
-struct task_ctx *lookup_task_ctx(struct task_struct *p)
-{
-	struct task_ctx *taskc;
-
-	taskc = try_lookup_task_ctx(p);
-	if (!taskc)
-		scx_bpf_error("task_ctx lookup failed for task %p", p);
-
-	return taskc;
-}

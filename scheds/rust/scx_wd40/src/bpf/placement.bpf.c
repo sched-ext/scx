@@ -49,7 +49,7 @@ static u64 node_dom_mask(u32 node_id)
  * set_mempolicy for more details on mempolicy.
  */
 static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
-						  struct task_ctx *taskc)
+						  task_ptr taskc)
 {
 	u32 node_id;
 	u32 val = 0;
@@ -90,7 +90,7 @@ static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 	return;
 }
 
-static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
+static u32 task_pick_domain(task_ptr taskc, struct task_struct *p,
 			    const struct cpumask *cpumask)
 {
 	s32 cpu = bpf_get_smp_processor_id();
@@ -137,16 +137,12 @@ __weak
 bool task_set_domain(struct task_struct *p __arg_trusted,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
-	const struct cpumask *cpumask = p->cpus_ptr;
 	dom_ptr old_domc, new_domc;
 	scx_bitmap_t t_cpumask;
-	struct task_ctx *taskc;
+	task_ptr taskc;
 
-	taskc = lookup_task_ctx_mask(p, &t_cpumask);
-	if (!taskc || !t_cpumask) {
-		scx_bpf_error("Failed to look up task cpumask");
-		return false;
-	}
+	taskc = lookup_task_ctx(p);
+	t_cpumask = taskc->cpumask;
 
 	old_domc = lookup_dom_ctx(taskc->target_dom);
 	if (!old_domc)
@@ -187,10 +183,8 @@ bool task_set_domain(struct task_struct *p __arg_trusted,
 }
 
 __hidden
-void task_pick_and_set_domain(struct task_ctx *taskc,
-				     struct task_struct *p __arg_trusted,
-				     const struct cpumask *cpumask,
-				     bool init_dsq_vtime)
+void task_pick_and_set_domain(task_ptr taskc, struct task_struct *p __arg_trusted,
+		const struct cpumask *cpumask, bool init_dsq_vtime)
 {
 	u32 dom_id = 0;
 

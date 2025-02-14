@@ -23,8 +23,7 @@ extern volatile u64 slice_ns;
 extern const volatile u32 nr_doms;
 extern const volatile u32 nr_nodes;
 
-struct task_ctx *lookup_task_ctx(struct task_struct *p);
-struct task_ctx *try_lookup_task_ctx(struct task_struct *p);
+#define lookup_task_ctx(p) ((task_ptr) sdt_task_data(p))
 extern scx_bitmap_t all_cpumask;
 u32 dom_node_id(u32 dom_id);
 void dom_dcycle_adj(dom_ptr domc, u32 weight, u64 now, bool runnable);
@@ -40,25 +39,20 @@ static inline u64 dom_min_vruntime(dom_ptr domc)
 	return READ_ONCE_ARENA(u64, domc->min_vruntime);
 }
 
-void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
-			  u64 enq_flags);
-
-void running_update_vtime(struct task_struct *p,
-				 struct task_ctx *taskc,
+void place_task_dl(struct task_struct *p, task_ptr taskc, u64 enq_flags);
+void running_update_vtime(struct task_struct *p, task_ptr taskc,
 				 dom_ptr domc);
-void stopping_update_vtime(struct task_struct *p, struct task_ctx *taskc,
+void stopping_update_vtime(struct task_struct *p, task_ptr taskc,
 				  dom_ptr domc);
 
 u64 update_freq(u64 freq, u64 interval);
-void init_vtime(struct task_struct *p, struct task_ctx *taskc);
-void task_pick_and_set_domain(struct task_ctx *taskc,
+void init_vtime(struct task_struct *p, task_ptr taskc);
+void task_pick_and_set_domain(task_ptr taskc,
 				     struct task_struct *p,
 				     const struct cpumask *cpumask,
 				     bool init_dsq_vtime);
 bool task_set_domain(struct task_struct *p __arg_trusted,
 			    u32 new_dom_id, bool init_dsq_vtime);
-struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, scx_bitmap_t *p_cpumaskp);
-
 /*
  * Per-CPU context
  */

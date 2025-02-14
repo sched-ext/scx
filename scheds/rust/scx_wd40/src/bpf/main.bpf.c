@@ -90,22 +90,6 @@ const volatile u32 greedy_threshold_x_numa;
 
 struct pcpu_ctx pcpu_ctx[MAX_CPUS];
 
-static scx_bitmap_t scx_bitmap_get_idle_smtmask()
-{
-	scx_bitmap_t scx = scx_percpu_scx_bitmap();
-	const struct cpumask __kptr *bpf = scx_bpf_get_idle_smtmask();
-
-	if (!bpf) {
-		scx_bpf_error("failed to retrieve CPU-local storage");
-		return NULL;
-	}
-	scx_bitmap_from_bpf(scx, bpf);
-
-	scx_bpf_put_idle_cpumask(bpf);
-
-	return scx;
-}
-
 static s32 scx_bitmap_pick_idle_cpu(scx_bitmap_t mask __arg_arena, int flags)
 {
 	struct bpf_cpumask __kptr *bpf = scx_percpu_bpfmask();
@@ -149,34 +133,6 @@ static s32 scx_bitmap_any_and_distribute(scx_bitmap_t scx, const struct cpumask 
 	return cpu;
 }
 
-static scx_bitmap_t lookup_task_scx_bitmap(struct task_struct *p)
-{
-	struct task_ctx *taskc = try_lookup_task_ctx(p);
-
-	return taskc->cpumask;
-}
-
-__hidden
-struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, scx_bitmap_t *p_cpumaskp)
-{
-	struct task_ctx *taskc;
-
-	if (p_cpumaskp == NULL) {
-		scx_bpf_error("no mask pointer provided");
-		return NULL;
-	}
-
-	taskc = lookup_task_ctx(p);
-	if (!taskc)
-		scx_bpf_error("task_ctx lookup failed for task %p", p);
-
-	*p_cpumaskp = lookup_task_scx_bitmap(p);
-	if (*p_cpumaskp == NULL)
-		scx_bpf_error("task mask lookup failed for task %p", p);
-
-	return taskc;
-}
-
 static struct pcpu_ctx *lookup_pcpu_ctx(s32 cpu)
 {
 	struct pcpu_ctx *pcpuc;
@@ -188,11 +144,17 @@ static struct pcpu_ctx *lookup_pcpu_ctx(s32 cpu)
 	return pcpuc;
 }
 
-static void task_load_adj(struct task_ctx *taskc,
+static void task_load_adj(task_ptr taskc,
 			  u64 now, bool runnable)
 {
+	struct ravg_data rdp;
+
+	rdp = taskc->dcyc_rd;
+
 	taskc->runnable = runnable;
-	ravg_accumulate(&taskc->dcyc_rd, taskc->runnable, now, load_half_life);
+	ravg_accumulate(&rdp, taskc->runnable, now, load_half_life);
+
+	taskc->dcyc_rd = rdp;
 }
 
 /*
@@ -270,7 +232,7 @@ static void refresh_tune_params(void)
 	}
 }
 
-static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
+static s32 try_sync_wakeup(struct task_struct *p, task_ptr taskc,
 			   s32 prev_cpu)
 {
 	struct task_struct *current = (void *)bpf_get_current_task_btf();
@@ -314,7 +276,7 @@ out:
 }
 
 static
-int select_cpu_idle_x_numa(struct task_ctx *taskc, u32 prev_cpu, bool has_idle_cores, s32 *cpu)
+int select_cpu_idle_x_numa(task_ptr taskc, u32 prev_cpu, bool has_idle_cores, s32 *cpu)
 {
 
 	u32 dom_id = cpu_to_dom_id(prev_cpu);
@@ -474,15 +436,15 @@ s32 BPF_STRUCT_OPS(wd40_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
 	const struct cpumask *idle_smtmask = scx_bpf_get_idle_smtmask();
-	struct task_ctx *taskc;
+	task_ptr taskc;
 	bool prev_domestic, has_idle_cores;
 	scx_bitmap_t p_cpumask;
 	s32 cpu;
 
 	refresh_tune_params();
 
-	if (!(taskc = lookup_task_ctx_mask(p, &p_cpumask)) || !p_cpumask)
-		goto enoent;
+	taskc = lookup_task_ctx(p);
+	p_cpumask  = taskc->cpumask;
 
 	if (p->nr_cpus_allowed == 1) {
 		cpu = prev_cpu;
@@ -565,13 +527,13 @@ enoent:
 
 void BPF_STRUCT_OPS(wd40_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
 {
-	struct task_ctx *taskc;
+	task_ptr taskc;
 	dom_ptr domc;
 	scx_bitmap_t p_cpumask;
 	s32 cpu = -1;
 
-	if (!(taskc = lookup_task_ctx_mask(p, &p_cpumask)) || !p_cpumask)
-		return;
+	taskc = lookup_task_ctx(p);
+	p_cpumask = taskc->cpumask;
 
 	domc = taskc->domc;
 	if (!domc)
@@ -635,21 +597,22 @@ dom_queue:
 	 * CPUs are highly loaded while KICK_GREEDY doesn't. Even under fairly
 	 * high utilization, KICK_GREEDY can slightly improve work-conservation.
 	 */
-	if (taskc->all_cpus) {
-		const struct cpumask *idle_cpumask;
+	if (!taskc->all_cpus)
+		return;
 
-		idle_cpumask = scx_bpf_get_idle_cpumask();
-		if (kick_greedy_cpumask) {
-			cpu = scx_bitmap_any_and_distribute(kick_greedy_cpumask, idle_cpumask);
-			if (cpu >= nr_cpu_ids)
-				cpu = -EBUSY;
-		}
-		scx_bpf_put_cpumask(idle_cpumask);
+	const struct cpumask *idle_cpumask;
 
-		if (cpu >= 0) {
-			stat_add(RUSTY_STAT_KICK_GREEDY, 1);
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-		}
+	idle_cpumask = scx_bpf_get_idle_cpumask();
+	if (kick_greedy_cpumask) {
+		cpu = scx_bitmap_any_and_distribute(kick_greedy_cpumask, idle_cpumask);
+		if (cpu >= nr_cpu_ids)
+			cpu = -EBUSY;
+	}
+	scx_bpf_put_cpumask(idle_cpumask);
+
+	if (cpu >= 0) {
+		stat_add(RUSTY_STAT_KICK_GREEDY, 1);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	}
 }
 
@@ -740,11 +703,10 @@ void BPF_STRUCT_OPS(wd40_dispatch, s32 cpu, struct task_struct *prev)
 static void
 update_task_wake_freq(struct task_struct *p, u64 now)
 {
-	struct task_ctx *taskc;
+	task_ptr taskc;
 	u64 interval;
 
-	if (!(taskc = try_lookup_task_ctx(p)))
-		return;
+	taskc = lookup_task_ctx(p);
 
 	interval = now - taskc->last_woke_at;
 	taskc->waker_freq = update_freq(taskc->waker_freq, interval);
@@ -754,11 +716,9 @@ update_task_wake_freq(struct task_struct *p, u64 now)
 void BPF_STRUCT_OPS(wd40_runnable, struct task_struct *p, u64 enq_flags)
 {
 	u64 now = scx_bpf_now();
-	struct task_ctx *wakee_ctx;
+	task_ptr wakee_ctx;
 
-	if (!(wakee_ctx = lookup_task_ctx(p)))
-		return;
-
+	wakee_ctx = lookup_task_ctx(p);
 	wakee_ctx->is_kworker = p->flags & PF_WQ_WORKER;
 
 	task_load_adj(wakee_ctx, now, true);
@@ -773,7 +733,7 @@ void BPF_STRUCT_OPS(wd40_runnable, struct task_struct *p, u64 enq_flags)
 }
 
 static
-void lb_record_run(struct task_struct *p, dom_ptr domc, struct task_ctx *taskc)
+void lb_record_run(struct task_struct *p, dom_ptr domc, task_ptr taskc)
 {
 	task_ptr usrptr = (task_ptr)sdt_task_data(p);
 	u32 dap_gen;
@@ -804,7 +764,7 @@ void lb_record_run(struct task_struct *p, dom_ptr domc, struct task_ctx *taskc)
 
 void BPF_STRUCT_OPS(wd40_running, struct task_struct *p)
 {
-	struct task_ctx *taskc;
+	task_ptr taskc;
 	dom_ptr domc;
 
 	if (!(taskc = lookup_task_ctx(p)))
@@ -826,7 +786,7 @@ void BPF_STRUCT_OPS(wd40_running, struct task_struct *p)
 
 void BPF_STRUCT_OPS(wd40_stopping, struct task_struct *p, bool runnable)
 {
-	struct task_ctx *taskc;
+	task_ptr taskc;
 	dom_ptr domc;
 
 	if (fifo_sched)
@@ -844,7 +804,7 @@ void BPF_STRUCT_OPS(wd40_stopping, struct task_struct *p, bool runnable)
 void BPF_STRUCT_OPS(wd40_quiescent, struct task_struct *p, u64 deq_flags)
 {
 	u64 now = scx_bpf_now(), interval;
-	struct task_ctx *taskc;
+	task_ptr taskc;
 	dom_ptr domc;
 
 	if (!(taskc = lookup_task_ctx(p)))
@@ -866,7 +826,7 @@ void BPF_STRUCT_OPS(wd40_quiescent, struct task_struct *p, u64 deq_flags)
 
 void BPF_STRUCT_OPS(wd40_set_weight, struct task_struct *p, u32 weight)
 {
-	struct task_ctx *taskc;
+	task_ptr taskc;
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
@@ -881,7 +841,7 @@ void BPF_STRUCT_OPS(wd40_set_weight, struct task_struct *p, u32 weight)
 void BPF_STRUCT_OPS(wd40_set_cpumask, struct task_struct *p __arg_trusted,
 		    const struct cpumask *cpumask __arg_trusted)
 {
-	struct task_ctx *taskc;
+	task_ptr taskc;
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
@@ -895,13 +855,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init_task, struct task_struct *p __arg_trusted
 		   struct scx_init_task_args *args)
 {
 	u64 now = scx_bpf_now();
-	struct task_ctx *taskc;
+	task_ptr taskc;
 
-	taskc = (struct task_ctx *)sdt_task_alloc(p);
+	taskc = (task_ptr)sdt_task_alloc(p);
 	if (!taskc)
 		return -ENOMEM;
 
-	*taskc = (struct task_ctx) {
+	*(struct task_ctx *)taskc = (struct task_ctx) {
 		.dom_active_tasks_gen = -1,
 		.last_blocked_at = now,
 		.last_woke_at = now,
