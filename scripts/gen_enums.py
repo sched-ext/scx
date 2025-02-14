@@ -102,7 +102,7 @@ def gen_enums_rs():
         f.write("lazy_static::lazy_static! {\n")
         f.write("    pub static ref scx_enums: Enums = Enums {\n")
         for kind, symbol in enums:
-            f.write("        {}: read_enum(\"{}\",\"{}\").unwrap(),\n".format(symbol, kind, symbol))
+            f.write("        {}: read_enum(\"{}\",\"{}\").unwrap_or(0),\n".format(symbol, kind, symbol))
         f.write("    };\n")
         f.write("}\n\n")
 
