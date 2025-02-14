@@ -93,6 +93,10 @@ pub fn get_default_config() -> Config {
                 "scx_flash".to_string(),
                 get_default_sched_for_config(&SupportedSched::Flash),
             ),
+            (
+                "scx_p2dq".to_string(),
+                get_default_sched_for_config(&SupportedSched::P2DQ),
+            ),
         ]),
     }
 }
@@ -194,6 +198,13 @@ fn get_default_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedM
         SupportedSched::Rusty => vec![],
         // scx_flash doesn't support any of these modes
         SupportedSched::Flash => vec![],
+        SupportedSched::P2DQ => match sched_mode {
+            SchedMode::Gaming => vec![],
+            SchedMode::LowLatency => vec!["-y"],
+            SchedMode::PowerSave => vec![],
+            SchedMode::Server => vec!["--keep-running"],
+            SchedMode::Auto => vec![],
+        },
     }
 }
 
@@ -233,6 +244,13 @@ gaming_mode = []
 lowlatency_mode = []
 powersave_mode = []
 server_mode = []
+
+[scheds.scx_p2dq]
+auto_mode = []
+gaming_mode = []
+lowlatency_mode = ["-y"]
+powersave_mode = []
+server_mode = ["--keep-running"]
 "#;
 
         let parsed_config = parse_config_content(config_str).expect("Failed to parse config");
