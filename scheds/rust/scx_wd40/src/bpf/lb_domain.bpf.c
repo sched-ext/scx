@@ -44,16 +44,7 @@ struct {
 	__uint(map_flags, 0);
 } dom_dcycle_locks SEC(".maps");
 
-/*
- * Numa node context
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct node_ctx);
-	__uint(max_entries, MAX_NUMA_NODES);
-	__uint(map_flags, 0);
-} node_data SEC(".maps");
+scx_bitmap_t node_data[MAX_NUMA_NODES];
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -353,28 +344,16 @@ __weak
 s32 create_node(u32 node_id)
 {
 	u32 cpu;
-	scx_bitmap_t cpumask;
-	struct node_ctx *nodec;
 	s32 ret;
 
-	nodec = bpf_map_lookup_elem(&node_data, &node_id);
-	if (!nodec) {
-		/* Should never happen, it's created statically at load time. */
-		scx_bpf_error("No node%u", node_id);
+	if (node_id >= MAX_NUMA_NODES) {
+		scx_bpf_error("Invalid node%u", node_id);
 		return -ENOENT;
 	}
 
-	ret = create_save_scx_bitmap(&nodec->cpumask);
+	ret = create_save_scx_bitmap(&node_data[node_id]);
 	if (ret)
 		return ret;
-
-	bpf_rcu_read_lock();
-	cpumask = nodec->cpumask;
-	if (!cpumask) {
-		bpf_rcu_read_unlock();
-		scx_bpf_error("Failed to lookup node cpumask");
-		return -ENOENT;
-	}
 
 	bpf_for(cpu, 0, MAX_CPUS) {
 		const volatile u64 *nmask;
@@ -387,10 +366,9 @@ s32 create_node(u32 node_id)
 		}
 
 		if (*nmask & (1LLU << (cpu % 64)))
-			scx_bitmap_set_cpu(cpu, cpumask);
+			scx_bitmap_set_cpu(cpu, node_data[node_id]);
 	}
 
-	bpf_rcu_read_unlock();
 	return ret;
 }
 
@@ -398,7 +376,6 @@ s32 create_node(u32 node_id)
 __weak s32 create_dom(u32 dom_id)
 {
 	dom_ptr domc;
-	struct node_ctx *nodec;
 	scx_bitmap_t all_mask;
 	struct lb_domain *lb_domain;
 	u32 cpu, node_id;
@@ -467,15 +444,12 @@ __weak s32 create_dom(u32 dom_id)
 	if (ret)
 		return ret;
 
-
-	nodec = bpf_map_lookup_elem(&node_data, &node_id);
-	if (!nodec) {
-		/* Should never happen, it's created statically at load time. */
-		scx_bpf_error("No node%u", node_id);
+	if (node_id >= MAX_NUMA_NODES) {
+		scx_bpf_error("Invalid node%u", node_id);
 		return -ENOENT;
 	}
 
-	scx_bitmap_copy(domc->node_cpumask, nodec->cpumask);
+	domc->node_cpumask = node_data[node_id];
 
 	return 0;
 }

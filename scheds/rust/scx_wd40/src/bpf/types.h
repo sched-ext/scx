@@ -74,8 +74,4 @@ struct dom_ctx {
 	scx_bitmap_t node_cpumask;
 };
 
-struct node_ctx {
-	scx_bitmap_t cpumask;
-};
-
 #endif /* __TYPES_H */
