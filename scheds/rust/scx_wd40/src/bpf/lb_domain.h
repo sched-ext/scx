@@ -1,17 +1,6 @@
 
 #include <lib/sdt_task.h>
 
-struct lb_domain {
-	union sdt_id		tid;
-
-	struct bpf_spin_lock vtime_lock;
-	scx_bitmap_t cpumask;
-	scx_bitmap_t direct_greedy_cpumask;
-	scx_bitmap_t node_cpumask;
-
-	dom_ptr domc;
-};
-
 extern volatile dom_ptr dom_ctxs[MAX_DOMS];
 extern struct sdt_allocator lb_domain_allocator;
 
@@ -44,44 +33,6 @@ static inline u64 min(u64 a, u64 b)
 {
 	return a <= b ? a : b;
 }
-
-static inline
-s32 create_save_cpumask(struct bpf_cpumask **kptr)
-{
-	struct bpf_cpumask *cpumask;
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask) {
-		scx_bpf_error("Failed to create cpumask");
-		return -ENOMEM;
-	}
-
-	cpumask = bpf_kptr_xchg(kptr, cpumask);
-	if (cpumask) {
-		scx_bpf_error("kptr already had cpumask");
-		bpf_cpumask_release(cpumask);
-	}
-
-	return 0;
-}
-
-static inline
-bool cpumask_intersects_domain(const struct cpumask *cpumask, u32 dom_id)
-{
-	struct lb_domain *lb_domain;
-	scx_bitmap_t dmask;
-
-	lb_domain = lb_domain_get(dom_id);
-	if (!lb_domain)
-		return false;
-
-	dmask = lb_domain->cpumask;
-	if (!dmask)
-		return false;
-
-	return scx_bitmap_intersects_cpumask(dmask, cpumask);
-}
-
 
 int stat_add(enum stat_idx idx, u64 addend);
 static inline u64 dom_min_vruntime(dom_ptr domc)
@@ -117,21 +68,4 @@ struct pcpu_ctx {
 	struct bpf_cpumask __kptr *bpfmask;
 } __attribute__((aligned(CACHELINE_SIZE)));
 
-struct bpfmask_wrapper {
-	struct bpf_cpumask __kptr *instance;
-};
-
 extern struct pcpu_ctx pcpu_ctx[MAX_CPUS];
-
-static inline
-scx_bitmap_t lookup_task_bpfmask(struct task_struct *p)
-{
-	task_ptr taskc;
-
-	taskc = sdt_task_data(p);
-	if (!taskc)
-		return NULL;
-
-
-	return taskc->cpumask;
-}

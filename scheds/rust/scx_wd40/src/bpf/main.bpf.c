@@ -239,24 +239,24 @@ static void refresh_tune_params(void)
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		u32 dom_id = cpu_to_dom_id(cpu);
-		struct lb_domain *lb_domain;
+		dom_ptr domc;
 
 		if (is_offline_cpu(cpu))
 			continue;
 
-		if (!(lb_domain = lb_domain_get(dom_id)))
+		if (!(domc = lookup_dom_ctx(dom_id)))
 			return;
 
 		if (tune_input.direct_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
 			if (direct_greedy_cpumask)
 				scx_bitmap_set_cpu(cpu, direct_greedy_cpumask);
-			if (lb_domain->direct_greedy_cpumask)
-				scx_bitmap_set_cpu(cpu, lb_domain->direct_greedy_cpumask);
+			if (domc->direct_greedy_cpumask)
+				scx_bitmap_set_cpu(cpu, domc->direct_greedy_cpumask);
 		} else {
 			if (direct_greedy_cpumask)
 				scx_bitmap_clear_cpu(cpu, direct_greedy_cpumask);
-			if (lb_domain->direct_greedy_cpumask)
-				scx_bitmap_clear_cpu(cpu, lb_domain->direct_greedy_cpumask);
+			if (domc->direct_greedy_cpumask)
+				scx_bitmap_clear_cpu(cpu, domc->direct_greedy_cpumask);
 		}
 
 		if (tune_input.kick_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
@@ -276,29 +276,21 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 	s32 cpu;
 	const struct cpumask *idle_cpumask;
 	bool share_llc, has_idle;
-	struct lb_domain *lb_domain;
-	scx_bitmap_t d_cpumask;
 	struct pcpu_ctx *pcpuc;
+	dom_ptr domc;
 
 	cpu = bpf_get_smp_processor_id();
 	pcpuc = lookup_pcpu_ctx(cpu);
 	if (!pcpuc)
 		return -ENOENT;
 
-	lb_domain = lb_domain_get(pcpuc->dom_id);
-	if (!lb_domain)
+	domc = lookup_dom_ctx(pcpuc->dom_id);
+	if (!domc)
 		return -ENOENT;
-
-	d_cpumask = lb_domain->cpumask;
-	if (!d_cpumask) {
-		scx_bpf_error("Failed to acquire dom%u cpumask kptr",
-				taskc->target_dom);
-		return -ENOENT;
-	}
 
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 
-	share_llc = scx_bitmap_test_cpu(prev_cpu, d_cpumask);
+	share_llc = scx_bitmap_test_cpu(prev_cpu, domc->cpumask);
 	if (share_llc && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		stat_add(RUSTY_STAT_SYNC_PREV_IDLE, 1);
 
@@ -306,7 +298,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 		goto out;
 	}
 
-	has_idle = scx_bitmap_intersects_cpumask(d_cpumask, idle_cpumask);
+	has_idle = scx_bitmap_intersects_cpumask(domc->cpumask, idle_cpumask);
 
 	if (has_idle && bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
 	    !(current->flags & PF_EXITING) && taskc->target_dom < MAX_DOMS &&
@@ -327,9 +319,7 @@ int select_cpu_idle_x_numa(struct task_ctx *taskc, u32 prev_cpu, bool has_idle_c
 {
 
 	u32 dom_id = cpu_to_dom_id(prev_cpu);
-	struct lb_domain *lb_domain;
-	scx_bitmap_t tmp_direct_greedy, node_mask;
-	scx_bitmap_t tmp_cpumask;
+	scx_bitmap_t tmp_direct_greedy, tmp_cpumask;
 	dom_ptr domc;
 
 	*cpu = -1;
@@ -349,11 +339,6 @@ int select_cpu_idle_x_numa(struct task_ctx *taskc, u32 prev_cpu, bool has_idle_c
 	else if (!(domc = lookup_dom_ctx(dom_id)))
 		return -ENOENT;
 
-	if (!(lb_domain = lb_domain_get(domc->id))) {
-		scx_bpf_error("Failed to lookup domain map value");
-		return -ENOENT;
-	}
-
 	tmp_direct_greedy = direct_greedy_cpumask;
 	if (!tmp_direct_greedy) {
 		scx_bpf_error("Failed to lookup direct_greedy mask");
@@ -368,30 +353,23 @@ int select_cpu_idle_x_numa(struct task_ctx *taskc, u32 prev_cpu, bool has_idle_c
 	 * working set may end up spanning multiple NUMA nodes.
 	 */
 	if (!direct_greedy_numa && domc) {
-		node_mask = lb_domain->node_cpumask;
-		if (!node_mask) {
-			scx_bpf_error("Failed to lookup node mask");
-			return -ENOENT;
-		}
-
 		tmp_cpumask = scx_percpu_scx_bitmap();
 		if (!tmp_cpumask) {
 			scx_bpf_error("Failed to lookup tmp cpumask");
 			return -ENOENT;
 		}
-		scx_bitmap_and(tmp_cpumask, node_mask, tmp_direct_greedy);
+
+		scx_bitmap_and(tmp_cpumask, domc->node_cpumask, tmp_direct_greedy);
 		tmp_direct_greedy = tmp_cpumask;
 	}
 
 	/* Try to find an idle core in the previous and then any domain */
 	if (has_idle_cores) {
-		if (domc && lb_domain->direct_greedy_cpumask) {
-			*cpu = scx_bitmap_pick_idle_cpu(lb_domain->direct_greedy_cpumask,
-						    SCX_PICK_IDLE_CORE);
-			if (*cpu >= 0) {
-				stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
-				return 0;
-			}
+		*cpu = scx_bitmap_pick_idle_cpu(domc->direct_greedy_cpumask,
+					    SCX_PICK_IDLE_CORE);
+		if (*cpu >= 0) {
+			stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
+			return 0;
 		}
 
 		if (direct_greedy_cpumask) {
@@ -407,12 +385,10 @@ int select_cpu_idle_x_numa(struct task_ctx *taskc, u32 prev_cpu, bool has_idle_c
 	/*
 	 * No idle core. Is there any idle CPU?
 	 */
-	if (domc && lb_domain->direct_greedy_cpumask) {
-		*cpu = scx_bitmap_pick_idle_cpu(lb_domain->direct_greedy_cpumask, 0);
-		if (*cpu >= 0) {
-			stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
-			return 0;
-		}
+	*cpu = scx_bitmap_pick_idle_cpu(domc->direct_greedy_cpumask, 0);
+	if (*cpu >= 0) {
+		stat_add(RUSTY_STAT_DIRECT_GREEDY, 1);
+		return 0;
 	}
 
 	if (direct_greedy_cpumask) {
@@ -903,8 +879,8 @@ void BPF_STRUCT_OPS(wd40_set_weight, struct task_struct *p, u32 weight)
 	taskc->weight = weight;
 }
 
-void BPF_STRUCT_OPS(wd40_set_cpumask, struct task_struct *p,
-		    const struct cpumask *cpumask)
+void BPF_STRUCT_OPS(wd40_set_cpumask, struct task_struct *p __arg_trusted,
+		    const struct cpumask *cpumask __arg_trusted)
 {
 	struct task_ctx *taskc;
 
@@ -916,15 +892,11 @@ void BPF_STRUCT_OPS(wd40_set_cpumask, struct task_struct *p,
 		taskc->all_cpus = scx_bitmap_subset_cpumask(all_cpumask, cpumask);
 }
 
-s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init_task, struct task_struct *p,
+s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init_task, struct task_struct *p __arg_trusted,
 		   struct scx_init_task_args *args)
 {
 	u64 now = scx_bpf_now();
-	struct task_struct *p_map;
-	struct bpfmask_wrapper wrapper;
-	struct bpfmask_wrapper *mask_map_value;
 	struct task_ctx *taskc;
-	long ret;
 
 	taskc = (struct task_ctx *)sdt_task_alloc(p);
 	if (!taskc)
@@ -958,14 +930,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init_task, struct task_struct *p,
 void BPF_STRUCT_OPS(wd40_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
-	long ret;
-
 	sdt_task_free(p);
 }
 
 static s32 initialize_cpu(s32 cpu)
 {
 	struct pcpu_ctx *pcpuc = lookup_pcpu_ctx(cpu);
+	dom_ptr domc;
 	u32 i;
 
 	if (!pcpuc)
@@ -973,24 +944,12 @@ static s32 initialize_cpu(s32 cpu)
 
 	pcpuc->dom_rr_cur = cpu;
 	bpf_for(i, 0, nr_doms) {
-		bool in_dom;
-		struct lb_domain *lb_domain;
 
-		lb_domain = lb_domain_get(i);
-		if (!lb_domain)
+		domc = lookup_dom_ctx(i);
+		if (!domc)
 			return -ENOENT;
 
-		bpf_rcu_read_lock();
-		if (!lb_domain->cpumask) {
-			bpf_rcu_read_unlock();
-			scx_bpf_error("Failed to lookup dom node %d cpumask %p",
-				i, &lb_domain->cpumask);
-			return -ENOENT;
-		}
-
-		in_dom = scx_bitmap_test_cpu(cpu, lb_domain->cpumask);
-		bpf_rcu_read_unlock();
-		if (in_dom) {
+		if (scx_bitmap_test_cpu(cpu, domc->cpumask)) {
 			pcpuc->dom_id = i;
 			return 0;
 		}

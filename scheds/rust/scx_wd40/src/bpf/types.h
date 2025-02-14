@@ -68,6 +68,10 @@ struct dom_ctx {
 	u64 dbg_dcycle_printed_at;
 	struct bucket_ctx buckets[LB_LOAD_BUCKETS];
 	struct dom_active_tasks active_tasks;
+
+	scx_bitmap_t cpumask;
+	scx_bitmap_t direct_greedy_cpumask;
+	scx_bitmap_t node_cpumask;
 };
 
 struct node_ctx {
