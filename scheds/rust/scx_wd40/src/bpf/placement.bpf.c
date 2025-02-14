@@ -8,10 +8,14 @@
 #include <scx/ravg_impl.bpf.h>
 #include <lib/sdt_task.h>
 
+#include "cpumask.h"
+
 #include "intf.h"
 #include "types.h"
 #include "lb_domain.h"
 #include "deadline.h"
+
+#include "percpu.h"
 
 #include <scx/bpf_arena_common.h>
 #include <errno.h>
@@ -47,26 +51,25 @@ static u64 node_dom_mask(u32 node_id)
 static void task_set_preferred_mempolicy_dom_mask(struct task_struct *p,
 						  struct task_ctx *taskc)
 {
-	struct bpf_cpumask *p_cpumask;
 	u32 node_id;
 	u32 val = 0;
 	void *mask;
 
 	taskc->preferred_dom_mask = 0;
 
-	p_cpumask = lookup_task_bpfmask(p);
-
 	if (!mempolicy_affinity || !bpf_core_field_exists(p->mempolicy) ||
-	    !p->mempolicy || !p_cpumask)
+	    !p->mempolicy)
 		return;
 
 	if (!(p->mempolicy->mode & (MPOL_BIND|MPOL_PREFERRED|MPOL_PREFERRED_MANY)))
 		return;
 
-	// MPOL_BIND and MPOL_PREFERRED_MANY use the home_node field on the
-	// mempolicy struct, so use that for now. In the future the memory
-	// usage of the node can be checked to follow the same algorithm for
-	// where memory allocations will occur.
+	/*
+	 * MPOL_BIND and MPOL_PREFERRED_MANY use the home_node field on the
+	 * mempolicy struct, so use that for now. In the future the memory
+	 * usage of the node can be checked to follow the same algorithm for
+	 * where memory allocations will occur.
+	 */
 	if ((int)p->mempolicy->home_node >= 0) {
 		taskc->preferred_dom_mask =
 			node_dom_mask((u32)p->mempolicy->home_node);
@@ -92,6 +95,7 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 {
 	s32 cpu = bpf_get_smp_processor_id();
 	u32 first_dom = NO_DOM_FOUND, dom, preferred_dom = NO_DOM_FOUND;
+	dom_ptr domc;
 
 	if (cpu < 0 || cpu >= MAX_CPUS)
 		return NO_DOM_FOUND;
@@ -102,8 +106,13 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 	task_set_preferred_mempolicy_dom_mask(p, taskc);
 	bpf_repeat(nr_doms) {
 		dom = (dom + 1) % nr_doms;
+		domc = lookup_dom_ctx(dom);
+		if (!domc) {
+			scx_bpf_error("dom%d not found", dom);
+			continue;
+		}
 
-		if (cpumask_intersects_domain(cpumask, dom)) {
+		if (scx_bitmap_intersects_cpumask(domc->cpumask, cpumask)) {
 			taskc->dom_mask |= 1LLU << dom;
 			/*
 			 * The starting point is round-robin'd and the first
@@ -124,15 +133,14 @@ static u32 task_pick_domain(struct task_ctx *taskc, struct task_struct *p,
 	return preferred_dom != NO_DOM_FOUND ? preferred_dom: first_dom;
 }
 
-__hidden
+__weak
 bool task_set_domain(struct task_struct *p __arg_trusted,
 			    u32 new_dom_id, bool init_dsq_vtime)
 {
+	const struct cpumask *cpumask = p->cpus_ptr;
 	dom_ptr old_domc, new_domc;
-	struct bpf_cpumask *d_cpumask, *t_cpumask;
-	struct lb_domain *new_lb_domain;
+	scx_bitmap_t t_cpumask;
 	struct task_ctx *taskc;
-	u32 old_dom_id;
 
 	taskc = lookup_task_ctx_mask(p, &t_cpumask);
 	if (!taskc || !t_cpumask) {
@@ -140,13 +148,12 @@ bool task_set_domain(struct task_struct *p __arg_trusted,
 		return false;
 	}
 
-	old_dom_id = taskc->target_dom;
-	old_domc = lookup_dom_ctx(old_dom_id);
+	old_domc = lookup_dom_ctx(taskc->target_dom);
 	if (!old_domc)
 		return false;
 
 	if (new_dom_id == NO_DOM_FOUND) {
-		bpf_cpumask_clear(t_cpumask);
+		scx_bitmap_clear(t_cpumask);
 		return !(p->scx.flags & SCX_TASK_QUEUED);
 	}
 
@@ -154,25 +161,13 @@ bool task_set_domain(struct task_struct *p __arg_trusted,
 	if (!new_domc)
 		return false;
 
-	new_lb_domain = lb_domain_get(new_dom_id);
-	if (!new_lb_domain) {
-		scx_bpf_error("no lb_domain for dom%d\n", new_dom_id);
-		return false;
-	}
-
-	d_cpumask = new_lb_domain->cpumask;
-	if (!d_cpumask) {
-		scx_bpf_error("Failed to get dom%u cpumask kptr",
-			      new_dom_id);
-		return false;
-	}
-
+	bpf_rcu_read_lock();
 
 	/*
 	 * set_cpumask might have happened between userspace requesting LB and
 	 * here and @p might not be able to run in @dom_id anymore. Verify.
 	 */
-	if (bpf_cpumask_intersects(cast_mask(d_cpumask), p->cpus_ptr)) {
+	if (scx_bitmap_intersects_cpumask(new_domc->cpumask, p->cpus_ptr)) {
 		u64 now = scx_bpf_now();
 
 		if (!init_dsq_vtime)
@@ -183,15 +178,17 @@ bool task_set_domain(struct task_struct *p __arg_trusted,
 
 		p->scx.dsq_vtime = dom_min_vruntime(new_domc);
 		init_vtime(p, taskc);
-		bpf_cpumask_and(t_cpumask, cast_mask(d_cpumask), p->cpus_ptr);
+		scx_bitmap_and_cpumask(t_cpumask, new_domc->cpumask, p->cpus_ptr);
 	}
+
+	bpf_rcu_read_unlock();
 
 	return taskc->target_dom == new_dom_id;
 }
 
 __hidden
 void task_pick_and_set_domain(struct task_ctx *taskc,
-				     struct task_struct *p,
+				     struct task_struct *p __arg_trusted,
 				     const struct cpumask *cpumask,
 				     bool init_dsq_vtime)
 {

@@ -43,6 +43,8 @@ struct task_ctx {
 	u32 pid;
 
 	struct ravg_data dcyc_rd;
+
+	scx_bitmap_t cpumask;
 };
 
 typedef struct task_ctx __arena *task_ptr;
@@ -66,10 +68,14 @@ struct dom_ctx {
 	u64 dbg_dcycle_printed_at;
 	struct bucket_ctx buckets[LB_LOAD_BUCKETS];
 	struct dom_active_tasks active_tasks;
+
+	scx_bitmap_t cpumask;
+	scx_bitmap_t direct_greedy_cpumask;
+	scx_bitmap_t node_cpumask;
 };
 
 struct node_ctx {
-	struct bpf_cpumask __kptr *cpumask;
+	scx_bitmap_t cpumask;
 };
 
 #endif /* __TYPES_H */

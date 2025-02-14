@@ -8,9 +8,12 @@
 #include <scx/ravg_impl.bpf.h>
 #include <lib/sdt_task.h>
 
+#include "cpumask.h"
+
 #include "intf.h"
 #include "types.h"
 #include "lb_domain.h"
+#include "percpu.h"
 
 #include <scx/bpf_arena_common.h>
 #include <errno.h>
@@ -23,6 +26,14 @@ const volatile u32 wd40_perf_mode;
 
 struct lock_wrapper {
 	struct bpf_spin_lock lock;
+};
+
+struct lb_domain {
+	union sdt_id		tid;
+
+	struct bpf_spin_lock vtime_lock;
+
+	dom_ptr domc;
 };
 
 struct {
@@ -55,7 +66,7 @@ struct {
 volatile dom_ptr dom_ctxs[MAX_DOMS];
 struct sdt_allocator lb_domain_allocator;
 
-__hidden
+__weak
 int lb_domain_init(void)
 {
 	return sdt_alloc_init(&lb_domain_allocator, sizeof(struct dom_ctx));
@@ -82,6 +93,28 @@ dom_ptr lb_domain_alloc(u32 dom_id)
 	}
 
 	domc = lb_domain.domc;
+	domc->id = dom_id;
+
+	domc->cpumask = scx_bitmap_alloc();
+	if (!domc->cpumask) {
+		lb_domain_free(domc);
+		return NULL;
+	}
+
+	domc->direct_greedy_cpumask = scx_bitmap_alloc();
+	if (!domc->cpumask) {
+		scx_bitmap_free(domc->cpumask);
+		lb_domain_free(domc);
+		return NULL;
+	}
+
+	domc->node_cpumask = scx_bitmap_alloc();
+	if (ret) {
+		scx_bitmap_free(domc->direct_greedy_cpumask);
+		scx_bitmap_free(domc->cpumask);
+		lb_domain_free(domc);
+		return NULL;
+	}
 
 	return domc;
 }
@@ -97,6 +130,10 @@ void lb_domain_free(dom_ptr domc)
 	lb_domain = bpf_map_lookup_elem(&lb_domain_map, &key);
 	if (!lb_domain)
 		return;
+
+	scx_bitmap_free(domc->node_cpumask);
+	scx_bitmap_free(domc->direct_greedy_cpumask);
+	scx_bitmap_free(domc->cpumask);
 
 	sdt_free_idx(&lb_domain_allocator, lb_domain->tid.idx);
 	lb_domain->domc = NULL;
@@ -219,7 +256,8 @@ void dom_dcycle_adj(dom_ptr domc, u32 weight, u64 now, bool runnable)
 }
 
 
-static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
+
+static int dom_dcycle_xfer_task(struct task_struct *p __arg_trusted, task_ptr taskc,
 			         dom_ptr from_domc,
 				 dom_ptr to_domc, u64 now)
 {
@@ -232,12 +270,12 @@ static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
 	from_lockw = lookup_dom_bkt_lock(from_domc->id, weight);
 	to_lockw = lookup_dom_bkt_lock(to_domc->id, weight);
 	if (!from_lockw || !to_lockw)
-		return;
+		return 0;
 
 	from_bucket = lookup_dom_bucket(from_domc, weight, &idx);
 	to_bucket = lookup_dom_bucket(to_domc, weight, &idx);
 	if (!from_bucket || !to_bucket)
-		return;
+		return 0;
 
 	/*
 	 * @p is moving from @from_domc to @to_domc. Its duty cycle
@@ -246,8 +284,8 @@ static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
 	 * duty cycle from BPF. Load is computed in user space when performing
 	 * load balancing.
 	 */
-	ravg_accumulate(&taskc->dcyc_rd, taskc->runnable, now, load_half_life);
-	task_dcyc_rd = taskc->dcyc_rd;
+	ravg_accumulate(&task_dcyc_rd,  taskc->runnable, now, load_half_life);
+	taskc->dcyc_rd = taskc->dcyc_rd;
 	if (debug >= 2)
 		task_dcycle = ravg_read(&task_dcyc_rd, now, load_half_life);
 
@@ -291,22 +329,21 @@ static void dom_dcycle_xfer_task(struct task_struct *p, struct task_ctx *taskc,
 			   from_dcycle[1] >> RAVG_FRAC_BITS,
 			   to_dcycle[0] >> RAVG_FRAC_BITS,
 			   to_dcycle[1] >> RAVG_FRAC_BITS);
+
+	return 0;
 }
 
 int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now)
 {
 	dom_ptr from_domc, to_domc;
-	struct task_ctx *taskc;
+	task_ptr taskc;
 
-	taskc = lookup_task_ctx(p);
+	taskc = (task_ptr)sdt_task_data(p);
 	if (!taskc)
 		return 0;
 
 	from_domc = taskc->domc;
 	to_domc = lookup_dom_ctx(new_dom_id);
-
-	if (!from_domc || !to_domc || !taskc)
-		return 0;
 
 	dom_dcycle_xfer_task(p, taskc, from_domc, to_domc, now);
 	return 0;
@@ -316,7 +353,7 @@ __weak
 s32 create_node(u32 node_id)
 {
 	u32 cpu;
-	struct bpf_cpumask *cpumask;
+	scx_bitmap_t cpumask;
 	struct node_ctx *nodec;
 	s32 ret;
 
@@ -327,7 +364,7 @@ s32 create_node(u32 node_id)
 		return -ENOENT;
 	}
 
-	ret = create_save_cpumask(&nodec->cpumask);
+	ret = create_save_scx_bitmap(&nodec->cpumask);
 	if (ret)
 		return ret;
 
@@ -350,7 +387,7 @@ s32 create_node(u32 node_id)
 		}
 
 		if (*nmask & (1LLU << (cpu % 64)))
-			bpf_cpumask_set_cpu(cpu, cpumask);
+			scx_bitmap_set_cpu(cpu, cpumask);
 	}
 
 	bpf_rcu_read_unlock();
@@ -362,7 +399,7 @@ __weak s32 create_dom(u32 dom_id)
 {
 	dom_ptr domc;
 	struct node_ctx *nodec;
-	struct bpf_cpumask *dom_mask, *node_mask, *all_mask;
+	scx_bitmap_t all_mask;
 	struct lb_domain *lb_domain;
 	u32 cpu, node_id;
 	int perf;
@@ -395,25 +432,11 @@ __weak s32 create_dom(u32 dom_id)
 		return ret;
 	}
 
-	domc->id = dom_id;
+	bpf_printk("Created domain %d (%p)", dom_id, domc->cpumask);
 
-	ret = create_save_cpumask(&lb_domain->cpumask);
-	if (ret)
-		return ret;
-
-	bpf_printk("Created domain %d (%p)", dom_id, &lb_domain->cpumask);
-	if (!lb_domain->cpumask)
-		scx_bpf_error("NULL");
+	all_mask = all_cpumask;
 
 	bpf_rcu_read_lock();
-	dom_mask = lb_domain->cpumask;
-	all_mask = all_cpumask;
-	if (!dom_mask || !all_mask) {
-		bpf_rcu_read_unlock();
-		scx_bpf_error("Could not find cpumask");
-		return -ENOENT;
-	}
-
 	bpf_for(cpu, 0, MAX_CPUS) {
 		const volatile u64 *dmask;
 		bool cpu_in_domain;
@@ -429,8 +452,8 @@ __weak s32 create_dom(u32 dom_id)
 		if (!cpu_in_domain)
 			continue;
 
-		bpf_cpumask_set_cpu(cpu, dom_mask);
-		bpf_cpumask_set_cpu(cpu, all_mask);
+		scx_bitmap_set_cpu(cpu, domc->cpumask);
+		scx_bitmap_set_cpu(cpu, all_mask);
 
 		/*
 		 * Perf has to be within [0, 1024]. Set it regardless
@@ -444,9 +467,6 @@ __weak s32 create_dom(u32 dom_id)
 	if (ret)
 		return ret;
 
-	ret = create_save_cpumask(&lb_domain->direct_greedy_cpumask);
-	if (ret)
-		return ret;
 
 	nodec = bpf_map_lookup_elem(&node_data, &node_id);
 	if (!nodec) {
@@ -454,20 +474,8 @@ __weak s32 create_dom(u32 dom_id)
 		scx_bpf_error("No node%u", node_id);
 		return -ENOENT;
 	}
-	ret = create_save_cpumask(&lb_domain->node_cpumask);
-	if (ret)
-		return ret;
 
-	bpf_rcu_read_lock();
-	node_mask = nodec->cpumask;
-	dom_mask = lb_domain->node_cpumask;
-	if (!node_mask || !dom_mask) {
-		bpf_rcu_read_unlock();
-		scx_bpf_error("cpumask lookup failed");
-		return -ENOENT;
-	}
-	bpf_cpumask_copy(dom_mask, cast_mask(node_mask));
-	bpf_rcu_read_unlock();
+	scx_bitmap_copy(domc->node_cpumask, nodec->cpumask);
 
 	return 0;
 }
