@@ -341,8 +341,8 @@ int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now)
 __weak
 s32 create_node(u32 node_id)
 {
-	u32 cpu;
 	s32 ret;
+	int i;
 
 	if (node_id >= MAX_NUMA_NODES) {
 		scx_bpf_error("Invalid node%u", node_id);
@@ -353,18 +353,8 @@ s32 create_node(u32 node_id)
 	if (ret)
 		return ret;
 
-	bpf_for(cpu, 0, MAX_CPUS) {
-		const volatile u64 *nmask;
-
-		nmask = MEMBER_VPTR(numa_cpumasks, [node_id][cpu / 64]);
-		if (!nmask) {
-			scx_bpf_error("array index error");
-			ret = -ENOENT;
-			break;
-		}
-
-		if (*nmask & (1LLU << (cpu % 64)))
-			scx_bitmap_set_cpu(cpu, node_data[node_id]);
+	bpf_for (i, 0, MAX_CPUS / 64) {
+		node_data[node_id]->bits[i] = numa_cpumasks[node_id][i];
 	}
 
 	return ret;
@@ -373,10 +363,8 @@ s32 create_node(u32 node_id)
 
 __weak s32 create_dom(u32 dom_id)
 {
+	u32 cpu, node_id, i;
 	dom_ptr domc;
-	scx_bitmap_t all_mask;
-	struct lb_domain *lb_domain;
-	u32 cpu, node_id;
 	s32 ret;
 
 	if (dom_id >= MAX_DOMS) {
@@ -393,13 +381,6 @@ __weak s32 create_dom(u32 dom_id)
 	dom_ctxs[dom_id] = domc;
 	cast_user(dom_ctxs[dom_id]);
 
-	lb_domain = lb_domain_get(dom_id);
-	if (!lb_domain) {
-		scx_bpf_error("could not retrieve dom%d data\n", dom_id);
-		lb_domain_free(domc);
-		return -EINVAL;
-	}
-
 	ret = scx_bpf_create_dsq(dom_id, node_id);
 	if (ret < 0) {
 		scx_bpf_error("Failed to create dsq %u (%d)", dom_id, ret);
@@ -408,31 +389,11 @@ __weak s32 create_dom(u32 dom_id)
 
 	bpf_printk("Created domain %d (%p)", dom_id, domc->cpumask);
 
-	all_mask = all_cpumask;
-
-	bpf_rcu_read_lock();
-	bpf_for(cpu, 0, MAX_CPUS) {
-		const volatile u64 *dmask;
-		bool cpu_in_domain;
-
-		dmask = MEMBER_VPTR(dom_cpumasks, [dom_id][cpu / 64]);
-		if (!dmask) {
-			scx_bpf_error("array index error");
-			ret = -ENOENT;
-			break;
-		}
-
-		cpu_in_domain = *dmask & (1LLU << (cpu % 64));
-		if (!cpu_in_domain)
-			continue;
-
-		scx_bitmap_set_cpu(cpu, domc->cpumask);
-		scx_bitmap_set_cpu(cpu, all_mask);
-
+	bpf_for (i, 0, MAX_CPUS / 64) {
+		domc->cpumask->bits[i] = dom_cpumasks[dom_id][i];
 	}
-	bpf_rcu_read_unlock();
-	if (ret)
-		return ret;
+
+	scx_bitmap_or(all_cpumask, all_cpumask, domc->cpumask);
 
 	if (node_id >= MAX_NUMA_NODES) {
 		scx_bpf_error("Invalid node%u", node_id);

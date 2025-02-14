@@ -33,6 +33,7 @@ bool scx_bitmap_test_cpu(u32 cpu, scx_bitmap_t __arg_arena mask);
 
 int scx_bitmap_clear(scx_bitmap_t __arg_arena mask);
 int scx_bitmap_and(scx_bitmap_t __arg_arena dst, scx_bitmap_t __arg_arena src1, scx_bitmap_t __arg_arena src2);
+int scx_bitmap_or(scx_bitmap_t __arg_arena dst, scx_bitmap_t __arg_arena src1, scx_bitmap_t __arg_arena src2);
 bool scx_bitmap_empty(scx_bitmap_t __arg_arena mask);
 int scx_bitmap_copy(scx_bitmap_t __arg_arena dst, scx_bitmap_t __arg_arena src);
 
