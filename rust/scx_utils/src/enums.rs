@@ -12,6 +12,14 @@ pub struct Enums {
     pub SCX_OPS_NAME_LEN: u64,
     pub SCX_SLICE_DFL: u64,
     pub SCX_SLICE_INF: u64,
+    pub SCX_RQ_ONLINE: u64,
+    pub SCX_RQ_CAN_STOP_TICK: u64,
+    pub SCX_RQ_BAL_PENDING: u64,
+    pub SCX_RQ_BAL_KEEP: u64,
+    pub SCX_RQ_BYPASSING: u64,
+    pub SCX_RQ_CLK_VALID: u64,
+    pub SCX_RQ_IN_WAKEUP: u64,
+    pub SCX_RQ_IN_BALANCE: u64,
     pub SCX_DSQ_FLAG_BUILTIN: u64,
     pub SCX_DSQ_FLAG_LOCAL_ON: u64,
     pub SCX_DSQ_INVALID: u64,
@@ -49,6 +57,14 @@ lazy_static::lazy_static! {
         SCX_OPS_NAME_LEN: read_enum("scx_public_consts","SCX_OPS_NAME_LEN").unwrap(),
         SCX_SLICE_DFL: read_enum("scx_public_consts","SCX_SLICE_DFL").unwrap(),
         SCX_SLICE_INF: read_enum("scx_public_consts","SCX_SLICE_INF").unwrap(),
+        SCX_RQ_ONLINE: read_enum("scx_rq_flags","SCX_RQ_ONLINE").unwrap(),
+        SCX_RQ_CAN_STOP_TICK: read_enum("scx_rq_flags","SCX_RQ_CAN_STOP_TICK").unwrap(),
+        SCX_RQ_BAL_PENDING: read_enum("scx_rq_flags","SCX_RQ_BAL_PENDING").unwrap(),
+        SCX_RQ_BAL_KEEP: read_enum("scx_rq_flags","SCX_RQ_BAL_KEEP").unwrap(),
+        SCX_RQ_BYPASSING: read_enum("scx_rq_flags","SCX_RQ_BYPASSING").unwrap(),
+        SCX_RQ_CLK_VALID: read_enum("scx_rq_flags","SCX_RQ_CLK_VALID").unwrap(),
+        SCX_RQ_IN_WAKEUP: read_enum("scx_rq_flags","SCX_RQ_IN_WAKEUP").unwrap(),
+        SCX_RQ_IN_BALANCE: read_enum("scx_rq_flags","SCX_RQ_IN_BALANCE").unwrap(),
         SCX_DSQ_FLAG_BUILTIN: read_enum("scx_dsq_id_flags","SCX_DSQ_FLAG_BUILTIN").unwrap(),
         SCX_DSQ_FLAG_LOCAL_ON: read_enum("scx_dsq_id_flags","SCX_DSQ_FLAG_LOCAL_ON").unwrap(),
         SCX_DSQ_INVALID: read_enum("scx_dsq_id_flags","SCX_DSQ_INVALID").unwrap(),
@@ -89,6 +105,14 @@ macro_rules! import_enums {
         $skel.maps.rodata_data.__SCX_OPS_NAME_LEN = scx_enums.SCX_OPS_NAME_LEN;
         $skel.maps.rodata_data.__SCX_SLICE_DFL = scx_enums.SCX_SLICE_DFL;
         $skel.maps.rodata_data.__SCX_SLICE_INF = scx_enums.SCX_SLICE_INF;
+        $skel.maps.rodata_data.__SCX_RQ_ONLINE = scx_enums.SCX_RQ_ONLINE;
+        $skel.maps.rodata_data.__SCX_RQ_CAN_STOP_TICK = scx_enums.SCX_RQ_CAN_STOP_TICK;
+        $skel.maps.rodata_data.__SCX_RQ_BAL_PENDING = scx_enums.SCX_RQ_BAL_PENDING;
+        $skel.maps.rodata_data.__SCX_RQ_BAL_KEEP = scx_enums.SCX_RQ_BAL_KEEP;
+        $skel.maps.rodata_data.__SCX_RQ_BYPASSING = scx_enums.SCX_RQ_BYPASSING;
+        $skel.maps.rodata_data.__SCX_RQ_CLK_VALID = scx_enums.SCX_RQ_CLK_VALID;
+        $skel.maps.rodata_data.__SCX_RQ_IN_WAKEUP = scx_enums.SCX_RQ_IN_WAKEUP;
+        $skel.maps.rodata_data.__SCX_RQ_IN_BALANCE = scx_enums.SCX_RQ_IN_BALANCE;
         $skel.maps.rodata_data.__SCX_DSQ_FLAG_BUILTIN = scx_enums.SCX_DSQ_FLAG_BUILTIN;
         $skel.maps.rodata_data.__SCX_DSQ_FLAG_LOCAL_ON = scx_enums.SCX_DSQ_FLAG_LOCAL_ON;
         $skel.maps.rodata_data.__SCX_DSQ_INVALID = scx_enums.SCX_DSQ_INVALID;
