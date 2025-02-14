@@ -119,8 +119,18 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	cur_cpu = cpuc->cpu_id;
 
 	/*
-	 * First check if it is worth to try to kick other CPU
-	 * at the expense of IPI.
+	 * First, test the current CPU since it can skip the expensive IPI.
+	 */
+	if (can_cpu_be_kicked(now, cpuc) &&
+	    bpf_cpumask_test_cpu(cur_cpu, cpumask) &&
+	    can_cpu1_kick_cpu2(&prm_task, &prm_cpus[0], cpuc)) {
+		victim_cpu = &prm_task;
+		goto bingo_out;
+	}
+
+	/*
+	 * If the current CPU cannot be a victim, let's check if it is worth
+	 * to try to kick other CPU at the expense of IPI.
 	 */
 	if (!is_worth_kick_other_task(taskc))
 		goto null_out;
@@ -209,10 +219,30 @@ static bool try_kick_cpu(struct task_struct *p, struct cpu_ctx *cpuc_cur,
 	bool ret = false;
 
 	/*
+	 * If the current CPU is a victim, we just reset the current task's
+	 * time slice as an optimization. Othewise, kick the remote CPU for
+	 * preemption.
+	 *
+	 * Resetting task's time slice does not trigger an immediate
+	 * preemption. However, the cost of self-IPI is prohibitively expensive
+	 * for some scenarios. The actual preemption will happen at the next
+	 * ops.tick().
+	 */
+	if (cpuc_cur->cpu_id == victim_cpuc->cpu_id) {
+		struct task_struct *tsk = bpf_get_current_task_btf();
+
+		/*
+		 * We do not reset to 0 because resetting to 0 would cause the
+		 * zero slice warning, making the sched_ext core force to set
+		 * the time slice to SCX_SLICE_DFL (20 msec). So we reset to 1
+		 * instead.
+		 */
+		tsk->scx.slice = 1;
+	}
+
+	/*
 	 * Kick a victim CPU if it is not victimized yet by another
 	 * concurrent kick task.
-	 *
-	 *
 	 */
 	old = p->scx.slice;
 	if (old != 1 && old != 0)
