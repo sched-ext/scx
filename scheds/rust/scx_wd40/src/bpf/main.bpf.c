@@ -211,24 +211,17 @@ static void refresh_tune_params(void)
 			return;
 
 		if (tune_input.direct_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
-			if (direct_greedy_cpumask)
-				scx_bitmap_set_cpu(cpu, direct_greedy_cpumask);
-			if (domc->direct_greedy_cpumask)
-				scx_bitmap_set_cpu(cpu, domc->direct_greedy_cpumask);
+			scx_bitmap_set_cpu(cpu, direct_greedy_cpumask);
+			scx_bitmap_set_cpu(cpu, domc->direct_greedy_cpumask);
 		} else {
-			if (direct_greedy_cpumask)
-				scx_bitmap_clear_cpu(cpu, direct_greedy_cpumask);
-			if (domc->direct_greedy_cpumask)
-				scx_bitmap_clear_cpu(cpu, domc->direct_greedy_cpumask);
+			scx_bitmap_clear_cpu(cpu, direct_greedy_cpumask);
+			scx_bitmap_clear_cpu(cpu, domc->direct_greedy_cpumask);
 		}
 
-		if (tune_input.kick_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
-			if (kick_greedy_cpumask)
-				scx_bitmap_set_cpu(cpu, kick_greedy_cpumask);
-		} else {
-			if (kick_greedy_cpumask)
-				scx_bitmap_clear_cpu(cpu, kick_greedy_cpumask);
-		}
+		if (tune_input.kick_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64)))
+			scx_bitmap_set_cpu(cpu, kick_greedy_cpumask);
+		else
+			scx_bitmap_clear_cpu(cpu, kick_greedy_cpumask);
 	}
 }
 
@@ -733,9 +726,9 @@ void BPF_STRUCT_OPS(wd40_runnable, struct task_struct *p, u64 enq_flags)
 }
 
 static
-void lb_record_run(struct task_struct *p, dom_ptr domc, task_ptr taskc)
+void lb_record_run(task_ptr taskc)
 {
-	task_ptr usrptr = (task_ptr)sdt_task_data(p);
+	dom_ptr domc = taskc->domc;
 	u32 dap_gen;
 
 	/*
@@ -754,10 +747,7 @@ void lb_record_run(struct task_struct *p, dom_ptr domc, task_ptr taskc)
 			return;
 		}
 
-		usrptr = (task_ptr)sdt_task_data(p);
-		cast_user(usrptr);
-
-		domc->active_tasks.tasks[idx] = usrptr;
+		domc->active_tasks.tasks[idx] = taskc;
 		taskc->dom_active_tasks_gen = dap_gen;
 	}
 }
@@ -767,16 +757,10 @@ void BPF_STRUCT_OPS(wd40_running, struct task_struct *p)
 	task_ptr taskc;
 	dom_ptr domc;
 
-	if (!(taskc = lookup_task_ctx(p)))
-		return;
-
+	taskc = lookup_task_ctx(p);
 	domc = taskc->domc;
-	if (!domc) {
-		scx_bpf_error("Invalid dom ID");
-		return;
-	}
 
-	lb_record_run(p, domc, taskc);
+	lb_record_run(domc);
 
 	if (fifo_sched)
 		return;
@@ -971,6 +955,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init)
 		ret = create_dom(i);
 		if (ret)
 			return ret;
+
+		scx_bitmap_or(all_cpumask, all_cpumask, dom_ctxs[i]->cpumask);
+
 	}
 
 	bpf_for(i, 0, nr_cpu_ids) {

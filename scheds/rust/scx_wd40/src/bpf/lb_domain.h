@@ -24,7 +24,6 @@ extern const volatile u32 nr_doms;
 extern const volatile u32 nr_nodes;
 
 #define lookup_task_ctx(p) ((task_ptr) sdt_task_data(p))
-extern scx_bitmap_t all_cpumask;
 u32 dom_node_id(u32 dom_id);
 void dom_dcycle_adj(dom_ptr domc, u32 weight, u64 now, bool runnable);
 

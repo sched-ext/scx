@@ -393,8 +393,6 @@ __weak s32 create_dom(u32 dom_id)
 		domc->cpumask->bits[i] = dom_cpumasks[dom_id][i];
 	}
 
-	scx_bitmap_or(all_cpumask, all_cpumask, domc->cpumask);
-
 	if (node_id >= MAX_NUMA_NODES) {
 		scx_bpf_error("Invalid node%u", node_id);
 		return -ENOENT;
