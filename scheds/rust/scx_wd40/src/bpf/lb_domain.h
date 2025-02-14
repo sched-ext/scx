@@ -64,8 +64,7 @@ struct task_ctx *lookup_task_ctx_mask(struct task_struct *p, scx_bitmap_t *p_cpu
  */
 struct pcpu_ctx {
 	u32 dom_rr_cur; /* used when scanning other doms */
-	u32 dom_id;
-	struct bpf_cpumask __kptr *bpfmask;
+	dom_ptr domc;
 } __attribute__((aligned(CACHELINE_SIZE)));
 
 extern struct pcpu_ctx pcpu_ctx[MAX_CPUS];

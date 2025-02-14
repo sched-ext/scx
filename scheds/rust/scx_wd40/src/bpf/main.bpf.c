@@ -285,9 +285,7 @@ static s32 try_sync_wakeup(struct task_struct *p, struct task_ctx *taskc,
 	if (!pcpuc)
 		return -ENOENT;
 
-	domc = lookup_dom_ctx(pcpuc->dom_id);
-	if (!domc)
-		return -ENOENT;
+	domc = pcpuc->domc;
 
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 
@@ -960,7 +958,7 @@ static s32 initialize_cpu(s32 cpu)
 			return -ENOENT;
 
 		if (scx_bitmap_test_cpu(cpu, domc->cpumask)) {
-			pcpuc->dom_id = i;
+			pcpuc->domc = domc;
 			return 0;
 		}
 	}

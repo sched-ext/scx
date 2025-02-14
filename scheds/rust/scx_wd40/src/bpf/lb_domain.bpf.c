@@ -363,7 +363,7 @@ s32 create_node(u32 node_id)
 
 __weak s32 create_dom(u32 dom_id)
 {
-	u32 cpu, node_id, i;
+	u32 node_id, i;
 	dom_ptr domc;
 	s32 ret;
 
