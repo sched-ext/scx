@@ -80,6 +80,7 @@ UEI_DEFINE(uei);
 const volatile u32 nr_cpu_ids = 64;	/* !0 for veristat, set during init */
 const volatile u32 cpu_dom_id_map[MAX_CPUS];
 const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
+const volatile u32 wd40_perf_mode;
 
 const volatile bool kthreads_local;
 const volatile bool fifo_sched = false;
@@ -937,10 +938,19 @@ static s32 initialize_cpu(s32 cpu)
 {
 	struct pcpu_ctx *pcpuc = lookup_pcpu_ctx(cpu);
 	dom_ptr domc;
+	int perf;
 	u32 i;
 
 	if (!pcpuc)
 		return -ENOENT;
+
+	/*
+	 * Perf has to be within [0, 1024]. Set it regardless
+	 * of value to clean up any previous settings, since
+	 * it persists even after removing the scheduler.
+	 */
+	perf = min(SCX_CPUPERF_ONE, wd40_perf_mode);
+	scx_bpf_cpuperf_set(cpu, perf);
 
 	pcpuc->dom_rr_cur = cpu;
 	bpf_for(i, 0, nr_doms) {

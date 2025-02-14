@@ -22,7 +22,6 @@
 #include <bpf/bpf_tracing.h>
 
 const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
-const volatile u32 wd40_perf_mode;
 
 struct lock_wrapper {
 	struct bpf_spin_lock lock;
@@ -30,7 +29,6 @@ struct lock_wrapper {
 
 struct lb_domain {
 	union sdt_id		tid;
-
 	struct bpf_spin_lock vtime_lock;
 
 	dom_ptr domc;
@@ -379,7 +377,6 @@ __weak s32 create_dom(u32 dom_id)
 	scx_bitmap_t all_mask;
 	struct lb_domain *lb_domain;
 	u32 cpu, node_id;
-	int perf;
 	s32 ret;
 
 	if (dom_id >= MAX_DOMS) {
@@ -432,13 +429,6 @@ __weak s32 create_dom(u32 dom_id)
 		scx_bitmap_set_cpu(cpu, domc->cpumask);
 		scx_bitmap_set_cpu(cpu, all_mask);
 
-		/*
-		 * Perf has to be within [0, 1024]. Set it regardless
-		 * of value to clean up any previous settings, since
-		 * it persists even after removing the scheduler.
-		 */
-		perf = min(SCX_CPUPERF_ONE, wd40_perf_mode);
-		scx_bpf_cpuperf_set(cpu, perf);
 	}
 	bpf_rcu_read_unlock();
 	if (ret)
