@@ -547,6 +547,10 @@ struct Opts {
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
 
+    /// Maximum task runnable_at delay (in seconds) before antistall turns on
+    #[clap(long, default_value = "3")]
+    antistall_sec: u64,
+
     /// Enable gpu support
     #[clap(long, default_value = "false")]
     enable_gpu_support: bool,
@@ -568,9 +572,9 @@ struct Opts {
     #[clap(long, default_value = "false")]
     netdev_irq_balance: bool,
 
-    /// Maximum task runnable_at delay (in seconds) before antistall turns on
-    #[clap(long, default_value = "3")]
-    antistall_sec: u64,
+    /// Disable queued wakeup optimization.
+    #[clap(long, default_value = "false")]
+    disable_queued_wakeup: bool,
 
     /// Show descriptions for statistics.
     #[clap(long)]
@@ -1717,6 +1721,13 @@ impl<'a> Scheduler<'a> {
 
         // Initialize skel according to @opts.
         skel.struct_ops.layered_mut().exit_dump_len = opts.exit_dump_len;
+
+        if !opts.disable_queued_wakeup {
+            match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
+                0 => info!("Kernel does not support queued wakeup optimization"),
+                v => skel.struct_ops.layered_mut().flags |= v,
+            }
+        }
 
         skel.maps.rodata_data.debug = opts.verbose as u32;
         skel.maps.rodata_data.slice_ns = opts.slice_us * 1000;
