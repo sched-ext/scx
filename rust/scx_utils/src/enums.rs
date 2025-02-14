@@ -12,6 +12,14 @@ pub struct Enums {
     pub SCX_OPS_NAME_LEN: u64,
     pub SCX_SLICE_DFL: u64,
     pub SCX_SLICE_INF: u64,
+    pub SCX_RQ_ONLINE: u64,
+    pub SCX_RQ_CAN_STOP_TICK: u64,
+    pub SCX_RQ_BAL_PENDING: u64,
+    pub SCX_RQ_BAL_KEEP: u64,
+    pub SCX_RQ_BYPASSING: u64,
+    pub SCX_RQ_CLK_VALID: u64,
+    pub SCX_RQ_IN_WAKEUP: u64,
+    pub SCX_RQ_IN_BALANCE: u64,
     pub SCX_DSQ_FLAG_BUILTIN: u64,
     pub SCX_DSQ_FLAG_LOCAL_ON: u64,
     pub SCX_DSQ_INVALID: u64,
@@ -46,39 +54,47 @@ pub struct Enums {
 
 lazy_static::lazy_static! {
     pub static ref scx_enums: Enums = Enums {
-        SCX_OPS_NAME_LEN: read_enum("scx_public_consts","SCX_OPS_NAME_LEN").unwrap(),
-        SCX_SLICE_DFL: read_enum("scx_public_consts","SCX_SLICE_DFL").unwrap(),
-        SCX_SLICE_INF: read_enum("scx_public_consts","SCX_SLICE_INF").unwrap(),
-        SCX_DSQ_FLAG_BUILTIN: read_enum("scx_dsq_id_flags","SCX_DSQ_FLAG_BUILTIN").unwrap(),
-        SCX_DSQ_FLAG_LOCAL_ON: read_enum("scx_dsq_id_flags","SCX_DSQ_FLAG_LOCAL_ON").unwrap(),
-        SCX_DSQ_INVALID: read_enum("scx_dsq_id_flags","SCX_DSQ_INVALID").unwrap(),
-        SCX_DSQ_GLOBAL: read_enum("scx_dsq_id_flags","SCX_DSQ_GLOBAL").unwrap(),
-        SCX_DSQ_LOCAL: read_enum("scx_dsq_id_flags","SCX_DSQ_LOCAL").unwrap(),
-        SCX_DSQ_LOCAL_ON: read_enum("scx_dsq_id_flags","SCX_DSQ_LOCAL_ON").unwrap(),
-        SCX_DSQ_LOCAL_CPU_MASK: read_enum("scx_dsq_id_flags","SCX_DSQ_LOCAL_CPU_MASK").unwrap(),
-        SCX_TASK_QUEUED: read_enum("scx_ent_flags","SCX_TASK_QUEUED").unwrap(),
-        SCX_TASK_RESET_RUNNABLE_AT: read_enum("scx_ent_flags","SCX_TASK_RESET_RUNNABLE_AT").unwrap(),
-        SCX_TASK_DEQD_FOR_SLEEP: read_enum("scx_ent_flags","SCX_TASK_DEQD_FOR_SLEEP").unwrap(),
-        SCX_TASK_STATE_SHIFT: read_enum("scx_ent_flags","SCX_TASK_STATE_SHIFT").unwrap(),
-        SCX_TASK_STATE_BITS: read_enum("scx_ent_flags","SCX_TASK_STATE_BITS").unwrap(),
-        SCX_TASK_STATE_MASK: read_enum("scx_ent_flags","SCX_TASK_STATE_MASK").unwrap(),
-        SCX_TASK_CURSOR: read_enum("scx_ent_flags","SCX_TASK_CURSOR").unwrap(),
-        SCX_TASK_NONE: read_enum("scx_task_state","SCX_TASK_NONE").unwrap(),
-        SCX_TASK_INIT: read_enum("scx_task_state","SCX_TASK_INIT").unwrap(),
-        SCX_TASK_READY: read_enum("scx_task_state","SCX_TASK_READY").unwrap(),
-        SCX_TASK_ENABLED: read_enum("scx_task_state","SCX_TASK_ENABLED").unwrap(),
-        SCX_TASK_NR_STATES: read_enum("scx_task_state","SCX_TASK_NR_STATES").unwrap(),
-        SCX_TASK_DSQ_ON_PRIQ: read_enum("scx_ent_dsq_flags","SCX_TASK_DSQ_ON_PRIQ").unwrap(),
-        SCX_KICK_IDLE: read_enum("scx_kick_flags","SCX_KICK_IDLE").unwrap(),
-        SCX_KICK_PREEMPT: read_enum("scx_kick_flags","SCX_KICK_PREEMPT").unwrap(),
-        SCX_KICK_WAIT: read_enum("scx_kick_flags","SCX_KICK_WAIT").unwrap(),
-        SCX_ENQ_WAKEUP: read_enum("scx_enq_flags","SCX_ENQ_WAKEUP").unwrap(),
-        SCX_ENQ_HEAD: read_enum("scx_enq_flags","SCX_ENQ_HEAD").unwrap(),
-        SCX_ENQ_PREEMPT: read_enum("scx_enq_flags","SCX_ENQ_PREEMPT").unwrap(),
-        SCX_ENQ_REENQ: read_enum("scx_enq_flags","SCX_ENQ_REENQ").unwrap(),
-        SCX_ENQ_LAST: read_enum("scx_enq_flags","SCX_ENQ_LAST").unwrap(),
-        SCX_ENQ_CLEAR_OPSS: read_enum("scx_enq_flags","SCX_ENQ_CLEAR_OPSS").unwrap(),
-        SCX_ENQ_DSQ_PRIQ: read_enum("scx_enq_flags","SCX_ENQ_DSQ_PRIQ").unwrap(),
+        SCX_OPS_NAME_LEN: read_enum("scx_public_consts","SCX_OPS_NAME_LEN").unwrap_or(0),
+        SCX_SLICE_DFL: read_enum("scx_public_consts","SCX_SLICE_DFL").unwrap_or(0),
+        SCX_SLICE_INF: read_enum("scx_public_consts","SCX_SLICE_INF").unwrap_or(0),
+        SCX_RQ_ONLINE: read_enum("scx_rq_flags","SCX_RQ_ONLINE").unwrap_or(0),
+        SCX_RQ_CAN_STOP_TICK: read_enum("scx_rq_flags","SCX_RQ_CAN_STOP_TICK").unwrap_or(0),
+        SCX_RQ_BAL_PENDING: read_enum("scx_rq_flags","SCX_RQ_BAL_PENDING").unwrap_or(0),
+        SCX_RQ_BAL_KEEP: read_enum("scx_rq_flags","SCX_RQ_BAL_KEEP").unwrap_or(0),
+        SCX_RQ_BYPASSING: read_enum("scx_rq_flags","SCX_RQ_BYPASSING").unwrap_or(0),
+        SCX_RQ_CLK_VALID: read_enum("scx_rq_flags","SCX_RQ_CLK_VALID").unwrap_or(0),
+        SCX_RQ_IN_WAKEUP: read_enum("scx_rq_flags","SCX_RQ_IN_WAKEUP").unwrap_or(0),
+        SCX_RQ_IN_BALANCE: read_enum("scx_rq_flags","SCX_RQ_IN_BALANCE").unwrap_or(0),
+        SCX_DSQ_FLAG_BUILTIN: read_enum("scx_dsq_id_flags","SCX_DSQ_FLAG_BUILTIN").unwrap_or(0),
+        SCX_DSQ_FLAG_LOCAL_ON: read_enum("scx_dsq_id_flags","SCX_DSQ_FLAG_LOCAL_ON").unwrap_or(0),
+        SCX_DSQ_INVALID: read_enum("scx_dsq_id_flags","SCX_DSQ_INVALID").unwrap_or(0),
+        SCX_DSQ_GLOBAL: read_enum("scx_dsq_id_flags","SCX_DSQ_GLOBAL").unwrap_or(0),
+        SCX_DSQ_LOCAL: read_enum("scx_dsq_id_flags","SCX_DSQ_LOCAL").unwrap_or(0),
+        SCX_DSQ_LOCAL_ON: read_enum("scx_dsq_id_flags","SCX_DSQ_LOCAL_ON").unwrap_or(0),
+        SCX_DSQ_LOCAL_CPU_MASK: read_enum("scx_dsq_id_flags","SCX_DSQ_LOCAL_CPU_MASK").unwrap_or(0),
+        SCX_TASK_QUEUED: read_enum("scx_ent_flags","SCX_TASK_QUEUED").unwrap_or(0),
+        SCX_TASK_RESET_RUNNABLE_AT: read_enum("scx_ent_flags","SCX_TASK_RESET_RUNNABLE_AT").unwrap_or(0),
+        SCX_TASK_DEQD_FOR_SLEEP: read_enum("scx_ent_flags","SCX_TASK_DEQD_FOR_SLEEP").unwrap_or(0),
+        SCX_TASK_STATE_SHIFT: read_enum("scx_ent_flags","SCX_TASK_STATE_SHIFT").unwrap_or(0),
+        SCX_TASK_STATE_BITS: read_enum("scx_ent_flags","SCX_TASK_STATE_BITS").unwrap_or(0),
+        SCX_TASK_STATE_MASK: read_enum("scx_ent_flags","SCX_TASK_STATE_MASK").unwrap_or(0),
+        SCX_TASK_CURSOR: read_enum("scx_ent_flags","SCX_TASK_CURSOR").unwrap_or(0),
+        SCX_TASK_NONE: read_enum("scx_task_state","SCX_TASK_NONE").unwrap_or(0),
+        SCX_TASK_INIT: read_enum("scx_task_state","SCX_TASK_INIT").unwrap_or(0),
+        SCX_TASK_READY: read_enum("scx_task_state","SCX_TASK_READY").unwrap_or(0),
+        SCX_TASK_ENABLED: read_enum("scx_task_state","SCX_TASK_ENABLED").unwrap_or(0),
+        SCX_TASK_NR_STATES: read_enum("scx_task_state","SCX_TASK_NR_STATES").unwrap_or(0),
+        SCX_TASK_DSQ_ON_PRIQ: read_enum("scx_ent_dsq_flags","SCX_TASK_DSQ_ON_PRIQ").unwrap_or(0),
+        SCX_KICK_IDLE: read_enum("scx_kick_flags","SCX_KICK_IDLE").unwrap_or(0),
+        SCX_KICK_PREEMPT: read_enum("scx_kick_flags","SCX_KICK_PREEMPT").unwrap_or(0),
+        SCX_KICK_WAIT: read_enum("scx_kick_flags","SCX_KICK_WAIT").unwrap_or(0),
+        SCX_ENQ_WAKEUP: read_enum("scx_enq_flags","SCX_ENQ_WAKEUP").unwrap_or(0),
+        SCX_ENQ_HEAD: read_enum("scx_enq_flags","SCX_ENQ_HEAD").unwrap_or(0),
+        SCX_ENQ_PREEMPT: read_enum("scx_enq_flags","SCX_ENQ_PREEMPT").unwrap_or(0),
+        SCX_ENQ_REENQ: read_enum("scx_enq_flags","SCX_ENQ_REENQ").unwrap_or(0),
+        SCX_ENQ_LAST: read_enum("scx_enq_flags","SCX_ENQ_LAST").unwrap_or(0),
+        SCX_ENQ_CLEAR_OPSS: read_enum("scx_enq_flags","SCX_ENQ_CLEAR_OPSS").unwrap_or(0),
+        SCX_ENQ_DSQ_PRIQ: read_enum("scx_enq_flags","SCX_ENQ_DSQ_PRIQ").unwrap_or(0),
     };
 }
 
@@ -89,6 +105,14 @@ macro_rules! import_enums {
         $skel.maps.rodata_data.__SCX_OPS_NAME_LEN = scx_enums.SCX_OPS_NAME_LEN;
         $skel.maps.rodata_data.__SCX_SLICE_DFL = scx_enums.SCX_SLICE_DFL;
         $skel.maps.rodata_data.__SCX_SLICE_INF = scx_enums.SCX_SLICE_INF;
+        $skel.maps.rodata_data.__SCX_RQ_ONLINE = scx_enums.SCX_RQ_ONLINE;
+        $skel.maps.rodata_data.__SCX_RQ_CAN_STOP_TICK = scx_enums.SCX_RQ_CAN_STOP_TICK;
+        $skel.maps.rodata_data.__SCX_RQ_BAL_PENDING = scx_enums.SCX_RQ_BAL_PENDING;
+        $skel.maps.rodata_data.__SCX_RQ_BAL_KEEP = scx_enums.SCX_RQ_BAL_KEEP;
+        $skel.maps.rodata_data.__SCX_RQ_BYPASSING = scx_enums.SCX_RQ_BYPASSING;
+        $skel.maps.rodata_data.__SCX_RQ_CLK_VALID = scx_enums.SCX_RQ_CLK_VALID;
+        $skel.maps.rodata_data.__SCX_RQ_IN_WAKEUP = scx_enums.SCX_RQ_IN_WAKEUP;
+        $skel.maps.rodata_data.__SCX_RQ_IN_BALANCE = scx_enums.SCX_RQ_IN_BALANCE;
         $skel.maps.rodata_data.__SCX_DSQ_FLAG_BUILTIN = scx_enums.SCX_DSQ_FLAG_BUILTIN;
         $skel.maps.rodata_data.__SCX_DSQ_FLAG_LOCAL_ON = scx_enums.SCX_DSQ_FLAG_LOCAL_ON;
         $skel.maps.rodata_data.__SCX_DSQ_INVALID = scx_enums.SCX_DSQ_INVALID;

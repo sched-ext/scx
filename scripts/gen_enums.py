@@ -16,6 +16,15 @@ enums = [
             ("scx_public_consts", "SCX_SLICE_DFL"),
             ("scx_public_consts", "SCX_SLICE_INF"),
 
+            ("scx_rq_flags", "SCX_RQ_ONLINE"),
+            ("scx_rq_flags", "SCX_RQ_CAN_STOP_TICK"),
+            ("scx_rq_flags", "SCX_RQ_BAL_PENDING"),
+            ("scx_rq_flags", "SCX_RQ_BAL_KEEP"),
+            ("scx_rq_flags", "SCX_RQ_BYPASSING"),
+            ("scx_rq_flags", "SCX_RQ_CLK_VALID"),
+            ("scx_rq_flags", "SCX_RQ_IN_WAKEUP"),
+            ("scx_rq_flags", "SCX_RQ_IN_BALANCE"),
+
             ("scx_dsq_id_flags", "SCX_DSQ_FLAG_BUILTIN"),
             ("scx_dsq_id_flags", "SCX_DSQ_FLAG_LOCAL_ON"),
             ("scx_dsq_id_flags", "SCX_DSQ_INVALID"),
@@ -93,7 +102,7 @@ def gen_enums_rs():
         f.write("lazy_static::lazy_static! {\n")
         f.write("    pub static ref scx_enums: Enums = Enums {\n")
         for kind, symbol in enums:
-            f.write("        {}: read_enum(\"{}\",\"{}\").unwrap(),\n".format(symbol, kind, symbol))
+            f.write("        {}: read_enum(\"{}\",\"{}\").unwrap_or(0),\n".format(symbol, kind, symbol))
         f.write("    };\n")
         f.write("}\n\n")
 
