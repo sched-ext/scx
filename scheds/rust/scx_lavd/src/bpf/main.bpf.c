@@ -975,6 +975,8 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 {
 	bool found_idle = false;
 	struct task_ctx *taskc;
+	struct cpu_ctx *cpuc;
+	u64 dsq_id;
 	s32 cpu_id;
 
 	taskc = get_task_ctx(p);
@@ -989,13 +991,22 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	cpu_id = find_idle_cpu(p, taskc, prev_cpu, wake_flags, true, &found_idle);
 	if (found_idle) {
 		/*
-		 * If there is an idle cpu,
+		 * If there is an idle cpu and its associated DSQ is empty,
 		 * disptach the task to the idle cpu right now.
 		 */
-		p->scx.dsq_vtime = calc_when_to_run(p, taskc);
-		p->scx.slice = calc_time_slice(p, taskc);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
-		return cpu_id;
+		cpuc = get_cpu_ctx_id(cpu_id);
+		if (!cpuc) {
+			scx_bpf_error("Failed to look up cpu context context");
+			return cpu_id;
+		}
+		dsq_id = cpuc->cpdom_id;
+
+		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
+			p->scx.dsq_vtime = calc_when_to_run(p, taskc);
+			p->scx.slice = calc_time_slice(p, taskc);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
+			return cpu_id;
+		}
 	}
 
 	/*
