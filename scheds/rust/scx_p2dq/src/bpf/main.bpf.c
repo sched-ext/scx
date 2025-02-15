@@ -40,7 +40,9 @@ const volatile u32 nr_dsqs_per_llc = 3;
 const volatile u64 dsq_shift = 2;
 const volatile int init_dsq_index = 0;
 const volatile u64 min_slice_us = 100;
+const volatile u32 interactive_ratio = 10;
 
+const volatile bool autoslice = true;
 const volatile bool interactive_sticky = false;
 const volatile bool keep_running_enabled = true;
 const volatile bool eager_load_balance = true;
@@ -56,12 +58,18 @@ u64 big_core_ids[MAX_CPUS];
 u64 dsq_time_slices[MAX_DSQS_PER_LLC];
 
 u64 max_exec_ns;
+u64 min_slice_ns = 500;
 u32 sched_mode = MODE_PERFORMANCE;
 
 
 private(A) struct bpf_cpumask __kptr *all_cpumask;
 private(A) struct bpf_cpumask __kptr *big_cpumask;
 
+
+static u64 max(u64 a, u64 b)
+{
+	return a >= b ? a : b;
+}
 
 static __always_inline u64 dsq_time_slice(int dsq_id)
 {
@@ -73,7 +81,7 @@ static __always_inline u64 dsq_time_slice(int dsq_id)
 }
 
 struct p2dq_timer p2dq_timers[MAX_TIMERS] = {
-	{500LLU * NSEC_PER_MSEC, CLOCK_BOOTTIME, 0},
+	{250LLU * NSEC_PER_MSEC, CLOCK_BOOTTIME, 0},
 };
 
 struct timer_wrapper {
@@ -115,7 +123,7 @@ static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 
 static __always_inline u64 cpu_dsq_id(int dsq_index, struct cpu_ctx *cpuc) {
 	if (dsq_index < 0 || dsq_index > nr_dsqs_per_llc || dsq_index >= MAX_DSQS_PER_LLC) {
-		scx_bpf_error("invalid dsq index: %d", dsq_index);
+		scx_bpf_error("cpuc invalid dsq index: %d", dsq_index);
 		return 0;
 	}
 	return *MEMBER_VPTR(cpuc->dsqs, [dsq_index]);
@@ -686,6 +694,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
 	u64 used, last_dsq_slice_ns;
+	u64 now = scx_bpf_now();
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
@@ -694,21 +703,18 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	    !(llcx = lookup_llc_ctx(cpuc->llc_id)))
 		return;
 
-	u64 now = scx_bpf_now();
 	last_dsq_slice_ns = dsq_time_slice(taskc->dsq_index);
 
 	// can't happen, appease the verifier
 	int dsq_index = taskc->dsq_index;
 	if (dsq_index < 0 || dsq_index >= nr_dsqs_per_llc) {
-		scx_bpf_error("invalid dsq index");
+		scx_bpf_error("taskc invalid dsq index");
 		return;
 	}
 
 	used = now - taskc->last_run_at;
-	taskc->last_run_at = now;
 	taskc->last_dsq_id = taskc->dsq_id;
 	taskc->last_dsq_index = dsq_index;
-	cpuc->dsq_index = dsq_index;
 	__sync_fetch_and_add(&llcx->vtime, used);
 	__sync_fetch_and_add(&llcx->dsq_max_vtime[dsq_index], used);
 	__sync_fetch_and_add(&llcx->dsq_load[dsq_index], used);
@@ -716,7 +722,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	// On stopping determine if the task can move to a longer DSQ by
 	// comparing the used time to the scaled DSQ slice.
 	if (used >= ((9 * last_dsq_slice_ns) / 10)) {
-		if (taskc->dsq_id < nr_dsqs_per_llc) {
+		if (taskc->dsq_index < nr_dsqs_per_llc - 1) {
 			taskc->dsq_index += 1;
 			stat_inc(P2DQ_STAT_DSQ_CHANGE);
 			trace("%s[%p]: DSQ change %u -> %u, slice %llu", p->comm, p,
@@ -782,6 +788,10 @@ void BPF_STRUCT_OPS(p2dq_dispatch, s32 cpu, struct task_struct *prev)
 		    scx_bpf_dsq_move_to_local(cpuc->dsqs[i]))
 		    return;
 	}
+
+	// If on a single LLC there isn't anything left to try.
+	if (nr_llcs == 1)
+		return;
 
 	// Last ditch effort try a random LLC for the same type of DSQ.
 	llcx = pick_two_llc_ctx(rand_llc_ctx(), rand_llc_ctx(), false);
@@ -1000,17 +1010,69 @@ static bool load_balance_timer(void)
 {
 	struct llc_ctx *llcx;
 	int llc_id, j;
+	u64 ideal_sum, load_sum = 0, interactive_sum = 0;
 
-	if (nr_llcs == 1)
+	if (nr_llcs == 1 && !autoslice)
 		return false;
 
-	// Reset load values until next load balancing.
+	if (!autoslice)
+		goto reset_load;
+
+	bpf_for(llc_id, 0, nr_llcs) {
+		if (!(llcx = lookup_llc_ctx(llc_id)))
+			return false;
+
+		bpf_for(j, 0, nr_dsqs_per_llc) {
+			load_sum += llcx->dsq_load[j];
+			if (j == 0)
+				interactive_sum += llcx->dsq_load[j];
+		}
+	}
+	dbg("load %llu interactive %llu", load_sum, interactive_sum);
+
+	if (load_sum == 0 || load_sum < interactive_sum) {
+		scx_bpf_error("invalid load sum");
+		goto reset_load;
+	}
+
+	if (interactive_sum == 0) {
+		dsq_time_slices[0] = (11 * dsq_time_slices[0]) / 10;
+		bpf_for(j, 1, nr_dsqs_per_llc) {
+			dsq_time_slices[j] = dsq_time_slices[0] << j << dsq_shift;
+		}
+	} else {
+		ideal_sum = (load_sum * interactive_ratio) / 100;
+		dbg("ideal/sum %llu/%llu", ideal_sum, interactive_sum);
+		if (interactive_sum < ideal_sum) {
+			dsq_time_slices[0] = (11 * dsq_time_slices[0]) / 10;
+
+			bpf_for(j, 1, nr_dsqs_per_llc) {
+				dsq_time_slices[j] = dsq_time_slices[0] << j << dsq_shift;
+			}
+		} else {
+			dsq_time_slices[0] = max((10 * dsq_time_slices[0]) / 11, min_slice_ns);
+			bpf_for(j, 1, nr_dsqs_per_llc) {
+				dsq_time_slices[j] = dsq_time_slices[0] << j << dsq_shift;
+			}
+		}
+
+	}
+
+
+reset_load:
+
 	bpf_for(llc_id, 0, nr_llcs) {
 		if (!(llcx = lookup_llc_ctx(llc_id)))
 			return false;
 
 		bpf_for(j, 0, nr_dsqs_per_llc) {
 			llcx->dsq_load[j] = 0;
+			if (llc_id == 0) {
+				if (j > 0 && dsq_time_slices[j] < dsq_time_slices[j-1]) {
+					dsq_time_slices[j] = dsq_time_slices[j-1] << dsq_shift;
+				}
+				dbg("interactive slice %llu", dsq_time_slices[j]);
+			}
 		}
 	}
 
@@ -1177,6 +1239,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init)
 	}
 
 	max_exec_ns = 10 * dsq_time_slice(nr_dsqs_per_llc);
+	min_slice_ns = 1000 * min_slice_us;
 
 	if (start_timers() < 0)
 		return -EINVAL;
