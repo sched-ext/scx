@@ -451,6 +451,18 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 				*is_idle = true;
 				goto out_put_cpumask;
 			}
+
+			/*
+			 * Last try any big core in the local node.
+			 */
+			if (smt_enabled) {
+				cpu = bpf_cpumask_any_and_distribute(idle_cpumask,
+								     cast_mask(nodec->big_cpumask));
+				if (cpu < nr_cpus) {
+					*is_idle = true;
+					goto out_put_cpumask;
+				}
+			}
 		}
 	}
 
@@ -525,12 +537,13 @@ s32 BPF_STRUCT_OPS(p2dq_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 
 void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
 {
-	struct task_ctx *taskc;
-	struct cpu_ctx *cpuc, *task_cpuc;
+	const struct cpumask *idle_cpumask, *llc_mask;
 	struct llc_ctx *llcx, *prev_llcx;
+	struct cpu_ctx *cpuc, *task_cpuc;
+	struct task_ctx *taskc;
 	u64 dsq_id;
 
-	s32 task_cpu = scx_bpf_task_cpu(p);
+	s32 cpu, task_cpu = scx_bpf_task_cpu(p);
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) ||
 	    !(task_cpuc = lookup_cpu_ctx(task_cpu)) ||
@@ -568,7 +581,8 @@ void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 	 * behind other threads which is necessary for forward progress
 	 * guarantee as we depend on the BPF timer which may run from ksoftirqd.
 	 */
-	if ((p->flags & PF_KTHREAD) && (p->nr_cpus_allowed < nr_cpus) && kthreads_local) {
+	if ((p->flags & PF_KTHREAD) && (p->nr_cpus_allowed < nr_cpus) &&
+	    kthreads_local) {
 		stat_inc(P2DQ_STAT_DIRECT);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns,
 				   enq_flags | SCX_ENQ_PREEMPT);
@@ -576,7 +590,8 @@ void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 	}
 
 	/* 
-	 * Affinitized tasks just get dispatched directly, need to handle this better 
+	 * Affinitized tasks just get dispatched directly, need to handle this
+	 * better.
 	 */
 	if ((!taskc->all_cpus)) {
 		stat_inc(P2DQ_STAT_DIRECT);
@@ -595,6 +610,22 @@ void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 		llcx->dsq_max_vtime[taskc->dsq_index] = vtime;
 		trace("LLC[%d]DSQ[%d] max_vtime %llu", llcx->id, dsq_id, vtime);
 	}
+
+
+	llc_mask = cast_mask(llcx->cpumask);
+	if (!llc_mask) {
+		scx_bpf_error("invalid llc cpumask");
+		return;
+
+	}
+
+	idle_cpumask = scx_bpf_get_idle_cpumask();
+	cpu = bpf_cpumask_any_and_distribute(llc_mask, idle_cpumask);
+	scx_bpf_put_cpumask(idle_cpumask);
+
+	// If there is an idle CPU in the LLC kick it.
+	if (cpu < nr_cpus)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
 
@@ -690,6 +721,8 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 			stat_inc(P2DQ_STAT_DSQ_CHANGE);
 			trace("%s[%p]: DSQ change %u -> %u, slice %llu", p->comm, p,
 			      taskc->last_dsq_id, taskc->dsq_index, dsq_time_slice(taskc->dsq_index));
+		} else {
+			stat_inc(P2DQ_STAT_DSQ_SAME);
 		}
 	// If under half the slice was consumed move the task back down.
 	} else if (used < last_dsq_slice_ns / 2) {
@@ -698,6 +731,8 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 			stat_inc(P2DQ_STAT_DSQ_CHANGE);
 			trace("%s[%p]: DSQ change %u -> %u slice %llu", p->comm, p,
 			      taskc->last_dsq_id, taskc->dsq_index, dsq_time_slice(taskc->dsq_index));
+		} else {
+			stat_inc(P2DQ_STAT_DSQ_SAME);
 		}
 	} else {
 		stat_inc(P2DQ_STAT_DSQ_SAME);
@@ -725,12 +760,6 @@ void BPF_STRUCT_OPS(p2dq_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
-	if (eager_load_balance && nr_llcs > 1) {
-		llcx = pick_two_llc_ctx(llcx, rand_llc_ctx(), false);
-		if (!llcx)
-			return;
-	}
-
 	u64 min_vtime = llcx->vtime;
 	bpf_for(i, 0, nr_dsqs_per_llc) {
 		if (llcx->dsq_max_vtime[i] < min_vtime) {
@@ -755,7 +784,7 @@ void BPF_STRUCT_OPS(p2dq_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	// Last ditch effort try a random LLC for the same type of DSQ.
-	llcx = rand_llc_ctx();
+	llcx = pick_two_llc_ctx(rand_llc_ctx(), rand_llc_ctx(), false);
 	if (!llcx || cpuc->dsq_index < 0 || cpuc->dsq_index > nr_dsqs_per_llc)
 		return;
 
