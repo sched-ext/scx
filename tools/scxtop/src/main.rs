@@ -16,6 +16,7 @@ use scxtop::App;
 use scxtop::Event;
 use scxtop::Key;
 use scxtop::KeyMap;
+use scxtop::PerfEvent;
 use scxtop::Tui;
 use scxtop::APP;
 use scxtop::SCHED_NAME_PATH;
@@ -58,6 +59,9 @@ struct Args {
     /// Number of ticks to warmup before collecting traces.
     #[arg(long, default_value_t = 3)]
     trace_tick_warmup: usize,
+    /// Process to monitor or all.
+    #[arg(long, default_value_t = -1)]
+    process_id: i32,
 }
 
 fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {
@@ -254,6 +258,7 @@ async fn main() -> Result<()> {
         args.tick_rate_ms,
         args.trace_ticks,
         args.trace_tick_warmup,
+        args.process_id,
         action_tx.clone(),
         skel,
     )?;

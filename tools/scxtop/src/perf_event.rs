@@ -145,7 +145,7 @@ impl PerfEvent {
     }
 
     /// Attaches a PerfEvent struct.
-    pub fn attach(&mut self) -> Result<()> {
+    pub fn attach(&mut self, process_id: i32) -> Result<()> {
         let mut attrs = perf::bindings::perf_event_attr {
             size: std::mem::size_of::<perf::bindings::perf_event_attr>() as u32,
             ..Default::default()
@@ -232,10 +232,11 @@ impl PerfEvent {
         attrs.set_disabled(0);
         attrs.set_exclude_kernel(0);
         attrs.set_exclude_hv(0);
-        attrs.set_inherit(1);
+        attrs.set_inherit(if process_id == -1 { 1 } else { 0 });
         attrs.set_pinned(1);
 
-        let result = unsafe { perf::perf_event_open(&mut attrs, -1, self.cpu as i32, -1, 0) };
+        let result =
+            unsafe { perf::perf_event_open(&mut attrs, process_id, self.cpu as i32, -1, 0) };
 
         if result < 0 {
             return Err(anyhow!("failed to open perf event: {}", result));
