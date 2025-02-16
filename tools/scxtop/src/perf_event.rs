@@ -16,6 +16,7 @@ use std::mem;
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 #[allow(dead_code)]
 const PERF_SAMPLE_ID: u64 = 1 << 16;
@@ -27,6 +28,8 @@ const PERF_FORMAT_TOTAL_TIME_RUNNING: u64 = 1 << 1;
 const DEBUGFS: &str = "debugfs";
 const TRACEFS: &str = "tracefs";
 const PROCFS_MOUNTS: &str = "/proc/mounts";
+
+static PROCESS_ID: OnceLock<i32> = OnceLock::new();
 
 /// Returns the mount point for a filesystem type.
 fn get_fs_mount(mount_type: &str) -> Result<Vec<PathBuf>> {
@@ -108,6 +111,13 @@ impl PerfEvent {
         }
     }
 
+    pub fn set_process_id(process_id: i32) -> Result<(), i32> {
+        if process_id < -1 {
+            return Err(process_id);
+        }
+        PROCESS_ID.set(process_id)
+    }
+
     /// Returns the set of default hardware events.
     pub fn default_hw_events() -> Vec<PerfEvent> {
         vec![
@@ -150,6 +160,8 @@ impl PerfEvent {
             size: std::mem::size_of::<perf::bindings::perf_event_attr>() as u32,
             ..Default::default()
         };
+
+        let process_id = *PROCESS_ID.get_or_init(|| -1);
 
         match self.subsystem.to_lowercase().as_str() {
             "hw" | "hardware" => {
@@ -232,10 +244,11 @@ impl PerfEvent {
         attrs.set_disabled(0);
         attrs.set_exclude_kernel(0);
         attrs.set_exclude_hv(0);
-        attrs.set_inherit(1);
+        attrs.set_inherit(if process_id == -1 { 1 } else { 0 });
         attrs.set_pinned(1);
 
-        let result = unsafe { perf::perf_event_open(&mut attrs, -1, self.cpu as i32, -1, 0) };
+        let result =
+            unsafe { perf::perf_event_open(&mut attrs, process_id, self.cpu as i32, -1, 0) };
 
         if result < 0 {
             return Err(anyhow!("failed to open perf event: {}", result));
