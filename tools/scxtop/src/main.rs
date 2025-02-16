@@ -91,8 +91,6 @@ async fn main() -> Result<()> {
     if args.debug {
         builder.obj_builder.debug(true);
     }
-    PerfEvent::set_process_id(args.process_id)
-        .expect("perf event process_id init failed or invalid value");
 
     let open_skel = builder.open(&mut open_object)?;
     let skel = open_skel.load()?;
@@ -260,6 +258,7 @@ async fn main() -> Result<()> {
         args.tick_rate_ms,
         args.trace_ticks,
         args.trace_tick_warmup,
+        args.process_id,
         action_tx.clone(),
         skel,
     )?;

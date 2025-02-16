@@ -111,6 +111,7 @@ pub struct App<'a> {
     trace_tick_warmup: usize,
     max_trace_ticks: usize,
     prev_bpf_sample_rate: u32,
+    process_id: i32,
     trace_links: Vec<Link>,
 }
 
@@ -126,6 +127,7 @@ impl<'a> App<'a> {
         tick_rate_ms: usize,
         trace_ticks: usize,
         trace_tick_warmup: usize,
+        process_id: i32,
         action_tx: UnboundedSender<Action>,
         skel: BpfSkel<'a>,
     ) -> Result<Self> {
@@ -142,7 +144,7 @@ impl<'a> App<'a> {
             .collect::<Vec<String>>();
         for cpu in topo.all_cpus.values() {
             let mut event = PerfEvent::new("hw".to_string(), "cycles".to_string(), cpu.id);
-            event.attach()?;
+            event.attach(process_id)?;
             active_perf_events.insert(cpu.id, event);
             let mut data =
                 CpuData::new(cpu.id, cpu.core_id, cpu.llc_id, cpu.node_id, max_cpu_events);
@@ -224,6 +226,7 @@ impl<'a> App<'a> {
             max_trace_ticks: trace_ticks,
             trace_manager: PerfettoTraceManager::new(trace_file_prefix, None),
             bpf_stats: Default::default(),
+            process_id,
             trace_links: vec![],
         };
 
@@ -305,7 +308,7 @@ impl<'a> App<'a> {
                 perf_event.event.clone(),
                 *cpu_id,
             );
-            event.attach()?;
+            event.attach(self.process_id)?;
             self.active_perf_events.insert(*cpu_id, event);
         }
         Ok(())
