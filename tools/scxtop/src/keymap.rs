@@ -3,8 +3,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use crate::Action;
 use crate::AppState;
+use crate::{Action, RecordTraceAction};
 use crossterm::event::KeyCode;
 use std::collections::HashMap;
 
@@ -41,8 +41,14 @@ impl Default for KeyMap {
         bindings.insert(Key::Char('l'), Action::SetState(AppState::Llc));
         bindings.insert(Key::Char('n'), Action::SetState(AppState::Node));
         bindings.insert(Key::Char('s'), Action::SetState(AppState::Scheduler));
-        bindings.insert(Key::Char('a'), Action::RecordTrace);
-        bindings.insert(Key::Char('P'), Action::RecordTrace);
+        bindings.insert(
+            Key::Char('a'),
+            Action::RecordTrace(RecordTraceAction { immediate: false }),
+        );
+        bindings.insert(
+            Key::Char('P'),
+            Action::RecordTrace(RecordTraceAction { immediate: false }),
+        );
         bindings.insert(Key::Char('x'), Action::ClearEvent);
         bindings.insert(Key::Char('j'), Action::PrevEvent);
         bindings.insert(Key::Char('k'), Action::NextEvent);

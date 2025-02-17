@@ -31,6 +31,7 @@ enum event_type {
 	SCHED_WAKEUP,
 	SCHED_WAKING,
 	SOFTIRQ,
+	START_TRACE,
 	EVENT_MAX,
 };
 

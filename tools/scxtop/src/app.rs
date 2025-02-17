@@ -23,8 +23,8 @@ use crate::APP;
 use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
-    Action, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction,
-    SoftIRQAction,
+    Action, RecordTraceAction, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction,
+    SchedWakingAction, SoftIRQAction,
 };
 
 use anyhow::Result;
@@ -1587,7 +1587,10 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: record perfetto trace",
-                    self.keymap.action_keys_string(Action::RecordTrace),
+                    self.keymap
+                        .action_keys_string(Action::RecordTrace(RecordTraceAction {
+                            immediate: false
+                        })),
                 ),
                 Style::default(),
             )),
@@ -1925,10 +1928,10 @@ impl<'a> App<'a> {
     }
 
     /// Starts recording a trace.
-    fn start_trace(&mut self) -> Result<()> {
+    fn start_trace(&mut self, immediate: bool) -> Result<()> {
         self.prev_state = self.state.clone();
         self.state = AppState::Tracing;
-        self.trace_tick = 0;
+        self.trace_tick = if immediate { self.trace_tick_warmup } else { 0 };
         self.trace_manager.start()?;
 
         // set bpf sampling to every event
@@ -2100,8 +2103,8 @@ impl<'a> App<'a> {
             Action::SchedCpuPerfSet(SchedCpuPerfSetAction { cpu, perf }) => {
                 self.on_cpu_perf(cpu, perf);
             }
-            Action::RecordTrace => {
-                self.start_trace()?;
+            Action::RecordTrace(RecordTraceAction { immediate }) => {
+                self.start_trace(immediate)?;
             }
             Action::SchedSwitch(a) => {
                 self.on_sched_switch(&a);

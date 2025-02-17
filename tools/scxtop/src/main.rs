@@ -3,11 +3,6 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::Result;
-use clap::Parser;
-use libbpf_rs::skel::OpenSkel;
-use libbpf_rs::skel::SkelBuilder;
-use libbpf_rs::RingBufferBuilder;
 use scxtop::bpf_intf::*;
 use scxtop::bpf_skel::types::bpf_event;
 use scxtop::bpf_skel::*;
@@ -22,16 +17,24 @@ use scxtop::APP;
 use scxtop::SCHED_NAME_PATH;
 use scxtop::STATS_SOCKET_PATH;
 use scxtop::{
-    Action, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction,
-    SoftIRQAction,
+    Action, RecordTraceAction, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction,
+    SchedWakingAction, SoftIRQAction,
 };
+
+use anyhow::anyhow;
+use anyhow::Result;
+use clap::Parser;
+use libbpf_rs::skel::OpenSkel;
+use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::RingBufferBuilder;
+use libbpf_rs::UprobeOpts;
+use ratatui::crossterm::event::KeyCode::Char;
+use tokio::sync::mpsc;
+
 use std::mem::MaybeUninit;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-
-use ratatui::crossterm::event::KeyCode::Char;
-use tokio::sync::mpsc;
 
 const TRACE_FILE_PREFIX: &str = "scxtop_trace";
 
@@ -62,6 +65,24 @@ struct Args {
     /// Process to monitor or all.
     #[arg(long, default_value_t = -1)]
     process_id: i32,
+
+    /// Automatically start a trace when a function takes too long to return.
+    #[arg(
+        long,
+        default_value_t = false,
+        requires("experimental_long_tail_tracing_symbol"),
+        requires("experimental_long_tail_tracing_binary")
+    )]
+    experimental_long_tail_tracing: bool,
+    /// Symbol to automatically trace the long tail of.
+    #[arg(long)]
+    experimental_long_tail_tracing_symbol: Option<String>,
+    /// Binary to attach the uprobe and uretprobe to.
+    #[arg(long)]
+    experimental_long_tail_tracing_binary: Option<String>,
+    /// Minimum latency to trigger a trace.
+    #[arg(long, default_value_t = 100000000)]
+    experimental_long_tail_tracing_min_latency_ns: u64,
 }
 
 fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {
@@ -82,9 +103,9 @@ fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let (action_tx, mut action_rx) = mpsc::unbounded_channel();
-
     let args = Args::parse();
+
+    let (action_tx, mut action_rx) = mpsc::unbounded_channel();
 
     let mut open_object = MaybeUninit::uninit();
     let mut builder = BpfSkelBuilder::default();
@@ -92,8 +113,11 @@ async fn main() -> Result<()> {
         builder.obj_builder.debug(true);
     }
 
-    let open_skel = builder.open(&mut open_object)?;
-    let skel = open_skel.load()?;
+    let skel = builder.open(&mut open_object)?;
+    skel.maps.rodata_data.long_tail_tracing_min_latency_ns =
+        args.experimental_long_tail_tracing_min_latency_ns;
+
+    let skel = skel.load()?;
 
     // Attach probes
     let mut links = vec![
@@ -135,6 +159,34 @@ async fn main() -> Result<()> {
     if let Ok(link) = skel.progs.scx_dsq_move.attach() {
         links.push(link);
     }
+
+    if args.experimental_long_tail_tracing {
+        let binary = &args.experimental_long_tail_tracing_binary.unwrap();
+        let symbol = &args.experimental_long_tail_tracing_symbol.unwrap();
+
+        links.extend([
+            skel.progs.long_tail_tracker_exit.attach_uprobe_with_opts(
+                -1, /* pid, -1 == all */
+                binary,
+                0,
+                UprobeOpts {
+                    retprobe: true,
+                    func_name: symbol.into(),
+                    ..Default::default()
+                },
+            )?,
+            skel.progs.long_tail_tracker_entry.attach_uprobe_with_opts(
+                -1, /* pid, -1 == all */
+                binary,
+                0,
+                UprobeOpts {
+                    retprobe: false,
+                    func_name: symbol.into(),
+                    ..Default::default()
+                },
+            )?,
+        ]);
+    };
 
     let keymap = KeyMap::default();
     let mut tui = Tui::new(keymap.clone(), args.tick_rate_ms)?;
@@ -241,6 +293,11 @@ async fn main() -> Result<()> {
                 });
                 tx.send(action).ok();
             },
+            #[allow(non_upper_case_globals)]
+            event_type_START_TRACE => {
+                let action = Action::RecordTrace(RecordTraceAction { immediate: true });
+                tx.send(action).ok();
+            }
             _ => {}
         }
         0
