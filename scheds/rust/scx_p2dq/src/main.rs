@@ -62,6 +62,14 @@ struct Opts {
     #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
     disable_kthreads_local: bool,
 
+    /// Enables autoslice tuning
+    #[clap(short = 'a', long, action = clap::ArgAction::SetTrue)]
+    autoslice: bool,
+
+    /// Ratio of interactive tasks for autoslice tuning, percent value from 1-99.
+    #[clap(short = 'r', long, default_value = "10")]
+    interactive_ratio: usize,
+
     /// Disables eager pick2 load balancing.
     #[clap(short = 'e', long, action = clap::ArgAction::SetTrue)]
     eager_load_balance: bool,
@@ -171,7 +179,17 @@ impl<'a> Scheduler<'a> {
                 skel.maps.bss_data.dsq_time_slices[i] = slice_ns;
             }
         }
+        if opts.autoslice {
+            if opts.interactive_ratio == 0 || opts.interactive_ratio > 99 {
+                panic!(
+                    "Invalid interactive_ratio {}, must be between 1-99",
+                    opts.interactive_ratio
+                );
+            }
+        }
 
+        skel.maps.rodata_data.autoslice = opts.autoslice;
+        skel.maps.rodata_data.interactive_ratio = opts.interactive_ratio as u32;
         skel.maps.rodata_data.min_slice_us = opts.min_slice_us;
         skel.maps.rodata_data.dsq_shift = opts.dsq_shift as u64;
         skel.maps.rodata_data.kthreads_local = !opts.disable_kthreads_local;
