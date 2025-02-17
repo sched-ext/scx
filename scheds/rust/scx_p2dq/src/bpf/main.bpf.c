@@ -397,6 +397,33 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		}
 	}
 
+	if (has_little_cores) {
+		if (!llcx->big_cpumask)
+			goto out_put_cpumask;
+
+		cpu = bpf_cpumask_any_and_distribute(smt_enabled ? idle_smtmask : idle_cpumask,
+						     cast_mask(llcx->big_cpumask));
+		if (cpu < nr_cpus) {
+			*is_idle = true;
+			goto out_put_cpumask;
+		}
+
+		if (!nodec->big_cpumask)
+			goto out_put_cpumask;
+
+		/*
+		 * Next try a big core in the local node.
+		 */
+		if (!interactive) {
+			cpu = bpf_cpumask_any_and_distribute(smt_enabled ? idle_smtmask : idle_cpumask,
+							     cast_mask(nodec->big_cpumask));
+			if (cpu < nr_cpus) {
+				*is_idle = true;
+				goto out_put_cpumask;
+			}
+		}
+	}
+
 	if (smt_enabled) {
 		if (is_prev_llc_affine &&
 		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
@@ -407,70 +434,11 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		}
 	}
 
-	if (has_little_cores) {
-		if (interactive) {
-			if (!llcx->cpumask)
-				goto out_put_cpumask;
-			/*
-			 * Interactive tasks can run anywhere, first try in the local LLC.
-			 */
-			cpu = bpf_cpumask_any_and_distribute(idle_cpumask, cast_mask(llcx->cpumask));
-			if (cpu < nr_cpus) {
-				*is_idle = true;
-				goto out_put_cpumask;
-			}
-
-			if (!nodec->cpumask)
-				goto out_put_cpumask;
-			cpu = bpf_cpumask_any_and_distribute(idle_cpumask, cast_mask(nodec->cpumask));
-			if (cpu < nr_cpus) {
-				*is_idle = true;
-				goto out_put_cpumask;
-			}
-		} else {
-			if (!llcx->big_cpumask)
-				goto out_put_cpumask;
-			/*
-			 * If not interactive try a big core in the local domain first.
-			 */
-			cpu = bpf_cpumask_any_and_distribute(smt_enabled ? idle_smtmask : idle_cpumask,
-							     cast_mask(llcx->big_cpumask));
-			if (cpu < nr_cpus) {
-				*is_idle = true;
-				goto out_put_cpumask;
-			}
-
-			if (!nodec->big_cpumask)
-				goto out_put_cpumask;
-			/*
-			 * Next try a big core in the local node.
-			 */
-			cpu = bpf_cpumask_any_and_distribute(smt_enabled ? idle_smtmask : idle_cpumask,
-							     cast_mask(nodec->big_cpumask));
-			if (cpu < nr_cpus) {
-				*is_idle = true;
-				goto out_put_cpumask;
-			}
-
-			/*
-			 * Last try any big core in the local node.
-			 */
-			if (smt_enabled) {
-				cpu = bpf_cpumask_any_and_distribute(idle_cpumask,
-								     cast_mask(nodec->big_cpumask));
-				if (cpu < nr_cpus) {
-					*is_idle = true;
-					goto out_put_cpumask;
-				}
-			}
-		}
-	}
-
 	if (!llcx->cpumask)
 		goto out_put_cpumask;
 
 	// Next try in the local LLC.
-	cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), 0);
+	cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), SCX_PICK_IDLE_CORE);
 	if (cpu < nr_cpus && cpu >= 0) {
 		*is_idle = true;
 		goto out_put_cpumask;
@@ -485,7 +453,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		goto out_put_cpumask;
 
 	// Next try in the local node.
-	cpu = scx_bpf_pick_idle_cpu(cast_mask(nodec->cpumask), 0);
+	cpu = scx_bpf_pick_idle_cpu(cast_mask(nodec->cpumask), SCX_PICK_IDLE_CORE);
 	if (cpu < nr_cpus && cpu >= 0) {
 		*is_idle = true;
 		goto out_put_cpumask;
