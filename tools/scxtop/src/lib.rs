@@ -148,6 +148,11 @@ pub struct SoftIRQAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RecordTraceAction {
+    pub immediate: bool,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
     Tick,
     Increment,
@@ -176,7 +181,7 @@ pub enum Action {
     SetState(AppState),
     SoftIRQ(SoftIRQAction),
     NextViewState,
-    RecordTrace,
+    RecordTrace(RecordTraceAction),
     ToggleCpuFreq,
     ToggleUncoreFreq,
     TickRateChange(std::time::Duration),

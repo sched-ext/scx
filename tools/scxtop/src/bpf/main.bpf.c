@@ -21,6 +21,8 @@
 
 char _license[] SEC("license") = "GPL";
 
+const volatile u64 long_tail_tracing_min_latency_ns = 0;
+
 // dummy for generating types
 struct bpf_event _event = {0};
 
@@ -81,6 +83,12 @@ struct {
 	__uint(map_flags, 0);
 } task_data SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(key_size, sizeof(u64));
+	__uint(value_size, sizeof(u64));
+	__uint(max_entries, 1000000);
+} long_tail_entries SEC(".maps");
 
 struct __softirq_event {
 	u32		pid;
@@ -591,6 +599,50 @@ int BPF_PROG(on_softirq_exit, unsigned int nr)
 	event->event.softirq.exit_ts = exit_ts;
 	event->event.softirq.softirq_nr = nr;
 
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
+SEC("uprobe")
+int BPF_UPROBE(long_tail_tracker_entry)
+{
+	u64 pidtgid = bpf_get_current_pid_tgid();
+	u64 ts = bpf_ktime_get_ns();
+	bpf_map_update_elem(&long_tail_entries, &pidtgid, &ts, BPF_ANY);
+	return 0;
+}
+
+SEC("uretprobe")
+int BPF_URETPROBE(long_tail_tracker_exit)
+{
+	struct bpf_event *event;
+	u64 *entry_time;
+	u64 now = bpf_ktime_get_ns();
+
+	u64 pidtgid = bpf_get_current_pid_tgid();
+	if (!(entry_time = bpf_map_lookup_elem(&long_tail_entries, &pidtgid)))
+		return -ENOENT;
+
+	if (now - *entry_time < long_tail_tracing_min_latency_ns)
+		return 0;
+
+	// grab an event first. if this fails we can't set the other parameters
+	// as they won't be cleaned up.
+	if (!(event = try_reserve_event()))
+		return -ENOENT;
+
+	// replicate the actions of userspace starting a trace so it starts
+	// immediately, but such that events will come after our ringbuffer
+	// entry informing userspace we've started a trace.
+	// we don't enable softirqs from the bpf side and I don't think it's
+	// possible with the current setup. we'd likely have to attach the uprobes
+	// always and activate them with a global, which could be expensive. for
+	// now let them start late.
+	sample_rate = 1;
+
+	// tell userspace to handle the trace and eventually reset. this is pretty racy and might break things.
+	event->type = START_TRACE;
 	bpf_ringbuf_submit(event, 0);
 
 	return 0;
