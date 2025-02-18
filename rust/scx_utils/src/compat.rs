@@ -17,6 +17,8 @@ lazy_static::lazy_static! {
         read_enum("scx_ops_flags", "SCX_OPS_SWITCH_PARTIAL").unwrap_or(0);
     pub static ref SCX_OPS_ALLOW_QUEUED_WAKEUP: u64 =
         read_enum("scx_ops_flags", "SCX_OPS_ALLOW_QUEUED_WAKEUP").unwrap_or(0);
+    pub static ref SCX_OPS_ENQ_MIGRATION_DISABLED: u64 =
+        read_enum("scx_ops_flags", "SCX_OPS_ENQ_MIGRATION_DISABLED").unwrap_or(0);
 }
 
 fn load_vmlinux_btf() -> &'static mut btf {

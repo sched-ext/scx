@@ -35,6 +35,7 @@ use log::{debug, info};
 use scx_stats::prelude::*;
 use scx_utils::autopower::{fetch_power_profile, PowerProfile};
 use scx_utils::build_id;
+use scx_utils::compat;
 use scx_utils::import_enums;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
@@ -281,6 +282,9 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
+
+        // Disable automatic dispatch of migration-disabled tasks.
+        skel.struct_ops.bpfland_ops_mut().flags |= *compat::SCX_OPS_ENQ_MIGRATION_DISABLED;
 
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, bpfland_ops, uei)?;
