@@ -42,6 +42,7 @@ use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::ProgramInput;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use log::info;
@@ -451,8 +452,18 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.debug = opts.verbose as u32;
         skel.maps.rodata_data.wd40_perf_mode = opts.perf;
 
-        // Attach.
         let mut skel = scx_ops_load!(skel, wd40, uei)?;
+
+        // Allocate the arena memory from the BPF side so userspace initializes it before starting
+        // the scheduler. Despite the function call's name this is neither a test nor a test run, 
+        // it's the recommended way of executing SEC("syscall") probes.
+        let input = ProgramInput { ..Default::default() };
+        let output = skel.progs.wd40_arena_setup.test_run(input)?;
+        if output.return_value != 0 {
+            bail!("Could not initialize WD40 arenas, wd40_arena_setup returned {}", output.return_value as i32);
+        }
+
+        // Actually get the scheduler starting.
         let struct_ops = Some(scx_ops_attach!(skel, wd40)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 

@@ -905,9 +905,10 @@ static s32 initialize_cpu(s32 cpu)
 	return -ENOENT;
 }
 
-s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init)
+SEC("syscall")
+int wd40_arena_setup(void)
 {
-	s32 i, ret;
+	int ret;
 
 	ret = sdt_static_init(STATIC_ALLOC_PAGES_GRANULARITY);
 	if (ret)
@@ -940,6 +941,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init)
 	ret = sdt_task_init(sizeof(struct task_ctx));
 	if (ret)
 		return ret;
+
+	return (0);
+}
+
+s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init)
+{
+	s32 i, ret;
 
 	bpf_for(i, 0, nr_nodes) {
 		ret = create_node(i);
