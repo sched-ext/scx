@@ -1837,7 +1837,7 @@ static __noinline bool match_one(struct layer_match *match,
 			bool pid_present = false;
 
 			if (!enable_gpu_support)
-				return match->used_gpu;
+				return match->using_gpu;
 
 			pid = p->pid;
 			gpu_pid = bpf_map_lookup_elem(&cur_gpu_pid, &pid) == 0;
@@ -1845,7 +1845,7 @@ static __noinline bool match_one(struct layer_match *match,
 			if (gpu_pid)
 				pid_present = true;
 
-			return pid_present == match->used_gpu;
+			return pid_present == match->using_gpu;
 	}
 	case MATCH_USED_GPU: {
 			u32 pid;
