@@ -761,12 +761,17 @@ void BPF_STRUCT_OPS(p2dq_dispatch, s32 cpu, struct task_struct *prev)
 	if (nr_llcs == 1)
 		return;
 
-	// Last ditch effort try a random LLC for the same type of DSQ.
+	// Last ditch effort try consuming from the most loaded DSQ.
 	llcx = pick_two_llc_ctx(rand_llc_ctx(), rand_llc_ctx(), false);
 	if (!llcx || cpuc->dsq_index < 0 || cpuc->dsq_index > nr_dsqs_per_llc)
 		return;
 
-	scx_bpf_dsq_move_to_local(llcx->dsqs[cpuc->dsq_index]);
+	// Start with least interactive DSQs to avoid migrating interactive
+	// tasks.
+	bpf_for(i, 1, nr_dsqs_per_llc) {
+		if (scx_bpf_dsq_move_to_local(llcx->dsqs[nr_dsqs_per_llc - i]))
+		    return;
+	}
 }
 
 void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
