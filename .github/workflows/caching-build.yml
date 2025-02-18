@@ -30,7 +30,7 @@ jobs:
     uses: ./.github/workflows/build-kernel.yml
     with:
       git-repo: "https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git"
-      branch: for-6.13
+      branch: for-next
 
   integration-test:
     runs-on: ubuntu-24.04
@@ -45,7 +45,7 @@ jobs:
       - uses: ./.github/actions/restore-kernel-cache
         with:
           git-repo: "https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git"
-          branch: for-6.13
+          branch: for-next
 
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
@@ -122,7 +122,7 @@ jobs:
       - uses: ./.github/actions/restore-kernel-cache
         with:
           git-repo: "https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git"
-          branch: for-6.13
+          branch: for-next
 
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
@@ -187,7 +187,7 @@ jobs:
       - uses: ./.github/actions/restore-kernel-cache
         with:
           git-repo: "https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git"
-          branch: for-6.13
+          branch: for-next
 
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
@@ -236,7 +236,7 @@ jobs:
           RUSTDOCFLAGS="--enable-index-page -Zunstable-options" cargo +nightly doc --workspace --no-deps --bins --lib --examples --document-private-items
           sudo apt install build-essential graphviz sphinx-doc python3-sphinx-rtd-theme texlive-latex-recommended python3-yaml -y
           cargo install htmlq
-          git clone --single-branch -b for-6.13 --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git linux
+          git clone --single-branch -b for-next --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git linux
           cd linux
           make DOCS_THEME=sphinx_rtd_theme SPHINXDIRS=scheduler htmldocs
           make DOCS_THEME=sphinx_rtd_theme SPHINXDIRS=bpf htmldocs
