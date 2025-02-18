@@ -170,7 +170,7 @@ int BPF_KPROBE(scx_sched_reg)
 		return 0;
 
 	if (!(event = try_reserve_event()))
-		return -ENOENT;
+		return -ENOMEM;
 
 	event->type = SCHED_REG;
 	bpf_ringbuf_submit(event, 0);
@@ -187,7 +187,7 @@ int BPF_KPROBE(scx_sched_unreg)
 		return 0;
 
 	if (!(event = try_reserve_event()))
-		return -ENOENT;
+		return -ENOMEM;
 
 	event->type = SCHED_UNREG;
 	bpf_ringbuf_submit(event, 0);
@@ -204,7 +204,7 @@ int BPF_KPROBE(on_sched_cpu_perf, s32 cpu, u32 perf)
 		return 0;
 
 	if (!(event = try_reserve_event()))
-		return -ENOENT;
+		return -ENOMEM;
 
 	event->type = CPU_PERF_SET;
 	event->cpu = cpu;
@@ -444,7 +444,7 @@ static __always_inline int on_sched_switch_non_scx(bool preempt, struct task_str
 		return -ENOENT;
 
 	if (!(event = try_reserve_event()))
-		return -ENOENT;
+		return -ENOMEM;
 
 	u64 now = bpf_ktime_get_ns();
 	event->type = SCHED_SWITCH;
@@ -494,7 +494,7 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 	}
 
 	if (!(event = try_reserve_event()))
-		return -ENOENT;
+		return -ENOMEM;
 
 	u64 now = bpf_ktime_get_ns();
 	event->type = SCHED_SWITCH;
@@ -589,7 +589,7 @@ int BPF_PROG(on_softirq_exit, unsigned int nr)
 	bpf_map_delete_elem(&softirq_events, &zero_int);
 
 	if (!(event = try_reserve_event()))
-		return -ENOENT;
+		return -ENOMEM;
 
 	event->type = SOFTIRQ;
 	event->cpu = bpf_get_smp_processor_id();
@@ -630,7 +630,7 @@ int BPF_URETPROBE(long_tail_tracker_exit)
 	// grab an event first. if this fails we can't set the other parameters
 	// as they won't be cleaned up.
 	if (!(event = try_reserve_event()))
-		return -ENOENT;
+		return -ENOMEM;
 
 	// replicate the actions of userspace starting a trace so it starts
 	// immediately, but such that events will come after our ringbuffer
@@ -659,7 +659,7 @@ int BPF_PROG(on_ipi_send_cpu, u32 cpu, void *callsite, void *callback)
 		return 0;
 
 	if (!(event = try_reserve_event()))
-		return -ENOENT;
+		return -ENOMEM;
 
 	event->type = IPI;
 	event->cpu = bpf_get_smp_processor_id();
