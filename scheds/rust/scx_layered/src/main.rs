@@ -1963,9 +1963,9 @@ impl<'a> Scheduler<'a> {
                 missing_gpu_pid = true;
             } else {
                 for (k, v) in self.gpu_mon_data.gpu_pidmap.iter() {
-                    let k_pid = sysinfo::Pid::from_u32(k.clone());
+                    let k_pid = sysinfo::Pid::from_u32(*k);
                     if current_pidmap.contains_key(&k_pid) {
-                        if v.clone() < current_pidmap.get(&k_pid).unwrap().start_time() {
+                        if *v < current_pidmap.get(&k_pid).unwrap().start_time() {
                             missing_gpu_pid = true;
                             break;
                         }
@@ -2074,6 +2074,7 @@ impl<'a> Scheduler<'a> {
                     self.gpu_mon_data.gpu_pidmap.insert(x, 0);
                 }
             }
+            debug!("GPU PIDs are: {:#?}", self.gpu_mon_data.gpu_pidmap);
         }
         Ok(())
     }
