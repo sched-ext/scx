@@ -1850,7 +1850,7 @@ impl<'a> Scheduler<'a> {
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         let gpu_mon_data = GpuMonData {
             sysinfo_sys: System::new_with_specifics(
-                sysinfo::RefreshKind::nothing()
+                sysinfo::RefreshKind::new()
                     .with_processes(sysinfo::ProcessRefreshKind::everything()),
             ),
             last_nvml_poll: std::time::SystemTime::now(),
@@ -1954,9 +1954,7 @@ impl<'a> Scheduler<'a> {
 
         if !self.opts.aggressive_nvml_polling {
             self.gpu_mon_data.sysinfo_sys.refresh_processes_specifics(
-                sysinfo::ProcessesToUpdate::All,
-                true,
-                sysinfo::ProcessRefreshKind::nothing(),
+                sysinfo::ProcessRefreshKind::new(),
             );
             let current_pidmap = self.gpu_mon_data.sysinfo_sys.processes();
             if self.gpu_mon_data.gpu_pidmap.is_empty() {
@@ -2050,9 +2048,7 @@ impl<'a> Scheduler<'a> {
             }
             // bookkeeping for non-agressive mode
             self.gpu_mon_data.sysinfo_sys.refresh_processes_specifics(
-                sysinfo::ProcessesToUpdate::All,
-                true,
-                sysinfo::ProcessRefreshKind::nothing(),
+                sysinfo::ProcessRefreshKind::new(),
             );
             self.gpu_mon_data.gpu_pidmap.clear();
             for x in pids {
