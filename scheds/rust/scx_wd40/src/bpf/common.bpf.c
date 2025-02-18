@@ -20,7 +20,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
-const volatile u32 dom_numa_id_map[MAX_DOMS];
+volatile u32 dom_numa_id_map[MAX_DOMS];
 const volatile u32 debug;
 const volatile u32 load_half_life = 1000000000	/* 1s */;
 const volatile u32 nr_doms = 32;	/* !0 for veristat, set during init */

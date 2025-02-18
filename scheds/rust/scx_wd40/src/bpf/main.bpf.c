@@ -79,7 +79,6 @@ UEI_DEFINE(uei);
  */
 const volatile u32 nr_cpu_ids = 64;	/* !0 for veristat, set during init */
 const volatile u32 cpu_dom_id_map[MAX_CPUS];
-const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 wd40_perf_mode;
 
 const volatile bool kthreads_local;
@@ -471,7 +470,6 @@ s32 BPF_STRUCT_OPS(wd40_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 */
 	has_idle_cores = !bpf_cpumask_empty(idle_smtmask);
 
-
 	cpu = select_cpu_pick_local(p_cpumask, prev_domestic, has_idle_cores, prev_cpu);
 	if (cpu >= 0)
 		goto direct;
@@ -612,6 +610,9 @@ static bool dispatch_steal_local_numa(u32 curr_dom, struct pcpu_ctx *pcpuc)
 {
 	u32 my_node;
 	u32 dom;
+
+	/* XXX Check if the addresses of the nodes are the same, the dom 
+	 * we traverse to should be in the array. */
 
 	my_node = dom_node_id(curr_dom);
 
@@ -755,7 +756,7 @@ void BPF_STRUCT_OPS(wd40_running, struct task_struct *p)
 	taskc = lookup_task_ctx(p);
 	domc = taskc->domc;
 
-	lb_record_run(domc);
+	lb_record_run(taskc);
 
 	if (fifo_sched)
 		return;
@@ -878,6 +879,8 @@ static s32 initialize_cpu(s32 cpu)
 	int perf;
 	u32 i;
 
+	sdt_subprog_init_arena();
+
 	if (!pcpuc)
 		return -ENOENT;
 
@@ -902,13 +905,15 @@ static s32 initialize_cpu(s32 cpu)
 		}
 	}
 
+	scx_bpf_error("dom%d not found for CPU %d", nr_doms, cpu);
+
 	return -ENOENT;
 }
 
 SEC("syscall")
 int wd40_arena_setup(void)
 {
-	int ret;
+	int ret, i;
 
 	ret = sdt_static_init(STATIC_ALLOC_PAGES_GRANULARITY);
 	if (ret)
@@ -942,28 +947,42 @@ int wd40_arena_setup(void)
 	if (ret)
 		return ret;
 
-	return (0);
+	/* The node masks are initialized from userspace .*/
+
+	if (nr_nodes >= MAX_NUMA_NODES) {
+		scx_bpf_error("Invalid # of nodes (%d)", nr_nodes);
+		return -ENOENT;
+	}
+
+	bpf_for(i, 0, nr_nodes) {
+		ret = create_save_scx_bitmap((scx_bitmap_t *)&node_data[i]);
+		if (ret)
+			return ret;
+	}
+
+	bpf_for(i, 0, nr_doms) {
+		ret = alloc_dom(i);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init)
 {
 	s32 i, ret;
 
-	bpf_for(i, 0, nr_nodes) {
-		ret = create_node(i);
-		if (ret)
-			return ret;
-	}
 	bpf_for(i, 0, nr_doms) {
 		ret = create_dom(i);
 		if (ret)
 			return ret;
 
 		scx_bitmap_or(all_cpumask, all_cpumask, dom_ctxs[i]->cpumask);
-
 	}
 
 	bpf_for(i, 0, nr_cpu_ids) {
+
 		if (is_offline_cpu(i))
 			continue;
 

@@ -12,13 +12,13 @@ dom_ptr try_lookup_dom_ctx(u32 dom_id);
 dom_ptr lookup_dom_ctx(u32 dom_id);
 struct bpf_spin_lock *lookup_dom_vtime_lock(dom_ptr domc);
 
-__weak s32 create_node(u32 node_id);
+__weak s32 alloc_dom(u32 dom_id);
 __weak s32 create_dom(u32 dom_id);
 int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now);
 
+extern volatile scx_bitmap_t node_data[MAX_NUMA_NODES];
 extern const volatile u32 load_half_life;
 extern const volatile u32 debug;
-extern const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 extern volatile u64 slice_ns;
 extern const volatile u32 nr_doms;
 extern const volatile u32 nr_nodes;

@@ -21,8 +21,6 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
-const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
-
 struct lock_wrapper {
 	struct bpf_spin_lock lock;
 };
@@ -42,7 +40,7 @@ struct {
 	__uint(map_flags, 0);
 } dom_dcycle_locks SEC(".maps");
 
-scx_bitmap_t node_data[MAX_NUMA_NODES];
+volatile scx_bitmap_t node_data[MAX_NUMA_NODES];
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -338,48 +336,36 @@ int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now)
 	return 0;
 }
 
-__weak
-s32 create_node(u32 node_id)
+__weak s32 alloc_dom(u32 dom_id)
 {
-	s32 ret;
-	int i;
-
-	if (node_id >= MAX_NUMA_NODES) {
-		scx_bpf_error("Invalid node%u", node_id);
-		return -ENOENT;
-	}
-
-	ret = create_save_scx_bitmap(&node_data[node_id]);
-	if (ret)
-		return ret;
-
-	bpf_for (i, 0, MAX_CPUS / 64) {
-		node_data[node_id]->bits[i] = numa_cpumasks[node_id][i];
-	}
-
-	return ret;
-}
-
-
-__weak s32 create_dom(u32 dom_id)
-{
-	u32 node_id, i;
 	dom_ptr domc;
-	s32 ret;
 
 	if (dom_id >= MAX_DOMS) {
 		scx_bpf_error("Max dom ID %u exceeded (%u)", MAX_DOMS, dom_id);
 		return -EINVAL;
 	}
 
-	node_id = dom_node_id(dom_id);
-
 	domc = lb_domain_alloc(dom_id);
 	if (!domc)
 		return -ENOMEM;
 
 	dom_ctxs[dom_id] = domc;
-	cast_user(dom_ctxs[dom_id]);
+
+	return 0;
+}
+
+__hidden
+s32 create_dom(u32 dom_id)
+{
+	dom_ptr domc;
+	u32 node_id;
+	s32 ret;
+
+	/*
+	 * XXX This is why we have to have a node struct, the sched_ext core
+	 * uses them to match DSQs to NUMA nodes.
+	 */
+	node_id = dom_node_id(dom_id);
 
 	ret = scx_bpf_create_dsq(dom_id, node_id);
 	if (ret < 0) {
@@ -387,17 +373,12 @@ __weak s32 create_dom(u32 dom_id)
 		return ret;
 	}
 
-	bpf_printk("Created domain %d (%p)", dom_id, domc->cpumask);
-
-	bpf_for (i, 0, MAX_CPUS / 64) {
-		domc->cpumask->bits[i] = dom_cpumasks[dom_id][i];
-	}
-
 	if (node_id >= MAX_NUMA_NODES) {
-		scx_bpf_error("Invalid node%u", node_id);
+		scx_bpf_error("Invalid node %d %d", node_id, MAX_NUMA_NODES);
 		return -ENOENT;
 	}
 
+	domc = lookup_dom_ctx(dom_id);
 	domc->node_cpumask = node_data[node_id];
 
 	return 0;
