@@ -22,7 +22,6 @@
 #include <bpf/bpf_tracing.h>
 
 const volatile u64 dom_cpumasks[MAX_DOMS][MAX_CPUS / 64];
-const volatile u32 wd40_perf_mode;
 
 struct lock_wrapper {
 	struct bpf_spin_lock lock;
@@ -30,7 +29,6 @@ struct lock_wrapper {
 
 struct lb_domain {
 	union sdt_id		tid;
-
 	struct bpf_spin_lock vtime_lock;
 
 	dom_ptr domc;
@@ -44,16 +42,7 @@ struct {
 	__uint(map_flags, 0);
 } dom_dcycle_locks SEC(".maps");
 
-/*
- * Numa node context
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct node_ctx);
-	__uint(max_entries, MAX_NUMA_NODES);
-	__uint(map_flags, 0);
-} node_data SEC(".maps");
+scx_bitmap_t node_data[MAX_NUMA_NODES];
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -352,57 +341,30 @@ int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now)
 __weak
 s32 create_node(u32 node_id)
 {
-	u32 cpu;
-	scx_bitmap_t cpumask;
-	struct node_ctx *nodec;
 	s32 ret;
+	int i;
 
-	nodec = bpf_map_lookup_elem(&node_data, &node_id);
-	if (!nodec) {
-		/* Should never happen, it's created statically at load time. */
-		scx_bpf_error("No node%u", node_id);
+	if (node_id >= MAX_NUMA_NODES) {
+		scx_bpf_error("Invalid node%u", node_id);
 		return -ENOENT;
 	}
 
-	ret = create_save_scx_bitmap(&nodec->cpumask);
+	ret = create_save_scx_bitmap(&node_data[node_id]);
 	if (ret)
 		return ret;
 
-	bpf_rcu_read_lock();
-	cpumask = nodec->cpumask;
-	if (!cpumask) {
-		bpf_rcu_read_unlock();
-		scx_bpf_error("Failed to lookup node cpumask");
-		return -ENOENT;
+	bpf_for (i, 0, MAX_CPUS / 64) {
+		node_data[node_id]->bits[i] = numa_cpumasks[node_id][i];
 	}
 
-	bpf_for(cpu, 0, MAX_CPUS) {
-		const volatile u64 *nmask;
-
-		nmask = MEMBER_VPTR(numa_cpumasks, [node_id][cpu / 64]);
-		if (!nmask) {
-			scx_bpf_error("array index error");
-			ret = -ENOENT;
-			break;
-		}
-
-		if (*nmask & (1LLU << (cpu % 64)))
-			scx_bitmap_set_cpu(cpu, cpumask);
-	}
-
-	bpf_rcu_read_unlock();
 	return ret;
 }
 
 
 __weak s32 create_dom(u32 dom_id)
 {
+	u32 node_id, i;
 	dom_ptr domc;
-	struct node_ctx *nodec;
-	scx_bitmap_t all_mask;
-	struct lb_domain *lb_domain;
-	u32 cpu, node_id;
-	int perf;
 	s32 ret;
 
 	if (dom_id >= MAX_DOMS) {
@@ -419,13 +381,6 @@ __weak s32 create_dom(u32 dom_id)
 	dom_ctxs[dom_id] = domc;
 	cast_user(dom_ctxs[dom_id]);
 
-	lb_domain = lb_domain_get(dom_id);
-	if (!lb_domain) {
-		scx_bpf_error("could not retrieve dom%d data\n", dom_id);
-		lb_domain_free(domc);
-		return -EINVAL;
-	}
-
 	ret = scx_bpf_create_dsq(dom_id, node_id);
 	if (ret < 0) {
 		scx_bpf_error("Failed to create dsq %u (%d)", dom_id, ret);
@@ -434,48 +389,16 @@ __weak s32 create_dom(u32 dom_id)
 
 	bpf_printk("Created domain %d (%p)", dom_id, domc->cpumask);
 
-	all_mask = all_cpumask;
-
-	bpf_rcu_read_lock();
-	bpf_for(cpu, 0, MAX_CPUS) {
-		const volatile u64 *dmask;
-		bool cpu_in_domain;
-
-		dmask = MEMBER_VPTR(dom_cpumasks, [dom_id][cpu / 64]);
-		if (!dmask) {
-			scx_bpf_error("array index error");
-			ret = -ENOENT;
-			break;
-		}
-
-		cpu_in_domain = *dmask & (1LLU << (cpu % 64));
-		if (!cpu_in_domain)
-			continue;
-
-		scx_bitmap_set_cpu(cpu, domc->cpumask);
-		scx_bitmap_set_cpu(cpu, all_mask);
-
-		/*
-		 * Perf has to be within [0, 1024]. Set it regardless
-		 * of value to clean up any previous settings, since
-		 * it persists even after removing the scheduler.
-		 */
-		perf = min(SCX_CPUPERF_ONE, wd40_perf_mode);
-		scx_bpf_cpuperf_set(cpu, perf);
+	bpf_for (i, 0, MAX_CPUS / 64) {
+		domc->cpumask->bits[i] = dom_cpumasks[dom_id][i];
 	}
-	bpf_rcu_read_unlock();
-	if (ret)
-		return ret;
 
-
-	nodec = bpf_map_lookup_elem(&node_data, &node_id);
-	if (!nodec) {
-		/* Should never happen, it's created statically at load time. */
-		scx_bpf_error("No node%u", node_id);
+	if (node_id >= MAX_NUMA_NODES) {
+		scx_bpf_error("Invalid node%u", node_id);
 		return -ENOENT;
 	}
 
-	scx_bitmap_copy(domc->node_cpumask, nodec->cpumask);
+	domc->node_cpumask = node_data[node_id];
 
 	return 0;
 }

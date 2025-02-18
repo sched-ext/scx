@@ -72,7 +72,7 @@ static __noinline u64 sched_prio_to_latency_weight(u64 prio)
 	return sched_prio_to_weight[DL_MAX_LAT_PRIO - prio - 1];
 }
 
-static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
+static u64 task_compute_dl(struct task_struct *p, task_ptr taskc,
 			   u64 enq_flags)
 {
 	u64 waker_freq, blocked_freq;
@@ -242,7 +242,7 @@ u64 update_freq(u64 freq, u64 interval)
 	return calc_avg(freq, new_freq);
 }
 
-static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 enq_flags)
+static void clamp_task_vtime(struct task_struct *p, task_ptr taskc, u64 enq_flags)
 {
 	u64 dom_vruntime, min_vruntime;
 	dom_ptr domc;
@@ -268,7 +268,7 @@ static void clamp_task_vtime(struct task_struct *p, struct task_ctx *taskc, u64 
 }
 
 __hidden
-void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
+void place_task_dl(struct task_struct *p, task_ptr taskc,
 			  u64 enq_flags)
 {
 	clamp_task_vtime(p, taskc, enq_flags);
@@ -277,14 +277,14 @@ void place_task_dl(struct task_struct *p, struct task_ctx *taskc,
 }
 
 __hidden
-void init_vtime(struct task_struct *p, struct task_ctx *taskc)
+void init_vtime(struct task_struct *p, task_ptr taskc)
 {
 	taskc->deadline = p->scx.dsq_vtime +
 			  scale_inverse_fair(taskc->avg_runtime, taskc->weight);
 }
 
 __hidden
-void running_update_vtime(struct task_struct *p, struct task_ctx *taskc,
+void running_update_vtime(struct task_struct *p, task_ptr taskc,
 				 dom_ptr domc)
 {
 	struct bpf_spin_lock * lock = lookup_dom_vtime_lock(domc);
@@ -302,8 +302,7 @@ void running_update_vtime(struct task_struct *p, struct task_ctx *taskc,
 
 
 __hidden
-void stopping_update_vtime(struct task_struct *p, struct task_ctx *taskc,
-				  dom_ptr domc)
+void stopping_update_vtime(struct task_struct *p, task_ptr taskc, dom_ptr domc)
 {
 	u64 now, delta;
 

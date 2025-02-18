@@ -114,6 +114,18 @@ int scx_bitmap_and(scx_bitmap_t __arg_arena dst, scx_bitmap_t __arg_arena src1, 
 }
 
 __weak
+int scx_bitmap_or(scx_bitmap_t __arg_arena dst, scx_bitmap_t __arg_arena src1, scx_bitmap_t __arg_arena src2)
+{
+	int i;
+
+	bpf_for(i, 0, mask_size) {
+		dst->bits[i] = src1->bits[i] | src2->bits[i];
+	}
+
+	return 0;
+}
+
+__weak
 bool scx_bitmap_empty(scx_bitmap_t __arg_arena mask)
 {
 	int i;
