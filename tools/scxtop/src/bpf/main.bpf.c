@@ -643,6 +643,35 @@ int BPF_URETPROBE(long_tail_tracker_exit)
 
 	// tell userspace to handle the trace and eventually reset. this is pretty racy and might break things.
 	event->type = START_TRACE;
+
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
+SEC("tp_btf/ipi_send_cpu")
+int BPF_PROG(on_ipi_send_cpu, u32 cpu, void *callsite, void *callback)
+{
+	struct bpf_event *event;
+	struct task_struct *p;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	if (!(event = try_reserve_event()))
+		return -ENOENT;
+
+	event->type = IPI;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = bpf_ktime_get_ns();
+	event->event.ipi.target_cpu = cpu;
+
+	p = (struct task_struct *)bpf_get_current_task();
+	if (p)
+		event->event.ipi.pid = BPF_CORE_READ(p, pid);
+	else
+		event->event.ipi.pid = 0;
+
 	bpf_ringbuf_submit(event, 0);
 
 	return 0;

@@ -17,8 +17,8 @@ use scxtop::APP;
 use scxtop::SCHED_NAME_PATH;
 use scxtop::STATS_SOCKET_PATH;
 use scxtop::{
-    Action, RecordTraceAction, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction,
-    SchedWakingAction, SoftIRQAction,
+    Action, IPIAction, RecordTraceAction, SchedCpuPerfSetAction, SchedSwitchAction,
+    SchedWakeupAction, SchedWakingAction, SoftIRQAction,
 };
 
 use anyhow::anyhow;
@@ -211,6 +211,16 @@ async fn main() -> Result<()> {
                 let action = Action::SchedCpuPerfSet(SchedCpuPerfSetAction {
                     cpu: event.cpu,
                     perf: unsafe { event.event.perf.perf },
+                });
+                tx.send(action).ok();
+            }
+            #[allow(non_upper_case_globals)]
+            event_type_IPI => {
+                let action = Action::IPI(IPIAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    pid: unsafe { event.event.ipi.pid },
+                    target_cpu: unsafe { event.event.ipi.target_cpu },
                 });
                 tx.send(action).ok();
             }

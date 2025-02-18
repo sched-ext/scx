@@ -14,13 +14,15 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{Action, SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction};
+use crate::{
+    Action, IPIAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
+};
 
 use crate::protos_gen::perfetto_scx::counter_descriptor::Unit::UNIT_COUNT;
 use crate::protos_gen::perfetto_scx::trace_packet::Data::TrackDescriptor as DataTrackDescriptor;
 use crate::protos_gen::perfetto_scx::track_event::Type as TrackEventType;
 use crate::protos_gen::perfetto_scx::{
-    CounterDescriptor, FtraceEvent, FtraceEventBundle, SchedSwitchFtraceEvent,
+    CounterDescriptor, FtraceEvent, FtraceEventBundle, IpiRaiseFtraceEvent, SchedSwitchFtraceEvent,
     SchedWakeupFtraceEvent, SchedWakingFtraceEvent, SoftirqEntryFtraceEvent,
     SoftirqExitFtraceEvent, Trace, TracePacket, TrackDescriptor, TrackEvent,
 };
@@ -285,6 +287,28 @@ impl<'a> PerfettoTraceManager<'a> {
             exit_ftrace_event.set_pid(action.pid);
 
             [entry_ftrace_event, exit_ftrace_event]
+        });
+    }
+
+    /// Adds events for the IPI entry/exit events.
+    pub fn on_ipi(&mut self, action: &IPIAction) {
+        let IPIAction {
+            ts,
+            cpu,
+            target_cpu,
+            pid,
+        } = action;
+
+        self.ftrace_events.entry(*cpu).or_default().push({
+            let mut ftrace_event = FtraceEvent::new();
+            let mut raise_event = IpiRaiseFtraceEvent::new();
+            raise_event.set_reason("IPI raise".to_string());
+            raise_event.set_target_cpus(*target_cpu);
+            ftrace_event.set_pid(*pid);
+            ftrace_event.set_timestamp(*ts);
+            ftrace_event.set_ipi_raise(raise_event);
+
+            ftrace_event
         });
     }
 

@@ -153,12 +153,21 @@ pub struct RecordTraceAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct IPIAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub target_cpu: u32,
+    pub pid: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
     Tick,
     Increment,
     Decrement,
     Quit,
     Help,
+    IPI(IPIAction),
     Event,
     ClearEvent,
     NextEvent,
