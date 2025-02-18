@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn test_ksym_exists() {
-        assert!(super::ksym_exists("scx_bpf_consume").unwrap());
+        assert!(super::ksym_exists("bpf_task_acquire").unwrap());
         assert!(!super::ksym_exists("NO_SUCH_KFUNC").unwrap());
     }
 }
