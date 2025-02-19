@@ -7,6 +7,9 @@ license = "GPL-2.0-only"
 repository = "https://github.com/sched-ext/scx"
 description = "sched_ext scheduler tool for observability"
 
+[package.metadata.scx]
+ci.use_clippy = true
+
 [lints.rust]
 unused_imports = "allow"
 
