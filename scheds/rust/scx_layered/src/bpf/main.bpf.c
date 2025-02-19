@@ -54,7 +54,7 @@ const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
-const volatile bool enable_gpu_support = true;
+const volatile bool enable_gpu_support = false;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
 const u32 zero_u32 = 0;
