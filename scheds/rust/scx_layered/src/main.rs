@@ -40,7 +40,6 @@ use log::debug;
 use log::info;
 use log::trace;
 use log::warn;
-use nix::sched::{sched_setaffinity, CpuSet};
 use nvml_wrapper::Nvml;
 use scx_layered::*;
 use scx_stats::prelude::*;
@@ -92,8 +91,6 @@ const NR_LSTATS: usize = bpf_intf::layer_stat_id_NR_LSTATS as usize;
 const NR_LLC_LSTATS: usize = bpf_intf::llc_layer_stat_id_NR_LLC_LSTATS as usize;
 
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
-
-const CPUMASK_MAX_LONGS: usize = 8;
 
 lazy_static! {
     static ref USAGE_DECAY: f64 = 0.5f64.powf(1.0 / USAGE_HALF_LIFE_F64);
@@ -558,11 +555,6 @@ struct Opts {
     #[clap(long, default_value = "false")]
     enable_gpu_support: bool,
 
-    /// Hack -- set ideal affinities on gpu tasks. ideally this should
-    /// use layers and not affinities.
-    #[clap(long, default_value = "false")]
-    affinitize_gpu_tasks: bool,
-
     /// GPU Pid Poll Short Interval, if gpu support enabled.
     #[clap(long, default_value = "180")]
     gpu_poll_short_interval: u64,
@@ -803,7 +795,6 @@ struct GpuMonData {
     sysinfo_sys: sysinfo::System,
     last_nvml_poll: std::time::SystemTime,
     gpu_pid_to_start_time: HashMap<u32, u64>,
-    gpu_to_affinity: HashMap<u32, CpuSet>,
 }
 
 #[derive(Clone, Debug)]
@@ -1864,7 +1855,6 @@ impl<'a> Scheduler<'a> {
             ),
             last_nvml_poll: std::time::SystemTime::now(),
             gpu_pid_to_start_time: HashMap::new(),
-            gpu_to_affinity: HashMap::new(),
         };
 
         let sched = Self {
@@ -2002,40 +1992,14 @@ impl<'a> Scheduler<'a> {
             // Iterate over all devices and gather running processes
             for i in 0..device_count {
                 let device = nvml.device_by_index(i)?;
-                // this feels expensive and static, so do it once.
-                if self.gpu_mon_data.gpu_to_affinity.is_empty() {
-                    let affinity = device.cpu_affinity(CPUMASK_MAX_LONGS)?;
-                    let mut cpu_set = CpuSet::new();
-                    for (x, &sub_cpumask) in affinity.iter().enumerate() {
-                        for cpu_index in 0..64 {
-                            if ((sub_cpumask >> cpu_index) & 1) == 1 {
-                                cpu_set.set(x * 32 + cpu_index)?;
-                            }
-                        }
-                    }
-                    self.gpu_mon_data.gpu_to_affinity.insert(i, cpu_set);
-                }
-
                 let procs = device.running_compute_processes()?;
 
                 for proc_info in procs {
                     pids.insert(proc_info.pid);
-                    if self.opts.affinitize_gpu_tasks
-                        && !self.gpu_mon_data.gpu_to_affinity.is_empty()
-                    {
-                        let cpu_set = self.gpu_mon_data.gpu_to_affinity.get(&i);
-                        if let Some(cpu_set) = cpu_set {
-                            sched_setaffinity(
-                                nix::unistd::Pid::from_raw(proc_info.pid.try_into()?),
-                                cpu_set,
-                            )?;
-                        }
-                    }
                 }
             }
 
             // ensure current pids only have current pids.
-            let zero = 0;
             let all_pid_bpf_map = MapHandle::try_from(&self.skel.maps.all_gpu_pid)?;
             let cur_pid_bpf_map = MapHandle::try_from(&self.skel.maps.cur_gpu_pid)?;
 
