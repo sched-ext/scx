@@ -40,6 +40,7 @@ use log::debug;
 use log::info;
 use log::trace;
 use log::warn;
+use nix::sched::{sched_setaffinity, CpuSet};
 use nvml_wrapper::Nvml;
 use scx_layered::*;
 use scx_stats::prelude::*;
@@ -91,6 +92,8 @@ const NR_LSTATS: usize = bpf_intf::layer_stat_id_NR_LSTATS as usize;
 const NR_LLC_LSTATS: usize = bpf_intf::llc_layer_stat_id_NR_LLC_LSTATS as usize;
 
 const NR_LAYER_MATCH_KINDS: usize = bpf_intf::layer_match_kind_NR_LAYER_MATCH_KINDS as usize;
+
+const CPUMASK_MAX_LONGS: usize = 8;
 
 lazy_static! {
     static ref USAGE_DECAY: f64 = 0.5f64.powf(1.0 / USAGE_HALF_LIFE_F64);
@@ -555,6 +558,11 @@ struct Opts {
     #[clap(long, default_value = "false")]
     enable_gpu_support: bool,
 
+    /// Hack -- set ideal affinities on gpu tasks. ideally this should
+    /// use layers and not affinities.
+    #[clap(long, default_value = "false")]
+    affinitize_gpu_tasks: bool,
+
     /// GPU Pid Poll Short Interval, if gpu support enabled.
     #[clap(long, default_value = "180")]
     gpu_poll_short_interval: u64,
@@ -794,7 +802,8 @@ impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
 struct GpuMonData {
     sysinfo_sys: sysinfo::System,
     last_nvml_poll: std::time::SystemTime,
-    gpu_pidmap: HashMap<u32, u64>,
+    gpu_pid_to_start_time: HashMap<u32, u64>,
+    gpu_to_affinity: HashMap<u32, CpuSet>,
 }
 
 #[derive(Clone, Debug)]
@@ -1854,7 +1863,8 @@ impl<'a> Scheduler<'a> {
                     .with_processes(sysinfo::ProcessRefreshKind::everything()),
             ),
             last_nvml_poll: std::time::SystemTime::now(),
-            gpu_pidmap: HashMap::new(),
+            gpu_pid_to_start_time: HashMap::new(),
+            gpu_to_affinity: HashMap::new(),
         };
 
         let sched = Self {
@@ -1957,10 +1967,10 @@ impl<'a> Scheduler<'a> {
                 .sysinfo_sys
                 .refresh_processes_specifics(sysinfo::ProcessRefreshKind::new());
             let current_pidmap = self.gpu_mon_data.sysinfo_sys.processes();
-            if self.gpu_mon_data.gpu_pidmap.is_empty() {
+            if self.gpu_mon_data.gpu_pid_to_start_time.is_empty() {
                 missing_gpu_pid = true;
             } else {
-                for (k, v) in self.gpu_mon_data.gpu_pidmap.iter() {
+                for (k, v) in self.gpu_mon_data.gpu_pid_to_start_time.iter() {
                     let k_pid = sysinfo::Pid::from_u32(*k);
                     if current_pidmap.contains_key(&k_pid) {
                         if *v < current_pidmap.get(&k_pid).unwrap().start_time() {
@@ -1988,17 +1998,41 @@ impl<'a> Scheduler<'a> {
             debug!("calling NVML to update GPU pids");
             self.gpu_mon_data.last_nvml_poll = std::time::SystemTime::now();
             let device_count = nvml.device_count()?;
-
             let mut pids = HashSet::new();
-
             // Iterate over all devices and gather running processes
             for i in 0..device_count {
                 let device = nvml.device_by_index(i)?;
+                // this feels expensive and static, so do it once.
+                if self.gpu_mon_data.gpu_to_affinity.is_empty() {
+                    let affinity = device.cpu_affinity(CPUMASK_MAX_LONGS)?;
+                    let mut cpu_set = CpuSet::new();
+                    for (x, &sub_cpumask) in affinity.iter().enumerate() {
+                        for cpu_index in 0..64 {
+                            if ((sub_cpumask >> cpu_index) & 1) == 1 {
+                                cpu_set.set(x * 32 + cpu_index)?;
+                            }
+                        }
+                    }
+                    self.gpu_mon_data.gpu_to_affinity.insert(i, cpu_set);
+                }
 
                 let procs = device.running_compute_processes()?;
 
                 for proc_info in procs {
                     pids.insert(proc_info.pid);
+                    if self.opts.affinitize_gpu_tasks
+                        && !self.gpu_mon_data.gpu_to_affinity.is_empty()
+                    {
+                        let cpu_set = self
+                            .gpu_mon_data
+                            .gpu_to_affinity
+                            .get(&i)
+                            .expect("missing gpu numa data");
+                        sched_setaffinity(
+                            nix::unistd::Pid::from_raw(proc_info.pid.try_into()?),
+                            cpu_set,
+                        )?;
+                    }
                 }
             }
 
@@ -2050,7 +2084,7 @@ impl<'a> Scheduler<'a> {
             self.gpu_mon_data
                 .sysinfo_sys
                 .refresh_processes_specifics(sysinfo::ProcessRefreshKind::new());
-            self.gpu_mon_data.gpu_pidmap.clear();
+            self.gpu_mon_data.gpu_pid_to_start_time.clear();
             for x in pids {
                 let x_pid = sysinfo::Pid::from_u32(x);
                 if self
@@ -2065,12 +2099,17 @@ impl<'a> Scheduler<'a> {
                         .processes()
                         .get(&x_pid)
                         .unwrap();
-                    self.gpu_mon_data.gpu_pidmap.insert(x, proc.start_time());
+                    self.gpu_mon_data
+                        .gpu_pid_to_start_time
+                        .insert(x, proc.start_time());
                 } else {
-                    self.gpu_mon_data.gpu_pidmap.insert(x, 0);
+                    self.gpu_mon_data.gpu_pid_to_start_time.insert(x, 0);
                 }
             }
-            debug!("GPU PIDs are: {:#?}", self.gpu_mon_data.gpu_pidmap);
+            debug!(
+                "GPU PIDs are: {:#?}",
+                self.gpu_mon_data.gpu_pid_to_start_time
+            );
         }
         Ok(())
     }
