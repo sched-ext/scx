@@ -2064,21 +2064,21 @@ impl<'a> Scheduler<'a> {
             let cur_add_set = pids.difference(&pids);
             let all_add_set = pids.difference(&all_pid_bpf_set);
 
-            let zero_bytes: &[u8; 4] = unsafe { std::mem::transmute(&zero) };
+            let zero_bytes = (0 as u32).to_ne_bytes();
             use libbpf_rs::MapFlags;
-            for pid in cur_add_set {
-                let pid_bytes: &[u8; 4] = unsafe { std::mem::transmute(&pid) };
-                cur_pid_bpf_map.update(pid_bytes, zero_bytes, MapFlags::ANY)?;
+            for pid in cur_add_set.cloned() {
+                let pid_bytes = pid.to_ne_bytes();
+                cur_pid_bpf_map.update(&pid_bytes, &zero_bytes, MapFlags::ANY)?;
             }
 
-            for pid in cur_delete_set {
-                let pid_bytes: &[u8; 4] = unsafe { std::mem::transmute(&pid) };
-                cur_pid_bpf_map.delete(pid_bytes)?;
+            for pid in cur_delete_set.cloned() {
+                let pid_bytes = pid.to_ne_bytes();
+                cur_pid_bpf_map.delete(&pid_bytes)?;
             }
 
-            for pid in all_add_set {
-                let pid_bytes: &[u8; 4] = unsafe { std::mem::transmute(&pid) };
-                all_pid_bpf_map.update(pid_bytes, zero_bytes, MapFlags::ANY)?;
+            for pid in all_add_set.cloned() {
+                let pid_bytes = pid.to_ne_bytes();
+                all_pid_bpf_map.update(&pid_bytes, &zero_bytes, MapFlags::ANY)?;
             }
             // bookkeeping for non-agressive mode
             self.gpu_mon_data

@@ -54,7 +54,7 @@ const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
-const volatile bool enable_gpu_support = false;
+const volatile bool enable_gpu_support = true;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
 const u32 zero_u32 = 0;
@@ -1833,32 +1833,32 @@ static __noinline bool match_one(struct layer_match *match,
 	}
 	case MATCH_USING_GPU: {
 			u32 pid;
-			u32 gpu_pid;
+			u32 *gpu_pid;
 			bool pid_present = false;
 
 			if (!enable_gpu_support)
 				return match->using_gpu;
+			
+			pid = (u32) p->tgid;
+			gpu_pid = bpf_map_lookup_elem(&cur_gpu_pid, &pid);
 
-			pid = p->pid;
-			gpu_pid = bpf_map_lookup_elem(&cur_gpu_pid, &pid) == 0;
-
-			if (gpu_pid)
+			if (gpu_pid && *gpu_pid == 0)
 				pid_present = true;
 
 			return pid_present == match->using_gpu;
 	}
 	case MATCH_USED_GPU: {
 			u32 pid;
-			u32 gpu_pid;
+			u32 *gpu_pid;
 			bool pid_present = false;
 
 			if (!enable_gpu_support)
 				return match->used_gpu;
 
-			pid = p->pid;
-			gpu_pid = bpf_map_lookup_elem(&all_gpu_pid, &pid) == 0;
+			pid = (u32) p->tgid;
+			gpu_pid = bpf_map_lookup_elem(&all_gpu_pid, &pid);
 
-			if (gpu_pid)
+			if (gpu_pid && *gpu_pid == 0)
 				pid_present = true;
 
 			return pid_present == match->used_gpu;
