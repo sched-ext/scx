@@ -794,7 +794,7 @@ impl<'a, 'b> Sub<&'b BpfStats> for &'a BpfStats {
 struct GpuMonData {
     sysinfo_sys: sysinfo::System,
     last_nvml_poll: std::time::SystemTime,
-    gpu_pidmap: HashMap<u32, u64>,
+    gpu_pid_to_start_time: HashMap<u32, u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -1854,7 +1854,7 @@ impl<'a> Scheduler<'a> {
                     .with_processes(sysinfo::ProcessRefreshKind::everything()),
             ),
             last_nvml_poll: std::time::SystemTime::now(),
-            gpu_pidmap: HashMap::new(),
+            gpu_pid_to_start_time: HashMap::new(),
         };
 
         let sched = Self {
@@ -1957,10 +1957,10 @@ impl<'a> Scheduler<'a> {
                 .sysinfo_sys
                 .refresh_processes_specifics(sysinfo::ProcessRefreshKind::new());
             let current_pidmap = self.gpu_mon_data.sysinfo_sys.processes();
-            if self.gpu_mon_data.gpu_pidmap.is_empty() {
+            if self.gpu_mon_data.gpu_pid_to_start_time.is_empty() {
                 missing_gpu_pid = true;
             } else {
-                for (k, v) in self.gpu_mon_data.gpu_pidmap.iter() {
+                for (k, v) in self.gpu_mon_data.gpu_pid_to_start_time.iter() {
                     let k_pid = sysinfo::Pid::from_u32(*k);
                     if current_pidmap.contains_key(&k_pid) {
                         if *v < current_pidmap.get(&k_pid).unwrap().start_time() {
@@ -1988,13 +1988,10 @@ impl<'a> Scheduler<'a> {
             debug!("calling NVML to update GPU pids");
             self.gpu_mon_data.last_nvml_poll = std::time::SystemTime::now();
             let device_count = nvml.device_count()?;
-
             let mut pids = HashSet::new();
-
             // Iterate over all devices and gather running processes
             for i in 0..device_count {
                 let device = nvml.device_by_index(i)?;
-
                 let procs = device.running_compute_processes()?;
 
                 for proc_info in procs {
@@ -2003,7 +2000,6 @@ impl<'a> Scheduler<'a> {
             }
 
             // ensure current pids only have current pids.
-            let zero = 0;
             let all_pid_bpf_map = MapHandle::try_from(&self.skel.maps.all_gpu_pid)?;
             let cur_pid_bpf_map = MapHandle::try_from(&self.skel.maps.cur_gpu_pid)?;
 
@@ -2030,27 +2026,27 @@ impl<'a> Scheduler<'a> {
             let cur_add_set = pids.difference(&pids);
             let all_add_set = pids.difference(&all_pid_bpf_set);
 
-            let zero_bytes: &[u8; 4] = unsafe { std::mem::transmute(&zero) };
+            let zero_bytes = (0 as u32).to_ne_bytes();
             use libbpf_rs::MapFlags;
-            for pid in cur_add_set {
-                let pid_bytes: &[u8; 4] = unsafe { std::mem::transmute(&pid) };
-                cur_pid_bpf_map.update(pid_bytes, zero_bytes, MapFlags::ANY)?;
+            for pid in cur_add_set.cloned() {
+                let pid_bytes = pid.to_ne_bytes();
+                cur_pid_bpf_map.update(&pid_bytes, &zero_bytes, MapFlags::ANY)?;
             }
 
-            for pid in cur_delete_set {
-                let pid_bytes: &[u8; 4] = unsafe { std::mem::transmute(&pid) };
-                cur_pid_bpf_map.delete(pid_bytes)?;
+            for pid in cur_delete_set.cloned() {
+                let pid_bytes = pid.to_ne_bytes();
+                cur_pid_bpf_map.delete(&pid_bytes)?;
             }
 
-            for pid in all_add_set {
-                let pid_bytes: &[u8; 4] = unsafe { std::mem::transmute(&pid) };
-                all_pid_bpf_map.update(pid_bytes, zero_bytes, MapFlags::ANY)?;
+            for pid in all_add_set.cloned() {
+                let pid_bytes = pid.to_ne_bytes();
+                all_pid_bpf_map.update(&pid_bytes, &zero_bytes, MapFlags::ANY)?;
             }
             // bookkeeping for non-agressive mode
             self.gpu_mon_data
                 .sysinfo_sys
                 .refresh_processes_specifics(sysinfo::ProcessRefreshKind::new());
-            self.gpu_mon_data.gpu_pidmap.clear();
+            self.gpu_mon_data.gpu_pid_to_start_time.clear();
             for x in pids {
                 let x_pid = sysinfo::Pid::from_u32(x);
                 if self
@@ -2065,12 +2061,17 @@ impl<'a> Scheduler<'a> {
                         .processes()
                         .get(&x_pid)
                         .unwrap();
-                    self.gpu_mon_data.gpu_pidmap.insert(x, proc.start_time());
+                    self.gpu_mon_data
+                        .gpu_pid_to_start_time
+                        .insert(x, proc.start_time());
                 } else {
-                    self.gpu_mon_data.gpu_pidmap.insert(x, 0);
+                    self.gpu_mon_data.gpu_pid_to_start_time.insert(x, 0);
                 }
             }
-            debug!("GPU PIDs are: {:#?}", self.gpu_mon_data.gpu_pidmap);
+            debug!(
+                "GPU PIDs are: {:#?}",
+                self.gpu_mon_data.gpu_pid_to_start_time
+            );
         }
         Ok(())
     }
