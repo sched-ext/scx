@@ -12,7 +12,7 @@ clap = { version = "4.1", features = ["derive", "env", "unicode", "wrap_help"] }
 colored = "2"
 ctrlc = { version = "3.1", features = ["termination"] }
 log = "0.4.17"
-nix = { features = ["process", "signal"], default-features = false, version = "0.29" }
+libc = "0.2.169"
 serde = { version = "1.0.215", features = ["derive"] }
 sysinfo = "0.33.1"
 tokio = { version = "1.42.0", features = ["macros", "sync", "rt-multi-thread", "process"] }

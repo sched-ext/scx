@@ -467,10 +467,11 @@ async fn start_scheduler(
                         log::debug!("Received cancellation signal");
                         // Send SIGINT
                         if let Some(child_id) = child.id() {
-                            nix::sys::signal::kill(
-                                nix::unistd::Pid::from_raw(child_id as i32),
-                                nix::sys::signal::SIGINT,
-                            ).context("Failed to send termination signal to the child")?;
+                            let ret = unsafe { libc::kill(child_id as i32, libc::SIGINT) };
+
+                            if ret != 0 {
+                                Err(std::io::Error::last_os_error()).context("Failed to send termination signal to the child")?;
+                            }
                         }
                         let status = child.wait().await.expect("child process encountered an error");
                         last_status = Some(status);
