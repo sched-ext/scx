@@ -157,13 +157,10 @@ const DEFAULT_WEIGHT: f64 = bpf_intf::consts_LB_DEFAULT_WEIGHT as f64;
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 
 fn now_monotonic() -> u64 {
-    let mut time = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
-    assert!(ret == 0);
-    time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
+    let time = nix::time::ClockId::CLOCK_MONOTONIC
+        .now()
+        .expect("Failed getting current monotonic time");
+    time.tv_sec() as u64 * 1_000_000_000 + time.tv_nsec() as u64
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

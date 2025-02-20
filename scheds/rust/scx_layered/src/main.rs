@@ -585,10 +585,13 @@ struct Opts {
 }
 
 fn now_monotonic() -> u64 {
-    let time = nix::time::ClockId::CLOCK_MONOTONIC
-        .now()
-        .expect("Failed getting current monotonic time");
-    time.tv_sec() as u64 * 1_000_000_000 + time.tv_nsec() as u64
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
+    assert!(ret == 0);
+    time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
 }
 
 fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
