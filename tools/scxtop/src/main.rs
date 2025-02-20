@@ -361,15 +361,16 @@ fn main() -> Result<()> {
                     Event::Render => action_tx.send(Action::Render)?,
                     Event::Key(_) => {
                         let action = get_action(&app, &keymap, e);
-                        action_tx.send(action.clone())?;
+                        action_tx.send(action)?;
                     }
                     _ => {}
                 };
 
                 while let Ok(action) = action_rx.try_recv() {
-                    app.handle_action(action.clone())?;
                     if let Action::Render = action {
                         tui.draw(|f| app.render(f).expect("Failed to render application"))?;
+                    } else {
+                        app.handle_action(&action)?;
                     }
                 }
 
