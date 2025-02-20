@@ -73,7 +73,6 @@ pub struct App<'a> {
     prev_state: AppState,
     theme: AppTheme,
     view_state: ViewState,
-    pub counter: i64,
     pub tick_rate_ms: usize,
     pub should_quit: Arc<AtomicBool>,
     pub action_tx: UnboundedSender<Action>,
@@ -196,7 +195,6 @@ impl<'a> App<'a> {
             state: AppState::Default,
             view_state: ViewState::BarChart,
             prev_state: AppState::Default,
-            counter: 0,
             tick_rate_ms,
             should_quit: Arc::new(AtomicBool::new(false)),
             action_tx,
@@ -2068,12 +2066,6 @@ impl<'a> App<'a> {
         match action {
             Action::Tick => {
                 self.on_tick()?;
-            }
-            Action::Increment => {
-                self.counter += 1;
-            }
-            Action::Decrement => {
-                self.counter -= 1;
             }
             Action::Down => self.on_down(),
             Action::Up => self.on_up(),

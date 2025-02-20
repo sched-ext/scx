@@ -163,8 +163,6 @@ pub struct IPIAction {
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
     Tick,
-    Increment,
-    Decrement,
     Quit,
     Help,
     IPI(IPIAction),
