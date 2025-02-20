@@ -17,7 +17,7 @@ fastrand = "2.1.1"
 fb_procfs = "0.7"
 lazy_static = "1.5.0"
 libbpf-rs = "=0.25.0-beta.1"
-libc = "0.2.137"
+nix = { features = ["process", "time"], default-features = false, version = "0.29" }
 log = "0.4.17"
 scx_stats = { path = "../../../rust/scx_stats", version = "1.0.9" }
 scx_stats_derive = { path = "../../../rust/scx_stats/scx_stats_derive", version = "1.0.9" }
