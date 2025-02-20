@@ -443,7 +443,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	if (is_wake_sync(p, current, cpu, prev_cpu, wake_flags)) {
 		const struct cpumask *curr_l3_domain;
 		struct cpu_ctx *cctx;
-		bool share_llc, has_idle;
+		bool share_llc;
 
 		/*
 		 * Determine waker CPU scheduling domain.
@@ -482,10 +482,9 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 * the wakee on the same CPU as the waker (since it's going to
 		 * block and release the current CPU).
 		 */
-		has_idle = bpf_cpumask_intersects(curr_l3_domain, idle_cpumask);
-		if (has_idle &&
+		if (!(current->flags & PF_EXITING) &&
+		    bpf_cpumask_intersects(curr_l3_domain, idle_cpumask) &&
 		    bpf_cpumask_test_cpu(cpu, p_mask) &&
-		    !(current->flags & PF_EXITING) &&
 		    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) == 0) {
 			*is_idle = true;
 			goto out_put_cpumask;
@@ -660,7 +659,10 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 static void kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tctx)
 {
 	const struct cpumask *idle_cpumask;
+	const struct cpumask *mask;
 	s32 cpu;
+
+	idle_cpumask = scx_bpf_get_idle_cpumask();
 
 	/*
 	 * Look for any idle CPU usable by the task that can immediately
@@ -669,12 +671,33 @@ static void kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 	 * Note that we do not want to mark the CPU as busy, since we don't
 	 * know at this stage if we will actually dispatch any task on it.
 	 */
-	idle_cpumask = scx_bpf_get_idle_cpumask();
-	cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, idle_cpumask);
-	scx_bpf_put_cpumask(idle_cpumask);
+	mask = tctx->l2_cpumask;
+	if (mask) {
+		cpu = bpf_cpumask_any_and_distribute(mask, idle_cpumask);
+		if (cpu < nr_cpu_ids) {
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			goto out_release;
+		}
+	}
+	mask = tctx->l3_cpumask;
+	if (mask) {
+		cpu = bpf_cpumask_any_and_distribute(mask, idle_cpumask);
+		if (cpu < nr_cpu_ids) {
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			goto out_release;
+		}
+	}
+	mask = tctx->cpumask;
+	if (mask) {
+		cpu = bpf_cpumask_any_and_distribute(mask, idle_cpumask);
+		if (cpu < nr_cpu_ids) {
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			goto out_release;
+		}
+	}
 
-	if (cpu < nr_cpu_ids)
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+out_release:
+	scx_bpf_put_cpumask(idle_cpumask);
 }
 
 /*
@@ -683,7 +706,7 @@ static void kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
  * Return true if the task is dispatched, false otherwise.
  */
 static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
-				u64 slice, u64 enq_flags)
+				s32 prev_cpu, u64 slice, u64 enq_flags)
 {
 	/*
 	 * If a task has been re-enqueued because its assigned CPU has been
@@ -709,7 +732,6 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 * If ops.select_cpu() has been skipped, try direct dispatch.
 	 */
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
-		s32 prev_cpu = scx_bpf_task_cpu(p);
 		struct rq *rq = scx_bpf_cpu_rq(prev_cpu);
 
 		/*
@@ -725,19 +747,6 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 		}
 
 		/*
-		 * If both the local and shared DSQs are empty, perform the
-		 * direct dispatch.
-		 */
-		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
-		    (local_pcpu || !scx_bpf_dsq_nr_queued(SHARED_DSQ))) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
-					   slice_max, enq_flags);
-			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-
-			return true;
-		}
-
-		/*
 		 * If local_pcpu is enabled always dispatch tasks that can only run
 		 * on one CPU directly.
 		 *
@@ -746,6 +755,19 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 		 */
 		if (local_pcpu && p->nr_cpus_allowed == 1) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, enq_flags);
+			__sync_fetch_and_add(&nr_direct_dispatches, 1);
+
+			return true;
+		}
+
+		/*
+		 * If the local DSQ has one or no task waiting and the shared
+		 * DSQs is empty, perform the direct dispatch.
+		 */
+		if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) <= 1 &&
+		    (local_pcpu || !scx_bpf_dsq_nr_queued(SHARED_DSQ))) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
+					   slice_max, enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
 			return true;
@@ -767,6 +789,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *tctx;
 	u64 slice, deadline;
+	s32 prev_cpu = scx_bpf_task_cpu(p);
 
 	/*
 	 * Dispatch regular tasks to the shared DSQ.
@@ -780,7 +803,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * Try to dispatch the task directly, if possible.
 	 */
-	if (try_direct_dispatch(p, tctx, slice, enq_flags))
+	if (try_direct_dispatch(p, tctx, prev_cpu, slice, enq_flags))
 		return;
 
 	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, slice, deadline, enq_flags);
