@@ -294,6 +294,7 @@ impl<'a> Scheduler<'a> {
 
         // Initialize the primary scheduling domain and the preferred domain.
         let power_profile = fetch_power_profile(false);
+        info!("power profile = {}", power_profile);
         if let Err(err) = Self::init_energy_domain(&mut skel, &opts.primary_domain, power_profile) {
             warn!("failed to initialize primary domain: error {}", err);
         }
