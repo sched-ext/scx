@@ -190,6 +190,7 @@ pub enum Action {
     NextViewState,
     RecordTrace(RecordTraceAction),
     ToggleCpuFreq,
+    ToggleLocalization,
     ToggleUncoreFreq,
     TickRateChange(std::time::Duration),
     IncTickRate,
