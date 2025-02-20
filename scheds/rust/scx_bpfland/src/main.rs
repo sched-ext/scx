@@ -493,6 +493,20 @@ impl<'a> Scheduler<'a> {
 
         // Update the BPF cpumasks for the cache domains.
         for (cache_id, cpus) in cache_id_map {
+            // Ignore the cache domain if it includes a single CPU or all the CPUs.
+            if cpus.len() <= 1 || cpus.len() == *NR_CPU_IDS {
+                continue;
+            }
+
+            // Ignore the cache domain if all the CPUs are part of the same SMT core.
+            let smt_siblings = topo.sibling_cpus();
+            if cpus
+                .iter()
+                .all(|cpu| cpus.contains(&(smt_siblings[*cpu] as usize)))
+            {
+                continue;
+            }
+
             info!(
                 "L{} cache ID {}: sibling CPUs: {:?}",
                 cache_lvl, cache_id, cpus
