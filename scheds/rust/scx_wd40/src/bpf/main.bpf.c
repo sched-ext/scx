@@ -155,22 +155,9 @@ static void task_load_adj(task_ptr taskc, u64 now, bool runnable)
 	taskc->dcyc_rd = rdp;
 }
 
-/*
- * Userspace tuner will frequently update the following struct with tuning
- * parameters and bump its gen. refresh_tune_params() converts them into forms
- * that can be used directly in the scheduling paths.
- */
-struct tune_input{
-	u64 gen;
-	u64 slice_ns;
-	u64 direct_greedy_cpumask[MAX_CPUS / 64];
-	u64 kick_greedy_cpumask[MAX_CPUS / 64];
-} tune_input;
-
-u64 tune_params_gen;
-private(A) scx_bitmap_t all_cpumask;
-private(A) scx_bitmap_t direct_greedy_cpumask;
-private(A) scx_bitmap_t kick_greedy_cpumask;
+scx_bitmap_t all_cpumask;
+scx_bitmap_t direct_greedy_cpumask;
+scx_bitmap_t kick_greedy_cpumask;
 
 static u32 cpu_to_dom_id(s32 cpu)
 {
@@ -186,41 +173,6 @@ static u32 cpu_to_dom_id(s32 cpu)
 static inline bool is_offline_cpu(s32 cpu)
 {
 	return cpu_to_dom_id(cpu) > MAX_DOMS;
-}
-
-static void refresh_tune_params(void)
-{
-	s32 cpu;
-
-	if (tune_params_gen == tune_input.gen)
-		return;
-
-	tune_params_gen = tune_input.gen;
-	slice_ns = tune_input.slice_ns;
-
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		u32 dom_id = cpu_to_dom_id(cpu);
-		dom_ptr domc;
-
-		if (is_offline_cpu(cpu))
-			continue;
-
-		if (!(domc = lookup_dom_ctx(dom_id)))
-			return;
-
-		if (tune_input.direct_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64))) {
-			scx_bitmap_set_cpu(cpu, direct_greedy_cpumask);
-			scx_bitmap_set_cpu(cpu, domc->direct_greedy_cpumask);
-		} else {
-			scx_bitmap_clear_cpu(cpu, direct_greedy_cpumask);
-			scx_bitmap_clear_cpu(cpu, domc->direct_greedy_cpumask);
-		}
-
-		if (tune_input.kick_greedy_cpumask[cpu / 64] & (1LLU << (cpu % 64)))
-			scx_bitmap_set_cpu(cpu, kick_greedy_cpumask);
-		else
-			scx_bitmap_clear_cpu(cpu, kick_greedy_cpumask);
-	}
 }
 
 static s32 try_sync_wakeup(struct task_struct *p, task_ptr taskc,
@@ -431,8 +383,6 @@ s32 BPF_STRUCT_OPS(wd40_select_cpu, struct task_struct *p, s32 prev_cpu,
 	bool prev_domestic, has_idle_cores;
 	scx_bitmap_t p_cpumask;
 	s32 cpu;
-
-	refresh_tune_params();
 
 	taskc = lookup_task_ctx(p);
 	p_cpumask  = taskc->cpumask;

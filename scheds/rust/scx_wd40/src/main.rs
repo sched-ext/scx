@@ -457,7 +457,8 @@ impl<'a> Scheduler<'a> {
                 let dom_cpumask_slice = unsafe{ &mut *domc.cpumask};
 
                 let raw_dom_slice = dom.mask_slice();
-                dom_cpumask_slice.bits.clone_from_slice(raw_dom_slice);
+                let (left, _) = dom_cpumask_slice.bits.split_at_mut(raw_numa_slice.len());
+                left.clone_from_slice(raw_dom_slice);
                 skel.maps.bss_data.dom_numa_id_map[dom.id()] =
                     numa.try_into().expect("NUMA ID could not fit into 32 bits");
 
