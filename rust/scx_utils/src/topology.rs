@@ -317,9 +317,9 @@ impl Topology {
 /// TopoCtx is a helper struct used to build a topology.
 struct TopoCtx {
     /// Mapping of NUMA node core ids
-    node_core_kernel_ids: BTreeMap<(usize, usize), usize>,
+    node_core_kernel_ids: BTreeMap<(usize, usize, usize), usize>,
     /// Mapping of NUMA node LLC ids
-    node_llc_kernel_ids: BTreeMap<(usize, usize), usize>,
+    node_llc_kernel_ids: BTreeMap<(usize, usize, usize), usize>,
     /// Mapping of L2 ids
     l2_ids: BTreeMap<String, usize>,
     /// Mapping of L3 ids
@@ -450,7 +450,7 @@ fn create_insert_cpu(
     let num_llcs = topo_ctx.node_llc_kernel_ids.len();
     let llc_id = topo_ctx
         .node_llc_kernel_ids
-        .entry((node.id, llc_kernel_id))
+        .entry((node.id, package_id, llc_kernel_id))
         .or_insert(num_llcs);
 
     let llc = node.llcs.entry(*llc_id).or_insert(Arc::new(Llc {
@@ -484,7 +484,7 @@ fn create_insert_cpu(
     let num_cores = topo_ctx.node_core_kernel_ids.len();
     let core_id = topo_ctx
         .node_core_kernel_ids
-        .entry((node.id, core_kernel_id))
+        .entry((node.id, package_id, core_kernel_id))
         .or_insert(num_cores);
 
     let core = llc_mut.cores.entry(*core_id).or_insert(Arc::new(Core {
