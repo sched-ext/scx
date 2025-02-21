@@ -2223,7 +2223,7 @@ impl<'a> App<'a> {
     }
 
     /// Handles the action and updates application states.
-    pub fn handle_action(&mut self, action: Action) -> Result<()> {
+    pub fn handle_action(&mut self, action: &Action) -> Result<()> {
         match action {
             Action::Tick => {
                 self.on_tick()?;
@@ -2234,10 +2234,10 @@ impl<'a> App<'a> {
             Action::PageDown => self.on_pg_down(),
             Action::Enter => self.on_enter(),
             Action::SetState(state) => {
-                if state == self.state {
+                if *state == self.state {
                     self.set_state(self.prev_state.clone());
                 } else {
-                    self.set_state(state);
+                    self.set_state(state.clone());
                 }
             }
 
@@ -2259,28 +2259,28 @@ impl<'a> App<'a> {
                 self.on_scheduler_unload();
             }
             Action::SchedStats(raw) => {
-                self.on_sched_stats(raw);
+                self.on_sched_stats(raw.clone());
             }
             Action::SchedCpuPerfSet(SchedCpuPerfSetAction { cpu, perf }) => {
-                self.on_cpu_perf(cpu, perf);
+                self.on_cpu_perf(*cpu, *perf);
             }
             Action::RecordTrace(RecordTraceAction { immediate }) => {
-                self.start_trace(immediate)?;
+                self.start_trace(*immediate)?;
             }
             Action::SchedSwitch(a) => {
-                self.on_sched_switch(&a);
+                self.on_sched_switch(a);
             }
             Action::SchedWakeup(a) => {
-                self.on_sched_wakeup(&a);
+                self.on_sched_wakeup(a);
             }
             Action::SchedWaking(a) => {
-                self.on_sched_waking(&a);
+                self.on_sched_waking(a);
             }
             Action::SoftIRQ(a) => {
-                self.on_softirq(&a);
+                self.on_softirq(a);
             }
             Action::IPI(a) => {
-                self.on_ipi(&a);
+                self.on_ipi(a);
             }
             Action::ClearEvent => self.stop_perf_events(),
             Action::ChangeTheme => {
@@ -2310,7 +2310,7 @@ impl<'a> App<'a> {
             }
             Action::Quit => match self.state {
                 AppState::Help => {
-                    self.handle_action(Action::SetState(AppState::Help))?;
+                    self.handle_action(&Action::SetState(AppState::Help))?;
                 }
                 _ => {
                     self.should_quit.store(true, Ordering::Relaxed);
