@@ -30,6 +30,7 @@ use crate::{
 use anyhow::Result;
 use glob::glob;
 use libbpf_rs::Link;
+use num_format::{SystemLocale, ToFormattedString};
 use protobuf::Message;
 use ratatui::prelude::Constraint;
 use ratatui::{
@@ -61,6 +62,8 @@ const DSQ_VTIME_CUTOFF: u64 = 1_000_000_000_000_000;
 
 /// App is the struct for scxtop application state.
 pub struct App<'a> {
+    localize: bool,
+    locale: SystemLocale,
     stats_client: Arc<RwLock<StatsClient>>,
     stats_socket_path: String,
     sched_stats_raw: String,
@@ -184,6 +187,8 @@ impl<'a> App<'a> {
         let sample_rate = skel.maps.data_data.sample_rate;
 
         let app = Self {
+            localize: true,
+            locale: SystemLocale::default()?,
             stats_client: Arc::new(RwLock::new(stats_client)),
             sched_stats_raw: "".to_string(),
             stats_socket_path: stats_socket_path.clone(),
@@ -531,7 +536,11 @@ impl<'a> App<'a> {
                     "".to_string()
                 }
             )))
-            .text_value(format!("{}", value))
+            .text_value(if self.localize {
+                value.to_formatted_string(&self.locale)
+            } else {
+                format!("{}", value)
+            })
     }
 
     /// Creates a sparkline for a cpu.
@@ -608,10 +617,20 @@ impl<'a> App<'a> {
                     .style(self.theme.border_style())
                     .border_type(BorderType::Rounded)
                     .title_top(
-                        Line::from(format!(
-                            "LLC {} avg {} max {} min {}",
-                            llc, stats.avg, stats.max, stats.min
-                        ))
+                        Line::from(if self.localize {
+                            format!(
+                                "LLC {} avg {} max {} min {}",
+                                llc,
+                                stats.avg.to_formatted_string(&self.locale),
+                                stats.max.to_formatted_string(&self.locale),
+                                stats.min.to_formatted_string(&self.locale)
+                            )
+                        } else {
+                            format!(
+                                "LLC {} avg {} max {} min {}",
+                                llc, stats.avg, stats.max, stats.min
+                            )
+                        })
                         .style(self.theme.title_style())
                         .left_aligned(),
                     ),
@@ -660,10 +679,20 @@ impl<'a> App<'a> {
                         .right_aligned(),
                     )
                     .title_top(
-                        Line::from(format!(
-                            "Node {} avg {} max {} min {}",
-                            node, stats.avg, stats.max, stats.min
-                        ))
+                        Line::from(if self.localize {
+                            format!(
+                                "Node {} avg {} max {} min {}",
+                                node,
+                                stats.avg.to_formatted_string(&self.locale),
+                                stats.max.to_formatted_string(&self.locale),
+                                stats.min.to_formatted_string(&self.locale)
+                            )
+                        } else {
+                            format!(
+                                "Node {} avg {} max {} min {}",
+                                node, stats.avg, stats.max, stats.min,
+                            )
+                        })
                         .style(self.theme.title_style())
                         .left_aligned(),
                     ),
@@ -698,10 +727,20 @@ impl<'a> App<'a> {
 
                 let llc_block = Block::bordered()
                     .title_top(
-                        Line::from(format!(
-                            "LLCs ({}) avg {} max {} min {}",
-                            self.active_event.event, stats.avg, stats.max, stats.min
-                        ))
+                        Line::from(if self.localize {
+                            format!(
+                                "LLCs ({}) avg {} max {} min {}",
+                                self.active_event.event,
+                                stats.avg.to_formatted_string(&self.locale),
+                                stats.max.to_formatted_string(&self.locale),
+                                stats.min.to_formatted_string(&self.locale)
+                            )
+                        } else {
+                            format!(
+                                "LLCs ({}) avg {} max {} min {}",
+                                self.active_event.event, stats.avg, stats.max, stats.min,
+                            )
+                        })
                         .style(self.theme.title_style())
                         .centered(),
                     )
@@ -727,10 +766,20 @@ impl<'a> App<'a> {
             ViewState::BarChart => {
                 let llc_block = Block::default()
                     .title_top(
-                        Line::from(format!(
-                            "LLCs ({}) avg {} max {} min {}",
-                            self.active_event.event, stats.avg, stats.max, stats.min,
-                        ))
+                        Line::from(if self.localize {
+                            format!(
+                                "LLCs ({}) avg {} max {} min {}",
+                                self.active_event.event,
+                                stats.avg.to_formatted_string(&self.locale),
+                                stats.max.to_formatted_string(&self.locale),
+                                stats.min.to_formatted_string(&self.locale),
+                            )
+                        } else {
+                            format!(
+                                "LLCs ({}) avg {} max {} min {}",
+                                self.active_event.event, stats.avg, stats.max, stats.min,
+                            )
+                        })
                         .style(self.theme.title_style())
                         .centered(),
                     )
@@ -799,10 +848,20 @@ impl<'a> App<'a> {
 
                 let node_block = Block::bordered()
                     .title_top(
-                        Line::from(format!(
-                            "Node ({}) avg {} max {} min {}",
-                            self.active_event.event, stats.avg, stats.max, stats.min
-                        ))
+                        Line::from(if self.localize {
+                            format!(
+                                "Node ({}) avg {} max {} min {}",
+                                self.active_event.event,
+                                stats.avg.to_formatted_string(&self.locale),
+                                stats.max.to_formatted_string(&self.locale),
+                                stats.min.to_formatted_string(&self.locale)
+                            )
+                        } else {
+                            format!(
+                                "Node ({}) avg {} max {} min {}",
+                                self.active_event.event, stats.avg, stats.max, stats.min,
+                            )
+                        })
                         .style(self.theme.title_style())
                         .centered(),
                     )
@@ -825,10 +884,20 @@ impl<'a> App<'a> {
             ViewState::BarChart => {
                 let node_block = Block::default()
                     .title_top(
-                        Line::from(format!(
-                            "NUMA Nodes ({}) avg {} max {} min {}",
-                            self.active_event.event, stats.avg, stats.max, stats.min,
-                        ))
+                        Line::from(if self.localize {
+                            format!(
+                                "NUMA Nodes ({}) avg {} max {} min {}",
+                                self.active_event.event,
+                                stats.avg.to_formatted_string(&self.locale),
+                                stats.max.to_formatted_string(&self.locale),
+                                stats.min.to_formatted_string(&self.locale),
+                            )
+                        } else {
+                            format!(
+                                "NUMA Nodes ({}) avg {} max {} min {}",
+                                self.active_event.event, stats.avg, stats.max, stats.min,
+                            )
+                        })
                         .style(self.theme.title_style())
                         .centered(),
                     )
@@ -906,10 +975,20 @@ impl<'a> App<'a> {
                         Line::from("".to_string())
                     })
                     .title_top(
-                        Line::from(format!(
-                            "dsq {:#X} avg {} max {} min {}",
-                            dsq_id, stats.avg, stats.max, stats.min
-                        ))
+                        Line::from(if self.localize {
+                            format!(
+                                "dsq {:#X} avg {} max {} min {}",
+                                dsq_id,
+                                stats.avg.to_formatted_string(&self.locale),
+                                stats.max.to_formatted_string(&self.locale),
+                                stats.min.to_formatted_string(&self.locale),
+                            )
+                        } else {
+                            format!(
+                                "dsq {:#X} avg {} max {} min {}",
+                                dsq_id, stats.avg, stats.max, stats.min,
+                            )
+                        })
                         .style(self.theme.title_style())
                         .centered(),
                     ),
@@ -943,11 +1022,22 @@ impl<'a> App<'a> {
     fn dsq_bar(&self, dsq: u64, value: u64, avg: u64, max: u64, min: u64) -> Bar {
         Bar::default()
             .value(value)
-            .label(Line::from(format!(
-                "{:#X} avg {} max {} min {}",
-                dsq, avg, max, min
-            )))
-            .text_value(format!("{}", value))
+            .label(Line::from(if self.localize {
+                format!(
+                    "{:#X} avg {} max {} min {}",
+                    dsq,
+                    avg.to_formatted_string(&self.locale),
+                    max.to_formatted_string(&self.locale),
+                    min.to_formatted_string(&self.locale)
+                )
+            } else {
+                format!("{:#X} avg {} max {} min {}", dsq, avg, max, min,)
+            }))
+            .text_value(if self.localize {
+                value.to_formatted_string(&self.locale)
+            } else {
+                format!("{}", value)
+            })
     }
 
     /// Generates DSQ bar charts.
@@ -968,11 +1058,22 @@ impl<'a> App<'a> {
     fn event_bar(&self, id: usize, value: u64, avg: u64, max: u64, min: u64) -> Bar {
         Bar::default()
             .value(value)
-            .label(Line::from(format!(
-                "{} avg {} max {} min {}",
-                id, avg, max, min
-            )))
-            .text_value(format!("{}", value))
+            .label(Line::from(if self.localize {
+                format!(
+                    "{} avg {} max {} min {}",
+                    id,
+                    avg.to_formatted_string(&self.locale),
+                    max.to_formatted_string(&self.locale),
+                    min.to_formatted_string(&self.locale)
+                )
+            } else {
+                format!("{} avg {} max {} min {}", id, avg, max, min,)
+            }))
+            .text_value(if self.localize {
+                value.to_formatted_string(&self.locale)
+            } else {
+                format!("{}", value)
+            })
     }
 
     /// Generates LLC bar charts.
@@ -1162,10 +1263,21 @@ impl<'a> App<'a> {
 
         let bar_block = Block::default()
             .title_top(
-                Line::from(format!(
-                    "{} {} avg {} max {} min {}",
-                    self.scheduler, event, stats.avg, stats.max, stats.min,
-                ))
+                Line::from(if self.localize {
+                    format!(
+                        "{} {} avg {} max {} min {}",
+                        self.scheduler,
+                        event,
+                        stats.avg.to_formatted_string(&self.locale),
+                        stats.max.to_formatted_string(&self.locale),
+                        stats.min.to_formatted_string(&self.locale),
+                    )
+                } else {
+                    format!(
+                        "{} {} avg {} max {} min {}",
+                        self.scheduler, event, stats.avg, stats.max, stats.min,
+                    )
+                })
                 .style(self.theme.title_style())
                 .centered(),
             )
@@ -1230,10 +1342,21 @@ impl<'a> App<'a> {
 
         let bar_block = Block::default()
             .title_top(
-                Line::from(format!(
-                    "{} {} avg {} max {} min {}",
-                    self.scheduler, event, stats.avg, stats.max, stats.min,
-                ))
+                Line::from(if self.localize {
+                    format!(
+                        "{} {} avg {} max {} min {}",
+                        self.scheduler,
+                        event,
+                        stats.avg.to_formatted_string(&self.locale),
+                        stats.max.to_formatted_string(&self.locale),
+                        stats.min.to_formatted_string(&self.locale),
+                    )
+                } else {
+                    format!(
+                        "{} {} avg {} max {} min {}",
+                        self.scheduler, event, stats.avg, stats.max, stats.min,
+                    )
+                })
                 .style(self.theme.title_style())
                 .centered(),
             )
@@ -1361,10 +1484,25 @@ impl<'a> App<'a> {
 
                     let node_block = Block::bordered()
                         .title_top(
-                            Line::from(format!(
-                                "Node{} ({}) avg {} max {} min {}",
-                                node.id, self.active_event.event, stats.avg, stats.max, stats.min
-                            ))
+                            Line::from(if self.localize {
+                                format!(
+                                    "Node{} ({}) avg {} max {} min {}",
+                                    node.id,
+                                    self.active_event.event,
+                                    stats.avg.to_formatted_string(&self.locale),
+                                    stats.max.to_formatted_string(&self.locale),
+                                    stats.min.to_formatted_string(&self.locale)
+                                )
+                            } else {
+                                format!(
+                                    "Node{} ({}) avg {} max {} min {}",
+                                    node.id,
+                                    self.active_event.event,
+                                    stats.avg,
+                                    stats.max,
+                                    stats.min,
+                                )
+                            })
                             .style(self.theme.title_style())
                             .centered(),
                         )
@@ -1466,10 +1604,25 @@ impl<'a> App<'a> {
 
                     let node_block = Block::bordered()
                         .title_top(
-                            Line::from(format!(
-                                "Node{} ({}) avg {} max {} min {}",
-                                node.id, self.active_event.event, stats.avg, stats.max, stats.min
-                            ))
+                            Line::from(if self.localize {
+                                format!(
+                                    "Node{} ({}) avg {} max {} min {}",
+                                    node.id,
+                                    self.active_event.event,
+                                    stats.avg.to_formatted_string(&self.locale),
+                                    stats.max.to_formatted_string(&self.locale),
+                                    stats.min.to_formatted_string(&self.locale)
+                                )
+                            } else {
+                                format!(
+                                    "Node{} ({}) avg {} max {} min {}",
+                                    node.id,
+                                    self.active_event.event,
+                                    stats.avg,
+                                    stats.max,
+                                    stats.min,
+                                )
+                            })
                             .style(self.theme.title_style())
                             .centered(),
                         )
@@ -1629,6 +1782,14 @@ impl<'a> App<'a> {
                     "{}: Enable CPU frequency ({})",
                     self.keymap.action_keys_string(Action::ToggleCpuFreq),
                     self.collect_cpu_freq
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: Enable localization ({})",
+                    self.keymap.action_keys_string(Action::ToggleLocalization),
+                    self.localize
                 ),
                 Style::default(),
             )),
@@ -2130,6 +2291,7 @@ impl<'a> App<'a> {
             }
             Action::ToggleCpuFreq => self.collect_cpu_freq = !self.collect_cpu_freq,
             Action::ToggleUncoreFreq => self.collect_uncore_freq = !self.collect_uncore_freq,
+            Action::ToggleLocalization => self.localize = !self.localize,
             Action::IncBpfSampleRate => {
                 let sample_rate = self.skel.maps.data_data.sample_rate;
                 if sample_rate == 0 {
