@@ -131,6 +131,7 @@ struct cpu_ctx {
 	u64 tot_runtime;
 	u64 prev_runtime;
 	u64 last_running;
+	struct bpf_cpumask __kptr *smt_cpumask;
 	struct bpf_cpumask __kptr *l2_cpumask;
 	struct bpf_cpumask __kptr *l3_cpumask;
 };
@@ -851,10 +852,45 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 		kick_idle_cpu(p, tctx, prev_cpu, false);
 }
 
+static bool keep_running(const struct task_struct *p, s32 cpu)
+{
+	const struct cpumask *primary = cast_mask(primary_cpumask), *smt;
+	const struct cpumask *idle_cpumask;
+	struct cpu_ctx *cctx;
+	bool ret;
+
+	/* Do not keep running if the task doesn't need to run */
+	if (!is_queued(p))
+		return false;
+
+	/* Do not keep running if the CPU is not in the primary domain */
+	if (!primary || !bpf_cpumask_test_cpu(cpu, primary))
+		return false;
+
+	/*
+	 * Keep running only if the task is on a full-idle SMT core (or SMT
+	 * is disabled).
+	 */
+	if (!smt_enabled)
+		return true;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return false;
+
+	smt = cast_mask(cctx->smt_cpumask);
+	if (!smt)
+		return false;
+
+	idle_cpumask = scx_bpf_get_idle_cpumask();
+	ret = bpf_cpumask_subset(smt, idle_cpumask);
+	scx_bpf_put_cpumask(idle_cpumask);
+
+	return ret;
+}
+
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 {
-	const struct cpumask *primary = cast_mask(primary_cpumask);
-
 	/*
 	 * Consume regular tasks from the shared DSQ, transferring them to the
 	 * local CPU DSQ.
@@ -865,11 +901,9 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * If the current task expired its time slice and no other task wants
 	 * to run, simply replenish its time slice and let it run for another
-	 * round on the same CPU (provided the CPU is in the primary scheduling
-	 * domain).
+	 * round on the same CPU.
 	 */
-	if (prev && is_queued(prev) &&
-	    primary && bpf_cpumask_test_cpu(cpu, primary))
+	if (prev && keep_running(prev, cpu))
 		prev->scx.slice = slice_max;
 }
 
@@ -1120,6 +1154,9 @@ int enable_sibling_cpu(struct domain_arg *input)
 
 	/* Make sure the target CPU mask is initialized */
 	switch (input->lvl_id) {
+	case 0:
+		pmask = &cctx->smt_cpumask;
+		break;
 	case 2:
 		pmask = &cctx->l2_cpumask;
 		break;
@@ -1240,6 +1277,6 @@ SCX_OPS_DEFINE(bpfland_ops,
 	       .init_task		= (void *)bpfland_init_task,
 	       .init			= (void *)bpfland_init,
 	       .exit			= (void *)bpfland_exit,
-	       .flags			= SCX_OPS_ENQ_EXITING,
+	       .flags			= SCX_OPS_ENQ_EXITING | SCX_OPS_ENQ_LAST,
 	       .timeout_ms		= 5000,
 	       .name			= "bpfland");

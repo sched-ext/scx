@@ -304,6 +304,11 @@ impl<'a> Scheduler<'a> {
             );
         }
 
+        // Initialize SMT domains.
+        if smt_enabled {
+            Self::init_smt_domains(&mut skel, &topo)?;
+        }
+
         // Initialize L2 cache domains.
         if !opts.disable_l2 {
             Self::init_l2_cache_domains(&mut skel, &topo)?;
@@ -467,6 +472,17 @@ impl<'a> Scheduler<'a> {
         let out = prog.test_run(input).unwrap();
         if out.return_value != 0 {
             return Err(out.return_value);
+        }
+
+        Ok(())
+    }
+
+    fn init_smt_domains(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<(), std::io::Error> {
+        let smt_siblings = topo.sibling_cpus();
+
+        info!("SMT sibling CPUs: {:?}", smt_siblings);
+        for (cpu, sibling_cpu) in smt_siblings.iter().enumerate() {
+            Self::enable_sibling_cpu(skel, 0, cpu, *sibling_cpu as usize).unwrap();
         }
 
         Ok(())
