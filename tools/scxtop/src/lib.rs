@@ -7,6 +7,8 @@ mod app;
 pub mod bpf_intf;
 pub mod bpf_skel;
 mod bpf_stats;
+pub mod cli;
+pub mod config;
 mod cpu_data;
 mod event_data;
 mod keymap;
@@ -44,8 +46,9 @@ pub use plain::Plain;
 // Generate serialization types for handling events from the bpf ring buffer.
 unsafe impl Plain for crate::bpf_skel::types::bpf_event {}
 
-pub const STATS_SOCKET_PATH: &str = "/var/run/scx/root/stats";
 pub const APP: &str = "scxtop";
+pub const TRACE_FILE_PREFIX: &str = "scxtop_trace";
+pub const STATS_SOCKET_PATH: &str = "/var/run/scx/root/stats";
 pub const LICENSE: &str = "Copyright (c) Meta Platforms, Inc. and affiliates.
 
 This software may be used and distributed according to the terms of the 
