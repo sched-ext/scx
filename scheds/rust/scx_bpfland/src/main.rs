@@ -13,6 +13,7 @@ pub use bpf_intf::*;
 mod stats;
 use std::collections::BTreeMap;
 use std::ffi::c_int;
+use std::fmt::Write;
 use std::fs::File;
 use std::io::Read;
 use std::mem::MaybeUninit;
@@ -51,7 +52,7 @@ use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 use stats::Metrics;
 
-const SCHEDULER_NAME: &'static str = "scx_bpfland";
+const SCHEDULER_NAME: &str = "scx_bpfland";
 
 #[derive(PartialEq)]
 enum Powermode {
@@ -100,11 +101,10 @@ fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
     }
 
     // Convert the byte vector to a hexadecimal string.
-    let hex_str: String = bitmask
-        .iter()
-        .rev()
-        .map(|byte| format!("{:02x}", byte))
-        .collect();
+    let hex_str: String = bitmask.iter().rev().fold(String::new(), |mut f, byte| {
+        let _ = write!(&mut f, "{:02x}", byte);
+        f
+    });
 
     format!("0x{}", hex_str)
 }
