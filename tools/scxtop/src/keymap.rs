@@ -42,6 +42,7 @@ impl Default for KeyMap {
         bindings.insert(Key::Char('l'), Action::SetState(AppState::Llc));
         bindings.insert(Key::Char('n'), Action::SetState(AppState::Node));
         bindings.insert(Key::Char('s'), Action::SetState(AppState::Scheduler));
+        bindings.insert(Key::Char('S'), Action::SaveConfig);
         bindings.insert(
             Key::Char('a'),
             Action::RecordTrace(RecordTraceAction { immediate: false }),

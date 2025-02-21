@@ -6,6 +6,9 @@
 use scxtop::bpf_intf::*;
 use scxtop::bpf_skel::types::bpf_event;
 use scxtop::bpf_skel::*;
+use scxtop::cli::Cli;
+use scxtop::config::get_config_path;
+use scxtop::config::Config;
 use scxtop::read_file_string;
 use scxtop::App;
 use scxtop::Event;
@@ -31,62 +34,12 @@ use libbpf_rs::UprobeOpts;
 use ratatui::crossterm::event::KeyCode::Char;
 use tokio::sync::mpsc;
 
+use std::fs;
 use std::mem::MaybeUninit;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-
-const TRACE_FILE_PREFIX: &str = "scxtop_trace";
-
-#[derive(Parser, Debug)]
-#[command(about = APP)]
-struct Args {
-    /// App tick rate in milliseconds.
-    #[arg(short = 'r', long, default_value_t = 250)]
-    tick_rate_ms: usize,
-    /// Extra verbose output.
-    #[arg(short, long, default_value_t = false)]
-    debug: bool,
-    /// Exclude bpf event tracking.
-    #[arg(short, long, default_value_t = false)]
-    exclude_bpf: bool,
-    /// Stats unix socket path.
-    #[arg(short, long, default_value_t = STATS_SOCKET_PATH.to_string())]
-    stats_socket_path: String,
-    /// Trace file prefix for perfetto traces
-    #[arg(short, long, default_value_t = TRACE_FILE_PREFIX.to_string())]
-    trace_file_prefix: String,
-    /// Number of ticks for traces.
-    #[arg(long, default_value_t = 5)]
-    trace_ticks: usize,
-    /// Number of worker threads
-    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u16).range(2..128))]
-    worker_threads: u16,
-    /// Number of ticks to warmup before collecting traces.
-    #[arg(long, default_value_t = 3)]
-    trace_tick_warmup: usize,
-    /// Process to monitor or all.
-    #[arg(long, default_value_t = -1)]
-    process_id: i32,
-
-    /// Automatically start a trace when a function takes too long to return.
-    #[arg(
-        long,
-        default_value_t = false,
-        requires("experimental_long_tail_tracing_symbol"),
-        requires("experimental_long_tail_tracing_binary")
-    )]
-    experimental_long_tail_tracing: bool,
-    /// Symbol to automatically trace the long tail of.
-    #[arg(long)]
-    experimental_long_tail_tracing_symbol: Option<String>,
-    /// Binary to attach the uprobe and uretprobe to.
-    #[arg(long)]
-    experimental_long_tail_tracing_binary: Option<String>,
-    /// Minimum latency to trigger a trace.
-    #[arg(long, default_value_t = 100000000)]
-    experimental_long_tail_tracing_min_latency_ns: u64,
-}
 
 fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {
     match event {
@@ -105,11 +58,14 @@ fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let args = Cli::parse();
+
+    let mut config = Config::load().unwrap_or(Config::empty_config());
+    config = Config::merge_cli(&config, &args);
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .worker_threads(args.worker_threads as usize)
+        .worker_threads(config.worker_threads() as usize)
         .build()
         .unwrap()
         .block_on(async {
@@ -117,7 +73,7 @@ fn main() -> Result<()> {
 
             let mut open_object = MaybeUninit::uninit();
             let mut builder = BpfSkelBuilder::default();
-            if args.debug {
+            if config.debug() {
                 builder.obj_builder.debug(true);
             }
 
@@ -197,7 +153,7 @@ fn main() -> Result<()> {
             };
 
             let keymap = KeyMap::default();
-            let mut tui = Tui::new(keymap.clone(), args.tick_rate_ms)?;
+            let mut tui = Tui::new(keymap.clone(), config.tick_rate_ms())?;
             let mut event_rbb = RingBufferBuilder::new();
             let tx = action_tx.clone();
             let event_handler = move |data: &[u8]| {
@@ -325,14 +281,10 @@ fn main() -> Result<()> {
             let scheduler = read_file_string(SCHED_NAME_PATH).unwrap_or("".to_string());
 
             let mut app = App::new(
-                args.stats_socket_path,
-                args.trace_file_prefix.as_str(),
+                config,
                 scheduler,
                 keymap.clone(),
                 100,
-                args.tick_rate_ms,
-                args.trace_ticks,
-                args.trace_tick_warmup,
                 args.process_id,
                 action_tx.clone(),
                 skel,
