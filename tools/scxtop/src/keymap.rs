@@ -5,7 +5,12 @@
 
 use crate::AppState;
 use crate::{Action, RecordTraceAction};
+use anyhow::anyhow;
+use anyhow::Result;
 use crossterm::event::KeyCode;
+use crossterm::event::MediaKeyCode;
+use crossterm::event::ModifierKeyCode;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug, Eq, Hash, PartialOrd, PartialEq)]
@@ -72,9 +77,20 @@ impl Default for KeyMap {
 }
 
 impl KeyMap {
+    /// Returns an empty KeyMap.
+    pub fn empty() -> KeyMap {
+        let bindings = HashMap::new();
+        KeyMap { bindings }
+    }
+
     /// Maps the Key to an Action.
     pub fn action(&self, key: &Key) -> Action {
         self.bindings.get(key).cloned().unwrap_or(Action::None)
+    }
+
+    /// Inserts a Key mapping for an Action.
+    pub fn insert(&mut self, key: Key, action: Action) {
+        self.bindings.insert(key, action);
     }
 
     /// Returns the Keys for an Action.
@@ -96,5 +112,265 @@ impl KeyMap {
             .map(|k| k.to_string())
             .collect::<Vec<_>>()
             .join("/")
+    }
+
+    pub fn to_hashmap(&self) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        for (key, action) in &self.bindings {
+            map.insert(format!("{}", key), format!("{}", action));
+        }
+        map
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialOrd, PartialEq, Serialize, Deserialize)]
+pub enum KeyCodeWrapper {
+    Backspace,
+    Left,
+    Right,
+    Up,
+    Down,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Tab,
+    BackTab,
+    Enter,
+    Esc,
+    Delete,
+    Insert,
+    F(u8),
+    Null,
+    CapsLock,
+    ScrollLock,
+    NumLock,
+    PrintScreen,
+    Pause,
+    Menu,
+    KeypadBegin,
+    Media(MediaKeyCodeWrapper),
+    Modifier(ModifierKeyCodeWrapper),
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialOrd, PartialEq, Serialize, Deserialize)]
+pub enum MediaKeyCodeWrapper {
+    FastForward,
+    LowerVolume,
+    MuteVolume,
+    Pause,
+    Play,
+    PlayPause,
+    RaiseVolume,
+    Record,
+    Reverse,
+    Rewind,
+    Stop,
+    TrackNext,
+    TrackPrevious,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialOrd, PartialEq, Serialize, Deserialize)]
+pub enum ModifierKeyCodeWrapper {
+    LeftShift,
+    LeftControl,
+    LeftAlt,
+    LeftSuper,
+    LeftHyper,
+    LeftMeta,
+    RightShift,
+    RightControl,
+    RightAlt,
+    RightSuper,
+    RightHyper,
+    RightMeta,
+    IsoLevel3Shift,
+    IsoLevel5Shift,
+}
+
+impl From<KeyCode> for KeyCodeWrapper {
+    fn from(keycode: KeyCode) -> Self {
+        match keycode {
+            KeyCode::Backspace => KeyCodeWrapper::Backspace,
+            KeyCode::Left => KeyCodeWrapper::Left,
+            KeyCode::Right => KeyCodeWrapper::Right,
+            KeyCode::Up => KeyCodeWrapper::Up,
+            KeyCode::Down => KeyCodeWrapper::Down,
+            KeyCode::Home => KeyCodeWrapper::Home,
+            KeyCode::End => KeyCodeWrapper::End,
+            KeyCode::PageUp => KeyCodeWrapper::PageUp,
+            KeyCode::PageDown => KeyCodeWrapper::PageDown,
+            KeyCode::Tab => KeyCodeWrapper::Tab,
+            KeyCode::BackTab => KeyCodeWrapper::BackTab,
+            KeyCode::Enter => KeyCodeWrapper::Enter,
+            KeyCode::Esc => KeyCodeWrapper::Esc,
+            KeyCode::Delete => KeyCodeWrapper::Delete,
+            KeyCode::Insert => KeyCodeWrapper::Insert,
+            KeyCode::F(n) => KeyCodeWrapper::F(n),
+            KeyCode::Null => KeyCodeWrapper::Null,
+            KeyCode::CapsLock => KeyCodeWrapper::CapsLock,
+            KeyCode::ScrollLock => KeyCodeWrapper::ScrollLock,
+            KeyCode::NumLock => KeyCodeWrapper::NumLock,
+            KeyCode::PrintScreen => KeyCodeWrapper::PrintScreen,
+            KeyCode::Pause => KeyCodeWrapper::Pause,
+            KeyCode::Menu => KeyCodeWrapper::Menu,
+            KeyCode::KeypadBegin => KeyCodeWrapper::KeypadBegin,
+            KeyCode::Media(media) => KeyCodeWrapper::Media(match media {
+                crossterm::event::MediaKeyCode::FastForward => MediaKeyCodeWrapper::FastForward,
+                crossterm::event::MediaKeyCode::PlayPause => MediaKeyCodeWrapper::PlayPause,
+                crossterm::event::MediaKeyCode::Play => MediaKeyCodeWrapper::Play,
+                crossterm::event::MediaKeyCode::Pause => MediaKeyCodeWrapper::Pause,
+                crossterm::event::MediaKeyCode::Rewind => MediaKeyCodeWrapper::Rewind,
+                crossterm::event::MediaKeyCode::Reverse => MediaKeyCodeWrapper::Reverse,
+                crossterm::event::MediaKeyCode::Stop => MediaKeyCodeWrapper::Stop,
+                crossterm::event::MediaKeyCode::TrackNext => MediaKeyCodeWrapper::TrackNext,
+                crossterm::event::MediaKeyCode::TrackPrevious => MediaKeyCodeWrapper::TrackPrevious,
+                crossterm::event::MediaKeyCode::Record => MediaKeyCodeWrapper::Record,
+                crossterm::event::MediaKeyCode::LowerVolume => MediaKeyCodeWrapper::LowerVolume,
+                crossterm::event::MediaKeyCode::RaiseVolume => MediaKeyCodeWrapper::RaiseVolume,
+                crossterm::event::MediaKeyCode::MuteVolume => MediaKeyCodeWrapper::MuteVolume,
+            }),
+            KeyCode::Modifier(modifier) => KeyCodeWrapper::Modifier(match modifier {
+                crossterm::event::ModifierKeyCode::LeftShift => ModifierKeyCodeWrapper::LeftShift,
+                crossterm::event::ModifierKeyCode::LeftControl => {
+                    ModifierKeyCodeWrapper::LeftControl
+                }
+                crossterm::event::ModifierKeyCode::LeftAlt => ModifierKeyCodeWrapper::LeftAlt,
+                crossterm::event::ModifierKeyCode::LeftSuper => ModifierKeyCodeWrapper::LeftSuper,
+                crossterm::event::ModifierKeyCode::LeftHyper => ModifierKeyCodeWrapper::LeftHyper,
+                crossterm::event::ModifierKeyCode::LeftMeta => ModifierKeyCodeWrapper::LeftMeta,
+                crossterm::event::ModifierKeyCode::RightShift => ModifierKeyCodeWrapper::RightShift,
+                crossterm::event::ModifierKeyCode::RightControl => {
+                    ModifierKeyCodeWrapper::RightControl
+                }
+                crossterm::event::ModifierKeyCode::RightAlt => ModifierKeyCodeWrapper::RightAlt,
+                crossterm::event::ModifierKeyCode::RightSuper => ModifierKeyCodeWrapper::RightSuper,
+                crossterm::event::ModifierKeyCode::RightHyper => ModifierKeyCodeWrapper::RightHyper,
+                crossterm::event::ModifierKeyCode::RightMeta => ModifierKeyCodeWrapper::RightMeta,
+                crossterm::event::ModifierKeyCode::IsoLevel3Shift => {
+                    ModifierKeyCodeWrapper::IsoLevel3Shift
+                }
+                crossterm::event::ModifierKeyCode::IsoLevel5Shift => {
+                    ModifierKeyCodeWrapper::IsoLevel5Shift
+                }
+            }),
+            _ => todo!(),
+        }
+    }
+}
+
+impl From<KeyCodeWrapper> for KeyCode {
+    fn from(keycode_wrapper: KeyCodeWrapper) -> Self {
+        match keycode_wrapper {
+            KeyCodeWrapper::Backspace => KeyCode::Backspace,
+            KeyCodeWrapper::Left => KeyCode::Left,
+            KeyCodeWrapper::Right => KeyCode::Right,
+            KeyCodeWrapper::Up => KeyCode::Up,
+            KeyCodeWrapper::Down => KeyCode::Down,
+            KeyCodeWrapper::Home => KeyCode::Home,
+            KeyCodeWrapper::End => KeyCode::End,
+            KeyCodeWrapper::PageUp => KeyCode::PageUp,
+            KeyCodeWrapper::PageDown => KeyCode::PageDown,
+            KeyCodeWrapper::Tab => KeyCode::Tab,
+            KeyCodeWrapper::BackTab => KeyCode::BackTab,
+            KeyCodeWrapper::Enter => KeyCode::Enter,
+            KeyCodeWrapper::Esc => KeyCode::Esc,
+            KeyCodeWrapper::Delete => KeyCode::Delete,
+            KeyCodeWrapper::Insert => KeyCode::Insert,
+            KeyCodeWrapper::F(n) => KeyCode::F(n),
+            KeyCodeWrapper::Null => KeyCode::Null,
+            KeyCodeWrapper::CapsLock => KeyCode::CapsLock,
+            KeyCodeWrapper::ScrollLock => KeyCode::ScrollLock,
+            KeyCodeWrapper::NumLock => KeyCode::NumLock,
+            KeyCodeWrapper::PrintScreen => KeyCode::PrintScreen,
+            KeyCodeWrapper::Pause => KeyCode::Pause,
+            KeyCodeWrapper::Menu => KeyCode::Menu,
+            KeyCodeWrapper::KeypadBegin => KeyCode::KeypadBegin,
+            KeyCodeWrapper::Media(media) => KeyCode::Media(match media {
+                MediaKeyCodeWrapper::PlayPause => MediaKeyCode::PlayPause,
+                MediaKeyCodeWrapper::Play => MediaKeyCode::Play,
+                MediaKeyCodeWrapper::Pause => MediaKeyCode::Pause,
+                MediaKeyCodeWrapper::Stop => MediaKeyCode::Stop,
+                MediaKeyCodeWrapper::TrackNext => MediaKeyCode::TrackNext,
+                MediaKeyCodeWrapper::TrackPrevious => MediaKeyCode::TrackPrevious,
+                MediaKeyCodeWrapper::Record => MediaKeyCode::Record,
+                MediaKeyCodeWrapper::Reverse => MediaKeyCode::Reverse,
+                MediaKeyCodeWrapper::Rewind => MediaKeyCode::Rewind,
+                MediaKeyCodeWrapper::FastForward => MediaKeyCode::FastForward,
+                MediaKeyCodeWrapper::LowerVolume => MediaKeyCode::LowerVolume,
+                MediaKeyCodeWrapper::RaiseVolume => MediaKeyCode::RaiseVolume,
+                MediaKeyCodeWrapper::MuteVolume => MediaKeyCode::MuteVolume,
+            }),
+            KeyCodeWrapper::Modifier(modifier) => KeyCode::Modifier(match modifier {
+                ModifierKeyCodeWrapper::LeftShift => ModifierKeyCode::LeftShift,
+                ModifierKeyCodeWrapper::LeftControl => ModifierKeyCode::LeftControl,
+                ModifierKeyCodeWrapper::LeftAlt => ModifierKeyCode::LeftAlt,
+                ModifierKeyCodeWrapper::LeftSuper => ModifierKeyCode::LeftSuper,
+                ModifierKeyCodeWrapper::LeftHyper => ModifierKeyCode::LeftHyper,
+                ModifierKeyCodeWrapper::LeftMeta => ModifierKeyCode::LeftMeta,
+                ModifierKeyCodeWrapper::RightShift => ModifierKeyCode::RightShift,
+                ModifierKeyCodeWrapper::RightControl => ModifierKeyCode::RightControl,
+                ModifierKeyCodeWrapper::RightAlt => ModifierKeyCode::RightAlt,
+                ModifierKeyCodeWrapper::RightSuper => ModifierKeyCode::RightSuper,
+                ModifierKeyCodeWrapper::RightHyper => ModifierKeyCode::RightHyper,
+                ModifierKeyCodeWrapper::RightMeta => ModifierKeyCode::RightMeta,
+                ModifierKeyCodeWrapper::IsoLevel3Shift => ModifierKeyCode::IsoLevel3Shift,
+                ModifierKeyCodeWrapper::IsoLevel5Shift => ModifierKeyCode::IsoLevel5Shift,
+            }),
+        }
+    }
+}
+
+/// Parses a key from a string.
+pub fn parse_key(key_str: &str) -> Result<Key> {
+    if key_str.len() == 1 {
+        Ok(Key::Char(key_str.chars().next().unwrap()))
+    } else if let Ok(keycode_wrapper) =
+        toml::from_str::<KeyCodeWrapper>(&format!("\"{}\"", key_str))
+    {
+        Ok(Key::Code(keycode_wrapper.into()))
+    } else {
+        match key_str {
+            "Page Up" | "PageUp" => Ok(Key::Code(KeyCode::PageUp)),
+            "Page Down" | "PageDown" => Ok(Key::Code(KeyCode::PageDown)),
+            "Up" => Ok(Key::Code(KeyCode::Up)),
+            "Down" => Ok(Key::Code(KeyCode::Down)),
+            "Enter" => Ok(Key::Code(KeyCode::Enter)),
+            _ => Err(anyhow!("Invalid key: {}", key_str)),
+        }
+    }
+}
+
+/// Parses an Action from a string.
+pub fn parse_action(action_str: &str) -> Result<Action> {
+    match action_str {
+        "AppStateDefault" => Ok(Action::SetState(AppState::Default)),
+        "AppStateEvent" => Ok(Action::SetState(AppState::Event)),
+        "ToggleCpuFreq" => Ok(Action::ToggleCpuFreq),
+        "ToggleUncoreFreq" => Ok(Action::ToggleUncoreFreq),
+        "ToggleLocalization" => Ok(Action::ToggleLocalization),
+        "AppStateHelp" => Ok(Action::SetState(AppState::Help)),
+        "AppStateLlc" => Ok(Action::SetState(AppState::Llc)),
+        "AppStateNode" => Ok(Action::SetState(AppState::Node)),
+        "AppStateScheduler" => Ok(Action::SetState(AppState::Scheduler)),
+        "SaveConfig" => Ok(Action::SaveConfig),
+        "RecordTrace" => Ok(Action::RecordTrace(RecordTraceAction { immediate: false })),
+        "RecordTraceNow" => Ok(Action::RecordTrace(RecordTraceAction { immediate: true })),
+        "ClearEvent" => Ok(Action::ClearEvent),
+        "PrevEvent" => Ok(Action::PrevEvent),
+        "NextEvent" => Ok(Action::NextEvent),
+        "Quit" => Ok(Action::Quit),
+        "ChangeTheme" => Ok(Action::ChangeTheme),
+        "DecTickRate" => Ok(Action::DecTickRate),
+        "IncTickRate" => Ok(Action::IncTickRate),
+        "DecBpfSampleRate" => Ok(Action::DecBpfSampleRate),
+        "IncBpfSampleRate" => Ok(Action::IncBpfSampleRate),
+        "NextViewState" => Ok(Action::NextViewState),
+        "Down" => Ok(Action::Down),
+        "Up" => Ok(Action::Up),
+        "PageDown" => Ok(Action::PageDown),
+        "PageUp" => Ok(Action::PageUp),
+        "Enter" => Ok(Action::Enter),
+        _ => Err(anyhow!("Invalid action: {}", action_str)),
     }
 }
