@@ -30,14 +30,14 @@ use crate::protos_gen::perfetto_scx::{
 /// Handler for perfetto traces. For details on data flow in perfetto see:
 /// https://perfetto.dev/docs/concepts/buffers and
 /// https://perfetto.dev/docs/reference/trace-packet-proto
-pub struct PerfettoTraceManager<'a> {
+pub struct PerfettoTraceManager {
     // proto fields
     trace: Trace,
 
     trace_id: u32,
     trusted_pid: i32,
     rng: StdRng,
-    output_file_prefix: &'a str,
+    output_file_prefix: String,
 
     // per cpu ftrace events
     ftrace_events: BTreeMap<u32, Vec<FtraceEvent>>,
@@ -48,9 +48,9 @@ pub struct PerfettoTraceManager<'a> {
     dsq_uuids: BTreeMap<u64, u64>,
 }
 
-impl<'a> PerfettoTraceManager<'a> {
+impl PerfettoTraceManager {
     /// Returns a PerfettoTraceManager that is ready to start tracing.
-    pub fn new(output_file_prefix: &'a str, seed: Option<u64>) -> Self {
+    pub fn new(output_file_prefix: String, seed: Option<u64>) -> Self {
         let trace_uuid = seed.unwrap_or(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
