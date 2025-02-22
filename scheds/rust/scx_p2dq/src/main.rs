@@ -45,6 +45,7 @@ use crate::bpf_intf::stat_idx_P2DQ_NR_STATS;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DIRECT;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DSQ_CHANGE;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DSQ_SAME;
+use crate::bpf_intf::stat_idx_P2DQ_STAT_GREEDY_IDLE;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_IDLE;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_KEEP;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_LLC_MIGRATION;
@@ -73,6 +74,10 @@ struct Opts {
     /// Disables eager pick2 load balancing.
     #[clap(short = 'e', long, action = clap::ArgAction::SetTrue)]
     eager_load_balance: bool,
+
+    /// Disables greedy idle CPU selection, may cause better load balancing on multi-LLC systems.
+    #[clap(short = 'g', long, action = clap::ArgAction::SetTrue)]
+    greedy_idle_disable: bool,
 
     /// Interactive tasks stay sticky to their CPU if no idle CPU is found.
     #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
@@ -200,6 +205,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.nr_llcs = topo.all_llcs.clone().keys().len() as u32;
         skel.maps.rodata_data.nr_nodes = topo.nodes.clone().keys().len() as u32;
         skel.maps.rodata_data.eager_load_balance = !opts.eager_load_balance;
+        skel.maps.rodata_data.greedy_idle = !opts.greedy_idle_disable;
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.interactive_sticky = opts.interactive_sticky;
         skel.maps.rodata_data.keep_running_enabled = opts.keep_running;
@@ -249,6 +255,7 @@ impl<'a> Scheduler<'a> {
         Metrics {
             direct: stats[stat_idx_P2DQ_STAT_DIRECT as usize],
             idle: stats[stat_idx_P2DQ_STAT_IDLE as usize],
+            greedy_idle: stats[stat_idx_P2DQ_STAT_GREEDY_IDLE as usize],
             sched_mode: self.skel.maps.bss_data.sched_mode,
             dsq_change: stats[stat_idx_P2DQ_STAT_DSQ_CHANGE as usize],
             same_dsq: stats[stat_idx_P2DQ_STAT_DSQ_SAME as usize],
