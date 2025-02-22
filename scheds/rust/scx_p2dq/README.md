@@ -14,3 +14,15 @@ the same LLC share the same vtime and there is special handling for
 
 The scheduler handles all scheduling decisions in BPF and the userspace
 component is only for metric reporting.
+
+### Configuration
+The main idea behind p2dq is being able to classify which tasks are interactive
+and using a separate dispatch queue (DSQ) for them. Non interactive tasks
+can have special properties such as being able to be load balanced across
+LLCs/NUMA nodes. The `--autoslice` option will attempt to scale DSQ time slices
+based on the `--interactive-ratio`. DSQ time slices can also be set manually
+if the duration/distribution of tasks that are considered to be interactive is
+known in advance. `scxtop` can be used to get an understanding of time slice
+utilization so that DSQs can be properly configured. For desktop systems keeping
+the interactive ratio small (ex: <5) and using a small number of queues (2) will
+give a general performance with autoslice enabled.

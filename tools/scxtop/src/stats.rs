@@ -110,7 +110,7 @@ impl VecStats {
                     }
                 }
                 Self {
-                    avg: if calc_avg && vec.len() > 0 {
+                    avg: if calc_avg && !vec.is_empty() {
                         sum / vec.len() as u64
                     } else {
                         0
@@ -121,7 +121,7 @@ impl VecStats {
                 }
             }
             None => Self {
-                avg: if calc_avg && vec.len() > 0 {
+                avg: if calc_avg && !vec.is_empty() {
                     sum / vec.len() as u64
                 } else {
                     0

@@ -13,10 +13,11 @@ char _license[] SEC("license") = "GPL";
 struct {
 	__uint(type, BPF_MAP_TYPE_ARENA);
 	__uint(map_flags, BPF_F_MMAPABLE);
-	__uint(max_entries, 1 << 20); /* number of pages */
 #ifdef __TARGET_ARCH_arm64
+	__uint(max_entries, 1 << 16); /* number of pages */
         __ulong(map_extra, (1ull << 32)); /* start of mmap() region */
 #else
+	__uint(max_entries, 1 << 20); /* number of pages */
         __ulong(map_extra, (1ull << 44)); /* start of mmap() region */
 #endif
 } arena __weak SEC(".maps");
@@ -307,8 +308,8 @@ sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size)
 	size_t min_chunk_size;
 	int ret;
 
-	_Static_assert(sizeof(struct sdt_chunk)  == PAGE_SIZE,
-		"chunk size must be equal to a page");
+	_Static_assert(sizeof(struct sdt_chunk) <= PAGE_SIZE,
+		"chunk size must fit into a page");
 
 	ret = sdt_pool_set_size(&sdt_chunk_pool, sizeof(struct sdt_chunk), 1);
 	if (ret != 0)

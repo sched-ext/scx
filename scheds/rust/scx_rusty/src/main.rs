@@ -401,10 +401,7 @@ impl<'a> Scheduler<'a> {
 
         for (id, dom) in domains.doms().iter() {
             for cpu in dom.mask().iter() {
-                skel.maps.rodata_data.cpu_dom_id_map[cpu] = id
-                    .clone()
-                    .try_into()
-                    .expect("Domain ID could not fit into 32 bits");
+                skel.maps.rodata_data.cpu_dom_id_map[cpu] = *id as u32;
             }
         }
 
@@ -455,14 +452,9 @@ impl<'a> Scheduler<'a> {
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         for (id, dom) in domains.doms().iter() {
-            let id: usize = id
-                .clone()
-                .try_into()
-                .expect("Could not turn domain ID into usize");
-
             let mut ctx = dom.ctx.lock().unwrap();
 
-            *ctx = Some(skel.maps.bss_data.dom_ctxs[id]);
+            *ctx = Some(skel.maps.bss_data.dom_ctxs[*id]);
         }
 
         info!("Rusty scheduler started! Run `scx_rusty --monitor` for metrics.");
@@ -570,8 +562,8 @@ impl<'a> Scheduler<'a> {
             &mut self.skel,
             self.dom_group.clone(),
             self.balanced_kworkers,
-            self.tuner.fully_utilized.clone(),
-            self.balance_load.clone(),
+            self.tuner.fully_utilized,
+            self.balance_load,
         );
 
         lb.load_balance()?;
@@ -627,7 +619,7 @@ impl<'a> Scheduler<'a> {
     }
 }
 
-impl<'a> Drop for Scheduler<'a> {
+impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
         if let Some(struct_ops) = self.struct_ops.take() {
             drop(struct_ops);

@@ -36,6 +36,7 @@ use log::{debug, info};
 use scx_stats::prelude::*;
 use scx_utils::autopower::{fetch_power_profile, PowerProfile};
 use scx_utils::build_id;
+use scx_utils::compat;
 use scx_utils::import_enums;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
@@ -282,6 +283,9 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
 
+        // Disable automatic dispatch of migration-disabled tasks.
+        skel.struct_ops.bpfland_ops_mut().flags |= *compat::SCX_OPS_ENQ_MIGRATION_DISABLED;
+
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, bpfland_ops, uei)?;
 
@@ -298,6 +302,11 @@ impl<'a> Scheduler<'a> {
                 "failed to initialize cpufreq performance level: error {}",
                 err
             );
+        }
+
+        // Initialize SMT domains.
+        if smt_enabled {
+            Self::init_smt_domains(&mut skel, &topo)?;
         }
 
         // Initialize L2 cache domains.
@@ -468,6 +477,17 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn init_smt_domains(skel: &mut BpfSkel<'_>, topo: &Topology) -> Result<(), std::io::Error> {
+        let smt_siblings = topo.sibling_cpus();
+
+        info!("SMT sibling CPUs: {:?}", smt_siblings);
+        for (cpu, sibling_cpu) in smt_siblings.iter().enumerate() {
+            Self::enable_sibling_cpu(skel, 0, cpu, *sibling_cpu as usize).unwrap();
+        }
+
+        Ok(())
+    }
+
     fn init_cache_domains(
         skel: &mut BpfSkel<'_>,
         topo: &Topology,
@@ -489,6 +509,20 @@ impl<'a> Scheduler<'a> {
 
         // Update the BPF cpumasks for the cache domains.
         for (cache_id, cpus) in cache_id_map {
+            // Ignore the cache domain if it includes a single CPU or all the CPUs.
+            if cpus.len() <= 1 || cpus.len() == *NR_CPU_IDS {
+                continue;
+            }
+
+            // Ignore the cache domain if all the CPUs are part of the same SMT core.
+            let smt_siblings = topo.sibling_cpus();
+            if cpus
+                .iter()
+                .all(|cpu| cpus.contains(&(smt_siblings[*cpu] as usize)))
+            {
+                continue;
+            }
+
             info!(
                 "L{} cache ID {}: sibling CPUs: {:?}",
                 cache_lvl, cache_id, cpus
@@ -562,7 +596,7 @@ impl<'a> Scheduler<'a> {
     }
 }
 
-impl<'a> Drop for Scheduler<'a> {
+impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
         info!("Unregister {} scheduler", SCHEDULER_NAME);
     }

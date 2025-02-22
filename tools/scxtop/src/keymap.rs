@@ -3,8 +3,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use crate::Action;
 use crate::AppState;
+use crate::{Action, RecordTraceAction};
 use crossterm::event::KeyCode;
 use std::collections::HashMap;
 
@@ -28,21 +28,29 @@ pub struct KeyMap {
     bindings: HashMap<Key, Action>,
 }
 
-impl KeyMap {
+impl Default for KeyMap {
     /// Returns the default keymap.
-    pub fn default() -> Self {
+    fn default() -> Self {
         let mut bindings = HashMap::new();
         bindings.insert(Key::Char('d'), Action::SetState(AppState::Default));
         bindings.insert(Key::Char('e'), Action::SetState(AppState::Event));
         bindings.insert(Key::Char('f'), Action::ToggleCpuFreq);
         bindings.insert(Key::Char('u'), Action::ToggleUncoreFreq);
+        bindings.insert(Key::Char('L'), Action::ToggleLocalization);
         bindings.insert(Key::Char('h'), Action::SetState(AppState::Help));
         bindings.insert(Key::Char('?'), Action::SetState(AppState::Help));
         bindings.insert(Key::Char('l'), Action::SetState(AppState::Llc));
         bindings.insert(Key::Char('n'), Action::SetState(AppState::Node));
         bindings.insert(Key::Char('s'), Action::SetState(AppState::Scheduler));
-        bindings.insert(Key::Char('a'), Action::RecordTrace);
-        bindings.insert(Key::Char('P'), Action::RecordTrace);
+        bindings.insert(Key::Char('S'), Action::SaveConfig);
+        bindings.insert(
+            Key::Char('a'),
+            Action::RecordTrace(RecordTraceAction { immediate: false }),
+        );
+        bindings.insert(
+            Key::Char('P'),
+            Action::RecordTrace(RecordTraceAction { immediate: false }),
+        );
         bindings.insert(Key::Char('x'), Action::ClearEvent);
         bindings.insert(Key::Char('j'), Action::PrevEvent);
         bindings.insert(Key::Char('k'), Action::NextEvent);
@@ -61,7 +69,9 @@ impl KeyMap {
 
         Self { bindings }
     }
+}
 
+impl KeyMap {
     /// Maps the Key to an Action.
     pub fn action(&self, key: &Key) -> Action {
         self.bindings.get(key).cloned().unwrap_or(Action::None)
@@ -81,13 +91,10 @@ impl KeyMap {
     /// Returns a String of the keys for an Action.
     pub fn action_keys_string(&self, action: Action) -> String {
         let action_keys = self.action_keys(action);
-        format!(
-            "{}",
-            action_keys
-                .iter()
-                .map(|k| k.to_string())
-                .collect::<Vec<_>>()
-                .join("/")
-        )
+        action_keys
+            .iter()
+            .map(|k| k.to_string())
+            .collect::<Vec<_>>()
+            .join("/")
     }
 }

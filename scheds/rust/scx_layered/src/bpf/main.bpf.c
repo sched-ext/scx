@@ -776,12 +776,19 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	if (layer_id >= MAX_LAYERS || !(layer_cpumask = lookup_layer_cpumask(layer_id)))
 		return -1;
 
-	/* not much to do if bound to a single CPU */
-	if (p->nr_cpus_allowed == 1 && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		if (layer->kind == LAYER_KIND_CONFINED &&
-		    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
-			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
-		return prev_cpu;
+	/*
+	 * Not much to do if bound to a single CPU. Explicitly handle migration
+	 * disabled tasks for kernels before SCX_OPS_ENQ_MIGRATION_DISABLED.
+	 */
+	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+			if (layer->kind == LAYER_KIND_CONFINED &&
+			    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
+				lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
+			return prev_cpu;
+		} else {
+			return -1;
+		}
 	}
 
 	cpus_seq = READ_ONCE(layers->cpus_seq);
@@ -958,30 +965,16 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	return prev_cpu;
 }
 
-static __always_inline
-bool pick_idle_cpu_and_kick(struct task_struct *p, s32 task_cpu,
-			    struct cpu_ctx *cpuc, struct task_ctx *taskc,
-			    struct layer *layer)
+/*
+ * XXX - It'd be better to get @cpuc and @enq_flags from the caller but that
+ * goes beyond the maximum number of supported arguments and __always_inline
+ * causes verification fail with "invalid size of register spill". Lookup cpuc
+ * before use and ignore extra enq_flags.
+ */
+static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *taskc,
+			    struct layer *layer, bool preempt_first)
 {
-	s32 cpu;
-
-	cpu = pick_idle_cpu(p, task_cpu, cpuc, taskc, layer, false);
-
-	if (cpu >= 0) {
-		lstat_inc(LSTAT_KICK, layer, cpuc);
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-		return true;
-	} else {
-		return false;
-	}
-}
-
-static __always_inline
-bool try_preempt_cpu(s32 cand, struct task_struct *p, struct cpu_ctx *cpuc,
-		     struct task_ctx *taskc, struct layer *layer,
-		     bool preempt_first)
-{
-	struct cpu_ctx *cand_cpuc, *sib_cpuc = NULL;
+	struct cpu_ctx *cpuc, *cand_cpuc, *sib_cpuc = NULL;
 	s32 sib;
 
 	if (cand >= nr_possible_cpus || !bpf_cpumask_test_cpu(cand, p->cpus_ptr))
@@ -1009,12 +1002,18 @@ bool try_preempt_cpu(s32 cand, struct task_struct *p, struct cpu_ctx *cpuc,
 	 */
 	if (layer->exclusive && (sib = sibling_cpu(cand)) >= 0 &&
 	    (!(sib_cpuc = lookup_cpu_ctx(sib)) || sib_cpuc->current_preempt)) {
+		if (!(cpuc = lookup_cpu_ctx(-1)))
+			return false;
 		lstat_inc(LSTAT_EXCL_COLLISION, layer, cpuc);
 		return false;
 	}
 
-	scx_bpf_kick_cpu(cand, SCX_KICK_PREEMPT);
+	/* preempt */
+	taskc->dsq_id = SCX_DSQ_LOCAL_ON | cand;
+	scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, SCX_ENQ_PREEMPT);
 
+	if (!(cpuc = lookup_cpu_ctx(-1)))
+		return true;
 	/*
 	 * $sib_cpuc is set if @p is an exclusive task, a sibling CPU
 	 * exists which is not running a preempt task. Let's preempt the
@@ -1035,58 +1034,6 @@ bool try_preempt_cpu(s32 cand, struct task_struct *p, struct cpu_ctx *cpuc,
 		lstat_inc(LSTAT_PREEMPT_IDLE, layer, cpuc);
 	}
 	return true;
-}
-
-static __always_inline
-void try_preempt(s32 task_cpu, struct task_struct *p, struct task_ctx *taskc,
-		 bool preempt_first, u64 enq_flags)
-{
-	struct cpu_ctx *cpuc, *task_cpuc;
-	struct layer *layer;
-	struct cpu_prox_map *pmap;
-	s32 i;
-
-	if (!(layer = lookup_layer(taskc->layer_id)) ||
-	    !(cpuc = lookup_cpu_ctx(-1)) ||
-	    !(task_cpuc = lookup_cpu_ctx(task_cpu)))
-		return;
-
-	if (preempt_first) {
-		/*
-		 * @p prefers to preempt its previous CPU even when there are
-		 * other idle CPUs.
-		 */
-		if (try_preempt_cpu(task_cpu, p, cpuc, taskc, layer, true))
-			return;
-		/* we skipped idle CPU picking in select_cpu. Do it here. */
-		if (pick_idle_cpu_and_kick(p, task_cpu, cpuc, taskc, layer))
-			return;
-	} else {
-		/*
-		 * If we aren't in the wakeup path, layered_select_cpu() hasn't
-		 * run and thus we haven't looked for and kicked an idle CPU.
-		 * Let's do it now.
-		 */
-		if (!(enq_flags & SCX_ENQ_WAKEUP) &&
-		    pick_idle_cpu_and_kick(p, task_cpu, cpuc, taskc, layer))
-			return;
-		if (!layer->preempt)
-			return;
-		if (try_preempt_cpu(task_cpu, p, cpuc, taskc, layer, false))
-			return;
-	}
-
-	pmap = &task_cpuc->prox_map;
-
-	bpf_for(i, 1, MAX_CPUS) {
-		if (i >= pmap->sys_end)
-			break;
-		u16 *cpu_p = MEMBER_VPTR(pmap->cpus, [i]);
-		if (cpu_p && try_preempt_cpu(*cpu_p, p, cpuc, taskc, layer, false))
-			return;
-	}
-
-	lstat_inc(LSTAT_PREEMPT_FAIL, layer, cpuc);
 }
 
 static void task_uncharge_qrt(struct task_ctx *taskc)
@@ -1123,33 +1070,19 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *taskc;
 	struct llc_ctx *llcc;
 	struct layer *layer;
-	s32 task_cpu = scx_bpf_task_cpu(p);
+	s32 cpu, task_cpu = scx_bpf_task_cpu(p);
 	u64 vtime = p->scx.dsq_vtime;
 	u32 llc_id, layer_id;
-	bool try_preempt_first;
+	bool yielding, try_preempt_first;
 	u64 queued_runtime;
 	u64 *lstats;
 
-	if (!(cpuc = lookup_cpu_ctx(-1)) ||
-	    !(task_cpuc = lookup_cpu_ctx(task_cpu)) ||
-	    !(taskc = lookup_task_ctx(p)))
+	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
 
-	llc_id = task_cpuc->llc_id;
 	layer_id = taskc->layer_id;
-
-	if (llc_id >= MAX_LLCS ||
-	    !(llcc = lookup_llc_ctx(llc_id)) ||
-	    !(layer = lookup_layer(layer_id)))
+	if (!(layer = lookup_layer(layer_id)))
 		return;
-
-	try_preempt_first = cpuc->try_preempt_first;
-	cpuc->try_preempt_first = false;
-
-	if (cpuc->yielding) {
-		lstat_inc(LSTAT_YIELD, layer, cpuc);
-		cpuc->yielding = false;
-	}
 
 	if (enq_flags & SCX_ENQ_REENQ) {
 		lstat_inc(LSTAT_ENQ_REENQ, layer, cpuc);
@@ -1160,10 +1093,70 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 			lstat_inc(LSTAT_ENQ_EXPIRE, layer, cpuc);
 	}
 
+	yielding = cpuc->yielding;
+	if (yielding) {
+		lstat_inc(LSTAT_YIELD, layer, cpuc);
+		cpuc->yielding = false;
+	}
+
+	try_preempt_first = cpuc->try_preempt_first;
+	cpuc->try_preempt_first = false;
+
 	/*
-	 * Limit the amount of budget that an idling task can accumulate
-	 * to one slice.
+	 * Does @p prefer to preempt its previous CPU even when there are other
+	 * idle CPUs?
 	 */
+	if (try_preempt_first && !yielding &&
+	    try_preempt_cpu(task_cpu, p, taskc, layer, true))
+		return;
+
+	/*
+	 * If select_cpu() was skipped, try direct dispatching to an idle CPU.
+	 */
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags) || try_preempt_first) {
+		cpu = pick_idle_cpu(p, task_cpu, cpuc, taskc, layer, false);
+		if (cpu >= 0) {
+			lstat_inc(LSTAT_ENQ_LOCAL, layer, cpuc);
+			taskc->dsq_id = SCX_DSQ_LOCAL_ON | cpu;
+			scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, 0);
+			return;
+		}
+	}
+
+	if (!(task_cpuc = lookup_cpu_ctx(task_cpu)))
+		return;
+
+	/*
+	 * No idle CPU, try preempting.
+	 */
+	if (layer->preempt && !yielding) {
+		struct cpu_prox_map *pmap;
+
+		if (!try_preempt_first &&
+		    try_preempt_cpu(task_cpu, p, taskc, layer, false))
+			return;
+
+		pmap = &task_cpuc->prox_map;
+		bpf_for(cpu, 1, MAX_CPUS) {
+			if (cpu >= pmap->sys_end)
+				break;
+			u16 *cpu_p = MEMBER_VPTR(pmap->cpus, [cpu]);
+			if (cpu_p && try_preempt_cpu(*cpu_p, p, taskc, layer, false))
+				return;
+		}
+
+		lstat_inc(LSTAT_PREEMPT_FAIL, layer, cpuc);
+	}
+
+	/*
+	 * No idle CPU, no preemption, insert into the DSQ. First, update the
+	 * associated LLC and limit the amount of budget that an idling task can
+	 * accumulate to one slice.
+	 */
+	llc_id = task_cpuc->llc_id;
+	if (llc_id >= MAX_LLCS || !(llcc = lookup_llc_ctx(llc_id)))
+		return;
+
 	maybe_update_task_llc(p, taskc, task_cpu);
 	if (time_before(vtime, llcc->vtime_now[layer_id] - layer->slice_ns))
 		vtime = llcc->vtime_now[layer_id] - layer->slice_ns;
@@ -1185,7 +1178,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 		taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
 		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
-		goto preempt;
+		return;
 	}
 
 	/*
@@ -1214,7 +1207,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!scx_bpf_dsq_nr_queued(taskc->dsq_id))
 			llcc->lo_fb_seq++;
 		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
-		goto preempt;
+		return;
 	}
 
 	/*
@@ -1263,9 +1256,6 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		layer_llc_drain_enable(layer, llc_id);
 		layer_kick_idle_cpu(layer);
 	}
-
-preempt:
-	try_preempt(task_cpu, p, taskc, try_preempt_first, enq_flags);
 }
 
 static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
@@ -1843,32 +1833,32 @@ static __noinline bool match_one(struct layer_match *match,
 	}
 	case MATCH_USING_GPU: {
 			u32 pid;
-			u32 gpu_pid;
+			u32 *gpu_pid;
 			bool pid_present = false;
 
 			if (!enable_gpu_support)
-				return match->used_gpu;
+				return match->using_gpu;
+			
+			pid = (u32) p->tgid;
+			gpu_pid = bpf_map_lookup_elem(&cur_gpu_pid, &pid);
 
-			pid = p->pid;
-			gpu_pid = bpf_map_lookup_elem(&cur_gpu_pid, &pid) == 0;
-
-			if (gpu_pid)
+			if (gpu_pid && *gpu_pid == 0)
 				pid_present = true;
 
-			return pid_present == match->used_gpu;
+			return pid_present == match->using_gpu;
 	}
 	case MATCH_USED_GPU: {
 			u32 pid;
-			u32 gpu_pid;
+			u32 *gpu_pid;
 			bool pid_present = false;
 
 			if (!enable_gpu_support)
 				return match->used_gpu;
 
-			pid = p->pid;
-			gpu_pid = bpf_map_lookup_elem(&all_gpu_pid, &pid) == 0;
+			pid = (u32) p->tgid;
+			gpu_pid = bpf_map_lookup_elem(&all_gpu_pid, &pid);
 
-			if (gpu_pid)
+			if (gpu_pid && *gpu_pid == 0)
 				pid_present = true;
 
 			return pid_present == match->used_gpu;
@@ -1977,9 +1967,9 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 
 		taskc->layer_id = layer_id;
 		taskc->llc_id = cpuc->llc_id;
-		taskc->layered_cpus.seq = layer->cpus_seq - 1;
-		taskc->layered_cpus_llc.seq = layer->cpus_seq - 1;
-		taskc->layered_cpus_node.seq = layer->cpus_seq - 1;
+		taskc->layered_cpus.seq = -1;
+		taskc->layered_cpus_llc.seq = -1;
+		taskc->layered_cpus_node.seq = -1;
 		__sync_fetch_and_add(&layer->nr_tasks, 1);
 		/*
 		 * XXX - To be correct, we'd need to calculate the vtime
@@ -2436,6 +2426,11 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 		return;
 
 	refresh_cpus_flags(taskc, cpumask);
+
+	/* invalidate all cached cpumasks */
+	taskc->layered_cpus.seq = -1;
+	taskc->layered_cpus_llc.seq = -1;
+	taskc->layered_cpus_node.seq = -1;
 }
 
 void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)

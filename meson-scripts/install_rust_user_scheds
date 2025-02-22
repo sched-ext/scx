@@ -7,8 +7,8 @@ for manifest in "$MESON_SOURCE_ROOT"/scheds/rust/*/Cargo.toml; do
     target_dir="${MESON_BUILD_ROOT}"
     name="${source_dir##*/}"
 
-    # Skip scx_mitosis
-    if [ "$name" = "scx_mitosis" ]; then
+    # Skip scx_mitosis and scx_wd40
+    if [ "$name" = "scx_mitosis" ] || [ "$name" = "scx_wd40" ]; then
         echo "Skipping installation of $name"
         continue
     fi

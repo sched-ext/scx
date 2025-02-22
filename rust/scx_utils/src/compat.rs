@@ -14,7 +14,11 @@ use std::slice::from_raw_parts;
 
 lazy_static::lazy_static! {
     pub static ref SCX_OPS_SWITCH_PARTIAL: u64 =
-    read_enum("scx_ops_flags", "SCX_OPS_SWITCH_PARTIAL").unwrap_or(0);
+        read_enum("scx_ops_flags", "SCX_OPS_SWITCH_PARTIAL").unwrap_or(0);
+    pub static ref SCX_OPS_ALLOW_QUEUED_WAKEUP: u64 =
+        read_enum("scx_ops_flags", "SCX_OPS_ALLOW_QUEUED_WAKEUP").unwrap_or(0);
+    pub static ref SCX_OPS_ENQ_MIGRATION_DISABLED: u64 =
+        read_enum("scx_ops_flags", "SCX_OPS_ENQ_MIGRATION_DISABLED").unwrap_or(0);
 }
 
 fn load_vmlinux_btf() -> &'static mut btf {
@@ -266,7 +270,7 @@ mod tests {
 
     #[test]
     fn test_ksym_exists() {
-        assert!(super::ksym_exists("scx_bpf_consume").unwrap());
+        assert!(super::ksym_exists("bpf_task_acquire").unwrap());
         assert!(!super::ksym_exists("NO_SUCH_KFUNC").unwrap());
     }
 }

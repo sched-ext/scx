@@ -6,6 +6,9 @@
 mod app;
 pub mod bpf_intf;
 pub mod bpf_skel;
+mod bpf_stats;
+pub mod cli;
+pub mod config;
 mod cpu_data;
 mod event_data;
 mod keymap;
@@ -43,13 +46,14 @@ pub use plain::Plain;
 // Generate serialization types for handling events from the bpf ring buffer.
 unsafe impl Plain for crate::bpf_skel::types::bpf_event {}
 
-pub const STATS_SOCKET_PATH: &'static str = "/var/run/scx/root/stats";
-pub const APP: &'static str = "scxtop";
-pub const LICENSE: &'static str = "Copyright (c) Meta Platforms, Inc. and affiliates. 
+pub const APP: &str = "scxtop";
+pub const TRACE_FILE_PREFIX: &str = "scxtop_trace";
+pub const STATS_SOCKET_PATH: &str = "/var/run/scx/root/stats";
+pub const LICENSE: &str = "Copyright (c) Meta Platforms, Inc. and affiliates.
 
 This software may be used and distributed according to the terms of the 
 GNU General Public License version 2.";
-pub const SCHED_NAME_PATH: &'static str = "/sys/kernel/sched_ext/root/ops";
+pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum AppState {
@@ -138,40 +142,65 @@ pub type SchedWakingAction = SchedWakeActionCtx;
 pub type SchedWakeupAction = SchedWakeActionCtx;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SoftIRQAction {
+    pub cpu: u32,
+    pub pid: u32,
+    pub entry_ts: u64,
+    pub exit_ts: u64,
+    pub softirq_nr: usize,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RecordTraceAction {
+    pub immediate: bool,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct IPIAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub target_cpu: u32,
+    pub pid: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
-    Tick,
-    Increment,
-    Decrement,
-    Quit,
-    Help,
-    Event,
-    ClearEvent,
-    NextEvent,
-    PrevEvent,
     ChangeTheme,
-    Up,
+    ClearEvent,
+    DecBpfSampleRate,
+    DecTickRate,
     Down,
-    PageUp,
-    PageDown,
     Enter,
+    Event,
+    Help,
+    IncBpfSampleRate,
+    IncTickRate,
+    IPI(IPIAction),
+    NextEvent,
+    NextViewState,
+    PageDown,
+    PageUp,
+    PrevEvent,
+    Quit,
+    RecordTrace(RecordTraceAction),
+    ReloadStatsClient,
     Render,
-    SchedReg,
-    SchedUnreg,
+    SaveConfig,
     SchedCpuPerfSet(SchedCpuPerfSetAction),
+    SchedReg,
     SchedStats(String),
     SchedSwitch(SchedSwitchAction),
-    SchedWakeup(SchedWakeupAction),
+    SchedUnreg,
     SchedWakeupNew(SchedWakeupNewAction),
+    SchedWakeup(SchedWakeupAction),
     SchedWaking(SchedWakingAction),
     SetState(AppState),
-    NextViewState,
-    RecordTrace,
-    ToggleCpuFreq,
-    ToggleUncoreFreq,
+    SoftIRQ(SoftIRQAction),
+    Tick,
     TickRateChange(std::time::Duration),
-    IncTickRate,
-    DecTickRate,
-    IncBpfSampleRate,
-    DecBpfSampleRate,
+    ToggleCpuFreq,
+    ToggleLocalization,
+    ToggleUncoreFreq,
+    Up,
     None,
 }
