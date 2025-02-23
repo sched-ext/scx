@@ -228,15 +228,16 @@ static bool is_queued(const struct task_struct *p)
 }
 
 /*
- * Return true if @cpu is a full-idle SMT core, false otherwise.
+ * Return true if @cpu is a full-idle SMT core (or if SMT is disabled),
+ * false otherwise.
  */
-static bool is_idle_smt(s32 cpu)
+static bool is_fully_idle(s32 cpu)
 {
 	const struct cpumask *idle_smtmask;
 	bool is_idle;
 
 	if (!smt_enabled)
-		return false;
+		return true;
 
 	idle_smtmask = scx_bpf_get_idle_smtmask();
 	is_idle = bpf_cpumask_test_cpu(cpu, idle_smtmask);
@@ -703,7 +704,7 @@ static bool kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 	/*
 	 * Try to reuse the same CPU if idle.
 	 */
-	if (!idle_smt || (idle_smt && is_idle_smt(prev_cpu))) {
+	if (!idle_smt || (idle_smt && is_fully_idle(prev_cpu))) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 			return true;
@@ -809,7 +810,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 		 */
 		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
 		    (local_pcpu || !scx_bpf_dsq_nr_queued(SHARED_DSQ)) &&
-		    is_idle_smt(prev_cpu)) {
+		    is_fully_idle(prev_cpu)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
 					   slice_max, enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
