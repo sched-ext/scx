@@ -246,7 +246,7 @@ static bool is_eligible(struct task_ctx *taskc)
 
 static bool is_lock_holder(struct task_ctx *taskc)
 {
-	return taskc->futex_boost > 0;
+	return taskc->futex_boost;
 }
 
 static bool have_scheduled(struct task_ctx *taskc)

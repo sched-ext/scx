@@ -116,7 +116,6 @@ struct task_ctx {
 	/*
 	 * Task deadline and time slice
 	 */
-	u32	*futex_uaddr;		/* futex uaddr */
 	u32	lat_cri;		/* final context-aware latency criticality */
 	u32	lat_cri_waker;		/* waker's latency criticality */
 	u32	perf_cri;		/* performance criticality of a task */

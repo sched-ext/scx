@@ -2032,6 +2032,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->offline_clk = now;
 		cpuc->cpdom_poll_pos = cpu % LAVD_CPDOM_MAX_NR;
 		cpuc->min_perf_cri = 1000;
+		cpuc->futex_op = LAVD_FUTEX_OP_INVALID;
 
 		if (cpuc->capacity > 0) {
 			sum_capacity += cpuc->capacity;
