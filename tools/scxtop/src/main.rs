@@ -32,11 +32,14 @@ use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::UprobeOpts;
 use ratatui::crossterm::event::KeyCode::Char;
+use simplelog::{LevelFilter, WriteLogger};
 use tokio::sync::mpsc;
 
 use std::fs;
+use std::fs::File;
 use std::mem::MaybeUninit;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -58,6 +61,22 @@ fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {
 }
 
 fn main() -> Result<()> {
+    if let Ok(log_path) = std::env::var("RUST_LOG_PATH") {
+        let log_level = match std::env::var("RUST_LOG") {
+            Ok(v) => LevelFilter::from_str(&v)?,
+            Err(_) => LevelFilter::Info,
+        };
+
+        WriteLogger::init(
+            log_level,
+            simplelog::Config::default(),
+            File::create(log_path)?,
+        )?;
+
+        log_panics::Config::new()
+            .backtrace_mode(log_panics::BacktraceMode::Resolved)
+            .install_panic_hook();
+    };
     let args = Cli::parse();
 
     let mut config = Config::load().unwrap_or(Config::default_config());
