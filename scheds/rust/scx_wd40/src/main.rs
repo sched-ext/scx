@@ -42,9 +42,9 @@ use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
-use libbpf_rs::ProgramInput;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 use log::info;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
@@ -65,7 +65,10 @@ use scx_utils::NR_CPU_IDS;
 const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 
-/// scx_wd40: A fork of the scx_rusty multi-domain scheduler. 
+// Number of u64 words in a BPF CPU mask.
+static mut MASK_LEN: usize = 0;
+
+/// scx_wd40: A fork of the scx_rusty multi-domain scheduler.
 ///
 /// The message below is from the original scx_rusty codebase:
 ///
@@ -268,6 +271,14 @@ pub fn sub_or_zero(curr: &u64, prev: &u64) -> u64 {
     curr.checked_sub(*prev).unwrap_or(0u64)
 }
 
+pub fn update_bpf_mask(bpfptr: *mut types::scx_bitmap, cpumask: &Cpumask) -> Result<()> {
+    let bpfmask = unsafe { &mut *bpfptr };
+
+    unsafe { cpumask.write_to_ptr(&raw mut bpfmask.bits as *mut u64, MASK_LEN)? };
+
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 struct StatsCtx {
     cpu_busy: u64,
@@ -429,13 +440,28 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_load!(skel, wd40, uei)?;
 
         // Allocate the arena memory from the BPF side so userspace initializes it before starting
-        // the scheduler. Despite the function call's name this is neither a test nor a test run, 
+        // the scheduler. Despite the function call's name this is neither a test nor a test run,
         // it's the recommended way of executing SEC("syscall") probes.
-        let input = ProgramInput { ..Default::default() };
+        let input = ProgramInput {
+            ..Default::default()
+        };
         let output = skel.progs.wd40_arena_setup.test_run(input)?;
         if output.return_value != 0 {
-            bail!("Could not initialize WD40 arenas, wd40_arena_setup returned {}", output.return_value as i32);
+            bail!(
+                "Could not initialize WD40 arenas, wd40_arena_setup returned {}",
+                output.return_value as i32
+            );
         }
+
+        println!(
+            "Mask length {} NR_CPU_IDS {}",
+            skel.maps.bss_data.mask_size, skel.maps.rodata_data.nr_cpu_ids
+        );
+        // Read the mask length chosen by BPF. We count elements in the u64 array, like the BPF
+        // program does.
+        //
+        // This invocation is safe because there is no concurrency in the program during initialization.
+        unsafe { MASK_LEN = skel.maps.bss_data.mask_size as usize };
 
         for numa in 0..domains.nr_nodes() {
             let mut numa_mask = Cpumask::new();
@@ -445,20 +471,13 @@ impl<'a> Scheduler<'a> {
                 numa_mask = numa_mask.or(&dom_mask);
             }
 
-            let raw_numa_slice = numa_mask.as_raw_slice();
-            let node_cpumask_slice = unsafe{&mut *skel.maps.bss_data.node_data[numa]};
-
-            let (left, _) = node_cpumask_slice.bits.split_at_mut(raw_numa_slice.len());
-            left.clone_from_slice(raw_numa_slice);
+            update_bpf_mask(skel.maps.bss_data.node_data[numa], &numa_mask)?;
             info!("NODE[{:02}] mask= {}", numa, numa_mask);
 
             for dom in node_domains.iter() {
-                let domc = unsafe{ &mut *skel.maps.bss_data.dom_ctxs[dom.id()]};
-                let dom_cpumask_slice = unsafe{ &mut *domc.cpumask};
+                let domc = unsafe { &mut *skel.maps.bss_data.dom_ctxs[dom.id()] };
+                update_bpf_mask(domc.cpumask, &dom.mask())?;
 
-                let raw_dom_slice = dom.mask_slice();
-                let (left, _) = dom_cpumask_slice.bits.split_at_mut(raw_numa_slice.len());
-                left.clone_from_slice(raw_dom_slice);
                 skel.maps.bss_data.dom_numa_id_map[dom.id()] =
                     numa.try_into().expect("NUMA ID could not fit into 32 bits");
 

@@ -266,6 +266,29 @@ impl Cpumask {
         }
     }
 
+    /// Write out a CPU mask to a raw memory pointer. We normally use this as part of updating
+    /// the CPU masks on the BPF side.
+    ///
+    /// SAFETY: The caller must enforce that the bpfptr is valid and points to a valid region of
+    /// writable BPF memory that represents a CPU mask. This function is not thread safe.
+    pub unsafe fn write_to_ptr(&self, bpfptr: *mut u64, len: usize) -> Result<()> {
+        let cpumask_slice = self.as_raw_slice();
+        if len != cpumask_slice.len() {
+            bail!(
+                "BPF CPU mask has length {} u64s, Cpumask size is {}",
+                len,
+                cpumask_slice.len()
+            );
+        }
+
+        let ptr = bpfptr as *mut [u64; 64];
+        let bpfmask: &mut [u64; 64] = unsafe { &mut *ptr };
+        let (left, _) = bpfmask.split_at_mut(cpumask_slice.len());
+        left.clone_from_slice(cpumask_slice);
+
+        Ok(())
+    }
+
     fn fmt_with(&self, f: &mut fmt::Formatter<'_>, case: char) -> fmt::Result {
         let mut masks: Vec<u32> = self
             .as_raw_slice()
