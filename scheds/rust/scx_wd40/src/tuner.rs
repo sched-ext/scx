@@ -138,8 +138,15 @@ impl Tuner {
         avg_util /= self.dom_group.weight() as f64;
         self.fully_utilized = avg_util >= 0.99999;
 
+        let write_to_bpf = |target: &mut [u64; 64], mask: &Cpumask| {
+            let raw_slice = mask.as_raw_slice();
+            let (left, _) = target.split_at_mut(raw_slice.len());
+            left.clone_from_slice(raw_slice);
+        };
+
         self.direct_greedy_mask.clear_all();
         self.kick_greedy_mask.clear_all();
+
         for (dom_id, dom) in self.dom_group.doms().iter() {
             // Calculate the domain avg util. If there are no active CPUs,
             // it doesn't really matter. Go with 0.0 as that's less likely
@@ -155,29 +162,35 @@ impl Tuner {
 
             if enable_direct {
                 self.direct_greedy_mask |= &dom.mask();
-            }
+
+                let domc = dom.ctx().unwrap();
+                let dom_direct_greedy = unsafe { &mut *domc.direct_greedy_cpumask };
+
+                write_to_bpf(&mut dom_direct_greedy.bits, &dom.mask());
+            } 
+
             if enable_kick {
                 self.kick_greedy_mask |= &dom.mask();
             }
         }
 
-        let ti = &mut skel.maps.bss_data.tune_input;
-        let write_to_bpf = |target: &mut [u64; 8], mask: &Cpumask| {
-            let raw_slice = mask.as_raw_slice();
-            let (left, _) = target.split_at_mut(raw_slice.len());
-            left.clone_from_slice(raw_slice);
-        };
+        let direct_greedy_cpumask = unsafe{ &mut *skel.maps.bss_data.direct_greedy_cpumask};
+        let kick_greedy_cpumask = unsafe{ &mut *skel.maps.bss_data.direct_greedy_cpumask};
 
-        write_to_bpf(&mut ti.direct_greedy_cpumask, &self.direct_greedy_mask);
-        write_to_bpf(&mut ti.kick_greedy_cpumask, &self.kick_greedy_mask);
+        write_to_bpf(&mut direct_greedy_cpumask.bits, &self.direct_greedy_mask);
+        write_to_bpf(&mut kick_greedy_cpumask.bits, &self.kick_greedy_mask);
+
         if self.fully_utilized {
             self.slice_ns = self.overutil_slice_ns;
         } else {
             self.slice_ns = self.underutil_slice_ns;
         }
-        ti.slice_ns = self.slice_ns;
 
-        ti.gen += 1;
+        skel.maps.bss_data.slice_ns = self.slice_ns;
+
+        // For domain in domains
+        // Get the dom_ctx and the internal mask
+        // And the direct greedy cpumask with the domain mask
 
         self.prev_cpu_stats = curr_cpu_stats;
 
