@@ -156,6 +156,13 @@ static struct task_ctx *get_task_ctx(struct task_struct *p)
 	return taskc;
 }
 
+static struct cpu_ctx *try_get_cpu_ctx(void)
+{
+	const u32 idx = 0;
+
+	return bpf_map_lookup_elem(&cpu_ctx_stor, &idx);
+}
+
 static struct cpu_ctx *get_cpu_ctx(void)
 {
 	const u32 idx = 0;
