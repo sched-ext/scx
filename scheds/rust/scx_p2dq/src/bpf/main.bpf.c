@@ -1039,10 +1039,8 @@ static bool load_balance_timer(void)
 	}
 	dbg("load %llu interactive %llu", load_sum, interactive_sum);
 
-	if (load_sum == 0 || load_sum < interactive_sum) {
-		scx_bpf_error("invalid load sum");
+	if (load_sum == 0 || load_sum < interactive_sum)
 		goto reset_load;
-	}
 
 	if (interactive_sum == 0) {
 		dsq_time_slices[0] = (11 * dsq_time_slices[0]) / 10;
@@ -1076,7 +1074,7 @@ reset_load:
 
 		bpf_for(j, 0, nr_dsqs_per_llc) {
 			llcx->dsq_load[j] = 0;
-			if (llc_id == 0) {
+			if (llc_id == 0 && autoslice) {
 				if (j > 0 && dsq_time_slices[j] < dsq_time_slices[j-1]) {
 					dsq_time_slices[j] = dsq_time_slices[j-1] << dsq_shift;
 				}
