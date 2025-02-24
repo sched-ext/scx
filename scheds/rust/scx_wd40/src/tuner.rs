@@ -12,6 +12,7 @@ use anyhow::Result;
 use scx_utils::Cpumask;
 
 use crate::sub_or_zero;
+use crate::update_bpf_mask;
 use crate::BpfSkel;
 use crate::DomainGroup;
 
@@ -138,12 +139,6 @@ impl Tuner {
         avg_util /= self.dom_group.weight() as f64;
         self.fully_utilized = avg_util >= 0.99999;
 
-        let write_to_bpf = |target: &mut [u64; 64], mask: &Cpumask| {
-            let raw_slice = mask.as_raw_slice();
-            let (left, _) = target.split_at_mut(raw_slice.len());
-            left.clone_from_slice(raw_slice);
-        };
-
         self.direct_greedy_mask.clear_all();
         self.kick_greedy_mask.clear_all();
 
@@ -164,21 +159,23 @@ impl Tuner {
                 self.direct_greedy_mask |= &dom.mask();
 
                 let domc = dom.ctx().unwrap();
-                let dom_direct_greedy = unsafe { &mut *domc.direct_greedy_cpumask };
 
-                write_to_bpf(&mut dom_direct_greedy.bits, &dom.mask());
-            } 
+                update_bpf_mask(domc.direct_greedy_cpumask, &dom.mask())?;
+            }
 
             if enable_kick {
                 self.kick_greedy_mask |= &dom.mask();
             }
         }
 
-        let direct_greedy_cpumask = unsafe{ &mut *skel.maps.bss_data.direct_greedy_cpumask};
-        let kick_greedy_cpumask = unsafe{ &mut *skel.maps.bss_data.direct_greedy_cpumask};
-
-        write_to_bpf(&mut direct_greedy_cpumask.bits, &self.direct_greedy_mask);
-        write_to_bpf(&mut kick_greedy_cpumask.bits, &self.kick_greedy_mask);
+        update_bpf_mask(
+            skel.maps.bss_data.direct_greedy_cpumask,
+            &self.direct_greedy_mask,
+        )?;
+        update_bpf_mask(
+            skel.maps.bss_data.kick_greedy_cpumask,
+            &self.kick_greedy_mask,
+        )?;
 
         if self.fully_utilized {
             self.slice_ns = self.overutil_slice_ns;

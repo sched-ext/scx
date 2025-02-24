@@ -16,8 +16,8 @@
  * they are round-robined to a domain.
  *
  * wd40_select_cpu is the primary scheduling logic, invoked when a task
- * becomes runnable. A task's target_dom field is populated by userspace to inform 
- * the BPF scheduler that a task should be migrated to a new domain. Otherwise, 
+ * becomes runnable. A task's target_dom field is populated by userspace to inform
+ * the BPF scheduler that a task should be migrated to a new domain. Otherwise,
  * the task is scheduled in priority order as follows:
  * * The current core if the task was woken up synchronously and there are idle
  *   cpus in the system
@@ -561,7 +561,7 @@ static bool dispatch_steal_local_numa(u32 curr_dom, struct pcpu_ctx *pcpuc)
 	u32 my_node;
 	u32 dom;
 
-	/* XXX Check if the addresses of the nodes are the same, the dom 
+	/* XXX Check if the addresses of the nodes are the same, the dom
 	 * we traverse to should be in the array. */
 
 	my_node = dom_node_id(curr_dom);
@@ -869,7 +869,8 @@ int wd40_arena_setup(void)
 	if (ret)
 		return ret;
 
-	ret = scx_bitmap_init(sizeof(struct scx_bitmap));
+	/* How many types to store all CPU IDs? */
+	ret = scx_bitmap_init(div_round_up(nr_cpu_ids, 8));
 	if (ret)
 		return ret;
 
