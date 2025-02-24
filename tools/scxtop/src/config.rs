@@ -4,17 +4,26 @@
 // GNU General Public License version 2.
 
 use crate::cli::Cli;
+use crate::keymap::parse_action;
+use crate::keymap::parse_key;
 use crate::AppTheme;
+use crate::KeyMap;
 use crate::STATS_SOCKET_PATH;
 use crate::TRACE_FILE_PREFIX;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use xdg;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
+    /// Key mappings.
+    pub keymap: Option<HashMap<String, String>>,
+    /// Parsed keymap.
+    #[serde(skip)]
+    pub active_keymap: KeyMap,
     /// TUI theme.
     theme: Option<AppTheme>,
     /// App tick rate in milliseconds.
@@ -109,6 +118,8 @@ impl Config {
     /// Returns a config with nothing set.
     pub fn empty_config() -> Config {
         Config {
+            keymap: None,
+            active_keymap: KeyMap::empty(),
             theme: None,
             tick_rate_ms: None,
             debug: None,
@@ -124,6 +135,8 @@ impl Config {
     /// Returns the default config.
     pub fn default_config() -> Config {
         let mut config = Config {
+            keymap: None,
+            active_keymap: KeyMap::default(),
             theme: None,
             tick_rate_ms: None,
             debug: None,
@@ -145,13 +158,28 @@ impl Config {
     pub fn load() -> Result<Config> {
         let config_path = get_config_path()?;
         let contents = fs::read_to_string(config_path)?;
-        let config: Config = toml::from_str(&contents)?;
+        let mut config: Config = toml::from_str(&contents)?;
+
+        if let Some(keymap_config) = &config.keymap {
+            let mut keymap = KeyMap::default();
+            for (key_str, action_str) in keymap_config {
+                let key = parse_key(key_str)?;
+                let action = parse_action(action_str)?;
+                keymap.insert(key, action);
+            }
+            config.active_keymap = keymap;
+        } else {
+            config.active_keymap = KeyMap::default();
+        }
+
         Ok(config)
     }
 
     /// Merges a Config with a Cli config.
     pub fn merge_cli(config: &Config, cli: &Cli) -> Config {
         Config {
+            keymap: config.keymap.clone(),
+            active_keymap: config.active_keymap.clone(),
             theme: config.theme.clone(),
             tick_rate_ms: Some(cli.tick_rate_ms.unwrap_or(config.tick_rate_ms())),
             debug: Some(cli.debug.unwrap_or(config.debug())),
@@ -184,6 +212,7 @@ impl Config {
 
     /// Saves the current config.
     pub fn save(&mut self) -> Result<()> {
+        self.keymap = Some(self.active_keymap.to_hashmap());
         let config_path = get_config_path()?;
         if !config_path.exists() {
             fs::create_dir_all(config_path.parent().map(PathBuf::from).unwrap())?;

@@ -14,7 +14,6 @@ use crate::AppState;
 use crate::AppTheme;
 use crate::CpuData;
 use crate::EventData;
-use crate::KeyMap;
 use crate::LlcData;
 use crate::NodeData;
 use crate::PerfEvent;
@@ -70,7 +69,6 @@ pub struct App<'a> {
     stats_client: Arc<RwLock<StatsClient>>,
     sched_stats_raw: String,
 
-    keymap: KeyMap,
     scheduler: String,
     max_cpu_events: usize,
     max_sched_events: usize,
@@ -121,7 +119,6 @@ impl<'a> App<'a> {
     pub fn new(
         config: Config,
         scheduler: String,
-        keymap: KeyMap,
         max_cpu_events: usize,
         process_id: i32,
         action_tx: UnboundedSender<Action>,
@@ -192,7 +189,6 @@ impl<'a> App<'a> {
             scheduler,
             max_cpu_events,
             max_sched_events: max_cpu_events,
-            keymap,
             state: AppState::Default,
             view_state: ViewState::BarChart,
             prev_state: AppState::Default,
@@ -1724,7 +1720,8 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: (press to exit help)",
-                    self.keymap
+                    self.config
+                        .active_keymap
                         .action_keys_string(Action::SetState(AppState::Help))
                 ),
                 Style::default(),
@@ -1732,7 +1729,9 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: change theme ({})",
-                    self.keymap.action_keys_string(Action::ChangeTheme),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::ChangeTheme),
                     serde_json::to_string_pretty(&theme)?
                 ),
                 Style::default(),
@@ -1740,7 +1739,8 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: record perfetto trace",
-                    self.keymap
+                    self.config
+                        .active_keymap
                         .action_keys_string(Action::RecordTrace(RecordTraceAction {
                             immediate: false
                         })),
@@ -1750,7 +1750,9 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: decrease tick rate ({}ms)",
-                    self.keymap.action_keys_string(Action::DecTickRate),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::DecTickRate),
                     self.config.tick_rate_ms()
                 ),
                 Style::default(),
@@ -1758,7 +1760,9 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: increase tick rate ({}ms)",
-                    self.keymap.action_keys_string(Action::IncTickRate),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::IncTickRate),
                     self.config.tick_rate_ms()
                 ),
                 Style::default(),
@@ -1766,7 +1770,9 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: decrease bpf sample rate ({})",
-                    self.keymap.action_keys_string(Action::DecBpfSampleRate),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::DecBpfSampleRate),
                     self.skel.maps.data_data.sample_rate
                 ),
                 Style::default(),
@@ -1774,7 +1780,9 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: increase bpf sample rate ({})",
-                    self.keymap.action_keys_string(Action::IncBpfSampleRate),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::IncBpfSampleRate),
                     self.skel.maps.data_data.sample_rate
                 ),
                 Style::default(),
@@ -1782,7 +1790,9 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: Enable CPU frequency ({})",
-                    self.keymap.action_keys_string(Action::ToggleCpuFreq),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::ToggleCpuFreq),
                     self.collect_cpu_freq
                 ),
                 Style::default(),
@@ -1790,7 +1800,9 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: Enable localization ({})",
-                    self.keymap.action_keys_string(Action::ToggleLocalization),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::ToggleLocalization),
                     self.localize
                 ),
                 Style::default(),
@@ -1798,7 +1810,9 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: Enable uncore frequency ({})",
-                    self.keymap.action_keys_string(Action::ToggleUncoreFreq),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::ToggleUncoreFreq),
                     self.collect_uncore_freq
                 ),
                 Style::default(),
@@ -1806,7 +1820,8 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: show CPU event menu ({})",
-                    self.keymap
+                    self.config
+                        .active_keymap
                         .action_keys_string(Action::SetState(AppState::Event)),
                     self.active_event.event
                 ),
@@ -1815,46 +1830,58 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: clear active perf event",
-                    self.keymap.action_keys_string(Action::ClearEvent),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::ClearEvent),
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
                     "{}: next perf event",
-                    self.keymap.action_keys_string(Action::NextEvent),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::NextEvent),
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
                     "{}: previous perf event",
-                    self.keymap.action_keys_string(Action::PrevEvent)
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::PrevEvent)
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
                     "{}: perf event list scroll up",
-                    self.keymap.action_keys_string(Action::PageUp)
+                    self.config.active_keymap.action_keys_string(Action::PageUp)
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
                     "{}: perf event list scroll down",
-                    self.keymap.action_keys_string(Action::PageDown)
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::PageDown)
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
-                format!("{}: quit", self.keymap.action_keys_string(Action::Quit),),
+                format!(
+                    "{}: quit",
+                    self.config.active_keymap.action_keys_string(Action::Quit),
+                ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
                     "{}: display LLC view",
-                    self.keymap
+                    self.config
+                        .active_keymap
                         .action_keys_string(Action::SetState(AppState::Llc))
                 ),
                 Style::default(),
@@ -1862,7 +1889,8 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: display NUMA Node view",
-                    self.keymap
+                    self.config
+                        .active_keymap
                         .action_keys_string(Action::SetState(AppState::Node))
                 ),
                 Style::default(),
@@ -1870,7 +1898,8 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: display scheduler view",
-                    self.keymap
+                    self.config
+                        .active_keymap
                         .action_keys_string(Action::SetState(AppState::Scheduler))
                 ),
                 Style::default(),
@@ -1878,7 +1907,9 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: change view state ({})",
-                    self.keymap.action_keys_string(Action::NextViewState),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::NextViewState),
                     self.view_state
                 ),
                 Style::default(),
@@ -1886,7 +1917,9 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: Saves the current config ({})",
-                    self.keymap.action_keys_string(Action::SaveConfig),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SaveConfig),
                     get_config_path()?.to_string_lossy()
                 ),
                 Style::default(),
@@ -1937,9 +1970,11 @@ impl<'a> App<'a> {
             .title(
                 format!(
                     "Use ▲ ▼  ({}/{}) to scroll, {} to select",
-                    self.keymap.action_keys_string(Action::PageUp),
-                    self.keymap.action_keys_string(Action::PageDown),
-                    self.keymap.action_keys_string(Action::Enter),
+                    self.config.active_keymap.action_keys_string(Action::PageUp),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::PageDown),
+                    self.config.active_keymap.action_keys_string(Action::Enter),
                 )
                 .bold(),
             );

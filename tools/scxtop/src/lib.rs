@@ -204,3 +204,40 @@ pub enum Action {
     Up,
     None,
 }
+
+impl std::fmt::Display for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Action::SetState(AppState::Default) => write!(f, "AppStateDefault"),
+            Action::SetState(AppState::Event) => write!(f, "AppStateEvent"),
+            Action::ToggleCpuFreq => write!(f, "ToggleCpuFreq"),
+            Action::ToggleUncoreFreq => write!(f, "ToggleUncoreFreq"),
+            Action::ToggleLocalization => write!(f, "ToggleLocalization"),
+            Action::SetState(AppState::Help) => write!(f, "AppStateHelp"),
+            Action::SetState(AppState::Llc) => write!(f, "AppStateLlc"),
+            Action::SetState(AppState::Node) => write!(f, "AppStateNode"),
+            Action::SetState(AppState::Scheduler) => write!(f, "AppStateScheduler"),
+            Action::SaveConfig => write!(f, "SaveConfig"),
+            Action::RecordTrace(RecordTraceAction { immediate: false }) => write!(f, "RecordTrace"),
+            Action::RecordTrace(RecordTraceAction { immediate: true }) => {
+                write!(f, "RecordTraceNow")
+            }
+            Action::ClearEvent => write!(f, "ClearEvent"),
+            Action::PrevEvent => write!(f, "PrevEvent"),
+            Action::NextEvent => write!(f, "NextEvent"),
+            Action::Quit => write!(f, "Quit"),
+            Action::ChangeTheme => write!(f, "ChangeTheme"),
+            Action::DecTickRate => write!(f, "DecTickRate"),
+            Action::IncTickRate => write!(f, "IncTickRate"),
+            Action::DecBpfSampleRate => write!(f, "DecBpfSampleRate"),
+            Action::IncBpfSampleRate => write!(f, "IncBpfSampleRate"),
+            Action::NextViewState => write!(f, "NextViewState"),
+            Action::Down => write!(f, "Down"),
+            Action::Up => write!(f, "Up"),
+            Action::PageDown => write!(f, "PageDown"),
+            Action::PageUp => write!(f, "PageUp"),
+            Action::Enter => write!(f, "Enter"),
+            _ => write!(f, "{:?}", self),
+        }
+    }
+}

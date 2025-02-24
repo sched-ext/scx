@@ -60,8 +60,9 @@ fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {
 fn main() -> Result<()> {
     let args = Cli::parse();
 
-    let mut config = Config::load().unwrap_or(Config::empty_config());
+    let mut config = Config::load().unwrap_or(Config::default_config());
     config = Config::merge_cli(&config, &args);
+    let keymap = config.active_keymap.clone();
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -152,7 +153,6 @@ fn main() -> Result<()> {
                 ]);
             };
 
-            let keymap = KeyMap::default();
             let mut tui = Tui::new(keymap.clone(), config.tick_rate_ms())?;
             let mut event_rbb = RingBufferBuilder::new();
             let tx = action_tx.clone();
@@ -283,7 +283,6 @@ fn main() -> Result<()> {
             let mut app = App::new(
                 config,
                 scheduler,
-                keymap.clone(),
                 100,
                 args.process_id,
                 action_tx.clone(),
