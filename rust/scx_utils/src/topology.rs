@@ -125,6 +125,7 @@ pub struct Cpu {
     pub llc_id: usize,
     pub node_id: usize,
     pub package_id: usize,
+    pub cluster_id: usize,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -133,6 +134,7 @@ pub struct Core {
     pub id: usize,
     /// The sysfs value of core_id
     pub kernel_id: usize,
+    pub cluster_id: usize,
     pub cpus: BTreeMap<usize, Arc<Cpu>>,
     /// Cpumask of all CPUs in this core.
     pub span: Cpumask,
@@ -315,9 +317,9 @@ impl Topology {
 /// TopoCtx is a helper struct used to build a topology.
 struct TopoCtx {
     /// Mapping of NUMA node core ids
-    node_core_kernel_ids: BTreeMap<(usize, usize), usize>,
+    node_core_kernel_ids: BTreeMap<(usize, usize, usize), usize>,
     /// Mapping of NUMA node LLC ids
-    node_llc_kernel_ids: BTreeMap<(usize, usize), usize>,
+    node_llc_kernel_ids: BTreeMap<(usize, usize, usize), usize>,
     /// Mapping of L2 ids
     l2_ids: BTreeMap<String, usize>,
     /// Mapping of L3 ids
@@ -401,6 +403,7 @@ fn create_insert_cpu(
     node: &mut Node,
     online_mask: &Cpumask,
     topo_ctx: &mut TopoCtx,
+    big_little: bool,
     avg_cpu_freq: Option<(usize, usize)>,
     flatten_llc: bool,
 ) -> Result<()> {
@@ -418,6 +421,7 @@ fn create_insert_cpu(
     let top_path = cpu_path.join("topology");
     let core_kernel_id = read_file_usize(&top_path.join("core_id"))?;
     let package_id = read_file_usize(&top_path.join("physical_package_id"))?;
+    let cluster_id = read_file_usize(&top_path.join("cluster_id"))?;
 
     // Evaluate L2, L3 and LLC cache IDs.
     //
@@ -446,7 +450,7 @@ fn create_insert_cpu(
     let num_llcs = topo_ctx.node_llc_kernel_ids.len();
     let llc_id = topo_ctx
         .node_llc_kernel_ids
-        .entry((node.id, llc_kernel_id))
+        .entry((node.id, package_id, llc_kernel_id))
         .or_insert(num_llcs);
 
     let llc = node.llcs.entry(*llc_id).or_insert(Arc::new(Llc {
@@ -460,23 +464,27 @@ fn create_insert_cpu(
     }));
     let llc_mut = Arc::get_mut(llc).unwrap();
 
-    let core_type = match avg_cpu_freq {
-        Some((avg_base_freq, top_max_freq)) => {
-            if max_freq == top_max_freq {
-                CoreType::Big { turbo: true }
-            } else if base_freq >= avg_base_freq {
-                CoreType::Big { turbo: false }
-            } else {
-                CoreType::Little
+    let core_type = if !big_little {
+        CoreType::Big { turbo: false }
+    } else {
+        match avg_cpu_freq {
+            Some((avg_base_freq, top_max_freq)) => {
+                if max_freq == top_max_freq {
+                    CoreType::Big { turbo: true }
+                } else if base_freq >= avg_base_freq {
+                    CoreType::Big { turbo: false }
+                } else {
+                    CoreType::Little
+                }
             }
+            None => CoreType::Big { turbo: false },
         }
-        None => CoreType::Big { turbo: false },
     };
 
     let num_cores = topo_ctx.node_core_kernel_ids.len();
     let core_id = topo_ctx
         .node_core_kernel_ids
-        .entry((node.id, core_kernel_id))
+        .entry((node.id, package_id, core_kernel_id))
         .or_insert(num_cores);
 
     let core = llc_mut.cores.entry(*core_id).or_insert(Arc::new(Core {
@@ -488,6 +496,7 @@ fn create_insert_cpu(
         llc_id: *llc_id,
         node_id: node.id,
         kernel_id: core_kernel_id,
+        cluster_id: cluster_id,
     }));
     let core_mut = Arc::get_mut(core).unwrap();
 
@@ -507,6 +516,7 @@ fn create_insert_cpu(
             llc_id: *llc_id,
             node_id: node.id,
             package_id,
+            cluster_id,
         }),
     );
 
@@ -562,6 +572,19 @@ fn avg_cpu_freq() -> Option<(usize, usize)> {
     Some((avg_base_freq / nr_cpus, top_max_freq))
 }
 
+fn has_big_little() -> Option<bool> {
+    let mut clusters = std::collections::HashSet::new();
+
+    let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*").ok()?;
+    for cpu_path in cpu_paths.filter_map(Result::ok) {
+        let top_path = cpu_path.join("topology");
+        let cluster_id = read_file_usize(&top_path.join("cluster_id")).unwrap_or(0);
+        clusters.insert(cluster_id);
+    }
+
+    Some(clusters.len() > 1)
+}
+
 fn create_default_node(
     online_mask: &Cpumask,
     topo_ctx: &mut TopoCtx,
@@ -594,6 +617,7 @@ fn create_default_node(
     }
 
     let avg_cpu_freq = avg_cpu_freq();
+    let big_little = has_big_little().unwrap_or(false);
     let cpu_ids = read_cpu_ids()?;
     for cpu_id in cpu_ids.iter() {
         create_insert_cpu(
@@ -601,6 +625,7 @@ fn create_default_node(
             &mut node,
             online_mask,
             topo_ctx,
+            big_little,
             avg_cpu_freq,
             flatten_llc,
         )?;
@@ -653,6 +678,7 @@ fn create_numa_nodes(
 
         let cpu_pattern = numa_path.join("cpu[0-9]*");
         let cpu_paths = glob(cpu_pattern.to_string_lossy().as_ref())?;
+        let big_little = has_big_little().unwrap_or(false);
         let avg_cpu_freq = avg_cpu_freq();
         for cpu_path in cpu_paths.filter_map(Result::ok) {
             let cpu_str = cpu_path.to_str().unwrap().trim();
@@ -668,6 +694,7 @@ fn create_numa_nodes(
                 &mut node,
                 online_mask,
                 topo_ctx,
+                big_little,
                 avg_cpu_freq,
                 false,
             )?;

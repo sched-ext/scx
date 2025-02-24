@@ -3,7 +3,7 @@
 use crate::misc::read_file_usize;
 use crate::{Cpumask, NR_CPU_IDS};
 use nvml_wrapper::bitmasks::InitFlags;
-use nvml_wrapper::enum_wrappers::device::Clock;
+use nvml_wrapper::enum_wrappers::device::{Clock, TopologyLevel};
 use nvml_wrapper::Nvml;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -22,6 +22,10 @@ pub struct Gpu {
     pub max_sm_clock: usize,
     pub memory: u64,
     pub cpu_mask: Cpumask,
+    // Represents the ordered list of nearest
+    // available devices in term of topology
+    // connectivity (as for now in term of PCI board).
+    pub nearest: Vec<GpuIndex>,
 }
 
 pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
@@ -62,6 +66,26 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 Cpumask::new()
             };
 
+            // NVML_TOPOLOGY_HOSTBRIDGE is supported by all models and
+            // NVML_TOPOLOGY_SYSTEM is an expensive check (i.e. all sort of
+            // multi gpus connection types).
+            let nearest = if let Ok(nearest_gpus) =
+                nvidia_gpu.topology_nearest_gpus(TopologyLevel::HostBridge)
+            {
+                nearest_gpus
+                    .iter()
+                    .filter_map(|d| {
+                        if let Ok(idx) = d.index() {
+                            Some(GpuIndex::Nvidia { nvml_id: idx })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
             // The NVML library doesn't return a PCIe bus ID compatible with sysfs. It includes
             // uppercase bus ID values and an extra four leading 0s.
             let bus_id = pci_info.bus_id.to_lowercase();
@@ -76,6 +100,7 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 max_sm_clock: sm_boost_clock as usize,
                 memory: memory_info.total,
                 cpu_mask,
+                nearest,
             };
             if !gpus.contains_key(&numa_node) {
                 gpus.insert(numa_node, vec![gpu]);

@@ -20,7 +20,6 @@ LINUX_VER=$(git describe --tags --abbrev=0)
 # List of architectures and their corresponding cross-compilers
 declare -A ARCHS
 ARCHS=(
-    [x86]="x86_64-linux-gnu-"
     [arm]="arm-linux-gnueabi-"
     [arm64]="aarch64-linux-gnu-"
     [mips]="mips64-linux-gnu-"

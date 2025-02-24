@@ -24,9 +24,9 @@ const PERF_FORMAT_TOTAL_TIME_ENABLED: u64 = 1 << 0;
 #[allow(dead_code)]
 const PERF_FORMAT_TOTAL_TIME_RUNNING: u64 = 1 << 1;
 #[allow(dead_code)]
-const DEBUGFS: &'static str = "debugfs";
-const TRACEFS: &'static str = "tracefs";
-const PROCFS_MOUNTS: &'static str = "/proc/mounts";
+const DEBUGFS: &str = "debugfs";
+const TRACEFS: &str = "tracefs";
+const PROCFS_MOUNTS: &str = "/proc/mounts";
 
 /// Returns the mount point for a filesystem type.
 fn get_fs_mount(mount_type: &str) -> Result<Vec<PathBuf>> {
@@ -110,88 +110,30 @@ impl PerfEvent {
 
     /// Returns the set of default hardware events.
     pub fn default_hw_events() -> Vec<PerfEvent> {
-        let mut avail_events = Vec::new();
-        avail_events.push(PerfEvent::new("hw".to_string(), "cycles".to_string(), 0));
-        avail_events.push(PerfEvent::new("hw".to_string(), "branches".to_string(), 0));
-        avail_events.push(PerfEvent::new(
-            "hw".to_string(),
-            "branch-misses".to_string(),
-            0,
-        ));
-        avail_events.push(PerfEvent::new(
-            "hw".to_string(),
-            "cache-misses".to_string(),
-            0,
-        ));
-        avail_events.push(PerfEvent::new(
-            "hw".to_string(),
-            "cache-references".to_string(),
-            0,
-        ));
-        avail_events.push(PerfEvent::new(
-            "hw".to_string(),
-            "instructions".to_string(),
-            0,
-        ));
-        avail_events.push(PerfEvent::new(
-            "hw".to_string(),
-            "ref-cycles".to_string(),
-            0,
-        ));
-        avail_events.push(PerfEvent::new(
-            "hw".to_string(),
-            "stalled-cycles-backend".to_string(),
-            0,
-        ));
-        avail_events.push(PerfEvent::new(
-            "hw".to_string(),
-            "stalled-cycles-frontend".to_string(),
-            0,
-        ));
-        avail_events.push(PerfEvent::new(
-            "hw".to_string(),
-            "bus-cycles".to_string(),
-            0,
-        ));
-        avail_events.push(PerfEvent::new(
-            "hw".to_string(),
-            "L1-dcache-load-misses".to_string(),
-            0,
-        ));
-
-        avail_events
+        vec![
+            PerfEvent::new("hw".to_string(), "cycles".to_string(), 0),
+            PerfEvent::new("hw".to_string(), "branches".to_string(), 0),
+            PerfEvent::new("hw".to_string(), "branch-misses".to_string(), 0),
+            PerfEvent::new("hw".to_string(), "cache-misses".to_string(), 0),
+            PerfEvent::new("hw".to_string(), "cache-references".to_string(), 0),
+            PerfEvent::new("hw".to_string(), "instructions".to_string(), 0),
+            PerfEvent::new("hw".to_string(), "ref-cycles".to_string(), 0),
+            PerfEvent::new("hw".to_string(), "stalled-cycles-backend".to_string(), 0),
+            PerfEvent::new("hw".to_string(), "stalled-cycles-frontend".to_string(), 0),
+            PerfEvent::new("hw".to_string(), "bus-cycles".to_string(), 0),
+            PerfEvent::new("hw".to_string(), "L1-dcache-load-misses".to_string(), 0),
+        ]
     }
 
     /// Returns the set of default software events.
     pub fn default_sw_events() -> Vec<PerfEvent> {
-        let mut avail_events = Vec::new();
-        avail_events.push(PerfEvent::new(
-            "sw".to_string(),
-            "context-switches".to_string(),
-            0,
-        ));
-        avail_events.push(PerfEvent::new(
-            "sw".to_string(),
-            "page-faults".to_string(),
-            0,
-        ));
-        avail_events.push(PerfEvent::new(
-            "sw".to_string(),
-            "minor-faults".to_string(),
-            0,
-        ));
-        avail_events.push(PerfEvent::new(
-            "sw".to_string(),
-            "major-faults".to_string(),
-            0,
-        ));
-        avail_events.push(PerfEvent::new(
-            "sw".to_string(),
-            "migrations".to_string(),
-            0,
-        ));
-
-        avail_events
+        vec![
+            PerfEvent::new("sw".to_string(), "context-switches".to_string(), 0),
+            PerfEvent::new("sw".to_string(), "page-faults".to_string(), 0),
+            PerfEvent::new("sw".to_string(), "minor-faults".to_string(), 0),
+            PerfEvent::new("sw".to_string(), "major-faults".to_string(), 0),
+            PerfEvent::new("sw".to_string(), "migrations".to_string(), 0),
+        ]
     }
 
     /// Returns the set of default hardware and software events.
@@ -203,10 +145,11 @@ impl PerfEvent {
     }
 
     /// Attaches a PerfEvent struct.
-    pub fn attach(&mut self) -> Result<()> {
-        let mut attrs = perf::bindings::perf_event_attr::default();
-
-        attrs.size = std::mem::size_of::<perf::bindings::perf_event_attr>() as u32;
+    pub fn attach(&mut self, process_id: i32) -> Result<()> {
+        let mut attrs = perf::bindings::perf_event_attr {
+            size: std::mem::size_of::<perf::bindings::perf_event_attr>() as u32,
+            ..Default::default()
+        };
 
         match self.subsystem.to_lowercase().as_str() {
             "hw" | "hardware" => {
@@ -289,10 +232,11 @@ impl PerfEvent {
         attrs.set_disabled(0);
         attrs.set_exclude_kernel(0);
         attrs.set_exclude_hv(0);
-        attrs.set_inherit(1);
+        attrs.set_inherit(if process_id == -1 { 1 } else { 0 });
         attrs.set_pinned(1);
 
-        let result = unsafe { perf::perf_event_open(&mut attrs, -1, self.cpu as i32, -1, 0) };
+        let result =
+            unsafe { perf::perf_event_open(&mut attrs, process_id, self.cpu as i32, -1, 0) };
 
         if result < 0 {
             return Err(anyhow!("failed to open perf event: {}", result));

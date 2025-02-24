@@ -33,15 +33,18 @@ pub struct Metrics {
     pub direct: u64,
     #[stat(desc = "Number of times tasks have dispatched to an idle local per CPU DSQs")]
     pub idle: u64,
+    #[stat(desc = "Number of times tasks have greedily picked an idle CPU in the local LLC")]
+    pub greedy_idle: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "direct/idle {}/{}\n\tdsq same/migrate {}/{}\n\tkeep {} pick2 {}\n\tmigrations llc/node: {}/{}",
+            "direct/idle/greedy {}/{}/{}\n\tdsq same/migrate {}/{}\n\tkeep {} pick2 {}\n\tmigrations llc/node: {}/{}",
             self.direct,
             self.idle,
+            self.greedy_idle,
             self.same_dsq,
             self.dsq_change,
             self.keep,
@@ -56,6 +59,7 @@ impl Metrics {
         Self {
             direct: self.direct - rhs.direct,
             idle: self.idle - rhs.idle,
+            greedy_idle: self.greedy_idle - rhs.greedy_idle,
             dsq_change: self.dsq_change - rhs.dsq_change,
             same_dsq: self.same_dsq - rhs.same_dsq,
             keep: self.keep - rhs.keep,

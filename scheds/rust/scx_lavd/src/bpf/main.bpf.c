@@ -975,6 +975,8 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 {
 	bool found_idle = false;
 	struct task_ctx *taskc;
+	struct cpu_ctx *cpuc;
+	u64 dsq_id;
 	s32 cpu_id;
 
 	taskc = get_task_ctx(p);
@@ -989,13 +991,22 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	cpu_id = find_idle_cpu(p, taskc, prev_cpu, wake_flags, true, &found_idle);
 	if (found_idle) {
 		/*
-		 * If there is an idle cpu,
+		 * If there is an idle cpu and its associated DSQ is empty,
 		 * disptach the task to the idle cpu right now.
 		 */
-		p->scx.dsq_vtime = calc_when_to_run(p, taskc);
-		p->scx.slice = calc_time_slice(p, taskc);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
-		return cpu_id;
+		cpuc = get_cpu_ctx_id(cpu_id);
+		if (!cpuc) {
+			scx_bpf_error("Failed to look up cpu context context");
+			return cpu_id;
+		}
+		dsq_id = cpuc->cpdom_id;
+
+		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
+			p->scx.dsq_vtime = calc_when_to_run(p, taskc);
+			p->scx.slice = calc_time_slice(p, taskc);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
+			return cpu_id;
+		}
 	}
 
 	/*
@@ -1042,31 +1053,6 @@ static bool try_kick_task_idle_cpu(struct task_struct *p,
 	return false;
 }
 
-static bool can_direct_dispatch(struct task_struct *p, u64 enq_flags,
-				s32 prev_cpu)
-{
-	/*
-	 * If a task is re-enqueued since the prev_cpu is taken by a higher
-	 * scheduling class (e.g., RT), directly dispatching to the prev_cpu
-	 * does not makes sense.
-	 */
-	if (enq_flags & SCX_ENQ_REENQ)
-		return false;
-
-	/*
-	 * If ops.select_cpu() has been skipped since the task is not
-	 * migratable, check whether the CPU is idle. If the CPU is idle,
-	 * dispatch the task to the local DSQ directly.
-	 */
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
-		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
-			bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
-			return true;
-	}
-
-	return false;
-}
-
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc_task, *cpuc_cur;
@@ -1101,16 +1087,16 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 	/*
 	 * Enqueue the task to one of task's DSQs based on its virtual deadline.
+	 *
+	 * We do not perform direct dispatch to a local DSQ (SCX_DSQ_LOCAL_ON)
+	 * on purpose. In particular, the direct dispatch at SCX_ENQ_CPU_SELECTED
+	 * could increase tail latencies because it gives too much favor to
+	 * non-migratable tasks, so stalling others.
 	 */
 	dsq_id = find_proper_dsq(taskc, cpuc_task);
 	prev_cpu = scx_bpf_task_cpu(p);
-	if (can_direct_dispatch(p, enq_flags, prev_cpu)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
-				   p->scx.slice, enq_flags);
-	} else {
-		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
-					 p->scx.dsq_vtime, enq_flags);
-	}
+	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice, p->scx.dsq_vtime,
+				 enq_flags);
 
 	/*
 	 * If there is an idle cpu for the task, try to kick it up now
@@ -2046,6 +2032,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->offline_clk = now;
 		cpuc->cpdom_poll_pos = cpu % LAVD_CPDOM_MAX_NR;
 		cpuc->min_perf_cri = 1000;
+		cpuc->futex_op = LAVD_FUTEX_OP_INVALID;
 
 		if (cpuc->capacity > 0) {
 			sum_capacity += cpuc->capacity;

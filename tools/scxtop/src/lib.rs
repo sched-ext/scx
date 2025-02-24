@@ -7,6 +7,8 @@ mod app;
 pub mod bpf_intf;
 pub mod bpf_skel;
 mod bpf_stats;
+pub mod cli;
+pub mod config;
 mod cpu_data;
 mod event_data;
 mod keymap;
@@ -44,13 +46,14 @@ pub use plain::Plain;
 // Generate serialization types for handling events from the bpf ring buffer.
 unsafe impl Plain for crate::bpf_skel::types::bpf_event {}
 
-pub const STATS_SOCKET_PATH: &'static str = "/var/run/scx/root/stats";
-pub const APP: &'static str = "scxtop";
-pub const LICENSE: &'static str = "Copyright (c) Meta Platforms, Inc. and affiliates. 
+pub const APP: &str = "scxtop";
+pub const TRACE_FILE_PREFIX: &str = "scxtop_trace";
+pub const STATS_SOCKET_PATH: &str = "/var/run/scx/root/stats";
+pub const LICENSE: &str = "Copyright (c) Meta Platforms, Inc. and affiliates.
 
 This software may be used and distributed according to the terms of the 
 GNU General Public License version 2.";
-pub const SCHED_NAME_PATH: &'static str = "/sys/kernel/sched_ext/root/ops";
+pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum AppState {
@@ -139,40 +142,102 @@ pub type SchedWakingAction = SchedWakeActionCtx;
 pub type SchedWakeupAction = SchedWakeActionCtx;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SoftIRQAction {
+    pub cpu: u32,
+    pub pid: u32,
+    pub entry_ts: u64,
+    pub exit_ts: u64,
+    pub softirq_nr: usize,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RecordTraceAction {
+    pub immediate: bool,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct IPIAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub target_cpu: u32,
+    pub pid: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
-    Tick,
-    Increment,
-    Decrement,
-    Quit,
-    Help,
-    Event,
-    ClearEvent,
-    NextEvent,
-    PrevEvent,
     ChangeTheme,
-    Up,
+    ClearEvent,
+    DecBpfSampleRate,
+    DecTickRate,
     Down,
-    PageUp,
-    PageDown,
     Enter,
+    Event,
+    Help,
+    IncBpfSampleRate,
+    IncTickRate,
+    IPI(IPIAction),
+    NextEvent,
+    NextViewState,
+    PageDown,
+    PageUp,
+    PrevEvent,
+    Quit,
+    RecordTrace(RecordTraceAction),
+    ReloadStatsClient,
     Render,
-    SchedReg,
-    SchedUnreg,
+    SaveConfig,
     SchedCpuPerfSet(SchedCpuPerfSetAction),
+    SchedReg,
     SchedStats(String),
     SchedSwitch(SchedSwitchAction),
-    SchedWakeup(SchedWakeupAction),
+    SchedUnreg,
     SchedWakeupNew(SchedWakeupNewAction),
+    SchedWakeup(SchedWakeupAction),
     SchedWaking(SchedWakingAction),
     SetState(AppState),
-    NextViewState,
-    RecordTrace,
-    ToggleCpuFreq,
-    ToggleUncoreFreq,
+    SoftIRQ(SoftIRQAction),
+    Tick,
     TickRateChange(std::time::Duration),
-    IncTickRate,
-    DecTickRate,
-    IncBpfSampleRate,
-    DecBpfSampleRate,
+    ToggleCpuFreq,
+    ToggleLocalization,
+    ToggleUncoreFreq,
+    Up,
     None,
+}
+
+impl std::fmt::Display for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Action::SetState(AppState::Default) => write!(f, "AppStateDefault"),
+            Action::SetState(AppState::Event) => write!(f, "AppStateEvent"),
+            Action::ToggleCpuFreq => write!(f, "ToggleCpuFreq"),
+            Action::ToggleUncoreFreq => write!(f, "ToggleUncoreFreq"),
+            Action::ToggleLocalization => write!(f, "ToggleLocalization"),
+            Action::SetState(AppState::Help) => write!(f, "AppStateHelp"),
+            Action::SetState(AppState::Llc) => write!(f, "AppStateLlc"),
+            Action::SetState(AppState::Node) => write!(f, "AppStateNode"),
+            Action::SetState(AppState::Scheduler) => write!(f, "AppStateScheduler"),
+            Action::SaveConfig => write!(f, "SaveConfig"),
+            Action::RecordTrace(RecordTraceAction { immediate: false }) => write!(f, "RecordTrace"),
+            Action::RecordTrace(RecordTraceAction { immediate: true }) => {
+                write!(f, "RecordTraceNow")
+            }
+            Action::ClearEvent => write!(f, "ClearEvent"),
+            Action::PrevEvent => write!(f, "PrevEvent"),
+            Action::NextEvent => write!(f, "NextEvent"),
+            Action::Quit => write!(f, "Quit"),
+            Action::ChangeTheme => write!(f, "ChangeTheme"),
+            Action::DecTickRate => write!(f, "DecTickRate"),
+            Action::IncTickRate => write!(f, "IncTickRate"),
+            Action::DecBpfSampleRate => write!(f, "DecBpfSampleRate"),
+            Action::IncBpfSampleRate => write!(f, "IncBpfSampleRate"),
+            Action::NextViewState => write!(f, "NextViewState"),
+            Action::Down => write!(f, "Down"),
+            Action::Up => write!(f, "Up"),
+            Action::PageDown => write!(f, "PageDown"),
+            Action::PageUp => write!(f, "PageUp"),
+            Action::Enter => write!(f, "Enter"),
+            _ => write!(f, "{:?}", self),
+        }
+    }
 }

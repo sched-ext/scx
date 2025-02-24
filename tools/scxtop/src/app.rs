@@ -6,13 +6,14 @@
 use crate::available_perf_events;
 use crate::bpf_skel::BpfSkel;
 use crate::bpf_stats::BpfStats;
+use crate::config::get_config_path;
+use crate::config::Config;
 use crate::format_hz;
 use crate::read_file_string;
 use crate::AppState;
 use crate::AppTheme;
 use crate::CpuData;
 use crate::EventData;
-use crate::KeyMap;
 use crate::LlcData;
 use crate::NodeData;
 use crate::PerfEvent;
@@ -23,11 +24,14 @@ use crate::APP;
 use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
-    Action, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction,
+    Action, IPIAction, RecordTraceAction, SchedCpuPerfSetAction, SchedSwitchAction,
+    SchedWakeupAction, SchedWakingAction, SoftIRQAction,
 };
 
 use anyhow::Result;
 use glob::glob;
+use libbpf_rs::Link;
+use num_format::{SystemLocale, ToFormattedString};
 use protobuf::Message;
 use ratatui::prelude::Constraint;
 use ratatui::{
@@ -45,10 +49,9 @@ use regex::Regex;
 use scx_stats::prelude::StatsClient;
 use scx_utils::misc::read_file_usize;
 use scx_utils::Topology;
-use serde_json;
 use serde_json::Value as JsonValue;
+use std::sync::RwLock;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::RwLock;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -60,20 +63,18 @@ const DSQ_VTIME_CUTOFF: u64 = 1_000_000_000_000_000;
 
 /// App is the struct for scxtop application state.
 pub struct App<'a> {
+    config: Config,
+    localize: bool,
+    locale: SystemLocale,
     stats_client: Arc<RwLock<StatsClient>>,
-    stats_socket_path: String,
     sched_stats_raw: String,
 
-    keymap: KeyMap,
     scheduler: String,
     max_cpu_events: usize,
     max_sched_events: usize,
     state: AppState,
     prev_state: AppState,
-    theme: AppTheme,
     view_state: ViewState,
-    pub counter: i64,
-    pub tick_rate_ms: usize,
     pub should_quit: Arc<AtomicBool>,
     pub action_tx: UnboundedSender<Action>,
     pub skel: BpfSkel<'a>,
@@ -105,24 +106,21 @@ pub struct App<'a> {
     non_hw_event_active: bool,
 
     // trace releated
-    trace_manager: PerfettoTraceManager<'a>,
+    trace_manager: PerfettoTraceManager,
     trace_tick: usize,
-    trace_tick_warmup: usize,
-    max_trace_ticks: usize,
     prev_bpf_sample_rate: u32,
+    process_id: i32,
+    trace_links: Vec<Link>,
 }
 
 impl<'a> App<'a> {
     /// Creates a new appliation.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        stats_socket_path: String,
-        trace_file_prefix: &'a str,
+        config: Config,
         scheduler: String,
-        keymap: KeyMap,
         max_cpu_events: usize,
-        tick_rate_ms: usize,
-        trace_ticks: usize,
-        trace_tick_warmup: usize,
+        process_id: i32,
         action_tx: UnboundedSender<Action>,
         skel: BpfSkel<'a>,
     ) -> Result<Self> {
@@ -139,7 +137,7 @@ impl<'a> App<'a> {
             .collect::<Vec<String>>();
         for cpu in topo.all_cpus.values() {
             let mut event = PerfEvent::new("hw".to_string(), "cycles".to_string(), cpu.id);
-            event.attach()?;
+            event.attach(process_id)?;
             active_perf_events.insert(cpu.id, event);
             let mut data =
                 CpuData::new(cpu.id, cpu.core_id, cpu.llc_id, cpu.node_id, max_cpu_events);
@@ -167,32 +165,33 @@ impl<'a> App<'a> {
             .collect();
         let num_perf_events: u16 = available_perf_events_list.len() as u16;
         let mut stats_client = StatsClient::new();
+        let stats_socket_path = config.stats_socket_path();
         if !stats_socket_path.is_empty() {
-            stats_client = stats_client.set_path(stats_socket_path.clone());
+            stats_client = stats_client.set_path(stats_socket_path);
         }
         stats_client = stats_client.connect().unwrap_or_else(|_| {
             let mut client = StatsClient::new();
             if !stats_socket_path.is_empty() {
-                client = client.set_path(stats_socket_path.clone());
+                client = client.set_path(stats_socket_path);
             }
             client
         });
         let sample_rate = skel.maps.data_data.sample_rate;
+        let trace_file_prefix = config.trace_file_prefix().to_string();
+        let trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
 
         let app = Self {
+            config,
+            localize: true,
+            locale: SystemLocale::default()?,
             stats_client: Arc::new(RwLock::new(stats_client)),
             sched_stats_raw: "".to_string(),
-            stats_socket_path: stats_socket_path.clone(),
             scheduler,
             max_cpu_events,
             max_sched_events: max_cpu_events,
-            keymap,
-            theme: AppTheme::Default,
             state: AppState::Default,
             view_state: ViewState::BarChart,
             prev_state: AppState::Default,
-            counter: 0,
-            tick_rate_ms,
             should_quit: Arc::new(AtomicBool::new(false)),
             action_tx,
             skel,
@@ -217,10 +216,10 @@ impl<'a> App<'a> {
             non_hw_event_active: false,
             prev_bpf_sample_rate: sample_rate,
             trace_tick: 0,
-            trace_tick_warmup,
-            max_trace_ticks: trace_ticks,
-            trace_manager: PerfettoTraceManager::new(&trace_file_prefix, None),
+            trace_manager,
             bpf_stats: Default::default(),
+            process_id,
+            trace_links: vec![],
         };
 
         Ok(app)
@@ -238,13 +237,13 @@ impl<'a> App<'a> {
     }
 
     /// Returns the current theme of the application
-    pub fn theme(&self) -> AppTheme {
-        self.theme.clone()
+    pub fn theme(&self) -> &AppTheme {
+        self.config.theme()
     }
 
     /// Sets the theme of the application.
     pub fn set_theme(&mut self, theme: AppTheme) {
-        self.theme = theme
+        self.config.set_theme(theme)
     }
 
     /// Stop all active perf events.
@@ -301,7 +300,7 @@ impl<'a> App<'a> {
                 perf_event.event.clone(),
                 *cpu_id,
             );
-            event.attach()?;
+            event.attach(self.process_id)?;
             self.active_perf_events.insert(*cpu_id, event);
         }
         Ok(())
@@ -398,9 +397,26 @@ impl<'a> App<'a> {
         self.max_cpu_events = max_events;
     }
 
+    /// Saves the current config.
+    fn on_save_config(&mut self) -> Result<()> {
+        self.config.save()
+    }
+
     /// Handles when scheduler stats are received.
     fn on_sched_stats(&mut self, stats_raw: String) {
         self.sched_stats_raw = stats_raw;
+    }
+
+    /// Reloads stats client
+    fn reload_stats_client(&mut self) -> Result<()> {
+        let stats_socket_path = self.config.stats_socket_path();
+        let mut new_client = StatsClient::new();
+        new_client = new_client.connect()?;
+        new_client = new_client.set_path(stats_socket_path);
+        let mut client = self.stats_client.write().unwrap();
+        *client = new_client;
+
+        Ok(())
     }
 
     /// Runs callbacks to update application state on tick.
@@ -412,10 +428,9 @@ impl<'a> App<'a> {
             AppState::Scheduler => {
                 if !self.scheduler.is_empty() {
                     let stats_client_read = self.stats_client.clone();
-                    let stats_socket_path = self.stats_socket_path.clone();
                     let tx = self.action_tx.clone();
                     tokio::spawn(async move {
-                        let mut client = stats_client_read.write().await;
+                        let mut client = stats_client_read.write().unwrap();
 
                         let result = client.request::<JsonValue>("stats", vec![]);
                         match result {
@@ -426,14 +441,7 @@ impl<'a> App<'a> {
                                 .unwrap();
                             }
                             Err(_) => {
-                                // On error it could be the scheduler was loaded/unloaded so try
-                                // reconnecting.
-                                let mut new_client = StatsClient::new();
-                                new_client = new_client.connect()?;
-                                if !stats_socket_path.is_empty() {
-                                    new_client = new_client.set_path(stats_socket_path);
-                                }
-                                *client = new_client;
+                                tx.send(Action::ReloadStatsClient).unwrap();
                             }
                         }
                         Ok::<(), anyhow::Error>(())
@@ -443,7 +451,7 @@ impl<'a> App<'a> {
             AppState::Tracing => {
                 self.trace_tick += 1;
                 // trace for max ticks and then exit tracing mode
-                if self.trace_tick > self.max_trace_ticks + self.trace_tick_warmup {
+                if self.trace_tick > self.config.trace_ticks() + self.config.trace_tick_warmup() {
                     return self.record_trace();
                 }
             }
@@ -526,7 +534,11 @@ impl<'a> App<'a> {
                     "".to_string()
                 }
             )))
-            .text_value(format!("{}", value))
+            .text_value(if self.localize {
+                value.to_formatted_string(&self.locale)
+            } else {
+                format!("{}", value)
+            })
     }
 
     /// Creates a sparkline for a cpu.
@@ -555,7 +567,7 @@ impl<'a> App<'a> {
             .data(&data)
             .max(max)
             .direction(RenderDirection::RightToLeft)
-            .style(self.theme.sparkline_style())
+            .style(self.theme().sparkline_style())
             .bar_set(if small { THREE_LEVELS } else { NINE_LEVELS })
             .block(
                 Block::new()
@@ -575,7 +587,7 @@ impl<'a> App<'a> {
                     ))
                     .borders(borders)
                     .border_type(BorderType::Rounded)
-                    .style(self.theme.border_style()),
+                    .style(self.theme().border_style()),
             )
     }
 
@@ -592,7 +604,7 @@ impl<'a> App<'a> {
         Sparkline::default()
             .data(&data)
             .direction(RenderDirection::RightToLeft)
-            .style(self.theme.sparkline_style())
+            .style(self.theme().sparkline_style())
             .block(
                 Block::new()
                     .borders(if bottom_border {
@@ -600,14 +612,24 @@ impl<'a> App<'a> {
                     } else {
                         Borders::LEFT | Borders::RIGHT
                     })
-                    .style(self.theme.border_style())
+                    .style(self.theme().border_style())
                     .border_type(BorderType::Rounded)
                     .title_top(
-                        Line::from(format!(
-                            "LLC {} avg {} max {} min {}",
-                            llc, stats.avg, stats.max, stats.min
-                        ))
-                        .style(self.theme.title_style())
+                        Line::from(if self.localize {
+                            format!(
+                                "LLC {} avg {} max {} min {}",
+                                llc,
+                                stats.avg.to_formatted_string(&self.locale),
+                                stats.max.to_formatted_string(&self.locale),
+                                stats.min.to_formatted_string(&self.locale)
+                            )
+                        } else {
+                            format!(
+                                "LLC {} avg {} max {} min {}",
+                                llc, stats.avg, stats.max, stats.min
+                            )
+                        })
+                        .style(self.theme().title_style())
                         .left_aligned(),
                     ),
             )
@@ -626,7 +648,7 @@ impl<'a> App<'a> {
         Sparkline::default()
             .data(&data)
             .direction(RenderDirection::RightToLeft)
-            .style(self.theme.sparkline_style())
+            .style(self.theme().sparkline_style())
             .block(
                 Block::new()
                     .borders(if bottom_border {
@@ -635,34 +657,41 @@ impl<'a> App<'a> {
                         Borders::LEFT | Borders::RIGHT
                     })
                     .border_type(BorderType::Rounded)
-                    .style(self.theme.border_style())
+                    .style(self.theme().border_style())
                     .title_top(
-                        Line::from(format!(
-                            "{}",
-                            if self.collect_uncore_freq {
-                                "uncore ".to_string()
-                                    + &format_hz(
-                                        self.node_data
-                                            .get(&node)
-                                            .unwrap()
-                                            .event_data_immut("uncore_freq".to_string())
-                                            .last()
-                                            .copied()
-                                            .unwrap_or(0_u64),
-                                    )
-                            } else {
-                                "".to_string()
-                            }
-                        ))
-                        .style(self.theme.text_important_color())
+                        Line::from(if self.collect_uncore_freq {
+                            "uncore ".to_string()
+                                + &format_hz(
+                                    self.node_data
+                                        .get(&node)
+                                        .unwrap()
+                                        .event_data_immut("uncore_freq".to_string())
+                                        .last()
+                                        .copied()
+                                        .unwrap_or(0_u64),
+                                )
+                        } else {
+                            "".to_string()
+                        })
+                        .style(self.theme().text_important_color())
                         .right_aligned(),
                     )
                     .title_top(
-                        Line::from(format!(
-                            "Node {} avg {} max {} min {}",
-                            node, stats.avg, stats.max, stats.min
-                        ))
-                        .style(self.theme.title_style())
+                        Line::from(if self.localize {
+                            format!(
+                                "Node {} avg {} max {} min {}",
+                                node,
+                                stats.avg.to_formatted_string(&self.locale),
+                                stats.max.to_formatted_string(&self.locale),
+                                stats.min.to_formatted_string(&self.locale)
+                            )
+                        } else {
+                            format!(
+                                "Node {} avg {} max {} min {}",
+                                node, stats.avg, stats.max, stats.min,
+                            )
+                        })
+                        .style(self.theme().title_style())
                         .left_aligned(),
                     ),
             )
@@ -696,32 +725,37 @@ impl<'a> App<'a> {
 
                 let llc_block = Block::bordered()
                     .title_top(
-                        Line::from(format!(
-                            "LLCs ({}) avg {} max {} min {}",
-                            self.active_event.event, stats.avg, stats.max, stats.min
-                        ))
-                        .style(self.theme.title_style())
+                        Line::from(if self.localize {
+                            format!(
+                                "LLCs ({}) avg {} max {} min {}",
+                                self.active_event.event,
+                                stats.avg.to_formatted_string(&self.locale),
+                                stats.max.to_formatted_string(&self.locale),
+                                stats.min.to_formatted_string(&self.locale)
+                            )
+                        } else {
+                            format!(
+                                "LLCs ({}) avg {} max {} min {}",
+                                self.active_event.event, stats.avg, stats.max, stats.min,
+                            )
+                        })
+                        .style(self.theme().title_style())
                         .centered(),
                     )
                     .border_type(BorderType::Rounded)
                     .title_top(
-                        Line::from(format!("{}ms", self.tick_rate_ms))
-                            .style(self.theme.text_important_color())
+                        Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                            .style(self.theme().text_important_color())
                             .right_aligned(),
                     )
-                    .style(self.theme.border_style());
+                    .style(self.theme().border_style());
 
                 frame.render_widget(llc_block, llcs_verticle[0]);
 
-                let llc_sparklines: Vec<Sparkline> = self
-                    .topo
+                self.topo
                     .all_llcs
                     .keys()
-                    .map(|llc_id| self.llc_sparkline(llc_id.clone(), *llc_id == num_llcs - 1))
-                    .collect();
-
-                let _ = llc_sparklines
-                    .iter()
+                    .map(|llc_id| self.llc_sparkline(*llc_id, *llc_id == num_llcs - 1))
                     .enumerate()
                     .for_each(|(i, llc_sparkline)| {
                         frame.render_widget(llc_sparkline, llcs_verticle[i + 1]);
@@ -730,19 +764,29 @@ impl<'a> App<'a> {
             ViewState::BarChart => {
                 let llc_block = Block::default()
                     .title_top(
-                        Line::from(format!(
-                            "LLCs ({}) avg {} max {} min {}",
-                            self.active_event.event, stats.avg, stats.max, stats.min,
-                        ))
-                        .style(self.theme.title_style())
+                        Line::from(if self.localize {
+                            format!(
+                                "LLCs ({}) avg {} max {} min {}",
+                                self.active_event.event,
+                                stats.avg.to_formatted_string(&self.locale),
+                                stats.max.to_formatted_string(&self.locale),
+                                stats.min.to_formatted_string(&self.locale),
+                            )
+                        } else {
+                            format!(
+                                "LLCs ({}) avg {} max {} min {}",
+                                self.active_event.event, stats.avg, stats.max, stats.min,
+                            )
+                        })
+                        .style(self.theme().title_style())
                         .centered(),
                     )
                     .title_top(
-                        Line::from(format!("{}ms", self.tick_rate_ms))
-                            .style(self.theme.text_important_color())
+                        Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                            .style(self.theme().text_important_color())
                             .right_aligned(),
                     )
-                    .style(self.theme.border_style())
+                    .style(self.theme().border_style())
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded);
 
@@ -753,7 +797,7 @@ impl<'a> App<'a> {
                     .block(llc_block)
                     .max(stats.max)
                     .direction(Direction::Horizontal)
-                    .bar_style(self.theme.sparkline_style())
+                    .bar_style(self.theme().sparkline_style())
                     .bar_gap(0)
                     .bar_width(1);
 
@@ -797,28 +841,38 @@ impl<'a> App<'a> {
                     .topo
                     .nodes
                     .keys()
-                    .map(|node_id| self.node_sparkline(node_id.clone(), *node_id == num_nodes - 1))
+                    .map(|node_id| self.node_sparkline(*node_id, *node_id == num_nodes - 1))
                     .collect();
 
                 let node_block = Block::bordered()
                     .title_top(
-                        Line::from(format!(
-                            "Node ({}) avg {} max {} min {}",
-                            self.active_event.event, stats.avg, stats.max, stats.min
-                        ))
-                        .style(self.theme.title_style())
+                        Line::from(if self.localize {
+                            format!(
+                                "Node ({}) avg {} max {} min {}",
+                                self.active_event.event,
+                                stats.avg.to_formatted_string(&self.locale),
+                                stats.max.to_formatted_string(&self.locale),
+                                stats.min.to_formatted_string(&self.locale)
+                            )
+                        } else {
+                            format!(
+                                "Node ({}) avg {} max {} min {}",
+                                self.active_event.event, stats.avg, stats.max, stats.min,
+                            )
+                        })
+                        .style(self.theme().title_style())
                         .centered(),
                     )
                     .title_top(
-                        Line::from(format!("{}ms", self.tick_rate_ms))
-                            .style(self.theme.text_important_color())
+                        Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                            .style(self.theme().text_important_color())
                             .right_aligned(),
                     )
                     .border_type(BorderType::Rounded)
-                    .style(self.theme.border_style());
+                    .style(self.theme().border_style());
 
                 frame.render_widget(node_block, nodes_verticle[0]);
-                let _ = node_sparklines
+                node_sparklines
                     .iter()
                     .enumerate()
                     .for_each(|(i, node_sparkline)| {
@@ -828,19 +882,29 @@ impl<'a> App<'a> {
             ViewState::BarChart => {
                 let node_block = Block::default()
                     .title_top(
-                        Line::from(format!(
-                            "NUMA Nodes ({}) avg {} max {} min {}",
-                            self.active_event.event, stats.avg, stats.max, stats.min,
-                        ))
-                        .style(self.theme.title_style())
+                        Line::from(if self.localize {
+                            format!(
+                                "NUMA Nodes ({}) avg {} max {} min {}",
+                                self.active_event.event,
+                                stats.avg.to_formatted_string(&self.locale),
+                                stats.max.to_formatted_string(&self.locale),
+                                stats.min.to_formatted_string(&self.locale),
+                            )
+                        } else {
+                            format!(
+                                "NUMA Nodes ({}) avg {} max {} min {}",
+                                self.active_event.event, stats.avg, stats.max, stats.min,
+                            )
+                        })
+                        .style(self.theme().title_style())
                         .centered(),
                     )
                     .title_top(
-                        Line::from(format!("{}ms", self.tick_rate_ms))
-                            .style(self.theme.text_important_color())
+                        Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                            .style(self.theme().text_important_color())
                             .right_aligned(),
                     )
-                    .style(self.theme.border_style())
+                    .style(self.theme().border_style())
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded);
 
@@ -851,7 +915,7 @@ impl<'a> App<'a> {
                     .block(node_block)
                     .max(stats.max)
                     .direction(Direction::Horizontal)
-                    .bar_style(self.theme.sparkline_style())
+                    .bar_style(self.theme().sparkline_style())
                     .bar_gap(0)
                     .bar_width(1);
 
@@ -885,35 +949,45 @@ impl<'a> App<'a> {
             .data(&data)
             .max(stats.max)
             .direction(RenderDirection::RightToLeft)
-            .style(self.theme.sparkline_style())
+            .style(self.theme().sparkline_style())
             .block(
                 Block::new()
                     .borders(borders)
                     .border_type(BorderType::Rounded)
-                    .style(self.theme.border_style())
+                    .style(self.theme().border_style())
                     .title_top(if render_sample_rate {
                         Line::from(format!(
                             "sample rate {}",
                             self.skel.maps.data_data.sample_rate
                         ))
-                        .style(self.theme.text_important_color())
+                        .style(self.theme().text_important_color())
                         .right_aligned()
                     } else {
                         Line::from("".to_string())
                     })
                     .title_top(if render_title {
                         Line::from(format!("{} ", event.clone()))
-                            .style(self.theme.title_style())
+                            .style(self.theme().title_style())
                             .left_aligned()
                     } else {
                         Line::from("".to_string())
                     })
                     .title_top(
-                        Line::from(format!(
-                            "dsq {:#X} avg {} max {} min {}",
-                            dsq_id, stats.avg, stats.max, stats.min
-                        ))
-                        .style(self.theme.title_style())
+                        Line::from(if self.localize {
+                            format!(
+                                "dsq {:#X} avg {} max {} min {}",
+                                dsq_id,
+                                stats.avg.to_formatted_string(&self.locale),
+                                stats.max.to_formatted_string(&self.locale),
+                                stats.min.to_formatted_string(&self.locale),
+                            )
+                        } else {
+                            format!(
+                                "dsq {:#X} avg {} max {} min {}",
+                                dsq_id, stats.avg, stats.max, stats.min,
+                            )
+                        })
+                        .style(self.theme().title_style())
                         .centered(),
                     ),
             )
@@ -933,7 +1007,7 @@ impl<'a> App<'a> {
             .map(|(j, (dsq_id, _data))| {
                 self.dsq_sparkline(
                     event.clone(),
-                    dsq_id.clone(),
+                    *dsq_id,
                     Borders::ALL,
                     j == 0 && render_title,
                     j == 0 && render_sample_rate,
@@ -946,11 +1020,22 @@ impl<'a> App<'a> {
     fn dsq_bar(&self, dsq: u64, value: u64, avg: u64, max: u64, min: u64) -> Bar {
         Bar::default()
             .value(value)
-            .label(Line::from(format!(
-                "{:#X} avg {} max {} min {}",
-                dsq, avg, max, min
-            )))
-            .text_value(format!("{}", value))
+            .label(Line::from(if self.localize {
+                format!(
+                    "{:#X} avg {} max {} min {}",
+                    dsq,
+                    avg.to_formatted_string(&self.locale),
+                    max.to_formatted_string(&self.locale),
+                    min.to_formatted_string(&self.locale)
+                )
+            } else {
+                format!("{:#X} avg {} max {} min {}", dsq, avg, max, min,)
+            }))
+            .text_value(if self.localize {
+                value.to_formatted_string(&self.locale)
+            } else {
+                format!("{}", value)
+            })
     }
 
     /// Generates DSQ bar charts.
@@ -971,11 +1056,22 @@ impl<'a> App<'a> {
     fn event_bar(&self, id: usize, value: u64, avg: u64, max: u64, min: u64) -> Bar {
         Bar::default()
             .value(value)
-            .label(Line::from(format!(
-                "{} avg {} max {} min {}",
-                id, avg, max, min
-            )))
-            .text_value(format!("{}", value))
+            .label(Line::from(if self.localize {
+                format!(
+                    "{} avg {} max {} min {}",
+                    id,
+                    avg.to_formatted_string(&self.locale),
+                    max.to_formatted_string(&self.locale),
+                    min.to_formatted_string(&self.locale)
+                )
+            } else {
+                format!("{} avg {} max {} min {}", id, avg, max, min,)
+            }))
+            .text_value(if self.localize {
+                value.to_formatted_string(&self.locale)
+            } else {
+                format!("{}", value)
+            })
     }
 
     /// Generates LLC bar charts.
@@ -1012,15 +1108,15 @@ impl<'a> App<'a> {
         let block = Block::bordered()
             .title_top(
                 Line::from(self.scheduler.clone())
-                    .style(self.theme.title_style())
+                    .style(self.theme().title_style())
                     .centered(),
             )
             .title_top(
-                Line::from(format!("{}ms", self.tick_rate_ms))
-                    .style(self.theme.text_important_color())
+                Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                    .style(self.theme().text_important_color())
                     .right_aligned(),
             )
-            .style(self.theme.border_style())
+            .style(self.theme().border_style())
             .border_type(BorderType::Rounded);
 
         frame.render_widget(paragraph.block(block), area);
@@ -1054,10 +1150,10 @@ impl<'a> App<'a> {
             let block = Block::default()
                 .title_top(
                     Line::from(self.scheduler.clone())
-                        .style(self.theme.title_style())
+                        .style(self.theme().title_style())
                         .centered(),
                 )
-                .style(self.theme.border_style())
+                .style(self.theme().border_style())
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded);
             frame.render_widget(block, area);
@@ -1069,8 +1165,7 @@ impl<'a> App<'a> {
         }
         let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
 
-        let _ = self
-            .dsq_sparklines(event.clone(), render_title, render_sample_rate)
+        self.dsq_sparklines(event.clone(), render_title, render_sample_rate)
             .iter()
             .enumerate()
             .for_each(|(j, dsq_sparkline)| {
@@ -1098,10 +1193,10 @@ impl<'a> App<'a> {
             let block = Block::default()
                 .title_top(
                     Line::from(self.scheduler.clone())
-                        .style(self.theme.title_style())
+                        .style(self.theme().title_style())
                         .centered(),
                 )
-                .style(self.theme.border_style())
+                .style(self.theme().border_style())
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded);
             frame.render_widget(block, area);
@@ -1114,8 +1209,7 @@ impl<'a> App<'a> {
         }
         let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
 
-        let _ = self
-            .dsq_sparklines(event.clone(), render_title, render_sample_rate)
+        self.dsq_sparklines(event.clone(), render_title, render_sample_rate)
             .iter()
             .enumerate()
             .for_each(|(j, dsq_sparkline)| {
@@ -1142,10 +1236,10 @@ impl<'a> App<'a> {
             let block = Block::default()
                 .title_top(
                     Line::from(self.scheduler.clone())
-                        .style(self.theme.title_style())
+                        .style(self.theme().title_style())
                         .centered(),
                 )
-                .style(self.theme.border_style())
+                .style(self.theme().border_style())
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded);
             frame.render_widget(block, area);
@@ -1167,21 +1261,32 @@ impl<'a> App<'a> {
 
         let bar_block = Block::default()
             .title_top(
-                Line::from(format!(
-                    "{} {} avg {} max {} min {}",
-                    self.scheduler, event, stats.avg, stats.max, stats.min,
-                ))
-                .style(self.theme.title_style())
+                Line::from(if self.localize {
+                    format!(
+                        "{} {} avg {} max {} min {}",
+                        self.scheduler,
+                        event,
+                        stats.avg.to_formatted_string(&self.locale),
+                        stats.max.to_formatted_string(&self.locale),
+                        stats.min.to_formatted_string(&self.locale),
+                    )
+                } else {
+                    format!(
+                        "{} {} avg {} max {} min {}",
+                        self.scheduler, event, stats.avg, stats.max, stats.min,
+                    )
+                })
+                .style(self.theme().title_style())
                 .centered(),
             )
             .title_top(if render_sample_rate {
                 Line::from(format!("sample rate {}", sample_rate))
-                    .style(self.theme.text_important_color())
+                    .style(self.theme().text_important_color())
                     .right_aligned()
             } else {
                 Line::from("")
             })
-            .style(self.theme.border_style())
+            .style(self.theme().border_style())
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded);
 
@@ -1192,7 +1297,7 @@ impl<'a> App<'a> {
             .block(bar_block)
             .max(stats.max)
             .direction(Direction::Horizontal)
-            .bar_style(self.theme.sparkline_style())
+            .bar_style(self.theme().sparkline_style())
             .bar_gap(0)
             .bar_width(1);
 
@@ -1213,10 +1318,10 @@ impl<'a> App<'a> {
             let block = Block::default()
                 .title_top(
                     Line::from(self.scheduler.clone())
-                        .style(self.theme.title_style())
+                        .style(self.theme().title_style())
                         .centered(),
                 )
-                .style(self.theme.border_style())
+                .style(self.theme().border_style())
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded);
             frame.render_widget(block, area);
@@ -1235,21 +1340,32 @@ impl<'a> App<'a> {
 
         let bar_block = Block::default()
             .title_top(
-                Line::from(format!(
-                    "{} {} avg {} max {} min {}",
-                    self.scheduler, event, stats.avg, stats.max, stats.min,
-                ))
-                .style(self.theme.title_style())
+                Line::from(if self.localize {
+                    format!(
+                        "{} {} avg {} max {} min {}",
+                        self.scheduler,
+                        event,
+                        stats.avg.to_formatted_string(&self.locale),
+                        stats.max.to_formatted_string(&self.locale),
+                        stats.min.to_formatted_string(&self.locale),
+                    )
+                } else {
+                    format!(
+                        "{} {} avg {} max {} min {}",
+                        self.scheduler, event, stats.avg, stats.max, stats.min,
+                    )
+                })
+                .style(self.theme().title_style())
                 .centered(),
             )
             .title_top(if render_sample_rate {
                 Line::from(format!("sample rate {}", sample_rate))
-                    .style(self.theme.text_important_color())
+                    .style(self.theme().text_important_color())
                     .right_aligned()
             } else {
                 Line::from("")
             })
-            .style(self.theme.border_style())
+            .style(self.theme().border_style())
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded);
 
@@ -1260,7 +1376,7 @@ impl<'a> App<'a> {
             .block(bar_block)
             .max(stats.max)
             .direction(Direction::Horizontal)
-            .bar_style(self.theme.sparkline_style())
+            .bar_style(self.theme().sparkline_style())
             .bar_gap(0)
             .bar_width(1);
 
@@ -1366,43 +1482,55 @@ impl<'a> App<'a> {
 
                     let node_block = Block::bordered()
                         .title_top(
-                            Line::from(format!(
-                                "Node{} ({}) avg {} max {} min {}",
-                                node.id, self.active_event.event, stats.avg, stats.max, stats.min
-                            ))
-                            .style(self.theme.title_style())
+                            Line::from(if self.localize {
+                                format!(
+                                    "Node{} ({}) avg {} max {} min {}",
+                                    node.id,
+                                    self.active_event.event,
+                                    stats.avg.to_formatted_string(&self.locale),
+                                    stats.max.to_formatted_string(&self.locale),
+                                    stats.min.to_formatted_string(&self.locale)
+                                )
+                            } else {
+                                format!(
+                                    "Node{} ({}) avg {} max {} min {}",
+                                    node.id,
+                                    self.active_event.event,
+                                    stats.avg,
+                                    stats.max,
+                                    stats.min,
+                                )
+                            })
+                            .style(self.theme().title_style())
                             .centered(),
                         )
                         .title_top(if i == 0 {
-                            Line::from(format!("{}ms", self.tick_rate_ms))
-                                .style(self.theme.text_important_color())
+                            Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                                .style(self.theme().text_important_color())
                                 .right_aligned()
                         } else {
                             Line::from("")
                         })
                         .title_top(
-                            Line::from(format!(
-                                "{}",
-                                if self.collect_uncore_freq {
-                                    "uncore ".to_string()
-                                        + &format_hz(
-                                            self.node_data
-                                                .get(&node.id)
-                                                .unwrap()
-                                                .event_data_immut("uncore_freq".to_string())
-                                                .last()
-                                                .copied()
-                                                .unwrap_or(0_u64),
-                                        )
-                                } else {
-                                    "".to_string()
-                                }
-                            ))
-                            .style(self.theme.text_important_color())
+                            Line::from(if self.collect_uncore_freq {
+                                "uncore ".to_string()
+                                    + &format_hz(
+                                        self.node_data
+                                            .get(&node.id)
+                                            .unwrap()
+                                            .event_data_immut("uncore_freq".to_string())
+                                            .last()
+                                            .copied()
+                                            .unwrap_or(0_u64),
+                                    )
+                            } else {
+                                "".to_string()
+                            })
+                            .style(self.theme().text_important_color())
                             .left_aligned(),
                         )
                         .border_type(BorderType::Rounded)
-                        .style(self.theme.border_style());
+                        .style(self.theme().border_style());
 
                     frame.render_widget(node_block, top);
 
@@ -1414,7 +1542,7 @@ impl<'a> App<'a> {
                         .enumerate()
                         .map(|(j, cpu)| {
                             self.cpu_sparkline(
-                                cpu.id.clone(),
+                                cpu.id,
                                 stats.max,
                                 if j > col_scale && j == node_cpus - col_scale {
                                     Borders::LEFT | Borders::BOTTOM
@@ -1434,7 +1562,7 @@ impl<'a> App<'a> {
                         })
                         .collect();
 
-                    let _ = cpu_sparklines
+                    cpu_sparklines
                         .iter()
                         .enumerate()
                         .for_each(|(j, cpu_sparkline)| {
@@ -1474,43 +1602,55 @@ impl<'a> App<'a> {
 
                     let node_block = Block::bordered()
                         .title_top(
-                            Line::from(format!(
-                                "Node{} ({}) avg {} max {} min {}",
-                                node.id, self.active_event.event, stats.avg, stats.max, stats.min
-                            ))
-                            .style(self.theme.title_style())
+                            Line::from(if self.localize {
+                                format!(
+                                    "Node{} ({}) avg {} max {} min {}",
+                                    node.id,
+                                    self.active_event.event,
+                                    stats.avg.to_formatted_string(&self.locale),
+                                    stats.max.to_formatted_string(&self.locale),
+                                    stats.min.to_formatted_string(&self.locale)
+                                )
+                            } else {
+                                format!(
+                                    "Node{} ({}) avg {} max {} min {}",
+                                    node.id,
+                                    self.active_event.event,
+                                    stats.avg,
+                                    stats.max,
+                                    stats.min,
+                                )
+                            })
+                            .style(self.theme().title_style())
                             .centered(),
                         )
                         .title_top(if i == 0 {
-                            Line::from(format!("{}ms", self.tick_rate_ms))
-                                .style(self.theme.text_important_color())
+                            Line::from(format!("{}ms", self.config.tick_rate_ms()))
+                                .style(self.theme().text_important_color())
                                 .right_aligned()
                         } else {
                             Line::from("")
                         })
                         .title_top(
-                            Line::from(format!(
-                                "{}",
-                                if self.collect_uncore_freq {
-                                    "uncore ".to_string()
-                                        + &format_hz(
-                                            self.node_data
-                                                .get(&node.id)
-                                                .unwrap()
-                                                .event_data_immut("uncore_freq".to_string())
-                                                .last()
-                                                .copied()
-                                                .unwrap_or(0_u64),
-                                        )
-                                } else {
-                                    "".to_string()
-                                }
-                            ))
-                            .style(self.theme.text_important_color())
+                            Line::from(if self.collect_uncore_freq {
+                                "uncore ".to_string()
+                                    + &format_hz(
+                                        self.node_data
+                                            .get(&node.id)
+                                            .unwrap()
+                                            .event_data_immut("uncore_freq".to_string())
+                                            .last()
+                                            .copied()
+                                            .unwrap_or(0_u64),
+                                    )
+                            } else {
+                                "".to_string()
+                            })
+                            .style(self.theme().text_important_color())
                             .left_aligned(),
                         )
                         .border_type(BorderType::Rounded)
-                        .style(self.theme.border_style());
+                        .style(self.theme().border_style());
 
                     let mut bar_col_data: Vec<Vec<Bar>> = vec![Vec::new(); 4];
                     let _: Vec<_> = node
@@ -1537,13 +1677,13 @@ impl<'a> App<'a> {
                                 },
                             )
                             .border_type(BorderType::Rounded)
-                            .style(self.theme.border_style());
+                            .style(self.theme().border_style());
                         let bar_chart = BarChart::default()
                             .block(cpu_block)
-                            .data(BarGroup::default().bars(&col_data))
+                            .data(BarGroup::default().bars(col_data))
                             .max(stats.max)
                             .direction(Direction::Horizontal)
-                            .bar_style(self.theme.sparkline_style())
+                            .bar_style(self.theme().sparkline_style())
                             .bar_gap(0)
                             .bar_width(1);
                         frame.render_widget(bar_chart, cpus_areas[j % col_scale as usize]);
@@ -1580,7 +1720,8 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: (press to exit help)",
-                    self.keymap
+                    self.config
+                        .active_keymap
                         .action_keys_string(Action::SetState(AppState::Help))
                 ),
                 Style::default(),
@@ -1588,7 +1729,9 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: change theme ({})",
-                    self.keymap.action_keys_string(Action::ChangeTheme),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::ChangeTheme),
                     serde_json::to_string_pretty(&theme)?
                 ),
                 Style::default(),
@@ -1596,30 +1739,40 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: record perfetto trace",
-                    self.keymap.action_keys_string(Action::RecordTrace),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::RecordTrace(RecordTraceAction {
+                            immediate: false
+                        })),
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
                     "{}: decrease tick rate ({}ms)",
-                    self.keymap.action_keys_string(Action::DecTickRate),
-                    self.tick_rate_ms
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::DecTickRate),
+                    self.config.tick_rate_ms()
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
                     "{}: increase tick rate ({}ms)",
-                    self.keymap.action_keys_string(Action::IncTickRate),
-                    self.tick_rate_ms
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::IncTickRate),
+                    self.config.tick_rate_ms()
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
                     "{}: decrease bpf sample rate ({})",
-                    self.keymap.action_keys_string(Action::DecBpfSampleRate),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::DecBpfSampleRate),
                     self.skel.maps.data_data.sample_rate
                 ),
                 Style::default(),
@@ -1627,7 +1780,9 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: increase bpf sample rate ({})",
-                    self.keymap.action_keys_string(Action::IncBpfSampleRate),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::IncBpfSampleRate),
                     self.skel.maps.data_data.sample_rate
                 ),
                 Style::default(),
@@ -1635,15 +1790,29 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: Enable CPU frequency ({})",
-                    self.keymap.action_keys_string(Action::ToggleCpuFreq),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::ToggleCpuFreq),
                     self.collect_cpu_freq
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
+                    "{}: Enable localization ({})",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::ToggleLocalization),
+                    self.localize
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
                     "{}: Enable uncore frequency ({})",
-                    self.keymap.action_keys_string(Action::ToggleUncoreFreq),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::ToggleUncoreFreq),
                     self.collect_uncore_freq
                 ),
                 Style::default(),
@@ -1651,7 +1820,8 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: show CPU event menu ({})",
-                    self.keymap
+                    self.config
+                        .active_keymap
                         .action_keys_string(Action::SetState(AppState::Event)),
                     self.active_event.event
                 ),
@@ -1660,46 +1830,58 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: clear active perf event",
-                    self.keymap.action_keys_string(Action::ClearEvent),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::ClearEvent),
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
                     "{}: next perf event",
-                    self.keymap.action_keys_string(Action::NextEvent),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::NextEvent),
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
                     "{}: previous perf event",
-                    self.keymap.action_keys_string(Action::PrevEvent)
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::PrevEvent)
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
                     "{}: perf event list scroll up",
-                    self.keymap.action_keys_string(Action::PageUp)
+                    self.config.active_keymap.action_keys_string(Action::PageUp)
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
                     "{}: perf event list scroll down",
-                    self.keymap.action_keys_string(Action::PageDown)
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::PageDown)
                 ),
                 Style::default(),
             )),
             Line::from(Span::styled(
-                format!("{}: quit", self.keymap.action_keys_string(Action::Quit),),
+                format!(
+                    "{}: quit",
+                    self.config.active_keymap.action_keys_string(Action::Quit),
+                ),
                 Style::default(),
             )),
             Line::from(Span::styled(
                 format!(
                     "{}: display LLC view",
-                    self.keymap
+                    self.config
+                        .active_keymap
                         .action_keys_string(Action::SetState(AppState::Llc))
                 ),
                 Style::default(),
@@ -1707,7 +1889,8 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: display NUMA Node view",
-                    self.keymap
+                    self.config
+                        .active_keymap
                         .action_keys_string(Action::SetState(AppState::Node))
                 ),
                 Style::default(),
@@ -1715,7 +1898,8 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: display scheduler view",
-                    self.keymap
+                    self.config
+                        .active_keymap
                         .action_keys_string(Action::SetState(AppState::Scheduler))
                 ),
                 Style::default(),
@@ -1723,8 +1907,20 @@ impl<'a> App<'a> {
             Line::from(Span::styled(
                 format!(
                     "{}: change view state ({})",
-                    self.keymap.action_keys_string(Action::NextViewState),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::NextViewState),
                     self.view_state
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    "{}: Saves the current config ({})",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SaveConfig),
+                    get_config_path()?.to_string_lossy()
                 ),
                 Style::default(),
             )),
@@ -1733,11 +1929,11 @@ impl<'a> App<'a> {
             Paragraph::new(text)
                 .block(
                     Block::default()
-                        .title_top(Line::from(APP).style(self.theme.title_style()).centered())
+                        .title_top(Line::from(APP).style(self.theme().title_style()).centered())
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded),
                 )
-                .style(self.theme.border_style())
+                .style(self.theme().border_style())
                 .alignment(Alignment::Left),
             area,
         );
@@ -1747,7 +1943,7 @@ impl<'a> App<'a> {
     /// Renders the event list TUI.
     fn render_event_list(&mut self, frame: &mut Frame) -> Result<()> {
         let area = frame.area();
-        let default_style = Style::default().fg(self.theme.text_color());
+        let default_style = Style::default().fg(self.theme().text_color());
         let chunks = Layout::vertical([Constraint::Min(1), Constraint::Percentage(99)]).split(area);
 
         let height = if area.height > 0 { area.height - 1 } else { 1 };
@@ -1761,9 +1957,9 @@ impl<'a> App<'a> {
             .enumerate()
             .map(|(i, event)| {
                 if i == self.selected_event {
-                    Line::from(event.clone()).fg(self.theme.text_important_color())
+                    Line::from(event.clone()).fg(self.theme().text_important_color())
                 } else {
-                    Line::from(event.clone()).fg(self.theme.text_color())
+                    Line::from(event.clone()).fg(self.theme().text_color())
                 }
             })
             .collect();
@@ -1774,9 +1970,11 @@ impl<'a> App<'a> {
             .title(
                 format!(
                     "Use ▲ ▼  ({}/{}) to scroll, {} to select",
-                    self.keymap.action_keys_string(Action::PageUp),
-                    self.keymap.action_keys_string(Action::PageDown),
-                    self.keymap.action_keys_string(Action::Enter),
+                    self.config.active_keymap.action_keys_string(Action::PageUp),
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::PageDown),
+                    self.config.active_keymap.action_keys_string(Action::Enter),
                 )
                 .bold(),
             );
@@ -1803,12 +2001,12 @@ impl<'a> App<'a> {
         let block = Block::new()
             .title_top(
                 Line::from(self.scheduler.clone())
-                    .style(self.theme.title_style())
+                    .style(self.theme().title_style())
                     .centered(),
             )
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .style(self.theme.border_style());
+            .style(self.theme().border_style());
 
         let label = Span::styled(
             format!(
@@ -1816,12 +2014,16 @@ impl<'a> App<'a> {
                 self.trace_manager.trace_file(),
                 self.bpf_stats.dropped_events
             ),
-            self.theme.title_style(),
+            self.theme().title_style(),
         );
         let gauge = Gauge::default()
             .block(block)
-            .gauge_style(self.theme.text_important_color())
-            .ratio(self.trace_tick as f64 / (self.max_trace_ticks + self.trace_tick_warmup) as f64)
+            .gauge_style(self.theme().text_important_color())
+            .ratio(
+                (self.trace_tick as f64
+                    / (self.config.trace_ticks() + self.config.trace_tick_warmup()) as f64)
+                    .clamp(0.0_f64, 1.0_f64),
+            )
             .label(label);
         frame.render_widget(gauge, frame.area());
 
@@ -1857,98 +2059,98 @@ impl<'a> App<'a> {
 
     /// Updates app state when the down arrow or mapped key is pressed.
     fn on_down(&mut self) {
-        match self.state {
-            AppState::Event => {
-                if self.event_scroll <= self.num_perf_events {
-                    self.event_scroll += 1;
-                    self.selected_event += 1
-                }
-            }
-            _ => {}
+        if self.state == AppState::Event && self.event_scroll <= self.num_perf_events {
+            self.event_scroll += 1;
+            self.selected_event += 1
         }
     }
 
     /// Updates app state when the up arrow or mapped key is pressed.
     fn on_up(&mut self) {
-        match self.state {
-            AppState::Event => {
-                if self.event_scroll > 0 {
-                    self.event_scroll -= 1;
-                    self.selected_event -= 1
-                }
-            }
-            _ => {}
+        if self.state == AppState::Event && self.event_scroll > 0 {
+            self.event_scroll -= 1;
+            self.selected_event -= 1
         }
     }
 
     /// Updates app state when page down or mapped key is pressed.
     fn on_pg_down(&mut self) {
-        match self.state {
-            AppState::Event => {
-                if self.event_scroll <= self.num_perf_events - self.events_list_size {
-                    self.event_scroll += self.events_list_size - 1;
-                    self.selected_event += (self.events_list_size - 1) as usize;
-                }
-            }
-            _ => {}
+        if self.state == AppState::Event
+            && self.event_scroll <= self.num_perf_events - self.events_list_size
+        {
+            self.event_scroll += self.events_list_size - 1;
+            self.selected_event += (self.events_list_size - 1) as usize;
         }
     }
 
     /// Updates app state when page up or mapped key is pressed.
     fn on_pg_up(&mut self) {
-        match self.state {
-            AppState::Event => {
-                if self.event_scroll > self.events_list_size {
-                    self.event_scroll -= self.events_list_size - 1;
-                    self.selected_event -= (self.events_list_size - 1) as usize;
-                } else {
-                    self.event_scroll = 0;
-                    self.selected_event = 0;
-                }
+        if self.state == AppState::Event {
+            if self.event_scroll > self.events_list_size {
+                self.event_scroll -= self.events_list_size - 1;
+                self.selected_event -= (self.events_list_size - 1) as usize;
+            } else {
+                self.event_scroll = 0;
+                self.selected_event = 0;
             }
-            _ => {}
         }
     }
 
     /// Updates app state when the enter key is pressed.
     fn on_enter(&mut self) {
-        match self.state {
-            AppState::Event => {
-                if let Some((subsystem, event)) =
-                    self.available_perf_events_list[self.selected_event].split_once(":")
-                {
-                    let perf_event = PerfEvent::new(subsystem.to_string(), event.to_string(), 0);
-                    self.active_perf_events.clear();
-                    self.active_event = perf_event.clone();
-                    let _ = self.activate_perf_event(&perf_event);
-                    self.non_hw_event_active = true;
-                    let prev_state = self.prev_state.clone();
-                    self.prev_state = self.state.clone();
-                    self.state = prev_state;
-                    self.available_events.push(perf_event.clone());
-                }
+        if self.state == AppState::Event {
+            if let Some((subsystem, event)) =
+                self.available_perf_events_list[self.selected_event].split_once(":")
+            {
+                let perf_event = PerfEvent::new(subsystem.to_string(), event.to_string(), 0);
+                self.active_perf_events.clear();
+                self.active_event = perf_event.clone();
+                let _ = self.activate_perf_event(&perf_event);
+                self.non_hw_event_active = true;
+                let prev_state = self.prev_state.clone();
+                self.prev_state = self.state.clone();
+                self.state = prev_state;
+                self.available_events.push(perf_event.clone());
             }
-            _ => {}
         }
+    }
+
+    /// Attaches any BPF programs required for perfetto traces.
+    fn attach_trace_progs(&mut self) -> Result<()> {
+        self.trace_links = vec![
+            self.skel.progs.on_softirq_entry.attach()?,
+            self.skel.progs.on_softirq_exit.attach()?,
+            self.skel.progs.on_ipi_send_cpu.attach()?,
+        ];
+
+        Ok(())
     }
 
     /// Records the trace to perfetto output.
     fn record_trace(&mut self) -> Result<()> {
         self.skel.maps.data_data.sample_rate = self.prev_bpf_sample_rate;
         self.state = self.prev_state.clone();
-        self.trace_manager.stop()
+        self.trace_manager.stop()?;
+        self.trace_links.clear();
+
+        Ok(())
     }
 
     /// Starts recording a trace.
-    fn start_trace(&mut self) -> Result<()> {
+    fn start_trace(&mut self, immediate: bool) -> Result<()> {
         self.prev_state = self.state.clone();
         self.state = AppState::Tracing;
-        self.trace_tick = 0;
+        self.trace_tick = if immediate {
+            self.config.trace_tick_warmup()
+        } else {
+            0
+        };
         self.trace_manager.start()?;
 
         // set bpf sampling to every event
         self.prev_bpf_sample_rate = self.skel.maps.data_data.sample_rate;
         self.skel.maps.data_data.sample_rate = 1;
+        self.attach_trace_progs()?;
 
         Ok(())
     }
@@ -1986,13 +2188,13 @@ impl<'a> App<'a> {
 
     /// Updates the app when a task wakes.
     fn on_sched_wakeup(&mut self, action: &SchedWakeupAction) {
-        if self.state == AppState::Tracing {
+        if self.state == AppState::Tracing && self.trace_tick > self.config.trace_tick_warmup() {
             self.trace_manager.on_sched_wakeup(action);
         }
     }
 
     fn on_sched_waking(&mut self, action: &SchedWakingAction) {
-        if self.state == AppState::Tracing {
+        if self.state == AppState::Tracing && self.trace_tick > self.config.trace_tick_warmup() {
             self.trace_manager.on_sched_waking(action);
         }
     }
@@ -2010,7 +2212,7 @@ impl<'a> App<'a> {
         } = action;
 
         if self.state == AppState::Tracing {
-            if self.trace_tick > self.trace_tick_warmup {
+            if self.trace_tick > self.config.trace_tick_warmup() {
                 self.trace_manager.on_sched_switch(action);
             }
             return;
@@ -2054,22 +2256,30 @@ impl<'a> App<'a> {
         prev_dsq_data.add_event_data("dsq_slice_consumed".to_string(), *prev_used_slice_ns);
     }
 
+    /// Handles softirq events.
+    pub fn on_softirq(&mut self, action: &SoftIRQAction) {
+        if self.trace_tick > self.config.trace_tick_warmup() {
+            self.trace_manager.on_softirq(action);
+        }
+    }
+
+    /// Handles IPI events.
+    pub fn on_ipi(&mut self, action: &IPIAction) {
+        if self.trace_tick > self.config.trace_tick_warmup() {
+            self.trace_manager.on_ipi(action);
+        }
+    }
+
     /// Updates the bpf bpf sampling rate.
     pub fn update_bpf_sample_rate(&mut self, sample_rate: u32) {
         self.skel.maps.data_data.sample_rate = sample_rate;
     }
 
     /// Handles the action and updates application states.
-    pub fn handle_action(&mut self, action: Action) -> Result<()> {
+    pub fn handle_action(&mut self, action: &Action) -> Result<()> {
         match action {
             Action::Tick => {
                 self.on_tick()?;
-            }
-            Action::Increment => {
-                self.counter += 1;
-            }
-            Action::Decrement => {
-                self.counter -= 1;
             }
             Action::Down => self.on_down(),
             Action::Up => self.on_up(),
@@ -2077,10 +2287,10 @@ impl<'a> App<'a> {
             Action::PageDown => self.on_pg_down(),
             Action::Enter => self.on_enter(),
             Action::SetState(state) => {
-                if state == self.state {
+                if *state == self.state {
                     self.set_state(self.prev_state.clone());
                 } else {
-                    self.set_state(state);
+                    self.set_state(state.clone());
                 }
             }
 
@@ -2102,32 +2312,46 @@ impl<'a> App<'a> {
                 self.on_scheduler_unload();
             }
             Action::SchedStats(raw) => {
-                self.on_sched_stats(raw);
+                self.on_sched_stats(raw.clone());
             }
             Action::SchedCpuPerfSet(SchedCpuPerfSetAction { cpu, perf }) => {
-                self.on_cpu_perf(cpu, perf);
+                self.on_cpu_perf(*cpu, *perf);
             }
-            Action::RecordTrace => {
-                self.start_trace()?;
+            Action::RecordTrace(RecordTraceAction { immediate }) => {
+                self.start_trace(*immediate)?;
+            }
+            Action::ReloadStatsClient => {
+                self.reload_stats_client()?;
+            }
+            Action::SaveConfig => {
+                self.on_save_config()?;
             }
             Action::SchedSwitch(a) => {
-                self.on_sched_switch(&a);
+                self.on_sched_switch(a);
             }
             Action::SchedWakeup(a) => {
-                self.on_sched_wakeup(&a);
+                self.on_sched_wakeup(a);
             }
             Action::SchedWaking(a) => {
-                self.on_sched_waking(&a);
+                self.on_sched_waking(a);
+            }
+            Action::SoftIRQ(a) => {
+                self.on_softirq(a);
+            }
+            Action::IPI(a) => {
+                self.on_ipi(a);
             }
             Action::ClearEvent => self.stop_perf_events(),
             Action::ChangeTheme => {
                 self.set_theme(self.theme().next());
             }
             Action::TickRateChange(dur) => {
-                self.tick_rate_ms = dur.as_millis().try_into().unwrap();
+                self.config
+                    .set_tick_rate_ms(dur.as_millis().try_into().unwrap());
             }
             Action::ToggleCpuFreq => self.collect_cpu_freq = !self.collect_cpu_freq,
             Action::ToggleUncoreFreq => self.collect_uncore_freq = !self.collect_uncore_freq,
+            Action::ToggleLocalization => self.localize = !self.localize,
             Action::IncBpfSampleRate => {
                 let sample_rate = self.skel.maps.data_data.sample_rate;
                 if sample_rate == 0 {
@@ -2146,7 +2370,7 @@ impl<'a> App<'a> {
             }
             Action::Quit => match self.state {
                 AppState::Help => {
-                    self.handle_action(Action::SetState(AppState::Help))?;
+                    self.handle_action(&Action::SetState(AppState::Help))?;
                 }
                 _ => {
                     self.should_quit.store(true, Ordering::Relaxed);

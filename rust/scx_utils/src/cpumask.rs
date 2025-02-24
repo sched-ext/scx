@@ -16,10 +16,10 @@
 //! Empty Cpumasks can be created directly, or they can be created from a
 //! hexadecimal string:
 //!
-//!```
+//!```no_run
 //!     use scx_utils::Cpumask;
 //!     let all_zeroes = Cpumask::new();
-//!     let from_str_mask = Cpumask::from_str(&String::from("0xf0"));
+//!     let from_str_mask = Cpumask::from_str("0xf0");
 //!```
 //!
 //! The hexadecimal string also supports the special values "none" and "all",

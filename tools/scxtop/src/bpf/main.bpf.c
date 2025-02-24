@@ -21,12 +21,15 @@
 
 char _license[] SEC("license") = "GPL";
 
+const volatile u64 long_tail_tracing_min_latency_ns = 0;
+
 // dummy for generating types
 struct bpf_event _event = {0};
 
 bool enable_bpf_events = true;
 u32 sample_rate = 128;
 
+const int zero_int = 0;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -79,6 +82,25 @@ struct {
 	__uint(max_entries, 1000000);
 	__uint(map_flags, 0);
 } task_data SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(key_size, sizeof(u64));
+	__uint(value_size, sizeof(u64));
+	__uint(max_entries, 1000000);
+} long_tail_entries SEC(".maps");
+
+struct __softirq_event {
+	u32		pid;
+	u64		start_ts;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, int);
+	__type(value, struct __softirq_event);
+	__uint(max_entries, 1);
+} softirq_events SEC(".maps");
 
 
 static __always_inline u64 t_to_tptr(struct task_struct *p)
@@ -148,7 +170,7 @@ int BPF_KPROBE(scx_sched_reg)
 		return 0;
 
 	if (!(event = try_reserve_event()))
-		return -ENOENT;
+		return -ENOMEM;
 
 	event->type = SCHED_REG;
 	bpf_ringbuf_submit(event, 0);
@@ -165,7 +187,7 @@ int BPF_KPROBE(scx_sched_unreg)
 		return 0;
 
 	if (!(event = try_reserve_event()))
-		return -ENOENT;
+		return -ENOMEM;
 
 	event->type = SCHED_UNREG;
 	bpf_ringbuf_submit(event, 0);
@@ -182,7 +204,7 @@ int BPF_KPROBE(on_sched_cpu_perf, s32 cpu, u32 perf)
 		return 0;
 
 	if (!(event = try_reserve_event()))
-		return -ENOENT;
+		return -ENOMEM;
 
 	event->type = CPU_PERF_SET;
 	event->cpu = cpu;
@@ -422,7 +444,7 @@ static __always_inline int on_sched_switch_non_scx(bool preempt, struct task_str
 		return -ENOENT;
 
 	if (!(event = try_reserve_event()))
-		return -ENOENT;
+		return -ENOMEM;
 
 	u64 now = bpf_ktime_get_ns();
 	event->type = SCHED_SWITCH;
@@ -472,7 +494,7 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 	}
 
 	if (!(event = try_reserve_event()))
-		return -ENOENT;
+		return -ENOMEM;
 
 	u64 now = bpf_ktime_get_ns();
 	event->type = SCHED_SWITCH;
@@ -523,6 +545,134 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 	prev_tctx->dsq_vtime = 0;
 	prev_tctx->wakeup_ts = 0;
 	prev_tctx->dsq_insert_time = 0;
+
+	return 0;
+}
+
+SEC("tp_btf/softirq_entry")
+int BPF_PROG(on_softirq_entry, unsigned int nr)
+{
+	struct task_struct *p;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	p = (struct task_struct *)bpf_get_current_task();
+
+	struct __softirq_event event;
+	event.start_ts = bpf_ktime_get_ns();
+	if (p)
+		event.pid = BPF_CORE_READ(p, pid);
+	else
+		event.pid = 0;
+
+	bpf_map_update_elem(&softirq_events, &zero_int, &event, BPF_ANY);
+
+	return 0;
+}
+
+SEC("tp_btf/softirq_exit")
+int BPF_PROG(on_softirq_exit, unsigned int nr)
+{
+	struct bpf_event *event;
+	struct __softirq_event *softirq_event;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	u64 exit_ts = bpf_ktime_get_ns();
+
+	softirq_event = bpf_map_lookup_elem(&softirq_events, &zero_int);
+	if (!softirq_event)
+		return 0;
+
+	bpf_map_delete_elem(&softirq_events, &zero_int);
+
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+	event->type = SOFTIRQ;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = exit_ts;
+	event->event.softirq.pid = softirq_event->pid;
+	event->event.softirq.entry_ts = softirq_event->start_ts;
+	event->event.softirq.exit_ts = exit_ts;
+	event->event.softirq.softirq_nr = nr;
+
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
+SEC("uprobe")
+int BPF_UPROBE(long_tail_tracker_entry)
+{
+	u64 pidtgid = bpf_get_current_pid_tgid();
+	u64 ts = bpf_ktime_get_ns();
+	bpf_map_update_elem(&long_tail_entries, &pidtgid, &ts, BPF_ANY);
+	return 0;
+}
+
+SEC("uretprobe")
+int BPF_URETPROBE(long_tail_tracker_exit)
+{
+	struct bpf_event *event;
+	u64 *entry_time;
+	u64 now = bpf_ktime_get_ns();
+
+	u64 pidtgid = bpf_get_current_pid_tgid();
+	if (!(entry_time = bpf_map_lookup_elem(&long_tail_entries, &pidtgid)))
+		return -ENOENT;
+
+	if (now - *entry_time < long_tail_tracing_min_latency_ns)
+		return 0;
+
+	// grab an event first. if this fails we can't set the other parameters
+	// as they won't be cleaned up.
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+	// replicate the actions of userspace starting a trace so it starts
+	// immediately, but such that events will come after our ringbuffer
+	// entry informing userspace we've started a trace.
+	// we don't enable softirqs from the bpf side and I don't think it's
+	// possible with the current setup. we'd likely have to attach the uprobes
+	// always and activate them with a global, which could be expensive. for
+	// now let them start late.
+	sample_rate = 1;
+
+	// tell userspace to handle the trace and eventually reset. this is pretty racy and might break things.
+	event->type = START_TRACE;
+
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
+SEC("tp_btf/ipi_send_cpu")
+int BPF_PROG(on_ipi_send_cpu, u32 cpu, void *callsite, void *callback)
+{
+	struct bpf_event *event;
+	struct task_struct *p;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+	event->type = IPI;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = bpf_ktime_get_ns();
+	event->event.ipi.target_cpu = cpu;
+
+	p = (struct task_struct *)bpf_get_current_task();
+	if (p)
+		event->event.ipi.pid = BPF_CORE_READ(p, pid);
+	else
+		event->event.ipi.pid = 0;
+
+	bpf_ringbuf_submit(event, 0);
 
 	return 0;
 }

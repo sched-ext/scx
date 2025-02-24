@@ -776,8 +776,11 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	if (layer_id >= MAX_LAYERS || !(layer_cpumask = lookup_layer_cpumask(layer_id)))
 		return -1;
 
-	/* not much to do if bound to a single CPU */
-	if (p->nr_cpus_allowed == 1) {
+	/*
+	 * Not much to do if bound to a single CPU. Explicitly handle migration
+	 * disabled tasks for kernels before SCX_OPS_ENQ_MIGRATION_DISABLED.
+	 */
+	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			if (layer->kind == LAYER_KIND_CONFINED &&
 			    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
@@ -1830,32 +1833,32 @@ static __noinline bool match_one(struct layer_match *match,
 	}
 	case MATCH_USING_GPU: {
 			u32 pid;
-			u32 gpu_pid;
+			u32 *gpu_pid;
 			bool pid_present = false;
 
 			if (!enable_gpu_support)
-				return match->used_gpu;
+				return match->using_gpu;
+			
+			pid = (u32) p->tgid;
+			gpu_pid = bpf_map_lookup_elem(&cur_gpu_pid, &pid);
 
-			pid = p->pid;
-			gpu_pid = bpf_map_lookup_elem(&cur_gpu_pid, &pid) == 0;
-
-			if (gpu_pid)
+			if (gpu_pid && *gpu_pid == 0)
 				pid_present = true;
 
-			return pid_present == match->used_gpu;
+			return pid_present == match->using_gpu;
 	}
 	case MATCH_USED_GPU: {
 			u32 pid;
-			u32 gpu_pid;
+			u32 *gpu_pid;
 			bool pid_present = false;
 
 			if (!enable_gpu_support)
 				return match->used_gpu;
 
-			pid = p->pid;
-			gpu_pid = bpf_map_lookup_elem(&all_gpu_pid, &pid) == 0;
+			pid = (u32) p->tgid;
+			gpu_pid = bpf_map_lookup_elem(&all_gpu_pid, &pid);
 
-			if (gpu_pid)
+			if (gpu_pid && *gpu_pid == 0)
 				pid_present = true;
 
 			return pid_present == match->used_gpu;
@@ -1964,9 +1967,9 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 
 		taskc->layer_id = layer_id;
 		taskc->llc_id = cpuc->llc_id;
-		taskc->layered_cpus.seq = layer->cpus_seq - 1;
-		taskc->layered_cpus_llc.seq = layer->cpus_seq - 1;
-		taskc->layered_cpus_node.seq = layer->cpus_seq - 1;
+		taskc->layered_cpus.seq = -1;
+		taskc->layered_cpus_llc.seq = -1;
+		taskc->layered_cpus_node.seq = -1;
 		__sync_fetch_and_add(&layer->nr_tasks, 1);
 		/*
 		 * XXX - To be correct, we'd need to calculate the vtime
@@ -2423,6 +2426,11 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 		return;
 
 	refresh_cpus_flags(taskc, cpumask);
+
+	/* invalidate all cached cpumasks */
+	taskc->layered_cpus.seq = -1;
+	taskc->layered_cpus_llc.seq = -1;
+	taskc->layered_cpus_node.seq = -1;
 }
 
 void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)

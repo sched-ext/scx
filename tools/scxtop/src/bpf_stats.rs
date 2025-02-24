@@ -20,7 +20,7 @@ impl BpfStats {
         let all_cpus = skel
             .maps
             .stats
-            .lookup_percpu(&(0 as u32).to_ne_bytes(), libbpf_rs::MapFlags::ANY)?
+            .lookup_percpu(&0_u32.to_ne_bytes(), libbpf_rs::MapFlags::ANY)?
             .expect("BPF_MAP_TYPE_PERCPU_ARRAY");
 
         let read_stat = |idx| {

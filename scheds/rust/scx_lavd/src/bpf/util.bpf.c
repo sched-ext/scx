@@ -156,6 +156,13 @@ static struct task_ctx *get_task_ctx(struct task_struct *p)
 	return taskc;
 }
 
+static struct cpu_ctx *try_get_cpu_ctx(void)
+{
+	const u32 idx = 0;
+
+	return bpf_map_lookup_elem(&cpu_ctx_stor, &idx);
+}
+
 static struct cpu_ctx *get_cpu_ctx(void)
 {
 	const u32 idx = 0;
@@ -246,7 +253,7 @@ static bool is_eligible(struct task_ctx *taskc)
 
 static bool is_lock_holder(struct task_ctx *taskc)
 {
-	return taskc->futex_boost > 0;
+	return taskc->futex_boost;
 }
 
 static bool have_scheduled(struct task_ctx *taskc)

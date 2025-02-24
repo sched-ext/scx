@@ -45,6 +45,7 @@ use crate::bpf_intf::stat_idx_P2DQ_NR_STATS;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DIRECT;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DSQ_CHANGE;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DSQ_SAME;
+use crate::bpf_intf::stat_idx_P2DQ_STAT_GREEDY_IDLE;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_IDLE;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_KEEP;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_LLC_MIGRATION;
@@ -62,9 +63,21 @@ struct Opts {
     #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
     disable_kthreads_local: bool,
 
-    /// Eager load balancing.
+    /// Enables autoslice tuning
+    #[clap(short = 'a', long, action = clap::ArgAction::SetTrue)]
+    autoslice: bool,
+
+    /// Ratio of interactive tasks for autoslice tuning, percent value from 1-99.
+    #[clap(short = 'r', long, default_value = "10")]
+    interactive_ratio: usize,
+
+    /// Disables eager pick2 load balancing.
     #[clap(short = 'e', long, action = clap::ArgAction::SetTrue)]
     eager_load_balance: bool,
+
+    /// Disables greedy idle CPU selection, may cause better load balancing on multi-LLC systems.
+    #[clap(short = 'g', long, action = clap::ArgAction::SetTrue)]
+    greedy_idle_disable: bool,
 
     /// Interactive tasks stay sticky to their CPU if no idle CPU is found.
     #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
@@ -171,7 +184,17 @@ impl<'a> Scheduler<'a> {
                 skel.maps.bss_data.dsq_time_slices[i] = slice_ns;
             }
         }
+        if opts.autoslice {
+            if opts.interactive_ratio == 0 || opts.interactive_ratio > 99 {
+                panic!(
+                    "Invalid interactive_ratio {}, must be between 1-99",
+                    opts.interactive_ratio
+                );
+            }
+        }
 
+        skel.maps.rodata_data.autoslice = opts.autoslice;
+        skel.maps.rodata_data.interactive_ratio = opts.interactive_ratio as u32;
         skel.maps.rodata_data.min_slice_us = opts.min_slice_us;
         skel.maps.rodata_data.dsq_shift = opts.dsq_shift as u64;
         skel.maps.rodata_data.kthreads_local = !opts.disable_kthreads_local;
@@ -181,7 +204,8 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.init_dsq_index = opts.init_dsq_index as i32;
         skel.maps.rodata_data.nr_llcs = topo.all_llcs.clone().keys().len() as u32;
         skel.maps.rodata_data.nr_nodes = topo.nodes.clone().keys().len() as u32;
-        skel.maps.rodata_data.eager_load_balance = opts.eager_load_balance;
+        skel.maps.rodata_data.eager_load_balance = !opts.eager_load_balance;
+        skel.maps.rodata_data.greedy_idle = !opts.greedy_idle_disable;
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.interactive_sticky = opts.interactive_sticky;
         skel.maps.rodata_data.keep_running_enabled = opts.keep_running;
@@ -231,6 +255,7 @@ impl<'a> Scheduler<'a> {
         Metrics {
             direct: stats[stat_idx_P2DQ_STAT_DIRECT as usize],
             idle: stats[stat_idx_P2DQ_STAT_IDLE as usize],
+            greedy_idle: stats[stat_idx_P2DQ_STAT_GREEDY_IDLE as usize],
             sched_mode: self.skel.maps.bss_data.sched_mode,
             dsq_change: stats[stat_idx_P2DQ_STAT_DSQ_CHANGE as usize],
             same_dsq: stats[stat_idx_P2DQ_STAT_DSQ_SAME as usize],
