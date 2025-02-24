@@ -6,6 +6,8 @@
 use crate::EventData;
 use crate::PerfEvent;
 
+use std::collections::VecDeque;
+
 /// Container for per NUMA node data.
 #[derive(Clone, Debug)]
 pub struct NodeData {
@@ -19,7 +21,7 @@ impl NodeData {
     pub fn new(node: usize, max_data_size: usize) -> NodeData {
         let mut data = EventData::new(max_data_size);
         for event in PerfEvent::default_events() {
-            data.event_data(event.event.clone());
+            data.event_data(&event.event);
         }
         Self {
             node,
@@ -29,35 +31,29 @@ impl NodeData {
     }
 
     /// Initializes events with default values.
-    pub fn initialize_events(&mut self, events: &Vec<String>) {
+    pub fn initialize_events(&mut self, events: &[&str]) {
         self.data.initialize_events(events);
     }
 
     /// Returns the data for an event and updates if no entry is present.
-    pub fn event_data(&mut self, event: String) -> &Vec<u64> {
+    pub fn event_data(&mut self, event: &str) -> &VecDeque<u64> {
         self.data.event_data(event)
     }
 
     /// Returns the data for an event and updates if no entry is present.
-    pub fn event_data_immut(&self, event: String) -> Vec<u64> {
+    pub fn event_data_immut(&self, event: &str) -> Vec<u64> {
         self.data.event_data_immut(event)
     }
 
     /// Adds data for an event.
-    pub fn add_event_data(&mut self, event: String, val: u64) {
+    pub fn add_event_data(&mut self, event: &str, val: u64) {
         self.data.add_event_data(event, val)
     }
 
     /// Adds data for a cpu by updating the first value.
-    pub fn add_cpu_event_data(&mut self, event: String, val: u64) {
-        let size = self.max_data_size - 1;
-        self.data
-            .data
-            .entry(event.clone())
-            .and_modify(|x| {
-                let len = x.len();
-                x[len - 1] += val
-            })
-            .or_insert(vec![0, size.try_into().unwrap()]);
+    pub fn add_cpu_event_data(&mut self, event: &str, val: u64) {
+        let data = self.data.event_data_mut(event);
+        let len = data.len();
+        data[len - 1] += val;
     }
 }
