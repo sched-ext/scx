@@ -2020,8 +2020,9 @@ impl<'a> App<'a> {
             .block(block)
             .gauge_style(self.theme().text_important_color())
             .ratio(
-                self.trace_tick as f64
-                    / (self.config.trace_ticks() + self.config.trace_tick_warmup()) as f64,
+                (self.trace_tick as f64
+                    / (self.config.trace_ticks() + self.config.trace_tick_warmup()) as f64)
+                    .clamp(0.0_f64, 1.0_f64),
             )
             .label(label);
         frame.render_widget(gauge, frame.area());
