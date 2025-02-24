@@ -37,7 +37,7 @@ jobs:
     needs: build-kernel
     strategy:
           matrix:
-            scheduler: [ scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty ]
+            scheduler: [ scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty, scx_p2dq ]
           fail-fast: false
     steps:
       - uses: actions/checkout@v4
@@ -180,7 +180,7 @@ jobs:
     needs: build-kernel
     strategy:
       matrix:
-        package: [ scx_loader, scx_rustland_core, scx_stats, scx_utils, scxtop, scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty ]
+        package: [ scx_loader, scx_rustland_core, scx_stats, scx_utils, scxtop, scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty, scx_p2dq ]
     steps:
       - uses: actions/checkout@v4
 
