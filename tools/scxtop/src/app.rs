@@ -133,8 +133,8 @@ impl<'a> App<'a> {
         let default_events = PerfEvent::default_events();
         let default_events_str = default_events
             .iter()
-            .map(|event| event.event.clone())
-            .collect::<Vec<String>>();
+            .map(|event| event.event.as_str())
+            .collect::<Vec<&str>>();
         for cpu in topo.all_cpus.values() {
             let mut event = PerfEvent::new("hw".to_string(), "cycles".to_string(), cpu.id);
             event.attach(process_id)?;
@@ -322,7 +322,7 @@ impl<'a> App<'a> {
                 self.max_cpu_events,
             ));
 
-            cpu_data.add_event_data("cpu_freq".to_string(), freq as u64);
+            cpu_data.add_event_data("cpu_freq", freq as u64);
         }
         Ok(())
     }
@@ -353,7 +353,7 @@ impl<'a> App<'a> {
                             .node_data
                             .entry(cpu.node_id)
                             .or_insert(NodeData::new(cpu.node_id, self.max_cpu_events));
-                        node_data.add_event_data("uncore_freq".to_string(), uncore_freq as u64);
+                        node_data.add_event_data("uncore_freq", uncore_freq as u64);
                     }
                 }
             }
@@ -463,7 +463,7 @@ impl<'a> App<'a> {
                 .node_data
                 .entry(*node)
                 .or_insert(NodeData::new(*node, self.max_cpu_events));
-            node_data.add_event_data(self.active_event.event.clone(), 0);
+            node_data.add_event_data(&self.active_event.event, 0);
         }
         // Add entry for llcs
         for llc in self.topo.all_llcs.keys() {
@@ -471,7 +471,7 @@ impl<'a> App<'a> {
                 self.llc_data
                     .entry(*llc)
                     .or_insert(LlcData::new(*llc, 0, self.max_cpu_events));
-            llc_data.add_event_data(self.active_event.event.clone(), 0);
+            llc_data.add_event_data(&self.active_event.event, 0);
         }
 
         for (cpu, event) in &mut self.active_perf_events {
@@ -481,18 +481,18 @@ impl<'a> App<'a> {
                 .entry(*cpu)
                 // XXX: fixme
                 .or_insert(CpuData::new(*cpu, 0, 0, 0, self.max_cpu_events));
-            cpu_data.add_event_data(event.event.clone(), val);
+            cpu_data.add_event_data(&event.event, val);
             let llc_data = self.llc_data.entry(cpu_data.llc).or_insert(LlcData::new(
                 cpu_data.llc,
                 0,
                 self.max_cpu_events,
             ));
-            llc_data.add_cpu_event_data(event.event.clone(), val);
+            llc_data.add_cpu_event_data(&event.event, val);
             let node_data = self
                 .node_data
                 .entry(cpu_data.node)
                 .or_insert(NodeData::new(cpu_data.node, self.max_cpu_events));
-            node_data.add_cpu_event_data(event.event.clone(), val);
+            node_data.add_cpu_event_data(&event.event, val);
         }
         if self.collect_cpu_freq {
             self.record_cpu_freq()?;
@@ -504,12 +504,12 @@ impl<'a> App<'a> {
     }
 
     /// Generates a CPU bar chart.
-    fn cpu_bar(&self, cpu: usize, event: String) -> Bar {
+    fn cpu_bar(&self, cpu: usize, event: &str) -> Bar {
         let value = self
             .cpu_data
             .get(&cpu)
             .unwrap()
-            .event_data_immut(event.clone())
+            .event_data_immut(event)
             .last()
             .copied()
             .unwrap_or(0_u64);
@@ -524,7 +524,7 @@ impl<'a> App<'a> {
                         " {}",
                         format_hz(
                             cpu_data
-                                .event_data_immut("cpu_freq".to_string())
+                                .event_data_immut("cpu_freq")
                                 .last()
                                 .copied()
                                 .unwrap_or(0)
@@ -548,18 +548,18 @@ impl<'a> App<'a> {
         let data = if self.cpu_data.contains_key(&cpu) {
             let cpu_data = self.cpu_data.get(&cpu).unwrap();
             perf = cpu_data
-                .event_data_immut("perf".to_string())
+                .event_data_immut("perf")
                 .last()
                 .copied()
                 .unwrap_or(0);
             if self.collect_cpu_freq {
                 cpu_freq = cpu_data
-                    .event_data_immut("cpu_freq".to_string())
+                    .event_data_immut("cpu_freq")
                     .last()
                     .copied()
                     .unwrap_or(0);
             }
-            cpu_data.event_data_immut(self.active_event.event.clone())
+            cpu_data.event_data_immut(&self.active_event.event)
         } else {
             Vec::new()
         };
@@ -595,7 +595,7 @@ impl<'a> App<'a> {
     fn llc_sparkline(&self, llc: usize, bottom_border: bool) -> Sparkline {
         let data = if self.llc_data.contains_key(&llc) {
             let llc_data = self.llc_data.get(&llc).unwrap();
-            llc_data.event_data_immut(self.active_event.event.clone())
+            llc_data.event_data_immut(&self.active_event.event)
         } else {
             Vec::new()
         };
@@ -639,7 +639,7 @@ impl<'a> App<'a> {
     fn node_sparkline(&self, node: usize, bottom_border: bool) -> Sparkline {
         let data = if self.llc_data.contains_key(&node) {
             let node_data = self.node_data.get(&node).unwrap();
-            node_data.event_data_immut(self.active_event.event.clone())
+            node_data.event_data_immut(&self.active_event.event)
         } else {
             Vec::new()
         };
@@ -665,7 +665,7 @@ impl<'a> App<'a> {
                                     self.node_data
                                         .get(&node)
                                         .unwrap()
-                                        .event_data_immut("uncore_freq".to_string())
+                                        .event_data_immut("uncore_freq")
                                         .last()
                                         .copied()
                                         .unwrap_or(0_u64),
@@ -711,7 +711,7 @@ impl<'a> App<'a> {
         let llc_iter = self
             .llc_data
             .values()
-            .flat_map(|llc_data| llc_data.event_data_immut(self.active_event.event.clone()))
+            .flat_map(|llc_data| llc_data.event_data_immut(&self.active_event.event))
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&llc_iter, true, true, true, None);
 
@@ -790,7 +790,7 @@ impl<'a> App<'a> {
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded);
 
-                let llc_bars: Vec<Bar> = self.llc_bars(self.active_event.event.clone());
+                let llc_bars: Vec<Bar> = self.llc_bars(&self.active_event.event);
 
                 let barchart = BarChart::default()
                     .data(BarGroup::default().bars(&llc_bars))
@@ -805,7 +805,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_scheduler("dsq_lat_us".to_string(), frame, top_left, true, true)?;
+        self.render_scheduler("dsq_lat_us", frame, top_left, true, true)?;
         self.render_dsq_vtime(frame, bottom_left, true, false)?;
 
         Ok(())
@@ -825,7 +825,7 @@ impl<'a> App<'a> {
         let node_iter = self
             .node_data
             .values()
-            .flat_map(|node_data| node_data.event_data_immut(self.active_event.event.clone()))
+            .flat_map(|node_data| node_data.event_data_immut(&self.active_event.event))
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&node_iter, true, true, true, None);
 
@@ -908,7 +908,7 @@ impl<'a> App<'a> {
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded);
 
-                let node_bars: Vec<Bar> = self.node_bars(self.active_event.event.clone());
+                let node_bars: Vec<Bar> = self.node_bars(&self.active_event.event);
 
                 let barchart = BarChart::default()
                     .data(BarGroup::default().bars(&node_bars))
@@ -923,7 +923,7 @@ impl<'a> App<'a> {
             }
         }
 
-        self.render_scheduler("dsq_lat_us".to_string(), frame, top_left, true, true)?;
+        self.render_scheduler("dsq_lat_us", frame, top_left, true, true)?;
         self.render_dsq_vtime(frame, bottom_left, true, false)?;
         Ok(())
     }
@@ -931,7 +931,7 @@ impl<'a> App<'a> {
     /// Creates a sparkline for a dsq.
     fn dsq_sparkline(
         &self,
-        event: String,
+        event: &str,
         dsq_id: u64,
         borders: Borders,
         render_title: bool,
@@ -939,7 +939,7 @@ impl<'a> App<'a> {
     ) -> Sparkline {
         let data = if self.dsq_data.contains_key(&dsq_id) {
             let dsq_data = self.dsq_data.get(&dsq_id).unwrap();
-            dsq_data.event_data_immut(event.clone())
+            dsq_data.event_data_immut(event)
         } else {
             Vec::new()
         };
@@ -966,7 +966,7 @@ impl<'a> App<'a> {
                         Line::from("".to_string())
                     })
                     .title_top(if render_title {
-                        Line::from(format!("{} ", event.clone()))
+                        Line::from(format!("{} ", event))
                             .style(self.theme().title_style())
                             .left_aligned()
                     } else {
@@ -996,17 +996,17 @@ impl<'a> App<'a> {
     /// Generates dsq sparklines.
     fn dsq_sparklines(
         &self,
-        event: String,
+        event: &str,
         render_title: bool,
         render_sample_rate: bool,
     ) -> Vec<Sparkline> {
         self.dsq_data
             .iter()
-            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(&event.clone()))
+            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(event))
             .enumerate()
             .map(|(j, (dsq_id, _data))| {
                 self.dsq_sparkline(
-                    event.clone(),
+                    event,
                     *dsq_id,
                     Borders::ALL,
                     j == 0 && render_title,
@@ -1039,12 +1039,12 @@ impl<'a> App<'a> {
     }
 
     /// Generates DSQ bar charts.
-    fn dsq_bars(&self, event: String) -> Vec<Bar> {
+    fn dsq_bars(&self, event: &str) -> Vec<Bar> {
         self.dsq_data
             .iter()
-            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(&event.clone()))
+            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(event))
             .map(|(dsq_id, dsq_data)| {
-                let values = dsq_data.event_data_immut(event.clone());
+                let values = dsq_data.event_data_immut(event);
                 let value = values.last().copied().unwrap_or(0_u64);
                 let stats = VecStats::new(&values, true, true, true, None);
                 self.dsq_bar(*dsq_id, value, stats.avg, stats.max, stats.min)
@@ -1075,12 +1075,12 @@ impl<'a> App<'a> {
     }
 
     /// Generates LLC bar charts.
-    fn llc_bars(&self, event: String) -> Vec<Bar> {
+    fn llc_bars(&self, event: &str) -> Vec<Bar> {
         self.llc_data
             .iter()
-            .filter(|(_llc_id, llc_data)| llc_data.data.data.contains_key(&event.clone()))
+            .filter(|(_llc_id, llc_data)| llc_data.data.data.contains_key(event))
             .map(|(llc_id, llc_data)| {
-                let values = llc_data.event_data_immut(event.clone());
+                let values = llc_data.event_data_immut(event);
                 let value = values.last().copied().unwrap_or(0_u64);
                 let stats = VecStats::new(&values, true, true, true, None);
                 self.event_bar(*llc_id, value, stats.avg, stats.max, stats.min)
@@ -1089,12 +1089,12 @@ impl<'a> App<'a> {
     }
 
     /// Generates Node bar charts.
-    fn node_bars(&self, event: String) -> Vec<Bar> {
+    fn node_bars(&self, event: &str) -> Vec<Bar> {
         self.node_data
             .iter()
-            .filter(|(_node_id, node_data)| node_data.data.data.contains_key(&event.clone()))
+            .filter(|(_node_id, node_data)| node_data.data.data.contains_key(event))
             .map(|(node_id, node_data)| {
-                let values = node_data.event_data_immut(event.clone());
+                let values = node_data.event_data_immut(event);
                 let value = values.last().copied().unwrap_or(0_u64);
                 let stats = VecStats::new(&values, true, true, true, None);
                 self.event_bar(*node_id, value, stats.avg, stats.max, stats.min)
@@ -1127,7 +1127,7 @@ impl<'a> App<'a> {
     /// Renders the scheduler state as sparklines.
     fn render_scheduler_sparklines(
         &mut self,
-        event: String,
+        event: &str,
         frame: &mut Frame,
         area: Rect,
         render_title: bool,
@@ -1136,7 +1136,7 @@ impl<'a> App<'a> {
         let num_dsqs = self
             .dsq_data
             .iter()
-            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(&event.clone()))
+            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(event))
             .count();
 
         let mut dsq_constraints = Vec::new();
@@ -1165,7 +1165,7 @@ impl<'a> App<'a> {
         }
         let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
 
-        self.dsq_sparklines(event.clone(), render_title, render_sample_rate)
+        self.dsq_sparklines(event, render_title, render_sample_rate)
             .iter()
             .enumerate()
             .for_each(|(j, dsq_sparkline)| {
@@ -1178,7 +1178,7 @@ impl<'a> App<'a> {
     /// Returns the dsq vtime chart.
     fn render_dsq_vtime_sparklines(
         &self,
-        event: String,
+        event: &str,
         frame: &mut Frame,
         area: Rect,
         render_title: bool,
@@ -1187,7 +1187,7 @@ impl<'a> App<'a> {
         let num_dsqs = self
             .dsq_data
             .iter()
-            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(&event.clone()))
+            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(event))
             .count();
         if num_dsqs == 0 {
             let block = Block::default()
@@ -1209,7 +1209,7 @@ impl<'a> App<'a> {
         }
         let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
 
-        self.dsq_sparklines(event.clone(), render_title, render_sample_rate)
+        self.dsq_sparklines(event, render_title, render_sample_rate)
             .iter()
             .enumerate()
             .for_each(|(j, dsq_sparkline)| {
@@ -1222,7 +1222,7 @@ impl<'a> App<'a> {
     /// Returns the dsq vtime chart.
     fn render_dsq_vtime_barchart(
         &self,
-        event: String,
+        event: &str,
         frame: &mut Frame,
         area: Rect,
         render_sample_rate: bool,
@@ -1230,7 +1230,7 @@ impl<'a> App<'a> {
         let num_dsqs = self
             .dsq_data
             .iter()
-            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(&event.clone()))
+            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(event))
             .count();
         if num_dsqs == 0 {
             let block = Block::default()
@@ -1253,8 +1253,8 @@ impl<'a> App<'a> {
         let vtime_global_iter: Vec<u64> = self
             .dsq_data
             .iter()
-            .filter(|(_dsq_id, event_data)| event_data.data.contains_key(&event.clone()))
-            .flat_map(|(_dsq_id, event_data)| event_data.event_data_immut(event.clone()))
+            .filter(|(_dsq_id, event_data)| event_data.data.contains_key(event))
+            .flat_map(|(_dsq_id, event_data)| event_data.event_data_immut(event))
             .collect::<Vec<u64>>();
 
         let stats = VecStats::new(&vtime_global_iter, true, true, true, None);
@@ -1290,7 +1290,7 @@ impl<'a> App<'a> {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded);
 
-        let dsq_bars: Vec<Bar> = self.dsq_bars(event.clone());
+        let dsq_bars: Vec<Bar> = self.dsq_bars(event);
 
         let barchart = BarChart::default()
             .data(BarGroup::default().bars(&dsq_bars))
@@ -1308,7 +1308,7 @@ impl<'a> App<'a> {
     /// Renders the scheduler state as barcharts.
     fn render_scheduler_barchart(
         &mut self,
-        event: String,
+        event: &str,
         frame: &mut Frame,
         area: Rect,
         render_sample_rate: bool,
@@ -1334,7 +1334,7 @@ impl<'a> App<'a> {
         let dsq_global_iter = self
             .dsq_data
             .values()
-            .flat_map(|dsq_data| dsq_data.event_data_immut(event.clone()))
+            .flat_map(|dsq_data| dsq_data.event_data_immut(event))
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&dsq_global_iter, true, true, true, None);
 
@@ -1369,7 +1369,7 @@ impl<'a> App<'a> {
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded);
 
-        let dsq_bars: Vec<Bar> = self.dsq_bars(event.clone());
+        let dsq_bars: Vec<Bar> = self.dsq_bars(event);
 
         let barchart = BarChart::default()
             .data(BarGroup::default().bars(&dsq_bars))
@@ -1387,7 +1387,7 @@ impl<'a> App<'a> {
     /// Renders the scheduler application state.
     fn render_scheduler(
         &mut self,
-        event: String,
+        event: &str,
         frame: &mut Frame,
         area: Rect,
         render_title: bool,
@@ -1417,18 +1417,15 @@ impl<'a> App<'a> {
     ) -> Result<()> {
         match self.view_state {
             ViewState::Sparkline => self.render_dsq_vtime_sparklines(
-                "dsq_vtime_delta".to_string(),
+                "dsq_vtime_delta",
                 frame,
                 area,
                 render_title,
                 render_sample_rate,
             ),
-            ViewState::BarChart => self.render_dsq_vtime_barchart(
-                "dsq_vtime_delta".to_string(),
-                frame,
-                area,
-                render_sample_rate,
-            ),
+            ViewState::BarChart => {
+                self.render_dsq_vtime_barchart("dsq_vtime_delta", frame, area, render_sample_rate)
+            }
         }
     }
 
@@ -1474,9 +1471,7 @@ impl<'a> App<'a> {
                         .cpu_data
                         .values()
                         .filter(|cpu_data| cpu_data.node == node.id)
-                        .flat_map(|cpu_data| {
-                            cpu_data.event_data_immut(self.active_event.event.clone())
-                        })
+                        .flat_map(|cpu_data| cpu_data.event_data_immut(&self.active_event.event))
                         .collect::<Vec<u64>>();
                     let stats = VecStats::new(&node_iter, true, true, true, None);
 
@@ -1518,7 +1513,7 @@ impl<'a> App<'a> {
                                         self.node_data
                                             .get(&node.id)
                                             .unwrap()
-                                            .event_data_immut("uncore_freq".to_string())
+                                            .event_data_immut("uncore_freq")
                                             .last()
                                             .copied()
                                             .unwrap_or(0_u64),
@@ -1594,9 +1589,7 @@ impl<'a> App<'a> {
                         .cpu_data
                         .values()
                         .filter(|cpu_data| cpu_data.node == node.id)
-                        .flat_map(|cpu_data| {
-                            cpu_data.event_data_immut(self.active_event.event.clone())
-                        })
+                        .flat_map(|cpu_data| cpu_data.event_data_immut(&self.active_event.event))
                         .collect::<Vec<u64>>();
                     let stats = VecStats::new(&node_iter, true, true, true, None);
 
@@ -1638,7 +1631,7 @@ impl<'a> App<'a> {
                                         self.node_data
                                             .get(&node.id)
                                             .unwrap()
-                                            .event_data_immut("uncore_freq".to_string())
+                                            .event_data_immut("uncore_freq")
                                             .last()
                                             .copied()
                                             .unwrap_or(0_u64),
@@ -1658,7 +1651,7 @@ impl<'a> App<'a> {
                         .keys()
                         .enumerate()
                         .map(|(j, cpu)| {
-                            let cpu_bar = self.cpu_bar(*cpu, self.active_event.event.clone());
+                            let cpu_bar = self.cpu_bar(*cpu, &self.active_event.event);
                             bar_col_data[j % col_scale as usize].push(cpu_bar);
                         })
                         .collect();
@@ -1700,7 +1693,7 @@ impl<'a> App<'a> {
         let [top_left, bottom_left] = Layout::vertical([Constraint::Fill(1); 2]).areas(left);
 
         self.render_event(frame, right)?;
-        self.render_scheduler("dsq_lat_us".to_string(), frame, top_left, true, true)?;
+        self.render_scheduler("dsq_lat_us", frame, top_left, true, true)?;
         self.render_dsq_vtime(frame, bottom_left, true, false)?;
         Ok(())
     }
@@ -2041,15 +2034,9 @@ impl<'a> App<'a> {
                 let [left, right] =
                     Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
                 let [top, center, bottom] = Layout::vertical([Constraint::Fill(1); 3]).areas(left);
-                self.render_scheduler("dsq_lat_us".to_string(), frame, top, true, true)?;
-                self.render_scheduler(
-                    "dsq_slice_consumed".to_string(),
-                    frame,
-                    center,
-                    true,
-                    false,
-                )?;
-                self.render_scheduler("dsq_vtime_delta".to_string(), frame, bottom, true, false)?;
+                self.render_scheduler("dsq_lat_us", frame, top, true, true)?;
+                self.render_scheduler("dsq_slice_consumed", frame, center, true, false)?;
+                self.render_scheduler("dsq_vtime_delta", frame, bottom, true, false)?;
                 self.render_scheduler_stats(frame, right)
             }
             AppState::Tracing => self.render_tracing(frame),
@@ -2163,7 +2150,7 @@ impl<'a> App<'a> {
         let _ = self
             .cpu_data
             .values_mut()
-            .map(|cpu_data| cpu_data.data.clear_event("perf".to_string()));
+            .map(|cpu_data| cpu_data.data.clear_event("perf"));
     }
 
     /// Updates the app when a scheduler is loaded.
@@ -2183,7 +2170,7 @@ impl<'a> App<'a> {
             0,
             self.max_cpu_events,
         ));
-        cpu_data.add_event_data("perf".to_string(), perf as u64);
+        cpu_data.add_event_data("perf", perf as u64);
     }
 
     /// Updates the app when a task wakes.
@@ -2228,22 +2215,22 @@ impl<'a> App<'a> {
             0,
             self.max_cpu_events,
         ));
-        cpu_data.add_event_data("dsq_lat_us".to_string(), *next_dsq_lat_us);
+        cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
         let next_dsq_data = self
             .dsq_data
             .entry(*next_dsq_id)
             .or_insert(EventData::new(self.max_cpu_events));
-        next_dsq_data.add_event_data("dsq_lat_us".to_string(), *next_dsq_lat_us);
+        next_dsq_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
         if *next_dsq_vtime > 0 {
             // vtime is special because we want the delta
             let last = next_dsq_data
-                .event_data_immut("dsq_vtime_delta".to_string())
+                .event_data_immut("dsq_vtime_delta")
                 .last()
                 .copied()
                 .unwrap_or(0_u64);
             if next_dsq_vtime - last < DSQ_VTIME_CUTOFF {
                 next_dsq_data.add_event_data(
-                    "dsq_vtime_delta".to_string(),
+                    "dsq_vtime_delta",
                     if last > 0 { *next_dsq_vtime - last } else { 0 },
                 );
             }
@@ -2253,7 +2240,7 @@ impl<'a> App<'a> {
             .dsq_data
             .entry(*prev_dsq_id)
             .or_insert(EventData::new(self.max_cpu_events));
-        prev_dsq_data.add_event_data("dsq_slice_consumed".to_string(), *prev_used_slice_ns);
+        prev_dsq_data.add_event_data("dsq_slice_consumed", *prev_used_slice_ns);
     }
 
     /// Handles softirq events.
