@@ -20,6 +20,7 @@ clap = { version = "4.1", features = [
     "string",
     "unstable-styles",
 ] }
+clap_complete = "4.5.45"
 config = "0.14.1"
 crossterm = { version = "0.28.1", features = ["serde", "event-stream"] }
 derive_deref = "1.1.1"
