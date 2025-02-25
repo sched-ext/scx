@@ -661,7 +661,7 @@ impl<'a> App<'a> {
                     .title_top(
                         Line::from(if self.collect_uncore_freq {
                             "uncore ".to_string()
-                                + &format_hz(
+                                + format_hz(
                                     self.node_data
                                         .get(&node)
                                         .unwrap()
@@ -670,6 +670,7 @@ impl<'a> App<'a> {
                                         .copied()
                                         .unwrap_or(0_u64),
                                 )
+                                .as_str()
                         } else {
                             "".to_string()
                         })
@@ -1509,7 +1510,7 @@ impl<'a> App<'a> {
                         .title_top(
                             Line::from(if self.collect_uncore_freq {
                                 "uncore ".to_string()
-                                    + &format_hz(
+                                    + format_hz(
                                         self.node_data
                                             .get(&node.id)
                                             .unwrap()
@@ -1518,6 +1519,7 @@ impl<'a> App<'a> {
                                             .copied()
                                             .unwrap_or(0_u64),
                                     )
+                                    .as_str()
                             } else {
                                 "".to_string()
                             })
@@ -1627,7 +1629,7 @@ impl<'a> App<'a> {
                         .title_top(
                             Line::from(if self.collect_uncore_freq {
                                 "uncore ".to_string()
-                                    + &format_hz(
+                                    + format_hz(
                                         self.node_data
                                             .get(&node.id)
                                             .unwrap()
@@ -1636,6 +1638,7 @@ impl<'a> App<'a> {
                                             .copied()
                                             .unwrap_or(0_u64),
                                     )
+                                    .as_str()
                             } else {
                                 "".to_string()
                             })

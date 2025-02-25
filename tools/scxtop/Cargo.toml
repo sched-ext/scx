@@ -54,6 +54,7 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "serde"] }
 xdg = "2.5.2"
 log-panics = { version = "2", features = ["with-backtrace"]}
 hashbrown = "0.15.2"
+smartstring = { version = "1.0.1", features = ["serde"] }
 
 [build-dependencies]
 protobuf-codegen = "3.7.1"

@@ -224,7 +224,7 @@ impl PerfettoTraceManager {
 
             wakeup_event.set_pid(pid.try_into().unwrap());
             wakeup_event.set_prio(*prio);
-            wakeup_event.set_comm(comm.clone());
+            wakeup_event.set_comm(comm.to_string());
             wakeup_event.set_target_cpu(cpu);
 
             ftrace_event.set_timestamp(*ts);
@@ -258,7 +258,7 @@ impl PerfettoTraceManager {
 
             waking_event.set_pid(pid.try_into().unwrap());
             waking_event.set_prio(*prio);
-            waking_event.set_comm(comm.clone());
+            waking_event.set_comm(comm.to_string());
             waking_event.set_target_cpu(cpu);
 
             ftrace_event.set_timestamp(*ts);
@@ -337,11 +337,11 @@ impl PerfettoTraceManager {
             let next_pid: i32 = *next_pid as i32;
 
             switch_event.set_next_pid(next_pid);
-            switch_event.set_next_comm(next_comm.clone());
+            switch_event.set_next_comm(next_comm.to_string());
             switch_event.set_next_prio(*next_prio);
             switch_event.set_prev_pid(prev_pid);
             switch_event.set_prev_prio(*prev_prio);
-            switch_event.set_prev_comm(prev_comm.clone());
+            switch_event.set_prev_comm(prev_comm.to_string());
             switch_event.set_prev_state(*prev_state as i64);
             ftrace_event.set_timestamp(*ts);
             ftrace_event.set_sched_switch(switch_event);
