@@ -18,3 +18,11 @@ resolver = "2"
 
 [profile.release]
 lto = true
+
+[profile.release-fast]
+inherits = "release"
+target-cpu = "native"
+lto = false
+incremental = true
+opt-level = 0
+debuginfo = 0
