@@ -66,11 +66,19 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 Cpumask::new()
             };
 
+            let nearest_gpu_topology_level = if nvidia_gpu.is_multi_gpu_board().unwrap_or(false) {
+                // e.g. for some Tesla models, this mode is faster
+                // as units are part of the same physical device
+                TopologyLevel::Internal
+            } else {
+                TopologyLevel::HostBridge
+            };
+
             // NVML_TOPOLOGY_HOSTBRIDGE is supported by all models and
             // NVML_TOPOLOGY_SYSTEM is an expensive check (i.e. all sort of
             // multi gpus connection types).
             let nearest = if let Ok(nearest_gpus) =
-                nvidia_gpu.topology_nearest_gpus(TopologyLevel::HostBridge)
+                nvidia_gpu.topology_nearest_gpus(nearest_gpu_topology_level)
             {
                 nearest_gpus
                     .iter()
@@ -91,7 +99,7 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
             let bus_id = pci_info.bus_id.to_lowercase();
             let fixed_bus_id = bus_id.strip_prefix("0000").unwrap_or("");
             let numa_path = format!("/sys/bus/pci/devices/{}/numa_node", fixed_bus_id);
-            let numa_node = read_file_usize(&Path::new(&numa_path)).unwrap_or(0);
+            let numa_node = read_file_usize(Path::new(&numa_path)).unwrap_or(0);
 
             let gpu = Gpu {
                 index: GpuIndex::Nvidia { nvml_id: index },
