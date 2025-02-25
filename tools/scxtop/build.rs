@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 
 fn main() {
+    println!("cargo::rerun-if-changed=src/protos/perfetto_scx.proto");
     protobuf_codegen::Codegen::new()
         .pure()
         .cargo_out_dir("protos_gen/")
