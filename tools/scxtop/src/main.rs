@@ -6,7 +6,7 @@
 use scxtop::bpf_intf::*;
 use scxtop::bpf_skel::types::bpf_event;
 use scxtop::bpf_skel::*;
-use scxtop::cli::Cli;
+use scxtop::cli::{generate_completions, Cli, Commands, TuiArgs};
 use scxtop::config::get_config_path;
 use scxtop::config::Config;
 use scxtop::read_file_string;
@@ -26,7 +26,7 @@ use scxtop::{
 
 use anyhow::anyhow;
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::RingBufferBuilder;
@@ -60,7 +60,7 @@ fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {
     }
 }
 
-fn main() -> Result<()> {
+fn run_tui(tui_args: &TuiArgs) -> Result<()> {
     if let Ok(log_path) = std::env::var("RUST_LOG_PATH") {
         let log_level = match std::env::var("RUST_LOG") {
             Ok(v) => LevelFilter::from_str(&v)?,
@@ -77,10 +77,9 @@ fn main() -> Result<()> {
             .backtrace_mode(log_panics::BacktraceMode::Resolved)
             .install_panic_hook();
     };
-    let args = Cli::parse();
 
     let mut config = Config::load().unwrap_or(Config::default_config());
-    config = Config::merge_cli(&config, &args);
+    config = Config::merge_tui_args(&config, tui_args);
     let keymap = config.active_keymap.clone();
 
     tokio::runtime::Builder::new_multi_thread()
@@ -99,7 +98,7 @@ fn main() -> Result<()> {
 
             let skel = builder.open(&mut open_object)?;
             skel.maps.rodata_data.long_tail_tracing_min_latency_ns =
-                args.experimental_long_tail_tracing_min_latency_ns;
+                tui_args.experimental_long_tail_tracing_min_latency_ns;
 
             let skel = skel.load()?;
 
@@ -144,28 +143,34 @@ fn main() -> Result<()> {
                 links.push(link);
             }
 
-            if args.experimental_long_tail_tracing {
-                let binary = &args.experimental_long_tail_tracing_binary.unwrap();
-                let symbol = &args.experimental_long_tail_tracing_symbol.unwrap();
+            if tui_args.experimental_long_tail_tracing {
+                let binary = tui_args
+                    .experimental_long_tail_tracing_binary
+                    .clone()
+                    .unwrap();
+                let symbol = tui_args
+                    .experimental_long_tail_tracing_symbol
+                    .clone()
+                    .unwrap();
 
                 links.extend([
                     skel.progs.long_tail_tracker_exit.attach_uprobe_with_opts(
                         -1, /* pid, -1 == all */
-                        binary,
+                        binary.clone(),
                         0,
                         UprobeOpts {
                             retprobe: true,
-                            func_name: symbol.into(),
+                            func_name: symbol.clone(),
                             ..Default::default()
                         },
                     )?,
                     skel.progs.long_tail_tracker_entry.attach_uprobe_with_opts(
                         -1, /* pid, -1 == all */
-                        binary,
+                        binary.clone(),
                         0,
                         UprobeOpts {
                             retprobe: false,
-                            func_name: symbol.into(),
+                            func_name: symbol.clone(),
                             ..Default::default()
                         },
                     )?,
@@ -193,7 +198,7 @@ fn main() -> Result<()> {
                 config,
                 scheduler,
                 100,
-                args.process_id,
+                tui_args.process_id,
                 action_tx.clone(),
                 skel,
             )?;
@@ -243,4 +248,19 @@ fn main() -> Result<()> {
 
             Ok(())
         })
+}
+
+fn main() -> Result<()> {
+    let args = Cli::parse();
+
+    match &args.command.unwrap_or(Commands::Tui(args.tui)) {
+        Commands::Tui(tui_args) => {
+            run_tui(tui_args)?;
+        }
+        Commands::GenerateCompletions { shell, output } => {
+            generate_completions(Cli::command(), *shell, output.clone())
+                .unwrap_or_else(|_| panic!("Failed to generate completions for {}", shell));
+        }
+    }
+    Ok(())
 }

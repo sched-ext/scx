@@ -5,11 +5,29 @@
 use crate::APP;
 use crate::STATS_SOCKET_PATH;
 use crate::TRACE_FILE_PREFIX;
-use clap::Parser;
+
+use anyhow::Result;
+use clap::{Command, Parser, Subcommand};
+use clap_complete::{generate, Shell};
+use std::fs::File;
+use std::io;
+
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+#[command(args_conflicts_with_subcommands = true)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+
+    #[clap(flatten)]
+    pub tui: TuiArgs,
+}
 
 #[derive(Parser, Debug)]
 #[command(about = APP)]
-pub struct Cli {
+pub struct TuiArgs {
     /// App tick rate in milliseconds.
     #[arg(short = 'r', long, default_missing_value = "250")]
     pub tick_rate_ms: Option<usize>,
@@ -55,4 +73,31 @@ pub struct Cli {
     /// Minimum latency to trigger a trace.
     #[arg(long, default_value_t = 100000000)]
     pub experimental_long_tail_tracing_min_latency_ns: u64,
+}
+
+#[derive(Subcommand)]
+pub enum Commands {
+    /// Runs the scxtop TUI.
+    Tui(TuiArgs),
+
+    #[clap(hide = true)]
+    GenerateCompletions {
+        /// The shell type
+        #[clap(short, long, default_value = "bash")]
+        shell: Shell,
+        /// Output file, stdout if not present
+        #[arg(long, value_parser(clap::value_parser!(PathBuf)))]
+        output: Option<PathBuf>,
+    },
+}
+
+/// Generates clap completions
+pub fn generate_completions(mut app: Command, shell: Shell, output: Option<PathBuf>) -> Result<()> {
+    let mut file: Box<dyn io::Write> = match output {
+        Some(path) => Box::new(File::create(path)?),
+        None => Box::new(io::stdout()),
+    };
+
+    generate(shell, &mut app, "scxtop", &mut file);
+    Ok(())
 }

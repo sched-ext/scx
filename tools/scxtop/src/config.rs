@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use crate::cli::Cli;
+use crate::cli::TuiArgs;
 use crate::keymap::parse_action;
 use crate::keymap::parse_key;
 use crate::AppTheme;
@@ -176,15 +176,15 @@ impl Config {
     }
 
     /// Merges a Config with a Cli config.
-    pub fn merge_cli(config: &Config, cli: &Cli) -> Config {
+    pub fn merge_tui_args(config: &Config, tui_args: &TuiArgs) -> Config {
         Config {
             keymap: config.keymap.clone(),
             active_keymap: config.active_keymap.clone(),
             theme: config.theme.clone(),
-            tick_rate_ms: Some(cli.tick_rate_ms.unwrap_or(config.tick_rate_ms())),
-            debug: Some(cli.debug.unwrap_or(config.debug())),
-            exclude_bpf: Some(cli.exclude_bpf.unwrap_or(config.exclude_bpf())),
-            stats_socket_path: match &cli.stats_socket_path {
+            tick_rate_ms: Some(tui_args.tick_rate_ms.unwrap_or(config.tick_rate_ms())),
+            debug: Some(tui_args.debug.unwrap_or(config.debug())),
+            exclude_bpf: Some(tui_args.exclude_bpf.unwrap_or(config.exclude_bpf())),
+            stats_socket_path: match &tui_args.stats_socket_path {
                 Some(s) => {
                     if !s.is_empty() {
                         Some(s.to_string())
@@ -194,7 +194,7 @@ impl Config {
                 }
                 None => config.stats_socket_path.clone(),
             },
-            trace_file_prefix: match &cli.trace_file_prefix {
+            trace_file_prefix: match &tui_args.trace_file_prefix {
                 Some(s) => {
                     if !s.is_empty() {
                         Some(s.to_string())
@@ -204,9 +204,13 @@ impl Config {
                 }
                 None => config.trace_file_prefix.clone(),
             },
-            trace_ticks: Some(cli.trace_ticks.unwrap_or(config.trace_ticks())),
-            worker_threads: Some(cli.worker_threads.unwrap_or(config.worker_threads())),
-            trace_tick_warmup: Some(cli.trace_tick_warmup.unwrap_or(config.trace_tick_warmup())),
+            trace_ticks: Some(tui_args.trace_ticks.unwrap_or(config.trace_ticks())),
+            worker_threads: Some(tui_args.worker_threads.unwrap_or(config.worker_threads())),
+            trace_tick_warmup: Some(
+                tui_args
+                    .trace_tick_warmup
+                    .unwrap_or(config.trace_tick_warmup()),
+            ),
         }
     }
 
