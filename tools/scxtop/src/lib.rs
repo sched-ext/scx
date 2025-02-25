@@ -46,6 +46,8 @@ pub use plain::Plain;
 // Generate serialization types for handling events from the bpf ring buffer.
 unsafe impl Plain for crate::bpf_skel::types::bpf_event {}
 
+use smartstring::alias::String as SsoString;
+
 pub const APP: &str = "scxtop";
 pub const TRACE_FILE_PREFIX: &str = "scxtop_trace";
 pub const STATS_SOCKET_PATH: &str = "/var/run/scx/root/stats";
@@ -117,14 +119,14 @@ pub struct SchedSwitchAction {
     pub next_pid: u32,
     pub next_tgid: u32,
     pub next_prio: i32,
-    pub next_comm: String,
+    pub next_comm: SsoString,
     pub prev_dsq_id: u64,
     pub prev_used_slice_ns: u64,
     pub prev_slice_ns: u64,
     pub prev_pid: u32,
     pub prev_tgid: u32,
     pub prev_prio: i32,
-    pub prev_comm: String,
+    pub prev_comm: SsoString,
     pub prev_state: u64,
 }
 
@@ -134,7 +136,7 @@ pub struct SchedWakeActionCtx {
     pub cpu: u32,
     pub pid: u32,
     pub prio: i32,
-    pub comm: String,
+    pub comm: SsoString,
 }
 
 pub type SchedWakeupNewAction = SchedWakeActionCtx;

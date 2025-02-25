@@ -219,21 +219,24 @@ fn main() -> Result<()> {
                         tx.send(action).ok();
                     },
                     #[allow(non_upper_case_globals)]
-                    event_type_SCHED_WAKEUP => unsafe {
-                        let comm = std::str::from_utf8(std::slice::from_raw_parts(
-                            event.event.wakeup.comm.as_ptr() as *const u8,
-                            16,
-                        ))
-                        .unwrap();
+                    event_type_SCHED_WAKEUP => {
+                        let wakeup = unsafe { event.event.wakeup };
+                        let comm = unsafe {
+                            std::str::from_utf8(std::slice::from_raw_parts(
+                                event.event.wakeup.comm.as_ptr() as *const u8,
+                                16,
+                            ))
+                            .unwrap()
+                        };
                         let action = Action::SchedWakeup(SchedWakeupAction {
                             ts: event.ts,
                             cpu: event.cpu,
-                            pid: event.event.wakeup.pid,
-                            prio: event.event.wakeup.prio,
-                            comm: comm.to_string(),
+                            pid: wakeup.pid,
+                            prio: wakeup.prio,
+                            comm: comm.into(),
                         });
                         tx.send(action).ok();
-                    },
+                    }
                     #[allow(non_upper_case_globals)]
                     event_type_SCHED_WAKING => {
                         let waking = unsafe { &event.event.waking };
@@ -246,46 +249,52 @@ fn main() -> Result<()> {
                             cpu: event.cpu,
                             pid: waking.pid,
                             prio: waking.prio,
-                            comm: comm.to_string(),
+                            comm: comm.into(),
                         });
                         tx.send(action).ok();
                     }
                     #[allow(non_upper_case_globals)]
-                    event_type_SCHED_SWITCH => unsafe {
-                        let prev_comm = std::str::from_utf8(std::slice::from_raw_parts(
-                            event.event.sched_switch.prev_comm.as_ptr() as *const u8,
-                            16,
-                        ))
-                        .unwrap();
-                        let next_comm = std::str::from_utf8(std::slice::from_raw_parts(
-                            event.event.sched_switch.next_comm.as_ptr() as *const u8,
-                            16,
-                        ))
-                        .unwrap();
+                    event_type_SCHED_SWITCH => {
+                        let sched_switch = unsafe { &event.event.sched_switch };
+                        let prev_comm = unsafe {
+                            std::str::from_utf8(std::slice::from_raw_parts(
+                                sched_switch.prev_comm.as_ptr() as *const u8,
+                                sched_switch.prev_comm.len(),
+                            ))
+                            .unwrap()
+                        };
+                        let next_comm = unsafe {
+                            std::str::from_utf8(std::slice::from_raw_parts(
+                                sched_switch.next_comm.as_ptr() as *const u8,
+                                sched_switch.next_comm.len(),
+                            ))
+                            .unwrap()
+                        };
+
                         let action = Action::SchedSwitch(SchedSwitchAction {
                             ts: event.ts,
                             cpu: event.cpu,
-                            preempt: event.event.sched_switch.preempt.assume_init(),
-                            next_dsq_id: event.event.sched_switch.next_dsq_id,
-                            next_dsq_lat_us: event.event.sched_switch.next_dsq_lat_us,
-                            next_dsq_nr_queued: event.event.sched_switch.next_dsq_nr,
-                            next_dsq_vtime: event.event.sched_switch.next_dsq_vtime,
-                            next_slice_ns: event.event.sched_switch.next_slice_ns,
-                            next_pid: event.event.sched_switch.next_pid,
-                            next_tgid: event.event.sched_switch.next_tgid,
-                            next_prio: event.event.sched_switch.next_prio,
-                            next_comm: next_comm.to_string(),
-                            prev_dsq_id: event.event.sched_switch.prev_dsq_id,
-                            prev_used_slice_ns: event.event.sched_switch.prev_slice_ns,
-                            prev_slice_ns: event.event.sched_switch.prev_slice_ns,
-                            prev_pid: event.event.sched_switch.prev_pid,
-                            prev_tgid: event.event.sched_switch.prev_tgid,
-                            prev_comm: prev_comm.to_string(),
-                            prev_prio: event.event.sched_switch.prev_prio,
-                            prev_state: event.event.sched_switch.prev_state,
+                            preempt: unsafe { sched_switch.preempt.assume_init() },
+                            next_dsq_id: sched_switch.next_dsq_id,
+                            next_dsq_lat_us: sched_switch.next_dsq_lat_us,
+                            next_dsq_nr_queued: sched_switch.next_dsq_nr,
+                            next_dsq_vtime: sched_switch.next_dsq_vtime,
+                            next_slice_ns: sched_switch.next_slice_ns,
+                            next_pid: sched_switch.next_pid,
+                            next_tgid: sched_switch.next_tgid,
+                            next_prio: sched_switch.next_prio,
+                            next_comm: next_comm.into(),
+                            prev_dsq_id: sched_switch.prev_dsq_id,
+                            prev_used_slice_ns: sched_switch.prev_slice_ns,
+                            prev_slice_ns: sched_switch.prev_slice_ns,
+                            prev_pid: sched_switch.prev_pid,
+                            prev_tgid: sched_switch.prev_tgid,
+                            prev_comm: prev_comm.into(),
+                            prev_prio: sched_switch.prev_prio,
+                            prev_state: sched_switch.prev_state,
                         });
                         tx.send(action).ok();
-                    },
+                    }
                     #[allow(non_upper_case_globals)]
                     event_type_START_TRACE => {
                         let action = Action::RecordTrace(RecordTraceAction { immediate: true });
