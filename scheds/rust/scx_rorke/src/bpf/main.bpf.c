@@ -99,7 +99,7 @@ s32 BPF_STRUCT_OPS(rorke_select_cpu,
 
   cpu = pick_idle_cpu(p, prev_cpu, wake_flags);
   if (cpu >= 0) {
-    scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_INF, 0);
+    scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_INF, 0);
     __sync_fetch_and_add(&nr_direct_to_idle_dispatches, 1);
     dbg("rorke_select_cpu: VM: %d, vCPU: %d, prev_cpu: %d direct dispatch to "
         "idle cpu: %d",
@@ -109,7 +109,7 @@ s32 BPF_STRUCT_OPS(rorke_select_cpu,
   }
 
   dbg("rorke_enqueue: enqueued VM: %d vCPU: %d", tgid, pid);
-  scx_bpf_dispatch(p, tgid, SCX_SLICE_INF, 0);
+  scx_bpf_dsq_insert(p, tgid, SCX_SLICE_INF, 0);
   __sync_fetch_and_add(&nr_vm_dispatches, 1);
 
   return prev_cpu;
@@ -144,14 +144,14 @@ void BPF_STRUCT_OPS(rorke_enqueue, struct task_struct* p, u64 enq_flags) {
    */
   if (is_kthread(p) && p->nr_cpus_allowed == 1) {
     trace("rorke_enqueue: enqueued local kthread %d", pid);
-    scx_bpf_dispatch(p, SCX_DSQ_LOCAL, SCX_SLICE_INF,
+    scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_INF,
                      enq_flags | SCX_ENQ_PREEMPT);
     __sync_fetch_and_add(&nr_kthread_dispatches, 1);
     return;
   }
 
   trace("rorke_enqueue: enqueued VM: %d vCPU: %d", tgid, pid);
-  scx_bpf_dispatch(p, tgid, SCX_SLICE_INF, enq_flags);
+  scx_bpf_dsq_insert(p, tgid, SCX_SLICE_INF, enq_flags);
   __sync_fetch_and_add(&nr_vm_dispatches, 1);
 
   /*
@@ -177,7 +177,7 @@ void BPF_STRUCT_OPS(rorke_dispatch, s32 cpu, struct task_struct* prev) {
     return;
   }
 
-  if (scx_bpf_consume(vm_id)) {
+  if (scx_bpf_dsq_move_to_local(vm_id)) {
     trace("rorke_dispatch: consumed from VM - %d", vm_id);
     return;
   }
