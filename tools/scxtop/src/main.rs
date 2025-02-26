@@ -9,6 +9,7 @@ use scxtop::bpf_skel::*;
 use scxtop::cli::{generate_completions, Cli, Commands, TuiArgs};
 use scxtop::config::get_config_path;
 use scxtop::config::Config;
+use scxtop::edm::{BpfEventActionPublisher, BpfEventHandler, EventDispatchManager};
 use scxtop::read_file_string;
 use scxtop::App;
 use scxtop::Event;
@@ -97,6 +98,9 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
             if config.debug() {
                 builder.obj_builder.debug(true);
             }
+            let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
+            let mut edm = EventDispatchManager::new(None, None);
+            edm.register_bpf_handler(Box::new(bpf_publisher));
 
             let skel = builder.open(&mut open_object)?;
             skel.maps.rodata_data.long_tail_tracing_min_latency_ns =
@@ -181,15 +185,10 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
 
             let mut tui = Tui::new(keymap.clone(), config.tick_rate_ms())?;
             let mut event_rbb = RingBufferBuilder::new();
-            let tx = action_tx.clone();
             let event_handler = move |data: &[u8]| {
                 let mut event = bpf_event::default();
-                // This works because the plain types were created in lib.rs
                 plain::copy_from_bytes(&mut event, data).expect("Event data buffer was too short");
-
-                let action: Action = event.try_into().expect("unrecognised bpf_event");
-                tx.send(action).ok();
-
+                let _ = edm.on_event(&event);
                 0
             };
             event_rbb.add(&skel.maps.events, event_handler)?;
