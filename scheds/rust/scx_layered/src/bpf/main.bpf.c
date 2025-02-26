@@ -178,22 +178,35 @@ static bool cpuc_in_layer(struct cpu_ctx *cpuc, struct layer *layer)
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	// u32 comes from nvml
 	__type(key, u32);
 	__type(value, u32);
 	__uint(max_entries, MAX_GPU_PIDS);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-} all_gpu_pid SEC(".maps");
-
+} gpu_tgid SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
-	// u32 comes from nvml
 	__type(key, u32);
 	__type(value, u32);
 	__uint(max_entries, MAX_GPU_PIDS);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-} cur_gpu_pid SEC(".maps");
+} gpu_tid SEC(".maps");
+
+SEC("?kprobe/nvidia_open")
+int save_gpu_tgid_pid() {
+	if (!enable_gpu_support)
+		return 0;
+	u64 pid_tgid;
+	u32 pid, tid, zero;
+	zero = 0;
+
+	pid_tgid = bpf_get_current_pid_tgid();
+	pid = pid_tgid >> 32;
+	tid = pid_tgid;
+	bpf_map_update_elem(&gpu_tid, &tid, &zero, BPF_ANY);
+	bpf_map_update_elem(&gpu_tgid, &pid, &zero, BPF_ANY);
+	return 0;
+}
 
 // XXX - Converting this to bss array triggers verifier bugs. See
 // BpfStats::read(). Should also be cacheline aligned which doesn't work with
@@ -1831,37 +1844,33 @@ static __noinline bool match_one(struct layer_match *match,
 		// See https://github.com/sched-ext/scx/issues/610 for more details.
 		return (p->tgid == p->pid) == match->is_group_leader;
 	}
-	case MATCH_USING_GPU: {
-			u32 pid;
-			u32 *gpu_pid;
+	case MATCH_USED_GPU_TID: {
+			u32 tid;
 			bool pid_present = false;
 
 			if (!enable_gpu_support)
-				return match->using_gpu;
-			
-			pid = (u32) p->tgid;
-			gpu_pid = bpf_map_lookup_elem(&cur_gpu_pid, &pid);
+				scx_bpf_error("UsedGpuTid requires --enable_gpu_support");
 
-			if (gpu_pid && *gpu_pid == 0)
+			tid = p->pid;
+
+			if (bpf_map_lookup_elem(&gpu_tid, &tid) == 0)
 				pid_present = true;
 
-			return pid_present == match->using_gpu;
+			return pid_present == match->used_gpu_tid;
 	}
-	case MATCH_USED_GPU: {
-			u32 pid;
-			u32 *gpu_pid;
+	case MATCH_USED_GPU_PID: {
+			u32 tgid;
 			bool pid_present = false;
 
 			if (!enable_gpu_support)
-				return match->used_gpu;
+				scx_bpf_error("UsedGpuPid requires --enable_gpu_support");
 
-			pid = (u32) p->tgid;
-			gpu_pid = bpf_map_lookup_elem(&all_gpu_pid, &pid);
+			tgid = p->tgid;
 
-			if (gpu_pid && *gpu_pid == 0)
+			if (bpf_map_lookup_elem(&gpu_tgid, &tgid) == 0)
 				pid_present = true;
 
-			return pid_present == match->used_gpu;
+			return pid_present == match->used_gpu_pid;
 	}
 
 	default:
@@ -2897,11 +2906,11 @@ static s32 init_layer(int layer_id)
 			case MATCH_IS_GROUP_LEADER:
 				dbg("%s PID %d", header, match->is_group_leader);
 				break;
-			case MATCH_USING_GPU:
-				dbg("%s PID %d", header, match->using_gpu);
+			case MATCH_USED_GPU_TID:
+				dbg("%s GPU_TID %d", header, match->used_gpu_tid);
 				break;
-			case MATCH_USED_GPU:
-				dbg("%s PID %d", header, match->used_gpu);
+			case MATCH_USED_GPU_PID:
+				dbg("%s GPU_PID %d", header, match->used_gpu_pid);
 				break;
 			default:
 				scx_bpf_error("%s Invalid kind", header);
