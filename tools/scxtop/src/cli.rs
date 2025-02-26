@@ -25,7 +25,7 @@ pub struct Cli {
     pub tui: TuiArgs,
 }
 
-#[derive(Parser, Debug)]
+#[derive(Clone, Parser, Debug)]
 #[command(about = APP)]
 pub struct TuiArgs {
     /// App tick rate in milliseconds.

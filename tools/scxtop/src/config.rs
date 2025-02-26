@@ -44,6 +44,24 @@ pub struct Config {
     trace_tick_warmup: Option<usize>,
 }
 
+impl From<TuiArgs> for Config {
+    fn from(args: TuiArgs) -> Config {
+        Config {
+            keymap: None,
+            active_keymap: KeyMap::empty(),
+            debug: args.debug,
+            exclude_bpf: args.exclude_bpf,
+            stats_socket_path: args.stats_socket_path,
+            theme: None,
+            tick_rate_ms: args.tick_rate_ms,
+            trace_file_prefix: args.trace_file_prefix,
+            trace_tick_warmup: args.trace_tick_warmup,
+            trace_ticks: args.trace_ticks,
+            worker_threads: args.worker_threads,
+        }
+    }
+}
+
 pub fn get_config_path() -> Result<PathBuf> {
     let xdg_dirs = xdg::BaseDirectories::with_prefix("scxtop")?;
     let config_path = xdg_dirs.get_config_file("scxtop.toml");
@@ -51,6 +69,32 @@ pub fn get_config_path() -> Result<PathBuf> {
 }
 
 impl Config {
+    pub fn merge<I: IntoIterator<Item = Self>>(iter: I) -> Self {
+        iter.into_iter().fold(Self::empty_config(), Self::or)
+    }
+
+    pub fn or(self, rhs: Self) -> Self {
+        let active_keymap = if self.keymap.is_some() {
+            self.active_keymap
+        } else {
+            rhs.active_keymap
+        };
+
+        Self {
+            keymap: self.keymap.or(rhs.keymap),
+            active_keymap,
+            theme: self.theme.or(rhs.theme),
+            tick_rate_ms: self.tick_rate_ms.or(rhs.tick_rate_ms),
+            debug: self.debug.or(rhs.debug),
+            exclude_bpf: self.exclude_bpf.or(rhs.exclude_bpf),
+            stats_socket_path: self.stats_socket_path.or(rhs.stats_socket_path),
+            trace_file_prefix: self.trace_file_prefix.or(rhs.trace_file_prefix),
+            trace_ticks: self.trace_ticks.or(rhs.trace_ticks),
+            worker_threads: self.worker_threads.or(rhs.worker_threads),
+            trace_tick_warmup: self.trace_tick_warmup.or(rhs.trace_tick_warmup),
+        }
+    }
+
     /// App theme.
     pub fn theme(&self) -> &AppTheme {
         match &self.theme {
@@ -175,45 +219,6 @@ impl Config {
         Ok(config)
     }
 
-    /// Merges a Config with a Cli config.
-    pub fn merge_tui_args(config: &Config, tui_args: &TuiArgs) -> Config {
-        Config {
-            keymap: config.keymap.clone(),
-            active_keymap: config.active_keymap.clone(),
-            theme: config.theme.clone(),
-            tick_rate_ms: Some(tui_args.tick_rate_ms.unwrap_or(config.tick_rate_ms())),
-            debug: Some(tui_args.debug.unwrap_or(config.debug())),
-            exclude_bpf: Some(tui_args.exclude_bpf.unwrap_or(config.exclude_bpf())),
-            stats_socket_path: match &tui_args.stats_socket_path {
-                Some(s) => {
-                    if !s.is_empty() {
-                        Some(s.to_string())
-                    } else {
-                        config.stats_socket_path.clone()
-                    }
-                }
-                None => config.stats_socket_path.clone(),
-            },
-            trace_file_prefix: match &tui_args.trace_file_prefix {
-                Some(s) => {
-                    if !s.is_empty() {
-                        Some(s.to_string())
-                    } else {
-                        config.trace_file_prefix.clone()
-                    }
-                }
-                None => config.trace_file_prefix.clone(),
-            },
-            trace_ticks: Some(tui_args.trace_ticks.unwrap_or(config.trace_ticks())),
-            worker_threads: Some(tui_args.worker_threads.unwrap_or(config.worker_threads())),
-            trace_tick_warmup: Some(
-                tui_args
-                    .trace_tick_warmup
-                    .unwrap_or(config.trace_tick_warmup()),
-            ),
-        }
-    }
-
     /// Saves the current config.
     pub fn save(&mut self) -> Result<()> {
         self.keymap = Some(self.active_keymap.to_hashmap());
@@ -223,5 +228,32 @@ impl Config {
         }
         let config_str = toml::to_string(&self)?;
         Ok(fs::write(&config_path, config_str)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_merge_configs() {
+        let mut a = Config::empty_config();
+        a.theme = Some(AppTheme::MidnightGreen);
+        a.tick_rate_ms = None;
+        a.debug = Some(true);
+        a.exclude_bpf = None;
+
+        let mut b = Config::empty_config();
+        b.theme = Some(AppTheme::IAmBlue);
+        b.tick_rate_ms = Some(114);
+        b.debug = None;
+        a.exclude_bpf = None;
+
+        let merged = Config::merge([a, b]);
+
+        assert_eq!(merged.theme(), &AppTheme::MidnightGreen);
+        assert_eq!(merged.tick_rate_ms(), 114);
+        assert_eq!(merged.debug(), true);
+        assert_eq!(merged.exclude_bpf(), false);
     }
 }

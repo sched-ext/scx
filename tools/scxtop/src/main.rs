@@ -78,8 +78,10 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
             .install_panic_hook();
     };
 
-    let mut config = Config::load().unwrap_or(Config::default_config());
-    config = Config::merge_tui_args(&config, tui_args);
+    let config = Config::merge([
+        Config::from(tui_args.clone()),
+        Config::load().unwrap_or(Config::default_config()),
+    ]);
     let keymap = config.active_keymap.clone();
 
     tokio::runtime::Builder::new_multi_thread()
