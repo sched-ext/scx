@@ -10,6 +10,7 @@ mod bpf_stats;
 pub mod cli;
 pub mod config;
 mod cpu_data;
+pub mod edm;
 mod event_data;
 mod keymap;
 mod llc_data;

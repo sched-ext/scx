@@ -50,8 +50,8 @@ use scx_stats::prelude::StatsClient;
 use scx_utils::misc::read_file_usize;
 use scx_utils::Topology;
 use serde_json::Value as JsonValue;
-use std::sync::RwLock;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::Mutex;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -66,7 +66,7 @@ pub struct App<'a> {
     config: Config,
     localize: bool,
     locale: SystemLocale,
-    stats_client: Arc<RwLock<StatsClient>>,
+    stats_client: Arc<Mutex<StatsClient>>,
     sched_stats_raw: String,
 
     scheduler: String,
@@ -184,7 +184,7 @@ impl<'a> App<'a> {
             config,
             localize: true,
             locale: SystemLocale::default()?,
-            stats_client: Arc::new(RwLock::new(stats_client)),
+            stats_client: Arc::new(Mutex::new(stats_client)),
             sched_stats_raw: "".to_string(),
             scheduler,
             max_cpu_events,
@@ -413,7 +413,8 @@ impl<'a> App<'a> {
         let mut new_client = StatsClient::new();
         new_client = new_client.connect()?;
         new_client = new_client.set_path(stats_socket_path);
-        let mut client = self.stats_client.write().unwrap();
+        let client_ref = self.stats_client.clone();
+        let mut client = client_ref.blocking_lock();
         *client = new_client;
 
         Ok(())
@@ -430,18 +431,17 @@ impl<'a> App<'a> {
                     let stats_client_read = self.stats_client.clone();
                     let tx = self.action_tx.clone();
                     tokio::spawn(async move {
-                        let mut client = stats_client_read.write().unwrap();
+                        let mut client = stats_client_read.lock().await;
 
                         let result = client.request::<JsonValue>("stats", vec![]);
                         match result {
                             Ok(stats) => {
                                 tx.send(Action::SchedStats(
                                     serde_json::to_string_pretty(&stats).unwrap(),
-                                ))
-                                .unwrap();
+                                ))?;
                             }
                             Err(_) => {
-                                tx.send(Action::ReloadStatsClient).unwrap();
+                                tx.send(Action::ReloadStatsClient)?;
                             }
                         }
                         Ok::<(), anyhow::Error>(())
