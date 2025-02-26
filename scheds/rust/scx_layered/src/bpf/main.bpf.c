@@ -1853,7 +1853,7 @@ static __noinline bool match_one(struct layer_match *match,
 
 			tid = p->pid;
 
-			if (bpf_map_lookup_elem(&gpu_tid, &tid) == 0)
+			if (bpf_map_lookup_elem(&gpu_tid, &tid))
 				pid_present = true;
 
 			return pid_present == match->used_gpu_tid;
@@ -1867,7 +1867,7 @@ static __noinline bool match_one(struct layer_match *match,
 
 			tgid = p->tgid;
 
-			if (bpf_map_lookup_elem(&gpu_tgid, &tgid) == 0)
+			if (bpf_map_lookup_elem(&gpu_tgid, &tgid))
 				pid_present = true;
 
 			return pid_present == match->used_gpu_pid;
