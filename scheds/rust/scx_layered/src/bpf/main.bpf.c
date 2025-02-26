@@ -1211,14 +1211,12 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if ((!taskc->all_cpus_allowed &&
 	     !(layer->allow_node_aligned && taskc->cpus_node_aligned)) ||
 	    !layer->nr_cpus) {
-		taskc->dsq_id = task_cpuc->lo_fb_dsq_id;
+		taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
 		/*
 		 * Start a new lo fallback queued region if the DSQ is empty.
 		 * While the following is racy, all that's needed is at least
 		 * one of the racing updates to succeed, which is guaranteed.
 		 */
-		if (!scx_bpf_dsq_nr_queued(taskc->dsq_id))
-			llcc->lo_fb_seq++;
 		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 		return;
 	}
