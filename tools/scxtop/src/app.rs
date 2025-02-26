@@ -592,7 +592,7 @@ impl<'a> App<'a> {
     }
 
     /// creates as sparkline for a llc.
-    fn llc_sparkline(&self, llc: usize, bottom_border: bool) -> Sparkline {
+    fn llc_sparkline(&self, llc: usize, max: u64, bottom_border: bool) -> Sparkline {
         let data = if self.llc_data.contains_key(&llc) {
             let llc_data = self.llc_data.get(&llc).unwrap();
             llc_data.event_data_immut(&self.active_event.event)
@@ -603,6 +603,7 @@ impl<'a> App<'a> {
 
         Sparkline::default()
             .data(&data)
+            .max(max)
             .direction(RenderDirection::RightToLeft)
             .style(self.theme().sparkline_style())
             .block(
@@ -756,7 +757,7 @@ impl<'a> App<'a> {
                 self.topo
                     .all_llcs
                     .keys()
-                    .map(|llc_id| self.llc_sparkline(*llc_id, *llc_id == num_llcs - 1))
+                    .map(|llc_id| self.llc_sparkline(*llc_id, stats.max, *llc_id == num_llcs - 1))
                     .enumerate()
                     .for_each(|(i, llc_sparkline)| {
                         frame.render_widget(llc_sparkline, llcs_verticle[i + 1]);
