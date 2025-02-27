@@ -1704,7 +1704,9 @@ impl<'a> Scheduler<'a> {
         // enable autoloads for conditionally loaded things
         // immediately after creating skel (because this is always before loading)
         if opts.enable_gpu_support {
-            compat::cond_kprobe_enable("nvidia_open", &skel.progs.save_gpu_tgid_pid)?;
+            compat::cond_kprobe_enable("nvidia_open", &skel.progs.kprobe_nvidia_open)?;
+            compat::cond_kprobe_enable("nvidia_poll", &skel.progs.kprobe_nvidia_poll)?;
+            compat::cond_kprobe_enable("nvidia_mmap", &skel.progs.kprobe_nvidia_mmap)?;
         }
 
         skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;
