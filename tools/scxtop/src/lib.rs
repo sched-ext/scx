@@ -188,7 +188,6 @@ pub enum Action {
     Quit,
     RecordTrace(RecordTraceAction),
     ReloadStatsClient,
-    Render,
     SaveConfig,
     SchedCpuPerfSet(SchedCpuPerfSetAction),
     SchedReg,

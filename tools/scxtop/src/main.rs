@@ -52,7 +52,6 @@ fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {
         Event::TickRateChange(tick_rate_ms) => {
             Action::TickRateChange(std::time::Duration::from_millis(tick_rate_ms))
         }
-        Event::Render => Action::Render,
         Event::Key(key) => match key.code {
             Char(c) => keymap.action(&Key::Char(c)),
             _ => keymap.action(&Key::Code(key.code)),
@@ -217,31 +216,32 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
             });
 
             loop {
-                let e = tui.next().await?;
-                match e {
-                    Event::Quit => action_tx.send(Action::Quit)?,
-                    Event::Tick => action_tx.send(Action::Tick)?,
-                    Event::TickRateChange(tick_rate_ms) => action_tx.send(
-                        Action::TickRateChange(std::time::Duration::from_millis(tick_rate_ms)),
-                    )?,
-                    Event::Render => action_tx.send(Action::Render)?,
-                    Event::Key(_) => {
-                        let action = get_action(&app, &keymap, e);
-                        action_tx.send(action)?;
-                    }
-                    _ => {}
-                };
+                tokio::select! {
+                    ev = tui.next() => {
+                        let ev = ev?;
+                        match ev {
+                            Event::Quit => { action_tx.send(Action::Quit)?; },
+                            Event::Tick => action_tx.send(Action::Tick)?,
+                            Event::TickRateChange(tick_rate_ms) => action_tx.send(
+                                Action::TickRateChange(std::time::Duration::from_millis(tick_rate_ms)),
+                            )?,
+                            Event::Render => {
+                                if app.should_quit.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                tui.draw(|f| app.render(f).expect("Failed to render application"))?;
+                            }
+                            Event::Key(_) => {
+                                let action = get_action(&app, &keymap, ev);
+                                action_tx.send(action)?;
+                            }
+                            _ => {}
+                    }}
 
-                while let Ok(action) = action_rx.try_recv() {
-                    if let Action::Render = action {
-                        tui.draw(|f| app.render(f).expect("Failed to render application"))?;
-                    } else {
-                        app.handle_action(&action)?;
+                    ac = action_rx.recv() => {
+                        let ac = ac.ok_or(anyhow!("actions channel closed"))?;
+                        app.handle_action(&ac)?;
                     }
-                }
-
-                if app.should_quit.load(Ordering::Relaxed) {
-                    break;
                 }
             }
             tui.exit()?;
