@@ -283,8 +283,18 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
 
-        // Disable automatic dispatch of migration-disabled tasks.
-        skel.struct_ops.bpfland_ops_mut().flags |= *compat::SCX_OPS_ENQ_MIGRATION_DISABLED;
+        // Set scheduler compatibility flags.
+        skel.maps.rodata_data.__COMPAT_SCX_PICK_IDLE_IN_NODE = *compat::SCX_PICK_IDLE_IN_NODE;
+
+        // Set scheduler flags.
+        skel.struct_ops.bpfland_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
+            | *compat::SCX_OPS_ENQ_LAST
+            | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
+            | *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE;
+        info!(
+            "scheduler flags: {:#x}",
+            skel.struct_ops.bpfland_ops_mut().flags
+        );
 
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, bpfland_ops, uei)?;
