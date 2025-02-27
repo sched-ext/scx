@@ -335,7 +335,8 @@ lazy_static! {
 ///   "cpus_range" property.
 ///
 /// - Grouped: Similar to Confined but tasks may spill outside if there are
-///   idle CPUs outside the allocated ones.
+///   idle CPUs outside the allocated ones. The range can optionally be
+///   restricted with the "cpus_range" property.
 ///
 /// - Open: Prefer the CPUs which are not occupied by Confined or Grouped
 ///   layers. Tasks in this group will spill into occupied CPUs if there are
@@ -350,6 +351,10 @@ lazy_static! {
 /// - yield_ignore: Yield ignore ratio. If 0.0, yield(2) forfeits a whole
 ///   execution slice. 0.25 yields three quarters of an execution slice and
 ///   so on. If 1.0, yield is completely ignored.
+///
+/// - slice_us: Scheduling slice duration in microseconds.
+///
+/// - fifo: Use FIFO queues within the layer instead of the default vtime.
 ///
 /// - preempt: If true, tasks in the layer will preempt tasks which belong
 ///   to other non-preempting layers when no idle CPUs are available.
@@ -366,13 +371,20 @@ lazy_static! {
 ///   the whole scheduler node aware and should only be used with open
 ///   layers on non-saturated machines to avoid possible stalls.
 ///
-/// - slice_us: Scheduling slice duration in microseconds.
-///
 /// - weight: Weight of the layer, which is a range from 1 to 10000 with a
 ///   default of 100. Layer weights are used during contention to prevent
 ///   starvation across layers. Weights are used in combination with
 ///   utilization to determine the infeasible adjusted weight with higher
 ///   weights having a larger adjustment in adjusted utilization.
+///
+/// - disallow_open_after_us: Duration to wait after machine reaches saturation
+///   before confining tasks in Open layers.
+///
+/// - disallow_preempt_after_us: Duration to wait after machine reaches saturation
+///   before confining tasks to preempt.
+///
+/// - xllc_mig_min_us: Skip cross-LLC migrations if they are likely to run on
+///   their existing LLC sooner than this.
 ///
 /// - idle_smt: *** DEPRECATED ****
 ///
