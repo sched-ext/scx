@@ -637,7 +637,7 @@ impl<'a> App<'a> {
     }
 
     /// creates as sparkline for a node.
-    fn node_sparkline(&self, node: usize, bottom_border: bool) -> Sparkline {
+    fn node_sparkline(&self, node: usize, max: u64, bottom_border: bool) -> Sparkline {
         let data = if self.llc_data.contains_key(&node) {
             let node_data = self.node_data.get(&node).unwrap();
             node_data.event_data_immut(&self.active_event.event)
@@ -648,6 +648,7 @@ impl<'a> App<'a> {
 
         Sparkline::default()
             .data(&data)
+            .max(max)
             .direction(RenderDirection::RightToLeft)
             .style(self.theme().sparkline_style())
             .block(
@@ -843,7 +844,9 @@ impl<'a> App<'a> {
                     .topo
                     .nodes
                     .keys()
-                    .map(|node_id| self.node_sparkline(*node_id, *node_id == num_nodes - 1))
+                    .map(|node_id| {
+                        self.node_sparkline(*node_id, stats.max, *node_id == num_nodes - 1)
+                    })
                     .collect();
 
                 let node_block = Block::bordered()
