@@ -24,7 +24,7 @@ use crate::APP;
 use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
-    Action, IPIAction, RecordTraceAction, SchedCpuPerfSetAction, SchedSwitchAction,
+    Action, GpuMemAction, IPIAction, RecordTraceAction, SchedCpuPerfSetAction, SchedSwitchAction,
     SchedWakeupAction, SchedWakingAction, SoftIRQAction,
 };
 
@@ -2264,6 +2264,12 @@ impl<'a> App<'a> {
         }
     }
 
+    pub fn on_gpu_mem(&mut self, action: &GpuMemAction) {
+        if self.trace_tick > self.config.trace_tick_warmup() {
+            self.trace_manager.on_gpu_mem(action);
+        }
+    }
+
     /// Updates the bpf bpf sampling rate.
     pub fn update_bpf_sample_rate(&mut self, sample_rate: u32) {
         self.skel.maps.data_data.sample_rate = sample_rate;
@@ -2334,6 +2340,9 @@ impl<'a> App<'a> {
             }
             Action::IPI(a) => {
                 self.on_ipi(a);
+            }
+            Action::GpuMem(a) => {
+                self.on_gpu_mem(a);
             }
             Action::ClearEvent => self.stop_perf_events(),
             Action::ChangeTheme => {

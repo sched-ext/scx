@@ -168,6 +168,15 @@ pub struct IPIAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct GpuMemAction {
+    pub ts: u64,
+    pub size: u64,
+    pub cpu: u32,
+    pub gpu: u32,
+    pub pid: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
     ChangeTheme,
     ClearEvent,
@@ -176,6 +185,7 @@ pub enum Action {
     Down,
     Enter,
     Event,
+    GpuMem(GpuMemAction),
     Help,
     IncBpfSampleRate,
     IncTickRate,
@@ -239,6 +249,14 @@ impl TryFrom<&bpf_event> for Action {
                 cpu: event.cpu,
                 pid: unsafe { event.event.ipi.pid },
                 target_cpu: unsafe { event.event.ipi.target_cpu },
+            })),
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_GPU_MEM => Ok(Action::GpuMem(GpuMemAction {
+                ts: event.ts,
+                cpu: event.cpu,
+                pid: unsafe { event.event.gm.pid },
+                gpu: unsafe { event.event.gm.gpu },
+                size: unsafe { event.event.gm.size },
             })),
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_SOFTIRQ => {

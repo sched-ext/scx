@@ -676,3 +676,26 @@ int BPF_PROG(on_ipi_send_cpu, u32 cpu, void *callsite, void *callback)
 
 	return 0;
 }
+
+SEC("tp_bpf/gpu_memory_total")
+int BPF_PROG(on_gpu_memory_total, u32 gpu, u32 pid, u64 size)
+{
+	struct bpf_event *event;
+	struct task_struct *p;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+	event->type = GPU_MEM;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = bpf_ktime_get_ns();
+	event->event.gm.gpu = gpu;
+	event->event.gm.pid = pid;
+	event->event.gm.size = size;
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
