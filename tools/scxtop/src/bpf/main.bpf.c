@@ -677,7 +677,7 @@ int BPF_PROG(on_ipi_send_cpu, u32 cpu, void *callsite, void *callback)
 	return 0;
 }
 
-SEC("tp_bpf/gpu_memory_total")
+SEC("?tp_btf/gpu_mem_total")
 int BPF_PROG(on_gpu_memory_total, u32 gpu, u32 pid, u64 size)
 {
 	struct bpf_event *event;
