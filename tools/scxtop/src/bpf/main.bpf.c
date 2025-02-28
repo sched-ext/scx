@@ -700,8 +700,8 @@ int BPF_PROG(on_gpu_memory_total, u32 gpu, u32 pid, u64 size)
 	return 0;
 }
 
-SEC("tp_bpf/cpuhp_enter")
-int BPF_PROG(on_cpuhp_enter, u32 cpu, int target, int state, int(*fun)(u32))
+SEC("tp_btf/cpuhp_enter")
+int BPF_PROG(on_cpuhp_enter, u32 cpu, int target, int state)
 {
 	struct bpf_event *event;
 	struct task_struct *p;
@@ -718,7 +718,6 @@ int BPF_PROG(on_cpuhp_enter, u32 cpu, int target, int state, int(*fun)(u32))
 	event->event.chp.cpu = cpu;
 	event->event.chp.target = target;
 	event->event.chp.state = state;
-	event->event.chp.fun = (u64)fun;
 	p = (struct task_struct *)bpf_get_current_task();
 	if (p)
 		event->event.chp.pid = BPF_CORE_READ(p, pid);

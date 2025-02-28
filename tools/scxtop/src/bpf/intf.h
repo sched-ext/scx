@@ -93,7 +93,6 @@ struct cpuhp_event {
 	u32             pid;
 	int             target;
 	int             state;
-	u64             fun;
 };
 
 struct bpf_event {

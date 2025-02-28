@@ -343,7 +343,6 @@ impl PerfettoTraceManager {
             cpu,
             target,
             state,
-            fun,
             pid,
         } = action;
 
@@ -353,7 +352,6 @@ impl PerfettoTraceManager {
             cpu_hp_event.set_cpu(*cpu);
             cpu_hp_event.set_target(*target);
             cpu_hp_event.set_idx(*state);
-            cpu_hp_event.set_fun(*fun);
             ftrace_event.set_pid(*pid);
             ftrace_event.set_timestamp(*ts);
             ftrace_event.set_cpuhp_enter(cpu_hp_event);

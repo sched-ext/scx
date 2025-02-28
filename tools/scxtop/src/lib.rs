@@ -182,7 +182,6 @@ pub struct CpuhpAction {
     pub cpu: u32,
     pub target: i32,
     pub state: i32,
-    pub fun: u64,
     pub pid: u32,
 }
 
@@ -276,7 +275,6 @@ impl TryFrom<&bpf_event> for Action {
                 cpu: unsafe { event.event.chp.cpu },
                 state: unsafe { event.event.chp.state },
                 target: unsafe { event.event.chp.target },
-                fun: unsafe { event.event.chp.fun },
             })),
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_SOFTIRQ => {
