@@ -24,6 +24,7 @@ enum stat_id {
 };
 
 enum event_type {
+	CPU_HP,
 	CPU_PERF_SET,
 	GPU_MEM,
 	IPI,
@@ -87,12 +88,20 @@ struct gpu_mem_event {
 	u32             pid;
 };
 
+struct cpuhp_event {
+	u32             cpu;
+	u32             pid;
+	int             target;
+	int             state;
+};
+
 struct bpf_event {
 	int		type;
 	u64		ts;
 	u32		cpu;
 	union {
 		struct  gpu_mem_event gm;
+		struct  cpuhp_event chp;
 		struct	ipi_event ipi;
 		struct	sched_switch_event sched_switch;
 		struct	set_perf_event perf;

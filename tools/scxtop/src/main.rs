@@ -147,6 +147,9 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
             if let Ok(link) = skel.progs.scx_dsq_move.attach() {
                 links.push(link);
             }
+            if let Ok(link) = skel.progs.on_cpuhp_enter.attach() {
+                links.push(link);
+            }
 
             if tui_args.experimental_long_tail_tracing {
                 let binary = tui_args

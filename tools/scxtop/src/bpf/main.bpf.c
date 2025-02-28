@@ -681,7 +681,6 @@ SEC("tp_bpf/gpu_memory_total")
 int BPF_PROG(on_gpu_memory_total, u32 gpu, u32 pid, u64 size)
 {
 	struct bpf_event *event;
-	struct task_struct *p;
 
 	if (!enable_bpf_events || !should_sample())
 		return 0;
@@ -695,6 +694,36 @@ int BPF_PROG(on_gpu_memory_total, u32 gpu, u32 pid, u64 size)
 	event->event.gm.gpu = gpu;
 	event->event.gm.pid = pid;
 	event->event.gm.size = size;
+
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
+SEC("tp_btf/cpuhp_enter")
+int BPF_PROG(on_cpuhp_enter, u32 cpu, int target, int state)
+{
+	struct bpf_event *event;
+	struct task_struct *p;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+	event->type = CPU_HP;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = bpf_ktime_get_ns();
+	event->event.chp.cpu = cpu;
+	event->event.chp.target = target;
+	event->event.chp.state = state;
+	p = (struct task_struct *)bpf_get_current_task();
+	if (p)
+		event->event.chp.pid = BPF_CORE_READ(p, pid);
+	else
+		event->event.chp.pid = 0;
+
 	bpf_ringbuf_submit(event, 0);
 
 	return 0;

@@ -177,9 +177,19 @@ pub struct GpuMemAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CpuhpAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub target: i32,
+    pub state: i32,
+    pub pid: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
     ChangeTheme,
     ClearEvent,
+    Cpuhp(CpuhpAction),
     DecBpfSampleRate,
     DecTickRate,
     Down,
@@ -257,6 +267,14 @@ impl TryFrom<&bpf_event> for Action {
                 pid: unsafe { event.event.gm.pid },
                 gpu: unsafe { event.event.gm.gpu },
                 size: unsafe { event.event.gm.size },
+            })),
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_CPU_HP => Ok(Action::Cpuhp(CpuhpAction {
+                ts: event.ts,
+                pid: unsafe { event.event.chp.pid },
+                cpu: unsafe { event.event.chp.cpu },
+                state: unsafe { event.event.chp.state },
+                target: unsafe { event.event.chp.target },
             })),
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_SOFTIRQ => {
