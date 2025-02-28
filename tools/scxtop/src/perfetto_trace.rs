@@ -15,18 +15,18 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
-    Action, GpuMemAction, IPIAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction,
-    SoftIRQAction,
+    Action, CpuhpAction, GpuMemAction, IPIAction, SchedSwitchAction, SchedWakeupAction,
+    SchedWakingAction, SoftIRQAction,
 };
 
 use crate::protos_gen::perfetto_scx::counter_descriptor::Unit::UNIT_COUNT;
 use crate::protos_gen::perfetto_scx::trace_packet::Data::TrackDescriptor as DataTrackDescriptor;
 use crate::protos_gen::perfetto_scx::track_event::Type as TrackEventType;
 use crate::protos_gen::perfetto_scx::{
-    CounterDescriptor, FtraceEvent, FtraceEventBundle, GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent,
-    SchedSwitchFtraceEvent, SchedWakeupFtraceEvent, SchedWakingFtraceEvent,
-    SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent, Trace, TracePacket, TrackDescriptor,
-    TrackEvent,
+    CounterDescriptor, CpuhpEnterFtraceEvent, FtraceEvent, FtraceEventBundle,
+    GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent, SchedSwitchFtraceEvent, SchedWakeupFtraceEvent,
+    SchedWakingFtraceEvent, SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent, Trace, TracePacket,
+    TrackDescriptor, TrackEvent,
 };
 
 /// Handler for perfetto traces. For details on data flow in perfetto see:
@@ -332,6 +332,31 @@ impl PerfettoTraceManager {
             ftrace_event.set_pid(*pid);
             ftrace_event.set_timestamp(*ts);
             ftrace_event.set_gpu_mem_total(gpu_mem_event);
+
+            ftrace_event
+        });
+    }
+
+    pub fn on_cpu_hp(&mut self, action: &CpuhpAction) {
+        let CpuhpAction {
+            ts,
+            cpu,
+            target,
+            state,
+            fun,
+            pid,
+        } = action;
+
+        self.ftrace_events.entry(*cpu).or_default().push({
+            let mut ftrace_event = FtraceEvent::new();
+            let mut cpu_hp_event = CpuhpEnterFtraceEvent::new();
+            cpu_hp_event.set_cpu(*cpu);
+            cpu_hp_event.set_target(*target);
+            cpu_hp_event.set_idx(*state);
+            cpu_hp_event.set_fun(*fun);
+            ftrace_event.set_pid(*pid);
+            ftrace_event.set_timestamp(*ts);
+            ftrace_event.set_cpuhp_enter(cpu_hp_event);
 
             ftrace_event
         });
