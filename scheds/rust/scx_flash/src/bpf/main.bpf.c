@@ -47,12 +47,6 @@ const volatile u64 slice_lag = 20ULL * NSEC_PER_MSEC;
 const volatile bool local_kthreads;
 
 /*
- * When enabled, threads who's hold a user-space lock and still able to run
- * will be dispatch first. See flash_dispatch() for details.
- */
-const volatile bool user_lock_boost;
-
-/*
  * Scheduling statistics.
  */
 volatile u64 nr_kthread_dispatches, nr_direct_dispatches, nr_shared_dispatches;
@@ -154,121 +148,12 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 }
 
 /*
- * User-space locking detection: re-using a logic similar to scx_lavd.
- */
-struct futex_vector;
-struct hrtimer_sleeper;
-struct file;
-
-static bool is_task_locked(struct task_struct *p)
-{
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	return tctx ? tctx->lock_boost : false;
-}
-
-static void task_lock(struct task_struct *p)
-{
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (tctx)
-		tctx->lock_boost = true;
-}
-
-static void task_unlock(struct task_struct *p)
-{
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (tctx)
-		tctx->lock_boost = false;
-}
-
-SEC("fexit/__futex_wait")
-int BPF_PROG(fexit___futex_wait, u32 *uaddr, unsigned int flags, u32 val,
-	     struct hrtimer_sleeper *to, u32 bitset, int ret)
-{
-	if (ret == 0) {
-		struct task_struct *p = (void *)bpf_get_current_task_btf();
-		task_lock(p);
-	}
-	return 0;
-}
-
-SEC("fexit/futex_wait_multiple")
-int BPF_PROG(fexit_futex_wait_multiple, struct futex_vector *vs,
-	     unsigned int count, struct hrtimer_sleeper *to, int ret)
-{
-	if (ret == 0) {
-		struct task_struct *p = (void *)bpf_get_current_task_btf();
-		task_lock(p);
-	}
-	return 0;
-}
-
-SEC("fexit/futex_wait_requeue_pi")
-int BPF_PROG(fexit_futex_wait_requeue_pi, u32 *uaddr, unsigned int flags,
-	     u32 val, ktime_t *abs_time, u32 bitset, u32 *uaddr2, int ret)
-{
-	if (ret == 0) {
-		struct task_struct *p = (void *)bpf_get_current_task_btf();
-		task_lock(p);
-	}
-	return 0;
-}
-
-SEC("fexit/futex_lock_pi")
-int BPF_PROG(fexit_futex_lock_pi, u32 *uaddr, unsigned int flags,
-	     ktime_t *time, int trylock, int ret)
-{
-	if (ret == 0) {
-		struct task_struct *p = (void *)bpf_get_current_task_btf();
-		task_lock(p);
-	}
-	return 0;
-}
-
-SEC("fexit/futex_wake")
-int BPF_PROG(fexit_futex_wake, u32 *uaddr, unsigned int flags,
-	     int nr_wake, u32 bitset, int ret)
-{
-	if (ret == 0) {
-		struct task_struct *p = (void *)bpf_get_current_task_btf();
-		task_unlock(p);
-	}
-	return 0;
-}
-
-SEC("fexit/futex_wake_op")
-int BPF_PROG(fexit_futex_wake_op, u32 *uaddr1, unsigned int flags,
-	     u32 *uaddr2, int nr_wake, int nr_wake2, int op, int ret)
-{
-	if (ret == 0) {
-		struct task_struct *p = (void *)bpf_get_current_task_btf();
-		task_unlock(p);
-	}
-	return 0;
-}
-
-SEC("fexit/futex_unlock_pi")
-int BPF_PROG(fexit_futex_unlock_pi, u32 *uaddr, unsigned int flags, int ret)
-{
-	if (ret == 0) {
-		struct task_struct *p = (void *)bpf_get_current_task_btf();
-		task_unlock(p);
-	}
-	return 0;
-}
-
-/*
  * Prevent excessive prioritization of tasks performing massive fsync()
  * operations on the filesystem. These tasks can degrade system responsiveness
  * by not being inherently latency-sensitive.
  */
-SEC("kprobe/vfs_fsync_range")
-int BPF_PROG(fexit_vfs_fsync_range, struct file *file, u64 start, u64 end, int datasync)
+SEC("?kprobe/vfs_fsync_range")
+int kprobe_vfs_fsync_range(struct file *file, u64 start, u64 end, int datasync)
 {
 	struct task_struct *p = (void *)bpf_get_current_task_btf();
 	struct task_ctx *tctx;
@@ -822,17 +707,6 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 {
-	/*
-	 * If the task can still run and it's holding a user-space lock, let it
-	 * run for another round.
-	 */
-	if (user_lock_boost && prev && (prev->scx.flags & SCX_TASK_QUEUED) &&
-	    is_task_locked(prev)) {
-		task_unlock(prev);
-		task_refill_slice(prev);
-		return;
-	}
-
 	/*
 	 * Select a new task to run.
 	 */
