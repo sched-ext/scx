@@ -6,7 +6,7 @@ aggregates the data in a live view across CPUs, LLCs, and NUMA nodes. It uses
 
 ### Using `scxtop`
 `scxtop` must be run as root or with capabilities as it uses `perf_event_open`
-as well as BPF programs for data collection. Use the help menu (`h` key is the 
+as well as BPF programs for data collection. Use the help menu (`h` key is the
 default to see keybindings) to view the current keybindings:
 <img width="1919" alt="image" src="https://github.com/user-attachments/assets/38d11e5d-edb7-4567-b62f-da223a47efd9" />
 
@@ -17,6 +17,50 @@ displays live value bar charts:
 The sparkline view is useful for seeing a historical view of the metrics:
 <img width="1919" alt="image" src="https://github.com/user-attachments/assets/83238b44-5580-4587-a370-b2f9a68d925a" />
 
+### Configuration
+`scxtop` can use a configuration file, which can be generated using the `S` key
+in the default keymap configuration. The config file follows the
+[XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/).
+
+An example configuration shows customization of default tick rates, theme and keymaps:
+```
+theme = "IAmBlue"
+tick_rate_ms = 250
+debug = false
+exclude_bpf = false
+worker_threads = 4
+
+[keymap]
+d = "AppStateDefault"
+"?" = "AppStateHelp"
+"[" = "DecBpfSampleRate"
+q = "Quit"
+"+" = "IncTickRate"
+u = "ToggleUncoreFreq"
+"Page Down" = "PageDown"
+S = "SaveConfig"
+Up = "Up"
+P = "RecordTrace"
+- = "DecTickRate"
+L = "ToggleLocalization"
+t = "ChangeTheme"
+"]" = "IncBpfSampleRate"
+Down = "Down"
+l = "AppStateLlc"
+k = "NextEvent"
+a = "RecordTrace"
+j = "PrevEvent"
+v = "NextViewState"
+h = "AppStateHelp"
+n = "AppStateNode"
+s = "AppStateScheduler"
+e = "AppStateEvent"
+w = "RecordTrace"
+f = "ToggleCpuFreq"
+Enter = "Enter"
+"Page Up" = "PageUp"
+x = "ClearEvent"
+```
 
 ### Generating Traces
 `scxtop` is able to generate [Perfetto](https://perfetto.dev/) compatible traces.
@@ -33,7 +77,7 @@ level:
 <img width="1919" alt="image" src="https://github.com/user-attachments/assets/32b6b27d-d7fa-4893-890d-84070caf3497" />
 
 ### Scheduler Stats
-The scheduler view displays scheduler related stats. For schedulers that use 
+The scheduler view displays scheduler related stats. For schedulers that use
 [`scx_stats`](https://github.com/sched-ext/scx/tree/main/rust/scx_stats) the stats
 will be collected and aggregated. The scheduler view displays stats such as DSQ latency,
 DSQ slice consumed (how much of the given timeslice was used), and vtime delta. Vtime
