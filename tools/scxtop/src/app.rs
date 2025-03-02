@@ -130,11 +130,19 @@ impl<'a> App<'a> {
         let mut node_data = BTreeMap::new();
         let active_event = PerfEvent::new("hw".to_string(), "cycles".to_string(), 0);
         let mut active_perf_events = BTreeMap::new();
-        let default_events = PerfEvent::default_events();
-        let default_events_str = default_events
+        let mut default_events = PerfEvent::default_events();
+        let config_events = PerfEvent::from_config(&config)?;
+        default_events.extend(config_events);
+        let default_events_str: Vec<&str> = default_events
             .iter()
-            .map(|event| event.event.as_str())
-            .collect::<Vec<&str>>();
+            .map(|event| {
+                if !event.alias.is_empty() {
+                    event.alias.as_str()
+                } else {
+                    event.event.as_str()
+                }
+            })
+            .collect();
         for cpu in topo.all_cpus.values() {
             let mut event = PerfEvent::new("hw".to_string(), "cycles".to_string(), cpu.id);
             event.attach(process_id)?;
@@ -295,11 +303,8 @@ impl<'a> App<'a> {
             self.stop_perf_events();
         }
         for cpu_id in self.topo.all_cpus.keys() {
-            let mut event = PerfEvent::new(
-                perf_event.subsystem.clone(),
-                perf_event.event.clone(),
-                *cpu_id,
-            );
+            let mut event = perf_event.clone();
+            event.cpu = *cpu_id;
             event.attach(self.process_id)?;
             self.active_perf_events.insert(*cpu_id, event);
         }
@@ -463,7 +468,7 @@ impl<'a> App<'a> {
                 .node_data
                 .entry(*node)
                 .or_insert(NodeData::new(*node, self.max_cpu_events));
-            node_data.add_event_data(&self.active_event.event, 0);
+            node_data.add_event_data(self.active_event.event_name(), 0);
         }
         // Add entry for llcs
         for llc in self.topo.all_llcs.keys() {
@@ -471,7 +476,7 @@ impl<'a> App<'a> {
                 self.llc_data
                     .entry(*llc)
                     .or_insert(LlcData::new(*llc, 0, self.max_cpu_events));
-            llc_data.add_event_data(&self.active_event.event, 0);
+            llc_data.add_event_data(self.active_event.event_name(), 0);
         }
 
         for (cpu, event) in &mut self.active_perf_events {
@@ -481,18 +486,18 @@ impl<'a> App<'a> {
                 .entry(*cpu)
                 // XXX: fixme
                 .or_insert(CpuData::new(*cpu, 0, 0, 0, self.max_cpu_events));
-            cpu_data.add_event_data(&event.event, val);
+            cpu_data.add_event_data(event.event_name(), val);
             let llc_data = self.llc_data.entry(cpu_data.llc).or_insert(LlcData::new(
                 cpu_data.llc,
                 0,
                 self.max_cpu_events,
             ));
-            llc_data.add_cpu_event_data(&event.event, val);
+            llc_data.add_cpu_event_data(event.event_name(), val);
             let node_data = self
                 .node_data
                 .entry(cpu_data.node)
                 .or_insert(NodeData::new(cpu_data.node, self.max_cpu_events));
-            node_data.add_cpu_event_data(&event.event, val);
+            node_data.add_cpu_event_data(event.event_name(), val);
         }
         if self.collect_cpu_freq {
             self.record_cpu_freq()?;
@@ -559,7 +564,7 @@ impl<'a> App<'a> {
                     .copied()
                     .unwrap_or(0);
             }
-            cpu_data.event_data_immut(&self.active_event.event)
+            cpu_data.event_data_immut(self.active_event.event_name())
         } else {
             Vec::new()
         };
@@ -595,7 +600,7 @@ impl<'a> App<'a> {
     fn llc_sparkline(&self, llc: usize, max: u64, bottom_border: bool) -> Sparkline {
         let data = if self.llc_data.contains_key(&llc) {
             let llc_data = self.llc_data.get(&llc).unwrap();
-            llc_data.event_data_immut(&self.active_event.event)
+            llc_data.event_data_immut(self.active_event.event_name())
         } else {
             Vec::new()
         };
@@ -640,7 +645,7 @@ impl<'a> App<'a> {
     fn node_sparkline(&self, node: usize, max: u64, bottom_border: bool) -> Sparkline {
         let data = if self.llc_data.contains_key(&node) {
             let node_data = self.node_data.get(&node).unwrap();
-            node_data.event_data_immut(&self.active_event.event)
+            node_data.event_data_immut(self.active_event.event_name())
         } else {
             Vec::new()
         };
@@ -714,7 +719,7 @@ impl<'a> App<'a> {
         let llc_iter = self
             .llc_data
             .values()
-            .flat_map(|llc_data| llc_data.event_data_immut(&self.active_event.event))
+            .flat_map(|llc_data| llc_data.event_data_immut(self.active_event.event_name()))
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&llc_iter, true, true, true, None);
 
@@ -731,7 +736,7 @@ impl<'a> App<'a> {
                         Line::from(if self.localize {
                             format!(
                                 "LLCs ({}) avg {} max {} min {}",
-                                self.active_event.event,
+                                self.active_event.event_name(),
                                 stats.avg.to_formatted_string(&self.locale),
                                 stats.max.to_formatted_string(&self.locale),
                                 stats.min.to_formatted_string(&self.locale)
@@ -739,7 +744,10 @@ impl<'a> App<'a> {
                         } else {
                             format!(
                                 "LLCs ({}) avg {} max {} min {}",
-                                self.active_event.event, stats.avg, stats.max, stats.min,
+                                self.active_event.event_name(),
+                                stats.avg,
+                                stats.max,
+                                stats.min,
                             )
                         })
                         .style(self.theme().title_style())
@@ -770,7 +778,7 @@ impl<'a> App<'a> {
                         Line::from(if self.localize {
                             format!(
                                 "LLCs ({}) avg {} max {} min {}",
-                                self.active_event.event,
+                                self.active_event.event_name(),
                                 stats.avg.to_formatted_string(&self.locale),
                                 stats.max.to_formatted_string(&self.locale),
                                 stats.min.to_formatted_string(&self.locale),
@@ -778,7 +786,10 @@ impl<'a> App<'a> {
                         } else {
                             format!(
                                 "LLCs ({}) avg {} max {} min {}",
-                                self.active_event.event, stats.avg, stats.max, stats.min,
+                                self.active_event.event_name(),
+                                stats.avg,
+                                stats.max,
+                                stats.min,
                             )
                         })
                         .style(self.theme().title_style())
@@ -793,7 +804,7 @@ impl<'a> App<'a> {
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded);
 
-                let llc_bars: Vec<Bar> = self.llc_bars(&self.active_event.event);
+                let llc_bars: Vec<Bar> = self.llc_bars(self.active_event.event_name());
 
                 let barchart = BarChart::default()
                     .data(BarGroup::default().bars(&llc_bars))
@@ -828,7 +839,7 @@ impl<'a> App<'a> {
         let node_iter = self
             .node_data
             .values()
-            .flat_map(|node_data| node_data.event_data_immut(&self.active_event.event))
+            .flat_map(|node_data| node_data.event_data_immut(self.active_event.event_name()))
             .collect::<Vec<u64>>();
         let stats = VecStats::new(&node_iter, true, true, true, None);
 
@@ -854,7 +865,7 @@ impl<'a> App<'a> {
                         Line::from(if self.localize {
                             format!(
                                 "Node ({}) avg {} max {} min {}",
-                                self.active_event.event,
+                                self.active_event.event_name(),
                                 stats.avg.to_formatted_string(&self.locale),
                                 stats.max.to_formatted_string(&self.locale),
                                 stats.min.to_formatted_string(&self.locale)
@@ -862,7 +873,10 @@ impl<'a> App<'a> {
                         } else {
                             format!(
                                 "Node ({}) avg {} max {} min {}",
-                                self.active_event.event, stats.avg, stats.max, stats.min,
+                                self.active_event.event_name(),
+                                stats.avg,
+                                stats.max,
+                                stats.min,
                             )
                         })
                         .style(self.theme().title_style())
@@ -890,7 +904,7 @@ impl<'a> App<'a> {
                         Line::from(if self.localize {
                             format!(
                                 "NUMA Nodes ({}) avg {} max {} min {}",
-                                self.active_event.event,
+                                self.active_event.event_name(),
                                 stats.avg.to_formatted_string(&self.locale),
                                 stats.max.to_formatted_string(&self.locale),
                                 stats.min.to_formatted_string(&self.locale),
@@ -898,7 +912,10 @@ impl<'a> App<'a> {
                         } else {
                             format!(
                                 "NUMA Nodes ({}) avg {} max {} min {}",
-                                self.active_event.event, stats.avg, stats.max, stats.min,
+                                self.active_event.event_name(),
+                                stats.avg,
+                                stats.max,
+                                stats.min,
                             )
                         })
                         .style(self.theme().title_style())
@@ -913,7 +930,7 @@ impl<'a> App<'a> {
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded);
 
-                let node_bars: Vec<Bar> = self.node_bars(&self.active_event.event);
+                let node_bars: Vec<Bar> = self.node_bars(self.active_event.event_name());
 
                 let barchart = BarChart::default()
                     .data(BarGroup::default().bars(&node_bars))
@@ -1476,7 +1493,9 @@ impl<'a> App<'a> {
                         .cpu_data
                         .values()
                         .filter(|cpu_data| cpu_data.node == node.id)
-                        .flat_map(|cpu_data| cpu_data.event_data_immut(&self.active_event.event))
+                        .flat_map(|cpu_data| {
+                            cpu_data.event_data_immut(self.active_event.event_name())
+                        })
                         .collect::<Vec<u64>>();
                     let stats = VecStats::new(&node_iter, true, true, true, None);
 
@@ -1486,7 +1505,7 @@ impl<'a> App<'a> {
                                 format!(
                                     "Node{} ({}) avg {} max {} min {}",
                                     node.id,
-                                    self.active_event.event,
+                                    self.active_event.event_name(),
                                     stats.avg.to_formatted_string(&self.locale),
                                     stats.max.to_formatted_string(&self.locale),
                                     stats.min.to_formatted_string(&self.locale)
@@ -1495,7 +1514,7 @@ impl<'a> App<'a> {
                                 format!(
                                     "Node{} ({}) avg {} max {} min {}",
                                     node.id,
-                                    self.active_event.event,
+                                    self.active_event.event_name(),
                                     stats.avg,
                                     stats.max,
                                     stats.min,
@@ -1595,7 +1614,9 @@ impl<'a> App<'a> {
                         .cpu_data
                         .values()
                         .filter(|cpu_data| cpu_data.node == node.id)
-                        .flat_map(|cpu_data| cpu_data.event_data_immut(&self.active_event.event))
+                        .flat_map(|cpu_data| {
+                            cpu_data.event_data_immut(self.active_event.event_name())
+                        })
                         .collect::<Vec<u64>>();
                     let stats = VecStats::new(&node_iter, true, true, true, None);
 
@@ -1605,7 +1626,7 @@ impl<'a> App<'a> {
                                 format!(
                                     "Node{} ({}) avg {} max {} min {}",
                                     node.id,
-                                    self.active_event.event,
+                                    self.active_event.event_name(),
                                     stats.avg.to_formatted_string(&self.locale),
                                     stats.max.to_formatted_string(&self.locale),
                                     stats.min.to_formatted_string(&self.locale)
@@ -1614,7 +1635,7 @@ impl<'a> App<'a> {
                                 format!(
                                     "Node{} ({}) avg {} max {} min {}",
                                     node.id,
-                                    self.active_event.event,
+                                    self.active_event.event_name(),
                                     stats.avg,
                                     stats.max,
                                     stats.min,
@@ -1658,7 +1679,7 @@ impl<'a> App<'a> {
                         .keys()
                         .enumerate()
                         .map(|(j, cpu)| {
-                            let cpu_bar = self.cpu_bar(*cpu, &self.active_event.event);
+                            let cpu_bar = self.cpu_bar(*cpu, self.active_event.event_name());
                             bar_col_data[j % col_scale as usize].push(cpu_bar);
                         })
                         .collect();
@@ -1823,7 +1844,7 @@ impl<'a> App<'a> {
                     self.config
                         .active_keymap
                         .action_keys_string(Action::SetState(AppState::Event)),
-                    self.active_event.event
+                    self.active_event.event_name()
                 ),
                 Style::default(),
             )),
