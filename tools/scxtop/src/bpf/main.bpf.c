@@ -242,7 +242,7 @@ int BPF_KPROBE(on_sched_cpu_perf, s32 cpu, u32 perf)
 	return 0;
 }
 
-SEC("kprobe/scx_bpf_dsq_insert_vtime")
+SEC("?kprobe/scx_bpf_dsq_insert_vtime")
 int BPF_KPROBE(scx_insert_vtime, struct task_struct *p, u64 dsq, u64 slice_ns, u64 vtime)
 {
 	return update_task_ctx(p, dsq, vtime, slice_ns);
@@ -272,7 +272,7 @@ static int on_insert(struct task_struct *p, u64 dsq)
 }
 
 
-SEC("kprobe/scx_bpf_dsq_insert")
+SEC("?kprobe/scx_bpf_dsq_insert")
 int BPF_KPROBE(scx_insert, struct task_struct *p, u64 dsq)
 {
 	return on_insert(p, dsq);
@@ -300,7 +300,7 @@ static int on_dsq_move(struct task_struct *p, u64 dsq)
 	return 0;
 }
 
-SEC("kprobe/scx_bpf_dsq_move")
+SEC("?kprobe/scx_bpf_dsq_move")
 int BPF_KPROBE(scx_dsq_move, struct bpf_iter_scx_dsq *it__iter,
 	       struct task_struct *p, u64 dsq_id, u64 enq_flags)
 {
@@ -359,7 +359,7 @@ static int on_move_set_slice(struct task_struct *p, u64 slice)
 	return 0;
 }
 
-SEC("kprobe/scx_bpf_dsq_move_set_slice")
+SEC("?kprobe/scx_bpf_dsq_move_set_slice")
 int BPF_KPROBE(scx_dsq_move_set_slice, struct bpf_iter_scx_dsq *it__iter, u64 slice)
 {
 	// TODO: figure out how to return task from iterator without consuming.
@@ -389,7 +389,7 @@ static int on_move_set_vtime(struct task_struct *p, u64 vtime)
 	return 0;
 }
 
-SEC("kprobe/scx_bpf_dsq_move_set_vtime")
+SEC("?kprobe/scx_bpf_dsq_move_set_vtime")
 int BPF_KPROBE(scx_dsq_move_set_vtime, struct bpf_iter_scx_dsq *it__iter, u64 vtime)
 {
 	// TODO: figure out how to return task from iterator without consuming.
