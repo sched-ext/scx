@@ -482,7 +482,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
             nodes: SortedVec::new(),
 
-            lb_apply_weight: lb_apply_weight.clone(),
+            lb_apply_weight,
             balance_load,
 
             dom_group,
@@ -517,7 +517,6 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             (
                 ledger
                     .dom_dcycle_sums()
-                    .to_vec()
                     .into_iter()
                     .map(|d| DEFAULT_WEIGHT * d)
                     .collect(),
@@ -837,16 +836,16 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     break;
                 }
             }
-            while !pullers.is_empty() {
-                pull_node.domains.insert(pullers.pop().unwrap());
+            while let Some(puller) = pullers.pop() {
+                pull_node.domains.insert(puller);
             }
             pushers.push_back(push_dom);
             if pushed > 0.0f64 {
                 break;
             }
         }
-        while !pushers.is_empty() {
-            push_node.domains.insert(pushers.pop_front().unwrap());
+        while let Some(pusher) = pushers.pop_front() {
+            push_node.domains.insert(pusher);
         }
 
         Ok(pushed)
@@ -935,8 +934,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                     );
                 }
             }
-            while !pullers.is_empty() {
-                self.nodes.insert(pullers.pop().unwrap());
+            while let Some(puller) = pullers.pop() {
+                self.nodes.insert(puller);
             }
 
             if pushed > 0.0f64 {
@@ -1035,8 +1034,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 // Couldn't push any load to this domain, try the next one.
                 pullers.push(pull_dom);
             }
-            while pullers.len() > 0 {
-                node.domains.insert(pullers.pop().unwrap());
+            while let Some(puller) = pullers.pop() {
+                node.domains.insert(puller);
             }
 
             if pushed > 0.0f64 {
@@ -1044,8 +1043,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             }
             pushers.push_back(push_dom);
         }
-        while pushers.len() > 0 {
-            node.domains.insert(pushers.pop_front().unwrap());
+        while let Some(pusher) = pushers.pop_front() {
+            node.domains.insert(pusher);
         }
 
         Ok(())
