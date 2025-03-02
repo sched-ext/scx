@@ -480,14 +480,14 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 		return 0;
 
 	next_tctx = try_lookup_task_ctx(next);
-	if (!next_tctx || next_tctx->dsq_id == SCX_DSQ_INVALID || next_tctx->dsq_insert_time == 0) {
+	if (!next_tctx || next_tctx->dsq_insert_time == 0) {
 		if (sample_rate == 1)
 			return on_sched_switch_non_scx(preempt, prev, next, prev_state);
 		return -ENOENT;
 	}
 
 	prev_tctx = try_lookup_task_ctx(prev);
-	if (!prev_tctx || prev_tctx->dsq_id == SCX_DSQ_INVALID) {
+	if (!prev_tctx) {
 		if (sample_rate == 1)
 			return on_sched_switch_non_scx(preempt, prev, next, prev_state);
 		return -ENOENT;
