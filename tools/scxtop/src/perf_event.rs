@@ -3,11 +3,14 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use crate::config::Config;
+
 use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
 use libc::{close, read};
 use perf_event_open_sys as perf;
+
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::fs::File;
@@ -81,6 +84,10 @@ pub struct PerfEvent {
     pub subsystem: String,
     pub event: String,
     pub cpu: usize,
+    pub alias: String,
+    pub use_config: bool,
+    pub event_type: u32,
+    config: u64,
     fd: usize,
     freq: usize,
 }
@@ -103,9 +110,40 @@ impl PerfEvent {
             subsystem,
             event,
             cpu,
+            alias: "".to_string(),
+            config: 0,
+            event_type: 0,
+            use_config: false,
             fd: 0,
             freq: 0,
         }
+    }
+
+    /// Returns a set of PerfEvents from a Config.
+    pub fn from_config(config: &Config) -> Result<Vec<PerfEvent>> {
+        let mut events = vec![];
+        for event_config in &config.perf_events {
+            let split: Vec<&str> = event_config.split(":").collect();
+            if split.len() != 3 {
+                return Err(anyhow!("Invalid event config: {}", event_config));
+            }
+            let alias = split.first().expect("can't happen").to_string();
+            let config = u64::from_str_radix(split[1].to_string().trim_start_matches("0x"), 16)?;
+            let event_type = u32::from_str(split[2])?;
+            events.push(PerfEvent {
+                subsystem: "".to_string(),
+                event: "".to_string(),
+                cpu: 0,
+                alias,
+                config,
+                use_config: true,
+                event_type,
+                fd: 0,
+                freq: 0,
+            });
+        }
+
+        Ok(events)
     }
 
     /// Returns the set of default hardware events.
@@ -142,6 +180,15 @@ impl PerfEvent {
         avail_events.append(&mut PerfEvent::default_sw_events());
 
         avail_events
+    }
+
+    /// Returns the event name.
+    pub fn event_name(&self) -> &str {
+        if self.use_config {
+            &self.alias
+        } else {
+            &self.event
+        }
     }
 
     /// Attaches a PerfEvent struct.
@@ -216,11 +263,16 @@ impl PerfEvent {
                     }
                 }
             }
-            // Not a hardware or software event so get the event type.
             _ => {
-                let config = perf_event_config(&self.subsystem, &self.event)?;
-                attrs.type_ = perf::bindings::PERF_TYPE_TRACEPOINT;
-                attrs.config = config as u64;
+                if self.use_config {
+                    attrs.type_ = self.event_type;
+                    attrs.config = self.config
+                } else {
+                    // Not a hardware or software event so get the event type.
+                    let config = perf_event_config(&self.subsystem, &self.event)?;
+                    attrs.type_ = perf::bindings::PERF_TYPE_TRACEPOINT;
+                    attrs.config = config as u64;
+                }
             }
         }
 

@@ -24,6 +24,8 @@ pub struct Config {
     /// Parsed keymap.
     #[serde(skip)]
     pub active_keymap: KeyMap,
+    /// Configured perf events. Must be in format <alias>:<event_config>
+    pub perf_events: Vec<String>,
     /// TUI theme.
     theme: Option<AppTheme>,
     /// App tick rate in milliseconds.
@@ -47,16 +49,17 @@ pub struct Config {
 impl From<TuiArgs> for Config {
     fn from(args: TuiArgs) -> Config {
         Config {
-            keymap: None,
             active_keymap: KeyMap::empty(),
             debug: args.debug,
             exclude_bpf: args.exclude_bpf,
+            keymap: None,
+            perf_events: args.perf_events,
             stats_socket_path: args.stats_socket_path,
             theme: None,
             tick_rate_ms: args.tick_rate_ms,
             trace_file_prefix: args.trace_file_prefix,
-            trace_tick_warmup: args.trace_tick_warmup,
             trace_ticks: args.trace_ticks,
+            trace_tick_warmup: args.trace_tick_warmup,
             worker_threads: args.worker_threads,
         }
     }
@@ -87,6 +90,11 @@ impl Config {
             tick_rate_ms: self.tick_rate_ms.or(rhs.tick_rate_ms),
             debug: self.debug.or(rhs.debug),
             exclude_bpf: self.exclude_bpf.or(rhs.exclude_bpf),
+            perf_events: if !self.perf_events.is_empty() {
+                self.perf_events
+            } else {
+                rhs.perf_events
+            },
             stats_socket_path: self.stats_socket_path.or(rhs.stats_socket_path),
             trace_file_prefix: self.trace_file_prefix.or(rhs.trace_file_prefix),
             trace_ticks: self.trace_ticks.or(rhs.trace_ticks),
@@ -167,6 +175,7 @@ impl Config {
             theme: None,
             tick_rate_ms: None,
             debug: None,
+            perf_events: vec![],
             exclude_bpf: None,
             stats_socket_path: None,
             trace_file_prefix: None,
@@ -185,6 +194,7 @@ impl Config {
             tick_rate_ms: None,
             debug: None,
             exclude_bpf: None,
+            perf_events: vec![],
             stats_socket_path: None,
             trace_file_prefix: None,
             trace_ticks: None,
