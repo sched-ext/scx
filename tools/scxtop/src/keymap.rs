@@ -3,8 +3,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use crate::Action;
 use crate::AppState;
-use crate::{Action, RecordTraceAction};
 use anyhow::anyhow;
 use anyhow::Result;
 use crossterm::event::KeyCode;
@@ -48,14 +48,8 @@ impl Default for KeyMap {
         bindings.insert(Key::Char('n'), Action::SetState(AppState::Node));
         bindings.insert(Key::Char('s'), Action::SetState(AppState::Scheduler));
         bindings.insert(Key::Char('S'), Action::SaveConfig);
-        bindings.insert(
-            Key::Char('a'),
-            Action::RecordTrace(RecordTraceAction { immediate: false }),
-        );
-        bindings.insert(
-            Key::Char('P'),
-            Action::RecordTrace(RecordTraceAction { immediate: false }),
-        );
+        bindings.insert(Key::Char('a'), Action::RequestTrace);
+        bindings.insert(Key::Char('P'), Action::RequestTrace);
         bindings.insert(Key::Char('x'), Action::ClearEvent);
         bindings.insert(Key::Char('j'), Action::PrevEvent);
         bindings.insert(Key::Char('k'), Action::NextEvent);
@@ -354,8 +348,7 @@ pub fn parse_action(action_str: &str) -> Result<Action> {
         "AppStateNode" => Ok(Action::SetState(AppState::Node)),
         "AppStateScheduler" => Ok(Action::SetState(AppState::Scheduler)),
         "SaveConfig" => Ok(Action::SaveConfig),
-        "RecordTrace" => Ok(Action::RecordTrace(RecordTraceAction { immediate: false })),
-        "RecordTraceNow" => Ok(Action::RecordTrace(RecordTraceAction { immediate: true })),
+        "RequestTrace" => Ok(Action::RequestTrace),
         "ClearEvent" => Ok(Action::ClearEvent),
         "PrevEvent" => Ok(Action::PrevEvent),
         "NextEvent" => Ok(Action::NextEvent),

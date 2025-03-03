@@ -19,17 +19,42 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
+#define CLOCK_BOOTTIME 7
+
 char _license[] SEC("license") = "GPL";
 
 const volatile u64 long_tail_tracing_min_latency_ns = 0;
+
+u64 trace_duration_ns = 1000000000;
+u64 trace_warmup_ns = 500000000;
 
 // dummy for generating types
 struct bpf_event _event = {0};
 
 bool enable_bpf_events = true;
+
+enum mode mode = MODE_NORMAL;
 u32 sample_rate = 128;
+u32 last_sample_rate;
 
 const int zero_int = 0;
+
+struct timer_wrapper{
+	struct bpf_timer	timer;
+	int			key;
+};
+
+enum scxtop_timer_callbacks {
+	TIMER_STOP_TRACE,
+	MAX_TIMERS,
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, MAX_TIMERS);
+	__type(key, int);
+	__type(value, struct timer_wrapper);
+} timers SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -604,6 +629,86 @@ int BPF_PROG(on_softirq_exit, unsigned int nr)
 	return 0;
 }
 
+static int stop_trace_timer_callback(void *map, int key, struct timer_wrapper *timerw)
+{
+	struct bpf_event *event;
+
+	sample_rate = last_sample_rate;
+	mode = MODE_NORMAL;
+
+	if (!(event = try_reserve_event()))
+		return 0;
+
+	event->ts = bpf_ktime_get_ns();
+	event->type = TRACE_STOPPED;
+
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+}
+
+static __always_inline int start_trace_real(bool schedule_stop, bool start_immediately)
+{
+	static const enum scxtop_timer_callbacks stop_trace_key = TIMER_STOP_TRACE;
+	u64 duration_ns = trace_duration_ns;
+	if (!start_immediately)
+		duration_ns += trace_warmup_ns;
+
+	enum mode last_mode = __sync_lock_test_and_set(&mode, MODE_TRACING);
+	// do not restart a started trace. this may be relaxed in future.
+	if (last_mode == MODE_TRACING)
+		return 0;
+
+	struct timer_wrapper *timerw;
+	struct bpf_event *event;
+
+	// replicate the actions of userspace starting a trace so it starts
+	// immediately, but such that events will come after our ringbuffer
+	// entry informing userspace we've started a trace.
+	// we don't enable softirqs from the bpf side and I don't think it's
+	// possible with the current setup. we'd likely have to attach the uprobes
+	// always and activate them with a global, which could be expensive. for
+	// now let them start late.
+	last_sample_rate = sample_rate;
+	sample_rate = 1;
+
+	// inform userspace that following events are in trace mode
+	if (!(event = try_reserve_event()))
+		goto error_no_event;
+
+	if (schedule_stop) {
+		timerw = bpf_map_lookup_elem(&timers, &stop_trace_key);
+		if (!timerw)
+			goto error_no_timer;
+		if (bpf_timer_start(&timerw->timer, duration_ns, 0) < 0)
+			goto error_no_timer;
+	}
+
+	event->ts = bpf_ktime_get_ns();
+	event->type = TRACE_STARTED;
+	event->event.trace.start_immediately = start_immediately;
+	event->event.trace.stop_scheduled = schedule_stop;
+
+	bpf_ringbuf_submit(event, 0);
+	return 0;
+
+error_no_timer:
+	bpf_ringbuf_discard(event, 0);
+error_no_event:
+	__sync_val_compare_and_swap(&sample_rate, 1, last_sample_rate);
+	__sync_val_compare_and_swap(&mode, MODE_TRACING, MODE_NORMAL);
+	return -1;
+}
+
+/*
+ * Begin a trace and schedule stopping it. This is called via BPF_PROG_RUN from userspace.
+ */
+SEC("syscall")
+int BPF_PROG(start_trace)
+{
+	start_trace_real(true /* schedule_stop */, false /* start_immediately */);
+	return 0;
+}
+
 SEC("uprobe")
 int BPF_UPROBE(long_tail_tracker_entry)
 {
@@ -616,7 +721,6 @@ int BPF_UPROBE(long_tail_tracker_entry)
 SEC("uretprobe")
 int BPF_URETPROBE(long_tail_tracker_exit)
 {
-	struct bpf_event *event;
 	u64 *entry_time;
 	u64 now = bpf_ktime_get_ns();
 
@@ -627,24 +731,26 @@ int BPF_URETPROBE(long_tail_tracker_exit)
 	if (now - *entry_time < long_tail_tracing_min_latency_ns)
 		return 0;
 
-	// grab an event first. if this fails we can't set the other parameters
-	// as they won't be cleaned up.
-	if (!(event = try_reserve_event()))
-		return -ENOMEM;
+	// we can't start the trace fully from the bpf side directly here because
+	// we need to schedule the timer that terminates the trace, and:
+	//     tracing progs cannot use bpf_timer yet
+	// instead start the trace but include in the message to userspace the
+	// fact we haven't scheduled the stop, and have userspace call back into
+	// a "syscall" type program which can schedule the stop. userspace can
+	// compute the absolute stop time to make this less racy.
+	return start_trace_real(false /* schedule_stop */, true /* start_immediately */);
+}
 
-	// replicate the actions of userspace starting a trace so it starts
-	// immediately, but such that events will come after our ringbuffer
-	// entry informing userspace we've started a trace.
-	// we don't enable softirqs from the bpf side and I don't think it's
-	// possible with the current setup. we'd likely have to attach the uprobes
-	// always and activate them with a global, which could be expensive. for
-	// now let them start late.
-	sample_rate = 1;
+SEC("syscall")
+int schedule_stop_trace(struct schedule_stop_trace_args *args)
+{
+	static const enum scxtop_timer_callbacks stop_trace_key = TIMER_STOP_TRACE;
 
-	// tell userspace to handle the trace and eventually reset. this is pretty racy and might break things.
-	event->type = START_TRACE;
-
-	bpf_ringbuf_submit(event, 0);
+	struct timer_wrapper *timerw = bpf_map_lookup_elem(&timers, &stop_trace_key);
+	if (!timerw)
+		return -ENOENT;
+	if (bpf_timer_start(&timerw->timer, args->stop_timestamp, BPF_F_TIMER_ABS) < 0)
+		return -ENOENT;
 
 	return 0;
 }
@@ -725,6 +831,31 @@ int BPF_PROG(on_cpuhp_enter, u32 cpu, int target, int state)
 		event->event.chp.pid = 0;
 
 	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
+SEC("syscall")
+int BPF_PROG(scxtop_init)
+{
+	struct timer_wrapper *timerw;
+	int timer_id, err;
+
+	bpf_for(timer_id, 0, MAX_TIMERS) {
+		timerw = bpf_map_lookup_elem(&timers, &timer_id);
+		if (!timerw)
+			return 0;
+
+		timerw->key = timer_id;
+
+		err = bpf_timer_init(&timerw->timer, &timers, CLOCK_BOOTTIME);
+		if (err)
+			return 0;
+
+		err = bpf_timer_set_callback(&timerw->timer, &stop_trace_timer_callback);
+		if (err)
+			return 0;
+	}
 
 	return 0;
 }

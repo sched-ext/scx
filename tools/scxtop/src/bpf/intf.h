@@ -23,6 +23,11 @@ enum stat_id {
 	NR_SCXTOP_STATS,
 };
 
+enum mode {
+	MODE_NORMAL,
+	MODE_TRACING,
+};
+
 enum event_type {
 	CPU_HP,
 	CPU_PERF_SET,
@@ -34,7 +39,8 @@ enum event_type {
 	SCHED_WAKEUP,
 	SCHED_WAKING,
 	SOFTIRQ,
-	START_TRACE,
+	TRACE_STARTED,
+	TRACE_STOPPED,
 	EVENT_MAX,
 };
 
@@ -95,6 +101,11 @@ struct cpuhp_event {
 	int             state;
 };
 
+struct trace_started_event {
+	bool		start_immediately;
+	bool		stop_scheduled;
+};
+
 struct bpf_event {
 	int		type;
 	u64		ts;
@@ -108,6 +119,7 @@ struct bpf_event {
 		struct	softirq_event softirq;
 		struct	wakeup_event wakeup;
 		struct	wakeup_event waking;
+		struct  trace_started_event trace;
 	} event;
 };
 
@@ -118,6 +130,10 @@ struct task_ctx {
 	u64		dsq_vtime;
 	u64		slice_ns;
 	u64		last_run_ns;
+};
+
+struct schedule_stop_trace_args {
+	u64		stop_timestamp;
 };
 
 #endif /* __INTF_H */

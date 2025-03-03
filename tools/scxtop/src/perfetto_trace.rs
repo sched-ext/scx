@@ -81,6 +81,7 @@ impl PerfettoTraceManager {
 
     /// Starts a new perfetto trace.
     pub fn start(&mut self) -> Result<()> {
+        self.clear();
         self.trace = Trace::new();
         Ok(())
     }
