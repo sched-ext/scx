@@ -28,11 +28,9 @@ pub use bpf_skel::*;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use lazy_static::lazy_static;
-use libbpf_rs::libbpf_sys::bpf_program__set_autoload;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
-use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
@@ -64,8 +62,6 @@ use stats::LayerStats;
 use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
-use std::collections::HashSet;
-use std::io::BufRead;
 
 const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
 const MAX_COMM: usize = bpf_intf::consts_MAX_COMM as usize;
@@ -597,20 +593,6 @@ fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
         .context("Failed to read procfs")?
         .total_cpu
         .ok_or_else(|| anyhow!("Could not read total cpu stat in proc"))
-}
-
-fn sym_exists(sym: &str) -> bool {
-    let file = std::fs::File::open("/proc/kallsyms").expect("kallsyms missing");
-    let reader = std::io::BufReader::new(file);
-    let mut syms_present: HashSet<String> = HashSet::new();
-
-    for line in reader.lines() {
-        for sym in line.unwrap().split_whitespace() {
-            syms_present.insert(sym.into());
-        }
-    }
-
-    syms_present.contains(sym)
 }
 
 fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
@@ -1722,16 +1704,7 @@ impl<'a> Scheduler<'a> {
         // enable autoloads for conditionally loaded things
         // immediately after creating skel (because this is always before loading)
         if opts.enable_gpu_support {
-            if sym_exists("nvidia_open") {
-                unsafe {
-                    bpf_program__set_autoload(
-                        skel.progs.save_gpu_tgid_pid.as_libbpf_object().as_ptr(),
-                        true,
-                    );
-                }
-            } else {
-                warn!("--enable-gpu-support was set but nvidia_open symbol is missing.")
-            }
+            compat::cond_kprobe_enable("nvidia_open", &skel.progs.save_gpu_tgid_pid)?;
         }
 
         skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;
