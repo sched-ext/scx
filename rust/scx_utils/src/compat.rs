@@ -5,10 +5,13 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use libbpf_rs::libbpf_sys::*;
+use libbpf_rs::{AsRawLibbpf, OpenProgramImpl};
+use log::warn;
 use std::ffi::c_void;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::io;
+use std::io::BufRead;
 use std::mem::size_of;
 use std::slice::from_raw_parts;
 
@@ -150,6 +153,32 @@ pub fn ksym_exists(ksym: &str) -> Result<bool> {
     let ksym_name = CString::new(ksym).unwrap();
     let tid = unsafe { btf__find_by_name(btf, ksym_name.as_ptr()) };
     Ok(tid >= 0)
+}
+
+pub fn in_kallsyms(ksym: &str) -> Result<bool> {
+    let file = std::fs::File::open("/proc/kallsyms")?;
+    let reader = std::io::BufReader::new(file);
+
+    for line in reader.lines() {
+        for sym in line.unwrap().split_whitespace() {
+            if ksym == sym {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+pub fn cond_kprobe_enable<T>(sym: &str, prog_ptr: &OpenProgramImpl<T>) -> Result<()> {
+    if in_kallsyms(sym)? {
+        unsafe {
+            bpf_program__set_autoload(prog_ptr.as_libbpf_object().as_ptr(), true);
+        }
+    } else {
+        warn!("symbol {} is missing, kprobe not loaded", sym);
+    }
+    Ok(())
 }
 
 pub fn is_sched_ext_enabled() -> io::Result<bool> {
