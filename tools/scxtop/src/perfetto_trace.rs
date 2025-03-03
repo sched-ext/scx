@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 use protobuf::Message;
 use rand::rngs::StdRng;
 use rand::RngCore;
@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::bpf_skel::types::bpf_event;
+use crate::edm::{ActionHandler, BpfEventHandler};
 use crate::{
     Action, CpuhpAction, GpuMemAction, IPIAction, SchedSwitchAction, SchedWakeupAction,
     SchedWakingAction, SoftIRQAction,
@@ -139,7 +141,11 @@ impl PerfettoTraceManager {
     }
 
     /// Stops the trace and writes to configured output file.
-    pub fn stop(&mut self, last_relevent_timestamp_ns: Option<u64>) -> Result<()> {
+    pub fn stop(
+        &mut self,
+        output_file: Option<String>,
+        last_relevent_timestamp_ns: Option<u64>,
+    ) -> Result<()> {
         // TracePacket is the root object of a Perfetto trace. A Perfetto trace is a linear
         // sequence of TracePacket(s). The tracing service guarantees that all TracePacket(s)
         // written by a given TraceWriter are seen in-order, without gaps or duplicates.
@@ -216,7 +222,14 @@ impl PerfettoTraceManager {
         }
 
         let out_bytes: Vec<u8> = self.trace.write_to_bytes()?;
-        fs::write(self.trace_file(), out_bytes)?;
+        match output_file {
+            Some(trace_file) => {
+                fs::write(trace_file, out_bytes)?;
+            }
+            None => {
+                fs::write(self.trace_file(), out_bytes)?;
+            }
+        }
 
         self.clear();
         self.trace_id += 1;
@@ -399,13 +412,20 @@ impl PerfettoTraceManager {
             let prev_pid: i32 = *prev_pid as i32;
             let next_pid: i32 = *next_pid as i32;
 
-            switch_event.set_next_pid(next_pid);
-            switch_event.set_next_comm(next_comm.to_string());
-            switch_event.set_next_prio(*next_prio);
-            switch_event.set_prev_pid(prev_pid);
-            switch_event.set_prev_prio(*prev_prio);
-            switch_event.set_prev_comm(prev_comm.to_string());
-            switch_event.set_prev_state(*prev_state as i64);
+            // XXX: On the BPF side the prev/next pid gets set to an invalid pid (0) if the
+            // prev/next task is invalid.
+            if next_pid > 0 {
+                switch_event.set_next_pid(next_pid);
+                switch_event.set_next_comm(next_comm.to_string());
+                switch_event.set_next_prio(*next_prio);
+            }
+
+            if prev_pid > 0 {
+                switch_event.set_prev_pid(prev_pid);
+                switch_event.set_prev_prio(*prev_prio);
+                switch_event.set_prev_comm(prev_comm.to_string());
+                switch_event.set_prev_state(*prev_state as i64);
+            }
             ftrace_event.set_timestamp(*ts);
             ftrace_event.set_sched_switch(switch_event);
             ftrace_event.set_pid(prev_pid.try_into().unwrap());
@@ -448,5 +468,36 @@ impl PerfettoTraceManager {
 
                 event
             });
+    }
+}
+
+impl ActionHandler for PerfettoTraceManager {
+    fn on_action(&mut self, action: &Action) -> Result<()> {
+        match action {
+            Action::SchedSwitch(a) => {
+                self.on_sched_switch(a);
+            }
+            Action::SchedWakeup(a) => {
+                self.on_sched_wakeup(a);
+            }
+            Action::SchedWaking(a) => {
+                self.on_sched_waking(a);
+            }
+            Action::SoftIRQ(a) => {
+                self.on_softirq(a);
+            }
+            Action::IPI(a) => {
+                self.on_ipi(a);
+            }
+            Action::GpuMem(a) => {
+                self.on_gpu_mem(a);
+            }
+            Action::Cpuhp(a) => {
+                self.on_cpu_hp(a);
+            }
+            _ => {}
+        }
+
+        Ok(())
     }
 }
