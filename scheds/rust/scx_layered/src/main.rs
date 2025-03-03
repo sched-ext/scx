@@ -35,6 +35,7 @@ use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
+use libbpf_rs::OpenProgramImpl;
 use libbpf_rs::ProgramInput;
 use log::debug;
 use log::info;
@@ -597,6 +598,16 @@ fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
         .context("Failed to read procfs")?
         .total_cpu
         .ok_or_else(|| anyhow!("Could not read total cpu stat in proc"))
+}
+
+fn cond_kprobe_enable<T>(sym: &str, prog_ptr: &OpenProgramImpl<T>) {
+    if sym_exists(sym) {
+        unsafe {
+            bpf_program__set_autoload(prog_ptr.as_libbpf_object().as_ptr(), true);
+        }
+    } else {
+        warn!("symbol {} missing, kprobe not loaded", sym);
+    }
 }
 
 fn sym_exists(sym: &str) -> bool {
@@ -1722,16 +1733,9 @@ impl<'a> Scheduler<'a> {
         // enable autoloads for conditionally loaded things
         // immediately after creating skel (because this is always before loading)
         if opts.enable_gpu_support {
-            if sym_exists("nvidia_open") {
-                unsafe {
-                    bpf_program__set_autoload(
-                        skel.progs.save_gpu_tgid_pid.as_libbpf_object().as_ptr(),
-                        true,
-                    );
-                }
-            } else {
-                warn!("--enable-gpu-support was set but nvidia_open symbol is missing.")
-            }
+            cond_kprobe_enable("nvidia_open", &skel.progs.kprobe_nvidia_open);
+            cond_kprobe_enable("nvidia_poll", &skel.progs.kprobe_nvidia_poll);
+            cond_kprobe_enable("nvidia_mmap", &skel.progs.kprobe_nvidia_mmap);
         }
 
         skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;

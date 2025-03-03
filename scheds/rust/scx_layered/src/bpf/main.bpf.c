@@ -192,7 +192,6 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 } gpu_tid SEC(".maps");
 
-SEC("?kprobe/nvidia_open")
 int save_gpu_tgid_pid() {
 	if (!enable_gpu_support)
 		return 0;
@@ -206,6 +205,21 @@ int save_gpu_tgid_pid() {
 	bpf_map_update_elem(&gpu_tid, &tid, &zero, BPF_ANY);
 	bpf_map_update_elem(&gpu_tgid, &pid, &zero, BPF_ANY);
 	return 0;
+}
+
+SEC("?kprobe/nvidia_poll")
+int kprobe_nvidia_poll() {
+	return save_gpu_tgid_pid();
+}
+
+SEC("?kprobe/nvidia_open")
+int kprobe_nvidia_open() {
+	return save_gpu_tgid_pid();
+}
+
+SEC("?kprobe/nvidia_mmap")
+int kprobe_nvidia_mmap() {
+	return save_gpu_tgid_pid();
 }
 
 // XXX - Converting this to bss array triggers verifier bugs. See
