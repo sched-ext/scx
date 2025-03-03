@@ -5,10 +5,14 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use libbpf_rs::libbpf_sys::*;
+use libbpf_rs::{AsRawLibbpf, OpenProgramImpl};
+use log::warn;
+use std::collections::HashSet;
 use std::ffi::c_void;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::io;
+use std::io::BufRead;
 use std::mem::size_of;
 use std::slice::from_raw_parts;
 
@@ -145,11 +149,28 @@ pub fn struct_has_field(type_name: &str, field: &str) -> Result<bool> {
 }
 
 pub fn ksym_exists(ksym: &str) -> Result<bool> {
-    let btf: &btf = *VMLINUX_BTF;
+    let file = std::fs::File::open("/proc/kallsyms")?;
+    let reader = std::io::BufReader::new(file);
+    let mut syms_present: HashSet<String> = HashSet::new();
 
-    let ksym_name = CString::new(ksym).unwrap();
-    let tid = unsafe { btf__find_by_name(btf, ksym_name.as_ptr()) };
-    Ok(tid >= 0)
+    for line in reader.lines() {
+        for sym in line.unwrap().split_whitespace() {
+            syms_present.insert(sym.into());
+        }
+    }
+
+    Ok(syms_present.contains(ksym))
+}
+
+pub fn cond_kprobe_enable<T>(sym: &str, prog_ptr: &OpenProgramImpl<T>) -> Result<()> {
+    if ksym_exists(sym)? {
+        unsafe {
+            bpf_program__set_autoload(prog_ptr.as_libbpf_object().as_ptr(), true);
+        }
+    } else {
+        warn!("symbol {} is missing, kprobe not loaded", sym);
+    }
+    Ok(())
 }
 
 pub fn is_sched_ext_enabled() -> io::Result<bool> {
