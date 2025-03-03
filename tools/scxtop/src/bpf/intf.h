@@ -26,6 +26,7 @@ enum stat_id {
 enum mode {
 	MODE_NORMAL,
 	MODE_TRACING,
+	MODE_TRACE_STOPPING,
 };
 
 enum event_type {

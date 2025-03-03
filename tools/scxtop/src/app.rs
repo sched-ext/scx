@@ -26,7 +26,7 @@ use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
     Action, CpuhpAction, GpuMemAction, IPIAction, SchedCpuPerfSetAction, SchedSwitchAction,
-    SchedWakeupAction, SchedWakingAction, SoftIRQAction, TraceStartedAction,
+    SchedWakeupAction, SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
 };
 
 use anyhow::Result;
@@ -2134,10 +2134,10 @@ impl<'a> App<'a> {
     }
 
     /// Records the trace to perfetto output.
-    fn stop_recording_trace(&mut self) -> Result<()> {
+    fn stop_recording_trace(&mut self, ts: u64) -> Result<()> {
         self.skel.maps.data_data.sample_rate = self.prev_bpf_sample_rate;
         self.state = self.prev_state.clone();
-        self.trace_manager.stop()?;
+        self.trace_manager.stop(Some(ts))?;
         self.trace_links.clear();
 
         Ok(())
@@ -2408,8 +2408,8 @@ impl<'a> App<'a> {
             }) => {
                 self.start_recording_trace(*start_immediately, *ts, *stop_scheduled)?;
             }
-            Action::TraceStopped => {
-                self.stop_recording_trace()?;
+            Action::TraceStopped(TraceStoppedAction { ts }) => {
+                self.stop_recording_trace(*ts)?;
             }
             Action::ReloadStatsClient => {
                 self.reload_stats_client()?;
