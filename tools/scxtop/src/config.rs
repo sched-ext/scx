@@ -17,6 +17,50 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use xdg;
 
+/// `scxtop` can use a configuration file, which can be generated using the `S` key
+/// in the default keymap configuration. The config file (`scxtop.toml`) follows the
+/// [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/).
+///
+/// An example configuration shows customization of default tick rates, theme and keymaps:
+/// ```text
+/// theme = "IAmBlue"
+/// tick_rate_ms = 250
+/// debug = false
+/// exclude_bpf = false
+/// worker_threads = 4
+///
+/// [keymap]
+/// d = "AppStateDefault"
+/// "?" = "AppStateHelp"
+/// "[" = "DecBpfSampleRate"
+/// q = "Quit"
+/// "+" = "IncTickRate"
+/// u = "ToggleUncoreFreq"
+/// "Page Down" = "PageDown"
+/// S = "SaveConfig"
+/// Up = "Up"
+/// P = "RecordTrace"
+/// - = "DecTickRate"
+/// L = "ToggleLocalization"
+/// t = "ChangeTheme"
+/// "]" = "IncBpfSampleRate"
+/// Down = "Down"
+/// l = "AppStateLlc"
+/// k = "NextEvent"
+/// a = "RecordTrace"
+/// j = "PrevEvent"
+/// v = "NextViewState"
+/// h = "AppStateHelp"
+/// n = "AppStateNode"
+/// s = "AppStateScheduler"
+/// e = "AppStateEvent"
+/// w = "RecordTrace"
+/// f = "ToggleCpuFreq"
+/// Enter = "Enter"
+/// "Page Up" = "PageUp"
+/// x = "ClearEvent"
+/// ```
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
     /// Key mappings.
