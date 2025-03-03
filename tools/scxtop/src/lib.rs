@@ -155,8 +155,10 @@ pub struct SoftIRQAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RecordTraceAction {
-    pub immediate: bool,
+pub struct TraceStartedAction {
+    pub start_immediately: bool,
+    pub ts: u64,
+    pub stop_scheduled: bool,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -206,7 +208,9 @@ pub enum Action {
     PageUp,
     PrevEvent,
     Quit,
-    RecordTrace(RecordTraceAction),
+    RequestTrace,
+    TraceStarted(TraceStartedAction),
+    TraceStopped,
     ReloadStatsClient,
     SaveConfig,
     SchedCpuPerfSet(SchedCpuPerfSetAction),
@@ -362,9 +366,16 @@ impl TryFrom<&bpf_event> for Action {
                 }))
             }
             #[allow(non_upper_case_globals)]
-            bpf_intf::event_type_START_TRACE => {
-                Ok(Action::RecordTrace(RecordTraceAction { immediate: true }))
+            bpf_intf::event_type_TRACE_STARTED => {
+                let trace = unsafe { &event.event.trace };
+                Ok(Action::TraceStarted(TraceStartedAction {
+                    start_immediately: unsafe { trace.start_immediately.assume_init() },
+                    ts: event.ts,
+                    stop_scheduled: unsafe { trace.stop_scheduled.assume_init() },
+                }))
             }
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_TRACE_STOPPED => Ok(Action::TraceStopped),
             _ => Err(()),
         }
     }
@@ -383,10 +394,9 @@ impl std::fmt::Display for Action {
             Action::SetState(AppState::Node) => write!(f, "AppStateNode"),
             Action::SetState(AppState::Scheduler) => write!(f, "AppStateScheduler"),
             Action::SaveConfig => write!(f, "SaveConfig"),
-            Action::RecordTrace(RecordTraceAction { immediate: false }) => write!(f, "RecordTrace"),
-            Action::RecordTrace(RecordTraceAction { immediate: true }) => {
-                write!(f, "RecordTraceNow")
-            }
+            Action::RequestTrace => write!(f, "RequestTrace"),
+            Action::TraceStarted(_) => write!(f, "TraceStarted"),
+            Action::TraceStopped => write!(f, "TraceStopped"),
             Action::ClearEvent => write!(f, "ClearEvent"),
             Action::PrevEvent => write!(f, "PrevEvent"),
             Action::NextEvent => write!(f, "NextEvent"),
