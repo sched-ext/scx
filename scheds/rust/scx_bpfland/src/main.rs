@@ -498,6 +498,22 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn are_smt_siblings(topo: &Topology, cpus: &[usize]) -> bool {
+        // Single CPU or empty array are considered siblings.
+        if cpus.len() <= 1 {
+            return true;
+        }
+
+        // Check if each CPU is a sibling of the first CPU.
+        let first_cpu = cpus[0];
+        let smt_siblings = topo.sibling_cpus();
+        cpus.iter().all(|&cpu| {
+            cpu == first_cpu
+                || smt_siblings[cpu] == first_cpu as i32
+                || (smt_siblings[first_cpu] >= 0 && smt_siblings[first_cpu] == cpu as i32)
+        })
+    }
+
     fn init_cache_domains(
         skel: &mut BpfSkel<'_>,
         topo: &Topology,
@@ -525,11 +541,7 @@ impl<'a> Scheduler<'a> {
             }
 
             // Ignore the cache domain if all the CPUs are part of the same SMT core.
-            let smt_siblings = topo.sibling_cpus();
-            if cpus
-                .iter()
-                .all(|cpu| cpus.contains(&(smt_siblings[*cpu] as usize)))
-            {
+            if Self::are_smt_siblings(topo, &cpus) {
                 continue;
             }
 

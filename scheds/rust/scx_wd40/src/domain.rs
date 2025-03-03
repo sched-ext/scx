@@ -73,7 +73,7 @@ impl DomainGroup {
         let (doms, num_numa_nodes) = if !cpumasks.is_empty() {
             let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
             for mask_str in cpumasks.iter() {
-                let mask = Cpumask::from_str(&mask_str)?;
+                let mask = Cpumask::from_str(mask_str)?;
                 span |= &mask;
                 doms.insert(
                     dom_id,
@@ -101,7 +101,7 @@ impl DomainGroup {
                             ctx: Arc::new(Mutex::new(None)),
                         },
                     );
-                    dom_numa_map.insert(dom_id, node_id.clone());
+                    dom_numa_map.insert(dom_id, *node_id);
                     dom_id += 1;
                 }
             }
@@ -121,7 +121,7 @@ impl DomainGroup {
         // XXX dom_numa_map never gets updated even if we cross NUMA nodes
         for (d_id, n_id) in self.dom_numa_map.iter() {
             if n_id == numa_id {
-                let dom = self.doms.get(&d_id).unwrap();
+                let dom = self.doms.get(d_id).unwrap();
                 numa_doms.push(dom.clone());
             }
         }

@@ -26,15 +26,18 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::libbpf_sys::bpf_program__set_autoload;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use log::info;
 use log::warn;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
+use scx_utils::compat;
 use scx_utils::import_enums;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
@@ -73,14 +76,6 @@ struct Opts {
     /// traffic.
     #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
     local_kthreads: bool,
-
-    /// Enable user-space lock owner prioritization.
-    ///
-    /// Enabling this can improve workload performance when the workload tends to trigger
-    /// large amount of futex() syscall. For some workloads such as database transaction,
-    /// it might not be beneficial and even degrade the performance.
-    #[clap(short = 'u', long, action = clap::ArgAction::SetTrue)]
-    user_lock_boost: bool,
 
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
@@ -147,9 +142,23 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_max = opts.slice_us_max * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
         skel.maps.rodata_data.local_kthreads = opts.local_kthreads;
-        skel.maps.rodata_data.user_lock_boost = opts.user_lock_boost;
 
         skel.maps.rodata_data.smt_enabled = smt_enabled;
+
+        // Conditionally load the kprobes used by the scheduler.
+        if compat::ksym_exists("vfs_fsync_range").unwrap_or(false) {
+            unsafe {
+                bpf_program__set_autoload(
+                    skel.progs
+                        .kprobe_vfs_fsync_range
+                        .as_libbpf_object()
+                        .as_ptr(),
+                    true,
+                );
+            }
+        } else {
+            warn!("vfs_fsync_range symbol is missing")
+        }
 
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, flash_ops, uei)?;
