@@ -27,6 +27,7 @@ const volatile u64 long_tail_tracing_min_latency_ns = 0;
 
 u64 trace_duration_ns = 1000000000;
 u64 trace_warmup_ns = 500000000;
+u64 last_trace_end_time = 0;
 
 // dummy for generating types
 struct bpf_event _event = {0};
@@ -632,29 +633,40 @@ int BPF_PROG(on_softirq_exit, unsigned int nr)
 static int stop_trace_timer_callback(void *map, int key, struct timer_wrapper *timerw)
 {
 	struct bpf_event *event;
+	u64 end = mode == MODE_TRACING ? bpf_ktime_get_ns() : last_trace_end_time;
 
 	sample_rate = last_sample_rate;
-	mode = MODE_NORMAL;
 
-	if (!(event = try_reserve_event()))
+	if ((event = try_reserve_event())) {
+		mode = MODE_NORMAL;
+
+		event->ts = end;
+		event->type = TRACE_STOPPED;
+
+		bpf_ringbuf_submit(event, 0);
 		return 0;
+	}
 
-	event->ts = bpf_ktime_get_ns();
-	event->type = TRACE_STOPPED;
+	// Failed to get event. We've already slowed down the sample rate which
+	// will reduce the amount of events userspace needs to handle. Log when
+	// the trace actually ended and retry in 5ms.
+	mode = MODE_TRACE_STOPPING;
+	last_trace_end_time = end;
 
-	bpf_ringbuf_submit(event, 0);
+	bpf_timer_start(&timerw->timer, 5000000, 0);
 	return 0;
 }
 
 static __always_inline int start_trace_real(bool schedule_stop, bool start_immediately)
 {
 	static const enum scxtop_timer_callbacks stop_trace_key = TIMER_STOP_TRACE;
+
 	u64 duration_ns = trace_duration_ns;
 	if (!start_immediately)
 		duration_ns += trace_warmup_ns;
 
-	enum mode last_mode = __sync_lock_test_and_set(&mode, MODE_TRACING);
 	// do not restart a started trace. this may be relaxed in future.
+	enum mode last_mode = __sync_val_compare_and_swap(&mode, MODE_NORMAL, MODE_TRACING);
 	if (last_mode == MODE_TRACING)
 		return 0;
 

@@ -162,6 +162,11 @@ pub struct TraceStartedAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TraceStoppedAction {
+    pub ts: u64,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct IPIAction {
     pub ts: u64,
     pub cpu: u32,
@@ -210,7 +215,7 @@ pub enum Action {
     Quit,
     RequestTrace,
     TraceStarted(TraceStartedAction),
-    TraceStopped,
+    TraceStopped(TraceStoppedAction),
     ReloadStatsClient,
     SaveConfig,
     SchedCpuPerfSet(SchedCpuPerfSetAction),
@@ -375,7 +380,10 @@ impl TryFrom<&bpf_event> for Action {
                 }))
             }
             #[allow(non_upper_case_globals)]
-            bpf_intf::event_type_TRACE_STOPPED => Ok(Action::TraceStopped),
+            bpf_intf::event_type_TRACE_STOPPED => {
+                let action = Action::TraceStopped(TraceStoppedAction { ts: event.ts });
+                Ok(action)
+            }
             _ => Err(()),
         }
     }
@@ -396,7 +404,7 @@ impl std::fmt::Display for Action {
             Action::SaveConfig => write!(f, "SaveConfig"),
             Action::RequestTrace => write!(f, "RequestTrace"),
             Action::TraceStarted(_) => write!(f, "TraceStarted"),
-            Action::TraceStopped => write!(f, "TraceStopped"),
+            Action::TraceStopped(_) => write!(f, "TraceStopped"),
             Action::ClearEvent => write!(f, "ClearEvent"),
             Action::PrevEvent => write!(f, "PrevEvent"),
             Action::NextEvent => write!(f, "NextEvent"),

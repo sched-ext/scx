@@ -139,7 +139,7 @@ impl PerfettoTraceManager {
     }
 
     /// Stops the trace and writes to configured output file.
-    pub fn stop(&mut self) -> Result<()> {
+    pub fn stop(&mut self, last_relevent_timestamp_ns: Option<u64>) -> Result<()> {
         // TracePacket is the root object of a Perfetto trace. A Perfetto trace is a linear
         // sequence of TracePacket(s). The tracing service guarantees that all TracePacket(s)
         // written by a given TraceWriter are seen in-order, without gaps or duplicates.
@@ -147,6 +147,20 @@ impl PerfettoTraceManager {
 
         let trace_cpus: Vec<u32> = self.ftrace_events.keys().cloned().collect();
         let trace_dsqs: Vec<u64> = self.dsq_nr_queued_events.keys().cloned().collect();
+
+        // remove any events >last_relevent_timestamp_ns
+        if let Some(ns) = last_relevent_timestamp_ns {
+            let signed_ns = ns as i64;
+            self.dsq_lat_events
+                .iter_mut()
+                .for_each(|(_, v)| v.retain(|e| e.timestamp_absolute_us() * 1000 < signed_ns));
+            self.dsq_nr_queued_events
+                .iter_mut()
+                .for_each(|(_, v)| v.retain(|e| e.timestamp_absolute_us() * 1000 < signed_ns));
+            self.ftrace_events
+                .iter_mut()
+                .for_each(|(_, v)| v.retain(|e| e.timestamp() < ns));
+        };
 
         for trace_descs in self.track_descriptors().values() {
             for trace_desc in trace_descs {
