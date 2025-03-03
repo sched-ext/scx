@@ -43,15 +43,21 @@ pub struct TuiArgs {
     /// Trace file prefix for perfetto traces.
     #[arg(short, long, default_missing_value = TRACE_FILE_PREFIX.to_string())]
     pub trace_file_prefix: Option<String>,
-    /// Number of ticks for traces.
+    /// DEPRECATED: Number of ticks for traces. Use --trace-duration-ms instead.
     #[arg(long, default_missing_value = "5")]
     pub trace_ticks: Option<usize>,
+    /// Duration of trace in ms.
+    #[arg(long)]
+    pub trace_duration_ms: Option<u64>,
     /// Number of worker threads.
     #[arg(long, default_missing_value = "4", value_parser = clap::value_parser!(u16).range(2..128))]
     pub worker_threads: Option<u16>,
-    /// Number of ticks to warmup before collecting traces.
+    /// DEPRECATED: Number of ticks to warmup before collecting traces. Use --trace-warmup-ms instead.
     #[arg(long, default_missing_value = "3")]
     pub trace_tick_warmup: Option<usize>,
+    /// Duration to warmup a trace before collecting in ms.
+    #[arg(long)]
+    pub trace_warmup_ms: Option<u64>,
     /// Process to monitor or all.
     #[arg(long, default_value_t = -1)]
     pub process_id: i32,
