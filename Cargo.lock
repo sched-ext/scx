@@ -2531,6 +2531,7 @@ dependencies = [
  "libc",
  "log",
  "log-panics",
+ "nix 0.29.0",
  "num-format",
  "perf-event-open-sys",
  "plain",

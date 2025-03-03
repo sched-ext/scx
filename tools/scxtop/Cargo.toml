@@ -56,6 +56,7 @@ xdg = "2.5.2"
 log-panics = { version = "2", features = ["with-backtrace"]}
 hashbrown = "0.15.2"
 smartstring = { version = "1.0.1", features = ["serde"] }
+nix = { version = "0.29.0", features = ["time"] }
 
 [build-dependencies]
 protobuf-codegen = "3.7.1"

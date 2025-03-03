@@ -22,8 +22,8 @@ use scxtop::APP;
 use scxtop::SCHED_NAME_PATH;
 use scxtop::STATS_SOCKET_PATH;
 use scxtop::{
-    Action, IPIAction, RecordTraceAction, SchedCpuPerfSetAction, SchedSwitchAction,
-    SchedWakeupAction, SchedWakingAction, SoftIRQAction,
+    Action, IPIAction, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction,
+    SchedWakingAction, SoftIRQAction,
 };
 
 use anyhow::anyhow;
@@ -31,6 +31,7 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::SkelBuilder;
+use libbpf_rs::ProgramInput;
 use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::UprobeOpts;
 use ratatui::crossterm::event::KeyCode::Char;
@@ -108,6 +109,8 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
 
             let skel = skel.load()?;
 
+            skel.progs.scxtop_init.test_run(ProgramInput::default())?;
+
             // Attach probes
             let mut links = vec![
                 skel.progs.on_sched_cpu_perf.attach()?,
@@ -158,6 +161,9 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
             }
 
             if tui_args.experimental_long_tail_tracing {
+                skel.maps.data_data.trace_duration_ns = config.trace_duration_ns();
+                skel.maps.data_data.trace_warmup_ns = config.trace_warmup_ns();
+
                 let binary = tui_args
                     .experimental_long_tail_tracing_binary
                     .clone()

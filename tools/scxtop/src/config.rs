@@ -38,12 +38,16 @@ pub struct Config {
     stats_socket_path: Option<String>,
     /// Trace file prefix for perfetto traces.
     trace_file_prefix: Option<String>,
-    /// Number of ticks for traces.
+    /// DEPRECATED: Number of ticks for traces. Use trace_duration_ms instead.
     trace_ticks: Option<usize>,
+    /// Duration of trace in ms.
+    trace_duration_ms: Option<u64>,
     /// Number of worker threads
     worker_threads: Option<u16>,
-    /// Number of ticks to warmup before collecting traces.
+    /// DEPRECATED: Number of ticks to warmup before collecting traces. Use trace_warmup_ms instead.
     trace_tick_warmup: Option<usize>,
+    /// Duration to warmup a trace before collecting in ms.
+    trace_warmup_ms: Option<u64>,
 }
 
 impl From<TuiArgs> for Config {
@@ -58,8 +62,10 @@ impl From<TuiArgs> for Config {
             theme: None,
             tick_rate_ms: args.tick_rate_ms,
             trace_file_prefix: args.trace_file_prefix,
-            trace_ticks: args.trace_ticks,
             trace_tick_warmup: args.trace_tick_warmup,
+            trace_warmup_ms: args.trace_warmup_ms,
+            trace_ticks: args.trace_ticks,
+            trace_duration_ms: args.trace_duration_ms,
             worker_threads: args.worker_threads,
         }
     }
@@ -98,8 +104,10 @@ impl Config {
             stats_socket_path: self.stats_socket_path.or(rhs.stats_socket_path),
             trace_file_prefix: self.trace_file_prefix.or(rhs.trace_file_prefix),
             trace_ticks: self.trace_ticks.or(rhs.trace_ticks),
+            trace_duration_ms: self.trace_duration_ms.or(rhs.trace_duration_ms),
             worker_threads: self.worker_threads.or(rhs.worker_threads),
             trace_tick_warmup: self.trace_tick_warmup.or(rhs.trace_tick_warmup),
+            trace_warmup_ms: self.trace_warmup_ms.or(rhs.trace_warmup_ms),
         }
     }
 
@@ -152,9 +160,12 @@ impl Config {
         }
     }
 
-    /// Number of ticks for traces.
-    pub fn trace_ticks(&self) -> usize {
-        self.trace_ticks.unwrap_or(5)
+    /// Duration of trace in ns.
+    pub fn trace_duration_ns(&self) -> u64 {
+        self.trace_duration_ms
+            .or(self.trace_ticks.map(|t| (t * self.tick_rate_ms()) as u64))
+            .unwrap_or(1_250)
+            * 1_000_000
     }
 
     /// Number of worker threads
@@ -162,9 +173,14 @@ impl Config {
         self.worker_threads.unwrap_or(4)
     }
 
-    /// Number of ticks to warmup before collecting traces.
-    pub fn trace_tick_warmup(&self) -> usize {
-        self.trace_tick_warmup.unwrap_or(3)
+    /// Duration to warmup a trace before collecting in ns.
+    pub fn trace_warmup_ns(&self) -> u64 {
+        self.trace_warmup_ms
+            .or(self
+                .trace_tick_warmup
+                .map(|t| (t * self.tick_rate_ms()) as u64))
+            .unwrap_or(750)
+            * 1_000_000
     }
 
     /// Returns a config with nothing set.
@@ -180,8 +196,10 @@ impl Config {
             stats_socket_path: None,
             trace_file_prefix: None,
             trace_ticks: None,
+            trace_duration_ms: None,
             worker_threads: None,
             trace_tick_warmup: None,
+            trace_warmup_ms: None,
         }
     }
 
@@ -198,8 +216,10 @@ impl Config {
             stats_socket_path: None,
             trace_file_prefix: None,
             trace_ticks: None,
+            trace_duration_ms: None,
             worker_threads: None,
             trace_tick_warmup: None,
+            trace_warmup_ms: None,
         };
         config.tick_rate_ms = Some(config.tick_rate_ms());
         config.debug = Some(config.debug());
