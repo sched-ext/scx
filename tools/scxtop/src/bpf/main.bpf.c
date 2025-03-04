@@ -830,6 +830,28 @@ int BPF_PROG(on_cpuhp_enter, u32 cpu, int target, int state)
 	return 0;
 }
 
+SEC("?tp_btf/hw_pressure_update")
+int BPF_PROG(on_hw_pressure_update, u32 cpu, u64 hw_pressure)
+{
+	struct bpf_event *event;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+	event->type = HW_PRESSURE;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = bpf_ktime_get_ns();
+	event->event.hwp.hw_pressure = hw_pressure;
+	event->event.hwp.cpu = cpu;
+
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
 SEC("syscall")
 int BPF_PROG(scxtop_init)
 {
