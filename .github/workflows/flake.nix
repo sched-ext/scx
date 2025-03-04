@@ -17,7 +17,7 @@
         devShells =
           let
             pkgs = import nixpkgs { inherit system; };
-            common = with pkgs; [ gnutar zstd ];
+            common = with pkgs; [ git gnutar zstd ];
           in
           {
             update-kernels = pkgs.mkShell {
@@ -42,6 +42,29 @@
                 perl
                 virtme-ng
                 zlib
+              ];
+            };
+
+            rust-tests = pkgs.mkShellNoCC {
+              buildInputs = with pkgs; common ++ [
+                cargo
+                clang
+                clippy
+                elfutils
+                jq
+                llvmPackages.libclang
+                llvmPackages.libllvm
+                pkg-config
+                rustfmt
+                virtme-ng
+                zlib
+              ];
+
+              LIBCLANG_PATH = "${pkgs.lib.getLib pkgs.llvmPackages.libclang}/lib";
+
+              hardeningDisable = [
+                "stackprotector"
+                "zerocallusedregs"
               ];
             };
           };
