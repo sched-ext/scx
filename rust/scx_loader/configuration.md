@@ -48,6 +48,12 @@ auto_mode = []
 gaming_mode = []
 lowlatency_mode = ["-y"]
 powersave_mode = []
+
+[scheds.scx_tickless]
+auto_mode = []
+gaming_mode = ["-f 5000 -s 5000"]
+lowlatency_mode = ["-f 5000 -s 1000"]
+powersave_mode = ["-f 50 -p"]
 ```
 
 **`default_sched`:**

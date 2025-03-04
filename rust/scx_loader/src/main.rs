@@ -93,6 +93,7 @@ impl ScxLoader {
             "scx_flash",
             "scx_lavd",
             "scx_p2dq",
+            "scx_tickless",
             "scx_rusty",
         ]
     }
