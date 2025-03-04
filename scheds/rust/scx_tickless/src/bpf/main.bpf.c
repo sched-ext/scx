@@ -5,6 +5,8 @@
 #include <scx/common.bpf.h>
 #include "intf.h"
 
+#define MAX_CPUS		1024
+
 extern unsigned CONFIG_HZ __kconfig;
 
 enum {
@@ -34,34 +36,26 @@ const volatile u64 tick_freq;
 /*
  * Scheduling statistics.
  */
-volatile u64 nr_direct_dispatches, nr_fallback_dispatches, nr_shared_dispatches;
+volatile u64 nr_ticks, nr_preemptions;
+volatile u64 nr_direct_dispatches, nr_timer_dispatches, nr_primary_dispatches;
 
 struct cpu_ctx {
+	struct bpf_timer timer;
+
+	bool timer_initialized;
 	u64 started_at;
 };
 
 struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
 	__type(value, struct cpu_ctx);
-	__uint(max_entries, 1);
+	__uint(max_entries, MAX_CPUS);
 } cpu_ctx_stor SEC(".maps");
-
-struct sched_timer {
-	struct bpf_timer timer;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, u32);
-	__type(value, struct sched_timer);
-} sched_timer SEC(".maps");
 
 struct cpu_ctx *try_lookup_cpu_ctx(s32 cpu)
 {
-	const u32 idx = 0;
-	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu);
+	return bpf_map_lookup_elem(&cpu_ctx_stor, &cpu);
 }
 
 /*
@@ -197,9 +191,7 @@ static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
 	/*
 	 * Add the execution vruntime to the deadline.
 	 */
-	tctx->deadline += scale_inverse_fair(p, tctx->exec_runtime);
-
-	return tctx->deadline;
+	return tctx->deadline + scale_inverse_fair(p, tctx->exec_runtime);
 }
 
 /*
@@ -232,15 +224,9 @@ void BPF_STRUCT_OPS(tickless_enqueue, struct task_struct *p, u64 enq_flags)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
+
 	deadline = task_deadline(p, tctx);
 	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_INF, deadline, enq_flags);
-
-	/*
-	 * Trigger a resched event on a primary CPU when a task that was not
-	 * already running is enqueued.
-	 */
-	if (!scx_bpf_task_running(p))
-		scx_bpf_kick_cpu(pick_primary_cpu(), SCX_KICK_PREEMPT);
 }
 
 /*
@@ -250,7 +236,7 @@ void BPF_STRUCT_OPS(tickless_enqueue, struct task_struct *p, u64 enq_flags)
  *
  * Return true if a task was dispatched, false otherwise.
  */
-static bool dispatch_cpu(s32 cpu, bool same_cpu)
+static bool dispatch_cpu(s32 cpu, bool same_cpu, bool from_dispatch)
 {
 	struct task_struct *p;
 	bool dispatched = false;
@@ -279,16 +265,16 @@ static bool dispatch_cpu(s32 cpu, bool same_cpu)
 			bpf_task_release(p);
 			continue;
 		}
-		__sync_fetch_and_add(&nr_shared_dispatches, 1);
+		if (from_dispatch)
+			__sync_fetch_and_add(&nr_primary_dispatches, 1);
+		else
+			__sync_fetch_and_add(&nr_timer_dispatches, 1);
 		dispatched = true;
 
 		bpf_task_release(p);
 
 		break;
 	}
-
-	if (dispatched && !is_primary_cpu(cpu))
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 	return dispatched;
 }
@@ -299,13 +285,14 @@ static bool dispatch_cpu(s32 cpu, bool same_cpu)
  *
  * If @do_idle_smt is true, consider only full-idle SMT cores.
  *
- * Return true if there are still some free dispatch slots available, false
- * otherwise.
+ * If @from_dispatch is true, the function is called from ops.dispatch()
+ * (used to check if we have enough dispatch slots available).
  */
-static bool dispatch_all_cpus(bool do_idle_smt)
+static bool dispatch_all_cpus(bool do_idle_smt, bool from_dispatch)
 {
 	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
 	s32 cpu;
+	bool is_done = false;
 
 	online_cpumask = scx_bpf_get_online_cpumask();
 	idle_smtmask = scx_bpf_get_idle_smtmask();
@@ -318,6 +305,23 @@ static bool dispatch_all_cpus(bool do_idle_smt)
 		goto out_put_cpumask;
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
+		/*
+		 * Stop dispatching tasks if all the pending tasks have
+		 * been distributed.
+		 */
+		if (!scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
+			is_done = true;
+			break;
+		}
+
+		/*
+		 * Stop dispatching tasks if we're out of dispatch slots.
+		 */
+		if (from_dispatch && !scx_bpf_dispatch_nr_slots()) {
+			is_done = true;
+			break;
+		}
+
 		/*
 		 * Do not distribute tasks to offline or primary CPUs.
 		 */
@@ -341,14 +345,8 @@ static bool dispatch_all_cpus(bool do_idle_smt)
 		 * Try to dispatch a task that was using this CPU first, if
 		 * @prefer_same_cpu is enabled.
 		 */
-		if (!prefer_same_cpu || !dispatch_cpu(cpu, true))
-			dispatch_cpu(cpu, false);
-
-		/*
-		 * Stop dispatching tasks if we're out of dispatch slots.
-		 */
-		if (!scx_bpf_dispatch_nr_slots())
-			break;
+		if (!prefer_same_cpu || !dispatch_cpu(cpu, true, from_dispatch))
+			dispatch_cpu(cpu, false, from_dispatch);
 	}
 
 out_put_cpumask:
@@ -356,38 +354,125 @@ out_put_cpumask:
 	scx_bpf_put_cpumask(idle_cpumask);
 	scx_bpf_put_cpumask(online_cpumask);
 
-	if (!scx_bpf_dispatch_nr_slots()) {
-		scx_bpf_kick_cpu(pick_primary_cpu(), SCX_KICK_PREEMPT);
-		return false;
+	return is_done;
+}
+
+static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
+{
+	const struct cpumask *online_cpumask;
+	struct cpu_ctx *cctx;
+	u64 now = scx_bpf_now();
+	bool is_primary;
+	s32 cpu;
+
+	/*
+	 * Dispatch tasks on the available CPUs.
+	 */
+	if (!smt_enabled || !dispatch_all_cpus(true, false))
+		dispatch_all_cpus(false, false);
+
+	bpf_rcu_read_lock();
+
+	is_primary = is_primary_cpu(bpf_get_smp_processor_id());
+	if (!is_primary) {
+		scx_bpf_error("Scheduling timer executed on a non-primary CPU");
+		goto out_unlock;
 	}
 
-	return true;
+	online_cpumask = scx_bpf_get_online_cpumask();
+
+	/*
+	 * Check if we need to preempt the running tasks.
+	 */
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		if (!bpf_cpumask_test_cpu(cpu, online_cpumask))
+			continue;
+
+		cctx = try_lookup_cpu_ctx(cpu);
+		if (!cctx)
+			continue;
+
+		if (!cctx->started_at ||
+		    time_before(now, cctx->started_at + slice_ns))
+			continue;
+
+		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) &&
+		    !scx_bpf_dsq_nr_queued(SHARED_DSQ))
+			continue;
+
+		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+		__sync_fetch_and_add(&nr_preemptions, 1);
+	}
+
+	scx_bpf_put_cpumask(online_cpumask);
+
+	bpf_timer_start(timer, tick_interval_ns(), BPF_F_TIMER_CPU_PIN);
+out_unlock:
+	bpf_rcu_read_unlock();
+
+	return 0;
+}
+
+/*
+ * Start the BPF timer on a target CPU (if not already started).
+ */
+static void fire_timer(s32 cpu)
+{
+	struct cpu_ctx *cctx;
+	int ret;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return;
+
+	if (cctx->timer_initialized)
+		return;
+
+	bpf_timer_init(&cctx->timer, &cpu_ctx_stor, CLOCK_MONOTONIC);
+	bpf_timer_set_callback(&cctx->timer, sched_timerfn);
+
+	ret = bpf_timer_start(&cctx->timer, tick_interval_ns(), BPF_F_TIMER_CPU_PIN);
+	if (ret)
+		scx_bpf_error("failed to fire up timer on cpu%d: %d", cpu, ret);
+
+	cctx->timer_initialized = true;
 }
 
 void BPF_STRUCT_OPS(tickless_dispatch, s32 cpu, struct task_struct *prev)
 {
-	/*
-	 * Primary CPUs need to distribute tasks among the tickless CPUs.
-	 */
 	if (is_primary_cpu(cpu)) {
-		if (smt_enabled && !dispatch_all_cpus(true))
-			return;
+		/*
+		 * Start the time on the primary CPU.
+		 *
+		 * XXX: figure out a better way to pin the timer to the CPU.
+		 */
+		fire_timer(cpu);
 
-		if (!dispatch_all_cpus(false))
-			return;
+		/*
+		 * Try to bounce all the queued tasks to the available
+		 * tickless CPUs first.
+		 */
+		if (!smt_enabled || !dispatch_all_cpus(true, true))
+			dispatch_all_cpus(false, true);
 	}
 
 	/*
-	 * Try to consume a task from the shared DSQ.
+	 * Consume a task from the shared DSQ.
 	 *
 	 * This applies also to primary CPUs: if there are still tasks in
 	 * the shared DSQ after distributing them to the tickless CPUs,
 	 * primary CPUs will also start consuming them.
 	 */
 	if (scx_bpf_dsq_move_to_local(SHARED_DSQ)) {
-		__sync_fetch_and_add(&nr_fallback_dispatches, 1);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		return;
 	}
+
+	/*
+	 * Keep running the previous task if it still wants to run.
+	 */
+	if (prev && prev->scx.flags & SCX_TASK_QUEUED)
+		prev->scx.slice = SCX_SLICE_INF;
 }
 
 /*
@@ -437,6 +522,11 @@ void BPF_STRUCT_OPS(tickless_running, struct task_struct *p)
 	 */
 	if (time_before(vtime_now, tctx->deadline))
 		vtime_now = tctx->deadline;
+}
+
+void BPF_STRUCT_OPS(tickless_tick, struct task_struct *p)
+{
+	__sync_fetch_and_add(&nr_ticks, 1);
 }
 
 /*
@@ -510,50 +600,6 @@ s32 BPF_STRUCT_OPS(tickless_init_task, struct task_struct *p,
 	return 0;
 }
 
-static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
-{
-	const struct cpumask *online_cpumask;
-	struct cpu_ctx *cctx;
-	u64 now = scx_bpf_now();
-	bool is_primary;
-	s32 cpu;
-
-	bpf_rcu_read_lock();
-	is_primary = is_primary_cpu(bpf_get_smp_processor_id());
-	if (!is_primary) {
-		scx_bpf_error("Scheduling timer executed on a non-primary CPU");
-		goto out_unlock;
-	}
-
-	online_cpumask = scx_bpf_get_online_cpumask();
-
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		if (!bpf_cpumask_test_cpu(cpu, online_cpumask) || is_primary_cpu(cpu))
-			continue;
-
-		cctx = try_lookup_cpu_ctx(cpu);
-		if (!cctx)
-			continue;
-
-		if (time_before(now, cctx->started_at + slice_ns))
-			continue;
-
-		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) &&
-		    !scx_bpf_dsq_nr_queued(SHARED_DSQ))
-			continue;
-
-		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-	}
-
-	scx_bpf_put_cpumask(online_cpumask);
-
-	bpf_timer_start(timer, tick_interval_ns(), BPF_F_TIMER_CPU_PIN);
-out_unlock:
-	bpf_rcu_read_unlock();
-
-	return 0;
-}
-
 /*
  * Allocate/re-allocate a new cpumask.
  */
@@ -610,55 +656,30 @@ SEC("syscall")
 int enable_primary_cpu(struct cpu_arg *input)
 {
 	struct bpf_cpumask *mask;
-	int err = 0;
+	s32 cpu = input->cpu_id;
+	int ret;
 
-	err = init_cpumask(&primary_cpumask);
-	if (err)
-		return err;
+	ret = init_cpumask(&primary_cpumask);
+	if (ret)
+		return ret;
 
 	bpf_rcu_read_lock();
+
 	mask = primary_cpumask;
 	if (mask) {
-		s32 cpu = input->cpu_id;
-
 		if (cpu < 0)
 			bpf_cpumask_clear(mask);
 		else
 			bpf_cpumask_set_cpu(cpu, mask);
 	}
+
 	bpf_rcu_read_unlock();
 
-	return err;
+	return ret;
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(tickless_init)
 {
-	u32 key = 0;
-	struct bpf_timer *timer;
-	bool is_primary;
-	int ret;
-
-	timer = bpf_map_lookup_elem(&sched_timer, &key);
-	if (!timer)
-		return -ESRCH;
-
-	bpf_rcu_read_lock();
-	is_primary = is_primary_cpu(bpf_get_smp_processor_id());
-	bpf_rcu_read_unlock();
-
-	if (!is_primary) {
-		scx_bpf_error("init from non-primary CPU");
-		return -EINVAL;
-	}
-
-	bpf_timer_init(timer, &sched_timer, CLOCK_MONOTONIC);
-	bpf_timer_set_callback(timer, sched_timerfn);
-	ret = bpf_timer_start(timer, tick_interval_ns(), BPF_F_TIMER_CPU_PIN);
-	if (ret) {
-		scx_bpf_error("bpf_timer_start failed (%d)", ret);
-		return ret;
-	}
-
 	return scx_bpf_create_dsq(SHARED_DSQ, -1);
 }
 
@@ -673,6 +694,7 @@ SCX_OPS_DEFINE(tickless_ops,
 	       .dispatch		= (void *)tickless_dispatch,
 	       .runnable		= (void *)tickless_runnable,
 	       .running			= (void *)tickless_running,
+	       .tick			= (void *)tickless_tick,
 	       .stopping		= (void *)tickless_stopping,
 	       .enable			= (void *)tickless_enable,
 	       .init_task		= (void *)tickless_init_task,

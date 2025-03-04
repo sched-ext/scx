@@ -230,7 +230,7 @@ impl<'a> Scheduler<'a> {
     fn init_primary_domain(skel: &mut BpfSkel<'_>, domain: &Cpumask) -> Result<()> {
         // Clear the primary domain by passing a negative CPU id.
         if let Err(err) = Self::enable_primary_cpu(skel, -1) {
-            warn!("failed to reset primary domain: error {}", err);
+            warn!("failed to reset primary domain: error {}", err as i32);
         }
         // Update primary scheduling domain.
         for cpu in 0..*NR_CPU_IDS {
@@ -246,9 +246,11 @@ impl<'a> Scheduler<'a> {
 
     fn get_metrics(&self) -> Metrics {
         Metrics {
+            nr_ticks: self.skel.maps.bss_data.nr_ticks,
+            nr_preemptions: self.skel.maps.bss_data.nr_preemptions,
             nr_direct_dispatches: self.skel.maps.bss_data.nr_direct_dispatches,
-            nr_fallback_dispatches: self.skel.maps.bss_data.nr_fallback_dispatches,
-            nr_shared_dispatches: self.skel.maps.bss_data.nr_shared_dispatches,
+            nr_primary_dispatches: self.skel.maps.bss_data.nr_primary_dispatches,
+            nr_timer_dispatches: self.skel.maps.bss_data.nr_timer_dispatches,
         }
     }
 

@@ -22,32 +22,40 @@ use serde::Serialize;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct Metrics {
-    #[stat(desc = "Number of task direct dispatches")]
+    #[stat(desc = "Number of ticks")]
+    pub nr_ticks: u64,
+    #[stat(desc = "Number of preemption events")]
+    pub nr_preemptions: u64,
+    #[stat(desc = "Number of dispatches directly consumed from the shared queue")]
     pub nr_direct_dispatches: u64,
-    #[stat(desc = "Number of task dispatches in the fallback queue")]
-    pub nr_fallback_dispatches: u64,
-    #[stat(desc = "Number of regular task dispatches")]
-    pub nr_shared_dispatches: u64,
+    #[stat(desc = "Number of dispatches routed by the primary CPUs")]
+    pub nr_primary_dispatches: u64,
+    #[stat(desc = "Number of dispatches routed by the primary CPU timers")]
+    pub nr_timer_dispatches: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "[{}] dispatch -> d: {:<5} f: {:<5} s: {:<5}",
+            "[{}] ticks -> {:<5} preempts -> {:<5} dispatch -> d: {:<5} p: {:<5} t: {:<5}",
             crate::SCHEDULER_NAME,
+            self.nr_ticks,
+            self.nr_preemptions,
             self.nr_direct_dispatches,
-            self.nr_fallback_dispatches,
-            self.nr_shared_dispatches
+            self.nr_primary_dispatches,
+            self.nr_timer_dispatches
         )?;
         Ok(())
     }
 
     fn delta(&self, rhs: &Self) -> Self {
         Self {
+            nr_ticks: self.nr_ticks - rhs.nr_ticks,
+            nr_preemptions: self.nr_preemptions - rhs.nr_preemptions,
             nr_direct_dispatches: self.nr_direct_dispatches - rhs.nr_direct_dispatches,
-            nr_fallback_dispatches: self.nr_fallback_dispatches - rhs.nr_fallback_dispatches,
-            nr_shared_dispatches: self.nr_shared_dispatches - rhs.nr_shared_dispatches,
+            nr_primary_dispatches: self.nr_primary_dispatches - rhs.nr_primary_dispatches,
+            nr_timer_dispatches: self.nr_timer_dispatches - rhs.nr_timer_dispatches,
             ..self.clone()
         }
     }
