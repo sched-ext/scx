@@ -2137,7 +2137,7 @@ impl<'a> App<'a> {
     fn stop_recording_trace(&mut self, ts: u64) -> Result<()> {
         self.skel.maps.data_data.sample_rate = self.prev_bpf_sample_rate;
         self.state = self.prev_state.clone();
-        self.trace_manager.stop(Some(ts))?;
+        self.trace_manager.stop(None, Some(ts))?;
         self.trace_links.clear();
 
         Ok(())

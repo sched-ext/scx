@@ -84,10 +84,31 @@ pub struct TuiArgs {
     pub experimental_long_tail_tracing_min_latency_ns: u64,
 }
 
+#[derive(Clone, Parser, Debug)]
+#[command(about = "Collects a trace")]
+pub struct TraceArgs {
+    /// Trace duration.
+    #[arg(short = 'd', long, default_value_t = 1000)]
+    pub trace_ms: u64,
+    /// Trace warmup duration, make sure this is long enough or events may have poor data quality.
+    #[arg(short = 'w', long, default_value_t = 5000)]
+    pub warmup_ms: u64,
+    /// Trace output file.
+    #[arg(short = 'o', long)]
+    pub output_file: Option<String>,
+    /// Enable verbose output, including libbpf details. Specify multiple
+    /// times to increase verbosity.
+    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Runs the scxtop TUI.
     Tui(TuiArgs),
+
+    /// Collects a trace.
+    Trace(TraceArgs),
 
     #[clap(hide = true)]
     GenerateCompletions {

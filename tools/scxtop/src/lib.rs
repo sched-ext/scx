@@ -20,6 +20,7 @@ mod perfetto_trace;
 pub mod protos;
 mod stats;
 mod theme;
+pub mod tracer;
 mod tui;
 mod util;
 

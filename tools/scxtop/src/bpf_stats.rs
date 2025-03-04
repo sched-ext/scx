@@ -10,7 +10,7 @@ use libbpf_rs::MapCore;
 
 const STAT_DROPPED_EVENTS: usize = bpf_intf::stat_id_STAT_DROPPED_EVENTS as usize;
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct BpfStats {
     pub dropped_events: u64,
 }
