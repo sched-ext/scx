@@ -1,12 +1,12 @@
-
 # scxctl
 
 [![crates.io](https://img.shields.io/crates/v/scxctl.svg)](https://crates.io/crates/scxctl)
 [![license](https://img.shields.io/crates/l/scxctl.svg)](https://crates.io/crates/scxctl)
 
-`scxctl` is a cli interface for interacting with `scx_loader`.
+`scxctl` is a cli dbus client for interacting with `scx_loader`.
 
 ## Features
+
 - Get the current scheduler and mode
 - List all available schedulers
 - Start a scheduler in a given mode, or with given arguments
@@ -16,15 +16,19 @@
 ## Installation
 
 ### Arch Linux
-`scxctl` is available on the AUR as [scxctl](https://aur.archlinux.org/packages/scxctl) 
+
+`scxctl` is available on the AUR as [scxctl](https://aur.archlinux.org/packages/scxctl)
 
 ### Other Distros
+
 `scxctl` can be installed from crates.io through cargo
+
 ```
 cargo install scxctl
 ```
 
 ## Usage
+
 ```
 $ scxctl --help
 Usage: scxctl <COMMAND>
@@ -69,17 +73,21 @@ Options:
 ```
 
 ### Examples:
+
 Start bpfland in auto mode
+
 ```
 scxctl start -s bpfland
 ```
 
 Switch to gaming mode
+
 ```
 scxctl switch -m gaming
 ```
 
 Switch to lavd with verbose and performance flags
+
 ```
 scxctl switch -s lavd -a="-v,--performance"
 ```
