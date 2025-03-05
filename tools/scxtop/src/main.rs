@@ -84,34 +84,36 @@ fn attach_progs(skel: &mut BpfSkel) -> Result<Vec<Link>> {
     ];
 
     // 6.13 compatibility
-    if let Ok(link) = skel.progs.scx_insert_vtime.attach() {
+    if compat::ksym_exists("scx_insert_vtime").is_ok() {
+        if let Ok(link) = skel.progs.scx_insert_vtime.attach() {
+            links.push(link);
+        }
+        if let Ok(link) = skel.progs.scx_insert.attach() {
+            links.push(link);
+        }
+        if let Ok(link) = skel.progs.scx_dsq_move.attach() {
+            links.push(link);
+        }
+        if let Ok(link) = skel.progs.scx_dsq_move_set_vtime.attach() {
+            links.push(link);
+        }
+        if let Ok(link) = skel.progs.scx_dsq_move_set_slice.attach() {
+            links.push(link);
+        }
+    }
+    if let Ok(link) = skel.progs.scx_dispatch.attach() {
         links.push(link);
     }
     if let Ok(link) = skel.progs.scx_dispatch_vtime.attach() {
         links.push(link);
     }
-    if let Ok(link) = skel.progs.scx_insert.attach() {
-        links.push(link);
-    }
-    if let Ok(link) = skel.progs.scx_dispatch.attach() {
-        links.push(link);
-    }
     if let Ok(link) = skel.progs.scx_dispatch_from_dsq_set_vtime.attach() {
-        links.push(link);
-    }
-    if let Ok(link) = skel.progs.scx_dsq_move_set_vtime.attach() {
-        links.push(link);
-    }
-    if let Ok(link) = skel.progs.scx_dsq_move_set_slice.attach() {
         links.push(link);
     }
     if let Ok(link) = skel.progs.scx_dispatch_from_dsq_set_slice.attach() {
         links.push(link);
     }
     if let Ok(link) = skel.progs.scx_dispatch_from_dsq.attach() {
-        links.push(link);
-    }
-    if let Ok(link) = skel.progs.scx_dsq_move.attach() {
         links.push(link);
     }
     if let Ok(link) = skel.progs.on_cpuhp_enter.attach() {
