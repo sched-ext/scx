@@ -46,7 +46,6 @@ use libbpf_rs::ProgramInput;
 use libc::c_char;
 use log::debug;
 use log::info;
-use log::warn;
 use plain::Plain;
 use scx_stats::prelude::*;
 use scx_utils::autopower::{fetch_power_profile, PowerProfile};
@@ -231,7 +230,6 @@ impl introspec {
 struct CpuFlatId {
     node_id: usize,
     llc_pos: usize,
-    max_freq: usize,
     core_pos: usize,
     cpu_pos: usize,
     cpu_id: usize,
@@ -282,12 +280,12 @@ impl fmt::Display for FlatTopology {
 impl FlatTopology {
     /// Build a flat-structured topology
     pub fn new() -> Result<FlatTopology> {
-        let (cpu_fids_performance, avg_freq) = Self::build_cpu_fids(false, false).unwrap();
+        let (cpu_fids_performance, avg_cap) = Self::build_cpu_fids(false, false).unwrap();
         let (cpu_fids_powersave, _) = Self::build_cpu_fids(true, true).unwrap();
 
         // Note that building compute domain is not dependent to CPU orer
         // so it is okay to use any cpu_fids_*.
-        let cpdom_map = Self::build_cpdom(&cpu_fids_performance, avg_freq).unwrap();
+        let cpdom_map = Self::build_cpdom(&cpu_fids_performance, avg_cap).unwrap();
 
         Ok(FlatTopology {
             cpu_fids_performance,
@@ -317,8 +315,7 @@ impl FlatTopology {
         debug!("{:#?}", topo);
 
         // Build a vector of cpu flat ids.
-        let mut base_freq = 0;
-        let mut avg_freq = 0;
+        let mut avg_cap = 0;
         for (&node_id, node) in topo.nodes.iter() {
             for (llc_pos, (_llc_id, llc)) in node.llcs.iter().enumerate() {
                 for (core_pos, (core_id, core)) in llc.cores.iter().enumerate() {
@@ -326,7 +323,6 @@ impl FlatTopology {
                         let cpu_fid = CpuFlatId {
                             node_id,
                             llc_pos,
-                            max_freq: cpu.max_freq,
                             core_pos,
                             cpu_pos,
                             cpu_id: *cpu_id,
@@ -334,33 +330,15 @@ impl FlatTopology {
                             l2_id: cpu.l2_id,
                             l3_id: cpu.l3_id,
                             sharing_lvl: 0,
-                            cpu_cap: 0,
+                            cpu_cap: cpu.cpu_capacity,
                         };
                         cpu_fids.push(RefCell::new(cpu_fid));
-                        if base_freq < cpu.max_freq {
-                            base_freq = cpu.max_freq;
-                        }
-                        avg_freq += cpu.max_freq;
+                        avg_cap += cpu.cpu_capacity;
                     }
                 }
             }
         }
-        avg_freq /= cpu_fids.len() as usize;
-
-        // Initialize cpu capacity
-        if base_freq > 0 {
-            for cpu_fid in cpu_fids.iter_mut() {
-                let mut cpu_fid = cpu_fid.borrow_mut();
-                cpu_fid.cpu_cap = ((cpu_fid.max_freq * 1024) / base_freq) as usize;
-            }
-        } else {
-            // Unfortunately, the frequency information in sysfs seems not
-            // always correct in some distributions.
-            for cpu_fid in cpu_fids.iter_mut() {
-                cpu_fid.borrow_mut().cpu_cap = 1024 as usize;
-            }
-            warn!("System does not provide proper CPU frequency information.");
-        }
+        avg_cap /= cpu_fids.len() as usize;
 
         // Initialize cpu's hardware resource sharing level
         for (a_id, cpu_fid_a) in cpu_fids.iter().enumerate() {
@@ -394,62 +372,62 @@ impl FlatTopology {
         // Sort the cpu_fids
         match (prefer_smt_core, prefer_little_core) {
             (true, false) => {
-                // Sort the cpu_fids by node, llc, ^max_freq, ^sharing_lvl, core, and cpu order
+                // Sort the cpu_fids by node, llc, ^cpu_cap, ^sharing_lvl, core, and cpu order
                 cpu_fids.sort_by(|a, b| {
                     a.node_id
                         .cmp(&b.node_id)
                         .then_with(|| a.llc_pos.cmp(&b.llc_pos))
-                        .then_with(|| b.max_freq.cmp(&a.max_freq))
+                        .then_with(|| b.cpu_cap.cmp(&a.cpu_cap))
                         .then_with(|| b.sharing_lvl.cmp(&a.sharing_lvl))
                         .then_with(|| a.core_pos.cmp(&b.core_pos))
                         .then_with(|| a.cpu_pos.cmp(&b.cpu_pos))
                 });
             }
             (true, true) => {
-                // Sort the cpu_fids by node, llc, max_freq, ^sharing_lvl, core, and cpu order
+                // Sort the cpu_fids by node, llc, cpu_cap, ^sharing_lvl, core, and cpu order
                 cpu_fids.sort_by(|a, b| {
                     a.node_id
                         .cmp(&b.node_id)
                         .then_with(|| a.llc_pos.cmp(&b.llc_pos))
-                        .then_with(|| a.max_freq.cmp(&b.max_freq))
+                        .then_with(|| a.cpu_cap.cmp(&b.cpu_cap))
                         .then_with(|| b.sharing_lvl.cmp(&a.sharing_lvl))
                         .then_with(|| a.core_pos.cmp(&b.core_pos))
                         .then_with(|| a.cpu_pos.cmp(&b.cpu_pos))
                 });
             }
             (false, false) => {
-                // Sort the cpu_fids by cpu, node, llc, ^max_freq, sharing_lvl, and core order
+                // Sort the cpu_fids by cpu, node, llc, ^cpu_cap, sharing_lvl, and core order
                 cpu_fids.sort_by(|a, b| {
                     a.cpu_pos
                         .cmp(&b.cpu_pos)
                         .then_with(|| a.node_id.cmp(&b.node_id))
                         .then_with(|| a.llc_pos.cmp(&b.llc_pos))
-                        .then_with(|| b.max_freq.cmp(&a.max_freq))
+                        .then_with(|| b.cpu_cap.cmp(&a.cpu_cap))
                         .then_with(|| a.sharing_lvl.cmp(&b.sharing_lvl))
                         .then_with(|| a.core_pos.cmp(&b.core_pos))
                 });
             }
             (false, true) => {
-                // Sort the cpu_fids by cpu, node, llc, max_freq, sharing_lvl, and core order
+                // Sort the cpu_fids by cpu, node, llc, cpu_cap, sharing_lvl, and core order
                 cpu_fids.sort_by(|a, b| {
                     a.cpu_pos
                         .cmp(&b.cpu_pos)
                         .then_with(|| a.node_id.cmp(&b.node_id))
                         .then_with(|| a.llc_pos.cmp(&b.llc_pos))
-                        .then_with(|| a.max_freq.cmp(&b.max_freq))
+                        .then_with(|| a.cpu_cap.cmp(&b.cpu_cap))
                         .then_with(|| a.sharing_lvl.cmp(&b.sharing_lvl))
                         .then_with(|| a.core_pos.cmp(&b.core_pos))
                 });
             }
         }
 
-        Some((cpu_fids, avg_freq))
+        Some((cpu_fids, avg_cap))
     }
 
     /// Build a list of compute domains
     fn build_cpdom(
         cpu_fids: &Vec<CpuFlatId>,
-        avg_freq: usize,
+        avg_cap: usize,
     ) -> Option<BTreeMap<ComputeDomainKey, ComputeDomainValue>> {
         // Creat a compute domain map
         let mut cpdom_id = 0;
@@ -458,7 +436,7 @@ impl FlatTopology {
             let key = ComputeDomainKey {
                 node_id: cpu_fid.node_id,
                 llc_pos: cpu_fid.llc_pos,
-                is_big: cpu_fid.max_freq >= avg_freq,
+                is_big: cpu_fid.cpu_cap >= avg_cap,
             };
             let mut value;
             match cpdom_map.get(&key) {
