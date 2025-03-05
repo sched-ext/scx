@@ -105,6 +105,10 @@ struct Opts {
     #[clap(long = "slice-min-us", default_value = "300")]
     slice_min_us: u64,
 
+    /// Do not boost futex holders.
+    #[clap(long = "no-futex-boost", action = clap::ArgAction::SetTrue)]
+    no_futex_boost: bool,
+
     /// Disable core compaction and schedule tasks across all online CPUs. Core compaction attempts
     /// to keep idle CPUs idle in favor of scheduling tasks on CPUs that are already
     /// awake. See main.bpf.c for more info. Normally set by the power mode, but can be set independently if
@@ -555,26 +559,28 @@ impl<'a> Scheduler<'a> {
 
         // Enable autoloads for conditionally loaded things
         // immediately after creating skel (because this is always before loading)
-        compat::cond_tracepoint_enable(
-            "syscalls:sys_enter_futex",
-            &skel.progs.rtp_sys_enter_futex,
-        )?;
-        compat::cond_tracepoint_enable(
-            "syscalls:sys_exit_futex",
-            &skel.progs.rtp_sys_exit_futex
-        )?;
-        compat::cond_tracepoint_enable(
-            "syscalls:sys_exit_futex_wait",
-            &skel.progs.rtp_sys_exit_futex_wait,
-        )?;
-        compat::cond_tracepoint_enable(
-            "syscalls:sys_exit_futex_waitv",
-            &skel.progs.rtp_sys_exit_futex_waitv,
-        )?;
-        compat::cond_tracepoint_enable(
-            "syscalls:sys_exit_futex_wake",
-            &skel.progs.rtp_sys_exit_futex_wake,
-        )?;
+        if !opts.no_futex_boost {
+            compat::cond_tracepoint_enable(
+                "syscalls:sys_enter_futex",
+                &skel.progs.rtp_sys_enter_futex,
+            )?;
+            compat::cond_tracepoint_enable(
+                "syscalls:sys_exit_futex",
+                &skel.progs.rtp_sys_exit_futex,
+            )?;
+            compat::cond_tracepoint_enable(
+                "syscalls:sys_exit_futex_wait",
+                &skel.progs.rtp_sys_exit_futex_wait,
+            )?;
+            compat::cond_tracepoint_enable(
+                "syscalls:sys_exit_futex_waitv",
+                &skel.progs.rtp_sys_exit_futex_waitv,
+            )?;
+            compat::cond_tracepoint_enable(
+                "syscalls:sys_exit_futex_wake",
+                &skel.progs.rtp_sys_exit_futex_wake,
+            )?;
+        }
 
         // Initialize CPU topology
         let topo = FlatTopology::new().unwrap();
