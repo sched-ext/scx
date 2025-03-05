@@ -11,7 +11,7 @@ repository = "https://github.com/sched-ext/scx"
 readme = "README.md"
 keywords = ["linux", "scx", "scx_scheds", "scx_loader", "sched_ext"]
 categories = ["command-line-utilities"]
-license = "Apache-2.0 OR MIT"
+license = "GPL-2.0-only"
 
 [profile.release]
 lto = true
