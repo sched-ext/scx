@@ -171,7 +171,7 @@ pub fn in_kallsyms(ksym: &str) -> Result<bool> {
 }
 
 pub fn tracepoint_exists(tracepoint: &str) -> Result<bool> {
-    let file = std::fs::File::open("/sys/kernel/debug/tracing/available_events")?;
+    let file = std::fs::File::open("/sys/kernel/tracing/available_events")?;
     let reader = std::io::BufReader::new(file);
 
     for line in reader.lines() {

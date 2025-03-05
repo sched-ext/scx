@@ -211,7 +211,7 @@ struct Opts {
     #[clap(long)]
     monitor: Option<f64>,
 
-    /// Enable BPF debugging via /sys/kernel/debug/tracing/trace_pipe.
+    /// Enable BPF debugging via /sys/kernel/tracing/trace_pipe.
     #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
     debug: bool,
 

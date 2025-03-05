@@ -6,7 +6,7 @@ import time
 
 HEADER = "TASK-PID"
 BUFF_STARTED = "buffer started ###"
-TRACING_PATH = "/sys/kernel/debug/tracing"
+TRACING_PATH = "/sys/kernel/tracing"
 TRACE_PIPE_PATH = os.path.join(TRACING_PATH, "trace_pipe")
 
 
