@@ -377,7 +377,7 @@ static bool is_wake_sync(const struct task_struct *p,
 	 * kthread, which has now finished, making the wakeup effectively
 	 * synchronous. An example of this behavior is seen in IO completions.
 	 */
-	if (is_kthread(current) && (p->nr_cpus_allowed == 1) &&
+	if (is_kthread(current) && (current->nr_cpus_allowed == 1) &&
 	    (prev_cpu == cpu))
 		return true;
 
