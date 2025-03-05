@@ -248,7 +248,7 @@ int BPF_KPROBE(scx_insert_vtime, struct task_struct *p, u64 dsq, u64 slice_ns, u
 	return update_task_ctx(p, dsq, vtime, slice_ns);
 }
 
-SEC("kprobe/scx_bpf_dispatch_vtime")
+SEC("?kprobe/scx_bpf_dispatch_vtime")
 int BPF_KPROBE(scx_dispatch_vtime, struct task_struct *p, u64 dsq, u64 slice_ns, u64 vtime)
 {
 	return update_task_ctx(p, dsq, vtime, slice_ns);
@@ -278,7 +278,7 @@ int BPF_KPROBE(scx_insert, struct task_struct *p, u64 dsq)
 	return on_insert(p, dsq);
 }
 
-SEC("kprobe/scx_bpf_dispatch")
+SEC("?kprobe/scx_bpf_dispatch")
 int BPF_KPROBE(scx_dispatch, struct task_struct *p, u64 dsq)
 {
 	return on_insert(p, dsq);
@@ -307,7 +307,7 @@ int BPF_KPROBE(scx_dsq_move, struct bpf_iter_scx_dsq *it__iter,
 	return on_dsq_move(p, dsq_id);
 }
 
-SEC("kprobe/scx_bpf_dispatch_from_dsq")
+SEC("?kprobe/scx_bpf_dispatch_from_dsq")
 int BPF_KPROBE(scx_dispatch_from_dsq, struct bpf_iter_scx_dsq *it__iter,
 	       struct task_struct *p, u64 dsq_id, u64 enq_flags)
 {
@@ -330,14 +330,14 @@ static int on_dsq_move_vtime(struct task_struct *p, u64 dsq)
 	return 0;
 }
 
-SEC("kprobe/scx_bpf_dsq_move_vtime")
+SEC("?kprobe/scx_bpf_dsq_move_vtime")
 int BPF_KPROBE(scx_dsq_move_vtime, struct bpf_iter_scx_dsq *it__iter,
 	       struct task_struct *p, u64 dsq_id, u64 enq_flags)
 {
 	return on_dsq_move_vtime(p, dsq_id);
 }
 
-SEC("kprobe/scx_bpf_dispatch_vtime_from_dsq")
+SEC("?kprobe/scx_bpf_dispatch_vtime_from_dsq")
 int BPF_KPROBE(scx_dispatch_vtime_from_dsq, struct bpf_iter_scx_dsq *it__iter,
 	       struct task_struct *p, u64 dsq_id, u64 enq_flags)
 {
@@ -366,7 +366,7 @@ int BPF_KPROBE(scx_dsq_move_set_slice, struct bpf_iter_scx_dsq *it__iter, u64 sl
 	return on_move_set_slice(NULL, slice);
 }
 
-SEC("kprobe/scx_bpf_dispatch_from_dsq_set_slice")
+SEC("?kprobe/scx_bpf_dispatch_from_dsq_set_slice")
 int BPF_KPROBE(scx_dispatch_from_dsq_set_slice, struct bpf_iter_scx_dsq *it__iter,
 	       u64 slice)
 {
@@ -396,7 +396,7 @@ int BPF_KPROBE(scx_dsq_move_set_vtime, struct bpf_iter_scx_dsq *it__iter, u64 vt
 	return on_move_set_vtime(NULL, vtime);
 }
 
-SEC("kprobe/scx_bpf_dispatch_from_dsq_set_vtime")
+SEC("?kprobe/scx_bpf_dispatch_from_dsq_set_vtime")
 int BPF_KPROBE(scx_dispatch_from_dsq_set_vtime, struct bpf_iter_scx_dsq *it__iter, u64 vtime)
 {
 	// TODO: figure out how to return task from iterator without consuming.
