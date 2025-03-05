@@ -140,7 +140,7 @@ struct tp_syscall_exit {
 	long ret;
 };
 
-SEC("tracepoint/syscalls/sys_enter_futex")
+SEC("?tracepoint/syscalls/sys_enter_futex")
 int rtp_sys_enter_futex(struct tp_syscall_enter_futex *ctx)
 {
 	struct cpu_ctx *cpuc = try_get_cpu_ctx();
@@ -150,7 +150,7 @@ int rtp_sys_enter_futex(struct tp_syscall_enter_futex *ctx)
 	return 0;
 }
 
-SEC("tracepoint/syscalls/sys_exit_futex")
+SEC("?tracepoint/syscalls/sys_exit_futex")
 int rtp_sys_exit_futex(struct tp_syscall_exit *ctx)
 {
 	struct cpu_ctx *cpuc;
@@ -195,7 +195,7 @@ int rtp_sys_exit_futex(struct tp_syscall_exit *ctx)
 	return 0;
 }
 
-SEC("tracepoint/syscalls/sys_exit_futex_wait")
+SEC("?tracepoint/syscalls/sys_exit_futex_wait")
 int rtp_sys_exit_futex_wait(struct tp_syscall_exit *ctx)
 {
 	if (ctx->ret == 0) /* 0 for wait success */
@@ -203,7 +203,7 @@ int rtp_sys_exit_futex_wait(struct tp_syscall_exit *ctx)
 	return 0;
 }
 
-SEC("tracepoint/syscalls/sys_exit_futex_waitv")
+SEC("?tracepoint/syscalls/sys_exit_futex_waitv")
 int rtp_sys_exit_futex_waitv(struct tp_syscall_exit *ctx)
 {
 	if (ctx->ret >= 0) /* array index of one of the woken futexes */
@@ -211,7 +211,7 @@ int rtp_sys_exit_futex_waitv(struct tp_syscall_exit *ctx)
 	return 0;
 }
 
-SEC("tracepoint/syscalls/sys_exit_futex_wake")
+SEC("?tracepoint/syscalls/sys_exit_futex_wake")
 int rtp_sys_exit_futex_wake(struct tp_syscall_exit *ctx)
 {
 	if (ctx->ret > 0) /* the number of waiters that were woken up */
