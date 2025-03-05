@@ -94,7 +94,7 @@ struct Opts {
     exit_dump_len: u32,
 
     /// Enable verbose output, including libbpf details. Moreover, BPF scheduling events will be
-    /// reported in debugfs (e.g., /sys/kernel/debug/tracing/trace_pipe).
+    /// reported in tracefs (e.g., /sys/kernel/tracing/trace_pipe).
     #[clap(short = 'v', long, action = clap::ArgAction::SetTrue)]
     verbose: bool,
 
