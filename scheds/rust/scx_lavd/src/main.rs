@@ -51,6 +51,7 @@ use plain::Plain;
 use scx_stats::prelude::*;
 use scx_utils::autopower::{fetch_power_profile, PowerProfile};
 use scx_utils::build_id;
+use scx_utils::compat;
 use scx_utils::import_enums;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
@@ -551,6 +552,29 @@ impl<'a> Scheduler<'a> {
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose > 0);
         let mut skel = scx_ops_open!(skel_builder, open_object, lavd_ops)?;
+
+        // Enable autoloads for conditionally loaded things
+        // immediately after creating skel (because this is always before loading)
+        compat::cond_tracepoint_enable(
+            "syscalls:sys_enter_futex",
+            &skel.progs.rtp_sys_enter_futex,
+        )?;
+        compat::cond_tracepoint_enable(
+            "syscalls:sys_exit_futex",
+            &skel.progs.rtp_sys_exit_futex
+        )?;
+        compat::cond_tracepoint_enable(
+            "syscalls:sys_exit_futex_wait",
+            &skel.progs.rtp_sys_exit_futex_wait,
+        )?;
+        compat::cond_tracepoint_enable(
+            "syscalls:sys_exit_futex_waitv",
+            &skel.progs.rtp_sys_exit_futex_waitv,
+        )?;
+        compat::cond_tracepoint_enable(
+            "syscalls:sys_exit_futex_wake",
+            &skel.progs.rtp_sys_exit_futex_wake,
+        )?;
 
         // Initialize CPU topology
         let topo = FlatTopology::new().unwrap();
