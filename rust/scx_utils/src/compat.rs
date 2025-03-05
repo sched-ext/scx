@@ -170,17 +170,49 @@ pub fn in_kallsyms(ksym: &str) -> Result<bool> {
     Ok(false)
 }
 
-pub fn cond_kprobe_enable<T>(sym: &str, prog_ptr: &OpenProgramImpl<T>) -> Result<()> {
+pub fn tracepoint_exists(tracepoint: &str) -> Result<bool> {
+    let file = std::fs::File::open("/sys/kernel/debug/tracing/available_events")?;
+    let reader = std::io::BufReader::new(file);
+
+    for line in reader.lines() {
+        for tp in line.unwrap().split_whitespace() {
+            if tracepoint == tp {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+pub fn cond_kprobe_enable<T>(sym: &str, prog_ptr: &OpenProgramImpl<T>) -> Result<bool> {
     if in_kallsyms(sym)? {
         unsafe {
             bpf_program__set_autoload(prog_ptr.as_libbpf_object().as_ptr(), true);
         }
+        return Ok(true);
     } else {
         warn!("symbol {} is missing, kprobe not loaded", sym);
     }
-    Ok(())
+
+    Ok(false)
 }
 
+pub fn cond_tracepoint_enable<T>(tracepoint: &str, prog_ptr: &OpenProgramImpl<T>) -> Result<bool> {
+    if tracepoint_exists(tracepoint)? {
+        unsafe {
+            bpf_program__set_autoload(prog_ptr.as_libbpf_object().as_ptr(), true);
+        }
+        return Ok(true);
+    } else {
+        warn!(
+            "tradepoint {} is missing, tracepoint not loaded",
+            tracepoint
+        );
+    }
+
+    Ok(false)
+}
 pub fn is_sched_ext_enabled() -> io::Result<bool> {
     let content = std::fs::read_to_string("/sys/kernel/sched_ext/state")?;
 
