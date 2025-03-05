@@ -97,6 +97,10 @@ pub fn get_default_config() -> Config {
                 "scx_p2dq".to_string(),
                 get_default_sched_for_config(&SupportedSched::P2DQ),
             ),
+            (
+                "scx_tickless".to_string(),
+                get_default_sched_for_config(&SupportedSched::Tickless),
+            ),
         ]),
     }
 }
@@ -205,6 +209,13 @@ fn get_default_scx_flags_for_mode(scx_sched: &SupportedSched, sched_mode: SchedM
             SchedMode::Server => vec!["--keep-running"],
             SchedMode::Auto => vec![],
         },
+        SupportedSched::Tickless => match sched_mode {
+            SchedMode::Gaming => vec!["-f", "5000", "-s", "5000"],
+            SchedMode::LowLatency => vec!["-f", "5000", "-s", "1000"],
+            SchedMode::PowerSave => vec!["-f", "50", "-p"],
+            SchedMode::Server => vec!["-f", "100"],
+            SchedMode::Auto => vec![],
+        },
     }
 }
 
@@ -251,6 +262,13 @@ gaming_mode = []
 lowlatency_mode = ["-y"]
 powersave_mode = []
 server_mode = ["--keep-running"]
+
+[scheds.scx_tickless]
+auto_mode = []
+gaming_mode = ["-f", "5000", "-s", "5000"]
+lowlatency_mode = ["-f", "5000", "-s", "1000"]
+powersave_mode = ["-f", "50", "-p"]
+server_mode = ["-f", "100"]
 "#;
 
         let parsed_config = parse_config_content(config_str).expect("Failed to parse config");

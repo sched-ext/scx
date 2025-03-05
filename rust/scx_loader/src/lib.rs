@@ -30,6 +30,8 @@ pub enum SupportedSched {
     Flash,
     #[serde(rename = "scx_p2dq")]
     P2DQ,
+    #[serde(rename = "scx_tickless")]
+    Tickless,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Type, Value, OwnedValue, PartialEq)]
@@ -55,6 +57,7 @@ impl FromStr for SupportedSched {
             "scx_flash" => Ok(SupportedSched::Flash),
             "scx_lavd" => Ok(SupportedSched::Lavd),
             "scx_p2dq" => Ok(SupportedSched::P2DQ),
+            "scx_tickless" => Ok(SupportedSched::Tickless),
             "scx_rusty" => Ok(SupportedSched::Rusty),
             _ => Err(anyhow::anyhow!("{scx_name} is not supported")),
         }
@@ -75,6 +78,7 @@ impl From<SupportedSched> for &str {
             SupportedSched::Flash => "scx_flash",
             SupportedSched::Lavd => "scx_lavd",
             SupportedSched::P2DQ => "scx_p2dq",
+            SupportedSched::Tickless => "scx_tickless",
             SupportedSched::Rusty => "scx_rusty",
         }
     }

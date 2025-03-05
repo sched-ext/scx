@@ -12,6 +12,7 @@ members = ["rust/scx_stats",
            "scheds/rust/scx_rlfifo",
            "scheds/rust/scx_rusty",
            "scheds/rust/scx_p2dq",
+           "scheds/rust/scx_tickless",
            "scheds/rust/scx_layered",
            "scheds/rust/scx_mitosis"]
 resolver = "2"
