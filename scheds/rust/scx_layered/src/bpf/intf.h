@@ -244,6 +244,7 @@ enum layer_match_kind {
 	MATCH_NS_EQUALS,
 	MATCH_SCXCMD_JOIN,
 	MATCH_IS_GROUP_LEADER,
+	MATCH_IS_KTHREAD,
 	MATCH_USED_GPU_TID,
 	MATCH_USED_GPU_PID,
 
@@ -263,8 +264,9 @@ struct layer_match {
 	u32		tgid;
 	u64		nsid;
 	bool		is_group_leader;
-	bool	used_gpu_tid;
-	bool	used_gpu_pid;
+	bool		is_kthread;
+	bool		used_gpu_tid;
+	bool		used_gpu_pid;
 };
 
 struct layer_match_ands {

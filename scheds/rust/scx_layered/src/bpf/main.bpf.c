@@ -1879,6 +1879,8 @@ static __noinline bool match_one(struct layer_match *match,
 		// See https://github.com/sched-ext/scx/issues/610 for more details.
 		return (p->tgid == p->pid) == match->is_group_leader;
 	}
+	case MATCH_IS_KTHREAD:
+		return p->flags & PF_KTHREAD;
 	case MATCH_USED_GPU_TID: {
 			u32 tid;
 			bool pid_present = false;
@@ -2939,7 +2941,10 @@ static s32 init_layer(int layer_id)
 				dbg("%s SCXCMD_JOIN \"%s\"", header, match->comm_prefix);
 				break;
 			case MATCH_IS_GROUP_LEADER:
-				dbg("%s PID %d", header, match->is_group_leader);
+				dbg("%s IS_GROUP_LEADER %d", header, match->is_group_leader);
+				break;
+			case MATCH_IS_KTHREAD:
+				dbg("%s IS_KTHREAD %d", header, match->is_kthread);
 				break;
 			case MATCH_USED_GPU_TID:
 				dbg("%s GPU_TID %d", header, match->used_gpu_tid);
