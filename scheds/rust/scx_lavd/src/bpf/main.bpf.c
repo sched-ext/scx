@@ -1107,8 +1107,8 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 	/*
 	 * If there is no idle cpu for an eligible task, try to preempt a task.
-	 * Try to find and kick a victim CPU, which runs a less urgent task.
-	 * The kick will be done asynchronously.
+	 * Try to find and kick a victim CPU, which runs a less urgent task,
+	 * from dsq_id. The kick will be done asynchronously.
 	 */
 	now = scx_bpf_now();
 	try_find_and_kick_victim_cpu(p, taskc, cpuc_cur, dsq_id, now);
