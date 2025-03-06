@@ -1224,6 +1224,10 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_IS_GROUP_LEADER as i32;
                             mt.is_group_leader.write(*polarity);
                         }
+                        LayerMatch::IsKthread(polarity) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_IS_KTHREAD as i32;
+                            mt.is_kthread.write(*polarity);
+                        }
                         LayerMatch::UsedGpuTid(polarity) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_USED_GPU_TID as i32;
                             mt.used_gpu_tid.write(*polarity);
