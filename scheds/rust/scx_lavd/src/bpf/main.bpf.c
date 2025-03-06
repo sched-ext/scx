@@ -2210,7 +2210,8 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .init_task		= (void *)lavd_init_task,
 	       .init			= (void *)lavd_init,
 	       .exit			= (void *)lavd_exit,
-	       .flags			= SCX_OPS_KEEP_BUILTIN_IDLE |
+	       .flags			= SCX_OPS_ENQ_LAST |
+					  SCX_OPS_KEEP_BUILTIN_IDLE |
 					  SCX_OPS_ENQ_EXITING,
 	       .timeout_ms		= 30000U,
 	       .name			= "lavd");
