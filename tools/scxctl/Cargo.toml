@@ -3,7 +3,7 @@ name = "scxctl"
 
 [package]
 name = "scxctl"
-version = "1.0.9"
+version = "1.0.10"
 edition = "2021"
 description = "A cli dbus client for scx_loader"
 authors = ["Joe Maples <joe@maples.dev>"]
