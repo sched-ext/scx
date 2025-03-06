@@ -1203,7 +1203,11 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
 
-		taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
+		if (p->nr_cpus_allowed == 1)
+			taskc->dsq_id = SCX_DSQ_LOCAL;
+		else
+			taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
+
 		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 		return;
 	}
@@ -1302,6 +1306,10 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 
 	/* tasks running in low fallback doesn't get to continue */
 	if (taskc->dsq_id & LO_FB_DSQ_BASE)
+		goto no;
+
+	/* if hi_fb has tasks pending, don't keep running the current one */
+	if (scx_bpf_dsq_nr_queued(cpuc->hi_fb_dsq_id))
 		goto no;
 
 	/* @p has fully consumed its slice and still wants to run */
@@ -1636,12 +1644,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (!(llcc = lookup_llc_ctx(cpuc->llc_id)))
 		return;
 
-	/*
-	 * Always consume hi_fb_dsq_id first for kthreads. This ends up
-	 * prioritizing tasks with custom affinities which will be solved by
-	 * implementing starvation prevention for lo fallback and queueing them
-	 * there.
-	 */
+	/* always consume hi_fb_dsq_id first for kthreads */
 	if (scx_bpf_dsq_move_to_local(cpuc->hi_fb_dsq_id))
 		return;
 
