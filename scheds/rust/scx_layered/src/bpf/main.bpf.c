@@ -1097,6 +1097,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *taskc;
 	struct llc_ctx *llcc;
 	struct layer *layer;
+	bool wakeup = enq_flags & SCX_ENQ_WAKEUP;
 	s32 cpu, task_cpu = scx_bpf_task_cpu(p);
 	u64 vtime = p->scx.dsq_vtime;
 	u32 llc_id, layer_id;
@@ -1114,7 +1115,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (enq_flags & SCX_ENQ_REENQ) {
 		lstat_inc(LSTAT_ENQ_REENQ, layer, cpuc);
 	} else {
-		if (enq_flags & SCX_ENQ_WAKEUP)
+		if (wakeup)
 			lstat_inc(LSTAT_ENQ_WAKEUP, layer, cpuc);
 		else
 			lstat_inc(LSTAT_ENQ_EXPIRE, layer, cpuc);
@@ -1131,9 +1132,11 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 
 	/*
 	 * Does @p prefer to preempt its previous CPU even when there are other
-	 * idle CPUs?
+	 * idle CPUs? If @p was already on the CPU (!wakeup), layered_dispatch()
+	 * already decided that @p shouldn't continue running on it. Don't
+	 * override the decision.
 	 */
-	if (try_preempt_first && !yielding &&
+	if (try_preempt_first && wakeup && !yielding &&
 	    try_preempt_cpu(task_cpu, p, taskc, layer, true))
 		return;
 
@@ -1159,7 +1162,11 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (layer->preempt && !yielding) {
 		struct cpu_prox_map *pmap;
 
-		if (!try_preempt_first &&
+		/*
+		 * See try_preempt_first block above for explanation on the
+		 * wakeup test.
+		 */
+		if (!try_preempt_first && wakeup &&
 		    try_preempt_cpu(task_cpu, p, taskc, layer, false))
 			return;
 
