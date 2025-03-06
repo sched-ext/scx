@@ -51,6 +51,7 @@ const volatile u64 min_open_layer_disallow_open_after_ns;
 const volatile u64 min_open_layer_disallow_preempt_after_ns;
 const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
+const volatile bool percpu_kthread_preempt = true;
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
@@ -74,6 +75,12 @@ static inline s32 prio_to_nice(s32 static_prio)
 {
 	/* See DEFAULT_PRIO and PRIO_TO_NICE in include/linux/sched/prio.h */
 	return static_prio - 120;
+}
+
+static inline bool is_preempt_kthread(struct task_struct *p)
+{
+	return percpu_kthread_preempt && (p->flags & PF_KTHREAD) &&
+		p->nr_cpus_allowed == 1;
 }
 
 static inline s32 sibling_cpu(s32 cpu)
@@ -1159,9 +1166,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * No idle CPU, try preempting.
 	 */
-	if (layer->preempt && !yielding) {
-		struct cpu_prox_map *pmap;
-
+	if ((layer->preempt || is_preempt_kthread(p)) && !yielding) {
 		/*
 		 * See try_preempt_first block above for explanation on the
 		 * wakeup test.
@@ -1170,13 +1175,16 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		    try_preempt_cpu(task_cpu, p, taskc, layer, false))
 			return;
 
-		pmap = &task_cpuc->prox_map;
-		bpf_for(cpu, 1, MAX_CPUS) {
-			if (cpu >= pmap->sys_end)
-				break;
-			u16 *cpu_p = MEMBER_VPTR(pmap->cpus, [cpu]);
-			if (cpu_p && try_preempt_cpu(*cpu_p, p, taskc, layer, false))
-				return;
+		if (p->nr_cpus_allowed > 1) {
+			struct cpu_prox_map *pmap = &task_cpuc->prox_map;
+
+			bpf_for(cpu, 1, MAX_CPUS) {
+				if (cpu >= pmap->sys_end)
+					break;
+				u16 *cpu_p = MEMBER_VPTR(pmap->cpus, [cpu]);
+				if (cpu_p && try_preempt_cpu(*cpu_p, p, taskc, layer, false))
+					return;
+			}
 		}
 
 		lstat_inc(LSTAT_PREEMPT_FAIL, layer, cpuc);
@@ -2241,7 +2249,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	if (time_before(llcc->vtime_now[layer_id], p->scx.dsq_vtime))
 		llcc->vtime_now[layer_id] = p->scx.dsq_vtime;
 
-	cpuc->current_preempt = layer->preempt;
+	cpuc->current_preempt = layer->preempt || is_preempt_kthread(p);
 	cpuc->current_exclusive = layer->exclusive;
 	cpuc->task_layer_id = taskc->layer_id;
 	cpuc->running_at = now;
