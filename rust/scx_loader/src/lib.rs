@@ -34,20 +34,6 @@ pub enum SupportedSched {
     Tickless,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Type, Value, OwnedValue, PartialEq)]
-pub enum SchedMode {
-    /// Default values for the scheduler
-    Auto = 0,
-    /// Applies flags for better gaming experience
-    Gaming = 1,
-    /// Applies flags for lower power usage
-    PowerSave = 2,
-    /// Starts scheduler in low latency mode
-    LowLatency = 3,
-    /// Starts scheduler in server-oriented mode
-    Server = 4,
-}
-
 impl FromStr for SupportedSched {
     type Err = anyhow::Error;
 
@@ -80,6 +66,54 @@ impl From<SupportedSched> for &str {
             SupportedSched::P2DQ => "scx_p2dq",
             SupportedSched::Tickless => "scx_tickless",
             SupportedSched::Rusty => "scx_rusty",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Type, Value, OwnedValue, PartialEq)]
+pub enum SchedMode {
+    /// Default values for the scheduler
+    Auto = 0,
+    /// Applies flags for better gaming experience
+    Gaming = 1,
+    /// Applies flags for lower power usage
+    PowerSave = 2,
+    /// Starts scheduler in low latency mode
+    LowLatency = 3,
+    /// Starts scheduler in server-oriented mode
+    Server = 4,
+}
+
+impl FromStr for SchedMode {
+    type Err = anyhow::Error;
+
+    fn from_str(mode_name: &str) -> anyhow::Result<SchedMode> {
+        match mode_name {
+            "auto" => Ok(SchedMode::Auto),
+            "gaming" => Ok(SchedMode::Gaming),
+            "powersave" => Ok(SchedMode::PowerSave),
+            "lowlatency" => Ok(SchedMode::LowLatency),
+            "server" => Ok(SchedMode::Server),
+            _ => Err(anyhow::anyhow!("{mode_name} is not supported")),
+        }
+    }
+}
+
+impl TryFrom<&str> for SchedMode {
+    type Error = <SchedMode as FromStr>::Err;
+    fn try_from(s: &str) -> Result<SchedMode, Self::Error> {
+        <SchedMode as FromStr>::from_str(s)
+    }
+}
+
+impl From<SchedMode> for &str {
+    fn from(mode_name: SchedMode) -> Self {
+        match mode_name {
+            SchedMode::Auto => "auto",
+            SchedMode::Gaming => "gaming",
+            SchedMode::PowerSave => "powersave",
+            SchedMode::LowLatency => "lowlatency",
+            SchedMode::Server => "server",
         }
     }
 }

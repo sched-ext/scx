@@ -1,5 +1,5 @@
-use crate::scx_loader::ScxLoaderMode;
 use clap::{Parser, Subcommand};
+use scx_loader::SchedMode;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -21,7 +21,7 @@ pub struct StartArgs {
         conflicts_with = "args",
         help = "Mode to start in"
     )]
-    pub mode: Option<ScxLoaderMode>,
+    pub mode: Option<SchedMode>,
     #[arg(
         short,
         long,
@@ -45,7 +45,7 @@ pub struct SwitchArgs {
         conflicts_with = "args",
         help = "Mode to switch to"
     )]
-    pub mode: Option<ScxLoaderMode>,
+    pub mode: Option<SchedMode>,
     #[arg(
         short,
         long,
