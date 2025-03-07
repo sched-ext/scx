@@ -39,6 +39,8 @@ pub enum LayerGrowthAlgo {
     /// LittleBig attempts to first grow across all little cores and then
     /// allocates onto big cores after all little cores are allocated.
     LittleBig,
+    /// Grab CPUs from NUMA nodes, iteratively, in reverse order.
+    NodeSpread,
     /// RandomTopo is sticky to NUMA nodes/LLCs but randomises the order in which
     /// it visits each. The layer will select a random NUMA node, then a random LLC
     /// within it, then randomly iterate the cores in that LLC.
@@ -53,6 +55,7 @@ const GROWTH_ALGO_TOPO: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_TOPO as i3
 const GROWTH_ALGO_ROUND_ROBIN: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_ROUND_ROBIN as i32;
 const GROWTH_ALGO_BIG_LITTLE: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_BIG_LITTLE as i32;
 const GROWTH_ALGO_LITTLE_BIG: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_LITTLE_BIG as i32;
+const GROWTH_ALGO_NODE_SPREAD: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_NODE_SPREAD as i32;
 const GROWTH_ALGO_RANDOM_TOPO: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_RANDOM_TOPO as i32;
 
 impl LayerGrowthAlgo {
@@ -66,6 +69,7 @@ impl LayerGrowthAlgo {
             LayerGrowthAlgo::RoundRobin => GROWTH_ALGO_ROUND_ROBIN,
             LayerGrowthAlgo::BigLittle => GROWTH_ALGO_BIG_LITTLE,
             LayerGrowthAlgo::LittleBig => GROWTH_ALGO_LITTLE_BIG,
+            LayerGrowthAlgo::NodeSpread => GROWTH_ALGO_NODE_SPREAD,
             LayerGrowthAlgo::RandomTopo => GROWTH_ALGO_RANDOM_TOPO,
         }
     }
@@ -111,6 +115,7 @@ impl LayerGrowthAlgo {
             LayerGrowthAlgo::BigLittle => generator.grow_big_little(),
             LayerGrowthAlgo::LittleBig => generator.grow_little_big(),
             LayerGrowthAlgo::Topo => generator.grow_topo(),
+            LayerGrowthAlgo::NodeSpread => generator.grow_node_spread(),
             LayerGrowthAlgo::RandomTopo => generator.grow_random_topo(),
         }
     }
@@ -226,6 +231,27 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             .into_iter()
             .map(|core| self.cpu_pool.get_core_topological_id(core))
             .collect()
+    }
+
+    fn grow_node_spread(&self) -> Vec<usize> {
+        let mut cores: Vec<usize> = Vec::new();
+        let core_vecs: Vec<Vec<usize>> = self
+            .topo
+            .nodes
+            .clone()
+            .into_iter()
+            .map(|(_, x)| x.all_cpus.into_iter().map(|(_, x)| x.id).collect())
+            .collect();
+
+        for i in 0..core_vecs[0].len() {
+            for sub_vec in core_vecs.clone() {
+                if i < sub_vec.len() {
+                    cores.push(sub_vec[i]);
+                }
+            }
+        }
+        cores.reverse();
+        cores
     }
 
     fn grow_little_big(&self) -> Vec<usize> {
