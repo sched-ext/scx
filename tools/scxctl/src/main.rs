@@ -1,40 +1,40 @@
 mod cli;
-mod scx_loader;
 
-use crate::scx_loader::{ScxLoaderMode, ScxLoaderProxyBlocking};
 use clap::Parser;
 use cli::{Cli, Commands};
 use colored::Colorize;
+use scx_loader::{dbus::LoaderClientProxyBlocking, SchedMode, SupportedSched};
 use std::process::exit;
 use zbus::blocking::Connection;
 
-fn cmd_get(scx_loader: ScxLoaderProxyBlocking) -> Result<(), Box<dyn std::error::Error>> {
-    let current_scheduler: String = remove_scx_prefix(&scx_loader.current_scheduler().unwrap());
-    let sched_mode = ScxLoaderMode::from_u32(scx_loader.scheduler_mode().unwrap())
-        .unwrap()
-        .as_str();
+fn cmd_get(scx_loader: LoaderClientProxyBlocking) -> Result<(), Box<dyn std::error::Error>> {
+    let current_scheduler: String = scx_loader.current_scheduler().unwrap();
+    let sched_mode: SchedMode = scx_loader.scheduler_mode().unwrap();
     match current_scheduler.as_str() {
         "unknown" => println!("no scx scheduler running"),
-        _ => println!("running {} in {} mode", current_scheduler, sched_mode),
+        _ => {
+            let sched = SupportedSched::try_from(current_scheduler.as_str()).unwrap();
+            println!("running {sched:?} in {sched_mode:?} mode");
+        }
     }
     Ok(())
 }
 
-fn cmd_list(scx_loader: ScxLoaderProxyBlocking) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_list(scx_loader: LoaderClientProxyBlocking) -> Result<(), Box<dyn std::error::Error>> {
     let supported_scheds: Vec<String> = scx_loader
         .supported_schedulers()
         .unwrap()
         .iter()
-        .map(|s| remove_scx_prefix(s))
+        .map(|s| remove_scx_prefix(&s.to_string()))
         .collect();
     println!("supported schedulers: {:?}", supported_scheds);
     Ok(())
 }
 
 fn cmd_start(
-    scx_loader: ScxLoaderProxyBlocking,
-    sched: String,
-    mode: Option<ScxLoaderMode>,
+    scx_loader: LoaderClientProxyBlocking,
+    sched_name: String,
+    mode_name: Option<SchedMode>,
     args: Option<Vec<String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Verify scx_loader is not running a scheduler
@@ -49,25 +49,25 @@ fn cmd_start(
         exit(1);
     }
 
-    let sched = validate_sched(scx_loader.clone(), sched);
-    let mode = mode.unwrap_or_else(|| ScxLoaderMode::Auto);
+    let sched: SupportedSched = validate_sched(scx_loader.clone(), sched_name);
+    let mode: SchedMode = mode_name.unwrap_or_else(|| SchedMode::Auto);
     match args {
         Some(args) => {
-            scx_loader.start_scheduler_with_args(sched.clone(), args.clone())?;
-            println!("started {} with arguments \"{}\"", sched, args.join(" "));
+            scx_loader.start_scheduler_with_args(sched.clone(), &args.clone())?;
+            println!("started {sched:?} with arguments \"{}\"", args.join(" "));
         }
         None => {
-            scx_loader.start_scheduler(sched.clone(), mode.as_u32())?;
-            println!("started {} in {} mode", sched, mode.as_str());
+            scx_loader.start_scheduler(sched.clone(), mode.clone())?;
+            println!("started {sched:?} in {mode:?} mode");
         }
     }
     Ok(())
 }
 
 fn cmd_switch(
-    scx_loader: ScxLoaderProxyBlocking,
-    sched: Option<String>,
-    mode: Option<ScxLoaderMode>,
+    scx_loader: LoaderClientProxyBlocking,
+    sched_name: Option<String>,
+    mode_name: Option<SchedMode>,
     args: Option<Vec<String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Verify scx_loader is running a scheduler
@@ -82,32 +82,31 @@ fn cmd_switch(
         exit(1);
     }
 
-    let sched = match sched {
-        Some(sched) => validate_sched(scx_loader.clone(), sched),
-        None => scx_loader.current_scheduler().unwrap(),
+    let sched: SupportedSched = match sched_name {
+        Some(sched_name) => validate_sched(scx_loader.clone(), sched_name),
+        None => SupportedSched::try_from(scx_loader.current_scheduler().unwrap().as_str()).unwrap(),
     };
-    let mode = match mode {
-        Some(mode) => mode,
-        None => ScxLoaderMode::from_u32(scx_loader.scheduler_mode().unwrap()).unwrap(),
+    let mode: SchedMode = match mode_name {
+        Some(mode_name) => mode_name,
+        None => scx_loader.scheduler_mode().unwrap(),
     };
     match args {
         Some(args) => {
-            scx_loader.switch_scheduler_with_args(sched.clone(), args.clone())?;
+            scx_loader.switch_scheduler_with_args(sched.clone(), &args.clone())?;
             println!(
-                "switched to {} with arguments \"{}\"",
-                sched,
+                "switched to {sched:?} with arguments \"{}\"",
                 args.join(" ")
             );
         }
         None => {
-            scx_loader.switch_scheduler(sched.clone(), mode.as_u32())?;
-            println!("switched to {} in {} mode", sched, mode.as_str());
+            scx_loader.switch_scheduler(sched.clone(), mode.clone())?;
+            println!("switched to {sched:?} in {mode:?} mode");
         }
     }
     Ok(())
 }
 
-fn cmd_stop(scx_loader: ScxLoaderProxyBlocking) -> Result<(), Box<dyn std::error::Error>> {
+fn cmd_stop(scx_loader: LoaderClientProxyBlocking) -> Result<(), Box<dyn std::error::Error>> {
     scx_loader.stop_scheduler()?;
     println!("stopped");
     Ok(())
@@ -116,7 +115,7 @@ fn cmd_stop(scx_loader: ScxLoaderProxyBlocking) -> Result<(), Box<dyn std::error
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let conn = Connection::system()?;
-    let scx_loader = ScxLoaderProxyBlocking::new(&conn)?;
+    let scx_loader = LoaderClientProxyBlocking::new(&conn)?;
 
     match cli.command {
         Commands::Get => cmd_get(scx_loader)?,
@@ -149,7 +148,7 @@ fn remove_scx_prefix(input: &String) -> String {
     input.to_string()
 }
 
-fn validate_sched(scx_loader: ScxLoaderProxyBlocking, sched: String) -> String {
+fn validate_sched(scx_loader: LoaderClientProxyBlocking, sched: String) -> SupportedSched {
     let raw_supported_scheds: Vec<String> = scx_loader.supported_schedulers().unwrap();
     let supported_scheds: Vec<String> = raw_supported_scheds
         .iter()
@@ -167,5 +166,5 @@ fn validate_sched(scx_loader: ScxLoaderProxyBlocking, sched: String) -> String {
         exit(1);
     }
 
-    ensure_scx_prefix(sched)
+    SupportedSched::try_from(ensure_scx_prefix(sched).as_str()).unwrap()
 }
