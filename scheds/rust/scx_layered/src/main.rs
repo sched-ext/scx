@@ -104,6 +104,7 @@ lazy_static! {
                 kind: LayerKind::Confined {
                     util_range: (0.8, 0.9),
                     cpus_range: Some((0, 16)),
+                    protected: false,
                     common: LayerCommon {
                         min_exec_us: 1000,
                         yield_ignore: 0.0,
@@ -164,6 +165,7 @@ lazy_static! {
                 kind: LayerKind::Confined {
                     cpus_range: None,
                     util_range: (0.2, 0.8),
+                    protected: false,
                     common: LayerCommon {
                         min_exec_us: 800,
                         yield_ignore: 0.0,
@@ -192,6 +194,7 @@ lazy_static! {
                 kind: LayerKind::Grouped {
                     cpus_range: None,
                     util_range: (0.5, 0.6),
+                    protected: false,
                     common: LayerCommon {
                         min_exec_us: 200,
                         yield_ignore: 0.0,
@@ -403,6 +406,9 @@ lazy_static! {
 ///   the nodes value is set the cpuset of LLCs will be or'ed with the nodes
 ///   config.
 ///
+/// - protected: If set the layer's idle CPUs will not be used to execute
+/// tasks from other layers. The layer CPUs can still be preempted by
+/// preemptive layers.
 ///
 /// Similar to matches, adding new policies and extending existing ones
 /// should be relatively straightforward.

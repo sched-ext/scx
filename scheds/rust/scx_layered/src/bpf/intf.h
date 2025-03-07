@@ -324,6 +324,7 @@ struct layer {
 	u32			llc_drain_cnt;
 
 	char			name[MAX_LAYER_NAME];
+	bool			protected;
 };
 
 struct scx_cmd {

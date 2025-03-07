@@ -60,6 +60,8 @@ const volatile bool enable_gpu_support = false;
 const volatile u64 antistall_sec = 3;
 const u32 zero_u32 = 0;
 
+/* Tracking unprotected instead of protected CPUs to make bitops simpler.*/
+private(unprotected_cpumask) struct bpf_cpumask __kptr *unprotected_cpumask;
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
 struct layer layers[MAX_LAYERS];
@@ -156,6 +158,126 @@ struct {
 	__type(value, struct cpu_ctx);
 	__uint(max_entries, 1);
 } cpu_ctxs SEC(".maps");
+
+struct layer_cpumask_wrapper {
+	struct bpf_cpumask __kptr *cpumask;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct layer_cpumask_wrapper);
+	__uint(max_entries, 2);
+} percpu_tmpmask SEC(".maps");
+
+static s32 create_save_cpumask(struct bpf_cpumask **kptr)
+{
+	struct bpf_cpumask *cpumask;
+
+	cpumask = bpf_cpumask_create();
+	if (!cpumask) {
+		scx_bpf_error("Failed to create cpumask");
+		return -ENOMEM;
+	}
+
+	cpumask = bpf_kptr_xchg(kptr, cpumask);
+	if (cpumask) {
+		scx_bpf_error("kptr already had cpumask");
+		bpf_cpumask_release(cpumask);
+	}
+
+	return 0;
+}
+
+
+static inline struct bpf_cpumask *lookup_percpu_tmpmask(int ind)
+{
+	struct layer_cpumask_wrapper *wrapper; 
+
+	wrapper = bpf_map_lookup_elem(&percpu_tmpmask, &ind);
+	if (!wrapper)
+		return NULL;
+
+	return wrapper->cpumask;
+}
+
+static inline int init_percpu_tmpmask_one(s32 cpu, int ind)
+{
+	struct layer_cpumask_wrapper *wrapper;
+
+	wrapper = bpf_map_lookup_percpu_elem(&percpu_tmpmask, &ind, cpu);
+	if (!wrapper)
+		return -EINVAL;
+
+	return create_save_cpumask(&wrapper->cpumask);
+}
+
+static inline int init_percpu_tmpmasks(s32 cpu)
+{
+	int ret;
+	int i;
+
+	bpf_for(i, 0, 2) {
+		ret = init_percpu_tmpmask_one(cpu, i);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static __always_inline 
+struct bpf_cpumask *idle_cpumask_unprotected(struct cpu_ctx *cpuc, const struct cpumask *layermask)
+{
+	const struct cpumask __kptr *idlemask;
+	struct bpf_cpumask __kptr *cpumask;
+
+	if (!(cpumask = lookup_percpu_tmpmask(0))) {
+		scx_bpf_error("cpu context has no mask");
+		return NULL;
+	}
+
+	idlemask = scx_bpf_get_idle_cpumask();
+	if (!idlemask || !unprotected_cpumask) {
+		scx_bpf_put_idle_cpumask(idlemask);
+		return NULL;
+	}
+
+	/* Candidate CPUs are either in this layer or not in a protected layer. */
+	bpf_cpumask_or(cpumask, layermask, cast_mask(unprotected_cpumask));
+
+	bpf_cpumask_and(cpumask, cast_mask(cpumask), idlemask);
+
+	scx_bpf_put_idle_cpumask(idlemask);
+
+	return cpumask;
+}
+
+
+static __always_inline 
+struct bpf_cpumask *idle_smtmask_unprotected(struct cpu_ctx *cpuc, const struct cpumask *layermask)
+{
+	const struct cpumask __kptr *idlemask;
+	struct bpf_cpumask __kptr *cpumask;
+
+	if (!(cpumask = lookup_percpu_tmpmask(0)))
+		return NULL;
+
+	idlemask = scx_bpf_get_idle_smtmask();
+	if (!idlemask || !unprotected_cpumask) {
+		scx_bpf_put_idle_cpumask(idlemask);
+		return NULL;
+	}
+
+	/* Candidate CPUs are either in this layer or not in a protected layer. */
+	bpf_cpumask_or(cpumask, layermask, cast_mask(unprotected_cpumask));
+
+	bpf_cpumask_and(cpumask, cast_mask(cpumask), idlemask);
+
+	scx_bpf_put_idle_cpumask(idlemask);
+
+	return cpumask;
+}
 
 static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 {
@@ -298,10 +420,6 @@ static void lstat_inc(u32 id, struct layer *layer, struct cpu_ctx *cpuc)
 {
 	lstat_add(id, layer, cpuc, 1);
 }
-
-struct layer_cpumask_wrapper {
-	struct bpf_cpumask __kptr *cpumask;
-};
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -696,10 +814,22 @@ static void maybe_refresh_layered_cpus_node(struct task_struct *p, struct task_c
 }
 
 static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
-			      const struct cpumask *idle_smtmask)
+			      const struct cpumask *idle_smtmask, struct layer *layer)
 {
-	bool prev_in_cand = bpf_cpumask_test_cpu(prev_cpu, cand_cpumask);
+	const struct cpumask *layered_mask = lookup_layer_cpumask(layer->id);
+	struct bpf_cpumask *cpumask;
+	bool prev_in_cand;
 	s32 cpu;
+
+	if (!(cpumask = lookup_percpu_tmpmask(1)))
+		return -1;
+
+	if (!layered_mask || !unprotected_cpumask)
+		return -1;
+
+	bpf_cpumask_or(cpumask, cast_mask(unprotected_cpumask), layered_mask);
+	bpf_cpumask_and(cpumask, cast_mask(cpumask), cand_cpumask);
+	prev_in_cand = bpf_cpumask_test_cpu(prev_cpu, cast_mask(cpumask));
 
 	/*
 	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
@@ -711,7 +841,7 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 			return prev_cpu;
 
-		cpu = scx_bpf_pick_idle_cpu(cand_cpumask, SCX_PICK_IDLE_CORE);
+		cpu = scx_bpf_pick_idle_cpu(cast_mask(cpumask), SCX_PICK_IDLE_CORE);
 		if (cpu >= 0)
 			return cpu;
 	}
@@ -719,7 +849,7 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 	if (prev_in_cand && scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 		return prev_cpu;
 
-	return scx_bpf_pick_idle_cpu(cand_cpumask, 0);
+	return scx_bpf_pick_idle_cpu(cast_mask(cpumask), 0);
 }
 
 static __always_inline
@@ -769,8 +899,8 @@ s32 pick_idle_big_little(struct layer *layer, struct task_ctx *taskc,
 
 		bpf_cpumask_and(tmp_cpumask, cast_mask(taskc->layered_mask),
 				cast_mask(big_cpumask));
-		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask),
-					 prev_cpu, idle_smtmask);
+		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask), prev_cpu,
+					 idle_smtmask, layer);
 		goto out_put;
 	}
 	case GROWTH_ALGO_LITTLE_BIG: {
@@ -783,8 +913,8 @@ s32 pick_idle_big_little(struct layer *layer, struct task_ctx *taskc,
 			goto out_put;
 		bpf_cpumask_and(tmp_cpumask, cast_mask(taskc->layered_mask),
 				cast_mask(tmp_cpumask));
-		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask),
-					 prev_cpu, idle_smtmask);
+		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask), prev_cpu,
+					 idle_smtmask, layer);
 		goto out_put;
 	}
 	default:
@@ -801,7 +931,8 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		  struct cpu_ctx *cpuc, struct task_ctx *taskc, struct layer *layer,
 		  bool from_selcpu)
 {
-	const struct cpumask *idle_smtmask, *layer_cpumask, *layered_cpumask, *cpumask;
+	const struct cpumask *layer_cpumask, *layered_cpumask, *cpumask;
+	struct bpf_cpumask *bpfmask, *idle_smtmask;
 	struct cpu_ctx *prev_cpuc;
 	u32 layer_id = layer->id;
 	u64 cpus_seq;
@@ -849,14 +980,15 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	if (READ_ONCE(layer->check_no_idle)) {
 		bool has_idle;
 
-		cpumask = scx_bpf_get_idle_cpumask();
+		bpfmask = idle_cpumask_unprotected(cpuc, layered_cpumask);
+		if (!bpfmask)
+			return -1;
 
 		if (layer->kind == LAYER_KIND_CONFINED)
-			has_idle = bpf_cpumask_intersects(layered_cpumask, cpumask);
+			has_idle = bpf_cpumask_intersects(layered_cpumask, cast_mask(bpfmask));
 		else
-			has_idle = bpf_cpumask_intersects(p->cpus_ptr, cpumask);
+			has_idle = bpf_cpumask_intersects(p->cpus_ptr, cast_mask(bpfmask));
 
-		scx_bpf_put_idle_cpumask(cpumask);
 		if (!has_idle)
 			return -1;
 	}
@@ -864,14 +996,14 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	if ((nr_llcs > 1 || nr_nodes > 1) &&
 	    !(prev_cpuc = lookup_cpu_ctx(prev_cpu)))
 		return -1;
-	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
+	if (!(idle_smtmask = idle_smtmask_unprotected(cpuc, layer_cpumask)))
 		return -1;
 
 	/*
 	 * If the system has a big/little architecture and uses any related
 	 * layer growth algos try to find a cpu in that topology first.
 	 */
-	cpu = pick_idle_big_little(layer, taskc, idle_smtmask, prev_cpu);
+	cpu = pick_idle_big_little(layer, taskc, cast_mask(idle_smtmask), prev_cpu);
 	if (cpu >=0)
 		goto out_put;
 
@@ -887,7 +1019,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 			cpu = -1;
 			goto out_put;
 		}
-		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask)) >= 0)
+		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, cast_mask(idle_smtmask), layer)) >= 0)
 			goto out_put;
 
 		if (!(prev_llcc = lookup_llc_ctx(prev_cpuc->llc_id)) ||
@@ -908,18 +1040,18 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 			cpu = -1;
 			goto out_put;
 		}
-		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask)) >= 0)
+		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, cast_mask(idle_smtmask), layer)) >= 0)
 			goto out_put;
 	}
 
-	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu, idle_smtmask)) >= 0)
+	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu, cast_mask(idle_smtmask), layer)) >= 0)
 		goto out_put;
 
 	/*
 	 * If the layer is an open one, we can try the whole machine.
 	 */
 	if (layer->kind != LAYER_KIND_CONFINED &&
-	    (cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu, idle_smtmask)) >= 0) {
+	    (cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu, cast_mask(idle_smtmask), layer)) >= 0) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
 		goto out_put;
 	}
@@ -941,7 +1073,6 @@ out_put:
 			WRITE_ONCE(layer->check_no_idle, true);
 	}
 
-	scx_bpf_put_idle_cpumask(idle_smtmask);
 	return cpu;
 }
 
@@ -1083,19 +1214,18 @@ static void task_uncharge_qrt(struct task_ctx *taskc)
 	taskc->qrt_llc_id = MAX_LLCS;
 }
 
-static void layer_kick_idle_cpu(struct layer *layer)
+static void layer_kick_idle_cpu(struct cpu_ctx *cpuc, struct layer *layer)
 {
-	const struct cpumask *layer_cpumask, *idle_smtmask;;
+	const struct cpumask *layer_cpumask;
+	struct bpf_cpumask *idle_smtmask;
 	s32 cpu;
 
 	if (!(layer_cpumask = lookup_layer_cpumask(layer->id)) ||
-	    !(idle_smtmask = scx_bpf_get_idle_smtmask()))
+	    !(idle_smtmask = idle_smtmask_unprotected(cpuc, layer_cpumask)))
 		return;
 
-	if ((cpu = pick_idle_cpu_from(layer_cpumask, 0, idle_smtmask)) >= 0)
+	if ((cpu = pick_idle_cpu_from(layer_cpumask, 0, cast_mask(idle_smtmask), layer)) >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-
-	scx_bpf_put_idle_cpumask(idle_smtmask);
 }
 
 void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
@@ -1300,7 +1430,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (!layer->nr_llc_cpus[llc_id]) {
 		layer_llc_drain_enable(layer, llc_id);
-		layer_kick_idle_cpu(layer);
+		layer_kick_idle_cpu(cpuc, layer);
 	}
 }
 
@@ -1358,8 +1488,20 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 			return true;
 		}
 	} else {
-		const struct cpumask *idle_cpumask = scx_bpf_get_idle_cpumask();
+		const struct cpumask *layered_cpumask = lookup_layer_cpumask(layer->id);
+		struct bpf_cpumask *idle_cpumask;
 		bool has_idle = false;
+
+		if (!layered_cpumask) {
+			scx_bpf_error("layer%d has no mask", layer->id);
+			return false;
+		}
+
+		idle_cpumask = idle_cpumask_unprotected(cpuc, layered_cpumask);
+		if (!idle_cpumask) {
+			scx_bpf_error("could not generate idle CPU mask");
+			return false;
+		}
 
 		/*
 		 * If @p is in an open layer, keep running if there's any idle
@@ -1367,16 +1509,14 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 		 * idle CPUs.
 		 */
 		if (layer->kind != LAYER_KIND_CONFINED) {
-			has_idle = !bpf_cpumask_empty(idle_cpumask);
+			has_idle = !bpf_cpumask_empty(cast_mask(idle_cpumask));
 		} else {
 			struct cpumask *layer_cpumask;
 
 			if ((layer_cpumask = lookup_layer_cpumask(layer->id)))
-				has_idle = bpf_cpumask_intersects(idle_cpumask,
+				has_idle = bpf_cpumask_intersects(cast_mask(idle_cpumask),
 								  layer_cpumask);
 		}
-
-		scx_bpf_put_idle_cpumask(idle_cpumask);
 
 		if (has_idle) {
 			p->scx.slice = layer->slice_ns;
@@ -1768,7 +1908,13 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 				return;
 			if (try_consume_layer(owner_layer->id, cpuc, llcc))
 				return;
+
+			/* Cpu is in a protected layer, do not pull from other layers. */
+			if (owner_layer->protected)
+				return;
 		}
+
+
 
 		/* try grouped/open preempting if not tried yet */
 		if (!tried_preempting &&
@@ -2037,25 +2183,6 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 		      taskc->layer_id, p->comm, p->pid, cgrp_path);
 }
 
-static s32 create_save_cpumask(struct bpf_cpumask **kptr)
-{
-	struct bpf_cpumask *cpumask;
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask) {
-		scx_bpf_error("Failed to create cpumask");
-		return -ENOMEM;
-	}
-
-	cpumask = bpf_kptr_xchg(kptr, cpumask);
-	if (cpumask) {
-		scx_bpf_error("kptr already had cpumask");
-		bpf_cpumask_release(cpumask);
-	}
-
-	return 0;
-}
-
 static s32 create_node(u32 node_id)
 {
 	u32 cpu;
@@ -2301,6 +2428,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct layer *task_layer;
 	u64 now = scx_bpf_now();
 	u64 usage_since_idle;
+	bool cpu_is_protected;
 	s32 task_lid;
 	u64 used;
 
@@ -2355,6 +2483,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	cpuc->protect_owned = false;
 	cpuc->protect_owned_preempt = false;
 
+	cpu_is_protected = false;
 	if (cpuc->in_open_layers) {
 		if (task_layer->kind == LAYER_KIND_OPEN && !task_layer->preempt) {
 			cpuc->protect_owned = usage_since_idle > min_open_layer_disallow_open_after_ns;
@@ -2370,7 +2499,16 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		if (cpu_layer) {
 			cpuc->protect_owned = usage_since_idle > cpu_layer->disallow_open_after_ns;
 			cpuc->protect_owned_preempt = usage_since_idle > cpu_layer->disallow_preempt_after_ns;
+			cpu_is_protected = cpu_layer->protected;
 		}
+	}
+
+
+	if (unprotected_cpumask) {
+		if (cpu_is_protected)
+			bpf_cpumask_clear_cpu(cpuc->cpu, unprotected_cpumask);
+		else
+			bpf_cpumask_set_cpu(cpuc->cpu, unprotected_cpumask);
 	}
 
 	cpuc->current_preempt = false;
@@ -3018,6 +3156,9 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 	}
 	cpuc->task_layer_id = MAX_LAYERS;
 
+	if (init_percpu_tmpmasks(cpu))
+		return -ENOMEM;
+
 	if ((u8_ptr = MEMBER_VPTR(all_cpus, [cpu / 8]))) {
 		if (*u8_ptr & (1 << (cpu % 8))) {
 			bpf_cpumask_set_cpu(cpu, cpumask);
@@ -3071,7 +3212,7 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
-	struct bpf_cpumask *cpumask, *tmp_big_cpumask;
+	struct bpf_cpumask *cpumask, *tmp_big_cpumask, *tmp_unprotected_cpumask;
 	int i, nr_online_cpus, ret;
 
 	cpumask = bpf_cpumask_create();
@@ -3084,12 +3225,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		return -ENOMEM;
 	}
 
+	tmp_unprotected_cpumask = bpf_cpumask_create();
+	if (!tmp_unprotected_cpumask) {
+		bpf_cpumask_release(tmp_big_cpumask);
+		bpf_cpumask_release(cpumask);
+		return -ENOMEM;
+	}
+
 	nr_online_cpus = 0;
 	bpf_for(i, 0, nr_possible_cpus) {
 		ret = init_cpu(i, &nr_online_cpus, cpumask, tmp_big_cpumask);
 		if (ret != 0) {
 			bpf_cpumask_release(cpumask);
 			bpf_cpumask_release(tmp_big_cpumask);
+			bpf_cpumask_release(tmp_unprotected_cpumask);
 			return ret;
 		}
 	}
@@ -3101,6 +3250,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	tmp_big_cpumask = bpf_kptr_xchg(&big_cpumask, tmp_big_cpumask);
 	if (tmp_big_cpumask)
 		bpf_cpumask_release(tmp_big_cpumask);
+
+	bpf_cpumask_setall(tmp_unprotected_cpumask);
+	tmp_unprotected_cpumask = bpf_kptr_xchg(&unprotected_cpumask, tmp_unprotected_cpumask);
+	if (tmp_unprotected_cpumask)
+		bpf_cpumask_release(tmp_unprotected_cpumask);
 
 	bpf_for(i, 0, nr_nodes) {
 		ret = create_node(i);
