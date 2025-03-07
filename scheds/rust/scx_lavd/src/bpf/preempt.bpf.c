@@ -195,8 +195,7 @@ null_out:
 	return NULL;
 }
 
-static bool try_kick_cpu(struct task_struct *p, struct cpu_ctx *cpuc_cur,
-			 struct cpu_ctx *victim_cpuc)
+static bool try_kick_cpu(struct task_struct *p, struct cpu_ctx *victim_cpuc)
 {
 	/*
 	 * Kicking the victim CPU does _not_ guarantee that task @p will run on
@@ -263,7 +262,7 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 	 * If a victim CPU is chosen, preempt the victim by kicking it.
 	 */
 	if (victim_cpuc)
-		ret = try_kick_cpu(p, cpuc_cur, victim_cpuc);
+		ret = try_kick_cpu(p, victim_cpuc);
 
 	return ret;
 }

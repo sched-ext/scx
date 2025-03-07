@@ -1107,8 +1107,8 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 
 	/*
 	 * If there is no idle cpu for an eligible task, try to preempt a task.
-	 * Try to find and kick a victim CPU, which runs a less urgent task.
-	 * The kick will be done asynchronously.
+	 * Try to find and kick a victim CPU, which runs a less urgent task,
+	 * from dsq_id. The kick will be done asynchronously.
 	 */
 	now = scx_bpf_now();
 	try_find_and_kick_victim_cpu(p, taskc, cpuc_cur, dsq_id, now);
@@ -1337,13 +1337,13 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
-		scx_bpf_error("Failed to look up cpu context context");
+		scx_bpf_error("Failed to look up cpu context");
 		return;
 	}
 	dsq_id = cpuc->cpdom_id;
 
 	/*
-	 * If a task newly holds a lock, continue to execute it
+	 * If a task is holding a new lock, continue to execute it
 	 * to make system-wide forward progress.
 	 */
 	if (prev) {
@@ -1352,7 +1352,6 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 			scx_bpf_error("Failed to look up task context");
 			return;
 		}
-
 		if (try_continue_lock_holder(prev, taskc, cpuc))
 			return;
 	}
@@ -1378,91 +1377,79 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/*
-	 * If the CPU belonges to the active or overflow set, dispatch a task.
+	 * If the current CPU belonges to either active or overflow set,
+	 * dispatch a task and go.
 	 */
 	if (bpf_cpumask_test_cpu(cpu, cast_mask(active)) ||
-	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
+	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw)))
 		try_consume = true;
-		goto unlock_out;
+
+	/*
+	 * If the previous task can run on this CPU but not on either active
+	 * or overflow set, extend the overflow set and go.
+	 */
+	if (!try_consume && prev &&
+	    bpf_cpumask_test_cpu(cpu, prev->cpus_ptr) &&
+	    !bpf_cpumask_intersects(cast_mask(active), prev->cpus_ptr) &&
+	    !bpf_cpumask_intersects(cast_mask(ovrflw), prev->cpus_ptr)) {
+		bpf_cpumask_set_cpu(cpu, ovrflw);
+		try_consume = true;
 	}
+
+	if (try_consume)
+		goto unlock_out;
 
 	/*
 	 * If this CPU is not either in active or overflow CPUs, it tries to
-	 * find and run a task pinned to run on this CPU.
+	 * find and run the task pinned on this CPU.
 	 */
 	bpf_for_each(scx_dsq, p, dsq_id, 0) {
 		/*
-		 * Prioritize kernel tasks because most kernel tasks are pinned
-		 * to a particular CPU and latency-critical (e.g., ksoftirqd,
-		 * kworker, etc).
+		 * Note that this is a hack to bypass the restriction of the
+		 * current BPF not trusting the pointer p. Once the BPF
+		 * verifier gets smarter, we can remove bpf_task_from_pid().
 		 */
-		if (is_kernel_task(p)) {
+		p = bpf_task_from_pid(p->pid);
+		if (!p)
+			break;
+
+		/*
+		 * If a task can run on this CPU but not on either active
+		 * or overflow set, extend the overflow set and go.
+		 */
+		if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
+		    !bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) &&
+		    !bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr)) {
 			bpf_cpumask_set_cpu(cpu, ovrflw);
+			bpf_task_release(p);
 			try_consume = true;
 			break;
 		}
 
 		/*
-		 * This is a hack to bypass the restriction of the current BPF
-		 * not trusting the pointer p. Once the BPF verifier gets
-		 * smarter, we can remove bpf_task_from_pid().
+		 * Otherwise, try another task.
 		 */
-		p = bpf_task_from_pid(p->pid);
-		if (!p)
-			goto unlock_out;
-
-		/*
-		 * If a task can run on active or overflow CPUs, it just does
-		 * nothing to go idle.
-		 */
-		if (bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
-		    bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))
-			goto release_break;
-
-		/*
-		 * This is the first time a particular pinned user-space task
-		 * is run on this CPU at this interval. From now on, this CPU
-		 * will be part of the overflow CPU so can be used to run the
-		 * pinned task and the other tasks. Note that we don't need to
-		 * kick @cpu here since @cpu is the current CPU, which is
-		 * obviously not idle.
-		 */
-		bpf_cpumask_set_cpu(cpu, ovrflw);
-
-		/*
-		 * Otherwise, that means there is a task that should run on
-		 * this particular CPU. So, consume one of such tasks.
-		 *
-		 * Note that this path is not optimized since
-		 * scx_bpf_dsq_move_to_local() should traverse until it finds
-		 * any task that can run on this CPU. The scheduled task might
-		 * be runnable on the active cores. We will optimize this path
-		 * after introducing per-core DSQ.
-		 */
-		try_consume = true;
-
-release_break:
 		bpf_task_release(p);
-		break;
 	}
 
 unlock_out:
 	bpf_rcu_read_unlock();
 
-	/*
-	 * Note that the verifier in 6.8 kernel cannot correctly verifies the
-	 * code when consume_task() is under a rcu-read-lock region. Hence, we
-	 * moveed it outside of the rcu region. :-(
-	 */
 consume_out:
 	/*
-	 * Consume a task if requested.
+	 * If this CPU should go idle, do nothing.
 	 */
-	if (try_consume && consume_task(cpuc))
+	if (!try_consume)
 		return;
 
 	/*
-	 * If nothing to run, continue to run the previous task.
+	 * Otherwise, consume a task.
+	 */
+	if (consume_task(cpuc))
+		return;
+
+	/*
+	 * If nothing to run, continue running the previous task.
 	 */
 	if (prev && prev->scx.flags & SCX_TASK_QUEUED)
 		prev->scx.slice = calc_time_slice(prev, taskc);
@@ -2210,7 +2197,8 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .init_task		= (void *)lavd_init_task,
 	       .init			= (void *)lavd_init,
 	       .exit			= (void *)lavd_exit,
-	       .flags			= SCX_OPS_KEEP_BUILTIN_IDLE |
+	       .flags			= SCX_OPS_ENQ_LAST |
+					  SCX_OPS_KEEP_BUILTIN_IDLE |
 					  SCX_OPS_ENQ_EXITING,
 	       .timeout_ms		= 30000U,
 	       .name			= "lavd");
