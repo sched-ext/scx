@@ -215,7 +215,7 @@ static bool is_queued(const struct task_struct *p)
 }
 
 /*
- * Return true if @cpu is a full-idle SMT core (or if SMT is disabled),
+ * Return true if @cpu is in a full-idle physical core,
  * false otherwise.
  */
 static bool is_fully_idle(s32 cpu)
@@ -223,9 +223,6 @@ static bool is_fully_idle(s32 cpu)
 	const struct cpumask *idle_smtmask;
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
 	bool is_idle;
-
-	if (!smt_enabled)
-		return true;
 
 	idle_smtmask = __COMPAT_scx_bpf_get_idle_smtmask_node(node);
 	is_idle = bpf_cpumask_test_cpu(cpu, idle_smtmask);
