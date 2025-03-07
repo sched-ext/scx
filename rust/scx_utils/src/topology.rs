@@ -115,6 +115,8 @@ pub struct Cpu {
     /// Base operational frqeuency. Only available on Intel Turbo Boost
     /// CPUs. If not available, this will simply return maximum frequency.
     pub base_freq: usize,
+    /// The best-effort guessting of cpu_capacity scaled to 1024
+    pub cpu_capacity: usize,
     pub trans_lat_ns: usize,
     pub l2_id: usize,
     pub l3_id: usize,
@@ -405,6 +407,7 @@ fn create_insert_cpu(
     topo_ctx: &mut TopoCtx,
     big_little: bool,
     avg_cpu_freq: Option<(usize, usize)>,
+    capacity_src: Option<(String, usize, usize)>,
     flatten_llc: bool,
 ) -> Result<()> {
     // CPU is offline. The Topology hierarchy is read-only, and assumes
@@ -446,6 +449,12 @@ fn create_insert_cpu(
     let max_freq = read_file_usize(&freq_path.join("scaling_max_freq")).unwrap_or(0);
     let base_freq = read_file_usize(&freq_path.join("base_frequency")).unwrap_or(max_freq);
     let trans_lat_ns = read_file_usize(&freq_path.join("cpuinfo_transition_latency")).unwrap_or(0);
+
+    // Cpu capacity
+    let (cap_suffix, _avg_rcap, max_rcap) = capacity_src.unwrap_or(("".to_string(), 1024, 1024));
+    let cap_path = cpu_path.join(cap_suffix);
+    let rcap = read_file_usize(&cap_path).unwrap_or(max_rcap);
+    let cpu_capacity = (rcap * 1024) / max_rcap;
 
     let num_llcs = topo_ctx.node_llc_kernel_ids.len();
     let llc_id = topo_ctx
@@ -507,6 +516,7 @@ fn create_insert_cpu(
             min_freq,
             max_freq,
             base_freq,
+            cpu_capacity,
             trans_lat_ns,
             l2_id,
             l3_id,
@@ -546,6 +556,57 @@ fn read_cpu_ids() -> Result<Vec<usize>> {
     }
     cpu_ids.sort();
     Ok(cpu_ids)
+}
+
+fn cpu_capacity_source() -> Option<(String, usize, usize)> {
+    // Sources for guessing cpu_capacity under /sys/devices/system/cpu/cpuX.
+    // They should be ordered from the most precise to the least precise.
+    let sources = [
+        "cpufreq/amd_pstate_highest_perf",
+        "acpi_cppc/highest_perf",
+        "cpu_capacity",
+        "cpufreq/cpuinfo_max_freq",
+    ];
+
+    // Find the most precise source for cpu_capacity estimation.
+    let prefix = "/sys/devices/system/cpu/cpu0";
+    let mut raw_capacity = 0;
+    let mut suffix = sources[sources.len() - 1];
+    for src in sources {
+        let path_str = [prefix, src].join("/");
+        let path = Path::new(&path_str);
+        raw_capacity = read_file_usize(&path).unwrap_or(0);
+        if raw_capacity > 0 {
+            suffix = src;
+            break;
+        }
+    }
+    if raw_capacity <= 0 {
+        return None;
+    }
+
+    // Find the max raw_capacity value for scaling to 1024.
+    let mut max_raw_capacity = 0;
+    let mut avg_raw_capacity = 0;
+    let mut nr_cpus = 0;
+    let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*").ok()?;
+    for cpu_path in cpu_paths.filter_map(Result::ok) {
+        let raw_capacity = read_file_usize(&cpu_path.join(suffix)).unwrap_or(0);
+        if max_raw_capacity < raw_capacity {
+            max_raw_capacity = raw_capacity;
+        }
+        avg_raw_capacity += raw_capacity;
+        nr_cpus += 1;
+    }
+    if max_raw_capacity <= 0 {
+        return None;
+    }
+
+    Some((
+        suffix.to_string(),
+        avg_raw_capacity / nr_cpus,
+        max_raw_capacity,
+    ))
 }
 
 // Return the average base frequency across all CPUs and the highest maximum frequency.
@@ -616,6 +677,7 @@ fn create_default_node(
         bail!("/sys/devices/system/cpu sysfs node not found");
     }
 
+    let capacity_src = cpu_capacity_source();
     let avg_cpu_freq = avg_cpu_freq();
     let big_little = has_big_little().unwrap_or(false);
     let cpu_ids = read_cpu_ids()?;
@@ -627,6 +689,7 @@ fn create_default_node(
             topo_ctx,
             big_little,
             avg_cpu_freq,
+            capacity_src.clone(),
             flatten_llc,
         )?;
     }
@@ -679,6 +742,7 @@ fn create_numa_nodes(
         let cpu_pattern = numa_path.join("cpu[0-9]*");
         let cpu_paths = glob(cpu_pattern.to_string_lossy().as_ref())?;
         let big_little = has_big_little().unwrap_or(false);
+        let capacity_src = cpu_capacity_source();
         let avg_cpu_freq = avg_cpu_freq();
         for cpu_path in cpu_paths.filter_map(Result::ok) {
             let cpu_str = cpu_path.to_str().unwrap().trim();
@@ -696,6 +760,7 @@ fn create_numa_nodes(
                 topo_ctx,
                 big_little,
                 avg_cpu_freq,
+                capacity_src.clone(),
                 false,
             )?;
         }

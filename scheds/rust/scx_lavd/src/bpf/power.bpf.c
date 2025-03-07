@@ -535,7 +535,7 @@ static u16 get_cputurbo_cap(void)
 	int nr_turbo = 0, cpu;
 
 	/*
-	 * Find the maximum CPU frequency
+	 * Find the maximum CPU capacity
 	 */
 	for (cpu = 0; cpu < nr_cpu_ids && cpu < LAVD_CPU_ID_MAX; cpu++) {
 		if (__cpu_capacity_hint[cpu] > turbo_cap) {
@@ -545,7 +545,7 @@ static u16 get_cputurbo_cap(void)
 	}
 
 	/*
-	 * If all CPU's frequencies are the same, ignore the turbo.
+	 * If all CPU's capacities are the same, ignore the turbo.
 	 */
 	if (nr_turbo <= 1)
 		turbo_cap = 0;
