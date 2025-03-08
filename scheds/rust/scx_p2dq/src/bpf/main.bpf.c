@@ -41,6 +41,7 @@ const volatile u64 dsq_shift = 2;
 const volatile int init_dsq_index = 0;
 const volatile u64 min_slice_us = 100;
 const volatile u32 interactive_ratio = 10;
+const volatile u32 min_nr_queued_pick2 = 10;
 
 const volatile bool autoslice = true;
 const volatile bool interactive_sticky = false;
@@ -287,11 +288,15 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *left, struct llc_ctx *ri
 		right_load += *MEMBER_VPTR(right->dsq_load, [i]);
 	}
 
+	if (min_nr_queued_pick2 > 0 &&
+	    (left_queued < min_nr_queued_pick2 && right_queued < min_nr_queued_pick2))
+		return NULL;
+
 	if (((left_queued > 0 || right_queued > 0) && left_queued < right_queued) ||
 	    left_load > right_load)
 		return most_loaded ? right : left;
 
-	return most_loaded ? left : right;
+	return NULL;
 }
 
 static s32 pick_two_cpu(struct task_ctx *taskc, bool *is_idle)

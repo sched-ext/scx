@@ -52,6 +52,24 @@ use crate::bpf_intf::stat_idx_P2DQ_STAT_LLC_MIGRATION;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_NODE_MIGRATION;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_PICK2;
 
+lazy_static::lazy_static! {
+        pub static ref TOPO: Topology = Topology::new().unwrap();
+}
+
+fn get_default_pick2_nr_queued() -> u32 {
+    let max_llc_cpus = TOPO
+        .all_llcs
+        .values()
+        .map(|llc| llc.cores.len())
+        .max()
+        .unwrap_or(1) as u32;
+    if max_llc_cpus > 1 {
+        max_llc_cpus / 2
+    } else {
+        max_llc_cpus
+    }
+}
+
 /// scx_p2dq: A pick 2 dumb queuing load balancing scheduler.
 ///
 /// The BPF part does simple vtime or round robin scheduling in each domain
@@ -99,6 +117,10 @@ struct Opts {
     /// DSQ scaling shift, each queue min timeslice is shifted by the scaling shift.
     #[clap(short = 'x', long, default_value = "4")]
     dsq_shift: u64,
+
+    /// Minimum number of queued tasks to use pick2 balancing, 0 to always enabled.
+    #[clap(short = 'm', long, default_value_t = get_default_pick2_nr_queued())]
+    min_nr_queued_pick2: u32,
 
     /// Number of dumb DSQs.
     #[clap(short = 'q', long, default_value = "3")]
@@ -155,7 +177,6 @@ impl<'a> Scheduler<'a> {
         );
         let mut skel = scx_ops_open!(skel_builder, open_object, p2dq).unwrap();
 
-        let topo = Topology::new()?;
         if opts.init_dsq_index > opts.dumb_queues - 1 {
             panic!("Invalid init_dsq_index {}", opts.init_dsq_index);
         }
@@ -196,17 +217,18 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.autoslice = opts.autoslice;
         skel.maps.rodata_data.interactive_ratio = opts.interactive_ratio as u32;
         skel.maps.rodata_data.min_slice_us = opts.min_slice_us;
+        skel.maps.rodata_data.min_nr_queued_pick2 = opts.min_nr_queued_pick2;
         skel.maps.rodata_data.dsq_shift = opts.dsq_shift as u64;
         skel.maps.rodata_data.kthreads_local = !opts.disable_kthreads_local;
         skel.maps.rodata_data.debug = opts.verbose as u32;
         skel.maps.rodata_data.nr_cpus = *NR_CPU_IDS as u32;
         skel.maps.rodata_data.nr_dsqs_per_llc = opts.dumb_queues as u32;
         skel.maps.rodata_data.init_dsq_index = opts.init_dsq_index as i32;
-        skel.maps.rodata_data.nr_llcs = topo.all_llcs.clone().keys().len() as u32;
-        skel.maps.rodata_data.nr_nodes = topo.nodes.clone().keys().len() as u32;
+        skel.maps.rodata_data.nr_llcs = TOPO.all_llcs.clone().keys().len() as u32;
+        skel.maps.rodata_data.nr_nodes = TOPO.nodes.clone().keys().len() as u32;
         skel.maps.rodata_data.eager_load_balance = !opts.eager_load_balance;
         skel.maps.rodata_data.greedy_idle = !opts.greedy_idle_disable;
-        skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
+        skel.maps.rodata_data.has_little_cores = TOPO.has_little_cores();
         skel.maps.rodata_data.interactive_sticky = opts.interactive_sticky;
         skel.maps.rodata_data.keep_running_enabled = opts.keep_running;
         skel.maps.rodata_data.smt_enabled =
@@ -214,7 +236,7 @@ impl<'a> Scheduler<'a> {
 
         let mut skel = scx_ops_load!(skel, p2dq, uei)?;
 
-        for cpu in topo.all_cpus.values() {
+        for cpu in TOPO.all_cpus.values() {
             skel.maps.bss_data.big_core_ids[cpu.id] =
                 if cpu.core_type == (CoreType::Big { turbo: true }) {
                     1
