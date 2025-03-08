@@ -150,8 +150,9 @@ struct cpu_ctx {
 	/*
 	 * Temporary cpu masks
 	 */
-	struct bpf_cpumask __kptr *tmp_a_mask;
-	struct bpf_cpumask __kptr *tmp_o_mask;
+	struct bpf_cpumask __kptr *tmp_a_mask; /* for active set */
+	struct bpf_cpumask __kptr *tmp_o_mask; /* for overflow set */
+	struct bpf_cpumask __kptr *tmp_l_mask; /* for online cpumask */
 	struct bpf_cpumask __kptr *tmp_t_mask;
 	struct bpf_cpumask __kptr *tmp_t2_mask;
 } __attribute__((aligned(CACHELINE_SIZE)));

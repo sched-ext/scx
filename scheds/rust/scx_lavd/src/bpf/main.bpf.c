@@ -1338,9 +1338,10 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
-	struct bpf_cpumask *active, *ovrflw;
+	struct bpf_cpumask *active, *ovrflw, *cpdom_mask, *new_mask;
 	struct task_struct *p;
 	u64 dsq_id;
+	s32 new_cpu;
 	bool try_consume = false;
 
 	cpuc = get_cpu_ctx_id(cpu);
@@ -1379,7 +1380,9 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 
 	active = active_cpumask;
 	ovrflw = ovrflw_cpumask;
-	if (!active || !ovrflw) {
+	cpdom_mask = MEMBER_VPTR(cpdom_cpumask, [cpuc->cpdom_id]);
+	new_mask = cpuc->tmp_t_mask;
+	if (!active || !ovrflw || !cpdom_mask || !new_mask) {
 		scx_bpf_error("Failed to prepare cpumasks.");
 		goto unlock_out;
 	}
@@ -1396,7 +1399,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If the previous task can run on this CPU but not on either active
 	 * or overflow set, extend the overflow set and go.
 	 */
-	if (!try_consume && prev &&
+	if (!try_consume && prev && is_affinitized(prev) &&
 	    bpf_cpumask_test_cpu(cpu, prev->cpus_ptr) &&
 	    !bpf_cpumask_intersects(cast_mask(active), prev->cpus_ptr) &&
 	    !bpf_cpumask_intersects(cast_mask(ovrflw), prev->cpus_ptr)) {
@@ -1422,21 +1425,32 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 			break;
 
 		/*
-		 * If a task can run on this CPU but not on either active
-		 * or overflow set, extend the overflow set and go.
+		 * If the task can run on either the active or overflow set,
+		 * try another task.
 		 */
-		if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
-		    !bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) &&
-		    !bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr)) {
-			bpf_cpumask_set_cpu(cpu, ovrflw);
+		if(!is_affinitized(p) ||
+		   bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
+		   bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr)) {
 			bpf_task_release(p);
-			try_consume = true;
-			break;
+			continue;
 		}
 
 		/*
-		 * Otherwise, try another task.
+		 * Now, we know that the task cannot run on either the
+		 * active or overflow set. Then, let's consider to extend
+		 * the overflow set.
 		 */
+		new_cpu = find_cpu_in(p->cpus_ptr, cpuc);
+		if (new_cpu >= 0) {
+			if (new_cpu == cpu) {
+				bpf_cpumask_set_cpu(new_cpu, ovrflw);
+				bpf_task_release(p);
+				try_consume = true;
+				break;
+			}
+			else if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
+				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+		}
 		bpf_task_release(p);
 	}
 
@@ -2007,6 +2021,10 @@ static s32 init_per_cpu_ctx(u64 now)
 			goto unlock_out;
 
 		err = calloc_cpumask(&cpuc->tmp_o_mask);
+		if (err)
+			goto unlock_out;
+
+		err = calloc_cpumask(&cpuc->tmp_l_mask);
 		if (err)
 			goto unlock_out;
 

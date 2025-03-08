@@ -87,15 +87,26 @@ static bool clear_cpu_periodically(u32 cpu, struct bpf_cpumask *cpumask)
 	return clear;
 }
 
+static const volatile u16 *get_cpu_order(void)
+{
+	/*
+	 * Decide a cpu order to use according to its power mode.
+	 */
+	if (is_powersave_mode)
+		return cpu_order_powersave;
+	else
+		return cpu_order_performance;
+}
+
 static void do_core_compaction(void)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
+	const volatile u16 *cpu_order = get_cpu_order();
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *active, *ovrflw;
 	int nr_cpus, nr_active, nr_active_old, cpu, i;
 	u32 sum_capacity = 0, big_capacity = 0;
 	bool clear;
-	const volatile u16 *cpu_order;
 
 	bpf_rcu_read_lock();
 
@@ -108,14 +119,6 @@ static void do_core_compaction(void)
 		scx_bpf_error("Failed to prepare cpumasks.");
 		goto unlock_out;
 	}
-
-	/*
-	 * Decide a cpuorder to use according to its power mode.
-	 */
-	if (is_powersave_mode)
-		cpu_order = cpu_order_powersave;
-	else
-		cpu_order = cpu_order_performance;
 
 	/*
 	 * Assign active and overflow cores
@@ -192,6 +195,40 @@ static void do_core_compaction(void)
 
 unlock_out:
 	bpf_rcu_read_unlock();
+}
+
+static s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc)
+{
+	const volatile u16 *cpu_order = get_cpu_order();
+	const struct cpumask *online_mask;
+	struct bpf_cpumask *online_src_mask;
+	s32 cpu;
+	int i;
+
+	/*
+	 * online_src_mask = src_mask ∩ online_mask
+	 */
+	online_src_mask = cpuc->tmp_l_mask;
+	if (!online_src_mask)
+		return -ENOENT;
+
+	online_mask = scx_bpf_get_online_cpumask();
+	bpf_cpumask_and(online_src_mask, src_mask, online_mask);
+	scx_bpf_put_cpumask(online_mask);
+
+	/*
+	 * Find a proper CPU in the preferred CPU order.
+	 */
+	bpf_for(i, 0, nr_cpu_ids) {
+		if (i >= LAVD_CPU_ID_MAX)
+			break;
+
+		cpu = cpu_order[i];
+		if (bpf_cpumask_test_cpu(cpu, cast_mask(online_src_mask)))
+			return cpu;
+	};
+
+	return -ENOENT;
 }
 
 static void update_power_mode_time(void)
