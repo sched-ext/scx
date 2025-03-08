@@ -43,6 +43,7 @@ use scx_utils::NR_CPU_IDS;
 
 use crate::bpf_intf::stat_idx_P2DQ_NR_STATS;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DIRECT;
+use crate::bpf_intf::stat_idx_P2DQ_STAT_DISPATCH_PICK2;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DSQ_CHANGE;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DSQ_SAME;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_GREEDY_IDLE;
@@ -50,7 +51,7 @@ use crate::bpf_intf::stat_idx_P2DQ_STAT_IDLE;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_KEEP;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_LLC_MIGRATION;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_NODE_MIGRATION;
-use crate::bpf_intf::stat_idx_P2DQ_STAT_PICK2;
+use crate::bpf_intf::stat_idx_P2DQ_STAT_SELECT_PICK2;
 
 lazy_static::lazy_static! {
         pub static ref TOPO: Topology = Topology::new().unwrap();
@@ -288,7 +289,8 @@ impl<'a> Scheduler<'a> {
             dsq_change: stats[stat_idx_P2DQ_STAT_DSQ_CHANGE as usize],
             same_dsq: stats[stat_idx_P2DQ_STAT_DSQ_SAME as usize],
             keep: stats[stat_idx_P2DQ_STAT_KEEP as usize],
-            pick2: stats[stat_idx_P2DQ_STAT_PICK2 as usize],
+            select_pick2: stats[stat_idx_P2DQ_STAT_SELECT_PICK2 as usize],
+            dispatch_pick2: stats[stat_idx_P2DQ_STAT_DISPATCH_PICK2 as usize],
             llc_migrations: stats[stat_idx_P2DQ_STAT_LLC_MIGRATION as usize],
             node_migrations: stats[stat_idx_P2DQ_STAT_NODE_MIGRATION as usize],
         }

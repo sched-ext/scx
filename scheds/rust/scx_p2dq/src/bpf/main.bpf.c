@@ -332,8 +332,6 @@ static s32 pick_two_cpu(struct task_ctx *taskc, bool *is_idle)
 	s32 right_queued = scx_bpf_dsq_nr_queued(right_dsq_id);
 	u64 right_load = *MEMBER_VPTR(right->dsq_load, [dsq_index]);
 
-	stat_inc(P2DQ_STAT_PICK2);
-
 	if (((left_queued > 0 || right_queued > 0) &&
 	    left_queued < right_queued) ||
 	    left_load > right_load) {
@@ -518,6 +516,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		} else {
 			cpu = pick_two_cpu(taskc, is_idle);
 			if (cpu >= 0) {
+				stat_inc(P2DQ_STAT_SELECT_PICK2);
 				goto out_put_cpumask;
 			}
 		}
@@ -822,8 +821,10 @@ void BPF_STRUCT_OPS(p2dq_dispatch, s32 cpu, struct task_struct *prev)
 	// Start with least interactive DSQs to avoid migrating interactive
 	// tasks.
 	bpf_for(i, 1, nr_dsqs_per_llc) {
-		if (scx_bpf_dsq_move_to_local(llcx->dsqs[nr_dsqs_per_llc - i]))
-		    return;
+		if (scx_bpf_dsq_move_to_local(llcx->dsqs[nr_dsqs_per_llc - i])) {
+			stat_inc(P2DQ_STAT_DISPATCH_PICK2);
+			return;
+		}
 	}
 }
 
