@@ -194,6 +194,12 @@ pub struct CpuhpAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct HwPressureAction {
+    pub hw_pressure: u64,
+    pub cpu: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
     ChangeTheme,
     ClearEvent,
@@ -205,6 +211,7 @@ pub enum Action {
     Event,
     GpuMem(GpuMemAction),
     Help,
+    HwPressure(HwPressureAction),
     IncBpfSampleRate,
     IncTickRate,
     IPI(IPIAction),
@@ -285,6 +292,11 @@ impl TryFrom<&bpf_event> for Action {
                 cpu: unsafe { event.event.chp.cpu },
                 state: unsafe { event.event.chp.state },
                 target: unsafe { event.event.chp.target },
+            })),
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_HW_PRESSURE => Ok(Action::HwPressure(HwPressureAction {
+                cpu: event.cpu,
+                hw_pressure: unsafe { event.event.hwp.hw_pressure },
             })),
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_SOFTIRQ => {
