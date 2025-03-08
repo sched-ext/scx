@@ -77,6 +77,7 @@ struct task_ctx {
 	u64			last_dsq_id;
 	int			last_dsq_index;
 	u64 			last_run_at;
+	u64			llc_runs; /* how many runs on the current LLC */
 
 	/* The task is a workqueue worker thread */
 	bool			is_kworker;

@@ -109,6 +109,11 @@ struct Opts {
     #[clap(short = 's', long, default_value = "100")]
     min_slice_us: u64,
 
+    /// Number of runs on the LLC before a task becomes eligbile for pick2 migration on the wakeup
+    /// path.
+    #[clap(short = 'l', long, default_value = "3")]
+    min_llc_runs_pick2: u64,
+
     /// Manual definition of slice intervals in microseconds for DSQs, must be equal to number of
     /// dumb_queues.
     #[clap(short = 't', long, value_parser = clap::value_parser!(u64), default_values_t = [0;0])]
@@ -218,6 +223,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.interactive_ratio = opts.interactive_ratio as u32;
         skel.maps.rodata_data.min_slice_us = opts.min_slice_us;
         skel.maps.rodata_data.min_nr_queued_pick2 = opts.min_nr_queued_pick2;
+        skel.maps.rodata_data.min_llc_runs_pick2 = opts.min_llc_runs_pick2;
         skel.maps.rodata_data.dsq_shift = opts.dsq_shift as u64;
         skel.maps.rodata_data.kthreads_local = !opts.disable_kthreads_local;
         skel.maps.rodata_data.debug = opts.verbose as u32;
