@@ -5,11 +5,11 @@
 
 use anyhow::Result;
 
+use scx_utils::BpfBuilder;
+use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
-
-use scx_utils::BpfBuilder;
 
 pub struct RustLandBuilder {
     inner_builder: BpfBuilder,
@@ -24,6 +24,14 @@ impl RustLandBuilder {
 
     fn create_file(&self, file_name: &str, content: &[u8]) {
         let path = Path::new(file_name);
+
+        // Limit file writing to when file contents differ (for caching)
+        if let Ok(bytes_there) = fs::read(path) {
+            if bytes_there == content {
+                return;
+            }
+        }
+
         let mut file = File::create(path).expect("Unable to create file");
         file.write_all(content).expect("Unable to write to file");
     }
