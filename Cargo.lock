@@ -2393,6 +2393,7 @@ dependencies = [
  "crossbeam",
  "ctrlc",
  "fb_procfs",
+ "lazy_static",
  "libbpf-rs",
  "libc",
  "log",
