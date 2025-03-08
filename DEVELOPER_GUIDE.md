@@ -31,6 +31,25 @@ load between scheduling domains becomes a difficult problem. sched_ext has a
 common crate for calculating weights between scheduling domains. See the
 `infeasible` crate in `rust/scx_utils/src` for the implementation.
 
+## Development kernels
+This repository has a kernel lock file at `./kernel-versions.json` where we track
+several kernels important to development.
+
+If your change requires a new commit from a branch, you can update this file with:
+    nix run ./.github/workflows#update-kernels
+or with:
+    python3 ./.github/workflows/update-kernels.py
+
+Otherwise new changes will be picked up automatically. If the changes that are
+picked up automatically fail CI, you can fix this in a PR separately - the automatic
+updater will kick back in once things are green. Create a branch and PR as normal
+both updating the kernel lock and making necessary fixes to the codebase.
+
+We use `virtme-ng` for testing in the CI environment, and it should be possible
+to reproduce this locally with the same pinned kernels. Currently the most effective
+documentation for this will be to read the CI workflows. If this improves in the
+future we'll endeavour to update this documentation.
+
 ## Rust
 We use `cargo fmt` to ensure consistency in our Rust code. This runs on PRs in
 the CI and will fail with a patch if your code doesn't match. We currently need
