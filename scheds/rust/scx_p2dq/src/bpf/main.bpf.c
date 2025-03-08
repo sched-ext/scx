@@ -40,6 +40,7 @@ const volatile u32 nr_dsqs_per_llc = 3;
 const volatile u64 dsq_shift = 2;
 const volatile int init_dsq_index = 0;
 const volatile u64 min_slice_us = 100;
+const volatile u64 min_llc_runs_pick2 = 5;
 const volatile u32 interactive_ratio = 10;
 const volatile u32 min_nr_queued_pick2 = 10;
 
@@ -124,7 +125,9 @@ static struct cpu_ctx *lookup_cpu_ctx(int cpu)
 }
 
 static __always_inline u64 cpu_dsq_id(int dsq_index, struct cpu_ctx *cpuc) {
-	if (dsq_index < 0 || dsq_index > nr_dsqs_per_llc || dsq_index >= MAX_DSQS_PER_LLC) {
+	if (dsq_index < 0 ||
+	    dsq_index > nr_dsqs_per_llc ||
+	    dsq_index >= MAX_DSQS_PER_LLC) {
 		scx_bpf_error("cpuc invalid dsq index: %d", dsq_index);
 		return 0;
 	}
@@ -267,7 +270,8 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 	return true;
 }
 
-static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *left, struct llc_ctx *right, bool most_loaded)
+static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *left,
+					struct llc_ctx *right, bool most_loaded)
 {
 	s32 left_queued = 0, right_queued = 0;
 	u64 left_load = 0, right_load = 0;
@@ -289,18 +293,21 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *left, struct llc_ctx *ri
 	}
 
 	if (min_nr_queued_pick2 > 0 &&
-	    (left_queued < min_nr_queued_pick2 && right_queued < min_nr_queued_pick2))
+	    (left_queued < min_nr_queued_pick2 &&
+	     right_queued < min_nr_queued_pick2))
 		return NULL;
 
-	if (((left_queued > 0 || right_queued > 0) && left_queued < right_queued) ||
-	    left_load > right_load)
+	if (left_queued < right_queued || left_load > right_load)
 		return most_loaded ? right : left;
 
-	return NULL;
+	return most_loaded ? right : left;
 }
 
 static s32 pick_two_cpu(struct task_ctx *taskc, bool *is_idle)
 {
+	if (min_llc_runs_pick2 > 0 && taskc->llc_runs < min_llc_runs_pick2)
+		return -EINVAL;
+
 	struct llc_ctx *chosen;
 	struct llc_ctx *left = rand_llc_ctx();
 	struct llc_ctx *right = rand_llc_ctx();
@@ -327,7 +334,8 @@ static s32 pick_two_cpu(struct task_ctx *taskc, bool *is_idle)
 
 	stat_inc(P2DQ_STAT_PICK2);
 
-	if (((left_queued > 0 || right_queued > 0) && left_queued < right_queued) ||
+	if (((left_queued > 0 || right_queued > 0) &&
+	    left_queued < right_queued) ||
 	    left_load > right_load) {
 		chosen = left;
 		goto pick_llc;
@@ -578,7 +586,8 @@ void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 
 		u64 vtime_delta = p->scx.dsq_vtime - prev_llcx->vtime;
 		p->scx.dsq_vtime = vtime_now + vtime_delta;
-		trace("vtime change %llu, new vtime %llu", vtime_delta, p->scx.dsq_vtime);
+		trace("vtime change %llu, new vtime %llu",
+		      vtime_delta, p->scx.dsq_vtime);
 	}
 
 	u64 vtime = p->scx.dsq_vtime;
@@ -670,10 +679,13 @@ void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 		return;
 
 	if (taskc->llc_id != cpuc->llc_id) {
+		taskc->llc_runs = 0;
 		stat_inc(P2DQ_STAT_LLC_MIGRATION);
 		trace("RUNNING %d cpu %d->%d llc %d->%d",
 		      p->pid, cpuc->id, taskc->cpu,
 		      taskc->llc_id, llcx->id);
+	} else {
+		taskc->llc_runs += 1;
 	}
 	if (taskc->node_id != cpuc->node_id) {
 		stat_inc(P2DQ_STAT_NODE_MIGRATION);
