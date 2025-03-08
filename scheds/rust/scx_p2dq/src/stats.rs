@@ -23,8 +23,10 @@ pub struct Metrics {
     pub same_dsq: u64,
     #[stat(desc = "Number of times a task kept running")]
     pub keep: u64,
-    #[stat(desc = "Number of times a pick 2 load balancing occured")]
-    pub pick2: u64,
+    #[stat(desc = "Number of times a select_cpu pick 2 load balancing occured")]
+    pub select_pick2: u64,
+    #[stat(desc = "Number of times a dispatch pick 2 load balancing occured")]
+    pub dispatch_pick2: u64,
     #[stat(desc = "Number of times a task migrated LLCs")]
     pub llc_migrations: u64,
     #[stat(desc = "Number of times a task migrated NUMA nodes")]
@@ -41,14 +43,15 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "direct/idle/greedy {}/{}/{}\n\tdsq same/migrate {}/{}\n\tkeep {} pick2 {}\n\tmigrations llc/node: {}/{}",
+            "direct/idle/greedy {}/{}/{}\n\tdsq same/migrate {}/{}\n\tkeep {}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}",
             self.direct,
             self.idle,
             self.greedy_idle,
             self.same_dsq,
             self.dsq_change,
             self.keep,
-            self.pick2,
+            self.select_pick2,
+            self.dispatch_pick2,
             self.llc_migrations,
             self.node_migrations
         )?;
@@ -63,7 +66,8 @@ impl Metrics {
             dsq_change: self.dsq_change - rhs.dsq_change,
             same_dsq: self.same_dsq - rhs.same_dsq,
             keep: self.keep - rhs.keep,
-            pick2: self.pick2 - rhs.pick2,
+            select_pick2: self.select_pick2 - rhs.select_pick2,
+            dispatch_pick2: self.dispatch_pick2 - rhs.dispatch_pick2,
             llc_migrations: self.llc_migrations - rhs.llc_migrations,
             node_migrations: self.node_migrations - rhs.node_migrations,
             ..self.clone()
