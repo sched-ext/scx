@@ -48,6 +48,7 @@ const volatile bool autoslice = true;
 const volatile bool interactive_sticky = false;
 const volatile bool keep_running_enabled = true;
 const volatile bool eager_load_balance = true;
+const volatile bool dispatch_pick2_disable = false;
 const volatile bool smt_enabled = true;
 const volatile bool greedy_idle = false;
 const volatile bool has_little_cores = false;
@@ -810,7 +811,7 @@ void BPF_STRUCT_OPS(p2dq_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	// If on a single LLC there isn't anything left to try.
-	if (nr_llcs == 1)
+	if (nr_llcs == 1 || dispatch_pick2_disable)
 		return;
 
 	// Last ditch effort try consuming from the most loaded DSQ.

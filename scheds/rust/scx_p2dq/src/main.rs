@@ -102,6 +102,10 @@ struct Opts {
     #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
     interactive_sticky: bool,
 
+    /// Disables pick2 load balancing on the dispatch path.
+    #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
+    dispatch_pick2_disable: bool,
+
     /// Enable tasks to run beyond their timeslice if the CPU is idle.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     keep_running: bool,
@@ -233,7 +237,9 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.init_dsq_index = opts.init_dsq_index as i32;
         skel.maps.rodata_data.nr_llcs = TOPO.all_llcs.clone().keys().len() as u32;
         skel.maps.rodata_data.nr_nodes = TOPO.nodes.clone().keys().len() as u32;
+
         skel.maps.rodata_data.eager_load_balance = !opts.eager_load_balance;
+        skel.maps.rodata_data.dispatch_pick2_disable = opts.dispatch_pick2_disable;
         skel.maps.rodata_data.greedy_idle = !opts.greedy_idle_disable;
         skel.maps.rodata_data.has_little_cores = TOPO.has_little_cores();
         skel.maps.rodata_data.interactive_sticky = opts.interactive_sticky;
