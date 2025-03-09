@@ -14,11 +14,6 @@ char _license[] SEC("license") = "GPL";
 #define MAX_AVG_NVCSW		128
 
 /*
- * Global DSQ used to dispatch tasks.
- */
-#define SHARED_DSQ		0
-
-/*
  * Task time slice range.
  */
 const volatile u64 slice_max = 20ULL * NSEC_PER_MSEC;
@@ -149,9 +144,9 @@ static inline bool is_kthread(const struct task_struct *p)
 /*
  * Return the amount of tasks that are waiting to run.
  */
-static inline u64 nr_tasks_waiting(void)
+static inline u64 nr_tasks_waiting(int node)
 {
-	return scx_bpf_dsq_nr_queued(SHARED_DSQ) + 1;
+	return scx_bpf_dsq_nr_queued(node) + 1;
 }
 
 /*
@@ -199,14 +194,15 @@ static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
  * Evaluate task's time slice in function of the total amount of tasks that
  * are waiting to be dispatched and the task's weight.
  */
-static u64 task_slice(const struct task_struct *p, const struct task_ctx *tctx)
+static u64 task_slice(const struct task_struct *p,
+		      const struct task_ctx *tctx, int node)
 {
 	/*
 	 * Assign a time slice proportional to the task weight and inversely
 	 * proportional to the total amount of tasks that are waiting to be
 	 * scheduled.
 	 */
-	return scale_up_fair(p, slice_max / nr_tasks_waiting());
+	return scale_up_fair(p, slice_max / nr_tasks_waiting(node));
 }
 
 /*
@@ -218,11 +214,12 @@ static u64 task_slice(const struct task_struct *p, const struct task_ctx *tctx)
 s32 BPF_STRUCT_OPS(flash_select_cpu, struct task_struct *p,
 		   s32 prev_cpu, u64 wake_flags)
 {
+	int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
 	bool is_idle = false;
 	s32 cpu;
 
 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-	if (is_idle && !scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
+	if (is_idle && !scx_bpf_dsq_nr_queued(node)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
 	}
@@ -236,6 +233,8 @@ s32 BPF_STRUCT_OPS(flash_select_cpu, struct task_struct *p,
  */
 void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 {
+	s32 cpu = scx_bpf_task_cpu(p);
+	int node = __COMPAT_scx_bpf_cpu_node(cpu);
 	struct task_ctx *tctx;
 
 	/*
@@ -258,7 +257,7 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 
-	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, task_slice(p, tctx),
+	scx_bpf_dsq_insert_vtime(p, node, task_slice(p, tctx, node),
 				 task_deadline(p, tctx), enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
@@ -282,10 +281,12 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(flash_dispatch, s32 cpu, struct task_struct *prev)
 {
+	int node = __COMPAT_scx_bpf_cpu_node(cpu);
+
 	/*
 	 * Select a new task to run.
 	 */
-	if (scx_bpf_dsq_move_to_local(SHARED_DSQ))
+	if (scx_bpf_dsq_move_to_local(node))
 		return;
 
 	/*
@@ -424,20 +425,20 @@ s32 BPF_STRUCT_OPS(flash_init_task, struct task_struct *p,
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 {
-	int err;
+	int err, node;
 
 	/* Initialize the amount of possible CPUs */
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
 	/*
-	 * Create the shared DSQ.
-	 *
-	 * Allocate the new DSQ id to not clash with any valid CPU id.
+	 * Create a separate DSQ for each NUMA node.
 	 */
-	err = scx_bpf_create_dsq(SHARED_DSQ, -1);
-	if (err) {
-		scx_bpf_error("failed to create shared DSQ: %d", err);
-		return err;
+	bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
+		err = scx_bpf_create_dsq(node, node);
+		if (err) {
+			scx_bpf_error("failed to create DSQ %d: %d", node, err);
+			return err;
+		}
 	}
 
 	return 0;
