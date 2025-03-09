@@ -104,6 +104,7 @@ lazy_static! {
                 kind: LayerKind::Confined {
                     util_range: (0.8, 0.9),
                     cpus_range: Some((0, 16)),
+                    protected: false,
                     common: LayerCommon {
                         min_exec_us: 1000,
                         yield_ignore: 0.0,
@@ -164,6 +165,7 @@ lazy_static! {
                 kind: LayerKind::Confined {
                     cpus_range: None,
                     util_range: (0.2, 0.8),
+                    protected: false,
                     common: LayerCommon {
                         min_exec_us: 800,
                         yield_ignore: 0.0,
@@ -192,6 +194,7 @@ lazy_static! {
                 kind: LayerKind::Grouped {
                     cpus_range: None,
                     util_range: (0.5, 0.6),
+                    protected: false,
                     common: LayerCommon {
                         min_exec_us: 200,
                         yield_ignore: 0.0,
@@ -1302,6 +1305,13 @@ impl<'a> Scheduler<'a> {
                     layer.llc_mask |= llcmask_from_llcs(&topo_node.llcs) as u64;
                 }
             }
+
+            layer.is_protected.write(match spec.kind {
+                LayerKind::Open { .. } => false,
+                LayerKind::Confined { protected, .. } | LayerKind::Grouped { protected, .. } => {
+                    protected
+                }
+            });
 
             perf_set |= layer.perf > 0;
         }

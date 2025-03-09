@@ -60,6 +60,9 @@ const volatile bool enable_gpu_support = false;
 const volatile u64 antistall_sec = 3;
 const u32 zero_u32 = 0;
 
+private(unprotected_cpumask) struct bpf_cpumask __kptr *unprotected_cpumask;
+u64 unprotected_seq = 0;
+
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
 struct layer layers[MAX_LAYERS];
@@ -333,6 +336,35 @@ static void layer_llc_drain_disable(struct layer *layer, u32 llc_id)
 	__sync_and_and_fetch(&layer->llcs_to_drain, ~(1LLU << llc_id));
 }
 
+static inline bool refresh_layer_cpuc(struct cpu_ctx *cpuc, struct layer *layer)
+{
+	/* a CPU can be shared by multiple open layers */
+	if (layer->kind == LAYER_KIND_OPEN) {
+		cpuc->in_open_layers = true;
+		cpuc->layer_id = MAX_LAYERS;
+	} else {
+		cpuc->in_open_layers = false;
+		cpuc->layer_id = layer->id;
+	}
+
+	if (cpuc->is_protected == layer->is_protected)
+		false;
+
+	cpuc->is_protected = layer->is_protected;
+	if (unlikely(!unprotected_cpumask)) {
+		scx_bpf_error("unprotected_cpumask not initialized");
+		return false;
+	}
+
+	/* The mask tracks _unprotected_ CPUs to simplify bitops. */
+	if (cpuc->is_protected)
+		bpf_cpumask_clear_cpu(cpuc->cpu, unprotected_cpumask);
+	else
+		bpf_cpumask_set_cpu(cpuc->cpu, unprotected_cpumask);
+
+	return true;
+}
+
 /*
  * Returns if any cpus were added to the layer.
  */
@@ -340,6 +372,7 @@ static void refresh_cpumasks(u32 layer_id)
 {
 	struct bpf_cpumask *layer_cpumask;
 	struct layer_cpumask_wrapper *cpumaskw;
+	bool protected_changed = false;
 	struct layer *layer;
 	struct cpu_ctx *cpuc;
 	int cpu, llc_id;
@@ -371,14 +404,9 @@ static void refresh_cpumasks(u32 layer_id)
 
 		if ((u8_ptr = MEMBER_VPTR(layers, [layer_id].cpus[cpu / 8]))) {
 			if (*u8_ptr & (1 << (cpu % 8))) {
-				/* a CPU can be shared by multiple open layers */
-				if (layer->kind == LAYER_KIND_OPEN) {
-					cpuc->in_open_layers = true;
-					cpuc->layer_id = MAX_LAYERS;
-				} else {
-					cpuc->in_open_layers = false;
-					cpuc->layer_id = layer_id;
-				}
+				if (refresh_layer_cpuc(cpuc, layer))
+					protected_changed = true;
+
 				bpf_cpumask_set_cpu(cpu, layer_cpumask);
 			} else {
 				if (layer->kind == LAYER_KIND_OPEN)
@@ -393,6 +421,9 @@ static void refresh_cpumasks(u32 layer_id)
 	}
 
 	bpf_rcu_read_unlock();
+
+	if (protected_changed)
+		__sync_fetch_and_add(&unprotected_seq, 1);
 
 	__sync_fetch_and_add(&layer->cpus_seq, 1);	/* MB, see below */
 	trace("LAYER[%d] now has %d cpus, seq=%llu", layer_id, layer->nr_cpus, layer->cpus_seq);
@@ -453,6 +484,8 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *layered_llc_mask;
 	struct cached_cpus	layered_cpus_node;
 	struct bpf_cpumask __kptr *layered_node_mask;
+	struct cached_cpus	layered_cpus_unprotected;
+	struct bpf_cpumask __kptr *layered_unprotected_mask;
 	bool			all_cpus_allowed;
 	bool			cpus_node_aligned;
 	u64			runnable_at;
@@ -695,11 +728,38 @@ static void maybe_refresh_layered_cpus_node(struct task_struct *p, struct task_c
 	}
 }
 
+static void maybe_refresh_layered_cpus_unprotected(struct task_struct *p, struct task_ctx *taskc,
+		const struct cpumask *layer_cpumask)
+{
+	struct bpf_cpumask *task_cpumask = taskc->layered_unprotected_mask;
+	u64 cpus_seq = READ_ONCE(unprotected_seq);
+
+	/* Do we have our own unprotected CPU mask? */
+	if (!task_cpumask || !layer_cpumask || !unprotected_cpumask)
+		return;
+
+	if (should_refresh_cached_cpus(&taskc->layered_cpus_unprotected, 0, cpus_seq)) {
+		bpf_cpumask_or(task_cpumask, cast_mask(unprotected_cpumask), layer_cpumask);
+		bpf_cpumask_and(task_cpumask, cast_mask(task_cpumask), p->cpus_ptr);
+
+		taskc->layered_cpus_unprotected.id = 0;
+		taskc->layered_cpus_unprotected.seq = cpus_seq;
+
+		trace("%s[%d] layered allowed cpumask refreshed to seq=%llu",
+		      p->comm, p->pid, taskc->layered_cpus_unprotected.seq);
+	}
+}
+
 static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 			      const struct cpumask *idle_smtmask)
 {
-	bool prev_in_cand = bpf_cpumask_test_cpu(prev_cpu, cand_cpumask);
+	bool prev_in_cand;
 	s32 cpu;
+
+	if (unlikely(!cand_cpumask || !idle_smtmask))
+		return -1;
+
+	prev_in_cand = bpf_cpumask_test_cpu(prev_cpu, cand_cpumask);
 
 	/*
 	 * If CPU has SMT, any wholly idle CPU is likely a better pick than
@@ -802,6 +862,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		  bool from_selcpu)
 {
 	const struct cpumask *idle_smtmask, *layer_cpumask, *layered_cpumask, *cpumask;
+	struct bpf_cpumask *unprot_mask;
 	struct cpu_ctx *prev_cpuc;
 	u32 layer_id = layer->id;
 	u64 cpus_seq;
@@ -848,13 +909,28 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	 */
 	if (READ_ONCE(layer->check_no_idle)) {
 		bool has_idle;
-
 		cpumask = scx_bpf_get_idle_cpumask();
 
-		if (layer->kind == LAYER_KIND_CONFINED)
+		if (layer->kind == LAYER_KIND_CONFINED) {
 			has_idle = bpf_cpumask_intersects(layered_cpumask, cpumask);
-		else
-			has_idle = bpf_cpumask_intersects(p->cpus_ptr, cpumask);
+		} else {
+			maybe_refresh_layered_cpus_unprotected(p, taskc, layered_cpumask);
+			/*
+			 * Use the task's idle unprotected mask if available, otherwise
+			 * use the global one.
+			 */
+			unprot_mask = taskc->layered_unprotected_mask;
+			if (!unprot_mask)
+				unprot_mask = unprotected_cpumask;
+
+			if (unlikely(!unprot_mask)) {
+				scx_bpf_error("unprotected_cpumask not initialized");
+				scx_bpf_put_idle_cpumask(cpumask);
+				return -1;
+			}
+
+			has_idle = bpf_cpumask_intersects(cast_mask(unprot_mask), cpumask);
+		}
 
 		scx_bpf_put_idle_cpumask(cpumask);
 		if (!has_idle)
@@ -918,10 +994,16 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	/*
 	 * If the layer is an open one, we can try the whole machine.
 	 */
-	if (layer->kind != LAYER_KIND_CONFINED &&
-	    (cpu = pick_idle_cpu_from(p->cpus_ptr, prev_cpu, idle_smtmask)) >= 0) {
+	if (layer->kind != LAYER_KIND_CONFINED) {
+	    maybe_refresh_layered_cpus_unprotected(p, taskc, layered_cpumask);
+	    unprot_mask = taskc->layered_unprotected_mask;
+	    if (!unprot_mask)
+		    unprot_mask = unprotected_cpumask;
+
+	    if ((cpu = pick_idle_cpu_from(cast_mask(unprot_mask), prev_cpu, idle_smtmask)) >= 0) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
 		goto out_put;
+	    }
 	}
 
 	cpu = -1;
@@ -1680,7 +1762,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	 * Low fallback DSQ execution is forced upto lo_fb_share_ppk fraction
 	 * after the DSQ had tasks queued for longer than lo_fb_wait_ns.
 	 */
-	if (scx_bpf_dsq_nr_queued(cpuc->lo_fb_dsq_id)) {
+	if (!cpuc->is_protected && scx_bpf_dsq_nr_queued(cpuc->lo_fb_dsq_id)) {
 		u64 now = scx_bpf_now();
 		u64 dur, usage;
 
@@ -1753,7 +1835,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		 * Grouped/open preempt layers first if there's no owner layer
 		 * or the owner layer is not protected or preempting.
 		 */
-		if (!owner_layer || (!cpuc->protect_owned && !owner_layer->preempt)) {
+		if (!owner_layer || (!owner_layer->is_protected && !cpuc->protect_owned && !owner_layer->preempt)) {
 			if (try_consume_layers(cpuc->ogp_layer_order, nr_ogp_layers,
 					       cpuc->layer_id, cpuc, llcc))
 				return;
@@ -1767,6 +1849,10 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			    try_drain_layer_llcs(owner_layer, cpuc))
 				return;
 			if (try_consume_layer(owner_layer->id, cpuc, llcc))
+				return;
+
+			/* CPU is in a protected layer, do not pull from other layers. */
+			if (owner_layer->is_protected)
 				return;
 		}
 
@@ -2256,6 +2342,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	cpuc->task_layer_id = taskc->layer_id;
 	cpuc->running_at = now;
 	taskc->running_at = now;
+	cpuc->is_protected = layer->is_protected;
 
 	/* running an owned task if the task is on the layer owning the CPU */
 	if (layer->kind == LAYER_KIND_OPEN) {
@@ -2354,6 +2441,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 
 	cpuc->protect_owned = false;
 	cpuc->protect_owned_preempt = false;
+	cpuc->is_protected = false;
 
 	if (cpuc->in_open_layers) {
 		if (task_layer->kind == LAYER_KIND_OPEN && !task_layer->preempt) {
@@ -2463,6 +2551,41 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 	}
 }
 
+static int init_cached_cpus(struct cached_cpus *ccpus)
+{
+	ccpus->id = -1;
+
+	return 0;
+}
+
+static int maybe_init_task_unprotected_mask(struct task_struct *p, struct task_ctx *taskc)
+{
+	struct bpf_cpumask *cpumask;
+	int ret;
+
+	/* We don't need our own mask, we have no placement restrictions. */
+	if (bpf_cpumask_full(p->cpus_ptr))
+		return 0;
+
+	/* Already initialized. */
+	if (taskc->layered_unprotected_mask)
+		return 0;
+
+	ret = init_cached_cpus(&taskc->layered_cpus_unprotected);
+	if (ret)
+		return ret;
+
+	if (!(cpumask = bpf_cpumask_create()))
+		return -ENOMEM;
+
+	if ((cpumask = bpf_kptr_xchg(&taskc->layered_unprotected_mask, cpumask))) {
+		bpf_cpumask_release(cpumask);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
 void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
@@ -2477,6 +2600,9 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 	taskc->layered_cpus.seq = -1;
 	taskc->layered_cpus_llc.seq = -1;
 	taskc->layered_cpus_node.seq = -1;
+	taskc->layered_cpus_unprotected.seq = -1;
+
+	maybe_init_task_unprotected_mask(p, taskc);
 }
 
 void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
@@ -2494,13 +2620,6 @@ void BPF_STRUCT_OPS(layered_cpu_release, s32 cpu,
 		    struct scx_cpu_release_args *args)
 {
 	scx_bpf_reenqueue_local();
-}
-
-static int init_cached_cpus(struct cached_cpus *ccpus)
-{
-	ccpus->id = -1;
-
-	return 0;
 }
 
 s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
@@ -2560,6 +2679,11 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 		bpf_cpumask_release(cpumask);
 		return -EINVAL;
 	}
+
+	// Unprotected CPU idle mask setup if necessary
+	ret = maybe_init_task_unprotected_mask(p, taskc);
+	if (ret)
+		return ret;
 
 	taskc->pid = p->pid;
 	taskc->last_cpu = -1;
@@ -2858,8 +2982,9 @@ static s32 init_layer(int layer_id)
 	    layer_id, layer->name, layer->min_exec_ns,
 	    layer->kind != LAYER_KIND_CONFINED,
 	    layer->preempt, layer->exclusive);
-	dbg("CFG      disallow_open/preempt_after=%lu/%lu",
-	    layer->disallow_open_after_ns, layer->disallow_preempt_after_ns);
+	dbg("CFG      disallow_open/preempt_after/protected=%lu/%lu/%d",
+	    layer->disallow_open_after_ns, layer->disallow_preempt_after_ns,
+	    layer->is_protected);
 
 	layer->id = layer_id;
 
@@ -3071,7 +3196,7 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
-	struct bpf_cpumask *cpumask, *tmp_big_cpumask;
+	struct bpf_cpumask *cpumask, *tmp_big_cpumask, *tmp_unprotected_cpumask;
 	int i, nr_online_cpus, ret;
 
 	cpumask = bpf_cpumask_create();
@@ -3084,12 +3209,20 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		return -ENOMEM;
 	}
 
+	tmp_unprotected_cpumask = bpf_cpumask_create();
+	if (!tmp_unprotected_cpumask) {
+		bpf_cpumask_release(tmp_big_cpumask);
+		bpf_cpumask_release(cpumask);
+		return -ENOMEM;
+	}
+
 	nr_online_cpus = 0;
 	bpf_for(i, 0, nr_possible_cpus) {
 		ret = init_cpu(i, &nr_online_cpus, cpumask, tmp_big_cpumask);
 		if (ret != 0) {
 			bpf_cpumask_release(cpumask);
 			bpf_cpumask_release(tmp_big_cpumask);
+			bpf_cpumask_release(tmp_unprotected_cpumask);
 			return ret;
 		}
 	}
@@ -3101,6 +3234,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	tmp_big_cpumask = bpf_kptr_xchg(&big_cpumask, tmp_big_cpumask);
 	if (tmp_big_cpumask)
 		bpf_cpumask_release(tmp_big_cpumask);
+
+	tmp_unprotected_cpumask = bpf_kptr_xchg(&unprotected_cpumask, tmp_unprotected_cpumask);
+	if (tmp_unprotected_cpumask)
+		bpf_cpumask_release(tmp_unprotected_cpumask);
 
 	bpf_for(i, 0, nr_nodes) {
 		ret = create_node(i);
