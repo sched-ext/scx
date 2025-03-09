@@ -13,8 +13,6 @@ pub use bpf_intf::*;
 mod stats;
 use std::ffi::c_int;
 use std::fs;
-use std::fs::File;
-use std::io::Read;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -45,6 +43,7 @@ use scx_utils::set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cpumask;
+use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 use stats::Metrics;
@@ -108,20 +107,6 @@ struct Opts {
     help_stats: bool,
 }
 
-fn is_smt_active() -> bool {
-    let mut file = match File::open("/sys/devices/system/cpu/smt/active") {
-        Ok(f) => f,
-        Err(_) => return false,
-    };
-
-    let mut contents = String::new();
-    if file.read_to_string(&mut contents).is_err() {
-        return false;
-    }
-
-    contents.trim().parse::<i32>().unwrap_or(0) == 1
-}
-
 pub fn is_nohz_enabled() -> bool {
     if let Ok(contents) = fs::read_to_string("/sys/devices/system/cpu/nohz_full") {
         let trimmed = contents.trim();
@@ -140,7 +125,9 @@ impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         set_rlimit_infinity();
 
-        let smt_enabled = !opts.nosmt && is_smt_active();
+        // Initialize CPU topology.
+        let topo = Topology::new().unwrap();
+        let smt_enabled = !opts.nosmt && topo.smt_enabled;
         info!(
             "{} {} {}",
             SCHEDULER_NAME,

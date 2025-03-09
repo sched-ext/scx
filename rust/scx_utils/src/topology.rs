@@ -184,6 +184,8 @@ pub struct Topology {
     pub nodes: BTreeMap<usize, Node>,
     /// Cpumask all CPUs in the system.
     pub span: Cpumask,
+    /// True if SMT is enabled in the system, false otherwise.
+    pub smt_enabled: bool,
 
     /// Skip indices to access lower level members easily.
     pub all_llcs: BTreeMap<usize, Arc<Llc>>,
@@ -241,6 +243,7 @@ impl Topology {
         Ok(Topology {
             nodes,
             span,
+            smt_enabled: is_smt_active().unwrap_or(false),
             all_llcs: topo_llcs,
             all_cores: topo_cores,
             all_cpus: topo_cpus,
@@ -644,6 +647,11 @@ fn has_big_little() -> Option<bool> {
     }
 
     Some(clusters.len() > 1)
+}
+
+fn is_smt_active() -> Option<bool> {
+    let smt_on = read_file_usize(Path::new("/sys/devices/system/cpu/smt/active")).ok()?;
+    Some(smt_on == 1)
 }
 
 fn create_default_node(

@@ -1740,7 +1740,7 @@ impl<'a> Scheduler<'a> {
         };
         skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
         skel.maps.rodata_data.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
-        skel.maps.rodata_data.smt_enabled = topo.all_cpus.len() > topo.all_cores.len();
+        skel.maps.rodata_data.smt_enabled = topo.smt_enabled;
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
         skel.maps.rodata_data.antistall_sec = opts.antistall_sec;

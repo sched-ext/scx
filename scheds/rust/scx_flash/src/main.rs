@@ -13,15 +13,12 @@ pub use bpf_intf::*;
 mod stats;
 use std::collections::HashMap;
 use std::ffi::c_int;
-use std::fs::File;
-use std::io::Read;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
@@ -99,16 +96,6 @@ struct Opts {
     help_stats: bool,
 }
 
-fn is_smt_active() -> std::io::Result<i32> {
-    let mut file = File::open("/sys/devices/system/cpu/smt/active")?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
-
-    let smt_active: i32 = contents.trim().parse().unwrap_or(0);
-
-    Ok(smt_active)
-}
-
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -119,16 +106,19 @@ impl<'a> Scheduler<'a> {
     fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         set_rlimit_infinity();
 
+        // Initialize CPU topology.
+        let topo = Topology::new().unwrap();
+
         // Check host topology to determine if we need to enable SMT capabilities.
-        let smt_enabled = match is_smt_active() {
-            Ok(value) => value == 1,
-            Err(e) => bail!("Failed to read SMT status: {}", e),
-        };
         info!(
             "{} {} {}",
             SCHEDULER_NAME,
             build_id::full_version(env!("CARGO_PKG_VERSION")),
-            if smt_enabled { "SMT on" } else { "SMT off" }
+            if topo.smt_enabled {
+                "SMT on"
+            } else {
+                "SMT off"
+            }
         );
 
         // Initialize BPF connector.
@@ -143,7 +133,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
         skel.maps.rodata_data.local_kthreads = opts.local_kthreads;
 
-        skel.maps.rodata_data.smt_enabled = smt_enabled;
+        skel.maps.rodata_data.smt_enabled = topo.smt_enabled;
 
         // Conditionally load the kprobes used by the scheduler.
         if compat::ksym_exists("vfs_fsync_range").unwrap_or(false) {
@@ -162,9 +152,6 @@ impl<'a> Scheduler<'a> {
 
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, flash_ops, uei)?;
-
-        // Initialize CPU topology.
-        let topo = Topology::new().unwrap();
 
         // Initialize LLC domain.
         Self::init_l3_cache_domains(&mut skel, &topo)?;
