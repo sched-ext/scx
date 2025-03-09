@@ -45,14 +45,16 @@ const volatile u32 interactive_ratio = 10;
 const volatile u32 min_nr_queued_pick2 = 10;
 
 const volatile bool autoslice = true;
+const volatile bool dispatch_pick2_disable = false;
+const volatile bool eager_load_balance = true;
+const volatile bool greedy_idle = false;
 const volatile bool interactive_sticky = false;
 const volatile bool keep_running_enabled = true;
-const volatile bool eager_load_balance = true;
-const volatile bool dispatch_pick2_disable = false;
+const volatile bool kthreads_local = true;
+const volatile bool max_dsq_pick2 = false;
+
 const volatile bool smt_enabled = true;
-const volatile bool greedy_idle = false;
 const volatile bool has_little_cores = false;
-const volatile bool kthreads_local;
 const volatile u32 debug = 2;
 
 const u32 zero_u32 = 0;
@@ -233,6 +235,18 @@ static bool is_interactive(struct task_ctx *taskc)
 }
 
 /*
+ * Returns if the task is able to load balance using pick2.
+ */
+static bool can_pick2(struct task_ctx *taskc)
+{
+	if (is_interactive(taskc) ||
+	    (max_dsq_pick2 && taskc->dsq_id < nr_dsqs_per_llc))
+		return false;
+
+	return true;
+}
+
+/*
  * Returns a random llc_ctx
  */
 static struct llc_ctx *rand_llc_ctx(void)
@@ -306,7 +320,8 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *left,
 
 static s32 pick_two_cpu(struct task_ctx *taskc, bool *is_idle)
 {
-	if (min_llc_runs_pick2 > 0 && taskc->llc_runs < min_llc_runs_pick2)
+	if ((min_llc_runs_pick2 > 0 && taskc->llc_runs < min_llc_runs_pick2) ||
+	    !can_pick2(taskc))
 		return -EINVAL;
 
 	struct llc_ctx *chosen;
