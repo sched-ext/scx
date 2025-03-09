@@ -110,6 +110,10 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     keep_running: bool,
 
+    /// Only pick2 load balance from the max DSQ.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    max_dsq_pick2: bool,
+
     /// Scheduling min slice duration in microseconds.
     #[clap(short = 's', long, default_value = "100")]
     min_slice_us: u64,
@@ -224,26 +228,27 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        skel.maps.rodata_data.autoslice = opts.autoslice;
         skel.maps.rodata_data.interactive_ratio = opts.interactive_ratio as u32;
         skel.maps.rodata_data.min_slice_us = opts.min_slice_us;
         skel.maps.rodata_data.min_nr_queued_pick2 = opts.min_nr_queued_pick2;
         skel.maps.rodata_data.min_llc_runs_pick2 = opts.min_llc_runs_pick2;
         skel.maps.rodata_data.dsq_shift = opts.dsq_shift as u64;
         skel.maps.rodata_data.kthreads_local = !opts.disable_kthreads_local;
-        skel.maps.rodata_data.debug = opts.verbose as u32;
         skel.maps.rodata_data.nr_cpus = *NR_CPU_IDS as u32;
         skel.maps.rodata_data.nr_dsqs_per_llc = opts.dumb_queues as u32;
         skel.maps.rodata_data.init_dsq_index = opts.init_dsq_index as i32;
         skel.maps.rodata_data.nr_llcs = TOPO.all_llcs.clone().keys().len() as u32;
         skel.maps.rodata_data.nr_nodes = TOPO.nodes.clone().keys().len() as u32;
 
-        skel.maps.rodata_data.eager_load_balance = !opts.eager_load_balance;
+        skel.maps.rodata_data.autoslice = opts.autoslice;
+        skel.maps.rodata_data.debug = opts.verbose as u32;
         skel.maps.rodata_data.dispatch_pick2_disable = opts.dispatch_pick2_disable;
+        skel.maps.rodata_data.eager_load_balance = !opts.eager_load_balance;
         skel.maps.rodata_data.greedy_idle = !opts.greedy_idle_disable;
         skel.maps.rodata_data.has_little_cores = TOPO.has_little_cores();
         skel.maps.rodata_data.interactive_sticky = opts.interactive_sticky;
         skel.maps.rodata_data.keep_running_enabled = opts.keep_running;
+        skel.maps.rodata_data.max_dsq_pick2 = opts.max_dsq_pick2;
         skel.maps.rodata_data.smt_enabled =
             read_file_usize(Path::new("/sys/devices/system/cpu/smt/active")).unwrap_or(0) == 1;
 
