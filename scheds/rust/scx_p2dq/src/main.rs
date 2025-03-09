@@ -9,7 +9,6 @@ pub mod stats;
 use stats::Metrics;
 
 use std::mem::MaybeUninit;
-use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -29,7 +28,6 @@ use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::import_enums;
 use scx_utils::init_libbpf_logging;
-use scx_utils::misc::read_file_usize;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
@@ -249,8 +247,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.interactive_sticky = opts.interactive_sticky;
         skel.maps.rodata_data.keep_running_enabled = opts.keep_running;
         skel.maps.rodata_data.max_dsq_pick2 = opts.max_dsq_pick2;
-        skel.maps.rodata_data.smt_enabled =
-            read_file_usize(Path::new("/sys/devices/system/cpu/smt/active")).unwrap_or(0) == 1;
+        skel.maps.rodata_data.smt_enabled = TOPO.smt_enabled;
 
         let mut skel = scx_ops_load!(skel, p2dq, uei)?;
 

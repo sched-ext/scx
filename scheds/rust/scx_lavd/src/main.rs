@@ -18,8 +18,6 @@ use std::collections::BTreeMap;
 use std::ffi::c_int;
 use std::ffi::CStr;
 use std::fmt;
-use std::fs::File;
-use std::io::Read;
 use std::mem;
 use std::mem::MaybeUninit;
 use std::str;
@@ -260,6 +258,7 @@ struct FlatTopology {
     cpu_fids_performance: Vec<CpuFlatId>,
     cpu_fids_powersave: Vec<CpuFlatId>,
     cpdom_map: BTreeMap<ComputeDomainKey, ComputeDomainValue>,
+    smt_enabled: bool,
 }
 
 impl fmt::Display for FlatTopology {
@@ -273,6 +272,7 @@ impl fmt::Display for FlatTopology {
         for (k, v) in self.cpdom_map.iter() {
             write!(f, "\nCPDOM: {:?} {:?}", k, v).ok();
         }
+        write!(f, "SMT: {}", self.smt_enabled).ok();
         Ok(())
     }
 }
@@ -280,8 +280,9 @@ impl fmt::Display for FlatTopology {
 impl FlatTopology {
     /// Build a flat-structured topology
     pub fn new() -> Result<FlatTopology> {
-        let (cpu_fids_performance, avg_cap) = Self::build_cpu_fids(false, false).unwrap();
-        let (cpu_fids_powersave, _) = Self::build_cpu_fids(true, true).unwrap();
+        let topo = Topology::new().expect("Failed to build host topology");
+        let (cpu_fids_performance, avg_cap) = Self::build_cpu_fids(&topo, false, false).unwrap();
+        let (cpu_fids_powersave, _) = Self::build_cpu_fids(&topo, true, true).unwrap();
 
         // Note that building compute domain is not dependent to CPU orer
         // so it is okay to use any cpu_fids_*.
@@ -291,26 +292,16 @@ impl FlatTopology {
             cpu_fids_performance,
             cpu_fids_powersave,
             cpdom_map,
+            smt_enabled: topo.smt_enabled,
         })
-    }
-
-    /// Check if SMT is enabled or not
-    pub fn is_smt_active() -> std::io::Result<i32> {
-        let mut file = File::open("/sys/devices/system/cpu/smt/active")?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
-
-        let smt_active: i32 = contents.trim().parse().unwrap_or(0);
-
-        Ok(smt_active)
     }
 
     /// Build a flat-structured list of CPUs in a preference order
     fn build_cpu_fids(
+        topo: &Topology,
         prefer_smt_core: bool,
         prefer_little_core: bool,
     ) -> Option<(Vec<CpuFlatId>, usize)> {
-        let topo = Topology::new().expect("Failed to build host topology");
         let mut cpu_fids = Vec::new();
         debug!("{:#?}", topo);
 
@@ -565,7 +556,7 @@ impl<'a> Scheduler<'a> {
         Self::init_cpus(&mut skel, &topo);
 
         // Initialize skel according to @opts.
-        Self::init_globals(&mut skel, &opts);
+        Self::init_globals(&mut skel, &opts, &topo);
 
         // Attach.
         let mut skel = scx_ops_load!(skel, lavd_ops, uei)?;
@@ -641,16 +632,13 @@ impl<'a> Scheduler<'a> {
         opts.prefer_smt_core && opts.prefer_little_core
     }
 
-    fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts) {
+    fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, topo: &FlatTopology) {
         skel.maps.bss_data.no_core_compaction = opts.no_core_compaction;
         skel.maps.bss_data.no_freq_scaling = opts.no_freq_scaling;
         skel.maps.bss_data.no_prefer_turbo_core = opts.no_prefer_turbo_core;
         skel.maps.bss_data.is_powersave_mode = Self::is_powersave_mode(&opts);
         skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u64;
-        skel.maps.rodata_data.is_smt_active = match FlatTopology::is_smt_active() {
-            Ok(ret) => (ret == 1) as u32,
-            Err(_) => 0,
-        };
+        skel.maps.rodata_data.is_smt_active = topo.smt_enabled;
         skel.maps.rodata_data.is_autopilot_on = opts.autopilot;
         skel.maps.rodata_data.verbose = opts.verbose;
         skel.maps.rodata_data.slice_max_ns = opts.slice_max_us * 1000;

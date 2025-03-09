@@ -11,8 +11,6 @@ use crate::bpf_skel::*;
 
 use std::ffi::c_int;
 use std::ffi::c_ulong;
-use std::fs::File;
-use std::io::Read;
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
@@ -182,16 +180,6 @@ static mut BUF: AlignedBuffer = AlignedBuffer([0; BUFSIZE]);
 // ring buffer.
 const LIBBPF_STOP: i32 = -255;
 
-fn is_smt_active() -> std::io::Result<bool> {
-    let mut file = File::open("/sys/devices/system/cpu/smt/active")?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
-
-    let smt_active: i32 = contents.trim().parse().unwrap_or(0);
-
-    Ok(smt_active == 1)
-}
-
 static SET_HANDLER: Once = Once::new();
 
 fn set_ctrlc_handler(shutdown: Arc<AtomicBool>) -> Result<(), anyhow::Error> {
@@ -260,7 +248,8 @@ impl<'cb> BpfScheduler<'cb> {
         }
 
         // Check host topology to determine if we need to enable SMT capabilities.
-        skel.maps.rodata_data.smt_enabled = is_smt_active()?;
+        let topo = Topology::new().unwrap();
+        skel.maps.rodata_data.smt_enabled = topo.smt_enabled;
 
         // Set scheduler options (defined in the BPF part).
         if partial {
@@ -275,7 +264,6 @@ impl<'cb> BpfScheduler<'cb> {
         let mut skel = scx_ops_load!(skel, rustland, uei)?;
 
         // Initialize cache domains.
-        let topo = Topology::new().unwrap();
         Self::init_l2_cache_domains(&mut skel, &topo)?;
         Self::init_l3_cache_domains(&mut skel, &topo)?;
 
