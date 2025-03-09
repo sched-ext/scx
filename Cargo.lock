@@ -2552,7 +2552,7 @@ dependencies = [
 
 [[package]]
 name = "scxctl"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "clap",
  "colored 3.0.0",
