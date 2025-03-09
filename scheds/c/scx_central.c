@@ -48,6 +48,7 @@ int main(int argc, char **argv)
 	struct scx_central *skel;
 	struct bpf_link *link;
 	__u64 seq = 0, ecode;
+	__u32 hotplugs = 0;
 	__s32 opt;
 	cpu_set_t *cpuset;
 
@@ -118,6 +119,9 @@ restart:
 		printf("WARNING : BPF_F_TIMER_CPU_PIN not available, timer not pinned to central\n");
 
 	while (!exit_req && !UEI_EXITED(skel, uei)) {
+		if (UEI_ECODE_SYS_RSN(ecode) & SCX_ECODE_RSN_HOTPLUG) {
+			hotplugs ++;
+		}
 		printf("[SEQ %llu]\n", seq++);
 		printf("total   :%10" PRIu64 "    local:%10" PRIu64 "   queued:%10" PRIu64 "  lost:%10" PRIu64 "\n",
 		       skel->bss->nr_total,
@@ -129,8 +133,9 @@ restart:
 		       skel->bss->nr_dispatches,
 		       skel->bss->nr_mismatches,
 		       skel->bss->nr_retries);
-		printf("overflow:%10" PRIu64 "\n",
-		       skel->bss->nr_overflows);
+		printf("overflow:%10" PRIu64 " hotplugs:%10" PRIu32 "\n",
+		       skel->bss->nr_overflows, hotplugs);
+
 		fflush(stdout);
 		sleep(1);
 	}
