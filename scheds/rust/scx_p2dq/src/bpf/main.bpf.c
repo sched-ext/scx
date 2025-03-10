@@ -224,6 +224,14 @@ static inline void stat_inc(enum stat_idx idx)
 }
 
 /*
+ * Return a value proportionally scaled to the task's priority.
+ */
+static u64 scale_up_fair(const struct task_struct *p, u64 value)
+{
+	return (value * p->scx.weight) / 100;
+}
+
+/*
  * Returns if the task is interactive based on the tasks DSQ index.
  */
 static bool is_interactive(struct task_ctx *taskc)
@@ -749,6 +757,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	}
 
 	used = now - taskc->last_run_at;
+	p->scx.dsq_vtime = scale_up_fair(p, used);
 	taskc->last_dsq_id = taskc->dsq_id;
 	taskc->last_dsq_index = dsq_index;
 	__sync_fetch_and_add(&llcx->vtime, used);
