@@ -1219,7 +1219,7 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 				return false;
 			}
 
-			if (!cpdomc_pick->is_stealee || !cpdomc_pick->is_active)
+			if (!cpdomc_pick->is_stealee || !cpdomc_pick->is_valid)
 				continue;
 
 			/*
@@ -1288,7 +1288,7 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 				return false;
 			}
 
-			if (!cpdomc_pick->is_active)
+			if (!cpdomc_pick->is_valid)
 				continue;
 
 			if (consume_dsq(dsq_id))
@@ -1712,7 +1712,6 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 {
 	cpuc->idle_start_clk = 0;
-	cpuc->cpu_id = cpu_id;
 	cpuc->lat_cri = 0;
 	cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
 	WRITE_ONCE(cpuc->online_clk, now);
@@ -1724,7 +1723,6 @@ static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 {
 	cpuc->idle_start_clk = 0;
-	cpuc->cpu_id = cpu_id;
 	WRITE_ONCE(cpuc->offline_clk, now);
 	cpuc->is_online = false;
 	barrier();
@@ -1932,7 +1930,7 @@ static s32 init_cpdoms(u64 now)
 			scx_bpf_error("Failed to lookup cpdom_ctx for %d", i);
 			return -ESRCH;
 		}
-		if (!cpdomc->is_active)
+		if (!cpdomc->is_valid)
 			continue;
 
 		/*
@@ -1975,11 +1973,22 @@ static int init_cpumasks(void)
 	int err = 0;
 
 	bpf_rcu_read_lock();
+	/*
+	 * Allocate active cpumask and initialize it with all online CPUs.
+	 */
 	err = calloc_cpumask(&active_cpumask);
 	active = active_cpumask;
 	if (err || !active)
 		goto out;
 
+	online_cpumask = scx_bpf_get_online_cpumask();
+	nr_cpus_onln = bpf_cpumask_weight(online_cpumask);
+	bpf_cpumask_copy(active, online_cpumask);
+	scx_bpf_put_cpumask(online_cpumask);
+
+	/*
+	 * Allocate the other cpumasks.
+	 */
 	err = calloc_cpumask(&ovrflw_cpumask);
 	if (err)
 		goto out;
@@ -1995,15 +2004,6 @@ static int init_cpumasks(void)
 	err = calloc_cpumask(&little_cpumask);
 	if (err)
 		goto out;
-
-	/*
-	 * Initially activate all online CPUs until we know the system load.
-	 */
-	online_cpumask = scx_bpf_get_online_cpumask();
-	nr_cpus_onln = bpf_cpumask_weight(online_cpumask);
-	bpf_cpumask_copy(active, online_cpumask);
-	scx_bpf_put_cpumask(online_cpumask);
-
 out:
 	bpf_rcu_read_unlock();
 	return err;
@@ -2013,6 +2013,7 @@ static s32 init_per_cpu_ctx(u64 now)
 {
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *turbo, *big, *little, *active, *ovrflw, *cd_cpumask;
+	const struct cpumask *online_cpumask;
 	struct cpdom_ctx *cpdomc;
 	int cpu, i, j, err = 0, nr_cpus_non_zero = 0;
 	u64 cpdom_id;
@@ -2020,6 +2021,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	u16 turbo_cap;
 
 	bpf_rcu_read_lock();
+	online_cpumask = scx_bpf_get_online_cpumask();
 
 	/*
 	 * Prepare cpumasks.
@@ -2066,13 +2068,14 @@ static s32 init_per_cpu_ctx(u64 now)
 		if (err)
 			goto unlock_out;
 
-		if (bpf_cpumask_test_cpu(cpu, cast_mask(active)))
-			cpu_ctx_init_online(cpuc, cpu, now);
-		else
-			cpu_ctx_init_offline(cpuc, cpu, now);
-
-		cpuc->capacity = get_cpuperf_cap(cpu);
+		cpuc->cpu_id = cpu;
+		cpuc->idle_start_clk = 0;
+		cpuc->lat_cri = 0;
+		cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+		cpuc->online_clk = now;
 		cpuc->offline_clk = now;
+		cpuc->is_online = bpf_cpumask_test_cpu(cpu, online_cpumask);
+		cpuc->capacity = get_cpuperf_cap(cpu);
 		cpuc->cpdom_poll_pos = cpu % LAVD_CPDOM_MAX_NR;
 		cpuc->min_perf_cri = 1000;
 		cpuc->futex_op = LAVD_FUTEX_OP_INVALID;
@@ -2105,15 +2108,9 @@ static s32 init_per_cpu_ctx(u64 now)
 			nr_cpus_big++;
 			big_capacity += cpuc->capacity;
 			bpf_cpumask_set_cpu(cpu, big);
-			/*
-			 * Initially, all big cores are in the active domain
-			 * and all little cores in the overflow domain.
-			 */
-			bpf_cpumask_set_cpu(cpu, active);
 		}
 		else {
 			bpf_cpumask_set_cpu(cpu, little);
-			bpf_cpumask_set_cpu(cpu, ovrflw);
 			have_little_core = true;
 		}
 
@@ -2140,7 +2137,7 @@ static s32 init_per_cpu_ctx(u64 now)
 			err = -ESRCH;
 			goto unlock_out;
 		}
-		if (!cpdomc->is_active)
+		if (!cpdomc->is_valid)
 			continue;
 
 		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
@@ -2148,13 +2145,13 @@ static s32 init_per_cpu_ctx(u64 now)
 			bpf_for(j, 0, 64) {
 				if (cpumask & 0x1LLU << j) {
 			 		cpu = (i * 64) + j;
-					bpf_cpumask_set_cpu(cpu, cd_cpumask);
 					cpuc = get_cpu_ctx_id(cpu);
 					if (!cpuc) {
 						scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
 						err = -ESRCH;
 						goto unlock_out;
 					}
+					bpf_cpumask_set_cpu(cpu, cd_cpumask);
 					cpuc->cpdom_id = cpdomc->id;
 					cpuc->cpdom_alt_id = cpdomc->alt_id;
 					cpdomc->nr_cpus++;
@@ -2163,6 +2160,9 @@ static s32 init_per_cpu_ctx(u64 now)
 		}
 	}
 
+	/*
+	 * Print some useful informatin for debugging.
+	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
@@ -2175,6 +2175,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	}
 
 unlock_out:
+	scx_bpf_put_cpumask(online_cpumask);
 	bpf_rcu_read_unlock();
 	return err;
 }

@@ -604,7 +604,7 @@ impl<'a> Scheduler<'a> {
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].alt_id = v.cpdom_alt_id.get() as u64;
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].node_id = k.node_id as u8;
             skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_big = k.is_big as u8;
-            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_active = 1;
+            skel.maps.bss_data.cpdom_ctxs[v.cpdom_id].is_valid = 1;
             for cpu_id in v.cpu_ids.iter() {
                 let i = cpu_id / 64;
                 let j = cpu_id % 64;

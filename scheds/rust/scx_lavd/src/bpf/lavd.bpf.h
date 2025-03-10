@@ -66,7 +66,7 @@ struct cpdom_ctx {
 	u64	alt_id;				    /* id of the closest compute domain of alternative type (== dsq id) */
 	u8	node_id;			    /* numa domain id */
 	u8	is_big;				    /* is it a big core or little core? */
-	u8	is_active;			    /* if this compute domain is active */
+	u8	is_valid;			    /* is this a valid compute domain? */
 	u8	is_stealer;			    /* this domain should steal tasks from others */
 	u8	is_stealee;			    /* stealer doamin should steal tasks from this domain */
 	u16	nr_cpus;			    /* the number of CPUs in this compute domain */
