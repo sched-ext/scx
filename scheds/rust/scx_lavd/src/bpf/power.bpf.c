@@ -213,7 +213,7 @@ static void do_core_compaction(void)
 		if (!cpdomc || !cd_cpumask || !cpdomc->is_active)
 			continue;
 
-		if (!bpf_cpumask_intersects(active, cd_cpumask))
+		if (!bpf_cpumask_intersects(cast_mask(active), cast_mask(cd_cpumask)))
 			WRITE_ONCE(cpdomc->is_active, false);
 	}
 
@@ -221,7 +221,7 @@ unlock_out:
 	bpf_rcu_read_unlock();
 }
 
-static s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc)
+static s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
 {
 	const volatile u16 *cpu_order = get_cpu_order();
 	const struct cpumask *online_mask;
@@ -232,7 +232,7 @@ static s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc)
 	/*
 	 * online_src_mask = src_mask ∩ online_mask
 	 */
-	online_src_mask = cpuc->tmp_l_mask;
+	online_src_mask = cpuc_cur->tmp_l_mask;
 	if (!online_src_mask)
 		return -ENOENT;
 

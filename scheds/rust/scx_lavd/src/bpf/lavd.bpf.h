@@ -57,6 +57,9 @@ enum consts_internal  {
 	LAVD_FUTEX_OP_INVALID		= -1,
 };
 
+#define U32_MAX		((u32)~0U)
+#define S32_MAX		((s32)(U32_MAX >> 1))
+
 /*
  * Compute domain context
  * - system > numa node > llc domain > compute domain per core type (P or E)
