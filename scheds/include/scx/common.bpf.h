@@ -640,6 +640,23 @@ static inline u32 log2_u64(u64 v)
                 return log2_u32(v) + 1;
 }
 
+/*
+ * Return a value proportionally scaled to the task's priority.
+ */
+static inline u64 scale_task_fair(const struct task_struct *p, u64 value)
+{
+	return (value * p->scx.weight) / 100;
+}
+
+/*
+ * Return a value inversely proportional to the task's priority.
+ */
+static inline u64 scale_task_inverse_fair(const struct task_struct *p, u64 value)
+{
+	return value * 100 / p->scx.weight;
+}
+
+
 #include "compat.bpf.h"
 #include "enums.bpf.h"
 
