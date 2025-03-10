@@ -50,6 +50,7 @@ use ratatui::{
 use regex::Regex;
 use scx_stats::prelude::StatsClient;
 use scx_utils::misc::read_file_usize;
+use scx_utils::scx_enums;
 use scx_utils::Topology;
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc::UnboundedSender;
@@ -2296,32 +2297,37 @@ impl<'a> App<'a> {
             0,
             self.max_cpu_events,
         ));
-        cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
-        let next_dsq_data = self
-            .dsq_data
-            .entry(*next_dsq_id)
-            .or_insert(EventData::new(self.max_cpu_events));
-        next_dsq_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
-        if *next_dsq_vtime > 0 {
-            // vtime is special because we want the delta
-            let last = next_dsq_data
-                .event_data_immut("dsq_vtime_delta")
-                .last()
-                .copied()
-                .unwrap_or(0_u64);
-            if next_dsq_vtime - last < DSQ_VTIME_CUTOFF {
-                next_dsq_data.add_event_data(
-                    "dsq_vtime_delta",
-                    if last > 0 { *next_dsq_vtime - last } else { 0 },
-                );
+
+        if *next_dsq_id != scx_enums.SCX_DSQ_INVALID {
+            cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
+            let next_dsq_data = self
+                .dsq_data
+                .entry(*next_dsq_id)
+                .or_insert(EventData::new(self.max_cpu_events));
+            next_dsq_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
+            if *next_dsq_vtime > 0 {
+                // vtime is special because we want the delta
+                let last = next_dsq_data
+                    .event_data_immut("dsq_vtime_delta")
+                    .last()
+                    .copied()
+                    .unwrap_or(0_u64);
+                if next_dsq_vtime - last < DSQ_VTIME_CUTOFF {
+                    next_dsq_data.add_event_data(
+                        "dsq_vtime_delta",
+                        if last > 0 { *next_dsq_vtime - last } else { 0 },
+                    );
+                }
             }
         }
 
-        let prev_dsq_data = self
-            .dsq_data
-            .entry(*prev_dsq_id)
-            .or_insert(EventData::new(self.max_cpu_events));
-        prev_dsq_data.add_event_data("dsq_slice_consumed", *prev_used_slice_ns);
+        if *prev_dsq_id != scx_enums.SCX_DSQ_INVALID {
+            let prev_dsq_data = self
+                .dsq_data
+                .entry(*prev_dsq_id)
+                .or_insert(EventData::new(self.max_cpu_events));
+            prev_dsq_data.add_event_data("dsq_slice_consumed", *prev_used_slice_ns);
+        }
     }
 
     /// Handles softirq events.
