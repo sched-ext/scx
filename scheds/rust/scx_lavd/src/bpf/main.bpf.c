@@ -1023,23 +1023,23 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	return cpu_id >= 0 ? cpu_id : prev_cpu;
 }
 
-static u64 find_proper_dsq(struct task_ctx *taskc, struct cpu_ctx *cpuc)
+static u64 find_proper_dsq(struct task_ctx *taskc, struct cpu_ctx *cpuc_task)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	bool perf_cri = is_perf_cri(taskc, stat_cur);
-	bool big_core = cpuc->big_core;
+	bool big_core = cpuc_task->big_core;
 
 	/*
 	 * If a task type and a core type matches, use the current cpu's
 	 * compute domain DSQ.
 	 */
 	if (perf_cri == big_core)
-		return cpuc->cpdom_id;
+		return cpuc_task->cpdom_id;
 
 	/*
 	 * Otherwise, use the DSQ of an alternative core type.
 	 */
-	return cpuc->cpdom_alt_id;
+	return cpuc_task->cpdom_alt_id;
 }
 
 static bool try_kick_task_idle_cpu(struct task_struct *p,
@@ -1061,27 +1061,50 @@ static bool try_kick_task_idle_cpu(struct task_struct *p,
 	return false;
 }
 
+static bool try_extend_overflow_set(struct task_struct *p,
+				    struct cpu_ctx *cpuc_cur)
+{
+	struct bpf_cpumask *active, *ovrflw;
+	s32 new_cpu;
+
+	if (use_full_cpus() || !is_affinitized(p))
+		return false;
+
+	active  = active_cpumask;
+	ovrflw  = ovrflw_cpumask;
+	if (!active || !ovrflw)
+		return false;
+
+	/*
+	 * Extend the overflow set if the current active and overflow set
+	 * cannot cover @p->cpus_ptr. Once a new overflow CPU is chosen,
+	 * wake it up.
+	 */
+	bpf_rcu_read_lock();
+	if (!bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) &&
+	    !bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr)) {
+		new_cpu = find_cpu_in(p->cpus_ptr, cpuc_cur);
+		if (new_cpu >= 0) {
+			if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
+				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+			bpf_rcu_read_unlock();
+			return true;
+		}
+	}
+	bpf_rcu_read_unlock();
+	return false;
+}
+
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc_task, *cpuc_cur;
 	struct task_ctx *taskc;
-	s32 prev_cpu;
+	s32 task_cpu;
 	u64 dsq_id, now;
 
-	/*
-	 * Place a task to a run queue of current cpu's compute domain.
-	 *
-	 * If there is an idle CPU at the ops.select_cpu(), the task is already
-	 * dispatched at ops.select_cpu(), so ops.enqueue() won't be called.
-	 * Hence, the task that is enqueued here are the cases: 1) there is no
-	 * idle CPU when ops.select_cpu() or 2) the task is not the case of
-	 * being wakened up (i.e., resume after preemption). Therefore, we
-	 * always put the task to the global DSQ, so any idle CPU can pick it
-	 * up.
-	 */
 	taskc = get_task_ctx(p);
-	prev_cpu = scx_bpf_task_cpu(p);
-	cpuc_task = get_cpu_ctx_id(prev_cpu);
+	task_cpu = scx_bpf_task_cpu(p);
+	cpuc_task = get_cpu_ctx_id(task_cpu);
 	cpuc_cur = get_cpu_ctx();
 	if (!cpuc_cur || !cpuc_task || !taskc)
 		return;
@@ -1094,23 +1117,30 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	p->scx.slice = calc_time_slice(p, taskc);
 
 	/*
-	 * Enqueue the task to one of task's DSQs based on its virtual deadline.
+	 * Place a task to a proper DSQ, which is either the task's
+	 * associated compute domain or its alternative domain.
 	 *
-	 * We do not perform direct dispatch to a local DSQ (SCX_DSQ_LOCAL_ON)
-	 * on purpose. In particular, the direct dispatch at SCX_ENQ_CPU_SELECTED
-	 * could increase tail latencies because it gives too much favor to
-	 * non-migratable tasks, so stalling others.
+	 * Note that we do not perform direct dispatch to a local DSQ
+	 * (SCX_DSQ_LOCAL_ON) on purpose. In particular, the direct dispatch
+	 * at SCX_ENQ_CPU_SELECTED could increase tail latencies because it
+	 * gives too much favor to non-migratable tasks, so stalling others.
 	 */
 	dsq_id = find_proper_dsq(taskc, cpuc_task);
-	prev_cpu = scx_bpf_task_cpu(p);
 	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice, p->scx.dsq_vtime,
 				 enq_flags);
+
+	/*
+	 * If the current active or overflow set cannot run this task,
+	 * extend the overflow set and kick the new overflow CPU here.
+	 */
+	if (try_extend_overflow_set(p, cpuc_cur))
+		return;
 
 	/*
 	 * If there is an idle cpu for the task, try to kick it up now
 	 * so it can consume the task immediately.
 	 */
-	if (try_kick_task_idle_cpu(p, taskc, prev_cpu))
+	if (try_kick_task_idle_cpu(p, taskc, task_cpu))
 		return;
 
 	/*
