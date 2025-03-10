@@ -411,16 +411,18 @@ static __always_inline int __on_sched_wakeup(struct task_struct *p)
 	if (!p || !should_sample())
 		return 0;
 
+	u64 now = bpf_ktime_get_ns();
 	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return 0;
 
 	if (!(event = try_reserve_event()))
 		return 0;
 
-	tctx->wakeup_ts = bpf_ktime_get_ns();
 	event->type = SCHED_WAKEUP;
-	event->ts = tctx->wakeup_ts;
+
+	if (tctx)
+		tctx->wakeup_ts = now;
+
+	event->ts = now;
 	event->cpu = bpf_get_smp_processor_id();
 	event->event.wakeup.pid = p->pid;
 	event->event.wakeup.prio = (int)p->prio;
@@ -498,9 +500,9 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 		event->event.sched_switch.next_pid = next->pid;
 		event->event.sched_switch.next_tgid = next->tgid;
 		event->event.sched_switch.next_prio = (int)next->prio;
-		if (next_tctx) {
-			event->event.sched_switch.next_dsq_id = next_tctx->dsq_id;
+		if (next_tctx && next_tctx->dsq_insert_time > 0) {
 			event->event.sched_switch.next_dsq_lat_us = (now - next_tctx->dsq_insert_time) / 1000;
+			event->event.sched_switch.next_dsq_id = next_tctx->dsq_id;
 			event->event.sched_switch.next_dsq_nr = scx_bpf_dsq_nr_queued(next_tctx->dsq_id);
 			/*
 			 * XXX: if a task gets moved to another dsq and the vtime is updated
@@ -527,7 +529,7 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 		event->event.sched_switch.prev_tgid = prev->tgid;
 		event->event.sched_switch.prev_prio = (int)prev->prio;
 		event->event.sched_switch.prev_state = prev_state;
-		if (prev_tctx) {
+		if (prev_tctx && prev_tctx->last_run_ns > 0) {
 			event->event.sched_switch.prev_used_slice_ns = prev_tctx->last_run_ns - now;
 			event->event.sched_switch.prev_dsq_id = prev_tctx->dsq_id;
 			event->event.sched_switch.prev_slice_ns = prev_tctx->slice_ns;
