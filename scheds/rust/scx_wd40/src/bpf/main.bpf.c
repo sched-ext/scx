@@ -50,6 +50,7 @@
 #endif
 
 #include "cpumask.h"
+#include "bpf_arena_spin_lock.h"
 
 #include "intf.h"
 #include "types.h"

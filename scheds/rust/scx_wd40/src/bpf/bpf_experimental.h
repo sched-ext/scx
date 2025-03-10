@@ -352,6 +352,19 @@ l_true:												\
        })
 #endif
 
+/* Override the definitions from scx/common.bpf.h. */
+#ifdef cond_break
+#undef cond_break
+#endif
+
+#ifdef READ_ONCE
+#undef READ_ONCE
+#endif
+
+#ifdef WRITE_ONCE
+#undef WRITE_ONCE
+#endif
+
 /*
  * Note that cond_break can only be portably used in the body of a breakable
  * construct, whereas can_loop can be used anywhere.

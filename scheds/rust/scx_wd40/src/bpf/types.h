@@ -4,6 +4,8 @@
 typedef struct dom_ctx __arena *dom_ptr;
 struct dom_ctx;
 
+#define arena_lock_t arena_spinlock_t __arena *
+
 struct task_ctx {
 	/* The domains this task can run on */
 	u64 dom_mask;
@@ -72,6 +74,8 @@ struct dom_ctx {
 	scx_bitmap_t cpumask;
 	scx_bitmap_t direct_greedy_cpumask;
 	scx_bitmap_t node_cpumask;
+
+	arena_lock_t vtime_lock;
 };
 
 #endif /* __TYPES_H */

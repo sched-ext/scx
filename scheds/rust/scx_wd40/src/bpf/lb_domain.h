@@ -10,7 +10,6 @@ void lb_domain_free(dom_ptr domc);
 struct lb_domain *lb_domain_get(u32 dom_id);
 dom_ptr try_lookup_dom_ctx(u32 dom_id);
 dom_ptr lookup_dom_ctx(u32 dom_id);
-struct bpf_spin_lock *lookup_dom_vtime_lock(dom_ptr domc);
 
 __weak s32 alloc_dom(u32 dom_id);
 __weak s32 create_dom(u32 dom_id);

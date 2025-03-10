@@ -10,6 +10,8 @@
 
 #include "cpumask.h"
 
+#include "bpf_arena_spin_lock.h"
+
 #include "intf.h"
 #include "types.h"
 #include "lb_domain.h"
@@ -27,7 +29,6 @@ struct lock_wrapper {
 
 struct lb_domain {
 	union sdt_id		tid;
-	struct bpf_spin_lock vtime_lock;
 
 	dom_ptr domc;
 };
@@ -156,20 +157,6 @@ dom_ptr lookup_dom_ctx(u32 dom_id)
 		scx_bpf_error("Failed to lookup dom[%u]", dom_id);
 
 	return domc;
-}
-
-__hidden
-struct bpf_spin_lock *lookup_dom_vtime_lock(dom_ptr domc)
-{
-	struct lb_domain *lb_domain;
-
-	lb_domain = lb_domain_get(domc->id);
-	if (!lb_domain) {
-		scx_bpf_error("Failed to lookup dom map value");
-		return NULL;
-	}
-
-	return &lb_domain->vtime_lock;
 }
 
 static inline u32 weight_to_bucket_idx(u32 weight)

@@ -10,6 +10,8 @@
 
 #include "cpumask.h"
 
+#include "bpf_arena_spin_lock.h"
+
 #include "intf.h"
 #include "types.h"
 #include "lb_domain.h"
