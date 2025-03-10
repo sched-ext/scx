@@ -171,7 +171,7 @@ pub fn in_kallsyms(ksym: &str) -> Result<bool> {
 }
 
 pub fn tracepoint_exists(tracepoint: &str) -> Result<bool> {
-    let mut file = match std::fs::File::open("/sys/kernel/tracing/available_events") {
+    let file = match std::fs::File::open("/sys/kernel/tracing/available_events") {
         Err(_) => std::fs::File::open("/sys/kernel/debug/tracing/available_events")?,
         Ok(file) => file,
     };
