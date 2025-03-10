@@ -7,7 +7,6 @@ extern struct sdt_allocator lb_domain_allocator;
 int lb_domain_init(void);
 dom_ptr lb_domain_alloc(u32 dom_id);
 void lb_domain_free(dom_ptr domc);
-struct lb_domain *lb_domain_get(u32 dom_id);
 dom_ptr try_lookup_dom_ctx(u32 dom_id);
 dom_ptr lookup_dom_ctx(u32 dom_id);
 

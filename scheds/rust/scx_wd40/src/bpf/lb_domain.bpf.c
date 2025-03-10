@@ -27,12 +27,6 @@ struct lock_wrapper {
 	struct bpf_spin_lock lock;
 };
 
-struct lb_domain {
-	union sdt_id		tid;
-
-	dom_ptr domc;
-};
-
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
@@ -42,14 +36,6 @@ struct {
 } dom_dcycle_locks SEC(".maps");
 
 volatile scx_bitmap_t node_data[MAX_NUMA_NODES];
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct lb_domain);
-	__uint(max_entries, MAX_DOMS);
-	__uint(map_flags, 0);
-} lb_domain_map SEC(".maps");
 
 volatile dom_ptr dom_ctxs[MAX_DOMS];
 struct sdt_allocator lb_domain_allocator;
@@ -64,24 +50,12 @@ __hidden
 dom_ptr lb_domain_alloc(u32 dom_id)
 {
 	struct sdt_data __arena *data = NULL;
-	struct lb_domain lb_domain;
 	dom_ptr domc;
-	int ret;
 
 	data = sdt_alloc(&lb_domain_allocator);
 
-	lb_domain.tid = data->tid;
-	lb_domain.domc = (dom_ptr)data->payload;
-
-	ret = bpf_map_update_elem(&lb_domain_map, &dom_id, &lb_domain,
-				    BPF_EXIST);
-	if (ret) {
-		sdt_free_idx(&lb_domain_allocator, data->tid.idx);
-		return NULL;
-	}
-
-	domc = lb_domain.domc;
-	domc->id = dom_id;
+	domc = (dom_ptr)data->payload;
+	domc->tid = data->tid;
 
 	domc->cpumask = scx_bitmap_alloc();
 	if (!domc->cpumask) {
@@ -97,7 +71,7 @@ dom_ptr lb_domain_alloc(u32 dom_id)
 	}
 
 	domc->node_cpumask = scx_bitmap_alloc();
-	if (ret) {
+	if (!domc->node_cpumask) {
 		scx_bitmap_free(domc->direct_greedy_cpumask);
 		scx_bitmap_free(domc->cpumask);
 		lb_domain_free(domc);
@@ -110,41 +84,22 @@ dom_ptr lb_domain_alloc(u32 dom_id)
 __hidden
 void lb_domain_free(dom_ptr domc)
 {
-	struct lb_domain *lb_domain;
-	u32 key = domc->id;
-
 	sdt_subprog_init_arena();
-
-	lb_domain = bpf_map_lookup_elem(&lb_domain_map, &key);
-	if (!lb_domain)
-		return;
 
 	scx_bitmap_free(domc->node_cpumask);
 	scx_bitmap_free(domc->direct_greedy_cpumask);
 	scx_bitmap_free(domc->cpumask);
 
-	sdt_free_idx(&lb_domain_allocator, lb_domain->tid.idx);
-	lb_domain->domc = NULL;
-
-	bpf_map_delete_elem(&lb_domain_map, &key);
-}
-
-__hidden
-struct lb_domain *lb_domain_get(u32 dom_id)
-{
-	return bpf_map_lookup_elem(&lb_domain_map, &dom_id);
+	sdt_free_idx(&lb_domain_allocator, domc->tid.idx);
 }
 
 __hidden
 dom_ptr try_lookup_dom_ctx(u32 dom_id)
 {
-	struct lb_domain *lb_domain;
-
-	lb_domain = lb_domain_get(dom_id);
-	if (!lb_domain)
+	if (dom_id >= MAX_DOMS)
 		return NULL;
 
-	return lb_domain->domc;
+	return dom_ctxs[dom_id];
 }
 
 __hidden

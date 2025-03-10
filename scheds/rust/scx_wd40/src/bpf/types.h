@@ -64,6 +64,8 @@ struct dom_active_tasks {
 };
 
 struct dom_ctx {
+	union sdt_id		tid;
+
 	u32 id;
 	u64 min_vruntime;
 
