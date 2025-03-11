@@ -348,6 +348,11 @@ static s32 pick_two_cpu(struct task_ctx *taskc, bool *is_idle)
 	s32 right_queued = scx_bpf_dsq_nr_queued(right_dsq_id);
 	u64 right_load = *MEMBER_VPTR(right->dsq_load, [dsq_index]);
 
+	if (min_nr_queued_pick2 > 0 &&
+	    (left_queued < min_nr_queued_pick2 &&
+	     right_queued < min_nr_queued_pick2))
+		return -EINVAL;
+
 	if (((left_queued > 0 || right_queued > 0) &&
 	    left_queued < right_queued) ||
 	    left_load > right_load) {
