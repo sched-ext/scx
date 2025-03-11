@@ -231,6 +231,11 @@ static bool is_per_cpu_task(const struct task_struct *p)
 	return false;
 }
 
+static bool is_affinitized(const struct task_struct *p)
+{
+	return p->nr_cpus_allowed != nr_cpu_ids;
+}
+
 static bool have_idle_cpus(const struct cpumask *idle_mask)
 {
 	return !bpf_cpumask_empty(idle_mask);

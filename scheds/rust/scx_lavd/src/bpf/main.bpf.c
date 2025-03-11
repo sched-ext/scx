@@ -287,6 +287,13 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
+	 * Prioritize an affinitized task since it has restrictions
+	 * in placement so it tends to be delayed.
+	 */
+	if (is_affinitized(p))
+		weight_boost += LAVD_LC_WEIGHT_BOOST;
+
+	/*
 	 * Prioritize a migration-disabled task since it has restrictions
 	 * in placement so it tends to be delayed.
 	 */
