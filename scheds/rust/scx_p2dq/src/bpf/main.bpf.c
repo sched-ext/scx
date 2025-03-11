@@ -749,7 +749,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	}
 
 	used = now - taskc->last_run_at;
-	p->scx.dsq_vtime = scale_task_fair(p, used);
+	p->scx.dsq_vtime = scale_by_task_weight(p, used);
 	taskc->last_dsq_id = taskc->dsq_id;
 	taskc->last_dsq_index = dsq_index;
 	__sync_fetch_and_add(&llcx->vtime, used);

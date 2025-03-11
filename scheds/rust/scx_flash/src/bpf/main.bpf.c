@@ -171,7 +171,7 @@ static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
 	/*
 	 * Add the execution vruntime to the deadline.
 	 */
-	return tctx->deadline + scale_task_inverse_fair(p, tctx->exec_runtime);
+	return tctx->deadline + scale_by_task_weight_inverse(p, tctx->exec_runtime);
 }
 
 /*
@@ -186,7 +186,7 @@ static u64 task_slice(const struct task_struct *p,
 	 * proportional to the total amount of tasks that are waiting to be
 	 * scheduled.
 	 */
-	return scale_task_fair(p, slice_max / nr_tasks_waiting(node));
+	return scale_by_task_weight(p, slice_max / nr_tasks_waiting(node));
 }
 
 /*
@@ -335,7 +335,7 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Update task's vruntime.
 	 */
-	tctx->deadline += scale_task_inverse_fair(p, slice);
+	tctx->deadline += scale_by_task_weight_inverse(p, slice);
 }
 
 void BPF_STRUCT_OPS(flash_quiescent, struct task_struct *p, u64 deq_flags)
