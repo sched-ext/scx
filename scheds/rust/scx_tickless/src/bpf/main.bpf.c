@@ -183,7 +183,7 @@ static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
 	/*
 	 * Add the execution vruntime to the deadline.
 	 */
-	return tctx->deadline + scale_task_inverse_fair(p, tctx->exec_runtime);
+	return tctx->deadline + scale_by_task_weight_inverse(p, tctx->exec_runtime);
 }
 
 /*
@@ -556,7 +556,7 @@ void BPF_STRUCT_OPS(tickless_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Update task's vruntime.
 	 */
-	tctx->deadline += scale_task_inverse_fair(p, slice);
+	tctx->deadline += scale_by_task_weight_inverse(p, slice);
 }
 
 /*
