@@ -506,12 +506,14 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		goto out_put_cpumask;
 	}
 
-	// Greedy idle tries to grab any idle CPU in the LLC
-	if (greedy_idle && llcx->cpumask) {
+	// Try to keep interactive tasks local to the LLC and let non
+	// interactive tasks load balance via pick2.
+	if ((interactive || greedy_idle) && llcx->cpumask) {
 		cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), 0);
 		if (cpu >= 0) {
+			if (greedy_idle)
+				stat_inc(P2DQ_STAT_GREEDY_IDLE);
 			*is_idle = true;
-			stat_inc(P2DQ_STAT_GREEDY_IDLE);
 			goto out_put_cpumask;
 		}
 	}
@@ -519,16 +521,18 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	if (!nodec->cpumask)
 		goto out_put_cpumask;
 
-	cpu = scx_bpf_pick_idle_cpu(cast_mask(nodec->cpumask), SCX_PICK_IDLE_CORE);
-	if (cpu >= 0) {
-		*is_idle = true;
-		goto out_put_cpumask;
-	}
-
 	if (nr_llcs > 1) {
-		// Try to keep interactive tasks local to the LLC and let non
-		// interactive tasks load balance via pick2.
-		if (interactive && nodec->cpumask) {
+		// first try an idle core in the local node
+		cpu = scx_bpf_pick_idle_cpu(cast_mask(nodec->cpumask), SCX_PICK_IDLE_CORE);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto out_put_cpumask;
+		}
+
+		if (interactive) {
+			if (!nodec->cpumask)
+				goto out_put_cpumask;
+
 			cpu = scx_bpf_pick_idle_cpu(cast_mask(nodec->cpumask), 0);
 			if (cpu >= 0) {
 				*is_idle = true;
@@ -541,12 +545,21 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 				goto out_put_cpumask;
 			}
 		}
-	}
+	} else {
+		cpu = scx_bpf_pick_idle_cpu(cast_mask(nodec->cpumask), SCX_PICK_IDLE_CORE);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto out_put_cpumask;
+		}
 
-	cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-	if (cpu >= 0) {
-		*is_idle = true;
-		goto out_put_cpumask;
+		if (!nodec->cpumask)
+			goto out_put_cpumask;
+
+		cpu = scx_bpf_pick_idle_cpu(cast_mask(nodec->cpumask), 0);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto out_put_cpumask;
+		}
 	}
 	cpu = prev_cpu;
 
