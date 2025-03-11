@@ -905,7 +905,7 @@ start_tmask:
 	}
 
 	/*
-	 * Pick a idle core among active CPUs.
+	 * Pick an idle core among active CPUs.
 	 */
 	cpu_id = find_idle_cpu_in(a_cpumask, idle_mask, reserve_cpu);
 	if (cpu_id >= 0) {
@@ -928,7 +928,7 @@ start_omask:
 
 	/*
 	 * If there is no idle core under our control, pick random core
-	 * either in active of overflow CPUs.
+	 * either in active or overflow CPUs.
 	 */
 	if (!bpf_cpumask_empty(cast_mask(a_cpumask))) {
 		cpu_id = bpf_cpumask_any_distribute(cast_mask(a_cpumask));
@@ -942,26 +942,27 @@ start_omask:
 
 	/*
 	 * If the task cannot run on either active or overflow cores,
-	 * stay on the previous core (if it is okay) or one of its taskset.
-	 * Then, put the CPU to the overflow set.
+	 * extend the overflow set following the CPU preference order.
 	 */
 start_any_mask:
-	if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
-		cpu_id = prev_cpu;
-	else
-		cpu_id = bpf_cpumask_any_distribute(p->cpus_ptr);
-	bpf_cpumask_set_cpu(cpu_id, ovrflw);
+	cpu_id = find_cpu_in(p->cpus_ptr, cpuc);
+	if (cpu_id >= 0) {
+		if (test_and_clear_cpu_idle(cpu_id, idle_mask, reserve_cpu))
+			*is_idle = true;
+		bpf_cpumask_set_cpu(cpu_id, ovrflw);
+		goto unlock_out;
+	}
+
+	/*
+	 * If nothing works, stay on the previous core.
+	 */
+	cpu_id = prev_cpu;
 
 unlock_out:
 	bpf_rcu_read_unlock();
 
 out:
 	scx_bpf_put_idle_cpumask(idle_mask);
-
-	/*
-	 * Note that we don't need to kick the picked CPU here since the
-	 * ops.select_cpu() path internally triggers kicking cpu if necessary.
-	 */
 	return cpu_id;
 }
 
