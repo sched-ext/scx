@@ -1711,6 +1711,16 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 
 static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 {
+	struct bpf_cpumask *cd_cpumask;
+
+	bpf_rcu_read_lock();
+	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpuc->cpdom_id]);
+	if (!cd_cpumask)
+		goto unlock_out;
+	bpf_cpumask_set_cpu(cpu_id, cd_cpumask);
+unlock_out:
+	bpf_rcu_read_unlock();
+
 	cpuc->idle_start_clk = 0;
 	cpuc->lat_cri = 0;
 	cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
@@ -1722,6 +1732,16 @@ static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 
 static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 {
+	struct bpf_cpumask *cd_cpumask;
+
+	bpf_rcu_read_lock();
+	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpuc->cpdom_id]);
+	if (!cd_cpumask)
+		goto unlock_out;
+	bpf_cpumask_clear_cpu(cpu_id, cd_cpumask);
+unlock_out:
+	bpf_rcu_read_unlock();
+
 	cpuc->idle_start_clk = 0;
 	WRITE_ONCE(cpuc->offline_clk, now);
 	cpuc->is_online = false;
@@ -2154,7 +2174,8 @@ static s32 init_per_cpu_ctx(u64 now)
 					cpuc->cpdom_id = cpdomc->id;
 					cpuc->cpdom_alt_id = cpdomc->alt_id;
 
-					bpf_cpumask_set_cpu(cpu, cd_cpumask);
+					if (bpf_cpumask_test_cpu(cpu, online_cpumask))
+						bpf_cpumask_set_cpu(cpu, cd_cpumask);
 					if (bpf_cpumask_test_cpu(cpu, active))
 						cpdomc->is_active = true;
 					cpdomc->nr_cpus++;
