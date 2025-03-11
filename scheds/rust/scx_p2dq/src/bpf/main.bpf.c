@@ -586,7 +586,7 @@ s32 BPF_STRUCT_OPS(p2dq_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 	if (is_idle) {
 		stat_inc(P2DQ_STAT_IDLE);
 		u64 slice_ns = dsq_time_slice(taskc->dsq_index);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 	}
 
 	return cpu;
