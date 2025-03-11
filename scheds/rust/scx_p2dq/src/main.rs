@@ -118,7 +118,7 @@ struct Opts {
 
     /// Number of runs on the LLC before a task becomes eligbile for pick2 migration on the wakeup
     /// path.
-    #[clap(short = 'l', long, default_value = "3")]
+    #[clap(short = 'l', long, default_value = "1")]
     min_llc_runs_pick2: u64,
 
     /// Manual definition of slice intervals in microseconds for DSQs, must be equal to number of
