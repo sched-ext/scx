@@ -641,17 +641,17 @@ static inline u32 log2_u64(u64 v)
 }
 
 /*
- * Return a value proportionally scaled to the task's priority.
+ * Return a value proportionally scaled to the task's weight.
  */
-static inline u64 scale_task_fair(const struct task_struct *p, u64 value)
+static inline u64 scale_by_task_weight(const struct task_struct *p, u64 value)
 {
 	return (value * p->scx.weight) / 100;
 }
 
 /*
- * Return a value inversely proportional to the task's priority.
+ * Return a value inversely proportional to the task's weight.
  */
-static inline u64 scale_task_inverse_fair(const struct task_struct *p, u64 value)
+static inline u64 scale_by_task_weight_inverse(const struct task_struct *p, u64 value)
 {
 	return value * 100 / p->scx.weight;
 }
