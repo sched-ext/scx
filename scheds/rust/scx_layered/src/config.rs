@@ -125,6 +125,9 @@ pub enum LayerKind {
         #[serde(default)]
         cpus_range: Option<(usize, usize)>,
 
+        #[serde(default)]
+        protected: bool,
+
         #[serde(flatten)]
         common: LayerCommon,
     },
@@ -132,6 +135,9 @@ pub enum LayerKind {
         util_range: (f64, f64),
         #[serde(default)]
         cpus_range: Option<(usize, usize)>,
+
+        #[serde(default)]
+        protected: bool,
 
         #[serde(flatten)]
         common: LayerCommon,
