@@ -67,6 +67,7 @@ struct cpdom_ctx {
 	u8	node_id;			    /* numa domain id */
 	u8	is_big;				    /* is it a big core or little core? */
 	u8	is_valid;			    /* is this a valid compute domain? */
+	u8	is_active;			    /* is there an active CPU in this domain? */
 	u8	is_stealer;			    /* this domain should steal tasks from others */
 	u8	is_stealee;			    /* stealer doamin should steal tasks from this domain */
 	u16	nr_cpus;			    /* the number of CPUs in this compute domain */

@@ -2151,9 +2151,12 @@ static s32 init_per_cpu_ctx(u64 now)
 						err = -ESRCH;
 						goto unlock_out;
 					}
-					bpf_cpumask_set_cpu(cpu, cd_cpumask);
 					cpuc->cpdom_id = cpdomc->id;
 					cpuc->cpdom_alt_id = cpdomc->alt_id;
+
+					bpf_cpumask_set_cpu(cpu, cd_cpumask);
+					if (bpf_cpumask_test_cpu(cpu, active))
+						cpdomc->is_active = true;
 					cpdomc->nr_cpus++;
 				}
 			}

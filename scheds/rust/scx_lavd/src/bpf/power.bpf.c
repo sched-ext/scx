@@ -105,10 +105,12 @@ static void do_core_compaction(void)
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	const volatile u16 *cpu_order = get_cpu_order();
 	struct cpu_ctx *cpuc;
-	struct bpf_cpumask *active, *ovrflw;
+	struct bpf_cpumask *active, *ovrflw, *cd_cpumask;
+	struct cpdom_ctx *cpdomc;
 	int nr_cpus, nr_active, nr_active_old, cpu, i;
 	u32 sum_capacity = 0, big_capacity = 0;
 	bool clear;
+	u64 cpdom_id;
 
 	bpf_rcu_read_lock();
 
@@ -150,6 +152,10 @@ static void do_core_compaction(void)
 			if (i < nr_active) {
 				bpf_cpumask_set_cpu(cpu, active);
 				bpf_cpumask_clear_cpu(cpu, ovrflw);
+
+				cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpu]);
+				if (cpdomc)
+					WRITE_ONCE(cpdomc->is_active, true);
 			}
 			else {
 				bpf_cpumask_set_cpu(cpu, ovrflw);
@@ -194,6 +200,22 @@ static void do_core_compaction(void)
 
 	cur_big_core_ratio = (1000 * big_capacity) / sum_capacity;
 	stat_cur->nr_active = nr_active;
+
+	/*
+	 * Maintain cpdomc->is_active reflecting the active set.
+	 */
+	bpf_for(cpdom_id, 0, nr_cpdoms) {
+		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
+			break;
+
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+		cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
+		if (!cpdomc || !cd_cpumask || !cpdomc->is_active)
+			continue;
+
+		if (!bpf_cpumask_intersects(active, cd_cpumask))
+			WRITE_ONCE(cpdomc->is_active, false);
+	}
 
 unlock_out:
 	bpf_rcu_read_unlock();
