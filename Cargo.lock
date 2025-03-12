@@ -1829,12 +1829,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b17cddbe7ec3f8bc800887bab5e717348c95ea2ca0b1bf0837fb964dc67099"
 
 [[package]]
-name = "perf-event-open-sys"
-version = "4.0.0"
+name = "perf-event-open-sys2"
+version = "5.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c44fb1c7651a45a3652c4afc6e754e40b3d6e6556f1487e2b230bfc4f33c2a8"
+checksum = "d9c25955321465255e437600b54296983fab1feac2cd0c38958adeb26dbae49e"
 dependencies = [
  "libc",
+ "memoffset 0.9.1",
 ]
 
 [[package]]
@@ -2583,7 +2584,7 @@ dependencies = [
  "log-panics",
  "nix 0.29.0",
  "num-format",
- "perf-event-open-sys",
+ "perf-event-open-sys2",
  "plain",
  "protobuf",
  "protobuf-codegen",
