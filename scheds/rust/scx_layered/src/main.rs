@@ -104,7 +104,7 @@ lazy_static! {
                 kind: LayerKind::Confined {
                     util_range: (0.8, 0.9),
                     cpus_range: Some((0, 16)),
-                    cpus_pct: None,
+                    cpus_range_pct: None,
                     protected: false,
                     common: LayerCommon {
                         min_exec_us: 1000,
@@ -167,7 +167,7 @@ lazy_static! {
                     cpus_range: None,
                     util_range: (0.2, 0.8),
                     protected: false,
-                    cpus_pct: None,
+                    cpus_range_pct: None,
                     common: LayerCommon {
                         min_exec_us: 800,
                         yield_ignore: 0.0,
@@ -197,7 +197,7 @@ lazy_static! {
                     cpus_range: None,
                     util_range: (0.5, 0.6),
                     protected: false,
-                    cpus_pct: None,
+                    cpus_range_pct: None,
                     common: LayerCommon {
                         min_exec_us: 200,
                         yield_ignore: 0.0,
@@ -382,8 +382,9 @@ lazy_static! {
 /// - disallow_open_after_us: Duration to wait after machine reaches saturation
 ///   before confining tasks in Open layers.
 ///
-/// - cpus_pct: Integer between 1 and 100. Percentage of all CPUs to give to a
-///   layer. Mutually exclusive with cpus_range.
+/// - cpus_range_pct: Array of 2 integers between 1 and 100. Lower and upper
+///   bound percentages of all CPUs to give to a layer. Mutually exclusive
+///   with cpus_range.
 ///
 /// - disallow_preempt_after_us: Duration to wait after machine reaches saturation
 ///   before confining tasks to preempt.
@@ -994,26 +995,30 @@ struct Layer {
 
 fn resolve_cpus_pct_range(
     cpus_range: &Option<(usize, usize)>,
-    cpus_pct: &Option<usize>,
+    cpus_range_pct: &Option<(usize, usize)>,
     max_cpus: usize,
 ) -> Result<(usize, usize)> {
     match cpus_range {
-        Some(cpus_range) => match cpus_pct {
+        Some(cpus_range) => match cpus_range_pct {
             Some(_cpus_pct) => {
                 bail!("cpus_range cannot be used with cpus_pct.");
             }
             None => Ok(*cpus_range),
         },
-        None => match cpus_pct {
-            Some(cpus_pct) => {
-                if *cpus_pct > 100 || *cpus_pct < 1 {
-                    bail!("cpus_pct cannot be less than 1 or greater than 100.");
+        None => match cpus_range_pct {
+            Some(cpus_range_pct) => {
+                let cpus_min_pct = cpus_range_pct.0;
+                let cpus_max_pct = cpus_range_pct.1;
+                if !(1..=100).contains(&cpus_min_pct) || !(1..=100).contains(&cpus_max_pct) {
+                    bail!("cpus_pct values cannot be less than 1 or greater than 100.");
                 }
-                let cpu_count =
-                    ((max_cpus as f64) * ((*cpus_pct as f64) / 100f64)).floor() as usize;
+                let cpus_min_count =
+                    ((max_cpus as f64) * ((cpus_min_pct as f64) / 100f64)).floor() as usize;
+                let cpus_max_count =
+                    ((max_cpus as f64) * ((cpus_max_pct as f64) / 100f64)).floor() as usize;
                 Ok((
-                    std::cmp::max(cpu_count, 1),
-                    std::cmp::min(cpu_count, max_cpus),
+                    std::cmp::max(cpus_min_count, 1),
+                    std::cmp::min(cpus_max_count, max_cpus),
                 ))
             }
             None => Ok((0, max_cpus)),
@@ -1029,12 +1034,13 @@ impl Layer {
         match &kind {
             LayerKind::Confined {
                 cpus_range,
-                cpus_pct,
+                cpus_range_pct,
                 util_range,
                 common: LayerCommon { nodes, llcs, .. },
                 ..
             } => {
-                let cpus_range = resolve_cpus_pct_range(cpus_range, cpus_pct, topo.all_cpus.len())?;
+                let cpus_range =
+                    resolve_cpus_pct_range(cpus_range, cpus_range_pct, topo.all_cpus.len())?;
                 if cpus_range.0 > cpus_range.1 || cpus_range.1 == 0 {
                     bail!("invalid cpus_range {:?}", cpus_range);
                 }
@@ -1997,13 +2003,13 @@ impl<'a> Scheduler<'a> {
                 LayerKind::Confined {
                     util_range,
                     cpus_range,
-                    cpus_pct,
+                    cpus_range_pct,
                     ..
                 }
                 | LayerKind::Grouped {
                     util_range,
                     cpus_range,
-                    cpus_pct,
+                    cpus_range_pct,
                     ..
                 } => {
                     // Guide layer sizing by utilization within each layer
@@ -2023,7 +2029,8 @@ impl<'a> Scheduler<'a> {
                     let low = (util / util_range.1).ceil() as usize;
                     let high = ((util / util_range.0).floor() as usize).max(low);
                     let target = layer.cpus.weight().clamp(low, high);
-                    let cpus_range = resolve_cpus_pct_range(cpus_range, cpus_pct, nr_cpus).unwrap();
+                    let cpus_range =
+                        resolve_cpus_pct_range(cpus_range, cpus_range_pct, nr_cpus).unwrap();
 
                     records.push((
                         (owned * 100.0) as u64,
