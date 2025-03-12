@@ -10,6 +10,8 @@ use anyhow::Context;
 use anyhow::Result;
 use libc::{close, read};
 use perf_event_open_sys as perf;
+use scx_utils::compat::get_fs_mount;
+use scx_utils::compat::tracefs_mount;
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -26,39 +28,6 @@ const PERF_SAMPLE_ID: u64 = 1 << 16;
 const PERF_FORMAT_TOTAL_TIME_ENABLED: u64 = 1 << 0;
 #[allow(dead_code)]
 const PERF_FORMAT_TOTAL_TIME_RUNNING: u64 = 1 << 1;
-#[allow(dead_code)]
-const DEBUGFS: &str = "debugfs";
-const TRACEFS: &str = "tracefs";
-const PROCFS_MOUNTS: &str = "/proc/mounts";
-
-/// Returns the mount point for a filesystem type.
-fn get_fs_mount(mount_type: &str) -> Result<Vec<PathBuf>> {
-    let proc_mounts_path = Path::new(PROCFS_MOUNTS);
-
-    let file = File::open(proc_mounts_path)
-        .with_context(|| format!("Failed to open {}", proc_mounts_path.display()))?;
-
-    let reader = BufReader::new(file);
-
-    let mut mounts = Vec::new();
-    for line in reader.lines() {
-        let line = line.context("Failed to read line from /proc/mounts")?;
-        let mount_info: Vec<&str> = line.split_whitespace().collect();
-
-        if mount_info.len() > 3 && mount_info[2] == mount_type {
-            let mount_path = PathBuf::from(mount_info[1]);
-            mounts.push(mount_path);
-        }
-    }
-
-    Ok(mounts)
-}
-
-/// Returns the tracefs mount point.
-pub fn tracefs_mount() -> Result<PathBuf> {
-    let mounts = get_fs_mount(TRACEFS)?;
-    mounts.into_iter().next().context("No tracefs mount found")
-}
 
 /// Reads a file and returns the u64 value from a file.
 pub fn read_file_u64<P: AsRef<Path>>(path: P) -> Result<u64> {
