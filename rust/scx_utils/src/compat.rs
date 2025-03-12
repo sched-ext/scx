@@ -206,7 +206,7 @@ pub fn tracefs_mount() -> Result<std::path::PathBuf> {
 
 /// Returns the debugfs mount point.
 pub fn debugfs_mount() -> Result<std::path::PathBuf> {
-    let mounts = get_fs_mount(TRACEFS)?;
+    let mounts = get_fs_mount(DEBUGFS)?;
     mounts.into_iter().next().context("No debugfs mount found")
 }
 
