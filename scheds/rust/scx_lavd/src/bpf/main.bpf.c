@@ -287,6 +287,13 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
+	 * Prioritize an affinitized task since it has restrictions
+	 * in placement so it tends to be delayed.
+	 */
+	if (is_affinitized(p))
+		weight_boost += LAVD_LC_WEIGHT_BOOST;
+
+	/*
 	 * Prioritize a migration-disabled task since it has restrictions
 	 * in placement so it tends to be delayed.
 	 */
@@ -898,7 +905,7 @@ start_tmask:
 	}
 
 	/*
-	 * Pick a idle core among active CPUs.
+	 * Pick an idle core among active CPUs.
 	 */
 	cpu_id = find_idle_cpu_in(a_cpumask, idle_mask, reserve_cpu);
 	if (cpu_id >= 0) {
@@ -921,7 +928,7 @@ start_omask:
 
 	/*
 	 * If there is no idle core under our control, pick random core
-	 * either in active of overflow CPUs.
+	 * either in active or overflow CPUs.
 	 */
 	if (!bpf_cpumask_empty(cast_mask(a_cpumask))) {
 		cpu_id = bpf_cpumask_any_distribute(cast_mask(a_cpumask));
@@ -935,26 +942,27 @@ start_omask:
 
 	/*
 	 * If the task cannot run on either active or overflow cores,
-	 * stay on the previous core (if it is okay) or one of its taskset.
-	 * Then, put the CPU to the overflow set.
+	 * extend the overflow set following the CPU preference order.
 	 */
 start_any_mask:
-	if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
-		cpu_id = prev_cpu;
-	else
-		cpu_id = bpf_cpumask_any_distribute(p->cpus_ptr);
-	bpf_cpumask_set_cpu(cpu_id, ovrflw);
+	cpu_id = find_cpu_in(p->cpus_ptr, cpuc);
+	if (cpu_id >= 0) {
+		if (test_and_clear_cpu_idle(cpu_id, idle_mask, reserve_cpu))
+			*is_idle = true;
+		bpf_cpumask_set_cpu(cpu_id, ovrflw);
+		goto unlock_out;
+	}
+
+	/*
+	 * If nothing works, stay on the previous core.
+	 */
+	cpu_id = prev_cpu;
 
 unlock_out:
 	bpf_rcu_read_unlock();
 
 out:
 	scx_bpf_put_idle_cpumask(idle_mask);
-
-	/*
-	 * Note that we don't need to kick the picked CPU here since the
-	 * ops.select_cpu() path internally triggers kicking cpu if necessary.
-	 */
 	return cpu_id;
 }
 
@@ -1015,23 +1023,133 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	return cpu_id >= 0 ? cpu_id : prev_cpu;
 }
 
-static u64 find_proper_dsq(struct task_ctx *taskc, struct cpu_ctx *cpuc)
+static u64 find_proper_dsq(const struct task_struct *p,
+			   struct task_ctx *taskc,
+			   struct cpu_ctx *cpuc_task,
+			   struct cpu_ctx *cpuc_cur,
+			   s32 *new_cpu)
 {
-	struct sys_stat *stat_cur = get_sys_stat_cur();
-	bool perf_cri = is_perf_cri(taskc, stat_cur);
-	bool big_core = cpuc->big_core;
+	struct sys_stat *stat_cur;
+	struct cpdom_ctx *cpdomc;
+	struct bpf_cpumask *active, *ovrflw, *cd_cpumask;
+	u64 cpdom_id, o_cpdom_id, m_cpdom_id;
+	s32 load, o_cpdom_load, m_cpdom_load;
+	bool is_task_big, affinitized;
+
+	*new_cpu = -ENOENT;
 
 	/*
-	 * If a task type and a core type matches, use the current cpu's
-	 * compute domain DSQ.
+	 * If a task can run on only one compute domain, stay on it.
 	 */
-	if (perf_cri == big_core)
-		return cpuc->cpdom_id;
+	if (nr_cpdoms == 1 || is_per_cpu_task(p))
+		return cpuc_task->cpdom_id;
 
 	/*
-	 * Otherwise, use the DSQ of an alternative core type.
+	 * If a task type and a core type match, try to stay on the compute
+	 * domain of the task's associated CPU. Otherwise, try to migrate
+	 * to the alternative compute domain.
 	 */
-	return cpuc->cpdom_alt_id;
+	stat_cur = get_sys_stat_cur();
+	is_task_big = is_perf_cri(taskc, stat_cur);
+	if (is_task_big == cpuc_task->big_core)
+		cpdom_id = cpuc_task->cpdom_id;
+	else
+		cpdom_id = cpuc_task->cpdom_alt_id;
+
+	/*
+	 * If the chosen compute domain is active and can run the task,
+	 * go with it.
+	 */
+	cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
+	if (!cpdomc || !cd_cpumask) {
+		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", cpdom_id);
+		return -ENOENT;
+	}
+
+	affinitized = is_affinitized(p);
+	if (READ_ONCE(cpdomc->is_active) && (!affinitized ||
+	    bpf_cpumask_intersects(cast_mask(cd_cpumask), p->cpus_ptr)))
+		return cpdom_id;
+
+	/*
+	 * If no active CPUs can run the task,
+	 * find a CPU in the CPU preference order and go with it.
+	 */
+	bpf_rcu_read_lock();
+	active = active_cpumask;
+	ovrflw = ovrflw_cpumask;
+	if (!active || !ovrflw) {
+		scx_bpf_error("Failed to prepare cpumasks.");
+		goto unlock_out;
+	}
+
+	if (affinitized &&
+	    !bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr)) {
+		*new_cpu = find_cpu_in(p->cpus_ptr, cpuc_cur);
+		if (*new_cpu >= 0) {
+			struct cpu_ctx *cpuc = get_cpu_ctx_id(*new_cpu);
+			if (!cpuc)
+				goto unlock_out;
+			bpf_cpumask_set_cpu(*new_cpu, ovrflw);
+			bpf_rcu_read_unlock();
+			return cpuc->cpdom_id;
+		}
+	}
+
+	/*
+	 * Now we know that the task can run on an active CPU.
+	 * Let's find out the best matching compute domain for the task
+	 * considering the task type.
+	 */
+	o_cpdom_id = -ENOENT;
+	m_cpdom_id = -ENOENT;
+	o_cpdom_load = S32_MAX;
+	m_cpdom_load = S32_MAX;
+	bpf_for(cpdom_id, 0, nr_cpdoms) {
+		if (cpdom_id >= LAVD_CPDOM_MAX_NR)
+			break;
+
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpdom_id]);
+		cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpdom_id]);
+		if (!cpdomc || !cd_cpumask) {
+			scx_bpf_error("Failed to lookup cpdom_ctx for %llu", cpdom_id);
+			goto unlock_out;
+		}
+
+		if (!READ_ONCE(cpdomc->is_active) || (affinitized &&
+		    !bpf_cpumask_intersects(p->cpus_ptr, cast_mask(cd_cpumask))))
+			continue;
+
+		load = scx_bpf_dsq_nr_queued(cpdom_id);
+		if (load < o_cpdom_load) {
+			o_cpdom_id = cpdom_id;
+			o_cpdom_load = load;
+		}
+
+		if (is_task_big == cpdomc->is_big) {
+			if (load < m_cpdom_load) {
+				m_cpdom_id = cpdom_id;
+				m_cpdom_load = load;
+			}
+		}
+	}
+	if (m_cpdom_id >= 0) {
+		bpf_rcu_read_unlock();
+		return m_cpdom_id;
+	}
+	if (o_cpdom_id >= 0) {
+		bpf_rcu_read_unlock();
+		return o_cpdom_id;
+	}
+
+unlock_out:
+	bpf_rcu_read_unlock();
+
+	/*
+	 * If nothing works, just go with the associated CPU's compute domain.
+	 */
+	return cpuc_task->cpdom_id;
 }
 
 static bool try_kick_task_idle_cpu(struct task_struct *p,
@@ -1053,27 +1171,50 @@ static bool try_kick_task_idle_cpu(struct task_struct *p,
 	return false;
 }
 
+static bool try_extend_overflow_set(struct task_struct *p,
+				    struct cpu_ctx *cpuc_cur)
+{
+	struct bpf_cpumask *active, *ovrflw;
+	s32 new_cpu;
+
+	if (use_full_cpus() || !is_affinitized(p))
+		return false;
+
+	active  = active_cpumask;
+	ovrflw  = ovrflw_cpumask;
+	if (!active || !ovrflw)
+		return false;
+
+	/*
+	 * Extend the overflow set if the current active and overflow set
+	 * cannot cover @p->cpus_ptr. Once a new overflow CPU is chosen,
+	 * wake it up.
+	 */
+	bpf_rcu_read_lock();
+	if (!bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) &&
+	    !bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr)) {
+		new_cpu = find_cpu_in(p->cpus_ptr, cpuc_cur);
+		if (new_cpu >= 0) {
+			if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
+				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+			bpf_rcu_read_unlock();
+			return true;
+		}
+	}
+	bpf_rcu_read_unlock();
+	return false;
+}
+
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc_task, *cpuc_cur;
 	struct task_ctx *taskc;
-	s32 prev_cpu;
+	s32 task_cpu, new_cpu;
 	u64 dsq_id, now;
 
-	/*
-	 * Place a task to a run queue of current cpu's compute domain.
-	 *
-	 * If there is an idle CPU at the ops.select_cpu(), the task is already
-	 * dispatched at ops.select_cpu(), so ops.enqueue() won't be called.
-	 * Hence, the task that is enqueued here are the cases: 1) there is no
-	 * idle CPU when ops.select_cpu() or 2) the task is not the case of
-	 * being wakened up (i.e., resume after preemption). Therefore, we
-	 * always put the task to the global DSQ, so any idle CPU can pick it
-	 * up.
-	 */
 	taskc = get_task_ctx(p);
-	prev_cpu = scx_bpf_task_cpu(p);
-	cpuc_task = get_cpu_ctx_id(prev_cpu);
+	task_cpu = scx_bpf_task_cpu(p);
+	cpuc_task = get_cpu_ctx_id(task_cpu);
 	cpuc_cur = get_cpu_ctx();
 	if (!cpuc_cur || !cpuc_task || !taskc)
 		return;
@@ -1086,23 +1227,39 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	p->scx.slice = calc_time_slice(p, taskc);
 
 	/*
-	 * Enqueue the task to one of task's DSQs based on its virtual deadline.
+	 * Place a task to a proper DSQ, which is either the task's
+	 * associated compute domain or its alternative domain.
 	 *
-	 * We do not perform direct dispatch to a local DSQ (SCX_DSQ_LOCAL_ON)
-	 * on purpose. In particular, the direct dispatch at SCX_ENQ_CPU_SELECTED
-	 * could increase tail latencies because it gives too much favor to
-	 * non-migratable tasks, so stalling others.
+	 * Note that we do not perform direct dispatch to a local DSQ
+	 * (SCX_DSQ_LOCAL_ON) on purpose. In particular, the direct dispatch
+	 * at SCX_ENQ_CPU_SELECTED could increase tail latencies because it
+	 * gives too much favor to non-migratable tasks, so stalling others.
 	 */
-	dsq_id = find_proper_dsq(taskc, cpuc_task);
-	prev_cpu = scx_bpf_task_cpu(p);
+	dsq_id = find_proper_dsq(p, taskc, cpuc_task, cpuc_cur, &new_cpu);
 	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice, p->scx.dsq_vtime,
 				 enq_flags);
+
+	/*
+	 * If a new overflow CPU was assigned while finding a proper DSQ,
+	 * kick the new CPU and go.
+	 */
+	if (new_cpu >= 0) {
+		scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+		return;
+	}
+
+	/*
+	 * If the current active or overflow set cannot run this task,
+	 * extend the overflow set and kick the new overflow CPU here.
+	 */
+	if (try_extend_overflow_set(p, cpuc_cur))
+		return;
 
 	/*
 	 * If there is an idle cpu for the task, try to kick it up now
 	 * so it can consume the task immediately.
 	 */
-	if (try_kick_task_idle_cpu(p, taskc, prev_cpu))
+	if (try_kick_task_idle_cpu(p, taskc, task_cpu))
 		return;
 
 	/*
@@ -1181,7 +1338,7 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 				return false;
 			}
 
-			if (!cpdomc_pick->is_stealee || !cpdomc_pick->is_active)
+			if (!cpdomc_pick->is_stealee || !cpdomc_pick->is_valid)
 				continue;
 
 			/*
@@ -1250,7 +1407,7 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 				return false;
 			}
 
-			if (!cpdomc_pick->is_active)
+			if (!cpdomc_pick->is_valid)
 				continue;
 
 			if (consume_dsq(dsq_id))
@@ -1330,9 +1487,10 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
-	struct bpf_cpumask *active, *ovrflw;
+	struct bpf_cpumask *active, *ovrflw, *cpdom_mask, *new_mask;
 	struct task_struct *p;
 	u64 dsq_id;
+	s32 new_cpu;
 	bool try_consume = false;
 
 	cpuc = get_cpu_ctx_id(cpu);
@@ -1371,7 +1529,9 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 
 	active = active_cpumask;
 	ovrflw = ovrflw_cpumask;
-	if (!active || !ovrflw) {
+	cpdom_mask = MEMBER_VPTR(cpdom_cpumask, [cpuc->cpdom_id]);
+	new_mask = cpuc->tmp_t_mask;
+	if (!active || !ovrflw || !cpdom_mask || !new_mask) {
 		scx_bpf_error("Failed to prepare cpumasks.");
 		goto unlock_out;
 	}
@@ -1388,7 +1548,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If the previous task can run on this CPU but not on either active
 	 * or overflow set, extend the overflow set and go.
 	 */
-	if (!try_consume && prev &&
+	if (!try_consume && prev && is_affinitized(prev) &&
 	    bpf_cpumask_test_cpu(cpu, prev->cpus_ptr) &&
 	    !bpf_cpumask_intersects(cast_mask(active), prev->cpus_ptr) &&
 	    !bpf_cpumask_intersects(cast_mask(ovrflw), prev->cpus_ptr)) {
@@ -1414,21 +1574,32 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 			break;
 
 		/*
-		 * If a task can run on this CPU but not on either active
-		 * or overflow set, extend the overflow set and go.
+		 * If the task can run on either the active or overflow set,
+		 * try another task.
 		 */
-		if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
-		    !bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) &&
-		    !bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr)) {
-			bpf_cpumask_set_cpu(cpu, ovrflw);
+		if(!is_affinitized(p) ||
+		   bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
+		   bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr)) {
 			bpf_task_release(p);
-			try_consume = true;
-			break;
+			continue;
 		}
 
 		/*
-		 * Otherwise, try another task.
+		 * Now, we know that the task cannot run on either the
+		 * active or overflow set. Then, let's consider to extend
+		 * the overflow set.
 		 */
+		new_cpu = find_cpu_in(p->cpus_ptr, cpuc);
+		if (new_cpu >= 0) {
+			if (new_cpu == cpu) {
+				bpf_cpumask_set_cpu(new_cpu, ovrflw);
+				bpf_task_release(p);
+				try_consume = true;
+				break;
+			}
+			else if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
+				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+		}
 		bpf_task_release(p);
 	}
 
@@ -1659,8 +1830,17 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 
 static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 {
+	struct bpf_cpumask *cd_cpumask;
+
+	bpf_rcu_read_lock();
+	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpuc->cpdom_id]);
+	if (!cd_cpumask)
+		goto unlock_out;
+	bpf_cpumask_set_cpu(cpu_id, cd_cpumask);
+unlock_out:
+	bpf_rcu_read_unlock();
+
 	cpuc->idle_start_clk = 0;
-	cpuc->cpu_id = cpu_id;
 	cpuc->lat_cri = 0;
 	cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
 	WRITE_ONCE(cpuc->online_clk, now);
@@ -1671,8 +1851,17 @@ static void cpu_ctx_init_online(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 
 static void cpu_ctx_init_offline(struct cpu_ctx *cpuc, u32 cpu_id, u64 now)
 {
+	struct bpf_cpumask *cd_cpumask;
+
+	bpf_rcu_read_lock();
+	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [cpuc->cpdom_id]);
+	if (!cd_cpumask)
+		goto unlock_out;
+	bpf_cpumask_clear_cpu(cpu_id, cd_cpumask);
+unlock_out:
+	bpf_rcu_read_unlock();
+
 	cpuc->idle_start_clk = 0;
-	cpuc->cpu_id = cpu_id;
 	WRITE_ONCE(cpuc->offline_clk, now);
 	cpuc->is_online = false;
 	barrier();
@@ -1880,7 +2069,7 @@ static s32 init_cpdoms(u64 now)
 			scx_bpf_error("Failed to lookup cpdom_ctx for %d", i);
 			return -ESRCH;
 		}
-		if (!cpdomc->is_active)
+		if (!cpdomc->is_valid)
 			continue;
 
 		/*
@@ -1923,11 +2112,22 @@ static int init_cpumasks(void)
 	int err = 0;
 
 	bpf_rcu_read_lock();
+	/*
+	 * Allocate active cpumask and initialize it with all online CPUs.
+	 */
 	err = calloc_cpumask(&active_cpumask);
 	active = active_cpumask;
 	if (err || !active)
 		goto out;
 
+	online_cpumask = scx_bpf_get_online_cpumask();
+	nr_cpus_onln = bpf_cpumask_weight(online_cpumask);
+	bpf_cpumask_copy(active, online_cpumask);
+	scx_bpf_put_cpumask(online_cpumask);
+
+	/*
+	 * Allocate the other cpumasks.
+	 */
 	err = calloc_cpumask(&ovrflw_cpumask);
 	if (err)
 		goto out;
@@ -1943,15 +2143,6 @@ static int init_cpumasks(void)
 	err = calloc_cpumask(&little_cpumask);
 	if (err)
 		goto out;
-
-	/*
-	 * Initially activate all online CPUs until we know the system load.
-	 */
-	online_cpumask = scx_bpf_get_online_cpumask();
-	nr_cpus_onln = bpf_cpumask_weight(online_cpumask);
-	bpf_cpumask_copy(active, online_cpumask);
-	scx_bpf_put_cpumask(online_cpumask);
-
 out:
 	bpf_rcu_read_unlock();
 	return err;
@@ -1961,6 +2152,7 @@ static s32 init_per_cpu_ctx(u64 now)
 {
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *turbo, *big, *little, *active, *ovrflw, *cd_cpumask;
+	const struct cpumask *online_cpumask;
 	struct cpdom_ctx *cpdomc;
 	int cpu, i, j, err = 0, nr_cpus_non_zero = 0;
 	u64 cpdom_id;
@@ -1968,6 +2160,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	u16 turbo_cap;
 
 	bpf_rcu_read_lock();
+	online_cpumask = scx_bpf_get_online_cpumask();
 
 	/*
 	 * Prepare cpumasks.
@@ -2002,6 +2195,10 @@ static s32 init_per_cpu_ctx(u64 now)
 		if (err)
 			goto unlock_out;
 
+		err = calloc_cpumask(&cpuc->tmp_l_mask);
+		if (err)
+			goto unlock_out;
+
 		err = calloc_cpumask(&cpuc->tmp_t_mask);
 		if (err)
 			goto unlock_out;
@@ -2010,13 +2207,14 @@ static s32 init_per_cpu_ctx(u64 now)
 		if (err)
 			goto unlock_out;
 
-		if (bpf_cpumask_test_cpu(cpu, cast_mask(active)))
-			cpu_ctx_init_online(cpuc, cpu, now);
-		else
-			cpu_ctx_init_offline(cpuc, cpu, now);
-
-		cpuc->capacity = get_cpuperf_cap(cpu);
+		cpuc->cpu_id = cpu;
+		cpuc->idle_start_clk = 0;
+		cpuc->lat_cri = 0;
+		cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
+		cpuc->online_clk = now;
 		cpuc->offline_clk = now;
+		cpuc->is_online = bpf_cpumask_test_cpu(cpu, online_cpumask);
+		cpuc->capacity = get_cpuperf_cap(cpu);
 		cpuc->cpdom_poll_pos = cpu % LAVD_CPDOM_MAX_NR;
 		cpuc->min_perf_cri = 1000;
 		cpuc->futex_op = LAVD_FUTEX_OP_INVALID;
@@ -2049,15 +2247,9 @@ static s32 init_per_cpu_ctx(u64 now)
 			nr_cpus_big++;
 			big_capacity += cpuc->capacity;
 			bpf_cpumask_set_cpu(cpu, big);
-			/*
-			 * Initially, all big cores are in the active domain
-			 * and all little cores in the overflow domain.
-			 */
-			bpf_cpumask_set_cpu(cpu, active);
 		}
 		else {
 			bpf_cpumask_set_cpu(cpu, little);
-			bpf_cpumask_set_cpu(cpu, ovrflw);
 			have_little_core = true;
 		}
 
@@ -2084,7 +2276,7 @@ static s32 init_per_cpu_ctx(u64 now)
 			err = -ESRCH;
 			goto unlock_out;
 		}
-		if (!cpdomc->is_active)
+		if (!cpdomc->is_valid)
 			continue;
 
 		bpf_for(i, 0, LAVD_CPU_ID_MAX/64) {
@@ -2092,7 +2284,6 @@ static s32 init_per_cpu_ctx(u64 now)
 			bpf_for(j, 0, 64) {
 				if (cpumask & 0x1LLU << j) {
 			 		cpu = (i * 64) + j;
-					bpf_cpumask_set_cpu(cpu, cd_cpumask);
 					cpuc = get_cpu_ctx_id(cpu);
 					if (!cpuc) {
 						scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
@@ -2101,12 +2292,20 @@ static s32 init_per_cpu_ctx(u64 now)
 					}
 					cpuc->cpdom_id = cpdomc->id;
 					cpuc->cpdom_alt_id = cpdomc->alt_id;
+
+					if (bpf_cpumask_test_cpu(cpu, online_cpumask))
+						bpf_cpumask_set_cpu(cpu, cd_cpumask);
+					if (bpf_cpumask_test_cpu(cpu, cast_mask(active)))
+						WRITE_ONCE(cpdomc->is_active, true);
 					cpdomc->nr_cpus++;
 				}
 			}
 		}
 	}
 
+	/*
+	 * Print some useful informatin for debugging.
+	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
@@ -2119,6 +2318,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	}
 
 unlock_out:
+	scx_bpf_put_cpumask(online_cpumask);
 	bpf_rcu_read_unlock();
 	return err;
 }

@@ -44,7 +44,7 @@ enum consts_internal  {
 	LAVD_CC_PER_TURBO_CORE_MAX_CTUIL = 750, /* maximum per-core CPU utilization for a turbo core */
 	LAVD_CC_NR_ACTIVE_MIN		= 1, /* num of mininum active cores */
 	LAVD_CC_NR_OVRFLW		= 1, /* num of overflow cores */
-	LAVD_CC_CPU_PIN_INTERVAL	= (1ULL * LAVD_TIME_ONE_SEC),
+	LAVD_CC_CPU_PIN_INTERVAL	= (250ULL * NSEC_PER_MSEC),
 	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL / LAVD_SYS_STAT_INTERVAL_NS),
 
 	LAVD_AP_HIGH_UTIL		= 700, /* balanced mode when 10% < cpu util <= 40%,
@@ -57,6 +57,9 @@ enum consts_internal  {
 	LAVD_FUTEX_OP_INVALID		= -1,
 };
 
+#define U32_MAX		((u32)~0U)
+#define S32_MAX		((s32)(U32_MAX >> 1))
+
 /*
  * Compute domain context
  * - system > numa node > llc domain > compute domain per core type (P or E)
@@ -66,7 +69,8 @@ struct cpdom_ctx {
 	u64	alt_id;				    /* id of the closest compute domain of alternative type (== dsq id) */
 	u8	node_id;			    /* numa domain id */
 	u8	is_big;				    /* is it a big core or little core? */
-	u8	is_active;			    /* if this compute domain is active */
+	u8	is_valid;			    /* is this a valid compute domain? */
+	u8	is_active;			    /* is there an active CPU in this domain? */
 	u8	is_stealer;			    /* this domain should steal tasks from others */
 	u8	is_stealee;			    /* stealer doamin should steal tasks from this domain */
 	u16	nr_cpus;			    /* the number of CPUs in this compute domain */
@@ -150,8 +154,9 @@ struct cpu_ctx {
 	/*
 	 * Temporary cpu masks
 	 */
-	struct bpf_cpumask __kptr *tmp_a_mask;
-	struct bpf_cpumask __kptr *tmp_o_mask;
+	struct bpf_cpumask __kptr *tmp_a_mask; /* for active set */
+	struct bpf_cpumask __kptr *tmp_o_mask; /* for overflow set */
+	struct bpf_cpumask __kptr *tmp_l_mask; /* for online cpumask */
 	struct bpf_cpumask __kptr *tmp_t_mask;
 	struct bpf_cpumask __kptr *tmp_t2_mask;
 } __attribute__((aligned(CACHELINE_SIZE)));
