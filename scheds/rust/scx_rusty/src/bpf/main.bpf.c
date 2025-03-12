@@ -1279,7 +1279,7 @@ static u64 node_dom_mask(u32 node_id)
 	return mask;
 }
 
-#ifndef __TARGET_ARCH_arm64
+#if !defined(__TARGET_ARCH_arm64) && ! defined(__TARGET_ARCH_riscv)
 /*
  * Sets the preferred domain mask according to the mempolicy. See man(2)
  * set_mempolicy for more details on mempolicy.
