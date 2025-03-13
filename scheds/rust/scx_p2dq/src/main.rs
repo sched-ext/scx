@@ -34,6 +34,7 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::update_cpu_idle_resume_latency;
 use scx_utils::CoreType;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
@@ -107,6 +108,10 @@ struct Opts {
     /// Enable tasks to run beyond their timeslice if the CPU is idle.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     keep_running: bool,
+
+    /// Set idle QoS resume latency based in microseconds.
+    #[clap(long)]
+    idle_resume_us: Option<u32>,
 
     /// Only pick2 load balance from the max DSQ.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -381,6 +386,15 @@ fn main() -> Result<()> {
         if opts.monitor.is_some() {
             let _ = jh.join();
             return Ok(());
+        }
+    }
+
+    if let Some(idle_resume_us) = opts.idle_resume_us {
+        if idle_resume_us > 0 {
+            info!("Setting idle QoS to {}us", idle_resume_us);
+            for cpu in TOPO.all_cpus.values() {
+                update_cpu_idle_resume_latency(cpu.id, idle_resume_us.try_into().unwrap())?;
+            }
         }
     }
 
