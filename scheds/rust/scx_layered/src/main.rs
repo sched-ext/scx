@@ -104,6 +104,7 @@ lazy_static! {
                 kind: LayerKind::Confined {
                     util_range: (0.8, 0.9),
                     cpus_range: Some((0, 16)),
+                    cpus_range_frac: None,
                     protected: false,
                     common: LayerCommon {
                         min_exec_us: 1000,
@@ -166,6 +167,7 @@ lazy_static! {
                     cpus_range: None,
                     util_range: (0.2, 0.8),
                     protected: false,
+                    cpus_range_frac: None,
                     common: LayerCommon {
                         min_exec_us: 800,
                         yield_ignore: 0.0,
@@ -195,6 +197,7 @@ lazy_static! {
                     cpus_range: None,
                     util_range: (0.5, 0.6),
                     protected: false,
+                    cpus_range_frac: None,
                     common: LayerCommon {
                         min_exec_us: 200,
                         yield_ignore: 0.0,
@@ -378,6 +381,10 @@ lazy_static! {
 ///
 /// - disallow_open_after_us: Duration to wait after machine reaches saturation
 ///   before confining tasks in Open layers.
+///
+/// - cpus_range_frac: Array of 2 floats between 0 and 1.0. Lower and upper
+///   bound fractions of all CPUs to give to a layer. Mutually exclusive
+///   with cpus_range.
 ///
 /// - disallow_preempt_after_us: Duration to wait after machine reaches saturation
 ///   before confining tasks to preempt.
@@ -986,6 +993,35 @@ struct Layer {
     allowed_cpus: Cpumask,
 }
 
+fn resolve_cpus_pct_range(
+    cpus_range: &Option<(usize, usize)>,
+    cpus_range_frac: &Option<(f64, f64)>,
+    max_cpus: usize,
+) -> Result<(usize, usize)> {
+    match (cpus_range, cpus_range_frac) {
+        (Some(_x), Some(_y)) => {
+            bail!("cpus_range cannot be used with cpus_pct.");
+        }
+        (Some((cpus_range_min, cpus_range_max)), None) => Ok((*cpus_range_min, *cpus_range_max)),
+        (None, Some((cpus_frac_min, cpus_frac_max))) => {
+            if *cpus_frac_min < 0_f64
+                || *cpus_frac_min > 1_f64
+                || *cpus_frac_max < 0_f64
+                || *cpus_frac_max > 1_f64
+            {
+                bail!("cpus_range_frac values must be between 0.0 and 1.0");
+            }
+            let cpus_min_count = ((max_cpus as f64) * cpus_frac_min).round_ties_even() as usize;
+            let cpus_max_count = ((max_cpus as f64) * cpus_frac_max).round_ties_even() as usize;
+            Ok((
+                std::cmp::max(cpus_min_count, 1),
+                std::cmp::min(cpus_max_count, max_cpus),
+            ))
+        }
+        (None, None) => Ok((0, max_cpus)),
+    }
+}
+
 impl Layer {
     fn new(spec: &LayerSpec, topo: &Topology, core_order: &Vec<usize>) -> Result<Self> {
         let name = &spec.name;
@@ -994,11 +1030,13 @@ impl Layer {
         match &kind {
             LayerKind::Confined {
                 cpus_range,
+                cpus_range_frac,
                 util_range,
                 common: LayerCommon { nodes, llcs, .. },
                 ..
             } => {
-                let cpus_range = cpus_range.unwrap_or((0, std::usize::MAX));
+                let cpus_range =
+                    resolve_cpus_pct_range(cpus_range, cpus_range_frac, topo.all_cpus.len())?;
                 if cpus_range.0 > cpus_range.1 || cpus_range.1 == 0 {
                     bail!("invalid cpus_range {:?}", cpus_range);
                 }
@@ -1961,11 +1999,13 @@ impl<'a> Scheduler<'a> {
                 LayerKind::Confined {
                     util_range,
                     cpus_range,
+                    cpus_range_frac,
                     ..
                 }
                 | LayerKind::Grouped {
                     util_range,
                     cpus_range,
+                    cpus_range_frac,
                     ..
                 } => {
                     // Guide layer sizing by utilization within each layer
@@ -1985,7 +2025,8 @@ impl<'a> Scheduler<'a> {
                     let low = (util / util_range.1).ceil() as usize;
                     let high = ((util / util_range.0).floor() as usize).max(low);
                     let target = layer.cpus.weight().clamp(low, high);
-                    let cpus_range = cpus_range.unwrap_or((0, nr_cpus));
+                    let cpus_range =
+                        resolve_cpus_pct_range(cpus_range, cpus_range_frac, nr_cpus).unwrap();
 
                     records.push((
                         (owned * 100.0) as u64,
