@@ -79,6 +79,10 @@ mod infeasible;
 pub use infeasible::LoadAggregator;
 pub use infeasible::LoadLedger;
 
+pub mod pm;
+pub use pm::update_cpu_idle_resume_latency;
+pub use pm::update_global_idle_resume_latency;
+
 pub mod misc;
 pub use misc::monitor_stats;
 pub use misc::normalize_load_metric;
