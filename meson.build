@@ -310,6 +310,11 @@ if get_option('kernel') != ''
   kernel = get_option('kernel')
 endif
 
+if meson.is_cross_build()
+  cargo_target = host_machine.cpu_family() + '-unknown-' + host_machine.kernel() + '-gnu'
+  cargo_build_args += ['--target', cargo_target]
+endif
+
 if enable_rust
   cargo = find_program(get_option('cargo'))
   cargo_fetch = find_program(join_paths(meson.current_source_dir(),

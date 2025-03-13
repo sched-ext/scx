@@ -37,9 +37,15 @@ pub struct ClangInfo {
 
 impl ClangInfo {
     pub fn new() -> Result<ClangInfo> {
+        let mut clang_args = vec!["--version".to_string()];
+
+        if let Ok(target) = env::var("TARGET") {
+            clang_args.push(format!("--target={}", target));
+        }
+
         let clang = env::var("BPF_CLANG").unwrap_or("clang".into());
         let output = Command::new(&clang)
-            .args(["--version"])
+            .args(clang_args)
             .output()
             .with_context(|| format!("Failed to run \"{} --version\"", &clang))?;
 
