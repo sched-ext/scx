@@ -222,15 +222,37 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *tctx;
 
 	/*
-	 * Per-CPU kthreads can be critical for system responsiveness, when
-	 * local_kthreads is specified they are always dispatched directly
-	 * before any other task.
+	 * If a task has been re-enqueued because its assigned CPU has been
+	 * taken by a higher priority scheduling class, force it to follow
+	 * the regular scheduling path and give it a chance to run on a
+	 * different CPU.
+	 *
+	 * However, if the task can only run on a single CPU, re-scheduling
+	 * is unnecessary, as it can only be dispatched on that specific
+	 * CPU. In this case, dispatch it immediately to maximize its
+	 * chances of reclaiming the CPU quickly and avoiding stalls.
+	 *
+	 * This approach will be effective once dl_server support is added
+	 * to the sched_ext core.
 	 */
-	if (local_kthreads && is_kthread(p) && (p->nr_cpus_allowed == 1)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
-				   enq_flags | SCX_ENQ_PREEMPT);
-		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
-		return;
+	if (enq_flags & SCX_ENQ_REENQ) {
+		if (p->nr_cpus_allowed == 1) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
+			__sync_fetch_and_add(&nr_kthread_dispatches, 1);
+			return;
+		}
+	} else {
+		/*
+		 * Per-CPU kthreads can be critical for system responsiveness, when
+		 * local_kthreads is specified they are always dispatched directly
+		 * before any other task.
+		 */
+		if (local_kthreads && is_kthread(p) && (p->nr_cpus_allowed == 1)) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
+					   enq_flags | SCX_ENQ_PREEMPT);
+			__sync_fetch_and_add(&nr_kthread_dispatches, 1);
+			return;
+		}
 	}
 
 	/*
@@ -407,6 +429,16 @@ s32 BPF_STRUCT_OPS(flash_init_task, struct task_struct *p,
 	return 0;
 }
 
+void BPF_STRUCT_OPS(flash_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
+{
+	/*
+	 * When a CPU is taken by a higher priority scheduler class,
+	 * re-enqueue all the tasks that are waiting in the local DSQ, so
+	 * that we can give them a chance to run on another CPU.
+	 */
+	scx_bpf_reenqueue_local();
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(flash_init)
 {
 	int err, node;
@@ -443,6 +475,7 @@ SCX_OPS_DEFINE(flash_ops,
 	       .quiescent		= (void *)flash_quiescent,
 	       .enable			= (void *)flash_enable,
 	       .init_task		= (void *)flash_init_task,
+	       .cpu_release		= (void *)flash_cpu_release,
 	       .init			= (void *)flash_init,
 	       .exit			= (void *)flash_exit,
 	       .flags			= SCX_OPS_ENQ_EXITING,
