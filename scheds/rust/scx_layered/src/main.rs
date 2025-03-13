@@ -1011,8 +1011,8 @@ fn resolve_cpus_pct_range(
             {
                 bail!("cpus_range_frac values must be between 0.0 and 1.0");
             }
-            let cpus_min_count = ((max_cpus as f64) * cpus_frac_min).floor() as usize;
-            let cpus_max_count = ((max_cpus as f64) * cpus_frac_max).floor() as usize;
+            let cpus_min_count = ((max_cpus as f64) * cpus_frac_min).round_ties_even() as usize;
+            let cpus_max_count = ((max_cpus as f64) * cpus_frac_max).round_ties_even() as usize;
             Ok((
                 std::cmp::max(cpus_min_count, 1),
                 std::cmp::min(cpus_max_count, max_cpus),
