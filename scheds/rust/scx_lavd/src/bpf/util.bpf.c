@@ -16,7 +16,6 @@ private(LAVD) struct bpf_cpumask __kptr *big_cpumask; /* CPU mask for big CPUs *
 private(LAVD) struct bpf_cpumask __kptr *little_cpumask; /* CPU mask for little CPUs */
 private(LAVD) struct bpf_cpumask __kptr *active_cpumask; /* CPU mask for active CPUs */
 private(LAVD) struct bpf_cpumask __kptr *ovrflw_cpumask; /* CPU mask for overflow CPUs */
-private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR]; /* CPU mask for each compute domain */
 
 const volatile u64	nr_cpu_ids;	/* maximum CPU IDs */
 static volatile u64	nr_cpus_onln;	/* current number of online CPUs */
@@ -229,6 +228,11 @@ static bool is_per_cpu_task(const struct task_struct *p)
 		return true;
 
 	return false;
+}
+
+static bool is_affinitized(const struct task_struct *p)
+{
+	return p->nr_cpus_allowed != nr_cpu_ids;
 }
 
 static bool have_idle_cpus(const struct cpumask *idle_mask)

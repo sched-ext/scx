@@ -12,8 +12,13 @@ use std::ffi::CStr;
 use std::ffi::CString;
 use std::io;
 use std::io::BufRead;
+use std::io::BufReader;
 use std::mem::size_of;
 use std::slice::from_raw_parts;
+
+const PROCFS_MOUNTS: &str = "/proc/mounts";
+const TRACEFS: &str = "tracefs";
+const DEBUGFS: &str = "debugfs";
 
 lazy_static::lazy_static! {
     pub static ref SCX_OPS_KEEP_BUILTIN_IDLE: u64 =
@@ -170,11 +175,44 @@ pub fn in_kallsyms(ksym: &str) -> Result<bool> {
     Ok(false)
 }
 
+/// Returns the mount point for a filesystem type.
+pub fn get_fs_mount(mount_type: &str) -> Result<Vec<std::path::PathBuf>> {
+    let proc_mounts_path = std::path::Path::new(PROCFS_MOUNTS);
+
+    let file = std::fs::File::open(proc_mounts_path)
+        .with_context(|| format!("Failed to open {}", proc_mounts_path.display()))?;
+
+    let reader = BufReader::new(file);
+
+    let mut mounts = Vec::new();
+    for line in reader.lines() {
+        let line = line.context("Failed to read line from /proc/mounts")?;
+        let mount_info: Vec<&str> = line.split_whitespace().collect();
+
+        if mount_info.len() > 3 && mount_info[2] == mount_type {
+            let mount_path = std::path::PathBuf::from(mount_info[1]);
+            mounts.push(mount_path);
+        }
+    }
+
+    Ok(mounts)
+}
+
+/// Returns the tracefs mount point.
+pub fn tracefs_mount() -> Result<std::path::PathBuf> {
+    let mounts = get_fs_mount(TRACEFS)?;
+    mounts.into_iter().next().context("No tracefs mount found")
+}
+
+/// Returns the debugfs mount point.
+pub fn debugfs_mount() -> Result<std::path::PathBuf> {
+    let mounts = get_fs_mount(DEBUGFS)?;
+    mounts.into_iter().next().context("No debugfs mount found")
+}
+
 pub fn tracepoint_exists(tracepoint: &str) -> Result<bool> {
-    let file = match std::fs::File::open("/sys/kernel/tracing/available_events") {
-        Err(_) => std::fs::File::open("/sys/kernel/debug/tracing/available_events")?,
-        Ok(file) => file,
-    };
+    let base_path = tracefs_mount().unwrap_or(debugfs_mount()?);
+    let file = std::fs::File::open(base_path.join("available_events"))?;
     let reader = std::io::BufReader::new(file);
 
     for line in reader.lines() {

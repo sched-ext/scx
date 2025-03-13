@@ -734,9 +734,24 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 * taken by a higher priority scheduling class, force it to follow
 	 * the regular scheduling path and give it a chance to run on a
 	 * different CPU.
+	 *
+	 * However, if the task can only run on a single CPU, re-scheduling
+	 * is unnecessary, as it can only be dispatched on that specific
+	 * CPU. In this case, dispatch it immediately to maximize its
+	 * chances of reclaiming the CPU quickly and avoiding stalls.
+	 *
+	 * This approach will be effective once dl_server support is added
+	 * to the sched_ext core.
 	 */
-	if (enq_flags & SCX_ENQ_REENQ)
+	if (enq_flags & SCX_ENQ_REENQ) {
+		if (p->nr_cpus_allowed == 1) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
+			__sync_fetch_and_add(&nr_kthread_dispatches, 1);
+
+			return true;
+		}
 		return false;
+	}
 
 	/*
 	 * If local_kthread is specified dispatch per-CPU kthreads
