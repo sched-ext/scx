@@ -1,9 +1,6 @@
 name: build-and-test
 
 on:
-  # only runs on main, hourly cache update used by all branches. random minute to avoid synchronised scheduled workflows.
-  schedule:
-    - cron: "8 * * * *"
   push:
   pull_request:
   merge_group:
@@ -29,8 +26,7 @@ jobs:
   build-kernel:
     uses: ./.github/workflows/build-kernel.yml
     with:
-      git-repo: "https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git"
-      branch: for-next
+      repo-name: sched_ext/for-next
 
   integration-test:
     runs-on: ubuntu-24.04
@@ -44,8 +40,7 @@ jobs:
 
       - uses: ./.github/actions/restore-kernel-cache
         with:
-          git-repo: "https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git"
-          branch: for-next
+          repo-name: sched_ext/for-next
 
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
@@ -121,8 +116,7 @@ jobs:
 
       - uses: ./.github/actions/restore-kernel-cache
         with:
-          git-repo: "https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git"
-          branch: for-next
+          repo-name: sched_ext/for-next
 
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
@@ -186,8 +180,7 @@ jobs:
 
       - uses: ./.github/actions/restore-kernel-cache
         with:
-          git-repo: "https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git"
-          branch: for-next
+          repo-name: sched_ext/for-next
 
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar

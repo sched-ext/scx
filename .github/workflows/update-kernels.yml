@@ -1,0 +1,72 @@
+name: update-kernels
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * *'
+
+jobs:
+  list-kernels:
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64" ]') || 'ubuntu-latest' }}
+    outputs:
+      matrix: ${{ steps.output.outputs.matrix }}
+    steps:
+      - name: Install Nix
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - uses: actions/checkout@v4
+
+      - name: Load dependencies
+        run: nix run ./.github/workflows#nix-develop-gha -- ./.github/workflows#update-kernels
+
+      - name: List kernels
+        id: output
+        run: |
+          matrix=$(jq -c 'keys' kernel-versions.json)
+          echo $matrix
+          echo "matrix=$matrix" >> $GITHUB_OUTPUT
+
+  update-kernels:
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64" ]') || 'ubuntu-latest' }}
+    needs: list-kernels
+    strategy:
+      matrix:
+        version: ${{ fromJson(needs.list-kernels.outputs.matrix) }}
+
+    steps:
+      - name: Install Nix
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_TOKEN_FOR_UPDATES }}
+
+      - name: Load dependencies
+        run: nix run ./.github/workflows#nix-develop-gha -- ./.github/workflows#update-kernels
+
+      - name: Update kernel
+        run: |
+          git switch -c "deps/kernel/${{ matrix.version }}"
+          nix run ./.github/workflows#update-kernels -- ${{ matrix.version }}
+          git diff --exit-code || echo 'modified=true' >> $GITHUB_ENV
+
+      - name: Commit and open PR
+        if: env.modified == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN_FOR_UPDATES }}
+        run: |
+          git config --global user.email "ci@sched-ext.com"
+          git config --global user.name "sched-ext CI Bot"
+          git commit -am "chore(deps): update ${{ matrix.version }} kernel"
+
+          # we own these branches, force push is fine
+          git push --force origin "HEAD:deps/kernel/${{ matrix.version }}"
+
+          PR_IDS=$(gh pr list --head $(git rev-parse --abbrev-ref HEAD) --json id)
+          if echo $PR_IDS | jq -e '. == []'; then
+            gh pr create --fill
+          else
+            echo "PR already exists, skipping creation."
+          fi
+          gh pr merge --auto --merge --delete-branch

@@ -1,10 +1,7 @@
 on:
   workflow_call:
     inputs:
-      git-repo:
-        required: true
-        type: string
-      branch:
+      repo-name:
         required: true
         type: string
 
@@ -16,14 +13,12 @@ jobs:
         if: ${{ runner.environment == 'github-hosted' }}
         uses: DeterminateSystems/nix-installer-action@main
 
-      # Make very basic dependencies available in PATH
-      - name: Install basic dependencies
-        run: |
-          nix profile install nixpkgs#{git,openssl,gawk,gnutar,zstd}
-          echo "$HOME/.nix-profile/bin" >> $GITHUB_PATH
+      - uses: actions/checkout@v4
 
-      # get latest head commit of sched_ext for-next
-      - run: echo "SCHED_EXT_KERNEL_COMMIT=$(git ls-remote ${{ inputs.git-repo }} heads/${{ inputs.branch }} | awk '{print $1}')" >> $GITHUB_ENV
+      - name: Load minimal dependencies
+        run: nix run ./.github/workflows#nix-develop-gha -- ./.github/workflows#update-kernels
+
+      - run: echo "SCHED_EXT_KERNEL_COMMIT=$(jq -r '."${{ inputs.repo-name }}".commitHash' kernel-versions.json)" >> $GITHUB_ENV
 
       # check for cached kernel without downloading
       - name: Cache Kernel
@@ -37,13 +32,9 @@ jobs:
           key: kernel-build-${{ env.SCHED_EXT_KERNEL_COMMIT }}-7
           lookup-only: true
 
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-        uses: actions/checkout@v4
-
-      - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
-        uses: nicknovitski/nix-develop@v1
-        with:
-          arguments: ./.github/workflows#build-kernel
+      - name: Load dependencies
+        if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
+        run: nix run ./.github/workflows#nix-develop-gha -- ./.github/workflows#build-kernel
 
       - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
         name: Clone Kernel
@@ -51,7 +42,7 @@ jobs:
         with:
           retries: 10
           pause: 18
-          command: git clone --single-branch -b ${{ inputs.branch }} --depth 1 ${{ inputs.git-repo }} linux
+          command: git clone --single-branch -b $(jq -r '."${{ inputs.repo-name }}".branch' kernel-versions.json) --depth 100 $(jq -r '."${{ inputs.repo-name }}".repo' kernel-versions.json) linux
 
       - if: ${{ steps.cache-kernel.outputs.cache-hit != 'true' }}
         name: Select correct commit for cache hash

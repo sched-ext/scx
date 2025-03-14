@@ -9,8 +9,7 @@ jobs:
   build-kernel:
     uses: ./.github/workflows/build-kernel.yml
     with:
-      git-repo: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
-      branch: linux-rolling-stable
+      repo-name: stable/linux-rolling-stable
 
   integration-test:
     runs-on: ubuntu-24.04
@@ -24,8 +23,7 @@ jobs:
 
       - uses: ./.github/actions/restore-kernel-cache
         with:
-          git-repo: "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git"
-          branch: linux-rolling-stable
+          repo-name: stable/linux-rolling-stable
 
       # prevent cache permission errors
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
