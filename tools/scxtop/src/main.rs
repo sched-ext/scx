@@ -125,6 +125,11 @@ fn attach_progs(skel: &mut BpfSkel) -> Result<Vec<Link>> {
             links.push(link);
         }
     }
+    if compat::ksym_exists("hw_pressure_update").is_ok() {
+        if let Ok(link) = skel.progs.on_hw_pressure_update.attach() {
+            links.push(link);
+        }
+    }
 
     Ok(links)
 }

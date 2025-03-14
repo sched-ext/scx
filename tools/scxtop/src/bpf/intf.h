@@ -33,6 +33,7 @@ enum event_type {
 	CPU_HP,
 	CPU_PERF_SET,
 	GPU_MEM,
+	HW_PRESSURE,
 	IPI,
 	SCHED_REG,
 	SCHED_SWITCH,
@@ -102,6 +103,11 @@ struct cpuhp_event {
 	int             state;
 };
 
+struct hw_pressure_event {
+	u64             hw_pressure;
+	u32             cpu;
+};
+
 struct trace_started_event {
 	bool		start_immediately;
 	bool		stop_scheduled;
@@ -112,6 +118,7 @@ struct bpf_event {
 	u64		ts;
 	u32		cpu;
 	union {
+		struct  hw_pressure_event hwp;
 		struct  gpu_mem_event gm;
 		struct  cpuhp_event chp;
 		struct	ipi_event ipi;

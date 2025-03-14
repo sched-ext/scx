@@ -25,8 +25,9 @@ use crate::APP;
 use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
-    Action, CpuhpAction, GpuMemAction, IPIAction, SchedCpuPerfSetAction, SchedSwitchAction,
-    SchedWakeupAction, SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
+    Action, CpuhpAction, GpuMemAction, HwPressureAction, IPIAction, SchedCpuPerfSetAction,
+    SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction, TraceStartedAction,
+    TraceStoppedAction,
 };
 
 use anyhow::Result;
@@ -501,21 +502,23 @@ impl<'a> App<'a> {
 
     /// Generates a CPU bar chart.
     fn cpu_bar(&self, cpu: usize, event: &str) -> Bar {
-        let value = self
-            .cpu_data
-            .get(&cpu)
-            .unwrap()
+        let cpu_data = self.cpu_data.get(&cpu).unwrap();
+        let value = cpu_data
             .event_data_immut(event)
             .last()
             .copied()
             .unwrap_or(0_u64);
+        let hw_pressure = cpu_data
+            .event_data_immut("hw_pressure")
+            .last()
+            .copied()
+            .unwrap_or(0);
         Bar::default()
             .value(value)
             .label(Line::from(format!(
-                "{}{}",
+                "{}{}{}",
                 cpu,
                 if self.collect_cpu_freq {
-                    let cpu_data = self.cpu_data.get(&cpu).unwrap();
                     format!(
                         " {}",
                         format_hz(
@@ -526,6 +529,11 @@ impl<'a> App<'a> {
                                 .unwrap_or(0)
                         )
                     )
+                } else {
+                    "".to_string()
+                },
+                if hw_pressure > 0 {
+                    format!("{}", hw_pressure)
                 } else {
                     "".to_string()
                 }
@@ -541,6 +549,7 @@ impl<'a> App<'a> {
     fn cpu_sparkline(&self, cpu: usize, max: u64, borders: Borders, small: bool) -> Sparkline {
         let mut perf: u64 = 0;
         let mut cpu_freq: u64 = 0;
+        let mut hw_pressure: u64 = 0;
         let data = if self.cpu_data.contains_key(&cpu) {
             let cpu_data = self.cpu_data.get(&cpu).unwrap();
             perf = cpu_data
@@ -555,6 +564,11 @@ impl<'a> App<'a> {
                     .copied()
                     .unwrap_or(0);
             }
+            hw_pressure = cpu_data
+                .event_data_immut("hw_pressure")
+                .last()
+                .copied()
+                .unwrap_or(0);
             cpu_data.event_data_immut(self.active_event.event_name())
         } else {
             Vec::new()
@@ -568,7 +582,7 @@ impl<'a> App<'a> {
             .block(
                 Block::new()
                     .title(format!(
-                        "{} perf({}){}",
+                        "{} perf({}){}{}",
                         cpu,
                         if perf == 0 {
                             "".to_string()
@@ -577,6 +591,11 @@ impl<'a> App<'a> {
                         },
                         if self.collect_cpu_freq {
                             format!(" {}", format_hz(cpu_freq))
+                        } else {
+                            "".to_string()
+                        },
+                        if hw_pressure > 0 {
+                            format!(" hw_pressure({})", hw_pressure)
                         } else {
                             "".to_string()
                         }
@@ -2357,6 +2376,21 @@ impl<'a> App<'a> {
         }
     }
 
+    /// Handles hardware pressure events.
+    pub fn on_hw_pressure(&mut self, action: &HwPressureAction) {
+        let HwPressureAction { cpu, hw_pressure } = action;
+
+        let cpu_data = self.cpu_data.entry(*cpu as usize).or_insert(CpuData::new(
+            *cpu as usize,
+            0,
+            0,
+            0,
+            self.max_cpu_events,
+        ));
+
+        cpu_data.add_event_data("hw_pressure", *hw_pressure);
+    }
+
     /// Updates the bpf bpf sampling rate.
     pub fn update_bpf_sample_rate(&mut self, sample_rate: u32) {
         self.skel.maps.data_data.sample_rate = sample_rate;
@@ -2443,6 +2477,9 @@ impl<'a> App<'a> {
             }
             Action::Cpuhp(a) => {
                 self.on_cpu_hp(a);
+            }
+            Action::HwPressure(a) => {
+                self.on_hw_pressure(a);
             }
             Action::ClearEvent => self.stop_perf_events(),
             Action::ChangeTheme => {
