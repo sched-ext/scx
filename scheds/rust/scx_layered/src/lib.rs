@@ -35,6 +35,8 @@ const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 pub struct CpuPool {
     pub topo: Arc<Topology>,
 
+    pub free_llcs: Vec<(usize, usize)>,
+
     /// A bit mask representing all available physical cores.
     /// Each bit corresponds to whether a physical core is available for task scheduling.
     available_cores: BitVec,
@@ -80,7 +82,10 @@ impl CpuPool {
 
         let first_cpu = *topo.all_cpus.keys().next().unwrap();
 
+        let free_llcs = topo.all_llcs.iter().map(|llc| (llc.1.id, 0)).collect();
+
         let mut cpu_pool = Self {
+            free_llcs,
             available_cores: bitvec![1; topo.all_cores.len()],
             first_cpu,
             fallback_cpu: first_cpu,
