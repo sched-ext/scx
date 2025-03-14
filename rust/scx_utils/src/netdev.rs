@@ -59,7 +59,7 @@ pub fn read_netdevs() -> Result<BTreeMap<String, NetDev>> {
             continue;
         }
 
-        let node_path_raw = format!("/sys/class/net/{}/device/node", iface);
+        let node_path_raw = format!("/sys/class/net/{}/device/numa_node", iface);
         let node_path = Path::new(&node_path_raw);
         let node = read_file_usize(node_path).unwrap_or(0);
         let mut irqs = BTreeMap::new();
