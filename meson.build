@@ -237,6 +237,7 @@ arch_dict = {
   'sparc64': 'sparc',
   'riscv32': 'riscv',
   'riscv64': 'riscv',
+  'riscv64gc': 'riscv',
   'arc': 'arc',
   'loongarch64': 'loongarch'
 }

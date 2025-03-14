@@ -23,6 +23,7 @@ lazy_static::lazy_static! {
     ("sparcv9", "sparc"),
     ("riscv32", "riscv"),
     ("riscv64", "riscv"),
+    ("riscv64gc", "riscv"),
     ("arc", "arc"),			// unsure this is supported
     ("loongarch64", "loongarch"),	// ditto
     ].into_iter().collect();

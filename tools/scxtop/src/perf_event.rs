@@ -162,10 +162,8 @@ impl PerfEvent {
 
     /// Attaches a PerfEvent struct.
     pub fn attach(&mut self, process_id: i32) -> Result<()> {
-        let mut attrs = perf::bindings::perf_event_attr {
-            size: std::mem::size_of::<perf::bindings::perf_event_attr>() as u32,
-            ..Default::default()
-        };
+        let mut attrs = perf::bindings::perf_event_attr::default();
+        attrs.size = std::mem::size_of::<perf::bindings::perf_event_attr>() as u32;
 
         match self.subsystem.to_lowercase().as_str() {
             "hw" | "hardware" => {
