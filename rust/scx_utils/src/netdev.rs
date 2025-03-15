@@ -53,6 +53,12 @@ pub fn read_netdevs() -> Result<BTreeMap<String, NetDev>> {
     for entry in fs::read_dir("/sys/class/net")? {
         let entry = entry?;
         let iface = entry.file_name().to_string_lossy().into_owned();
+        let iface_path_raw = format!("/sys/class/net/{}/device/enable", iface);
+        let iface_path = Path::new(&iface_path_raw);
+        let is_enabled = read_file_usize(iface_path).unwrap_or(0);
+        if is_enabled < 1 {
+            continue;
+        }
         let raw_path = format!("/sys/class/net/{}/device/msi_irqs", iface);
         let msi_irqs_path = Path::new(&raw_path);
         if !msi_irqs_path.exists() {
