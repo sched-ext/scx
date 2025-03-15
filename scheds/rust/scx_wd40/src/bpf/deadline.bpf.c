@@ -11,14 +11,16 @@
 
 #include "cpumask.h"
 
+#include "bpf_arena_spin_lock.h"
+
 #include "intf.h"
 #include "types.h"
 #include "lb_domain.h"
 #include "deadline.h"
 
-#include <scx/bpf_arena_common.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <scx/bpf_arena_common.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
@@ -287,15 +289,20 @@ __hidden
 void running_update_vtime(struct task_struct *p, task_ptr taskc,
 				 dom_ptr domc)
 {
-	struct bpf_spin_lock * lock = lookup_dom_vtime_lock(domc);
+	arena_lock_t lock = domc->vtime_lock;
+	int ret;
 
 	if (!lock)
 		return;
 
-	bpf_spin_lock(lock);
+	if ((ret = arena_spin_lock(lock))) {
+		scx_bpf_error("spinlock error %d", ret);
+		return;
+	}
+
 	if (time_before(dom_min_vruntime(domc), p->scx.dsq_vtime))
 		WRITE_ONCE_ARENA(u64, domc->min_vruntime, p->scx.dsq_vtime);
-	bpf_spin_unlock(lock);
+	arena_spin_unlock(lock);
 
 	taskc->last_run_at = scx_bpf_now();
 }
