@@ -420,7 +420,8 @@ impl FlatTopology {
         cpu_fids: &Vec<CpuFlatId>,
         avg_cap: usize,
     ) -> Option<BTreeMap<ComputeDomainKey, ComputeDomainValue>> {
-        // Creat a compute domain map
+        // Creat a compute domain map, where a compute domain is a CPUs that
+        // are under the same node and LLC and have the same core type.
         let mut cpdom_id = 0;
         let mut cpdom_map: BTreeMap<ComputeDomainKey, ComputeDomainValue> = BTreeMap::new();
         for cpu_fid in cpu_fids.iter() {
@@ -448,7 +449,9 @@ impl FlatTopology {
             cpdom_map.insert(key, value);
         }
 
-        // Fill up cpdom_alt_id for each compute domain
+        // Fill up cpdom_alt_id for each compute domain, where the alternative
+        // compute domain is a compute domain that are under the same node
+        // and LLC but has a different core type.
         for (k, v) in cpdom_map.iter() {
             let mut key = k.clone();
             key.is_big = !k.is_big;
@@ -458,7 +461,8 @@ impl FlatTopology {
             }
         }
 
-        // Build a neighbor map for each compute domain
+        // Build a neighbor map for each compute domain, where neighbors are
+        // ordered by core type, node, and LLC.
         for ((from_k, from_v), (to_k, to_v)) in iproduct!(cpdom_map.iter(), cpdom_map.iter()) {
             if from_k == to_k {
                 continue;
