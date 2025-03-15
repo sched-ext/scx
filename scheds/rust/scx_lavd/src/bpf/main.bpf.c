@@ -673,12 +673,17 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
 	bool found_idle = false;
-	struct task_ctx *taskc;
+	struct task_ctx *taskc = get_task_ctx(p);
 	struct cpu_ctx *cpuc;
 	u64 dsq_id;
 	s32 cpu_id;
+	struct pick_ctx ictx = {
+		.p = p,
+		.taskc = taskc,
+		.prev_cpu = prev_cpu,
+		.wake_flags = wake_flags,
+	};
 
-	taskc = get_task_ctx(p);
 	if (!taskc)
 		return prev_cpu;
 	taskc->wakeup_ft += !!(wake_flags & SCX_WAKE_SYNC);
@@ -687,7 +692,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * Find an idle cpu and reserve it since the task @p will run
 	 * on the idle cpu.
 	 */
-	cpu_id = find_idle_cpu(p, taskc, prev_cpu, wake_flags, true, &found_idle);
+	cpu_id = pick_idle_cpu(&ictx, &found_idle);
 	if (found_idle) {
 		/*
 		 * If there is an idle cpu and its associated DSQ is empty,
@@ -848,12 +853,18 @@ static bool try_kick_task_idle_cpu(struct task_struct *p,
 {
 	bool found_idle = false;
 	s32 cpu;
+	struct pick_ctx ictx = {
+		.p = p,
+		.taskc = taskc,
+		.prev_cpu = prev_cpu,
+		.wake_flags = 0,
+	};
 
 	/*
 	 * Find an idle cpu but do not reserve the idle cpu. That is because
 	 * there is no guarantee the idle cpu will be picked up at this point.
 	 */
-	cpu = find_idle_cpu(p, taskc, prev_cpu, 0, false, &found_idle);
+	cpu = pick_idle_cpu(&ictx, &found_idle);
 	if (found_idle && cpu >= 0) {
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return true;
@@ -1700,11 +1711,19 @@ static s32 init_per_cpu_ctx(u64 now)
 		if (err)
 			goto unlock_out;
 
+		err = calloc_cpumask(&cpuc->tmp_i_mask);
+		if (err)
+			goto unlock_out;
+
 		err = calloc_cpumask(&cpuc->tmp_t_mask);
 		if (err)
 			goto unlock_out;
 
 		err = calloc_cpumask(&cpuc->tmp_t2_mask);
+		if (err)
+			goto unlock_out;
+
+		err = calloc_cpumask(&cpuc->tmp_t3_mask);
 		if (err)
 			goto unlock_out;
 

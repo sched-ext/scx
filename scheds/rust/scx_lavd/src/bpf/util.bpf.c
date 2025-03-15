@@ -235,11 +235,6 @@ static bool is_affinitized(const struct task_struct *p)
 	return p->nr_cpus_allowed != nr_cpu_ids;
 }
 
-static bool have_idle_cpus(const struct cpumask *idle_mask)
-{
-	return !bpf_cpumask_empty(idle_mask);
-}
-
 static bool is_lat_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
 {
 	return taskc->lat_cri >= stat_cur->avg_lat_cri;
