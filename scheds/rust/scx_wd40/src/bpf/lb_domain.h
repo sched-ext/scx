@@ -33,7 +33,7 @@ static inline u64 min(u64 a, u64 b)
 int stat_add(enum stat_idx idx, u64 addend);
 static inline u64 dom_min_vruntime(dom_ptr domc)
 {
-	return READ_ONCE_ARENA(u64, domc->min_vruntime);
+	return READ_ONCE(domc->min_vruntime);
 }
 
 void place_task_dl(struct task_struct *p, task_ptr taskc, u64 enq_flags);

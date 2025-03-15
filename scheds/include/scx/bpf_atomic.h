@@ -5,44 +5,11 @@
 
 #include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
-#include "bpf_experimental.h"
 
 extern bool CONFIG_X86_64 __kconfig __weak;
 
-/*
- * __unqual_typeof(x) - Declare an unqualified scalar type, leaving
- *			non-scalar types unchanged,
- *
- * Prefer C11 _Generic for better compile-times and simpler code. Note: 'char'
- * is not type-compatible with 'signed char', and we define a separate case.
- *
- * This is copied verbatim from kernel's include/linux/compiler_types.h, but
- * with default expression (for pointers) changed from (x) to (typeof(x)0).
- *
- * This is because LLVM has a bug where for lvalue (x), it does not get rid of
- * an extra address_space qualifier, but does in case of rvalue (typeof(x)0).
- * Hence, for pointers, we need to create an rvalue expression to get the
- * desired type. See https://github.com/llvm/llvm-project/issues/53400.
- */
-#define __scalar_type_to_expr_cases(type) \
-	unsigned type : (unsigned type)0, signed type : (signed type)0
-
-#define __unqual_typeof(x)                              \
-	typeof(_Generic((x),                            \
-		char: (char)0,                          \
-		__scalar_type_to_expr_cases(char),      \
-		__scalar_type_to_expr_cases(short),     \
-		__scalar_type_to_expr_cases(int),       \
-		__scalar_type_to_expr_cases(long),      \
-		__scalar_type_to_expr_cases(long long), \
-		default: (typeof(x))0))
-
 /* No-op for BPF */
 #define cpu_relax() ({})
-
-#define READ_ONCE(x) (*(volatile typeof(x) *)&(x))
-
-#define WRITE_ONCE(x, val) ((*(volatile typeof(x) *)&(x)) = (val))
 
 #define cmpxchg(p, old, new) __sync_val_compare_and_swap((p), old, new)
 

@@ -11,7 +11,8 @@
 
 #include "cpumask.h"
 
-#include "bpf_arena_spin_lock.h"
+#include <scx/bpf_arena_common.h>
+#include <scx/bpf_arena_spin_lock.h>
 
 #include "intf.h"
 #include "types.h"
@@ -301,7 +302,7 @@ void running_update_vtime(struct task_struct *p, task_ptr taskc,
 	}
 
 	if (time_before(dom_min_vruntime(domc), p->scx.dsq_vtime))
-		WRITE_ONCE_ARENA(u64, domc->min_vruntime, p->scx.dsq_vtime);
+		WRITE_ONCE(domc->min_vruntime, p->scx.dsq_vtime);
 	arena_spin_unlock(lock);
 
 	taskc->last_run_at = scx_bpf_now();
