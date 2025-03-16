@@ -12,10 +12,12 @@ main.rs or \*.bpf.c files.
 
 # Schedulers
 
-- [scx_layered](scx_layered/README.md)
-- [scx_rusty](scx_rusty/README.md)
-- [scx_rustland](scx_rustland/README.md)
-- [scx_rlfifo](scx_rlfifo/README.md)
-- [scx_lavd](scx_lavd/README.md)
 - [scx_bpfland](scx_bpfland/README.md)
 - [scx_flash](scx_flash/README.md)
+- [scx_lavd](scx_lavd/README.md)
+- [scx_layered](scx_layered/README.md)
+- [scx_p2dq](scx_p2dq/README.md)
+- [scx_rlfifo](scx_rlfifo/README.md)
+- [scx_rustland](scx_rustland/README.md)
+- [scx_rusty](scx_rusty/README.md)
+- [scx_tickless](scx_tickless/README.md)
