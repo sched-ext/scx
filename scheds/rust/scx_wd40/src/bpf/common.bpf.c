@@ -8,9 +8,10 @@
 #include <scx/ravg_impl.bpf.h>
 #include <lib/sdt_task.h>
 
-#include "cpumask.h"
+#include <scx/bpf_arena_common.h>
+#include <scx/bpf_arena_spin_lock.h>
 
-#include "bpf_arena_spin_lock.h"
+#include "cpumask.h"
 
 #include "intf.h"
 #include "types.h"

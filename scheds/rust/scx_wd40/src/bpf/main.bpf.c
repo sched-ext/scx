@@ -49,8 +49,10 @@
 #include <lib/sdt_task.h>
 #endif
 
+#include <scx/bpf_arena_common.h>
+#include <scx/bpf_arena_spin_lock.h>
+
 #include "cpumask.h"
-#include "bpf_arena_spin_lock.h"
 
 #include "intf.h"
 #include "types.h"

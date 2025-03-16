@@ -8,16 +8,16 @@
 #include <scx/ravg_impl.bpf.h>
 #include <lib/sdt_task.h>
 
-#include "cpumask.h"
+#include <scx/bpf_arena_common.h>
+#include <scx/bpf_arena_spin_lock.h>
 
-#include "bpf_arena_spin_lock.h"
+#include "cpumask.h"
 
 #include "intf.h"
 #include "types.h"
 #include "lb_domain.h"
 #include "percpu.h"
 
-#include <scx/bpf_arena_common.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_helpers.h>
