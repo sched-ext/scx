@@ -113,6 +113,8 @@ pub struct LayerCommon {
     #[serde(default)]
     pub perf: u64,
     #[serde(default)]
+    pub idle_resume_us: Option<u32>,
+    #[serde(default)]
     pub nodes: Vec<usize>,
     #[serde(default)]
     pub llcs: Vec<usize>,

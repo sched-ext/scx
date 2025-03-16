@@ -50,6 +50,7 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::update_cpu_idle_resume_latency;
 use scx_utils::CoreType;
 use scx_utils::Cpumask;
 use scx_utils::Llc;
@@ -121,6 +122,7 @@ lazy_static! {
                         disallow_preempt_after_us: None,
                         xllc_mig_min_us: 1000.0,
                         growth_algo: LayerGrowthAlgo::Sticky,
+                        idle_resume_us: None,
                         perf: 1024,
                         nodes: vec![],
                         llcs: vec![],
@@ -151,6 +153,7 @@ lazy_static! {
                         xllc_mig_min_us: 0.0,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
+                        idle_resume_us: None,
                         nodes: vec![],
                         llcs: vec![],
                     },
@@ -184,6 +187,7 @@ lazy_static! {
                         xllc_mig_min_us: 0.0,
                         growth_algo: LayerGrowthAlgo::Topo,
                         perf: 1024,
+                        idle_resume_us: None,
                         nodes: vec![],
                         llcs: vec![],
                     },
@@ -214,6 +218,7 @@ lazy_static! {
                         xllc_mig_min_us: 100.0,
                         growth_algo: LayerGrowthAlgo::Linear,
                         perf: 1024,
+                        idle_resume_us: None,
                         nodes: vec![],
                         llcs: vec![],
                     },
@@ -402,6 +407,12 @@ lazy_static! {
 /// - perf: CPU performance target. 0 means no configuration. A value
 ///   between 1 and 1024 indicates the performance level CPUs running tasks
 ///   in this layer are configured to using scx_bpf_cpuperf_set().
+///
+/// - idle_resume_us: Sets the idle resume QoS value. CPU idle time governors are expected to
+///   regard the minimum of the global (effective) CPU latency limit and the effective resume
+///   latency constraint for the given CPU as the upper limit for the exit latency of the idle
+///   states. See the latest kernel docs for more details:
+///   https://www.kernel.org/doc/html/latest/admin-guide/pm/cpuidle.html
 ///
 /// - nodes: If set the layer will use the set of NUMA nodes for scheduling
 ///   decisions. If unset then all available NUMA nodes will be used. If the
@@ -1177,6 +1188,7 @@ struct Scheduler<'a> {
 
     cpu_pool: CpuPool,
     layers: Vec<Layer>,
+    idle_qos_enabled: bool,
 
     proc_reader: procfs::ProcReader,
     sched_stats: Stats,
@@ -1876,6 +1888,9 @@ impl<'a> Scheduler<'a> {
             layers.push(Layer::new(spec, &topo, growth_order)?);
         }
 
+        let idle_qos_enabled = layers
+            .iter()
+            .any(|layer| layer.kind.common().idle_resume_us.unwrap_or(0) > 0);
         Self::init_cpus(&skel, &layer_specs, &topo)?;
         Self::init_llc_prox_map(&mut skel, &topo)?;
 
@@ -1908,6 +1923,7 @@ impl<'a> Scheduler<'a> {
 
             cpu_pool,
             layers,
+            idle_qos_enabled,
 
             sched_stats: Stats::new(&mut skel, &proc_reader)?,
 
@@ -2282,6 +2298,26 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn refresh_idle_qos(&mut self) -> Result<()> {
+        if !self.idle_qos_enabled {
+            return Ok(());
+        }
+
+        let mut cpu_idle_qos = vec![0; *NR_CPU_IDS];
+        for layer in self.layers.iter() {
+            let idle_resume_us = layer.kind.common().idle_resume_us.unwrap_or(0) as i32;
+            for cpu in layer.cpus.iter() {
+                cpu_idle_qos[cpu] = idle_resume_us;
+            }
+        }
+
+        for (cpu, idle_resume_usec) in cpu_idle_qos.iter().enumerate() {
+            update_cpu_idle_resume_latency(cpu, *idle_resume_usec)?;
+        }
+
+        Ok(())
+    }
+
     fn step(&mut self) -> Result<()> {
         let started_at = Instant::now();
         self.sched_stats.refresh(
@@ -2291,6 +2327,7 @@ impl<'a> Scheduler<'a> {
             self.processing_dur,
         )?;
         self.refresh_cpumasks()?;
+        self.refresh_idle_qos()?;
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
     }
