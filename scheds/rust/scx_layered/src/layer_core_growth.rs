@@ -39,8 +39,10 @@ pub enum LayerGrowthAlgo {
     /// LittleBig attempts to first grow across all little cores and then
     /// allocates onto big cores after all little cores are allocated.
     LittleBig,
-    /// Grab CPUs from NUMA nodes, iteratively, in reverse order.
+    /// Grab CPUs from NUMA nodes, iteratively, in linear order.
     NodeSpread,
+    /// Grab CPUs from NUMA nodes, iteratively, in reverse order.
+    NodeSpreadReverse,
     /// RandomTopo is sticky to NUMA nodes/LLCs but randomises the order in which
     /// it visits each. The layer will select a random NUMA node, then a random LLC
     /// within it, then randomly iterate the cores in that LLC.
@@ -56,6 +58,8 @@ const GROWTH_ALGO_ROUND_ROBIN: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_ROU
 const GROWTH_ALGO_BIG_LITTLE: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_BIG_LITTLE as i32;
 const GROWTH_ALGO_LITTLE_BIG: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_LITTLE_BIG as i32;
 const GROWTH_ALGO_NODE_SPREAD: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_NODE_SPREAD as i32;
+const GROWTH_ALGO_NODE_SPREAD_REVERSE: i32 =
+    bpf_intf::layer_growth_algo_GROWTH_ALGO_NODE_SPREAD_REVERSE as i32;
 const GROWTH_ALGO_RANDOM_TOPO: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_RANDOM_TOPO as i32;
 
 impl LayerGrowthAlgo {
@@ -70,6 +74,7 @@ impl LayerGrowthAlgo {
             LayerGrowthAlgo::BigLittle => GROWTH_ALGO_BIG_LITTLE,
             LayerGrowthAlgo::LittleBig => GROWTH_ALGO_LITTLE_BIG,
             LayerGrowthAlgo::NodeSpread => GROWTH_ALGO_NODE_SPREAD,
+            LayerGrowthAlgo::NodeSpreadReverse => GROWTH_ALGO_NODE_SPREAD_REVERSE,
             LayerGrowthAlgo::RandomTopo => GROWTH_ALGO_RANDOM_TOPO,
         }
     }
@@ -116,6 +121,7 @@ impl LayerGrowthAlgo {
             LayerGrowthAlgo::LittleBig => generator.grow_little_big(),
             LayerGrowthAlgo::Topo => generator.grow_topo(),
             LayerGrowthAlgo::NodeSpread => generator.grow_node_spread(),
+            LayerGrowthAlgo::NodeSpreadReverse => generator.grow_node_spread_reverse(),
             LayerGrowthAlgo::RandomTopo => generator.grow_random_topo(),
         }
     }
@@ -250,6 +256,11 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                 }
             }
         }
+        cores
+    }
+
+    fn grow_node_spread_reverse(&self) -> Vec<usize> {
+        let mut cores = self.grow_node_spread();
         cores.reverse();
         cores
     }
