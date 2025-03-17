@@ -1,7 +1,7 @@
 # scx_p2dq
 
 ## Overview
-A simple pick 2 load balancing scheduler with dumb queueing.
+A simple pick 2 load balancing scheduler with (dumb) multi-layer queueing.
 
 The p2dq scheduler is a simple load balancing scheduler that uses a pick two
 algorithm for load balancing. A fixed number of DSQs are created per LLC with
@@ -10,10 +10,15 @@ assigned slice is it dispatched to a DSQ with a longer slice. Tasks that do not
 consume more than half the slice are moved to shorter slice DSQs. The DSQs with
 the shortest slice lengths are then determined to be "interactive". All DSQs on
 the same LLC share the same vtime and there is special handling for
-(non)interactive tasks.
+(non)interactive tasks for load balancing purposes.
 
 The scheduler handles all scheduling decisions in BPF and the userspace
 component is only for metric reporting.
+
+## Use Cases
+p2dq can perform well in a variety of workloads including interactive workloads
+such as gaming, batch processing and server applications. Tuning of of p2dq for
+each use case is required.
 
 ### Configuration
 The main idea behind p2dq is being able to classify which tasks are interactive
