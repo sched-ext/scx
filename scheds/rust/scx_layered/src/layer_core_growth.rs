@@ -39,9 +39,11 @@ pub enum LayerGrowthAlgo {
     /// LittleBig attempts to first grow across all little cores and then
     /// allocates onto big cores after all little cores are allocated.
     LittleBig,
-    /// Grab CPUs from NUMA nodes, iteratively, in linear order.
+    /// Grab CPUs from NUMA nodes, iteratively, in linear order. Not for use
+    /// on CPUs with heterogenous SMT.
     NodeSpread,
-    /// Grab CPUs from NUMA nodes, iteratively, in reverse order.
+    /// Grab CPUs from NUMA nodes, iteratively, in reverse order. Not for use
+    /// on CPUs with heterogenous SMT.
     NodeSpreadReverse,
     /// RandomTopo is sticky to NUMA nodes/LLCs but randomises the order in which
     /// it visits each. The layer will select a random NUMA node, then a random LLC
@@ -246,7 +248,19 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             .nodes
             .clone()
             .into_iter()
-            .map(|(_, x)| x.all_cpus.into_iter().map(|(_, x)| x.id).collect())
+            .map(|(_, x)| {
+                x.all_cores
+                    .clone()
+                    .into_iter()
+                    .flat_map(|(_, x)| {
+                        if self.topo.all_cores.len() * 2 == self.topo.all_cpus.len() {
+                            vec![x.id, x.id + self.topo.all_cores.len()]
+                        } else {
+                            vec![x.id]
+                        }
+                    })
+                    .collect()
+            })
             .collect();
 
         for i in 0..core_vecs[0].len() {
