@@ -243,28 +243,24 @@ impl<'a> LayerCoreOrderGenerator<'a> {
 
     fn grow_node_spread(&self) -> Vec<usize> {
         let mut cores: Vec<usize> = Vec::new();
-        let core_vecs: Vec<Vec<usize>> = self
-            .topo
-            .nodes
-            .clone()
-            .into_iter()
-            .map(|(_, x)| {
-                x.all_cores
-                    .clone()
-                    .into_iter()
-                    .flat_map(|(_, x)| {
-                        if self.topo.all_cores.len() * 2 == self.topo.all_cpus.len() {
-                            vec![x.id, x.id + self.topo.all_cores.len()]
-                        } else {
-                            vec![x.id]
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
+        let mut node_core_vecs: Vec<Vec<usize>> = Vec::new();
+        let mut max_node_cpus: usize = 0;
 
-        for i in 0..core_vecs[0].len() {
-            for sub_vec in core_vecs.clone() {
+        for (_, node) in self.topo.nodes.iter() {
+            let mut node_vec = Vec::new();
+            for (_, llc) in node.llcs.iter() {
+                for (core_id, _) in llc.cores.iter() {
+                    node_vec.push(core_id.clone());
+                }
+            }
+            max_node_cpus = std::cmp::max(node_vec.len(), max_node_cpus);
+            // XXX this is a hack to maximize locality when core order is linear.
+            node_vec.sort();
+            node_core_vecs.push(node_vec.clone());
+        }
+
+        for i in 0..=max_node_cpus {
+            for sub_vec in node_core_vecs.iter() {
                 if i < sub_vec.len() {
                     cores.push(sub_vec[i]);
                 }
