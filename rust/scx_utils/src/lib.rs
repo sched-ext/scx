@@ -79,10 +79,6 @@ mod infeasible;
 pub use infeasible::LoadAggregator;
 pub use infeasible::LoadLedger;
 
-pub mod pm;
-pub use pm::update_cpu_idle_resume_latency;
-pub use pm::update_global_idle_resume_latency;
-
 pub mod misc;
 pub use misc::monitor_stats;
 pub use misc::normalize_load_metric;
@@ -91,6 +87,8 @@ pub use misc::set_rlimit_infinity;
 mod netdev;
 pub use netdev::read_netdevs;
 pub use netdev::NetDev;
+
+pub mod pm;
 
 pub mod enums;
 pub use enums::scx_enums;
