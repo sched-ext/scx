@@ -51,6 +51,9 @@ use crate::bpf_intf::stat_idx_P2DQ_STAT_KEEP;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_LLC_MIGRATION;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_NODE_MIGRATION;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_SELECT_PICK2;
+use crate::bpf_intf::stat_idx_P2DQ_STAT_WAKE_LLC;
+use crate::bpf_intf::stat_idx_P2DQ_STAT_WAKE_MIG;
+use crate::bpf_intf::stat_idx_P2DQ_STAT_WAKE_PREV;
 
 lazy_static::lazy_static! {
         pub static ref TOPO: Topology = Topology::new().unwrap();
@@ -306,6 +309,9 @@ impl<'a> Scheduler<'a> {
             dispatch_pick2: stats[stat_idx_P2DQ_STAT_DISPATCH_PICK2 as usize],
             llc_migrations: stats[stat_idx_P2DQ_STAT_LLC_MIGRATION as usize],
             node_migrations: stats[stat_idx_P2DQ_STAT_NODE_MIGRATION as usize],
+            wake_prev: stats[stat_idx_P2DQ_STAT_WAKE_PREV as usize],
+            wake_llc: stats[stat_idx_P2DQ_STAT_WAKE_LLC as usize],
+            wake_mig: stats[stat_idx_P2DQ_STAT_WAKE_MIG as usize],
         }
     }
 

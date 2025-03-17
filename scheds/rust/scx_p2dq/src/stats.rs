@@ -37,23 +37,32 @@ pub struct Metrics {
     pub idle: u64,
     #[stat(desc = "Number of times tasks have greedily picked an idle CPU in the local LLC")]
     pub greedy_idle: u64,
+    #[stat(desc = "Number of times tasks have been woken to the previous CPU")]
+    pub wake_prev: u64,
+    #[stat(desc = "Number of times tasks have been woken to the previous llc")]
+    pub wake_llc: u64,
+    #[stat(desc = "Number of times tasks have been woken and migrated llc")]
+    pub wake_mig: u64,
 }
 
 impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "direct/idle/greedy {}/{}/{}\n\tdsq same/migrate {}/{}\n\tkeep {}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}",
+            "direct/idle/greedy {}/{}/{}\n\tdsq same/migrate/keep {}/{}/{}\n\twake_prev/llc/mig {}/{}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}",
             self.direct,
             self.idle,
             self.greedy_idle,
             self.same_dsq,
             self.dsq_change,
             self.keep,
+            self.wake_prev,
+            self.wake_llc,
+            self.wake_mig,
             self.select_pick2,
             self.dispatch_pick2,
             self.llc_migrations,
-            self.node_migrations
+            self.node_migrations,
         )?;
         Ok(())
     }
@@ -70,6 +79,9 @@ impl Metrics {
             dispatch_pick2: self.dispatch_pick2 - rhs.dispatch_pick2,
             llc_migrations: self.llc_migrations - rhs.llc_migrations,
             node_migrations: self.node_migrations - rhs.node_migrations,
+            wake_prev: self.wake_prev - rhs.wake_prev,
+            wake_llc: self.wake_llc - rhs.wake_llc,
+            wake_mig: self.wake_mig - rhs.wake_mig,
             ..self.clone()
         }
     }
