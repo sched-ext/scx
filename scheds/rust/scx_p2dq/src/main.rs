@@ -28,13 +28,13 @@ use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::import_enums;
 use scx_utils::init_libbpf_logging;
+use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::update_cpu_idle_resume_latency;
 use scx_utils::CoreType;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
@@ -390,10 +390,14 @@ fn main() -> Result<()> {
     }
 
     if let Some(idle_resume_us) = opts.idle_resume_us {
-        if idle_resume_us > 0 {
-            info!("Setting idle QoS to {}us", idle_resume_us);
-            for cpu in TOPO.all_cpus.values() {
-                update_cpu_idle_resume_latency(cpu.id, idle_resume_us.try_into().unwrap())?;
+        if !cpu_idle_resume_latency_supported() {
+            warn!("idle resume latency not supported");
+        } else {
+            if idle_resume_us > 0 {
+                info!("Setting idle QoS to {}us", idle_resume_us);
+                for cpu in TOPO.all_cpus.values() {
+                    update_cpu_idle_resume_latency(cpu.id, idle_resume_us.try_into().unwrap())?;
+                }
             }
         }
     }

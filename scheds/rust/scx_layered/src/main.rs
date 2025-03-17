@@ -43,6 +43,7 @@ use scx_stats::prelude::*;
 use scx_utils::compat;
 use scx_utils::import_enums;
 use scx_utils::init_libbpf_logging;
+use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
 use scx_utils::read_netdevs;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
@@ -50,7 +51,6 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::update_cpu_idle_resume_latency;
 use scx_utils::CoreType;
 use scx_utils::Cpumask;
 use scx_utils::Llc;
@@ -1888,9 +1888,14 @@ impl<'a> Scheduler<'a> {
             layers.push(Layer::new(spec, &topo, growth_order)?);
         }
 
-        let idle_qos_enabled = layers
+        let mut idle_qos_enabled = layers
             .iter()
             .any(|layer| layer.kind.common().idle_resume_us.unwrap_or(0) > 0);
+        if idle_qos_enabled && !cpu_idle_resume_latency_supported() {
+            warn!("idle_resume_us not supported, ignoring");
+            idle_qos_enabled = false;
+        }
+
         Self::init_cpus(&skel, &layer_specs, &topo)?;
         Self::init_llc_prox_map(&mut skel, &topo)?;
 

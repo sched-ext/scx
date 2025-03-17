@@ -39,3 +39,8 @@ pub fn update_cpu_idle_resume_latency(cpu_num: usize, value_us: i32) -> Result<(
     write!(file, "{}", value_us)?;
     Ok(())
 }
+
+/// Returns if idle resume latency is supported.
+pub fn cpu_idle_resume_latency_supported() -> bool {
+    std::fs::exists("/sys/devices/system/cpu/cpu0/power/pm_qos_resume_latency_us").unwrap_or(false)
+}
