@@ -247,19 +247,28 @@ impl<'a> LayerCoreOrderGenerator<'a> {
         let mut max_node_cpus: usize = 0;
 
         for (node_id, node) in self.topo.nodes.iter() {
-            let mut node_vec = Vec::new();
-            for (llc_id, llc) in node.llcs.iter() {
-                let mut llc_vec = Vec::new();
-                for (core_id, _) in llc.cores.iter() {
-                    llc_vec.push(core_id.clone());
-                }
-                llc_vec.sort();
-                log::debug!("LLC ID {} has cores {:?}", llc_id, llc_vec);
-                node_vec.push(llc_vec.clone());
-            }
-            node_vec.sort_by(|x, y| (x[0]).cmp(&y[0]));
-            let flat_node_vec: Vec<usize> = node_vec.into_iter().flatten().collect();
-            log::debug!("Node ID {} has cores {:?}", node_id, flat_node_vec.clone());
+            let flat_node_vec: Vec<usize> = node
+                .llcs
+                .iter()
+                .flat_map(|(llc_id, llc)| {
+                    llc.cores
+                        .iter()
+                        .map(|(core_id, core)| {
+                            // this debug information is important.
+                            for (cpu_id, _) in core.cpus.iter() {
+                                log::debug!(
+                                    "NODE_ID: {} LLC_ID: {} CORE_ID: {} CPU_ID: {}",
+                                    node_id,
+                                    llc_id,
+                                    core_id,
+                                    cpu_id
+                                );
+                            }
+                            core_id.clone()
+                        })
+                        .collect::<Vec<usize>>()
+                })
+                .collect();
             max_node_cpus = std::cmp::max(flat_node_vec.len(), max_node_cpus);
             node_core_vecs.push(flat_node_vec.clone());
         }
@@ -271,6 +280,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
                 }
             }
         }
+        self.rotate_layer_offset(&mut cores);
         cores
     }
 
