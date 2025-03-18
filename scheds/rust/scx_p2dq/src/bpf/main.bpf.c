@@ -474,9 +474,9 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	}
 
 	if (eager_load_balance && nr_llcs > 1) {
-		llcx = pick_two_llc_ctx(rand_llc_ctx(), rand_llc_ctx(), false);
-		if (!llcx) {
-			cpu = prev_cpu;
+		cpu = pick_two_cpu(taskc, is_idle);
+		if (cpu >= 0) {
+			stat_inc(P2DQ_STAT_SELECT_PICK2);
 			goto out_put_cpumask;
 		}
 	}
