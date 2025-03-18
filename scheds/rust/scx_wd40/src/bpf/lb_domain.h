@@ -37,10 +37,8 @@ static inline u64 dom_min_vruntime(dom_ptr domc)
 }
 
 void place_task_dl(struct task_struct *p, task_ptr taskc, u64 enq_flags);
-void running_update_vtime(struct task_struct *p, task_ptr taskc,
-				 dom_ptr domc);
-void stopping_update_vtime(struct task_struct *p, task_ptr taskc,
-				  dom_ptr domc);
+void running_update_vtime(struct task_struct *p, task_ptr taskc);
+void stopping_update_vtime(struct task_struct *p);
 
 u64 update_freq(u64 freq, u64 interval);
 void init_vtime(struct task_struct *p, task_ptr taskc);
