@@ -69,4 +69,4 @@ jobs:
           else
             echo "PR already exists, skipping creation."
           fi
-          gh pr merge --auto --merge --delete-branch
+          gh pr merge --auto
