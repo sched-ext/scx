@@ -584,7 +584,7 @@ fn cpu_capacity_source() -> Option<(String, usize, usize)> {
             break;
         }
     }
-    if raw_capacity <= 0 {
+    if raw_capacity == 0 {
         return None;
     }
 
@@ -601,7 +601,7 @@ fn cpu_capacity_source() -> Option<(String, usize, usize)> {
         avg_raw_capacity += raw_capacity;
         nr_cpus += 1;
     }
-    if max_raw_capacity <= 0 {
+    if max_raw_capacity == 0 {
         return None;
     }
 
