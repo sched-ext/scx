@@ -22,6 +22,8 @@
           {
             update-kernels = pkgs.mkShell {
               buildInputs = with pkgs; common ++ [
+                gh
+                git
                 jq
               ];
             };
