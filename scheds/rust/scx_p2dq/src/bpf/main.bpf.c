@@ -420,20 +420,47 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	if (wake_flags & SCX_WAKE_SYNC) {
 		struct task_struct *current = (void *)bpf_get_current_task_btf();
-		if (!current)
-			goto out_put_cpumask;
-
 		struct task_ctx *cur_taskc = lookup_task_ctx_may_fail(current);
-		if (!cur_taskc)
-			goto out_put_cpumask;
+		if (cur_taskc) {
+			if (cur_taskc->llc_id == llcx->id) {
+				// First check if the waking task is in the same LLC
+				// and the prev cpu is idle
+				if (scx_bpf_test_and_clear_cpu_idle(cpu)) {
+					stat_inc(P2DQ_STAT_WAKE_PREV);
+					*is_idle = true;
+					goto out_put_cpumask;
+				}
+				// Try an idle core in the LLC.
+				if (llcx->cpumask &&
+				    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), SCX_PICK_IDLE_CORE)) &&
+				    cpu >= 0) {
+					stat_inc(P2DQ_STAT_WAKE_LLC);
+					*is_idle = true;
+					goto out_put_cpumask;
+				}
+			} else {
+				// If not in the local LLC we need to migrate to the waker llc.
+				struct llc_ctx *cur_llcx = lookup_llc_ctx(cur_taskc->llc_id);
+				if (!cur_llcx)
+					goto out_put_cpumask;
 
-		// If the waking task is in the same LLC then use the current
-		// CPU if available.
-		s32 cur_cpu = bpf_get_smp_processor_id();
-		if (llcx->id == cur_taskc->llc_id &&
-		    scx_bpf_test_and_clear_cpu_idle(cur_cpu)) {
-			*is_idle = true;
-			goto out_put_cpumask;
+				if (cur_llcx->cpumask &&
+				    (cpu = scx_bpf_pick_idle_cpu(cast_mask(cur_llcx->cpumask), SCX_PICK_IDLE_CORE)) &&
+				    cpu >= 0) {
+					stat_inc(P2DQ_STAT_WAKE_MIG);
+					*is_idle = true;
+					goto out_put_cpumask;
+				}
+
+				// Couldn't find an idle core so just migrate to the CPU
+				if (cur_llcx->cpumask &&
+				    (cpu = scx_bpf_pick_idle_cpu(cast_mask(cur_llcx->cpumask), 0)) &&
+				    cpu >= 0) {
+					stat_inc(P2DQ_STAT_WAKE_MIG);
+					*is_idle = true;
+					goto out_put_cpumask;
+				}
+			}
 		}
 	}
 
