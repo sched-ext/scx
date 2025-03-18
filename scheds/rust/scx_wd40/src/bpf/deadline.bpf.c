@@ -287,13 +287,18 @@ void init_vtime(struct task_struct *p, task_ptr taskc)
 }
 
 __hidden
-void running_update_vtime(struct task_struct *p, task_ptr taskc,
-				 dom_ptr domc)
+void running_update_vtime(struct task_struct *p, task_ptr taskc)
 {
-	arena_lock_t lock = domc->vtime_lock;
+	arena_lock_t lock;
+	dom_ptr domc;
 	int ret;
 
-	if (!lock)
+	if (!(domc = taskc->domc)) {
+		scx_bpf_error("no domain for task");
+		return;
+	}
+
+	if (!(lock = domc->vtime_lock))
 		return;
 
 	if ((ret = arena_spin_lock(lock))) {
@@ -310,9 +315,13 @@ void running_update_vtime(struct task_struct *p, task_ptr taskc,
 
 
 __hidden
-void stopping_update_vtime(struct task_struct *p, task_ptr taskc, dom_ptr domc)
+void stopping_update_vtime(struct task_struct *p)
 {
+	task_ptr taskc;
 	u64 now, delta;
+
+	if (!(taskc = lookup_task_ctx(p)))
+		return;
 
 	now = scx_bpf_now();
 	delta = now - taskc->last_run_at;

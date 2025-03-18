@@ -704,34 +704,24 @@ static void lb_record_run(task_ptr taskc)
 void BPF_STRUCT_OPS(wd40_running, struct task_struct *p)
 {
 	task_ptr taskc;
-	dom_ptr domc;
 
-	taskc = lookup_task_ctx(p);
-	domc = taskc->domc;
+	if (!(taskc = lookup_task_ctx(p)))
+		return;
 
 	lb_record_run(taskc);
 
 	if (fifo_sched)
 		return;
 
-	running_update_vtime(p, taskc, domc);
+	running_update_vtime(p, taskc);
 }
 
 void BPF_STRUCT_OPS(wd40_stopping, struct task_struct *p, bool runnable)
 {
-	task_ptr taskc;
-	dom_ptr domc;
-
 	if (fifo_sched)
 		return;
 
-	if (!(taskc = lookup_task_ctx(p)))
-		return;
-
-	if (!(domc = taskc->domc))
-		return;
-
-	stopping_update_vtime(p, taskc, domc);
+	stopping_update_vtime(p);
 }
 
 void BPF_STRUCT_OPS(wd40_quiescent, struct task_struct *p, u64 deq_flags)
