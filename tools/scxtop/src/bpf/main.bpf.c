@@ -294,6 +294,7 @@ static int on_dsq_move(struct task_struct *p, u64 dsq)
 	if (!(tctx = try_lookup_task_ctx(p)))
 		return -ENOENT;
 
+	tctx->dsq_insert_time = bpf_ktime_get_ns();
 	tctx->dsq_id = dsq;
 	tctx->dsq_vtime = 0;
 
@@ -324,6 +325,7 @@ static int on_dsq_move_vtime(struct task_struct *p, u64 dsq)
 	if (!(tctx = try_lookup_task_ctx(p)))
 		return -ENOENT;
 
+	tctx->dsq_insert_time = bpf_ktime_get_ns();
 	tctx->dsq_id = dsq;
 	bpf_core_read(&tctx->dsq_vtime, sizeof(u64), &p->scx.dsq_vtime);
 

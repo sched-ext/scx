@@ -2317,7 +2317,7 @@ impl<'a> App<'a> {
             self.max_cpu_events,
         ));
 
-        if *next_dsq_id != scx_enums.SCX_DSQ_INVALID {
+        if *next_dsq_id != scx_enums.SCX_DSQ_INVALID && *next_dsq_lat_us > 0 {
             cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
             let next_dsq_data = self
                 .dsq_data
@@ -2340,7 +2340,7 @@ impl<'a> App<'a> {
             }
         }
 
-        if *prev_dsq_id != scx_enums.SCX_DSQ_INVALID {
+        if *prev_dsq_id != scx_enums.SCX_DSQ_INVALID && *prev_used_slice_ns > 0 {
             let prev_dsq_data = self
                 .dsq_data
                 .entry(*prev_dsq_id)
