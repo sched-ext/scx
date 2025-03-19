@@ -692,12 +692,6 @@ void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 		return;
 	}
 
-	if (vtime > llcx->dsq_max_vtime[taskc->dsq_index]) {
-		llcx->dsq_max_vtime[taskc->dsq_index] = vtime;
-		trace("LLC[%d]DSQ[%d] max_vtime %llu", llcx->id, dsq_id, vtime);
-	}
-
-
 	llc_mask = cast_mask(llcx->cpumask);
 	if (!llc_mask) {
 		scx_bpf_error("invalid llc cpumask");
