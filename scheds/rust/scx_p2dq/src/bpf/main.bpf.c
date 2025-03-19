@@ -393,7 +393,6 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	struct cpu_ctx *prev_cpuc;
 	struct node_ctx *nodec;
 	struct llc_ctx *llcx;
-	bool is_prev_llc_affine = false;
 	bool interactive = is_interactive(taskc);
 	s32 cpu = prev_cpu;
 
@@ -409,9 +408,6 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	    !llcx->cpumask)
 		goto out_put_cpumask;
 
-	is_prev_llc_affine = bpf_cpumask_test_cpu(prev_cpu, cast_mask(llcx->cpumask));
-	if (!llcx->cpumask || !idle_cpumask)
-		goto out_put_cpumask;
 
 	/*
 	 * If the current task is waking up another task and releasing the CPU
@@ -464,15 +460,6 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		}
 	}
 
-	// If last CPU is idle then run again
-	if (is_prev_llc_affine &&
-	    bpf_cpumask_test_cpu(prev_cpu, smt_enabled ? idle_smtmask : idle_cpumask) &&
-	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		cpu = prev_cpu;
-		*is_idle = true;
-		goto out_put_cpumask;
-	}
-
 	if (eager_load_balance && nr_llcs > 1) {
 		cpu = pick_two_cpu(taskc, is_idle);
 		if (cpu >= 0) {
@@ -482,112 +469,68 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	}
 
 	if (has_little_cores) {
-		if (!llcx->big_cpumask)
-			goto out_put_cpumask;
-
-		cpu = bpf_cpumask_any_and_distribute(smt_enabled ? idle_smtmask : idle_cpumask,
-						     cast_mask(llcx->big_cpumask));
-		if (cpu < nr_cpus) {
+		if (llcx->big_cpumask &&
+		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->big_cpumask), SCX_PICK_IDLE_CORE)) &&
+		    cpu >= 0) {
 			*is_idle = true;
 			goto out_put_cpumask;
 		}
 
-		if (!nodec->big_cpumask)
-			goto out_put_cpumask;
-
-		/*
-		 * Next try a big core in the local node.
-		 */
-		if (!interactive) {
-			cpu = bpf_cpumask_any_and_distribute(smt_enabled ? idle_smtmask : idle_cpumask,
-							     cast_mask(nodec->big_cpumask));
-			if (cpu < nr_cpus) {
-				*is_idle = true;
-				goto out_put_cpumask;
-			}
-		}
-	}
-
-	if (smt_enabled) {
-		if (is_prev_llc_affine &&
-		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			cpu = prev_cpu;
+		if (nodec->big_cpumask &&
+		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(nodec->big_cpumask), SCX_PICK_IDLE_CORE)) &&
+		    cpu >= 0) {
 			*is_idle = true;
 			goto out_put_cpumask;
 		}
 	}
 
-	if (!llcx->cpumask)
-		goto out_put_cpumask;
-
-	// Next try in the local LLC.
-	cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), SCX_PICK_IDLE_CORE);
-	if (cpu >= 0) {
+	// First check if last CPU is idle
+	if (llcx->cpumask &&
+	    bpf_cpumask_test_cpu(prev_cpu, cast_mask(llcx->cpumask)) &&
+	    bpf_cpumask_test_cpu(prev_cpu, smt_enabled ? idle_smtmask : idle_cpumask) &&
+	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		cpu = prev_cpu;
 		*is_idle = true;
 		goto out_put_cpumask;
 	}
 
-	if (interactive_sticky && interactive) {
-		cpu = prev_cpu;
+	// Next try in the local LLC
+	if (llcx->cpumask &&
+	    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), SCX_PICK_IDLE_CORE)) &&
+	    cpu >= 0) {
+		*is_idle = true;
 		goto out_put_cpumask;
 	}
 
-	// Try to keep interactive tasks local to the LLC and let non
-	// interactive tasks load balance via pick2.
-	if ((interactive || greedy_idle) && llcx->cpumask) {
+	// Try to keep interactive tasks local to the LLC
+	if (((interactive_sticky && interactive) || greedy_idle) && llcx->cpumask) {
 		cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), 0);
 		if (cpu >= 0) {
-			if (greedy_idle)
+			if (greedy_idle && !interactive_sticky)
 				stat_inc(P2DQ_STAT_GREEDY_IDLE);
 			*is_idle = true;
 			goto out_put_cpumask;
 		}
 	}
 
-	if (!nodec->cpumask)
-		goto out_put_cpumask;
-
-	if (nr_llcs > 1) {
-		// first try an idle core in the local node
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(nodec->cpumask), SCX_PICK_IDLE_CORE);
-		if (cpu >= 0) {
+	if (interactive || nr_llcs == 1) {
+		// Try a idle CPU in the llc
+		if (llcx->cpumask &&
+		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), 0)) &&
+		    cpu >= 0) {
 			*is_idle = true;
 			goto out_put_cpumask;
-		}
-
-		if (interactive) {
-			if (!nodec->cpumask)
-				goto out_put_cpumask;
-
-			cpu = scx_bpf_pick_idle_cpu(cast_mask(nodec->cpumask), 0);
-			if (cpu >= 0) {
-				*is_idle = true;
-				goto out_put_cpumask;
-			}
-		} else {
-			cpu = pick_two_cpu(taskc, is_idle);
-			if (cpu >= 0) {
-				stat_inc(P2DQ_STAT_SELECT_PICK2);
-				goto out_put_cpumask;
-			}
 		}
 	} else {
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(nodec->cpumask), SCX_PICK_IDLE_CORE);
-		if (cpu >= 0) {
-			*is_idle = true;
-			goto out_put_cpumask;
-		}
-
-		if (!nodec->cpumask)
-			goto out_put_cpumask;
-
-		cpu = scx_bpf_pick_idle_cpu(cast_mask(nodec->cpumask), 0);
-		if (cpu >= 0) {
-			*is_idle = true;
+		// Non-interactive tasks load balance
+		if (nr_llcs > 1 &&
+		    (cpu = pick_two_cpu(taskc, is_idle)) &&
+		    cpu >= 0) {
+			stat_inc(P2DQ_STAT_SELECT_PICK2);
 			goto out_put_cpumask;
 		}
 	}
+
 	cpu = prev_cpu;
 
 out_put_cpumask:
