@@ -11,7 +11,7 @@ use crate::bpf_intf;
 use crate::CpuPool;
 use crate::LayerSpec;
 
-#[derive(Clone, Debug, Parser, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Parser, Serialize, Deserialize)]
 #[clap(rename_all = "snake_case")]
 pub enum LayerGrowthAlgo {
     /// Sticky attempts to place layers evenly spaced across cores.
@@ -49,6 +49,10 @@ pub enum LayerGrowthAlgo {
     /// it visits each. The layer will select a random NUMA node, then a random LLC
     /// within it, then randomly iterate the cores in that LLC.
     RandomTopo,
+    /// StickyDynamic attempts to assign cores to layers according to their
+    /// size, while remaining sticky to LLCs, and tries to place layers across
+    /// LLC boundary minimizing overlap.
+    StickyDynamic,
 }
 
 const GROWTH_ALGO_STICKY: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_STICKY as i32;
@@ -63,6 +67,8 @@ const GROWTH_ALGO_NODE_SPREAD: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_NOD
 const GROWTH_ALGO_NODE_SPREAD_REVERSE: i32 =
     bpf_intf::layer_growth_algo_GROWTH_ALGO_NODE_SPREAD_REVERSE as i32;
 const GROWTH_ALGO_RANDOM_TOPO: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_RANDOM_TOPO as i32;
+const GROWTH_ALGO_STICKY_DYNAMIC: i32 =
+    bpf_intf::layer_growth_algo_GROWTH_ALGO_STICKY_DYNAMIC as i32;
 
 impl LayerGrowthAlgo {
     pub fn as_bpf_enum(&self) -> i32 {
@@ -78,6 +84,7 @@ impl LayerGrowthAlgo {
             LayerGrowthAlgo::NodeSpread => GROWTH_ALGO_NODE_SPREAD,
             LayerGrowthAlgo::NodeSpreadReverse => GROWTH_ALGO_NODE_SPREAD_REVERSE,
             LayerGrowthAlgo::RandomTopo => GROWTH_ALGO_RANDOM_TOPO,
+            LayerGrowthAlgo::StickyDynamic => GROWTH_ALGO_STICKY_DYNAMIC,
         }
     }
 
@@ -125,6 +132,7 @@ impl LayerGrowthAlgo {
             LayerGrowthAlgo::NodeSpread => generator.grow_node_spread(),
             LayerGrowthAlgo::NodeSpreadReverse => generator.grow_node_spread_reverse(),
             LayerGrowthAlgo::RandomTopo => generator.grow_random_topo(),
+            LayerGrowthAlgo::StickyDynamic => generator.grow_sticky_dynamic(),
         }
     }
 }
@@ -361,6 +369,10 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             })
             .map(|c| self.cpu_pool.get_core_topological_id(c))
             .collect()
+    }
+
+    fn grow_sticky_dynamic(&self) -> Vec<usize> {
+        self.grow_sticky()
     }
 }
 
