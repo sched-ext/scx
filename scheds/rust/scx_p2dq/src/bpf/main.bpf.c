@@ -370,13 +370,21 @@ pick_llc:
 	if (!chosen->cpumask)
 		return -EINVAL;
 
-	cpu = scx_bpf_pick_idle_cpu(cast_mask(chosen->cpumask), 0);
-	if (cpu < nr_cpus && cpu >= 0) {
+	// First try to find an idle core
+	cpu = scx_bpf_pick_idle_cpu(cast_mask(chosen->cpumask), SCX_PICK_IDLE_CORE);
+	if (cpu >= 0) {
 		*is_idle = true;
 		return cpu;
 	}
 
-	// couldn't find idle, but still return a CPU.
+	// No idle cores, any CPU will do
+	cpu = scx_bpf_pick_idle_cpu(cast_mask(chosen->cpumask), 0);
+	if (cpu >= 0) {
+		*is_idle = true;
+		return cpu;
+	}
+
+	// Couldn't find idle, but still return a CPU to load balance
 	if (!chosen->cpumask)
 		return -EINVAL;
 	cpu = bpf_cpumask_any_distribute(cast_mask(chosen->cpumask));
