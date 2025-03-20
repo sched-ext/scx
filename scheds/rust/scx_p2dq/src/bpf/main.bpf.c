@@ -364,10 +364,7 @@ static s32 pick_two_cpu(struct task_ctx *taskc, bool *is_idle)
 	}
 
 pick_llc:
-	if (!chosen)
-		return -EINVAL;
-
-	if (!chosen->cpumask)
+	if (!chosen || !chosen->cpumask)
 		return -EINVAL;
 
 	// First try to find an idle core
@@ -378,18 +375,17 @@ pick_llc:
 	}
 
 	// No idle cores, any CPU will do
-	cpu = scx_bpf_pick_idle_cpu(cast_mask(chosen->cpumask), 0);
-	if (cpu >= 0) {
+	if (chosen->cpumask &&
+	    (cpu = scx_bpf_pick_idle_cpu(cast_mask(chosen->cpumask), 0)) >= 0) {
 		*is_idle = true;
 		return cpu;
 	}
 
 	// Couldn't find idle, but still return a CPU to load balance
-	if (!chosen->cpumask)
-		return -EINVAL;
-	cpu = bpf_cpumask_any_distribute(cast_mask(chosen->cpumask));
-	if (cpu < nr_cpus)
+	if (chosen->cpumask &&
+	    (cpu = bpf_cpumask_any_distribute(cast_mask(chosen->cpumask))) < nr_cpus) {
 		return cpu;
+	}
 
 	return -EINVAL;
 }
