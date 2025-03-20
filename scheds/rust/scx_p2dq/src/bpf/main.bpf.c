@@ -511,20 +511,19 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		}
 	}
 
-	if (interactive || nr_llcs == 1) {
-		// Try a idle CPU in the llc
-		if (llcx->cpumask &&
-		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), 0)) >= 0) {
-			*is_idle = true;
-			goto out_put_cpumask;
-		}
-	} else {
-		// Non-interactive tasks load balance
-		if (nr_llcs > 1 &&
-		    (cpu = pick_two_cpu(taskc, is_idle)) >= 0) {
-			stat_inc(P2DQ_STAT_SELECT_PICK2);
-			goto out_put_cpumask;
-		}
+	// Try a idle CPU in the llc
+	if (llcx->cpumask &&
+	    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), 0)) >= 0) {
+		*is_idle = true;
+		goto out_put_cpumask;
+	}
+
+	// Non-interactive tasks load balance
+	if (nr_llcs > 1 &&
+	    !interactive &&
+	    (cpu = pick_two_cpu(taskc, is_idle)) >= 0) {
+		stat_inc(P2DQ_STAT_SELECT_PICK2);
+		goto out_put_cpumask;
 	}
 
 	cpu = prev_cpu;

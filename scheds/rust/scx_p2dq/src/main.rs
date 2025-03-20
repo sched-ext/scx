@@ -59,18 +59,14 @@ lazy_static::lazy_static! {
         pub static ref TOPO: Topology = Topology::new().unwrap();
 }
 
-fn get_default_pick2_nr_queued() -> u32 {
-    let max_llc_cpus = TOPO
-        .all_llcs
-        .values()
-        .map(|llc| llc.cores.len())
-        .max()
-        .unwrap_or(1) as u32;
-    if max_llc_cpus > 1 {
-        max_llc_cpus / 2
-    } else {
-        max_llc_cpus
-    }
+fn get_default_greedy_disable() -> bool {
+    TOPO.all_llcs.len() > 1
+}
+
+fn get_default_llc_runs() -> u64 {
+    let n_llcs = TOPO.all_llcs.len() as f64;
+    let llc_runs = n_llcs.log2();
+    llc_runs as u64
 }
 
 /// scx_p2dq: A pick 2 dumb queuing load balancing scheduler.
@@ -97,7 +93,7 @@ struct Opts {
     eager_load_balance: bool,
 
     /// Disables greedy idle CPU selection, may cause better load balancing on multi-LLC systems.
-    #[clap(short = 'g', long, action = clap::ArgAction::SetTrue)]
+    #[clap(short = 'g', long, default_value_t = get_default_greedy_disable(), action = clap::ArgAction::Set)]
     greedy_idle_disable: bool,
 
     /// Interactive tasks stay sticky to their CPU if no idle CPU is found.
@@ -117,7 +113,7 @@ struct Opts {
     idle_resume_us: Option<u32>,
 
     /// Only pick2 load balance from the max DSQ.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
+    #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
     max_dsq_pick2: bool,
 
     /// Scheduling min slice duration in microseconds.
@@ -126,7 +122,7 @@ struct Opts {
 
     /// Number of runs on the LLC before a task becomes eligbile for pick2 migration on the wakeup
     /// path.
-    #[clap(short = 'l', long, default_value = "1")]
+    #[clap(short = 'l', long, default_value_t = get_default_llc_runs())]
     min_llc_runs_pick2: u64,
 
     /// Manual definition of slice intervals in microseconds for DSQs, must be equal to number of
@@ -139,7 +135,7 @@ struct Opts {
     dsq_shift: u64,
 
     /// Minimum number of queued tasks to use pick2 balancing, 0 to always enabled.
-    #[clap(short = 'm', long, default_value_t = get_default_pick2_nr_queued())]
+    #[clap(short = 'm', long, default_value = "0")]
     min_nr_queued_pick2: u32,
 
     /// Number of dumb DSQs.
