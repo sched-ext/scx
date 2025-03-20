@@ -623,26 +623,29 @@ void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 		return;
 	}
 
-	dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
-	scx_bpf_dsq_insert_vtime(p, dsq_id, slice_ns, vtime, enq_flags);
-	if (taskc->dsq_index < 0 || taskc->dsq_index >= nr_dsqs_per_llc) {
-		scx_bpf_error("can't happen");
-		return;
-	}
-
 	if (!(llc_mask = cast_mask(llcx->cpumask))) {
 		scx_bpf_error("invalid llc cpumask");
 		return;
 	}
 
-	if (smt_enabled &&
-	    (cpu = scx_bpf_pick_idle_cpu(llc_mask, SCX_PICK_IDLE_CORE)) >= 0) {
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-		return;
+	// If an idle CPU hasn't been found in select_cpu find one now
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
+		if (smt_enabled &&
+		    (cpu = scx_bpf_pick_idle_cpu(llc_mask, SCX_PICK_IDLE_CORE)) >= 0) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			return;
+		}
+
+		if ((cpu = scx_bpf_pick_idle_cpu(llc_mask, 0)) >= 0) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			return;
+		}
 	}
 
-	if ((cpu = scx_bpf_pick_idle_cpu(llc_mask, 0)) >= 0)
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
+	scx_bpf_dsq_insert_vtime(p, dsq_id, slice_ns, vtime, enq_flags);
 }
 
 
