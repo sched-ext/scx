@@ -436,8 +436,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 				}
 				// Try an idle core in the LLC.
 				if (llcx->cpumask &&
-				    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), SCX_PICK_IDLE_CORE)) &&
-				    cpu >= 0) {
+				    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), SCX_PICK_IDLE_CORE)) >= 0) {
 					stat_inc(P2DQ_STAT_WAKE_LLC);
 					*is_idle = true;
 					goto out_put_cpumask;
@@ -449,8 +448,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 					goto out_put_cpumask;
 
 				if (cur_llcx->cpumask &&
-				    (cpu = scx_bpf_pick_idle_cpu(cast_mask(cur_llcx->cpumask), SCX_PICK_IDLE_CORE)) &&
-				    cpu >= 0) {
+				    (cpu = scx_bpf_pick_idle_cpu(cast_mask(cur_llcx->cpumask), SCX_PICK_IDLE_CORE)) >= 0) {
 					stat_inc(P2DQ_STAT_WAKE_MIG);
 					*is_idle = true;
 					goto out_put_cpumask;
@@ -458,8 +456,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 
 				// Couldn't find an idle core so just migrate to the CPU
 				if (cur_llcx->cpumask &&
-				    (cpu = scx_bpf_pick_idle_cpu(cast_mask(cur_llcx->cpumask), 0)) &&
-				    cpu >= 0) {
+				    (cpu = scx_bpf_pick_idle_cpu(cast_mask(cur_llcx->cpumask), 0)) >= 0) {
 					stat_inc(P2DQ_STAT_WAKE_MIG);
 					*is_idle = true;
 					goto out_put_cpumask;
@@ -478,15 +475,13 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 
 	if (has_little_cores) {
 		if (llcx->big_cpumask &&
-		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->big_cpumask), SCX_PICK_IDLE_CORE)) &&
-		    cpu >= 0) {
+		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->big_cpumask), SCX_PICK_IDLE_CORE)) >= 0) {
 			*is_idle = true;
 			goto out_put_cpumask;
 		}
 
 		if (nodec->big_cpumask &&
-		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(nodec->big_cpumask), SCX_PICK_IDLE_CORE)) &&
-		    cpu >= 0) {
+		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(nodec->big_cpumask), SCX_PICK_IDLE_CORE)) >= 0) {
 			*is_idle = true;
 			goto out_put_cpumask;
 		}
@@ -504,8 +499,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 
 	// Next try in the local LLC
 	if (llcx->cpumask &&
-	    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), SCX_PICK_IDLE_CORE)) &&
-	    cpu >= 0) {
+	    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), SCX_PICK_IDLE_CORE)) >= 0) {
 		*is_idle = true;
 		goto out_put_cpumask;
 	}
@@ -524,16 +518,14 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	if (interactive || nr_llcs == 1) {
 		// Try a idle CPU in the llc
 		if (llcx->cpumask &&
-		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), 0)) &&
-		    cpu >= 0) {
+		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), 0)) >= 0) {
 			*is_idle = true;
 			goto out_put_cpumask;
 		}
 	} else {
 		// Non-interactive tasks load balance
 		if (nr_llcs > 1 &&
-		    (cpu = pick_two_cpu(taskc, is_idle)) &&
-		    cpu >= 0) {
+		    (cpu = pick_two_cpu(taskc, is_idle)) >= 0) {
 			stat_inc(P2DQ_STAT_SELECT_PICK2);
 			goto out_put_cpumask;
 		}
@@ -573,7 +565,7 @@ s32 BPF_STRUCT_OPS(p2dq_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 
 void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
 {
-	const struct cpumask *idle_cpumask, *llc_mask;
+	const struct cpumask *llc_mask;
 	struct llc_ctx *llcx, *prev_llcx;
 	struct cpu_ctx *cpuc, *task_cpuc;
 	struct task_ctx *taskc;
@@ -643,19 +635,18 @@ void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 		return;
 	}
 
-	llc_mask = cast_mask(llcx->cpumask);
-	if (!llc_mask) {
+	if (!(llc_mask = cast_mask(llcx->cpumask))) {
 		scx_bpf_error("invalid llc cpumask");
 		return;
-
 	}
 
-	idle_cpumask = scx_bpf_get_idle_cpumask();
-	cpu = bpf_cpumask_any_and_distribute(llc_mask, idle_cpumask);
-	scx_bpf_put_cpumask(idle_cpumask);
+	if (smt_enabled &&
+	    (cpu = scx_bpf_pick_idle_cpu(llc_mask, SCX_PICK_IDLE_CORE)) >= 0) {
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		return;
+	}
 
-	// If there is an idle CPU in the LLC kick it.
-	if (cpu < nr_cpus)
+	if ((cpu = scx_bpf_pick_idle_cpu(llc_mask, 0)) >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
