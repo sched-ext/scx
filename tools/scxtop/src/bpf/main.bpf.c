@@ -782,6 +782,30 @@ int BPF_PROG(on_ipi_send_cpu, u32 cpu, void *callsite, void *callback)
 	return 0;
 }
 
+SEC("tp_btf/sched_process_fork")
+int BPF_PROG(on_sched_fork, struct task_struct *parent, struct task_struct *child)
+{
+	struct bpf_event *event;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+	event->type = FORK;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = bpf_ktime_get_ns();
+	event->event.fork.parent_pid = BPF_CORE_READ(parent, pid);
+	event->event.fork.child_pid = BPF_CORE_READ(child, pid);
+	__builtin_memcpy_inline(&event->event.fork.parent_comm, &parent->comm, MAX_COMM);
+	__builtin_memcpy_inline(&event->event.fork.child_comm, &child->comm, MAX_COMM);
+
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
 SEC("?tp_btf/gpu_mem_total")
 int BPF_PROG(on_gpu_memory_total, u32 gpu, u32 pid, u64 size)
 {

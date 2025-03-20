@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::bpf_skel::types::bpf_event;
 use crate::edm::{ActionHandler, BpfEventHandler};
 use crate::{
-    Action, CpuhpAction, GpuMemAction, HwPressureAction, IPIAction, SchedSwitchAction,
+    Action, CpuhpAction, ForkAction, GpuMemAction, HwPressureAction, IPIAction, SchedSwitchAction,
     SchedWakeupAction, SchedWakingAction, SoftIRQAction,
 };
 
@@ -26,9 +26,10 @@ use crate::protos_gen::perfetto_scx::trace_packet::Data::TrackDescriptor as Data
 use crate::protos_gen::perfetto_scx::track_event::Type as TrackEventType;
 use crate::protos_gen::perfetto_scx::{
     CounterDescriptor, CpuhpEnterFtraceEvent, FtraceEvent, FtraceEventBundle,
-    GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent, SchedSwitchFtraceEvent, SchedWakeupFtraceEvent,
-    SchedWakingFtraceEvent, SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent, Trace, TracePacket,
-    TrackDescriptor, TrackEvent,
+    GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent, SchedProcessForkFtraceEvent,
+    SchedSwitchFtraceEvent, SchedWakeupFtraceEvent, SchedWakingFtraceEvent,
+    SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent, Trace, TracePacket, TrackDescriptor,
+    TrackEvent,
 };
 
 /// Handler for perfetto traces. For details on data flow in perfetto see:
@@ -234,6 +235,33 @@ impl PerfettoTraceManager {
         self.clear();
         self.trace_id += 1;
         Ok(())
+    }
+
+    pub fn on_fork(&mut self, action: &ForkAction) {
+        let ForkAction {
+            ts,
+            cpu,
+            parent_pid,
+            child_pid,
+            parent_comm,
+            child_comm,
+        } = action;
+
+        self.ftrace_events.entry(*cpu).or_default().push({
+            let mut ftrace_event = FtraceEvent::new();
+            let mut fork_event = SchedProcessForkFtraceEvent::new();
+
+            fork_event.set_parent_pid((*parent_pid).try_into().unwrap());
+            fork_event.set_child_pid((*child_pid).try_into().unwrap());
+            fork_event.set_parent_comm(parent_comm.to_string());
+            fork_event.set_child_comm(child_comm.to_string());
+
+            ftrace_event.set_timestamp(*ts);
+            ftrace_event.set_sched_process_fork(fork_event);
+            ftrace_event.set_pid(*parent_pid);
+
+            ftrace_event
+        });
     }
 
     /// Adds events for on sched_wakeup.
@@ -488,6 +516,9 @@ impl ActionHandler for PerfettoTraceManager {
             }
             Action::IPI(a) => {
                 self.on_ipi(a);
+            }
+            Action::Fork(a) => {
+                self.on_fork(a);
             }
             Action::GpuMem(a) => {
                 self.on_gpu_mem(a);

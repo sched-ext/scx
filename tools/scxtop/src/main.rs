@@ -171,7 +171,8 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             skel.maps.data_data.sample_rate = 1;
 
             let mut skel = skel.load()?;
-            let links = attach_progs(&mut skel)?;
+            let mut links = attach_progs(&mut skel)?;
+            links.push(skel.progs.on_sched_fork.attach()?);
 
             let trace_dur = std::time::Duration::from_millis(trace_args.trace_ms);
             let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());

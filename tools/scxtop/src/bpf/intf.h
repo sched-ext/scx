@@ -32,6 +32,7 @@ enum mode {
 enum event_type {
 	CPU_HP,
 	CPU_PERF_SET,
+	FORK,
 	GPU_MEM,
 	HW_PRESSURE,
 	IPI,
@@ -85,6 +86,13 @@ struct softirq_event {
 	int		softirq_nr;
 };
 
+struct fork_event {
+	u32		parent_pid;
+	u32		child_pid;
+	char		parent_comm[MAX_COMM];
+	char		child_comm[MAX_COMM];
+};
+
 struct ipi_event {
 	u32		pid;
 	u32		target_cpu;
@@ -118,6 +126,7 @@ struct bpf_event {
 	u64		ts;
 	u32		cpu;
 	union {
+		struct  fork_event fork;
 		struct  hw_pressure_event hwp;
 		struct  gpu_mem_event gm;
 		struct  cpuhp_event chp;

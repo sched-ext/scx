@@ -25,9 +25,9 @@ use crate::APP;
 use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
-    Action, CpuhpAction, GpuMemAction, HwPressureAction, IPIAction, SchedCpuPerfSetAction,
-    SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction, TraceStartedAction,
-    TraceStoppedAction,
+    Action, CpuhpAction, ForkAction, GpuMemAction, HwPressureAction, IPIAction,
+    SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
+    TraceStartedAction, TraceStoppedAction,
 };
 
 use anyhow::Result;
@@ -2148,6 +2148,7 @@ impl<'a> App<'a> {
             self.skel.progs.on_softirq_entry.attach()?,
             self.skel.progs.on_softirq_exit.attach()?,
             self.skel.progs.on_ipi_send_cpu.attach()?,
+            self.skel.progs.on_sched_fork.attach()?,
         ];
 
         Ok(())
@@ -2272,6 +2273,12 @@ impl<'a> App<'a> {
             self.max_cpu_events,
         ));
         cpu_data.add_event_data("perf", perf as u64);
+    }
+
+    fn on_fork(&mut self, action: &ForkAction) {
+        if self.state == AppState::Tracing && action.ts > self.trace_start {
+            self.trace_manager.on_fork(action);
+        }
     }
 
     /// Updates the app when a task wakes.
@@ -2468,6 +2475,9 @@ impl<'a> App<'a> {
             }
             Action::SoftIRQ(a) => {
                 self.on_softirq(a);
+            }
+            Action::Fork(a) => {
+                self.on_fork(a);
             }
             Action::IPI(a) => {
                 self.on_ipi(a);

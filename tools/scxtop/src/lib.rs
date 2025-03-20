@@ -110,6 +110,16 @@ pub struct SchedCpuPerfSetAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ForkAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub parent_pid: u32,
+    pub child_pid: u32,
+    pub parent_comm: SsoString,
+    pub child_comm: SsoString,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SchedSwitchAction {
     pub ts: u64,
     pub cpu: u32,
@@ -209,6 +219,7 @@ pub enum Action {
     Down,
     Enter,
     Event,
+    Fork(ForkAction),
     GpuMem(GpuMemAction),
     Help,
     HwPressure(HwPressureAction),
@@ -340,6 +351,32 @@ impl TryFrom<&bpf_event> for Action {
                     pid: waking.pid,
                     prio: waking.prio,
                     comm: comm.into(),
+                }))
+            }
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_FORK => {
+                let fork = unsafe { &event.event.fork };
+                let parent_comm = unsafe {
+                    std::str::from_utf8(std::slice::from_raw_parts(
+                        fork.parent_comm.as_ptr() as *const u8,
+                        fork.parent_comm.len(),
+                    ))
+                    .unwrap()
+                };
+                let child_comm = unsafe {
+                    std::str::from_utf8(std::slice::from_raw_parts(
+                        fork.child_comm.as_ptr() as *const u8,
+                        fork.child_comm.len(),
+                    ))
+                    .unwrap()
+                };
+                Ok(Action::Fork(ForkAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    parent_pid: fork.parent_pid,
+                    child_pid: fork.child_pid,
+                    parent_comm: parent_comm.into(),
+                    child_comm: child_comm.into(),
                 }))
             }
             #[allow(non_upper_case_globals)]
