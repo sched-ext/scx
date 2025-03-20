@@ -62,7 +62,9 @@ impl LayerSpec {
 pub enum LayerMatch {
     CgroupPrefix(String),
     CommPrefix(String),
+    CommPrefixExclude(String),
     PcommPrefix(String),
+    PcommPrefixExclude(String),
     NiceAbove(i32),
     NiceBelow(i32),
     NiceEquals(i32),
