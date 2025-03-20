@@ -806,6 +806,28 @@ int BPF_PROG(on_sched_fork, struct task_struct *parent, struct task_struct *chil
 	return 0;
 }
 
+SEC("tp_btf/sched_process_exec")
+int BPF_PROG(on_sched_exec, struct task_struct *p, u32 old_pid, struct linux_binprm *prm)
+{
+	struct bpf_event *event;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+	event->type = FORK;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = bpf_ktime_get_ns();
+	event->event.exec.old_pid = old_pid;
+	event->event.exec.pid = BPF_CORE_READ(p, pid);
+
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
 SEC("?tp_btf/gpu_mem_total")
 int BPF_PROG(on_gpu_memory_total, u32 gpu, u32 pid, u64 size)
 {
