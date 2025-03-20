@@ -1298,6 +1298,9 @@ impl<'a> Scheduler<'a> {
                             mt.used_gpu_pid.write(*polarity);
                         }
                     }
+
+                    // Rules are allowlist-based by default
+                    mt.exclude.write(false);
                 }
                 layer.matches[or_i].nr_match_ands = or.len() as i32;
             }
