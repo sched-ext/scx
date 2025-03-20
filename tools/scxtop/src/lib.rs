@@ -120,6 +120,14 @@ pub struct ForkAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ExecAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub old_pid: u32,
+    pub pid: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SchedSwitchAction {
     pub ts: u64,
     pub cpu: u32,
@@ -219,6 +227,7 @@ pub enum Action {
     Down,
     Enter,
     Event,
+    Exec(ExecAction),
     Fork(ForkAction),
     GpuMem(GpuMemAction),
     Help,
@@ -353,6 +362,13 @@ impl TryFrom<&bpf_event> for Action {
                     comm: comm.into(),
                 }))
             }
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_EXEC => Ok(Action::Exec(ExecAction {
+                ts: event.ts,
+                cpu: event.cpu,
+                old_pid: unsafe { event.event.exec.old_pid },
+                pid: unsafe { event.event.exec.pid },
+            })),
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_FORK => {
                 let fork = unsafe { &event.event.fork };

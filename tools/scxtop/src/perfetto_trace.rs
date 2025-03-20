@@ -17,8 +17,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::bpf_skel::types::bpf_event;
 use crate::edm::{ActionHandler, BpfEventHandler};
 use crate::{
-    Action, CpuhpAction, ForkAction, GpuMemAction, HwPressureAction, IPIAction, SchedSwitchAction,
-    SchedWakeupAction, SchedWakingAction, SoftIRQAction,
+    Action, CpuhpAction, ExecAction, ForkAction, GpuMemAction, HwPressureAction, IPIAction,
+    SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
 };
 
 use crate::protos_gen::perfetto_scx::counter_descriptor::Unit::UNIT_COUNT;
@@ -26,10 +26,10 @@ use crate::protos_gen::perfetto_scx::trace_packet::Data::TrackDescriptor as Data
 use crate::protos_gen::perfetto_scx::track_event::Type as TrackEventType;
 use crate::protos_gen::perfetto_scx::{
     CounterDescriptor, CpuhpEnterFtraceEvent, FtraceEvent, FtraceEventBundle,
-    GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent, SchedProcessForkFtraceEvent,
-    SchedSwitchFtraceEvent, SchedWakeupFtraceEvent, SchedWakingFtraceEvent,
-    SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent, Trace, TracePacket, TrackDescriptor,
-    TrackEvent,
+    GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent, SchedProcessExecFtraceEvent,
+    SchedProcessForkFtraceEvent, SchedSwitchFtraceEvent, SchedWakeupFtraceEvent,
+    SchedWakingFtraceEvent, SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent, Trace, TracePacket,
+    TrackDescriptor, TrackEvent,
 };
 
 /// Handler for perfetto traces. For details on data flow in perfetto see:
@@ -264,6 +264,28 @@ impl PerfettoTraceManager {
         });
     }
 
+    pub fn on_exec(&mut self, action: &ExecAction) {
+        let ExecAction {
+            ts,
+            cpu,
+            old_pid,
+            pid,
+        } = action;
+
+        self.ftrace_events.entry(*cpu).or_default().push({
+            let mut ftrace_event = FtraceEvent::new();
+            let mut exec_event = SchedProcessExecFtraceEvent::new();
+
+            exec_event.set_old_pid((*old_pid).try_into().unwrap());
+            exec_event.set_pid((*pid).try_into().unwrap());
+
+            ftrace_event.set_timestamp(*ts);
+            ftrace_event.set_sched_process_exec(exec_event);
+            ftrace_event.set_pid(*old_pid);
+
+            ftrace_event
+        });
+    }
     /// Adds events for on sched_wakeup.
     pub fn on_sched_wakeup(&mut self, action: &SchedWakeupAction) {
         let SchedWakeupAction {
@@ -516,6 +538,9 @@ impl ActionHandler for PerfettoTraceManager {
             }
             Action::IPI(a) => {
                 self.on_ipi(a);
+            }
+            Action::Exec(a) => {
+                self.on_exec(a);
             }
             Action::Fork(a) => {
                 self.on_fork(a);

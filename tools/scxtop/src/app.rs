@@ -25,7 +25,7 @@ use crate::APP;
 use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
-    Action, CpuhpAction, ForkAction, GpuMemAction, HwPressureAction, IPIAction,
+    Action, CpuhpAction, ExecAction, ForkAction, GpuMemAction, HwPressureAction, IPIAction,
     SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
     TraceStartedAction, TraceStoppedAction,
 };
@@ -2149,6 +2149,7 @@ impl<'a> App<'a> {
             self.skel.progs.on_softirq_exit.attach()?,
             self.skel.progs.on_ipi_send_cpu.attach()?,
             self.skel.progs.on_sched_fork.attach()?,
+            self.skel.progs.on_sched_exec.attach()?,
         ];
 
         Ok(())
@@ -2273,6 +2274,12 @@ impl<'a> App<'a> {
             self.max_cpu_events,
         ));
         cpu_data.add_event_data("perf", perf as u64);
+    }
+
+    fn on_exec(&mut self, action: &ExecAction) {
+        if self.state == AppState::Tracing && action.ts > self.trace_start {
+            self.trace_manager.on_exec(action);
+        }
     }
 
     fn on_fork(&mut self, action: &ForkAction) {
@@ -2475,6 +2482,9 @@ impl<'a> App<'a> {
             }
             Action::SoftIRQ(a) => {
                 self.on_softirq(a);
+            }
+            Action::Exec(a) => {
+                self.on_exec(a);
             }
             Action::Fork(a) => {
                 self.on_fork(a);
