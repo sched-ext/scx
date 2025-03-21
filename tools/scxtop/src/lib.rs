@@ -128,6 +128,12 @@ pub struct ExecAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SchedMoveNumaAction {
+    pub source_cpu: u32,
+    pub target_cpu: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SchedSwitchAction {
     pub ts: u64,
     pub cpu: u32,
@@ -247,6 +253,7 @@ pub enum Action {
     ReloadStatsClient,
     SaveConfig,
     SchedCpuPerfSet(SchedCpuPerfSetAction),
+    SchedMoveNuma(SchedMoveNumaAction),
     SchedReg,
     SchedStats(String),
     SchedSwitch(SchedSwitchAction),
@@ -393,6 +400,13 @@ impl TryFrom<&bpf_event> for Action {
                     child_pid: fork.child_pid,
                     parent_comm: parent_comm.into(),
                     child_comm: child_comm.into(),
+                }))
+            }
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_SCHED_MOVE_NUMA => {
+                Ok(Action::SchedMoveNuma(SchedMoveNumaAction {
+                    source_cpu: unsafe { event.event.move_numa.source_cpu },
+                    target_cpu: unsafe { event.event.move_numa.target_cpu },
                 }))
             }
             #[allow(non_upper_case_globals)]

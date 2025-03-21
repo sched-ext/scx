@@ -828,6 +828,28 @@ int BPF_PROG(on_sched_exec, struct task_struct *p, u32 old_pid, struct linux_bin
 	return 0;
 }
 
+SEC("tp_btf/sched_move_numa")
+int BPF_PROG(on_sched_move_numa, struct task_struct *p, s32 source_cpu, s32 target_cpu)
+{
+	struct bpf_event *event;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+	event->type = SCHED_MOVE_NUMA;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = bpf_ktime_get_ns();
+	event->event.move_numa.source_cpu = source_cpu;
+	event->event.move_numa.target_cpu = target_cpu;
+
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
 SEC("?tp_btf/gpu_mem_total")
 int BPF_PROG(on_gpu_memory_total, u32 gpu, u32 pid, u64 size)
 {

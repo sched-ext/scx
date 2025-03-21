@@ -17,8 +17,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::bpf_skel::types::bpf_event;
 use crate::edm::{ActionHandler, BpfEventHandler};
 use crate::{
-    Action, CpuhpAction, ExecAction, ForkAction, GpuMemAction, HwPressureAction, IPIAction,
-    SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
+    Action, CpuhpAction, ExecAction, ForkAction, GpuMemAction, IPIAction, SchedSwitchAction,
+    SchedWakeupAction, SchedWakingAction, SoftIRQAction,
 };
 
 use crate::protos_gen::perfetto_scx::counter_descriptor::Unit::UNIT_COUNT;

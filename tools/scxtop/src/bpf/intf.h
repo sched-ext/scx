@@ -37,6 +37,7 @@ enum event_type {
 	GPU_MEM,
 	HW_PRESSURE,
 	IPI,
+	SCHED_MOVE_NUMA,
 	SCHED_REG,
 	SCHED_SWITCH,
 	SCHED_UNREG,
@@ -127,6 +128,11 @@ struct trace_started_event {
 	bool		stop_scheduled;
 };
 
+struct sched_move_numa_event {
+	u32             source_cpu;
+	u32             target_cpu;
+};
+
 struct bpf_event {
 	int		type;
 	u64		ts;
@@ -144,6 +150,7 @@ struct bpf_event {
 		struct	wakeup_event wakeup;
 		struct	wakeup_event waking;
 		struct  trace_started_event trace;
+		struct  sched_move_numa_event move_numa;
 	} event;
 };
 
