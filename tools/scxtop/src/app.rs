@@ -26,8 +26,8 @@ use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
     Action, CpuhpAction, ExecAction, ForkAction, GpuMemAction, HwPressureAction, IPIAction,
-    SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
-    TraceStartedAction, TraceStoppedAction,
+    SchedCpuPerfSetAction, SchedMoveNumaAction, SchedSwitchAction, SchedWakeupAction,
+    SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
 };
 
 use anyhow::Result;
@@ -653,13 +653,25 @@ impl<'a> App<'a> {
 
     /// creates as sparkline for a node.
     fn node_sparkline(&self, node: usize, max: u64, bottom_border: bool) -> Sparkline {
+        let node_data = self.node_data.get(&node).unwrap();
         let data = if self.llc_data.contains_key(&node) {
-            let node_data = self.node_data.get(&node).unwrap();
             node_data.event_data_immut(self.active_event.event_name())
         } else {
             Vec::new()
         };
         let stats = VecStats::new(&data, true, true, true, None);
+
+        let source_cpu = node_data
+            .event_data_immut("move_numa_source_cpu")
+            .last()
+            .copied()
+            .unwrap_or(0);
+
+        let target_cpu = node_data
+            .event_data_immut("move_numa_target_cpu")
+            .last()
+            .copied()
+            .unwrap_or(0);
 
         Sparkline::default()
             .data(&data)
@@ -679,9 +691,7 @@ impl<'a> App<'a> {
                         Line::from(if self.collect_uncore_freq {
                             "uncore ".to_string()
                                 + format_hz(
-                                    self.node_data
-                                        .get(&node)
-                                        .unwrap()
+                                    node_data
                                         .event_data_immut("uncore_freq")
                                         .last()
                                         .copied()
@@ -697,16 +707,18 @@ impl<'a> App<'a> {
                     .title_top(
                         Line::from(if self.localize {
                             format!(
-                                "Node {} avg {} max {} min {}",
+                                "Node {} avg {} max {} min {} src/cpu {} tgt/cpu {}",
                                 node,
                                 stats.avg.to_formatted_string(&self.locale),
                                 stats.max.to_formatted_string(&self.locale),
-                                stats.min.to_formatted_string(&self.locale)
+                                stats.min.to_formatted_string(&self.locale),
+                                source_cpu,
+                                target_cpu,
                             )
                         } else {
                             format!(
-                                "Node {} avg {} max {} min {}",
-                                node, stats.avg, stats.max, stats.min,
+                                "Node {} avg {} max {} min {} src/cpu {} tgt/cpu {}",
+                                node, stats.avg, stats.max, stats.min, source_cpu, target_cpu,
                             )
                         })
                         .style(self.theme().title_style())
@@ -1518,7 +1530,7 @@ impl<'a> App<'a> {
                                     self.active_event.event_name(),
                                     stats.avg.to_formatted_string(&self.locale),
                                     stats.max.to_formatted_string(&self.locale),
-                                    stats.min.to_formatted_string(&self.locale)
+                                    stats.min.to_formatted_string(&self.locale),
                                 )
                             } else {
                                 format!(
@@ -1639,7 +1651,7 @@ impl<'a> App<'a> {
                                     self.active_event.event_name(),
                                     stats.avg.to_formatted_string(&self.locale),
                                     stats.max.to_formatted_string(&self.locale),
-                                    stats.min.to_formatted_string(&self.locale)
+                                    stats.min.to_formatted_string(&self.locale),
                                 )
                             } else {
                                 format!(
@@ -2405,6 +2417,31 @@ impl<'a> App<'a> {
         cpu_data.add_event_data("hw_pressure", *hw_pressure);
     }
 
+    /// Handles NUMA node pu migrations.
+    pub fn on_sched_move_numa(&mut self, action: &SchedMoveNumaAction) {
+        let SchedMoveNumaAction {
+            source_cpu,
+            target_cpu,
+        } = action;
+
+        for cpu in self.topo.all_cpus.values() {
+            if cpu.id == *source_cpu as usize {
+                let node_data = self
+                    .node_data
+                    .entry(cpu.node_id)
+                    .or_insert(NodeData::new(cpu.node_id, self.max_cpu_events));
+                node_data.add_event_data("move_numa_source_cpu", cpu.id as u64);
+            }
+            if cpu.id == *target_cpu as usize {
+                let node_data = self
+                    .node_data
+                    .entry(cpu.node_id)
+                    .or_insert(NodeData::new(cpu.node_id, self.max_cpu_events));
+                node_data.add_event_data("move_numa_target_cpu", cpu.id as u64);
+            }
+        }
+    }
+
     /// Updates the bpf bpf sampling rate.
     pub fn update_bpf_sample_rate(&mut self, sample_rate: u32) {
         self.skel.maps.data_data.sample_rate = sample_rate;
@@ -2479,6 +2516,9 @@ impl<'a> App<'a> {
             }
             Action::SchedWaking(a) => {
                 self.on_sched_waking(a);
+            }
+            Action::SchedMoveNuma(a) => {
+                self.on_sched_move_numa(a);
             }
             Action::SoftIRQ(a) => {
                 self.on_softirq(a);
