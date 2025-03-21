@@ -1,0 +1,27 @@
+[
+	{
+		"name": "not stress-ng",
+		"matches": [
+			[{ "CommPrefixExclude": "stress-ng" }]
+		],
+		"kind": {
+			"Grouped": {
+				"cpus_range":  [5, 5],
+				"util_range": [0.01, 0.99],
+				"growth_algo": "RandomTopo",
+				"protected": true
+			}
+		}
+	},
+	{
+		"name": "stress-ng",
+		"matches": [
+			[]
+		],
+		"kind": {
+			"Open": {
+				"growth_algo": "RandomTopo"
+			}
+		}
+	}
+]

@@ -2044,7 +2044,7 @@ int match_layer(u32 layer_id, pid_t pid, const char *cgrp_path)
 				goto err;
 
 			match = &ands->matches[and_id];
-			if (!match_one(match, p, cgrp_path)) {
+			if (!(match_one(match, p, cgrp_path) == !match->exclude)) {
 				matched = false;
 				break;
 			}

@@ -1223,6 +1223,10 @@ impl<'a> Scheduler<'a> {
             for (or_i, or) in spec.matches.iter().enumerate() {
                 for (and_i, and) in or.iter().enumerate() {
                     let mt = &mut layer.matches[or_i].matches[and_i];
+
+                    // Rules are allowlist-based by default
+                    mt.exclude.write(false);
+
                     match and {
                         LayerMatch::CgroupPrefix(prefix) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_PREFIX as i32;
@@ -1232,8 +1236,18 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_COMM_PREFIX as i32;
                             copy_into_cstr(&mut mt.comm_prefix, prefix.as_str());
                         }
+                        LayerMatch::CommPrefixExclude(prefix) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_COMM_PREFIX as i32;
+                            mt.exclude.write(true);
+                            copy_into_cstr(&mut mt.comm_prefix, prefix.as_str());
+                        }
                         LayerMatch::PcommPrefix(prefix) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_PCOMM_PREFIX as i32;
+                            copy_into_cstr(&mut mt.pcomm_prefix, prefix.as_str());
+                        }
+                        LayerMatch::PcommPrefixExclude(prefix) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_PCOMM_PREFIX as i32;
+                            mt.exclude.write(true);
                             copy_into_cstr(&mut mt.pcomm_prefix, prefix.as_str());
                         }
                         LayerMatch::NiceAbove(nice) => {

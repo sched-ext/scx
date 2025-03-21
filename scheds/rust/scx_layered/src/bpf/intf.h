@@ -268,6 +268,7 @@ struct layer_match {
 	bool		is_kthread;
 	bool		used_gpu_tid;
 	bool		used_gpu_pid;
+	bool		exclude;
 };
 
 struct layer_match_ands {
