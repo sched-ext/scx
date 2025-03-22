@@ -27,7 +27,7 @@ static bool consume_dsq(u64 dsq_id)
 static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 {
 	struct cpdom_ctx *cpdomc_pick;
-	u64 nr_nbr, dsq_id;
+	s64 nr_nbr, dsq_id;
 	s64 nuance;
 
 	/*
@@ -63,7 +63,7 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 				break;
 
 			dsq_id = pick_any_bit(cpdomc->neighbor_bits[i], nuance);
-			if (dsq_id == -ENOENT)
+			if (dsq_id < 0)
 				continue;
 
 			cpdomc_pick = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
@@ -112,7 +112,7 @@ static bool try_to_steal_task(struct cpdom_ctx *cpdomc)
 static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 {
 	struct cpdom_ctx *cpdomc_pick;
-	u64 nr_nbr, dsq_id;
+	s64 nr_nbr, dsq_id;
 	s64 nuance;
 
 	/*
@@ -132,7 +132,7 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 				break;
 
 			dsq_id = pick_any_bit(cpdomc->neighbor_bits[i], nuance);
-			if (dsq_id == -ENOENT)
+			if (dsq_id < 0)
 				continue;
 
 			cpdomc_pick = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);

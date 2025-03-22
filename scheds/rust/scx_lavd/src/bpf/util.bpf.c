@@ -276,7 +276,7 @@ static bool use_full_cpus(void)
 	return (stat_cur->nr_active + LAVD_CC_NR_OVRFLW) >= nr_cpus_onln;
 }
 
-static u64 pick_any_bit(u64 bitmap, u64 nuance)
+static s64 pick_any_bit(u64 bitmap, u64 nuance)
 {
 	u64 i, pos;
 
