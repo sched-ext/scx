@@ -188,9 +188,7 @@ static bool consume_task(struct cpu_ctx *cpuc)
 
 	/*
 	 * Task migration across compute domains happens.
-	 * Update the statistics.
 	 */
 x_domain_migration_out:
-	cpuc->nr_x_migration++;
 	return true;
 }

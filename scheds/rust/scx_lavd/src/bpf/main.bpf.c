@@ -602,6 +602,11 @@ static void update_stat_for_running(struct task_struct *p,
 	if (is_perf_cri(taskc, stat_cur))
 		cpuc->nr_perf_cri++;
 
+	if (taskc->dsq_id != cpuc->cpdom_id) {
+		taskc->dsq_id = cpuc->cpdom_id;
+		cpuc->nr_x_migration++;
+	}
+
 	/*
 	 * It is clear there is no need to consider the suspended duration
 	 * while running a task, so reset the suspended duration to zero.
