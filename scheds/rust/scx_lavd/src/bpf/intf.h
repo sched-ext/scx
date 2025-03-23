@@ -112,6 +112,7 @@ struct task_ctx {
 	u64	wait_freq;		/* waiting frequency in a second */
 	u64	wake_freq;		/* waking-up frequency in a second */
 	u64	svc_time;		/* total CPU time consumed for this task */
+	u64	dsq_id;			/* DSQ id where a task run for statistics */
 
 	/*
 	 * Task deadline and time slice

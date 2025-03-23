@@ -16,7 +16,7 @@ struct pick_ctx {
 	s32 prev_cpu;
 	u64 wake_flags;
 	/*
-	 * Additional output arguments for find_idle_cpu().
+	 * Additional output arguments for pick_idle_cpu().
 	 */
 	u64 cpdom_id;
 	/*

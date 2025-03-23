@@ -392,7 +392,7 @@ static u64 calc_adj_runtime(u64 runtime)
 {
 	/*
 	 * Convert highly skewed runtime distribution to
-	 * mildlyskewed distribution.
+	 * mildly skewed distribution.
 	 */
 	u64 adj_runtime = log2_u64(runtime + 1);
 	return adj_runtime * adj_runtime;
@@ -507,11 +507,12 @@ static void advance_cur_logical_clk(struct task_struct *p)
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 vlc, clc, ret_clc;
 	u64 nr_queued, delta, new_clk;
+	int i;
 
 	vlc = READ_ONCE(p->scx.dsq_vtime);
 	clc = READ_ONCE(cur_logical_clk);
 
-	for (int i = 0; i < LAVD_MAX_RETRY; ++i) {
+	bpf_for(i, 0, LAVD_MAX_RETRY) {
 		/*
 		 * The clock should not go backward, so do nothing.
 		 */
@@ -600,6 +601,11 @@ static void update_stat_for_running(struct task_struct *p,
 
 	if (is_perf_cri(taskc, stat_cur))
 		cpuc->nr_perf_cri++;
+
+	if (taskc->dsq_id != cpuc->cpdom_id) {
+		taskc->dsq_id = cpuc->cpdom_id;
+		cpuc->nr_x_migration++;
+	}
 
 	/*
 	 * It is clear there is no need to consider the suspended duration
@@ -1716,9 +1722,9 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .init_task		= (void *)lavd_init_task,
 	       .init			= (void *)lavd_init,
 	       .exit			= (void *)lavd_exit,
-	       .flags			= SCX_OPS_ENQ_LAST |
-					  SCX_OPS_KEEP_BUILTIN_IDLE |
-					  SCX_OPS_ENQ_EXITING,
+	       .flags			= SCX_OPS_ENQ_EXITING |
+					  SCX_OPS_ENQ_LAST |
+					  SCX_OPS_KEEP_BUILTIN_IDLE,
 	       .timeout_ms		= 30000U,
 	       .name			= "lavd");
 
