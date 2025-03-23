@@ -392,7 +392,7 @@ static u64 calc_adj_runtime(u64 runtime)
 {
 	/*
 	 * Convert highly skewed runtime distribution to
-	 * mildlyskewed distribution.
+	 * mildly skewed distribution.
 	 */
 	u64 adj_runtime = log2_u64(runtime + 1);
 	return adj_runtime * adj_runtime;
@@ -507,11 +507,12 @@ static void advance_cur_logical_clk(struct task_struct *p)
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 vlc, clc, ret_clc;
 	u64 nr_queued, delta, new_clk;
+	int i;
 
 	vlc = READ_ONCE(p->scx.dsq_vtime);
 	clc = READ_ONCE(cur_logical_clk);
 
-	for (int i = 0; i < LAVD_MAX_RETRY; ++i) {
+	bpf_for(i, 0, LAVD_MAX_RETRY) {
 		/*
 		 * The clock should not go backward, so do nothing.
 		 */
