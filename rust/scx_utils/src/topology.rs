@@ -70,6 +70,7 @@
 //! to e.g. hotplug), a new Topology object should be created.
 
 use crate::misc::read_file_usize;
+use crate::misc::read_file_usize_vec;
 use crate::Cpumask;
 use anyhow::bail;
 use anyhow::Result;
@@ -167,6 +168,7 @@ pub struct Llc {
 #[derive(Debug, Clone)]
 pub struct Node {
     pub id: usize,
+    pub distance: Vec<usize>,
     pub llcs: BTreeMap<usize, Arc<Llc>>,
     /// Cpumask of all CPUs in this node.
     pub span: Cpumask,
@@ -663,6 +665,7 @@ fn create_default_node(
 
     let mut node = Node {
         id: 0,
+        distance: vec![],
         llcs: BTreeMap::new(),
         span: Cpumask::new(),
         #[cfg(feature = "gpu-topology")]
@@ -725,9 +728,16 @@ fn create_numa_nodes(
                 bail!("Failed to parse NUMA node ID {}", numa_str);
             }
         };
-
+        let distance = read_file_usize_vec(
+            Path::new(&format!(
+                "/sys/devices/system/node/node{}/distance",
+                node_id
+            )),
+            ' ',
+        )?;
         let mut node = Node {
             id: node_id,
+            distance,
             llcs: BTreeMap::new(),
             span: Cpumask::new(),
 
