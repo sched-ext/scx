@@ -235,11 +235,6 @@ static bool is_affinitized(const struct task_struct *p)
 	return p->nr_cpus_allowed != nr_cpu_ids;
 }
 
-static bool have_idle_cpus(const struct cpumask *idle_mask)
-{
-	return !bpf_cpumask_empty(idle_mask);
-}
-
 static bool is_lat_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
 {
 	return taskc->lat_cri >= stat_cur->avg_lat_cri;
@@ -281,7 +276,7 @@ static bool use_full_cpus(void)
 	return (stat_cur->nr_active + LAVD_CC_NR_OVRFLW) >= nr_cpus_onln;
 }
 
-static u64 pick_any_bit(u64 bitmap, u64 nuance)
+static s64 pick_any_bit(u64 bitmap, u64 nuance)
 {
 	u64 i, pos;
 
