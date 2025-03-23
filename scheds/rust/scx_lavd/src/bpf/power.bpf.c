@@ -221,40 +221,6 @@ unlock_out:
 	bpf_rcu_read_unlock();
 }
 
-static s32 find_cpu_in(const struct cpumask *src_mask, struct cpu_ctx *cpuc_cur)
-{
-	const volatile u16 *cpu_order = get_cpu_order();
-	const struct cpumask *online_mask;
-	struct bpf_cpumask *online_src_mask;
-	s32 cpu;
-	int i;
-
-	/*
-	 * online_src_mask = src_mask ∩ online_mask
-	 */
-	online_src_mask = cpuc_cur->tmp_l_mask;
-	if (!online_src_mask)
-		return -ENOENT;
-
-	online_mask = scx_bpf_get_online_cpumask();
-	bpf_cpumask_and(online_src_mask, src_mask, online_mask);
-	scx_bpf_put_cpumask(online_mask);
-
-	/*
-	 * Find a proper CPU in the preferred CPU order.
-	 */
-	bpf_for(i, 0, nr_cpu_ids) {
-		if (i >= LAVD_CPU_ID_MAX)
-			break;
-
-		cpu = cpu_order[i];
-		if (bpf_cpumask_test_cpu(cpu, cast_mask(online_src_mask)))
-			return cpu;
-	};
-
-	return -ENOENT;
-}
-
 static void update_power_mode_time(void)
 {
 	u64 now = scx_bpf_now();
