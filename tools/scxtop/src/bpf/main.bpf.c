@@ -841,7 +841,7 @@ int BPF_PROG(on_sched_exec, struct task_struct *p, u32 old_pid, struct linux_bin
 	if (!(event = try_reserve_event()))
 		return -ENOMEM;
 
-	event->type = FORK;
+	event->type = EXEC;
 	event->cpu = bpf_get_smp_processor_id();
 	event->ts = bpf_ktime_get_ns();
 	event->event.exec.old_pid = old_pid;
