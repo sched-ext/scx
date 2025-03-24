@@ -25,9 +25,9 @@ use crate::APP;
 use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
-    Action, CpuhpAction, ExecAction, ForkAction, GpuMemAction, HwPressureAction, IPIAction,
-    SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
-    TraceStartedAction, TraceStoppedAction,
+    Action, CpuhpAction, ExecAction, ExitAction, ForkAction, GpuMemAction, HwPressureAction,
+    IPIAction, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction,
+    SoftIRQAction, TraceStartedAction, TraceStoppedAction,
 };
 
 use anyhow::Result;
@@ -2157,6 +2157,7 @@ impl<'a> App<'a> {
             self.skel.progs.on_ipi_send_cpu.attach()?,
             self.skel.progs.on_sched_fork.attach()?,
             self.skel.progs.on_sched_exec.attach()?,
+            self.skel.progs.on_sched_exit.attach()?,
         ];
 
         Ok(())
@@ -2286,6 +2287,12 @@ impl<'a> App<'a> {
     fn on_exec(&mut self, action: &ExecAction) {
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_exec(action);
+        }
+    }
+
+    fn on_exit(&mut self, action: &ExitAction) {
+        if self.state == AppState::Tracing && action.ts > self.trace_start {
+            self.trace_manager.on_exit(action);
         }
     }
 
@@ -2492,6 +2499,9 @@ impl<'a> App<'a> {
             }
             Action::Exec(a) => {
                 self.on_exec(a);
+            }
+            Action::Exit(a) => {
+                self.on_exit(a);
             }
             Action::Fork(a) => {
                 self.on_fork(a);
