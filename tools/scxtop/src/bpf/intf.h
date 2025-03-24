@@ -33,6 +33,7 @@ enum event_type {
 	CPU_HP,
 	CPU_PERF_SET,
 	EXEC,
+	EXIT,
 	FORK,
 	GPU_MEM,
 	HW_PRESSURE,
@@ -87,6 +88,13 @@ struct softirq_event {
 	int		softirq_nr;
 };
 
+struct exit_event {
+	u32		pid;
+	u32		prio;
+	u32		tgid;
+	char		comm[MAX_COMM];
+};
+
 struct fork_event {
 	u32		parent_pid;
 	u32		child_pid;
@@ -132,6 +140,7 @@ struct bpf_event {
 	u64		ts;
 	u32		cpu;
 	union {
+		struct  exit_event exit;
 		struct  fork_event fork;
 		struct  exec_event exec;
 		struct  hw_pressure_event hwp;

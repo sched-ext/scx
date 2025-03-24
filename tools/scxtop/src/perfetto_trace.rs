@@ -17,8 +17,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::bpf_skel::types::bpf_event;
 use crate::edm::{ActionHandler, BpfEventHandler};
 use crate::{
-    Action, CpuhpAction, ExecAction, ForkAction, GpuMemAction, HwPressureAction, IPIAction,
-    SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
+    Action, CpuhpAction, ExecAction, ExitAction, ForkAction, GpuMemAction, HwPressureAction,
+    IPIAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
 };
 
 use crate::protos_gen::perfetto_scx::counter_descriptor::Unit::UNIT_COUNT;
@@ -27,9 +27,9 @@ use crate::protos_gen::perfetto_scx::track_event::Type as TrackEventType;
 use crate::protos_gen::perfetto_scx::{
     CounterDescriptor, CpuhpEnterFtraceEvent, FtraceEvent, FtraceEventBundle,
     GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent, SchedProcessExecFtraceEvent,
-    SchedProcessForkFtraceEvent, SchedSwitchFtraceEvent, SchedWakeupFtraceEvent,
-    SchedWakingFtraceEvent, SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent, Trace, TracePacket,
-    TrackDescriptor, TrackEvent,
+    SchedProcessExitFtraceEvent, SchedProcessForkFtraceEvent, SchedSwitchFtraceEvent,
+    SchedWakeupFtraceEvent, SchedWakingFtraceEvent, SoftirqEntryFtraceEvent,
+    SoftirqExitFtraceEvent, Trace, TracePacket, TrackDescriptor, TrackEvent,
 };
 
 /// Handler for perfetto traces. For details on data flow in perfetto see:
@@ -235,6 +235,33 @@ impl PerfettoTraceManager {
         self.clear();
         self.trace_id += 1;
         Ok(())
+    }
+
+    pub fn on_exit(&mut self, action: &ExitAction) {
+        let ExitAction {
+            ts,
+            cpu,
+            pid,
+            tgid,
+            prio,
+            comm,
+        } = action;
+
+        self.ftrace_events.entry(*cpu).or_default().push({
+            let mut ftrace_event = FtraceEvent::new();
+            let mut exit_event = SchedProcessExitFtraceEvent::new();
+
+            exit_event.set_comm(comm.to_string());
+            exit_event.set_pid((*pid).try_into().unwrap());
+            exit_event.set_tgid((*tgid).try_into().unwrap());
+            exit_event.set_prio((*prio).try_into().unwrap());
+
+            ftrace_event.set_timestamp(*ts);
+            ftrace_event.set_sched_process_exit(exit_event);
+            ftrace_event.set_pid(*pid);
+
+            ftrace_event
+        });
     }
 
     pub fn on_fork(&mut self, action: &ForkAction) {
@@ -547,6 +574,9 @@ impl ActionHandler for PerfettoTraceManager {
             }
             Action::GpuMem(a) => {
                 self.on_gpu_mem(a);
+            }
+            Action::Exit(a) => {
+                self.on_exit(a);
             }
             Action::Cpuhp(a) => {
                 self.on_cpu_hp(a);

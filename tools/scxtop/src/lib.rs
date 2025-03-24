@@ -110,6 +110,16 @@ pub struct SchedCpuPerfSetAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ExitAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub pid: u32,
+    pub tgid: u32,
+    pub prio: u32,
+    pub comm: SsoString,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ForkAction {
     pub ts: u64,
     pub cpu: u32,
@@ -228,6 +238,7 @@ pub enum Action {
     Enter,
     Event,
     Exec(ExecAction),
+    Exit(ExitAction),
     Fork(ForkAction),
     GpuMem(GpuMemAction),
     Help,
@@ -362,13 +373,30 @@ impl TryFrom<&bpf_event> for Action {
                     comm: comm.into(),
                 }))
             }
-            #[allow(non_upper_case_globals)]
             bpf_intf::event_type_EXEC => Ok(Action::Exec(ExecAction {
                 ts: event.ts,
                 cpu: event.cpu,
                 old_pid: unsafe { event.event.exec.old_pid },
                 pid: unsafe { event.event.exec.pid },
             })),
+            bpf_intf::event_type_EXIT => {
+                let exit = unsafe { &event.event.exit };
+                let comm = unsafe {
+                    std::str::from_utf8(std::slice::from_raw_parts(
+                        exit.comm.as_ptr() as *const u8,
+                        exit.comm.len(),
+                    ))
+                    .unwrap()
+                };
+                Ok(Action::Exit(ExitAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    pid: exit.pid,
+                    tgid: exit.tgid,
+                    prio: exit.prio,
+                    comm: comm.into(),
+                }))
+            }
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_FORK => {
                 let fork = unsafe { &event.event.fork };

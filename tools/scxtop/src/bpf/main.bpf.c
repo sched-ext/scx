@@ -782,6 +782,30 @@ int BPF_PROG(on_ipi_send_cpu, u32 cpu, void *callsite, void *callback)
 	return 0;
 }
 
+SEC("tp_btf/sched_process_exit")
+int BPF_PROG(on_sched_exit, struct task_struct *task)
+{
+  struct bpf_event *event;
+
+  if (!enable_bpf_events || !should_sample())
+    return 0;
+
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+	event->type = EXIT;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = bpf_ktime_get_ns();
+	event->event.exit.pid = BPF_CORE_READ(task, pid);
+	event->event.exit.tgid = BPF_CORE_READ(task, tgid);
+	event->event.exit.prio = BPF_CORE_READ(task, prio);
+	__builtin_memcpy_inline(&event->event.exit.comm, &task->comm, MAX_COMM);
+
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
 SEC("tp_btf/sched_process_fork")
 int BPF_PROG(on_sched_fork, struct task_struct *parent, struct task_struct *child)
 {
