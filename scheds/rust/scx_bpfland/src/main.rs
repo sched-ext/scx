@@ -281,7 +281,8 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.bpfland_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
-            | *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE;
+            | *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE
+            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         info!(
             "scheduler flags: {:#x}",
             skel.struct_ops.bpfland_ops_mut().flags
