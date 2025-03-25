@@ -299,6 +299,8 @@ macro_rules! scx_ops_open {
     ($builder: expr, $obj_ref: expr, $ops: ident) => { 'block: {
         scx_utils::paste! {
 	    scx_utils::unwrap_or_break!(scx_utils::compat::check_min_requirements(), 'block);
+            use ::anyhow::Context;
+            use ::libbpf_rs::skel::SkelBuilder;
 
             let mut skel = match $builder.open($obj_ref).context("Failed to open BPF program") {
                 Ok(val) => val,
@@ -324,7 +326,7 @@ macro_rules! scx_ops_open {
 
             import_enums!(skel);
 
-            let result : Result<OpenBpfSkel<'_>, anyhow::Error> = Ok(skel);
+            let result = ::anyhow::Result::Ok(skel);
 
             result
         }
@@ -340,6 +342,9 @@ macro_rules! scx_ops_open {
 macro_rules! scx_ops_load {
     ($skel: expr, $ops: ident, $uei: ident) => { 'block: {
         scx_utils::paste! {
+            use ::anyhow::Context;
+            use ::libbpf_rs::skel::OpenSkel;
+
             scx_utils::uei_set_size!($skel, $ops, $uei);
             $skel.load().context("Failed to load BPF program")
         }
@@ -351,6 +356,9 @@ macro_rules! scx_ops_load {
 #[macro_export]
 macro_rules! scx_ops_attach {
     ($skel: expr, $ops: ident) => { 'block: {
+        use ::anyhow::Context;
+        use ::libbpf_rs::skel::Skel;
+
         if scx_utils::compat::is_sched_ext_enabled().unwrap_or(false) {
             break 'block Err(anyhow::anyhow!(
                 "another sched_ext scheduler is already running"
