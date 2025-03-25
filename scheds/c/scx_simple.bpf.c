@@ -131,6 +131,11 @@ void BPF_STRUCT_OPS(simple_enable, struct task_struct *p)
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(simple_init)
 {
+	if (SCX_DSQ_FLAG_BUILTIN == 0)
+		scx_bpf_error("invalid SCX_DSQ_FLAG_BUILTIN");
+	if (SCX_DSQ_LOCAL == 2)
+		scx_bpf_error("invalid SCX_DSQ_LOCAL");
+
 	return scx_bpf_create_dsq(SHARED_DSQ, -1);
 }
 
