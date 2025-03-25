@@ -23,9 +23,6 @@ use anyhow::Result;
 
 use plain::Plain;
 
-use libbpf_rs::skel::OpenSkel;
-use libbpf_rs::skel::Skel;
-use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 
