@@ -26,7 +26,6 @@ use libbpf_rs::OpenObject;
 use log::{debug, info, warn};
 use scx_stats::prelude::*;
 use scx_utils::build_id;
-use scx_utils::import_enums;
 use scx_utils::init_libbpf_logging;
 use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
 use scx_utils::scx_enums;

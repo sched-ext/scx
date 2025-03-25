@@ -36,7 +36,6 @@ use log::trace;
 use maplit::btreemap;
 use maplit::hashmap;
 use scx_utils::compat;
-use scx_utils::import_enums;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
 use scx_utils::scx_enums;

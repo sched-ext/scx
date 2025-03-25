@@ -322,7 +322,7 @@ macro_rules! scx_ops_open {
                 }
             };
 
-            import_enums!(skel);
+            $crate::import_enums!(skel);
 
             let result : Result<OpenBpfSkel<'_>, anyhow::Error> = Ok(skel);
 

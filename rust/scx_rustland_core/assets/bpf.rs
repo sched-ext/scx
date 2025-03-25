@@ -35,7 +35,6 @@ use libc::{pthread_self, pthread_setschedparam, sched_param};
 use libc::timespec;
 
 use scx_utils::compat;
-use scx_utils::import_enums;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
