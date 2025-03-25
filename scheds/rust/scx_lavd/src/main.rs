@@ -643,10 +643,11 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_max_ns = opts.slice_max_us * 1000;
         skel.maps.rodata_data.slice_min_ns = opts.slice_min_us * 1000;
 
-        match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
-            0 => info!("Kernel does not support queued wakeup optimization."),
-            v => skel.struct_ops.lavd_ops_mut().flags |= v,
-        }
+        skel.struct_ops.lavd_ops_mut().flags = *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
+            | *compat::SCX_OPS_ENQ_EXITING
+            | *compat::SCX_OPS_ENQ_LAST
+            | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
+            | *compat::SCX_OPS_KEEP_BUILTIN_IDLE;
     }
 
     fn get_msg_seq_id() -> u64 {
