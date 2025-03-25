@@ -29,7 +29,6 @@ use log::warn;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
-use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;

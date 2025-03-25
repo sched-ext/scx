@@ -112,7 +112,7 @@ def gen_enums_rs():
         f.write("macro_rules! import_enums {\n")
         f.write("    ($skel: ident) => { 'block : {\n")
         for _, symbol in enums:
-            f.write("        $skel.maps.rodata_data.{} = scx_enums.{};\n".format(localvar(symbol), symbol))
+            f.write("        $skel.maps.rodata_data.{} = $crate::scx_enums.{};\n".format(localvar(symbol), symbol))
         f.write("    }};\n")
 
         f.write("}\n")
