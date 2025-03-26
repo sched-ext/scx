@@ -32,6 +32,7 @@ use scx_stats::prelude::*;
 use scx_utils::autopower::{fetch_power_profile, PowerProfile};
 use scx_utils::build_id;
 use scx_utils::compat;
+use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -133,6 +134,14 @@ struct Opts {
     /// making the task ordering closer to a FIFO).
     #[clap(short = 'l', long, allow_hyphen_values = true, default_value = "20000")]
     slice_us_lag: i64,
+
+    /// Set CPU idle QoS resume latency in microseconds (-1 = disabled).
+    ///
+    /// Setting a lower latency value makes CPUs less likely to enter deeper idle states, enhancing
+    /// performance at the cost of higher power consumption. Alternatively, increasing the latency
+    /// value may reduce performance, but also improve power efficiency.
+    #[clap(short = 'I', long, allow_hyphen_values = true, default_value = "-1")]
+    idle_resume_us: i64,
 
     /// Disable preemption.
     ///
@@ -251,6 +260,20 @@ impl<'a> Scheduler<'a> {
                 "SMT off"
             }
         );
+
+        if opts.idle_resume_us >= 0 {
+            if !cpu_idle_resume_latency_supported() {
+                warn!("idle resume latency not supported");
+            } else {
+                info!("Setting idle QoS to {} us", opts.idle_resume_us);
+                for cpu in topo.all_cpus.values() {
+                    update_cpu_idle_resume_latency(
+                        cpu.id,
+                        opts.idle_resume_us.try_into().unwrap(),
+                    )?;
+                }
+            }
+        }
 
         // Initialize BPF connector.
         let mut skel_builder = BpfSkelBuilder::default();
@@ -605,6 +628,19 @@ impl<'a> Scheduler<'a> {
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
         info!("Unregister {} scheduler", SCHEDULER_NAME);
+
+        // Restore default CPU idle QoS resume latency.
+        if self.opts.idle_resume_us >= 0 {
+            if cpu_idle_resume_latency_supported() {
+                let default_latency = 5000;
+                info!("Restore idle QoS to {} us", default_latency);
+
+                let topo = Topology::new().unwrap();
+                for cpu in topo.all_cpus.values() {
+                    update_cpu_idle_resume_latency(cpu.id, default_latency).unwrap();
+                }
+            }
+        }
     }
 }
 
