@@ -21,12 +21,13 @@ use crate::{
     IPIAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
 };
 
+use crate::protos_gen::perfetto_scx::clock_snapshot::Clock;
 use crate::protos_gen::perfetto_scx::counter_descriptor::Unit::UNIT_COUNT;
 use crate::protos_gen::perfetto_scx::trace_packet::Data::TrackDescriptor as DataTrackDescriptor;
 use crate::protos_gen::perfetto_scx::track_event::Type as TrackEventType;
 use crate::protos_gen::perfetto_scx::{
-    CounterDescriptor, CpuhpEnterFtraceEvent, FtraceEvent, FtraceEventBundle,
-    GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent, SchedProcessExecFtraceEvent,
+    BuiltinClock, ClockSnapshot, CounterDescriptor, CpuhpEnterFtraceEvent, FtraceEvent,
+    FtraceEventBundle, GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent, SchedProcessExecFtraceEvent,
     SchedProcessExitFtraceEvent, SchedProcessForkFtraceEvent, SchedSwitchFtraceEvent,
     SchedWakeupFtraceEvent, SchedWakingFtraceEvent, SoftirqEntryFtraceEvent,
     SoftirqExitFtraceEvent, Trace, TracePacket, TrackDescriptor, TrackEvent,
@@ -86,6 +87,7 @@ impl PerfettoTraceManager {
     pub fn start(&mut self) -> Result<()> {
         self.clear();
         self.trace = Trace::new();
+        self.snapshot_clocks();
         Ok(())
     }
 
@@ -139,6 +141,51 @@ impl PerfettoTraceManager {
         }
 
         desc_map
+    }
+
+    fn get_clock_value(&mut self, clock_id: libc::c_int) -> u64 {
+        let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+        if unsafe { libc::clock_gettime(clock_id, &mut ts) } != 0 {
+            return 0;
+        }
+        (ts.tv_sec as u64 * 1_000_000_000) + ts.tv_nsec as u64
+    }
+
+    fn snapshot_clocks(&mut self) {
+        let mut clock_snapshot = ClockSnapshot::new();
+        let mut clock = Clock::new();
+        clock.set_clock_id(BuiltinClock::BUILTIN_CLOCK_MONOTONIC as u32);
+        clock.set_timestamp(self.get_clock_value(libc::CLOCK_MONOTONIC));
+        clock_snapshot.clocks.push(clock);
+
+        let mut clock = Clock::default();
+        clock.set_clock_id(BuiltinClock::BUILTIN_CLOCK_BOOTTIME as u32);
+        clock.set_timestamp(self.get_clock_value(libc::CLOCK_BOOTTIME));
+        clock_snapshot.clocks.push(clock);
+
+        let mut clock = Clock::default();
+        clock.set_clock_id(BuiltinClock::BUILTIN_CLOCK_REALTIME as u32);
+        clock.set_timestamp(self.get_clock_value(libc::CLOCK_REALTIME));
+        clock_snapshot.clocks.push(clock);
+
+        let mut clock = Clock::default();
+        clock.set_clock_id(BuiltinClock::BUILTIN_CLOCK_REALTIME_COARSE as u32);
+        clock.set_timestamp(self.get_clock_value(libc::CLOCK_REALTIME_COARSE));
+        clock_snapshot.clocks.push(clock);
+
+        let mut clock = Clock::default();
+        clock.set_clock_id(BuiltinClock::BUILTIN_CLOCK_MONOTONIC_COARSE as u32);
+        clock.set_timestamp(self.get_clock_value(libc::CLOCK_MONOTONIC_COARSE));
+        clock_snapshot.clocks.push(clock);
+
+        let mut clock = Clock::default();
+        clock.set_clock_id(BuiltinClock::BUILTIN_CLOCK_MONOTONIC_RAW as u32);
+        clock.set_timestamp(self.get_clock_value(libc::CLOCK_MONOTONIC_RAW));
+        clock_snapshot.clocks.push(clock);
+
+        let mut packet = TracePacket::new();
+        packet.set_clock_snapshot(clock_snapshot);
+        self.trace.packet.push(packet);
     }
 
     /// Stops the trace and writes to configured output file.
