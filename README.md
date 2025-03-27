@@ -124,7 +124,7 @@ repo](https://mesonbuild.com/Quick-guide.html#installation-from-source) and call
 - `clang`: >=16 required, >=17 recommended
 - `libbpf`: >=1.2.2 required, >=1.3 recommended (`RESIZE_ARRAY` support is
   new in 1.3). It's preferred to link statically against the source from the libbpf git repo, which is cloned during setup.
-- Rust toolchain: >=1.72
+- Rust toolchain: >=1.81
 - `libelf`, `libz`, `libzstd` if linking against staic `libbpf.a`
 - `bpftool` By default this is cloned and built as part of the default build process. Alternatively it's usually available in `linux-tools-common`.
 
