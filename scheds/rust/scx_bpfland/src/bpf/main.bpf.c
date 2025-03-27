@@ -215,23 +215,6 @@ static bool is_queued(const struct task_struct *p)
 }
 
 /*
- * Return true if @cpu is in a full-idle physical core,
- * false otherwise.
- */
-static bool is_fully_idle(s32 cpu)
-{
-	const struct cpumask *idle_smtmask;
-	int node = __COMPAT_scx_bpf_cpu_node(cpu);
-	bool is_idle;
-
-	idle_smtmask = __COMPAT_scx_bpf_get_idle_smtmask_node(node);
-	is_idle = bpf_cpumask_test_cpu(cpu, idle_smtmask);
-	scx_bpf_put_cpumask(idle_smtmask);
-
-	return is_idle;
-}
-
-/*
  * Allocate/re-allocate a new cpumask.
  */
 static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
@@ -252,9 +235,9 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 /*
  * Return the total amount of tasks that are currently waiting to be scheduled.
  */
-static u64 nr_tasks_waiting(int node)
+static u64 nr_tasks_waiting(s32 cpu)
 {
-	return scx_bpf_dsq_nr_queued(node) + 1;
+	return scx_bpf_dsq_nr_queued(cpu) + 1;
 }
 
 /*
@@ -388,7 +371,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	const struct cpumask *primary, *p_mask, *l2_mask, *l3_mask;
 	struct task_struct *current = (void *)bpf_get_current_task_btf();
 	struct task_ctx *tctx;
-	bool is_prev_llc_affine = false;
 	int node;
 	s32 cpu;
 
@@ -399,6 +381,11 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return -ENOENT;
+
+	/*
+	 * Refresh task domain based on the previously used cpu.
+	 */
+	task_set_domain(p, prev_cpu, p->cpus_ptr);
 
 	/*
 	 * Task's scheduling domains.
@@ -465,13 +452,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		}
 
 		/*
-		 * Migrate the wakee to the same domain as the waker in case of
-		 * a sync wakeup.
-		 */
-		if (!share_llc)
-			task_set_domain(p, cpu, p->cpus_ptr);
-
-		/*
 		 * If the waker's L3 domain is not saturated attempt to migrate
 		 * the wakee on the same CPU as the waker (since it's going to
 		 * block and release the current CPU).
@@ -486,12 +466,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	}
 
 	/*
-	 * Check if the previously used CPU is still in the L3 task domain. If
-	 * not, we may want to move the task back to its original L3 domain.
-	 */
-	is_prev_llc_affine = bpf_cpumask_test_cpu(prev_cpu, l3_mask);
-
-	/*
 	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
 	 */
 	if (smt_enabled) {
@@ -499,8 +473,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 * If the task can still run on the previously used CPU and
 		 * it's a full-idle core, keep using it.
 		 */
-		if (is_prev_llc_affine &&
-		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
+		if (bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			*is_idle = true;
@@ -530,20 +503,11 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		}
 
 		/*
-		 * Search for any other full-idle core in the primary domain.
+		 * Search for any full-idle CPU in the same node and
+		 * primary domain.
 		 */
 		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(p_mask, node,
-					SCX_PICK_IDLE_CORE);
-		if (cpu >= 0) {
-			*is_idle = true;
-			goto out_put_cpumask;
-		}
-
-		/*
-		 * Search for any full-idle core usable by the task.
-		 */
-		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(p->cpus_ptr, node,
-					SCX_PICK_IDLE_CORE);
+					SCX_PICK_IDLE_CORE | __COMPAT_SCX_PICK_IDLE_IN_NODE);
 		if (cpu >= 0) {
 			*is_idle = true;
 			goto out_put_cpumask;
@@ -554,8 +518,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * If a full-idle core can't be found (or if this is not an SMT system)
 	 * try to re-use the same CPU, even if it's not in a full-idle core.
 	 */
-	if (is_prev_llc_affine &&
-	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu = prev_cpu;
 		*is_idle = true;
 		goto out_put_cpumask;
@@ -601,23 +564,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		goto out_put_cpumask;
 	}
 
-	/*
-	 * We couldn't find any idle CPU, return the previous CPU if it is in
-	 * the task's L3 domain.
-	 */
-	if (is_prev_llc_affine) {
-		cpu = prev_cpu;
-		goto out_put_cpumask;
-	}
-
-	/*
-	 * Otherwise, return a random CPU in the task's L3 domain (if
-	 * available).
-	 */
-	cpu = bpf_cpumask_any_distribute(l3_mask);
-	if (cpu >= nr_cpu_ids)
-		cpu = prev_cpu;
-
 out_put_cpumask:
 	scx_bpf_put_cpumask(idle_cpumask);
 	scx_bpf_put_cpumask(idle_smtmask);
@@ -646,221 +592,13 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
-		int node = __COMPAT_scx_bpf_cpu_node(cpu);
-
-		if (local_pcpu || !scx_bpf_dsq_nr_queued(node)) {
+		if (local_pcpu || !scx_bpf_dsq_nr_queued(cpu)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, 0);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		}
 	}
 
 	return cpu;
-}
-
-/*
- * Try to wake up an idle CPU that can immediately process the task.
- *
- * Return true if a CPU has been kicked, false otherwise.
- */
-static bool kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tctx,
-			  s32 prev_cpu, bool idle_smt)
-{
-	const struct cpumask *mask;
-	u64 flags = idle_smt ? SCX_PICK_IDLE_CORE : 0;
-	s32 cpu = scx_bpf_task_cpu(p);
-	int node = __COMPAT_scx_bpf_cpu_node(cpu);
-
-	/*
-	 * No need to look for full-idle SMT cores if SMT is disabled.
-	 */
-	if (idle_smt && !smt_enabled)
-		return false;
-
-	/*
-	 * Try to reuse the same CPU if idle.
-	 */
-	if (!idle_smt || (idle_smt && is_fully_idle(prev_cpu))) {
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
-			return true;
-		}
-	}
-
-	/*
-	 * Look for any idle CPU usable by the task that can immediately
-	 * execute the task, prioritizing SMT isolation and cache locality.
-	 */
-	mask = cast_mask(tctx->l2_cpumask);
-	if (mask) {
-		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(mask, node,
-					flags | __COMPAT_SCX_PICK_IDLE_IN_NODE);
-		if (cpu >= 0) {
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			return true;
-		}
-	}
-	mask = cast_mask(tctx->l3_cpumask);
-	if (mask) {
-		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(mask, node,
-					flags | __COMPAT_SCX_PICK_IDLE_IN_NODE);
-		if (cpu >= 0) {
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			return true;
-		}
-	}
-	mask = cast_mask(tctx->cpumask);
-	if (mask) {
-		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(mask, node,
-					flags | __COMPAT_SCX_PICK_IDLE_IN_NODE);
-		if (cpu >= 0) {
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			return true;
-		}
-	}
-
-	return false;
-}
-
-/*
- * Attempt to dispatch a task directly to its assigned CPU.
- *
- * Return true if the task is dispatched, false otherwise.
- */
-static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
-				s32 prev_cpu, u64 slice, u64 enq_flags)
-{
-	/*
-	 * If a task has been re-enqueued because its assigned CPU has been
-	 * taken by a higher priority scheduling class, force it to follow
-	 * the regular scheduling path and give it a chance to run on a
-	 * different CPU.
-	 *
-	 * However, if the task can only run on a single CPU, re-scheduling
-	 * is unnecessary, as it can only be dispatched on that specific
-	 * CPU. In this case, dispatch it immediately to maximize its
-	 * chances of reclaiming the CPU quickly and avoiding stalls.
-	 *
-	 * This approach will be effective once dl_server support is added
-	 * to the sched_ext core.
-	 */
-	if (enq_flags & SCX_ENQ_REENQ) {
-		if (p->nr_cpus_allowed == 1) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
-			__sync_fetch_and_add(&nr_kthread_dispatches, 1);
-
-			return true;
-		}
-		return false;
-	}
-
-	/*
-	 * If local_kthread is specified dispatch per-CPU kthreads
-	 * directly on their assigned CPU.
-	 */
-	if (local_kthreads && is_kthread(p)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
-		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
-
-		return true;
-	}
-
-	/*
-	 * If ops.select_cpu() has been skipped, try direct dispatch.
-	 */
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
-		int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
-		struct rq *rq = scx_bpf_cpu_rq(prev_cpu);
-
-		/*
-		 * Allow to preempt the task currently running on the
-		 * assigned CPU if our deadline is earlier.
-		 */
-		if (!no_preempt && tctx->deadline < rq->curr->scx.dsq_vtime) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
-					   slice, enq_flags | SCX_ENQ_PREEMPT);
-			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-
-			return true;
-		}
-
-		/*
-		 * If local_pcpu is enabled always dispatch tasks that can only run
-		 * on one CPU directly.
-		 *
-		 * This can help to improve I/O workloads (like large parallel
-		 * builds).
-		 */
-		if (local_pcpu && p->nr_cpus_allowed == 1) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, enq_flags);
-			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-
-			return true;
-		}
-
-		/*
-		 * If the local DSQ and the shared DSQ have no task waiting
-		 * and the CPU is still a full-idle SMT core, perform a
-		 * direct dispatch.
-		 */
-		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
-		    (local_pcpu || !scx_bpf_dsq_nr_queued(node)) &&
-		    is_fully_idle(prev_cpu)) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
-					   slice_max, enq_flags);
-			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-
-			return true;
-		}
-	}
-
-	/*
-	 * Direct dispatch not possible, follow the regular scheduling
-	 * path.
-	 */
-	return false;
-}
-
-/*
- * Dispatch all the other tasks that were not dispatched directly in
- * select_cpu().
- */
-void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
-{
-	const struct cpumask *idle_cpumask;
-	struct task_ctx *tctx;
-	u64 slice, deadline;
-	s32 prev_cpu = scx_bpf_task_cpu(p);
-	int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
-
-	/*
-	 * Dispatch regular tasks to the shared DSQ.
-	 */
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-	deadline = task_deadline(p, tctx);
-	slice = CLAMP(slice_max / nr_tasks_waiting(node), slice_min, slice_max);
-
-	/*
-	 * Try to dispatch the task directly, if possible.
-	 */
-	if (try_direct_dispatch(p, tctx, prev_cpu, slice, enq_flags))
-		return;
-
-	scx_bpf_dsq_insert_vtime(p, node, slice, deadline, enq_flags);
-	__sync_fetch_and_add(&nr_shared_dispatches, 1);
-
-	/*
-	 * If there are idle CPUs in the system try to proactively wake up
-	 * one, so that it can immediately execute the task in case its
-	 * current CPU is busy (always prioritizing full-idle SMT cores
-	 * first, if present).
-	 */
-	idle_cpumask = __COMPAT_scx_bpf_get_idle_cpumask_node(node);
-	if (!bpf_cpumask_empty(idle_cpumask))
-		if (!kick_idle_cpu(p, tctx, prev_cpu, true))
-			kick_idle_cpu(p, tctx, prev_cpu, false);
-	scx_bpf_put_cpumask(idle_cpumask);
 }
 
 static bool keep_running(const struct task_struct *p, s32 cpu)
@@ -910,15 +648,113 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	return ret;
 }
 
+/*
+ * Try to migrate a task on a different CPU.
+ *
+ * Return a CPU where the task can be migrated.
+ */
+static s32 try_migrate(const struct task_struct *p, const struct task_ctx *tctx,
+		       s32 prev_cpu, bool idle_smt)
+{
+	const struct cpumask *mask;
+	u64 flags = idle_smt ? SCX_PICK_IDLE_CORE : 0;
+	int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
+	s32 cpu;
+
+	/*
+	 * No need to look for full-idle SMT cores if SMT is disabled.
+	 */
+	if (idle_smt && !smt_enabled)
+		return -ENOENT;
+
+	/*
+	 * Don't try to migrate if the task can only run on one CPU.
+	 */
+	if (p->nr_cpus_allowed == 1)
+		return prev_cpu;
+
+	/*
+	 * Try to reuse the same CPU if idle.
+	 */
+	if (keep_running(p, prev_cpu))
+		return prev_cpu;
+
+	/*
+	 * Look for any idle CPU usable by the task that can immediately
+	 * execute the task, prioritizing SMT isolation and cache locality.
+	 */
+	mask = cast_mask(tctx->l2_cpumask);
+	if (mask) {
+		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(mask,
+					node, flags | __COMPAT_SCX_PICK_IDLE_IN_NODE);
+		if (cpu >= 0)
+			return cpu;
+	}
+
+	mask = cast_mask(tctx->l3_cpumask);
+	if (mask) {
+		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(mask,
+					node, flags | __COMPAT_SCX_PICK_IDLE_IN_NODE);
+		if (cpu >= 0)
+			return cpu;
+	}
+
+	mask = cast_mask(tctx->cpumask);
+	if (mask) {
+		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(mask,
+					node, flags | __COMPAT_SCX_PICK_IDLE_IN_NODE);
+		if (cpu >= 0)
+			return cpu;
+	}
+
+	return -EBUSY;
+}
+
+/*
+ * Dispatch all the other tasks that were not dispatched directly in
+ * select_cpu().
+ */
+void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
+{
+	s32 prev_cpu = scx_bpf_task_cpu(p), cpu = -ENOENT;
+	struct task_ctx *tctx;
+	u64 slice, deadline;
+
+	/*
+	 * Dispatch regular tasks to the shared DSQ.
+	 */
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	/*
+	 * Allow tasks to migrate from ops.enqueue() if ops.select_cpu()
+	 * was skipped and the current CPU is busy.
+	 */
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
+		cpu = try_migrate(p, tctx, prev_cpu, true);
+		if (cpu < 0)
+			cpu = try_migrate(p, tctx, prev_cpu, false);
+	}
+	if (cpu < 0)
+		cpu = prev_cpu;
+
+	deadline = task_deadline(p, tctx);
+	slice = CLAMP(slice_max / nr_tasks_waiting(cpu), slice_min, slice_max);
+
+	scx_bpf_dsq_insert_vtime(p, cpu, slice, deadline, enq_flags);
+	__sync_fetch_and_add(&nr_shared_dispatches, 1);
+
+	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 {
-	int node = __COMPAT_scx_bpf_cpu_node(cpu);
-
 	/*
 	 * Consume regular tasks from the shared DSQ, transferring them to the
 	 * local CPU DSQ.
 	 */
-	if (scx_bpf_dsq_move_to_local(node))
+	if (scx_bpf_dsq_move_to_local(cpu))
 		return;
 
 	/*
@@ -1256,7 +1092,7 @@ static void init_cpuperf_target(void)
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 {
-	int err, node;
+	int err, cpu;
 
 	/* Initialize amount of online and possible CPUs */
 	nr_online_cpus = get_nr_online_cpus();
@@ -1268,10 +1104,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	/*
 	 * Create the global shared DSQ.
 	 */
-	bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
-		err = scx_bpf_create_dsq(node, node);
+	bpf_for(cpu, 0, nr_cpu_ids) {
+		err = scx_bpf_create_dsq(cpu, __COMPAT_scx_bpf_cpu_node(cpu));
 		if (err) {
-			scx_bpf_error("failed to create DSQ %d: %d", node, err);
+			scx_bpf_error("failed to create DSQ %d: %d", cpu, err);
 			return err;
 		}
 	}
