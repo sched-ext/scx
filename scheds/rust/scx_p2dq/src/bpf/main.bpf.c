@@ -739,7 +739,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	struct task_ctx *taskc;
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
-	u64 used, last_dsq_slice_ns;
+	u64 used, scaled_used, last_dsq_slice_ns;
 	u64 now = scx_bpf_now();
 
 	if (!(taskc = lookup_task_ctx(p)))
@@ -759,12 +759,13 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	}
 
 	used = now - taskc->last_run_at;
-	p->scx.dsq_vtime += scale_by_task_weight_inverse(p, used);
+	scaled_used = scale_by_task_weight_inverse(p, used);
+	p->scx.dsq_vtime += scaled_used;
 	taskc->last_dsq_id = taskc->dsq_id;
 	taskc->last_dsq_index = dsq_index;
-	__sync_fetch_and_add(&llcx->vtime, used);
-	__sync_fetch_and_add(&llcx->dsq_max_vtime[dsq_index], used);
-	__sync_fetch_and_add(&llcx->dsq_load[dsq_index], used);
+	__sync_fetch_and_add(&llcx->vtime, scaled_used);
+	__sync_fetch_and_add(&llcx->dsq_max_vtime[dsq_index], scaled_used);
+	__sync_fetch_and_add(&llcx->dsq_load[dsq_index], scaled_used);
 
 	// On stopping determine if the task can move to a longer DSQ by
 	// comparing the used time to the scaled DSQ slice.
