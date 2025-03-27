@@ -118,6 +118,8 @@ pub struct Cpu {
     pub base_freq: usize,
     /// The best-effort guessting of cpu_capacity scaled to 1024
     pub cpu_capacity: usize,
+    /// CPU idle resume latency
+    pub pm_qos_resume_latency_us: usize,
     pub trans_lat_ns: usize,
     pub l2_id: usize,
     pub l3_id: usize,
@@ -461,6 +463,11 @@ fn create_insert_cpu(
     let rcap = read_file_usize(&cap_path).unwrap_or(max_rcap);
     let cpu_capacity = (rcap * 1024) / max_rcap;
 
+    // Power management
+    let power_path = cpu_path.join("power");
+    let pm_qos_resume_latency_us =
+        read_file_usize(&power_path.join("pm_qos_resume_latency_us")).unwrap_or(0);
+
     let num_llcs = topo_ctx.node_llc_kernel_ids.len();
     let llc_id = topo_ctx
         .node_llc_kernel_ids
@@ -522,6 +529,7 @@ fn create_insert_cpu(
             max_freq,
             base_freq,
             cpu_capacity,
+            pm_qos_resume_latency_us,
             trans_lat_ns,
             l2_id,
             l3_id,

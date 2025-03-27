@@ -234,6 +234,7 @@ struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     opts: &'a Opts,
+    topo: Topology,
     power_profile: PowerProfile,
     stats_server: StatsServer<(), Metrics>,
     user_restart: bool,
@@ -343,6 +344,7 @@ impl<'a> Scheduler<'a> {
             skel,
             struct_ops,
             opts,
+            topo,
             power_profile,
             stats_server,
             user_restart: false,
@@ -632,12 +634,9 @@ impl Drop for Scheduler<'_> {
         // Restore default CPU idle QoS resume latency.
         if self.opts.idle_resume_us >= 0 {
             if cpu_idle_resume_latency_supported() {
-                let default_latency = 5000;
-                info!("Restore idle QoS to {} us", default_latency);
-
-                let topo = Topology::new().unwrap();
-                for cpu in topo.all_cpus.values() {
-                    update_cpu_idle_resume_latency(cpu.id, default_latency).unwrap();
+                for cpu in self.topo.all_cpus.values() {
+                    update_cpu_idle_resume_latency(cpu.id, cpu.pm_qos_resume_latency_us as i32)
+                        .unwrap();
                 }
             }
         }
