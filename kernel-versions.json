@@ -2,8 +2,8 @@
   "sched_ext/for-next": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git",
     "branch": "for-next",
-    "commitHash": "d780271744822e3b8daf08416514d0296f235b98",
-    "lastModified": 1742302520
+    "commitHash": "f0c6eab5e45c529f449fbc595873719e00de6d79",
+    "lastModified": 1743047221
   },
   "bpf/bpf-next": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git",
