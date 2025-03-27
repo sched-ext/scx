@@ -166,6 +166,7 @@ pub struct SchedWakeActionCtx {
     pub ts: u64,
     pub cpu: u32,
     pub pid: u32,
+    pub tgid: u32,
     pub prio: i32,
     pub comm: SsoString,
 }
@@ -375,6 +376,7 @@ impl TryFrom<&bpf_event> for Action {
                     ts: event.ts,
                     cpu: event.cpu,
                     pid: wakeup.pid,
+                    tgid: wakeup.tgid,
                     prio: wakeup.prio,
                     comm: comm.into(),
                 }))
@@ -386,10 +388,12 @@ impl TryFrom<&bpf_event> for Action {
                     std::slice::from_raw_parts(waking.comm.as_ptr() as *const u8, 16)
                 })
                 .unwrap();
+
                 Ok(Action::SchedWaking(SchedWakingAction {
                     ts: event.ts,
                     cpu: event.cpu,
                     pid: waking.pid,
+                    tgid: waking.tgid,
                     prio: waking.prio,
                     comm: comm.into(),
                 }))

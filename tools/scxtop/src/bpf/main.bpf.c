@@ -427,6 +427,7 @@ static __always_inline int __on_sched_wakeup(struct task_struct *p)
 	event->ts = now;
 	event->cpu = bpf_get_smp_processor_id();
 	event->event.wakeup.pid = p->pid;
+	event->event.wakeup.tgid = p->tgid;
 	event->event.wakeup.prio = (int)p->prio;
 	__builtin_memcpy_inline(&event->event.wakeup.comm, &p->comm, MAX_COMM);
 	bpf_ringbuf_submit(event, 0);
@@ -461,6 +462,7 @@ int BPF_PROG(on_sched_waking, struct task_struct *p)
 	event->ts = bpf_ktime_get_ns();
 	event->cpu = bpf_get_smp_processor_id();
 	event->event.wakeup.pid = p->pid;
+	event->event.wakeup.tgid = p->tgid;
 	event->event.wakeup.prio = (int)p->prio;
 	__builtin_memcpy(&event->event.wakeup.comm, &p->comm, MAX_COMM);
 

@@ -74,6 +74,7 @@ struct sched_switch_event {
 
 struct wakeup_event {
 	u32		pid;
+	u32		tgid;
 	int		prio;
 	char		comm[MAX_COMM];
 };
