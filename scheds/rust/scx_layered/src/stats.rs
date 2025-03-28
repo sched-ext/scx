@@ -214,7 +214,8 @@ impl LayerStats {
             + lstat(LSTAT_ENQ_LOCAL)
             + lstat(LSTAT_ENQ_WAKEUP)
             + lstat(LSTAT_ENQ_EXPIRE)
-            + lstat(LSTAT_ENQ_REENQ);
+            + lstat(LSTAT_ENQ_REENQ)
+            + lstat(LSTAT_KEEP);
         let lstat_pct = |sidx| {
             if ltotal != 0 {
                 lstat(sidx) as f64 / ltotal as f64 * 100.0
@@ -502,7 +503,8 @@ impl SysStats {
             + lsum(LSTAT_ENQ_LOCAL)
             + lsum(LSTAT_ENQ_WAKEUP)
             + lsum(LSTAT_ENQ_EXPIRE)
-            + lsum(LSTAT_ENQ_REENQ);
+            + lsum(LSTAT_ENQ_REENQ)
+            + lsum(LSTAT_KEEP);
         let lsum_pct = |idx| {
             if total != 0 {
                 lsum(idx) as f64 / total as f64 * 100.0
