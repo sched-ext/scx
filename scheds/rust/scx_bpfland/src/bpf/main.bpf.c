@@ -1097,7 +1097,9 @@ static void init_cpuperf_target(void)
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 {
-	int err, cpu;
+	int err, node;
+	u64 dsq_id;
+	s32 cpu;
 
 	/* Initialize amount of online and possible CPUs */
 	nr_online_cpus = get_nr_online_cpus();
@@ -1107,12 +1109,27 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	init_cpuperf_target();
 
 	/*
-	 * Create the global shared DSQ.
+	 * Create per-CPU DSQs.
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		err = scx_bpf_create_dsq(cpu, __COMPAT_scx_bpf_cpu_node(cpu));
+		dsq_id = cpu;
+
+		err = scx_bpf_create_dsq(dsq_id, __COMPAT_scx_bpf_cpu_node(cpu));
 		if (err) {
-			scx_bpf_error("failed to create DSQ %d: %d", cpu, err);
+			scx_bpf_error("failed to create DSQ %llu: %d", dsq_id, err);
+			return err;
+		}
+	}
+
+	/*
+	 * Create per-node DSQs.
+	 */
+	bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
+		dsq_id = nr_cpu_ids + node;
+
+		err = scx_bpf_create_dsq(dsq_id, node);
+		if (err) {
+			scx_bpf_error("failed to create DSQ %llu: %d", dsq_id, err);
 			return err;
 		}
 	}
