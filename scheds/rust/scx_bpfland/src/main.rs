@@ -544,8 +544,8 @@ impl<'a> Scheduler<'a> {
 
         // Update the BPF cpumasks for the cache domains.
         for (cache_id, cpus) in cache_id_map {
-            // Ignore the cache domain if it includes a single CPU or all the CPUs.
-            if cpus.len() <= 1 || cpus.len() == *NR_CPU_IDS {
+            // Ignore the cache domain if it includes a single CPU.
+            if cpus.len() <= 1 {
                 continue;
             }
 
