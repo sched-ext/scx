@@ -111,11 +111,11 @@ enum layer_stat_id {
 	LSTAT_ENQ_WAKEUP,
 	LSTAT_ENQ_EXPIRE,
 	LSTAT_ENQ_REENQ,
+	LSTAT_KEEP,
 	LSTAT_MIN_EXEC,
 	LSTAT_MIN_EXEC_NS,
 	LSTAT_OPEN_IDLE,
 	LSTAT_AFFN_VIOL,
-	LSTAT_KEEP,
 	LSTAT_KEEP_FAIL_MAX_EXEC,
 	LSTAT_KEEP_FAIL_BUSY,
 	LSTAT_PREEMPT,
@@ -169,7 +169,7 @@ struct cpu_ctx {
 	bool			running_owned;
 	bool			running_open;
 	bool			running_fallback;
-	u64			running_at;
+	u64			used_at;
 	bool			is_protected;
 
 	u64			layer_usages[MAX_LAYERS][NR_LAYER_USAGES];

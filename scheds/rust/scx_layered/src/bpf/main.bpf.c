@@ -1386,6 +1386,48 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 }
 
+static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now)
+{
+	s32 task_lid;
+	u64 used;
+
+	used = now - cpuc->used_at;
+	if (!used)
+		return;
+
+	task_lid = taskc->layer_id;
+	if (unlikely(task_lid >= nr_layers)) {
+		scx_bpf_error("invalid layer %d", task_lid);
+		return;
+	}
+
+	cpuc->used_at = now;
+	cpuc->usage += used;
+
+	/*
+	 * protect_owned/preempt accounting is a bit wrong in that they charge
+	 * the execution duration to the layer that just ran which may be
+	 * different from the layer that is protected on the CPU. Oh well...
+	 */
+	if (cpuc->running_owned) {
+		cpuc->layer_usages[task_lid][LAYER_USAGE_OWNED] += used;
+		if (cpuc->protect_owned)
+			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED] += used;
+		if (cpuc->protect_owned_preempt)
+			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED_PREEMPT] += used;
+	} else {
+		cpuc->layer_usages[task_lid][LAYER_USAGE_OPEN] += used;
+	}
+
+	if (taskc->dsq_id & HI_FB_DSQ_BASE)
+		gstat_add(GSTAT_HI_FB_USAGE, cpuc, used);
+	else if (taskc->dsq_id & LO_FB_DSQ_BASE)
+		gstat_add(GSTAT_LO_FB_USAGE, cpuc, used);
+
+	if (cpuc->running_fallback)
+		gstat_add(GSTAT_FB_CPU_USAGE, cpuc, used);
+}
+
 static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 {
 	struct task_ctx *taskc;
@@ -1872,6 +1914,17 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 }
 
+void BPF_STRUCT_OPS(layered_tick, struct task_struct *p)
+{
+	struct cpu_ctx *cpuc;
+	struct task_ctx *taskc;
+
+	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
+		return;
+
+	account_used(cpuc, taskc, scx_bpf_now());
+}
+
 static __noinline bool match_one(struct layer_match *match,
 				 struct task_struct *p, const char *cgrp_path)
 {
@@ -2340,7 +2393,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	cpuc->current_preempt = layer->preempt || is_preempt_kthread(p);
 	cpuc->current_exclusive = layer->exclusive;
 	cpuc->task_layer_id = taskc->layer_id;
-	cpuc->running_at = now;
+	cpuc->used_at = now;
 	taskc->running_at = now;
 	cpuc->is_protected = layer->is_protected;
 
@@ -2389,7 +2442,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	u64 now = scx_bpf_now();
 	u64 usage_since_idle;
 	s32 task_lid;
-	u64 used;
+	u64 runtime;
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
@@ -2398,40 +2451,17 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	if (!(task_layer = lookup_layer(task_lid)))
 		return;
 
-	used = now - taskc->running_at;
-	cpuc->usage += used;
-
+	runtime = now - taskc->running_at;
 	taskc->runtime_avg =
-		((RUNTIME_DECAY_FACTOR - 1) * taskc->runtime_avg + used) /
+		((RUNTIME_DECAY_FACTOR - 1) * taskc->runtime_avg + runtime) /
 		RUNTIME_DECAY_FACTOR;
 
-	/*
-	 * protect_owned/preempt accounting is a bit wrong in that they charge
-	 * the execution duration to the layer that just ran which may be
-	 * different from the layer that is protected on the CPU. Oh well...
-	 */
-	if (cpuc->running_owned) {
-		cpuc->layer_usages[task_lid][LAYER_USAGE_OWNED] += used;
-		if (cpuc->protect_owned)
-			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED] += used;
-		if (cpuc->protect_owned_preempt)
-			cpuc->layer_usages[task_lid][LAYER_USAGE_PROTECTED_PREEMPT] += used;
-	} else {
-		cpuc->layer_usages[task_lid][LAYER_USAGE_OPEN] += used;
-	}
+	account_used(cpuc, taskc, now);
 
-	if (taskc->dsq_id & HI_FB_DSQ_BASE) {
+	if (taskc->dsq_id & HI_FB_DSQ_BASE)
 		gstat_inc(GSTAT_HI_FB_EVENTS, cpuc);
-		gstat_add(GSTAT_HI_FB_USAGE, cpuc, used);
-	} else if (taskc->dsq_id & LO_FB_DSQ_BASE) {
+	else if (taskc->dsq_id & LO_FB_DSQ_BASE)
 		gstat_inc(GSTAT_LO_FB_EVENTS, cpuc);
-		gstat_add(GSTAT_LO_FB_USAGE, cpuc, used);
-	}
-
-	if (cpuc->running_fallback) {
-		gstat_add(GSTAT_FB_CPU_USAGE, cpuc, used);
-		cpuc->running_fallback = false;
-	}
 
 	/*
 	 * Owned execution protection. Apply iff the CPU stayed saturated for
@@ -2461,6 +2491,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		}
 	}
 
+	cpuc->running_fallback = false;
 	cpuc->current_preempt = false;
 	cpuc->prev_exclusive = cpuc->current_exclusive;
 	cpuc->current_exclusive = false;
@@ -2470,15 +2501,15 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	 * Apply min_exec_us, scale the execution time by the inverse of the
 	 * weight and charge.
 	 */
-	if (used < task_layer->min_exec_ns) {
+	if (runtime < task_layer->min_exec_ns) {
 		lstat_inc(LSTAT_MIN_EXEC, task_layer, cpuc);
-		lstat_add(LSTAT_MIN_EXEC_NS, task_layer, cpuc, task_layer->min_exec_ns - used);
-		used = task_layer->min_exec_ns;
+		lstat_add(LSTAT_MIN_EXEC_NS, task_layer, cpuc, task_layer->min_exec_ns - runtime);
+		runtime = task_layer->min_exec_ns;
 	}
 
-	if (cpuc->yielding && used < task_layer->slice_ns)
-		used = task_layer->slice_ns;
-	p->scx.dsq_vtime += used * 100 / p->scx.weight;
+	if (cpuc->yielding && runtime < task_layer->slice_ns)
+		runtime = task_layer->slice_ns;
+	p->scx.dsq_vtime += runtime * 100 / p->scx.weight;
 	cpuc->maybe_idle = true;
 }
 
@@ -3293,6 +3324,7 @@ SCX_OPS_DEFINE(layered,
 	       .select_cpu		= (void *)layered_select_cpu,
 	       .enqueue			= (void *)layered_enqueue,
 	       .dispatch		= (void *)layered_dispatch,
+	       .tick			= (void *)layered_tick,
 	       .runnable		= (void *)layered_runnable,
 	       .running			= (void *)layered_running,
 	       .stopping		= (void *)layered_stopping,
