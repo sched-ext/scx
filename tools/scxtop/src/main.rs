@@ -120,6 +120,9 @@ fn attach_progs(skel: &mut BpfSkel) -> Result<Vec<Link>> {
     if let Ok(link) = skel.progs.on_cpuhp_enter.attach() {
         links.push(link);
     }
+    if let Ok(link) = skel.progs.on_cpuhp_exit.attach() {
+        links.push(link);
+    }
     if compat::ksym_exists("gpu_memory_total").is_ok() {
         if let Ok(link) = skel.progs.on_gpu_memory_total.attach() {
             links.push(link);

@@ -30,7 +30,8 @@ enum mode {
 };
 
 enum event_type {
-	CPU_HP,
+	CPU_HP_ENTER,
+	CPU_HP_EXIT,
 	CPU_PERF_SET,
 	EXEC,
 	EXIT,
@@ -118,11 +119,19 @@ struct gpu_mem_event {
 	u32             pid;
 };
 
-struct cpuhp_event {
+struct cpuhp_enter_event {
 	u32             cpu;
 	u32             pid;
 	int             target;
 	int             state;
+};
+
+struct cpuhp_exit_event {
+	u32             cpu;
+	u32             pid;
+	int             state;
+	int             idx;
+	int             ret;
 };
 
 struct hw_pressure_event {
@@ -145,7 +154,8 @@ struct bpf_event {
 		struct  exec_event exec;
 		struct  hw_pressure_event hwp;
 		struct  gpu_mem_event gm;
-		struct  cpuhp_event chp;
+		struct  cpuhp_enter_event chp;
+		struct  cpuhp_exit_event cxp;
 		struct	ipi_event ipi;
 		struct	sched_switch_event sched_switch;
 		struct	set_perf_event perf;

@@ -785,10 +785,10 @@ int BPF_PROG(on_ipi_send_cpu, u32 cpu, void *callsite, void *callback)
 SEC("tp_btf/sched_process_exit")
 int BPF_PROG(on_sched_exit, struct task_struct *task)
 {
-  struct bpf_event *event;
+	struct bpf_event *event;
 
-  if (!enable_bpf_events || !should_sample())
-    return 0;
+	if (!enable_bpf_events || !should_sample())
+		return 0;
 
 	if (!(event = try_reserve_event()))
 		return -ENOMEM;
@@ -887,7 +887,7 @@ int BPF_PROG(on_cpuhp_enter, u32 cpu, int target, int state)
 	if (!(event = try_reserve_event()))
 		return -ENOMEM;
 
-	event->type = CPU_HP;
+	event->type = CPU_HP_ENTER;
 	event->cpu = bpf_get_smp_processor_id();
 	event->ts = bpf_ktime_get_ns();
 	event->event.chp.cpu = cpu;
@@ -898,6 +898,36 @@ int BPF_PROG(on_cpuhp_enter, u32 cpu, int target, int state)
 		event->event.chp.pid = BPF_CORE_READ(p, pid);
 	else
 		event->event.chp.pid = 0;
+
+	bpf_ringbuf_submit(event, 0);
+
+	return 0;
+}
+
+SEC("tp_btf/cpuhp_exit")
+int BPF_PROG(on_cpuhp_exit, u32 cpu, int state, int idx, int ret)
+{
+	struct bpf_event *event;
+	struct task_struct *p;
+
+	if (!enable_bpf_events || !should_sample())
+		return 0;
+
+	if (!(event = try_reserve_event()))
+		return -ENOMEM;
+
+	event->type = CPU_HP_EXIT;
+	event->cpu = bpf_get_smp_processor_id();
+	event->ts = bpf_ktime_get_ns();
+	event->event.cxp.cpu = cpu;
+	event->event.cxp.state = state;
+	event->event.cxp.state = idx;
+	event->event.cxp.state = ret;
+	p = (struct task_struct *)bpf_get_current_task();
+	if (p)
+		event->event.cxp.pid = BPF_CORE_READ(p, pid);
+	else
+		event->event.cxp.pid = 0;
 
 	bpf_ringbuf_submit(event, 0);
 

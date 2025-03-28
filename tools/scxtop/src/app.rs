@@ -25,9 +25,9 @@ use crate::APP;
 use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
-    Action, CpuhpAction, ExecAction, ExitAction, ForkAction, GpuMemAction, HwPressureAction,
-    IPIAction, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction,
-    SoftIRQAction, TraceStartedAction, TraceStoppedAction,
+    Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
+    HwPressureAction, IPIAction, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction,
+    SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
 };
 
 use anyhow::Result;
@@ -2398,9 +2398,15 @@ impl<'a> App<'a> {
     }
 
     /// Handles cpu hotplug events.
-    pub fn on_cpu_hp(&mut self, action: &CpuhpAction) {
+    pub fn on_cpu_hp_enter(&mut self, action: &CpuhpEnterAction) {
         if self.state == AppState::Tracing && action.ts > self.trace_start {
-            self.trace_manager.on_cpu_hp(action);
+            self.trace_manager.on_cpu_hp_enter(action);
+        }
+    }
+
+    pub fn on_cpu_hp_exit(&mut self, action: &CpuhpExitAction) {
+        if self.state == AppState::Tracing && action.ts > self.trace_start {
+            self.trace_manager.on_cpu_hp_exit(action);
         }
     }
 
@@ -2512,8 +2518,11 @@ impl<'a> App<'a> {
             Action::GpuMem(a) => {
                 self.on_gpu_mem(a);
             }
-            Action::Cpuhp(a) => {
-                self.on_cpu_hp(a);
+            Action::CpuhpEnter(a) => {
+                self.on_cpu_hp_enter(a);
+            }
+            Action::CpuhpExit(a) => {
+                self.on_cpu_hp_exit(a);
             }
             Action::HwPressure(a) => {
                 self.on_hw_pressure(a);

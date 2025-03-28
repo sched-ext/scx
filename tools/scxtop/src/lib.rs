@@ -213,11 +213,21 @@ pub struct GpuMemAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct CpuhpAction {
+pub struct CpuhpEnterAction {
     pub ts: u64,
     pub cpu: u32,
     pub target: i32,
     pub state: i32,
+    pub pid: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CpuhpExitAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub state: i32,
+    pub idx: i32,
+    pub ret: i32,
     pub pid: u32,
 }
 
@@ -231,7 +241,8 @@ pub struct HwPressureAction {
 pub enum Action {
     ChangeTheme,
     ClearEvent,
-    Cpuhp(CpuhpAction),
+    CpuhpEnter(CpuhpEnterAction),
+    CpuhpExit(CpuhpExitAction),
     DecBpfSampleRate,
     DecTickRate,
     Down,
@@ -318,12 +329,21 @@ impl TryFrom<&bpf_event> for Action {
                 size: unsafe { event.event.gm.size },
             })),
             #[allow(non_upper_case_globals)]
-            bpf_intf::event_type_CPU_HP => Ok(Action::Cpuhp(CpuhpAction {
+            bpf_intf::event_type_CPU_HP_ENTER => Ok(Action::CpuhpEnter(CpuhpEnterAction {
                 ts: event.ts,
                 pid: unsafe { event.event.chp.pid },
                 cpu: unsafe { event.event.chp.cpu },
                 state: unsafe { event.event.chp.state },
                 target: unsafe { event.event.chp.target },
+            })),
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_CPU_HP_EXIT => Ok(Action::CpuhpExit(CpuhpExitAction {
+                ts: event.ts,
+                pid: unsafe { event.event.cxp.pid },
+                cpu: unsafe { event.event.cxp.cpu },
+                state: unsafe { event.event.cxp.state },
+                idx: unsafe { event.event.cxp.idx },
+                ret: unsafe { event.event.cxp.ret },
             })),
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_HW_PRESSURE => Ok(Action::HwPressure(HwPressureAction {
