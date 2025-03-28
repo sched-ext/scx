@@ -62,10 +62,25 @@ Enter = "Enter"
 x = "ClearEvent"
 ```
 
+### Shell completions
+`scxtop` is able to generate shell completions for various shells using the
+`scxtop generate-completions` subcommand:
+```
+scxtop generate-completions -h
+Usage: scxtop generate-completions [OPTIONS]
+
+Options:
+  -s, --shell <SHELL>    The shell type [default: bash] [possible values: bash, elvish, fish, powershell, zsh]
+      --output <OUTPUT>  Output file, stdout if not present
+  -h, --help             Print help
+```
+
 ### Generating Traces
 `scxtop` is able to generate [Perfetto](https://perfetto.dev/) compatible traces.
 The trace data also contains DSQ (dispatch queue) data for any active sched_ext
-scheduler. Soft IRQs are also collected as part of the trace.
+scheduler. Soft IRQs are also collected as part of the trace. Traces can be
+collected with the `scxtop trace` subcommand as well as from keybindings from
+the TUI.
 ![scxtop](https://github.com/user-attachments/assets/1be4ace4-e153-48ad-b63e-16f2b4e4c756)
 
 ### Aggregating Across Hardware Boundaries
