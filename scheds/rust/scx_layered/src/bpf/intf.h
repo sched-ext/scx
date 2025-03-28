@@ -169,7 +169,7 @@ struct cpu_ctx {
 	bool			running_owned;
 	bool			running_open;
 	bool			running_fallback;
-	u64			running_at;
+	u64			used_at;
 	bool			is_protected;
 
 	u64			layer_usages[MAX_LAYERS][NR_LAYER_USAGES];
