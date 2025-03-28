@@ -323,6 +323,28 @@ static u64 nr_tasks_waiting(int node)
 }
 
 /*
+ * Scale a value inversely proportional to the task's normalized weight.
+ */
+static inline u64 scale_by_task_normalized_weight_inverse(const struct task_struct *p, u64 value)
+{
+	/*
+	 * Original weight range:   [1, 10000], default = 100
+	 * Normalized weight range: [1, 128], default = 64
+	 *
+	 * This normalization reduces the impact of extreme weight differences,
+	 * preventing highly prioritized tasks from starving lower-priority ones.
+	 *
+	 * The goal is to ensure a more balanced scheduling that is
+	 * influenced more by the task's behavior rather than its priority
+	 * difference and prevent potential stalls due to large priority
+	 * gaps.
+	*/
+	u64 weight = 1 + (127 * log2_u64(p->scx.weight) / log2_u64(10000));
+
+	return value * 64 / weight;
+}
+
+/*
  * Update and return the task's deadline.
  */
 static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
@@ -344,7 +366,7 @@ static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
 	/*
 	 * Add the execution vruntime to the deadline.
 	 */
-	tctx->deadline += scale_by_task_weight_inverse(p, tctx->exec_runtime);
+	tctx->deadline += scale_by_task_normalized_weight_inverse(p, tctx->exec_runtime);
 
 	return tctx->deadline;
 }
@@ -1109,7 +1131,7 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Update task's vruntime.
 	 */
-	tctx->deadline += scale_by_task_weight_inverse(p, slice);
+	tctx->deadline += scale_by_task_normalized_weight_inverse(p, slice);
 
 	/*
 	 * Update CPU runtime.
