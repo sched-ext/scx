@@ -772,7 +772,7 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 				scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 				return prev_cpu;
 
-    // try prev if layers smt sibling is idle
+		// try prev if layers smt sibling is idle
 		if (prev_in_cand &&
 		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
