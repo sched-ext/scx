@@ -11,13 +11,13 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::bail;
 use anyhow::Result;
-use bitvec::prelude::*;
 use chrono::DateTime;
 use chrono::Local;
 use log::warn;
 use scx_stats::prelude::*;
 use scx_stats_derive::stat_doc;
 use scx_stats_derive::Stats;
+use scx_utils::Cpumask;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -184,7 +184,7 @@ pub struct LayerStats {
     #[stat(desc = "% LLC draining succeeded")]
     pub llc_drain: f64,
     #[stat(desc = "mask of allocated CPUs", _om_skip)]
-    pub cpus: Vec<u32>,
+    pub cpus: Vec<u64>,
     #[stat(desc = "count of CPUs assigned")]
     pub cur_nr_cpus: u32,
     #[stat(desc = "minimum # of CPUs assigned")]
@@ -202,22 +202,6 @@ pub struct LayerStats {
 }
 
 impl LayerStats {
-    fn bitvec_to_u32s(bitvec: &BitVec<u64, Lsb0>) -> Vec<u32> {
-        let mut vals = Vec::<u32>::new();
-        let mut val: u32 = 0;
-        for (idx, bit) in bitvec.iter().enumerate() {
-            if idx > 0 && idx % 32 == 0 {
-                vals.push(val);
-                val = 0;
-            }
-            if *bit {
-                val |= 1 << (idx % 32);
-            }
-        }
-        vals.push(val);
-        vals
-    }
-
     pub fn new(
         lidx: usize,
         layer: &Layer,
@@ -290,7 +274,7 @@ impl LayerStats {
             xllc_migration_skip: lstat_pct(LSTAT_XLLC_MIGRATION_SKIP),
             llc_drain_try: lstat_pct(LSTAT_LLC_DRAIN_TRY),
             llc_drain: lstat_pct(LSTAT_LLC_DRAIN),
-            cpus: Self::bitvec_to_u32s(layer.cpus.as_raw_bitvec()),
+            cpus: layer.cpus.as_raw_slice().to_vec(),
             cur_nr_cpus: layer.cpus.weight() as u32,
             min_nr_cpus: nr_cpus_range.0 as u32,
             max_nr_cpus: nr_cpus_range.1 as u32,
@@ -400,11 +384,7 @@ impl LayerStats {
             width = header_width
         )?;
 
-        let mut cpus = self
-            .cpus
-            .iter()
-            .fold(String::new(), |string, v| format!("{}{:08x} ", string, v));
-        cpus.pop();
+        let cpumask = Cpumask::from_vec(self.cpus.clone());
 
         writeln!(
             w,
@@ -413,7 +393,7 @@ impl LayerStats {
             self.cur_nr_cpus,
             self.min_nr_cpus,
             self.max_nr_cpus,
-            &cpus,
+            &cpumask,
             width = header_width
         )?;
 
