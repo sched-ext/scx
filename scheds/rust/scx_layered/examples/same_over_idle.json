@@ -1,0 +1,60 @@
+[
+    {
+      "name": "same_over_idle",
+      "comment": "same_over_idle",
+      "matches": [
+        [{"CommPrefix": "stress-ng"}],
+        [{"PcommPrefix": "stress-ng"}]
+      ],
+      "kind": {
+        "Confined": {
+          "cpus_range_frac": [0.25,0.25],
+          "min_exec_us": 100,
+          "growth_algo": "NodeSpreadReverse",
+          "same_over_idle": true,
+          "util_range": [
+            0.8,
+            0.9
+          ]
+        }
+      }
+    },
+    {
+      "name": "not_same_over_idle",
+      "comment": "not_same_over_idle",
+      "matches": [
+        [{"CommPrefix": "stress"}],
+        [{"PcommPrefix": "stress"}]
+      ],
+      "kind": {
+        "Confined": {
+          "cpus_range_frac": [0.25,0.25],
+          "min_exec_us": 100,
+          "growth_algo": "NodeSpread",
+          "util_range": [
+            0.8,
+            0.9
+          ],
+          "same_over_idle": false
+        }
+      }
+    },
+    {
+      "name": "normal",
+      "comment": "the rest",
+      "matches": [
+        []
+      ],
+      "kind": {
+        "Open": {
+          "util_range": [
+            0.8,
+            0.9
+          ],
+          "min_exec_us": 100,
+          "allow_node_aligned": true
+        }
+      }
+    }
+  ]
+
