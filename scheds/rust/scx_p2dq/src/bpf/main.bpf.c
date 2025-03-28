@@ -14,6 +14,10 @@
 #include <scx/common.bpf.h>
 #endif
 
+#ifndef P2DQ_CREATE_STRUCT_OPS
+#define P2DQ_CREATE_STRUCT_OPS 1
+#endif
+
 #include "intf.h"
 
 #include <errno.h>
@@ -52,6 +56,7 @@ const volatile bool interactive_sticky = false;
 const volatile bool keep_running_enabled = true;
 const volatile bool kthreads_local = true;
 const volatile bool max_dsq_pick2 = false;
+const volatile bool select_idle_in_enqueue = true;
 
 const volatile bool smt_enabled = true;
 const volatile bool has_little_cores = false;
@@ -575,7 +580,7 @@ found_cpu:
 }
 
 
-s32 BPF_STRUCT_OPS(p2dq_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
+static __always_inline s32 p2dq_select_cpu_impl(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	struct task_ctx *taskc;
 	bool is_idle = false;
@@ -595,7 +600,14 @@ s32 BPF_STRUCT_OPS(p2dq_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wak
 }
 
 
-void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
+/*
+ * Perform the enqueue logic for `p` but don't enqueue it where possible.  This
+ * is primarily used so that scx_chaos can decide to enqueue a task either
+ * immediately in `enqueue` or later in `dispatch`.
+ */
+static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
+					       struct task_struct *p,
+					       u64 enq_flags)
 {
 	struct llc_ctx *llcx, *prev_llcx;
 	struct cpu_ctx *cpuc, *task_cpuc;
@@ -646,6 +658,8 @@ void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 		stat_inc(P2DQ_STAT_DIRECT);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns,
 				   enq_flags | SCX_ENQ_PREEMPT);
+
+		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
 
@@ -655,12 +669,16 @@ void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 	 */
 	if (!taskc->all_cpus && bpf_cpumask_test_cpu(cpuc->id, p->cpus_ptr)) {
 		stat_inc(P2DQ_STAT_DIRECT);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
+
+		ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
+		ret->fifo.dsq = SCX_DSQ_LOCAL;
+		ret->fifo.enq_flags = enq_flags;
+		ret->fifo.slice_ns = slice_ns;
 		return;
 	}
 
 	// If an idle CPU hasn't been found in select_cpu find one now
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
+	if (select_idle_in_enqueue && !__COMPAT_is_enq_cpu_selected(enq_flags)) {
 		bool is_idle = false;
 		cpu = pick_idle_cpu(p, taskc, taskc->cpu, 0, &is_idle);
 		cpuc = lookup_cpu_ctx(cpu);
@@ -671,16 +689,41 @@ void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 				stat_inc(P2DQ_STAT_IDLE);
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			}
+
+			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 			return;
 		}
 	}
 
 	dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
-	scx_bpf_dsq_insert_vtime(p, dsq_id, slice_ns, vtime, enq_flags);
+
+	ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
+	ret->vtime.dsq = dsq_id;
+	ret->vtime.enq_flags = enq_flags;
+	ret->vtime.slice_ns = slice_ns;
+	ret->vtime.vtime = vtime;
 }
 
+static __always_inline void complete_p2dq_enqueue(struct enqueue_promise *pro,
+						  struct task_struct *p)
+{
+	switch (pro->kind) {
+	case P2DQ_ENQUEUE_PROMISE_COMPLETE:
+		goto out;
+	case P2DQ_ENQUEUE_PROMISE_FIFO:
+		scx_bpf_dsq_insert(p, pro->fifo.dsq, pro->fifo.enq_flags,
+				   *MEMBER_VPTR(pro->fifo, .slice_ns));
+		goto out;
+	case P2DQ_ENQUEUE_PROMISE_VTIME:
+		scx_bpf_dsq_insert_vtime(p, pro->vtime.dsq, pro->vtime.enq_flags,
+				         pro->vtime.vtime, pro->vtime.slice_ns);
+		goto out;
+	}
+out:
+	pro->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
+}
 
-void BPF_STRUCT_OPS(p2dq_runnable, struct task_struct *p, u64 enq_flags)
+static __always_inline void p2dq_runnable_impl(struct task_struct *p, u64 enq_flags)
 {
 	struct task_ctx *wakee_ctx;
 
@@ -881,7 +924,7 @@ __weak int dispatch_pick_two(s32 cpu)
 }
 
 
-void BPF_STRUCT_OPS(p2dq_dispatch, s32 cpu, struct task_struct *prev)
+static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
@@ -1290,7 +1333,7 @@ s32 static start_timers(void)
 	return 0;
 }
 
-s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init)
+static __always_inline s32 p2dq_init_impl()
 {
 	int i, ret;
 	struct bpf_cpumask *tmp_cpumask, *tmp_big_cpumask;
@@ -1382,10 +1425,37 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init)
 	return 0;
 }
 
-
 void BPF_STRUCT_OPS(p2dq_exit, struct scx_exit_info *ei)
 {
 	UEI_RECORD(uei, ei);
+}
+
+#if P2DQ_CREATE_STRUCT_OPS
+void BPF_STRUCT_OPS(p2dq_runnable, struct task_struct *p, u64 enq_flags)
+{
+	return p2dq_runnable_impl(p, enq_flags);
+}
+
+s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init)
+{
+	return p2dq_init_impl();
+}
+
+void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
+{
+	struct enqueue_promise pro;
+	async_p2dq_enqueue(&pro, p, enq_flags);
+	complete_p2dq_enqueue(&pro, p);
+}
+
+void BPF_STRUCT_OPS(p2dq_dispatch, s32 cpu, struct task_struct *prev)
+{
+	return p2dq_dispatch_impl(cpu, prev);
+}
+
+s32 BPF_STRUCT_OPS(p2dq_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
+{
+	return p2dq_select_cpu_impl(p, prev_cpu, wake_flags);
 }
 
 SCX_OPS_DEFINE(p2dq,
@@ -1401,3 +1471,4 @@ SCX_OPS_DEFINE(p2dq,
 	       .exit			= (void *)p2dq_exit,
 	       .timeout_ms		= 20000,
 	       .name			= "p2dq");
+#endif

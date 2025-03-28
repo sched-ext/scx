@@ -2,11 +2,17 @@
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
-mod bpf_skel;
-pub use bpf_skel::*;
+
+//mod bpf_skel;
+//pub use bpf_skel::*;
+pub use scx_p2dq::bpf_skel::*; // TODO: PUT ME BACK after the abstraction exists
+
 pub mod bpf_intf;
 pub mod stats;
 use stats::Metrics;
+
+use scx_p2dq::SchedulerOpts;
+use scx_p2dq::TOPO;
 
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
@@ -31,10 +37,7 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::CoreType;
-use scx_utils::Topology;
 use scx_utils::UserExitInfo;
-use scx_utils::NR_CPU_IDS;
 
 use crate::bpf_intf::stat_idx_P2DQ_NR_STATS;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DIRECT;
@@ -51,123 +54,33 @@ use crate::bpf_intf::stat_idx_P2DQ_STAT_WAKE_LLC;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_WAKE_MIG;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_WAKE_PREV;
 
-lazy_static::lazy_static! {
-        pub static ref TOPO: Topology = Topology::new().unwrap();
-}
-
-fn get_default_greedy_disable() -> bool {
-    TOPO.all_llcs.len() > 1
-}
-
-fn get_default_llc_runs() -> u64 {
-    let n_llcs = TOPO.all_llcs.len() as f64;
-    let llc_runs = n_llcs.log2();
-    llc_runs as u64
-}
-
 /// scx_p2dq: A pick 2 dumb queuing load balancing scheduler.
 ///
 /// The BPF part does simple vtime or round robin scheduling in each domain
 /// while tracking average load of each domain and duty cycle of each task.
 ///
 #[derive(Debug, Parser)]
-struct Opts {
-    /// Disables per-cpu kthreads directly dispatched into local dsqs.
-    #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
-    disable_kthreads_local: bool,
-
-    /// Enables autoslice tuning
-    #[clap(short = 'a', long, action = clap::ArgAction::SetTrue)]
-    autoslice: bool,
-
-    /// Ratio of interactive tasks for autoslice tuning, percent value from 1-99.
-    #[clap(short = 'r', long, default_value = "10")]
-    interactive_ratio: usize,
-
-    /// Disables eager pick2 load balancing.
-    #[clap(short = 'e', long, action = clap::ArgAction::SetTrue)]
-    eager_load_balance: bool,
-
-    /// Disables greedy idle CPU selection, may cause better load balancing on multi-LLC systems.
-    #[clap(short = 'g', long, default_value_t = get_default_greedy_disable(), action = clap::ArgAction::Set)]
-    greedy_idle_disable: bool,
-
-    /// Interactive tasks stay sticky to their CPU if no idle CPU is found.
-    #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
-    interactive_sticky: bool,
-
-    /// Disables pick2 load balancing on the dispatch path.
-    #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
-    dispatch_pick2_disable: bool,
-
-    /// Enable tasks to run beyond their timeslice if the CPU is idle.
-    #[clap(long, action = clap::ArgAction::SetTrue)]
-    keep_running: bool,
-
-    /// Set idle QoS resume latency based in microseconds.
-    #[clap(long)]
-    idle_resume_us: Option<u32>,
-
-    /// Only pick2 load balance from the max DSQ.
-    #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
-    max_dsq_pick2: bool,
-
-    /// Scheduling min slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "100")]
-    min_slice_us: u64,
-
-    /// Number of runs on the LLC before a task becomes eligbile for pick2 migration on the wakeup
-    /// path.
-    #[clap(short = 'l', long, default_value_t = get_default_llc_runs())]
-    min_llc_runs_pick2: u64,
-
-    /// Manual definition of slice intervals in microseconds for DSQs, must be equal to number of
-    /// dumb_queues.
-    #[clap(short = 't', long, value_parser = clap::value_parser!(u64), default_values_t = [0;0])]
-    dsq_time_slices: Vec<u64>,
-
-    /// DSQ scaling shift, each queue min timeslice is shifted by the scaling shift.
-    #[clap(short = 'x', long, default_value = "4")]
-    dsq_shift: u64,
-
-    /// Minimum number of queued tasks to use pick2 balancing, 0 to always enabled.
-    #[clap(short = 'm', long, default_value = "0")]
-    min_nr_queued_pick2: u32,
-
-    /// Number of dumb DSQs.
-    #[clap(short = 'q', long, default_value = "3")]
-    dumb_queues: usize,
-
-    /// Initial DSQ for tasks.
-    #[clap(short = 'i', long, default_value = "0")]
-    init_dsq_index: usize,
-
+struct CliOpts {
     /// Enable verbose output, including libbpf details. Specify multiple
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
-    verbose: u8,
+    pub verbose: u8,
 
     /// Enable stats monitoring with the specified interval.
     #[clap(long)]
-    stats: Option<f64>,
+    pub stats: Option<f64>,
 
     /// Run in stats monitoring mode with the specified interval. Scheduler
     /// is not launched.
     #[clap(long)]
-    monitor: Option<f64>,
+    pub monitor: Option<f64>,
 
     /// Print version and exit.
     #[clap(long)]
-    version: bool,
-}
+    pub version: bool,
 
-fn dsq_slice_ns(dsq_index: u64, min_slice_us: u64, dsq_shift: u64) -> u64 {
-    let result = if dsq_index == 0 {
-        1000 * min_slice_us
-    } else {
-        1000 * (min_slice_us << (dsq_index as u32) << dsq_shift)
-    };
-    result
+    #[clap(flatten)]
+    pub sched: SchedulerOpts,
 }
 
 struct Scheduler<'a> {
@@ -178,93 +91,29 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+    fn init(
+        opts: &SchedulerOpts,
+        open_object: &'a mut MaybeUninit<OpenObject>,
+        verbose: u8,
+    ) -> Result<Self> {
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
-        skel_builder.obj_builder.debug(opts.verbose > 1);
+        skel_builder.obj_builder.debug(verbose > 1);
         init_libbpf_logging(None);
         info!(
             "Running scx_p2dq (build ID: {})",
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
-        let mut skel = scx_ops_open!(skel_builder, open_object, p2dq).unwrap();
+        let mut open_skel = scx_ops_open!(skel_builder, open_object, p2dq).unwrap();
+        scx_p2dq::init_open_skel!(&mut open_skel, opts, verbose)?;
 
-        if opts.init_dsq_index > opts.dumb_queues - 1 {
-            panic!("Invalid init_dsq_index {}", opts.init_dsq_index);
-        }
-        if opts.dsq_time_slices.len() > 0 {
-            if opts.dsq_time_slices.len() != opts.dumb_queues {
-                panic!(
-                    "Invalid number of dsq_time_slices, got {} need {}",
-                    opts.dsq_time_slices.len(),
-                    opts.dumb_queues,
-                )
-            }
-            for vals in opts.dsq_time_slices.windows(2) {
-                assert!(
-                    vals[0] < vals[1],
-                    "DSQ time slices must be in increasing order"
-                );
-            }
-            for (i, slice) in opts.dsq_time_slices.iter().enumerate() {
-                info!("DSQ[{}] slice_ns {}", i, slice * 1000);
-                skel.maps.bss_data.dsq_time_slices[i] = slice * 1000;
-            }
-        } else {
-            for i in 0..=opts.dumb_queues - 1 {
-                let slice_ns = dsq_slice_ns(i as u64, opts.min_slice_us, opts.dsq_shift);
-                info!("DSQ[{}] slice_ns {}", i, slice_ns);
-                skel.maps.bss_data.dsq_time_slices[i] = slice_ns;
-            }
-        }
-        if opts.autoslice {
-            if opts.interactive_ratio == 0 || opts.interactive_ratio > 99 {
-                panic!(
-                    "Invalid interactive_ratio {}, must be between 1-99",
-                    opts.interactive_ratio
-                );
-            }
-        }
-
-        skel.maps.rodata_data.interactive_ratio = opts.interactive_ratio as u32;
-        skel.maps.rodata_data.min_slice_us = opts.min_slice_us;
-        skel.maps.rodata_data.min_nr_queued_pick2 = opts.min_nr_queued_pick2;
-        skel.maps.rodata_data.min_llc_runs_pick2 = opts.min_llc_runs_pick2;
-        skel.maps.rodata_data.dsq_shift = opts.dsq_shift as u64;
-        skel.maps.rodata_data.kthreads_local = !opts.disable_kthreads_local;
-        skel.maps.rodata_data.nr_cpus = *NR_CPU_IDS as u32;
-        skel.maps.rodata_data.nr_dsqs_per_llc = opts.dumb_queues as u32;
-        skel.maps.rodata_data.init_dsq_index = opts.init_dsq_index as i32;
-        skel.maps.rodata_data.nr_llcs = TOPO.all_llcs.clone().keys().len() as u32;
-        skel.maps.rodata_data.nr_nodes = TOPO.nodes.clone().keys().len() as u32;
-
-        skel.maps.rodata_data.autoslice = opts.autoslice;
-        skel.maps.rodata_data.debug = opts.verbose as u32;
-        skel.maps.rodata_data.dispatch_pick2_disable = opts.dispatch_pick2_disable;
-        skel.maps.rodata_data.eager_load_balance = !opts.eager_load_balance;
-        skel.maps.rodata_data.greedy_idle = !opts.greedy_idle_disable;
-        skel.maps.rodata_data.has_little_cores = TOPO.has_little_cores();
-        skel.maps.rodata_data.interactive_sticky = opts.interactive_sticky;
-        skel.maps.rodata_data.keep_running_enabled = opts.keep_running;
-        skel.maps.rodata_data.max_dsq_pick2 = opts.max_dsq_pick2;
-        skel.maps.rodata_data.smt_enabled = TOPO.smt_enabled;
-
-        match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
+        match compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),
             v => skel.struct_ops.p2dq_mut().flags |= v,
-        }
-        let mut skel = scx_ops_load!(skel, p2dq, uei)?;
+        };
 
-        for cpu in TOPO.all_cpus.values() {
-            skel.maps.bss_data.big_core_ids[cpu.id] =
-                if cpu.core_type == (CoreType::Big { turbo: true }) {
-                    1
-                } else {
-                    0
-                };
-            skel.maps.bss_data.cpu_llc_ids[cpu.id] = cpu.llc_id as u64;
-            skel.maps.bss_data.cpu_node_ids[cpu.id] = cpu.node_id as u64;
-        }
+        let mut skel = scx_ops_load!(open_skel, p2dq, uei)?;
+        scx_p2dq::init_skel!(&mut skel);
 
         let struct_ops = Some(scx_ops_attach!(skel, p2dq)?);
 
@@ -336,7 +185,7 @@ impl Drop for Scheduler<'_> {
 }
 
 fn main() -> Result<()> {
-    let opts = Opts::parse();
+    let opts = CliOpts::parse();
 
     if opts.version {
         println!(
@@ -391,7 +240,7 @@ fn main() -> Result<()> {
         }
     }
 
-    if let Some(idle_resume_us) = opts.idle_resume_us {
+    if let Some(idle_resume_us) = opts.sched.idle_resume_us {
         if !cpu_idle_resume_latency_supported() {
             warn!("idle resume latency not supported");
         } else {
@@ -406,7 +255,7 @@ fn main() -> Result<()> {
 
     let mut open_object = MaybeUninit::uninit();
     loop {
-        let mut sched = Scheduler::init(&opts, &mut open_object)?;
+        let mut sched = Scheduler::init(&opts.sched, &mut open_object, opts.verbose)?;
         if !sched.run(shutdown.clone())?.should_restart() {
             break;
         }
