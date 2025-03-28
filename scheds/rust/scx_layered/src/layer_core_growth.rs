@@ -39,12 +39,12 @@ pub enum LayerGrowthAlgo {
     /// LittleBig attempts to first grow across all little cores and then
     /// allocates onto big cores after all little cores are allocated.
     LittleBig,
-    /// Grab CPUs from NUMA nodes, iteratively, in linear order. Not for use
-    /// on CPUs with heterogenous SMT.
+    /// Grab CPUs from NUMA nodes, iteratively, in linear order.
     NodeSpread,
-    /// Grab CPUs from NUMA nodes, iteratively, in reverse order. Not for use
-    /// on CPUs with heterogenous SMT.
+    /// Grab CPUs from NUMA nodes, iteratively, in reverse order.
     NodeSpreadReverse,
+    /// Grab CPUs from NUMA nodes, iteratively, in random order.
+    NodeSpreadRandom,
     /// RandomTopo is sticky to NUMA nodes/LLCs but randomises the order in which
     /// it visits each. The layer will select a random NUMA node, then a random LLC
     /// within it, then randomly iterate the cores in that LLC.
@@ -66,6 +66,8 @@ const GROWTH_ALGO_LITTLE_BIG: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_LITT
 const GROWTH_ALGO_NODE_SPREAD: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_NODE_SPREAD as i32;
 const GROWTH_ALGO_NODE_SPREAD_REVERSE: i32 =
     bpf_intf::layer_growth_algo_GROWTH_ALGO_NODE_SPREAD_REVERSE as i32;
+const GROWTH_ALGO_NODE_SPREAD_RANDOM: i32 =
+    bpf_intf::layer_growth_algo_GROWTH_ALGO_NODE_SPREAD_RANDOM as i32;
 const GROWTH_ALGO_RANDOM_TOPO: i32 = bpf_intf::layer_growth_algo_GROWTH_ALGO_RANDOM_TOPO as i32;
 const GROWTH_ALGO_STICKY_DYNAMIC: i32 =
     bpf_intf::layer_growth_algo_GROWTH_ALGO_STICKY_DYNAMIC as i32;
@@ -83,6 +85,7 @@ impl LayerGrowthAlgo {
             LayerGrowthAlgo::LittleBig => GROWTH_ALGO_LITTLE_BIG,
             LayerGrowthAlgo::NodeSpread => GROWTH_ALGO_NODE_SPREAD,
             LayerGrowthAlgo::NodeSpreadReverse => GROWTH_ALGO_NODE_SPREAD_REVERSE,
+            LayerGrowthAlgo::NodeSpreadRandom => GROWTH_ALGO_NODE_SPREAD_RANDOM,
             LayerGrowthAlgo::RandomTopo => GROWTH_ALGO_RANDOM_TOPO,
             LayerGrowthAlgo::StickyDynamic => GROWTH_ALGO_STICKY_DYNAMIC,
         }
@@ -131,6 +134,7 @@ impl LayerGrowthAlgo {
             LayerGrowthAlgo::Topo => generator.grow_topo(),
             LayerGrowthAlgo::NodeSpread => generator.grow_node_spread(),
             LayerGrowthAlgo::NodeSpreadReverse => generator.grow_node_spread_reverse(),
+            LayerGrowthAlgo::NodeSpreadRandom => generator.grow_node_spread_random(),
             LayerGrowthAlgo::RandomTopo => generator.grow_random_topo(),
             LayerGrowthAlgo::StickyDynamic => generator.grow_sticky_dynamic(),
         }
@@ -249,7 +253,7 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             .collect()
     }
 
-    fn grow_node_spread(&self) -> Vec<usize> {
+    fn grow_node_spread_inner(&self, make_random: bool) -> Vec<usize> {
         let mut cores: Vec<usize> = Vec::new();
         let mut node_core_vecs: Vec<Vec<usize>> = Vec::new();
         let mut max_node_cpus: usize = 0;
@@ -281,6 +285,12 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             node_core_vecs.push(flat_node_vec.clone());
         }
 
+        if make_random {
+            for mut core_vec in &mut node_core_vecs {
+                fastrand::shuffle(&mut core_vec);
+            }
+        }
+
         for i in 0..=max_node_cpus {
             for sub_vec in node_core_vecs.iter() {
                 if i < sub_vec.len() {
@@ -296,6 +306,14 @@ impl<'a> LayerCoreOrderGenerator<'a> {
         let mut cores = self.grow_node_spread();
         cores.reverse();
         cores
+    }
+
+    fn grow_node_spread(&self) -> Vec<usize> {
+        return self.grow_node_spread_inner(false);
+    }
+
+    fn grow_node_spread_random(&self) -> Vec<usize> {
+        return self.grow_node_spread_inner(true);
     }
 
     fn grow_little_big(&self) -> Vec<usize> {
