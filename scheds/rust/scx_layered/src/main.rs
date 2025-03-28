@@ -933,8 +933,11 @@ impl Stats {
             nr_layer_tasks,
             nr_nodes: self.nr_nodes,
 
-            total_util: layer_utils.iter().flatten().sum(),
-            layer_utils: layer_utils,
+            total_util: layer_utils
+                .iter()
+                .map(|x| x.iter().take(LAYER_USAGE_SUM_UPTO + 1).sum::<f64>())
+                .sum(),
+            layer_utils,
             prev_layer_usages: cur_layer_usages,
 
             cpu_busy,
