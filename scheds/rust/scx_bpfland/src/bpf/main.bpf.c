@@ -233,11 +233,27 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 }
 
 /*
+ * Return the DSQ associated to a specific node.
+ */
+static u64 node_to_dsq(int node)
+{
+	return nr_cpu_ids + node;
+}
+
+/*
+ * Return the DSQ associated to a specific CPU.
+ */
+static u64 cpu_to_dsq(s32 cpu)
+{
+	return cpu;
+}
+
+/*
  * Return the total amount of tasks that are currently waiting to be scheduled.
  */
-static u64 nr_tasks_waiting(s32 cpu)
+static u64 nr_tasks_waiting(u64 dsq_id)
 {
-	return scx_bpf_dsq_nr_queued(cpu) + 1;
+	return scx_bpf_dsq_nr_queued(dsq_id);
 }
 
 /*
@@ -599,7 +615,10 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
-		if (local_pcpu || !scx_bpf_dsq_nr_queued(cpu)) {
+		int node = __COMPAT_scx_bpf_cpu_node(cpu);
+
+		if ((!nr_tasks_waiting(cpu_to_dsq(cpu)) &&
+		     !nr_tasks_waiting(node_to_dsq(node)))) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, 0);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		}
@@ -711,14 +730,30 @@ static s32 try_migrate(const struct task_struct *p, const struct task_ctx *tctx,
 }
 
 /*
+ * Return true if the NUMA node is completely busy, false otherwise.
+ */
+static bool is_node_busy(int node)
+{
+	const struct cpumask *idle_cpumask;
+	bool is_busy;
+
+	idle_cpumask = __COMPAT_scx_bpf_get_idle_cpumask_node(node);
+	is_busy = bpf_cpumask_empty(idle_cpumask);
+	scx_bpf_put_cpumask(idle_cpumask);
+
+	return is_busy;
+}
+
+/*
  * Dispatch all the other tasks that were not dispatched directly in
  * select_cpu().
  */
 void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	s32 prev_cpu = scx_bpf_task_cpu(p), cpu = -ENOENT;
+	int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
+	u64 dsq_id, slice, deadline;
 	struct task_ctx *tctx;
-	u64 slice, deadline;
 
 	/*
 	 * Dispatch regular tasks to the shared DSQ.
@@ -727,34 +762,49 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 
-	/*
-	 * Allow tasks to migrate from ops.enqueue() if ops.select_cpu()
-	 * was skipped and the current CPU is busy.
-	 */
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
-		cpu = try_migrate(p, tctx, prev_cpu, true);
+	if (!is_node_busy(node) && !nr_tasks_waiting(node_to_dsq(node))) {
+		/*
+		 * Allow tasks to migrate from ops.enqueue() if ops.select_cpu()
+		 * was skipped and the current CPU is busy.
+		 */
+		if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
+			cpu = try_migrate(p, tctx, prev_cpu, true);
+			if (cpu < 0)
+				cpu = try_migrate(p, tctx, prev_cpu, false);
+		}
 		if (cpu < 0)
-			cpu = try_migrate(p, tctx, prev_cpu, false);
+			cpu = prev_cpu;
+
+		dsq_id = cpu_to_dsq(cpu);
+	} else {
+		dsq_id = node_to_dsq(node);
 	}
-	if (cpu < 0)
-		cpu = prev_cpu;
 
 	deadline = task_deadline(p, tctx);
-	slice = CLAMP(slice_max / nr_tasks_waiting(cpu), slice_min, slice_max);
+	slice = CLAMP(slice_max / (nr_tasks_waiting(dsq_id) + 1), slice_min, slice_max);
 
-	scx_bpf_dsq_insert_vtime(p, cpu, slice, deadline, enq_flags);
+	scx_bpf_dsq_insert_vtime(p, dsq_id, slice, deadline, enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
-	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	scx_bpf_kick_cpu(cpu >= 0 ? cpu : prev_cpu, SCX_KICK_IDLE);
 }
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 {
+	int node = __COMPAT_scx_bpf_cpu_node(cpu);
+
 	/*
-	 * Consume regular tasks from the shared DSQ, transferring them to the
+	 * Consume tasks from the per-CPU DSQ, transferring them to the
 	 * local CPU DSQ.
 	 */
 	if (scx_bpf_dsq_move_to_local(cpu))
+		return;
+
+	/*
+	 * Consume tasks from the per-node DSQ, transferring them to the
+	 * local CPU DSQ.
+	 */
+	if (scx_bpf_dsq_move_to_local(nr_cpu_ids + node))
 		return;
 
 	/*
