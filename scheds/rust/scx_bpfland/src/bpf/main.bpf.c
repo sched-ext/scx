@@ -762,7 +762,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!tctx)
 		return;
 
-	if (!is_node_busy(node) && !nr_tasks_waiting(node_to_dsq(node))) {
+	if (local_pcpu || (!is_node_busy(node) && !nr_tasks_waiting(node_to_dsq(node)))) {
 		/*
 		 * Allow tasks to migrate from ops.enqueue() if ops.select_cpu()
 		 * was skipped and the current CPU is busy.
