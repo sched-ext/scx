@@ -310,7 +310,7 @@ struct layer {
 	bool			preempt_first;
 	bool			exclusive;
 	bool			allow_node_aligned;
-	bool			same_over_idle;
+	bool			prev_over_idle_core;
 	int			growth_algo;
 
 	u64			nr_tasks;

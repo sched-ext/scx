@@ -101,7 +101,7 @@ pub struct LayerCommon {
     #[serde(default)]
     pub allow_node_aligned: bool,
     #[serde(default)]
-    pub same_over_idle: bool,
+    pub prev_over_idle_core: bool,
     #[serde(default)]
     pub weight: u32,
     #[serde(default)]
