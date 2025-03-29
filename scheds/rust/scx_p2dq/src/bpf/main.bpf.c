@@ -765,7 +765,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	taskc->last_dsq_index = dsq_index;
 	__sync_fetch_and_add(&llcx->vtime, scaled_used);
 	__sync_fetch_and_add(&llcx->dsq_max_vtime[dsq_index], scaled_used);
-	__sync_fetch_and_add(&llcx->dsq_load[dsq_index], scaled_used);
+	__sync_fetch_and_add(&llcx->dsq_load[dsq_index], used);
 
 	// On stopping determine if the task can move to a longer DSQ by
 	// comparing the used time to the scaled DSQ slice.
