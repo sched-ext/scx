@@ -29,6 +29,8 @@ walkdir = "2.4"
 version-compare = "0.1"
 libc = "0.2.137"
 zbus = { version = "5", optional = true }
+rev_buf_reader = { version = "0.3", optional = true }
+csv = { version = "1", optional = true }
 
 [build-dependencies]
 anyhow = "1.0.65"
@@ -46,6 +48,8 @@ walkdir = "2.4"
 default = []
 gpu-topology = ["dep:nvml-wrapper"]
 autopower = ["dep:zbus"]
+fps = ["dep:rev_buf_reader", "dep:csv"]
+all = ["gpu-topology","autopower","fps"]
 
 [lints.clippy]
 not_unsafe_ptr_arg_deref = "allow"
