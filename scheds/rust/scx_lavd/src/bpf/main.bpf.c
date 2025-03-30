@@ -549,6 +549,16 @@ static void update_stat_for_running(struct task_struct *p,
 	u64 wait_period, interval;
 
 	/*
+	 * If the sched_ext core directly dispatched a task, calculating the
+	 * task's deadline and time slice was also skipped. In this case, we
+	 * set the deadline and time slice here.
+	 */
+	if (p->scx.slice == SCX_SLICE_DFL) {
+		p->scx.dsq_vtime = READ_ONCE(cur_logical_clk);
+		p->scx.slice = calc_time_slice(p, taskc);
+	}
+
+	/*
 	 * Update the current logical clock.
 	 */
 	advance_cur_logical_clk(p);
