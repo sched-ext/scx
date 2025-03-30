@@ -310,6 +310,9 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 	}
 
+	/*
+	 * Respect nice priority.
+	 */
 	weight_ft = p->scx.weight * weight_boost;
 	return weight_ft;
 }
