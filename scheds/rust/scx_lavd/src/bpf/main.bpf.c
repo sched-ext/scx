@@ -875,27 +875,38 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * dispatch a task and go.
 	 */
 	if (bpf_cpumask_test_cpu(cpu, cast_mask(active)) ||
-	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw)))
+	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
 		try_consume = true;
+		goto unlock_out;
+	}
+	/* NOTE: This CPU belongs to neither active nor overflow set. */
+
+	/*
+	 * If the previous task is a per-CPU task on this CPU,
+	 * extend the overflow set and go.
+	 */
+	if (prev && is_per_cpu_task(prev)) {
+		bpf_cpumask_set_cpu(cpu, ovrflw);
+		try_consume = true;
+		goto unlock_out;
+	}
 
 	/*
 	 * If the previous task can run on this CPU but not on either active
 	 * or overflow set, extend the overflow set and go.
 	 */
-	if (!try_consume && prev && is_affinitized(prev) &&
+	if (prev && is_affinitized(prev) &&
 	    bpf_cpumask_test_cpu(cpu, prev->cpus_ptr) &&
 	    !bpf_cpumask_intersects(cast_mask(active), prev->cpus_ptr) &&
 	    !bpf_cpumask_intersects(cast_mask(ovrflw), prev->cpus_ptr)) {
 		bpf_cpumask_set_cpu(cpu, ovrflw);
 		try_consume = true;
+		goto unlock_out;
 	}
 
-	if (try_consume)
-		goto unlock_out;
-
 	/*
-	 * If this CPU is not either in active or overflow CPUs, it tries to
-	 * find and run the task pinned on this CPU.
+	 * If this CPU is neither in active nor overflow CPUs,
+	 * try to find and run the task affinitized on this CPU.
 	 */
 	bpf_for_each(scx_dsq, p, dsq_id, 0) {
 		/*
@@ -908,7 +919,27 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 			break;
 
 		/*
-		 * If the task can run on either the active or overflow set,
+		 * If the task is a per-CPU task on this CPU,
+		 * extend the overflow set and go.
+		 * But not on this CPU, try another task.
+		 */
+		if (is_per_cpu_task(p)) {
+			new_cpu = scx_bpf_task_cpu(p);
+			if (new_cpu == cpu) {
+				bpf_cpumask_set_cpu(new_cpu, ovrflw);
+				bpf_task_release(p);
+				try_consume = true;
+				break;
+			}
+			else if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
+				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+
+			bpf_task_release(p);
+			continue;
+		}
+
+		/*
+		 * If the task can run on either active or overflow set,
 		 * try another task.
 		 */
 		if(!is_affinitized(p) ||
@@ -919,9 +950,9 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		}
 
 		/*
-		 * Now, we know that the task cannot run on either the
-		 * active or overflow set. Then, let's consider to extend
-		 * the overflow set.
+		 * Now, we know that the task cannot run on either active
+		 * or overflow set. Then, let's consider to extend the
+		 * overflow set.
 		 */
 		new_cpu = find_cpu_in(p->cpus_ptr, cpuc);
 		if (new_cpu >= 0) {
