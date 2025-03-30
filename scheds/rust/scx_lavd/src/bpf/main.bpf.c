@@ -552,6 +552,10 @@ static void update_stat_for_running(struct task_struct *p,
 	 * If the sched_ext core directly dispatched a task, calculating the
 	 * task's deadline and time slice was also skipped. In this case, we
 	 * set the deadline and time slice here.
+	 *
+	 * Note that this is necessary when the kernel does not support
+	 * SCX_OPS_ENQ_MIGRATION_DISABLED or SCX_OPS_ENQ_MIGRATION_DISABLED
+	 * is not turned on.
 	 */
 	if (p->scx.slice == SCX_SLICE_DFL) {
 		p->scx.dsq_vtime = READ_ONCE(cur_logical_clk);
