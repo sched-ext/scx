@@ -18,8 +18,6 @@
 #include "lb_domain.h"
 #include "deadline.h"
 
-#include "percpu.h"
-
 #include <scx/bpf_arena_common.h>
 #include <errno.h>
 #include <stdbool.h>

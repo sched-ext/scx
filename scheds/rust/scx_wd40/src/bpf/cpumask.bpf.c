@@ -2,7 +2,7 @@
 #include <lib/sdt_task.h>
 
 #include "cpumask.h"
-#include "percpu.h"
+#include <lib/percpu.h>
 
 static struct sdt_allocator scx_bitmap_allocator;
 size_t mask_size;

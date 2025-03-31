@@ -53,13 +53,12 @@
 #include <scx/bpf_arena_spin_lock.h>
 
 #include "cpumask.h"
+#include <lib/percpu.h>
 
 #include "intf.h"
 #include "types.h"
 #include "lb_domain.h"
 #include "deadline.h"
-
-#include "percpu.h"
 
 #include <scx/bpf_arena_common.h>
 #include <errno.h>

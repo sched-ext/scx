@@ -16,7 +16,6 @@
 #include "intf.h"
 #include "types.h"
 #include "lb_domain.h"
-#include "percpu.h"
 
 #include <errno.h>
 #include <stdbool.h>
