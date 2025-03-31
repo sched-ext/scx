@@ -143,26 +143,14 @@ scx_bitmap_to_bpf(struct bpf_cpumask __kptr *bpfmask __arg_trusted,
 		   scx_bitmap_t __arg_arena scx_bitmap)
 {
 	struct scx_bitmap *tmp;
-	int ret, i;
+	int ret;
 
-	if (bpf_ksym_exists(bpf_cpumask_from_bpf_mem)) {
-		tmp = scx_percpu_scx_bitmap_stack();
-		scx_bitmap_copy_to_stack(tmp, scx_bitmap);
+	tmp = scx_percpu_scx_bitmap_stack();
+	scx_bitmap_copy_to_stack(tmp, scx_bitmap);
 
-		ret = bpf_cpumask_from_bpf_mem(bpfmask, tmp, sizeof(*tmp));
-		if (ret)
-			scx_bpf_error("error");
-
-
-		return 0;
-	}
-
-	bpf_for(i, 0, nr_cpu_ids) {
-		if (scx_bitmap_test_cpu(i, scx_bitmap))
-			bpf_cpumask_set_cpu(i, bpfmask);
-		else
-			bpf_cpumask_clear_cpu(i, bpfmask);
-	}
+	ret = bpf_cpumask_populate((struct cpumask *)bpfmask, tmp->bits, sizeof(tmp->bits));
+	if (unlikely(ret))
+		scx_bpf_error("error %d when calling bpf_cpumask_populate", ret);
 
 	return 0;
 }
