@@ -20,13 +20,17 @@ struct pick_ctx {
 	 */
 	u64 cpdom_id;
 	/*
+	 * Additional output arguments for init_active_ovrflw_masks().
+	 */
+	struct bpf_cpumask *active; /* global active mask */
+	struct bpf_cpumask *ovrflw; /* global overflow mask */
+	/*
 	 * Additional output arguments for init_ao_masks().
 	 * Additional input arguments for find_sticky_cpu_and_domain().
 	 */
 	struct cpu_ctx *cpuc_cur;
 	struct bpf_cpumask *a_mask; /* task's active mask */
 	struct bpf_cpumask *o_mask; /* task's overflow mask */
-	struct bpf_cpumask *ovrflw; /* global overflow mask */
 	bool a_empty;
 	bool o_empty;
 	/*
@@ -82,18 +86,24 @@ bool init_idle_i_mask(struct pick_ctx *ctx, const struct cpumask *idle_cpumask)
 }
 
 static __always_inline
+bool init_active_ovrflw_masks(struct pick_ctx *ctx)
+{
+	ctx->active = active_cpumask;
+	ctx->ovrflw = ovrflw_cpumask;
+	if (!ctx->active || !ctx->ovrflw)
+		return false;
+	return true;
+}
+
+static __always_inline
 bool init_ao_masks(struct pick_ctx *ctx)
 {
-	struct bpf_cpumask *active;
-
-	active = active_cpumask;
-	ctx->ovrflw = ovrflw_cpumask;
 	ctx->cpuc_cur = get_cpu_ctx();
-	if (!active || !ctx->ovrflw || !ctx->cpuc_cur)
+	if (!ctx->cpuc_cur)
 		return false;
 
 	if (!is_affinitized(ctx->p)) {
-		ctx->a_mask = active;
+		ctx->a_mask = ctx->active;
 		ctx->o_mask = ctx->ovrflw;
 		ctx->a_empty = ctx->o_empty = false;
 		return true;
@@ -104,7 +114,7 @@ bool init_ao_masks(struct pick_ctx *ctx)
 	if (!ctx->a_mask || !ctx->o_mask)
 		return false;
 
-	bpf_cpumask_and(ctx->a_mask, ctx->p->cpus_ptr, cast_mask(active));
+	bpf_cpumask_and(ctx->a_mask, ctx->p->cpus_ptr, cast_mask(ctx->active));
 	bpf_cpumask_and(ctx->o_mask, ctx->p->cpus_ptr, cast_mask(ctx->ovrflw));
 	ctx->a_empty = bpf_cpumask_empty(cast_mask(ctx->a_mask));
 	ctx->o_empty = bpf_cpumask_empty(cast_mask(ctx->o_mask));
@@ -490,6 +500,22 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	bpf_rcu_read_lock();
 
 	/*
+	 * If a task can run only on a single CPU (e.g., per-CPU kworker),
+	 * we just go with that CPU and set the overflow set if needed.
+	 */
+	if (!init_active_ovrflw_masks(ctx))
+		goto err_out;
+	if (is_per_cpu_task(ctx->p)) {
+		cpu = ctx->prev_cpu;
+		if (!bpf_cpumask_test_cpu(cpu, cast_mask(ctx->active))) {
+			bpf_cpumask_test_and_set_cpu(cpu, ctx->ovrflw);
+		}
+		*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
+		goto unlock_out;
+	}
+	/* NOTE: Now task @p is not a per-CPU task. */
+
+	/*
 	 * If @p cannot run on either active or overflow set, extend the
 	 * overflow set, respecting the cpu preference order.
 	 */
@@ -498,24 +524,12 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	if (ctx->a_empty && ctx->o_empty) {
 		cpu = find_cpu_in(ctx->p->cpus_ptr, ctx->cpuc_cur);
 		if (cpu >= 0) {
-			*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
 			bpf_cpumask_set_cpu(cpu, ctx->ovrflw);
+			*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
 		}
 		goto unlock_out;
 	}
 	/* NOTE: Now task @p can run on either active or overflow set. */
-
-	/*
-	 * If a task can run only on a single CPU (e.g., per-CPU kworker),
-	 * we simply check if the task is still pinned on the prev_cpu and go.
-	 */
-	idle_cpumask = scx_bpf_get_idle_cpumask();
-	if (is_per_cpu_task(ctx->p) &&
-	    bpf_cpumask_test_cpu(ctx->prev_cpu, ctx->p->cpus_ptr)) {
-		cpu = ctx->prev_cpu;
-		*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
-		goto unlock_out;
-	}
 
 	/*
 	 * Find a sticky cpu and domain considering the core & task type
@@ -539,6 +553,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	/*
 	 * If there is no idle CPU, stay on the sticky CPU or domain.
 	 */
+	idle_cpumask = scx_bpf_get_idle_cpumask();
 	if (!init_idle_i_mask(ctx, idle_cpumask))
 		goto err_out;
 	if (ctx->i_empty) {
@@ -669,7 +684,7 @@ unlock_out:
 
 static
 s64 pick_proper_dsq(const struct task_struct *p, struct task_ctx *taskc,
-		    s32 task_cpu, s32 *new_cpu)
+		    s32 task_cpu, s32 *cpu, bool *is_idle)
 {
 	struct pick_ctx ictx = {
 		.p = p,
@@ -678,11 +693,7 @@ s64 pick_proper_dsq(const struct task_struct *p, struct task_ctx *taskc,
 		.wake_flags = 0,
 		.cpdom_id = -ENOMEM,
 	};
-	bool is_idle = false;
-	s32 cpu;
 
-	cpu = pick_idle_cpu(&ictx, &is_idle);
-	if (is_idle && cpu >= 0)
-		*new_cpu = cpu;
+	*cpu = pick_idle_cpu(&ictx, is_idle);
 	return ictx.cpdom_id;
 }
