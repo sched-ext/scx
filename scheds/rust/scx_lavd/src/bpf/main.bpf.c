@@ -742,12 +742,24 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	return cpu_id >= 0 ? cpu_id : prev_cpu;
 }
 
+static bool can_direct_dispatch(u64 dsq_id, s32 cpu, bool is_idle)
+{
+	/*
+	 * If the chosen CPU is idle and there is nothing to do
+	 * in the domain, we can safely choose the fast track.
+	 */
+	if (is_idle && cpu >= 0 && !scx_bpf_dsq_nr_queued(dsq_id))
+		return true;
+	return false;
+}
+
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc_cur;
 	struct task_ctx *taskc;
-	s32 task_cpu, new_cpu = -ENOENT;
+	s32 task_cpu, cpu = -ENOENT;
 	u64 dsq_id, now;
+	bool is_idle = false;
 
 	taskc = get_task_ctx(p);
 	if (!taskc)
@@ -761,30 +773,37 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	p->scx.slice = calc_time_slice(p, taskc);
 
 	/*
-	 * Place a task to a proper DSQ, which is either the task's
-	 * associated compute domain or its alternative domain.
-	 *
-	 * Note that we do not perform direct dispatch to a local DSQ
-	 * (SCX_DSQ_LOCAL_ON) on purpose. In particular, the direct dispatch
-	 * at SCX_ENQ_CPU_SELECTED could increase tail latencies because it
-	 * gives too much favor to non-migratable tasks, so stalling others.
+	 * Find a proper DSQ for the task, which is either the task's
+	 * associated compute domain or its alternative domain, or
+	 * the closest available domain from the previous domain.
 	 */
 	task_cpu = scx_bpf_task_cpu(p);
-	dsq_id = pick_proper_dsq(p, taskc, task_cpu, &new_cpu);
-	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice, p->scx.dsq_vtime,
-				 enq_flags);
+	dsq_id = pick_proper_dsq(p, taskc, task_cpu, &cpu, &is_idle);
+
+	/*
+	 * Enqueue the task to a DSQ. If it is safe to directly dispatch
+	 * to the local DSQ of the chosen CPU, do it. Otherwise, enqueue
+	 * to the chosen DSQ of the chosen domain.
+	 */
+	if (can_direct_dispatch(dsq_id, cpu, is_idle)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
+				   enq_flags);
+	} else {
+		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
+					 p->scx.dsq_vtime, enq_flags);
+	}
 
 	/*
 	 * If a new overflow CPU was assigned while finding a proper DSQ,
 	 * kick the new CPU and go.
 	 */
-	if (new_cpu >= 0) {
-		scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+	if (is_idle && cpu >= 0) {
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return;
 	}
 
 	/*
-	 * If there is no idle cpu for an eligible task, try to preempt a task.
+	 * If there is no idle CPU for an eligible task, try to preempt a task.
 	 * Try to find and kick a victim CPU, which runs a less urgent task,
 	 * from dsq_id. The kick will be done asynchronously.
 	 */

@@ -684,7 +684,7 @@ unlock_out:
 
 static
 s64 pick_proper_dsq(const struct task_struct *p, struct task_ctx *taskc,
-		    s32 task_cpu, s32 *new_cpu)
+		    s32 task_cpu, s32 *cpu, bool *is_idle)
 {
 	struct pick_ctx ictx = {
 		.p = p,
@@ -693,11 +693,7 @@ s64 pick_proper_dsq(const struct task_struct *p, struct task_ctx *taskc,
 		.wake_flags = 0,
 		.cpdom_id = -ENOMEM,
 	};
-	bool is_idle = false;
-	s32 cpu;
 
-	cpu = pick_idle_cpu(&ictx, &is_idle);
-	if (is_idle && cpu >= 0)
-		*new_cpu = cpu;
+	*cpu = pick_idle_cpu(&ictx, is_idle);
 	return ictx.cpdom_id;
 }
