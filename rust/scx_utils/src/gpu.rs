@@ -1,6 +1,6 @@
 #![cfg(feature = "gpu-topology")]
 
-use crate::misc::read_file_usize;
+use crate::misc::read_from_file;
 use crate::{Cpumask, NR_CPU_IDS};
 use nvml_wrapper::bitmasks::InitFlags;
 use nvml_wrapper::enum_wrappers::device::{Clock, TopologyLevel};
@@ -99,7 +99,7 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
             let bus_id = pci_info.bus_id.to_lowercase();
             let fixed_bus_id = bus_id.strip_prefix("0000").unwrap_or("");
             let numa_path = format!("/sys/bus/pci/devices/{}/numa_node", fixed_bus_id);
-            let numa_node = read_file_usize(Path::new(&numa_path)).unwrap_or(0);
+            let numa_node = read_from_file(Path::new(&numa_path)).unwrap_or(0_usize);
 
             let gpu = Gpu {
                 index: GpuIndex::Nvidia { nvml_id: index },
