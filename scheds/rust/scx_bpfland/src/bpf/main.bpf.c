@@ -759,18 +759,39 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 		}
 
 		/*
-		 * If the local DSQ and the shared DSQ have no task waiting
-		 * and the CPU is still a full-idle SMT core, perform a
-		 * direct dispatch.
+		 * Skip direct dispatch if the shared DSQ has tasks waiting
+		 * to prevent starvation.
 		 */
-		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
-		    (local_pcpu || !scx_bpf_dsq_nr_queued(node)) &&
-		    is_fully_idle(prev_cpu)) {
+		if (!local_pcpu && scx_bpf_dsq_nr_queued(node))
+			return false;
+
+		/*
+		 * If the previously used CPU is still a full-idle SMT
+		 * core, perform a direct dispatch.
+		 */
+		if (is_fully_idle(prev_cpu)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
 					   slice_max, enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
 			return true;
+		}
+
+		/*
+		 * In case of a remote wakeup (ttwu_queue), attempt a task
+		 * migration.
+		 */
+		if (!scx_bpf_task_running(p)) {
+			bool is_idle = false;
+			s32 cpu;
+
+			cpu = pick_idle_cpu(p, prev_cpu, 0, &is_idle);
+			if (is_idle) {
+				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, 0);
+				__sync_fetch_and_add(&nr_direct_dispatches, 1);
+
+				return true;
+			}
 		}
 	}
 
