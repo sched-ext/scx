@@ -70,3 +70,8 @@ jobs:
             echo "PR already exists, skipping creation."
           fi
           gh pr merge --auto
+
+      - name: Build Nix kernels
+        if: env.modified == 'true'
+        # Non-blocking step to track that these kernels build with Nix
+        run: nix build ./.github/workflows#kernels."${{ matrix.version }}"

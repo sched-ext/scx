@@ -17,6 +17,25 @@ def get_hash_for_repo_branch(repo, branch):
     return result.stdout.split("\t")[0]
 
 
+def get_nar_hash_and_version(repo, branch, hash):
+    result = subprocess.run(
+        ["nix", "flake", "prefetch", "--json", f"git+{repo}?ref={branch}&rev={hash}"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    j = json.loads(result.stdout)
+
+    result = subprocess.run(
+        ["make", "kernelversion"],
+        cwd=j["storePath"],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    return (j["hash"], result.stdout.rstrip())
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Update kernel locks")
     parser.add_argument(
@@ -50,6 +69,11 @@ if __name__ == "__main__":
 
         v["commitHash"] = new_hash
         v["lastModified"] = int(time.time())
+
+        print(f"Downloading and hashing kernel source for {k}. This will take a while...")
+        (narHash, kver) = get_nar_hash_and_version(v["repo"], v["branch"], v["commitHash"])
+        v["narHash"] = narHash
+        v["kernelVersion"] = kver
 
         diff = True
 
