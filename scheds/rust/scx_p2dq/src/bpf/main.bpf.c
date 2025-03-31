@@ -437,14 +437,6 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 			goto found_cpu;
 		}
 
-		// Next anything in the LLC
-		if (llcx->tmp_cpumask &&
-		    llcx->cpumask &&
-		    bpf_cpumask_and(llcx->tmp_cpumask, idle_cpumask, cast_mask(llcx->cpumask)) &&
-		    llcx->tmp_cpumask && // thanks verifier :(
-		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->tmp_cpumask), 0)) >= 0)
-			goto found_cpu;
-
 		// TODO: handle affinitized tasks to be more topology aware
 		cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
 		goto found_cpu;
