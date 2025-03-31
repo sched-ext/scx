@@ -656,6 +656,20 @@ static void update_stat_for_stopping(struct task_struct *p,
 	taskc->svc_time += task_run_time / p->scx.weight;
 
 	/*
+	 * Count how many times a task completely consumed the assigned time
+	 * slice to boost the task's slice. If not fully consumed, decrease
+	 * the slice boost priority by half.
+	 */
+	if (task_run_time > 0 && task_run_time >= taskc->slice_ns) {
+		if (taskc->slice_boost_prio < LAVD_SLICE_BOOST_MAX_STEP)
+			taskc->slice_boost_prio++;
+	}
+	else {
+		if (taskc->slice_boost_prio)
+			taskc->slice_boost_prio >>= 1;
+	}
+
+	/*
 	 * Reset waker's latency criticality here to limit the latency boost of
 	 * a task. A task will be latency-boosted only once after wake-up.
 	 */
@@ -1135,31 +1149,6 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	try_proc_introspec_cmd(p, taskc);
 }
 
-static bool slice_fully_consumed(struct cpu_ctx *cpuc, struct task_ctx *taskc)
-{
-	u64 run_time_ns;
-
-	run_time_ns = time_delta(taskc->last_stopping_clk, taskc->last_running_clk);
-	return run_time_ns > 0 && run_time_ns >= taskc->slice_ns;
-}
-
-static void adjust_slice_boost(struct cpu_ctx *cpuc, struct task_ctx *taskc)
-{
-	/*
-	 * Count how many times a task completely consumed the assigned time
-	 * slice to boost the task's slice when CPU is under-utilized. If not
-	 * fully consumed, decrease the slice boost priority by half.
-	 */
-	if (slice_fully_consumed(cpuc, taskc)) {
-		if (taskc->slice_boost_prio < LAVD_SLICE_BOOST_MAX_STEP)
-			taskc->slice_boost_prio++;
-	}
-	else {
-		if (taskc->slice_boost_prio)
-			taskc->slice_boost_prio >>= 1;
-	}
-}
-
 void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 {
 	struct cpu_ctx *cpuc;
@@ -1174,11 +1163,6 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	update_stat_for_stopping(p, taskc, cpuc);
-
-	/*
-	 * Adjust slice boost for the task's next schedule.
-	 */
-	adjust_slice_boost(cpuc, taskc);
 }
 
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
