@@ -1,5 +1,5 @@
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::{anyhow, bail};
 use libc;
 use log::{info, warn};
 use scx_stats::prelude::*;
@@ -93,6 +93,18 @@ pub fn read_file_usize(path: &Path) -> Result<usize> {
             bail!("Failed to parse {}", val);
         }
     }
+}
+
+pub fn read_file_usize_vec(path: &Path, separator: char) -> Result<Vec<usize>> {
+    let val = std::fs::read_to_string(path)?;
+
+    val.split(separator)
+        .map(|s| {
+            s.trim()
+                .parse::<usize>()
+                .map_err(|_| anyhow!("Failed to parse '{}' as usize", s))
+        })
+        .collect::<Result<Vec<usize>>>()
 }
 
 /* Load is reported as weight * duty cycle

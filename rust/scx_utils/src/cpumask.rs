@@ -313,8 +313,8 @@ impl Cpumask {
         // The rest in descending order.
         for submask in masks.iter().rev() {
             match case {
-                'x' => write!(f, " {:08x}", submask)?,
-                'X' => write!(f, " {:08X}", submask)?,
+                'x' => write!(f, ",{:08x}", submask)?,
+                'X' => write!(f, ",{:08X}", submask)?,
                 _ => unreachable!(),
             }
         }

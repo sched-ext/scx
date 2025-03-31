@@ -139,39 +139,16 @@ static u64 rsigmoid_u64(u64 v, u64 max)
 	return (v >= max) ? 0 : max - v;
 }
 
-static struct task_ctx *try_get_task_ctx(struct task_struct *p)
-{
-	return bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
-}
-
 static struct task_ctx *get_task_ctx(struct task_struct *p)
 {
-	struct task_ctx *taskc;
-
-	taskc = try_get_task_ctx(p);
-	if (!taskc)
-		scx_bpf_error("task_ctx lookup failed for %s[%d]",
-			      p->comm, p->pid);
-	return taskc;
-}
-
-static struct cpu_ctx *try_get_cpu_ctx(void)
-{
-	const u32 idx = 0;
-
-	return bpf_map_lookup_elem(&cpu_ctx_stor, &idx);
+	return bpf_task_storage_get(&task_ctx_stor, p, 0, 0);
 }
 
 static struct cpu_ctx *get_cpu_ctx(void)
 {
 	const u32 idx = 0;
-	struct cpu_ctx *cpuc;
 
-	cpuc = bpf_map_lookup_elem(&cpu_ctx_stor, &idx);
-	if (!cpuc)
-		scx_bpf_error("cpu_ctx lookup failed for current cpu");
-
-	return cpuc;
+	return bpf_map_lookup_elem(&cpu_ctx_stor, &idx);
 }
 
 static struct cpu_ctx *get_cpu_ctx_id(s32 cpu_id)
@@ -235,11 +212,6 @@ static bool is_affinitized(const struct task_struct *p)
 	return p->nr_cpus_allowed != nr_cpu_ids;
 }
 
-static bool have_idle_cpus(const struct cpumask *idle_mask)
-{
-	return !bpf_cpumask_empty(idle_mask);
-}
-
 static bool is_lat_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
 {
 	return taskc->lat_cri >= stat_cur->avg_lat_cri;
@@ -281,7 +253,7 @@ static bool use_full_cpus(void)
 	return (stat_cur->nr_active + LAVD_CC_NR_OVRFLW) >= nr_cpus_onln;
 }
 
-static u64 pick_any_bit(u64 bitmap, u64 nuance)
+static s64 pick_any_bit(u64 bitmap, u64 nuance)
 {
 	u64 i, pos;
 

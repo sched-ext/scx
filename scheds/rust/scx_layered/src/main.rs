@@ -28,9 +28,6 @@ pub use bpf_skel::*;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use lazy_static::lazy_static;
-use libbpf_rs::skel::OpenSkel;
-use libbpf_rs::skel::Skel;
-use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
@@ -41,7 +38,6 @@ use log::warn;
 use scx_layered::*;
 use scx_stats::prelude::*;
 use scx_utils::compat;
-use scx_utils::import_enums;
 use scx_utils::init_libbpf_logging;
 use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
 use scx_utils::read_netdevs;
@@ -602,16 +598,6 @@ struct Opts {
     specs: Vec<String>,
 }
 
-fn now_monotonic() -> u64 {
-    let mut time = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
-    assert!(ret == 0);
-    time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64
-}
-
 fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
     reader
         .read_stat()
@@ -834,37 +820,12 @@ struct Stats {
 
 impl Stats {
     fn read_layer_usages(cpu_ctxs: &[bpf_intf::cpu_ctx], nr_layers: usize) -> Vec<Vec<u64>> {
-        let now = now_monotonic();
         let mut layer_usages = vec![vec![0u64; NR_LAYER_USAGES]; nr_layers];
 
         for cpu in 0..*NR_CPUS_POSSIBLE {
             for layer in 0..nr_layers {
                 for usage in 0..NR_LAYER_USAGES {
                     layer_usages[layer][usage] += cpu_ctxs[cpu].layer_usages[layer][usage];
-                }
-            }
-        }
-
-        // layer_usages are updated at ops.stopping(). If tasks in a layer
-        // keep running, it may not update the usage stats for a long time
-        // to the point where the reported usage stats fluctuate wildly
-        // making CPU allocation oscillate. Compensate for it by adding the
-        // time spent for the currently running task.
-        //
-        // This is racy but the error range is bound. Implement seq_lock
-        // equivalent to make this fully correct. Due to the raciness, it
-        // may be possible for usage stats to go backward. Use saturating
-        // sub when calculating delta. See cur_layer_utils calculation in
-        // Stats::refresh().
-        for cpuc in cpu_ctxs {
-            let layer = cpuc.task_layer_id as usize;
-            if layer < MAX_LAYERS {
-                let usage = match cpuc.running_owned {
-                    true => LAYER_USAGE_OWNED,
-                    false => LAYER_USAGE_OPEN,
-                };
-                if now > cpuc.running_at {
-                    layer_usages[layer][usage] += now - cpuc.running_at;
                 }
             }
         }
@@ -931,14 +892,13 @@ impl Stats {
             .collect();
 
         let cur_layer_usages = Self::read_layer_usages(&cpu_ctxs, self.nr_layers);
-        // See read_layer_usages() on why saturating_sub is used below.
         let cur_layer_utils: Vec<Vec<f64>> = cur_layer_usages
             .iter()
             .zip(self.prev_layer_usages.iter())
             .map(|(cur, prev)| {
                 cur.iter()
                     .zip(prev.iter())
-                    .map(|(c, p)| (c.saturating_sub(*p)) as f64 / 1_000_000_000.0 / elapsed_f64)
+                    .map(|(c, p)| (c - p) as f64 / 1_000_000_000.0 / elapsed_f64)
                     .collect()
             })
             .collect();
@@ -973,8 +933,11 @@ impl Stats {
             nr_layer_tasks,
             nr_nodes: self.nr_nodes,
 
-            total_util: layer_utils.iter().flatten().sum(),
-            layer_utils: layer_utils,
+            total_util: layer_utils
+                .iter()
+                .map(|x| x.iter().take(LAYER_USAGE_SUM_UPTO + 1).sum::<f64>())
+                .sum(),
+            layer_utils,
             prev_layer_usages: cur_layer_usages,
 
             cpu_busy,

@@ -116,6 +116,7 @@ struct llc_ctx {
 	u64				dsq_load[MAX_DSQS_PER_LLC];
 	struct bpf_cpumask __kptr	*cpumask;
 	struct bpf_cpumask __kptr	*big_cpumask;
+	struct bpf_cpumask __kptr	*tmp_cpumask;
 };
 
 struct node_ctx {

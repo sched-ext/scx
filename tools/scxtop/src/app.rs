@@ -25,9 +25,9 @@ use crate::APP;
 use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
-    Action, CpuhpAction, ExecAction, ForkAction, GpuMemAction, HwPressureAction, IPIAction,
-    SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
-    TraceStartedAction, TraceStoppedAction,
+    Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
+    HwPressureAction, IPIAction, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction,
+    SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
 };
 
 use anyhow::Result;
@@ -58,6 +58,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 
 use std::collections::BTreeMap;
+use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -68,6 +69,7 @@ const DSQ_VTIME_CUTOFF: u64 = 1_000_000_000_000_000;
 /// App is the struct for scxtop application state.
 pub struct App<'a> {
     config: Config,
+    hw_pressure: bool,
     localize: bool,
     locale: SystemLocale,
     stats_client: Arc<Mutex<StatsClient>>,
@@ -192,9 +194,14 @@ impl<'a> App<'a> {
         let trace_file_prefix = config.trace_file_prefix().to_string();
         let trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
 
+        // There isn't a 'is_loaded' method on a prog in libbpf-rs so do the next best thing and
+        // try to infer from the fd
+        let hw_pressure = skel.progs.on_hw_pressure_update.as_fd().as_raw_fd() > 0;
+
         let app = Self {
             config,
             localize: true,
+            hw_pressure,
             locale: SystemLocale::default()?,
             stats_client: Arc::new(Mutex::new(stats_client)),
             sched_stats_raw: "".to_string(),
@@ -532,7 +539,7 @@ impl<'a> App<'a> {
                 } else {
                     "".to_string()
                 },
-                if hw_pressure > 0 {
+                if self.hw_pressure && hw_pressure > 0 {
                     format!("{}", hw_pressure)
                 } else {
                     "".to_string()
@@ -594,7 +601,7 @@ impl<'a> App<'a> {
                         } else {
                             "".to_string()
                         },
-                        if hw_pressure > 0 {
+                        if self.hw_pressure && hw_pressure > 0 {
                             format!(" hw_pressure({})", hw_pressure)
                         } else {
                             "".to_string()
@@ -2150,6 +2157,7 @@ impl<'a> App<'a> {
             self.skel.progs.on_ipi_send_cpu.attach()?,
             self.skel.progs.on_sched_fork.attach()?,
             self.skel.progs.on_sched_exec.attach()?,
+            self.skel.progs.on_sched_exit.attach()?,
         ];
 
         Ok(())
@@ -2282,6 +2290,12 @@ impl<'a> App<'a> {
         }
     }
 
+    fn on_exit(&mut self, action: &ExitAction) {
+        if self.state == AppState::Tracing && action.ts > self.trace_start {
+            self.trace_manager.on_exit(action);
+        }
+    }
+
     fn on_fork(&mut self, action: &ForkAction) {
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_fork(action);
@@ -2384,9 +2398,15 @@ impl<'a> App<'a> {
     }
 
     /// Handles cpu hotplug events.
-    pub fn on_cpu_hp(&mut self, action: &CpuhpAction) {
+    pub fn on_cpu_hp_enter(&mut self, action: &CpuhpEnterAction) {
         if self.state == AppState::Tracing && action.ts > self.trace_start {
-            self.trace_manager.on_cpu_hp(action);
+            self.trace_manager.on_cpu_hp_enter(action);
+        }
+    }
+
+    pub fn on_cpu_hp_exit(&mut self, action: &CpuhpExitAction) {
+        if self.state == AppState::Tracing && action.ts > self.trace_start {
+            self.trace_manager.on_cpu_hp_exit(action);
         }
     }
 
@@ -2486,6 +2506,9 @@ impl<'a> App<'a> {
             Action::Exec(a) => {
                 self.on_exec(a);
             }
+            Action::Exit(a) => {
+                self.on_exit(a);
+            }
             Action::Fork(a) => {
                 self.on_fork(a);
             }
@@ -2495,8 +2518,11 @@ impl<'a> App<'a> {
             Action::GpuMem(a) => {
                 self.on_gpu_mem(a);
             }
-            Action::Cpuhp(a) => {
-                self.on_cpu_hp(a);
+            Action::CpuhpEnter(a) => {
+                self.on_cpu_hp_enter(a);
+            }
+            Action::CpuhpExit(a) => {
+                self.on_cpu_hp_exit(a);
             }
             Action::HwPressure(a) => {
                 self.on_hw_pressure(a);
@@ -2512,6 +2538,7 @@ impl<'a> App<'a> {
             Action::ToggleCpuFreq => self.collect_cpu_freq = !self.collect_cpu_freq,
             Action::ToggleUncoreFreq => self.collect_uncore_freq = !self.collect_uncore_freq,
             Action::ToggleLocalization => self.localize = !self.localize,
+            Action::ToggleHwPressure => self.hw_pressure = !self.hw_pressure,
             Action::IncBpfSampleRate => {
                 let sample_rate = self.skel.maps.data_data.sample_rate;
                 if sample_rate == 0 {

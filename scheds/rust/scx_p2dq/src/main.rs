@@ -18,18 +18,14 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
-use libbpf_rs::skel::OpenSkel;
-use libbpf_rs::skel::Skel;
-use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use log::{debug, info, warn};
 use scx_stats::prelude::*;
 use scx_utils::build_id;
-use scx_utils::import_enums;
+use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
-use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -253,6 +249,10 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.max_dsq_pick2 = opts.max_dsq_pick2;
         skel.maps.rodata_data.smt_enabled = TOPO.smt_enabled;
 
+        match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
+            0 => info!("Kernel does not support queued wakeup optimization."),
+            v => skel.struct_ops.p2dq_mut().flags |= v,
+        }
         let mut skel = scx_ops_load!(skel, p2dq, uei)?;
 
         for cpu in TOPO.all_cpus.values() {

@@ -24,9 +24,6 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
-use libbpf_rs::skel::OpenSkel;
-use libbpf_rs::skel::Skel;
-use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use log::warn;
@@ -35,8 +32,7 @@ use scx_stats::prelude::*;
 use scx_utils::autopower::{fetch_power_profile, PowerProfile};
 use scx_utils::build_id;
 use scx_utils::compat;
-use scx_utils::import_enums;
-use scx_utils::scx_enums;
+use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
@@ -139,6 +135,14 @@ struct Opts {
     #[clap(short = 'l', long, allow_hyphen_values = true, default_value = "20000")]
     slice_us_lag: i64,
 
+    /// Set CPU idle QoS resume latency in microseconds (-1 = disabled).
+    ///
+    /// Setting a lower latency value makes CPUs less likely to enter deeper idle states, enhancing
+    /// performance at the cost of higher power consumption. Alternatively, increasing the latency
+    /// value may reduce performance, but also improve power efficiency.
+    #[clap(short = 'I', long, allow_hyphen_values = true, default_value = "-1")]
+    idle_resume_us: i64,
+
     /// Disable preemption.
     ///
     /// Never allow tasks to preempt others before their assigned time slice expires. This can help
@@ -230,6 +234,7 @@ struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
     opts: &'a Opts,
+    topo: Topology,
     power_profile: PowerProfile,
     stats_server: StatsServer<(), Metrics>,
     user_restart: bool,
@@ -257,6 +262,20 @@ impl<'a> Scheduler<'a> {
             }
         );
 
+        if opts.idle_resume_us >= 0 {
+            if !cpu_idle_resume_latency_supported() {
+                warn!("idle resume latency not supported");
+            } else {
+                info!("Setting idle QoS to {} us", opts.idle_resume_us);
+                for cpu in topo.all_cpus.values() {
+                    update_cpu_idle_resume_latency(
+                        cpu.id,
+                        opts.idle_resume_us.try_into().unwrap(),
+                    )?;
+                }
+            }
+        }
+
         // Initialize BPF connector.
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder.obj_builder.debug(opts.verbose);
@@ -281,7 +300,8 @@ impl<'a> Scheduler<'a> {
         skel.struct_ops.bpfland_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
             | *compat::SCX_OPS_ENQ_LAST
             | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
-            | *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE;
+            | *compat::SCX_OPS_BUILTIN_IDLE_PER_NODE
+            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         info!(
             "scheduler flags: {:#x}",
             skel.struct_ops.bpfland_ops_mut().flags
@@ -324,6 +344,7 @@ impl<'a> Scheduler<'a> {
             skel,
             struct_ops,
             opts,
+            topo,
             power_profile,
             stats_server,
             user_restart: false,
@@ -609,6 +630,16 @@ impl<'a> Scheduler<'a> {
 impl Drop for Scheduler<'_> {
     fn drop(&mut self) {
         info!("Unregister {} scheduler", SCHEDULER_NAME);
+
+        // Restore default CPU idle QoS resume latency.
+        if self.opts.idle_resume_us >= 0 {
+            if cpu_idle_resume_latency_supported() {
+                for cpu in self.topo.all_cpus.values() {
+                    update_cpu_idle_resume_latency(cpu.id, cpu.pm_qos_resume_latency_us as i32)
+                        .unwrap();
+                }
+            }
+        }
     }
 }
 

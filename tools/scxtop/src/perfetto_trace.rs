@@ -17,19 +17,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::bpf_skel::types::bpf_event;
 use crate::edm::{ActionHandler, BpfEventHandler};
 use crate::{
-    Action, CpuhpAction, ExecAction, ForkAction, GpuMemAction, HwPressureAction, IPIAction,
-    SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
+    Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
+    HwPressureAction, IPIAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction,
+    SoftIRQAction,
 };
 
+use crate::protos_gen::perfetto_scx::clock_snapshot::Clock;
 use crate::protos_gen::perfetto_scx::counter_descriptor::Unit::UNIT_COUNT;
 use crate::protos_gen::perfetto_scx::trace_packet::Data::TrackDescriptor as DataTrackDescriptor;
 use crate::protos_gen::perfetto_scx::track_event::Type as TrackEventType;
 use crate::protos_gen::perfetto_scx::{
-    CounterDescriptor, CpuhpEnterFtraceEvent, FtraceEvent, FtraceEventBundle,
-    GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent, SchedProcessExecFtraceEvent,
-    SchedProcessForkFtraceEvent, SchedSwitchFtraceEvent, SchedWakeupFtraceEvent,
-    SchedWakingFtraceEvent, SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent, Trace, TracePacket,
-    TrackDescriptor, TrackEvent,
+    BuiltinClock, ClockSnapshot, CounterDescriptor, CpuhpEnterFtraceEvent, CpuhpExitFtraceEvent,
+    FtraceEvent, FtraceEventBundle, GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent,
+    SchedProcessExecFtraceEvent, SchedProcessExitFtraceEvent, SchedProcessForkFtraceEvent,
+    SchedSwitchFtraceEvent, SchedWakeupFtraceEvent, SchedWakingFtraceEvent,
+    SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent, Trace, TracePacket, TrackDescriptor,
+    TrackEvent,
 };
 
 /// Handler for perfetto traces. For details on data flow in perfetto see:
@@ -86,6 +89,7 @@ impl PerfettoTraceManager {
     pub fn start(&mut self) -> Result<()> {
         self.clear();
         self.trace = Trace::new();
+        self.snapshot_clocks();
         Ok(())
     }
 
@@ -139,6 +143,51 @@ impl PerfettoTraceManager {
         }
 
         desc_map
+    }
+
+    fn get_clock_value(&mut self, clock_id: libc::c_int) -> u64 {
+        let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+        if unsafe { libc::clock_gettime(clock_id, &mut ts) } != 0 {
+            return 0;
+        }
+        (ts.tv_sec as u64 * 1_000_000_000) + ts.tv_nsec as u64
+    }
+
+    fn snapshot_clocks(&mut self) {
+        let mut clock_snapshot = ClockSnapshot::new();
+        let mut clock = Clock::new();
+        clock.set_clock_id(BuiltinClock::BUILTIN_CLOCK_MONOTONIC as u32);
+        clock.set_timestamp(self.get_clock_value(libc::CLOCK_MONOTONIC));
+        clock_snapshot.clocks.push(clock);
+
+        let mut clock = Clock::default();
+        clock.set_clock_id(BuiltinClock::BUILTIN_CLOCK_BOOTTIME as u32);
+        clock.set_timestamp(self.get_clock_value(libc::CLOCK_BOOTTIME));
+        clock_snapshot.clocks.push(clock);
+
+        let mut clock = Clock::default();
+        clock.set_clock_id(BuiltinClock::BUILTIN_CLOCK_REALTIME as u32);
+        clock.set_timestamp(self.get_clock_value(libc::CLOCK_REALTIME));
+        clock_snapshot.clocks.push(clock);
+
+        let mut clock = Clock::default();
+        clock.set_clock_id(BuiltinClock::BUILTIN_CLOCK_REALTIME_COARSE as u32);
+        clock.set_timestamp(self.get_clock_value(libc::CLOCK_REALTIME_COARSE));
+        clock_snapshot.clocks.push(clock);
+
+        let mut clock = Clock::default();
+        clock.set_clock_id(BuiltinClock::BUILTIN_CLOCK_MONOTONIC_COARSE as u32);
+        clock.set_timestamp(self.get_clock_value(libc::CLOCK_MONOTONIC_COARSE));
+        clock_snapshot.clocks.push(clock);
+
+        let mut clock = Clock::default();
+        clock.set_clock_id(BuiltinClock::BUILTIN_CLOCK_MONOTONIC_RAW as u32);
+        clock.set_timestamp(self.get_clock_value(libc::CLOCK_MONOTONIC_RAW));
+        clock_snapshot.clocks.push(clock);
+
+        let mut packet = TracePacket::new();
+        packet.set_clock_snapshot(clock_snapshot);
+        self.trace.packet.push(packet);
     }
 
     /// Stops the trace and writes to configured output file.
@@ -235,6 +284,33 @@ impl PerfettoTraceManager {
         self.clear();
         self.trace_id += 1;
         Ok(())
+    }
+
+    pub fn on_exit(&mut self, action: &ExitAction) {
+        let ExitAction {
+            ts,
+            cpu,
+            pid,
+            tgid,
+            prio,
+            comm,
+        } = action;
+
+        self.ftrace_events.entry(*cpu).or_default().push({
+            let mut ftrace_event = FtraceEvent::new();
+            let mut exit_event = SchedProcessExitFtraceEvent::new();
+
+            exit_event.set_comm(comm.to_string());
+            exit_event.set_pid((*pid).try_into().unwrap());
+            exit_event.set_tgid((*tgid).try_into().unwrap());
+            exit_event.set_prio((*prio).try_into().unwrap());
+
+            ftrace_event.set_timestamp(*ts);
+            ftrace_event.set_sched_process_exit(exit_event);
+            ftrace_event.set_pid(*pid);
+
+            ftrace_event
+        });
     }
 
     pub fn on_fork(&mut self, action: &ForkAction) {
@@ -415,8 +491,8 @@ impl PerfettoTraceManager {
         });
     }
 
-    pub fn on_cpu_hp(&mut self, action: &CpuhpAction) {
-        let CpuhpAction {
+    pub fn on_cpu_hp_enter(&mut self, action: &CpuhpEnterAction) {
+        let CpuhpEnterAction {
             ts,
             cpu,
             target,
@@ -438,6 +514,30 @@ impl PerfettoTraceManager {
         });
     }
 
+    pub fn on_cpu_hp_exit(&mut self, action: &CpuhpExitAction) {
+        let CpuhpExitAction {
+            ts,
+            cpu,
+            state,
+            idx,
+            ret,
+            pid,
+        } = action;
+
+        self.ftrace_events.entry(*cpu).or_default().push({
+            let mut ftrace_event = FtraceEvent::new();
+            let mut cpu_hp_event = CpuhpExitFtraceEvent::new();
+            cpu_hp_event.set_cpu(*cpu);
+            cpu_hp_event.set_state(*state);
+            cpu_hp_event.set_idx(*idx);
+            cpu_hp_event.set_ret(*ret);
+            ftrace_event.set_pid(*pid);
+            ftrace_event.set_timestamp(*ts);
+            ftrace_event.set_cpuhp_exit(cpu_hp_event);
+
+            ftrace_event
+        });
+    }
     /// Adds events for the sched_switch event.
     pub fn on_sched_switch(&mut self, action: &SchedSwitchAction) {
         let SchedSwitchAction {
@@ -548,8 +648,14 @@ impl ActionHandler for PerfettoTraceManager {
             Action::GpuMem(a) => {
                 self.on_gpu_mem(a);
             }
-            Action::Cpuhp(a) => {
-                self.on_cpu_hp(a);
+            Action::Exit(a) => {
+                self.on_exit(a);
+            }
+            Action::CpuhpEnter(a) => {
+                self.on_cpu_hp_enter(a);
+            }
+            Action::CpuhpExit(a) => {
+                self.on_cpu_hp_exit(a);
             }
             _ => {}
         }

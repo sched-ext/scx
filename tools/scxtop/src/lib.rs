@@ -110,6 +110,16 @@ pub struct SchedCpuPerfSetAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ExitAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub pid: u32,
+    pub tgid: u32,
+    pub prio: u32,
+    pub comm: SsoString,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ForkAction {
     pub ts: u64,
     pub cpu: u32,
@@ -203,11 +213,21 @@ pub struct GpuMemAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct CpuhpAction {
+pub struct CpuhpEnterAction {
     pub ts: u64,
     pub cpu: u32,
     pub target: i32,
     pub state: i32,
+    pub pid: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct CpuhpExitAction {
+    pub ts: u64,
+    pub cpu: u32,
+    pub state: i32,
+    pub idx: i32,
+    pub ret: i32,
     pub pid: u32,
 }
 
@@ -221,13 +241,15 @@ pub struct HwPressureAction {
 pub enum Action {
     ChangeTheme,
     ClearEvent,
-    Cpuhp(CpuhpAction),
+    CpuhpEnter(CpuhpEnterAction),
+    CpuhpExit(CpuhpExitAction),
     DecBpfSampleRate,
     DecTickRate,
     Down,
     Enter,
     Event,
     Exec(ExecAction),
+    Exit(ExitAction),
     Fork(ForkAction),
     GpuMem(GpuMemAction),
     Help,
@@ -260,6 +282,7 @@ pub enum Action {
     TickRateChange(std::time::Duration),
     ToggleCpuFreq,
     ToggleLocalization,
+    ToggleHwPressure,
     ToggleUncoreFreq,
     Up,
     None,
@@ -306,12 +329,21 @@ impl TryFrom<&bpf_event> for Action {
                 size: unsafe { event.event.gm.size },
             })),
             #[allow(non_upper_case_globals)]
-            bpf_intf::event_type_CPU_HP => Ok(Action::Cpuhp(CpuhpAction {
+            bpf_intf::event_type_CPU_HP_ENTER => Ok(Action::CpuhpEnter(CpuhpEnterAction {
                 ts: event.ts,
                 pid: unsafe { event.event.chp.pid },
                 cpu: unsafe { event.event.chp.cpu },
                 state: unsafe { event.event.chp.state },
                 target: unsafe { event.event.chp.target },
+            })),
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_CPU_HP_EXIT => Ok(Action::CpuhpExit(CpuhpExitAction {
+                ts: event.ts,
+                pid: unsafe { event.event.cxp.pid },
+                cpu: unsafe { event.event.cxp.cpu },
+                state: unsafe { event.event.cxp.state },
+                idx: unsafe { event.event.cxp.idx },
+                ret: unsafe { event.event.cxp.ret },
             })),
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_HW_PRESSURE => Ok(Action::HwPressure(HwPressureAction {
@@ -362,13 +394,30 @@ impl TryFrom<&bpf_event> for Action {
                     comm: comm.into(),
                 }))
             }
-            #[allow(non_upper_case_globals)]
             bpf_intf::event_type_EXEC => Ok(Action::Exec(ExecAction {
                 ts: event.ts,
                 cpu: event.cpu,
                 old_pid: unsafe { event.event.exec.old_pid },
                 pid: unsafe { event.event.exec.pid },
             })),
+            bpf_intf::event_type_EXIT => {
+                let exit = unsafe { &event.event.exit };
+                let comm = unsafe {
+                    std::str::from_utf8(std::slice::from_raw_parts(
+                        exit.comm.as_ptr() as *const u8,
+                        exit.comm.len(),
+                    ))
+                    .unwrap()
+                };
+                Ok(Action::Exit(ExitAction {
+                    ts: event.ts,
+                    cpu: event.cpu,
+                    pid: exit.pid,
+                    tgid: exit.tgid,
+                    prio: exit.prio,
+                    comm: comm.into(),
+                }))
+            }
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_FORK => {
                 let fork = unsafe { &event.event.fork };
@@ -463,6 +512,7 @@ impl std::fmt::Display for Action {
             Action::ToggleCpuFreq => write!(f, "ToggleCpuFreq"),
             Action::ToggleUncoreFreq => write!(f, "ToggleUncoreFreq"),
             Action::ToggleLocalization => write!(f, "ToggleLocalization"),
+            Action::ToggleHwPressure => write!(f, "ToggleHwPressure"),
             Action::SetState(AppState::Help) => write!(f, "AppStateHelp"),
             Action::SetState(AppState::Llc) => write!(f, "AppStateLlc"),
             Action::SetState(AppState::Node) => write!(f, "AppStateNode"),

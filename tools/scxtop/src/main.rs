@@ -120,6 +120,9 @@ fn attach_progs(skel: &mut BpfSkel) -> Result<Vec<Link>> {
     if let Ok(link) = skel.progs.on_cpuhp_enter.attach() {
         links.push(link);
     }
+    if let Ok(link) = skel.progs.on_cpuhp_exit.attach() {
+        links.push(link);
+    }
     if compat::ksym_exists("gpu_memory_total").is_ok() {
         if let Ok(link) = skel.progs.on_gpu_memory_total.attach() {
             links.push(link);
@@ -173,6 +176,8 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             let mut skel = skel.load()?;
             let mut links = attach_progs(&mut skel)?;
             links.push(skel.progs.on_sched_fork.attach()?);
+            links.push(skel.progs.on_sched_exec.attach()?);
+            links.push(skel.progs.on_sched_exit.attach()?);
 
             let trace_dur = std::time::Duration::from_millis(trace_args.trace_ms);
             let bpf_publisher = BpfEventActionPublisher::new(action_tx.clone());
