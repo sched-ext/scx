@@ -288,11 +288,11 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 	return true;
 }
 
-static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *left,
-					struct llc_ctx *right, bool most_loaded)
+static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *cur_llcx, struct llc_ctx *left,
+					struct llc_ctx *right)
 {
-	s32 left_queued = 0, right_queued = 0;
-	u64 left_load = 0, right_load = 0;
+	s32 cur_queued = 0, left_queued = 0, right_queued = 0;
+	u64 cur_load = 0, left_load = 0, right_load = 0;
 	int i;
 
 	if (!left || !right)
@@ -302,6 +302,9 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *left,
 		if (i >= nr_dsqs_per_llc || i < 0)
 			continue;
 
+		u64 cur_dsq_id = *MEMBER_VPTR(cur_llcx->dsqs, [i]);
+		cur_queued += scx_bpf_dsq_nr_queued(cur_dsq_id);
+		cur_load += *MEMBER_VPTR(cur_llcx->dsq_load, [i]);
 		u64 left_dsq_id = *MEMBER_VPTR(left->dsqs, [i]);
 		left_queued += scx_bpf_dsq_nr_queued(left_dsq_id);
 		left_load += *MEMBER_VPTR(left->dsq_load, [i]);
@@ -315,9 +318,14 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *left,
 	     right_queued < min_nr_queued_pick2))
 		return NULL;
 
+	// If the current LLCs has more load don't try to pick2.
+	if ((cur_queued >= left_queued && cur_queued >= right_queued) ||
+	    (cur_load > left_load && cur_load > right_load))
+	    return NULL;
+
         if (left_queued < right_queued || left_load < right_load)
-		return most_loaded ? right : left;
-	return most_loaded ? left : right;
+		return right;
+	return left;
 }
 
 static s32 pick_two_cpu(struct llc_ctx *cur_llcx, struct task_ctx *taskc,
@@ -834,7 +842,7 @@ static int __always_inline dispatch_cpu(u64 dsq_id, s32 cpu, struct llc_ctx *llc
 }
 
 
-__weak int dispatch_pick_two(s32 cpu)
+static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, struct cpu_ctx *cpuc)
 {
 	struct llc_ctx *llcx, *left, *right;
 	u64 dsq_id;
@@ -854,7 +862,7 @@ __weak int dispatch_pick_two(s32 cpu)
 	}
 
 	// Last ditch effort try consuming from the most loaded DSQ.
-	llcx = pick_two_llc_ctx(left, right, true);
+	llcx = pick_two_llc_ctx(cur_llcx, left, right);
 	if (!llcx)
 		return -EINVAL;
 
@@ -925,7 +933,7 @@ void BPF_STRUCT_OPS(p2dq_dispatch, s32 cpu, struct task_struct *prev)
 		    return;
 	}
 
-	dispatch_pick_two(cpu);
+	dispatch_pick_two(cpu, llcx, cpuc);
 }
 
 void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
