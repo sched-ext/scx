@@ -24,7 +24,7 @@ u64 scx_bitmap_alloc_internal(void)
 
 	data = sdt_alloc(&scx_bitmap_allocator);
 	cast_kern(data);
-	if (!data)
+	if (unlikely(!data))
 		return (u64)(NULL);
 
 	mask = (scx_bitmap_t)data->payload;
@@ -55,7 +55,7 @@ int scx_bitmap_copy_to_stack(struct scx_bitmap *dst, scx_bitmap_t __arg_arena sr
 {
 	int i;
 
-	if (!src || !dst) {
+	if (unlikely(!src || !dst)) {
 		scx_bpf_error("invalid pointer args to pointer copy");
 		return 0;
 	}
