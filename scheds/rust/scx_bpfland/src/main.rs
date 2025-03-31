@@ -191,6 +191,10 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_l3: bool,
 
+    /// Disable SMT awareness.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_smt: bool,
+
     /// Enable CPU frequency control (only with schedutil governor).
     ///
     /// With this option enabled the CPU frequency will be automatically scaled based on the load.
@@ -251,15 +255,13 @@ impl<'a> Scheduler<'a> {
         let topo = Topology::new().unwrap();
 
         // Check host topology to determine if we need to enable SMT capabilities.
+        let smt_enabled = !opts.disable_smt && topo.smt_enabled;
+
         info!(
             "{} {} {}",
             SCHEDULER_NAME,
             build_id::full_version(env!("CARGO_PKG_VERSION")),
-            if topo.smt_enabled {
-                "SMT on"
-            } else {
-                "SMT off"
-            }
+            if smt_enabled { "SMT on" } else { "SMT off" }
         );
 
         if opts.idle_resume_us >= 0 {
@@ -285,7 +287,7 @@ impl<'a> Scheduler<'a> {
 
         // Override default BPF scheduling parameters.
         skel.maps.rodata_data.debug = opts.debug;
-        skel.maps.rodata_data.smt_enabled = topo.smt_enabled;
+        skel.maps.rodata_data.smt_enabled = smt_enabled;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
         skel.maps.rodata_data.local_kthreads = opts.local_kthreads;
         skel.maps.rodata_data.no_preempt = opts.no_preempt;
@@ -323,7 +325,7 @@ impl<'a> Scheduler<'a> {
         }
 
         // Initialize SMT domains.
-        if topo.smt_enabled {
+        if smt_enabled {
             Self::init_smt_domains(&mut skel, &topo)?;
         }
 
