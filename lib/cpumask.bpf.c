@@ -23,7 +23,6 @@ u64 scx_bitmap_alloc_internal(void)
 	int i;
 
 	data = sdt_alloc(&scx_bitmap_allocator);
-	cast_kern(data);
 	if (unlikely(!data))
 		return (u64)(NULL);
 

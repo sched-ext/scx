@@ -112,8 +112,6 @@ static SDT_TASK_FN_ATTRS __u64 sdt_chunk_find_empty(sdt_desc_t *desc)
 	__u64 freeslots;
 	__u64 i;
 
-	cast_kern(desc);
-
 	for (i = 0; i < SDT_TASK_CHUNK_BITMAP_U64S; i++) {
 		freeslots = ~desc->allocated[i];
 		if (freeslots == (__u64)0)
@@ -130,8 +128,6 @@ void __arena *sdt_alloc_stack_pop(struct sdt_alloc_stack __arena *stack)
 {
 	void __arena *slab;
 
-	cast_kern(stack);
-
 	/* Cannot print out diagnostic because we may be holding a lock. */
 	if (unlikely(stack->idx == 0))
 		return NULL;
@@ -147,8 +143,6 @@ static SDT_TASK_FN_ATTRS
 int sdt_alloc_stack(struct sdt_alloc_stack __arena *stack)
 {
 	void __arena *slab;
-
-	cast_kern(stack);
 
 	bpf_spin_lock(&sdt_lock);
 	if (stack->idx >= SDT_TASK_ALLOC_STACK_MIN)
@@ -271,8 +265,6 @@ sdt_desc_t *sdt_alloc_chunk(struct sdt_alloc_stack __arena *stack)
 
 	out = desc;
 
-	cast_kern(desc);
-
 	desc->nr_free = SDT_TASK_ENTS_PER_CHUNK;
 	desc->chunk = chunk;
 
@@ -354,8 +346,6 @@ int sdt_set_idx_state(sdt_desc_t *desc, __u64 pos, bool state)
 	__u64 __arena *allocated = desc->allocated;
 	__u64 bit;
 
-	cast_kern(allocated);
-
 	if (unlikely(pos >= SDT_TASK_ENTS_PER_CHUNK))
 		return -EINVAL;
 
@@ -386,8 +376,6 @@ int sdt_mark_nodes_avail(sdt_desc_t *lv_desc[SDT_TASK_LEVELS], __u64 lv_pos[SDT_
 		ret = sdt_set_idx_state(desc, lv_pos[level], false);
 		if (unlikely(ret != 0))
 			return ret;
-
-		cast_kern(desc);
 
 		desc->nr_free += 1;
 		if (desc->nr_free > 1)
@@ -441,10 +429,7 @@ int sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 		if (level == SDT_TASK_LEVELS - 1)
 			break;
 
-		cast_kern(desc);
-
 		chunk = desc->chunk;
-		cast_kern(chunk);
 
 		desc_children = (sdt_desc_t * __arena *)chunk->descs;
 		desc = desc_children[pos];
@@ -457,15 +442,11 @@ int sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 		}
 	}
 
-	cast_kern(desc);
-
 	chunk = desc->chunk;
-	cast_kern(chunk);
 
 	pos = idx & mask;
 	data = chunk->data[pos];
 	if (likely(!data)) {
-		cast_kern(data);
 
 		data[pos] = (struct sdt_data) {
 			.tid.gen = data->tid.gen + 1,
@@ -530,11 +511,7 @@ sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
 		if (level == SDT_TASK_LEVELS - 1)
 			break;
 
-		cast_kern(desc);
-
 		chunk = desc->chunk;
-		cast_kern(chunk);
-
 		desc_children = (sdt_desc_t * __arena *)chunk->descs;
 		desc = desc_children[pos];
 		if (!desc) {
@@ -547,7 +524,6 @@ sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
 		level = SDT_TASK_LEVELS - 1 - u;
 		tmp = lv_desc[level];
 
-		cast_kern(tmp);
 		ret = sdt_set_idx_state(tmp, lv_pos[level], true);
 		if (ret != 0)
 			break;
@@ -575,7 +551,6 @@ void sdt_alloc_finish(struct sdt_data __arena *data, __u64 idx)
 
 	bpf_spin_unlock(&sdt_lock);
 
-	cast_kern(data);
 	data->tid.idx = idx;
 }
 
@@ -607,10 +582,7 @@ u64 sdt_alloc_internal(struct sdt_allocator *alloc)
 		return (u64)NULL;
 	}
 
-	cast_kern(desc);
-
 	chunk = desc->chunk;
-	cast_kern(chunk);
 
 	/* Populate the leaf node if necessary. */
 	pos = idx & (SDT_TASK_ENTS_PER_CHUNK - 1);
