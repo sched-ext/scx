@@ -320,9 +320,11 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *left,
 	return most_loaded ? left : right;
 }
 
-static s32 pick_two_cpu(struct task_ctx *taskc, bool *is_idle)
+static s32 pick_two_cpu(struct llc_ctx *cur_llcx, struct task_ctx *taskc,
+			bool *is_idle)
 {
-	if ((min_llc_runs_pick2 > 0 && taskc->llc_runs < min_llc_runs_pick2) ||
+	if ((min_llc_runs_pick2 > 0 &&
+	     taskc->llc_runs < min_llc_runs_pick2) ||
 	    !can_pick2(taskc))
 		return -EINVAL;
 
@@ -350,12 +352,20 @@ static s32 pick_two_cpu(struct task_ctx *taskc, bool *is_idle)
 			return -EINVAL;
 	}
 
+	u64 cur_dsq_id = *MEMBER_VPTR(cur_llcx->dsqs, [dsq_index]);
+	s32 cur_queued = scx_bpf_dsq_nr_queued(cur_dsq_id);
+	u64 cur_load = *MEMBER_VPTR(cur_llcx->dsq_load, [dsq_index]);
 	u64 left_dsq_id = *MEMBER_VPTR(left->dsqs, [dsq_index]);
 	s32 left_queued = scx_bpf_dsq_nr_queued(left_dsq_id);
 	u64 left_load = *MEMBER_VPTR(left->dsq_load, [dsq_index]);
 	u64 right_dsq_id = *MEMBER_VPTR(right->dsqs, [dsq_index]);
 	s32 right_queued = scx_bpf_dsq_nr_queued(right_dsq_id);
 	u64 right_load = *MEMBER_VPTR(right->dsq_load, [dsq_index]);
+
+	// If the other LLCs have more load than the current don't bother.
+	if ((left_queued >= cur_queued && right_queued >= cur_queued) ||
+	    (left_load >= cur_load && right_load >= cur_load))
+		return -EINVAL;
 
 	if (min_nr_queued_pick2 > 0 &&
 	    (left_queued < min_nr_queued_pick2 &&
@@ -505,7 +515,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	if (nr_llcs > 1 &&
 	    (eager_load_balance ||
 	     (llc_idle == 0 && nr_queued > llcx->nr_cpus && nr_idle > 0))) {
-		cpu = pick_two_cpu(taskc, is_idle);
+		cpu = pick_two_cpu(llcx, taskc, is_idle);
 		if (cpu >= 0) {
 			stat_inc(P2DQ_STAT_SELECT_PICK2);
 			goto found_cpu;
@@ -556,7 +566,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	if (nr_llcs > 1 &&
 	    !interactive &&
 	    nr_idle > 1 &&
-	    (cpu = pick_two_cpu(taskc, is_idle)) >= 0) {
+	    (cpu = pick_two_cpu(llcx, taskc, is_idle)) >= 0) {
 		stat_inc(P2DQ_STAT_SELECT_PICK2);
 		goto found_cpu;
 	}
