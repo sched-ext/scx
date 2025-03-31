@@ -1,6 +1,7 @@
 #pragma once
 
 #include <scx/common.bpf.h>
+#include <lib/cpumask.h>
 
 struct scx_percpu_storage {
 	struct bpf_cpumask __kptr *bpfmask;

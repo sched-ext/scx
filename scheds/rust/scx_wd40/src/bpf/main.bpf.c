@@ -52,7 +52,7 @@
 #include <scx/bpf_arena_common.h>
 #include <scx/bpf_arena_spin_lock.h>
 
-#include "cpumask.h"
+#include <lib/cpumask.h>
 #include <lib/percpu.h>
 
 #include "intf.h"
