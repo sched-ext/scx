@@ -751,7 +751,7 @@ static void maybe_refresh_layered_cpus_unprotected(struct task_struct *p, struct
 }
 
 static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
-			      const struct cpumask *idle_smtmask)
+			      const struct cpumask *idle_smtmask, const struct layer *layer)
 {
 	bool prev_in_cand;
 	s32 cpu;
@@ -766,11 +766,19 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 	 * partially idle @prev_cpu.
 	 */
 	if (smt_enabled) {
+
+		// if layer is prev_over_idle_core, try prev
+		if (prev_in_cand && layer->prev_over_idle_core &&
+				scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+				return prev_cpu;
+
+		// try prev if layers smt sibling is idle
 		if (prev_in_cand &&
 		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 			return prev_cpu;
 
+		// try a wholly idle cpu
 		cpu = scx_bpf_pick_idle_cpu(cand_cpumask, SCX_PICK_IDLE_CORE);
 		if (cpu >= 0)
 			return cpu;
@@ -830,7 +838,7 @@ s32 pick_idle_big_little(struct layer *layer, struct task_ctx *taskc,
 		bpf_cpumask_and(tmp_cpumask, cast_mask(taskc->layered_mask),
 				cast_mask(big_cpumask));
 		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask),
-					 prev_cpu, idle_smtmask);
+					 prev_cpu, idle_smtmask, layer);
 		goto out_put;
 	}
 	case GROWTH_ALGO_LITTLE_BIG: {
@@ -844,7 +852,7 @@ s32 pick_idle_big_little(struct layer *layer, struct task_ctx *taskc,
 		bpf_cpumask_and(tmp_cpumask, cast_mask(taskc->layered_mask),
 				cast_mask(tmp_cpumask));
 		cpu = pick_idle_cpu_from(cast_mask(tmp_cpumask),
-					 prev_cpu, idle_smtmask);
+					 prev_cpu, idle_smtmask, layer);
 		goto out_put;
 	}
 	default:
@@ -963,7 +971,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 			cpu = -1;
 			goto out_put;
 		}
-		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask)) >= 0)
+		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask, layer)) >= 0)
 			goto out_put;
 
 		if (!(prev_llcc = lookup_llc_ctx(prev_cpuc->llc_id)) ||
@@ -984,11 +992,11 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 			cpu = -1;
 			goto out_put;
 		}
-		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask)) >= 0)
+		if ((cpu = pick_idle_cpu_from(cpumask, prev_cpu, idle_smtmask, layer)) >= 0)
 			goto out_put;
 	}
 
-	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu, idle_smtmask)) >= 0)
+	if ((cpu = pick_idle_cpu_from(layered_cpumask, prev_cpu, idle_smtmask, layer)) >= 0)
 		goto out_put;
 
 	/*
@@ -1000,7 +1008,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	    if (!unprot_mask)
 		    unprot_mask = unprotected_cpumask;
 
-	    if ((cpu = pick_idle_cpu_from(cast_mask(unprot_mask), prev_cpu, idle_smtmask)) >= 0) {
+	    if ((cpu = pick_idle_cpu_from(cast_mask(unprot_mask), prev_cpu, idle_smtmask, layer)) >= 0) {
 		lstat_inc(LSTAT_OPEN_IDLE, layer, cpuc);
 		goto out_put;
 	    }
@@ -1174,7 +1182,7 @@ static void layer_kick_idle_cpu(struct layer *layer)
 	    !(idle_smtmask = scx_bpf_get_idle_smtmask()))
 		return;
 
-	if ((cpu = pick_idle_cpu_from(layer_cpumask, 0, idle_smtmask)) >= 0)
+	if ((cpu = pick_idle_cpu_from(layer_cpumask, 0, idle_smtmask, layer)) >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 	scx_bpf_put_idle_cpumask(idle_smtmask);

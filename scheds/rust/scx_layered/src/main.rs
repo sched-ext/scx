@@ -110,6 +110,7 @@ lazy_static! {
                         preempt_first: false,
                         exclusive: false,
                         allow_node_aligned: false,
+                        prev_over_idle_core: false,
                         idle_smt: None,
                         slice_us: 20000,
                         fifo: false,
@@ -140,6 +141,7 @@ lazy_static! {
                         preempt_first: false,
                         exclusive: true,
                         allow_node_aligned: true,
+                        prev_over_idle_core: true,
                         idle_smt: None,
                         slice_us: 20000,
                         fifo: false,
@@ -174,6 +176,7 @@ lazy_static! {
                         preempt_first: false,
                         exclusive: false,
                         allow_node_aligned: false,
+                        prev_over_idle_core: false,
                         idle_smt: None,
                         slice_us: 800,
                         fifo: false,
@@ -205,6 +208,7 @@ lazy_static! {
                         preempt_first: false,
                         exclusive: false,
                         allow_node_aligned: false,
+                        prev_over_idle_core: false,
                         idle_smt: None,
                         slice_us: 20000,
                         fifo: false,
@@ -373,6 +377,10 @@ lazy_static! {
 ///   fallback. This is a hack to support node-affine tasks without making
 ///   the whole scheduler node aware and should only be used with open
 ///   layers on non-saturated machines to avoid possible stalls.
+///
+/// - prev_over_idle_core: On SMT enabled systems, prefer using the same CPU
+///   when picking a CPU for tasks on this layer, even if that CPUs SMT
+///   sibling is processing a task.
 ///
 /// - weight: Weight of the layer, which is a range from 1 to 10000 with a
 ///   default of 100. Layer weights are used during contention to prevent
@@ -1291,6 +1299,7 @@ impl<'a> Scheduler<'a> {
                     preempt_first,
                     exclusive,
                     allow_node_aligned,
+                    prev_over_idle_core,
                     growth_algo,
                     nodes,
                     slice_us,
@@ -1319,6 +1328,7 @@ impl<'a> Scheduler<'a> {
                 layer.preempt_first.write(*preempt_first);
                 layer.exclusive.write(*exclusive);
                 layer.allow_node_aligned.write(*allow_node_aligned);
+                layer.prev_over_idle_core.write(*prev_over_idle_core);
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;
                 layer.disallow_open_after_ns = match disallow_open_after_us.unwrap() {

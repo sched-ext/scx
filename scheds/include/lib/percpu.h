@@ -1,8 +1,9 @@
 #pragma once
 
 #include <scx/common.bpf.h>
+#include <lib/cpumask.h>
 
-struct wd40_percpu_storage {
+struct scx_percpu_storage {
 	struct bpf_cpumask __kptr *bpfmask;
 	scx_bitmap_t scx_bitmap;
 	cpumask_t cpumask;
@@ -16,7 +17,7 @@ struct wd40_percpu_storage {
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, u32);
-	__type(value, struct wd40_percpu_storage);
+	__type(value, struct scx_percpu_storage);
 	__uint(max_entries, 1);
 } scx_percpu_storage_map __weak SEC(".maps");
 
@@ -56,7 +57,7 @@ static s32 create_save_bpfmask(struct bpf_cpumask __kptr **kptr)
 
 __weak int scx_storage_init_single(u32 cpu)
 {
-	struct wd40_percpu_storage *storage;
+	struct scx_percpu_storage *storage;
 	void *map = &scx_percpu_storage_map;
 	const u32 zero = 0;
 	int ret;
@@ -91,7 +92,7 @@ __weak int scx_percpu_storage_init(void)
 static __maybe_unused
 struct bpf_cpumask *scx_percpu_bpfmask(void)
 {
-	struct wd40_percpu_storage *storage;
+	struct scx_percpu_storage *storage;
 	void *map = &scx_percpu_storage_map;
 	const u32 zero = 0;
 
@@ -111,7 +112,7 @@ struct bpf_cpumask *scx_percpu_bpfmask(void)
 static __maybe_unused
 scx_bitmap_t scx_percpu_scx_bitmap(void)
 {
-	struct wd40_percpu_storage *storage;
+	struct scx_percpu_storage *storage;
 	void *map = &scx_percpu_storage_map;
 	const u32 zero = 0;
 
@@ -131,7 +132,7 @@ scx_bitmap_t scx_percpu_scx_bitmap(void)
 static __maybe_unused
 cpumask_t *scx_percpu_cpumask(void)
 {
-	struct wd40_percpu_storage *storage;
+	struct scx_percpu_storage *storage;
 	void *map = &scx_percpu_storage_map;
 	const u32 zero = 0;
 
@@ -148,7 +149,7 @@ cpumask_t *scx_percpu_cpumask(void)
 static __maybe_unused
 struct scx_bitmap *scx_percpu_scx_bitmap_stack(void)
 {
-	struct wd40_percpu_storage *storage;
+	struct scx_percpu_storage *storage;
 	void *map = &scx_percpu_storage_map;
 	const u32 zero = 0;
 

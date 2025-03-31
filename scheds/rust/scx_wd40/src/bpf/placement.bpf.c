@@ -8,7 +8,7 @@
 #include <scx/ravg_impl.bpf.h>
 #include <lib/sdt_task.h>
 
-#include "cpumask.h"
+#include <lib/cpumask.h>
 
 #include <scx/bpf_arena_common.h>
 #include <scx/bpf_arena_spin_lock.h>
@@ -17,8 +17,6 @@
 #include "types.h"
 #include "lb_domain.h"
 #include "deadline.h"
-
-#include "percpu.h"
 
 #include <scx/bpf_arena_common.h>
 #include <errno.h>
