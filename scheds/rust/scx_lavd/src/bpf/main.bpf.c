@@ -1068,7 +1068,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * Filter out unrelated tasks.
 	 */
 	waker = bpf_get_current_task_btf();
-	waker_taskc = try_get_task_ctx(waker);
+	waker_taskc = get_task_ctx(waker);
 	if (!waker_taskc) {
 		/*
 		 * In this case, the waker could be an idle task
