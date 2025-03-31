@@ -11,15 +11,12 @@
 
   outputs = { self, nixpkgs, flake-utils, nix-develop-gha, ... }:
     flake-utils.lib.eachSystem [ "x86_64-linux" ]
-      (system: {
-        packages.nix-develop-gha = nix-develop-gha.packages."${system}".default;
-
-        devShells =
-          let
-            pkgs = import nixpkgs { inherit system; };
-            common = with pkgs; [ gnutar zstd ];
-          in
-          {
+      (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        {
+          devShells = let common = with pkgs; [ gnutar zstd ]; in {
             update-kernels = pkgs.mkShell {
               buildInputs = with pkgs; common ++ [
                 gh
@@ -45,7 +42,19 @@
               ];
             };
           };
-      }) // flake-utils.lib.eachDefaultSystem (system:
+
+          packages = {
+            nix-develop-gha = nix-develop-gha.packages."${system}".default;
+
+            kernels = builtins.mapAttrs
+              (name: details: (pkgs.callPackage ./build-kernel.nix {
+                inherit name;
+                inherit (details) repo branch commitHash narHash;
+                version = details.kernelVersion;
+              }))
+              (builtins.fromJSON (builtins.readFile ./../../kernel-versions.json));
+          };
+        }) // flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
       in
@@ -61,6 +70,15 @@
 
                 pyproject = false;
                 dontUnpack = true;
+
+                dependencies = with pkgs; [
+                  bash
+                  coreutils
+                  git
+                  gnumake
+                  gnused
+                  nix
+                ];
 
                 installPhase = "install -Dm755 ${./update-kernels.py} $out/bin/update-kernels";
               };

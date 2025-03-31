@@ -10,11 +10,11 @@
 static void __inc_futex_boost(struct cpu_ctx *cpuc)
 {
 	struct task_struct *p = bpf_get_current_task_btf();
-	struct task_ctx *taskc = try_get_task_ctx(p);
+	struct task_ctx *taskc = get_task_ctx(p);
 
 	if (taskc) {
 		if (!cpuc)
-			cpuc = try_get_cpu_ctx();
+			cpuc = get_cpu_ctx();
 
 		if (cpuc) {
 			taskc->futex_boost = true;
@@ -29,11 +29,11 @@ static void __inc_futex_boost(struct cpu_ctx *cpuc)
 static void __dec_futex_boost(struct cpu_ctx *cpuc)
 {
 	struct task_struct *p = bpf_get_current_task_btf();
-	struct task_ctx *taskc = try_get_task_ctx(p);
+	struct task_ctx *taskc = get_task_ctx(p);
 
 	if (taskc && taskc->futex_boost) {
 		if (!cpuc)
-			cpuc = try_get_cpu_ctx();
+			cpuc = get_cpu_ctx();
 
 		if (cpuc) {
 			taskc->futex_boost = false;
@@ -143,7 +143,7 @@ struct tp_syscall_exit {
 SEC("?tracepoint/syscalls/sys_enter_futex")
 int rtp_sys_enter_futex(struct tp_syscall_enter_futex *ctx)
 {
-	struct cpu_ctx *cpuc = try_get_cpu_ctx();
+	struct cpu_ctx *cpuc = get_cpu_ctx();
 
 	if (cpuc)
 		cpuc->futex_op = ctx->op;
@@ -159,7 +159,7 @@ int rtp_sys_exit_futex(struct tp_syscall_exit *ctx)
 	if (ctx->ret < 0)
 		return 0;
 
-	cpuc = try_get_cpu_ctx();
+	cpuc = get_cpu_ctx();
 	if (!cpuc)
 		return 0;
 

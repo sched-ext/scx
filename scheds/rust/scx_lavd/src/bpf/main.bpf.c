@@ -310,6 +310,9 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 	}
 
+	/*
+	 * Respect nice priority.
+	 */
 	weight_ft = p->scx.weight * weight_boost;
 	return weight_ft;
 }
@@ -546,6 +549,20 @@ static void update_stat_for_running(struct task_struct *p,
 	u64 wait_period, interval;
 
 	/*
+	 * If the sched_ext core directly dispatched a task, calculating the
+	 * task's deadline and time slice was also skipped. In this case, we
+	 * set the deadline and time slice here.
+	 *
+	 * Note that this is necessary when the kernel does not support
+	 * SCX_OPS_ENQ_MIGRATION_DISABLED or SCX_OPS_ENQ_MIGRATION_DISABLED
+	 * is not turned on.
+	 */
+	if (p->scx.slice == SCX_SLICE_DFL) {
+		p->scx.dsq_vtime = READ_ONCE(cur_logical_clk);
+		p->scx.slice = calc_time_slice(p, taskc);
+	}
+
+	/*
 	 * Update the current logical clock.
 	 */
 	advance_cur_logical_clk(p);
@@ -725,12 +742,24 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 	return cpu_id >= 0 ? cpu_id : prev_cpu;
 }
 
+static bool can_direct_dispatch(u64 dsq_id, s32 cpu, bool is_idle)
+{
+	/*
+	 * If the chosen CPU is idle and there is nothing to do
+	 * in the domain, we can safely choose the fast track.
+	 */
+	if (is_idle && cpu >= 0 && !scx_bpf_dsq_nr_queued(dsq_id))
+		return true;
+	return false;
+}
+
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx *cpuc_cur;
 	struct task_ctx *taskc;
-	s32 task_cpu, new_cpu = -ENOENT;
+	s32 task_cpu, cpu = -ENOENT;
 	u64 dsq_id, now;
+	bool is_idle = false;
 
 	taskc = get_task_ctx(p);
 	if (!taskc)
@@ -744,30 +773,37 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	p->scx.slice = calc_time_slice(p, taskc);
 
 	/*
-	 * Place a task to a proper DSQ, which is either the task's
-	 * associated compute domain or its alternative domain.
-	 *
-	 * Note that we do not perform direct dispatch to a local DSQ
-	 * (SCX_DSQ_LOCAL_ON) on purpose. In particular, the direct dispatch
-	 * at SCX_ENQ_CPU_SELECTED could increase tail latencies because it
-	 * gives too much favor to non-migratable tasks, so stalling others.
+	 * Find a proper DSQ for the task, which is either the task's
+	 * associated compute domain or its alternative domain, or
+	 * the closest available domain from the previous domain.
 	 */
 	task_cpu = scx_bpf_task_cpu(p);
-	dsq_id = pick_proper_dsq(p, taskc, task_cpu, &new_cpu);
-	scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice, p->scx.dsq_vtime,
-				 enq_flags);
+	dsq_id = pick_proper_dsq(p, taskc, task_cpu, &cpu, &is_idle);
+
+	/*
+	 * Enqueue the task to a DSQ. If it is safe to directly dispatch
+	 * to the local DSQ of the chosen CPU, do it. Otherwise, enqueue
+	 * to the chosen DSQ of the chosen domain.
+	 */
+	if (can_direct_dispatch(dsq_id, cpu, is_idle)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, p->scx.slice,
+				   enq_flags);
+	} else {
+		scx_bpf_dsq_insert_vtime(p, dsq_id, p->scx.slice,
+					 p->scx.dsq_vtime, enq_flags);
+	}
 
 	/*
 	 * If a new overflow CPU was assigned while finding a proper DSQ,
 	 * kick the new CPU and go.
 	 */
-	if (new_cpu >= 0) {
-		scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+	if (is_idle && cpu >= 0) {
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return;
 	}
 
 	/*
-	 * If there is no idle cpu for an eligible task, try to preempt a task.
+	 * If there is no idle CPU for an eligible task, try to preempt a task.
 	 * Try to find and kick a victim CPU, which runs a less urgent task,
 	 * from dsq_id. The kick will be done asynchronously.
 	 */
@@ -858,27 +894,38 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * dispatch a task and go.
 	 */
 	if (bpf_cpumask_test_cpu(cpu, cast_mask(active)) ||
-	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw)))
+	    bpf_cpumask_test_cpu(cpu, cast_mask(ovrflw))) {
 		try_consume = true;
+		goto unlock_out;
+	}
+	/* NOTE: This CPU belongs to neither active nor overflow set. */
+
+	/*
+	 * If the previous task is a per-CPU task on this CPU,
+	 * extend the overflow set and go.
+	 */
+	if (prev && is_per_cpu_task(prev)) {
+		bpf_cpumask_set_cpu(cpu, ovrflw);
+		try_consume = true;
+		goto unlock_out;
+	}
 
 	/*
 	 * If the previous task can run on this CPU but not on either active
 	 * or overflow set, extend the overflow set and go.
 	 */
-	if (!try_consume && prev && is_affinitized(prev) &&
+	if (prev && is_affinitized(prev) &&
 	    bpf_cpumask_test_cpu(cpu, prev->cpus_ptr) &&
 	    !bpf_cpumask_intersects(cast_mask(active), prev->cpus_ptr) &&
 	    !bpf_cpumask_intersects(cast_mask(ovrflw), prev->cpus_ptr)) {
 		bpf_cpumask_set_cpu(cpu, ovrflw);
 		try_consume = true;
+		goto unlock_out;
 	}
 
-	if (try_consume)
-		goto unlock_out;
-
 	/*
-	 * If this CPU is not either in active or overflow CPUs, it tries to
-	 * find and run the task pinned on this CPU.
+	 * If this CPU is neither in active nor overflow CPUs,
+	 * try to find and run the task affinitized on this CPU.
 	 */
 	bpf_for_each(scx_dsq, p, dsq_id, 0) {
 		/*
@@ -891,7 +938,27 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 			break;
 
 		/*
-		 * If the task can run on either the active or overflow set,
+		 * If the task is a per-CPU task on this CPU,
+		 * extend the overflow set and go.
+		 * But not on this CPU, try another task.
+		 */
+		if (is_per_cpu_task(p)) {
+			new_cpu = scx_bpf_task_cpu(p);
+			if (new_cpu == cpu) {
+				bpf_cpumask_set_cpu(new_cpu, ovrflw);
+				bpf_task_release(p);
+				try_consume = true;
+				break;
+			}
+			else if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
+				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
+
+			bpf_task_release(p);
+			continue;
+		}
+
+		/*
+		 * If the task can run on either active or overflow set,
 		 * try another task.
 		 */
 		if(!is_affinitized(p) ||
@@ -902,9 +969,9 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		}
 
 		/*
-		 * Now, we know that the task cannot run on either the
-		 * active or overflow set. Then, let's consider to extend
-		 * the overflow set.
+		 * Now, we know that the task cannot run on either active
+		 * or overflow set. Then, let's consider to extend the
+		 * overflow set.
 		 */
 		new_cpu = find_cpu_in(p->cpus_ptr, cpuc);
 		if (new_cpu >= 0) {
@@ -1001,7 +1068,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * Filter out unrelated tasks.
 	 */
 	waker = bpf_get_current_task_btf();
-	waker_taskc = try_get_task_ctx(waker);
+	waker_taskc = get_task_ctx(waker);
 	if (!waker_taskc) {
 		/*
 		 * In this case, the waker could be an idle task
@@ -1722,9 +1789,6 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .init_task		= (void *)lavd_init_task,
 	       .init			= (void *)lavd_init,
 	       .exit			= (void *)lavd_exit,
-	       .flags			= SCX_OPS_ENQ_EXITING |
-					  SCX_OPS_ENQ_LAST |
-					  SCX_OPS_KEEP_BUILTIN_IDLE,
 	       .timeout_ms		= 30000U,
 	       .name			= "lavd");
 
