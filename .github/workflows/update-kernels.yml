@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Load dependencies
-        run: nix run ./.github/workflows#nix-develop-gha -- ./.github/workflows#update-kernels
+        run: nix run ./.github/include#nix-develop-gha -- ./.github/include#update-kernels
 
       - name: List kernels
         id: output
@@ -43,12 +43,12 @@ jobs:
           token: ${{ secrets.GH_TOKEN_FOR_UPDATES }}
 
       - name: Load dependencies
-        run: nix run ./.github/workflows#nix-develop-gha -- ./.github/workflows#update-kernels
+        run: nix run ./.github/include#nix-develop-gha -- ./.github/include#update-kernels
 
       - name: Update kernel
         run: |
           git switch -c "deps/kernel/${{ matrix.version }}"
-          nix run ./.github/workflows#update-kernels -- ${{ matrix.version }}
+          nix run ./.github/include#update-kernels -- ${{ matrix.version }}
           git diff --exit-code || echo 'modified=true' >> $GITHUB_ENV
 
       - name: Commit and open PR
@@ -74,4 +74,4 @@ jobs:
       - name: Build Nix kernels
         if: env.modified == 'true'
         # Non-blocking step to track that these kernels build with Nix
-        run: nix build ./.github/workflows#kernels."${{ matrix.version }}"
+        run: nix build ./.github/include#kernels."${{ matrix.version }}"
