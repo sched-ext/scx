@@ -36,9 +36,9 @@ This repository has a kernel lock file at `./kernel-versions.json` where we trac
 several kernels important to development.
 
 If your change requires a new commit from a branch, you can update this file with:
-    nix run ./.github/workflows#update-kernels
+    nix run ./.github/include#update-kernels
 or with:
-    python3 ./.github/workflows/update-kernels.py
+    python3 ./.github/include/update-kernels.py
 
 Otherwise new changes will be picked up automatically. If the changes that are
 picked up automatically fail CI, you can fix this in a PR separately - the automatic
