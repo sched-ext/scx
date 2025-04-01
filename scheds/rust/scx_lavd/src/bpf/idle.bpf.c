@@ -72,7 +72,7 @@ struct pick_ctx {
 static __always_inline
 bool init_idle_i_mask(struct pick_ctx *ctx, const struct cpumask *idle_cpumask)
 {
-	if (!is_affinitized(ctx->p))
+	if (!is_affinitized(ctx->taskc))
 		ctx->i_mask = idle_cpumask;
 	else {
 		struct bpf_cpumask *_i_mask = ctx->cpuc_cur->tmp_i_mask;
@@ -102,7 +102,7 @@ bool init_ao_masks(struct pick_ctx *ctx)
 	if (!ctx->cpuc_cur)
 		return false;
 
-	if (!is_affinitized(ctx->p)) {
+	if (!is_affinitized(ctx->taskc)) {
 		ctx->a_mask = ctx->active;
 		ctx->o_mask = ctx->ovrflw;
 		ctx->a_empty = ctx->o_empty = false;
@@ -295,15 +295,15 @@ s32 find_sticky_cpu(struct pick_ctx *ctx, s32 sticky_cpu, s64 sticky_cpdom)
 }
 
 static __always_inline
-bool can_run_on_cpu(struct pick_ctx *ctx, const struct task_struct *p, s32 cpu)
+bool can_run_on_cpu(struct pick_ctx *ctx, s32 cpu)
 {
 	struct bpf_cpumask *a_mask;
 	struct bpf_cpumask *o_mask;
 
-	if (!is_affinitized(p))
+	if (!is_affinitized(ctx->taskc))
 		return true;
 
-	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+	if (!bpf_cpumask_test_cpu(cpu, ctx->p->cpus_ptr))
 		return false;
 
 	a_mask = ctx->a_mask;
@@ -316,13 +316,12 @@ bool can_run_on_cpu(struct pick_ctx *ctx, const struct task_struct *p, s32 cpu)
 }
 
 static __always_inline
-bool can_run_on_domain(struct pick_ctx *ctx, const struct task_struct *p,
-		       s64 cpdom)
+bool can_run_on_domain(struct pick_ctx *ctx, s64 cpdom)
 {
 	struct cpdom_ctx *cpdc;
 	struct bpf_cpumask *cpd_mask, *a_mask, *o_mask;
 
-	if (!is_affinitized(p))
+	if (!is_affinitized(ctx->taskc))
 		return true;
 
 	cpd_mask = MEMBER_VPTR(cpdom_cpumask, [cpdom]);
@@ -344,10 +343,9 @@ bool can_run_on_domain(struct pick_ctx *ctx, const struct task_struct *p,
 }
 
 static __always_inline
-bool test_cpu_stickable(struct pick_ctx *ctx, const struct task_struct *p,
-			s32 cpu, bool is_task_big)
+bool test_cpu_stickable(struct pick_ctx *ctx, s32 cpu, bool is_task_big)
 {
-	if (can_run_on_cpu(ctx, p, cpu)) {
+	if (can_run_on_cpu(ctx, cpu)) {
 		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc || ctx->i_m >= 2 || ctx->i_nm >= 2)
 			return false;
@@ -382,10 +380,10 @@ s32 find_sticky_cpu_and_domain(struct pick_ctx *ctx, s64 *sticky_cpdom)
 	ctx->cpus_not_match[1] = -ENOENT;
 	ctx->i_m = 0;
 	ctx->i_nm = 0;
-	test_cpu_stickable(ctx, ctx->p, ctx->prev_cpu, ctx->is_task_big);
+	test_cpu_stickable(ctx, ctx->prev_cpu, ctx->is_task_big);
 	if (ctx->wake_flags & SCX_WAKE_SYNC) {
 		ctx->waker_cpu = bpf_get_smp_processor_id();
-		test_cpu_stickable(ctx, ctx->p, ctx->waker_cpu, ctx->is_task_big);
+		test_cpu_stickable(ctx, ctx->waker_cpu, ctx->is_task_big);
 	}
 
 	/*
@@ -414,7 +412,7 @@ s32 find_sticky_cpu_and_domain(struct pick_ctx *ctx, s64 *sticky_cpdom)
 	 */
 	if (ctx->i_nm == 1) {
 		q0 = ctx->cpdoms_not_match[0];
-		if (can_run_on_domain(ctx, ctx->p, q0)) {
+		if (can_run_on_domain(ctx, q0)) {
 			*sticky_cpdom = q0;
 			return -ENOENT;
 		}
@@ -422,8 +420,8 @@ s32 find_sticky_cpu_and_domain(struct pick_ctx *ctx, s64 *sticky_cpdom)
 		q0 = ctx->cpdoms_not_match[0];
 		q1 = ctx->cpdoms_not_match[1];
 
-		if (q0 != q1 && can_run_on_domain(ctx, ctx->p, q0) &&
-		    can_run_on_domain(ctx, ctx->p, q1)) {
+		if (q0 != q1 && can_run_on_domain(ctx, q0) &&
+		    can_run_on_domain(ctx, q1)) {
 			if (scx_bpf_dsq_nr_queued(q0) > scx_bpf_dsq_nr_queued(q1)) {
 				*sticky_cpdom = q1;
 				return -ENOENT;
@@ -432,10 +430,10 @@ s32 find_sticky_cpu_and_domain(struct pick_ctx *ctx, s64 *sticky_cpdom)
 				*sticky_cpdom = q0;
 				return -ENOENT;
 			}
-		} else if (can_run_on_domain(ctx, ctx->p, q0)) {
+		} else if (can_run_on_domain(ctx, q0)) {
 			*sticky_cpdom = q0;
 			return -ENOENT;
-		} else if (can_run_on_domain(ctx, ctx->p, q1)) {
+		} else if (can_run_on_domain(ctx, q1)) {
 			*sticky_cpdom = q1;
 			return -ENOENT;
 		}
@@ -448,7 +446,7 @@ s32 find_sticky_cpu_and_domain(struct pick_ctx *ctx, s64 *sticky_cpdom)
 	 * the previous CPU's compute domain to reduce cross-domain migration.
 	 */
 	cpuc = get_cpu_ctx_id(ctx->prev_cpu);
-	if (cpuc && can_run_on_domain(ctx, ctx->p, cpuc->cpdom_id)) {
+	if (cpuc && can_run_on_domain(ctx, cpuc->cpdom_id)) {
 		*sticky_cpdom = cpuc->cpdom_id;
 		return -ENOENT;
 	}

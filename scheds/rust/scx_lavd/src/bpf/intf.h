@@ -117,11 +117,12 @@ struct task_ctx {
 	/*
 	 * Task deadline and time slice
 	 */
+	u32	nr_cpus_allowed;	/* the number of allowed CPUs running on */
 	u32	lat_cri;		/* final context-aware latency criticality */
 	u32	lat_cri_waker;		/* waker's latency criticality */
 	u32	perf_cri;		/* performance criticality of a task */
 	u32	slice_ns;		/* time slice */
-	s8	futex_boost;		/* futex boost count */
+	s8	futex_boost;		/* futex acquired or not */
 	u8	is_greedy;		/* task's overscheduling ratio compared to its nice priority */
 	u8	need_lock_boost;	/* need to boost lock for deadline calculation */
 	u8	lock_holder_xted;	/* slice is already extended for a lock holder task */

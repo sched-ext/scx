@@ -292,7 +292,7 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 	 * Prioritize an affinitized task since it has restrictions
 	 * in placement so it tends to be delayed.
 	 */
-	if (is_affinitized(p))
+	if (is_affinitized(taskc))
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
@@ -436,6 +436,9 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 nr_queued;
 	u32 slice;
+
+	if (!taskc)
+		return LAVD_SLICE_MAX_NS_DFL;
 
 	/*
 	 * The time slice should be short enough to schedule all runnable tasks
@@ -654,6 +657,20 @@ static void update_stat_for_stopping(struct task_struct *p,
 	taskc->last_stopping_clk = now;
 
 	taskc->svc_time += task_run_time / p->scx.weight;
+
+	/*
+	 * Count how many times a task completely consumed the assigned time
+	 * slice to boost the task's slice. If not fully consumed, decrease
+	 * the slice boost priority by half.
+	 */
+	if (task_run_time > 0 && task_run_time >= taskc->slice_ns) {
+		if (taskc->slice_boost_prio < LAVD_SLICE_BOOST_MAX_STEP)
+			taskc->slice_boost_prio++;
+	}
+	else {
+		if (taskc->slice_boost_prio)
+			taskc->slice_boost_prio >>= 1;
+	}
 
 	/*
 	 * Reset waker's latency criticality here to limit the latency boost of
@@ -914,7 +931,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If the previous task can run on this CPU but not on either active
 	 * or overflow set, extend the overflow set and go.
 	 */
-	if (prev && is_affinitized(prev) &&
+	if (prev && is_affinitized(taskc) &&
 	    bpf_cpumask_test_cpu(cpu, prev->cpus_ptr) &&
 	    !bpf_cpumask_intersects(cast_mask(active), prev->cpus_ptr) &&
 	    !bpf_cpumask_intersects(cast_mask(ovrflw), prev->cpus_ptr)) {
@@ -961,9 +978,10 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * If the task can run on either active or overflow set,
 		 * try another task.
 		 */
-		if(!is_affinitized(p) ||
+		taskc = get_task_ctx(p);
+		if(taskc && (!is_affinitized(taskc) ||
 		   bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
-		   bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr)) {
+		   bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))) {
 			bpf_task_release(p);
 			continue;
 		}
@@ -1135,31 +1153,6 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	try_proc_introspec_cmd(p, taskc);
 }
 
-static bool slice_fully_consumed(struct cpu_ctx *cpuc, struct task_ctx *taskc)
-{
-	u64 run_time_ns;
-
-	run_time_ns = time_delta(taskc->last_stopping_clk, taskc->last_running_clk);
-	return run_time_ns > 0 && run_time_ns >= taskc->slice_ns;
-}
-
-static void adjust_slice_boost(struct cpu_ctx *cpuc, struct task_ctx *taskc)
-{
-	/*
-	 * Count how many times a task completely consumed the assigned time
-	 * slice to boost the task's slice when CPU is under-utilized. If not
-	 * fully consumed, decrease the slice boost priority by half.
-	 */
-	if (slice_fully_consumed(cpuc, taskc)) {
-		if (taskc->slice_boost_prio < LAVD_SLICE_BOOST_MAX_STEP)
-			taskc->slice_boost_prio++;
-	}
-	else {
-		if (taskc->slice_boost_prio)
-			taskc->slice_boost_prio >>= 1;
-	}
-}
-
 void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 {
 	struct cpu_ctx *cpuc;
@@ -1174,11 +1167,6 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	update_stat_for_stopping(p, taskc, cpuc);
-
-	/*
-	 * Adjust slice boost for the task's next schedule.
-	 */
-	adjust_slice_boost(cpuc, taskc);
 }
 
 void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
@@ -1358,6 +1346,7 @@ void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 		return;
 	}
 
+	taskc->nr_cpus_allowed = bpf_cpumask_weight(p->cpus_ptr);
 	set_on_core_type(taskc, cpumask);
 }
 
@@ -1406,6 +1395,7 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	u64 now = scx_bpf_now();
 
 	__builtin_memset(taskc, 0, sizeof(*taskc));
+	taskc->nr_cpus_allowed = bpf_cpumask_weight(p->cpus_ptr);
 	taskc->last_running_clk = now; /* for run_time_ns */
 	taskc->last_stopping_clk = now; /* for run_time_ns */
 	taskc->run_time_ns = slice_max_ns;
