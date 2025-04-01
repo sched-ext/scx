@@ -86,8 +86,9 @@ struct task_ctx {
 	/* The task is a workqueue worker thread */
 	bool			is_kworker;
 
-	/* Allowed on all CPUs and eligible for DIRECT_GREEDY optimization */
+	/* Allowed to run on all CPUs */
 	bool			all_cpus;
+
 
 	struct bpf_cpumask __kptr *mask;
 };
