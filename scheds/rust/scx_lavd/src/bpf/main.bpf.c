@@ -292,7 +292,7 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 	 * Prioritize an affinitized task since it has restrictions
 	 * in placement so it tends to be delayed.
 	 */
-	if (is_affinitized(p))
+	if (is_affinitized(taskc))
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
@@ -436,6 +436,9 @@ static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 nr_queued;
 	u32 slice;
+
+	if (!taskc)
+		return LAVD_SLICE_MAX_NS_DFL;
 
 	/*
 	 * The time slice should be short enough to schedule all runnable tasks
@@ -928,7 +931,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	 * If the previous task can run on this CPU but not on either active
 	 * or overflow set, extend the overflow set and go.
 	 */
-	if (prev && is_affinitized(prev) &&
+	if (prev && is_affinitized(taskc) &&
 	    bpf_cpumask_test_cpu(cpu, prev->cpus_ptr) &&
 	    !bpf_cpumask_intersects(cast_mask(active), prev->cpus_ptr) &&
 	    !bpf_cpumask_intersects(cast_mask(ovrflw), prev->cpus_ptr)) {
@@ -975,9 +978,10 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 		 * If the task can run on either active or overflow set,
 		 * try another task.
 		 */
-		if(!is_affinitized(p) ||
+		taskc = get_task_ctx(p);
+		if(taskc && (!is_affinitized(taskc) ||
 		   bpf_cpumask_intersects(cast_mask(active), p->cpus_ptr) ||
-		   bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr)) {
+		   bpf_cpumask_intersects(cast_mask(ovrflw), p->cpus_ptr))) {
 			bpf_task_release(p);
 			continue;
 		}
@@ -1342,6 +1346,7 @@ void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 		return;
 	}
 
+	taskc->nr_cpus_allowed = bpf_cpumask_weight(p->cpus_ptr);
 	set_on_core_type(taskc, cpumask);
 }
 
@@ -1390,6 +1395,7 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	u64 now = scx_bpf_now();
 
 	__builtin_memset(taskc, 0, sizeof(*taskc));
+	taskc->nr_cpus_allowed = bpf_cpumask_weight(p->cpus_ptr);
 	taskc->last_running_clk = now; /* for run_time_ns */
 	taskc->last_stopping_clk = now; /* for run_time_ns */
 	taskc->run_time_ns = slice_max_ns;

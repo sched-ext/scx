@@ -117,6 +117,7 @@ struct task_ctx {
 	/*
 	 * Task deadline and time slice
 	 */
+	u32	nr_cpus_allowed;	/* the number of allowed CPUs running on */
 	u32	lat_cri;		/* final context-aware latency criticality */
 	u32	lat_cri_waker;		/* waker's latency criticality */
 	u32	perf_cri;		/* performance criticality of a task */
