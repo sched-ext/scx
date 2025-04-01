@@ -319,8 +319,8 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *cur_llcx, struct llc_ctx
 		return NULL;
 
 	// If the current LLCs has more load don't try to pick2.
-	if ((cur_queued >= left_queued && cur_queued >= right_queued) ||
-	    (cur_load > left_load && cur_load > right_load))
+	if ((nr_llcs > 2 && cur_queued >= left_queued && cur_queued >= right_queued) ||
+	    (nr_llcs > 2 && cur_load > left_load && cur_load > right_load))
 	    return NULL;
 
         if (left_queued < right_queued || left_load < right_load)
@@ -371,8 +371,8 @@ static s32 pick_two_cpu(struct llc_ctx *cur_llcx, struct task_ctx *taskc,
 	u64 right_load = *MEMBER_VPTR(right->dsq_load, [dsq_index]);
 
 	// If the other LLCs have more load than the current don't bother.
-	if ((left_queued >= cur_queued && right_queued >= cur_queued) ||
-	    (left_load >= cur_load && right_load >= cur_load))
+	if ((nr_llcs > 2 && left_queued >= cur_queued && right_queued >= cur_queued) ||
+	    (nr_llcs > 2 && left_load > cur_load && right_load > cur_load))
 		return -EINVAL;
 
 	if (min_nr_queued_pick2 > 0 &&
