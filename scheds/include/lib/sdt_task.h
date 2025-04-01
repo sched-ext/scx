@@ -1,8 +1,8 @@
 /*
  * SPDX-License-Identifier: GPL-2.0
- * Copyright (c) 2024 Meta Platforms, Inc. and affiliates.
- * Copyright (c) 2024 Tejun Heo <tj@kernel.org>
- * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
+ * Copyright (c) 2025 Meta Platforms, Inc. and affiliates.
+ * Copyright (c) 2025 Tejun Heo <tj@kernel.org>
+ * Copyright (c) 2025 Emil Tsalapatis <etsal@meta.com>
  */
 #pragma once
 #include <scx/bpf_arena_common.h>
@@ -106,6 +106,39 @@ struct scx_static {
 
 #ifdef __BPF__
 
+#include <scx/bpf_arena_spin_lock.h>
+
+struct scx_ring;
+typedef struct scx_ring __arena scx_ring_t;
+
+#define SCX_RING_MAX (SDT_TASK_ENTS_PER_CHUNK - 2)
+
+struct scx_ring {
+	void __arena	*elems[SCX_RING_MAX];
+	scx_ring_t	*prev;
+	scx_ring_t	*next;
+};
+
+/*
+ * Extensible stack struct.
+ */
+struct scx_stk {
+	arena_spinlock_t __arena *lock;
+
+	scx_ring_t *first;	/* First ring. */
+	scx_ring_t *last;
+
+	scx_ring_t *current;	/* Current ring. */
+	__u64 cind;
+
+	__u64 capacity;		/* Free slots in the ring buffer. */
+	__u64 available;	/* Available items in the ring buffer. */
+	__u64 data_size;
+	__u64 nr_pages_per_alloc;
+
+	scx_ring_t *reserve;
+};
+
 void __arena *scx_task_data(struct task_struct *p);
 int scx_task_init(__u64 data_size);
 void __arena *scx_task_alloc(struct task_struct *p);
@@ -120,5 +153,11 @@ int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx);
 
 void __arena *scx_static_alloc(size_t bytes);
 int scx_static_init(size_t max_alloc_pages);
+
+u64 scx_stk_alloc(struct scx_stk *stack);
+int scx_stk_init(struct scx_stk *stackp, __u64 data_size, __u64 nr_pages_per_alloc);
+int scx_stk_free_internal(struct scx_stk *stack, __u64 elem);
+
+#define scx_stk_free(stack, elem) scx_stk_free_internal(stack, (__u64)elem)
 
 #endif /* __BPF__ */
