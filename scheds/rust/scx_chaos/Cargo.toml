@@ -3,6 +3,9 @@ name = "scx_chaos"
 version = "1.0.11"
 edition = "2021"
 
+[package.metadata.scx]
+ci.use_clippy = true
+
 [dependencies]
 scx_utils = { path = "../../../rust/scx_utils", version = "1.0.13" }
 scx_p2dq = { path = "../../../scheds/rust/scx_p2dq", version = "1.0.12" }

@@ -327,7 +327,7 @@ mod tests {
 
         assert_eq!(merged.theme(), &AppTheme::MidnightGreen);
         assert_eq!(merged.tick_rate_ms(), 114);
-        assert_eq!(merged.debug(), true);
-        assert_eq!(merged.exclude_bpf(), false);
+        assert!(merged.debug());
+        assert!(!merged.exclude_bpf());
     }
 }

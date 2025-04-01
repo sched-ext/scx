@@ -7,6 +7,9 @@ license = "GPL-2.0-only"
 repository = "https://github.com/sched-ext/scx"
 description = "sched_ext scheduler tool for observability"
 
+[package.metadata.scx]
+ci.use_clippy = true
+
 [dependencies]
 anyhow = "1.0.65"
 clap = { version = "4.5.28", features = [
