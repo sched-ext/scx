@@ -1,8 +1,8 @@
 /*
  * SPDX-License-Identifier: GPL-2.0
- * Copyright (c) 2024 Meta Platforms, Inc. and affiliates.
- * Copyright (c) 2024 Tejun Heo <tj@kernel.org>
- * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
+ * Copyright (c) 2024-2025 Meta Platforms, Inc. and affiliates.
+ * Copyright (c) 2024-2025 Tejun Heo <tj@kernel.org>
+ * Copyright (c) 2024-2025 Emil Tsalapatis <etsal@meta.com>
  */
 
 #include <scx/common.bpf.h>
@@ -682,4 +682,250 @@ int scx_static_init(size_t alloc_pages)
 	bpf_spin_unlock(&alloc_lock);
 
 	return 0;
+}
+
+__weak
+int scx_stk_init(struct scx_stk *stack, __u64 data_size, __u64 nr_pages_per_alloc)
+{
+	if (!stack)
+		return -EINVAL;
+
+	stack->data_size = data_size;
+	stack->nr_pages_per_alloc = nr_pages_per_alloc;
+
+	stack->lock = scx_static_alloc(sizeof(*stack->lock));
+	if (!stack->lock) {
+		scx_bpf_error("failed to allocate lock");
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+static void scx_stk_push(struct scx_stk *stack)
+{
+	scx_ring_t *ring = stack->current;
+	int ridx = stack->cind;
+
+	ridx += 1;
+
+	/* Possibly loop into the next ring. */
+	if (ridx == SCX_RING_MAX) {
+		ridx = 0;
+		ring = ring->next;
+	}
+
+	/* Possibly loop back into the first ring. */
+	if (!ring)
+		ring = stack->first;
+
+	stack->current = ring;
+	stack->cind = ridx;
+}
+
+static void scx_stk_pop(struct scx_stk *stack)
+{
+	scx_ring_t *ring = stack->current;
+	int ridx = stack->cind;
+
+	/* Possibly loop into previous next ring. */
+	if (ridx == 0) {
+		ridx = SCX_RING_MAX;
+		ring = stack->current->prev;
+	}
+
+	ridx -= 1;
+
+	/* Possibly loop back into the last ring. */
+	if (!ring)
+		ring = stack->last;
+
+	stack->current = ring;
+	stack->cind = ridx;
+}
+
+static
+int scx_stk_free_unlocked(struct scx_stk *stack, void __arena *elem)
+{
+	if (!stack)
+		return -EINVAL;
+
+	/* We ensure there is always room in the ring at allocation time. */
+	if (stack->capacity == 0) {
+		scx_bpf_error("stack capacity overload");
+		return 0;
+	}
+
+	stack->current->elems[stack->cind] = elem;
+
+	scx_stk_push(stack);
+
+	stack->capacity -= 1;
+	stack->available += 1;
+
+	return 0;
+}
+
+__weak
+int scx_stk_free_internal(struct scx_stk *stack, __u64 elem)
+{
+	int ret;
+
+	if (!stack)
+		return -EINVAL;
+
+	if ((ret = arena_spin_lock(stack->lock))) {
+		scx_bpf_error("spinlock error %d", ret);
+		return 0;
+	}
+
+	ret = scx_stk_free_unlocked(stack, (void __arena *)elem);
+
+	arena_spin_unlock(stack->lock);
+
+	return ret;
+}
+
+static
+int scx_stk_add_to_reserve(struct scx_stk *stack, __u64 nr_pages, __u64 nelems)
+{
+	scx_ring_t *ring;
+	u64 data, mem;
+	int ret, i;
+
+	arena_spin_unlock(stack->lock);
+
+	if (nelems > SCX_RING_MAX) {
+		scx_bpf_error("new elements must fit into a single ring");
+		return -EINVAL;
+	}
+
+	/*
+	 * XXXETSAL: The code conflates two things, allocating data and expanding
+	 * the buffer. We can expand the current logic to split the two, but
+	 * for now it should only matter for very large structs.
+	 */
+
+	/*
+	 * On error, we return with the ring buffer unlocked. This is
+	 * because arena_spin_lock can fail, so we cannot guarantee we
+	 * can lock it back.
+	 */
+	if (!stack)
+		return -EINVAL;
+
+	mem = (__u64)bpf_arena_alloc_pages(&arena, NULL, nr_pages + 1, NUMA_NO_NODE, 0);
+	if (!mem)
+		return -ENOMEM;
+
+	if ((ret = arena_spin_lock(stack->lock))) {
+		bpf_arena_free_pages(&arena, (void __arena *)mem, nr_pages);
+		scx_bpf_error("spinlock error %d", ret);
+		return ret;
+	}
+
+	_Static_assert(sizeof(struct scx_ring) <= PAGE_SIZE,
+		"ring must fit into a page");
+
+	ring = (scx_ring_t *)mem;
+	data = mem + PAGE_SIZE;
+
+
+	/* Populate with the elements. */
+	for (i = zero; i < nelems && can_loop; i++) {
+		ring->elems[i] = (void __arena *)data;
+		data += stack->data_size;
+	}
+
+	/* Attach to the reserve rings. */
+	ring->next = stack->reserve;
+	stack->reserve = ring;
+
+	return 0;
+}
+
+static
+int scx_stk_fill_new_elems(struct scx_stk *stack)
+{
+	scx_ring_t *reserve;
+	__u64 nr_pages;
+	size_t nelems;
+	int ret;
+
+	nr_pages = stack->nr_pages_per_alloc;
+	nelems = (nr_pages * PAGE_SIZE) / stack->data_size;
+
+	if (!stack->reserve) {
+		/* This call drops and retakes the lock.  */
+		ret = scx_stk_add_to_reserve(stack, nr_pages, nelems);
+		if (ret)
+			return ret;
+	}
+
+	/*
+	 * If somebody replenished the stack while we were asleep,
+	 * no need to do anything.
+	 */
+	if (stack->available > 0)
+		return 0;
+
+	/* Pop out the reserve and attach to the stack. */
+	reserve = stack->reserve;
+	stack->reserve = reserve->next;
+
+	if (stack->first)
+		stack->first->prev = reserve;
+	reserve->next = stack->first;
+	reserve->prev = NULL;
+
+	stack->first = reserve;
+	stack->reserve = NULL;
+
+	/* New rings are always prefilled with nelems. */
+	stack->capacity += (SCX_RING_MAX - nelems);
+	stack->available += nelems;
+
+	stack->current = reserve;
+	stack->cind = nelems;
+
+	return 0;
+}
+
+__weak
+__u64 scx_stk_alloc(struct scx_stk *stack)
+{
+	void __arena *elem;
+	int ret;
+
+	if (!stack)
+		return 0ULL;
+
+	if ((ret = arena_spin_lock(stack->lock))) {
+		scx_bpf_error("spinlock error %d", ret);
+		return 0ULL;
+	}
+
+	/* If ring buffer is empty, we have to populate it. */
+	if (stack->available == 0) {
+
+		/* The call drops the lock on error. */
+		ret = scx_stk_fill_new_elems(stack);
+		if (ret) {
+			scx_bpf_error("elem creation failed");
+			return 0ULL;
+		}
+	}
+
+	scx_stk_pop(stack);
+	elem = stack->current->elems[stack->cind];
+
+	stack->capacity += 1;
+	stack->available -= 1;
+
+	arena_spin_unlock(stack->lock);
+
+	if (!elem)
+		scx_bpf_error("returning NULL");
+
+	return (u64)elem;
 }
