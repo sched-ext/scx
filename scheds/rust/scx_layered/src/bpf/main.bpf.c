@@ -776,11 +776,11 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 		}
 
 		// try prev if smt sibling empty
-		if (prev_in_cand &&
-			bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
-			scx_bpf_test_and_clear_cpu_idle(prev_cpu))
-			return prev_cpu;
-		prev_in_cand = false;
+		if (prev_in_cand && bpf_cpumask_test_cpu(prev_cpu, idle_smtmask)) {
+			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+				return prev_cpu;
+			prev_in_cand = false;
+		}
 
 		// try any idle core
 		cpu = scx_bpf_pick_idle_cpu(cand_cpumask, SCX_PICK_IDLE_CORE);
