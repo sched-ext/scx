@@ -944,7 +944,7 @@ void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
 	if (!(taskc = lookup_task_ctx(p)) || !all_cpumask)
 		return;
 
-	taskc->all_cpus = p->nr_cpus_allowed == nr_cpus;
+	taskc->all_cpus = p->cpus_ptr == &p->cpus_mask && p->nr_cpus_allowed == nr_cpus;
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init_task, struct task_struct *p,
@@ -964,6 +964,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init_task, struct task_struct *p,
 		return -ENOMEM;
 	}
 
+	if (!(cpuc = lookup_cpu_ctx(task_cpu)) ||
+	    !(llcx = lookup_llc_ctx(cpuc->llc_id)))
+		return -EINVAL;
+
 	if (!(cpumask = bpf_cpumask_create())) {
 		scx_bpf_error("task_ctx allocation failure");
 		return -ENOMEM;
@@ -975,10 +979,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init_task, struct task_struct *p,
 		return -EINVAL;
 	}
 
-	if (!(cpuc = lookup_cpu_ctx(task_cpu)) ||
-	    !(llcx = lookup_llc_ctx(cpuc->llc_id)))
-		return -EINVAL;
-
 	taskc->cpu = task_cpu;
 	taskc->dsq_id = SCX_DSQ_INVALID;
 	taskc->llc_id = cpuc->llc_id;
@@ -986,7 +986,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init_task, struct task_struct *p,
 	taskc->dsq_index = init_dsq_index;
 	taskc->last_dsq_index = init_dsq_index;
 	taskc->runnable = true;
-	taskc->all_cpus = p->nr_cpus_allowed == nr_cpus;
+	taskc->all_cpus = p->cpus_ptr == &p->cpus_mask && p->nr_cpus_allowed == nr_cpus;
 	p->scx.dsq_vtime = llcx->vtime;
 
 	return 0;
