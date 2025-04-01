@@ -107,6 +107,11 @@ private(BPFLAND) struct bpf_cpumask __kptr *primary_cpumask;
 const volatile bool smt_enabled = true;
 
 /*
+ * Disable NUMA rebalancing.
+ */
+const volatile bool numa_disabled = false;
+
+/*
  * Current global vruntime.
  */
 static u64 vtime_now;
@@ -160,6 +165,9 @@ struct node_ctx *try_lookup_node_ctx(int node)
 static bool node_rebalance(int node)
 {
 	const struct node_ctx *nctx;
+
+	if (numa_disabled)
+		return false;
 
 	nctx = try_lookup_node_ctx(node);
 	if (!nctx)
@@ -1471,7 +1479,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 		return err;
 
 	/* Do not update NUMA statistics if there's only one node */
-	if (__COMPAT_scx_bpf_nr_node_ids() <= 1)
+	if (numa_disabled || __COMPAT_scx_bpf_nr_node_ids() <= 1)
 		return 0;
 
 	timer = bpf_map_lookup_elem(&numa_timer, &key);
