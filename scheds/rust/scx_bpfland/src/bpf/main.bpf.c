@@ -771,7 +771,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 		 */
 		if (p->nr_cpus_allowed == 1) {
 			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
+				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL,
 						   slice_max, enq_flags);
 				__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
@@ -808,7 +808,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 
 			cpu = pick_idle_cpu(p, prev_cpu, 0, &is_idle);
 			if (is_idle) {
-				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, 0);
+				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_max, 0);
 				__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
 				return true;
@@ -891,6 +891,12 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	 * is disabled).
 	 */
 	if (!smt_enabled)
+		return true;
+
+	/*
+	 * If the task can only run on this CPU, keep it running.
+	 */
+	if (p->nr_cpus_allowed == 1)
 		return true;
 
 	cctx = try_lookup_cpu_ctx(cpu);
