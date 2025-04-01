@@ -767,26 +767,33 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 	 */
 	if (smt_enabled) {
 
-		// if layer is prev_over_idle_core, try prev
-		if (prev_in_cand && layer->prev_over_idle_core &&
-				scx_bpf_test_and_clear_cpu_idle(prev_cpu))
-				return prev_cpu;
-
-		// try prev if layers smt sibling is idle
+		// try prev if prev_over_idle_core
 		if (prev_in_cand &&
-		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
-			return prev_cpu;
+			layer->prev_over_idle_core) {
+			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+				return prev_cpu;
+			prev_in_cand = false;
+		}
 
-		// try a wholly idle cpu
+		// try prev if smt sibling empty
+		if (prev_in_cand && bpf_cpumask_test_cpu(prev_cpu, idle_smtmask)) {
+			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+				return prev_cpu;
+			prev_in_cand = false;
+		}
+
+		// try any idle core
 		cpu = scx_bpf_pick_idle_cpu(cand_cpumask, SCX_PICK_IDLE_CORE);
 		if (cpu >= 0)
 			return cpu;
 	}
 
-	if (prev_in_cand && scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+	// try prev if not previously tried and failed
+	if (prev_in_cand &&
+		scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 		return prev_cpu;
 
+	// return any idle cpu
 	return scx_bpf_pick_idle_cpu(cand_cpumask, 0);
 }
 
