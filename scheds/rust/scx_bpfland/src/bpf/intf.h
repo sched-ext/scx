@@ -19,6 +19,9 @@ enum consts {
 	NSEC_PER_USEC = 1000ULL,
 	NSEC_PER_MSEC = (1000ULL * NSEC_PER_USEC),
 	NSEC_PER_SEC = (1000ULL * NSEC_PER_MSEC),
+
+	/* Kernel definitions */
+	CLOCK_BOOTTIME		= 7,
 };
 
 #ifndef __VMLINUX_H__
