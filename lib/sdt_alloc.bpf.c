@@ -1,8 +1,8 @@
 /*
  * SPDX-License-Identifier: GPL-2.0
- * Copyright (c) 2024 Meta Platforms, Inc. and affiliates.
- * Copyright (c) 2024 Tejun Heo <tj@kernel.org>
- * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
+ * Copyright (c) 2024-2025 Meta Platforms, Inc. and affiliates.
+ * Copyright (c) 2024-2025 Tejun Heo <tj@kernel.org>
+ * Copyright (c) 2024-2025 Emil Tsalapatis <etsal@meta.com>
  */
 
 #include <scx/common.bpf.h>
@@ -689,4 +689,256 @@ int sdt_static_init(size_t alloc_pages)
 	bpf_spin_unlock(&sdt_lock);
 
 	return 0;
+}
+
+__weak
+int scx_ringbuf_init(struct scx_ringbuf *ringbuf, __u64 data_size, __u64 nr_pages_per_alloc)
+{
+	if (!ringbuf)
+		return -EINVAL;
+
+	ringbuf->data_size = data_size;
+	ringbuf->nr_pages_per_alloc = nr_pages_per_alloc;
+
+	ringbuf->lock = sdt_static_alloc(sizeof(*ringbuf->lock));
+	if (!ringbuf->lock) {
+		scx_bpf_error("failed to allocate lock");
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+/*
+ * Not using scx_ring_t *ring as an input/output argument because the verifier
+ * confuses the types struct scx_ring * __arena * and scx_ring __arena **
+ * (arena pointer to pointer and pointer to arena pointer).
+ */
+static
+scx_ring_t *scx_ringbuf_advance(struct scx_ringbuf *ringbuf, scx_ring_t *ring, __u64 *rindp)
+{
+	int rind = *rindp;
+
+	rind += 1;
+
+	/* Possibly loop into the next ring. */
+	if (rind == SDT_TASK_ENTS_PER_CHUNK) {
+		rind = 0;
+		ring = ring->next;
+	}
+
+	/* Possibly loop back into the first ring. */
+	if (!ring)
+		ring = ringbuf->first;
+
+	*rindp = rind;
+
+	return ring;
+}
+
+static
+int scx_ringbuf_free_unlocked(struct scx_ringbuf *ringbuf, void __arena *elem)
+{
+	__u64 tind;
+
+	if (!ringbuf)
+		return -EINVAL;
+
+	/* We ensure there is always room in the ring at allocation time. */
+	if (ringbuf->capacity == 0) {
+		scx_bpf_error("ringbuf capacity overload");
+		return 0;
+	}
+
+	ringbuf->produce->elems[ringbuf->pind] = elem;
+
+	/* The index is a non-arena argument, so bounce through the stack. */
+	tind = ringbuf->pind;
+	ringbuf->produce = scx_ringbuf_advance(ringbuf, ringbuf->produce, &tind);
+	ringbuf->pind = tind;
+
+	ringbuf->capacity -= 1;
+	ringbuf->available += 1;
+
+	return 0;
+}
+
+__weak
+int scx_ringbuf_free_internal(struct scx_ringbuf *ringbuf, __u64 elem)
+{
+	int ret;
+
+	if (!ringbuf)
+		return -EINVAL;
+
+	if ((ret = arena_spin_lock(ringbuf->lock))) {
+		scx_bpf_error("spinlock error %d", ret);
+		return 0;
+	}
+
+	ret = scx_ringbuf_free_unlocked(ringbuf, (void __arena *)elem);
+
+	arena_spin_unlock(ringbuf->lock);
+
+	return ret;
+}
+
+static
+int scx_ringbuf_add_to_reserve(struct scx_ringbuf *ringbuf, __u64 nr_pages, __u64 nelems)
+{
+	scx_ring_t *ring;
+	u64 data, mem;
+	int ret, i;
+
+	arena_spin_unlock(ringbuf->lock);
+
+	if (nelems > SDT_TASK_ENTS_PER_CHUNK - 1) {
+		scx_bpf_error("new elements must fit into a single ring");
+		return -EINVAL;
+	}
+
+	/* 
+	 * XXXETSAL: The code conflates two things, allocating data and expanding
+	 * the buffer. We can expand the current logic to split the two, but 
+	 * for now it should only matter for very large structs. 
+	 */
+
+	/* 
+	 * On error, we return with the ring buffer unlocked. This is
+	 * because arena_spin_lock can fail, so we cannot guarantee we
+	 * can lock it back.
+	 */
+	if (!ringbuf)
+		return -EINVAL;
+
+	mem = (__u64)bpf_arena_alloc_pages(&arena, NULL, nr_pages + 1, NUMA_NO_NODE, 0);
+	if (!mem)
+		return -ENOMEM;
+
+	if ((ret = arena_spin_lock(ringbuf->lock))) {
+		bpf_arena_free_pages(&arena, (void __arena *)mem, nr_pages);
+		scx_bpf_error("spinlock error %d", ret);
+		return ret;
+	}
+
+	_Static_assert(sizeof(struct scx_ring) <= PAGE_SIZE, 
+		"ring must fit into a page");
+
+	ring = (scx_ring_t *)mem;
+	data = mem + PAGE_SIZE;
+
+
+	/* Populate with the elements. */
+	for (i = zero; i < nelems && can_loop; i++) {
+		ring->elems[i] = (void __arena *)data;
+		data += ringbuf->data_size;
+	}
+
+	/* Attach to the reserve rings. */
+	ring->next = ringbuf->reserve;
+	ringbuf->reserve = ring;
+
+	return 0;
+}
+
+static
+int scx_ringbuf_fill_new_elems(struct scx_ringbuf *ringbuf)
+{
+	scx_ring_t *reserve;
+	__u64 nr_pages;
+	size_t nelems;
+	int ret;
+
+	nr_pages = ringbuf->nr_pages_per_alloc;
+	nelems = (nr_pages * PAGE_SIZE) / ringbuf->data_size;
+
+	if (!ringbuf->reserve) {
+		/* This call drops and retakes the lock.  */
+		ret = scx_ringbuf_add_to_reserve(ringbuf, nr_pages, nelems);
+		if (ret)
+			return ret;
+	}
+
+	/* 
+	 * If somebody replenished the ring buffer while we were asleep,
+	 * no need to do anything.
+	 */
+	if (ringbuf->available > 0)
+		return 0;
+
+	/*
+	 * The ring buffer is full and the order we consume the elements
+	 * in doesn't matter. The only invariant we must keep is that a
+	 * slot in the ringuf is empty iff it is after the producer index
+	 * but before the consumer index. Add the new empty ring at the
+	 * front of the chain, have the producer ring point to its beginning,
+	 * and have the consumer ring point to the previous first page.
+	 */
+
+	/* Pop out the reserve and attach to the ring buffer. */
+	reserve = ringbuf->reserve;
+	ringbuf->reserve = reserve->next;
+
+	reserve->next = ringbuf->first;
+	ringbuf->first = reserve;
+
+	/* New rings are always prefilled with nelems. */
+	ringbuf->capacity += (SDT_TASK_ENTS_PER_CHUNK - nelems);
+	ringbuf->available += nelems;
+
+	ringbuf->produce = reserve;
+	ringbuf->pind = nelems;
+
+	/* Also handles initialization, when there is no first ring. */
+	ringbuf->consume = reserve;
+	ringbuf->cind = 0;
+
+	return 0;
+}
+
+__weak
+__u64 scx_ringbuf_alloc(struct scx_ringbuf *ringbuf)
+{
+	void __arena *elem;
+	int ret;
+	__u64 tind;
+
+	if (!ringbuf)
+		return 0ULL;
+
+	if ((ret = arena_spin_lock(ringbuf->lock))) {
+		scx_bpf_error("spinlock error %d", ret);
+		return 0ULL;
+	}
+
+	/* If ring buffer is empty, we have to populate it. */
+	if (ringbuf->available == 0) { 
+
+		/* The call drops the lock on error. */
+		ret = scx_ringbuf_fill_new_elems(ringbuf);
+		if (ret) {
+			scx_bpf_error("elem creation failed");
+			return 0ULL;
+		}
+	} 
+
+	/* 
+	 * Advance to the first valid element and pop it out. The index is a 
+	 * non-arena argument, so bounce through the stack.
+	 */
+	elem = ringbuf->consume->elems[ringbuf->cind];
+
+	tind = ringbuf->cind;
+	ringbuf->consume = scx_ringbuf_advance(ringbuf, ringbuf->consume, &tind);
+	ringbuf->cind = tind;
+
+	ringbuf->capacity += 1;
+	ringbuf->available -= 1;
+
+	arena_spin_unlock(ringbuf->lock);
+
+	if (!elem)
+		scx_bpf_error("returning NULL");
+
+	return (u64)elem;
 }

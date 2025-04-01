@@ -1,11 +1,12 @@
 /*
  * SPDX-License-Identifier: GPL-2.0
- * Copyright (c) 2024 Meta Platforms, Inc. and affiliates.
- * Copyright (c) 2024 Tejun Heo <tj@kernel.org>
- * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
+ * Copyright (c) 2025 Meta Platforms, Inc. and affiliates.
+ * Copyright (c) 2025 Tejun Heo <tj@kernel.org>
+ * Copyright (c) 2025 Emil Tsalapatis <etsal@meta.com>
  */
 #pragma once
 #include <scx/bpf_arena_common.h>
+#include <scx/bpf_arena_spin_lock.h>
 
 #ifndef div_round_up
 #define div_round_up(a, b) (((a) + (b) - 1) / (b))
@@ -104,6 +105,37 @@ struct sdt_static {
 	size_t off;
 };
 
+struct scx_ring;
+typedef struct scx_ring __arena scx_ring_t;
+
+struct scx_ring {
+	void __arena	*elems[SDT_TASK_ENTS_PER_CHUNK - 1];
+	scx_ring_t	*next;
+};
+
+/*
+ * Extensible ringbuf struct. Using a ringbuf instead of a stack to at
+ * least decouple allocation operations from free operations.
+ */
+struct scx_ringbuf {
+	arena_spinlock_t __arena *lock;
+
+	scx_ring_t *first;	/* First ring. Used during ringbuf extension. */
+
+	scx_ring_t *consume;	/* Current consume ring. */
+	__u64 cind;
+
+	scx_ring_t *produce;	/* Current produce ring. */
+	__u64 pind;
+
+	__u64 capacity;		/* Free slots in the ring buffer. */
+	__u64 available;	/* Available items in the ring buffer. */
+	__u64 data_size;
+	__u64 nr_pages_per_alloc;
+
+	scx_ring_t *reserve;
+};
+
 #ifdef __BPF__
 
 void __arena *sdt_task_data(struct task_struct *p);
@@ -120,5 +152,11 @@ int sdt_free_idx(struct sdt_allocator *alloc, __u64 idx);
 
 void __arena *sdt_static_alloc(size_t bytes);
 int sdt_static_init(size_t max_alloc_pages);
+
+u64 scx_ringbuf_alloc(struct scx_ringbuf *ringbuf);
+int scx_ringbuf_init(struct scx_ringbuf *ringbufp, __u64 data_size, __u64 nr_pages_per_alloc);
+int scx_ringbuf_free_internal(struct scx_ringbuf *ringbuf, __u64 elem);
+
+#define scx_ringbuf_free(ringbuf, elem) scx_ringbuf_free_internal(ringbuf, (__u64)elem)
 
 #endif /* __BPF__ */
