@@ -117,7 +117,6 @@ struct task_ctx {
 	/*
 	 * Task deadline and time slice
 	 */
-	u32	nr_cpus_allowed;	/* the number of allowed CPUs running on */
 	u32	lat_cri;		/* final context-aware latency criticality */
 	u32	lat_cri_waker;		/* waker's latency criticality */
 	u32	perf_cri;		/* performance criticality of a task */
@@ -130,6 +129,7 @@ struct task_ctx {
 	u8	slice_boost_prio;	/* how many times a task fully consumed the slice */
 	u8	on_big;			/* executable on a big core */
 	u8	on_little;		/* executable on a little core */
+	u8	is_affinitized;		/* is this task pinned to a subset of all CPUs? */
 };
 
 /*
