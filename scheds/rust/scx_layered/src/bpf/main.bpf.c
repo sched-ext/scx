@@ -573,7 +573,7 @@ int BPF_PROG(tp_cgroup_attach_task, struct cgroup *cgrp, const char *cgrp_path,
 			break;
 		}
 
-		if ((taskc = lookup_task_ctx(next)))
+		if ((taskc = lookup_task_ctx_may_fail(next)))
 			taskc->refresh_layer = true;
 	}
 
@@ -2915,7 +2915,7 @@ u64 antistall_set(u64 dsq_id, u64 jiffies_now)
 		if (!(p = bpf_task_from_pid(__p->pid)))
 			continue;
 
-		if (!(taskc = lookup_task_ctx(p)))
+		if (!(taskc = lookup_task_ctx_may_fail(p)))
 			goto unlock;
 
 		cur_delay = get_delay_sec(p, jiffies_now);
