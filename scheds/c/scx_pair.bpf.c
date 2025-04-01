@@ -308,6 +308,7 @@ static int lookup_pairc_and_mask(s32 cpu, struct pair_ctx **pairc, u32 *mask)
 	return 0;
 }
 
+__attribute__((noinline))
 static int try_dispatch(s32 cpu)
 {
 	struct pair_ctx *pairc;
