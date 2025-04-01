@@ -116,7 +116,7 @@ pub struct Cpu {
     /// Base operational frqeuency. Only available on Intel Turbo Boost
     /// CPUs. If not available, this will simply return maximum frequency.
     pub base_freq: usize,
-    /// The best-effort guessting of cpu_capacity scaled to 1024
+    /// The best-effort guessing of cpu_capacity scaled to 1024.
     pub cpu_capacity: usize,
     /// CPU idle resume latency
     pub pm_qos_resume_latency_us: usize,
