@@ -108,13 +108,13 @@ static __always_inline void complete_p2dq_enqueue_move(struct enqueue_promise *p
 	case P2DQ_ENQUEUE_PROMISE_COMPLETE:
 		goto out;
 	case P2DQ_ENQUEUE_PROMISE_FIFO:
-		scx_bpf_dsq_move_set_slice(it__iter, *MEMBER_VPTR(pro->fifo, .slice_ns));
-		scx_bpf_dsq_move(it__iter, p, pro->fifo.dsq_id, pro->fifo.enq_flags);
+		__COMPAT_scx_bpf_dsq_move_set_slice(it__iter, *MEMBER_VPTR(pro->fifo, .slice_ns));
+		__COMPAT_scx_bpf_dsq_move(it__iter, p, pro->fifo.dsq_id, pro->fifo.enq_flags);
 		goto out;
 	case P2DQ_ENQUEUE_PROMISE_VTIME:
-		scx_bpf_dsq_move_set_slice(it__iter, pro->vtime.slice_ns);
-		scx_bpf_dsq_move_set_vtime(it__iter, pro->vtime.vtime);
-		scx_bpf_dsq_move_vtime(it__iter, p, pro->vtime.dsq_id, pro->vtime.enq_flags);
+		__COMPAT_scx_bpf_dsq_move_set_slice(it__iter, pro->vtime.slice_ns);
+		__COMPAT_scx_bpf_dsq_move_set_vtime(it__iter, pro->vtime.vtime);
+		__COMPAT_scx_bpf_dsq_move_vtime(it__iter, p, pro->vtime.dsq_id, pro->vtime.enq_flags);
 		goto out;
 	}
 
