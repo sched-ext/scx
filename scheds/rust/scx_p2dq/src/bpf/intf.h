@@ -2,8 +2,8 @@
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
-#ifndef __INTF_H
-#define __INTF_H
+#ifndef __P2DQ_INTF_H
+#define __P2DQ_INTF_H
 
 #include <stdbool.h>
 #ifndef __kptr
@@ -127,4 +127,31 @@ struct node_ctx {
 	struct bpf_cpumask __kptr	*big_cpumask;
 };
 
-#endif /* __INTF_H */
+enum enqueue_promise_kind {
+	P2DQ_ENQUEUE_PROMISE_COMPLETE,
+	P2DQ_ENQUEUE_PROMISE_VTIME,
+	P2DQ_ENQUEUE_PROMISE_FIFO,
+};
+
+struct enqueue_promise_vtime {
+	u64	dsq_id;
+	u64	enq_flags;
+	u64	slice_ns;
+	u64	vtime;
+};
+
+struct enqueue_promise_fifo {
+	u64	dsq_id;
+	u64	enq_flags;
+	u64	slice_ns;
+};
+
+struct enqueue_promise {
+	enum enqueue_promise_kind	kind;
+	union {
+		struct enqueue_promise_vtime	vtime;
+		struct enqueue_promise_fifo	fifo;
+	};
+};
+
+#endif /* __P2DQ_INTF_H */
