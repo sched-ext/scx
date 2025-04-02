@@ -738,8 +738,10 @@ void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 	else
 		p->scx.dsq_vtime = llcx->vtime;
 
-	if (sched_mode == MODE_PERFORMANCE && taskc->dsq_index == 0) {
-		scx_bpf_cpuperf_set(task_cpu, 1024);
+	// If the task is running in the least interactive DSQ, bump the
+	// frequency.
+	if (taskc->dsq_index == nr_dsqs_per_llc-1) {
+		scx_bpf_cpuperf_set(task_cpu, SCX_CPUPERF_ONE);
 	}
 }
 
