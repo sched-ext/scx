@@ -107,9 +107,74 @@ private(BPFLAND) struct bpf_cpumask __kptr *primary_cpumask;
 const volatile bool smt_enabled = true;
 
 /*
+ * Disable NUMA rebalancing.
+ */
+const volatile bool numa_disabled = false;
+
+/*
  * Current global vruntime.
  */
 static u64 vtime_now;
+
+/*
+ * Timer used to update NUMA statistics.
+ */
+struct numa_timer {
+	struct bpf_timer timer;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct numa_timer);
+} numa_timer SEC(".maps");
+
+/*
+ * Per-node context.
+ */
+struct node_ctx {
+	u64 tot_perf_lvl;
+	u64 nr_cpus;
+	u64 perf_lvl;
+	bool need_rebalance;
+};
+
+/* CONFIG_NODES_SHIFT should be always <= 10 */
+#define MAX_NUMA_NODES	1024
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, int);
+	__type(value, struct node_ctx);
+	__uint(max_entries, MAX_NUMA_NODES);
+	__uint(map_flags, 0);
+} node_ctx_stor SEC(".maps");
+
+/*
+ * Return a node context.
+ */
+struct node_ctx *try_lookup_node_ctx(int node)
+{
+	return bpf_map_lookup_elem(&node_ctx_stor, &node);
+}
+
+/*
+ * Return true if @node needs a rebalance, false otherwise.
+ */
+static bool node_rebalance(int node)
+{
+	const struct node_ctx *nctx;
+
+	if (numa_disabled)
+		return false;
+
+	nctx = try_lookup_node_ctx(node);
+	if (!nctx)
+		return false;
+
+	return nctx->need_rebalance;
+}
 
 /*
  * Per-CPU context.
@@ -118,6 +183,7 @@ struct cpu_ctx {
 	u64 tot_runtime;
 	u64 prev_runtime;
 	u64 last_running;
+	u64 perf_lvl;
 	struct bpf_cpumask __kptr *smt_cpumask;
 	struct bpf_cpumask __kptr *l2_cpumask;
 	struct bpf_cpumask __kptr *l3_cpumask;
@@ -519,12 +585,18 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		}
 
 		/*
-		 * Search for any full-idle CPU in the same node and
-		 * primary domain.
+		 * Search for any full-idle CPU in the primary domain.
+		 *
+		 * If the current node needs a rebalance, look for any
+		 * full-idle CPU also on different nodes.
 		 */
 		if (p_mask) {
-			cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(p_mask, node,
-						SCX_PICK_IDLE_CORE | __COMPAT_SCX_PICK_IDLE_IN_NODE);
+			u64 flags = SCX_PICK_IDLE_CORE;
+
+			if (!node_rebalance(node))
+				flags |= __COMPAT_SCX_PICK_IDLE_IN_NODE;
+
+			cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(p_mask, node, flags);
 			if (cpu >= 0) {
 				*is_idle = true;
 				goto out_put_cpumask;
@@ -546,7 +618,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * Search for any idle CPU in the primary domain that shares the same
 	 * L2 cache.
 	 */
-	if (l2_mask) {
+	if (l2_mask && !node_rebalance(node)) {
 		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(l2_mask, node,
 						__COMPAT_SCX_PICK_IDLE_IN_NODE);
 		if (cpu >= 0) {
@@ -559,7 +631,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * Search for any idle CPU in the primary domain that shares the same
 	 * L3 cache.
 	 */
-	if (l3_mask) {
+	if (l3_mask && !node_rebalance(node)) {
 		cpu = __COMPAT_scx_bpf_pick_idle_cpu_node(l3_mask, node,
 						__COMPAT_SCX_PICK_IDLE_IN_NODE);
 		if (cpu >= 0) {
@@ -944,18 +1016,14 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 }
 
 /*
- * Scale target CPU frequency based on the performance level selected
- * from user-space and the CPU utilization.
+ * Update CPU load and scale target performance level accordingly.
  */
-static void update_cpuperf_target(struct task_struct *p, struct task_ctx *tctx)
+static void update_cpu_load(struct task_struct *p, struct task_ctx *tctx)
 {
 	u64 now = scx_bpf_now();
 	s32 cpu = scx_bpf_task_cpu(p);
 	u64 perf_lvl, delta_runtime, delta_t;
 	struct cpu_ctx *cctx;
-
-	if (cpufreq_perf_lvl >= 0)
-		return;
 
 	/*
 	 * For non-interactive tasks determine their cpufreq scaling factor as
@@ -970,17 +1038,26 @@ static void update_cpuperf_target(struct task_struct *p, struct task_ctx *tctx)
 	 * utilization, normalized in the range [0 .. SCX_CPUPERF_ONE].
 	 */
 	delta_t = now - cctx->last_running;
-	delta_runtime = cctx->tot_runtime - cctx->prev_runtime;
-	perf_lvl = delta_runtime * SCX_CPUPERF_ONE / delta_t;
-
-	perf_lvl = MIN(perf_lvl, SCX_CPUPERF_ONE);
+	if (!delta_t)
+		return;
 
 	/*
-	 * Apply the dynamic cpuperf scaling factor.
+	 * Refresh target performance level, if utilization is above 75%
+	 * bump up the performance level to the max.
 	 */
-	scx_bpf_cpuperf_set(cpu, perf_lvl);
+	delta_runtime = cctx->tot_runtime - cctx->prev_runtime;
+	perf_lvl = MIN(delta_runtime * SCX_CPUPERF_ONE / delta_t, SCX_CPUPERF_ONE);
+	if (perf_lvl >= SCX_CPUPERF_ONE - SCX_CPUPERF_ONE / 4)
+		perf_lvl = SCX_CPUPERF_ONE;
+	cctx->perf_lvl = perf_lvl;
 
-	cctx->last_running = scx_bpf_now();
+	/*
+	 * Refresh the dynamic cpuperf scaling factor if needed.
+	 */
+	if (cpufreq_perf_lvl < 0)
+		scx_bpf_cpuperf_set(cpu, cctx->perf_lvl);
+
+	cctx->last_running = now;
 	cctx->prev_runtime = cctx->tot_runtime;
 }
 
@@ -998,7 +1075,7 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
 	/*
 	 * Adjust target CPU frequency before the task starts to run.
 	 */
-	update_cpuperf_target(p, tctx);
+	update_cpu_load(p, tctx);
 
 	/*
 	 * Update the global vruntime as a new task is starting to use a
@@ -1014,16 +1091,10 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
  */
 void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 {
-	u64 now = scx_bpf_now(), slice;
+	u64 now = scx_bpf_now(), slice, delta_runtime;
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
-
-	if (cpufreq_perf_lvl < 0) {
-		cctx = try_lookup_cpu_ctx(cpu);
-		if (cctx)
-			cctx->tot_runtime += now - cctx->last_running;
-	}
 
 	__sync_fetch_and_sub(&nr_running, 1);
 
@@ -1049,6 +1120,15 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 * Update task's vruntime.
 	 */
 	tctx->deadline += scale_by_task_weight_inverse(p, slice);
+
+	/*
+	 * Update CPU runtime.
+	 */
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return;
+	delta_runtime = now - cctx->last_running;
+	cctx->tot_runtime += delta_runtime;
 }
 
 void BPF_STRUCT_OPS(bpfland_runnable, struct task_struct *p, u64 enq_flags)
@@ -1256,31 +1336,130 @@ int enable_primary_cpu(struct cpu_arg *input)
 static void init_cpuperf_target(void)
 {
 	const struct cpumask *online_cpumask;
+	struct node_ctx *nctx;
 	u64 perf_lvl;
+	int node;
 	s32 cpu;
-
-	if (cpufreq_perf_lvl < 0)
-		return;
 
 	online_cpumask = scx_bpf_get_online_cpumask();
 	bpf_for (cpu, 0, nr_cpu_ids) {
 		if (!bpf_cpumask_test_cpu(cpu, online_cpumask))
 			continue;
-		perf_lvl = MIN(cpufreq_perf_lvl, SCX_CPUPERF_ONE);
+
+		/* Set the initial cpufreq performance level  */
+		if (cpufreq_perf_lvl < 0)
+			perf_lvl = SCX_CPUPERF_ONE;
+		else
+			perf_lvl = MIN(cpufreq_perf_lvl, SCX_CPUPERF_ONE);
 		scx_bpf_cpuperf_set(cpu, perf_lvl);
+
+		/* Evaluate the amount of online CPUs for each node */
+		node = __COMPAT_scx_bpf_cpu_node(cpu);
+		nctx = try_lookup_node_ctx(node);
+		if (nctx)
+			nctx->nr_cpus++;
 	}
 	scx_bpf_put_cpumask(online_cpumask);
 }
 
+/*
+ * Refresh NUMA statistics.
+ */
+static int numa_timerfn(void *map, int *key, struct bpf_timer *timer)
+{
+	const struct cpumask *online_cpumask;
+	struct node_ctx *nctx;
+	int node, err;
+	bool has_idle_nodes = false;
+	s32 cpu;
+
+	/*
+	 * Update node statistics.
+	 */
+	online_cpumask = scx_bpf_get_online_cpumask();
+	bpf_for (cpu, 0, nr_cpu_ids) {
+		struct cpu_ctx *cctx;
+
+		if (!bpf_cpumask_test_cpu(cpu, online_cpumask))
+			continue;
+
+		cctx = try_lookup_cpu_ctx(cpu);
+		if (!cctx)
+			continue;
+
+		node = __COMPAT_scx_bpf_cpu_node(cpu);
+		nctx = try_lookup_node_ctx(node);
+		if (!nctx)
+			continue;
+
+		nctx->tot_perf_lvl += cctx->perf_lvl;
+	}
+	scx_bpf_put_cpumask(online_cpumask);
+
+	/*
+	 * Update node utilization.
+	 */
+	bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
+		nctx = try_lookup_node_ctx(node);
+		if (!nctx || !nctx->nr_cpus)
+			continue;
+
+		/*
+		 * Evaluate node utilization as the average perf_lvl among
+		 * its CPUs.
+		 */
+		nctx->perf_lvl = nctx->tot_perf_lvl / nctx->nr_cpus;
+
+		/*
+		 * System has at least one idle node if its current
+		 * utilization is 25% or below.
+		 */
+		if (nctx->perf_lvl <= SCX_CPUPERF_ONE / 4)
+			has_idle_nodes = true;
+
+		/*
+		 * Reset partial performance level.
+		 */
+		nctx->tot_perf_lvl = 0;
+	}
+
+	/*
+	 * Determine nodes that need a rebalance.
+	 */
+	bpf_for(node, 0, __COMPAT_scx_bpf_nr_node_ids()) {
+		nctx = try_lookup_node_ctx(node);
+		if (!nctx)
+			continue;
+
+		/*
+		 * If the current node utilization is 50% or more and there
+		 * is at least an idle node in the system, trigger a
+		 * rebalance.
+		 */
+		nctx->need_rebalance = has_idle_nodes && nctx->perf_lvl >= SCX_CPUPERF_ONE / 2;
+
+		dbg_msg("node %d util %llu rebalance %d",
+			   node, nctx->perf_lvl, nctx->need_rebalance);
+	}
+
+	err = bpf_timer_start(timer, NSEC_PER_SEC, 0);
+	if (err)
+		scx_bpf_error("Failed to start NUMA timer");
+
+	return 0;
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 {
+	struct bpf_timer *timer;
 	int err, node;
+	u32 key = 0;
 
 	/* Initialize amount of online and possible CPUs */
 	nr_online_cpus = get_nr_online_cpus();
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
-	/* Initialize cpufreq profile */
+	/* Initialize CPUs and NUMA properties */
 	init_cpuperf_target();
 
 	/*
@@ -1298,6 +1477,22 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	err = init_cpumask(&primary_cpumask);
 	if (err)
 		return err;
+
+	/* Do not update NUMA statistics if there's only one node */
+	if (numa_disabled || __COMPAT_scx_bpf_nr_node_ids() <= 1)
+		return 0;
+
+	timer = bpf_map_lookup_elem(&numa_timer, &key);
+	if (!timer) {
+		scx_bpf_error("Failed to lookup central timer");
+		return -ESRCH;
+	}
+
+	bpf_timer_init(timer, &numa_timer, CLOCK_BOOTTIME);
+	bpf_timer_set_callback(timer, numa_timerfn);
+	err = bpf_timer_start(timer, NSEC_PER_SEC, 0);
+	if (err)
+		scx_bpf_error("Failed to start NUMA timer");
 
 	return 0;
 }

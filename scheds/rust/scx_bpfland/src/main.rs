@@ -195,6 +195,10 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     disable_smt: bool,
 
+    /// Disable NUMA rebalancing.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    disable_numa: bool,
+
     /// Enable CPU frequency control (only with schedutil governor).
     ///
     /// With this option enabled the CPU frequency will be automatically scaled based on the load.
@@ -288,6 +292,7 @@ impl<'a> Scheduler<'a> {
         // Override default BPF scheduling parameters.
         skel.maps.rodata_data.debug = opts.debug;
         skel.maps.rodata_data.smt_enabled = smt_enabled;
+        skel.maps.rodata_data.numa_disabled = opts.disable_numa;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
         skel.maps.rodata_data.local_kthreads = opts.local_kthreads;
         skel.maps.rodata_data.no_preempt = opts.no_preempt;
