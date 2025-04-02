@@ -33,7 +33,7 @@ jobs:
     needs: build-kernel
     strategy:
           matrix:
-            scheduler: [ scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty, scx_p2dq, scx_tickless ]
+            scheduler: [ scx_bpfland, scx_chaos, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty, scx_p2dq, scx_tickless ]
           fail-fast: false
     steps:
       - uses: actions/checkout@v4
@@ -174,7 +174,7 @@ jobs:
     needs: build-kernel
     strategy:
       matrix:
-        package: [ scx_loader, scx_rustland_core, scx_stats, scx_utils, scxtop, scx_bpfland, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty, scx_p2dq, scx_tickless ]
+        package: [ scx_loader, scx_rustland_core, scx_stats, scx_utils, scxtop, scx_bpfland, scx_chaos, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty, scx_p2dq, scx_tickless ]
     steps:
       - uses: actions/checkout@v4
 
@@ -199,7 +199,7 @@ jobs:
       - run: cargo build --all-targets --package ${{ matrix.package }}
 
       - name: Clippy
-        if: contains(fromJSON('["scxtop"]'), matrix.package)
+        if: contains(fromJSON('["scxtop", "scx_chaos"]'), matrix.package)
         run: cargo clippy --no-deps -p ${{ matrix.package }} -- -Dwarnings
 
       # virtme-ng runs as a different user than the runner, so loses the rustup and cargo roots. specify them explicitly to avoid a rebuild.
