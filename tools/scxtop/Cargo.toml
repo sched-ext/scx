@@ -12,7 +12,7 @@ unused_imports = "allow"
 
 [dependencies]
 anyhow = "1.0.65"
-clap = { version = "4.1", features = [
+clap = { version = "4.5.28", features = [
     "derive",
     "cargo",
     "wrap_help",

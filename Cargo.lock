@@ -2363,7 +2363,7 @@ version = "1.0.10"
 dependencies = [
  "anyhow",
  "clap",
- "colored 2.2.0",
+ "colored 3.0.0",
  "ctrlc",
  "log",
  "nix 0.29.0",
