@@ -353,24 +353,7 @@ impl TopoCtx {
 fn cpus_online() -> Result<Cpumask> {
     let path = "/sys/devices/system/cpu/online";
     let online = std::fs::read_to_string(path)?;
-    let online_groups: Vec<&str> = online.split(',').collect();
-    let mut mask = Cpumask::new();
-    for group in online_groups.iter() {
-        let (min, max) = match sscanf!(group.trim(), "{usize}-{usize}") {
-            Ok((x, y)) => (x, y),
-            Err(_) => match sscanf!(group.trim(), "{usize}") {
-                Ok(x) => (x, x),
-                Err(_) => {
-                    bail!("Failed to parse online cpus {}", group.trim());
-                }
-            },
-        };
-        for i in min..(max + 1) {
-            mask.set_cpu(i)?;
-        }
-    }
-
-    Ok(mask)
+    Cpumask::from_cpulist(&online)
 }
 
 fn get_cache_id(topo_ctx: &mut TopoCtx, cache_level_path: &PathBuf, cache_level: usize) -> usize {
