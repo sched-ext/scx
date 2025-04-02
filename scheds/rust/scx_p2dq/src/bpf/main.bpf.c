@@ -436,7 +436,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 	idle_smtmask = scx_bpf_get_idle_smtmask();
 
-	if (!idle_cpumask || !idle_smtmask || bpf_cpumask_empty(idle_cpumask))
+	if (!idle_cpumask || !idle_smtmask)
 		goto found_cpu;
 
 	if (!(prev_cpuc = lookup_cpu_ctx(prev_cpu)) ||
