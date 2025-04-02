@@ -28,7 +28,7 @@ tar = "0.4"
 walkdir = "2.4"
 version-compare = "0.1"
 libc = "0.2.137"
-zbus = { version = "5", optional = true }
+zbus = { version = "5.3.1", optional = true }
 
 [build-dependencies]
 anyhow = "1.0.65"
