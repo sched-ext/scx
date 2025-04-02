@@ -460,7 +460,41 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 			goto found_cpu;
 		}
 
-		// TODO: handle affinitized tasks to be more topology aware
+		if (taskc->mask && llcx->cpumask)
+			bpf_cpumask_and(taskc->mask, cast_mask(llcx->cpumask),
+					p->cpus_ptr);
+
+		// First try to find an idle SMT in the LLC
+		if (smt_enabled && taskc->mask) {
+			cpu = scx_bpf_pick_idle_cpu(cast_mask(taskc->mask),
+						    SCX_PICK_IDLE_CORE);
+			if (cpu >= 0) {
+				*is_idle = true;
+				goto found_cpu;
+			}
+		}
+
+		// Next try to find an idle CPU in the LLC
+		if (taskc->mask) {
+			cpu = scx_bpf_pick_idle_cpu(cast_mask(taskc->mask), 0);
+			if (cpu >= 0) {
+				*is_idle = true;
+				goto found_cpu;
+			}
+		}
+
+		// Next try to find an idle CPU in the node
+		if (nodec->cpumask && taskc->mask) {
+			bpf_cpumask_and(taskc->mask, cast_mask(nodec->cpumask),
+					p->cpus_ptr);
+			if (taskc->mask &&
+			    (cpu = scx_bpf_pick_idle_cpu(cast_mask(taskc->mask), 0)) >= 0) {
+				*is_idle = true;
+				goto found_cpu;
+			}
+		}
+
+		// Fallback to anywhere the task can run
 		cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
 		goto found_cpu;
 	}
