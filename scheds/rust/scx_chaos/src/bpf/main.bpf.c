@@ -270,6 +270,9 @@ void BPF_STRUCT_OPS(chaos_dispatch, s32 cpu, struct task_struct *prev)
 			break; // this is the DSQ's key so we're done
 		}
 
+		// restore vtime to p2dq's timeline
+		p->scx.dsq_vtime = taskc->p2dq_vtime;
+
 		async_p2dq_enqueue(&promise, p, taskc->enq_flags);
 		complete_p2dq_enqueue_move(&promise, BPF_FOR_EACH_ITER, p);
 		bpf_task_release(p);
@@ -288,12 +291,17 @@ void BPF_STRUCT_OPS(chaos_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 		return;
 	}
 
+	// capture vtime before the potentially discarded enqueue
+	taskc->p2dq_vtime = p->scx.dsq_vtime;
+
 	async_p2dq_enqueue(&promise, p, enq_flags);
 	if (promise.kind == P2DQ_ENQUEUE_PROMISE_COMPLETE)
 		return;
 
-	if (taskc->next_trait != CHAOS_TRAIT_NONE &&
-	    enqueue_chaotic(p, enq_flags, taskc))
+	if (taskc->next_trait == CHAOS_TRAIT_NONE)
+		return complete_p2dq_enqueue(&promise, p);
+
+	if (enqueue_chaotic(p, enq_flags, taskc))
 		return;
 
 	complete_p2dq_enqueue(&promise, p);
