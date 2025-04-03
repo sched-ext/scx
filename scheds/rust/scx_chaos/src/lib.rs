@@ -127,8 +127,8 @@ impl<'a> TryFrom<Builder<'a>> for Pin<Box<Scheduler>> {
                 } => {
                     open_skel.maps.rodata_data.random_delays_freq_frac32 =
                         (frequency * 2_f64.powf(32_f64)) as u32;
-                    open_skel.maps.rodata_data.random_delays_min_ns = (min_us * 1000) as u32;
-                    open_skel.maps.rodata_data.random_delays_max_ns = (max_us * 1000) as u32;
+                    open_skel.maps.rodata_data.random_delays_min_ns = min_us * 1000;
+                    open_skel.maps.rodata_data.random_delays_max_ns = max_us * 1000;
                 }
             }
         }
