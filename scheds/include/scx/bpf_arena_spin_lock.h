@@ -44,7 +44,7 @@ struct arena_qnode {
  * 16-17: tail index
  * 18-31: tail cpu (+1)
  */
-#define _Q_MAX_CPUS		1024
+#define _Q_MAX_CPUS		16384
 
 #define	_Q_SET_MASK(type)	(((1U << _Q_ ## type ## _BITS) - 1)\
 				      << _Q_ ## type ## _OFFSET)
@@ -460,7 +460,7 @@ static __always_inline int arena_spin_lock(arena_spinlock_t __arena *lock)
 {
 	int val = 0;
 
-	if (CONFIG_NR_CPUS > 1024)
+	if (CONFIG_NR_CPUS > _Q_MAX_CPUS)
 		return -EOPNOTSUPP;
 
 	bpf_preempt_disable();
