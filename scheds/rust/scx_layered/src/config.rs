@@ -122,6 +122,10 @@ pub struct LayerCommon {
     pub nodes: Vec<usize>,
     #[serde(default)]
     pub llcs: Vec<usize>,
+    #[serde(default)]
+    pub sticky_mod_min_us: f64,
+    #[serde(default)]
+    pub sticky_mod_pred_pct: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -202,6 +202,9 @@ struct cpu_ctx {
 	u32			gn_layer_order[MAX_LAYERS];	/* grouped non-preempt */
 
 	struct cpu_prox_map	prox_map;
+
+	u64			sticky_mod_end_time_ns;
+	u64			sticky_mod_pred_pct;
 };
 
 struct llc_prox_map {
@@ -332,6 +335,9 @@ struct layer {
 
 	char			name[MAX_LAYER_NAME];
 	bool			is_protected;
+
+	u64			sticky_mod_min_ns;
+	u64			sticky_mod_pred_pct;
 };
 
 struct scx_cmd {

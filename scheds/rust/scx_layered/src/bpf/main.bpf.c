@@ -52,6 +52,7 @@ const volatile u64 min_open_layer_disallow_preempt_after_ns;
 const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 const volatile bool percpu_kthread_preempt = true;
+int active_sticky_mod = 0;
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
@@ -499,6 +500,11 @@ struct task_ctx {
 	u32			qrt_llc_id;
 
 	char 			join_layer[SCXCMD_COMLEN];
+
+#define STICKY_MOD_NR_BUCKETS 8
+	u64			sticky_mod_buckets[STICKY_MOD_NR_BUCKETS];
+	u64			sticky_mod_nr_cnt;
+	u64			sticky_mod_start_ns;
 };
 
 struct {
@@ -872,6 +878,47 @@ out_put:
 }
 
 static __always_inline
+s32 pick_sticky_mod_cpu(struct llc_ctx *llc, struct layer *layer, s32 prev_cpu)
+{
+	u64 time = bpf_ktime_get_ns();
+	const struct cpumask *cpumask;
+	struct cpu_ctx *cpu_ctx;
+	s32 cpu = -1;
+	int i;
+
+	if (!active_sticky_mod)
+		return cpu;
+
+	cpu_ctx = lookup_cpu_ctx(prev_cpu);
+	if (!cpu_ctx)
+		goto llc;
+	if (cpu_ctx->sticky_mod_pred_pct < layer->sticky_mod_pred_pct)
+		goto llc;
+	if (cpu_ctx->sticky_mod_end_time_ns - time > layer->sticky_mod_min_ns)
+		goto llc;
+	return prev_cpu;
+llc:
+	if (!(cpumask = cast_mask(llc->cpumask)))
+		goto out;
+	bpf_for(i, 0, nr_possible_cpus) {
+		if (i == prev_cpu)
+			continue;
+		if (!bpf_cpumask_test_cpu(i, cpumask))
+			continue;
+		if (!(cpu_ctx = lookup_cpu_ctx(i)))
+			continue;
+		if (cpu_ctx->sticky_mod_pred_pct < layer->sticky_mod_pred_pct)
+			continue;
+		if (cpu_ctx->sticky_mod_end_time_ns - time > layer->sticky_mod_min_ns)
+			continue;
+		cpu = i;
+		break;
+	}
+out:
+	return cpu;
+}
+
+static __always_inline
 s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		  struct cpu_ctx *cpuc, struct task_ctx *taskc, struct layer *layer,
 		  bool from_selcpu)
@@ -987,6 +1034,9 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 			cpu = -1;
 			goto out_put;
 		}
+
+		if ((cpu = pick_sticky_mod_cpu(prev_llcc, layer, prev_cpu)) >= 0)
+			goto out_put;
 	}
 
 	/*
@@ -1193,6 +1243,55 @@ static void layer_kick_idle_cpu(struct layer *layer)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 	scx_bpf_put_idle_cpumask(idle_smtmask);
+}
+
+SEC("tp_btf/sched_switch")
+int BPF_PROG(layered_sched_switch, bool ignore, struct task_struct *prev, struct task_struct *next)
+{
+	u64 time = bpf_ktime_get_ns();
+	u64 duration = time, max = 0;
+	u32 beg = 0, end = 50000, i;
+	struct task_ctx *pc, *nc;
+	struct cpu_ctx *c;
+	u32 max_i = 0;
+
+	if (!active_sticky_mod)
+		return 0;
+
+	if (!(pc = lookup_task_ctx_may_fail(prev)))
+		goto next;
+
+	duration -= pc->sticky_mod_start_ns;
+	duration /= 1000;
+
+	pc->sticky_mod_nr_cnt++;
+
+	for (i = 0; i < STICKY_MOD_NR_BUCKETS; i++) {
+		u64 cnt = pc->sticky_mod_buckets[i];
+
+		if (duration >= beg && duration <= end) {
+			pc->sticky_mod_buckets[i]++;
+			cnt++;
+		}
+		if (max < cnt) {
+			max = cnt;
+			max_i = i;
+		}
+		beg += 50000;
+		end += 50000;
+		if (i == STICKY_MOD_NR_BUCKETS - 2)
+			end = -1;
+	}
+
+	if (!(c = lookup_cpu_ctx(-1)))
+		goto next;
+	c->sticky_mod_end_time_ns = (max_i + 1) * 50000;
+	c->sticky_mod_pred_pct = ((max * 100) / pc->sticky_mod_nr_cnt);
+next:
+	if (!(nc = lookup_task_ctx_may_fail(next)))
+		return 0;
+	nc->sticky_mod_start_ns = time;
+	return 0;
 }
 
 void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
@@ -1718,6 +1817,9 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 				xllc_mig_skipped = true;
 				continue;
 			}
+
+			if (pick_sticky_mod_cpu(remote_llcc, layer, -1) >= 0)
+				continue;
 		}
 
 		if (scx_bpf_dsq_move_to_local(layer_dsq_id(layer_id, *llc_idp)))
@@ -3173,6 +3275,9 @@ static s32 init_layer(int layer_id)
 		if (ret < 0)
 			return ret;
 	}
+
+	if (layer->sticky_mod_min_ns || layer->sticky_mod_pred_pct)
+		active_sticky_mod++;
 
 	return 0;
 }

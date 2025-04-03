@@ -123,6 +123,8 @@ lazy_static! {
                         perf: 1024,
                         nodes: vec![],
                         llcs: vec![],
+                        sticky_mod_min_us: 0.0,
+                        sticky_mod_pred_pct: 0.0,
                     },
                 },
             },
@@ -154,6 +156,8 @@ lazy_static! {
                         idle_resume_us: None,
                         nodes: vec![],
                         llcs: vec![],
+                        sticky_mod_min_us: 0.0,
+                        sticky_mod_pred_pct: 0.0,
                     },
                 },
             },
@@ -189,6 +193,8 @@ lazy_static! {
                         idle_resume_us: None,
                         nodes: vec![],
                         llcs: vec![],
+                        sticky_mod_min_us: 0.0,
+                        sticky_mod_pred_pct: 0.0,
                     },
                 },
             },
@@ -221,6 +227,8 @@ lazy_static! {
                         idle_resume_us: None,
                         nodes: vec![],
                         llcs: vec![],
+                        sticky_mod_min_us: 0.0,
+                        sticky_mod_pred_pct: 0.0,
                     },
                 },
             },
@@ -427,6 +435,17 @@ lazy_static! {
 ///   for scheduling decisions. If unset then all LLCs will be used. If
 ///   the nodes value is set the cpuset of LLCs will be or'ed with the nodes
 ///   config.
+///
+/// - sticky_mod_min_us: Skip cross-CPU migration if the previous CPU is likely
+///   to be available for execution sooner than this threshold, same applies for
+///   one of the CPUs in the previous LLC.
+///
+/// - sticky_mod_pred_pct: The percentage threshold to decide whether to stick
+///   to previous CPU, or one of the CPUs in the previous LLC, opening up. It
+///   is compared against the percentage of times the process stayed in a
+///   predictable bucket of execution time, increasing confidence on
+///   predictions. E.g. 90 would mean only processes predictable with 90%
+///   accuracy or more will be chosen for stickiness modulation.
 ///
 ///
 /// Similar to matches, adding new policies and extending existing ones
@@ -1318,6 +1337,8 @@ impl<'a> Scheduler<'a> {
                     disallow_open_after_us,
                     disallow_preempt_after_us,
                     xllc_mig_min_us,
+                    sticky_mod_min_us,
+                    sticky_mod_pred_pct,
                     ..
                 } = spec.kind.common();
 
@@ -1359,6 +1380,8 @@ impl<'a> Scheduler<'a> {
                     }
                     layer.llc_mask |= llcmask_from_llcs(&topo_node.llcs) as u64;
                 }
+                layer.sticky_mod_min_ns = (sticky_mod_min_us * 1000.0) as u64;
+                layer.sticky_mod_pred_pct = sticky_mod_pred_pct.clamp(0.0, 100.0) as u64;
             }
 
             layer.is_protected.write(match spec.kind {
