@@ -2260,7 +2260,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scx_bpfland"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "clap",
@@ -2277,7 +2277,7 @@ dependencies = [
 
 [[package]]
 name = "scx_chaos"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "clap",
@@ -2291,7 +2291,7 @@ dependencies = [
 
 [[package]]
 name = "scx_flash"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -2308,7 +2308,7 @@ dependencies = [
 
 [[package]]
 name = "scx_lavd"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -2334,7 +2334,7 @@ dependencies = [
 
 [[package]]
 name = "scx_layered"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -2359,7 +2359,7 @@ dependencies = [
 
 [[package]]
 name = "scx_loader"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "clap",
@@ -2378,7 +2378,7 @@ dependencies = [
 
 [[package]]
 name = "scx_mitosis"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -2400,7 +2400,7 @@ dependencies = [
 
 [[package]]
 name = "scx_p2dq"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2424,7 +2424,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rlfifo"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "ctrlc",
@@ -2437,7 +2437,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "clap",
@@ -2458,7 +2458,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland_core"
-version = "2.2.9"
+version = "2.2.10"
 dependencies = [
  "anyhow",
  "libbpf-rs",
@@ -2471,7 +2471,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rusty"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2494,7 +2494,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "crossbeam",
@@ -2511,7 +2511,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats_derive"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2522,7 +2522,7 @@ dependencies = [
 
 [[package]]
 name = "scx_tickless"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "affinity",
  "anyhow",
@@ -2540,7 +2540,7 @@ dependencies = [
 
 [[package]]
 name = "scx_utils"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "anyhow",
  "bindgen 0.71.1",
@@ -2568,7 +2568,7 @@ dependencies = [
 
 [[package]]
 name = "scxctl"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "clap",
  "colored 3.0.0",
@@ -2578,7 +2578,7 @@ dependencies = [
 
 [[package]]
 name = "scxtop"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "anyhow",
  "clap",
