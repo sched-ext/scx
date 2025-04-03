@@ -42,7 +42,6 @@ use crate::bpf_intf::stat_idx_P2DQ_STAT_DIRECT;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DISPATCH_PICK2;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DSQ_CHANGE;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DSQ_SAME;
-use crate::bpf_intf::stat_idx_P2DQ_STAT_GREEDY_IDLE;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_IDLE;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_KEEP;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_LLC_MIGRATION;
@@ -143,7 +142,6 @@ impl<'a> Scheduler<'a> {
         Metrics {
             direct: stats[stat_idx_P2DQ_STAT_DIRECT as usize],
             idle: stats[stat_idx_P2DQ_STAT_IDLE as usize],
-            greedy_idle: stats[stat_idx_P2DQ_STAT_GREEDY_IDLE as usize],
             sched_mode: self.skel.maps.bss_data.sched_mode,
             dsq_change: stats[stat_idx_P2DQ_STAT_DSQ_CHANGE as usize],
             same_dsq: stats[stat_idx_P2DQ_STAT_DSQ_SAME as usize],
