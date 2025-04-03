@@ -25,6 +25,7 @@ struct chaos_task_ctx {
 
 	enum chaos_trait_kind	next_trait;
 	u64			enq_flags;
+	u64			p2dq_vtime;
 };
 
 #endif /* __CHAOS_INTF_H */
