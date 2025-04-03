@@ -12,6 +12,26 @@
 
 #include <stdbool.h>
 
+#define __COMPAT_chaos_scx_bpf_dsq_move_set_slice(it__iter, slice)				\
+	(bpf_ksym_exists(scx_bpf_dsq_move_set_slice) ?						\
+	  scx_bpf_dsq_move_set_slice((it__iter), (slice)) :					\
+	  scx_bpf_dispatch_from_dsq_set_slice___compat((it__iter), (slice)))
+
+#define __COMPAT_chaos_scx_bpf_dsq_move(it__iter, p, dsq_id, enq_flags)				\
+	(bpf_ksym_exists(scx_bpf_dsq_move) ?							\
+	  scx_bpf_dsq_move((it__iter), (p), (dsq_id), (enq_flags)) :				\
+	  scx_bpf_dispatch_from_dsq___compat((it__iter), (p), (dsq_id), (enq_flags)))
+
+#define __COMPAT_chaos_scx_bpf_dsq_move_set_vtime(it__iter, vtime)				\
+	(bpf_ksym_exists(scx_bpf_dsq_move_set_vtime) ?						\
+	  scx_bpf_dsq_move_set_vtime((it__iter), (vtime)) :					\
+	  scx_bpf_dispatch_from_dsq_set_vtime___compat((it__iter), (vtime)))
+
+#define __COMPAT_chaos_scx_bpf_dsq_move_vtime(it__iter, p, dsq_id, enq_flags)			\
+	(bpf_ksym_exists(scx_bpf_dsq_move_vtime) ?						\
+	  scx_bpf_dsq_move_vtime((it__iter), (p), (dsq_id), (enq_flags)) :			\
+	  scx_bpf_dispatch_vtime_from_dsq___compat((it__iter), (p), (dsq_id), (enq_flags)))
+
 const volatile u32 random_delays_freq_frac32 = 1; /* for veristat */
 const volatile u32 random_delays_min_ns = 1; /* for veristat */
 const volatile u32 random_delays_max_ns = 2; /* for veristat */
@@ -108,13 +128,13 @@ static __always_inline void complete_p2dq_enqueue_move(struct enqueue_promise *p
 	case P2DQ_ENQUEUE_PROMISE_COMPLETE:
 		goto out;
 	case P2DQ_ENQUEUE_PROMISE_FIFO:
-		__COMPAT_scx_bpf_dsq_move_set_slice(it__iter, *MEMBER_VPTR(pro->fifo, .slice_ns));
-		__COMPAT_scx_bpf_dsq_move(it__iter, p, pro->fifo.dsq_id, pro->fifo.enq_flags);
+		__COMPAT_chaos_scx_bpf_dsq_move_set_slice(it__iter, *MEMBER_VPTR(pro->fifo, .slice_ns));
+		__COMPAT_chaos_scx_bpf_dsq_move(it__iter, p, pro->fifo.dsq_id, pro->fifo.enq_flags);
 		goto out;
 	case P2DQ_ENQUEUE_PROMISE_VTIME:
-		__COMPAT_scx_bpf_dsq_move_set_slice(it__iter, pro->vtime.slice_ns);
-		__COMPAT_scx_bpf_dsq_move_set_vtime(it__iter, pro->vtime.vtime);
-		__COMPAT_scx_bpf_dsq_move_vtime(it__iter, p, pro->vtime.dsq_id, pro->vtime.enq_flags);
+		__COMPAT_chaos_scx_bpf_dsq_move_set_slice(it__iter, pro->vtime.slice_ns);
+		__COMPAT_chaos_scx_bpf_dsq_move_set_vtime(it__iter, pro->vtime.vtime);
+		__COMPAT_chaos_scx_bpf_dsq_move_vtime(it__iter, p, pro->vtime.dsq_id, pro->vtime.enq_flags);
 		goto out;
 	}
 
