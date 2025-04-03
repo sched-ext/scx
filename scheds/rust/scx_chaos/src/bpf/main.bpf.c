@@ -12,9 +12,30 @@
 
 #include <stdbool.h>
 
+const volatile u64 chaos_timer_check_queues_min_ns = 500000;
+const volatile u64 chaos_timer_check_queues_max_ns = 2000000;
+const volatile u64 chaos_timer_check_queues_slack_ns = 2500000;
+
 const volatile u32 random_delays_freq_frac32 = 1; /* for veristat */
-const volatile u32 random_delays_min_ns = 1; /* for veristat */
-const volatile u32 random_delays_max_ns = 2; /* for veristat */
+const volatile u64 random_delays_min_ns = 1; /* for veristat */
+const volatile u64 random_delays_max_ns = 2; /* for veristat */
+
+#define MIN(x, y) ((x) < (y) ? (x) : (y))
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
+
+#define MAX_ITERS_IN_DISPATCH 8
+
+enum chaos_timer_callbacks {
+	CHAOS_TIMER_CHECK_QUEUES,
+	CHAOS_MAX_TIMERS,
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, CHAOS_MAX_TIMERS);
+	__type(key, int);
+	__type(value, struct timer_wrapper);
+} chaos_timers SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
@@ -36,14 +57,16 @@ static __always_inline enum chaos_trait_kind choose_chaos()
 	return CHAOS_TRAIT_NONE;
 }
 
-static __always_inline u32 get_current_cpu_delay_dsq()
+static __always_inline u64 get_cpu_delay_dsq(int cpu_idx)
 {
+	if (cpu_idx >= 0)
+		return CHAOS_DSQ_BASE | cpu_idx;
+
 	// use current processor so enqueue runs here next time too
 	// TODO: this assumes CPU IDs are linear, and probably needs to be mapped
 	// into linear IDs with topology information passed from userspace
-	u32 cpu = bpf_get_smp_processor_id();
-
-	return CHAOS_DSQ_BASE | cpu;
+	cpu_idx = bpf_get_smp_processor_id();
+	return CHAOS_DSQ_BASE | cpu_idx;
 }
 
 __weak s32 enqueue_random_delay(struct task_struct *p __arg_trusted, u64 enq_flags,
@@ -56,7 +79,7 @@ __weak s32 enqueue_random_delay(struct task_struct *p __arg_trusted, u64 enq_fla
 		vtime += rand64 % (random_delays_max_ns - random_delays_min_ns);
 	}
 
-	scx_bpf_dsq_insert_vtime(p, get_current_cpu_delay_dsq(), 0, vtime, enq_flags);
+	scx_bpf_dsq_insert_vtime(p, get_cpu_delay_dsq(-1), 0, vtime, enq_flags);
 
 	return true;
 }
@@ -81,11 +104,90 @@ __weak s32 enqueue_chaotic(struct task_struct *p __arg_trusted, u64 enq_flags,
 	return out;
 }
 
+enum dsq_check_result {
+	CHAOS_DSQ_CHECK_OKAY,
+	CHAOS_DSQ_CHECK_DISPATCH_NOW,
+	CHAOS_DSQ_CHECK_DISPATCH_SLOW,
+};
+
+/*
+ * Walk a CPU's delay dsq and kick it if the task should already have been
+ * scheduled. Use a slack time to avoid preempting for small differences. Return
+ * the next time a task in this DSQ might need kicking. The next time is
+ * obviously very racy and may return 0 if the DSQ will all be handled by the
+ * next dispatch, so should be clamped before being relied on.
+ */
+__weak u64 check_dsq_times(int cpu_idx)
+{
+	struct task_struct *p;
+	u64 next_trigger_time = 0;
+	u64 now = bpf_ktime_get_ns();
+	int i = 0;
+	bool has_kicked = false;
+
+	bpf_rcu_read_lock();
+	bpf_for_each(scx_dsq, p, get_cpu_delay_dsq(cpu_idx), 0) {
+		p = bpf_task_from_pid(p->pid);
+		if (!p)
+			break;
+
+		if (i++ >= MAX_ITERS_IN_DISPATCH) {
+			next_trigger_time = p->scx.dsq_vtime;
+			bpf_task_release(p);
+			break;
+		}
+
+		if (has_kicked) {
+			bpf_task_release(p);
+			continue;
+		}
+
+		if (p->scx.dsq_vtime < now + chaos_timer_check_queues_slack_ns) {
+			has_kicked = true;
+			scx_bpf_kick_cpu(cpu_idx, SCX_KICK_PREEMPT);
+		} else if (p->scx.dsq_vtime < now) {
+			has_kicked = true;
+			scx_bpf_kick_cpu(cpu_idx, SCX_KICK_IDLE);
+		}
+
+		bpf_task_release(p);
+	}
+	bpf_rcu_read_unlock();
+
+	return next_trigger_time;
+}
+
+static int chaos_timer_check_queues_callback(void *map, int key, struct timer_wrapper *timerw)
+{
+	u64 started_at = bpf_ktime_get_ns();
+	u64 next_trigger_time = 0;
+	u64 this_next_trigger_time;
+	int cpu_idx;
+
+	bpf_for(cpu_idx, 0, nr_cpus) {
+		this_next_trigger_time = check_dsq_times(cpu_idx);
+		next_trigger_time = MAX(next_trigger_time, this_next_trigger_time);
+	}
+
+	if (next_trigger_time == 0) {
+		bpf_timer_start(&timerw->timer, chaos_timer_check_queues_max_ns, 0);
+		return 0;
+	}
+
+	next_trigger_time = MAX(next_trigger_time, started_at + chaos_timer_check_queues_min_ns);
+	next_trigger_time = MIN(next_trigger_time, started_at + chaos_timer_check_queues_max_ns);
+
+	bpf_timer_start(&timerw->timer, next_trigger_time, BPF_F_TIMER_ABS);
+	return 0;
+}
+
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(chaos_init)
 {
+	struct timer_wrapper *timerw;
 	struct llc_ctx *llcx;
 	struct cpu_ctx *cpuc;
-	int i, ret;
+	int timer_id, ret, i;
 
 	bpf_for(i, 0, nr_cpus) {
 		if (!(cpuc = lookup_cpu_ctx(i)) ||
@@ -96,6 +198,25 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(chaos_init)
 		if (ret < 0)
 			return ret;
 	}
+
+	timer_id = CHAOS_TIMER_CHECK_QUEUES;
+	timerw = bpf_map_lookup_elem(&chaos_timers, &timer_id);
+	if (!timerw)
+		return -1;
+
+	timerw->key = timer_id;
+
+	ret = bpf_timer_init(&timerw->timer, &chaos_timers, CLOCK_BOOTTIME);
+	if (ret)
+		return -1;
+
+	ret = bpf_timer_set_callback(&timerw->timer, &chaos_timer_check_queues_callback);
+	if (ret)
+		return -1;
+
+	ret = bpf_timer_start(&timerw->timer, chaos_timer_check_queues_max_ns, 0);
+	if (ret)
+		return -1;
 
 	return p2dq_init_impl();
 }
@@ -130,8 +251,8 @@ void BPF_STRUCT_OPS(chaos_dispatch, s32 cpu, struct task_struct *prev)
 	u64 now = bpf_ktime_get_ns();
 
 	int i = 0;
-	bpf_for_each(scx_dsq, p, get_current_cpu_delay_dsq(), 0) {
-		if (++i >= 8)
+	bpf_for_each(scx_dsq, p, get_cpu_delay_dsq(-1), 0) {
+		if (i++ >= MAX_ITERS_IN_DISPATCH)
 			break; // the verifier can't handle this loop, so limit it
 
 		p = bpf_task_from_pid(p->pid);
