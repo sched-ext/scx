@@ -6,7 +6,7 @@ import re
 import subprocess
 import sys
 
-priority=['scx_stats', 'scx_stats_derive', 'scx_utils', 'scx_rustland_core']
+priority=['scx_stats', 'scx_stats_derive', 'scx_utils', 'scx_rustland_core', 'scx_p2dq']
 skip=['scx_mitosis']
 publish_args={'scx_rlfifo': ['--no-verify'],
               'scx_rustland': ['--no-verify']}
