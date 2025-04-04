@@ -46,12 +46,14 @@ use scx_stats::prelude::*;
 use scx_utils::autopower::{fetch_power_profile, PowerProfile};
 use scx_utils::build_id;
 use scx_utils::compat;
+use scx_utils::read_cpulist;
 use scx_utils::scx_ops_attach;
 use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
@@ -96,6 +98,10 @@ struct Opts {
     /// Minimum scheduling slice duration in microseconds.
     #[clap(long = "slice-min-us", default_value = "300")]
     slice_min_us: u64,
+
+    /// List of CPUs in preferred order (e.g., "0-3,7,6,5,4").
+    #[clap(long = "cpu-pref-order", default_value = "")]
+    cpu_pref_order: String,
 
     /// Do not boost futex holders.
     #[clap(long = "no-futex-boost", action = clap::ArgAction::SetTrue)]
@@ -158,12 +164,13 @@ struct Opts {
 }
 
 impl Opts {
-    fn nothing_specified(&self) -> bool {
+    fn autopilot_allowed(&self) -> bool {
         self.autopilot == false
             && self.autopower == false
             && self.performance == false
             && self.powersave == false
             && self.balanced == false
+            && self.cpu_pref_order == ""
             && self.no_core_compaction == false
             && self.prefer_smt_core == false
             && self.prefer_little_core == false
@@ -174,7 +181,7 @@ impl Opts {
     }
 
     fn proc(&mut self) -> Option<&mut Self> {
-        if self.nothing_specified() {
+        if self.autopilot_allowed() {
             self.autopilot = true;
             info!("Autopilot mode is enabled by default.");
             return Some(self);
@@ -250,6 +257,7 @@ struct ComputeDomainValue {
 
 #[derive(Debug)]
 struct FlatTopology {
+    all_cpus_mask: Cpumask,
     cpu_fids_performance: Vec<CpuFlatId>,
     cpu_fids_powersave: Vec<CpuFlatId>,
     cpdom_map: BTreeMap<ComputeDomainKey, ComputeDomainValue>,
@@ -275,19 +283,21 @@ impl fmt::Display for FlatTopology {
 impl FlatTopology {
     /// Build a flat-structured topology
     pub fn new() -> Result<FlatTopology> {
-        let topo = Topology::new().expect("Failed to build host topology");
-        let (cpu_fids_performance, avg_cap) = Self::build_cpu_fids(&topo, false, false).unwrap();
-        let (cpu_fids_powersave, _) = Self::build_cpu_fids(&topo, true, true).unwrap();
+        let sys_topo = Topology::new().expect("Failed to build host topology");
+        let (cpu_fids_performance, avg_cap) =
+            Self::build_cpu_fids(&sys_topo, false, false).unwrap();
+        let (cpu_fids_powersave, _) = Self::build_cpu_fids(&sys_topo, true, true).unwrap();
 
         // Note that building compute domain is not dependent to CPU orer
         // so it is okay to use any cpu_fids_*.
         let cpdom_map = Self::build_cpdom(&cpu_fids_performance, avg_cap).unwrap();
 
         Ok(FlatTopology {
+            all_cpus_mask: sys_topo.span,
             cpu_fids_performance,
             cpu_fids_powersave,
             cpdom_map,
-            smt_enabled: topo.smt_enabled,
+            smt_enabled: sys_topo.smt_enabled,
         })
     }
 
@@ -552,7 +562,7 @@ impl<'a> Scheduler<'a> {
 
         // Initialize CPU topology
         let topo = FlatTopology::new().unwrap();
-        Self::init_cpus(&mut skel, &topo);
+        Self::init_cpus(&mut skel, &opts, &topo);
 
         // Initialize skel according to @opts.
         Self::init_globals(&mut skel, &opts, &topo);
@@ -585,17 +595,43 @@ impl<'a> Scheduler<'a> {
         })
     }
 
-    fn init_cpus(skel: &mut OpenBpfSkel, topo: &FlatTopology) {
-        // Initialize CPU order topologically sorted
-        // by a cpu, node, llc, max_freq, and core order
-        for (pos, cpu) in topo.cpu_fids_performance.iter().enumerate() {
-            skel.maps.rodata_data.cpu_order_performance[pos] = cpu.cpu_id as u16;
+    fn init_cpus(skel: &mut OpenBpfSkel, opts: &Opts, topo: &FlatTopology) {
+        debug!("{:#?}", topo);
+
+        // Initialize CPU capacity
+        for (_, cpu) in topo.cpu_fids_performance.iter().enumerate() {
             skel.maps.rodata_data.__cpu_capacity_hint[cpu.cpu_id] = cpu.cpu_cap as u16;
         }
-        for (pos, cpu) in topo.cpu_fids_powersave.iter().enumerate() {
-            skel.maps.rodata_data.cpu_order_powersave[pos] = cpu.cpu_id as u16;
+
+        // If cpu_pref_order is not specified, initialize CPU order
+        // topologically sorted by a cpu, node, llc, max_freq, and core order.
+        // Otherwise, follow the specified CPU preference order.
+        let mut cpu_pf_order = vec![];
+        let mut cpu_ps_order = vec![];
+        if opts.cpu_pref_order == "" {
+            for (pos, cpu) in topo.cpu_fids_performance.iter().enumerate() {
+                cpu_pf_order.push(cpu.cpu_id);
+            }
+            for (pos, cpu) in topo.cpu_fids_powersave.iter().enumerate() {
+                cpu_ps_order.push(cpu.cpu_id);
+            }
+        } else {
+            let cpu_list = read_cpulist(&opts.cpu_pref_order).unwrap();
+            let pref_mask = Cpumask::from_cpulist(&opts.cpu_pref_order).unwrap();
+            if pref_mask != topo.all_cpus_mask {
+                panic!("--cpu_pref_order does not cover the whole CPUs.");
+            }
+            cpu_pf_order = cpu_list.clone();
+            cpu_ps_order = cpu_list.clone();
         }
-        debug!("{:#?}", topo);
+        for (pos, cpu) in cpu_pf_order.iter().enumerate() {
+            skel.maps.rodata_data.cpu_order_performance[pos] = *cpu as u16;
+        }
+        for (pos, cpu) in cpu_ps_order.iter().enumerate() {
+            skel.maps.rodata_data.cpu_order_powersave[pos] = *cpu as u16;
+        }
+        info!("CPU pref order in performance mode: {:?}", cpu_pf_order);
+        info!("CPU perf order in powersave mode: {:?}", cpu_ps_order);
 
         // Initialize compute domain contexts
         for (k, v) in topo.cpdom_map.iter() {
