@@ -146,7 +146,7 @@ pub struct SchedSample {
     #[stat(desc = "How often this task is scheduled per second")]
     pub run_freq: u64,
     #[stat(desc = "Average runtime per schedule")]
-    pub run_time_ns: u64,
+    pub avg_runtime: u64,
     #[stat(desc = "How frequently this task waits for other tasks")]
     pub wait_freq: u64,
     #[stat(desc = "How frequently this task wakes other tasks")]
@@ -210,7 +210,7 @@ impl SchedSample {
             self.static_prio,
             self.slice_boost_prio,
             self.run_freq,
-            self.run_time_ns,
+            self.avg_runtime,
             self.wait_freq,
             self.wake_freq,
             self.perf_cri,

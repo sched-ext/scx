@@ -14,7 +14,7 @@ struct preemption_info {
 
 static u64 get_est_stopping_time(struct task_ctx *taskc, u64 now)
 {
-	return now + taskc->run_time_ns;
+	return now + taskc->avg_runtime;
 }
 
 static int comp_preemption_info(struct preemption_info *prm_a,
@@ -304,7 +304,7 @@ static bool try_yield_current_cpu(struct task_struct *p_run,
 	 * zero.
 	 */
 	prm_run.stopping_tm_est_ns = taskc_run->last_running_clk +
-				     taskc_run->run_time_ns;
+				     taskc_run->avg_runtime;
 	prm_run.lat_cri = taskc_run->lat_cri;
 
 	bpf_rcu_read_lock();
