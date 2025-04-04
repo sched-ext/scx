@@ -391,8 +391,18 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	taskc->lat_cri = max(lat_cri, taskc->lat_cri_waker);
 }
 
-static u64 calc_adj_runtime(u64 runtime)
+static u64 calc_adjusted_runtime(struct task_ctx *taskc)
 {
+	u64 runtime;
+
+	/*
+	 * Prefer a short-running (avg_runtime) and recently woken-up
+	 * (acc_runtime) task. To avoid the starvation of CPU-bound tasks,
+	 * which rarely sleep, limit the impact of acc_runtime.
+	 */
+	runtime = taskc->avg_runtime +
+		  min(taskc->acc_runtime, LAVD_ACC_RUNTIME_MAX);
+
 	/*
 	 * Convert highly skewed runtime distribution to
 	 * mildly skewed distribution.
@@ -402,9 +412,9 @@ static u64 calc_adj_runtime(u64 runtime)
 }
 
 static u64 calc_virtual_deadline_delta(struct task_struct *p,
-					struct task_ctx *taskc)
+				       struct task_ctx *taskc)
 {
-	u64 deadline, adj_runtime;
+	u64 deadline, adjusted_runtime;
 	u32 greedy_ratio, greedy_ft;
 
 	/*
@@ -415,9 +425,9 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	calc_lat_cri(p, taskc);
 	greedy_ratio = calc_greedy_ratio(taskc);
 	greedy_ft = calc_greedy_factor(greedy_ratio);
-	adj_runtime = calc_adj_runtime(taskc->avg_runtime);
+	adjusted_runtime = calc_adjusted_runtime(taskc);
 
-	deadline = (adj_runtime / taskc->lat_cri) * greedy_ft;
+	deadline = (adjusted_runtime * greedy_ft) / taskc->lat_cri;
 
 	return deadline;
 }

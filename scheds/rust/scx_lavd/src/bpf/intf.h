@@ -106,7 +106,7 @@ struct task_ctx {
 	/*
 	 * Task running statistics for latency criticality calculation
 	 */
-	u64	acc_runtime;	/* accmulated runtime from runnable to quiescent state */
+	u64	acc_runtime;		/* accmulated runtime from runnable to quiescent state */
 	u64	avg_runtime;		/* average runtime per schedule */
 	u64	run_freq;		/* scheduling frequency in a second */
 	u64	wait_freq;		/* waiting frequency in a second */

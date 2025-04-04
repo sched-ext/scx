@@ -609,10 +609,10 @@ impl<'a> Scheduler<'a> {
         let mut cpu_pf_order = vec![];
         let mut cpu_ps_order = vec![];
         if opts.cpu_pref_order == "" {
-            for (_, cpu) in topo.cpu_fids_performance.iter().enumerate() {
+            for cpu in topo.cpu_fids_performance.iter() {
                 cpu_pf_order.push(cpu.cpu_id);
             }
-            for (_, cpu) in topo.cpu_fids_powersave.iter().enumerate() {
+            for cpu in topo.cpu_fids_powersave.iter() {
                 cpu_ps_order.push(cpu.cpu_id);
             }
         } else {
