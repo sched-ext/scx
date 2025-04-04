@@ -40,7 +40,8 @@ pub struct SchedulerOpts {
     #[clap(short = 'e', long, action = clap::ArgAction::SetTrue)]
     pub eager_load_balance: bool,
 
-    /// Disables greedy idle CPU selection, may cause better load balancing on multi-LLC systems.
+    /// ***DEPRECATED*** Disables greedy idle CPU selection, may cause better load balancing on
+    /// multi-LLC systems.
     #[clap(short = 'g', long, default_value_t = get_default_greedy_disable(), action = clap::ArgAction::Set)]
     pub greedy_idle_disable: bool,
 
@@ -169,7 +170,6 @@ macro_rules! init_open_skel {
             $skel.maps.rodata_data.debug = verbose as u32;
             $skel.maps.rodata_data.dispatch_pick2_disable = opts.dispatch_pick2_disable;
             $skel.maps.rodata_data.eager_load_balance = !opts.eager_load_balance;
-            $skel.maps.rodata_data.greedy_idle = !opts.greedy_idle_disable;
             $skel.maps.rodata_data.has_little_cores = $crate::TOPO.has_little_cores();
             $skel.maps.rodata_data.interactive_sticky = opts.interactive_sticky;
             $skel.maps.rodata_data.keep_running_enabled = opts.keep_running;

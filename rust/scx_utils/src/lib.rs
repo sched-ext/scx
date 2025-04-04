@@ -70,6 +70,11 @@ pub use topology::Topology;
 pub use topology::NR_CPUS_POSSIBLE;
 pub use topology::NR_CPU_IDS;
 
+mod energy_model;
+pub use energy_model::EnergyModel;
+pub use energy_model::PerfDomain;
+pub use energy_model::PerfState;
+
 mod cpumask;
 pub use cpumask::Cpumask;
 

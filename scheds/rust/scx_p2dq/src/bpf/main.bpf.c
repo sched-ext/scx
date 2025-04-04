@@ -51,7 +51,6 @@ const volatile u32 min_nr_queued_pick2 = 10;
 const volatile bool autoslice = true;
 const volatile bool dispatch_pick2_disable = false;
 const volatile bool eager_load_balance = true;
-const volatile bool greedy_idle = false;
 const volatile bool interactive_sticky = false;
 const volatile bool keep_running_enabled = true;
 const volatile bool kthreads_local = true;

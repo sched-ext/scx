@@ -79,7 +79,17 @@ pub fn set_rlimit_infinity() {
     };
 }
 
-pub fn read_file_usize(path: &Path) -> Result<usize> {
+/// Read a file and parse its content into the specified type.
+///
+/// Trims whitespace before parsing.
+///
+/// # Errors
+/// Returns an error if reading or parsing fails.
+pub fn read_from_file<T>(path: &Path) -> Result<T>
+where
+    T: std::str::FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
+{
     let val = match std::fs::read_to_string(path) {
         Ok(val) => val,
         Err(_) => {
@@ -87,10 +97,10 @@ pub fn read_file_usize(path: &Path) -> Result<usize> {
         }
     };
 
-    match val.trim().parse::<usize>() {
+    match val.trim().parse::<T>() {
         Ok(parsed) => Ok(parsed),
         Err(_) => {
-            bail!("Failed to parse {}", val);
+            bail!("Failed to parse content '{}' from {:?}", val.trim(), path);
         }
     }
 }

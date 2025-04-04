@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use crate::misc::read_file_usize;
+use crate::misc::read_from_file;
 use crate::Cpumask;
 use anyhow::Result;
 
@@ -55,7 +55,7 @@ pub fn read_netdevs() -> Result<BTreeMap<String, NetDev>> {
         let iface = entry.file_name().to_string_lossy().into_owned();
         let iface_path_raw = format!("/sys/class/net/{}/device/enable", iface);
         let iface_path = Path::new(&iface_path_raw);
-        let is_enabled = read_file_usize(iface_path).unwrap_or(0);
+        let is_enabled = read_from_file(iface_path).unwrap_or(0_usize);
         if is_enabled < 1 {
             continue;
         }
@@ -67,7 +67,7 @@ pub fn read_netdevs() -> Result<BTreeMap<String, NetDev>> {
 
         let node_path_raw = format!("/sys/class/net/{}/device/numa_node", iface);
         let node_path = Path::new(&node_path_raw);
-        let node = read_file_usize(node_path).unwrap_or(0);
+        let node = read_from_file(node_path).unwrap_or(0_usize);
         let mut irqs = BTreeMap::new();
         let mut irq_hints = BTreeMap::new();
 

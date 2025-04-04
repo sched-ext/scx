@@ -69,8 +69,8 @@
 //! hierarchy are entirely read-only. If the host topology were to change (due
 //! to e.g. hotplug), a new Topology object should be created.
 
-use crate::misc::read_file_usize;
 use crate::misc::read_file_usize_vec;
+use crate::misc::read_from_file;
 use crate::Cpumask;
 use anyhow::bail;
 use anyhow::Result;
@@ -116,7 +116,7 @@ pub struct Cpu {
     /// Base operational frqeuency. Only available on Intel Turbo Boost
     /// CPUs. If not available, this will simply return maximum frequency.
     pub base_freq: usize,
-    /// The best-effort guessting of cpu_capacity scaled to 1024
+    /// The best-effort guessing of cpu_capacity scaled to 1024.
     pub cpu_capacity: usize,
     /// CPU idle resume latency
     pub pm_qos_resume_latency_us: usize,
@@ -130,7 +130,7 @@ pub struct Cpu {
     pub llc_id: usize,
     pub node_id: usize,
     pub package_id: usize,
-    pub cluster_id: usize,
+    pub cluster_id: isize,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -139,7 +139,7 @@ pub struct Core {
     pub id: usize,
     /// The sysfs value of core_id
     pub kernel_id: usize,
-    pub cluster_id: usize,
+    pub cluster_id: isize,
     pub cpus: BTreeMap<usize, Arc<Cpu>>,
     /// Cpumask of all CPUs in this core.
     pub span: Cpumask,
@@ -353,24 +353,7 @@ impl TopoCtx {
 fn cpus_online() -> Result<Cpumask> {
     let path = "/sys/devices/system/cpu/online";
     let online = std::fs::read_to_string(path)?;
-    let online_groups: Vec<&str> = online.split(',').collect();
-    let mut mask = Cpumask::new();
-    for group in online_groups.iter() {
-        let (min, max) = match sscanf!(group.trim(), "{usize}-{usize}") {
-            Ok((x, y)) => (x, y),
-            Err(_) => match sscanf!(group.trim(), "{usize}") {
-                Ok(x) => (x, x),
-                Err(_) => {
-                    bail!("Failed to parse online cpus {}", group.trim());
-                }
-            },
-        };
-        for i in min..(max + 1) {
-            mask.set_cpu(i)?;
-        }
-    }
-
-    Ok(mask)
+    Cpumask::from_cpulist(&online)
 }
 
 fn get_cache_id(topo_ctx: &mut TopoCtx, cache_level_path: &PathBuf, cache_level: usize) -> usize {
@@ -393,7 +376,7 @@ fn get_cache_id(topo_ctx: &mut TopoCtx, cache_level_path: &PathBuf, cache_level:
     }
 
     // In case of a cache miss, try to get the id from the sysfs first.
-    let id = read_file_usize(&cache_level_path.join("id")).unwrap_or(usize::MAX);
+    let id = read_from_file(&cache_level_path.join("id")).unwrap_or(usize::MAX);
     if id != usize::MAX {
         // Keep the id in the map
         id_map.insert(key, id);
@@ -429,9 +412,9 @@ fn create_insert_cpu(
 
     // Physical core ID
     let top_path = cpu_path.join("topology");
-    let core_kernel_id = read_file_usize(&top_path.join("core_id"))?;
-    let package_id = read_file_usize(&top_path.join("physical_package_id"))?;
-    let cluster_id = read_file_usize(&top_path.join("cluster_id"))?;
+    let core_kernel_id = read_from_file(&top_path.join("core_id"))?;
+    let package_id = read_from_file(&top_path.join("physical_package_id"))?;
+    let cluster_id = read_from_file(&top_path.join("cluster_id"))?;
 
     // Evaluate L2, L3 and LLC cache IDs.
     //
@@ -452,21 +435,22 @@ fn create_insert_cpu(
     // Min and max frequencies. If the kernel is not compiled with
     // CONFIG_CPU_FREQ, just assume 0 for both frequencies.
     let freq_path = cpu_path.join("cpufreq");
-    let min_freq = read_file_usize(&freq_path.join("scaling_min_freq")).unwrap_or(0);
-    let max_freq = read_file_usize(&freq_path.join("scaling_max_freq")).unwrap_or(0);
-    let base_freq = read_file_usize(&freq_path.join("base_frequency")).unwrap_or(max_freq);
-    let trans_lat_ns = read_file_usize(&freq_path.join("cpuinfo_transition_latency")).unwrap_or(0);
+    let min_freq = read_from_file(&freq_path.join("scaling_min_freq")).unwrap_or(0_usize);
+    let max_freq = read_from_file(&freq_path.join("scaling_max_freq")).unwrap_or(0_usize);
+    let base_freq = read_from_file(&freq_path.join("base_frequency")).unwrap_or(max_freq);
+    let trans_lat_ns =
+        read_from_file(&freq_path.join("cpuinfo_transition_latency")).unwrap_or(0_usize);
 
     // Cpu capacity
     let (cap_suffix, _avg_rcap, max_rcap) = capacity_src.unwrap_or(("".to_string(), 1024, 1024));
     let cap_path = cpu_path.join(cap_suffix);
-    let rcap = read_file_usize(&cap_path).unwrap_or(max_rcap);
+    let rcap = read_from_file(&cap_path).unwrap_or(max_rcap);
     let cpu_capacity = (rcap * 1024) / max_rcap;
 
     // Power management
     let power_path = cpu_path.join("power");
     let pm_qos_resume_latency_us =
-        read_file_usize(&power_path.join("pm_qos_resume_latency_us")).unwrap_or(0);
+        read_from_file(&power_path.join("pm_qos_resume_latency_us")).unwrap_or(0_usize);
 
     let num_llcs = topo_ctx.node_llc_kernel_ids.len();
     let llc_id = topo_ctx
@@ -588,7 +572,7 @@ fn cpu_capacity_source() -> Option<(String, usize, usize)> {
     for src in sources {
         let path_str = [prefix, src].join("/");
         let path = Path::new(&path_str);
-        raw_capacity = read_file_usize(&path).unwrap_or(0);
+        raw_capacity = read_from_file(&path).unwrap_or(0_usize);
         if raw_capacity > 0 {
             suffix = src;
             break;
@@ -604,7 +588,7 @@ fn cpu_capacity_source() -> Option<(String, usize, usize)> {
     let mut nr_cpus = 0;
     let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*").ok()?;
     for cpu_path in cpu_paths.filter_map(Result::ok) {
-        let raw_capacity = read_file_usize(&cpu_path.join(suffix)).unwrap_or(0);
+        let raw_capacity = read_from_file(&cpu_path.join(suffix)).unwrap_or(0_usize);
         if max_raw_capacity < raw_capacity {
             max_raw_capacity = raw_capacity;
         }
@@ -630,8 +614,8 @@ fn avg_cpu_freq() -> Option<(usize, usize)> {
     let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*").ok()?;
     for cpu_path in cpu_paths.filter_map(Result::ok) {
         let freq_path = cpu_path.join("cpufreq");
-        let max_freq = read_file_usize(&freq_path.join("scaling_max_freq")).unwrap_or(0);
-        let base_freq = read_file_usize(&freq_path.join("base_frequency")).unwrap_or(max_freq);
+        let max_freq = read_from_file(&freq_path.join("scaling_max_freq")).unwrap_or(0_usize);
+        let base_freq = read_from_file(&freq_path.join("base_frequency")).unwrap_or(max_freq);
         if base_freq > 0 {
             if max_freq > top_max_freq {
                 top_max_freq = max_freq;
@@ -652,7 +636,7 @@ fn has_big_little() -> Option<bool> {
     let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*").ok()?;
     for cpu_path in cpu_paths.filter_map(Result::ok) {
         let top_path = cpu_path.join("topology");
-        let cluster_id = read_file_usize(&top_path.join("cluster_id")).unwrap_or(0);
+        let cluster_id = read_from_file(&top_path.join("cluster_id")).unwrap_or(-1);
         clusters.insert(cluster_id);
     }
 
@@ -660,7 +644,7 @@ fn has_big_little() -> Option<bool> {
 }
 
 fn is_smt_active() -> Option<bool> {
-    let smt_on = read_file_usize(Path::new("/sys/devices/system/cpu/smt/active")).ok()?;
+    let smt_on: u8 = read_from_file(Path::new("/sys/devices/system/cpu/smt/active")).ok()?;
     Some(smt_on == 1)
 }
 

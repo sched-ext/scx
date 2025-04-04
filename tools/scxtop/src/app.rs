@@ -50,7 +50,7 @@ use ratatui::{
 };
 use regex::Regex;
 use scx_stats::prelude::StatsClient;
-use scx_utils::misc::read_file_usize;
+use scx_utils::misc::read_from_file;
 use scx_utils::scx_enums;
 use scx_utils::Topology;
 use serde_json::Value as JsonValue;
@@ -329,7 +329,7 @@ impl<'a> App<'a> {
                 *cpu_id
             );
             let path = Path::new(&file);
-            let freq = read_file_usize(path).unwrap_or(0);
+            let freq = read_from_file(path).unwrap_or(0_usize);
             let cpu_data = self.cpu_data.entry(*cpu_id).or_insert(CpuData::new(
                 *cpu_id,
                 0,
@@ -360,7 +360,7 @@ impl<'a> App<'a> {
                     re.captures(raw_path.to_str().expect("failed to get str from path"))
                 {
                     let package_id: usize = caps[1].parse().unwrap();
-                    let uncore_freq = read_file_usize(path).unwrap_or(0);
+                    let uncore_freq = read_from_file(path).unwrap_or(0_usize);
                     for cpu in self.topo.all_cpus.values() {
                         if cpu.package_id != package_id {
                             continue;

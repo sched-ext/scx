@@ -35,8 +35,6 @@ pub struct Metrics {
     pub direct: u64,
     #[stat(desc = "Number of times tasks have dispatched to an idle local per CPU DSQs")]
     pub idle: u64,
-    #[stat(desc = "Number of times tasks have greedily picked an idle CPU in the local LLC")]
-    pub greedy_idle: u64,
     #[stat(desc = "Number of times tasks have been woken to the previous CPU")]
     pub wake_prev: u64,
     #[stat(desc = "Number of times tasks have been woken to the previous llc")]
@@ -49,10 +47,9 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "direct/idle/greedy {}/{}/{}\n\tdsq same/migrate/keep {}/{}/{}\n\twake_prev/llc/mig {}/{}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}",
+            "direct/idle {}/{}\n\tdsq same/migrate/keep {}/{}/{}\n\twake_prev/llc/mig {}/{}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}",
             self.direct,
             self.idle,
-            self.greedy_idle,
             self.same_dsq,
             self.dsq_change,
             self.keep,
@@ -71,7 +68,6 @@ impl Metrics {
         Self {
             direct: self.direct - rhs.direct,
             idle: self.idle - rhs.idle,
-            greedy_idle: self.greedy_idle - rhs.greedy_idle,
             dsq_change: self.dsq_change - rhs.dsq_change,
             same_dsq: self.same_dsq - rhs.same_dsq,
             keep: self.keep - rhs.keep,
