@@ -76,6 +76,7 @@ pub use energy_model::PerfDomain;
 pub use energy_model::PerfState;
 
 mod cpumask;
+pub use cpumask::read_cpulist;
 pub use cpumask::Cpumask;
 
 mod gpu;
