@@ -390,6 +390,7 @@ fn get_cache_id(topo_ctx: &mut TopoCtx, cache_level_path: &PathBuf, cache_level:
     id
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_insert_cpu(
     id: usize,
     node: &mut Node,

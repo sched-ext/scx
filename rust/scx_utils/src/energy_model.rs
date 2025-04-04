@@ -109,7 +109,7 @@ impl PerfState {
 impl fmt::Display for EnergyModel {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         for (_, pd) in self.perf_doms.iter() {
-            write!(f, "{:#}\n", pd)?;
+            writeln!(f, "{:#}", pd)?;
         }
         Ok(())
     }
@@ -117,10 +117,10 @@ impl fmt::Display for EnergyModel {
 
 impl fmt::Display for PerfDomain {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "# perf domain: {:#}, cpus: {:#}\n", self.id, self.span)?;
-        write!(f, "cost, frequency, inefficient, performance, power\n")?;
+        writeln!(f, "# perf domain: {:#}, cpus: {:#}", self.id, self.span)?;
+        writeln!(f, "cost, frequency, inefficient, performance, power")?;
         for (_, ps) in self.perf_table.iter() {
-            write!(f, "{:#}\n", ps)?;
+            writeln!(f, "{:#}", ps)?;
         }
         Ok(())
     }
@@ -161,7 +161,7 @@ fn get_pd_paths() -> Result<Vec<(usize, String)>> {
         let pd_id: usize = pd_str[prefix.len()..].parse().unwrap();
         pd_vec.push((pd_id, pd_str));
     }
-    if pd_vec.len() == 0 {
+    if pd_vec.is_empty() {
         bail!("There is no performance domain.");
     }
     pd_vec.sort();
