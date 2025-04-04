@@ -60,6 +60,7 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use bitvec::prelude::*;
+use sscanf::sscanf;
 use std::fmt;
 use std::ops::BitAndAssign;
 use std::ops::BitOrAssign;
@@ -135,6 +136,15 @@ impl Cpumask {
         }
 
         Ok(Self { mask })
+    }
+
+    pub fn from_cpulist(cpulist: &str) -> Result<Cpumask> {
+        let mut mask = Cpumask::new();
+        for cpu_id in read_cpulist(cpulist).unwrap() {
+            mask.set_cpu(cpu_id);
+        }
+
+        Ok(mask)
     }
 
     pub fn from_vec(vec: Vec<u64>) -> Self {
@@ -320,6 +330,27 @@ impl Cpumask {
         }
         Ok(())
     }
+}
+
+pub fn read_cpulist(cpulist: &str) -> Result<Vec<usize>> {
+    let cpu_groups: Vec<&str> = cpulist.split(',').collect();
+    let mut cpu_ids = vec![];
+    for group in cpu_groups.iter() {
+        let (min, max) = match sscanf!(group.trim(), "{usize}-{usize}") {
+            Ok((x, y)) => (x, y),
+            Err(_) => match sscanf!(group.trim(), "{usize}") {
+                Ok(x) => (x, x),
+                Err(_) => {
+                    bail!("Failed to parse cpulist {}", group.trim());
+                }
+            },
+        };
+        for i in min..(max + 1) {
+            cpu_ids.push(i);
+        }
+    }
+
+    Ok(cpu_ids)
 }
 
 pub struct CpumaskIterator<'a> {

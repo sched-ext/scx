@@ -116,7 +116,7 @@ pub struct Cpu {
     /// Base operational frqeuency. Only available on Intel Turbo Boost
     /// CPUs. If not available, this will simply return maximum frequency.
     pub base_freq: usize,
-    /// The best-effort guessting of cpu_capacity scaled to 1024
+    /// The best-effort guessing of cpu_capacity scaled to 1024.
     pub cpu_capacity: usize,
     /// CPU idle resume latency
     pub pm_qos_resume_latency_us: usize,
@@ -353,24 +353,7 @@ impl TopoCtx {
 fn cpus_online() -> Result<Cpumask> {
     let path = "/sys/devices/system/cpu/online";
     let online = std::fs::read_to_string(path)?;
-    let online_groups: Vec<&str> = online.split(',').collect();
-    let mut mask = Cpumask::new();
-    for group in online_groups.iter() {
-        let (min, max) = match sscanf!(group.trim(), "{usize}-{usize}") {
-            Ok((x, y)) => (x, y),
-            Err(_) => match sscanf!(group.trim(), "{usize}") {
-                Ok(x) => (x, x),
-                Err(_) => {
-                    bail!("Failed to parse online cpus {}", group.trim());
-                }
-            },
-        };
-        for i in min..(max + 1) {
-            mask.set_cpu(i)?;
-        }
-    }
-
-    Ok(mask)
+    Cpumask::from_cpulist(&online)
 }
 
 fn get_cache_id(topo_ctx: &mut TopoCtx, cache_level_path: &PathBuf, cache_level: usize) -> usize {
