@@ -140,8 +140,8 @@ impl Cpumask {
 
     pub fn from_cpulist(cpulist: &str) -> Result<Cpumask> {
         let mut mask = Cpumask::new();
-        for cpu_id in read_cpulist(cpulist).unwrap() {
-            mask.set_cpu(cpu_id);
+        for cpu_id in read_cpulist(cpulist)? {
+            let _ = mask.set_cpu(cpu_id);
         }
 
         Ok(mask)
