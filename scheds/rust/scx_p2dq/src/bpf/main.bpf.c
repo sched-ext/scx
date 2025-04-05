@@ -691,10 +691,10 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	u64 vtime = p->scx.dsq_vtime;
 
 	/*
-	 * Limit the amount of budget that an idling task can accumulate
-	 * to one slice for the dsq.
+	 * Limit the amount of budget that an idling task can accumulate to the
+	 * max possible slice.
 	 */
-	if (time_before(vtime, vtime_now - slice_ns))
+	if (time_before(vtime, vtime_now - dsq_time_slice(nr_dsqs_per_llc - 1)))
 		vtime = vtime_now - slice_ns;
 
 	p->scx.dsq_vtime = vtime;
