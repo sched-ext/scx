@@ -7,7 +7,7 @@ fn main() {
     scx_utils::BpfBuilder::new()
         .unwrap()
         .enable_intf("src/bpf/intf.h", "bpf_intf.rs")
-        .enable_skel("src/bpf/main.bpf.c", "bpf")
+        .enable_skel("src/bpf/main.bpf.c", "main")
         .add_source("src/bpf/lb_domain.bpf.c")
         .add_source("src/bpf/common.bpf.c")
         .add_source("src/bpf/deadline.bpf.c")
