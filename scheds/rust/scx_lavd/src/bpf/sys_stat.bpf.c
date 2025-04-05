@@ -48,7 +48,7 @@ struct sys_stat_ctx {
 	u64		max_perf_cri;
 	u64		sum_perf_cri;
 	u32		thr_perf_cri;
-	u64		new_util;
+	u32		cur_util;
 	u32		nr_violation;
 };
 
@@ -212,15 +212,15 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		if (c->duration > cpuc->idle_total)
 			compute = c->duration - cpuc->idle_total;
 
-		c->new_util = (compute * LAVD_CPU_UTIL_MAX) / c->duration;
-		cpuc->util = calc_avg(cpuc->util, c->new_util);
+		cpuc->cur_util = (compute * LAVD_CPU_UTIL_MAX) / c->duration;
+		cpuc->avg_util = calc_avg(cpuc->avg_util, cpuc->cur_util);
 
 		if (cpuc->turbo_core) {
-			if (cpuc->util > LAVD_CC_PER_TURBO_CORE_MAX_CTUIL)
+			if (cpuc->avg_util > LAVD_CC_PER_TURBO_CORE_MAX_CTUIL)
 				c->nr_violation += 1000;
 		}
 		else {
-			if (cpuc->util > LAVD_CC_PER_CORE_MAX_CTUIL)
+			if (cpuc->avg_util > LAVD_CC_PER_CORE_MAX_CTUIL)
 				c->nr_violation += 1000;
 		}
 
@@ -239,7 +239,7 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 		c->compute_total = c->duration_total - c->idle_total;
 	else
 		c->compute_total = 0;
-	c->new_util = (c->compute_total * LAVD_CPU_UTIL_MAX)/c->duration_total;
+	c->cur_util = (c->compute_total * LAVD_CPU_UTIL_MAX)/c->duration_total;
 
 	if (c->nr_sched == 0) {
 		/*
@@ -274,7 +274,7 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 	struct sys_stat *stat_next = c->stat_next;
 
 	stat_next->util =
-		calc_avg(stat_cur->util, c->new_util);
+		calc_avg(stat_cur->util, c->cur_util);
 
 	stat_next->max_lat_cri =
 		calc_avg32(stat_cur->max_lat_cri, c->max_lat_cri);
