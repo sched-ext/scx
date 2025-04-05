@@ -113,6 +113,9 @@ fn attach_progs(skel: &mut BpfSkel) -> Result<Vec<Link>> {
     if let Ok(link) = skel.progs.on_cpuhp_exit.attach() {
         links.push(link);
     }
+    if let Ok(link) = skel.progs.on_pstate_sample.attach() {
+        links.push(link);
+    }
 
     Ok(links)
 }

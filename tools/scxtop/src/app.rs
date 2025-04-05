@@ -26,8 +26,8 @@ use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
-    HwPressureAction, IPIAction, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction,
-    SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
+    HwPressureAction, IPIAction, PstateSampleAction, SchedCpuPerfSetAction, SchedSwitchAction,
+    SchedWakeupAction, SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
 };
 
 use anyhow::Result;
@@ -87,6 +87,7 @@ pub struct App<'a> {
     large_core_count: bool,
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
+    pstate: bool,
     event_scroll_state: ScrollbarState,
     event_scroll: u16,
 
@@ -217,6 +218,7 @@ impl<'a> App<'a> {
             topo,
             collect_cpu_freq: true,
             collect_uncore_freq: true,
+            pstate: true,
             cpu_data,
             llc_data,
             node_data,
@@ -522,7 +524,7 @@ impl<'a> App<'a> {
         Bar::default()
             .value(value)
             .label(Line::from(format!(
-                "{}{}{}",
+                "{}{}{}{}",
                 cpu,
                 if self.collect_cpu_freq {
                     format!(
@@ -534,6 +536,18 @@ impl<'a> App<'a> {
                                 .copied()
                                 .unwrap_or(0)
                         )
+                    )
+                } else {
+                    "".to_string()
+                },
+                if self.pstate {
+                    format!(
+                        " {}",
+                        cpu_data
+                            .event_data_immut("pstate")
+                            .last()
+                            .copied()
+                            .unwrap_or(0)
                     )
                 } else {
                     "".to_string()
@@ -556,6 +570,7 @@ impl<'a> App<'a> {
         let mut perf: u64 = 0;
         let mut cpu_freq: u64 = 0;
         let mut hw_pressure: u64 = 0;
+        let mut pstate: u64 = 0;
         let data = if self.cpu_data.contains_key(&cpu) {
             let cpu_data = self.cpu_data.get(&cpu).unwrap();
             perf = cpu_data
@@ -570,11 +585,20 @@ impl<'a> App<'a> {
                     .copied()
                     .unwrap_or(0);
             }
-            hw_pressure = cpu_data
-                .event_data_immut("hw_pressure")
-                .last()
-                .copied()
-                .unwrap_or(0);
+            if self.pstate {
+                pstate = cpu_data
+                    .event_data_immut("pstate")
+                    .last()
+                    .copied()
+                    .unwrap_or(0);
+            }
+            if self.hw_pressure {
+                hw_pressure = cpu_data
+                    .event_data_immut("hw_pressure")
+                    .last()
+                    .copied()
+                    .unwrap_or(0);
+            }
             cpu_data.event_data_immut(self.active_event.event_name())
         } else {
             Vec::new()
@@ -593,7 +617,15 @@ impl<'a> App<'a> {
                         if perf == 0 {
                             "".to_string()
                         } else {
-                            format!("{}", perf)
+                            format!(
+                                "{}{}",
+                                perf,
+                                if self.pstate {
+                                    format!("/{}", pstate)
+                                } else {
+                                    "".to_string()
+                                }
+                            )
                         },
                         if self.collect_cpu_freq {
                             format!(" {}", format_hz(cpu_freq))
@@ -2283,6 +2315,18 @@ impl<'a> App<'a> {
         cpu_data.add_event_data("perf", perf as u64);
     }
 
+    fn on_pstate_sample(&mut self, action: &PstateSampleAction) {
+        let PstateSampleAction { cpu, busy } = action;
+        let cpu_data = self.cpu_data.entry(*cpu as usize).or_insert(CpuData::new(
+            *cpu as usize,
+            0,
+            0,
+            0,
+            self.max_cpu_events,
+        ));
+        cpu_data.add_event_data("pstate", *busy as u64);
+    }
+
     fn on_exec(&mut self, action: &ExecAction) {
         if self.state == AppState::Tracing && action.ts > self.trace_start {
             self.trace_manager.on_exec(action);
@@ -2459,6 +2503,9 @@ impl<'a> App<'a> {
                 }
             }
             Action::NextViewState => self.next_view_state(),
+            Action::PstateSample(a) => {
+                self.on_pstate_sample(a);
+            }
             Action::SchedReg => {
                 self.on_scheduler_load()?;
             }
