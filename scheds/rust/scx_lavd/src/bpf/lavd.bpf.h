@@ -88,7 +88,8 @@ struct cpu_ctx {
 	/* 
 	 * Information used to keep track of CPU utilization
 	 */
-	volatile u64	util;		/* average of the CPU utilization */
+	volatile u32	avg_util;	/* average of the CPU utilization */
+	volatile u32	cur_util;	/* CPU utilization of the current interval */
 	volatile u64	idle_total;	/* total idle time so far */
 	volatile u64	idle_start_clk;	/* when the CPU becomes idle */
 
@@ -124,8 +125,6 @@ struct cpu_ctx {
 	 * Information for CPU frequency scaling
 	 */
 	u32		cpuperf_cur;	/* CPU's current performance target */
-	u32		cpuperf_task;	/* task's CPU performance target */
-	u32		cpuperf_avg;	/* EWMA of task's CPU performance target */
 
 	/*
 	 * Fields for core compaction

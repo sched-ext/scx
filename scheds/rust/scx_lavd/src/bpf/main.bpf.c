@@ -1034,28 +1034,18 @@ void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
 	struct cpu_ctx *cpuc_run;
 	struct task_ctx *taskc_run;
 	u64 now;
-	bool preempted;
 
 	cpuc_run = get_cpu_ctx();
 	taskc_run = get_task_ctx(p_run);
 	if (!cpuc_run || !taskc_run)
-		goto update_cpuperf;
+		return;
 
 	/*
 	 * Try to yield the current CPU if there is a higher priority task in
 	 * the run queue.
 	 */
 	now = scx_bpf_now();
-	preempted = try_yield_current_cpu(p_run, cpuc_run, taskc_run, now);
-
-	/*
-	 * Update performance target of the current CPU if the current running
-	 * task continues to run.
-	 */
-	if (!preempted) {
-update_cpuperf:
-		try_decrease_cpuperf_target(cpuc_run);
-	}
+	try_yield_current_cpu(p_run, cpuc_run, taskc_run, now);
 }
 
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
@@ -1110,7 +1100,6 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 
 void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 {
-	struct sys_stat *stat_cur = get_sys_stat_cur();
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
 	u64 now = scx_bpf_now();
@@ -1136,8 +1125,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 * urgently increases according to task's target but it decreases
 	 * gradually according to EWMA of past performance targets.
 	 */
-	calc_cpuperf_target(stat_cur, taskc, cpuc);
-	try_increase_cpuperf_target(cpuc);
+	update_cpuperf_target(cpuc);
 
 	/*
 	 * Update running task's information for preemption
@@ -1354,7 +1342,7 @@ void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
 	struct cpu_ctx *cpuc;
 
 	/*
-	 * When the scx scheduler loses control of a CPU,
+	 * When a CPU is released to serve higher priority scheduler class,
 	 * reset the CPU's preemption information so it cannot be a victim.
 	 */
 	cpuc = get_cpu_ctx_id(cpu);
@@ -1365,10 +1353,15 @@ void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
 	reset_cpu_preemption_info(cpuc, true);
 
 	/*
-	 * When a CPU is released to serve higher priority scheduler class,
-	 * requeue the tasks in a local DSQ to the global enqueue.
+	 * Requeue the tasks in a local DSQ to the global enqueue.
 	 */
 	scx_bpf_reenqueue_local();
+
+	/*
+	 * Reset the current CPU's performance target, so we can set
+	 * the target properly after regaining the control.
+	 */
+	reset_cpuperf_target(cpuc);
 }
 
 void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)

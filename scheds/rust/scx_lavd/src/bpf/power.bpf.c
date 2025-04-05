@@ -458,93 +458,37 @@ unlock_out:
 	return err;
 }
 
-static int calc_cpuperf_target(struct sys_stat *stat_cur,
-			       struct task_ctx *taskc, struct cpu_ctx *cpuc)
+static void update_cpuperf_target(struct cpu_ctx *cpuc)
 {
-	u64 max_load, cpu_load;
-	u32 cpuperf_target;
-
-	if (!stat_cur || !taskc || !cpuc)
-		return -EINVAL;
-
-	if (no_freq_scaling) {
-		cpuc->cpuperf_task = SCX_CPUPERF_ONE;
-		cpuc->cpuperf_avg = SCX_CPUPERF_ONE;
-		return 0;
-	}
+	u32 util, cpuperf_target;
 
 	/*
-	 * We determine the clock frequency of a CPU using two factors: 1) the
-	 * current CPU utilization (cpuc->util) and 2) the current task's
-	 * performance criticality (taskc->perf_cri) compared to the
-	 * system-wide average performance criticality
-	 * (stat_cur->thr_perf_cri).
-	 *
-	 * When a current CPU utilization is 85% and the current task's
-	 * performance criticality is the same as the system-wide average
-	 * criticality, we set the target CPU frequency to the maximum.
-	 *
-	 * In other words, even if CPU utilization is not so high, the target
-	 * CPU frequency could be high when the task's performance criticality
-	 * is high enough (i.e., boosting CPU frequency). On the other hand,
-	 * the target CPU frequency could be low even if CPU utilization is
-	 * high when a non-performance-critical task is running (i.e.,
-	 * deboosting CPU frequency).
+	 * The CPU utilization decides the frequency. The bigger one between
+	 * the running average and the recent utilization is used to respond
+	 * quickly upon load spikes. When the utilization is greater than
+	 * LAVD_CPU_UTIL_MAX_FOR_CPUPERF (85%), ceil to 100%.
 	 */
-	max_load = stat_cur->thr_perf_cri * LAVD_CPU_UTIL_MAX_FOR_CPUPERF;
-	cpu_load = taskc->perf_cri * cpuc->util;
-	cpuperf_target = (cpu_load * SCX_CPUPERF_ONE) / max_load;
-	cpuperf_target = min(cpuperf_target, SCX_CPUPERF_ONE);
+	if (!no_freq_scaling) {
+		util = max(cpuc->avg_util, cpuc->cur_util) <
+			LAVD_CPU_UTIL_MAX_FOR_CPUPERF? : 1000;
+		cpuperf_target = (util * SCX_CPUPERF_ONE) / 1000;
+	} else
+		cpuperf_target = SCX_CPUPERF_ONE;
 
-	cpuc->cpuperf_task = cpuperf_target;
-	cpuc->cpuperf_avg = calc_avg32(cpuc->cpuperf_avg, cpuperf_target);
-	return 0;
+	/*
+	 * Update the performance target once it changes.
+	 */
+	if (cpuc->cpuperf_cur != cpuperf_target) {
+		scx_bpf_cpuperf_set(cpuc->cpu_id, cpuperf_target);
+		cpuc->cpuperf_cur = cpuperf_target;
+	}
 }
 
-static bool try_increase_cpuperf_target(struct cpu_ctx *cpuc)
+static void reset_cpuperf_target(struct cpu_ctx *cpuc)
 {
-	/*
-	 * When a task becomes running, update CPU's performance target only
-	 * when the current task's target performance is higher. This helps
-	 * rapidly adopt workload changes by rapidly increasing CPU's
-	 * performance target.
-	 */
-	u32 target;
-
-	if (!cpuc)
-		return false;
-
-	target = max(cpuc->cpuperf_task, cpuc->cpuperf_avg);
-	if (cpuc->cpuperf_cur < target) {
-		cpuc->cpuperf_cur = target;
-		scx_bpf_cpuperf_set(cpuc->cpu_id, target);
-		return true;
+	if (!no_freq_scaling) {
+		cpuc->cpuperf_cur = 0;
 	}
-
-	return false;
-}
-
-static bool try_decrease_cpuperf_target(struct cpu_ctx *cpuc)
-{
-	/*
-	 * Upon every tick interval, we try to decrease the CPU's performance
-	 * target if the current one is higher than both the current task's
-	 * target and EWMA of past targets. This helps gradually adopt workload
-	 * changes upon sudden down falls.
-	 */
-	u32 target;
-
-	if (!cpuc)
-		return false;
-
-	target = max(cpuc->cpuperf_task, cpuc->cpuperf_avg);
-	if (cpuc->cpuperf_cur != target) {
-		cpuc->cpuperf_cur = target;
-		scx_bpf_cpuperf_set(cpuc->cpu_id, target);
-		return true;
-	}
-
-	return false;
 }
 
 static u16 get_cpuperf_cap(s32 cpu)
