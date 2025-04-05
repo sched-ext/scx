@@ -441,7 +441,7 @@ static u32 clamp_time_slice_ns(u32 slice)
 	return slice;
 }
 
-static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
+static u64 calc_time_slice(struct task_ctx *taskc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 nr_queued;
@@ -563,7 +563,7 @@ static void update_stat_for_running(struct task_struct *p,
 	 */
 	if (p->scx.slice == SCX_SLICE_DFL) {
 		p->scx.dsq_vtime = READ_ONCE(cur_logical_clk);
-		p->scx.slice = calc_time_slice(p, taskc);
+		p->scx.slice = calc_time_slice(taskc);
 	}
 
 	/*
@@ -748,7 +748,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
 			p->scx.dsq_vtime = calc_when_to_run(p, taskc);
-			p->scx.slice = calc_time_slice(p, taskc);
+			p->scx.slice = calc_time_slice(taskc);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
 			return cpu_id;
 		}
@@ -788,7 +788,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	taskc->wakeup_ft += !!(enq_flags & SCX_ENQ_WAKEUP);
 	p->scx.dsq_vtime = calc_when_to_run(p, taskc);
-	p->scx.slice = calc_time_slice(p, taskc);
+	p->scx.slice = calc_time_slice(taskc);
 
 	/*
 	 * Find a proper DSQ for the task, which is either the task's
@@ -842,7 +842,7 @@ static bool try_continue_lock_holder(struct task_struct *prev,
 	/*
 	 * Refill the time slice.
 	 */
-	prev->scx.slice = calc_time_slice(prev, taskc);
+	prev->scx.slice = calc_time_slice(taskc);
 
 	/*
 	 * Reset prev task's lock and futex boost count
@@ -1026,7 +1026,7 @@ consume_out:
 	 * If nothing to run, continue running the previous task.
 	 */
 	if (prev && prev->scx.flags & SCX_TASK_QUEUED)
-		prev->scx.slice = calc_time_slice(prev, taskc);
+		prev->scx.slice = calc_time_slice(taskc);
 }
 
 void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
@@ -1117,7 +1117,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	/*
 	 * Calculate the task's time slice.
 	 */
-	p->scx.slice = calc_time_slice(p, taskc);
+	p->scx.slice = calc_time_slice(taskc);
 
 	/*
 	 * Calculate the task's CPU performance target and update if the new
