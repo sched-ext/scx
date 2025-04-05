@@ -340,7 +340,7 @@ static void calc_perf_cri(struct task_struct *p, struct task_ctx *taskc)
 		wake_freq_ft = calc_freq_factor(taskc->wake_freq, p->scx.weight);
 		perf_cri = log2_u64(wait_freq_ft * wake_freq_ft);
 		perf_cri += log2_u64(max(taskc->run_freq, 1) *
-				     max(taskc->run_time_ns, 1) * p->scx.weight);
+				     max(taskc->avg_runtime, 1) * p->scx.weight);
 	}
 
 	taskc->perf_cri = perf_cri;
@@ -369,7 +369,7 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	 */
 	wait_freq_ft = calc_freq_factor(taskc->wait_freq, weight_ft);
 	wake_freq_ft = calc_freq_factor(taskc->wake_freq, weight_ft);
-	runtime_ft = calc_runtime_factor(taskc->run_time_ns, weight_ft);
+	runtime_ft = calc_runtime_factor(taskc->avg_runtime, weight_ft);
 
 	/*
 	 * Wake frequency and wait frequency represent how much a task is used
@@ -391,8 +391,18 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	taskc->lat_cri = max(lat_cri, taskc->lat_cri_waker);
 }
 
-static u64 calc_adj_runtime(u64 runtime)
+static u64 calc_adjusted_runtime(struct task_ctx *taskc)
 {
+	u64 runtime;
+
+	/*
+	 * Prefer a short-running (avg_runtime) and recently woken-up
+	 * (acc_runtime) task. To avoid the starvation of CPU-bound tasks,
+	 * which rarely sleep, limit the impact of acc_runtime.
+	 */
+	runtime = taskc->avg_runtime +
+		  min(taskc->acc_runtime, LAVD_ACC_RUNTIME_MAX);
+
 	/*
 	 * Convert highly skewed runtime distribution to
 	 * mildly skewed distribution.
@@ -402,9 +412,9 @@ static u64 calc_adj_runtime(u64 runtime)
 }
 
 static u64 calc_virtual_deadline_delta(struct task_struct *p,
-					struct task_ctx *taskc)
+				       struct task_ctx *taskc)
 {
-	u64 deadline, adj_runtime;
+	u64 deadline, adjusted_runtime;
 	u32 greedy_ratio, greedy_ft;
 
 	/*
@@ -415,9 +425,9 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	calc_lat_cri(p, taskc);
 	greedy_ratio = calc_greedy_ratio(taskc);
 	greedy_ft = calc_greedy_factor(greedy_ratio);
-	adj_runtime = calc_adj_runtime(taskc->run_time_ns);
+	adjusted_runtime = calc_adjusted_runtime(taskc);
 
-	deadline = (adj_runtime / taskc->lat_cri) * greedy_ft;
+	deadline = (adjusted_runtime * greedy_ft) / taskc->lat_cri;
 
 	return deadline;
 }
@@ -499,15 +509,6 @@ static u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc)
 	return duration;
 }
 
-static void update_stat_for_runnable(struct task_struct *p,
-				     struct task_ctx *taskc)
-{
-	/*
-	 * Reflect task's load immediately.
-	 */
-	taskc->acc_run_time_ns = 0;
-}
-
 static void advance_cur_logical_clk(struct task_struct *p)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
@@ -576,7 +577,7 @@ static void update_stat_for_running(struct task_struct *p,
 	 */
 	if (have_scheduled(taskc)) {
 		wait_period = time_delta(now, taskc->last_quiescent_clk);
-		interval = taskc->run_time_ns + wait_period;
+		interval = taskc->avg_runtime + wait_period;
 		taskc->run_freq = calc_avg_freq(taskc->run_freq, interval);
 	}
 
@@ -639,10 +640,10 @@ static void update_stat_for_stopping(struct task_struct *p,
 				     struct cpu_ctx *cpuc)
 {
 	u64 now = scx_bpf_now();
-	u64 suspended_duration, task_run_time;
+	u64 suspended_duration, task_runtime;
 
 	/*
-	 * Update task's run_time. When a task is scheduled consecutively
+	 * Update task's runtime. When a task is scheduled consecutively
 	 * without ops.quiescent(), the task's runtime is accumulated for
 	 * statistics. Suppose a task is scheduled 2ms, 2ms, and 2ms with the
 	 * time slice exhausted. If 6ms of time slice was given in the first
@@ -651,19 +652,19 @@ static void update_stat_for_stopping(struct task_struct *p,
 	 * calculation of runtime statistics.
 	 */
 	suspended_duration = get_suspended_duration_and_reset(cpuc);
-	task_run_time = time_delta(now, taskc->last_running_clk + suspended_duration);
-	taskc->acc_run_time_ns += task_run_time;
-	taskc->run_time_ns = calc_avg(taskc->run_time_ns, taskc->acc_run_time_ns);
+	task_runtime = time_delta(now, taskc->last_running_clk + suspended_duration);
+	taskc->acc_runtime += task_runtime;
+	taskc->avg_runtime = calc_avg(taskc->avg_runtime, taskc->acc_runtime);
 	taskc->last_stopping_clk = now;
 
-	taskc->svc_time += task_run_time / p->scx.weight;
+	taskc->svc_time += task_runtime / p->scx.weight;
 
 	/*
 	 * Count how many times a task completely consumed the assigned time
 	 * slice to boost the task's slice. If not fully consumed, decrease
 	 * the slice boost priority by half.
 	 */
-	if (task_run_time > 0 && task_run_time >= taskc->slice_ns) {
+	if (task_runtime > 0 && task_runtime >= taskc->slice_ns) {
 		if (taskc->slice_boost_prio < LAVD_SLICE_BOOST_MAX_STEP)
 			taskc->slice_boost_prio++;
 	}
@@ -1064,15 +1065,12 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	u64 now, interval;
 
 	/*
-	 * Add task load based on the current statistics regardless of a target
-	 * rq. Statistics will be adjusted when more accurate statistics become
-	 * available (ops.running).
+	 * Clear the accumulated runtime.
 	 */
 	p_taskc = get_task_ctx(p);
 	if (!p_taskc)
 		return;
-
-	update_stat_for_runnable(p, p_taskc);
+	p_taskc->acc_runtime = 0;
 
 	/*
 	 * When a task @p is wakened up, the wake frequency of its waker task
@@ -1396,9 +1394,9 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 
 	__builtin_memset(taskc, 0, sizeof(*taskc));
 	taskc->is_affinitized = bpf_cpumask_weight(p->cpus_ptr) != nr_cpu_ids;
-	taskc->last_running_clk = now; /* for run_time_ns */
-	taskc->last_stopping_clk = now; /* for run_time_ns */
-	taskc->run_time_ns = slice_max_ns;
+	taskc->last_running_clk = now; /* for avg_runtime */
+	taskc->last_stopping_clk = now; /* for avg_runtime */
+	taskc->avg_runtime = slice_max_ns;
 	taskc->svc_time = stat_cur->avg_svc_time * LAVD_NEW_PROC_PENALITY;
 
 	set_on_core_type(taskc, p->cpus_ptr);
