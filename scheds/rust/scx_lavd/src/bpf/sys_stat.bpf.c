@@ -262,10 +262,19 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 	}
 }
 
+static u32 clamp_time_slice_ns(u32 slice)
+{
+	if (slice < slice_min_ns)
+		slice = slice_min_ns;
+	else if (slice > slice_max_ns)
+		slice = slice_max_ns;
+	return slice;
+}
+
 static void update_sys_stat_next(struct sys_stat_ctx *c)
 {
 	static int cnt = 0;
-	u64 avg_svc_time = 0;
+	u64 avg_svc_time = 0, nr_queued, slice;
 
 	/*
 	 * Update the CPU utilization to the next version.
@@ -307,6 +316,16 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 	stat_next->nr_queued_task =
 		calc_avg(stat_cur->nr_queued_task, c->nr_queued_task);
 
+	/*
+	 * Given the updated state, recalculate the time slice for the next
+	 * round. The time slice should be short enough to schedule all
+	 * runnable tasks at least once within a targeted latency using the
+	 * active CPUs.
+	 */
+	nr_queued = stat_next->nr_queued_task + 1;
+	slice = (LAVD_TARGETED_LATENCY_NS * stat_next->nr_active) / nr_queued;
+	slice = clamp_time_slice_ns(slice);
+	stat_next->slice = calc_avg(stat_cur->slice, slice);
 
 	/*
 	 * Half the statistics every minitue so the statistics hold the

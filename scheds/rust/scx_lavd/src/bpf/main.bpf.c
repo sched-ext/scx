@@ -192,18 +192,6 @@
 char _license[] SEC("license") = "GPL";
 
 /*
- * Include sub-modules
- */
-#include "util.bpf.c"
-#include "power.bpf.c"
-#include "introspec.bpf.c"
-#include "sys_stat.bpf.c"
-#include "preempt.bpf.c"
-#include "lock.bpf.c"
-#include "idle.bpf.c"
-#include "balance.bpf.c"
-
-/*
  * Logical current clock
  */
 static u64		cur_logical_clk;
@@ -219,6 +207,18 @@ static u64		cur_svc_time;
  */
 const volatile u64	slice_min_ns = LAVD_SLICE_MIN_NS_DFL;
 const volatile u64	slice_max_ns = LAVD_SLICE_MAX_NS_DFL;
+
+/*
+ * Include sub-modules
+ */
+#include "util.bpf.c"
+#include "power.bpf.c"
+#include "introspec.bpf.c"
+#include "sys_stat.bpf.c"
+#include "preempt.bpf.c"
+#include "lock.bpf.c"
+#include "idle.bpf.c"
+#include "balance.bpf.c"
 
 static u32 calc_greedy_ratio(struct task_ctx *taskc)
 {
@@ -432,51 +432,32 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	return deadline;
 }
 
-static u32 clamp_time_slice_ns(u32 slice)
-{
-	if (slice < slice_min_ns)
-		slice = slice_min_ns;
-	else if (slice > slice_max_ns)
-		slice = slice_max_ns;
-	return slice;
-}
-
 static u64 calc_time_slice(struct task_ctx *taskc)
 {
 	struct sys_stat *stat_cur = get_sys_stat_cur();
-	u64 nr_queued;
-	u32 slice;
+	u64 slice;
 
 	if (!taskc)
 		return LAVD_SLICE_MAX_NS_DFL;
 
-	/*
-	 * The time slice should be short enough to schedule all runnable tasks
-	 * at least once within a targeted latency.
-	 */
-	nr_queued = stat_cur->nr_queued_task + 1;
-	slice = (LAVD_TARGETED_LATENCY_NS * stat_cur->nr_active) / nr_queued;
-
-	/*
-	 * Keep the slice in [slice_min_ns, slice_max_ns].
-	 */
-	slice = clamp_time_slice_ns(slice);
+	slice = stat_cur->slice;
 
 	/*
 	 * Boost time slice for CPU-bound tasks.
-	 */
-	slice += (LAVD_SLICE_BOOST_MAX_FT * slice *
-		  taskc->slice_boost_prio) / LAVD_SLICE_BOOST_MAX_STEP;
-
-	/*
+	 *
 	 * If a task has yet to be scheduled (i.e., a freshly forked task or a
 	 * task just under sched_ext), don't give a fair amount of time slice
 	 * until knowing its properties. This helps to mitigate potential
 	 * system starvation caused by massively forking tasks (i.e., fork-bomb
 	 * attacks).
 	 */
-	if (!have_scheduled(taskc))
+	if (taskc->slice_boost_prio > 0) {
+		slice += (LAVD_SLICE_BOOST_MAX_FT * slice *
+			  taskc->slice_boost_prio) /
+			 LAVD_SLICE_BOOST_MAX_STEP;
+	} else if (!have_scheduled(taskc)) {
 		slice >>= 2;
+	}
 
 	taskc->slice_ns = slice;
 	return slice;

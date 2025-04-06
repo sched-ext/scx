@@ -68,6 +68,7 @@ struct sys_stat {
 
 	volatile u64	avg_svc_time;	/* average service time per task */
 	volatile u64	nr_queued_task;
+	volatile u64	slice;		/* base time slice */
 
 	volatile u32	avg_lat_cri;	/* average latency criticality (LC) */
 	volatile u32	max_lat_cri;	/* maximum latency criticality (LC) */
