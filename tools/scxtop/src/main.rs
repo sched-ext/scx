@@ -123,16 +123,6 @@ fn attach_progs(skel: &mut BpfSkel) -> Result<Vec<Link>> {
     if let Ok(link) = skel.progs.on_cpuhp_exit.attach() {
         links.push(link);
     }
-    if compat::ksym_exists("gpu_memory_total").is_ok() {
-        if let Ok(link) = skel.progs.on_gpu_memory_total.attach() {
-            links.push(link);
-        }
-    }
-    if compat::ksym_exists("hw_pressure_update").is_ok() {
-        if let Ok(link) = skel.progs.on_hw_pressure_update.attach() {
-            links.push(link);
-        }
-    }
 
     Ok(links)
 }
@@ -172,6 +162,8 @@ fn run_trace(trace_args: &TraceArgs) -> Result<()> {
             let skel = builder.open(&mut open_object)?;
             // set sample rate to 1 here to populate the BPF tctxs
             skel.maps.data_data.sample_rate = 1;
+            compat::cond_kprobe_enable("gpu_memory_total", &skel.progs.on_gpu_memory_total)?;
+            compat::cond_kprobe_enable("hw_pressure_update", &skel.progs.on_hw_pressure_update)?;
 
             let mut skel = skel.load()?;
             let mut links = attach_progs(&mut skel)?;
@@ -301,6 +293,8 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
             skel.maps.rodata_data.long_tail_tracing_min_latency_ns =
                 tui_args.experimental_long_tail_tracing_min_latency_ns;
 
+            compat::cond_kprobe_enable("gpu_memory_total", &skel.progs.on_gpu_memory_total)?;
+            compat::cond_kprobe_enable("hw_pressure_update", &skel.progs.on_hw_pressure_update)?;
             let mut skel = skel.load()?;
             let mut links = attach_progs(&mut skel)?;
             skel.progs.scxtop_init.test_run(ProgramInput::default())?;
