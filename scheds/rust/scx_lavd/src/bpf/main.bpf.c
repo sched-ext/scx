@@ -289,6 +289,12 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
+	 * Further prioritize kworkers.
+	 */
+	if (is_kernel_worker(p))
+		weight_boost += LAVD_LC_WEIGHT_BOOST;
+
+	/*
 	 * Prioritize an affinitized task since it has restrictions
 	 * in placement so it tends to be delayed.
 	 */

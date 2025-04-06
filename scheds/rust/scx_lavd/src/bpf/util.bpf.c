@@ -199,6 +199,14 @@ static bool is_kernel_task(struct task_struct *p)
 	return !!(p->flags & PF_KTHREAD);
 }
 
+#ifndef PF_IO_WORKER
+#define PF_IO_WORKER		0x00000010	/* Task is an IO worker */
+#endif
+static bool is_kernel_worker(struct task_struct *p)
+{
+	return !!(p->flags & (PF_WQ_WORKER | PF_IO_WORKER));
+}
+
 static bool is_per_cpu_task(const struct task_struct *p)
 {
 	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p))
