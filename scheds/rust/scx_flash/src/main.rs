@@ -142,6 +142,15 @@ impl<'a> Scheduler<'a> {
             warn!("vfs_fsync_range symbol is missing")
         }
 
+        // Set scheduler flags.
+        skel.struct_ops.flash_ops_mut().flags = *compat::SCX_OPS_ENQ_EXITING
+            | *compat::SCX_OPS_ENQ_LAST
+            | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED;
+        info!(
+            "scheduler flags: {:#x}",
+            skel.struct_ops.flash_ops_mut().flags
+        );
+
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, flash_ops, uei)?;
 

@@ -478,6 +478,5 @@ SCX_OPS_DEFINE(flash_ops,
 	       .cpu_release		= (void *)flash_cpu_release,
 	       .init			= (void *)flash_init,
 	       .exit			= (void *)flash_exit,
-	       .flags			= SCX_OPS_ENQ_EXITING,
 	       .timeout_ms		= 5000U,
 	       .name			= "flash");
