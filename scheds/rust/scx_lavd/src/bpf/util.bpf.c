@@ -21,8 +21,7 @@ const volatile u64	nr_cpu_ids;	/* maximum CPU IDs */
 static volatile u64	nr_cpus_onln;	/* current number of online CPUs */
 static volatile u64	nr_cpus_big;
 
-struct sys_stat	__sys_stats[2];
-volatile int	__sys_stat_idx;
+struct sys_stat	sys_stat;
 
 /*
  * Options
@@ -83,26 +82,6 @@ struct {
 #ifndef max
 #define max(X, Y) (((X) < (Y)) ? (Y) : (X))
 #endif
-
-static struct sys_stat *get_sys_stat_cur(void)
-{
-	if (READ_ONCE(__sys_stat_idx) == 0)
-		return &__sys_stats[0];
-	return &__sys_stats[1];
-}
-
-static struct sys_stat *get_sys_stat_next(void)
-{
-	if (READ_ONCE(__sys_stat_idx) == 0)
-		return &__sys_stats[1];
-	return &__sys_stats[0];
-}
-
-static void flip_sys_stat(void)
-{
-	WRITE_ONCE(__sys_stat_idx, __sys_stat_idx ^ 0x1);
-}
-
 
 static u64 sigmoid_u64(u64 v, u64 max)
 {
@@ -215,9 +194,9 @@ static bool is_per_cpu_task(const struct task_struct *p)
 	return false;
 }
 
-static bool is_lat_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
+static bool is_lat_cri(struct task_ctx *taskc)
 {
-	return taskc->lat_cri >= stat_cur->avg_lat_cri;
+	return taskc->lat_cri >= sys_stat.avg_lat_cri;
 }
 
 static bool is_greedy(struct task_ctx *taskc)
@@ -252,8 +231,7 @@ static u16 get_nice_prio(struct task_struct *p)
 
 static bool use_full_cpus(void)
 {
-	struct sys_stat *stat_cur = get_sys_stat_cur();
-	return (stat_cur->nr_active + LAVD_CC_NR_OVRFLW) >= nr_cpus_onln;
+	return (sys_stat.nr_active + LAVD_CC_NR_OVRFLW) >= nr_cpus_onln;
 }
 
 static s64 pick_any_bit(u64 bitmap, u64 nuance)

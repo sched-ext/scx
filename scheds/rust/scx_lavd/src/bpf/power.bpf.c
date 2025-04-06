@@ -43,30 +43,30 @@ volatile u64		performance_mode_ns;
 volatile u64		balanced_mode_ns;
 volatile u64		powersave_mode_ns;
 
-static bool is_perf_cri(struct task_ctx *taskc, struct sys_stat *stat_cur)
+static bool is_perf_cri(struct task_ctx *taskc)
 {
 	if (!have_little_core)
 		return true;
 
 	if (READ_ONCE(taskc->on_big) && READ_ONCE(taskc->on_little))
-		return taskc->perf_cri >= stat_cur->thr_perf_cri;
+		return taskc->perf_cri >= sys_stat.thr_perf_cri;
 	return READ_ONCE(taskc->on_big);
 }
 
-static u64 calc_nr_active_cpus(struct sys_stat *stat_cur)
+static u64 calc_nr_active_cpus(void)
 {
 	u64 nr_active;
 
 	/*
 	 * nr_active = ceil(nr_cpus_onln * cpu_util * per_core_max_util)
 	 */
-	nr_active  = (nr_cpus_onln * stat_cur->util * 1000) + 500;
+	nr_active  = (nr_cpus_onln * sys_stat.util * 1000) + 500;
 	nr_active /= (LAVD_CC_PER_CORE_MAX_CTUIL * 1000);
 
 	/*
 	 * If a few CPUs are particularly busy, boost the active CPUs more.
 	 */
-	nr_active += min(LAVD_CC_NR_OVRFLW, (stat_cur->nr_violation) / 1000);
+	nr_active += min(LAVD_CC_NR_OVRFLW, (sys_stat.nr_violation) / 1000);
 	nr_active = max(min(nr_active, nr_cpus_onln),
 			LAVD_CC_NR_ACTIVE_MIN);
 
@@ -102,7 +102,6 @@ static const volatile u16 *get_cpu_order(void)
 
 static void do_core_compaction(void)
 {
-	struct sys_stat *stat_cur = get_sys_stat_cur();
 	const volatile u16 *cpu_order = get_cpu_order();
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *active, *ovrflw, *cd_cpumask;
@@ -127,8 +126,8 @@ static void do_core_compaction(void)
 	/*
 	 * Assign active and overflow cores
 	 */
-	nr_active_old = stat_cur->nr_active;
-	nr_active = calc_nr_active_cpus(stat_cur);
+	nr_active_old = sys_stat.nr_active;
+	nr_active = calc_nr_active_cpus();
 	nr_cpus = nr_active + LAVD_CC_NR_OVRFLW;
 	bpf_for(i, 0, nr_cpu_ids) {
 		if (i >= LAVD_CPU_ID_MAX)
@@ -199,7 +198,7 @@ static void do_core_compaction(void)
 	}
 
 	cur_big_core_ratio = (1000 * big_capacity) / sum_capacity;
-	stat_cur->nr_active = nr_active;
+	sys_stat.nr_active = nr_active;
 
 	/*
 	 * Maintain cpdomc->is_active reflecting the active set.
@@ -307,35 +306,32 @@ static int do_set_power_profile(s32 pm, int util)
 
 static int do_autopilot(void)
 {
-	struct sys_stat *stat_cur = get_sys_stat_cur();
-
 	/*
 	 * If the CPU utiulization is very low (say <= 5%), it means high
 	 * performance is not required. We run the scheduler in powersave mode
 	 * to save energy consumption.
 	 */
-	if (stat_cur->util <= LAVD_AP_LOW_UTIL)
-		return do_set_power_profile(LAVD_PM_POWERSAVE, stat_cur->util);
+	if (sys_stat.util <= LAVD_AP_LOW_UTIL)
+		return do_set_power_profile(LAVD_PM_POWERSAVE, sys_stat.util);
 
 	/*
 	 * If the CPU utiulization is moderate (say > 5%, <= 30%), we run the
 	 * scheduler in balanced mode. Actually, balanced mode can save energy
 	 * consumption only under moderate CPU load.
 	 */
-	if (stat_cur->util <= LAVD_AP_HIGH_UTIL)
-		return do_set_power_profile(LAVD_PM_BALANCED, stat_cur->util);
+	if (sys_stat.util <= LAVD_AP_HIGH_UTIL)
+		return do_set_power_profile(LAVD_PM_BALANCED, sys_stat.util);
 
 	/*
 	 * If the CPU utilization is high enough (say > 30%), we run the
 	 * scheduler in performance mode. The system indeed needs perrformance
 	 * also there is little energy benefit even under balanced mode anyway.
 	 */
-	return do_set_power_profile(LAVD_PM_PERFORMANCE, stat_cur->util);
+	return do_set_power_profile(LAVD_PM_PERFORMANCE, sys_stat.util);
 }
 
 static void update_thr_perf_cri(void)
 {
-	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u32 little_core_ratio, delta, diff, thr;
 
 	if (no_core_compaction || !have_little_core)
@@ -345,7 +341,7 @@ static void update_thr_perf_cri(void)
 	 * If all active cores are big, all tasks should run on the big cores.
 	 */
 	if (cur_big_core_ratio == 1000) {
-		stat_cur->thr_perf_cri = 0;
+		sys_stat.thr_perf_cri = 0;
 		return;
 	}
 
@@ -384,9 +380,9 @@ static void update_thr_perf_cri(void)
 		 *   |     little_core_ratio
 		 *   0
 		 */
-		delta = stat_cur->avg_perf_cri - stat_cur->min_perf_cri;
+		delta = sys_stat.avg_perf_cri - sys_stat.min_perf_cri;
 		diff = (delta * little_core_ratio) / 1000;
-		thr = diff + stat_cur->min_perf_cri;
+		thr = diff + sys_stat.min_perf_cri;
 	}
 	else {
 		/*
@@ -402,12 +398,12 @@ static void update_thr_perf_cri(void)
 		 *   |                     little_core_ratio
 		 *   0
 		 */
-		delta = stat_cur->max_perf_cri - stat_cur->avg_perf_cri;
+		delta = sys_stat.max_perf_cri - sys_stat.avg_perf_cri;
 		diff = (delta * cur_big_core_ratio) / 1000;
-		thr = stat_cur->max_perf_cri - diff;
+		thr = sys_stat.max_perf_cri - diff;
 	}
 
-	stat_cur->thr_perf_cri = thr;
+	sys_stat.thr_perf_cri = thr;
 }
 
 static int reinit_active_cpumask_for_performance(void)

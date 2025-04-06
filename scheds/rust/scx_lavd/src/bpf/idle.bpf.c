@@ -534,7 +534,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 * to set an anchor for proximity.
 	 */
 	ctx->waker_cpu = -ENOENT;
-	ctx->is_task_big = is_perf_cri(ctx->taskc, get_sys_stat_cur());
+	ctx->is_task_big = is_perf_cri(ctx->taskc);
 	sticky_cpu = find_sticky_cpu_and_domain(ctx, &sticky_cpdom);
 
 	/*

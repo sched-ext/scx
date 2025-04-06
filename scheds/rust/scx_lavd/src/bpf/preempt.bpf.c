@@ -78,9 +78,7 @@ static bool is_worth_kick_other_task(struct task_ctx *taskc)
 	 * trying to victimize another CPU as the current task is urgent
 	 * enough.
 	 */
-	struct sys_stat *stat_cur = get_sys_stat_cur();
-
-	return (taskc->lat_cri >= stat_cur->thr_lat_cri);
+	return (taskc->lat_cri >= sys_stat.thr_lat_cri);
 }
 
 static bool can_cpu_be_kicked(u64 now, struct cpu_ctx *cpuc)

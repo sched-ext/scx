@@ -63,33 +63,33 @@ enum {
  * System-wide stats
  */
 struct sys_stat {
-	volatile u64	last_update_clk;
-	volatile u64	util;		/* average of the CPU utilization */
+	u64	last_update_clk;
+	u64	util;		/* average of the CPU utilization */
 
-	volatile u64	avg_svc_time;	/* average service time per task */
-	volatile u64	nr_queued_task;
-	volatile u64	slice;		/* base time slice */
+	u64	avg_svc_time;	/* average service time per task */
+	u64	nr_queued_task;
+	u64	slice;		/* base time slice */
 
-	volatile u32	avg_lat_cri;	/* average latency criticality (LC) */
-	volatile u32	max_lat_cri;	/* maximum latency criticality (LC) */
-	volatile u32	thr_lat_cri;	/* latency criticality threshold for kicking */
+	u32	avg_lat_cri;	/* average latency criticality (LC) */
+	u32	max_lat_cri;	/* maximum latency criticality (LC) */
+	u32	thr_lat_cri;	/* latency criticality threshold for kicking */
 
-	volatile u32	min_perf_cri;	/* minimum performance criticality */
-	volatile u32	avg_perf_cri;	/* average performance criticality */
-	volatile u32	max_perf_cri;	/* maximum performance criticality */
-	volatile u32	thr_perf_cri;	/* performance criticality threshold */
+	u32	min_perf_cri;	/* minimum performance criticality */
+	u32	avg_perf_cri;	/* average performance criticality */
+	u32	max_perf_cri;	/* maximum performance criticality */
+	u32	thr_perf_cri;	/* performance criticality threshold */
 
-	volatile u32	nr_stealee;	/* number of compute domains to be migrated */
-	volatile u32	nr_violation;	/* number of utilization violation */
-	volatile u32	nr_active;	/* number of active cores */
+	u32	nr_stealee;	/* number of compute domains to be migrated */
+	u32	nr_violation;	/* number of utilization violation */
+	u32	nr_active;	/* number of active cores */
 
-	volatile u64	nr_sched;	/* total scheduling so far */
-	volatile u64	nr_perf_cri;	/* number of performance-critical tasks scheduled */
-	volatile u64	nr_lat_cri;	/* number of latency-critical tasks scheduled */
-	volatile u64	nr_x_migration; /* number of cross domain migration */
-	volatile u64	nr_big;		/* scheduled on big core */
-	volatile u64	nr_pc_on_big;	/* performance-critical tasks scheduled on big core */
-	volatile u64	nr_lc_on_big;	/* latency-critical tasks scheduled on big core */
+	u64	nr_sched;	/* total scheduling so far */
+	u64	nr_perf_cri;	/* number of performance-critical tasks scheduled */
+	u64	nr_lat_cri;	/* number of latency-critical tasks scheduled */
+	u64	nr_x_migration; /* number of cross domain migration */
+	u64	nr_big;		/* scheduled on big core */
+	u64	nr_pc_on_big;	/* performance-critical tasks scheduled on big core */
+	u64	nr_lc_on_big;	/* latency-critical tasks scheduled on big core */
 };
 
 /*
