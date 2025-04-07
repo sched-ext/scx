@@ -117,13 +117,6 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 	cur_cpu = cpuc->cpu_id;
 
 	/*
-	 * First check if it is worth to try to kick other CPU
-	 * at the expense of IPI.
-	 */
-	if (!is_worth_kick_other_task(taskc))
-		goto null_out;
-
-	/*
 	 * Randomly find _two_ CPUs that run lower-priority tasks than @p. To
 	 * traverse CPUs in a random order, we start from a random CPU ID in a
 	 * random direction (left or right). The random-order traversal helps
@@ -238,6 +231,12 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 	 * Don't even try to perform expensive preemption for greedy tasks.
 	 */
 	if (!is_eligible(taskc))
+		return false;
+
+	/*
+	 * Check if it is worth to try to kick other CPU at the expense of IPI.
+	 */
+	if (!is_worth_kick_other_task(taskc))
 		return false;
 
 	/*
