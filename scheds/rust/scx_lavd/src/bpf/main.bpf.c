@@ -808,11 +808,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Try to find and kick a victim CPU, which runs a less urgent task,
 	 * from dsq_id. The kick will be done asynchronously.
 	 */
-	cpuc_cur = get_cpu_ctx();
-	if (cpuc_cur) {
-		now = scx_bpf_now();
-		try_find_and_kick_victim_cpu(p, taskc, cpuc_cur, dsq_id, now);
-	}
+	try_find_and_kick_victim_cpu(p, taskc, dsq_id);
 }
 
 static bool try_continue_lock_holder(struct task_struct *prev,
@@ -1012,23 +1008,23 @@ consume_out:
 		prev->scx.slice = calc_time_slice(taskc);
 }
 
-void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
+void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 {
-	struct cpu_ctx *cpuc_run;
-	struct task_ctx *taskc_run;
+	struct cpu_ctx *cpuc;
+	struct task_ctx *taskc;
 	u64 now;
 
-	cpuc_run = get_cpu_ctx();
-	taskc_run = get_task_ctx(p_run);
-	if (!cpuc_run || !taskc_run)
-		return;
-
 	/*
-	 * Try to yield the current CPU if there is a higher priority task in
-	 * the run queue.
+	 * For a non-latency-critical task, try to yield the current CPU if
+	 * there is a higher priority task in the run queue.
 	 */
-	now = scx_bpf_now();
-	try_yield_current_cpu(p_run, cpuc_run, taskc_run, now);
+	if ((taskc = get_task_ctx(p)) && !is_lat_cri(taskc)) {
+		cpuc = get_cpu_ctx();
+		if (cpuc) {
+			now = scx_bpf_now();
+			try_yield_current_cpu(p, cpuc, taskc, now);
+		}
+	}
 }
 
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)

@@ -218,14 +218,14 @@ static bool try_kick_cpu(struct task_struct *p, struct cpu_ctx *victim_cpuc)
 }
 
 static bool try_find_and_kick_victim_cpu(struct task_struct *p,
-					 struct task_ctx *taskc,
-					 struct cpu_ctx *cpuc_cur,
-					 u64 dsq_id, u64 now)
+					 struct task_ctx *taskc, u64 dsq_id)
 {
 	struct bpf_cpumask *cd_cpumask, *cpumask;
 	struct cpdom_ctx *cpdomc;
 	struct cpu_ctx *victim_cpuc;
+	struct cpu_ctx *cpuc_cur;
 	bool ret = false;
+	u64 now;
 
 	/*
 	 * Don't even try to perform expensive preemption for greedy tasks.
@@ -242,6 +242,10 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 	/*
 	 * Prepare a cpumak so we find a victim in @p's compute domain.
 	 */
+	cpuc_cur = get_cpu_ctx();
+	if (!cpuc_cur)
+		return false;
+
 	cpumask = cpuc_cur->tmp_t_mask;
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
 	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [dsq_id]);
@@ -253,6 +257,7 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 	/*
 	 * Find a victim CPU among CPUs that run lower-priority tasks.
 	 */
+	now = scx_bpf_now();
 	victim_cpuc = find_victim_cpu(cast_mask(cpumask), taskc, now);
 
 	/*

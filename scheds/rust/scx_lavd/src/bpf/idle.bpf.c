@@ -26,7 +26,7 @@ struct pick_ctx {
 	struct bpf_cpumask *ovrflw; /* global overflow mask */
 	/*
 	 * Additional output arguments for init_ao_masks().
-	 * Additional input arguments for find_sticky_cpu_and_domain().
+	 * Additional input arguments for find_sticky_cpu_and_cpdom().
 	 */
 	struct cpu_ctx *cpuc_cur;
 	struct bpf_cpumask *a_mask; /* task's active mask */
@@ -34,7 +34,7 @@ struct pick_ctx {
 	bool a_empty;
 	bool o_empty;
 	/*
-	 * Additional input arguments for find_sticky_cpu_and_domain().
+	 * Additional input arguments for find_sticky_cpu_and_cpdom().
 	 */
 	s32 waker_cpu;
 	bool is_task_big;
@@ -258,7 +258,7 @@ s32 cpumask_any_dsitribute(struct pick_ctx *ctx)
 }
 
 static
-s32 find_sticky_cpu(struct pick_ctx *ctx, s32 sticky_cpu, s64 sticky_cpdom)
+s32 find_sticky_cpu_at_cpdom(struct pick_ctx *ctx, s32 sticky_cpu, s64 sticky_cpdom)
 {
 	struct bpf_cpumask *cpd_mask;
 	s32 cpu;
@@ -366,7 +366,7 @@ bool test_cpu_stickable(struct pick_ctx *ctx, s32 cpu, bool is_task_big)
 }
 
 static 
-s32 find_sticky_cpu_and_domain(struct pick_ctx *ctx, s64 *sticky_cpdom)
+s32 find_sticky_cpu_and_cpdom(struct pick_ctx *ctx, s64 *sticky_cpdom)
 {
 	struct cpu_ctx *cpuc;
 	u64 q0, q1;
@@ -535,7 +535,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 */
 	ctx->waker_cpu = -ENOENT;
 	ctx->is_task_big = is_perf_cri(ctx->taskc);
-	sticky_cpu = find_sticky_cpu_and_domain(ctx, &sticky_cpdom);
+	sticky_cpu = find_sticky_cpu_and_cpdom(ctx, &sticky_cpdom);
 
 	/*
 	 * If failed to find a sticky domain -- i.e., @p cannot run on previous
@@ -555,7 +555,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	if (!init_idle_i_mask(ctx, idle_cpumask))
 		goto err_out;
 	if (ctx->i_empty) {
-		cpu = find_sticky_cpu(ctx, sticky_cpu, sticky_cpdom);
+		cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu, sticky_cpdom);
 		goto unlock_out;
 	}
 	/* NOTE: There is at least one idle CPU. */
@@ -610,7 +610,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	if (!init_idle_ato_masks(ctx, ctx->i_mask))
 		goto err_out;
 	if (ctx->ia_empty && ctx->io_empty) {
-		cpu = find_sticky_cpu(ctx, sticky_cpu, sticky_cpdom);
+		cpu = find_sticky_cpu_at_cpdom(ctx, sticky_cpu, sticky_cpdom);
 		goto unlock_out;
 	}
 	/* NOTE: There is at least one idle CPU in either active or overflow set. */
