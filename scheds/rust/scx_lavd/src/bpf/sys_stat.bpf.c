@@ -385,9 +385,7 @@ static s32 init_sys_stat(u64 now)
 	int err;
 
 	sys_stat.last_update_clk = now;
-	sys_stat.last_update_clk = now;
-	sys_stat.nr_active = nr_cpus_big;
-	sys_stat.nr_active = nr_cpus_big;
+	sys_stat.nr_active = nr_cpus_onln;
 
 	timer = bpf_map_lookup_elem(&update_timer, &key);
 	if (!timer) {

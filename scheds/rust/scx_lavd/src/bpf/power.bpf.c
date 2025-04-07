@@ -410,6 +410,7 @@ static int reinit_active_cpumask_for_performance(void)
 {
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *active, *ovrflw;
+	const struct cpumask *online_cpumask;
 	int cpu, err = 0;
 
 	barrier();
@@ -428,26 +429,38 @@ static int reinit_active_cpumask_for_performance(void)
 
 
 	/*
-	 * Once core compaction becomes off in performance mode,
-	 * reinitialize active/overflow cpumasks to reflect the mode change.
+	 * Once core compaction becomes off in performance mode, reinitialize
+	 * active/overflow cpumasks to reflect the mode change.
+	 * In an asymmetric system, big cores belong to the active set but
+	 * little cores the overflow set to prefer big cores for performance.
+	 * In a symmetric system, all online CPUs belong to the active set.
 	 */
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		cpuc = get_cpu_ctx_id(cpu);
-		if (!cpuc) {
-			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
-			err = -ESRCH;
-			goto unlock_out;
-		}
+	if (have_little_core) {
+		bpf_for(cpu, 0, nr_cpu_ids) {
+			cpuc = get_cpu_ctx_id(cpu);
+			if (!cpuc) {
+				err = -ESRCH;
+				goto unlock_out;
+			}
 
-		if (cpuc->big_core) {
-			bpf_cpumask_set_cpu(cpu, active);
-			bpf_cpumask_clear_cpu(cpu, ovrflw);
+			if (cpuc->big_core) {
+				bpf_cpumask_set_cpu(cpu, active);
+				bpf_cpumask_clear_cpu(cpu, ovrflw);
+			}
+			else {
+				bpf_cpumask_set_cpu(cpu, ovrflw);
+				bpf_cpumask_clear_cpu(cpu, active);
+			}
 		}
-		else {
-			bpf_cpumask_set_cpu(cpu, ovrflw);
-			bpf_cpumask_clear_cpu(cpu, active);
-		}
+	} else {
+		online_cpumask = scx_bpf_get_online_cpumask();
+		nr_cpus_onln = bpf_cpumask_weight(online_cpumask);
+		bpf_cpumask_copy(active, online_cpumask);
+		scx_bpf_put_cpumask(online_cpumask);
+
+		bpf_cpumask_clear(ovrflw);
 	}
+	sys_stat.nr_active = nr_cpus_onln;
 
 unlock_out:
 	bpf_rcu_read_unlock();
