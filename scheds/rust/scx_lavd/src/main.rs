@@ -776,7 +776,7 @@ impl<'a> Scheduler<'a> {
                 self.mseq_id += 1;
 
                 let bss_data = &self.skel.maps.bss_data;
-                let st = bss_data.__sys_stats[0];
+                let st = bss_data.sys_stat;
 
                 let mseq = self.mseq_id;
                 let nr_queued_task = st.nr_queued_task;

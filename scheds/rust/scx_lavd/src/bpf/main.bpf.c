@@ -192,18 +192,6 @@
 char _license[] SEC("license") = "GPL";
 
 /*
- * Include sub-modules
- */
-#include "util.bpf.c"
-#include "power.bpf.c"
-#include "introspec.bpf.c"
-#include "sys_stat.bpf.c"
-#include "preempt.bpf.c"
-#include "lock.bpf.c"
-#include "idle.bpf.c"
-#include "balance.bpf.c"
-
-/*
  * Logical current clock
  */
 static u64		cur_logical_clk;
@@ -220,9 +208,20 @@ static u64		cur_svc_time;
 const volatile u64	slice_min_ns = LAVD_SLICE_MIN_NS_DFL;
 const volatile u64	slice_max_ns = LAVD_SLICE_MAX_NS_DFL;
 
+/*
+ * Include sub-modules
+ */
+#include "util.bpf.c"
+#include "power.bpf.c"
+#include "introspec.bpf.c"
+#include "sys_stat.bpf.c"
+#include "preempt.bpf.c"
+#include "lock.bpf.c"
+#include "idle.bpf.c"
+#include "balance.bpf.c"
+
 static u32 calc_greedy_ratio(struct task_ctx *taskc)
 {
-	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u32 ratio;
 
 	if (!have_scheduled(taskc)) {
@@ -236,7 +235,7 @@ static u32 calc_greedy_ratio(struct task_ctx *taskc)
 	 * the ratio of task's actual service time to average service time in a
 	 * system.
 	 */
-	ratio = (1000 * taskc->svc_time) / stat_cur->avg_svc_time;
+	ratio = (1000 * taskc->svc_time) / sys_stat.avg_svc_time;
 
 out:
 	taskc->is_greedy = ratio > 1000;
@@ -286,6 +285,12 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 	 * latency-critical jobs.
 	 */
 	if (is_kernel_task(p))
+		weight_boost += LAVD_LC_WEIGHT_BOOST;
+
+	/*
+	 * Further prioritize kworkers.
+	 */
+	if (is_kernel_worker(p))
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
@@ -432,51 +437,31 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 	return deadline;
 }
 
-static u32 clamp_time_slice_ns(u32 slice)
+static u64 calc_time_slice(struct task_ctx *taskc)
 {
-	if (slice < slice_min_ns)
-		slice = slice_min_ns;
-	else if (slice > slice_max_ns)
-		slice = slice_max_ns;
-	return slice;
-}
-
-static u64 calc_time_slice(struct task_struct *p, struct task_ctx *taskc)
-{
-	struct sys_stat *stat_cur = get_sys_stat_cur();
-	u64 nr_queued;
-	u32 slice;
+	u64 slice;
 
 	if (!taskc)
 		return LAVD_SLICE_MAX_NS_DFL;
 
-	/*
-	 * The time slice should be short enough to schedule all runnable tasks
-	 * at least once within a targeted latency.
-	 */
-	nr_queued = stat_cur->nr_queued_task + 1;
-	slice = (LAVD_TARGETED_LATENCY_NS * stat_cur->nr_active) / nr_queued;
-
-	/*
-	 * Keep the slice in [slice_min_ns, slice_max_ns].
-	 */
-	slice = clamp_time_slice_ns(slice);
+	slice = sys_stat.slice;
 
 	/*
 	 * Boost time slice for CPU-bound tasks.
-	 */
-	slice += (LAVD_SLICE_BOOST_MAX_FT * slice *
-		  taskc->slice_boost_prio) / LAVD_SLICE_BOOST_MAX_STEP;
-
-	/*
+	 *
 	 * If a task has yet to be scheduled (i.e., a freshly forked task or a
 	 * task just under sched_ext), don't give a fair amount of time slice
 	 * until knowing its properties. This helps to mitigate potential
 	 * system starvation caused by massively forking tasks (i.e., fork-bomb
 	 * attacks).
 	 */
-	if (!have_scheduled(taskc))
+	if (taskc->slice_boost_prio > 0) {
+		slice += (LAVD_SLICE_BOOST_MAX_FT * slice *
+			  taskc->slice_boost_prio) /
+			 LAVD_SLICE_BOOST_MAX_STEP;
+	} else if (!have_scheduled(taskc)) {
 		slice >>= 2;
+	}
 
 	taskc->slice_ns = slice;
 	return slice;
@@ -511,7 +496,6 @@ static u64 get_suspended_duration_and_reset(struct cpu_ctx *cpuc)
 
 static void advance_cur_logical_clk(struct task_struct *p)
 {
-	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 vlc, clc, ret_clc;
 	u64 nr_queued, delta, new_clk;
 	int i;
@@ -530,7 +514,7 @@ static void advance_cur_logical_clk(struct task_struct *p)
 		 * Advance the clock up to the task's deadline. When overloaded,
 		 * advance the clock slower so other can jump in the run queue.
 		 */
-		nr_queued = max(stat_cur->nr_queued_task, 1);
+		nr_queued = max(sys_stat.nr_queued_task, 1);
 		delta = (vlc - clc) / nr_queued;
 		new_clk = clc + delta;
 
@@ -549,7 +533,6 @@ static void update_stat_for_running(struct task_struct *p,
 				    struct task_ctx *taskc,
 				    struct cpu_ctx *cpuc, u64 now)
 {
-	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 wait_period, interval;
 
 	/*
@@ -563,7 +546,7 @@ static void update_stat_for_running(struct task_struct *p,
 	 */
 	if (p->scx.slice == SCX_SLICE_DFL) {
 		p->scx.dsq_vtime = READ_ONCE(cur_logical_clk);
-		p->scx.slice = calc_time_slice(p, taskc);
+		p->scx.slice = calc_time_slice(taskc);
 	}
 
 	/*
@@ -617,10 +600,10 @@ static void update_stat_for_running(struct task_struct *p,
 	/*
 	 * Update statistics information.
 	 */
-	if (is_lat_cri(taskc, stat_cur))
+	if (is_lat_cri(taskc))
 		cpuc->nr_lat_cri++;
 
-	if (is_perf_cri(taskc, stat_cur))
+	if (is_perf_cri(taskc))
 		cpuc->nr_perf_cri++;
 
 	if (taskc->dsq_id != cpuc->cpdom_id) {
@@ -748,7 +731,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
 			p->scx.dsq_vtime = calc_when_to_run(p, taskc);
-			p->scx.slice = calc_time_slice(p, taskc);
+			p->scx.slice = calc_time_slice(taskc);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, p->scx.slice, 0);
 			return cpu_id;
 		}
@@ -788,7 +771,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	taskc->wakeup_ft += !!(enq_flags & SCX_ENQ_WAKEUP);
 	p->scx.dsq_vtime = calc_when_to_run(p, taskc);
-	p->scx.slice = calc_time_slice(p, taskc);
+	p->scx.slice = calc_time_slice(taskc);
 
 	/*
 	 * Find a proper DSQ for the task, which is either the task's
@@ -825,11 +808,7 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Try to find and kick a victim CPU, which runs a less urgent task,
 	 * from dsq_id. The kick will be done asynchronously.
 	 */
-	cpuc_cur = get_cpu_ctx();
-	if (cpuc_cur) {
-		now = scx_bpf_now();
-		try_find_and_kick_victim_cpu(p, taskc, cpuc_cur, dsq_id, now);
-	}
+	try_find_and_kick_victim_cpu(p, taskc, dsq_id);
 }
 
 static bool try_continue_lock_holder(struct task_struct *prev,
@@ -842,7 +821,7 @@ static bool try_continue_lock_holder(struct task_struct *prev,
 	/*
 	 * Refill the time slice.
 	 */
-	prev->scx.slice = calc_time_slice(prev, taskc);
+	prev->scx.slice = calc_time_slice(taskc);
 
 	/*
 	 * Reset prev task's lock and futex boost count
@@ -1026,26 +1005,26 @@ consume_out:
 	 * If nothing to run, continue running the previous task.
 	 */
 	if (prev && prev->scx.flags & SCX_TASK_QUEUED)
-		prev->scx.slice = calc_time_slice(prev, taskc);
+		prev->scx.slice = calc_time_slice(taskc);
 }
 
-void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p_run)
+void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
 {
-	struct cpu_ctx *cpuc_run;
-	struct task_ctx *taskc_run;
+	struct cpu_ctx *cpuc;
+	struct task_ctx *taskc;
 	u64 now;
 
-	cpuc_run = get_cpu_ctx();
-	taskc_run = get_task_ctx(p_run);
-	if (!cpuc_run || !taskc_run)
-		return;
-
 	/*
-	 * Try to yield the current CPU if there is a higher priority task in
-	 * the run queue.
+	 * For a non-latency-critical task, try to yield the current CPU if
+	 * there is a higher priority task in the run queue.
 	 */
-	now = scx_bpf_now();
-	try_yield_current_cpu(p_run, cpuc_run, taskc_run, now);
+	if ((taskc = get_task_ctx(p)) && !is_lat_cri(taskc)) {
+		cpuc = get_cpu_ctx();
+		if (cpuc) {
+			now = scx_bpf_now();
+			try_yield_current_cpu(p, cpuc, taskc, now);
+		}
+	}
 }
 
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
@@ -1117,7 +1096,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	/*
 	 * Calculate the task's time slice.
 	 */
-	p->scx.slice = calc_time_slice(p, taskc);
+	p->scx.slice = calc_time_slice(taskc);
 
 	/*
 	 * Calculate the task's CPU performance target and update if the new
@@ -1382,7 +1361,6 @@ void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
 
 static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 {
-	struct sys_stat *stat_cur = get_sys_stat_cur();
 	u64 now = scx_bpf_now();
 
 	__builtin_memset(taskc, 0, sizeof(*taskc));
@@ -1390,7 +1368,7 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	taskc->last_running_clk = now; /* for avg_runtime */
 	taskc->last_stopping_clk = now; /* for avg_runtime */
 	taskc->avg_runtime = slice_max_ns;
-	taskc->svc_time = stat_cur->avg_svc_time * LAVD_NEW_PROC_PENALITY;
+	taskc->svc_time = sys_stat.avg_svc_time * LAVD_NEW_PROC_PENALITY;
 
 	set_on_core_type(taskc, p->cpus_ptr);
 }

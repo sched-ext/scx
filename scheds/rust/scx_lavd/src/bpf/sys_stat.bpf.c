@@ -23,8 +23,6 @@ struct {
 } update_timer SEC(".maps");
 
 struct sys_stat_ctx {
-	struct sys_stat *stat_cur;
-	struct sys_stat	*stat_next;
 	u64		now;
 	u64		duration;
 	u64		duration_total;
@@ -56,12 +54,10 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 {
 	__builtin_memset(c, 0, sizeof(*c));
 
-	c->stat_cur = get_sys_stat_cur();
-	c->stat_next = get_sys_stat_next();
 	c->min_perf_cri = 1000;
 	c->now = scx_bpf_now();
-	c->duration = c->now - c->stat_cur->last_update_clk;
-	c->stat_next->last_update_clk = c->now;
+	c->duration = c->now - sys_stat.last_update_clk;
+	sys_stat.last_update_clk = c->now;
 }
 
 static void plan_x_cpdom_migration(struct sys_stat_ctx *c)
@@ -232,8 +228,20 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	}
 }
 
+static u32 clamp_time_slice_ns(u32 slice)
+{
+	if (slice < slice_min_ns)
+		slice = slice_min_ns;
+	else if (slice > slice_max_ns)
+		slice = slice_max_ns;
+	return slice;
+}
+
 static void calc_sys_stat(struct sys_stat_ctx *c)
 {
+	static int cnt = 0;
+	u64 avg_svc_time = 0, nr_queued, slice;
+
 	c->duration_total = c->duration * nr_cpus_onln;
 	if (c->duration_total > c->idle_total)
 		c->compute_total = c->duration_total - c->idle_total;
@@ -246,13 +254,13 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 		 * When a system is completely idle, it is indeed possible
 		 * nothing scheduled for an interval.
 		 */
-		c->max_lat_cri = c->stat_cur->max_lat_cri;
-		c->avg_lat_cri = c->stat_cur->avg_lat_cri;
+		c->max_lat_cri = sys_stat.max_lat_cri;
+		c->avg_lat_cri = sys_stat.avg_lat_cri;
 
 		if (have_little_core) {
-			c->min_perf_cri = c->stat_cur->min_perf_cri;
-			c->max_perf_cri = c->stat_cur->max_perf_cri;
-			c->avg_perf_cri = c->stat_cur->avg_perf_cri;
+			c->min_perf_cri = sys_stat.min_perf_cri;
+			c->max_perf_cri = sys_stat.max_perf_cri;
+			c->avg_perf_cri = sys_stat.avg_perf_cri;
 		}
 	}
 	else {
@@ -260,53 +268,44 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 		if (have_little_core)
 			c->avg_perf_cri = c->sum_perf_cri / c->nr_sched;
 	}
-}
-
-static void update_sys_stat_next(struct sys_stat_ctx *c)
-{
-	static int cnt = 0;
-	u64 avg_svc_time = 0;
 
 	/*
 	 * Update the CPU utilization to the next version.
 	 */
-	struct sys_stat *stat_cur = c->stat_cur;
-	struct sys_stat *stat_next = c->stat_next;
-
-	stat_next->util =
-		calc_avg(stat_cur->util, c->cur_util);
-
-	stat_next->max_lat_cri =
-		calc_avg32(stat_cur->max_lat_cri, c->max_lat_cri);
-	stat_next->avg_lat_cri =
-		calc_avg32(stat_cur->avg_lat_cri, c->avg_lat_cri);
-	stat_next->thr_lat_cri = stat_next->max_lat_cri -
-		((stat_next->max_lat_cri - stat_next->avg_lat_cri) >> 1);
+	sys_stat.util = calc_avg(sys_stat.util, c->cur_util);
+	sys_stat.max_lat_cri = calc_avg32(sys_stat.max_lat_cri, c->max_lat_cri);
+	sys_stat.avg_lat_cri = calc_avg32(sys_stat.avg_lat_cri, c->avg_lat_cri);
+	sys_stat.thr_lat_cri = sys_stat.max_lat_cri - ((sys_stat.max_lat_cri -
+				sys_stat.avg_lat_cri) >> 1);
 
 	if (have_little_core) {
-		stat_next->min_perf_cri =
-			calc_avg32(stat_cur->min_perf_cri, c->min_perf_cri);
-		stat_next->avg_perf_cri =
-			calc_avg32(stat_cur->avg_perf_cri, c->avg_perf_cri);
-		stat_next->max_perf_cri =
-			calc_avg32(stat_cur->max_perf_cri, c->max_perf_cri);
-		stat_next->thr_perf_cri =
-			c->stat_cur->thr_perf_cri; /* will be updated later */
+		sys_stat.min_perf_cri =
+			calc_avg32(sys_stat.min_perf_cri, c->min_perf_cri);
+		sys_stat.avg_perf_cri =
+			calc_avg32(sys_stat.avg_perf_cri, c->avg_perf_cri);
+		sys_stat.max_perf_cri =
+			calc_avg32(sys_stat.max_perf_cri, c->max_perf_cri);
 	}
 
-	stat_next->nr_stealee = c->nr_stealee;
+	sys_stat.nr_stealee = c->nr_stealee;
 
-	stat_next->nr_violation =
-		calc_avg32(stat_cur->nr_violation, c->nr_violation);
+	sys_stat.nr_violation = calc_avg32(sys_stat.nr_violation, c->nr_violation);
 
 	if (c->nr_sched > 0)
 		avg_svc_time = c->tot_svc_time / c->nr_sched;
-	stat_next->avg_svc_time =
-		calc_avg(stat_cur->avg_svc_time, avg_svc_time);
+	sys_stat.avg_svc_time = calc_avg(sys_stat.avg_svc_time, avg_svc_time);
+	sys_stat.nr_queued_task = calc_avg(sys_stat.nr_queued_task, c->nr_queued_task);
 
-	stat_next->nr_queued_task =
-		calc_avg(stat_cur->nr_queued_task, c->nr_queued_task);
-
+	/*
+	 * Given the updated state, recalculate the time slice for the next
+	 * round. The time slice should be short enough to schedule all
+	 * runnable tasks at least once within a targeted latency using the
+	 * active CPUs.
+	 */
+	nr_queued = sys_stat.nr_queued_task + 1;
+	slice = (LAVD_TARGETED_LATENCY_NS * sys_stat.nr_active) / nr_queued;
+	slice = clamp_time_slice_ns(slice);
+	sys_stat.slice = calc_avg(sys_stat.slice, slice);
 
 	/*
 	 * Half the statistics every minitue so the statistics hold the
@@ -314,26 +313,26 @@ static void update_sys_stat_next(struct sys_stat_ctx *c)
 	 */
 	if (cnt++ == LAVD_SYS_STAT_DECAY_TIMES) {
 		cnt = 0;
-		stat_next->nr_sched >>= 1;
-		stat_next->nr_perf_cri >>= 1;
-		stat_next->nr_lat_cri >>= 1;
-		stat_next->nr_x_migration >>= 1;
-		stat_next->nr_big >>= 1;
-		stat_next->nr_pc_on_big >>= 1;
-		stat_next->nr_lc_on_big >>= 1;
+		sys_stat.nr_sched >>= 1;
+		sys_stat.nr_perf_cri >>= 1;
+		sys_stat.nr_lat_cri >>= 1;
+		sys_stat.nr_x_migration >>= 1;
+		sys_stat.nr_big >>= 1;
+		sys_stat.nr_pc_on_big >>= 1;
+		sys_stat.nr_lc_on_big >>= 1;
 
 		__sync_fetch_and_sub(&performance_mode_ns, performance_mode_ns/2);
 		__sync_fetch_and_sub(&balanced_mode_ns, balanced_mode_ns/2);
 		__sync_fetch_and_sub(&powersave_mode_ns, powersave_mode_ns/2);
 	}
 
-	stat_next->nr_sched += c->nr_sched;
-	stat_next->nr_perf_cri += c->nr_perf_cri;
-	stat_next->nr_lat_cri += c->nr_lat_cri;
-	stat_next->nr_x_migration += c->nr_x_migration;
-	stat_next->nr_big += c->nr_big;
-	stat_next->nr_pc_on_big += c->nr_pc_on_big;
-	stat_next->nr_lc_on_big += c->nr_lc_on_big;
+	sys_stat.nr_sched += c->nr_sched;
+	sys_stat.nr_perf_cri += c->nr_perf_cri;
+	sys_stat.nr_lat_cri += c->nr_lat_cri;
+	sys_stat.nr_x_migration += c->nr_x_migration;
+	sys_stat.nr_big += c->nr_big;
+	sys_stat.nr_pc_on_big += c->nr_pc_on_big;
+	sys_stat.nr_lc_on_big += c->nr_lc_on_big;
 
 	update_power_mode_time();
 }
@@ -342,19 +341,10 @@ static void do_update_sys_stat(void)
 {
 	struct sys_stat_ctx c;
 
-	/*
-	 * Collect and prepare the next version of stat.
-	 */
 	init_sys_stat_ctx(&c);
 	plan_x_cpdom_migration(&c);
 	collect_sys_stat(&c);
 	calc_sys_stat(&c);
-	update_sys_stat_next(&c);
-
-	/*
-	 * Make the next version atomically visible.
-	 */
-	flip_sys_stat();
 }
 
 static void update_sys_stat(void)
@@ -394,11 +384,8 @@ static s32 init_sys_stat(u64 now)
 	u32 key = 0;
 	int err;
 
-	__builtin_memset(__sys_stats, 0, sizeof(__sys_stats));
-	__sys_stats[0].last_update_clk = now;
-	__sys_stats[1].last_update_clk = now;
-	__sys_stats[0].nr_active = nr_cpus_big;
-	__sys_stats[1].nr_active = nr_cpus_big;
+	sys_stat.last_update_clk = now;
+	sys_stat.nr_active = nr_cpus_onln;
 
 	timer = bpf_map_lookup_elem(&update_timer, &key);
 	if (!timer) {

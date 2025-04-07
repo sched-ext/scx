@@ -78,9 +78,7 @@ static bool is_worth_kick_other_task(struct task_ctx *taskc)
 	 * trying to victimize another CPU as the current task is urgent
 	 * enough.
 	 */
-	struct sys_stat *stat_cur = get_sys_stat_cur();
-
-	return (taskc->lat_cri >= stat_cur->thr_lat_cri);
+	return (taskc->lat_cri >= sys_stat.thr_lat_cri);
 }
 
 static bool can_cpu_be_kicked(u64 now, struct cpu_ctx *cpuc)
@@ -117,13 +115,6 @@ static struct cpu_ctx *find_victim_cpu(const struct cpumask *cpumask,
 		goto null_out;
 	}
 	cur_cpu = cpuc->cpu_id;
-
-	/*
-	 * First check if it is worth to try to kick other CPU
-	 * at the expense of IPI.
-	 */
-	if (!is_worth_kick_other_task(taskc))
-		goto null_out;
 
 	/*
 	 * Randomly find _two_ CPUs that run lower-priority tasks than @p. To
@@ -227,14 +218,14 @@ static bool try_kick_cpu(struct task_struct *p, struct cpu_ctx *victim_cpuc)
 }
 
 static bool try_find_and_kick_victim_cpu(struct task_struct *p,
-					 struct task_ctx *taskc,
-					 struct cpu_ctx *cpuc_cur,
-					 u64 dsq_id, u64 now)
+					 struct task_ctx *taskc, u64 dsq_id)
 {
 	struct bpf_cpumask *cd_cpumask, *cpumask;
 	struct cpdom_ctx *cpdomc;
 	struct cpu_ctx *victim_cpuc;
+	struct cpu_ctx *cpuc_cur;
 	bool ret = false;
+	u64 now;
 
 	/*
 	 * Don't even try to perform expensive preemption for greedy tasks.
@@ -243,8 +234,18 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 		return false;
 
 	/*
+	 * Check if it is worth to try to kick other CPU at the expense of IPI.
+	 */
+	if (!is_worth_kick_other_task(taskc))
+		return false;
+
+	/*
 	 * Prepare a cpumak so we find a victim in @p's compute domain.
 	 */
+	cpuc_cur = get_cpu_ctx();
+	if (!cpuc_cur)
+		return false;
+
 	cpumask = cpuc_cur->tmp_t_mask;
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
 	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [dsq_id]);
@@ -256,6 +257,7 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 	/*
 	 * Find a victim CPU among CPUs that run lower-priority tasks.
 	 */
+	now = scx_bpf_now();
 	victim_cpuc = find_victim_cpu(cast_mask(cpumask), taskc, now);
 
 	/*
