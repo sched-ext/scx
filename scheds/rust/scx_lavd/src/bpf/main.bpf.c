@@ -756,10 +756,9 @@ static bool can_direct_dispatch(u64 dsq_id, s32 cpu, bool is_idle)
 
 void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	struct cpu_ctx *cpuc_cur;
 	struct task_ctx *taskc;
 	s32 task_cpu, cpu = -ENOENT;
-	u64 dsq_id, now;
+	u64 dsq_id;
 	bool is_idle = false;
 
 	taskc = get_task_ctx(p);
