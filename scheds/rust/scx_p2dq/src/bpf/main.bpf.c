@@ -782,7 +782,7 @@ static __always_inline void p2dq_runnable_impl(struct task_struct *p, u64 enq_fl
 	if (!(wakee_ctx = lookup_task_ctx(p)))
 		return;
 
-	wakee_ctx->is_kworker = p->flags & PF_WQ_WORKER;
+	wakee_ctx->is_kworker = p->flags & (PF_KTHREAD | PF_WQ_WORKER | PF_IO_WORKER);
 }
 
 
