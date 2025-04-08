@@ -48,8 +48,8 @@ enum consts_internal  {
 	LAVD_CC_CPU_PIN_INTERVAL	= (250ULL * NSEC_PER_MSEC),
 	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL / LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_AP_HIGH_UTIL		= 700, /* balanced mode when 10% < cpu util <= 40%,
-						  performance mode when cpu util > 40% */
+	LAVD_AP_HIGH_UTIL		= 700, /* balanced mode when 10% < cpu util <= 70%,
+						  performance mode when cpu util > 70% */
 
 	LAVD_CPDOM_MIGRATION_SHIFT	= 3, /* 1/2**3 = +/- 12.5% */
 	LAVD_CPDOM_X_PROB_FT		= (LAVD_SYS_STAT_INTERVAL_NS /
