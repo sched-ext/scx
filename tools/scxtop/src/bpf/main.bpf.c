@@ -451,9 +451,11 @@ int BPF_PROG(on_sched_waking, struct task_struct *p)
 {
 	struct bpf_event *event;
 
-	event = bpf_ringbuf_reserve(&events, sizeof(struct bpf_event), 0);
-	if (!event)
-		return 0;
+        if (!enable_bpf_events || !should_sample())
+                return 0;
+
+        if (!(event = try_reserve_event()))
+                return -ENOMEM;
 
 	event->type = SCHED_WAKING;
 	event->ts = bpf_ktime_get_ns();
