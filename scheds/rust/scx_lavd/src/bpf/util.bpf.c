@@ -228,7 +228,7 @@ static u16 get_nice_prio(struct task_struct *p)
 
 static bool use_full_cpus(void)
 {
-	return (sys_stat.nr_active + LAVD_CC_NR_OVRFLW) >= nr_cpus_onln;
+	return sys_stat.nr_active >= nr_cpus_onln;
 }
 
 static s64 pick_any_bit(u64 bitmap, u64 nuance)

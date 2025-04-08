@@ -66,9 +66,8 @@ static u64 calc_nr_active_cpus(void)
 	/*
 	 * If a few CPUs are particularly busy, boost the active CPUs more.
 	 */
-	nr_active += min(LAVD_CC_NR_OVRFLW, (sys_stat.nr_violation) / 1000);
-	nr_active = max(min(nr_active, nr_cpus_onln),
-			LAVD_CC_NR_ACTIVE_MIN);
+	nr_active += sys_stat.nr_violation / 1000;
+	nr_active = max(min(nr_active, nr_cpus_onln), LAVD_CC_NR_ACTIVE_MIN);
 
 	return nr_active;
 }
@@ -106,7 +105,7 @@ static void do_core_compaction(void)
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *active, *ovrflw, *cd_cpumask;
 	struct cpdom_ctx *cpdomc;
-	int nr_cpus, nr_active, nr_active_old, cpu, i;
+	int nr_active, nr_active_old, cpu, i;
 	u32 sum_capacity = 0, big_capacity = 0;
 	bool clear;
 	u64 cpdom_id;
@@ -128,7 +127,6 @@ static void do_core_compaction(void)
 	 */
 	nr_active_old = sys_stat.nr_active;
 	nr_active = calc_nr_active_cpus();
-	nr_cpus = nr_active + LAVD_CC_NR_OVRFLW;
 	bpf_for(i, 0, nr_cpu_ids) {
 		if (i >= LAVD_CPU_ID_MAX)
 			break;
@@ -147,19 +145,13 @@ static void do_core_compaction(void)
 		/*
 		 * Assign an online cpu to active and overflow cpumasks
 		 */
-		if (i < nr_cpus) {
-			if (i < nr_active) {
-				bpf_cpumask_set_cpu(cpu, active);
-				bpf_cpumask_clear_cpu(cpu, ovrflw);
+		if (i < nr_active) {
+			bpf_cpumask_set_cpu(cpu, active);
+			bpf_cpumask_clear_cpu(cpu, ovrflw);
 
-				cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpu]);
-				if (cpdomc)
-					WRITE_ONCE(cpdomc->is_active, true);
-			}
-			else {
-				bpf_cpumask_set_cpu(cpu, ovrflw);
-				bpf_cpumask_clear_cpu(cpu, active);
-			}
+			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpu]);
+			if (cpdomc)
+				WRITE_ONCE(cpdomc->is_active, true);
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 			/*
@@ -168,32 +160,28 @@ static void do_core_compaction(void)
 			sum_capacity += cpuc->capacity;
 			if (cpuc->big_core)
 				big_capacity += cpuc->capacity;
-		}
-		else {
-			if (i < nr_active_old) {
-				bpf_cpumask_clear_cpu(cpu, active);
-				bpf_cpumask_clear_cpu(cpu, ovrflw);
-			}
-			else {
-				/*
-				 * This is the case when a CPU belongs to the
-				 * overflow set even though that CPU was not an
-				 * overflow set initially. This can happen only
-				 * when a pinned userspace task ran on this
-				 * CPU. In this case, we keep the CPU in an
-				 * overflow set since the CPU will be used
-				 * anyway for the task. This will promote equal
-				 * use of all used CPUs, lowering the energy
-				 * consumption by avoiding a few CPUs being
-				 * turbo-boosted. Hence, we do not clear the
-				 * overflow cpumask here for a while,
-				 * approximately for LAVD_CC_CPU_PIN_INTERVAL.
-				 */
-				bpf_cpumask_clear_cpu(cpu, active);
-				clear = clear_cpu_periodically(cpu, ovrflw);
-				if (!clear)
-					scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			}
+		} else if (i < nr_active_old) {
+			bpf_cpumask_clear_cpu(cpu, active);
+			bpf_cpumask_clear_cpu(cpu, ovrflw);
+		} else {
+			/*
+			 * This is the case when a CPU belongs to the
+			 * overflow set even though that CPU was not an
+			 * overflow set initially. This can happen only
+			 * when a pinned userspace task ran on this
+			 * CPU. In this case, we keep the CPU in an
+			 * overflow set since the CPU will be used
+			 * anyway for the task. This will promote equal
+			 * use of all used CPUs, lowering the energy
+			 * consumption by avoiding a few CPUs being
+			 * turbo-boosted. Hence, we do not clear the
+			 * overflow cpumask here for a while,
+			 * approximately for LAVD_CC_CPU_PIN_INTERVAL.
+			 */
+			bpf_cpumask_clear_cpu(cpu, active);
+			clear = clear_cpu_periodically(cpu, ovrflw);
+			if (!clear)
+				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		}
 	}
 
