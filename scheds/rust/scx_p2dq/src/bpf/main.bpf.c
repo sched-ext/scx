@@ -62,6 +62,9 @@ const volatile bool has_little_cores = false;
 const volatile u32 debug = 2;
 
 const u32 zero_u32 = 0;
+const u64 lb_timer_intvl_ns = 250LLU * NSEC_PER_MSEC;
+const u64 lb_backoff_ns = 25LLU * NSEC_PER_MSEC;
+
 u64 cpu_llc_ids[MAX_CPUS];
 u64 cpu_node_ids[MAX_CPUS];
 u64 big_core_ids[MAX_CPUS];
@@ -91,7 +94,7 @@ static __always_inline u64 dsq_time_slice(int dsq_id)
 }
 
 struct p2dq_timer p2dq_timers[MAX_TIMERS] = {
-	{250LLU * NSEC_PER_MSEC, CLOCK_BOOTTIME, 0},
+	{lb_timer_intvl_ns, CLOCK_BOOTTIME, 0},
 };
 
 struct timer_wrapper {
@@ -247,6 +250,7 @@ static bool can_pick2(struct task_ctx *taskc)
 	if (is_interactive(taskc) ||
 	    !taskc->all_cpus ||
 	    taskc->is_kworker ||
+	    nr_llcs == 2 ||
 	    (max_dsq_pick2 > 0 && taskc->llc_runs < min_llc_runs_pick2))
 		return false;
 
@@ -295,11 +299,23 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *cur_llcx, struct llc_ctx *left,
 					struct llc_ctx *right)
 {
-	s32 cur_queued = 0, left_queued = 0, right_queued = 0;
-	u64 cur_load = 0, left_load = 0, right_load = 0;
+	s32 cur_queued = 0;
+	u64 left_load = 0, right_load = 0;
 	int i;
 
 	if (!left || !right)
+		return NULL;
+
+	u64 now = scx_bpf_now();
+	if (now - cur_llcx->last_period_ns < lb_backoff_ns)
+		return NULL;
+
+	u64 max_possible_load = (now - cur_llcx->last_period_ns) * cur_llcx->nr_cpus;
+	u64 cur_load = cur_llcx->load;
+	u64 scaled_load = (100 * cur_load) / max_possible_load;
+
+	// If over 75% utilization then don't bother trying to pull more work
+	if (scaled_load > 75)
 		return NULL;
 
 	bpf_for(i, 0, nr_llcs) {
@@ -308,26 +324,20 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *cur_llcx, struct llc_ctx
 
 		u64 cur_dsq_id = *MEMBER_VPTR(cur_llcx->dsqs, [i]);
 		cur_queued += scx_bpf_dsq_nr_queued(cur_dsq_id);
-		cur_load += *MEMBER_VPTR(cur_llcx->dsq_load, [i]);
-		u64 left_dsq_id = *MEMBER_VPTR(left->dsqs, [i]);
-		left_queued += scx_bpf_dsq_nr_queued(left_dsq_id);
-		left_load += *MEMBER_VPTR(left->dsq_load, [i]);
-		u64 right_dsq_id = *MEMBER_VPTR(right->dsqs, [i]);
-		right_queued += scx_bpf_dsq_nr_queued(right_dsq_id);
-		right_load += *MEMBER_VPTR(right->dsq_load, [i]);
 	}
 
 	if (min_nr_queued_pick2 > 0 &&
-	    (left_queued < min_nr_queued_pick2 &&
-	     right_queued < min_nr_queued_pick2))
+	    cur_queued < min_nr_queued_pick2)
 		return NULL;
 
+	left_load = left->load;
+	right_load = right->load;
+
 	// If the current LLCs has more load don't try to pick2.
-	if ((nr_llcs > 2 && cur_queued >= left_queued && cur_queued >= right_queued) ||
-	    (nr_llcs > 2 && cur_load > left_load && cur_load > right_load))
+	if ((nr_llcs > 2 && cur_load > left_load && cur_load > right_load))
 	    return NULL;
 
-        if (left_queued < right_queued || left_load < right_load)
+        if (left_load < right_load)
 		return right;
 	return left;
 }
@@ -342,51 +352,45 @@ static s32 pick_two_cpu(struct llc_ctx *cur_llcx, struct task_ctx *taskc,
 
 	struct llc_ctx *chosen;
 	struct llc_ctx *left, *right;
-	int dsq_index = taskc->dsq_index;
 	s32 cpu;
 
-	if (nr_llcs == 2) {
-		left = lookup_llc_ctx(0);
-		right = lookup_llc_ctx(1);
-	} else {
-		left = rand_llc_ctx();
-		right = rand_llc_ctx();
-	}
+	u64 now = scx_bpf_now();
+	// TODO: Use a moving avg instead for load calculations. The current
+	// method will be too noisy.
+	if (now - cur_llcx->last_period_ns < lb_backoff_ns)
+		return -EINVAL;
 
-	if (!left || !right || dsq_index > nr_dsqs_per_llc) {
+	u64 max_possible_load = (now - cur_llcx->last_period_ns) * cur_llcx->nr_cpus;
+	u64 cur_load = cur_llcx->load;
+	u64 scaled_load = (100 * cur_load) / max_possible_load;
+
+	// If the current LLC is not heavily utilized then don't load balance,
+	// under saturation load balancing is done on the dispatch path.
+	if (scaled_load < 90)
+		return -EINVAL;
+
+	left = rand_llc_ctx();
+	right = rand_llc_ctx();
+
+	if (!left || !right) {
 		return -EINVAL;
 	}
 
 	// last ditch effort if same are picked.
-	if (left->id == right->id) {
+	if (unlikely(left->id == right->id)) {
 		right = rand_llc_ctx();
 		if (!right || left->id == right->id)
 			return -EINVAL;
 	}
 
-	u64 cur_dsq_id = *MEMBER_VPTR(cur_llcx->dsqs, [dsq_index]);
-	s32 cur_queued = scx_bpf_dsq_nr_queued(cur_dsq_id);
-	u64 cur_load = *MEMBER_VPTR(cur_llcx->dsq_load, [dsq_index]);
-	u64 left_dsq_id = *MEMBER_VPTR(left->dsqs, [dsq_index]);
-	s32 left_queued = scx_bpf_dsq_nr_queued(left_dsq_id);
-	u64 left_load = *MEMBER_VPTR(left->dsq_load, [dsq_index]);
-	u64 right_dsq_id = *MEMBER_VPTR(right->dsqs, [dsq_index]);
-	s32 right_queued = scx_bpf_dsq_nr_queued(right_dsq_id);
-	u64 right_load = *MEMBER_VPTR(right->dsq_load, [dsq_index]);
+	u64 left_load = left->load;
+	u64 right_load = right->load;
 
 	// If the other LLCs have more load than the current don't bother.
-	if ((nr_llcs > 2 && left_queued >= cur_queued && right_queued >= cur_queued) ||
-	    (nr_llcs > 2 && left_load > cur_load && right_load > cur_load))
+	if (left_load > cur_load && right_load > cur_load)
 		return -EINVAL;
 
-	if (min_nr_queued_pick2 > 0 &&
-	    (left_queued < min_nr_queued_pick2 &&
-	     right_queued < min_nr_queued_pick2))
-		return -EINVAL;
-
-	if (((left_queued > 0 || right_queued > 0) ||
-	    left_queued < right_queued) ||
-	    left_load < right_load) {
+	if (left_load < right_load) {
 		chosen = left;
 		goto pick_llc;
 	} else {
@@ -399,7 +403,8 @@ pick_llc:
 		return -EINVAL;
 
 	// First try to find an idle core
-	cpu = scx_bpf_pick_idle_cpu(cast_mask(chosen->cpumask), SCX_PICK_IDLE_CORE);
+	cpu = scx_bpf_pick_idle_cpu(cast_mask(chosen->cpumask),
+				    SCX_PICK_IDLE_CORE);
 	if (cpu >= 0) {
 		*is_idle = true;
 		return cpu;
@@ -863,6 +868,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	__sync_fetch_and_add(&llcx->vtime, scaled_used);
 	__sync_fetch_and_add(&llcx->dsq_max_vtime[dsq_index], scaled_used);
 	__sync_fetch_and_add(&llcx->dsq_load[dsq_index], used);
+	__sync_fetch_and_add(&llcx->load, used);
 
 	// On stopping determine if the task can move to a longer DSQ by
 	// comparing the used time to the scaled DSQ slice.
@@ -1297,6 +1303,8 @@ reset_load:
 		if (!(llcx = lookup_llc_ctx(llc_id)))
 			return false;
 
+		llcx->load = 0;
+		llcx->last_period_ns = scx_bpf_now();
 		bpf_for(j, 0, nr_dsqs_per_llc) {
 			llcx->dsq_load[j] = 0;
 			if (llc_id == 0 && autoslice) {

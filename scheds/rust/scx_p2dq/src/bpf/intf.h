@@ -110,6 +110,8 @@ struct llc_ctx {
 	u32				nr_cpus;
 	u32				node_id;
 	u64				vtime;
+	u64				last_period_ns;
+	u64				load;
 	bool				all_big;
 	u64				dsqs[MAX_DSQS_PER_LLC];
 	u64				dsq_max_vtime[MAX_DSQS_PER_LLC];
