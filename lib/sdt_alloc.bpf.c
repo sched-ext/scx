@@ -47,8 +47,6 @@ static __u64 zero = 0;
  */
 static bool sdt_verify_once;
 
-#define SDT_TASK_FN_ATTRS	inline __attribute__((unused, always_inline))
-
 __hidden void sdt_subprog_init_arena(void)
 {
 	if (sdt_verify_once)
@@ -69,7 +67,7 @@ struct sdt_pool sdt_chunk_pool;
 /* Protected by sdt_lock. */
 struct sdt_stats sdt_stats;
 
-static SDT_TASK_FN_ATTRS int sdt_ffs(__u64 word)
+static int sdt_ffs(__u64 word)
 {
 	unsigned int num = 0;
 
@@ -107,7 +105,7 @@ static SDT_TASK_FN_ATTRS int sdt_ffs(__u64 word)
 }
 
 /* find the first empty slot */
-static SDT_TASK_FN_ATTRS __u64 sdt_chunk_find_empty(sdt_desc_t *desc)
+static __u64 sdt_chunk_find_empty(sdt_desc_t *desc)
 {
 	__u64 freeslots;
 	__u64 i;
@@ -123,7 +121,7 @@ static SDT_TASK_FN_ATTRS __u64 sdt_chunk_find_empty(sdt_desc_t *desc)
 	return SDT_TASK_ENTS_PER_CHUNK;
 }
 
-static SDT_TASK_FN_ATTRS
+static
 void __arena *scx_alloc_stack_pop(struct scx_alloc_stack __arena *stack)
 {
 	void __arena *slab;
@@ -139,7 +137,7 @@ void __arena *scx_alloc_stack_pop(struct scx_alloc_stack __arena *stack)
 	return slab;
 }
 
-static SDT_TASK_FN_ATTRS
+static
 int scx_alloc_stack(struct scx_alloc_stack __arena *stack)
 {
 	void __arena *slab;
@@ -199,7 +197,7 @@ int scx_alloc_attempt(struct scx_alloc_stack __arena *stack)
 }
 
 /* Allocate element from the pool. Must be called with a then pool lock held. */
-static SDT_TASK_FN_ATTRS
+static
 void __arena *scx_alloc_from_pool(struct sdt_pool *pool,
 	struct scx_alloc_stack __arena *stack)
 {
@@ -228,7 +226,7 @@ void __arena *scx_alloc_from_pool(struct sdt_pool *pool,
 }
 
 /* Allocate element from the pool. Must be called with a then pool lock held. */
-static SDT_TASK_FN_ATTRS
+static
 void __arena *scx_alloc_from_pool_sleepable(struct sdt_pool *pool)
 {
 	__u64 elem_size, max_elems;
@@ -253,8 +251,7 @@ void __arena *scx_alloc_from_pool_sleepable(struct sdt_pool *pool)
 }
 
 /* Alloc desc and associated chunk. Called with the task spinlock held. */
-static SDT_TASK_FN_ATTRS
-sdt_desc_t *scx_alloc_chunk(struct scx_alloc_stack __arena *stack)
+static sdt_desc_t *scx_alloc_chunk(struct scx_alloc_stack __arena *stack)
 {
 	struct sdt_chunk __arena *chunk;
 	sdt_desc_t *desc;
@@ -273,7 +270,7 @@ sdt_desc_t *scx_alloc_chunk(struct scx_alloc_stack __arena *stack)
 	return out;
 }
 
-static SDT_TASK_FN_ATTRS int sdt_pool_set_size(struct sdt_pool *pool, __u64 data_size, __u64 nr_pages)
+static int sdt_pool_set_size(struct sdt_pool *pool, __u64 data_size, __u64 nr_pages)
 {
 	if (unlikely(data_size % 8)) {
 		scx_bpf_error("%s: allocation size %llu not word aligned", __func__, data_size);
@@ -340,7 +337,7 @@ scx_alloc_init(struct scx_allocator *alloc, __u64 data_size)
 	return 0;
 }
 
-static SDT_TASK_FN_ATTRS
+static
 int sdt_set_idx_state(sdt_desc_t *desc, __u64 pos, bool state)
 {
 	__u64 __arena *allocated = desc->allocated;
@@ -476,8 +473,7 @@ int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx)
  * Find and return an available idx on the allocator.
  * Called with the task spinlock held.
  */
-static SDT_TASK_FN_ATTRS
-sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
+static sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
 	struct scx_alloc_stack __arena *stack,
 	__u64 *idxp)
 {
@@ -539,8 +535,7 @@ sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
 	return desc;
 }
 
-static SDT_TASK_FN_ATTRS
-void scx_alloc_finish(struct sdt_data __arena *data, __u64 idx)
+static void scx_alloc_finish(struct sdt_data __arena *data, __u64 idx)
 {
 	bpf_spin_lock(&sdt_lock);
 
