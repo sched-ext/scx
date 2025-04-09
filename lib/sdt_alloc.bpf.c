@@ -57,17 +57,17 @@ __hidden void scx_arena_subprog_init(void)
 }
 
 
-private(LOCK) struct bpf_spin_lock sdt_lock;
-private(POOL_LOCK) struct bpf_spin_lock sdt_pool_alloc_lock;
+private(LOCK) struct bpf_spin_lock alloc_lock;
+private(POOL_LOCK) struct bpf_spin_lock alloc_pool_lock;
 
 /* allocation pools */
-struct sdt_pool sdt_desc_pool;
-struct sdt_pool sdt_chunk_pool;
+struct sdt_pool desc_pool;
+struct sdt_pool chunk_pool;
 
-/* Protected by sdt_lock. */
-struct sdt_stats sdt_stats;
+/* Protected by alloc_lock. */
+struct scx_alloc_stats alloc_stats;
 
-static int sdt_ffs(__u64 word)
+static int scx_ffs(__u64 word)
 {
 	unsigned int num = 0;
 
@@ -105,7 +105,7 @@ static int sdt_ffs(__u64 word)
 }
 
 /* find the first empty slot */
-static __u64 sdt_chunk_find_empty(sdt_desc_t *desc)
+static __u64 chunk_find_empty(sdt_desc_t *desc)
 {
 	__u64 freeslots;
 	__u64 i;
@@ -115,7 +115,7 @@ static __u64 sdt_chunk_find_empty(sdt_desc_t *desc)
 		if (freeslots == (__u64)0)
 			continue;
 
-		return (i * 64) + sdt_ffs(freeslots);
+		return (i * 64) + scx_ffs(freeslots);
 	}
 
 	return SDT_TASK_ENTS_PER_CHUNK;
@@ -142,17 +142,17 @@ int scx_alloc_stack(struct scx_alloc_stack __arena *stack)
 {
 	void __arena *slab;
 
-	bpf_spin_lock(&sdt_lock);
+	bpf_spin_lock(&alloc_lock);
 	if (stack->idx >= SDT_TASK_ALLOC_STACK_MIN)
 		return 0;
 
-	bpf_spin_unlock(&sdt_lock);
+	bpf_spin_unlock(&alloc_lock);
 
 	slab = bpf_arena_alloc_pages(&arena, NULL, 1, NUMA_NO_NODE, 0);
 	if (slab == NULL)
 		return -ENOMEM;
 
-	bpf_spin_lock(&sdt_lock);
+	bpf_spin_lock(&alloc_lock);
 
 	/*
 	 * Edge case where so many threads tried to allocate that our
@@ -160,7 +160,7 @@ int scx_alloc_stack(struct scx_alloc_stack __arena *stack)
 	 */
 	if (stack->idx >= SDT_TASK_ALLOC_STACK_MAX) {
 
-		bpf_spin_unlock(&sdt_lock);
+		bpf_spin_unlock(&alloc_lock);
 
 		bpf_arena_free_pages(&arena, slab, 1);
 		return -EAGAIN;
@@ -169,8 +169,8 @@ int scx_alloc_stack(struct scx_alloc_stack __arena *stack)
 	stack->stack[stack->idx] = slab;
 	stack->idx += 1;
 
-	sdt_stats.arena_pages_used += 1;
-	bpf_spin_unlock(&sdt_lock);
+	alloc_stats.arena_pages_used += 1;
+	bpf_spin_unlock(&alloc_lock);
 
 	return -EAGAIN;
 }
@@ -257,20 +257,20 @@ static sdt_desc_t *scx_alloc_chunk(struct scx_alloc_stack __arena *stack)
 	sdt_desc_t *desc;
 	sdt_desc_t *out;
 
-	chunk = scx_alloc_from_pool(&sdt_chunk_pool, stack);
-	desc = scx_alloc_from_pool(&sdt_desc_pool, stack);
+	chunk = scx_alloc_from_pool(&chunk_pool, stack);
+	desc = scx_alloc_from_pool(&desc_pool, stack);
 
 	out = desc;
 
 	desc->nr_free = SDT_TASK_ENTS_PER_CHUNK;
 	desc->chunk = chunk;
 
-	sdt_stats.chunk_allocs += 1;
+	alloc_stats.chunk_allocs += 1;
 
 	return out;
 }
 
-static int sdt_pool_set_size(struct sdt_pool *pool, __u64 data_size, __u64 nr_pages)
+static int pool_set_size(struct sdt_pool *pool, __u64 data_size, __u64 nr_pages)
 {
 	if (unlikely(data_size % 8)) {
 		scx_bpf_error("%s: allocation size %llu not word aligned", __func__, data_size);
@@ -300,11 +300,11 @@ scx_alloc_init(struct scx_allocator *alloc, __u64 data_size)
 	_Static_assert(sizeof(struct sdt_chunk) <= PAGE_SIZE,
 		"chunk size must fit into a page");
 
-	ret = sdt_pool_set_size(&sdt_chunk_pool, sizeof(struct sdt_chunk), 1);
+	ret = pool_set_size(&chunk_pool, sizeof(struct sdt_chunk), 1);
 	if (ret != 0)
 		return ret;
 
-	ret = sdt_pool_set_size(&sdt_desc_pool, sizeof(struct sdt_desc), 1);
+	ret = pool_set_size(&desc_pool, sizeof(struct sdt_desc), 1);
 	if (ret != 0)
 		return ret;
 
@@ -317,7 +317,7 @@ scx_alloc_init(struct scx_allocator *alloc, __u64 data_size)
 	 * internal fragmentation when turning chunks it into structs.
 	 */
 	min_chunk_size = div_round_up(SDT_TASK_MIN_ELEM_PER_ALLOC * data_size, PAGE_SIZE);
-	ret = sdt_pool_set_size(&alloc->pool, data_size, min_chunk_size);
+	ret = pool_set_size(&alloc->pool, data_size, min_chunk_size);
 	if (ret != 0)
 		return ret;
 
@@ -332,13 +332,13 @@ scx_alloc_init(struct scx_allocator *alloc, __u64 data_size)
 
 	alloc->root = scx_alloc_chunk(prealloc_stack);
 
-	bpf_spin_unlock(&sdt_lock);
+	bpf_spin_unlock(&alloc_lock);
 
 	return 0;
 }
 
 static
-int sdt_set_idx_state(sdt_desc_t *desc, __u64 pos, bool state)
+int set_idx_state(sdt_desc_t *desc, __u64 pos, bool state)
 {
 	__u64 __arena *allocated = desc->allocated;
 	__u64 bit;
@@ -357,7 +357,7 @@ int sdt_set_idx_state(sdt_desc_t *desc, __u64 pos, bool state)
 }
 
 static __noinline
-int sdt_mark_nodes_avail(sdt_desc_t *lv_desc[SDT_TASK_LEVELS], __u64 lv_pos[SDT_TASK_LEVELS])
+int mark_nodes_avail(sdt_desc_t *lv_desc[SDT_TASK_LEVELS], __u64 lv_pos[SDT_TASK_LEVELS])
 {
 	sdt_desc_t *desc;
 	__u64 u, level;
@@ -370,7 +370,7 @@ int sdt_mark_nodes_avail(sdt_desc_t *lv_desc[SDT_TASK_LEVELS], __u64 lv_pos[SDT_
 		desc = lv_desc[level];
 
 		/* Failed calls return unlocked. */
-		ret = sdt_set_idx_state(desc, lv_pos[level], false);
+		ret = set_idx_state(desc, lv_pos[level], false);
 		if (unlikely(ret != 0))
 			return ret;
 
@@ -401,11 +401,11 @@ int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx)
 	if (!alloc)
 		return 0;
 
-	bpf_spin_lock(&sdt_lock);
+	bpf_spin_lock(&alloc_lock);
 
 	desc = alloc->root;
 	if (unlikely(!desc)) {
-		bpf_spin_unlock(&sdt_lock);
+		bpf_spin_unlock(&alloc_lock);
 		scx_bpf_error("%s: root not allocated", __func__);
 		return 0;
 	}
@@ -432,7 +432,7 @@ int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx)
 		desc = desc_children[pos];
 
 		if (unlikely(!desc)) {
-			bpf_spin_unlock(&sdt_lock);
+			bpf_spin_unlock(&alloc_lock);
 			scx_bpf_error("%s: freeing nonexistent idx [0x%llx] (level %llu)",
 				__func__, idx, level);
 			return 0;
@@ -455,16 +455,16 @@ int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx)
 		}
 	}
 
-	ret = sdt_mark_nodes_avail(lv_desc, lv_pos);
+	ret = mark_nodes_avail(lv_desc, lv_pos);
 	if (unlikely(ret != 0)) {
-		bpf_spin_unlock(&sdt_lock);
+		bpf_spin_unlock(&alloc_lock);
 		return 0;
 	}
 
-	sdt_stats.active_allocs -= 1;
-	sdt_stats.free_ops += 1;
+	alloc_stats.active_allocs -= 1;
+	alloc_stats.free_ops += 1;
 
-	bpf_spin_unlock(&sdt_lock);
+	bpf_spin_unlock(&alloc_lock);
 
 	return 0;
 }
@@ -473,7 +473,7 @@ int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx)
  * Find and return an available idx on the allocator.
  * Called with the task spinlock held.
  */
-static sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
+static sdt_desc_t * desc_find_empty(sdt_desc_t *desc,
 	struct scx_alloc_stack __arena *stack,
 	__u64 *idxp)
 {
@@ -487,7 +487,7 @@ static sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
 	int ret;
 
 	for (level = zero; level < SDT_TASK_LEVELS && can_loop; level++) {
-		pos = sdt_chunk_find_empty(desc);
+		pos = chunk_find_empty(desc);
 
 		/* Something has gone terribly wrong. */
 		if (unlikely(pos > SDT_TASK_ENTS_PER_CHUNK))
@@ -520,7 +520,7 @@ static sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
 		level = SDT_TASK_LEVELS - 1 - u;
 		tmp = lv_desc[level];
 
-		ret = sdt_set_idx_state(tmp, lv_pos[level], true);
+		ret = set_idx_state(tmp, lv_pos[level], true);
 		if (ret != 0)
 			break;
 
@@ -537,14 +537,14 @@ static sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
 
 static void scx_alloc_finish(struct sdt_data __arena *data, __u64 idx)
 {
-	bpf_spin_lock(&sdt_lock);
+	bpf_spin_lock(&alloc_lock);
 
 	/* The data counts as a chunk */
-	sdt_stats.data_allocs += 1;
-	sdt_stats.alloc_ops += 1;
-	sdt_stats.active_allocs += 1;
+	alloc_stats.data_allocs += 1;
+	alloc_stats.alloc_ops += 1;
+	alloc_stats.active_allocs += 1;
 
-	bpf_spin_unlock(&sdt_lock);
+	bpf_spin_unlock(&alloc_lock);
 
 	data->tid.idx = idx;
 }
@@ -568,9 +568,9 @@ u64 scx_alloc_internal(struct scx_allocator *alloc)
 		return (u64)NULL;
 
 	/* We unlock if we encounter an error in the function. */
-	desc = sdt_find_empty(alloc->root, stack, &idx);
+	desc = desc_find_empty(alloc->root, stack, &idx);
 
-	bpf_spin_unlock(&sdt_lock);
+	bpf_spin_unlock(&alloc_lock);
 
 	if (unlikely(desc == NULL)) {
 		bpf_printk("%s: failed to find empty tree key", __func__);
@@ -615,9 +615,9 @@ void __arena *scx_static_alloc(size_t bytes)
 	void __arena *memory, *old;
 	void __arena *ptr;
 
-	bpf_spin_lock(&sdt_lock);
+	bpf_spin_lock(&alloc_lock);
 	if (bytes > scx_static.max_alloc_bytes) {
-		bpf_spin_unlock(&sdt_lock);
+		bpf_spin_unlock(&alloc_lock);
 		scx_bpf_error("invalid request %ld, max is %ld\n", bytes,
 			      scx_static.max_alloc_bytes);
 		return NULL;
@@ -632,7 +632,7 @@ void __arena *scx_static_alloc(size_t bytes)
 	if (scx_static.off + bytes  > scx_static.max_alloc_bytes) {
 		old = scx_static.memory;
 
-		bpf_spin_unlock(&sdt_lock);
+		bpf_spin_unlock(&alloc_lock);
 
 		/*
 		 * No free operation so just forget about the previous
@@ -645,11 +645,11 @@ void __arena *scx_static_alloc(size_t bytes)
 		if (!scx_static.memory)
 			return NULL;
 
-		bpf_spin_lock(&sdt_lock);
+		bpf_spin_lock(&alloc_lock);
 
 		/* Error out if we raced with another allocation. */
 		if (scx_static.memory != old) {
-			bpf_spin_unlock(&sdt_lock);
+			bpf_spin_unlock(&alloc_lock);
 			bpf_arena_free_pages(&arena, memory, scx_static.max_alloc_bytes);
 
 			scx_bpf_error("concurrent static memory allocations unsupported");
@@ -673,13 +673,13 @@ int scx_static_init(size_t alloc_pages)
 	if (!memory)
 		return -ENOMEM;
 
-	bpf_spin_lock(&sdt_lock);
+	bpf_spin_lock(&alloc_lock);
 	scx_static = (struct scx_static) {
 		.max_alloc_bytes = max_bytes,
 		.off = 0,
 		.memory = memory,
 	};
-	bpf_spin_unlock(&sdt_lock);
+	bpf_spin_unlock(&alloc_lock);
 
 	return 0;
 }

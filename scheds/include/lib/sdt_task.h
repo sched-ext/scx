@@ -84,7 +84,7 @@ struct sdt_pool {
 	__u64		idx;
 };
 
-struct sdt_stats {
+struct scx_alloc_stats {
 	__u64		chunk_allocs;
 	__u64		data_allocs;
 	__u64		alloc_ops;
