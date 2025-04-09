@@ -81,6 +81,7 @@ fn attach_progs(skel: &mut BpfSkel) -> Result<Vec<Link>> {
         skel.progs.on_sched_switch.attach()?,
         skel.progs.on_sched_wakeup.attach()?,
         skel.progs.on_sched_wakeup_new.attach()?,
+        skel.progs.on_sched_waking.attach()?,
     ];
 
     // 6.13 compatibility
