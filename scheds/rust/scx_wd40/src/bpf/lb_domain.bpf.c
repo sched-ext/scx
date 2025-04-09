@@ -83,7 +83,7 @@ dom_ptr lb_domain_alloc(u32 dom_id)
 __hidden
 void lb_domain_free(dom_ptr domc)
 {
-	sdt_subprog_init_arena();
+	scx_arena_subprog_init();
 
 	scx_bitmap_free(domc->node_cpumask);
 	scx_bitmap_free(domc->direct_greedy_cpumask);

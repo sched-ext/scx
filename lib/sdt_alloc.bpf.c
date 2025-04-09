@@ -45,15 +45,15 @@ static __u64 zero = 0;
  * statement that triggers at most once to generate an LD.IMM instruction
  * to access the arena and help the verifier.
  */
-static bool sdt_verify_once;
+static bool scx_arena_verify_once;
 
-__hidden void sdt_subprog_init_arena(void)
+__hidden void scx_arena_subprog_init(void)
 {
-	if (sdt_verify_once)
+	if (scx_arena_verify_once)
 		return;
 
 	bpf_printk("%s: arena pointer %p", __func__, &arena);
-	sdt_verify_once = true;
+	scx_arena_verify_once = true;
 }
 
 
@@ -396,7 +396,7 @@ int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx)
 	int ret;
 	int i;
 
-	sdt_subprog_init_arena();
+	scx_arena_subprog_init();
 
 	if (!alloc)
 		return 0;

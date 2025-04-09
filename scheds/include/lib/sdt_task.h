@@ -110,7 +110,7 @@ void __arena *scx_task_data(struct task_struct *p);
 int scx_task_init(__u64 data_size);
 void __arena *scx_task_alloc(struct task_struct *p);
 void scx_task_free(struct task_struct *p);
-void sdt_subprog_init_arena(void);
+void scx_arena_subprog_init(void);
 
 int scx_alloc_init(struct scx_allocator *alloc, __u64 data_size);
 u64 scx_alloc_internal(struct scx_allocator *alloc);

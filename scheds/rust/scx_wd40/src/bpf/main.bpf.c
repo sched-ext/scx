@@ -821,7 +821,7 @@ static s32 initialize_cpu(s32 cpu)
 	int perf;
 	u32 i;
 
-	sdt_subprog_init_arena();
+	scx_arena_subprog_init();
 
 	if (!pcpuc)
 		return -ENOENT;

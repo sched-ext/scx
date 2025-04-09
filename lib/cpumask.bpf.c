@@ -43,7 +43,7 @@ u64 scx_bitmap_alloc_internal(void)
 __weak
 int scx_bitmap_free(scx_bitmap_t __arg_arena mask)
 {
-	sdt_subprog_init_arena();
+	scx_arena_subprog_init();
 
 	scx_alloc_free_idx(&scx_bitmap_allocator, mask->tid.idx);
 	return 0;
