@@ -106,10 +106,10 @@ struct scx_static {
 
 #ifdef __BPF__
 
-void __arena *sdt_task_data(struct task_struct *p);
-int sdt_task_init(__u64 data_size);
-void __arena *sdt_task_alloc(struct task_struct *p);
-void sdt_task_free(struct task_struct *p);
+void __arena *scx_task_data(struct task_struct *p);
+int scx_task_init(__u64 data_size);
+void __arena *scx_task_alloc(struct task_struct *p);
+void scx_task_free(struct task_struct *p);
 void sdt_subprog_init_arena(void);
 
 int scx_alloc_init(struct scx_allocator *alloc, __u64 data_size);

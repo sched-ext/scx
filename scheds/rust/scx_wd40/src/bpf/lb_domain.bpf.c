@@ -266,7 +266,7 @@ int dom_xfer_task(struct task_struct *p __arg_trusted, u32 new_dom_id, u64 now)
 	dom_ptr from_domc, to_domc;
 	task_ptr taskc;
 
-	taskc = (task_ptr)sdt_task_data(p);
+	taskc = (task_ptr)scx_task_data(p);
 	if (!taskc)
 		return 0;
 
