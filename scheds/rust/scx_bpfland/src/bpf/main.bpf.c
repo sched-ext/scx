@@ -38,8 +38,7 @@ const volatile u64 slice_min = 1ULL * NSEC_PER_MSEC;
 const volatile s64 slice_lag = 20ULL * NSEC_PER_MSEC;
 
 /*
- * If enabled, never allow tasks to preempt others before their assigned
- * time slice expires.
+ * If enabled, never allow tasks to be directly dispatched.
  */
 const volatile bool no_preempt;
 
@@ -675,6 +674,25 @@ out_put_cpumask:
 }
 
 /*
+ * Return true if we can perform a direct dispatch on @node, false
+ * otherwise.
+ */
+static bool can_direct_dispatch(int node)
+{
+	/*
+	 * Never allow direct dispatch if preemption is disabled.
+	 */
+	if (no_preempt)
+		return false;
+
+	/*
+	 * Allow direct dispatch when @local_pcpu is enabled, or when there
+	 * are no tasks queued in the node DSQ.
+	 */
+	return local_pcpu || !scx_bpf_dsq_nr_queued(node);
+}
+
+/*
  * Pick a target CPU for a task which is being woken up.
  *
  * If a task is dispatched here, ops.enqueue() will be skipped: task will be
@@ -690,7 +708,7 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 	if (is_idle) {
 		int node = __COMPAT_scx_bpf_cpu_node(cpu);
 
-		if (local_pcpu || !scx_bpf_dsq_nr_queued(node)) {
+		if (can_direct_dispatch(node)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, 0);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 		}
@@ -767,24 +785,9 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 * taken by a higher priority scheduling class, force it to follow
 	 * the regular scheduling path and give it a chance to run on a
 	 * different CPU.
-	 *
-	 * However, if the task can only run on a single CPU, re-scheduling
-	 * is unnecessary, as it can only be dispatched on that specific
-	 * CPU. In this case, dispatch it immediately to maximize its
-	 * chances of reclaiming the CPU quickly and avoiding stalls.
-	 *
-	 * This approach will be effective once dl_server support is added
-	 * to the sched_ext core.
 	 */
-	if (enq_flags & SCX_ENQ_REENQ) {
-		if (p->nr_cpus_allowed == 1) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
-			__sync_fetch_and_add(&nr_kthread_dispatches, 1);
-
-			return true;
-		}
+	if (enq_flags & SCX_ENQ_REENQ)
 		return false;
-	}
 
 	/*
 	 * If local_kthread is specified dispatch per-CPU kthreads
@@ -802,19 +805,13 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 */
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
 		int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
-		struct rq *rq = scx_bpf_cpu_rq(prev_cpu);
 
 		/*
-		 * Allow to preempt the task currently running on the
-		 * assigned CPU if our deadline is earlier.
+		 * Stop here if direct dispatch is not allowed in the
+		 * target node.
 		 */
-		if (!no_preempt && tctx->deadline < rq->curr->scx.dsq_vtime) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
-					   slice, enq_flags | SCX_ENQ_PREEMPT);
-			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-
-			return true;
-		}
+		if (!can_direct_dispatch(node))
+			return false;
 
 		/*
 		 * If local_pcpu is enabled always dispatch tasks that can
@@ -829,13 +826,6 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 
 			return true;
 		}
-
-		/*
-		 * Skip direct dispatch if the shared DSQ has tasks waiting
-		 * to prevent starvation.
-		 */
-		if (!local_pcpu && scx_bpf_dsq_nr_queued(node))
-			return false;
 
 		/*
 		 * If the task can only run on a single CPU and that CPU is

@@ -145,8 +145,8 @@ struct Opts {
 
     /// Disable preemption.
     ///
-    /// Never allow tasks to preempt others before their assigned time slice expires. This can help
-    /// to increase system throughput over responsiveness.
+    /// Never allow tasks to be directly dispatched. This can help to increase fairness
+    /// over responsiveness.
     #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
     no_preempt: bool,
 
