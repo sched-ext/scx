@@ -779,7 +779,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init_task, struct task_struct *p __arg_trusted
 	u64 now = scx_bpf_now();
 	task_ptr taskc;
 
-	taskc = (task_ptr)sdt_task_alloc(p);
+	taskc = (task_ptr)scx_task_alloc(p);
 	if (!taskc)
 		return -ENOMEM;
 
@@ -797,7 +797,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init_task, struct task_struct *p __arg_trusted
 
 	taskc->cpumask = scx_bitmap_alloc();
 	if (!taskc->cpumask) {
-		sdt_task_free(p);
+		scx_task_free(p);
 		return -ENOMEM;
 	}
 
@@ -811,7 +811,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init_task, struct task_struct *p __arg_trusted
 void BPF_STRUCT_OPS(wd40_exit_task, struct task_struct *p,
 		    struct scx_exit_task_args *args)
 {
-	sdt_task_free(p);
+	scx_task_free(p);
 }
 
 static s32 initialize_cpu(s32 cpu)
@@ -821,7 +821,7 @@ static s32 initialize_cpu(s32 cpu)
 	int perf;
 	u32 i;
 
-	sdt_subprog_init_arena();
+	scx_arena_subprog_init();
 
 	if (!pcpuc)
 		return -ENOENT;
@@ -857,7 +857,7 @@ int wd40_arena_setup(void)
 {
 	int ret, i;
 
-	ret = sdt_static_init(STATIC_ALLOC_PAGES_GRANULARITY);
+	ret = scx_static_init(STATIC_ALLOC_PAGES_GRANULARITY);
 	if (ret)
 		return ret;
 
@@ -886,7 +886,7 @@ int wd40_arena_setup(void)
 	if (ret)
 		return ret;
 
-	ret = sdt_task_init(sizeof(struct task_ctx));
+	ret = scx_task_init(sizeof(struct task_ctx));
 	if (ret)
 		return ret;
 

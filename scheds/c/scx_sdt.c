@@ -77,12 +77,12 @@ restart:
 		printf("\n");
 
 		printf("====ALLOCATION STATS====\n");
-		printf("chunk allocs=%llu\t", skel->bss->sdt_stats.chunk_allocs);
-		printf("data_allocs=%llu\n", skel->bss->sdt_stats.data_allocs);
-		printf("alloc_ops=%llu\t", skel->bss->sdt_stats.alloc_ops);
-		printf("free_ops=%llu\t", skel->bss->sdt_stats.free_ops);
-		printf("active_allocs=%llu\t", skel->bss->sdt_stats.active_allocs);
-		printf("arena_pages_used=%llu\t", skel->bss->sdt_stats.arena_pages_used);
+		printf("chunk allocs=%llu\t", skel->bss->alloc_stats.chunk_allocs);
+		printf("data_allocs=%llu\n", skel->bss->alloc_stats.data_allocs);
+		printf("alloc_ops=%llu\t", skel->bss->alloc_stats.alloc_ops);
+		printf("free_ops=%llu\t", skel->bss->alloc_stats.free_ops);
+		printf("active_allocs=%llu\t", skel->bss->alloc_stats.active_allocs);
+		printf("arena_pages_used=%llu\t", skel->bss->alloc_stats.arena_pages_used);
 		printf("\n\n");
 
 		fflush(stdout);

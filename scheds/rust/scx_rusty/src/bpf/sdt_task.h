@@ -72,7 +72,7 @@ struct sdt_chunk {
  * to drop the lock to allocate pages from the arena in the middle of the
  * top-level alloc. This in turn prevents races and simplifies the code.
  */
-struct scx_alloc_stack {
+struct sdt_alloc_stack {
 	__u64 idx;
 	void __arena	*stack[SDT_TASK_ALLOC_STACK_MAX];
 };
@@ -84,7 +84,7 @@ struct sdt_pool {
 	__u64		idx;
 };
 
-struct scx_alloc_stats {
+struct sdt_stats {
 	__u64		chunk_allocs;
 	__u64		data_allocs;
 	__u64		alloc_ops;
@@ -93,12 +93,12 @@ struct scx_alloc_stats {
 	__u64		arena_pages_used;
 };
 
-struct scx_allocator {
+struct sdt_allocator {
 	struct sdt_pool	pool;
 	sdt_desc_t	*root;
 };
 
-struct scx_static {
+struct sdt_static {
 	size_t max_alloc_bytes;
 	void __arena *memory;
 	size_t off;
@@ -106,19 +106,19 @@ struct scx_static {
 
 #ifdef __BPF__
 
-void __arena *scx_task_data(struct task_struct *p);
-int scx_task_init(__u64 data_size);
-void __arena *scx_task_alloc(struct task_struct *p);
-void scx_task_free(struct task_struct *p);
-void scx_arena_subprog_init(void);
+void __arena *sdt_task_data(struct task_struct *p);
+int sdt_task_init(__u64 data_size);
+void __arena *sdt_task_alloc(struct task_struct *p);
+void sdt_task_free(struct task_struct *p);
+void sdt_subprog_init_arena(void);
 
-int scx_alloc_init(struct scx_allocator *alloc, __u64 data_size);
-u64 scx_alloc_internal(struct scx_allocator *alloc);
-int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx);
+int sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size);
+u64 sdt_alloc_internal(struct sdt_allocator *alloc);
+int sdt_free_idx(struct sdt_allocator *alloc, __u64 idx);
 
-#define scx_alloc(alloc) ((struct sdt_data __arena *)scx_alloc_internal((alloc)))
+#define sdt_alloc(alloc) ((struct sdt_data __arena *)sdt_alloc_internal((alloc)))
 
-void __arena *scx_static_alloc(size_t bytes);
-int scx_static_init(size_t max_alloc_pages);
+void __arena *sdt_static_alloc(size_t bytes);
+int sdt_static_init(size_t max_alloc_pages);
 
 #endif /* __BPF__ */

@@ -4,7 +4,7 @@
 #include <lib/cpumask.h>
 #include <lib/percpu.h>
 
-static struct sdt_allocator scx_bitmap_allocator;
+static struct scx_allocator scx_bitmap_allocator;
 size_t mask_size;
 
 __weak
@@ -12,7 +12,7 @@ int scx_bitmap_init(__u64 total_mask_size)
 {
 	mask_size = div_round_up(total_mask_size, 8);
 
-	return sdt_alloc_init(&scx_bitmap_allocator, mask_size * 8 + sizeof(union sdt_id));
+	return scx_alloc_init(&scx_bitmap_allocator, mask_size * 8 + sizeof(union sdt_id));
 }
 
 __weak
@@ -22,7 +22,7 @@ u64 scx_bitmap_alloc_internal(void)
 	scx_bitmap_t mask;
 	int i;
 
-	data = sdt_alloc(&scx_bitmap_allocator);
+	data = scx_alloc(&scx_bitmap_allocator);
 	if (unlikely(!data))
 		return (u64)(NULL);
 
@@ -43,9 +43,9 @@ u64 scx_bitmap_alloc_internal(void)
 __weak
 int scx_bitmap_free(scx_bitmap_t __arg_arena mask)
 {
-	sdt_subprog_init_arena();
+	scx_arena_subprog_init();
 
-	sdt_free_idx(&scx_bitmap_allocator, mask->tid.idx);
+	scx_alloc_free_idx(&scx_bitmap_allocator, mask->tid.idx);
 	return 0;
 }
 

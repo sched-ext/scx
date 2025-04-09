@@ -898,7 +898,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "crossbeam",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats_derive"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -924,7 +924,7 @@ dependencies = [
 
 [[package]]
 name = "scx_utils"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "scx_wd40"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "chrono",

@@ -43,7 +43,7 @@ s32 BPF_STRUCT_OPS(sdt_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake
 	bool is_idle = false;
 	s32 cpu;
 
-	stats = sdt_task_data(p);
+	stats = scx_task_data(p);
 	if (!stats) {
 		scx_bpf_error("%s: no stats for pid %d", __func__, p->pid);
 		return 0;
@@ -64,7 +64,7 @@ void BPF_STRUCT_OPS(sdt_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct scx_stats __arena *stats;
 
-	stats = sdt_task_data(p);
+	stats = scx_task_data(p);
 	if (!stats) {
 		scx_bpf_error("%s: no stats for pid %d", __func__, p->pid);
 		return;
@@ -85,7 +85,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init_task, struct task_struct *p,
 {
 	struct scx_stats __arena *stats;
 
-	stats = sdt_task_alloc(p);
+	stats = scx_task_alloc(p);
 	if (!stats) {
 		scx_bpf_error("arena allocator out of memory");
 		return -ENOMEM;
@@ -103,7 +103,7 @@ void BPF_STRUCT_OPS(sdt_exit_task, struct task_struct *p,
 {
 	struct scx_stats __arena *stats;
 
-	stats = sdt_task_data(p);
+	stats = scx_task_data(p);
 	if (!stats) {
 		scx_bpf_error("%s: no stats for pid %d", __func__, p->pid);
 		return;
@@ -112,14 +112,14 @@ void BPF_STRUCT_OPS(sdt_exit_task, struct task_struct *p,
 	stat_inc_exit(stats);
 	scx_stat_global_update(stats);
 
-	sdt_task_free(p);
+	scx_task_free(p);
 }
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(sdt_init)
 {
 	int ret;
 
-	ret = sdt_task_init(sizeof(struct scx_stats));
+	ret = scx_task_init(sizeof(struct scx_stats));
 	if (ret < 0) {
 		scx_bpf_error("%s: failed with %d", __func__, ret);
 		return ret;
