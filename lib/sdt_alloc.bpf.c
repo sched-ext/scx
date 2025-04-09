@@ -658,6 +658,8 @@ void __arena *scx_static_alloc(size_t bytes)
 	ptr = (void __arena *)((__u64) scx_static.memory + scx_static.off);
 	scx_static.off += bytes;
 
+	bpf_spin_unlock(&alloc_lock);
+
 	return ptr;
 }
 
