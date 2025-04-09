@@ -22,7 +22,7 @@ struct {
 #endif
 } arena __weak SEC(".maps");
 
-struct sdt_alloc_stack __arena *prealloc_stack;
+struct scx_alloc_stack __arena *prealloc_stack;
 
 /*
  * Necessary for cond_break/can_loop's semantics. According to kernel commit
@@ -124,7 +124,7 @@ static SDT_TASK_FN_ATTRS __u64 sdt_chunk_find_empty(sdt_desc_t *desc)
 }
 
 static SDT_TASK_FN_ATTRS
-void __arena *sdt_alloc_stack_pop(struct sdt_alloc_stack __arena *stack)
+void __arena *scx_alloc_stack_pop(struct scx_alloc_stack __arena *stack)
 {
 	void __arena *slab;
 
@@ -140,7 +140,7 @@ void __arena *sdt_alloc_stack_pop(struct sdt_alloc_stack __arena *stack)
 }
 
 static SDT_TASK_FN_ATTRS
-int sdt_alloc_stack(struct sdt_alloc_stack __arena *stack)
+int scx_alloc_stack(struct scx_alloc_stack __arena *stack)
 {
 	void __arena *slab;
 
@@ -178,7 +178,7 @@ int sdt_alloc_stack(struct sdt_alloc_stack __arena *stack)
 }
 
 static __noinline
-int sdt_alloc_attempt(struct sdt_alloc_stack __arena *stack)
+int scx_alloc_attempt(struct scx_alloc_stack __arena *stack)
 {
 	int i;
 
@@ -191,7 +191,7 @@ int sdt_alloc_attempt(struct sdt_alloc_stack __arena *stack)
 	 * and counting down with every iteration.
 	 */
 	for (i = zero; i < SDT_TASK_ALLOC_ATTEMPTS && can_loop; i++) {
-		if (sdt_alloc_stack(stack) == 0)
+		if (scx_alloc_stack(stack) == 0)
 			return 0;
 	}
 
@@ -200,8 +200,8 @@ int sdt_alloc_attempt(struct sdt_alloc_stack __arena *stack)
 
 /* Allocate element from the pool. Must be called with a then pool lock held. */
 static SDT_TASK_FN_ATTRS
-void __arena *sdt_alloc_from_pool(struct sdt_pool *pool,
-	struct sdt_alloc_stack __arena *stack)
+void __arena *scx_alloc_from_pool(struct sdt_pool *pool,
+	struct scx_alloc_stack __arena *stack)
 {
 	__u64 elem_size, max_elems;
 	void __arena *slab;
@@ -216,7 +216,7 @@ void __arena *sdt_alloc_from_pool(struct sdt_pool *pool,
 
 	/* If the chunk is spent, get a new one. */
 	if (pool->idx >= max_elems) {
-		slab = sdt_alloc_stack_pop(stack);
+		slab = scx_alloc_stack_pop(stack);
 		pool->slab = slab;
 		pool->idx = 0;
 	}
@@ -229,7 +229,7 @@ void __arena *sdt_alloc_from_pool(struct sdt_pool *pool,
 
 /* Allocate element from the pool. Must be called with a then pool lock held. */
 static SDT_TASK_FN_ATTRS
-void __arena *sdt_alloc_from_pool_sleepable(struct sdt_pool *pool)
+void __arena *scx_alloc_from_pool_sleepable(struct sdt_pool *pool)
 {
 	__u64 elem_size, max_elems;
 	void __arena *slab;
@@ -254,14 +254,14 @@ void __arena *sdt_alloc_from_pool_sleepable(struct sdt_pool *pool)
 
 /* Alloc desc and associated chunk. Called with the task spinlock held. */
 static SDT_TASK_FN_ATTRS
-sdt_desc_t *sdt_alloc_chunk(struct sdt_alloc_stack __arena *stack)
+sdt_desc_t *scx_alloc_chunk(struct scx_alloc_stack __arena *stack)
 {
 	struct sdt_chunk __arena *chunk;
 	sdt_desc_t *desc;
 	sdt_desc_t *out;
 
-	chunk = sdt_alloc_from_pool(&sdt_chunk_pool, stack);
-	desc = sdt_alloc_from_pool(&sdt_desc_pool, stack);
+	chunk = scx_alloc_from_pool(&sdt_chunk_pool, stack);
+	desc = scx_alloc_from_pool(&sdt_desc_pool, stack);
 
 	out = desc;
 
@@ -295,7 +295,7 @@ static SDT_TASK_FN_ATTRS int sdt_pool_set_size(struct sdt_pool *pool, __u64 data
 
 /* initialize the whole thing, maybe misnomer */
 __hidden int
-sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size)
+scx_alloc_init(struct scx_allocator *alloc, __u64 data_size)
 {
 	size_t min_chunk_size;
 	int ret;
@@ -329,11 +329,11 @@ sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size)
 		return -ENOMEM;
 
 	/* On success, returns with the lock taken. */
-	ret = sdt_alloc_attempt(prealloc_stack);
+	ret = scx_alloc_attempt(prealloc_stack);
 	if (ret != 0)
 		return ret;
 
-	alloc->root = sdt_alloc_chunk(prealloc_stack);
+	alloc->root = scx_alloc_chunk(prealloc_stack);
 
 	bpf_spin_unlock(&sdt_lock);
 
@@ -386,7 +386,7 @@ int sdt_mark_nodes_avail(sdt_desc_t *lv_desc[SDT_TASK_LEVELS], __u64 lv_pos[SDT_
 }
 
 __weak
-int sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
+int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx)
 {
 	const __u64 mask = (1 << SDT_TASK_ENTS_PER_PAGE_SHIFT) - 1;
 	sdt_desc_t *lv_desc[SDT_TASK_LEVELS];
@@ -478,7 +478,7 @@ int sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
  */
 static SDT_TASK_FN_ATTRS
 sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
-	struct sdt_alloc_stack __arena *stack,
+	struct scx_alloc_stack __arena *stack,
 	__u64 *idxp)
 {
 	sdt_desc_t *lv_desc[SDT_TASK_LEVELS];
@@ -515,7 +515,7 @@ sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
 		desc_children = (sdt_desc_t * __arena *)chunk->descs;
 		desc = desc_children[pos];
 		if (!desc) {
-			desc = sdt_alloc_chunk(stack);
+			desc = scx_alloc_chunk(stack);
 			desc_children[pos] = desc;
 		}
 	}
@@ -540,7 +540,7 @@ sdt_desc_t * sdt_find_empty(sdt_desc_t *desc,
 }
 
 static SDT_TASK_FN_ATTRS
-void sdt_alloc_finish(struct sdt_data __arena *data, __u64 idx)
+void scx_alloc_finish(struct sdt_data __arena *data, __u64 idx)
 {
 	bpf_spin_lock(&sdt_lock);
 
@@ -555,9 +555,9 @@ void sdt_alloc_finish(struct sdt_data __arena *data, __u64 idx)
 }
 
 __weak
-u64 sdt_alloc_internal(struct sdt_allocator *alloc)
+u64 scx_alloc_internal(struct scx_allocator *alloc)
 {
-	struct sdt_alloc_stack __arena *stack = prealloc_stack;
+	struct scx_alloc_stack __arena *stack = prealloc_stack;
 	struct sdt_data __arena *data = NULL;
 	struct sdt_chunk __arena *chunk;
 	sdt_desc_t *desc;
@@ -568,7 +568,7 @@ u64 sdt_alloc_internal(struct sdt_allocator *alloc)
 		return (u64)NULL;
 
 	/* On success, call returns with the lock taken. */
-	ret = sdt_alloc_attempt(stack);
+	ret = scx_alloc_attempt(stack);
 	if (ret != 0)
 		return (u64)NULL;
 
@@ -588,9 +588,9 @@ u64 sdt_alloc_internal(struct sdt_allocator *alloc)
 	pos = idx & (SDT_TASK_ENTS_PER_CHUNK - 1);
 	data = chunk->data[pos];
 	if (!data) {
-		data = sdt_alloc_from_pool_sleepable(&alloc->pool);
+		data = scx_alloc_from_pool_sleepable(&alloc->pool);
 		if (!data) {
-			sdt_free_idx(alloc, idx);
+			scx_alloc_free_idx(alloc, idx);
 			bpf_printk("%s: failed to allocate data from pool", __func__);
 			return (u64)NULL;
 		}
@@ -598,7 +598,7 @@ u64 sdt_alloc_internal(struct sdt_allocator *alloc)
 
 	chunk->data[pos] = data;
 
-	sdt_alloc_finish(data, idx);
+	scx_alloc_finish(data, idx);
 
 	return (u64)data;
 }

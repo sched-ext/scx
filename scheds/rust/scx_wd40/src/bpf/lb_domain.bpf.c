@@ -37,12 +37,12 @@ struct {
 volatile scx_bitmap_t node_data[MAX_NUMA_NODES];
 
 volatile dom_ptr dom_ctxs[MAX_DOMS];
-struct sdt_allocator lb_domain_allocator;
+struct scx_allocator lb_domain_allocator;
 
 __weak
 int lb_domain_init(void)
 {
-	return sdt_alloc_init(&lb_domain_allocator, sizeof(struct dom_ctx));
+	return scx_alloc_init(&lb_domain_allocator, sizeof(struct dom_ctx));
 }
 
 __hidden
@@ -51,7 +51,7 @@ dom_ptr lb_domain_alloc(u32 dom_id)
 	struct sdt_data __arena *data = NULL;
 	dom_ptr domc;
 
-	data = sdt_alloc(&lb_domain_allocator);
+	data = scx_alloc(&lb_domain_allocator);
 
 	domc = (dom_ptr)data->payload;
 	domc->tid = data->tid;
@@ -89,7 +89,7 @@ void lb_domain_free(dom_ptr domc)
 	scx_bitmap_free(domc->direct_greedy_cpumask);
 	scx_bitmap_free(domc->cpumask);
 
-	sdt_free_idx(&lb_domain_allocator, domc->tid.idx);
+	scx_alloc_free_idx(&lb_domain_allocator, domc->tid.idx);
 }
 
 __hidden

@@ -25,7 +25,7 @@ struct {
 	__type(value, struct sdt_task_map_val);
 } sdt_task_map SEC(".maps");
 
-struct sdt_allocator sdt_task_allocator;
+struct scx_allocator sdt_task_allocator;
 
 __hidden
 void __arena *sdt_task_alloc(struct task_struct *p)
@@ -38,7 +38,7 @@ void __arena *sdt_task_alloc(struct task_struct *p)
 	if (!mval)
 		return NULL;
 
-	data = sdt_alloc(&sdt_task_allocator);
+	data = scx_alloc(&sdt_task_allocator);
 
 	mval->tid = data->tid;
 	mval->tptr = (__u64) p;
@@ -50,7 +50,7 @@ void __arena *sdt_task_alloc(struct task_struct *p)
 __hidden
 int sdt_task_init(__u64 data_size)
 {
-	return sdt_alloc_init(&sdt_task_allocator, data_size);
+	return scx_alloc_init(&sdt_task_allocator, data_size);
 }
 
 __hidden
@@ -81,7 +81,7 @@ void sdt_task_free(struct task_struct *p)
 	if (!mval)
 		return;
 
-	sdt_free_idx(&sdt_task_allocator, mval->tid.idx);
+	scx_alloc_free_idx(&sdt_task_allocator, mval->tid.idx);
 	mval->data = NULL;
 	mval->tptr = 0;
 }

@@ -72,7 +72,7 @@ struct sdt_chunk {
  * to drop the lock to allocate pages from the arena in the middle of the
  * top-level alloc. This in turn prevents races and simplifies the code.
  */
-struct sdt_alloc_stack {
+struct scx_alloc_stack {
 	__u64 idx;
 	void __arena	*stack[SDT_TASK_ALLOC_STACK_MAX];
 };
@@ -93,7 +93,7 @@ struct sdt_stats {
 	__u64		arena_pages_used;
 };
 
-struct sdt_allocator {
+struct scx_allocator {
 	struct sdt_pool	pool;
 	sdt_desc_t	*root;
 };
@@ -112,11 +112,11 @@ void __arena *sdt_task_alloc(struct task_struct *p);
 void sdt_task_free(struct task_struct *p);
 void sdt_subprog_init_arena(void);
 
-int sdt_alloc_init(struct sdt_allocator *alloc, __u64 data_size);
-u64 sdt_alloc_internal(struct sdt_allocator *alloc);
-int sdt_free_idx(struct sdt_allocator *alloc, __u64 idx);
+int scx_alloc_init(struct scx_allocator *alloc, __u64 data_size);
+u64 scx_alloc_internal(struct scx_allocator *alloc);
+int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx);
 
-#define sdt_alloc(alloc) ((struct sdt_data __arena *)sdt_alloc_internal((alloc)))
+#define scx_alloc(alloc) ((struct sdt_data __arena *)scx_alloc_internal((alloc)))
 
 void __arena *scx_static_alloc(size_t bytes);
 int scx_static_init(size_t max_alloc_pages);
