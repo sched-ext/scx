@@ -857,7 +857,7 @@ int wd40_arena_setup(void)
 {
 	int ret, i;
 
-	ret = sdt_static_init(STATIC_ALLOC_PAGES_GRANULARITY);
+	ret = scx_static_init(STATIC_ALLOC_PAGES_GRANULARITY);
 	if (ret)
 		return ret;
 

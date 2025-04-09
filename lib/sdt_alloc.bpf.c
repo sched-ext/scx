@@ -612,19 +612,19 @@ u64 sdt_alloc_internal(struct sdt_allocator *alloc)
  * having to define an allocator for each type.
  */
 
-struct sdt_static sdt_static;
+struct scx_static scx_static;
 
 __hidden
-void __arena *sdt_static_alloc(size_t bytes)
+void __arena *scx_static_alloc(size_t bytes)
 {
 	void __arena *memory, *old;
 	void __arena *ptr;
 
 	bpf_spin_lock(&sdt_lock);
-	if (bytes > sdt_static.max_alloc_bytes) {
+	if (bytes > scx_static.max_alloc_bytes) {
 		bpf_spin_unlock(&sdt_lock);
 		scx_bpf_error("invalid request %ld, max is %ld\n", bytes,
-			      sdt_static.max_alloc_bytes);
+			      scx_static.max_alloc_bytes);
 		return NULL;
 	}
 
@@ -634,8 +634,8 @@ void __arena *sdt_static_alloc(size_t bytes)
 	 * size, so it does not attempt to alleviate memory
 	 * fragmentation.
 	 */
-	if (sdt_static.off + bytes  > sdt_static.max_alloc_bytes) {
-		old = sdt_static.memory;
+	if (scx_static.off + bytes  > scx_static.max_alloc_bytes) {
+		old = scx_static.memory;
 
 		bpf_spin_unlock(&sdt_lock);
 
@@ -645,31 +645,31 @@ void __arena *sdt_static_alloc(size_t bytes)
 		 */
 
 		memory = bpf_arena_alloc_pages(&arena, NULL,
-					       sdt_static.max_alloc_bytes / PAGE_SIZE,
+					       scx_static.max_alloc_bytes / PAGE_SIZE,
 					       NUMA_NO_NODE, 0);
-		if (!sdt_static.memory)
+		if (!scx_static.memory)
 			return NULL;
 
 		bpf_spin_lock(&sdt_lock);
 
 		/* Error out if we raced with another allocation. */
-		if (sdt_static.memory != old) {
+		if (scx_static.memory != old) {
 			bpf_spin_unlock(&sdt_lock);
-			bpf_arena_free_pages(&arena, memory, sdt_static.max_alloc_bytes);
+			bpf_arena_free_pages(&arena, memory, scx_static.max_alloc_bytes);
 
 			scx_bpf_error("concurrent static memory allocations unsupported");
 			return NULL;
 		}
 	}
 
-	ptr = (void __arena *)((__u64) sdt_static.memory + sdt_static.off);
-	sdt_static.off += bytes;
+	ptr = (void __arena *)((__u64) scx_static.memory + scx_static.off);
+	scx_static.off += bytes;
 
 	return ptr;
 }
 
 __weak
-int sdt_static_init(size_t alloc_pages)
+int scx_static_init(size_t alloc_pages)
 {
 	size_t max_bytes = alloc_pages * PAGE_SIZE;
 	void __arena *memory;
@@ -679,7 +679,7 @@ int sdt_static_init(size_t alloc_pages)
 		return -ENOMEM;
 
 	bpf_spin_lock(&sdt_lock);
-	sdt_static = (struct sdt_static) {
+	scx_static = (struct scx_static) {
 		.max_alloc_bytes = max_bytes,
 		.off = 0,
 		.memory = memory,

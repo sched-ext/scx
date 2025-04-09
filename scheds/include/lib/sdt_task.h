@@ -98,7 +98,7 @@ struct sdt_allocator {
 	sdt_desc_t	*root;
 };
 
-struct sdt_static {
+struct scx_static {
 	size_t max_alloc_bytes;
 	void __arena *memory;
 	size_t off;
@@ -118,7 +118,7 @@ int sdt_free_idx(struct sdt_allocator *alloc, __u64 idx);
 
 #define sdt_alloc(alloc) ((struct sdt_data __arena *)sdt_alloc_internal((alloc)))
 
-void __arena *sdt_static_alloc(size_t bytes);
-int sdt_static_init(size_t max_alloc_pages);
+void __arena *scx_static_alloc(size_t bytes);
+int scx_static_init(size_t max_alloc_pages);
 
 #endif /* __BPF__ */
