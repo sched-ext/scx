@@ -6,7 +6,8 @@
  */
 
 #include <scx/common.bpf.h>
-#include <lib/sdt_task.h>
+
+#include "sdt_task.h"
 
 /*
  * Task BPF map entry recording the task's assigned ID and pointing to the data

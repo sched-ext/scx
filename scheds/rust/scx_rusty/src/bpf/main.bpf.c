@@ -43,9 +43,9 @@
 #else
 #include <scx/common.bpf.h>
 #include <scx/ravg_impl.bpf.h>
-#include <lib/sdt_task.h>
 #endif
 
+#include "sdt_task.h"
 #include "intf.h"
 #include "types.h"
 #include "lb_domain.h"

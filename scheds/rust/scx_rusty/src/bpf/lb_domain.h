@@ -1,6 +1,6 @@
 #include <scx/common.bpf.h>
 
-#include <lib/sdt_task.h>
+#include "sdt_task.h"
 
 struct lb_domain {
 	union sdt_id		tid;

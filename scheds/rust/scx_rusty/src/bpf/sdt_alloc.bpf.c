@@ -6,7 +6,8 @@
  */
 
 #include <scx/common.bpf.h>
-#include <lib/sdt_task.h>
+
+#include "sdt_task.h"
 
 char _license[] SEC("license") = "GPL";
 
