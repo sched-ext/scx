@@ -1040,8 +1040,8 @@ void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
 	taskc->all_cpus = p->cpus_ptr == &p->cpus_mask && p->nr_cpus_allowed == nr_cpus;
 }
 
-s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init_task, struct task_struct *p,
-			     struct scx_init_task_args *args)
+static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
+					       struct scx_init_task_args *args)
 {
 	struct bpf_cpumask *cpumask;
 	struct task_ctx *taskc;
@@ -1519,6 +1519,12 @@ void BPF_STRUCT_OPS(p2dq_dispatch, s32 cpu, struct task_struct *prev)
 s32 BPF_STRUCT_OPS(p2dq_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	return p2dq_select_cpu_impl(p, prev_cpu, wake_flags);
+}
+
+s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init_task, struct task_struct *p,
+			     struct scx_init_task_args *args)
+{
+	return p2dq_init_task_impl(p, args);
 }
 
 SCX_OPS_DEFINE(p2dq,

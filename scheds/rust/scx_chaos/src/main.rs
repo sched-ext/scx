@@ -3,6 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 use scx_chaos::Builder;
+use scx_chaos::RequiresPpid;
 use scx_chaos::Scheduler;
 use scx_chaos::Trait;
 
@@ -11,6 +12,7 @@ use scx_p2dq::SchedulerOpts as P2dqOpts;
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use log::info;
+use nix::unistd::Pid;
 
 use std::panic;
 use std::pin::Pin;
@@ -62,6 +64,11 @@ pub struct Args {
     #[clap(long, action = clap::ArgAction::SetTrue, requires = "args")]
     pub repeat_success: bool,
 
+    /// Whether to focus on the named task and its children instead of the entire system. Only
+    /// takes effect if pid or args provided.
+    #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
+    pub ppid_targeting: bool,
+
     /// Enable verbose output, including libbpf details. Specify multiple
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
@@ -80,7 +87,7 @@ pub struct Args {
         help_heading = "Test Command",
         conflicts_with = "args"
     )]
-    pub pid: Option<u64>,
+    pub pid: Option<libc::pid_t>,
 
     /// Program to run under the chaos scheduler
     ///
@@ -129,10 +136,23 @@ impl<'a> Iterator for BuilderIterator<'a> {
                 });
             };
 
+            let requires_ppid = if self.args.ppid_targeting {
+                if let Some(p) = self.args.pid {
+                    Some(RequiresPpid::IncludeParent(Pid::from_raw(p)))
+                } else if !self.args.args.is_empty() {
+                    Some(RequiresPpid::ExcludeParent(Pid::this()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             Some(Builder {
                 traits,
                 verbose: self.args.verbose,
                 p2dq_opts: &self.args.p2dq,
+                requires_ppid,
             })
         }
     }
