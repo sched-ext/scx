@@ -57,6 +57,10 @@ pub struct SchedulerOpts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub keep_running: bool,
 
+    /// Minimum load for load balancing on the wakeup path, 0 to disable.
+    #[clap(long, default_value = "0", value_parser = clap::value_parser!(u64).range(0..99))]
+    pub wakeup_lb_busy: u64,
+
     /// Set idle QoS resume latency based in microseconds.
     #[clap(long)]
     pub idle_resume_us: Option<u32>,
@@ -176,6 +180,7 @@ macro_rules! init_open_skel {
             $skel.maps.rodata_data.max_dsq_pick2 = opts.max_dsq_pick2;
             $skel.maps.rodata_data.smt_enabled = $crate::TOPO.smt_enabled;
             $skel.maps.rodata_data.select_idle_in_enqueue = true;
+            $skel.maps.rodata_data.wakeup_lb_busy = opts.wakeup_lb_busy;
 
             Ok(())
         }
