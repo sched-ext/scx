@@ -38,12 +38,18 @@ volatile scx_bitmap_t node_data[MAX_NUMA_NODES];
 
 volatile dom_ptr dom_ctxs[MAX_DOMS];
 struct scx_stk lb_domain_allocator;
+private(LBDOMAIN_BUDDY) struct scx_buddy buddy;
 
 #define LBALLOC_PAGES_PER_ALLOC (16)
 
 __weak
 int lb_domain_init(void)
 {
+	if (scx_buddy_init(&buddy, PAGE_SIZE)) {
+		scx_bpf_error("failed to initialize buddy allocator");
+		bpf_printk("failed to initialize buddy allocator");
+	}
+
 	return scx_stk_init(&lb_domain_allocator,
 		sizeof(struct dom_ctx),
 		LBALLOC_PAGES_PER_ALLOC);
