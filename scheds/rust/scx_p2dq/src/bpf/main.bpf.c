@@ -555,14 +555,21 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		}
 	}
 
-	if (nr_llcs > 1 &&
-	    wakeup_lb_busy > 0 &&
-	    eager_load_balance) {
+	if (eager_load_balance && wakeup_lb_busy > 0 && nr_llcs > 1) {
 		cpu = pick_two_cpu(llcx, taskc, is_idle);
 		if (cpu >= 0) {
 			stat_inc(P2DQ_STAT_SELECT_PICK2);
 			goto found_cpu;
 		}
+	}
+
+	// First check if last CPU is idle
+	if (llcx->cpumask &&
+	    bpf_cpumask_test_cpu(prev_cpu, cast_mask(llcx->cpumask)) &&
+	    bpf_cpumask_test_cpu(prev_cpu, (smt_enabled && !interactive) ? idle_smtmask : idle_cpumask)) {
+		cpu = prev_cpu;
+		*is_idle = true;
+		goto found_cpu;
 	}
 
 	if (has_little_cores) {
@@ -581,17 +588,9 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		}
 	}
 
-	// First check if last CPU is idle
-	if (llcx->cpumask &&
-	    bpf_cpumask_test_cpu(prev_cpu, cast_mask(llcx->cpumask)) &&
-	    bpf_cpumask_test_cpu(prev_cpu, smt_enabled ? idle_smtmask : idle_cpumask)) {
-		cpu = prev_cpu;
-		*is_idle = true;
-		goto found_cpu;
-	}
-
 	// Next try in the local LLC
-	if (llcx->cpumask &&
+	if (!interactive &&
+	    llcx->cpumask &&
 	    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask),
 					 SCX_PICK_IDLE_CORE)) >= 0) {
 		*is_idle = true;
