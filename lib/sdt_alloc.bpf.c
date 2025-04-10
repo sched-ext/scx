@@ -945,7 +945,7 @@ scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
 	if (!chunk)
 		return NULL;
 
-	/* 
+	/*
 	 * Initialize the chunk by carving out the first page to hold the metadata struct above,
 	 * then dumping the rest of the pages into the allocator.
 	 */
@@ -1108,33 +1108,81 @@ u64 scx_buddy_alloc_internal(struct scx_buddy *buddy, size_t size)
 	return address;
 }
 
+/*
+ * XXX Hacky, to be cleaned. Sizes are mostly hardcoded and need to be adjusted
+ * when we adapt the allocator for small (16 byte and up) allocations.
+ */
 __weak
-void scx_buddy_free(struct scx_buddy *buddy, size_t free)
+void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 {
-	/* Find the buddy chunk we are freeing from:
-	 *	- Go through the list of chunks.
-	 *	- For each chunk, check if the top bits from 19 on (12 (page) + 7 (order) )are identical.
-	 *	- If so, we found our chunk.
-	 */
-	/* 
-	 * Find the right header by subtracting the address from the beginning of the data area, then dividing
-	 * by the minimum allocation size. We now found our header.
-	 */
-	/* Mark the header as free and of order 0. Do not add it to any linked list yet. */
-	/*
-	 *
-	 * Recursively, until we have no free buddy or the entire chunk is free:
-	 *
-	 * Find the buddy header:
-	 *	- Get the header offset, flip the order bit, then use the result to retrieve the buddy header.
-	 *	- If not free, we are done.
-	 *	- Otherwise, both are free. Remove both headers from the order linked list.
-	 *	- Mark both as of order + 1
-	 *	- Have the new header be the one in the smallest offset of the two (Doing so recursively 
-	 *	ensures all low bits are 0).
-	 */
-	/*
-	 * Add the header to the right order offset. If the entire chunk is free, free it back to the 
-	 * allocation stack.
-	 */
+	scx_buddy_header_t *header, *buddy_header, *tmp_header;
+	scx_buddy_chunk_t *chunk, *target_chunk;
+	u64 mib_mask = ((1ULL << 20) - 1);
+	u64 index, buddy_index;
+	int order;
+
+	if (addr & ((1ULL << 12) - 1)) {
+		scx_bpf_error("Freeing non-page aligned address %llx", addr);
+		return;
+	}
+
+	bpf_spin_lock(&buddy->lock);
+
+	/* Align to a 1 MiB boundary. */
+	target_chunk = (void __arena *)(addr & ~mib_mask);
+
+	/* XXX Only necessary for debugging. */
+	for (chunk = buddy->first_chunk; chunk != NULL && can_loop; chunk = chunk->next) {
+		if (chunk == target_chunk)
+			break;
+	}
+
+	if (chunk == NULL) {
+		bpf_spin_unlock(&buddy->lock);
+		scx_bpf_error("could not find chunk for address %llx", addr);
+	}
+
+	/* Get the page index. */
+	index = (addr & mib_mask) >> 12;
+	header = &chunk->headers[index];
+
+	bpf_for(order, header->order, SCX_BUDDY_CHUNK_ORDERS) {
+		buddy_index = index ^= 1 << order;
+		buddy_header = &chunk->headers[buddy_index];
+
+		/* Check if the buddy is not in the free list. */
+		if (chunk->order_indices[order] != buddy_index &&
+		    buddy_header->prev_index == SCX_BUDDY_CHUNK_ITEMS &&
+		    buddy_header->next_index == SCX_BUDDY_CHUNK_ITEMS)
+			break;
+
+		/* Pop off the list head if necessary. */
+		if (chunk->order_indices[order] == buddy_index)
+			chunk->order_indices[order] = buddy_header->next_index;
+
+		/* Pop */
+		if (buddy_header->prev_index != SCX_BUDDY_CHUNK_ITEMS) {
+			tmp_header = &chunk->headers[buddy_header->prev_index];
+			tmp_header->next_index = buddy_header->next_index;
+			buddy_header->next_index = SCX_BUDDY_CHUNK_ITEMS;
+		}
+
+		if (buddy_header->next_index != SCX_BUDDY_CHUNK_ITEMS) {
+			tmp_header = &chunk->headers[buddy_header->next_index];
+			tmp_header->prev_index = buddy_header->prev_index;
+			buddy_header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
+		}
+
+		buddy_header->order = SCX_BUDDY_CHUNK_ORDERS;
+
+		index = index < buddy_index ? index : buddy_index;
+
+		header = &chunk->headers[index];
+		header->order = order + 1;
+	}
+
+	header->next_index = chunk->order_indices[header->order];
+	chunk->order_indices[header->order] = index;
+
+	bpf_spin_unlock(&buddy->lock);
 }
