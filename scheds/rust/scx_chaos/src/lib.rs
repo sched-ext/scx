@@ -18,6 +18,7 @@ use scx_utils::uei_report;
 use anyhow::Result;
 use libbpf_rs::OpenObject;
 use log::debug;
+use nix::unistd::Pid;
 
 use std::marker::PhantomPinned;
 use std::mem::MaybeUninit;
@@ -37,11 +38,18 @@ pub enum Trait {
 }
 
 #[derive(Debug)]
+pub enum RequiresPpid {
+    ExcludeParent(Pid),
+    IncludeParent(Pid),
+}
+
+#[derive(Debug)]
 /// State required to build a Scheduler configuration.
 pub struct Builder<'a> {
     pub traits: Vec<Trait>,
     pub verbose: u8,
     pub p2dq_opts: &'a P2dqOpts,
+    pub requires_ppid: Option<RequiresPpid>,
 }
 
 pub struct Scheduler {
@@ -87,7 +95,7 @@ impl Scheduler {
 impl<'a> TryFrom<Builder<'a>> for Pin<Box<Scheduler>> {
     type Error = anyhow::Error;
 
-    fn try_from(builder: Builder<'a>) -> Result<Pin<Box<Scheduler>>> {
+    fn try_from(b: Builder<'a>) -> Result<Pin<Box<Scheduler>>> {
         let mut out = Box::<Scheduler>::new_uninit();
 
         let open_object = &mut unsafe {
@@ -108,17 +116,31 @@ impl<'a> TryFrom<Builder<'a>> for Pin<Box<Scheduler>> {
         };
 
         let mut skel_builder = bpf_skel::BpfSkelBuilder::default();
-        skel_builder.obj_builder.debug(builder.verbose > 1);
+        skel_builder.obj_builder.debug(b.verbose > 1);
         init_libbpf_logging(None);
 
         let mut open_skel = scx_ops_open!(skel_builder, open_object, chaos)?;
-        scx_p2dq::init_open_skel!(&mut open_skel, builder.p2dq_opts, builder.verbose)?;
+        scx_p2dq::init_open_skel!(&mut open_skel, b.p2dq_opts, b.verbose)?;
 
         // TODO: figure out how to abstract waking a CPU in enqueue properly, but for now disable
         // this codepath
         open_skel.maps.rodata_data.select_idle_in_enqueue = false;
 
-        for tr in builder.traits {
+        match b.requires_ppid {
+            None => {
+                open_skel.maps.rodata_data.ppid_targeting_ppid = -1;
+            }
+            Some(RequiresPpid::ExcludeParent(p)) => {
+                open_skel.maps.rodata_data.ppid_targeting_inclusive = false;
+                open_skel.maps.rodata_data.ppid_targeting_ppid = p.as_raw();
+            }
+            Some(RequiresPpid::IncludeParent(p)) => {
+                open_skel.maps.rodata_data.ppid_targeting_inclusive = true;
+                open_skel.maps.rodata_data.ppid_targeting_ppid = p.as_raw();
+            }
+        };
+
+        for tr in b.traits {
             match tr {
                 Trait::RandomDelays {
                     frequency,
