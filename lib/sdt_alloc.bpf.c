@@ -1,8 +1,8 @@
 /*
  * SPDX-License-Identifier: GPL-2.0
- * Copyright (c) 2024 Meta Platforms, Inc. and affiliates.
- * Copyright (c) 2024 Tejun Heo <tj@kernel.org>
- * Copyright (c) 2024 Emil Tsalapatis <etsal@meta.com>
+ * Copyright (c) 2024-2025 Meta Platforms, Inc. and affiliates.
+ * Copyright (c) 2024-2025 Tejun Heo <tj@kernel.org>
+ * Copyright (c) 2024-2025 Emil Tsalapatis <etsal@meta.com>
  */
 
 #include <scx/common.bpf.h>
@@ -660,6 +660,8 @@ void __arena *scx_static_alloc(size_t bytes)
 	ptr = (void __arena *)((__u64) scx_static.memory + scx_static.off);
 	scx_static.off += bytes;
 
+	bpf_spin_unlock(&alloc_lock);
+
 	return ptr;
 }
 
@@ -682,4 +684,507 @@ int scx_static_init(size_t alloc_pages)
 	bpf_spin_unlock(&alloc_lock);
 
 	return 0;
+}
+
+__hidden
+int scx_stk_init(struct scx_stk *stack, __u64 data_size, __u64 nr_pages_per_alloc)
+{
+	if (!stack)
+		return -EINVAL;
+
+	stack->data_size = data_size;
+	stack->nr_pages_per_alloc = nr_pages_per_alloc;
+
+	stack->lock = scx_static_alloc(sizeof(*stack->lock));
+	if (!stack->lock) {
+		scx_bpf_error("failed to allocate lock");
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+static void scx_stk_push(struct scx_stk *stack)
+{
+	scx_ring_t *ring = stack->current;
+	int rind = stack->cind;
+
+	rind += 1;
+
+	/* Possibly loop into the next ring. */
+	if (rind == SCX_RING_MAX) {
+		rind = 0;
+		ring = ring->next;
+	}
+
+	/* Possibly loop back into the first ring. */
+	if (!ring)
+		ring = stack->first;
+
+	stack->current = ring;
+	stack->cind = rind;
+}
+
+static void scx_stk_pop(struct scx_stk *stack)
+{
+	scx_ring_t *ring = stack->current;
+	int rind = stack->cind;
+
+	/* Possibly loop into previous next ring. */
+	if (rind == 0) {
+		rind = SCX_RING_MAX;
+		ring = stack->current->prev;
+	}
+
+	rind -= 1;
+
+	/* Possibly loop back into the last ring. */
+	if (!ring)
+		ring = stack->last;
+
+	stack->current = ring;
+	stack->cind = rind;
+}
+
+static
+int scx_stk_free_unlocked(struct scx_stk *stack, void __arena *elem)
+{
+	if (!stack)
+		return -EINVAL;
+
+	/* We ensure there is always room in the ring at allocation time. */
+	if (stack->capacity == 0) {
+		scx_bpf_error("stack capacity overload");
+		return 0;
+	}
+
+	stack->current->elems[stack->cind] = elem;
+
+	scx_stk_push(stack);
+
+	stack->capacity -= 1;
+	stack->available += 1;
+
+	return 0;
+}
+
+__weak
+int scx_stk_free_internal(struct scx_stk *stack, __u64 elem)
+{
+	int ret;
+
+	if (!stack)
+		return -EINVAL;
+
+	if ((ret = arena_spin_lock(stack->lock))) {
+		scx_bpf_error("spinlock error %d", ret);
+		return 0;
+	}
+
+	ret = scx_stk_free_unlocked(stack, (void __arena *)elem);
+
+	arena_spin_unlock(stack->lock);
+
+	return ret;
+}
+
+static
+int scx_stk_add_to_reserve(struct scx_stk *stack, __u64 nr_pages, __u64 nelems)
+{
+	scx_ring_t *ring;
+	u64 data, mem;
+	int ret, i;
+
+	arena_spin_unlock(stack->lock);
+
+	if (nelems > SCX_RING_MAX) {
+		scx_bpf_error("new elements must fit into a single ring");
+		return -EINVAL;
+	}
+
+	/*
+	 * XXXETSAL: The code conflates two things, allocating data and expanding
+	 * the buffer. We can expand the current logic to split the two, but
+	 * for now it should only matter for very large structs.
+	 */
+
+	/*
+	 * On error, we return with the ring buffer unlocked. This is
+	 * because arena_spin_lock can fail, so we cannot guarantee we
+	 * can lock it back.
+	 */
+	if (!stack)
+		return -EINVAL;
+
+	mem = (__u64)bpf_arena_alloc_pages(&arena, NULL, nr_pages + 1, NUMA_NO_NODE, 0);
+	if (!mem)
+		return -ENOMEM;
+
+	if ((ret = arena_spin_lock(stack->lock))) {
+		bpf_arena_free_pages(&arena, (void __arena *)mem, nr_pages);
+		scx_bpf_error("spinlock error %d", ret);
+		return ret;
+	}
+
+	_Static_assert(sizeof(struct scx_ring) <= PAGE_SIZE,
+		"ring must fit into a page");
+
+	ring = (scx_ring_t *)mem;
+	data = mem + PAGE_SIZE;
+
+
+	/* Populate with the elements. */
+	for (i = zero; i < nelems && can_loop; i++) {
+		ring->elems[i] = (void __arena *)data;
+		data += stack->data_size;
+	}
+
+	/* Attach to the reserve rings. */
+	ring->next = stack->reserve;
+	stack->reserve = ring;
+
+	return 0;
+}
+
+static
+int scx_stk_fill_new_elems(struct scx_stk *stack)
+{
+	scx_ring_t *reserve;
+	__u64 nr_pages;
+	size_t nelems;
+	int ret;
+
+	nr_pages = stack->nr_pages_per_alloc;
+	nelems = (nr_pages * PAGE_SIZE) / stack->data_size;
+
+	if (!stack->reserve) {
+		/* This call drops and retakes the lock.  */
+		ret = scx_stk_add_to_reserve(stack, nr_pages, nelems);
+		if (ret)
+			return ret;
+	}
+
+	/*
+	 * If somebody replenished the stack while we were asleep,
+	 * no need to do anything.
+	 */
+	if (stack->available > 0)
+		return 0;
+
+	/* Pop out the reserve and attach to the stack. */
+	reserve = stack->reserve;
+	stack->reserve = reserve->next;
+
+	if (stack->first)
+		stack->first->prev = reserve;
+	reserve->next = stack->first;
+	reserve->prev = NULL;
+
+	stack->first = reserve;
+	stack->reserve = NULL;
+
+	/* New rings are always prefilled with nelems. */
+	stack->capacity += (SCX_RING_MAX - nelems);
+	stack->available += nelems;
+
+	stack->current = reserve;
+	stack->cind = nelems;
+
+	return 0;
+}
+
+__weak
+__u64 scx_stk_alloc(struct scx_stk *stack)
+{
+	void __arena *elem;
+	int ret;
+
+	if (!stack)
+		return 0ULL;
+
+	if ((ret = arena_spin_lock(stack->lock))) {
+		scx_bpf_error("spinlock error %d", ret);
+		return 0ULL;
+	}
+
+	/* If ring buffer is empty, we have to populate it. */
+	if (stack->available == 0) {
+
+		/* The call drops the lock on error. */
+		ret = scx_stk_fill_new_elems(stack);
+		if (ret) {
+			scx_bpf_error("elem creation failed");
+			return 0ULL;
+		}
+	}
+
+	scx_stk_pop(stack);
+	elem = stack->current->elems[stack->cind];
+
+	stack->capacity += 1;
+	stack->available -= 1;
+
+	arena_spin_unlock(stack->lock);
+
+	if (!elem)
+		scx_bpf_error("returning NULL");
+
+	return (u64)elem;
+}
+
+
+static
+scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
+{
+	scx_buddy_chunk_t *chunk;
+	u8 index;
+	u64 order;
+	int i;
+
+	_Static_assert(sizeof(struct scx_buddy_chunk) <= PAGE_SIZE, "chunk must fit into a page");
+
+	chunk = (scx_buddy_chunk_t *)scx_stk_alloc(stk);
+	if (!chunk)
+		return NULL;
+
+	/* 
+	 * Initialize the chunk by carving out the first page to hold the metadata struct above,
+	 * then dumping the rest of the pages into the allocator.
+	 */
+
+	bpf_for (i, 0, SCX_BUDDY_CHUNK_ITEMS) {
+		chunk->headers[i].prev_index = SCX_BUDDY_CHUNK_ITEMS;
+		chunk->headers[i].next_index = SCX_BUDDY_CHUNK_ITEMS;
+		chunk->headers[i].order = SCX_BUDDY_CHUNK_ORDERS;
+	}
+
+
+	/*
+	 * This reserves the first page for the scx_buddy_chunk then breaks the
+	 * full allocation into the different buckets.
+	 */
+	index = 0;
+	bpf_for (order, 0, SCX_BUDDY_CHUNK_ORDERS - 1) {
+		index += 1 << order;
+		chunk->order_indices[order] = index;
+		chunk->headers[index].order = order;
+	}
+
+
+	return chunk;
+}
+
+__hidden
+int scx_buddy_init(struct scx_buddy *buddy, size_t size)
+{
+	scx_buddy_chunk_t *chunk;
+	int ret;
+
+	/* Set a minimum allocation size. */
+	if (size < SCX_BUDDY_MIN_ALLOC_BYTES)
+		return -EINVAL;
+
+	bpf_spin_lock(&buddy->lock);
+	/* Check if already initialized. */
+	if (buddy->min_alloc_bytes) {
+		bpf_spin_unlock(&buddy->lock);
+		return -EALREADY;
+	}
+
+	buddy->min_alloc_bytes = size;
+	bpf_spin_unlock(&buddy->lock);
+
+	/* One allocation per chunk. */
+	ret = scx_stk_init(&buddy->stack, SCX_BUDDY_CHUNK_PAGES * PAGE_SIZE, SCX_BUDDY_CHUNK_PAGES);
+	if (ret) {
+		bpf_spin_lock(&buddy->lock);
+		buddy->min_alloc_bytes = 0;
+		bpf_spin_unlock(&buddy->lock);
+		return ret;
+	}
+
+	chunk = scx_buddy_chunk_get(&buddy->stack);
+
+	bpf_spin_lock(&buddy->lock);
+
+	if (chunk) {
+		/* Put the chunk at the beginning of the list. */
+		chunk->next = buddy->first_chunk;
+		chunk->prev = NULL;
+		buddy->first_chunk = chunk;
+	} else {
+		/* Mark as uninitialized. */
+		buddy->min_alloc_bytes = 0;
+		buddy->first_chunk = NULL;
+	}
+
+	bpf_spin_unlock(&buddy->lock);
+
+	return chunk ? 0 : -ENOMEM;
+}
+
+__weak
+u64 scx_buddy_chunk_alloc(scx_buddy_chunk_t *chunk, int order_req)
+{
+	scx_buddy_header_t *header;
+	u64 address;
+	u64 order;
+	u8 index;
+
+	bpf_for(order, order_req, SCX_BUDDY_CHUNK_ORDERS) {
+		if (chunk->order_indices[order] != SCX_BUDDY_CHUNK_ITEMS)
+			break;
+	}
+
+	if (order == SCX_BUDDY_CHUNK_ORDERS)
+		return (u64)NULL;
+
+
+	index = chunk->order_indices[order];
+	header = (scx_buddy_header_t *)&chunk->headers[index];
+	chunk->order_indices[order] = header->next_index;
+
+	header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
+	header->next_index = SCX_BUDDY_CHUNK_ITEMS;
+	header->order = order_req;
+
+	address = (u64)chunk + PAGE_SIZE + (index * SCX_BUDDY_MIN_ALLOC_BYTES);
+
+	/* If we allocated from a larger-order chunk, split the buddies. */
+	bpf_for(order, order_req, order) {
+		/* Flip the bit for the current order. */
+		index ^= 1 << order;
+
+		/* Add the buddy of the allocation to the free list. */
+		header = (scx_buddy_header_t *)&chunk->headers[index];
+		header->order = order;
+		header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
+
+		header->next_index = chunk->order_indices[order];
+		chunk->order_indices[order] = index;
+	}
+
+	return address;
+}
+
+__weak
+u64 scx_buddy_alloc_internal(struct scx_buddy *buddy, size_t size)
+{
+	scx_buddy_chunk_t *chunk;
+	u64 address;
+	int order;
+
+	order = 1 << (63 - scx_ffs(size / PAGE_SIZE));
+	if (order >= SCX_BUDDY_CHUNK_ORDERS - 1) {
+		scx_bpf_error("Allocation size %lu too large", size);
+		return (u64)NULL;
+	}
+
+	bpf_spin_lock(&buddy->lock);
+	chunk = buddy->first_chunk;
+	do {
+		address = scx_buddy_chunk_alloc(chunk, order);
+		chunk = chunk->next;
+	} while (address == (u64)NULL && can_loop);
+	bpf_spin_unlock(&buddy->lock);
+
+	if (address)
+		return address;
+
+	/* Get a new chunk. */
+	chunk = scx_buddy_chunk_get(&buddy->stack);
+	if (!chunk)
+		return (u64)NULL;
+
+	bpf_spin_lock(&buddy->lock);
+
+	/* Add the chunk into the allocator and retry. */
+	chunk->next = buddy->first_chunk;
+	chunk->prev = NULL;
+	buddy->first_chunk = chunk;
+
+	address = scx_buddy_chunk_alloc(buddy->first_chunk, order);
+
+	bpf_spin_unlock(&buddy->lock);
+
+	return address;
+}
+
+/* 
+ * XXX Hacky, to be cleaned. Sizes are mostly hardcoded and need to be adjusted
+ * when we adapt the allocator for small (16 byte and up) allocations.
+ */
+__weak
+void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
+{
+	scx_buddy_header_t *header, *buddy_header, *tmp_header;
+	scx_buddy_chunk_t *chunk, *target_chunk;
+	u64 mib_mask = ((1ULL << 20) - 1);
+	u64 index, buddy_index;
+	int order;
+
+	if (addr & ((1ULL << 12) - 1)) {
+		scx_bpf_error("Freeing non-page aligned address %llx", addr);
+		return;
+	}
+
+	bpf_spin_lock(&buddy->lock);
+
+	/* Align to a 1 MiB boundary. */
+	target_chunk = (void __arena *)(addr & ~mib_mask);
+
+	/* XXX Only necessary for debugging. */
+	for (chunk = buddy->first_chunk; chunk != NULL && can_loop; chunk = chunk->next) {
+		if (chunk == target_chunk)
+			break;
+	}
+
+	if (chunk == NULL) {
+		bpf_spin_unlock(&buddy->lock);
+		scx_bpf_error("could not find chunk for address %llx", addr);
+	}
+
+	/* Get the page index. */
+	index = (addr & mib_mask) >> 12;
+	header = &chunk->headers[index];
+	
+	bpf_for(order, header->order, SCX_BUDDY_CHUNK_ORDERS) {
+		buddy_index = index ^= 1 << order;
+		buddy_header = &chunk->headers[buddy_index];
+
+		/* Check if the buddy is not in the free list. */
+		if (chunk->order_indices[order] != buddy_index &&
+		    buddy_header->prev_index == SCX_BUDDY_CHUNK_ITEMS && 
+		    buddy_header->next_index == SCX_BUDDY_CHUNK_ITEMS)
+			break;
+
+		/* Pop off the list head if necessary. */
+		if (chunk->order_indices[order] == buddy_index)
+			chunk->order_indices[order] = buddy_header->next_index;
+
+		/* Pop */
+		if (buddy_header->prev_index != SCX_BUDDY_CHUNK_ITEMS) {
+			tmp_header = &chunk->headers[buddy_header->prev_index];
+			tmp_header->next_index = buddy_header->next_index; 
+			buddy_header->next_index = SCX_BUDDY_CHUNK_ITEMS;
+		}
+
+		if (buddy_header->next_index != SCX_BUDDY_CHUNK_ITEMS) {
+			tmp_header = &chunk->headers[buddy_header->next_index];
+			tmp_header->prev_index = buddy_header->prev_index; 
+			buddy_header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
+		}
+
+		buddy_header->order = SCX_BUDDY_CHUNK_ORDERS;
+
+		index = index < buddy_index ? index : buddy_index;
+
+		header = &chunk->headers[index];
+		header->order = order + 1;
+	}
+
+	header->next_index = chunk->order_indices[header->order];
+	chunk->order_indices[header->order] = index;
+
+	bpf_spin_unlock(&buddy->lock);
 }
