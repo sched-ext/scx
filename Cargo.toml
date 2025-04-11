@@ -15,7 +15,9 @@ members = ["rust/scx_stats",
            "scheds/rust/scx_p2dq",
            "scheds/rust/scx_tickless",
            "scheds/rust/scx_layered",
-           "scheds/rust/scx_mitosis", "scheds/rust/scx_chaos"]
+           "scheds/rust/scx_mitosis", 
+           "scheds/rust/scx_chaos",
+           "tools/vmlinux_docify"]
 resolver = "2"
 
 [profile.release]
