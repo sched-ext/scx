@@ -1,3 +1,5 @@
+#pragma once
+
 /* to be included in the main bpf.c file */
 #include "ravg.bpf.h"
 
