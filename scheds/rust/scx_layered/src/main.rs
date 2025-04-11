@@ -593,7 +593,7 @@ struct Opts {
     /// and more accurately identifying PIDs using GPUs in a more timely manner.
     /// Lower values incur less system overhead, at the cost of less accurately
     /// identifying GPU pids and taking longer to do so.
-    #[clap(long, default_value = "1")]
+    #[clap(long, default_value = "3")]
     gpu_kprobe_level: u64,
 
     /// Enable netdev IRQ balancing. This is experimental and should be used with caution.
