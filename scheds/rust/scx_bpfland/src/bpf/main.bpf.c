@@ -280,23 +280,6 @@ static bool is_queued(const struct task_struct *p)
 }
 
 /*
- * Return true if @cpu is in a full-idle physical core,
- * false otherwise.
- */
-static bool is_fully_idle(s32 cpu)
-{
-	const struct cpumask *idle_smtmask;
-	int node = __COMPAT_scx_bpf_cpu_node(cpu);
-	bool is_idle;
-
-	idle_smtmask = __COMPAT_scx_bpf_get_idle_smtmask_node(node);
-	is_idle = bpf_cpumask_test_cpu(cpu, idle_smtmask);
-	scx_bpf_put_cpumask(idle_smtmask);
-
-	return is_idle;
-}
-
-/*
  * Allocate/re-allocate a new cpumask.
  */
 static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
@@ -565,20 +548,19 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	}
 
 	/*
+	 * If the task can still run on the previously used CPU, keep using
+	 * it.
+	 */
+	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		cpu = prev_cpu;
+		*is_idle = true;
+		goto out_put_cpumask;
+	}
+
+	/*
 	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
 	 */
 	if (smt_enabled) {
-		/*
-		 * If the task can still run on the previously used CPU and
-		 * it's a full-idle core, keep using it.
-		 */
-		if (bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			cpu = prev_cpu;
-			*is_idle = true;
-			goto out_put_cpumask;
-		}
-
 		/*
 		 * Search for any full-idle CPU in the primary domain that
 		 * shares the same L2 cache.
@@ -623,16 +605,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 				goto out_put_cpumask;
 			}
 		}
-	}
-
-	/*
-	 * If a full-idle core can't be found (or if this is not an SMT system)
-	 * try to re-use the same CPU, even if it's not in a full-idle core.
-	 */
-	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-		cpu = prev_cpu;
-		*is_idle = true;
-		goto out_put_cpumask;
 	}
 
 	/*
@@ -761,11 +733,9 @@ static bool kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 	/*
 	 * Try to reuse the same CPU if idle.
 	 */
-	if (!idle_smt || (idle_smt && is_fully_idle(prev_cpu))) {
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
-			return true;
-		}
+	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
+		return true;
 	}
 
 	/*
@@ -871,10 +841,10 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 
 		/*
 		 * For tasks that are not limited to run on a single CPU,
-		 * check if their previously used CPU is a full-idle SMT
-		 * core and in that case perform a direct dispatch.
+		 * check if their previously used CPU is idle and in that
+		 * case perform a direct dispatch.
 		 */
-		if (is_fully_idle(prev_cpu)) {
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
 					   slice_max, enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
@@ -956,11 +926,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
  */
 static bool keep_running(const struct task_struct *p, s32 cpu)
 {
-	int node = __COMPAT_scx_bpf_cpu_node(cpu);
-	const struct cpumask *primary = cast_mask(primary_cpumask), *smt;
-	const struct cpumask *idle_smtmask, *idle_cpumask;
-	struct cpu_ctx *cctx;
-	bool ret;
+	const struct cpumask *primary = cast_mask(primary_cpumask);
 
 	/* Do not keep running if the task doesn't need to run */
 	if (!is_queued(p))
@@ -970,41 +936,7 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 	if (!primary || !bpf_cpumask_test_cpu(cpu, primary))
 		return false;
 
-	/*
-	 * Keep running only if the task is on a full-idle SMT core (or SMT
-	 * is disabled).
-	 */
-	if (!smt_enabled)
-		return true;
-
-	/*
-	 * If the task can only run on this CPU, keep it running.
-	 */
-	if (p->nr_cpus_allowed == 1)
-		return true;
-
-	cctx = try_lookup_cpu_ctx(cpu);
-	if (!cctx)
-		return false;
-
-	smt = cast_mask(cctx->smt_cpumask);
-	if (!smt)
-		return false;
-
-	idle_smtmask = __COMPAT_scx_bpf_get_idle_smtmask_node(node);
-	idle_cpumask = __COMPAT_scx_bpf_get_idle_cpumask_node(node);
-
-	/*
-	 * If the task is running in a full-idle SMT core or if all the SMT
-	 * cores in the system are busy (they all have at least one busy
-	 * sibling), keep the task running on its current CPU.
-	 */
-	ret = bpf_cpumask_subset(smt, idle_cpumask) || bpf_cpumask_empty(idle_smtmask);
-
-	scx_bpf_put_cpumask(idle_cpumask);
-	scx_bpf_put_cpumask(idle_smtmask);
-
-	return ret;
+	return true;
 }
 
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
