@@ -586,6 +586,16 @@ struct Opts {
     #[clap(long, default_value = "false")]
     enable_gpu_support: bool,
 
+    /// Gpu Kprobe Level
+    /// The value set here determines how agressive
+    /// the kprobes enabled on gpu driver functions are.
+    /// Higher values are more aggressive, incurring more system overhead
+    /// and more accurately identifying PIDs using GPUs in a more timely manner.
+    /// Lower values incur less system overhead, at the cost of less accurately
+    /// identifying GPU pids and taking longer to do so.
+    #[clap(long, default_value = "1")]
+    gpu_kprobe_level: u64,
+
     /// Enable netdev IRQ balancing. This is experimental and should be used with caution.
     #[clap(long, default_value = "false")]
     netdev_irq_balance: bool,
@@ -1767,9 +1777,19 @@ impl<'a> Scheduler<'a> {
         // enable autoloads for conditionally loaded things
         // immediately after creating skel (because this is always before loading)
         if opts.enable_gpu_support {
-            compat::cond_kprobe_enable("nvidia_open", &skel.progs.kprobe_nvidia_open)?;
-            compat::cond_kprobe_enable("nvidia_poll", &skel.progs.kprobe_nvidia_poll)?;
-            compat::cond_kprobe_enable("nvidia_mmap", &skel.progs.kprobe_nvidia_mmap)?;
+            // by default, enable open if gpu support is enabled.
+            // open has been observed to be relatively cheap to kprobe.
+            if opts.gpu_kprobe_level >= 1 {
+                compat::cond_kprobe_enable("nvidia_open", &skel.progs.kprobe_nvidia_open)?;
+            }
+            // enable the rest progressively based upon how often they are called
+            // for observed workloads
+            if opts.gpu_kprobe_level >= 2 {
+                compat::cond_kprobe_enable("nvidia_mmap", &skel.progs.kprobe_nvidia_mmap)?;
+            }
+            if opts.gpu_kprobe_level >= 3 {
+                compat::cond_kprobe_enable("nvidia_poll", &skel.progs.kprobe_nvidia_poll)?;
+            }
         }
 
         skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;
