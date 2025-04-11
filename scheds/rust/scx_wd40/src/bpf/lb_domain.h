@@ -1,3 +1,4 @@
+#pragma once
 
 #include <lib/sdt_task.h>
 
