@@ -503,10 +503,11 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 */
 	if (!init_active_ovrflw_masks(ctx))
 		goto err_out;
-	if (is_per_cpu_task(ctx->p)) {
+	if (is_pinned(ctx->p) || is_migration_disabled(ctx->p)) {
 		cpu = ctx->prev_cpu;
 		if (!bpf_cpumask_test_cpu(cpu, cast_mask(ctx->active))) {
-			bpf_cpumask_test_and_set_cpu(cpu, ctx->ovrflw);
+			if (is_pinned(ctx->p))
+				bpf_cpumask_test_and_set_cpu(cpu, ctx->ovrflw);
 		}
 		*is_idle = scx_bpf_test_and_clear_cpu_idle(cpu);
 		goto unlock_out;
