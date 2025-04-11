@@ -301,10 +301,10 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
-	 * Prioritize a migration-disabled task since it has restrictions
-	 * in placement so it tends to be delayed.
+	 * Prioritize a pinned task since it has restrictions in placement
+	 * so it tends to be delayed.
 	 */
-	if (is_per_cpu_task(p))
+	if (is_pinned(p) || is_migration_disabled(p))
 		weight_boost += LAVD_LC_WEIGHT_BOOST;
 
 	/*
@@ -897,11 +897,12 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 	/* NOTE: This CPU belongs to neither active nor overflow set. */
 
 	/*
-	 * If the previous task is a per-CPU task on this CPU,
+	 * If the previous task is pinned to this CPU,
 	 * extend the overflow set and go.
 	 */
-	if (prev && is_per_cpu_task(prev)) {
-		bpf_cpumask_set_cpu(cpu, ovrflw);
+	if (prev && (is_pinned(prev) || is_migration_disabled(prev))) {
+		if (is_pinned(prev))
+			bpf_cpumask_set_cpu(cpu, ovrflw);
 		try_consume = true;
 		goto unlock_out;
 	}
@@ -934,19 +935,21 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 			break;
 
 		/*
-		 * If the task is a per-CPU task on this CPU,
+		 * If the task is pinned to this CPU,
 		 * extend the overflow set and go.
 		 * But not on this CPU, try another task.
 		 */
-		if (is_per_cpu_task(p)) {
+		if (is_pinned(p) || is_migration_disabled(p)) {
 			new_cpu = scx_bpf_task_cpu(p);
 			if (new_cpu == cpu) {
-				bpf_cpumask_set_cpu(new_cpu, ovrflw);
+				if (is_pinned(p))
+					bpf_cpumask_set_cpu(new_cpu, ovrflw);
 				bpf_task_release(p);
 				try_consume = true;
 				break;
 			}
-			else if (!bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
+			else if (is_pinned(p) &&
+				 !bpf_cpumask_test_and_set_cpu(new_cpu, ovrflw))
 				scx_bpf_kick_cpu(new_cpu, SCX_KICK_IDLE);
 
 			bpf_task_release(p);

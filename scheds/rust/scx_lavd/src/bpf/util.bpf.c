@@ -183,12 +183,9 @@ static bool is_kernel_worker(struct task_struct *p)
 	return !!(p->flags & (PF_WQ_WORKER | PF_IO_WORKER));
 }
 
-static bool is_per_cpu_task(const struct task_struct *p)
+static bool is_pinned(const struct task_struct *p)
 {
-	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p))
-		return true;
-
-	return false;
+	return p->nr_cpus_allowed == 1;
 }
 
 static bool is_lat_cri(struct task_ctx *taskc)
