@@ -586,6 +586,10 @@ struct Opts {
     #[clap(long, default_value = "false")]
     enable_gpu_support: bool,
 
+    /// Enable nvidia poll kprobe
+    #[clap(long, default_value = "false")]
+    enable_nvidia_poll: bool,
+
     /// Enable netdev IRQ balancing. This is experimental and should be used with caution.
     #[clap(long, default_value = "false")]
     netdev_irq_balance: bool,
@@ -1768,8 +1772,12 @@ impl<'a> Scheduler<'a> {
         // immediately after creating skel (because this is always before loading)
         if opts.enable_gpu_support {
             compat::cond_kprobe_enable("nvidia_open", &skel.progs.kprobe_nvidia_open)?;
-            compat::cond_kprobe_enable("nvidia_poll", &skel.progs.kprobe_nvidia_poll)?;
             compat::cond_kprobe_enable("nvidia_mmap", &skel.progs.kprobe_nvidia_mmap)?;
+            // this has it's own flag because it is called so often
+            // that it is suspicious wrt/ perf overhead.
+            if opts.enable_nvidia_poll {
+                compat::cond_kprobe_enable("nvidia_poll", &skel.progs.kprobe_nvidia_poll)?;
+            }
         }
 
         skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;
