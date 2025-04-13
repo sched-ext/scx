@@ -244,6 +244,12 @@ struct task_ctx {
 	 * for latency-sensitive tasks.
 	 */
 	u64 deadline;
+
+	/*
+	 * Task's recently used CPU: used to determine whether we need to
+	 * refresh the task's cpumasks.
+	 */
+	s32 recent_used_cpu;
 };
 
 /* Map that contains task-local storage. */
@@ -378,6 +384,12 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 	struct bpf_cpumask *p_mask, *l2_mask, *l3_mask;
 	struct cpu_ctx *cctx;
 
+	/*
+	 * Refresh task's recently used CPU every time the task's domain
+	 * is updated..
+	 */
+	tctx->recent_used_cpu = cpu;
+
 	cctx = try_lookup_cpu_ctx(cpu);
 	if (!cctx)
 		return;
@@ -386,13 +398,8 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 	if (!primary)
 		return;
 
-	l3_domain = cctx->l3_cpumask;
-	if (!l3_domain)
-		l3_domain = primary;
-
 	l2_domain = cctx->l2_cpumask;
-	if (!l2_domain)
-		l2_domain = l3_domain;
+	l3_domain = cctx->l3_cpumask;
 
 	p_mask = tctx->cpumask;
 	if (!p_mask) {
@@ -423,14 +430,16 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 	 * primary cpumask and the L2 cache domain mask of the previously used
 	 * CPU.
 	 */
-	bpf_cpumask_and(l2_mask, cast_mask(p_mask), cast_mask(l2_domain));
+	if (l2_domain)
+		bpf_cpumask_and(l2_mask, cast_mask(p_mask), cast_mask(l2_domain));
 
 	/*
 	 * Determine the L3 cache domain as the intersection of the task's
 	 * primary cpumask and the L3 cache domain mask of the previously used
 	 * CPU.
 	 */
-	bpf_cpumask_and(l3_mask, cast_mask(p_mask), cast_mask(l3_domain));
+	if (l3_domain)
+		bpf_cpumask_and(l3_mask, cast_mask(p_mask), cast_mask(l3_domain));
 }
 
 static bool is_wake_sync(const struct task_struct *p,
@@ -493,9 +502,12 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	}
 
 	/*
-	 * Refresh task domain based on the previously used cpu.
+	 * Refresh task domain based on the previously used cpu. If we keep
+	 * selecting the same CPU, the task's domain doesn't need to be
+	 * updated and we can save some cpumask ops.
 	 */
-	task_update_domain(p, tctx, prev_cpu, p->cpus_ptr);
+	if (tctx->recent_used_cpu != prev_cpu)
+		task_update_domain(p, tctx, prev_cpu, p->cpus_ptr);
 
 	p_mask = cast_mask(tctx->cpumask);
 	if (p_mask && bpf_cpumask_empty(p_mask))
@@ -504,8 +516,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	if (l2_mask && bpf_cpumask_empty(l2_mask))
 		l2_mask = NULL;
 	l3_mask = cast_mask(tctx->l3_cpumask);
-	if (l3_mask)
-		l2_mask = NULL;
+	if (l3_mask && bpf_cpumask_empty(l3_mask))
+		l3_mask = NULL;
 
 	/*
 	 * Acquire the CPU masks to determine the idle CPUs in the system.
