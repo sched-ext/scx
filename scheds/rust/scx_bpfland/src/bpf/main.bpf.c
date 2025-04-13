@@ -442,26 +442,66 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 		bpf_cpumask_and(l3_mask, cast_mask(p_mask), cast_mask(l3_domain));
 }
 
-static bool is_wake_sync(const struct task_struct *p,
-			 const struct task_struct *current,
-			 s32 prev_cpu, s32 cpu, u64 wake_flags)
+/*
+ * Return true if all the CPUs in the LLC of @cpu are busy, false
+ * otherwise.
+ */
+static bool is_llc_busy(const struct cpumask *idle_cpumask, s32 cpu)
 {
-	if (wake_flags & SCX_WAKE_SYNC)
-		return true;
+	const struct cpumask *primary, *l3_mask;
+	struct cpu_ctx *cctx;
 
+	primary = cast_mask(primary_cpumask);
+	if (!primary)
+		return false;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return false;
+
+	l3_mask = cast_mask(cctx->l3_cpumask);
+	if (!l3_mask)
+		l3_mask = primary;
+
+	return !bpf_cpumask_intersects(l3_mask, idle_cpumask);
+}
+
+/*
+ * Return true if the waker is (likely) going to release the CPU after
+ * waking up @p, false otherwise.
+ */
+static bool is_wake_sync(const struct task_struct *p,
+			 s32 prev_cpu, s32 this_cpu, u64 wake_flags)
+{
+	const struct task_struct *current = (void *)bpf_get_current_task_btf();
+
+	return (wake_flags & SCX_WAKE_SYNC) && !(current->flags & PF_EXITING);
+}
+
+/*
+ * Return the best CPU for @p in case of a sync wakeup.
+ *
+ * During a sync wakeup, the waker commits to releasing the CPU immediately
+ * after the wakeup event, so we should consider a sync wakeup almost like
+ * a direct function call between a waker and a wakee.
+ */
+static s32 try_sync_wakeup(const struct task_struct *p, s32 prev_cpu, s32 this_cpu)
+{
 	/*
-	 * If the current task is a per-CPU kthread running on the wakee's
-	 * previous CPU, treat it as a synchronous wakeup.
+	 * If waker and wakee are on the same CPU and no other tasks are
+	 * queued, consider the waker's CPU as idle.
 	 *
-	 * The assumption is that the wakee had queued work for the per-CPU
-	 * kthread, which has now finished, making the wakeup effectively
-	 * synchronous. An example of this behavior is seen in IO completions.
+	 * If waker and wakee are running on different CPUs we don't to
+	 * move tasks around as it may disrupt the heuristic of certain
+	 * cpufreq governors (e.g., intel_pstate when running in
+	 * balance_power energy profile), since they may scale down the
+	 * frequency of @prev_cpu, leading to suboptimal performance.
 	 */
-	if (is_kthread(current) && (current->nr_cpus_allowed == 1) &&
-	    (prev_cpu == cpu))
-		return true;
+	if ((this_cpu == prev_cpu) &&
+	    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | this_cpu))
+		return this_cpu;
 
-	return false;
+	return -EBUSY;
 }
 
 /*
@@ -477,10 +517,9 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 {
 	const struct cpumask *idle_smtmask, *idle_cpumask;
 	const struct cpumask *primary, *p_mask, *l2_mask, *l3_mask;
-	struct task_struct *current = (void *)bpf_get_current_task_btf();
 	struct task_ctx *tctx;
 	int node;
-	s32 cpu;
+	s32 this_cpu = bpf_get_smp_processor_id(), cpu;
 
 	primary = cast_mask(primary_cpumask);
 	if (!primary)
@@ -527,50 +566,31 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	idle_cpumask = __COMPAT_scx_bpf_get_idle_cpumask_node(node);
 
 	/*
-	 * If the current task is waking up another task and releasing the CPU
-	 * (WAKE_SYNC), attempt to migrate the wakee on the same CPU as the
-	 * waker.
+	 * In case of a sync wakeup, attempt to run the wakee on the
+	 * waker's CPU if possible, as it's going to release the CPU right
+	 * after the wakeup, so it can be considered as idle and, possibly,
+	 * cache hot.
+	 *
+	 * However, ignore this optimization if the LLC is completely
+	 * saturated, since we may introduce too much unfairness.
 	 */
-	cpu = bpf_get_smp_processor_id();
-	if (is_wake_sync(p, current, cpu, prev_cpu, wake_flags)) {
-		const struct cpumask *curr_l3_domain;
-		struct cpu_ctx *cctx;
-		bool share_llc;
-
+	if (is_wake_sync(p, prev_cpu, this_cpu, wake_flags) &&
+	    !is_llc_busy(idle_cpumask, prev_cpu)) {
 		/*
-		 * Determine waker CPU scheduling domain.
+		 * If @prev_cpu is idle, keep using it, since there is not
+		 * guarantee that the cache hot data from the waker's CPU
+		 * is more important than cache hot data in the wakee's
+		 * CPU.
 		 */
-		cctx = try_lookup_cpu_ctx(cpu);
-		if (!cctx) {
-			cpu = -EINVAL;
-			goto out_put_cpumask;
-		}
-
-		curr_l3_domain = cast_mask(cctx->l3_cpumask);
-		if (!curr_l3_domain)
-			curr_l3_domain = primary;
-
-		/*
-		 * If both the waker and wakee share the same L3 cache keep
-		 * using the same CPU if possible.
-		 */
-		share_llc = bpf_cpumask_test_cpu(prev_cpu, curr_l3_domain);
-		if (share_llc &&
+		if ((!smt_enabled || bpf_cpumask_test_cpu(prev_cpu, idle_smtmask)) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			*is_idle = true;
 			goto out_put_cpumask;
 		}
 
-		/*
-		 * If the waker's L3 domain is not saturated attempt to migrate
-		 * the wakee on the same CPU as the waker (since it's going to
-		 * block and release the current CPU).
-		 */
-		if (!(current->flags & PF_EXITING) &&
-		    bpf_cpumask_intersects(curr_l3_domain, idle_cpumask) &&
-		    p_mask && bpf_cpumask_test_cpu(cpu, p_mask) &&
-		    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu) == 0) {
+		cpu = try_sync_wakeup(p, prev_cpu, this_cpu);
+		if (cpu >= 0) {
 			*is_idle = true;
 			goto out_put_cpumask;
 		}
