@@ -170,6 +170,13 @@ struct Opts {
     #[clap(short = 'k', long, action = clap::ArgAction::SetTrue)]
     local_kthreads: bool,
 
+    /// Disable direct dispatch during synchronous wakeups.
+    ///
+    /// Enabling this option can increase fairness at the cost of slowing down pipe-intensive
+    /// workloads.
+    #[clap(short = 'w', long, action = clap::ArgAction::SetTrue)]
+    no_wake_sync: bool,
+
     /// Specifies the initial set of CPUs, represented as a bitmask in hex (e.g., 0xff), that the
     /// scheduler will use to dispatch tasks, until the system becomes saturated, at which point
     /// tasks may overflow to other available CPUs.
@@ -296,6 +303,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
         skel.maps.rodata_data.local_kthreads = opts.local_kthreads;
         skel.maps.rodata_data.no_preempt = opts.no_preempt;
+        skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;
         skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;

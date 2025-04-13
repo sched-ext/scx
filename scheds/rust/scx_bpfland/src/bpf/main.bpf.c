@@ -43,6 +43,11 @@ const volatile s64 slice_lag = 20ULL * NSEC_PER_MSEC;
 const volatile bool no_preempt;
 
 /*
+ * Ignore synchronous wakeup events.
+ */
+const volatile bool no_wake_sync;
+
+/*
  * When enabled always dispatch per-CPU kthreads directly.
  *
  * This allows to prioritize critical kernel threads that may potentially slow
@@ -451,7 +456,8 @@ static bool is_wake_sync(const struct task_struct *p,
 {
 	const struct task_struct *current = (void *)bpf_get_current_task_btf();
 
-	return (wake_flags & SCX_WAKE_SYNC) && !(current->flags & PF_EXITING);
+	return !no_wake_sync &&
+	       (wake_flags & SCX_WAKE_SYNC) && !(current->flags & PF_EXITING);
 }
 
 /*
