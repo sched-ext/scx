@@ -228,7 +228,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 	}
 }
 
-static u32 clamp_time_slice_ns(u32 slice)
+static u64 clamp_time_slice_ns(u64 slice)
 {
 	if (slice < slice_min_ns)
 		slice = slice_min_ns;
