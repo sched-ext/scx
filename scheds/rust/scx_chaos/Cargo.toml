@@ -11,7 +11,9 @@ anyhow = "1.0.65"
 clap = { version = "4.5.28", features = ["derive", "env", "unicode", "wrap_help"] }
 ctrlc = { version = "3.1", features = ["termination"] }
 libbpf-rs = "=0.25.0-beta.1"
+libc = "0.2.137"
 log = "0.4.17"
+nix = { version = "0.29", features = ["process"] }
 simplelog = "0.12"
 
 [build-dependencies]
