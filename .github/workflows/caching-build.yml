@@ -200,7 +200,7 @@ jobs:
 
       - name: Clippy
         if: contains(fromJSON('["scxtop", "scx_chaos"]'), matrix.package)
-        run: cargo clippy --no-deps -p ${{ matrix.package }} -- -Dwarnings
+        run: cargo clippy -p ${{ matrix.package }} -- -Dwarnings --no-deps
 
       # virtme-ng runs as a different user than the runner, so loses the rustup and cargo roots. specify them explicitly to avoid a rebuild.
       - run: |
