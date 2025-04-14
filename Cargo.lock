@@ -2439,7 +2439,7 @@ dependencies = [
 
 [[package]]
 name = "scx_p2dq"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "anyhow",
  "chrono",
