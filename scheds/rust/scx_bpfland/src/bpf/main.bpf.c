@@ -455,6 +455,16 @@ static bool is_wake_sync(const struct task_struct *p,
 }
 
 /*
+ * Return true in case of a task wakeup event between two different CPUs,
+ * false otherwise.
+ */
+static bool is_wake_remote(const struct task_struct *p,
+			   s32 prev_cpu, s32 this_cpu, u64 wake_flags)
+{
+	return (wake_flags & SCX_WAKE_TTWU) && (this_cpu != prev_cpu);
+}
+
+/*
  * Return the best CPU for @p in case of a sync wakeup.
  *
  * During a sync wakeup, the waker commits to releasing the CPU immediately
@@ -574,10 +584,53 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	share_llc = l3_mask && bpf_cpumask_test_cpu(this_cpu, l3_mask);
 	if (share_llc) {
 		/*
-		 * In case of a sync wakeup, attempt to migrate the wakee on the
-		 * waker's CPU if possible, as it's going to release the CPU right
-		 * after the wakeup, so it can be considered as idle and, possibly,
-		 * cache hot.
+		 * In case of a remote wakeup event, if the waker and the
+		 * wakee CPUs share the same LLC, attempt a migration on
+		 * the waker's CPU.
+		 *
+		 * Only allow the move if the LLC is shared, otherwise an
+		 * interrupt intensive workload could force all tasks onto
+		 * one LLC / node, depending on the IO topology or IRQ
+		 * affinity settings.
+		 */
+		if (is_wake_remote(p, prev_cpu, this_cpu, wake_flags)) {
+			/*
+			 * If @this_cpu is idle, the wakeup is happening
+			 * from interrupt context. In this case we can
+			 * attempt to migrate the task to @this_cpu.
+			 *
+			 * However, if @prev_cpu is idle (and cache affine)
+			 * avoid the migration, since there is no guarantee
+			 * that the cache hot data from the interrupt is
+			 * more important than cache hot data on @prev_cpu
+			 * and, from a cpufreq perspective, it's better to
+			 * have higher utilization on the wakee's CPU.
+			 *
+			 * This allows to get better performance on systems
+			 * with aggressively power-saving cpufreq governors
+			 * (e.g., the "balance_power" profile with
+			 * intel_pstate when running on battery power).
+			 */
+			if ((!smt_enabled || bpf_cpumask_test_cpu(prev_cpu, idle_smtmask)) &&
+			    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+				cpu = prev_cpu;
+				*is_idle = true;
+				goto out_put_cpumask;
+			}
+
+			if ((!smt_enabled || bpf_cpumask_test_cpu(this_cpu, idle_smtmask)) &&
+			    scx_bpf_test_and_clear_cpu_idle(this_cpu)) {
+				cpu = this_cpu;
+				*is_idle = true;
+				goto out_put_cpumask;
+			}
+		}
+
+		/*
+		 * In case of a sync wakeup, attempt to migrate the wakee
+		 * on the waker's CPU if possible, as it's going to release
+		 * the CPU right after the wakeup, so it can be considered
+		 * as idle and, possibly, cache hot.
 		 */
 		if (is_wake_sync(p, prev_cpu, this_cpu, wake_flags) &&
 		    !is_llc_busy(idle_cpumask, prev_cpu)) {
