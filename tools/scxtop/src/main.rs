@@ -4,29 +4,21 @@
 // GNU General Public License version 2.
 
 use scx_utils::compat;
-use scxtop::bpf_intf::*;
 use scxtop::bpf_skel::types::bpf_event;
 use scxtop::bpf_skel::*;
 use scxtop::cli::{generate_completions, Cli, Commands, TraceArgs, TuiArgs};
-use scxtop::config::get_config_path;
 use scxtop::config::Config;
 use scxtop::edm::{ActionHandler, BpfEventActionPublisher, BpfEventHandler, EventDispatchManager};
 use scxtop::read_file_string;
 use scxtop::tracer::Tracer;
+use scxtop::Action;
 use scxtop::App;
 use scxtop::Event;
 use scxtop::Key;
 use scxtop::KeyMap;
-use scxtop::PerfEvent;
 use scxtop::PerfettoTraceManager;
 use scxtop::Tui;
-use scxtop::APP;
 use scxtop::SCHED_NAME_PATH;
-use scxtop::STATS_SOCKET_PATH;
-use scxtop::{
-    Action, IPIAction, SchedCpuPerfSetAction, SchedSwitchAction, SchedWakeupAction,
-    SchedWakingAction, SoftIRQAction,
-};
 
 use anyhow::anyhow;
 use anyhow::Result;
@@ -39,7 +31,6 @@ use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::UprobeOpts;
 use log::debug;
 use log::info;
-use log::trace;
 use ratatui::crossterm::event::KeyCode::Char;
 use simplelog::{
     ColorChoice, Config as SimplelogConfig, LevelFilter, TermLogger, TerminalMode, WriteLogger,
@@ -47,13 +38,11 @@ use simplelog::{
 use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
 
-use std::fs;
 use std::fs::File;
 use std::mem::MaybeUninit;
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {
