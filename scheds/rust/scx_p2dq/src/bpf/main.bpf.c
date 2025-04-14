@@ -57,13 +57,15 @@ const volatile bool kthreads_local = true;
 const volatile bool max_dsq_pick2 = false;
 const volatile bool select_idle_in_enqueue = true;
 
+const volatile u64 wakeup_lb_busy = 90;
+
 const volatile bool smt_enabled = true;
 const volatile bool has_little_cores = false;
 const volatile u32 debug = 2;
 
 const u32 zero_u32 = 0;
 const u64 lb_timer_intvl_ns = 250LLU * NSEC_PER_MSEC;
-const u64 lb_backoff_ns = 25LLU * NSEC_PER_MSEC;
+const u64 lb_backoff_ns = 5LLU * NSEC_PER_MSEC;
 
 u64 cpu_llc_ids[MAX_CPUS];
 u64 cpu_node_ids[MAX_CPUS];
@@ -366,7 +368,7 @@ static s32 pick_two_cpu(struct llc_ctx *cur_llcx, struct task_ctx *taskc,
 
 	// If the current LLC is not heavily utilized then don't load balance,
 	// under saturation load balancing is done on the dispatch path.
-	if (scaled_load < 90)
+	if (scaled_load < wakeup_lb_busy)
 		return -EINVAL;
 
 	left = rand_llc_ctx();
@@ -387,6 +389,9 @@ static s32 pick_two_cpu(struct llc_ctx *cur_llcx, struct task_ctx *taskc,
 	u64 right_load = right->load;
 
 	// If the other LLCs have more load than the current don't bother.
+	u64 slack_factor = (1 * cur_load) / 100;
+	if (slack_factor > 0)
+		cur_load += slack_factor;
 	if (left_load > cur_load && right_load > cur_load)
 		return -EINVAL;
 
@@ -434,7 +439,6 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	struct node_ctx *nodec;
 	struct llc_ctx *llcx;
 	bool interactive = is_interactive(taskc);
-	int llc_idle = 0;
 	s32 cpu = prev_cpu;
 
 	idle_cpumask = scx_bpf_get_idle_cpumask();
@@ -448,13 +452,6 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	    !(nodec = lookup_node_ctx(prev_cpuc->node_id)) ||
 	    !llcx->cpumask || !llcx->tmp_cpumask)
 		goto found_cpu;
-
-	bpf_cpumask_and(llcx->tmp_cpumask, idle_cpumask, cast_mask(llcx->cpumask));
-	int nr_idle = bpf_cpumask_weight(idle_cpumask);
-	int nr_queued = scx_bpf_dsq_nr_queued(taskc->dsq_id);
-	if (llcx->tmp_cpumask)
-		llc_idle = bpf_cpumask_weight(cast_mask(llcx->tmp_cpumask));
-
 
 	// Special handling of tasks with custom affinities
 	if (!taskc->all_cpus) {
@@ -556,8 +553,8 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	}
 
 	if (nr_llcs > 1 &&
-	    (eager_load_balance ||
-	     (llc_idle == 0 && nr_queued > llcx->nr_cpus && nr_idle > 0))) {
+	    wakeup_lb_busy > 0 &&
+	    eager_load_balance) {
 		cpu = pick_two_cpu(llcx, taskc, is_idle);
 		if (cpu >= 0) {
 			stat_inc(P2DQ_STAT_SELECT_PICK2);
@@ -608,7 +605,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	// Non-interactive tasks load balance
 	if (nr_llcs > 1 &&
 	    !interactive &&
-	    nr_idle > 1 &&
+	    wakeup_lb_busy > 0 &&
 	    (cpu = pick_two_cpu(llcx, taskc, is_idle)) >= 0) {
 		stat_inc(P2DQ_STAT_SELECT_PICK2);
 		goto found_cpu;
