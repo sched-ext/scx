@@ -10,7 +10,6 @@ use anyhow::Context;
 use anyhow::Result;
 use libc::{close, read};
 use perf_event_open_sys as perf;
-use scx_utils::compat::get_fs_mount;
 use scx_utils::compat::tracefs_mount;
 
 use std::collections::{BTreeMap, HashSet};
@@ -19,7 +18,6 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::mem;
 use std::path::Path;
-use std::path::PathBuf;
 use std::str::FromStr;
 
 #[allow(dead_code)]

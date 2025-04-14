@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::{Error, Result};
+use anyhow::Result;
 use protobuf::Message;
 use rand::rngs::StdRng;
 use rand::RngCore;
@@ -14,12 +14,10 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::bpf_skel::types::bpf_event;
-use crate::edm::{ActionHandler, BpfEventHandler};
+use crate::edm::ActionHandler;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
-    HwPressureAction, IPIAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction,
-    SoftIRQAction,
+    IPIAction, SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction,
 };
 
 use crate::protos_gen::perfetto_scx::clock_snapshot::Clock;
