@@ -58,12 +58,14 @@ const volatile bool max_dsq_pick2 = false;
 const volatile bool select_idle_in_enqueue = true;
 
 const volatile u64 wakeup_lb_busy = 90;
+const volatile u64 lb_slack_factor = 5;
 
 const volatile bool smt_enabled = true;
 const volatile bool has_little_cores = false;
 const volatile u32 debug = 2;
 
 const u32 zero_u32 = 0;
+
 const u64 lb_timer_intvl_ns = 250LLU * NSEC_PER_MSEC;
 const u64 lb_backoff_ns = 5LLU * NSEC_PER_MSEC;
 
@@ -336,6 +338,7 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *cur_llcx, struct llc_ctx
 	right_load = right->load;
 
 	// If the current LLCs has more load don't try to pick2.
+	cur_load += (lb_slack_factor * cur_load) / 100;
 	if ((nr_llcs > 2 && cur_load > left_load && cur_load > right_load))
 	    return NULL;
 

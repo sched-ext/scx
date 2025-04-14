@@ -73,6 +73,11 @@ pub struct SchedulerOpts {
     #[clap(short = 's', long, default_value = "100")]
     pub min_slice_us: u64,
 
+    /// Slack factor for load balancing, load balancing is not performed if load is within slack
+    /// factor percent.
+    #[clap(long, default_value = "5", value_parser = clap::value_parser!(u64).range(0..99))]
+    pub lb_slack_factor: u64,
+
     /// Number of runs on the LLC before a task becomes eligbile for pick2 migration on the wakeup
     /// path.
     #[clap(short = 'l', long, default_value_t = get_default_llc_runs())]
@@ -169,6 +174,7 @@ macro_rules! init_open_skel {
             $skel.maps.rodata_data.init_dsq_index = opts.init_dsq_index as i32;
             $skel.maps.rodata_data.nr_llcs = $crate::TOPO.all_llcs.clone().keys().len() as u32;
             $skel.maps.rodata_data.nr_nodes = $crate::TOPO.nodes.clone().keys().len() as u32;
+            $skel.maps.rodata_data.lb_slack_factor = opts.lb_slack_factor;
 
             $skel.maps.rodata_data.autoslice = opts.autoslice;
             $skel.maps.rodata_data.debug = verbose as u32;
