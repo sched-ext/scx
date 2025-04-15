@@ -23,8 +23,7 @@ use crate::{
 
 use crate::protos_gen::perfetto_scx::clock_snapshot::Clock;
 use crate::protos_gen::perfetto_scx::counter_descriptor::Unit::Count as UNIT_COUNT;
-use crate::protos_gen::perfetto_scx::trace_packet::Data::TrackDescriptor as DataTrackDescriptor;
-use crate::protos_gen::perfetto_scx::track_event::Type as TrackEventType;
+use crate::protos_gen::perfetto_scx::trace_packet;
 use crate::protos_gen::perfetto_scx::{
     BuiltinClock, ClockSnapshot, CounterDescriptor, CpuhpEnterFtraceEvent, CpuhpExitFtraceEvent,
     FtraceEvent, FtraceEventBundle, GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent, ProcessDescriptor,
@@ -221,36 +220,31 @@ impl PerfettoTraceManager {
         let key = self.generate_key(pid, tid);
 
         if pid == tid {
-            self.processes
+            let process = self
+                .processes
                 .entry(key)
-                .and_modify(|process| {
-                    if process.process_name().is_empty() {
-                        process.set_process_name(comm.clone());
-                    }
-                })
-                .or_insert_with(|| {
-                    let mut process = ProcessDescriptor::new();
-                    process.set_pid(pid as i32);
-                    process.set_process_name(comm);
-                    process
+                .or_insert_with(|| ProcessDescriptor {
+                    pid: Some(pid as i32),
+                    ..ProcessDescriptor::default()
                 });
+            process.process_name.get_or_insert(comm);
         } else {
-            self.threads.entry(key).or_insert_with(|| {
-                let mut thread = ThreadDescriptor::new();
-                thread.set_tid(tid as i32);
-                thread.set_pid(pid as i32);
-                thread.set_thread_name(comm);
-                thread
+            self.threads.entry(key).or_insert_with(|| ThreadDescriptor {
+                tid: Some(tid as i32),
+                pid: Some(pid as i32),
+                thread_name: Some(comm),
+                ..ThreadDescriptor::default()
             });
             // Create a ProcessDescriptor with an empty comm if one doesn't
             // exist - if we ever see the main thread we populate the process
             // name field there (see above).
             let pkey = self.generate_key(pid, pid);
-            self.processes.entry(pkey).or_insert_with(|| {
-                let mut process = ProcessDescriptor::new();
-                process.set_pid(pid as i32);
-                process
-            });
+            self.processes
+                .entry(pkey)
+                .or_insert_with(|| ProcessDescriptor {
+                    pid: Some(pid as i32),
+                    ..ProcessDescriptor::default()
+                });
         }
     }
 
@@ -294,30 +288,34 @@ impl PerfettoTraceManager {
             let uuid = self.rng.next_u64();
             self.process_uuids.insert(process.pid(), uuid);
 
-            let mut desc = TrackDescriptor::default();
-            desc.set_uuid(uuid);
-            desc.process = Some(process.clone()).into();
+            let desc = TrackDescriptor {
+                uuid: Some(uuid),
+                process: Some(process.clone()),
+                ..TrackDescriptor::default()
+            };
 
-            let mut packet = TracePacket::default();
-            packet.set_track_descriptor(desc);
+            let packet = TracePacket {
+                data: Some(trace_packet::Data::TrackDescriptor(desc)),
+                ..TracePacket::default()
+            };
             self.trace.packet.push(packet);
         }
 
         for (_, thread) in self.threads.iter() {
             let uuid = self.rng.next_u64();
 
-            let mut desc = TrackDescriptor::default();
-            desc.set_uuid(uuid);
-            desc.thread = Some(thread.clone()).into();
+            let pid = thread.pid();
+            let desc = TrackDescriptor {
+                parent_uuid: self.process_uuids.get(&pid).copied(),
+                thread: Some(thread.clone()),
+                uuid: Some(uuid),
+                ..TrackDescriptor::default()
+            };
 
-            let pid = desc.thread.pid();
-            let puuid = self.process_uuids.get(&pid);
-            if let Some(p) = puuid {
-                desc.set_parent_uuid(*p);
-            }
-
-            let mut packet = TracePacket::default();
-            packet.set_track_descriptor(desc);
+            let packet = TracePacket {
+                data: Some(trace_packet::Data::TrackDescriptor(desc)),
+                ..TracePacket::default()
+            };
             self.trace.packet.push(packet);
         }
 
