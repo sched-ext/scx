@@ -7,6 +7,17 @@
 #define __LAVD_H
 
 /*
+ * common macros
+ */
+#define U32_MAX		((u32)~0U)
+#define S32_MAX		((s32)(U32_MAX >> 1))
+
+#define LAVD_SHIFT			10
+#define LAVD_SCALE			(1L << LAVD_SHIFT)
+#define p2s(percent)			(((percent) << LAVD_SHIFT) / 100)
+#define s2p(scale)			(((scale) * 100) >> LAVD_SHIFT)
+
+/*
  * common constants
  */
 enum consts_internal  {
@@ -27,28 +38,27 @@ enum consts_internal  {
 	LAVD_LC_FREQ_MAX		= 1000000,
 	LAVD_LC_RUNTIME_MAX		= LAVD_TIME_ONE_SEC,
 	LAVD_LC_WEIGHT_BOOST		= 128, /* 2^7 */
-	LAVD_LC_GREEDY_PENALTY		= 20,  /* 20% */
+	LAVD_LC_GREEDY_PENALTY		= p2s(20),  /* 20% */
 	LAVD_LC_FREQ_OVER_RUNTIME	= 100,  /* 100x */
 
 	LAVD_SLICE_BOOST_MAX_FT		= 3, /* maximum additional 3x of slice */
 	LAVD_SLICE_BOOST_MAX_STEP	= 6, /* 6 slice exhausitions in a row */
 	LAVD_NEW_PROC_PENALITY		= 5,
-	LAVD_GREEDY_RATIO_NEW		= (1000 * LAVD_NEW_PROC_PENALITY),
+	LAVD_GREEDY_RATIO_NEW		= (LAVD_SCALE * LAVD_NEW_PROC_PENALITY),
 
-	LAVD_CPU_UTIL_MAX		= 1000, /* 100.0% */
-	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= 850, /* 85.0% */
+	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= p2s(85), /* 85.0% */
 
 	LAVD_SYS_STAT_INTERVAL_NS	= (50ULL * NSEC_PER_MSEC),
 	LAVD_SYS_STAT_DECAY_TIMES	= ((2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_CC_PER_CORE_MAX_CTUIL	= 500, /* maximum per-core CPU utilization */
-	LAVD_CC_PER_TURBO_CORE_MAX_CTUIL = 750, /* maximum per-core CPU utilization for a turbo core */
+	LAVD_CC_PER_CORE_MAX_CTUIL	= p2s(50),  /* 50%: maximum per-core CPU utilization */
+	LAVD_CC_PER_TURBO_CORE_MAX_CTUIL = p2s(75), /* 75%: maximum per-core CPU utilization for a turbo core */
 	LAVD_CC_NR_ACTIVE_MIN		= 1, /* num of mininum active cores */
 	LAVD_CC_CPU_PIN_INTERVAL	= (250ULL * NSEC_PER_MSEC),
 	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL / LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_AP_HIGH_UTIL		= 700, /* balanced mode when 10% < cpu util <= 70%,
-						  performance mode when cpu util > 70% */
+	LAVD_AP_HIGH_UTIL		= p2s(70), /* 70%: balanced mode when 10% < cpu util <= 70%,
+							  performance mode when cpu util > 70% */
 
 	LAVD_CPDOM_MIGRATION_SHIFT	= 3, /* 1/2**3 = +/- 12.5% */
 	LAVD_CPDOM_X_PROB_FT		= (LAVD_SYS_STAT_INTERVAL_NS /
@@ -56,9 +66,6 @@ enum consts_internal  {
 
 	LAVD_FUTEX_OP_INVALID		= -1,
 };
-
-#define U32_MAX		((u32)~0U)
-#define S32_MAX		((s32)(U32_MAX >> 1))
 
 /*
  * Compute domain context
@@ -130,7 +137,7 @@ struct cpu_ctx {
 	 *
 	 */
 	u16		cpu_id;		/* cpu id */
-	u16		capacity;	/* CPU capacity based on 1000 */
+	u16		capacity;	/* CPU capacity based on 1024 */
 	u8		big_core;	/* is it a big core? */
 	u8		turbo_core;	/* is it a turbo core? */
 	u8		cpdom_id;	/* compute domain id (== dsq_id) */

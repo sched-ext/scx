@@ -235,10 +235,10 @@ static u32 calc_greedy_ratio(struct task_ctx *taskc)
 	 * the ratio of task's actual service time to average service time in a
 	 * system.
 	 */
-	ratio = (1000 * taskc->svc_time) / sys_stat.avg_svc_time;
+	ratio = (taskc->svc_time << LAVD_SHIFT) / sys_stat.avg_svc_time;
 
 out:
-	taskc->is_greedy = ratio > 1000;
+	taskc->is_greedy = ratio > LAVD_SCALE;
 	return ratio;
 }
 
@@ -247,13 +247,13 @@ static u32 calc_greedy_factor(u32 greedy_ratio)
 	/*
 	 * For all under-utilized tasks, we treat them equally.
 	 */
-	if (greedy_ratio <= 1000)
-		return 1000;
+	if (greedy_ratio <= LAVD_SCALE)
+		return LAVD_SCALE;
 
 	/*
 	 * For over-utilized tasks, we give some mild penalty.
 	 */
-	return 1000 + ((greedy_ratio - 1000) / LAVD_LC_GREEDY_PENALTY);
+	return LAVD_SCALE + ((greedy_ratio - LAVD_SCALE) / LAVD_LC_GREEDY_PENALTY);
 
 }
 
@@ -324,7 +324,7 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 
 static void calc_perf_cri(struct task_struct *p, struct task_ctx *taskc)
 {
-	u64 wait_freq_ft, wake_freq_ft, perf_cri = 1000;
+	u64 wait_freq_ft, wake_freq_ft, perf_cri = LAVD_SCALE;
 
 	/*
 	 * A task is more CPU-performance sensitive when it meets the following
@@ -1569,7 +1569,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->is_online = bpf_cpumask_test_cpu(cpu, online_cpumask);
 		cpuc->capacity = get_cpuperf_cap(cpu);
 		cpuc->cpdom_poll_pos = cpu % LAVD_CPDOM_MAX_NR;
-		cpuc->min_perf_cri = 1000;
+		cpuc->min_perf_cri = LAVD_SCALE;
 		cpuc->futex_op = LAVD_FUTEX_OP_INVALID;
 
 		if (cpuc->capacity > 0) {
@@ -1613,7 +1613,7 @@ static s32 init_per_cpu_ctx(u64 now)
 			debugln("CPU %d is a turbo core.", cpu);
 		}
 	}
-	default_big_core_ratio = (1000 * big_capacity) / sum_capacity;
+	default_big_core_scale = (big_capacity << LAVD_SHIFT) / sum_capacity;
 
 	/*
 	 * Initialize compute domain id.
