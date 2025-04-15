@@ -674,6 +674,12 @@ static void update_stat_for_stopping(struct task_struct *p,
 		WRITE_ONCE(cur_svc_time, taskc->svc_time);
 
 	/*
+	 * Increase total scaled CPU time of this CPU,
+	 * whcih is capacity and frequency invariant.
+	 */
+	cpuc->tot_sc_time += scale_cap_freq(task_runtime, cpuc->cpu_id);
+
+	/*
 	 * Reset task's lock and futex boost count
 	 * for a lock holder to be boosted only once.
 	 */
@@ -1317,20 +1323,52 @@ void BPF_STRUCT_OPS(lavd_set_cpumask, struct task_struct *p,
 	set_on_core_type(taskc, cpumask);
 }
 
-void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
-		    struct scx_cpu_release_args *args)
+void BPF_STRUCT_OPS(lavd_cpu_acquire, s32 cpu,
+		    struct scx_cpu_acquire_args *args)
 {
 	struct cpu_ctx *cpuc;
+	u64 dur, scaled_dur;
 
-	/*
-	 * When a CPU is released to serve higher priority scheduler class,
-	 * reset the CPU's preemption information so it cannot be a victim.
-	 */
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
 		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return;
 	}
+
+	/*
+	 * When regaining control of a CPU under the higher priority scheduler
+	 * class, measure how much time the higher priority scheduler class
+	 * used -- i.e., [lavd_cpu_release, lavd_cpu_acquire]. This will be
+	 * used to calculate capacity-invariant and frequency-invariant CPU
+	 * utilization.
+	 */
+	dur = time_delta(scx_bpf_now(), cpuc->cpu_release_clk);
+	scaled_dur = scale_cap_freq(dur, cpu);
+	cpuc->tot_sc_time += scaled_dur;
+
+	/*
+	 * The higher-priority scheduler class could change the CPU frequency,
+	 * so let's keep track of the frequency when we gain the CPU control.
+	 * This helps to make the frequency update decision.
+	 */
+	cpuc->cpuperf_cur = scx_bpf_cpuperf_cur(cpu);
+}
+
+void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
+		    struct scx_cpu_release_args *args)
+{
+	struct cpu_ctx *cpuc;
+
+	cpuc = get_cpu_ctx_id(cpu);
+	if (!cpuc) {
+		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
+		return;
+	}
+
+	/*
+	 * When a CPU is released to serve higher priority scheduler class,
+	 * reset the CPU's preemption information so it cannot be a victim.
+	 */
 	reset_cpu_preemption_info(cpuc, true);
 
 	/*
@@ -1343,6 +1381,13 @@ void BPF_STRUCT_OPS(lavd_cpu_release, s32 cpu,
 	 * the target properly after regaining the control.
 	 */
 	reset_cpuperf_target(cpuc);
+
+	/*
+	 * Keep track of when the higher-priority scheduler class takes
+	 * the CPUto calculate capacity-invariant and frequency-invariant
+	 * CPU utilization.
+	 */
+	cpuc->cpu_release_clk = scx_bpf_now();
 }
 
 void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
@@ -1566,6 +1611,7 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->stopping_tm_est_ns = SCX_SLICE_INF;
 		cpuc->online_clk = now;
 		cpuc->offline_clk = now;
+		cpuc->cpu_release_clk = now;
 		cpuc->is_online = bpf_cpumask_test_cpu(cpu, online_cpumask);
 		cpuc->capacity = get_cpuperf_cap(cpu);
 		cpuc->cpdom_poll_pos = cpu % LAVD_CPDOM_MAX_NR;
@@ -1745,6 +1791,7 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .cpu_offline		= (void *)lavd_cpu_offline,
 	       .update_idle		= (void *)lavd_update_idle,
 	       .set_cpumask		= (void *)lavd_set_cpumask,
+	       .cpu_acquire		= (void *)lavd_cpu_acquire,
 	       .cpu_release		= (void *)lavd_cpu_release,
 	       .enable			= (void *)lavd_enable,
 	       .init_task		= (void *)lavd_init_task,

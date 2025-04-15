@@ -96,13 +96,17 @@ struct cpu_ctx {
 	 */
 	volatile u32	avg_util;	/* average of the CPU utilization */
 	volatile u32	cur_util;	/* CPU utilization of the current interval */
+	volatile u32	avg_sc_util;	/* average of the scaled CPU utilization, which is capacity and frequency invariant. */
+	volatile u32	cur_sc_util;	/* the scaled CPU utilization of the current interval, which is capacity and frequency invariant. */
 	volatile u64	idle_total;	/* total idle time so far */
 	volatile u64	idle_start_clk;	/* when the CPU becomes idle */
 
 	/*
 	 * Information used to keep track of load
 	 */
-	volatile u64	tot_svc_time;	/* total service time on a CPU */
+	volatile u64	tot_svc_time;	/* total service time on a CPU scaled by tasks' weights */
+	volatile u64	tot_sc_time;	/* total scaled CPU time, which is capacity and frequency invariant. */
+	volatile u64	cpu_release_clk; /* when the CPU is taken by higher-priority scheduler class */
 
 	/*
 	 * Information used to keep track of latency criticality
