@@ -709,7 +709,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	 * behind other threads which is necessary for forward progress
 	 * guarantee as we depend on the BPF timer which may run from ksoftirqd.
 	 */
-	if ((p->flags & PF_KTHREAD) && (p->nr_cpus_allowed < nr_cpus) &&
+	if ((p->flags & PF_KTHREAD) && !taskc->all_cpus &&
 	    kthreads_local) {
 		stat_inc(P2DQ_STAT_DIRECT);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns,
@@ -723,13 +723,13 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	 * Affinitized tasks just get dispatched directly, need to handle this
 	 * better.
 	 */
-	if (!taskc->all_cpus && bpf_cpumask_test_cpu(cpuc->id, p->cpus_ptr)) {
-		stat_inc(P2DQ_STAT_DIRECT);
-
+	if (!taskc->all_cpus) {
+		cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
 		ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
-		ret->fifo.dsq_id = SCX_DSQ_LOCAL;
+		ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON | cpu;
 		ret->fifo.enq_flags = enq_flags;
 		ret->fifo.slice_ns = slice_ns;
+		stat_inc(P2DQ_STAT_DIRECT);
 		return;
 	}
 
@@ -920,7 +920,7 @@ static int __always_inline dispatch_cpu(u64 dsq_id, s32 cpu, struct llc_ctx *llc
 			continue;
 		}
 
-		if (!__COMPAT_scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p, SCX_DSQ_LOCAL_ON|cpu, SCX_ENQ_PREEMPT)) {
+		if (!__COMPAT_scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p, SCX_DSQ_LOCAL_ON | cpu, 0)) {
 			bpf_task_release(p);
 			continue;
 		}
