@@ -10,7 +10,7 @@ use rand::RngCore;
 use rand::SeedableRng;
 use scx_utils::scx_enums;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,11 +26,11 @@ use crate::protos_gen::perfetto_scx::trace_packet::Data::TrackDescriptor as Data
 use crate::protos_gen::perfetto_scx::track_event::Type as TrackEventType;
 use crate::protos_gen::perfetto_scx::{
     BuiltinClock, ClockSnapshot, CounterDescriptor, CpuhpEnterFtraceEvent, CpuhpExitFtraceEvent,
-    FtraceEvent, FtraceEventBundle, GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent,
+    FtraceEvent, FtraceEventBundle, GpuMemTotalFtraceEvent, IpiRaiseFtraceEvent, ProcessDescriptor,
     SchedProcessExecFtraceEvent, SchedProcessExitFtraceEvent, SchedProcessForkFtraceEvent,
     SchedSwitchFtraceEvent, SchedWakeupFtraceEvent, SchedWakingFtraceEvent,
-    SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent, Trace, TracePacket, TrackDescriptor,
-    TrackEvent,
+    SoftirqEntryFtraceEvent, SoftirqExitFtraceEvent, ThreadDescriptor, Trace, TracePacket,
+    TrackDescriptor, TrackEvent,
 };
 
 /// Handler for perfetto traces. For details on data flow in perfetto see:
@@ -52,6 +52,9 @@ pub struct PerfettoTraceManager {
     dsq_nr_queued_events: BTreeMap<u64, Vec<TrackEvent>>,
     dsq_nr_queued_trusted_packet_seq_uuid: u32,
     dsq_uuids: BTreeMap<u64, u64>,
+    processes: HashMap<u64, ProcessDescriptor>,
+    threads: HashMap<u64, ThreadDescriptor>,
+    process_uuids: HashMap<i32, u64>,
 }
 
 impl PerfettoTraceManager {
@@ -80,6 +83,9 @@ impl PerfettoTraceManager {
             dsq_lat_trusted_packet_seq_uuid,
             dsq_nr_queued_events: BTreeMap::new(),
             dsq_nr_queued_trusted_packet_seq_uuid,
+            processes: HashMap::new(),
+            threads: HashMap::new(),
+            process_uuids: HashMap::new(),
         }
     }
 
@@ -188,6 +194,49 @@ impl PerfettoTraceManager {
         self.trace.packet.push(packet);
     }
 
+    fn generate_key(&mut self, v1: u32, v2: u32) -> u64 {
+        let v1_u32 = v1 as u64;
+        let v2_u32 = v2 as u64;
+        (v1_u32 << 32) | v2_u32
+    }
+
+    fn record_process_thread(&mut self, pid: u32, tid: u32, comm: String) {
+        let key = self.generate_key(pid, tid);
+
+        if pid == tid {
+            self.processes
+                .entry(key)
+                .and_modify(|process| {
+                    if process.process_name().is_empty() {
+                        process.set_process_name(comm.clone());
+                    }
+                })
+                .or_insert_with(|| {
+                    let mut process = ProcessDescriptor::new();
+                    process.set_pid(pid as i32);
+                    process.set_process_name(comm);
+                    process
+                });
+        } else {
+            self.threads.entry(key).or_insert_with(|| {
+                let mut thread = ThreadDescriptor::new();
+                thread.set_tid(tid as i32);
+                thread.set_pid(pid as i32);
+                thread.set_thread_name(comm);
+                thread
+            });
+            // Create a ProcessDescriptor with an empty comm if one doesn't
+            // exist - if we ever see the main thread we populate the process
+            // name field there (see above).
+            let pkey = self.generate_key(pid, pid);
+            self.processes.entry(pkey).or_insert_with(|| {
+                let mut process = ProcessDescriptor::new();
+                process.set_pid(pid as i32);
+                process
+            });
+        }
+    }
+
     /// Stops the trace and writes to configured output file.
     pub fn stop(
         &mut self,
@@ -215,6 +264,37 @@ impl PerfettoTraceManager {
                 .iter_mut()
                 .for_each(|(_, v)| v.retain(|e| e.timestamp() < ns));
         };
+
+        for (_, process) in self.processes.iter() {
+            let uuid = self.rng.next_u64();
+            self.process_uuids.insert(process.pid(), uuid);
+
+            let mut desc = TrackDescriptor::default();
+            desc.set_uuid(uuid);
+            desc.process = Some(process.clone()).into();
+
+            let mut packet = TracePacket::default();
+            packet.set_track_descriptor(desc);
+            self.trace.packet.push(packet);
+        }
+
+        for (_, thread) in self.threads.iter() {
+            let uuid = self.rng.next_u64();
+
+            let mut desc = TrackDescriptor::default();
+            desc.set_uuid(uuid);
+            desc.thread = Some(thread.clone()).into();
+
+            let pid = desc.thread.pid();
+            let puuid = self.process_uuids.get(&pid);
+            if let Some(p) = puuid {
+                desc.set_parent_uuid(*p);
+            }
+
+            let mut packet = TracePacket::default();
+            packet.set_track_descriptor(desc);
+            self.trace.packet.push(packet);
+        }
 
         for trace_descs in self.track_descriptors().values() {
             for trace_desc in trace_descs {
@@ -309,6 +389,7 @@ impl PerfettoTraceManager {
 
             ftrace_event
         });
+        self.record_process_thread(*tgid, *pid, comm.to_string());
     }
 
     pub fn on_fork(&mut self, action: &ForkAction) {
@@ -366,6 +447,7 @@ impl PerfettoTraceManager {
             ts,
             cpu,
             pid,
+            tgid,
             prio,
             comm,
         } = action;
@@ -387,6 +469,7 @@ impl PerfettoTraceManager {
 
             ftrace_event
         });
+        self.record_process_thread(*tgid, *pid, comm.to_string());
     }
 
     /// Adds events for on sched_wakeup_new.
@@ -400,6 +483,7 @@ impl PerfettoTraceManager {
             ts,
             cpu,
             pid,
+            tgid,
             prio,
             comm,
         } = action;
@@ -421,6 +505,7 @@ impl PerfettoTraceManager {
 
             ftrace_event
         });
+        self.record_process_thread(*tgid, *pid, comm.to_string());
     }
 
     /// Adds events for the softirq entry/exit events.
@@ -545,9 +630,11 @@ impl PerfettoTraceManager {
             next_dsq_nr_queued,
             next_dsq_lat_us,
             next_pid,
+            next_tgid,
             next_prio,
             next_comm,
             prev_pid,
+            prev_tgid,
             prev_prio,
             prev_comm,
             prev_state,
@@ -580,6 +667,13 @@ impl PerfettoTraceManager {
 
             ftrace_event
         });
+
+        if *next_pid > 0 {
+            self.record_process_thread(*next_tgid, *next_pid, next_comm.to_string());
+        }
+        if *prev_pid > 0 {
+            self.record_process_thread(*prev_tgid, *prev_pid, prev_comm.to_string());
+        }
 
         // Skip handling DSQ data if the sched_switch event didn't have
         // any DSQ data.
