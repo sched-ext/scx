@@ -36,7 +36,7 @@ int submit_task_ctx(struct task_struct *p, struct task_ctx *taskc, u32 cpu_id)
 	m->taskc_x.pid = p->pid;
 	__builtin_memcpy_inline(m->taskc_x.comm, p->comm, TASK_COMM_LEN);
 	m->taskc_x.static_prio = get_nice_prio(p);
-	m->taskc_x.cpu_util = cpuc->avg_util / 10;
+	m->taskc_x.cpu_util = s2p(cpuc->avg_util);
 	m->taskc_x.cpu_id = cpu_id;
 	m->taskc_x.avg_lat_cri = sys_stat.avg_lat_cri;
 	m->taskc_x.thr_perf_cri = sys_stat.thr_perf_cri;

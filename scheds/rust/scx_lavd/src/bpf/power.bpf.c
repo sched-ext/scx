@@ -17,7 +17,7 @@ static bool		have_little_core;
 
 const volatile u16	cpu_order_performance[LAVD_CPU_ID_MAX]; /* CPU preference order for performance and balanced mode */
 const volatile u16	cpu_order_powersave[LAVD_CPU_ID_MAX]; /* CPU preference order for powersave mode */
-const volatile u16	__cpu_capacity_hint[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1000 */
+const volatile u16	__cpu_capacity_hint[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1024 */
 
 static int		nr_cpdoms; /* number of compute domains */
 struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR]; /* contexts for compute domains */
@@ -25,14 +25,14 @@ private(LAVD) struct bpf_cpumask cpdom_cpumask[LAVD_CPDOM_MAX_NR]; /* online CPU
 
 
 /*
- * Big core's compute ratio among currently active cores
+ * Big core's compute ratio among currently active cores scaled by 1024.
  */
-static u32		cur_big_core_ratio;
+static u32		cur_big_core_scale;
 
 /*
- * Big core's compute ratio when all cores are active
+ * Big core's compute ratio when all cores are active scaled by 1024.
  */
-static u32		default_big_core_ratio;
+static u32		default_big_core_scale;
 
 /*
  * Statistics
@@ -60,13 +60,13 @@ static u64 calc_nr_active_cpus(void)
 	/*
 	 * nr_active = ceil(nr_cpus_onln * cpu_util * per_core_max_util)
 	 */
-	nr_active  = (nr_cpus_onln * sys_stat.util * 1000) + 500;
-	nr_active /= (LAVD_CC_PER_CORE_MAX_CTUIL * 1000);
+	nr_active  = ((nr_cpus_onln * sys_stat.util) << LAVD_SHIFT) + p2s(50);
+	nr_active /= (LAVD_CC_PER_CORE_MAX_CTUIL << LAVD_SHIFT);
 
 	/*
 	 * If a few CPUs are particularly busy, boost the active CPUs more.
 	 */
-	nr_active += sys_stat.nr_violation / 1000;
+	nr_active += sys_stat.nr_violation >> LAVD_SHIFT;
 	nr_active = max(min(nr_active, nr_cpus_onln), LAVD_CC_NR_ACTIVE_MIN);
 
 	return nr_active;
@@ -185,7 +185,7 @@ static void do_core_compaction(void)
 		}
 	}
 
-	cur_big_core_ratio = (1000 * big_capacity) / sum_capacity;
+	cur_big_core_scale = (big_capacity << LAVD_SHIFT) / sum_capacity;
 	sys_stat.nr_active = nr_active;
 
 	/*
@@ -320,15 +320,15 @@ static int do_autopilot(void)
 
 static void update_thr_perf_cri(void)
 {
-	u32 little_core_ratio, delta, diff, thr;
+	u32 little_core_scale, delta, diff, thr;
 
 	if (no_core_compaction || !have_little_core)
-		cur_big_core_ratio = default_big_core_ratio;
+		cur_big_core_scale = default_big_core_scale;
 
 	/*
 	 * If all active cores are big, all tasks should run on the big cores.
 	 */
-	if (cur_big_core_ratio == 1000) {
+	if (cur_big_core_scale == LAVD_SCALE) {
 		sys_stat.thr_perf_cri = 0;
 		return;
 	}
@@ -349,12 +349,12 @@ static void update_thr_perf_cri(void)
 	 *
 	 *   <------------><------------------->
 	 *   |            |                    |
-	 *   |            |                    1000
-	 *   |            1000 - big_core_ratio (i.e., little_core_ratio)
+	 *   |            |                    1024
+	 *   |            1024 - big_core_scale (i.e., little_core_scale)
 	 *   0
 	 */
-	little_core_ratio = 1000 - cur_big_core_ratio;
-	if (little_core_ratio < 500) {
+	little_core_scale = LAVD_SCALE - cur_big_core_scale;
+	if (little_core_scale < p2s(50)) {
 		/*
 		 *   min_perf_cri
 		 *   |         avg_perf_cri
@@ -364,12 +364,12 @@ static void update_thr_perf_cri(void)
 		 *
 		 *   <-///-><-------------------------->
 		 *   |     |                           |
-		 *   |     |                           1000
-		 *   |     little_core_ratio
+		 *   |     |                           1024
+		 *   |     little_core_scale
 		 *   0
 		 */
 		delta = sys_stat.avg_perf_cri - sys_stat.min_perf_cri;
-		diff = (delta * little_core_ratio) / 1000;
+		diff = (delta * little_core_scale) >> LAVD_SHIFT;
 		thr = diff + sys_stat.min_perf_cri;
 	}
 	else {
@@ -382,12 +382,12 @@ static void update_thr_perf_cri(void)
 		 *
 		 *   <---------------------><-////////->
 		 *   |                     |           |
-		 *   |                     |           1000
-		 *   |                     little_core_ratio
+		 *   |                     |           1024
+		 *   |                     little_core_scale
 		 *   0
 		 */
 		delta = sys_stat.max_perf_cri - sys_stat.avg_perf_cri;
-		diff = (delta * cur_big_core_ratio) / 1000;
+		diff = (delta * cur_big_core_scale) >> LAVD_SHIFT;
 		thr = sys_stat.max_perf_cri - diff;
 	}
 
@@ -467,8 +467,8 @@ static void update_cpuperf_target(struct cpu_ctx *cpuc)
 	 */
 	if (!no_freq_scaling) {
 		util = max(cpuc->avg_util, cpuc->cur_util) <
-			LAVD_CPU_UTIL_MAX_FOR_CPUPERF? : 1000;
-		cpuperf_target = (util * SCX_CPUPERF_ONE) / 1000;
+			LAVD_CPU_UTIL_MAX_FOR_CPUPERF? : LAVD_SCALE;
+		cpuperf_target = (util * SCX_CPUPERF_ONE) / LAVD_SCALE;
 	} else
 		cpuperf_target = SCX_CPUPERF_ONE;
 
@@ -528,14 +528,14 @@ static void init_autopilot_low_util(void)
 		 * When there are little cores, we move up to the balanced mode
 		 * if one little core is fully utilized.
 		 */
-		LAVD_AP_LOW_UTIL = 1000 / nr_cpus_onln;
+		LAVD_AP_LOW_UTIL = LAVD_SCALE / nr_cpus_onln;
 	}
 	else {
 		/*
 		 * When there are only big cores, we move up to the balanced
 		 * mode if two big cores are fully utilized.
 		 */
-		LAVD_AP_LOW_UTIL = (2 * 1000) / nr_cpus_onln;
+		LAVD_AP_LOW_UTIL = (2 * LAVD_SCALE) / nr_cpus_onln;
 	}
 }
 

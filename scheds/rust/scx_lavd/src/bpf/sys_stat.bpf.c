@@ -54,7 +54,7 @@ static void init_sys_stat_ctx(struct sys_stat_ctx *c)
 {
 	__builtin_memset(c, 0, sizeof(*c));
 
-	c->min_perf_cri = 1000;
+	c->min_perf_cri = LAVD_SCALE;
 	c->now = scx_bpf_now();
 	c->duration = c->now - sys_stat.last_update_clk;
 	sys_stat.last_update_clk = c->now;
@@ -78,7 +78,7 @@ static void plan_x_cpdom_migration(struct sys_stat_ctx *c)
 		c->nr_queued_task += nr_q_tasks;
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
-		cpdomc->nr_q_tasks_per_cpu = (nr_q_tasks * 1000) / cpdomc->nr_cpus;
+		cpdomc->nr_q_tasks_per_cpu = (nr_q_tasks * LAVD_SCALE) / cpdomc->nr_cpus;
 		avg_nr_q_tasks_per_cpu += cpdomc->nr_q_tasks_per_cpu;
 	}
 	avg_nr_q_tasks_per_cpu /= nr_cpdoms;
@@ -174,7 +174,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		if (have_little_core) {
 			if (cpuc->min_perf_cri < c->min_perf_cri)
 				c->min_perf_cri = cpuc->min_perf_cri;
-			cpuc->min_perf_cri = 1000;
+			cpuc->min_perf_cri = LAVD_SCALE;
 
 			if (cpuc->max_perf_cri > c->max_perf_cri)
 				c->max_perf_cri = cpuc->max_perf_cri;
@@ -208,16 +208,16 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		if (c->duration > cpuc->idle_total)
 			compute = c->duration - cpuc->idle_total;
 
-		cpuc->cur_util = (compute * LAVD_CPU_UTIL_MAX) / c->duration;
+		cpuc->cur_util = (compute * LAVD_SCALE) / c->duration;
 		cpuc->avg_util = calc_avg(cpuc->avg_util, cpuc->cur_util);
 
 		if (cpuc->turbo_core) {
 			if (cpuc->avg_util > LAVD_CC_PER_TURBO_CORE_MAX_CTUIL)
-				c->nr_violation += 1000;
+				c->nr_violation += LAVD_SCALE;
 		}
 		else {
 			if (cpuc->avg_util > LAVD_CC_PER_CORE_MAX_CTUIL)
-				c->nr_violation += 1000;
+				c->nr_violation += LAVD_SCALE;
 		}
 
 		/*
@@ -247,7 +247,7 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 		c->compute_total = c->duration_total - c->idle_total;
 	else
 		c->compute_total = 0;
-	c->cur_util = (c->compute_total * LAVD_CPU_UTIL_MAX)/c->duration_total;
+	c->cur_util = (c->compute_total * LAVD_SCALE) / c->duration_total;
 
 	if (c->nr_sched == 0) {
 		/*
