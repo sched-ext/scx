@@ -15,8 +15,8 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: Load minimal dependencies
-        run: nix run ./.github/include#nix-develop-gha -- ./.github/include#update-kernels
+      - name: Load dependencies
+        run: nix run ./.github/include#nix-develop-gha -- ./.github/include#restore-kernels
 
       - run: echo "SCHED_EXT_KERNEL_COMMIT=$(jq -r '."${{ inputs.repo-name }}".commitHash' kernel-versions.json)" >> $GITHUB_ENV
 
