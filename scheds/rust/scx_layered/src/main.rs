@@ -509,6 +509,11 @@ struct Opts {
     #[clap(long, default_value = "0")]
     exit_dump_len: u32,
 
+    /// Ms a task may not be ran before a watchdog kicks the scheduler from the
+    /// kernel. This will be capped to 30s by the kernel and defaults to 30s.
+    #[clap(long, default_value = "30000")]
+    timeout_ms: u32,
+
     /// Enable verbose output, including libbpf details. Specify multiple
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
@@ -1797,6 +1802,8 @@ impl<'a> Scheduler<'a> {
 
         // Initialize skel according to @opts.
         skel.struct_ops.layered_mut().exit_dump_len = opts.exit_dump_len;
+
+        skel.struct_ops.layered_mut().timeout_ms = opts.timeout_ms;
 
         if !opts.disable_queued_wakeup {
             match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
