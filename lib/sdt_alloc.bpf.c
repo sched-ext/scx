@@ -702,10 +702,12 @@ int scx_stk_init(struct scx_stk *stack, __u64 data_size, __u64 nr_pages_per_allo
 	return 0;
 }
 
-static void scx_stk_push(struct scx_stk *stack)
+static void scx_stk_push(struct scx_stk *stack, void __arena *elem)
 {
 	scx_ring_t *ring = stack->current;
 	int ridx = stack->cind;
+
+	stack->current->elems[stack->cind] = elem;
 
 	ridx += 1;
 
@@ -721,11 +723,16 @@ static void scx_stk_push(struct scx_stk *stack)
 
 	stack->current = ring;
 	stack->cind = ridx;
+
+	stack->capacity -= 1;
+	stack->available += 1;
 }
 
-static void scx_stk_pop(struct scx_stk *stack)
+static
+void __arena *scx_stk_pop(struct scx_stk *stack)
 {
 	scx_ring_t *ring = stack->current;
+	void __arena *elem;
 	int ridx = stack->cind;
 
 	/* Possibly loop into previous next ring. */
@@ -742,6 +749,60 @@ static void scx_stk_pop(struct scx_stk *stack)
 
 	stack->current = ring;
 	stack->cind = ridx;
+
+	elem = stack->current->elems[stack->cind];
+
+	stack->capacity += 1;
+	stack->available -= 1;
+
+	return elem;
+}
+
+static
+int scx_stk_ring_to_data(struct scx_stk *stack, size_t nelems)
+{
+	u64 data;
+	int i;
+
+	/* Do we have enough empty rings for the conversion? */
+	if (!stack->first || stack->first == stack->last)
+		return -ENOMEM;
+
+	data = (u64)stack->last;
+	stack->last->prev->next = NULL;
+	stack->last = stack->last->prev;
+
+	/* We removed a ring. */
+	stack->capacity -= SCX_RING_MAX;
+
+	for (i = zero; i < nelems && can_loop; i++) {
+		scx_stk_push(stack, (void __arena *)data);
+		data += stack->data_size;
+	}
+
+	return 0;
+}
+
+static
+void scx_stk_extend(struct scx_stk *stack, scx_ring_t *ring)
+{
+	if (stack->last)
+		stack->last->next = ring;
+
+	ring->prev = stack->last;
+	ring->next = NULL;
+
+	stack->last = ring;
+	stack->capacity += SCX_RING_MAX;
+
+	if (!stack->first)
+		stack->first = ring;
+
+	/*
+	 * Do not adjust the current ring/index because we did not add
+	 * any elements. The new ring will be pushed into during the next
+	 * allocation.
+	 */
 }
 
 static
@@ -750,18 +811,13 @@ int scx_stk_free_unlocked(struct scx_stk *stack, void __arena *elem)
 	if (!stack)
 		return -EINVAL;
 
-	/* We ensure there is always room in the ring at allocation time. */
+	/* If no more room, repurpose the allocation into a ring. */
 	if (stack->capacity == 0) {
-		scx_bpf_error("stack capacity overload");
+		scx_stk_extend(stack, (scx_ring_t *)elem);
 		return 0;
 	}
 
-	stack->current->elems[stack->cind] = elem;
-
-	scx_stk_push(stack);
-
-	stack->capacity -= 1;
-	stack->available += 1;
+	scx_stk_push(stack, elem);
 
 	return 0;
 }
@@ -787,23 +843,20 @@ int scx_stk_free_internal(struct scx_stk *stack, __u64 elem)
 }
 
 static
-int scx_stk_add_to_reserve(struct scx_stk *stack, __u64 nr_pages, __u64 nelems)
+int scx_stk_get_arena_memory(struct scx_stk *stack, __u64 nr_pages, __u64 nrings)
 {
 	scx_ring_t *ring;
-	u64 data, mem;
 	int ret, i;
+	u64 mem;
 
 	arena_spin_unlock(stack->lock);
 
-	if (nelems > SCX_RING_MAX) {
-		scx_bpf_error("new elements must fit into a single ring");
-		return -EINVAL;
-	}
-
 	/*
-	 * XXXETSAL: The code conflates two things, allocating data and expanding
-	 * the buffer. We can expand the current logic to split the two, but
-	 * for now it should only matter for very large structs.
+	 * The code allocates new memory only as rings. The allocation and
+	 * free code freely typecasts the ring buffer into data that can be
+	 * allocated, and vice versa to avoid either ending up with too many
+	 * empty rings under memory pressure, or having no space in the ring
+	 * buffer for a buffer currently being freed.
 	 */
 
 	/*
@@ -814,7 +867,12 @@ int scx_stk_add_to_reserve(struct scx_stk *stack, __u64 nr_pages, __u64 nelems)
 	if (!stack)
 		return -EINVAL;
 
-	mem = (__u64)bpf_arena_alloc_pages(&arena, NULL, nr_pages + 1, NUMA_NO_NODE, 0);
+	/*
+	 * We may alocate 2x the allocation size to ensure that a single
+	 * rings allocation to handle a completely empty stack that has
+	 * neither rings nor elements.
+	 */
+	mem = (__u64)bpf_arena_alloc_pages(&arena, NULL, nrings * nr_pages, NUMA_NO_NODE, 0);
 	if (!mem)
 		return -ENOMEM;
 
@@ -827,19 +885,14 @@ int scx_stk_add_to_reserve(struct scx_stk *stack, __u64 nr_pages, __u64 nelems)
 	_Static_assert(sizeof(struct scx_ring) <= PAGE_SIZE,
 		"ring must fit into a page");
 
-	ring = (scx_ring_t *)mem;
-	data = mem + PAGE_SIZE;
+	/* Attach the rings to the reserve linked list. */
+	for (i = zero; i < nrings && can_loop; i++) {
+		ring = (scx_ring_t *)mem;
+		ring->next = stack->reserve;
+		stack->reserve = ring;
 
-
-	/* Populate with the elements. */
-	for (i = zero; i < nelems && can_loop; i++) {
-		ring->elems[i] = (void __arena *)data;
-		data += stack->data_size;
+		mem += nr_pages * PAGE_SIZE;
 	}
-
-	/* Attach to the reserve rings. */
-	ring->next = stack->reserve;
-	stack->reserve = ring;
 
 	return 0;
 }
@@ -847,46 +900,64 @@ int scx_stk_add_to_reserve(struct scx_stk *stack, __u64 nr_pages, __u64 nelems)
 static
 int scx_stk_fill_new_elems(struct scx_stk *stack)
 {
-	scx_ring_t *reserve;
+	size_t nelems, nrings;
+	scx_ring_t *ring;
 	__u64 nr_pages;
-	size_t nelems;
-	int ret;
+	int ret, i;
+	u64 mem;
 
 	nr_pages = stack->nr_pages_per_alloc;
 	nelems = (nr_pages * PAGE_SIZE) / stack->data_size;
+	if (nelems > SCX_RING_MAX) {
+		scx_bpf_error("new elements must fit into a single ring");
+		return -EINVAL;
+	}
 
+	/* How many rings should we allocate? */
+	nrings = stack->capacity ? 1 : 2;
+
+	/*
+	 * If we have more than two empty rings available,
+	 * repurpose one of them into an allocation.
+	 */
+	ret = scx_stk_ring_to_data(stack, nelems);
+	if (!ret)
+		return 0;
+
+	/* If we haven't set aside any memory from before, allocate. */
 	if (!stack->reserve) {
 		/* This call drops and retakes the lock.  */
-		ret = scx_stk_add_to_reserve(stack, nr_pages, nelems);
+		ret = scx_stk_get_arena_memory(stack, nr_pages, nrings);
 		if (ret)
 			return ret;
 	}
 
 	/*
-	 * If somebody replenished the stack while we were asleep,
-	 * no need to do anything.
+	 * If somebody replenished the stack while we were asleep, no need
+	 * to do anything. Keep the allocated memory in the reserve linked
+	 * list for subsequent allocations.
 	 */
 	if (stack->available > 0)
 		return 0;
 
+	/*
+	 * Otherwise add elements and possibly capacity to the stack. */
+	if (!stack->capacity) {
+		ring = stack->reserve;
+		stack->reserve = stack->reserve->next;
+
+		scx_stk_extend(stack, ring);
+	}
+
 	/* Pop out the reserve and attach to the stack. */
-	reserve = stack->reserve;
-	stack->reserve = reserve->next;
+	ring = stack->reserve;
+	stack->reserve = ring->next;
 
-	if (stack->first)
-		stack->first->prev = reserve;
-	reserve->next = stack->first;
-	reserve->prev = NULL;
-
-	stack->first = reserve;
-	stack->reserve = NULL;
-
-	/* New rings are always prefilled with nelems. */
-	stack->capacity += (SCX_RING_MAX - nelems);
-	stack->available += nelems;
-
-	stack->current = reserve;
-	stack->cind = nelems;
+	mem = (u64)ring;
+	for (i = zero; i < nelems && can_loop; i++) {
+		scx_stk_push(stack, (void __arena *)mem);
+		mem += stack->data_size;
+	}
 
 	return 0;
 }
@@ -907,7 +978,6 @@ __u64 scx_stk_alloc(struct scx_stk *stack)
 
 	/* If ring buffer is empty, we have to populate it. */
 	if (stack->available == 0) {
-
 		/* The call drops the lock on error. */
 		ret = scx_stk_fill_new_elems(stack);
 		if (ret) {
@@ -916,11 +986,7 @@ __u64 scx_stk_alloc(struct scx_stk *stack)
 		}
 	}
 
-	scx_stk_pop(stack);
-	elem = stack->current->elems[stack->cind];
-
-	stack->capacity += 1;
-	stack->available -= 1;
+	elem = scx_stk_pop(stack);
 
 	arena_spin_unlock(stack->lock);
 
