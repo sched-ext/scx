@@ -705,13 +705,13 @@ int scx_stk_init(struct scx_stk *stack, __u64 data_size, __u64 nr_pages_per_allo
 static void scx_stk_push(struct scx_stk *stack)
 {
 	scx_ring_t *ring = stack->current;
-	int rind = stack->cind;
+	int ridx = stack->cind;
 
-	rind += 1;
+	ridx += 1;
 
 	/* Possibly loop into the next ring. */
-	if (rind == SCX_RING_MAX) {
-		rind = 0;
+	if (ridx == SCX_RING_MAX) {
+		ridx = 0;
 		ring = ring->next;
 	}
 
@@ -720,28 +720,28 @@ static void scx_stk_push(struct scx_stk *stack)
 		ring = stack->first;
 
 	stack->current = ring;
-	stack->cind = rind;
+	stack->cind = ridx;
 }
 
 static void scx_stk_pop(struct scx_stk *stack)
 {
 	scx_ring_t *ring = stack->current;
-	int rind = stack->cind;
+	int ridx = stack->cind;
 
 	/* Possibly loop into previous next ring. */
-	if (rind == 0) {
-		rind = SCX_RING_MAX;
+	if (ridx == 0) {
+		ridx = SCX_RING_MAX;
 		ring = stack->current->prev;
 	}
 
-	rind -= 1;
+	ridx -= 1;
 
 	/* Possibly loop back into the last ring. */
 	if (!ring)
 		ring = stack->last;
 
 	stack->current = ring;
-	stack->cind = rind;
+	stack->cind = ridx;
 }
 
 static
