@@ -2789,15 +2789,21 @@ void BPF_STRUCT_OPS(layered_disable, struct task_struct *p)
 	task_uncharge_qrt(taskc);
 }
 
-static u64 dsq_first_runnable_for_ms(u64 dsq_id, u64 now)
+static s64 dsq_first_runnable_at_ms(u64 dsq_id, u64 now)
 {
 	struct task_struct *p;
 
 	bpf_for_each(scx_dsq, p, dsq_id, 0) {
 		struct task_ctx *taskc;
 
-		if ((taskc = lookup_task_ctx(p)))
-			return (now - taskc->runnable_at) / 1000000;
+		if ((taskc = lookup_task_ctx(p))) {
+			u64 runnable_at = taskc->runnable_at;
+
+			if (runnable_at >= now)
+				return ((taskc->runnable_at - now) / 1000000);
+			else
+				return -((now - taskc->runnable_at) / 1000000);
+		}
 	}
 
 	return 0;
@@ -2846,10 +2852,10 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 				continue;
 
 			dsq_id = layer_dsq_id(layer->id, j);
-			scx_bpf_dump("LAYER[%d][%s]DSQ[%llx] nr_cpus=%u nr_queued=%d -%llums cpus=",
+			scx_bpf_dump("LAYER[%d][%s]DSQ[%llx] nr_cpus=%u nr_queued=%d %+lldms cpus=",
 				     i, layer->name, dsq_id, layer->nr_cpus,
 				     scx_bpf_dsq_nr_queued(dsq_id),
-				     dsq_first_runnable_for_ms(dsq_id, now));
+				     dsq_first_runnable_at_ms(dsq_id, now));
 			scx_bpf_dump("\n");
 		}
 		dump_layer_cpumask(i);
@@ -2857,13 +2863,13 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 	}
 	bpf_for(i, 0, nr_llcs) {
 		dsq_id = hi_fb_dsq_id(i);
-		scx_bpf_dump("HI_[%llx] nr_queued=%d -%llums\n",
+		scx_bpf_dump("HI_[%llx] nr_queued=%d %+lldms\n",
 			     dsq_id, scx_bpf_dsq_nr_queued(dsq_id),
-			     dsq_first_runnable_for_ms(dsq_id, now));
+			     dsq_first_runnable_at_ms(dsq_id, now));
 		dsq_id = lo_fb_dsq_id(i);
-		scx_bpf_dump("LO_FALLBACK[%llx] nr_queued=%d -%llums\n",
+		scx_bpf_dump("LO_FALLBACK[%llx] nr_queued=%d %+lldms\n",
 			     dsq_id, scx_bpf_dsq_nr_queued(dsq_id),
-			     dsq_first_runnable_for_ms(dsq_id, now));
+			     dsq_first_runnable_at_ms(dsq_id, now));
 	}
 }
 
