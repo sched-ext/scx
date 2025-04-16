@@ -405,6 +405,23 @@ int BPF_KPROBE(scx_dispatch_from_dsq_set_vtime, struct bpf_iter_scx_dsq *it__ite
 	return on_move_set_vtime(NULL, vtime);
 }
 
+static void record_real_comm(char *comm, struct task_struct *task)
+{
+	if (task->flags & PF_WQ_WORKER) {
+		/*
+		 * Worker queue thread names are 32 characters long but let's
+		 * stick with the measly 16 characters of the comm field to
+		 * keep things simple.
+		 */
+		struct kthread *k = bpf_core_cast(task->worker_private,
+						  struct kthread);
+		struct worker *worker = bpf_core_cast(k->data, struct worker);
+		bpf_probe_read_kernel_str(comm, MAX_COMM, worker->desc);
+	} else {
+		__builtin_memcpy_inline(comm, &task->comm, MAX_COMM);
+	}
+}
+
 static __always_inline int __on_sched_wakeup(struct task_struct *p)
 {
 	struct task_ctx *tctx;
@@ -429,7 +446,8 @@ static __always_inline int __on_sched_wakeup(struct task_struct *p)
 	event->event.wakeup.pid = p->pid;
 	event->event.wakeup.tgid = p->tgid;
 	event->event.wakeup.prio = (int)p->prio;
-	__builtin_memcpy_inline(&event->event.wakeup.comm, &p->comm, MAX_COMM);
+	record_real_comm(event->event.wakeup.comm, p);
+
 	bpf_ringbuf_submit(event, 0);
 
 	return 0;
@@ -464,7 +482,7 @@ int BPF_PROG(on_sched_waking, struct task_struct *p)
 	event->event.wakeup.pid = p->pid;
 	event->event.wakeup.tgid = p->tgid;
 	event->event.wakeup.prio = (int)p->prio;
-	__builtin_memcpy(&event->event.wakeup.comm, &p->comm, MAX_COMM);
+	record_real_comm(event->event.wakeup.comm, p);
 
 	bpf_ringbuf_submit(event, 0);
 	return 0;
@@ -524,7 +542,7 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 			event->event.sched_switch.next_dsq_nr = 0;
 			event->event.sched_switch.next_dsq_vtime = 0;
 		}
-		__builtin_memcpy(&event->event.sched_switch.next_comm, &next->comm, MAX_COMM);
+		record_real_comm(event->event.sched_switch.next_comm, next);
 	} else {
 		event->event.sched_switch.next_pid = 0;
 		event->event.sched_switch.next_tgid = 0;
@@ -542,7 +560,7 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 		} else {
 			event->event.sched_switch.prev_dsq_id = SCX_DSQ_INVALID;
 		}
-		__builtin_memcpy(&event->event.sched_switch.prev_comm, &prev->comm, MAX_COMM);
+		record_real_comm(event->event.sched_switch.prev_comm, prev);
 	} else {
 		event->event.sched_switch.prev_pid = 0;
 		event->event.sched_switch.prev_tgid = 0;
@@ -803,7 +821,7 @@ int BPF_PROG(on_sched_exit, struct task_struct *task)
 	event->event.exit.pid = BPF_CORE_READ(task, pid);
 	event->event.exit.tgid = BPF_CORE_READ(task, tgid);
 	event->event.exit.prio = BPF_CORE_READ(task, prio);
-	__builtin_memcpy_inline(&event->event.exit.comm, &task->comm, MAX_COMM);
+	record_real_comm(event->event.exit.comm, task);
 
 	bpf_ringbuf_submit(event, 0);
 
@@ -826,8 +844,8 @@ int BPF_PROG(on_sched_fork, struct task_struct *parent, struct task_struct *chil
 	event->ts = bpf_ktime_get_ns();
 	event->event.fork.parent_pid = BPF_CORE_READ(parent, pid);
 	event->event.fork.child_pid = BPF_CORE_READ(child, pid);
-	__builtin_memcpy_inline(&event->event.fork.parent_comm, &parent->comm, MAX_COMM);
-	__builtin_memcpy_inline(&event->event.fork.child_comm, &child->comm, MAX_COMM);
+	record_real_comm(event->event.fork.parent_comm, parent);
+	record_real_comm(event->event.fork.child_comm, child);
 
 	bpf_ringbuf_submit(event, 0);
 
