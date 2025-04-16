@@ -145,6 +145,7 @@ struct task_ctx_x {
 	u16	static_prio;	/* nice priority */
 	u32	cpu_id;		/* where a task ran */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
+	u64	cpu_sutil;	/* scaled cpu utilization in [0..100] */
 	u32	thr_perf_cri;	/* performance criticality threshold */
 	u32	avg_lat_cri;	/* average latency criticality */
 	u32	nr_active;	/* number of active cores */
