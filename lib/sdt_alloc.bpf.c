@@ -996,6 +996,41 @@ __u64 scx_stk_alloc(struct scx_stk *stack)
 	return (u64)elem;
 }
 
+static
+void header_set_order(scx_buddy_chunk_t *chunk, u64 offset, u8 order)
+{
+	if (order >= SCX_BUDDY_CHUNK_ORDERS) {
+		scx_bpf_error("setting invalid order");
+		return;
+	}
+
+	if (offset >= SCX_BUDDY_CHUNK_ITEMS) {
+		scx_bpf_error("setting order of invalid offset");
+		return;
+	}
+
+	if (offset & 0x1)
+		order &= 0xf;
+	else
+		order <<= 4;
+
+	chunk->orders[offset / 2] |= order;
+}
+
+static
+u8 header_get_order(scx_buddy_chunk_t *chunk, u64 offset)
+{
+	u8 result;
+
+	if (offset >= SCX_BUDDY_CHUNK_ITEMS) {
+		scx_bpf_error("setting order of invalid offset");
+		return SCX_BUDDY_CHUNK_ORDERS;
+	}
+
+	result = chunk->orders[offset / 2];
+
+	return (offset & 0x1) ? (result & 0xf) : (result >> 4);
+}
 
 static
 scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
@@ -1019,7 +1054,7 @@ scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
 	bpf_for (i, 0, SCX_BUDDY_CHUNK_ITEMS) {
 		chunk->headers[i].prev_index = SCX_BUDDY_CHUNK_ITEMS;
 		chunk->headers[i].next_index = SCX_BUDDY_CHUNK_ITEMS;
-		chunk->headers[i].order = SCX_BUDDY_CHUNK_ORDERS;
+		header_set_order(chunk, i, SCX_BUDDY_CHUNK_ORDERS);
 	}
 
 
@@ -1031,7 +1066,7 @@ scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
 	bpf_for (order, 0, SCX_BUDDY_CHUNK_ORDERS - 1) {
 		index += 1 << order;
 		chunk->order_indices[order] = index;
-		chunk->headers[index].order = order;
+		header_set_order(chunk, index, order);
 	}
 
 
@@ -1110,7 +1145,7 @@ u64 scx_buddy_chunk_alloc(scx_buddy_chunk_t *chunk, int order_req)
 
 	header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
 	header->next_index = SCX_BUDDY_CHUNK_ITEMS;
-	header->order = order_req;
+	header_set_order(chunk, index, order_req);
 
 	address = (u64)chunk + PAGE_SIZE + (index * SCX_BUDDY_MIN_ALLOC_BYTES);
 
@@ -1121,7 +1156,7 @@ u64 scx_buddy_chunk_alloc(scx_buddy_chunk_t *chunk, int order_req)
 
 		/* Add the buddy of the allocation to the free list. */
 		header = (scx_buddy_header_t *)&chunk->headers[index];
-		header->order = order;
+		header_set_order(chunk, index, order);
 		header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
 
 		header->next_index = chunk->order_indices[order];
@@ -1185,7 +1220,7 @@ void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 	scx_buddy_chunk_t *chunk, *target_chunk;
 	u64 mib_mask = ((1ULL << 20) - 1);
 	u64 index, buddy_index;
-	int order;
+	u8 order;
 
 	if (addr & ((1ULL << 12) - 1)) {
 		scx_bpf_error("Freeing non-page aligned address %llx", addr);
@@ -1212,7 +1247,7 @@ void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 	index = (addr & mib_mask) >> 12;
 	header = &chunk->headers[index];
 
-	bpf_for(order, header->order, SCX_BUDDY_CHUNK_ORDERS) {
+	bpf_for(order, header_get_order(chunk, index), SCX_BUDDY_CHUNK_ORDERS) {
 		buddy_index = index ^= 1 << order;
 		buddy_header = &chunk->headers[buddy_index];
 
@@ -1239,16 +1274,17 @@ void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 			buddy_header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
 		}
 
-		buddy_header->order = SCX_BUDDY_CHUNK_ORDERS;
+		header_set_order(chunk, buddy_index, SCX_BUDDY_CHUNK_ORDERS);
 
 		index = index < buddy_index ? index : buddy_index;
 
 		header = &chunk->headers[index];
-		header->order = order + 1;
+		header_set_order(chunk, index, order + 1);
 	}
 
-	header->next_index = chunk->order_indices[header->order];
-	chunk->order_indices[header->order] = index;
+	order = header_get_order(chunk, index);
+	header->next_index = chunk->order_indices[order];
+	chunk->order_indices[order] = index;
 
 	bpf_spin_unlock(&buddy->lock);
 }

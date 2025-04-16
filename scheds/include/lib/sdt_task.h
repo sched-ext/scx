@@ -162,7 +162,7 @@ int scx_stk_free_internal(struct scx_stk *stack, __u64 elem);
 
 /* Buddy allocator-related structs. */
 
-/* 
+/*
  * XXX Initially we do page-sized allocations, there are certain intricacies in using
  * a buddy allocator with smaller sizes - mainly the metadata and worst-case allocations
  * cause high space overhead in the average and worst case.
@@ -180,23 +180,24 @@ typedef struct scx_buddy_chunk __arena scx_buddy_chunk_t;
 struct scx_buddy_header;
 typedef struct scx_buddy_header __arena scx_buddy_header_t;
 
-/* 
- * XXXETSAL: Right now this is 16 bytes because of the pointer and alignment. 
+/*
+ * XXXETSAL: Right now this is 16 bytes because of the pointer and alignment.
  * We can make this 8 bytes if we use a 32-bit pointer, since arena pointers
- * are 32-bit anyway, then turn it into 2 bytes if we replace the pointer 
+ * are 32-bit anyway, then turn it into 2 bytes if we replace the pointer
  * with an offset into the chunk array and mark the struct as packed (assuming
  * BPF permits it).
  */
 struct scx_buddy_header {
 	u16 prev_index;	/* "Pointer" to the previous available allocation of the same size. */
 	u16 next_index; /* Same for the next allocation. */
-	u16 order;	/* Allocation order, starting from the base allocation of the allocator. */
 };
 
 /*
  * We bring memory into the allocator 1MiB at a time.
  */
 struct scx_buddy_chunk {
+	/* The order of the current allocation for a item. 4 bits per order. */
+	u8 orders[SCX_BUDDY_CHUNK_ITEMS / 2];
 	struct scx_buddy_header	headers[SCX_BUDDY_CHUNK_ITEMS];
 	u64			order_indices[SCX_BUDDY_CHUNK_ORDERS];
 	scx_buddy_chunk_t	*prev;
