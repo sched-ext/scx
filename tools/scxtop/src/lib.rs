@@ -50,6 +50,7 @@ pub use plain::Plain;
 unsafe impl Plain for crate::bpf_skel::types::bpf_event {}
 
 use smartstring::alias::String as SsoString;
+use std::ffi::CStr;
 
 pub const APP: &str = "scxtop";
 pub const TRACE_FILE_PREFIX: &str = "scxtop_trace";
@@ -365,13 +366,10 @@ impl TryFrom<&bpf_event> for Action {
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_SCHED_WAKEUP => {
                 let wakeup = unsafe { event.event.wakeup };
-                let comm = unsafe {
-                    std::str::from_utf8(std::slice::from_raw_parts(
-                        event.event.wakeup.comm.as_ptr() as *const u8,
-                        16,
-                    ))
-                    .unwrap()
-                };
+                let comm = unsafe { CStr::from_ptr(event.event.wakeup.comm.as_ptr()) }
+                    .to_string_lossy()
+                    .to_string();
+
                 Ok(Action::SchedWakeup(SchedWakeupAction {
                     ts: event.ts,
                     cpu: event.cpu,
@@ -384,10 +382,9 @@ impl TryFrom<&bpf_event> for Action {
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_SCHED_WAKING => {
                 let waking = unsafe { &event.event.waking };
-                let comm = std::str::from_utf8(unsafe {
-                    std::slice::from_raw_parts(waking.comm.as_ptr() as *const u8, 16)
-                })
-                .unwrap();
+                let comm = unsafe { CStr::from_ptr(waking.comm.as_ptr()) }
+                    .to_string_lossy()
+                    .to_string();
 
                 Ok(Action::SchedWaking(SchedWakingAction {
                     ts: event.ts,
@@ -406,13 +403,10 @@ impl TryFrom<&bpf_event> for Action {
             })),
             bpf_intf::event_type_EXIT => {
                 let exit = unsafe { &event.event.exit };
-                let comm = unsafe {
-                    std::str::from_utf8(std::slice::from_raw_parts(
-                        exit.comm.as_ptr() as *const u8,
-                        exit.comm.len(),
-                    ))
-                    .unwrap()
-                };
+                let comm = unsafe { CStr::from_ptr(exit.comm.as_ptr()) }
+                    .to_string_lossy()
+                    .to_string();
+
                 Ok(Action::Exit(ExitAction {
                     ts: event.ts,
                     cpu: event.cpu,
@@ -425,20 +419,13 @@ impl TryFrom<&bpf_event> for Action {
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_FORK => {
                 let fork = unsafe { &event.event.fork };
-                let parent_comm = unsafe {
-                    std::str::from_utf8(std::slice::from_raw_parts(
-                        fork.parent_comm.as_ptr() as *const u8,
-                        fork.parent_comm.len(),
-                    ))
-                    .unwrap()
-                };
-                let child_comm = unsafe {
-                    std::str::from_utf8(std::slice::from_raw_parts(
-                        fork.child_comm.as_ptr() as *const u8,
-                        fork.child_comm.len(),
-                    ))
-                    .unwrap()
-                };
+                let parent_comm = unsafe { CStr::from_ptr(fork.parent_comm.as_ptr()) }
+                    .to_string_lossy()
+                    .to_string();
+                let child_comm = unsafe { CStr::from_ptr(fork.child_comm.as_ptr()) }
+                    .to_string_lossy()
+                    .to_string();
+
                 Ok(Action::Fork(ForkAction {
                     ts: event.ts,
                     cpu: event.cpu,
@@ -451,20 +438,12 @@ impl TryFrom<&bpf_event> for Action {
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_SCHED_SWITCH => {
                 let sched_switch = unsafe { &event.event.sched_switch };
-                let prev_comm = unsafe {
-                    std::str::from_utf8(std::slice::from_raw_parts(
-                        sched_switch.prev_comm.as_ptr() as *const u8,
-                        sched_switch.prev_comm.len(),
-                    ))
-                    .unwrap()
-                };
-                let next_comm = unsafe {
-                    std::str::from_utf8(std::slice::from_raw_parts(
-                        sched_switch.next_comm.as_ptr() as *const u8,
-                        sched_switch.next_comm.len(),
-                    ))
-                    .unwrap()
-                };
+                let prev_comm = unsafe { CStr::from_ptr(sched_switch.prev_comm.as_ptr()) }
+                    .to_string_lossy()
+                    .to_string();
+                let next_comm = unsafe { CStr::from_ptr(sched_switch.next_comm.as_ptr()) }
+                    .to_string_lossy()
+                    .to_string();
 
                 Ok(Action::SchedSwitch(SchedSwitchAction {
                     ts: event.ts,
