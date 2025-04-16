@@ -2809,26 +2809,32 @@ static s64 dsq_first_runnable_at_ms(u64 dsq_id, u64 now)
 	return 0;
 }
 
+__hidden void dump_cpumask_word(s32 word, struct cpumask *cpumask)
+{
+	u32 u, v = 0;
+
+	bpf_for(u, 0, 32) {
+		s32 cpu = 32 * word + u;
+		if (cpu < nr_cpu_ids &&
+		    bpf_cpumask_test_cpu(cpu, cpumask))
+			v |= 1 << u;
+	}
+	scx_bpf_dump("%08x", v);
+}
+
 static void dump_layer_cpumask(int id)
 {
 	struct cpumask *layer_cpumask;
-	s32 cpu;
-	char buf[128] = "", *p;
+	u32 word, nr_words = (nr_cpu_ids + 31) / 32;
 
 	if (!(layer_cpumask = lookup_layer_cpumask(id)))
 		return;
 
-	bpf_for(cpu, 0, scx_bpf_nr_cpu_ids()) {
-		if (!(p = MEMBER_VPTR(buf, [cpu])))
-			break;
-		if (bpf_cpumask_test_cpu(cpu, layer_cpumask))
-			*p = '0' + cpu % 10;
-		else
-			*p = '.';
+	bpf_for(word, 0, nr_words) {
+		if (word)
+			scx_bpf_dump(",");
+		dump_cpumask_word(nr_words - word - 1, layer_cpumask);
 	}
-	buf[sizeof(buf) - 1] = '\0';
-
-	scx_bpf_dump("%s", buf);
 }
 
 void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
@@ -2852,12 +2858,12 @@ void BPF_STRUCT_OPS(layered_dump, struct scx_dump_ctx *dctx)
 				continue;
 
 			dsq_id = layer_dsq_id(layer->id, j);
-			scx_bpf_dump("LAYER[%d][%s]DSQ[%llx] nr_cpus=%u nr_queued=%d %+lldms cpus=",
+			scx_bpf_dump("LAYER[%d](%s)-DSQ[%llx] nr_cpus=%u nr_queued=%d %+lldms\n",
 				     i, layer->name, dsq_id, layer->nr_cpus,
 				     scx_bpf_dsq_nr_queued(dsq_id),
 				     dsq_first_runnable_at_ms(dsq_id, now));
-			scx_bpf_dump("\n");
 		}
+		scx_bpf_dump("LAYER[%d](%s) CPUS=", i, layer->name);
 		dump_layer_cpumask(i);
 		scx_bpf_dump("\n");
 	}
