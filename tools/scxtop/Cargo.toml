@@ -32,7 +32,7 @@ log = "0.4.17"
 num-format = { version = "0.4.3", features = ["with-serde", "with-system-locale"] }
 perf-event-open-sys2 = "5.0.6"
 plain = "0.2.3"
-protobuf = "3.7.1"
+prost = "0.13.5"
 rand = "0.8.5"
 ratatui = { version = "0.29.0", features = ["serde", "macros"] }
 regex = "1.11.1"
@@ -56,6 +56,6 @@ smartstring = { version = "1.0.1", features = ["serde"] }
 nix = { version = "0.29", features = ["time"] }
 
 [build-dependencies]
-protobuf-codegen = "3.7.1"
+prost-build = "0.13.5"
 scx_stats = { path = "../../rust/scx_stats", version = "1.0.11" }
 scx_utils = { path = "../../rust/scx_utils", version = "1.0.13" }
