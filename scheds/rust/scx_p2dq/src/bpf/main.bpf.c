@@ -719,22 +719,9 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		return;
 	}
 
-	/*
-	 * Affinitized tasks just get dispatched directly, need to handle this
-	 * better.
-	 */
-	if (!taskc->all_cpus) {
-		cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
-		ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
-		ret->fifo.dsq_id = SCX_DSQ_LOCAL_ON | cpu;
-		ret->fifo.enq_flags = enq_flags;
-		ret->fifo.slice_ns = slice_ns;
-		stat_inc(P2DQ_STAT_DIRECT);
-		return;
-	}
-
 	// If an idle CPU hasn't been found in select_cpu find one now
-	if (select_idle_in_enqueue && !__COMPAT_is_enq_cpu_selected(enq_flags)) {
+	if ((select_idle_in_enqueue && !__COMPAT_is_enq_cpu_selected(enq_flags)) ||
+	    !taskc->all_cpus) {
 		bool is_idle = false;
 		cpu = pick_idle_cpu(p, taskc, taskc->cpu, 0, &is_idle);
 		cpuc = lookup_cpu_ctx(cpu);
