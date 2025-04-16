@@ -58,6 +58,8 @@ const volatile bool enable_antistall = true;
 const volatile bool enable_gpu_support = false;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
+/* Multiplier on CPUs antistall dedicates to clearing stalls per run. */
+const volatile u32 antistall_aggressiveness = 1;
 const u32 zero_u32 = 0;
 
 private(unprotected_cpumask) struct bpf_cpumask __kptr *unprotected_cpumask;
@@ -2976,6 +2978,7 @@ static bool antistall_scan(void)
 	s32 llc;
 	u64 layer_id;
 	u64 jiffies_now;
+	u32 antistall_multiplier;
 
 	if (!enable_antistall)
 		return true;
@@ -2983,10 +2986,11 @@ static bool antistall_scan(void)
 	jiffies_now = bpf_jiffies64();
 
 	bpf_for(layer_id, 0, nr_layers)
-		bpf_for(llc, 0, nr_llcs)
-			antistall_set(layer_dsq_id(layer_id, llc), jiffies_now);
+		bpf_for(llc, 0, nr_llcs) 
+			for(antistall_multiplier = antistall_aggressiveness; antistall_multiplier > 0; --antistall_multiplier) 
+				antistall_set(layer_dsq_id(layer_id, llc), jiffies_now);
 
-	bpf_for(llc, 0, nr_llcs) {
+	bpf_for(llc, 0, nr_llcs) for(antistall_multiplier = antistall_aggressiveness; antistall_multiplier > 0; --antistall_multiplier) {
 		antistall_set(hi_fb_dsq_id(llc), jiffies_now);
 		antistall_set(lo_fb_dsq_id(llc), jiffies_now);
 	}
