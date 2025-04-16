@@ -600,7 +600,7 @@ impl<'a> Scheduler<'a> {
 
         // Initialize CPU capacity
         for (_, cpu) in topo.cpu_fids_performance.iter().enumerate() {
-            skel.maps.rodata_data.__cpu_capacity_hint[cpu.cpu_id] = cpu.cpu_cap as u16;
+            skel.maps.rodata_data.cpu_capacity[cpu.cpu_id] = cpu.cpu_cap as u16;
         }
 
         // If cpu_pref_order is not specified, initialize CPU order

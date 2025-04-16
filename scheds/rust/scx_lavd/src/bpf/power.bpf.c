@@ -17,7 +17,7 @@ static bool		have_little_core;
 
 const volatile u16	cpu_order_performance[LAVD_CPU_ID_MAX]; /* CPU preference order for performance and balanced mode */
 const volatile u16	cpu_order_powersave[LAVD_CPU_ID_MAX]; /* CPU preference order for powersave mode */
-const volatile u16	__cpu_capacity_hint[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1024 */
+const volatile u16	cpu_capacity[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1024 */
 
 static int		nr_cpdoms; /* number of compute domains */
 struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR]; /* contexts for compute domains */
@@ -58,16 +58,23 @@ static u64 calc_nr_active_cpus(void)
 	u64 nr_active;
 
 	/*
+	 * TODO: remove the following two:
+	 * - sys_stat.nr_violation
+	 * - LAVD_CC_PER_CORE_MAX_CTUIL
+	 * - LAVD_CC_PER_TURBO_CORE_MAX_CTUIL
+	 */
+
+	/*
 	 * nr_active = ceil(nr_cpus_onln * cpu_util * per_core_max_util)
 	 */
 	nr_active  = ((nr_cpus_onln * sys_stat.avg_util) << LAVD_SHIFT) + p2s(50);
-	nr_active /= (LAVD_CC_PER_CORE_MAX_CTUIL << LAVD_SHIFT);
+	nr_active /= (LAVD_CC_PER_CORE_UTIL << LAVD_SHIFT);
 
 	/*
 	 * If a few CPUs are particularly busy, boost the active CPUs more.
 	 */
 	nr_active += sys_stat.nr_violation >> LAVD_SHIFT;
-	nr_active = max(min(nr_active, nr_cpus_onln), LAVD_CC_NR_ACTIVE_MIN);
+	nr_active = max(min(nr_active, nr_cpus_onln), 1);
 
 	return nr_active;
 }
@@ -468,7 +475,7 @@ static void update_cpuperf_target(struct cpu_ctx *cpuc)
 	if (!no_freq_scaling) {
 		util = max(cpuc->avg_util, cpuc->cur_util) <
 			LAVD_CPU_UTIL_MAX_FOR_CPUPERF? : LAVD_SCALE;
-		cpuperf_target = (util * SCX_CPUPERF_ONE) / LAVD_SCALE;
+		cpuperf_target = (util * SCX_CPUPERF_ONE) >> LAVD_SHIFT;
 	} else
 		cpuperf_target = SCX_CPUPERF_ONE;
 
@@ -491,7 +498,7 @@ static void reset_cpuperf_target(struct cpu_ctx *cpuc)
 static u16 get_cpuperf_cap(s32 cpu)
 {
 	if (cpu >= 0 && cpu < nr_cpu_ids && cpu < LAVD_CPU_ID_MAX)
-		return __cpu_capacity_hint[cpu];
+		return cpu_capacity[cpu];
 
 	debugln("Infeasible CPU id: %d", cpu);
 	return 0;
@@ -506,8 +513,8 @@ static u16 get_cputurbo_cap(void)
 	 * Find the maximum CPU capacity
 	 */
 	for (cpu = 0; cpu < nr_cpu_ids && cpu < LAVD_CPU_ID_MAX; cpu++) {
-		if (__cpu_capacity_hint[cpu] > turbo_cap) {
-			turbo_cap = __cpu_capacity_hint[cpu];
+		if (cpu_capacity[cpu] > turbo_cap) {
+			turbo_cap = cpu_capacity[cpu];
 			nr_turbo++;
 		}
 	}
@@ -531,7 +538,7 @@ static u64 scale_cap_freq(u64 dur, s32 cpu)
 	 */
 	cap = get_cpuperf_cap(cpu);
 	freq = scx_bpf_cpuperf_cur(cpu);
-	scaled_dur = (dur * cap * freq) / (LAVD_SCALE * LAVD_SCALE);
+	scaled_dur = (dur * cap * freq) >> (LAVD_SHIFT * 2);
 
 	return scaled_dur;
 }

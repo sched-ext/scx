@@ -51,9 +51,9 @@ enum consts_internal  {
 	LAVD_SYS_STAT_INTERVAL_NS	= (50ULL * NSEC_PER_MSEC),
 	LAVD_SYS_STAT_DECAY_TIMES	= ((2ULL * LAVD_TIME_ONE_SEC) / LAVD_SYS_STAT_INTERVAL_NS),
 
-	LAVD_CC_PER_CORE_MAX_CTUIL	= p2s(50),  /* 50%: maximum per-core CPU utilization */
-	LAVD_CC_PER_TURBO_CORE_MAX_CTUIL = p2s(75), /* 75%: maximum per-core CPU utilization for a turbo core */
-	LAVD_CC_NR_ACTIVE_MIN		= 1, /* num of mininum active cores */
+	LAVD_CC_PER_CORE_SHIFT		= 1,  /* 50%: maximum per-core CPU utilization */
+	LAVD_CC_PER_CORE_UTIL		= p2s(50),  /* 50%: maximum per-core CPU utilization */
+	LAVD_CC_PER_TURBO_UTIL		= p2s(75), /* 75%: maximum per-core CPU utilization for a turbo core */
 	LAVD_CC_CPU_PIN_INTERVAL	= (250ULL * NSEC_PER_MSEC),
 	LAVD_CC_CPU_PIN_INTERVAL_DIV	= (LAVD_CC_CPU_PIN_INTERVAL / LAVD_SYS_STAT_INTERVAL_NS),
 
