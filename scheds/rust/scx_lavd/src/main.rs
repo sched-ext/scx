@@ -733,6 +733,7 @@ impl<'a> Scheduler<'a> {
             thr_perf_cri: tx.thr_perf_cri,
             cpuperf_cur: tx.cpuperf_cur,
             cpu_util: tx.cpu_util,
+            cpu_sutil: tx.cpu_sutil,
             nr_active: tx.nr_active,
         }) {
             Ok(()) | Err(TrySendError::Full(_)) => 0,

@@ -64,7 +64,9 @@ enum {
  */
 struct sys_stat {
 	u64	last_update_clk;
-	u64	util;		/* average of the CPU utilization */
+	u64	avg_util;	/* average of the CPU utilization */
+	u64	avg_sc_util;	/* average of the scaled CPU utilization,
+				   which is capacity and frequency invariant */
 
 	u64	avg_svc_time;	/* average service time per task */
 	u64	nr_queued_task;
@@ -112,7 +114,7 @@ struct task_ctx {
 	u64	run_freq;		/* scheduling frequency in a second */
 	u64	wait_freq;		/* waiting frequency in a second */
 	u64	wake_freq;		/* waking-up frequency in a second */
-	u64	svc_time;		/* total CPU time consumed for this task */
+	u64	svc_time;		/* total CPU time consumed for this task scaled by task's weight */
 	u64	dsq_id;			/* DSQ id where a task run for statistics */
 
 	/*
@@ -143,6 +145,7 @@ struct task_ctx_x {
 	u16	static_prio;	/* nice priority */
 	u32	cpu_id;		/* where a task ran */
 	u64	cpu_util;	/* cpu utilization in [0..100] */
+	u64	cpu_sutil;	/* scaled cpu utilization in [0..100] */
 	u32	thr_perf_cri;	/* performance criticality threshold */
 	u32	avg_lat_cri;	/* average latency criticality */
 	u32	nr_active;	/* number of active cores */
