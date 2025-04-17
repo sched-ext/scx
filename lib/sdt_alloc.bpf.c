@@ -1216,28 +1216,23 @@ u64 scx_buddy_alloc_internal(struct scx_buddy *buddy, size_t size)
 	return address;
 }
 
-/*
- * XXX Hacky, to be cleaned. Sizes are mostly hardcoded and need to be adjusted
- * when we adapt the allocator for small (16 byte and up) allocations.
- */
 __weak
 void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 {
 	scx_buddy_header_t *header, *buddy_header, *tmp_header;
 	scx_buddy_chunk_t *chunk, *target_chunk;
-	u64 mib_mask = ((1ULL << 20) - 1);
 	u64 index, buddy_index;
 	u8 order;
 
-	if (addr & ((1ULL << 12) - 1)) {
+	if (addr & (PAGE_SIZE - 1)) {
 		scx_bpf_error("Freeing non-page aligned address %llx", addr);
 		return;
 	}
 
 	bpf_spin_lock(&buddy->lock);
 
-	/* Align to a 1 MiB boundary. */
-	target_chunk = (void __arena *)(addr & ~mib_mask);
+	/* Align to the chunk boundary. */
+	target_chunk = (void __arena *)(addr & ~SCX_BUDDY_CHUNK_OFFSET_MASK);
 
 	/* XXX Only necessary for debugging. */
 	for (chunk = buddy->first_chunk; chunk != NULL && can_loop; chunk = chunk->next) {
@@ -1248,10 +1243,11 @@ void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 	if (chunk == NULL) {
 		bpf_spin_unlock(&buddy->lock);
 		scx_bpf_error("could not find chunk for address %llx", addr);
+		return;
 	}
 
 	/* Get the page index. */
-	index = (addr & mib_mask) >> 12;
+	index = (addr & SCX_BUDDY_OFFSET_MASK) >> 12;
 	header = chunk_get_header(chunk, index);
 
 	bpf_for(order, header_get_order(chunk, index), SCX_BUDDY_CHUNK_ORDERS) {
