@@ -248,6 +248,12 @@ impl PerfettoTraceManager {
         }
     }
 
+    fn get_comm(pid: i32) -> Result<String> {
+        let path = format!("/proc/{}/comm", pid);
+        let content = fs::read_to_string(path)?;
+        Ok(content.trim_end().to_string())
+    }
+
     /// Stops the trace and writes to configured output file.
     pub fn stop(
         &mut self,
@@ -284,13 +290,17 @@ impl PerfettoTraceManager {
                 .for_each(|(_, v)| v.retain(|e| e.timestamp.unwrap_or(0) < ns));
         };
 
-        for (_, process) in self.processes.iter() {
+        for (_, mut process) in self.processes.drain() {
             let uuid = self.rng.next_u64();
             self.process_uuids.insert(process.pid(), uuid);
 
+            if process.process_name().is_empty() {
+                process.process_name = Self::get_comm(process.pid()).ok();
+            }
+
             let desc = TrackDescriptor {
                 uuid: Some(uuid),
-                process: Some(process.clone()),
+                process: Some(process),
                 ..TrackDescriptor::default()
             };
 
@@ -301,13 +311,13 @@ impl PerfettoTraceManager {
             self.trace.packet.push(packet);
         }
 
-        for (_, thread) in self.threads.iter() {
+        for (_, thread) in self.threads.drain() {
             let uuid = self.rng.next_u64();
 
             let pid = thread.pid();
             let desc = TrackDescriptor {
                 parent_uuid: self.process_uuids.get(&pid).copied(),
-                thread: Some(thread.clone()),
+                thread: Some(thread),
                 uuid: Some(uuid),
                 ..TrackDescriptor::default()
             };
