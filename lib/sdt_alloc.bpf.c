@@ -102,6 +102,22 @@ static int scx_ffs(__u64 word)
 	return num;
 }
 
+static
+u64 scx_next_pow2(__u64 n)
+{
+	n--;
+	n |= n >> 1;
+	n |= n >> 2;
+	n |= n >> 4;
+	n |= n >> 8;
+	n |= n >> 16;
+	n |= n >> 32;
+	n++;
+
+	return n;
+}
+
+
 /* find the first empty slot */
 static __u64 chunk_find_empty(sdt_desc_t *desc)
 {
@@ -799,7 +815,7 @@ void scx_stk_extend(struct scx_stk *stack, scx_ring_t *ring)
 		stack->first = ring;
 
 	/*
-	 * Do not adjust the current ring/index because we did not add
+	 * Do not adjust the current ring/idx because we did not add
 	 * any elements. The new ring will be pushed into during the next
 	 * allocation.
 	 */
@@ -1022,6 +1038,8 @@ u8 header_get_order(scx_buddy_chunk_t *chunk, u64 offset)
 {
 	u8 result;
 
+	_Static_assert(SCX_BUDDY_CHUNK_ORDERS <= 16, "order must fit in 4 bytes");
+
 	if (offset >= SCX_BUDDY_CHUNK_ITEMS) {
 		scx_bpf_error("setting order of invalid offset");
 		return SCX_BUDDY_CHUNK_ORDERS;
@@ -1033,9 +1051,32 @@ u8 header_get_order(scx_buddy_chunk_t *chunk, u64 offset)
 }
 
 static
-scx_buddy_header_t *chunk_get_header(scx_buddy_chunk_t *chunk, u8 offset)
+u64 size_to_order(size_t size)
 {
-	return &chunk->headers[offset];
+	u64 order;
+
+	order = scx_ffs(scx_next_pow2(size));
+	if (order < SCX_BUDDY_MIN_ALLOC_SHIFT)
+		return 0;
+
+	return order - SCX_BUDDY_MIN_ALLOC_SHIFT;
+}
+
+static
+void __arena *chunk_idx_to_mem(scx_buddy_chunk_t *chunk, size_t idx)
+{
+	size_t offset = size_to_order(sizeof(*chunk));
+	u64 address;
+
+	address = (u64)chunk + offset + (idx * SCX_BUDDY_MIN_ALLOC_BYTES);
+
+	return (void __arena *)address;
+}
+
+static
+scx_buddy_header_t *chunk_get_header(scx_buddy_chunk_t *chunk, size_t idx)
+{
+	return (scx_buddy_header_t *)chunk_idx_to_mem(chunk, idx);
 }
 
 static
@@ -1043,11 +1084,9 @@ scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
 {
 	scx_buddy_chunk_t *chunk;
 	scx_buddy_header_t *header;
-	u8 index;
-	u64 order;
+	u64 order, chunk_order;
+	u32 idx;
 	int i;
-
-	_Static_assert(sizeof(struct scx_buddy_chunk) <= PAGE_SIZE, "chunk must fit into a page");
 
 	chunk = (scx_buddy_chunk_t *)scx_stk_alloc(stk);
 	if (!chunk)
@@ -1065,18 +1104,21 @@ scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
 		header_set_order(chunk, i, SCX_BUDDY_CHUNK_ORDERS);
 	}
 
+	_Static_assert(SCX_BUDDY_CHUNK_PAGES * PAGE_SIZE >= SCX_BUDDY_MIN_ALLOC_BYTES * SCX_BUDDY_CHUNK_ITEMS,
+		"chunk must fit within the stack allocation");
+
+	chunk_order = size_to_order(sizeof(*chunk));
 
 	/*
-	 * This reserves the first page for the scx_buddy_chunk then breaks the
-	 * full allocation into the different buckets.
+	 * This reserves a chunk for the chunk metadata, then breaks
+	 * the rest of the full allocation into the different buckets.
 	 */
-	index = 0;
-	bpf_for (order, 0, SCX_BUDDY_CHUNK_ORDERS - 1) {
-		index += 1 << order;
-		chunk->order_indices[order] = index;
-		header_set_order(chunk, index, order);
+	idx = 0;
+	bpf_for (order, chunk_order, SCX_BUDDY_CHUNK_ORDERS - 1) {
+		idx += 1 << order;
+		chunk->order_indices[order] = idx;
+		header_set_order(chunk, idx, order);
 	}
-
 
 	return chunk;
 }
@@ -1100,6 +1142,8 @@ int scx_buddy_init(struct scx_buddy *buddy, size_t size)
 
 	buddy->min_alloc_bytes = size;
 	bpf_spin_unlock(&buddy->lock);
+
+	_Static_assert(SCX_BUDDY_CHUNK_PAGES > 0, "chunk must use one or more pages");
 
 	/* One allocation per chunk. */
 	ret = scx_stk_init(&buddy->stack, SCX_BUDDY_CHUNK_PAGES * PAGE_SIZE, SCX_BUDDY_CHUNK_PAGES);
@@ -1136,7 +1180,7 @@ u64 scx_buddy_chunk_alloc(scx_buddy_chunk_t *chunk, int order_req)
 	scx_buddy_header_t *header;
 	u64 address;
 	u64 order;
-	u8 index;
+	u32 idx;
 
 	bpf_for(order, order_req, SCX_BUDDY_CHUNK_ORDERS) {
 		if (chunk->order_indices[order] != SCX_BUDDY_CHUNK_ITEMS)
@@ -1146,28 +1190,28 @@ u64 scx_buddy_chunk_alloc(scx_buddy_chunk_t *chunk, int order_req)
 	if (order == SCX_BUDDY_CHUNK_ORDERS)
 		return (u64)NULL;
 
-	index = chunk->order_indices[order];
-	header = chunk_get_header(chunk, index);
+	idx = chunk->order_indices[order];
+	header = chunk_get_header(chunk, idx);
 	chunk->order_indices[order] = header->next_index;
 
 	header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
 	header->next_index = SCX_BUDDY_CHUNK_ITEMS;
-	header_set_order(chunk, index, order_req);
+	header_set_order(chunk, idx, order_req);
 
-	address = (u64)chunk + PAGE_SIZE + (index * SCX_BUDDY_MIN_ALLOC_BYTES);
+	address = (u64)chunk_idx_to_mem(chunk, idx);
 
 	/* If we allocated from a larger-order chunk, split the buddies. */
 	bpf_for(order, order_req, order) {
 		/* Flip the bit for the current order. */
-		index ^= 1 << order;
+		idx ^= 1 << order;
 
 		/* Add the buddy of the allocation to the free list. */
-		header = chunk_get_header(chunk, index);
-		header_set_order(chunk, index, order);
+		header = chunk_get_header(chunk, idx);
+		header_set_order(chunk, idx, order);
 		header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
 
 		header->next_index = chunk->order_indices[order];
-		chunk->order_indices[order] = index;
+		chunk->order_indices[order] = idx;
 	}
 
 	return address;
@@ -1180,7 +1224,7 @@ u64 scx_buddy_alloc_internal(struct scx_buddy *buddy, size_t size)
 	u64 address;
 	int order;
 
-	order = 1 << (63 - scx_ffs(size / PAGE_SIZE));
+	order = size_to_order(size);
 	if (order >= SCX_BUDDY_CHUNK_ORDERS - 1) {
 		scx_bpf_error("Allocation size %lu too large", size);
 		return (u64)NULL;
@@ -1221,11 +1265,11 @@ void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 {
 	scx_buddy_header_t *header, *buddy_header, *tmp_header;
 	scx_buddy_chunk_t *chunk, *target_chunk;
-	u64 index, buddy_index;
+	u64 idx, buddy_idx;
 	u8 order;
 
-	if (addr & (PAGE_SIZE - 1)) {
-		scx_bpf_error("Freeing non-page aligned address %llx", addr);
+	if (addr & (SCX_BUDDY_MIN_ALLOC_BYTES - 1)) {
+		scx_bpf_error("Freeing unaligned address %llx", addr);
 		return;
 	}
 
@@ -1246,22 +1290,22 @@ void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 		return;
 	}
 
-	/* Get the page index. */
-	index = (addr & SCX_BUDDY_OFFSET_MASK) >> 12;
-	header = chunk_get_header(chunk, index);
+	/* Get the page idx. */
+	idx = (addr & SCX_BUDDY_CHUNK_OFFSET_MASK) / SCX_BUDDY_MIN_ALLOC_BYTES;
+	header = chunk_get_header(chunk, idx);
 
-	bpf_for(order, header_get_order(chunk, index), SCX_BUDDY_CHUNK_ORDERS) {
-		buddy_index = index ^= 1 << order;
-		buddy_header = chunk_get_header(chunk, buddy_index);
+	bpf_for(order, header_get_order(chunk, idx), SCX_BUDDY_CHUNK_ORDERS) {
+		buddy_idx = idx ^= 1 << order;
+		buddy_header = chunk_get_header(chunk, buddy_idx);
 
 		/* Check if the buddy is not in the free list. */
-		if (chunk->order_indices[order] != buddy_index &&
+		if (chunk->order_indices[order] != buddy_idx &&
 		    buddy_header->prev_index == SCX_BUDDY_CHUNK_ITEMS &&
 		    buddy_header->next_index == SCX_BUDDY_CHUNK_ITEMS)
 			break;
 
 		/* Pop off the list head if necessary. */
-		if (chunk->order_indices[order] == buddy_index)
+		if (chunk->order_indices[order] == buddy_idx)
 			chunk->order_indices[order] = buddy_header->next_index;
 
 		/* Pop */
@@ -1277,17 +1321,17 @@ void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 			buddy_header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
 		}
 
-		header_set_order(chunk, buddy_index, SCX_BUDDY_CHUNK_ORDERS);
+		header_set_order(chunk, buddy_idx, SCX_BUDDY_CHUNK_ORDERS);
 
-		index = index < buddy_index ? index : buddy_index;
+		idx = idx < buddy_idx ? idx : buddy_idx;
 
-		header = chunk_get_header(chunk, index);
-		header_set_order(chunk, index, order + 1);
+		header = chunk_get_header(chunk, idx);
+		header_set_order(chunk, idx, order + 1);
 	}
 
-	order = header_get_order(chunk, index);
+	order = header_get_order(chunk, idx);
 	header->next_index = chunk->order_indices[order];
-	chunk->order_indices[order] = index;
+	chunk->order_indices[order] = idx;
 
 	bpf_spin_unlock(&buddy->lock);
 }
