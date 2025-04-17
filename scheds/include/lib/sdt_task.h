@@ -162,19 +162,20 @@ int scx_stk_free_internal(struct scx_stk *stack, __u64 elem);
 
 /* Buddy allocator-related structs. */
 
-enum scx_buddy_consts {
-	SCX_BUDDY_CHUNK_PAGES		= 256,
-	SCX_BUDDY_CHUNK_ORDERS		= 8,
-	SCX_BUDDY_MIN_ALLOC_BYTES	= PAGE_SIZE,
-	SCX_BUDDY_CHUNK_ITEMS		= SCX_BUDDY_CHUNK_PAGES * PAGE_SIZE / SCX_BUDDY_MIN_ALLOC_BYTES,
-	SCX_BUDDY_CHUNK_OFFSET_MASK	= (SCX_BUDDY_CHUNK_PAGES * SCX_BUDDY_MIN_ALLOC_BYTES) - 1,
-};
-
 struct scx_buddy_chunk;
 typedef struct scx_buddy_chunk __arena scx_buddy_chunk_t;
 
 struct scx_buddy_header;
 typedef struct scx_buddy_header __arena scx_buddy_header_t;
+
+enum scx_buddy_consts {
+	SCX_BUDDY_MIN_ALLOC_SHIFT	= 4,
+	SCX_BUDDY_MIN_ALLOC_BYTES	= 1 << SCX_BUDDY_MIN_ALLOC_SHIFT,
+	SCX_BUDDY_CHUNK_ORDERS		= 16,
+	SCX_BUDDY_CHUNK_PAGES		= (SCX_BUDDY_MIN_ALLOC_BYTES << SCX_BUDDY_CHUNK_ORDERS) / PAGE_SIZE,
+	SCX_BUDDY_CHUNK_ITEMS		= SCX_BUDDY_CHUNK_PAGES * PAGE_SIZE / SCX_BUDDY_MIN_ALLOC_BYTES,
+	SCX_BUDDY_CHUNK_OFFSET_MASK	= (SCX_BUDDY_CHUNK_PAGES * PAGE_SIZE) - 1,
+};
 
 /*
  * XXXETSAL: Right now this is 16 bytes because of the pointer and alignment.
@@ -184,8 +185,8 @@ typedef struct scx_buddy_header __arena scx_buddy_header_t;
  * BPF permits it).
  */
 struct scx_buddy_header {
-	u16 prev_index;	/* "Pointer" to the previous available allocation of the same size. */
-	u16 next_index; /* Same for the next allocation. */
+	u32 prev_index;	/* "Pointer" to the previous available allocation of the same size. */
+	u32 next_index; /* Same for the next allocation. */
 };
 
 /*
@@ -193,8 +194,7 @@ struct scx_buddy_header {
  */
 struct scx_buddy_chunk {
 	/* The order of the current allocation for a item. 4 bits per order. */
-	u8 orders[SCX_BUDDY_CHUNK_ITEMS / 2];
-	struct scx_buddy_header	headers[SCX_BUDDY_CHUNK_ITEMS];
+	u8			orders[SCX_BUDDY_CHUNK_ITEMS / 2];
 	u64			order_indices[SCX_BUDDY_CHUNK_ORDERS];
 	scx_buddy_chunk_t	*prev;
 	scx_buddy_chunk_t	*next;
