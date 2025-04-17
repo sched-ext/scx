@@ -53,6 +53,11 @@ pub struct SchedulerOpts {
     #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
     pub dispatch_pick2_disable: bool,
 
+    /// Enables pick2 load balancing on the dispatch path when LLC utilization is under the
+    /// specified utilization.
+    #[clap(long, default_value = "75", value_parser = clap::value_parser!(u64).range(0..100))]
+    pub dispatch_lb_busy: u64,
+
     /// Enable tasks to run beyond their timeslice if the CPU is idle.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub keep_running: bool,
@@ -179,6 +184,7 @@ macro_rules! init_open_skel {
             $skel.maps.rodata_data.autoslice = opts.autoslice;
             $skel.maps.rodata_data.debug = verbose as u32;
             $skel.maps.rodata_data.dispatch_pick2_disable = opts.dispatch_pick2_disable;
+            $skel.maps.rodata_data.dispatch_lb_busy = opts.dispatch_lb_busy;
             $skel.maps.rodata_data.eager_load_balance = !opts.eager_load_balance;
             $skel.maps.rodata_data.has_little_cores = $crate::TOPO.has_little_cores();
             $skel.maps.rodata_data.interactive_sticky = opts.interactive_sticky;
