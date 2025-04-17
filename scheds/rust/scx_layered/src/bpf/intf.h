@@ -136,6 +136,7 @@ enum layer_stat_id {
 	LSTAT_XLAYER_REWAKE,
 	LSTAT_LLC_DRAIN_TRY,
 	LSTAT_LLC_DRAIN,
+	LSTAT_SKIP_REMOTE_NODE,
 	NR_LSTATS,
 };
 
@@ -311,6 +312,7 @@ struct layer {
 	bool			preempt_first;
 	bool			exclusive;
 	bool			allow_node_aligned;
+	bool			skip_remote_node;
 	bool			prev_over_idle_core;
 	int			growth_algo;
 
