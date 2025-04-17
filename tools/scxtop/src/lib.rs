@@ -240,6 +240,12 @@ pub struct HwPressureAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PstateSampleAction {
+    pub cpu: u32,
+    pub busy: u32,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
     ChangeTheme,
     ClearEvent,
@@ -264,6 +270,7 @@ pub enum Action {
     PageDown,
     PageUp,
     PrevEvent,
+    PstateSample(PstateSampleAction),
     Quit,
     RequestTrace,
     TraceStarted(TraceStartedAction),
@@ -435,6 +442,11 @@ impl TryFrom<&bpf_event> for Action {
                     child_comm: child_comm.into(),
                 }))
             }
+            #[allow(non_upper_case_globals)]
+            bpf_intf::event_type_PSTATE_SAMPLE => Ok(Action::PstateSample(PstateSampleAction {
+                cpu: event.cpu,
+                busy: unsafe { event.event.pstate.busy },
+            })),
             #[allow(non_upper_case_globals)]
             bpf_intf::event_type_SCHED_SWITCH => {
                 let sched_switch = unsafe { &event.event.sched_switch };
