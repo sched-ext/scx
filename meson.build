@@ -83,6 +83,7 @@ executable('cc_cflags_probe', 'meson-scripts/cc_cflags_probe.c', install: false,
 jq = find_program('jq')
 make = find_program('make')
 nproc = find_program('nproc')
+protoc = find_program('protoc', required: true)
 
 make_jobs = 1
 if nproc.found()
