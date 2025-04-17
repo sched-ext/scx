@@ -57,6 +57,7 @@ const volatile bool kthreads_local = true;
 const volatile bool max_dsq_pick2 = false;
 const volatile bool select_idle_in_enqueue = true;
 
+const volatile bool dispatch_lb_interactive = false;
 const volatile u64 dispatch_lb_busy = 75;
 const volatile u64 wakeup_lb_busy = 90;
 const volatile bool wakeup_llc_migrations = false;
@@ -920,7 +921,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	}
 }
 
-static int __always_inline dispatch_cpu(u64 dsq_id, s32 cpu, struct llc_ctx *llcx, int dsq_index)
+static __always_inline int dispatch_cpu(u64 dsq_id, s32 cpu, struct llc_ctx *llcx, int dsq_index)
 {
 	struct task_struct *p;
 	int dispatched = 0;
@@ -997,8 +998,15 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 		return 0;
 	}
 
-	// Start with least interactive DSQs to avoid migrating interactive
-	// tasks.
+	// First try any interactive tasks.
+	if (dispatch_lb_interactive) {
+		dsq_id = llcx->dsqs[0];
+		if (dispatch_cpu(dsq_id, cpu, llcx, 0) > 0)
+			return 0;
+	}
+
+	// Then migrate least interactive DSQs to find the most throughput
+	// bound tasks.
 	bpf_for(i, 1, nr_dsqs_per_llc) {
 		dsq_id = llcx->dsqs[nr_dsqs_per_llc - i];
 		if (dispatch_cpu(dsq_id, cpu, llcx, nr_dsqs_per_llc - i) > 0)
