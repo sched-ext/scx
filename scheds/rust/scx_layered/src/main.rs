@@ -513,6 +513,11 @@ struct Opts {
     #[clap(long, default_value = "1")]
     antistall_aggressiveness: u32,
 
+    /// Antistall slice override. When non-zero, override slice size for tasks
+    /// in DSQs being processed by antistall.
+    #[clap(long, default_value = "0")]
+    antistall_slice_override: u64,
+
     /// Enable verbose output, including libbpf details. Specify multiple
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
@@ -1824,6 +1829,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
         skel.maps.rodata_data.antistall_sec = opts.antistall_sec;
         skel.maps.rodata_data.antistall_aggressiveness = opts.antistall_aggressiveness;
+        skel.maps.rodata_data.antistall_slice_override = opts.antistall_slice_override;
         skel.maps.rodata_data.monitor_disable = opts.monitor_disable;
         skel.maps.rodata_data.lo_fb_wait_ns = opts.lo_fb_wait_us * 1000;
         skel.maps.rodata_data.lo_fb_share_ppk = ((opts.lo_fb_share * 1024.0) as u32).clamp(1, 1024);

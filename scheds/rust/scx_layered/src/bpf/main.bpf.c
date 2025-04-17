@@ -60,6 +60,7 @@ const volatile bool enable_gpu_support = false;
 const volatile u64 antistall_sec = 3;
 /* Multiplier on CPUs antistall dedicates to clearing stalls per run. */
 const volatile u32 antistall_aggressiveness = 1;
+const volatile u64 antistall_slice_override = 0;
 const u32 zero_u32 = 0;
 
 private(unprotected_cpumask) struct bpf_cpumask __kptr *unprotected_cpumask;
@@ -1587,7 +1588,8 @@ bool antistall_consume(struct cpu_ctx *cpuc)
 {
 	u64 *antistall_dsq, jiffies_now, cur_delay;
 	bool consumed;
-	struct task_struct *p;
+	struct task_struct *p = NULL;
+	struct layer *layer;
 
 	cur_delay = 0;
 	consumed = false;
@@ -1604,6 +1606,19 @@ bool antistall_consume(struct cpu_ctx *cpuc)
 
 	if (*antistall_dsq == SCX_DSQ_INVALID)
 		return false;
+
+	if (antistall_slice_override != 0) {
+		if (!(layer = lookup_layer(cpuc->layer_id))) {
+			scx_bpf_error("cant happen");
+			return consumed;
+		}
+		// override slice size while in antistall.
+		bpf_for_each(scx_dsq, p, *antistall_dsq, 0) {
+			if (p->scx.slice == antistall_slice_override)
+				break;
+			p->scx.slice = antistall_slice_override;
+		}
+	}
 
 	consumed = scx_bpf_dsq_move_to_local(*antistall_dsq);
 
@@ -1625,6 +1640,12 @@ bool antistall_consume(struct cpu_ctx *cpuc)
 	}
 
 reset:
+	if (antistall_slice_override != 0) {
+		bpf_for_each(scx_dsq, p, *antistall_dsq, 0) {
+			p->scx.slice = layer->slice_ns;	
+		}
+	}
+	
 	trace("antistall reset DSQ[%llu] SELECTED_CPU[%llu] DELAY[%llu]",
 	      *antistall_dsq, cpuc->cpu, cur_delay);
 	*antistall_dsq = SCX_DSQ_INVALID;
