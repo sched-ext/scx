@@ -162,16 +162,12 @@ int scx_stk_free_internal(struct scx_stk *stack, __u64 elem);
 
 /* Buddy allocator-related structs. */
 
-/*
- * XXX Initially we do page-sized allocations, there are certain intricacies in using
- * a buddy allocator with smaller sizes - mainly the metadata and worst-case allocations
- * cause high space overhead in the average and worst case.
- */
 enum scx_buddy_consts {
 	SCX_BUDDY_CHUNK_PAGES		= 256,
 	SCX_BUDDY_CHUNK_ORDERS		= 8,
-	SCX_BUDDY_MIN_ALLOC_BYTES	= 4096,
+	SCX_BUDDY_MIN_ALLOC_BYTES	= PAGE_SIZE,
 	SCX_BUDDY_CHUNK_ITEMS		= SCX_BUDDY_CHUNK_PAGES * PAGE_SIZE / SCX_BUDDY_MIN_ALLOC_BYTES,
+	SCX_BUDDY_CHUNK_OFFSET_MASK	= (SCX_BUDDY_CHUNK_PAGES * SCX_BUDDY_MIN_ALLOC_BYTES) - 1,
 };
 
 struct scx_buddy_chunk;
