@@ -58,6 +58,7 @@ const volatile bool max_dsq_pick2 = false;
 const volatile bool select_idle_in_enqueue = true;
 
 const volatile u64 wakeup_lb_busy = 90;
+const volatile bool wakeup_llc_migrations = false;
 const volatile u64 lb_slack_factor = 5;
 
 const volatile bool smt_enabled = true;
@@ -512,47 +513,83 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	if (wake_flags & SCX_WAKE_SYNC) {
 		struct task_struct *current = (void *)bpf_get_current_task_btf();
 		struct task_ctx *cur_taskc = lookup_task_ctx_may_fail(current);
-		if (cur_taskc) {
-			if (cur_taskc->llc_id == llcx->id) {
-				// First check if the waking task is in the same LLC
-				// and the prev cpu is idle
-				if (scx_bpf_test_and_clear_cpu_idle(cpu)) {
-					stat_inc(P2DQ_STAT_WAKE_PREV);
-					*is_idle = true;
-					goto found_cpu;
-				}
-				// Try an idle core in the LLC.
-				if (llcx->cpumask &&
-				    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask),
-								 SCX_PICK_IDLE_CORE)) >= 0) {
-					stat_inc(P2DQ_STAT_WAKE_LLC);
-					*is_idle = true;
-					goto found_cpu;
-				}
-			} else {
-				// If not in the local LLC we need to migrate to the waker llc.
-				struct llc_ctx *cur_llcx = lookup_llc_ctx(cur_taskc->llc_id);
-				if (!cur_llcx)
-					goto found_cpu;
-
-				if (cur_llcx->cpumask &&
-				    (cpu = scx_bpf_pick_idle_cpu(cast_mask(cur_llcx->cpumask),
-								 SCX_PICK_IDLE_CORE)) >= 0) {
-					stat_inc(P2DQ_STAT_WAKE_MIG);
-					*is_idle = true;
-					goto found_cpu;
-				}
-
-				// Couldn't find an idle core so just migrate to the CPU
-				if (cur_llcx->cpumask &&
-				    (cpu = scx_bpf_pick_idle_cpu(cast_mask(cur_llcx->cpumask),
-								 0)) >= 0) {
-					stat_inc(P2DQ_STAT_WAKE_MIG);
-					*is_idle = true;
-					goto found_cpu;
-				}
-			}
+		// Shouldn't happen, but makes code easier to follow
+		if (!cur_taskc) {
+			cpu = prev_cpu;
+			goto found_cpu;
 		}
+		// Interactive tasks aren't worth migrating across LLCs.
+		if (interactive) {
+			cpu = prev_cpu;
+			if (scx_bpf_test_and_clear_cpu_idle(cpu)) {
+				stat_inc(P2DQ_STAT_WAKE_PREV);
+				*is_idle = true;
+				goto found_cpu;
+			}
+			// Try an idle CPU in the LLC.
+			if (llcx->cpumask &&
+			    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), 0)) >= 0) {
+				stat_inc(P2DQ_STAT_WAKE_LLC);
+				*is_idle = true;
+				goto found_cpu;
+			}
+			// Nothing idle, stay sticky
+			cpu = prev_cpu;
+			goto found_cpu;
+		}
+		if (cur_taskc->llc_id == llcx->id || !wakeup_llc_migrations) {
+			// First check if the waking task is in the same LLC
+			// and the prev cpu is idle
+			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+				cpu = prev_cpu;
+				stat_inc(P2DQ_STAT_WAKE_PREV);
+				*is_idle = true;
+				goto found_cpu;
+			}
+			// Try an idle core in the LLC.
+			if (llcx->cpumask &&
+			    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask),
+							 SCX_PICK_IDLE_CORE)) >= 0) {
+				stat_inc(P2DQ_STAT_WAKE_LLC);
+				*is_idle = true;
+				goto found_cpu;
+			}
+			// Try an idle core in the LLC.
+			if (llcx->cpumask &&
+			    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask),
+							 0)) >= 0) {
+				stat_inc(P2DQ_STAT_WAKE_LLC);
+				*is_idle = true;
+				goto found_cpu;
+			}
+			// Nothing idle, stay sticky
+			cpu = prev_cpu;
+			goto found_cpu;
+		}
+		// If wakeup LLC are allowed then migrate to the waker llc.
+		struct llc_ctx *cur_llcx = lookup_llc_ctx(cur_taskc->llc_id);
+		if (!cur_llcx)
+			goto found_cpu;
+
+		if (cur_llcx->cpumask &&
+		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(cur_llcx->cpumask),
+						 SCX_PICK_IDLE_CORE)) >= 0) {
+			stat_inc(P2DQ_STAT_WAKE_MIG);
+			*is_idle = true;
+			goto found_cpu;
+		}
+
+		// Couldn't find an idle core so just migrate to the CPU
+		if (cur_llcx->cpumask &&
+		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(cur_llcx->cpumask),
+						 0)) >= 0) {
+			stat_inc(P2DQ_STAT_WAKE_MIG);
+			*is_idle = true;
+			goto found_cpu;
+		}
+		// Nothing idle, move to waker CPU
+		cpu = cur_taskc->cpu;
+		goto found_cpu;
 	}
 
 	if (eager_load_balance && wakeup_lb_busy > 0 && nr_llcs > 1) {
