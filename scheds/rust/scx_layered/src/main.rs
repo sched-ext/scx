@@ -110,6 +110,7 @@ lazy_static! {
                         preempt_first: false,
                         exclusive: false,
                         allow_node_aligned: false,
+                        skip_remote_node: false,
                         prev_over_idle_core: false,
                         idle_smt: None,
                         slice_us: 20000,
@@ -141,6 +142,7 @@ lazy_static! {
                         preempt_first: false,
                         exclusive: true,
                         allow_node_aligned: true,
+                        skip_remote_node: false,
                         prev_over_idle_core: true,
                         idle_smt: None,
                         slice_us: 20000,
@@ -176,6 +178,7 @@ lazy_static! {
                         preempt_first: false,
                         exclusive: false,
                         allow_node_aligned: false,
+                        skip_remote_node: false,
                         prev_over_idle_core: false,
                         idle_smt: None,
                         slice_us: 800,
@@ -208,6 +211,7 @@ lazy_static! {
                         preempt_first: false,
                         exclusive: false,
                         allow_node_aligned: false,
+                        skip_remote_node: false,
                         prev_over_idle_core: false,
                         idle_smt: None,
                         slice_us: 20000,
@@ -1309,6 +1313,7 @@ impl<'a> Scheduler<'a> {
                     preempt_first,
                     exclusive,
                     allow_node_aligned,
+                    skip_remote_node,
                     prev_over_idle_core,
                     growth_algo,
                     nodes,
@@ -1338,6 +1343,7 @@ impl<'a> Scheduler<'a> {
                 layer.preempt_first.write(*preempt_first);
                 layer.exclusive.write(*exclusive);
                 layer.allow_node_aligned.write(*allow_node_aligned);
+                layer.skip_remote_node.write(*skip_remote_node);
                 layer.prev_over_idle_core.write(*prev_over_idle_core);
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;

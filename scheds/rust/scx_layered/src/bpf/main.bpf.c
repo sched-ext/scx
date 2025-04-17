@@ -1694,11 +1694,15 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 {
 	struct llc_prox_map *llc_pmap = &llcc->prox_map;
 	struct layer *layer;
+	u32 nid = llc_node_id(llcc->id);
 	bool xllc_mig_skipped = false;
+	bool skip_remote_node;
 	u32 u;
 
 	if (!(layer = lookup_layer(layer_id)))
 		return false;
+
+	skip_remote_node = layer->skip_remote_node;
 
 	bpf_for(u, 0, llc_pmap->sys_end) {
 		u16 *llc_idp;
@@ -1713,6 +1717,11 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 
 			if (!(remote_llcc = lookup_llc_ctx(*llc_idp)))
 				return false;
+
+			if (skip_remote_node && nid != llc_node_id(remote_llcc->id)) {
+				lstat_inc(LSTAT_SKIP_REMOTE_NODE, layer, cpuc);
+				continue;
+			}
 
 			if (remote_llcc->queued_runtime[layer_id] < layer->xllc_mig_min_ns) {
 				xllc_mig_skipped = true;
