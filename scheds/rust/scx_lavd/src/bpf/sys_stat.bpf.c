@@ -29,6 +29,7 @@ struct sys_stat_ctx {
 	u64		idle_total;
 	u64		compute_total;
 	u64		tot_svc_time;
+	u64		tot_sc_time;
 	u64		nr_queued_task;
 	s32		max_lat_cri;
 	s32		avg_lat_cri;
@@ -47,6 +48,7 @@ struct sys_stat_ctx {
 	u64		sum_perf_cri;
 	u32		thr_perf_cri;
 	u32		cur_util;
+	u32		cur_sc_util;
 	u32		nr_violation;
 };
 
@@ -135,6 +137,20 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		cpuc->tot_svc_time = 0;
 
 		/*
+		 * Update scaled CPU utilization,
+		 * which is capacity and frequency invariant.
+		 */
+		cpuc->cur_sc_util = (cpuc->tot_sc_time << LAVD_SHIFT) / c->duration;
+		cpuc->avg_sc_util = calc_avg(cpuc->avg_sc_util, cpuc->cur_sc_util);
+
+		/*
+		 * Accumulate cpus' scaled loads,
+		 * whcih is capacity and frequency invariant.
+		 */
+		c->tot_sc_time += cpuc->tot_sc_time;
+		cpuc->tot_sc_time = 0;
+
+		/*
 		 * Accumulate statistics.
 		 */
 		if (cpuc->big_core) {
@@ -208,7 +224,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		if (c->duration > cpuc->idle_total)
 			compute = c->duration - cpuc->idle_total;
 
-		cpuc->cur_util = (compute * LAVD_SCALE) / c->duration;
+		cpuc->cur_util = (compute << LAVD_SHIFT) / c->duration;
 		cpuc->avg_util = calc_avg(cpuc->avg_util, cpuc->cur_util);
 
 		if (cpuc->turbo_core) {
@@ -247,7 +263,8 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 		c->compute_total = c->duration_total - c->idle_total;
 	else
 		c->compute_total = 0;
-	c->cur_util = (c->compute_total * LAVD_SCALE) / c->duration_total;
+	c->cur_util = (c->compute_total << LAVD_SHIFT) / c->duration_total;
+	c->cur_sc_util = (c->tot_sc_time << LAVD_SHIFT) / c->duration_total;
 
 	if (c->nr_sched == 0) {
 		/*
@@ -272,7 +289,8 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 	/*
 	 * Update the CPU utilization to the next version.
 	 */
-	sys_stat.util = calc_avg(sys_stat.util, c->cur_util);
+	sys_stat.avg_util = calc_avg(sys_stat.avg_util, c->cur_util);
+	sys_stat.avg_sc_util = calc_avg(sys_stat.avg_sc_util, c->cur_sc_util);
 	sys_stat.max_lat_cri = calc_avg32(sys_stat.max_lat_cri, c->max_lat_cri);
 	sys_stat.avg_lat_cri = calc_avg32(sys_stat.avg_lat_cri, c->avg_lat_cri);
 	sys_stat.thr_lat_cri = sys_stat.max_lat_cri - ((sys_stat.max_lat_cri -

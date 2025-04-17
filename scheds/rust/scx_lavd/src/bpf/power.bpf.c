@@ -60,7 +60,7 @@ static u64 calc_nr_active_cpus(void)
 	/*
 	 * nr_active = ceil(nr_cpus_onln * cpu_util * per_core_max_util)
 	 */
-	nr_active  = ((nr_cpus_onln * sys_stat.util) << LAVD_SHIFT) + p2s(50);
+	nr_active  = ((nr_cpus_onln * sys_stat.avg_util) << LAVD_SHIFT) + p2s(50);
 	nr_active /= (LAVD_CC_PER_CORE_MAX_CTUIL << LAVD_SHIFT);
 
 	/*
@@ -299,23 +299,23 @@ static int do_autopilot(void)
 	 * performance is not required. We run the scheduler in powersave mode
 	 * to save energy consumption.
 	 */
-	if (sys_stat.util <= LAVD_AP_LOW_UTIL)
-		return do_set_power_profile(LAVD_PM_POWERSAVE, sys_stat.util);
+	if (sys_stat.avg_util <= LAVD_AP_LOW_UTIL)
+		return do_set_power_profile(LAVD_PM_POWERSAVE, sys_stat.avg_util);
 
 	/*
 	 * If the CPU utiulization is moderate (say > 5%, <= 30%), we run the
 	 * scheduler in balanced mode. Actually, balanced mode can save energy
 	 * consumption only under moderate CPU load.
 	 */
-	if (sys_stat.util <= LAVD_AP_HIGH_UTIL)
-		return do_set_power_profile(LAVD_PM_BALANCED, sys_stat.util);
+	if (sys_stat.avg_util <= LAVD_AP_HIGH_UTIL)
+		return do_set_power_profile(LAVD_PM_BALANCED, sys_stat.avg_util);
 
 	/*
 	 * If the CPU utilization is high enough (say > 30%), we run the
 	 * scheduler in performance mode. The system indeed needs perrformance
 	 * also there is little energy benefit even under balanced mode anyway.
 	 */
-	return do_set_power_profile(LAVD_PM_PERFORMANCE, sys_stat.util);
+	return do_set_power_profile(LAVD_PM_PERFORMANCE, sys_stat.avg_util);
 }
 
 static void update_thr_perf_cri(void)
@@ -519,6 +519,21 @@ static u16 get_cputurbo_cap(void)
 		turbo_cap = 0;
 
 	return turbo_cap;
+}
+
+static u64 scale_cap_freq(u64 dur, s32 cpu)
+{
+	u64 cap, freq, scaled_dur;
+
+	/*
+	 * Scale the duration by CPU capacity and frequency, so calculate
+	 * capacity-invariant and frequency-invariant time duration.
+	 */
+	cap = get_cpuperf_cap(cpu);
+	freq = scx_bpf_cpuperf_cur(cpu);
+	scaled_dur = (dur * cap * freq) / (LAVD_SCALE * LAVD_SCALE);
+
+	return scaled_dur;
 }
 
 static void init_autopilot_low_util(void)
