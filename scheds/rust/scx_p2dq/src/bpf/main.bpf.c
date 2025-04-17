@@ -57,6 +57,7 @@ const volatile bool kthreads_local = true;
 const volatile bool max_dsq_pick2 = false;
 const volatile bool select_idle_in_enqueue = true;
 
+const volatile u64 dispatch_lb_busy = 75;
 const volatile u64 wakeup_lb_busy = 90;
 const volatile u64 lb_slack_factor = 5;
 
@@ -318,8 +319,9 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *cur_llcx, struct llc_ctx
 	u64 cur_load = cur_llcx->load;
 	u64 scaled_load = (100 * cur_load) / max_possible_load;
 
-	// If over 75% utilization then don't bother trying to pull more work
-	if (scaled_load > 75)
+	// If over the load balancing utilization busy watermark don't load
+	// balance.
+	if (scaled_load > dispatch_lb_busy)
 		return NULL;
 
 	bpf_for(i, 0, nr_llcs) {
@@ -330,8 +332,7 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *cur_llcx, struct llc_ctx
 		cur_queued += scx_bpf_dsq_nr_queued(cur_dsq_id);
 	}
 
-	if (min_nr_queued_pick2 > 0 &&
-	    cur_queued < min_nr_queued_pick2)
+	if (min_nr_queued_pick2 > 0 && cur_queued < min_nr_queued_pick2)
 		return NULL;
 
 	left_load = left->load;
@@ -339,7 +340,7 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *cur_llcx, struct llc_ctx
 
 	// If the current LLCs has more load don't try to pick2.
 	cur_load += (lb_slack_factor * cur_load) / 100;
-	if ((nr_llcs > 2 && cur_load > left_load && cur_load > right_load))
+	if ((nr_llcs > 2 && (cur_load > left_load || cur_load > right_load)))
 	    return NULL;
 
         if (left_load < right_load)
