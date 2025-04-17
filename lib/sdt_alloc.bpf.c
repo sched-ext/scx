@@ -1033,9 +1033,16 @@ u8 header_get_order(scx_buddy_chunk_t *chunk, u64 offset)
 }
 
 static
+scx_buddy_header_t *chunk_get_header(scx_buddy_chunk_t *chunk, u8 offset)
+{
+	return &chunk->headers[offset];
+}
+
+static
 scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
 {
 	scx_buddy_chunk_t *chunk;
+	scx_buddy_header_t *header;
 	u8 index;
 	u64 order;
 	int i;
@@ -1052,8 +1059,9 @@ scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
 	 */
 
 	bpf_for (i, 0, SCX_BUDDY_CHUNK_ITEMS) {
-		chunk->headers[i].prev_index = SCX_BUDDY_CHUNK_ITEMS;
-		chunk->headers[i].next_index = SCX_BUDDY_CHUNK_ITEMS;
+		header = chunk_get_header(chunk, i);
+		header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
+		header->next_index = SCX_BUDDY_CHUNK_ITEMS;
 		header_set_order(chunk, i, SCX_BUDDY_CHUNK_ORDERS);
 	}
 
@@ -1138,9 +1146,8 @@ u64 scx_buddy_chunk_alloc(scx_buddy_chunk_t *chunk, int order_req)
 	if (order == SCX_BUDDY_CHUNK_ORDERS)
 		return (u64)NULL;
 
-
 	index = chunk->order_indices[order];
-	header = (scx_buddy_header_t *)&chunk->headers[index];
+	header = chunk_get_header(chunk, index);
 	chunk->order_indices[order] = header->next_index;
 
 	header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
@@ -1155,7 +1162,7 @@ u64 scx_buddy_chunk_alloc(scx_buddy_chunk_t *chunk, int order_req)
 		index ^= 1 << order;
 
 		/* Add the buddy of the allocation to the free list. */
-		header = (scx_buddy_header_t *)&chunk->headers[index];
+		header = chunk_get_header(chunk, index);
 		header_set_order(chunk, index, order);
 		header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
 
@@ -1245,11 +1252,11 @@ void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 
 	/* Get the page index. */
 	index = (addr & mib_mask) >> 12;
-	header = &chunk->headers[index];
+	header = chunk_get_header(chunk, index);
 
 	bpf_for(order, header_get_order(chunk, index), SCX_BUDDY_CHUNK_ORDERS) {
 		buddy_index = index ^= 1 << order;
-		buddy_header = &chunk->headers[buddy_index];
+		buddy_header = chunk_get_header(chunk, buddy_index);
 
 		/* Check if the buddy is not in the free list. */
 		if (chunk->order_indices[order] != buddy_index &&
@@ -1263,13 +1270,13 @@ void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 
 		/* Pop */
 		if (buddy_header->prev_index != SCX_BUDDY_CHUNK_ITEMS) {
-			tmp_header = &chunk->headers[buddy_header->prev_index];
+			tmp_header = chunk_get_header(chunk, buddy_header->prev_index);
 			tmp_header->next_index = buddy_header->next_index;
 			buddy_header->next_index = SCX_BUDDY_CHUNK_ITEMS;
 		}
 
 		if (buddy_header->next_index != SCX_BUDDY_CHUNK_ITEMS) {
-			tmp_header = &chunk->headers[buddy_header->next_index];
+			tmp_header = chunk_get_header(chunk, buddy_header->next_index);
 			tmp_header->prev_index = buddy_header->prev_index;
 			buddy_header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
 		}
@@ -1278,7 +1285,7 @@ void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 
 		index = index < buddy_index ? index : buddy_index;
 
-		header = &chunk->headers[index];
+		header = chunk_get_header(chunk, index);
 		header_set_order(chunk, index, order + 1);
 	}
 
