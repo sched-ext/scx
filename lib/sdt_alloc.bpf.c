@@ -1055,6 +1055,12 @@ u64 size_to_order(size_t size)
 {
 	u64 order;
 
+	/*
+	 * To find the order of the allocation we find the first power of two
+	 * >= the requested size, take the log2, then adjust it for the minimum
+	 * allocation size by removing the minimum shift from it. Requests
+	 * smaller than the minimum allocation size are rounded up.
+	 */
 	order = scx_ffs(scx_next_pow2(size));
 	if (order < SCX_BUDDY_MIN_ALLOC_SHIFT)
 		return 0;
@@ -1065,10 +1071,18 @@ u64 size_to_order(size_t size)
 static
 void __arena *chunk_idx_to_mem(scx_buddy_chunk_t *chunk, size_t idx)
 {
-	size_t offset = size_to_order(sizeof(*chunk));
 	u64 address;
 
-	address = (u64)chunk + offset + (idx * SCX_BUDDY_MIN_ALLOC_BYTES);
+	/*
+	 * The data blocks start in the chunk after the metadata block.
+	 * We find the actual address by indexing into the region at an
+	 * SCX_BUDDY_MIN_ALLOC_BYTES granularity, the minimum allowed.
+	 * The index number already accounts for the fact that the first
+	 * blocks in the chunk are occupied by the metadata, so we do
+	 * not need to offset it.
+	 */
+
+	address = (u64)chunk + (idx * SCX_BUDDY_MIN_ALLOC_BYTES);
 
 	return (void __arena *)address;
 }
@@ -1082,11 +1096,12 @@ scx_buddy_header_t *chunk_get_header(scx_buddy_chunk_t *chunk, size_t idx)
 static
 scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
 {
-	scx_buddy_chunk_t *chunk;
+	u64 order, ord, last_order;
 	scx_buddy_header_t *header;
-	u64 order, chunk_order;
-	u32 idx;
-	int i;
+	scx_buddy_chunk_t *chunk;
+	u32 idx, cur_idx;
+	int i, power2;
+	size_t left;
 
 	chunk = (scx_buddy_chunk_t *)scx_stk_alloc(stk);
 	if (!chunk)
@@ -1107,17 +1122,45 @@ scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
 	_Static_assert(SCX_BUDDY_CHUNK_PAGES * PAGE_SIZE >= SCX_BUDDY_MIN_ALLOC_BYTES * SCX_BUDDY_CHUNK_ITEMS,
 		"chunk must fit within the stack allocation");
 
-	chunk_order = size_to_order(sizeof(*chunk));
-
 	/*
 	 * This reserves a chunk for the chunk metadata, then breaks
 	 * the rest of the full allocation into the different buckets.
+	 * We allocating the memory by grabbing blocks of progressively
+	 * smaller sizes from the allocator, which are guaranteed to be
+	 * continuous.
+	 *
+	 * This operation also populates the allocator.
 	 */
-	idx = 0;
-	bpf_for (order, chunk_order, SCX_BUDDY_CHUNK_ORDERS - 1) {
-		idx += 1 << order;
-		chunk->order_indices[order] = idx;
-		header_set_order(chunk, idx, order);
+	last_order = SCX_BUDDY_CHUNK_ORDERS;
+	left = sizeof(*chunk);
+	cur_idx = 0;
+	while((power2 = scx_ffs(left)) && can_loop) {
+		if (unlikely(power2 >= SCX_BUDDY_CHUNK_ORDERS)) {
+			scx_bpf_error("buddy chunk metadata too large");
+			return NULL;
+		}
+
+		/* Round up allocations that are too small. */
+		if (power2 < SCX_BUDDY_MIN_ALLOC_SHIFT) {
+			order = 0;
+			left = 0;
+		} else {
+			order = power2 - SCX_BUDDY_MIN_ALLOC_SHIFT;
+			left -= 1 << power2;
+		}
+
+		idx = cur_idx;
+		bpf_for (ord, order, last_order) {
+			/* Skip to the buddy. */
+			idx += 1 << ord;
+
+			/* Mark it free. */
+			chunk->order_indices[ord] = idx;
+			header_set_order(chunk, idx, ord);
+		}
+
+		/* Adjust the index. */
+		cur_idx += 1 << order;
 	}
 
 	return chunk;
