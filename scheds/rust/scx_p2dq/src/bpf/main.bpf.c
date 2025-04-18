@@ -196,13 +196,23 @@ static struct node_ctx *lookup_node_ctx(u32 node_id)
 	return nodec;
 }
 
-
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
 	__type(value, task_ctx);
 } task_ctxs SEC(".maps");
+
+struct lock_wrapper {
+	struct bpf_cpumask __kptr *mask;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct lock_wrapper);
+} task_masks SEC(".maps");
 
 static task_ctx *lookup_task_ctx_may_fail(struct task_struct *p)
 {
@@ -442,7 +452,9 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			 s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
 	const struct cpumask *idle_smtmask, *idle_cpumask;
+	struct lock_wrapper *wrapper;
 	struct cpu_ctx *prev_cpuc;
+	struct bpf_cpumask *mask;
 	struct node_ctx *nodec;
 	struct llc_ctx *llcx;
 	bool interactive = is_interactive(taskc);
@@ -462,19 +474,31 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 
 	// Special handling of tasks with custom affinities
 	if (!taskc->all_cpus) {
+		wrapper = bpf_task_storage_get(&task_masks, p, 0, 0);
+		if (!wrapper) {
+			cpu = prev_cpu;
+			goto found_cpu;
+		}
+
+		mask = wrapper->mask;
+		if (!mask) {
+			cpu = prev_cpu;
+			goto found_cpu;
+		}
+
 		// First try last CPU
 		if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
 			cpu = prev_cpu;
 			goto found_cpu;
 		}
 
-		if (taskc->mask && llcx->cpumask)
-			bpf_cpumask_and(taskc->mask, cast_mask(llcx->cpumask),
+		if (llcx->cpumask)
+			bpf_cpumask_and(mask, cast_mask(llcx->cpumask),
 					p->cpus_ptr);
 
 		// First try to find an idle SMT in the LLC
-		if (smt_enabled && taskc->mask) {
-			cpu = scx_bpf_pick_idle_cpu(cast_mask(taskc->mask),
+		if (smt_enabled) {
+			cpu = scx_bpf_pick_idle_cpu(cast_mask(mask),
 						    SCX_PICK_IDLE_CORE);
 			if (cpu >= 0) {
 				*is_idle = true;
@@ -483,20 +507,17 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		}
 
 		// Next try to find an idle CPU in the LLC
-		if (taskc->mask) {
-			cpu = scx_bpf_pick_idle_cpu(cast_mask(taskc->mask), 0);
-			if (cpu >= 0) {
-				*is_idle = true;
-				goto found_cpu;
-			}
+		cpu = scx_bpf_pick_idle_cpu(cast_mask(mask), 0);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto found_cpu;
 		}
 
 		// Next try to find an idle CPU in the node
-		if (nodec->cpumask && taskc->mask) {
-			bpf_cpumask_and(taskc->mask, cast_mask(nodec->cpumask),
+		if (nodec->cpumask && mask) {
+			bpf_cpumask_and(mask, cast_mask(nodec->cpumask),
 					p->cpus_ptr);
-			if (taskc->mask &&
-			    (cpu = scx_bpf_pick_idle_cpu(cast_mask(taskc->mask), 0)) >= 0) {
+			if ((cpu = scx_bpf_pick_idle_cpu(cast_mask(mask), 0)) >= 0) {
 				*is_idle = true;
 				goto found_cpu;
 			}
@@ -1076,6 +1097,7 @@ void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
 static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 					       struct scx_init_task_args *args)
 {
+	struct lock_wrapper *wrapper;
 	struct bpf_cpumask *cpumask;
 	task_ctx *taskc;
 	struct cpu_ctx *cpuc;
@@ -1099,7 +1121,15 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 		return -ENOMEM;
 	}
 
-	if ((cpumask = bpf_kptr_xchg(&taskc->mask, cpumask))) {
+	wrapper = bpf_task_storage_get(&task_masks, p, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!wrapper) {
+		bpf_cpumask_release(cpumask);
+		scx_bpf_error("task mask allocation failure");
+		return -ENOMEM;
+	}
+
+	if ((cpumask = bpf_kptr_xchg(&wrapper->mask, cpumask))) {
 		bpf_cpumask_release(cpumask);
 		scx_bpf_error("task_ctx allocation failure");
 		return -EINVAL;

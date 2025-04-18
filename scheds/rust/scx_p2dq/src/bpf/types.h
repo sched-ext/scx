@@ -61,9 +61,6 @@ struct task_p2dq {
 
 	/* Allowed to run on all CPUs */
 	bool			all_cpus;
-
-
-	struct bpf_cpumask __kptr *mask;
 };
 
 typedef struct task_p2dq task_ctx;
