@@ -63,7 +63,7 @@ struct task_p2dq {
 	bool			all_cpus;
 };
 
-typedef struct task_p2dq task_ctx;
+typedef struct task_p2dq __arena task_ctx;
 
 struct enqueue_promise_vtime {
 	u64	dsq_id;

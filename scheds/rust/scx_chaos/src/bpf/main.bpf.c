@@ -499,10 +499,11 @@ SCX_OPS_DEFINE(chaos,
 	       .runnable		= (void *)chaos_runnable,
 	       .select_cpu		= (void *)chaos_select_cpu,
 
+	       .exit_task		= (void *)p2dq_exit_task,
 	       .exit			= (void *)p2dq_exit,
 	       .running			= (void *)p2dq_running,
-	       .set_cpumask		= (void *)p2dq_set_cpumask,
 	       .stopping		= (void *)p2dq_stopping,
+	       .set_cpumask		= (void *)p2dq_set_cpumask,
 
 	       .timeout_ms		= 30000,
 	       .name			= "chaos");
