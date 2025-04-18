@@ -17,7 +17,7 @@ static bool		have_little_core;
 
 const volatile u16	cpu_order_performance[LAVD_CPU_ID_MAX]; /* CPU preference order for performance and balanced mode */
 const volatile u16	cpu_order_powersave[LAVD_CPU_ID_MAX]; /* CPU preference order for powersave mode */
-const volatile u16	__cpu_capacity_hint[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1024 */
+const volatile u16	cpu_capacity[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1024 */
 
 static int		nr_cpdoms; /* number of compute domains */
 struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR]; /* contexts for compute domains */
@@ -53,25 +53,6 @@ static bool is_perf_cri(struct task_ctx *taskc)
 	return READ_ONCE(taskc->on_big);
 }
 
-static u64 calc_nr_active_cpus(void)
-{
-	u64 nr_active;
-
-	/*
-	 * nr_active = ceil(nr_cpus_onln * cpu_util * per_core_max_util)
-	 */
-	nr_active  = ((nr_cpus_onln * sys_stat.avg_util) << LAVD_SHIFT) + p2s(50);
-	nr_active /= (LAVD_CC_PER_CORE_MAX_CTUIL << LAVD_SHIFT);
-
-	/*
-	 * If a few CPUs are particularly busy, boost the active CPUs more.
-	 */
-	nr_active += sys_stat.nr_violation >> LAVD_SHIFT;
-	nr_active = max(min(nr_active, nr_cpus_onln), LAVD_CC_NR_ACTIVE_MIN);
-
-	return nr_active;
-}
-
 static bool clear_cpu_periodically(u32 cpu, struct bpf_cpumask *cpumask)
 {
 	u32 clear;
@@ -97,6 +78,49 @@ static const volatile u16 *get_cpu_order(void)
 		return cpu_order_powersave;
 	else
 		return cpu_order_performance;
+}
+
+static int calc_nr_active_cpus(void)
+{
+	const volatile u16 *cpu_order;
+	u64 req_cap, cap_cpu, cap_sum = 0;
+	u16 cpu_id, i;
+
+	/*
+	 * Calculate the required compute capacity:
+	 *
+	 * Scaled utilization assumes all the CPUs are the fastest ones
+	 * running at the highest frequency. So the required compute capacity
+	 * given the scaled utilization is defined as follows:
+	 *
+	 * req_cpacity = total_compute_capaticy * scaled_utilization
+	 *             = (nr_cpus_onln * 1024) * (avg_sc_util / 1024)
+	 *             = nr_cpus_only * scaled_utilization
+	 */
+	req_cap = nr_cpus_onln * sys_stat.avg_sc_util;
+
+	/*
+	 * Fill the required compute capacity in the CPU preference order,
+	 * utilizing each CPU in a certain % (LAVD_CC_PER_CORE_UTIL or
+	 * LAVD_CC_PER_CORE_SHIFT).
+	 */
+	cpu_order = get_cpu_order();
+	bpf_for(i, 0, nr_cpu_ids) {
+		if (i >= LAVD_CPU_ID_MAX)
+			return nr_cpu_ids;
+
+		cpu_id = cpu_order[i];
+		if (cpu_id >= LAVD_CPU_ID_MAX)
+			return nr_cpu_ids;
+
+		cap_cpu = cpu_capacity[cpu_id];
+		cap_sum += cap_cpu >> LAVD_CC_PER_CORE_SHIFT;
+		if (cap_sum >= req_cap)
+			return i+1;
+	}
+
+	/* Should not be here. */
+	return nr_cpu_ids;
 }
 
 static void do_core_compaction(void)
@@ -468,7 +492,7 @@ static void update_cpuperf_target(struct cpu_ctx *cpuc)
 	if (!no_freq_scaling) {
 		util = max(cpuc->avg_util, cpuc->cur_util) <
 			LAVD_CPU_UTIL_MAX_FOR_CPUPERF? : LAVD_SCALE;
-		cpuperf_target = (util * SCX_CPUPERF_ONE) / LAVD_SCALE;
+		cpuperf_target = (util * SCX_CPUPERF_ONE) >> LAVD_SHIFT;
 	} else
 		cpuperf_target = SCX_CPUPERF_ONE;
 
@@ -491,7 +515,7 @@ static void reset_cpuperf_target(struct cpu_ctx *cpuc)
 static u16 get_cpuperf_cap(s32 cpu)
 {
 	if (cpu >= 0 && cpu < nr_cpu_ids && cpu < LAVD_CPU_ID_MAX)
-		return __cpu_capacity_hint[cpu];
+		return cpu_capacity[cpu];
 
 	debugln("Infeasible CPU id: %d", cpu);
 	return 0;
@@ -506,8 +530,8 @@ static u16 get_cputurbo_cap(void)
 	 * Find the maximum CPU capacity
 	 */
 	for (cpu = 0; cpu < nr_cpu_ids && cpu < LAVD_CPU_ID_MAX; cpu++) {
-		if (__cpu_capacity_hint[cpu] > turbo_cap) {
-			turbo_cap = __cpu_capacity_hint[cpu];
+		if (cpu_capacity[cpu] > turbo_cap) {
+			turbo_cap = cpu_capacity[cpu];
 			nr_turbo++;
 		}
 	}
@@ -531,7 +555,7 @@ static u64 scale_cap_freq(u64 dur, s32 cpu)
 	 */
 	cap = get_cpuperf_cap(cpu);
 	freq = scx_bpf_cpuperf_cur(cpu);
-	scaled_dur = (dur * cap * freq) / (LAVD_SCALE * LAVD_SCALE);
+	scaled_dur = (dur * cap * freq) >> (LAVD_SHIFT * 2);
 
 	return scaled_dur;
 }

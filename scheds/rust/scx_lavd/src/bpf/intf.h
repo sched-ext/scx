@@ -82,7 +82,6 @@ struct sys_stat {
 	u32	thr_perf_cri;	/* performance criticality threshold */
 
 	u32	nr_stealee;	/* number of compute domains to be migrated */
-	u32	nr_violation;	/* number of utilization violation */
 	u32	nr_active;	/* number of active cores */
 
 	u64	nr_sched;	/* total scheduling so far */

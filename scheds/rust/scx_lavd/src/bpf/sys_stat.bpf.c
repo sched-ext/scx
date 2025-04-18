@@ -49,7 +49,6 @@ struct sys_stat_ctx {
 	u32		thr_perf_cri;
 	u32		cur_util;
 	u32		cur_sc_util;
-	u32		nr_violation;
 };
 
 static void init_sys_stat_ctx(struct sys_stat_ctx *c)
@@ -80,7 +79,7 @@ static void plan_x_cpdom_migration(struct sys_stat_ctx *c)
 		c->nr_queued_task += nr_q_tasks;
 
 		cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
-		cpdomc->nr_q_tasks_per_cpu = (nr_q_tasks * LAVD_SCALE) / cpdomc->nr_cpus;
+		cpdomc->nr_q_tasks_per_cpu = (nr_q_tasks << LAVD_SHIFT) / cpdomc->nr_cpus;
 		avg_nr_q_tasks_per_cpu += cpdomc->nr_q_tasks_per_cpu;
 	}
 	avg_nr_q_tasks_per_cpu /= nr_cpdoms;
@@ -225,16 +224,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 			compute = c->duration - cpuc->idle_total;
 
 		cpuc->cur_util = (compute << LAVD_SHIFT) / c->duration;
-		cpuc->avg_util = calc_avg(cpuc->avg_util, cpuc->cur_util);
-
-		if (cpuc->turbo_core) {
-			if (cpuc->avg_util > LAVD_CC_PER_TURBO_CORE_MAX_CTUIL)
-				c->nr_violation += LAVD_SCALE;
-		}
-		else {
-			if (cpuc->avg_util > LAVD_CC_PER_CORE_MAX_CTUIL)
-				c->nr_violation += LAVD_SCALE;
-		}
+		cpuc->avg_util = calc_asym_avg(cpuc->avg_util, cpuc->cur_util);
 
 		/*
 		 * Accmulate system-wide idle time
@@ -256,7 +246,7 @@ static u64 clamp_time_slice_ns(u64 slice)
 static void calc_sys_stat(struct sys_stat_ctx *c)
 {
 	static int cnt = 0;
-	u64 avg_svc_time = 0, nr_queued, slice;
+	u64 avg_svc_time = 0;
 
 	c->duration_total = c->duration * nr_cpus_onln;
 	if (c->duration_total > c->idle_total)
@@ -289,8 +279,8 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 	/*
 	 * Update the CPU utilization to the next version.
 	 */
-	sys_stat.avg_util = calc_avg(sys_stat.avg_util, c->cur_util);
-	sys_stat.avg_sc_util = calc_avg(sys_stat.avg_sc_util, c->cur_sc_util);
+	sys_stat.avg_util = calc_asym_avg(sys_stat.avg_util, c->cur_util);
+	sys_stat.avg_sc_util = calc_asym_avg(sys_stat.avg_sc_util, c->cur_sc_util);
 	sys_stat.max_lat_cri = calc_avg32(sys_stat.max_lat_cri, c->max_lat_cri);
 	sys_stat.avg_lat_cri = calc_avg32(sys_stat.avg_lat_cri, c->avg_lat_cri);
 	sys_stat.thr_lat_cri = sys_stat.max_lat_cri - ((sys_stat.max_lat_cri -
@@ -307,23 +297,10 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 
 	sys_stat.nr_stealee = c->nr_stealee;
 
-	sys_stat.nr_violation = calc_avg32(sys_stat.nr_violation, c->nr_violation);
-
 	if (c->nr_sched > 0)
 		avg_svc_time = c->tot_svc_time / c->nr_sched;
 	sys_stat.avg_svc_time = calc_avg(sys_stat.avg_svc_time, avg_svc_time);
 	sys_stat.nr_queued_task = calc_avg(sys_stat.nr_queued_task, c->nr_queued_task);
-
-	/*
-	 * Given the updated state, recalculate the time slice for the next
-	 * round. The time slice should be short enough to schedule all
-	 * runnable tasks at least once within a targeted latency using the
-	 * active CPUs.
-	 */
-	nr_queued = sys_stat.nr_queued_task + 1;
-	slice = (LAVD_TARGETED_LATENCY_NS * sys_stat.nr_active) / nr_queued;
-	slice = clamp_time_slice_ns(slice);
-	sys_stat.slice = calc_avg(sys_stat.slice, slice);
 
 	/*
 	 * Half the statistics every minitue so the statistics hold the
@@ -355,6 +332,22 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 	update_power_mode_time();
 }
 
+static void calc_sys_time_slice(void)
+{
+	u64 nr_queued, slice;
+
+	/*
+	 * Given the updated state, recalculate the time slice for the next
+	 * round. The time slice should be short enough to schedule all
+	 * runnable tasks at least once within a targeted latency using the
+	 * active CPUs.
+	 */
+	nr_queued = sys_stat.nr_queued_task + 1;
+	slice = (LAVD_TARGETED_LATENCY_NS * sys_stat.nr_active) / nr_queued;
+	slice = clamp_time_slice_ns(slice);
+	sys_stat.slice = calc_avg(sys_stat.slice, slice);
+}
+
 static void do_update_sys_stat(void)
 {
 	struct sys_stat_ctx c;
@@ -375,6 +368,7 @@ static void update_sys_stat(void)
 	if (!no_core_compaction)
 		do_core_compaction();
 
+	calc_sys_time_slice();
 	update_thr_perf_cri();
 
 	if (reinit_cpumask_for_performance) {
