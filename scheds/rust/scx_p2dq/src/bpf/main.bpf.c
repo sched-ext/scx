@@ -201,17 +201,17 @@ struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
-	__type(value, struct task_ctx);
+	__type(value, task_ctx);
 } task_ctxs SEC(".maps");
 
-static struct task_ctx *lookup_task_ctx_may_fail(struct task_struct *p)
+static task_ctx *lookup_task_ctx_may_fail(struct task_struct *p)
 {
 	return bpf_task_storage_get(&task_ctxs, p, 0, 0);
 }
 
-static struct task_ctx *lookup_task_ctx(struct task_struct *p)
+static task_ctx *lookup_task_ctx(struct task_struct *p)
 {
-	struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
+	task_ctx *taskc = lookup_task_ctx_may_fail(p);
 
 	if (!taskc)
 		scx_bpf_error("task_ctx lookup failed");
@@ -242,7 +242,7 @@ static inline void stat_inc(enum stat_idx idx)
 /*
  * Returns if the task is interactive based on the tasks DSQ index.
  */
-static bool is_interactive(struct task_ctx *taskc)
+static bool is_interactive(task_ctx *taskc)
 {
 	if (nr_dsqs_per_llc <= 1)
 		return false;
@@ -253,7 +253,7 @@ static bool is_interactive(struct task_ctx *taskc)
 /*
  * Returns if the task is able to load balance using pick2.
  */
-static bool can_pick2(struct task_ctx *taskc)
+static bool can_pick2(task_ctx *taskc)
 {
 	if (is_interactive(taskc) ||
 	    !taskc->all_cpus ||
@@ -351,7 +351,7 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *cur_llcx, struct llc_ctx
 	return left;
 }
 
-static s32 pick_two_cpu(struct llc_ctx *cur_llcx, struct task_ctx *taskc,
+static s32 pick_two_cpu(struct llc_ctx *cur_llcx, task_ctx *taskc,
 			bool *is_idle)
 {
 	if ((min_llc_runs_pick2 > 0 &&
@@ -438,7 +438,7 @@ pick_llc:
 	return -EINVAL;
 }
 
-static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
+static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			 s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
 	const struct cpumask *idle_smtmask, *idle_cpumask;
@@ -515,7 +515,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	if (wake_flags & SCX_WAKE_SYNC) {
 		struct task_struct *current = (void *)bpf_get_current_task_btf();
-		struct task_ctx *cur_taskc = lookup_task_ctx_may_fail(current);
+		task_ctx *cur_taskc = lookup_task_ctx_may_fail(current);
 		// Shouldn't happen, but makes code easier to follow
 		if (!cur_taskc) {
 			cpu = prev_cpu;
@@ -669,7 +669,7 @@ found_cpu:
 
 static __always_inline s32 p2dq_select_cpu_impl(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 	bool is_idle = false;
 	s32 cpu;
 
@@ -703,7 +703,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 {
 	struct llc_ctx *llcx, *prev_llcx;
 	struct cpu_ctx *cpuc, *task_cpuc;
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 	u64 dsq_id;
 
 	s32 cpu, task_cpu = scx_bpf_task_cpu(p);
@@ -808,7 +808,7 @@ out:
 
 static __always_inline void p2dq_runnable_impl(struct task_struct *p, u64 enq_flags)
 {
-	struct task_ctx *wakee_ctx;
+	task_ctx *wakee_ctx;
 
 	if (!(wakee_ctx = lookup_task_ctx(p)))
 		return;
@@ -819,7 +819,7 @@ static __always_inline void p2dq_runnable_impl(struct task_struct *p, u64 enq_fl
 
 void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 {
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
 	s32 task_cpu = scx_bpf_task_cpu(p);
@@ -864,7 +864,7 @@ void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 
 void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 {
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
 	u64 used, scaled_used, last_dsq_slice_ns;
@@ -1065,7 +1065,7 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 
 	if (!(taskc = lookup_task_ctx(p)) || !all_cpumask)
 		return;
@@ -1077,7 +1077,7 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 					       struct scx_init_task_args *args)
 {
 	struct bpf_cpumask *cpumask;
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
 

@@ -43,7 +43,7 @@ struct node_ctx {
 	struct bpf_cpumask __kptr	*big_cpumask;
 };
 
-struct task_ctx {
+struct task_p2dq {
 	u64			dsq_id;
 	int			dsq_index;
 	u32			cpu;
@@ -65,6 +65,8 @@ struct task_ctx {
 
 	struct bpf_cpumask __kptr *mask;
 };
+
+typedef struct task_p2dq task_ctx;
 
 struct enqueue_promise_vtime {
 	u64	dsq_id;
