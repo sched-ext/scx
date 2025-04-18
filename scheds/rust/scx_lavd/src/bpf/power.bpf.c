@@ -53,32 +53,6 @@ static bool is_perf_cri(struct task_ctx *taskc)
 	return READ_ONCE(taskc->on_big);
 }
 
-static u64 calc_nr_active_cpus(void)
-{
-	u64 nr_active;
-
-	/*
-	 * TODO: remove the following two:
-	 * - sys_stat.nr_violation
-	 * - LAVD_CC_PER_CORE_MAX_CTUIL
-	 * - LAVD_CC_PER_TURBO_CORE_MAX_CTUIL
-	 */
-
-	/*
-	 * nr_active = ceil(nr_cpus_onln * cpu_util * per_core_max_util)
-	 */
-	nr_active  = ((nr_cpus_onln * sys_stat.avg_util) << LAVD_SHIFT) + p2s(50);
-	nr_active /= (LAVD_CC_PER_CORE_UTIL << LAVD_SHIFT);
-
-	/*
-	 * If a few CPUs are particularly busy, boost the active CPUs more.
-	 */
-	nr_active += sys_stat.nr_violation >> LAVD_SHIFT;
-	nr_active = max(min(nr_active, nr_cpus_onln), 1);
-
-	return nr_active;
-}
-
 static bool clear_cpu_periodically(u32 cpu, struct bpf_cpumask *cpumask)
 {
 	u32 clear;
@@ -104,6 +78,49 @@ static const volatile u16 *get_cpu_order(void)
 		return cpu_order_powersave;
 	else
 		return cpu_order_performance;
+}
+
+static int calc_nr_active_cpus(void)
+{
+	const volatile u16 *cpu_order;
+	u64 req_cap, cap_cpu, cap_sum = 0;
+	u16 cpu_id, i;
+
+	/*
+	 * Calculate the required compute capacity:
+	 *
+	 * Scaled utilization assumes all the CPUs are the fastest ones
+	 * running at the highest frequency. So the required compute capacity
+	 * given the scaled utilization is defined as follows:
+	 *
+	 * req_cpacity = total_compute_capaticy * scaled_utilization
+	 *             = (nr_cpus_onln * 1024) * (avg_sc_util / 1024)
+	 *             = nr_cpus_only * scaled_utilization
+	 */
+	req_cap = nr_cpus_onln * sys_stat.avg_sc_util;
+
+	/*
+	 * Fill the required compute capacity in the CPU preference order,
+	 * utilizing each CPU in a certain % (LAVD_CC_PER_CORE_UTIL or
+	 * LAVD_CC_PER_CORE_SHIFT).
+	 */
+	cpu_order = get_cpu_order();
+	bpf_for(i, 0, nr_cpu_ids) {
+		if (i >= LAVD_CPU_ID_MAX)
+			return nr_cpu_ids;
+
+		cpu_id = cpu_order[i];
+		if (cpu_id >= LAVD_CPU_ID_MAX)
+			return nr_cpu_ids;
+
+		cap_cpu = cpu_capacity[cpu_id];
+		cap_sum += cap_cpu >> LAVD_CC_PER_CORE_SHIFT;
+		if (cap_sum >= req_cap)
+			return i+1;
+	}
+
+	/* Should not be here. */
+	return nr_cpu_ids;
 }
 
 static void do_core_compaction(void)

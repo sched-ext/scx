@@ -49,7 +49,6 @@ struct sys_stat_ctx {
 	u32		thr_perf_cri;
 	u32		cur_util;
 	u32		cur_sc_util;
-	u32		nr_violation;
 };
 
 static void init_sys_stat_ctx(struct sys_stat_ctx *c)
@@ -227,15 +226,6 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		cpuc->cur_util = (compute << LAVD_SHIFT) / c->duration;
 		cpuc->avg_util = calc_avg(cpuc->avg_util, cpuc->cur_util);
 
-		if (cpuc->turbo_core) {
-			if (cpuc->avg_util > LAVD_CC_PER_TURBO_UTIL)
-				c->nr_violation += LAVD_SCALE;
-		}
-		else {
-			if (cpuc->avg_util > LAVD_CC_PER_CORE_UTIL)
-				c->nr_violation += LAVD_SCALE;
-		}
-
 		/*
 		 * Accmulate system-wide idle time
 		 */
@@ -306,8 +296,6 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 	}
 
 	sys_stat.nr_stealee = c->nr_stealee;
-
-	sys_stat.nr_violation = calc_avg32(sys_stat.nr_violation, c->nr_violation);
 
 	if (c->nr_sched > 0)
 		avg_svc_time = c->tot_svc_time / c->nr_sched;
