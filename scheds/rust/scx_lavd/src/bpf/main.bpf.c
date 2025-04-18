@@ -1016,25 +1016,6 @@ consume_out:
 		prev->scx.slice = calc_time_slice(taskc);
 }
 
-void BPF_STRUCT_OPS(lavd_tick, struct task_struct *p)
-{
-	struct cpu_ctx *cpuc;
-	struct task_ctx *taskc;
-	u64 now;
-
-	/*
-	 * For a non-latency-critical task, try to yield the current CPU if
-	 * there is a higher priority task in the run queue.
-	 */
-	if ((taskc = get_task_ctx(p)) && !is_lat_cri(taskc)) {
-		cpuc = get_cpu_ctx();
-		if (cpuc) {
-			now = scx_bpf_now();
-			try_yield_current_cpu(p, cpuc, taskc, now);
-		}
-	}
-}
-
 void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 {
 	struct task_struct *waker;
@@ -1782,7 +1763,6 @@ SCX_OPS_DEFINE(lavd_ops,
 	       .select_cpu		= (void *)lavd_select_cpu,
 	       .enqueue			= (void *)lavd_enqueue,
 	       .dispatch		= (void *)lavd_dispatch,
-	       .tick			= (void *)lavd_tick,
 	       .runnable		= (void *)lavd_runnable,
 	       .running			= (void *)lavd_running,
 	       .stopping		= (void *)lavd_stopping,
