@@ -160,7 +160,7 @@ Make sure you have dependencies installed that allow you to compile from source!
 ##### Ubuntu/Debian
 
 ```
-apt install gcc-multilib build-essential libssl-dev llvm lld libelf-dev
+apt install build-essential libssl-dev llvm lld libelf-dev meson cargo rustc clang llvm cmake pkg-config protobuf-compiler
 ```
 
 ##### Arch Linux
