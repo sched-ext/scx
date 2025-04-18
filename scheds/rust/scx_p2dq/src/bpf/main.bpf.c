@@ -19,6 +19,7 @@
 #endif
 
 #include "intf.h"
+#include "types.h"
 
 #include <errno.h>
 #include <stdbool.h>
