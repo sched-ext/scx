@@ -160,6 +160,17 @@ static u64 calc_avg(u64 old_val, u64 new_val)
 	return (old_val - (old_val >> 2)) + (new_val >> 2);
 }
 
+static u64 calc_asym_avg(u64 old_val, u64 new_val)
+{
+	/*
+	 * Increase fast but descrease slowly.
+	 */
+	if (old_val < new_val)
+		return (new_val - (new_val >> 2)) + (old_val >> 2);
+	else
+		return (old_val - (old_val >> 2)) + (new_val >> 2);
+}
+
 static u64 calc_avg_freq(u64 old_freq, u64 interval)
 {
 	u64 new_freq, ewma_freq;

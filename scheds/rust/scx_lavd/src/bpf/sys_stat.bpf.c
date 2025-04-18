@@ -224,7 +224,7 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 			compute = c->duration - cpuc->idle_total;
 
 		cpuc->cur_util = (compute << LAVD_SHIFT) / c->duration;
-		cpuc->avg_util = calc_avg(cpuc->avg_util, cpuc->cur_util);
+		cpuc->avg_util = calc_asym_avg(cpuc->avg_util, cpuc->cur_util);
 
 		/*
 		 * Accmulate system-wide idle time
@@ -279,8 +279,8 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 	/*
 	 * Update the CPU utilization to the next version.
 	 */
-	sys_stat.avg_util = calc_avg(sys_stat.avg_util, c->cur_util);
-	sys_stat.avg_sc_util = calc_avg(sys_stat.avg_sc_util, c->cur_sc_util);
+	sys_stat.avg_util = calc_asym_avg(sys_stat.avg_util, c->cur_util);
+	sys_stat.avg_sc_util = calc_asym_avg(sys_stat.avg_sc_util, c->cur_sc_util);
 	sys_stat.max_lat_cri = calc_avg32(sys_stat.max_lat_cri, c->max_lat_cri);
 	sys_stat.avg_lat_cri = calc_avg32(sys_stat.avg_lat_cri, c->avg_lat_cri);
 	sys_stat.thr_lat_cri = sys_stat.max_lat_cri - ((sys_stat.max_lat_cri -
