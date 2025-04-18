@@ -456,7 +456,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	if (!(prev_cpuc = lookup_cpu_ctx(prev_cpu)) ||
 	    !(llcx = lookup_llc_ctx(prev_cpuc->llc_id)) ||
 	    !(nodec = lookup_node_ctx(prev_cpuc->node_id)) ||
-	    !llcx->cpumask || !llcx->tmp_cpumask)
+	    !llcx->cpumask)
 		goto found_cpu;
 
 	// Special handling of tasks with custom affinities
@@ -611,19 +611,19 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		goto found_cpu;
 	}
 
-	if (has_little_cores) {
-		if (llcx->big_cpumask &&
-		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->big_cpumask),
-						 SCX_PICK_IDLE_CORE)) >= 0) {
-			*is_idle = true;
-			goto found_cpu;
-		}
-
-		if (nodec->big_cpumask &&
-		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(nodec->big_cpumask),
-						 SCX_PICK_IDLE_CORE)) >= 0) {
-			*is_idle = true;
-			goto found_cpu;
+	if (has_little_cores && llcx->little_cpumask && llcx->big_cpumask) {
+		if (interactive) {
+			if ((cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->little_cpumask),
+							 0)) >= 0) {
+				*is_idle = true;
+				goto found_cpu;
+			}
+		} else {
+			if ((cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->big_cpumask),
+							 SCX_PICK_IDLE_CORE)) >= 0) {
+				*is_idle = true;
+				goto found_cpu;
+			}
 		}
 	}
 
@@ -1120,7 +1120,7 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 
 static int init_llc(u32 llc_id)
 {
-	struct bpf_cpumask *cpumask, *big_cpumask, *tmp_cpumask;
+	struct bpf_cpumask *cpumask, *big_cpumask, *little_cpumask;
 	struct llc_ctx *llcx;
 
 	llcx = bpf_map_lookup_elem(&llc_ctxs, &llc_id);
@@ -1162,16 +1162,16 @@ static int init_llc(u32 llc_id)
 		bpf_cpumask_release(big_cpumask);
 	}
 
-	tmp_cpumask = bpf_cpumask_create();
-	if (!tmp_cpumask) {
+	little_cpumask = bpf_cpumask_create();
+	if (!little_cpumask) {
 		scx_bpf_error("failed to create tmp cpumask");
 		return -ENOMEM;
 	}
 
-	tmp_cpumask = bpf_kptr_xchg(&llcx->tmp_cpumask, tmp_cpumask);
-	if (tmp_cpumask) {
+	little_cpumask = bpf_kptr_xchg(&llcx->little_cpumask, little_cpumask);
+	if (little_cpumask) {
 		scx_bpf_error("kptr already had cpumask");
-		bpf_cpumask_release(tmp_cpumask);
+		bpf_cpumask_release(little_cpumask);
 	}
 
 	return 0;
@@ -1261,6 +1261,10 @@ static s32 init_cpu(int cpu)
 			bpf_cpumask_set_cpu(cpu, llcx->big_cpumask);
 		bpf_rcu_read_unlock();
 	} else {
+		bpf_rcu_read_lock();
+		if (llcx->little_cpumask)
+			bpf_cpumask_set_cpu(cpu, llcx->little_cpumask);
+		bpf_rcu_read_unlock();
 		llcx->all_big = false;
 		nodec->all_big = false;
 	}
