@@ -324,6 +324,18 @@ macro_rules! scx_ops_open {
                 }
             };
 
+            if let Ok(s) = ::std::env::var("SCX_TIMEOUT_MS") {
+                skel.struct_ops.[<$ops _mut>]().timeout_ms = match s.parse::<u32>() {
+                    Ok(ms) => {
+                        ::scx_utils::info!("Setting timeout_ms to {} based on environment", ms);
+                        ms
+                    },
+                    Err(e) => {
+                        break 'block anyhow::Result::Err(e).context("SCX_TIMEOUT_MS has invalid value");
+                    },
+                };
+            }
+
             $crate::import_enums!(skel);
 
             let result = ::anyhow::Result::Ok(skel);

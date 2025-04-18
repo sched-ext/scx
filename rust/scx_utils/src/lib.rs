@@ -30,6 +30,7 @@
 //! Utility modules which can be useful for userspace component of sched_ext
 //! schedulers.
 
+pub use log::info;
 pub use log::warn;
 pub use paste::paste;
 
