@@ -2,9 +2,9 @@
   "sched_ext/for-next": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git",
     "branch": "for-next",
-    "commitHash": "0b304617936094b1e55c0b3e5903ce7d4f1bc32b",
-    "lastModified": 1744256750,
-    "narHash": "sha256-jwlB5S/XvDPIN5r3ZNjtMC1Kf/r53p8+NgXtviEjsso=",
+    "commitHash": "69120f8228297715e0d1d40d2f636ebbff60b543",
+    "lastModified": 1745034218,
+    "narHash": "sha256-/bBpjffVx2DagSB15BRXwDuueNe5jDULdJi82HxXMNQ=",
     "kernelVersion": "6.14.0"
   },
   "bpf/bpf-next": {
