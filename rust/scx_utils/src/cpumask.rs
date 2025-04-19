@@ -307,10 +307,10 @@ impl Cpumask {
             .collect();
 
         // Throw out possible stray from u64 -> u32.
-        masks.truncate((*NR_CPU_IDS + 31) / 32);
+        masks.truncate((*NR_CPU_IDS).div_ceil(32));
 
         // Print the highest 32bit. Trim digits beyond *NR_CPU_IDS.
-        let width = match (*NR_CPU_IDS + 3) / 4 % 8 {
+        let width = match (*NR_CPU_IDS).div_ceil(4) % 8 {
             0 => 8,
             v => v,
         };

@@ -31,10 +31,10 @@ lazy_static::lazy_static! {
 
 pub fn full_version(semver: &str) -> String {
     let mut ver = semver.to_string();
-    if GIT_VERSION.len() > 0 {
+    if !GIT_VERSION.is_empty() {
         write!(ver, "-{}", &*GIT_VERSION).unwrap();
     }
-    if BUILD_TAG.len() > 0 {
+    if !BUILD_TAG.is_empty() {
         write!(ver, " {}", &*BUILD_TAG).unwrap();
     }
     ver

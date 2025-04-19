@@ -374,12 +374,12 @@ impl BpfBuilder {
             .generate(&skel_path)?;
 
         let mut deps = BTreeSet::new();
-        self.add_src_deps(&mut deps, &input)?;
+        self.add_src_deps(&mut deps, input)?;
         for filename in self.sources.iter() {
             deps.insert(filename.to_string());
         }
 
-        self.gen_cargo_reruns(Some(&mut deps))?;
+        self.gen_cargo_reruns(Some(&deps))?;
 
         Ok(())
     }
@@ -404,7 +404,7 @@ impl BpfBuilder {
             println!("cargo:warning={}", line);
         }
 
-        self.add_src_deps(deps, &input)?;
+        self.add_src_deps(deps, input)?;
 
         Ok(())
     }
