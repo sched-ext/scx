@@ -168,7 +168,8 @@ static bool consume_task(struct cpu_ctx *cpuc)
 	 * If the current compute domain is a stealer, try to steal
 	 * a task from any of stealee domains probabilistically.
 	 */
-	if (READ_ONCE(cpdomc->is_stealer) && try_to_steal_task(cpdomc))
+	if (nr_cpdoms > 1 && READ_ONCE(cpdomc->is_stealer) &&
+	    try_to_steal_task(cpdomc))
 		goto x_domain_migration_out;
 
 	/*
@@ -181,7 +182,7 @@ static bool consume_task(struct cpu_ctx *cpuc)
 	 * If there is no task in the assssociated DSQ, traverse neighbor
 	 * compute domains in distance order -- task stealing.
 	 */
-	if (force_to_steal_task(cpdomc))
+	if (nr_cpdoms > 1 && force_to_steal_task(cpdomc))
 		goto x_domain_migration_out;
 
 	return false;
