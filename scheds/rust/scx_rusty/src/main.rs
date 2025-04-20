@@ -15,6 +15,9 @@ use tuner::Tuner;
 pub mod load_balance;
 use load_balance::LoadBalancer;
 
+pub mod perf;
+use perf::init_perf_counters;
+
 mod stats;
 use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
@@ -444,6 +447,10 @@ impl<'a> Scheduler<'a> {
 
         // Attach.
         let mut skel = scx_ops_load!(skel, rusty, uei)?;
+
+        let (pefd, _link) = init_perf_counters(&mut skel, &0)?;
+        println!("Got perf file descriptor {}", pefd);
+
         let struct_ops = Some(scx_ops_attach!(skel, rusty)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 

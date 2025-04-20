@@ -572,6 +572,18 @@ static void refresh_tune_params(void)
 	}
 }
 
+/*
+ * Performance counter callback.
+ */
+
+SEC("perf_event")
+int drain_counters(void *ctx)
+{
+	scx_bpf_error("HIT");
+	bpf_printk("Callback detected");
+	return 1;
+}
+
 static u64 min(u64 a, u64 b)
 {
 	return a <= b ? a : b;
