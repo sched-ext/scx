@@ -479,7 +479,7 @@ static bool is_wake_sync(s32 prev_cpu, s32 this_cpu, u64 wake_flags)
 {
 	const struct task_struct *current = (void *)bpf_get_current_task_btf();
 
-	if (!no_wake_sync)
+	if (no_wake_sync)
 		return false;
 
 	if ((wake_flags & SCX_WAKE_SYNC) && !(current->flags & PF_EXITING))
