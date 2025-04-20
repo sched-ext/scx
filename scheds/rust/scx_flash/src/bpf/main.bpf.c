@@ -222,37 +222,15 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	struct task_ctx *tctx;
 
 	/*
-	 * If a task has been re-enqueued because its assigned CPU has been
-	 * taken by a higher priority scheduling class, force it to follow
-	 * the regular scheduling path and give it a chance to run on a
-	 * different CPU.
-	 *
-	 * However, if the task can only run on a single CPU, re-scheduling
-	 * is unnecessary, as it can only be dispatched on that specific
-	 * CPU. In this case, dispatch it immediately to maximize its
-	 * chances of reclaiming the CPU quickly and avoiding stalls.
-	 *
-	 * This approach will be effective once dl_server support is added
-	 * to the sched_ext core.
+	 * Per-CPU kthreads can be critical for system responsiveness, when
+	 * local_kthreads is specified they are always dispatched directly
+	 * before any other task.
 	 */
-	if (enq_flags & SCX_ENQ_REENQ) {
-		if (p->nr_cpus_allowed == 1) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
-			__sync_fetch_and_add(&nr_kthread_dispatches, 1);
-			return;
-		}
-	} else {
-		/*
-		 * Per-CPU kthreads can be critical for system responsiveness, when
-		 * local_kthreads is specified they are always dispatched directly
-		 * before any other task.
-		 */
-		if (local_kthreads && is_kthread(p) && (p->nr_cpus_allowed == 1)) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
-					   enq_flags | SCX_ENQ_PREEMPT);
-			__sync_fetch_and_add(&nr_kthread_dispatches, 1);
-			return;
-		}
+	if (local_kthreads && is_kthread(p) && (p->nr_cpus_allowed == 1)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
+				   enq_flags | SCX_ENQ_PREEMPT);
+		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
+		return;
 	}
 
 	/*
