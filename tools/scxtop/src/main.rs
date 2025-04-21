@@ -9,6 +9,7 @@ use scxtop::bpf_skel::*;
 use scxtop::cli::{generate_completions, Cli, Commands, TraceArgs, TuiArgs};
 use scxtop::config::Config;
 use scxtop::edm::{ActionHandler, BpfEventActionPublisher, BpfEventHandler, EventDispatchManager};
+use scxtop::mangoapp::poll_mangoapp;
 use scxtop::read_file_string;
 use scxtop::tracer::Tracer;
 use scxtop::Action;
@@ -38,6 +39,7 @@ use simplelog::{
 use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
 
+use std::ffi::CString;
 use std::fs::File;
 use std::mem::MaybeUninit;
 use std::str::FromStr;
@@ -361,6 +363,23 @@ fn run_tui(tui_args: &TuiArgs) -> Result<()> {
                     }
                 }
             });
+
+            if tui_args.mangoapp_tracing {
+                let stop_mangoapp = app.should_quit.clone();
+                let mangoapp_path = CString::new(tui_args.mangoapp_path.clone()).unwrap();
+                let poll_intvl_ms = tui_args.mangoapp_poll_intvl_ms;
+                let tx = action_tx.clone();
+                tokio::spawn(async move {
+                    poll_mangoapp(
+                        mangoapp_path,
+                        poll_intvl_ms,
+                        tx,
+                        stop_mangoapp,
+                    )
+                    .await
+                });
+            }
+
 
             loop {
                 tokio::select! {

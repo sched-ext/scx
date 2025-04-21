@@ -26,8 +26,9 @@ use crate::LICENSE;
 use crate::SCHED_NAME_PATH;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
-    HwPressureAction, IPIAction, PstateSampleAction, SchedCpuPerfSetAction, SchedSwitchAction,
-    SchedWakeupAction, SchedWakingAction, SoftIRQAction, TraceStartedAction, TraceStoppedAction,
+    HwPressureAction, IPIAction, MangoAppAction, PstateSampleAction, SchedCpuPerfSetAction,
+    SchedSwitchAction, SchedWakeupAction, SchedWakingAction, SoftIRQAction, TraceStartedAction,
+    TraceStoppedAction,
 };
 
 use anyhow::Result;
@@ -116,7 +117,13 @@ pub struct App<'a> {
     trace_start: u64,
     prev_bpf_sample_rate: u32,
     process_id: i32,
+    prev_process_id: i32,
     trace_links: Vec<Link>,
+
+    // mangoapp related
+    last_mangoapp_action: Option<MangoAppAction>,
+    frames_since_update: u64,
+    max_fps: u16,
 }
 
 impl<'a> App<'a> {
@@ -239,7 +246,11 @@ impl<'a> App<'a> {
             trace_manager,
             bpf_stats: Default::default(),
             process_id,
+            prev_process_id: -1,
             trace_links: vec![],
+            last_mangoapp_action: None,
+            frames_since_update: 0,
+            max_fps: 1,
         };
 
         Ok(app)
@@ -254,6 +265,14 @@ impl<'a> App<'a> {
     pub fn set_state(&mut self, state: AppState) {
         self.prev_state = self.state.clone();
         self.state = state;
+        if self.prev_state == AppState::MangoApp {
+            self.process_id = self.prev_process_id;
+            // reactivate the prev perf event with the previous pid
+            let perf_event = &self.available_events[self.active_hw_event_id].clone();
+            let _ = self.activate_perf_event(perf_event);
+            self.max_fps = 1;
+            self.frames_since_update = 0;
+        }
     }
 
     /// Returns the current theme of the application
@@ -2101,11 +2120,75 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    /// Handles MangoApp pressure events.
+    pub fn on_mangoapp(&mut self, action: &MangoAppAction) -> Result<()> {
+        self.last_mangoapp_action = Some(action.clone());
+        // Update the perf event to the mangoapp event
+        if action.pid as i32 != self.process_id && action.pid > 0 {
+            self.prev_process_id = self.process_id;
+            self.process_id = action.pid as i32;
+            // reactivate the active perf event with the pid from mangoapp
+            let perf_event = &self.available_events[self.active_hw_event_id].clone();
+            let _ = self.activate_perf_event(perf_event);
+        }
+        Ok(())
+    }
+
+    /// Renders the mangoapp TUI.
+    fn render_mangoapp(&mut self, frame: &mut Frame) -> Result<()> {
+        let [left, right] = Layout::horizontal([Constraint::Fill(1); 2]).areas(frame.area());
+
+        let left_constraints = vec![
+            Constraint::Percentage(2),
+            Constraint::Percentage(49),
+            Constraint::Percentage(49),
+        ];
+        let left_areas = Layout::vertical(left_constraints).split(left);
+        let theme = self.theme();
+
+        let mut comm = if self.process_id > 0 {
+            read_file_string(&format!("/proc/{}/comm", self.process_id)).unwrap_or("".to_string())
+        } else {
+            "".to_string()
+        };
+        comm = comm.trim_end().to_string();
+        let last_action = self.last_mangoapp_action.clone();
+
+        let block = Block::new()
+            .title_top(
+                Line::from(if let Some(action) = last_action {
+                    format!(
+                        "{}:{} {}x{}:{}",
+                        comm,
+                        self.process_id,
+                        action.output_width,
+                        action.output_height,
+                        action.display_refresh,
+                    )
+                } else {
+                    "mangoapp not available".to_string()
+                })
+                .style(theme.title_style())
+                .centered(),
+            )
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .style(theme.border_style());
+
+        self.render_event(frame, right)?;
+        frame.render_widget(block, left_areas[0]);
+        self.render_scheduler("dsq_lat_us", frame, left_areas[1], true, true)?;
+        self.render_scheduler("dsq_slice_consumed", frame, left_areas[2], true, false)?;
+
+        Ok(())
+    }
+
     /// Renders the application to the frame.
     pub fn render(&mut self, frame: &mut Frame) -> Result<()> {
         match self.state {
             AppState::Help => self.render_help(frame),
             AppState::Event => self.render_event_list(frame),
+            AppState::MangoApp => self.render_mangoapp(frame),
             AppState::Node => self.render_node(frame),
             AppState::Llc => self.render_llc(frame),
             AppState::Scheduler => {
@@ -2389,12 +2472,27 @@ impl<'a> App<'a> {
         ));
 
         if *next_dsq_id != scx_enums.SCX_DSQ_INVALID && *next_dsq_lat_us > 0 {
-            cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
+            if self.state == AppState::MangoApp {
+                if self.process_id > 0 && action.next_tgid == self.process_id as u32 {
+                    cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
+                }
+            } else {
+                cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
+            }
+
             let next_dsq_data = self
                 .dsq_data
                 .entry(*next_dsq_id)
                 .or_insert(EventData::new(self.max_cpu_events));
-            next_dsq_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
+
+            if self.state == AppState::MangoApp {
+                if self.process_id > 0 && action.next_tgid == self.process_id as u32 {
+                    next_dsq_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
+                }
+            } else {
+                next_dsq_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
+            }
+
             if *next_dsq_vtime > 0 {
                 // vtime is special because we want the delta
                 let last = next_dsq_data
@@ -2416,7 +2514,13 @@ impl<'a> App<'a> {
                 .dsq_data
                 .entry(*prev_dsq_id)
                 .or_insert(EventData::new(self.max_cpu_events));
-            prev_dsq_data.add_event_data("dsq_slice_consumed", *prev_used_slice_ns);
+            if self.state == AppState::MangoApp {
+                if self.process_id > 0 && action.prev_tgid == self.process_id as u32 {
+                    prev_dsq_data.add_event_data("dsq_slice_consumed", *prev_used_slice_ns);
+                }
+            } else {
+                prev_dsq_data.add_event_data("dsq_slice_consumed", *prev_used_slice_ns);
+            }
         }
     }
 
@@ -2560,6 +2664,9 @@ impl<'a> App<'a> {
             }
             Action::IPI(a) => {
                 self.on_ipi(a);
+            }
+            Action::MangoApp(a) => {
+                self.on_mangoapp(a)?;
             }
             Action::GpuMem(a) => {
                 self.on_gpu_mem(a);
