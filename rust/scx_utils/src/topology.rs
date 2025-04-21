@@ -69,6 +69,8 @@
 //! hierarchy are entirely read-only. If the host topology were to change (due
 //! to e.g. hotplug), a new Topology object should be created.
 
+use crate::cpumask::read_cpulist;
+use crate::misc::read_file_byte;
 use crate::misc::read_file_usize_vec;
 use crate::misc::read_from_file;
 use crate::Cpumask;
@@ -123,6 +125,8 @@ pub struct Cpu {
     pub trans_lat_ns: usize,
     pub l2_id: usize,
     pub l3_id: usize,
+    /// Per-CPU cache size of all levels.
+    pub cache_size: usize,
     pub core_type: CoreType,
 
     /// Ancestor IDs.
@@ -390,6 +394,25 @@ fn get_cache_id(topo_ctx: &mut TopoCtx, cache_level_path: &PathBuf, cache_level:
     id
 }
 
+fn get_per_cpu_cache_size(cache_path: &PathBuf) -> Result<usize> {
+    let path_str = cache_path.to_str().unwrap();
+    let paths = glob(&(path_str.to_owned() + "/index[0-9]*"))?;
+    let mut tot_size = 0;
+
+    for index in paths.filter_map(Result::ok) {
+        // If there is no size information under sysfs (e.g., many ARM SoCs),
+        // give 1024 as a default value. 1024 is small enough compared to the
+        // real cache size of the CPU, but it is large enough to give a penalty
+        // when multiple CPUs share the cache.
+        let size = read_file_byte(&index.join("size")).unwrap_or(1024_usize);
+        let cpulist: String = read_from_file(&index.join("shared_cpu_list"))?;
+        let num_cpus = read_cpulist(&cpulist)?.len();
+        tot_size += size / num_cpus;
+    }
+
+    Ok(tot_size)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn create_insert_cpu(
     id: usize,
@@ -432,6 +455,9 @@ fn create_insert_cpu(
     } else {
         l3_id
     };
+
+    // Per-CPU cache size
+    let cache_size = get_per_cpu_cache_size(&cache_path).unwrap_or(0_usize);
 
     // Min and max frequencies. If the kernel is not compiled with
     // CONFIG_CPU_FREQ, just assume 0 for both frequencies.
@@ -518,6 +544,7 @@ fn create_insert_cpu(
             trans_lat_ns,
             l2_id,
             l3_id,
+            cache_size,
             core_type: core_type.clone(),
 
             core_id: *core_id,
