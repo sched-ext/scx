@@ -198,6 +198,7 @@ struct {
 	__uint(map_flags, 0);
 } node_data SEC(".maps");
 
+
 struct lock_wrapper {
 	struct bpf_spin_lock lock;
 };
@@ -572,16 +573,51 @@ static void refresh_tune_params(void)
 	}
 }
 
+void *bpf_cast_to_kern_ctx(void *) __ksym;
+
 /*
  * Performance counter callback.
  */
-
 SEC("perf_event")
-int drain_counters(void *ctx)
+int read_sample(struct bpf_perf_event_data_kern __kptr *arg)
 {
-	scx_bpf_error("HIT");
-	bpf_printk("Callback detected");
-	return 1;
+	struct bpf_perf_event_data_kern *ctx, a;
+	struct perf_sample_data data;
+	union perf_mem_data_src data_src;
+	int ret;
+
+	ctx = bpf_cast_to_kern_ctx(arg);
+
+	if ((ret = bpf_probe_read_kernel(&a, sizeof(a), ctx))) {
+		scx_bpf_error("[0] %s: bpf_probe_read_kernel failed", __func__);
+		return -EACCES;
+	}
+
+	if ((ret = bpf_probe_read_kernel(&data, sizeof(data), a.data))) {
+		scx_bpf_error("%s: bpf_probe_read_kernel failed", __func__);
+		return -EACCES;
+	}
+
+	data_src = ctx->data->data_src;
+	if (!ctx->data->sample_flags || data_src.mem_op == 1)
+		return 0;
+
+	if (ctx->data->addr == 0)
+		return 0;
+
+	bpf_printk("(1/2) %s\t(0x%lx,0x%lx,0x%lx) ",
+			data_src.mem_op == 2 ? "STORE" : (data_src.mem_op == 4 ? "LOAD" : "UNKNOWN") ,
+			data_src.mem_lvl_num,
+			data_src.mem_snoop,
+			data_src.mem_remote
+			);
+	bpf_printk("(2/2) [%llx, %llx] 0x%lx",
+			ctx->data->phys_addr,
+			ctx->data->addr,
+			data_src.mem_dtlb
+			);
+
+	return 0;
 }
 
 static u64 min(u64 a, u64 b)

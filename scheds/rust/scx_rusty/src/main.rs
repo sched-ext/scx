@@ -351,6 +351,7 @@ struct Scheduler<'a> {
 
     tuner: Tuner,
     stats_server: StatsServer<StatsCtx, (StatsCtx, ClusterStats)>,
+    _pefds: Vec<(i32, libbpf_rs::Link)>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -448,10 +449,13 @@ impl<'a> Scheduler<'a> {
         // Attach.
         let mut skel = scx_ops_load!(skel, rusty, uei)?;
 
-        let (pefd, _link) = init_perf_counters(&mut skel, &0)?;
-        println!("Got perf file descriptor {}", pefd);
+        let mut pefds: Vec<(i32, libbpf_rs::Link)> = vec![];
+        for i in 0..32 {
+            pefds.push(init_perf_counters(&mut skel, &i)?);
+        }
 
         let struct_ops = Some(scx_ops_attach!(skel, rusty)?);
+
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         for (id, dom) in domains.doms().iter() {
@@ -489,6 +493,7 @@ impl<'a> Scheduler<'a> {
                 opts.slice_us_overutil * 1000,
             )?,
             stats_server,
+            _pefds: pefds,
         })
     }
 
