@@ -785,13 +785,27 @@ fn create_numa_nodes(
             }
         }
 
+        let cpu_pattern = numa_path.join("cpu[0-9]*");
+        let cpu_paths = glob(cpu_pattern.to_string_lossy().as_ref())?;
         let big_little = has_big_little().unwrap_or(false);
         let capacity_src = cpu_capacity_source();
         let avg_cpu_freq = avg_cpu_freq();
-        let cpu_ids = read_cpu_ids()?;
-        for cpu_id in cpu_ids.iter() {
+        let mut cpu_ids = vec![];
+        for cpu_path in cpu_paths.filter_map(Result::ok) {
+            let cpu_str = cpu_path.to_str().unwrap().trim();
+            let cpu_id = match sscanf!(cpu_str, "/sys/devices/system/node/node{usize}/cpu{usize}") {
+                Ok((_, val)) => val,
+                Err(_) => {
+                    bail!("Failed to parse cpu ID {}", cpu_str);
+                }
+            };
+            cpu_ids.push(cpu_id);
+        }
+        cpu_ids.sort();
+
+        for cpu_id in cpu_ids {
             create_insert_cpu(
-                *cpu_id,
+                cpu_id,
                 &mut node,
                 online_mask,
                 topo_ctx,
