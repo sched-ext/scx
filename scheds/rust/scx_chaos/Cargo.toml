@@ -2,6 +2,9 @@
 name = "scx_chaos"
 version = "1.0.12"
 edition = "2021"
+authors = ["Jake Hillion <jake@hillion.co.uk>"]
+description = "scx_chaos A general purpose sched_ext scheduler designed to amplify race conditions"
+license = "GPL-2.0-only"
 
 [package.metadata.scx]
 ci.use_clippy = true
