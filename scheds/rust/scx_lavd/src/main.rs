@@ -233,10 +233,8 @@ struct CpuFlatId {
     core_pos: usize,
     cpu_pos: usize,
     cpu_id: usize,
-    core_id: usize,
-    l2_id: usize,
-    l3_id: usize,
-    sharing_lvl: usize,
+    smt_level: usize,
+    cache_size: usize,
     cpu_cap: usize,
 }
 
@@ -284,9 +282,8 @@ impl FlatTopology {
     /// Build a flat-structured topology
     pub fn new() -> Result<FlatTopology> {
         let sys_topo = Topology::new().expect("Failed to build host topology");
-        let (cpu_fids_performance, avg_cap) =
-            Self::build_cpu_fids(&sys_topo, false, false).unwrap();
-        let (cpu_fids_powersave, _) = Self::build_cpu_fids(&sys_topo, true, true).unwrap();
+        let (cpu_fids_performance, avg_cap) = Self::build_cpu_fids(&sys_topo, false).unwrap();
+        let (cpu_fids_powersave, _) = Self::build_cpu_fids(&sys_topo, true).unwrap();
 
         // Note that building compute domain is not dependent to CPU orer
         // so it is okay to use any cpu_fids_*.
@@ -302,11 +299,7 @@ impl FlatTopology {
     }
 
     /// Build a flat-structured list of CPUs in a preference order
-    fn build_cpu_fids(
-        topo: &Topology,
-        prefer_smt_core: bool,
-        prefer_little_core: bool,
-    ) -> Option<(Vec<CpuFlatId>, usize)> {
+    fn build_cpu_fids(topo: &Topology, prefer_powersave: bool) -> Option<(Vec<CpuFlatId>, usize)> {
         let mut cpu_fids = Vec::new();
         debug!("{:#?}", topo);
 
@@ -314,7 +307,7 @@ impl FlatTopology {
         let mut avg_cap = 0;
         for (&node_id, node) in topo.nodes.iter() {
             for (llc_pos, (_llc_id, llc)) in node.llcs.iter().enumerate() {
-                for (core_pos, (core_id, core)) in llc.cores.iter().enumerate() {
+                for (core_pos, (_core_id, core)) in llc.cores.iter().enumerate() {
                     for (cpu_pos, (cpu_id, cpu)) in core.cpus.iter().enumerate() {
                         let cpu_fid = CpuFlatId {
                             node_id,
@@ -322,10 +315,8 @@ impl FlatTopology {
                             core_pos,
                             cpu_pos,
                             cpu_id: *cpu_id,
-                            core_id: *core_id,
-                            l2_id: cpu.l2_id,
-                            l3_id: cpu.l3_id,
-                            sharing_lvl: 0,
+                            smt_level: cpu.smt_level,
+                            cache_size: cpu.cache_size,
                             cpu_cap: cpu.cpu_capacity,
                         };
                         cpu_fids.push(RefCell::new(cpu_fid));
@@ -336,28 +327,6 @@ impl FlatTopology {
         }
         avg_cap /= cpu_fids.len() as usize;
 
-        // Initialize cpu's hardware resource sharing level
-        for (a_id, cpu_fid_a) in cpu_fids.iter().enumerate() {
-            for (b_id, cpu_fid_b) in cpu_fids.iter().enumerate() {
-                if a_id == b_id {
-                    continue;
-                }
-
-                let mut a = cpu_fid_a.borrow_mut();
-                let b = cpu_fid_b.borrow();
-
-                if a.core_id == b.core_id {
-                    a.sharing_lvl += 1;
-                }
-                if a.l2_id == b.l2_id {
-                    a.sharing_lvl += 1;
-                }
-                if a.l3_id == b.l3_id {
-                    a.sharing_lvl += 1;
-                }
-            }
-        }
-
         // Convert a vector of RefCell to a vector of plain cpu_fids
         let mut cpu_fids2 = Vec::new();
         for cpu_fid in cpu_fids.iter() {
@@ -366,52 +335,30 @@ impl FlatTopology {
         let mut cpu_fids = cpu_fids2;
 
         // Sort the cpu_fids
-        match (prefer_smt_core, prefer_little_core) {
-            (true, false) => {
-                // Sort the cpu_fids by node, llc, ^cpu_cap, ^sharing_lvl, core, and cpu order
-                cpu_fids.sort_by(|a, b| {
-                    a.node_id
-                        .cmp(&b.node_id)
-                        .then_with(|| a.llc_pos.cmp(&b.llc_pos))
-                        .then_with(|| b.cpu_cap.cmp(&a.cpu_cap))
-                        .then_with(|| b.sharing_lvl.cmp(&a.sharing_lvl))
-                        .then_with(|| a.core_pos.cmp(&b.core_pos))
-                        .then_with(|| a.cpu_pos.cmp(&b.cpu_pos))
-                });
-            }
-            (true, true) => {
-                // Sort the cpu_fids by node, llc, cpu_cap, ^sharing_lvl, core, and cpu order
+        match prefer_powersave {
+            true => {
+                // Sort the cpu_fids by node, llc, cpu_cap, ^smt_level, ^cache_size, core, and cpu order
                 cpu_fids.sort_by(|a, b| {
                     a.node_id
                         .cmp(&b.node_id)
                         .then_with(|| a.llc_pos.cmp(&b.llc_pos))
                         .then_with(|| a.cpu_cap.cmp(&b.cpu_cap))
-                        .then_with(|| b.sharing_lvl.cmp(&a.sharing_lvl))
+                        .then_with(|| b.smt_level.cmp(&a.smt_level))
+                        .then_with(|| b.cache_size.cmp(&a.cache_size))
                         .then_with(|| a.core_pos.cmp(&b.core_pos))
                         .then_with(|| a.cpu_pos.cmp(&b.cpu_pos))
                 });
             }
-            (false, false) => {
-                // Sort the cpu_fids by cpu, node, llc, ^cpu_cap, sharing_lvl, and core order
+            false => {
+                // Sort the cpu_fids by cpu, node, llc, ^cpu_cap, smt_level, ^cache_size, and core order
                 cpu_fids.sort_by(|a, b| {
                     a.cpu_pos
                         .cmp(&b.cpu_pos)
                         .then_with(|| a.node_id.cmp(&b.node_id))
                         .then_with(|| a.llc_pos.cmp(&b.llc_pos))
                         .then_with(|| b.cpu_cap.cmp(&a.cpu_cap))
-                        .then_with(|| a.sharing_lvl.cmp(&b.sharing_lvl))
-                        .then_with(|| a.core_pos.cmp(&b.core_pos))
-                });
-            }
-            (false, true) => {
-                // Sort the cpu_fids by cpu, node, llc, cpu_cap, sharing_lvl, and core order
-                cpu_fids.sort_by(|a, b| {
-                    a.cpu_pos
-                        .cmp(&b.cpu_pos)
-                        .then_with(|| a.node_id.cmp(&b.node_id))
-                        .then_with(|| a.llc_pos.cmp(&b.llc_pos))
-                        .then_with(|| a.cpu_cap.cmp(&b.cpu_cap))
-                        .then_with(|| a.sharing_lvl.cmp(&b.sharing_lvl))
+                        .then_with(|| a.smt_level.cmp(&b.smt_level))
+                        .then_with(|| b.cache_size.cmp(&a.cache_size))
                         .then_with(|| a.core_pos.cmp(&b.core_pos))
                 });
             }
@@ -631,7 +578,7 @@ impl<'a> Scheduler<'a> {
             skel.maps.rodata_data.cpu_order_powersave[pos] = *cpu as u16;
         }
         info!("CPU pref order in performance mode: {:?}", cpu_pf_order);
-        info!("CPU perf order in powersave mode: {:?}", cpu_ps_order);
+        info!("CPU pref order in powersave mode: {:?}", cpu_ps_order);
 
         // Initialize compute domain contexts
         for (k, v) in topo.cpdom_map.iter() {
