@@ -10,14 +10,17 @@ from typing import List, Optional
 
 
 def run_command(
-    cmd: List[str], check: bool = True, env: Optional[dict] = None
+    cmd: List[str],
+    check: bool = True,
+    env: Optional[dict] = None,
+    cwd: Optional[str] = None,
 ) -> subprocess.CompletedProcess:
     """Run a command and return the result."""
     print(f"Running: {' '.join(cmd)}", flush=True)
     merged_env = os.environ.copy()
     if env:
         merged_env.update(env)
-    return subprocess.run(cmd, check=check, env=merged_env)
+    return subprocess.run(cmd, check=check, env=merged_env, cwd=cwd)
 
 
 def get_clippy_packages() -> List[str]:
@@ -49,6 +52,8 @@ def run_format():
     run_command(["isort", ".github/include/ci.py"])
 
     run_command(["cargo", "fmt"])
+
+    run_command(["nix", "fmt"], cwd=".github/include")
 
     run_command(["git", "diff", "--exit-code"])
     print("✓ Format completed successfully", flush=True)

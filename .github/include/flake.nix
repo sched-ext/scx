@@ -91,6 +91,7 @@
                   jq
                   llvmPackages.libclang
                   llvmPackages.libllvm
+                  nix
                   pkg-config
                   protobuf
                   rustc
