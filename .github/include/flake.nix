@@ -78,6 +78,7 @@
                   binutils
                   black
                   cargo
+                  cargo-nextest
                   clang
                   clippy
                   coreutils
