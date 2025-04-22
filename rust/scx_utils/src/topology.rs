@@ -120,6 +120,7 @@ pub struct Cpu {
     pub base_freq: usize,
     /// The best-effort guessing of cpu_capacity scaled to 1024.
     pub cpu_capacity: usize,
+    pub smt_level: usize,
     /// CPU idle resume latency
     pub pm_qos_resume_latency_us: usize,
     pub trans_lat_ns: usize,
@@ -219,7 +220,13 @@ impl Topology {
                 let mut llc_cpus = BTreeMap::new();
 
                 for (&core_id, core) in llc_mut.cores.iter_mut() {
-                    for (&cpu_id, cpu) in core.cpus.iter() {
+                    let core_mut = Arc::get_mut(core).unwrap();
+                    let smt_level = core_mut.cpus.len();
+
+                    for (&cpu_id, cpu) in core_mut.cpus.iter_mut() {
+                        let cpu_mut = Arc::get_mut(cpu).unwrap();
+                        cpu_mut.smt_level = smt_level;
+
                         if topo_cpus
                             .insert(cpu_id, cpu.clone())
                             .or(node_cpus.insert(cpu_id, cpu.clone()))
@@ -540,6 +547,7 @@ fn create_insert_cpu(
             max_freq,
             base_freq,
             cpu_capacity,
+            smt_level: 0, // Will be initialized at instantiate().
             pm_qos_resume_latency_us,
             trans_lat_ns,
             l2_id,
