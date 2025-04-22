@@ -44,6 +44,7 @@ impl Default for KeyMap {
         bindings.insert(Key::Char('L'), Action::ToggleLocalization);
         bindings.insert(Key::Char('P'), Action::ToggleHwPressure);
         bindings.insert(Key::Char('h'), Action::SetState(AppState::Help));
+        bindings.insert(Key::Char('m'), Action::SetState(AppState::MangoApp));
         bindings.insert(Key::Char('?'), Action::SetState(AppState::Help));
         bindings.insert(Key::Char('l'), Action::SetState(AppState::Llc));
         bindings.insert(Key::Char('n'), Action::SetState(AppState::Node));
@@ -346,6 +347,7 @@ pub fn parse_action(action_str: &str) -> Result<Action> {
         "ToggleHwPressure" => Ok(Action::ToggleHwPressure),
         "AppStateHelp" => Ok(Action::SetState(AppState::Help)),
         "AppStateLlc" => Ok(Action::SetState(AppState::Llc)),
+        "AppStateMangoApp" => Ok(Action::SetState(AppState::MangoApp)),
         "AppStateNode" => Ok(Action::SetState(AppState::Node)),
         "AppStateScheduler" => Ok(Action::SetState(AppState::Scheduler)),
         "SaveConfig" => Ok(Action::SaveConfig),

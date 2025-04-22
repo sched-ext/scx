@@ -14,6 +14,7 @@ pub mod edm;
 mod event_data;
 mod keymap;
 mod llc_data;
+pub mod mangoapp;
 mod node_data;
 mod perf_event;
 mod perfetto_trace;
@@ -77,6 +78,8 @@ pub enum AppState {
     Scheduler,
     /// Application is in the tracing  state.
     Tracing,
+    /// Application is in the mangoapp state.
+    MangoApp,
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -246,6 +249,19 @@ pub struct PstateSampleAction {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MangoAppAction {
+    pub pid: u32,
+    pub vis_frametime: u64,
+    pub app_frametime: u64,
+    pub fsr_upscale: u8,
+    pub fsr_sharpness: u8,
+    pub latency_ns: u64,
+    pub output_width: u32,
+    pub output_height: u32,
+    pub display_refresh: u16,
+}
+
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
     ChangeTheme,
     ClearEvent,
@@ -265,6 +281,7 @@ pub enum Action {
     IncBpfSampleRate,
     IncTickRate,
     IPI(IPIAction),
+    MangoApp(MangoAppAction),
     NextEvent,
     NextViewState,
     PageDown,

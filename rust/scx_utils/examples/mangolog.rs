@@ -2,7 +2,7 @@
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
-use scx_utils::mangoapp::mangoapp_msg_v1;
+use scx_utils::mangoapp::{mangoapp_msg_v1, MANGOAPP_PROJ_ID};
 
 use anyhow::bail;
 use anyhow::Result;
@@ -26,7 +26,7 @@ fn main() -> Result<()> {
 
     // Create the key for msgget reads using the mangoapp file
     let path = CString::new("mangoapp").unwrap();
-    let key = unsafe { libc::ftok(path.as_ptr(), 65) };
+    let key = unsafe { libc::ftok(path.as_ptr(), MANGOAPP_PROJ_ID) };
     if key == -1 {
         bail!("failed to ftok: {}", io::Error::last_os_error());
     }

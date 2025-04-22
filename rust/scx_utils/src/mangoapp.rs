@@ -3,6 +3,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+pub const MANGOAPP_PROJ_ID: i32 = 65;
+
 #[derive(Debug, Copy, Clone)]
 #[repr(C, packed)]
 pub struct mangoapp_msg_header {
@@ -30,8 +32,8 @@ pub struct mangoapp_msg_v1 {
 impl mangoapp_msg_v1 {
     const B_APP_WANTS_HDR_MASK: u8 = 0b0000_0001;
     const B_STEAM_FOCUSED_MASK: u8 = 0b0000_0010;
-    #[inline]
 
+    #[inline]
     pub fn wants_hdr(&self) -> bool {
         (self.b_app_wants_hdr_steam_focused & Self::B_APP_WANTS_HDR_MASK) != 0
     }

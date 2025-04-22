@@ -82,6 +82,16 @@ pub struct TuiArgs {
     /// Minimum latency to trigger a trace.
     #[arg(long, default_value_t = 100000000)]
     pub experimental_long_tail_tracing_min_latency_ns: u64,
+
+    /// Trace mangoapp applications
+    #[arg(long, default_value_t = false)]
+    pub mangoapp_tracing: bool,
+    /// Mangoapp poll interval in ms
+    #[arg(long, default_value_t = 1000)]
+    pub mangoapp_poll_intvl_ms: u64,
+    /// Mangoapp path for System V IPC key
+    #[arg(long, default_value = "mangoapp")]
+    pub mangoapp_path: String,
 }
 
 #[derive(Clone, Parser, Debug)]
@@ -102,6 +112,7 @@ pub struct TraceArgs {
     pub verbose: u8,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
     /// Runs the scxtop TUI.
