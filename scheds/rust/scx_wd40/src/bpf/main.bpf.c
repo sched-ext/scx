@@ -499,8 +499,10 @@ void BPF_STRUCT_OPS(wd40_enqueue, struct task_struct *p __arg_trusted, u64 enq_f
 	 */
 	if (taskc->dispatch_local) {
 		taskc->dispatch_local = false;
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
-		return;
+		if (!scx_bpf_dsq_nr_queued(dom)) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, enq_flags);
+			return;
+		}
 	}
 
 	/*
