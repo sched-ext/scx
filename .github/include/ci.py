@@ -3,10 +3,10 @@
 import argparse
 import json
 import os
+import random
 import subprocess
 import sys
 from typing import List, Optional
-import random
 
 
 def run_command(
@@ -57,7 +57,11 @@ def run_format():
     """Format all targets."""
     print("Running format...", flush=True)
 
+    run_command(["black", ".github/include/ci.py"])
+    run_command(["isort", ".github/include/ci.py"])
+
     run_command(["cargo", "fmt"])
+
     run_command(["git", "diff", "--exit-code"])
     print("✓ Format completed successfully", flush=True)
 
