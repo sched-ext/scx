@@ -1,0 +1,21 @@
+[package]
+name = "scx_userspace_arena"
+version = "1.0.11"
+edition = "2024"
+authors = ["Jake Hillion <jake@hillion.co.uk>"]
+license = "GPL-2.0-only"
+repository = "https://github.com/sched-ext/scx"
+description = "Utilities for interacting with BPF arenas from userspace in sched_ext schedulers"
+
+[package.metadata.scx]
+ci.use_clippy = true
+
+[dependencies]
+scx_utils = { path = "../scx_utils", version = "1.0.14" }
+
+anyhow = "1.0.65"
+buddy_system_allocator = { version = "0.11.0", default-features = false }
+libbpf-rs = "=0.25.0-beta.1"
+
+[build-dependencies]
+scx_utils = { path = "../scx_utils", version = "1.0.14" }

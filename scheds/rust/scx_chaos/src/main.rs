@@ -15,7 +15,6 @@ use log::info;
 use nix::unistd::Pid;
 
 use std::panic;
-use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::Condvar;
@@ -202,7 +201,7 @@ fn main() -> Result<()> {
             for builder in BuilderIterator::from(&*args) {
                 info!("{:?}", &builder);
 
-                let sched: Pin<Box<Scheduler>> = builder.try_into()?;
+                let sched: Scheduler = builder.try_into()?;
 
                 sched.observe(&shutdown, None)?;
             }
