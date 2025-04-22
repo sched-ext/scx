@@ -6,7 +6,7 @@
  */
 
 #define P2DQ_CREATE_STRUCT_OPS 0
-#include "../../../scx_p2dq/src/bpf/main.bpf.c"
+#include "scx_p2dq/main.bpf.c"
 
 #include "intf.h"
 

@@ -21,3 +21,4 @@ simplelog = "0.12"
 
 [build-dependencies]
 scx_utils = { path = "../../../rust/scx_utils", version = "1.0.13" }
+scx_p2dq = { path = "../../../scheds/rust/scx_p2dq", version = "1.0.12" }
