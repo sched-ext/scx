@@ -41,18 +41,6 @@ def get_clippy_packages() -> List[str]:
     return clippy_packages
 
 
-def test_binary_has_tests(binary_path: str) -> bool:
-    """Test whether a test binary contains any tests."""
-    result = subprocess.run(
-        [binary_path, "--list"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-
-    return result.stdout.strip() != "0 tests, 0 benchmarks"
-
-
 def run_format():
     """Format all targets."""
     print("Running format...", flush=True)
@@ -90,33 +78,21 @@ def run_tests():
     print("Running tests...", flush=True)
 
     result = subprocess.run(
-        ["cargo", "test", "--no-run", "--message-format", "json"],
+        [
+            "cargo",
+            "nextest",
+            "archive",
+            "--archive-file",
+            "target/nextest-archive.tar.zst",
+        ],
         check=True,
         stdout=subprocess.PIPE,
         stderr=sys.stderr,
         text=True,
     )
-    cargo_results = [
-        json.loads(line) for line in result.stdout.splitlines() if line.strip()
-    ]
-    test_binaries = [
-        x["executable"]
-        for x in cargo_results
-        if x["reason"] == "compiler-artifact"
-        if x["profile"].get("test", False)
-        if x["executable"] is not None
-    ]
-
-    test_binaries = [x for x in test_binaries if test_binary_has_tests(x)]
-    random.shuffle(test_binaries)
-
-    # If vng needs to traverse a path that's inaccessible to the user (like
-    # /var/cache/private/...) it can't run these binaries with their absolute
-    # paths. Make them relative to CWD to solve this.
-    test_binaries = [os.path.relpath(x) for x in test_binaries]
 
     # Get CPU count
-    cpu_count = min(os.cpu_count(), 8)
+    cpu_count = min(os.cpu_count(), 16)
 
     # Find kernel image
     kernel_path = "linux/arch/x86/boot/bzImage"
@@ -151,7 +127,6 @@ def run_tests():
         sys.argv[0],
         "test-in-vm",
     ]
-    cmd += test_binaries
 
     # Run tests in VM
     run_command(cmd)
@@ -159,11 +134,21 @@ def run_tests():
     print("✓ Tests completed successfully", flush=True)
 
 
-def run_tests_in_vm(test_bins):
+def run_tests_in_vm():
     """Run tests when already inside the VM."""
 
-    for cmd in test_bins:
-        run_command([cmd])
+    run_command(
+        [
+            "cargo-nextest",
+            "nextest",
+            "run",
+            "--archive-file",
+            "target/nextest-archive.tar.zst",
+            "--workspace-remap",
+            ".",
+            "--no-fail-fast",
+        ]
+    )
 
 
 def run_all():
@@ -195,9 +180,6 @@ def main():
         "test-in-vm",
         help="Run Rust tests in VM (intended to be invoked by this script)",
     )
-    parser_test_in_vm.add_argument(
-        "test_bins", nargs="*", help="Test binaries to execute in order"
-    )
 
     args = parser.parse_args()
 
@@ -210,7 +192,7 @@ def main():
     elif args.command == "test":
         run_tests()
     elif args.command == "test-in-vm":
-        run_tests_in_vm(args.test_bins)
+        run_tests_in_vm()
     elif args.command == "all":
         run_all()
 
