@@ -76,6 +76,7 @@
                 propagatedBuildInputs = with pkgs; [
                   bash
                   binutils
+                  black
                   cargo
                   clang
                   clippy
@@ -85,6 +86,7 @@
                   gnugrep
                   gnumake
                   gnused
+                  isort
                   jq
                   llvmPackages.libclang
                   llvmPackages.libllvm
