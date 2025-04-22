@@ -117,6 +117,28 @@ pub fn read_file_usize_vec(path: &Path, separator: char) -> Result<Vec<usize>> {
         .collect::<Result<Vec<usize>>>()
 }
 
+pub fn read_file_byte(path: &Path) -> Result<usize> {
+    let val = std::fs::read_to_string(path)?;
+    let val = val.trim();
+
+    // E.g., 10K, 10M, 10G, 10
+    if val.ends_with("K") {
+        let byte = val[..val.len() - 1].parse::<usize>()?;
+        return Ok(byte * 1024);
+    }
+    if val.ends_with("M") {
+        let byte = val[..val.len() - 1].parse::<usize>()?;
+        return Ok(byte * 1024 * 1024);
+    }
+    if val.ends_with("G") {
+        let byte = val[..val.len() - 1].parse::<usize>()?;
+        return Ok(byte * 1024 * 1024 * 1024);
+    }
+
+    let byte = val.parse::<usize>()?;
+    Ok(byte)
+}
+
 /* Load is reported as weight * duty cycle
  *
  * In the Linux kernel, EEDVF uses default weight = 1 s.t.
