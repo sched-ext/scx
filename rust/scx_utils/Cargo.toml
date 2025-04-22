@@ -50,6 +50,10 @@ default = []
 gpu-topology = ["dep:nvml-wrapper"]
 autopower = ["dep:zbus"]
 
+[[example]]
+name = "mangolog"
+crate-type = ["bin"]
+
 [lints.clippy]
 not_unsafe_ptr_arg_deref = "allow"
 
