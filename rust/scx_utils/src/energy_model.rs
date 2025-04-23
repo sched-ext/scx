@@ -65,6 +65,15 @@ impl EnergyModel {
 
         Ok(EnergyModel { perf_doms })
     }
+
+    pub fn get_pd(&self, cpu_id: usize) -> Option<&PerfDomain> {
+        for (_, pd) in self.perf_doms.iter() {
+            if pd.span.test_cpu(cpu_id) {
+                return Some(&pd);
+            }
+        }
+        None
+    }
 }
 
 impl PerfDomain {
