@@ -12,6 +12,8 @@ fn main() {
     file.write_all(scx_p2dq::bpf_srcs::main_bpf_c()).unwrap();
     let mut file = std::fs::File::create(include_path.clone() + "/scx_p2dq/intf.h").unwrap();
     file.write_all(scx_p2dq::bpf_srcs::intf_h()).unwrap();
+    let mut file = std::fs::File::create(include_path.clone() + "/scx_p2dq/types.h").unwrap();
+    file.write_all(scx_p2dq::bpf_srcs::types_h()).unwrap();
 
     // TODO: this is a massive hack. BpfBuilder should be rewritten to have an explicit change of
     // state between "builder" mode (where options are set) and "actualised" mode where they are

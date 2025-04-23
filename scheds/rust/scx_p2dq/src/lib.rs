@@ -240,4 +240,11 @@ pub mod bpf_srcs {
 
         MAIN_BPF_C
     }
+
+    pub fn types_h() -> &'static [u8] {
+        const TYPES_H: &'static [u8] =
+            include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/bpf/types.h"));
+
+        TYPES_H
+    }
 }
