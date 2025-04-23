@@ -54,6 +54,7 @@ use scx_utils::set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 use scx_utils::Cpumask;
+use scx_utils::EnergyModel;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
@@ -229,6 +230,7 @@ impl introspec {
 #[derive(Debug, Clone)]
 struct CpuFlatId {
     node_id: usize,
+    pd_id: usize,
     llc_pos: usize,
     core_pos: usize,
     cpu_pos: usize,
@@ -282,8 +284,13 @@ impl FlatTopology {
     /// Build a flat-structured topology
     pub fn new() -> Result<FlatTopology> {
         let sys_topo = Topology::new().expect("Failed to build host topology");
-        let (cpu_fids_performance, avg_cap) = Self::build_cpu_fids(&sys_topo, false).unwrap();
-        let (cpu_fids_powersave, _) = Self::build_cpu_fids(&sys_topo, true).unwrap();
+        let sys_em = EnergyModel::new();
+        debug!("{:#?}", sys_topo);
+        debug!("{:#?}", sys_em);
+
+        let (cpu_fids_performance, avg_cap) =
+            Self::build_cpu_fids(&sys_topo, &sys_em, false).unwrap();
+        let (cpu_fids_powersave, _) = Self::build_cpu_fids(&sys_topo, &sys_em, true).unwrap();
 
         // Note that building compute domain is not dependent to CPU orer
         // so it is okay to use any cpu_fids_*.
@@ -299,9 +306,12 @@ impl FlatTopology {
     }
 
     /// Build a flat-structured list of CPUs in a preference order
-    fn build_cpu_fids(topo: &Topology, prefer_powersave: bool) -> Option<(Vec<CpuFlatId>, usize)> {
+    fn build_cpu_fids(
+        topo: &Topology,
+        em: &Result<EnergyModel>,
+        prefer_powersave: bool,
+    ) -> Option<(Vec<CpuFlatId>, usize)> {
         let mut cpu_fids = Vec::new();
-        debug!("{:#?}", topo);
 
         // Build a vector of cpu flat ids.
         let mut avg_cap = 0;
@@ -309,12 +319,15 @@ impl FlatTopology {
             for (llc_pos, (_llc_id, llc)) in node.llcs.iter().enumerate() {
                 for (core_pos, (_core_id, core)) in llc.cores.iter().enumerate() {
                     for (cpu_pos, (cpu_id, cpu)) in core.cpus.iter().enumerate() {
+                        let cpu_id = *cpu_id;
+                        let pd_id = Self::get_pd_id(em, cpu_id, node_id);
                         let cpu_fid = CpuFlatId {
                             node_id,
+                            pd_id,
                             llc_pos,
                             core_pos,
                             cpu_pos,
-                            cpu_id: *cpu_id,
+                            cpu_id,
                             smt_level: cpu.smt_level,
                             cache_size: cpu.cache_size,
                             cpu_cap: cpu.cpu_capacity,
@@ -337,7 +350,7 @@ impl FlatTopology {
         // Sort the cpu_fids
         match prefer_powersave {
             true => {
-                // Sort the cpu_fids by node, llc, cpu_cap, ^smt_level, ^cache_size, core, and cpu order
+                // Sort the cpu_fids by node, llc, cpu_cap, ^smt_level, ^cache_size, perf_dom, core, and cpu order
                 cpu_fids.sort_by(|a, b| {
                     a.node_id
                         .cmp(&b.node_id)
@@ -345,12 +358,13 @@ impl FlatTopology {
                         .then_with(|| a.cpu_cap.cmp(&b.cpu_cap))
                         .then_with(|| b.smt_level.cmp(&a.smt_level))
                         .then_with(|| b.cache_size.cmp(&a.cache_size))
+                        .then_with(|| a.pd_id.cmp(&b.pd_id))
                         .then_with(|| a.core_pos.cmp(&b.core_pos))
                         .then_with(|| a.cpu_pos.cmp(&b.cpu_pos))
                 });
             }
             false => {
-                // Sort the cpu_fids by cpu, node, llc, ^cpu_cap, smt_level, ^cache_size, and core order
+                // Sort the cpu_fids by cpu, node, llc, ^cpu_cap, smt_level, ^cache_size, perf_dom, and core order
                 cpu_fids.sort_by(|a, b| {
                     a.cpu_pos
                         .cmp(&b.cpu_pos)
@@ -359,12 +373,22 @@ impl FlatTopology {
                         .then_with(|| b.cpu_cap.cmp(&a.cpu_cap))
                         .then_with(|| a.smt_level.cmp(&b.smt_level))
                         .then_with(|| b.cache_size.cmp(&a.cache_size))
+                        .then_with(|| a.pd_id.cmp(&b.pd_id))
                         .then_with(|| a.core_pos.cmp(&b.core_pos))
                 });
             }
         }
 
         Some((cpu_fids, avg_cap))
+    }
+
+    /// Get the performance domain (i.e., CPU frequency domain) ID for a CPU.
+    /// If the energy model is not available, use NUMA node ID instead.
+    fn get_pd_id(em: &Result<EnergyModel>, cpu_id: usize, node_id: usize) -> usize {
+        match em {
+            Ok(em) => em.get_pd(cpu_id).unwrap().id,
+            Err(_) => node_id,
+        }
     }
 
     /// Build a list of compute domains
