@@ -1075,7 +1075,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	/*
 	 * Update task statistics
 	 */
-	cpuc = get_cpu_ctx();
+	cpuc = get_cpu_ctx_id(scx_bpf_task_cpu(p));
 	taskc = get_task_ctx(p);
 	if (!cpuc || !taskc)
 		return;
