@@ -10,21 +10,27 @@
 #ifdef LSP
 #define __bpf__
 #include "../../../../include/scx/common.bpf.h"
+#include "../../../../include/scx/bpf_arena_common.h"
+#include "../../../../include/lib/sdt_task.h"
 #else
 #include <scx/common.bpf.h>
-#endif
-
-#ifndef P2DQ_CREATE_STRUCT_OPS
-#define P2DQ_CREATE_STRUCT_OPS 1
+#include <scx/bpf_arena_common.h>
+#include <lib/sdt_task.h>
 #endif
 
 #include "intf.h"
+#include "types.h"
+
 
 #include <errno.h>
 #include <stdbool.h>
 #include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+
+#ifndef P2DQ_CREATE_STRUCT_OPS
+#define P2DQ_CREATE_STRUCT_OPS 1
+#endif
 
 char _license[] SEC("license") = "GPL";
 
@@ -195,22 +201,20 @@ static struct node_ctx *lookup_node_ctx(u32 node_id)
 	return nodec;
 }
 
+struct mask_wrapper {
+	struct bpf_cpumask __kptr *mask;
+};
 
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
-	__type(value, struct task_ctx);
-} task_ctxs SEC(".maps");
+	__type(value, struct mask_wrapper);
+} task_masks SEC(".maps");
 
-static struct task_ctx *lookup_task_ctx_may_fail(struct task_struct *p)
+static task_ctx *lookup_task_ctx(struct task_struct *p)
 {
-	return bpf_task_storage_get(&task_ctxs, p, 0, 0);
-}
-
-static struct task_ctx *lookup_task_ctx(struct task_struct *p)
-{
-	struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
+	task_ctx *taskc = scx_task_data(p);
 
 	if (!taskc)
 		scx_bpf_error("task_ctx lookup failed");
@@ -241,7 +245,7 @@ static inline void stat_inc(enum stat_idx idx)
 /*
  * Returns if the task is interactive based on the tasks DSQ index.
  */
-static bool is_interactive(struct task_ctx *taskc)
+static bool is_interactive(task_ctx *taskc)
 {
 	if (nr_dsqs_per_llc <= 1)
 		return false;
@@ -252,7 +256,7 @@ static bool is_interactive(struct task_ctx *taskc)
 /*
  * Returns if the task is able to load balance using pick2.
  */
-static bool can_pick2(struct task_ctx *taskc)
+static bool can_pick2(task_ctx *taskc)
 {
 	if (is_interactive(taskc) ||
 	    !taskc->all_cpus ||
@@ -350,7 +354,7 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *cur_llcx, struct llc_ctx
 	return left;
 }
 
-static s32 pick_two_cpu(struct llc_ctx *cur_llcx, struct task_ctx *taskc,
+static s32 pick_two_cpu(struct llc_ctx *cur_llcx, task_ctx *taskc,
 			bool *is_idle)
 {
 	if ((min_llc_runs_pick2 > 0 &&
@@ -437,11 +441,13 @@ pick_llc:
 	return -EINVAL;
 }
 
-static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
+static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			 s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
 	const struct cpumask *idle_smtmask, *idle_cpumask;
+	struct mask_wrapper *wrapper;
 	struct cpu_ctx *prev_cpuc;
+	struct bpf_cpumask *mask;
 	struct node_ctx *nodec;
 	struct llc_ctx *llcx;
 	bool interactive = is_interactive(taskc);
@@ -461,19 +467,31 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 
 	// Special handling of tasks with custom affinities
 	if (!taskc->all_cpus) {
+		wrapper = bpf_task_storage_get(&task_masks, p, 0, 0);
+		if (!wrapper) {
+			cpu = prev_cpu;
+			goto found_cpu;
+		}
+
+		mask = wrapper->mask;
+		if (!mask) {
+			cpu = prev_cpu;
+			goto found_cpu;
+		}
+
 		// First try last CPU
 		if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
 			cpu = prev_cpu;
 			goto found_cpu;
 		}
 
-		if (taskc->mask && llcx->cpumask)
-			bpf_cpumask_and(taskc->mask, cast_mask(llcx->cpumask),
+		if (llcx->cpumask)
+			bpf_cpumask_and(mask, cast_mask(llcx->cpumask),
 					p->cpus_ptr);
 
 		// First try to find an idle SMT in the LLC
-		if (smt_enabled && taskc->mask) {
-			cpu = scx_bpf_pick_idle_cpu(cast_mask(taskc->mask),
+		if (smt_enabled) {
+			cpu = scx_bpf_pick_idle_cpu(cast_mask(mask),
 						    SCX_PICK_IDLE_CORE);
 			if (cpu >= 0) {
 				*is_idle = true;
@@ -482,20 +500,17 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 		}
 
 		// Next try to find an idle CPU in the LLC
-		if (taskc->mask) {
-			cpu = scx_bpf_pick_idle_cpu(cast_mask(taskc->mask), 0);
-			if (cpu >= 0) {
-				*is_idle = true;
-				goto found_cpu;
-			}
+		cpu = scx_bpf_pick_idle_cpu(cast_mask(mask), 0);
+		if (cpu >= 0) {
+			*is_idle = true;
+			goto found_cpu;
 		}
 
 		// Next try to find an idle CPU in the node
-		if (nodec->cpumask && taskc->mask) {
-			bpf_cpumask_and(taskc->mask, cast_mask(nodec->cpumask),
+		if (nodec->cpumask && mask) {
+			bpf_cpumask_and(mask, cast_mask(nodec->cpumask),
 					p->cpus_ptr);
-			if (taskc->mask &&
-			    (cpu = scx_bpf_pick_idle_cpu(cast_mask(taskc->mask), 0)) >= 0) {
+			if ((cpu = scx_bpf_pick_idle_cpu(cast_mask(mask), 0)) >= 0) {
 				*is_idle = true;
 				goto found_cpu;
 			}
@@ -514,7 +529,7 @@ static s32 pick_idle_cpu(struct task_struct *p, struct task_ctx *taskc,
 	 */
 	if (wake_flags & SCX_WAKE_SYNC) {
 		struct task_struct *current = (void *)bpf_get_current_task_btf();
-		struct task_ctx *cur_taskc = lookup_task_ctx_may_fail(current);
+		task_ctx *cur_taskc = scx_task_data(current);
 		// Shouldn't happen, but makes code easier to follow
 		if (!cur_taskc) {
 			cpu = prev_cpu;
@@ -668,7 +683,7 @@ found_cpu:
 
 static __always_inline s32 p2dq_select_cpu_impl(struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 	bool is_idle = false;
 	s32 cpu;
 
@@ -702,7 +717,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 {
 	struct llc_ctx *llcx, *prev_llcx;
 	struct cpu_ctx *cpuc, *task_cpuc;
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 	u64 dsq_id;
 
 	s32 cpu, task_cpu = scx_bpf_task_cpu(p);
@@ -807,7 +822,7 @@ out:
 
 static __always_inline void p2dq_runnable_impl(struct task_struct *p, u64 enq_flags)
 {
-	struct task_ctx *wakee_ctx;
+	task_ctx *wakee_ctx;
 
 	if (!(wakee_ctx = lookup_task_ctx(p)))
 		return;
@@ -818,7 +833,7 @@ static __always_inline void p2dq_runnable_impl(struct task_struct *p, u64 enq_fl
 
 void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 {
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
 	s32 task_cpu = scx_bpf_task_cpu(p);
@@ -863,7 +878,7 @@ void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 
 void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 {
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
 	u64 used, scaled_used, last_dsq_slice_ns;
@@ -1064,7 +1079,7 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
 		    const struct cpumask *cpumask)
 {
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 
 	if (!(taskc = lookup_task_ctx(p)) || !all_cpumask)
 		return;
@@ -1075,15 +1090,15 @@ void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
 static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 					       struct scx_init_task_args *args)
 {
+	struct mask_wrapper *wrapper;
 	struct bpf_cpumask *cpumask;
-	struct task_ctx *taskc;
+	task_ctx *taskc;
 	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
 
 	s32 task_cpu = scx_bpf_task_cpu(p);
 
-	taskc = bpf_task_storage_get(&task_ctxs, p, 0,
-				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	taskc = scx_task_alloc(p);
 	if (!taskc) {
 		scx_bpf_error("task_ctx allocation failure");
 		return -ENOMEM;
@@ -1098,7 +1113,15 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 		return -ENOMEM;
 	}
 
-	if ((cpumask = bpf_kptr_xchg(&taskc->mask, cpumask))) {
+	wrapper = bpf_task_storage_get(&task_masks, p, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!wrapper) {
+		bpf_cpumask_release(cpumask);
+		scx_bpf_error("task mask allocation failure");
+		return -ENOMEM;
+	}
+
+	if ((cpumask = bpf_kptr_xchg(&wrapper->mask, cpumask))) {
 		bpf_cpumask_release(cpumask);
 		scx_bpf_error("task_ctx allocation failure");
 		return -EINVAL;
@@ -1117,6 +1140,10 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 	return 0;
 }
 
+void BPF_STRUCT_OPS(p2dq_exit_task, struct task_struct *p, struct scx_exit_task_args *args)
+{
+	scx_task_free(p);
+}
 
 static int init_llc(u32 llc_id)
 {
@@ -1520,9 +1547,12 @@ static __always_inline s32 p2dq_init_impl()
 	if (start_timers() < 0)
 		return -EINVAL;
 
+	ret = scx_task_init(sizeof(task_ctx));
+	if (ret)
+		return ret;
+
 	return 0;
 }
-
 
 void BPF_STRUCT_OPS(p2dq_exit, struct scx_exit_info *ei)
 {
@@ -1572,6 +1602,7 @@ SCX_OPS_DEFINE(p2dq,
 	       .stopping		= (void *)p2dq_stopping,
 	       .set_cpumask		= (void *)p2dq_set_cpumask,
 	       .init_task		= (void *)p2dq_init_task,
+	       .exit_task		= (void *)p2dq_exit_task,
 	       .init			= (void *)p2dq_init,
 	       .exit			= (void *)p2dq_exit,
 	       .timeout_ms		= 20000,
