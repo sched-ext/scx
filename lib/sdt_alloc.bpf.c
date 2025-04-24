@@ -925,6 +925,7 @@ int scx_stk_fill_new_elems(struct scx_stk *stack)
 	nr_pages = stack->nr_pages_per_alloc;
 	nelems = (nr_pages * PAGE_SIZE) / stack->data_size;
 	if (nelems > SCX_RING_MAX) {
+		arena_spin_unlock(stack->lock);
 		scx_bpf_error("new elements must fit into a single ring");
 		return -EINVAL;
 	}
