@@ -879,7 +879,6 @@ void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 {
 	task_ctx *taskc;
-	struct cpu_ctx *cpuc;
 	struct llc_ctx *llcx;
 	u64 used, scaled_used, last_dsq_slice_ns;
 	u64 now = scx_bpf_now();
@@ -887,8 +886,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	if (!(cpuc = lookup_cpu_ctx(-1)) ||
-	    !(llcx = lookup_llc_ctx(cpuc->llc_id)))
+	if (!(llcx = lookup_llc_ctx(taskc->llc_id)))
 		return;
 
 	last_dsq_slice_ns = dsq_time_slice(taskc->dsq_index);
