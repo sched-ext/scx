@@ -33,9 +33,6 @@ const SCHEDULER_NAME: &'static str = "RustLand";
 
 const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
-/// Task is being enqueued as a result of a wakeup event.
-const SCX_ENQ_WAKEUP: u64 = 1;
-
 /// scx_rustland: user-space scheduler written in Rust
 ///
 /// scx_rustland is designed to prioritize interactive workloads over background CPU-intensive
@@ -118,17 +115,10 @@ struct Opts {
 
 // Time constants.
 const NSEC_PER_USEC: u64 = 1_000;
-const NSEC_PER_SEC: u64 = 1_000_000_000;
-
-// Maximum multiplier for the dynamic task priority.
-const MAX_LATENCY_WEIGHT: u64 = 1_000;
 
 // Basic item stored in the task information map.
 #[derive(Debug)]
 struct TaskInfo {
-    nvcsw: u64,
-    nvcsw_ts: u64,
-    avg_nvcsw: u64,
     sum_exec_runtime: u64, // total cpu time used by the task
     vruntime: u64,         // total vruntime of the task
 }
@@ -230,7 +220,13 @@ struct Scheduler<'a> {
 impl<'a> Scheduler<'a> {
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         // Low-level BPF connector.
-        let bpf = BpfScheduler::init(open_object, opts.exit_dump_len, opts.partial, opts.verbose)?;
+        let bpf = BpfScheduler::init(
+            open_object,
+            opts.exit_dump_len,
+            opts.partial,
+            opts.verbose,
+            true, // Enable built-in idle CPU selection policy
+        )?;
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         info!("{} scheduler attached", SCHEDULER_NAME);
@@ -281,17 +277,11 @@ impl<'a> Scheduler<'a> {
         ts.as_nanos() as u64
     }
 
-    fn calc_avg(old_val: u64, new_val: u64) -> u64 {
-        (old_val - (old_val >> 2)) + (new_val >> 2)
-    }
-
     // Update task's vruntime based on the information collected from the kernel and return to the
     // caller the evaluated task's deadline.
     //
     // This method implements the main task ordering logic of the scheduler.
     fn update_enqueued(&mut self, task: &QueuedTask) -> u64 {
-        let now = Self::now();
-
         // Get task information if the task is already stored in the task map,
         // otherwise create a new entry for it.
         let task_info = self
@@ -299,22 +289,13 @@ impl<'a> Scheduler<'a> {
             .tasks
             .entry(task.pid)
             .or_insert_with_key(|&_pid| TaskInfo {
-                nvcsw: task.nvcsw,
-                nvcsw_ts: now,
-                avg_nvcsw: 0,
                 sum_exec_runtime: task.sum_exec_runtime,
                 vruntime: self.min_vruntime,
             });
 
-        // Refresh voluntary context switches metrics.
-        let delta_t = now - task_info.nvcsw_ts;
-        if delta_t >= NSEC_PER_SEC {
-            let delta_nvcsw = task.nvcsw - task_info.nvcsw;
-            let avg_nvcsw = (delta_nvcsw * NSEC_PER_SEC / delta_t).min(1000);
-
-            task_info.nvcsw = task.nvcsw;
-            task_info.nvcsw_ts = now;
-            task_info.avg_nvcsw = Self::calc_avg(task_info.avg_nvcsw, avg_nvcsw);
+        // Update global minimum vruntime based on the previous task's vruntime.
+        if self.min_vruntime < task.vtime {
+            self.min_vruntime = task.vtime;
         }
 
         // Evaluate used task time slice.
@@ -326,35 +307,17 @@ impl<'a> Scheduler<'a> {
         // Update total task cputime.
         task_info.sum_exec_runtime = task.sum_exec_runtime;
 
-        // Update task's vruntime re-aligning it to min_vruntime.
-        //
-        // The amount of vruntime budget an idle task can accumulate is adjusted in function of its
-        // latency weight, which is derived from the average number of voluntary context switches.
-        // This ensures that latency-sensitive tasks receive a priority boost.
-        let latency_weight = {
-            let base_weight = task_info.avg_nvcsw.min(MAX_LATENCY_WEIGHT);
-            // Boost tasks being enqueued as a result of a wakeup event by an additional 2x factor.
-            let weight_multiplier = if task.flags & SCX_ENQ_WAKEUP != 0 {
-                2
-            } else {
-                1
-            };
-            (base_weight * weight_multiplier) + 1
-        };
-        let min_vruntime = self
-            .min_vruntime
-            .saturating_sub(self.slice_ns * latency_weight);
+        // Update task's vruntime re-aligning it to min_vruntime (never allow a task to accumulate
+        // a budget of more than a time slice to prevent starvation).
+        let min_vruntime = self.min_vruntime.saturating_sub(self.slice_ns);
         if task_info.vruntime < min_vruntime {
             task_info.vruntime = min_vruntime;
         }
         let vslice = slice * 100 / task.weight;
         task_info.vruntime += vslice;
 
-        // Update global minimum vruntime.
-        self.min_vruntime += vslice;
-
         // Return the task's deadline.
-        task_info.vruntime
+        task_info.vruntime + task.exec_runtime.min(self.slice_ns * 100)
     }
 
     // Drain all the tasks from the queued list, update their vruntime (Self::update_enqueued()),
