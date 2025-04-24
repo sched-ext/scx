@@ -1,5 +1,8 @@
+use anyhow::Result;
 use std::collections::BTreeMap;
+use std::fs;
 use std::sync::Arc;
+use walkdir::WalkDir;
 
 use clap::Parser;
 use scx_utils::Core;
@@ -90,7 +93,7 @@ pub struct CpuSet {
     cores: BTreeSet<usize>,
 }
 
-fn parse_cpu_ranges(s: &str) -> Result<BTreeSet<usize>, anyhow::Error> {
+fn parse_cpu_ranges(s: &str) -> Result<BTreeSet<usize>> {
     let mut cpus = BTreeSet::new();
 
     for part in s.trim().split(',') {
@@ -105,11 +108,8 @@ fn parse_cpu_ranges(s: &str) -> Result<BTreeSet<usize>, anyhow::Error> {
 
     Ok(cpus)
 }
-use std::fs;
 
-use walkdir::WalkDir;
-
-fn collect_cpuset_effective() -> Result<BTreeSet<BTreeSet<usize>>, anyhow::Error> {
+fn collect_cpuset_effective() -> Result<BTreeSet<BTreeSet<usize>>> {
     let mut result = BTreeSet::new();
 
     for entry in WalkDir::new("/sys/fs/cgroup") {
@@ -126,14 +126,14 @@ fn collect_cpuset_effective() -> Result<BTreeSet<BTreeSet<usize>>, anyhow::Error
 }
 
 // return cpuset layout.
-fn get_cpusets(topo: &Topology) -> Result<BTreeSet<CpuSet>, anyhow::Error> {
+fn get_cpusets(topo: &Topology) -> Result<BTreeSet<CpuSet>> {
     let mut cpusets: BTreeSet<CpuSet> = BTreeSet::new();
     let cpuset_cpus = collect_cpuset_effective()?;
     for x in cpuset_cpus {
         let mut cores = BTreeSet::new();
-        for (_, core) in topo.all_cores.clone().into_iter() {
+        for (_, core) in topo.all_cores.iter() {
             let mut has_all = true;
-            for (_, cpu) in core.cpus.clone().into_iter() {
+            for (_, cpu) in core.cpus.iter() {
                 has_all &= x.contains(&cpu.id);
             }
             if has_all {
@@ -142,6 +142,25 @@ fn get_cpusets(topo: &Topology) -> Result<BTreeSet<CpuSet>, anyhow::Error> {
         }
         cpusets.insert(CpuSet { cores, cpus: x });
     }
+    // XXX -- this enforces the expectation that cpusets are disjoint
+    // think this is a reasonable expectation.
+    let mut overlapping_cpusets = BTreeSet::new();
+    for x in cpusets.iter() {
+        for y in cpusets.iter() {
+            if x != y && !overlapping_cpusets.contains(x) && !overlapping_cpusets.contains(y) {
+                // toss superset if exists, toss one of overlap otherwise.
+                if x.cpus.is_superset(&y.cpus) {
+                    overlapping_cpusets.insert(x.clone());
+                } else if y.cpus.is_superset(&x.cpus) {
+                    overlapping_cpusets.insert(y.clone());
+                } else if !x.cpus.is_disjoint(&y.cpus) {
+                    overlapping_cpusets.insert(x.clone());
+                }
+            }
+        }
+    }
+    cpusets.retain(|x| !overlapping_cpusets.contains(x));
+
     Ok(cpusets)
 }
 
@@ -171,7 +190,7 @@ impl LayerGrowthAlgo {
         cpu_pool: &CpuPool,
         layer_specs: &[LayerSpec],
         topo: &Topology,
-    ) -> Result<BTreeMap<usize, Vec<usize>>, anyhow::Error> {
+    ) -> Result<BTreeMap<usize, Vec<usize>>> {
         let mut core_orders = BTreeMap::new();
 
         for (idx, spec) in layer_specs.iter().enumerate() {
@@ -191,14 +210,14 @@ impl LayerGrowthAlgo {
         spec: &LayerSpec,
         layer_idx: usize,
         topo: &Topology,
-    ) -> Result<Vec<usize>, anyhow::Error> {
+    ) -> Result<Vec<usize>> {
         let generator = LayerCoreOrderGenerator {
             cpu_pool,
             layer_specs,
             spec,
             layer_idx,
             topo,
-            cpusets: &get_cpusets(&topo)?.clone(),
+            cpusets: &get_cpusets(&topo)?,
         };
         Ok(match self {
             LayerGrowthAlgo::Sticky => generator.grow_sticky(),
@@ -399,12 +418,12 @@ impl<'a> LayerCoreOrderGenerator<'a> {
 
     fn grow_cpuset_spread_inner(&self, make_random: bool) -> Vec<usize> {
         let mut cores: Vec<usize> = Vec::new();
-        let mut cpuset_core_vecs: Vec<Vec<usize>> = Vec::new();
-        let mut max_node_cpus: usize = 0;
+        let mut cpuset_core_vecs: Vec<Vec<&usize>> = Vec::new();
+        let mut max_cpuset_cores: usize = 0;
 
         for cpuset in self.cpusets {
-            max_node_cpus = std::cmp::max(cpuset_core_vecs.len(), max_node_cpus);
-            let cpuset_core_vec: Vec<usize> = cpuset.cores.clone().into_iter().map(|x| x).collect();
+            max_cpuset_cores = std::cmp::max(cpuset_core_vecs.len(), max_cpuset_cores);
+            let cpuset_core_vec: Vec<&usize> = cpuset.cores.iter().map(|x| x).collect();
             cpuset_core_vecs.push(cpuset_core_vec);
         }
 
@@ -414,10 +433,10 @@ impl<'a> LayerCoreOrderGenerator<'a> {
             }
         }
 
-        for i in 0..=max_node_cpus {
+        for i in 0..=max_cpuset_cores {
             for sub_vec in cpuset_core_vecs.iter() {
                 if i < sub_vec.len() {
-                    cores.push(sub_vec[i]);
+                    cores.push(*sub_vec[i]);
                 }
             }
         }
