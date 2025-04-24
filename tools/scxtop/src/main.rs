@@ -76,7 +76,7 @@ fn attach_progs(skel: &mut BpfSkel) -> Result<Vec<Link>> {
     ];
 
     // 6.13 compatibility
-    if compat::ksym_exists("scx_insert_vtime").is_ok() {
+    if compat::ksym_exists("scx_insert_vtime")? {
         if let Ok(link) = skel.progs.scx_insert_vtime.attach() {
             links.push(link);
         }
