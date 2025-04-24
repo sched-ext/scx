@@ -77,6 +77,7 @@ pub struct QueuedTask {
     pub pid: i32,              // pid that uniquely identifies a task
     pub cpu: i32,              // CPU where the task is running
     pub flags: u64,            // task enqueue flags
+    pub exec_runtime: u64,     // Total cpu time since last sleep
     pub sum_exec_runtime: u64, // Total cpu time
     pub nvcsw: u64,            // Total amount of voluntary context switches
     pub weight: u64,           // Task static priority
@@ -142,6 +143,7 @@ impl EnqueuedMessage {
             pid: self.inner.pid,
             cpu: self.inner.cpu,
             flags: self.inner.flags,
+            exec_runtime: self.inner.exec_runtime,
             sum_exec_runtime: self.inner.sum_exec_runtime,
             nvcsw: self.inner.nvcsw,
             weight: self.inner.weight,

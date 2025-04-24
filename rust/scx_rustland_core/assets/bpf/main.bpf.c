@@ -195,6 +195,16 @@ struct task_ctx {
 	u64 slice_ns;
 
 	/*
+	 * Timestamp since last time the task ran on a CPU.
+	 */
+	u64 last_run_at;
+
+	/*
+	 * Execution time (in nanoseconds) since the last sleep event.
+	 */
+	u64 exec_runtime;
+
+	/*
 	 * cpumask generation counter: used to verify the validity of the
 	 * current task's cpumask.
 	 */
@@ -719,6 +729,7 @@ static void get_task_info(struct queued_task_ctx *task,
 	task->pid = p->pid;
 	task->cpu = scx_bpf_task_cpu(p);
 	task->flags = enq_flags;
+	task->exec_runtime = tctx ? tctx->exec_runtime : 0;
 	task->sum_exec_runtime = p->se.sum_exec_runtime;
 	task->nvcsw = p->nvcsw;
 	task->weight = p->scx.weight;
@@ -925,12 +936,24 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	}
 }
 
+void BPF_STRUCT_OPS(rustland_runnable, struct task_struct *p, u64 enq_flags)
+{
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	tctx->exec_runtime = 0;
+}
+
 /*
  * Task @p starts on its selected CPU (update CPU ownership map).
  */
 void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 {
 	s32 cpu = scx_bpf_task_cpu(p);
+	struct task_ctx *tctx;
 
 	dbg_msg("start: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
 
@@ -946,6 +969,11 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 	 */
 	if (!is_usersched_task(p))
 		__sync_fetch_and_add(&nr_running, 1);
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+	tctx->last_run_at = scx_bpf_now();
 }
 
 /*
@@ -954,6 +982,7 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 {
 	s32 cpu = scx_bpf_task_cpu(p);
+	struct task_ctx *tctx;
 
 	dbg_msg("stop: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
 	/*
@@ -961,6 +990,15 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 	 */
 	if (!is_usersched_task(p))
 		__sync_fetch_and_sub(&nr_running, 1);
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	/*
+	 * Update the partial execution time since last sleep.
+	 */
+	tctx->exec_runtime += scx_bpf_now() - tctx->last_run_at;
 }
 
 /*
@@ -1272,6 +1310,7 @@ SCX_OPS_DEFINE(rustland,
 	       .select_cpu		= (void *)rustland_select_cpu,
 	       .enqueue			= (void *)rustland_enqueue,
 	       .dispatch		= (void *)rustland_dispatch,
+	       .runnable		= (void *)rustland_runnable,
 	       .running			= (void *)rustland_running,
 	       .stopping		= (void *)rustland_stopping,
 	       .update_idle		= (void *)rustland_update_idle,
