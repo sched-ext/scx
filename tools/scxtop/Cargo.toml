@@ -33,7 +33,6 @@ libbpf-rs = "=0.25.0-beta.1"
 libc = "0.2.137"
 log = "0.4.17"
 num-format = { version = "0.4.3", features = ["with-serde", "with-system-locale"] }
-perf-event-open-sys2 = "5.0.6"
 plain = "0.2.3"
 prost = "0.13.5"
 rand = "0.8.5"

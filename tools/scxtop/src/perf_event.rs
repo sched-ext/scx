@@ -9,8 +9,8 @@ use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
 use libc::{close, read};
-use perf_event_open_sys as perf;
 use scx_utils::compat::tracefs_mount;
+use scx_utils::perf;
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -160,8 +160,10 @@ impl PerfEvent {
 
     /// Attaches a PerfEvent struct.
     pub fn attach(&mut self, process_id: i32) -> Result<()> {
-        let mut attrs = perf::bindings::perf_event_attr::default();
-        attrs.size = std::mem::size_of::<perf::bindings::perf_event_attr>() as u32;
+        let mut attrs = scx_utils::perf::bindings::perf_event_attr {
+            size: std::mem::size_of::<perf::bindings::perf_event_attr>() as u32,
+            ..Default::default()
+        };
 
         match self.subsystem.to_lowercase().as_str() {
             "hw" | "hardware" => {
@@ -260,7 +262,7 @@ impl PerfEvent {
         }
 
         unsafe {
-            if perf::ioctls::ENABLE(result, 0) < 0 {
+            if perf::ioctls::enable(result, 0) < 0 {
                 return Err(anyhow!("failed to enable perf event: {}", self.event));
             }
         }
@@ -282,7 +284,7 @@ impl PerfEvent {
             {
                 return Err(anyhow!("failed to read perf event {:?}", self));
             }
-            if reset && perf::ioctls::RESET(self.fd as i32, 0) < 0 {
+            if reset && perf::ioctls::reset(self.fd as i32, 0) < 0 {
                 return Err(anyhow!("failed to reset perf event: {}", self.event));
             }
         }

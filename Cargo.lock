@@ -1859,16 +1859,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19b17cddbe7ec3f8bc800887bab5e717348c95ea2ca0b1bf0837fb964dc67099"
 
 [[package]]
-name = "perf-event-open-sys2"
-version = "5.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9c25955321465255e437600b54296983fab1feac2cd0c38958adeb26dbae49e"
-dependencies = [
- "libc",
- "memoffset 0.9.1",
-]
-
-[[package]]
 name = "pest"
 version = "2.7.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2662,7 +2652,6 @@ dependencies = [
  "log-panics",
  "nix 0.29.0",
  "num-format",
- "perf-event-open-sys2",
  "plain",
  "prost",
  "prost-build",
