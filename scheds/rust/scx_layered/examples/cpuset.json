@@ -1,0 +1,41 @@
+[
+    {
+      "name": "hhvmworkers",
+      "comment": "hhvmworker",
+      "matches": [
+        [
+          {
+            "CommPrefix": "geekbench"
+          }
+        ]
+      ],
+      "kind": {
+        "Grouped": {
+          "min_exec_us": 100,
+          "util_range": [
+            0.8,
+            0.9
+          ],
+          "growth_algo": "CpuSetSpread"
+      }
+      }
+    },
+    {
+      "name": "normal",
+      "comment": "the rest",
+      "matches": [
+        []
+      ],
+      "kind": {
+        "Open": {
+          "util_range": [
+            0.8,
+            0.9
+          ],
+          "min_exec_us": 100,
+          "allow_node_aligned": true
+        }
+      }
+    }
+  ]
+

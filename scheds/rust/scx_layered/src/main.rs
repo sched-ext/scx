@@ -1901,7 +1901,7 @@ impl<'a> Scheduler<'a> {
 
         let mut layers = vec![];
         let layer_growth_orders =
-            LayerGrowthAlgo::layer_core_orders(&cpu_pool, &layer_specs, &topo);
+            LayerGrowthAlgo::layer_core_orders(&cpu_pool, &layer_specs, &topo)?;
         for (idx, spec) in layer_specs.iter().enumerate() {
             let growth_order = layer_growth_orders
                 .get(&idx)

@@ -2417,6 +2417,7 @@ dependencies = [
  "serde",
  "serde_json",
  "simplelog",
+ "walkdir",
 ]
 
 [[package]]
