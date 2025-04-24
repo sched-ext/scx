@@ -299,6 +299,12 @@ enum layer_growth_algo {
 	GROWTH_ALGO_STICKY_DYNAMIC,
 };
 
+enum layer_task_place {
+	PLACEMENT_STD,
+	PLACEMENT_STICK,
+	PLACEMENT_FLOAT,
+};
+
 struct layer {
 	struct layer_match_ands	matches[MAX_LAYER_MATCH_ORS];
 	unsigned int		nr_match_ors;
@@ -337,6 +343,7 @@ struct layer {
 
 	u64			llcs_to_drain;
 	u32			llc_drain_cnt;
+	enum layer_task_place   task_place;
 
 	char			name[MAX_LAYER_NAME];
 	bool			is_protected;
