@@ -339,16 +339,11 @@ static void layer_llc_drain_disable(struct layer *layer, u32 llc_id)
 static inline bool refresh_layer_cpuc(struct cpu_ctx *cpuc, struct layer *layer)
 {
 	/* a CPU can be shared by multiple open layers */
-	if (layer->kind == LAYER_KIND_OPEN) {
-		cpuc->in_open_layers = true;
-		cpuc->layer_id = MAX_LAYERS;
-	} else {
-		cpuc->in_open_layers = false;
-		cpuc->layer_id = layer->id;
-	}
+	cpuc->in_open_layers = (layer->kind == LAYER_KIND_OPEN);
+	cpuc->layer_id = (layer->kind == LAYER_KIND_OPEN) ? MAX_LAYERS : layer->id;
 
 	if (cpuc->is_protected == layer->is_protected)
-		false;
+		return false;
 
 	cpuc->is_protected = layer->is_protected;
 	if (unlikely(!unprotected_cpumask)) {
@@ -404,8 +399,7 @@ static void refresh_cpumasks(u32 layer_id)
 
 		if ((u8_ptr = MEMBER_VPTR(layers, [layer_id].cpus[cpu / 8]))) {
 			if (*u8_ptr & (1 << (cpu % 8))) {
-				if (refresh_layer_cpuc(cpuc, layer))
-					protected_changed = true;
+				protected_changed |= refresh_layer_cpuc(cpuc, layer);
 
 				bpf_cpumask_set_cpu(cpu, layer_cpumask);
 			} else {
@@ -1828,7 +1822,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	 * Low fallback DSQ execution is forced upto lo_fb_share_ppk fraction
 	 * after the DSQ had tasks queued for longer than lo_fb_wait_ns.
 	 */
-	if (!cpuc->is_protected && scx_bpf_dsq_nr_queued(cpuc->lo_fb_dsq_id)) {
+	if (scx_bpf_dsq_nr_queued(cpuc->lo_fb_dsq_id)) {
 		u64 now = scx_bpf_now();
 		u64 dur, usage;
 
