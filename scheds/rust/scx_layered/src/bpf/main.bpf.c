@@ -1828,7 +1828,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	 * Low fallback DSQ execution is forced upto lo_fb_share_ppk fraction
 	 * after the DSQ had tasks queued for longer than lo_fb_wait_ns.
 	 */
-	if (!cpuc->is_protected && scx_bpf_dsq_nr_queued(cpuc->lo_fb_dsq_id)) {
+	if (scx_bpf_dsq_nr_queued(cpuc->lo_fb_dsq_id)) {
 		u64 now = scx_bpf_now();
 		u64 dur, usage;
 
