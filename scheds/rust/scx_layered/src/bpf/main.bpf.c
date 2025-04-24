@@ -34,9 +34,11 @@ const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 llc_numa_id_map[MAX_LLCS];
 const volatile u32 cpu_llc_id_map[MAX_CPUS];
 const volatile u32 nr_layers = 1;
+const volatile u32 nr_containers = 1;
 const volatile u32 nr_nodes = 32;	/* !0 for veristat, set during init */
 const volatile u32 nr_llcs = 32;	/* !0 for veristat, set during init */
 const volatile bool smt_enabled = true;
+const volatile bool enable_container = true;
 const volatile bool has_little_cores = true;
 const volatile bool xnuma_preemption = false;
 const volatile s32 __sibling_cpu[MAX_CPUS];
@@ -53,6 +55,7 @@ const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 const volatile bool percpu_kthread_preempt = true;
 volatile u64 layer_refresh_seq_avgruntime;
+const volatile u64 cpuset_fakemasks[MAX_CONTAINERS][MAX_CPUS / 64];
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
@@ -66,6 +69,10 @@ u64 unprotected_seq = 0;
 
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 private(big_cpumask) struct bpf_cpumask __kptr *big_cpumask;
+// XXXLIKEWHATEVS -- this should be a map of kptrs.
+// for now use one cpumask consisting of all cpuset cpumasks
+// anded.
+private(cpuset_cpumask) struct bpf_cpumask __kptr *cpuset_cpumask;
 struct layer layers[MAX_LAYERS];
 u32 fallback_cpu;
 u32 layered_root_tgid = 0;
@@ -3313,8 +3320,8 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
-	struct bpf_cpumask *cpumask, *tmp_big_cpumask, *tmp_unprotected_cpumask;
-	int i, nr_online_cpus, ret;
+	struct bpf_cpumask *cpumask, *tmp_big_cpumask, *tmp_unprotected_cpumask, tmptmp;
+	int i, nr_online_cpus, ret, x;
 
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
@@ -3355,6 +3362,41 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	tmp_unprotected_cpumask = bpf_kptr_xchg(&unprotected_cpumask, tmp_unprotected_cpumask);
 	if (tmp_unprotected_cpumask)
 		bpf_cpumask_release(tmp_unprotected_cpumask);
+
+
+
+	if (enable_container) {
+		bpf_for(i, 0, nr_containers) {
+			cpumask = bpf_cpumask_create();
+
+			if (!cpumask)
+				return -ENOMEM;
+			
+			bpf_for(x, 0, MAX_CPUS/64) {
+		 		// container then cpu bit
+				if (cpuset_fakemasks[i][x] == 1) {
+					bpf_cpumask_set_cpu(x, cpumask);
+				}
+			}
+
+			if (cpuset_cpumask) {
+				struct bpf_cpumask *tmp_cpuset_cpumask = bpf_kptr_xchg(&cpuset_cpumask, NULL);
+				if (!tmp_cpuset_cpumask) {
+					bpf_cpumask_release(cpumask);
+					return -1;
+				}
+				bpf_cpumask_and(cpumask, cast_mask(tmp_cpuset_cpumask), cast_mask(cpumask));
+				bpf_cpumask_release(tmp_cpuset_cpumask);
+			} 
+			
+			struct bpf_cpumask *old_cpumask = bpf_kptr_xchg(&cpuset_cpumask, cpumask);
+
+			if (old_cpumask) {
+				bpf_cpumask_release(old_cpumask);
+			}
+
+		}
+	}
 
 	bpf_for(i, 0, nr_nodes) {
 		ret = create_node(i);

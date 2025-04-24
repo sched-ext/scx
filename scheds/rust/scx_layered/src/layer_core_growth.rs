@@ -89,8 +89,8 @@ use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CpuSet {
-    cpus: BTreeSet<usize>,
-    cores: BTreeSet<usize>,
+    pub cpus: BTreeSet<usize>,
+    pub cores: BTreeSet<usize>,
 }
 
 fn parse_cpu_ranges(s: &str) -> Result<BTreeSet<usize>> {
@@ -126,7 +126,7 @@ fn collect_cpuset_effective() -> Result<BTreeSet<BTreeSet<usize>>> {
 }
 
 // return cpuset layout.
-fn get_cpusets(topo: &Topology) -> Result<BTreeSet<CpuSet>> {
+pub fn get_cpusets(topo: &Topology) -> Result<BTreeSet<CpuSet>> {
     let mut cpusets: BTreeSet<CpuSet> = BTreeSet::new();
     let cpuset_cpus = collect_cpuset_effective()?;
     for x in cpuset_cpus {
