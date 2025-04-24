@@ -126,20 +126,18 @@ static struct task_ctx *get_task_ctx(struct task_struct *p)
 static struct cpu_ctx *get_cpu_ctx(void)
 {
 	const u32 idx = 0;
-
 	return bpf_map_lookup_elem(&cpu_ctx_stor, &idx);
 }
 
 static struct cpu_ctx *get_cpu_ctx_id(s32 cpu_id)
 {
 	const u32 idx = 0;
-	struct cpu_ctx *cpuc;
+	return bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu_id);
+}
 
-	cpuc = bpf_map_lookup_percpu_elem(&cpu_ctx_stor, &idx, cpu_id);
-	if (!cpuc)
-		scx_bpf_error("cpu_ctx lookup failed for %d", cpu_id);
-
-	return cpuc;
+static struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p)
+{
+	return get_cpu_ctx_id(scx_bpf_task_cpu(p));
 }
 
 static u32 calc_avg32(u32 old_val, u32 new_val)
