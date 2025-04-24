@@ -190,11 +190,6 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *l3_cpumask;
 
 	/*
-	 * Time slice assigned to the task.
-	 */
-	u64 slice_ns;
-
-	/*
 	 * Timestamp since last time the task ran on a CPU.
 	 */
 	u64 last_run_at;
@@ -375,19 +370,6 @@ static u64 cpu_to_dsq(s32 cpu)
 		return SHARED_DSQ;
 	}
 	return (u64)cpu;
-}
-
-/*
- * Return the time slice assigned to the task.
- */
-static inline u64 task_slice(struct task_struct *p)
-{
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx || !tctx->slice_ns)
-		return SCX_SLICE_DFL;
-	return tctx->slice_ns;
 }
 
 /*
@@ -612,14 +594,13 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 		__sync_fetch_and_add(&nr_bounce_dispatches, 1);
 		goto out_kick_idle_cpu;
 	}
-	tctx->slice_ns = task->slice_ns;
 
 	/*
 	 * Dispatch task to the target DSQ.
 	 */
 	if (task->cpu & RL_CPU_ANY) {
 		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ,
-					 SCX_SLICE_DFL, task->vtime, task->flags);
+					 task->slice_ns, task->vtime, task->flags);
 		goto out_kick_idle_cpu;
 	}
 
@@ -642,7 +623,7 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	/* Check if the CPU is valid, according to the cpumask */
 	if (!bpf_cpumask_test_cpu(task->cpu, p->cpus_ptr)) {
 		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ,
-					 SCX_SLICE_DFL, task->vtime, task->flags);
+					 task->slice_ns, task->vtime, task->flags);
 		__sync_fetch_and_add(&nr_bounce_dispatches, 1);
 		goto out_kick_idle_cpu;
 	}
@@ -652,7 +633,7 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 
 	/* Dispatch the task to the target per-CPU DSQ */
 	scx_bpf_dsq_insert_vtime(p, dsq_id,
-				 SCX_SLICE_DFL, task->vtime, task->flags);
+				 task->slice_ns, task->vtime, task->flags);
 
 	/* If the cpumask is not valid anymore, ignore the dispatch event */
 	if (curr_cpumask_cnt != task->cpumask_cnt) {
@@ -958,12 +939,6 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 	dbg_msg("start: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
 
 	/*
-	 * Ensure time slice never exceeds slice_ns when a task is started on a
-	 * CPU.
-	 */
-	p->scx.slice = task_slice(p);
-
-	/*
 	 * Mark the CPU as busy by setting the pid as owner (ignoring the
 	 * user-space scheduler).
 	 */
@@ -1084,7 +1059,6 @@ s32 BPF_STRUCT_OPS(rustland_init_task, struct task_struct *p,
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (!tctx)
 		return -ENOMEM;
-	tctx->slice_ns = SCX_SLICE_DFL;
 
 	/*
 	 * Create task's L2 cache cpumask.
