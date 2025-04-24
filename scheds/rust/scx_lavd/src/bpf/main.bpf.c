@@ -1075,7 +1075,7 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	/*
 	 * Update task statistics
 	 */
-	cpuc = get_cpu_ctx_id(scx_bpf_task_cpu(p));
+	cpuc = get_cpu_ctx_task(p);
 	taskc = get_task_ctx(p);
 	if (!cpuc || !taskc)
 		return;
@@ -1115,7 +1115,7 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Update task statistics
 	 */
-	cpuc = get_cpu_ctx_id(scx_bpf_task_cpu(p));
+	cpuc = get_cpu_ctx_task(p);
 	taskc = get_task_ctx(p);
 	if (!cpuc || !taskc)
 		return;
@@ -1132,7 +1132,7 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	/*
 	 * Substract task load from the current CPU's load.
 	 */
-	cpuc = get_cpu_ctx();
+	cpuc = get_cpu_ctx_task(p);
 	taskc = get_task_ctx(p);
 	if (!cpuc || !taskc)
 		return;
