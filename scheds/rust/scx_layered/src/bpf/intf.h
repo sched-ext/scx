@@ -249,6 +249,7 @@ enum layer_match_kind {
 	MATCH_IS_KTHREAD,
 	MATCH_USED_GPU_TID,
 	MATCH_USED_GPU_PID,
+	MATCH_AVG_RUNTIME,
 
 	NR_LAYER_MATCH_KINDS,
 };
@@ -270,6 +271,8 @@ struct layer_match {
 	bool		used_gpu_tid;
 	bool		used_gpu_pid;
 	bool		exclude;
+	u64		min_avg_runtime_us;
+	u64		max_avg_runtime_us;
 };
 
 struct layer_match_ands {

@@ -2066,6 +2066,24 @@ static __noinline bool match_one(struct layer_match *match,
 
 			return pid_present == match->used_gpu_pid;
 	}
+	case MATCH_AVG_RUNTIME: {
+			struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
+			if (!taskc) {
+				scx_bpf_error("could not find task");
+				return false;
+			}
+
+			u64 avg_runtime_us = taskc->runtime_avg / 1000;
+
+			if (!taskc) {
+				scx_bpf_error("could not find task");
+				return false;
+			}
+
+			/* To match, we must get min <= time < max. */
+			return match->min_avg_runtime_us <= avg_runtime_us &&
+				avg_runtime_us < match->max_avg_runtime_us;
+	}
 
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
@@ -3137,6 +3155,11 @@ static s32 init_layer(int layer_id)
 				break;
 			case MATCH_USED_GPU_PID:
 				dbg("%s GPU_PID %d", header, match->used_gpu_pid);
+				break;
+			case MATCH_AVG_RUNTIME:
+				dbg("%s AVG_RUNTIME [%lluus, %lluus)", header,
+					match->min_avg_runtime_us,
+					match->max_avg_runtime_us);
 				break;
 			default:
 				scx_bpf_error("%s Invalid kind", header);

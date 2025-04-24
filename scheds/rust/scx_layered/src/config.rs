@@ -80,6 +80,7 @@ pub enum LayerMatch {
     IsKthread(bool),
     UsedGpuTid(bool),
     UsedGpuPid(bool),
+    AvgRuntime(u64, u64),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
