@@ -16,6 +16,7 @@ pub use config::LayerCommon;
 pub use config::LayerConfig;
 pub use config::LayerKind;
 pub use config::LayerMatch;
+pub use config::LayerPlacement;
 pub use config::LayerSpec;
 pub use layer_core_growth::LayerGrowthAlgo;
 use log::info;
