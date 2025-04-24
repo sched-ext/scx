@@ -104,3 +104,5 @@ pub use enums::scx_enums;
 
 #[cfg(feature = "autopower")]
 pub mod autopower;
+
+pub mod perf;
