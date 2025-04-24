@@ -87,6 +87,9 @@ volatile u64 nr_failed_dispatches, nr_sched_congested;
  /* Report additional debugging information */
 const volatile bool debug;
 
+/* Rely on the in-kernel idle CPU selection policy */
+const volatile bool builtin_idle;
+
 /* Allow to use bpf_printk() only when @debug is set */
 #define dbg_msg(_fmt, ...) do {						\
 	if (debug)							\
@@ -619,11 +622,26 @@ out_release:
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
+	bool is_idle = false;
+	s32 cpu;
+
 	/*
-	 * Completely delegate the CPU selection logic to the user-space
-	 * scheduler.
+	 * If built-in idle CPU policy is not enabled completely delegate
+	 * the idle selection policy to user-space and keep re-using the
+	 * same CPU here.
 	 */
-	return prev_cpu;
+	if (!builtin_idle || is_usersched_task(p))
+		return prev_cpu;
+
+	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+	if (is_idle &&
+	    !scx_bpf_dsq_nr_queued(SHARED_DSQ) &&
+	    !scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu))) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+	}
+
+	return cpu;
 }
 
 /*

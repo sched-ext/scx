@@ -195,6 +195,7 @@ impl<'cb> BpfScheduler<'cb> {
         exit_dump_len: u32,
         partial: bool,
         debug: bool,
+        builtin_idle: bool,
     ) -> Result<Self> {
         let shutdown = Arc::new(AtomicBool::new(false));
         set_ctrlc_handler(shutdown.clone()).context("Error setting Ctrl-C handler")?;
@@ -255,6 +256,7 @@ impl<'cb> BpfScheduler<'cb> {
         skel.struct_ops.rustland_mut().exit_dump_len = exit_dump_len;
 
         skel.maps.bss_data.usersched_pid = std::process::id();
+        skel.maps.rodata_data.builtin_idle = builtin_idle;
         skel.maps.rodata_data.debug = debug;
 
         // Attach BPF scheduler.

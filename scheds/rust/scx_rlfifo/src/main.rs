@@ -106,6 +106,7 @@ impl<'a> Scheduler<'a> {
             0,     // exit_dump_len (buffer size of exit info, 0 = default)
             false, // partial (false = include all tasks)
             false, // debug (false = debug mode off)
+            false, // builtin_idle (false = idle selection policy in user-space)
         )?;
         Ok(Self { bpf })
     }
