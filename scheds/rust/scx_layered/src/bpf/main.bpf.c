@@ -399,7 +399,7 @@ static void refresh_cpumasks(u32 layer_id)
 
 		if ((u8_ptr = MEMBER_VPTR(layers, [layer_id].cpus[cpu / 8]))) {
 			if (*u8_ptr & (1 << (cpu % 8))) {
-				protected_changed |= refresh_layer_cpuc(cpuc, layer);
+				protected_changed = refresh_layer_cpuc(cpuc, layer) || protected_changed;
 
 				bpf_cpumask_set_cpu(cpu, layer_cpumask);
 			} else {
