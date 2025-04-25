@@ -53,6 +53,8 @@ const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 const volatile bool percpu_kthread_preempt = true;
 
+const volatile bool check_hi_before_dispatch = false;
+
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
 const volatile bool enable_gpu_support = false;
@@ -1802,7 +1804,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/* always consume hi_fb_dsq_id first for kthreads */
-	if (scx_bpf_dsq_move_to_local(cpuc->hi_fb_dsq_id))
+	if ((!check_hi_before_dispatch || (scx_bpf_dsq_nr_queued(cpuc->hi_fb_dsq_id) != 0)) &&
+		scx_bpf_dsq_move_to_local(cpuc->hi_fb_dsq_id))
 		return;
 
 	/*

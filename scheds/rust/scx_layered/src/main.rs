@@ -582,6 +582,11 @@ struct Opts {
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
 
+    /// check hi dsq has queued tasks before attempting to
+    /// dispatch it.
+    #[clap(long, default_value = "false")]
+    check_hi_before_dispatch: bool,
+    
     /// Maximum task runnable_at delay (in seconds) before antistall turns on
     #[clap(long, default_value = "3")]
     antistall_sec: u64,
@@ -1829,6 +1834,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.lo_fb_wait_ns = opts.lo_fb_wait_us * 1000;
         skel.maps.rodata_data.lo_fb_share_ppk = ((opts.lo_fb_share * 1024.0) as u32).clamp(1, 1024);
         skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
+        skel.maps.rodata_data.check_hi_before_dispatch = opts.check_hi_before_dispatch;
         skel.maps.rodata_data.enable_gpu_support = opts.enable_gpu_support;
 
         for (cpu, sib) in topo.sibling_cpus().iter().enumerate() {
