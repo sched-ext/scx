@@ -3,13 +3,13 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use libbpf_rs::libbpf_sys::*;
 use libbpf_rs::{AsRawLibbpf, OpenProgramImpl};
 use log::warn;
-use std::ffi::c_void;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::ffi::c_void;
 use std::io;
 use std::io::BufRead;
 use std::io::BufReader;

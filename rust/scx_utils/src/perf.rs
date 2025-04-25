@@ -29,16 +29,18 @@ pub unsafe fn perf_event_open(
     cpu: c_int,
     group_fd: c_int,
     flags: c_ulong,
-) -> c_int { unsafe {
-    libc::syscall(
-        bindings::__NR_perf_event_open as libc::c_long,
-        attrs as *const bindings::perf_event_attr,
-        pid,
-        cpu,
-        group_fd,
-        flags,
-    ) as c_int
-}}
+) -> c_int {
+    unsafe {
+        libc::syscall(
+            bindings::__NR_perf_event_open as libc::c_long,
+            attrs as *const bindings::perf_event_attr,
+            pid,
+            cpu,
+            group_fd,
+            flags,
+        ) as c_int
+    }
+}
 
 pub mod bindings {
     include!(concat!(env!("OUT_DIR"), "/perf_bindings.rs"));
@@ -49,12 +51,12 @@ pub mod ioctls {
     use std::os::raw::{c_int, c_uint};
 
     #[allow(clippy::missing_safety_doc)]
-    pub unsafe fn enable(fd: c_int, arg: c_uint) -> c_int { unsafe {
-        libc::ioctl(fd, perf::bindings::ENABLE.into(), arg)
-    }}
+    pub unsafe fn enable(fd: c_int, arg: c_uint) -> c_int {
+        unsafe { libc::ioctl(fd, perf::bindings::ENABLE.into(), arg) }
+    }
 
     #[allow(clippy::missing_safety_doc)]
-    pub unsafe fn reset(fd: c_int, arg: c_uint) -> c_int { unsafe {
-        libc::ioctl(fd, perf::bindings::ENABLE.into(), arg)
-    }}
+    pub unsafe fn reset(fd: c_int, arg: c_uint) -> c_int {
+        unsafe { libc::ioctl(fd, perf::bindings::ENABLE.into(), arg) }
+    }
 }

@@ -31,7 +31,7 @@ pub trait LoaderClient {
     /// This method will stop the currently running scheduler (if any) and
     /// then start the new scheduler.
     fn switch_scheduler(&self, scx_name: SupportedSched, sched_mode: SchedMode)
-        -> zbus::Result<()>;
+    -> zbus::Result<()>;
 
     /// Switches to the specified scheduler with the provided arguments. This
     /// method will stop the currently running scheduler (if any) and then
