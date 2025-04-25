@@ -856,7 +856,6 @@ void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 		stat_inc(P2DQ_STAT_NODE_MIGRATION);
 	}
 
-	taskc->last_run_at = scx_bpf_now();
 	taskc->llc_id = llcx->id;
 	taskc->node_id = llcx->node_id;
 	cpuc->dsq_index = taskc->dsq_index;
@@ -873,6 +872,7 @@ void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 	if (taskc->dsq_index == nr_dsqs_per_llc-1) {
 		scx_bpf_cpuperf_set(task_cpu, SCX_CPUPERF_ONE);
 	}
+	taskc->last_run_at = bpf_ktime_get_ns();
 }
 
 
@@ -881,7 +881,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	task_ctx *taskc;
 	struct llc_ctx *llcx;
 	u64 used, scaled_used, last_dsq_slice_ns;
-	u64 now = scx_bpf_now();
+	u64 now = bpf_ktime_get_ns();
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
