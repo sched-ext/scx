@@ -31,7 +31,7 @@ use crate::{
     TraceStoppedAction,
 };
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use glob::glob;
 use libbpf_rs::Link;
 use libbpf_rs::ProgramInput;
