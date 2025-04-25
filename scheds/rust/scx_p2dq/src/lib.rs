@@ -203,6 +203,8 @@ macro_rules! init_open_skel {
             $skel.maps.rodata_data.select_idle_in_enqueue = true;
             $skel.maps.rodata_data.wakeup_lb_busy = opts.wakeup_lb_busy;
             $skel.maps.rodata_data.wakeup_llc_migrations = opts.wakeup_llc_migrations;
+            $skel.maps.rodata_data.max_exec_ns =
+                2 * $skel.maps.bss_data.dsq_time_slices[opts.dumb_queues - 1];
 
             Ok(())
         }
