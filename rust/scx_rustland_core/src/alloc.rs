@@ -209,7 +209,7 @@ impl BuddyAlloc {
     /// The `base_addr..(base_addr + len)` must be allocated before using,
     /// and must guarantee no others write to the memory range, to avoid undefined behaviors.
     /// The new function panic if memory space not enough for initialize BuddyAlloc.
-    pub unsafe fn new(param: BuddyAllocParam) -> Self {
+    pub unsafe fn new(param: BuddyAllocParam) -> Self { unsafe {
         let BuddyAllocParam {
             base_addr,
             len,
@@ -298,7 +298,7 @@ impl BuddyAlloc {
         };
         allocator.init_free_list();
         allocator
-    }
+    }}
 
     fn init_free_list(&mut self) {
         let mut base_addr = self.base_addr;
@@ -446,11 +446,11 @@ impl UserAllocator {
         }
     }
 
-    unsafe fn fetch_buddy_alloc<R, F: FnOnce(&mut BuddyAlloc) -> R>(&self, f: F) -> R {
+    unsafe fn fetch_buddy_alloc<R, F: FnOnce(&mut BuddyAlloc) -> R>(&self, f: F) -> R { unsafe {
         let mut inner = self.inner_buddy_alloc.lock().unwrap();
         let alloc = inner.get_or_insert_with(|| BuddyAlloc::new(self.buddy_alloc_param));
         f(alloc)
-    }
+    }}
 
     #[allow(static_mut_refs)]
     pub fn lock_memory(&self) {
@@ -491,14 +491,14 @@ impl UserAllocator {
 
 // Override global allocator methods.
 unsafe impl GlobalAlloc for UserAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 { unsafe {
         let bytes = layout.size();
         self.fetch_buddy_alloc(|alloc| alloc.malloc(bytes))
-    }
+    }}
 
-    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
+    unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) { unsafe {
         self.fetch_buddy_alloc(|alloc| alloc.free(ptr));
-    }
+    }}
 }
 
 unsafe impl Sync for UserAllocator {}
