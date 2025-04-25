@@ -27,6 +27,7 @@ use anyhow::Result;
 pub use bpf_skel::*;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
+use layer_core_growth::get_cpusets;
 use lazy_static::lazy_static;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
@@ -59,7 +60,6 @@ use stats::LayerStats;
 use stats::StatsReq;
 use stats::StatsRes;
 use stats::SysStats;
-use layer_core_growth::get_cpusets;
 
 const MAX_PATH: usize = bpf_intf::consts_MAX_PATH as usize;
 const MAX_COMM: usize = bpf_intf::consts_MAX_COMM as usize;
@@ -594,7 +594,7 @@ struct Opts {
     /// Enable container support
     #[clap(long, default_value = "false")]
     enable_container: bool,
-    
+
     /// Maximum task runnable_at delay (in seconds) before antistall turns on
     #[clap(long, default_value = "3")]
     antistall_sec: u64,
@@ -1447,8 +1447,8 @@ impl<'a> Scheduler<'a> {
     fn init_cpusets(skel: &mut OpenBpfSkel, topo: &Topology) -> Result<()> {
         let cpusets = get_cpusets(topo)?;
         for (i, cpuset) in cpusets.iter().enumerate() {
-            let mut cpumask_bitvec: [u64; MAX_CPUS/64] = [0; MAX_CPUS/64];
-            for j in 0..MAX_CPUS/64 {
+            let mut cpumask_bitvec: [u64; MAX_CPUS / 64] = [0; MAX_CPUS / 64];
+            for j in 0..MAX_CPUS / 64 {
                 if cpuset.cpus.contains(&j) {
                     cpumask_bitvec[j] = 1;
                 }
@@ -1980,7 +1980,7 @@ impl<'a> Scheduler<'a> {
 
         Self::init_layers(&mut skel, &layer_specs, &topo)?;
         Self::init_nodes(&mut skel, opts, &topo);
-        
+
         if opts.enable_container {
             Self::init_cpusets(&mut skel, &topo)?;
         }
