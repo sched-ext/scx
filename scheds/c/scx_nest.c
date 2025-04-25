@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <inttypes.h>
 #include <signal.h>
+#include <assert.h>
 #include <libgen.h>
 #include <bpf/bpf.h>
 #include <scx/common.h>
@@ -66,6 +67,7 @@ static struct nest_stat nest_stats[NEST_STAT(NR)] = {
 static void read_stats(struct scx_nest *skel, u64 *stats)
 {
 	int nr_cpus = libbpf_num_possible_cpus();
+	assert(nr_cpus > 0);
 	u64 cnts[NEST_STAT(NR)][nr_cpus];
 	u32 idx;
 
@@ -170,6 +172,7 @@ restart:
 	skel = SCX_OPS_OPEN(nest_ops, scx_nest);
 
 	skel->rodata->nr_cpus = libbpf_num_possible_cpus();
+	assert(skel->rodata->nr_cpus > 0);
 	skel->rodata->sampling_cadence_ns = SAMPLING_CADENCE_S * 1000 * 1000 * 1000;
 	skel->rodata->slice_ns = __COMPAT_ENUM_OR_ZERO("scx_public_consts", "SCX_SLICE_DFL");
 
