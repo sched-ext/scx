@@ -586,7 +586,7 @@ struct Opts {
     /// dispatch it.
     #[clap(long, default_value = "false")]
     check_hi_before_dispatch: bool,
-    
+
     /// Maximum task runnable_at delay (in seconds) before antistall turns on
     #[clap(long, default_value = "3")]
     antistall_sec: u64,
