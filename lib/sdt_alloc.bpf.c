@@ -1016,7 +1016,7 @@ __u64 scx_stk_alloc(struct scx_stk *stack)
 static
 void header_set_order(scx_buddy_chunk_t *chunk, u64 offset, u8 order)
 {
-	if (order >= SCX_BUDDY_CHUNK_ORDERS) {
+	if (order >= SCX_BUDDY_CHUNK_MAX_ORDER) {
 		scx_bpf_error("setting invalid order");
 		return;
 	}
@@ -1039,11 +1039,11 @@ u8 header_get_order(scx_buddy_chunk_t *chunk, u64 offset)
 {
 	u8 result;
 
-	_Static_assert(SCX_BUDDY_CHUNK_ORDERS <= 16, "order must fit in 4 bytes");
+	_Static_assert(SCX_BUDDY_CHUNK_MAX_ORDER <= 16, "order must fit in 4 bits");
 
 	if (offset >= SCX_BUDDY_CHUNK_ITEMS) {
 		scx_bpf_error("setting order of invalid offset");
-		return SCX_BUDDY_CHUNK_ORDERS;
+		return SCX_BUDDY_CHUNK_MAX_ORDER;
 	}
 
 	result = chunk->orders[offset / 2];
@@ -1117,7 +1117,7 @@ scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
 		header = chunk_get_header(chunk, i);
 		header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
 		header->next_index = SCX_BUDDY_CHUNK_ITEMS;
-		header_set_order(chunk, i, SCX_BUDDY_CHUNK_ORDERS);
+		header_set_order(chunk, i, SCX_BUDDY_CHUNK_MAX_ORDER);
 	}
 
 	_Static_assert(SCX_BUDDY_CHUNK_PAGES * PAGE_SIZE >= SCX_BUDDY_MIN_ALLOC_BYTES * SCX_BUDDY_CHUNK_ITEMS,
@@ -1132,11 +1132,11 @@ scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
 	 *
 	 * This operation also populates the allocator.
 	 */
-	last_order = SCX_BUDDY_CHUNK_ORDERS;
+	last_order = SCX_BUDDY_CHUNK_MAX_ORDER;
 	left = sizeof(*chunk);
 	cur_idx = 0;
 	while((power2 = scx_ffs(left)) && can_loop) {
-		if (unlikely(power2 >= SCX_BUDDY_CHUNK_ORDERS)) {
+		if (unlikely(power2 >= SCX_BUDDY_CHUNK_MAX_ORDER)) {
 			scx_bpf_error("buddy chunk metadata too large");
 			return NULL;
 		}
@@ -1226,12 +1226,12 @@ u64 scx_buddy_chunk_alloc(scx_buddy_chunk_t *chunk, int order_req)
 	u64 order;
 	u32 idx;
 
-	bpf_for(order, order_req, SCX_BUDDY_CHUNK_ORDERS) {
+	bpf_for(order, order_req, SCX_BUDDY_CHUNK_MAX_ORDER) {
 		if (chunk->order_indices[order] != SCX_BUDDY_CHUNK_ITEMS)
 			break;
 	}
 
-	if (order == SCX_BUDDY_CHUNK_ORDERS)
+	if (order == SCX_BUDDY_CHUNK_MAX_ORDER)
 		return (u64)NULL;
 
 	idx = chunk->order_indices[order];
@@ -1269,7 +1269,7 @@ u64 scx_buddy_alloc_internal(struct scx_buddy *buddy, size_t size)
 	int order;
 
 	order = size_to_order(size);
-	if (order >= SCX_BUDDY_CHUNK_ORDERS - 1) {
+	if (order >= SCX_BUDDY_CHUNK_MAX_ORDER - 1) {
 		scx_bpf_error("Allocation size %lu too large", size);
 		return (u64)NULL;
 	}
@@ -1338,7 +1338,7 @@ void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 	idx = (addr & SCX_BUDDY_CHUNK_OFFSET_MASK) / SCX_BUDDY_MIN_ALLOC_BYTES;
 	header = chunk_get_header(chunk, idx);
 
-	bpf_for(order, header_get_order(chunk, idx), SCX_BUDDY_CHUNK_ORDERS) {
+	bpf_for(order, header_get_order(chunk, idx), SCX_BUDDY_CHUNK_MAX_ORDER) {
 		buddy_idx = idx ^= 1 << order;
 		buddy_header = chunk_get_header(chunk, buddy_idx);
 
@@ -1365,7 +1365,7 @@ void scx_buddy_free_internal(struct scx_buddy *buddy, u64 addr)
 			buddy_header->prev_index = SCX_BUDDY_CHUNK_ITEMS;
 		}
 
-		header_set_order(chunk, buddy_idx, SCX_BUDDY_CHUNK_ORDERS);
+		header_set_order(chunk, buddy_idx, SCX_BUDDY_CHUNK_MAX_ORDER);
 
 		idx = idx < buddy_idx ? idx : buddy_idx;
 

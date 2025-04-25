@@ -171,19 +171,12 @@ typedef struct scx_buddy_header __arena scx_buddy_header_t;
 enum scx_buddy_consts {
 	SCX_BUDDY_MIN_ALLOC_SHIFT	= 4,
 	SCX_BUDDY_MIN_ALLOC_BYTES	= 1 << SCX_BUDDY_MIN_ALLOC_SHIFT,
-	SCX_BUDDY_CHUNK_ORDERS		= 16,
-	SCX_BUDDY_CHUNK_PAGES		= (SCX_BUDDY_MIN_ALLOC_BYTES << SCX_BUDDY_CHUNK_ORDERS) / PAGE_SIZE,
+	SCX_BUDDY_CHUNK_MAX_ORDER		= 16,
+	SCX_BUDDY_CHUNK_PAGES		= (SCX_BUDDY_MIN_ALLOC_BYTES << SCX_BUDDY_CHUNK_MAX_ORDER) / PAGE_SIZE,
 	SCX_BUDDY_CHUNK_ITEMS		= SCX_BUDDY_CHUNK_PAGES * PAGE_SIZE / SCX_BUDDY_MIN_ALLOC_BYTES,
 	SCX_BUDDY_CHUNK_OFFSET_MASK	= (SCX_BUDDY_CHUNK_PAGES * PAGE_SIZE) - 1,
 };
 
-/*
- * XXXETSAL: Right now this is 16 bytes because of the pointer and alignment.
- * We can make this 8 bytes if we use a 32-bit pointer, since arena pointers
- * are 32-bit anyway, then turn it into 2 bytes if we replace the pointer
- * with an offset into the chunk array and mark the struct as packed (assuming
- * BPF permits it).
- */
 struct scx_buddy_header {
 	u32 prev_index;	/* "Pointer" to the previous available allocation of the same size. */
 	u32 next_index; /* Same for the next allocation. */
@@ -195,7 +188,7 @@ struct scx_buddy_header {
 struct scx_buddy_chunk {
 	/* The order of the current allocation for a item. 4 bits per order. */
 	u8			orders[SCX_BUDDY_CHUNK_ITEMS / 2];
-	u64			order_indices[SCX_BUDDY_CHUNK_ORDERS];
+	u64			order_indices[SCX_BUDDY_CHUNK_MAX_ORDER];
 	scx_buddy_chunk_t	*prev;
 	scx_buddy_chunk_t	*next;
 };

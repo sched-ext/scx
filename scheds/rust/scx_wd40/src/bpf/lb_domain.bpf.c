@@ -38,6 +38,15 @@ volatile scx_bitmap_t node_data[MAX_NUMA_NODES];
 
 volatile dom_ptr dom_ctxs[MAX_DOMS];
 struct scx_stk lb_domain_allocator;
+
+/*
+ * Declared in its own section because loading the object otherwise fails
+ * with the following error message (where bpf_bpf the fully linked object):
+ *
+ * [WARN] libbpf: map 'bpf_bpf.bss': failed to re-mmap() contents: -524
+ * [WARN] libbpf: map 'bpf_bpf.bss': failed to create: unknown error (-524)(-524)
+ * [WARN] libbpf: failed to load object 'bpf_bpf'
+ */
 private(LBDOMAIN_BUDDY) struct scx_buddy buddy;
 
 #define LBALLOC_PAGES_PER_ALLOC (16)
