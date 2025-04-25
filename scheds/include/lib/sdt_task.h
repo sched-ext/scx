@@ -108,15 +108,15 @@ struct scx_static {
 
 #include <scx/bpf_arena_spin_lock.h>
 
-struct scx_ring;
-typedef struct scx_ring __arena scx_ring_t;
+struct scx_stk_seg;
+typedef struct scx_stk_seg __arena scx_stk_seg_t;
 
-#define SCX_RING_MAX (SDT_TASK_ENTS_PER_CHUNK - 2)
+#define SCX_STK_SEG_MAX (SDT_TASK_ENTS_PER_CHUNK - 2)
 
-struct scx_ring {
-	void __arena	*elems[SCX_RING_MAX];
-	scx_ring_t	*prev;
-	scx_ring_t	*next;
+struct scx_stk_seg {
+	void __arena	*elems[SCX_STK_SEG_MAX];
+	scx_stk_seg_t	*prev;
+	scx_stk_seg_t	*next;
 };
 
 /*
@@ -125,18 +125,18 @@ struct scx_ring {
 struct scx_stk {
 	arena_spinlock_t __arena *lock;
 
-	scx_ring_t *first;	/* First ring. */
-	scx_ring_t *last;
+	scx_stk_seg_t *first;	/* First stack segment. */
+	scx_stk_seg_t *last;
 
-	scx_ring_t *current;	/* Current ring. */
+	scx_stk_seg_t *current;	/* Current stack segment. */
 	__u64 cind;
 
-	__u64 capacity;		/* Free slots in the ring buffer. */
-	__u64 available;	/* Available items in the ring buffer. */
+	__u64 capacity;		/* Free slots in the stack. */
+	__u64 available;	/* Available items in the stack. */
 	__u64 data_size;
 	__u64 nr_pages_per_alloc;
 
-	scx_ring_t *reserve;
+	scx_stk_seg_t *reserve;
 };
 
 void __arena *scx_task_data(struct task_struct *p);

@@ -720,24 +720,24 @@ int scx_stk_init(struct scx_stk *stack, __u64 data_size, __u64 nr_pages_per_allo
 
 static void scx_stk_push(struct scx_stk *stack, void __arena *elem)
 {
-	scx_ring_t *ring = stack->current;
+	scx_stk_seg_t *stk_seg = stack->current;
 	int ridx = stack->cind;
 
 	stack->current->elems[stack->cind] = elem;
 
 	ridx += 1;
 
-	/* Possibly loop into the next ring. */
-	if (ridx == SCX_RING_MAX) {
+	/* Possibly loop into the next segment. */
+	if (ridx == SCX_STK_SEG_MAX) {
 		ridx = 0;
-		ring = ring->next;
+		stk_seg = stk_seg->next;
 	}
 
-	/* Possibly loop back into the first ring. */
-	if (!ring)
-		ring = stack->first;
+	/* Possibly loop back into the first segment. */
+	if (!stk_seg)
+		stk_seg = stack->first;
 
-	stack->current = ring;
+	stack->current = stk_seg;
 	stack->cind = ridx;
 
 	stack->capacity -= 1;
@@ -747,23 +747,23 @@ static void scx_stk_push(struct scx_stk *stack, void __arena *elem)
 static
 void __arena *scx_stk_pop(struct scx_stk *stack)
 {
-	scx_ring_t *ring = stack->current;
+	scx_stk_seg_t *stk_seg = stack->current;
 	void __arena *elem;
 	int ridx = stack->cind;
 
-	/* Possibly loop into previous next ring. */
+	/* Possibly loop into previous next segment. */
 	if (ridx == 0) {
-		ridx = SCX_RING_MAX;
-		ring = stack->current->prev;
+		ridx = SCX_STK_SEG_MAX;
+		stk_seg = stack->current->prev;
 	}
 
 	ridx -= 1;
 
-	/* Possibly loop back into the last ring. */
-	if (!ring)
-		ring = stack->last;
+	/* Possibly loop back into the last segment. */
+	if (!stk_seg)
+		stk_seg = stack->last;
 
-	stack->current = ring;
+	stack->current = stk_seg;
 	stack->cind = ridx;
 
 	elem = stack->current->elems[stack->cind];
@@ -775,12 +775,12 @@ void __arena *scx_stk_pop(struct scx_stk *stack)
 }
 
 static
-int scx_stk_ring_to_data(struct scx_stk *stack, size_t nelems)
+int scx_stk_seg_to_data(struct scx_stk *stack, size_t nelems)
 {
 	u64 data;
 	int i;
 
-	/* Do we have enough empty rings for the conversion? */
+	/* Do we have enough empty segments for the conversion? */
 	if (!stack->first || stack->first == stack->last)
 		return -ENOMEM;
 
@@ -788,8 +788,8 @@ int scx_stk_ring_to_data(struct scx_stk *stack, size_t nelems)
 	stack->last->prev->next = NULL;
 	stack->last = stack->last->prev;
 
-	/* We removed a ring. */
-	stack->capacity -= SCX_RING_MAX;
+	/* We removed a segment. */
+	stack->capacity -= SCX_STK_SEG_MAX;
 
 	for (i = zero; i < nelems && can_loop; i++) {
 		scx_stk_push(stack, (void __arena *)data);
@@ -800,23 +800,23 @@ int scx_stk_ring_to_data(struct scx_stk *stack, size_t nelems)
 }
 
 static
-void scx_stk_extend(struct scx_stk *stack, scx_ring_t *ring)
+void scx_stk_extend(struct scx_stk *stack, scx_stk_seg_t *stk_seg)
 {
 	if (stack->last)
-		stack->last->next = ring;
+		stack->last->next = stk_seg;
 
-	ring->prev = stack->last;
-	ring->next = NULL;
+	stk_seg->prev = stack->last;
+	stk_seg->next = NULL;
 
-	stack->last = ring;
-	stack->capacity += SCX_RING_MAX;
+	stack->last = stk_seg;
+	stack->capacity += SCX_STK_SEG_MAX;
 
 	if (!stack->first)
-		stack->first = ring;
+		stack->first = stk_seg;
 
 	/*
-	 * Do not adjust the current ring/idx because we did not add
-	 * any elements. The new ring will be pushed into during the next
+	 * Do not adjust the current segment/idx because we did not add
+	 * any elements. The new segment will be pushed into during the next
 	 * allocation.
 	 */
 }
@@ -827,9 +827,9 @@ int scx_stk_free_unlocked(struct scx_stk *stack, void __arena *elem)
 	if (!stack)
 		return -EINVAL;
 
-	/* If no more room, repurpose the allocation into a ring. */
+	/* If no more room, repurpose the allocation into a segment. */
 	if (stack->capacity == 0) {
-		scx_stk_extend(stack, (scx_ring_t *)elem);
+		scx_stk_extend(stack, (scx_stk_seg_t *)elem);
 		return 0;
 	}
 
@@ -859,24 +859,24 @@ int scx_stk_free_internal(struct scx_stk *stack, __u64 elem)
 }
 
 static
-int scx_stk_get_arena_memory(struct scx_stk *stack, __u64 nr_pages, __u64 nrings)
+int scx_stk_get_arena_memory(struct scx_stk *stack, __u64 nr_pages, __u64 nstk_segs)
 {
-	scx_ring_t *ring;
+	scx_stk_seg_t *stk_seg;
 	int ret, i;
 	u64 mem;
 
 	arena_spin_unlock(stack->lock);
 
 	/*
-	 * The code allocates new memory only as rings. The allocation and
-	 * free code freely typecasts the ring buffer into data that can be
+	 * The code allocates new memory only as segments. The allocation and
+	 * free code freely typecasts the segment buffer into data that can be
 	 * allocated, and vice versa to avoid either ending up with too many
-	 * empty rings under memory pressure, or having no space in the ring
+	 * empty segments under memory pressure, or having no space in the segment
 	 * buffer for a buffer currently being freed.
 	 */
 
 	/*
-	 * On error, we return with the ring buffer unlocked. This is
+	 * On error, we return with the segment buffer unlocked. This is
 	 * because arena_spin_lock can fail, so we cannot guarantee we
 	 * can lock it back.
 	 */
@@ -885,10 +885,10 @@ int scx_stk_get_arena_memory(struct scx_stk *stack, __u64 nr_pages, __u64 nrings
 
 	/*
 	 * We may alocate 2x the allocation size to ensure that a single
-	 * rings allocation to handle a completely empty stack that has
-	 * neither rings nor elements.
+	 * segment allocation to handle a completely empty stack that has
+	 * neither segments nor elements.
 	 */
-	mem = (__u64)bpf_arena_alloc_pages(&arena, NULL, nrings * nr_pages, NUMA_NO_NODE, 0);
+	mem = (__u64)bpf_arena_alloc_pages(&arena, NULL, nstk_segs * nr_pages, NUMA_NO_NODE, 0);
 	if (!mem)
 		return -ENOMEM;
 
@@ -898,14 +898,14 @@ int scx_stk_get_arena_memory(struct scx_stk *stack, __u64 nr_pages, __u64 nrings
 		return ret;
 	}
 
-	_Static_assert(sizeof(struct scx_ring) <= PAGE_SIZE,
-		"ring must fit into a page");
+	_Static_assert(sizeof(struct scx_stk_seg) <= PAGE_SIZE,
+		"segment must fit into a page");
 
-	/* Attach the rings to the reserve linked list. */
-	for (i = zero; i < nrings && can_loop; i++) {
-		ring = (scx_ring_t *)mem;
-		ring->next = stack->reserve;
-		stack->reserve = ring;
+	/* Attach the segments to the reserve linked list. */
+	for (i = zero; i < nstk_segs && can_loop; i++) {
+		stk_seg = (scx_stk_seg_t *)mem;
+		stk_seg->next = stack->reserve;
+		stack->reserve = stk_seg;
 
 		mem += nr_pages * PAGE_SIZE;
 	}
@@ -916,35 +916,35 @@ int scx_stk_get_arena_memory(struct scx_stk *stack, __u64 nr_pages, __u64 nrings
 static
 int scx_stk_fill_new_elems(struct scx_stk *stack)
 {
-	size_t nelems, nrings;
-	scx_ring_t *ring;
+	size_t nelems, nstk_segs;
+	scx_stk_seg_t *stk_seg;
 	__u64 nr_pages;
 	int ret, i;
 	u64 mem;
 
 	nr_pages = stack->nr_pages_per_alloc;
 	nelems = (nr_pages * PAGE_SIZE) / stack->data_size;
-	if (nelems > SCX_RING_MAX) {
+	if (nelems > SCX_STK_SEG_MAX) {
 		arena_spin_unlock(stack->lock);
-		scx_bpf_error("new elements must fit into a single ring");
+		scx_bpf_error("new elements must fit into a single segment");
 		return -EINVAL;
 	}
 
-	/* How many rings should we allocate? */
-	nrings = stack->capacity ? 1 : 2;
+	/* How many segments should we allocate? */
+	nstk_segs = stack->capacity ? 1 : 2;
 
 	/*
-	 * If we have more than two empty rings available,
+	 * If we have more than two empty segments available,
 	 * repurpose one of them into an allocation.
 	 */
-	ret = scx_stk_ring_to_data(stack, nelems);
+	ret = scx_stk_seg_to_data(stack, nelems);
 	if (!ret)
 		return 0;
 
 	/* If we haven't set aside any memory from before, allocate. */
 	if (!stack->reserve) {
 		/* This call drops and retakes the lock.  */
-		ret = scx_stk_get_arena_memory(stack, nr_pages, nrings);
+		ret = scx_stk_get_arena_memory(stack, nr_pages, nstk_segs);
 		if (ret)
 			return ret;
 	}
@@ -960,17 +960,17 @@ int scx_stk_fill_new_elems(struct scx_stk *stack)
 	/*
 	 * Otherwise add elements and possibly capacity to the stack. */
 	if (!stack->capacity) {
-		ring = stack->reserve;
+		stk_seg = stack->reserve;
 		stack->reserve = stack->reserve->next;
 
-		scx_stk_extend(stack, ring);
+		scx_stk_extend(stack, stk_seg);
 	}
 
 	/* Pop out the reserve and attach to the stack. */
-	ring = stack->reserve;
-	stack->reserve = ring->next;
+	stk_seg = stack->reserve;
+	stack->reserve = stk_seg->next;
 
-	mem = (u64)ring;
+	mem = (u64)stk_seg;
 	for (i = zero; i < nelems && can_loop; i++) {
 		scx_stk_push(stack, (void __arena *)mem);
 		mem += stack->data_size;
@@ -993,10 +993,10 @@ __u64 scx_stk_alloc(struct scx_stk *stack)
 		return 0ULL;
 	}
 
-	/* If ring buffer is empty, we have to populate it. */
+	/* If segment buffer is empty, we have to populate it. */
 	if (stack->available == 0) {
 		/* The call drops the lock on error. */
-		ret = scx_stk_fill_new_elems(stack);
+	ret = scx_stk_fill_new_elems(stack);
 		if (ret) {
 			scx_bpf_error("elem creation failed");
 			return 0ULL;
