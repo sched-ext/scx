@@ -40,11 +40,11 @@
     },
     "nixpkgs": {
       "locked": {
-        "lastModified": 1741127887,
-        "narHash": "sha256-wjvXLT5DJqBg+KDDdx/R/LhroGZr6OpE+n+l/AnNJc8=",
+        "lastModified": 1745583952,
+        "narHash": "sha256-ybjWNaiScS4XCT4PYYXyXg5sWxQBWzIr7UkoLiB667U=",
         "owner": "JakeHillion",
         "repo": "nixpkgs",
-        "rev": "f72326a3a7770ec2b85c832fbfa8051346e21515",
+        "rev": "93043a431a3a709df655ae9d8f95af129d9b832f",
         "type": "github"
       },
       "original": {
