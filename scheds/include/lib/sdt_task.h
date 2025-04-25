@@ -11,6 +11,10 @@
 #define div_round_up(a, b) (((a) + (b) - 1) / (b))
 #endif
 
+#ifndef round_up
+#define round_up(a, b) (div_round_up((a), (b)) * (b))
+#endif
+
 typedef struct sdt_desc __arena sdt_desc_t;
 
 enum sdt_consts {
@@ -151,7 +155,7 @@ int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx);
 
 #define scx_alloc(alloc) ((struct sdt_data __arena *)scx_alloc_internal((alloc)))
 
-void __arena *scx_static_alloc(size_t bytes);
+void __arena *scx_static_alloc(size_t bytes, size_t alignment);
 int scx_static_init(size_t max_alloc_pages);
 
 u64 scx_stk_alloc(struct scx_stk *stack);

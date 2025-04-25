@@ -324,7 +324,7 @@ scx_alloc_init(struct scx_allocator *alloc, __u64 data_size)
 
 	/* Wrap data into a descriptor and word align. */
 	data_size += sizeof(struct sdt_data);
-	data_size = div_round_up(data_size, 8) * 8;
+	data_size = round_up(data_size, 8);
 
 	/*
 	 * Ensure we allocate large enough chunks from the arena to avoid excessive
@@ -624,12 +624,21 @@ u64 scx_alloc_internal(struct scx_allocator *alloc)
 struct scx_static scx_static;
 
 __hidden
-void __arena *scx_static_alloc(size_t bytes)
+void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 {
 	void __arena *memory, *old;
 	void __arena *ptr;
+	size_t padding;
+	u64 addr;
 
 	bpf_spin_lock(&alloc_lock);
+
+	/* Round up the current offset. */
+	addr = (__u64) scx_static.memory + scx_static.off;
+
+	padding = round_up(addr, alignment) - addr;
+	bytes += padding;
+
 	if (bytes > scx_static.max_alloc_bytes) {
 		bpf_spin_unlock(&alloc_lock);
 		scx_bpf_error("invalid request %ld, max is %ld\n", bytes,
@@ -643,7 +652,7 @@ void __arena *scx_static_alloc(size_t bytes)
 	 * size, so it does not attempt to alleviate memory
 	 * fragmentation.
 	 */
-	if (scx_static.off + bytes  > scx_static.max_alloc_bytes) {
+	if (scx_static.off + bytes > scx_static.max_alloc_bytes) {
 		old = scx_static.memory;
 
 		bpf_spin_unlock(&alloc_lock);
@@ -671,7 +680,7 @@ void __arena *scx_static_alloc(size_t bytes)
 		}
 	}
 
-	ptr = (void __arena *)((__u64) scx_static.memory + scx_static.off);
+	ptr = (void __arena *)(addr + padding);
 	scx_static.off += bytes;
 
 	bpf_spin_unlock(&alloc_lock);
@@ -709,7 +718,7 @@ int scx_stk_init(struct scx_stk *stack, __u64 data_size, __u64 nr_pages_per_allo
 	stack->data_size = data_size;
 	stack->nr_pages_per_alloc = nr_pages_per_alloc;
 
-	stack->lock = scx_static_alloc(sizeof(*stack->lock));
+	stack->lock = scx_static_alloc(sizeof(*stack->lock), 1);
 	if (!stack->lock) {
 		scx_bpf_error("failed to allocate lock");
 		return -ENOMEM;
