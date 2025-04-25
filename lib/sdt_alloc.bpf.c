@@ -718,7 +718,7 @@ int scx_stk_init(struct scx_stk *stack, __u64 data_size, __u64 nr_pages_per_allo
 	return 0;
 }
 
-static void scx_stk_push(struct scx_stk *stack, void __arena *elem)
+static int scx_stk_push(struct scx_stk *stack, void __arena *elem)
 {
 	scx_stk_seg_t *stk_seg = stack->current;
 	int ridx = stack->cind;
@@ -731,17 +731,18 @@ static void scx_stk_push(struct scx_stk *stack, void __arena *elem)
 	if (ridx == SCX_STK_SEG_MAX) {
 		ridx = 0;
 		stk_seg = stk_seg->next;
+		if (!stk_seg)
+			return -ENOSPC;
 	}
 
-	/* Possibly loop back into the first segment. */
-	if (!stk_seg)
-		stk_seg = stack->first;
 
 	stack->current = stk_seg;
 	stack->cind = ridx;
 
 	stack->capacity -= 1;
 	stack->available += 1;
+
+	return 0;
 }
 
 static
@@ -755,13 +756,13 @@ void __arena *scx_stk_pop(struct scx_stk *stack)
 	if (ridx == 0) {
 		ridx = SCX_STK_SEG_MAX;
 		stk_seg = stack->current->prev;
+		/* Possibly loop back into the last segment. */
+		if (!stk_seg)
+			return NULL;
 	}
 
 	ridx -= 1;
 
-	/* Possibly loop back into the last segment. */
-	if (!stk_seg)
-		stk_seg = stack->last;
 
 	stack->current = stk_seg;
 	stack->cind = ridx;
@@ -777,8 +778,8 @@ void __arena *scx_stk_pop(struct scx_stk *stack)
 static
 int scx_stk_seg_to_data(struct scx_stk *stack, size_t nelems)
 {
+	int ret, i;
 	u64 data;
-	int i;
 
 	/* Do we have enough empty segments for the conversion? */
 	if (!stack->first || stack->first == stack->last)
@@ -792,7 +793,9 @@ int scx_stk_seg_to_data(struct scx_stk *stack, size_t nelems)
 	stack->capacity -= SCX_STK_SEG_MAX;
 
 	for (i = zero; i < nelems && can_loop; i++) {
-		scx_stk_push(stack, (void __arena *)data);
+		ret = scx_stk_push(stack, (void __arena *)data);
+		if (ret)
+			return ret;
 		data += stack->data_size;
 	}
 
@@ -833,9 +836,7 @@ int scx_stk_free_unlocked(struct scx_stk *stack, void __arena *elem)
 		return 0;
 	}
 
-	scx_stk_push(stack, elem);
-
-	return 0;
+	return scx_stk_push(stack, elem);
 }
 
 __weak
@@ -883,11 +884,6 @@ int scx_stk_get_arena_memory(struct scx_stk *stack, __u64 nr_pages, __u64 nstk_s
 	if (!stack)
 		return -EINVAL;
 
-	/*
-	 * We may alocate 2x the allocation size to ensure that a single
-	 * segment allocation to handle a completely empty stack that has
-	 * neither segments nor elements.
-	 */
 	mem = (__u64)bpf_arena_alloc_pages(&arena, NULL, nstk_segs * nr_pages, NUMA_NO_NODE, 0);
 	if (!mem)
 		return -ENOMEM;
@@ -972,7 +968,11 @@ int scx_stk_fill_new_elems(struct scx_stk *stack)
 
 	mem = (u64)stk_seg;
 	for (i = zero; i < nelems && can_loop; i++) {
-		scx_stk_push(stack, (void __arena *)mem);
+		ret = scx_stk_push(stack, (void __arena *)mem);
+		if (ret) {
+			arena_spin_unlock(stack->lock);
+			return ret;
+		}
 		mem += stack->data_size;
 	}
 
@@ -985,8 +985,10 @@ __u64 scx_stk_alloc(struct scx_stk *stack)
 	void __arena *elem;
 	int ret;
 
-	if (!stack)
+	if (!stack) {
+		scx_bpf_error("using uninitialized stack allocator");
 		return 0ULL;
+	}
 
 	if ((ret = arena_spin_lock(stack->lock))) {
 		scx_bpf_error("spinlock error %d", ret);
@@ -996,7 +998,7 @@ __u64 scx_stk_alloc(struct scx_stk *stack)
 	/* If segment buffer is empty, we have to populate it. */
 	if (stack->available == 0) {
 		/* The call drops the lock on error. */
-	ret = scx_stk_fill_new_elems(stack);
+		ret = scx_stk_fill_new_elems(stack);
 		if (ret) {
 			scx_bpf_error("elem creation failed");
 			return 0ULL;
@@ -1004,11 +1006,7 @@ __u64 scx_stk_alloc(struct scx_stk *stack)
 	}
 
 	elem = scx_stk_pop(stack);
-
 	arena_spin_unlock(stack->lock);
-
-	if (!elem)
-		scx_bpf_error("returning NULL");
 
 	return (u64)elem;
 }
@@ -1177,30 +1175,22 @@ int scx_buddy_init(struct scx_buddy *buddy, size_t size)
 	if (size < SCX_BUDDY_MIN_ALLOC_BYTES)
 		return -EINVAL;
 
-	bpf_spin_lock(&buddy->lock);
 	/* Check if already initialized. */
-	if (buddy->min_alloc_bytes) {
-		bpf_spin_unlock(&buddy->lock);
+	if (buddy->min_alloc_bytes)
 		return -EALREADY;
-	}
 
 	buddy->min_alloc_bytes = size;
-	bpf_spin_unlock(&buddy->lock);
 
 	_Static_assert(SCX_BUDDY_CHUNK_PAGES > 0, "chunk must use one or more pages");
 
 	/* One allocation per chunk. */
 	ret = scx_stk_init(&buddy->stack, SCX_BUDDY_CHUNK_PAGES * PAGE_SIZE, SCX_BUDDY_CHUNK_PAGES);
 	if (ret) {
-		bpf_spin_lock(&buddy->lock);
 		buddy->min_alloc_bytes = 0;
-		bpf_spin_unlock(&buddy->lock);
 		return ret;
 	}
 
 	chunk = scx_buddy_chunk_get(&buddy->stack);
-
-	bpf_spin_lock(&buddy->lock);
 
 	if (chunk) {
 		/* Put the chunk at the beginning of the list. */
@@ -1212,8 +1202,6 @@ int scx_buddy_init(struct scx_buddy *buddy, size_t size)
 		buddy->min_alloc_bytes = 0;
 		buddy->first_chunk = NULL;
 	}
-
-	bpf_spin_unlock(&buddy->lock);
 
 	return chunk ? 0 : -ENOMEM;
 }
