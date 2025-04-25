@@ -15,6 +15,14 @@
     "narHash": "sha256-wBhng0fVnekeChWGFkOU73Q6cEWRFjGYpMkKzpge71A=",
     "kernelVersion": "6.15.0-rc3"
   },
+  "stable/6_12": {
+    "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
+    "branch": "linux-6.12.y",
+    "commitHash": "ef4999852d307d38cfdecd91ed6892cc03beb9b8",
+    "lastModified": 1745573568,
+    "narHash": "sha256-rpjKq+QXwe9vJ5P0VZ/DR8wj2G+uiuwQzr6GbwVOROo=",
+    "kernelVersion": "6.12.25"
+  },
   "stable/linux-rolling-stable": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-rolling-stable",
