@@ -635,7 +635,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
         let (mut ridx, widx) = (active_tasks.read_idx, active_tasks.write_idx);
         active_tasks.read_idx = active_tasks.write_idx;
-        active_tasks.gen += 1;
+        active_tasks.genn += 1;
 
         if widx - ridx > MAX_TPTRS {
             ridx = widx - MAX_TPTRS;

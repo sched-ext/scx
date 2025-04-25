@@ -23,7 +23,10 @@ fn main() {
     if let Ok(e) = std::env::var("BPF_EXTRA_CFLAGS_POST_INCL") {
         extra_flags.push(e);
     }
-    std::env::set_var("BPF_EXTRA_CFLAGS_POST_INCL", extra_flags.join(" "));
+
+    unsafe {
+        std::env::set_var("BPF_EXTRA_CFLAGS_POST_INCL", extra_flags.join(" "));
+    }
 
     scx_utils::BpfBuilder::new()
         .unwrap()

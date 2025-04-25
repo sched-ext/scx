@@ -503,7 +503,7 @@ static inline void stat_add(enum stat_idx idx, u64 addend)
  * that can be used directly in the scheduling paths.
  */
 struct tune_input{
-	u64 gen;
+	u64 genn;
 	u64 slice_ns;
 	u64 direct_greedy_cpumask[MAX_CPUS / 64];
 	u64 kick_greedy_cpumask[MAX_CPUS / 64];
@@ -534,10 +534,10 @@ static void refresh_tune_params(void)
 {
 	s32 cpu;
 
-	if (tune_params_gen == tune_input.gen)
+	if (tune_params_gen == tune_input.genn)
 		return;
 
-	tune_params_gen = tune_input.gen;
+	tune_params_gen = tune_input.genn;
 	slice_ns = tune_input.slice_ns;
 
 	bpf_for(cpu, 0, nr_cpu_ids) {
@@ -1483,7 +1483,7 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 	 * consider recently active tasks. Access synchronization rules aren't
 	 * strict. We just need to be right most of the time.
 	 */
-	dap_gen = domc->active_tasks.gen;
+	dap_gen = domc->active_tasks.genn;
 	if (taskc->dom_active_tasks_gen != dap_gen) {
 		u64 idx = __sync_fetch_and_add(&domc->active_tasks.write_idx, 1) %
 			MAX_DOM_ACTIVE_TPTRS;

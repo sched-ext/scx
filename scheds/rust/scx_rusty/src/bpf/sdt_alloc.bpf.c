@@ -469,7 +469,7 @@ int sdt_free_idx(struct sdt_allocator *alloc, __u64 idx)
 		cast_kern(data);
 
 		data[pos] = (struct sdt_data) {
-			.tid.gen = data->tid.gen + 1,
+			.tid.genn = data->tid.genn + 1,
 		};
 
 		/* Zero out one word at a time. */
