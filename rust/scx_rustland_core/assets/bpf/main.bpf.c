@@ -716,6 +716,15 @@ static void kick_task_cpu(struct task_struct *p)
 }
 
 /*
+ * Return true if a task has been enqueued as a remote wakeup, false
+ * otherwise.
+ */
+static bool is_queued_wakeup(const struct task_struct *p, u64 enq_flags)
+{
+	return !__COMPAT_is_enq_cpu_selected(enq_flags) && !scx_bpf_task_running(p);
+}
+
+/*
  * Task @p becomes ready to run. We can dispatch the task directly here if the
  * user-space scheduler is not required, or enqueue it to be processed by the
  * scheduler.
@@ -743,6 +752,21 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 				   enq_flags | SCX_ENQ_PREEMPT);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
+	}
+
+	/*
+	 * Give the task a chance to be directly dispatched if
+	 * ops.select_cpu() was skipped.
+	 */
+	if (builtin_idle && is_queued_wakeup(p, enq_flags)) {
+		s32 cpu = pick_idle_cpu(p, scx_bpf_task_cpu(p));
+
+		if (cpu >= 0) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
+					   SCX_SLICE_DFL, enq_flags);
+			__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+			return;
+		}
 	}
 
 	/*
@@ -1235,7 +1259,6 @@ SCX_OPS_DEFINE(rustland,
 	       .init_task		= (void *)rustland_init_task,
 	       .init			= (void *)rustland_init,
 	       .exit			= (void *)rustland_exit,
-	       .flags			= SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
 	       .timeout_ms		= 5000,
 	       .dispatch_max_batch	= MAX_DISPATCH_SLOT,
 	       .name			= "rustland");
