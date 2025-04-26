@@ -4,8 +4,8 @@
 // GNU General Public License version 2.
 use crate::bindings;
 use crate::compat;
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::bail;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::sync::Mutex;
@@ -196,9 +196,13 @@ impl UserExitInfo {
 
         if let Some(dump) = &self.dump {
             eprintln!("\nDEBUG DUMP");
-            eprintln!("================================================================================\n");
+            eprintln!(
+                "================================================================================\n"
+            );
             eprintln!("{}", dump);
-            eprintln!("================================================================================\n");
+            eprintln!(
+                "================================================================================\n"
+            );
         }
 
         let why = match (&self.reason, &self.msg) {

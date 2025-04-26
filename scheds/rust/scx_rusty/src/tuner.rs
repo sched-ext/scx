@@ -6,14 +6,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ::fb_procfs as procfs;
+use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
-use anyhow::Result;
 use scx_utils::Cpumask;
 
-use crate::sub_or_zero;
 use crate::BpfSkel;
 use crate::DomainGroup;
+use crate::sub_or_zero;
 
 fn calc_util(curr: &procfs::CpuStat, prev: &procfs::CpuStat) -> Result<f64> {
     match (curr, prev) {
@@ -177,7 +177,7 @@ impl Tuner {
         }
         ti.slice_ns = self.slice_ns;
 
-        ti.gen += 1;
+        ti.genn += 1;
 
         self.prev_cpu_stats = curr_cpu_stats;
 

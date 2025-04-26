@@ -2,7 +2,7 @@
 name = "scx_rustland"
 version = "1.0.11"
 authors = ["Andrea Righi <andrea.righi@linux.dev>"]
-edition = "2021"
+edition = "2024"
 description = "A BPF component (dispatcher) that implements the low level sched-ext functionalities and a user-space counterpart (scheduler), written in Rust, that implements the actual scheduling policy. This is used within sched_ext, which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. https://github.com/sched-ext/scx/tree/main"
 license = "GPL-2.0-only"
 

@@ -12,21 +12,23 @@ pub use bpf_intf::*;
 
 mod stats;
 use std::mem::MaybeUninit;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
-use libbpf_rs::libbpf_sys::bpf_program__set_autoload;
 use libbpf_rs::AsRawLibbpf;
 use libbpf_rs::OpenObject;
+use libbpf_rs::libbpf_sys::bpf_program__set_autoload;
 use log::info;
 use log::warn;
 use scx_stats::prelude::*;
+use scx_utils::Topology;
+use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::scx_ops_attach;
@@ -35,8 +37,6 @@ use scx_utils::scx_ops_open;
 use scx_utils::set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::Topology;
-use scx_utils::UserExitInfo;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &'static str = "scx_flash";

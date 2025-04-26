@@ -4,32 +4,32 @@
 // GNU General Public License version 2.
 
 use scx_utils::compat;
-use scxtop::bpf_skel::types::bpf_event;
-use scxtop::bpf_skel::*;
-use scxtop::cli::{generate_completions, Cli, Commands, TraceArgs, TuiArgs};
-use scxtop::config::Config;
-use scxtop::edm::{ActionHandler, BpfEventActionPublisher, BpfEventHandler, EventDispatchManager};
-use scxtop::mangoapp::poll_mangoapp;
-use scxtop::read_file_string;
-use scxtop::tracer::Tracer;
 use scxtop::Action;
 use scxtop::App;
 use scxtop::Event;
 use scxtop::Key;
 use scxtop::KeyMap;
 use scxtop::PerfettoTraceManager;
-use scxtop::Tui;
 use scxtop::SCHED_NAME_PATH;
+use scxtop::Tui;
+use scxtop::bpf_skel::types::bpf_event;
+use scxtop::bpf_skel::*;
+use scxtop::cli::{Cli, Commands, TraceArgs, TuiArgs, generate_completions};
+use scxtop::config::Config;
+use scxtop::edm::{ActionHandler, BpfEventActionPublisher, BpfEventHandler, EventDispatchManager};
+use scxtop::mangoapp::poll_mangoapp;
+use scxtop::read_file_string;
+use scxtop::tracer::Tracer;
 
-use anyhow::anyhow;
 use anyhow::Result;
+use anyhow::anyhow;
 use clap::{CommandFactory, Parser};
-use libbpf_rs::skel::OpenSkel;
-use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::Link;
 use libbpf_rs::ProgramInput;
 use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::UprobeOpts;
+use libbpf_rs::skel::OpenSkel;
+use libbpf_rs::skel::SkelBuilder;
 use log::debug;
 use log::info;
 use ratatui::crossterm::event::KeyCode::Char;
@@ -43,8 +43,8 @@ use std::ffi::CString;
 use std::fs::File;
 use std::mem::MaybeUninit;
 use std::str::FromStr;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {

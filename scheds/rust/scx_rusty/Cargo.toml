@@ -2,7 +2,7 @@
 name = "scx_rusty"
 version = "1.0.11"
 authors = ["Dan Schatzberg <dschatzberg@meta.com>", "Meta"]
-edition = "2021"
+edition = "2024"
 description = "A multi-domain, BPF / user space hybrid scheduler used within sched_ext, which is a Linux kernel feature which enables implementing kernel thread schedulers in BPF and dynamically loading them. https://github.com/sched-ext/scx/tree/main"
 license = "GPL-2.0-only"
 

@@ -1,5 +1,5 @@
 use crate::{StatsErrno, StatsRequest, StatsResponse};
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use log::trace;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader, Write};

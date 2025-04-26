@@ -11,11 +11,11 @@
 //! A crate that allows schedulers to inspect and model the host's energy model,
 //! which is loaded from debugfs.
 
+use crate::Cpumask;
 use crate::compat;
 use crate::misc::read_from_file;
-use crate::Cpumask;
-use anyhow::bail;
 use anyhow::Result;
+use anyhow::bail;
 use glob::glob;
 use std::collections::BTreeMap;
 use std::fmt;

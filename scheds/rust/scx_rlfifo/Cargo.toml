@@ -2,7 +2,7 @@
 name = "scx_rlfifo"
 version = "1.0.11"
 authors = ["Andrea Righi <andrea.righi@linux.dev>"]
-edition = "2021"
+edition = "2024"
 description = "A simple FIFO scheduler in Rust that runs in user-space"
 license = "GPL-2.0-only"
 

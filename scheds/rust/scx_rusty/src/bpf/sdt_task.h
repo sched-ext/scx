@@ -28,7 +28,7 @@ union sdt_id {
 	__s64				val;
 	struct {
 		__s32			idx;	/* index in the radix tree */
-		__s32			gen;	/* ++'d on recycle so that it forms unique'ish 64bit ID */
+		__s32			genn;	/* ++'d on recycle so that it forms unique'ish 64bit ID */
 	};
 };
 

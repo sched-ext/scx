@@ -13,14 +13,14 @@ use std::fs::File;
 use std::mem::MaybeUninit;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
-use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
+use anyhow::anyhow;
+use anyhow::bail;
 use bitvec::prelude::*;
 use cgroupfs::CgroupReader;
 use clap::Parser;
@@ -32,6 +32,7 @@ use log::info;
 use log::trace;
 use maplit::btreemap;
 use maplit::hashmap;
+use scx_utils::UserExitInfo;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
 use scx_utils::ravg::ravg_read;
@@ -41,7 +42,6 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
-use scx_utils::UserExitInfo;
 
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
 const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
@@ -84,7 +84,9 @@ struct Opts {
 }
 
 unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
-    ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
+    unsafe {
+        ::std::slice::from_raw_parts((p as *const T) as *const u8, ::std::mem::size_of::<T>())
+    }
 }
 
 fn now_monotonic() -> u64 {
@@ -523,9 +525,7 @@ impl<'a> Scheduler<'a> {
         for (cell_idx, cell) in self.cells.iter() {
             trace!(
                 "Cell {}, Load: {}, Pinned Load: {}",
-                cell_idx,
-                cell.load,
-                cell.pinned_load
+                cell_idx, cell.load, cell.pinned_load
             );
         }
         let zero = 0 as libc::__u32;

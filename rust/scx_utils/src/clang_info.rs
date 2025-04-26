@@ -1,6 +1,6 @@
 use std::{collections::HashMap, env, process::Command};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use sscanf::sscanf;
 
 lazy_static::lazy_static! {
