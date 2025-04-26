@@ -626,10 +626,8 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		return prev_cpu;
 
 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
-	if (is_idle &&
-	    !scx_bpf_dsq_nr_queued(SHARED_DSQ) &&
-	    !scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu))) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+	if (is_idle && !scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
+		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), SCX_SLICE_DFL, 0ULL, 0);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	}
 
@@ -746,9 +744,10 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		s32 cpu = pick_idle_cpu(p, scx_bpf_task_cpu(p));
 
 		if (cpu >= 0) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
-					   SCX_SLICE_DFL, enq_flags);
+			scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
+					   SCX_SLICE_DFL, 0ULL, enq_flags);
 			__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return;
 		}
 	}
