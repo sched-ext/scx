@@ -298,20 +298,20 @@ static bool test_and_clear_usersched_needed(void)
  * Return true if there's any pending activity to do for the scheduler, false
  * otherwise.
  *
- * NOTE: nr_queued is incremented by the BPF component, more exactly in
- * enqueue(), when a task is sent to the user-space scheduler, then the
- * scheduler drains the queued tasks (updating nr_queued) and adds them to its
- * internal data structures / state; at this point tasks become "scheduled" and
- * the user-space scheduler will take care of updating nr_scheduled
- * accordingly; lastly tasks will be dispatched and the user-space scheduler
- * will update nr_scheduled again.
+ * NOTE: a task is sent to the user-space scheduler using the "queued"
+ * ringbuffer, then the scheduler drains the queued tasks and adds them to
+ * its internal data structures / state; at this point tasks become
+ * "scheduled" and the user-space scheduler will take care of updating
+ * nr_scheduled accordingly; lastly tasks will be dispatched and the
+ * user-space scheduler will update nr_scheduled again.
  *
- * Checking both counters allows to determine if there is still some pending
- * work to do for the scheduler: new tasks have been queued since last check,
- * or there are still tasks "queued" or "scheduled" since the previous
- * user-space scheduler run. If the counters are both zero it is pointless to
- * wake-up the scheduler (even if a CPU becomes idle), because there is nothing
- * to do.
+ * Checking nr_scheduled and the available data in the ringbuffer allows to
+ * determine if there is still some pending work to do for the scheduler:
+ * new tasks have been queued since last check, or there are still tasks
+ * "queued" or "scheduled" since the previous user-space scheduler run.
+ *
+ * If there's no pending action, it is pointless to wake-up the scheduler
+ * (even if a CPU becomes idle), because there is nothing to do.
  *
  * Also keep in mind that we don't need any protection here since this code
  * doesn't run concurrently with the user-space scheduler (that is single
@@ -319,7 +319,10 @@ static bool test_and_clear_usersched_needed(void)
  */
 static bool usersched_has_pending_tasks(void)
 {
-	return nr_queued || nr_scheduled;
+	if (nr_scheduled)
+		return true;
+
+	return bpf_ringbuf_query(&queued, BPF_RB_AVAIL_DATA) > 0;
 }
 
 /*
