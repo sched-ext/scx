@@ -122,16 +122,16 @@ pub fn read_file_byte(path: &Path) -> Result<usize> {
     let val = val.trim();
 
     // E.g., 10K, 10M, 10G, 10
-    if val.ends_with("K") {
-        let byte = val[..val.len() - 1].parse::<usize>()?;
+    if let Some(sval) = val.strip_suffix("K") {
+        let byte = sval.parse::<usize>()?;
         return Ok(byte * 1024);
     }
-    if val.ends_with("M") {
-        let byte = val[..val.len() - 1].parse::<usize>()?;
+    if let Some(sval) = val.strip_suffix("M") {
+        let byte = sval.parse::<usize>()?;
         return Ok(byte * 1024 * 1024);
     }
-    if val.ends_with("G") {
-        let byte = val[..val.len() - 1].parse::<usize>()?;
+    if let Some(sval) = val.strip_suffix("G") {
+        let byte = sval.parse::<usize>()?;
         return Ok(byte * 1024 * 1024 * 1024);
     }
 
