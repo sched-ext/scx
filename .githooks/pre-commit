@@ -1,0 +1,10 @@
+#!/bin/sh
+
+echo "Running cargo fmt..."
+cargo fmt --all
+
+# Stage any files modified by cargo fmt
+git add $(git diff --name-only)
+
+exit 0
+
