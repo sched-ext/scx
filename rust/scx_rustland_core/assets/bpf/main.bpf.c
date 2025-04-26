@@ -696,26 +696,6 @@ static void sched_congested(struct task_struct *p)
 }
 
 /*
- * Try to wake up the CPU that was assigned to task @p.
- */
-static void kick_task_cpu(struct task_struct *p)
-{
-	s32 cpu = scx_bpf_task_cpu(p);
-
-	/*
-	 * If the assigned CPU is not usable pick any other CPU usable by the
-	 * task.
-	 */
-	if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-		cpu = scx_bpf_pick_any_cpu(p->cpus_ptr, 0);
-
-	/*
-	 * Wake up the selected CPU if idle.
-	 */
-	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-}
-
-/*
  * Return true if a task has been enqueued as a remote wakeup, false
  * otherwise.
  */
@@ -732,6 +712,7 @@ static bool is_queued_wakeup(const struct task_struct *p, u64 enq_flags)
 void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct queued_task_ctx *task;
+	s32 cpu;
 
 	/*
 	 * Scheduler is dispatched directly in .dispatch() when needed, so
@@ -782,7 +763,6 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		sched_congested(p);
 		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, 0, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
-		kick_task_cpu(p);
 		return;
 	}
 	get_task_info(task, p, enq_flags);
@@ -790,6 +770,10 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	bpf_ringbuf_submit(task, 0);
 
 	__sync_fetch_and_add(&nr_queued, 1);
+
+	cpu = scx_bpf_task_cpu(p);
+	if (cpu != bpf_get_smp_processor_id())
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
 /*
