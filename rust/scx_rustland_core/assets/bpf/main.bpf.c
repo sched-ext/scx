@@ -795,16 +795,17 @@ static bool dispatch_user_scheduler(void)
 	}
 
 	/*
-	 * Use the lowest vtime possible to give the scheduler itself the
-	 * highest priority possible.
+	 * Always append the user-space scheduler at the end of the shared
+	 * DSQ, so that it'll run after all the tasks currently dispatched
+	 * have used their assigned time slice on their target CPU.
 	 *
-	 * At the same time make sure to assign an infinite time slice, so that
-	 * it can completely drain all the pending tasks.
+	 * At the same time assign an infinite time slice, so that it can
+	 * completely drain all the pending tasks.
 	 *
 	 * The user-space scheduler will voluntarily yield the CPU upon
 	 * completion through BpfScheduler->notify_complete().
 	 */
-	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_INF, 0ULL, 0);
+	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_INF, -1ULL, 0);
 
 	bpf_task_release(p);
 
@@ -847,6 +848,12 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, 0);
 
+       /*
+	* Always dispatch the user-space scheduler every time that a CPU
+	* becomes available.
+	*/
+	dispatch_user_scheduler();
+
 	/*
 	 * Consume a task from the per-CPU DSQ.
 	 */
@@ -856,15 +863,7 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * Consume a task from the shared DSQ.
 	 */
-	if (scx_bpf_dsq_move_to_local(SHARED_DSQ))
-		return;
-
-	/*
-	 * No more tasks to process, check if we need to keep the CPU alive to
-	 * process pending tasks from the user-space scheduler.
-	 */
-	if (dispatch_user_scheduler())
-		scx_bpf_dsq_move_to_local(SHARED_DSQ);
+	scx_bpf_dsq_move_to_local(SHARED_DSQ);
 }
 
 void BPF_STRUCT_OPS(rustland_runnable, struct task_struct *p, u64 enq_flags)
