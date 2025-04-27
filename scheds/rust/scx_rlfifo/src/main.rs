@@ -128,7 +128,7 @@ impl<'a> Scheduler<'a> {
             //
             // If we can't find any idle CPU, keep the task running on the same CPU.
             let cpu = self.bpf.select_cpu(task.pid, task.cpu, task.flags);
-            dispatched_task.cpu = if cpu < 0 { task.cpu } else { RL_CPU_ANY };
+            dispatched_task.cpu = if cpu >= 0 { cpu } else { task.cpu };
 
             // Determine the task's time slice: assign value inversely proportional to the number
             // of tasks waiting to be scheduled.
