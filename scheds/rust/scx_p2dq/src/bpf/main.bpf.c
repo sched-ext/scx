@@ -74,6 +74,10 @@ const volatile bool smt_enabled = true;
 const volatile bool has_little_cores = false;
 const volatile u32 debug = 2;
 
+const volatile bool mangoapp_scheduling = false;
+int mangoapp_tgid = 0;
+u64 mangoapp_slice = 0;
+
 const u32 zero_u32 = 0;
 
 const u64 lb_timer_intvl_ns = 250LLU * NSEC_PER_MSEC;
@@ -262,6 +266,23 @@ static bool is_interactive(task_ctx *taskc)
 		return false;
 	// For now only the shortest duration DSQ is considered interactive.
 	return taskc->dsq_index == 0;
+}
+
+/*
+ * Returns if the task is the traced mangoapp pid
+ */
+static bool is_mangoapp_task(struct task_struct *p)
+{
+	return mangoapp_scheduling &&
+	       mangoapp_tgid > 0 &&
+	       (p->tgid == mangoapp_tgid ||
+		p->last_wakee->tgid == mangoapp_tgid ||
+		p->real_parent->tgid == mangoapp_tgid);
+}
+
+static __always_inline u64 calc_mangoapp_slice(void)
+{
+	return 5 * mangoapp_slice;
 }
 
 /*
@@ -547,7 +568,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			goto found_cpu;
 		}
 		// Interactive tasks aren't worth migrating across LLCs.
-		if (interactive) {
+		if (interactive || is_mangoapp_task(current)) {
 			cpu = prev_cpu;
 			if (scx_bpf_test_and_clear_cpu_idle(cpu)) {
 				stat_inc(P2DQ_STAT_WAKE_PREV);
@@ -705,6 +726,15 @@ static __always_inline s32 p2dq_select_cpu_impl(struct task_struct *p, s32 prev_
 	if (is_idle) {
 		stat_inc(P2DQ_STAT_IDLE);
 		u64 slice_ns = task_slice_ns(p,taskc->dsq_index);
+		if (mangoapp_scheduling && is_mangoapp_task(p))
+			slice_ns = calc_mangoapp_slice();
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		return cpu;
+	}
+
+	struct task_struct *waker = (void *)bpf_get_current_task_btf();
+	if (is_mangoapp_task(waker) || is_mangoapp_task(p)) {
+		u64 slice_ns = dsq_time_slice(taskc->dsq_index);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 	}
 
@@ -732,6 +762,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	u64 dsq_id;
 
 	s32 cpu, task_cpu = scx_bpf_task_cpu(p);
+	bool should_mango = mangoapp_scheduling && is_mangoapp_task(p);
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) ||
 	    !(task_cpuc = lookup_cpu_ctx(task_cpu)) ||
@@ -792,10 +823,16 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		cpuc = lookup_cpu_ctx(cpu);
 		if (cpuc && taskc->dsq_index >= 0 && taskc->dsq_index < nr_dsqs_per_llc) {
 			dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
-			scx_bpf_dsq_insert_vtime(p, dsq_id, slice_ns, p->scx.dsq_vtime, enq_flags);
+			if (should_mango)
+				slice_ns = calc_mangoapp_slice();
+			scx_bpf_dsq_insert_vtime(p, dsq_id, slice_ns, vtime, enq_flags);
 			if (is_idle) {
 				stat_inc(P2DQ_STAT_IDLE);
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			}
+			if (should_mango) {
+				stat_inc(P2DQ_STAT_MANGO);
+				scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
 			}
 
 			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
@@ -804,6 +841,8 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	}
 
 	dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
+	if (should_mango)
+		slice_ns = calc_mangoapp_slice();
 
 	ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
 	ret->vtime.dsq_id = dsq_id;
@@ -881,7 +920,7 @@ void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 
 	// If the task is running in the least interactive DSQ, bump the
 	// frequency.
-	if (taskc->dsq_index == nr_dsqs_per_llc-1) {
+	if (taskc->dsq_index == nr_dsqs_per_llc - 1 || is_mangoapp_task(p)) {
 		scx_bpf_cpuperf_set(task_cpu, SCX_CPUPERF_ONE);
 	}
 	taskc->last_run_at = bpf_ktime_get_ns();
