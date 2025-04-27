@@ -135,12 +135,14 @@ impl<'a> Scheduler<'a> {
             // Decide where the task needs to run (target CPU).
             //
             // A call to select_cpu() will return the most suitable idle CPU for the task,
-            // considering its previously used CPU.
+            // prioritizing its previously used CPU (task.cpu).
+            //
+            // If we can't find any idle CPU, keep the task running on the same CPU.
             let cpu = self.bpf.select_cpu(task.pid, task.cpu, 0);
             if cpu >= 0 {
                 dispatched_task.cpu = cpu;
             } else {
-                dispatched_task.flags |= RL_CPU_ANY;
+                dispatched_task.cpu = task.cpu;
             }
 
             // Decide for how long the task needs to run (time slice); if not specified
