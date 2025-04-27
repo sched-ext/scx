@@ -785,18 +785,6 @@ static bool dispatch_user_scheduler(void)
 {
 	struct task_struct *p;
 
-	/*
-	 * If there are pending tasks, mark that user-space scheduling is
-	 * needed.
-	 */
-	if (usersched_has_pending_tasks())
-		set_usersched_needed();
-
-	/*
-	 * Prevent a burst of duplicate dispatches across all the CPUs,
-	 * allowing only the first one to dispatch the user-space
-	 * scheduler.
-	 */
 	if (!test_and_clear_usersched_needed())
 		return false;
 
