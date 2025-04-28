@@ -318,7 +318,7 @@ static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
 	/*
 	 * Respect nice priority.
 	 */
-	weight_ft = p->scx.weight * weight_boost;
+	weight_ft = p->scx.weight * nice_to_weight(p) * weight_boost;
 	return weight_ft;
 }
 
@@ -638,9 +638,8 @@ static void update_stat_for_stopping(struct task_struct *p,
 	task_runtime = time_delta(now, taskc->last_running_clk + suspended_duration);
 	taskc->acc_runtime += task_runtime;
 	taskc->avg_runtime = calc_avg(taskc->avg_runtime, taskc->acc_runtime);
+	taskc->svc_time += scale_by_combined_weight(p, task_runtime);
 	taskc->last_stopping_clk = now;
-
-	taskc->svc_time += task_runtime / p->scx.weight;
 
 	/*
 	 * Count how many times a task completely consumed the assigned time

@@ -140,6 +140,11 @@ static struct cpu_ctx *get_cpu_ctx_task(const struct task_struct *p)
 	return get_cpu_ctx_id(scx_bpf_task_cpu(p));
 }
 
+static u64 scale_by_combined_weight(const struct task_struct *p, u64 v)
+{
+	return (v * 100 * 1024) / (p->scx.weight * nice_to_weight(p));
+}
+
 static u32 calc_avg32(u32 old_val, u32 new_val)
 {
 	/*
