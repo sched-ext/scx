@@ -272,6 +272,14 @@ static inline bool is_kthread(const struct task_struct *p)
 }
 
 /*
+ * Return true if @p still wants to run, false otherwise.
+ */
+static bool is_queued(const struct task_struct *p)
+{
+	return p->scx.flags & SCX_TASK_QUEUED;
+}
+
+/*
  * Flag used to wake-up the user-space scheduler.
  */
 static volatile u32 usersched_needed;
@@ -863,7 +871,38 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	/*
 	 * Consume a task from the shared DSQ.
 	 */
-	scx_bpf_dsq_move_to_local(SHARED_DSQ);
+	if (scx_bpf_dsq_move_to_local(SHARED_DSQ))
+		return;
+
+	/*
+	 * If the previous task was the user-space scheduler and it
+	 * voluntarily released the CPU without dispatching any task, it
+	 * means that there are no pending actions to be done, so let the
+	 * CPU go idle.
+	 */
+	if (prev && is_usersched_task(prev))
+		return;
+
+	/*
+	 * If the current task expired its time slice and no other task
+	 * wants to run, simply replenish its time slice and let it run for
+	 * another round on the same CPU.
+         */
+	if (prev && is_queued(prev)) {
+		prev->scx.slice = SCX_SLICE_DFL;
+
+		/*
+		 * Notify the user-space scheduler if there are any pending
+		 * tasks to be completed, before resuming the previous
+		 * task.
+		 *
+		 * Keep in mind that if we don't refill the previous task's
+		 * time slice, this check will be performed in
+		 * ops.update_idle().
+		 */
+		if (usersched_has_pending_tasks())
+			set_usersched_needed();
+	}
 }
 
 void BPF_STRUCT_OPS(rustland_runnable, struct task_struct *p, u64 enq_flags)
