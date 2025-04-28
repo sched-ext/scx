@@ -53,6 +53,7 @@ UEI_DEFINE(uei);
  * Scheduler attributes and statistics.
  */
 u32 usersched_pid; /* User-space scheduler PID */
+u64 usersched_last_run_at; /* Timestamp of the last user-space scheduler execution */
 const volatile bool switch_partial; /* Switch all tasks or SCHED_EXT tasks */
 
 /*
@@ -927,8 +928,10 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct task_ctx *tctx;
 
-	if (is_usersched_task(p))
+	if (is_usersched_task(p)) {
+		usersched_last_run_at = scx_bpf_now();
 		return;
+	}
 
 	dbg_msg("start: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
 
@@ -1078,10 +1081,27 @@ s32 BPF_STRUCT_OPS(rustland_init_task, struct task_struct *p,
  */
 static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
 {
+	struct task_struct *p;
 	int err = 0;
 
-	/* Kick the scheduler */
-	set_usersched_needed();
+	/*
+	 * Trigger the user-space scheduler if it has been inactive for
+	 * more than USERSCHED_TIMER_NS.
+	 */
+	if (time_delta(scx_bpf_now(), usersched_last_run_at) >= USERSCHED_TIMER_NS) {
+		bpf_rcu_read_lock();
+		p = bpf_task_from_pid(usersched_pid);
+		if (p) {
+			s32 cpu;
+
+			set_usersched_needed();
+			cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+			if (cpu >= 0)
+				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			bpf_task_release(p);
+		}
+		bpf_rcu_read_unlock();
+	}
 
 	/* Re-arm the timer */
 	err = bpf_timer_start(timer, USERSCHED_TIMER_NS, 0);
