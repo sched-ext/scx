@@ -52,6 +52,7 @@ const volatile u64 min_open_layer_disallow_preempt_after_ns;
 const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 const volatile bool percpu_kthread_preempt = true;
+volatile u64 layer_refresh_seq;
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
@@ -493,6 +494,7 @@ struct task_ctx {
 	u32			qrt_llc_id;
 
 	char 			join_layer[SCXCMD_COMLEN];
+	u64			layer_refresh_seq;
 };
 
 struct {
@@ -2172,9 +2174,10 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 	u64 layer_id;	// XXX - int makes verifier unhappy
 	pid_t pid = p->pid;
 
-	if (!taskc->refresh_layer)
+	if (!taskc->refresh_layer && taskc->layer_refresh_seq >= layer_refresh_seq)
 		return;
 	taskc->refresh_layer = false;
+	taskc->layer_refresh_seq = layer_refresh_seq;
 
 	if (!(cgrp_path = format_cgrp_path(p->cgroups->dfl_cgrp)))
 		return;
