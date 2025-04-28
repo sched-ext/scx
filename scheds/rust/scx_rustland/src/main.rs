@@ -74,11 +74,11 @@ const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 #[derive(Debug, Parser)]
 struct Opts {
     /// Scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "5000")]
+    #[clap(short = 's', long, default_value = "20000")]
     slice_us: u64,
 
     /// Scheduling minimum slice duration in microseconds.
-    #[clap(short = 'S', long, default_value = "500")]
+    #[clap(short = 'S', long, default_value = "1000")]
     slice_us_min: u64,
 
     /// If specified, only tasks which have their scheduling policy set to SCHED_EXT using
