@@ -594,7 +594,7 @@ const static int sched_prio_to_weight[MAX_TASK_PRIO + 1] = {
 /*
  * Returns the scaled value with niceness taken into account
  */
-static inline u64 nice_to_weight(struct task_struct *p)
+static inline u64 nice_to_weight(const struct task_struct *p)
 {
 	/*
 	 * static_prio is nice + 120, so to scale to the table borrowed
