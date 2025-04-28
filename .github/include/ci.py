@@ -53,7 +53,10 @@ def run_format():
 
     run_command(["cargo", "fmt"])
 
-    run_command(["nix", "fmt"], cwd=".github/include")
+    run_command(
+        ["nix", "--extra-experimental-features", "nix-command flakes", "fmt"],
+        cwd=".github/include",
+    )
 
     run_command(["git", "diff", "--exit-code"])
     print("✓ Format completed successfully", flush=True)
