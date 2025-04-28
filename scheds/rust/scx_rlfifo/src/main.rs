@@ -3,12 +3,15 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-//! # FIFO Linux kernel scheduler that runs in user-space
+//! # Round-Robin Linux kernel scheduler that runs in user-space
 //!
 //! ## Overview
 //!
-//! This is a fully functional FIFO scheduler for the Linux kernel that operates in user-space and
-//! it is 100% implemented in Rust.
+//! This is a fully functional Round-Robin scheduler for the Linux kernel that operates
+//! in user-space and it is 100% implemented in Rust.
+//!
+//! It dequeues tasks in FIFO order and assigns dynamic time slices, preempting and
+//! re-enqueuing tasks to achieve basic Round-Robin behavior.
 //!
 //! The scheduler is designed to serve as a simple template for developers looking to implement
 //! more advanced scheduling policies.
