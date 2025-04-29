@@ -87,8 +87,6 @@ u64 dsq_time_slices[MAX_DSQS_PER_LLC];
 u64 min_slice_ns = 500;
 u32 sched_mode = MODE_PERFORMANCE;
 
-const u64 nice_scaling_weight = 1024;
-
 private(A) struct bpf_cpumask __kptr *all_cpumask;
 private(A) struct bpf_cpumask __kptr *big_cpumask;
 
@@ -104,13 +102,18 @@ static u64 min(u64 a, u64 b)
 }
 
 
-static __always_inline u64 dsq_time_slice(int dsq_id)
+static __always_inline u64 dsq_time_slice(int dsq_index)
 {
-	if (dsq_id > nr_dsqs_per_llc || dsq_id < 0) {
-		scx_bpf_error("Invalid DSQ id");
+	if (dsq_index > nr_dsqs_per_llc || dsq_index < 0) {
+		scx_bpf_error("Invalid DSQ index");
 		return 0;
 	}
-	return dsq_time_slices[dsq_id];
+	return dsq_time_slices[dsq_index];
+}
+
+static __always_inline u64 task_slice_ns(struct task_struct *p, int dsq_index)
+{
+	return p->scx.weight * dsq_time_slice(dsq_index) / 100;
 }
 
 struct p2dq_timer p2dq_timers[MAX_TIMERS] = {
@@ -277,48 +280,6 @@ static bool can_pick2(task_ctx *taskc)
 }
 
 /*
- * ** Taken directly from fair.c in the Linux kernel **
- *
- * "Nice levels are multiplicative, with a gentle 10% change for every
- * nice level changed. I.e. when a CPU-bound task goes from nice 0 to
- * nice 1, it will get ~10% less CPU time than another CPU-bound task
- * that remained on nice 0.
- *
- * The "10% effect" is relative and cumulative: from _any_ nice level,
- * if you go up 1 level, it's -10% CPU usage, if you go down 1 level
- * it's +10% CPU usage. (to achieve that we use a multiplier of 1.25.
- * If a task goes up by ~10% and another task goes down by ~10% then
- * the relative distance between them is ~25%.)"
- */
-const int sched_prio_to_weight[MAX_TASK_PRIO + 1] = {
- /* -20 */     88761,     71755,     56483,     46273,     36291,
- /* -15 */     29154,     23254,     18705,     14949,     11916,
- /* -10 */     9548,     7620,     6100,     4904,     3906,
- /*  -5 */     3121,     2501,     1991,     1586,     1277,
- /*   0 */     1024,     820,      655,      526,      423,
- /*   5 */     335,      272,      215,      172,      137,
- /*  10 */     110,      87,       70,       56,       45,
- /*  15 */     36,       29,       23,       18,       15,
-};
-
-/*
- * Returns the scaled value with niceness taken into account
- */
-static u64 nice_scaled(struct task_struct *p)
-{
-	// static_prio is nice + 120, so to scale to the table borrowed from
-	// fair.c subtract 101.
-	u16 prio = p->static_prio - 101;
-	// verifier
-	if (prio >= MAX_TASK_PRIO)
-		prio = MAX_TASK_PRIO - 1;
-	if (prio < 0)
-		prio = 0;
-
-	return sched_prio_to_weight[MAX_TASK_PRIO - prio - 1];
-}
-
-/*
  * Returns a random llc_ctx
  */
 static struct llc_ctx *rand_llc_ctx(void)
@@ -350,7 +311,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
 		return false;
 
 
-	u64 slice_ns = dsq_time_slice(cpuc->dsq_index);
+	u64 slice_ns = task_slice_ns(p, cpuc->dsq_index);
 	cpuc->ran_for += slice_ns;
 	p->scx.slice = slice_ns;
 	stat_inc(P2DQ_STAT_KEEP);
@@ -743,7 +704,7 @@ static __always_inline s32 p2dq_select_cpu_impl(struct task_struct *p, s32 prev_
 	cpu = pick_idle_cpu(p, taskc, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
 		stat_inc(P2DQ_STAT_IDLE);
-		u64 slice_ns = dsq_time_slice(taskc->dsq_index);
+		u64 slice_ns = task_slice_ns(p,taskc->dsq_index);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 	}
 
@@ -781,7 +742,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	}
 
 	u64 vtime_now = llcx->vtime;
-	u64 slice_ns = dsq_time_slice(taskc->dsq_index);
+	u64 slice_ns = task_slice_ns(p,taskc->dsq_index);
 
 	// If the task in in another LLC need to update vtime.
 	if (taskc->llc_id != cpuc->llc_id) {
@@ -948,9 +909,9 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	taskc->last_dsq_index = taskc->dsq_index;
 	taskc->used = 0;
 
-	last_dsq_slice_ns = dsq_time_slice(taskc->dsq_index);
+	last_dsq_slice_ns = task_slice_ns(p, taskc->dsq_index);
 	used = min(now - taskc->last_run_at, last_dsq_slice_ns);
-	scaled_used = (used * nice_scaling_weight * 100) / (nice_scaled(p) * p->scx.weight);
+	scaled_used = used * 100 / p->scx.weight;
 
 	p->scx.dsq_vtime += scaled_used;
 	__sync_fetch_and_add(&llcx->vtime, scaled_used);
@@ -959,8 +920,8 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	__sync_fetch_and_add(&llcx->load, used);
 
 
-	trace("%s prio %d slice %llu used %llu scaled %llu",
-	      p->comm, p->static_prio, last_dsq_slice_ns, used, scaled_used);
+	trace("%s weight %d slice %llu used %llu scaled %llu",
+	      p->comm, p->scx.weight, last_dsq_slice_ns, used, scaled_used);
 
 	// On stopping determine if the task can move to a longer DSQ by
 	// comparing the used time to the scaled DSQ slice.
