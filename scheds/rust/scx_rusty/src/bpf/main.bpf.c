@@ -595,7 +595,7 @@ static u64 min(u64 a, u64 b)
  * If a task goes up by ~10% and another task goes down by ~10% then
  * the relative distance between them is ~25%.)"
  */
-const int sched_prio_to_lat_weight[DL_MAX_LAT_PRIO + 1] = {
+const int sched_prio_to_weight[DL_MAX_LAT_PRIO + 1] = {
  /* -20 */     88761,     71755,     56483,     46273,     36291,
  /* -15 */     29154,     23254,     18705,     14949,     11916,
  /* -10 */      9548,      7620,      6100,      4904,      3906,
@@ -613,7 +613,7 @@ static __noinline u64 sched_prio_to_latency_weight(u64 prio)
 		return 0;
 	}
 
-	return sched_prio_to_lat_weight[DL_MAX_LAT_PRIO - prio - 1];
+	return sched_prio_to_weight[DL_MAX_LAT_PRIO - prio - 1];
 }
 
 static u64 task_compute_dl(struct task_struct *p, struct task_ctx *taskc,
