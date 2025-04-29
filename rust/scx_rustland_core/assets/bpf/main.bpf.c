@@ -1297,6 +1297,7 @@ SCX_OPS_DEFINE(rustland,
 	       .init_task		= (void *)rustland_init_task,
 	       .init			= (void *)rustland_init,
 	       .exit			= (void *)rustland_exit,
+	       .flags			= SCX_OPS_KEEP_BUILTIN_IDLE | SCX_OPS_ENQ_LAST,
 	       .timeout_ms		= 5000,
 	       .dispatch_max_batch	= MAX_DISPATCH_SLOT,
 	       .name			= "rustland");
