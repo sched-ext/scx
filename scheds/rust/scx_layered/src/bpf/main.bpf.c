@@ -52,7 +52,7 @@ const volatile u64 min_open_layer_disallow_preempt_after_ns;
 const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 const volatile bool percpu_kthread_preempt = true;
-volatile u64 layer_refresh_seq;
+volatile u64 layer_refresh_seq_avgruntime;
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
@@ -1088,6 +1088,9 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	 */
 	if (taskc->layer_id == MAX_LAYERS || !(layer = lookup_layer(taskc->layer_id)))
 		return prev_cpu;
+
+	if (layer->periodically_refresh && taskc->layer_refresh_seq < layer_refresh_seq_avgruntime)
+		taskc->refresh_layer = true;
 
 	if (layer->task_place == PLACEMENT_STICK)
 		cpu = prev_cpu;
@@ -2174,10 +2177,10 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 	u64 layer_id;	// XXX - int makes verifier unhappy
 	pid_t pid = p->pid;
 
-	if (!taskc->refresh_layer && taskc->layer_refresh_seq >= layer_refresh_seq)
+	if (!taskc->refresh_layer)
 		return;
 	taskc->refresh_layer = false;
-	taskc->layer_refresh_seq = layer_refresh_seq;
+	taskc->layer_refresh_seq = layer_refresh_seq_avgruntime;
 
 	if (!(cgrp_path = format_cgrp_path(p->cgroups->dfl_cgrp)))
 		return;
@@ -3172,6 +3175,7 @@ static s32 init_layer(int layer_id)
 				dbg("%s GPU_PID %d", header, match->used_gpu_pid);
 				break;
 			case MATCH_AVG_RUNTIME:
+				layer->periodically_refresh = true;
 				dbg("%s AVG_RUNTIME [%lluus, %lluus)", header,
 					match->min_avg_runtime_us,
 					match->max_avg_runtime_us);

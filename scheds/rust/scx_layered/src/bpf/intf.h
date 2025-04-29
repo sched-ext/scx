@@ -347,6 +347,7 @@ struct layer {
 
 	char			name[MAX_LAYER_NAME];
 	bool			is_protected;
+	bool			periodically_refresh;
 };
 
 struct scx_cmd {

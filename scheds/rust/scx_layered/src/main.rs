@@ -626,10 +626,10 @@ struct Opts {
     /// Layer specification. See --help.
     specs: Vec<String>,
 
-    /// Periodically tasks to reevaluate which layer they belong to. Default period of 0
+    /// Periodically force tasks in layers using the AvgRuntime match rule to reevaluate which layer they belong to. Default period of 2s.
     /// turns this off.
-    #[clap(long, default_value = "0")]
-    force_layer_refresh_ms: u64,
+    #[clap(long, default_value = "2000")]
+    layer_refresh_ms_avgruntime: u64,
 }
 
 fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
@@ -1964,7 +1964,7 @@ impl<'a> Scheduler<'a> {
             layer_specs,
 
             sched_intv: Duration::from_secs_f64(opts.interval),
-            layer_refresh_intv: Duration::from_millis(opts.force_layer_refresh_ms),
+            layer_refresh_intv: Duration::from_millis(opts.layer_refresh_ms_avgruntime),
 
             cpu_pool,
             layers,
@@ -2593,7 +2593,7 @@ impl<'a> Scheduler<'a> {
             }
 
             if enable_layer_refresh && now >= next_layer_refresh_at {
-                self.skel.maps.bss_data.layer_refresh_seq += 1;
+                self.skel.maps.bss_data.layer_refresh_seq_avgruntime += 1;
                 while next_layer_refresh_at < now {
                     next_layer_refresh_at += self.layer_refresh_intv;
                 }
