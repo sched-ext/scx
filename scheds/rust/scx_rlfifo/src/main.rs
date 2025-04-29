@@ -48,6 +48,7 @@
 //!     pub pid: i32,              // pid that uniquely identifies a task
 //!     pub cpu: i32,              // CPU previously used by the task
 //!     pub flags: u64,            // task's enqueue flags
+//!     pub exec_runtime: u64,     // Total cpu time in nanoseconds
 //!     pub sum_exec_runtime: u64, // Total cpu time in nanoseconds
 //!     pub weight: u64,           // Task priority in the range [1..10000] (default is 100)
 //!     pub nvcsw: u64,            // Total amount of voluntary context switches
