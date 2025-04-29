@@ -885,24 +885,25 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
+	 * Notify the user-space scheduler if there are any pending tasks
+	 * to be completed, before resuming the previous task.
+	 *
+	 * Keep in mind that if we don't refill the previous task's time
+	 * slice, this check will be performed in ops.update_idle().
+	 */
+	if (usersched_has_pending_tasks())
+		set_usersched_needed();
+
+	/*
 	 * If the current task expired its time slice and no other task
 	 * wants to run, simply replenish its time slice and let it run for
 	 * another round on the same CPU.
          */
 	if (prev && is_queued(prev)) {
 		prev->scx.slice = SCX_SLICE_DFL;
-
-		/*
-		 * Notify the user-space scheduler if there are any pending
-		 * tasks to be completed, before resuming the previous
-		 * task.
-		 *
-		 * Keep in mind that if we don't refill the previous task's
-		 * time slice, this check will be performed in
-		 * ops.update_idle().
-		 */
-		if (usersched_has_pending_tasks())
-			set_usersched_needed();
+	} else {
+		if (dispatch_user_scheduler())
+			scx_bpf_kick_cpu(cpu, 0);
 	}
 }
 
@@ -970,33 +971,6 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 	 * Update the partial execution time since last sleep.
 	 */
 	tctx->exec_runtime += scx_bpf_now() - tctx->last_run_at;
-}
-
-/*
- * A CPU is about to change its idle state.
- */
-void BPF_STRUCT_OPS(rustland_update_idle, s32 cpu, bool idle)
-{
-	/*
-	 * Don't do anything if we exit from and idle state, a CPU owner will
-	 * be assigned in .running().
-	 */
-	if (!idle)
-		return;
-
-	/*
-	 * A CPU is now available, notify the user-space scheduler that tasks
-	 * can be dispatched.
-	 */
-	if (usersched_has_pending_tasks()) {
-		set_usersched_needed();
-		/*
-		 * Wake up the idle CPU and trigger a resched, so that it can
-		 * immediately accept dispatched tasks.
-		 */
-		scx_bpf_kick_cpu(cpu, 0);
-		return;
-	}
 }
 
 /*
@@ -1291,13 +1265,12 @@ SCX_OPS_DEFINE(rustland,
 	       .runnable		= (void *)rustland_runnable,
 	       .running			= (void *)rustland_running,
 	       .stopping		= (void *)rustland_stopping,
-	       .update_idle		= (void *)rustland_update_idle,
 	       .set_cpumask		= (void *)rustland_set_cpumask,
 	       .cpu_release		= (void *)rustland_cpu_release,
 	       .init_task		= (void *)rustland_init_task,
 	       .init			= (void *)rustland_init,
 	       .exit			= (void *)rustland_exit,
-	       .flags			= SCX_OPS_KEEP_BUILTIN_IDLE | SCX_OPS_ENQ_LAST,
+	       .flags			= SCX_OPS_ENQ_LAST,
 	       .timeout_ms		= 5000,
 	       .dispatch_max_batch	= MAX_DISPATCH_SLOT,
 	       .name			= "rustland");
