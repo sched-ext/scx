@@ -225,8 +225,8 @@ static u32 calc_greedy_ratio(struct task_ctx *taskc)
 	u32 ratio;
 
 	if (!have_scheduled(taskc)) {
-		ratio = LAVD_GREEDY_RATIO_NEW;
-		goto out;
+		taskc->is_greedy = true;
+		return LAVD_GREEDY_RATIO_NEW;
 	}
 
 	/*
@@ -236,8 +236,6 @@ static u32 calc_greedy_ratio(struct task_ctx *taskc)
 	 * system.
 	 */
 	ratio = (taskc->svc_time << LAVD_SHIFT) / sys_stat.avg_svc_time;
-
-out:
 	taskc->is_greedy = ratio > LAVD_SCALE;
 	return ratio;
 }
@@ -257,16 +255,14 @@ static u32 calc_greedy_factor(u32 greedy_ratio)
 
 }
 
-static u64 calc_runtime_factor(u64 runtime, u64 weight_ft)
+static inline u64 calc_runtime_factor(u64 runtime)
 {
-	u64 ft = rsigmoid_u64(runtime, LAVD_LC_RUNTIME_MAX);
-	return (ft / weight_ft) + 1;
+	return rsigmoid_u64(runtime, LAVD_LC_RUNTIME_MAX);
 }
 
-static u64 calc_freq_factor(u64 freq, u64 weight_ft)
+static inline u64 calc_freq_factor(u64 freq)
 {
-	u64 ft = sigmoid_u64(freq, LAVD_LC_FREQ_MAX);
-	return (ft * weight_ft * LAVD_LC_FREQ_OVER_RUNTIME) + 1;
+	return sigmoid_u64(freq, LAVD_LC_FREQ_MAX);
 }
 
 static u64 calc_weight_factor(struct task_struct *p, struct task_ctx *taskc)
@@ -341,8 +337,8 @@ static void calc_perf_cri(struct task_struct *p, struct task_ctx *taskc)
 	 * Note that we use unadjusted weight to reflect the pure task priority.
 	 */
 	if (have_little_core) {
-		wait_freq_ft = calc_freq_factor(taskc->wait_freq, p->scx.weight);
-		wake_freq_ft = calc_freq_factor(taskc->wake_freq, p->scx.weight);
+		wait_freq_ft = calc_freq_factor(taskc->wait_freq);
+		wake_freq_ft = calc_freq_factor(taskc->wake_freq);
 		perf_cri = log2_u64(wait_freq_ft * wake_freq_ft);
 		perf_cri += log2_u64(max(taskc->run_freq, 1) *
 				     max(taskc->avg_runtime, 1) * p->scx.weight);
@@ -372,9 +368,9 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	 * is monotonically increasing since higher frequencies mean more
 	 * latency-critical.
 	 */
-	wait_freq_ft = calc_freq_factor(taskc->wait_freq, weight_ft);
-	wake_freq_ft = calc_freq_factor(taskc->wake_freq, weight_ft);
-	runtime_ft = calc_runtime_factor(taskc->avg_runtime, weight_ft);
+	wait_freq_ft = calc_freq_factor(taskc->wait_freq) + 1;
+	wake_freq_ft = calc_freq_factor(taskc->wake_freq) + 1;
+	runtime_ft = calc_runtime_factor(taskc->avg_runtime) + 1;
 
 	/*
 	 * Wake frequency and wait frequency represent how much a task is used
@@ -384,9 +380,9 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	 * add +1 to guarantee the latency criticality (log2-ed) is always
 	 * positive.
 	 */
-	lat_cri = log2_u64(wait_freq_ft);
-	lat_cri += log2_u64(wake_freq_ft);
-	lat_cri += log2_u64(runtime_ft);
+	lat_cri = log2_u64(wait_freq_ft * weight_ft) +
+		  log2_u64(wake_freq_ft) +
+		  log2_u64(runtime_ft);
 
 	/*
 	 * Determine latency criticality of a task in a context-aware manner by
@@ -448,19 +444,9 @@ static u64 calc_time_slice(struct task_ctx *taskc)
 
 	/*
 	 * Boost time slice for CPU-bound tasks.
-	 *
-	 * If a task has yet to be scheduled (i.e., a freshly forked task or a
-	 * task just under sched_ext), don't give a fair amount of time slice
-	 * until knowing its properties. This helps to mitigate potential
-	 * system starvation caused by massively forking tasks (i.e., fork-bomb
-	 * attacks).
 	 */
 	if (taskc->slice_boost_prio > 0) {
-		slice += (LAVD_SLICE_BOOST_MAX_FT * slice *
-			  taskc->slice_boost_prio) /
-			 LAVD_SLICE_BOOST_MAX_STEP;
-	} else if (!have_scheduled(taskc)) {
-		slice >>= 2;
+		slice += (slice * taskc->slice_boost_prio) >> LAVD_SLICE_BOOST_SHIFT;		
 	}
 
 	taskc->slice_ns = slice;
