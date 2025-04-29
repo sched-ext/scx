@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;

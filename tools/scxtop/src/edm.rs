@@ -3,8 +3,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use crate::Action;
 use crate::bpf_skel::types::bpf_event;
+use crate::Action;
 use anyhow::{Error, Result};
 use tokio::sync::mpsc::UnboundedSender;
 

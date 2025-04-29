@@ -2,7 +2,7 @@
 name = "scx_flash"
 version = "1.0.9"
 authors = ["Andrea Righi <arighi@nvidia.com>"]
-edition = "2024"
+edition = "2021"
 description = "A scheduler designed for multimedia and real-time audio processing workloads. https://github.com/sched-ext/scx/tree/main"
 license = "GPL-2.0-only"
 

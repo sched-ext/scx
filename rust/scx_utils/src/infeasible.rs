@@ -200,8 +200,8 @@
 //!     // ...
 //! ```
 
-use anyhow::Result;
 use anyhow::bail;
+use anyhow::Result;
 use std::collections::BTreeMap;
 
 const MIN_WEIGHT: usize = 1;

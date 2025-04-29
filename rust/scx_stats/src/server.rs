@@ -1,7 +1,7 @@
 use crate::StatsClient;
 use crate::{Meta, StatsData, StatsKind, StatsMeta};
-use anyhow::{Context, Result, anyhow, bail};
-use crossbeam::channel::{Receiver, RecvError, Select, SendError, Sender, unbounded};
+use anyhow::{anyhow, bail, Context, Result};
+use crossbeam::channel::{unbounded, Receiver, RecvError, Select, SendError, Sender};
 use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -17,8 +17,11 @@ pub trait StatsReader<Req, Res>:
     FnMut(&BTreeMap<String, String>, (&Sender<Req>, &Receiver<Res>)) -> Result<Value>
 {
 }
-impl<Req, Res, T: FnMut(&BTreeMap<String, String>, (&Sender<Req>, &Receiver<Res>)) -> Result<Value>>
-    StatsReader<Req, Res> for T
+impl<
+        Req,
+        Res,
+        T: FnMut(&BTreeMap<String, String>, (&Sender<Req>, &Receiver<Res>)) -> Result<Value>,
+    > StatsReader<Req, Res> for T
 {
 }
 
@@ -27,10 +30,10 @@ pub trait StatsReaderSend<Req, Res>:
 {
 }
 impl<
-    Req,
-    Res,
-    T: FnMut(&BTreeMap<String, String>, (&Sender<Req>, &Receiver<Res>)) -> Result<Value> + Send,
-> StatsReaderSend<Req, Res> for T
+        Req,
+        Res,
+        T: FnMut(&BTreeMap<String, String>, (&Sender<Req>, &Receiver<Res>)) -> Result<Value> + Send,
+    > StatsReaderSend<Req, Res> for T
 {
 }
 
@@ -39,10 +42,12 @@ pub trait StatsReaderSync<Req, Res>:
 {
 }
 impl<
-    Req,
-    Res,
-    T: Fn(&BTreeMap<String, String>, (&Sender<Req>, &Receiver<Res>)) -> Result<Value> + Send + Sync,
-> StatsReaderSync<Req, Res> for T
+        Req,
+        Res,
+        T: Fn(&BTreeMap<String, String>, (&Sender<Req>, &Receiver<Res>)) -> Result<Value>
+            + Send
+            + Sync,
+    > StatsReaderSync<Req, Res> for T
 {
 }
 
@@ -51,10 +56,10 @@ pub trait StatsOpener<Req, Res>:
 {
 }
 impl<
-    Req,
-    Res,
-    T: FnMut((&Sender<Req>, &Receiver<Res>)) -> Result<Box<dyn StatsReader<Req, Res>>> + Send,
-> StatsOpener<Req, Res> for T
+        Req,
+        Res,
+        T: FnMut((&Sender<Req>, &Receiver<Res>)) -> Result<Box<dyn StatsReader<Req, Res>>> + Send,
+    > StatsOpener<Req, Res> for T
 {
 }
 

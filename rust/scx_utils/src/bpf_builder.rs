@@ -4,9 +4,9 @@
 // GNU General Public License version 2.
 
 use crate::clang_info::ClangInfo;
+use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::anyhow;
 use glob::glob;
 use libbpf_cargo::SkeletonBuilder;
 use libbpf_rs::Linker;
@@ -505,16 +505,12 @@ mod tests {
                 &arch, &ver, &sha1,
             );
 
-            assert!(
-                regex::Regex::new(r"^([1-9][0-9]*\.[1-9][0-9][a-z0-9-]*)$")
-                    .unwrap()
-                    .is_match(&ver)
-            );
-            assert!(
-                regex::Regex::new(r"^[0-9a-z]{12}$")
-                    .unwrap()
-                    .is_match(&sha1)
-            );
+            assert!(regex::Regex::new(r"^([1-9][0-9]*\.[1-9][0-9][a-z0-9-]*)$")
+                .unwrap()
+                .is_match(&ver));
+            assert!(regex::Regex::new(r"^[0-9a-z]{12}$")
+                .unwrap()
+                .is_match(&sha1));
         }
 
         assert!(found);

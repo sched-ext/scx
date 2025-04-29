@@ -4,7 +4,7 @@
 // GNU General Public License version 2.
 
 use std::{
-    io::{Stderr, stderr},
+    io::{stderr, Stderr},
     ops::{Deref, DerefMut},
     time::Duration,
 };
@@ -12,8 +12,8 @@ use std::{
 use crate::Action;
 use crate::Key as TuiKey;
 use crate::KeyMap;
-use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::Result;
 use futures::{FutureExt, StreamExt};
 use ratatui::crossterm::event::KeyCode::Char;
 use ratatui::{

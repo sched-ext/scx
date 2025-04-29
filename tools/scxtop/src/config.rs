@@ -3,13 +3,13 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use crate::cli::TuiArgs;
+use crate::keymap::parse_action;
+use crate::keymap::parse_key;
 use crate::AppTheme;
 use crate::KeyMap;
 use crate::STATS_SOCKET_PATH;
 use crate::TRACE_FILE_PREFIX;
-use crate::cli::TuiArgs;
-use crate::keymap::parse_action;
-use crate::keymap::parse_key;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

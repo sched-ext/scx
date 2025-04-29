@@ -5,9 +5,9 @@
 
 use crate::config::Config;
 
+use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::anyhow;
 use libc::{close, read};
 use scx_utils::compat::tracefs_mount;
 use scx_utils::perf;

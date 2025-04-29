@@ -56,9 +56,9 @@
 //!```
 
 use crate::NR_CPU_IDS;
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
-use anyhow::bail;
 use bitvec::prelude::*;
 use sscanf::sscanf;
 use std::fmt;

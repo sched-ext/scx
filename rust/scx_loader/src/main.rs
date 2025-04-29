@@ -24,8 +24,8 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Duration;
 use tokio::time::Instant;
-use zbus::Connection;
 use zbus::interface;
+use zbus::Connection;
 
 #[derive(Debug, PartialEq)]
 enum ScxMessage {

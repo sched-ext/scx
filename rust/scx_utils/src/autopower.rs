@@ -1,11 +1,11 @@
 use std::fmt;
 use std::fs;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
-use zbus::Result;
 use zbus::blocking::Connection;
 use zbus::proxy;
+use zbus::Result;
 
 #[proxy(
     interface = "net.hadess.PowerProfiles",

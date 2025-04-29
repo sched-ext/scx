@@ -69,13 +69,13 @@
 //! hierarchy are entirely read-only. If the host topology were to change (due
 //! to e.g. hotplug), a new Topology object should be created.
 
-use crate::Cpumask;
 use crate::cpumask::read_cpulist;
 use crate::misc::read_file_byte;
 use crate::misc::read_file_usize_vec;
 use crate::misc::read_from_file;
-use anyhow::Result;
+use crate::Cpumask;
 use anyhow::bail;
+use anyhow::Result;
 use glob::glob;
 use sscanf::sscanf;
 use std::collections::BTreeMap;
@@ -84,7 +84,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(feature = "gpu-topology")]
-use crate::gpu::{Gpu, GpuIndex, create_gpus};
+use crate::gpu::{create_gpus, Gpu, GpuIndex};
 
 lazy_static::lazy_static! {
     /// The maximum possible number of CPU IDs in the system. As mentioned

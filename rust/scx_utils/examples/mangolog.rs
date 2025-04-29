@@ -2,11 +2,11 @@
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
-use scx_utils::mangoapp::{MANGOAPP_PROJ_ID, mangoapp_msg_v1};
+use scx_utils::mangoapp::{mangoapp_msg_v1, MANGOAPP_PROJ_ID};
 
-use anyhow::Result;
 use anyhow::bail;
-use libc::{IPC_NOWAIT, msgget, msgrcv};
+use anyhow::Result;
+use libc::{msgget, msgrcv, IPC_NOWAIT};
 
 use std::mem;
 use std::path::Path;

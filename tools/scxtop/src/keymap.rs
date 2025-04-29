@@ -5,8 +5,8 @@
 
 use crate::Action;
 use crate::AppState;
-use anyhow::Result;
 use anyhow::anyhow;
+use anyhow::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::MediaKeyCode;
 use crossterm::event::ModifierKeyCode;
