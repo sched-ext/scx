@@ -31,7 +31,7 @@ struct {
 	__uint(key_size, sizeof(u32));
 	__uint(value_size, MAX_PATH);
 	__uint(max_entries, 1);
-} prefix_bufs SEC(".maps");
+} match_bufs SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -86,45 +86,62 @@ __hidden char *format_cgrp_path(struct cgroup *cgrp)
 	return path;
 }
 
-bool __noinline match_prefix(const char *prefix, const char *str, u32 max_len)
+bool __noinline match_prefix_suffix(const char *prefix, const char *str, bool match_suffix)
 {
 	u32 c, zero = 0;
-	int len;
+	int str_len, match_str_len, offset;
 
-	if (!prefix || !str || max_len > MAX_PATH) {
+	if (!prefix || !str) {
 		scx_bpf_error("invalid args: %s %s %u",
-			      prefix, str, max_len);
+			      prefix, str, MAX_PATH);
 		return false;
 	}
 
-	char *pre_buf = bpf_map_lookup_elem(&prefix_bufs, &zero);
+	char *match_buf = bpf_map_lookup_elem(&match_bufs, &zero);
 	char *str_buf = bpf_map_lookup_elem(&str_bufs, &zero);
-	if (!pre_buf || !str_buf) {
+	if (!match_buf || !str_buf) {
 		scx_bpf_error("failed to look up buf");
 		return false;
 	}
 
-	len = bpf_probe_read_kernel_str(pre_buf, MAX_PATH, prefix);
-	if (len < 0) {
+	match_str_len = bpf_probe_read_kernel_str(match_buf, MAX_PATH, prefix);
+	if (match_str_len < 0) {
 		scx_bpf_error("failed to read prefix");
 		return false;
 	}
 
-	len = bpf_probe_read_kernel_str(str_buf, MAX_PATH, str);
-	if (len < 0) {
+	str_len = bpf_probe_read_kernel_str(str_buf, MAX_PATH, str);
+	if (str_len < 0) {
 		scx_bpf_error("failed to read str");
 		return false;
 	}
 
-	bpf_for(c, 0, max_len) {
+	if (match_str_len > str_len)
+		return false;
+	
+	offset = str_len - match_str_len;
+	// max_path is just for the verifier.
+	bpf_for(c, 0, MAX_PATH) {
 		c &= 0xfff;
-		if (c > len) {
+		
+		if (offset >= MAX_PATH || c >= MAX_PATH || (offset + c) >= MAX_PATH)
+			return false;
+
+		if (c > str_len) {
 			scx_bpf_error("invalid length");
 			return false; /* appease the verifier */
 		}
-		if (pre_buf[c] == '\0')
+
+		if (!match_suffix && match_buf[c] == '\0')
 			return true;
-		if (str_buf[c] != pre_buf[c])
+
+		if (match_suffix && str_buf[offset + c] == '\0')
+			return true;
+		
+		if (match_suffix && (str_buf[offset + c] != match_buf[c]))
+			return false;	
+
+		if (!match_suffix && (str_buf[c] != match_buf[c]))
 			return false;
 	}
 	return false;
