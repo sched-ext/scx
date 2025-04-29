@@ -2,9 +2,9 @@
 
 use crate::misc::read_from_file;
 use crate::{Cpumask, NR_CPU_IDS};
-use nvml_wrapper::Nvml;
 use nvml_wrapper::bitmasks::InitFlags;
 use nvml_wrapper::enum_wrappers::device::{Clock, TopologyLevel};
+use nvml_wrapper::Nvml;
 use std::collections::BTreeMap;
 use std::path::Path;
 

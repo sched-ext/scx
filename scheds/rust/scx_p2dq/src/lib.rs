@@ -3,8 +3,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 pub use scx_utils::CoreType;
-pub use scx_utils::NR_CPU_IDS;
 use scx_utils::Topology;
+pub use scx_utils::NR_CPU_IDS;
 
 use clap::Parser;
 

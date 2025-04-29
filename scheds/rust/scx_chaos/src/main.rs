@@ -9,7 +9,7 @@ use scx_chaos::Trait;
 
 use scx_p2dq::SchedulerOpts as P2dqOpts;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use log::info;
 use nix::unistd::Pid;

@@ -4,7 +4,7 @@ name = "scxctl"
 [package]
 name = "scxctl"
 version = "1.0.11"
-edition = "2024"
+edition = "2021"
 description = "A cli dbus client for scx_loader"
 authors = ["Joe Maples <joe@maples.dev>"]
 repository = "https://github.com/sched-ext/scx"

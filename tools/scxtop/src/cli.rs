@@ -8,7 +8,7 @@ use crate::TRACE_FILE_PREFIX;
 
 use anyhow::Result;
 use clap::{Command, Parser, Subcommand};
-use clap_complete::{Shell, generate};
+use clap_complete::{generate, Shell};
 use std::fs::File;
 use std::io;
 
