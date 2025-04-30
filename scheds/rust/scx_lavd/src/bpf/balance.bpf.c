@@ -10,14 +10,6 @@
 
 static bool consume_dsq(u64 dsq_id)
 {
-	struct cpdom_ctx *cpdomc;
-
-	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
-	if (!cpdomc) {
-		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_id);
-		return false;
-	}
-
 	/*
 	 * Try to consume a task on the associated DSQ.
 	 */
@@ -152,12 +144,10 @@ static bool force_to_steal_task(struct cpdom_ctx *cpdomc)
 	return false;
 }
 
-static bool consume_task(struct cpu_ctx *cpuc)
+static bool consume_task(u64 dsq_id)
 {
 	struct cpdom_ctx *cpdomc;
-	u64 dsq_id;
 
-	dsq_id = cpuc->cpdom_id;
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
 	if (!cpdomc) {
 		scx_bpf_error("Failed to lookup cpdom_ctx for %llu", dsq_id);
