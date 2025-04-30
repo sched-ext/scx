@@ -636,7 +636,7 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle && !scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
-		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), SCX_SLICE_DFL, 0ULL, 0);
+		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), SCX_SLICE_DFL, p->scx.dsq_vtime, 0);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	}
 
@@ -754,7 +754,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 
 		if (cpu >= 0) {
 			scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
-					   SCX_SLICE_DFL, 0ULL, enq_flags);
+					   SCX_SLICE_DFL, p->scx.dsq_vtime, enq_flags);
 			__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return;
@@ -772,7 +772,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	task = bpf_ringbuf_reserve(&queued, sizeof(*task), 0);
 	if (!task) {
 		sched_congested(p);
-		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, 0, enq_flags);
+		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_DFL, p->scx.dsq_vtime, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
