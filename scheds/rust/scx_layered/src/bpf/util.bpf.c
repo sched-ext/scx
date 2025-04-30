@@ -92,8 +92,8 @@ bool __noinline match_prefix_suffix(const char *prefix, const char *str, bool ma
 	int str_len, match_str_len, offset;
 
 	if (!prefix || !str) {
-		scx_bpf_error("invalid args: %s %s %u",
-			      prefix, str, MAX_PATH);
+		scx_bpf_error("invalid args: %s %s",
+			      prefix, str);
 		return false;
 	}
 
@@ -118,31 +118,24 @@ bool __noinline match_prefix_suffix(const char *prefix, const char *str, bool ma
 
 	if (match_str_len > str_len)
 		return false;
-	
-	offset = str_len - match_str_len;
-	// max_path is just for the verifier.
+
+	offset = 0;
+
+	if (match_suffix)
+		offset = str_len - match_str_len;
+		
 	bpf_for(c, 0, MAX_PATH) {
 		c &= 0xfff;
 		
-		if (offset >= MAX_PATH || c >= MAX_PATH || (offset + c) >= MAX_PATH)
+		if ((offset + c) >= str_len)
 			return false;
 
-		if (c > str_len) {
-			scx_bpf_error("invalid length");
-			return false; /* appease the verifier */
-		}
-
-		if (!match_suffix && match_buf[c] == '\0')
-			return true;
-
-		if (match_suffix && str_buf[offset + c] == '\0')
+		if (match_buf[c] == '\0')
 			return true;
 		
-		if (match_suffix && (str_buf[offset + c] != match_buf[c]))
+		if (str_buf[offset + c] != match_buf[c])
 			return false;	
 
-		if (!match_suffix && (str_buf[c] != match_buf[c]))
-			return false;
 	}
 	return false;
 }

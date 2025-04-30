@@ -4,7 +4,7 @@
 		"matches": [
 			[
 				{ "CgroupPrefix": "system.slice/docker" },
-				{ "CgroupSuffix": "11df.scope/" }
+				{ "CgroupSuffix": "21f.scope/" }
 			]
 		],
 		"kind": {
