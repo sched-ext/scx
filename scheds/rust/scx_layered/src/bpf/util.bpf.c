@@ -124,10 +124,12 @@ bool __noinline match_prefix_suffix(const char *prefix, const char *str, bool ma
 	if (match_suffix)
 		offset = str_len - match_str_len;
 	
-	bpf_for(c, offset, str_len) {
+	// use MAX_PATH instead of str_len for when 
+	// prefix/suffix == string.
+	bpf_for(c, offset, MAX_PATH) {
 		i = c - offset;
 
-		if ((c > str_len) || (i >= str_len) || (i < 0))
+		if ((c > MAX_PATH) || (i >= MAX_PATH) || (i < 0))
 			return false;
 
 		if (match_buf[i] == '\0')
