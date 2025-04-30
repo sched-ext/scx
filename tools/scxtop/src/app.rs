@@ -3,27 +3,27 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use crate::APP;
-use crate::AppState;
-use crate::AppTheme;
-use crate::CpuData;
-use crate::EventData;
-use crate::LICENSE;
-use crate::LlcData;
-use crate::NodeData;
-use crate::PerfEvent;
-use crate::PerfettoTraceManager;
-use crate::SCHED_NAME_PATH;
-use crate::VecStats;
-use crate::ViewState;
 use crate::available_perf_events;
 use crate::bpf_intf;
 use crate::bpf_skel::BpfSkel;
 use crate::bpf_stats::BpfStats;
-use crate::config::Config;
 use crate::config::get_config_path;
+use crate::config::Config;
 use crate::format_hz;
 use crate::read_file_string;
+use crate::AppState;
+use crate::AppTheme;
+use crate::CpuData;
+use crate::EventData;
+use crate::LlcData;
+use crate::NodeData;
+use crate::PerfEvent;
+use crate::PerfettoTraceManager;
+use crate::VecStats;
+use crate::ViewState;
+use crate::APP;
+use crate::LICENSE;
+use crate::SCHED_NAME_PATH;
 use crate::{
     Action, CpuhpEnterAction, CpuhpExitAction, ExecAction, ExitAction, ForkAction, GpuMemAction,
     HwPressureAction, IPIAction, MangoAppAction, PstateSampleAction, SchedCpuPerfSetAction,
@@ -31,14 +31,13 @@ use crate::{
     TraceStoppedAction,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use glob::glob;
 use libbpf_rs::Link;
 use libbpf_rs::ProgramInput;
 use num_format::{SystemLocale, ToFormattedString};
 use ratatui::prelude::Constraint;
 use ratatui::{
-    Frame,
     layout::{Alignment, Direction, Layout, Rect},
     style::{Modifier, Style, Stylize},
     symbols::bar::{NINE_LEVELS, THREE_LEVELS},
@@ -47,22 +46,23 @@ use ratatui::{
         Bar, BarChart, BarGroup, Block, BorderType, Borders, Gauge, Paragraph, RenderDirection,
         Scrollbar, ScrollbarOrientation, ScrollbarState, Sparkline,
     },
+    Frame,
 };
 use regex::Regex;
 use scx_stats::prelude::StatsClient;
-use scx_utils::Topology;
 use scx_utils::misc::read_from_file;
 use scx_utils::scx_enums;
+use scx_utils::Topology;
 use serde_json::Value as JsonValue;
-use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::Mutex;
 
 use std::collections::BTreeMap;
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 const DSQ_VTIME_CUTOFF: u64 = 1_000_000_000_000_000;
 

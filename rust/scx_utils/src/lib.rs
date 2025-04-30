@@ -45,13 +45,13 @@ mod builder;
 pub use builder::Builder;
 
 mod user_exit_info;
-pub use user_exit_info::SCX_ECODE_ACT_RESTART;
-pub use user_exit_info::SCX_ECODE_RSN_HOTPLUG;
 pub use user_exit_info::ScxConsts;
 pub use user_exit_info::ScxExitKind;
-pub use user_exit_info::UEI_DUMP_PTR_MUTEX;
 pub use user_exit_info::UeiDumpPtr;
 pub use user_exit_info::UserExitInfo;
+pub use user_exit_info::SCX_ECODE_ACT_RESTART;
+pub use user_exit_info::SCX_ECODE_RSN_HOTPLUG;
+pub use user_exit_info::UEI_DUMP_PTR_MUTEX;
 
 pub mod build_id;
 pub mod compat;
@@ -66,10 +66,10 @@ pub use topology::Core;
 pub use topology::CoreType;
 pub use topology::Cpu;
 pub use topology::Llc;
-pub use topology::NR_CPU_IDS;
-pub use topology::NR_CPUS_POSSIBLE;
 pub use topology::Node;
 pub use topology::Topology;
+pub use topology::NR_CPUS_POSSIBLE;
+pub use topology::NR_CPU_IDS;
 
 mod energy_model;
 pub use energy_model::EnergyModel;
@@ -77,8 +77,8 @@ pub use energy_model::PerfDomain;
 pub use energy_model::PerfState;
 
 mod cpumask;
-pub use cpumask::Cpumask;
 pub use cpumask::read_cpulist;
+pub use cpumask::Cpumask;
 
 mod gpu;
 
@@ -94,8 +94,8 @@ pub use misc::normalize_load_metric;
 pub use misc::set_rlimit_infinity;
 
 mod netdev;
-pub use netdev::NetDev;
 pub use netdev::read_netdevs;
+pub use netdev::NetDev;
 
 pub mod pm;
 

@@ -13,9 +13,9 @@ use scx_p2dq::SchedulerOpts;
 use scx_p2dq::TOPO;
 
 use std::mem::MaybeUninit;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -26,7 +26,6 @@ use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use log::{debug, info, warn};
 use scx_stats::prelude::*;
-use scx_utils::UserExitInfo;
 use scx_utils::build_id;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
@@ -36,6 +35,7 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::UserExitInfo;
 
 use crate::bpf_intf::stat_idx_P2DQ_NR_STATS;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DIRECT;

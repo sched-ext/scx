@@ -5,9 +5,9 @@
 
 use anyhow::Result;
 use prost::Message;
+use rand::rngs::StdRng;
 use rand::RngCore;
 use rand::SeedableRng;
-use rand::rngs::StdRng;
 use scx_utils::scx_enums;
 
 use std::collections::{BTreeMap, HashMap};

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env::args;
 use std::io::Read;
-use std::thread::{ThreadId, current, spawn};
+use std::thread::{current, spawn, ThreadId};
 
 // Hacky definition sharing. See stats_def.rs.h.
 include!("stats_defs.rs.h");

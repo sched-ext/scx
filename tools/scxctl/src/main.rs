@@ -3,7 +3,7 @@ mod cli;
 use clap::Parser;
 use cli::{Cli, Commands};
 use colored::Colorize;
-use scx_loader::{SchedMode, SupportedSched, dbus::LoaderClientProxyBlocking};
+use scx_loader::{dbus::LoaderClientProxyBlocking, SchedMode, SupportedSched};
 use std::process::exit;
 use zbus::blocking::Connection;
 

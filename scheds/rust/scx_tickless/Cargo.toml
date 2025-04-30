@@ -2,7 +2,7 @@
 name = "scx_tickless"
 version = "1.0.2"
 authors = ["Andrea Righi <arighi@nvidia.com>", "NVIDIA"]
-edition = "2024"
+edition = "2021"
 description = "A server-oriented scheduler designed to minimize OS noise and maximize performance isolation. https://github.com/sched-ext/scx/tree/main"
 license = "GPL-2.0-only"
 

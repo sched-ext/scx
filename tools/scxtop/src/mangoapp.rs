@@ -3,11 +3,11 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use anyhow::Result;
 use anyhow::anyhow;
-use libc::{IPC_NOWAIT, ftok, msgget, msgrcv};
+use anyhow::Result;
+use libc::{ftok, msgget, msgrcv, IPC_NOWAIT};
 use log::info;
-use scx_utils::mangoapp::{MANGOAPP_PROJ_ID, mangoapp_msg_v1};
+use scx_utils::mangoapp::{mangoapp_msg_v1, MANGOAPP_PROJ_ID};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::Duration;
 
@@ -15,9 +15,9 @@ use crate::Action;
 use crate::MangoAppAction;
 
 use std::mem;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::{ffi::CString, io};
 
 pub async fn poll_mangoapp(

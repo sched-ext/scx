@@ -4,8 +4,8 @@
 // GNU General Public License version 2.
 use crate::bindings;
 use crate::compat;
-use anyhow::Result;
 use anyhow::bail;
+use anyhow::Result;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::sync::Mutex;

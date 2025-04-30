@@ -137,21 +137,21 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 
-use anyhow::Result;
 use anyhow::bail;
+use anyhow::Result;
 use log::debug;
 use log::trace;
 use ordered_float::OrderedFloat;
+use scx_utils::ravg::ravg_read;
 use scx_utils::LoadAggregator;
 use scx_utils::LoadLedger;
-use scx_utils::ravg::ravg_read;
 use sorted_vec::SortedVec;
 
-use crate::DomainGroup;
 use crate::bpf_intf;
 use crate::bpf_skel::*;
 use crate::stats::DomainStats;
 use crate::stats::NodeStats;
+use crate::DomainGroup;
 
 const DEFAULT_WEIGHT: f64 = bpf_intf::consts_LB_DEFAULT_WEIGHT as f64;
 const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
