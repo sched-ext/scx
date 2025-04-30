@@ -128,7 +128,6 @@ struct task_ctx {
 	u8	need_lock_boost;	/* need to boost lock for deadline calculation */
 	u8	lock_holder_xted;	/* slice is already extended for a lock holder task */
 	u8	wakeup_ft;		/* regular wakeup = 1, sync wakeup = 2 */
-	u8	slice_boost_prio;	/* how many times a task fully consumed the slice */
 	u8	on_big;			/* executable on a big core */
 	u8	on_little;		/* executable on a little core */
 	u8	is_affinitized;		/* is this task pinned to a subset of all CPUs? */
