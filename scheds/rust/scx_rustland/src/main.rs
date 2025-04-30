@@ -120,8 +120,7 @@ const NSEC_PER_USEC: u64 = 1_000;
 // Basic item stored in the task information map.
 #[derive(Debug)]
 struct TaskInfo {
-    sum_exec_runtime: u64, // total cpu time used by the task
-    vruntime: u64,         // total vruntime of the task
+    vruntime: u64, // total vruntime of the task
 }
 
 // Task information map: store total execution time and vruntime of each task in the system.
@@ -290,7 +289,6 @@ impl<'a> Scheduler<'a> {
             .tasks
             .entry(task.pid)
             .or_insert_with_key(|&_pid| TaskInfo {
-                sum_exec_runtime: task.sum_exec_runtime,
                 vruntime: self.min_vruntime,
             });
 
@@ -299,14 +297,18 @@ impl<'a> Scheduler<'a> {
             self.min_vruntime = task.vtime;
         }
 
-        // Evaluate used task time slice.
-        let slice = task
-            .sum_exec_runtime
-            .saturating_sub(task_info.sum_exec_runtime)
-            .min(self.slice_ns);
-
-        // Update total task cputime.
-        task_info.sum_exec_runtime = task.sum_exec_runtime;
+        // Estimate the used time slice based on total runtime since the last sleep.
+        //
+        // Cap the value to slice_ns, since exec_runtime accumulates across multiple enqueue
+        // events, but what matters here is the time used in the most recent slice, so:
+        //  - if the task didn't sleep, it's the full slice_ns,
+        //  - if it did sleep, it's exec_runtime.
+        //
+        // Note that there may be some inaccuracies here, as a task can exceed its assigned time
+        // slice due to factors like holding locks or becoming non-deschedulable. These
+        // inaccuracies are tolerated to ensure smoother vruntime progression and prevent excessive
+        // gaps between tasks' vruntimes.
+        let slice = task.exec_runtime.min(self.slice_ns);
 
         // Update task's vruntime re-aligning it to min_vruntime (never allow a task to accumulate
         // a budget of more than a time slice to prevent starvation).
