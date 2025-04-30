@@ -10,6 +10,7 @@ on:
 jobs:
   integration-test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     strategy:
           matrix:
             scheduler: [ scx_bpfland, scx_chaos, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty, scx_p2dq, scx_tickless ]
@@ -83,6 +84,7 @@ jobs:
 
   layered-matrix:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     strategy:
           matrix:
             scheduler: [ scx_layered ]
