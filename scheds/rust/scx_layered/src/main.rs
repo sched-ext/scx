@@ -591,9 +591,9 @@ struct Opts {
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
 
-    /// Enable container support
+    /// Enable cpuset support
     #[clap(long, default_value = "false")]
-    enable_container: bool,
+    enable_cpuset: bool,
 
     /// Maximum task runnable_at delay (in seconds) before antistall turns on
     #[clap(long, default_value = "3")]
@@ -1433,7 +1433,7 @@ impl<'a> Scheduler<'a> {
             let cpuset_cpumask_slice = &mut skel.maps.rodata_data.cpuset_fakemasks[i];
             cpuset_cpumask_slice.copy_from_slice(&cpumask_bitvec);
         }
-        skel.maps.rodata_data.nr_containers = cpusets.len() as u32;
+        skel.maps.rodata_data.nr_cpusets = cpusets.len() as u32;
         Ok(())
     }
 
@@ -1877,7 +1877,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.lo_fb_wait_ns = opts.lo_fb_wait_us * 1000;
         skel.maps.rodata_data.lo_fb_share_ppk = ((opts.lo_fb_share * 1024.0) as u32).clamp(1, 1024);
         skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
-        skel.maps.rodata_data.enable_container = opts.enable_container;
+        skel.maps.rodata_data.enable_cpuset = opts.enable_cpuset;
         skel.maps.rodata_data.enable_gpu_support = opts.enable_gpu_support;
 
         for (cpu, sib) in topo.sibling_cpus().iter().enumerate() {
@@ -1946,7 +1946,7 @@ impl<'a> Scheduler<'a> {
         Self::init_layers(&mut skel, &layer_specs, &topo)?;
         Self::init_nodes(&mut skel, opts, &topo);
 
-        if opts.enable_container {
+        if opts.enable_cpuset {
             Self::init_cpusets(&mut skel, &topo)?;
         }
 
