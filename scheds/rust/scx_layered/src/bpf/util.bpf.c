@@ -89,7 +89,7 @@ __hidden char *format_cgrp_path(struct cgroup *cgrp)
 bool __noinline match_prefix_suffix(const char *prefix, const char *str, bool match_suffix)
 {
 	u32 c, zero = 0;
-	int str_len, match_str_len, offset;
+	int str_len, match_str_len, offset, i;
 
 	if (!prefix || !str) {
 		scx_bpf_error("invalid args: %s %s",
@@ -123,19 +123,18 @@ bool __noinline match_prefix_suffix(const char *prefix, const char *str, bool ma
 
 	if (match_suffix)
 		offset = str_len - match_str_len;
-		
-	bpf_for(c, 0, MAX_PATH) {
-		c &= 0xfff;
-		
-		if ((offset + c) >= str_len)
+	
+	bpf_for(c, offset, str_len) {
+		i = c - offset;
+
+		if ((c > str_len) || (i >= str_len) || (i < 0))
 			return false;
 
-		if (match_buf[c] == '\0')
+		if (match_buf[i] == '\0')
 			return true;
 		
-		if (str_buf[offset + c] != match_buf[c])
+		if (str_buf[c] != match_buf[i])
 			return false;	
-
 	}
 	return false;
 }
