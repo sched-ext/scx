@@ -40,9 +40,6 @@ enum consts_internal  {
 	LAVD_LC_WEIGHT_BOOST		= 128, /* 2^7 */
 	LAVD_LC_GREEDY_PENALTY		= p2s(20),  /* 20% */
 
-	LAVD_SLICE_BOOST_MAX_FT		= 3, /* maximum additional 3x of slice */
-	LAVD_SLICE_BOOST_MAX_STEP	= 6, /* 6 slice exhausitions in a row */
-	LAVD_SLICE_BOOST_SHIFT		= 1,
 	LAVD_NEW_PROC_PENALITY		= 5,
 	LAVD_GREEDY_RATIO_NEW		= (LAVD_SCALE * LAVD_NEW_PROC_PENALITY),
 

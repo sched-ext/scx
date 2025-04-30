@@ -380,9 +380,8 @@ static void calc_lat_cri(struct task_struct *p, struct task_ctx *taskc)
 	 * add +1 to guarantee the latency criticality (log2-ed) is always
 	 * positive.
 	 */
-	lat_cri = log2_u64(wait_freq_ft * weight_ft) +
-		  log2_u64(wake_freq_ft) +
-		  log2_u64(runtime_ft);
+	lat_cri = log2_u64(wait_freq_ft * wake_freq_ft) +
+		  log2_u64(runtime_ft * weight_ft);
 
 	/*
 	 * Determine latency criticality of a task in a context-aware manner by
@@ -435,22 +434,11 @@ static u64 calc_virtual_deadline_delta(struct task_struct *p,
 
 static u64 calc_time_slice(struct task_ctx *taskc)
 {
-	u64 slice;
-
 	if (!taskc)
 		return LAVD_SLICE_MAX_NS_DFL;
 
-	slice = sys_stat.slice;
-
-	/*
-	 * Boost time slice for CPU-bound tasks.
-	 */
-	if (taskc->slice_boost_prio > 0) {
-		slice += (slice * taskc->slice_boost_prio) >> LAVD_SLICE_BOOST_SHIFT;		
-	}
-
-	taskc->slice_ns = slice;
-	return slice;
+	taskc->slice_ns = sys_stat.slice;
+	return taskc->slice_ns;
 }
 
 static void reset_suspended_duration(struct cpu_ctx *cpuc)
@@ -627,20 +615,6 @@ static void update_stat_for_stopping(struct task_struct *p,
 	taskc->last_stopping_clk = now;
 
 	taskc->svc_time += task_runtime / p->scx.weight;
-
-	/*
-	 * Count how many times a task completely consumed the assigned time
-	 * slice to boost the task's slice. If not fully consumed, decrease
-	 * the slice boost priority by half.
-	 */
-	if (task_runtime > 0 && task_runtime >= taskc->slice_ns) {
-		if (taskc->slice_boost_prio < LAVD_SLICE_BOOST_MAX_STEP)
-			taskc->slice_boost_prio++;
-	}
-	else {
-		if (taskc->slice_boost_prio)
-			taskc->slice_boost_prio >>= 1;
-	}
 
 	/*
 	 * Reset waker's latency criticality here to limit the latency boost of
