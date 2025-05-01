@@ -36,6 +36,12 @@
                 ];
               };
 
+              list-tests = pkgs.mkShell {
+                buildInputs = with pkgs; common ++ [
+                  python3
+                ];
+              };
+
               build-kernel = pkgs.mkShell {
                 buildInputs = with pkgs; common ++ [
                   bc
