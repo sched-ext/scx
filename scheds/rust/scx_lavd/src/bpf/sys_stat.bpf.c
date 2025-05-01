@@ -284,7 +284,7 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 	sys_stat.max_lat_cri = calc_avg32(sys_stat.max_lat_cri, c->max_lat_cri);
 	sys_stat.avg_lat_cri = calc_avg32(sys_stat.avg_lat_cri, c->avg_lat_cri);
 	sys_stat.thr_lat_cri = sys_stat.max_lat_cri - ((sys_stat.max_lat_cri -
-				sys_stat.avg_lat_cri) >> 1);
+				sys_stat.avg_lat_cri) >> LAVD_LC_PREEMPT_SHIFT);
 
 	if (have_little_core) {
 		sys_stat.min_perf_cri =
