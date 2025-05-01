@@ -124,6 +124,7 @@ lazy_static! {
                         perf: 1024,
                         nodes: vec![],
                         llcs: vec![],
+                        placement: LayerPlacement::Standard,
                     },
                 },
             },
@@ -156,6 +157,7 @@ lazy_static! {
                         idle_resume_us: None,
                         nodes: vec![],
                         llcs: vec![],
+                        placement: LayerPlacement::Standard,
                     },
                 },
             },
@@ -192,6 +194,7 @@ lazy_static! {
                         idle_resume_us: None,
                         nodes: vec![],
                         llcs: vec![],
+                        placement: LayerPlacement::Standard,
                     },
                 },
             },
@@ -225,6 +228,7 @@ lazy_static! {
                         idle_resume_us: None,
                         nodes: vec![],
                         llcs: vec![],
+                        placement: LayerPlacement::Standard,
                     },
                 },
             },
@@ -315,6 +319,9 @@ lazy_static! {
 ///
 /// - UsedGpuPid: Bool. When true, matches if the tasks which have used gpu
 ///   by tgid/pid.
+///
+/// - [EXPERIMENTAL] AvgRuntime: (u64, u64). Match tasks whose average runtime
+///   is within the provided values [min, max).
 ///
 /// While there are complexity limitations as the matches are performed in
 /// BPF, it is straightforward to add more types of matches.
@@ -618,6 +625,11 @@ struct Opts {
 
     /// Layer specification. See --help.
     specs: Vec<String>,
+
+    /// Periodically force tasks in layers using the AvgRuntime match rule to reevaluate which layer they belong to. Default period of 2s.
+    /// turns this off.
+    #[clap(long, default_value = "2000")]
+    layer_refresh_ms_avgruntime: u64,
 }
 
 fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
@@ -1178,6 +1190,7 @@ struct Scheduler<'a> {
     layer_specs: Vec<LayerSpec>,
 
     sched_intv: Duration,
+    layer_refresh_intv: Duration,
 
     cpu_pool: CpuPool,
     layers: Vec<Layer>,
@@ -1299,6 +1312,11 @@ impl<'a> Scheduler<'a> {
                         LayerMatch::UsedGpuPid(polarity) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_USED_GPU_PID as i32;
                             mt.used_gpu_pid.write(*polarity);
+                        }
+                        LayerMatch::AvgRuntime(min, max) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_AVG_RUNTIME as i32;
+                            mt.min_avg_runtime_us = *min;
+                            mt.max_avg_runtime_us = *max;
                         }
                     }
                 }
@@ -1950,6 +1968,7 @@ impl<'a> Scheduler<'a> {
             layer_specs,
 
             sched_intv: Duration::from_secs_f64(opts.interval),
+            layer_refresh_intv: Duration::from_millis(opts.layer_refresh_ms_avgruntime),
 
             cpu_pool,
             layers,
@@ -2563,6 +2582,8 @@ impl<'a> Scheduler<'a> {
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
         let mut next_sched_at = Instant::now() + self.sched_intv;
+        let enable_layer_refresh = !self.layer_refresh_intv.is_zero();
+        let mut next_layer_refresh_at = Instant::now() + self.layer_refresh_intv;
         let mut cpus_ranges = HashMap::<ThreadId, Vec<(usize, usize)>>::new();
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
@@ -2572,6 +2593,13 @@ impl<'a> Scheduler<'a> {
                 self.step()?;
                 while next_sched_at < now {
                     next_sched_at += self.sched_intv;
+                }
+            }
+
+            if enable_layer_refresh && now >= next_layer_refresh_at {
+                self.skel.maps.bss_data.layer_refresh_seq_avgruntime += 1;
+                while next_layer_refresh_at < now {
+                    next_layer_refresh_at += self.layer_refresh_intv;
                 }
             }
 

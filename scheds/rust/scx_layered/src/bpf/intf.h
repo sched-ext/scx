@@ -249,6 +249,7 @@ enum layer_match_kind {
 	MATCH_IS_KTHREAD,
 	MATCH_USED_GPU_TID,
 	MATCH_USED_GPU_PID,
+	MATCH_AVG_RUNTIME,
 	MATCH_CGROUP_SUFFIX,
 
 	NR_LAYER_MATCH_KINDS,
@@ -272,6 +273,8 @@ struct layer_match {
 	bool		used_gpu_tid;
 	bool		used_gpu_pid;
 	bool		exclude;
+	u64		min_avg_runtime_us;
+	u64		max_avg_runtime_us;
 };
 
 struct layer_match_ands {
@@ -296,6 +299,12 @@ enum layer_growth_algo {
 	GROWTH_ALGO_CPUSET_SPREAD_RANDOM,
 	GROWTH_ALGO_RANDOM_TOPO,
 	GROWTH_ALGO_STICKY_DYNAMIC,
+};
+
+enum layer_task_place {
+	PLACEMENT_STD,
+	PLACEMENT_STICK,
+	PLACEMENT_FLOAT,
 };
 
 struct layer {
@@ -336,9 +345,11 @@ struct layer {
 
 	u64			llcs_to_drain;
 	u32			llc_drain_cnt;
+	enum layer_task_place   task_place;
 
 	char			name[MAX_LAYER_NAME];
 	bool			is_protected;
+	bool			periodically_refresh;
 };
 
 struct scx_cmd {

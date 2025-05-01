@@ -52,6 +52,7 @@ const volatile u64 min_open_layer_disallow_preempt_after_ns;
 const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 const volatile bool percpu_kthread_preempt = true;
+volatile u64 layer_refresh_seq_avgruntime;
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
@@ -493,6 +494,7 @@ struct task_ctx {
 	u32			qrt_llc_id;
 
 	char 			join_layer[SCXCMD_COMLEN];
+	u64			layer_refresh_seq;
 };
 
 struct {
@@ -871,6 +873,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		  bool from_selcpu)
 {
 	const struct cpumask *idle_smtmask, *layer_cpumask, *layered_cpumask, *cpumask;
+	bool is_float = layer->task_place == PLACEMENT_FLOAT;
 	struct bpf_cpumask *unprot_mask;
 	struct cpu_ctx *prev_cpuc;
 	u32 layer_id = layer->id;
@@ -880,11 +883,14 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	if (layer_id >= MAX_LAYERS || !(layer_cpumask = lookup_layer_cpumask(layer_id)))
 		return -1;
 
+	if (layer->periodically_refresh && taskc->layer_refresh_seq < layer_refresh_seq_avgruntime)
+		taskc->refresh_layer = true;
+
 	/*
 	 * Not much to do if bound to a single CPU. Explicitly handle migration
 	 * disabled tasks for kernels before SCX_OPS_ENQ_MIGRATION_DISABLED.
 	 */
-	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
+	if (!is_float && (p->nr_cpus_allowed == 1 || is_migration_disabled(p))) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			if (layer->kind == LAYER_KIND_CONFINED &&
 			    !bpf_cpumask_test_cpu(prev_cpu, layer_cpumask))
@@ -952,6 +958,9 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
 		return -1;
 
+	if (is_float)
+		goto no_locality;
+
 	/*
 	 * If the system has a big/little architecture and uses any related
 	 * layer growth algos try to find a cpu in that topology first.
@@ -983,6 +992,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		}
 	}
 
+no_locality:
 	/*
 	 * Next try a CPU in the current node
 	 */
@@ -1079,7 +1089,11 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (taskc->layer_id == MAX_LAYERS || !(layer = lookup_layer(taskc->layer_id)))
 		return prev_cpu;
 
-	cpu = pick_idle_cpu(p, prev_cpu, cpuc, taskc, layer, true);
+	if (layer->task_place == PLACEMENT_STICK)
+		cpu = prev_cpu;
+	else
+		cpu = pick_idle_cpu(p, prev_cpu, cpuc, taskc, layer, true);
+
 	if (cpu >= 0) {
 		lstat_inc(LSTAT_SEL_LOCAL, layer, cpuc);
 		taskc->dsq_id = SCX_DSQ_LOCAL;
@@ -2069,6 +2083,24 @@ static __noinline bool match_one(struct layer_match *match,
 
 			return pid_present == match->used_gpu_pid;
 	}
+	case MATCH_AVG_RUNTIME: {
+			struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
+			if (!taskc) {
+				scx_bpf_error("could not find task");
+				return false;
+			}
+
+			u64 avg_runtime_us = taskc->runtime_avg / 1000;
+
+			if (!taskc) {
+				scx_bpf_error("could not find task");
+				return false;
+			}
+
+			/* To match, we must get min <= time < max. */
+			return match->min_avg_runtime_us <= avg_runtime_us &&
+				avg_runtime_us < match->max_avg_runtime_us;
+	}
 
 	default:
 		scx_bpf_error("invalid match kind %d", match->kind);
@@ -2148,6 +2180,7 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 	if (!taskc->refresh_layer)
 		return;
 	taskc->refresh_layer = false;
+	taskc->layer_refresh_seq = layer_refresh_seq_avgruntime;
 
 	if (!(cgrp_path = format_cgrp_path(p->cgroups->dfl_cgrp)))
 		return;
@@ -3141,6 +3174,11 @@ static s32 init_layer(int layer_id)
 			case MATCH_USED_GPU_PID:
 				dbg("%s GPU_PID %d", header, match->used_gpu_pid);
 				break;
+			case MATCH_AVG_RUNTIME:
+				layer->periodically_refresh = true;
+				dbg("%s AVG_RUNTIME [%lluus, %lluus)", header,
+					match->min_avg_runtime_us,
+					match->max_avg_runtime_us);
 			case MATCH_CGROUP_SUFFIX:
 				dbg("%s CGROUP_SUFFIX \"%s\"", header, match->cgroup_suffix);
 				break;

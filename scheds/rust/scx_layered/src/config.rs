@@ -58,6 +58,14 @@ impl LayerSpec {
     }
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub enum LayerPlacement {
+    #[default]
+    Standard,
+    Sticky,
+    Floating,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LayerMatch {
     CgroupPrefix(String),
@@ -81,6 +89,7 @@ pub enum LayerMatch {
     IsKthread(bool),
     UsedGpuTid(bool),
     UsedGpuPid(bool),
+    AvgRuntime(u64, u64),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -125,6 +134,8 @@ pub struct LayerCommon {
     pub nodes: Vec<usize>,
     #[serde(default)]
     pub llcs: Vec<usize>,
+    #[serde(default)]
+    pub placement: LayerPlacement,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -1,0 +1,75 @@
+[
+  {
+    "name": "short",
+    "comment": "Layers running for up to 100us",
+    "matches": [
+      [
+        {
+          "AvgRuntime": [0, 100]
+        }
+      ]
+    ],
+    "kind": {
+      "Confined": {
+	"protected": true,
+	"slice_us": 100000,
+	"util_range": [0.01, 0.99],
+        "cpus_range": [5, 5]
+      }
+    }
+  },
+
+  {
+    "name": "mid",
+    "comment": "Layers running for up to 10ms",
+    "matches": [
+      [
+        {
+          "AvgRuntime": [100, 10000]
+        }
+      ]
+    ],
+    "kind": {
+      "Confined": {
+	"protected": true,
+	"slice_us": 100000,
+	"util_range": [0.01, 0.99],
+        "cpus_range": [5, 5]
+      }
+    }
+  },
+
+  {
+    "name": "long",
+    "comment": "Layers running from 10ms to 1s",
+    "matches": [
+      [
+        {
+          "AvgRuntime": [10000, 1000000]
+        }
+      ]
+    ],
+    "kind": {
+      "Confined": {
+	"protected": true,
+	"slice_us": 100000,
+	"util_range": [0.01, 0.99],
+        "cpus_range": [5, 5]
+      }
+    }
+  },
+
+  {
+    "name": "rest",
+    "comment": "the rest",
+    "matches":[[]],
+    "kind": {
+      "Grouped": {
+        "util_range": [
+          0.05,
+          0.60
+        ]
+      }
+    }
+  }
+]
