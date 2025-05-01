@@ -51,10 +51,11 @@ struct task_p2dq {
 	u32			node_id;
 	bool			runnable;
 	u32			weight;
+	u64			used;
 	u64			last_dsq_id;
-	int			last_dsq_index;
 	u64 			last_run_at;
 	u64			llc_runs; /* how many runs on the current LLC */
+	int			last_dsq_index;
 
 	/* The task is a workqueue worker thread */
 	bool			is_kworker;

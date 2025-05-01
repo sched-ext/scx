@@ -4,9 +4,9 @@ This is a single user-defined scheduler used within [sched_ext](https://github.c
 
 ## Overview
 
-scx_rustland is made of a BPF component (scx_rustland_core) that implements the
-low level sched-ext functionalities and a user-space counterpart (scheduler),
-written in Rust, that implements the actual scheduling policy.
+scx_rustland is based on scx_rustland_core, a BPF component that abstracts
+the low-level sched_ext functionalities. The actual scheduling policy is
+entirely implemented in user space and it is written in Rust.
 
 ## How To Install
 
@@ -25,9 +25,9 @@ implemented in Rust.
 
 ## Production Ready?
 
-Not quite. For production scenarios, other schedulers are likely to exhibit
-better performance, as offloading all scheduling decisions to user-space comes
-with a certain cost.
+For performance-critical production scenarios, other schedulers are likely
+to exhibit better performance, as offloading all scheduling decisions to
+user-space comes with a certain cost (even if it's minimal).
 
 However, a scheduler entirely implemented in user-space holds the potential for
 seamless integration with sophisticated libraries, tracing tools, external

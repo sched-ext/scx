@@ -92,6 +92,8 @@ pub struct Config {
     trace_tick_warmup: Option<usize>,
     /// Duration to warmup a trace before collecting in ms.
     trace_warmup_ms: Option<u64>,
+    /// Default perf event
+    default_perf_event: Option<String>,
 }
 
 impl From<TuiArgs> for Config {
@@ -111,6 +113,7 @@ impl From<TuiArgs> for Config {
             trace_ticks: args.trace_ticks,
             trace_duration_ms: args.trace_duration_ms,
             worker_threads: args.worker_threads,
+            default_perf_event: Some(args.default_perf_event),
         }
     }
 }
@@ -152,6 +155,7 @@ impl Config {
             worker_threads: self.worker_threads.or(rhs.worker_threads),
             trace_tick_warmup: self.trace_tick_warmup.or(rhs.trace_tick_warmup),
             trace_warmup_ms: self.trace_warmup_ms.or(rhs.trace_warmup_ms),
+            default_perf_event: self.default_perf_event.or(rhs.default_perf_event),
         }
     }
 
@@ -217,6 +221,13 @@ impl Config {
         self.worker_threads.unwrap_or(4)
     }
 
+    /// Default perf event
+    pub fn default_perf_event(&self) -> String {
+        self.default_perf_event
+            .clone()
+            .unwrap_or("hw:cycles".to_string())
+    }
+
     /// Duration to warmup a trace before collecting in ns.
     pub fn trace_warmup_ns(&self) -> u64 {
         self.trace_warmup_ms
@@ -244,6 +255,7 @@ impl Config {
             worker_threads: None,
             trace_tick_warmup: None,
             trace_warmup_ms: None,
+            default_perf_event: None,
         }
     }
 
@@ -264,6 +276,7 @@ impl Config {
             worker_threads: None,
             trace_tick_warmup: None,
             trace_warmup_ms: None,
+            default_perf_event: None,
         };
         config.tick_rate_ms = Some(config.tick_rate_ms());
         config.debug = Some(config.debug());

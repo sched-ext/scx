@@ -250,6 +250,7 @@ enum layer_match_kind {
 	MATCH_USED_GPU_TID,
 	MATCH_USED_GPU_PID,
 	MATCH_AVG_RUNTIME,
+	MATCH_CGROUP_SUFFIX,
 
 	NR_LAYER_MATCH_KINDS,
 };
@@ -257,6 +258,7 @@ enum layer_match_kind {
 struct layer_match {
 	int		kind;
 	char		cgroup_prefix[MAX_PATH];
+	char		cgroup_suffix[MAX_PATH];
 	char		comm_prefix[MAX_COMM];
 	char		pcomm_prefix[MAX_COMM];
 	int		nice;

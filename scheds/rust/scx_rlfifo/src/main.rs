@@ -3,12 +3,15 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-//! # FIFO Linux kernel scheduler that runs in user-space
+//! # Round-Robin Linux kernel scheduler that runs in user-space
 //!
 //! ## Overview
 //!
-//! This is a fully functional FIFO scheduler for the Linux kernel that operates in user-space and
-//! it is 100% implemented in Rust.
+//! This is a fully functional Round-Robin scheduler for the Linux kernel that operates
+//! in user-space and it is 100% implemented in Rust.
+//!
+//! It dequeues tasks in FIFO order and assigns dynamic time slices, preempting and
+//! re-enqueuing tasks to achieve basic Round-Robin behavior.
 //!
 //! The scheduler is designed to serve as a simple template for developers looking to implement
 //! more advanced scheduling policies.
@@ -45,6 +48,7 @@
 //!     pub pid: i32,              // pid that uniquely identifies a task
 //!     pub cpu: i32,              // CPU previously used by the task
 //!     pub flags: u64,            // task's enqueue flags
+//!     pub exec_runtime: u64,     // Total cpu time in nanoseconds
 //!     pub sum_exec_runtime: u64, // Total cpu time in nanoseconds
 //!     pub weight: u64,           // Task priority in the range [1..10000] (default is 100)
 //!     pub nvcsw: u64,            // Total amount of voluntary context switches
@@ -128,7 +132,7 @@ impl<'a> Scheduler<'a> {
             //
             // If we can't find any idle CPU, keep the task running on the same CPU.
             let cpu = self.bpf.select_cpu(task.pid, task.cpu, task.flags);
-            dispatched_task.cpu = if cpu < 0 { task.cpu } else { RL_CPU_ANY };
+            dispatched_task.cpu = if cpu >= 0 { cpu } else { task.cpu };
 
             // Determine the task's time slice: assign value inversely proportional to the number
             // of tasks waiting to be scheduled.

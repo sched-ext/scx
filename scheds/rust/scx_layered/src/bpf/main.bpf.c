@@ -1968,18 +1968,21 @@ static __noinline bool match_one(struct layer_match *match,
 
 	switch (match->kind) {
 	case MATCH_CGROUP_PREFIX: {
-		return match_prefix(match->cgroup_prefix, cgrp_path, MAX_PATH);
+		return match_prefix_suffix(match->cgroup_prefix, cgrp_path, false);
+	}
+	case MATCH_CGROUP_SUFFIX: {
+		return match_prefix_suffix(match->cgroup_suffix, cgrp_path, true);
 	}
 	case MATCH_COMM_PREFIX: {
 		char comm[MAX_COMM];
 		__builtin_memcpy(comm, p->comm, MAX_COMM);
-		return match_prefix(match->comm_prefix, comm, MAX_COMM);
+		return match_prefix_suffix(match->comm_prefix, comm, false);
 	}
 	case MATCH_PCOMM_PREFIX: {
 		char pcomm[MAX_COMM];
 
 		__builtin_memcpy(pcomm, p->group_leader->comm, MAX_COMM);
-		return match_prefix(match->pcomm_prefix, pcomm, MAX_COMM);
+		return match_prefix_suffix(match->pcomm_prefix, pcomm, false);
 	}
 	case MATCH_NICE_ABOVE:
 		return prio_to_nice((s32)p->static_prio) > match->nice;
@@ -2045,8 +2048,8 @@ static __noinline bool match_one(struct layer_match *match,
 		if (!taskc->join_layer[0])
 			return false;
 
-		return match_prefix(match->comm_prefix, taskc->join_layer,
-			SCXCMD_COMLEN);
+		return match_prefix_suffix(match->comm_prefix, taskc->join_layer,
+			false);
 	}
 	case MATCH_IS_GROUP_LEADER: {
 		// There is nuance to this around exec(2)s and group leader swaps.
@@ -3179,6 +3182,8 @@ static s32 init_layer(int layer_id)
 				dbg("%s AVG_RUNTIME [%lluus, %lluus)", header,
 					match->min_avg_runtime_us,
 					match->max_avg_runtime_us);
+			case MATCH_CGROUP_SUFFIX:
+				dbg("%s CGROUP_SUFFIX \"%s\"", header, match->cgroup_suffix);
 				break;
 			default:
 				scx_bpf_error("%s Invalid kind", header);

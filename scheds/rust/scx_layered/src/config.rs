@@ -69,6 +69,7 @@ pub enum LayerPlacement {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LayerMatch {
     CgroupPrefix(String),
+    CgroupSuffix(String),
     CommPrefix(String),
     CommPrefixExclude(String),
     PcommPrefix(String),

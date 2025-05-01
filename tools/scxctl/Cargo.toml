@@ -12,7 +12,7 @@ readme = "README.md"
 keywords = ["linux", "scx", "scx_scheds", "scx_loader", "sched_ext"]
 categories = ["command-line-utilities"]
 license = "GPL-2.0-only"
-rust-version = "1.81"
+rust-version = "1.86"
 
 [dependencies]
 clap = { version = "4.5.28", features = ["derive"] }

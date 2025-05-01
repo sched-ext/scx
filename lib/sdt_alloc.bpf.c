@@ -444,7 +444,7 @@ int scx_alloc_free_idx(struct scx_allocator *alloc, __u64 idx)
 	if (likely(!data)) {
 
 		data[pos] = (struct sdt_data) {
-			.tid.gen = data->tid.gen + 1,
+			.tid.genn = data->tid.genn + 1,
 		};
 
 		/* Zero out one word at a time. */

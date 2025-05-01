@@ -1230,6 +1230,10 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_PREFIX as i32;
                             copy_into_cstr(&mut mt.cgroup_prefix, prefix.as_str());
                         }
+                        LayerMatch::CgroupSuffix(suffix) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_SUFFIX as i32;
+                            copy_into_cstr(&mut mt.cgroup_suffix, suffix.as_str());
+                        }
                         LayerMatch::CommPrefix(prefix) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_COMM_PREFIX as i32;
                             copy_into_cstr(&mut mt.comm_prefix, prefix.as_str());

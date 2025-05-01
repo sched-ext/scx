@@ -177,7 +177,7 @@ impl Tuner {
         }
         ti.slice_ns = self.slice_ns;
 
-        ti.gen += 1;
+        ti.genn += 1;
 
         self.prev_cpu_stats = curr_cpu_stats;
 

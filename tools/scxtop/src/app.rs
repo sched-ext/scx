@@ -31,7 +31,7 @@ use crate::{
     TraceStoppedAction,
 };
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use glob::glob;
 use libbpf_rs::Link;
 use libbpf_rs::ProgramInput;
@@ -141,7 +141,17 @@ impl<'a> App<'a> {
         let mut cpu_data = BTreeMap::new();
         let mut llc_data = BTreeMap::new();
         let mut node_data = BTreeMap::new();
-        let active_event = PerfEvent::new("hw".to_string(), "cycles".to_string(), 0);
+        let default_perf_event = config.default_perf_event();
+        let default_perf_event_parts: Vec<&str> = default_perf_event.split(':').collect();
+        if default_perf_event_parts.len() < 2 {
+            bail!(
+                "Invalid default perf event: {}",
+                config.default_perf_event()
+            );
+        }
+        let subsystem = default_perf_event_parts[0].to_string();
+        let event = default_perf_event_parts[1].to_string();
+        let active_event = PerfEvent::new(subsystem.clone(), event.clone(), 0);
         let mut active_perf_events = BTreeMap::new();
         let mut default_events = PerfEvent::default_events();
         let config_events = PerfEvent::from_config(&config)?;
@@ -157,7 +167,7 @@ impl<'a> App<'a> {
             })
             .collect();
         for cpu in topo.all_cpus.values() {
-            let mut event = PerfEvent::new("hw".to_string(), "cycles".to_string(), cpu.id);
+            let mut event = PerfEvent::new(subsystem.clone(), event.clone(), cpu.id);
             event.attach(process_id)?;
             active_perf_events.insert(cpu.id, event);
             let mut data =
