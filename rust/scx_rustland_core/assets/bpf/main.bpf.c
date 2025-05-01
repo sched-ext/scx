@@ -663,15 +663,6 @@ int rs_select_cpu(struct task_cpu_arg *input)
 
 	bpf_task_release(p);
 
-	/*
-	 * Wake-up the CPU if idle. Use SCX_KICK_IDLE to prevent unecessary
-	 * rescheduling events in case the CPU is already awake (since we don't
-	 * know exactly what the user-space scheduler is doing we can't
-	 * implicitly assume that the target CPU is idle here).
-	 */
-	if (cpu >= 0)
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-
 	return cpu;
 }
 
