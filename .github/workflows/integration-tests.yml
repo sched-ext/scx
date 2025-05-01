@@ -8,12 +8,58 @@ on:
         type: string
 
 jobs:
+  list-tests:
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64" ]') || 'ubuntu-latest' }}
+    outputs:
+      matrix: ${{ steps.output.outputs.matrix }}
+    steps:
+      - name: Install Nix
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - uses: actions/checkout@v4
+
+      - name: Load dependencies
+        run: nix run ./.github/include#nix-develop-gha -- ./.github/include#list-tests
+
+      - name: List tests
+        id: output
+        run: |
+          python3 - <<EOF
+          import itertools
+          import json
+          import os
+
+          matrix = [{ "name": x, "flags": "" } for x in [
+            "scx_bpfland",
+            "scx_chaos",
+            "scx_lavd",
+            "scx_rlfifo",
+            "scx_rustland",
+            "scx_rusty",
+            "scx_p2dq",
+            "scx_tickless",
+          ]]
+
+          for flags in itertools.product(
+              ["--disable-topology=false", "--disable-topology=true"],
+              ["", "--disable-antistall"]
+          ):
+            matrix.append({ "name": "scx_layered", "flags": " ".join(flags) })
+
+          output = f"matrix={json.dumps(matrix)}"
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            print(output, file=f)
+
+          EOF
+
   integration-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    needs: list-tests
     strategy:
           matrix:
-            scheduler: [ scx_bpfland, scx_chaos, scx_lavd, scx_layered, scx_rlfifo, scx_rustland, scx_rusty, scx_p2dq, scx_tickless ]
+            scheduler: ${{ fromJson(needs.list-tests.outputs.matrix) }}
           fail-fast: false
     steps:
       - uses: actions/checkout@v4
@@ -26,7 +72,8 @@ jobs:
       - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.scheduler }}
+          # ignore the flags here, this is a rust cache
+          key: ${{ matrix.scheduler.name }}
           prefix-key: "4"
       - uses: ./.github/actions/install-deps-action
       # cache virtiofsd (goes away w/ 24.04)
@@ -46,15 +93,15 @@ jobs:
       - run: sudo chmod +x /usr/bin/veristat && sudo chmod 755 /usr/bin/veristat
 
       # The actual build:
-      - run: meson setup build -Dkernel=../linux/arch/x86/boot/bzImage -Dkernel_headers=../linux -Denable_stress=true -Dvng_rw_mount=true
-      - run: meson compile -C build ${{ matrix.scheduler }}
+      - run: meson setup build -Dkernel=../linux/arch/x86/boot/bzImage -Dkernel_headers=../linux -Denable_stress=true -Dvng_rw_mount=true -Dextra_sched_args=" ${{ matrix.scheduler['flags'] }}"
+      - run: meson compile -C build ${{ matrix.scheduler['name'] }}
 
       # Print CPU model before running the tests (this can be useful for
       # debugging purposes)
       - run: grep 'model name' /proc/cpuinfo | head -1
 
       # Test schedulers
-      - run: meson compile -C build test_sched_${{ matrix.scheduler }}
+      - run: meson compile -C build test_sched_${{ matrix.scheduler['name'] }}
       # this is where errors we want logs on start occurring, so always generate debug info and save logs
         if: always()
       # Stress schedulers
@@ -63,8 +110,8 @@ jobs:
         if: always()
         with:
           retries: 3
-          command: meson compile -C build stress_tests_${{ matrix.scheduler }}
-      - run: meson compile -C build veristat_${{ matrix.scheduler }}
+          command: meson compile -C build stress_tests_${{ matrix.scheduler['name'] }}
+      - run: meson compile -C build veristat_${{ matrix.scheduler['name'] }}
         if: always()
       - run: sudo cat /var/log/dmesg > host-dmesg.ci.log
         if: always()
@@ -77,74 +124,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.scheduler }}_logs_${{ github.run_id }}_${{ github.run_attempt }}
-          path: ./log_save/*.ci.log
-          # it's all txt files w/ 90 day retention, lets be nice.
-          compression-level: 9
-
-  layered-matrix:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    strategy:
-          matrix:
-            scheduler: [ scx_layered ]
-            topo: ['--disable-topology=false', '--disable-topology=true']
-            antistall: ['', '--disable-antistall']
-          fail-fast: false
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: ./.github/actions/restore-kernel-cache
-        with:
-          repo-name: ${{ inputs.repo-name }}
-
-      # prevent cache permission errors
-      - run: sudo chown root /usr/bin/tar && sudo chmod u+s /usr/bin/tar
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.scheduler }}
-          prefix-key: "4"
-      - uses: ./.github/actions/install-deps-action
-      # cache virtiofsd (goes away w/ 24.04)
-      - name: Cache virtiofsd
-        id: cache-virtiofsd
-        uses: actions/cache@v4
-        with:
-          path: |
-            /usr/lib/virtiofsd
-          key: virtiofsd-binary
-      - if: ${{ steps.cache-virtiofsd.outputs.cache-hit != 'true' }}
-        run: cargo install virtiofsd && sudo cp -a ~/.cargo/bin/virtiofsd /usr/lib/
-
-      # The actual build:
-      - run: meson setup build -Dkernel=../linux/arch/x86/boot/bzImage -Dkernel_headers=../linux -Denable_stress=true -Dvng_rw_mount=true -Dextra_sched_args=" ${{ matrix.topo }} ${{ matrix.antistall }}"
-      - run: meson compile -C build ${{ matrix.scheduler }}
-
-      # Print CPU model before running the tests (this can be useful for
-      # debugging purposes)
-      - run: grep 'model name' /proc/cpuinfo | head -1
-
-      # Stress schedulers
-      - uses: cytopia/shell-command-retry-action@v0.1.2
-        name: stress test ${{ matrix.topo }}
-        if: always()
-        with:
-          retries: 3
-          command: meson compile -C build stress_tests_${{ matrix.scheduler }}
-      - run: meson compile -C build veristat_${{ matrix.scheduler }}
-        if: always()
-      - run: sudo cat /var/log/dmesg > host-dmesg.ci.log
-        if: always()
-      - run: mkdir -p ./log_save/
-        if: always()
-        # no symlink following here (to avoid cycle`s)
-      - run: sudo find '/home/runner/' -iname '*.ci.log' -exec mv {} ./log_save/ \;
-        if: always()
-      - name: upload debug logs, bpftrace, dmesg, etc.
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.scheduler }}_${{ matrix.topo }}_${{ matrix.test_name }}_logs_${{ github.run_id }}_${{ github.run_attempt }}_${{ matrix.antistall }}
+          name: ${{ matrix.scheduler['name'] }}${{ matrix.scheduler['flags'] }}_logs_${{ github.run_id }}_${{ github.run_attempt }}
           path: ./log_save/*.ci.log
           # it's all txt files w/ 90 day retention, lets be nice.
           compression-level: 9
