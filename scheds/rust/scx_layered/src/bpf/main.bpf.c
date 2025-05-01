@@ -1089,9 +1089,6 @@ s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (taskc->layer_id == MAX_LAYERS || !(layer = lookup_layer(taskc->layer_id)))
 		return prev_cpu;
 
-	if (layer->periodically_refresh && taskc->layer_refresh_seq < layer_refresh_seq_avgruntime)
-		taskc->refresh_layer = true;
-
 	if (layer->task_place == PLACEMENT_STICK)
 		cpu = prev_cpu;
 	else
