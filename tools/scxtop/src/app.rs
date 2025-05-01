@@ -72,7 +72,7 @@ pub struct App<'a> {
     hw_pressure: bool,
     localize: bool,
     locale: SystemLocale,
-    stats_client: Arc<Mutex<StatsClient>>,
+    stats_client: Option<Arc<Mutex<StatsClient>>>,
     sched_stats_raw: String,
 
     scheduler: String,
@@ -207,6 +207,7 @@ impl<'a> App<'a> {
             }
             client
         });
+        let stats_client = Some(Arc::new(Mutex::new(stats_client)));
         let sample_rate = skel.maps.data_data.sample_rate;
         let trace_file_prefix = config.trace_file_prefix().to_string();
         let trace_manager = PerfettoTraceManager::new(trace_file_prefix, None);
@@ -220,7 +221,7 @@ impl<'a> App<'a> {
             localize: true,
             hw_pressure,
             locale: SystemLocale::default()?,
-            stats_client: Arc::new(Mutex::new(stats_client)),
+            stats_client,
             sched_stats_raw: "".to_string(),
             scheduler,
             max_cpu_events,
@@ -459,10 +460,10 @@ impl<'a> App<'a> {
         let mut new_client = StatsClient::new();
         new_client = new_client.connect()?;
         new_client = new_client.set_path(stats_socket_path);
-        let client_ref = self.stats_client.clone();
-        let mut client = client_ref.blocking_lock();
-        *client = new_client;
-
+        if let Some(client_ref) = &self.stats_client {
+            let mut client = client_ref.blocking_lock();
+            *client = new_client;
+        }
         Ok(())
     }
 
@@ -472,24 +473,25 @@ impl<'a> App<'a> {
         self.bpf_stats = BpfStats::get_from_skel(&self.skel)?;
 
         if self.state == AppState::Scheduler && !self.scheduler.is_empty() {
-            let stats_client_read = self.stats_client.clone();
-            let tx = self.action_tx.clone();
-            tokio::spawn(async move {
-                let mut client = stats_client_read.lock().await;
+            if let Some(stats_client_read) = self.stats_client.clone() {
+                let tx = self.action_tx.clone();
+                tokio::spawn(async move {
+                    let mut client = stats_client_read.lock().await;
 
-                let result = client.request::<JsonValue>("stats", vec![]);
-                match result {
-                    Ok(stats) => {
-                        tx.send(Action::SchedStats(
-                            serde_json::to_string_pretty(&stats).unwrap(),
-                        ))?;
+                    let result = client.request::<JsonValue>("stats", vec![]);
+                    match result {
+                        Ok(stats) => {
+                            tx.send(Action::SchedStats(
+                                serde_json::to_string_pretty(&stats).unwrap(),
+                            ))?;
+                        }
+                        Err(_) => {
+                            tx.send(Action::ReloadStatsClient)?;
+                        }
                     }
-                    Err(_) => {
-                        tx.send(Action::ReloadStatsClient)?;
-                    }
-                }
-                Ok::<(), anyhow::Error>(())
-            });
+                    Ok::<(), anyhow::Error>(())
+                });
+            };
         };
         // Add entry for nodes
         for node in self.topo.nodes.keys() {
