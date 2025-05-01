@@ -73,10 +73,9 @@ static bool can_cpu1_kick_cpu2(struct preemption_info *prm_cpu1,
 static bool is_worth_kick_other_task(struct task_ctx *taskc)
 {
 	/*
-	 * The scx_bpf_kick_cpu() used for preemption is expensive as an IPI is
-	 * involved. Hence, we first judiciously check whether it is worth
-	 * trying to victimize another CPU as the current task is urgent
-	 * enough.
+	 * Preemption is not free. It is expensive involving context switching,
+	 * etc. Hence, we first judiciously check whether it is worth trying to
+	 * victimize another CPU as the current task is urgent enough.
 	 */
 	return (taskc->lat_cri >= sys_stat.thr_lat_cri);
 }
@@ -186,71 +185,59 @@ null_out:
 	return NULL;
 }
 
-static bool try_kick_cpu(struct task_struct *p, struct cpu_ctx *victim_cpuc)
+static void ask_cpu_yield(struct cpu_ctx *victim_cpuc)
 {
 	/*
-	 * Kicking the victim CPU does _not_ guarantee that task @p will run on
-	 * that CPU. Enqueuing @p to the global queue is one operation, and
-	 * kicking the victim is another asynchronous operation. However, it is
-	 * okay because, anyway, the victim CPU will run a higher-priority task
-	 * than @p.
+	 * Note that we avoid using scx_bpf_kick_cpu() on purpose.
+	 * While scx_bpf_kick_cpu() can trigger a task preemption immediately,
+	 * it incurs an expensive IPI operation. Furthermore, an IPI operation
+	 * is more costly in certain processor architectures or in older
+	 * generations of processors, causing performance variations among
+	 * processors. Thus, let's avoid using the IPI, scx_bpf_kick_cpu(), and
+	 * set the victim task's time slice to zero so the victim task yields
+	 * the CPU in the next scheduling point.
 	 */
-	u64 old;
-	bool ret = false;
+	struct rq *victim_rq;
+	struct task_struct *victim_p;
 
-	/*
-	 * Kick a victim CPU if it is not victimized yet by another
-	 * concurrent kick task.
-	 *
-	 *
-	 */
-	old = p->scx.slice;
-	if (old != 1 && old != 0)
-		ret = __sync_bool_compare_and_swap(&p->scx.slice, old, 1);
-
-	/*
-	 * Kick the remote CPU for preemption.
-	 */
-	if (ret)
-		scx_bpf_kick_cpu(victim_cpuc->cpu_id, SCX_KICK_PREEMPT);
-
-	return ret;
+	victim_rq = scx_bpf_cpu_rq(victim_cpuc->cpu_id);
+	if (victim_rq && (victim_p = victim_rq->curr))
+		WRITE_ONCE(victim_p->scx.slice, 0);
 }
 
-static bool try_find_and_kick_victim_cpu(struct task_struct *p,
+static void try_find_and_kick_victim_cpu(struct task_struct *p,
 					 struct task_ctx *taskc, u64 dsq_id)
 {
 	struct bpf_cpumask *cd_cpumask, *cpumask;
 	struct cpdom_ctx *cpdomc;
 	struct cpu_ctx *victim_cpuc;
 	struct cpu_ctx *cpuc_cur;
-	bool ret = false;
 	u64 now;
 
 	/*
 	 * Don't even try to perform expensive preemption for greedy tasks.
 	 */
 	if (!is_eligible(taskc))
-		return false;
+		return;
 
 	/*
-	 * Check if it is worth to try to kick other CPU at the expense of IPI.
+	 * Check if it is worth to try to kick other CPU.
 	 */
 	if (!is_worth_kick_other_task(taskc))
-		return false;
+		return;
 
 	/*
 	 * Prepare a cpumak so we find a victim in @p's compute domain.
 	 */
 	cpuc_cur = get_cpu_ctx();
 	if (!cpuc_cur)
-		return false;
+		return;
 
 	cpumask = cpuc_cur->tmp_t_mask;
 	cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
 	cd_cpumask = MEMBER_VPTR(cpdom_cpumask, [dsq_id]);
 	if (!cpdomc || !cd_cpumask || !cpumask)
-		return false;
+		return;
 
 	bpf_cpumask_and(cpumask, cast_mask(cd_cpumask), p->cpus_ptr);
 
@@ -264,9 +251,7 @@ static bool try_find_and_kick_victim_cpu(struct task_struct *p,
 	 * If a victim CPU is chosen, preempt the victim by kicking it.
 	 */
 	if (victim_cpuc)
-		ret = try_kick_cpu(p, victim_cpuc);
-
-	return ret;
+		ask_cpu_yield(victim_cpuc);
 }
 
 static void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released)
