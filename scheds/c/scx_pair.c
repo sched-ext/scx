@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <inttypes.h>
 #include <signal.h>
+#include <assert.h>
 #include <libgen.h>
 #include <bpf/bpf.h>
 #include <scx/common.h>
@@ -55,6 +56,7 @@ restart:
 	skel = SCX_OPS_OPEN(pair_ops, scx_pair);
 
 	skel->rodata->nr_cpu_ids = libbpf_num_possible_cpus();
+	assert(skel->rodata->nr_cpu_ids > 0);
 	skel->rodata->pair_batch_dur_ns = __COMPAT_ENUM_OR_ZERO("scx_public_consts", "SCX_SLICE_DFL");
 
 	/* pair up the earlier half to the latter by default, override with -s */

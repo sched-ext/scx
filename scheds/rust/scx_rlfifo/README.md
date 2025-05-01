@@ -4,8 +4,10 @@ This is a single user-defined scheduler used within [sched_ext](https://github.c
 
 ## Overview
 
-scx_rlfifo is a simple FIFO scheduler runs in user-space, based on the
+scx_rlfifo is a simple Round-Robin scheduler runs in user-space, based on the
 scx_rustland_core framework.
+It dequeues tasks in FIFO order and assigns dynamic time slices, preempting and
+re-enqueuing tasks to achieve basic Round-Robin behavior.
 
 ## Typical Use Case
 

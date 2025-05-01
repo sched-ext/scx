@@ -79,7 +79,7 @@ struct bucket_ctx {
 };
 
 struct dom_active_tasks {
-	u64 gen;
+	u64 genn;
 	u64 read_idx;
 	u64 write_idx;
 	task_ptr tasks[MAX_DOM_ACTIVE_TPTRS];

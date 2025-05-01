@@ -42,24 +42,26 @@ const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 /// scx_rustland is also designed to be an "easy to read" template that can be used by any
 /// developer to quickly experiment more complex scheduling policies fully implemented in Rust.
 ///
-/// The scheduler is made of a BPF component (scx_rustland_core) that implements the low level
-/// sched-ext functionalities and a user-space counterpart (scheduler), written in Rust, that
-/// implements the actual scheduling policy.
+/// The scheduler is based on scx_rustland_core, which implements the low level sched-ext
+/// functionalities.
 ///
-/// The default scheduling policy implemented in the user-space scheduler is a based on virtual
-/// runtime (vruntime):
+/// The scheduling policy implemented in user-space is a based on a deadline, evaluated as
+/// following:
 ///
-/// - each task receives the same time slice of execution (slice_ns)
+///       deadline = vruntime + exec_runtime
 ///
-/// - the actual execution time, adjusted based on the task's static priority (weight), determines
-///   the vruntime
+/// Where, vruntime reflects the task's total runtime scaled by weight (ensuring fairness), while
+/// exec_runtime accounts the CPU time used since the last sleep (capturing responsiveness). Tasks
+/// are then dispatched from the lowest to the highest deadline.
 ///
-/// - tasks are then dispatched from the lowest to the highest vruntime
+/// This approach favors latency-sensitive tasks: those that frequently sleep will accumulate less
+/// exec_runtime, resulting in earlier deadlines. In contrast, CPU-intensive tasks that don’t sleep
+/// accumulate a larger exec_runtime and thus get scheduled later.
 ///
-/// All the tasks are stored in a BTreeSet (TaskTree), using vruntime as the ordering key.
-/// Once the order of execution is determined all tasks are sent back to the BPF counterpart to be
-/// dispatched. To keep track of the accumulated cputime and vruntime the scheduler maintain a
-/// HashMap (TaskInfoMap) indexed by pid.
+/// All the tasks are stored in a BTreeSet (TaskTree), using the deadline as the ordering key.
+/// Once the order of execution is determined all tasks are sent back to the BPF counterpart
+/// (scx_rustland_core) to be dispatched. To keep track of the accumulated execution time and
+/// vruntime, the scheduler maintains a HashMap (TaskInfoMap), indexed by pid.
 ///
 /// The BPF dispatcher is completely agnostic of the particular scheduling policy implemented in
 /// user-space. For this reason developers that are willing to use this scheduler to experiment
@@ -68,17 +70,16 @@ const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 ///
 /// === Troubleshooting ===
 ///
-/// - Reduce the time slice (option `-s`) if you experience audio issues (i.e., cracking audio or
-///   audio packet loss).
+/// - Reduce the time slice (option `-s`) if you experience lag or cracking audio.
 ///
 #[derive(Debug, Parser)]
 struct Opts {
     /// Scheduling slice duration in microseconds.
-    #[clap(short = 's', long, default_value = "5000")]
+    #[clap(short = 's', long, default_value = "20000")]
     slice_us: u64,
 
     /// Scheduling minimum slice duration in microseconds.
-    #[clap(short = 'S', long, default_value = "500")]
+    #[clap(short = 'S', long, default_value = "1000")]
     slice_us_min: u64,
 
     /// If specified, only tasks which have their scheduling policy set to SCHED_EXT using
@@ -119,8 +120,7 @@ const NSEC_PER_USEC: u64 = 1_000;
 // Basic item stored in the task information map.
 #[derive(Debug)]
 struct TaskInfo {
-    sum_exec_runtime: u64, // total cpu time used by the task
-    vruntime: u64,         // total vruntime of the task
+    vruntime: u64, // total vruntime of the task
 }
 
 // Task information map: store total execution time and vruntime of each task in the system.
@@ -289,7 +289,6 @@ impl<'a> Scheduler<'a> {
             .tasks
             .entry(task.pid)
             .or_insert_with_key(|&_pid| TaskInfo {
-                sum_exec_runtime: task.sum_exec_runtime,
                 vruntime: self.min_vruntime,
             });
 
@@ -298,14 +297,18 @@ impl<'a> Scheduler<'a> {
             self.min_vruntime = task.vtime;
         }
 
-        // Evaluate used task time slice.
-        let slice = task
-            .sum_exec_runtime
-            .saturating_sub(task_info.sum_exec_runtime)
-            .min(self.slice_ns);
-
-        // Update total task cputime.
-        task_info.sum_exec_runtime = task.sum_exec_runtime;
+        // Estimate the used time slice based on total runtime since the last sleep.
+        //
+        // Cap the value to slice_ns, since exec_runtime accumulates across multiple enqueue
+        // events, but what matters here is the time used in the most recent slice, so:
+        //  - if the task didn't sleep, it's the full slice_ns,
+        //  - if it did sleep, it's exec_runtime.
+        //
+        // Note that there may be some inaccuracies here, as a task can exceed its assigned time
+        // slice due to factors like holding locks or becoming non-deschedulable. These
+        // inaccuracies are tolerated to ensure smoother vruntime progression and prevent excessive
+        // gaps between tasks' vruntimes.
+        let slice = task.exec_runtime.min(self.slice_ns);
 
         // Update task's vruntime re-aligning it to min_vruntime (never allow a task to accumulate
         // a budget of more than a time slice to prevent starvation).

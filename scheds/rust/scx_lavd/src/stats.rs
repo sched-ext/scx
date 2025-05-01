@@ -141,8 +141,6 @@ pub struct SchedSample {
     pub avg_lat_cri: u32,
     #[stat(desc = "Static priority (20 == nice 0)")]
     pub static_prio: u16,
-    #[stat(desc = "Slice boost factor (number of consecutive full slice exhaustions)")]
-    pub slice_boost_prio: u8,
     #[stat(desc = "How often this task is scheduled per second")]
     pub run_freq: u64,
     #[stat(desc = "Average runtime per schedule")]
@@ -169,7 +167,7 @@ impl SchedSample {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "\x1b[93m| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:7} | {:8} | {:7} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:6} |\x1b[0m",
+            "\x1b[93m| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:7} | {:8} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:6} |\x1b[0m",
             "MSEQ",
             "PID",
             "COMM",
@@ -179,7 +177,6 @@ impl SchedSample {
             "LAT_CRI",
             "AVG_LC",
             "ST_PRIO",
-            "SLC_BST",
             "RUN_FREQ",
             "RUN_TM_NS",
             "WAIT_FREQ",
@@ -201,7 +198,7 @@ impl SchedSample {
 
         writeln!(
             w,
-            "| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:7} | {:8} | {:7} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:6} |",
+            "| {:6} | {:7} | {:17} | {:5} | {:4} | {:8} | {:8} | {:7} | {:8} | {:9} | {:9} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:6} |",
             self.mseq,
             self.pid,
             self.comm,
@@ -211,7 +208,6 @@ impl SchedSample {
             self.lat_cri,
             self.avg_lat_cri,
             self.static_prio,
-            self.slice_boost_prio,
             self.run_freq,
             self.avg_runtime,
             self.wait_freq,

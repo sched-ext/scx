@@ -1172,7 +1172,7 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Evaluate the time slice used by the task.
 	 */
-	slice = scx_bpf_now() - tctx->last_run_at;
+	slice = now - tctx->last_run_at;
 
 	/*
 	 * Update task's execution time (exec_runtime), but never account

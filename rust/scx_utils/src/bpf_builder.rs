@@ -470,7 +470,7 @@ mod tests {
     #[test]
     fn test_bpf_builder_new() {
         let td = tempfile::tempdir().unwrap();
-        std::env::set_var("OUT_DIR", td.path());
+        unsafe { std::env::set_var("OUT_DIR", td.path()) };
 
         let res = super::BpfBuilder::new();
         assert!(res.is_ok(), "Failed to create BpfBuilder ({:?})", &res);

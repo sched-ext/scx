@@ -133,6 +133,8 @@ impl PerfEvent {
     /// Returns the set of default software events.
     pub fn default_sw_events() -> Vec<PerfEvent> {
         vec![
+            PerfEvent::new("sw".to_string(), "cpu-clock".to_string(), 0),
+            PerfEvent::new("sw".to_string(), "task-clock".to_string(), 0),
             PerfEvent::new("sw".to_string(), "context-switches".to_string(), 0),
             PerfEvent::new("sw".to_string(), "page-faults".to_string(), 0),
             PerfEvent::new("sw".to_string(), "minor-faults".to_string(), 0),
@@ -212,6 +214,12 @@ impl PerfEvent {
                 match self.event.to_lowercase().as_str() {
                     "cs" | "context-switches" => {
                         attrs.config = perf::bindings::PERF_COUNT_SW_CONTEXT_SWITCHES as u64;
+                    }
+                    "cpu-clock" => {
+                        attrs.config = perf::bindings::PERF_COUNT_SW_CPU_CLOCK as u64;
+                    }
+                    "task-clock" => {
+                        attrs.config = perf::bindings::PERF_COUNT_SW_TASK_CLOCK as u64;
                     }
                     "page-faults" | "faults" => {
                         attrs.config = perf::bindings::PERF_COUNT_SW_PAGE_FAULTS as u64;
