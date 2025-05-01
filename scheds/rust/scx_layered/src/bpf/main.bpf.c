@@ -75,6 +75,18 @@ u32 nr_empty_layer_ids;
 
 UEI_DEFINE(uei);
 
+struct task_hint {
+	u64 hint;
+	u64 __reserved[3];
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct task_hint);
+} scx_layered_task_hint_map SEC(".maps");
+
 static inline s32 prio_to_nice(s32 static_prio)
 {
 	/* See DEFAULT_PRIO and PRIO_TO_NICE in include/linux/sched/prio.h */

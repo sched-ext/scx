@@ -630,6 +630,10 @@ struct Opts {
     /// turns this off.
     #[clap(long, default_value = "2000")]
     layer_refresh_ms_avgruntime: u64,
+
+    /// Set the path for pinning the task hint map.
+    #[clap(long, default_value = "")]
+    task_hint_map: String,
 }
 
 fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
@@ -1919,6 +1923,17 @@ impl<'a> Scheduler<'a> {
         Self::init_layers(&mut skel, &layer_specs, &topo)?;
         Self::init_nodes(&mut skel, opts, &topo);
 
+        // We set the pin path before loading the skeleton. This will ensure
+        // libbpf creates and pins the map, or reuses the pinned map fd for us,
+        // so that we can keep reusing the older map already pinned on scheduler
+        // restarts.
+        let layered_task_hint_map_path = &opts.task_hint_map;
+        let hint_map = &mut skel.maps.scx_layered_task_hint_map;
+        // Only set pin path if a path is provided.
+        if layered_task_hint_map_path.is_empty() == false {
+            hint_map.set_pin_path(layered_task_hint_map_path).unwrap();
+        }
+
         let mut skel = scx_ops_load!(skel, layered, uei)?;
 
         let mut layers = vec![];
@@ -1958,6 +1973,18 @@ impl<'a> Scheduler<'a> {
         // BPF. It would be better to update the cpumasks here before we
         // attach, but the value will quickly converge anyways so it's not a
         // huge problem in the interim until we figure it out.
+
+        // Allow all tasks to open and write to BPF task hint map, now that
+        // we should have it pinned at the desired location.
+        if layered_task_hint_map_path.is_empty() == false {
+            let path = CString::new(layered_task_hint_map_path.as_bytes()).unwrap();
+            let mode: libc::mode_t = 0o666;
+            unsafe {
+                if libc::chmod(path.as_ptr(), mode) != 0 {
+                    trace!("'chmod' to 666 of task hint map failed, continuing...");
+                }
+            }
+        }
 
         // Attach.
         let struct_ops = scx_ops_attach!(skel, layered)?;
