@@ -37,24 +37,41 @@ struct {
 volatile scx_bitmap_t node_data[MAX_NUMA_NODES];
 
 volatile dom_ptr dom_ctxs[MAX_DOMS];
-struct scx_allocator lb_domain_allocator;
+struct scx_stk lb_domain_allocator;
+
+/*
+ * Declared in its own section because loading the object otherwise fails
+ * with the following error message (where bpf_bpf the fully linked object):
+ *
+ * [WARN] libbpf: map 'bpf_bpf.bss': failed to re-mmap() contents: -524
+ * [WARN] libbpf: map 'bpf_bpf.bss': failed to create: unknown error (-524)(-524)
+ * [WARN] libbpf: failed to load object 'bpf_bpf'
+ */
+private(LBDOMAIN_BUDDY) struct scx_buddy buddy;
+
+#define LBALLOC_PAGES_PER_ALLOC (16)
 
 __weak
 int lb_domain_init(void)
 {
-	return scx_alloc_init(&lb_domain_allocator, sizeof(struct dom_ctx));
+	if (scx_buddy_init(&buddy, PAGE_SIZE)) {
+		scx_bpf_error("failed to initialize buddy allocator");
+		bpf_printk("failed to initialize buddy allocator");
+	}
+
+	return scx_stk_init(&lb_domain_allocator,
+		sizeof(struct dom_ctx),
+		LBALLOC_PAGES_PER_ALLOC);
 }
 
 __hidden
 dom_ptr lb_domain_alloc(u32 dom_id)
 {
-	struct sdt_data __arena *data = NULL;
 	dom_ptr domc;
 
-	data = scx_alloc(&lb_domain_allocator);
-
-	domc = (dom_ptr)data->payload;
-	domc->tid = data->tid;
+	domc = (dom_ptr)scx_stk_alloc(&lb_domain_allocator);
+	if (!domc)
+		return NULL;
 
 	domc->cpumask = scx_bitmap_alloc();
 	if (!domc->cpumask) {
@@ -89,7 +106,7 @@ void lb_domain_free(dom_ptr domc)
 	scx_bitmap_free(domc->direct_greedy_cpumask);
 	scx_bitmap_free(domc->cpumask);
 
-	scx_alloc_free_idx(&lb_domain_allocator, domc->tid.idx);
+	scx_stk_free(&lb_domain_allocator, (void __arena *)domc);
 }
 
 __hidden
