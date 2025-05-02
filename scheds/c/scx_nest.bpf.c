@@ -24,7 +24,6 @@
  * Copyright (c) 2023 Tejun Heo <tj@kernel.org>
  */
 #include <scx/common.bpf.h>
-#include <lib/sdt_task.h>
 
 #include "scx_nest.h"
 
