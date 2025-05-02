@@ -39,6 +39,7 @@ enum consts_internal  {
 	LAVD_LC_RUNTIME_MAX		= LAVD_TIME_ONE_SEC,
 	LAVD_LC_WEIGHT_BOOST		= 128, /* 2^7 */
 	LAVD_LC_GREEDY_PENALTY		= p2s(20),  /* 20% */
+	LAVD_LC_PREEMPT_SHIFT		= 6, /* roughly top 1.56% for preemption. */
 
 	LAVD_NEW_PROC_PENALITY		= 5,
 	LAVD_GREEDY_RATIO_NEW		= (LAVD_SCALE * LAVD_NEW_PROC_PENALITY),
@@ -148,6 +149,7 @@ struct cpu_ctx {
 	/*
 	 * Information for statistics.
 	 */
+	volatile u32	nr_preempt;
 	volatile u32	nr_x_migration;
 	volatile u32	nr_perf_cri;
 	volatile u32	nr_lat_cri;

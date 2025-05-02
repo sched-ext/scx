@@ -773,7 +773,8 @@ void BPF_STRUCT_OPS(lavd_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Try to find and kick a victim CPU, which runs a less urgent task,
 	 * from dsq_id. The kick will be done asynchronously.
 	 */
-	try_find_and_kick_victim_cpu(p, taskc, dsq_id);
+	if (!no_preemption)
+		try_find_and_kick_victim_cpu(p, taskc, dsq_id);
 }
 
 void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)

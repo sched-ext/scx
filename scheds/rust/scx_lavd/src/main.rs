@@ -108,6 +108,14 @@ struct Opts {
     #[clap(long = "no-futex-boost", action = clap::ArgAction::SetTrue)]
     no_futex_boost: bool,
 
+    /// Disable preemption.
+    #[clap(long = "no-preemption", action = clap::ArgAction::SetTrue)]
+    no_preemption: bool,
+
+    /// Disable an optimization for synchronous wake-up.
+    #[clap(long = "no-wake-sync", action = clap::ArgAction::SetTrue)]
+    no_wake_sync: bool,
+
     /// Disable core compaction and schedule tasks across all online CPUs. Core compaction attempts
     /// to keep idle CPUs idle in favor of scheduling tasks on CPUs that are already
     /// awake. See main.bpf.c for more info. Normally set by the power mode, but can be set independently if
@@ -639,6 +647,8 @@ impl<'a> Scheduler<'a> {
     }
 
     fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, topo: &FlatTopology) {
+        skel.maps.bss_data.no_preemption = opts.no_preemption;
+        skel.maps.bss_data.no_wake_sync = opts.no_wake_sync;
         skel.maps.bss_data.no_core_compaction = opts.no_core_compaction;
         skel.maps.bss_data.no_freq_scaling = opts.no_freq_scaling;
         skel.maps.bss_data.no_prefer_turbo_core = opts.no_prefer_turbo_core;
@@ -753,6 +763,7 @@ impl<'a> Scheduler<'a> {
                 let nr_queued_task = st.nr_queued_task;
                 let nr_active = st.nr_active;
                 let nr_sched = st.nr_sched;
+                let nr_preempt = st.nr_preempt;
                 let pc_pc = Self::get_pc(st.nr_perf_cri, nr_sched);
                 let pc_lc = Self::get_pc(st.nr_lat_cri, nr_sched);
                 let pc_x_migration = Self::get_pc(st.nr_x_migration, nr_sched);
@@ -774,6 +785,7 @@ impl<'a> Scheduler<'a> {
                     nr_queued_task,
                     nr_active,
                     nr_sched,
+                    nr_preempt,
                     pc_pc,
                     pc_lc,
                     pc_x_migration,

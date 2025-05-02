@@ -31,6 +31,9 @@ pub struct SysStats {
     #[stat(desc = "Number of context switches")]
     pub nr_sched: u64,
 
+    #[stat(desc = "Number of task preemption triggered")]
+    pub nr_preempt: u64,
+
     #[stat(desc = "% of performance-critical tasks")]
     pub pc_pc: f64,
 
@@ -69,11 +72,12 @@ impl SysStats {
     pub fn format_header<W: Write>(w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "\x1b[93m| {:8} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
+            "\x1b[93m| {:8} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
             "MSEQ",
             "# Q TASK",
             "# ACT CPU",
             "# SCHED",
+            "# PREEMPT",
             "PERF-CR%",
             "LAT-CR%",
             "X-MIG%",
@@ -96,11 +100,12 @@ impl SysStats {
 
         writeln!(
             w,
-            "| {:8} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |",
+            "| {:8} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |",
             self.mseq,
             self.nr_queued_task,
             self.nr_active,
             self.nr_sched,
+            self.nr_preempt,
             GPoint(self.pc_pc),
             GPoint(self.pc_lc),
             GPoint(self.pc_x_migration),

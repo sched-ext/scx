@@ -35,6 +35,7 @@ struct sys_stat_ctx {
 	s32		avg_lat_cri;
 	u64		sum_lat_cri;
 	u32		nr_sched;
+	u32		nr_preempt;
 	u32		nr_perf_cri;
 	u32		nr_lat_cri;
 	u32		nr_x_migration;
@@ -179,6 +180,9 @@ static void collect_sys_stat(struct sys_stat_ctx *c)
 		c->nr_sched += cpuc->nr_sched;
 		cpuc->nr_sched = 0;
 
+		c->nr_preempt += cpuc->nr_preempt;
+		cpuc->nr_preempt = 0;
+
 		if (cpuc->max_lat_cri > c->max_lat_cri)
 			c->max_lat_cri = cpuc->max_lat_cri;
 		cpuc->max_lat_cri = 0;
@@ -284,7 +288,7 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 	sys_stat.max_lat_cri = calc_avg32(sys_stat.max_lat_cri, c->max_lat_cri);
 	sys_stat.avg_lat_cri = calc_avg32(sys_stat.avg_lat_cri, c->avg_lat_cri);
 	sys_stat.thr_lat_cri = sys_stat.max_lat_cri - ((sys_stat.max_lat_cri -
-				sys_stat.avg_lat_cri) >> 1);
+				sys_stat.avg_lat_cri) >> LAVD_LC_PREEMPT_SHIFT);
 
 	if (have_little_core) {
 		sys_stat.min_perf_cri =
@@ -309,6 +313,7 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 	if (cnt++ == LAVD_SYS_STAT_DECAY_TIMES) {
 		cnt = 0;
 		sys_stat.nr_sched >>= 1;
+		sys_stat.nr_preempt >>= 1;
 		sys_stat.nr_perf_cri >>= 1;
 		sys_stat.nr_lat_cri >>= 1;
 		sys_stat.nr_x_migration >>= 1;
@@ -322,6 +327,7 @@ static void calc_sys_stat(struct sys_stat_ctx *c)
 	}
 
 	sys_stat.nr_sched += c->nr_sched;
+	sys_stat.nr_preempt += c->nr_preempt;
 	sys_stat.nr_perf_cri += c->nr_perf_cri;
 	sys_stat.nr_lat_cri += c->nr_lat_cri;
 	sys_stat.nr_x_migration += c->nr_x_migration;
