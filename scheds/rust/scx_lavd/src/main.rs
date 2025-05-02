@@ -108,6 +108,10 @@ struct Opts {
     #[clap(long = "no-futex-boost", action = clap::ArgAction::SetTrue)]
     no_futex_boost: bool,
 
+    /// Disable preemption.
+    #[clap(long = "no-preemption", action = clap::ArgAction::SetTrue)]
+    no_preemption: bool,
+
     /// Disable core compaction and schedule tasks across all online CPUs. Core compaction attempts
     /// to keep idle CPUs idle in favor of scheduling tasks on CPUs that are already
     /// awake. See main.bpf.c for more info. Normally set by the power mode, but can be set independently if
@@ -639,6 +643,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn init_globals(skel: &mut OpenBpfSkel, opts: &Opts, topo: &FlatTopology) {
+        skel.maps.bss_data.no_preemption = opts.no_preemption;
         skel.maps.bss_data.no_core_compaction = opts.no_core_compaction;
         skel.maps.bss_data.no_freq_scaling = opts.no_freq_scaling;
         skel.maps.bss_data.no_prefer_turbo_core = opts.no_prefer_turbo_core;
