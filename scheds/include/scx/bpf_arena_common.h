@@ -2,10 +2,6 @@
 /* Copyright (c) 2024 Meta Platforms, Inc. and affiliates. */
 #pragma once
 
-#ifndef NUMA_NO_NODE
-#define	NUMA_NO_NODE	(-1)
-#endif
-
 #ifndef arena_container_of
 #define arena_container_of(ptr, type, member)			\
 	({							\
