@@ -250,8 +250,10 @@ static void try_find_and_kick_victim_cpu(struct task_struct *p,
 	/*
 	 * If a victim CPU is chosen, preempt the victim by kicking it.
 	 */
-	if (victim_cpuc)
+	if (victim_cpuc) {
 		ask_cpu_yield(victim_cpuc);
+		cpuc_cur->nr_preempt++;
+	}
 }
 
 static void reset_cpu_preemption_info(struct cpu_ctx *cpuc, bool released)

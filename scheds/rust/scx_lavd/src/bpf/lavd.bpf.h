@@ -149,6 +149,7 @@ struct cpu_ctx {
 	/*
 	 * Information for statistics.
 	 */
+	volatile u32	nr_preempt;
 	volatile u32	nr_x_migration;
 	volatile u32	nr_perf_cri;
 	volatile u32	nr_lat_cri;
