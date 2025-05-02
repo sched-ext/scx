@@ -219,6 +219,8 @@ struct Scheduler<'a> {
 
 impl<'a> Scheduler<'a> {
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+        let stats_server = StatsServer::new(stats::server_data()).launch()?;
+
         // Low-level BPF connector.
         let bpf = BpfScheduler::init(
             open_object,
@@ -227,7 +229,6 @@ impl<'a> Scheduler<'a> {
             opts.verbose,
             true, // Enable built-in idle CPU selection policy
         )?;
-        let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         info!("{} scheduler attached", SCHEDULER_NAME);
 
