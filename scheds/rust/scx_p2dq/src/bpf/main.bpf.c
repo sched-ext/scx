@@ -470,6 +470,12 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	if (!idle_cpumask || !idle_smtmask)
 		goto found_cpu;
 
+	if (interactive_sticky && interactive) {
+		cpu = prev_cpu;
+		*is_idle = scx_bpf_test_and_clear_cpu_idle(prev_cpu);
+		goto found_cpu;
+	}
+
 	if (!(prev_cpuc = lookup_cpu_ctx(prev_cpu)) ||
 	    !(llcx = lookup_llc_ctx(prev_cpuc->llc_id)) ||
 	    !(nodec = lookup_node_ctx(prev_cpuc->node_id)) ||
