@@ -54,7 +54,7 @@ enum event_type {
 struct sched_switch_event {
 	u32		cpu;
 	bool		preempt;
-	char		next_comm[MAX_COMM];
+	u8		next_comm[MAX_COMM];
 	u64		next_dsq_id;
 	u64		next_dsq_lat_us;
 	u32		next_dsq_nr;
@@ -63,7 +63,7 @@ struct sched_switch_event {
 	u32		next_pid;
 	u32		next_tgid;
 	int		next_prio;
-	char		prev_comm[MAX_COMM];
+	u8		prev_comm[MAX_COMM];
 	u64		prev_dsq_id;
 	u64		prev_used_slice_ns;
 	u64		prev_slice_ns;
@@ -77,7 +77,7 @@ struct wakeup_event {
 	u32		pid;
 	u32		tgid;
 	int		prio;
-	char		comm[MAX_COMM];
+	u8		comm[MAX_COMM];
 };
 
 struct set_perf_event {
@@ -95,14 +95,14 @@ struct exit_event {
 	u32		pid;
 	u32		prio;
 	u32		tgid;
-	char		comm[MAX_COMM];
+	u8		comm[MAX_COMM];
 };
 
 struct fork_event {
 	u32		parent_pid;
 	u32		child_pid;
-	char		parent_comm[MAX_COMM];
-	char		child_comm[MAX_COMM];
+	u8		parent_comm[MAX_COMM];
+	u8		child_comm[MAX_COMM];
 };
 
 struct exec_event {

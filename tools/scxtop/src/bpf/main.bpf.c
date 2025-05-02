@@ -405,7 +405,7 @@ int BPF_KPROBE(scx_dispatch_from_dsq_set_vtime, struct bpf_iter_scx_dsq *it__ite
 	return on_move_set_vtime(NULL, vtime);
 }
 
-static void record_real_comm(char *comm, struct task_struct *task)
+static void record_real_comm(u8 *comm, struct task_struct *task)
 {
 	if (task->flags & PF_WQ_WORKER) {
 		/*
