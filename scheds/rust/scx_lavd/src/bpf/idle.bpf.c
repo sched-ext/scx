@@ -655,7 +655,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 * since it is busy running this code. Also, just in case the waker CPU
 	 * is in a different domain with the sticky CPU, reset sticky_cpdom.
 	 */
-	if (is_sync_waker_idle(ctx, sticky_cpu)) {
+	if (!no_wake_sync && is_sync_waker_idle(ctx, sticky_cpu)) {
 		cpu = ctx->sync_waker_cpu;
 		sticky_cpdom = -ENOENT;
 		goto unlock_out;
