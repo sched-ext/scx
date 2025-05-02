@@ -26,6 +26,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use seccomp::*;
 use std::alloc::{GlobalAlloc, Layout};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -454,6 +455,24 @@ impl UserAllocator {
             let alloc = inner.get_or_insert_with(|| BuddyAlloc::new(self.buddy_alloc_param));
             f(alloc)
         }
+    }
+
+    // Enable a seccomp filter that sends a SIGSYS when mmap() is called.
+    #[allow(static_mut_refs)]
+    pub fn disable_mmap(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut ctx = seccomp::Context::default(Action::Allow)?;
+        let syscall_nr = libc::SYS_mmap as usize;
+        let cmp = Compare::arg(0)
+            .using(Op::MaskedEq)
+            .with(0)
+            .build()
+            .ok_or("Failed to build seccomp filter")?;
+
+        let rule = Rule::new(syscall_nr, cmp, Action::Errno(libc::EPERM));
+        ctx.add_rule(rule)?;
+        ctx.load()?;
+
+        Ok(())
     }
 
     #[allow(static_mut_refs)]
