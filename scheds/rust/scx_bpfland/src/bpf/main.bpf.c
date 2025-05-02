@@ -484,7 +484,7 @@ static bool is_llc_busy(const struct cpumask *idle_cpumask, s32 cpu)
  * Return true if the waker commits to release the CPU after waking up @p,
  * false otherwise.
  */
-static bool is_wake_sync(s32 prev_cpu, s32 this_cpu, u64 wake_flags)
+static bool is_wake_sync(u64 wake_flags)
 {
 	const struct task_struct *current = (void *)bpf_get_current_task_btf();
 
@@ -503,38 +503,10 @@ static bool is_wake_sync(s32 prev_cpu, s32 this_cpu, u64 wake_flags)
 	 * synchronous. An example of this behavior is seen in IO
 	 * completions.
 	 */
-	if (is_kthread(current) && (current->nr_cpus_allowed == 1) &&
-	    (prev_cpu == this_cpu))
+	if (is_kthread(current) && (current->nr_cpus_allowed == 1))
 		return true;
 
 	return false;
-}
-
-/*
- * Return the target CPU for @p in case of a sync wakeup.
- *
- * During a sync wakeup, the waker commits to releasing the CPU immediately
- * after the wakeup event, so we should consider a sync wakeup almost like
- * a direct function call between a waker and a wakee.
- */
-static s32 try_sync_wakeup(const struct task_struct *p, s32 prev_cpu, s32 this_cpu)
-{
-	/*
-	 * If @prev_cpu is idle, keep using it, since there is no guarantee
-	 * that the cache hot data from the waker's CPU is more important
-	 * than cache hot data in the wakee's CPU.
-	 */
-	if ((this_cpu != prev_cpu) && scx_bpf_test_and_clear_cpu_idle(prev_cpu))
-		return prev_cpu;
-
-	/*
-	 * If waker and wakee are on the same CPU and no other tasks are
-	 * queued, consider the waker's CPU as idle.
-	 */
-	if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | this_cpu))
-		return this_cpu;
-
-	return -EBUSY;
 }
 
 /*
@@ -553,7 +525,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	struct task_ctx *tctx;
 	int node;
 	s32 this_cpu = bpf_get_smp_processor_id(), cpu;
-	bool share_llc;
 
 	primary = cast_mask(primary_cpumask);
 	if (!primary)
@@ -599,22 +570,18 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	idle_smtmask = __COMPAT_scx_bpf_get_idle_smtmask_node(node);
 	idle_cpumask = __COMPAT_scx_bpf_get_idle_cpumask_node(node);
 
-	/*
-	 * In case of a sync wakeup, attempt to run the wakee on the
-	 * waker's CPU if possible, as it's going to release the CPU right
-	 * after the wakeup, so it can be considered as idle and, possibly,
-	 * cache hot.
-	 *
-	 * However, ignore this optimization if the LLC is completely
-	 * saturated, since it's just more efficient to dispatch the task
-	 * on the first CPU available.
-	 */
-	share_llc = l3_mask && bpf_cpumask_test_cpu(this_cpu, l3_mask);
-	if (is_wake_sync(prev_cpu, this_cpu, wake_flags) &&
-	    share_llc && !is_llc_busy(idle_cpumask, this_cpu)) {
-		cpu = try_sync_wakeup(p, prev_cpu, this_cpu);
-		if (cpu >= 0) {
+	if ((prev_cpu == this_cpu) && is_wake_sync(wake_flags)) {
+		/*
+		 * If waker and wakee are on the same CPU and no other
+		 * tasks are queued, consider the waker's CPU as idle, but
+		 * only if the LLC is not completely busy, otherwise tasks
+		 * that are repeatedly awakened could always take priority
+		 * over other tasks, leading to unfairness.
+		 */
+		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu) &&
+		    !is_llc_busy(idle_cpumask, prev_cpu)) {
 			*is_idle = true;
+			cpu = prev_cpu;
 			goto out_put_cpumask;
 		}
 	}
@@ -882,6 +849,7 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 */
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
 		int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
+		s32 this_cpu = bpf_get_smp_processor_id();
 
 		/*
 		 * Stop here if direct dispatch is not allowed in the
@@ -935,6 +903,20 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
 			return true;
+		}
+
+		/*
+		 * If a per-CPU ktherad is running we want to ignore the
+		 * fact that the CPU is busy, so reuse is_wake_sync() here.
+		 */
+		if ((prev_cpu == this_cpu) && is_wake_sync(0)) {
+			if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | prev_cpu)) {
+				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
+						   slice_max, enq_flags);
+				__sync_fetch_and_add(&nr_direct_dispatches, 1);
+
+				return true;
+			}
 		}
 
 		/*
