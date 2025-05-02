@@ -457,27 +457,25 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 }
 
 /*
- * Return true if all the CPUs in the LLC of @cpu are busy, false
- * otherwise.
+ * Return true if @this_cpu and @that_cpu are in the same LLC, false otherwise.
  */
-static bool is_llc_busy(const struct cpumask *idle_cpumask, s32 cpu)
+static bool cpus_share_cache(s32 this_cpu, s32 that_cpu)
 {
-	const struct cpumask *primary, *l3_mask;
+	const struct cpumask *l3_mask;
 	struct cpu_ctx *cctx;
 
-	primary = cast_mask(primary_cpumask);
-	if (!primary)
-		return false;
+	if (this_cpu == that_cpu)
+		return true;
 
-	cctx = try_lookup_cpu_ctx(cpu);
+	cctx = try_lookup_cpu_ctx(this_cpu);
 	if (!cctx)
 		return false;
 
 	l3_mask = cast_mask(cctx->l3_cpumask);
 	if (!l3_mask)
-		l3_mask = primary;
+		return true;
 
-	return !bpf_cpumask_intersects(l3_mask, idle_cpumask);
+	return bpf_cpumask_test_cpu(that_cpu, l3_mask);
 }
 
 /*
@@ -511,33 +509,6 @@ static bool is_wake_sync(s32 prev_cpu, s32 this_cpu, u64 wake_flags)
 }
 
 /*
- * Return the target CPU for @p in case of a sync wakeup.
- *
- * During a sync wakeup, the waker commits to releasing the CPU immediately
- * after the wakeup event, so we should consider a sync wakeup almost like
- * a direct function call between a waker and a wakee.
- */
-static s32 try_sync_wakeup(const struct task_struct *p, s32 prev_cpu, s32 this_cpu)
-{
-	/*
-	 * If @prev_cpu is idle, keep using it, since there is no guarantee
-	 * that the cache hot data from the waker's CPU is more important
-	 * than cache hot data in the wakee's CPU.
-	 */
-	if ((this_cpu != prev_cpu) && scx_bpf_test_and_clear_cpu_idle(prev_cpu))
-		return prev_cpu;
-
-	/*
-	 * If waker and wakee are on the same CPU and no other tasks are
-	 * queued, consider the waker's CPU as idle.
-	 */
-	if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | this_cpu))
-		return this_cpu;
-
-	return -EBUSY;
-}
-
-/*
  * Find an idle CPU in the system.
  *
  * NOTE: the idle CPU selection doesn't need to be formally perfect, it is
@@ -553,7 +524,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	struct task_ctx *tctx;
 	int node;
 	s32 this_cpu = bpf_get_smp_processor_id(), cpu;
-	bool share_llc;
 
 	primary = cast_mask(primary_cpumask);
 	if (!primary)
@@ -600,21 +570,42 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	idle_cpumask = __COMPAT_scx_bpf_get_idle_cpumask_node(node);
 
 	/*
-	 * In case of a sync wakeup, attempt to run the wakee on the
-	 * waker's CPU if possible, as it's going to release the CPU right
-	 * after the wakeup, so it can be considered as idle and, possibly,
-	 * cache hot.
-	 *
-	 * However, ignore this optimization if the LLC is completely
-	 * saturated, since it's just more efficient to dispatch the task
-	 * on the first CPU available.
+	 * In case of a synchronous wakeup the waker is going to release its
+	 * CPU after the wakeup, so we can consider that CPU as idle and a good
+	 * candidate for the wakee, since it may contain hot cache data.
 	 */
-	share_llc = l3_mask && bpf_cpumask_test_cpu(this_cpu, l3_mask);
-	if (is_wake_sync(prev_cpu, this_cpu, wake_flags) &&
-	    share_llc && !is_llc_busy(idle_cpumask, this_cpu)) {
-		cpu = try_sync_wakeup(p, prev_cpu, this_cpu);
-		if (cpu >= 0) {
+	if (is_wake_sync(prev_cpu, this_cpu, wake_flags)) {
+		/*
+		 * If the waker and wakee share the same LLC, prefer
+		 * reusing the same CPU, if idle, to avoid unnecessary
+		 * migrations.
+		 */
+		if (cpus_share_cache(prev_cpu, this_cpu) &&
+		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			*is_idle = true;
+			cpu = prev_cpu;
+			goto out_put_cpumask;
+		}
+
+		/*
+		 * If the waker's local DSQ is empty, and the waker's node
+		 * is not fully saturated, try to migrate to the waker's
+		 * CPU.
+                 *
+		 * Checking only for an empty local DSQ is insufficient as
+		 * it could give the wakee an unfair advantage when the
+		 * node is oversaturated.
+                 *
+		 * Checking only for the presence of idle CPUs in the node
+		 * is also insufficient as the local DSQ of the waker could
+		 * have tasks piled up on it even if there are idle CPUs in
+		 * the node.
+                 */
+		if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | this_cpu) &&
+		    !bpf_cpumask_empty(idle_cpumask) &&
+		    p_mask && bpf_cpumask_test_cpu(this_cpu, p_mask)) {
+			*is_idle = true;
+			cpu = this_cpu;
 			goto out_put_cpumask;
 		}
 	}
