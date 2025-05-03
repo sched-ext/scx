@@ -406,7 +406,7 @@ impl<'a> Scheduler<'a> {
         self.drain_queued_tasks();
         self.dispatch_tasks();
 
-        // Notify the dispatcher if there are still peding tasks to be processed,
+        // Notify the dispatcher if there are still pending tasks to be processed,
         self.bpf.notify_complete(self.task_pool.tasks.len() as u64);
     }
 
