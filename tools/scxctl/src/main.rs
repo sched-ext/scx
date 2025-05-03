@@ -50,7 +50,7 @@ fn cmd_start(
     }
 
     let sched: SupportedSched = validate_sched(scx_loader.clone(), sched_name);
-    let mode: SchedMode = mode_name.unwrap_or_else(|| SchedMode::Auto);
+    let mode: SchedMode = mode_name.unwrap_or(SchedMode::Auto);
     match args {
         Some(args) => {
             scx_loader.start_scheduler_with_args(sched.clone(), &args.clone())?;
@@ -142,8 +142,8 @@ fn ensure_scx_prefix(input: String) -> String {
 }
 
 fn remove_scx_prefix(input: &String) -> String {
-    if input.starts_with(SCHED_PREFIX) {
-        return input[SCHED_PREFIX.len()..].to_string();
+    if let Some(strip_input) = input.strip_prefix(SCHED_PREFIX) {
+        return strip_input.to_string();
     }
     input.to_string()
 }
