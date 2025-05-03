@@ -385,7 +385,7 @@ impl<'cb> BpfScheduler<'cb> {
     }
 
     // Notify the BPF component that the user-space scheduler has completed its scheduling cycle,
-    // updating the amount tasks that are still peding.
+    // updating the amount tasks that are still pending.
     //
     // NOTE: do not set allow(dead_code) for this method, any scheduler must use this method at
     // some point, otherwise the BPF component will keep waking-up the user-space scheduler in a
