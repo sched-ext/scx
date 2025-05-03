@@ -33,6 +33,8 @@ pub struct Metrics {
     pub node_migrations: u64,
     #[stat(desc = "Number of times tasks have directly been dispatched to local per CPU DSQs")]
     pub direct: u64,
+    #[stat(desc = "Number of times tasks have been mangoapp scheduled")]
+    pub mango: u64,
     #[stat(desc = "Number of times tasks have dispatched to an idle local per CPU DSQs")]
     pub idle: u64,
     #[stat(desc = "Number of times tasks have been woken to the previous CPU")]
@@ -47,9 +49,10 @@ impl Metrics {
     fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "direct/idle {}/{}\n\tdsq same/migrate/keep {}/{}/{}\n\twake_prev/llc/mig {}/{}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}",
+            "direct/idle/mango {}/{}/{}\n\tdsq same/migrate/keep {}/{}/{}\n\twake_prev/llc/mig {}/{}/{}\n\tpick2 select/dispatch {}/{}\n\tmigrations llc/node: {}/{}",
             self.direct,
             self.idle,
+            self.mango,
             self.same_dsq,
             self.dsq_change,
             self.keep,
@@ -68,6 +71,7 @@ impl Metrics {
         Self {
             direct: self.direct - rhs.direct,
             idle: self.idle - rhs.idle,
+            mango: self.mango - rhs.mango,
             dsq_change: self.dsq_change - rhs.dsq_change,
             same_dsq: self.same_dsq - rhs.same_dsq,
             keep: self.keep - rhs.keep,

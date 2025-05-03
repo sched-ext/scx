@@ -12,11 +12,16 @@ use stats::Metrics;
 use scx_p2dq::SchedulerOpts;
 use scx_p2dq::TOPO;
 
+use std::mem;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use std::{ffi::CString, io};
+
+use libc::{ftok, msgget, msgrcv, IPC_NOWAIT};
+use scx_utils::mangoapp::{mangoapp_msg_v1, MANGOAPP_PROJ_ID};
 
 use anyhow::Context;
 use anyhow::Result;
@@ -24,7 +29,7 @@ use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::compat;
@@ -45,6 +50,7 @@ use crate::bpf_intf::stat_idx_P2DQ_STAT_DSQ_SAME;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_IDLE;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_KEEP;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_LLC_MIGRATION;
+use crate::bpf_intf::stat_idx_P2DQ_STAT_MANGO;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_NODE_MIGRATION;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_SELECT_PICK2;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_WAKE_LLC;
@@ -80,11 +86,29 @@ struct CliOpts {
     pub sched: SchedulerOpts,
 }
 
+#[derive(Debug, Clone)]
+struct MangoAppAction {
+    pid: u32,
+    vis_frametime: u64,
+    app_frametime: u64,
+    fsr_upscale: u32,
+    fsr_sharpness: u32,
+    latency_ns: u64,
+    output_width: u32,
+    output_height: u32,
+    display_refresh: u32,
+}
+
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
 
     stats_server: StatsServer<(), Metrics>,
+
+    mangoapp_scheduling: bool,
+    mangoapp_key: i32,
+    mangoapp_poll_ms: Duration,
+    mangoapp_path: CString,
 }
 
 impl<'a> Scheduler<'a> {
@@ -116,13 +140,24 @@ impl<'a> Scheduler<'a> {
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
+        let mangoapp_scheduling = opts.mangoapp_scheduling;
+        let mangoapp_poll_ms = Duration::from_millis(opts.mangoapp_poll_ms as u64);
+        let mangoapp_path = CString::new(opts.mangoapp_path.clone())?;
+        let mangoapp_key = -1;
+
         info!("P2DQ scheduler started! Run `scx_p2dq --monitor` for metrics.");
 
-        Ok(Self {
+        let mut sched = Self {
             skel,
             struct_ops,
             stats_server,
-        })
+            mangoapp_scheduling,
+            mangoapp_key,
+            mangoapp_poll_ms,
+            mangoapp_path,
+        };
+        sched.init_mangoapp()?;
+        Ok(sched)
     }
 
     fn get_metrics(&self) -> Metrics {
@@ -142,6 +177,7 @@ impl<'a> Scheduler<'a> {
         Metrics {
             direct: stats[stat_idx_P2DQ_STAT_DIRECT as usize],
             idle: stats[stat_idx_P2DQ_STAT_IDLE as usize],
+            mango: stats[stat_idx_P2DQ_STAT_MANGO as usize],
             sched_mode: self.skel.maps.bss_data.sched_mode,
             dsq_change: stats[stat_idx_P2DQ_STAT_DSQ_CHANGE as usize],
             same_dsq: stats[stat_idx_P2DQ_STAT_DSQ_SAME as usize],
@@ -156,11 +192,100 @@ impl<'a> Scheduler<'a> {
         }
     }
 
+    fn init_mangoapp(&mut self) -> Result<()> {
+        if !self.mangoapp_scheduling {
+            return Ok(());
+        }
+        let key = unsafe { ftok(self.mangoapp_path.as_ptr(), MANGOAPP_PROJ_ID) };
+        if key == -1 {
+            return Err(anyhow::anyhow!(
+                "failed to ftok: {}",
+                io::Error::last_os_error()
+            ));
+        }
+
+        let msgid = unsafe { msgget(key, 0) };
+        if msgid == -1 {
+            return Err(anyhow::anyhow!(
+                "msgget failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        self.mangoapp_key = msgid;
+
+        Ok(())
+    }
+
+    fn poll_mangoapp(&self) -> Result<Option<MangoAppAction>> {
+        let mut raw_msg: mangoapp_msg_v1 = unsafe { mem::zeroed() };
+        let msg_size = unsafe {
+            msgrcv(
+                self.mangoapp_key,
+                &mut raw_msg as *mut _ as *mut libc::c_void,
+                mem::size_of::<mangoapp_msg_v1>() - mem::size_of::<i64>(),
+                0,
+                IPC_NOWAIT, // XXX: this should probably use MSG_COPY
+            )
+        };
+        if msg_size as isize == -1 {
+            if io::Error::last_os_error().kind() != io::ErrorKind::WouldBlock {
+                info!(
+                    "mangoapp: msgrcv returned -1 with error {}",
+                    io::Error::last_os_error()
+                );
+            }
+            return Ok(None);
+        }
+
+        let vis_frametime = raw_msg.visible_frametime_ns;
+        let fsr_upscale = raw_msg.fsr_upscale;
+        let fsr_sharpness = raw_msg.fsr_sharpness;
+        let app_frametime = raw_msg.app_frametime_ns;
+        let pid = raw_msg.pid;
+        let latency_ns = raw_msg.latency_ns;
+        let output_width = raw_msg.output_width;
+        let output_height = raw_msg.output_height;
+        let display_refresh = raw_msg.display_refresh;
+        let action = MangoAppAction {
+            pid,
+            vis_frametime,
+            app_frametime,
+            fsr_upscale: fsr_upscale.into(),
+            fsr_sharpness: fsr_sharpness.into(),
+            latency_ns,
+            output_width,
+            output_height,
+            display_refresh: display_refresh.into(),
+        };
+
+        Ok(Some(action))
+    }
+
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
+        let mut mangoapp_last_poll = Instant::now();
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
-            match req_ch.recv_timeout(Duration::from_secs(1)) {
+            let now = Instant::now();
+            if self.mangoapp_scheduling && now - mangoapp_last_poll >= self.mangoapp_poll_ms {
+                match self.poll_mangoapp() {
+                    Ok(Some(action)) => {
+                        info!("Received MangoApp action: {:?}", action);
+                        self.skel.maps.bss_data.mangoapp_tgid = action.pid as i32;
+                        self.skel.maps.bss_data.mangoapp_slice = action.app_frametime;
+                    }
+                    Ok(None) => {
+                        // No MangoApp message
+                    }
+                    Err(e) => {
+                        error!("Error polling MangoApp: {}", e);
+                        // Disable bpf scheduling
+                        self.skel.maps.bss_data.mangoapp_tgid = 0;
+                    }
+                }
+                mangoapp_last_poll = now;
+            }
+            match req_ch.recv_timeout(self.mangoapp_poll_ms) {
                 Ok(()) => res_ch.send(self.get_metrics())?,
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(e) => Err(e)?,

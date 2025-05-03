@@ -116,6 +116,18 @@ pub struct SchedulerOpts {
     /// Initial DSQ for tasks.
     #[clap(short = 'i', long, default_value = "0")]
     pub init_dsq_index: usize,
+
+    /// Enables mangoapp integration
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    pub mangoapp_scheduling: bool,
+
+    /// Mangoapp poll interval in ms
+    #[arg(long, default_value = "1000")]
+    pub mangoapp_poll_ms: usize,
+
+    /// Mangoapp path for System V IPC key
+    #[arg(long, default_value = "mangoapp")]
+    pub mangoapp_path: String,
 }
 
 pub fn dsq_slice_ns(dsq_index: u64, min_slice_us: u64, dsq_shift: u64) -> u64 {
@@ -205,6 +217,8 @@ macro_rules! init_open_skel {
             $skel.maps.rodata_data.wakeup_llc_migrations = opts.wakeup_llc_migrations;
             $skel.maps.rodata_data.max_exec_ns =
                 2 * $skel.maps.bss_data.dsq_time_slices[opts.dumb_queues - 1];
+
+            $skel.maps.rodata_data.mangoapp_scheduling = opts.mangoapp_scheduling;
 
             Ok(())
         }
