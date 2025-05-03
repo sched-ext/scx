@@ -792,6 +792,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		cpuc = lookup_cpu_ctx(cpu);
 		if (cpuc && taskc->dsq_index >= 0 && taskc->dsq_index < nr_dsqs_per_llc) {
 			dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
+			taskc->dsq_id = dsq_id;
 			scx_bpf_dsq_insert_vtime(p, dsq_id, slice_ns, p->scx.dsq_vtime, enq_flags);
 			if (is_idle) {
 				stat_inc(P2DQ_STAT_IDLE);
@@ -804,6 +805,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	}
 
 	dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
+	taskc->dsq_id = dsq_id;
 
 	ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
 	ret->vtime.dsq_id = dsq_id;
