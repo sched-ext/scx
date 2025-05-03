@@ -224,11 +224,6 @@ static u32 calc_greedy_ratio(struct task_ctx *taskc)
 {
 	u32 ratio;
 
-	if (!have_scheduled(taskc)) {
-		taskc->is_greedy = true;
-		return LAVD_GREEDY_RATIO_NEW;
-	}
-
 	/*
 	 * The greedy ratio of a task represents how much time the task
 	 * overspent CPU time compared to the ideal, fair CPU allocation. It is
@@ -1360,7 +1355,7 @@ static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
 	taskc->last_running_clk = now; /* for avg_runtime */
 	taskc->last_stopping_clk = now; /* for avg_runtime */
 	taskc->avg_runtime = slice_max_ns;
-	taskc->svc_time = sys_stat.avg_svc_time * LAVD_NEW_PROC_PENALITY;
+	taskc->svc_time = sys_stat.avg_svc_time;
 
 	set_on_core_type(taskc, p->cpus_ptr);
 }
