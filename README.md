@@ -262,10 +262,10 @@ options can be used in such cases.
 - `bpftool`: `bpftool` to use when generating `.bpf.skel.h`. Set this to "disabled" to check the system for an already installed bpftool
 - `libbpf_a`: Static `libbpf.a` to use. Set this to "disabled" to link libbpf dynamically
 - `libbpf_h`: `libbpf` header directories, only meaningful with `libbpf_a` option
-- `cargo`: `cargo` to use when building rust sub-projects
-- 'cargo_home': 'CARGO_HOME env to use when invoking cargo'
-- `offline`: 'Compilation step should not access the internet'
-- `enable_rust`: 'Enable the build of rust sub-projects'
+- `cargo`: `cargo` to use when building Rust sub-projects
+- `cargo_home`: `CARGO_HOME` env to use when invoking `cargo`
+- `offline`: Compilation step should not access the internet
+- `enable_rust`: Enable the build of Rust sub-projects
 
 For example, let's say you want to use `bpftool` and `libbpf` shipped in the
 kernel tree located at `$KERNEL`. We need to build `bpftool` in the kernel
