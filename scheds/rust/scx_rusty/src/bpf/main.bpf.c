@@ -582,8 +582,10 @@ SEC("perf_event")
 int read_sample(struct bpf_perf_event_data_kern __kptr *arg)
 {
 	struct bpf_perf_event_data_kern *ctx, a;
-	struct perf_sample_data data;
 	union perf_mem_data_src data_src;
+	struct perf_sample_data data;
+	struct task_ctx *taskc;
+	struct task_struct *p;
 	int ret;
 
 	ctx = bpf_cast_to_kern_ctx(arg);
@@ -605,17 +607,23 @@ int read_sample(struct bpf_perf_event_data_kern __kptr *arg)
 	if (ctx->data->addr == 0)
 		return 0;
 
-	bpf_printk("(1/2) %s\t(0x%lx,0x%lx,0x%lx) ",
-			data_src.mem_op == 2 ? "STORE" : (data_src.mem_op == 4 ? "LOAD" : "UNKNOWN") ,
-			data_src.mem_lvl_num,
-			data_src.mem_snoop,
-			data_src.mem_remote
-			);
-	bpf_printk("(2/2) [%llx, %llx] 0x%lx",
-			ctx->data->phys_addr,
-			ctx->data->addr,
-			data_src.mem_dtlb
-			);
+	/* We only care about L3 traffic. */
+	if (data_src.mem_lvl_num != 0x3)
+		return 0;
+
+	p = bpf_get_current_task_btf();
+	if (!p) {
+		bpf_printk("could not retrieve current task");
+		return 0;
+	}
+			
+	taskc = try_lookup_task_ctx(p);
+	if (!taskc) {
+		bpf_printk("no task context found for %d", p->pid);
+		return 0;
+	}
+
+	taskc->l3_current += 1;
 
 	return 0;
 }

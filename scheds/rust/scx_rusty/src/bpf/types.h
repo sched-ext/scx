@@ -63,6 +63,10 @@ struct task_ctx {
 	u32 pid;
 
 	struct ravg_data dcyc_rd;
+	struct ravg_data l3_rd;
+
+	u64 l3_current;
+	u64 l3_prev;
 };
 
 /* XXXETSAL Same rationale as for dom_ptr. Remove once we dump Clang 18.*/
