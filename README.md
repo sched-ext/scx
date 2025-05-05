@@ -112,7 +112,7 @@ scx
 
 `meson` is the main build system but each Rust sub-project is its own
 self-contained cargo project and can be built and published separately. The
-followings are the dependencies and version requirements.
+following are the dependencies and version requirements.
 
 **Note**: Many distros only have earlier versions of `meson`, in that case just [clone the meson
 repo](https://mesonbuild.com/Quick-guide.html#installation-from-source) and call
@@ -285,7 +285,7 @@ $ meson install -C build
 ```
 
 Note that we use `libbpf` which was produced as a part of `bpftool` build
-process rather than buliding `libbpf` directly. This is necessary because
+process rather than building `libbpf` directly. This is necessary because
 `libbpf` header files need to be installed for them to be in the expected
 relative locations.
 
@@ -427,7 +427,7 @@ See: [services](services/README.md)
 
 The kernel feature is not yet upstream and can be found in the
 [sched_ext](https://github.com/sched-ext/sched_ext) repository. The
-followings are important branches:
+following are important branches:
 
 - [`sched_ext`](https://github.com/sched-ext/sched_ext): The main development
   branch. This branch periodically pulls from the

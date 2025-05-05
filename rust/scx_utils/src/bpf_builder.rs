@@ -22,7 +22,7 @@ use std::path::PathBuf;
 /// [sched_ext](https://github.com/sched-ext/scx) scheduler with C BPF
 /// component and Rust userspace component. `BpfBuilder` provides everything
 /// necessary to build the BPF component and generate Rust bindings.
-/// BpfBuilder provides the followings.
+/// BpfBuilder provides the following.
 ///
 /// 1. *`vmlinux.h` and other common BPF header files*
 ///
