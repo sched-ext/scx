@@ -282,21 +282,18 @@ static bool dispatch_cpu(s32 cpu, bool same_cpu, bool from_dispatch)
  */
 static bool dispatch_all_cpus(bool do_idle_smt, bool from_dispatch)
 {
-	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
-	s32 cpu;
+	const struct cpumask *idle_smtmask, *idle_cpumask;
+	s32 i, cpu;
 	bool is_done = false;
 
-	online_cpumask = scx_bpf_get_online_cpumask();
 	idle_smtmask = scx_bpf_get_idle_smtmask();
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 
-	if (do_idle_smt && bpf_cpumask_empty(idle_smtmask))
-		goto out_put_cpumask;
+	bpf_for(i, 0, nr_cpu_ids) {
+		cpu = bpf_cpumask_first(do_idle_smt ? idle_smtmask : idle_cpumask);
+		if (cpu >= nr_cpu_ids)
+			break;
 
-	if (!do_idle_smt && bpf_cpumask_empty(idle_cpumask))
-		goto out_put_cpumask;
-
-	bpf_for(cpu, 0, nr_cpu_ids) {
 		/*
 		 * Stop dispatching tasks if all the pending tasks have
 		 * been distributed.
@@ -315,25 +312,6 @@ static bool dispatch_all_cpus(bool do_idle_smt, bool from_dispatch)
 		}
 
 		/*
-		 * Do not distribute tasks to offline or primary CPUs.
-		 */
-		if (!bpf_cpumask_test_cpu(cpu, online_cpumask) || is_primary_cpu(cpu))
-			continue;
-
-		/*
-		 * Skip if we want only full-idle SMT cores and the SMT is
-		 * busy.
-		 */
-		if (do_idle_smt && !bpf_cpumask_test_cpu(cpu, idle_smtmask))
-			continue;
-
-		/*
-		 * Skip busy CPUs.
-		 */
-		if (!bpf_cpumask_test_cpu(cpu, idle_cpumask))
-			continue;
-
-		/*
 		 * Try to dispatch a task that was using this CPU first, if
 		 * @prefer_same_cpu is enabled.
 		 */
@@ -341,20 +319,16 @@ static bool dispatch_all_cpus(bool do_idle_smt, bool from_dispatch)
 			dispatch_cpu(cpu, false, from_dispatch);
 	}
 
-out_put_cpumask:
 	scx_bpf_put_cpumask(idle_smtmask);
 	scx_bpf_put_cpumask(idle_cpumask);
-	scx_bpf_put_cpumask(online_cpumask);
 
 	return is_done;
 }
 
 static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
 {
-	const struct cpumask *online_cpumask;
 	struct cpu_ctx *cctx;
 	u64 now = scx_bpf_now();
-	bool is_primary;
 	s32 cpu;
 
 	/*
@@ -363,23 +337,11 @@ static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
 	if (!smt_enabled || !dispatch_all_cpus(true, false))
 		dispatch_all_cpus(false, false);
 
-	bpf_rcu_read_lock();
-
-	is_primary = is_primary_cpu(bpf_get_smp_processor_id());
-	if (!is_primary) {
-		scx_bpf_error("Scheduling timer executed on a non-primary CPU");
-		goto out_unlock;
-	}
-
-	online_cpumask = scx_bpf_get_online_cpumask();
-
 	/*
 	 * Check if we need to preempt the running tasks.
 	 */
+	bpf_rcu_read_lock();
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		if (!bpf_cpumask_test_cpu(cpu, online_cpumask))
-			continue;
-
 		cctx = try_lookup_cpu_ctx(cpu);
 		if (!cctx)
 			continue;
@@ -396,10 +358,7 @@ static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
 		__sync_fetch_and_add(&nr_preemptions, 1);
 	}
 
-	scx_bpf_put_cpumask(online_cpumask);
-
-	bpf_timer_start(timer, tick_interval_ns(), BPF_F_TIMER_CPU_PIN);
-out_unlock:
+	bpf_timer_start(timer, tick_interval_ns(), 0);
 	bpf_rcu_read_unlock();
 
 	return 0;
@@ -423,7 +382,7 @@ static void fire_timer(s32 cpu)
 	bpf_timer_init(&cctx->timer, &cpu_ctx_stor, CLOCK_MONOTONIC);
 	bpf_timer_set_callback(&cctx->timer, sched_timerfn);
 
-	ret = bpf_timer_start(&cctx->timer, tick_interval_ns(), BPF_F_TIMER_CPU_PIN);
+	ret = bpf_timer_start(&cctx->timer, tick_interval_ns(), 0);
 	if (ret)
 		scx_bpf_error("failed to fire up timer on cpu%d: %d", cpu, ret);
 
