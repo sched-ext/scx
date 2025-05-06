@@ -578,6 +578,7 @@ impl<'a> Scheduler<'a> {
             self.balanced_kworkers,
             self.tuner.fully_utilized,
             self.balance_load,
+            self.l3_balancing,
         );
 
         lb.load_balance()?;

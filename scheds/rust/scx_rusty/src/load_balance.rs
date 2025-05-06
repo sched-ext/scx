@@ -460,6 +460,7 @@ pub struct LoadBalancer<'a, 'b> {
 
     lb_apply_weight: bool,
     balance_load: bool,
+    l3_balancing: bool,
 }
 
 // Verify that the number of buckets is a factor of the maximum weight to
@@ -476,6 +477,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         skip_kworkers: bool,
         lb_apply_weight: bool,
         balance_load: bool,
+        l3_balancing: bool,
     ) -> Self {
         Self {
             skel,
@@ -489,6 +491,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             balance_load,
 
             dom_group,
+            l3_balancing,
         }
     }
 
@@ -573,7 +576,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
 
             for bucket in 0..NUM_BUCKETS {
                 let bucket_ctx = &dom_ctx.buckets[bucket as usize];
-                let rd = &bucket_ctx.rd;
+                let rd = if self.l3_balancing { &bucket_ctx.l3_rd } else { &bucket_ctx.rd };
                 let duty_cycle = ravg_read(
                     rd.val,
                     rd.val_at,
@@ -653,7 +656,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
                 continue;
             }
 
-            let rd = &taskc.dcyc_rd;
+            let rd = if self.l3_balancing { &taskc.l3_rd } else { &taskc.dcyc_rd };
             let mut load = ravg_read(
                 rd.val,
                 rd.val_at,
@@ -769,6 +772,10 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         }
 
         let load = *(task.load);
+        if load == 0.0f64 {
+            return Ok(None);
+        }
+
         let taskc_p = task.taskc_p;
         task.migrated.set(true);
         std::mem::swap(&mut push_dom.tasks, &mut SortedVec::from_unsorted(tasks));
