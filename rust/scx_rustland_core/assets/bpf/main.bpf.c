@@ -924,7 +924,7 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 		return;
 	}
 
-	dbg_msg("start: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
+	bpf_printk("start: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
 
 	/*
 	 * Mark the CPU as busy by setting the pid as owner (ignoring the
@@ -943,13 +943,12 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
  */
 void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 {
+	u64 now = scx_bpf_now();
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct task_ctx *tctx;
 
 	if (is_usersched_task(p))
 		return;
-
-	dbg_msg("stop: pid=%d (%s) cpu=%ld", p->pid, p->comm, cpu);
 
 	__sync_fetch_and_sub(&nr_running, 1);
 
@@ -957,10 +956,13 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 	if (!tctx)
 		return;
 
+	bpf_printk("stop: pid=%d (%s) cpu=%ld used_slice=%llu",
+		   p->pid, p->comm, cpu, now - tctx->last_run_at);
+
 	/*
 	 * Update the partial execution time since last sleep.
 	 */
-	tctx->exec_runtime += scx_bpf_now() - tctx->last_run_at;
+	tctx->exec_runtime += now - tctx->last_run_at;
 }
 
 /*
