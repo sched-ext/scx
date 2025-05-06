@@ -638,12 +638,6 @@ int read_sample(struct bpf_perf_event_data_kern __kptr *arg)
 	if (!ctx->data->sample_flags || data_src.mem_op == 1)
 		return 0;
 
-	if (ctx->data->addr == 0)
-		return 0;
-
-	/* We only care about L3 traffic. */
-	if (data_src.mem_lvl_num != 0x3)
-		return 0;
 
 	p = bpf_get_current_task_btf();
 	if (!p) {
@@ -655,6 +649,22 @@ int read_sample(struct bpf_perf_event_data_kern __kptr *arg)
 	taskc = try_lookup_task_ctx(p);
 	if (!taskc)
 		return 0;
+
+
+	/* Require level 3 because it is really spammy. */
+	if (debug >= 3) {
+		bpf_printk("(1/2) %s\t(0x%lx,0x%lx,0x%lx) ",
+				data_src.mem_op == 2 ? "STORE" : (data_src.mem_op == 4 ? "LOAD" : "UNKNOWN") ,
+				data_src.mem_lvl_num,
+				data_src.mem_snoop,
+				data_src.mem_remote
+				);
+		bpf_printk("(2/2) [%llx, %llx] 0x%lx",
+				ctx->data->phys_addr,
+				ctx->data->addr,
+				data_src.mem_dtlb
+				);
+	}
 
 	taskc->l3_next += 1;
 

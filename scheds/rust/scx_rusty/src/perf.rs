@@ -212,7 +212,8 @@ pub fn init_perf_counters(skel: &mut BpfSkel, cpu: &i32) -> Result<(i32, libbpf_
      */
     attr._type = _PERF_TYPE_AMD_IBS;
     attr.size = mem::size_of::<perf_event_attr>() as u32;
-    attr.config = 0;
+    // Only mark L3 misses.
+    attr.config = 1 << 16;
     attr.sample_type = _PERF_SAMPLE_CPU | _PERF_SAMPLE_IP | _PERF_SAMPLE_TID | _PERF_SAMPLE_DATA_SRC | _PERF_SAMPLE_PHYS_ADDR | _PERF_SAMPLE_ADDR;
     attr.sample.sample_period = 1000;
     attr.flags = 3 * _PERF_SAMPLE_FLAG_PRECISE_IP;
