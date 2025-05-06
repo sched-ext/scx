@@ -230,6 +230,10 @@ struct Opts {
     /// prioritize energy efficiency. When in doubt, use 0 or 1024.
     #[clap(long, default_value = "0")]
     perf: u32,
+
+    /// Use L3 traffic sampling for load balancing instead of CPU load.
+    #[clap(long, default_value="false")]
+    l3_balancing: bool,
 }
 
 fn read_cpu_busy_and_total(reader: &procfs::ProcReader) -> Result<(u64, u64)> {
@@ -352,6 +356,7 @@ struct Scheduler<'a> {
     tuner: Tuner,
     stats_server: StatsServer<StatsCtx, (StatsCtx, ClusterStats)>,
     _pefds: Vec<(i32, libbpf_rs::Link)>,
+    l3_balancing: bool,
 }
 
 impl<'a> Scheduler<'a> {
@@ -477,6 +482,7 @@ impl<'a> Scheduler<'a> {
             tune_interval: Duration::from_secs_f64(opts.tune_interval),
             balance_load: !opts.no_load_balance,
             balanced_kworkers: opts.balanced_kworkers,
+            l3_balancing: opts.l3_balancing,
 
             dom_group: domains.clone(),
             proc_reader,
