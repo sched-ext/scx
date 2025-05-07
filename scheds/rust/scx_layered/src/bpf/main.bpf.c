@@ -1126,6 +1126,7 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 			    struct layer *layer, bool preempt_first)
 {
 	struct cpu_ctx *cpuc, *cand_cpuc, *sib_cpuc = NULL;
+	struct rq *rq = NULL;
 	s32 sib;
 
 	if (cand >= nr_possible_cpus || !bpf_cpumask_test_cpu(cand, p->cpus_ptr))
@@ -1135,6 +1136,20 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 		return false;
 
 	if (cand_cpuc->current_preempt)
+		return false;
+
+	rq = scx_bpf_cpu_rq(cand);
+
+	if (!rq) {
+		scx_bpf_error("failed to get rq to determine preempt eligibility for cpu %d", cand);
+		return false;
+	}
+	
+	/*
+	 * Don't preempt if sched policy is not sched_ext.
+	 * 
+	 */
+	if (rq->curr->policy != SCHED_EXT)
 		return false;
 
 	/*
