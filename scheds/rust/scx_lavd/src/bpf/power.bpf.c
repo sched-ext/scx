@@ -277,8 +277,6 @@ static int do_set_power_profile(s32 pm, int util)
 	switch (pm) {
 	case LAVD_PM_PERFORMANCE:
 		no_core_compaction = true;
-		no_freq_scaling = false;
-		no_prefer_turbo_core = false;
 		is_powersave_mode = false;
 
 		/*
@@ -295,16 +293,12 @@ static int do_set_power_profile(s32 pm, int util)
 		break;
 	case LAVD_PM_BALANCED:
 		no_core_compaction = false;
-		no_freq_scaling = false;
-		no_prefer_turbo_core = false;
 		is_powersave_mode = false;
 		reinit_cpumask_for_performance = false;
 		debugln("Set the scheduler's power profile to balanced mode: %d", util);
 		break;
 	case LAVD_PM_POWERSAVE:
 		no_core_compaction = false;
-		no_freq_scaling = false;
-		no_prefer_turbo_core = true;
 		is_powersave_mode = true;
 		reinit_cpumask_for_performance = false;
 		debugln("Set the scheduler's power profile to power-save mode: %d", util);
