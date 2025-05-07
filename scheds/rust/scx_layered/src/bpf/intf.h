@@ -164,6 +164,7 @@ struct cpu_ctx {
 	bool			yielding;
 	bool			try_preempt_first;
 	bool			is_big;
+	bool			current_is_scx;
 
 	bool			protect_owned;
 	bool			protect_owned_preempt;

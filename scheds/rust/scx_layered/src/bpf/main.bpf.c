@@ -1136,6 +1136,14 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 
 	if (cand_cpuc->current_preempt)
 		return false;
+	
+	/*
+	 * Don't preempt if the sched policy of running task is not sched_ext
+	 * We are setting current_is_scx in tick, so this will be racy,
+	 * but this might be sufficient for anti-thrash WRT/ RT tasks.
+	 */
+	if (!cand_cpuc->current_is_scx)
+		return false;
 
 	/*
 	 * Don't preempt if protection against is in effect. However, open
@@ -1965,6 +1973,8 @@ void BPF_STRUCT_OPS(layered_tick, struct task_struct *p)
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
+
+	cpuc->current_is_scx = p->policy == SCHED_EXT;
 
 	account_used(cpuc, taskc, scx_bpf_now());
 }
