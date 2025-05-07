@@ -30,7 +30,6 @@ volatile bool		no_preemption;
 volatile bool		no_wake_sync;
 volatile bool		no_core_compaction;
 volatile bool		no_freq_scaling;
-volatile bool		no_prefer_turbo_core;
 volatile bool		is_powersave_mode;
 volatile bool		reinit_cpumask_for_performance;
 const volatile bool	is_autopilot_on;

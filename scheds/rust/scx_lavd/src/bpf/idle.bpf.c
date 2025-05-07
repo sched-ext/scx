@@ -149,8 +149,7 @@ bool init_idle_ato_masks(struct pick_ctx *ctx, const struct cpumask *idle_mask)
 	else
 		ctx->io_empty = true;
 
-	if (ctx->ia_empty || !have_turbo_core ||
-	    no_prefer_turbo_core || !turbo_cpumask)
+	if (ctx->ia_empty || !have_turbo_core || !turbo_cpumask)
 		ctx->iat_empty = true;
 	else if (turbo_cpumask) {
 		bpf_cpumask_and(ctx->iat_mask, cast_mask(ctx->ia_mask),
