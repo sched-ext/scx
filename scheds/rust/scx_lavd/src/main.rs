@@ -84,7 +84,8 @@ struct Opts {
     /// powersave vs. balanced) based on the system's active power profile.
     /// The scheduler's power mode decides the CPU preference order and the use
     /// of core compaction, so the options affecting these (--autopilot,
-    /// --no-core-compaction) cannot be used with this option.
+    /// --performance, --powersave, --balanced, --no-core-compaction) cannot
+    /// be used with this option.
     #[clap(long = "autopower", action = clap::ArgAction::SetTrue)]
     autopower: bool,
 
@@ -179,28 +180,95 @@ struct Opts {
 }
 
 impl Opts {
-    fn autopilot_allowed(&self) -> bool {
-        self.autopilot == false
-            && self.autopower == false
+    fn can_autopilot(&self) -> bool {
+        self.autopower == false
             && self.performance == false
             && self.powersave == false
             && self.balanced == false
             && self.no_core_compaction == false
     }
 
+    fn can_autopower(&self) -> bool {
+        self.autopilot == false
+            && self.performance == false
+            && self.powersave == false
+            && self.balanced == false
+            && self.no_core_compaction == false
+    }
+
+    fn can_performance(&self) -> bool {
+        self.autopilot == false
+            && self.autopower == false
+            && self.powersave == false
+            && self.balanced == false
+    }
+
+    fn can_balanced(&self) -> bool {
+        self.autopilot == false
+            && self.autopower == false
+            && self.performance == false
+            && self.powersave == false
+            && self.no_core_compaction == false
+    }
+
+    fn can_powersave(&self) -> bool {
+        self.autopilot == false
+            && self.autopower == false
+            && self.performance == false
+            && self.balanced == false
+            && self.no_core_compaction == false
+    }
+
     fn proc(&mut self) -> Option<&mut Self> {
-        if self.autopilot_allowed() {
-            self.autopilot = true;
-            info!("Autopilot mode is enabled by default.");
+        if !self.autopilot {
+            self.autopilot = self.can_autopilot();
+        }
+        if self.autopilot {
+            if !self.can_autopilot() {
+                info!("Autopilot mode cannot be used with conflicting options.");
+                return None;
+            }
+            info!("Autopilot mode is enabled.");
+            return Some(self);
+        }
+
+        if self.autopower {
+            if !self.can_autopower() {
+                info!("Autopower mode cannot be used with conflicting options.");
+                return None;
+            }
+            info!("Autopower mode is enabled.");
             return Some(self);
         }
 
         if self.performance {
+            if !self.can_performance() {
+                info!("Performance mode cannot be used with conflicting options.");
+                return None;
+            }
+            info!("Performance mode is enabled.");
             self.no_core_compaction = true;
-        } else if self.powersave {
+            return Some(self);
+        }
+
+        if self.powersave {
+            if !self.can_powersave() {
+                info!("Powersave mode cannot be used with conflicting options.");
+                return None;
+            }
+            info!("Powersave mode is enabled.");
             self.no_core_compaction = false;
-        } else if self.balanced {
+            return Some(self);
+        }
+
+        if self.balanced {
+            if !self.can_balanced() {
+                info!("Balanced mode cannot be used with conflicting options.");
+                return None;
+            }
+            info!("Balanced mode is enabled.");
             self.no_core_compaction = false;
+            return Some(self);
         }
 
         Some(self)
@@ -944,7 +1012,7 @@ fn main() -> Result<()> {
     init_log(&opts);
 
     opts.proc().unwrap();
-    debug!("{:#?}", opts);
+    info!("{:#?}", opts);
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
