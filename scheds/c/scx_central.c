@@ -40,6 +40,7 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 
 static void sigint_handler(int dummy)
 {
+	(void)dummy;
 	exit_req = 1;
 }
 
