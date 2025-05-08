@@ -383,7 +383,7 @@ impl<'a> Scheduler<'a> {
                 let cpu = self
                     .bpf
                     .select_cpu(task.qtask.pid, task.qtask.cpu, task.qtask.flags);
-                dispatched_task.cpu = if cpu >= 0 { cpu } else { RL_CPU_ANY };
+                dispatched_task.cpu = if cpu >= 0 { cpu } else { task.qtask.cpu };
 
                 // Send task to the BPF dispatcher.
                 match self.bpf.dispatch_task(&dispatched_task) {
