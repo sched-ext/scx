@@ -1139,17 +1139,15 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 		return false;
 
 	rq = scx_bpf_cpu_rq(cand);
-
-	if (!rq) {
-		scx_bpf_error("failed to get rq to determine preempt eligibility for cpu %d", cand);
-		return false;
-	}
 	
 	/*
-	 * Don't preempt if sched policy is not sched_ext.
-	 * 
+	 * XXX once sched_class can be used for this, use 
+	 * that instead.
 	 */
-	if (rq->curr->policy != SCHED_EXT)
+	if (rq && 
+		(rq->curr->policy != SCHED_EXT) &&
+		(rq->curr->policy != SCHED_IDLE) &&
+		(rq->curr->policy != SCHED_NORMAL))
 		return false;
 
 	/*
