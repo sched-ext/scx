@@ -710,8 +710,7 @@ static __always_inline s32 p2dq_select_cpu_impl(struct task_struct *p, s32 prev_
 	cpu = pick_idle_cpu(p, taskc, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
 		stat_inc(P2DQ_STAT_IDLE);
-		u64 slice_ns = task_slice_ns(p,taskc->dsq_index);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, taskc->slice_ns, 0);
 	}
 
 	return cpu;
@@ -748,7 +747,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	}
 
 	u64 vtime_now = llcx->vtime;
-	u64 slice_ns = task_slice_ns(p,taskc->dsq_index);
+	taskc->slice_ns = task_slice_ns(p, taskc->dsq_index);
 
 	// If the task in in another LLC need to update vtime.
 	if (taskc->llc_id != cpuc->llc_id) {
@@ -770,7 +769,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	 * max possible slice.
 	 */
 	if (time_before(vtime, vtime_now - dsq_time_slice(nr_dsqs_per_llc - 1)))
-		vtime = vtime_now - slice_ns;
+		vtime = vtime_now - taskc->slice_ns;
 
 	p->scx.dsq_vtime = vtime;
 
@@ -783,7 +782,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	if ((p->flags & PF_KTHREAD) && !taskc->all_cpus &&
 	    kthreads_local) {
 		stat_inc(P2DQ_STAT_DIRECT);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns,
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, taskc->slice_ns,
 				   enq_flags | SCX_ENQ_PREEMPT);
 
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
@@ -799,7 +798,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		if (cpuc && taskc->dsq_index >= 0 && taskc->dsq_index < nr_dsqs_per_llc) {
 			dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
 			taskc->dsq_id = dsq_id;
-			scx_bpf_dsq_insert_vtime(p, dsq_id, slice_ns, p->scx.dsq_vtime, enq_flags);
+			scx_bpf_dsq_insert_vtime(p, dsq_id, taskc->slice_ns, p->scx.dsq_vtime, enq_flags);
 			if (is_idle) {
 				stat_inc(P2DQ_STAT_IDLE);
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
@@ -816,7 +815,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
 	ret->vtime.dsq_id = dsq_id;
 	ret->vtime.enq_flags = enq_flags;
-	ret->vtime.slice_ns = slice_ns;
+	ret->vtime.slice_ns = taskc->slice_ns;
 	ret->vtime.vtime = p->scx.dsq_vtime;
 }
 
@@ -917,7 +916,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	taskc->last_dsq_index = taskc->dsq_index;
 	taskc->used = 0;
 
-	last_dsq_slice_ns = task_slice_ns(p, taskc->dsq_index);
+	last_dsq_slice_ns = taskc->slice_ns;
 	used = min(now - taskc->last_run_at, last_dsq_slice_ns);
 	scaled_used = used * 100 / p->scx.weight;
 
@@ -1154,6 +1153,7 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 	taskc->node_id = cpuc->node_id;
 	taskc->dsq_index = init_dsq_index;
 	taskc->last_dsq_index = init_dsq_index;
+	taskc->slice_ns = dsq_time_slice(init_dsq_index);
 	taskc->runnable = true;
 	taskc->all_cpus = p->cpus_ptr == &p->cpus_mask && p->nr_cpus_allowed == nr_cpus;
 	p->scx.dsq_vtime = llcx->vtime;
