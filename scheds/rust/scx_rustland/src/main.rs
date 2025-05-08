@@ -285,13 +285,9 @@ impl<'a> Scheduler<'a> {
     fn update_enqueued(&mut self, task: &QueuedTask) -> u64 {
         // Get task information if the task is already stored in the task map,
         // otherwise create a new entry for it.
-        let task_info = self
-            .task_map
-            .tasks
-            .entry(task.pid)
-            .or_insert_with_key(|&_pid| TaskInfo {
-                vruntime: self.min_vruntime,
-            });
+        let task_info = self.task_map.tasks.entry(task.pid).or_insert(TaskInfo {
+            vruntime: self.min_vruntime,
+        });
 
         // Update global minimum vruntime based on the previous task's vruntime.
         if self.min_vruntime < task.vtime {
