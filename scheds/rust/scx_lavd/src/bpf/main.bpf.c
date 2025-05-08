@@ -214,11 +214,11 @@ const volatile u64	slice_max_ns = LAVD_SLICE_MAX_NS_DFL;
 #include "util.bpf.c"
 #include "power.bpf.c"
 #include "introspec.bpf.c"
-#include "sys_stat.bpf.c"
 #include "preempt.bpf.c"
 #include "lock.bpf.c"
 #include "idle.bpf.c"
 #include "balance.bpf.c"
+#include "sys_stat.bpf.c"
 
 static u32 calc_greedy_ratio(struct task_ctx *taskc)
 {

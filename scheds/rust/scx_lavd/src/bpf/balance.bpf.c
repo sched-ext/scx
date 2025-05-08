@@ -7,6 +7,60 @@
 /*
  * To be included to the main.bpf.c
  */
+static void plan_x_cpdom_migration(void)
+{
+	struct cpdom_ctx *cpdomc;
+	u64 dsq_id;
+	u32 avg_nr_q_tasks_per_cpu = 0, x_mig_delta;
+	u32 stealer_threshold, stealee_threshold, nr_stealee = 0;
+
+	/*
+	 * Calcualte average queued tasks per CPU per compute domain.
+	 */
+	bpf_for(dsq_id, 0, nr_cpdoms) {
+		if (dsq_id >= LAVD_CPDOM_MAX_NR)
+			break;
+
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
+		cpdomc->nr_q_tasks_per_cpu = (cpdomc->nr_queued_task << LAVD_SHIFT) / cpdomc->nr_cpus;
+		avg_nr_q_tasks_per_cpu += cpdomc->nr_q_tasks_per_cpu;
+	}
+	avg_nr_q_tasks_per_cpu /= nr_cpdoms;
+
+	/*
+	 * Determine stealer and stealee domains.
+	 *
+	 * A stealer domain, whose per-CPU queue length is shorter than
+	 * the average, will steal a task from any of stealee domain,
+	 * whose per-CPU queue length is longer than the average.
+	 * Compute domain around average will not do anything.
+	 */
+	x_mig_delta = avg_nr_q_tasks_per_cpu >> LAVD_CPDOM_MIGRATION_SHIFT;
+	stealer_threshold = avg_nr_q_tasks_per_cpu - x_mig_delta;
+	stealee_threshold = avg_nr_q_tasks_per_cpu + x_mig_delta;
+
+	bpf_for(dsq_id, 0, nr_cpdoms) {
+		if (dsq_id >= LAVD_CPDOM_MAX_NR)
+			break;
+
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
+
+		if (cpdomc->nr_q_tasks_per_cpu < stealer_threshold) {
+			WRITE_ONCE(cpdomc->is_stealer, true);
+			WRITE_ONCE(cpdomc->is_stealee, false);
+		}
+		else if (cpdomc->nr_q_tasks_per_cpu > stealee_threshold) {
+			WRITE_ONCE(cpdomc->is_stealer, false);
+			WRITE_ONCE(cpdomc->is_stealee, true);
+			nr_stealee++;
+		}
+		else {
+			WRITE_ONCE(cpdomc->is_stealer, false);
+			WRITE_ONCE(cpdomc->is_stealee, false);
+		}
+	}
+	sys_stat.nr_stealee = nr_stealee;
+}
 
 static bool consume_dsq(u64 dsq_id)
 {

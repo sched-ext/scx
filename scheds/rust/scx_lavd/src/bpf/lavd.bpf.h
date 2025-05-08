@@ -77,6 +77,8 @@ struct cpdom_ctx {
 	u8	is_stealee;			    /* stealer doamin should steal tasks from this domain */
 	u16	nr_cpus;			    /* the number of CPUs in this compute domain */
 	u32	nr_q_tasks_per_cpu;		    /* the number of queued tasks per CPU in this domain (x1000) */
+	u32	nr_queued_task;			    /* the number of queued tasks in this domain */
+	u32	cur_util_sum;			    /* the sum of  CPU utilization in the current interval */
 	u8	nr_neighbors[LAVD_CPDOM_MAX_DIST];  /* number of neighbors per distance */
 	u64	neighbor_bits[LAVD_CPDOM_MAX_DIST]; /* bitmask of neighbor bitmask per distance */
 	u64	__cpumask[LAVD_CPU_ID_MAX/64];	    /* cpumasks belongs to this compute domain */

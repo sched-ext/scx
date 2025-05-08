@@ -417,6 +417,8 @@ static int reinit_active_cpumask_for_performance(void)
 	struct cpu_ctx *cpuc;
 	struct bpf_cpumask *active, *ovrflw;
 	const struct cpumask *online_cpumask;
+	struct cpdom_ctx *cpdomc;
+	u64 dsq_id;
 	int cpu, err = 0;
 
 	barrier();
@@ -465,6 +467,17 @@ static int reinit_active_cpumask_for_performance(void)
 		scx_bpf_put_cpumask(online_cpumask);
 
 		bpf_cpumask_clear(ovrflw);
+	}
+
+	/*
+	 * Make all compute domains active.
+	 */
+	bpf_for(dsq_id, 0, nr_cpdoms) {
+		if (dsq_id >= LAVD_CPDOM_MAX_NR)
+			break;
+
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
+		cpdomc->is_active = true;
 	}
 	sys_stat.nr_active = nr_cpus_onln;
 
