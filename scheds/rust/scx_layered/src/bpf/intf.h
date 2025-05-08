@@ -13,6 +13,7 @@
 #define __kptr
 #endif
 
+
 #ifndef __KERNEL__
 typedef unsigned char u8;
 typedef unsigned short u16;
@@ -337,6 +338,7 @@ struct layer {
 	u64			llc_mask;
 	bool			check_no_idle;
 	u32			perf;
+	s32 		lowest_idle_state;
 	u64			refresh_cpus;
 	u8			cpus[MAX_CPUS_U8];
 

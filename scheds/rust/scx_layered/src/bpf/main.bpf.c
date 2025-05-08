@@ -1083,6 +1083,17 @@ bool maybe_update_task_llc(struct task_struct *p, struct task_ctx *taskc, s32 ne
 	return true;
 }
 
+static __always_inline
+bool maybe_update_task_idle_state(struct task_struct *p, struct layer *layer, s32 new_cpu, bool disabled)
+{
+	bpf_printk("maybe_update_task_idle_state: [%d] lowest_idle_state:%d\n", new_cpu, layer->lowest_idle_state);
+	if (layer->lowest_idle_state == -1)
+		return false;
+	struct cpuidle_driver *drv = (struct cpuidle_driver *) cpuidle_get_driver();
+	cpuidle_driver_state_disabled(drv, layer->lowest_idle_state, disabled);
+	return true;
+}
+
 s32 BPF_STRUCT_OPS(layered_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	struct cpu_ctx *cpuc;
@@ -2497,6 +2508,8 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 		cpuc->perf = layer->perf;
 	}
 
+	maybe_update_task_idle_state(p, layer, task_cpu, true);
+
 	cpuc->maybe_idle = false;
 }
 
@@ -2585,6 +2598,8 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 		hint = hint < 1024 ? hint : 1024;
 		runtime = (runtime * hint) / 1024;
 	}
+
+	maybe_update_task_idle_state(p, task_layer, scx_bpf_task_cpu(p), false);
 
 	p->scx.dsq_vtime += runtime;
 	cpuc->maybe_idle = true;

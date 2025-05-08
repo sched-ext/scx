@@ -136,6 +136,8 @@ pub struct LayerCommon {
     pub llcs: Vec<usize>,
     #[serde(default)]
     pub placement: LayerPlacement,
+    #[serde(default)]
+    pub lowest_idle_state: i32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

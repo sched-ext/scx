@@ -378,6 +378,11 @@ int bpf_iter_bits_new(struct bpf_iter_bits *it, const u64 *unsafe_ptr__ign, u32 
 int *bpf_iter_bits_next(struct bpf_iter_bits *it) __ksym;
 void bpf_iter_bits_destroy(struct bpf_iter_bits *it) __ksym;
 
+/* cpuidle */
+void cpuidle_driver_state_disabled(struct cpuidle_driver *drv, int idx,
+	bool disable) __ksym;
+extern struct cpuidle_driver *cpuidle_get_driver(void) __ksym;
+
 #define def_iter_struct(name)							\
 struct bpf_iter_##name {							\
     struct bpf_iter_bits it;							\

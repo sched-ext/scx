@@ -125,6 +125,7 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
+                        lowest_idle_state: -1,
                     },
                 },
             },
@@ -158,6 +159,7 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
+                        lowest_idle_state: -1,
                     },
                 },
             },
@@ -195,6 +197,7 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
+                        lowest_idle_state: -1,
                     },
                 },
             },
@@ -229,6 +232,7 @@ lazy_static! {
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
+                        lowest_idle_state: -1,
                     },
                 },
             },
@@ -422,6 +426,10 @@ lazy_static! {
 /// - perf: CPU performance target. 0 means no configuration. A value
 ///   between 1 and 1024 indicates the performance level CPUs running tasks
 ///   in this layer are configured to using scx_bpf_cpuperf_set().
+///
+/// - lowest_idle_state: Prevent layer CPUs from entering deep idle state.
+///   -1 means no configuration. Check valid range in /sys/devices/system/cpu/cpu0/cpuidle/
+///   Example, setting this to 2 will disable state2 and below.
 ///
 /// - idle_resume_us: Sets the idle resume QoS value. CPU idle time governors are expected to
 ///   regard the minimum of the global (effective) CPU latency limit and the effective resume
@@ -1349,6 +1357,7 @@ impl<'a> Scheduler<'a> {
                     disallow_open_after_us,
                     disallow_preempt_after_us,
                     xllc_mig_min_us,
+                    lowest_idle_state,
                     ..
                 } = spec.kind.common();
 
@@ -1384,6 +1393,7 @@ impl<'a> Scheduler<'a> {
                 layer.xllc_mig_min_ns = (xllc_mig_min_us * 1000.0) as u64;
                 layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
+                layer.lowest_idle_state = *lowest_idle_state;
                 layer.node_mask = nodemask_from_nodes(nodes) as u64;
                 for (topo_node_id, topo_node) in &topo.nodes {
                     if !nodes.is_empty() && !nodes.contains(topo_node_id) {
