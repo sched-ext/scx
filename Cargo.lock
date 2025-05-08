@@ -410,6 +410,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "buddy_system_allocator"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1a0108968a3a2dab95b089c0fc3f1afa7759aa5ebe6f1d86d206d6f7ba726eb"
+
+[[package]]
 name = "bumpalo"
 version = "3.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2337,6 +2343,7 @@ dependencies = [
  "log",
  "nix 0.29.0",
  "scx_p2dq",
+ "scx_userspace_arena",
  "scx_utils",
  "simplelog",
 ]
@@ -2590,6 +2597,16 @@ dependencies = [
  "scx_utils",
  "serde",
  "simplelog",
+]
+
+[[package]]
+name = "scx_userspace_arena"
+version = "1.0.11"
+dependencies = [
+ "anyhow",
+ "buddy_system_allocator",
+ "libbpf-rs",
+ "scx_utils",
 ]
 
 [[package]]

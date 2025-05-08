@@ -10,6 +10,7 @@ license = "GPL-2.0-only"
 ci.use_clippy = true
 
 [dependencies]
+scx_userspace_arena = { path = "../../../rust/scx_userspace_arena", version = "1.0.11" }
 scx_utils = { path = "../../../rust/scx_utils", version = "1.0.14" }
 scx_p2dq = { path = "../../../scheds/rust/scx_p2dq", version = "1.0.14" }
 
