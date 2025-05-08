@@ -2120,17 +2120,11 @@ static __noinline bool match_one(struct layer_match *match,
 	}
 }
 
-int match_layer(u32 layer_id, pid_t pid, const char *cgrp_path)
+int match_layer(u32 layer_id, struct task_struct *p, const char *cgrp_path)
 {
-
-	struct task_struct *p;
 	struct layer *layer;
 	u32 nr_match_ors;
 	u64 or_id, and_id;
-
-	p = bpf_task_from_pid(pid);
-	if (!p)
-		return -EINVAL;
 
 	if (layer_id >= nr_layers)
 		goto err;
@@ -2187,7 +2181,6 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 	const char *cgrp_path;
 	bool matched = false;
 	u64 layer_id;	// XXX - int makes verifier unhappy
-	pid_t pid = p->pid;
 
 	if (!taskc->refresh_layer)
 		return;
@@ -2201,7 +2194,7 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
 
 	bpf_for(layer_id, 0, nr_layers) {
-		if (match_layer(layer_id, pid, cgrp_path) == 0) {
+		if (match_layer(layer_id, p, cgrp_path) == 0) {
 			matched = true;
 			break;
 		}
