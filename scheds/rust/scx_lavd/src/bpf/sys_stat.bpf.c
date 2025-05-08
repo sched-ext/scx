@@ -343,7 +343,8 @@ static void update_sys_stat(void)
 		reinit_active_cpumask_for_performance();
 	}
 
-	plan_x_cpdom_migration();
+	if (nr_cpdoms > 1)
+		plan_x_cpdom_migration();
 }
 
 static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
@@ -361,12 +362,22 @@ static int update_timer_cb(void *map, int *key, struct bpf_timer *timer)
 
 static s32 init_sys_stat(u64 now)
 {
+	struct cpdom_ctx *cpdomc;
 	struct bpf_timer *timer;
+	u64 dsq_id;
 	u32 key = 0;
 	int err;
 
 	sys_stat.last_update_clk = now;
 	sys_stat.nr_active = nr_cpus_onln;
+	bpf_for(dsq_id, 0, nr_cpdoms) {
+		if (dsq_id >= LAVD_CPDOM_MAX_NR)
+			break;
+
+		cpdomc = MEMBER_VPTR(cpdom_ctxs, [dsq_id]);
+		if (cpdomc->nr_active_cpus)
+			sys_stat.nr_active_cpdoms++;
+	}
 
 	timer = bpf_map_lookup_elem(&update_timer, &key);
 	if (!timer) {
