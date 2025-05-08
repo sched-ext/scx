@@ -34,9 +34,11 @@ const volatile u64 numa_cpumasks[MAX_NUMA_NODES][MAX_CPUS / 64];
 const volatile u32 llc_numa_id_map[MAX_LLCS];
 const volatile u32 cpu_llc_id_map[MAX_CPUS];
 const volatile u32 nr_layers = 1;
+const volatile u32 nr_cpusets = 1;
 const volatile u32 nr_nodes = 32;	/* !0 for veristat, set during init */
 const volatile u32 nr_llcs = 32;	/* !0 for veristat, set during init */
 const volatile bool smt_enabled = true;
+const volatile bool enable_cpuset = true;
 const volatile bool has_little_cores = true;
 const volatile bool xnuma_preemption = false;
 const volatile s32 __sibling_cpu[MAX_CPUS];
@@ -53,6 +55,7 @@ const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 const volatile bool percpu_kthread_preempt = true;
 volatile u64 layer_refresh_seq_avgruntime;
+const volatile u64 cpuset_fakemasks[MAX_CPUSETS][MAX_CPUS / 64];
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
@@ -72,6 +75,19 @@ u32 layered_root_tgid = 0;
 
 u32 empty_layer_ids[MAX_LAYERS];
 u32 nr_empty_layer_ids;
+
+struct cpumask_box {
+    struct bpf_cpumask __kptr *mask;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, MAX_CPUSETS);
+    __type(key, u32);
+    __type(value, struct cpumask_box);
+} cpuset_cpumask SEC(".maps");
+
+
 
 UEI_DEFINE(uei);
 
@@ -495,6 +511,7 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *layered_unprotected_mask;
 	bool			all_cpus_allowed;
 	bool			cpus_node_aligned;
+	bool			cpus_cpuset_aligned;
 	u64			runnable_at;
 	u64			running_at;
 	u64			runtime_avg;
@@ -1358,9 +1375,11 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * without making the whole scheduler node aware and should only be used
 	 * with open layers on non-saturated machines to avoid possible stalls.
 	 */
-	if ((!taskc->all_cpus_allowed &&
-	     !(layer->allow_node_aligned && taskc->cpus_node_aligned)) ||
-	    !layer->nr_cpus) {
+	if ((!taskc->all_cpus_allowed && 
+		!((layer->allow_node_aligned && taskc->cpus_node_aligned) || 
+			(enable_cpuset && taskc->cpus_cpuset_aligned))) 
+		|| !layer->nr_cpus) {
+
 		taskc->dsq_id = task_cpuc->lo_fb_dsq_id;
 		/*
 		 * Start a new lo fallback queued region if the DSQ is empty.
@@ -2631,7 +2650,7 @@ void BPF_STRUCT_OPS(layered_set_weight, struct task_struct *p, u32 weight)
 static void refresh_cpus_flags(struct task_ctx *taskc,
 			       const struct cpumask *cpumask)
 {
-	u32 node_id;
+	u32 node_id, container_id;
 
 	if (!all_cpumask) {
 		scx_bpf_error("NULL all_cpumask");
@@ -2648,7 +2667,7 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 
 		if (!(nodec = lookup_node_ctx(node_id)) ||
 		    !(node_cpumask = cast_mask(nodec->cpumask)))
-			return;
+			break;
 
 		/* not llc aligned if partially overlaps */
 		if (bpf_cpumask_intersects(node_cpumask, cpumask) &&
@@ -2656,6 +2675,21 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 			taskc->cpus_node_aligned = false;
 			break;
 		}
+	}
+	if (enable_cpuset) {
+		bpf_for(container_id, 0, nr_cpusets) {
+			struct cpumask_box* box;
+			box = bpf_map_lookup_elem(&cpuset_cpumask, &container_id);
+			if (!box || !box->mask) {
+				scx_bpf_error("error marking tasks as cpuset aligned");
+				return;
+			}
+			if (bpf_cpumask_equal(cast_mask(box->mask), cpumask)) {
+				taskc->cpus_cpuset_aligned = true;
+				return;
+			}
+		}
+		taskc->cpus_cpuset_aligned = false;
 	}
 }
 
@@ -3324,8 +3358,10 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 {
-	struct bpf_cpumask *cpumask, *tmp_big_cpumask, *tmp_unprotected_cpumask;
-	int i, nr_online_cpus, ret;
+	struct bpf_cpumask *cpumask, *tmp_big_cpumask, *tmp_unprotected_cpumask, 
+		*tmp_cpuset_cpumask, *tmp_swap_dst_cpumask;
+	int i, j, cpu, nr_online_cpus, ret;
+	struct cpumask_box* cpumask_box;
 
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
@@ -3366,6 +3402,54 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	tmp_unprotected_cpumask = bpf_kptr_xchg(&unprotected_cpumask, tmp_unprotected_cpumask);
 	if (tmp_unprotected_cpumask)
 		bpf_cpumask_release(tmp_unprotected_cpumask);
+
+
+
+	if (enable_cpuset) {
+		bpf_for(i, 0, nr_cpusets) {
+			cpumask = bpf_cpumask_create();
+
+			if (!cpumask)
+				return -ENOMEM;
+			
+			
+			bpf_for(j, 0, MAX_CPUS/64) {
+				// verifier
+				if (i < 0 || i >= MAX_CPUSETS || j < 0 || j >= (MAX_CPUS / 64)) {
+    					bpf_cpumask_release(cpumask);
+    					return -1;
+				}
+		 		// container then cpu bit
+				if (cpuset_fakemasks[i][j] == 1) {
+					bpf_cpumask_set_cpu(j, cpumask);
+				}
+			}
+
+
+			// pay init cost once for faster lookups later.
+			bpf_for(cpu, 0, nr_possible_cpus) {
+				cpumask_box = bpf_map_lookup_percpu_elem(&cpuset_cpumask, &i, cpu);	
+				tmp_cpuset_cpumask = bpf_cpumask_create();
+			
+				if (!cpumask || !tmp_cpuset_cpumask || !cpumask_box) {
+					if (cpumask)
+						bpf_cpumask_release(cpumask);
+					if (tmp_cpuset_cpumask)
+						bpf_cpumask_release(tmp_cpuset_cpumask);
+					scx_bpf_error("cpumask is null");
+					return -1; 
+				}
+				bpf_cpumask_copy(tmp_cpuset_cpumask, cast_mask(cpumask));
+
+				tmp_swap_dst_cpumask = bpf_kptr_xchg(&cpumask_box->mask, tmp_cpuset_cpumask);
+				if (tmp_swap_dst_cpumask)
+					bpf_cpumask_release(tmp_swap_dst_cpumask);
+			}
+			if (cpumask)
+				bpf_cpumask_release(cpumask);
+
+		}
+	}
 
 	bpf_for(i, 0, nr_nodes) {
 		ret = create_node(i);

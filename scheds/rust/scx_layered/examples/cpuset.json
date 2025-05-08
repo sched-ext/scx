@@ -5,7 +5,7 @@
       "matches": [
         [
           {
-            "CommPrefix": "geekbench"
+            "CgroupPrefix": "system.slice/docker"
           }
         ]
       ],

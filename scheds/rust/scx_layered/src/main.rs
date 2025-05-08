@@ -27,6 +27,7 @@ use anyhow::Result;
 pub use bpf_skel::*;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
+use layer_core_growth::get_cpusets;
 use lazy_static::lazy_static;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
@@ -67,6 +68,7 @@ const MIN_LAYER_WEIGHT: u32 = bpf_intf::consts_MIN_LAYER_WEIGHT;
 const MAX_LAYER_MATCH_ORS: usize = bpf_intf::consts_MAX_LAYER_MATCH_ORS as usize;
 const MAX_LAYER_NAME: usize = bpf_intf::consts_MAX_LAYER_NAME as usize;
 const MAX_LAYERS: usize = bpf_intf::consts_MAX_LAYERS as usize;
+const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 const DEFAULT_LAYER_WEIGHT: u32 = bpf_intf::consts_DEFAULT_LAYER_WEIGHT;
 const USAGE_HALF_LIFE: u32 = bpf_intf::consts_USAGE_HALF_LIFE;
 const USAGE_HALF_LIFE_F64: f64 = USAGE_HALF_LIFE as f64 / 1_000_000_000.0;
@@ -588,6 +590,10 @@ struct Opts {
     /// Disable antistall
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
+
+    /// Enable cpuset support
+    #[clap(long, default_value = "false")]
+    enable_cpuset: bool,
 
     /// Maximum task runnable_at delay (in seconds) before antistall turns on
     #[clap(long, default_value = "3")]
@@ -1415,6 +1421,22 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn init_cpusets(skel: &mut OpenBpfSkel, topo: &Topology) -> Result<()> {
+        let cpusets = get_cpusets(topo)?;
+        for (i, cpuset) in cpusets.iter().enumerate() {
+            let mut cpumask_bitvec: [u64; MAX_CPUS / 64] = [0; MAX_CPUS / 64];
+            for j in 0..MAX_CPUS / 64 {
+                if cpuset.cpus.contains(&j) {
+                    cpumask_bitvec[j] = 1;
+                }
+            }
+            let cpuset_cpumask_slice = &mut skel.maps.rodata_data.cpuset_fakemasks[i];
+            cpuset_cpumask_slice.copy_from_slice(&cpumask_bitvec);
+        }
+        skel.maps.rodata_data.nr_cpusets = cpusets.len() as u32;
+        Ok(())
+    }
+
     fn init_nodes(skel: &mut OpenBpfSkel, _opts: &Opts, topo: &Topology) {
         skel.maps.rodata_data.nr_nodes = topo.nodes.len() as u32;
         skel.maps.rodata_data.nr_llcs = 0;
@@ -1855,6 +1877,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.lo_fb_wait_ns = opts.lo_fb_wait_us * 1000;
         skel.maps.rodata_data.lo_fb_share_ppk = ((opts.lo_fb_share * 1024.0) as u32).clamp(1, 1024);
         skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
+        skel.maps.rodata_data.enable_cpuset = opts.enable_cpuset;
         skel.maps.rodata_data.enable_gpu_support = opts.enable_gpu_support;
 
         for (cpu, sib) in topo.sibling_cpus().iter().enumerate() {
@@ -1922,6 +1945,10 @@ impl<'a> Scheduler<'a> {
 
         Self::init_layers(&mut skel, &layer_specs, &topo)?;
         Self::init_nodes(&mut skel, opts, &topo);
+
+        if opts.enable_cpuset {
+            Self::init_cpusets(&mut skel, &topo)?;
+        }
 
         // We set the pin path before loading the skeleton. This will ensure
         // libbpf creates and pins the map, or reuses the pinned map fd for us,
