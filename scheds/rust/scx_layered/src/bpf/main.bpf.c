@@ -2176,7 +2176,7 @@ err:
 	return -EINVAL;
 }
 
-static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
+static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task_ctx *taskc)
 {
 	const char *cgrp_path;
 	bool matched = false;
