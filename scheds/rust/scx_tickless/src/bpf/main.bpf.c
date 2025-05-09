@@ -295,6 +295,15 @@ static bool dispatch_all_cpus(bool do_idle_smt, bool from_dispatch)
 			break;
 
 		/*
+		 * Do not distribute tasks to the primary CPUs, keep them
+		 * as a last resort.
+		 */
+		if (is_primary_cpu(cpu)) {
+			(void)scx_bpf_test_and_clear_cpu_idle(cpu);
+			continue;
+		}
+
+		/*
 		 * Stop dispatching tasks if all the pending tasks have
 		 * been distributed.
 		 */
@@ -317,6 +326,9 @@ static bool dispatch_all_cpus(bool do_idle_smt, bool from_dispatch)
 		 */
 		if (!prefer_same_cpu || !dispatch_cpu(cpu, true, from_dispatch))
 			dispatch_cpu(cpu, false, from_dispatch);
+
+		(void)scx_bpf_test_and_clear_cpu_idle(cpu);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	}
 
 	scx_bpf_put_cpumask(idle_smtmask);
