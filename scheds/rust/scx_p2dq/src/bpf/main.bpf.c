@@ -517,6 +517,16 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			goto found_cpu;
 		}
 
+		// Keep the task sticky to the LLC if possible.
+		if (mask && llcx->cpumask &&
+		    bpf_cpumask_and(mask, cast_mask(llcx->cpumask),
+				    p->cpus_ptr)) {
+			cpu = bpf_cpumask_any_distribute(cast_mask(mask));
+			if (cpu < nr_cpus)
+				goto found_cpu;
+		}
+
+
 		// Next try to find an idle CPU in the node
 		if (nodec->cpumask && mask) {
 			bpf_cpumask_and(mask, cast_mask(nodec->cpumask),
