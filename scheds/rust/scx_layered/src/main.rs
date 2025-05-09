@@ -1839,7 +1839,6 @@ impl<'a> Scheduler<'a> {
         if ext_sched_class_addr.is_ok() && idle_sched_class_addr.is_ok() {
             skel.maps.rodata_data.ext_sched_class_addr = ext_sched_class_addr.unwrap();
             skel.maps.rodata_data.idle_sched_class_addr = idle_sched_class_addr.unwrap();
-            skel.maps.rodata_data.enable_skip_preempt = true;
         } else {
             warn!("skip_preempt is not supported, ignoring");
         }

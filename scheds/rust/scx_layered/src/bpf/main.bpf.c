@@ -60,7 +60,6 @@ const volatile bool enable_gpu_support = false;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
 const u32 zero_u32 = 0;
-const volatile bool enable_skip_preempt = false;
 
 /*
  * XXX sched classes should be exported kernel
@@ -1136,7 +1135,7 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	struct cpu_ctx *cpuc, *cand_cpuc, *sib_cpuc = NULL;
 	struct rq *rq = NULL;
 	s32 sib;
-	struct sched_class *ext_sched_class, *idle_sched_class;
+	struct sched_class *ext_sched_class = NULL, *idle_sched_class = NULL;
 
 	if (cand >= nr_possible_cpus || !bpf_cpumask_test_cpu(cand, p->cpus_ptr))
 		return false;
@@ -1149,17 +1148,16 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 
 	rq = scx_bpf_cpu_rq(cand);
 	
-	if (enable_skip_preempt) {
-		ext_sched_class = (struct sched_class *)(unsigned long long)ext_sched_class_addr;
-		idle_sched_class = (struct sched_class *)(unsigned long long)idle_sched_class_addr;
+	ext_sched_class = (struct sched_class *)(unsigned long long)ext_sched_class_addr;
+	idle_sched_class = (struct sched_class *)(unsigned long long)idle_sched_class_addr;
 
-		if (rq && (rq->curr->sched_class != ext_sched_class) &&
-			(rq->curr->sched_class != idle_sched_class)) {
-			if (!(cpuc = lookup_cpu_ctx(-1)))
-				return false;
-			gstat_inc(GSTAT_SKIP_PREEMPT, cpuc);
+	if (rq && ext_sched_class_addr && idle_sched_class_addr &&
+		(rq->curr->sched_class != ext_sched_class) &&
+		(rq->curr->sched_class != idle_sched_class)) {
+		if (!(cpuc = lookup_cpu_ctx(-1)))
 			return false;
-		}
+		gstat_inc(GSTAT_SKIP_PREEMPT, cpuc);
+		return false;
 	}
 
 	/*
