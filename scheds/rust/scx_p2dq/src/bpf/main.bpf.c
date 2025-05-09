@@ -689,8 +689,11 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	}
 
 	// Couldn't find anything idle just return something in the local LLC
-	if (llcx->cpumask)
+	if (interactive && llcx->cpumask)
 		cpu = bpf_cpumask_any_distribute(cast_mask(llcx->cpumask));
+	else
+		// non interactive tasks stay sticky
+		cpu = prev_cpu;
 
 found_cpu:
 	scx_bpf_put_cpumask(idle_cpumask);
