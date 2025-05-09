@@ -1840,7 +1840,9 @@ impl<'a> Scheduler<'a> {
             skel.maps.rodata_data.ext_sched_class_addr = ext_sched_class_addr.unwrap();
             skel.maps.rodata_data.idle_sched_class_addr = idle_sched_class_addr.unwrap();
         } else {
-            warn!("skip_preempt is not supported, ignoring");
+            warn!(
+                "Unable to get sched_class addresses from /proc/kallsyms, disabling skip_preempt."
+            );
         }
 
         skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;

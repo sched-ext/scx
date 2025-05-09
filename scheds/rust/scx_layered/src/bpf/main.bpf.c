@@ -1135,7 +1135,7 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	struct cpu_ctx *cpuc, *cand_cpuc, *sib_cpuc = NULL;
 	struct rq *rq = NULL;
 	s32 sib;
-	struct sched_class *ext_sched_class = NULL, *idle_sched_class = NULL;
+	struct sched_class *ext_sched_class, *idle_sched_class;
 
 	if (cand >= nr_possible_cpus || !bpf_cpumask_test_cpu(cand, p->cpus_ptr))
 		return false;
