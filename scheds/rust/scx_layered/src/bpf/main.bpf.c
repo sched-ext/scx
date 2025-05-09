@@ -2142,26 +2142,20 @@ static __noinline bool match_one(struct layer_match *match,
 	}
 }
 
-int match_layer(u32 layer_id, pid_t pid, const char *cgrp_path)
+int match_layer(u32 layer_id, struct task_struct *p __arg_trusted, const char *cgrp_path)
 {
-
-	struct task_struct *p;
 	struct layer *layer;
 	u32 nr_match_ors;
 	u64 or_id, and_id;
 
-	p = bpf_task_from_pid(pid);
-	if (!p)
-		return -EINVAL;
-
 	if (layer_id >= nr_layers)
-		goto err;
+		return -EINVAL;
 
 	layer = &layers[layer_id];
 	nr_match_ors = layer->nr_match_ors;
 
 	if (nr_match_ors > MAX_LAYER_MATCH_ORS)
-		goto err;
+		return -EINVAL;
 
 	bpf_for(or_id, 0, nr_match_ors) {
 		struct layer_match_ands *ands;
@@ -2169,19 +2163,19 @@ int match_layer(u32 layer_id, pid_t pid, const char *cgrp_path)
 
 		barrier_var(or_id);
 		if (or_id >= MAX_LAYER_MATCH_ORS)
-			goto err;
+			return -EINVAL;
 
 		ands = &layer->matches[or_id];
 
 		if (ands->nr_match_ands > NR_LAYER_MATCH_KINDS)
-			goto err;
+			return -EINVAL;
 
 		bpf_for(and_id, 0, ands->nr_match_ands) {
 			struct layer_match *match;
 
 			barrier_var(and_id);
 			if (and_id >= NR_LAYER_MATCH_KINDS)
-				goto err;
+				return -EINVAL;
 
 			match = &ands->matches[and_id];
 			if (!(match_one(match, p, cgrp_path) == !match->exclude)) {
@@ -2191,25 +2185,18 @@ int match_layer(u32 layer_id, pid_t pid, const char *cgrp_path)
 		}
 
 		if (matched) {
-			bpf_task_release(p);
 			return 0;
 		}
 	}
 
-	bpf_task_release(p);
 	return -ENOENT;
-
-err:
-	bpf_task_release(p);
-	return -EINVAL;
 }
 
-static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
+static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task_ctx *taskc)
 {
 	const char *cgrp_path;
 	bool matched = false;
 	u64 layer_id;	// XXX - int makes verifier unhappy
-	pid_t pid = p->pid;
 
 	if (!taskc->refresh_layer)
 		return;
@@ -2223,7 +2210,7 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
 
 	bpf_for(layer_id, 0, nr_layers) {
-		if (match_layer(layer_id, pid, cgrp_path) == 0) {
+		if (match_layer(layer_id, p, cgrp_path) == 0) {
 			matched = true;
 			break;
 		}
