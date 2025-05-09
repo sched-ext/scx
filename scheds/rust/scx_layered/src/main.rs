@@ -39,7 +39,7 @@ use scx_layered::*;
 use scx_stats::prelude::*;
 use scx_utils::compat;
 use scx_utils::init_libbpf_logging;
-use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency};
+use scx_utils::pm::{cpu_idle_resume_latency_supported, update_cpu_idle_resume_latency, cpuidle_state_supported, update_cpuidle_state, all_cpuidle_state_enabled};
 use scx_utils::read_netdevs;
 use scx_utils::scx_enums;
 use scx_utils::scx_ops_attach;
@@ -120,8 +120,9 @@ lazy_static! {
                         disallow_preempt_after_us: None,
                         xllc_mig_min_us: 1000.0,
                         growth_algo: LayerGrowthAlgo::Sticky,
-                        idle_resume_us: None,
                         perf: 1024,
+                        idle_resume_us: None,
+                        lowest_idle_state: None,
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
@@ -155,6 +156,7 @@ lazy_static! {
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
                         idle_resume_us: None,
+                        lowest_idle_state: None,
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
@@ -192,6 +194,7 @@ lazy_static! {
                         growth_algo: LayerGrowthAlgo::Topo,
                         perf: 1024,
                         idle_resume_us: None,
+                        lowest_idle_state: None,
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
@@ -226,6 +229,7 @@ lazy_static! {
                         growth_algo: LayerGrowthAlgo::Linear,
                         perf: 1024,
                         idle_resume_us: None,
+                        lowest_idle_state: None,
                         nodes: vec![],
                         llcs: vec![],
                         placement: LayerPlacement::Standard,
@@ -422,6 +426,10 @@ lazy_static! {
 /// - perf: CPU performance target. 0 means no configuration. A value
 ///   between 1 and 1024 indicates the performance level CPUs running tasks
 ///   in this layer are configured to using scx_bpf_cpuperf_set().
+///
+/// - lowest_idle_state: Prevent layer CPUs from entering deep idle state.
+///   Check valid range in /sys/devices/system/cpu/cpu0/cpuidle/
+///   For example, setting this flag to 2 will disable state2 and state3.
 ///
 /// - idle_resume_us: Sets the idle resume QoS value. CPU idle time governors are expected to
 ///   regard the minimum of the global (effective) CPU latency limit and the effective resume
@@ -1208,6 +1216,9 @@ struct Scheduler<'a> {
     cpu_pool: CpuPool,
     layers: Vec<Layer>,
     idle_qos_enabled: bool,
+    cpuidle_override_enabled: bool,
+    // record cpu with custom idle state override
+    cpuidle_state_map: BTreeMap<usize, usize>,
 
     proc_reader: procfs::ProcReader,
     sched_stats: Stats,
@@ -1358,6 +1369,7 @@ impl<'a> Scheduler<'a> {
                     disallow_open_after_us,
                     disallow_preempt_after_us,
                     xllc_mig_min_us,
+                    lowest_idle_state,
                     ..
                 } = spec.kind.common();
 
@@ -1393,6 +1405,11 @@ impl<'a> Scheduler<'a> {
                 layer.xllc_mig_min_ns = (xllc_mig_min_us * 1000.0) as u64;
                 layer_weights.push(layer.weight.try_into().unwrap());
                 layer.perf = u32::try_from(*perf)?;
+                layer.lowest_idle_state = if let Some(value) = lowest_idle_state {
+                    *value
+                } else {
+                    u32::MAX
+                };
                 layer.node_mask = nodemask_from_nodes(nodes) as u64;
                 for (topo_node_id, topo_node) in &topo.nodes {
                     if !nodes.is_empty() && !nodes.contains(topo_node_id) {
@@ -1966,6 +1983,27 @@ impl<'a> Scheduler<'a> {
             idle_qos_enabled = false;
         }
 
+        let mut cpuidle_override_enabled = layers
+        .iter()
+        .any(|layer| layer.kind.common().lowest_idle_state.is_some());
+
+        if cpuidle_override_enabled && !cpuidle_state_supported() {
+            if !cpuidle_state_supported() {
+                warn!("CPU Idle not supported, ignoring");
+                cpuidle_override_enabled = false;
+            }
+
+            if !all_cpuidle_state_enabled()? {
+                warn!("CPU Idle has custom state, do not override");
+                cpuidle_override_enabled = false;
+            }
+            // TODO (patlu): If we want to support non-default CPU idle
+            // states, we can call clear_all_cpu_idle_states() to initialize
+            // states to known states.
+        }
+
+        let cpuidle_state_map = BTreeMap::new();
+
         Self::init_cpus(&skel, &layer_specs, &topo)?;
         Self::init_llc_prox_map(&mut skel, &topo)?;
 
@@ -2012,6 +2050,8 @@ impl<'a> Scheduler<'a> {
             cpu_pool,
             layers,
             idle_qos_enabled,
+            cpuidle_override_enabled,
+            cpuidle_state_map,
 
             sched_stats: Stats::new(&mut skel, &proc_reader)?,
 
@@ -2587,6 +2627,35 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn refresh_cpuidle_states(&mut self) -> Result<()> {
+        if !self.cpuidle_override_enabled {
+            return Ok(());
+        }
+        for layer in self.layers.iter() {
+            let layer_lowest_idle_state = layer.kind.common().lowest_idle_state;
+            if layer_lowest_idle_state.is_none() {
+                for cpu in layer.cpus.iter() {
+                    let state_to_reset = self.cpuidle_state_map.get(&cpu).copied();
+                    if let Some(state_to_reset) = state_to_reset {
+                        update_cpuidle_state(cpu, state_to_reset as u32, false)?;
+                        self.cpuidle_state_map.remove(&cpu);
+                    }
+                }
+            } else {
+                for cpu in layer.cpus.iter() {
+                    let state_to_reset = self.cpuidle_state_map.get(&cpu).copied();
+                    if let Some(state_to_reset) = state_to_reset {
+                        update_cpuidle_state(cpu, state_to_reset as u32, false)?;
+                        self.cpuidle_state_map.remove(&cpu);
+                    }
+                    update_cpuidle_state(cpu, layer_lowest_idle_state.unwrap(), true)?;
+                    self.cpuidle_state_map.insert(cpu, layer_lowest_idle_state.unwrap() as usize);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn step(&mut self) -> Result<()> {
         let started_at = Instant::now();
         self.sched_stats.refresh(
@@ -2597,6 +2666,7 @@ impl<'a> Scheduler<'a> {
         )?;
         self.refresh_cpumasks()?;
         self.refresh_idle_qos()?;
+        self.refresh_cpuidle_states()?;
         self.processing_dur += Instant::now().duration_since(started_at);
         Ok(())
     }
@@ -2681,6 +2751,26 @@ impl<'a> Scheduler<'a> {
         self.struct_ops.take();
         uei_report!(&self.skel, uei)
     }
+
+    fn cleanup_cpuidle_states(&mut self) -> Result<()> {
+        if !self.cpuidle_override_enabled {
+            return Ok(());
+        }
+
+        for cpu in self.topo.all_cpus.values() {
+            for (state_id, original_disable_state) in &cpu.cpuidle_states {
+                update_cpuidle_state(cpu.id, *state_id as u32, *original_disable_state)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> Result<()> {
+        debug!("Restore cpuidle state");
+        self.cleanup_cpuidle_states()?;
+        Ok(())
+    }
+
 }
 
 impl Drop for Scheduler<'_> {
@@ -2926,12 +3016,12 @@ fn main() -> Result<()> {
     verify_layer_specs(&layer_config.specs)?;
 
     let mut open_object = MaybeUninit::uninit();
+    let mut sched = Scheduler::init(&opts, &layer_config.specs, &mut open_object)?;
     loop {
-        let mut sched = Scheduler::init(&opts, &layer_config.specs, &mut open_object)?;
         if !sched.run(shutdown.clone())?.should_restart() {
             break;
         }
     }
-
+    sched.cleanup()?;
     Ok(())
 }

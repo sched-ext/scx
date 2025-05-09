@@ -56,7 +56,7 @@
 //!
 //! Topology objects are created using the static new function:
 //!
-//!```  
+//!```
 //!     use scx_utils::Topology;
 //!     let top = Topology::new().unwrap();
 //!```
@@ -129,6 +129,8 @@ pub struct Cpu {
     /// Per-CPU cache size of all levels.
     pub cache_size: usize,
     pub core_type: CoreType,
+    /// CPU Idle state status
+    pub cpuidle_states: BTreeMap<u32, bool>,
 
     /// Ancestor IDs.
     pub core_id: usize,
@@ -420,6 +422,21 @@ fn get_per_cpu_cache_size(cache_path: &PathBuf) -> Result<usize> {
     Ok(tot_size)
 }
 
+fn get_cpuidle_states(cpuidle_path: &PathBuf) -> Result<BTreeMap<u32, bool>> {
+    let path_str = cpuidle_path.to_str().unwrap();
+    let paths = glob(&(path_str.to_owned() + "/state[0-9]*"))?;
+    let mut states = BTreeMap::new();
+
+    for state in paths.filter_map(Result::ok) {
+        let state_id = state.file_name().unwrap().to_str().unwrap()[5..].parse::<u32>()?;
+        let disable: usize = read_from_file(&state.join("disable"))?;
+        let is_disabled = disable == 1;
+        states.insert(state_id, is_disabled);
+    }
+
+    Ok(states)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn create_insert_cpu(
     id: usize,
@@ -485,6 +502,10 @@ fn create_insert_cpu(
     let power_path = cpu_path.join("power");
     let pm_qos_resume_latency_us =
         read_from_file(&power_path.join("pm_qos_resume_latency_us")).unwrap_or(0_usize);
+
+    // CPU Idle states
+    let cpuidle_path = cpu_path.join("cpuidle");
+    let cpuidle_states = get_cpuidle_states(&cpuidle_path)?;
 
     let num_llcs = topo_ctx.node_llc_kernel_ids.len();
     let llc_id = topo_ctx
@@ -554,6 +575,7 @@ fn create_insert_cpu(
             l3_id,
             cache_size,
             core_type: core_type.clone(),
+            cpuidle_states,
 
             core_id: *core_id,
             llc_id: *llc_id,
