@@ -96,12 +96,6 @@ static u64 max(u64 a, u64 b)
 	return a >= b ? a : b;
 }
 
-static u64 min(u64 a, u64 b)
-{
-	return a <= b ? a : b;
-}
-
-
 static __always_inline u64 dsq_time_slice(int dsq_index)
 {
 	if (dsq_index > nr_dsqs_per_llc || dsq_index < 0) {
@@ -917,7 +911,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	taskc->used = 0;
 
 	last_dsq_slice_ns = taskc->slice_ns;
-	used = min(now - taskc->last_run_at, last_dsq_slice_ns);
+	used = now - taskc->last_run_at;
 	scaled_used = used * 100 / p->scx.weight;
 
 	p->scx.dsq_vtime += scaled_used;
