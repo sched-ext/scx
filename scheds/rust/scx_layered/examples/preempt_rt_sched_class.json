@@ -1,0 +1,30 @@
+[
+	{
+		"name": "second",
+		"matches": [
+			[{ "CommPrefix": "stress" }, {"UIDEquals": 1000}]
+		],
+		"kind": {
+			"Confined": {
+				"cpus_range":  [6, 6],
+				"util_range": [0.4, 0.85],
+				"preempt": true,
+				"preempt_first": true,
+				"growth_algo": "Reverse",
+				"slice_us": 1000,
+				"yield_ignore": 0.50
+			}
+		}
+	},
+	{
+		"name": "third",
+		"matches": [
+			[]
+		],
+		"kind": {
+			"Open": {
+				"growth_algo": "Linear"
+			}
+		}
+	}
+]
