@@ -2120,20 +2120,20 @@ static __noinline bool match_one(struct layer_match *match,
 	}
 }
 
-int match_layer(u32 layer_id, struct task_struct *p, const char *cgrp_path)
+int match_layer(u32 layer_id, struct task_struct *p __arg_trusted, const char *cgrp_path)
 {
 	struct layer *layer;
 	u32 nr_match_ors;
 	u64 or_id, and_id;
 
 	if (layer_id >= nr_layers)
-		goto err;
+		return -EINVAL;
 
 	layer = &layers[layer_id];
 	nr_match_ors = layer->nr_match_ors;
 
 	if (nr_match_ors > MAX_LAYER_MATCH_ORS)
-		goto err;
+		return -EINVAL;
 
 	bpf_for(or_id, 0, nr_match_ors) {
 		struct layer_match_ands *ands;
@@ -2141,19 +2141,19 @@ int match_layer(u32 layer_id, struct task_struct *p, const char *cgrp_path)
 
 		barrier_var(or_id);
 		if (or_id >= MAX_LAYER_MATCH_ORS)
-			goto err;
+			return -EINVAL;
 
 		ands = &layer->matches[or_id];
 
 		if (ands->nr_match_ands > NR_LAYER_MATCH_KINDS)
-			goto err;
+			return -EINVAL;
 
 		bpf_for(and_id, 0, ands->nr_match_ands) {
 			struct layer_match *match;
 
 			barrier_var(and_id);
 			if (and_id >= NR_LAYER_MATCH_KINDS)
-				goto err;
+				return -EINVAL;
 
 			match = &ands->matches[and_id];
 			if (!(match_one(match, p, cgrp_path) == !match->exclude)) {
@@ -2163,17 +2163,11 @@ int match_layer(u32 layer_id, struct task_struct *p, const char *cgrp_path)
 		}
 
 		if (matched) {
-			bpf_task_release(p);
 			return 0;
 		}
 	}
 
-	bpf_task_release(p);
 	return -ENOENT;
-
-err:
-	bpf_task_release(p);
-	return -EINVAL;
 }
 
 static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task_ctx *taskc)
