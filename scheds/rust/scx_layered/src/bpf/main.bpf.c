@@ -1151,7 +1151,8 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	ext_sched_class = (struct sched_class *)(unsigned long long)ext_sched_class_addr;
 	idle_sched_class = (struct sched_class *)(unsigned long long)idle_sched_class_addr;
 
-	if (rq && (rq->curr->sched_class != ext_sched_class) &&
+	if (rq && ext_sched_class_addr && idle_sched_class_addr &&
+		(rq->curr->sched_class != ext_sched_class) &&
 		(rq->curr->sched_class != idle_sched_class)) {
 		if (!(cpuc = lookup_cpu_ctx(-1)))
 			return false;
