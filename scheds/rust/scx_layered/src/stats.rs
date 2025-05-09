@@ -38,6 +38,7 @@ const GSTAT_LO_FB_EVENTS: usize = bpf_intf::global_stat_id_GSTAT_LO_FB_EVENTS as
 const GSTAT_LO_FB_USAGE: usize = bpf_intf::global_stat_id_GSTAT_LO_FB_USAGE as usize;
 const GSTAT_FB_CPU_USAGE: usize = bpf_intf::global_stat_id_GSTAT_FB_CPU_USAGE as usize;
 const GSTAT_ANTISTALL: usize = bpf_intf::global_stat_id_GSTAT_ANTISTALL as usize;
+const GSTAT_SKIP_PREEMPT: usize = bpf_intf::global_stat_id_GSTAT_SKIP_PREEMPT as usize;
 
 const LSTAT_SEL_LOCAL: usize = bpf_intf::layer_stat_id_LSTAT_SEL_LOCAL as usize;
 const LSTAT_ENQ_LOCAL: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_LOCAL as usize;
@@ -493,6 +494,8 @@ pub struct SysStats {
     pub lo_fb_util: f64,
     #[stat(desc = "Number of tasks dispatched via antistall")]
     pub antistall: u64,
+    #[stat(desc = "Number of times preemptions of non-scx tasks were avoided")]
+    pub skip_preempt: u64,
     #[stat(desc = "fallback CPU")]
     pub fallback_cpu: u32,
     #[stat(desc = "per-layer statistics")]
@@ -548,6 +551,7 @@ impl SysStats {
             lo_fb_util: stats.bpf_stats.gstats[GSTAT_LO_FB_USAGE] as f64 / elapsed_ns as f64
                 * 100.0,
             antistall: stats.bpf_stats.gstats[GSTAT_ANTISTALL],
+            skip_preempt: stats.bpf_stats.gstats[GSTAT_SKIP_PREEMPT],
             fallback_cpu: fallback_cpu as u32,
             fallback_cpu_util: stats.bpf_stats.gstats[GSTAT_FB_CPU_USAGE] as f64
                 / elapsed_ns as f64
@@ -559,7 +563,7 @@ impl SysStats {
     pub fn format<W: Write>(&self, w: &mut W) -> Result<()> {
         writeln!(
             w,
-            "tot={:7} local_sel/enq={}/{} open_idle={} affn_viol={} hi/lo={}/{}",
+            "tot={:7} local_sel/enq={}/{} open_idle={} affn_viol={} hi/lo={}/{} skip_preempt={}",
             self.total,
             fmt_pct(self.local_sel),
             fmt_pct(self.local_enq),
@@ -567,6 +571,7 @@ impl SysStats {
             fmt_pct(self.affn_viol),
             fmt_pct(self.hi_fb),
             fmt_pct(self.lo_fb),
+            self.skip_preempt,
         )?;
 
         writeln!(

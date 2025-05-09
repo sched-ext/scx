@@ -61,6 +61,13 @@ const volatile bool enable_gpu_support = false;
 const volatile u64 antistall_sec = 3;
 const u32 zero_u32 = 0;
 
+/*
+ * XXX sched classes should be exported kernel
+ * side to avoid having to do this...
+ */
+const volatile u64 ext_sched_class_addr = 0;
+const volatile u64 idle_sched_class_addr = 0;
+
 private(unprotected_cpumask) struct bpf_cpumask __kptr *unprotected_cpumask;
 u64 unprotected_seq = 0;
 
@@ -1128,6 +1135,7 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	struct cpu_ctx *cpuc, *cand_cpuc, *sib_cpuc = NULL;
 	struct rq *rq = NULL;
 	s32 sib;
+	struct sched_class *ext_sched_class, *idle_sched_class;
 
 	if (cand >= nr_possible_cpus || !bpf_cpumask_test_cpu(cand, p->cpus_ptr))
 		return false;
@@ -1140,15 +1148,16 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 
 	rq = scx_bpf_cpu_rq(cand);
 	
-	/*
-	 * XXX once sched_class can be used for this, use 
-	 * that instead.
-	 */
-	if (rq && 
-		(rq->curr->policy != SCHED_EXT) &&
-		(rq->curr->policy != SCHED_IDLE) &&
-		(rq->curr->policy != SCHED_NORMAL))
+	ext_sched_class = (struct sched_class *)(unsigned long long)ext_sched_class_addr;
+	idle_sched_class = (struct sched_class *)(unsigned long long)idle_sched_class_addr;
+
+	if (rq && (rq->curr->sched_class != ext_sched_class) &&
+		(rq->curr->sched_class != idle_sched_class)) {
+		if (!(cpuc = lookup_cpu_ctx(-1)))
+			return false;
+		gstat_inc(GSTAT_SKIP_PREEMPT, cpuc);
 		return false;
+	}
 
 	/*
 	 * Don't preempt if protection against is in effect. However, open
