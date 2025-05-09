@@ -1833,8 +1833,14 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        skel.maps.rodata_data.ext_sched_class_addr = get_kallsyms_addr("ext_sched_class")?;
-        skel.maps.rodata_data.idle_sched_class_addr = get_kallsyms_addr("idle_sched_class")?;
+        let ext_sched_class_addr = get_kallsyms_addr("ext_sched_class");
+        let idle_sched_class_addr = get_kallsyms_addr("idle_sched_class");
+
+        if ext_sched_class_addr.is_ok() && idle_sched_class_addr.is_ok() {
+            skel.maps.rodata_data.ext_sched_class_addr = ext_sched_class_addr.unwrap();
+            skel.maps.rodata_data.idle_sched_class_addr = idle_sched_class_addr.unwrap();
+            skel.maps.rodata_data.enable_skip_preempt = true;
+        }
 
         skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;
         skel.maps.rodata_data.max_exec_ns = 20 * scx_enums.SCX_SLICE_DFL;
