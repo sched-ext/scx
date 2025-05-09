@@ -42,6 +42,7 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
+
 #define dbg(fmt, args...)	do { if (debug) bpf_printk(fmt, ##args); } while (0)
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
 
@@ -984,6 +985,8 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	__sync_fetch_and_add(&llcx->dsq_max_vtime[dsq_index], scaled_used);
 	__sync_fetch_and_add(&llcx->dsq_load[dsq_index], used);
 	__sync_fetch_and_add(&llcx->load, used);
+	if (!taskc->all_cpus)
+		__sync_fetch_and_add(&llcx->affin_load, used);
 
 
 	trace("%s weight %d slice %llu used %llu scaled %llu",
@@ -1462,6 +1465,7 @@ reset_load:
 			return false;
 
 		llcx->load = 0;
+		llcx->non_scx_load = 0;
 		llcx->last_period_ns = scx_bpf_now();
 		bpf_for(j, 0, nr_dsqs_per_llc) {
 			llcx->dsq_load[j] = 0;
@@ -1669,6 +1673,32 @@ void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 	p2dq_running_impl(p);
 }
 
+void BPF_STRUCT_OPS(p2dq_cpu_acquire, s32 cpu,
+		    struct scx_cpu_acquire_args *args)
+{
+	struct cpu_ctx *cpuc;
+	struct llc_ctx *llcx;
+
+	if (!(cpuc = lookup_cpu_ctx(cpu)) ||
+	    !(llcx = lookup_llc_ctx(cpuc->llc_id)))
+	    return;
+
+	u64 now = scx_bpf_now();
+	llcx->non_scx_load += now - cpuc->last_acquired;
+}
+
+void BPF_STRUCT_OPS(p2dq_cpu_release, s32 cpu,
+		    struct scx_cpu_release_args *args)
+{
+	struct cpu_ctx *cpuc;
+
+	if (!(cpuc = lookup_cpu_ctx(cpu)))
+	    return;
+
+	u64 now = scx_bpf_now();
+	cpuc->last_acquired = now;
+}
+
 void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
 {
 	struct enqueue_promise pro;
@@ -1698,6 +1728,8 @@ SCX_OPS_DEFINE(p2dq,
 	       .dispatch		= (void *)p2dq_dispatch,
 	       .running			= (void *)p2dq_running,
 	       .stopping		= (void *)p2dq_stopping,
+	       .cpu_acquire		= (void *)p2dq_cpu_acquire,
+	       .cpu_release		= (void *)p2dq_cpu_release,
 	       .set_cpumask		= (void *)p2dq_set_cpumask,
 	       .init_task		= (void *)p2dq_init_task,
 	       .exit_task		= (void *)p2dq_exit_task,
