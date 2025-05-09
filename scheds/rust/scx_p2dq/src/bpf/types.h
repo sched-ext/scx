@@ -15,7 +15,9 @@ struct cpu_ctx {
 	u32				perf;
 	bool				interactive;
 	bool				is_big;
+	bool				idle;
 	u64				ran_for;
+	u64				last_acquired;
 	u64				dsqs[MAX_DSQS_PER_LLC];
 	u64				max_load_dsq;
 };
