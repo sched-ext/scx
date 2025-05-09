@@ -69,7 +69,6 @@ pub const RL_CPU_ANY: i32 = bpf_intf::RL_CPU_ANY as i32;
 ///
 /// Finally the methods exited() and shutdown_and_report() can be used respectively to test
 /// whether the BPF component exited, and to shutdown and report the exit message.
-/// whether the BPF component exited, and to shutdown and report exit message.
 
 // Task queued for scheduling from the BPF component (see bpf_intf::queued_task_ctx).
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
