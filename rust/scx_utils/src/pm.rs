@@ -44,3 +44,20 @@ pub fn update_cpu_idle_resume_latency(cpu_num: usize, value_us: i32) -> Result<(
 pub fn cpu_idle_resume_latency_supported() -> bool {
     std::fs::exists("/sys/devices/system/cpu/cpu0/power/pm_qos_resume_latency_us").unwrap_or(false)
 }
+
+pub fn update_cpu_idle_state(cpu_num: usize, state: u32, disable: bool) -> Result<()> {
+    let cpuidle_str = format!("/sys/devices/system/cpu/cpu{}/cpuidle/state{}", cpu_num, state);
+    let cpuidle_path = Path::new(&cpuidle_str);
+
+    if !cpuidle_path.exists() {
+        return Err(anyhow!("cpuidle state {} does not exist", state));
+    }
+
+    let mut file = File::create(cpuidle_path)?;
+    write!(file, "{}", if disable {1} else {0})?;
+    Ok(())
+}
+
+pub fn cpu_idle_state_supported() -> bool {
+    std::fs::exists("/sys/devices/system/cpu/cpu0/cpuidle/state0/disable").unwrap_or(false)
+}
