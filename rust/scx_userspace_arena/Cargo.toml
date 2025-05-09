@@ -1,7 +1,7 @@
 [package]
 name = "scx_userspace_arena"
 version = "1.0.11"
-edition = "2024"
+edition = "2021"
 authors = ["Jake Hillion <jake@hillion.co.uk>"]
 license = "GPL-2.0-only"
 repository = "https://github.com/sched-ext/scx"
