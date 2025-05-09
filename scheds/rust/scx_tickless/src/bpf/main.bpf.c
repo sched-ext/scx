@@ -198,11 +198,19 @@ static inline u64 tick_interval_ns(void)
 
 s32 BPF_STRUCT_OPS(tickless_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
+	s32 cpu;
+
 	/*
 	 * Always route wakeups to a CPU from the primary group to minimize
 	 * noise on the other CPUs.
+	 *
+	 * Also make sure to lock the selected CPU, so that it's not picked
+	 * when distributing tasks in dispatch_all_cpus().
 	 */
-	return pick_primary_cpu();
+	cpu = pick_primary_cpu();
+	scx_bpf_test_and_clear_cpu_idle(cpu);
+
+	return cpu;
 }
 
 void BPF_STRUCT_OPS(tickless_enqueue, struct task_struct *p, u64 enq_flags)
@@ -282,43 +290,38 @@ static bool dispatch_cpu(s32 cpu, bool same_cpu, bool from_dispatch)
  */
 static bool dispatch_all_cpus(bool do_idle_smt, bool from_dispatch)
 {
-	const struct cpumask *idle_smtmask, *idle_cpumask;
+	const struct cpumask *idle_mask;
 	s32 i, cpu;
 	bool is_done = false;
 
-	idle_smtmask = scx_bpf_get_idle_smtmask();
-	idle_cpumask = scx_bpf_get_idle_cpumask();
+	if (!scx_bpf_dsq_nr_queued(SHARED_DSQ))
+		return true;
 
-	bpf_for(i, 0, nr_cpu_ids) {
-		cpu = bpf_cpumask_first(do_idle_smt ? idle_smtmask : idle_cpumask);
+	idle_mask = do_idle_smt ? scx_bpf_get_idle_smtmask() : scx_bpf_get_idle_cpumask();
+
+	bpf_for(i, 0, bpf_cpumask_weight(idle_mask)) {
+		/*
+		 * Lock the first idle CPU available and attempt to dispatch a
+		 * task.
+		 */
+		cpu = bpf_cpumask_first(idle_mask);
 		if (cpu >= nr_cpu_ids)
 			break;
+		if (!scx_bpf_test_and_clear_cpu_idle(cpu))
+			continue;
+
+		/*
+		 * Wakeup the selected CPU, if no task is dispatched the CPU
+		 * will automatically reset its idle state.
+		 */
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 		/*
 		 * Do not distribute tasks to the primary CPUs, keep them
 		 * as a last resort.
 		 */
-		if (is_primary_cpu(cpu)) {
-			(void)scx_bpf_test_and_clear_cpu_idle(cpu);
+		if (is_primary_cpu(cpu))
 			continue;
-		}
-
-		/*
-		 * Stop dispatching tasks if all the pending tasks have
-		 * been distributed.
-		 */
-		if (!scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
-			is_done = true;
-			break;
-		}
-
-		/*
-		 * Stop dispatching tasks if we're out of dispatch slots.
-		 */
-		if (from_dispatch && !scx_bpf_dispatch_nr_slots()) {
-			is_done = true;
-			break;
-		}
 
 		/*
 		 * Try to dispatch a task that was using this CPU first, if
@@ -327,12 +330,17 @@ static bool dispatch_all_cpus(bool do_idle_smt, bool from_dispatch)
 		if (!prefer_same_cpu || !dispatch_cpu(cpu, true, from_dispatch))
 			dispatch_cpu(cpu, false, from_dispatch);
 
-		(void)scx_bpf_test_and_clear_cpu_idle(cpu);
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		/*
+		 * Stop dispatching if all the pending tasks have been
+		 * distributed.
+		 */
+		if (!scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
+			is_done = true;
+			break;
+		}
 	}
 
-	scx_bpf_put_cpumask(idle_smtmask);
-	scx_bpf_put_cpumask(idle_cpumask);
+	scx_bpf_put_cpumask(idle_mask);
 
 	return is_done;
 }
