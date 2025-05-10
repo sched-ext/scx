@@ -196,9 +196,27 @@ static inline u64 tick_interval_ns(void)
 	return NSEC_PER_SEC / freq;
 }
 
+/*
+ * Return true if the waker commits to release the CPU after waking up @p,
+ * false otherwise.
+ */
+static bool is_wake_sync(u64 wake_flags)
+{
+	const struct task_struct *current = (void *)bpf_get_current_task_btf();
+
+	return (wake_flags & SCX_WAKE_SYNC) && !(current->flags & PF_EXITING);
+}
+
 s32 BPF_STRUCT_OPS(tickless_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	s32 cpu;
+
+	/*
+	 * Consider sync wakeups almost like a function call and try to route
+	 * the wakee to the waker's CPU.
+	 */
+	if (is_wake_sync(wake_flags))
+		return bpf_get_smp_processor_id();
 
 	/*
 	 * Always route wakeups to a CPU from the primary group to minimize
