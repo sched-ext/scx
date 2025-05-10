@@ -36,6 +36,7 @@ char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
 
+
 #define dbg(fmt, args...)	do { if (debug) bpf_printk(fmt, ##args); } while (0)
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
 
@@ -94,6 +95,11 @@ private(A) struct bpf_cpumask __kptr *big_cpumask;
 static u64 max(u64 a, u64 b)
 {
 	return a >= b ? a : b;
+}
+
+static __always_inline bool is_idle_task(const struct task_struct *p)
+{
+	return !!(p->flags & PF_IDLE);
 }
 
 static __always_inline u64 dsq_time_slice(int dsq_index)
@@ -1597,6 +1603,38 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init)
 	return p2dq_init_impl();
 }
 
+void BPF_STRUCT_OPS(p2dq_cpu_acquire, s32 cpu,
+		    struct scx_cpu_acquire_args *args)
+{
+	struct cpu_ctx *cpuc;
+	struct llc_ctx *llcx;
+	u64 now = scx_bpf_now();
+
+	if (!(cpuc = lookup_cpu_ctx(cpu)) ||
+	    !(llcx = lookup_llc_ctx(cpuc->llc_id)))
+	    return;
+
+	if (!cpuc->idle)
+		llcx->load += now - cpuc->last_acquired;
+}
+
+void BPF_STRUCT_OPS(p2dq_cpu_release, s32 cpu,
+		    struct scx_cpu_release_args *args)
+{
+	struct cpu_ctx *cpuc;
+	u64 now = scx_bpf_now();
+
+	if (!(cpuc = lookup_cpu_ctx(cpu)))
+	    return;
+
+	if (is_idle_task(args->task)) {
+		cpuc->idle = true;
+	} else {
+		cpuc->idle = false;
+		cpuc->last_acquired = now;
+	}
+}
+
 void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
 {
 	struct enqueue_promise pro;
@@ -1627,6 +1665,8 @@ SCX_OPS_DEFINE(p2dq,
 	       .runnable		= (void *)p2dq_runnable,
 	       .running			= (void *)p2dq_running,
 	       .stopping		= (void *)p2dq_stopping,
+	       .cpu_acquire		= (void *)p2dq_cpu_acquire,
+	       .cpu_release		= (void *)p2dq_cpu_release,
 	       .set_cpumask		= (void *)p2dq_set_cpumask,
 	       .init_task		= (void *)p2dq_init_task,
 	       .exit_task		= (void *)p2dq_exit_task,
