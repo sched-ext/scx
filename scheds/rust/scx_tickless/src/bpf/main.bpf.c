@@ -41,8 +41,6 @@ volatile u64 nr_direct_dispatches, nr_timer_dispatches, nr_primary_dispatches;
 
 struct cpu_ctx {
 	struct bpf_timer timer;
-
-	bool timer_initialized;
 	u64 started_at;
 };
 
@@ -70,13 +68,19 @@ private(TICKLESS) struct bpf_cpumask __kptr *primary_cpumask;
 static bool is_primary_cpu(s32 cpu)
 {
 	const struct cpumask *primary;
+	bool ret;
 
+	bpf_rcu_read_lock();
 	primary = cast_mask(primary_cpumask);
 	if (!primary) {
 		scx_bpf_error("Primary CPUs not initialized");
-		return false;
+		ret = false;
+	} else {
+		ret = bpf_cpumask_test_cpu(cpu, primary);
 	}
-	return bpf_cpumask_test_cpu(cpu, primary);
+	bpf_rcu_read_unlock();
+
+	return ret;
 }
 
 /*
@@ -259,6 +263,7 @@ static bool dispatch_cpu(s32 cpu, bool same_cpu, bool from_dispatch)
 	struct task_struct *p;
 	bool dispatched = false;
 
+	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, p, SHARED_DSQ, 0) {
 		 /*
 		  * This is a workaround for the BPF verifier's pointer
@@ -293,6 +298,7 @@ static bool dispatch_cpu(s32 cpu, bool same_cpu, bool from_dispatch)
 
 		break;
 	}
+	bpf_rcu_read_unlock();
 
 	return dispatched;
 }
@@ -378,7 +384,6 @@ static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
 	/*
 	 * Check if we need to preempt the running tasks.
 	 */
-	bpf_rcu_read_lock();
 	bpf_for(cpu, 0, nr_cpu_ids) {
 		cctx = try_lookup_cpu_ctx(cpu);
 		if (!cctx)
@@ -397,24 +402,23 @@ static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
 	}
 
 	bpf_timer_start(timer, tick_interval_ns(), 0);
-	bpf_rcu_read_unlock();
 
 	return 0;
 }
 
 /*
- * Start the BPF timer on a target CPU (if not already started).
+ * Start the BPF timer on a target CPU.
  */
-static void fire_timer(s32 cpu)
+static void init_timer(s32 cpu)
 {
 	struct cpu_ctx *cctx;
 	int ret;
 
+	if (!is_primary_cpu(cpu))
+		scx_bpf_error("starting timer on cpu%d, which is not a scheduling CPU", cpu);
+
 	cctx = try_lookup_cpu_ctx(cpu);
 	if (!cctx)
-		return;
-
-	if (cctx->timer_initialized)
 		return;
 
 	bpf_timer_init(&cctx->timer, &cpu_ctx_stor, CLOCK_MONOTONIC);
@@ -423,20 +427,11 @@ static void fire_timer(s32 cpu)
 	ret = bpf_timer_start(&cctx->timer, tick_interval_ns(), 0);
 	if (ret)
 		scx_bpf_error("failed to fire up timer on cpu%d: %d", cpu, ret);
-
-	cctx->timer_initialized = true;
 }
 
 void BPF_STRUCT_OPS(tickless_dispatch, s32 cpu, struct task_struct *prev)
 {
 	if (is_primary_cpu(cpu)) {
-		/*
-		 * Start the time on the primary CPU.
-		 *
-		 * XXX: figure out a better way to pin the timer to the CPU.
-		 */
-		fire_timer(cpu);
-
 		/*
 		 * Try to bounce all the queued tasks to the available
 		 * tickless CPUs first.
@@ -669,7 +664,13 @@ int enable_primary_cpu(struct cpu_arg *input)
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(tickless_init)
 {
-	return scx_bpf_create_dsq(SHARED_DSQ, -1);
+	int ret;
+
+	ret = scx_bpf_create_dsq(SHARED_DSQ, -1);
+	if (ret < 0)
+		return ret;
+
+	init_timer(bpf_get_smp_processor_id());
 }
 
 void BPF_STRUCT_OPS(tickless_exit, struct scx_exit_info *ei)
