@@ -21,14 +21,20 @@ fn cmd_get(scx_loader: LoaderClientProxyBlocking) -> Result<(), Box<dyn std::err
 }
 
 fn cmd_list(scx_loader: LoaderClientProxyBlocking) -> Result<(), Box<dyn std::error::Error>> {
-    let supported_scheds: Vec<String> = scx_loader
-        .supported_schedulers()
-        .unwrap()
-        .iter()
-        .map(|s| remove_scx_prefix(&s.to_string()))
-        .collect();
-    println!("supported schedulers: {:?}", supported_scheds);
-    Ok(())
+    match scx_loader.supported_schedulers() {
+        Ok(sl) => {
+            let supported_scheds = sl
+                .iter()
+                .map(|s| remove_scx_prefix(&s.to_string()))
+                .collect::<Vec<String>>();
+            println!("supported schedulers: {:?}", supported_scheds);
+            return Ok(());
+        }
+        Err(e) => {
+            eprintln!("scheduler list failed: {e}");
+            exit(1);
+        }
+    };
 }
 
 fn cmd_start(
