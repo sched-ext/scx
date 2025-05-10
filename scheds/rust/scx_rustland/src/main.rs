@@ -185,13 +185,12 @@ impl TaskTree {
     // with the same deadline will be sorted by pid).
     fn push(&mut self, task: Task) {
         // Check if task already exists.
-        if let Some(prev_task) = self.task_map.get(&task.qtask.pid) {
-            self.tasks.remove(prev_task);
+        if let Some(prev_task) = self.task_map.insert(task.qtask.pid, task.clone()) {
+            self.tasks.remove(&prev_task);
         }
 
         // Insert/update task.
-        self.tasks.insert(task.clone());
-        self.task_map.insert(task.qtask.pid, task);
+        self.tasks.insert(task);
     }
 
     // Pop the first item from the BTreeSet (item with the shortest deadline).
