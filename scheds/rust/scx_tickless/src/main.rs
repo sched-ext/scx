@@ -157,7 +157,8 @@ impl<'a> Scheduler<'a> {
         // Load the BPF program for validation.
         let mut skel = scx_ops_load!(skel, tickless_ops, uei)?;
 
-        // Set task affinity to the first primary CPU.
+        // Set task affinity to the first primary CPU: this is required to start the scheduler's
+        // timer on a primary CPU.
         let timer_cpu = domain.iter().next();
         if timer_cpu.is_none() {
             bail!("primary cpumask is empty");
