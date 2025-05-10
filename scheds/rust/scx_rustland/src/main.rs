@@ -195,12 +195,10 @@ impl TaskTree {
 
     // Pop the first item from the BTreeSet (item with the shortest deadline).
     fn pop(&mut self) -> Option<Task> {
-        if let Some(task) = self.tasks.pop_first() {
+        self.tasks.pop_first().map(|task| {
             self.task_map.remove(&task.qtask.pid);
-            Some(task)
-        } else {
-            None
-        }
+            task
+        })
     }
 }
 
