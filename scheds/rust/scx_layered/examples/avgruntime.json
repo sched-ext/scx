@@ -14,7 +14,8 @@
 	"protected": true,
 	"slice_us": 100000,
 	"util_range": [0.01, 0.99],
-        "cpus_range": [5, 5]
+        "cpus_range": [5, 5],
+	"placement": "Floating"
       }
     }
   },
@@ -34,7 +35,8 @@
 	"protected": true,
 	"slice_us": 100000,
 	"util_range": [0.01, 0.99],
-        "cpus_range": [5, 5]
+        "cpus_range": [5, 5],
+	"placement": "Sticky"
       }
     }
   },
@@ -54,7 +56,8 @@
 	"protected": true,
 	"slice_us": 100000,
 	"util_range": [0.01, 0.99],
-        "cpus_range": [5, 5]
+        "cpus_range": [5, 5],
+	"placement": "Sticky"
       }
     }
   },
