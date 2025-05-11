@@ -620,11 +620,30 @@ out_release:
 	bpf_task_release(p);
 }
 
+/*
+ * Return true if the waker commits to release the CPU after waking up @p,
+ * false otherwise.
+ */
+static bool is_wake_sync(u64 wake_flags)
+{
+	const struct task_struct *current = (void *)bpf_get_current_task_btf();
+
+	return (wake_flags & SCX_WAKE_SYNC) && !(current->flags & PF_EXITING);
+}
+
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
 	bool is_idle = false;
 	s32 cpu;
+
+	/*
+	 * In case of a sync wakeup always try to use the waker's CPU, but
+	 * never perform a direct dispatch otherwise we may have starvation
+	 * with rapid producer/consumer workloads.
+	 */
+	if (is_wake_sync(wake_flags))
+		return bpf_get_smp_processor_id();
 
 	/*
 	 * If built-in idle CPU policy is not enabled completely delegate
