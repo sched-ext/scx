@@ -453,7 +453,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	struct mask_wrapper *wrapper;
 	struct cpu_ctx *prev_cpuc;
 	struct bpf_cpumask *mask;
-	struct node_ctx *nodec;
 	struct llc_ctx *llcx;
 	bool interactive = is_interactive(taskc);
 	s32 cpu = prev_cpu;
@@ -472,7 +471,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 
 	if (!(prev_cpuc = lookup_cpu_ctx(prev_cpu)) ||
 	    !(llcx = lookup_llc_ctx(prev_cpuc->llc_id)) ||
-	    !(nodec = lookup_node_ctx(prev_cpuc->node_id)) ||
 	    !llcx->cpumask)
 		goto found_cpu;
 
@@ -528,8 +526,8 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 
 
 		// Next try to find an idle CPU in the node
-		if (nodec->cpumask && mask) {
-			bpf_cpumask_and(mask, cast_mask(nodec->cpumask),
+		if (llcx->node_cpumask && mask) {
+			bpf_cpumask_and(mask, cast_mask(llcx->node_cpumask),
 					p->cpus_ptr);
 			if ((cpu = scx_bpf_pick_idle_cpu(cast_mask(mask), 0)) >= 0) {
 				*is_idle = true;
@@ -640,7 +638,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 
 	// First check if last CPU is idle
 	if (llcx->cpumask &&
-	    bpf_cpumask_test_cpu(prev_cpu, cast_mask(llcx->cpumask)) &&
 	    bpf_cpumask_test_cpu(prev_cpu, (smt_enabled && !interactive) ? idle_smtmask : idle_cpumask)) {
 		cpu = prev_cpu;
 		*is_idle = true;
@@ -1175,7 +1172,7 @@ void BPF_STRUCT_OPS(p2dq_exit_task, struct task_struct *p, struct scx_exit_task_
 
 static int init_llc(u32 llc_id)
 {
-	struct bpf_cpumask *cpumask, *big_cpumask, *little_cpumask;
+	struct bpf_cpumask *cpumask, *big_cpumask, *little_cpumask, *node_cpumask;
 	struct llc_ctx *llcx;
 
 	llcx = bpf_map_lookup_elem(&llc_ctxs, &llc_id);
@@ -1227,6 +1224,18 @@ static int init_llc(u32 llc_id)
 	if (little_cpumask) {
 		scx_bpf_error("kptr already had cpumask");
 		bpf_cpumask_release(little_cpumask);
+	}
+
+	node_cpumask = bpf_cpumask_create();
+	if (!node_cpumask) {
+		scx_bpf_error("failed to create node cpumask");
+		return -ENOMEM;
+	}
+
+	node_cpumask = bpf_kptr_xchg(&llcx->node_cpumask, node_cpumask);
+	if (node_cpumask) {
+		scx_bpf_error("kptr already had node_cpumask");
+		bpf_cpumask_release(node_cpumask);
 	}
 
 	return 0;
@@ -1563,6 +1572,15 @@ static __always_inline s32 p2dq_init_impl()
 		if (!(cpuc = lookup_cpu_ctx(i)) ||
 		    !(llcx = lookup_llc_ctx(cpuc->llc_id)))
 			return -EINVAL;
+
+		if (cpuc &&
+		    llcx->node_cpumask &&
+		    llcx->node_id == cpuc->node_id) {
+			bpf_rcu_read_lock();
+			if (llcx->node_cpumask)
+				bpf_cpumask_set_cpu(cpuc->id, llcx->node_cpumask);
+			bpf_rcu_read_unlock();
+		}
 
 		bpf_for(dsq_id, 0, nr_dsqs_per_llc) {
 			cpuc->dsqs[dsq_id] = llcx->dsqs[dsq_id];
