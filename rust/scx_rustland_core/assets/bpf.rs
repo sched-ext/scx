@@ -69,7 +69,6 @@ pub const RL_CPU_ANY: i32 = bpf_intf::RL_CPU_ANY as i32;
 ///
 /// Finally the methods exited() and shutdown_and_report() can be used respectively to test
 /// whether the BPF component exited, and to shutdown and report the exit message.
-/// whether the BPF component exited, and to shutdown and report exit message.
 
 // Task queued for scheduling from the BPF component (see bpf_intf::queued_task_ctx).
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
@@ -205,10 +204,6 @@ impl<'cb> BpfScheduler<'cb> {
         skel_builder.obj_builder.debug(debug);
         let mut skel = scx_ops_open!(skel_builder, open_object, rustland)?;
 
-        // Lock all the memory to prevent page faults that could trigger potential deadlocks during
-        // scheduling.
-        ALLOCATOR.lock_memory();
-
         // Copy one item from the ring buffer.
         //
         // # Safety
@@ -281,6 +276,11 @@ impl<'cb> BpfScheduler<'cb> {
         // Build the user ring buffer of dispatched tasks.
         let dispatched = libbpf_rs::UserRingBuffer::new(&maps.dispatched)
             .expect("failed to create user ringbuf");
+
+        // Lock all the memory to prevent page faults that could trigger potential deadlocks during
+        // scheduling.
+        ALLOCATOR.lock_memory();
+        ALLOCATOR.disable_mmap().expect("Failed to disable mmap");
 
         // Make sure to use the SCHED_EXT class at least for the scheduler itself.
         match Self::use_sched_ext() {

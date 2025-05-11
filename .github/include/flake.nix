@@ -95,6 +95,7 @@
                   gnused
                   isort
                   jq
+                  libseccomp.lib
                   llvmPackages.libclang
                   llvmPackages.libllvm
                   pkg-config
@@ -137,6 +138,7 @@
                       elfutils.out
                       zlib
                       zstd.out
+                      libseccomp.lib
                     ]))) + "'")
                   ]
                 ];

@@ -185,23 +185,20 @@ impl TaskTree {
     // with the same deadline will be sorted by pid).
     fn push(&mut self, task: Task) {
         // Check if task already exists.
-        if let Some(prev_task) = self.task_map.get(&task.qtask.pid) {
-            self.tasks.remove(prev_task);
+        if let Some(prev_task) = self.task_map.insert(task.qtask.pid, task.clone()) {
+            self.tasks.remove(&prev_task);
         }
 
         // Insert/update task.
-        self.tasks.insert(task.clone());
-        self.task_map.insert(task.qtask.pid, task);
+        self.tasks.insert(task);
     }
 
     // Pop the first item from the BTreeSet (item with the shortest deadline).
     fn pop(&mut self) -> Option<Task> {
-        if let Some(task) = self.tasks.pop_first() {
+        self.tasks.pop_first().map(|task| {
             self.task_map.remove(&task.qtask.pid);
-            Some(task)
-        } else {
-            None
-        }
+            task
+        })
     }
 }
 
@@ -219,6 +216,8 @@ struct Scheduler<'a> {
 
 impl<'a> Scheduler<'a> {
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+        let stats_server = StatsServer::new(stats::server_data()).launch()?;
+
         // Low-level BPF connector.
         let bpf = BpfScheduler::init(
             open_object,
@@ -227,7 +226,6 @@ impl<'a> Scheduler<'a> {
             opts.verbose,
             true, // Enable built-in idle CPU selection policy
         )?;
-        let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         info!("{} scheduler attached", SCHEDULER_NAME);
 
@@ -284,13 +282,9 @@ impl<'a> Scheduler<'a> {
     fn update_enqueued(&mut self, task: &QueuedTask) -> u64 {
         // Get task information if the task is already stored in the task map,
         // otherwise create a new entry for it.
-        let task_info = self
-            .task_map
-            .tasks
-            .entry(task.pid)
-            .or_insert_with_key(|&_pid| TaskInfo {
-                vruntime: self.min_vruntime,
-            });
+        let task_info = self.task_map.tasks.entry(task.pid).or_insert(TaskInfo {
+            vruntime: self.min_vruntime,
+        });
 
         // Update global minimum vruntime based on the previous task's vruntime.
         if self.min_vruntime < task.vtime {

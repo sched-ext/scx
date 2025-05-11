@@ -1009,6 +1009,15 @@ struct Layer {
     allowed_cpus: Cpumask,
 }
 
+fn get_kallsyms_addr(sym_name: &str) -> Result<u64> {
+    fs::read_to_string("/proc/kallsyms")?
+        .lines()
+        .find(|line| line.contains(sym_name))
+        .and_then(|line| line.split_whitespace().next())
+        .and_then(|addr| u64::from_str_radix(addr, 16).ok())
+        .ok_or_else(|| anyhow!("Symbol '{}' not found", sym_name))
+}
+
 fn resolve_cpus_pct_range(
     cpus_range: &Option<(usize, usize)>,
     cpus_range_frac: &Option<(f64, f64)>,
@@ -1822,6 +1831,18 @@ impl<'a> Scheduler<'a> {
             if opts.gpu_kprobe_level >= 3 {
                 compat::cond_kprobe_enable("nvidia_poll", &skel.progs.kprobe_nvidia_poll)?;
             }
+        }
+
+        let ext_sched_class_addr = get_kallsyms_addr("ext_sched_class");
+        let idle_sched_class_addr = get_kallsyms_addr("idle_sched_class");
+
+        if ext_sched_class_addr.is_ok() && idle_sched_class_addr.is_ok() {
+            skel.maps.rodata_data.ext_sched_class_addr = ext_sched_class_addr.unwrap();
+            skel.maps.rodata_data.idle_sched_class_addr = idle_sched_class_addr.unwrap();
+        } else {
+            warn!(
+                "Unable to get sched_class addresses from /proc/kallsyms, disabling skip_preempt."
+            );
         }
 
         skel.maps.rodata_data.slice_ns = scx_enums.SCX_SLICE_DFL;

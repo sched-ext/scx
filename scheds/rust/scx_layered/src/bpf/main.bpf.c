@@ -61,6 +61,13 @@ const volatile bool enable_gpu_support = false;
 const volatile u64 antistall_sec = 3;
 const u32 zero_u32 = 0;
 
+/*
+ * XXX sched classes should be exported kernel
+ * side to avoid having to do this...
+ */
+const volatile u64 ext_sched_class_addr = 0;
+const volatile u64 idle_sched_class_addr = 0;
+
 private(unprotected_cpumask) struct bpf_cpumask __kptr *unprotected_cpumask;
 u64 unprotected_seq = 0;
 
@@ -1126,7 +1133,9 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 			    struct layer *layer, bool preempt_first)
 {
 	struct cpu_ctx *cpuc, *cand_cpuc, *sib_cpuc = NULL;
+	struct rq *rq = NULL;
 	s32 sib;
+	struct sched_class *ext_sched_class, *idle_sched_class;
 
 	if (cand >= nr_possible_cpus || !bpf_cpumask_test_cpu(cand, p->cpus_ptr))
 		return false;
@@ -1136,6 +1145,20 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 
 	if (cand_cpuc->current_preempt)
 		return false;
+
+	rq = scx_bpf_cpu_rq(cand);
+	
+	ext_sched_class = (struct sched_class *)(unsigned long long)ext_sched_class_addr;
+	idle_sched_class = (struct sched_class *)(unsigned long long)idle_sched_class_addr;
+
+	if (rq && ext_sched_class_addr && idle_sched_class_addr &&
+		(rq->curr->sched_class != ext_sched_class) &&
+		(rq->curr->sched_class != idle_sched_class)) {
+		if (!(cpuc = lookup_cpu_ctx(-1)))
+			return false;
+		gstat_inc(GSTAT_SKIP_PREEMPT, cpuc);
+		return false;
+	}
 
 	/*
 	 * Don't preempt if protection against is in effect. However, open
@@ -2120,26 +2143,20 @@ static __noinline bool match_one(struct layer_match *match,
 	}
 }
 
-int match_layer(u32 layer_id, pid_t pid, const char *cgrp_path)
+int match_layer(u32 layer_id, struct task_struct *p __arg_trusted, const char *cgrp_path)
 {
-
-	struct task_struct *p;
 	struct layer *layer;
 	u32 nr_match_ors;
 	u64 or_id, and_id;
 
-	p = bpf_task_from_pid(pid);
-	if (!p)
-		return -EINVAL;
-
 	if (layer_id >= nr_layers)
-		goto err;
+		return -EINVAL;
 
 	layer = &layers[layer_id];
 	nr_match_ors = layer->nr_match_ors;
 
 	if (nr_match_ors > MAX_LAYER_MATCH_ORS)
-		goto err;
+		return -EINVAL;
 
 	bpf_for(or_id, 0, nr_match_ors) {
 		struct layer_match_ands *ands;
@@ -2147,19 +2164,19 @@ int match_layer(u32 layer_id, pid_t pid, const char *cgrp_path)
 
 		barrier_var(or_id);
 		if (or_id >= MAX_LAYER_MATCH_ORS)
-			goto err;
+			return -EINVAL;
 
 		ands = &layer->matches[or_id];
 
 		if (ands->nr_match_ands > NR_LAYER_MATCH_KINDS)
-			goto err;
+			return -EINVAL;
 
 		bpf_for(and_id, 0, ands->nr_match_ands) {
 			struct layer_match *match;
 
 			barrier_var(and_id);
 			if (and_id >= NR_LAYER_MATCH_KINDS)
-				goto err;
+				return -EINVAL;
 
 			match = &ands->matches[and_id];
 			if (!(match_one(match, p, cgrp_path) == !match->exclude)) {
@@ -2169,25 +2186,18 @@ int match_layer(u32 layer_id, pid_t pid, const char *cgrp_path)
 		}
 
 		if (matched) {
-			bpf_task_release(p);
 			return 0;
 		}
 	}
 
-	bpf_task_release(p);
 	return -ENOENT;
-
-err:
-	bpf_task_release(p);
-	return -EINVAL;
 }
 
-static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
+static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task_ctx *taskc)
 {
 	const char *cgrp_path;
 	bool matched = false;
 	u64 layer_id;	// XXX - int makes verifier unhappy
-	pid_t pid = p->pid;
 
 	if (!taskc->refresh_layer)
 		return;
@@ -2201,7 +2211,7 @@ static void maybe_refresh_layer(struct task_struct *p, struct task_ctx *taskc)
 		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
 
 	bpf_for(layer_id, 0, nr_layers) {
-		if (match_layer(layer_id, pid, cgrp_path) == 0) {
+		if (match_layer(layer_id, p, cgrp_path) == 0) {
 			matched = true;
 			break;
 		}
@@ -2505,6 +2515,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
 	struct layer *task_layer;
+	struct task_hint *task_hint;
 	u64 now = scx_bpf_now();
 	u64 usage_since_idle;
 	s32 task_lid;
@@ -2575,7 +2586,17 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 
 	if (cpuc->yielding && runtime < task_layer->slice_ns)
 		runtime = task_layer->slice_ns;
-	p->scx.dsq_vtime += runtime * 100 / p->scx.weight;
+
+	runtime = runtime * 100 / p->scx.weight;
+
+	task_hint = bpf_task_storage_get(&scx_layered_task_hint_map, p, NULL, 0);
+	if (task_hint) {
+		u64 hint = task_hint->hint ?: 1;
+		hint = hint < 1024 ? hint : 1024;
+		runtime = (runtime * hint) / 1024;
+	}
+
+	p->scx.dsq_vtime += runtime;
 	cpuc->maybe_idle = true;
 }
 

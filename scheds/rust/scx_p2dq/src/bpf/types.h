@@ -34,6 +34,7 @@ struct llc_ctx {
 	struct bpf_cpumask __kptr	*cpumask;
 	struct bpf_cpumask __kptr	*big_cpumask;
 	struct bpf_cpumask __kptr	*little_cpumask;
+	struct bpf_cpumask __kptr	*node_cpumask;
 };
 
 struct node_ctx {
@@ -45,6 +46,7 @@ struct node_ctx {
 
 struct task_p2dq {
 	u64			dsq_id;
+	u64			slice_ns;
 	int			dsq_index;
 	u32			cpu;
 	u32			llc_id;
