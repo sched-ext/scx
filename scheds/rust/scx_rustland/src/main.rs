@@ -426,9 +426,8 @@ impl<'a> Scheduler<'a> {
             self.schedule();
 
             // Handle monitor requests asynchronously.
-            match req_ch.try_recv() {
-                Ok(()) => res_ch.send(self.get_metrics())?,
-                Err(_) => {}
+            if req_ch.try_recv().is_ok() {
+                res_ch.send(self.get_metrics())?;
             }
         }
 
