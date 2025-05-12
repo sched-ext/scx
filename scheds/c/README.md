@@ -39,9 +39,9 @@ and no timer ticks allows the VM to avoid unnecessary expensive vmexits.
 
 ### Production Ready?
 
-Not yet. While tasks are run with an infinite slice (SCX_SLICE_INF), they're
+Not yet. While tasks are run with an infinite slice (`SCX_SLICE_INF`), they're
 preempted every 20ms in a timer callback. The scheduler also puts the core
-schedling logic inside of the central / scheduling CPU's ops.dispatch() path,
+scheduling logic inside of the central / scheduling CPU's `ops.dispatch()` path,
 and does not yet have any kind of priority mechanism.
 
 --------------------------------------------------------------------------------
@@ -84,11 +84,11 @@ perform well on single CCX / single-socket hosts.
 
 ### Typical Use Case
 
-scx_nest is designed to optimize workloads that CPU utilization somewhat low,
+`scx_nest` is designed to optimize workloads that CPU utilization somewhat low,
 and which can benefit from running on a subset of cores on the host so as to
 keep the frequencies high on those cores. Some workloads may perform better by
 spreading work across many cores to avoid thrashing the cache, etc. Determining
-whether a workload is well-suited to scx_nest will likely require
+whether a workload is well-suited to `scx_nest` will likely require
 experimentation.
 
 ### Production Ready?
@@ -146,7 +146,7 @@ No
 ### Overview
 
 A simple scheduler that provides an example of a minimal sched_ext
-scheduler. scx_simple can be run in either global weighted vtime mode, or
+scheduler. `scx_simple` can be run in either global weighted vtime mode, or
 FIFO mode.
 
 ### Typical Use Case
@@ -154,13 +154,13 @@ FIFO mode.
 Though very simple, this scheduler should perform reasonably well on
 single-socket CPUs with a uniform L3 cache topology. Note that while running in
 global FIFO mode may work well for some workloads, saturating threads can
-easily drown out inactive ones.
+easily starve inactive ones.
 
 ### Production Ready?
 
 This scheduler could be used in a production environment, assuming the hardware
-constraints enumerated above, and assuming the workload can accommodate a
-simple scheduling policy.
+constraints enumerated above, and assuming the workload tolerates the simplicity
+of the scheduling policy.
 
 --------------------------------------------------------------------------------
 
@@ -168,19 +168,19 @@ simple scheduling policy.
 
 ### Overview
 
-A variation on scx_simple with CPU selection that prioritizes an idle previous
-CPU over finding a fully idle core (as is done in scx_simple and scx_rusty).
+A variation on `scx_simple` with CPU selection that prioritizes an idle previous
+CPU over finding a fully idle core (as is done in `scx_simple` and `scx_rusty`).
 
 ### Typical Use Case
 
-This scheduler outperforms the in-kernel fair class, scx_simple, and scx_rusty
+This scheduler outperforms the in-kernel fair class, `scx_simple`, and `scx_rusty`
 on OLTP workloads run on systems with simple topology (i.e. non-NUMA, single
 LLC).
 
 ### Production Ready?
 
-scx_prev has not been tested in a production environment, but given its
-similarity to scx_simple, it might be production ready for specific workloads
+`scx_prev` has not been tested in a production environment, but given its
+similarity to `scx_simple`, it might be production ready for specific workloads
 on hardware with simple topology.
 
 --------------------------------------------------------------------------------
@@ -211,7 +211,7 @@ framework that abstracts much of this complexity away from you.
 
 ### Production Ready?
 
-No. This scheduler uses an ordered list for vtime scheduling, and is stricly
+No. This scheduler uses an ordered list for vtime scheduling, and is strictly
 less performant than just using something like `scx_simple`. It is purely
 meant to illustrate that it's possible to build a user space scheduler on
 top of sched_ext.

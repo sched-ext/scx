@@ -2,33 +2,33 @@
   "sched_ext/for-next": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/tj/sched_ext.git",
     "branch": "for-next",
-    "commitHash": "771641d7c9a7a06e36281597646a99c5c67fe7fa",
-    "lastModified": 1746071732,
-    "narHash": "sha256-eGh/LPhyxWpcloCJSxs7gLWk2XY5wQJ0amz3Gz0P/9o=",
+    "commitHash": "92e91bb0495f725e2647c00b9aacf81b5b7dc73f",
+    "lastModified": 1746676297,
+    "narHash": "sha256-dm/4mMWp7sjAjyHBGe2r1OCvhMDf2yhUrC+IhFNqtAc=",
     "kernelVersion": "6.14.0"
   },
   "bpf/bpf-next": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/bpf/bpf-next.git",
     "branch": "master",
-    "commitHash": "62e23f183839c3d718ab36ce1c0cf7cb4b9c05a4",
-    "lastModified": 1746503352,
-    "narHash": "sha256-ArdZdcxRC2J55Nn9AHtJmXta2CuIreU767jsemPnvYg=",
+    "commitHash": "7220eabff8cb4af3b93cd021aa853b9f5df2923f",
+    "lastModified": 1746935542,
+    "narHash": "sha256-YnHXjOHlop0hLto0sp/GxGLTfR+/rWCWLfPHrrrKA3Q=",
     "kernelVersion": "6.15.0-rc4"
   },
   "stable/6_12": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-6.12.y",
-    "commitHash": "b801eaa96a5a2f2a8fe0b5982ffe4a1fba3c1e93",
-    "lastModified": 1746503353,
-    "narHash": "sha256-pT7aJpvvy5S0nj6HRZSalrKs34BQGi5aLqT2AY8MXxY=",
-    "kernelVersion": "6.12.27"
+    "commitHash": "f08cdc6cc92e3d23a05745f0f12f8caa348a27b4",
+    "lastModified": 1746848806,
+    "narHash": "sha256-xU1lzXgsUMsICyTVWx84LLSCae3DvWpv5wjYmtkIsLs=",
+    "kernelVersion": "6.12.28"
   },
   "stable/linux-rolling-stable": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-rolling-stable",
-    "commitHash": "d2cb798d2d8ceb0d194721a2cb0e577b4b927573",
-    "lastModified": 1746243995,
-    "narHash": "sha256-9FVjWxVurrsPqT3hSRHnga3T6Aj3MMCqtpC2+rPfm6U=",
-    "kernelVersion": "6.14.5"
+    "commitHash": "392c8e00cced35ed6f84559b2c12cc07fae012e3",
+    "lastModified": 1746848801,
+    "narHash": "sha256-UMakHuP1j7mPbp5NsPCidknqYK4+FCzMYBniBq0ZPGw=",
+    "kernelVersion": "6.14.6"
   }
 }

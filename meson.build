@@ -1,5 +1,5 @@
 project('sched_ext schedulers', 'c',
-        version: '1.0.11',
+        version: '1.0.12',
         license: 'GPL-2.0',
         meson_version : '>= 1.2.0',)
 
@@ -84,6 +84,7 @@ jq = find_program('jq')
 make = find_program('make')
 nproc = find_program('nproc')
 protoc = find_program('protoc', required: true)
+seccomp = dependency('libseccomp', required: true)
 
 make_jobs = 1
 if nproc.found()

@@ -620,6 +620,17 @@ out_release:
 	bpf_task_release(p);
 }
 
+/*
+ * Return true if the waker commits to release the CPU after waking up @p,
+ * false otherwise.
+ */
+static bool is_wake_sync(u64 wake_flags)
+{
+	const struct task_struct *current = (void *)bpf_get_current_task_btf();
+
+	return (wake_flags & SCX_WAKE_SYNC) && !(current->flags & PF_EXITING);
+}
+
 s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
@@ -634,11 +645,22 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (!builtin_idle || is_usersched_task(p))
 		return prev_cpu;
 
-	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+	/*
+	 * Exclude sync wakeup, since we are handling this special case
+	 * below.
+	 */
+	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags & !SCX_WAKE_SYNC, &is_idle);
 	if (is_idle && !scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
 		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), SCX_SLICE_DFL, p->scx.dsq_vtime, 0);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	}
+
+	/*
+	 * If we couldn't find an idle CPU, in case of a sync wakeup
+	 * prioritize the waker's CPU.
+	 */
+	if (!is_idle && is_wake_sync(wake_flags))
+		return bpf_get_smp_processor_id();
 
 	return cpu;
 }

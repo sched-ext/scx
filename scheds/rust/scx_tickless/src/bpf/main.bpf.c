@@ -41,8 +41,6 @@ volatile u64 nr_direct_dispatches, nr_timer_dispatches, nr_primary_dispatches;
 
 struct cpu_ctx {
 	struct bpf_timer timer;
-
-	bool timer_initialized;
 	u64 started_at;
 };
 
@@ -70,13 +68,19 @@ private(TICKLESS) struct bpf_cpumask __kptr *primary_cpumask;
 static bool is_primary_cpu(s32 cpu)
 {
 	const struct cpumask *primary;
+	bool ret;
 
+	bpf_rcu_read_lock();
 	primary = cast_mask(primary_cpumask);
 	if (!primary) {
 		scx_bpf_error("Primary CPUs not initialized");
-		return false;
+		ret = false;
+	} else {
+		ret = bpf_cpumask_test_cpu(cpu, primary);
 	}
-	return bpf_cpumask_test_cpu(cpu, primary);
+	bpf_rcu_read_unlock();
+
+	return ret;
 }
 
 /*
@@ -196,13 +200,39 @@ static inline u64 tick_interval_ns(void)
 	return NSEC_PER_SEC / freq;
 }
 
+/*
+ * Return true if the waker commits to release the CPU after waking up @p,
+ * false otherwise.
+ */
+static bool is_wake_sync(u64 wake_flags)
+{
+	const struct task_struct *current = (void *)bpf_get_current_task_btf();
+
+	return (wake_flags & SCX_WAKE_SYNC) && !(current->flags & PF_EXITING);
+}
+
 s32 BPF_STRUCT_OPS(tickless_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
+	s32 cpu;
+
+	/*
+	 * Consider sync wakeups almost like a function call and try to route
+	 * the wakee to the waker's CPU.
+	 */
+	if (is_wake_sync(wake_flags))
+		return bpf_get_smp_processor_id();
+
 	/*
 	 * Always route wakeups to a CPU from the primary group to minimize
 	 * noise on the other CPUs.
+	 *
+	 * Also make sure to lock the selected CPU, so that it's not picked
+	 * when distributing tasks in dispatch_all_cpus().
 	 */
-	return pick_primary_cpu();
+	cpu = pick_primary_cpu();
+	scx_bpf_test_and_clear_cpu_idle(cpu);
+
+	return cpu;
 }
 
 void BPF_STRUCT_OPS(tickless_enqueue, struct task_struct *p, u64 enq_flags)
@@ -233,6 +263,7 @@ static bool dispatch_cpu(s32 cpu, bool same_cpu, bool from_dispatch)
 	struct task_struct *p;
 	bool dispatched = false;
 
+	bpf_rcu_read_lock();
 	bpf_for_each(scx_dsq, p, SHARED_DSQ, 0) {
 		 /*
 		  * This is a workaround for the BPF verifier's pointer
@@ -267,6 +298,7 @@ static bool dispatch_cpu(s32 cpu, bool same_cpu, bool from_dispatch)
 
 		break;
 	}
+	bpf_rcu_read_unlock();
 
 	return dispatched;
 }
@@ -282,55 +314,37 @@ static bool dispatch_cpu(s32 cpu, bool same_cpu, bool from_dispatch)
  */
 static bool dispatch_all_cpus(bool do_idle_smt, bool from_dispatch)
 {
-	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
-	s32 cpu;
+	const struct cpumask *idle_mask;
+	s32 i, cpu;
 	bool is_done = false;
 
-	online_cpumask = scx_bpf_get_online_cpumask();
-	idle_smtmask = scx_bpf_get_idle_smtmask();
-	idle_cpumask = scx_bpf_get_idle_cpumask();
+	if (!scx_bpf_dsq_nr_queued(SHARED_DSQ))
+		return true;
 
-	if (do_idle_smt && bpf_cpumask_empty(idle_smtmask))
-		goto out_put_cpumask;
+	idle_mask = do_idle_smt ? scx_bpf_get_idle_smtmask() : scx_bpf_get_idle_cpumask();
 
-	if (!do_idle_smt && bpf_cpumask_empty(idle_cpumask))
-		goto out_put_cpumask;
-
-	bpf_for(cpu, 0, nr_cpu_ids) {
+	bpf_for(i, 0, bpf_cpumask_weight(idle_mask)) {
 		/*
-		 * Stop dispatching tasks if all the pending tasks have
-		 * been distributed.
+		 * Lock the first idle CPU available and attempt to dispatch a
+		 * task.
 		 */
-		if (!scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
-			is_done = true;
+		cpu = bpf_cpumask_first(idle_mask);
+		if (cpu >= nr_cpu_ids)
 			break;
-		}
-
-		/*
-		 * Stop dispatching tasks if we're out of dispatch slots.
-		 */
-		if (from_dispatch && !scx_bpf_dispatch_nr_slots()) {
-			is_done = true;
-			break;
-		}
-
-		/*
-		 * Do not distribute tasks to offline or primary CPUs.
-		 */
-		if (!bpf_cpumask_test_cpu(cpu, online_cpumask) || is_primary_cpu(cpu))
+		if (!scx_bpf_test_and_clear_cpu_idle(cpu))
 			continue;
 
 		/*
-		 * Skip if we want only full-idle SMT cores and the SMT is
-		 * busy.
+		 * Wakeup the selected CPU, if no task is dispatched the CPU
+		 * will automatically reset its idle state.
 		 */
-		if (do_idle_smt && !bpf_cpumask_test_cpu(cpu, idle_smtmask))
-			continue;
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 		/*
-		 * Skip busy CPUs.
+		 * Do not distribute tasks to the primary CPUs, keep them
+		 * as a last resort.
 		 */
-		if (!bpf_cpumask_test_cpu(cpu, idle_cpumask))
+		if (is_primary_cpu(cpu))
 			continue;
 
 		/*
@@ -339,22 +353,26 @@ static bool dispatch_all_cpus(bool do_idle_smt, bool from_dispatch)
 		 */
 		if (!prefer_same_cpu || !dispatch_cpu(cpu, true, from_dispatch))
 			dispatch_cpu(cpu, false, from_dispatch);
+
+		/*
+		 * Stop dispatching if all the pending tasks have been
+		 * distributed.
+		 */
+		if (!scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
+			is_done = true;
+			break;
+		}
 	}
 
-out_put_cpumask:
-	scx_bpf_put_cpumask(idle_smtmask);
-	scx_bpf_put_cpumask(idle_cpumask);
-	scx_bpf_put_cpumask(online_cpumask);
+	scx_bpf_put_cpumask(idle_mask);
 
 	return is_done;
 }
 
 static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
 {
-	const struct cpumask *online_cpumask;
 	struct cpu_ctx *cctx;
 	u64 now = scx_bpf_now();
-	bool is_primary;
 	s32 cpu;
 
 	/*
@@ -363,23 +381,10 @@ static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
 	if (!smt_enabled || !dispatch_all_cpus(true, false))
 		dispatch_all_cpus(false, false);
 
-	bpf_rcu_read_lock();
-
-	is_primary = is_primary_cpu(bpf_get_smp_processor_id());
-	if (!is_primary) {
-		scx_bpf_error("Scheduling timer executed on a non-primary CPU");
-		goto out_unlock;
-	}
-
-	online_cpumask = scx_bpf_get_online_cpumask();
-
 	/*
 	 * Check if we need to preempt the running tasks.
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		if (!bpf_cpumask_test_cpu(cpu, online_cpumask))
-			continue;
-
 		cctx = try_lookup_cpu_ctx(cpu);
 		if (!cctx)
 			continue;
@@ -396,50 +401,37 @@ static int sched_timerfn(void *map, int *key, struct bpf_timer *timer)
 		__sync_fetch_and_add(&nr_preemptions, 1);
 	}
 
-	scx_bpf_put_cpumask(online_cpumask);
-
-	bpf_timer_start(timer, tick_interval_ns(), BPF_F_TIMER_CPU_PIN);
-out_unlock:
-	bpf_rcu_read_unlock();
+	bpf_timer_start(timer, tick_interval_ns(), 0);
 
 	return 0;
 }
 
 /*
- * Start the BPF timer on a target CPU (if not already started).
+ * Start the BPF timer on a target CPU.
  */
-static void fire_timer(s32 cpu)
+static void init_timer(s32 cpu)
 {
 	struct cpu_ctx *cctx;
 	int ret;
+
+	if (!is_primary_cpu(cpu))
+		scx_bpf_error("starting timer on cpu%d, which is not a scheduling CPU", cpu);
 
 	cctx = try_lookup_cpu_ctx(cpu);
 	if (!cctx)
 		return;
 
-	if (cctx->timer_initialized)
-		return;
-
 	bpf_timer_init(&cctx->timer, &cpu_ctx_stor, CLOCK_MONOTONIC);
 	bpf_timer_set_callback(&cctx->timer, sched_timerfn);
 
-	ret = bpf_timer_start(&cctx->timer, tick_interval_ns(), BPF_F_TIMER_CPU_PIN);
+	ret = bpf_timer_start(&cctx->timer, tick_interval_ns(), 0);
 	if (ret)
 		scx_bpf_error("failed to fire up timer on cpu%d: %d", cpu, ret);
-
-	cctx->timer_initialized = true;
 }
 
 void BPF_STRUCT_OPS(tickless_dispatch, s32 cpu, struct task_struct *prev)
 {
 	if (is_primary_cpu(cpu)) {
-		/*
-		 * Start the time on the primary CPU.
-		 *
-		 * XXX: figure out a better way to pin the timer to the CPU.
-		 */
-		fire_timer(cpu);
-
 		/*
 		 * Try to bounce all the queued tasks to the available
 		 * tickless CPUs first.
@@ -672,7 +664,13 @@ int enable_primary_cpu(struct cpu_arg *input)
 
 s32 BPF_STRUCT_OPS_SLEEPABLE(tickless_init)
 {
-	return scx_bpf_create_dsq(SHARED_DSQ, -1);
+	int ret;
+
+	ret = scx_bpf_create_dsq(SHARED_DSQ, -1);
+	if (ret < 0)
+		return ret;
+
+	init_timer(bpf_get_smp_processor_id());
 }
 
 void BPF_STRUCT_OPS(tickless_exit, struct scx_exit_info *ei)

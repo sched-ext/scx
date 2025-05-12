@@ -410,6 +410,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "buddy_system_allocator"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1a0108968a3a2dab95b089c0fc3f1afa7759aa5ebe6f1d86d206d6f7ba726eb"
+
+[[package]]
 name = "bumpalo"
 version = "3.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2310,7 +2316,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scx_bpfland"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "anyhow",
  "clap",
@@ -2327,7 +2333,7 @@ dependencies = [
 
 [[package]]
 name = "scx_chaos"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "anyhow",
  "clap",
@@ -2337,13 +2343,14 @@ dependencies = [
  "log",
  "nix 0.29.0",
  "scx_p2dq",
+ "scx_userspace_arena",
  "scx_utils",
  "simplelog",
 ]
 
 [[package]]
 name = "scx_flash"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "anyhow",
  "clap",
@@ -2360,7 +2367,7 @@ dependencies = [
 
 [[package]]
 name = "scx_lavd"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -2386,7 +2393,7 @@ dependencies = [
 
 [[package]]
 name = "scx_layered"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -2412,7 +2419,7 @@ dependencies = [
 
 [[package]]
 name = "scx_loader"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "anyhow",
  "clap",
@@ -2431,7 +2438,7 @@ dependencies = [
 
 [[package]]
 name = "scx_mitosis"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "bitvec",
@@ -2453,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "scx_p2dq"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2477,7 +2484,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rlfifo"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "anyhow",
  "ctrlc",
@@ -2490,7 +2497,7 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "anyhow",
  "clap",
@@ -2511,20 +2518,21 @@ dependencies = [
 
 [[package]]
 name = "scx_rustland_core"
-version = "2.2.10"
+version = "2.2.11"
 dependencies = [
  "anyhow",
  "libbpf-rs",
  "libc",
  "plain",
  "scx_utils",
+ "seccomp",
  "tar",
  "walkdir",
 ]
 
 [[package]]
 name = "scx_rusty"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2547,7 +2555,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "anyhow",
  "crossbeam",
@@ -2564,7 +2572,7 @@ dependencies = [
 
 [[package]]
 name = "scx_stats_derive"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2575,7 +2583,7 @@ dependencies = [
 
 [[package]]
 name = "scx_tickless"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "affinity",
  "anyhow",
@@ -2592,8 +2600,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_userspace_arena"
+version = "1.0.12"
+dependencies = [
+ "anyhow",
+ "buddy_system_allocator",
+ "libbpf-rs",
+ "scx_utils",
+]
+
+[[package]]
 name = "scx_utils"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "anyhow",
  "bindgen 0.71.1",
@@ -2622,7 +2640,7 @@ dependencies = [
 
 [[package]]
 name = "scxctl"
-version = "1.0.11"
+version = "1.0.12"
 dependencies = [
  "clap",
  "colored 3.0.0",
@@ -2632,7 +2650,7 @@ dependencies = [
 
 [[package]]
 name = "scxtop"
-version = "1.0.12"
+version = "1.0.13"
 dependencies = [
  "anyhow",
  "clap",
@@ -2673,6 +2691,25 @@ dependencies = [
  "tracing-error",
  "tracing-subscriber",
  "xdg",
+]
+
+[[package]]
+name = "seccomp"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ca3dd4474d15e6fdaea3c411bfa688c55cd1ae0051391a2b46581fffaed315b"
+dependencies = [
+ "libc",
+ "seccomp-sys",
+]
+
+[[package]]
+name = "seccomp-sys"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5bcf74ba0708aeaf8d702e4f84f7458ae1de42d80e2c20963a395b6038e6be6"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -3379,7 +3416,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vmlinux_docify"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "walkdir",

@@ -125,7 +125,7 @@ repo](https://mesonbuild.com/Quick-guide.html#installation-from-source) and call
 - `libbpf`: >=1.2.2 required, >=1.3 recommended (`RESIZE_ARRAY` support is
   new in 1.3). It's preferred to link statically against the source from the libbpf git repo, which is cloned during setup.
 - Rust toolchain: >=1.82
-- `libelf`, `libz`, `libzstd` if linking against staic `libbpf.a`
+- `libelf`, `libz`, `libzstd` if linking against static `libbpf.a`
 - `bpftool` By default this is cloned and built as part of the default build process. Alternatively it's usually available in `linux-tools-common`.
 
 The kernel has to be built with the following configuration:
@@ -292,7 +292,7 @@ relative locations.
 
 ### Offline Compilation
 
-Rust builds automatically download dependencies from crates.io; however,
+Rust builds automatically download dependencies from `crates.io`; however,
 some build environments might not allow internet access requiring all
 dependencies to be available offline. The `fetch` target and `offline`
 option are provided for such cases.
@@ -318,7 +318,7 @@ $ meson compile -C build
 
 ### Working with Rust Sub-projects
 
-Each Rust sub-project is its own self-contained cargo project. When buildng
+Each Rust sub-project is its own self-contained cargo project. When building
 as a part of this repository, `meson` invokes `cargo` with the appropriate
 options and environment variables to sync the build environment. When
 building separately by running `cargo build` directly in a sub-project
@@ -441,13 +441,13 @@ following are important branches:
   high-level discussions.
   - [RFC](https://github.com/htejun/sched_ext):
     [LMKL thread](http://lkml.kernel.org/r/20221130082313.3241517-1-tj@kernel.org)
-  - [`sched_ext-v2'](https://github.com/sched-ext/sched_ext/tree/sched_ext-v2):
+  - [`sched_ext-v2`](https://github.com/sched-ext/sched_ext/tree/sched_ext-v2):
     [LKML thread](http://lkml.kernel.org/r/20230128001639.3510083-1-tj@kernel.org)
-  - [`sched_ext-v3'](https://github.com/sched-ext/sched_ext/tree/sched_ext-v3):
+  - [`sched_ext-v3`](https://github.com/sched-ext/sched_ext/tree/sched_ext-v3):
     [LKML thread](http://lkml.kernel.org/r/20230317213333.2174969-1-tj@kernel.org)
-  - [`sched_ext-v4'](https://github.com/sched-ext/sched_ext/tree/sched_ext-v4):
+  - [`sched_ext-v4`](https://github.com/sched-ext/sched_ext/tree/sched_ext-v4):
     [LKML thread](http://lkml.kernel.org/r/20230711011412.100319-1-tj@kernel.org)
-  - [`sched_ext-v5'](https://github.com/sched-ext/sched_ext/tree/sched_ext-v5):
+  - [`sched_ext-v5`](https://github.com/sched-ext/sched_ext/tree/sched_ext-v5):
     [LKML thread](http://lkml.kernel.org/r/20231111024835.2164816-1-tj@kernel.org)
 
 ## [Breaking Changes](./BREAKING_CHANGES.md)
