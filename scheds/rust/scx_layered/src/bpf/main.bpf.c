@@ -2661,7 +2661,7 @@ void BPF_STRUCT_OPS(layered_set_weight, struct task_struct *p, u32 weight)
 static void refresh_cpus_flags(struct task_ctx *taskc,
 			       const struct cpumask *cpumask)
 {
-	u32 node_id, container_id;
+	u32 node_id, cpuset_id;
 
 	if (!all_cpumask) {
 		scx_bpf_error("NULL all_cpumask");
@@ -2688,9 +2688,9 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 		}
 	}
 	if (enable_cpuset) {
-		bpf_for(container_id, 0, nr_cpusets) {
+		bpf_for(cpuset_id, 0, nr_cpusets) {
 			struct cpumask_box* box;
-			box = bpf_map_lookup_elem(&cpuset_cpumask, &container_id);
+			box = bpf_map_lookup_elem(&cpuset_cpumask, &cpuset_id);
 			if (!box || !box->mask) {
 				scx_bpf_error("error marking tasks as cpuset aligned");
 				return;
