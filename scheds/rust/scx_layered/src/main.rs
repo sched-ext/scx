@@ -1449,9 +1449,9 @@ impl<'a> Scheduler<'a> {
         for (i, cpuset) in cpusets.iter().enumerate() {
             debug!("a cpuset is: {:#?}", cpuset.clone());
             let mut cpumask_bitvec: [u64; MAX_CPUS / 64] = [0; MAX_CPUS / 64];
-            for chunk_idx in 0..(cpumask_bitvec.len() - 1) {
+            for chunk_idx in 0..cpumask_bitvec.len() {
                 let mut cpumask_chunk = 0;
-                for cpu in 0..63 {
+                for cpu in 0..64 {
                     if cpuset.cpus.contains(&(chunk_idx * 64 + cpu)) {
                         cpumask_chunk |= 1 << cpu;
                     }

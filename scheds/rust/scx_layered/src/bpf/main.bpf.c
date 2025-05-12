@@ -84,7 +84,7 @@ u32 empty_layer_ids[MAX_LAYERS];
 u32 nr_empty_layer_ids;
 
 
-struct cpumask_box {
+struct cpumask_wrapper {
     struct bpf_cpumask __kptr *mask;
 };
 
@@ -92,7 +92,7 @@ struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __uint(max_entries, MAX_CPUSETS);
     __type(key, u32);
-    __type(value, struct cpumask_box);
+    __type(value, struct cpumask_wrapper);
 } cpuset_cpumask SEC(".maps");
 
 
@@ -2689,13 +2689,13 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 	}
 	if (enable_cpuset) {
 		bpf_for(cpuset_id, 0, nr_cpusets) {
-			struct cpumask_box* box;
-			box = bpf_map_lookup_elem(&cpuset_cpumask, &cpuset_id);
-			if (!box || !box->mask) {
+			struct cpumask_wrapper* wrapper;
+			wrapper = bpf_map_lookup_elem(&cpuset_cpumask, &cpuset_id);
+			if (!wrapper || !wrapper->mask) {
 				scx_bpf_error("error marking tasks as cpuset aligned");
 				return;
 			}
-			if (bpf_cpumask_equal(cast_mask(box->mask), cpumask)) {
+			if (bpf_cpumask_equal(cast_mask(wrapper->mask), cpumask)) {
 				taskc->cpus_cpuset_aligned = true;
 				return;
 			}
@@ -3372,7 +3372,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	struct bpf_cpumask *cpumask, *tmp_big_cpumask, *tmp_unprotected_cpumask, 
 		*tmp_cpuset_cpumask, *tmp_swap_dst_cpumask;
 	int i, j, cpu, nr_online_cpus, ret;
-	struct cpumask_box* cpumask_box;
+	struct cpumask_wrapper* cpumask_wrapper;
 
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
@@ -3424,8 +3424,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 				return -ENOMEM;
 
 			bpf_for(j, 0, MAX_CPUS/64) {
-				bpf_for(cpu, 0, 63) {
-					if (cpu < 0 || cpu >= 64 || j < 0 || j >= (MAX_CPUS/64) || i < 0 || i >= MAX_CPUSETS) {
+				bpf_for(cpu, 0, 64) {
+					if (i < 0 || i >= MAX_CPUSETS) {
 						bpf_cpumask_release(cpumask);
 						return -1;
 					}
@@ -3438,10 +3438,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 
 			// pay init cost once for faster lookups later.
 			bpf_for(cpu, 0, nr_possible_cpus) {
-				cpumask_box = bpf_map_lookup_percpu_elem(&cpuset_cpumask, &i, cpu);
+				cpumask_wrapper = bpf_map_lookup_percpu_elem(&cpuset_cpumask, &i, cpu);
 				tmp_cpuset_cpumask = bpf_cpumask_create();
 					
-				if (!cpumask || !tmp_cpuset_cpumask || !cpumask_box) {
+				if (!cpumask || !tmp_cpuset_cpumask || !cpumask_wrapper) {
 					if (cpumask)
 						bpf_cpumask_release(cpumask);
 					if (tmp_cpuset_cpumask)
@@ -3452,7 +3452,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 				
 				bpf_cpumask_copy(tmp_cpuset_cpumask, cast_mask(cpumask));
 
-				tmp_swap_dst_cpumask = bpf_kptr_xchg(&cpumask_box->mask, tmp_cpuset_cpumask);
+				tmp_swap_dst_cpumask = bpf_kptr_xchg(&cpumask_wrapper->mask, tmp_cpuset_cpumask);
 		
 				if (tmp_swap_dst_cpumask)
 					bpf_cpumask_release(tmp_swap_dst_cpumask);
