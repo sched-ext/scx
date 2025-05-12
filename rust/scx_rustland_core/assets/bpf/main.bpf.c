@@ -567,7 +567,8 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	 */
 	if (task->cpu == RL_CPU_ANY) {
 		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, task->slice_ns, task->vtime, task->flags);
-		goto out_kick_idle_cpu;
+		scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_IDLE);
+		goto out_release;
 	}
 
 	/* Read current cpumask generation counter */
@@ -577,7 +578,8 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	if (!bpf_cpumask_test_cpu(task->cpu, p->cpus_ptr)) {
 		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, task->slice_ns, task->vtime, task->flags);
 		__sync_fetch_and_add(&nr_bounce_dispatches, 1);
-		goto out_kick_idle_cpu;
+		scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_IDLE);
+		goto out_release;
 	}
 
 	/*
@@ -608,13 +610,6 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 
 	if (task->cpu != bpf_get_smp_processor_id())
 		scx_bpf_kick_cpu(task->cpu, SCX_KICK_IDLE);
-
-	goto out_release;
-
-out_kick_idle_cpu:
-	cpu = pick_idle_cpu(p, task->cpu);
-	if (cpu >= 0)
-		scx_bpf_kick_cpu(cpu, 0);
 
 out_release:
 	bpf_task_release(p);
