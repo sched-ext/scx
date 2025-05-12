@@ -51,8 +51,6 @@ enum consts {
 	DSQ_ID_LLC_MASK		= (1LLU << DSQ_ID_LAYER_SHIFT) - 1,		/* 0x0000ffff */
 	DSQ_ID_LAYER_MASK	= ~DSQ_ID_LAYER_SHIFT & ~DSQ_ID_SPECIAL_MASK,	/* 0x3fff0000 */
 
-	MAX_CPUMASK_DBG_STR_LEN = 35,
-
 	/* XXX remove */
 	MAX_CGRP_PREFIXES	= 32,
 
