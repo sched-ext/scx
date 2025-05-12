@@ -56,6 +56,8 @@ volatile u64 layer_refresh_seq_avgruntime;
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
+/* Flag to enable or disable task count feature */
+const volatile bool enable_task_count = true;
 const volatile bool enable_gpu_support = false;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
@@ -1573,6 +1575,18 @@ no:
 	return false;
 }
 
+
+/* Mapping of TGID to count of TIDs with that TGID
+ * XXX this should probably use a percpu data struture
+ * if possible.
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, pid_t);
+	__type(value, u32);
+	__uint(max_entries, sizeof(pid_t));
+} tgid_tid_count SEC(".maps");
+
 /* Mapping of cpu to most delayed DSQ it can consume */
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -3078,6 +3092,73 @@ static bool antistall_scan(void)
 	return true;
 }
 
+static bool task_count_refresh_dsq(u64 dsq_id, bool reset) {
+	struct task_struct *p;
+	u32 *counter;
+	pid_t pidk;
+	if (!dsq_id)
+		return true;
+	u32 zero_u32 = 0;
+	u32 one_u32 = 1;
+	// verifier
+	bpf_rcu_read_lock();
+	
+	bpf_for_each(scx_dsq, p, dsq_id, 0) {
+		pidk = BPF_CORE_READ(p, tgid);
+		counter = bpf_map_lookup_elem(&tgid_tid_count, &pidk);
+		if (reset) {
+			if (!counter) {
+				bpf_map_update_elem(&tgid_tid_count, &pidk, &zero_u32, 0);
+			} else {
+				*counter = 0;
+			}
+		} else {
+			if (!counter) {
+				bpf_map_update_elem(&tgid_tid_count, &pidk, &one_u32, 0);
+			} else {
+				(*counter)++;
+			}
+		}
+	}
+
+	bpf_rcu_read_unlock();
+	return true;
+}
+
+/**
+ * task_count_refresh() - refresh task counts.
+ * This function refreshes counts in task_count_map.
+ */
+static bool task_count_refresh() {
+	s32 llc;
+	u64 layer_id;
+	bool reset;
+
+	if (!enable_task_count)
+		return true;
+	
+	reset = true;
+
+process:
+	bpf_for(layer_id, 0, nr_layers) {
+		bpf_for(llc, 0, nr_llcs) {
+			task_count_refresh_dsq(layer_dsq_id(layer_id, llc), reset);
+		}
+	}
+	bpf_for(llc, 0, nr_llcs) {
+			task_count_refresh_dsq(hi_fb_dsq_id(llc), reset);
+			task_count_refresh_dsq(lo_fb_dsq_id(llc), reset);
+	}
+	
+	if (reset) {
+		reset = false;
+		goto process;
+	}
+	
+	return true;
+}
+
+
 bool run_timer_cb(int key)
 {
 	switch (key) {
@@ -3085,6 +3166,8 @@ bool run_timer_cb(int key)
 		return layered_monitor();
 	case ANTISTALL_TIMER:
 		return antistall_scan();
+	case TASK_COUNT_TIMER:
+		return task_count_refresh();
 	case NOOP_TIMER:
 	case MAX_TIMERS:
 	default:
@@ -3095,6 +3178,7 @@ bool run_timer_cb(int key)
 struct layered_timer layered_timers[MAX_TIMERS] = {
 	{15LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
 	{1LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
+	{5LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
 	{0LLU, CLOCK_BOOTTIME, 0},
 };
 
