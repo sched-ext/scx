@@ -83,8 +83,10 @@ u32 layered_root_tgid = 0;
 u32 empty_layer_ids[MAX_LAYERS];
 u32 nr_empty_layer_ids;
 
+
 struct cpumask_box {
     struct bpf_cpumask __kptr *mask;
+    char dbg_str[MAX_CPUMASK_DBG_STR_LEN] __attribute__((aligned(1)));
 };
 
 struct {
@@ -3417,6 +3419,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 
 	if (enable_cpuset) {
 		bpf_for(i, 0, nr_cpusets) {
+			u64 bitmask = 0;
 			cpumask = bpf_cpumask_create();
 
 			if (!cpumask)
@@ -3432,13 +3435,13 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		 		// container then cpu bit
 				if (cpuset_fakemasks[i][j] == 1) {
 					bpf_cpumask_set_cpu(j, cpumask);
+					bitmask |= 1ULL << j;
 				}
 			}
 
-
 			// pay init cost once for faster lookups later.
 			bpf_for(cpu, 0, nr_possible_cpus) {
-				cpumask_box = bpf_map_lookup_percpu_elem(&cpuset_cpumask, &i, cpu);	
+				cpumask_box = bpf_map_lookup_percpu_elem(&cpuset_cpumask, &i, cpu);
 				tmp_cpuset_cpumask = bpf_cpumask_create();
 			
 				if (!cpumask || !tmp_cpuset_cpumask || !cpumask_box) {
@@ -3449,12 +3452,17 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 					scx_bpf_error("cpumask is null");
 					return -1; 
 				}
+				
+				bpf_snprintf(cpumask_box->dbg_str, sizeof(cpumask_box->dbg_str), "0x%032llx\0", &bitmask, sizeof(bitmask));
 				bpf_cpumask_copy(tmp_cpuset_cpumask, cast_mask(cpumask));
 
 				tmp_swap_dst_cpumask = bpf_kptr_xchg(&cpumask_box->mask, tmp_cpuset_cpumask);
+		
 				if (tmp_swap_dst_cpumask)
 					bpf_cpumask_release(tmp_swap_dst_cpumask);
+								
 			}
+
 			if (cpumask)
 				bpf_cpumask_release(cpumask);
 
