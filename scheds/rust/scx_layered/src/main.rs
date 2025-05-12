@@ -1447,12 +1447,24 @@ impl<'a> Scheduler<'a> {
     fn init_cpusets(skel: &mut OpenBpfSkel, topo: &Topology) -> Result<()> {
         let cpusets = get_cpusets(topo)?;
         for (i, cpuset) in cpusets.iter().enumerate() {
+            debug!("a cpuset is: {:#?}", cpuset.clone());
             let mut cpumask_bitvec: [u64; MAX_CPUS / 64] = [0; MAX_CPUS / 64];
-            for j in 0..MAX_CPUS / 64 {
-                if cpuset.cpus.contains(&j) {
-                    cpumask_bitvec[j] = 1;
+            for chunk_idx in 0..(cpumask_bitvec.len() - 1) {
+                let mut cpumask_chunk = 0;
+                for cpu in 0..63 {
+                    if cpuset.cpus.contains(&(chunk_idx * 64 + cpu)) {
+                        cpumask_chunk |= 1 << cpu;
+                    }
                 }
+                cpumask_bitvec[cpumask_bitvec.len() - chunk_idx - 1] = cpumask_chunk;
             }
+            let hex_string = cpumask_bitvec
+                .clone()
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>();
+            debug!("a cpuset cpumask is: {}", hex_string);
+
             let cpuset_cpumask_slice = &mut skel.maps.rodata_data.cpuset_fakemasks[i];
             cpuset_cpumask_slice.copy_from_slice(&cpumask_bitvec);
         }
