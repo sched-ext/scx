@@ -738,7 +738,6 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	struct llc_ctx *llcx, *prev_llcx;
 	struct cpu_ctx *cpuc, *task_cpuc;
 	task_ctx *taskc;
-	u64 dsq_id;
 
 	s32 cpu, task_cpu = scx_bpf_task_cpu(p);
 
@@ -800,9 +799,8 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		cpu = pick_idle_cpu(p, taskc, taskc->cpu, 0, &is_idle);
 		cpuc = lookup_cpu_ctx(cpu);
 		if (cpuc && taskc->dsq_index >= 0 && taskc->dsq_index < nr_dsqs_per_llc) {
-			dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
-			taskc->dsq_id = dsq_id;
-			scx_bpf_dsq_insert_vtime(p, dsq_id, taskc->slice_ns, p->scx.dsq_vtime, enq_flags);
+			taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
+			scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, taskc->slice_ns, p->scx.dsq_vtime, enq_flags);
 			if (is_idle) {
 				stat_inc(P2DQ_STAT_IDLE);
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
@@ -813,11 +811,10 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		}
 	}
 
-	dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
-	taskc->dsq_id = dsq_id;
+	taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
 
 	ret->kind = P2DQ_ENQUEUE_PROMISE_VTIME;
-	ret->vtime.dsq_id = dsq_id;
+	ret->vtime.dsq_id = taskc->dsq_id;
 	ret->vtime.enq_flags = enq_flags;
 	ret->vtime.slice_ns = taskc->slice_ns;
 	ret->vtime.vtime = p->scx.dsq_vtime;

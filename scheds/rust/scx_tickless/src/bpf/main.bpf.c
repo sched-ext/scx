@@ -671,6 +671,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(tickless_init)
 		return ret;
 
 	init_timer(bpf_get_smp_processor_id());
+
+	return 0;
 }
 
 void BPF_STRUCT_OPS(tickless_exit, struct scx_exit_info *ei)
