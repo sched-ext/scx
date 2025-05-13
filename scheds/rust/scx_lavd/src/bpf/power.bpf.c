@@ -172,6 +172,7 @@ static void do_core_compaction(void)
 		if (i < nr_active) {
 			bpf_cpumask_set_cpu(cpu, active);
 			bpf_cpumask_clear_cpu(cpu, ovrflw);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 			/*
 			 * Accumulate the capacity of active CPUs and
@@ -182,7 +183,6 @@ static void do_core_compaction(void)
 				cpdomc->cap_sum_temp += cpuc->capacity;
 				cpdomc->nr_acpus_temp++;
 			}
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
 			/*
 			 * Calculate big capacity ratio among active cores.
@@ -472,32 +472,36 @@ static int reinit_active_cpumask_for_performance(void)
 				bpf_cpumask_set_cpu(cpu, ovrflw);
 				bpf_cpumask_clear_cpu(cpu, active);
 			}
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
-			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpu]);
+			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
 			if (cpdomc) {
 				cpdomc->nr_acpus_temp++;
 				cpdomc->cap_sum_temp += cpuc->capacity;
 			}
 		}
 	} else {
-		bpf_for(cpu, 0, nr_cpu_ids) {
-			cpuc = get_cpu_ctx_id(cpu);
-			if (!cpuc || !cpuc->is_online)
-				continue;
-
-			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpu]);
-			if (cpdomc) {
-				cpdomc->nr_acpus_temp++;
-				cpdomc->cap_sum_temp += cpuc->capacity;
-			}
-		}
-
 		online_cpumask = scx_bpf_get_online_cpumask();
 		nr_cpus_onln = bpf_cpumask_weight(online_cpumask);
 		bpf_cpumask_copy(active, online_cpumask);
 		scx_bpf_put_cpumask(online_cpumask);
 
 		bpf_cpumask_clear(ovrflw);
+
+		bpf_for(cpu, 0, nr_cpu_ids) {
+			cpuc = get_cpu_ctx_id(cpu);
+			if (!cpuc || !cpuc->is_online)
+				continue;
+
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+
+			cpdomc = MEMBER_VPTR(cpdom_ctxs, [cpuc->cpdom_id]);
+			if (cpdomc) {
+				cpdomc->nr_acpus_temp++;
+				cpdomc->cap_sum_temp += cpuc->capacity;
+			}
+		}
+
 	}
 
 	/*

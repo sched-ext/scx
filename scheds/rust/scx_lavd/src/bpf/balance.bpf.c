@@ -56,8 +56,12 @@ static void plan_x_cpdom_migration(void)
 			 * If tasks are running on an overflow domain,
 			 * need load balancing.
 			 */
-			if (cpdomc->cur_util_sum > 0)
+			if (cpdomc->cur_util_sum > 0) {
 				overflow_running = true;
+				cpdomc->sc_load = U32_MAX;
+			}
+			else
+				cpdomc->sc_load = 0;
 			continue;
 		}
 
