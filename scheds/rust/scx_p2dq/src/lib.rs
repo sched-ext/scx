@@ -49,6 +49,10 @@ pub struct SchedulerOpts {
     #[clap(short = 'y', long, action = clap::ArgAction::SetTrue)]
     pub interactive_sticky: bool,
 
+    /// Interactive tasks are FIFO scheduled
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    pub interactive_fifo: bool,
+
     /// Disables pick2 load balancing on the dispatch path.
     #[clap(short = 'd', long, action = clap::ArgAction::SetTrue)]
     pub dispatch_pick2_disable: bool,
@@ -201,6 +205,7 @@ macro_rules! init_open_skel {
             $skel.maps.rodata_data.eager_load_balance = !opts.eager_load_balance;
             $skel.maps.rodata_data.has_little_cores = $crate::TOPO.has_little_cores();
             $skel.maps.rodata_data.interactive_sticky = opts.interactive_sticky;
+            $skel.maps.rodata_data.interactive_fifo = opts.interactive_fifo;
             $skel.maps.rodata_data.keep_running_enabled = opts.keep_running;
             $skel.maps.rodata_data.max_dsq_pick2 = opts.max_dsq_pick2;
             $skel.maps.rodata_data.smt_enabled = $crate::TOPO.smt_enabled;
