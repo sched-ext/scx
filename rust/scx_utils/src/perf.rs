@@ -52,11 +52,11 @@ pub mod ioctls {
 
     #[allow(clippy::missing_safety_doc)]
     pub unsafe fn enable(fd: c_int, arg: c_uint) -> c_int {
-        unsafe { libc::ioctl(fd, perf::bindings::ENABLE.into(), arg) }
+        unsafe { libc::ioctl(fd, perf::bindings::ENABLE as libc::Ioctl, arg) }
     }
 
     #[allow(clippy::missing_safety_doc)]
     pub unsafe fn reset(fd: c_int, arg: c_uint) -> c_int {
-        unsafe { libc::ioctl(fd, perf::bindings::RESET.into(), arg) }
+        unsafe { libc::ioctl(fd, perf::bindings::RESET as libc::Ioctl, arg) }
     }
 }
