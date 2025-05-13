@@ -46,8 +46,6 @@ const volatile u64 random_delays_max_ns = 2; /* for veristat */
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
-#define MAX_ITERS_IN_DISPATCH 8
-
 enum chaos_timer_callbacks {
 	CHAOS_TIMER_CHECK_QUEUES,
 	CHAOS_MAX_TIMERS,
@@ -263,7 +261,6 @@ __weak u64 check_dsq_times(int cpu_idx)
 	struct task_struct *p;
 	u64 next_trigger_time = 0;
 	u64 now = bpf_ktime_get_ns();
-	int i = 0;
 	bool has_kicked = false;
 
 	bpf_rcu_read_lock();
@@ -272,26 +269,19 @@ __weak u64 check_dsq_times(int cpu_idx)
 		if (!p)
 			break;
 
-		if (i++ >= MAX_ITERS_IN_DISPATCH) {
-			next_trigger_time = p->scx.dsq_vtime;
-			bpf_task_release(p);
-			break;
-		}
-
-		if (has_kicked) {
-			bpf_task_release(p);
-			continue;
-		}
-
-		if (p->scx.dsq_vtime < now + chaos_timer_check_queues_slack_ns) {
+		if (!has_kicked && p->scx.dsq_vtime < now - chaos_timer_check_queues_slack_ns) {
 			has_kicked = true;
 			scx_bpf_kick_cpu(cpu_idx, SCX_KICK_PREEMPT);
-		} else if (p->scx.dsq_vtime < now) {
+		} else if (!has_kicked && p->scx.dsq_vtime < now) {
 			has_kicked = true;
 			scx_bpf_kick_cpu(cpu_idx, SCX_KICK_IDLE);
+		} else if (p->scx.dsq_vtime > now) {
+			next_trigger_time = p->scx.dsq_vtime;
 		}
 
 		bpf_task_release(p);
+		if (next_trigger_time > now + chaos_timer_check_queues_slack_ns)
+			break;
 	}
 	bpf_rcu_read_unlock();
 
@@ -384,6 +374,14 @@ out:
 	pro->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 }
 
+__weak int async_p2dq_enqueue_weak(struct enqueue_promise *ret __arg_nonnull,
+				   struct task_struct *p __arg_trusted,
+				   u64 enq_flags)
+{
+	async_p2dq_enqueue(ret, p, enq_flags);
+	return 0;
+}
+
 void BPF_STRUCT_OPS(chaos_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct enqueue_promise promise;
@@ -391,11 +389,7 @@ void BPF_STRUCT_OPS(chaos_dispatch, s32 cpu, struct task_struct *prev)
 	struct task_struct *p;
 	u64 now = bpf_ktime_get_ns();
 
-	int i = 0;
 	bpf_for_each(scx_dsq, p, get_cpu_delay_dsq(-1), 0) {
-		if (i++ >= MAX_ITERS_IN_DISPATCH)
-			break; // the verifier can't handle this loop, so limit it
-
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
 			continue;
@@ -414,7 +408,7 @@ void BPF_STRUCT_OPS(chaos_dispatch, s32 cpu, struct task_struct *prev)
 		// restore vtime to p2dq's timeline
 		p->scx.dsq_vtime = taskc->p2dq_vtime;
 
-		async_p2dq_enqueue(&promise, p, taskc->enq_flags);
+		async_p2dq_enqueue_weak(&promise, p, taskc->enq_flags);
 		complete_p2dq_enqueue_move(&promise, BPF_FOR_EACH_ITER, p);
 		bpf_task_release(p);
 	}
