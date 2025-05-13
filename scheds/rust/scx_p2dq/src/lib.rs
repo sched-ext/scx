@@ -74,6 +74,10 @@ pub struct SchedulerOpts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub wakeup_llc_migrations: bool,
 
+    /// Allow selecting idle in enqueue path.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    pub select_idle_in_enqueue: bool,
+
     /// Set idle QoS resume latency based in microseconds.
     #[clap(long)]
     pub idle_resume_us: Option<u32>,
@@ -200,7 +204,7 @@ macro_rules! init_open_skel {
             $skel.maps.rodata_data.keep_running_enabled = opts.keep_running;
             $skel.maps.rodata_data.max_dsq_pick2 = opts.max_dsq_pick2;
             $skel.maps.rodata_data.smt_enabled = $crate::TOPO.smt_enabled;
-            $skel.maps.rodata_data.select_idle_in_enqueue = true;
+            $skel.maps.rodata_data.select_idle_in_enqueue = opts.select_idle_in_enqueue;
             $skel.maps.rodata_data.wakeup_lb_busy = opts.wakeup_lb_busy;
             $skel.maps.rodata_data.wakeup_llc_migrations = opts.wakeup_llc_migrations;
             $skel.maps.rodata_data.max_exec_ns =
