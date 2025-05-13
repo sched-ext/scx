@@ -577,14 +577,11 @@ impl<'a> Scheduler<'a> {
             );
             for cpu in &cpus {
                 for sibling_cpu in &cpus {
-                    match enable_sibling_cpu_fn(skel, cache_lvl, *cpu, *sibling_cpu) {
-                        Ok(()) => {}
-                        Err(_) => {
-                            warn!(
-                                "L{} cache ID {}: failed to set CPU {} sibling {}",
-                                cache_lvl, cache_id, *cpu, *sibling_cpu
-                            );
-                        }
+                    if enable_sibling_cpu_fn(skel, cache_lvl, *cpu, *sibling_cpu).is_err() {
+                        warn!(
+                            "L{} cache ID {}: failed to set CPU {} sibling {}",
+                            cache_lvl, cache_id, *cpu, *sibling_cpu
+                        );
                     }
                 }
             }
