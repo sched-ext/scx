@@ -209,7 +209,7 @@ s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
 	 * Search an idle CPU in a compute domain
 	 * in the order of turbo, active, and overflow.
 	 */
-	if (!ctx->iat_empty && cpdc->is_active && cpdc->is_big) {
+	if (!ctx->iat_empty && cpdc->nr_active_cpus && cpdc->is_big) {
 		bpf_cpumask_and(ctx->temp_mask,
 				cast_mask(cpd_mask), cast_mask(ctx->iat_mask));
 		cpu = scx_bpf_pick_idle_cpu(cast_mask(ctx->temp_mask), scope);
@@ -218,7 +218,7 @@ s32 pick_idle_cpu_at_cpdom(struct pick_ctx *ctx, s64 cpdom, u64 scope,
 			return cpu;
 		}
 	}
-	if (!ctx->ia_empty && cpdc->is_active) {
+	if (!ctx->ia_empty && cpdc->nr_active_cpus) {
 		bpf_cpumask_and(ctx->temp_mask,
 				cast_mask(cpd_mask), cast_mask(ctx->ia_mask));
 		cpu = scx_bpf_pick_idle_cpu(cast_mask(ctx->temp_mask), scope);
@@ -329,7 +329,7 @@ bool can_run_on_domain(struct pick_ctx *ctx, s64 cpdom)
 		return false;
 
 	a_mask = ctx->a_mask;
-	if (a_mask && cpdc->is_active &&
+	if (a_mask && cpdc->nr_active_cpus &&
 	    bpf_cpumask_intersects(cast_mask(a_mask), cast_mask(cpd_mask)))
 		return true;
 
