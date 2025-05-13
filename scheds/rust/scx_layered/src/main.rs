@@ -1358,6 +1358,7 @@ impl<'a> Scheduler<'a> {
                     disallow_open_after_us,
                     disallow_preempt_after_us,
                     xllc_mig_min_us,
+                    placement,
                     ..
                 } = spec.kind.common();
 
@@ -1400,6 +1401,19 @@ impl<'a> Scheduler<'a> {
                     }
                     layer.llc_mask |= llcmask_from_llcs(&topo_node.llcs) as u64;
                 }
+
+                let task_place = |place: u32| crate::types::layer_task_place(place);
+                layer.task_place = match placement {
+                    LayerPlacement::Standard => {
+                        task_place(bpf_intf::layer_task_place_PLACEMENT_STD as u32)
+                    }
+                    LayerPlacement::Sticky => {
+                        task_place(bpf_intf::layer_task_place_PLACEMENT_STICK as u32)
+                    }
+                    LayerPlacement::Floating => {
+                        task_place(bpf_intf::layer_task_place_PLACEMENT_FLOAT as u32)
+                    }
+                };
             }
 
             layer.is_protected.write(match spec.kind {
