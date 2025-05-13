@@ -742,7 +742,6 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	s32 cpu, task_cpu = scx_bpf_task_cpu(p);
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) ||
-	    !(task_cpuc = lookup_cpu_ctx(task_cpu)) ||
 	    !(taskc = lookup_task_ctx(p)) ||
 	    !(llcx = lookup_llc_ctx(cpuc->llc_id))) {
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
@@ -754,7 +753,8 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 
 	// If the task in in another LLC need to update vtime.
 	if (taskc->llc_id != cpuc->llc_id) {
-		if (!(prev_llcx = lookup_llc_ctx(task_cpuc->llc_id))) {
+		if (!(task_cpuc = lookup_cpu_ctx(task_cpu)) ||
+		    !(prev_llcx = lookup_llc_ctx(task_cpuc->llc_id))) {
 			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 			return;
 		}
