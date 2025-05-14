@@ -1,7 +1,7 @@
 use crate::StatsClient;
 use crate::{Meta, StatsData, StatsKind, StatsMeta};
 use anyhow::{anyhow, bail, Context, Result};
-use crossbeam::channel::{unbounded, Receiver, RecvError, Select, SendError, Sender};
+use crossbeam::channel::{unbounded, Receiver, RecvError, Select, Sender};
 use log::{debug, error, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
