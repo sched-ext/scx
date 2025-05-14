@@ -88,6 +88,7 @@ pub mod bpf_intf;
 
 #[rustfmt::skip]
 mod bpf;
+use std::io::{self, ErrorKind};
 use std::mem::MaybeUninit;
 use std::time::SystemTime;
 
