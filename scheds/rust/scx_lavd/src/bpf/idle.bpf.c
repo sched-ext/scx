@@ -499,10 +499,10 @@ static
 s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 {
 	const struct cpumask *idle_cpumask = NULL, *idle_smtmask = NULL;
-	struct cpdom_ctx *cpdc;
+	struct cpdom_ctx *cpdc, *mig_cpdc;
 	s32 cpu = -ENOENT, sticky_cpu;
 	bool i_smt_empty;
-	s64 sticky_cpdom = -ENOENT, nr_nbr, nuance;
+	s64 sticky_cpdom = -ENOENT, mig_cpdom, nr_nbr, nuance;
 	int i, j;
 
 	/*
@@ -543,7 +543,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 	 * If a task can run only on a single CPU (e.g., per-CPU kworker),
 	 * we just go with that CPU and set the overflow set if needed.
 	 * Note that do not extend the overflow set for a unpinned,
-	 * non-migratable, task since disabling task migration is temporary.
+	 * non-migratable task since disabling task migration is temporary.
 	 */
 	if (!init_active_ovrflw_masks(ctx))
 		goto err_out;
@@ -646,7 +646,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 		*is_idle = true;
 		goto unlock_out;
 	}
-	/* NOTE: The sticky CPU is not idle. */
+	/* NOTE: The sticky CPU is not (even partially) idle. */
 
 	/*
 	 * If the synchronous waker CPU is idle, stay on it.
@@ -659,7 +659,7 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 		sticky_cpdom = -ENOENT;
 		goto unlock_out;
 	}
-	/* NOTE: The waker CPU is not idle or irrelevant. */
+	/* NOTE: The waker CPU is not (even partially) idle if there is. */
 
 	/*
 	 * If there is no idle CPU in the active and overflow set,
@@ -672,6 +672,70 @@ s32 pick_idle_cpu(struct pick_ctx *ctx, bool *is_idle)
 		goto unlock_out;
 	}
 	/* NOTE: There is at least one idle CPU in either active or overflow set. */
+
+	/*
+	 * So far, it is confirmed that
+	 *  - There is no fully idle CPU in the sticky domain.
+	 *  - The sticky CPU or waker CPU is not idle.
+	 *  - But there is at least one idle CPU in active/overflow set.
+	 *
+	 * In other words, the system is underloaded, but there is no fully
+	 * idle CPU in the stikcy domain. In addition to that, if the sticky
+	 * domain is marked as a stealee domain, that means the sticky domain's
+	 * load is relatively higher than the other domains. 
+	 *
+	 * In this case, let's donate the task to an under-loaded neighboring
+	 * domain by finding a _fully_ idle CPU from neighboring domains. Note
+	 * that when a system is under-loaded, task donation works better than
+	 * task stealing because DSQs are mostly empty (i.e., it is hard to
+	 * steal from a DSQ).
+	 */
+	if (!is_smt_active)
+		goto skip_fully_idle_neighbor;
+
+	cpdc = MEMBER_VPTR(cpdom_ctxs, [sticky_cpdom]);
+	if (!cpdc || !READ_ONCE(cpdc->is_stealee))
+		goto skip_fully_idle_neighbor;
+
+	nuance = bpf_get_prandom_u32();
+	mig_cpdom = sticky_cpdom;
+	for (i = 0; i < LAVD_CPDOM_MAX_DIST && cpdc; i++) {
+		nr_nbr = min(cpdc->nr_neighbors[i], LAVD_CPDOM_MAX_NR);
+		if (nr_nbr == 0)
+			break;
+		for (j = 0; j < LAVD_CPDOM_MAX_NR; j++, nuance = mig_cpdom + 1) {
+			if (j >= nr_nbr)
+				break;
+			mig_cpdom  = pick_any_bit(cpdc->neighbor_bits[i], nuance);
+			if (mig_cpdom < 0)
+				continue;
+
+			mig_cpdc = MEMBER_VPTR(cpdom_ctxs, [mig_cpdom]);
+			if (!mig_cpdc || !READ_ONCE(mig_cpdc->is_stealer))
+				continue;
+
+			cpu = pick_idle_cpu_at_cpdom(ctx, mig_cpdom, SCX_PICK_IDLE_CORE, is_idle);
+			if (cpu >= 0) {
+				/*
+				 * If task donation is successful, mark the stealer
+				 * and the stealee's job done. By marking done,
+				 * those compute domains would not be involved in
+				 * load balancing until the end of this round,
+				 * so this helps gradual migration. It is racy
+				 * in task stealings and donations, but we don't
+				 * care because a slight over-migration does not matter.
+				 */
+				WRITE_ONCE(mig_cpdc->is_stealer, false);
+				WRITE_ONCE(cpdc->is_stealee, false);
+				sticky_cpdom = mig_cpdom;
+				goto unlock_out;
+			}
+		}
+	}
+skip_fully_idle_neighbor:
+	/* NOTE: There is no fully idle CPU in the neighboring domain,
+	 * it is not worth migrating. So try to find any idle CPU from
+	 * the sticky domain. */
 
 	/*
 	 * If there is an (partially) idle CPU in the sticky domain, stay on it.

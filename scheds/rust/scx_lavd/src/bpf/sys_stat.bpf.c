@@ -327,22 +327,38 @@ static void do_update_sys_stat(void)
 
 static void update_sys_stat(void)
 {
+	/*
+	 * Update system statistics.
+	 */
 	do_update_sys_stat();
 
+	/*
+	 * Change the power profile based on the statistics.
+	 */
 	if (is_autopilot_on)
 		do_autopilot();
 
+	/*
+	 * Perform core compaction for powersave and balance mode.
+	 * Or turn on all CPUs for performance mode.
+	 */
 	if (!no_core_compaction)
 		do_core_compaction();
-
-	calc_sys_time_slice();
-	update_thr_perf_cri();
 
 	if (reinit_cpumask_for_performance) {
 		reinit_cpumask_for_performance = false;
 		reinit_active_cpumask_for_performance();
 	}
 
+	/*
+	 * Update time slice and performance criticality threshold.
+	 */
+	calc_sys_time_slice();
+	update_thr_perf_cri();
+
+	/*
+	 * Plan cross-domain task migration.
+	 */
 	if (nr_cpdoms > 1)
 		plan_x_cpdom_migration();
 }
