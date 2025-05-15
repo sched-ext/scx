@@ -664,10 +664,10 @@ impl<'a> Scheduler<'a> {
         for (pos, cpu) in cpu_ps_order.iter().enumerate() {
             skel.maps.rodata_data.cpu_order_powersave[pos] = *cpu as u16;
         }
-        if (!opts.powersave) {
+        if !opts.powersave {
             info!("CPU pref order in performance mode: {:?}", cpu_pf_order);
         }
-        if (!opts.performance) {
+        if !opts.performance {
             info!("CPU pref order in powersave mode: {:?}", cpu_ps_order);
         }
 
