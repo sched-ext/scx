@@ -1,6 +1,6 @@
 [package]
 name = "scx_chaos"
-version = "1.0.14"
+version = "1.0.15"
 edition = "2021"
 authors = ["Jake Hillion <jake@hillion.co.uk>"]
 description = "scx_chaos A general purpose sched_ext scheduler designed to amplify race conditions"
