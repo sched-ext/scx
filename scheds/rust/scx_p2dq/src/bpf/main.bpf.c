@@ -61,6 +61,7 @@ const volatile bool interactive_sticky = false;
 const volatile bool keep_running_enabled = true;
 const volatile bool kthreads_local = true;
 const volatile bool max_dsq_pick2 = false;
+const volatile bool freq_control = true;
 const volatile bool select_idle_in_enqueue = true;
 const volatile u64 max_exec_ns = 20 * NSEC_PER_MSEC;
 
@@ -849,8 +850,7 @@ static __always_inline void p2dq_runnable_impl(struct task_struct *p, u64 enq_fl
 	wakee_ctx->is_kworker = p->flags & (PF_KTHREAD | PF_WQ_WORKER | PF_IO_WORKER);
 }
 
-
-void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
+static __always_inline int p2dq_running_impl(struct task_struct *p)
 {
 	task_ctx *taskc;
 	struct cpu_ctx *cpuc;
@@ -860,7 +860,7 @@ void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 	if (!(taskc = lookup_task_ctx(p)) ||
 	   !(cpuc = lookup_cpu_ctx(task_cpu)) ||
 	   !(llcx = lookup_llc_ctx(cpuc->llc_id)))
-		return;
+		return -EINVAL;
 
 	if (taskc->llc_id != cpuc->llc_id) {
 		taskc->llc_runs = 0;
@@ -889,10 +889,12 @@ void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
 
 	// If the task is running in the least interactive DSQ, bump the
 	// frequency.
-	if (taskc->dsq_index == nr_dsqs_per_llc-1) {
+	if (freq_control && taskc->dsq_index == nr_dsqs_per_llc-1) {
 		scx_bpf_cpuperf_set(task_cpu, SCX_CPUPERF_ONE);
 	}
 	taskc->last_run_at = bpf_ktime_get_ns();
+
+	return 0;
 }
 
 void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
@@ -1610,6 +1612,11 @@ void BPF_STRUCT_OPS(p2dq_runnable, struct task_struct *p, u64 enq_flags)
 s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init)
 {
 	return p2dq_init_impl();
+}
+
+void BPF_STRUCT_OPS(p2dq_running, struct task_struct *p)
+{
+	p2dq_running_impl(p);
 }
 
 void BPF_STRUCT_OPS(p2dq_enqueue, struct task_struct *p __arg_trusted, u64 enq_flags)
