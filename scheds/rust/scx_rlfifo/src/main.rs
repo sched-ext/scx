@@ -110,7 +110,7 @@ impl<'a> Scheduler<'a> {
             0,     // exit_dump_len (buffer size of exit info, 0 = default)
             false, // partial (false = include all tasks)
             false, // debug (false = debug mode off)
-            false, // builtin_idle (false = idle selection policy in user-space)
+            true,  // builtin_idle (true = allow BPF to use idle CPUs if available)
         )?;
         Ok(Self { bpf })
     }
@@ -130,9 +130,9 @@ impl<'a> Scheduler<'a> {
             // A call to select_cpu() will return the most suitable idle CPU for the task,
             // prioritizing its previously used CPU (task.cpu).
             //
-            // If we can't find any idle CPU, keep the task running on the same CPU.
+            // If we can't find any idle CPU, run on the first CPU available.
             let cpu = self.bpf.select_cpu(task.pid, task.cpu, task.flags);
-            dispatched_task.cpu = if cpu >= 0 { cpu } else { task.cpu };
+            dispatched_task.cpu = if cpu >= 0 { cpu } else { RL_CPU_ANY };
 
             // Determine the task's time slice: assign value inversely proportional to the number
             // of tasks waiting to be scheduled.
