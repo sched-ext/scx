@@ -594,7 +594,12 @@ struct Opts {
     /// Enable cpuset support
     /// This flag has tasks with cpuset aligned cpumasks sent to layer
     /// DSQs instead of lo fallback DSQ (as would be done with tasks
-    /// w/ non-all_cpus affinities otherwise).
+    /// w/ non-all_cpus affinities otherwise). Care must be taken when
+    /// using cpuset to ensure that cpusets are LLC aligned or performance
+    /// will suffer. It is likely best to not use cpuset at all, and instead
+    /// leverage some other method of soft partitioning (such as having layers
+    /// with per-cgroup matchers and cpus_range_frac). This flag's behavior
+    /// is "support cpuset use as best as is possible".
     #[clap(long, default_value = "false")]
     enable_cpuset: bool,
 
