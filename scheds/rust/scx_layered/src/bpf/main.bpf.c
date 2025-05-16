@@ -2687,7 +2687,9 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 			break;
 		}
 	}
+
 	if (enable_cpuset) {
+
 		bpf_for(cpuset_id, 0, nr_cpusets) {
 			struct cpumask_wrapper* wrapper;
 			wrapper = bpf_map_lookup_elem(&cpuset_cpumask, &cpuset_id);
@@ -2700,6 +2702,7 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 				return;
 			}
 		}
+		
 		taskc->cpus_cpuset_aligned = false;
 	}
 }
@@ -3414,13 +3417,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	if (tmp_unprotected_cpumask)
 		bpf_cpumask_release(tmp_unprotected_cpumask);
 
-
-
 	if (enable_cpuset) {
 		bpf_for(i, 0, nr_cpusets) {
-			cpumask = bpf_cpumask_create();
-			
-			if (!cpumask)
+			if (!(cpumask = bpf_cpumask_create()))
 				return -ENOMEM;
 
 			bpf_for(j, 0, MAX_CPUS) {
