@@ -478,10 +478,9 @@ impl UserAllocator {
     #[allow(static_mut_refs)]
     pub fn lock_memory(&self) {
         unsafe {
-            match VM.save() {
-                Ok(_) => {}
-                Err(res) => eprintln!("WARNING: {}\n", res),
-            };
+            if let Err(e) = VM.save() {
+                eprintln!("WARNING: {}\n", e);
+            }
 
             // Call setrlimit to set the locked-in-memory limit to unlimited.
             let new_rlimit = libc::rlimit {
@@ -504,9 +503,8 @@ impl UserAllocator {
     #[allow(static_mut_refs)]
     pub fn unlock_memory(&self) {
         unsafe {
-            match VM.restore() {
-                Ok(_) => {}
-                Err(res) => eprintln!("WARNING: {}\n", res),
+            if let Err(e) = VM.restore() {
+                eprintln!("WARNING: {}\n", e);
             }
         };
     }
