@@ -2691,7 +2691,8 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 	}
 
 	if (enable_cpuset) {
-
+		taskc->cpus_cpuset_aligned = false;
+		
 		bpf_for(cpuset_id, 0, nr_cpusets) {
 			struct cpumask_wrapper* wrapper;
 			wrapper = bpf_map_lookup_elem(&cpuset_cpumask, &cpuset_id);
@@ -2701,11 +2702,9 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 			}
 			if (bpf_cpumask_equal(cast_mask(wrapper->mask), cpumask)) {
 				taskc->cpus_cpuset_aligned = true;
-				return;
+				break;
 			}
-		}
-		
-		taskc->cpus_cpuset_aligned = false;
+		}	
 	}
 }
 
