@@ -592,6 +592,9 @@ struct Opts {
     disable_antistall: bool,
 
     /// Enable cpuset support
+    /// This flag has tasks with cpuset aligned cpumasks sent to layer
+    /// DSQs instead of lo fallback DSQ (as would be done with tasks
+    /// w/ non-all_cpus affinities otherwise).
     #[clap(long, default_value = "false")]
     enable_cpuset: bool,
 

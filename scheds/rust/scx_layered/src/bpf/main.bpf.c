@@ -83,7 +83,7 @@ u32 layered_root_tgid = 0;
 u32 empty_layer_ids[MAX_LAYERS];
 u32 nr_empty_layer_ids;
 
-
+/* map storing cpuset cpu masks */
 struct cpumask_wrapper {
     struct bpf_cpumask __kptr *mask;
 };
@@ -94,8 +94,6 @@ struct {
     __type(key, u32);
     __type(value, struct cpumask_wrapper);
 } cpuset_cpumask SEC(".maps");
-
-
 
 UEI_DEFINE(uei);
 
@@ -1398,6 +1396,11 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * FIXME: ->allow_node_aligned is a hack to support node-affine tasks
 	 * without making the whole scheduler node aware and should only be used
 	 * with open layers on non-saturated machines to avoid possible stalls.
+	 *
+	 * FIXME ->allow_cpuset_aligned is a hack to support cpuset affine tasks
+	 * without hierarchical scheduler support. Supporting cpuset affine tasks
+	 * properly likely requires hierarchical scheduler support, so replace this
+	 * with that once available.
 	 */
 	if ((!taskc->all_cpus_allowed && 
 		!((layer->allow_node_aligned && taskc->cpus_node_aligned) || 
@@ -2692,7 +2695,8 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 
 	if (enable_cpuset) {
 		taskc->cpus_cpuset_aligned = false;
-		
+
+		// set cpuset_aligned flag for cpuset_aligned tasks.	
 		bpf_for(cpuset_id, 0, nr_cpusets) {
 			struct cpumask_wrapper* wrapper;
 			wrapper = bpf_map_lookup_elem(&cpuset_cpumask, &cpuset_id);
@@ -3419,13 +3423,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 		bpf_cpumask_release(tmp_unprotected_cpumask);
 
 	if (enable_cpuset) {
+		// create a bpf cpumask for every cpuset
 		bpf_for(i, 0, nr_cpusets) {
 			if (!(cpumask = bpf_cpumask_create()))
 				return -ENOMEM;
-
+			// convert each byte of passed-in cpuset cpumask to bpf cpumask.
 			bpf_for(j, 0, MAX_CPUS) {
 				if (j >= MAX_CPUS/64)
 					break;
+				// convert each bit of passed-in cpuset cpumask to bpf cpumask.
 				bpf_for(cpu, 0, 64) {
 					if (i < 0 || i >= MAX_CPUSETS) {
 						bpf_cpumask_release(cpumask);
