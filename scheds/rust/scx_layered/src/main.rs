@@ -320,6 +320,10 @@ lazy_static! {
 /// - UsedGpuPid: Bool. When true, matches if the tasks which have used gpu
 ///   by tgid/pid.
 ///
+/// - ThreadCountLE: u32. Matches PIDs with X or less threads.
+///
+/// - ThreadCountGE: u32. Matches PIDs with X or more threads.
+///
 /// - [EXPERIMENTAL] AvgRuntime: (u64, u64). Match tasks whose average runtime
 ///   is within the provided values [min, max).
 ///
@@ -1329,6 +1333,14 @@ impl<'a> Scheduler<'a> {
                         LayerMatch::UsedGpuPid(polarity) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_USED_GPU_PID as i32;
                             mt.used_gpu_pid.write(*polarity);
+                        }
+                        LayerMatch::ThreadCountLE(boundary) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_THREAD_COUNT_LE as i32;
+                            mt.thread_count_le = *boundary;
+                        }
+                        LayerMatch::ThreadCountGE(boundary) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_THREAD_COUNT_GE as i32;
+                            mt.thread_count_ge = *boundary;
                         }
                         LayerMatch::AvgRuntime(min, max) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_AVG_RUNTIME as i32;

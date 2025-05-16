@@ -2135,6 +2135,34 @@ static __noinline bool match_one(struct layer_match *match,
 
 			return pid_present == match->used_gpu_pid;
 	}
+	case MATCH_THREAD_COUNT_LE: {
+			pid_t tgid;
+			u32 *count;
+
+			if (!enable_task_count)
+				scx_bpf_error("ThreadCountLE requires --enable-task-count");
+			
+			tgid = p->tgid;
+
+			if (!(count = bpf_map_lookup_elem(&tgid_tid_count, &tgid)))
+				return false;
+
+			return *count <= match->thread_count_le;
+	}
+	case MATCH_THREAD_COUNT_GE: {
+			pid_t tgid;
+			u32 *count;
+
+			if (!enable_task_count)
+				scx_bpf_error("ThreadCountGE requires --enable-task-count");
+			
+			tgid = p->tgid;
+
+			if (!(count = bpf_map_lookup_elem(&tgid_tid_count, &tgid)))
+				return false;
+
+			return *count >= match->thread_count_ge;
+	}
 	case MATCH_AVG_RUNTIME: {
 			struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
 			if (!taskc) {
@@ -3255,6 +3283,12 @@ static s32 init_layer(int layer_id)
 				break;
 			case MATCH_USED_GPU_PID:
 				dbg("%s GPU_PID %d", header, match->used_gpu_pid);
+				break;
+			case MATCH_THREAD_COUNT_LE:
+				dbg("%s THREAD_COUNT_LE %d", header, match->thread_count_le);
+				break;
+			case MATCH_THREAD_COUNT_GE:
+				dbg("%s THREAD_COUNT_GE %d", header, match->thread_count_ge);
 				break;
 			case MATCH_AVG_RUNTIME:
 				layer->periodically_refresh = true;

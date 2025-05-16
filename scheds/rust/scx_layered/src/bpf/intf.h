@@ -250,6 +250,8 @@ enum layer_match_kind {
 	MATCH_IS_KTHREAD,
 	MATCH_USED_GPU_TID,
 	MATCH_USED_GPU_PID,
+	MATCH_THREAD_COUNT_GE,
+	MATCH_THREAD_COUNT_LE,
 	MATCH_AVG_RUNTIME,
 	MATCH_CGROUP_SUFFIX,
 
@@ -274,6 +276,8 @@ struct layer_match {
 	bool		used_gpu_tid;
 	bool		used_gpu_pid;
 	bool		exclude;
+	u32		thread_count_ge;
+	u32		thread_count_le;
 	u64		min_avg_runtime_us;
 	u64		max_avg_runtime_us;
 };
