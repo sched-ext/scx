@@ -545,7 +545,6 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	struct task_struct *p;
 	struct task_ctx *tctx;
 	u64 dsq_id, curr_cpumask_cnt;
-	s32 cpu;
 
 	/* Ignore entry if the task doesn't exist anymore */
 	p = bpf_task_from_pid(task->pid);
