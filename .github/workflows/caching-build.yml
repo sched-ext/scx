@@ -7,24 +7,31 @@ on:
 
 jobs:
   build-kernel:
-    uses: ./.github/workflows/build-kernel.yml
-    with:
-      repo-name: sched_ext/for-next
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64" ]') || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: ./.github/actions/install-nix
+        with:
+          cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - uses: ./.github/actions/build-kernel
+        with:
+          repo-name: sched_ext/for-next
 
   rust-tests:
     runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64" ]') || 'ubuntu-latest' }}
     needs: build-kernel
     steps:
-      - name: Install Nix
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: DeterminateSystems/nix-installer-action@main
-
       - uses: actions/checkout@v4
 
-      - name: Load dependencies
-        run: nix run ./.github/include#nix-develop-gha -- ./.github/include#restore-kernels
+      - name: Install Nix
+        uses: ./.github/actions/install-nix
+        with:
+          cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
-      - uses: ./.github/actions/restore-kernel-cache
+      - uses: ./.github/actions/build-kernel
         with:
           repo-name: sched_ext/for-next
 

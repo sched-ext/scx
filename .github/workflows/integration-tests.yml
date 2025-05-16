@@ -13,11 +13,12 @@ jobs:
     outputs:
       matrix: ${{ steps.output.outputs.matrix }}
     steps:
-      - name: Install Nix
-        if: ${{ runner.environment == 'github-hosted' }}
-        uses: DeterminateSystems/nix-installer-action@main
-
       - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: ./.github/actions/install-nix
+        with:
+          cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
       - name: Load dependencies
         run: nix run ./.github/include#nix-develop-gha -- ./.github/include#list-tests
@@ -69,7 +70,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: ./.github/actions/restore-kernel-cache
+      - name: Install Nix
+        uses: ./.github/actions/install-nix
+        with:
+          cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
+
+      - uses: ./.github/actions/build-kernel
         with:
           repo-name: ${{ inputs.repo-name }}
 
@@ -98,7 +104,7 @@ jobs:
       - run: sudo chmod +x /usr/bin/veristat && sudo chmod 755 /usr/bin/veristat
 
       # The actual build:
-      - run: meson setup build -Dkernel=../linux/arch/x86/boot/bzImage -Dkernel_headers=../linux -Denable_stress=true -Dvng_rw_mount=true -Dextra_sched_args=" ${{ matrix.scheduler['flags'] }}"
+      - run: meson setup build -Dkernel=$KERNEL_STORE_PATH/bzImage -Dkernel_headers=$KERNEL_HEADERS_STORE_PATH -Denable_stress=true -Dvng_rw_mount=true -Dextra_sched_args=" ${{ matrix.scheduler['flags'] }}"
       - run: meson compile -C build ${{ matrix.scheduler['name'] }}
 
       # Print CPU model before running the tests (this can be useful for

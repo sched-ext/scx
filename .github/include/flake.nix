@@ -1,6 +1,11 @@
 {
   description = "Nix flake for the scx CI environment.";
 
+  nixConfig = {
+    extra-substituters = [ "https://sched-ext.cachix.org" ];
+    extra-trusted-public-keys = [ "sched-ext.cachix.org-1:dtoM9QOUUqJs3JkmSgVoKYp9cLY0BrupOqp4DVz35/g=" ];
+  };
+
   inputs = {
     nixpkgs.url = "github:JakeHillion/nixpkgs/virtme-ng";
     flake-utils.url = "github:numtide/flake-utils";
@@ -19,13 +24,16 @@
         {
           devShells =
             let
-              common = with pkgs; [ git gnutar zstd ];
+              common = with pkgs; [
+                cachix
+                git
+                gnutar
+                zstd
+              ];
             in
             {
-              restore-kernels = pkgs.mkShellNoCC {
-                buildInputs = with pkgs; common ++ [
-                  jq
-                ];
+              common = pkgs.mkShellNoCC {
+                buildInputs = common;
               };
 
               update-kernels = pkgs.mkShell {
@@ -39,23 +47,6 @@
               list-tests = pkgs.mkShell {
                 buildInputs = with pkgs; common ++ [
                   python3
-                ];
-              };
-
-              build-kernel = pkgs.mkShell {
-                buildInputs = with pkgs; common ++ [
-                  bc
-                  bison
-                  cpio
-                  elfutils
-                  flex
-                  git
-                  jq
-                  openssl
-                  pahole
-                  perl
-                  virtme-ng
-                  zlib
                 ];
               };
             };

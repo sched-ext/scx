@@ -103,7 +103,11 @@ def run_tests():
     cpu_count = min(os.cpu_count(), 16)
 
     # Find kernel image
-    kernel_path = "linux/arch/x86/boot/bzImage"
+    kernel_path = os.environ.get("KERNEL_STORE_PATH")
+    if kernel_path is None:
+        kernel_path = "linux/arch/x86/boot/bzImage"
+    else:
+        kernel_path += "/bzImage"
     if not os.path.exists(kernel_path):
         print(f"Error: Kernel image not found at {kernel_path}")
         print("Make sure to run the build-kernel job first")

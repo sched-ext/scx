@@ -46,9 +46,12 @@ updater will kick back in once things are green. Create a branch and PR as norma
 both updating the kernel lock and making necessary fixes to the codebase.
 
 We use `virtme-ng` for testing in the CI environment, and it should be possible
-to reproduce this locally with the same pinned kernels. Currently the most effective
-documentation for this will be to read the CI workflows. If this improves in the
-future we'll endeavour to update this documentation.
+to reproduce behaviour locally with the same pinned kernels. To get an identical
+kernel to the CI with Nix installed, run:
+    nix build ./.github/include#kernels.sched_ext/for-next
+And the kernel image will be available at `result/bzImage`. Alternatively you
+can clone the repo/commit from `kernel-versions.json`, but this isn't guaranteed
+to be reproducible.
 
 ## Rust
 We use `cargo fmt` to ensure consistency in our Rust code. This runs on PRs in
