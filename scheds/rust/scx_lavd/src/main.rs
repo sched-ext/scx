@@ -463,6 +463,7 @@ impl FlatTopology {
         // are under the same node and LLC and have the same core type.
         let mut cpdom_id = 0;
         let mut cpdom_map: BTreeMap<ComputeDomainKey, ComputeDomainValue> = BTreeMap::new();
+        let mut cpdom_types: BTreeMap<usize, bool> = BTreeMap::new();
         for cpu_fid in cpu_fids.iter() {
             let key = ComputeDomainKey {
                 node_id: cpu_fid.node_id,
@@ -481,23 +482,13 @@ impl FlatTopology {
                         cpu_ids: Vec::new(),
                         neighbor_map: RefCell::new(BTreeMap::new()),
                     };
+                    cpdom_types.insert(cpdom_id, key.is_big);
+
                     cpdom_id += 1;
                 }
             }
             value.cpu_ids.push(cpu_fid.cpu_id);
             cpdom_map.insert(key, value);
-        }
-
-        // Fill up cpdom_alt_id for each compute domain, where the alternative
-        // compute domain is a compute domain that are under the same node
-        // and LLC but has a different core type.
-        for (k, v) in cpdom_map.iter() {
-            let mut key = k.clone();
-            key.is_big = !k.is_big;
-
-            if let Some(alt_v) = cpdom_map.get(&key) {
-                v.cpdom_alt_id.set(alt_v.cpdom_id);
-            }
         }
 
         // Build a neighbor map for each compute domain, where neighbors are
@@ -515,6 +506,35 @@ impl FlatTopology {
                 }
                 None => {
                     map.insert(d, RefCell::new(vec![to_v.cpdom_id]));
+                }
+            }
+        }
+
+        // Fill up cpdom_alt_id for each compute domain.
+        for (k, v) in cpdom_map.iter() {
+            let mut key = k.clone();
+            key.is_big = !k.is_big;
+
+            if let Some(alt_v) = cpdom_map.get(&key) {
+                // First, try to find an alternative domain
+                // under the same node/LLC.
+                v.cpdom_alt_id.set(alt_v.cpdom_id);
+            } else {
+                // If there is no alternative domain in the same node/LLC,
+                // choose the closest one.
+                //
+                // Note that currently, the idle CPU selection (pick_idle_cpu)
+                // is not optimized for this kind of architecture, where big
+                // and LITTLE cores are in different node/LLCs.
+                'outer: for (_dist, ncpdoms) in v.neighbor_map.borrow().iter() {
+                    for ncpdom_id in ncpdoms.borrow().iter() {
+                        if let Some(is_big) = cpdom_types.get(ncpdom_id) {
+                            if *is_big == key.is_big {
+                                v.cpdom_alt_id.set(*ncpdom_id);
+                                break 'outer;
+                            }
+                        }
+                    }
                 }
             }
         }
