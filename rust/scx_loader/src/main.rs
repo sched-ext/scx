@@ -94,6 +94,7 @@ impl ScxLoader {
             "scx_lavd",
             "scx_p2dq",
             "scx_tickless",
+            "scx_rustland",
             "scx_rusty",
         ]
     }

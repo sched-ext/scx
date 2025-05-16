@@ -32,6 +32,8 @@ pub enum SupportedSched {
     P2DQ,
     #[serde(rename = "scx_tickless")]
     Tickless,
+    #[serde(rename = "scx_rustland")]
+    Rustland,
 }
 
 impl FromStr for SupportedSched {
@@ -44,6 +46,7 @@ impl FromStr for SupportedSched {
             "scx_lavd" => Ok(SupportedSched::Lavd),
             "scx_p2dq" => Ok(SupportedSched::P2DQ),
             "scx_tickless" => Ok(SupportedSched::Tickless),
+            "scx_rustland" => Ok(SupportedSched::Rustland),
             "scx_rusty" => Ok(SupportedSched::Rusty),
             _ => Err(anyhow::anyhow!("{scx_name} is not supported")),
         }
@@ -65,6 +68,7 @@ impl From<SupportedSched> for &str {
             SupportedSched::Lavd => "scx_lavd",
             SupportedSched::P2DQ => "scx_p2dq",
             SupportedSched::Tickless => "scx_tickless",
+            SupportedSched::Rustland => "scx_rustland",
             SupportedSched::Rusty => "scx_rusty",
         }
     }
