@@ -54,12 +54,18 @@ auto_mode = []
 gaming_mode = ["-f 5000 -s 5000"]
 lowlatency_mode = ["-f 5000 -s 1000"]
 powersave_mode = ["-f 50 -p"]
+
+[scheds.scx_rustland]
+auto_mode = []
+gaming_mode = []
+lowlatency_mode = []
+powersave_mode = []
 ```
 
 **`default_sched`:**
 
 * This field specifies the scheduler that will be started automatically when `scx_loader` starts (e.g., on boot).
-* It should be set to the name of a supported scheduler (e.g., `"scx_bpfland"`, `"scx_rusty"`, `"scx_lavd"`, `"scx_flash", `"scx_p2dq"``).
+* It should be set to the name of a supported scheduler (e.g., `"scx_bpfland"`, `"scx_rusty"`, `"scx_lavd"`, `"scx_flash"`, `"scx_p2dq"`, `"scx_rustland"`).
 * If this field is not present or is set to an empty string, no scheduler will be started automatically.
 
 **`default_mode`:**
@@ -70,7 +76,7 @@ powersave_mode = ["-f 50 -p"]
 
 **`[scheds.scx_name]`:**
 
-* This section defines the custom flags for a specific scheduler. Replace `scx_name` with the actual name of the scheduler (e.g., `scx_bpfland`, `scx_rusty`, `scx_lavd`, `scx_flash`, `scx_p2dq`).
+* This section defines the custom flags for a specific scheduler. Replace `scx_name` with the actual name of the scheduler (e.g., `scx_bpfland`, `scx_rusty`, `scx_lavd`, `scx_flash`, `scx_p2dq`, `scx_rustland`).
 
 **`auto_mode`, `gaming_mode`, `lowlatency_mode`, `powersave_mode`, `server_mode`:**
 
@@ -97,6 +103,8 @@ The example configuration above shows how to set custom flags for different sche
 * For `scx_p2dq`:
     * Low Latency mode: `-y`
     * Server mode: `--keep-running`
+* For `scx_rustland`:
+    * No custom flags are defined, so the default flags for each mode will be used.
 
 ## Fallback Behavior
 
