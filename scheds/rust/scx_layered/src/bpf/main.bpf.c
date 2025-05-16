@@ -3423,7 +3423,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 			if (!cpumask)
 				return -ENOMEM;
 
-			bpf_for(j, 0, MAX_CPUS/64) {
+			bpf_for(j, 0, MAX_CPUS) {
+				if (j >= MAX_CPUS/64)
+					break;
 				bpf_for(cpu, 0, 64) {
 					if (i < 0 || i >= MAX_CPUSETS) {
 						bpf_cpumask_release(cpumask);
