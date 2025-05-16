@@ -1492,19 +1492,14 @@ static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now)
 		gstat_add(GSTAT_FB_CPU_USAGE, cpuc, used);
 }
 
-static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
+static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
+			 struct task_ctx *taskc, struct layer *layer)
 {
-	struct task_ctx *taskc;
-	struct layer *layer;
-
 	if (cpuc->yielding || !max_exec_ns)
 		goto no;
 
 	/* does it wanna? */
 	if (!(p->scx.flags & SCX_TASK_QUEUED))
-		goto no;
-
-	if (!(taskc = lookup_task_ctx(p)) || !(layer = lookup_layer(taskc->layer_id)))
 		goto no;
 
 	/* tasks running in low fallback doesn't get to continue */
@@ -1814,6 +1809,8 @@ bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
 
 void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 {
+	struct task_ctx *prev_taskc = NULL;
+	struct layer *prev_layer;
 	struct cpu_ctx *cpuc, *sib_cpuc;
 	struct llc_ctx *llcc;
 	bool tried_preempting = false, tried_lo_fb = false;
@@ -1839,8 +1836,15 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	 * be extending slice from ops.tick() but that's not available in older
 	 * kernels, so let's make do with this for now.
 	 */
-	if (prev && keep_running(cpuc, prev))
-		return;
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
+		if (!(prev_taskc = lookup_task_ctx(prev)) ||
+		    !(prev_layer = lookup_layer(prev_taskc->layer_id)))
+			return;
+		if (keep_running(cpuc, prev, prev_taskc, prev_layer)) {
+			prev->scx.slice = prev_layer->slice_ns;
+			return;
+		}
+	}
 
 	/*
 	 * If the sibling CPU is running an exclusive task, keep this CPU idle.
@@ -1985,6 +1989,10 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	if (!tried_lo_fb && scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id))
 		return;
+
+	/* !NULL prev_taskc indicates @prev is runnable */
+	if (prev_taskc)
+		prev->scx.slice = prev_layer->slice_ns;
 }
 
 void BPF_STRUCT_OPS(layered_tick, struct task_struct *p)
@@ -3443,5 +3451,6 @@ SCX_OPS_DEFINE(layered,
 	       .dump			= (void *)layered_dump,
 	       .init			= (void *)layered_init,
 	       .exit			= (void *)layered_exit,
-	       .flags			= SCX_OPS_KEEP_BUILTIN_IDLE,
+	       .flags			= SCX_OPS_KEEP_BUILTIN_IDLE |
+					  SCX_OPS_ENQ_LAST,
 	       .name			= "layered");
