@@ -84,6 +84,7 @@ jq = find_program('jq')
 make = find_program('make')
 nproc = find_program('nproc')
 protoc = find_program('protoc', required: true)
+llvm_strip = find_program('llvm-strip', required: true)
 seccomp = dependency('libseccomp', required: true)
 
 make_jobs = 1
