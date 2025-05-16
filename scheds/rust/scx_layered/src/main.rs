@@ -1913,6 +1913,10 @@ impl<'a> Scheduler<'a> {
                 _ => false,
             })
             .count() as u32;
+        skel.maps.rodata_data.nr_exclusive_layers = layer_specs
+            .iter()
+            .filter(|spec| spec.kind.common().exclusive)
+            .count() as u32;
 
         let mut min_open = u64::MAX;
         let mut min_preempt = u64::MAX;
