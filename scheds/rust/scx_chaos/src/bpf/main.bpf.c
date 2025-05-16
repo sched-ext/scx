@@ -43,6 +43,10 @@ const volatile u32 random_delays_freq_frac32 = 1; /* for veristat */
 const volatile u64 random_delays_min_ns = 1; /* for veristat */
 const volatile u64 random_delays_max_ns = 2; /* for veristat */
 
+const volatile u32 cpu_freq_frac32 = 1;
+const volatile u32 cpu_freq_min = 0;
+const volatile u32 cpu_freq_max = SCX_CPUPERF_ONE;
+
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
@@ -78,7 +82,17 @@ static __always_inline enum chaos_trait_kind choose_chaos(struct chaos_task_ctx 
 	if (bpf_get_prandom_u32() < random_delays_freq_frac32)
 		return CHAOS_TRAIT_RANDOM_DELAYS;
 
+	if (bpf_get_prandom_u32() < cpu_freq_frac32)
+		return CHAOS_TRAIT_CPU_FREQ;
+
 	return CHAOS_TRAIT_NONE;
+}
+
+static __always_inline bool chaos_trait_skips_enqueue(struct chaos_task_ctx *taskc)
+{
+	if (taskc->next_trait == CHAOS_TRAIT_RANDOM_DELAYS)
+		return true;
+	return false;
 }
 
 static __always_inline u64 get_cpu_delay_dsq(int cpu_idx)
@@ -240,6 +254,7 @@ __weak s32 enqueue_chaotic(struct task_struct *p __arg_trusted, u64 enq_flags,
 		break;
 
 	case CHAOS_TRAIT_NONE:
+	case CHAOS_TRAIT_CPU_FREQ:
 	case CHAOS_TRAIT_MAX:
 		out = false;
 		break;
@@ -433,10 +448,8 @@ void BPF_STRUCT_OPS(chaos_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 	if (promise.kind == P2DQ_ENQUEUE_PROMISE_COMPLETE)
 		return;
 
-	if (taskc->next_trait == CHAOS_TRAIT_NONE)
-		return complete_p2dq_enqueue(&promise, p);
-
-	if (enqueue_chaotic(p, enq_flags, taskc))
+	if (taskc->next_trait == CHAOS_TRAIT_RANDOM_DELAYS &&
+	    enqueue_chaotic(p, enq_flags, taskc))
 		return;
 
 	complete_p2dq_enqueue(&promise, p);
@@ -457,6 +470,31 @@ p2dq:
 	return p2dq_runnable_impl(p, enq_flags);
 }
 
+void BPF_STRUCT_OPS(chaos_running, struct task_struct *p)
+{
+	struct chaos_task_ctx *taskc;
+
+	if (!(taskc = lookup_create_chaos_task_ctx(p))) {
+		scx_bpf_error("failed to lookup task context in enqueue");
+		return;
+	}
+
+	// Handle frequency scaling after p2dq. If chaos frequency control is
+	// enabled then p2dq frequency control should be disabled.
+	p2dq_running_impl(p);
+
+	s32 task_cpu = scx_bpf_task_cpu(p);
+	if (taskc->next_trait == CHAOS_TRAIT_CPU_FREQ) {
+		if (cpu_freq_min > 0) {
+			dbg("chaos freq pid: %d freq: %d", p->pid, cpu_freq_min);
+			scx_bpf_cpuperf_set(task_cpu, cpu_freq_min);
+		}
+	} else {
+		if (cpu_freq_max > 0)
+			scx_bpf_cpuperf_set(task_cpu, cpu_freq_max);
+	}
+}
+
 s32 BPF_STRUCT_OPS(chaos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
 	struct chaos_task_ctx *wakee_ctx;
@@ -464,8 +502,8 @@ s32 BPF_STRUCT_OPS(chaos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wa
 		goto p2dq;
 
 	// don't allow p2dq to select_cpu if we plan chaos to ensure we hit enqueue
-	if (wakee_ctx->next_trait != CHAOS_TRAIT_NONE)
-		return prev_cpu;
+	if (chaos_trait_skips_enqueue(wakee_ctx))
+		return -EINVAL;
 
 p2dq:
 	return p2dq_select_cpu_impl(p, prev_cpu, wake_flags);
@@ -495,7 +533,7 @@ SCX_OPS_DEFINE(chaos,
 
 	       .exit_task		= (void *)p2dq_exit_task,
 	       .exit			= (void *)p2dq_exit,
-	       .running			= (void *)p2dq_running,
+	       .running			= (void *)chaos_running,
 	       .stopping		= (void *)p2dq_stopping,
 	       .set_cpumask		= (void *)p2dq_set_cpumask,
 
