@@ -249,10 +249,9 @@ fn main() -> Result<()> {
         cvar.notify_all();
     }
 
-    match scheduler_thread.join() {
-        Ok(_) => {}
-        Err(e) => panic::resume_unwind(e),
-    };
+    if let Err(e) = scheduler_thread.join() {
+        panic::resume_unwind(e);
+    }
 
     Ok(())
 }
