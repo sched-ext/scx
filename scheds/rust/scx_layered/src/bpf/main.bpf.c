@@ -1201,6 +1201,12 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	 */
 	if (sib_cpuc && !bpf_cpumask_test_cpu(sib_cpuc->cpu, idle_cpumask)) {
 		lstat_inc(LSTAT_EXCL_PREEMPT, layer, cpuc);
+		/*
+		 * cpuc->current_exclusive will be set by running(); however,
+		 * the sibling CPU might enter dispatch() before this CPU enters
+		 * running(). Set cpuc->next_exclusive here.
+		 */
+		cpuc->next_exclusive = true;
 		scx_bpf_kick_cpu(sib, SCX_KICK_PREEMPT);
 	}
 
@@ -1825,6 +1831,17 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
+	 * If the sibling CPU is running an exclusive task, keep this CPU idle.
+	 * This test is racy but should be good enough for best-effort
+	 * optimization.
+	 */
+	if (sib >= 0 && (sib_cpuc = lookup_cpu_ctx(sib)) &&
+	    (sib_cpuc->current_exclusive || sib_cpuc->next_exclusive)) {
+		gstat_inc(GSTAT_EXCL_IDLE, cpuc);
+		return;
+	}
+
+	/*
 	 * if @prev was on SCX and is still runnable, we are here because @prev
 	 * has exhausted its slice. We may want to keep running it on this CPU
 	 * rather than giving this CPU to another task and then try to schedule
@@ -1844,17 +1861,6 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			prev->scx.slice = prev_layer->slice_ns;
 			return;
 		}
-	}
-
-	/*
-	 * If the sibling CPU is running an exclusive task, keep this CPU idle.
-	 * This test is a racy test but should be good enough for best-effort
-	 * optimization.
-	 */
-	if (sib >= 0 && (sib_cpuc = lookup_cpu_ctx(sib)) &&
-	    sib_cpuc->current_exclusive) {
-		gstat_inc(GSTAT_EXCL_IDLE, cpuc);
-		return;
 	}
 
 	if (!(llcc = lookup_llc_ctx(cpuc->llc_id)))
@@ -2481,6 +2487,7 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 		llcc->vtime_now[layer_id] = p->scx.dsq_vtime;
 
 	cpuc->current_preempt = layer->preempt || is_preempt_kthread(p);
+	cpuc->next_exclusive = false;
 	cpuc->current_exclusive = layer->exclusive;
 	cpuc->task_layer_id = taskc->layer_id;
 	cpuc->used_at = now;
