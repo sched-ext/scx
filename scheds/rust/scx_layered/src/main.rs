@@ -320,9 +320,11 @@ lazy_static! {
 /// - UsedGpuPid: Bool. When true, matches if the tasks which have used gpu
 ///   by tgid/pid.
 ///
-/// - ThreadCountLE: u32. Matches PIDs with X or less threads.
+/// - ThreadCountLE: u32. Matches PIDs with X or less threads. There is some
+///   approximation in how this works.
 ///
-/// - ThreadCountGE: u32. Matches PIDs with X or more threads.
+/// - ThreadCountGE: u32. Matches PIDs with X or more threads. There is some
+///   approximation in how this works.
 ///
 /// - [EXPERIMENTAL] AvgRuntime: (u64, u64). Match tasks whose average runtime
 ///   is within the provided values [min, max).
