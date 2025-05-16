@@ -161,7 +161,6 @@ struct cpu_ctx {
 	bool			current_preempt;
 	bool			current_exclusive;
 	bool			prev_exclusive;
-	bool			maybe_idle;
 	bool			yielding;
 	bool			try_preempt_first;
 	bool			is_big;

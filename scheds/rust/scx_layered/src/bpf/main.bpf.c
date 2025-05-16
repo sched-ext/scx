@@ -1136,6 +1136,7 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	struct rq *rq = NULL;
 	s32 sib;
 	struct sched_class *ext_sched_class, *idle_sched_class;
+	const struct cpumask *idle_cpumask;
 
 	if (cand >= nr_possible_cpus || !bpf_cpumask_test_cpu(cand, p->cpus_ptr))
 		return false;
@@ -1188,6 +1189,9 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 
 	if (!(cpuc = lookup_cpu_ctx(-1)))
 		return true;
+
+	idle_cpumask = scx_bpf_get_idle_cpumask();
+
 	/*
 	 * $sib_cpuc is set if @p is an exclusive task, a sibling CPU
 	 * exists which is not running a preempt task. Let's preempt the
@@ -1195,18 +1199,20 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 	 * inaccurate and racy but should be good enough for best-effort
 	 * optimization.
 	 */
-	if (sib_cpuc && !sib_cpuc->maybe_idle) {
+	if (sib_cpuc && !bpf_cpumask_test_cpu(sib_cpuc->cpu, idle_cpumask)) {
 		lstat_inc(LSTAT_EXCL_PREEMPT, layer, cpuc);
 		scx_bpf_kick_cpu(sib, SCX_KICK_PREEMPT);
 	}
 
-	if (!cand_cpuc->maybe_idle) {
+	if (!bpf_cpumask_test_cpu(cand_cpuc->cpu, idle_cpumask)) {
 		lstat_inc(LSTAT_PREEMPT, layer, cpuc);
 		if (preempt_first)
 			lstat_inc(LSTAT_PREEMPT_FIRST, layer, cpuc);
 	} else {
 		lstat_inc(LSTAT_PREEMPT_IDLE, layer, cpuc);
 	}
+
+	scx_bpf_put_idle_cpumask(idle_cpumask);
 	return true;
 }
 
@@ -2490,15 +2496,9 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 		s32 sib = sibling_cpu(task_cpu);
 		struct cpu_ctx *sib_cpuc;
 
-		/*
-		 * %SCX_KICK_IDLE would be great here but we want to support
-		 * older kernels. Let's use racy and inaccruate custom idle flag
-		 * instead.
-		 */
-		if (sib >= 0 && (sib_cpuc = lookup_cpu_ctx(sib)) &&
-		    sib_cpuc->maybe_idle) {
+		if (sib >= 0 && (sib_cpuc = lookup_cpu_ctx(sib))) {
 			gstat_inc(GSTAT_EXCL_WAKEUP, cpuc);
-			scx_bpf_kick_cpu(sib, 0);
+			scx_bpf_kick_cpu(sib, SCX_KICK_IDLE);
 		}
 	}
 
@@ -2506,8 +2506,6 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 		scx_bpf_cpuperf_set(task_cpu, layer->perf);
 		cpuc->perf = layer->perf;
 	}
-
-	cpuc->maybe_idle = false;
 }
 
 void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
@@ -2597,7 +2595,6 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	}
 
 	p->scx.dsq_vtime += runtime;
-	cpuc->maybe_idle = true;
 }
 
 bool BPF_STRUCT_OPS(layered_yield, struct task_struct *from, struct task_struct *to)
