@@ -159,9 +159,9 @@ struct cpu_prox_map {
 struct cpu_ctx {
 	s32			cpu;
 	bool			current_preempt;
-	bool			current_exclusive;
-	bool			prev_exclusive;
-	bool			next_exclusive;
+	bool			current_excl;
+	bool			prev_excl;
+	bool			next_excl;
 	bool			yielding;
 	bool			try_preempt_first;
 	bool			is_big;
@@ -325,7 +325,7 @@ struct layer {
 	int			kind;
 	bool			preempt;
 	bool			preempt_first;
-	bool			exclusive;
+	bool			excl;
 	bool			allow_node_aligned;
 	bool			skip_remote_node;
 	bool			prev_over_idle_core;
