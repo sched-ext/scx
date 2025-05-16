@@ -1575,16 +1575,19 @@ no:
 	return false;
 }
 
-
-/* Mapping of TGID to count of TIDs with that TGID
- * XXX this should probably use a percpu data struture
- * if possible.
- */
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
+        __uint(type, BPF_MAP_TYPE_BLOOM_FILTER);
+        __type(value, __u32);
+        /* Expected max number of TIDs (FPR worse past this) */
+        __uint(max_entries, 1000000);
+        __uint(map_extra, 3);
+} tgid_tid_seen SEC(".maps");
+
+struct {
+        __uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, pid_t);
-	__type(value, u32);
-	__uint(max_entries, sizeof(pid_t));
+        __type(value, u32);
+	__uint(max_entries, 100000);
 } tgid_tid_count SEC(".maps");
 
 /* Mapping of cpu to most delayed DSQ it can consume */
@@ -2426,6 +2429,28 @@ void on_wakeup(struct task_struct *p, struct task_ctx *taskc)
 	lstat_inc(LSTAT_XLAYER_WAKE, layer, cpuc);
 }
 
+int update_tgid_tid_count(struct task_struct *p __arg_trusted) {
+	struct task_ctx *taskc;
+	pid_t pid, tgid;
+	u32 *count, one = 1;
+	
+	if (!enable_task_count || 
+		!(taskc = lookup_task_ctx_may_fail(p)) ||
+		!(pid = p->pid) ||
+		!(tgid = p->tgid) ||
+		(bpf_map_peek_elem(&tgid_tid_seen, &pid) == 0))
+		return 0;
+
+	bpf_map_push_elem(&tgid_tid_seen, &pid, BPF_ANY);
+	
+	if ((count = bpf_map_lookup_elem(&tgid_tid_count, &tgid))) {
+		__sync_fetch_and_add(count, 1);
+		return 0;
+	}
+	
+	bpf_map_update_elem(&tgid_tid_count, &tgid, &one, BPF_NOEXIST);
+	return 0;
+}
 
 void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 {
@@ -2434,6 +2459,8 @@ void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
+	
+	update_tgid_tid_count(p);
 
 	taskc->runnable_at = now;
 	maybe_refresh_layer(p, taskc);
@@ -2461,6 +2488,8 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	if (!(layer = lookup_layer(layer_id)))
 		return;
 
+	update_tgid_tid_count(p);	
+	
 	task_uncharge_qrt(taskc);
 
 	if (taskc->last_cpu >= 0 && taskc->last_cpu != task_cpu) {
@@ -2554,6 +2583,8 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	else if (taskc->dsq_id & LO_FB_DSQ_BASE)
 		gstat_inc(GSTAT_LO_FB_EVENTS, cpuc);
 
+	update_tgid_tid_count(p);
+
 	/*
 	 * Owned execution protection. Apply iff the CPU stayed saturated for
 	 * longer than twice the slice.
@@ -2642,6 +2673,10 @@ bool BPF_STRUCT_OPS(layered_yield, struct task_struct *from, struct task_struct 
 	}
 
 	return false;
+}
+
+void BPF_STRUCT_OPS(layered_quiescent, struct task_struct *p, u64 deq_flags) {
+	update_tgid_tid_count(p);
 }
 
 void BPF_STRUCT_OPS(layered_set_weight, struct task_struct *p, u32 weight)
@@ -3092,73 +3127,6 @@ static bool antistall_scan(void)
 	return true;
 }
 
-static bool task_count_refresh_dsq(u64 dsq_id, bool reset) {
-	struct task_struct *p;
-	u32 *counter;
-	pid_t pidk;
-	if (!dsq_id)
-		return true;
-	u32 zero_u32 = 0;
-	u32 one_u32 = 1;
-	// verifier
-	bpf_rcu_read_lock();
-	
-	bpf_for_each(scx_dsq, p, dsq_id, 0) {
-		pidk = BPF_CORE_READ(p, tgid);
-		counter = bpf_map_lookup_elem(&tgid_tid_count, &pidk);
-		if (reset) {
-			if (!counter) {
-				bpf_map_update_elem(&tgid_tid_count, &pidk, &zero_u32, 0);
-			} else {
-				*counter = 0;
-			}
-		} else {
-			if (!counter) {
-				bpf_map_update_elem(&tgid_tid_count, &pidk, &one_u32, 0);
-			} else {
-				(*counter)++;
-			}
-		}
-	}
-
-	bpf_rcu_read_unlock();
-	return true;
-}
-
-/**
- * task_count_refresh() - refresh task counts.
- * This function refreshes counts in task_count_map.
- */
-static bool task_count_refresh() {
-	s32 llc;
-	u64 layer_id;
-	bool reset;
-
-	if (!enable_task_count)
-		return true;
-	
-	reset = true;
-
-process:
-	bpf_for(layer_id, 0, nr_layers) {
-		bpf_for(llc, 0, nr_llcs) {
-			task_count_refresh_dsq(layer_dsq_id(layer_id, llc), reset);
-		}
-	}
-	bpf_for(llc, 0, nr_llcs) {
-			task_count_refresh_dsq(hi_fb_dsq_id(llc), reset);
-			task_count_refresh_dsq(lo_fb_dsq_id(llc), reset);
-	}
-	
-	if (reset) {
-		reset = false;
-		goto process;
-	}
-	
-	return true;
-}
-
-
 bool run_timer_cb(int key)
 {
 	switch (key) {
@@ -3166,8 +3134,6 @@ bool run_timer_cb(int key)
 		return layered_monitor();
 	case ANTISTALL_TIMER:
 		return antistall_scan();
-	case TASK_COUNT_TIMER:
-		return task_count_refresh();
 	case NOOP_TIMER:
 	case MAX_TIMERS:
 	default:
@@ -3178,7 +3144,6 @@ bool run_timer_cb(int key)
 struct layered_timer layered_timers[MAX_TIMERS] = {
 	{15LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
 	{1LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
-	{5LLU * NSEC_PER_SEC, CLOCK_BOOTTIME, 0},
 	{0LLU, CLOCK_BOOTTIME, 0},
 };
 
@@ -3519,6 +3484,7 @@ SCX_OPS_DEFINE(layered,
 	       .runnable		= (void *)layered_runnable,
 	       .running			= (void *)layered_running,
 	       .stopping		= (void *)layered_stopping,
+	       .quiescent		= (void *)layered_quiescent,
 	       .yield			= (void *)layered_yield,
 	       .set_weight		= (void *)layered_set_weight,
 	       .set_cpumask		= (void *)layered_set_cpumask,
