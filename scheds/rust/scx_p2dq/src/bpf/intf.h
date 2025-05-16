@@ -34,6 +34,8 @@ enum consts {
 
 	// kernel definitions
 	CLOCK_BOOTTIME		= 7,
+
+	PF_IDLE			= 0x00000002,
 };
 
 enum p2dq_timers_defs {
