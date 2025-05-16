@@ -2677,8 +2677,10 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 		const struct cpumask *node_cpumask;
 
 		if (!(nodec = lookup_node_ctx(node_id)) ||
-		    !(node_cpumask = cast_mask(nodec->cpumask)))
-			break;
+		    !(node_cpumask = cast_mask(nodec->cpumask))) {
+			scx_bpf_error("NULL nodec or node_cpumask");
+			return;
+		}
 
 		/* not llc aligned if partially overlaps */
 		if (bpf_cpumask_intersects(node_cpumask, cpumask) &&
