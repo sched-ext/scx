@@ -433,7 +433,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 	 * CPU (ignore if this cpumask completely overlaps with the task's
 	 * cpumask).
 	 */
-	bpf_cpumask_and(l2_mask, p->cpus_ptr, cast_mask(l2_domain));
+	if (!bpf_cpumask_and(l2_mask, p->cpus_ptr, cast_mask(l2_domain)))
+		l2_mask = NULL;
 
 	/*
 	 * Determine the L3 cache domain as the intersection of the task's
@@ -441,7 +442,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 	 * CPU (ignore if this cpumask completely overlaps with the task's
 	 * cpumask).
 	 */
-	bpf_cpumask_and(l3_mask, p->cpus_ptr, cast_mask(l3_domain));
+	if (!bpf_cpumask_and(l3_mask, p->cpus_ptr, cast_mask(l3_domain)))
+		l3_mask = NULL;
 
 	/*
 	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
@@ -462,19 +464,23 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 		 * Search for any full-idle CPU in the task domain that shares
 		 * the same L2 cache.
 		 */
-		cpu = bpf_cpumask_any_and_distribute(cast_mask(l2_mask), idle_smtmask);
-		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-		    scx_bpf_test_and_clear_cpu_idle(cpu))
-			goto out_put_cpumask;
+		if (l2_mask) {
+			cpu = bpf_cpumask_any_and_distribute(cast_mask(l2_mask), idle_smtmask);
+			if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
+			    scx_bpf_test_and_clear_cpu_idle(cpu))
+				goto out_put_cpumask;
+		}
 
 		/*
 		 * Search for any full-idle CPU in the task domain that shares
 		 * the same L3 cache.
 		 */
-		cpu = bpf_cpumask_any_and_distribute(cast_mask(l3_mask), idle_smtmask);
-		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-		    scx_bpf_test_and_clear_cpu_idle(cpu))
-			goto out_put_cpumask;
+		if (l3_mask) {
+			cpu = bpf_cpumask_any_and_distribute(cast_mask(l3_mask), idle_smtmask);
+			if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
+			    scx_bpf_test_and_clear_cpu_idle(cpu))
+				goto out_put_cpumask;
+		}
 
 		/*
 		 * Otherwise, search for another usable full-idle core.
@@ -499,19 +505,23 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 	 * Search for any idle CPU in the primary domain that shares the same
 	 * L2 cache.
 	 */
-	cpu = bpf_cpumask_any_and_distribute(cast_mask(l2_mask), idle_cpumask);
-	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-	    scx_bpf_test_and_clear_cpu_idle(cpu))
-		goto out_put_cpumask;
+	if (l2_mask) {
+		cpu = bpf_cpumask_any_and_distribute(cast_mask(l2_mask), idle_cpumask);
+		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
+		    scx_bpf_test_and_clear_cpu_idle(cpu))
+			goto out_put_cpumask;
+	}
 
 	/*
 	 * Search for any idle CPU in the primary domain that shares the same
 	 * L3 cache.
 	 */
-	cpu = bpf_cpumask_any_and_distribute(cast_mask(l3_mask), idle_cpumask);
-	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-	    scx_bpf_test_and_clear_cpu_idle(cpu))
-		goto out_put_cpumask;
+	if (l3_mask) {
+		cpu = bpf_cpumask_any_and_distribute(cast_mask(l3_mask), idle_cpumask);
+		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
+		    scx_bpf_test_and_clear_cpu_idle(cpu))
+			goto out_put_cpumask;
+	}
 
 	/*
 	 * If all the previous attempts have failed, try to use any idle CPU in
