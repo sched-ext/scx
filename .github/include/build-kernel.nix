@@ -36,7 +36,29 @@ let
     '';
   };
 
+  headers = stdenv.mkDerivation {
+    name = "linux-headers-${version}";
+    inherit src version;
+
+    buildInputs = linuxPackages_latest.kernel.buildInputs;
+    nativeBuildInputs = linuxPackages_latest.kernel.nativeBuildInputs;
+
+    buildPhase = ''
+      cp ${configfile} .config
+      make headers
+    '';
+    installPhase = ''
+      mkdir -p $out
+      find . -type f \
+        \( -path 'usr/include/*' -o -name '*.h' \) \
+        -exec cp --parents '{}' $out \;
+    '';
+  };
 in
-linuxManualConfig {
+(linuxManualConfig {
   inherit src version configfile;
+}).overrideAttrs {
+  passthru = {
+    inherit headers;
+  };
 }
