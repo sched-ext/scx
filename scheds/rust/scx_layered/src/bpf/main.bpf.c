@@ -110,6 +110,9 @@ static inline s32 sibling_cpu(s32 cpu)
 {
 	const volatile s32 *sib;
 
+	if (!smt_enabled)
+		return -1;
+
 	sib = MEMBER_VPTR(__sibling_cpu, [cpu]);
 	if (sib)
 		return *sib;
@@ -769,7 +772,7 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 			      const struct cpumask *idle_smtmask, const struct layer *layer)
 {
 	bool prev_in_cand;
-	s32 cpu;
+	s32 i, cpu;
 
 	if (unlikely(!cand_cpumask || !idle_smtmask))
 		return -1;
@@ -781,7 +784,6 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 	 * partially idle @prev_cpu.
 	 */
 	if (smt_enabled) {
-
 		// try prev if prev_over_idle_core
 		if (prev_in_cand &&
 			layer->prev_over_idle_core) {
@@ -801,15 +803,32 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 		cpu = scx_bpf_pick_idle_cpu(cand_cpumask, SCX_PICK_IDLE_CORE);
 		if (cpu >= 0)
 			return cpu;
+
+		if (layer->exclusive)
+			return -EBUSY;
 	}
 
-	// try prev if not previously tried and failed
-	if (prev_in_cand &&
-		scx_bpf_test_and_clear_cpu_idle(prev_cpu))
-		return prev_cpu;
+	bpf_for(i, 0, MAX_CPUS) {
+		struct cpu_ctx *sib_cpuc;
+		s32 sib;
 
-	// return any idle cpu
-	return scx_bpf_pick_idle_cpu(cand_cpumask, 0);
+		// try prev if not tried yet and then pick any idle CPU
+		if (prev_in_cand && scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+			cpu = prev_cpu;
+			prev_in_cand = false;
+		} else {
+			cpu = scx_bpf_pick_idle_cpu(cand_cpumask, 0);
+			if (cpu < 0)
+				break;
+		}
+
+		// continue the search if the sibling is exclusive
+		if ((sib = sibling_cpu(cpu)) < 0 || !(sib_cpuc = lookup_cpu_ctx(sib)) ||
+		    (!sib_cpuc->current_exclusive && !sib_cpuc->next_exclusive))
+			break;
+	}
+
+	return cpu;
 }
 
 static __always_inline
