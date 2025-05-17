@@ -333,6 +333,7 @@ impl Cpumask {
 }
 
 pub fn read_cpulist(cpulist: &str) -> Result<Vec<usize>> {
+    let cpulist = cpulist.trim_end_matches('\0');
     let cpu_groups: Vec<&str> = cpulist.split(',').collect();
     let mut cpu_ids = vec![];
     for group in cpu_groups.iter() {

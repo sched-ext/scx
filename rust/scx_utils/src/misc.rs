@@ -81,7 +81,7 @@ pub fn set_rlimit_infinity() {
 
 /// Read a file and parse its content into the specified type.
 ///
-/// Trims whitespace before parsing.
+/// Trims null and whitespace before parsing.
 ///
 /// # Errors
 /// Returns an error if reading or parsing fails.
@@ -96,6 +96,7 @@ where
             bail!("Failed to open or read file {:?}", path);
         }
     };
+    let val = val.trim_end_matches('\0');
 
     match val.trim().parse::<T>() {
         Ok(parsed) => Ok(parsed),
@@ -107,6 +108,7 @@ where
 
 pub fn read_file_usize_vec(path: &Path, separator: char) -> Result<Vec<usize>> {
     let val = std::fs::read_to_string(path)?;
+    let val = val.trim_end_matches('\0');
 
     val.split(separator)
         .map(|s| {
@@ -119,6 +121,7 @@ pub fn read_file_usize_vec(path: &Path, separator: char) -> Result<Vec<usize>> {
 
 pub fn read_file_byte(path: &Path) -> Result<usize> {
     let val = std::fs::read_to_string(path)?;
+    let val = val.trim_end_matches('\0');
     let val = val.trim();
 
     // E.g., 10K, 10M, 10G, 10
