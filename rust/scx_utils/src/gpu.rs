@@ -20,6 +20,8 @@ pub struct Gpu {
     pub max_graphics_clock: usize,
     // AMD uses CU for this value
     pub max_sm_clock: usize,
+    // Frequency of the GPU's memory
+    pub max_mem_clock: usize,
     pub memory: u64,
     pub cpu_mask: Cpumask,
     // Represents the ordered list of nearest
@@ -44,6 +46,9 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 .max_customer_boost_clock(Clock::Graphics)
                 .unwrap_or(0);
             let sm_boost_clock = nvidia_gpu.max_customer_boost_clock(Clock::SM).unwrap_or(0);
+            let mem_boost_clock = nvidia_gpu
+                .max_customer_boost_clock(Clock::Memory)
+                .unwrap_or(0);
             let Ok(memory_info) = nvidia_gpu.memory_info() else {
                 continue;
             };
@@ -106,6 +111,7 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 node_id: numa_node as usize,
                 max_graphics_clock: graphics_boost_clock as usize,
                 max_sm_clock: sm_boost_clock as usize,
+                max_mem_clock: mem_boost_clock as usize,
                 memory: memory_info.total,
                 cpu_mask,
                 nearest,
