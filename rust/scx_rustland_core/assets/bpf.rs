@@ -80,10 +80,7 @@ pub struct QueuedTask {
     pub start_ts: u64,         // Timestamp since last time the task ran on a CPU
     pub stop_ts: u64,          // Timestamp since last time the task released a CPU
     pub exec_runtime: u64,     // Total cpu time since last sleep
-    pub sum_exec_runtime: u64, // Total cpu time
-    pub nvcsw: u64,            // Total amount of voluntary context switches
     pub weight: u64,           // Task static priority
-    pub slice: u64,            // Time slice budget
     pub vtime: u64,            // Current vruntime
     cpumask_cnt: u64,          // cpumask generation counter (private)
 }
@@ -148,10 +145,7 @@ impl EnqueuedMessage {
             start_ts: self.inner.start_ts,
             stop_ts: self.inner.stop_ts,
             exec_runtime: self.inner.exec_runtime,
-            sum_exec_runtime: self.inner.sum_exec_runtime,
-            nvcsw: self.inner.nvcsw,
             weight: self.inner.weight,
-            slice: self.inner.slice,
             vtime: self.inner.vtime,
             cpumask_cnt: self.inner.cpumask_cnt,
         }
