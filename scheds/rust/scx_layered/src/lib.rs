@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 mod config;
-mod layer_core_growth;
+pub mod layer_core_growth;
 
 pub mod bpf_intf;
 
@@ -189,7 +189,7 @@ impl CpuPool {
         cpus
     }
 
-    fn get_core_topological_id(&self, core: &Core) -> usize {
+    pub fn get_core_topological_id(&self, core: &Core) -> usize {
         *self
             .core_topology_to_id
             .get(&(core.node_id, core.llc_id, core.id))
