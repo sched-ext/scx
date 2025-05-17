@@ -708,10 +708,7 @@ static void get_task_info(struct queued_task_ctx *task,
 	task->start_ts = tctx ? tctx->start_ts : 0;
 	task->stop_ts = tctx ? tctx->stop_ts : 0;
 	task->exec_runtime = tctx ? tctx->exec_runtime : 0;
-	task->sum_exec_runtime = p->se.sum_exec_runtime;
-	task->nvcsw = p->nvcsw;
 	task->weight = p->scx.weight;
-	task->slice = p->scx.slice;
 	task->vtime = p->scx.dsq_vtime;
 	task->cpumask_cnt = tctx ? tctx->cpumask_cnt : 0;
 }
