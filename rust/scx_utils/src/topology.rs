@@ -603,7 +603,7 @@ fn cpu_capacity_source() -> Option<(String, usize, usize)> {
 
     // Find the most precise source for cpu_capacity estimation.
     let prefix = "/sys/devices/system/cpu/cpu0";
-    let mut raw_capacity = 0;
+    let mut raw_capacity;
     let mut suffix = sources[sources.len() - 1];
     'outer: for src in sources {
         let path_str = [prefix, src].join("/");
