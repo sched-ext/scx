@@ -63,6 +63,11 @@ have rustup installed this will use the version in `rust-toolchain.toml`.
 
 ## Useful Tools
 
+## [systing](https://github.com/josefbacik/systing)
+`systing` is a tool that generates perfetto traces and collects stack traces.
+It produces a large amount of process specific info for debugging scheduling
+issues. It is able to target by pid or cgroup.
+
 ## [scxtop](https://github.com/sched-ext/scx/blob/main/tools/scxtop/README.md)
 `scxtop` is a top like tool that collects and aggregates various perf and
 sched_ext events. See the
