@@ -605,17 +605,26 @@ fn cpu_capacity_source() -> Option<(String, usize, usize)> {
     let prefix = "/sys/devices/system/cpu/cpu0";
     let mut raw_capacity = 0;
     let mut suffix = sources[sources.len() - 1];
-    for src in sources {
+    'outer: for src in sources {
         let path_str = [prefix, src].join("/");
         let path = Path::new(&path_str);
         raw_capacity = read_from_file(&path).unwrap_or(0_usize);
         if raw_capacity > 0 {
+            // It would be an okay source...
             suffix = src;
-            break;
+            // But double-check if the source has meaningful information.
+            let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*").ok()?;
+            for cpu_path in cpu_paths.filter_map(Result::ok) {
+                let raw_capacity2 = read_from_file(&cpu_path.join(suffix)).unwrap_or(0_usize);
+                if raw_capacity != raw_capacity2 {
+                    break 'outer;
+                }
+            }
+            // The source exists, but it tells that all CPUs have the same
+            // capacity. Let's search more if there is any source that can
+            // tell the capacity differences among CPUs. This can happen when
+            // a buggy driver lies (e.g., "acpi_cppc/highest_perf").
         }
-    }
-    if raw_capacity == 0 {
-        return None;
     }
 
     // Find the max raw_capacity value for scaling to 1024.
