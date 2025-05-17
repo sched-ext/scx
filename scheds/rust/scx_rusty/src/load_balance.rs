@@ -690,10 +690,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     where
         I: IntoIterator<Item = &'d TaskInfo>,
     {
-        match tasks_by_load.into_iter().next() {
-            Some(task) => Some(task),
-            None => None,
-        }
+        tasks_by_load.into_iter().next()
     }
 
     /// Try to find a task in @push_dom to be moved into @pull_dom. If a task is
