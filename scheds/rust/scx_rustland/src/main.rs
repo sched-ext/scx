@@ -318,27 +318,13 @@ impl<'a> Scheduler<'a> {
             self.min_vruntime = task.vtime;
         }
 
-        // Estimate the used time slice based on total runtime since the last sleep.
-        //
-        // Cap the value to slice_ns, since exec_runtime accumulates across multiple enqueue
-        // events, but what matters here is the time used in the most recent slice, so:
-        //  - if the task didn't sleep, it's the full slice_ns,
-        //  - if it did sleep, it's exec_runtime.
-        //
-        // Note that there may be some inaccuracies here, as a task can exceed its assigned time
-        // slice due to factors like holding locks or becoming non-deschedulable. These
-        // inaccuracies are tolerated to ensure smoother vruntime progression and prevent excessive
-        // gaps between tasks' vruntimes.
-        let slice = task.exec_runtime.min(self.slice_ns);
-
         // Update task's vruntime re-aligning it to min_vruntime (never allow a task to accumulate
         // a budget of more than a time slice to prevent starvation).
         let min_vruntime = self.min_vruntime.saturating_sub(self.slice_ns);
         if task_info.vruntime < min_vruntime {
             task_info.vruntime = min_vruntime;
         }
-        let vslice = slice * 100 / task.weight;
-        task_info.vruntime += vslice;
+        task_info.vruntime += (task.stop_ts - task.start_ts) * 100 / task.weight;
 
         // Return the task's deadline.
         task_info.vruntime + task.exec_runtime.min(self.slice_ns * 100)
