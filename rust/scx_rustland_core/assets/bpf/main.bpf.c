@@ -54,7 +54,12 @@ UEI_DEFINE(uei);
  */
 u32 usersched_pid; /* User-space scheduler PID */
 u64 usersched_last_run_at; /* Timestamp of the last user-space scheduler execution */
-const volatile bool switch_partial; /* Switch all tasks or SCHED_EXT tasks */
+static u64 nr_cpu_ids; /* Maximum possible CPU number */
+
+/*
+ * Switch all tasks or SCHED_EXT tasks.
+ */
+const volatile bool switch_partial;
 
 /*
  * Number of tasks that are queued for scheduling.
@@ -358,20 +363,12 @@ static u64 cpu_to_dsq(s32 cpu)
  */
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 {
-	const struct cpumask *online_cpumask, *idle_smtmask, *idle_cpumask;
+	const struct cpumask *idle_smtmask, *idle_cpumask;
 	struct bpf_cpumask *l2_domain, *l3_domain;
 	struct bpf_cpumask *l2_mask, *l3_mask;
 	struct task_ctx *tctx;
 	struct cpu_ctx *cctx;
 	s32 cpu;
-
-	/*
-	 * If the task isn't allowed to use its previously used CPU it means
-	 * that it's rapidly changing affinity. In this case it's pointless to
-	 * find an optimal idle CPU, just return any idle CPU.
-	 */
-	if (!bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
-		return scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
 
 	/*
 	 * For tasks that can run only on a single CPU, we can simply verify if
@@ -381,7 +378,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 			return prev_cpu;
 
-		return -ENOENT;
+		return -EBUSY;
 	}
 
 	tctx = try_lookup_task_ctx(p);
@@ -393,10 +390,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 		return -ENOENT;
 
 	/*
-	 * Acquire the CPU masks to determine the online and idle CPUs in the
-	 * system.
+	 * Acquire the CPU masks to determine the idle CPUs in the system.
 	 */
-	online_cpumask = scx_bpf_get_online_cpumask();
 	idle_smtmask = scx_bpf_get_idle_smtmask();
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 
@@ -466,8 +461,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 		 */
 		if (l2_mask) {
 			cpu = bpf_cpumask_any_and_distribute(cast_mask(l2_mask), idle_smtmask);
-			if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-			    scx_bpf_test_and_clear_cpu_idle(cpu))
+			if ((cpu < nr_cpu_ids) && scx_bpf_test_and_clear_cpu_idle(cpu))
 				goto out_put_cpumask;
 		}
 
@@ -477,8 +471,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 		 */
 		if (l3_mask) {
 			cpu = bpf_cpumask_any_and_distribute(cast_mask(l3_mask), idle_smtmask);
-			if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-			    scx_bpf_test_and_clear_cpu_idle(cpu))
+			if ((cpu < nr_cpu_ids) && scx_bpf_test_and_clear_cpu_idle(cpu))
 				goto out_put_cpumask;
 		}
 
@@ -486,8 +479,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 		 * Otherwise, search for another usable full-idle core.
 		 */
 		cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, idle_smtmask);
-		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-		    scx_bpf_test_and_clear_cpu_idle(cpu))
+		if ((cpu < nr_cpu_ids) && scx_bpf_test_and_clear_cpu_idle(cpu))
 			goto out_put_cpumask;
 	}
 
@@ -507,8 +499,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 	 */
 	if (l2_mask) {
 		cpu = bpf_cpumask_any_and_distribute(cast_mask(l2_mask), idle_cpumask);
-		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-		    scx_bpf_test_and_clear_cpu_idle(cpu))
+		if ((cpu < nr_cpu_ids) && scx_bpf_test_and_clear_cpu_idle(cpu))
 			goto out_put_cpumask;
 	}
 
@@ -518,8 +509,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 	 */
 	if (l3_mask) {
 		cpu = bpf_cpumask_any_and_distribute(cast_mask(l3_mask), idle_cpumask);
-		if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-		    scx_bpf_test_and_clear_cpu_idle(cpu))
+		if ((cpu < nr_cpu_ids) && scx_bpf_test_and_clear_cpu_idle(cpu))
 			goto out_put_cpumask;
 	}
 
@@ -528,20 +518,18 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
 	 * the system.
 	 */
 	cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, idle_cpumask);
-	if (bpf_cpumask_test_cpu(cpu, online_cpumask) &&
-	    scx_bpf_test_and_clear_cpu_idle(cpu))
+	if ((cpu < nr_cpu_ids) && scx_bpf_test_and_clear_cpu_idle(cpu))
 		goto out_put_cpumask;
 
 	/*
 	 * If all the previous attempts have failed, dispatch the task to the
 	 * first CPU that will become available.
 	 */
-	cpu = -ENOENT;
+	cpu = -EBUSY;
 
 out_put_cpumask:
 	scx_bpf_put_cpumask(idle_cpumask);
 	scx_bpf_put_cpumask(idle_smtmask);
-	scx_bpf_put_cpumask(online_cpumask);
 
 	return cpu;
 }
@@ -1118,7 +1106,6 @@ static int usersched_timer_init(void)
 static s32 get_nr_online_cpus(void)
 {
 	const struct cpumask *online_cpumask;
-	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
 	int i, cpus = 0;
 
 	online_cpumask = scx_bpf_get_online_cpumask();
@@ -1145,7 +1132,6 @@ static s32 get_nr_online_cpus(void)
  */
 static int dsq_init(void)
 {
-	u64 nr_cpu_ids = scx_bpf_nr_cpu_ids();
 	int err;
 	s32 cpu;
 
@@ -1239,6 +1225,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(rustland_init)
 
 	/* Compile-time checks */
 	BUILD_BUG_ON((MAX_CPUS % 2));
+
+	/* Initialize maximum possible CPU number */
+	nr_cpu_ids = scx_bpf_nr_cpu_ids();
 
 	/* Initialize rustland core */
 	err = dsq_init();
