@@ -115,7 +115,7 @@ struct Opts {
     slice_max_us: u64,
 
     /// Minimum scheduling slice duration in microseconds.
-    #[clap(long = "slice-min-us", default_value = "300")]
+    #[clap(long = "slice-min-us", default_value = "500")]
     slice_min_us: u64,
 
     /// List of CPUs in preferred order (e.g., "0-3,7,6,5,4"). The scheduler
