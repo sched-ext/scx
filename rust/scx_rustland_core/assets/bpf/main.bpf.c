@@ -278,6 +278,14 @@ static inline bool is_kthread(const struct task_struct *p)
 }
 
 /*
+ * Return true if the target task @p is kswapd.
+ */
+static inline bool is_kswapd(const struct task_struct *p)
+{
+        return p->flags & PF_KSWAPD;
+}
+
+/*
  * Return true if @p still wants to run, false otherwise.
  */
 static bool is_queued(const struct task_struct *p)
@@ -743,7 +751,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * potentially stall the entire system if they are blocked for too long
 	 * (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
-	if (is_kthread(p) && p->nr_cpus_allowed == 1) {
+	if (is_kswapd(p) || (is_kthread(p) && p->nr_cpus_allowed == 1)) {
                 scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
 				   enq_flags | SCX_ENQ_PREEMPT);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
