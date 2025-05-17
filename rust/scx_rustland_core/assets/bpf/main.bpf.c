@@ -201,7 +201,12 @@ struct task_ctx {
 	/*
 	 * Timestamp since last time the task ran on a CPU.
 	 */
-	u64 last_run_at;
+	u64 start_ts;
+
+	/*
+	 * Timestamp since last time the task released a CPU.
+	 */
+	u64 stop_ts;
 
 	/*
 	 * Execution time (in nanoseconds) since the last sleep event.
@@ -700,6 +705,8 @@ static void get_task_info(struct queued_task_ctx *task,
 	task->pid = p->pid;
 	task->cpu = scx_bpf_task_cpu(p);
 	task->flags = enq_flags;
+	task->start_ts = tctx ? tctx->start_ts : 0;
+	task->stop_ts = tctx ? tctx->stop_ts : 0;
 	task->exec_runtime = tctx ? tctx->exec_runtime : 0;
 	task->sum_exec_runtime = p->se.sum_exec_runtime;
 	task->nvcsw = p->nvcsw;
@@ -945,7 +952,7 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
-	tctx->last_run_at = scx_bpf_now();
+	tctx->start_ts = scx_bpf_now();
 }
 
 /*
@@ -953,6 +960,7 @@ void BPF_STRUCT_OPS(rustland_running, struct task_struct *p)
  */
 void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 {
+	u64 now = scx_bpf_now();
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct task_ctx *tctx;
 
@@ -966,11 +974,12 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
+	tctx->stop_ts = now;
 
 	/*
 	 * Update the partial execution time since last sleep.
 	 */
-	tctx->exec_runtime += scx_bpf_now() - tctx->last_run_at;
+	tctx->exec_runtime += now - tctx->start_ts;
 }
 
 /*
