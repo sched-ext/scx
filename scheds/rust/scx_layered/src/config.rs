@@ -89,6 +89,8 @@ pub enum LayerMatch {
     IsKthread(bool),
     UsedGpuTid(bool),
     UsedGpuPid(bool),
+    ThreadCountLE(u32),
+    ThreadCountGE(u32),
     AvgRuntime(u64, u64),
 }
 

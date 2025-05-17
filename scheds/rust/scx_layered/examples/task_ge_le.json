@@ -1,0 +1,45 @@
+[
+	{
+		"name": "match le",
+		"matches": [
+			[
+				{ "CommPrefix": "sysbench" },
+				{ "ThreadCountLE": 2 }
+			]	
+		],
+		"kind": {
+			"Grouped": {
+				"cpus_range_frac":  [0.25, 0.5],
+				"util_range": [0.4, 0.85],
+				"growth_algo": "RandomTopo"
+			}
+		}
+	},
+	{
+		"name": "match ge",
+		"matches": [
+			[
+				{ "CommPrefix": "sysbench" },
+				{ "ThreadCountGE": 4 }
+			]
+		],
+		"kind": {
+			"Grouped": {
+				"cpus_range_frac":  [0.5, 0.5],
+				"util_range": [0.4, 0.85],
+				"growth_algo": "RandomTopo"
+			}
+		}
+	},
+	{
+		"name": "rest",
+		"matches": [
+			[]
+		],
+		"kind": {
+			"Open": {
+				"growth_algo": "RandomTopo"
+			}
+		}
+	}
+]

@@ -56,6 +56,8 @@ volatile u64 layer_refresh_seq_avgruntime;
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
+/* Flag to enable or disable task count feature */
+const volatile bool enable_task_count = true;
 const volatile bool enable_gpu_support = false;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
@@ -1573,6 +1575,21 @@ no:
 	return false;
 }
 
+struct {
+        __uint(type, BPF_MAP_TYPE_BLOOM_FILTER);
+        __type(value, __u32);
+        /* Expected max number of TIDs (FPR worse past this) */
+        __uint(max_entries, 1000000);
+        __uint(map_extra, 3);
+} tgid_tid_seen SEC(".maps");
+
+struct {
+        __uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, pid_t);
+        __type(value, u32);
+	__uint(max_entries, 100000);
+} tgid_tid_count SEC(".maps");
+
 /* Mapping of cpu to most delayed DSQ it can consume */
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -2118,6 +2135,34 @@ static __noinline bool match_one(struct layer_match *match,
 
 			return pid_present == match->used_gpu_pid;
 	}
+	case MATCH_THREAD_COUNT_LE: {
+			pid_t tgid;
+			u32 *count;
+
+			if (!enable_task_count)
+				scx_bpf_error("ThreadCountLE requires --enable-task-count");
+			
+			tgid = p->tgid;
+
+			if (!(count = bpf_map_lookup_elem(&tgid_tid_count, &tgid)))
+				return false;
+
+			return *count <= match->thread_count_le;
+	}
+	case MATCH_THREAD_COUNT_GE: {
+			pid_t tgid;
+			u32 *count;
+
+			if (!enable_task_count)
+				scx_bpf_error("ThreadCountGE requires --enable-task-count");
+			
+			tgid = p->tgid;
+
+			if (!(count = bpf_map_lookup_elem(&tgid_tid_count, &tgid)))
+				return false;
+
+			return *count >= match->thread_count_ge;
+	}
 	case MATCH_AVG_RUNTIME: {
 			struct task_ctx *taskc = lookup_task_ctx_may_fail(p);
 			if (!taskc) {
@@ -2412,6 +2457,28 @@ void on_wakeup(struct task_struct *p, struct task_ctx *taskc)
 	lstat_inc(LSTAT_XLAYER_WAKE, layer, cpuc);
 }
 
+int update_tgid_tid_count(struct task_struct *p __arg_trusted) {
+	struct task_ctx *taskc;
+	pid_t pid, tgid;
+	u32 *count, one = 1;
+	
+	if (!enable_task_count || 
+		!(taskc = lookup_task_ctx_may_fail(p)) ||
+		!(pid = p->pid) ||
+		!(tgid = p->tgid) ||
+		(bpf_map_peek_elem(&tgid_tid_seen, &pid) == 0))
+		return 0;
+
+	bpf_map_push_elem(&tgid_tid_seen, &pid, BPF_ANY);
+	
+	if ((count = bpf_map_lookup_elem(&tgid_tid_count, &tgid))) {
+		__sync_fetch_and_add(count, 1);
+		return 0;
+	}
+	
+	bpf_map_update_elem(&tgid_tid_count, &tgid, &one, BPF_NOEXIST);
+	return 0;
+}
 
 void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 {
@@ -2420,6 +2487,8 @@ void BPF_STRUCT_OPS(layered_runnable, struct task_struct *p, u64 enq_flags)
 
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
+	
+	update_tgid_tid_count(p);
 
 	taskc->runnable_at = now;
 	maybe_refresh_layer(p, taskc);
@@ -2447,6 +2516,8 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	if (!(layer = lookup_layer(layer_id)))
 		return;
 
+	update_tgid_tid_count(p);	
+	
 	task_uncharge_qrt(taskc);
 
 	if (taskc->last_cpu >= 0 && taskc->last_cpu != task_cpu) {
@@ -2540,6 +2611,8 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	else if (taskc->dsq_id & LO_FB_DSQ_BASE)
 		gstat_inc(GSTAT_LO_FB_EVENTS, cpuc);
 
+	update_tgid_tid_count(p);
+
 	/*
 	 * Owned execution protection. Apply iff the CPU stayed saturated for
 	 * longer than twice the slice.
@@ -2628,6 +2701,10 @@ bool BPF_STRUCT_OPS(layered_yield, struct task_struct *from, struct task_struct 
 	}
 
 	return false;
+}
+
+void BPF_STRUCT_OPS(layered_quiescent, struct task_struct *p, u64 deq_flags) {
+	update_tgid_tid_count(p);
 }
 
 void BPF_STRUCT_OPS(layered_set_weight, struct task_struct *p, u32 weight)
@@ -3207,6 +3284,12 @@ static s32 init_layer(int layer_id)
 			case MATCH_USED_GPU_PID:
 				dbg("%s GPU_PID %d", header, match->used_gpu_pid);
 				break;
+			case MATCH_THREAD_COUNT_LE:
+				dbg("%s THREAD_COUNT_LE %d", header, match->thread_count_le);
+				break;
+			case MATCH_THREAD_COUNT_GE:
+				dbg("%s THREAD_COUNT_GE %d", header, match->thread_count_ge);
+				break;
 			case MATCH_AVG_RUNTIME:
 				layer->periodically_refresh = true;
 				dbg("%s AVG_RUNTIME [%lluus, %lluus)", header,
@@ -3435,6 +3518,7 @@ SCX_OPS_DEFINE(layered,
 	       .runnable		= (void *)layered_runnable,
 	       .running			= (void *)layered_running,
 	       .stopping		= (void *)layered_stopping,
+	       .quiescent		= (void *)layered_quiescent,
 	       .yield			= (void *)layered_yield,
 	       .set_weight		= (void *)layered_set_weight,
 	       .set_cpumask		= (void *)layered_set_cpumask,

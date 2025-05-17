@@ -320,6 +320,12 @@ lazy_static! {
 /// - UsedGpuPid: Bool. When true, matches if the tasks which have used gpu
 ///   by tgid/pid.
 ///
+/// - ThreadCountLE: u32. Matches PIDs with X or less threads. There is some
+///   approximation in how this works.
+///
+/// - ThreadCountGE: u32. Matches PIDs with X or more threads. There is some
+///   approximation in how this works.
+///
 /// - [EXPERIMENTAL] AvgRuntime: (u64, u64). Match tasks whose average runtime
 ///   is within the provided values [min, max).
 ///
@@ -588,6 +594,10 @@ struct Opts {
     /// Disable antistall
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
+
+    /// Enable task count matcher
+    #[clap(long, default_value = "false")]
+    enable_task_count: bool,
 
     /// Maximum task runnable_at delay (in seconds) before antistall turns on
     #[clap(long, default_value = "3")]
@@ -1326,6 +1336,14 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_USED_GPU_PID as i32;
                             mt.used_gpu_pid.write(*polarity);
                         }
+                        LayerMatch::ThreadCountLE(boundary) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_THREAD_COUNT_LE as i32;
+                            mt.thread_count_le = *boundary;
+                        }
+                        LayerMatch::ThreadCountGE(boundary) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_THREAD_COUNT_GE as i32;
+                            mt.thread_count_ge = *boundary;
+                        }
                         LayerMatch::AvgRuntime(min, max) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_AVG_RUNTIME as i32;
                             mt.min_avg_runtime_us = *min;
@@ -1890,6 +1908,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.lo_fb_wait_ns = opts.lo_fb_wait_us * 1000;
         skel.maps.rodata_data.lo_fb_share_ppk = ((opts.lo_fb_share * 1024.0) as u32).clamp(1, 1024);
         skel.maps.rodata_data.enable_antistall = !opts.disable_antistall;
+        skel.maps.rodata_data.enable_task_count = opts.enable_task_count;
         skel.maps.rodata_data.enable_gpu_support = opts.enable_gpu_support;
 
         for (cpu, sib) in topo.sibling_cpus().iter().enumerate() {
