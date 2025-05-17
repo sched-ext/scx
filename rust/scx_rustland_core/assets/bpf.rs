@@ -245,9 +245,10 @@ impl<'cb> BpfScheduler<'cb> {
         let topo = Topology::new().unwrap();
         skel.maps.rodata_data.smt_enabled = topo.smt_enabled;
 
-        // Enable optional scheduler settings.
-        skel.struct_ops.rustland_mut().flags |=
-            *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED;
+        // Enable scheduler flags.
+        skel.struct_ops.rustland_mut().flags = *compat::SCX_OPS_ENQ_LAST
+            | *compat::SCX_OPS_ENQ_MIGRATION_DISABLED
+            | *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
         if partial {
             skel.struct_ops.rustland_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
         }
