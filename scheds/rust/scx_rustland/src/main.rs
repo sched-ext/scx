@@ -220,6 +220,11 @@ impl<'a> Scheduler<'a> {
         self.nr_tasks_queued() + self.nr_tasks_scheduled()
     }
 
+    // Return a value inversely proportional to the task's weight.
+    fn scale_by_task_weight_inverse(task: &QueuedTask, value: u64) -> u64 {
+        value * 100 / task.weight
+    }
+
     // Update task's vruntime based on the information collected from the kernel and return to the
     // caller the evaluated task's deadline.
     //
@@ -233,10 +238,14 @@ impl<'a> Scheduler<'a> {
         // Update task's vruntime re-aligning it to min_vruntime (never allow a task to accumulate
         // a budget of more than a time slice to prevent starvation).
         let min_vruntime = self.min_vruntime.saturating_sub(self.slice_ns);
-        if task.vtime < min_vruntime {
+        if task.vtime == 0 {
+            // Slightly penalize new tasks by charging an extra time slice to prevent bursts of such
+            // tasks from disrupting the responsiveness of already running ones.
+            task.vtime = min_vruntime + Self::scale_by_task_weight_inverse(task, self.slice_ns);
+        } else if task.vtime < min_vruntime {
             task.vtime = min_vruntime;
         }
-        task.vtime += (task.stop_ts - task.start_ts) * 100 / task.weight;
+        task.vtime += Self::scale_by_task_weight_inverse(task, task.stop_ts - task.start_ts);
 
         // Return the task's deadline.
         task.vtime + task.exec_runtime.min(self.slice_ns * 100)
