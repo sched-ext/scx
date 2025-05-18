@@ -12,7 +12,6 @@ use bpf::*;
 
 mod stats;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::io::{self};
@@ -81,16 +80,6 @@ struct Opts {
     #[clap(short = 'S', long, default_value = "1000")]
     slice_us_min: u64,
 
-    /// Specifies the maximum number of tasks that can be queued in the user-space scheduler.
-    /// If this limit is exceeded, the scheduler will attempt to flush tasks until the count falls
-    /// below the threshold.
-    ///
-    /// Lowering this value reduces the effectiveness of the scheduler under heavy load, while
-    /// raising it can improve scheduling efficiency. However, a higher limit may also reduce
-    /// robustness and increase the risk of stalls when the system is overloaded.
-    #[clap(short = 'w', long, default_value = "100")]
-    nr_waiting_max: u64,
-
     /// If specified, only tasks which have their scheduling policy set to SCHED_EXT using
     /// sched_setscheduler(2) are switched. Otherwise, all tasks are switched.
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
@@ -152,9 +141,8 @@ struct Scheduler<'a> {
     tasks: BTreeSet<Task>,                  // tasks ordered by deadline
     min_vruntime: u64,                      // Keep track of the minimum vruntime across all tasks
     init_page_faults: u64,                  // Initial page faults counter
-    nr_waiting_max: u64, // Maximum amount of tasks allowed to wait in the scheduler
-    slice_ns: u64,       // Default time slice (in ns)
-    slice_ns_min: u64,   // Minimum time slice (in ns)
+    slice_ns: u64,                          // Default time slice (in ns)
+    slice_ns_min: u64,                      // Minimum time slice (in ns)
 }
 
 impl<'a> Scheduler<'a> {
@@ -179,7 +167,6 @@ impl<'a> Scheduler<'a> {
             tasks: BTreeSet::new(),
             min_vruntime: 0,
             init_page_faults: 0,
-            nr_waiting_max: opts.nr_waiting_max,
             slice_ns: opts.slice_us * NSEC_PER_USEC,
             slice_ns_min: opts.slice_us_min * NSEC_PER_USEC,
         })
@@ -310,15 +297,6 @@ impl<'a> Scheduler<'a> {
                         deadline,
                         timestamp,
                     });
-
-                    // Do not allow too many tasks to pile up in the user-space scheduler, if that
-                    // happens flush the first task immediately, until we get back below the
-                    // critical threshold.
-                    if self.nr_tasks_scheduled() >= self.nr_waiting_max {
-                        if !self.dispatch_task() {
-                            break;
-                        }
-                    }
                 }
                 Ok(None) => {
                     break;
