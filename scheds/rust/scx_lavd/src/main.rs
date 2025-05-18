@@ -660,24 +660,25 @@ impl<'a> Scheduler<'a> {
         // If cpu_pref_order is not specified, initialize CPU order
         // topologically sorted by a cpu, node, llc, max_freq, and core order.
         // Otherwise, follow the specified CPU preference order.
-        let mut cpu_pf_order = vec![];
-        let mut cpu_ps_order = vec![];
-        if opts.cpu_pref_order == "" {
-            for cpu in topo.cpu_fids_performance.iter() {
-                cpu_pf_order.push(cpu.cpu_id);
-            }
-            for cpu in topo.cpu_fids_powersave.iter() {
-                cpu_ps_order.push(cpu.cpu_id);
-            }
+        let (cpu_pf_order, cpu_ps_order) = if opts.cpu_pref_order.is_empty() {
+            (
+                topo.cpu_fids_performance
+                    .iter()
+                    .map(|cpu| cpu.cpu_id)
+                    .collect(),
+                topo.cpu_fids_powersave
+                    .iter()
+                    .map(|cpu| cpu.cpu_id)
+                    .collect(),
+            )
         } else {
             let cpu_list = read_cpulist(&opts.cpu_pref_order).unwrap();
             let pref_mask = Cpumask::from_cpulist(&opts.cpu_pref_order).unwrap();
             if pref_mask != topo.all_cpus_mask {
                 panic!("--cpu_pref_order does not cover the whole CPUs.");
             }
-            cpu_pf_order = cpu_list.clone();
-            cpu_ps_order = cpu_list.clone();
-        }
+            (cpu_list.clone(), cpu_list)
+        };
         for (pos, cpu) in cpu_pf_order.iter().enumerate() {
             skel.maps.rodata_data.cpu_order_performance[pos] = *cpu as u16;
         }
