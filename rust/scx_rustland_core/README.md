@@ -79,11 +79,10 @@ struct QueuedTask {
     pub pid: i32,              // pid that uniquely identifies a task
     pub cpu: i32,              // CPU previously used by the task
     pub flags: u64,            // task's enqueue flags
+    pub start_ts: u64,         // Timestamp since last time the task ran on a CPU (in ns)
+    pub stop_ts: u64,          // Timestamp since last time the task released a CPU (in ns)
     pub exec_runtime: u64,     // Total cpu time since last sleep (in ns)
-    pub sum_exec_runtime: u64, // Total accumulated CPU time across all past executions of the task (in ns)
     pub weight: u64,           // Task priority in the range [1..10000] (default is 100)
-    pub nvcsw: u64,            // Total amount of voluntary context switches
-    pub slice: u64,            // Remaining time slice budget
     pub vtime: u64,            // Current task vruntime / deadline (set by the scheduler)
 }
 ```

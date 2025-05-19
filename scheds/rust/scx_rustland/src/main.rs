@@ -12,7 +12,6 @@ use bpf::*;
 
 mod stats;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::io::{self};
@@ -60,8 +59,7 @@ const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 ///
 /// All the tasks are stored in a BTreeSet (TaskTree), using the deadline as the ordering key.
 /// Once the order of execution is determined all tasks are sent back to the BPF counterpart
-/// (scx_rustland_core) to be dispatched. To keep track of the accumulated execution time and
-/// vruntime, the scheduler maintains a HashMap (TaskInfoMap), indexed by pid.
+/// (scx_rustland_core) to be dispatched.
 ///
 /// The BPF dispatcher is completely agnostic of the particular scheduling policy implemented in
 /// user-space. For this reason developers that are willing to use this scheduler to experiment
@@ -81,16 +79,6 @@ struct Opts {
     /// Scheduling minimum slice duration in microseconds.
     #[clap(short = 'S', long, default_value = "1000")]
     slice_us_min: u64,
-
-    /// Specifies the maximum number of tasks that can be queued in the user-space scheduler.
-    /// If this limit is exceeded, the scheduler will attempt to flush tasks until the count falls
-    /// below the threshold.
-    ///
-    /// Lowering this value reduces the effectiveness of the scheduler under heavy load, while
-    /// raising it can improve scheduling efficiency. However, a higher limit may also reduce
-    /// robustness and increase the risk of stalls when the system is overloaded.
-    #[clap(short = 'w', long, default_value = "100")]
-    nr_waiting_max: u64,
 
     /// If specified, only tasks which have their scheduling policy set to SCHED_EXT using
     /// sched_setscheduler(2) are switched. Otherwise, all tasks are switched.
@@ -127,35 +115,6 @@ struct Opts {
 // Time constants.
 const NSEC_PER_USEC: u64 = 1_000;
 
-// Basic item stored in the task information map.
-#[derive(Debug)]
-struct TaskInfo {
-    vruntime: u64, // total vruntime of the task
-}
-
-// Task information map: store total execution time and vruntime of each task in the system.
-//
-// TaskInfo objects are stored in the HashMap and they are indexed by pid.
-//
-// Entries are removed when the corresponding task exits.
-//
-// This information is fetched from the BPF section (through the .exit_task() callback) and
-// received by the user-space scheduler via self.bpf.dequeue_task(): a task with a negative .cpu
-// value represents an exiting task, so in this case we can free the corresponding entry in
-// TaskInfoMap (see also Scheduler::drain_queued_tasks()).
-struct TaskInfoMap {
-    tasks: HashMap<i32, TaskInfo>,
-}
-
-// TaskInfoMap implementation: provide methods to get items and update items by pid.
-impl TaskInfoMap {
-    fn new() -> Self {
-        TaskInfoMap {
-            tasks: HashMap::new(),
-        }
-    }
-}
-
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 struct Task {
     qtask: QueuedTask, // queued task
@@ -175,54 +134,15 @@ impl Ord for Task {
     }
 }
 
-// Task pool where all the tasks that needs to run are stored before dispatching (ordered by their
-// shortest deadline using a BTreeSet).
-struct TaskTree {
-    tasks: BTreeSet<Task>,
-    task_map: HashMap<i32, Task>, // Map from pid to task
-}
-
-// Task pool methods (push / pop).
-impl TaskTree {
-    fn new() -> Self {
-        TaskTree {
-            tasks: BTreeSet::new(),
-            task_map: HashMap::new(),
-        }
-    }
-
-    // Add an item to the pool (item will be placed in the tree depending on its deadline, items
-    // with the same deadline will be sorted by pid).
-    fn push(&mut self, task: Task) {
-        // Check if task already exists.
-        if let Some(prev_task) = self.task_map.insert(task.qtask.pid, task.clone()) {
-            self.tasks.remove(&prev_task);
-        }
-
-        // Insert/update task.
-        self.tasks.insert(task);
-    }
-
-    // Pop the first item from the BTreeSet (item with the shortest deadline).
-    fn pop(&mut self) -> Option<Task> {
-        self.tasks.pop_first().map(|task| {
-            self.task_map.remove(&task.qtask.pid);
-            task
-        })
-    }
-}
-
 // Main scheduler object
 struct Scheduler<'a> {
     bpf: BpfScheduler<'a>,                  // BPF connector
     stats_server: StatsServer<(), Metrics>, // statistics
-    task_pool: TaskTree,                    // tasks ordered by deadline
-    task_map: TaskInfoMap,                  // map pids to the corresponding task information
+    tasks: BTreeSet<Task>,                  // tasks ordered by deadline
     min_vruntime: u64,                      // Keep track of the minimum vruntime across all tasks
     init_page_faults: u64,                  // Initial page faults counter
-    nr_waiting_max: u64, // Maximum amount of tasks allowed to wait in the scheduler
-    slice_ns: u64,       // Default time slice (in ns)
-    slice_ns_min: u64,   // Minimum time slice (in ns)
+    slice_ns: u64,                          // Default time slice (in ns)
+    slice_ns_min: u64,                      // Minimum time slice (in ns)
 }
 
 impl<'a> Scheduler<'a> {
@@ -244,11 +164,9 @@ impl<'a> Scheduler<'a> {
         Ok(Self {
             bpf,
             stats_server,
-            task_pool: TaskTree::new(),
-            task_map: TaskInfoMap::new(),
+            tasks: BTreeSet::new(),
             min_vruntime: 0,
             init_page_faults: 0,
-            nr_waiting_max: opts.nr_waiting_max,
             slice_ns: opts.slice_us * NSEC_PER_USEC,
             slice_ns_min: opts.slice_us_min * NSEC_PER_USEC,
         })
@@ -289,7 +207,7 @@ impl<'a> Scheduler<'a> {
 
     // Return the total amount of tasks waiting in the user-space scheduler.
     fn nr_tasks_scheduled(&mut self) -> u64 {
-        self.task_pool.tasks.len() as u64
+        self.tasks.len() as u64
     }
 
     // Return the total amount of tasks waiting to be consumed by the user-space scheduler.
@@ -302,46 +220,35 @@ impl<'a> Scheduler<'a> {
         self.nr_tasks_queued() + self.nr_tasks_scheduled()
     }
 
+    // Return a value inversely proportional to the task's weight.
+    fn scale_by_task_weight_inverse(task: &QueuedTask, value: u64) -> u64 {
+        value * 100 / task.weight
+    }
+
     // Update task's vruntime based on the information collected from the kernel and return to the
     // caller the evaluated task's deadline.
     //
     // This method implements the main task ordering logic of the scheduler.
-    fn update_enqueued(&mut self, task: &QueuedTask) -> u64 {
-        // Get task information if the task is already stored in the task map,
-        // otherwise create a new entry for it.
-        let task_info = self.task_map.tasks.entry(task.pid).or_insert(TaskInfo {
-            vruntime: self.min_vruntime,
-        });
-
+    fn update_enqueued(&mut self, task: &mut QueuedTask) -> u64 {
         // Update global minimum vruntime based on the previous task's vruntime.
         if self.min_vruntime < task.vtime {
             self.min_vruntime = task.vtime;
         }
 
-        // Estimate the used time slice based on total runtime since the last sleep.
-        //
-        // Cap the value to slice_ns, since exec_runtime accumulates across multiple enqueue
-        // events, but what matters here is the time used in the most recent slice, so:
-        //  - if the task didn't sleep, it's the full slice_ns,
-        //  - if it did sleep, it's exec_runtime.
-        //
-        // Note that there may be some inaccuracies here, as a task can exceed its assigned time
-        // slice due to factors like holding locks or becoming non-deschedulable. These
-        // inaccuracies are tolerated to ensure smoother vruntime progression and prevent excessive
-        // gaps between tasks' vruntimes.
-        let slice = task.exec_runtime.min(self.slice_ns);
-
         // Update task's vruntime re-aligning it to min_vruntime (never allow a task to accumulate
         // a budget of more than a time slice to prevent starvation).
         let min_vruntime = self.min_vruntime.saturating_sub(self.slice_ns);
-        if task_info.vruntime < min_vruntime {
-            task_info.vruntime = min_vruntime;
+        if task.vtime == 0 {
+            // Slightly penalize new tasks by charging an extra time slice to prevent bursts of such
+            // tasks from disrupting the responsiveness of already running ones.
+            task.vtime = min_vruntime + Self::scale_by_task_weight_inverse(task, self.slice_ns);
+        } else if task.vtime < min_vruntime {
+            task.vtime = min_vruntime;
         }
-        let vslice = slice * 100 / task.weight;
-        task_info.vruntime += vslice;
+        task.vtime += Self::scale_by_task_weight_inverse(task, task.stop_ts - task.start_ts);
 
         // Return the task's deadline.
-        task_info.vruntime + task.exec_runtime.min(self.slice_ns * 100)
+        task.vtime + task.exec_runtime.min(self.slice_ns * 100)
     }
 
     // Dispatch the first task from the task pool (sending them to the BPF dispatcher).
@@ -350,7 +257,7 @@ impl<'a> Scheduler<'a> {
     fn dispatch_task(&mut self) -> bool {
         let nr_waiting = self.nr_tasks_waiting() + 1;
 
-        if let Some(task) = self.task_pool.pop() {
+        if let Some(task) = self.tasks.pop_first() {
             // Scale time slice based on the amount of tasks that are waiting in the
             // scheduler's queue and the previously unused time slice budget, but make sure
             // to assign at least slice_us_min.
@@ -374,7 +281,7 @@ impl<'a> Scheduler<'a> {
             // Send task to the BPF dispatcher.
             if self.bpf.dispatch_task(&dispatched_task).is_err() {
                 // If dispatching fails, re-add the task to the pool and skip further dispatching.
-                self.task_pool.push(task);
+                self.tasks.insert(task);
 
                 return false;
             }
@@ -388,26 +295,17 @@ impl<'a> Scheduler<'a> {
     fn drain_queued_tasks(&mut self) {
         loop {
             match self.bpf.dequeue_task() {
-                Ok(Some(task)) => {
+                Ok(Some(mut task)) => {
                     // Update task information and determine vruntime.
-                    let deadline = self.update_enqueued(&task);
+                    let deadline = self.update_enqueued(&mut task);
                     let timestamp = Self::now();
 
                     // Insert task in the task pool (ordered by vruntime).
-                    self.task_pool.push(Task {
+                    self.tasks.insert(Task {
                         qtask: task,
                         deadline,
                         timestamp,
                     });
-
-                    // Do not allow too many tasks to pile up in the user-space scheduler, if that
-                    // happens flush the first task immediately, until we get back below the
-                    // critical threshold.
-                    if self.nr_tasks_scheduled() >= self.nr_waiting_max {
-                        if !self.dispatch_task() {
-                            break;
-                        }
-                    }
                 }
                 Ok(None) => {
                     break;
@@ -429,7 +327,7 @@ impl<'a> Scheduler<'a> {
         self.drain_queued_tasks();
 
         // Notify the dispatcher if there are still pending tasks to be processed,
-        self.bpf.notify_complete(self.task_pool.tasks.len() as u64);
+        self.bpf.notify_complete(self.tasks.len() as u64);
     }
 
     // Get total page faults from /proc/self/stat.
