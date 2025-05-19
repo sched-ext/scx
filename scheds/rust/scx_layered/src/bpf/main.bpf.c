@@ -809,7 +809,11 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 			return -EBUSY;
 	}
 
-	bpf_for(i, 0, MAX_CPUS) {
+	/*
+	 * FIXME - The following should ideally be bpf_for(i, 0, nr_cpu_ids) but
+	 * that causes a mysterious verification failure. Try 32 times instead.
+	 */
+	for (i = 0; i < 32; i++) {
 		struct cpu_ctx *sib_cpuc;
 		s32 sib;
 
