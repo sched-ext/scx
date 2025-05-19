@@ -247,7 +247,6 @@ static u32 calc_greedy_factor(u32 greedy_ratio)
 	 * For over-utilized tasks, we give some mild penalty.
 	 */
 	return LAVD_SCALE + ((greedy_ratio - LAVD_SCALE) / LAVD_LC_GREEDY_PENALTY);
-
 }
 
 static inline u64 calc_runtime_factor(u64 runtime)
@@ -395,15 +394,10 @@ static u64 calc_adjusted_runtime(struct task_ctx *taskc)
 	 * (acc_runtime) task. To avoid the starvation of CPU-bound tasks,
 	 * which rarely sleep, limit the impact of acc_runtime.
 	 */
-	runtime = taskc->avg_runtime +
+	runtime = LAVD_ACC_RUNTIME_MAX +
 		  min(taskc->acc_runtime, LAVD_ACC_RUNTIME_MAX);
 
-	/*
-	 * Convert highly skewed runtime distribution to
-	 * mildly skewed distribution.
-	 */
-	u64 adj_runtime = log2_u64(runtime + 1);
-	return adj_runtime * adj_runtime;
+	return runtime;
 }
 
 static u64 calc_virtual_deadline_delta(struct task_struct *p,
