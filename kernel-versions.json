@@ -18,17 +18,17 @@
   "stable/6_12": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-6.12.y",
-    "commitHash": "f08cdc6cc92e3d23a05745f0f12f8caa348a27b4",
-    "lastModified": 1746848806,
-    "narHash": "sha256-xU1lzXgsUMsICyTVWx84LLSCae3DvWpv5wjYmtkIsLs=",
-    "kernelVersion": "6.12.28"
+    "commitHash": "5be5dbf91ef3c8643d2a3698d557a52059702487",
+    "lastModified": 1747627083,
+    "narHash": "sha256-91wgZha+cbfCr58sdrnN/R72qTSdP7DnXQY3p4B/xrg=",
+    "kernelVersion": "6.12.29"
   },
   "stable/linux-rolling-stable": {
     "repo": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git",
     "branch": "linux-rolling-stable",
-    "commitHash": "392c8e00cced35ed6f84559b2c12cc07fae012e3",
-    "lastModified": 1746848801,
-    "narHash": "sha256-UMakHuP1j7mPbp5NsPCidknqYK4+FCzMYBniBq0ZPGw=",
-    "kernelVersion": "6.14.6"
+    "commitHash": "f1f8a95d093efd12e3e7a66cb387389471fa25a6",
+    "lastModified": 1747627083,
+    "narHash": "sha256-fGEsdIyVSov/dyruguCTgRR7FqIL6/rDaARzGm3iu1Y=",
+    "kernelVersion": "6.14.7"
   }
 }
