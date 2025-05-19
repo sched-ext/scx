@@ -145,18 +145,18 @@ static u32 calc_avg32(u32 old_val, u32 new_val)
 {
 	/*
 	 * Calculate the exponential weighted moving average (EWMA).
-	 *  - EWMA = (0.75 * old) + (0.25 * new)
+	 *  - EWMA = (0.9375 * old) + (0.0625 * new)
 	 */
-	return (old_val - (old_val >> 2)) + (new_val >> 2);
+	return (old_val - (old_val >> 4)) + (new_val >> 4);
 }
 
 static u64 calc_avg(u64 old_val, u64 new_val)
 {
 	/*
 	 * Calculate the exponential weighted moving average (EWMA).
-	 *  - EWMA = (0.75 * old) + (0.25 * new)
+	 *  - EWMA = (0.9375 * old) + (0.0625 * new)
 	 */
-	return (old_val - (old_val >> 2)) + (new_val >> 2);
+	return (old_val - (old_val >> 4)) + (new_val >> 4);
 }
 
 static u64 calc_asym_avg(u64 old_val, u64 new_val)
