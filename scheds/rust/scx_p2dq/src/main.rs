@@ -18,12 +18,14 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use crossbeam::channel::RecvTimeoutError;
 use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
 use log::{debug, info, warn};
 use scx_stats::prelude::*;
 use scx_utils::build_id;
@@ -35,7 +37,10 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Topology;
 use scx_utils::UserExitInfo;
+use scx_utils::NR_CPU_IDS;
+use scx_utils::{Core, Llc};
 
 use crate::bpf_intf::stat_idx_P2DQ_NR_STATS;
 use crate::bpf_intf::stat_idx_P2DQ_STAT_DIRECT;
@@ -102,6 +107,7 @@ impl<'a> Scheduler<'a> {
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
         let mut open_skel = scx_ops_open!(skel_builder, open_object, p2dq).unwrap();
+        open_skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
         scx_p2dq::init_open_skel!(&mut open_skel, opts, verbose)?;
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
@@ -110,17 +116,14 @@ impl<'a> Scheduler<'a> {
         };
 
         let mut skel = scx_ops_load!(open_skel, p2dq, uei)?;
-        scx_p2dq::init_skel!(&mut skel);
 
-        let struct_ops = Some(scx_ops_attach!(skel, p2dq)?);
+        scx_p2dq::init_skel!(&mut skel);
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
-        info!("P2DQ scheduler started! Run `scx_p2dq --monitor` for metrics.");
-
         Ok(Self {
             skel,
-            struct_ops,
+            struct_ops: None,
             stats_server,
         })
     }
@@ -169,6 +172,122 @@ impl<'a> Scheduler<'a> {
 
         self.struct_ops.take();
         uei_report!(&self.skel, uei)
+    }
+
+    fn setup_arenas(&mut self) -> Result<()> {
+        // Allocate the arena memory from the BPF side so userspace initializes it before starting
+        // the scheduler. Despite the function call's name this is neither a test nor a test run,
+        // it's the recommended way of executing SEC("syscall") probes.
+        let input = ProgramInput {
+            ..Default::default()
+        };
+
+        let output = self.skel.progs.p2dq_arena_init.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "Could not initialize arenas, p2dq_setup returned {}",
+                output.return_value as i32
+            );
+        }
+
+        Ok(())
+    }
+
+    fn setup_topology_node(&mut self, mask: &[u64]) -> Result<()> {
+        // Copy the address of ptr to the kernel to populate it from BPF with the arena pointer.
+        let input = ProgramInput {
+            ..Default::default()
+        };
+
+        let output = self.skel.progs.p2dq_alloc_mask.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "Could not initialize arenas, setup_topology_node returned {}",
+                output.return_value as i32
+            );
+        }
+
+        let ptr = unsafe {
+            std::mem::transmute::<u64, &mut [u64; 10]>(self.skel.maps.bss_data.setup_ptr)
+        };
+
+        let (valid_mask, _) = ptr.split_at_mut(mask.len());
+        valid_mask.clone_from_slice(mask);
+
+        let input = ProgramInput {
+            ..Default::default()
+        };
+        let output = self.skel.progs.p2dq_topology_node_init.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "p2dq_topology_node_init returned {}",
+                output.return_value as i32
+            );
+        }
+
+        Ok(())
+    }
+
+    fn setup_topology(&mut self) -> Result<()> {
+        let topo = Topology::new().expect("Failed to build host topology");
+
+        self.setup_topology_node(topo.span.as_raw_slice())?;
+
+        for (_, node) in topo.nodes {
+            self.setup_topology_node(node.span.as_raw_slice())?;
+        }
+
+        for (_, llc) in topo.all_llcs {
+            self.setup_topology_node(
+                Arc::<Llc>::into_inner(llc)
+                    .expect("missing llc")
+                    .span
+                    .as_raw_slice(),
+            )?;
+        }
+
+        for (_, core) in topo.all_cores {
+            self.setup_topology_node(
+                Arc::<Core>::into_inner(core)
+                    .expect("missing core")
+                    .span
+                    .as_raw_slice(),
+            )?;
+        }
+        for (_, cpu) in topo.all_cpus {
+            let mut mask = [0; 9];
+            mask[cpu.id.checked_shr(64).unwrap_or(0)] |= 1 << (cpu.id % 64);
+            self.setup_topology_node(&mask)?;
+        }
+
+        Ok(())
+    }
+
+    fn print_topology(&mut self) -> Result<()> {
+        let input = ProgramInput {
+            ..Default::default()
+        };
+
+        let output = self.skel.progs.p2dq_topo_print.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "Could not initialize arenas, topo_print returned {}",
+                output.return_value as i32
+            );
+        }
+
+        Ok(())
+    }
+
+    fn start(&mut self) -> Result<()> {
+        self.setup_arenas()?;
+        self.setup_topology()?;
+
+        self.struct_ops = Some(scx_ops_attach!(self.skel, p2dq)?);
+
+        info!("P2DQ scheduler started! Run `scx_p2dq --monitor` for metrics.");
+
+        Ok(())
     }
 }
 
@@ -252,6 +371,8 @@ fn main() -> Result<()> {
     let mut open_object = MaybeUninit::uninit();
     loop {
         let mut sched = Scheduler::init(&opts.sched, &mut open_object, opts.verbose)?;
+        sched.start()?;
+
         if !sched.run(shutdown.clone())?.should_restart() {
             break;
         }
