@@ -555,12 +555,43 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 {
 	struct task_struct *p;
 	struct task_ctx *tctx;
-	u64 dsq_id, curr_cpumask_cnt;
+	u64 curr_cpumask_cnt;
 
 	/* Ignore entry if the task doesn't exist anymore */
 	p = bpf_task_from_pid(task->pid);
 	if (!p)
 		return;
+
+	dbg_msg("dispatch: pid=%d (%s) cpu=0x%lx vtime=%llu slice=%llu",
+		p->pid, p->comm, task->cpu, task->vtime, task->slice_ns);
+
+	/*
+	 * Dispatch task to the shared DSQ if the user-space scheduler
+	 * didn't select any specific target CPU.
+	 */
+	if (task->cpu == RL_CPU_ANY) {
+		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, task->slice_ns, task->vtime, task->flags);
+		scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_IDLE);
+		goto out_release;
+	}
+
+	/*
+	 * If a task can only run on a single CPU, dispatch it directly to
+	 * the only CPU where it can run, independently on what the
+	 * user-space scheduler has decided.
+	 */
+	if (p->nr_cpus_allowed == 1) {
+		s32 cpu = scx_bpf_task_cpu(p);
+
+		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
+					 task->slice_ns, task->vtime, task->flags);
+		if (cpu != task->cpu)
+			__sync_fetch_and_add(&nr_bounce_dispatches, 1);
+		if (cpu != bpf_get_smp_processor_id())
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+
+		goto out_release;
+	}
 
 	/*
 	 * Update task's time slice in its context.
@@ -568,18 +599,6 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		goto out_release;
-
-	dbg_msg("dispatch: pid=%d (%s) cpu=0x%lx vtime=%llu slice=%llu",
-		p->pid, p->comm, task->cpu, task->vtime, task->slice_ns);
-
-	/*
-	 * Dispatch task to the target DSQ.
-	 */
-	if (task->cpu == RL_CPU_ANY) {
-		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, task->slice_ns, task->vtime, task->flags);
-		scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_IDLE);
-		goto out_release;
-	}
 
 	/* Read current cpumask generation counter */
 	curr_cpumask_cnt = tctx->cpumask_cnt;
@@ -606,10 +625,8 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	 * the task will be re-enqueued by the core sched-ext code, potentially
 	 * selecting a different cpu and a different cpumask.
 	 */
-	dsq_id = cpu_to_dsq(task->cpu);
-
-	/* Dispatch the task to the target per-CPU DSQ */
-	scx_bpf_dsq_insert_vtime(p, dsq_id, task->slice_ns, task->vtime, task->flags);
+	scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(task->cpu),
+				 task->slice_ns, task->vtime, task->flags);
 
 	/* If the cpumask is not valid anymore, ignore the dispatch event */
 	if (curr_cpumask_cnt != task->cpumask_cnt) {
