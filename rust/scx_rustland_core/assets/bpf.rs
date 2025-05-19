@@ -283,19 +283,23 @@ impl<'cb> BpfScheduler<'cb> {
         ALLOCATOR.disable_mmap().expect("Failed to disable mmap");
 
         // Make sure to use the SCHED_EXT class at least for the scheduler itself.
-        match Self::use_sched_ext() {
-            0 => Ok(Self {
-                skel,
-                shutdown,
-                queued,
-                dispatched,
-                struct_ops,
-            }),
-            err => Err(anyhow::Error::msg(format!(
-                "sched_setscheduler error: {}",
-                err
-            ))),
+        if partial {
+            let err = Self::use_sched_ext();
+            if err < 0 {
+                return Err(anyhow::Error::msg(format!(
+                    "sched_setscheduler error: {}",
+                    err
+                )));
+            }
         }
+
+        Ok(Self {
+            skel,
+            shutdown,
+            queued,
+            dispatched,
+            struct_ops,
+        })
     }
 
     fn enable_sibling_cpu(
