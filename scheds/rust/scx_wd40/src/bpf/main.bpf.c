@@ -79,7 +79,6 @@ UEI_DEFINE(uei);
 /*
  * Domains and cpus
  */
-const volatile u32 nr_cpu_ids = 64;	/* !0 for veristat, set during init */
 const volatile u32 cpu_dom_id_map[MAX_CPUS];
 const volatile u32 wd40_perf_mode;
 
