@@ -1011,6 +1011,15 @@ void BPF_STRUCT_OPS(rustland_cpu_release, s32 cpu,
 }
 
 /*
+ * A task joins the sched_ext scheduler.
+ */
+void BPF_STRUCT_OPS(rustland_enable, struct task_struct *p)
+{
+	p->scx.dsq_vtime = 0;
+	p->scx.slice = SCX_SLICE_DFL;
+}
+
+/*
  * A new task @p is being created.
  *
  * Allocate and initialize all the internal structures for the task (this
@@ -1274,6 +1283,7 @@ SCX_OPS_DEFINE(rustland,
 	       .stopping		= (void *)rustland_stopping,
 	       .set_cpumask		= (void *)rustland_set_cpumask,
 	       .cpu_release		= (void *)rustland_cpu_release,
+	       .enable			= (void *)rustland_enable,
 	       .init_task		= (void *)rustland_init_task,
 	       .init			= (void *)rustland_init,
 	       .exit			= (void *)rustland_exit,
