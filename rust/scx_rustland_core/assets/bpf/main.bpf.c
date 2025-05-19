@@ -50,6 +50,16 @@ UEI_DEFINE(uei);
 #define SHARED_DSQ MAX_CPUS
 
 /*
+ * The user-space scheduler itself is dispatched using a separate DSQ, that
+ * is consumed after all other DSQs.
+ *
+ * This ensures to work in bursts: tasks are queued, then the user-space
+ * scheduler runs and dispatches them. Once all these tasks exhaust their
+ * time slices, the scheduler is invoked again, repeating the cycle.
+ */
+#define SCHED_DSQ (MAX_CPUS + 1)
+
+/*
  * Scheduler attributes and statistics.
  */
 u32 usersched_pid; /* User-space scheduler PID */
@@ -824,35 +834,26 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 /*
  * Dispatch the user-space scheduler.
  */
-static bool dispatch_user_scheduler(void)
+static void dispatch_user_scheduler(void)
 {
 	struct task_struct *p;
-
-	if (!test_and_clear_usersched_needed())
-		return false;
 
 	p = bpf_task_from_pid(usersched_pid);
 	if (!p) {
 		scx_bpf_error("Failed to find usersched task %d", usersched_pid);
-		return false;
+		return;
 	}
 
 	/*
-	 * Always append the user-space scheduler at the end of the shared
-	 * DSQ, so that it'll run after all the tasks currently dispatched
-	 * have used their assigned time slice on their target CPU.
-	 *
-	 * At the same time assign an infinite time slice, so that it can
-	 * completely drain all the pending tasks.
+	 * Assign an infinite time slice to the user-space scheduler, so
+	 * that it can completely drain all the pending tasks.
 	 *
 	 * The user-space scheduler will voluntarily yield the CPU upon
 	 * completion through BpfScheduler->notify_complete().
 	 */
-	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_INF, -1ULL, 0);
+	scx_bpf_dsq_insert(p, SCHED_DSQ, SCX_SLICE_INF, 0);
 
 	bpf_task_release(p);
-
-	return true;
 }
 
 /*
@@ -886,16 +887,18 @@ static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
 void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
-	 * Consume all tasks from the @dispatched list and immediately dispatch
-	 * them on the target CPU decided by the user-space scheduler.
+	 * Fire up the user-space scheduler: it will run only if no other
+	 * task needs to run.
+	 */
+	if (test_and_clear_usersched_needed())
+		dispatch_user_scheduler();
+
+	/*
+	 * Consume all tasks from the @dispatched list and immediately
+	 * dispatch them on the target CPU decided by the user-space
+	 * scheduler.
 	 */
 	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, BPF_RB_NO_WAKEUP);
-
-       /*
-	* Always dispatch the user-space scheduler every time that a CPU
-	* becomes available.
-	*/
-	dispatch_user_scheduler();
 
 	/*
 	 * Consume a task from the per-CPU DSQ.
@@ -910,12 +913,18 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
+	 * Lastly, consume and dispatch the user-space scheduler.
+	 */
+	if (scx_bpf_dsq_move_to_local(SCHED_DSQ))
+		return;
+
+	/*
 	 * If there are still pending task, notify the user-space scheduler
 	 * and prevent the CPU from going idle.
 	 */
 	if (usersched_has_pending_tasks()) {
 		set_usersched_needed();
-		scx_bpf_kick_cpu(cpu, 0);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return;
 	}
 
@@ -1192,6 +1201,13 @@ static int dsq_init(void)
 	err = scx_bpf_create_dsq(SHARED_DSQ, -1);
 	if (err) {
 		scx_bpf_error("failed to create shared DSQ: %d", err);
+		return err;
+	}
+
+	/* Create the scheduler's DSQ */
+	err = scx_bpf_create_dsq(SCHED_DSQ, -1);
+	if (err) {
+		scx_bpf_error("failed to create scheduler DSQ: %d", err);
 		return err;
 	}
 
