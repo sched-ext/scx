@@ -178,6 +178,7 @@ struct {
 struct cpu_ctx {
 	struct bpf_cpumask __kptr *l2_cpumask;
 	struct bpf_cpumask __kptr *l3_cpumask;
+	u32 usersched_needed;
 };
 
 struct {
@@ -309,26 +310,41 @@ static bool is_queued(const struct task_struct *p)
 }
 
 /*
- * Flag used to wake-up the user-space scheduler.
- */
-static volatile u32 usersched_needed;
-
-/*
  * Set user-space scheduler wake-up flag (equivalent to an atomic release
  * operation).
  */
-static void set_usersched_needed(void)
+static void set_usersched_needed(s32 cpu)
 {
-	__sync_fetch_and_or(&usersched_needed, 1);
+	struct cpu_ctx *cctx;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return;
+
+	cctx->usersched_needed = true;
 }
 
 /*
  * Check and clear user-space scheduler wake-up flag (equivalent to an atomic
  * acquire operation).
  */
-static bool test_and_clear_usersched_needed(void)
+static bool test_and_clear_usersched_needed(s32 cpu)
 {
-	return __sync_fetch_and_and(&usersched_needed, 0) == 1;
+	struct cpu_ctx *cctx;
+	bool ret;
+
+	cctx = try_lookup_cpu_ctx(cpu);
+	if (!cctx)
+		return false;
+
+	/*
+	 * This is a per-CPU flag, so the test-and-set operation doesn't
+	 * need to be stricly atomic.
+	 */
+	ret = cctx->usersched_needed;
+	cctx->usersched_needed = false;
+
+	return ret;
 }
 
 /*
@@ -890,7 +906,7 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 * Fire up the user-space scheduler: it will run only if no other
 	 * task needs to run.
 	 */
-	if (test_and_clear_usersched_needed())
+	if (test_and_clear_usersched_needed(cpu))
 		dispatch_user_scheduler();
 
 	/*
@@ -923,7 +939,7 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 * and prevent the CPU from going idle.
 	 */
 	if (usersched_has_pending_tasks()) {
-		set_usersched_needed();
+		set_usersched_needed(cpu);
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return;
 	}
@@ -1033,7 +1049,7 @@ void BPF_STRUCT_OPS(rustland_cpu_release, s32 cpu,
 	 */
 	dbg_msg("cpu preemption: pid=%d (%s)", p->pid, p->comm);
 	if (is_usersched_task(p))
-		set_usersched_needed();
+		set_usersched_needed(cpu);
 }
 
 /*
@@ -1109,10 +1125,11 @@ static int usersched_timer_fn(void *map, int *key, struct bpf_timer *timer)
 		if (p) {
 			s32 cpu;
 
-			set_usersched_needed();
 			cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
-			if (cpu >= 0)
+			if (cpu >= 0) {
+				set_usersched_needed(cpu);
 				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			}
 			bpf_task_release(p);
 		}
 		bpf_rcu_read_unlock();
