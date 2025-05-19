@@ -1887,10 +1887,8 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		struct cpu_ctx *sib_cpuc;
 		s32 sib;
 
-		if ((sib = sibling_cpu(cpu)) < 0 || !(sib_cpuc = lookup_cpu_ctx(sib)))
-			return;
-
-		if (sib_cpuc->current_excl || sib_cpuc->next_excl) {
+		if ((sib = sibling_cpu(cpu)) >= 0 && (sib_cpuc = lookup_cpu_ctx(sib)) &&
+		    (sib_cpuc->current_excl || sib_cpuc->next_excl)) {
 			gstat_inc(GSTAT_EXCL_IDLE, cpuc);
 			return;
 		}
