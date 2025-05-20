@@ -67,7 +67,7 @@ const volatile bool interactive_fifo = false;
 const volatile bool keep_running_enabled = true;
 const volatile bool kthreads_local = true;
 const volatile bool max_dsq_pick2 = false;
-const volatile bool freq_control = true;
+const volatile bool freq_control = false;
 const volatile bool select_idle_in_enqueue = true;
 const volatile u64 max_exec_ns = 20 * NSEC_PER_MSEC;
 
@@ -854,16 +854,6 @@ static __always_inline void complete_p2dq_enqueue(struct enqueue_promise *pro,
 	}
 out:
 	pro->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
-}
-
-static __always_inline void p2dq_runnable_impl(struct task_struct *p, u64 enq_flags)
-{
-	task_ctx *wakee_ctx;
-
-	if (!(wakee_ctx = lookup_task_ctx(p)))
-		return;
-
-	wakee_ctx->is_kworker = p->flags & (PF_KTHREAD | PF_WQ_WORKER | PF_IO_WORKER);
 }
 
 static __always_inline int p2dq_running_impl(struct task_struct *p)
@@ -1679,11 +1669,6 @@ void BPF_STRUCT_OPS(p2dq_exit, struct scx_exit_info *ei)
 }
 
 #if P2DQ_CREATE_STRUCT_OPS
-void BPF_STRUCT_OPS(p2dq_runnable, struct task_struct *p, u64 enq_flags)
-{
-	return p2dq_runnable_impl(p, enq_flags);
-}
-
 s32 BPF_STRUCT_OPS_SLEEPABLE(p2dq_init)
 {
 	return p2dq_init_impl();
@@ -1721,7 +1706,6 @@ SCX_OPS_DEFINE(p2dq,
 	       .select_cpu		= (void *)p2dq_select_cpu,
 	       .enqueue			= (void *)p2dq_enqueue,
 	       .dispatch		= (void *)p2dq_dispatch,
-	       .runnable		= (void *)p2dq_runnable,
 	       .running			= (void *)p2dq_running,
 	       .stopping		= (void *)p2dq_stopping,
 	       .set_cpumask		= (void *)p2dq_set_cpumask,

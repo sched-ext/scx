@@ -1377,7 +1377,7 @@ impl<'a> Scheduler<'a> {
                 copy_into_cstr(&mut layer.name, layer_name.as_str());
                 layer.preempt.write(*preempt);
                 layer.preempt_first.write(*preempt_first);
-                layer.exclusive.write(*exclusive);
+                layer.excl.write(*exclusive);
                 layer.allow_node_aligned.write(*allow_node_aligned);
                 layer.skip_remote_node.write(*skip_remote_node);
                 layer.prev_over_idle_core.write(*prev_over_idle_core);
@@ -1926,6 +1926,10 @@ impl<'a> Scheduler<'a> {
                 LayerKind::Grouped { .. } => !spec.kind.common().preempt,
                 _ => false,
             })
+            .count() as u32;
+        skel.maps.rodata_data.nr_excl_layers = layer_specs
+            .iter()
+            .filter(|spec| spec.kind.common().exclusive)
             .count() as u32;
 
         let mut min_open = u64::MAX;
