@@ -720,6 +720,7 @@ static void get_task_info(struct queued_task_ctx *task,
 
 	task->pid = p->pid;
 	task->cpu = scx_bpf_task_cpu(p);
+	task->nr_cpus_allowed = p->nr_cpus_allowed;
 	task->flags = enq_flags;
 	task->start_ts = tctx ? tctx->start_ts : 0;
 	task->stop_ts = tctx ? tctx->stop_ts : 0;
