@@ -1906,7 +1906,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (antistall_consume(cpuc))
 		return;
 	
-	if (sib_keep_idle(cpu, prev))
+	if (prev && sib_keep_idle(cpu, prev))
 		return;
 
 	/*
