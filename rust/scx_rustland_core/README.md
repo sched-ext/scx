@@ -78,6 +78,7 @@ Each task received from `.dequeue_task()` contains the following:
 struct QueuedTask {
     pub pid: i32,              // pid that uniquely identifies a task
     pub cpu: i32,              // CPU previously used by the task
+    pub nr_cpus_allowed: u64,  // Number of CPUs that the task can use
     pub flags: u64,            // task's enqueue flags
     pub start_ts: u64,         // Timestamp since last time the task ran on a CPU (in ns)
     pub stop_ts: u64,          // Timestamp since last time the task released a CPU (in ns)

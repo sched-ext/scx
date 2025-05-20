@@ -76,6 +76,7 @@ pub const RL_CPU_ANY: i32 = bpf_intf::RL_CPU_ANY as i32;
 pub struct QueuedTask {
     pub pid: i32,              // pid that uniquely identifies a task
     pub cpu: i32,              // CPU where the task is running
+    pub nr_cpus_allowed: u64,  // Number of CPUs that the task can use
     pub flags: u64,            // task enqueue flags
     pub start_ts: u64,         // Timestamp since last time the task ran on a CPU
     pub stop_ts: u64,          // Timestamp since last time the task released a CPU
@@ -138,6 +139,7 @@ impl EnqueuedMessage {
         QueuedTask {
             pid: self.inner.pid,
             cpu: self.inner.cpu,
+            nr_cpus_allowed: self.inner.nr_cpus_allowed,
             flags: self.inner.flags,
             start_ts: self.inner.start_ts,
             stop_ts: self.inner.stop_ts,
