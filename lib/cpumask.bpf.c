@@ -5,7 +5,7 @@
 #include <lib/percpu.h>
 
 static struct scx_allocator scx_bitmap_allocator;
-size_t mask_size;
+extern size_t mask_size;
 
 __weak
 int scx_bitmap_init(__u64 total_mask_size)
