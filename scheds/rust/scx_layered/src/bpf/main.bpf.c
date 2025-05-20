@@ -773,7 +773,7 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 			      const struct cpumask *idle_smtmask, const struct layer *layer)
 {
 	bool prev_in_cand;
-	s32 i, cpu;
+	s32 i, cpu = -1;
 
 	if (unlikely(!cand_cpumask || !idle_smtmask))
 		return -1;
@@ -809,11 +809,7 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 			return -EBUSY;
 	}
 
-	/*
-	 * FIXME - The following should ideally be bpf_for(i, 0, nr_cpu_ids) but
-	 * that causes a mysterious verification failure. Try 32 times instead.
-	 */
-	for (i = 0; i < 32; i++) {
+	bpf_for(i, 0, nr_cpu_ids) {
 		struct cpu_ctx *sib_cpuc;
 		s32 sib;
 
