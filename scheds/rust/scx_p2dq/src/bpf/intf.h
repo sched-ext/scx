@@ -26,6 +26,7 @@ enum consts {
 	MAX_LLCS		= 64,
 	MAX_DSQS_PER_LLC	= 8,
 	MAX_TASK_PRIO		= 39,
+	MAX_TOPO_NODES		= 1024,
 
 	NSEC_PER_USEC		= 1000ULL,
 	NSEC_PER_MSEC		= (1000ULL * NSEC_PER_USEC),
@@ -34,6 +35,8 @@ enum consts {
 
 	// kernel definitions
 	CLOCK_BOOTTIME		= 7,
+
+	STATIC_ALLOC_PAGES_GRANULARITY = 8,
 };
 
 enum p2dq_timers_defs {

@@ -12,10 +12,16 @@
 #include "../../../../include/scx/common.bpf.h"
 #include "../../../../include/scx/bpf_arena_common.h"
 #include "../../../../include/lib/sdt_task.h"
+#include "../../../../include/lib/cpumask.h"
+#include "../../../../include/lib/percpu.h"
+#include "../../../../include/lib/topology.h"
 #else
 #include <scx/common.bpf.h>
 #include <scx/bpf_arena_common.h>
 #include <lib/sdt_task.h>
+#include <lib/cpumask.h>
+#include <lib/percpu.h>
+#include <lib/topology.h>
 #endif
 
 #include "intf.h"
@@ -38,7 +44,6 @@ UEI_DEFINE(uei);
 
 #define dbg(fmt, args...)	do { if (debug) bpf_printk(fmt, ##args); } while (0)
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
-
 
 /*
  * Domains and cpus
@@ -77,9 +82,12 @@ const volatile bool has_little_cores = false;
 const volatile u32 debug = 2;
 
 const u32 zero_u32 = 0;
+extern const volatile u32 nr_cpu_ids;
 
 const u64 lb_timer_intvl_ns = 250LLU * NSEC_PER_MSEC;
 const u64 lb_backoff_ns = 5LLU * NSEC_PER_MSEC;
+
+u64 setup_ptr;
 
 u64 cpu_llc_ids[MAX_CPUS];
 u64 cpu_node_ids[MAX_CPUS];
@@ -91,7 +99,6 @@ u32 sched_mode = MODE_PERFORMANCE;
 
 private(A) struct bpf_cpumask __kptr *all_cpumask;
 private(A) struct bpf_cpumask __kptr *big_cpumask;
-
 
 static u64 max(u64 a, u64 b)
 {
@@ -1489,6 +1496,69 @@ s32 static start_timers(void)
 	return 0;
 }
 
+SEC("syscall")
+int p2dq_topo_print(void)
+{
+	scx_arena_subprog_init();
+	topo_print();
+	return 0;
+}
+
+SEC("syscall")
+int p2dq_arena_init(void)
+{
+	int ret;
+
+	ret = scx_static_init(STATIC_ALLOC_PAGES_GRANULARITY);
+	if (ret)
+		return ret;
+
+	/* How many types to store all CPU IDs? */
+	ret = scx_bitmap_init(div_round_up(nr_cpu_ids, 8));
+	if (ret)
+		return ret;
+
+	ret = scx_percpu_storage_init();
+	if (ret)
+		return ret;
+
+	ret = scx_task_init(sizeof(task_ctx));
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
+SEC("syscall")
+int p2dq_alloc_mask(void)
+{
+	scx_bitmap_t bitmap;
+
+	bitmap = scx_bitmap_alloc();
+	if (!bitmap)
+		return -ENOMEM;
+
+	setup_ptr = (u64)&bitmap->bits;
+
+	return 0;
+}
+
+SEC("syscall")
+int p2dq_topology_node_init(void)
+{
+	scx_bitmap_t bitmap = (scx_bitmap_t)container_of(setup_ptr, struct scx_bitmap, bits);
+	int ret;
+
+	ret = topo_init(bitmap);
+	if (ret)
+		return ret;
+
+	setup_ptr = 0;
+
+	return 0;
+}
+
+
 static __always_inline s32 p2dq_init_impl()
 {
 	int i, ret;
@@ -1585,10 +1655,6 @@ static __always_inline s32 p2dq_init_impl()
 
 	if (start_timers() < 0)
 		return -EINVAL;
-
-	ret = scx_task_init(sizeof(task_ctx));
-	if (ret)
-		return ret;
 
 	return 0;
 }
