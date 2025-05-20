@@ -1,0 +1,29 @@
+[
+	{
+		"name": "template",
+		"template": { "CgroupSuffix": "common_suffix/" },
+		"matches": [
+			[{ "CgroupPrefix": "top_level/" }]
+		],
+		"kind": {
+			"Grouped": {
+				"cpus_range_frac":  [0.25, 0.5],
+				"util_range": [0.4, 0.85],
+				"growth_algo": "RandomTopo",
+				"disallow_preempt_after_us": 0,
+				"protected": true
+			}
+		}
+	},
+	{
+		"name": "the rest",
+		"matches": [
+			[]
+		],
+		"kind": {
+			"Open": {
+				"growth_algo": "RandomTopo"
+			}
+		}
+	}
+]

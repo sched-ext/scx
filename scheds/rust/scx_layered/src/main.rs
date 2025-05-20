@@ -94,6 +94,7 @@ lazy_static! {
             LayerSpec {
                 name: "batch".into(),
                 comment: Some("tasks under system.slice or tasks with nice value > 0".into()),
+                template: None,
                 matches: vec![
                     vec![LayerMatch::CgroupPrefix("system.slice/".into())],
                     vec![LayerMatch::NiceAbove(0)],
@@ -131,6 +132,7 @@ lazy_static! {
             LayerSpec {
                 name: "immediate".into(),
                 comment: Some("tasks under workload.slice with nice value < 0".into()),
+                template: None,
                 matches: vec![vec![
                     LayerMatch::CgroupPrefix("workload.slice/".into()),
                     LayerMatch::NiceBelow(0),
@@ -164,6 +166,7 @@ lazy_static! {
             LayerSpec {
                 name: "stress-ng".into(),
                 comment: Some("stress-ng test layer".into()),
+                template: None,
                 matches: vec![
                     vec![LayerMatch::CommPrefix("stress-ng".into()),],
                     vec![LayerMatch::PcommPrefix("stress-ng".into()),]
@@ -201,6 +204,7 @@ lazy_static! {
             LayerSpec {
                 name: "normal".into(),
                 comment: Some("the rest".into()),
+                template: None,
                 matches: vec![vec![]],
                 kind: LayerKind::Grouped {
                     cpus_range: None,
