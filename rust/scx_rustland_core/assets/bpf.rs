@@ -573,7 +573,7 @@ impl<'cb> BpfScheduler<'cb> {
 
     // Called on exit to shutdown and report exit message from the BPF part.
     pub fn shutdown_and_report(&mut self) -> Result<UserExitInfo> {
-        self.struct_ops.take();
+        let _ = self.struct_ops.take();
         uei_report!(&self.skel, uei)
     }
 }
