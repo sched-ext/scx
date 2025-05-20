@@ -386,6 +386,7 @@ static s32 init_sys_stat(u64 now)
 
 	sys_stat.last_update_clk = now;
 	sys_stat.nr_active = nr_cpus_onln;
+	sys_stat.slice = LAVD_SLICE_MAX_NS_DFL;
 	bpf_for(dsq_id, 0, nr_cpdoms) {
 		if (dsq_id >= LAVD_CPDOM_MAX_NR)
 			break;

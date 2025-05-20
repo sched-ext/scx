@@ -17,19 +17,16 @@ static u64 get_est_stopping_time(struct task_ctx *taskc, u64 now)
 	return now + taskc->avg_runtime;
 }
 
-static int comp_preemption_info(struct preemption_info *prm_a,
-				struct preemption_info *prm_b)
+static bool can_a_preempt_b(struct preemption_info *prm_a,
+			    struct preemption_info *prm_b)
 {
 	/*
 	 * Check one's latency criticality and deadline.
 	 */
 	if ((prm_a->lat_cri > prm_b->lat_cri) &&
 	    (prm_a->stopping_tm_est_ns < prm_b->stopping_tm_est_ns))
-		return -1;
-	if ((prm_a->lat_cri < prm_b->lat_cri) &&
-	    (prm_a->stopping_tm_est_ns > prm_b->stopping_tm_est_ns))
-		return 1;
-	return 0;
+		return true;
+	return false;
 }
 
 static bool can_task1_kick_task2(struct preemption_info *prm_task1,
@@ -43,7 +40,7 @@ static bool can_task1_kick_task2(struct preemption_info *prm_task1,
 	 * If that CPU runs a lower priority task, that's a victim
 	 * candidate.
 	 */
-	return comp_preemption_info(prm_task1, prm_task2) < 0;
+	return can_a_preempt_b(prm_task1, prm_task2);
 }
 
 static bool can_cpu1_kick_cpu2(struct preemption_info *prm_cpu1,
@@ -67,7 +64,7 @@ static bool can_cpu1_kick_cpu2(struct preemption_info *prm_cpu1,
 	 * If that CPU runs a lower priority task, that's a victim
 	 * candidate.
 	 */
-	return comp_preemption_info(prm_cpu1, prm_cpu2) < 0;
+	return can_a_preempt_b(prm_cpu1, prm_cpu2);
 }
 
 static bool is_worth_kick_other_task(struct task_ctx *taskc)
@@ -201,8 +198,31 @@ static void ask_cpu_yield(struct cpu_ctx *victim_cpuc)
 	struct task_struct *victim_p;
 
 	victim_rq = scx_bpf_cpu_rq(victim_cpuc->cpu_id);
-	if (victim_rq && (victim_p = victim_rq->curr))
-		WRITE_ONCE(victim_p->scx.slice, 0);
+	if (victim_rq && (victim_p = victim_rq->curr)) {
+		/*
+		 * Finding a victim is racy, but we do not coordinate. Thus,
+		 * two different CPUs can choose the same victim CPU. We do not
+		 * coordinate this on purpose because such a race is rare, but
+		 * controlling it would impose high synchronization overhead.
+		 *
+		 * Instead, we set the victim's stopping_tm_est_ns to zero
+		 * atomically to avoid the same victim CPU can be chosen
+		 * repeatedly. In addition, once updating the
+		 * stopping_tm_est_ns to zero succeeds, that means this CPU
+		 * wins in preempting the victim CPU. Hence, let's set the
+		 * victim task's time slice to one (not zero).
+		 *
+		 * Why not set the time slice to zero? We avoid setting the
+		 * time slice to zero because the sched_ext core in the kernel
+		 * fixes the zero time slice to the default time slice
+		 * (SCX_SLICE_DFL, 20 msec).
+		 */
+		u64 old = victim_cpuc->stopping_tm_est_ns;
+		bool ret = __sync_bool_compare_and_swap(
+				&victim_cpuc->stopping_tm_est_ns, old, 0);
+		if (ret)
+			WRITE_ONCE(victim_p->scx.slice, 1);
+	}
 }
 
 static void try_find_and_kick_victim_cpu(struct task_struct *p,
