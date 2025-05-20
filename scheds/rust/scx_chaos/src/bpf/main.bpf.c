@@ -47,6 +47,9 @@ const volatile u64 random_delays_max_ns = 2; /* for veristat */
 const volatile u32 cpu_freq_min = 0;
 const volatile u32 cpu_freq_max = SCX_CPUPERF_ONE;
 
+const volatile u32 degradation_freq_frac32 = 1;
+const volatile u64 degradation_frac7 = 0;
+
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
@@ -258,6 +261,7 @@ __weak s32 enqueue_chaotic(struct task_struct *p __arg_trusted, u64 enq_flags,
 
 	case CHAOS_TRAIT_NONE:
 	case CHAOS_TRAIT_CPU_FREQ:
+	case CHAOS_TRAIT_DEGRADATION:
 	case CHAOS_TRAIT_MAX:
 		out = false;
 		break;
@@ -455,6 +459,21 @@ void BPF_STRUCT_OPS(chaos_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 	    enqueue_chaotic(p, enq_flags, taskc))
 		return;
 
+	// NOTE: this may not work for affinitized tasks because p2dq does
+	// direct dispatch in some situations.
+	if (taskc->next_trait == CHAOS_TRAIT_DEGRADATION) {
+		if (promise.kind == P2DQ_ENQUEUE_PROMISE_FIFO) {
+			promise.fifo.slice_ns = ((degradation_frac7 << 7) * promise.fifo.slice_ns) >> 7;
+			dbg("CHAOS[degradation][%d] slice_ns: %llu", p, promise.fifo.slice_ns);
+		}
+		if (promise.kind == P2DQ_ENQUEUE_PROMISE_VTIME) {
+			promise.vtime.vtime += ((degradation_frac7 << 7) * promise.vtime.slice_ns) >> 7;
+			promise.vtime.slice_ns = ((degradation_frac7 << 7) * promise.vtime.slice_ns) >> 7;
+			dbg("CHAOS[degradation][%d] vtime: %llu slice_ns: %llu",
+			    p, promise.vtime.vtime, promise.vtime.slice_ns);
+		}
+	}
+
 	complete_p2dq_enqueue(&promise, p);
 }
 
@@ -487,7 +506,7 @@ void BPF_STRUCT_OPS(chaos_running, struct task_struct *p)
 	s32 task_cpu = scx_bpf_task_cpu(p);
 	if (taskc->next_trait == CHAOS_TRAIT_CPU_FREQ) {
 		if (cpu_freq_min > 0) {
-			dbg("chaos freq pid: %d freq: %d", p->pid, cpu_freq_min);
+			dbg("CHAOS[freq][%d] freq: %d", p->pid, cpu_freq_min);
 			scx_bpf_cpuperf_set(task_cpu, cpu_freq_min);
 		}
 	} else {

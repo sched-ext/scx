@@ -54,6 +54,18 @@ pub struct CpuFreqArgs {
     pub cpufreq_max: Option<u32>,
 }
 
+/// Introduces a perf degradation
+#[derive(Debug, Parser)]
+pub struct PerfDegradationArgs {
+    /// Chance of degradating a process.
+    #[clap(long)]
+    pub degradation_frequency: Option<f64>,
+
+    /// Amount to degradate a process.
+    #[clap(long, default_value = "0", value_parser = clap::value_parser!(u64).range(0..129))]
+    pub degradation_frac7: u64,
+}
+
 /// scx_chaos: A general purpose sched_ext scheduler designed to amplify race conditions
 ///
 /// WARNING: This scheduler is a very early alpha, and hasn't been production tested yet. The CLI
@@ -91,6 +103,9 @@ pub struct Args {
 
     #[command(flatten, next_help_heading = "Random Delays")]
     pub random_delay: RandomDelayArgs,
+
+    #[command(flatten, next_help_heading = "Perf Degradation")]
+    pub perf_degradation: PerfDegradationArgs,
 
     #[command(flatten, next_help_heading = "CPU Frequency")]
     pub cpu_freq: CpuFreqArgs,
