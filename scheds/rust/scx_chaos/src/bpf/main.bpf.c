@@ -88,7 +88,7 @@ static __always_inline enum chaos_trait_kind choose_chaos(struct chaos_task_ctx 
 	return CHAOS_TRAIT_NONE;
 }
 
-static __always_inline bool chaos_trait_skips_enqueue(struct chaos_task_ctx *taskc)
+static __always_inline bool chaos_trait_skips_select_cpu(struct chaos_task_ctx *taskc)
 {
 	if (taskc->next_trait == CHAOS_TRAIT_RANDOM_DELAYS)
 		return true;
@@ -500,8 +500,8 @@ s32 BPF_STRUCT_OPS(chaos_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wa
 		goto p2dq;
 
 	// don't allow p2dq to select_cpu if we plan chaos to ensure we hit enqueue
-	if (chaos_trait_skips_enqueue(wakee_ctx))
-		return -EINVAL;
+	if (chaos_trait_skips_select_cpu(wakee_ctx))
+		return prev_cpu;
 
 p2dq:
 	return p2dq_select_cpu_impl(p, prev_cpu, wake_flags);
