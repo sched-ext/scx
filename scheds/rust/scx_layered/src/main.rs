@@ -12,6 +12,8 @@ use std::fs;
 use std::io::Write;
 use std::mem::MaybeUninit;
 use std::ops::Sub;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -1225,6 +1227,106 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
+    fn init_match(mt: &mut types::layer_match, rule: &LayerMatch) -> () {
+        // Rules are allowlist-based by default
+        mt.exclude.write(false);
+
+        match rule {
+            LayerMatch::CgroupPrefix(prefix) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_PREFIX as i32;
+                copy_into_cstr(&mut mt.cgroup_prefix, prefix.as_str());
+            }
+            LayerMatch::CgroupSuffix(suffix) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_SUFFIX as i32;
+                copy_into_cstr(&mut mt.cgroup_suffix, suffix.as_str());
+            }
+            LayerMatch::CommPrefix(prefix) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_COMM_PREFIX as i32;
+                copy_into_cstr(&mut mt.comm_prefix, prefix.as_str());
+            }
+            LayerMatch::CommPrefixExclude(prefix) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_COMM_PREFIX as i32;
+                mt.exclude.write(true);
+                copy_into_cstr(&mut mt.comm_prefix, prefix.as_str());
+            }
+            LayerMatch::PcommPrefix(prefix) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_PCOMM_PREFIX as i32;
+                copy_into_cstr(&mut mt.pcomm_prefix, prefix.as_str());
+            }
+            LayerMatch::PcommPrefixExclude(prefix) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_PCOMM_PREFIX as i32;
+                mt.exclude.write(true);
+                copy_into_cstr(&mut mt.pcomm_prefix, prefix.as_str());
+            }
+            LayerMatch::NiceAbove(nice) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_NICE_ABOVE as i32;
+                mt.nice = *nice;
+            }
+            LayerMatch::NiceBelow(nice) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_NICE_BELOW as i32;
+                mt.nice = *nice;
+            }
+            LayerMatch::NiceEquals(nice) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_NICE_EQUALS as i32;
+                mt.nice = *nice;
+            }
+            LayerMatch::UIDEquals(user_id) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_USER_ID_EQUALS as i32;
+                mt.user_id = *user_id;
+            }
+            LayerMatch::GIDEquals(group_id) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_GROUP_ID_EQUALS as i32;
+                mt.group_id = *group_id;
+            }
+            LayerMatch::PIDEquals(pid) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_PID_EQUALS as i32;
+                mt.pid = *pid;
+            }
+            LayerMatch::PPIDEquals(ppid) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_PPID_EQUALS as i32;
+                mt.ppid = *ppid;
+            }
+            LayerMatch::TGIDEquals(tgid) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_TGID_EQUALS as i32;
+                mt.tgid = *tgid;
+            }
+            LayerMatch::NSPIDEquals(nsid, pid) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_NSPID_EQUALS as i32;
+                mt.nsid = *nsid;
+                mt.pid = *pid;
+            }
+            LayerMatch::NSEquals(nsid) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_NS_EQUALS as i32;
+                mt.nsid = *nsid as u64;
+            }
+            LayerMatch::CmdJoin(joincmd) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_SCXCMD_JOIN as i32;
+                copy_into_cstr(&mut mt.comm_prefix, joincmd);
+            }
+            LayerMatch::IsGroupLeader(polarity) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_IS_GROUP_LEADER as i32;
+                mt.is_group_leader.write(*polarity);
+            }
+            LayerMatch::IsKthread(polarity) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_IS_KTHREAD as i32;
+                mt.is_kthread.write(*polarity);
+            }
+            LayerMatch::UsedGpuTid(polarity) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_USED_GPU_TID as i32;
+                mt.used_gpu_tid.write(*polarity);
+            }
+            LayerMatch::UsedGpuPid(polarity) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_USED_GPU_PID as i32;
+                mt.used_gpu_pid.write(*polarity);
+            }
+            LayerMatch::AvgRuntime(min, max) => {
+                mt.kind = bpf_intf::layer_match_kind_MATCH_AVG_RUNTIME as i32;
+                mt.min_avg_runtime_us = *min;
+                mt.max_avg_runtime_us = *max;
+            }
+        }
+    }
+
     fn init_layer_single(
         spec: &LayerSpec,
         topo: &Topology,
@@ -1234,103 +1336,7 @@ impl<'a> Scheduler<'a> {
             for (and_i, and) in or.iter().enumerate() {
                 let mt = &mut layer.matches[or_i].matches[and_i];
 
-                // Rules are allowlist-based by default
-                mt.exclude.write(false);
-
-                match and {
-                    LayerMatch::CgroupPrefix(prefix) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_PREFIX as i32;
-                        copy_into_cstr(&mut mt.cgroup_prefix, prefix.as_str());
-                    }
-                    LayerMatch::CgroupSuffix(suffix) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_SUFFIX as i32;
-                        copy_into_cstr(&mut mt.cgroup_suffix, suffix.as_str());
-                    }
-                    LayerMatch::CommPrefix(prefix) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_COMM_PREFIX as i32;
-                        copy_into_cstr(&mut mt.comm_prefix, prefix.as_str());
-                    }
-                    LayerMatch::CommPrefixExclude(prefix) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_COMM_PREFIX as i32;
-                        mt.exclude.write(true);
-                        copy_into_cstr(&mut mt.comm_prefix, prefix.as_str());
-                    }
-                    LayerMatch::PcommPrefix(prefix) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_PCOMM_PREFIX as i32;
-                        copy_into_cstr(&mut mt.pcomm_prefix, prefix.as_str());
-                    }
-                    LayerMatch::PcommPrefixExclude(prefix) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_PCOMM_PREFIX as i32;
-                        mt.exclude.write(true);
-                        copy_into_cstr(&mut mt.pcomm_prefix, prefix.as_str());
-                    }
-                    LayerMatch::NiceAbove(nice) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_NICE_ABOVE as i32;
-                        mt.nice = *nice;
-                    }
-                    LayerMatch::NiceBelow(nice) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_NICE_BELOW as i32;
-                        mt.nice = *nice;
-                    }
-                    LayerMatch::NiceEquals(nice) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_NICE_EQUALS as i32;
-                        mt.nice = *nice;
-                    }
-                    LayerMatch::UIDEquals(user_id) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_USER_ID_EQUALS as i32;
-                        mt.user_id = *user_id;
-                    }
-                    LayerMatch::GIDEquals(group_id) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_GROUP_ID_EQUALS as i32;
-                        mt.group_id = *group_id;
-                    }
-                    LayerMatch::PIDEquals(pid) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_PID_EQUALS as i32;
-                        mt.pid = *pid;
-                    }
-                    LayerMatch::PPIDEquals(ppid) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_PPID_EQUALS as i32;
-                        mt.ppid = *ppid;
-                    }
-                    LayerMatch::TGIDEquals(tgid) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_TGID_EQUALS as i32;
-                        mt.tgid = *tgid;
-                    }
-                    LayerMatch::NSPIDEquals(nsid, pid) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_NSPID_EQUALS as i32;
-                        mt.nsid = *nsid;
-                        mt.pid = *pid;
-                    }
-                    LayerMatch::NSEquals(nsid) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_NS_EQUALS as i32;
-                        mt.nsid = *nsid as u64;
-                    }
-                    LayerMatch::CmdJoin(joincmd) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_SCXCMD_JOIN as i32;
-                        copy_into_cstr(&mut mt.comm_prefix, joincmd);
-                    }
-                    LayerMatch::IsGroupLeader(polarity) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_IS_GROUP_LEADER as i32;
-                        mt.is_group_leader.write(*polarity);
-                    }
-                    LayerMatch::IsKthread(polarity) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_IS_KTHREAD as i32;
-                        mt.is_kthread.write(*polarity);
-                    }
-                    LayerMatch::UsedGpuTid(polarity) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_USED_GPU_TID as i32;
-                        mt.used_gpu_tid.write(*polarity);
-                    }
-                    LayerMatch::UsedGpuPid(polarity) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_USED_GPU_PID as i32;
-                        mt.used_gpu_pid.write(*polarity);
-                    }
-                    LayerMatch::AvgRuntime(min, max) => {
-                        mt.kind = bpf_intf::layer_match_kind_MATCH_AVG_RUNTIME as i32;
-                        mt.min_avg_runtime_us = *min;
-                        mt.max_avg_runtime_us = *max;
-                    }
-                }
+                Self::init_match(mt, and);
             }
             layer.matches[or_i].nr_match_ands = or.len() as i32;
         }
@@ -1424,6 +1430,43 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn traverse_sysfs(dir: &Path) -> Result<Vec<PathBuf>> {
+        let mut paths = vec![];
+
+        if !dir.is_dir() {
+            panic!("path {:?} does not correspond to directory", dir);
+        }
+
+        let direntries = fs::read_dir(dir)?;
+
+        for entry in direntries {
+            let path = entry?.path();
+            if path.is_dir() {
+                paths.append(&mut Self::traverse_sysfs(&path)?);
+            } else {
+                paths.push(path);
+            }
+        }
+
+        Ok(paths)
+    }
+
+    fn expand_template(rule: &LayerMatch) -> Result<Vec<LayerMatch>> {
+        match rule {
+            LayerMatch::CgroupSuffix(suffix) => {
+                Ok(Self::traverse_sysfs(Path::new("/sys/fs/cgroup"))?
+                    .into_iter()
+                    .map(|cgroup| {
+                        String::from(cgroup.to_str().expect("could not parse cgroup path"))
+                    })
+                    .filter(|cgroup| cgroup.ends_with(suffix))
+                    .map(|cgroup| LayerMatch::CgroupSuffix(cgroup))
+                    .collect())
+            }
+            _ => panic!("Unimplemented template enum {:?}", rule),
+        }
+    }
+
     fn init_layers(skel: &mut OpenBpfSkel, specs: &[LayerSpec], topo: &Topology) -> Result<()> {
         skel.maps.rodata_data.nr_layers = specs.len() as u32;
         let mut perf_set = false;
@@ -1436,20 +1479,40 @@ impl<'a> Scheduler<'a> {
             let mut layers = vec![];
 
             match &spec.template {
-                Some(_template) => {
-                    panic!("unimplemented")
+                Some(template) => {
+                    let matches = Self::expand_template(template)?;
+                    let layerarr = &mut skel.maps.bss_data.layers;
+
+                    if spec_i + matches.len() > bpf_intf::consts_MAX_LAYERS as usize {
+                        bail! {"Template rule causes layer overflow ({} layers created)", matches.len()};
+                    }
+
+                    for (rule, layer) in matches.iter().zip(&mut layerarr.iter_mut().skip(spec_i)) {
+                        Self::init_layer_single(&spec, &topo, layer)?;
+
+                        // Manually attach the extra rule to the layer.
+                        let ind = layer.nr_match_ors as usize;
+                        let mt = &mut layer.matches[ind].matches[0];
+                        Self::init_match(mt, &rule);
+
+                        layer.matches[ind].nr_match_ands = 1;
+                        layer.nr_match_ors += 1;
+
+                        layers.push(layer);
+                        spec_i += 1;
+                    }
                 }
                 None => {
                     let mut layer = &mut skel.maps.bss_data.layers[spec_i];
                     Self::init_layer_single(&spec, &topo, &mut layer)?;
-                    layers.push(layer)
+                    layers.push(layer);
+                    spec_i += 1;
                 }
             };
 
             for layer in layers {
                 layer_weights.push(layer.weight.try_into().unwrap());
                 perf_set |= layer.perf > 0;
-                spec_i += 1;
             }
         }
 
