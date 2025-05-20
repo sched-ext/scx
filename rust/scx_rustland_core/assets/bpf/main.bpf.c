@@ -872,7 +872,7 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 	 * Consume all tasks from the @dispatched list and immediately dispatch
 	 * them on the target CPU decided by the user-space scheduler.
 	 */
-	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, 0);
+	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, BPF_RB_NO_WAKEUP);
 
        /*
 	* Always dispatch the user-space scheduler every time that a CPU
