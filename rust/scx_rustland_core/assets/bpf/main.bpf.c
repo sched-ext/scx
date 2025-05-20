@@ -212,12 +212,6 @@ struct task_ctx {
 	 * Execution time (in nanoseconds) since the last sleep event.
 	 */
 	u64 exec_runtime;
-
-	/*
-	 * cpumask generation counter: used to verify the validity of the
-	 * current task's cpumask.
-	 */
-	u64 cpumask_cnt;
 };
 
 /* Map that contains task-local storage. */
@@ -555,7 +549,7 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 {
 	struct task_struct *p;
 	struct task_ctx *tctx;
-	u64 dsq_id, curr_cpumask_cnt;
+	u64 dsq_id;
 
 	/* Ignore entry if the task doesn't exist anymore */
 	p = bpf_task_from_pid(task->pid);
@@ -581,30 +575,26 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 		goto out_release;
 	}
 
-	/* Read current cpumask generation counter */
-	curr_cpumask_cnt = tctx->cpumask_cnt;
-
 	/* Check if the CPU is valid, according to the cpumask */
 	if (!bpf_cpumask_test_cpu(task->cpu, p->cpus_ptr)) {
-		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, task->slice_ns, task->vtime, task->flags);
+		s32 cpu = scx_bpf_task_cpu(p);
+
+		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
+					 task->slice_ns, task->vtime, task->flags);
 		__sync_fetch_and_add(&nr_bounce_dispatches, 1);
-		scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_IDLE);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		goto out_release;
 	}
 
 	/*
 	 * Dispatch a task to a specific per-CPU DSQ if the target CPU can be
-	 * used (according to the cpumask), otherwise redirect the task to the
-	 * shared DSQ.
+	 * used (according to the cpumask), otherwise cancel the dispatch.
 	 *
 	 * This can happen if the user-space scheduler dispatches the task to
-	 * an invalid CPU. In this case the redirection to the shared DSQ
-	 * allows to prevent potential stalls in the scheduler.
-	 *
-	 * If the cpumask is not valid anymore (determined by the cpumask_cnt
-	 * generation counter) we can simply cancel the dispatch event, since
-	 * the task will be re-enqueued by the core sched-ext code, potentially
-	 * selecting a different cpu and a different cpumask.
+	 * an invalid CPU. In this case cancelling the dispatch allows to
+	 * prevent potential stalls in the scheduler, since the task will
+	 * be re-enqueued by the core sched-ext code, potentially selecting
+	 * a different cpu and a different cpumask.
 	 */
 	dsq_id = cpu_to_dsq(task->cpu);
 
@@ -612,7 +602,7 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	scx_bpf_dsq_insert_vtime(p, dsq_id, task->slice_ns, task->vtime, task->flags);
 
 	/* If the cpumask is not valid anymore, ignore the dispatch event */
-	if (curr_cpumask_cnt != task->cpumask_cnt) {
+	if (!bpf_cpumask_test_cpu(task->cpu, p->cpus_ptr)) {
 		scx_bpf_dispatch_cancel();
 		__sync_fetch_and_add(&nr_cancel_dispatches, 1);
 		goto out_release;
@@ -710,7 +700,6 @@ static void get_task_info(struct queued_task_ctx *task,
 	task->exec_runtime = tctx ? tctx->exec_runtime : 0;
 	task->weight = p->scx.weight;
 	task->vtime = p->scx.dsq_vtime;
-	task->cpumask_cnt = tctx ? tctx->cpumask_cnt : 0;
 }
 
 /*
@@ -976,20 +965,6 @@ void BPF_STRUCT_OPS(rustland_stopping, struct task_struct *p, bool runnable)
 	 * Update the partial execution time since last sleep.
 	 */
 	tctx->exec_runtime += now - tctx->start_ts;
-}
-
-/*
- * Task @p changes cpumask: update its local cpumask generation counter.
- */
-void BPF_STRUCT_OPS(rustland_set_cpumask, struct task_struct *p,
-		    const struct cpumask *cpumask)
-{
-	struct task_ctx *tctx;
-
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-	tctx->cpumask_cnt++;
 }
 
 /*
@@ -1280,7 +1255,6 @@ SCX_OPS_DEFINE(rustland,
 	       .runnable		= (void *)rustland_runnable,
 	       .running			= (void *)rustland_running,
 	       .stopping		= (void *)rustland_stopping,
-	       .set_cpumask		= (void *)rustland_set_cpumask,
 	       .cpu_release		= (void *)rustland_cpu_release,
 	       .enable			= (void *)rustland_enable,
 	       .init_task		= (void *)rustland_init_task,

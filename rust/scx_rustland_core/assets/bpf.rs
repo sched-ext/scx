@@ -82,7 +82,6 @@ pub struct QueuedTask {
     pub exec_runtime: u64,     // Total cpu time since last sleep
     pub weight: u64,           // Task static priority
     pub vtime: u64,            // Current vruntime
-    cpumask_cnt: u64,          // cpumask generation counter (private)
 }
 
 // Task queued for dispatching to the BPF component (see bpf_intf::dispatched_task_ctx).
@@ -93,7 +92,6 @@ pub struct DispatchedTask {
     pub flags: u64,    // special dispatch flags
     pub slice_ns: u64, // time slice assigned to the task (0 = default)
     pub vtime: u64,    // task deadline / vruntime
-    cpumask_cnt: u64,  // cpumask generation counter (private)
 }
 
 impl DispatchedTask {
@@ -108,7 +106,6 @@ impl DispatchedTask {
             flags: task.flags,
             slice_ns: 0, // use default time slice
             vtime: 0,
-            cpumask_cnt: task.cpumask_cnt,
         }
     }
 }
@@ -147,7 +144,6 @@ impl EnqueuedMessage {
             exec_runtime: self.inner.exec_runtime,
             weight: self.inner.weight,
             vtime: self.inner.vtime,
-            cpumask_cnt: self.inner.cpumask_cnt,
         }
     }
 }
@@ -548,7 +544,6 @@ impl<'cb> BpfScheduler<'cb> {
             flags,
             slice_ns,
             vtime,
-            cpumask_cnt,
             ..
         } = &mut dispatched_task.as_mut();
 
@@ -557,7 +552,6 @@ impl<'cb> BpfScheduler<'cb> {
         *flags = task.flags;
         *slice_ns = task.slice_ns;
         *vtime = task.vtime;
-        *cpumask_cnt = task.cpumask_cnt;
 
         // Store the task in the user ring buffer.
         //
