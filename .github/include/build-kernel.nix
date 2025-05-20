@@ -29,7 +29,7 @@ let
     nativeBuildInputs = linuxPackages_latest.kernel.nativeBuildInputs;
 
     buildPhase = ''
-      ${virtme-ng}/bin/virtme-ng -v --kconfig --config ${./sched-ext.config}
+      ${virtme-ng}/bin/virtme-ng -v --kconfig --config ${../../kernel.config}
     '';
     installPhase = ''
       mv .config $out
