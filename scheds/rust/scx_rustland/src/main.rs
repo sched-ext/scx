@@ -79,6 +79,11 @@ struct Opts {
     #[clap(short = 'S', long, default_value = "1000")]
     slice_us_min: u64,
 
+    /// If set, per-CPU tasks are dispatched directly to their only eligible CPU.
+    /// This can help enforce affinity-based isolation for better performance.
+    #[clap(short = 'l', long, action = clap::ArgAction::SetTrue)]
+    percpu_local: bool,
+
     /// If specified, only tasks which have their scheduling policy set to SCHED_EXT using
     /// sched_setscheduler(2) are switched. Otherwise, all tasks are switched.
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
@@ -136,6 +141,7 @@ impl Ord for Task {
 // Main scheduler object
 struct Scheduler<'a> {
     bpf: BpfScheduler<'a>,                  // BPF connector
+    opts: &'a Opts,                         // scheduler options
     stats_server: StatsServer<(), Metrics>, // statistics
     tasks: BTreeSet<Task>,                  // tasks ordered by deadline
     min_vruntime: u64,                      // Keep track of the minimum vruntime across all tasks
@@ -145,7 +151,7 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
-    fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
+    fn init(opts: &'a Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         // Low-level BPF connector.
@@ -167,6 +173,7 @@ impl<'a> Scheduler<'a> {
         // Return scheduler object.
         Ok(Self {
             bpf,
+            opts,
             stats_server,
             tasks: BTreeSet::new(),
             min_vruntime: 0,
@@ -280,7 +287,16 @@ impl<'a> Scheduler<'a> {
             let cpu = self
                 .bpf
                 .select_cpu(task.qtask.pid, task.qtask.cpu, task.qtask.flags);
-            dispatched_task.cpu = if cpu >= 0 { cpu } else { RL_CPU_ANY };
+            dispatched_task.cpu = if cpu >= 0 {
+                // An idle CPU was found, dispatch the task there.
+                cpu
+            } else if self.opts.percpu_local && task.qtask.nr_cpus_allowed == 1 {
+                // Task is restricted to run on a single CPU, dispatch it to that one.
+                task.qtask.cpu
+            } else {
+                // No idle CPU found, dispatch to the first CPU available.
+                RL_CPU_ANY
+            };
 
             // Send task to the BPF dispatcher.
             if self.bpf.dispatch_task(&dispatched_task).is_err() {
