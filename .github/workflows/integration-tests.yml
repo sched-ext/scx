@@ -37,15 +37,12 @@ jobs:
             "scx_bpfland",
             "scx_chaos",
             "scx_lavd",
-            "scx_rlfifo",
-            "scx_rusty",
             "scx_p2dq",
+            "scx_rlfifo",
+            "scx_rustland",
+            "scx_rusty",
             "scx_tickless",
           ]]
-
-          # disable rustland on stable/ kernels, see https://github.com/sched-ext/scx/issues/1794 for more info
-          if not kernel.startswith("stable/"):
-            matrix.append({ "name": "scx_rustland", "flags": "" })
 
           for flags in itertools.product(
               ["--disable-topology=false", "--disable-topology=true"],
