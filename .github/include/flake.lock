@@ -58,7 +58,8 @@
       "inputs": {
         "flake-utils": "flake-utils",
         "nix-develop-gha": "nix-develop-gha",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "veristat-src": "veristat-src"
       }
     },
     "systems": {
@@ -73,6 +74,22 @@
       "original": {
         "owner": "nix-systems",
         "repo": "default",
+        "type": "github"
+      }
+    },
+    "veristat-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1736364478,
+        "narHash": "sha256-07awVCMrFFG69cGtucLYGT+mqcRZ9F9ZHvxARLLYpM0=",
+        "owner": "libbpf",
+        "repo": "veristat",
+        "rev": "3bf5cdf98b05faf53dca21492e69ffb4605c6d42",
+        "type": "github"
+      },
+      "original": {
+        "owner": "libbpf",
+        "repo": "veristat",
         "type": "github"
       }
     }

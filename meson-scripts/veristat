@@ -27,7 +27,7 @@ if [ -n "${SCHED}" ]; then
   if [ -n "${KERNEL}" ]; then
     timeout --preserve-status ${GUEST_TIMEOUT} \
       vng --user root -m 10G --cpu 8 -v --user root -r ${KERNEL} -- \
-        sudo veristat ${BPF_PATH} 2>&1 | tee veristat.ci.log
+        sudo $(which veristat) ${BPF_PATH} 2>&1 | tee veristat.ci.log
     exit $?
   else
     sudo veristat ${BPF_PATH} 2>&1 | tee veristat.ci.log
@@ -39,7 +39,7 @@ for BPF_PATH in $(find ${BUILD_DIR} -type f -name bpf.bpf.o); do
   if [ -n "${KERNEL}" ]; then
     timeout --preserve-status ${GUEST_TIMEOUT} \
       vng --user root -m 10G --cpu 8 $VNG_RW -v --user root -r ${KERNEL} -- \
-        sudo veristat ${BPF_PATH} 2>&1 | tee "$(basename "${BPF_PATH}")-veristat.ci.log"
+        sudo $(which veristat) ${BPF_PATH} 2>&1 | tee "$(basename "${BPF_PATH}")-veristat.ci.log"
   else
     echo "$BPF_PATH"
     sudo veristat ${BPF_PATH} 2>&1 | tee "$(basename "${BPF_PATH}")-veristat.ci.log"

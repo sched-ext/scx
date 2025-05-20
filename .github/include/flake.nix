@@ -12,9 +12,14 @@
 
     nix-develop-gha.url = "github:nicknovitski/nix-develop";
     nix-develop-gha.inputs.nixpkgs.follows = "nixpkgs";
+
+    veristat-src = {
+      url = "github:libbpf/veristat";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, nix-develop-gha, ... }:
+  outputs = { self, nixpkgs, flake-utils, nix-develop-gha, veristat-src, ... }:
     flake-utils.lib.eachSystem [ "x86_64-linux" ]
       (system:
         let
@@ -53,6 +58,11 @@
 
           packages = {
             nix-develop-gha = nix-develop-gha.packages."${system}".default;
+
+            veristat = pkgs.callPackage ./veristat.nix {
+              version = "git";
+              src = veristat-src;
+            };
 
             kernels = builtins.mapAttrs
               (name: details: (pkgs.callPackage ./build-kernel.nix {
