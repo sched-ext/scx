@@ -39,11 +39,11 @@ const volatile u64 chaos_timer_check_queues_min_ns = 500000;
 const volatile u64 chaos_timer_check_queues_max_ns = 2000000;
 const volatile u64 chaos_timer_check_queues_slack_ns = 2500000;
 
-const volatile u32 random_delays_freq_frac32 = 1; /* for veristat */
+const volatile u32 trait_delay_freq_frac32[CHAOS_TRAIT_MAX];
+
 const volatile u64 random_delays_min_ns = 1; /* for veristat */
 const volatile u64 random_delays_max_ns = 2; /* for veristat */
 
-const volatile u32 cpu_freq_frac32 = 1;
 const volatile u32 cpu_freq_min = 0;
 const volatile u32 cpu_freq_max = SCX_CPUPERF_ONE;
 
@@ -79,13 +79,16 @@ static __always_inline enum chaos_trait_kind choose_chaos(struct chaos_task_ctx 
 	if (taskc->match & CHAOS_MATCH_EXCLUDED)
 		return CHAOS_TRAIT_NONE;
 
-	if (bpf_get_prandom_u32() < random_delays_freq_frac32)
-		return CHAOS_TRAIT_RANDOM_DELAYS;
+	u32 roll = bpf_get_prandom_u32();
 
-	if (bpf_get_prandom_u32() < cpu_freq_frac32)
-		return CHAOS_TRAIT_CPU_FREQ;
+	#pragma unroll
+	for (int i = 0; i < CHAOS_TRAIT_MAX; ++i) {
+		if (roll <= trait_delay_freq_frac32[i])
+			return i;
+	}
 
-	return CHAOS_TRAIT_NONE;
+	scx_bpf_error("failed to select trait in choose_chaos");
+	return -1;
 }
 
 static __always_inline bool chaos_trait_skips_select_cpu(struct chaos_task_ctx *taskc)

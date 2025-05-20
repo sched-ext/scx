@@ -17,6 +17,7 @@ use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
 
+use anyhow::bail;
 use anyhow::Result;
 use libbpf_rs::OpenObject;
 use log::debug;
@@ -75,6 +76,22 @@ pub enum Trait {
         min_freq: u32,
         max_freq: u32,
     },
+}
+
+impl Trait {
+    pub fn kind(&self) -> u32 {
+        match self {
+            Self::RandomDelays { .. } => bpf_intf::chaos_trait_kind_CHAOS_TRAIT_RANDOM_DELAYS,
+            Self::CpuFreq { .. } => bpf_intf::chaos_trait_kind_CHAOS_TRAIT_CPU_FREQ,
+        }
+    }
+
+    pub fn frequency(&self) -> f64 {
+        match self {
+            Self::RandomDelays { frequency, .. } => *frequency,
+            Self::CpuFreq { frequency, .. } => *frequency,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -189,25 +206,53 @@ impl Builder<'_> {
             }
         };
 
+        // Set up the frequency array. The first element means nothing, so should be what's
+        // required to add up to 100%. The rest should be cumulative frequencies.
+        let freq_array = &mut open_skel.maps.rodata_data.trait_delay_freq_frac32;
+        freq_array.fill(0);
+        for tr in &self.traits {
+            let kind = tr.kind();
+            if freq_array[kind as usize] != 0 {
+                bail!("trait of kind {} specified multiple times!", kind);
+            }
+
+            let fixed_point = (tr.frequency() * 2_f64.powf(32_f64)) as u32;
+            freq_array[kind as usize] = fixed_point;
+        }
+        freq_array[bpf_intf::chaos_trait_kind_CHAOS_TRAIT_NONE as usize] =
+            u32::MAX - freq_array.iter().sum::<u32>();
+        for i in 1..freq_array.len() {
+            freq_array[i] = freq_array[i]
+                .checked_add(freq_array[i - 1])
+                .ok_or_else(|| {
+                    let err =
+                        concat!("frequencies overflowed! please ensure that frequencies sum to",
+                    " <=1. as these are floating point numbers, you may have to decrease by",
+                    " slightly more than you expect.");
+                    anyhow::anyhow!(err)
+                })?;
+        }
+
+        debug!(
+            "frequencies calculated as: {:?}",
+            open_skel.maps.rodata_data.trait_delay_freq_frac32
+        );
+
         for tr in &self.traits {
             match tr {
                 Trait::RandomDelays {
-                    frequency,
+                    frequency: _,
                     min_us,
                     max_us,
                 } => {
-                    open_skel.maps.rodata_data.random_delays_freq_frac32 =
-                        (frequency * 2_f64.powf(32_f64)) as u32;
                     open_skel.maps.rodata_data.random_delays_min_ns = min_us * 1000;
                     open_skel.maps.rodata_data.random_delays_max_ns = max_us * 1000;
                 }
                 Trait::CpuFreq {
-                    frequency,
+                    frequency: _,
                     min_freq,
                     max_freq,
                 } => {
-                    open_skel.maps.rodata_data.cpu_freq_frac32 =
-                        (frequency * 2_f64.powf(32_f64)) as u32;
                     open_skel.maps.rodata_data.cpu_freq_min = *min_freq;
                     open_skel.maps.rodata_data.cpu_freq_max = *max_freq;
                     // Don't let p2dq control frequency
