@@ -1856,27 +1856,20 @@ bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
 	return false;
 }
 
-void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
+int sib_keep_idle(s32 cpu, struct task_struct *prev __arg_trusted)
 {
 	struct task_ctx *prev_taskc = NULL;
-	struct layer *prev_layer;
+	struct layer *prev_layer = NULL;
 	struct cpu_ctx *cpuc;
-	struct llc_ctx *llcc;
-	bool tried_preempting = false, tried_lo_fb = false;
-	u32 nr_ogp_layers = nr_op_layers + nr_gp_layers;
-	u32 nr_ogn_layers = nr_on_layers + nr_gn_layers;
 
 	if (!(cpuc = lookup_cpu_ctx(-1)))
-		return;
-
-	if (antistall_consume(cpuc))
-		return;
+		return 1;
 
 	/* !NULL prev_taskc indicates runnable prev */
 	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
 		if (!(prev_taskc = lookup_task_ctx(prev)) ||
 		    !(prev_layer = lookup_layer(prev_taskc->layer_id)))
-			return;
+			return 1;
 	}
 
 	/*
@@ -1890,9 +1883,31 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 		if ((sib = sibling_cpu(cpu)) >= 0 && (sib_cpuc = lookup_cpu_ctx(sib)) &&
 		    (sib_cpuc->current_excl || sib_cpuc->next_excl)) {
 			gstat_inc(GSTAT_EXCL_IDLE, cpuc);
-			return;
+			return 1;
 		}
 	}
+	
+	return 0;
+}
+
+void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
+{
+	struct task_ctx *prev_taskc = NULL;
+	struct layer *prev_layer = NULL;
+	struct cpu_ctx *cpuc;
+	struct llc_ctx *llcc;
+	bool tried_preempting = false, tried_lo_fb = false;
+	u32 nr_ogp_layers = nr_op_layers + nr_gp_layers;
+	u32 nr_ogn_layers = nr_on_layers + nr_gn_layers;
+
+	if (!(cpuc = lookup_cpu_ctx(-1)))
+		return;
+
+	if (antistall_consume(cpuc))
+		return;
+	
+	if (sib_keep_idle(cpu, prev))
+		return;
 
 	/*
 	 * if @prev was on SCX and is still runnable, we are here because @prev
@@ -2044,7 +2059,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (!tried_lo_fb && scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id))
 		return;
 
-	if (prev_taskc)
+	if (prev_taskc && prev_layer)
 		prev->scx.slice = prev_layer->slice_ns;
 }
 
