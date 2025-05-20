@@ -283,19 +283,15 @@ static struct llc_ctx *rand_llc_ctx(void)
 	return lookup_llc_ctx(bpf_get_prandom_u32() % nr_llcs);
 }
 
-static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p)
+static bool keep_running(struct cpu_ctx *cpuc, struct llc_ctx *llcx, struct task_struct *p)
 {
-	struct llc_ctx *llcx;
 	int i;
 
-	// Only tasks in the least non interactive DSQ can keep running
+	// Only tasks in the most interactive DSQs can keep running.
 	if (!keep_running_enabled ||
-	    cpuc->dsq_index != nr_dsqs_per_llc - 1 ||
+	    cpuc->dsq_index == nr_dsqs_per_llc - 1 ||
 	    p->scx.flags & SCX_TASK_QUEUED ||
 	    cpuc->ran_for >= max_exec_ns)
-		return false;
-
-	if (!(llcx = lookup_llc_ctx(cpuc->llc_id)))
 		return false;
 
 	int nr_queued = 0;
@@ -857,8 +853,8 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 	s32 task_cpu = scx_bpf_task_cpu(p);
 
 	if (!(taskc = lookup_task_ctx(p)) ||
-	   !(cpuc = lookup_cpu_ctx(task_cpu)) ||
-	   !(llcx = lookup_llc_ctx(cpuc->llc_id)))
+	    !(cpuc = lookup_cpu_ctx(task_cpu)) ||
+	    !(llcx = lookup_llc_ctx(cpuc->llc_id)))
 		return -EINVAL;
 
 	if (taskc->llc_id != cpuc->llc_id) {
@@ -1064,9 +1060,6 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 	    !(llcx = lookup_llc_ctx(cpuc->llc_id)))
 		return;
 
-	if (prev && keep_running(cpuc, prev))
-		return;
-
 	if (nr_dsqs_per_llc > MAX_DSQS_PER_LLC) {
 		scx_bpf_error("can't happen");
 		return;
@@ -1094,6 +1087,9 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		    scx_bpf_dsq_move_to_local(cpuc->dsqs[i]))
 		    return;
 	}
+
+	if (prev && keep_running(cpuc, llcx, prev))
+		return;
 
 	dispatch_pick_two(cpu, llcx, cpuc);
 }
