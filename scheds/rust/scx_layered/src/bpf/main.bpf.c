@@ -1856,20 +1856,16 @@ bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
 	return false;
 }
 
-int sib_keep_idle(s32 cpu, struct task_struct *prev __arg_trusted)
+bool sib_keep_idle(s32 cpu, struct task_struct *prev __arg_trusted, struct cpu_ctx *cpuc)
 {
 	struct task_ctx *prev_taskc = NULL;
 	struct layer *prev_layer = NULL;
-	struct cpu_ctx *cpuc;
-
-	if (!(cpuc = lookup_cpu_ctx(-1)))
-		return 1;
 
 	/* !NULL prev_taskc indicates runnable prev */
 	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
 		if (!(prev_taskc = lookup_task_ctx(prev)) ||
 		    !(prev_layer = lookup_layer(prev_taskc->layer_id)))
-			return 1;
+			return false;
 	}
 
 	/*
@@ -1883,11 +1879,11 @@ int sib_keep_idle(s32 cpu, struct task_struct *prev __arg_trusted)
 		if ((sib = sibling_cpu(cpu)) >= 0 && (sib_cpuc = lookup_cpu_ctx(sib)) &&
 		    (sib_cpuc->current_excl || sib_cpuc->next_excl)) {
 			gstat_inc(GSTAT_EXCL_IDLE, cpuc);
-			return 1;
+			return false;
 		}
 	}
 	
-	return 0;
+	return true;
 }
 
 void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
@@ -1906,7 +1902,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (antistall_consume(cpuc))
 		return;
 	
-	if (prev && sib_keep_idle(cpu, prev))
+	if (prev && !sib_keep_idle(cpu, prev, cpuc))
 		return;
 
 	/*
