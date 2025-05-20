@@ -647,7 +647,7 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        self.struct_ops.take();
+        let _ = self.struct_ops.take();
         uei_report!(&self.skel, uei)
     }
 }
