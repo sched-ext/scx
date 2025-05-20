@@ -30,6 +30,7 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use clap_num::number_range;
 use crossbeam::channel;
 use crossbeam::channel::Receiver;
 use crossbeam::channel::RecvTimeoutError;
@@ -117,6 +118,13 @@ struct Opts {
     /// Minimum scheduling slice duration in microseconds.
     #[clap(long = "slice-min-us", default_value = "500")]
     slice_min_us: u64,
+
+    /// Limit the ratio of preemption to the roughly top P% of latency-critical
+    /// tasks. When N is given as an argument, P is 0.5^N * 100. The default
+    /// value is 6, which limits the preemption for the top 1.56% of
+    /// latency-critical tasks.
+    #[clap(long = "preempt-shift", default_value = "6", value_parser=Opts::preempt_shift_range)]
+    preempt_shift: u8,
 
     /// List of CPUs in preferred order (e.g., "0-3,7,6,5,4"). The scheduler
     /// uses the CPU preference mode only when the core compaction is enabled
@@ -272,6 +280,10 @@ impl Opts {
         }
 
         Some(self)
+    }
+
+    fn preempt_shift_range(s: &str) -> Result<u8, String> {
+        number_range(s, 0, 10)
     }
 }
 
@@ -734,6 +746,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.verbose = opts.verbose;
         skel.maps.rodata_data.slice_max_ns = opts.slice_max_us * 1000;
         skel.maps.rodata_data.slice_min_ns = opts.slice_min_us * 1000;
+        skel.maps.rodata_data.preempt_shift = opts.preempt_shift;
 
         skel.struct_ops.lavd_ops_mut().flags = *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP
             | *compat::SCX_OPS_ENQ_EXITING

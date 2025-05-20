@@ -41,7 +41,6 @@ enum consts_internal  {
 	LAVD_LC_RUNTIME_MAX		= LAVD_TIME_ONE_SEC,
 	LAVD_LC_WEIGHT_BOOST		= 128, /* 2^7 */
 	LAVD_LC_GREEDY_PENALTY		= p2s(20),  /* 20% */
-	LAVD_LC_PREEMPT_SHIFT		= 6, /* roughly top 1.56% for preemption. */
 
 	LAVD_CPU_UTIL_MAX_FOR_CPUPERF	= p2s(85), /* 85.0% */
 

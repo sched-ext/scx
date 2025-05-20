@@ -218,10 +218,12 @@ static void ask_cpu_yield(struct cpu_ctx *victim_cpuc)
 		 * (SCX_SLICE_DFL, 20 msec).
 		 */
 		u64 old = victim_cpuc->stopping_tm_est_ns;
-		bool ret = __sync_bool_compare_and_swap(
+		if (old) {
+			bool ret = __sync_bool_compare_and_swap(
 				&victim_cpuc->stopping_tm_est_ns, old, 0);
-		if (ret)
-			WRITE_ONCE(victim_p->scx.slice, 1);
+			if (ret)
+				WRITE_ONCE(victim_p->scx.slice, 1);
+		}
 	}
 }
 
