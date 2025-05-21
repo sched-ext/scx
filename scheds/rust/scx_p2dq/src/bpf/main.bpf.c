@@ -114,6 +114,11 @@ static __always_inline u64 dsq_time_slice(int dsq_index)
 	return dsq_time_slices[dsq_index];
 }
 
+static __always_inline u64 max_dsq_time_slice(void)
+{
+	return dsq_time_slices[nr_dsqs_per_llc - 1];
+}
+
 static __always_inline u64 task_slice_ns(struct task_struct *p, int dsq_index)
 {
 	return p->scx.weight * dsq_time_slice(dsq_index) / 100;
@@ -280,6 +285,32 @@ static bool can_pick2(task_ctx *taskc)
 		return false;
 
 	return true;
+}
+
+/*
+ * Updates a tasks vtime based on the newly assigned cpu_ctx and returns the
+ * updated vtime.
+ */
+static __always_inline void update_vtime(struct task_struct *p,
+					 struct cpu_ctx *cpuc,
+					 task_ctx *taskc,
+					 u64 vtime_now)
+{
+	/*
+	 * If in the same LLC we only need to clamp the vtime to ensure no task
+	 * accumulates too much vtime.
+	 */
+	if (taskc->llc_id == cpuc->llc_id) {
+		u64 max_slice = max_dsq_time_slice();
+		u64 vtime_min = vtime_now - max_slice;
+
+		p->scx.dsq_vtime = max(p->scx.dsq_vtime, vtime_min);
+		return;
+	}
+
+	p->scx.dsq_vtime = vtime_now;
+
+	return;
 }
 
 /*
@@ -742,59 +773,25 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 					       struct task_struct *p,
 					       u64 enq_flags)
 {
-	struct llc_ctx *llcx, *prev_llcx;
-	struct cpu_ctx *cpuc, *task_cpuc;
+	struct cpu_ctx *cpuc;
+	struct llc_ctx *llcx;
 	task_ctx *taskc;
+	s32 cpu;
 
-	s32 cpu, task_cpu = scx_bpf_task_cpu(p);
-
-	if (!(cpuc = lookup_cpu_ctx(-1)) ||
-	    !(taskc = lookup_task_ctx(p)) ||
-	    !(llcx = lookup_llc_ctx(cpuc->llc_id))) {
+	/*
+	 * Per-cpu kthreads are considered interactive and dispatched directly
+	 * into the local DSQ.
+	 */
+	if ((p->flags & PF_KTHREAD) && p->cpus_ptr == &p->cpus_mask && p->nr_cpus_allowed == nr_cpus &&
+	    kthreads_local) {
+		stat_inc(P2DQ_STAT_DIRECT);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, dsq_time_slices[0], enq_flags);
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
 
-	u64 vtime_now = llcx->vtime;
-	taskc->slice_ns = task_slice_ns(p, taskc->dsq_index);
-
-	// If the task in in another LLC need to update vtime.
-	if (taskc->llc_id != cpuc->llc_id) {
-		if (!(task_cpuc = lookup_cpu_ctx(task_cpu)) ||
-		    !(prev_llcx = lookup_llc_ctx(task_cpuc->llc_id))) {
-			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
-			return;
-		}
-
-		u64 vtime_delta = p->scx.dsq_vtime - prev_llcx->vtime;
-		p->scx.dsq_vtime = vtime_now + vtime_delta;
-		trace("vtime change %llu, new vtime %llu",
-		      vtime_delta, p->scx.dsq_vtime);
-	}
-
-	u64 vtime = p->scx.dsq_vtime;
-
-	/*
-	 * Limit the amount of budget that an idling task can accumulate to the
-	 * max possible slice.
-	 */
-	if (time_before(vtime, vtime_now - dsq_time_slice(nr_dsqs_per_llc - 1)))
-		vtime = vtime_now - taskc->slice_ns;
-
-	p->scx.dsq_vtime = vtime;
-
-	/*
-	 * Push per-cpu kthreads at the head of local dsq's and preempt the
-	 * corresponding CPU. This ensures that e.g. ksoftirqd isn't blocked
-	 * behind other threads which is necessary for forward progress
-	 * guarantee as we depend on the BPF timer which may run from ksoftirqd.
-	 */
-	if ((p->flags & PF_KTHREAD) && !taskc->all_cpus &&
-	    kthreads_local) {
-		stat_inc(P2DQ_STAT_DIRECT);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, taskc->slice_ns,
-				   enq_flags | SCX_ENQ_PREEMPT);
-
+	if(!(taskc = lookup_task_ctx(p))) {
+		scx_bpf_error("invalid lookup");
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
@@ -804,21 +801,33 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	    !taskc->all_cpus) {
 		bool is_idle = false;
 		cpu = pick_idle_cpu(p, taskc, taskc->cpu, 0, &is_idle);
-		cpuc = lookup_cpu_ctx(cpu);
-		if (cpuc && taskc->dsq_index >= 0 && taskc->dsq_index < nr_dsqs_per_llc) {
-			taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
-			scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, taskc->slice_ns, p->scx.dsq_vtime, enq_flags);
-			if (is_idle) {
-				stat_inc(P2DQ_STAT_IDLE);
-				scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-			}
-
+		if (!(cpuc = lookup_cpu_ctx(cpu)) ||
+		     !(llcx = lookup_llc_ctx(cpuc->llc_id))) {
+			scx_bpf_error("invalid lookup");
 			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 			return;
 		}
+
+		taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
+		update_vtime(p, cpuc, taskc, llcx->vtime);
+		scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, taskc->slice_ns, p->scx.dsq_vtime, enq_flags);
+		if (is_idle) {
+			stat_inc(P2DQ_STAT_IDLE);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		}
+		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
+		return;
+	}
+
+	if (!(cpuc = lookup_cpu_ctx(scx_bpf_task_cpu(p))) ||
+	    !(llcx = lookup_llc_ctx(cpuc->llc_id))) {
+		scx_bpf_error("invalid lookup");
+		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
+		return;
 	}
 
 	taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
+	update_vtime(p, cpuc, taskc, llcx->vtime);
 
 	if (interactive_fifo && taskc->dsq_index == 0) {
 		ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
@@ -832,7 +841,6 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		ret->vtime.slice_ns = taskc->slice_ns;
 		ret->vtime.vtime = p->scx.dsq_vtime;
 	}
-
 }
 
 static __always_inline void complete_p2dq_enqueue(struct enqueue_promise *pro,
@@ -961,6 +969,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	} else {
 		stat_inc(P2DQ_STAT_DSQ_SAME);
 	}
+	taskc->slice_ns = task_slice_ns(p, taskc->dsq_index);
 }
 
 static __always_inline int dispatch_cpu(u64 dsq_id, s32 cpu, struct llc_ctx *llcx, int dsq_index)
