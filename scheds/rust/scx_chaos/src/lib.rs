@@ -13,6 +13,7 @@ use scx_p2dq::SchedulerOpts as P2dqOpts;
 use scx_userspace_arena::alloc::Allocator;
 use scx_userspace_arena::alloc::HeapAllocator;
 use scx_utils::build_id;
+use scx_utils::compat;
 use scx_utils::compat::tracefs_mount;
 use scx_utils::init_libbpf_logging;
 use scx_utils::scx_ops_attach;
@@ -420,6 +421,10 @@ impl Builder<'_> {
         // TODO: figure out how to abstract waking a CPU in enqueue properly, but for now disable
         // this codepath
         rodata.p2dq_config.select_idle_in_enqueue = MaybeUninit::new(false);
+
+        if self.p2dq_opts.queued_wakeup {
+            open_skel.struct_ops.chaos_mut().flags |= *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP;
+        }
 
         match self.requires_ppid {
             None => {
