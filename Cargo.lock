@@ -1597,13 +1597,23 @@ dependencies = [
  "anyhow",
  "cargo_metadata 0.15.4",
  "clap",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "memmap2",
  "regex",
  "semver",
  "serde",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "libbpf-rs"
+version = "0.25.0-beta.1"
+dependencies = [
+ "bitflags 2.6.0",
+ "libbpf-sys",
+ "libc",
+ "vsprintf",
 ]
 
 [[package]]
@@ -1619,21 +1629,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "libbpf-rs"
+version = "0.25.0-beta.1"
+source = "git+https://github.com/arighi/libbpf-rs?branch=consume-raw-n#a1c39ff26ffbd7a1a0e2db47576ec1a17cb70c9d"
+dependencies = [
+ "bitflags 2.6.0",
+ "libbpf-sys",
+ "libc",
+ "vsprintf",
+]
+
+[[package]]
 name = "libbpf-sys"
-version = "1.4.6+v1.4.7"
+version = "1.5.1+v1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f30caf02dfece12c94e2835cab8daf7b52e5c62c1675f334f1dac24be5bd5f82"
+checksum = "912fae30b08bcbdb861d4b85bd09c05352c0ac9d7b93765ced5ca23709e7e590"
 dependencies = [
  "cc",
- "nix 0.29.0",
+ "nix 0.30.1",
  "pkg-config",
 ]
 
 [[package]]
 name = "libc"
-version = "0.2.169"
+version = "0.2.172"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5aba8db14291edd000dfcc4d620c7ebfb122c613afb886ca8803fa4e128a20a"
+checksum = "d750af042f7ef4f724306de029d18836c26c1765a54a6a3f094cbd23a7267ffa"
 
 [[package]]
 name = "libloading"
@@ -1821,6 +1842,18 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset 0.9.1",
+]
+
+[[package]]
+name = "nix"
+version = "0.30.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+dependencies = [
+ "bitflags 2.6.0",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
 ]
 
 [[package]]
@@ -2567,7 +2600,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1",
  "log",
  "scx_stats",
  "scx_stats_derive",
@@ -2583,7 +2616,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc",
  "log",
  "nix 0.29.0",
@@ -2601,7 +2634,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "log",
  "scx_stats",
  "scx_stats_derive",
@@ -2624,7 +2657,7 @@ dependencies = [
  "gpoint",
  "hex",
  "itertools",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc",
  "log",
  "ordered-float",
@@ -2650,7 +2683,7 @@ dependencies = [
  "fastrand",
  "fb_procfs",
  "lazy_static",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc",
  "log",
  "once_cell",
@@ -2694,7 +2727,7 @@ dependencies = [
  "fb_procfs",
  "itertools",
  "lazy_static",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc",
  "log",
  "maplit",
@@ -2715,7 +2748,7 @@ dependencies = [
  "ctrlc",
  "fb_procfs",
  "lazy_static",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc",
  "log",
  "ordered-float",
@@ -2734,7 +2767,7 @@ version = "1.0.12"
 dependencies = [
  "anyhow",
  "ctrlc",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1 (git+https://github.com/arighi/libbpf-rs?branch=consume-raw-n)",
  "libc",
  "plain",
  "scx_rustland_core",
@@ -2749,7 +2782,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "fb_procfs",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1 (git+https://github.com/arighi/libbpf-rs?branch=consume-raw-n)",
  "libc",
  "log",
  "ordered-float",
@@ -2767,7 +2800,7 @@ name = "scx_rustland_core"
 version = "2.3.1"
 dependencies = [
  "anyhow",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1 (git+https://github.com/arighi/libbpf-rs?branch=consume-raw-n)",
  "libc",
  "plain",
  "scx_utils",
@@ -2786,7 +2819,7 @@ dependencies = [
  "crossbeam",
  "ctrlc",
  "fb_procfs",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc",
  "log",
  "ordered-float",
@@ -2836,7 +2869,7 @@ dependencies = [
  "clap",
  "crossbeam",
  "ctrlc",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "log",
  "scx_stats",
  "scx_stats_derive",
@@ -2851,7 +2884,7 @@ version = "1.0.12"
 dependencies = [
  "anyhow",
  "buddy_system_allocator",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "scx_utils",
 ]
 
@@ -2866,7 +2899,7 @@ dependencies = [
  "hex",
  "lazy_static",
  "libbpf-cargo",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libbpf-sys",
  "libc",
  "log",
@@ -2910,7 +2943,7 @@ dependencies = [
  "hashbrown 0.15.2",
  "json5",
  "lazy_static",
- "libbpf-rs",
+ "libbpf-rs 0.25.0-beta.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc",
  "log",
  "log-panics",
