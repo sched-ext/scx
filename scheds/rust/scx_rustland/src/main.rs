@@ -25,12 +25,11 @@ use libbpf_rs::OpenObject;
 use log::info;
 use log::warn;
 use scx_stats::prelude::*;
+use scx_utils::build_id;
 use scx_utils::UserExitInfo;
 use stats::Metrics;
 
 const SCHEDULER_NAME: &'static str = "RustLand";
-
-const VERSION: &'static str = env!("CARGO_PKG_VERSION");
 
 /// scx_rustland: user-space scheduler written in Rust
 ///
@@ -164,7 +163,12 @@ impl<'a> Scheduler<'a> {
             true, // Enable built-in idle CPU selection policy
         )?;
 
-        info!("{} scheduler attached", SCHEDULER_NAME);
+        info!(
+            "{} version {} - scx_rustland_core {}",
+            SCHEDULER_NAME,
+            build_id::full_version(env!("CARGO_PKG_VERSION")),
+            scx_rustland_core::VERSION
+        );
 
         // Return scheduler object.
         Ok(Self {
@@ -400,7 +404,7 @@ fn main() -> Result<()> {
         println!(
             "{} version {} - scx_rustland_core {}",
             SCHEDULER_NAME,
-            VERSION,
+            build_id::full_version(env!("CARGO_PKG_VERSION")),
             scx_rustland_core::VERSION
         );
         return Ok(());
