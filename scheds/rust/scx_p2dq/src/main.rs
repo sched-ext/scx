@@ -88,6 +88,7 @@ struct CliOpts {
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     struct_ops: Option<libbpf_rs::Link>,
+    verbose: u8,
 
     stats_server: StatsServer<(), Metrics>,
 }
@@ -124,6 +125,7 @@ impl<'a> Scheduler<'a> {
         Ok(Self {
             skel,
             struct_ops: None,
+            verbose,
             stats_server,
         })
     }
@@ -284,6 +286,10 @@ impl<'a> Scheduler<'a> {
         self.setup_topology()?;
 
         self.struct_ops = Some(scx_ops_attach!(self.skel, p2dq)?);
+
+        if self.verbose > 1 {
+            self.print_topology()?;
+        }
 
         info!("P2DQ scheduler started! Run `scx_p2dq --monitor` for metrics.");
 
