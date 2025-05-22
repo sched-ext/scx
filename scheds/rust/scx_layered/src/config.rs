@@ -22,6 +22,7 @@ pub struct LayerConfig {
 pub struct LayerSpec {
     pub name: String,
     pub comment: Option<String>,
+    pub template: Option<LayerMatch>,
     pub matches: Vec<Vec<LayerMatch>>,
     pub kind: LayerKind,
 }
