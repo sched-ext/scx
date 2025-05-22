@@ -14,14 +14,14 @@ runs:
         nix_path: nixpkgs=channel:nixos-unstable
 
     - name: Load dependencies
-      if: ${{ runner.environment != 'github-hosted' }}
+      if: ${{ runner.environment == 'self-hosted' }}
       run: |
-        nix run ./.github/include#nix-develop-gha -- ./.github/include#common
+        nix run ./.github/include#nix-develop-gha -- ./.github/include#gha-common
       shell: bash
 
     - uses: cachix/cachix-action@v14
       name: Configure Cachix (self-hosted)
-      if: ${{ runner.environment != 'github-hosted' }}
+      if: ${{ runner.environment == 'self-hosted' }}
       with:
         name: sched-ext
         authToken: '${{ inputs.cachix-auth-token }}'
@@ -30,7 +30,7 @@ runs:
 
     - uses: cachix/cachix-action@v14
       name: Configure Cachix (github-hosted)
-      if: ${{ runner.environment == 'github-hosted' }}
+      if: ${{ runner.environment != 'self-hosted' }}
       with:
         name: sched-ext
         authToken: '${{ inputs.cachix-auth-token }}'

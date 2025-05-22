@@ -130,13 +130,15 @@ repo](https://mesonbuild.com/Quick-guide.html#installation-from-source) and call
 
 The kernel has to be built with the following configuration:
 - `CONFIG_BPF=y`
-- `CONFIG_BPF_EVENTS=y`
-- `CONFIG_BPF_JIT=y`
 - `CONFIG_BPF_SYSCALL=y`
+- `CONFIG_BPF_JIT=y`
 - `CONFIG_DEBUG_INFO_BTF=y`
-- `CONFIG_FTRACE=y`
+- `CONFIG_BPF_JIT_ALWAYS_ON=y`
+- `CONFIG_BPF_JIT_DEFAULT_ON=y`
 - `CONFIG_SCHED_CLASS_EXT=y`
 
+The [`scx/kernel.config`](./kernel.config) file includes all required and other recommended options for using `sched_ext`.
+You can append its contents to your kernel `.config` file to enable the necessary features.
 
 ### Setting Up and Building
 
@@ -146,7 +148,7 @@ commands in the root of the tree builds and installs all schedulers under
 
 #### Static linking against libbpf (preferred)
 
- ```
+```shell
 $ cd $SCX
 $ meson setup build --prefix ~
 $ meson compile -C build
@@ -159,13 +161,13 @@ Make sure you have dependencies installed that allow you to compile from source!
 
 ##### Ubuntu/Debian
 
-```
+```shell
 apt install build-essential libssl-dev llvm lld libelf-dev meson cargo rustc clang llvm cmake pkg-config protobuf-compiler
 ```
 
 ##### Arch Linux
 
-```
+```shell
 pacman -S base-devel
 ```
 
@@ -173,7 +175,7 @@ pacman -S base-devel
 Note, depending on your system configuration `libbpf_a` and `libbpf_h` may be
 in different directories. The system libbpf version needs to match the minimum
 libbpf version for scx.
- ```
+```shell
 $ cd $SCX
 $ meson setup build --prefix ~ -D libbpf_a=/usr/lib64/libbpf.a -D libbpf_h=/usr/include/bpf/
 $ meson compile -C build
@@ -181,7 +183,7 @@ $ meson install -C build
 ```
 
 #### Dynamic linking against libbpf
-```
+```shell
 $ cd $SCX
 $ meson setup build --prefix ~ -D libbpf_a=disabled
 $ meson compile -C build
@@ -190,11 +192,11 @@ $ meson install -C build
 
 #### Using a different bpftool
 This will check the system for an installed bpftool
-```
+```shell
 $ meson setup build --prefix ~ -D bpftool=disabled
 ```
 Using a custom built bpftool
-```
+```shell
 $ meson setup build --prefix ~ -D bpftool=/path/to/bpftool
 ```
 
@@ -207,7 +209,7 @@ options can be specified at `setup` time but can also be changed afterwards
 and `meson` will do the right thing. To switch to release builds, run the
 following in the build directory and then compile and install again.
 
-```
+```shell
 $ meson configure -Dbuildtype=release
 ```
 
@@ -225,7 +227,7 @@ want to build the simple example scheduler
 `scheds/c/scx_simple` and the Rust userspace scheduler
 `scheds/rust/scx_rusty`:
 
-```
+```shell
 $ cd $SCX
 $ meson setup build -Dbuildtype=release
 $ meson compile -C build scx_simple scx_rusty
@@ -238,7 +240,7 @@ directly - `$ CC=clang meson setup build -Dbuildtype=release`.
 
 You can also specify `-v` if you want to see the commands being used:
 
-```
+```shell
 $ meson compile -C build -v scx_pair
 ```
 
@@ -272,7 +274,7 @@ kernel tree located at `$KERNEL`. We need to build `bpftool` in the kernel
 tree first, set up SCX build with the related options and then build &
 install.
 
-```
+```shell
 $ cd $KERNEL
 $ make -C tools/bpf/bpftool
 $ cd $SCX
@@ -299,7 +301,7 @@ option are provided for such cases.
 
 The following downloads all Rust dependencies into `$HOME/cargo-deps`.
 
-```
+```shell
 $ cd $SCX
 $ meson setup build -Dcargo_home=$HOME/cargo-deps
 $ meson compile -C build fetch
@@ -310,7 +312,7 @@ The following builds the schedulers without accessing the internet. The
 that the `cargo_home` option points to a directory which contains the
 content generated from the previous step.
 
-```
+```shell
 $ cd $SCX
 $ meson setup build -Dcargo_home=$HOME/cargo-deps -Doffline=true -Dbuildtype=release
 $ meson compile -C build
@@ -329,7 +331,7 @@ documentation for details.
 
 For example, the following builds and runs the `scx_rusty` scheduler:
 
-```
+```shell
 $ cd $SCX/scheds/rust/scx_rusty
 $ cargo build --release
 $ cargo run --release
@@ -342,7 +344,7 @@ Note that Rust userspace schedulers are published on `crates.io` and can be
 built and installed without cloning this repository as long as the necessary
 toolchains are available. Simply run:
 
-```
+```shell
 $ cargo install --locked scx_rusty
 ```
 
@@ -355,13 +357,13 @@ Below are examples of how to do this.
 
 - To check the scheduler statistics, use the
 
-```
+```shell
 scx_SCHEDNAME --monitor $INTERVAL
 ```
 
 for example 0.5 - this will print the output every half a second
 
-```
+```shell
 scx_bpfland --monitor 0.5
 ```
 Some schedulers may implement different or multiple monitoring options. Refer to --help of each scheduler for details.
@@ -371,8 +373,8 @@ Most schedulers also accept ` --stats $INTERVAL` to print the statistics directl
 
 - scx_bpfland
 
-```
-❯ scx_bpfland --monitor 5
+```shell
+$ scx_bpfland --monitor 5
 [scx_bpfland] tasks -> run:  3/4  int: 2  wait: 3    | nvcsw: 3    | dispatch -> dir: 0     prio: 73    shr: 9
 [scx_bpfland] tasks -> run:  4/4  int: 2  wait: 2    | nvcsw: 3    | dispatch -> dir: 1     prio: 3498  shr: 1385
 [scx_bpfland] tasks -> run:  4/4  int: 2  wait: 2    | nvcsw: 3    | dispatch -> dir: 1     prio: 2492  shr: 1311
@@ -381,8 +383,8 @@ Most schedulers also accept ` --stats $INTERVAL` to print the statistics directl
 
 - scx_rusty
 
-```
-❯ scx_rusty --monitor 5
+```shell
+$ scx_rusty --monitor 5
 ###### Thu, 29 Aug 2024 14:42:37 +0200, load balance @  -265.1ms ######
 cpu=   0.00 load=    0.17 mig=0 task_err=0 lb_data_err=0 time_used= 0.0ms
 tot=     15 sync_prev_idle= 0.00 wsync= 0.00
@@ -400,8 +402,8 @@ direct_greedy_cpus=f
 
 - scx_lavd
 
-```
-❯ scx_lavd --monitor 5
+```shell
+$ scx_lavd --monitor 5
 |       12 |      1292 |         3 |         1 |      8510 |   37.6028 |   2.42068 |  99.1304 |      100 |  62.8907 |      100 |      100 |  62.8907 | performance |          100 |            0 |            0 |
 |       13 |      2208 |         3 |         1 |      6142 |   33.3442 |   2.39336 |  98.7626 |      100 |  60.2084 |      100 |      100 |  60.2084 | performance |          100 |            0 |            0 |
 |       14 |       941 |         3 |         1 |      5223 |    31.323 |     1.704 |   99.215 |  100.019 |  59.1614 |      100 |  100.019 |  59.1614 | performance |          100 |            0 |            0 |
@@ -409,8 +411,8 @@ direct_greedy_cpus=f
 
 - scx_rustland
 
-```
-❯ scx_rustland --monitor 5
+```shell
+$ scx_rustland --monitor 5
 [RustLand] tasks -> r:  1/4  w: 3 /3  | pf: 0     | dispatch -> u: 4     k: 0     c: 0     b: 0     f: 0     | cg: 0
 [RustLand] tasks -> r:  1/4  w: 2 /2  | pf: 0     | dispatch -> u: 28385 k: 0     c: 0     b: 0     f: 0     | cg: 0
 [RustLand] tasks -> r:  0/4  w: 4 /0  | pf: 0     | dispatch -> u: 25288 k: 0     c: 0     b: 0     f: 0     | cg: 0

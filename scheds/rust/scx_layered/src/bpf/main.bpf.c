@@ -1263,18 +1263,27 @@ static void task_uncharge_qrt(struct task_ctx *taskc)
 	taskc->qrt_llc_id = MAX_LLCS;
 }
 
-static void layer_kick_idle_cpu(struct layer *layer)
+static void kick_idle_cpu(struct task_struct *p, struct layer *layer)
 {
-	const struct cpumask *layer_cpumask, *idle_smtmask;;
+	const struct cpumask *idle_smtmask;
 	s32 cpu;
 
-	if (!(layer_cpumask = lookup_layer_cpumask(layer->id)) ||
-	    !(idle_smtmask = scx_bpf_get_idle_smtmask()))
+	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
 		return;
 
-	if ((cpu = pick_idle_cpu_from(layer_cpumask, 0, idle_smtmask, layer)) >= 0)
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	if (layer->kind == LAYER_KIND_CONFINED) {
+		const struct cpumask *layer_cpumask;
 
+		if (!(layer_cpumask = lookup_layer_cpumask(layer->id)))
+			goto out;
+		cpu = pick_idle_cpu_from(layer_cpumask, 0, idle_smtmask, layer);
+	} else {
+		cpu = pick_idle_cpu_from(p->cpus_ptr, 0, idle_smtmask, layer);
+	}
+
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+out:
 	scx_bpf_put_idle_cpumask(idle_smtmask);
 }
 
@@ -1489,10 +1498,15 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Also interlocked with opportunistic disabling in
 	 * try_drain_layer_llcs(). See there.
 	 */
-	if (!layer->nr_llc_cpus[llc_id]) {
+	if (!layer->nr_llc_cpus[llc_id])
 		layer_llc_drain_enable(layer, llc_id);
-		layer_kick_idle_cpu(layer);
-	}
+
+	/*
+	 * Interlocked with layered_update_idle(). Either we see the idle bit
+	 * set or they see @p queued in the DSQ. hi/lo_fb paths would need
+	 * something similar. Oh well...
+	 */
+	kick_idle_cpu(p, layer);
 }
 
 static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now)
@@ -1579,7 +1593,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 		 * have tasks waiting, keep running it. If there are multiple
 		 * competing preempting layers, this won't work well.
 		 */
-		u32 dsq_id = layer_dsq_id(layer->id, cpuc->llc_id);
+		u64 dsq_id = layer_dsq_id(layer->id, cpuc->llc_id);
 		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
 			p->scx.slice = layer->slice_ns;
 			lstat_inc(LSTAT_KEEP, layer, cpuc);
@@ -1875,11 +1889,11 @@ bool sib_keep_idle(s32 cpu, struct task_struct *prev __arg_trusted, struct cpu_c
 		if ((sib = sibling_cpu(cpu)) >= 0 && (sib_cpuc = lookup_cpu_ctx(sib)) &&
 		    (sib_cpuc->current_excl || sib_cpuc->next_excl)) {
 			gstat_inc(GSTAT_EXCL_IDLE, cpuc);
-			return false;
+			return true;
 		}
 	}
-	
-	return true;
+
+	return false;
 }
 
 void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
@@ -1898,7 +1912,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (antistall_consume(cpuc))
 		return;
 	
-	if (prev && !sib_keep_idle(cpu, prev, cpuc))
+	if (prev && sib_keep_idle(cpu, prev, cpuc))
 		return;
 
 	/*
@@ -2798,12 +2812,29 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
 {
 	struct cpu_ctx *cpuc;
+	unsigned layer_id;
+	u32 llc_id;
 
 	if (!idle || !(cpuc = lookup_cpu_ctx(cpu)))
 		return;
 
 	cpuc->protect_owned = false;
 	cpuc->usage_at_idle = cpuc->usage;
+
+	if (!idle)
+		return;
+
+	/*
+	 * Interlocked with kick_idle_cpu() in layered_enqueue(). Either they
+	 * see idle set or we see the task in one of the DSQs.
+	 */
+	llc_id = cpu_to_llc_id(cpu);
+	bpf_for(layer_id, 0, nr_layers) {
+		if (scx_bpf_dsq_nr_queued(layer_dsq_id(layer_id, llc_id))) {
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			break;
+		}
+	}
 }
 
 void BPF_STRUCT_OPS(layered_cpu_release, s32 cpu,

@@ -50,6 +50,16 @@ UEI_DEFINE(uei);
 #define SHARED_DSQ MAX_CPUS
 
 /*
+ * The user-space scheduler itself is dispatched using a separate DSQ, that
+ * is consumed after all other DSQs.
+ *
+ * This ensures to work in bursts: tasks are queued, then the user-space
+ * scheduler runs and dispatches them. Once all these tasks exhaust their
+ * time slices, the scheduler is invoked again, repeating the cycle.
+ */
+#define SCHED_DSQ (MAX_CPUS + 1)
+
+/*
  * Scheduler attributes and statistics.
  */
 u32 usersched_pid; /* User-space scheduler PID */
@@ -555,12 +565,43 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 {
 	struct task_struct *p;
 	struct task_ctx *tctx;
-	u64 dsq_id, curr_cpumask_cnt;
+	u64 curr_cpumask_cnt;
 
 	/* Ignore entry if the task doesn't exist anymore */
 	p = bpf_task_from_pid(task->pid);
 	if (!p)
 		return;
+
+	dbg_msg("dispatch: pid=%d (%s) cpu=0x%lx vtime=%llu slice=%llu",
+		p->pid, p->comm, task->cpu, task->vtime, task->slice_ns);
+
+	/*
+	 * Dispatch task to the shared DSQ if the user-space scheduler
+	 * didn't select any specific target CPU.
+	 */
+	if (task->cpu == RL_CPU_ANY) {
+		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, task->slice_ns, task->vtime, task->flags);
+		scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_IDLE);
+		goto out_release;
+	}
+
+	/*
+	 * If a task can only run on a single CPU, dispatch it directly to
+	 * the only CPU where it can run, independently on what the
+	 * user-space scheduler has decided.
+	 */
+	if (p->nr_cpus_allowed == 1) {
+		s32 cpu = scx_bpf_task_cpu(p);
+
+		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
+					 task->slice_ns, task->vtime, task->flags);
+		if (cpu != task->cpu)
+			__sync_fetch_and_add(&nr_bounce_dispatches, 1);
+		if (cpu != bpf_get_smp_processor_id())
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+
+		goto out_release;
+	}
 
 	/*
 	 * Update task's time slice in its context.
@@ -568,18 +609,6 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		goto out_release;
-
-	dbg_msg("dispatch: pid=%d (%s) cpu=0x%lx vtime=%llu slice=%llu",
-		p->pid, p->comm, task->cpu, task->vtime, task->slice_ns);
-
-	/*
-	 * Dispatch task to the target DSQ.
-	 */
-	if (task->cpu == RL_CPU_ANY) {
-		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, task->slice_ns, task->vtime, task->flags);
-		scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_IDLE);
-		goto out_release;
-	}
 
 	/* Read current cpumask generation counter */
 	curr_cpumask_cnt = tctx->cpumask_cnt;
@@ -606,10 +635,8 @@ static void dispatch_task(const struct dispatched_task_ctx *task)
 	 * the task will be re-enqueued by the core sched-ext code, potentially
 	 * selecting a different cpu and a different cpumask.
 	 */
-	dsq_id = cpu_to_dsq(task->cpu);
-
-	/* Dispatch the task to the target per-CPU DSQ */
-	scx_bpf_dsq_insert_vtime(p, dsq_id, task->slice_ns, task->vtime, task->flags);
+	scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(task->cpu),
+				 task->slice_ns, task->vtime, task->flags);
 
 	/* If the cpumask is not valid anymore, ignore the dispatch event */
 	if (curr_cpumask_cnt != task->cpumask_cnt) {
@@ -656,7 +683,7 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 */
 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags & !SCX_WAKE_SYNC, &is_idle);
 	if (is_idle && !scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
-		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), SCX_SLICE_DFL, p->scx.dsq_vtime, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	}
 
@@ -756,8 +783,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
 	if (is_kswapd(p) || (is_kthread(p) && p->nr_cpus_allowed == 1)) {
-                scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
-				   enq_flags | SCX_ENQ_PREEMPT);
+                scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
 	}
@@ -766,14 +792,13 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * Give the task a chance to be directly dispatched if
 	 * ops.select_cpu() was skipped.
 	 */
-	if (builtin_idle && is_queued_wakeup(p, enq_flags)) {
+	if (builtin_idle && is_queued_wakeup(p, enq_flags) &&
+	    !scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
 		s32 cpu = pick_idle_cpu(p, scx_bpf_task_cpu(p));
 
 		if (cpu >= 0) {
-			scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
-					   SCX_SLICE_DFL, p->scx.dsq_vtime, enq_flags);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, SCX_SLICE_DFL, enq_flags);
 			__sync_fetch_and_add(&nr_kernel_dispatches, 1);
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			return;
 		}
 	}
@@ -807,35 +832,26 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 /*
  * Dispatch the user-space scheduler.
  */
-static bool dispatch_user_scheduler(void)
+static void dispatch_user_scheduler(void)
 {
 	struct task_struct *p;
-
-	if (!test_and_clear_usersched_needed())
-		return false;
 
 	p = bpf_task_from_pid(usersched_pid);
 	if (!p) {
 		scx_bpf_error("Failed to find usersched task %d", usersched_pid);
-		return false;
+		return;
 	}
 
 	/*
-	 * Always append the user-space scheduler at the end of the shared
-	 * DSQ, so that it'll run after all the tasks currently dispatched
-	 * have used their assigned time slice on their target CPU.
-	 *
-	 * At the same time assign an infinite time slice, so that it can
-	 * completely drain all the pending tasks.
+	 * Assign an infinite time slice to the user-space scheduler, so
+	 * that it can completely drain all the pending tasks.
 	 *
 	 * The user-space scheduler will voluntarily yield the CPU upon
 	 * completion through BpfScheduler->notify_complete().
 	 */
-	scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, SCX_SLICE_INF, -1ULL, 0);
+	scx_bpf_dsq_insert(p, SCHED_DSQ, SCX_SLICE_INF, 0);
 
 	bpf_task_release(p);
-
-	return true;
 }
 
 /*
@@ -869,16 +885,18 @@ static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
 void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 {
 	/*
-	 * Consume all tasks from the @dispatched list and immediately dispatch
-	 * them on the target CPU decided by the user-space scheduler.
+	 * Fire up the user-space scheduler: it will run only if no other
+	 * task needs to run.
 	 */
-	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, 0);
+	if (test_and_clear_usersched_needed())
+		dispatch_user_scheduler();
 
-       /*
-	* Always dispatch the user-space scheduler every time that a CPU
-	* becomes available.
-	*/
-	dispatch_user_scheduler();
+	/*
+	 * Consume all tasks from the @dispatched list and immediately
+	 * dispatch them on the target CPU decided by the user-space
+	 * scheduler.
+	 */
+	bpf_user_ringbuf_drain(&dispatched, handle_dispatched_task, NULL, BPF_RB_NO_WAKEUP);
 
 	/*
 	 * Consume a task from the per-CPU DSQ.
@@ -893,12 +911,18 @@ void BPF_STRUCT_OPS(rustland_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 
 	/*
+	 * Lastly, consume and dispatch the user-space scheduler.
+	 */
+	if (scx_bpf_dsq_move_to_local(SCHED_DSQ))
+		return;
+
+	/*
 	 * If there are still pending task, notify the user-space scheduler
 	 * and prevent the CPU from going idle.
 	 */
 	if (usersched_has_pending_tasks()) {
 		set_usersched_needed();
-		scx_bpf_kick_cpu(cpu, 0);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 		return;
 	}
 
@@ -1008,6 +1032,15 @@ void BPF_STRUCT_OPS(rustland_cpu_release, s32 cpu,
 	dbg_msg("cpu preemption: pid=%d (%s)", p->pid, p->comm);
 	if (is_usersched_task(p))
 		set_usersched_needed();
+}
+
+/*
+ * A task joins the sched_ext scheduler.
+ */
+void BPF_STRUCT_OPS(rustland_enable, struct task_struct *p)
+{
+	p->scx.dsq_vtime = 0;
+	p->scx.slice = SCX_SLICE_DFL;
 }
 
 /*
@@ -1169,6 +1202,13 @@ static int dsq_init(void)
 		return err;
 	}
 
+	/* Create the scheduler's DSQ */
+	err = scx_bpf_create_dsq(SCHED_DSQ, -1);
+	if (err) {
+		scx_bpf_error("failed to create scheduler DSQ: %d", err);
+		return err;
+	}
+
 	return 0;
 }
 
@@ -1274,6 +1314,7 @@ SCX_OPS_DEFINE(rustland,
 	       .stopping		= (void *)rustland_stopping,
 	       .set_cpumask		= (void *)rustland_set_cpumask,
 	       .cpu_release		= (void *)rustland_cpu_release,
+	       .enable			= (void *)rustland_enable,
 	       .init_task		= (void *)rustland_init_task,
 	       .init			= (void *)rustland_init,
 	       .exit			= (void *)rustland_exit,
