@@ -2821,9 +2821,6 @@ void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
 	cpuc->protect_owned = false;
 	cpuc->usage_at_idle = cpuc->usage;
 
-	if (!idle)
-		return;
-
 	/*
 	 * Interlocked with kick_idle_cpu() in layered_enqueue(). Either they
 	 * see idle set or we see the task in one of the DSQs.
