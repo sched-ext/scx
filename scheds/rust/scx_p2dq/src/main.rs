@@ -56,22 +56,22 @@ use scx_p2dq::TOPO;
 
 impl P2dqArenaProgs for BpfSkel<'_> {
     fn run_arena_init<'b>(&self, input: ProgramInput<'b>) -> Result<libbpf_rs::ProgramOutput<'b>> {
-        Ok(self.progs.p2dq_arena_init.test_run(input)?)
+        Ok(self.progs.arena_init.test_run(input)?)
     }
 
     fn run_alloc_mask<'b>(&self, input: ProgramInput<'b>) -> Result<libbpf_rs::ProgramOutput<'b>> {
-        Ok(self.progs.p2dq_alloc_mask.test_run(input)?)
+        Ok(self.progs.arena_alloc_mask.test_run(input)?)
     }
 
     fn run_topology_node_init<'b>(
         &self,
         input: ProgramInput<'b>,
     ) -> Result<libbpf_rs::ProgramOutput<'b>> {
-        Ok(self.progs.p2dq_topology_node_init.test_run(input)?)
+        Ok(self.progs.arena_topology_node_init.test_run(input)?)
     }
 
     fn setup_ptr(&self) -> u64 {
-        self.maps.bss_data.setup_ptr
+        self.maps.bss_data.arena_topo_setup_ptr
     }
 }
 
@@ -200,7 +200,7 @@ impl<'a> Scheduler<'a> {
             ..Default::default()
         };
 
-        let output = self.skel.progs.p2dq_topo_print.test_run(input)?;
+        let output = self.skel.progs.arena_topology_print.test_run(input)?;
         if output.return_value != 0 {
             bail!(
                 "Could not initialize arenas, topo_print returned {}",
@@ -212,6 +212,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn start(&mut self) -> Result<()> {
+
         self.struct_ops = Some(scx_ops_attach!(self.skel, p2dq)?);
 
         if self.verbose > 1 {

@@ -2,10 +2,17 @@
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
+pub mod bpf_intf;
+
+mod bpf_skel;
+pub use bpf_skel::*;
+
 pub use scx_utils::CoreType;
 use scx_utils::Topology;
 pub use scx_utils::NR_CPU_IDS;
 use scx_utils::{Core, Llc};
+
+use std::ffi::c_ulong;
 
 use anyhow::{bail, Result};
 use clap::Parser;
@@ -164,7 +171,19 @@ pub fn setup_arenas<T: P2dqArenaProgs>(skel: &T) -> Result<()> {
     // Allocate the arena memory from the BPF side so userspace initializes it before starting
     // the scheduler. Despite the function call's name this is neither a test nor a test run,
     // it's the recommended way of executing SEC("syscall") probes.
+
+    let mut args = types::arena_init_args {
+        static_pages: bpf_intf::consts_STATIC_ALLOC_PAGES_GRANULARITY as c_ulong,
+        task_ctx_size: std::mem::size_of::<types::task_p2dq>() as c_ulong,
+    };
+
     let input = ProgramInput {
+        context_in: Some(unsafe {
+            std::slice::from_raw_parts_mut(
+                &mut args as *mut _ as *mut u8,
+                std::mem::size_of_val(&args),
+            )
+        }),
         ..Default::default()
     };
 
