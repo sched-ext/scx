@@ -899,7 +899,7 @@ impl<'a> App<'a> {
         }
 
         self.render_scheduler("dsq_lat_us", frame, top_left, true, true)?;
-        self.render_dsq_vtime(frame, bottom_left, true, false)?;
+        self.render_scheduler("dsq_slice_consumed", frame, bottom_left, true, false)?;
 
         Ok(())
     }
@@ -1025,7 +1025,7 @@ impl<'a> App<'a> {
         }
 
         self.render_scheduler("dsq_lat_us", frame, top_left, true, true)?;
-        self.render_dsq_vtime(frame, bottom_left, true, false)?;
+        self.render_scheduler("dsq_slice_consumed", frame, bottom_left, true, false)?;
         Ok(())
     }
 
@@ -1276,136 +1276,6 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    /// Returns the dsq vtime chart.
-    fn render_dsq_vtime_sparklines(
-        &self,
-        event: &str,
-        frame: &mut Frame,
-        area: Rect,
-        render_title: bool,
-        render_sample_rate: bool,
-    ) -> Result<()> {
-        let num_dsqs = self
-            .dsq_data
-            .iter()
-            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(event))
-            .count();
-        if num_dsqs == 0 {
-            let block = Block::default()
-                .title_top(
-                    Line::from(self.scheduler.clone())
-                        .style(self.theme().title_style())
-                        .centered(),
-                )
-                .style(self.theme().border_style())
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded);
-            frame.render_widget(block, area);
-            return Ok(());
-        }
-        let mut dsq_constraints = vec![];
-
-        for _ in 0..num_dsqs {
-            dsq_constraints.push(Constraint::Ratio(1, num_dsqs as u32));
-        }
-        let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
-
-        self.dsq_sparklines(event, render_title, render_sample_rate)
-            .iter()
-            .enumerate()
-            .for_each(|(j, dsq_sparkline)| {
-                frame.render_widget(dsq_sparkline, dsqs_verticle[j]);
-            });
-
-        Ok(())
-    }
-
-    /// Returns the dsq vtime chart.
-    fn render_dsq_vtime_barchart(
-        &self,
-        event: &str,
-        frame: &mut Frame,
-        area: Rect,
-        render_sample_rate: bool,
-    ) -> Result<()> {
-        let num_dsqs = self
-            .dsq_data
-            .iter()
-            .filter(|(_dsq_id, dsq_data)| dsq_data.data.contains_key(event))
-            .count();
-        if num_dsqs == 0 {
-            let block = Block::default()
-                .title_top(
-                    Line::from(self.scheduler.clone())
-                        .style(self.theme().title_style())
-                        .centered(),
-                )
-                .style(self.theme().border_style())
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded);
-            frame.render_widget(block, area);
-            return Ok(());
-        }
-
-        let dsq_constraints = vec![Constraint::Percentage(1), Constraint::Percentage(99)];
-        let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
-        let sample_rate = self.skel.maps.data_data.sample_rate;
-
-        let vtime_global_iter: Vec<u64> = self
-            .dsq_data
-            .iter()
-            .filter(|(_dsq_id, event_data)| event_data.data.contains_key(event))
-            .flat_map(|(_dsq_id, event_data)| event_data.event_data_immut(event))
-            .collect::<Vec<u64>>();
-
-        let stats = VecStats::new(&vtime_global_iter, true, true, true, None);
-
-        let bar_block = Block::default()
-            .title_top(
-                Line::from(if self.localize {
-                    format!(
-                        "{} {} avg {} max {} min {}",
-                        self.scheduler,
-                        event,
-                        stats.avg.to_formatted_string(&self.locale),
-                        stats.max.to_formatted_string(&self.locale),
-                        stats.min.to_formatted_string(&self.locale),
-                    )
-                } else {
-                    format!(
-                        "{} {} avg {} max {} min {}",
-                        self.scheduler, event, stats.avg, stats.max, stats.min,
-                    )
-                })
-                .style(self.theme().title_style())
-                .centered(),
-            )
-            .title_top(if render_sample_rate {
-                Line::from(format!("sample rate {}", sample_rate))
-                    .style(self.theme().text_important_color())
-                    .right_aligned()
-            } else {
-                Line::from("")
-            })
-            .style(self.theme().border_style())
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded);
-
-        let dsq_bars: Vec<Bar> = self.dsq_bars(event);
-
-        let barchart = BarChart::default()
-            .data(BarGroup::default().bars(&dsq_bars))
-            .block(bar_block)
-            .max(stats.max)
-            .direction(Direction::Horizontal)
-            .bar_style(self.theme().sparkline_style())
-            .bar_gap(0)
-            .bar_width(1);
-
-        frame.render_widget(barchart, dsqs_verticle[1]);
-        Ok(())
-    }
-
     /// Renders the scheduler state as barcharts.
     fn render_scheduler_barchart(
         &mut self,
@@ -1504,28 +1374,6 @@ impl<'a> App<'a> {
             ),
             ViewState::BarChart => {
                 self.render_scheduler_barchart(event, frame, area, render_sample_rate)
-            }
-        }
-    }
-
-    /// Renders the scheduler application state.
-    fn render_dsq_vtime(
-        &mut self,
-        frame: &mut Frame,
-        area: Rect,
-        render_title: bool,
-        render_sample_rate: bool,
-    ) -> Result<()> {
-        match self.view_state {
-            ViewState::Sparkline => self.render_dsq_vtime_sparklines(
-                "dsq_vtime_delta",
-                frame,
-                area,
-                render_title,
-                render_sample_rate,
-            ),
-            ViewState::BarChart => {
-                self.render_dsq_vtime_barchart("dsq_vtime_delta", frame, area, render_sample_rate)
             }
         }
     }
@@ -1801,7 +1649,7 @@ impl<'a> App<'a> {
 
         self.render_event(frame, right)?;
         self.render_scheduler("dsq_lat_us", frame, top_left, true, true)?;
-        self.render_dsq_vtime(frame, bottom_left, true, false)?;
+        self.render_scheduler("dsq_slice_consumed", frame, bottom_left, true, false)?;
         Ok(())
     }
 

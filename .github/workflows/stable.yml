@@ -23,6 +23,7 @@ jobs:
   integration-test:
     uses: ./.github/workflows/integration-tests.yml
     needs: build-kernel
+    secrets: inherit
     with:
       repo-name: stable/linux-rolling-stable
 

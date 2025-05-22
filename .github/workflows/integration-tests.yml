@@ -21,7 +21,7 @@ jobs:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
       - name: Load dependencies
-        run: nix run ./.github/include#nix-develop-gha -- ./.github/include#list-tests
+        run: nix run ./.github/include#nix-develop-gha -- ./.github/include#gha-list-tests
 
       - name: List tests
         id: output

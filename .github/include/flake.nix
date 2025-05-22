@@ -25,39 +25,90 @@
         let
           pkgs = import nixpkgs { inherit system; };
           lib = pkgs.lib;
+
+          makeBpfClang = llvmPackages: kernel: pkgs.stdenv.mkDerivation {
+            pname = "bpf-clang";
+            version = llvmPackages.clang.version;
+            meta.mainProgram = "clang";
+
+            dontUnpack = true;
+            dontConfigure = true;
+            dontBuild = true;
+
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+
+            installPhase = ''
+              mkdir -p $out/bin
+              makeWrapper ${pkgs.llvmPackages.clang-unwrapped}/bin/clang \
+                $out/bin/clang \
+                --add-flags "-I${llvmPackages.clang-unwrapped.lib}/lib/clang/${lib.versions.major llvmPackages.clang-unwrapped.version}/include" \
+                --add-flags "-I${kernel.headers}/usr/include" \
+                --add-flags "-I${pkgs.glibc.dev}/include" \
+                --prefix PATH : ${llvmPackages.clang-unwrapped}/bin
+            '';
+          };
+
+          build-env-vars = {
+            BPF_CLANG = lib.getExe self.packages.${system}.bpf-clang;
+            LIBCLANG_PATH = "${lib.getLib pkgs.llvmPackages.libclang}/lib";
+          };
+
+          gha-common-pkgs = with pkgs; [
+            cachix
+            git
+            gnutar
+            zstd
+          ];
         in
         {
-          devShells =
-            let
-              common = with pkgs; [
-                cachix
+          devShells = {
+            default = pkgs.mkShell ({
+              buildInputs = with pkgs; [
+                bash
+                binutils
+                cargo
+                clang
+                coreutils
+                elfutils
+                gcc
                 git
-                gnutar
+                glibc
+                gnumake
+                jq
+                libseccomp
+                pkg-config
+                protobuf
+                rustc
+                rustfmt
+                zlib
                 zstd
+
+                llvmPackages.libclang
+                llvmPackages.libllvm
               ];
-            in
-            {
-              common = pkgs.mkShellNoCC {
-                buildInputs = common;
-              };
+            } // build-env-vars);
 
-              update-kernels = pkgs.mkShell {
-                buildInputs = with pkgs; common ++ [
-                  gh
-                  git
-                  jq
-                ];
-              };
-
-              list-tests = pkgs.mkShell {
-                buildInputs = with pkgs; common ++ [
-                  python3
-                ];
-              };
+            gha-common = pkgs.mkShellNoCC {
+              buildInputs = gha-common-pkgs;
             };
 
+            gha-update-kernels = pkgs.mkShellNoCC {
+              buildInputs = with pkgs; gha-common-pkgs ++ [
+                gh
+                jq
+              ];
+            };
+
+            gha-list-tests = pkgs.mkShellNoCC {
+              buildInputs = with pkgs; gha-common-pkgs ++ [
+                python3
+              ];
+            };
+          };
+
           packages = {
-            nix-develop-gha = nix-develop-gha.packages."${system}".default;
+            nix-develop-gha = nix-develop-gha.packages.${system}.default;
+            bpf-clang = makeBpfClang pkgs.llvmPackages self.packages.${system}.kernels."sched_ext/for-next";
 
             veristat = pkgs.callPackage ./veristat.nix {
               version = "git";
@@ -72,80 +123,76 @@
               }))
               (builtins.fromJSON (builtins.readFile ./../../kernel-versions.json));
 
-            ci =
-              pkgs.python3Packages.buildPythonApplication rec {
-                pname = "ci";
-                version = "git";
+            ci = pkgs.python3Packages.buildPythonApplication rec {
+              pname = "ci";
+              version = "git";
 
-                pyproject = false;
-                dontUnpack = true;
+              pyproject = false;
+              dontUnpack = true;
 
-                propagatedBuildInputs = with pkgs; [
-                  bash
-                  binutils
-                  black
-                  cargo
-                  cargo-nextest
-                  clang
-                  clippy
-                  coreutils
-                  gcc
-                  git
-                  gnugrep
-                  gnumake
-                  gnused
-                  isort
-                  jq
-                  libseccomp.lib
-                  llvmPackages.libclang
-                  llvmPackages.libllvm
-                  pkg-config
-                  protobuf
-                  rustc
-                  rustfmt
-                  virtme-ng
+              propagatedBuildInputs = with pkgs; [
+                bash
+                binutils
+                black
+                cargo
+                cargo-nextest
+                clang
+                clippy
+                coreutils
+                gcc
+                git
+                gnugrep
+                gnumake
+                gnused
+                isort
+                jq
+                libseccomp.lib
+                llvmPackages.libclang
+                llvmPackages.libllvm
+                pkg-config
+                protobuf
+                rustc
+                rustfmt
+                virtme-ng
 
-                  elfutils.dev
-                  zlib.dev
-                  zstd.dev
-                ];
+                elfutils.dev
+                zlib.dev
+                zstd.dev
+              ];
 
-                makeWrapperArgs = lib.lists.flatten [
-                  [ "--set" "CC" "gcc" ]
-                  [ "--set" "LD" "ld" ]
+              makeWrapperArgs = lib.lists.flatten ([
+                [ "--set" "CC" "gcc" ]
+                [ "--set" "LD" "ld" ]
 
-                  [ "--set" "BPF_CLANG" (lib.getExe pkgs.llvmPackages.clang) ]
-                  [ "--set" "LIBCLANG_PATH" "${lib.getLib pkgs.llvmPackages.libclang}/lib" ]
+                [ "--set" "PKG_CONFIG_PATH" "${lib.makeSearchPath "lib/pkgconfig" propagatedBuildInputs}" ]
 
-                  [ "--set" "PKG_CONFIG_PATH" "${lib.makeSearchPath "lib/pkgconfig" propagatedBuildInputs}" ]
+                [ "--set" "RUSTFLAGS" "\"-C relocation-model=pic -C link-args=-lelf -C link-args=-lz -C link-args=-lzstd\"" ]
 
-                  [ "--set" "RUSTFLAGS" "'-C relocation-model=pic -C link-args=-lelf -C link-args=-lz -C link-args=-lzstd'" ]
+                [ "--set" "NIX_BINTOOLS" pkgs.binutils ]
+                [ "--set" "NIX_CC" pkgs.gcc ]
 
-                  [ "--set" "NIX_BINTOOLS" pkgs.binutils ]
-                  [ "--set" "NIX_CC" pkgs.gcc ]
-
-                  (
-                    let system = builtins.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.config; in [
-                      [ "--set" "NIX_BINTOOLS_WRAPPER_TARGET_HOST_${system}" "1" ]
-                      [ "--set" "NIX_CC_WRAPPER_TARGET_HOST_${system}" "1" ]
-                      [ "--set" "NIX_PKG_CONFIG_WRAPPER_TARGET_HOST_${system}" "1" ]
-                    ]
-                  )
-
-                  [
-                    "--set"
-                    "NIX_LDFLAGS"
-                    ("'" + (lib.concatStringsSep " " (builtins.map (drv: "-L${drv}/lib") (with pkgs; [
-                      elfutils.out
-                      zlib
-                      zstd.out
-                      libseccomp.lib
-                    ]))) + "'")
+                (
+                  let system = builtins.replaceStrings [ "-" ] [ "_" ] pkgs.stdenv.hostPlatform.config; in [
+                    [ "--set" "NIX_BINTOOLS_WRAPPER_TARGET_HOST_${system}" "1" ]
+                    [ "--set" "NIX_CC_WRAPPER_TARGET_HOST_${system}" "1" ]
+                    [ "--set" "NIX_PKG_CONFIG_WRAPPER_TARGET_HOST_${system}" "1" ]
                   ]
-                ];
+                )
 
-                installPhase = "install -Dm755 ${../include/ci.py} $out/bin/ci";
-              };
+                [
+                  "--set"
+                  "NIX_LDFLAGS"
+                  ("'" + (lib.concatStringsSep " " (builtins.map (drv: "-L${drv}/lib") (with pkgs; [
+                    elfutils.out
+                    zlib
+                    zstd.out
+                    libseccomp.lib
+                  ]))) + "'")
+                ]
+              ] ++ (lib.mapAttrsToList (key: val: "--set ${key} \"${val}\"") build-env-vars));
+
+              installPhase = "install -Dm755 ${../include/ci.py} $out/bin/ci";
+            };
           };
         }) // flake-utils.lib.eachDefaultSystem (system:
       let
@@ -183,4 +230,3 @@
         };
       });
 }
-
