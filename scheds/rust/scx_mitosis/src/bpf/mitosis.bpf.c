@@ -280,7 +280,7 @@ u32 critical_section_state[MAX_CPUS];
  * Write side will record the current state and then poll to check that the
  * generation has advanced (somewhat like call_rcu)
  */
-static __always_inline int critical_section_record()
+static __always_inline __maybe_unused int critical_section_record()
 {
 	u32 zero = 0;
 	u32 *data;
@@ -300,7 +300,7 @@ static __always_inline int critical_section_record()
 	return 0;
 }
 
-static __always_inline int critical_section_poll()
+static __always_inline __maybe_unused int critical_section_poll()
 {
 	u32 zero = 0;
 	u32 *data;
@@ -507,7 +507,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		goto out;
 	}
 
-	if (tctx->cpumask && bpf_cpumask_empty(tctx->cpumask)) {
+	if (tctx->cpumask && bpf_cpumask_empty((const struct cpumask *)tctx->cpumask)) {
 		/*
 		 * This is an affinity violation (no overlap between task cpus and cell
 		 * cpus) but we also failed to find an idle cpu in the task cpus. No
@@ -527,8 +527,8 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * All else failed, send it to the prev cpu (if that's valid), otherwise any
 	 * valid cpu.
 	 */
-	if (!bpf_cpumask_test_cpu(prev_cpu, tctx->cpumask) && tctx->cpumask)
-		cpu = bpf_cpumask_any_distribute(tctx->cpumask);
+	if (!bpf_cpumask_test_cpu(prev_cpu, (const struct cpumask *)tctx->cpumask) && tctx->cpumask)
+		cpu = bpf_cpumask_any_distribute((const struct cpumask *)tctx->cpumask);
 	else
 		cpu = prev_cpu;
 
@@ -879,6 +879,7 @@ static inline int cgroup_init_with_cpuset(struct cgrp_ctx *cgc,
 	} else {
 		scx_bpf_error(
 			"Definition of struct cpuset did not match any expected struct");
+		return -EINVAL;
 	}
 
 	if (err < 0) {
@@ -888,7 +889,7 @@ static inline int cgroup_init_with_cpuset(struct cgrp_ctx *cgc,
 		return -EINVAL;
 	}
 
-	if (bpf_cpumask_empty(&entry->cpumask))
+	if (bpf_cpumask_empty((const struct cpumask *)&entry->cpumask))
 		goto free_entry;
 
 	if (!all_cpumask) {
@@ -897,7 +898,7 @@ static inline int cgroup_init_with_cpuset(struct cgrp_ctx *cgc,
 	}
 
 	if (bpf_cpumask_subset((const struct cpumask *)all_cpumask,
-			       &entry->cpumask))
+			       (const struct cpumask *)&entry->cpumask))
 		goto free_entry;
 
 	int cell_idx = allocate_cell();
@@ -920,11 +921,11 @@ static inline int cgroup_init_with_cpuset(struct cgrp_ctx *cgc,
 		scx_bpf_error("tmp_cpumask should never be null");
 		return -ENOENT;
 	}
-	bpf_cpumask_copy(bpf_cpumask, &entry->cpumask);
+	bpf_cpumask_copy(bpf_cpumask, (const struct cpumask *)&entry->cpumask);
 	int cpu_idx;
 	bpf_for(cpu_idx, 0, nr_possible_cpus)
 	{
-		if (bpf_cpumask_test_cpu(cpu_idx, &entry->cpumask)) {
+		if (bpf_cpumask_test_cpu(cpu_idx, (const struct cpumask *)&entry->cpumask)) {
 			struct cpu_ctx *cpu_ctx;
 			if (!(cpu_ctx = lookup_cpu_ctx(cpu_idx))) {
 				bpf_cpumask_release(bpf_cpumask);
