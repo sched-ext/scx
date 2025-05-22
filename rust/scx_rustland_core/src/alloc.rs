@@ -497,7 +497,13 @@ impl UserAllocator {
             if res != 0 {
                 panic!("mlockall failed with error code: {}", res);
             }
-        };
+
+            // Prevent khugpaged from unmapping pages underneath.
+            let res = libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0);
+            if res != 0 {
+                panic!("Failed to disable THP: {}", res);
+            }
+        }
     }
 
     #[allow(static_mut_refs)]
