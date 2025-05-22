@@ -505,6 +505,14 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		goto found_cpu;
 	}
 
+	// First check if last CPU is idle
+	if (taskc->all_cpus &&
+	    bpf_cpumask_test_cpu(prev_cpu, (smt_enabled && !interactive) ? idle_smtmask : idle_cpumask)) {
+		cpu = prev_cpu;
+		*is_idle = true;
+		goto found_cpu;
+	}
+
 	if (!(prev_cpuc = lookup_cpu_ctx(prev_cpu)) ||
 	    !(llcx = lookup_llc_ctx(prev_cpuc->llc_id)) ||
 	    !llcx->cpumask)
@@ -553,16 +561,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			goto found_cpu;
 		}
 
-		// Keep the task sticky to the LLC if possible.
-		if (mask && llcx->cpumask &&
-		    bpf_cpumask_and(mask, cast_mask(llcx->cpumask),
-				    p->cpus_ptr)) {
-			cpu = bpf_cpumask_any_distribute(cast_mask(mask));
-			if (cpu < nr_cpus)
-				goto found_cpu;
-		}
-
-
 		// Next try to find an idle CPU in the node
 		if (llcx->node_cpumask && mask) {
 			bpf_cpumask_and(mask, cast_mask(llcx->node_cpumask),
@@ -585,10 +583,10 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	 * waker.
 	 */
 	if (wake_flags & SCX_WAKE_SYNC) {
-		struct task_struct *current = (void *)bpf_get_current_task_btf();
-		task_ctx *cur_taskc = scx_task_data(current);
+		struct task_struct *waker = (void *)bpf_get_current_task_btf();
+		task_ctx *waker_taskc = scx_task_data(waker);
 		// Shouldn't happen, but makes code easier to follow
-		if (!cur_taskc) {
+		if (!waker_taskc) {
 			cpu = prev_cpu;
 			goto found_cpu;
 		}
@@ -612,7 +610,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			cpu = prev_cpu;
 			goto found_cpu;
 		}
-		if (cur_taskc->llc_id == llcx->id || !wakeup_llc_migrations) {
+		if (waker_taskc->llc_id == llcx->id || !wakeup_llc_migrations) {
 			// First check if the waking task is in the same LLC
 			// and the prev cpu is idle
 			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
@@ -642,12 +640,12 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			goto found_cpu;
 		}
 		// If wakeup LLC are allowed then migrate to the waker llc.
-		struct llc_ctx *cur_llcx = lookup_llc_ctx(cur_taskc->llc_id);
-		if (!cur_llcx)
+		struct llc_ctx *waker_llcx = lookup_llc_ctx(waker_taskc->llc_id);
+		if (!waker_llcx)
 			goto found_cpu;
 
-		if (cur_llcx->cpumask &&
-		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(cur_llcx->cpumask),
+		if (waker_llcx->cpumask &&
+		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(waker_llcx->cpumask),
 						 SCX_PICK_IDLE_CORE)) >= 0) {
 			stat_inc(P2DQ_STAT_WAKE_MIG);
 			*is_idle = true;
@@ -655,15 +653,15 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		}
 
 		// Couldn't find an idle core so just migrate to the CPU
-		if (cur_llcx->cpumask &&
-		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(cur_llcx->cpumask),
+		if (waker_llcx->cpumask &&
+		    (cpu = scx_bpf_pick_idle_cpu(cast_mask(waker_llcx->cpumask),
 						 0)) >= 0) {
 			stat_inc(P2DQ_STAT_WAKE_MIG);
 			*is_idle = true;
 			goto found_cpu;
 		}
 		// Nothing idle, move to waker CPU
-		cpu = cur_taskc->cpu;
+		cpu = waker_taskc->cpu;
 		goto found_cpu;
 	}
 
@@ -673,14 +671,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			stat_inc(P2DQ_STAT_SELECT_PICK2);
 			goto found_cpu;
 		}
-	}
-
-	// First check if last CPU is idle
-	if (llcx->cpumask &&
-	    bpf_cpumask_test_cpu(prev_cpu, (smt_enabled && !interactive) ? idle_smtmask : idle_cpumask)) {
-		cpu = prev_cpu;
-		*is_idle = true;
-		goto found_cpu;
 	}
 
 	if (has_little_cores && llcx->little_cpumask && llcx->big_cpumask) {
