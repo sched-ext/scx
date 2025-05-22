@@ -17,3 +17,14 @@ runs:
     - name: Build kernel
       shell: bash
       run: nix build --no-link ./.github/include#kernels.'${{ inputs.repo-name }}'{,.headers}
+
+    - name: Explicitly push to cachix
+      shell: bash
+      run: |
+        # address an edge case where the dedicated runner has a local cache hit
+        # but that entry wasn't uploaded to cachix
+        if [ -f "$HOME/.config/cachix/cachix.dhall" ]; then
+          cachix push sched-ext $KERNEL_STORE_PATH $KERNEL_HEADERS_STORE_PATH
+        else
+          echo "no auth token; skipping cache push"
+        fi
