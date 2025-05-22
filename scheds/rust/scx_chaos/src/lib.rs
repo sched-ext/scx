@@ -7,6 +7,7 @@ mod bpf_skel;
 
 use bpf_skel::BpfSkel;
 
+use scx_p2dq::P2dqArenaProgs;
 use scx_p2dq::SchedulerOpts as P2dqOpts;
 use scx_userspace_arena::alloc::Allocator;
 use scx_userspace_arena::alloc::HeapAllocator;
@@ -20,6 +21,8 @@ use scx_utils::uei_report;
 use anyhow::bail;
 use anyhow::Result;
 use libbpf_rs::OpenObject;
+use libbpf_rs::ProgramInput;
+use libbpf_rs::ProgramOutput;
 use log::debug;
 use nix::unistd::Pid;
 
@@ -61,6 +64,24 @@ unsafe impl Allocator for ArenaAllocator {
                 layout,
             )
         }
+    }
+}
+
+impl P2dqArenaProgs for BpfSkel<'_> {
+    fn run_arena_init<'b>(&self, input: ProgramInput<'b>) -> Result<ProgramOutput<'b>> {
+        Ok(self.progs.p2dq_arena_init.test_run(input)?)
+    }
+
+    fn run_alloc_mask<'b>(&self, input: ProgramInput<'b>) -> Result<ProgramOutput<'b>> {
+        Ok(self.progs.p2dq_alloc_mask.test_run(input)?)
+    }
+
+    fn run_topology_node_init<'b>(&self, input: ProgramInput<'b>) -> Result<ProgramOutput<'b>> {
+        Ok(self.progs.p2dq_topology_node_init.test_run(input)?)
+    }
+
+    fn setup_ptr(&self) -> u64 {
+        self.maps.bss_data.setup_ptr
     }
 }
 
