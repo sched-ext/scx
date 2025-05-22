@@ -592,6 +592,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			cpu = prev_cpu;
 			goto found_cpu;
 		}
+
 		// Interactive tasks aren't worth migrating across LLCs.
 		if (interactive) {
 			cpu = prev_cpu;
@@ -810,7 +811,11 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 
 		taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
 		update_vtime(p, cpuc, taskc, llcx->vtime);
-		scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, taskc->slice_ns, p->scx.dsq_vtime, enq_flags);
+		if (interactive_fifo && taskc->dsq_index == 0) {
+			scx_bpf_dsq_insert(p, taskc->dsq_id, taskc->slice_ns, enq_flags);
+		} else {
+			scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, taskc->slice_ns, p->scx.dsq_vtime, enq_flags);
+		}
 		if (is_idle) {
 			stat_inc(P2DQ_STAT_IDLE);
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
