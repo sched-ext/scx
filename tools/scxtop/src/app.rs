@@ -2331,7 +2331,10 @@ impl<'a> App<'a> {
             self.max_cpu_events,
         ));
 
-        if *next_dsq_id != scx_enums.SCX_DSQ_INVALID && *next_dsq_lat_us > 0 {
+        let next_dsq_id = Self::classify_dsq(*next_dsq_id);
+        let prev_dsq_id = Self::classify_dsq(*prev_dsq_id);
+
+        if next_dsq_id != scx_enums.SCX_DSQ_INVALID && *next_dsq_lat_us > 0 {
             if self.state == AppState::MangoApp {
                 if self.process_id > 0 && action.next_tgid == self.process_id as u32 {
                     cpu_data.add_event_data("dsq_lat_us", *next_dsq_lat_us);
@@ -2342,7 +2345,7 @@ impl<'a> App<'a> {
 
             let next_dsq_data = self
                 .dsq_data
-                .entry(*next_dsq_id)
+                .entry(next_dsq_id)
                 .or_insert(EventData::new(self.max_cpu_events));
 
             if self.state == AppState::MangoApp {
@@ -2369,10 +2372,10 @@ impl<'a> App<'a> {
             }
         }
 
-        if *prev_dsq_id != scx_enums.SCX_DSQ_INVALID && *prev_used_slice_ns > 0 {
+        if prev_dsq_id != scx_enums.SCX_DSQ_INVALID && *prev_used_slice_ns > 0 {
             let prev_dsq_data = self
                 .dsq_data
-                .entry(*prev_dsq_id)
+                .entry(prev_dsq_id)
                 .or_insert(EventData::new(self.max_cpu_events));
             if self.state == AppState::MangoApp {
                 if self.process_id > 0 && action.prev_tgid == self.process_id as u32 {
@@ -2381,6 +2384,18 @@ impl<'a> App<'a> {
             } else {
                 prev_dsq_data.add_event_data("dsq_slice_consumed", *prev_used_slice_ns);
             }
+        }
+    }
+
+    // Groups built-in dsq's (GLOBAL, LOCAL, and LOCAL-ON)
+    fn classify_dsq(dsq_id: u64) -> u64 {
+        if dsq_id & scx_enums.SCX_DSQ_FLAG_BUILTIN == 0 {
+            dsq_id
+        } else if (dsq_id & scx_enums.SCX_DSQ_LOCAL_ON) == scx_enums.SCX_DSQ_LOCAL_ON {
+            scx_enums.SCX_DSQ_LOCAL_ON
+        } else {
+            // Catches both GLOBAL and LOCAL bits (1 or 2)
+            dsq_id & (scx_enums.SCX_DSQ_FLAG_BUILTIN | 3)
         }
     }
 
