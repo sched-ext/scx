@@ -2394,6 +2394,7 @@ impl<'a> App<'a> {
         } else if (dsq_id & scx_enums.SCX_DSQ_LOCAL_ON) == scx_enums.SCX_DSQ_LOCAL_ON {
             scx_enums.SCX_DSQ_LOCAL_ON
         } else {
+            // Catches both GLOBAL and LOCAL bits (1 or 2)
             dsq_id & (scx_enums.SCX_DSQ_FLAG_BUILTIN | 3)
         }
     }
