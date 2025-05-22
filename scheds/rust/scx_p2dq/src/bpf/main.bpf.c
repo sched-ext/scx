@@ -909,7 +909,12 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 	if (freq_control && taskc->dsq_index == nr_dsqs_per_llc-1) {
 		scx_bpf_cpuperf_set(task_cpu, SCX_CPUPERF_ONE);
 	}
-	taskc->last_run_at = bpf_ktime_get_ns();
+
+	u64 now = bpf_ktime_get_ns();
+	if (taskc->last_run_started == 0)
+		taskc->last_run_started = now;
+
+	taskc->last_run_at = now;
 
 	return 0;
 }
@@ -950,31 +955,35 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	trace("%s weight %d slice %llu used %llu scaled %llu",
 	      p->comm, p->scx.weight, last_dsq_slice_ns, used, scaled_used);
 
-	// On stopping determine if the task can move to a longer DSQ by
-	// comparing the used time to the scaled DSQ slice.
-	if (used >= ((9 * last_dsq_slice_ns) / 10)) {
-		if (taskc->dsq_index < nr_dsqs_per_llc - 1) {
-			taskc->dsq_index += 1;
-			stat_inc(P2DQ_STAT_DSQ_CHANGE);
-			trace("%s[%p]: DSQ inc %llu -> %u", p->comm, p,
-			      taskc->last_dsq_index, taskc->dsq_index);
+	if (!runnable) {
+		used = now - taskc->last_run_started;
+		// On stopping determine if the task can move to a longer DSQ by
+		// comparing the used time to the scaled DSQ slice.
+		if (used >= ((9 * last_dsq_slice_ns) / 10)) {
+			if (taskc->dsq_index < nr_dsqs_per_llc - 1) {
+				taskc->dsq_index += 1;
+				stat_inc(P2DQ_STAT_DSQ_CHANGE);
+				trace("%s[%p]: DSQ inc %llu -> %u", p->comm, p,
+				      taskc->last_dsq_index, taskc->dsq_index);
+			} else {
+				stat_inc(P2DQ_STAT_DSQ_SAME);
+			}
+		// If under half the slice was consumed move the task back down.
+		} else if (used < last_dsq_slice_ns / 2) {
+			if (taskc->dsq_index > 0) {
+				taskc->dsq_index -= 1;
+				stat_inc(P2DQ_STAT_DSQ_CHANGE);
+				trace("%s[%p]: DSQ dec %llu -> %u", p->comm, p,
+				      taskc->last_dsq_index, taskc->dsq_index);
+			} else {
+				stat_inc(P2DQ_STAT_DSQ_SAME);
+			}
 		} else {
 			stat_inc(P2DQ_STAT_DSQ_SAME);
 		}
-	// If under half the slice was consumed move the task back down.
-	} else if (used < last_dsq_slice_ns / 2) {
-		if (taskc->dsq_index > 0) {
-			taskc->dsq_index -= 1;
-			stat_inc(P2DQ_STAT_DSQ_CHANGE);
-			trace("%s[%p]: DSQ dec %llu -> %u", p->comm, p,
-			      taskc->last_dsq_index, taskc->dsq_index);
-		} else {
-			stat_inc(P2DQ_STAT_DSQ_SAME);
-		}
-	} else {
-		stat_inc(P2DQ_STAT_DSQ_SAME);
+		taskc->slice_ns = task_slice_ns(p, taskc->dsq_index);
+		taskc->last_run_started = 0;
 	}
-	taskc->slice_ns = task_slice_ns(p, taskc->dsq_index);
 }
 
 static __always_inline int dispatch_cpu(u64 dsq_id, s32 cpu, struct llc_ctx *llcx, int dsq_index)
@@ -1175,7 +1184,6 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 	taskc->dsq_index = init_dsq_index;
 	taskc->last_dsq_index = init_dsq_index;
 	taskc->slice_ns = dsq_time_slice(init_dsq_index);
-	taskc->runnable = true;
 	taskc->all_cpus = p->cpus_ptr == &p->cpus_mask && p->nr_cpus_allowed == nr_cpus;
 	p->scx.dsq_vtime = llcx->vtime;
 
