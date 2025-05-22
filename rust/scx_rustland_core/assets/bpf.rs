@@ -74,15 +74,15 @@ pub const RL_CPU_ANY: i32 = bpf_intf::RL_CPU_ANY as i32;
 // Task queued for scheduling from the BPF component (see bpf_intf::queued_task_ctx).
 #[derive(Debug, PartialEq, Eq, PartialOrd, Clone)]
 pub struct QueuedTask {
-    pub pid: i32,              // pid that uniquely identifies a task
-    pub cpu: i32,              // CPU where the task is running
-    pub nr_cpus_allowed: u64,  // Number of CPUs that the task can use
-    pub flags: u64,            // task enqueue flags
-    pub start_ts: u64,         // Timestamp since last time the task ran on a CPU
-    pub stop_ts: u64,          // Timestamp since last time the task released a CPU
-    pub exec_runtime: u64,     // Total cpu time since last sleep
-    pub weight: u64,           // Task static priority
-    pub vtime: u64,            // Current vruntime
+    pub pid: i32,             // pid that uniquely identifies a task
+    pub cpu: i32,             // CPU where the task is running
+    pub nr_cpus_allowed: u64, // Number of CPUs that the task can use
+    pub flags: u64,           // task enqueue flags
+    pub start_ts: u64,        // Timestamp since last time the task ran on a CPU
+    pub stop_ts: u64,         // Timestamp since last time the task released a CPU
+    pub exec_runtime: u64,    // Total cpu time since last sleep
+    pub weight: u64,          // Task static priority
+    pub vtime: u64,           // Current vruntime
 }
 
 // Task queued for dispatching to the BPF component (see bpf_intf::dispatched_task_ctx).
@@ -180,7 +180,8 @@ fn set_ctrlc_handler(shutdown: Arc<AtomicBool>) -> Result<(), anyhow::Error> {
         let shutdown_clone = shutdown.clone();
         ctrlc::set_handler(move || {
             shutdown_clone.store(true, Ordering::Relaxed);
-        }).expect("Error setting Ctrl-C handler");
+        })
+        .expect("Error setting Ctrl-C handler");
     });
     Ok(())
 }
@@ -335,7 +336,8 @@ impl<'cb> BpfScheduler<'cb> {
         cache_lvl: usize,
         enable_sibling_cpu_fn: &SiblingCpuFn,
     ) -> Result<(), std::io::Error>
-        where SiblingCpuFn: Fn(&mut BpfSkel<'_>, usize, usize, usize) -> Result<(), u32>
+    where
+        SiblingCpuFn: Fn(&mut BpfSkel<'_>, usize, usize, usize) -> Result<(), u32>,
     {
         // Determine the list of CPU IDs associated to each cache node.
         let mut cache_id_map: HashMap<usize, Vec<usize>> = HashMap::new();
@@ -517,7 +519,8 @@ impl<'cb> BpfScheduler<'cb> {
             LIBBPF_STOP => {
                 // A valid task is received, convert data to a proper task struct.
                 let task = unsafe { EnqueuedMessage::from_bytes(&BUF.0).to_queued_task() };
-                self.skel.maps.bss_data.nr_queued = self.skel.maps.bss_data.nr_queued.saturating_sub(1);
+                self.skel.maps.bss_data.nr_queued =
+                    self.skel.maps.bss_data.nr_queued.saturating_sub(1);
 
                 Ok(Some(task))
             }
