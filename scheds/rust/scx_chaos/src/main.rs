@@ -9,7 +9,7 @@ use scx_chaos::Trait;
 
 use scx_p2dq::SchedulerOpts as P2dqOpts;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use clap::Parser;
 use log::info;
 use nix::unistd::Pid;
@@ -208,10 +208,6 @@ fn main() -> Result<()> {
         simplelog::ColorChoice::Auto,
     )?;
 
-    if args.pid.is_some() {
-        return Err(anyhow!("args.pid is not yet implemented"));
-    }
-
     let shutdown = Arc::new((Mutex::new(false), Condvar::new()));
 
     ctrlc::set_handler({
@@ -240,6 +236,29 @@ fn main() -> Result<()> {
             Ok(())
         }
     });
+
+    if let Some(pid) = args.pid {
+        info!("Monitoring process with PID: {}", pid);
+
+        let is_process_running = |pid: libc::pid_t| -> bool {
+            unsafe {
+                // SAFETY: kill with signal 0 only runs validity checks. There's no chance of
+                // memory unsafety here.
+                libc::kill(pid, 0) == 0
+            }
+        };
+
+        while is_process_running(pid) && !*shutdown.0.lock().unwrap() {
+            if scheduler_thread.is_finished() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        if !is_process_running(pid) {
+            info!("app under test terminated, exiting...");
+        }
+    }
 
     let mut should_run_app = !args.args.is_empty();
     while should_run_app {
@@ -274,7 +293,8 @@ fn main() -> Result<()> {
         }
     }
 
-    if !args.args.is_empty() {
+    // Notify shutdown if we're exiting due to args or pid termination
+    if !args.args.is_empty() || args.pid.is_some() {
         let (lock, cvar) = &*shutdown;
         *lock.lock().unwrap() = true;
         cvar.notify_all();
