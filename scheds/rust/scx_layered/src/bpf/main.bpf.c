@@ -1866,7 +1866,7 @@ bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
 	return false;
 }
 
-bool sib_keep_idle(s32 cpu, struct task_struct *prev __arg_trusted, struct cpu_ctx *cpuc)
+bool __always_inline sib_keep_idle(s32 cpu, struct task_struct *prev __arg_trusted, struct cpu_ctx *cpuc)
 {
 	struct task_ctx *prev_taskc = NULL;
 	struct layer *prev_layer = NULL;
