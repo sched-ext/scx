@@ -552,6 +552,20 @@ out_put_cpumask:
 }
 
 /*
+ * Compatible wrapper for scx_bpf_select_cpu_and().
+ *
+ * Remove this wrapper with the custom pick_idle_cpu() and rely on
+ * scx_bpf_select_cpu_and() once it's available in all supported kernels.
+ */
+static s32 __COMPAT_pick_idle_cpu(struct task_struct *p, s32 prev_cpu)
+{
+	if (bpf_ksym_exists(scx_bpf_select_cpu_and))
+		return scx_bpf_select_cpu_and(p, prev_cpu, 0, p->cpus_ptr, 0);
+
+	return pick_idle_cpu(p, prev_cpu);
+}
+
+/*
  * Dispatch a task to a target per-CPU DSQ, waking up the corresponding CPU, if
  * needed.
  */
@@ -701,7 +715,7 @@ int rs_select_cpu(struct task_cpu_arg *input)
 		return -EINVAL;
 
 	bpf_rcu_read_lock();
-	cpu = pick_idle_cpu(p, input->cpu);
+	cpu = __COMPAT_pick_idle_cpu(p, input->cpu);
 	bpf_rcu_read_unlock();
 
 	bpf_task_release(p);
@@ -783,7 +797,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (builtin_idle && is_queued_wakeup(p, enq_flags) &&
 	    !scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
-		s32 cpu = pick_idle_cpu(p, scx_bpf_task_cpu(p));
+		s32 cpu = __COMPAT_pick_idle_cpu(p, scx_bpf_task_cpu(p));
 
 		if (cpu >= 0) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, SCX_SLICE_DFL, enq_flags);
