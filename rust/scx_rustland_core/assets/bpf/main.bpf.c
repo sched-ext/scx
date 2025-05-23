@@ -291,7 +291,7 @@ static inline bool is_kthread(const struct task_struct *p)
  */
 static inline bool is_kswapd(const struct task_struct *p)
 {
-        return p->flags & PF_KSWAPD;
+        return p->flags & (PF_KSWAPD | PF_KCOMPACTD);
 }
 
 /*
@@ -558,84 +558,64 @@ out_put_cpumask:
 static void dispatch_task(const struct dispatched_task_ctx *task)
 {
 	struct task_struct *p;
-	struct task_ctx *tctx;
+	s32 prev_cpu;
 
 	/* Ignore entry if the task doesn't exist anymore */
 	p = bpf_task_from_pid(task->pid);
 	if (!p)
 		return;
-
-	dbg_msg("dispatch: pid=%d (%s) cpu=0x%lx vtime=%llu slice=%llu",
-		p->pid, p->comm, task->cpu, task->vtime, task->slice_ns);
+	prev_cpu = scx_bpf_task_cpu(p);
 
 	/*
 	 * Dispatch task to the shared DSQ if the user-space scheduler
 	 * didn't select any specific target CPU.
 	 */
 	if (task->cpu == RL_CPU_ANY) {
-		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ, task->slice_ns, task->vtime, task->flags);
-		scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_IDLE);
+		scx_bpf_dsq_insert_vtime(p, SHARED_DSQ,
+					 task->slice_ns, task->vtime, task->flags);
+		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 		goto out_release;
 	}
 
 	/*
-	 * If a task can only run on a single CPU, dispatch it directly to
-	 * the only CPU where it can run, independently on what the
-	 * user-space scheduler has decided.
+	 * If a task can only run on a single CPU or if the target CPU
+	 * selected by the user-space scheduler is not valid, dispatch it
+	 * to the previously used CPU, independently on what the user-space
+	 * scheduler has decided.
 	 */
-	if (p->nr_cpus_allowed == 1) {
-		s32 cpu = scx_bpf_task_cpu(p);
-
-		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
+	if (p->nr_cpus_allowed == 1 || !bpf_cpumask_test_cpu(task->cpu, p->cpus_ptr)) {
+		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(prev_cpu),
 					 task->slice_ns, task->vtime, task->flags);
-		if (cpu != task->cpu)
+		if (prev_cpu != task->cpu)
 			__sync_fetch_and_add(&nr_bounce_dispatches, 1);
-		if (cpu != bpf_get_smp_processor_id())
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-
+		scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 		goto out_release;
 	}
 
 	/*
-	 * Update task's time slice in its context.
-	 */
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		goto out_release;
-
-	/* Check if the CPU is valid, according to the cpumask */
-	if (!bpf_cpumask_test_cpu(task->cpu, p->cpus_ptr)) {
-		s32 cpu = scx_bpf_task_cpu(p);
-
-		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
-					 task->slice_ns, task->vtime, task->flags);
-		__sync_fetch_and_add(&nr_bounce_dispatches, 1);
-		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-		goto out_release;
-	}
-
-	/*
-	 * Dispatch a task to a specific per-CPU DSQ if the target CPU can be
-	 * used (according to the cpumask), otherwise cancel the dispatch.
-	 *
-	 * This can happen if the user-space scheduler dispatches the task to
-	 * an invalid CPU. In this case cancelling the dispatch allows to
-	 * prevent potential stalls in the scheduler, since the task will
-	 * be re-enqueued by the core sched-ext code, potentially selecting
-	 * a different cpu and a different cpumask.
+	 * Dispatch a task to a target CPU selected by the user-space
+	 * scheduler.
 	 */
 	scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(task->cpu),
 				 task->slice_ns, task->vtime, task->flags);
 
-	/* If the cpumask is not valid anymore, ignore the dispatch event */
+	/*
+	 * If the cpumask is not valid anymore, ignore the dispatch event.
+	 *
+	 * This can happen if the task has changed its affinity and the
+	 * target CPU has become invalid. In this case cancelling the
+	 * dispatch allows to prevent potential stalls in the scheduler,
+	 * since the task will be re-enqueued by the core sched-ext code,
+	 * potentially selecting a different CPU.
+	 */
 	if (!bpf_cpumask_test_cpu(task->cpu, p->cpus_ptr)) {
 		scx_bpf_dispatch_cancel();
 		__sync_fetch_and_add(&nr_cancel_dispatches, 1);
 		goto out_release;
 	}
 
-	if (task->cpu != bpf_get_smp_processor_id())
-		scx_bpf_kick_cpu(task->cpu, SCX_KICK_IDLE);
+	__sync_fetch_and_add(&nr_user_dispatches, 1);
+	scx_bpf_kick_cpu(task->cpu, SCX_KICK_IDLE);
 
 out_release:
 	bpf_task_release(p);
@@ -672,7 +652,8 @@ s32 BPF_STRUCT_OPS(rustland_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 */
 	cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags & !SCX_WAKE_SYNC, &is_idle);
 	if (is_idle && !scx_bpf_dsq_nr_queued(SHARED_DSQ)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
+		scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
+					 SCX_SLICE_DFL, p->scx.dsq_vtime, 0);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 	}
 
@@ -786,8 +767,11 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 		s32 cpu = pick_idle_cpu(p, scx_bpf_task_cpu(p));
 
 		if (cpu >= 0) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, SCX_SLICE_DFL, enq_flags);
+			scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu),
+					   SCX_SLICE_DFL, p->scx.dsq_vtime, enq_flags);
 			__sync_fetch_and_add(&nr_kernel_dispatches, 1);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+
 			return;
 		}
 	}
@@ -856,7 +840,6 @@ static long handle_dispatched_task(struct bpf_dynptr *dynptr, void *context)
 		return 0;
 
 	dispatch_task(task);
-	__sync_fetch_and_add(&nr_user_dispatches, 1);
 
 	return !!scx_bpf_dispatch_nr_slots();
 }
