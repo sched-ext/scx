@@ -12,6 +12,8 @@ use serde::Serialize;
 use crate::bpf_intf;
 use crate::LayerGrowthAlgo;
 
+use scx_utils::Cpumask;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct LayerConfig {
@@ -21,6 +23,8 @@ pub struct LayerConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LayerSpec {
     pub name: String,
+    #[serde(skip)]
+    pub cpuset: Option<Cpumask>,
     pub comment: Option<String>,
     pub template: Option<LayerMatch>,
     pub matches: Vec<Vec<LayerMatch>>,
