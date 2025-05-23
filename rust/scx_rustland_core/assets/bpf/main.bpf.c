@@ -291,7 +291,7 @@ static inline bool is_kthread(const struct task_struct *p)
  */
 static inline bool is_kswapd(const struct task_struct *p)
 {
-        return p->flags & PF_KSWAPD;
+        return p->flags & (PF_KSWAPD | PF_KCOMPACTD);
 }
 
 /*
