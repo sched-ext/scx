@@ -23,6 +23,7 @@ use anyhow::Context;
 use anyhow::Result;
 
 use plain::Plain;
+use procfs::process::all_processes;
 
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
@@ -250,8 +251,8 @@ impl<'cb> BpfScheduler<'cb> {
             skel.struct_ops.rustland_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
         }
         skel.struct_ops.rustland_mut().exit_dump_len = exit_dump_len;
-
-        skel.maps.bss_data.usersched_pid = std::process::id();
+        skel.maps.rodata_data.usersched_pid = std::process::id();
+        skel.maps.rodata_data.khugepaged_pid = Self::khugepaged_pid();
         skel.maps.rodata_data.builtin_idle = builtin_idle;
         skel.maps.rodata_data.debug = debug;
 
@@ -299,6 +300,29 @@ impl<'cb> BpfScheduler<'cb> {
             dispatched,
             struct_ops,
         })
+    }
+
+    // Return the PID of khugepaged, if present, otherwise return 0.
+    fn khugepaged_pid() -> u32 {
+        let procs = match all_processes() {
+            Ok(p) => p,
+            Err(_) => return 0,
+        };
+
+        for proc in procs {
+            let proc = match proc {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            if let Ok(stat) = proc.stat() {
+                if proc.exe().is_err() && stat.comm == "khugepaged" {
+                    return proc.pid() as u32;
+                }
+            }
+        }
+
+        0
     }
 
     fn enable_sibling_cpu(

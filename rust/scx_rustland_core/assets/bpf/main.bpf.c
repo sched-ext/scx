@@ -62,7 +62,8 @@ UEI_DEFINE(uei);
 /*
  * Scheduler attributes and statistics.
  */
-u32 usersched_pid; /* User-space scheduler PID */
+const volatile u32 usersched_pid; /* User-space scheduler PID */
+const volatile u32 khugepaged_pid; /* khugepaged PID */
 u64 usersched_last_run_at; /* Timestamp of the last user-space scheduler execution */
 static u64 nr_cpu_ids; /* Maximum possible CPU number */
 
@@ -292,6 +293,14 @@ static inline bool is_kthread(const struct task_struct *p)
 static inline bool is_kswapd(const struct task_struct *p)
 {
         return p->flags & (PF_KSWAPD | PF_KCOMPACTD);
+}
+
+/*
+ * Return true if the target task @p is khugepaged, false otherwise.
+ */
+static inline bool is_khugepaged(const struct task_struct *p)
+{
+	return khugepaged_pid && p->pid == khugepaged_pid;
 }
 
 /*
@@ -752,7 +761,7 @@ void BPF_STRUCT_OPS(rustland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * potentially stall the entire system if they are blocked for too long
 	 * (i.e., ksoftirqd/N, rcuop/N, etc.).
 	 */
-	if (is_kswapd(p) || (is_kthread(p) && p->nr_cpus_allowed == 1)) {
+	if ((is_kthread(p) && p->nr_cpus_allowed == 1) || is_kswapd(p) || is_khugepaged(p)) {
                 scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, enq_flags);
 		__sync_fetch_and_add(&nr_kernel_dispatches, 1);
 		return;
