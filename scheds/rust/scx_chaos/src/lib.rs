@@ -97,6 +97,10 @@ pub enum Trait {
         min_freq: u32,
         max_freq: u32,
     },
+    PerfDegradation {
+        frequency: f64,
+        degradation_frac7: u64,
+    },
 }
 
 impl Trait {
@@ -104,6 +108,7 @@ impl Trait {
         match self {
             Self::RandomDelays { .. } => bpf_intf::chaos_trait_kind_CHAOS_TRAIT_RANDOM_DELAYS,
             Self::CpuFreq { .. } => bpf_intf::chaos_trait_kind_CHAOS_TRAIT_CPU_FREQ,
+            Self::PerfDegradation { .. } => bpf_intf::chaos_trait_kind_CHAOS_TRAIT_DEGRADATION,
         }
     }
 
@@ -111,6 +116,7 @@ impl Trait {
         match self {
             Self::RandomDelays { frequency, .. } => *frequency,
             Self::CpuFreq { frequency, .. } => *frequency,
+            Self::PerfDegradation { frequency, .. } => *frequency,
         }
     }
 }
@@ -278,6 +284,14 @@ impl Builder<'_> {
                     open_skel.maps.rodata_data.cpu_freq_max = *max_freq;
                     // Don't let p2dq control frequency
                     open_skel.maps.rodata_data.freq_control = false;
+                }
+                Trait::PerfDegradation {
+                    frequency,
+                    degradation_frac7,
+                } => {
+                    open_skel.maps.rodata_data.degradation_freq_frac32 =
+                        (frequency * 2_f64.powf(32_f64)) as u32;
+                    open_skel.maps.rodata_data.degradation_frac7 = *degradation_frac7;
                 }
             }
         }
