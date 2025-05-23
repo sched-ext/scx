@@ -19,6 +19,7 @@ mod node_data;
 mod perf_event;
 mod perfetto_trace;
 pub mod protos;
+mod search;
 mod stats;
 mod theme;
 pub mod tracer;
@@ -38,6 +39,7 @@ pub use perf_event::available_perf_events;
 pub use perf_event::PerfEvent;
 pub use perfetto_trace::PerfettoTraceManager;
 pub use protos::*;
+pub use search::Search;
 pub use stats::StatAggregation;
 pub use stats::VecStats;
 pub use theme::AppTheme;
@@ -57,7 +59,7 @@ pub const TRACE_FILE_PREFIX: &str = "scxtop_trace";
 pub const STATS_SOCKET_PATH: &str = "/var/run/scx/root/stats";
 pub const LICENSE: &str = "Copyright (c) Meta Platforms, Inc. and affiliates.
 
-This software may be used and distributed according to the terms of the 
+This software may be used and distributed according to the terms of the
 GNU General Public License version 2.";
 pub const SCHED_NAME_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 
