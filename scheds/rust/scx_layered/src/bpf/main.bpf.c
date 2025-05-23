@@ -57,6 +57,7 @@ volatile u64 layer_refresh_seq_avgruntime;
 
 /* Flag to enable or disable antistall feature */
 const volatile bool enable_antistall = true;
+const volatile bool enable_match_debug = false;
 const volatile bool enable_gpu_support = false;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
@@ -209,6 +210,13 @@ static bool cpuc_in_layer(struct cpu_ctx *cpuc, struct layer *layer)
 		return cpuc->layer_id == layer->id;
 }
 
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, MAX_TASKS);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+} layer_match_dbg SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -2234,7 +2242,7 @@ static __noinline bool match_one(struct layer_match *match,
 int match_layer(u32 layer_id, struct task_struct *p __arg_trusted, const char *cgrp_path)
 {
 	struct layer *layer;
-	u32 nr_match_ors;
+	u32 nr_match_ors, pid;
 	u64 or_id, and_id;
 
 	if (layer_id >= nr_layers)
@@ -2274,6 +2282,9 @@ int match_layer(u32 layer_id, struct task_struct *p __arg_trusted, const char *c
 		}
 
 		if (matched) {
+			if (enable_match_debug && (pid = p->pid))
+				bpf_map_update_elem(&layer_match_dbg, &pid, &layer_id, BPF_ANY);
+			
 			return 0;
 		}
 	}
@@ -2935,10 +2946,14 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 {
 	struct cpu_ctx *cpuc;
 	struct task_ctx *taskc;
+	u32 pid;
 
 	if (args->cancelled) {
 		return;
 	}
+	
+	if (enable_match_debug && (pid = p->pid))
+		bpf_map_delete_elem(&layer_match_dbg, &pid);
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
 		return;
