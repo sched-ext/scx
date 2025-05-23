@@ -573,6 +573,11 @@ struct VmSettings {
     //
     // The original value will be restored when the user-space scheduler exits.
     compact_unevictable_allowed: i32,
+
+    // Also store the the transparent huge-pages default settings and disable them system-wide, to
+    // prevent khugepaged/kcompactd from unmapping pages in the user-space scheduler task address
+    // space.
+    thp_enabled_value: String,
 }
 
 impl VmSettings {
@@ -613,6 +618,35 @@ impl VmSettings {
         Ok(()) // Return Ok if writing was successful
     }
 
+    // Read the raw string value from a sysfs file
+    fn read_sysfs(&self, file_path: &str) -> Result<String, String> {
+        let file = File::open(file_path)
+            .map_err(|err| format!("Failed to open {}: {}", file_path, err))?;
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .map_err(|err| format!("Failed to read {}: {}", file_path, err))?;
+
+        Ok(line.trim().to_string())
+    }
+
+    // Write a raw string value to a sysfs file
+    fn write_sysfs(&self, file_path: &str, value: &str) -> Result<(), String> {
+        let mut file = File::create(file_path)
+            .map_err(|err| format!("Failed to open {}: {}", file_path, err))?;
+        write!(file, "{}", value)
+            .map_err(|err| format!("Failed to write to {}: {}", file_path, err))?;
+
+        Ok(())
+    }
+
+    fn extract_first_bracketed_word(s: &str) -> Option<&str> {
+        let start = s.find('[')? + 1;
+        let end = s[start..].find(']')? + start;
+        Some(&s[start..end])
+    }
+
     // Save all the sysctl VM settings in the internal state.
     fn save(&self) -> Result<(), String> {
         let compact_unevictable_allowed = "/proc/sys/vm/compact_unevictable_allowed";
@@ -621,6 +655,13 @@ impl VmSettings {
             VM.compact_unevictable_allowed = value;
         };
         self.write_procfs(compact_unevictable_allowed, 0)?;
+
+        let thp_enabled = "/sys/kernel/mm/transparent_hugepage/enabled";
+        let thp_value = self.read_sysfs(thp_enabled)?;
+        unsafe {
+            VM.thp_enabled_value = thp_value;
+        }
+        self.write_sysfs(thp_enabled, "never")?;
 
         Ok(())
     }
@@ -631,6 +672,11 @@ impl VmSettings {
         let value = unsafe { VM.compact_unevictable_allowed };
         self.write_procfs(compact_unevictable_allowed, value)?;
 
+        let thp_enabled = "/sys/kernel/mm/transparent_hugepage/enabled";
+        let thp_value =
+            Self::extract_first_bracketed_word(unsafe { &VM.thp_enabled_value }).unwrap();
+        self.write_sysfs(thp_enabled, thp_value)?;
+
         Ok(())
     }
 }
@@ -638,4 +684,5 @@ impl VmSettings {
 // Special sysctl VM settings.
 static mut VM: VmSettings = VmSettings {
     compact_unevictable_allowed: 0,
+    thp_enabled_value: String::new(),
 };
