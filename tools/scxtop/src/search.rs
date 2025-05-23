@@ -1,5 +1,4 @@
-use fuzzy_matcher::skim::SkimMatcherV2;
-use fuzzy_matcher::FuzzyMatcher;
+use std::cmp::min;
 
 #[derive(Debug, Clone)]
 pub struct Search {
@@ -21,18 +20,41 @@ impl Search {
             .collect()
     }
 
+    /* We'll want check fuzzily in three ways using the following scoring system:
+     * 1: Is it a substring (contains)? 100 points
+     * 2: Is it contained in the string but not consecutive (contains_spread)? 100 - (length of input spread out - input length) -> contains_spread
+     * 3: If we take out one letter, is it now (1) or (2) - (contains_with_typo)? 75 - (length of input spread out - input length) -> contains_with_typo
+     *
+     * This method will then return a Vec<String> with the highest scoring entries at the lowest indices
+     */
     pub fn fuzzy_search(&self, input: &str) -> Vec<String> {
-        let matcher = SkimMatcherV2::default().ignore_case();
+        let input = &input.to_lowercase();
 
-        let mut fuzzy_results: Vec<(&String, i64)> = self
+        let mut fuzzy_results: Vec<(&String, u32)> = self
             .entries
             .iter()
             .filter_map(|entry| {
-                matcher
-                    .fuzzy_match(entry, input)
-                    .map(|score| (entry, score))
+                let entry_lower = &entry.to_lowercase();
+                entry_lower
+                    .contains(input)
+                    .then_some((entry, 100))
+                    .or_else(|| {
+                        contains_spread(entry_lower, input).map(|score| (entry, 100 - score))
+                    })
             })
             .collect();
+
+        // We only check if our input has a typo if we haven't matched to anything else (for performance reasons)
+        if fuzzy_results.is_empty() {
+            fuzzy_results = self
+                .entries
+                .iter()
+                .filter_map(|entry| {
+                    contains_with_typo(&entry.to_lowercase(), input)
+                        .map(|score| (entry, 75 - score))
+                })
+                .collect()
+        }
 
         fuzzy_results.sort_by(|a, b| b.1.cmp(&a.1));
 
@@ -41,6 +63,65 @@ impl Search {
             .map(|(entry, _)| entry.clone())
             .collect()
     }
+}
+
+/* Returns Some(n) if all characters of 'pattern' appear in order within 'word',
+ * allowing for other characters in between. 'n' is the number of extra characters present.
+ * Returns None if the pattern does not appear or does not appear in order.
+ *
+ * This operates at the byte level, so Unicode scores may be unintuitive but will always be Some
+ * if the pattern matches and None if it does not. See test_contains_spread_unicode for details.
+ */
+fn contains_spread(word: &str, pattern: &str) -> Option<u32> {
+    if pattern.is_empty() {
+        return Some(0);
+    }
+
+    let word_bytes = word.as_bytes();
+    let pattern_bytes = pattern.as_bytes();
+
+    let mut start = 0;
+    let mut pat_idx = 0;
+
+    for (i, &byte) in word_bytes.iter().enumerate() {
+        if byte == pattern_bytes[pat_idx] {
+            if pat_idx == 0 {
+                start = i;
+            }
+
+            pat_idx += 1;
+
+            if pat_idx == pattern_bytes.len() {
+                let total_len = i - start + 1;
+                return Some((total_len - pattern_bytes.len()) as u32);
+            }
+        }
+    }
+    None
+}
+
+// Checks for typos by removing each character in pattern, one by one, and calling contains_spread
+fn contains_with_typo(word: &str, pattern: &str) -> Option<u32> {
+    if pattern.is_empty() {
+        return Some(0);
+    }
+
+    let mut modified_pattern = String::with_capacity(pattern.len() - 1);
+    let mut result = None;
+
+    for i in 0..pattern.len() {
+        modified_pattern.push_str(&pattern[..i]);
+        modified_pattern.push_str(&pattern[i + 1..]);
+
+        result = match (result, contains_spread(word, &modified_pattern)) {
+            (Some(score_a), Some(score_b)) => Some(min(score_a, score_b)),
+            (Some(score), None) | (None, Some(score)) => Some(score),
+            (_, _) => None,
+        };
+
+        modified_pattern.clear();
+    }
+    result
 }
 
 #[cfg(test)]
@@ -72,6 +153,96 @@ mod tests {
         .into_iter()
         .map(String::from)
         .collect()
+    }
+
+    #[test]
+    fn test_contains_spread_empty() {
+        assert_eq!(contains_spread("btrfs:btrfs_reserve_extent", ""), Some(0));
+    }
+
+    #[test]
+    fn test_contains_spread_basic() {
+        let word = "syscalls:sys_exit_pselect6";
+
+        let result_a = contains_spread(word, "exit");
+        let result_b = contains_spread(word, "sysexit");
+
+        assert_eq!(result_a, Some(0));
+        assert_eq!(result_b, Some(10));
+    }
+
+    #[test]
+    fn test_contains_spread_complex() {
+        let word = "xhci-hcd:xhci_address_ctrl_ctx";
+
+        let result_a = contains_spread(word, "hides");
+        let result_b = contains_spread(word, "xxx");
+
+        assert_eq!(result_a, Some(14));
+        assert_eq!(result_b, Some(27));
+    }
+
+    #[test]
+    fn test_contains_spread_cannot_find() {
+        let word = "btrfs:btrfs_reserve_extent";
+
+        let result_a = contains_spread(word, "trees");
+        let result_b = contains_spread(word, "z");
+
+        assert_eq!(result_a, None);
+        assert_eq!(result_b, None);
+    }
+
+    #[test]
+    fn test_contains_spread_unicode() {
+        let word = "こあういえお";
+        let input = "あい";
+
+        // Word Bytes: [227, 129, 147, 227, 129, 130, 227, 129, 134, 227, 129, 132, 227, 129, 136, 227, 129, 138]
+        // Pattern Bytes: [227, 129, 130, 227, 129, 132]
+        // The matching begins at index 0 and end at index 11, therefore total_len(11) - pattern_len(5) = 6
+        assert_eq!(contains_spread(word, input), Some(6));
+    }
+
+    #[test]
+    fn test_contains_with_typo_empty() {
+        assert_eq!(
+            contains_with_typo("btrfs:btrfs_reserve_extent", ""),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn test_contains_with_typo_basic() {
+        let word = "syscalls:sys_exit_pselect6";
+
+        let result_a = contains_with_typo(word, "exlt");
+        let result_b = contains_with_typo(word, "sbsexit");
+
+        assert_eq!(result_a, Some(1));
+        assert_eq!(result_b, Some(11));
+    }
+
+    #[test]
+    fn test_contains_with_typo_complex() {
+        let word = "xhci-hcd:xhci_address_ctrl_ctx";
+
+        let result_a = contains_with_typo(word, "hizdes");
+        let result_b = contains_with_typo(word, "xxxx");
+
+        assert_eq!(result_a, Some(14));
+        assert_eq!(result_b, Some(27));
+    }
+
+    #[test]
+    fn test_contains_with_typo_cannot_find() {
+        let word = "btrfs:btrfs_reserve_extent";
+
+        let result_a = contains_with_typo(word, "btrzz");
+        let result_b = contains_with_typo(word, "ww");
+
+        assert_eq!(result_a, None);
+        assert_eq!(result_b, None);
     }
 
     #[test]
@@ -137,6 +308,16 @@ mod tests {
         let events = test_events();
         let search = Search::new(events);
         let results = search.fuzzy_search("alrMcacEL");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], "alarmtimer:alarmtimer_cancel".to_string());
+    }
+
+    #[test]
+    fn test_fuzzy_search_long_complex_input() {
+        let events = test_events();
+        let search = Search::new(events);
+        let results = search.fuzzy_search("alrMtIImeralarmmer_cacEL");
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0], "alarmtimer:alarmtimer_cancel".to_string());
