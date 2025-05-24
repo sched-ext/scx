@@ -1100,7 +1100,7 @@ out_put:
 	if (cpu >= 0) {
 		if (READ_ONCE(layer->check_no_idle))
 			WRITE_ONCE(layer->check_no_idle, false);
-	} else if (taskc->all_cpus_allowed || task_cpuset_aligned(p, taskc)) {
+	} else if (taskc->all_cpus_allowed || (enable_cpuset && task_cpuset_aligned(p, taskc))) {
 		if (!READ_ONCE(layer->check_no_idle))
 			WRITE_ONCE(layer->check_no_idle, true);
 	}
@@ -1465,7 +1465,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * with open layers on non-saturated machines to avoid possible stalls.
 	 */
 	if ((!taskc->all_cpus_allowed &&
-		!taskc->task_cpuset_aligned &&
+		!(enable_cpuset && taskc->task_cpuset_aligned) &&
 		!(layer->allow_node_aligned && taskc->cpus_node_aligned)) || 
 		!layer->nr_cpus) {
 		taskc->dsq_id = task_cpuc->lo_fb_dsq_id;
@@ -2753,14 +2753,16 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 {
 	u32 node_id, layer_id;
 	const struct cpumask *layer_cpuset_cpumask;
-	
-	taskc->task_cpuset_aligned = false;
 
-	bpf_for(layer_id, 0, MAX_LAYERS) {
-		if ((layer_cpuset_cpumask = lookup_layer_cpuset_cpumask(layer_id)) && 
-			bpf_cpumask_equal(layer_cpuset_cpumask, cpumask)) {
-			taskc->task_cpuset_aligned = true;
-			break;
+	if (enable_cpuset) {
+		taskc->task_cpuset_aligned = false;
+
+		bpf_for(layer_id, 0, MAX_LAYERS) {
+			if ((layer_cpuset_cpumask = lookup_layer_cpuset_cpumask(layer_id)) && 
+				bpf_cpumask_equal(layer_cpuset_cpumask, cpumask)) {
+				taskc->task_cpuset_aligned = true;
+				break;
+			}
 		}
 	}
 
