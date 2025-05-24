@@ -96,6 +96,7 @@ lazy_static! {
             LayerSpec {
                 name: "batch".into(),
                 comment: Some("tasks under system.slice or tasks with nice value > 0".into()),
+                cpuset: None,
                 template: None,
                 matches: vec![
                     vec![LayerMatch::CgroupPrefix("system.slice/".into())],
@@ -134,6 +135,7 @@ lazy_static! {
             LayerSpec {
                 name: "immediate".into(),
                 comment: Some("tasks under workload.slice with nice value < 0".into()),
+                cpuset: None,
                 template: None,
                 matches: vec![vec![
                     LayerMatch::CgroupPrefix("workload.slice/".into()),
@@ -168,6 +170,7 @@ lazy_static! {
             LayerSpec {
                 name: "stress-ng".into(),
                 comment: Some("stress-ng test layer".into()),
+                cpuset: None,
                 template: None,
                 matches: vec![
                     vec![LayerMatch::CommPrefix("stress-ng".into()),],
@@ -206,6 +209,7 @@ lazy_static! {
             LayerSpec {
                 name: "normal".into(),
                 comment: Some("the rest".into()),
+                cpuset: None,
                 template: None,
                 matches: vec![vec![]],
                 kind: LayerKind::Grouped {
@@ -1455,6 +1459,17 @@ impl<'a> Scheduler<'a> {
                 }
             });
 
+            match &spec.cpuset {
+                Some(mask) => {
+                    Self::update_cpumask(&mask, &mut layer.cpuset);
+                }
+                None => {
+                    for i in 0..layer.cpuset.len() {
+                        layer.cpuset[i] = u8::MAX;
+                    }
+                }
+            };
+
             perf_set |= layer.perf > 0;
         }
 
@@ -2091,15 +2106,19 @@ impl<'a> Scheduler<'a> {
         Ok(sched)
     }
 
-    fn update_bpf_layer_cpumask(layer: &Layer, bpf_layer: &mut types::layer) {
-        trace!("[{}] Updating BPF CPUs: {}", layer.name, &layer.cpus);
-        for cpu in 0..layer.cpus.len() {
-            if layer.cpus.test_cpu(cpu) {
-                bpf_layer.cpus[cpu / 8] |= 1 << (cpu % 8);
+    fn update_cpumask(mask: &Cpumask, bpfmask: &mut [u8]) {
+        for cpu in 0..mask.len() {
+            if mask.test_cpu(cpu) {
+                bpfmask[cpu / 8] |= 1 << (cpu % 8);
             } else {
-                bpf_layer.cpus[cpu / 8] &= !(1 << (cpu % 8));
+                bpfmask[cpu / 8] &= !(1 << (cpu % 8));
             }
         }
+    }
+
+    fn update_bpf_layer_cpumask(layer: &Layer, bpf_layer: &mut types::layer) {
+        trace!("[{}] Updating BPF CPUs: {}", layer.name, &layer.cpus);
+        Self::update_cpumask(&layer.cpus, &mut bpf_layer.cpus);
 
         bpf_layer.nr_cpus = layer.nr_cpus as u32;
         for (llc_id, &nr_llc_cpus) in layer.nr_llc_cpus.iter().enumerate() {
@@ -2876,13 +2895,27 @@ fn traverse_sysfs(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn expand_template(rule: &LayerMatch) -> Result<Vec<LayerMatch>> {
+fn find_cpumask(cgroup: &str) -> Cpumask {
+    let mut path = String::from(cgroup);
+    path.push_str("cpuset.cpus.effective");
+
+    let description = fs::read_to_string(&mut path).unwrap();
+
+    Cpumask::from_cpulist(&description).unwrap()
+}
+
+fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
     match rule {
         LayerMatch::CgroupSuffix(suffix) => Ok(traverse_sysfs(Path::new("/sys/fs/cgroup"))?
             .into_iter()
             .map(|cgroup| String::from(cgroup.to_str().expect("could not parse cgroup path")))
             .filter(|cgroup| cgroup.ends_with(suffix))
-            .map(|cgroup| LayerMatch::CgroupSuffix(cgroup))
+            .map(|cgroup| {
+                (
+                    LayerMatch::CgroupSuffix(cgroup.clone()),
+                    find_cpumask(&cgroup),
+                )
+            })
             .collect()),
         _ => panic!("Unimplemented template enum {:?}", rule),
     }
@@ -2974,8 +3007,10 @@ fn main() -> Result<()> {
             match spec.template {
                 Some(ref rule) => {
                     let matches = expand_template(&rule)?;
-                    for mt in matches {
+                    for (mt, mask) in matches {
                         let mut genspec = spec.clone();
+
+                        genspec.cpuset = Some(mask);
 
                         // Push the new "and" rule.
                         genspec.matches.push(vec![mt.clone()]);
