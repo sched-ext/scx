@@ -336,6 +336,7 @@ static void lstat_inc(u32 id, struct layer *layer, struct cpu_ctx *cpuc)
 
 struct layer_cpumask_wrapper {
 	struct bpf_cpumask __kptr *cpumask;
+	struct bpf_cpumask __kptr *cpuset;
 };
 
 struct {
@@ -352,6 +353,18 @@ static struct cpumask *lookup_layer_cpumask(u32 layer_id)
 
 	if ((cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id))) {
 		return (struct cpumask *)cpumaskw->cpumask;
+	} else {
+		scx_bpf_error("no layer_cpumask");
+		return NULL;
+	}
+}
+
+static struct bpf_cpumask *lookup_layer_cpuset(u32 layer_id)
+{
+	struct layer_cpumask_wrapper *cpumaskw;
+
+	if ((cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id))) {
+		return cpumaskw->cpuset;
 	} else {
 		scx_bpf_error("no layer_cpumask");
 		return NULL;
@@ -390,6 +403,41 @@ static inline bool refresh_layer_cpuc(struct cpu_ctx *cpuc, struct layer *layer)
 		bpf_cpumask_set_cpu(cpuc->cpu, unprotected_cpumask);
 
 	return true;
+}
+
+/* 
+ * Create a bpf_cpumask for the layer out of the serialized cpuset store by userspace. 
+ * Deserialization logic identical to refresh_cpumasks.
+ */
+static void layer_cpuset_bpfmask(int layer_id)
+{
+	struct bpf_cpumask *layer_cpuset;
+	u8 *u8_ptr;
+	int cpu;
+
+	bpf_rcu_read_lock();
+	bpf_for(cpu, 0, nr_possible_cpus) {
+		u8_ptr = MEMBER_VPTR(layers, [layer_id].cpuset[cpu / 8]);
+		if (!u8_ptr) {
+			bpf_rcu_read_unlock();
+			scx_bpf_error("could not find cpuset byte");
+			return;
+		}
+		
+		layer_cpuset = lookup_layer_cpuset(layer_id);
+		if (!layer_cpuset) {
+			bpf_rcu_read_unlock();
+			scx_bpf_error("uninitialized cpuset");
+			return;
+		}
+
+		if (*u8_ptr & (1 << (cpu % 8)))
+			bpf_cpumask_set_cpu(cpu, layer_cpuset);
+		else
+			bpf_cpumask_clear_cpu(cpu, layer_cpuset);
+	}
+
+	bpf_rcu_read_unlock();
 }
 
 /*
@@ -3213,13 +3261,58 @@ struct layered_timer layered_timers[MAX_TIMERS] = {
 	{0LLU, CLOCK_BOOTTIME, 0},
 };
 
+__weak int
+init_layer_cpumasks(int layer_id)
+{
+	struct bpf_cpumask *cpumask, *cpuset;
+	struct layer_cpumask_wrapper *cpumaskw;
+
+	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)))
+		return -ENOENT;
+
+	cpuset = bpf_cpumask_create();
+	if (!cpuset)
+		return -ENOMEM;
+
+	cpuset = bpf_kptr_xchg(&cpumaskw->cpuset, cpuset);
+	if (cpuset)
+		bpf_cpumask_release(cpuset);
+
+	cpumask = bpf_cpumask_create();
+	if (!cpumask)
+		return -ENOMEM;
+
+	cpumask = bpf_kptr_xchg(&cpumaskw->cpumask, cpumask);
+	if (cpumask)
+		bpf_cpumask_release(cpumask);
+
+	layer_cpuset_bpfmask(layer_id);
+
+	bpf_rcu_read_lock();
+	/* Look the masks back up to make the verifier happy. */
+	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)) ||
+	    !(cpumask = cpumaskw->cpumask) ||
+	    !(cpuset = cpumaskw->cpuset)) {
+		bpf_rcu_read_unlock();
+		return -EINVAL;
+	}
+
+	/*
+	 * Start all layers with their full cpuset so that everything runs
+	 * everywhere. This will soon be updated by refresh_cpumasks()
+	 * once the scheduler starts running.
+	 */
+	bpf_cpumask_copy(cpumask, (const struct cpumask *)cpuset);
+	bpf_rcu_read_unlock();
+
+	return 0;
+}
+
 /*
  * Initializes per-layer specific data structures.
  */
 static s32 init_layer(int layer_id)
 {
-	struct bpf_cpumask *cpumask;
-	struct layer_cpumask_wrapper *cpumaskw;
 	struct layer *layer = &layers[layer_id];
 	int i, j, ret;
 
@@ -3339,23 +3432,10 @@ static s32 init_layer(int layer_id)
 			dbg("CFG     DEFAULT");
 	}
 
-	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)))
-		return -ENOENT;
-
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-
-	/*
-	 * Start all layers with full cpumask so that everything runs
-	 * everywhere. This will soon be updated by refresh_cpumasks()
-	 * once the scheduler starts running.
-	 */
-	bpf_cpumask_setall(cpumask);
-
-	cpumask = bpf_kptr_xchg(&cpumaskw->cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
+	if ((ret = init_layer_cpumasks(layer_id))) {
+		scx_bpf_error("could not initalize cpumasks");
+		return ret;
+	}
 
 	// create the dsqs for the layer
 	bpf_for(i, 0, nr_llcs) {

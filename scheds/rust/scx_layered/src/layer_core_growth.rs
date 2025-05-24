@@ -196,8 +196,17 @@ impl LayerGrowthAlgo {
         for (idx, spec) in layer_specs.iter().enumerate() {
             let layer_growth_algo = spec.kind.common().growth_algo.clone();
             let core_order =
-                layer_growth_algo.layer_core_order(cpu_pool, layer_specs, spec, idx, topo);
-            core_orders.insert(idx, core_order?);
+                layer_growth_algo.layer_core_order(cpu_pool, layer_specs, spec, idx, topo)?;
+
+            let core_order = match &spec.cpuset {
+                Some(mask) => core_order
+                    .into_iter()
+                    .filter(|cpu| mask.test_cpu(*cpu))
+                    .collect(),
+                None => core_order,
+            };
+
+            core_orders.insert(idx, core_order);
         }
 
         Ok(core_orders)
