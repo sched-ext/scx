@@ -352,6 +352,8 @@ struct layer {
 	bool			is_protected;
 	bool			periodically_refresh;
 	u8			cpuset[MAX_CPUS_U8];
+	struct bpf_cpumask __kptr *cpumask;
+
 };
 
 struct scx_cmd {

@@ -618,6 +618,9 @@ struct Opts {
     #[clap(long, default_value = "false")]
     disable_antistall: bool,
 
+    #[clap(long, default_value = "false")]
+    enable_cpuset: bool,
+
     /// Maximum task runnable_at delay (in seconds) before antistall turns on
     #[clap(long, default_value = "3")]
     antistall_sec: u64,
@@ -1920,6 +1923,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.has_little_cores = topo.has_little_cores();
         skel.maps.rodata_data.xnuma_preemption = opts.xnuma_preemption;
         skel.maps.rodata_data.antistall_sec = opts.antistall_sec;
+        skel.maps.rodata_data.enable_cpuset = opts.enable_cpuset;
         skel.maps.rodata_data.monitor_disable = opts.monitor_disable;
         skel.maps.rodata_data.lo_fb_wait_ns = opts.lo_fb_wait_us * 1000;
         skel.maps.rodata_data.lo_fb_share_ppk = ((opts.lo_fb_share * 1024.0) as u32).clamp(1, 1024);

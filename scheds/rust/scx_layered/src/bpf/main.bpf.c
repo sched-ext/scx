@@ -53,6 +53,7 @@ const volatile u64 min_open_layer_disallow_preempt_after_ns;
 const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 const volatile bool percpu_kthread_preempt = true;
+const volatile bool enable_cpuset = true;
 volatile u64 layer_refresh_seq_avgruntime;
 
 /* Flag to enable or disable antistall feature */
@@ -328,6 +329,7 @@ static void lstat_inc(u32 id, struct layer *layer, struct cpu_ctx *cpuc)
 
 struct layer_cpumask_wrapper {
 	struct bpf_cpumask __kptr *cpumask;
+	struct bpf_cpumask __kptr *cpuset_cpumask;
 };
 
 struct {
@@ -346,6 +348,17 @@ static struct cpumask *lookup_layer_cpumask(u32 layer_id)
 		return (struct cpumask *)cpumaskw->cpumask;
 	} else {
 		scx_bpf_error("no layer_cpumask");
+		return NULL;
+	}
+}
+
+static struct cpumask *lookup_layer_cpuset_cpumask(u32 layer_id)
+{
+	struct layer_cpumask_wrapper *cpumaskw;
+
+	if ((cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id))) {
+		return (struct cpumask *)cpumaskw->cpuset_cpumask;
+	} else {
 		return NULL;
 	}
 }
@@ -1866,7 +1879,7 @@ bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
 	return false;
 }
 
-bool sib_keep_idle(s32 cpu, struct task_struct *prev __arg_trusted, struct cpu_ctx *cpuc)
+bool __always_inline sib_keep_idle(s32 cpu, struct task_struct *prev __arg_trusted, struct cpu_ctx *cpuc)
 {
 	struct task_ctx *prev_taskc = NULL;
 	struct layer *prev_layer = NULL;
@@ -3206,7 +3219,7 @@ struct layered_timer layered_timers[MAX_TIMERS] = {
  */
 static s32 init_layer(int layer_id)
 {
-	struct bpf_cpumask *cpumask;
+	struct bpf_cpumask *cpumask, *tmp_cpumask;
 	struct layer_cpumask_wrapper *cpumaskw;
 	struct layer *layer = &layers[layer_id];
 	int i, j, ret;
@@ -3220,6 +3233,7 @@ static s32 init_layer(int layer_id)
 	    layer->is_protected);
 
 	layer->id = layer_id;
+	int cpu;
 
 	if (layer->nr_match_ors > MAX_LAYER_MATCH_ORS) {
 		scx_bpf_error("too many ORs");
@@ -3330,16 +3344,53 @@ static s32 init_layer(int layer_id)
 	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)))
 		return -ENOENT;
 
+	if (enable_cpuset) {		
+		// create a bpf cpumask for every cpuset
+		if (!(cpumask = bpf_cpumask_create()))
+			return -ENOMEM;
+		// convert each byte of passed-in cpuset cpumask to bpf cpumask.
+		bpf_for(j, 0, MAX_CPUS_U8) {
+			if (j >= MAX_CPUS_U8)
+				break;
+			// convert each bit of passed-in cpuset cpumask to bpf cpumask.
+			bpf_for(cpu, 0, 64) {
+				if (i < 0 || i >= MAX_CPUS_U8) {
+					bpf_cpumask_release(cpumask);
+					return -1;
+				}
+				if (layer->cpuset[j] & (1LLU << cpu)) {
+					bpf_cpumask_set_cpu((MAX_CPUS_U8 - j - 1) * 64 + cpu, cpumask);
+				}
+
+			}
+		}
+
+		if (!cpumask || !cpumaskw) {
+			if (cpumask)
+				bpf_cpumask_release(cpumask);
+			scx_bpf_error("cpumask is null");
+			return -1; 
+		}
+
+		cpumask = bpf_kptr_xchg(&cpumaskw->cpuset_cpumask, cpumask);
+
+		if (cpumask)
+			bpf_cpumask_release(cpumask);
+
+	}
+
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
 		return -ENOMEM;
-
 	/*
 	 * Start all layers with full cpumask so that everything runs
 	 * everywhere. This will soon be updated by refresh_cpumasks()
 	 * once the scheduler starts running.
 	 */
 	bpf_cpumask_setall(cpumask);
+	
+	if (enable_cpuset && (tmp_cpumask = cpumaskw->cpumask))
+		bpf_cpumask_and(cpumask, cast_mask(cpumask), cast_mask(cpumaskw->cpuset_cpumask));
 
 	cpumask = bpf_kptr_xchg(&cpumaskw->cpumask, cpumask);
 	if (cpumask)
