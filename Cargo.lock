@@ -2781,6 +2781,7 @@ dependencies = [
  "libbpf-rs",
  "libc",
  "plain",
+ "procfs",
  "scx_rustland_core",
  "scx_utils",
 ]

@@ -478,9 +478,7 @@ impl UserAllocator {
     #[allow(static_mut_refs)]
     pub fn lock_memory(&self) {
         unsafe {
-            if let Err(e) = VM.save() {
-                eprintln!("WARNING: {}\n", e);
-            }
+            VM.save().ok();
 
             // Call setrlimit to set the locked-in-memory limit to unlimited.
             let new_rlimit = libc::rlimit {
@@ -498,20 +496,16 @@ impl UserAllocator {
                 panic!("mlockall failed with error code: {}", res);
             }
 
-            // Prevent khugpaged from unmapping pages underneath.
-            let res = libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0);
-            if res != 0 {
-                panic!("Failed to disable THP: {}", res);
-            }
+            // Hint the kernel to use huge pages for the memory arena.
+            let ptr = &mut HEAP.0 as *mut u8 as *mut libc::c_void;
+            libc::madvise(ptr, HEAP_SIZE, libc::MADV_HUGEPAGE);
         }
     }
 
     #[allow(static_mut_refs)]
     pub fn unlock_memory(&self) {
         unsafe {
-            if let Err(e) = VM.restore() {
-                eprintln!("WARNING: {}\n", e);
-            }
+            VM.restore().ok();
         };
     }
 }
