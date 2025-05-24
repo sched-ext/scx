@@ -354,7 +354,7 @@ static struct cpumask *lookup_layer_cpumask(u32 layer_id)
 	if ((cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id))) {
 		return (struct cpumask *)cpumaskw->cpumask;
 	} else {
-		scx_bpf_error("no layer_cpumask");
+		scx_bpf_error("no layer_cpumask for layer %d", layer_id);
 		return NULL;
 	}
 }
@@ -366,7 +366,7 @@ static struct bpf_cpumask *lookup_layer_cpuset(u32 layer_id)
 	if ((cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id))) {
 		return cpumaskw->cpuset;
 	} else {
-		scx_bpf_error("no layer_cpumask");
+		scx_bpf_error("no layer_cpuset for layer %d", layer_id);
 		return NULL;
 	}
 }
@@ -560,7 +560,7 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *layered_node_mask;
 	struct cached_cpus	layered_cpus_unprotected;
 	struct bpf_cpumask __kptr *layered_unprotected_mask;
-	bool			all_cpus_allowed;
+	bool			all_cpuset_allowed;
 	bool			cpus_node_aligned;
 	u64			runnable_at;
 	u64			running_at;
@@ -582,6 +582,10 @@ struct {
 	__type(key, int);
 	__type(value, struct task_ctx);
 } task_ctxs SEC(".maps");
+
+
+static void refresh_cpus_flags(struct task_ctx *taskc,
+			       const struct cpumask *cpumask);
 
 static struct task_ctx *lookup_task_ctx_may_fail(struct task_struct *p)
 {
@@ -1133,7 +1137,7 @@ out_put:
 	if (cpu >= 0) {
 		if (READ_ONCE(layer->check_no_idle))
 			WRITE_ONCE(layer->check_no_idle, false);
-	} else if (taskc->all_cpus_allowed) {
+	} else if (taskc->all_cpuset_allowed) {
 		if (!READ_ONCE(layer->check_no_idle))
 			WRITE_ONCE(layer->check_no_idle, true);
 	}
@@ -1497,7 +1501,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * without making the whole scheduler node aware and should only be used
 	 * with open layers on non-saturated machines to avoid possible stalls.
 	 */
-	if ((!taskc->all_cpus_allowed &&
+	if ((!taskc->all_cpuset_allowed &&
 	     !(layer->allow_node_aligned && taskc->cpus_node_aligned)) ||
 	    !layer->nr_cpus) {
 		taskc->dsq_id = task_cpuc->lo_fb_dsq_id;
@@ -2379,6 +2383,9 @@ static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task
 		taskc->layered_cpus_llc.seq = -1;
 		taskc->layered_cpus_node.seq = -1;
 		__sync_fetch_and_add(&layer->nr_tasks, 1);
+
+		refresh_cpus_flags(taskc, p->cpus_ptr);
+
 		/*
 		 * XXX - To be correct, we'd need to calculate the vtime
 		 * delta in the previous layer, scale it by the load
@@ -2786,15 +2793,16 @@ void BPF_STRUCT_OPS(layered_set_weight, struct task_struct *p, u32 weight)
 static void refresh_cpus_flags(struct task_ctx *taskc,
 			       const struct cpumask *cpumask)
 {
+	const struct cpumask *cpuset;
 	u32 node_id;
 
-	if (!all_cpumask) {
-		scx_bpf_error("NULL all_cpumask");
+	cpuset = (const struct cpumask *)lookup_layer_cpuset(taskc->layer_id);
+	if (!cpuset) {
+		scx_bpf_error("no cpuset mask found");
 		return;
 	}
 
-	taskc->all_cpus_allowed = bpf_cpumask_subset(cast_mask(all_cpumask), cpumask);
-
+	taskc->all_cpuset_allowed = bpf_cpumask_subset(cpuset, cpumask);
 	taskc->cpus_node_aligned = true;
 
 	bpf_for(node_id, 0, nr_nodes) {
@@ -2857,7 +2865,14 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	refresh_cpus_flags(taskc, cpumask);
+	/* 
+	 * If the task does not belong to a layer, it has not been
+	 * matched to one yet. We need to know which layer the task
+	 * belongs to so that we can compute all_cpuset_allowed. Defer
+	 * the call until we match.
+	 */
+	if (taskc->layer_id != MAX_LAYERS)
+		refresh_cpus_flags(taskc, cpumask);
 
 	/* invalidate all cached cpumasks */
 	taskc->layered_cpus.seq = -1;
@@ -2976,8 +2991,6 @@ s32 BPF_STRUCT_OPS(layered_init_task, struct task_struct *p,
 	 * used that instead.
 	 */
 	taskc->runtime_avg = slice_ns / 4;
-
-	refresh_cpus_flags(taskc, p->cpus_ptr);
 
 	/*
 	 * We are matching cgroup hierarchy path directly rather than the CPU
