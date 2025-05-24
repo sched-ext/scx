@@ -519,6 +519,7 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *layered_unprotected_mask;
 	bool			all_cpus_allowed;
 	bool			cpus_node_aligned;
+	bool			task_cpuset_aligned;
 	u64			runnable_at;
 	u64			running_at;
 	u64			runtime_avg;
@@ -846,6 +847,15 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 	return cpu;
 }
 
+static bool task_cpuset_aligned(struct task_struct *p __arg_trusted, struct task_ctx *taskc) {
+	const struct cpumask *taskm, *layerm;
+	
+	if (!(taskm = &p->cpus_mask) || !(layerm = lookup_layer_cpuset_cpumask(taskc->layer_id)))
+		return false;
+	
+	return bpf_cpumask_equal(taskm, layerm);
+}
+
 static __always_inline
 bool should_try_preempt_first(s32 cand, struct layer *layer,
 			      const struct cpumask *layered_cpumask)
@@ -1090,7 +1100,7 @@ out_put:
 	if (cpu >= 0) {
 		if (READ_ONCE(layer->check_no_idle))
 			WRITE_ONCE(layer->check_no_idle, false);
-	} else if (taskc->all_cpus_allowed) {
+	} else if (taskc->all_cpus_allowed || task_cpuset_aligned(p, taskc)) {
 		if (!READ_ONCE(layer->check_no_idle))
 			WRITE_ONCE(layer->check_no_idle, true);
 	}
@@ -1455,8 +1465,9 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * with open layers on non-saturated machines to avoid possible stalls.
 	 */
 	if ((!taskc->all_cpus_allowed &&
-	     !(layer->allow_node_aligned && taskc->cpus_node_aligned)) ||
-	    !layer->nr_cpus) {
+		!taskc->task_cpuset_aligned &&
+		!(layer->allow_node_aligned && taskc->cpus_node_aligned)) || 
+		!layer->nr_cpus) {
 		taskc->dsq_id = task_cpuc->lo_fb_dsq_id;
 		/*
 		 * Start a new lo fallback queued region if the DSQ is empty.
@@ -2740,7 +2751,18 @@ void BPF_STRUCT_OPS(layered_set_weight, struct task_struct *p, u32 weight)
 static void refresh_cpus_flags(struct task_ctx *taskc,
 			       const struct cpumask *cpumask)
 {
-	u32 node_id;
+	u32 node_id, layer_id;
+	const struct cpumask *layer_cpuset_cpumask;
+	
+	taskc->task_cpuset_aligned = false;
+
+	bpf_for(layer_id, 0, MAX_LAYERS) {
+		if ((layer_cpuset_cpumask = lookup_layer_cpuset_cpumask(layer_id)) && 
+			bpf_cpumask_equal(layer_cpuset_cpumask, cpumask)) {
+			taskc->task_cpuset_aligned = true;
+			break;
+		}
+	}
 
 	if (!all_cpumask) {
 		scx_bpf_error("NULL all_cpumask");
@@ -2766,6 +2788,7 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 			break;
 		}
 	}
+
 }
 
 static int init_cached_cpus(struct cached_cpus *ccpus)
