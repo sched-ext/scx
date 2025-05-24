@@ -61,6 +61,7 @@ const volatile bool enable_antistall = true;
 const volatile bool enable_gpu_support = false;
 /* Delay permitted, in seconds, before antistall activates */
 const volatile u64 antistall_sec = 3;
+const volatile u64 highly_affined_cutoff = 1;
 const u32 zero_u32 = 0;
 
 /*
@@ -519,7 +520,7 @@ struct task_ctx {
 	struct bpf_cpumask __kptr *layered_unprotected_mask;
 	bool			all_cpus_allowed;
 	bool			cpus_node_aligned;
-	bool			task_cpuset_aligned;
+	bool			cpuset_aligned;
 	u64			runnable_at;
 	u64			running_at;
 	u64			runtime_avg;
@@ -847,13 +848,48 @@ static s32 pick_idle_cpu_from(const struct cpumask *cand_cpumask, s32 prev_cpu,
 	return cpu;
 }
 
-static bool task_cpuset_aligned(struct task_struct *p __arg_trusted, struct task_ctx *taskc) {
+/*
+ * Task highly affined
+ * This determines if a task is "highly affined", which
+ * is when num eligible cpus <= affinity-cutoff.
+ * These will be sent to fallbacks and given lo fb frac
+ * to avoid stalls (bypassing scheduling policy).
+ */
+static bool cpumask_highly_affined(const struct cpumask *cpumask) {
+	int cpu, count = 0;
+
+	bpf_for(cpu, 0, scx_bpf_nr_cpu_ids())
+		if (bpf_cpumask_test_cpu(cpu, cpumask)) {
+			count++;
+			if (count >= highly_affined_cutoff)
+				return false;
+		}
+	return true;
+}
+
+static bool cpumask_cpuset_aligned_with(const struct cpumask *cpumask, const struct cpumask* layer_cpumask) {	
+	return bpf_cpumask_equal(cpumask, layer_cpumask) || 
+		(bpf_cpumask_subset(cpumask, layer_cpumask)
+		&& !cpumask_highly_affined(layer_cpumask));
+}
+
+/*
+ * Returns true if a task is aligned with a cpuset.
+ * Aligned tasks are those with cpumasks which are 
+ * a subset of a cpuset with greater than highly_affined_cutoff
+ * eligible cpus.
+ * 
+ * *** If a task does not have a cpuset, it is aligned with
+ * all cpusets. ***
+ * 
+ */
+static bool task_cpuset_aligned_with(struct task_struct *p __arg_trusted, int layer_id) {
 	const struct cpumask *taskm, *layerm;
 	
-	if (!(taskm = &p->cpus_mask) || !(layerm = lookup_layer_cpuset_cpumask(taskc->layer_id)))
-		return false;
-	
-	return bpf_cpumask_equal(taskm, layerm);
+	if (!(taskm = &p->cpus_mask) || !(layerm = lookup_layer_cpuset_cpumask(layer_id)))
+		return true;
+
+	return cpumask_cpuset_aligned_with(taskm, layerm);
 }
 
 static __always_inline
@@ -1100,7 +1136,7 @@ out_put:
 	if (cpu >= 0) {
 		if (READ_ONCE(layer->check_no_idle))
 			WRITE_ONCE(layer->check_no_idle, false);
-	} else if (taskc->all_cpus_allowed || (enable_cpuset && task_cpuset_aligned(p, taskc))) {
+	} else if (taskc->all_cpus_allowed || (enable_cpuset && taskc->cpuset_aligned)) {
 		if (!READ_ONCE(layer->check_no_idle))
 			WRITE_ONCE(layer->check_no_idle, true);
 	}
@@ -1465,7 +1501,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * with open layers on non-saturated machines to avoid possible stalls.
 	 */
 	if ((!taskc->all_cpus_allowed &&
-		!(enable_cpuset && taskc->task_cpuset_aligned) &&
+		!(enable_cpuset && taskc->cpuset_aligned) &&
 		!(layer->allow_node_aligned && taskc->cpus_node_aligned)) || 
 		!layer->nr_cpus) {
 		taskc->dsq_id = task_cpuc->lo_fb_dsq_id;
@@ -2323,6 +2359,9 @@ static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task
 		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
 
 	bpf_for(layer_id, 0, nr_layers) {
+		if (enable_cpuset && !task_cpuset_aligned_with(p, taskc->layer_id))
+			continue;
+
 		if (match_layer(layer_id, p, cgrp_path) == 0) {
 			matched = true;
 			break;
@@ -2752,18 +2791,17 @@ static void refresh_cpus_flags(struct task_ctx *taskc,
 			       const struct cpumask *cpumask)
 {
 	u32 node_id, layer_id;
-	const struct cpumask *layer_cpuset_cpumask;
+	const struct cpumask *layerm;
 
 	if (enable_cpuset) {
-		taskc->task_cpuset_aligned = false;
+		taskc->cpuset_aligned = false;
 
-		bpf_for(layer_id, 0, MAX_LAYERS) {
-			if ((layer_cpuset_cpumask = lookup_layer_cpuset_cpumask(layer_id)) && 
-				bpf_cpumask_equal(layer_cpuset_cpumask, cpumask)) {
-				taskc->task_cpuset_aligned = true;
+		bpf_for(layer_id, 0, MAX_LAYERS)
+			if ((layerm = lookup_layer_cpuset_cpumask(layer_id)) &&
+				cpumask_cpuset_aligned_with(cpumask, layerm)) {
+				taskc->cpuset_aligned = true;
 				break;
 			}
-		}
 	}
 
 	if (!all_cpumask) {
