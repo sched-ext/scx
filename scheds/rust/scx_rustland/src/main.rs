@@ -12,8 +12,6 @@ use bpf::*;
 
 mod stats;
 use std::collections::BTreeSet;
-use std::fs::File;
-use std::io::Read;
 use std::io::{self};
 use std::mem::MaybeUninit;
 use std::time::Duration;
@@ -24,6 +22,7 @@ use clap::Parser;
 use libbpf_rs::OpenObject;
 use log::info;
 use log::warn;
+use procfs::process::Process;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::UserExitInfo;
@@ -350,27 +349,14 @@ impl<'a> Scheduler<'a> {
         self.bpf.notify_complete(self.tasks.len() as u64);
     }
 
-    // Get total page faults from /proc/self/stat.
+    // Get total page faults from the process.
     fn get_page_faults() -> Result<u64, io::Error> {
-        let path = format!("/proc/self/stat");
-        let mut file = File::open(path)?;
+        let myself = Process::myself().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let stat = myself
+            .stat()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        // Read the contents of the file into a string.
-        let mut content = String::new();
-        file.read_to_string(&mut content)?;
-
-        // Parse the relevant fields and calculate the total page faults.
-        let fields: Vec<&str> = content.split_whitespace().collect();
-        if fields.len() >= 12 {
-            let minflt: u64 = fields[9].parse().unwrap_or(0);
-            let majflt: u64 = fields[11].parse().unwrap_or(0);
-            Ok(minflt + majflt)
-        } else {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid format in /proc/[PID]/stat",
-            ))
-        }
+        Ok(stat.minflt + stat.majflt)
     }
 
     fn run(&mut self) -> Result<UserExitInfo> {
