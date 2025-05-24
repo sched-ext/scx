@@ -404,6 +404,7 @@ static inline bool refresh_layer_cpuc(struct cpu_ctx *cpuc, struct layer *layer)
 static void refresh_cpumasks(u32 layer_id)
 {
 	struct bpf_cpumask *layer_cpumask;
+	struct cpumask *cpuset_cpumask;
 	struct layer_cpumask_wrapper *cpumaskw;
 	bool protected_changed = false;
 	struct layer *layer;
@@ -414,12 +415,16 @@ static void refresh_cpumasks(u32 layer_id)
 	if (!layer) {
 		scx_bpf_error("can't happen");
 		return;
-	}
+	}	
 
 	if (!__sync_val_compare_and_swap(&layer->refresh_cpus, 1, 0))
 		return;
 
 	bpf_rcu_read_lock();
+	
+	if (enable_cpuset)
+		cpuset_cpumask = lookup_layer_cpumask(layer_id);
+
 	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)) ||
 	    !(layer_cpumask = cpumaskw->cpumask)) {
 		bpf_rcu_read_unlock();
@@ -451,6 +456,9 @@ static void refresh_cpumasks(u32 layer_id)
 			scx_bpf_error("can't happen");
 		}
 	}
+	
+	if (enable_cpuset && cpuset_cpumask)
+		bpf_cpumask_and(layer_cpumask, cast_mask(layer_cpumask), cpuset_cpumask);
 
 	bpf_rcu_read_unlock();
 
