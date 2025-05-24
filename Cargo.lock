@@ -2792,7 +2792,6 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
- "fb_procfs",
  "libbpf-rs",
  "libc",
  "log",
