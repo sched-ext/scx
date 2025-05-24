@@ -3214,12 +3214,78 @@ struct layered_timer layered_timers[MAX_TIMERS] = {
 	{0LLU, CLOCK_BOOTTIME, 0},
 };
 
+int __always_inline layer_cpuset_cpumask_align(int layer_id) {
+	struct bpf_cpumask *cpumask;
+	struct layer_cpumask_wrapper *cpumaskw;
+	const struct cpumask *cpuset_cpumask;
+
+	if (!enable_cpuset)
+		return 0;
+
+	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)) ||
+		!(cpumask = bpf_cpumask_create()) || 
+		!(cpuset_cpumask = lookup_layer_cpuset_cpumask(layer_id))) 
+		return -ENOENT;
+
+	bpf_kptr_xchg(cpumask, cpumaskw->cpumask);
+	
+	if (cpumask && cpuset_cpumask) 
+		bpf_cpumask_and(cpumask, cast_mask(cpumask), cpuset_cpumask);
+	
+	return 0;
+}
+
+/*
+ * This is *not* in init layer.
+ * because that function is problematic
+ * for the verifier (ands/ors/offsets)
+ */
+int __always_inline init_layer_cpusets(int layer_id) {
+	struct bpf_cpumask *cpuset_cpumask, *tmp_cpumask;
+	struct layer_cpumask_wrapper *cpumaskw;
+	struct layer *layer;
+	int cpu, byte_offset, bit_offset;
+
+	if (!enable_cpuset)
+		return 0;
+
+	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)) ||
+		!(cpuset_cpumask = bpf_cpumask_create()) || 
+		!(layer = lookup_layer(layer_id)))
+		return -ENOENT;
+	
+	// convert each byte of passed-in cpuset cpumask to bpf cpumask.
+	bpf_for(byte_offset, 0, MAX_CPUS_U8) {
+		if (byte_offset >= MAX_CPUS_U8/8)
+			break;
+		// convert each bit of passed-in cpuset cpumask to bpf cpumask.
+		bpf_for(bit_offset, 0, 8) {
+			cpu = byte_offset * 8 + bit_offset;
+			if (byte_offset < 0 || byte_offset >= MAX_LAYERS) {
+				bpf_cpumask_release(cpuset_cpumask);
+				return -1;
+			}
+			if (layer->cpuset[byte_offset] & (1LLU << bit_offset)) {
+				bpf_cpumask_set_cpu(cpu, cpuset_cpumask);
+			}
+		}
+	}
+
+	tmp_cpumask = bpf_kptr_xchg(&cpumaskw->cpuset_cpumask, cpuset_cpumask);
+
+	if (tmp_cpumask)
+	 	bpf_cpumask_release(tmp_cpumask);
+
+	return 0;
+}
+
+
 /*
  * Initializes per-layer specific data structures.
  */
 static s32 init_layer(int layer_id)
 {
-	struct bpf_cpumask *cpumask, *tmp_cpumask;
+	struct bpf_cpumask *cpumask;
 	struct layer_cpumask_wrapper *cpumaskw;
 	struct layer *layer = &layers[layer_id];
 	int i, j, ret;
@@ -3233,7 +3299,6 @@ static s32 init_layer(int layer_id)
 	    layer->is_protected);
 
 	layer->id = layer_id;
-	int cpu;
 
 	if (layer->nr_match_ors > MAX_LAYER_MATCH_ORS) {
 		scx_bpf_error("too many ORs");
@@ -3344,41 +3409,6 @@ static s32 init_layer(int layer_id)
 	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)))
 		return -ENOENT;
 
-	if (enable_cpuset) {		
-		// create a bpf cpumask for every cpuset
-		if (!(cpumask = bpf_cpumask_create()))
-			return -ENOMEM;
-		// convert each byte of passed-in cpuset cpumask to bpf cpumask.
-		bpf_for(j, 0, MAX_CPUS_U8) {
-			if (j >= MAX_CPUS_U8)
-				break;
-			// convert each bit of passed-in cpuset cpumask to bpf cpumask.
-			bpf_for(cpu, 0, 64) {
-				if (i < 0 || i >= MAX_CPUS_U8) {
-					bpf_cpumask_release(cpumask);
-					return -1;
-				}
-				if (layer->cpuset[j] & (1LLU << cpu)) {
-					bpf_cpumask_set_cpu((MAX_CPUS_U8 - j - 1) * 64 + cpu, cpumask);
-				}
-
-			}
-		}
-
-		if (!cpumask || !cpumaskw) {
-			if (cpumask)
-				bpf_cpumask_release(cpumask);
-			scx_bpf_error("cpumask is null");
-			return -1; 
-		}
-
-		cpumask = bpf_kptr_xchg(&cpumaskw->cpuset_cpumask, cpumask);
-
-		if (cpumask)
-			bpf_cpumask_release(cpumask);
-
-	}
-
 	cpumask = bpf_cpumask_create();
 	if (!cpumask)
 		return -ENOMEM;
@@ -3388,9 +3418,6 @@ static s32 init_layer(int layer_id)
 	 * once the scheduler starts running.
 	 */
 	bpf_cpumask_setall(cpumask);
-	
-	if (enable_cpuset && (tmp_cpumask = cpumaskw->cpumask))
-		bpf_cpumask_and(cpumask, cast_mask(cpumask), cast_mask(cpumaskw->cpuset_cpumask));
 
 	cpumask = bpf_kptr_xchg(&cpumaskw->cpumask, cpumask);
 	if (cpumask)
@@ -3548,7 +3575,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 	    min_open_layer_disallow_open_after_ns, min_open_layer_disallow_preempt_after_ns);
 
 	bpf_for(i, 0, nr_layers) {
-		ret = init_layer(i);
+		ret = init_layer(i) + init_layer_cpusets(i);
 		if (ret != 0)
 			return ret;
 	}

@@ -1456,8 +1456,14 @@ impl<'a> Scheduler<'a> {
             });
 
             match &spec.cpuset {
-                Some(mask) => { Self::update_cpumask( &mask, &mut layer.cpuset); },
-                None => { for i in 0..layer.cpuset.len() { layer.cpuset[i] = u8::MAX; } },
+                Some(mask) => {
+                    Self::update_cpumask(&mask, &mut layer.cpuset);
+                }
+                None => {
+                    for i in 0..layer.cpuset.len() {
+                        layer.cpuset[i] = u8::MAX;
+                    }
+                }
             };
 
             perf_set |= layer.perf > 0;
@@ -2886,7 +2892,6 @@ fn traverse_sysfs(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn find_cpumask(cgroup: &str) -> Cpumask {
-
     let mut path = String::from(cgroup);
     path.push_str("cpuset.cpus.effective");
 
@@ -2901,7 +2906,12 @@ fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
             .into_iter()
             .map(|cgroup| String::from(cgroup.to_str().expect("could not parse cgroup path")))
             .filter(|cgroup| cgroup.ends_with(suffix))
-            .map(|cgroup| (LayerMatch::CgroupSuffix(cgroup.clone()), find_cpumask(&cgroup)))
+            .map(|cgroup| {
+                (
+                    LayerMatch::CgroupSuffix(cgroup.clone()),
+                    find_cpumask(&cgroup),
+                )
+            })
             .collect()),
         _ => panic!("Unimplemented template enum {:?}", rule),
     }
