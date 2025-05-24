@@ -971,7 +971,7 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 		  struct cpu_ctx *cpuc, struct task_ctx *taskc, struct layer *layer,
 		  bool from_selcpu)
 {
-	const struct cpumask *idle_smtmask, *layer_cpumask, *layered_cpumask, *cpumask;
+	const struct cpumask *idle_smtmask, *layer_cpumask, *layered_cpumask, *cpumask, *cpuset_cpumask;
 	bool is_float = layer->task_place == PLACEMENT_FLOAT;
 	struct bpf_cpumask *unprot_mask;
 	struct cpu_ctx *prev_cpuc;
@@ -1042,8 +1042,13 @@ s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu,
 				scx_bpf_put_idle_cpumask(cpumask);
 				return -1;
 			}
-
-			has_idle = bpf_cpumask_intersects(cast_mask(unprot_mask), cpumask);
+			if (enable_cpuset && layer->cpuset[0] && (cpuset_cpumask = lookup_layer_cpuset_cpumask(layer_id))) {
+				has_idle = bpf_cpumask_intersects(cast_mask(unprot_mask), cpumask) &&
+					bpf_cpumask_intersects(cast_mask(unprot_mask), cpuset_cpumask) &&
+					bpf_cpumask_intersects(cpumask, cpuset_cpumask);
+			} else {
+				has_idle = bpf_cpumask_intersects(cast_mask(unprot_mask), cpumask);
+			}
 		}
 
 		scx_bpf_put_idle_cpumask(cpumask);
