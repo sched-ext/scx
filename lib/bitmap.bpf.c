@@ -95,7 +95,7 @@ int scx_bitmap_clear(scx_bitmap_t __arg_arena mask)
 	int i;
 
 	bpf_for(i, 0, mask_size) {
-		mask->bits[i] = 0;
+		mask->bits[i] = 0ULL;
 	}
 
 	return 0;
