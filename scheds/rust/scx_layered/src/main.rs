@@ -2874,6 +2874,13 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
     Ok(())
 }
 
+fn name_suffix(cgroup: &str, len: usize) -> String {
+    let suffixlen = std::cmp::min(len, cgroup.len());
+    let suffixrev: String = cgroup.chars().rev().take(suffixlen).collect();
+
+    suffixrev.chars().rev().collect()
+}
+
 fn traverse_sysfs(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = vec![];
 
@@ -2911,7 +2918,11 @@ fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
             .filter(|cgroup| cgroup.ends_with(suffix))
             .map(|cgroup| {
                 (
-                    LayerMatch::CgroupSuffix(cgroup.clone()),
+                    {
+                        let mut slashterminated = cgroup.clone();
+                        slashterminated.push('/');
+                        LayerMatch::CgroupSuffix(name_suffix(&slashterminated, 64))
+                    },
                     find_cpumask(&cgroup),
                 )
             })
@@ -3014,7 +3025,6 @@ fn main() -> Result<()> {
                         // Push the new "and" rule.
                         genspec.matches.push(vec![mt.clone()]);
                         match &mt {
-                            LayerMatch::CgroupPrefix(cgroup) => genspec.name.push_str(cgroup),
                             LayerMatch::CgroupSuffix(cgroup) => genspec.name.push_str(cgroup),
                             _ => bail!("Template match has unexpected type"),
                         }
