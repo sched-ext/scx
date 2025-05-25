@@ -132,7 +132,7 @@ bool scx_bitmap_empty(scx_bitmap_t __arg_arena mask)
 
 	bpf_for(i, 0, mask_size) {
 		if (mask->bits[i])
-			return true;
+			return false;
 	}
 
 	return true;
