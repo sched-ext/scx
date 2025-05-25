@@ -1825,6 +1825,15 @@ impl<'a> App<'a> {
             )),
             Line::from(Span::styled(
                 format!(
+                    "{}: display default view",
+                    self.config
+                        .active_keymap
+                        .action_keys_string(Action::SetState(AppState::Default))
+                ),
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                format!(
                     "{}: display LLC view",
                     self.config
                         .active_keymap
