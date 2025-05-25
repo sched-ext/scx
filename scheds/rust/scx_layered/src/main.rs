@@ -2887,7 +2887,6 @@ fn traverse_sysfs(dir: &Path) -> Result<Vec<PathBuf>> {
         let path = entry?.path();
         if path.is_dir() {
             paths.append(&mut traverse_sysfs(&path)?);
-        } else {
             paths.push(path);
         }
     }
@@ -2897,7 +2896,7 @@ fn traverse_sysfs(dir: &Path) -> Result<Vec<PathBuf>> {
 
 fn find_cpumask(cgroup: &str) -> Cpumask {
     let mut path = String::from(cgroup);
-    path.push_str("cpuset.cpus.effective");
+    path.push_str("/cpuset.cpus.effective");
 
     let description = fs::read_to_string(&mut path).unwrap();
 
