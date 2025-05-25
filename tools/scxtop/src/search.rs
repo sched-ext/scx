@@ -22,8 +22,8 @@ impl Search {
 
     /* We'll want check fuzzily in three ways using the following scoring system:
      * 1: Is it a substring (contains)? 100 points
-     * 2: Is it contained in the string but not consecutive (contains_spread)? 100 - (length of input spread out - input length) -> contains_spread
-     * 3: If we take out one letter, is it now (1) or (2) - (contains_with_typo)? 75 - (length of input spread out - input length) -> contains_with_typo
+     * 2: Is it contained in the string but not consecutive (contains_spread)? 100 - (length of input spread out - input length)
+     * 3: If we take out one letter, is it now (1) or (2) - (contains_with_typo)? 75 - (length of input spread out - input length)
      *
      * This method will then return a Vec<String> with the highest scoring entries at the lowest indices
      */
@@ -200,7 +200,7 @@ mod tests {
 
         // Word Bytes: [227, 129, 147, 227, 129, 130, 227, 129, 134, 227, 129, 132, 227, 129, 136, 227, 129, 138]
         // Pattern Bytes: [227, 129, 130, 227, 129, 132]
-        // The matching begins at index 0 and end at index 11, therefore total_len(11) - pattern_len(5) = 6
+        // The matching begins at index 0 and ends at index 11, therefore total_len(11) - pattern_len(5) = 6
         assert_eq!(contains_spread(word, input), Some(6));
     }
 
