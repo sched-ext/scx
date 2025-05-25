@@ -2739,7 +2739,7 @@ void BPF_STRUCT_OPS(layered_stopping, struct task_struct *p, bool runnable)
 	if (task_hint) {
 		u64 hint = task_hint->hint ?: 1;
 		hint = hint < 1024 ? hint : 1024;
-		runtime = (runtime * hint) / 1024;
+		runtime = (runtime * hint) >> 10;
 	}
 
 	p->scx.dsq_vtime += runtime;
