@@ -72,21 +72,21 @@ int scx_bitmap_copy_to_stack(struct scx_bitmap *dst, scx_bitmap_t __arg_arena sr
 __weak
 int scx_bitmap_set_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
 {
-	mask->bits[cpu / 64] |= 1 << (cpu % 64);
+	mask->bits[cpu / 64] |= 1ULL << (cpu % 64);
 	return 0;
 }
 
 __weak
 int scx_bitmap_clear_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
 {
-	mask->bits[cpu / 64] &= 1 << ~(cpu % 64);
+	mask->bits[cpu / 64] &= ~(1ULL << (cpu % 64));
 	return 0;
 }
 
 __weak
 bool scx_bitmap_test_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
 {
-	return mask->bits[cpu / 64] & (1 << (cpu % 64));
+	return mask->bits[cpu / 64] & (1ULL << (cpu % 64));
 }
 
 __weak
