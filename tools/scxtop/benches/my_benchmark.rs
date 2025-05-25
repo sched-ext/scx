@@ -54,16 +54,40 @@ fn bench_complex_string(c: &mut Criterion) {
     group.bench_with_input(BenchmarkId::new("Fuzzy Complex String", i), i, |b, i| {
         b.iter(|| search.fuzzy_search(i))
     });
-    group.bench_with_input(BenchmarkId::new("Substring Complex", i), i, |b, i| {
-        b.iter(|| search.substring_search(i))
-    });
+    group.bench_with_input(
+        BenchmarkId::new("Substring Complex String", i),
+        i,
+        |b, i| b.iter(|| search.substring_search(i)),
+    );
     group.finish();
 }
 
+fn bench_long_complex_string(c: &mut Criterion) {
+    let search = get_search();
+    let i = "alrMtIImeralarmmer_cacEL";
+
+    let mut group = c.benchmark_group("Long Complex String Search");
+
+    group.bench_with_input(
+        BenchmarkId::new("Fuzzy Long Complex String", i),
+        i,
+        |b, i| b.iter(|| search.fuzzy_search(i)),
+    );
+    group.bench_with_input(
+        BenchmarkId::new("Substring Long Complex String", i),
+        i,
+        |b, i| b.iter(|| search.substring_search(i)),
+    );
+    group.finish();
+}
+
+fn configure_criterion() -> Criterion {
+    Criterion::default().measurement_time(std::time::Duration::new(10, 0))
+}
+
 criterion_group!(
-    benches,
-    bench_empty,
-    bench_easy_string,
-    bench_complex_string
+    name = benches;
+    config = configure_criterion();
+    targets = bench_empty, bench_easy_string, bench_complex_string, bench_long_complex_string
 );
 criterion_main!(benches);
