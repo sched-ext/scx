@@ -822,6 +822,7 @@ dependencies = [
  "cfg-if",
 ]
 
+[[package]]
 name = "criterion"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1463,15 +1464,6 @@ dependencies = [
  "pin-project-lite",
  "pin-utils",
  "slab",
-]
-
-[[package]]
-name = "fuzzy-matcher"
-version = "0.3.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54614a3312934d066701a80f20f15fa3b56d67ac7722b39eea5b4c9dd1d66c94"
-dependencies = [
- "thread_local",
 ]
 
 [[package]]
@@ -3118,7 +3110,6 @@ dependencies = [
  "derive_deref",
  "directories",
  "futures",
- "fuzzy-matcher",
  "glob",
  "hashbrown 0.15.2",
  "json5",
