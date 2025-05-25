@@ -15,7 +15,7 @@ struct introspec intrspc;
 
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 16 * 1024 /* 16 KB */);
+	__uint(max_entries, 16 * 1024 /* 16 KiB */);
 } introspec_msg SEC(".maps");
 
 static __always_inline

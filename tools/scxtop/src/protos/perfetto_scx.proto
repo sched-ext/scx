@@ -670,8 +670,8 @@ message FtraceConfig {
   // Example:
   //   buffer_size_kb: 4096
   //   buffer_size_lower_bound: true
-  // On older builds, the per-cpu buffers will be exactly 4 MB.
-  // On v43+, buffers will be at least 4 MB.
+  // On older builds, the per-cpu buffers will be exactly 4 MiB.
+  // On v43+, buffers will be at least 4 MiB.
   // In both cases, neither is guaranteed if there are other concurrent
   // perfetto ftrace sessions, as the buffers cannot be resized without pausing
   // the recording in the kernel.
@@ -9455,14 +9455,14 @@ message ProcessTree {
 // The fields in this message can be reported at different rates and with
 // different granularity. See sys_stats_config.proto.
 message SysStats {
-  // Counters from /proc/meminfo. Values are in KB.
+  // Counters from /proc/meminfo. Values are in KiB.
   message MeminfoValue {
     optional MeminfoCounters key = 1;
     optional uint64 value = 2;
   };
   repeated MeminfoValue meminfo = 1;
 
-  // Counter from /proc/vmstat. Units are often pages, not KB.
+  // Counter from /proc/vmstat. Units are often pages, not KiB.
   message VmstatValue {
     optional VmstatCounters key = 1;
     optional uint64 value = 2;
