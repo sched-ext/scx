@@ -507,7 +507,9 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 
 	// First check if last CPU is idle
 	if (taskc->all_cpus &&
-	    bpf_cpumask_test_cpu(prev_cpu, (smt_enabled && !interactive) ? idle_smtmask : idle_cpumask)) {
+	    bpf_cpumask_test_cpu(prev_cpu, (smt_enabled && !interactive) ?
+				 idle_smtmask : idle_cpumask) &&
+	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu = prev_cpu;
 		*is_idle = true;
 		goto found_cpu;
@@ -773,7 +775,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	 * Per-cpu kthreads are considered interactive and dispatched directly
 	 * into the local DSQ.
 	 */
-	if ((p->flags & PF_KTHREAD) && p->cpus_ptr == &p->cpus_mask && p->nr_cpus_allowed == nr_cpus &&
+	if ((p->flags & PF_KTHREAD) && p->cpus_ptr == &p->cpus_mask && p->nr_cpus_allowed != nr_cpus &&
 	    kthreads_local) {
 		stat_inc(P2DQ_STAT_DIRECT);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, dsq_time_slices[0], enq_flags);
