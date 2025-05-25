@@ -405,8 +405,8 @@ static inline bool refresh_layer_cpuc(struct cpu_ctx *cpuc, struct layer *layer)
 	return true;
 }
 
-/* 
- * Create a bpf_cpumask for the layer out of the serialized cpuset store by userspace. 
+/*
+ * Create a bpf_cpumask for the layer out of the serialized cpuset store by userspace.
  * Deserialization logic identical to refresh_cpumasks.
  */
 static void layer_cpuset_bpfmask(int layer_id)
@@ -423,7 +423,7 @@ static void layer_cpuset_bpfmask(int layer_id)
 			scx_bpf_error("could not find cpuset byte");
 			return;
 		}
-		
+
 		layer_cpuset = lookup_layer_cpuset(layer_id);
 		if (!layer_cpuset) {
 			bpf_rcu_read_unlock();
@@ -1234,7 +1234,7 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 		return false;
 
 	rq = scx_bpf_cpu_rq(cand);
-	
+
 	ext_sched_class = (struct sched_class *)(unsigned long long)ext_sched_class_addr;
 	idle_sched_class = (struct sched_class *)(unsigned long long)idle_sched_class_addr;
 
@@ -1971,7 +1971,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 	if (antistall_consume(cpuc))
 		return;
-	
+
 	if (prev && sib_keep_idle(cpu, prev, cpuc))
 		return;
 
@@ -2336,7 +2336,7 @@ int match_layer(u32 layer_id, struct task_struct *p __arg_trusted, const char *c
 		if (matched) {
 			if (enable_match_debug && (pid = p->pid))
 				bpf_map_update_elem(&layer_match_dbg, &pid, &layer_id, BPF_ANY);
-			
+
 			return 0;
 		}
 	}
@@ -2865,7 +2865,7 @@ void BPF_STRUCT_OPS(layered_set_cpumask, struct task_struct *p,
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
-	/* 
+	/*
 	 * If the task does not belong to a layer, it has not been
 	 * matched to one yet. We need to know which layer the task
 	 * belongs to so that we can compute all_cpuset_allowed. Defer
@@ -3012,7 +3012,7 @@ void BPF_STRUCT_OPS(layered_exit_task, struct task_struct *p,
 	if (args->cancelled) {
 		return;
 	}
-	
+
 	if (enable_match_debug && (pid = p->pid))
 		bpf_map_delete_elem(&layer_match_dbg, &pid);
 

@@ -33,7 +33,8 @@ enum consts {
 	MAX_LLCS		= 64,
 	MAX_COMM		= 16,
 	MAX_LAYER_MATCH_ORS	= 32,
-	MAX_LAYER_NAME		= 64,
+	/* 64 chars for user-provided name, 64 for possible template suffix. */
+	MAX_LAYER_NAME		= 128,
 	MAX_LAYERS		= 16,
 	MAX_LAYER_WEIGHT	= 10000,
 	MIN_LAYER_WEIGHT	= 1,
