@@ -32,8 +32,11 @@ topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask)
 	topo->parent = parent;
 	topo->nr_children = 0;
 	topo->level = parent ? topo->parent->level + 1 : 0;
+	/*
+	* The passed-in mask is deliberately consumed; topo_node takes ownership.
+	* Do not reuse the same mask elsewhere after this call.
+	*/
 	topo->mask = mask;
-	scx_bitmap_copy(topo->mask, mask);
 
 	if (topo->level >= TOPO_MAX_LEVEL) {
 		scx_bpf_error("topology is too deep");
