@@ -667,7 +667,7 @@ void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 					       scx_static.max_alloc_bytes / PAGE_SIZE,
 					       NUMA_NO_NODE, 0);
 		if (!memory)
-			return NULL;
+			return -ENOMEM;
 
 		bpf_spin_lock(&alloc_lock);
 
