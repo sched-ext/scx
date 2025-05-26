@@ -679,6 +679,13 @@ void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 			scx_bpf_error("concurrent static memory allocations unsupported");
 			return NULL;
 		}
+
+		/* Switch to new memory block, reset offset,
+		 * and recalculate base address.
+		 */
+		scx_static.memory = memory;
+		scx_static.off = 0;
+		addr = (__u64) scx_static.memory + scx_static.off;
 	}
 
 	ptr = (void __arena *)(addr + padding);
