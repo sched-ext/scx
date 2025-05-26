@@ -487,12 +487,10 @@ static bool is_llc_busy(const struct cpumask *idle_cpumask, s32 cpu)
 static bool is_wake_sync(s32 prev_cpu, s32 this_cpu, u64 wake_flags)
 {
 	const struct task_struct *current = (void *)bpf_get_current_task_btf();
+	const struct task_ctx *tctx;
 
 	if (no_wake_sync)
 		return false;
-
-	if ((wake_flags & SCX_WAKE_SYNC) && !(current->flags & PF_EXITING))
-		return true;
 
 	/*
 	 * If the current task is a per-CPU kthread running on the wakee's
@@ -505,6 +503,29 @@ static bool is_wake_sync(s32 prev_cpu, s32 this_cpu, u64 wake_flags)
 	 */
 	if (is_kthread(current) && (current->nr_cpus_allowed == 1) &&
 	    (prev_cpu == this_cpu))
+		return true;
+
+	/*
+	 * If the waker has been running for a short amount of time (less
+	 * than slice_min), it's unlikely to have much cache-hot data in
+	 * its CPU.
+	 *
+	 * In this case ignore the sync wakeup and try to keep the task
+	 * close to its previously used CPU.
+	 */
+	tctx = try_lookup_task_ctx(current);
+	if (!tctx || tctx->exec_runtime < slice_min)
+		return false;
+
+	/*
+	 * If the waker is going to yield the CPU after running for a
+	 * while, it may have cache-hot data in its CPU—unless it's
+	 * exiting.
+	 *
+	 * In this case, honor the sync wakeup and attempt to migrate the
+	 * wakee to the same CPU as the waker.
+	 */
+	if ((wake_flags & SCX_WAKE_SYNC) && !(current->flags & PF_EXITING))
 		return true;
 
 	return false;
