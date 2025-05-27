@@ -225,7 +225,7 @@ void __arena *scx_alloc_from_pool(struct sdt_pool *pool,
 
 	/* Nonsleepable allocations not supported for large data structures. */
 	if (elem_size > PAGE_SIZE)
-	  return NULL;
+		return NULL;
 
 	/* If the chunk is spent, get a new one. */
 	if (pool->idx >= max_elems) {
@@ -293,8 +293,8 @@ static int pool_set_size(struct sdt_pool *pool, __u64 data_size, __u64 nr_pages)
 	}
 
 	if (unlikely(nr_pages == 0)) {
-	      scx_bpf_error("%s: allocation size is 0", __func__);
-	      return -EINVAL;
+		scx_bpf_error("%s: allocation size is 0", __func__);
+		return -EINVAL;
 	}
 
 	pool->elem_size = data_size;
