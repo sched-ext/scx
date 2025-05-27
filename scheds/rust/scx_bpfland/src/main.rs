@@ -135,6 +135,13 @@ struct Opts {
     #[clap(short = 'l', long, allow_hyphen_values = true, default_value = "20000")]
     slice_us_lag: i64,
 
+    /// Throttle the running CPUs by periodically injecting idle cycles.
+    ///
+    /// This option can help extend battery life on portable devices, reduce heating, fan noise
+    /// and overall energy consumption (0 = disable).
+    #[clap(short = 't', long, default_value = "0")]
+    throttle_us: u64,
+
     /// Set CPU idle QoS resume latency in microseconds (-1 = disabled).
     ///
     /// Setting a lower latency value makes CPUs less likely to enter deeper idle states, enhancing
@@ -303,12 +310,16 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.smt_enabled = smt_enabled;
         skel.maps.rodata_data.numa_disabled = opts.disable_numa;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
-        skel.maps.rodata_data.local_kthreads = opts.local_kthreads;
         skel.maps.rodata_data.no_preempt = opts.no_preempt;
         skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;
         skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
+        skel.maps.rodata_data.throttle_ns = opts.throttle_us * 1000;
+
+        // Implicitly enable direct dispatch of per-CPU kthreads if CPU throttling is enabled
+        // (it's never a good idea to throttle per-CPU kthreads).
+        skel.maps.rodata_data.local_kthreads = opts.local_kthreads || opts.throttle_us > 0;
 
         // Set scheduler compatibility flags.
         skel.maps.rodata_data.__COMPAT_SCX_PICK_IDLE_IN_NODE = *compat::SCX_PICK_IDLE_IN_NODE;
