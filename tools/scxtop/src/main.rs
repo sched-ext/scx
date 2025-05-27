@@ -5,7 +5,6 @@
 
 use scx_utils::compat;
 use scxtop::bpf_skel::types::bpf_event;
-use scxtop::bpf_skel::*;
 use scxtop::cli::{generate_completions, Cli, Commands, TraceArgs, TuiArgs};
 use scxtop::config::Config;
 use scxtop::edm::{ActionHandler, BpfEventActionPublisher, BpfEventHandler, EventDispatchManager};
@@ -20,6 +19,7 @@ use scxtop::KeyMap;
 use scxtop::PerfettoTraceManager;
 use scxtop::Tui;
 use scxtop::SCHED_NAME_PATH;
+use scxtop::{bpf_skel::*, AppState};
 
 use anyhow::anyhow;
 use anyhow::Result;
@@ -32,7 +32,7 @@ use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::UprobeOpts;
 use log::debug;
 use log::info;
-use ratatui::crossterm::event::KeyCode::Char;
+use ratatui::crossterm::event::{KeyCode::Char, KeyEvent};
 use simplelog::{
     ColorChoice, Config as SimplelogConfig, LevelFilter, TermLogger, TerminalMode, WriteLogger,
 };
@@ -47,18 +47,29 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-fn get_action(_app: &App, keymap: &KeyMap, event: Event) -> Action {
+fn get_action(app: &App, keymap: &KeyMap, event: Event) -> Action {
     match event {
         Event::Error => Action::None,
         Event::Tick => Action::Tick,
         Event::TickRateChange(tick_rate_ms) => {
             Action::TickRateChange(std::time::Duration::from_millis(tick_rate_ms))
         }
-        Event::Key(key) => match key.code {
-            Char(c) => keymap.action(&Key::Char(c)),
-            _ => keymap.action(&Key::Code(key.code)),
+        Event::Key(key) => handle_key_event(app, keymap, key),
+        Event::Paste(paste) => match app.state() {
+            AppState::Event => Action::InputEntry(paste),
+            _ => Action::None,
         },
         _ => Action::None,
+    }
+}
+
+fn handle_key_event(app: &App, keymap: &KeyMap, key: KeyEvent) -> Action {
+    match key.code {
+        Char(c) => match app.state() {
+            AppState::Event => Action::InputEntry(c.to_string()),
+            _ => keymap.action(&Key::Char(c)),
+        },
+        _ => keymap.action(&Key::Code(key.code)),
     }
 }
 
