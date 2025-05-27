@@ -95,24 +95,6 @@ volatile u64 nr_online_cpus;
 static u64 nr_cpu_ids;
 
 /*
- * Runtime throttling.
- *
- * Throttle the CPUs by injecting @throttle_ns idle time every @slice_max.
- */
-const volatile u64 throttle_ns;
-static volatile bool cpus_throttled;
-
-static inline bool is_throttled(void)
-{
-	return READ_ONCE(cpus_throttled);
-}
-
-static inline void set_throttled(bool state)
-{
-	WRITE_ONCE(cpus_throttled, state);
-}
-
-/*
  * Exit information.
  */
 UEI_DEFINE(uei);
@@ -151,20 +133,6 @@ struct {
 	__type(key, u32);
 	__type(value, struct numa_timer);
 } numa_timer SEC(".maps");
-
-/*
- * Timer used to inject idle cycles when CPU throttling is enabled.
- */
-struct throttle_timer {
-	struct bpf_timer timer;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
-	__type(key, u32);
-	__type(value, struct throttle_timer);
-} throttle_timer SEC(".maps");
 
 /*
  * Per-node context.
@@ -366,30 +334,25 @@ static u64 nr_tasks_waiting(int node)
 }
 
 /*
- * Return the normalized task weight.
- *
- * Original weight range:   [1, 10000], default = 100
- * Normalized weight range: [1, 128], default = 64
- *
- * This normalization reduces the impact of extreme weight differences,
- * preventing highly prioritized tasks from starving lower-priority ones.
- *
- * The goal is to ensure a more balanced scheduling that is
- * influenced more by the task's behavior rather than its priority
- * difference and prevent potential stalls due to large priority
- * gaps.
-*/
-static u64 task_weight(const struct task_struct *p)
-{
-	return 1 + (127 * log2_u64(p->scx.weight) / log2_u64(10000));
-}
-
-/*
  * Scale a value inversely proportional to the task's normalized weight.
  */
 static inline u64 scale_by_task_normalized_weight_inverse(const struct task_struct *p, u64 value)
 {
-	return value * 64 / task_weight(p);
+	/*
+	 * Original weight range:   [1, 10000], default = 100
+	 * Normalized weight range: [1, 128], default = 64
+	 *
+	 * This normalization reduces the impact of extreme weight differences,
+	 * preventing highly prioritized tasks from starving lower-priority ones.
+	 *
+	 * The goal is to ensure a more balanced scheduling that is
+	 * influenced more by the task's behavior rather than its priority
+	 * difference and prevent potential stalls due to large priority
+	 * gaps.
+	*/
+	u64 weight = 1 + (127 * log2_u64(p->scx.weight) / log2_u64(10000));
+
+	return value * 64 / weight;
 }
 
 /*
@@ -401,8 +364,8 @@ static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
 
 	/*
 	 * Cap the vruntime budget that an idle task can accumulate to
-	 * slice_lag multiplied by the task's normalized weight, preventing
-	 * sleeping tasks from gaining excessive priority.
+	 * slice_lag, preventing sleeping tasks from gaining excessive
+	 * priority.
 	 *
 	 * A larger slice_lag favors tasks that sleep longer by allowing
 	 * them to accumulate more credit, leading to shorter deadlines and
@@ -416,7 +379,7 @@ static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
 	 * slice_lag), effectively approximating FIFO behavior as the
 	 * penalty increases.
 	 */
-	vtime_min = vtime_now - slice_lag * task_weight(p);
+	vtime_min = vtime_now - slice_lag;
 	if (time_before(tctx->deadline, vtime_min))
 		tctx->deadline = vtime_min;
 
@@ -524,10 +487,12 @@ static bool is_llc_busy(const struct cpumask *idle_cpumask, s32 cpu)
 static bool is_wake_sync(s32 prev_cpu, s32 this_cpu, u64 wake_flags)
 {
 	const struct task_struct *current = (void *)bpf_get_current_task_btf();
-	const struct task_ctx *tctx;
 
 	if (no_wake_sync)
 		return false;
+
+	if ((wake_flags & SCX_WAKE_SYNC) && !(current->flags & PF_EXITING))
+		return true;
 
 	/*
 	 * If the current task is a per-CPU kthread running on the wakee's
@@ -540,29 +505,6 @@ static bool is_wake_sync(s32 prev_cpu, s32 this_cpu, u64 wake_flags)
 	 */
 	if (is_kthread(current) && (current->nr_cpus_allowed == 1) &&
 	    (prev_cpu == this_cpu))
-		return true;
-
-	/*
-	 * If the waker has been running for a short amount of time (less
-	 * than slice_min), it's unlikely to have much cache-hot data in
-	 * its CPU.
-	 *
-	 * In this case ignore the sync wakeup and try to keep the task
-	 * close to its previously used CPU.
-	 */
-	tctx = try_lookup_task_ctx(current);
-	if (!tctx || tctx->exec_runtime < slice_min)
-		return false;
-
-	/*
-	 * If the waker is going to yield the CPU after running for a
-	 * while, it may have cache-hot data in its CPU—unless it's
-	 * exiting.
-	 *
-	 * In this case, honor the sync wakeup and attempt to migrate the
-	 * wakee to the same CPU as the waker.
-	 */
-	if ((wake_flags & SCX_WAKE_SYNC) && !(current->flags & PF_EXITING))
 		return true;
 
 	return false;
@@ -839,9 +781,6 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 	bool is_idle = false;
 	s32 cpu;
 
-	if (is_throttled())
-		return prev_cpu;
-
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
 		int node = __COMPAT_scx_bpf_cpu_node(cpu);
@@ -867,9 +806,6 @@ static bool kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 	u64 flags = idle_smt ? SCX_PICK_IDLE_CORE : 0;
 	s32 cpu = scx_bpf_task_cpu(p);
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
-
-	if (is_throttled())
-		return false;
 
 	/*
 	 * No need to look for full-idle SMT cores if SMT is disabled.
@@ -940,12 +876,6 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 
 		return true;
 	}
-
-	/*
-	 * Skip direct dispatch if the CPUs are forced to stay idle.
-	 */
-	if (is_throttled())
-		return false;
 
 	/*
 	 * If ops.select_cpu() has been skipped, try direct dispatch.
@@ -1137,12 +1067,6 @@ void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
 
 	/*
-	 * Let the CPU go idle if the system is throttled.
-	 */
-	if (is_throttled())
-		return;
-
-	/*
 	 * Consume regular tasks from the shared DSQ, transferring them to the
 	 * local CPU DSQ.
 	 */
@@ -1234,7 +1158,7 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
  */
 void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 {
-	u64 now = scx_bpf_now(), slice, delta_runtime, max_runtime;
+	u64 now = scx_bpf_now(), slice, delta_runtime;
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
@@ -1251,13 +1175,13 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	slice = now - tctx->last_run_at;
 
 	/*
-	 * Update task's execution time (exec_runtime), but never
-	 * accumulate more than slice_lag multiplied by the task's
-	 * normalized weight, to prevent excessive de-prioritization of
-	 * CPU-intensive tasks (which could lead to starvation).
+	 * Update task's execution time (exec_runtime), but never account
+	 * more than 10 slices of runtime to prevent excessive
+	 * de-prioritization of CPU-intensive tasks (which could lead to
+	 * starvation).
 	 */
-	max_runtime = slice_lag * task_weight(p);
-	tctx->exec_runtime = MIN(tctx->exec_runtime + slice, max_runtime);
+	if (tctx->exec_runtime < 10 * slice_max)
+		tctx->exec_runtime += slice;
 
 	/*
 	 * Update task's vruntime.
@@ -1506,50 +1430,6 @@ static void init_cpuperf_target(void)
 }
 
 /*
- * Throttle timer used to inject idle time across all the CPUs.
- */
-static int throttle_timerfn(void *map, int *key, struct bpf_timer *timer)
-{
-	bool throttled = is_throttled();
-	u64 flags, duration;
-	s32 cpu;
-	int err;
-
-	/*
-	 * Stop the CPUs sending a preemption IPI (SCX_KICK_PREEMPT) if we
-	 * need to interrupt the running tasks and inject the idle sleep.
-	 *
-	 * Otherwise, send a wakeup IPI to resume from the injected idle
-	 * sleep.
-	 */
-	if (throttled) {
-		flags = SCX_KICK_IDLE;
-		duration = slice_max;
-	} else {
-		flags = SCX_KICK_PREEMPT;
-		duration = throttle_ns;
-	}
-
-	/*
-	 * Flip the throttled state.
-	 */
-	set_throttled(!throttled);
-
-	bpf_for(cpu, 0, nr_cpu_ids)
-		scx_bpf_kick_cpu(cpu, flags);
-
-	/*
-	 * Re-arm the duty-cycle timer setting the runtime or the idle time
-	 * duration.
-	 */
-	err = bpf_timer_start(timer, duration, 0);
-	if (err)
-		scx_bpf_error("Failed to re-arm duty cycle timer");
-
-	return 0;
-}
-
-/*
  * Refresh NUMA statistics.
  */
 static int numa_timerfn(void *map, int *key, struct bpf_timer *timer)
@@ -1665,37 +1545,21 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	if (err)
 		return err;
 
-	timer = bpf_map_lookup_elem(&throttle_timer, &key);
-	if (!timer) {
-		scx_bpf_error("Failed to lookup throttle timer");
-		return -ESRCH;
-	}
-
-	bpf_timer_init(timer, &throttle_timer, CLOCK_BOOTTIME);
-	bpf_timer_set_callback(timer, throttle_timerfn);
-	err = bpf_timer_start(timer, slice_max, 0);
-	if (err) {
-		scx_bpf_error("Failed to arm throttle timer");
-		return err;
-	}
-
 	/* Do not update NUMA statistics if there's only one node */
 	if (numa_disabled || __COMPAT_scx_bpf_nr_node_ids() <= 1)
 		return 0;
 
 	timer = bpf_map_lookup_elem(&numa_timer, &key);
 	if (!timer) {
-		scx_bpf_error("Failed to lookup NUMA timer");
+		scx_bpf_error("Failed to lookup central timer");
 		return -ESRCH;
 	}
 
 	bpf_timer_init(timer, &numa_timer, CLOCK_BOOTTIME);
 	bpf_timer_set_callback(timer, numa_timerfn);
 	err = bpf_timer_start(timer, NSEC_PER_SEC, 0);
-	if (err) {
+	if (err)
 		scx_bpf_error("Failed to start NUMA timer");
-		return err;
-	}
 
 	return 0;
 }
