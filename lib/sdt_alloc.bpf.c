@@ -690,7 +690,8 @@ void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 		addr = (__u64) scx_static.memory + scx_static.off;
 
 		/*
-		 * We changed the base address. Recompute the padding. */
+		 * We changed the base address. Recompute the padding.
+		 */
 		padding = round_up(addr, alignment) - addr;
 		alloc_bytes = bytes + padding;
 	}
@@ -963,7 +964,7 @@ int scx_stk_fill_new_elems(struct scx_stk *stack)
 
 	/* If we haven't set aside any memory from before, allocate. */
 	if (!stack->reserve) {
-		/* This call drops and retakes the lock.  */
+		/* This call drops and retakes the lock. */
 		ret = scx_stk_get_arena_memory(stack, nr_pages, nstk_segs);
 		if (ret)
 			return ret;
