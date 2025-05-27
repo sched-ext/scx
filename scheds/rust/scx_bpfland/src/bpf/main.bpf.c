@@ -57,7 +57,7 @@ const volatile bool no_wake_sync;
  */
 const volatile bool local_kthreads;
 
- /*
+/*
  * Prioritize per-CPU tasks (tasks that can only run on a single CPU).
  *
  * This allows to prioritize per-CPU tasks that usually tend to be
@@ -432,7 +432,7 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 
 	/*
 	 * Refresh task's recently used CPU every time the task's domain
-	 * is updated..
+	 * is updated.
 	 */
 	tctx->recent_used_cpu = cpu;
 
@@ -854,7 +854,7 @@ static bool kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 	/*
 	 * Try to reuse the same CPU if idle.
 	 */
-	if (!idle_smt || (idle_smt && is_fully_idle(prev_cpu))) {
+	if (!idle_smt || is_fully_idle(prev_cpu)) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 			return true;
