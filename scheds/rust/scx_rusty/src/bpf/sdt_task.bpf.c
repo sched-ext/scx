@@ -87,6 +87,8 @@ void sdt_task_free(struct task_struct *p)
 		return;
 
 	sdt_free_idx(&sdt_task_allocator, mval->tid.idx);
+	bpf_task_storage_delete(&sdt_task_map, p);
+	mval->tid = (union sdt_id){ 0 };
 	mval->data = NULL;
 	mval->tptr = 0;
 }
