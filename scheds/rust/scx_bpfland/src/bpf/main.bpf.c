@@ -334,25 +334,30 @@ static u64 nr_tasks_waiting(int node)
 }
 
 /*
+ * Return the normalized task weight.
+ *
+ * Original weight range:   [1, 10000], default = 100
+ * Normalized weight range: [1, 128], default = 64
+ *
+ * This normalization reduces the impact of extreme weight differences,
+ * preventing highly prioritized tasks from starving lower-priority ones.
+ *
+ * The goal is to ensure a more balanced scheduling that is
+ * influenced more by the task's behavior rather than its priority
+ * difference and prevent potential stalls due to large priority
+ * gaps.
+*/
+static u64 task_weight(const struct task_struct *p)
+{
+	return 1 + (127 * log2_u64(p->scx.weight) / log2_u64(10000));
+}
+
+/*
  * Scale a value inversely proportional to the task's normalized weight.
  */
 static inline u64 scale_by_task_normalized_weight_inverse(const struct task_struct *p, u64 value)
 {
-	/*
-	 * Original weight range:   [1, 10000], default = 100
-	 * Normalized weight range: [1, 128], default = 64
-	 *
-	 * This normalization reduces the impact of extreme weight differences,
-	 * preventing highly prioritized tasks from starving lower-priority ones.
-	 *
-	 * The goal is to ensure a more balanced scheduling that is
-	 * influenced more by the task's behavior rather than its priority
-	 * difference and prevent potential stalls due to large priority
-	 * gaps.
-	*/
-	u64 weight = 1 + (127 * log2_u64(p->scx.weight) / log2_u64(10000));
-
-	return value * 64 / weight;
+	return value * 64 / task_weight(p);
 }
 
 /*
@@ -364,8 +369,8 @@ static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
 
 	/*
 	 * Cap the vruntime budget that an idle task can accumulate to
-	 * slice_lag, preventing sleeping tasks from gaining excessive
-	 * priority.
+	 * slice_lag multiplied by the task's normalized weight, preventing
+	 * sleeping tasks from gaining excessive priority.
 	 *
 	 * A larger slice_lag favors tasks that sleep longer by allowing
 	 * them to accumulate more credit, leading to shorter deadlines and
@@ -379,7 +384,7 @@ static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
 	 * slice_lag), effectively approximating FIFO behavior as the
 	 * penalty increases.
 	 */
-	vtime_min = vtime_now - slice_lag;
+	vtime_min = vtime_now - slice_lag * task_weight(p);
 	if (time_before(tctx->deadline, vtime_min))
 		tctx->deadline = vtime_min;
 
@@ -1179,7 +1184,7 @@ void BPF_STRUCT_OPS(bpfland_running, struct task_struct *p)
  */
 void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 {
-	u64 now = scx_bpf_now(), slice, delta_runtime;
+	u64 now = scx_bpf_now(), slice, delta_runtime, max_runtime;
 	s32 cpu = scx_bpf_task_cpu(p);
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
@@ -1196,13 +1201,13 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	slice = now - tctx->last_run_at;
 
 	/*
-	 * Update task's execution time (exec_runtime), but never account
-	 * more than 10 slices of runtime to prevent excessive
-	 * de-prioritization of CPU-intensive tasks (which could lead to
-	 * starvation).
+	 * Update task's execution time (exec_runtime), but never
+	 * accumulate more than slice_lag multiplied by the task's
+	 * normalized weight, to prevent excessive de-prioritization of
+	 * CPU-intensive tasks (which could lead to starvation).
 	 */
-	if (tctx->exec_runtime < 10 * slice_max)
-		tctx->exec_runtime += slice;
+	max_runtime = slice_lag * task_weight(p);
+	tctx->exec_runtime = MIN(tctx->exec_runtime + slice, max_runtime);
 
 	/*
 	 * Update task's vruntime.
