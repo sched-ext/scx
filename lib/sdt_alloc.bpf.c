@@ -628,6 +628,7 @@ __hidden
 void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 {
 	void __arena *memory, *old;
+	size_t alloc_bytes;
 	void __arena *ptr;
 	size_t padding;
 	u64 addr;
@@ -638,11 +639,11 @@ void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 	addr = (__u64) scx_static.memory + scx_static.off;
 
 	padding = round_up(addr, alignment) - addr;
-	bytes += padding;
+	alloc_bytes = bytes + padding;
 
-	if (bytes > scx_static.max_alloc_bytes) {
+	if (alloc_bytes > scx_static.max_alloc_bytes) {
 		bpf_spin_unlock(&alloc_lock);
-		scx_bpf_error("invalid request %ld, max is %ld\n", bytes,
+		scx_bpf_error("invalid request %ld, max is %ld\n", alloc_bytes,
 			      scx_static.max_alloc_bytes);
 		return NULL;
 	}
@@ -653,7 +654,7 @@ void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 	 * size, so it does not attempt to alleviate memory
 	 * fragmentation.
 	 */
-	if (scx_static.off + bytes > scx_static.max_alloc_bytes) {
+	if (scx_static.off + alloc_bytes > scx_static.max_alloc_bytes) {
 		old = scx_static.memory;
 
 		bpf_spin_unlock(&alloc_lock);
@@ -680,16 +681,22 @@ void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 			return NULL;
 		}
 
-		/* Switch to new memory block, reset offset,
+		/*
+		 * Switch to new memory block, reset offset,
 		 * and recalculate base address.
 		 */
 		scx_static.memory = memory;
 		scx_static.off = 0;
 		addr = (__u64) scx_static.memory + scx_static.off;
+
+		/*
+		 * We changed the base address. Recompute the padding. */
+		padding = round_up(addr, alignment) - addr;
+		alloc_bytes = bytes + padding;
 	}
 
 	ptr = (void __arena *)(addr + padding);
-	scx_static.off += bytes;
+	scx_static.off += alloc_bytes;
 
 	bpf_spin_unlock(&alloc_lock);
 
