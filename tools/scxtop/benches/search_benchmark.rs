@@ -1,3 +1,8 @@
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+//
+// This software may be used and distributed according to the terms of the
+// GNU General Public License version 2.
+
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use scxtop::available_perf_events;
 use scxtop::Search;
@@ -5,11 +10,11 @@ use scxtop::Search;
 fn get_search() -> Search {
     let available_perf_events_list: Vec<String> = available_perf_events()
         .unwrap()
-        .iter()
+        .into_iter()
         .flat_map(|(subsystem, events)| {
             events
-                .iter()
-                .map(|event| format!("{}:{}", subsystem.clone(), event.clone()))
+                .into_iter()
+                .map(move |event| format!("{}:{}", &subsystem, &event))
         })
         .collect();
     Search::new(available_perf_events_list)

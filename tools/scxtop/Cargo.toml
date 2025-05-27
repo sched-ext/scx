@@ -56,6 +56,8 @@ log-panics = { version = "2", features = ["with-backtrace"]}
 hashbrown = "0.15.2"
 smartstring = { version = "1.0.1", features = ["serde"] }
 nix = { version = "0.29", features = ["time"] }
+
+[dev-dependencies]
 criterion = "0.6.0"
 
 [[bench]]
