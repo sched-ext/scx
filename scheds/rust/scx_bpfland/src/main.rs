@@ -137,7 +137,7 @@ struct Opts {
 
     /// Throttle the running CPUs by periodically injecting idle cycles.
     ///
-    /// This option can help extend battery life on portable devieces, reduce heating, fan noise
+    /// This option can help extend battery life on portable devices, reduce heating, fan noise
     /// and overall energy consumption (0 = disable).
     #[clap(short = 't', long, default_value = "0")]
     throttle_us: u64,
