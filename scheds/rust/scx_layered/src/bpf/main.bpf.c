@@ -2367,7 +2367,7 @@ static bool get_aligned_layer(struct task_struct *p __arg_trusted, u64 layer_id,
 		}
 	}
 
-	if (is_cpumask) {
+	if (!is_cpumask) {
 		if (is_subset) {
 			if ((cpumask = cast_mask(lookup_layer_cpuset(layer_id))) &&
 				!bpf_cpumask_subset(p->cpus_ptr, cpumask))
