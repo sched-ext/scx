@@ -944,11 +944,6 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 		scx_bpf_cpuperf_set(task_cpu, SCX_CPUPERF_ONE);
 	}
 
-	// if ((taskc->dsq_index >=0 && taskc->dsq_index < nr_dsqs_per_llc) &&
-	//     p->scx.dsq_vtime > llcx->dsq_max_vtime[taskc->dsq_index]) {
-	// 	llcx->dsq_max_vtime[taskc->dsq_index] = p->scx.dsq_vtime;
-	// }
-
 	u64 now = bpf_ktime_get_ns();
 	if (taskc->last_run_started == 0)
 		taskc->last_run_started = now;
