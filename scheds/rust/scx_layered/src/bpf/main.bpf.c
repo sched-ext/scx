@@ -2344,11 +2344,51 @@ int match_layer(u32 layer_id, struct task_struct *p __arg_trusted, const char *c
 	return -ENOENT;
 }
 
+
+static bool get_matching_layer(struct task_struct *p __arg_trusted, u64 layer_id, const char *cgrp_path) {
+	if ((match_layer(layer_id, p, cgrp_path) == 0))
+		return true;
+
+	return false;
+}
+
+static bool get_aligned_layer(struct task_struct *p __arg_trusted, u64 layer_id, const char *cgrp_path, bool is_cpumask, bool is_subset) {
+	const struct cpumask *cpumask;
+
+	if (is_cpumask) {
+		if (is_subset) {
+			if ((cpumask = lookup_layer_cpumask(layer_id)) &&
+				!bpf_cpumask_subset(p->cpus_ptr, cpumask))
+					return false;
+		} else {
+			if ((cpumask = lookup_layer_cpumask(layer_id)) &&
+				!bpf_cpumask_intersects(p->cpus_ptr, cpumask))
+					return false;
+		}
+	}
+
+	if (is_cpumask) {
+		if (is_subset) {
+			if ((cpumask = cast_mask(lookup_layer_cpuset(layer_id))) &&
+				!bpf_cpumask_subset(p->cpus_ptr, cpumask))
+					return false;
+		} else {
+			if ((cpumask = cast_mask(lookup_layer_cpuset(layer_id))) &&
+				!bpf_cpumask_intersects(p->cpus_ptr, cpumask))
+					return false;
+		}
+	}
+
+	return get_matching_layer(p, layer_id, cgrp_path);
+
+}
+
 static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task_ctx *taskc)
 {
 	const char *cgrp_path;
 	bool matched = false;
 	u64 layer_id;	// XXX - int makes verifier unhappy
+	int i;
 
 	if (!taskc->refresh_layer)
 		return;
@@ -2361,12 +2401,32 @@ static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task
 	if (taskc->layer_id >= 0 && taskc->layer_id < nr_layers)
 		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
 
-	bpf_for(layer_id, 0, nr_layers) {
-		if (match_layer(layer_id, p, cgrp_path) == 0) {
-			matched = true;
+	// Match tasks in a tiered manner.
+	// Layer has CPUs which can all run task.
+	// Layer can have CPUs which can all run task.
+	// Layer has CPUs some of which can run task.
+	// Layer can have CPUs, some of which can run task.
+	// Layer can't have CPUs which can run task (i.e. lo fb).
+	bpf_for(i, 0, 5) {
+		if (matched)
 			break;
+		bpf_for(layer_id, 0, nr_layers) {
+			if (i == 0 && (matched = get_aligned_layer(p, layer_id, cgrp_path, true, true)) && matched)
+				break;
+			if (i == 1 && (matched = get_aligned_layer(p, layer_id, cgrp_path, false, true)) && matched)
+				break;
+			if (i == 2 && (matched = get_aligned_layer(p, layer_id, cgrp_path, true, false)) && matched)
+				break;
+			if (i == 3 && (matched = get_aligned_layer(p, layer_id, cgrp_path, false, false)) && matched)
+				break;
+			if (i == 4 && (matched = get_matching_layer(p, layer_id, cgrp_path)) && matched)
+				break;
 		}
 	}
+	
+	// verivier
+	if (layer_id >= nr_layers || layer_id < 0)
+		return;
 
 	if (matched) {
 		struct layer *layer = &layers[layer_id];
