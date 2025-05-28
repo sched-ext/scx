@@ -824,13 +824,6 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 			cpu = pick_idle_affinitized_cpu(p, taskc, cpu, &is_idle);
 
-		// if (!(cpuc = lookup_cpu_ctx(cpu)) ||
-		//      !(llcx = lookup_llc_ctx(cpuc->llc_id))) {
-		// 	scx_bpf_error("invalid lookup");
-		// 	ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
-		// 	return;
-		// }
-
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON|cpu, taskc->slice_ns, enq_flags);
 		if (is_idle) {
 			stat_inc(P2DQ_STAT_IDLE);
