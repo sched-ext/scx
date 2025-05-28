@@ -34,8 +34,12 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
+use scx_utils::{Core, Llc};
+
+use std::ffi::c_ulong;
 
 use bpf_intf::stat_idx_P2DQ_NR_STATS;
 use bpf_intf::stat_idx_P2DQ_STAT_DIRECT;
@@ -50,30 +54,8 @@ use bpf_intf::stat_idx_P2DQ_STAT_SELECT_PICK2;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_LLC;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_MIG;
 use bpf_intf::stat_idx_P2DQ_STAT_WAKE_PREV;
-use scx_p2dq::P2dqArenaProgs;
 use scx_p2dq::SchedulerOpts;
 use scx_p2dq::TOPO;
-
-impl P2dqArenaProgs for BpfSkel<'_> {
-    fn run_arena_init<'b>(&self, input: ProgramInput<'b>) -> Result<libbpf_rs::ProgramOutput<'b>> {
-        Ok(self.progs.arena_init.test_run(input)?)
-    }
-
-    fn run_alloc_mask<'b>(&self, input: ProgramInput<'b>) -> Result<libbpf_rs::ProgramOutput<'b>> {
-        Ok(self.progs.arena_alloc_mask.test_run(input)?)
-    }
-
-    fn run_topology_node_init<'b>(
-        &self,
-        input: ProgramInput<'b>,
-    ) -> Result<libbpf_rs::ProgramOutput<'b>> {
-        Ok(self.progs.arena_topology_node_init.test_run(input)?)
-    }
-
-    fn setup_ptr(&self) -> u64 {
-        self.maps.bss_data.arena_topo_setup_ptr
-    }
-}
 
 /// scx_p2dq: A pick 2 dumb queuing load balancing scheduler.
 ///
@@ -180,6 +162,106 @@ impl<'a> Scheduler<'a> {
         }
     }
 
+    fn setup_arenas(&mut self) -> Result<()> {
+        // Allocate the arena memory from the BPF side so userspace initializes it before starting
+        // the scheduler. Despite the function call's name this is neither a test nor a test run,
+        // it's the recommended way of executing SEC("syscall") probes.
+        let mut args = types::arena_init_args {
+            static_pages: bpf_intf::consts_STATIC_ALLOC_PAGES_GRANULARITY as c_ulong,
+            task_ctx_size: std::mem::size_of::<types::task_p2dq>() as c_ulong,
+        };
+
+        let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
+            ..Default::default()
+        };
+
+        let output = self.skel.progs.arena_init.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "Could not initialize arenas, p2dq_setup returned {}",
+                output.return_value as i32
+            );
+        }
+
+        Ok(())
+    }
+
+    fn setup_topology_node(&mut self, mask: &[u64]) -> Result<()> {
+        // Copy the address of ptr to the kernel to populate it from BPF with the arena pointer.
+        let input = ProgramInput {
+            ..Default::default()
+        };
+
+        let output = self.skel.progs.arena_alloc_mask.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "Could not initialize arenas, setup_topology_node returned {}",
+                output.return_value as i32
+            );
+        }
+
+        let ptr = unsafe {
+            std::mem::transmute::<u64, &mut [u64; 10]>(self.skel.maps.bss_data.arena_topo_setup_ptr)
+        };
+
+        let (valid_mask, _) = ptr.split_at_mut(mask.len());
+        valid_mask.clone_from_slice(mask);
+
+        let input = ProgramInput {
+            ..Default::default()
+        };
+        let output = self.skel.progs.arena_topology_node_init.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "p2dq_topology_node_init returned {}",
+                output.return_value as i32
+            );
+        }
+
+        Ok(())
+    }
+
+    fn setup_topology(&mut self) -> Result<()> {
+        let topo = Topology::new().expect("Failed to build host topology");
+
+        self.setup_topology_node(topo.span.as_raw_slice())?;
+
+        for (_, node) in topo.nodes {
+            self.setup_topology_node(node.span.as_raw_slice())?;
+        }
+
+        for (_, llc) in topo.all_llcs {
+            self.setup_topology_node(
+                Arc::<Llc>::into_inner(llc)
+                    .expect("missing llc")
+                    .span
+                    .as_raw_slice(),
+            )?;
+        }
+
+        for (_, core) in topo.all_cores {
+            self.setup_topology_node(
+                Arc::<Core>::into_inner(core)
+                    .expect("missing core")
+                    .span
+                    .as_raw_slice(),
+            )?;
+        }
+        for (_, cpu) in topo.all_cpus {
+            let mut mask = [0; 9];
+            mask[cpu.id.checked_shr(64).unwrap_or(0)] |= 1 << (cpu.id % 64);
+            self.setup_topology_node(&mask)?;
+        }
+
+        Ok(())
+    }
+
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (res_ch, req_ch) = self.stats_server.channels();
 
@@ -212,6 +294,8 @@ impl<'a> Scheduler<'a> {
     }
 
     fn start(&mut self) -> Result<()> {
+        self.setup_arenas()?;
+        self.setup_topology()?;
 
         self.struct_ops = Some(scx_ops_attach!(self.skel, p2dq)?);
 
