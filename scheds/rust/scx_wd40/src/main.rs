@@ -128,14 +128,6 @@ struct Opts {
     #[clap(short = 'c', long, default_value = "3")]
     cache_level: u32,
 
-    /// Instead of using cache locality, set the cpumask for each domain
-    /// manually. Provide multiple --cpumasks, one for each domain. E.g.
-    /// --cpumasks 0xff_00ff --cpumasks 0xff00 will create two domains, with
-    /// the corresponding CPUs belonging to each domain. Each CPU must
-    /// belong to precisely one domain.
-    #[clap(short = 'C', long, num_args = 1.., conflicts_with = "cache_level")]
-    cpumasks: Vec<String>,
-
     /// When non-zero, enable greedy task stealing. When a domain is idle, a cpu
     /// will attempt to steal tasks from another domain as follows:
     ///
@@ -508,7 +500,7 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, open_object, wd40).unwrap();
 
         // Initialize skel according to @opts.
-        let domains = Arc::new(DomainGroup::new(&Topology::new()?, &opts.cpumasks)?);
+        let domains = Arc::new(DomainGroup::new(&Topology::new()?)?);
 
         if *NR_CPU_IDS > MAX_CPUS {
             bail!(

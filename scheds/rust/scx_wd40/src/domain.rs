@@ -62,7 +62,7 @@ pub struct DomainGroup {
 }
 
 impl DomainGroup {
-    pub fn new(top: &Topology, cpumasks: &[String]) -> Result<Self> {
+    pub fn new(top: &Topology) -> Result<Self> {
         let mut span = Cpumask::new();
         let mut dom_numa_map = BTreeMap::new();
         // Track the domain ID separate from the LLC ID, because LLC IDs can
@@ -70,10 +70,10 @@ impl DomainGroup {
         // contiguous (at least for now, until we can update libraries to not
         // return vectors of domain values).
         let mut dom_id = 0;
-        let (doms, num_numa_nodes) = if !cpumasks.is_empty() {
-            let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
-            for mask_str in cpumasks.iter() {
-                let mask = Cpumask::from_str(mask_str)?;
+        let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
+        for (node_id, node) in &top.nodes {
+            for (_, llc) in node.llcs.iter() {
+                let mask = llc.span.clone();
                 span |= &mask;
                 doms.insert(
                     dom_id,
@@ -83,35 +83,15 @@ impl DomainGroup {
                         ctx: Arc::new(Mutex::new(None)),
                     },
                 );
-                dom_numa_map.insert(dom_id, 0);
+                dom_numa_map.insert(dom_id, *node_id);
                 dom_id += 1;
             }
-            (doms, 1)
-        } else {
-            let mut doms: BTreeMap<usize, Domain> = BTreeMap::new();
-            for (node_id, node) in &top.nodes {
-                for (_, llc) in node.llcs.iter() {
-                    let mask = llc.span.clone();
-                    span |= &mask;
-                    doms.insert(
-                        dom_id,
-                        Domain {
-                            id: dom_id,
-                            mask,
-                            ctx: Arc::new(Mutex::new(None)),
-                        },
-                    );
-                    dom_numa_map.insert(dom_id, *node_id);
-                    dom_id += 1;
-                }
-            }
-            (doms, top.nodes.len())
-        };
+        }
 
         Ok(Self {
             doms,
             dom_numa_map,
-            num_numa_nodes,
+            num_numa_nodes: top.nodes.len(),
             span,
         })
     }
