@@ -419,9 +419,8 @@ impl<'a> Scheduler<'a> {
             "performance" => Self::epp_to_cpumask(Powermode::Performance)?,
             "auto" => match power_profile {
                 PowerProfile::Powersave => Self::epp_to_cpumask(Powermode::Powersave)?,
-                PowerProfile::Performance | PowerProfile::Balanced => {
-                    Self::epp_to_cpumask(Powermode::Performance)?
-                }
+                PowerProfile::Balanced { .. } => Self::epp_to_cpumask(Powermode::Any)?,
+                PowerProfile::Performance => Self::epp_to_cpumask(Powermode::Performance)?,
                 PowerProfile::Unknown => Self::epp_to_cpumask(Powermode::Any)?,
             },
             "all" => Self::epp_to_cpumask(Powermode::Any)?,

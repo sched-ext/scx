@@ -24,7 +24,7 @@ const MAX_RETRIES: usize = 10;
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum PowerProfile {
     Powersave,
-    Balanced,
+    Balanced { power: bool },
     Performance,
     Unknown,
 }
@@ -33,7 +33,8 @@ impl fmt::Display for PowerProfile {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             PowerProfile::Powersave => "powersave",
-            PowerProfile::Balanced => "balanced",
+            PowerProfile::Balanced { power: true } => "balanced_power",
+            PowerProfile::Balanced { power: false } => "balanced_performance",
             PowerProfile::Performance => "performance",
             PowerProfile::Unknown => "unknown",
         }
@@ -49,8 +50,9 @@ fn read_energy_profile() -> PowerProfile {
         .ok()
         .or_else(|| fs::read_to_string(scaling_governor_path).ok())
         .map(|s| match s.trim_end() {
-            "power" | "balance_power" | "powersave" => PowerProfile::Powersave,
-            "balance_performance" => PowerProfile::Balanced,
+            "power" | "powersave" => PowerProfile::Powersave,
+            "balance_power" => PowerProfile::Balanced { power: true },
+            "balance_performance" => PowerProfile::Balanced { power: false },
             "performance" => PowerProfile::Performance,
             _ => PowerProfile::Unknown,
         })
@@ -61,7 +63,7 @@ pub fn fetch_power_profile(no_ppd: bool) -> PowerProfile {
     fn parse_profile(profile: &str) -> PowerProfile {
         match profile {
             "power-saver" => PowerProfile::Powersave,
-            "balanced" => PowerProfile::Balanced,
+            "balanced" => PowerProfile::Balanced { power: false },
             "performance" => PowerProfile::Performance,
             _ => PowerProfile::Unknown,
         }
