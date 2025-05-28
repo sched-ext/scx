@@ -238,11 +238,11 @@ int topo_print(void)
 		stack[lvl] = 0;
 
 		bpf_printk("[%d, %d, %d ,%d, %d]",
-			   stack[0],
-			   stack[1],
-			   stack[2],
-			   stack[3],
-			   stack[4]);
+			   stack[TOPO_TOP],
+			   stack[TOPO_NODE],
+			   stack[TOPO_LLC],
+			   stack[TOPO_CORE],
+			   stack[TOPO_CPU]);
 
 		scx_bitmap_print(topo->mask);
 	}

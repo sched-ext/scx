@@ -4,15 +4,22 @@ struct topology;
 typedef struct topology __arena * topo_ptr;
 
 #define TOPO_MAX_CHILDREN (16)
-/* Levels are : Top, NUMA node, LLC, Core, Hyperthread */
-#define TOPO_MAX_LEVEL (5)
+
+enum topo_level {
+	TOPO_TOP	= 0,
+	TOPO_NODE	= 1,
+	TOPO_LLC	= 2,
+	TOPO_CORE	= 3,
+	TOPO_CPU	= 4,
+	TOPO_MAX_LEVEL	= 5,
+};
 
 struct topology {
 	topo_ptr parent;
 	topo_ptr children[TOPO_MAX_CHILDREN];
 	size_t nr_children;
 	scx_bitmap_t mask;
-	size_t level;
+	enum topo_level level;
 
 	/* Generic pointer, can be used for anything. */
 	void *data;
