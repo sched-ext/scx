@@ -1360,13 +1360,18 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	bool yielding, try_preempt_first;
 	u64 queued_runtime;
 	u64 *lstats;
+	const struct cpumask *idle_smtmask;
+
+	
+	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
+		return;
 
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(taskc = lookup_task_ctx(p)))
-		return;
+		goto release;
 
 	layer_id = taskc->layer_id;
 	if (!(layer = lookup_layer(layer_id)))
-		return;
+		goto release;
 
 	if (enq_flags & SCX_ENQ_REENQ) {
 		lstat_inc(LSTAT_ENQ_REENQ, layer, cpuc);
@@ -1394,23 +1399,22 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	if (try_preempt_first && wakeup && !yielding &&
 	    try_preempt_cpu(task_cpu, p, taskc, layer, PREEMPT_FIRST))
-		return;
+		goto release;
 
 	/*
 	 * If select_cpu() was skipped, try direct dispatching to an idle CPU.
 	 */
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags) || try_preempt_first) {
-		cpu = pick_idle_cpu(p, task_cpu, cpuc, taskc, layer, false);
-		if (cpu >= 0) {
+		if ((cpu = pick_idle_cpu_from(cast_mask(taskc->layered_node_mask), task_cpu, idle_smtmask, layer)) >= 0) {
 			lstat_inc(LSTAT_ENQ_LOCAL, layer, cpuc);
 			taskc->dsq_id = SCX_DSQ_LOCAL_ON | cpu;
 			scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, 0);
-			return;
+			goto release;
 		}
 	}
 
 	if (!(task_cpuc = lookup_cpu_ctx(task_cpu)))
-		return;
+		goto release;
 
 	/*
 	 * No idle CPU, try preempting.
@@ -1422,7 +1426,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		 */
 		if (!try_preempt_first && wakeup &&
 		    try_preempt_cpu(task_cpu, p, taskc, layer, 0))
-			return;
+			goto release;
 
 		if (p->nr_cpus_allowed > 1) {
 			struct cpu_prox_map *pmap = &task_cpuc->prox_map;
@@ -1432,7 +1436,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 					break;
 				u16 *cpu_p = MEMBER_VPTR(pmap->cpus, [cpu]);
 				if (cpu_p && try_preempt_cpu(*cpu_p, p, taskc, layer, 0))
-					return;
+					goto release;
 			}
 
 			if (nr_excl_layers && layer->excl) {
@@ -1442,7 +1446,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 					u16 *cpu_p = MEMBER_VPTR(pmap->cpus, [cpu]);
 					if (cpu_p && try_preempt_cpu(*cpu_p, p, taskc, layer,
 								     PREEMPT_IGNORE_EXCL))
-						return;
+						goto release;
 				}
 			}
 		}
@@ -1457,7 +1461,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 */
 	llc_id = task_cpuc->llc_id;
 	if (llc_id >= MAX_LLCS || !(llcc = lookup_llc_ctx(llc_id)))
-		return;
+		goto release;
 
 	maybe_update_task_llc(p, taskc, task_cpu);
 	if (time_before(vtime, llcc->vtime_now[layer_id] - layer->slice_ns))
@@ -1484,7 +1488,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 			taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
 
 		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
-		return;
+		goto release;
 	}
 
 	/*
@@ -1513,7 +1517,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!scx_bpf_dsq_nr_queued(taskc->dsq_id))
 			llcc->lo_fb_seq++;
 		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
-		return;
+		goto release;
 	}
 
 	/*
@@ -1567,6 +1571,11 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * something similar. Oh well...
 	 */
 	kick_idle_cpu(p, layer);
+	
+	release:
+		scx_bpf_put_idle_cpumask(idle_smtmask);
+		return;
+
 }
 
 static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now)
