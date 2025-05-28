@@ -7,7 +7,6 @@ mod bpf_skel;
 
 use bpf_skel::BpfSkel;
 
-use scx_p2dq::P2dqArenaProgs;
 use scx_p2dq::SchedulerOpts as P2dqOpts;
 use scx_userspace_arena::alloc::Allocator;
 use scx_userspace_arena::alloc::HeapAllocator;
@@ -17,6 +16,9 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Core;
+use scx_utils::Llc;
+use scx_utils::Topology;
 
 use anyhow::bail;
 use anyhow::Context;
@@ -24,7 +26,6 @@ use anyhow::Result;
 use clap::Parser;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-use libbpf_rs::ProgramOutput;
 use log::debug;
 use log::info;
 use nix::unistd::Pid;
@@ -71,24 +72,6 @@ unsafe impl Allocator for ArenaAllocator {
                 layout,
             )
         }
-    }
-}
-
-impl P2dqArenaProgs for BpfSkel<'_> {
-    fn run_arena_init<'b>(&self, input: ProgramInput<'b>) -> Result<ProgramOutput<'b>> {
-        Ok(self.progs.p2dq_arena_init.test_run(input)?)
-    }
-
-    fn run_alloc_mask<'b>(&self, input: ProgramInput<'b>) -> Result<ProgramOutput<'b>> {
-        Ok(self.progs.p2dq_alloc_mask.test_run(input)?)
-    }
-
-    fn run_topology_node_init<'b>(&self, input: ProgramInput<'b>) -> Result<ProgramOutput<'b>> {
-        Ok(self.progs.p2dq_topology_node_init.test_run(input)?)
-    }
-
-    fn setup_ptr(&self) -> u64 {
-        self.maps.bss_data.setup_ptr
     }
 }
 
@@ -194,6 +177,96 @@ impl Scheduler {
 }
 
 impl Builder<'_> {
+    fn setup_arenas(&self, skel: &mut BpfSkel) -> Result<()> {
+        // Allocate the arena memory from the BPF side so userspace initializes it before starting
+        // the scheduler. Despite the function call's name this is neither a test nor a test run,
+        // it's the recommended way of executing SEC("syscall") probes.
+        let input = ProgramInput {
+            ..Default::default()
+        };
+
+        let output = skel.progs.p2dq_arena_init.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "Could not initialize arenas, p2dq_setup returned {}",
+                output.return_value as i32
+            );
+        }
+
+        Ok(())
+    }
+
+    fn setup_topology_node(&self, skel: &mut BpfSkel, mask: &[u64]) -> Result<()> {
+        // Copy the address of ptr to the kernel to populate it from BPF with the arena pointer.
+        let input = ProgramInput {
+            ..Default::default()
+        };
+
+        let output = skel.progs.p2dq_alloc_mask.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "Could not initialize arenas, setup_topology_node returned {}",
+                output.return_value as i32
+            );
+        }
+
+        let ptr =
+            unsafe { std::mem::transmute::<u64, &mut [u64; 10]>(skel.maps.bss_data.setup_ptr) };
+
+        let (valid_mask, _) = ptr.split_at_mut(mask.len());
+        valid_mask.clone_from_slice(mask);
+
+        let input = ProgramInput {
+            ..Default::default()
+        };
+        let output = skel.progs.p2dq_topology_node_init.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "p2dq_topology_node_init returned {}",
+                output.return_value as i32
+            );
+        }
+
+        Ok(())
+    }
+
+    fn setup_topology(&self, skel: &mut BpfSkel) -> Result<()> {
+        let topo = Topology::new().expect("Failed to build host topology");
+
+        self.setup_topology_node(skel, topo.span.as_raw_slice())?;
+
+        for (_, node) in topo.nodes {
+            self.setup_topology_node(skel, node.span.as_raw_slice())?;
+        }
+
+        for (_, llc) in topo.all_llcs {
+            self.setup_topology_node(
+                skel,
+                Arc::<Llc>::into_inner(llc)
+                    .expect("missing llc")
+                    .span
+                    .as_raw_slice(),
+            )?;
+        }
+
+        for (_, core) in topo.all_cores {
+            self.setup_topology_node(
+                skel,
+                Arc::<Core>::into_inner(core)
+                    .expect("missing core")
+                    .span
+                    .as_raw_slice(),
+            )?;
+        }
+        for (_, cpu) in topo.all_cpus {
+            let mut mask = [0; 9];
+            mask[cpu.id.checked_shr(64).unwrap_or(0)] |= 1 << (cpu.id % 64);
+            self.setup_topology_node(skel, &mask)?;
+        }
+
+        Ok(())
+    }
+
     fn load_skel(&self) -> Result<Pin<Rc<SkelWithObject>>> {
         let mut out: Rc<MaybeUninit<SkelWithObject>> = Rc::new_uninit();
         let uninit_skel = Rc::get_mut(&mut out).expect("brand new rc should be unique");
@@ -305,6 +378,9 @@ impl Builder<'_> {
 
         let mut skel = scx_ops_load!(open_skel, chaos, uei)?;
         scx_p2dq::init_skel!(&mut skel);
+
+        self.setup_arenas(&mut skel)?;
+        self.setup_topology(&mut skel)?;
 
         let out = unsafe {
             // SAFETY: initialising field by field. open_object is already "initialised" (it's
