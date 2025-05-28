@@ -52,6 +52,7 @@
 #include <scx/bpf_arena_common.h>
 #include <scx/bpf_arena_spin_lock.h>
 
+#include <lib/arena.h>
 #include <lib/cpumask.h>
 #include <lib/percpu.h>
 
@@ -852,22 +853,9 @@ static s32 initialize_cpu(s32 cpu)
 }
 
 SEC("syscall")
-int wd40_arena_setup(void)
+int wd40_setup(void)
 {
 	int ret, i;
-
-	ret = scx_static_init(STATIC_ALLOC_PAGES_GRANULARITY);
-	if (ret)
-		return ret;
-
-	/* How many types to store all CPU IDs? */
-	ret = scx_bitmap_init(div_round_up(nr_cpu_ids, 8));
-	if (ret)
-		return ret;
-
-	ret = scx_percpu_storage_init();
-	if (ret)
-		return ret;
 
 	ret = create_save_scx_bitmap(&all_cpumask);
 	if (ret)
@@ -882,10 +870,6 @@ int wd40_arena_setup(void)
 		return ret;
 
 	ret = lb_domain_init();
-	if (ret)
-		return ret;
-
-	ret = scx_task_init(sizeof(struct task_ctx));
 	if (ret)
 		return ret;
 
