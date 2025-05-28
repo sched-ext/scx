@@ -45,4 +45,9 @@ struct topo_iter {
 	for ((_child) = NULL; (_child = TOPO_ITER_NEXT(_iter)) && can_loop;)
 
 int topo_init(scx_bitmap_t __arg_arena mask);
+int topo_contains(topo_ptr topo, u32 cpu);
+
+u64 topo_mask_level_internal(topo_ptr topo, enum topo_level level);
+#define topo_mask_level(topo, level) ((scx_bitmap_t) topo_mask_level_internal((topo), (level))
+
 int topo_print(void);

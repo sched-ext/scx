@@ -187,6 +187,25 @@ topo_ptr topo_find_sibling(topo_ptr topo, u32 cpu)
 
 }
 
+__weak
+u64 topo_mask_level_internal(topo_ptr topo, enum topo_level level)
+{
+	if (unlikely(level < 0 || level >= TOPO_MAX_LEVEL)) {
+		scx_bpf_error("invalid topology level %d", level);
+		return (u64)NULL;
+	}
+
+	if (unlikely(topo->level < level)) {
+		scx_bpf_error("requesting cpumask from lower level %d, starting from %d", level, topo->level);
+		return (u64)NULL;
+	}
+
+	while (topo->level > level && can_loop)
+		topo = topo->parent;
+
+	return (u64)topo->mask;
+}
+
 __weak __maybe_unused
 int topo_print(void)
 {
