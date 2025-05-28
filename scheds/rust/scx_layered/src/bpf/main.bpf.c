@@ -443,7 +443,7 @@ static void layer_cpuset_bpfmask(int layer_id)
 /*
  * Returns if any cpus were added to the layer.
  */
-static void refresh_cpumasks(u32 layer_id)
+int refresh_cpumasks(u32 layer_id)
 {
 	struct bpf_cpumask *layer_cpumask;
 	struct layer_cpumask_wrapper *cpumaskw;
@@ -455,18 +455,18 @@ static void refresh_cpumasks(u32 layer_id)
 	layer = MEMBER_VPTR(layers, [layer_id]);
 	if (!layer) {
 		scx_bpf_error("can't happen");
-		return;
+		return 0;
 	}
 
 	if (!__sync_val_compare_and_swap(&layer->refresh_cpus, 1, 0))
-		return;
+		return 0;
 
 	bpf_rcu_read_lock();
 	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)) ||
 	    !(layer_cpumask = cpumaskw->cpumask)) {
 		bpf_rcu_read_unlock();
 		scx_bpf_error("can't happen");
-		return;
+		return 0;
 	}
 
 	bpf_for(cpu, 0, nr_possible_cpus) {
@@ -474,7 +474,7 @@ static void refresh_cpumasks(u32 layer_id)
 
 		if (!(cpuc = lookup_cpu_ctx(cpu))) {
 			bpf_rcu_read_unlock();
-			return;
+			return 0;
 		}
 
 		if ((u8_ptr = MEMBER_VPTR(layers, [layer_id].cpus[cpu / 8]))) {
@@ -518,10 +518,11 @@ static void refresh_cpumasks(u32 layer_id)
 
 	bpf_for(cpu, 0, nr_possible_cpus) {
 		if (!(cpuc = lookup_cpu_ctx(cpu)))
-			return;
+			return 0;
 		if (cpuc_in_layer(cpuc, layer))
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	}
+	return 0;
 }
 
 /*
