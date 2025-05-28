@@ -339,7 +339,7 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_load!(skel, bpfland_ops, uei)?;
 
         // Initialize the primary scheduling domain and the preferred domain.
-        let power_profile = fetch_power_profile(false);
+        let power_profile = Self::power_profile();
         if let Err(err) = Self::init_energy_domain(&mut skel, &opts.primary_domain, power_profile) {
             warn!("failed to initialize primary domain: error {}", err);
         }
@@ -419,8 +419,11 @@ impl<'a> Scheduler<'a> {
             "performance" => Self::epp_to_cpumask(Powermode::Performance)?,
             "auto" => match power_profile {
                 PowerProfile::Powersave => Self::epp_to_cpumask(Powermode::Powersave)?,
-                PowerProfile::Balanced { .. } => Self::epp_to_cpumask(Powermode::Any)?,
-                PowerProfile::Performance => Self::epp_to_cpumask(Powermode::Performance)?,
+                PowerProfile::Balanced { power: true } => {
+                    Self::epp_to_cpumask(Powermode::Powersave)?
+                }
+                PowerProfile::Balanced { power: false } => Self::epp_to_cpumask(Powermode::Any)?,
+                PowerProfile::Performance => Self::epp_to_cpumask(Powermode::Any)?,
                 PowerProfile::Unknown => Self::epp_to_cpumask(Powermode::Any)?,
             },
             "all" => Self::epp_to_cpumask(Powermode::Any)?,
@@ -472,9 +475,18 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn power_profile() -> PowerProfile {
+        let profile = fetch_power_profile(true);
+        if profile == PowerProfile::Unknown {
+            fetch_power_profile(false)
+        } else {
+            profile
+        }
+    }
+
     fn refresh_sched_domain(&mut self) -> bool {
         if self.power_profile != PowerProfile::Unknown {
-            let power_profile = fetch_power_profile(false);
+            let power_profile = Self::power_profile();
             if power_profile != self.power_profile {
                 self.power_profile = power_profile;
 
