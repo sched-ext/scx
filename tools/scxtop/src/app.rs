@@ -277,7 +277,9 @@ impl<'a> App<'a> {
 
     /// Sets the state of the application.
     pub fn set_state(&mut self, state: AppState) {
-        self.prev_state = self.state.clone();
+        if self.state != AppState::Help && self.state != AppState::Event {
+            self.prev_state = self.state.clone();
+        }
         self.state = state;
         if self.prev_state == AppState::MangoApp {
             self.process_id = self.prev_process_id;
