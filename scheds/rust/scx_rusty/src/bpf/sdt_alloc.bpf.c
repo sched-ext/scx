@@ -694,6 +694,8 @@ void __arena *sdt_static_alloc(size_t bytes)
 	ptr = (void __arena *)((__u64) sdt_static.memory + sdt_static.off);
 	sdt_static.off += bytes;
 
+	bpf_spin_unlock(&sdt_lock);
+
 	return ptr;
 }
 
