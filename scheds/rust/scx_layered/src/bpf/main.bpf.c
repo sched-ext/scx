@@ -2402,10 +2402,10 @@ static void maybe_refresh_layer(struct task_struct *p __arg_trusted, struct task
 		__sync_fetch_and_add(&layers[taskc->layer_id].nr_tasks, -1);
 
 	// Match tasks in a tiered manner.
-	// Layer has CPUs which can all run task.
-	// Layer can have CPUs which can all run task.
-	// Layer has CPUs some of which can run task.
-	// Layer can have CPUs, some of which can run task.
+	// Layer has all CPUs which can run task.
+	// Layer can have all CPUs which can run task.
+	// Layer has some CPUs which can run task.
+	// Layer can have some CPUs which can run task.
 	// Layer can't have CPUs which can run task (i.e. lo fb).
 	bpf_for(i, 0, 5) {
 		if (matched)
