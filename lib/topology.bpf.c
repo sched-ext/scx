@@ -74,10 +74,11 @@ int topo_add(topo_ptr parent, scx_bitmap_t mask)
 __weak
 int topo_init(scx_bitmap_t __arg_arena mask)
 {
-	struct topo_iter iter;
-	topo_ptr topo, child;
-	int i;
+	/* Initializing the child to appease the verifier. */
+	topo_ptr topo, child = NULL;
+	int i, j;
 
+	topo = topo_all;
 	if (!topo_all) {
 		topo_all = topo_node(NULL, mask);
 		if (!topo_all) {
@@ -88,14 +89,15 @@ int topo_init(scx_bitmap_t __arg_arena mask)
 		return 0;
 	}
 
-	for (topo = topo_all, i = 0; i < TOPO_MAX_LEVEL && can_loop; i++) {
+	for (i = 0; i < TOPO_MAX_LEVEL && can_loop; i++) {
 		if (!topo_subset(topo, mask)) {
 			scx_bpf_error("mask not a subset of a topology node");
 			topo_print();
 			return -EINVAL;
 		}
 
-		TOPO_FOR_EACH_CHILD(iter, topo, child) {
+		for (j = 0; j < topo->nr_children && can_loop; j++) {
+			child = topo->children[j];
 			if (topo_subset(child, mask))
 				break;
 
@@ -107,10 +109,15 @@ int topo_init(scx_bitmap_t __arg_arena mask)
 
 		/*
 		 * If we don't fit in any child, we belong right below the
-		 * toporent topology node.
+		 * parent topology node.
 		 */
-		if (!child) {
+		if (j == topo->nr_children) {
 			topo_add(topo, mask);
+			return 0;
+		}
+
+		if (!child) {
+			scx_bpf_error("child is not valid");
 			return 0;
 		}
 
@@ -124,9 +131,8 @@ int topo_init(scx_bitmap_t __arg_arena mask)
 __weak
 topo_ptr topo_find_descendant(topo_ptr topo, u32 cpu)
 {
-	struct topo_iter iter;
 	topo_ptr child;
-	int lvl;
+	int lvl, i;
 
 	if (!topo_contains(topo, cpu)) {
 		scx_bpf_error("missing cpu from topology");
@@ -134,15 +140,16 @@ topo_ptr topo_find_descendant(topo_ptr topo, u32 cpu)
 	}
 
 	for (lvl = 0; lvl < TOPO_MAX_LEVEL && can_loop; lvl++) {
-		if (!topo->nr_children)
+		if (topo->nr_children == 0)
 			return topo;
 
-		TOPO_FOR_EACH_CHILD(iter, topo, child) {
+		for (i = 0; i < topo->nr_children && can_loop; i++) {
+			child = topo->children[i];
 			if (topo_contains(child, cpu))
 				break;
 		}
 
-		if (!child) {
+		if (i == topo->nr_children) {
 			scx_bpf_error("missing cpu from inner topology nodes");
 			return NULL;
 		}
@@ -170,15 +177,16 @@ __weak
 topo_ptr topo_find_sibling(topo_ptr topo, u32 cpu)
 {
 	topo_ptr parent = topo->parent;
-	struct topo_iter iter;
 	topo_ptr child;
+	int i;
 
 	if (!parent) {
 		scx_bpf_error("parent has no sibling");
 		return NULL;
 	}
 
-	TOPO_FOR_EACH_CHILD(iter, topo, child) {
+	for (i = 0; i < topo->nr_children && can_loop; i++) {
+		child = topo->children[i];
 		if (topo_contains(child, cpu))
 			return child;
 	}
