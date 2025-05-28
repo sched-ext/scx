@@ -20,6 +20,10 @@ use scx_utils::Core;
 use scx_utils::Llc;
 use scx_utils::Topology;
 
+use scx_p2dq::bpf_intf::consts_STATIC_ALLOC_PAGES_GRANULARITY;
+use scx_p2dq::types;
+use std::ffi::c_ulong;
+
 use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
@@ -181,11 +185,22 @@ impl Builder<'_> {
         // Allocate the arena memory from the BPF side so userspace initializes it before starting
         // the scheduler. Despite the function call's name this is neither a test nor a test run,
         // it's the recommended way of executing SEC("syscall") probes.
+        let mut args = types::arena_init_args {
+            static_pages: consts_STATIC_ALLOC_PAGES_GRANULARITY as c_ulong,
+            task_ctx_size: std::mem::size_of::<types::task_p2dq>() as c_ulong,
+        };
+
         let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
             ..Default::default()
         };
 
-        let output = skel.progs.p2dq_arena_init.test_run(input)?;
+        let output = skel.progs.arena_init.test_run(input)?;
         if output.return_value != 0 {
             bail!(
                 "Could not initialize arenas, p2dq_setup returned {}",
@@ -202,7 +217,7 @@ impl Builder<'_> {
             ..Default::default()
         };
 
-        let output = skel.progs.p2dq_alloc_mask.test_run(input)?;
+        let output = skel.progs.arena_alloc_mask.test_run(input)?;
         if output.return_value != 0 {
             bail!(
                 "Could not initialize arenas, setup_topology_node returned {}",
@@ -210,8 +225,9 @@ impl Builder<'_> {
             );
         }
 
-        let ptr =
-            unsafe { std::mem::transmute::<u64, &mut [u64; 10]>(skel.maps.bss_data.setup_ptr) };
+        let ptr = unsafe {
+            std::mem::transmute::<u64, &mut [u64; 10]>(skel.maps.bss_data.arena_topo_setup_ptr)
+        };
 
         let (valid_mask, _) = ptr.split_at_mut(mask.len());
         valid_mask.clone_from_slice(mask);
@@ -219,7 +235,7 @@ impl Builder<'_> {
         let input = ProgramInput {
             ..Default::default()
         };
-        let output = skel.progs.p2dq_topology_node_init.test_run(input)?;
+        let output = skel.progs.arena_topology_node_init.test_run(input)?;
         if output.return_value != 0 {
             bail!(
                 "p2dq_topology_node_init returned {}",

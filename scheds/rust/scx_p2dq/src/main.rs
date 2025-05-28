@@ -39,6 +39,8 @@ use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 use scx_utils::{Core, Llc};
 
+use std::ffi::c_ulong;
+
 use bpf_intf::stat_idx_P2DQ_NR_STATS;
 use bpf_intf::stat_idx_P2DQ_STAT_DIRECT;
 use bpf_intf::stat_idx_P2DQ_STAT_DISPATCH_PICK2;
@@ -164,11 +166,22 @@ impl<'a> Scheduler<'a> {
         // Allocate the arena memory from the BPF side so userspace initializes it before starting
         // the scheduler. Despite the function call's name this is neither a test nor a test run,
         // it's the recommended way of executing SEC("syscall") probes.
+        let mut args = types::arena_init_args {
+            static_pages: bpf_intf::consts_STATIC_ALLOC_PAGES_GRANULARITY as c_ulong,
+            task_ctx_size: std::mem::size_of::<types::task_p2dq>() as c_ulong,
+        };
+
         let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
             ..Default::default()
         };
 
-        let output = self.skel.progs.p2dq_arena_init.test_run(input)?;
+        let output = self.skel.progs.arena_init.test_run(input)?;
         if output.return_value != 0 {
             bail!(
                 "Could not initialize arenas, p2dq_setup returned {}",
@@ -185,7 +198,7 @@ impl<'a> Scheduler<'a> {
             ..Default::default()
         };
 
-        let output = self.skel.progs.p2dq_alloc_mask.test_run(input)?;
+        let output = self.skel.progs.arena_alloc_mask.test_run(input)?;
         if output.return_value != 0 {
             bail!(
                 "Could not initialize arenas, setup_topology_node returned {}",
@@ -194,7 +207,7 @@ impl<'a> Scheduler<'a> {
         }
 
         let ptr = unsafe {
-            std::mem::transmute::<u64, &mut [u64; 10]>(self.skel.maps.bss_data.setup_ptr)
+            std::mem::transmute::<u64, &mut [u64; 10]>(self.skel.maps.bss_data.arena_topo_setup_ptr)
         };
 
         let (valid_mask, _) = ptr.split_at_mut(mask.len());
@@ -203,7 +216,7 @@ impl<'a> Scheduler<'a> {
         let input = ProgramInput {
             ..Default::default()
         };
-        let output = self.skel.progs.p2dq_topology_node_init.test_run(input)?;
+        let output = self.skel.progs.arena_topology_node_init.test_run(input)?;
         if output.return_value != 0 {
             bail!(
                 "p2dq_topology_node_init returned {}",
@@ -269,7 +282,7 @@ impl<'a> Scheduler<'a> {
             ..Default::default()
         };
 
-        let output = self.skel.progs.p2dq_topo_print.test_run(input)?;
+        let output = self.skel.progs.arena_topology_print.test_run(input)?;
         if output.return_value != 0 {
             bail!(
                 "Could not initialize arenas, topo_print returned {}",
