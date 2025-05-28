@@ -676,7 +676,7 @@ void __arena *sdt_static_alloc(size_t bytes)
 		memory = bpf_arena_alloc_pages(&arena, NULL,
 					       sdt_static.max_alloc_bytes / PAGE_SIZE,
 					       NUMA_NO_NODE, 0);
-		if (!sdt_static.memory)
+		if (!memory)
 			return NULL;
 
 		bpf_spin_lock(&sdt_lock);
