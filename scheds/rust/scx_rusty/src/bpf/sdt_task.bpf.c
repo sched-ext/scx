@@ -40,6 +40,9 @@ void __arena *sdt_task_alloc(struct task_struct *p)
 		return NULL;
 
 	data = sdt_alloc(&sdt_task_allocator);
+	if (unlikely(!data))
+		return NULL;
+
 	cast_kern(data);
 
 	mval->tid = data->tid;
