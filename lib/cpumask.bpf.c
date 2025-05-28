@@ -6,8 +6,7 @@
 
 extern const volatile u32 nr_cpu_ids;
 
-static struct scx_allocator scx_bitmap_allocator;
-size_t mask_size;
+extern size_t mask_size;
 
 __weak int
 scx_bitmap_to_bpf(struct bpf_cpumask __kptr *bpfmask __arg_trusted,

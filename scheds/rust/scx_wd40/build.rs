@@ -13,6 +13,7 @@ fn main() {
         .add_source("src/bpf/deadline.bpf.c")
         .add_source("src/bpf/placement.bpf.c")
         .add_source("src/bpf/deadline.bpf.c")
+        .add_source("../../../lib/bitmap.bpf.c")
         .add_source("../../../lib/cpumask.bpf.c")
         .add_source("../../../lib/sdt_task.bpf.c")
         .add_source("../../../lib/sdt_alloc.bpf.c")
