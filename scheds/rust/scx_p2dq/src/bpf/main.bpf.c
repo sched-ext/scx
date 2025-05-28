@@ -532,6 +532,10 @@ static s32 pick_idle_affinitized_cpu(struct task_struct *p, task_ctx *taskc,
 		}
 	}
 
+	if (llcx->cpumask)
+		bpf_cpumask_and(mask, cast_mask(llcx->cpumask),
+				p->cpus_ptr);
+
 	// Next try to find an idle CPU in the LLC
 	cpu = scx_bpf_pick_idle_cpu(cast_mask(mask), 0);
 	if (cpu >= 0) {
@@ -795,10 +799,13 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	 * Per-cpu kthreads are considered interactive and dispatched directly
 	 * into the local DSQ.
 	 */
-	if ((p->flags & PF_KTHREAD) && p->cpus_ptr == &p->cpus_mask && p->nr_cpus_allowed != nr_cpus &&
+	if ((p->flags & PF_KTHREAD) &&
+	    p->cpus_ptr == &p->cpus_mask &&
+	    p->nr_cpus_allowed != nr_cpus &&
+	    bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
 	    kthreads_local) {
 		stat_inc(P2DQ_STAT_DIRECT);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, dsq_time_slices[0], enq_flags);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON|cpu, dsq_time_slices[0], enq_flags);
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
@@ -810,15 +817,12 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	}
 
 	// Handle affinitized tasks separately
-	if (!taskc->all_cpus) {
+	if (!taskc->all_cpus ||
+	    (p->cpus_ptr == &p->cpus_mask &&
+	    p->nr_cpus_allowed != nr_cpus)) {
 		bool is_idle = false;
-		cpu = pick_idle_affinitized_cpu(p, taskc, cpu, &is_idle);
-		if (!(cpuc = lookup_cpu_ctx(cpu)) ||
-		     !(llcx = lookup_llc_ctx(cpuc->llc_id))) {
-			scx_bpf_error("invalid lookup");
-			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
-			return;
-		}
+		if (!bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+			cpu = pick_idle_affinitized_cpu(p, taskc, cpu, &is_idle);
 
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON|cpu, taskc->slice_ns, enq_flags);
 		if (is_idle) {
@@ -939,11 +943,6 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 	if (freq_control && taskc->dsq_index == nr_dsqs_per_llc-1) {
 		scx_bpf_cpuperf_set(task_cpu, SCX_CPUPERF_ONE);
 	}
-
-	// if ((taskc->dsq_index >=0 && taskc->dsq_index < nr_dsqs_per_llc) &&
-	//     p->scx.dsq_vtime > llcx->dsq_max_vtime[taskc->dsq_index]) {
-	// 	llcx->dsq_max_vtime[taskc->dsq_index] = p->scx.dsq_vtime;
-	// }
 
 	u64 now = bpf_ktime_get_ns();
 	if (taskc->last_run_started == 0)

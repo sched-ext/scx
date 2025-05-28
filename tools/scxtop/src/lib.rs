@@ -264,6 +264,7 @@ pub struct MangoAppAction {
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
+    Backspace,
     ChangeTheme,
     ClearEvent,
     CpuhpEnter(CpuhpEnterAction),
@@ -273,6 +274,7 @@ pub enum Action {
     Down,
     Enter,
     Event,
+    Esc,
     Exec(ExecAction),
     Exit(ExitAction),
     Fork(ForkAction),
@@ -281,6 +283,7 @@ pub enum Action {
     HwPressure(HwPressureAction),
     IncBpfSampleRate,
     IncTickRate,
+    InputEntry(String),
     IPI(IPIAction),
     MangoApp(MangoAppAction),
     NextEvent,

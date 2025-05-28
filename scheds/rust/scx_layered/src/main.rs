@@ -1283,6 +1283,10 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_SUFFIX as i32;
                             copy_into_cstr(&mut mt.cgroup_suffix, suffix.as_str());
                         }
+                        LayerMatch::CgroupContains(substr) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_CONTAINS as i32;
+                            copy_into_cstr(&mut mt.cgroup_substr, substr.as_str());
+                        }
                         LayerMatch::CommPrefix(prefix) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_COMM_PREFIX as i32;
                             copy_into_cstr(&mut mt.comm_prefix, prefix.as_str());
@@ -2820,6 +2824,16 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
                     LayerMatch::CgroupPrefix(prefix) => {
                         if prefix.len() > MAX_PATH {
                             bail!("Spec {:?} has too long a cgroup prefix", spec.name);
+                        }
+                    }
+                    LayerMatch::CgroupSuffix(suffix) => {
+                        if suffix.len() > MAX_PATH {
+                            bail!("Spec {:?} has too long a cgroup suffix", spec.name);
+                        }
+                    }
+                    LayerMatch::CgroupContains(substr) => {
+                        if substr.len() > MAX_PATH {
+                            bail!("Spec {:?} has too long a cgroup substr", spec.name);
                         }
                     }
                     LayerMatch::CommPrefix(prefix) => {

@@ -75,6 +75,7 @@ pub enum LayerPlacement {
 pub enum LayerMatch {
     CgroupPrefix(String),
     CgroupSuffix(String),
+    CgroupContains(String),
     CommPrefix(String),
     CommPrefixExclude(String),
     PcommPrefix(String),
