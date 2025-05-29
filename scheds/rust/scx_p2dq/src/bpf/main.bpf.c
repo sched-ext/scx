@@ -390,7 +390,7 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *cur_llcx, struct llc_ctx
 	if ((nr_llcs > 2 && (cur_load > left_load || cur_load > right_load)))
 	    return NULL;
 
-    if (left_load < right_load)
+    	if (left_load < right_load)
 		return right;
 	return left;
 }
