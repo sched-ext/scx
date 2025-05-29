@@ -25,6 +25,7 @@ struct llc_ctx {
 	u32				nr_cpus;
 	u32				node_id;
 	u64				vtime;
+	u32				lb_llc_id;
 	u64				last_period_ns;
 	u64				load;
 	bool				all_big;
@@ -86,4 +87,3 @@ struct enqueue_promise {
 		struct enqueue_promise_fifo	fifo;
 	};
 };
-
