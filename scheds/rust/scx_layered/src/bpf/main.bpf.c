@@ -1356,7 +1356,6 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	struct layer *layer;
 	bool wakeup = enq_flags & SCX_ENQ_WAKEUP;
 	s32 cpu, task_cpu = scx_bpf_task_cpu(p);
-	u64 vtime = p->scx.dsq_vtime;
 	u32 llc_id, layer_id;
 	bool yielding, try_preempt_first;
 	u64 queued_runtime;
@@ -1460,9 +1459,32 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (llc_id >= MAX_LLCS || !(llcc = lookup_llc_ctx(llc_id)))
 		return;
 
+	/*
+	 * If necessary, migrate @p to new LLC and constrain its vtime. As
+	 * maybe_update_task_llc() can update @p->scx.dsq_vtime, it can only be
+	 * read afterwards.
+	 *
+	 * A task is allowed to carray at most a slice worth of vtime budget
+	 * which determines the minimum vtime. It shouldn't be necessary to cap
+	 * the max vtime as there is no way for it to become significantly later
+	 * than vtime_now; however, cap the max delta at 8192 times the slice
+	 * just in case and log violations as there have been bugs in this area.
+	 * 8192 came from 100x for min weight, 20x for typical max_exec_us, and
+	 * ~4x for buffer.
+	 */
 	maybe_update_task_llc(p, taskc, task_cpu);
-	if (time_before(vtime, llcc->vtime_now[layer_id] - layer->slice_ns))
-		vtime = llcc->vtime_now[layer_id] - layer->slice_ns;
+
+	u64 vtime = p->scx.dsq_vtime;
+	u64 vtime_now = llcc->vtime_now[layer_id];
+	u64 vtime_min = vtime_now - layer->slice_ns;
+	u64 vtime_max = vtime_now + 8192 * layer->slice_ns;
+
+	if (time_before(vtime, vtime_min))
+		vtime = vtime_min;
+	if (unlikely(time_after(vtime, vtime_max))) {
+		gstat_inc(GSTAT_FIXUP_VTIME, cpuc);
+		vtime = vtime_max;
+	}
 
 	/*
 	 * Special-case per-cpu kthreads and scx_layered userspace so that they
