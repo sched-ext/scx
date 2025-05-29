@@ -41,7 +41,7 @@ static RAVG_FN_ATTRS u32 ravg_normalize_dur(u32 dur, u32 half_life)
  * [2] = [1] + ravg_decay(1 << RAVG_FRAC_BITS, 3)
  * ...
  */
-static u64 ravg_full_sum[] = {
+static const u64 ravg_full_sum[] = {
 	 524288,  786432,  917504,  983040,
 	1015808, 1032192, 1040384, 1044480,
 	1046528, 1047552, 1048064, 1048320,
