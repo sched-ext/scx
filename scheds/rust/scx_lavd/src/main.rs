@@ -439,13 +439,14 @@ impl FlatTopology {
                 });
             }
             false => {
-                // Sort the cpu_fids by cpu, node, llc, ^cpu_cap, smt_level, ^cache_size, perf_dom, and core order
+                // Sort the cpu_fids by node, llc, ^cpu_cap, cpu_pos, smt_level, ^cache_size, perf_dom, and core order
+                // For performance mode, prioritize CPU capacity over physical position for ARM big.LITTLE systems
                 cpu_fids.sort_by(|a, b| {
-                    a.cpu_pos
-                        .cmp(&b.cpu_pos)
-                        .then_with(|| a.node_id.cmp(&b.node_id))
-                        .then_with(|| a.llc_pos.cmp(&b.llc_pos))
-                        .then_with(|| b.cpu_cap.cmp(&a.cpu_cap))
+                    a.node_id
+                        .cmp(&b.node_id) // NUMA node first
+                        .then_with(|| a.llc_pos.cmp(&b.llc_pos)) // LLC locality
+                        .then_with(|| b.cpu_cap.cmp(&a.cpu_cap)) // CPU performance first (^cpu_cap)
+                        .then_with(|| a.cpu_pos.cmp(&b.cpu_pos)) // Physical position as tie-breaker
                         .then_with(|| a.smt_level.cmp(&b.smt_level))
                         .then_with(|| b.cache_size.cmp(&a.cache_size))
                         .then_with(|| a.pd_id.cmp(&b.pd_id))
