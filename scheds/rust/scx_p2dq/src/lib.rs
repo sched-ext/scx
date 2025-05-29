@@ -2,17 +2,16 @@
 
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
+pub mod bpf_intf;
+
+mod bpf_skel;
+pub use bpf_skel::*;
+
 pub use scx_utils::CoreType;
 use scx_utils::Topology;
 pub use scx_utils::NR_CPU_IDS;
-use scx_utils::{Core, Llc};
 
-use anyhow::{bail, Result};
 use clap::Parser;
-use libbpf_rs::ProgramInput;
-use libbpf_rs::ProgramOutput;
-
-use std::sync::Arc;
 
 lazy_static::lazy_static! {
         pub static ref TOPO: Topology = Topology::new().unwrap();
@@ -145,110 +144,6 @@ pub fn dsq_slice_ns(dsq_index: u64, min_slice_us: u64, dsq_shift: u64) -> u64 {
     result
 }
 
-/// Trait for interfacing with BPF arena programs
-pub trait P2dqArenaProgs {
-    /// Run the arena initialization program and return the result
-    fn run_arena_init<'a>(&self, input: ProgramInput<'a>) -> Result<ProgramOutput<'a>>;
-
-    /// Run the allocation mask program and return the result
-    fn run_alloc_mask<'a>(&self, input: ProgramInput<'a>) -> Result<ProgramOutput<'a>>;
-
-    /// Run the topology node initialization program and return the result
-    fn run_topology_node_init<'a>(&self, input: ProgramInput<'a>) -> Result<ProgramOutput<'a>>;
-
-    /// Access to the setup pointer in BSS data
-    fn setup_ptr(&self) -> u64;
-}
-
-pub fn setup_arenas<T: P2dqArenaProgs>(skel: &T) -> Result<()> {
-    // Allocate the arena memory from the BPF side so userspace initializes it before starting
-    // the scheduler. Despite the function call's name this is neither a test nor a test run,
-    // it's the recommended way of executing SEC("syscall") probes.
-    let input = ProgramInput {
-        ..Default::default()
-    };
-
-    let output = skel.run_arena_init(input)?;
-    if output.return_value != 0 {
-        bail!(
-            "Could not initialize arenas, p2dq_setup returned {}",
-            output.return_value as i32
-        );
-    }
-
-    Ok(())
-}
-
-fn setup_topology_node<T: P2dqArenaProgs>(skel: &T, mask: &[u64]) -> Result<()> {
-    // Copy the address of ptr to the kernel to populate it from BPF with the arena pointer.
-    let input = ProgramInput {
-        ..Default::default()
-    };
-
-    let output = skel.run_alloc_mask(input)?;
-    if output.return_value != 0 {
-        bail!(
-            "Could not initialize arenas, setup_topology_node returned {}",
-            output.return_value as i32
-        );
-    }
-
-    let ptr = unsafe { std::mem::transmute::<u64, &mut [u64; 10]>(skel.setup_ptr()) };
-
-    let (valid_mask, _) = ptr.split_at_mut(mask.len());
-    valid_mask.clone_from_slice(mask);
-
-    let input = ProgramInput {
-        ..Default::default()
-    };
-    let output = skel.run_topology_node_init(input)?;
-    if output.return_value != 0 {
-        bail!(
-            "p2dq_topology_node_init returned {}",
-            output.return_value as i32
-        );
-    }
-
-    Ok(())
-}
-
-pub fn setup_topology<T: P2dqArenaProgs>(skel: &T) -> Result<()> {
-    let topo = Topology::new().expect("Failed to build host topology");
-
-    setup_topology_node(skel, topo.span.as_raw_slice())?;
-
-    for (_, node) in topo.nodes {
-        setup_topology_node(skel, node.span.as_raw_slice())?;
-    }
-
-    for (_, llc) in topo.all_llcs {
-        setup_topology_node(
-            skel,
-            Arc::<Llc>::into_inner(llc)
-                .expect("missing llc")
-                .span
-                .as_raw_slice(),
-        )?;
-    }
-
-    for (_, core) in topo.all_cores {
-        setup_topology_node(
-            skel,
-            Arc::<Core>::into_inner(core)
-                .expect("missing core")
-                .span
-                .as_raw_slice(),
-        )?;
-    }
-    for (_, cpu) in topo.all_cpus {
-        let mut mask = [0; 9];
-        mask[cpu.id.checked_shr(64).unwrap_or(0)] |= 1 << (cpu.id % 64);
-        setup_topology_node(skel, &mask)?;
-    }
-
-    Ok(())
-}
-
 #[macro_export]
 macro_rules! init_open_skel {
     ($skel: expr, $opts: expr, $verbose: expr) => {
@@ -348,9 +243,6 @@ macro_rules! init_skel {
             $skel.maps.bss_data.cpu_llc_ids[cpu.id] = cpu.llc_id as u64;
             $skel.maps.bss_data.cpu_node_ids[cpu.id] = cpu.node_id as u64;
         }
-
-        $crate::setup_arenas($skel)?;
-        $crate::setup_topology($skel)?;
     };
 }
 

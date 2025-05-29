@@ -57,7 +57,7 @@ const volatile bool no_wake_sync;
  */
 const volatile bool local_kthreads;
 
- /*
+/*
  * Prioritize per-CPU tasks (tasks that can only run on a single CPU).
  *
  * This allows to prioritize per-CPU tasks that usually tend to be
@@ -93,6 +93,24 @@ volatile u64 nr_online_cpus;
  * Maximum possible CPU number.
  */
 static u64 nr_cpu_ids;
+
+/*
+ * Runtime throttling.
+ *
+ * Throttle the CPUs by injecting @throttle_ns idle time every @slice_max.
+ */
+const volatile u64 throttle_ns;
+static volatile bool cpus_throttled;
+
+static inline bool is_throttled(void)
+{
+	return READ_ONCE(cpus_throttled);
+}
+
+static inline void set_throttled(bool state)
+{
+	WRITE_ONCE(cpus_throttled, state);
+}
 
 /*
  * Exit information.
@@ -133,6 +151,20 @@ struct {
 	__type(key, u32);
 	__type(value, struct numa_timer);
 } numa_timer SEC(".maps");
+
+/*
+ * Timer used to inject idle cycles when CPU throttling is enabled.
+ */
+struct throttle_timer {
+	struct bpf_timer timer;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct throttle_timer);
+} throttle_timer SEC(".maps");
 
 /*
  * Per-node context.
@@ -400,7 +432,7 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
 
 	/*
 	 * Refresh task's recently used CPU every time the task's domain
-	 * is updated..
+	 * is updated.
 	 */
 	tctx->recent_used_cpu = cpu;
 
@@ -781,6 +813,9 @@ s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p,
 	bool is_idle = false;
 	s32 cpu;
 
+	if (is_throttled())
+		return prev_cpu;
+
 	cpu = pick_idle_cpu(p, prev_cpu, wake_flags, &is_idle);
 	if (is_idle) {
 		int node = __COMPAT_scx_bpf_cpu_node(cpu);
@@ -807,6 +842,9 @@ static bool kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 	s32 cpu = scx_bpf_task_cpu(p);
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
 
+	if (is_throttled())
+		return false;
+
 	/*
 	 * No need to look for full-idle SMT cores if SMT is disabled.
 	 */
@@ -816,7 +854,7 @@ static bool kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 	/*
 	 * Try to reuse the same CPU if idle.
 	 */
-	if (!idle_smt || (idle_smt && is_fully_idle(prev_cpu))) {
+	if (!idle_smt || is_fully_idle(prev_cpu)) {
 		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			scx_bpf_kick_cpu(prev_cpu, SCX_KICK_IDLE);
 			return true;
@@ -876,6 +914,12 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 
 		return true;
 	}
+
+	/*
+	 * Skip direct dispatch if the CPUs are forced to stay idle.
+	 */
+	if (is_throttled())
+		return false;
 
 	/*
 	 * If ops.select_cpu() has been skipped, try direct dispatch.
@@ -1065,6 +1109,12 @@ static bool keep_running(const struct task_struct *p, s32 cpu)
 void BPF_STRUCT_OPS(bpfland_dispatch, s32 cpu, struct task_struct *prev)
 {
 	int node = __COMPAT_scx_bpf_cpu_node(cpu);
+
+	/*
+	 * Let the CPU go idle if the system is throttled.
+	 */
+	if (is_throttled())
+		return;
 
 	/*
 	 * Consume regular tasks from the shared DSQ, transferring them to the
@@ -1430,6 +1480,50 @@ static void init_cpuperf_target(void)
 }
 
 /*
+ * Throttle timer used to inject idle time across all the CPUs.
+ */
+static int throttle_timerfn(void *map, int *key, struct bpf_timer *timer)
+{
+	bool throttled = is_throttled();
+	u64 flags, duration;
+	s32 cpu;
+	int err;
+
+	/*
+	 * Stop the CPUs sending a preemption IPI (SCX_KICK_PREEMPT) if we
+	 * need to interrupt the running tasks and inject the idle sleep.
+	 *
+	 * Otherwise, send a wakeup IPI to resume from the injected idle
+	 * sleep.
+	 */
+	if (throttled) {
+		flags = SCX_KICK_IDLE;
+		duration = slice_max;
+	} else {
+		flags = SCX_KICK_PREEMPT;
+		duration = throttle_ns;
+	}
+
+	/*
+	 * Flip the throttled state.
+	 */
+	set_throttled(!throttled);
+
+	bpf_for(cpu, 0, nr_cpu_ids)
+		scx_bpf_kick_cpu(cpu, flags);
+
+	/*
+	 * Re-arm the duty-cycle timer setting the runtime or the idle time
+	 * duration.
+	 */
+	err = bpf_timer_start(timer, duration, 0);
+	if (err)
+		scx_bpf_error("Failed to re-arm duty cycle timer");
+
+	return 0;
+}
+
+/*
  * Refresh NUMA statistics.
  */
 static int numa_timerfn(void *map, int *key, struct bpf_timer *timer)
@@ -1545,21 +1639,42 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(bpfland_init)
 	if (err)
 		return err;
 
+	timer = bpf_map_lookup_elem(&throttle_timer, &key);
+	if (!timer) {
+		scx_bpf_error("Failed to lookup throttle timer");
+		return -ESRCH;
+	}
+
+	/*
+	 * Fire the throttle timer if CPU throttling is enabled.
+	 */
+	if (throttle_ns) {
+		bpf_timer_init(timer, &throttle_timer, CLOCK_BOOTTIME);
+		bpf_timer_set_callback(timer, throttle_timerfn);
+		err = bpf_timer_start(timer, slice_max, 0);
+		if (err) {
+			scx_bpf_error("Failed to arm throttle timer");
+			return err;
+		}
+	}
+
 	/* Do not update NUMA statistics if there's only one node */
 	if (numa_disabled || __COMPAT_scx_bpf_nr_node_ids() <= 1)
 		return 0;
 
 	timer = bpf_map_lookup_elem(&numa_timer, &key);
 	if (!timer) {
-		scx_bpf_error("Failed to lookup central timer");
+		scx_bpf_error("Failed to lookup NUMA timer");
 		return -ESRCH;
 	}
 
 	bpf_timer_init(timer, &numa_timer, CLOCK_BOOTTIME);
 	bpf_timer_set_callback(timer, numa_timerfn);
 	err = bpf_timer_start(timer, NSEC_PER_SEC, 0);
-	if (err)
+	if (err) {
 		scx_bpf_error("Failed to start NUMA timer");
+		return err;
+	}
 
 	return 0;
 }

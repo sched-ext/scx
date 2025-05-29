@@ -1283,6 +1283,10 @@ impl<'a> Scheduler<'a> {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_SUFFIX as i32;
                             copy_into_cstr(&mut mt.cgroup_suffix, suffix.as_str());
                         }
+                        LayerMatch::CgroupContains(substr) => {
+                            mt.kind = bpf_intf::layer_match_kind_MATCH_CGROUP_CONTAINS as i32;
+                            copy_into_cstr(&mut mt.cgroup_substr, substr.as_str());
+                        }
                         LayerMatch::CommPrefix(prefix) => {
                             mt.kind = bpf_intf::layer_match_kind_MATCH_COMM_PREFIX as i32;
                             copy_into_cstr(&mut mt.comm_prefix, prefix.as_str());
@@ -2822,6 +2826,16 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
                             bail!("Spec {:?} has too long a cgroup prefix", spec.name);
                         }
                     }
+                    LayerMatch::CgroupSuffix(suffix) => {
+                        if suffix.len() > MAX_PATH {
+                            bail!("Spec {:?} has too long a cgroup suffix", spec.name);
+                        }
+                    }
+                    LayerMatch::CgroupContains(substr) => {
+                        if substr.len() > MAX_PATH {
+                            bail!("Spec {:?} has too long a cgroup substr", spec.name);
+                        }
+                    }
                     LayerMatch::CommPrefix(prefix) => {
                         if prefix.len() > MAX_COMM {
                             bail!("Spec {:?} has too long a comm prefix", spec.name);
@@ -2874,6 +2888,13 @@ fn verify_layer_specs(specs: &[LayerSpec]) -> Result<()> {
     Ok(())
 }
 
+fn name_suffix(cgroup: &str, len: usize) -> String {
+    let suffixlen = std::cmp::min(len, cgroup.len());
+    let suffixrev: String = cgroup.chars().rev().take(suffixlen).collect();
+
+    suffixrev.chars().rev().collect()
+}
+
 fn traverse_sysfs(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut paths = vec![];
 
@@ -2887,7 +2908,6 @@ fn traverse_sysfs(dir: &Path) -> Result<Vec<PathBuf>> {
         let path = entry?.path();
         if path.is_dir() {
             paths.append(&mut traverse_sysfs(&path)?);
-        } else {
             paths.push(path);
         }
     }
@@ -2897,7 +2917,7 @@ fn traverse_sysfs(dir: &Path) -> Result<Vec<PathBuf>> {
 
 fn find_cpumask(cgroup: &str) -> Cpumask {
     let mut path = String::from(cgroup);
-    path.push_str("cpuset.cpus.effective");
+    path.push_str("/cpuset.cpus.effective");
 
     let description = fs::read_to_string(&mut path).unwrap();
 
@@ -2912,7 +2932,11 @@ fn expand_template(rule: &LayerMatch) -> Result<Vec<(LayerMatch, Cpumask)>> {
             .filter(|cgroup| cgroup.ends_with(suffix))
             .map(|cgroup| {
                 (
-                    LayerMatch::CgroupSuffix(cgroup.clone()),
+                    {
+                        let mut slashterminated = cgroup.clone();
+                        slashterminated.push('/');
+                        LayerMatch::CgroupSuffix(name_suffix(&slashterminated, 64))
+                    },
                     find_cpumask(&cgroup),
                 )
             })
@@ -3015,7 +3039,6 @@ fn main() -> Result<()> {
                         // Push the new "and" rule.
                         genspec.matches.push(vec![mt.clone()]);
                         match &mt {
-                            LayerMatch::CgroupPrefix(cgroup) => genspec.name.push_str(cgroup),
                             LayerMatch::CgroupSuffix(cgroup) => genspec.name.push_str(cgroup),
                             _ => bail!("Template match has unexpected type"),
                         }

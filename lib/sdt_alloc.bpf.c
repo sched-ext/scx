@@ -225,7 +225,7 @@ void __arena *scx_alloc_from_pool(struct sdt_pool *pool,
 
 	/* Nonsleepable allocations not supported for large data structures. */
 	if (elem_size > PAGE_SIZE)
-	  return NULL;
+		return NULL;
 
 	/* If the chunk is spent, get a new one. */
 	if (pool->idx >= max_elems) {
@@ -293,8 +293,8 @@ static int pool_set_size(struct sdt_pool *pool, __u64 data_size, __u64 nr_pages)
 	}
 
 	if (unlikely(nr_pages == 0)) {
-	      scx_bpf_error("%s: allocation size is 0", __func__);
-	      return -EINVAL;
+		scx_bpf_error("%s: allocation size is 0", __func__);
+		return -EINVAL;
 	}
 
 	pool->elem_size = data_size;
@@ -628,6 +628,7 @@ __hidden
 void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 {
 	void __arena *memory, *old;
+	size_t alloc_bytes;
 	void __arena *ptr;
 	size_t padding;
 	u64 addr;
@@ -638,11 +639,11 @@ void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 	addr = (__u64) scx_static.memory + scx_static.off;
 
 	padding = round_up(addr, alignment) - addr;
-	bytes += padding;
+	alloc_bytes = bytes + padding;
 
-	if (bytes > scx_static.max_alloc_bytes) {
+	if (alloc_bytes > scx_static.max_alloc_bytes) {
 		bpf_spin_unlock(&alloc_lock);
-		scx_bpf_error("invalid request %ld, max is %ld\n", bytes,
+		scx_bpf_error("invalid request %ld, max is %ld\n", alloc_bytes,
 			      scx_static.max_alloc_bytes);
 		return NULL;
 	}
@@ -653,7 +654,7 @@ void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 	 * size, so it does not attempt to alleviate memory
 	 * fragmentation.
 	 */
-	if (scx_static.off + bytes > scx_static.max_alloc_bytes) {
+	if (scx_static.off + alloc_bytes > scx_static.max_alloc_bytes) {
 		old = scx_static.memory;
 
 		bpf_spin_unlock(&alloc_lock);
@@ -666,7 +667,7 @@ void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 		memory = bpf_arena_alloc_pages(&arena, NULL,
 					       scx_static.max_alloc_bytes / PAGE_SIZE,
 					       NUMA_NO_NODE, 0);
-		if (!scx_static.memory)
+		if (!memory)
 			return NULL;
 
 		bpf_spin_lock(&alloc_lock);
@@ -679,10 +680,24 @@ void __arena *scx_static_alloc(size_t bytes, size_t alignment)
 			scx_bpf_error("concurrent static memory allocations unsupported");
 			return NULL;
 		}
+
+		/*
+		 * Switch to new memory block, reset offset,
+		 * and recalculate base address.
+		 */
+		scx_static.memory = memory;
+		scx_static.off = 0;
+		addr = (__u64) scx_static.memory + scx_static.off;
+
+		/*
+		 * We changed the base address. Recompute the padding.
+		 */
+		padding = round_up(addr, alignment) - addr;
+		alloc_bytes = bytes + padding;
 	}
 
 	ptr = (void __arena *)(addr + padding);
-	scx_static.off += bytes;
+	scx_static.off += alloc_bytes;
 
 	bpf_spin_unlock(&alloc_lock);
 
@@ -949,7 +964,7 @@ int scx_stk_fill_new_elems(struct scx_stk *stack)
 
 	/* If we haven't set aside any memory from before, allocate. */
 	if (!stack->reserve) {
-		/* This call drops and retakes the lock.  */
+		/* This call drops and retakes the lock. */
 		ret = scx_stk_get_arena_memory(stack, nr_pages, nstk_segs);
 		if (ret)
 			return ret;

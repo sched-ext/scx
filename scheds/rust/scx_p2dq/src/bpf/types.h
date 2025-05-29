@@ -48,7 +48,6 @@ struct task_p2dq {
 	u64			dsq_id;
 	u64			slice_ns;
 	int			dsq_index;
-	u32			cpu;
 	u32			llc_id;
 	u32			node_id;
 	u64			used;

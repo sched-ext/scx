@@ -426,8 +426,6 @@ fn create_insert_cpu(
     node: &mut Node,
     online_mask: &Cpumask,
     topo_ctx: &mut TopoCtx,
-    big_little: bool,
-    avg_cpu_freq: Option<(usize, usize)>,
     capacity_src: Option<(String, usize, usize)>,
     flatten_llc: bool,
 ) -> Result<()> {
@@ -476,7 +474,7 @@ fn create_insert_cpu(
         read_from_file(&freq_path.join("cpuinfo_transition_latency")).unwrap_or(0_usize);
 
     // Cpu capacity
-    let (cap_suffix, _avg_rcap, max_rcap) = capacity_src.unwrap_or(("".to_string(), 1024, 1024));
+    let (cap_suffix, avg_rcap, max_rcap) = capacity_src.unwrap_or(("".to_string(), 1024, 1024));
     let cap_path = cpu_path.join(cap_suffix);
     let rcap = read_from_file(&cap_path).unwrap_or(max_rcap);
     let cpu_capacity = (rcap * 1024) / max_rcap;
@@ -503,21 +501,12 @@ fn create_insert_cpu(
     }));
     let llc_mut = Arc::get_mut(llc).unwrap();
 
-    let core_type = if !big_little {
+    let core_type = if rcap == max_rcap {
+        CoreType::Big { turbo: true }
+    } else if rcap >= avg_rcap {
         CoreType::Big { turbo: false }
     } else {
-        match avg_cpu_freq {
-            Some((avg_base_freq, top_max_freq)) => {
-                if max_freq == top_max_freq {
-                    CoreType::Big { turbo: true }
-                } else if base_freq >= avg_base_freq {
-                    CoreType::Big { turbo: false }
-                } else {
-                    CoreType::Little
-                }
-            }
-            None => CoreType::Big { turbo: false },
-        }
+        CoreType::Little
     };
 
     let num_cores = topo_ctx.node_core_kernel_ids.len();
@@ -651,43 +640,6 @@ fn cpu_capacity_source() -> Option<(String, usize, usize)> {
     ))
 }
 
-// Return the average base frequency across all CPUs and the highest maximum frequency.
-fn avg_cpu_freq() -> Option<(usize, usize)> {
-    let mut top_max_freq = 0;
-    let mut avg_base_freq = 0;
-    let mut nr_cpus = 0;
-    let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*").ok()?;
-    for cpu_path in cpu_paths.filter_map(Result::ok) {
-        let freq_path = cpu_path.join("cpufreq");
-        let max_freq = read_from_file(&freq_path.join("scaling_max_freq")).unwrap_or(0_usize);
-        let base_freq = read_from_file(&freq_path.join("base_frequency")).unwrap_or(max_freq);
-        if base_freq > 0 {
-            if max_freq > top_max_freq {
-                top_max_freq = max_freq;
-            }
-            avg_base_freq += base_freq;
-            nr_cpus += 1;
-        }
-    }
-    if avg_base_freq == 0 {
-        return None;
-    }
-    Some((avg_base_freq / nr_cpus, top_max_freq))
-}
-
-fn has_big_little() -> Option<bool> {
-    let mut clusters = std::collections::HashSet::new();
-
-    let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*").ok()?;
-    for cpu_path in cpu_paths.filter_map(Result::ok) {
-        let top_path = cpu_path.join("topology");
-        let cluster_id = read_from_file(&top_path.join("cluster_id")).unwrap_or(-1);
-        clusters.insert(cluster_id);
-    }
-
-    Some(clusters.len() > 1)
-}
-
 fn is_smt_active() -> Option<bool> {
     let smt_on: u8 = read_from_file(Path::new("/sys/devices/system/cpu/smt/active")).ok()?;
     Some(smt_on == 1)
@@ -726,8 +678,6 @@ fn create_default_node(
     }
 
     let capacity_src = cpu_capacity_source();
-    let avg_cpu_freq = avg_cpu_freq();
-    let big_little = has_big_little().unwrap_or(false);
     let cpu_ids = read_cpu_ids()?;
     for cpu_id in cpu_ids.iter() {
         create_insert_cpu(
@@ -735,8 +685,6 @@ fn create_default_node(
             &mut node,
             online_mask,
             topo_ctx,
-            big_little,
-            avg_cpu_freq,
             capacity_src.clone(),
             flatten_llc,
         )?;
@@ -796,9 +744,7 @@ fn create_numa_nodes(
 
         let cpu_pattern = numa_path.join("cpu[0-9]*");
         let cpu_paths = glob(cpu_pattern.to_string_lossy().as_ref())?;
-        let big_little = has_big_little().unwrap_or(false);
         let capacity_src = cpu_capacity_source();
-        let avg_cpu_freq = avg_cpu_freq();
         let mut cpu_ids = vec![];
         for cpu_path in cpu_paths.filter_map(Result::ok) {
             let cpu_str = cpu_path.to_str().unwrap().trim();
@@ -818,8 +764,6 @@ fn create_numa_nodes(
                 &mut node,
                 online_mask,
                 topo_ctx,
-                big_little,
-                avg_cpu_freq,
                 capacity_src.clone(),
                 false,
             )?;

@@ -29,6 +29,8 @@ use std::time::UNIX_EPOCH;
 use stats::ClusterStats;
 use stats::NodeStats;
 
+use std::ffi::c_ulong;
+
 #[macro_use]
 extern crate static_assertions;
 
@@ -53,7 +55,9 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Core;
 use scx_utils::Cpumask;
+use scx_utils::Llc;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
@@ -123,14 +127,6 @@ struct Opts {
     /// as determined by /sys/devices/system/cpu/cpuX/cache/indexI/id.
     #[clap(short = 'c', long, default_value = "3")]
     cache_level: u32,
-
-    /// Instead of using cache locality, set the cpumask for each domain
-    /// manually. Provide multiple --cpumasks, one for each domain. E.g.
-    /// --cpumasks 0xff_00ff --cpumasks 0xff00 will create two domains, with
-    /// the corresponding CPUs belonging to each domain. Each CPU must
-    /// belong to precisely one domain.
-    #[clap(short = 'C', long, num_args = 1.., conflicts_with = "cache_level")]
-    cpumasks: Vec<String>,
 
     /// When non-zero, enable greedy task stealing. When a domain is idle, a cpu
     /// will attempt to steal tasks from another domain as follows:
@@ -365,6 +361,133 @@ struct Scheduler<'a> {
 }
 
 impl<'a> Scheduler<'a> {
+    fn setup_allocators(skel: &mut BpfSkel<'a>) -> Result<()> {
+        // Allocate the arena memory from the BPF side so userspace initializes it before starting
+        // the scheduler. Despite the function call's name this is neither a test nor a test run,
+        // it's the recommended way of executing SEC("syscall") probes.
+        let mut args = types::arena_init_args {
+            static_pages: bpf_intf::consts_STATIC_ALLOC_PAGES_GRANULARITY as c_ulong,
+            task_ctx_size: std::mem::size_of::<types::task_ctx>() as c_ulong,
+        };
+
+        let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
+            ..Default::default()
+        };
+
+        let output = skel.progs.arena_init.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "Could not initialize arenas, p2dq_setup returned {}",
+                output.return_value as i32
+            );
+        }
+
+        Ok(())
+    }
+
+    fn setup_topology_node(skel: &mut BpfSkel<'a>, mask: &[u64]) -> Result<()> {
+        // Copy the address of ptr to the kernel to populate it from BPF with the arena pointer.
+        let input = ProgramInput {
+            ..Default::default()
+        };
+
+        let output = skel.progs.arena_alloc_mask.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "Could not initialize arenas, setup_topology_node returned {}",
+                output.return_value as i32
+            );
+        }
+
+        let ptr = unsafe {
+            std::mem::transmute::<u64, &mut [u64; 10]>(skel.maps.bss_data.arena_topo_setup_ptr)
+        };
+
+        let (valid_mask, _) = ptr.split_at_mut(mask.len());
+        valid_mask.clone_from_slice(mask);
+
+        let input = ProgramInput {
+            ..Default::default()
+        };
+        let output = skel.progs.arena_topology_node_init.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "p2dq_topology_node_init returned {}",
+                output.return_value as i32
+            );
+        }
+
+        Ok(())
+    }
+
+    fn setup_topology(skel: &mut BpfSkel<'a>) -> Result<()> {
+        let topo = Topology::new().expect("Failed to build host topology");
+
+        Self::setup_topology_node(skel, topo.span.as_raw_slice())?;
+
+        for (_, node) in topo.nodes {
+            Self::setup_topology_node(skel, node.span.as_raw_slice())?;
+        }
+
+        for (_, llc) in topo.all_llcs {
+            Self::setup_topology_node(
+                skel,
+                Arc::<Llc>::into_inner(llc)
+                    .expect("missing llc")
+                    .span
+                    .as_raw_slice(),
+            )?;
+        }
+        for (_, core) in topo.all_cores {
+            Self::setup_topology_node(
+                skel,
+                Arc::<Core>::into_inner(core)
+                    .expect("missing core")
+                    .span
+                    .as_raw_slice(),
+            )?;
+        }
+        for (_, cpu) in topo.all_cpus {
+            let mut mask = [0; 9];
+            mask[cpu.id.checked_shr(64).unwrap_or(0)] |= 1 << (cpu.id % 64);
+            Self::setup_topology_node(skel, &mask)?;
+        }
+
+        Ok(())
+    }
+
+    fn setup_wd40(skel: &mut BpfSkel<'a>) -> Result<()> {
+        // Allocate the arena memory from the BPF side so userspace initializes it before starting
+        // the scheduler. Despite the function call's name this is neither a test nor a test run,
+        // it's the recommended way of executing SEC("syscall") probes.
+        let input = ProgramInput {
+            ..Default::default()
+        };
+        let output = skel.progs.wd40_setup.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "Could not initialize WD40 arenas, wd40_arena_setup returned {}",
+                output.return_value as i32
+            );
+        }
+
+        Ok(())
+    }
+
+    fn setup_arenas(skel: &mut BpfSkel<'a>) -> Result<()> {
+        Self::setup_allocators(skel)?;
+        Self::setup_topology(skel)?;
+        Self::setup_wd40(skel)?;
+
+        Ok(())
+    }
+
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         // Open the BPF prog first for verification.
         let mut skel_builder = BpfSkelBuilder::default();
@@ -377,7 +500,7 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_open!(skel_builder, open_object, wd40).unwrap();
 
         // Initialize skel according to @opts.
-        let domains = Arc::new(DomainGroup::new(&Topology::new()?, &opts.cpumasks)?);
+        let domains = Arc::new(DomainGroup::new(&Topology::new()?)?);
 
         if *NR_CPU_IDS > MAX_CPUS {
             bail!(
@@ -434,19 +557,7 @@ impl<'a> Scheduler<'a> {
 
         let mut skel = scx_ops_load!(skel, wd40, uei)?;
 
-        // Allocate the arena memory from the BPF side so userspace initializes it before starting
-        // the scheduler. Despite the function call's name this is neither a test nor a test run,
-        // it's the recommended way of executing SEC("syscall") probes.
-        let input = ProgramInput {
-            ..Default::default()
-        };
-        let output = skel.progs.wd40_arena_setup.test_run(input)?;
-        if output.return_value != 0 {
-            bail!(
-                "Could not initialize WD40 arenas, wd40_arena_setup returned {}",
-                output.return_value as i32
-            );
-        }
+        Self::setup_arenas(&mut skel)?;
 
         println!(
             "Mask length {} NR_CPU_IDS {}",

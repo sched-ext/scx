@@ -32,8 +32,11 @@ topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask)
 	topo->parent = parent;
 	topo->nr_children = 0;
 	topo->level = parent ? topo->parent->level + 1 : 0;
+	/*
+	* The passed-in mask is deliberately consumed; topo_node takes ownership.
+	* Do not reuse the same mask elsewhere after this call.
+	*/
 	topo->mask = mask;
-	scx_bitmap_copy(topo->mask, mask);
 
 	if (topo->level >= TOPO_MAX_LEVEL) {
 		scx_bpf_error("topology is too deep");
@@ -184,6 +187,25 @@ topo_ptr topo_find_sibling(topo_ptr topo, u32 cpu)
 
 }
 
+__weak
+u64 topo_mask_level_internal(topo_ptr topo, enum topo_level level)
+{
+	if (unlikely(level < 0 || level >= TOPO_MAX_LEVEL)) {
+		scx_bpf_error("invalid topology level %d", level);
+		return (u64)NULL;
+	}
+
+	if (unlikely(topo->level < level)) {
+		scx_bpf_error("requesting cpumask from lower level %d, starting from %d", level, topo->level);
+		return (u64)NULL;
+	}
+
+	while (topo->level > level && can_loop)
+		topo = topo->parent;
+
+	return (u64)topo->mask;
+}
+
 __weak __maybe_unused
 int topo_print(void)
 {
@@ -235,11 +257,11 @@ int topo_print(void)
 		stack[lvl] = 0;
 
 		bpf_printk("[%d, %d, %d ,%d, %d]",
-			   stack[0],
-			   stack[1],
-			   stack[2],
-			   stack[3],
-			   stack[4]);
+			   stack[TOPO_TOP],
+			   stack[TOPO_NODE],
+			   stack[TOPO_LLC],
+			   stack[TOPO_CORE],
+			   stack[TOPO_CPU]);
 
 		scx_bitmap_print(topo->mask);
 	}

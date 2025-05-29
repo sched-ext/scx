@@ -19,6 +19,7 @@ mod node_data;
 mod perf_event;
 mod perfetto_trace;
 pub mod protos;
+mod search;
 mod stats;
 mod theme;
 pub mod tracer;
@@ -38,6 +39,7 @@ pub use perf_event::available_perf_events;
 pub use perf_event::PerfEvent;
 pub use perfetto_trace::PerfettoTraceManager;
 pub use protos::*;
+pub use search::Search;
 pub use stats::StatAggregation;
 pub use stats::VecStats;
 pub use theme::AppTheme;
@@ -262,6 +264,7 @@ pub struct MangoAppAction {
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Action {
+    Backspace,
     ChangeTheme,
     ClearEvent,
     CpuhpEnter(CpuhpEnterAction),
@@ -271,6 +274,7 @@ pub enum Action {
     Down,
     Enter,
     Event,
+    Esc,
     Exec(ExecAction),
     Exit(ExitAction),
     Fork(ForkAction),
@@ -279,6 +283,7 @@ pub enum Action {
     HwPressure(HwPressureAction),
     IncBpfSampleRate,
     IncTickRate,
+    InputEntry(String),
     IPI(IPIAction),
     MangoApp(MangoAppAction),
     NextEvent,

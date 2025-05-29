@@ -7,7 +7,6 @@ mod bpf_skel;
 
 use bpf_skel::BpfSkel;
 
-use scx_p2dq::P2dqArenaProgs;
 use scx_p2dq::SchedulerOpts as P2dqOpts;
 use scx_userspace_arena::alloc::Allocator;
 use scx_userspace_arena::alloc::HeapAllocator;
@@ -17,24 +16,37 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Core;
+use scx_utils::Llc;
+use scx_utils::Topology;
+
+use scx_p2dq::bpf_intf::consts_STATIC_ALLOC_PAGES_GRANULARITY;
+use scx_p2dq::types;
+use std::ffi::c_ulong;
 
 use anyhow::bail;
+use anyhow::Context;
 use anyhow::Result;
+use clap::Parser;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
-use libbpf_rs::ProgramOutput;
 use log::debug;
+use log::info;
 use nix::unistd::Pid;
 
 use std::alloc::Layout;
 use std::marker::PhantomPinned;
 use std::mem::MaybeUninit;
+use std::panic;
 use std::pin::Pin;
+use std::process::Command;
 use std::ptr::NonNull;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -64,24 +76,6 @@ unsafe impl Allocator for ArenaAllocator {
                 layout,
             )
         }
-    }
-}
-
-impl P2dqArenaProgs for BpfSkel<'_> {
-    fn run_arena_init<'b>(&self, input: ProgramInput<'b>) -> Result<ProgramOutput<'b>> {
-        Ok(self.progs.p2dq_arena_init.test_run(input)?)
-    }
-
-    fn run_alloc_mask<'b>(&self, input: ProgramInput<'b>) -> Result<ProgramOutput<'b>> {
-        Ok(self.progs.p2dq_alloc_mask.test_run(input)?)
-    }
-
-    fn run_topology_node_init<'b>(&self, input: ProgramInput<'b>) -> Result<ProgramOutput<'b>> {
-        Ok(self.progs.p2dq_topology_node_init.test_run(input)?)
-    }
-
-    fn setup_ptr(&self) -> u64 {
-        self.maps.bss_data.setup_ptr
     }
 }
 
@@ -187,6 +181,108 @@ impl Scheduler {
 }
 
 impl Builder<'_> {
+    fn setup_arenas(&self, skel: &mut BpfSkel) -> Result<()> {
+        // Allocate the arena memory from the BPF side so userspace initializes it before starting
+        // the scheduler. Despite the function call's name this is neither a test nor a test run,
+        // it's the recommended way of executing SEC("syscall") probes.
+        let mut args = types::arena_init_args {
+            static_pages: consts_STATIC_ALLOC_PAGES_GRANULARITY as c_ulong,
+            task_ctx_size: std::mem::size_of::<types::task_p2dq>() as c_ulong,
+        };
+
+        let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
+            ..Default::default()
+        };
+
+        let output = skel.progs.arena_init.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "Could not initialize arenas, p2dq_setup returned {}",
+                output.return_value as i32
+            );
+        }
+
+        Ok(())
+    }
+
+    fn setup_topology_node(&self, skel: &mut BpfSkel, mask: &[u64]) -> Result<()> {
+        // Copy the address of ptr to the kernel to populate it from BPF with the arena pointer.
+        let input = ProgramInput {
+            ..Default::default()
+        };
+
+        let output = skel.progs.arena_alloc_mask.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "Could not initialize arenas, setup_topology_node returned {}",
+                output.return_value as i32
+            );
+        }
+
+        let ptr = unsafe {
+            std::mem::transmute::<u64, &mut [u64; 10]>(skel.maps.bss_data.arena_topo_setup_ptr)
+        };
+
+        let (valid_mask, _) = ptr.split_at_mut(mask.len());
+        valid_mask.clone_from_slice(mask);
+
+        let input = ProgramInput {
+            ..Default::default()
+        };
+        let output = skel.progs.arena_topology_node_init.test_run(input)?;
+        if output.return_value != 0 {
+            bail!(
+                "p2dq_topology_node_init returned {}",
+                output.return_value as i32
+            );
+        }
+
+        Ok(())
+    }
+
+    fn setup_topology(&self, skel: &mut BpfSkel) -> Result<()> {
+        let topo = Topology::new().expect("Failed to build host topology");
+
+        self.setup_topology_node(skel, topo.span.as_raw_slice())?;
+
+        for (_, node) in topo.nodes {
+            self.setup_topology_node(skel, node.span.as_raw_slice())?;
+        }
+
+        for (_, llc) in topo.all_llcs {
+            self.setup_topology_node(
+                skel,
+                Arc::<Llc>::into_inner(llc)
+                    .expect("missing llc")
+                    .span
+                    .as_raw_slice(),
+            )?;
+        }
+
+        for (_, core) in topo.all_cores {
+            self.setup_topology_node(
+                skel,
+                Arc::<Core>::into_inner(core)
+                    .expect("missing core")
+                    .span
+                    .as_raw_slice(),
+            )?;
+        }
+        for (_, cpu) in topo.all_cpus {
+            let mut mask = [0; 9];
+            mask[cpu.id.checked_shr(64).unwrap_or(0)] |= 1 << (cpu.id % 64);
+            self.setup_topology_node(skel, &mask)?;
+        }
+
+        Ok(())
+    }
+
     fn load_skel(&self) -> Result<Pin<Rc<SkelWithObject>>> {
         let mut out: Rc<MaybeUninit<SkelWithObject>> = Rc::new_uninit();
         let uninit_skel = Rc::get_mut(&mut out).expect("brand new rc should be unique");
@@ -299,6 +395,9 @@ impl Builder<'_> {
         let mut skel = scx_ops_load!(open_skel, chaos, uei)?;
         scx_p2dq::init_skel!(&mut skel);
 
+        self.setup_arenas(&mut skel)?;
+        self.setup_topology(&mut skel)?;
+
         let out = unsafe {
             // SAFETY: initialising field by field. open_object is already "initialised" (it's
             // permanently MaybeUninit so any state is fine), hence the structure will be
@@ -334,4 +433,287 @@ impl<'a> TryFrom<Builder<'a>> for Scheduler {
             skel,
         })
     }
+}
+
+/// Randomly delay a process.
+#[derive(Debug, Parser)]
+pub struct RandomDelayArgs {
+    /// Chance of randomly delaying a process.
+    #[clap(long, requires = "random_delay_min_us")]
+    pub random_delay_frequency: Option<f64>,
+
+    /// Minimum time to add for random delay.
+    #[clap(long, requires = "random_delay_max_us")]
+    pub random_delay_min_us: Option<u64>,
+
+    /// Maximum time to add for random delay.
+    #[clap(long, requires = "random_delay_frequency")]
+    pub random_delay_max_us: Option<u64>,
+}
+
+/// Randomly CPU frequency scale a process.
+#[derive(Debug, Parser)]
+pub struct CpuFreqArgs {
+    /// Chance of randomly delaying a process.
+    #[clap(long, requires = "cpufreq_max")]
+    pub cpufreq_frequency: Option<f64>,
+
+    /// Minimum CPU frequency for scaling.
+    #[clap(long, requires = "cpufreq_frequency")]
+    pub cpufreq_min: Option<u32>,
+
+    /// Minimum CPU frequency for scaling.
+    #[clap(long, requires = "cpufreq_min")]
+    pub cpufreq_max: Option<u32>,
+}
+
+/// Introduces a perf degradation
+#[derive(Debug, Parser)]
+pub struct PerfDegradationArgs {
+    /// Chance of degradating a process.
+    #[clap(long)]
+    pub degradation_frequency: Option<f64>,
+
+    /// Amount to degradate a process.
+    #[clap(long, default_value = "0", value_parser = clap::value_parser!(u64).range(0..129))]
+    pub degradation_frac7: u64,
+}
+
+/// scx_chaos: A general purpose sched_ext scheduler designed to amplify race conditions
+///
+/// WARNING: This scheduler is a very early alpha, and hasn't been production tested yet. The CLI
+/// in particular is likely very unstable and does not guarantee compatibility between versions.
+///
+/// scx_chaos is a general purpose scheduler designed to run apps with acceptable performance. It
+/// has a series of features designed to add latency in paths in an application. All control is
+/// through the CLI. Running without arguments will not attempt to introduce latency and can set a
+/// baseline for performance impact. The other command line arguments allow for specifying latency
+/// inducing behaviours which attempt to induce a crash.
+///
+/// Unlike most other schedulers, you can also run scx_chaos with a named target. For example:
+///     scx_chaos -- ./app_that_might_crash --arg1 --arg2
+/// In this mode the scheduler will automatically detach after the application exits, unless run
+/// with `--repeat-failure` where it will restart the application on failure.
+#[derive(Debug, Parser)]
+pub struct Args {
+    /// Whether to continue on failure of the command under test.
+    #[clap(long, action = clap::ArgAction::SetTrue, requires = "args")]
+    pub repeat_failure: bool,
+
+    /// Whether to continue on successful exit of the command under test.
+    #[clap(long, action = clap::ArgAction::SetTrue, requires = "args")]
+    pub repeat_success: bool,
+
+    /// Whether to focus on the named task and its children instead of the entire system. Only
+    /// takes effect if pid or args provided.
+    #[clap(long, default_value = "true", action = clap::ArgAction::Set)]
+    pub ppid_targeting: bool,
+
+    /// Enable verbose output, including libbpf details. Specify multiple
+    /// times to increase verbosity.
+    #[clap(short = 'v', long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    #[command(flatten, next_help_heading = "Random Delays")]
+    pub random_delay: RandomDelayArgs,
+
+    #[command(flatten, next_help_heading = "Perf Degradation")]
+    pub perf_degradation: PerfDegradationArgs,
+
+    #[command(flatten, next_help_heading = "CPU Frequency")]
+    pub cpu_freq: CpuFreqArgs,
+
+    #[command(flatten, next_help_heading = "General Scheduling")]
+    pub p2dq: P2dqOpts,
+
+    /// Stop the scheduler if specified process terminates
+    #[arg(
+        long,
+        short = 'p',
+        help_heading = "Test Command",
+        conflicts_with = "args"
+    )]
+    pub pid: Option<libc::pid_t>,
+
+    /// Program to run under the chaos scheduler
+    ///
+    /// Runs a program under test and tracks when it terminates, similar to most debuggers. Note
+    /// that the scheduler still attaches for every process on the system.
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        help_heading = "Test Command"
+    )]
+    pub args: Vec<String>,
+}
+
+struct BuilderIterator<'a> {
+    args: &'a Args,
+    idx: u32,
+}
+
+impl<'a> From<&'a Args> for BuilderIterator<'a> {
+    fn from(args: &'a Args) -> BuilderIterator<'a> {
+        BuilderIterator { args, idx: 0 }
+    }
+}
+
+impl<'a> Iterator for BuilderIterator<'a> {
+    type Item = Builder<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.idx += 1;
+
+        if self.idx > 1 {
+            None
+        } else {
+            let mut traits = vec![];
+
+            if let RandomDelayArgs {
+                random_delay_frequency: Some(frequency),
+                random_delay_min_us: Some(min_us),
+                random_delay_max_us: Some(max_us),
+            } = self.args.random_delay
+            {
+                traits.push(Trait::RandomDelays {
+                    frequency,
+                    min_us,
+                    max_us,
+                });
+            };
+            if let CpuFreqArgs {
+                cpufreq_frequency: Some(frequency),
+                cpufreq_min: Some(min_freq),
+                cpufreq_max: Some(max_freq),
+            } = self.args.cpu_freq
+            {
+                traits.push(Trait::CpuFreq {
+                    frequency,
+                    min_freq,
+                    max_freq,
+                });
+            };
+
+            let requires_ppid = if self.args.ppid_targeting {
+                if let Some(p) = self.args.pid {
+                    Some(RequiresPpid::IncludeParent(Pid::from_raw(p)))
+                } else if !self.args.args.is_empty() {
+                    Some(RequiresPpid::ExcludeParent(Pid::this()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            Some(Builder {
+                traits,
+                verbose: self.args.verbose,
+                p2dq_opts: &self.args.p2dq,
+                requires_ppid,
+            })
+        }
+    }
+}
+
+pub fn run(args: Args) -> Result<()> {
+    let args = Arc::new(args);
+
+    let shutdown = Arc::new((Mutex::new(false), Condvar::new()));
+
+    ctrlc::set_handler({
+        let shutdown = shutdown.clone();
+        move || {
+            let (lock, cvar) = &*shutdown;
+            *lock.lock().unwrap() = true;
+            cvar.notify_all();
+        }
+    })
+    .context("Error setting Ctrl-C handler")?;
+
+    let scheduler_thread = thread::spawn({
+        let args = args.clone();
+        let shutdown = shutdown.clone();
+
+        move || -> Result<()> {
+            for builder in BuilderIterator::from(&*args) {
+                info!("{:?}", &builder);
+
+                let sched: Scheduler = builder.try_into()?;
+
+                sched.observe(&shutdown, None)?;
+            }
+
+            Ok(())
+        }
+    });
+
+    if let Some(pid) = args.pid {
+        info!("Monitoring process with PID: {}", pid);
+
+        let is_process_running = |pid: libc::pid_t| -> bool {
+            unsafe {
+                // SAFETY: kill with signal 0 only runs validity checks. There's no chance of
+                // memory unsafety here.
+                libc::kill(pid, 0) == 0
+            }
+        };
+
+        while is_process_running(pid) && !*shutdown.0.lock().unwrap() {
+            if scheduler_thread.is_finished() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+
+        if !is_process_running(pid) {
+            info!("app under test terminated, exiting...");
+        }
+    }
+
+    let mut should_run_app = !args.args.is_empty();
+    while should_run_app {
+        let (cmd, vargs) = args.args.split_first().unwrap();
+
+        let mut child = Command::new(cmd).args(vargs).spawn()?;
+        loop {
+            should_run_app &= !*shutdown.0.lock().unwrap();
+
+            if scheduler_thread.is_finished() {
+                child.kill()?;
+                break;
+            }
+            if let Some(s) = child.try_wait()? {
+                if s.success() && args.repeat_success {
+                    should_run_app &= !*shutdown.0.lock().unwrap();
+                    if should_run_app {
+                        info!("app under test terminated successfully, restarting...");
+                    };
+                } else if s.success() {
+                    info!("app under test terminated successfully, exiting...");
+                    should_run_app = false;
+                } else {
+                    info!("TODO: report what the scheduler was doing when it crashed");
+                    should_run_app &= !*shutdown.0.lock().unwrap() && args.repeat_failure;
+                };
+
+                break;
+            };
+
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    // Notify shutdown if we're exiting due to args or pid termination
+    if !args.args.is_empty() || args.pid.is_some() {
+        let (lock, cvar) = &*shutdown;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
+    }
+
+    if let Err(e) = scheduler_thread.join() {
+        panic::resume_unwind(e);
+    }
+
+    Ok(())
 }

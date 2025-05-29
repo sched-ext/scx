@@ -39,6 +39,8 @@ void __arena *scx_task_alloc(struct task_struct *p)
 		return NULL;
 
 	data = scx_alloc(&scx_task_allocator);
+	if (unlikely(!data))
+		return NULL;
 
 	mval->tid = data->tid;
 	mval->tptr = (__u64) p;
