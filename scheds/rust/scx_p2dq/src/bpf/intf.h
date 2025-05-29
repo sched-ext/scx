@@ -33,6 +33,8 @@ enum consts {
 	MSEC_PER_SEC		= 1000ULL,
 	NSEC_PER_SEC		= NSEC_PER_MSEC * MSEC_PER_SEC,
 
+	LOAD_BALANCE_SLACK	= 20LL,
+
 	// kernel definitions
 	CLOCK_BOOTTIME		= 7,
 
