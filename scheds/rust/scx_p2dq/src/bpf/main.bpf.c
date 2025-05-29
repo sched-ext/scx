@@ -75,7 +75,7 @@ const volatile bool dispatch_lb_interactive = false;
 const volatile u64 dispatch_lb_busy = 75;
 const volatile u64 wakeup_lb_busy = 90;
 const volatile bool wakeup_llc_migrations = false;
-const volatile u64 lb_slack_factor = 20;
+const volatile u64 lb_slack_factor = LOAD_BALANCE_SLACK;
 
 const volatile bool smt_enabled = true;
 const volatile bool has_little_cores = false;
