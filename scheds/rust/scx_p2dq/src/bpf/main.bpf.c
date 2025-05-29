@@ -1070,13 +1070,8 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 		return -EINVAL;
 
 	// Special case when two llcs are present
-	if (nr_llcs == 2) {
-		left = lookup_llc_ctx(0);
-		right = lookup_llc_ctx(1);
-	} else {
-		left = rand_llc_ctx();
-		right = rand_llc_ctx();
-	}
+	left = nr_llcs == 2 ? lookup_llc_ctx(0) : rand_llc_ctx();
+	right = nr_llcs == 2 ? lookup_llc_ctx(1) : rand_llc_ctx();
 
 	// Last ditch effort try consuming from the most loaded DSQ.
 	llcx = pick_two_llc_ctx(cur_llcx, left, right);
@@ -1088,7 +1083,7 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 	if (!bpf_ksym_exists(scx_bpf_dsq_move)) {
 		// Start with least interactive DSQs to avoid migrating
 		// interactive tasks.
-		bpf_for(i, 1, nr_dsqs_per_llc) {
+		bpf_for(i, dispatch_lb_interactive ? 0 : 1, nr_dsqs_per_llc) {
 			if (scx_bpf_dsq_move_to_local(llcx->dsqs[nr_dsqs_per_llc - i])) {
 				stat_inc(P2DQ_STAT_DISPATCH_PICK2);
 				return 0;
@@ -1097,16 +1092,9 @@ static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, 
 		return 0;
 	}
 
-	// First try any interactive tasks.
-	if (dispatch_lb_interactive) {
-		dsq_id = llcx->dsqs[0];
-		if (dispatch_cpu(dsq_id, cpu, llcx, 0) > 0)
-			return 0;
-	}
-
 	// Then migrate least interactive DSQs to find the most throughput
 	// bound tasks.
-	bpf_for(i, 1, nr_dsqs_per_llc) {
+	bpf_for(i, dispatch_lb_interactive ? 0 : 1, nr_dsqs_per_llc) {
 		dsq_id = llcx->dsqs[nr_dsqs_per_llc - i];
 		if (dispatch_cpu(dsq_id, cpu, llcx, nr_dsqs_per_llc - i) > 0)
 			return 0;
