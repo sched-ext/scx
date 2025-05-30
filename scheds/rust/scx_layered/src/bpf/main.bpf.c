@@ -1464,7 +1464,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * maybe_update_task_llc() can update @p->scx.dsq_vtime, it can only be
 	 * read afterwards.
 	 *
-	 * A task is allowed to carray at most a slice worth of vtime budget
+	 * A task is allowed to carry at most a slice worth of vtime budget
 	 * which determines the minimum vtime. It shouldn't be necessary to cap
 	 * the max vtime as there is no way for it to become significantly later
 	 * than vtime_now; however, cap the max delta at 8192 times the slice
