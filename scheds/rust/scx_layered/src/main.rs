@@ -3036,8 +3036,11 @@ fn main() -> Result<()> {
 
                         genspec.cpuset = Some(mask);
 
-                        // Push the new "and" rule.
-                        genspec.matches.push(vec![mt.clone()]);
+                        // Push the new "and" rule into each "or" term.
+                        for orterm in &mut genspec.matches {
+                            orterm.push(mt.clone());
+                        }
+
                         match &mt {
                             LayerMatch::CgroupSuffix(cgroup) => genspec.name.push_str(cgroup),
                             _ => bail!("Template match has unexpected type"),
