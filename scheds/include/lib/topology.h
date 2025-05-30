@@ -27,23 +27,6 @@ struct topology {
 
 topo_ptr topo_all __weak;
 
-struct topo_iter {
-	topo_ptr topo;
-	size_t i;
-};
-
-#define TOPO_ITER_INIT(_iter, _topo)	\
-	do { (_iter).topo = (_topo); (_iter).i = 0; } while (0)
-
-#define TOPO_ITER_DONE(_iter) ((_iter).i == (_iter).topo->nr_children)
-
-#define TOPO_ITER_NEXT(_iter) \
-	(TOPO_ITER_DONE(_iter) ? NULL : (_iter).topo->children[(_iter).i++])
-
-#define TOPO_FOR_EACH_CHILD(_iter, _topo, _child)		\
-	TOPO_ITER_INIT(_iter, _topo);				\
-	for ((_child) = NULL; (_child = TOPO_ITER_NEXT(_iter)) && can_loop;)
-
 int topo_init(scx_bitmap_t __arg_arena mask);
 int topo_contains(topo_ptr topo, u32 cpu);
 

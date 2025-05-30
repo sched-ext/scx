@@ -74,10 +74,11 @@ int topo_add(topo_ptr parent, scx_bitmap_t mask)
 __weak
 int topo_init(scx_bitmap_t __arg_arena mask)
 {
-	struct topo_iter iter;
-	topo_ptr topo, child;
-	int i;
+	/* Initializing the child to appease the verifier. */
+	topo_ptr topo, child = NULL;
+	int i, j;
 
+	topo = topo_all;
 	if (!topo_all) {
 		topo_all = topo_node(NULL, mask);
 		if (!topo_all) {
@@ -88,14 +89,15 @@ int topo_init(scx_bitmap_t __arg_arena mask)
 		return 0;
 	}
 
-	for (topo = topo_all, i = 0; i < TOPO_MAX_LEVEL && can_loop; i++) {
+	for (i = 0; i < TOPO_MAX_LEVEL && can_loop; i++) {
 		if (!topo_subset(topo, mask)) {
 			scx_bpf_error("mask not a subset of a topology node");
 			topo_print();
 			return -EINVAL;
 		}
 
-		TOPO_FOR_EACH_CHILD(iter, topo, child) {
+		for (j = 0; j < topo->nr_children && can_loop; j++) {
+			child = topo->children[j];
 			if (topo_subset(child, mask))
 				break;
 
@@ -107,10 +109,15 @@ int topo_init(scx_bitmap_t __arg_arena mask)
 
 		/*
 		 * If we don't fit in any child, we belong right below the
-		 * toporent topology node.
+		 * parent topology node.
 		 */
-		if (!child) {
+		if (j == topo->nr_children) {
 			topo_add(topo, mask);
+			return 0;
+		}
+
+		if (!child) {
+			scx_bpf_error("child is not valid");
 			return 0;
 		}
 
@@ -124,9 +131,8 @@ int topo_init(scx_bitmap_t __arg_arena mask)
 __weak
 topo_ptr topo_find_descendant(topo_ptr topo, u32 cpu)
 {
-	struct topo_iter iter;
 	topo_ptr child;
-	int lvl;
+	int lvl, i;
 
 	if (!topo_contains(topo, cpu)) {
 		scx_bpf_error("missing cpu from topology");
@@ -134,15 +140,16 @@ topo_ptr topo_find_descendant(topo_ptr topo, u32 cpu)
 	}
 
 	for (lvl = 0; lvl < TOPO_MAX_LEVEL && can_loop; lvl++) {
-		if (!topo->nr_children)
+		if (topo->nr_children == 0)
 			return topo;
 
-		TOPO_FOR_EACH_CHILD(iter, topo, child) {
+		for (i = 0; i < topo->nr_children && can_loop; i++) {
+			child = topo->children[i];
 			if (topo_contains(child, cpu))
 				break;
 		}
 
-		if (!child) {
+		if (i == topo->nr_children) {
 			scx_bpf_error("missing cpu from inner topology nodes");
 			return NULL;
 		}
@@ -170,15 +177,16 @@ __weak
 topo_ptr topo_find_sibling(topo_ptr topo, u32 cpu)
 {
 	topo_ptr parent = topo->parent;
-	struct topo_iter iter;
 	topo_ptr child;
+	int i;
 
 	if (!parent) {
 		scx_bpf_error("parent has no sibling");
 		return NULL;
 	}
 
-	TOPO_FOR_EACH_CHILD(iter, topo, child) {
+	for (i = 0; i < topo->nr_children && can_loop; i++) {
+		child = topo->children[i];
 		if (topo_contains(child, cpu))
 			return child;
 	}
@@ -206,65 +214,167 @@ u64 topo_mask_level_internal(topo_ptr topo, enum topo_level level)
 	return (u64)topo->mask;
 }
 
+struct topo_iter {
+	/* The current topology node. */
+	topo_ptr topo;
+	/*
+	 * The index for every node in the path of the tree for , -1 denotes levels > the current one.
+	 * E.g., [0, 1, 2, 1, 2] means:
+	 * - index on level 0 (we only have one top-level node]
+	 * - index 1 on level 1 (the top-level node's second child)
+	 * - index 2 on level 2 (the NUMA node topology node's third child)
+	 * and so on.
+	 */
+	int indices[TOPO_MAX_LEVEL];
+};
+
+static int
+topo_iter_init(topo_ptr topo, struct topo_iter *iter)
+{
+	topo_ptr parent;
+	enum topo_level lvl;
+	int ind;
+
+	if (!topo_all)
+		return -EINVAL;
+
+	iter->topo = topo;
+	bpf_for(ind, 0, TOPO_MAX_LEVEL)
+		iter->indices[ind] = -1;
+
+	parent = topo->parent;
+	for (lvl = topo->level; lvl > 0 && can_loop; lvl--) {
+		for (ind = 0; ind < parent->nr_children && can_loop; ind++) {
+			if (parent->children[ind] == topo)
+				break;
+		}
+
+		if (ind == parent->nr_children) {
+			scx_bpf_error("could not find topology node in parent");
+			return -EINVAL;
+		}
+
+
+		if (unlikely(lvl >= TOPO_MAX_LEVEL)) {
+			scx_bpf_error("invalid level %d", lvl);
+			return -EINVAL;
+		}
+
+		iter->indices[lvl] = ind;
+
+		/* Go one level up. */
+		parent = parent->parent;
+		topo = topo->parent;
+	}
+
+	/* We know we only have one root topology node. */
+	iter->indices[0] = 0;
+
+	return 0;
+}
+
+/* We choose in-order traversal. */
+__weak bool
+topo_iter_next(struct topo_iter *iter)
+{
+	topo_ptr parent;
+	enum topo_level lvl;
+
+	if (unlikely(!iter)) {
+		scx_bpf_error("passing NULL iterator");
+		return false;
+	}
+
+	/* Case 1: We have children. Go one step down and get the left most one. */
+	if (iter->topo->nr_children > 0) {
+		iter->topo = iter->topo->children[0];
+
+		lvl = iter->topo->level;
+		if (unlikely(lvl < 0 || lvl >= TOPO_MAX_LEVEL)) {
+			/*
+			 * XXXETSAL: We have both bpf_printk and scx_bpf_error
+			 * out of an abundance of caution: In some cases scx_bpf_error
+			 * does not fire at all, making debugging more difficult.
+			 */
+			bpf_printk("invalid child level %d", lvl);
+			scx_bpf_error("invalid child level %d", lvl);
+			return false;
+		}
+
+		iter->indices[lvl] = 0;
+
+		return true;
+	}
+
+
+	/*
+	 * Case 2: We have no children. Go up until we find a rightmost sibling,
+	 * then choose that sibling.
+	 */
+	while (iter->topo->level > 0 && can_loop) {
+		lvl = iter->topo->level;
+		if (unlikely(lvl < 0 || lvl >= TOPO_MAX_LEVEL)) {
+			bpf_printk("invalid level %d", lvl);
+			scx_bpf_error("invalid level %d", lvl);
+			return false;
+		}
+
+		iter->indices[lvl] += 1;
+
+		parent = iter->topo->parent;
+		if (iter->indices[lvl] == parent->nr_children) {
+			/* Done with parent, go up a level. */
+			iter->indices[lvl] = -1;
+			iter->topo = parent;
+			continue;
+		}
+
+		iter->topo = parent->children[iter->indices[lvl]];
+		return true;
+	}
+
+	/* Could not find a right sibling for any ancestor. */
+
+	return false;
+}
+
 __weak __maybe_unused
 int topo_print(void)
 {
-	int stack[TOPO_MAX_LEVEL];
-	topo_ptr topo;
-	int ind, lvl;
+	struct topo_iter iter;
+	char indent[TOPO_MAX_LEVEL];
+	int ret;
+	int i;
 
-	for (ind = 0; ind < TOPO_MAX_LEVEL && can_loop; ind++) {
-		stack[ind] = 0;
-	}
-
-	topo = topo_all;
-	if (!topo) {
+	if (!topo_all) {
 		bpf_printk("[NO TOPOLOGY]");
 		return 0;
 	}
 
-	lvl = ind = 0;
-	while (lvl >= 0 && can_loop) {
-		if (unlikely(lvl >= TOPO_MAX_LEVEL)) {
-			bpf_printk("Out of bounds");
-			break;
+	ret = topo_iter_init(topo_all, &iter);
+	if (ret)
+		return ret;
+
+	do {
+		bpf_for(i, 0, TOPO_MAX_LEVEL) {
+			if (i == iter.topo->level) {
+				indent[i] = '\0';
+				break;
+			}
+
+			indent[i] = '\t';
 		}
+		bpf_printk("%s (LEVEL %d) [%d, %d, %d ,%d, %d]",
+			indent,
+			iter.topo->level,
+			iter.indices[TOPO_TOP],
+			iter.indices[TOPO_NODE],
+			iter.indices[TOPO_LLC],
+			iter.indices[TOPO_CORE],
+			iter.indices[TOPO_CPU]);
 
-		ind = stack[lvl];
-
-		/* If past the index, go up. */
-		if (ind == topo->nr_children) {
-			topo = topo->parent;
-			stack[lvl] = -1;
-			lvl -= 1;
-
-			continue;
-		}
-
-		topo = topo->children[ind];
-		if (!topo) {
-			bpf_printk("[ERROR] No child found");
-			return 0;
-		}
-
-		stack[lvl] += 1;
-		lvl += 1;
-
-		if (unlikely(lvl >= TOPO_MAX_LEVEL)) {
-			bpf_printk("Out of bounds");
-			break;
-		}
-		stack[lvl] = 0;
-
-		bpf_printk("[%d, %d, %d ,%d, %d]",
-			   stack[TOPO_TOP],
-			   stack[TOPO_NODE],
-			   stack[TOPO_LLC],
-			   stack[TOPO_CORE],
-			   stack[TOPO_CPU]);
-
-		scx_bitmap_print(topo->mask);
-	}
+		scx_bitmap_print(iter.topo->mask);
+	} while (topo_iter_next(&iter) && can_loop);
 
 	return 0;
 }

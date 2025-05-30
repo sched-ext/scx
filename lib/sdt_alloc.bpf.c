@@ -1079,6 +1079,12 @@ u64 size_to_order(size_t size)
 {
 	u64 order;
 
+	if (unlikely(!size)) {
+		bpf_printk("size 0 has no order");
+		scx_bpf_error("size 0 has no order");
+		return 64;
+	}
+
 	/*
 	 * To find the order of the allocation we find the first power of two
 	 * >= the requested size, take the log2, then adjust it for the minimum
@@ -1158,8 +1164,10 @@ scx_buddy_chunk_t *scx_buddy_chunk_get(struct scx_stk *stk)
 	last_order = SCX_BUDDY_CHUNK_MAX_ORDER;
 	left = sizeof(*chunk);
 	cur_idx = 0;
-	while((power2 = scx_ffs(left)) && can_loop) {
+	while(left && can_loop) {
+		power2 = scx_ffs(left);
 		if (unlikely(power2 >= SCX_BUDDY_CHUNK_MAX_ORDER)) {
+			bpf_printk("buddy chunk metadata require allocation of order %d", power2);
 			scx_bpf_error("buddy chunk metadata too large");
 			return NULL;
 		}

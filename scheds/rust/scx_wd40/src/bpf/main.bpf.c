@@ -39,22 +39,17 @@
  * load balance based on userspace's setting of the target_dom field.
  */
 
-#ifdef LSP
-#define __bpf__
-#include "../../../../include/scx/common.bpf.h"
-#include "../../../../include/scx/ravg_impl.bpf.h"
-#else
 #include <scx/common.bpf.h>
-#include <scx/ravg_impl.bpf.h>
-#include <lib/sdt_task.h>
-#endif
 
 #include <scx/bpf_arena_common.h>
 #include <scx/bpf_arena_spin_lock.h>
+#include <scx/ravg_impl.bpf.h>
 
 #include <lib/arena.h>
 #include <lib/cpumask.h>
 #include <lib/percpu.h>
+#include <lib/topology.h>
+#include <lib/sdt_task.h>
 
 #include "intf.h"
 #include "types.h"
@@ -891,6 +886,9 @@ int wd40_setup(void)
 		if (ret)
 			return ret;
 	}
+
+	if (debug)
+		topo_print();
 
 	return 0;
 }
