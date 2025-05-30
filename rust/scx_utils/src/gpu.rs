@@ -22,6 +22,8 @@ pub struct Gpu {
     pub max_sm_clock: usize,
     // Frequency of the GPU's memory
     pub max_mem_clock: usize,
+    // Streaming Multiprocessor count
+    pub multiproc_count: usize,
     pub memory: u64,
     pub cpu_mask: Cpumask,
     // Represents the ordered list of nearest
@@ -71,6 +73,12 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 Cpumask::new()
             };
 
+            let multiproc_count = if let Ok(attributes) = nvidia_gpu.attributes() {
+                attributes.multiprocessor_count
+            } else {
+                0
+            };
+
             let nearest_gpu_topology_level = if nvidia_gpu.is_multi_gpu_board().unwrap_or(false) {
                 // e.g. for some Tesla models, this mode is faster
                 // as units are part of the same physical device
@@ -112,6 +120,7 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 max_graphics_clock: graphics_boost_clock as usize,
                 max_sm_clock: sm_boost_clock as usize,
                 max_mem_clock: mem_boost_clock as usize,
+                multiproc_count: multiproc_count as usize,
                 memory: memory_info.total,
                 cpu_mask,
                 nearest,
