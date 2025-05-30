@@ -624,7 +624,7 @@ static void update_stat_for_stopping(struct task_struct *p,
 
 	/*
 	 * Increase total scaled CPU time of this CPU,
-	 * whcih is capacity and frequency invariant.
+	 * which is capacity and frequency invariant.
 	 */
 	cpuc->tot_sc_time += scale_cap_freq(task_runtime, cpuc->cpu_id);
 
@@ -679,7 +679,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 */
 		cpuc = get_cpu_ctx_id(cpu_id);
 		if (!cpuc) {
-			scx_bpf_error("Failed to look up cpu context context");
+			scx_bpf_error("Failed to look up cpu context");
 			return cpu_id;
 		}
 		dsq_id = cpuc->cpdom_id;

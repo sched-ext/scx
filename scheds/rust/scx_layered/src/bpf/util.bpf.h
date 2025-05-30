@@ -20,7 +20,13 @@ extern const volatile u32 debug;
 #define dbg(fmt, args...)	do { if (debug) bpf_printk(fmt, ##args); } while (0)
 #define trace(fmt, args...)	do { if (debug > 1) bpf_printk(fmt, ##args); } while (0)
 
-bool match_prefix_suffix(const char *prefix, const char *str, bool match_suffix);
+enum MatchType {
+    STR_PREFIX = 0,
+    STR_SUFFIX = 1,
+    STR_SUBSTR = 2
+};
+
+bool match_str(const char *prefix, const char *str, enum MatchType match_type);
 char *format_cgrp_path(struct cgroup *cgrp);
 
 #endif /* __LAYERED_UTIL_H */

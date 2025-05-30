@@ -219,7 +219,7 @@ void __arena *sdt_alloc_from_pool(struct sdt_pool *pool,
 
 	/* Nonsleepable allocations not supported for large data structures. */
 	if (elem_size > PAGE_SIZE)
-	  return NULL;
+		return NULL;
 
 	/* If the chunk is spent, get a new one. */
 	if (pool->idx >= max_elems) {
@@ -290,8 +290,8 @@ static SDT_TASK_FN_ATTRS int sdt_pool_set_size(struct sdt_pool *pool, __u64 data
 	}
 
 	if (unlikely(nr_pages == 0)) {
-	      scx_bpf_error("%s: allocation size is 0", __func__);
-	      return -EINVAL;
+		scx_bpf_error("%s: allocation size is 0", __func__);
+		return -EINVAL;
 	}
 
 	pool->elem_size = data_size;
@@ -676,7 +676,7 @@ void __arena *sdt_static_alloc(size_t bytes)
 		memory = bpf_arena_alloc_pages(&arena, NULL,
 					       sdt_static.max_alloc_bytes / PAGE_SIZE,
 					       NUMA_NO_NODE, 0);
-		if (!sdt_static.memory)
+		if (!memory)
 			return NULL;
 
 		bpf_spin_lock(&sdt_lock);
@@ -689,10 +689,17 @@ void __arena *sdt_static_alloc(size_t bytes)
 			scx_bpf_error("concurrent static memory allocations unsupported");
 			return NULL;
 		}
+
+		/* Switch to new memory block, reset offset. */
+		sdt_static.memory = memory;
+		sdt_static.off = 0;
+
 	}
 
 	ptr = (void __arena *)((__u64) sdt_static.memory + sdt_static.off);
 	sdt_static.off += bytes;
+
+	bpf_spin_unlock(&sdt_lock);
 
 	return ptr;
 }

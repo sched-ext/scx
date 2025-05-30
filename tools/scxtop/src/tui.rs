@@ -36,6 +36,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Event {
+    Backspace,
     Init,
     Quit,
     Error,

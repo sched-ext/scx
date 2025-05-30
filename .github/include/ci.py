@@ -66,7 +66,7 @@ def run_build():
     """Build all targets."""
     print("Running build...", flush=True)
 
-    run_command(["cargo", "build", "--all-targets"])
+    run_command(["cargo", "build", "--all-targets", "--locked"])
     print("✓ Build completed successfully", flush=True)
 
 

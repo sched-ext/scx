@@ -443,7 +443,7 @@ static void layer_cpuset_bpfmask(int layer_id)
 /*
  * Returns if any cpus were added to the layer.
  */
-static void refresh_cpumasks(u32 layer_id)
+int refresh_cpumasks(u32 layer_id)
 {
 	struct bpf_cpumask *layer_cpumask;
 	struct layer_cpumask_wrapper *cpumaskw;
@@ -455,18 +455,18 @@ static void refresh_cpumasks(u32 layer_id)
 	layer = MEMBER_VPTR(layers, [layer_id]);
 	if (!layer) {
 		scx_bpf_error("can't happen");
-		return;
+		return 0;
 	}
 
 	if (!__sync_val_compare_and_swap(&layer->refresh_cpus, 1, 0))
-		return;
+		return 0;
 
 	bpf_rcu_read_lock();
 	if (!(cpumaskw = bpf_map_lookup_elem(&layer_cpumasks, &layer_id)) ||
 	    !(layer_cpumask = cpumaskw->cpumask)) {
 		bpf_rcu_read_unlock();
 		scx_bpf_error("can't happen");
-		return;
+		return 0;
 	}
 
 	bpf_for(cpu, 0, nr_possible_cpus) {
@@ -474,7 +474,7 @@ static void refresh_cpumasks(u32 layer_id)
 
 		if (!(cpuc = lookup_cpu_ctx(cpu))) {
 			bpf_rcu_read_unlock();
-			return;
+			return 0;
 		}
 
 		if ((u8_ptr = MEMBER_VPTR(layers, [layer_id].cpus[cpu / 8]))) {
@@ -518,10 +518,11 @@ static void refresh_cpumasks(u32 layer_id)
 
 	bpf_for(cpu, 0, nr_possible_cpus) {
 		if (!(cpuc = lookup_cpu_ctx(cpu)))
-			return;
+			return 0;
 		if (cpuc_in_layer(cpuc, layer))
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	}
+	return 0;
 }
 
 /*
@@ -1355,7 +1356,6 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	struct layer *layer;
 	bool wakeup = enq_flags & SCX_ENQ_WAKEUP;
 	s32 cpu, task_cpu = scx_bpf_task_cpu(p);
-	u64 vtime = p->scx.dsq_vtime;
 	u32 llc_id, layer_id;
 	bool yielding, try_preempt_first;
 	u64 queued_runtime;
@@ -1459,9 +1459,32 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (llc_id >= MAX_LLCS || !(llcc = lookup_llc_ctx(llc_id)))
 		return;
 
+	/*
+	 * If necessary, migrate @p to new LLC and constrain its vtime. As
+	 * maybe_update_task_llc() can update @p->scx.dsq_vtime, it can only be
+	 * read afterwards.
+	 *
+	 * A task is allowed to carry at most a slice worth of vtime budget
+	 * which determines the minimum vtime. It shouldn't be necessary to cap
+	 * the max vtime as there is no way for it to become significantly later
+	 * than vtime_now; however, cap the max delta at 8192 times the slice
+	 * just in case and log violations as there have been bugs in this area.
+	 * 8192 came from 100x for min weight, 20x for typical max_exec_us, and
+	 * ~4x for buffer.
+	 */
 	maybe_update_task_llc(p, taskc, task_cpu);
-	if (time_before(vtime, llcc->vtime_now[layer_id] - layer->slice_ns))
-		vtime = llcc->vtime_now[layer_id] - layer->slice_ns;
+
+	u64 vtime = p->scx.dsq_vtime;
+	u64 vtime_now = llcc->vtime_now[layer_id];
+	u64 vtime_min = vtime_now - layer->slice_ns;
+	u64 vtime_max = vtime_now + 8192 * layer->slice_ns;
+
+	if (time_before(vtime, vtime_min))
+		vtime = vtime_min;
+	if (unlikely(time_after(vtime, vtime_max))) {
+		gstat_inc(GSTAT_FIXUP_VTIME, cpuc);
+		vtime = vtime_max;
+	}
 
 	/*
 	 * Special-case per-cpu kthreads and scx_layered userspace so that they
@@ -2148,21 +2171,24 @@ static __noinline bool match_one(struct layer_match *match,
 
 	switch (match->kind) {
 	case MATCH_CGROUP_PREFIX: {
-		return match_prefix_suffix(match->cgroup_prefix, cgrp_path, false);
+		return match_str(match->cgroup_prefix, cgrp_path, STR_PREFIX);
 	}
 	case MATCH_CGROUP_SUFFIX: {
-		return match_prefix_suffix(match->cgroup_suffix, cgrp_path, true);
+		return match_str(match->cgroup_suffix, cgrp_path, STR_SUFFIX);
+	}
+	case MATCH_CGROUP_CONTAINS: {
+		return match_str(match->cgroup_substr, cgrp_path, STR_SUBSTR);
 	}
 	case MATCH_COMM_PREFIX: {
 		char comm[MAX_COMM];
 		__builtin_memcpy(comm, p->comm, MAX_COMM);
-		return match_prefix_suffix(match->comm_prefix, comm, false);
+		return match_str(match->comm_prefix, comm, STR_PREFIX);
 	}
 	case MATCH_PCOMM_PREFIX: {
 		char pcomm[MAX_COMM];
 
 		__builtin_memcpy(pcomm, p->group_leader->comm, MAX_COMM);
-		return match_prefix_suffix(match->pcomm_prefix, pcomm, false);
+		return match_str(match->pcomm_prefix, pcomm, STR_PREFIX);
 	}
 	case MATCH_NICE_ABOVE:
 		return prio_to_nice((s32)p->static_prio) > match->nice;
@@ -2228,8 +2254,8 @@ static __noinline bool match_one(struct layer_match *match,
 		if (!taskc->join_layer[0])
 			return false;
 
-		return match_prefix_suffix(match->comm_prefix, taskc->join_layer,
-			false);
+		return match_str(match->comm_prefix, taskc->join_layer,
+			STR_PREFIX);
 	}
 	case MATCH_IS_GROUP_LEADER: {
 		// There is nuance to this around exec(2)s and group leader swaps.
@@ -3435,6 +3461,9 @@ static s32 init_layer(int layer_id)
 					match->max_avg_runtime_us);
 			case MATCH_CGROUP_SUFFIX:
 				dbg("%s CGROUP_SUFFIX \"%s\"", header, match->cgroup_suffix);
+				break;
+			case MATCH_CGROUP_CONTAINS:
+				dbg("%s CGROUP_CONTAINS \"%s\"", header, match->cgroup_substr);
 				break;
 			default:
 				scx_bpf_error("%s Invalid kind", header);

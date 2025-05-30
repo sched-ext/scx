@@ -18,7 +18,7 @@ libbpf-sys = "=1.4.6"
 libbpf-cargo = "=0.25.0-beta.1"
 libbpf-rs = "=0.25.0-beta.1"
 log = "0.4.17"
-nvml-wrapper = { version = "0.10.0", optional = true }
+nvml-wrapper = { version = "0.11.0", optional = true }
 paste = "1.0"
 regex = "1.11.1"
 scx_stats = { path = "../scx_stats", version = "1.0.12" }

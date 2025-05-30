@@ -19,6 +19,7 @@ use crate::LlcData;
 use crate::NodeData;
 use crate::PerfEvent;
 use crate::PerfettoTraceManager;
+use crate::Search;
 use crate::VecStats;
 use crate::ViewState;
 use crate::APP;
@@ -89,15 +90,16 @@ pub struct App<'a> {
     collect_cpu_freq: bool,
     collect_uncore_freq: bool,
     pstate: bool,
-    event_scroll_state: ScrollbarState,
     event_scroll: u16,
 
     active_event: PerfEvent,
     active_hw_event_id: usize,
     active_perf_events: BTreeMap<usize, PerfEvent>,
     available_events: Vec<PerfEvent>,
+    event_input_buffer: String,
+    event_search: Search,
 
-    available_perf_events_list: Vec<String>,
+    filtered_perf_events_list: Vec<String>,
     cpu_data: BTreeMap<usize, CpuData>,
     llc_data: BTreeMap<usize, LlcData>,
     node_data: BTreeMap<usize, NodeData>,
@@ -186,7 +188,7 @@ impl<'a> App<'a> {
             node_data.insert(node.id, data);
         }
 
-        let available_perf_events_list: Vec<String> = available_perf_events()?
+        let initial_perf_events_list: Vec<String> = available_perf_events()?
             .iter()
             .flat_map(|(subsystem, events)| {
                 events
@@ -194,7 +196,7 @@ impl<'a> App<'a> {
                     .map(|event| format!("{}:{}", subsystem.clone(), event.clone()))
             })
             .collect();
-        let num_perf_events: u16 = available_perf_events_list.len() as u16;
+        let num_perf_events: u16 = initial_perf_events_list.len() as u16;
         let mut stats_client = StatsClient::new();
         let stats_socket_path = config.stats_socket_path();
         if !stats_socket_path.is_empty() {
@@ -241,13 +243,14 @@ impl<'a> App<'a> {
             llc_data,
             node_data,
             dsq_data: BTreeMap::new(),
-            event_scroll_state: ScrollbarState::new(num_perf_events.into()).position(0),
             event_scroll: 0,
             active_hw_event_id: 0,
             active_event,
             active_perf_events,
             available_events: default_events,
-            available_perf_events_list,
+            event_input_buffer: String::new(),
+            event_search: Search::new(initial_perf_events_list.clone()),
+            filtered_perf_events_list: Vec::new(),
             num_perf_events,
             events_list_size: 1,
             selected_event: 0,
@@ -274,7 +277,9 @@ impl<'a> App<'a> {
 
     /// Sets the state of the application.
     pub fn set_state(&mut self, state: AppState) {
-        self.prev_state = self.state.clone();
+        if self.state != AppState::Help && self.state != AppState::Event {
+            self.prev_state = self.state.clone();
+        }
         self.state = state;
         if self.prev_state == AppState::MangoApp {
             self.process_id = self.prev_process_id;
@@ -1899,15 +1904,30 @@ impl<'a> App<'a> {
     fn render_event_list(&mut self, frame: &mut Frame) -> Result<()> {
         let area = frame.area();
         let default_style = Style::default().fg(self.theme().text_color());
-        let chunks = Layout::vertical([Constraint::Min(1), Constraint::Percentage(99)]).split(area);
+        let chunks = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Percentage(98),
+            Constraint::Min(3),
+        ])
+        .split(area);
 
         let height = if area.height > 0 { area.height - 1 } else { 1 };
         if height != self.events_list_size {
             self.events_list_size = height
         }
 
+        self.filtered_perf_events_list = self.event_search.fuzzy_search(&self.event_input_buffer);
+        self.num_perf_events = self.filtered_perf_events_list.len() as u16;
+        if (self.num_perf_events as usize) <= self.selected_event {
+            self.selected_event = (self.num_perf_events as usize) - 1;
+        }
+
+        if self.num_perf_events <= self.event_scroll {
+            self.event_scroll = self.num_perf_events - 1;
+        }
+
         let events: Vec<Line> = self
-            .available_perf_events_list
+            .filtered_perf_events_list
             .iter()
             .enumerate()
             .map(|(i, event)| {
@@ -1924,7 +1944,7 @@ impl<'a> App<'a> {
             .title_alignment(Alignment::Center)
             .title(
                 format!(
-                    "Use ▲ ▼  ({}/{}) to scroll, {} to select",
+                    "Type to filter list, use ▲ ▼  ({}/{}) to scroll, {} to select",
                     self.config.active_keymap.action_keys_string(Action::PageUp),
                     self.config
                         .active_keymap
@@ -1940,12 +1960,19 @@ impl<'a> App<'a> {
             .scroll((self.event_scroll, 0));
         frame.render_widget(paragraph, chunks[1]);
 
+        let input_box = Paragraph::new(format!("# > {}", self.event_input_buffer))
+            .style(default_style)
+            .bold()
+            .block(Block::new().borders(Borders::ALL));
+        frame.render_widget(input_box, chunks[2]);
+
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("↑"))
                 .end_symbol(Some("↓")),
             chunks[1],
-            &mut self.event_scroll_state,
+            &mut ScrollbarState::new(self.num_perf_events.into())
+                .position(self.event_scroll as usize),
         );
 
         Ok(())
@@ -2076,7 +2103,7 @@ impl<'a> App<'a> {
 
     /// Updates app state when the down arrow or mapped key is pressed.
     fn on_down(&mut self) {
-        if self.state == AppState::Event && self.event_scroll <= self.num_perf_events {
+        if self.state == AppState::Event && self.event_scroll < self.num_perf_events - 1 {
             self.event_scroll += 1;
             self.selected_event += 1
         }
@@ -2115,9 +2142,9 @@ impl<'a> App<'a> {
 
     /// Updates app state when the enter key is pressed.
     fn on_enter(&mut self) {
-        if self.state == AppState::Event {
+        if self.state == AppState::Event && !self.filtered_perf_events_list.is_empty() {
             if let Some((subsystem, event)) =
-                self.available_perf_events_list[self.selected_event].split_once(":")
+                self.filtered_perf_events_list[self.selected_event].split_once(":")
             {
                 let perf_event = PerfEvent::new(subsystem.to_string(), event.to_string(), 0);
                 self.active_perf_events.clear();
@@ -2599,6 +2626,21 @@ impl<'a> App<'a> {
                 _ => {
                     self.should_quit.store(true, Ordering::Relaxed);
                 }
+            },
+            Action::InputEntry(input) => {
+                self.event_input_buffer.push_str(input);
+            }
+            Action::Backspace => {
+                self.event_input_buffer.pop();
+                self.selected_event = 0;
+                self.event_scroll = 0;
+            }
+            Action::Esc => match self.state() {
+                AppState::Event => {
+                    self.event_input_buffer.clear();
+                    self.handle_action(&Action::SetState(self.prev_state.clone()))?;
+                }
+                _ => self.handle_action(&Action::Quit)?,
             },
             _ => {}
         };

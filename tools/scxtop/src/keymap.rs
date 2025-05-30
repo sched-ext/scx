@@ -66,6 +66,8 @@ impl Default for KeyMap {
         bindings.insert(Key::Code(KeyCode::PageDown), Action::PageDown);
         bindings.insert(Key::Code(KeyCode::PageUp), Action::PageUp);
         bindings.insert(Key::Code(KeyCode::Enter), Action::Enter);
+        bindings.insert(Key::Code(KeyCode::Esc), Action::Esc);
+        bindings.insert(Key::Code(KeyCode::Backspace), Action::Backspace);
 
         Self { bindings }
     }
