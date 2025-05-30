@@ -1220,10 +1220,10 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 			    struct layer *layer, u64 flags)
 {
 	struct cpu_ctx *cpuc, *cand_cpuc, *sib_cpuc = NULL;
-	struct rq *rq = NULL;
-	s32 sib;
-	struct sched_class *ext_sched_class, *idle_sched_class;
+	struct rq *rq;
+	struct task_struct *curr;
 	const struct cpumask *idle_cpumask;
+	s32 sib;
 
 	if (cand >= nr_possible_cpus || !bpf_cpumask_test_cpu(cand, p->cpus_ptr))
 		return false;
@@ -1235,13 +1235,13 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 		return false;
 
 	rq = scx_bpf_cpu_rq(cand);
+	if (!rq)
+		return false;
+	curr = rq->curr;
 
-	ext_sched_class = (struct sched_class *)(unsigned long long)ext_sched_class_addr;
-	idle_sched_class = (struct sched_class *)(unsigned long long)idle_sched_class_addr;
-
-	if (rq && ext_sched_class_addr && idle_sched_class_addr &&
-		(rq->curr->sched_class != ext_sched_class) &&
-		(rq->curr->sched_class != idle_sched_class)) {
+	if (ext_sched_class_addr && idle_sched_class_addr &&
+	    ((u64)curr->sched_class != ext_sched_class_addr) &&
+	    ((u64)curr->sched_class != idle_sched_class_addr)) {
 		if (!(cpuc = lookup_cpu_ctx(-1)))
 			return false;
 		gstat_inc(GSTAT_SKIP_PREEMPT, cpuc);
