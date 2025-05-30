@@ -1451,6 +1451,30 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
+	 * Special-case per-cpu kthreads and scx_layered userspace so that they
+	 * run before preempting layers. This is to guarantee timely execution
+	 * of layered userspace code and give boost to per-cpu kthreads as they
+	 * are usually important for system performance and responsiveness.
+	 */
+	if (((p->flags & PF_KTHREAD) && p->nr_cpus_allowed < nr_possible_cpus) ||
+	    is_scheduler_task(p)) {
+		struct cpumask *layer_cpumask;
+
+		if (layer->kind == LAYER_KIND_CONFINED &&
+		    (layer_cpumask = lookup_layer_cpumask(taskc->layer_id)) &&
+		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
+			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
+
+		if (p->nr_cpus_allowed == 1)
+			taskc->dsq_id = SCX_DSQ_LOCAL;
+		else
+			taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
+
+		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
+		return;
+	}
+
+	/*
 	 * No idle CPU, no preemption, insert into the DSQ. First, update the
 	 * associated LLC and limit the amount of budget that an idling task can
 	 * accumulate to one slice.
@@ -1484,30 +1508,6 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (unlikely(time_after(vtime, vtime_max))) {
 		gstat_inc(GSTAT_FIXUP_VTIME, cpuc);
 		vtime = vtime_max;
-	}
-
-	/*
-	 * Special-case per-cpu kthreads and scx_layered userspace so that they
-	 * run before preempting layers. This is to guarantee timely execution
-	 * of layered userspace code and give boost to per-cpu kthreads as they
-	 * are usually important for system performance and responsiveness.
-	 */
-	if (((p->flags & PF_KTHREAD) && p->nr_cpus_allowed < nr_possible_cpus) ||
-	    is_scheduler_task(p)) {
-		struct cpumask *layer_cpumask;
-
-		if (layer->kind == LAYER_KIND_CONFINED &&
-		    (layer_cpumask = lookup_layer_cpumask(taskc->layer_id)) &&
-		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
-			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
-
-		if (p->nr_cpus_allowed == 1)
-			taskc->dsq_id = SCX_DSQ_LOCAL;
-		else
-			taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
-
-		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
-		return;
 	}
 
 	/*
