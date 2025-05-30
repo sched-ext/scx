@@ -943,8 +943,8 @@ int BPF_PROG(on_cpuhp_exit, u32 cpu, int state, int idx, int ret)
 	event->ts = bpf_ktime_get_ns();
 	event->event.cxp.cpu = cpu;
 	event->event.cxp.state = state;
-	event->event.cxp.state = idx;
-	event->event.cxp.state = ret;
+	event->event.cxp.idx = idx;
+	event->event.cxp.ret = ret;
 	p = (struct task_struct *)bpf_get_current_task();
 	if (p)
 		event->event.cxp.pid = BPF_CORE_READ(p, pid);
