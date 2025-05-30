@@ -1248,6 +1248,10 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 		return false;
 	}
 
+	/* don't preempt highpri kthreads */
+	if ((curr->flags & PF_KTHREAD) && curr->scx.weight > 100)
+		return false;
+
 	/*
 	 * Don't preempt if protection against is in effect. However, open
 	 * layers share CPUs and using the same mechanism between non-preempt
@@ -1465,10 +1469,21 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
 			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
 
-		if (p->nr_cpus_allowed == 1)
+		if (p->nr_cpus_allowed == 1) {
 			taskc->dsq_id = SCX_DSQ_LOCAL;
-		else
+			/*
+			 * For scheduling latency, scx_layered usually depends
+			 * on the fact that a task can be pulled by multiple
+			 * CPUs and an eligible CPU is likely to open up soon.
+			 * However, if @p is a high-priority per-cpu kthread, it
+			 * has to run soon and can only run on one particular
+			 * CPU. Preempt whatever is running on that CPU.
+			 */
+			if (p->scx.weight > 100)
+				enq_flags |= SCX_ENQ_PREEMPT;
+		} else {
 			taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
+		}
 
 		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 		return;
