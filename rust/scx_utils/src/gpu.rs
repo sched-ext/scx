@@ -5,6 +5,7 @@ use crate::{Cpumask, NR_CPU_IDS};
 use nvml_wrapper::bitmasks::InitFlags;
 use nvml_wrapper::enum_wrappers::device::{Clock, TopologyLevel};
 use nvml_wrapper::Nvml;
+use nvml_wrapper_sys::bindings::NVML_AFFINITY_SCOPE_NODE;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -61,7 +62,9 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 continue;
             };
 
-            let cpu_mask = if let Ok(cpu_affinity) = nvidia_gpu.cpu_affinity(*NR_CPU_IDS) {
+            let cpu_mask = if let Ok(cpu_affinity) =
+                nvidia_gpu.cpu_affinity_within_scope(*NR_CPU_IDS, NVML_AFFINITY_SCOPE_NODE)
+            {
                 // Note: nvml returns it as an arch dependent array of integrals
                 #[cfg(target_pointer_width = "32")]
                 let cpu_affinity: Vec<u64> = cpu_affinity
