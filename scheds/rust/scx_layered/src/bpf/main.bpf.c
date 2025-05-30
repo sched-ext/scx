@@ -1220,10 +1220,10 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 			    struct layer *layer, u64 flags)
 {
 	struct cpu_ctx *cpuc, *cand_cpuc, *sib_cpuc = NULL;
-	struct rq *rq = NULL;
-	s32 sib;
-	struct sched_class *ext_sched_class, *idle_sched_class;
+	struct rq *rq;
+	struct task_struct *curr;
 	const struct cpumask *idle_cpumask;
+	s32 sib;
 
 	if (cand >= nr_possible_cpus || !bpf_cpumask_test_cpu(cand, p->cpus_ptr))
 		return false;
@@ -1235,18 +1235,22 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 		return false;
 
 	rq = scx_bpf_cpu_rq(cand);
+	if (!rq)
+		return false;
+	curr = rq->curr;
 
-	ext_sched_class = (struct sched_class *)(unsigned long long)ext_sched_class_addr;
-	idle_sched_class = (struct sched_class *)(unsigned long long)idle_sched_class_addr;
-
-	if (rq && ext_sched_class_addr && idle_sched_class_addr &&
-		(rq->curr->sched_class != ext_sched_class) &&
-		(rq->curr->sched_class != idle_sched_class)) {
+	if (ext_sched_class_addr && idle_sched_class_addr &&
+	    ((u64)curr->sched_class != ext_sched_class_addr) &&
+	    ((u64)curr->sched_class != idle_sched_class_addr)) {
 		if (!(cpuc = lookup_cpu_ctx(-1)))
 			return false;
 		gstat_inc(GSTAT_SKIP_PREEMPT, cpuc);
 		return false;
 	}
+
+	/* don't preempt highpri kthreads */
+	if ((curr->flags & PF_KTHREAD) && curr->scx.weight > 100)
+		return false;
 
 	/*
 	 * Don't preempt if protection against is in effect. However, open
@@ -1451,6 +1455,41 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	/*
+	 * Special-case per-cpu kthreads and scx_layered userspace so that they
+	 * run before preempting layers. This is to guarantee timely execution
+	 * of layered userspace code and give boost to per-cpu kthreads as they
+	 * are usually important for system performance and responsiveness.
+	 */
+	if (((p->flags & PF_KTHREAD) && p->nr_cpus_allowed < nr_possible_cpus) ||
+	    is_scheduler_task(p)) {
+		struct cpumask *layer_cpumask;
+
+		if (layer->kind == LAYER_KIND_CONFINED &&
+		    (layer_cpumask = lookup_layer_cpumask(taskc->layer_id)) &&
+		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
+			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
+
+		if (p->nr_cpus_allowed == 1) {
+			taskc->dsq_id = SCX_DSQ_LOCAL;
+			/*
+			 * For scheduling latency, scx_layered usually depends
+			 * on the fact that a task can be pulled by multiple
+			 * CPUs and an eligible CPU is likely to open up soon.
+			 * However, if @p is a high-priority per-cpu kthread, it
+			 * has to run soon and can only run on one particular
+			 * CPU. Preempt whatever is running on that CPU.
+			 */
+			if (p->scx.weight > 100)
+				enq_flags |= SCX_ENQ_PREEMPT;
+		} else {
+			taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
+		}
+
+		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
+		return;
+	}
+
+	/*
 	 * No idle CPU, no preemption, insert into the DSQ. First, update the
 	 * associated LLC and limit the amount of budget that an idling task can
 	 * accumulate to one slice.
@@ -1484,30 +1523,6 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	if (unlikely(time_after(vtime, vtime_max))) {
 		gstat_inc(GSTAT_FIXUP_VTIME, cpuc);
 		vtime = vtime_max;
-	}
-
-	/*
-	 * Special-case per-cpu kthreads and scx_layered userspace so that they
-	 * run before preempting layers. This is to guarantee timely execution
-	 * of layered userspace code and give boost to per-cpu kthreads as they
-	 * are usually important for system performance and responsiveness.
-	 */
-	if (((p->flags & PF_KTHREAD) && p->nr_cpus_allowed < nr_possible_cpus) ||
-	    is_scheduler_task(p)) {
-		struct cpumask *layer_cpumask;
-
-		if (layer->kind == LAYER_KIND_CONFINED &&
-		    (layer_cpumask = lookup_layer_cpumask(taskc->layer_id)) &&
-		    !bpf_cpumask_test_cpu(task_cpu, layer_cpumask))
-			lstat_inc(LSTAT_AFFN_VIOL, layer, cpuc);
-
-		if (p->nr_cpus_allowed == 1)
-			taskc->dsq_id = SCX_DSQ_LOCAL;
-		else
-			taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
-
-		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
-		return;
 	}
 
 	/*
