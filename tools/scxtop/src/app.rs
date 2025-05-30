@@ -1882,6 +1882,15 @@ impl<'a> App<'a> {
                 ),
                 Style::default(),
             )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "For bug reporting and project updates, visit:",
+                Style::default(),
+            )),
+            Line::from(Span::styled(
+                "https://github.com/sched-ext/scx",
+                Style::default(),
+            )),
         ];
         frame.render_widget(
             Paragraph::new(text)
@@ -1942,7 +1951,7 @@ impl<'a> App<'a> {
             .title_alignment(Alignment::Center)
             .title(
                 format!(
-                    "Type to filter list, use ▲ ▼  ({}/{}) to scroll, {} to select",
+                    "Type to filter list, use ▲ ▼  ({}/{}) to scroll, {} to select, Esc to exit",
                     self.config.active_keymap.action_keys_string(Action::PageUp),
                     self.config
                         .active_keymap
