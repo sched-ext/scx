@@ -25,7 +25,8 @@ impl Search {
             .collect()
     }
 
-    /* We'll want check fuzzily in three ways using the following scoring system:
+    /**
+     * We'll want check fuzzily in three ways using the following scoring system:
      * 1: Is it a substring (contains)? 100 points
      * 2: Is it contained in the string but not consecutive (contains_spread)? 100 - (length of input spread out - input length)
      * 3: If we take out one letter, is it now (1) or (2) - (contains_with_typo)? 75 - (length of input spread out - input length)
@@ -70,7 +71,8 @@ impl Search {
     }
 }
 
-/* Returns Some(n) if all characters of 'pattern' appear in order within 'word',
+/**
+ * Returns Some(n) if all characters of 'pattern' appear in order within 'word',
  * allowing for other characters in between. 'n' is the number of extra characters present.
  * Returns None if the pattern does not appear or does not appear in order.
  *
@@ -83,7 +85,14 @@ fn contains_spread(word: &str, pattern: &str) -> Option<u32> {
     }
 
     let word_bytes = word.as_bytes();
+    let word_len = word_bytes.len();
     let pattern_bytes = pattern.as_bytes();
+    let pattern_len = pattern_bytes.len();
+
+    if word_len < pattern_len {
+        // Pattern cannot be contained in a shorter word
+        return None;
+    }
 
     let mut start = 0;
     let mut pat_idx = 0;
@@ -96,9 +105,9 @@ fn contains_spread(word: &str, pattern: &str) -> Option<u32> {
 
             pat_idx += 1;
 
-            if pat_idx == pattern_bytes.len() {
+            if pat_idx == pattern_len {
                 let total_len = i - start + 1;
-                return Some((total_len - pattern_bytes.len()) as u32);
+                return Some((total_len - pattern_len) as u32);
             }
         }
     }
