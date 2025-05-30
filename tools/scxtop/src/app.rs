@@ -1303,8 +1303,6 @@ impl<'a> App<'a> {
             frame.render_widget(block, area);
             return Ok(());
         }
-        let dsq_constraints = vec![Constraint::Percentage(1), Constraint::Percentage(99)];
-        let dsqs_verticle = Layout::vertical(dsq_constraints).split(area);
         let sample_rate = self.skel.maps.data_data.sample_rate;
 
         let dsq_global_iter = self
@@ -1356,7 +1354,7 @@ impl<'a> App<'a> {
             .bar_gap(0)
             .bar_width(1);
 
-        frame.render_widget(barchart, dsqs_verticle[1]);
+        frame.render_widget(barchart, area);
         Ok(())
     }
 
