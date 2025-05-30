@@ -670,6 +670,10 @@ struct Opts {
     /// Set the path for pinning the task hint map.
     #[clap(long, default_value = "")]
     task_hint_map: String,
+
+    /// Print the config (after template expansion) and exit.
+    #[clap(long, default_value = "false")]
+    print_and_exit: bool,
 }
 
 fn read_total_cpu(reader: &procfs::ProcReader) -> Result<procfs::CpuStat> {
@@ -3095,6 +3099,11 @@ fn main() -> Result<()> {
         if common.idle_smt.is_some() {
             warn!("Layer {} has deprecated flag \"idle_smt\"", &spec.name);
         }
+    }
+
+    if opts.print_and_exit {
+        println!("specs={}", serde_json::to_string_pretty(&layer_config)?);
+        return Ok(());
     }
 
     debug!("specs={}", serde_json::to_string_pretty(&layer_config)?);
