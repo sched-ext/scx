@@ -487,7 +487,6 @@ static s32 pick_idle_affinitized_cpu(struct task_struct *p, task_ctx *taskc,
 {
 	const struct cpumask *idle_smtmask, *idle_cpumask;
 	struct mask_wrapper *wrapper;
-	struct cpu_ctx *prev_cpuc;
 	struct bpf_cpumask *mask;
 	struct llc_ctx *llcx;
 	s32 cpu = prev_cpu;
@@ -495,8 +494,7 @@ static s32 pick_idle_affinitized_cpu(struct task_struct *p, task_ctx *taskc,
 	idle_cpumask = scx_bpf_get_idle_cpumask();
 	idle_smtmask = scx_bpf_get_idle_smtmask();
 
-	if (!(prev_cpuc = lookup_cpu_ctx(prev_cpu)) ||
-	    !(llcx = lookup_llc_ctx(prev_cpuc->llc_id)) ||
+	if (!(llcx = lookup_llc_ctx(taskc->llc_id)) ||
 	    !llcx->cpumask)
 		goto found_cpu;
 
