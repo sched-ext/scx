@@ -569,7 +569,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 			 s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
 	const struct cpumask *idle_smtmask, *idle_cpumask;
-	struct cpu_ctx *prev_cpuc;
 	struct llc_ctx *llcx;
 	bool interactive = is_interactive(taskc);
 	s32 cpu = prev_cpu;
@@ -596,8 +595,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		goto found_cpu;
 	}
 
-	if (!(prev_cpuc = lookup_cpu_ctx(prev_cpu)) ||
-	    !(llcx = lookup_llc_ctx(prev_cpuc->llc_id)) ||
+	if (!(llcx = lookup_llc_ctx(taskc->llc_id)) ||
 	    !llcx->cpumask)
 		goto found_cpu;
 
