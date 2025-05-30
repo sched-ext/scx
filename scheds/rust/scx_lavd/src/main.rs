@@ -950,7 +950,7 @@ impl<'a> Scheduler<'a> {
 
         let _ = match profile {
             PowerProfile::Performance => self.set_power_profile(LAVD_PM_PERFORMANCE),
-            PowerProfile::Balanced => self.set_power_profile(LAVD_PM_BALANCED),
+            PowerProfile::Balanced { .. } => self.set_power_profile(LAVD_PM_BALANCED),
             PowerProfile::Powersave => self.set_power_profile(LAVD_PM_POWERSAVE),
             PowerProfile::Unknown => {
                 // We don't know how to handle an unknown energy profile,
