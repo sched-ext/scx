@@ -123,7 +123,7 @@ The above creates a client instance. Let's query the statistics:
 
 ```rust
     let resp = client.request::<ClusterStats>("stat", vec![]);
-    println!("{:#?}", &resp);
+    println!("{:#?}", resp);
 ```
 
 The above is equivalent to querying the `top` target:
@@ -131,7 +131,7 @@ The above is equivalent to querying the `top` target:
 ```rust
     println!("\n===== Requesting \"stat\" with \"target\"=\"top\":");
     let resp = client.request::<ClusterStats>("stat", vec![("target".into(), "top".into())]);
-    println!("{:#?}", &resp);
+    println!("{:#?}", resp);
 ```
 
 If `("args", BTreeMap<String, String>)` is passed in as a part of the

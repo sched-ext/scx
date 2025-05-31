@@ -806,7 +806,7 @@ impl<'a> Scheduler<'a> {
             nr_active: tx.nr_active,
         }) {
             Ok(()) | Err(TrySendError::Full(_)) => 0,
-            Err(e) => panic!("failed to send on intrspc_tx ({})", &e),
+            Err(e) => panic!("failed to send on intrspc_tx ({})", e),
         }
     }
 

@@ -297,7 +297,7 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
         req_ch.send(StatsReq::NewSampler(tid))?;
         match res_ch.recv()? {
             StatsRes::Ack => {}
-            res => bail!("invalid response: {:?}", &res),
+            res => bail!("invalid response: {:?}", res),
         }
 
         let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
@@ -308,7 +308,7 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
                 let stats = match res_ch.recv()? {
                     StatsRes::SysStats(v) => v,
                     StatsRes::Bye => bail!("preempted by another sampler"),
-                    res => bail!("invalid response: {:?}", &res),
+                    res => bail!("invalid response: {:?}", res),
                 };
 
                 stats.to_json()
@@ -322,7 +322,7 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
             req_ch.send(StatsReq::NewSampler(tid))?;
             match res_ch.recv()? {
                 StatsRes::Ack => {}
-                res => bail!("invalid response: {:?}", &res),
+                res => bail!("invalid response: {:?}", res),
             }
 
             let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
@@ -333,7 +333,7 @@ pub fn server_data(nr_cpus_onln: u64) -> StatsServerData<StatsReq, StatsRes> {
                     let samples = match res_ch.recv()? {
                         StatsRes::SchedSamples(v) => v,
                         StatsRes::Bye => bail!("preempted by another sampler"),
-                        res => bail!("invalid response: {:?}", &res),
+                        res => bail!("invalid response: {:?}", res),
                     };
 
                     samples.to_json()

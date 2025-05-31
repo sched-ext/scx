@@ -256,7 +256,7 @@ impl StatsFieldAttrs {
                         }
                         v => Err(Error::new(
                             attr.span(),
-                            format!("Not a field attribute: {:?}", &v),
+                            format!("Not a field attribute: {:?}", v),
                         ))?,
                     }
                 }

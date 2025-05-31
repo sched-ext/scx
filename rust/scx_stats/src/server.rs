@@ -560,16 +560,16 @@ where
                     let (req_pair, res_pair) = ChannelPair::<Req, Res>::bidi();
                     match add_req.send(res_pair) {
                         Ok(()) => debug!("sent new channel to proxy"),
-                        Err(e) => warn!("StatsServer::proxy() failed ({})", &e),
+                        Err(e) => warn!("StatsServer::proxy() failed ({})", e),
                     }
 
                     spawn(move || {
                         if let Err(e) = Self::serve(stream, data, req_pair, exit) {
-                            warn!("stat communication errored ({})", &e);
+                            warn!("stat communication errored ({})", e);
                         }
                     });
                 }
-                Err(e) => warn!("failed to accept stat connection ({})", &e),
+                Err(e) => warn!("failed to accept stat connection ({})", e),
             }
         }
     }

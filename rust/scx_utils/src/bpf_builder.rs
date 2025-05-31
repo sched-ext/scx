@@ -473,7 +473,7 @@ mod tests {
         unsafe { std::env::set_var("OUT_DIR", td.path()) };
 
         let res = super::BpfBuilder::new();
-        assert!(res.is_ok(), "Failed to create BpfBuilder ({:?})", &res);
+        assert!(res.is_ok(), "Failed to create BpfBuilder ({:?})", res);
     }
 
     #[test]
