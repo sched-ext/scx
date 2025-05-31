@@ -64,7 +64,7 @@ pub struct SysStats {
     #[stat(desc = "% of balanced mode")]
     pub pc_balanced: f64,
 
-    #[stat(desc = "% of powersave powersave")]
+    #[stat(desc = "% of powersave mode")]
     pub pc_powersave: f64,
 }
 
@@ -133,7 +133,7 @@ pub struct SchedSample {
     #[stat(desc = "Task name")]
     pub comm: String,
     #[stat(
-        desc = "LR: 'L'atency-critical or 'R'egular, HI: performance-'H'ungry or performance-'I'nsensitive, BT: 'B'ig or li'T'tle, EG: 'E'ligigle or 'G'reedy, PN: 'P'reempting or 'N'ot"
+        desc = "LR: 'L'atency-critical or 'R'egular, HI: performance-'H'ungry or performance-'I'nsensitive, BT: 'B'ig or li'T'tle, EG: 'E'ligible or 'G'reedy, PN: 'P'reempting or 'N'ot"
     )]
     pub stat: String,
     #[stat(desc = "CPU id where this task is scheduled on")]
