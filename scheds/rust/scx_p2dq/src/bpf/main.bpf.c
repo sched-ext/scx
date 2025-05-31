@@ -89,6 +89,7 @@ const u64 lb_backoff_ns = 5LLU * NSEC_PER_MSEC;
 
 static u32 llc_lb_offset = 1;
 
+u64 llc_ids[MAX_LLCS];
 u64 cpu_llc_ids[MAX_CPUS];
 u64 cpu_node_ids[MAX_CPUS];
 u64 big_core_ids[MAX_CPUS];
@@ -346,51 +347,6 @@ static bool keep_running(struct cpu_ctx *cpuc, struct llc_ctx *llcx, struct task
 	p->scx.slice = slice_ns;
 	stat_inc(P2DQ_STAT_KEEP);
 	return true;
-}
-
-static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *cur_llcx, struct llc_ctx *left,
-					struct llc_ctx *right)
-{
-	s32 cur_queued = 0;
-	u64 left_load = 0, right_load = 0;
-	int i;
-
-	if (!left || !right)
-		return NULL;
-
-	u64 now = scx_bpf_now();
-	if (now - cur_llcx->last_period_ns < lb_backoff_ns)
-		return NULL;
-
-	u64 max_possible_load = (now - cur_llcx->last_period_ns) * cur_llcx->nr_cpus;
-	u64 cur_load = cur_llcx->load;
-	u64 scaled_load = (100 * cur_load) / max_possible_load;
-
-	// If over the load balancing utilization busy watermark don't load
-	// balance.
-	if (scaled_load > dispatch_lb_busy)
-		return NULL;
-
-	bpf_for(i, 0, nr_llcs) {
-		if (i >= nr_dsqs_per_llc || i < 0)
-			continue;
-
-		u64 cur_dsq_id = *MEMBER_VPTR(cur_llcx->dsqs, [i]);
-		cur_queued += scx_bpf_dsq_nr_queued(cur_dsq_id);
-	}
-
-	if (min_nr_queued_pick2 > 0 && cur_queued < min_nr_queued_pick2)
-		return NULL;
-
-	left_load = left->load;
-	right_load = right->load;
-
-	// If the current LLCs has more load don't try to pick2.
-	cur_load += (lb_slack_factor * cur_load) / 100;
-	if ((nr_llcs > 2 && (cur_load > left_load || cur_load > right_load)))
-		return NULL;
-
-	return left_load < right_load ? right: left;
 }
 
 static s32 pick_two_cpu(struct llc_ctx *cur_llcx, task_ctx *taskc,
@@ -941,9 +897,16 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 	// racy, but don't care
 	if (p->scx.dsq_vtime > llcx->vtime) {
 		__sync_val_compare_and_swap(&llcx->vtime, llcx->vtime, p->scx.dsq_vtime);
-	} else {
-		p->scx.dsq_vtime = llcx->vtime;
 	}
+
+	// For non affinitized tasks update the vtime if it is larger than the
+	// current LLC vtime. Affinitized tasks are direct dispatched and don't
+	// strictly follow vtime.
+	if ((taskc->dsq_index >= 0 && taskc->dsq_index < nr_dsqs_per_llc) &&
+	    taskc->all_cpus &&
+	    p->scx.dsq_vtime > llcx->dsq_max_vtime[taskc->dsq_index])
+		llcx->dsq_max_vtime[taskc->dsq_index] = p->scx.dsq_vtime;
+
 
 	// If the task is running in the least interactive DSQ, bump the
 	// frequency.
@@ -1032,11 +995,6 @@ static __always_inline int dispatch_cpu(u64 dsq_id, s32 cpu, struct llc_ctx *llc
 	struct task_struct *p;
 	int dispatched = 0;
 
-	if ((max_dsq_pick2 && dsq_index > 1) ||
-	    (min_nr_queued_pick2 > 0 &&
-	    scx_bpf_dsq_nr_queued(dsq_id) < min_nr_queued_pick2))
-		return -EINVAL;
-
 	bpf_for_each(scx_dsq, p, dsq_id, 0) {
 		/*
 		 * This is a workaround for the BPF verifier's pointer
@@ -1065,47 +1023,122 @@ static __always_inline int dispatch_cpu(u64 dsq_id, s32 cpu, struct llc_ctx *llc
 	return dispatched;
 }
 
-
-static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, struct cpu_ctx *cpuc)
+static __always_inline bool consume_llc_compat(struct llc_ctx *cur_llcx, struct llc_ctx *llcx)
 {
-	struct llc_ctx *llcx, *left, *right;
 	u64 dsq_id;
 	int i;
 
+	if (dispatch_lb_interactive &&
+	    scx_bpf_dsq_move_to_local(llcx->dsqs[0])) {
+			stat_inc(P2DQ_STAT_DISPATCH_PICK2);
+			return true;
+	}
+
+	if (llcx->load > cur_llcx->load) {
+		bpf_for(i, 1 , nr_dsqs_per_llc) {
+			dsq_id = llcx->dsqs[nr_dsqs_per_llc - i];
+			if (scx_bpf_dsq_move_to_local(dsq_id)) {
+				stat_inc(P2DQ_STAT_DISPATCH_PICK2);
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+static __always_inline bool consume_llc(struct llc_ctx *cur_llcx, struct llc_ctx *llcx, s32 cpu)
+{
+	u64 dsq_id;
+	int i;
+
+	if (!cur_llcx || !llcx || !bpf_ksym_exists(scx_bpf_dsq_move))
+		return false;
+
+	if (dispatch_lb_interactive &&
+	    scx_bpf_dsq_move_to_local(llcx->dsqs[0])) {
+		stat_inc(P2DQ_STAT_DISPATCH_PICK2);
+		return true;
+	}
+
+	bpf_for(i, 1, nr_dsqs_per_llc) {
+		dsq_id = llcx->dsqs[nr_dsqs_per_llc - i];
+		if (dispatch_cpu(dsq_id, cpu, llcx, nr_dsqs_per_llc - i) > 0)
+			return true;
+	}
+
+	return false;
+}
+
+
+static __always_inline int dispatch_pick_two(s32 cpu, struct llc_ctx *cur_llcx, struct cpu_ctx *cpuc)
+{
+	struct llc_ctx *first, *second, *left, *right;
+	int i;
+
 	// If on a single LLC there isn't anything left to try.
-	if (nr_llcs == 1 || dispatch_pick2_disable)
+	if (nr_llcs == 1 || dispatch_pick2_disable || nr_llcs >= MAX_LLCS)
 		return -EINVAL;
 
-	// Special case when two llcs are present
-	left = nr_llcs == 2 ? lookup_llc_ctx(0) : rand_llc_ctx();
-	right = nr_llcs == 2 ? lookup_llc_ctx(1) : rand_llc_ctx();
 
-	// Last ditch effort try consuming from the most loaded DSQ.
-	llcx = pick_two_llc_ctx(cur_llcx, left, right);
-	if (!llcx)
+	if (min_nr_queued_pick2 > 0) {
+		u32 cur_queued = 0;
+		bpf_for(i, 0, nr_llcs) {
+			if (i >= nr_dsqs_per_llc || i < 0)
+				continue;
+
+			u64 cur_dsq_id = *MEMBER_VPTR(cur_llcx->dsqs, [i]);
+			cur_queued += scx_bpf_dsq_nr_queued(cur_dsq_id);
+		}
+		if (cur_queued < min_nr_queued_pick2)
+			return -EINVAL;
+	}
+
+	if (lb_backoff_ns > 0) {
+		u64 now = scx_bpf_now();
+		if (now - cur_llcx->last_period_ns < lb_backoff_ns)
+			return -EINVAL;
+	}
+
+
+	/*
+	 * For pick two load balancing we randomly choose two LLCs. We then
+	 * first try to consume from the LLC with the largest load. If we are
+	 * unable to consume from the first LLC then the second LLC is consumed
+	 * from. This yields better work conservation on machines with a large
+	 * number of LLCs.
+	 */
+	left = rand_llc_ctx();
+	right = rand_llc_ctx();
+
+	if (!left || !right)
 		return -EINVAL;
+
+	if (right->load > left->load) {
+		first = right;
+		second = left;
+	} else {
+		first = left;
+		second = right;
+	}
 
 	// The compat macro doesn't work properly, so on older kernels best
 	// effort by moving to local directly instead of iterating.
 	if (!bpf_ksym_exists(scx_bpf_dsq_move)) {
-		// Start with least interactive DSQs to avoid migrating
-		// interactive tasks.
-		bpf_for(i, dispatch_lb_interactive ? 0 : 1, nr_dsqs_per_llc) {
-			if (scx_bpf_dsq_move_to_local(llcx->dsqs[nr_dsqs_per_llc - i])) {
-				stat_inc(P2DQ_STAT_DISPATCH_PICK2);
-				return 0;
-			}
-		}
-		return 0;
-	}
-
-	// Then migrate least interactive DSQs to find the most throughput
-	// bound tasks.
-	bpf_for(i, dispatch_lb_interactive ? 0 : 1, nr_dsqs_per_llc) {
-		dsq_id = llcx->dsqs[nr_dsqs_per_llc - i];
-		if (dispatch_cpu(dsq_id, cpu, llcx, nr_dsqs_per_llc - i) > 0)
+		if (consume_llc_compat(cur_llcx, first))
+			return 0;
+		if (consume_llc_compat(cur_llcx, second))
 			return 0;
 	}
+
+	if (first->load > cur_llcx->load &&
+	    consume_llc(cur_llcx, first, cpu))
+		return 0;
+
+	if (second->load > cur_llcx->load &&
+	    consume_llc(cur_llcx, second, cpu))
+		return 0;
+
 	return 0;
 }
 
@@ -1126,6 +1159,7 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		return;
 	}
 
+
 	u64 min_vtime = llcx->vtime;
 	bpf_for(i, 0, nr_dsqs_per_llc) {
 		if (llcx->dsq_max_vtime[i] < min_vtime) {
@@ -1134,18 +1168,22 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		}
 	}
 
-	if (scx_bpf_dsq_move_to_local(dsq_id))
+	if (dsq_id != 0 && scx_bpf_dsq_move_to_local(dsq_id)) {
+		stat_inc(P2DQ_STAT_KEEP);
 		return;
+	}
 
 	// Try the last DSQ, this is to keep tasks sticky to their dsq type.
-	if (cpuc->dsq_index >= 0 && cpuc->dsq_index < nr_dsqs_per_llc &&
-	    scx_bpf_dsq_move_to_local(cpuc->dsqs[cpuc->dsq_index]))
-		return;
+	if (cpuc->dsq_index >= 0 && cpuc->dsq_index < nr_dsqs_per_llc) {
+		dsq_id = cpuc->dsqs[cpuc->dsq_index];
+		if (dsq_id != 0 && scx_bpf_dsq_move_to_local(dsq_id))
+			return;
+	}
 
 	bpf_for(i, 0, nr_dsqs_per_llc) {
+		dsq_id = llcx->dsqs[i];
 		if (i != cpuc->dsq_index &&
-		    i != dsq_id &&
-		    scx_bpf_dsq_move_to_local(cpuc->dsqs[i]))
+		    scx_bpf_dsq_move_to_local(dsq_id))
 		    return;
 	}
 
@@ -1206,7 +1244,6 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 		return -EINVAL;
 	}
 
-	taskc->dsq_id = SCX_DSQ_INVALID;
 	taskc->llc_id = cpuc->llc_id;
 	taskc->node_id = cpuc->node_id;
 	taskc->dsq_index = init_dsq_index;
@@ -1214,6 +1251,13 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 	taskc->slice_ns = dsq_time_slice(init_dsq_index);
 	taskc->all_cpus = p->cpus_ptr == &p->cpus_mask && p->nr_cpus_allowed == nr_cpus;
 	p->scx.dsq_vtime = llcx->vtime;
+
+	// When a task is initialized set the DSQ id to invalid. This causes
+	// the task to be randomized on a LLC.
+	if (taskc->all_cpus)
+		taskc->dsq_id = SCX_DSQ_INVALID;
+	else
+		taskc->dsq_id = llcx->dsqs[init_dsq_index];
 
 	return 0;
 }
@@ -1223,10 +1267,11 @@ void BPF_STRUCT_OPS(p2dq_exit_task, struct task_struct *p, struct scx_exit_task_
 	scx_task_free(p);
 }
 
-static int init_llc(u32 llc_id)
+static int init_llc(u32 llc_index)
 {
 	struct bpf_cpumask *cpumask, *big_cpumask, *little_cpumask, *node_cpumask;
 	struct llc_ctx *llcx;
+	u32 llc_id = llc_ids[llc_index];
 
 	llcx = bpf_map_lookup_elem(&llc_ctxs, &llc_id);
 	if (!llcx) {
@@ -1235,7 +1280,8 @@ static int init_llc(u32 llc_id)
 	}
 
 	llcx->vtime = 0;
-	llcx->id = llc_id;
+	llcx->id = *MEMBER_VPTR(llc_ids, [llc_index]);
+	llcx->index = llc_index;
 	llcx->nr_cpus = 0;
 
 	cpumask = bpf_cpumask_create();
@@ -1402,21 +1448,30 @@ static s32 init_cpu(int cpu)
 static bool load_balance_timer(void)
 {
 	struct llc_ctx *llcx, *lb_llcx;
-	int llc_id, j;
+	int j;
 	u64 ideal_sum, load_sum = 0, interactive_sum = 0;
+	u32 llc_id, llc_index, lb_llc_index, lb_llc_id;
 
-	if (nr_llcs == 1)
-		return false;
+	bpf_for(llc_index, 0, nr_llcs) {
+		// verifier
+		if (llc_index >= MAX_LLCS)
+			break;
 
-	bpf_for(llc_id, 0, nr_llcs) {
+		llc_id = *MEMBER_VPTR(llc_ids, [llc_index]);
 		if (!(llcx = lookup_llc_ctx(llc_id))) {
-			scx_bpf_error("failed to lookup llc %d", llc_id);
+			scx_bpf_error("failed to lookup llc");
 			return false;
 		}
 
-		u32 lb_llc_id = (llc_id + llc_lb_offset) % nr_llcs;
+		lb_llc_index = (llc_index + llc_lb_offset) % nr_llcs;
+		if (lb_llc_index < 0 || lb_llc_index >= MAX_LLCS) {
+			scx_bpf_error("failed to lookup lb_llc");
+			return false;
+		}
+
+		lb_llc_id = *MEMBER_VPTR(llc_ids, [lb_llc_index]);
 		if (!(lb_llcx = lookup_llc_ctx(lb_llc_id))) {
-			scx_bpf_error("failed to lookup lb llc %d", lb_llc_id);
+			scx_bpf_error("failed to lookup lb llc");
 			return false;
 		}
 
@@ -1466,13 +1521,13 @@ static bool load_balance_timer(void)
 				dsq_time_slices[j] = dsq_time_slices[0] << j << dsq_shift;
 			}
 		}
-
 	}
 
 
 reset_load:
 
-	bpf_for(llc_id, 0, nr_llcs) {
+	bpf_for(llc_index, 0, nr_llcs) {
+		llc_id = *MEMBER_VPTR(llc_ids, [llc_index]);
 		if (!(llcx = lookup_llc_ctx(llc_id)))
 			return false;
 
@@ -1570,7 +1625,7 @@ s32 static start_timers(void)
 
 static __always_inline s32 p2dq_init_impl()
 {
-	int i, ret;
+	int i, j, ret;
 	struct bpf_cpumask *tmp_cpumask, *tmp_big_cpumask;
 
 	tmp_big_cpumask = bpf_cpumask_create();
@@ -1620,13 +1675,14 @@ static __always_inline s32 p2dq_init_impl()
 	// Create DSQs for the LLCs
 	struct llc_ctx *llcx;
 	u64 dsq_id;
-	int llc_id;
-	bpf_for(llc_id, 0, nr_llcs) {
+	u32 llc_id, llc_index;
+	bpf_for(llc_index, 0, nr_llcs) {
+		llc_id = *MEMBER_VPTR(llc_ids, [llc_index]);
 		if (!(llcx = lookup_llc_ctx(llc_id)))
 			return -EINVAL;
 
 		bpf_for(i, 0, nr_dsqs_per_llc) {
-			dsq_id = (llc_id << nr_dsqs_per_llc) | i;
+			dsq_id = ((llc_index << nr_dsqs_per_llc) | i) + 1;
 			dbg("CFG creating DSQ[%d][%llu] slice_us %llu for LLC[%u]",
 			    i, dsq_id, dsq_time_slice(i), llc_id);
 			ret = scx_bpf_create_dsq(dsq_id, llcx->node_id);
@@ -1655,8 +1711,10 @@ static __always_inline s32 p2dq_init_impl()
 			bpf_rcu_read_unlock();
 		}
 
-		bpf_for(dsq_id, 0, nr_dsqs_per_llc) {
-			cpuc->dsqs[dsq_id] = llcx->dsqs[dsq_id];
+		bpf_for(j, 0, nr_dsqs_per_llc) {
+			cpuc->dsqs[j] = llcx->dsqs[j];
+			dbg("CFG CPU[%d]DSQ[%d] %llu",
+			    i, j, cpuc->dsqs[j]);
 		}
 	}
 
