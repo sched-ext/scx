@@ -1363,10 +1363,19 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 	 * When @p becomes under the SCX control (e.g., being forked), @p's
 	 * context data is initialized. We can sleep in this function and the
 	 * following will automatically use GFP_KERNEL.
+	 * 
+	 * Return 0 on success.
+	 * Return -ESRCH if @p is invalid.
+	 * Return -ENOMEM if context allocation fails.
 	 */
+	if (!p){
+		scx_bpf_error("NULL task_struct pointer received");
+		return -ESRCH;
+	}
+	
 	taskc = bpf_task_storage_get(&task_ctx_stor, p, 0,
 				     BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!taskc || !p) {
+	if (!taskc) {
 		scx_bpf_error("task_ctx_stor first lookup failed");
 		return -ENOMEM;
 	}
