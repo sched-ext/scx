@@ -98,9 +98,15 @@ impl SysStats {
             Self::format_header(w)?;
         }
 
+        let color = if self.mseq % 2 == 0 {
+            "\x1b[90m" // Dark gray for even mseq
+        } else {
+            "\x1b[37m" // white for odd mseq
+        };
+
         writeln!(
             w,
-            "| {:8} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |",
+            "{color}| {:8} | {:9} | {:9} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:8} | {:11} | {:12} | {:12} | {:12} |\x1b[0m",
             self.mseq,
             self.nr_queued_task,
             self.nr_active,
