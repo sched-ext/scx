@@ -887,8 +887,10 @@ int wd40_setup(void)
 			return ret;
 	}
 
-	if (debug)
+	if (debug) {
 		topo_print();
+		topo_print_by_level();
+	}
 
 	return 0;
 }
