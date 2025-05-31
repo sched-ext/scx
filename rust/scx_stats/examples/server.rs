@@ -55,7 +55,7 @@ fn main() {
             Box::new(move |_args, (tx, rx)| {
                 let id = current().id();
                 let res = tx.send(id);
-                debug!("Sendt {:?} {:?}", id, &res);
+                debug!("Sendt {:?} {:?}", id, res);
                 let res = rx.recv();
                 debug!("Recevied {:?}", res);
                 stats.to_json()
@@ -75,7 +75,7 @@ fn main() {
     spawn(move || {
         while let Ok(id) = rx.recv() {
             if let Err(e) = tx.send(format!("hello {:?}", &id)) {
-                warn!("Server channel errored ({:?})", &e);
+                warn!("Server channel errored ({:?})", e);
                 break;
             }
         }

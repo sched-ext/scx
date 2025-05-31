@@ -648,7 +648,7 @@ pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
         req_ch.send(StatsReq::Hello(tid))?;
         let mut stats = Some(match res_ch.recv()? {
             StatsRes::Hello(v) => v,
-            res => bail!("invalid response to Hello: {:?}", &res),
+            res => bail!("invalid response to Hello: {:?}", res),
         });
 
         let read: Box<dyn StatsReader<StatsReq, StatsRes>> =
@@ -656,7 +656,7 @@ pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
                 req_ch.send(StatsReq::Refresh(tid, stats.take().unwrap()))?;
                 let (new_stats, sys_stats) = match res_ch.recv()? {
                     StatsRes::Refreshed(v) => v,
-                    res => bail!("invalid response to Refresh: {:?}", &res),
+                    res => bail!("invalid response to Refresh: {:?}", res),
                 };
                 stats = Some(new_stats);
                 sys_stats.to_json()
@@ -669,7 +669,7 @@ pub fn server_data() -> StatsServerData<StatsReq, StatsRes> {
         req_ch.send(StatsReq::Bye(current().id())).unwrap();
         match res_ch.recv().unwrap() {
             StatsRes::Bye => {}
-            res => panic!("invalid response to Bye: {:?}", &res),
+            res => panic!("invalid response to Bye: {:?}", res),
         }
     });
 

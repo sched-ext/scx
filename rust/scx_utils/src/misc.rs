@@ -46,12 +46,12 @@ where
                 Ok(v) => v,
                 Err(e) => match e.downcast_ref::<std::io::Error>() {
                     Some(ioe) => {
-                        info!("Connection to stats_server failed ({})", &ioe);
+                        info!("Connection to stats_server failed ({})", ioe);
                         sleep(Duration::from_secs(1));
                         break;
                     }
                     None => {
-                        warn!("error on handling stats_server result {}", &e);
+                        warn!("error on handling stats_server result {}", e);
                         sleep(Duration::from_secs(1));
                         break;
                     }
