@@ -388,11 +388,9 @@ static struct llc_ctx *pick_two_llc_ctx(struct llc_ctx *cur_llcx, struct llc_ctx
 	// If the current LLCs has more load don't try to pick2.
 	cur_load += (lb_slack_factor * cur_load) / 100;
 	if ((nr_llcs > 2 && (cur_load > left_load || cur_load > right_load)))
-	    return NULL;
+		return NULL;
 
-    	if (left_load < right_load)
-		return right;
-	return left;
+	return left_load < right_load ? right: left;
 }
 
 static s32 pick_two_cpu(struct llc_ctx *cur_llcx, task_ctx *taskc,
@@ -425,9 +423,8 @@ static s32 pick_two_cpu(struct llc_ctx *cur_llcx, task_ctx *taskc,
 	left = rand_llc_ctx();
 	right = rand_llc_ctx();
 
-	if (!left || !right) {
+	if (!left || !right)
 		return -EINVAL;
-	}
 
 	// last ditch effort if same are picked.
 	if (unlikely(left->id == right->id)) {
@@ -772,11 +769,11 @@ static __always_inline s32 p2dq_select_cpu_impl(struct task_struct *p, s32 prev_
 	if (!(taskc = lookup_task_ctx(p)))
 		return prev_cpu;
 
-	if (!taskc->all_cpus) {
+	if (!taskc->all_cpus)
 		cpu = pick_idle_affinitized_cpu(p, taskc, prev_cpu, &is_idle);
-	} else {
+	else
 		cpu = pick_idle_cpu(p, taskc, prev_cpu, wake_flags, &is_idle);
-	}
+
 	if (is_idle) {
 		stat_inc(P2DQ_STAT_IDLE);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, taskc->slice_ns, 0);
