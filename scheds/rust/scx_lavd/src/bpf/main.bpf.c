@@ -977,8 +977,10 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 * Clear the accumulated runtime.
 	 */
 	p_taskc = get_task_ctx(p);
-	if (!p_taskc)
+	if (!p_taskc) {
+		scx_bpf_error("Failed to lookup task_ctx for task");
 		return;
+	}
 	p_taskc->acc_runtime = 0;
 
 	/*
@@ -1028,8 +1030,10 @@ void BPF_STRUCT_OPS(lavd_running, struct task_struct *p)
 	 */
 	cpuc = get_cpu_ctx_task(p);
 	taskc = get_task_ctx(p);
-	if (!cpuc || !taskc)
+	if (!cpuc || !taskc) {
+		scx_bpf_error("Failed to lookup context for task %d", p->pid);
 		return;
+	}
 
 	update_stat_for_running(p, taskc, cpuc, now);
 
@@ -1068,8 +1072,10 @@ void BPF_STRUCT_OPS(lavd_stopping, struct task_struct *p, bool runnable)
 	 */
 	cpuc = get_cpu_ctx_task(p);
 	taskc = get_task_ctx(p);
-	if (!cpuc || !taskc)
+	if (!cpuc || !taskc) {
+		scx_bpf_error("Failed to lookup context for task %d", p->pid);
 		return;
+	}
 
 	update_stat_for_stopping(p, taskc, cpuc);
 }
@@ -1085,8 +1091,10 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	 */
 	cpuc = get_cpu_ctx_task(p);
 	taskc = get_task_ctx(p);
-	if (!cpuc || !taskc)
+	if (!cpuc || !taskc) {
+		scx_bpf_error("Failed to lookup context for task %d ", p->pid);
 		return;
+	}
 
 	/*
 	 * If a task @p is dequeued from a run queue for some other reason
@@ -1157,8 +1165,10 @@ void BPF_STRUCT_OPS(lavd_cpu_online, s32 cpu)
 	struct cpu_ctx *cpuc;
 
 	cpuc = get_cpu_ctx_id(cpu);
-	if (!cpuc)
+	if (!cpuc) {
+		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return;
+	}
 
 	cpu_ctx_init_online(cpuc, cpu, now);
 
@@ -1176,8 +1186,10 @@ void BPF_STRUCT_OPS(lavd_cpu_offline, s32 cpu)
 	struct cpu_ctx *cpuc;
 
 	cpuc = get_cpu_ctx_id(cpu);
-	if (!cpuc)
+	if (!cpuc) {
+		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return;
+	}
 
 	cpu_ctx_init_offline(cpuc, cpu, now);
 
@@ -1197,8 +1209,10 @@ void BPF_STRUCT_OPS(lavd_update_idle, s32 cpu, bool idle)
 	u64 now;
 
 	cpuc = get_cpu_ctx_id(cpu);
-	if (!cpuc)
+	if (!cpuc) {
+		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return;
+	}
 
 	now = scx_bpf_now();
 
@@ -1366,7 +1380,7 @@ s32 BPF_STRUCT_OPS(lavd_init_task, struct task_struct *p,
 	 * Return -ESRCH if @p is invalid.
 	 * Return -ENOMEM if context allocation fails.
 	 */
-	if (!p){
+	if (!p) {
 		scx_bpf_error("NULL task_struct pointer received");
 		return -ESRCH;
 	}
