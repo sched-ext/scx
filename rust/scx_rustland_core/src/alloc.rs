@@ -122,7 +122,7 @@ impl Node {
 
     fn pop(list: *mut Node) -> *mut Node {
         debug_assert!(!Self::is_empty(list));
-        let n_list: *mut Node = unsafe { (*list).next };
+        let n_list = unsafe { (*list).next };
         Self::remove(n_list);
         n_list
     }
