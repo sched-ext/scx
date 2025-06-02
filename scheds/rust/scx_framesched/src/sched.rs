@@ -94,10 +94,12 @@ impl SchedulerBuilder {
                 #[repr(C)]
                 struct dom_init_ctx {
                     dom_id: c_uint,
+                    numa_id: c_uint,
                     mask: [c_ulonglong; 16],
                 }
                 let mut init_ctx = dom_init_ctx {
                     dom_id: llc.id as u32,
+                    numa_id: node.id as u32,
                     mask: raw_mask.try_into().unwrap(),
                 };
 
@@ -150,12 +152,6 @@ impl SchedulerBuilder {
         }
         skel.maps.rodata_data.nr_dom_ids = nr_dom_ids;
         skel.maps.dom_data.set_max_entries(nr_dom_ids)?;
-
-        for (_, node) in top.nodes.iter() {
-            for (id, _) in node.llcs.iter() {
-                skel.maps.rodata_data.numa_dom_id_map[*id] = node.id as u32;
-            }
-        }
 
         // TODO: Once the libbpf bug is solved with user exit info, also
         // initialize that here.

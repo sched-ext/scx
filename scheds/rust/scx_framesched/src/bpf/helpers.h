@@ -6,7 +6,17 @@
 #ifndef __HELPERS_H
 #define __HELPERS_H
 
-static int create_assign_cpumask(struct bpf_cpumask **out)
+static inline u64 scale_up_fair(u64 value, u64 weight)
+{
+	return value * weight / 100;
+}
+
+static inline u64 scale_inverse_fair(u64 value, u64 weight)
+{
+	return value * 100 / weight;
+}
+
+static inline int create_assign_cpumask(struct bpf_cpumask **out)
 {
 	struct bpf_cpumask *mask;
 
@@ -26,7 +36,7 @@ static int create_assign_cpumask(struct bpf_cpumask **out)
 	return 0;
 }
 
-static u64 calc_avg(u64 curr_avg, u64 latest)
+static inline u64 calc_avg(u64 curr_avg, u64 latest)
 {
 	return (curr_avg - (curr_avg >> 2)) + (latest >> 2);
 }

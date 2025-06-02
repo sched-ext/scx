@@ -12,6 +12,7 @@
 
 #include <scx/common.bpf.h>
 
+#include "helpers.h"
 #include "intf.h"
 
 struct {
@@ -31,7 +32,7 @@ static struct pcpu_ctx *pcpu_lookup_ctx(s32 cpu)
 	struct pcpu_ctx *pcpuc;
 
 	pcpuc = pcpu_try_lookup_ctx(cpu);
-	if (!pcpuc)
+	if (unlikely(!pcpuc))
 		scx_bpf_error("Failed to lookup pcpu ctx for cpu %d", cpu);
 
 	return pcpuc;
@@ -40,6 +41,28 @@ static struct pcpu_ctx *pcpu_lookup_ctx(s32 cpu)
 static struct pcpu_ctx *pcpu_lookup_curr_ctx(void)
 {
 	return pcpu_lookup_ctx(bpf_get_smp_processor_id());
+}
+
+static __maybe_unused struct bpf_cpumask *pcpuc_get_mask(struct pcpu_ctx *pcpuc)
+{
+	struct bpf_cpumask *scratch;
+
+	scratch = bpf_kptr_xchg(&pcpuc->scratch_mask, NULL);
+	if (unlikely(!scratch)) {
+		scx_bpf_error("CPU %d didn't have scratch mask", pcpuc->cpu);
+		return NULL;
+	}
+
+	return scratch;
+}
+
+static __maybe_unused void pcpuc_release_mask(struct pcpu_ctx *pcpuc, struct bpf_cpumask *mask)
+{
+	struct bpf_cpumask *scratch;
+
+	scratch = bpf_kptr_xchg(&pcpuc->scratch_mask, mask);
+	if (unlikely(scratch))
+		scx_bpf_error("CPU %d already had mask in release", pcpuc->cpu);
 }
 
 static int pcpu_init_ctx(s32 cpu)
@@ -55,7 +78,9 @@ static int pcpu_init_ctx(s32 cpu)
 		return -ENOENT;
 	}
 
-	return 0;
+	pcpuc->cpu = cpu;
+
+	return create_assign_cpumask(&pcpuc->scratch_mask);
 }
 
 #endif /* __PCPU_H */

@@ -142,11 +142,20 @@ struct task_notif_msg {
 /* Per-CPU context */
 struct pcpu_ctx {
 	/*
+	 * Per-CPU cpumask that can be used as a scratch mask for scheduling
+	 * decisions
+	 */
+	struct bpf_cpumask __kptr *scratch_mask;
+
+	/*
 	 * Used to ensure round-robin semantics where we're looping over and
 	 * selecting something. For example, when we're selecting a domain for
 	 * a task.
 	 */
 	int rr_idx;
+
+	/* Store the CPU for convenience. Cannot change. */
+	int cpu;
 
 	/* The ID of the domain for this CPU. Cannot change. */
 	u32 dom_id;

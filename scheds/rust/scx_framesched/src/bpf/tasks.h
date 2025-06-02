@@ -44,7 +44,7 @@ static struct task_ctx *tasks_lookup_ctx(struct task_struct *p)
 	struct task_ctx *taskc;
 
 	taskc = tasks_try_lookup_ctx(p);
-	if (!taskc)
+	if (unlikely(!taskc))
 		scx_bpf_error("Failed to lookup task ctx for %s[%d]", p->comm, p->pid);
 
 	return taskc;
