@@ -392,8 +392,22 @@ impl<'a> Scheduler<'a> {
     }
 
     fn setup_topology_node(skel: &mut BpfSkel<'a>, mask: &[u64]) -> Result<()> {
-        // Copy the address of ptr to the kernel to populate it from BPF with the arena pointer.
+
+        let mut args = types::arena_alloc_mask_args {
+            bitmap: 0 as c_ulong,
+        };
+
+        // XXX How do we get back a pointer? eBPF does copy the input context
+        // back to the user, does that mean the input context is basically
+        // passed by reference?
+
         let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
             ..Default::default()
         };
 
@@ -406,13 +420,23 @@ impl<'a> Scheduler<'a> {
         }
 
         let ptr = unsafe {
-            std::mem::transmute::<u64, &mut [u64; 10]>(skel.maps.bss_data.arena_topo_setup_ptr)
+            std::mem::transmute::<u64, &mut [u64; 10]>(args.bitmap)
         };
 
         let (valid_mask, _) = ptr.split_at_mut(mask.len());
         valid_mask.clone_from_slice(mask);
 
+        let mut args = types::arena_topology_node_init_args {
+            bitmap: args.bitmap as c_ulong
+        };
+
         let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
             ..Default::default()
         };
         let output = skel.progs.arena_topology_node_init.test_run(input)?;

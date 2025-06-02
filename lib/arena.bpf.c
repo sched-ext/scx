@@ -15,7 +15,6 @@
  */
 
 struct task_ctx;
-u64 arena_topo_setup_ptr;
 
 SEC("syscall")
 int arena_init(struct arena_init_args *args)
@@ -43,7 +42,7 @@ int arena_init(struct arena_init_args *args)
 }
 
 SEC("syscall")
-int arena_alloc_mask(void)
+int arena_alloc_mask(struct arena_alloc_mask_args *args)
 {
 	scx_bitmap_t bitmap;
 
@@ -51,22 +50,20 @@ int arena_alloc_mask(void)
 	if (!bitmap)
 		return -ENOMEM;
 
-	arena_topo_setup_ptr = (u64)&bitmap->bits;
+	args->bitmap = (u64)&bitmap->bits;
 
 	return 0;
 }
 
 SEC("syscall")
-int arena_topology_node_init(void)
+int arena_topology_node_init(struct arena_topology_node_init_args *args)
 {
-	scx_bitmap_t bitmap = (scx_bitmap_t)container_of(arena_topo_setup_ptr, struct scx_bitmap, bits);
+	scx_bitmap_t bitmap = (scx_bitmap_t)container_of(args->bitmap, struct scx_bitmap, bits);
 	int ret;
 
 	ret = topo_init(bitmap);
 	if (ret)
 		return ret;
-
-	arena_topo_setup_ptr = 0;
 
 	return 0;
 }

@@ -6,11 +6,17 @@ struct arena_init_args {
 };
 
 int arena_init(struct arena_init_args *args);
-int arena_alloc_mask(void);
 
-struct arena_topology_node_init_args {
-	u64 setup_ptr;
+struct arena_alloc_mask_args {
+	u64 bitmap;
 };
 
-int arena_topology_node_init();
+int arena_alloc_mask(struct arena_alloc_mask_args *args);
+
+struct arena_topology_node_init_args {
+	u64 bitmap;
+};
+
+int arena_topology_node_init(struct arena_topology_node_init_args *args);
+
 int arena_topology_print(void);
