@@ -22,7 +22,7 @@ struct topology {
 	enum topo_level level;
 
 	/* Generic pointer, can be used for anything. */
-	void *data;
+	void __arena *data;
 };
 
 extern volatile topo_ptr topo_all;
