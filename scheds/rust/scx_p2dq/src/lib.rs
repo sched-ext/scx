@@ -41,8 +41,8 @@ pub struct SchedulerOpts {
     #[clap(short = 'r', long, default_value = "10")]
     pub interactive_ratio: usize,
 
-    /// Disables eager pick2 load balancing.
-    #[clap(short = 'e', long, action = clap::ArgAction::SetTrue)]
+    /// *DEPRECATED* Disables eager pick2 load balancing.
+    #[clap(short = 'e', long, help="DEPRECATED", action = clap::ArgAction::SetTrue)]
     pub eager_load_balance: bool,
 
     /// Enables CPU frequency control.
@@ -79,8 +79,8 @@ pub struct SchedulerOpts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     pub keep_running: bool,
 
-    /// Minimum load for load balancing on the wakeup path, 0 to disable.
-    #[clap(long, default_value = "0", value_parser = clap::value_parser!(u64).range(0..99))]
+    /// *DEPRECATED* Minimum load for load balancing on the wakeup path, 0 to disable.
+    #[clap(long, default_value = "0", help="DEPRECATED", value_parser = clap::value_parser!(u64).range(0..99))]
     pub wakeup_lb_busy: u64,
 
     /// Allow LLC migrations on the wakeup path.
