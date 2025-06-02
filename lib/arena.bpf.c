@@ -61,7 +61,7 @@ int arena_topology_node_init(struct arena_topology_node_init_args *args)
 	scx_bitmap_t bitmap = (scx_bitmap_t)container_of(args->bitmap, struct scx_bitmap, bits);
 	int ret;
 
-	ret = topo_init(bitmap);
+	ret = topo_init(bitmap, args->data_size);
 	if (ret)
 		return ret;
 

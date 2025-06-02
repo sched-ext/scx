@@ -27,7 +27,7 @@ struct topology {
 
 extern volatile topo_ptr topo_all;
 
-int topo_init(scx_bitmap_t __arg_arena mask);
+int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size);
 int topo_contains(topo_ptr topo, u32 cpu);
 
 u64 topo_mask_level_internal(topo_ptr topo, enum topo_level level);
@@ -40,7 +40,7 @@ struct topo_iter {
 	/* The current topology node. */
 	topo_ptr topo;
 	/*
-	 * The index for every node in the path of the tree for , -1 denotes levels > the current one. 
+	 * The index for every node in the path of the tree for , -1 denotes levels > the current one.
 	 * E.g., [0, 1, 2, 1, 2] means:
 	 * - index on level 0 (we only have one top-level node]
 	 * - index 1 on level 1 (the top-level node's second child)

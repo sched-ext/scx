@@ -72,7 +72,7 @@ int topo_add(topo_ptr parent, scx_bitmap_t mask)
 }
 
 __weak
-int topo_init(scx_bitmap_t __arg_arena mask)
+int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size)
 {
 	/* Initializing the child to appease the verifier. */
 	topo_ptr topo, child = NULL;
@@ -122,6 +122,13 @@ int topo_init(scx_bitmap_t __arg_arena mask)
 		}
 
 		topo = child;
+	}
+
+	topo->data = NULL;
+	if (data_size) {
+		topo->data = scx_static_alloc(data_size, 1);
+		if (!topo->data)
+			return -ENOMEM;
 	}
 
 	scx_bpf_error("topology is too deep");
