@@ -274,21 +274,6 @@ static bool is_interactive(task_ctx *taskc)
 }
 
 /*
- * Returns if the task is able to load balance using pick2.
- */
-static bool can_pick2(task_ctx *taskc)
-{
-	if (is_interactive(taskc) ||
-	    !taskc->all_cpus ||
-	    taskc->is_kworker ||
-	    nr_llcs < 2 ||
-	    (max_dsq_pick2 > 0 && taskc->llc_runs < min_llc_runs_pick2))
-		return false;
-
-	return true;
-}
-
-/*
  * Updates a tasks vtime based on the newly assigned cpu_ctx and returns the
  * updated vtime.
  */
@@ -347,92 +332,6 @@ static bool keep_running(struct cpu_ctx *cpuc, struct llc_ctx *llcx, struct task
 	p->scx.slice = slice_ns;
 	stat_inc(P2DQ_STAT_KEEP);
 	return true;
-}
-
-static s32 pick_two_cpu(struct llc_ctx *cur_llcx, task_ctx *taskc,
-			bool *is_idle)
-{
-	if ((min_llc_runs_pick2 > 0 &&
-	     taskc->llc_runs < min_llc_runs_pick2) ||
-	    !can_pick2(taskc))
-		return -EINVAL;
-
-	struct llc_ctx *chosen;
-	struct llc_ctx *left, *right;
-	s32 cpu;
-
-	u64 now = scx_bpf_now();
-	// TODO: Use a moving avg instead for load calculations. The current
-	// method will be too noisy.
-	if (now - cur_llcx->last_period_ns < lb_backoff_ns)
-		return -EINVAL;
-
-	u64 max_possible_load = (now - cur_llcx->last_period_ns) * cur_llcx->nr_cpus;
-	u64 cur_load = cur_llcx->load;
-	u64 scaled_load = (100 * cur_load) / max_possible_load;
-
-	// If the current LLC is not heavily utilized then don't load balance,
-	// under saturation load balancing is done on the dispatch path.
-	if (scaled_load < wakeup_lb_busy)
-		return -EINVAL;
-
-	left = rand_llc_ctx();
-	right = rand_llc_ctx();
-
-	if (!left || !right)
-		return -EINVAL;
-
-	// last ditch effort if same are picked.
-	if (unlikely(left->id == right->id)) {
-		right = rand_llc_ctx();
-		if (!right || left->id == right->id)
-			return -EINVAL;
-	}
-
-	u64 left_load = left->load;
-	u64 right_load = right->load;
-
-	// If the other LLCs have more load than the current don't bother.
-	u64 slack_factor = (1 * cur_load) / 100;
-	if (slack_factor > 0)
-		cur_load += slack_factor;
-	if (left_load > cur_load && right_load > cur_load)
-		return -EINVAL;
-
-	if (left_load < right_load) {
-		chosen = left;
-		goto pick_llc;
-	} else {
-		chosen = right;
-		goto pick_llc;
-	}
-
-pick_llc:
-	if (!chosen || !chosen->cpumask)
-		return -EINVAL;
-
-	// First try to find an idle core
-	cpu = scx_bpf_pick_idle_cpu(cast_mask(chosen->cpumask),
-				    SCX_PICK_IDLE_CORE);
-	if (cpu >= 0) {
-		*is_idle = true;
-		return cpu;
-	}
-
-	// No idle cores, any CPU will do
-	if (chosen->cpumask &&
-	    (cpu = scx_bpf_pick_idle_cpu(cast_mask(chosen->cpumask), 0)) >= 0) {
-		*is_idle = true;
-		return cpu;
-	}
-
-	// Couldn't find idle, but still return a CPU to load balance
-	if (chosen->cpumask &&
-	    (cpu = bpf_cpumask_any_distribute(cast_mask(chosen->cpumask))) < nr_cpus) {
-		return cpu;
-	}
-
-	return -EINVAL;
 }
 
 static s32 pick_idle_affinitized_cpu(struct task_struct *p, task_ctx *taskc,
@@ -650,14 +549,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		stat_inc(P2DQ_STAT_SELECT_PICK2);
 	}
 
-	if (eager_load_balance && wakeup_lb_busy > 0) {
-		cpu = pick_two_cpu(llcx, taskc, is_idle);
-		if (cpu >= 0) {
-			stat_inc(P2DQ_STAT_SELECT_PICK2);
-			goto found_cpu;
-		}
-	}
-
 	if (has_little_cores && llcx->little_cpumask && llcx->big_cpumask) {
 		if (interactive) {
 			if ((cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->little_cpumask),
@@ -687,15 +578,6 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	if (llcx->cpumask &&
 	    (cpu = scx_bpf_pick_idle_cpu(cast_mask(llcx->cpumask), 0)) >= 0) {
 		*is_idle = true;
-		goto found_cpu;
-	}
-
-	// Non-interactive tasks load balance
-	if (nr_llcs > 1 &&
-	    !interactive &&
-	    wakeup_lb_busy > 0 &&
-	    (cpu = pick_two_cpu(llcx, taskc, is_idle)) >= 0) {
-		stat_inc(P2DQ_STAT_SELECT_PICK2);
 		goto found_cpu;
 	}
 
