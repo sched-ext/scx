@@ -560,22 +560,6 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.nr_doms = domains.nr_doms() as u32;
         skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
 
-        // Any CPU with dom > MAX_DOMS is considered offline by default. There
-        // are a few places in the BPF code where we skip over offlined CPUs
-        // (e.g. when initializing or refreshing tune params), and elsewhere the
-        // scheduler will error if we try to schedule from them.
-        for cpu in 0..*NR_CPU_IDS {
-            skel.maps.rodata_data.cpu_dom_id_map[cpu] = u32::MAX;
-        }
-
-        for (id, dom) in domains.doms().iter() {
-            for cpu in dom.mask().iter() {
-                skel.maps.rodata_data.cpu_dom_id_map[cpu] = (*id)
-                    .try_into()
-                    .expect("Domain ID could not fit into 32 bits");
-            }
-        }
-
         if opts.partial {
             skel.struct_ops.wd40_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
         }
