@@ -193,8 +193,17 @@ impl<'a> Scheduler<'a> {
     }
 
     fn setup_topology_node(&mut self, mask: &[u64]) -> Result<()> {
-        // Copy the address of ptr to the kernel to populate it from BPF with the arena pointer.
+        let mut args = types::arena_alloc_mask_args {
+            bitmap: 0 as c_ulong,
+        };
+
         let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
             ..Default::default()
         };
 
@@ -206,16 +215,26 @@ impl<'a> Scheduler<'a> {
             );
         }
 
-        let ptr = unsafe {
-            std::mem::transmute::<u64, &mut [u64; 10]>(self.skel.maps.bss_data.arena_topo_setup_ptr)
-        };
+        let ptr = unsafe { std::mem::transmute::<u64, &mut [u64; 10]>(args.bitmap) };
 
         let (valid_mask, _) = ptr.split_at_mut(mask.len());
         valid_mask.clone_from_slice(mask);
 
+        let mut args = types::arena_topology_node_init_args {
+            bitmap: args.bitmap as c_ulong,
+            data_size: 0 as c_ulong,
+        };
+
         let input = ProgramInput {
+            context_in: Some(unsafe {
+                std::slice::from_raw_parts_mut(
+                    &mut args as *mut _ as *mut u8,
+                    std::mem::size_of_val(&args),
+                )
+            }),
             ..Default::default()
         };
+
         let output = self.skel.progs.arena_topology_node_init.test_run(input)?;
         if output.return_value != 0 {
             bail!(
