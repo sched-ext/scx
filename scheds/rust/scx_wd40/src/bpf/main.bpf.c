@@ -86,49 +86,6 @@ const volatile u32 greedy_threshold_x_numa;
 
 struct pcpu_ctx pcpu_ctx[MAX_CPUS];
 
-static s32 scx_bitmap_pick_idle_cpu(scx_bitmap_t mask __arg_arena, int flags)
-{
-	struct bpf_cpumask __kptr *bpf = scx_percpu_bpfmask();
-	s32 cpu;
-
-	if (!bpf)
-		return -1;
-
-	scx_bitmap_to_bpf(bpf, mask);
-	cpu = scx_bpf_pick_idle_cpu(cast_mask(bpf), flags);
-
-	scx_bitmap_from_bpf(mask, cast_mask(bpf));
-
-	return cpu;
-}
-
-static s32 scx_bitmap_any_distribute(scx_bitmap_t mask __arg_arena)
-{
-	struct bpf_cpumask __kptr *bpf = scx_percpu_bpfmask();
-	s32 cpu;
-
-	if (!bpf)
-		return -1;
-	scx_bitmap_to_bpf(bpf, mask);
-	cpu = bpf_cpumask_any_distribute(cast_mask(bpf));
-
-	return cpu;
-}
-
-static s32 scx_bitmap_any_and_distribute(scx_bitmap_t scx, const struct cpumask *bpf)
-{
-	struct bpf_cpumask *tmp = scx_percpu_bpfmask();
-	s32 cpu;
-
-	if (!bpf || !tmp)
-		return -1;
-
-	scx_bitmap_to_bpf(tmp, scx);
-	cpu = bpf_cpumask_any_and_distribute(cast_mask(tmp), bpf);
-
-	return cpu;
-}
-
 static struct pcpu_ctx *lookup_pcpu_ctx(s32 cpu)
 {
 	struct pcpu_ctx *pcpuc;
