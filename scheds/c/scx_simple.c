@@ -73,8 +73,6 @@ int main(int argc, char **argv)
 restart:
 	skel = SCX_OPS_OPEN(simple_ops, scx_simple);
 
-	skel->rodata->nr_cpu_ids = libbpf_num_possible_cpus();
-
 	while ((opt = getopt(argc, argv, "fvh")) != -1) {
 		switch (opt) {
 		case 'f':
