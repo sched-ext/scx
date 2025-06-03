@@ -391,7 +391,12 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn setup_topology_node(skel: &mut BpfSkel<'a>, mask: &[u64], data_size: usize, id: u64) -> Result<()> {
+    fn setup_topology_node(
+        skel: &mut BpfSkel<'a>,
+        mask: &[u64],
+        data_size: usize,
+        id: u64,
+    ) -> Result<()> {
         let mut args = types::arena_alloc_mask_args {
             bitmap: 0 as c_ulong,
         };
@@ -422,7 +427,7 @@ impl<'a> Scheduler<'a> {
         let mut args = types::arena_topology_node_init_args {
             bitmap: args.bitmap as c_ulong,
             data_size: data_size as c_ulong,
-            id: id as c_ulong
+            id: id as c_ulong,
         };
 
         let input = ProgramInput {
@@ -461,7 +466,7 @@ impl<'a> Scheduler<'a> {
                     .expect("missing llc")
                     .span
                     .as_raw_slice(),
-                    0, 
+                0,
                 0,
             )?;
         }
@@ -472,7 +477,7 @@ impl<'a> Scheduler<'a> {
                     .expect("missing core")
                     .span
                     .as_raw_slice(),
-                    0,
+                0,
                 0,
             )?;
         }
@@ -582,8 +587,8 @@ impl<'a> Scheduler<'a> {
 
         Self::setup_arenas(&mut skel)?;
 
-        println!(
-            "Mask length {} NR_CPU_IDS {}",
+        info!(
+            "Mask length {}, number of possible CPUs {}",
             skel.maps.bss_data.mask_size, skel.maps.rodata_data.nr_cpu_ids
         );
         // Read the mask length chosen by BPF. We count elements in the u64 array, like the BPF
