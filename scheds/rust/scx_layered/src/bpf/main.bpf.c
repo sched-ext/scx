@@ -53,6 +53,7 @@ const volatile u64 min_open_layer_disallow_preempt_after_ns;
 const volatile u64 lo_fb_wait_ns = 5000000;	/* !0 for veristat */
 const volatile u32 lo_fb_share_ppk = 128;	/* !0 for veristat */
 const volatile bool percpu_kthread_preempt = true;
+const volatile bool percpu_kthread_preempt_all = false;
 volatile u64 layer_refresh_seq_avgruntime;
 
 /* Flag to enable or disable antistall feature */
@@ -102,10 +103,15 @@ static inline s32 prio_to_nice(s32 static_prio)
 	return static_prio - 120;
 }
 
-static inline bool is_preempt_kthread(struct task_struct *p)
+static inline bool is_percpu_kthread(struct task_struct *p)
 {
-	return percpu_kthread_preempt && (p->flags & PF_KTHREAD) &&
-		p->nr_cpus_allowed == 1;
+	return (p->flags & PF_KTHREAD) && p->nr_cpus_allowed == 1;
+}
+
+static inline bool is_percpu_kthread_preempting(struct task_struct *p)
+{
+	return percpu_kthread_preempt &&
+		(percpu_kthread_preempt_all || p->scx.weight > 100);
 }
 
 static inline s32 sibling_cpu(s32 cpu)
@@ -1248,10 +1254,6 @@ static bool try_preempt_cpu(s32 cand, struct task_struct *p, struct task_ctx *ta
 		return false;
 	}
 
-	/* don't preempt highpri kthreads */
-	if ((curr->flags & PF_KTHREAD) && curr->scx.weight > 100)
-		return false;
-
 	/*
 	 * Don't preempt if protection against is in effect. However, open
 	 * layers share CPUs and using the same mechanism between non-preempt
@@ -1419,7 +1421,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	/*
 	 * No idle CPU, try preempting.
 	 */
-	if ((layer->preempt || is_preempt_kthread(p)) && !yielding) {
+	if (layer->preempt && !yielding) {
 		/*
 		 * See try_preempt_first block above for explanation on the
 		 * wakeup test.
@@ -1477,9 +1479,10 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 			 * CPUs and an eligible CPU is likely to open up soon.
 			 * However, if @p is a high-priority per-cpu kthread, it
 			 * has to run soon and can only run on one particular
-			 * CPU. Preempt whatever is running on that CPU.
+			 * CPU. Preempt whatever is running on that CPU. This
+			 * can be disabled by --disable-percpu-kthread-preempt.
 			 */
-			if (p->scx.weight > 100)
+			if (is_percpu_kthread_preempting(p))
 				enq_flags |= SCX_ENQ_PREEMPT;
 		} else {
 			taskc->dsq_id = task_cpuc->hi_fb_dsq_id;
@@ -2661,7 +2664,8 @@ void BPF_STRUCT_OPS(layered_running, struct task_struct *p)
 	if (time_before(llcc->vtime_now[layer_id], p->scx.dsq_vtime))
 		llcc->vtime_now[layer_id] = p->scx.dsq_vtime;
 
-	cpuc->current_preempt = layer->preempt || is_preempt_kthread(p);
+	cpuc->current_preempt = layer->preempt ||
+		(is_percpu_kthread(p) && is_percpu_kthread_preempting(p));
 	cpuc->task_layer_id = taskc->layer_id;
 	cpuc->used_at = now;
 	taskc->running_at = now;

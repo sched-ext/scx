@@ -26,10 +26,8 @@ impl RustLandBuilder {
         let path = Path::new(file_name);
 
         // Limit file writing to when file contents differ (for caching)
-        if let Ok(bytes_there) = fs::read(path) {
-            if bytes_there == content {
-                return;
-            }
+        if fs::read(path).map_or(false, |b| b == content) {
+            return;
         }
 
         let mut file = File::create(path).expect("Unable to create file");

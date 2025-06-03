@@ -655,6 +655,12 @@ struct Opts {
     #[clap(long, default_value = "false")]
     disable_percpu_kthread_preempt: bool,
 
+    /// Only highpri (nice < 0) per-cpu kthreads are preempting by default.
+    /// Make every per-cpu kthread preempting. Meaningful only if
+    /// --disable-percpu-kthread-preempt is not set.
+    #[clap(long, default_value = "false")]
+    percpu_kthread_preempt_all: bool,
+
     /// Show descriptions for statistics.
     #[clap(long)]
     help_stats: bool,
@@ -1928,6 +1934,8 @@ impl<'a> Scheduler<'a> {
         }
 
         skel.maps.rodata_data.percpu_kthread_preempt = !opts.disable_percpu_kthread_preempt;
+        skel.maps.rodata_data.percpu_kthread_preempt_all =
+            !opts.disable_percpu_kthread_preempt && opts.percpu_kthread_preempt_all;
         skel.maps.rodata_data.debug = opts.verbose as u32;
         skel.maps.rodata_data.slice_ns = opts.slice_us * 1000;
         skel.maps.rodata_data.max_exec_ns = if opts.max_exec_us > 0 {

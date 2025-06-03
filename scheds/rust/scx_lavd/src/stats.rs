@@ -7,7 +7,7 @@ use std::thread::ThreadId;
 use std::time::Duration;
 
 use anyhow::bail;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use gpoint::GPoint;
 use scx_stats::prelude::*;
 use scx_stats_derive::stat_doc;
@@ -377,6 +377,11 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
         &vec![],
         intv,
         || shutdown.load(Ordering::Relaxed),
-        |sysstats| sysstats.format(&mut std::io::stdout()),
+        |sysstats| {
+            sysstats
+                .format(&mut std::io::stdout())
+                .context("failed to format sysstats")?;
+            Ok(())
+        },
     )
 }

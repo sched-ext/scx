@@ -30,7 +30,6 @@ use seccomp::*;
 use std::alloc::{GlobalAlloc, Layout};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::num::ParseIntError;
 use std::sync::Mutex;
 
 /// Buddy allocator
@@ -122,7 +121,7 @@ impl Node {
 
     fn pop(list: *mut Node) -> *mut Node {
         debug_assert!(!Self::is_empty(list));
-        let n_list: *mut Node = unsafe { (*list).next };
+        let n_list = unsafe { (*list).next };
         Self::remove(n_list);
         n_list
     }
@@ -573,38 +572,31 @@ impl VmSettings {
     // Return the content of a procfs file as i32.
     fn read_procfs(&self, file_path: &str) -> Result<i32, String> {
         // Attempt to open the file
-        let file = match File::open(file_path) {
-            Ok(f) => f,
-            Err(err) => return Err(format!("Failed to open {}: {}", file_path, err)),
-        };
+        let file = File::open(file_path)
+            .map_err(|err| format!("Failed to open {}: {}", file_path, err))?;
 
         let reader = BufReader::new(file);
 
-        if let Some(Ok(line)) = reader.lines().next() {
-            let value: Result<i32, ParseIntError> = line.trim().parse();
-            match value {
-                Ok(v) => Ok(v),
-                Err(err) => Err(format!("Failed to parse {}: {}", file_path, err)),
-            }
-        } else {
-            Err(format!("File is empty: {}", file_path))
-        }
+        let line = reader
+            .lines()
+            .next()
+            .ok_or_else(|| format!("File is empty: {}", file_path))?
+            .map_err(|err| format!("Failed to read line from {}: {}", file_path, err))?;
+
+        line.trim()
+            .parse::<i32>()
+            .map_err(|err| format!("Failed to parse {}: {}", file_path, err))
     }
 
     // Write an i32 to a file in procfs.
     fn write_procfs(&self, file_path: &str, value: i32) -> Result<(), String> {
         // Attempt to create or open the file
-        let mut file = match File::create(file_path) {
-            Ok(f) => f,
-            Err(err) => return Err(format!("Failed to open {}: {}", file_path, err)),
-        };
+        let mut file = File::create(file_path)
+            .map_err(|err| format!("Failed to open {}: {}", file_path, err))?;
 
         // Attempt to write the value to the file
-        if let Err(err) = write!(file, "{}", value) {
-            return Err(format!("Failed to write to {}: {}", file_path, err));
-        }
-
-        Ok(()) // Return Ok if writing was successful
+        write!(file, "{}", value)
+            .map_err(|err| format!("Failed to write to {}: {}", file_path, err))
     }
 
     // Save all the sysctl VM settings in the internal state.
