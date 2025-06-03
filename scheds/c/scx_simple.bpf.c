@@ -64,25 +64,18 @@ static void stat_inc(u32 idx)
 
 s32 BPF_STRUCT_OPS(simple_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
 {
+	bool is_idle = false;
 	s32 cpu;
-	//bpf_trace_printk("NR CPUS: %d\n", nr_cpu_ids);
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		if (bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) && scx_bpf_test_and_clear_cpu_idle(cpu)){
-			if (fifo_sched){
-				scx_bpf_dsq_insert(p, cpu_to_dsq(cpu), SCX_SLICE_DFL, 0);
-			} else {
-				u64 vtime = p->scx.dsq_vtime;
-				if (time_before(vtime, vtime_now - SCX_SLICE_DFL))
-					vtime = vtime_now - SCX_SLICE_DFL;
 
-				vtime += (SCX_SLICE_DFL - p->scx.slice) * 100 / p->scx.weight;
-
-				scx_bpf_dsq_insert_vtime(p, cpu_to_dsq(cpu), vtime, SCX_SLICE_DFL, 0);
-			}
-			return cpu;
+        cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+        if (is_idle && !scx_bpf_dsq_nr_queued(cpu_to_dsq(cpu))) {
+                stat_inc(0);    /* count local queueing */
+                scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0);
 		}
-	}
-	return prev_cpu;
+
+	
+
+	return cpu;
 }
 
 
@@ -110,6 +103,7 @@ if(bpf_cpumask_test_cpu(cpu, p->cpus_ptr)){
 					 enq_flags);
 	}
 }
+scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
 void BPF_STRUCT_OPS(simple_dispatch, s32 cpu, struct task_struct *prev)
@@ -186,5 +180,5 @@ SCX_OPS_DEFINE(simple_ops,
 	       .init			= (void *)simple_init,
 	       .exit			= (void *)simple_exit,
 	       .timeout_ms		= 5000,
-	       .exit_dump_len		= 1000000,
+	       .exit_dump_len		= 2000000,
 	       .name			= "simple");
