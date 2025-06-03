@@ -80,7 +80,7 @@ dom_ptr lb_domain_alloc(u32 dom_id)
 	}
 
 	domc->direct_greedy_cpumask = scx_bitmap_alloc();
-	if (!domc->cpumask) {
+	if (!domc->direct_greedy_cpumask) {
 		scx_bitmap_free(domc->cpumask);
 		lb_domain_free(domc);
 		return NULL;
