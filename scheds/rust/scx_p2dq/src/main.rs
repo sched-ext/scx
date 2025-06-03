@@ -223,6 +223,7 @@ impl<'a> Scheduler<'a> {
         let mut args = types::arena_topology_node_init_args {
             bitmap: args.bitmap as c_ulong,
             data_size: 0 as c_ulong,
+            id: 0 as c_ulong,
         };
 
         let input = ProgramInput {

@@ -6,6 +6,15 @@
 
 volatile topo_ptr topo_all;
 
+/*
+ * XXXETSAL: This is a (hopefully) temporary measure that
+ * makes it easier to integrate with existing schedulers that
+ * use arbitraty IDs to index CPUs/LLCs/nodes. In the future we 
+ * will just keep a CPU id to CPU topology node array, but for
+ * now we will have an array for each level.
+ */
+topo_ptr topo_nodes[TOPO_MAX_LEVEL][NR_CPUS];
+
 __weak
 int topo_contains(topo_ptr topo, u32 cpu)
 {
@@ -19,7 +28,7 @@ int topo_subset(topo_ptr topo, scx_bitmap_t mask)
 }
 
 static
-topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask)
+topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask, u64 id)
 {
 	topo_ptr topo;
 
@@ -32,6 +41,7 @@ topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask)
 	topo->parent = parent;
 	topo->nr_children = 0;
 	topo->level = parent ? topo->parent->level + 1 : 0;
+	topo->id = id;
 	/*
 	* The passed-in mask is deliberately consumed; topo_node takes ownership.
 	* Do not reuse the same mask elsewhere after this call.
@@ -43,12 +53,19 @@ topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask)
 		return NULL;
 	}
 
+	if (id >= TOPO_MAX_CHILDREN) {
+		scx_bpf_error("invalid node id");
+		return NULL;
+	}
+
+	topo_nodes[topo->level][topo->id] = topo;
+
 	return topo;
 }
 
 
 static
-int topo_add(topo_ptr parent, scx_bitmap_t mask)
+int topo_add(topo_ptr parent, scx_bitmap_t mask, u64 id)
 {
 	topo_ptr child;
 
@@ -57,7 +74,7 @@ int topo_add(topo_ptr parent, scx_bitmap_t mask)
 		return -EINVAL;
 	}
 
-	child = topo_node(parent, mask);
+	child = topo_node(parent, mask, id);
 	if (!child)
 		return -ENOMEM;
 
@@ -72,7 +89,7 @@ int topo_add(topo_ptr parent, scx_bitmap_t mask)
 }
 
 __weak
-int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size)
+int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size, u64 id)
 {
 	/* Initializing the child to appease the verifier. */
 	topo_ptr topo, child = NULL;
@@ -80,7 +97,7 @@ int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size)
 
 	topo = topo_all;
 	if (!topo_all) {
-		topo_all = topo_node(NULL, mask);
+		topo_all = topo_node(NULL, mask, id);
 		if (!topo_all) {
 			scx_bpf_error("couldn't initialize topology");
 			return -EINVAL;
@@ -112,7 +129,7 @@ int topo_init(scx_bitmap_t __arg_arena mask, u64 data_size)
 		 * parent topology node.
 		 */
 		if (j == topo->nr_children) {
-			topo_add(topo, mask);
+			topo_add(topo, mask, id);
 			return 0;
 		}
 
