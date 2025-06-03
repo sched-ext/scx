@@ -114,11 +114,9 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 Vec::new()
             };
 
-            let perf_state = if let Ok(state) = nvidia_gpu.performance_state() {
-                state
-            } else {
-                PerformanceState::Unknown
-            };
+            let perf_state = nvidia_gpu
+                .performance_state()
+                .unwrap_or(PerformanceState::Unknown);
 
             // The NVML library doesn't return a PCIe bus ID compatible with sysfs. It includes
             // uppercase bus ID values and an extra four leading 0s.
@@ -139,13 +137,7 @@ pub fn create_gpus() -> BTreeMap<usize, Vec<Gpu>> {
                 nearest,
                 perf_state,
             };
-            if !gpus.contains_key(&numa_node) {
-                gpus.insert(numa_node, vec![gpu]);
-                continue;
-            }
-            if let Some(gpus) = gpus.get_mut(&numa_node) {
-                gpus.push(gpu);
-            }
+            gpus.entry(gpu.node_id).or_default().push(gpu);
         }
     }
 
