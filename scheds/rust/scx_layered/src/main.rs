@@ -1102,7 +1102,6 @@ impl Layer {
             LayerKind::Confined {
                 cpus_range,
                 cpus_range_frac,
-                util_range,
                 common: LayerCommon { nodes, llcs, .. },
                 ..
             } => {
@@ -1131,15 +1130,6 @@ impl Layer {
                             }
                         }
                     }
-                }
-
-                if util_range.0 < 0.0
-                    || util_range.0 > 1.0
-                    || util_range.1 < 0.0
-                    || util_range.1 > 1.0
-                    || util_range.0 >= util_range.1
-                {
-                    bail!("invalid util_range {:?}", util_range);
                 }
             }
             LayerKind::Grouped {
@@ -1171,6 +1161,17 @@ impl Layer {
                         }
                     }
                 }
+            }
+        }
+
+        if let Some(util_range) = kind.util_range() {
+            if util_range.0 < 0.0
+                || util_range.0 > 1.0
+                || util_range.1 < 0.0
+                || util_range.1 > 1.0
+                || util_range.0 >= util_range.1
+            {
+                bail!("invalid util_range {:?}", util_range);
             }
         }
 
