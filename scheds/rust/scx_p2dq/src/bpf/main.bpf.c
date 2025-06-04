@@ -98,7 +98,6 @@ u64 dsq_time_slices[MAX_DSQS_PER_LLC];
 u64 min_slice_ns = 500;
 u32 sched_mode = MODE_PERFORMANCE;
 
-private(A) struct bpf_cpumask __kptr *all_cpumask;
 private(A) struct bpf_cpumask __kptr *big_cpumask;
 
 static u64 max(u64 a, u64 b)
@@ -1050,10 +1049,8 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		}
 	}
 
-	if (dsq_id != 0 && scx_bpf_dsq_move_to_local(dsq_id)) {
-		stat_inc(P2DQ_STAT_KEEP);
+	if (dsq_id != 0 && scx_bpf_dsq_move_to_local(dsq_id))
 		return;
-	}
 
 	// Try the last DSQ, this is to keep tasks sticky to their dsq type.
 	if (cpuc->dsq_index >= 0 && cpuc->dsq_index < nr_dsqs_per_llc) {
@@ -1080,7 +1077,7 @@ void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
 {
 	task_ctx *taskc;
 
-	if (!(taskc = lookup_task_ctx(p)) || !all_cpumask)
+	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
 	taskc->all_cpus = p->cpus_ptr == &p->cpus_mask && p->nr_cpus_allowed == nr_cpus;
@@ -1508,7 +1505,7 @@ s32 static start_timers(void)
 static __always_inline s32 p2dq_init_impl()
 {
 	int i, j, ret;
-	struct bpf_cpumask *tmp_cpumask, *tmp_big_cpumask;
+	struct bpf_cpumask *tmp_big_cpumask;
 
 	tmp_big_cpumask = bpf_cpumask_create();
 	if (!tmp_big_cpumask) {
@@ -1524,16 +1521,6 @@ static __always_inline s32 p2dq_init_impl()
 	tmp_big_cpumask = bpf_kptr_xchg(&big_cpumask, tmp_big_cpumask);
 	if (tmp_big_cpumask)
 		bpf_cpumask_release(tmp_big_cpumask);
-
-	tmp_cpumask = bpf_cpumask_create();
-	if (!tmp_cpumask) {
-		scx_bpf_error("failed to create all cpumask");
-		return -ENOMEM;
-	}
-
-	tmp_cpumask = bpf_kptr_xchg(&all_cpumask, tmp_cpumask);
-	if (tmp_cpumask)
-		bpf_cpumask_release(tmp_cpumask);
 
 	// First we initialize LLCs because DSQs are created at the LLC level.
 	bpf_for(i, 0, nr_llcs) {
