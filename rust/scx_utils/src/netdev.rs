@@ -75,6 +75,11 @@ pub fn read_netdevs() -> Result<BTreeMap<String, NetDev>> {
             let entry = entry.unwrap();
             let irq = entry.file_name().to_string_lossy().into_owned();
             if let Ok(irq) = irq.parse::<usize>() {
+                let irq_path_raw = format!("/proc/irq/{}", irq);
+                let irq_path = Path::new(&irq_path_raw);
+                if !irq_path.exists() {
+                    continue;
+                }
                 let affinity_raw_path = format!("/proc/irq/{}/smp_affinity", irq);
                 let smp_affinity_path = Path::new(&affinity_raw_path);
                 let smp_affinity = fs::read_to_string(smp_affinity_path)?
