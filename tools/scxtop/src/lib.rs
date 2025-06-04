@@ -480,7 +480,7 @@ impl TryFrom<&bpf_event> for Action {
                     next_prio: sched_switch.next_prio,
                     next_comm: next_comm.into(),
                     prev_dsq_id: sched_switch.prev_dsq_id,
-                    prev_used_slice_ns: sched_switch.prev_slice_ns,
+                    prev_used_slice_ns: sched_switch.prev_used_slice_ns,
                     prev_slice_ns: sched_switch.prev_slice_ns,
                     prev_pid: sched_switch.prev_pid,
                     prev_tgid: sched_switch.prev_tgid,
