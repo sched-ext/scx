@@ -4,6 +4,8 @@ on:
   # only runs on main, every 6 hours. specify hours explicitly so scheduled runs can be offset and use a random minute.
   schedule:
     - cron: "46 1,7,13,19 * * *"
+  # TODO: REMOVE ME
+  push:
 
 jobs:
   build-kernel:
