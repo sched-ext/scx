@@ -35,7 +35,7 @@ const volatile u64 slice_min = 1ULL * NSEC_PER_MSEC;
  * tasks at the cost of making regular and newly created tasks less responsive
  * (0 = disabled).
  */
-const volatile s64 slice_lag = 20ULL * NSEC_PER_MSEC;
+const volatile u64 slice_lag = 20ULL * NSEC_PER_MSEC;
 
 /*
  * Ignore synchronous wakeup events.
@@ -391,20 +391,14 @@ static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
 
 	/*
 	 * Cap the vruntime budget that an idle task can accumulate to
-	 * slice_lag, preventing sleeping tasks from gaining excessive
-	 * priority.
+	 * the scaled @slice_lag, preventing sleeping tasks from gaining
+	 * excessive priority.
 	 *
-	 * A larger slice_lag favors tasks that sleep longer by allowing
+	 * A larger @slice_lag favors tasks that sleep longer by allowing
 	 * them to accumulate more credit, leading to shorter deadlines and
-	 * earlier execution. A smaller slice_lag reduces the advantage of
+	 * earlier execution. A smaller @slice_lag reduces the advantage of
 	 * long sleeps, treating short and long sleeps equally once they
 	 * exceed the threshold.
-	 *
-	 * If slice_lag is negative, it can be used to de-emphasize the
-	 * deadline-based scheduling altogether by charging all tasks a
-	 * fixed vruntime penalty (equal to the absolute value of
-	 * slice_lag), effectively approximating FIFO behavior as the
-	 * penalty increases.
 	 */
 	vtime_min = vtime_now - slice_lag;
 	if (time_before(tctx->deadline, vtime_min))
