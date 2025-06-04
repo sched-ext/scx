@@ -35,6 +35,10 @@
 #define PF_EXITING			0x00000004
 #define CLOCK_MONOTONIC			1
 
+#ifndef NR_CPUS
+#define NR_CPUS 1024
+#endif
+
 #ifndef NUMA_NO_NODE
 #define	NUMA_NO_NODE	(-1)
 #endif
