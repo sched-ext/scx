@@ -875,8 +875,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init)
 		if (ret)
 			return ret;
 
-		scx_bitmap_or(all_cpumask, all_cpumask, dom_ctxs[i]->cpumask);
 	}
+
+	scx_bitmap_or(all_cpumask, all_cpumask, topo_all->mask);
 
 	bpf_for(i, 0, nr_cpu_ids) {
 

@@ -578,6 +578,7 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_load!(skel, wd40, uei)?;
 
         Self::setup_arenas(&mut skel)?;
+        
 
         info!(
             "Mask length {}, number of possible CPUs {}",
@@ -588,6 +589,8 @@ impl<'a> Scheduler<'a> {
         //
         // This invocation is safe because there is no concurrency in the program during initialization.
         unsafe { MASK_LEN = skel.maps.bss_data.mask_size as usize };
+
+        let types::topo_level(index) = types::topo_level::TOPO_LLC;
 
         for numa in 0..domains.nr_nodes() {
             let mut numa_mask = Cpumask::new();
@@ -601,7 +604,9 @@ impl<'a> Scheduler<'a> {
             info!("NODE[{:02}] mask= {}", numa, numa_mask);
 
             for dom in node_domains.iter() {
-                let domc = unsafe { &mut *skel.maps.bss_data.dom_ctxs[dom.id()] };
+                // XXX Remove this by using the topo node's cpumask.
+                let ptr = skel.maps.bss_data.topo_nodes[index as usize][dom.id()];
+                let domc = unsafe { std::mem::transmute::<u64, &mut types::dom_ctx>(ptr) };
                 update_bpf_mask(domc.cpumask, &dom.mask())?;
 
                 skel.maps.bss_data.dom_numa_id_map[dom.id()] =
@@ -618,7 +623,9 @@ impl<'a> Scheduler<'a> {
         for (id, dom) in domains.doms().iter() {
             let mut ctx = dom.ctx.lock().unwrap();
 
-            *ctx = Some(skel.maps.bss_data.dom_ctxs[*id]);
+            let ptr = skel.maps.bss_data.topo_nodes[index as usize][*id];
+            let domc = unsafe { std::mem::transmute::<u64, &mut types::dom_ctx>(ptr) };
+            *ctx = Some(domc);
         }
 
         info!("WD40 scheduler started! Run `scx_wd40 --monitor` for metrics.");

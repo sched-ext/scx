@@ -6,7 +6,9 @@
 
 #include <scx/common.bpf.h>
 #include <scx/ravg_impl.bpf.h>
+#include <lib/cpumask.h>
 #include <lib/sdt_task.h>
+#include <lib/topology.h>
 
 #include <scx/bpf_arena_common.h>
 #include <scx/bpf_arena_spin_lock.h>
@@ -36,7 +38,6 @@ struct {
 
 volatile scx_bitmap_t node_data[MAX_NUMA_NODES];
 
-volatile dom_ptr dom_ctxs[MAX_DOMS];
 struct scx_stk lb_domain_allocator;
 
 /*
@@ -115,7 +116,7 @@ dom_ptr try_lookup_dom_ctx(u32 dom_id)
 	if (dom_id >= MAX_DOMS)
 		return NULL;
 
-	return dom_ctxs[dom_id];
+	return (dom_ptr)topo_nodes[TOPO_LLC][dom_id];
 }
 
 __hidden
@@ -307,7 +308,7 @@ __weak s32 alloc_dom(u32 dom_id)
 	if (!domc)
 		return -ENOMEM;
 
-	dom_ctxs[dom_id] = domc;
+	topo_nodes[TOPO_LLC][dom_id] = (u64)domc;
 
 	return 0;
 }
