@@ -13,7 +13,7 @@ volatile topo_ptr topo_all;
  * will just keep a CPU id to CPU topology node array, but for
  * now we will have an array for each level.
  */
-topo_ptr topo_nodes[TOPO_MAX_LEVEL][NR_CPUS];
+u64 topo_nodes[TOPO_MAX_LEVEL][NR_CPUS];
 
 __weak
 int topo_contains(topo_ptr topo, u32 cpu)
@@ -58,7 +58,7 @@ topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask, u64 id)
 		return NULL;
 	}
 
-	topo_nodes[topo->level][topo->id] = topo;
+	topo_nodes[topo->level][topo->id] = (u64)topo;
 
 	return topo;
 }
