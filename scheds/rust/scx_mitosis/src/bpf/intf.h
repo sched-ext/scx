@@ -50,4 +50,16 @@ struct cgrp_ctx {
 	bool cell_owner;
 };
 
+/*
+ * cell is the per-cell book-keeping
+*/
+struct cell {
+	// current vtime of the cell
+	u64 vtime_now;
+	// which dsq the cell uses
+	u32 dsq;
+	// Whether or not the cell is used or not
+	u32 in_use;
+};
+
 #endif /* __INTF_H */

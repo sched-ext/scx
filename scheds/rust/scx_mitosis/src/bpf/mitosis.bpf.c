@@ -65,13 +65,13 @@ struct {
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
 	__type(value, struct cgrp_ctx);
-} cgrp_ctx SEC(".maps");
+} cgrp_ctxs SEC(".maps");
 
 static inline struct cgrp_ctx *lookup_cgrp_ctx(struct cgroup *cgrp)
 {
 	struct cgrp_ctx *cgc;
 
-	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctx, cgrp, 0, 0))) {
+	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0, 0))) {
 		scx_bpf_error("cgrp_ctx lookup failed for cgid %llu",
 			      cgrp->kn->id);
 		return NULL;
@@ -148,18 +148,6 @@ static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 
 	return cctx;
 }
-
-/*
- * cell is the per-cell book-keeping
-*/
-struct cell {
-	// current vtime of the cell
-	u64 vtime_now;
-	// which dsq the cell uses
-	u32 dsq;
-	// Whether or not the cell is used or not
-	u32 in_use;
-};
 
 struct cell cells[MAX_CELLS];
 
@@ -507,7 +495,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		goto out;
 	}
 
-	if (tctx->cpumask && bpf_cpumask_empty((const struct cpumask *)tctx->cpumask)) {
+	if (tctx->cpumask && bpf_cpumask_empty(cast_mask(tctx->cpumask))) {
 		/*
 		 * This is an affinity violation (no overlap between task cpus and cell
 		 * cpus) but we also failed to find an idle cpu in the task cpus. No
@@ -527,8 +515,9 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	 * All else failed, send it to the prev cpu (if that's valid), otherwise any
 	 * valid cpu.
 	 */
-	if (!bpf_cpumask_test_cpu(prev_cpu, (const struct cpumask *)tctx->cpumask) && tctx->cpumask)
-		cpu = bpf_cpumask_any_distribute((const struct cpumask *)tctx->cpumask);
+	if (!bpf_cpumask_test_cpu(prev_cpu, cast_mask(tctx->cpumask)) &&
+	    tctx->cpumask)
+		cpu = bpf_cpumask_any_distribute(cast_mask(tctx->cpumask));
 	else
 		cpu = prev_cpu;
 
@@ -925,7 +914,8 @@ static inline int cgroup_init_with_cpuset(struct cgrp_ctx *cgc,
 	int cpu_idx;
 	bpf_for(cpu_idx, 0, nr_possible_cpus)
 	{
-		if (bpf_cpumask_test_cpu(cpu_idx, (const struct cpumask *)&entry->cpumask)) {
+		if (bpf_cpumask_test_cpu(
+			    cpu_idx, (const struct cpumask *)&entry->cpumask)) {
 			struct cpu_ctx *cpu_ctx;
 			if (!(cpu_ctx = lookup_cpu_ctx(cpu_idx))) {
 				bpf_cpumask_release(bpf_cpumask);
@@ -962,7 +952,7 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 		   struct scx_cgroup_init_args *args)
 {
 	struct cgrp_ctx *cgc;
-	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctx, cgrp, 0,
+	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0,
 					 BPF_LOCAL_STORAGE_GET_F_CREATE))) {
 		scx_bpf_error("cgrp_ctx creation failed for cgid %llu",
 			      cgrp->kn->id);
@@ -999,7 +989,7 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 s32 BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
 {
 	struct cgrp_ctx *cgc;
-	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctx, cgrp, 0,
+	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0,
 					 BPF_LOCAL_STORAGE_GET_F_CREATE))) {
 		scx_bpf_error("cgrp_ctx creation failed for cgid %llu",
 			      cgrp->kn->id);
