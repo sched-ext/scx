@@ -37,12 +37,15 @@ jobs:
             "scx_bpfland",
             "scx_chaos",
             "scx_lavd",
-            "scx_p2dq",
             "scx_rlfifo",
             "scx_rustland",
             "scx_rusty",
             "scx_tickless",
           ]]
+
+          # p2dq fails on 6.12, see https://github.com/sched-ext/scx/issues/2075 for more info
+          if kernel != "stable/6_12":
+            matrix.append({ "name": "scx_p2dq", "flags": "" })
 
           for flags in itertools.product(
               ["--disable-topology=false", "--disable-topology=true"],
