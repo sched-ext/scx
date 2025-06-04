@@ -53,7 +53,7 @@ topo_ptr topo_node(topo_ptr parent, scx_bitmap_t mask, u64 id)
 		return NULL;
 	}
 
-	if (id >= TOPO_MAX_CHILDREN) {
+	if (id >= NR_CPUS) {
 		scx_bpf_error("invalid node id");
 		return NULL;
 	}
