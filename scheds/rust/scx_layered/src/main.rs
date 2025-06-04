@@ -215,6 +215,7 @@ lazy_static! {
                 kind: LayerKind::Grouped {
                     cpus_range: None,
                     util_range: (0.5, 0.6),
+                    util_includes_open_cputime: true,
                     protected: false,
                     cpus_range_frac: None,
                     common: LayerCommon {
@@ -1102,7 +1103,6 @@ impl Layer {
             LayerKind::Confined {
                 cpus_range,
                 cpus_range_frac,
-                util_range,
                 common: LayerCommon { nodes, llcs, .. },
                 ..
             } => {
@@ -1131,15 +1131,6 @@ impl Layer {
                             }
                         }
                     }
-                }
-
-                if util_range.0 < 0.0
-                    || util_range.0 > 1.0
-                    || util_range.1 < 0.0
-                    || util_range.1 > 1.0
-                    || util_range.0 >= util_range.1
-                {
-                    bail!("invalid util_range {:?}", util_range);
                 }
             }
             LayerKind::Grouped {
@@ -1171,6 +1162,14 @@ impl Layer {
                         }
                     }
                 }
+            }
+        }
+
+        // Util can be above 1.0 for grouped layers if
+        // util_includes_open_cputime is set.
+        if let Some(util_range) = kind.util_range() {
+            if util_range.0 < 0.0 || util_range.1 < 0.0 || util_range.0 >= util_range.1 {
+                bail!("invalid util_range {:?}", util_range);
             }
         }
 
@@ -2207,16 +2206,15 @@ impl<'a> Scheduler<'a> {
                     cpus_range_frac,
                     ..
                 } => {
-                    // Guide layer sizing by utilization within each layer
-                    // to avoid oversizing grouped layers. As an empty layer
-                    // can only get CPU time through fallback (counted as
-                    // owned) or open execution, add open cputime for empty
-                    // layers.
+                    // A grouped layer can choose to include open cputime
+                    // for sizing. Also, as an empty layer can only get CPU
+                    // time through fallback (counted as owned) or open
+                    // execution, add open cputime for empty layers.
                     let owned = utils[idx][LAYER_USAGE_OWNED];
                     let open = utils[idx][LAYER_USAGE_OPEN];
 
                     let mut util = owned;
-                    if layer.nr_cpus == 0 {
+                    if layer.kind.util_includes_open_cputime() || layer.nr_cpus == 0 {
                         util += open;
                     }
 
