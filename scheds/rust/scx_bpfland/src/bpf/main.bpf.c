@@ -492,10 +492,12 @@ static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
  * Return true if all the CPUs in the LLC of @cpu are busy, false
  * otherwise.
  */
-static bool is_llc_busy(const struct cpumask *idle_cpumask, s32 cpu)
+static bool is_llc_busy(s32 cpu)
 {
-	const struct cpumask *primary, *l3_mask;
+	const struct cpumask *primary, *l3_mask, *idle_cpumask;
 	struct cpu_ctx *cctx;
+	int node;
+	bool ret;
 
 	primary = cast_mask(primary_cpumask);
 	if (!primary)
@@ -509,7 +511,14 @@ static bool is_llc_busy(const struct cpumask *idle_cpumask, s32 cpu)
 	if (!l3_mask)
 		l3_mask = primary;
 
-	return !bpf_cpumask_intersects(l3_mask, idle_cpumask);
+	node = __COMPAT_scx_bpf_cpu_node(cpu);
+	idle_cpumask = __COMPAT_scx_bpf_get_idle_cpumask_node(node);
+
+	ret = !bpf_cpumask_intersects(l3_mask, idle_cpumask);
+
+	scx_bpf_put_cpumask(idle_cpumask);
+
+	return ret;
 }
 
 /*
@@ -543,30 +552,32 @@ static bool is_wake_sync(s32 prev_cpu, s32 this_cpu, u64 wake_flags)
 }
 
 /*
- * Return the target CPU for @p in case of a sync wakeup.
- *
- * During a sync wakeup, the waker commits to releasing the CPU immediately
- * after the wakeup event, so we should consider a sync wakeup almost like
- * a direct function call between a waker and a wakee.
+ * Return true if @this_cpu and @that_cpu shares the same LLC, false
+ * otherwise.
  */
-static s32 try_sync_wakeup(const struct task_struct *p, s32 prev_cpu, s32 this_cpu)
+static bool cpus_share_llc(s32 this_cpu, s32 that_cpu)
 {
-	/*
-	 * If @prev_cpu is idle, keep using it, since there is no guarantee
-	 * that the cache hot data from the waker's CPU is more important
-	 * than cache hot data in the wakee's CPU.
-	 */
-	if ((this_cpu != prev_cpu) && scx_bpf_test_and_clear_cpu_idle(prev_cpu))
-		return prev_cpu;
+	const struct cpumask *llc_mask;
+	struct cpu_ctx *cctx;
+
+	cctx = try_lookup_cpu_ctx(that_cpu);
+	if (!cctx)
+		return false;
 
 	/*
-	 * If waker and wakee are on the same CPU and no other tasks are
-	 * queued, consider the waker's CPU as idle.
+	 * If the L3 cpumask isn't defined, it means that either all CPUs
+	 * share the same L3 cache or the scheduler is running with
+	 * --disable-l3.
+	 *
+	 * In both cases, treat the CPUs as if they share the same LLC (the
+	 * --disable-l3 option, in this case, is interpreted as merging all
+	 *  L3 caches into a single virtual LLC).
 	 */
-	if (!scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | this_cpu))
-		return this_cpu;
+	llc_mask = cast_mask(cctx->l3_cpumask);
+	if (!llc_mask)
+		return true;
 
-	return -EBUSY;
+	return bpf_cpumask_test_cpu(this_cpu, llc_mask);
 }
 
 /*
@@ -585,7 +596,7 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	struct task_ctx *tctx;
 	int node;
 	s32 this_cpu = bpf_get_smp_processor_id(), cpu;
-	bool share_llc;
+	bool is_prev_allowed;
 
 	primary = cast_mask(primary_cpumask);
 	if (!primary)
@@ -596,14 +607,41 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		return -ENOENT;
 
 	/*
-	 * If prev_cpu is not in the primary domain, pick an arbitrary CPU
-	 * in the primary domain.
+	 * Get the task's primary scheduling domain.
 	 */
-	if (!bpf_cpumask_test_cpu(prev_cpu, primary)) {
-		cpu = bpf_cpumask_any_and_distribute(p->cpus_ptr, primary);
-		if (cpu >= nr_cpu_ids)
+	p_mask = cast_mask(tctx->cpumask);
+	is_prev_allowed = p_mask && bpf_cpumask_test_cpu(prev_cpu, p_mask);
+
+	/*
+	 * In case of a sync wakeup, attempt to run the wakee on the
+	 * waker's CPU if possible, as it's going to release the CPU right
+	 * after the wakeup, so it can be considered as idle and, possibly,
+	 * cache hot.
+	 */
+	if (is_wake_sync(prev_cpu, this_cpu, wake_flags)) {
+		/*
+		 * If @prev_cpu is idle, keep using it, since there is no guarantee
+		 * that the cache hot data from the waker's CPU is more important
+		 * than cache hot data in the wakee's CPU.
+		 */
+		if (is_prev_allowed && cpus_share_llc(prev_cpu, this_cpu) &&
+		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+			*is_idle = true;
 			return prev_cpu;
-		prev_cpu = cpu;
+		}
+
+		/*
+		 * Migrate the wakee to the waker's CPU, but only if the
+		 * waker's LLC is not completely saturated, to prevent
+		 * wakers/wakees abusing this mechanism and potentially
+		 * starving other tasks.
+		 */
+		if (p_mask && bpf_cpumask_test_cpu(this_cpu, p_mask) &&
+		    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | this_cpu) &&
+		    !is_llc_busy(this_cpu)) {
+			*is_idle = true;
+			return this_cpu;
+		}
 	}
 
 	/*
@@ -614,15 +652,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	if (tctx->recent_used_cpu != prev_cpu)
 		task_update_domain(p, tctx, prev_cpu, p->cpus_ptr);
 
-	p_mask = cast_mask(tctx->cpumask);
-	if (p_mask && bpf_cpumask_empty(p_mask))
-		p_mask = NULL;
 	l2_mask = cast_mask(tctx->l2_cpumask);
-	if (l2_mask && bpf_cpumask_empty(l2_mask))
-		l2_mask = NULL;
 	l3_mask = cast_mask(tctx->l3_cpumask);
-	if (l3_mask && bpf_cpumask_empty(l3_mask))
-		l3_mask = NULL;
 
 	/*
 	 * Acquire the CPU masks to determine the idle CPUs in the system.
@@ -632,26 +663,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	idle_cpumask = __COMPAT_scx_bpf_get_idle_cpumask_node(node);
 
 	/*
-	 * In case of a sync wakeup, attempt to run the wakee on the
-	 * waker's CPU if possible, as it's going to release the CPU right
-	 * after the wakeup, so it can be considered as idle and, possibly,
-	 * cache hot.
-	 *
-	 * However, ignore this optimization if the LLC is completely
-	 * saturated, since it's just more efficient to dispatch the task
-	 * on the first CPU available.
-	 */
-	share_llc = l3_mask && bpf_cpumask_test_cpu(this_cpu, l3_mask);
-	if (is_wake_sync(prev_cpu, this_cpu, wake_flags) &&
-	    share_llc && !is_llc_busy(idle_cpumask, this_cpu)) {
-		cpu = try_sync_wakeup(p, prev_cpu, this_cpu);
-		if (cpu >= 0) {
-			*is_idle = true;
-			goto out_put_cpumask;
-		}
-	}
-
-	/*
 	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
 	 */
 	if (smt_enabled) {
@@ -659,7 +670,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 * If the task can still run on the previously used CPU and
 		 * it's a full-idle core, keep using it.
 		 */
-		if (bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
+		if (is_prev_allowed &&
+		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 			cpu = prev_cpu;
 			*is_idle = true;
@@ -716,7 +728,8 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	 * If a full-idle core can't be found (or if this is not an SMT system)
 	 * try to re-use the same CPU, even if it's not in a full-idle core.
 	 */
-	if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+	if (is_prev_allowed &&
+	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
 		cpu = prev_cpu;
 		*is_idle = true;
 		goto out_put_cpumask;
