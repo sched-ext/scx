@@ -53,17 +53,6 @@ const volatile bool no_wake_sync;
 const volatile bool local_kthreads;
 
 /*
- * Prioritize per-CPU tasks (tasks that can only run on a single CPU).
- *
- * This allows to prioritize per-CPU tasks that usually tend to be
- * de-prioritized (since they can't be migrated when their only usable CPU
- * is busy). Enabling this option can introduce unfairness and potentially
- * trigger stalls, but it can improve performance of server-type workloads
- * (such as large parallel builds).
- */
-const volatile bool local_pcpu;
-
-/*
  * The CPU frequency performance level: a negative value will not affect the
  * performance level and will be ignored.
  */
@@ -791,10 +780,10 @@ out_put_cpumask:
 static bool can_direct_dispatch(int node)
 {
 	/*
-	 * Allow direct dispatch when @local_pcpu is enabled, or when there
-	 * are no tasks queued in the node DSQ.
+	 * Allow direct dispatch only if there are no tasks queued in the
+	 * node DSQ.
 	 */
-	return local_pcpu || !scx_bpf_dsq_nr_queued(node);
+	return !scx_bpf_dsq_nr_queued(node);
 }
 
 /*
@@ -891,6 +880,10 @@ static bool kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 				s32 prev_cpu, u64 slice, u64 enq_flags)
 {
+	int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
+	bool is_idle = false;
+	s32 cpu;
+
 	/*
 	 * If a task has been re-enqueued because its assigned CPU has been
 	 * taken by a higher priority scheduling class, force it to follow
@@ -918,87 +911,75 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 		return false;
 
 	/*
-	 * If ops.select_cpu() has been skipped, try direct dispatch.
+	 * Try direct dispatch only if ops.select_cpu() has been skipped,
+	 * since the task already had a chance to be directly dispatched
+	 * from ops.select_cpu().
 	 */
-	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
-		int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
+	if (__COMPAT_is_enq_cpu_selected(enq_flags))
+		return false;
 
-		/*
-		 * Stop here if direct dispatch is not allowed in the
-		 * target node.
-		 */
-		if (!can_direct_dispatch(node))
-			return false;
-
-		/*
-		 * If local_pcpu is enabled always dispatch tasks that can
-		 * only run on one CPU directly.
-		 *
-		 * This can help to improve I/O workloads (like large
-		 * parallel builds).
-		 */
-		if (local_pcpu && p->nr_cpus_allowed == 1) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, enq_flags);
+	/*
+	 * If the task can only run on a single CPU and that CPU is idle,
+	 * perform a direct dispatch.
+	 */
+	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
+		if (can_direct_dispatch(node) &&
+		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
 			return true;
 		}
 
 		/*
-		 * If the task can only run on a single CPU and that CPU is
-		 * idle, perform a direct dispatch.
+		 * No need to check for other CPUs if the task can only run
+		 * on a single one.
 		 */
-		if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
-			if (scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
-				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL,
-						   slice_max, enq_flags);
-				__sync_fetch_and_add(&nr_direct_dispatches, 1);
-
-				return true;
-			}
-
-			/*
-			 * No need to check for other CPUs if the task can
-			 * only run on a single one.
-			 */
-			return false;
-		}
-
-		/*
-		 * For tasks that are not limited to run on a single CPU,
-		 * check if their previously used CPU is a full-idle SMT
-		 * core and in that case perform a direct dispatch.
-		 */
-		if (is_fully_idle(prev_cpu)) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu,
-					   slice_max, enq_flags);
-			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-
-			return true;
-		}
-
-		/*
-		 * In case of a remote wakeup (ttwu_queue), attempt a task
-		 * migration.
-		 */
-		if (!scx_bpf_task_running(p)) {
-			bool is_idle = false;
-			s32 cpu;
-
-			cpu = pick_idle_cpu(p, prev_cpu, 0, &is_idle);
-			if (is_idle) {
-				scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_max, 0);
-				__sync_fetch_and_add(&nr_direct_dispatches, 1);
-
-				return true;
-			}
-		}
+		return false;
 	}
 
 	/*
-	 * Direct dispatch not possible, follow the regular scheduling
-	 * path.
+	 * For tasks that are not limited to run on a single CPU, check if
+	 * their previously used CPU is a full-idle SMT core and in that
+	 * case perform a direct dispatch.
 	 */
+	if (can_direct_dispatch(node) && is_fully_idle(prev_cpu)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice_max, enq_flags);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+
+		return true;
+	}
+
+	/*
+	 * In case of a remote wakeup (ttwu_queue), the task was not
+	 * running, so attempt a task migration and dispatch to an idle
+	 * CPU.
+	 */
+	if (scx_bpf_task_running(p))
+		return false;
+
+	cpu = pick_idle_cpu(p, prev_cpu, 0, &is_idle);
+	if (!is_idle)
+		return false;
+
+	/*
+	 * Try direct dispatch to the idle CPU found.
+	 */
+	node = __COMPAT_scx_bpf_cpu_node(cpu);
+	if (can_direct_dispatch(node)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_max, 0);
+		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+
+		return true;
+	}
+
+	/*
+	 * Kick the CPU that we just idle-locked, since we didn't dispatch
+	 * the task we want it to either be re-added to the idle pool or
+	 * consume another task from the per-node DSQ.
+	 */
+	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+
 	return false;
 }
 
