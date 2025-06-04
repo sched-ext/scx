@@ -395,7 +395,7 @@ impl<'a> Scheduler<'a> {
         skel: &mut BpfSkel<'a>,
         mask: &[u64],
         data_size: usize,
-        id: u64,
+        id: usize,
     ) -> Result<()> {
         let mut args = types::arena_alloc_mask_args {
             bitmap: 0 as c_ulong,
@@ -453,13 +453,21 @@ impl<'a> Scheduler<'a> {
     fn setup_topology(skel: &mut BpfSkel<'a>) -> Result<()> {
         let topo = Topology::new().expect("Failed to build host topology");
 
+        // We never use the topology-provided IDs, because we do not need them anymore now that
+        // we have a proper topology struct. We instead only use sequential IDs we create
+        // ourselves to attach to the topology nodes. This is because the Topology-provided IDs
+        // are used to determine relations between topology nodes, e.g., LLCs belonging to a
+        // node, while sequential IDs are useful for linearly scanning the topology, e.g.,
+        // iterating over domains. This is why we LLC IDs and domain IDs in scx_wd40 are different.
+        // For now we only need the sequential IDs, so use those. Eventually we will be able
+        // to remove those, too, once we remove the hardcoded arrays from the code.
         Self::setup_topology_node(skel, topo.span.as_raw_slice(), 0, 0)?;
 
-        for (_, node) in topo.nodes {
-            Self::setup_topology_node(skel, node.span.as_raw_slice(), 0, 0)?;
+        for (id, (_, node)) in topo.nodes.into_iter().enumerate() {
+            Self::setup_topology_node(skel, node.span.as_raw_slice(), 0, id)?;
         }
 
-        for (_, llc) in topo.all_llcs {
+        for (id, (_, llc)) in topo.all_llcs.into_iter().into_iter().enumerate() {
             Self::setup_topology_node(
                 skel,
                 Arc::<Llc>::into_inner(llc)
@@ -467,10 +475,10 @@ impl<'a> Scheduler<'a> {
                     .span
                     .as_raw_slice(),
                 0,
-                0,
+                id,
             )?;
         }
-        for (_, core) in topo.all_cores {
+        for (id, (_, core)) in topo.all_cores.into_iter().into_iter().enumerate() {
             Self::setup_topology_node(
                 skel,
                 Arc::<Core>::into_inner(core)
@@ -478,13 +486,13 @@ impl<'a> Scheduler<'a> {
                     .span
                     .as_raw_slice(),
                 0,
-                0,
+                id,
             )?;
         }
-        for (_, cpu) in topo.all_cpus {
+        for (id, (_, cpu)) in topo.all_cpus.into_iter().into_iter().enumerate() {
             let mut mask = [0; 9];
             mask[cpu.id.checked_shr(64).unwrap_or(0)] |= 1 << (cpu.id % 64);
-            Self::setup_topology_node(skel, &mask, 0, 0)?;
+            Self::setup_topology_node(skel, &mask, 0, id)?;
         }
 
         Ok(())
