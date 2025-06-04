@@ -19,6 +19,8 @@ fn main() -> anyhow::Result<()> {
     simplelog::TermLogger::init(
         llv,
         simplelog::ConfigBuilder::new()
+            .set_time_offset_to_local()
+            .unwrap()
             .set_time_level(simplelog::LevelFilter::Error)
             .set_location_level(simplelog::LevelFilter::Off)
             .set_target_level(simplelog::LevelFilter::Off)
