@@ -48,7 +48,7 @@ both updating the kernel lock and making necessary fixes to the codebase.
 We use `virtme-ng` for testing in the CI environment, and it should be possible
 to reproduce behaviour locally with the same pinned kernels. To get an identical
 kernel to the CI with Nix installed, run:
-    nix build ./.github/include#kernels.sched_ext/for-next
+    nix build ./.github/include#kernel_sched_ext/for-next
 And the kernel image will be available at `result/bzImage`. Alternatively you
 can clone the repo/commit from `kernel-versions.json`, but this isn't guaranteed
 to be reproducible.
