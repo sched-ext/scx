@@ -2,8 +2,6 @@
 
 #include <lib/sdt_task.h>
 
-extern volatile dom_ptr dom_ctxs[MAX_DOMS];
-
 int lb_domain_init(void);
 dom_ptr lb_domain_alloc(u32 dom_id);
 void lb_domain_free(dom_ptr domc);

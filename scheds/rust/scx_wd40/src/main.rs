@@ -391,7 +391,12 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn setup_topology_node(skel: &mut BpfSkel<'a>, mask: &[u64], data_size: usize) -> Result<()> {
+    fn setup_topology_node(
+        skel: &mut BpfSkel<'a>,
+        mask: &[u64],
+        data_size: usize,
+        id: usize,
+    ) -> Result<()> {
         let mut args = types::arena_alloc_mask_args {
             bitmap: 0 as c_ulong,
         };
@@ -422,6 +427,7 @@ impl<'a> Scheduler<'a> {
         let mut args = types::arena_topology_node_init_args {
             bitmap: args.bitmap as c_ulong,
             data_size: data_size as c_ulong,
+            id: id as c_ulong,
         };
 
         let input = ProgramInput {
@@ -447,13 +453,21 @@ impl<'a> Scheduler<'a> {
     fn setup_topology(skel: &mut BpfSkel<'a>) -> Result<()> {
         let topo = Topology::new().expect("Failed to build host topology");
 
-        Self::setup_topology_node(skel, topo.span.as_raw_slice(), 0)?;
+        // We never use the topology-provided IDs, because we do not need them anymore now that
+        // we have a proper topology struct. We instead only use sequential IDs we create
+        // ourselves to attach to the topology nodes. This is because the Topology-provided IDs
+        // are used to determine relations between topology nodes, e.g., LLCs belonging to a
+        // node, while sequential IDs are useful for linearly scanning the topology, e.g.,
+        // iterating over domains. This is why we LLC IDs and domain IDs in scx_wd40 are different.
+        // For now we only need the sequential IDs, so use those. Eventually we will be able
+        // to remove those, too, once we remove the hardcoded arrays from the code.
+        Self::setup_topology_node(skel, topo.span.as_raw_slice(), 0, 0)?;
 
-        for (_, node) in topo.nodes {
-            Self::setup_topology_node(skel, node.span.as_raw_slice(), 0)?;
+        for (id, (_, node)) in topo.nodes.into_iter().enumerate() {
+            Self::setup_topology_node(skel, node.span.as_raw_slice(), 0, id)?;
         }
 
-        for (_, llc) in topo.all_llcs {
+        for (id, (_, llc)) in topo.all_llcs.into_iter().into_iter().enumerate() {
             Self::setup_topology_node(
                 skel,
                 Arc::<Llc>::into_inner(llc)
@@ -461,9 +475,10 @@ impl<'a> Scheduler<'a> {
                     .span
                     .as_raw_slice(),
                 0,
+                id,
             )?;
         }
-        for (_, core) in topo.all_cores {
+        for (id, (_, core)) in topo.all_cores.into_iter().into_iter().enumerate() {
             Self::setup_topology_node(
                 skel,
                 Arc::<Core>::into_inner(core)
@@ -471,12 +486,13 @@ impl<'a> Scheduler<'a> {
                     .span
                     .as_raw_slice(),
                 0,
+                id,
             )?;
         }
-        for (_, cpu) in topo.all_cpus {
+        for (id, (_, cpu)) in topo.all_cpus.into_iter().into_iter().enumerate() {
             let mut mask = [0; 9];
             mask[cpu.id.checked_shr(64).unwrap_or(0)] |= 1 << (cpu.id % 64);
-            Self::setup_topology_node(skel, &mask, 0)?;
+            Self::setup_topology_node(skel, &mask, 0, id)?;
         }
 
         Ok(())
@@ -544,22 +560,6 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.nr_doms = domains.nr_doms() as u32;
         skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
 
-        // Any CPU with dom > MAX_DOMS is considered offline by default. There
-        // are a few places in the BPF code where we skip over offlined CPUs
-        // (e.g. when initializing or refreshing tune params), and elsewhere the
-        // scheduler will error if we try to schedule from them.
-        for cpu in 0..*NR_CPU_IDS {
-            skel.maps.rodata_data.cpu_dom_id_map[cpu] = u32::MAX;
-        }
-
-        for (id, dom) in domains.doms().iter() {
-            for cpu in dom.mask().iter() {
-                skel.maps.rodata_data.cpu_dom_id_map[cpu] = (*id)
-                    .try_into()
-                    .expect("Domain ID could not fit into 32 bits");
-            }
-        }
-
         if opts.partial {
             skel.struct_ops.wd40_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
         }
@@ -578,9 +578,10 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_load!(skel, wd40, uei)?;
 
         Self::setup_arenas(&mut skel)?;
+        
 
-        println!(
-            "Mask length {} NR_CPU_IDS {}",
+        info!(
+            "Mask length {}, number of possible CPUs {}",
             skel.maps.bss_data.mask_size, skel.maps.rodata_data.nr_cpu_ids
         );
         // Read the mask length chosen by BPF. We count elements in the u64 array, like the BPF
@@ -588,6 +589,8 @@ impl<'a> Scheduler<'a> {
         //
         // This invocation is safe because there is no concurrency in the program during initialization.
         unsafe { MASK_LEN = skel.maps.bss_data.mask_size as usize };
+
+        let types::topo_level(index) = types::topo_level::TOPO_LLC;
 
         for numa in 0..domains.nr_nodes() {
             let mut numa_mask = Cpumask::new();
@@ -601,7 +604,9 @@ impl<'a> Scheduler<'a> {
             info!("NODE[{:02}] mask= {}", numa, numa_mask);
 
             for dom in node_domains.iter() {
-                let domc = unsafe { &mut *skel.maps.bss_data.dom_ctxs[dom.id()] };
+                // XXX Remove this by using the topo node's cpumask.
+                let ptr = skel.maps.bss_data.topo_nodes[index as usize][dom.id()];
+                let domc = unsafe { std::mem::transmute::<u64, &mut types::dom_ctx>(ptr) };
                 update_bpf_mask(domc.cpumask, &dom.mask())?;
 
                 skel.maps.bss_data.dom_numa_id_map[dom.id()] =
@@ -618,7 +623,9 @@ impl<'a> Scheduler<'a> {
         for (id, dom) in domains.doms().iter() {
             let mut ctx = dom.ctx.lock().unwrap();
 
-            *ctx = Some(skel.maps.bss_data.dom_ctxs[*id]);
+            let ptr = skel.maps.bss_data.topo_nodes[index as usize][*id];
+            let domc = unsafe { std::mem::transmute::<u64, &mut types::dom_ctx>(ptr) };
+            *ctx = Some(domc);
         }
 
         info!("WD40 scheduler started! Run `scx_wd40 --monitor` for metrics.");

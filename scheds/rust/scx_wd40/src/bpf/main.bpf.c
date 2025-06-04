@@ -75,7 +75,6 @@ UEI_DEFINE(uei);
 /*
  * Domains and cpus
  */
-const volatile u32 cpu_dom_id_map[MAX_CPUS];
 const volatile u32 wd40_perf_mode;
 
 const volatile bool kthreads_local;
@@ -113,20 +112,33 @@ scx_bitmap_t all_cpumask;
 scx_bitmap_t direct_greedy_cpumask;
 scx_bitmap_t kick_greedy_cpumask;
 
-static u32 cpu_to_dom_id(s32 cpu)
+static inline u32 cpu_to_dom_id(u32 cpu)
 {
-	const volatile u32 *dom_idp;
+	topo_ptr topo;
+	u32 id;
 
-	dom_idp = MEMBER_VPTR(cpu_dom_id_map, [cpu]);
-	if (!dom_idp)
+	if (cpu >= NR_CPUS) {
+		scx_bpf_error("invalid CPU ID");
 		return MAX_DOMS;
+	}
 
-	return *dom_idp;
+	topo = (topo_ptr)topo_nodes[TOPO_CPU][cpu];
+	if (!topo) {
+		scx_bpf_error("cpu is offline");
+		return MAX_DOMS;
+	}
+
+	id = topo->parent->parent->id;
+	if (id >= MAX_DOMS) {
+		scx_bpf_error("invalid domain id");
+	}
+
+	return id;
 }
 
 static inline bool is_offline_cpu(s32 cpu)
 {
-	return cpu_to_dom_id(cpu) > MAX_DOMS;
+	return topo_nodes[TOPO_CPU] == NULL;
 }
 
 static s32 try_sync_wakeup(struct task_struct *p, task_ptr taskc,
@@ -564,6 +576,8 @@ void BPF_STRUCT_OPS(wd40_dispatch, s32 cpu, struct task_struct *prev)
 	u32 curr_dom = cpu_to_dom_id(cpu);
 	struct pcpu_ctx *pcpuc;
 
+	scx_arena_subprog_init();
+
 	/*
 	 * In older kernels, we may receive an ops.dispatch() callback when a
 	 * CPU is coming online during a hotplug _before_ the hotplug callback
@@ -861,8 +875,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(wd40_init)
 		if (ret)
 			return ret;
 
-		scx_bitmap_or(all_cpumask, all_cpumask, dom_ctxs[i]->cpumask);
 	}
+
+	scx_bitmap_or(all_cpumask, all_cpumask, topo_all->mask);
 
 	bpf_for(i, 0, nr_cpu_ids) {
 
