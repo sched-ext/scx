@@ -108,20 +108,13 @@
 
           packages = {
             nix-develop-gha = nix-develop-gha.packages.${system}.default;
-            bpf-clang = makeBpfClang pkgs.llvmPackages self.packages.${system}.kernels."sched_ext/for-next";
+            bpf-clang = makeBpfClang pkgs.llvmPackages self.packages.${system}."kernel_sched_ext/for-next";
 
             veristat = pkgs.callPackage ./veristat.nix {
               version = "git";
               src = veristat-src;
             };
 
-            kernels = builtins.mapAttrs
-              (name: details: (pkgs.callPackage ./build-kernel.nix {
-                inherit name;
-                inherit (details) repo branch commitHash narHash;
-                version = details.kernelVersion;
-              }))
-              (builtins.fromJSON (builtins.readFile ./../../kernel-versions.json));
 
             ci = pkgs.python3Packages.buildPythonApplication rec {
               pname = "ci";
@@ -193,7 +186,13 @@
 
               installPhase = "install -Dm755 ${../include/ci.py} $out/bin/ci";
             };
-          };
+          } // (with lib.attrsets; mapAttrs'
+            (name: details: nameValuePair "kernel_${name}" (pkgs.callPackage ./build-kernel.nix {
+              inherit name;
+              inherit (details) repo branch commitHash narHash;
+              version = details.kernelVersion;
+            }))
+            (builtins.fromJSON (builtins.readFile ./../../kernel-versions.json)));
         }) // flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };

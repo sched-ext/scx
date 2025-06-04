@@ -10,13 +10,13 @@ runs:
   steps:
     - name: Get Nix store path
       run: |
-        echo "KERNEL_STORE_PATH=$(nix eval --raw ./.github/include#kernels.'${{ inputs.repo-name }}'.outPath)" >> $GITHUB_ENV
-        echo "KERNEL_HEADERS_STORE_PATH=$(nix eval --raw ./.github/include#kernels.'${{ inputs.repo-name }}'.headers.outPath)" >> $GITHUB_ENV
+        echo "KERNEL_STORE_PATH=$(nix eval --raw ./.github/include#'kernel_${{ inputs.repo-name }}'.outPath)" >> $GITHUB_ENV
+        echo "KERNEL_HEADERS_STORE_PATH=$(nix eval --raw ./.github/include#'kernel_${{ inputs.repo-name }}'.headers.outPath)" >> $GITHUB_ENV
       shell: bash
 
     - name: Build kernel
       shell: bash
-      run: nix build --no-link ./.github/include#kernels.'${{ inputs.repo-name }}'{,.headers}
+      run: nix build --no-link ./.github/include#'kernel_${{ inputs.repo-name }}'{,.headers}
 
     - name: Explicitly push to cachix
       shell: bash
