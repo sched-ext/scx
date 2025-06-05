@@ -125,6 +125,17 @@ struct Opts {
     #[clap(short = 'l', long, default_value = "20000")]
     slice_us_lag: u64,
 
+    /// Maximum rate of voluntary context switches.
+    ///
+    /// Increasing this value can help prioritize interactive tasks with a higher sleep frequency
+    /// over interactive tasks with lower sleep frequency.
+    ///
+    /// Decreasing this value makes the scheduler more robust and fair.
+    ///
+    /// (0 = disable voluntary context switch prioritization).
+    #[clap(short = 'c', long, default_value = "128")]
+    max_avg_nvcsw: u64,
+
     /// Throttle the running CPUs by periodically injecting idle cycles.
     ///
     /// This option can help extend battery life on portable devices, reduce heating, fan noise
@@ -281,6 +292,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
         skel.maps.rodata_data.throttle_ns = opts.throttle_us * 1000;
+        skel.maps.rodata_data.max_avg_nvcsw = opts.max_avg_nvcsw;
 
         // Implicitly enable direct dispatch of per-CPU kthreads if CPU throttling is enabled
         // (it's never a good idea to throttle per-CPU kthreads).

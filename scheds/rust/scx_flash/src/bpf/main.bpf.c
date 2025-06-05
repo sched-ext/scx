@@ -38,6 +38,12 @@ const volatile u64 slice_min = 1ULL * NSEC_PER_MSEC;
 const volatile u64 slice_lag = 20ULL * NSEC_PER_MSEC;
 
 /*
+ * Maximum amount of voluntary context switches (this limit allows to prevent
+ * spikes or abuse of the nvcsw dynamic).
+ */
+const volatile u64 max_avg_nvcsw = 128ULL;
+
+/*
  * Ignore synchronous wakeup events.
  */
 const volatile bool no_wake_sync;
@@ -245,6 +251,13 @@ struct task_ctx {
 	u64 last_run_at;
 
 	/*
+	 * Voluntary context switches metrics.
+	 */
+	u64 nvcsw;
+	u64 nvcsw_ts;
+	u64 avg_nvcsw;
+
+	/*
 	 * Task's deadline, defined as:
 	 *
 	 *   deadline = vruntime + exec_vruntime
@@ -288,6 +301,24 @@ struct task_ctx *try_lookup_task_ctx(const struct task_struct *p)
 {
 	return bpf_task_storage_get(&task_ctx_stor,
 					(struct task_struct *)p, 0, 0);
+}
+
+/*
+ * Prevent excessive prioritization of tasks performing massive fsync()
+ * operations on the filesystem. These tasks can degrade system responsiveness
+ * by not being inherently latency-sensitive.
+ */
+SEC("?kprobe/vfs_fsync_range")
+int kprobe_vfs_fsync_range(struct file *file, u64 start, u64 end, int datasync)
+{
+	struct task_struct *p = (void *)bpf_get_current_task_btf();
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (tctx)
+		tctx->avg_nvcsw = 0;
+
+	return 0;
 }
 
 /*
@@ -388,7 +419,7 @@ static inline u64 scale_by_task_normalized_weight_inverse(const struct task_stru
  */
 static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
 {
-	u64 vtime_min;
+	u64 vtime_min, max_sleep;
 
 	/*
 	 * Cap the vruntime budget that an idle task can accumulate to
@@ -1256,6 +1287,51 @@ void BPF_STRUCT_OPS(flash_runnable, struct task_struct *p, u64 enq_flags)
 	tctx->exec_runtime = 0;
 }
 
+/*
+ * Exponential weighted moving average (EWMA).
+ *
+ * Copied from scx_lavd. Returns the new average as:
+ *
+ *	new_avg := (old_avg * .75) + (new_val * .25);
+ */
+static u64 calc_avg(u64 old_val, u64 new_val)
+{
+	return (old_val - (old_val >> 2)) + (new_val >> 2);
+}
+
+/*
+ * Evaluate the EWMA limited to the range [low ... high]
+ */
+static u64 calc_avg_clamp(u64 old_val, u64 new_val, u64 low, u64 high)
+{
+	return CLAMP(calc_avg(old_val, new_val), low, high);
+}
+
+void BPF_STRUCT_OPS(flash_quiescent, struct task_struct *p, u64 deq_flags)
+{
+	u64 now = scx_bpf_now();
+	s64 delta_t;
+	struct task_ctx *tctx;
+
+	tctx = try_lookup_task_ctx(p);
+	if (!tctx)
+		return;
+
+	/*
+	 * Refresh voluntary context switch metrics every @slice_lag ns.
+	 */
+	tctx->nvcsw++;
+
+	delta_t = time_delta(now, tctx->nvcsw_ts);
+	if (delta_t > slice_lag) {
+		u64 avg = tctx->nvcsw * slice_lag / delta_t;
+
+		tctx->avg_nvcsw = calc_avg_clamp(tctx->avg_nvcsw, avg, 0, max_avg_nvcsw);
+		tctx->nvcsw = 0;
+		tctx->nvcsw_ts = now;
+	}
+}
+
 void BPF_STRUCT_OPS(flash_cpu_release, s32 cpu, struct scx_cpu_release_args *args)
 {
 	/*
@@ -1688,6 +1764,7 @@ SCX_OPS_DEFINE(flash_ops,
 	       .running			= (void *)flash_running,
 	       .stopping		= (void *)flash_stopping,
 	       .runnable		= (void *)flash_runnable,
+	       .quiescent		= (void *)flash_quiescent,
 	       .cpu_release		= (void *)flash_cpu_release,
 	       .set_cpumask		= (void *)flash_set_cpumask,
 	       .enable			= (void *)flash_enable,
