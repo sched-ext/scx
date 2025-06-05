@@ -1375,11 +1375,11 @@ static void kick_idle_cpu(struct task_struct *p, struct layer *layer)
 		}
 	}
 
-	bpf_cpumask_release(cand_cpumask);
-	scx_bpf_put_idle_cpumask(idle_smtmask);
-
 	if (cpu >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	
+	bpf_cpumask_release(cand_cpumask);
+	scx_bpf_put_idle_cpumask(idle_smtmask);
 }
 
 void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
