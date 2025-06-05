@@ -1340,7 +1340,10 @@ static void kick_idle_cpu(struct task_struct *p, struct layer *layer)
 
 	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
 		return;
-
+	
+	/*
+	 * XXX: this should account for cpuset also.
+	 */
 	if (!(cpuc = lookup_cpu_ctx(-1)) || !(cand_cpumask = bpf_cpumask_create())) {
 		scx_bpf_put_idle_cpumask(idle_smtmask);
 		return;
@@ -2976,7 +2979,7 @@ void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
 
 	bpf_for(layer_id, 0, nr_layers) {
 		/*
-		* XXX this should account for cpuset also.
+		* XXX: this should account for cpuset also.
 		*/
 		if((layer = lookup_layer(layer_id)) && 
 			layer->skip_remote_node && 
