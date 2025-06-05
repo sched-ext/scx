@@ -60,6 +60,7 @@ const volatile u32 interactive_ratio = 10;
 const volatile u32 min_nr_queued_pick2 = 10;
 
 const volatile bool autoslice = true;
+const volatile bool backwards_sticky = false;
 const volatile bool dispatch_pick2_disable = false;
 const volatile bool eager_load_balance = true;
 const volatile bool interactive_sticky = false;
@@ -434,6 +435,19 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 		goto found_cpu;
 	}
 
+	if (backwards_sticky &&
+	    ((taskc->bs_mask & nr_cpus) != nr_cpus)) {
+		s32 i;
+		bpf_for(i, 0, nr_cpus)
+			if (taskc->bs_mask == 0 || (taskc->bs_mask & i) != i) {
+				if (i == nr_cpus - 1)
+					taskc->bs_mask |= nr_cpus;
+				cpu = i;
+				*is_idle = true;
+				goto found_cpu;
+			}
+	}
+
 	// First check if last CPU is idle
 	if (taskc->all_cpus &&
 	    bpf_cpumask_test_cpu(prev_cpu, (smt_enabled && !interactive) ?
@@ -770,6 +784,8 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 	if (taskc->node_id != cpuc->node_id) {
 		stat_inc(P2DQ_STAT_NODE_MIGRATION);
 	}
+	if (backwards_sticky)
+		taskc->bs_mask |= task_cpu;
 
 	taskc->llc_id = llcx->id;
 	taskc->node_id = llcx->node_id;
@@ -1123,6 +1139,7 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 		return -EINVAL;
 	}
 
+	taskc->bs_mask = 0;
 	taskc->llc_id = cpuc->llc_id;
 	taskc->node_id = cpuc->node_id;
 	taskc->dsq_index = init_dsq_index;
