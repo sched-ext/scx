@@ -2955,7 +2955,9 @@ void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
 		*/
 		if((layer = lookup_layer(layer_id)) && 
 			layer->skip_remote_node && 
-			(layer_cpumask = lookup_layer_cpumask(layer_id)) && 
+			(layer_cpumask = lookup_layer_cpumask(layer_id)) &&
+			// verifier
+			nctx->cpumask && 
 			!bpf_cpumask_intersects(layer_cpumask, cast_mask(nctx->cpumask))) {
 			lstat_inc(LSTAT_SKIP_REMOTE_NODE, layer, cpuc);
 			continue;
