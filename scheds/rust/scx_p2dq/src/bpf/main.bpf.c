@@ -835,6 +835,9 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	__sync_fetch_and_add(&llcx->dsq_max_vtime[dsq_index], scaled_used);
 	__sync_fetch_and_add(&llcx->dsq_load[dsq_index], used);
 	__sync_fetch_and_add(&llcx->load, used);
+	if (!taskc->all_cpus)
+		// Note that affinitized load is absolute load, not scaled.
+		__sync_fetch_and_add(&llcx->affn_load, used);
 
 
 	trace("%s weight %d slice %llu used %llu scaled %llu",
@@ -1411,6 +1414,7 @@ reset_load:
 			return false;
 
 		llcx->load = 0;
+		llcx->affn_load = 0;
 		llcx->last_period_ns = scx_bpf_now();
 		bpf_for(j, 0, nr_dsqs_per_llc) {
 			llcx->dsq_load[j] = 0;

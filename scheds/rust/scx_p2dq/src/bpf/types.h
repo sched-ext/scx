@@ -28,6 +28,7 @@ struct llc_ctx {
 	u32				lb_llc_id;
 	u64				last_period_ns;
 	u64				load;
+	u64				affn_load;
 	u32				index;
 	bool				all_big;
 	u64				dsqs[MAX_DSQS_PER_LLC];
