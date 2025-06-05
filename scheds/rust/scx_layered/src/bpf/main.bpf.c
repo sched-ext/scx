@@ -1341,7 +1341,7 @@ static void kick_idle_cpu(struct task_struct *p, struct layer *layer)
 	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
 		return;
 
-	if (!(cand_cpumask = bpf_cpumask_create()) || !(cpuc = lookup_cpu_ctx(-1))) {
+	if (!(cpuc = lookup_cpu_ctx(-1)) || !(cand_cpumask = bpf_cpumask_create())) {
 		scx_bpf_put_idle_cpumask(idle_smtmask);
 		return;
 	}
