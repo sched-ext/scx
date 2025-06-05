@@ -6,23 +6,13 @@ on:
     - cron: "40 2,8,14,20 * * *"
 
 jobs:
-  build-kernel:
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64" ]') || 'ubuntu-latest' }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Nix
-        uses: ./.github/actions/install-nix
-        with:
-          cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-
-      - uses: ./.github/actions/build-kernel
-        with:
-          repo-name: stable/linux-rolling-stable
+  build-kernels:
+    uses: ./.github/workflows/build-kernels.yml
+    secrets: inherit
 
   integration-test:
     uses: ./.github/workflows/integration-tests.yml
-    needs: build-kernel
+    needs: build-kernels
     secrets: inherit
     with:
       repo-name: stable/linux-rolling-stable
