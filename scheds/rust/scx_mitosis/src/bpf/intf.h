@@ -34,6 +34,9 @@ enum consts {
 enum cell_stat_idx {
 	CSTAT_LOCAL,
 	CSTAT_GLOBAL,
+	CSTAT_LO_FALLBACK_Q,
+	CSTAT_HI_FALLBACK_Q,
+	CSTAT_DEFAULT_Q,
 	CSTAT_AFFN_VIOL,
 	NR_CSTATS,
 };
