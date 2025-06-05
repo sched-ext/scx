@@ -2933,8 +2933,11 @@ void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
 	struct cpu_ctx *cpuc;
 	unsigned layer_id;
 	u32 llc_id;
+	const struct node_ctx *nctx;
+	struct layer *layer;
+	struct cpumask *layer_cpumask;
 
-	if (!idle || !(cpuc = lookup_cpu_ctx(cpu)))
+	if (!idle || !(cpuc = lookup_cpu_ctx(cpu)) || !(nctx = lookup_node_ctx(cpuc->node_id)))
 		return;
 
 	cpuc->protect_owned = false;
@@ -2945,7 +2948,18 @@ void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
 	 * see idle set or we see the task in one of the DSQs.
 	 */
 	llc_id = cpu_to_llc_id(cpu);
+
 	bpf_for(layer_id, 0, nr_layers) {
+		/*
+		* XXX this should account for cpuset also.
+		*/
+		if((layer = lookup_layer(layer_id)) && 
+			layer->skip_remote_node && 
+			(layer_cpumask = lookup_layer_cpumask(layer_id)) && 
+			!bpf_cpumask_intersects(layer_cpumask, cast_mask(nctx->cpumask))) {
+			lstat_inc(LSTAT_SKIP_REMOTE_NODE, layer, cpuc);
+			continue;
+		}
 		if (scx_bpf_dsq_nr_queued(layer_dsq_id(layer_id, llc_id))) {
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			break;
