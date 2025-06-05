@@ -95,6 +95,9 @@ pub enum Trait {
         frequency: f64,
         degradation_frac7: u64,
     },
+    BackwardsSticky {
+        frequency: f64,
+    },
 }
 
 impl Trait {
@@ -103,6 +106,7 @@ impl Trait {
             Self::RandomDelays { .. } => bpf_intf::chaos_trait_kind_CHAOS_TRAIT_RANDOM_DELAYS,
             Self::CpuFreq { .. } => bpf_intf::chaos_trait_kind_CHAOS_TRAIT_CPU_FREQ,
             Self::PerfDegradation { .. } => bpf_intf::chaos_trait_kind_CHAOS_TRAIT_DEGRADATION,
+            Self::BackwardsSticky { .. } => bpf_intf::chaos_trait_kind_CHAOS_TRAIT_BACKWARDS_STICKY,
         }
     }
 
@@ -111,6 +115,7 @@ impl Trait {
             Self::RandomDelays { frequency, .. } => *frequency,
             Self::CpuFreq { frequency, .. } => *frequency,
             Self::PerfDegradation { frequency, .. } => *frequency,
+            Self::BackwardsSticky { frequency, .. } => *frequency,
         }
     }
 }
@@ -409,6 +414,10 @@ impl Builder<'_> {
                         (frequency * 2_f64.powf(32_f64)) as u32;
                     open_skel.maps.rodata_data.degradation_frac7 = *degradation_frac7;
                 }
+                Trait::BackwardsSticky { frequency } => {
+                    open_skel.maps.rodata_data.backwards_sticky_freq_frac32 =
+                        (frequency * 2_f64.powf(32_f64)) as u32;
+                }
             }
         }
 
@@ -499,6 +508,15 @@ pub struct PerfDegradationArgs {
     pub degradation_frac7: u64,
 }
 
+/// Backwards Sticky scheduling is where a task is scheduled on all CPUs iteratively to break
+/// caches and then returned to sticky scheduling.
+#[derive(Debug, Parser)]
+pub struct BackwardsStickyArgs {
+    /// Chance of applying backward sticky to a process.
+    #[clap(long)]
+    pub bs_frequency: Option<f64>,
+}
+
 /// scx_chaos: A general purpose sched_ext scheduler designed to amplify race conditions
 ///
 /// WARNING: This scheduler is a very early alpha, and hasn't been production tested yet. The CLI
@@ -539,6 +557,9 @@ pub struct Args {
 
     #[command(flatten, next_help_heading = "Perf Degradation")]
     pub perf_degradation: PerfDegradationArgs,
+
+    #[command(flatten, next_help_heading = "Backward Sticky")]
+    pub backward_sticky: BackwardsStickyArgs,
 
     #[command(flatten, next_help_heading = "CPU Frequency")]
     pub cpu_freq: CpuFreqArgs,
