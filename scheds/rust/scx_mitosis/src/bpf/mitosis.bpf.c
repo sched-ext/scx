@@ -858,11 +858,13 @@ static inline int cgroup_init_with_cpuset(struct cgrp_ctx *cgc,
 
 	int err;
 	if (bpf_core_type_matches(struct cpuset___cpumask_arr)) {
-		struct cpuset___cpumask_arr *cpuset_typed = (void *)cpuset;
+		struct cpuset___cpumask_arr *cpuset_typed =
+			(void *)bpf_core_cast(cpuset, struct cpuset);
 		err = bpf_core_read(&entry->cpumask, runtime_cpumask_size,
 				    &cpuset_typed->cpus_allowed);
 	} else if (bpf_core_type_matches(struct cpuset___cpumask_ptr)) {
-		struct cpuset___cpumask_ptr *cpuset_typed = (void *)cpuset;
+		struct cpuset___cpumask_ptr *cpuset_typed =
+			(void *)bpf_core_cast(cpuset, struct cpuset);
 		err = bpf_core_read(&entry->cpumask, runtime_cpumask_size,
 				    cpuset_typed->cpus_allowed);
 	} else {
