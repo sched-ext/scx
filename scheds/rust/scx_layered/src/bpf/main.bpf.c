@@ -1967,17 +1967,9 @@ bool try_consume_layers(u32 *layer_order, u32 nr, u32 exclude_layer_id,
 	return false;
 }
 
-bool __always_inline sib_keep_idle(s32 cpu, struct task_struct *prev __arg_trusted, struct cpu_ctx *cpuc)
+bool __always_inline sib_keep_idle(s32 cpu, struct task_struct *prev __arg_trusted, struct layer *prev_layer,
+				   struct task_ctx *prev_taskc, struct cpu_ctx *cpuc)
 {
-	struct task_ctx *prev_taskc = NULL;
-	struct layer *prev_layer = NULL;
-
-	/* !NULL prev_taskc indicates runnable prev */
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
-		if (!(prev_taskc = lookup_task_ctx(prev)) ||
-		    !(prev_layer = lookup_layer(prev_taskc->layer_id)))
-			return false;
-	}
 
 	/*
 	 * If the sibling CPU is running an exclusive task, keep this CPU idle
@@ -2013,7 +2005,14 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (antistall_consume(cpuc))
 		return;
 
-	if (prev && sib_keep_idle(cpu, prev, cpuc))
+	/* !NULL prev_taskc indicates runnable prev */
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
+		if (!(prev_taskc = lookup_task_ctx(prev)) ||
+		    !(prev_layer = lookup_layer(prev_taskc->layer_id)))
+			return;
+	}
+
+	if (prev && sib_keep_idle(cpu, prev, prev_layer, prev_taskc, cpuc))
 		return;
 
 	/*
@@ -2166,6 +2165,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 	if (!tried_lo_fb && scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id))
 		return;
 
+	/* !NULL prev_taskc indicates runnable prev */
 	if (prev_taskc && prev_layer)
 		prev->scx.slice = prev_layer->slice_ns;
 }

@@ -6,23 +6,13 @@ on:
   merge_group:
 
 jobs:
-  build-kernel:
-    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64" ]') || 'ubuntu-latest' }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Nix
-        uses: ./.github/actions/install-nix
-        with:
-          cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-
-      - uses: ./.github/actions/build-kernel
-        with:
-          repo-name: sched_ext/for-next
+  build-kernels:
+    uses: ./.github/workflows/build-kernels.yml
+    secrets: inherit
 
   rust-tests:
     runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64" ]') || 'ubuntu-latest' }}
-    needs: build-kernel
+    needs: build-kernels
     steps:
       - uses: actions/checkout@v4
 
@@ -31,9 +21,10 @@ jobs:
         with:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
-      - uses: ./.github/actions/build-kernel
-        with:
-          repo-name: sched_ext/for-next
+      - name: Load kernel
+        run: |
+          echo "KERNEL_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#'kernel_sched_ext/for-next')" >> $GITHUB_ENV
+          echo "KERNEL_HEADERS_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#'kernel_sched_ext/for-next'.headers)" >> $GITHUB_ENV
 
       - name: Format
         run: nix run ./.github/include#ci -- format
@@ -49,7 +40,7 @@ jobs:
 
   integration-test:
     uses: ./.github/workflows/integration-tests.yml
-    needs: build-kernel
+    needs: build-kernels
     secrets: inherit
     with:
       repo-name: sched_ext/for-next

@@ -6,6 +6,7 @@ mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 
+use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -26,6 +27,7 @@ use scx_utils::scx_ops_load;
 use scx_utils::scx_ops_open;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::Cpumask;
 use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPUS_POSSIBLE;
@@ -70,10 +72,17 @@ unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
     }
 }
 
+// Per cell book-keeping
+#[derive(Debug)]
+struct Cell {
+    cpus: Cpumask,
+}
+
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     prev_percpu_cell_cycles: Vec<[u64; MAX_CELLS]>,
     monitor_interval: std::time::Duration,
+    cells: HashMap<u32, Cell>,
 }
 
 impl<'a> Scheduler<'a> {
@@ -100,6 +109,7 @@ impl<'a> Scheduler<'a> {
             skel,
             prev_percpu_cell_cycles: vec![[0; MAX_CELLS]; *NR_CPU_IDS],
             monitor_interval: std::time::Duration::from_secs(opts.monitor_interval_s),
+            cells: HashMap::new(),
         })
     }
 
@@ -108,6 +118,7 @@ impl<'a> Scheduler<'a> {
         info!("Mitosis Scheduler Attached");
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
             std::thread::sleep(self.monitor_interval);
+            self.refresh_bpf_cells()?;
             self.debug()?;
         }
         drop(struct_ops);
@@ -139,8 +150,63 @@ impl<'a> Scheduler<'a> {
                 trace!("CPU {}: {:?}", cpu, diff_cycles);
             }
         }
+
+        for (cell_id, cell) in &self.cells {
+            trace!("CELL[{}]: {}", cell_id, cell.cpus);
+        }
         Ok(())
     }
+
+    fn refresh_bpf_cells(&mut self) -> Result<()> {
+        // collect all cpus per cell.
+        let mut cell_to_cpus: HashMap<u32, Cpumask> = HashMap::new();
+        let cpu_ctxs = read_cpu_ctxs(&self.skel)?;
+        for (i, cpu_ctx) in cpu_ctxs.iter().enumerate() {
+            cell_to_cpus
+                .entry(cpu_ctx.cell)
+                .and_modify(|mask| mask.set_cpu(i).expect("set cpu in existing mask"))
+                .or_insert_with(|| {
+                    let mut mask = Cpumask::new();
+                    mask.set_cpu(i).expect("set cpu in new mask");
+                    mask
+                });
+        }
+
+        // create cells we don't have yet, drop cells that are no longer in use.
+        let cells = &self.skel.maps.bss_data.cells;
+        for i in 0..MAX_CELLS {
+            let cell_idx = i as u32;
+            let bpf_cell = cells[i];
+            if bpf_cell.in_use > 0 {
+                self.cells.entry(cell_idx).or_insert(Cell {
+                    cpus: cell_to_cpus
+                        .get(&cell_idx)
+                        .expect("missing cell in cpu map")
+                        .clone(),
+                });
+            } else {
+                self.cells.remove(&cell_idx);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
+    let mut cpu_ctxs = vec![];
+    let cpu_ctxs_vec = skel
+        .maps
+        .cpu_ctxs
+        .lookup_percpu(&0u32.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
+        .context("Failed to lookup cpu_ctx")?
+        .unwrap();
+    for cpu in 0..*NR_CPUS_POSSIBLE {
+        cpu_ctxs.push(*unsafe {
+            &*(cpu_ctxs_vec[cpu].as_slice().as_ptr() as *const bpf_intf::cpu_ctx)
+        });
+    }
+    Ok(cpu_ctxs)
 }
 
 fn main() -> Result<()> {

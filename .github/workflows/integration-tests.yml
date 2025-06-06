@@ -20,41 +20,9 @@ jobs:
         with:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
-      - name: Load dependencies
-        run: nix run ./.github/include#nix-develop-gha -- ./.github/include#gha-list-tests
-
       - name: List tests
         id: output
-        run: |
-          python3 - <<EOF
-          import itertools
-          import json
-          import os
-
-          kernel = "${{ inputs.repo-name }}"
-
-          matrix = [{ "name": x, "flags": "" } for x in [
-            "scx_bpfland",
-            "scx_chaos",
-            "scx_lavd",
-            "scx_p2dq",
-            "scx_rlfifo",
-            "scx_rustland",
-            "scx_rusty",
-            "scx_tickless",
-          ]]
-
-          for flags in itertools.product(
-              ["--disable-topology=false", "--disable-topology=true"],
-              ["", "--disable-antistall"]
-          ):
-            matrix.append({ "name": "scx_layered", "flags": " ".join(flags) })
-
-          output = f"matrix={json.dumps(matrix)}"
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-            print(output, file=f)
-
-          EOF
+        run: nix run ./.github/include#list-integration-tests -- "${{ inputs.repo-name }}" >> $GITHUB_OUTPUT
 
   integration-test:
     runs-on: ubuntu-24.04
@@ -72,9 +40,10 @@ jobs:
         with:
           cachix-auth-token: '${{ secrets.CACHIX_AUTH_TOKEN }}'
 
-      - uses: ./.github/actions/build-kernel
-        with:
-          repo-name: ${{ inputs.repo-name }}
+      - name: Load kernel
+        run: |
+          echo "KERNEL_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#'kernel_${{ inputs.repo-name }}')" >> $GITHUB_ENV
+          echo "KERNEL_HEADERS_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#'kernel_${{ inputs.repo-name }}'.headers)" >> $GITHUB_ENV
 
       - name: Install Veristat
         run: nix-env -i $(nix build --no-link --print-out-paths ./.github/include#veristat)

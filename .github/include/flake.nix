@@ -92,16 +92,18 @@
               buildInputs = gha-common-pkgs;
             };
 
-            gha-update-kernels = pkgs.mkShellNoCC {
+            gha-build-kernels = pkgs.mkShellNoCC {
               buildInputs = with pkgs; gha-common-pkgs ++ [
-                gh
+                gawk
+                jq
                 jq
               ];
             };
 
-            gha-list-tests = pkgs.mkShellNoCC {
+            gha-update-kernels = pkgs.mkShellNoCC {
               buildInputs = with pkgs; gha-common-pkgs ++ [
-                python3
+                gh
+                jq
               ];
             };
           };
@@ -115,6 +117,15 @@
               src = veristat-src;
             };
 
+            list-integration-tests = pkgs.python3Packages.buildPythonApplication rec {
+              pname = "list-integration-tests";
+              version = "git";
+
+              pyproject = false;
+              dontUnpack = true;
+
+              installPhase = "install -Dm755 ${./list-integration-tests.py} $out/bin/list-integration-tests";
+            };
 
             ci = pkgs.python3Packages.buildPythonApplication rec {
               pname = "ci";

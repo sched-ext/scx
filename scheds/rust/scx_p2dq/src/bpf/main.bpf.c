@@ -98,7 +98,6 @@ u64 dsq_time_slices[MAX_DSQS_PER_LLC];
 u64 min_slice_ns = 500;
 u32 sched_mode = MODE_PERFORMANCE;
 
-private(A) struct bpf_cpumask __kptr *all_cpumask;
 private(A) struct bpf_cpumask __kptr *big_cpumask;
 
 static u64 max(u64 a, u64 b)
@@ -383,10 +382,6 @@ static s32 pick_idle_affinitized_cpu(struct task_struct *p, task_ctx *taskc,
 			goto found_cpu;
 		}
 	}
-
-	if (llcx->cpumask)
-		bpf_cpumask_and(mask, cast_mask(llcx->cpumask),
-				p->cpus_ptr);
 
 	// Next try to find an idle CPU in the LLC
 	cpu = scx_bpf_pick_idle_cpu(cast_mask(mask), 0);
@@ -689,17 +684,22 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 			return;
 		}
 
-		taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
 		update_vtime(p, cpuc, taskc, llcx->vtime);
+		if (is_idle) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON|cpu, taskc->slice_ns, enq_flags);
+			stat_inc(P2DQ_STAT_IDLE);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
+			return;
+		}
+
+		taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
 		if (interactive_fifo && taskc->dsq_index == 0) {
 			scx_bpf_dsq_insert(p, taskc->dsq_id, taskc->slice_ns, enq_flags);
 		} else {
 			scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, taskc->slice_ns, p->scx.dsq_vtime, enq_flags);
 		}
-		if (is_idle) {
-			stat_inc(P2DQ_STAT_IDLE);
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-		}
+
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
@@ -711,8 +711,15 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		return;
 	}
 
-	taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
 	update_vtime(p, cpuc, taskc, llcx->vtime);
+	if (scx_bpf_test_and_clear_cpu_idle(cpu)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON|cpu, taskc->slice_ns, enq_flags);
+		stat_inc(P2DQ_STAT_IDLE);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
+		return;
+	}
+	taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
 
 	if (interactive_fifo && taskc->dsq_index == 0) {
 		ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
@@ -836,6 +843,9 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	__sync_fetch_and_add(&llcx->dsq_max_vtime[dsq_index], scaled_used);
 	__sync_fetch_and_add(&llcx->dsq_load[dsq_index], used);
 	__sync_fetch_and_add(&llcx->load, used);
+	if (!taskc->all_cpus)
+		// Note that affinitized load is absolute load, not scaled.
+		__sync_fetch_and_add(&llcx->affn_load, used);
 
 
 	trace("%s weight %d slice %llu used %llu scaled %llu",
@@ -1050,10 +1060,8 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 		}
 	}
 
-	if (dsq_id != 0 && scx_bpf_dsq_move_to_local(dsq_id)) {
-		stat_inc(P2DQ_STAT_KEEP);
+	if (dsq_id != 0 && scx_bpf_dsq_move_to_local(dsq_id))
 		return;
-	}
 
 	// Try the last DSQ, this is to keep tasks sticky to their dsq type.
 	if (cpuc->dsq_index >= 0 && cpuc->dsq_index < nr_dsqs_per_llc) {
@@ -1080,7 +1088,7 @@ void BPF_STRUCT_OPS(p2dq_set_cpumask, struct task_struct *p,
 {
 	task_ctx *taskc;
 
-	if (!(taskc = lookup_task_ctx(p)) || !all_cpumask)
+	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
 	taskc->all_cpus = p->cpus_ptr == &p->cpus_mask && p->nr_cpus_allowed == nr_cpus;
@@ -1414,6 +1422,7 @@ reset_load:
 			return false;
 
 		llcx->load = 0;
+		llcx->affn_load = 0;
 		llcx->last_period_ns = scx_bpf_now();
 		bpf_for(j, 0, nr_dsqs_per_llc) {
 			llcx->dsq_load[j] = 0;
@@ -1508,7 +1517,7 @@ s32 static start_timers(void)
 static __always_inline s32 p2dq_init_impl()
 {
 	int i, j, ret;
-	struct bpf_cpumask *tmp_cpumask, *tmp_big_cpumask;
+	struct bpf_cpumask *tmp_big_cpumask;
 
 	tmp_big_cpumask = bpf_cpumask_create();
 	if (!tmp_big_cpumask) {
@@ -1524,16 +1533,6 @@ static __always_inline s32 p2dq_init_impl()
 	tmp_big_cpumask = bpf_kptr_xchg(&big_cpumask, tmp_big_cpumask);
 	if (tmp_big_cpumask)
 		bpf_cpumask_release(tmp_big_cpumask);
-
-	tmp_cpumask = bpf_cpumask_create();
-	if (!tmp_cpumask) {
-		scx_bpf_error("failed to create all cpumask");
-		return -ENOMEM;
-	}
-
-	tmp_cpumask = bpf_kptr_xchg(&all_cpumask, tmp_cpumask);
-	if (tmp_cpumask)
-		bpf_cpumask_release(tmp_cpumask);
 
 	// First we initialize LLCs because DSQs are created at the LLC level.
 	bpf_for(i, 0, nr_llcs) {
