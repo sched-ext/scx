@@ -688,17 +688,22 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 			return;
 		}
 
-		taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
 		update_vtime(p, cpuc, taskc, llcx->vtime);
+		if (is_idle) {
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON|cpu, taskc->slice_ns, enq_flags);
+			stat_inc(P2DQ_STAT_IDLE);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+			ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
+			return;
+		}
+
+		taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
 		if (interactive_fifo && taskc->dsq_index == 0) {
 			scx_bpf_dsq_insert(p, taskc->dsq_id, taskc->slice_ns, enq_flags);
 		} else {
 			scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, taskc->slice_ns, p->scx.dsq_vtime, enq_flags);
 		}
-		if (is_idle) {
-			stat_inc(P2DQ_STAT_IDLE);
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-		}
+
 		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
 		return;
 	}
@@ -710,8 +715,15 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 		return;
 	}
 
-	taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
 	update_vtime(p, cpuc, taskc, llcx->vtime);
+	if (scx_bpf_test_and_clear_cpu_idle(cpu)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON|cpu, taskc->slice_ns, enq_flags);
+		stat_inc(P2DQ_STAT_IDLE);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+		ret->kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
+		return;
+	}
+	taskc->dsq_id = cpu_dsq_id(taskc->dsq_index, cpuc);
 
 	if (interactive_fifo && taskc->dsq_index == 0) {
 		ret->kind = P2DQ_ENQUEUE_PROMISE_FIFO;
