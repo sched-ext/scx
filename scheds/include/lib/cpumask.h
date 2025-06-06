@@ -50,3 +50,4 @@ int scx_bitmap_print(scx_bitmap_t __arg_arena mask);
 s32 scx_bitmap_pick_idle_cpu(scx_bitmap_t mask __arg_arena, int flags);
 s32 scx_bitmap_any_distribute(scx_bitmap_t mask __arg_arena);
 s32 scx_bitmap_any_and_distribute(scx_bitmap_t scx __arg_arena, const struct cpumask *bpf);
+__weak s32 scx_bitmap_pick_any_cpu(scx_bitmap_t mask __arg_arena);
