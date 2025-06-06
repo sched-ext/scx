@@ -151,6 +151,15 @@ struct Opts {
     #[clap(short = 'I', long, allow_hyphen_values = true, default_value = "-1")]
     idle_resume_us: i64,
 
+    /// Enable per-CPU tasks prioritization.
+    ///
+    /// This allows to prioritize per-CPU tasks that usually tend to be de-prioritized (since they
+    /// can't be migrated when their only usable CPU is busy). Enabling this option can introduce
+    /// unfairness and potentially trigger stalls, but it can improve performance of server-type
+    /// workloads (such as large parallel builds).
+    #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
+    local_pcpu: bool,
+
     /// Enable kthreads prioritization (EXPERIMENTAL).
     ///
     /// Enabling this can improve system performance, but it may also introduce noticeable
@@ -287,6 +296,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.debug = opts.debug;
         skel.maps.rodata_data.smt_enabled = smt_enabled;
         skel.maps.rodata_data.numa_disabled = opts.disable_numa;
+        skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
         skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;
         skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;

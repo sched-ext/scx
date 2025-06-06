@@ -59,6 +59,17 @@ const volatile bool no_wake_sync;
 const volatile bool local_kthreads;
 
 /*
+ * Prioritize per-CPU tasks (tasks that can only run on a single CPU).
+ *
+ * This allows to prioritize per-CPU tasks that usually tend to be
+ * de-prioritized (since they can't be migrated when their only usable CPU
+ * is busy). Enabling this option can introduce unfairness and potentially
+ * trigger stalls, but it can improve performance of server-type workloads
+ * (such as large parallel builds).
+ */
+const volatile bool local_pcpu;
+
+/*
  * The CPU frequency performance level: a negative value will not affect the
  * performance level and will be ignored.
  */
@@ -824,10 +835,10 @@ out_put_cpumask:
 static bool can_direct_dispatch(int node)
 {
 	/*
-	 * Allow direct dispatch only if there are no tasks queued in the
-	 * node DSQ.
+	 * Allow direct dispatch when @local_pcpu is enabled, or when there
+	 * are no tasks queued in the node DSQ.
 	 */
-	return !scx_bpf_dsq_nr_queued(node);
+	return local_pcpu || !scx_bpf_dsq_nr_queued(node);
 }
 
 /*
@@ -967,8 +978,14 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 * perform a direct dispatch.
 	 */
 	if (p->nr_cpus_allowed == 1 || is_migration_disabled(p)) {
-		if (can_direct_dispatch(node) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+		bool is_idle = scx_bpf_test_and_clear_cpu_idle(prev_cpu);
+
+		/*
+		 * If @local_pcpu is enabled always dispatch tasks that can
+		 * only run on one CPU directly, independently on their
+		 * idle state.
+		 */
+		if (local_pcpu || (is_idle && can_direct_dispatch(node))) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
 
