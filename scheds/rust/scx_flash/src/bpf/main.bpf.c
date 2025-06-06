@@ -304,6 +304,11 @@ struct task_ctx {
 	 * refresh the task's cpumasks.
 	 */
 	s32 recent_used_cpu;
+
+	/*
+	 * Keep track of the last waker.
+	 */
+	u32 waker_pid;
 };
 
 /* Map that contains task-local storage. */
@@ -582,10 +587,9 @@ static bool is_llc_busy(s32 cpu)
  * Return true if the waker commits to release the CPU after waking up @p,
  * false otherwise.
  */
-static bool is_wake_sync(s32 prev_cpu, s32 this_cpu, u64 wake_flags)
+static bool is_wake_sync(const struct task_struct *current,
+			 s32 prev_cpu, s32 this_cpu, u64 wake_flags)
 {
-	const struct task_struct *current = (void *)bpf_get_current_task_btf();
-
 	if (no_wake_sync)
 		return false;
 
@@ -648,6 +652,7 @@ static bool cpus_share_llc(s32 this_cpu, s32 that_cpu)
  */
 static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bool *is_idle)
 {
+	const struct task_struct *current = (void *)bpf_get_current_task_btf();
 	const struct cpumask *idle_smtmask, *idle_cpumask;
 	const struct cpumask *primary, *p_mask, *l2_mask, *l3_mask;
 	struct task_ctx *tctx;
@@ -670,21 +675,33 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 	is_prev_allowed = p_mask && bpf_cpumask_test_cpu(prev_cpu, p_mask);
 
 	/*
+	 * Acquire the CPU masks to determine the idle CPUs in the system.
+	 */
+	node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
+	idle_smtmask = __COMPAT_scx_bpf_get_idle_smtmask_node(node);
+	idle_cpumask = __COMPAT_scx_bpf_get_idle_cpumask_node(node);
+
+	/*
 	 * In case of a sync wakeup, attempt to run the wakee on the
 	 * waker's CPU if possible, as it's going to release the CPU right
 	 * after the wakeup, so it can be considered as idle and, possibly,
 	 * cache hot.
 	 */
-	if (is_wake_sync(prev_cpu, this_cpu, wake_flags)) {
+	if (is_wake_sync(current, prev_cpu, this_cpu, wake_flags)) {
+		bool share_llc = cpus_share_llc(prev_cpu, this_cpu);
+
 		/*
-		 * If @prev_cpu is idle, keep using it, since there is no guarantee
-		 * that the cache hot data from the waker's CPU is more important
+		 * If waker and wakee are on the same LLC and @prev_cpu is
+		 * idle keep using it, since there is no guarantee that the
+		 * cache hot data from the waker's CPU is more important
 		 * than cache hot data in the wakee's CPU.
 		 */
-		if (is_prev_allowed && cpus_share_llc(prev_cpu, this_cpu) &&
+		if (is_prev_allowed && share_llc &&
+		    bpf_cpumask_test_cpu(prev_cpu, idle_smtmask) &&
 		    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
+			cpu = prev_cpu;
 			*is_idle = true;
-			return prev_cpu;
+			goto out_put_cpumask;
 		}
 
 		/*
@@ -692,12 +709,19 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 		 * waker's LLC is not completely saturated, to prevent
 		 * wakers/wakees abusing this mechanism and potentially
 		 * starving other tasks.
+		 *
+		 * Moreover, allow cross-LLC migrations only if the waker
+		 * performed the most recent wakeup of the wakee (meaning
+		 * that the two tasks are probably part of the same
+		 * pipeline).
 		 */
-		if (p_mask && bpf_cpumask_test_cpu(this_cpu, p_mask) &&
+		if ((share_llc || current->pid == tctx->waker_pid) &&
+		    p_mask && bpf_cpumask_test_cpu(this_cpu, p_mask) &&
 		    !scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | this_cpu) &&
 		    !is_llc_busy(this_cpu)) {
+			cpu = this_cpu;
 			*is_idle = true;
-			return this_cpu;
+			goto out_put_cpumask;
 		}
 	}
 
@@ -711,13 +735,6 @@ static s32 pick_idle_cpu(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bo
 
 	l2_mask = cast_mask(tctx->l2_cpumask);
 	l3_mask = cast_mask(tctx->l3_cpumask);
-
-	/*
-	 * Acquire the CPU masks to determine the idle CPUs in the system.
-	 */
-	node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
-	idle_smtmask = __COMPAT_scx_bpf_get_idle_smtmask_node(node);
-	idle_cpumask = __COMPAT_scx_bpf_get_idle_cpumask_node(node);
 
 	/*
 	 * Find the best idle CPU, prioritizing full idle cores in SMT systems.
@@ -1319,6 +1336,7 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 
 void BPF_STRUCT_OPS(flash_runnable, struct task_struct *p, u64 enq_flags)
 {
+	const struct task_struct *current = (void *)bpf_get_current_task_btf();
 	struct task_ctx *tctx;
 
 	tctx = try_lookup_task_ctx(p);
@@ -1326,6 +1344,7 @@ void BPF_STRUCT_OPS(flash_runnable, struct task_struct *p, u64 enq_flags)
 		return;
 
 	tctx->exec_runtime = 0;
+	tctx->waker_pid = current->pid;
 }
 
 /*
