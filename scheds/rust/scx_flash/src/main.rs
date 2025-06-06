@@ -160,6 +160,14 @@ struct Opts {
     #[clap(short = 'p', long, action = clap::ArgAction::SetTrue)]
     local_pcpu: bool,
 
+    /// Native tasks priorities.
+    ///
+    /// By default, the scheduler normalizes task priorities to avoid large gaps that could lead to
+    /// stalls or starvation. This option disables normalization and uses the default Linux priority
+    /// range instead.
+    #[clap(short = 'n', long, action = clap::ArgAction::SetTrue)]
+    native_priority: bool,
+
     /// Enable kthreads prioritization (EXPERIMENTAL).
     ///
     /// Enabling this can improve system performance, but it may also introduce noticeable
@@ -298,6 +306,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.numa_disabled = opts.disable_numa;
         skel.maps.rodata_data.local_pcpu = opts.local_pcpu;
         skel.maps.rodata_data.no_wake_sync = opts.no_wake_sync;
+        skel.maps.rodata_data.native_priority = opts.native_priority;
         skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;

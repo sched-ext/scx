@@ -70,6 +70,15 @@ const volatile bool local_kthreads;
 const volatile bool local_pcpu;
 
 /*
+ * Native tasks priorities.
+ *
+ * By default, the scheduler normalizes task priorities to avoid large gaps
+ * that could lead to stalls or starvation. This option disables
+ * normalization and uses the default Linux priority range instead.
+ */
+const volatile bool native_priority;
+
+/*
  * The CPU frequency performance level: a negative value will not affect the
  * performance level and will be ignored.
  */
@@ -406,7 +415,22 @@ static u64 nr_tasks_waiting(int node)
  */
 static inline u64 task_weight(const struct task_struct *p)
 {
+	/*
+	 * Return the non-normalized task weight if @native_priority is
+	 * enabled.
+	 */
+	if (native_priority)
+		return p->scx.weight;
+
 	return 1 + (127 * log2_u64(p->scx.weight) / log2_u64(10000));
+}
+
+/*
+ * Return the default task weight.
+ */
+static inline u64 task_base_weight(void)
+{
+	return native_priority ? 100 : 64;
 }
 
 /*
@@ -414,7 +438,7 @@ static inline u64 task_weight(const struct task_struct *p)
  */
 static inline u64 scale_by_task_normalized_weight(const struct task_struct *p, u64 value)
 {
-	return value * task_weight(p) / 64;
+	return value * task_weight(p) / task_base_weight();
 }
 
 /*
@@ -422,7 +446,7 @@ static inline u64 scale_by_task_normalized_weight(const struct task_struct *p, u
  */
 static inline u64 scale_by_task_normalized_weight_inverse(const struct task_struct *p, u64 value)
 {
-	return value * 64 / task_weight(p);
+	return value * task_base_weight() / task_weight(p);
 }
 
 /*
