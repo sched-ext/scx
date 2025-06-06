@@ -60,11 +60,6 @@ jobs:
           git config --global user.name "sched-ext CI Bot"
           git commit -am "chore(deps): update ${{ matrix.version }} kernel"
 
-      - uses: ./.github/actions/build-kernel
-        if: env.modified == 'true'
-        with:
-          repo-name: ${{ matrix.version }}
-
       - name: Open PR
         if: env.modified == 'true'
         env:

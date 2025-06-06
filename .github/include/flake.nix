@@ -92,6 +92,14 @@
               buildInputs = gha-common-pkgs;
             };
 
+            gha-build-kernels = pkgs.mkShellNoCC {
+              buildInputs = with pkgs; gha-common-pkgs ++ [
+                gawk
+                jq
+                jq
+              ];
+            };
+
             gha-update-kernels = pkgs.mkShellNoCC {
               buildInputs = with pkgs; gha-common-pkgs ++ [
                 gh
