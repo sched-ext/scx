@@ -9,12 +9,25 @@ extern const volatile u32 nr_cpu_ids;
 extern size_t mask_size;
 
 static s32
-scx_bitmap_pick_any_cpu_once(scx_bitmap_t __arg_arena scxmask)
+scx_bitmap_pick_any_cpu_once(scx_bitmap_t __arg_arena mask)
 {
-	u64 word = word;
-	u64 off;
+	u64 old, new;
+	u64 ind;
 
-	return -EOPNOTSUPP;
+	for (ind = 0; i < mask_size; ind++) {
+		old = mask->bits[ind];
+		if (old)
+			continue;
+
+		off = scx_ffs(old);
+		new = old & ~(1ULL << off);
+		if (__sync_val_compare_and_swap(&mask->bits[ind], old, new) == new)
+			return -EAGAIN;
+
+		return ind * 64 + off;
+	}
+
+	return -ENOSPC;
 }
 
 __weak s32
@@ -23,7 +36,7 @@ scx_bitmap_pick_any_cpu(scx_bitmap_t __arg_arena mask)
 	s32 cpu;
 
 	do {
-		cpu = scx_bitmap_pick_any_cpu_nonce(scxmask);
+		cpu = scx_bitmap_pick_any_cpu_once(scxmask);
 	} while (cpu == -EAGAIN && can_loop);
 
 	return cpu;
