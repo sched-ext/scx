@@ -211,4 +211,42 @@ void scx_buddy_free(struct scx_buddy *buddy, size_t free);
 u64 scx_buddy_alloc_internal(struct scx_buddy *buddy, size_t size);
 #define scx_buddy_alloc(alloc) ((void __arena *)scx_buddy_alloc_internal((buddy, size)))
 
+static inline
+int scx_ffs(__u64 word)
+{
+	unsigned int num = 0;
+
+	if ((word & 0xffffffff) == 0) {
+		num += 32;
+		word >>= 32;
+	}
+
+	if ((word & 0xffff) == 0) {
+		num += 16;
+		word >>= 16;
+	}
+
+	if ((word & 0xff) == 0) {
+		num += 8;
+		word >>= 8;
+	}
+
+	if ((word & 0xf) == 0) {
+		num += 4;
+		word >>= 4;
+	}
+
+	if ((word & 0x3) == 0) {
+		num += 2;
+		word >>= 2;
+	}
+
+	if ((word & 0x1) == 0) {
+		num += 1;
+		word >>= 1;
+	}
+
+	return num;
+}
+
 #endif /* __BPF__ */
