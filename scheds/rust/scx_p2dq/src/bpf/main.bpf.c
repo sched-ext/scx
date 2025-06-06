@@ -383,10 +383,6 @@ static s32 pick_idle_affinitized_cpu(struct task_struct *p, task_ctx *taskc,
 		}
 	}
 
-	if (llcx->cpumask)
-		bpf_cpumask_and(mask, cast_mask(llcx->cpumask),
-				p->cpus_ptr);
-
 	// Next try to find an idle CPU in the LLC
 	cpu = scx_bpf_pick_idle_cpu(cast_mask(mask), 0);
 	if (cpu >= 0) {
