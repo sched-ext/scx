@@ -70,8 +70,12 @@ if __name__ == "__main__":
         v["commitHash"] = new_hash
         v["lastModified"] = int(time.time())
 
-        print(f"Downloading and hashing kernel source for {k}. This will take a while...")
-        (narHash, kver) = get_nar_hash_and_version(v["repo"], v["branch"], v["commitHash"])
+        print(
+            f"Downloading and hashing kernel source for {k}. This will take a while..."
+        )
+        (narHash, kver) = get_nar_hash_and_version(
+            v["repo"], v["branch"], v["commitHash"]
+        )
         v["narHash"] = narHash
         v["kernelVersion"] = kver
 
