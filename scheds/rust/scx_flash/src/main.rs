@@ -279,6 +279,12 @@ impl<'a> Scheduler<'a> {
             if smt_enabled { "SMT on" } else { "SMT off" }
         );
 
+        // Print command line.
+        info!(
+            "scheduler options: {}",
+            std::env::args().collect::<Vec<_>>().join(" ")
+        );
+
         if opts.idle_resume_us >= 0 {
             if !cpu_idle_resume_latency_supported() {
                 warn!("idle resume latency not supported");
