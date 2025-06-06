@@ -106,12 +106,6 @@
                 jq
               ];
             };
-
-            gha-list-tests = pkgs.mkShellNoCC {
-              buildInputs = with pkgs; gha-common-pkgs ++ [
-                python3
-              ];
-            };
           };
 
           packages = {
@@ -123,6 +117,15 @@
               src = veristat-src;
             };
 
+            list-integration-tests = pkgs.python3Packages.buildPythonApplication rec {
+              pname = "list-integration-tests";
+              version = "git";
+
+              pyproject = false;
+              dontUnpack = true;
+
+              installPhase = "install -Dm755 ${./list-integration-tests.py} $out/bin/list-integration-tests";
+            };
 
             ci = pkgs.python3Packages.buildPythonApplication rec {
               pname = "ci";
