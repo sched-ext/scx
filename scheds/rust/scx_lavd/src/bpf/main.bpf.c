@@ -679,7 +679,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 */
 		cpuc = get_cpu_ctx_id(cpu_id);
 		if (!cpuc) {
-			scx_bpf_error("Failed to look up cpu context");
+			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu_id);
 			return cpu_id;
 		}
 		dsq_id = cpuc->cpdom_id;
@@ -776,7 +776,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
-		scx_bpf_error("Failed to look up cpu context");
+		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return;
 	}
 	dsq_id = cpuc->cpdom_id;
