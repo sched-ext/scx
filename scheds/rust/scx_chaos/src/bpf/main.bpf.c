@@ -50,6 +50,8 @@ const volatile u32 cpu_freq_max = SCX_CPUPERF_ONE;
 const volatile u32 degradation_freq_frac32 = 1;
 const volatile u64 degradation_frac7 = 0;
 
+const volatile u32 backwards_sticky_freq_frac32 = 1;
+
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
@@ -77,10 +79,20 @@ struct chaos_task_ctx *lookup_create_chaos_task_ctx(struct task_struct *p)
 	return bpf_task_storage_get(&chaos_task_ctxs, p, NULL, BPF_LOCAL_STORAGE_GET_F_CREATE);
 }
 
+static __always_inline bool keep_backwards_sticky(struct chaos_task_ctx *taskc)
+{
+	return taskc->next_trait == CHAOS_TRAIT_BACKWARDS_STICKY &&
+		taskc->bs_cpumask &&
+		bpf_cpumask_weight(cast_mask(taskc->bs_cpumask)) != nr_cpus;
+}
+
 static __always_inline enum chaos_trait_kind choose_chaos(struct chaos_task_ctx *taskc)
 {
 	if (taskc->match & CHAOS_MATCH_EXCLUDED)
 		return CHAOS_TRAIT_NONE;
+
+	if (keep_backwards_sticky(taskc))
+		return -1;
 
 	u32 roll = bpf_get_prandom_u32();
 
@@ -111,6 +123,24 @@ static __always_inline u64 get_cpu_delay_dsq(int cpu_idx)
 	// into linear IDs with topology information passed from userspace
 	cpu_idx = bpf_get_smp_processor_id();
 	return CHAOS_DSQ_BASE | cpu_idx;
+}
+
+static __always_inline s32 backwards_sticky_cpu(struct chaos_task_ctx *taskc)
+{
+	s32 cpu;
+	if (!taskc->bs_cpumask || bpf_cpumask_weight(cast_mask(taskc->bs_cpumask)) == nr_cpus)
+		return -ENOENT;
+
+	if (!taskc->bs_cpumask)
+		return -ENOENT;
+
+	cpu = bpf_cpumask_first_zero(cast_mask(taskc->bs_cpumask));
+	if (!taskc->bs_cpumask || cpu == nr_cpus)
+		return -ENOENT;
+	if (taskc->bs_cpumask)
+		bpf_cpumask_set_cpu(cpu, taskc->bs_cpumask);
+
+	return cpu;
 }
 
 static __always_inline s32 calculate_chaos_match(struct task_struct *p)
@@ -234,7 +264,7 @@ out:
 	return ret;
 }
 
-__weak s32 enqueue_random_delay(struct task_struct *p __arg_trusted, u64 enq_flags,
+static __always_inline s32 enqueue_random_delay(struct task_struct *p __arg_trusted, u64 enq_flags,
 				struct chaos_task_ctx *taskc __arg_nonnull)
 {
 	u64 rand64 = ((u64)bpf_get_prandom_u32() << 32) | bpf_get_prandom_u32();
@@ -249,7 +279,7 @@ __weak s32 enqueue_random_delay(struct task_struct *p __arg_trusted, u64 enq_fla
 	return true;
 }
 
-__weak s32 enqueue_chaotic(struct task_struct *p __arg_trusted, u64 enq_flags,
+static __always_inline s32 enqueue_chaotic(struct task_struct *p __arg_trusted, u64 enq_flags,
 			   struct chaos_task_ctx *taskc __arg_nonnull)
 {
 	bool out;
@@ -259,6 +289,9 @@ __weak s32 enqueue_chaotic(struct task_struct *p __arg_trusted, u64 enq_flags,
 		out = enqueue_random_delay(p, enq_flags, taskc);
 		break;
 
+	case CHAOS_TRAIT_BACKWARDS_STICKY:
+		out = false;
+		return out;
 	case CHAOS_TRAIT_NONE:
 	case CHAOS_TRAIT_CPU_FREQ:
 	case CHAOS_TRAIT_DEGRADATION:
@@ -474,6 +507,27 @@ void BPF_STRUCT_OPS(chaos_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 		}
 	}
 
+	// Backwards sticky means the task will cycle through all CPUs before
+	// becoming sticky again. Do a direct dispatch to ensure the task lands
+	// on the correct CPU and trashes the caches.
+	if (taskc->next_trait == CHAOS_TRAIT_BACKWARDS_STICKY) {
+		s32 cpu = backwards_sticky_cpu(taskc);
+		if (cpu >= 0) {
+			u64 slice_ns;
+			if (promise.kind == P2DQ_ENQUEUE_PROMISE_VTIME)
+				slice_ns = promise.vtime.slice_ns;
+			if (promise.kind == P2DQ_ENQUEUE_PROMISE_FIFO)
+				slice_ns = promise.fifo.slice_ns;
+
+			scx_bpf_dsq_insert(p,
+					   SCX_DSQ_LOCAL_ON | cpu,
+					   slice_ns,
+					   enq_flags);
+			promise.kind = P2DQ_ENQUEUE_PROMISE_COMPLETE;
+			return;
+		}
+	}
+
 	complete_p2dq_enqueue(&promise, p);
 }
 
@@ -532,6 +586,30 @@ p2dq:
 s32 BPF_STRUCT_OPS_SLEEPABLE(chaos_init_task, struct task_struct *p,
 			     struct scx_init_task_args *args)
 {
+	struct bpf_cpumask *bs_cpumask;
+	struct chaos_task_ctx *taskc;
+
+	if (!(bs_cpumask = bpf_cpumask_create())) {
+		scx_bpf_error("chaos_task_ctx bs_cpumask allocation failure");
+		return -ENOMEM;
+	}
+
+	if (!(taskc = lookup_create_chaos_task_ctx(p))) {
+		bpf_cpumask_release(bs_cpumask);
+		scx_bpf_error("failed to lookup task context in init_task");
+		return -ENOMEM;
+	}
+
+	if ((bs_cpumask = bpf_kptr_xchg(&taskc->bs_cpumask, bs_cpumask))) {
+		bpf_cpumask_release(bs_cpumask);
+		scx_bpf_error("chaos_task_ctx bs_cpumask allocation failure");
+		return -EINVAL;
+	}
+	bpf_rcu_read_lock();
+	if (taskc->bs_cpumask)
+		bpf_cpumask_clear(taskc->bs_cpumask);
+	bpf_rcu_read_unlock();
+
 	s32 ret = p2dq_init_task_impl(p, args);
 	if (ret)
 		return ret;
