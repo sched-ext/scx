@@ -1430,65 +1430,6 @@ void BPF_STRUCT_OPS(flash_enable, struct task_struct *p)
 	tctx->deadline = vtime_now;
 }
 
-s32 BPF_STRUCT_OPS(flash_init_task, struct task_struct *p,
-		   struct scx_init_task_args *args)
-{
-	s32 cpu = bpf_get_smp_processor_id();
-	struct task_ctx *tctx;
-	struct bpf_cpumask *cpumask;
-
-	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
-				    BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!tctx)
-		return -ENOMEM;
-	/*
-	 * Create task's primary cpumask.
-	 */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-	/*
-	 * Create task's L2 cache cpumask.
-	 */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->l2_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-	/*
-	 * Create task's L3 cache cpumask.
-	 */
-	cpumask = bpf_cpumask_create();
-	if (!cpumask)
-		return -ENOMEM;
-	cpumask = bpf_kptr_xchg(&tctx->l3_cpumask, cpumask);
-	if (cpumask)
-		bpf_cpumask_release(cpumask);
-
-	task_update_domain(p, tctx, cpu, p->cpus_ptr);
-
-	return 0;
-}
-
-/*
- * Evaluate the amount of online CPUs.
- */
-s32 get_nr_online_cpus(void)
-{
-	const struct cpumask *online_cpumask;
-	int cpus;
-
-	online_cpumask = scx_bpf_get_online_cpumask();
-	cpus = bpf_cpumask_weight(online_cpumask);
-	scx_bpf_put_cpumask(online_cpumask);
-
-	return cpus;
-}
-
 static int init_cpumask(struct bpf_cpumask **cpumask)
 {
 	struct bpf_cpumask *mask;
@@ -1510,6 +1451,57 @@ static int init_cpumask(struct bpf_cpumask **cpumask)
 		err = -ENOMEM;
 
 	return err;
+}
+
+s32 BPF_STRUCT_OPS(flash_init_task, struct task_struct *p,
+		   struct scx_init_task_args *args)
+{
+	s32 cpu = bpf_get_smp_processor_id();
+	struct task_ctx *tctx;
+	int err;
+
+	tctx = bpf_task_storage_get(&task_ctx_stor, p, 0,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!tctx)
+		return -ENOMEM;
+
+	/*
+	 * Create task's primary cpumask.
+	 */
+	err = init_cpumask(&tctx->cpumask);
+	if (err)
+		return err;
+	/*
+	 * Create task's L2 cache cpumask.
+	 */
+	err = init_cpumask(&tctx->l2_cpumask);
+	if (err)
+		return err;
+	/*
+	 * Create task's L3 cache cpumask.
+	 */
+	err = init_cpumask(&tctx->l3_cpumask);
+	if (err)
+		return err;
+
+	task_update_domain(p, tctx, cpu, p->cpus_ptr);
+
+	return 0;
+}
+
+/*
+ * Evaluate the amount of online CPUs.
+ */
+s32 get_nr_online_cpus(void)
+{
+	const struct cpumask *online_cpumask;
+	int cpus;
+
+	online_cpumask = scx_bpf_get_online_cpumask();
+	cpus = bpf_cpumask_weight(online_cpumask);
+	scx_bpf_put_cpumask(online_cpumask);
+
+	return cpus;
 }
 
 SEC("syscall")
