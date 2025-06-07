@@ -1333,24 +1333,49 @@ static void task_uncharge_qrt(struct task_ctx *taskc)
 static void kick_idle_cpu(struct task_struct *p, struct layer *layer)
 {
 	const struct cpumask *idle_smtmask;
+	struct bpf_cpumask *cand_cpumask;
+	struct task_ctx *taskc;
+	struct cpu_ctx *cpuc;
 	s32 cpu;
 
 	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
 		return;
-
+	
+	if (!(cpuc = lookup_cpu_ctx(-1)) || !(cand_cpumask = bpf_cpumask_create())) {
+		scx_bpf_put_idle_cpumask(idle_smtmask);
+		return;
+	}
+	
 	if (layer->kind == LAYER_KIND_CONFINED) {
 		const struct cpumask *layer_cpumask;
 
-		if (!(layer_cpumask = lookup_layer_cpumask(layer->id)))
-			goto out;
-		cpu = pick_idle_cpu_from(layer_cpumask, 0, idle_smtmask, layer);
+		if (!(layer_cpumask = lookup_layer_cpumask(layer->id))) {
+			bpf_cpumask_release(cand_cpumask);
+			scx_bpf_put_idle_cpumask(idle_smtmask);
+			return;
+		}
+
+		if (layer->skip_remote_node && (taskc = lookup_task_ctx(p)) && taskc->layered_node_mask) {
+			bpf_cpumask_and(cand_cpumask, layer_cpumask, cast_mask(taskc->layered_node_mask));
+			lstat_inc(LSTAT_SKIP_REMOTE_NODE, layer, cpuc);
+			cpu = pick_idle_cpu_from(cast_mask(cand_cpumask), 0, idle_smtmask, layer);
+		} else {
+			cpu = pick_idle_cpu_from(layer_cpumask, 0, idle_smtmask, layer);
+		}
 	} else {
-		cpu = pick_idle_cpu_from(p->cpus_ptr, 0, idle_smtmask, layer);
+		if (layer->skip_remote_node && (taskc = lookup_task_ctx(p)) && taskc->layered_node_mask) {
+			bpf_cpumask_and(cand_cpumask, p->cpus_ptr, cast_mask(taskc->layered_node_mask));
+			lstat_inc(LSTAT_SKIP_REMOTE_NODE, layer, cpuc);
+			cpu = pick_idle_cpu_from(cast_mask(cand_cpumask), 0, idle_smtmask, layer);
+		} else {
+			cpu = pick_idle_cpu_from(p->cpus_ptr, 0, idle_smtmask, layer);
+		}
 	}
 
 	if (cpu >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-out:
+	
+	bpf_cpumask_release(cand_cpumask);
 	scx_bpf_put_idle_cpumask(idle_smtmask);
 }
 
@@ -2933,8 +2958,11 @@ void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
 	struct cpu_ctx *cpuc;
 	unsigned layer_id;
 	u32 llc_id;
+	const struct node_ctx *nctx;
+	struct layer *layer;
+	struct cpumask *layer_cpumask;
 
-	if (!idle || !(cpuc = lookup_cpu_ctx(cpu)))
+	if (!idle || !(cpuc = lookup_cpu_ctx(cpu)) || !(nctx = lookup_node_ctx(cpuc->node_id)))
 		return;
 
 	cpuc->protect_owned = false;
@@ -2945,7 +2973,18 @@ void BPF_STRUCT_OPS(layered_update_idle, s32 cpu, bool idle)
 	 * see idle set or we see the task in one of the DSQs.
 	 */
 	llc_id = cpu_to_llc_id(cpu);
+
 	bpf_for(layer_id, 0, nr_layers) {
+		if((layer = lookup_layer(layer_id)) && 
+			(layer_cpumask = lookup_layer_cpumask(layer_id)) &&
+			!bpf_cpumask_test_cpu(cpu, layer_cpumask) &&
+			layer->skip_remote_node && 
+			// Verifier
+			nctx->cpumask && 
+			!bpf_cpumask_intersects(layer_cpumask, cast_mask(nctx->cpumask))) {
+			lstat_inc(LSTAT_SKIP_REMOTE_NODE, layer, cpuc);
+			continue;
+		}
 		if (scx_bpf_dsq_nr_queued(layer_dsq_id(layer_id, llc_id))) {
 			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 			break;
