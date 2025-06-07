@@ -30,7 +30,7 @@ scx_bitmap_pick_any_cpu_once(scx_bitmap_t __arg_arena mask, u64 __arg_arena *sta
 
 		cpu = scx_ffs(old);
 		new = old & ~(1ULL << cpu);
-		if (cmpxchg(&mask->bits[ind], old, new) == old)
+		if (cmpxchg(&mask->bits[ind], old, new) != old)
 			return -EAGAIN;
 
 		*start = ind;
