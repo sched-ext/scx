@@ -463,8 +463,8 @@ static void advance_cur_logical_clk(struct task_struct *p)
 	u64 nr_queued, delta, new_clk;
 	int i;
 
-	vlc = READ_ONCE(p->scx.dsq_vtime);
-	clc = READ_ONCE(cur_logical_clk);
+	WRITE_ONCE(vlc, p->scx.dsq_vtime);
+	WRITE_ONCE(clc, cur_logical_clk);
 
 	bpf_for(i, 0, LAVD_MAX_RETRY) {
 		/*
@@ -508,7 +508,7 @@ static void update_stat_for_running(struct task_struct *p,
 	 * is not turned on.
 	 */
 	if (p->scx.slice == SCX_SLICE_DFL) {
-		p->scx.dsq_vtime = READ_ONCE(cur_logical_clk);
+		WRITE_ONCE(p->scx.dsq_vtime, cur_logical_clk);
 		p->scx.slice = calc_time_slice(taskc);
 	}
 
@@ -1349,7 +1349,7 @@ void BPF_STRUCT_OPS(lavd_enable, struct task_struct *p)
 		return;
 	}
 
-	taskc->svc_time = READ_ONCE(cur_svc_time);
+	WRITE_ONCE(taskc->svc_time, cur_svc_time);
 }
 
 static void init_task_ctx(struct task_struct *p, struct task_ctx *taskc)
