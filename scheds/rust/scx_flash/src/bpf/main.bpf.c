@@ -29,13 +29,17 @@ const volatile u64 slice_max = 20ULL * NSEC_PER_MSEC;
 const volatile u64 slice_min = 1ULL * NSEC_PER_MSEC;
 
 /*
- * Maximum time slice lag.
- *
- * Increasing this value can help to increase the responsiveness of interactive
- * tasks at the cost of making regular and newly created tasks less responsive
- * (0 = disabled).
+ * Maximum runtime budget that a task can accumulate while sleeping (used
+ * to determine the task's minimum vruntime).
  */
 const volatile u64 slice_lag = 20ULL * NSEC_PER_MSEC;
+
+/*
+ * Maximum runtime penalty that a task can accumulate while running (used
+ * to determine the task's maximum exec_vruntime: accumulated vruntime
+ * since last sleep).
+ */
+const volatile u64 run_lag = 20ULL * NSEC_PER_MSEC;
 
 /*
  * Maximum amount of voluntary context switches (this limit allows to prevent
@@ -1304,7 +1308,7 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 
 	/*
 	 * Update task's execution time (exec_runtime), but never account
-	 * more than a scaled @slice_lag of runtime to prevent excessive
+	 * more than a scaled @run_lag of runtime to prevent excessive
 	 * de-prioritization of CPU-intensive tasks (which could lead to
 	 * starvation).
 	 *
@@ -1312,7 +1316,7 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 	 * cap (resulting in an earlier deadline) and vice-versa for tasks
 	 * with a lower priority.
 	 */
-	max_runtime = scale_by_task_normalized_weight_inverse(p, slice_lag);
+	max_runtime = scale_by_task_normalized_weight_inverse(p, run_lag);
 	if (tctx->exec_runtime + slice < max_runtime)
 		tctx->exec_runtime += slice;
 	else
@@ -1377,13 +1381,13 @@ void BPF_STRUCT_OPS(flash_quiescent, struct task_struct *p, u64 deq_flags)
 		return;
 
 	/*
-	 * Refresh voluntary context switch metrics every @slice_lag ns.
+	 * Refresh voluntary context switch metrics every @slice_max ns.
 	 */
 	tctx->nvcsw++;
 
 	delta_t = time_delta(now, tctx->nvcsw_ts);
-	if (delta_t > slice_lag) {
-		u64 avg = tctx->nvcsw * slice_lag / delta_t;
+	if (delta_t > slice_max) {
+		u64 avg = tctx->nvcsw * slice_max / delta_t;
 
 		tctx->avg_nvcsw = calc_avg_clamp(tctx->avg_nvcsw, avg, 0, max_avg_nvcsw);
 		tctx->nvcsw = 0;
