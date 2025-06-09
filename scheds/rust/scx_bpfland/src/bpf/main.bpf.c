@@ -1037,6 +1037,17 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
 
 	/*
+	 * Refresh the task domain if it was migrated to a different CPU,
+	 * without going through ops.select_cpu().
+	 *
+	 * This ensures the proactive wakeup (see below) will target a CPU
+	 * near the one the task was most recently running on, preventing
+	 * expensive cross-LLC or cross-node migrations.
+	 */
+	if (tctx->recent_used_cpu != prev_cpu)
+		task_update_domain(p, tctx, prev_cpu, p->cpus_ptr);
+
+	/*
 	 * If there are idle CPUs in the system try to proactively wake up
 	 * one, so that it can immediately execute the task in case its
 	 * current CPU is busy (always prioritizing full-idle SMT cores
