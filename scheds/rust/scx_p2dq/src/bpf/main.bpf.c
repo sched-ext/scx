@@ -661,7 +661,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	}
 
 	// Handle affinitized tasks separately
-	if (!taskc->all_cpus ||
+	if ((bpf_cpumask_weight(p->cpus_ptr) < 2 /* should probably be configurable */) ||
 	    (p->cpus_ptr == &p->cpus_mask &&
 	    p->nr_cpus_allowed != nr_cpus)) {
 		bool is_idle = false;
