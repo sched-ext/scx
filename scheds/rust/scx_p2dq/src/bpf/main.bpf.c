@@ -883,7 +883,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	}
 }
 
-static __always_inline int dispatch_cpu(u64 dsq_id, s32 cpu, struct llc_ctx *llcx, int dsq_index)
+static __always_inline int dispatch_cpu(u64 dsq_id, s32 cpu)
 {
 	struct task_struct *p;
 	int dispatched = 0;
@@ -956,7 +956,7 @@ static __always_inline bool consume_llc(struct llc_ctx *cur_llcx, struct llc_ctx
 
 	bpf_for(i, 1, nr_dsqs_per_llc) {
 		dsq_id = llcx->dsqs[nr_dsqs_per_llc - i];
-		if (dispatch_cpu(dsq_id, cpu, llcx, nr_dsqs_per_llc - i) > 0)
+		if (dispatch_cpu(dsq_id, cpu) > 0)
 			return true;
 	}
 
