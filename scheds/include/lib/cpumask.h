@@ -3,8 +3,6 @@
 
 #include <lib/sdt_task.h>
 
-int bpf_cpumask_populate(struct cpumask *dst, void *src, size_t src__sz) __ksym __weak;
-
 #define SCXMASK_NLONG (512 / 8)
 
 struct scx_bitmap {
