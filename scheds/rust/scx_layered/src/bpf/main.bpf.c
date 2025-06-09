@@ -1330,18 +1330,17 @@ static void task_uncharge_qrt(struct task_ctx *taskc)
 	taskc->qrt_llc_id = MAX_LLCS;
 }
 
-static void kick_idle_cpu(struct task_struct *p, struct layer *layer)
+static void kick_idle_cpu(struct task_struct *p, struct layer *layer, struct task_ctx *taskc)
 {
 	const struct cpumask *idle_smtmask;
 	struct bpf_cpumask *cand_cpumask;
-	struct task_ctx *taskc;
 	struct cpu_ctx *cpuc;
 	s32 cpu;
 
 	if (!(idle_smtmask = scx_bpf_get_idle_smtmask()))
 		return;
 	
-	if (!(cpuc = lookup_cpu_ctx(-1)) || !(cand_cpumask = bpf_cpumask_create())) {
+	if (!(cpuc = lookup_cpu_ctx(-1))) {
 		scx_bpf_put_idle_cpumask(idle_smtmask);
 		return;
 	}
@@ -1350,23 +1349,24 @@ static void kick_idle_cpu(struct task_struct *p, struct layer *layer)
 		const struct cpumask *layer_cpumask;
 
 		if (!(layer_cpumask = lookup_layer_cpumask(layer->id))) {
-			bpf_cpumask_release(cand_cpumask);
 			scx_bpf_put_idle_cpumask(idle_smtmask);
 			return;
 		}
 
-		if (layer->skip_remote_node && (taskc = lookup_task_ctx(p)) && taskc->layered_node_mask) {
+		if (layer->skip_remote_node && taskc && taskc->layered_node_mask && (cand_cpumask = bpf_cpumask_create())) {
 			bpf_cpumask_and(cand_cpumask, layer_cpumask, cast_mask(taskc->layered_node_mask));
 			lstat_inc(LSTAT_SKIP_REMOTE_NODE, layer, cpuc);
 			cpu = pick_idle_cpu_from(cast_mask(cand_cpumask), 0, idle_smtmask, layer);
+			bpf_cpumask_release(cand_cpumask);
 		} else {
 			cpu = pick_idle_cpu_from(layer_cpumask, 0, idle_smtmask, layer);
 		}
 	} else {
-		if (layer->skip_remote_node && (taskc = lookup_task_ctx(p)) && taskc->layered_node_mask) {
+		if (layer->skip_remote_node && taskc && taskc->layered_node_mask && (cand_cpumask = bpf_cpumask_create())) {
 			bpf_cpumask_and(cand_cpumask, p->cpus_ptr, cast_mask(taskc->layered_node_mask));
 			lstat_inc(LSTAT_SKIP_REMOTE_NODE, layer, cpuc);
 			cpu = pick_idle_cpu_from(cast_mask(cand_cpumask), 0, idle_smtmask, layer);
+			bpf_cpumask_release(cand_cpumask);
 		} else {
 			cpu = pick_idle_cpu_from(p->cpus_ptr, 0, idle_smtmask, layer);
 		}
@@ -1375,7 +1375,6 @@ static void kick_idle_cpu(struct task_struct *p, struct layer *layer)
 	if (cpu >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 	
-	bpf_cpumask_release(cand_cpumask);
 	scx_bpf_put_idle_cpumask(idle_smtmask);
 }
 
@@ -1632,7 +1631,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 	 * set or they see @p queued in the DSQ. hi/lo_fb paths would need
 	 * something similar. Oh well...
 	 */
-	kick_idle_cpu(p, layer);
+	kick_idle_cpu(p, layer, taskc);
 }
 
 static void account_used(struct cpu_ctx *cpuc, struct task_ctx *taskc, u64 now)
