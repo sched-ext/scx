@@ -1332,7 +1332,7 @@ static void task_uncharge_qrt(struct task_ctx *taskc)
 
 static void kick_idle_cpu(struct task_struct *p, struct layer *layer, struct task_ctx *taskc)
 {
-	const struct cpumask *idle_smtmask;
+	const struct cpumask *idle_smtmask, *layer_node_mask;
 	struct bpf_cpumask *cand_cpumask;
 	struct cpu_ctx *cpuc;
 	s32 cpu;
@@ -1353,8 +1353,11 @@ static void kick_idle_cpu(struct task_struct *p, struct layer *layer, struct tas
 			return;
 		}
 
-		if (layer->skip_remote_node && taskc->layered_node_mask && (cand_cpumask = bpf_cpumask_create())) {
-			bpf_cpumask_and(cand_cpumask, layer_cpumask, cast_mask(taskc->layered_node_mask));
+		if (layer->skip_remote_node && 
+			taskc->layered_node_mask &&
+			(layer_node_mask = cast_mask(taskc->layered_node_mask)) && 
+			(cand_cpumask = bpf_cpumask_create())) {
+			bpf_cpumask_and(cand_cpumask, layer_cpumask, layer_node_mask);
 			lstat_inc(LSTAT_SKIP_REMOTE_NODE, layer, cpuc);
 			cpu = pick_idle_cpu_from(cast_mask(cand_cpumask), 0, idle_smtmask, layer);
 			bpf_cpumask_release(cand_cpumask);
@@ -1362,8 +1365,11 @@ static void kick_idle_cpu(struct task_struct *p, struct layer *layer, struct tas
 			cpu = pick_idle_cpu_from(layer_cpumask, 0, idle_smtmask, layer);
 		}
 	} else {
-		if (layer->skip_remote_node && taskc->layered_node_mask && (cand_cpumask = bpf_cpumask_create())) {
-			bpf_cpumask_and(cand_cpumask, p->cpus_ptr, cast_mask(taskc->layered_node_mask));
+		if (layer->skip_remote_node && 
+			taskc->layered_node_mask && 
+			(layer_node_mask = cast_mask(taskc->layered_node_mask)) && 
+			(cand_cpumask = bpf_cpumask_create())) {
+			bpf_cpumask_and(cand_cpumask, p->cpus_ptr, layer_node_mask);
 			lstat_inc(LSTAT_SKIP_REMOTE_NODE, layer, cpuc);
 			cpu = pick_idle_cpu_from(cast_mask(cand_cpumask), 0, idle_smtmask, layer);
 			bpf_cpumask_release(cand_cpumask);
