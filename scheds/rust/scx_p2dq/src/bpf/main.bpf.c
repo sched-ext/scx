@@ -609,7 +609,7 @@ static __always_inline s32 p2dq_select_cpu_impl(struct task_struct *p, s32 prev_
 
 	if (is_idle) {
 		stat_inc(P2DQ_STAT_IDLE);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, taskc->slice_ns, 0);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON|cpu, taskc->slice_ns, 0);
 	}
 
 	return cpu;
@@ -784,7 +784,8 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 	cpuc->dsq_index = taskc->dsq_index;
 	cpuc->ran_for = 0;
 	// racy, but don't care
-	if (p->scx.dsq_vtime > llcx->vtime) {
+	if (p->scx.dsq_vtime > llcx->vtime &&
+	    p->scx.dsq_vtime < llcx->vtime + max_dsq_time_slice()) {
 		__sync_val_compare_and_swap(&llcx->vtime, llcx->vtime, p->scx.dsq_vtime);
 	}
 
@@ -1059,6 +1060,9 @@ static __always_inline void p2dq_dispatch_impl(s32 cpu, struct task_struct *prev
 			dsq_id = llcx->dsqs[i];
 		}
 	}
+
+	trace("DISPATCH cpu[%d] vtime %llu min_vtime %llu dsq_id %llu",
+	      cpu, llcx->vtime, min_vtime, dsq_id);
 
 	if (dsq_id != 0 && scx_bpf_dsq_move_to_local(dsq_id))
 		return;
