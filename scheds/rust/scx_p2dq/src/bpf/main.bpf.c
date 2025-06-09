@@ -606,7 +606,7 @@ static __always_inline s32 p2dq_select_cpu_impl(struct task_struct *p, s32 prev_
 	if (!(taskc = lookup_task_ctx(p)))
 		return prev_cpu;
 
-	if (!taskc->all_cpus)
+	if (bpf_cpumask_weight(p->cpus_ptr) < 2 /* should probably be cfg param */)
 		cpu = pick_idle_affinitized_cpu(p, taskc, prev_cpu, &is_idle);
 	else
 		cpu = pick_idle_cpu(p, taskc, prev_cpu, wake_flags, &is_idle);
