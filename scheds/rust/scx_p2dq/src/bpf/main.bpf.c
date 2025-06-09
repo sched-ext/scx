@@ -435,7 +435,7 @@ static s32 pick_idle_cpu(struct task_struct *p, task_ctx *taskc,
 	}
 
 	// First check if last CPU is idle
-	if (taskc->all_cpus &&
+	if ((bpf_cpumask_weight(p->cpus_ptr) < 3 /* should probably be configurable */) &&
 	    bpf_cpumask_test_cpu(prev_cpu, (smt_enabled && !interactive) ?
 				 idle_smtmask : idle_cpumask) &&
 	    scx_bpf_test_and_clear_cpu_idle(prev_cpu)) {
@@ -606,7 +606,7 @@ static __always_inline s32 p2dq_select_cpu_impl(struct task_struct *p, s32 prev_
 	if (!(taskc = lookup_task_ctx(p)))
 		return prev_cpu;
 
-	if (bpf_cpumask_weight(p->cpus_ptr) < 2 /* should probably be cfg param */)
+	if (bpf_cpumask_weight(p->cpus_ptr) < 3 /* should probably be cfg param */)
 		cpu = pick_idle_affinitized_cpu(p, taskc, prev_cpu, &is_idle);
 	else
 		cpu = pick_idle_cpu(p, taskc, prev_cpu, wake_flags, &is_idle);
@@ -661,7 +661,7 @@ static __always_inline void async_p2dq_enqueue(struct enqueue_promise *ret,
 	}
 
 	// Handle affinitized tasks separately
-	if ((bpf_cpumask_weight(p->cpus_ptr) < 2 /* should probably be configurable */) ||
+	if ((bpf_cpumask_weight(p->cpus_ptr) < 3 /* should probably be configurable */) ||
 	    (p->cpus_ptr == &p->cpus_mask &&
 	    p->nr_cpus_allowed != nr_cpus)) {
 		bool is_idle = false;
@@ -784,7 +784,7 @@ static __always_inline int p2dq_running_impl(struct task_struct *p)
 	// current LLC vtime. Affinitized tasks are direct dispatched and don't
 	// strictly follow vtime.
 	if ((taskc->dsq_index >= 0 && taskc->dsq_index < nr_dsqs_per_llc) &&
-	    taskc->all_cpus &&
+	    (bpf_cpumask_weight(p->cpus_ptr) < 3 /* should probably be configurable */) &&
 	    p->scx.dsq_vtime > llcx->dsq_max_vtime[taskc->dsq_index])
 		llcx->dsq_max_vtime[taskc->dsq_index] = p->scx.dsq_vtime;
 
@@ -1133,7 +1133,7 @@ static __always_inline s32 p2dq_init_task_impl(struct task_struct *p,
 
 	// When a task is initialized set the DSQ id to invalid. This causes
 	// the task to be randomized on a LLC.
-	if (taskc->all_cpus)
+	if (bpf_cpumask_weight(p->cpus_ptr) < 3 /* should probably be configurable */)
 		taskc->dsq_id = SCX_DSQ_INVALID;
 	else
 		taskc->dsq_id = llcx->dsqs[init_dsq_index];
