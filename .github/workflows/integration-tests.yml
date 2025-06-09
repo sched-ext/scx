@@ -117,3 +117,16 @@ jobs:
           path: ./log_save/*.ci.log
           # it's all txt files w/ 90 day retention, lets be nice.
           compression-level: 9
+
+  all-success:
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64" ]') || 'ubuntu-latest' }}
+    needs: integration-test
+    if: always()
+    steps:
+      - name: Check all jobs succeeded
+        run: |
+          if [[ "${{ needs.integration-test.result }}" != "success" ]]; then
+            echo "Integration tests failed or were cancelled"
+            exit 1
+          fi
+          echo "All integration tests passed successfully"
