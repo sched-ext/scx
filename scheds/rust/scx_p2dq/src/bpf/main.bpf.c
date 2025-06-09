@@ -839,8 +839,8 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 	scaled_used = used * 100 / p->scx.weight;
 
 	p->scx.dsq_vtime += scaled_used;
-	__sync_fetch_and_add(&llcx->vtime, scaled_used);
-	__sync_fetch_and_add(&llcx->dsq_max_vtime[dsq_index], scaled_used);
+	__sync_fetch_and_add(&llcx->vtime, used);
+	__sync_fetch_and_add(&llcx->dsq_max_vtime[dsq_index], used);
 	__sync_fetch_and_add(&llcx->dsq_load[dsq_index], used);
 	__sync_fetch_and_add(&llcx->load, used);
 	if (!taskc->all_cpus)
@@ -848,7 +848,7 @@ void BPF_STRUCT_OPS(p2dq_stopping, struct task_struct *p, bool runnable)
 		__sync_fetch_and_add(&llcx->affn_load, used);
 
 
-	trace("%s weight %d slice %llu used %llu scaled %llu",
+	trace("STOPPING %s weight %d slice %llu used %llu scaled %llu",
 	      p->comm, p->scx.weight, last_dsq_slice_ns, used, scaled_used);
 
 	if (!runnable) {
