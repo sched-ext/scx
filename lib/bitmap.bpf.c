@@ -94,9 +94,9 @@ bool scx_bitmap_test_and_clear_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
 {
 	u64 bit = 1ULL << (cpu % 64);
 	u32 idx = cpu / 64;
-	bool was_set = mask->bits[idx] & bit;
-	mask->bits[idx] &= ~bit;
-	return was_set;
+
+	u64 old = __sync_fetch_and_and(&mask->bits[idx], ~bit);
+	return old & bit;
 }
 
 __weak
