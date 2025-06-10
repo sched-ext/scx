@@ -14,6 +14,8 @@ jobs:
       matrix: ${{ steps.output.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Nix
         uses: ./.github/actions/install-nix
