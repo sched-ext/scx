@@ -1680,7 +1680,7 @@ static bool keep_running(struct cpu_ctx *cpuc, struct task_struct *p,
 		 * have tasks waiting, keep running it. If there are multiple
 		 * competing preempting layers, this won't work well.
 		 */
-		u32 dsq_id = layer_dsq_id(layer->id, cpuc->llc_id);
+		u64 dsq_id = layer_dsq_id(layer->id, cpuc->llc_id);
 		if (!scx_bpf_dsq_nr_queued(dsq_id)) {
 			p->scx.slice = layer->slice_ns;
 			lstat_inc(LSTAT_KEEP, layer, cpuc);
