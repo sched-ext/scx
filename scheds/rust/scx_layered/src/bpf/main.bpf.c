@@ -3490,7 +3490,8 @@ static s32 init_layer(int layer_id)
  */
 static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 		    struct bpf_cpumask *cpumask,
-		    struct bpf_cpumask *tmp_big_cpumask)
+		    struct bpf_cpumask *tmp_big_cpumask,
+		    struct bpf_cpumask *tmp_unprotected_cpumask)
 {
 	const volatile u8 *u8_ptr;
 	struct cpu_ctx *cpuc;
@@ -3508,6 +3509,13 @@ static s32 init_cpu(s32 cpu, int *nr_online_cpus,
 		return -ENOMEM;
 	}
 	cpuc->task_layer_id = MAX_LAYERS;
+
+
+	/*
+	 * By default, set all CPUs as unprotected, we'll converge eventually in
+	 * refresh_layer_cpuc.
+	 */
+	bpf_cpumask_set_cpu(cpu, tmp_unprotected_cpumask);
 
 	if ((u8_ptr = MEMBER_VPTR(all_cpus, [cpu / 8]))) {
 		if (*u8_ptr & (1 << (cpu % 8))) {
@@ -3584,7 +3592,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(layered_init)
 
 	nr_online_cpus = 0;
 	bpf_for(i, 0, nr_possible_cpus) {
-		ret = init_cpu(i, &nr_online_cpus, cpumask, tmp_big_cpumask);
+		ret = init_cpu(i, &nr_online_cpus, cpumask, tmp_big_cpumask, tmp_unprotected_cpumask);
 		if (ret != 0) {
 			bpf_cpumask_release(cpumask);
 			bpf_cpumask_release(tmp_big_cpumask);
