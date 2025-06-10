@@ -56,8 +56,8 @@ int scx_bitmap_copy_to_stack(struct scx_bitmap *dst, scx_bitmap_t __arg_arena sr
 	int i;
 
 	if (unlikely(!src || !dst)) {
-		scx_bpf_error("invalid pointer args to pointer copy");
-		return 0;
+		bpf_printk("invalid pointer args to pointer copy");
+		return -EINVAL;
 	}
 
 	bpf_for(i, 0, mask_size) {
