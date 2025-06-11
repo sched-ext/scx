@@ -2134,7 +2134,7 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 
 			/* CPU is in a protected layer, do not pull from other layers. */
 			if (owner_layer->is_protected)
-				return;
+				goto replenish;
 		}
 
 		/* try grouped/open preempting if not tried yet */
@@ -2149,9 +2149,9 @@ void BPF_STRUCT_OPS(layered_dispatch, s32 cpu, struct task_struct *prev)
 			return;
 	}
 
+replenish:
 	if (!tried_lo_fb && scx_bpf_dsq_move_to_local(cpuc->lo_fb_dsq_id))
 		return;
-
 	/* !NULL prev_taskc indicates runnable prev */
 	if (prev_taskc && prev_layer)
 		prev->scx.slice = prev_layer->slice_ns;
