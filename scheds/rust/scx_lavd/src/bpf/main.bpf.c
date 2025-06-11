@@ -679,7 +679,7 @@ s32 BPF_STRUCT_OPS(lavd_select_cpu, struct task_struct *p, s32 prev_cpu,
 		 */
 		cpuc = get_cpu_ctx_id(cpu_id);
 		if (!cpuc) {
-			scx_bpf_error("Failed to look up cpu context");
+			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu_id);
 			return cpu_id;
 		}
 		dsq_id = cpuc->cpdom_id;
@@ -776,7 +776,7 @@ void BPF_STRUCT_OPS(lavd_dispatch, s32 cpu, struct task_struct *prev)
 
 	cpuc = get_cpu_ctx_id(cpu);
 	if (!cpuc) {
-		scx_bpf_error("Failed to look up cpu context");
+		scx_bpf_error("Failed to lookup cpu_ctx %d", cpu);
 		return;
 	}
 	dsq_id = cpuc->cpdom_id;
@@ -978,7 +978,7 @@ void BPF_STRUCT_OPS(lavd_runnable, struct task_struct *p, u64 enq_flags)
 	 */
 	p_taskc = get_task_ctx(p);
 	if (!p_taskc) {
-		scx_bpf_error("Failed to lookup task_ctx for task");
+		scx_bpf_error("Failed to lookup task_ctx for task %d", p->pid);
 		return;
 	}
 	p_taskc->acc_runtime = 0;
@@ -1092,7 +1092,7 @@ void BPF_STRUCT_OPS(lavd_quiescent, struct task_struct *p, u64 deq_flags)
 	cpuc = get_cpu_ctx_task(p);
 	taskc = get_task_ctx(p);
 	if (!cpuc || !taskc) {
-		scx_bpf_error("Failed to lookup context for task %d ", p->pid);
+		scx_bpf_error("Failed to lookup context for task %d", p->pid);
 		return;
 	}
 
@@ -1515,7 +1515,7 @@ static s32 init_per_cpu_ctx(u64 now)
 	little = little_cpumask;
 	active  = active_cpumask;
 	ovrflw  = ovrflw_cpumask;
-	if (!turbo || !big|| !little || !active || !ovrflw) {
+	if (!turbo || !big || !little || !active || !ovrflw) {
 		scx_bpf_error("Failed to prepare cpumasks.");
 		err = -ENOMEM;
 		goto unlock_out;
