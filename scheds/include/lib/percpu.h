@@ -65,7 +65,7 @@ __weak int scx_storage_init_single(u32 cpu)
 	storage = bpf_map_lookup_percpu_elem(map, &zero, cpu);
 	if (!storage) {
 		/* Should be impossible. */
-		bpf_printk("Did not find map entry");
+		bpf_printk("Did not find map entry for cpu %d", cpu);
 		return -EINVAL;
 	}
 
@@ -119,7 +119,7 @@ scx_bitmap_t scx_percpu_scx_bitmap(void)
 	storage = bpf_map_lookup_elem(map, &zero);
 	if (!storage) {
 		/* Should be impossible. */
-		bpf_printk("Did not find map entry");
+		bpf_printk("Did not find map entry (bitmap)");
 		return NULL;
 	}
 

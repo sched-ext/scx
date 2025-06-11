@@ -1,9 +1,9 @@
 #include <scx/common.bpf.h>
+#include <lib/arena.h>
+#include <lib/cpumask.h>
 #include <lib/sdt_task.h>
 
-#include <lib/cpumask.h>
-
-const volatile u32 nr_cpu_ids = 64;
+const volatile u32 nr_cpu_ids = NR_CPU_IDS_UNINIT;
 
 static struct scx_allocator scx_bitmap_allocator;
 size_t mask_size;
