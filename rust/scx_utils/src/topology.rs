@@ -426,7 +426,7 @@ fn create_insert_cpu(
     node: &mut Node,
     online_mask: &Cpumask,
     topo_ctx: &mut TopoCtx,
-    capacity_src: Option<(String, usize, usize)>,
+    cs: &CapacitySource,
     flatten_llc: bool,
 ) -> Result<()> {
     // CPU is offline. The Topology hierarchy is read-only, and assumes
@@ -474,10 +474,9 @@ fn create_insert_cpu(
         read_from_file(&freq_path.join("cpuinfo_transition_latency")).unwrap_or(0_usize);
 
     // Cpu capacity
-    let (cap_suffix, avg_rcap, max_rcap) = capacity_src.unwrap_or(("".to_string(), 1024, 1024));
-    let cap_path = cpu_path.join(cap_suffix);
-    let rcap = read_from_file(&cap_path).unwrap_or(max_rcap);
-    let cpu_capacity = (rcap * 1024) / max_rcap;
+    let cap_path = cpu_path.join(cs.suffix.clone());
+    let rcap = read_from_file(&cap_path).unwrap_or(cs.max_rcap);
+    let cpu_capacity = (rcap * 1024) / cs.max_rcap;
 
     // Power management
     let power_path = cpu_path.join("power");
@@ -501,9 +500,9 @@ fn create_insert_cpu(
     }));
     let llc_mut = Arc::get_mut(llc).unwrap();
 
-    let core_type = if rcap == max_rcap {
+    let core_type = if rcap == cs.max_rcap {
         CoreType::Big { turbo: true }
-    } else if rcap >= avg_rcap {
+    } else if rcap >= cs.avg_rcap {
         CoreType::Big { turbo: false }
     } else {
         CoreType::Little
@@ -580,7 +579,16 @@ fn read_cpu_ids() -> Result<Vec<usize>> {
     Ok(cpu_ids)
 }
 
-fn cpu_capacity_source() -> Option<(String, usize, usize)> {
+struct CapacitySource {
+    /// Path suffix after /sys/devices/system/cpu/cpuX
+    suffix: String,
+    /// Average raw capacity value
+    avg_rcap: usize,
+    /// Maximum raw capacity value
+    max_rcap: usize,
+}
+
+fn get_capacity_source() -> Option<CapacitySource> {
     // Sources for guessing cpu_capacity under /sys/devices/system/cpu/cpuX.
     // They should be ordered from the most precise to the least precise.
     let sources = [
@@ -617,27 +625,32 @@ fn cpu_capacity_source() -> Option<(String, usize, usize)> {
     }
 
     // Find the max raw_capacity value for scaling to 1024.
-    let mut max_raw_capacity = 0;
-    let mut avg_raw_capacity = 0;
+    let mut max_rcap = 0;
+    let mut avg_rcap = 0;
     let mut nr_cpus = 0;
     let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*").ok()?;
     for cpu_path in cpu_paths.filter_map(Result::ok) {
-        let raw_capacity = read_from_file(&cpu_path.join(suffix)).unwrap_or(0_usize);
-        if max_raw_capacity < raw_capacity {
-            max_raw_capacity = raw_capacity;
+        let rcap = read_from_file(&cpu_path.join(suffix)).unwrap_or(0_usize);
+        if max_rcap < rcap {
+            max_rcap = rcap;
         }
-        avg_raw_capacity += raw_capacity;
+        avg_rcap += rcap;
         nr_cpus += 1;
     }
-    if max_raw_capacity == 0 {
-        return None;
+
+    if nr_cpus == 0 {
+        suffix = "";
+        avg_rcap = 1024;
+        max_rcap = 1024;
+    } else {
+        avg_rcap /= nr_cpus;
     }
 
-    Some((
-        suffix.to_string(),
-        avg_raw_capacity / nr_cpus,
-        max_raw_capacity,
-    ))
+    Some(CapacitySource {
+        suffix: suffix.to_string(),
+        avg_rcap,
+        max_rcap,
+    })
 }
 
 fn is_smt_active() -> Option<bool> {
@@ -677,17 +690,10 @@ fn create_default_node(
         bail!("/sys/devices/system/cpu sysfs node not found");
     }
 
-    let capacity_src = cpu_capacity_source();
+    let cs = get_capacity_source().unwrap();
     let cpu_ids = read_cpu_ids()?;
     for cpu_id in cpu_ids.iter() {
-        create_insert_cpu(
-            *cpu_id,
-            &mut node,
-            online_mask,
-            topo_ctx,
-            capacity_src.clone(),
-            flatten_llc,
-        )?;
+        create_insert_cpu(*cpu_id, &mut node, online_mask, topo_ctx, &cs, flatten_llc)?;
     }
 
     nodes.insert(node.id, node);
@@ -744,7 +750,7 @@ fn create_numa_nodes(
 
         let cpu_pattern = numa_path.join("cpu[0-9]*");
         let cpu_paths = glob(cpu_pattern.to_string_lossy().as_ref())?;
-        let capacity_src = cpu_capacity_source();
+        let cs = get_capacity_source().unwrap();
         let mut cpu_ids = vec![];
         for cpu_path in cpu_paths.filter_map(Result::ok) {
             let cpu_str = cpu_path.to_str().unwrap().trim();
@@ -759,14 +765,7 @@ fn create_numa_nodes(
         cpu_ids.sort();
 
         for cpu_id in cpu_ids {
-            create_insert_cpu(
-                cpu_id,
-                &mut node,
-                online_mask,
-                topo_ctx,
-                capacity_src.clone(),
-                false,
-            )?;
+            create_insert_cpu(cpu_id, &mut node, online_mask, topo_ctx, &cs, false)?;
         }
 
         nodes.insert(node.id, node);
