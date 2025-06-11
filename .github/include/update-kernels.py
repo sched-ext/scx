@@ -96,7 +96,11 @@ if __name__ == "__main__":
 
     subprocess.run(["git", "add", "kernel-versions.json"], check=True)
 
-    commit_message = "chore(deps): update kernel versions\n"
+    if len(updated_kernels) == 1:
+        commit_message = f"chore(deps): update {updated_kernels[0]} kernel\n"
+    else:
+        commit_message = "chore(deps): update kernel versions\n"
+
     for kernel in updated_kernels:
         commit_message += f"\nCI-Test-Kernel: {kernel}"
 
