@@ -2751,14 +2751,18 @@ version = "1.0.15"
 dependencies = [
  "anyhow",
  "clap",
+ "crossbeam",
  "ctrlc",
  "libbpf-rs",
  "libc",
  "log",
  "nix 0.29.0",
  "scx_p2dq",
+ "scx_stats",
+ "scx_stats_derive",
  "scx_userspace_arena",
  "scx_utils",
+ "serde",
  "simplelog",
 ]
 

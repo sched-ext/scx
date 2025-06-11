@@ -72,15 +72,31 @@ struct {
 	__type(value, struct chaos_task_ctx);
 } chaos_task_ctxs SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, CHAOS_NR_STATS);
+	__type(key, u32);
+	__type(value, u64);
+} chaos_stats SEC(".maps");
+
 struct chaos_task_ctx *lookup_create_chaos_task_ctx(struct task_struct *p)
 {
 	return bpf_task_storage_get(&chaos_task_ctxs, p, NULL, BPF_LOCAL_STORAGE_GET_F_CREATE);
 }
 
+static __always_inline void chaos_stat_inc(enum chaos_stat_idx stat)
+{
+	u64 *cnt_p = bpf_map_lookup_elem(&chaos_stats, &stat);
+	if (cnt_p)
+		(*cnt_p)++;
+}
+
 static __always_inline enum chaos_trait_kind choose_chaos(struct chaos_task_ctx *taskc)
 {
-	if (taskc->match & CHAOS_MATCH_EXCLUDED)
+	if (taskc->match & CHAOS_MATCH_EXCLUDED) {
+		chaos_stat_inc(CHAOS_STAT_CHAOS_EXCLUDED);
 		return CHAOS_TRAIT_NONE;
+	}
 
 	u32 roll = bpf_get_prandom_u32();
 
@@ -245,6 +261,7 @@ __weak s32 enqueue_random_delay(struct task_struct *p __arg_trusted, u64 enq_fla
 	}
 
 	scx_bpf_dsq_insert_vtime(p, get_cpu_delay_dsq(-1), 0, vtime, enq_flags);
+	chaos_stat_inc(CHAOS_STAT_TRAIT_RANDOM_DELAYS);
 
 	return true;
 }
@@ -260,6 +277,9 @@ __weak s32 enqueue_chaotic(struct task_struct *p __arg_trusted, u64 enq_flags,
 		break;
 
 	case CHAOS_TRAIT_NONE:
+		chaos_stat_inc(CHAOS_STAT_CHAOS_SKIPPED);
+		out = false;
+		break;
 	case CHAOS_TRAIT_CPU_FREQ:
 	case CHAOS_TRAIT_DEGRADATION:
 	case CHAOS_TRAIT_MAX:
@@ -294,9 +314,11 @@ __weak u64 check_dsq_times(int cpu_idx)
 		if (!has_kicked && p->scx.dsq_vtime < now - chaos_timer_check_queues_slack_ns) {
 			has_kicked = true;
 			scx_bpf_kick_cpu(cpu_idx, SCX_KICK_PREEMPT);
+			chaos_stat_inc(CHAOS_STAT_TIMER_KICKS);
 		} else if (!has_kicked && p->scx.dsq_vtime < now) {
 			has_kicked = true;
 			scx_bpf_kick_cpu(cpu_idx, SCX_KICK_IDLE);
+			chaos_stat_inc(CHAOS_STAT_TIMER_KICKS);
 		} else if (p->scx.dsq_vtime > now) {
 			next_trigger_time = p->scx.dsq_vtime;
 		}
@@ -465,12 +487,14 @@ void BPF_STRUCT_OPS(chaos_enqueue, struct task_struct *p __arg_trusted, u64 enq_
 		if (promise.kind == P2DQ_ENQUEUE_PROMISE_FIFO) {
 			promise.fifo.slice_ns = ((degradation_frac7 << 7) * promise.fifo.slice_ns) >> 7;
 			dbg("CHAOS[degradation][%d] slice_ns: %llu", p, promise.fifo.slice_ns);
+			chaos_stat_inc(CHAOS_STAT_TRAIT_DEGRADATION);
 		}
 		if (promise.kind == P2DQ_ENQUEUE_PROMISE_VTIME) {
 			promise.vtime.vtime += ((degradation_frac7 << 7) * promise.vtime.slice_ns) >> 7;
 			promise.vtime.slice_ns = ((degradation_frac7 << 7) * promise.vtime.slice_ns) >> 7;
 			dbg("CHAOS[degradation][%d] vtime: %llu slice_ns: %llu",
 			    p, promise.vtime.vtime, promise.vtime.slice_ns);
+			chaos_stat_inc(CHAOS_STAT_TRAIT_DEGRADATION);
 		}
 	}
 
@@ -508,6 +532,7 @@ void BPF_STRUCT_OPS(chaos_running, struct task_struct *p)
 		if (cpu_freq_min > 0) {
 			dbg("CHAOS[freq][%d] freq: %d", p->pid, cpu_freq_min);
 			scx_bpf_cpuperf_set(task_cpu, cpu_freq_min);
+			chaos_stat_inc(CHAOS_STAT_TRAIT_CPU_FREQ);
 		}
 	} else {
 		if (cpu_freq_max > 0)

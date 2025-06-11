@@ -4,8 +4,10 @@
 // GNU General Public License version 2.
 mod bpf_intf;
 mod bpf_skel;
+pub mod stats;
 
 use bpf_skel::BpfSkel;
+use stats::Metrics;
 
 use scx_p2dq::SchedulerOpts as P2dqOpts;
 use scx_userspace_arena::alloc::Allocator;
@@ -29,11 +31,14 @@ use anyhow::bail;
 use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
+use crossbeam::channel::RecvTimeoutError;
+use libbpf_rs::MapCore as _;
 use libbpf_rs::OpenObject;
 use libbpf_rs::ProgramInput;
 use log::debug;
 use log::info;
 use nix::unistd::Pid;
+use scx_stats::prelude::*;
 
 use std::alloc::Layout;
 use std::marker::PhantomPinned;
@@ -142,6 +147,7 @@ pub struct SkelWithObject {
 pub struct Scheduler {
     _arena: HeapAllocator<ArenaAllocator>,
     _struct_ops: libbpf_rs::Link,
+    stats_server: StatsServer<(), Metrics>,
 
     // Fields are dropped in declaration order, this must be last as arena holds a reference to the
     // skel
@@ -149,12 +155,41 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
+    fn get_metrics(&self) -> Metrics {
+        let mut stats = vec![0u64; bpf_intf::chaos_stat_idx_CHAOS_NR_STATS as usize];
+        let stats_map = &self.skel.skel.read().unwrap().maps.chaos_stats;
+
+        for stat in 0..bpf_intf::chaos_stat_idx_CHAOS_NR_STATS {
+            let cpu_stat_vec: Vec<Vec<u8>> = stats_map
+                .lookup_percpu(&stat.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
+                .unwrap_or(None)
+                .unwrap_or_default();
+            let sum: u64 = cpu_stat_vec
+                .iter()
+                .map(|val| u64::from_ne_bytes(val.as_slice().try_into().unwrap_or([0; 8])))
+                .sum();
+            stats[stat as usize] = sum;
+        }
+
+        Metrics {
+            trait_random_delays: stats
+                [bpf_intf::chaos_stat_idx_CHAOS_STAT_TRAIT_RANDOM_DELAYS as usize],
+            trait_cpu_freq: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_TRAIT_CPU_FREQ as usize],
+            trait_degradation: stats
+                [bpf_intf::chaos_stat_idx_CHAOS_STAT_TRAIT_DEGRADATION as usize],
+            chaos_excluded: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_CHAOS_EXCLUDED as usize],
+            chaos_skipped: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_CHAOS_SKIPPED as usize],
+            timer_kicks: stats[bpf_intf::chaos_stat_idx_CHAOS_STAT_TIMER_KICKS as usize],
+        }
+    }
+
     pub fn observe(
         &self,
         shutdown: &(Mutex<bool>, Condvar),
         timeout: Option<Duration>,
     ) -> Result<()> {
         let (lock, cvar) = shutdown;
+        let (res_ch, req_ch) = self.stats_server.channels();
 
         let start_time = Instant::now();
 
@@ -167,12 +202,20 @@ impl Scheduler {
                     .and_then(|_| Err(anyhow::anyhow!("scheduler exited unexpectedly")));
             }
 
+            match req_ch.recv_timeout(Duration::from_millis(500)) {
+                Ok(()) => {
+                    let _ = res_ch.send(self.get_metrics());
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(_) => {} // ignore other errors
+            }
+
             if timeout.is_some_and(|x| Instant::now().duration_since(start_time) >= x) {
                 break;
             }
 
             guard = cvar
-                .wait_timeout(guard, Duration::from_millis(500))
+                .wait_timeout(guard, Duration::from_millis(100))
                 .unwrap()
                 .0;
         }
@@ -441,6 +484,7 @@ impl<'a> TryFrom<Builder<'a>> for Scheduler {
         let skel = b.load_skel()?;
 
         let arena = HeapAllocator::new(ArenaAllocator(skel.clone()));
+        let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
         let struct_ops = {
             let mut skel_guard = skel.skel.write().unwrap();
@@ -451,6 +495,7 @@ impl<'a> TryFrom<Builder<'a>> for Scheduler {
         Ok(Scheduler {
             _arena: arena,
             _struct_ops: struct_ops,
+            stats_server,
             skel,
         })
     }
@@ -534,6 +579,15 @@ pub struct Args {
     /// times to increase verbosity.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
     pub verbose: u8,
+
+    /// Enable stats monitoring with the specified interval.
+    #[clap(long)]
+    pub stats: Option<f64>,
+
+    /// Run in stats monitoring mode with the specified interval. Scheduler
+    /// is not launched.
+    #[clap(long)]
+    pub monitor: Option<f64>,
 
     #[command(flatten, next_help_heading = "Random Delays")]
     pub random_delay: RandomDelayArgs,
@@ -652,6 +706,20 @@ pub fn run(args: Args) -> Result<()> {
     })
     .context("Error setting Ctrl-C handler")?;
 
+    if let Some(intv) = args.monitor {
+        return stats::monitor(Duration::from_secs_f64(intv), shutdown);
+    }
+
+    let stats_thread = if let Some(intv) = args.stats {
+        let shutdown = shutdown.clone();
+
+        Some(thread::spawn(move || -> Result<()> {
+            stats::monitor(Duration::from_secs_f64(intv), shutdown)
+        }))
+    } else {
+        None
+    };
+
     let scheduler_thread = thread::spawn({
         let args = args.clone();
         let shutdown = shutdown.clone();
@@ -734,6 +802,12 @@ pub fn run(args: Args) -> Result<()> {
 
     if let Err(e) = scheduler_thread.join() {
         panic::resume_unwind(e);
+    }
+
+    if let Some(stats_thread) = stats_thread {
+        if let Err(e) = stats_thread.join() {
+            panic::resume_unwind(e);
+        }
     }
 
     Ok(())
