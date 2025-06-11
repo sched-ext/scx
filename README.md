@@ -466,12 +466,12 @@ with schedulers? See the developer guide for more details.
 We aim to build a friendly and approachable community around sched_ext. You
 can reach us through the following channels:
 
-- github: https://github.com/sched-ext/scx
-- Discord: https://discord.gg/p5KSH7Sk
+- `GitHub`: https://github.com/sched-ext/scx
+- `Discord`: https://discord.gg/WFG4xG8cpc
 
-We also hold weekly office hours every Tuesday. Please see the #office-hours
-channel on slack for details. To join the slack community, you can use [this
-link](https://bit.ly/scx_slack).
+We also hold weekly office hours every Tuesday. Please see the `#office-hours`
+channel on `Discord` for details. To join the `Discord` community, you can use [this
+link](https://discord.gg/WFG4xG8cpc).
 
 ## Additional Resources
 
