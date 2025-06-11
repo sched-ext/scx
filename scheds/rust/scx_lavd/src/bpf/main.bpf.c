@@ -1499,10 +1499,9 @@ static s32 init_per_cpu_ctx(u64 now)
 	struct bpf_cpumask *turbo, *big, *little, *active, *ovrflw, *cd_cpumask;
 	const struct cpumask *online_cpumask;
 	struct cpdom_ctx *cpdomc;
-	int cpu, i, j, err = 0, nr_cpus_non_zero = 0;
+	int cpu, i, j, err = 0;
 	u64 cpdom_id;
-	u32 sum_capacity = 0, avg_capacity, big_capacity = 0;
-	u16 turbo_cap;
+	u32 sum_capacity = 0, big_capacity = 0;
 
 	bpf_rcu_read_lock();
 	online_cpumask = scx_bpf_get_online_cpumask();
@@ -1525,7 +1524,10 @@ static s32 init_per_cpu_ctx(u64 now)
 	 * Initilize CPU info
 	 */
 	bpf_for(cpu, 0, nr_cpu_ids) {
-		struct cpu_ctx *cpuc = get_cpu_ctx_id(cpu);
+		if (cpu >= LAVD_CPU_ID_MAX)
+			break;
+
+		cpuc = get_cpu_ctx_id(cpu);
 		if (!cpuc) {
 			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
 			err = -ESRCH;
@@ -1568,35 +1570,15 @@ static s32 init_per_cpu_ctx(u64 now)
 		cpuc->offline_clk = now;
 		cpuc->cpu_release_clk = now;
 		cpuc->is_online = bpf_cpumask_test_cpu(cpu, online_cpumask);
-		cpuc->capacity = get_cpuperf_cap(cpu);
+		cpuc->capacity = cpu_capacity[cpu];
+		cpuc->big_core = cpu_big[cpu];
+		cpuc->turbo_core = cpu_turbo[cpu];
 		cpuc->cpdom_poll_pos = cpu % LAVD_CPDOM_MAX_NR;
 		cpuc->min_perf_cri = LAVD_SCALE;
 		cpuc->futex_op = LAVD_FUTEX_OP_INVALID;
 
-		if (cpuc->capacity > 0) {
-			sum_capacity += cpuc->capacity;
-			nr_cpus_non_zero++;
-		}
-	}
+		sum_capacity += cpuc->capacity;
 
-	/*
-	 * Get turbo capacitiy.
-	 */
-	turbo_cap = get_cputurbo_cap();
-
-	/*
-	 * Classify CPU into BIG or little cores based on their average capacity.
-	 */
-	avg_capacity = sum_capacity / nr_cpus_non_zero;
-	bpf_for(cpu, 0, nr_cpu_ids) {
-		cpuc = get_cpu_ctx_id(cpu);
-		if (!cpuc) {
-			scx_bpf_error("Failed to lookup cpu_ctx: %d", cpu);
-			err = -ESRCH;
-			goto unlock_out;
-		}
-
-		cpuc->big_core = cpuc->capacity >= avg_capacity;
 		if (cpuc->big_core) {
 			nr_cpus_big++;
 			big_capacity += cpuc->capacity;
@@ -1607,11 +1589,9 @@ static s32 init_per_cpu_ctx(u64 now)
 			have_little_core = true;
 		}
 
-		cpuc->turbo_core = cpuc->capacity == turbo_cap;
 		if (cpuc->turbo_core) {
 			bpf_cpumask_set_cpu(cpu, turbo);
 			have_turbo_core = true;
-			debugln("CPU %d is a turbo core.", cpu);
 		}
 	}
 	default_big_core_scale = (big_capacity << LAVD_SHIFT) / sum_capacity;
@@ -1668,8 +1648,10 @@ static s32 init_per_cpu_ctx(u64 now)
 			err = -ESRCH;
 			goto unlock_out;
 		}
-		debugln("cpu:%d cpdom_id: %llu alt_id: %llu",
-			cpu, cpuc->cpdom_id, cpuc->cpdom_alt_id);
+		debugln("cpu[%d] capacity: %d, big_core: %d, turbo_core: %d, "
+			"cpdom_id: %llu, alt_id: %llu",
+			cpu, cpuc->capacity, cpuc->big_core, cpuc->turbo_core,
+			cpuc->cpdom_id, cpuc->cpdom_alt_id);
 	}
 
 unlock_out:
