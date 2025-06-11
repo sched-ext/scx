@@ -45,6 +45,10 @@ pub struct SchedulerOpts {
     #[clap(short = 'e', long, help="DEPRECATED", action = clap::ArgAction::SetTrue)]
     pub eager_load_balance: bool,
 
+    /// Enables backward sticky scheduling.
+    #[clap(long= "bs", action = clap::ArgAction::SetTrue)]
+    pub backwards_sticky: bool,
+
     /// Enables CPU frequency control.
     #[clap(short = 'f', long, action = clap::ArgAction::SetTrue)]
     pub freq_control: bool,
@@ -207,6 +211,7 @@ macro_rules! init_open_skel {
             $skel.maps.rodata_data.lb_slack_factor = opts.lb_slack_factor;
 
             $skel.maps.rodata_data.autoslice = opts.autoslice;
+            $skel.maps.rodata_data.backwards_sticky = opts.backwards_sticky;
             $skel.maps.rodata_data.debug = verbose as u32;
             $skel.maps.rodata_data.dispatch_pick2_disable = opts.dispatch_pick2_disable;
             $skel.maps.rodata_data.dispatch_lb_busy = opts.dispatch_lb_busy;
