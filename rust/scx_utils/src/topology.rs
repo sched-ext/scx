@@ -500,9 +500,9 @@ fn create_insert_cpu(
     }));
     let llc_mut = Arc::get_mut(llc).unwrap();
 
-    let core_type = if rcap == cs.max_rcap {
+    let core_type = if cs.avg_rcap < cs.max_rcap && rcap == cs.max_rcap {
         CoreType::Big { turbo: true }
-    } else if rcap >= cs.avg_rcap {
+    } else if !cs.has_biglittle || rcap >= cs.avg_rcap {
         CoreType::Big { turbo: false }
     } else {
         CoreType::Little
@@ -586,6 +586,8 @@ struct CapacitySource {
     avg_rcap: usize,
     /// Maximum raw capacity value
     max_rcap: usize,
+    /// Does a system have little cores?
+    has_biglittle: bool,
 }
 
 fn get_capacity_source() -> Option<CapacitySource> {
@@ -626,13 +628,18 @@ fn get_capacity_source() -> Option<CapacitySource> {
 
     // Find the max raw_capacity value for scaling to 1024.
     let mut max_rcap = 0;
+    let mut min_rcap = usize::MAX;
     let mut avg_rcap = 0;
     let mut nr_cpus = 0;
+    let mut has_biglittle = false;
     let cpu_paths = glob("/sys/devices/system/cpu/cpu[0-9]*").ok()?;
     for cpu_path in cpu_paths.filter_map(Result::ok) {
         let rcap = read_from_file(&cpu_path.join(suffix)).unwrap_or(0_usize);
         if max_rcap < rcap {
             max_rcap = rcap;
+        }
+        if min_rcap > rcap {
+            min_rcap = rcap;
         }
         avg_rcap += rcap;
         nr_cpus += 1;
@@ -644,12 +651,18 @@ fn get_capacity_source() -> Option<CapacitySource> {
         max_rcap = 1024;
     } else {
         avg_rcap /= nr_cpus;
+        // We consider a system to have a heterogeneous CPU architecture only
+        // when there is a significant capacity gap (e.g., 1.5x). CPU capacities
+        // can still vary in a homogeneous architecture—for instance, due to
+        // chip binning or when only a subset of CPUs supports turbo boost.
+        has_biglittle = max_rcap as f32 >= (1.5 * min_rcap as f32);
     }
 
     Some(CapacitySource {
         suffix: suffix.to_string(),
         avg_rcap,
         max_rcap,
+        has_biglittle,
     })
 }
 
