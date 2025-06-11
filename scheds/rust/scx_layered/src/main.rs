@@ -3061,8 +3061,8 @@ fn main() -> Result<()> {
                         // Push the generated layer into the config
                         layer_config.specs.push(genspec);
                     }
-                    // in the absence of cpusets, have template layers
-                    // behave like non-template layers.
+                    // in the absence of matching cgroups, have template layers
+                    // behave as non-template layers do.
                     if matches.len() == 0 {
                         layer_config.specs.push(spec);
                     }
