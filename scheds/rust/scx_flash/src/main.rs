@@ -118,12 +118,19 @@ struct Opts {
     #[clap(short = 'S', long, default_value = "1000")]
     slice_us_min: u64,
 
-    /// Maximum time slice lag in microseconds.
+    /// Maximum runtime budget that a task can accumulate while sleeping (in microseconds).
     ///
     /// Increasing this value can help to enhance the responsiveness of interactive tasks, but it
     /// can also make performance more "spikey".
     #[clap(short = 'l', long, default_value = "20000")]
     slice_us_lag: u64,
+
+    /// Maximum runtime penalty that a task can accumulate while running (in microseconds).
+    ///
+    /// Increasing this value can help to enhance the responsiveness of interactive tasks, but it
+    /// can also make performance more "spikey".
+    #[clap(short = 'r', long, default_value = "20000")]
+    run_us_lag: u64,
 
     /// Maximum rate of voluntary context switches.
     ///
@@ -316,6 +323,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
+        skel.maps.rodata_data.run_lag = opts.run_us_lag * 1000;
         skel.maps.rodata_data.throttle_ns = opts.throttle_us * 1000;
         skel.maps.rodata_data.max_avg_nvcsw = opts.max_avg_nvcsw;
 
