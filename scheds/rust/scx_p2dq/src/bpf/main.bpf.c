@@ -617,6 +617,8 @@ static __always_inline s32 p2dq_select_cpu_impl(struct task_struct *p, s32 prev_
 		stat_inc(P2DQ_STAT_IDLE);
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON|cpu, taskc->slice_ns, 0);
 	}
+	trace("SELECT [%d][%s] %i->%i idle %i",
+	      p->pid, p->comm, prev_cpu, cpu, is_idle);
 
 	return cpu;
 }
