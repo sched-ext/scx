@@ -330,7 +330,6 @@ impl Builder<'_> {
         init_libbpf_logging(None);
 
         let mut open_skel = scx_ops_open!(skel_builder, open_object, chaos)?;
-        open_skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
         scx_p2dq::init_open_skel!(&mut open_skel, self.p2dq_opts, self.verbose)?;
 
         // TODO: figure out how to abstract waking a CPU in enqueue properly, but for now disable
