@@ -201,6 +201,7 @@ macro_rules! init_open_skel {
             $skel.maps.rodata_data.kthreads_local = !opts.disable_kthreads_local;
             $skel.maps.rodata_data.nr_cpus = *$crate::NR_CPU_IDS as u32;
             $skel.maps.rodata_data.nr_dsqs_per_llc = opts.dumb_queues as u32;
+            $skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
             $skel.maps.rodata_data.init_dsq_index = opts.init_dsq_index as i32;
             $skel.maps.rodata_data.nr_llcs = $crate::TOPO.all_llcs.clone().keys().len() as u32;
             $skel.maps.rodata_data.nr_nodes = $crate::TOPO.nodes.clone().keys().len() as u32;

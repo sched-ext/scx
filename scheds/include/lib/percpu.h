@@ -42,13 +42,13 @@ static s32 create_save_bpfmask(struct bpf_cpumask __kptr **kptr)
 
 	bpfmask = bpf_cpumask_create();
 	if (!bpfmask) {
-		scx_bpf_error("Failed to create bpfmask");
+		bpf_printk("Failed to create bpfmask");
 		return -ENOMEM;
 	}
 
 	bpfmask = bpf_kptr_xchg(kptr, bpfmask);
 	if (bpfmask) {
-		scx_bpf_error("kptr already had cpumask");
+		bpf_printk("kptr already had cpumask");
 		bpf_cpumask_release(bpfmask);
 	}
 
@@ -65,7 +65,7 @@ __weak int scx_storage_init_single(u32 cpu)
 	storage = bpf_map_lookup_percpu_elem(map, &zero, cpu);
 	if (!storage) {
 		/* Should be impossible. */
-		scx_bpf_error("Did not find map entry");
+		bpf_printk("Did not find map entry for cpu %d", cpu);
 		return -EINVAL;
 	}
 
@@ -99,12 +99,12 @@ struct bpf_cpumask *scx_percpu_bpfmask(void)
 	storage = bpf_map_lookup_elem(map, &zero);
 	if (!storage) {
 		/* Should be impossible. */
-		scx_bpf_error("Did not find map entry");
+		bpf_printk("Did not find map entry");
 		return NULL;
 	}
 
 	if (!storage->bpfmask)
-		scx_bpf_error("Did not properly initialize singleton bpfmask");
+		bpf_printk("Did not properly initialize singleton bpfmask");
 
 	return storage->bpfmask;
 }
@@ -119,12 +119,12 @@ scx_bitmap_t scx_percpu_scx_bitmap(void)
 	storage = bpf_map_lookup_elem(map, &zero);
 	if (!storage) {
 		/* Should be impossible. */
-		scx_bpf_error("Did not find map entry");
+		bpf_printk("Did not find map entry (bitmap)");
 		return NULL;
 	}
 
 	if (!storage->scx_bitmap)
-		scx_bpf_error("Did not properly initialize singleton scx_bitmap");
+		bpf_printk("Did not properly initialize singleton scx_bitmap");
 
 	return storage->scx_bitmap;
 }
@@ -139,7 +139,7 @@ cpumask_t *scx_percpu_cpumask(void)
 	storage = bpf_map_lookup_elem(map, &zero);
 	if (!storage) {
 		/* Should be impossible. */
-		scx_bpf_error("Did not find map entry");
+		bpf_printk("Did not find map entry");
 		return NULL;
 	}
 
@@ -156,7 +156,7 @@ struct scx_bitmap *scx_percpu_scx_bitmap_stack(void)
 	storage = bpf_map_lookup_elem(map, &zero);
 	if (!storage) {
 		/* Should be impossible. */
-		scx_bpf_error("Did not find map entry");
+		bpf_printk("Did not find map entry");
 		return NULL;
 	}
 

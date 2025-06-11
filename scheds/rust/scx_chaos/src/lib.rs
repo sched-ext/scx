@@ -19,6 +19,7 @@ use scx_utils::uei_report;
 use scx_utils::Core;
 use scx_utils::Llc;
 use scx_utils::Topology;
+use scx_utils::NR_CPU_IDS;
 
 use scx_p2dq::bpf_intf::consts_STATIC_ALLOC_PAGES_GRANULARITY;
 use scx_p2dq::types;

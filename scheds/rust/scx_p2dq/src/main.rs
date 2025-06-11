@@ -109,7 +109,6 @@ impl<'a> Scheduler<'a> {
             build_id::full_version(env!("CARGO_PKG_VERSION"))
         );
         let mut open_skel = scx_ops_open!(skel_builder, open_object, p2dq).unwrap();
-        open_skel.maps.rodata_data.nr_cpu_ids = *NR_CPU_IDS as u32;
         scx_p2dq::init_open_skel!(&mut open_skel, opts, verbose)?;
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {

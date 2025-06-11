@@ -1,5 +1,7 @@
 #pragma once
 
+#define NR_CPU_IDS_UNINIT (~(u32)0)
+
 struct arena_init_args {
 	u64 static_pages;
 	u64 task_ctx_size;

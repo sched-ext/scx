@@ -1,9 +1,9 @@
 #include <scx/common.bpf.h>
+#include <lib/arena.h>
+#include <lib/cpumask.h>
 #include <lib/sdt_task.h>
 
-#include <lib/cpumask.h>
-
-const volatile u32 nr_cpu_ids = 64;
+const volatile u32 nr_cpu_ids = NR_CPU_IDS_UNINIT;
 
 static struct scx_allocator scx_bitmap_allocator;
 size_t mask_size;
@@ -56,8 +56,8 @@ int scx_bitmap_copy_to_stack(struct scx_bitmap *dst, scx_bitmap_t __arg_arena sr
 	int i;
 
 	if (unlikely(!src || !dst)) {
-		scx_bpf_error("invalid pointer args to pointer copy");
-		return 0;
+		bpf_printk("invalid pointer args to pointer copy");
+		return -EINVAL;
 	}
 
 	bpf_for(i, 0, mask_size) {
