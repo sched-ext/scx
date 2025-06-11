@@ -54,6 +54,7 @@ use scx_utils::scx_ops_open;
 use scx_utils::set_rlimit_infinity;
 use scx_utils::uei_exited;
 use scx_utils::uei_report;
+use scx_utils::CoreType;
 use scx_utils::Cpumask;
 use scx_utils::EnergyModel;
 use scx_utils::Topology;
@@ -313,6 +314,8 @@ struct CpuFlatId {
     smt_level: usize,
     cache_size: usize,
     cpu_cap: usize,
+    big_core: bool,
+    turbo_core: bool,
 }
 
 #[derive(Debug, Eq, PartialEq, Ord, PartialOrd, Clone)]
@@ -363,13 +366,12 @@ impl FlatTopology {
         debug!("{:#?}", sys_topo);
         debug!("{:#?}", sys_em);
 
-        let (cpu_fids_performance, avg_cap) =
-            Self::build_cpu_fids(&sys_topo, &sys_em, false).unwrap();
-        let (cpu_fids_powersave, _) = Self::build_cpu_fids(&sys_topo, &sys_em, true).unwrap();
+        let cpu_fids_performance = Self::build_cpu_fids(&sys_topo, &sys_em, false).unwrap();
+        let cpu_fids_powersave = Self::build_cpu_fids(&sys_topo, &sys_em, true).unwrap();
 
         // Note that building compute domain is not dependent to CPU orer
         // so it is okay to use any cpu_fids_*.
-        let cpdom_map = Self::build_cpdom(&cpu_fids_performance, avg_cap).unwrap();
+        let cpdom_map = Self::build_cpdom(&cpu_fids_performance).unwrap();
 
         Ok(FlatTopology {
             all_cpus_mask: sys_topo.span,
@@ -385,11 +387,10 @@ impl FlatTopology {
         topo: &Topology,
         em: &Result<EnergyModel>,
         prefer_powersave: bool,
-    ) -> Option<(Vec<CpuFlatId>, usize)> {
+    ) -> Option<Vec<CpuFlatId>> {
         let mut cpu_fids = Vec::new();
 
         // Build a vector of cpu flat ids.
-        let mut avg_cap = 0;
         for (&node_id, node) in topo.nodes.iter() {
             for (llc_pos, (_llc_id, llc)) in node.llcs.iter().enumerate() {
                 for (core_pos, (_core_id, core)) in llc.cores.iter().enumerate() {
@@ -406,14 +407,14 @@ impl FlatTopology {
                             smt_level: cpu.smt_level,
                             cache_size: cpu.cache_size,
                             cpu_cap: cpu.cpu_capacity,
+                            big_core: cpu.core_type != CoreType::Little,
+                            turbo_core: cpu.core_type == CoreType::Big { turbo: true },
                         };
                         cpu_fids.push(RefCell::new(cpu_fid));
-                        avg_cap += cpu.cpu_capacity;
                     }
                 }
             }
         }
-        avg_cap /= cpu_fids.len() as usize;
 
         // Convert a vector of RefCell to a vector of plain cpu_fids
         let mut cpu_fids2 = Vec::new();
@@ -455,7 +456,7 @@ impl FlatTopology {
             }
         }
 
-        Some((cpu_fids, avg_cap))
+        Some(cpu_fids)
     }
 
     /// Get the performance domain (i.e., CPU frequency domain) ID for a CPU.
@@ -470,7 +471,6 @@ impl FlatTopology {
     /// Build a list of compute domains
     fn build_cpdom(
         cpu_fids: &Vec<CpuFlatId>,
-        avg_cap: usize,
     ) -> Option<BTreeMap<ComputeDomainKey, ComputeDomainValue>> {
         // Creat a compute domain map, where a compute domain is a CPUs that
         // are under the same node and LLC and have the same core type.
@@ -481,7 +481,7 @@ impl FlatTopology {
             let key = ComputeDomainKey {
                 node_id: cpu_fid.node_id,
                 llc_pos: cpu_fid.llc_pos,
-                is_big: cpu_fid.cpu_cap >= avg_cap,
+                is_big: cpu_fid.big_core,
             };
             let mut value;
             match cpdom_map.get(&key) {
@@ -668,6 +668,8 @@ impl<'a> Scheduler<'a> {
         // Initialize CPU capacity
         for (_, cpu) in topo.cpu_fids_performance.iter().enumerate() {
             skel.maps.rodata_data.cpu_capacity[cpu.cpu_id] = cpu.cpu_cap as u16;
+            skel.maps.rodata_data.cpu_big[cpu.cpu_id] = cpu.big_core as u8;
+            skel.maps.rodata_data.cpu_turbo[cpu.cpu_id] = cpu.turbo_core as u8;
         }
 
         // If cpu_pref_order is not specified, initialize CPU order
