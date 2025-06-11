@@ -652,10 +652,14 @@ fn get_capacity_source() -> Option<CapacitySource> {
     } else {
         avg_rcap /= nr_cpus;
         // We consider a system to have a heterogeneous CPU architecture only
-        // when there is a significant capacity gap (e.g., 1.5x). CPU capacities
+        // when there is a significant capacity gap (e.g., 1.3x). CPU capacities
         // can still vary in a homogeneous architecture—for instance, due to
         // chip binning or when only a subset of CPUs supports turbo boost.
-        has_biglittle = max_rcap as f32 >= (1.5 * min_rcap as f32);
+        //
+        // Note that we need a more systematic approach to accurately detect
+        // big/LITTLE architectures across various SoC designs. The current
+        // approach, with a significant capacity difference, is somewhat ad-hoc.
+        has_biglittle = max_rcap as f32 >= (1.3 * min_rcap as f32);
     }
 
     Some(CapacitySource {
