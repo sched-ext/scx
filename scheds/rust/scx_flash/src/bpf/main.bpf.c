@@ -29,13 +29,17 @@ const volatile u64 slice_max = 20ULL * NSEC_PER_MSEC;
 const volatile u64 slice_min = 1ULL * NSEC_PER_MSEC;
 
 /*
- * Maximum time slice lag.
- *
- * Increasing this value can help to increase the responsiveness of interactive
- * tasks at the cost of making regular and newly created tasks less responsive
- * (0 = disabled).
+ * Maximum runtime budget that a task can accumulate while sleeping (used
+ * to determine the task's minimum vruntime).
  */
 const volatile u64 slice_lag = 20ULL * NSEC_PER_MSEC;
+
+/*
+ * Maximum runtime penalty that a task can accumulate while running (used
+ * to determine the task's maximum exec_vruntime: accumulated vruntime
+ * since last sleep).
+ */
+const volatile u64 run_lag = 20ULL * NSEC_PER_MSEC;
 
 /*
  * Maximum amount of voluntary context switches (this limit allows to prevent
@@ -278,28 +282,6 @@ struct task_ctx {
 	u64 avg_nvcsw;
 
 	/*
-	 * Task's deadline, defined as:
-	 *
-	 *   deadline = vruntime + exec_vruntime
-	 *
-	 * Here, vruntime represents the task's total runtime, scaled inversely by
-	 * its weight, while exec_vruntime accounts for the vruntime accumulated
-	 * from the moment the task becomes runnable until it voluntarily releases
-	 * the CPU.
-	 *
-	 * Fairness is ensured through vruntime, whereas exec_vruntime helps in
-	 * prioritizing latency-sensitive tasks: tasks that are frequently blocked
-	 * waiting for an event (typically latency sensitive) will accumulate a
-	 * smaller exec_vruntime, compared to tasks that continuously consume CPU
-	 * without interruption.
-	 *
-	 * As a result, tasks with a smaller exec_vruntime will have a shorter
-	 * deadline and will be dispatched earlier, ensuring better responsiveness
-	 * for latency-sensitive tasks.
-	 */
-	u64 deadline;
-
-	/*
 	 * Task's recently used CPU: used to determine whether we need to
 	 * refresh the task's cpumasks.
 	 */
@@ -400,9 +382,18 @@ static int calloc_cpumask(struct bpf_cpumask **p_cpumask)
 /*
  * Return the total amount of tasks that are currently waiting to be scheduled.
  */
-static u64 nr_tasks_waiting(int node)
+static inline u64 nr_tasks_waiting(int node)
 {
 	return scx_bpf_dsq_nr_queued(node) + 1;
+}
+
+/*
+ * Return the time slice that can be assigned to a task queued to @node
+ * DSQ.
+ */
+static inline u64 task_slice(int node)
+{
+	return CLAMP(slice_max / nr_tasks_waiting(node), slice_min, slice_max);
 }
 
 /*
@@ -455,9 +446,9 @@ static inline u64 scale_by_task_normalized_weight_inverse(const struct task_stru
 }
 
 /*
- * Update and return the task's deadline.
+ * Update the task deadline.
  */
-static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
+static void update_task_deadline(struct task_struct *p, struct task_ctx *tctx)
 {
 	u64 vtime_min, max_sleep;
 
@@ -474,15 +465,13 @@ static u64 task_deadline(const struct task_struct *p, struct task_ctx *tctx)
 	 */
 	max_sleep = scale_by_task_normalized_weight(p, slice_lag) * MAX(tctx->avg_nvcsw, 1);
 	vtime_min = vtime_now > max_sleep ? vtime_now - max_sleep : 0;
-	if (time_before(tctx->deadline, vtime_min))
-		tctx->deadline = vtime_min;
+	if (time_before(p->scx.dsq_vtime, vtime_min))
+		p->scx.dsq_vtime = vtime_min;
 
 	/*
 	 * Add the execution vruntime to the deadline.
 	 */
-	tctx->deadline += scale_by_task_normalized_weight_inverse(p, tctx->exec_runtime);
-
-	return tctx->deadline;
+	p->scx.dsq_vtime += scale_by_task_normalized_weight_inverse(p, tctx->exec_runtime);
 }
 
 static void task_update_domain(struct task_struct *p, struct task_ctx *tctx,
@@ -974,7 +963,7 @@ static bool kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
  * Return true if the task is dispatched, false otherwise.
  */
 static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
-				s32 prev_cpu, u64 slice, u64 enq_flags)
+				s32 prev_cpu, u64 enq_flags)
 {
 	bool is_idle = false;
 	s32 cpu;
@@ -1092,7 +1081,6 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	const struct cpumask *idle_cpumask;
 	struct task_ctx *tctx;
-	u64 slice, deadline;
 	s32 prev_cpu = scx_bpf_task_cpu(p);
 	int node = __COMPAT_scx_bpf_cpu_node(prev_cpu);
 
@@ -1102,17 +1090,27 @@ void BPF_STRUCT_OPS(flash_enqueue, struct task_struct *p, u64 enq_flags)
 	tctx = try_lookup_task_ctx(p);
 	if (!tctx)
 		return;
-	deadline = task_deadline(p, tctx);
-	slice = CLAMP(slice_max / nr_tasks_waiting(node), slice_min, slice_max);
+
+	update_task_deadline(p, tctx);
 
 	/*
 	 * Try to dispatch the task directly, if possible.
 	 */
-	if (try_direct_dispatch(p, tctx, prev_cpu, slice, enq_flags))
+	if (try_direct_dispatch(p, tctx, prev_cpu, enq_flags))
 		return;
 
-	scx_bpf_dsq_insert_vtime(p, node, slice, deadline, enq_flags);
+	scx_bpf_dsq_insert_vtime(p, node, task_slice(node), p->scx.dsq_vtime, enq_flags);
 	__sync_fetch_and_add(&nr_shared_dispatches, 1);
+
+	/*
+	 * Refresh the task domain if it was migrated to a different CPU,
+	 * without going through ops.select_cpu().
+	 *
+	 * This ensures the proactive wakeup (see below) will target a CPU
+	 * near the one the task was most recently running on.
+	 */
+	if (tctx->recent_used_cpu != prev_cpu)
+		task_update_domain(p, tctx, prev_cpu, p->cpus_ptr);
 
 	/*
 	 * If there are idle CPUs in the system try to proactively wake up
@@ -1276,8 +1274,8 @@ void BPF_STRUCT_OPS(flash_running, struct task_struct *p)
 	 * Update the global vruntime as a new task is starting to use a
 	 * CPU.
 	 */
-	if (time_before(vtime_now, tctx->deadline))
-		vtime_now = tctx->deadline;
+	if (time_before(vtime_now, p->scx.dsq_vtime))
+		vtime_now = p->scx.dsq_vtime;
 }
 
 /*
@@ -1304,7 +1302,7 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 
 	/*
 	 * Update task's execution time (exec_runtime), but never account
-	 * more than a scaled @slice_lag of runtime to prevent excessive
+	 * more than a scaled @run_lag of runtime to prevent excessive
 	 * de-prioritization of CPU-intensive tasks (which could lead to
 	 * starvation).
 	 *
@@ -1312,7 +1310,7 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 	 * cap (resulting in an earlier deadline) and vice-versa for tasks
 	 * with a lower priority.
 	 */
-	max_runtime = scale_by_task_normalized_weight_inverse(p, slice_lag);
+	max_runtime = scale_by_task_normalized_weight_inverse(p, run_lag);
 	if (tctx->exec_runtime + slice < max_runtime)
 		tctx->exec_runtime += slice;
 	else
@@ -1321,7 +1319,7 @@ void BPF_STRUCT_OPS(flash_stopping, struct task_struct *p, bool runnable)
 	/*
 	 * Update task's vruntime.
 	 */
-	tctx->deadline += scale_by_task_normalized_weight_inverse(p, slice);
+	p->scx.dsq_vtime += scale_by_task_normalized_weight_inverse(p, slice);
 
 	/*
 	 * Update CPU runtime.
@@ -1377,13 +1375,13 @@ void BPF_STRUCT_OPS(flash_quiescent, struct task_struct *p, u64 deq_flags)
 		return;
 
 	/*
-	 * Refresh voluntary context switch metrics every @slice_lag ns.
+	 * Refresh voluntary context switch metrics every @slice_max ns.
 	 */
 	tctx->nvcsw++;
 
 	delta_t = time_delta(now, tctx->nvcsw_ts);
-	if (delta_t > slice_lag) {
-		u64 avg = tctx->nvcsw * slice_lag / delta_t;
+	if (delta_t > slice_max) {
+		u64 avg = tctx->nvcsw * slice_max / delta_t;
 
 		tctx->avg_nvcsw = calc_avg_clamp(tctx->avg_nvcsw, avg, 0, max_avg_nvcsw);
 		tctx->nvcsw = 0;
@@ -1416,17 +1414,10 @@ void BPF_STRUCT_OPS(flash_set_cpumask, struct task_struct *p,
 
 void BPF_STRUCT_OPS(flash_enable, struct task_struct *p)
 {
-	struct task_ctx *tctx;
-
-	/* Initialize voluntary context switch timestamp */
-	tctx = try_lookup_task_ctx(p);
-	if (!tctx)
-		return;
-
 	/*
 	 * Initialize the task vruntime to the current global vruntime.
 	 */
-	tctx->deadline = vtime_now;
+	p->scx.dsq_vtime = vtime_now;
 }
 
 static int init_cpumask(struct bpf_cpumask **cpumask)

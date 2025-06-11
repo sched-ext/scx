@@ -46,6 +46,7 @@ const LSTAT_ENQ_LOCAL: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_LOCAL as usize;
 const LSTAT_ENQ_WAKEUP: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_WAKEUP as usize;
 const LSTAT_ENQ_EXPIRE: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_EXPIRE as usize;
 const LSTAT_ENQ_REENQ: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_REENQ as usize;
+const LSTAT_ENQ_DSQ: usize = bpf_intf::layer_stat_id_LSTAT_ENQ_DSQ as usize;
 const LSTAT_MIN_EXEC: usize = bpf_intf::layer_stat_id_LSTAT_MIN_EXEC as usize;
 const LSTAT_MIN_EXEC_NS: usize = bpf_intf::layer_stat_id_LSTAT_MIN_EXEC_NS as usize;
 const LSTAT_OPEN_IDLE: usize = bpf_intf::layer_stat_id_LSTAT_OPEN_IDLE as usize;
@@ -134,6 +135,8 @@ pub struct LayerStats {
     pub enq_expire: f64,
     #[stat(desc = "% re-enqueued due to RT preemption")]
     pub enq_reenq: f64,
+    #[stat(desc = "% enqueued into the layer's LLC DSQs")]
+    pub enq_dsq: f64,
     #[stat(desc = "count of times exec duration < min_exec_us")]
     pub min_exec: f64,
     #[stat(desc = "total exec durations extended due to min_exec_us")]
@@ -254,6 +257,7 @@ impl LayerStats {
             enq_wakeup: lstat_pct(LSTAT_ENQ_WAKEUP),
             enq_expire: lstat_pct(LSTAT_ENQ_EXPIRE),
             enq_reenq: lstat_pct(LSTAT_ENQ_REENQ),
+            enq_dsq: lstat_pct(LSTAT_ENQ_DSQ),
             min_exec: lstat_pct(LSTAT_MIN_EXEC),
             min_exec_us: (lstat(LSTAT_MIN_EXEC_NS) / 1000) as u64,
             open_idle: lstat_pct(LSTAT_OPEN_IDLE),
@@ -321,11 +325,12 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  tot={:7} local_sel/enq={}/{} wake/exp/reenq={}/{}/{}",
+            "  {:<width$}  tot={:7} local_sel/enq={}/{} enq_dsq={} wake/exp/reenq={}/{}/{}",
             "",
             self.total,
             fmt_pct(self.sel_local),
             fmt_pct(self.enq_local),
+            fmt_pct(self.enq_dsq),
             fmt_pct(self.enq_wakeup),
             fmt_pct(self.enq_expire),
             fmt_pct(self.enq_reenq),

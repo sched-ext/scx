@@ -103,8 +103,36 @@ fn cpus_to_cpumask(cpus: &Vec<usize>) -> String {
     format!("0x{}", hex_str)
 }
 
-/// scx_flash: a deadline-based sched_ext scheduler that prioritizes interactive workloads.
-#[derive(Debug, Parser)]
+#[derive(Debug, clap::Parser)]
+#[command(
+    name = "scx_flash",
+    version,
+    disable_version_flag = true,
+    about = "A deadline-based scheduler focused on fairness and performance predictability.",
+    long_about = r#"
+scx_flash is scheduler that focuses on ensuring fairness and performance predictability.
+
+It operates using an earliest deadline first (EDF) policy. The deadline of each task deadline is
+defined as:
+
+    deadline = vruntime + exec_vruntime
+
+`vruntime` represents the task's accumulated runtime, inversely scaled by its weight, while
+`exec_vruntime` accounts for the vruntime accumulated since the last sleep event.
+
+Fairness is ensured through `vruntime`, whereas `exec_vruntime` helps prioritize latency-sensitive
+tasks. Tasks that are frequently blocked waiting for an event (typically latency-sensitive)
+accumulate a smaller `exec_vruntime` compared to tasks that continuously consume CPU without
+interruption.
+
+As a result, tasks with a smaller `exec_vruntime` will have a shorter deadline and will be
+dispatched earlier, ensuring better responsiveness for latency-sensitive tasks.
+
+Moreover, tasks can accumulate a maximum `vruntime` credit while they're sleeping, based on how
+often they voluntarily release the CPU (`avg_nvcsw`). This allows prioritizing frequent sleepers
+over less-frequent ones.
+"#
+)]
 struct Opts {
     /// Exit debug dump buffer length. 0 indicates default.
     #[clap(long, default_value = "0")]
@@ -118,12 +146,19 @@ struct Opts {
     #[clap(short = 'S', long, default_value = "1000")]
     slice_us_min: u64,
 
-    /// Maximum time slice lag in microseconds.
+    /// Maximum runtime budget that a task can accumulate while sleeping (in microseconds).
     ///
     /// Increasing this value can help to enhance the responsiveness of interactive tasks, but it
     /// can also make performance more "spikey".
     #[clap(short = 'l', long, default_value = "20000")]
     slice_us_lag: u64,
+
+    /// Maximum runtime penalty that a task can accumulate while running (in microseconds).
+    ///
+    /// Increasing this value can help to enhance the responsiveness of interactive tasks, but it
+    /// can also make performance more "spikey".
+    #[clap(short = 'r', long, default_value = "20000")]
+    run_us_lag: u64,
 
     /// Maximum rate of voluntary context switches.
     ///
@@ -316,6 +351,7 @@ impl<'a> Scheduler<'a> {
         skel.maps.rodata_data.slice_max = opts.slice_us * 1000;
         skel.maps.rodata_data.slice_min = opts.slice_us_min * 1000;
         skel.maps.rodata_data.slice_lag = opts.slice_us_lag * 1000;
+        skel.maps.rodata_data.run_lag = opts.run_us_lag * 1000;
         skel.maps.rodata_data.throttle_ns = opts.throttle_us * 1000;
         skel.maps.rodata_data.max_avg_nvcsw = opts.max_avg_nvcsw;
 

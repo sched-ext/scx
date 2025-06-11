@@ -18,6 +18,8 @@ static bool		have_little_core;
 const volatile u16	cpu_order_performance[LAVD_CPU_ID_MAX]; /* CPU preference order for performance and balanced mode */
 const volatile u16	cpu_order_powersave[LAVD_CPU_ID_MAX]; /* CPU preference order for powersave mode */
 const volatile u16	cpu_capacity[LAVD_CPU_ID_MAX]; /* CPU capacity based on 1024 */
+const volatile u8	cpu_big[LAVD_CPU_ID_MAX]; /* Is a CPU a big core? */
+const volatile u8	cpu_turbo[LAVD_CPU_ID_MAX]; /* Is a CPU a turbo core? */
 
 static int		nr_cpdoms; /* number of compute domains */
 struct cpdom_ctx	cpdom_ctxs[LAVD_CPDOM_MAX_NR]; /* contexts for compute domains */
@@ -530,7 +532,7 @@ unlock_out:
 
 static void update_cpuperf_target(struct cpu_ctx *cpuc)
 {
-	u32 util, cpuperf_target;
+	u32 util, max_util, cpuperf_target;
 
 	/*
 	 * The CPU utilization decides the frequency. The bigger one between
@@ -539,8 +541,9 @@ static void update_cpuperf_target(struct cpu_ctx *cpuc)
 	 * LAVD_CPU_UTIL_MAX_FOR_CPUPERF (85%), ceil to 100%.
 	 */
 	if (!no_freq_scaling) {
-		util = max(cpuc->avg_util, cpuc->cur_util) <
-			LAVD_CPU_UTIL_MAX_FOR_CPUPERF? : LAVD_SCALE;
+		max_util = max(cpuc->avg_util, cpuc->cur_util);
+		util = (max_util < LAVD_CPU_UTIL_MAX_FOR_CPUPERF) ? max_util
+								  : LAVD_SCALE;
 		cpuperf_target = (util * SCX_CPUPERF_ONE) >> LAVD_SHIFT;
 	} else
 		cpuperf_target = SCX_CPUPERF_ONE;
@@ -563,35 +566,14 @@ static void reset_cpuperf_target(struct cpu_ctx *cpuc)
 
 static u16 get_cpuperf_cap(s32 cpu)
 {
-	if (cpu >= 0 && cpu < nr_cpu_ids && cpu < LAVD_CPU_ID_MAX)
-		return cpu_capacity[cpu];
+	const volatile u16 *cap;
+
+	cap = MEMBER_VPTR(cpu_capacity, [cpu]);
+	if (cap)
+		return *cap;
 
 	debugln("Infeasible CPU id: %d", cpu);
 	return 0;
-}
-
-static u16 get_cputurbo_cap(void)
-{
-	u16 turbo_cap = 0;
-	int nr_turbo = 0, cpu;
-
-	/*
-	 * Find the maximum CPU capacity
-	 */
-	for (cpu = 0; cpu < nr_cpu_ids && cpu < LAVD_CPU_ID_MAX; cpu++) {
-		if (cpu_capacity[cpu] > turbo_cap) {
-			turbo_cap = cpu_capacity[cpu];
-			nr_turbo++;
-		}
-	}
-
-	/*
-	 * If all CPU's capacities are the same, ignore the turbo.
-	 */
-	if (nr_turbo <= 1)
-		turbo_cap = 0;
-
-	return turbo_cap;
 }
 
 static u64 scale_cap_freq(u64 dur, s32 cpu)

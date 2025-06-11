@@ -1580,6 +1580,7 @@ void BPF_STRUCT_OPS(layered_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_dsq_insert(p, taskc->dsq_id, layer->slice_ns, enq_flags);
 	else
 		scx_bpf_dsq_insert_vtime(p, taskc->dsq_id, layer->slice_ns, vtime, enq_flags);
+	lstat_inc(LSTAT_ENQ_DSQ, layer, cpuc);
 
 	/*
 	 * Interlocked with refresh_cpumasks(). scx_bpf_dsq_insert[_vtime]()
