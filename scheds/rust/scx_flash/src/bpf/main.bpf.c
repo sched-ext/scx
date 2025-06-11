@@ -965,8 +965,8 @@ static bool kick_idle_cpu(const struct task_struct *p, const struct task_ctx *tc
 static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 				s32 prev_cpu, u64 enq_flags)
 {
-	bool is_idle = false;
-	s32 cpu;
+	bool is_idle = false, dispatched = false;
+	s32 cpu = prev_cpu;
 
 	/*
 	 * If a task has been re-enqueued because its assigned CPU has been
@@ -989,8 +989,9 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	if (is_kthread(p) && (local_kthreads || p->nr_cpus_allowed == 1)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
 		__sync_fetch_and_add(&nr_kthread_dispatches, 1);
+		dispatched = true;
 
-		return true;
+		goto out_kick;
 	}
 
 	/*
@@ -1012,19 +1013,16 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 * perform a direct dispatch.
 	 */
 	if (p->nr_cpus_allowed == 1) {
-		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu) &&
-		    can_direct_dispatch(prev_cpu)) {
+		if (scx_bpf_test_and_clear_cpu_idle(cpu) && can_direct_dispatch(cpu)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
 			__sync_fetch_and_add(&nr_direct_dispatches, 1);
-
-			return true;
+			dispatched = true;
 		}
 
 		/*
 		 * No need to check for other CPUs if the task can only run
 		 * on a single one.
 		 */
-		cpu = prev_cpu;
 		goto out_kick;
 	}
 
@@ -1033,11 +1031,12 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	 * their previously used CPU is a full-idle SMT core and in that
 	 * case perform a direct dispatch.
 	 */
-	if (can_direct_dispatch(prev_cpu) && is_fully_idle(prev_cpu)) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | prev_cpu, slice_max, enq_flags);
+	if (can_direct_dispatch(cpu) && is_fully_idle(cpu)) {
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_max, enq_flags);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
+		dispatched = true;
 
-		return true;
+		goto out_kick;
 	}
 
 	/*
@@ -1048,29 +1047,28 @@ static bool try_direct_dispatch(struct task_struct *p, struct task_ctx *tctx,
 	if (scx_bpf_task_running(p))
 		return false;
 
+	/*
+	 * Try to pick an idle CPU close to the one the task is using.
+	 */
 	cpu = pick_idle_cpu(p, prev_cpu, 0, &is_idle);
 	if (!is_idle)
 		return false;
 
-	/*
-	 * Try direct dispatch to the idle CPU found.
-	 */
 	if (can_direct_dispatch(cpu)) {
 		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_max, 0);
 		__sync_fetch_and_add(&nr_direct_dispatches, 1);
-
-		return true;
+		dispatched = true;
 	}
 
 out_kick:
 	/*
-	 * Kick the CPU that we just idle-locked, since we didn't dispatch
-	 * the task we want it to either be re-added to the idle pool or
+	 * Kick the CPU even if we didn't directly dispatch, so it can be
+	 * clear its idle state (transitioning from idle->awake->idle) or
 	 * consume another task from the per-node DSQ.
 	 */
 	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 
-	return false;
+	return dispatched;
 }
 
 /*
