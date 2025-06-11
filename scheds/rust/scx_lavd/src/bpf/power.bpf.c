@@ -530,7 +530,7 @@ unlock_out:
 
 static void update_cpuperf_target(struct cpu_ctx *cpuc)
 {
-	u32 util, cpuperf_target;
+	u32 util, max_util, cpuperf_target;
 
 	/*
 	 * The CPU utilization decides the frequency. The bigger one between
@@ -539,8 +539,9 @@ static void update_cpuperf_target(struct cpu_ctx *cpuc)
 	 * LAVD_CPU_UTIL_MAX_FOR_CPUPERF (85%), ceil to 100%.
 	 */
 	if (!no_freq_scaling) {
-		util = max(cpuc->avg_util, cpuc->cur_util) <
-			LAVD_CPU_UTIL_MAX_FOR_CPUPERF? : LAVD_SCALE;
+		max_util = max(cpuc->avg_util, cpuc->cur_util);
+		util = (max_util < LAVD_CPU_UTIL_MAX_FOR_CPUPERF) ? max_util
+								  : LAVD_SCALE;
 		cpuperf_target = (util * SCX_CPUPERF_ONE) >> LAVD_SHIFT;
 	} else
 		cpuperf_target = SCX_CPUPERF_ONE;
