@@ -42,8 +42,13 @@ jobs:
 
       - name: Load kernel
         run: |
-          echo "KERNEL_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#'kernel_${{ inputs.repo-name }}')" >> $GITHUB_ENV
-          echo "KERNEL_HEADERS_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#'kernel_${{ inputs.repo-name }}'.headers)" >> $GITHUB_ENV
+          if [ -n "${{ matrix.scheduler.kernel }}" ]; then
+            KERNEL_NAME="${{ matrix.scheduler.kernel }}"
+          else
+            KERNEL_NAME="${{ inputs.repo-name }}"
+          fi
+          echo "KERNEL_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#"kernel_${KERNEL_NAME}")" >> $GITHUB_ENV
+          echo "KERNEL_HEADERS_STORE_PATH=$(nix build --no-link --print-out-paths ./.github/include#"kernel_${KERNEL_NAME}".headers)" >> $GITHUB_ENV
 
       - name: Install Veristat
         run: nix-env -i $(nix build --no-link --print-out-paths ./.github/include#veristat)
@@ -95,11 +100,33 @@ jobs:
       # no symlink following here (to avoid cycle`s)
       - run: sudo find '/home/runner/' -iname '*.ci.log' -exec mv {} ./log_save/ \;
         if: always()
+      - name: Set artifact name
+        if: always()
+        run: |
+          KERNEL_SUFFIX=""
+          if [ -n "${{ matrix.scheduler.kernel }}" ]; then
+            KERNEL_CLEAN=$(echo "${{ matrix.scheduler.kernel }}" | tr '/' '_')
+            KERNEL_SUFFIX="_${KERNEL_CLEAN}"
+          fi
+          echo "ARTIFACT_NAME=${{ matrix.scheduler['name'] }}${{ matrix.scheduler['flags'] }}${KERNEL_SUFFIX}_logs_${{ github.run_id }}_${{ github.run_attempt }}" >> $GITHUB_ENV
       - name: upload debug logs, bpftrace, veristat, dmesg, etc.
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.scheduler['name'] }}${{ matrix.scheduler['flags'] }}_logs_${{ github.run_id }}_${{ github.run_attempt }}
+          name: ${{ env.ARTIFACT_NAME }}
           path: ./log_save/*.ci.log
           # it's all txt files w/ 90 day retention, lets be nice.
           compression-level: 9
+
+  all-success:
+    runs-on: ${{ github.repository_owner == 'sched-ext' && fromJSON('[ "self-hosted", "linux", "x64" ]') || 'ubuntu-latest' }}
+    needs: integration-test
+    if: always()
+    steps:
+      - name: Check all jobs succeeded
+        run: |
+          if [[ "${{ needs.integration-test.result }}" != "success" ]]; then
+            echo "Integration tests failed or were cancelled"
+            exit 1
+          fi
+          echo "All integration tests passed successfully"

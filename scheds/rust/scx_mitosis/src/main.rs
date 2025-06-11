@@ -11,6 +11,7 @@ use std::mem::MaybeUninit;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -81,7 +82,7 @@ struct Cell {
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     prev_percpu_cell_cycles: Vec<[u64; MAX_CELLS]>,
-    monitor_interval: std::time::Duration,
+    monitor_interval: Duration,
     cells: HashMap<u32, Cell>,
 }
 
@@ -108,7 +109,7 @@ impl<'a> Scheduler<'a> {
         Ok(Self {
             skel,
             prev_percpu_cell_cycles: vec![[0; MAX_CELLS]; *NR_CPU_IDS],
-            monitor_interval: std::time::Duration::from_secs(opts.monitor_interval_s),
+            monitor_interval: Duration::from_secs(opts.monitor_interval_s),
             cells: HashMap::new(),
         })
     }
