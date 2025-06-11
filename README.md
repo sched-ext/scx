@@ -468,6 +468,7 @@ can reach us through the following channels:
 
 - `GitHub`: https://github.com/sched-ext/scx
 - `Discord`: https://discord.gg/WFG4xG8cpc
+- `Mailing List`: sched-ext@lists.linux.dev (for kernel development)
 
 We also hold weekly office hours every Tuesday. Please see the `#office-hours`
 channel on `Discord` for details. To join the `Discord` community, you can use [this
