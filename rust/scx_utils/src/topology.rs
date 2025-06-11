@@ -77,6 +77,7 @@ use crate::Cpumask;
 use anyhow::bail;
 use anyhow::Result;
 use glob::glob;
+use log::warn;
 use sscanf::sscanf;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -645,10 +646,11 @@ fn get_capacity_source() -> Option<CapacitySource> {
         nr_cpus += 1;
     }
 
-    if nr_cpus == 0 {
+    if nr_cpus == 0 || max_rcap == 0 {
         suffix = "";
         avg_rcap = 1024;
         max_rcap = 1024;
+        warn!("CPU capacity information is not available under sysfs.");
     } else {
         avg_rcap /= nr_cpus;
         // We consider a system to have a heterogeneous CPU architecture only
