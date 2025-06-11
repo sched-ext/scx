@@ -28,7 +28,7 @@ int scx_bitmap_to_bpf(struct bpf_cpumask __kptr *bpfmask __arg_trusted, scx_bitm
 int scx_bitmap_set_cpu(u32 cpu, scx_bitmap_t __arg_arena mask);
 int scx_bitmap_clear_cpu(u32 cpu, scx_bitmap_t __arg_arena mask);
 bool scx_bitmap_test_cpu(u32 cpu, scx_bitmap_t __arg_arena mask);
-bool __scx_bitmap_test_and_clear_cpu(u32 cpu, scx_bitmap_t __arg_arena mask);
+bool scx_bitmap_test_and_clear_cpu(u32 cpu, scx_bitmap_t __arg_arena mask);
 
 int scx_bitmap_clear(scx_bitmap_t __arg_arena mask);
 int scx_bitmap_and(scx_bitmap_t __arg_arena dst, scx_bitmap_t __arg_arena src1, scx_bitmap_t __arg_arena src2);

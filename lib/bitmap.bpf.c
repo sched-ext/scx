@@ -90,13 +90,19 @@ bool scx_bitmap_test_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
 }
 
 __weak
-bool __scx_bitmap_test_and_clear_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
+bool scx_bitmap_test_and_clear_cpu(u32 cpu, scx_bitmap_t __arg_arena mask)
 {
 	u64 bit = 1ULL << (cpu % 64);
 	u32 idx = cpu / 64;
-	bool was_set = mask->bits[idx] & bit;
-	mask->bits[idx] &= ~bit;
-	return was_set;
+	u64 old = mask->bits[idx];
+
+	if (!(old & bit))
+		return false;
+
+	u64 new = old & ~bit;
+	u64 actual = cmpxchg(&mask->bits[idx], old, new);
+
+	return actual == old;
 }
 
 __weak
