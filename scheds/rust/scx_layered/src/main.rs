@@ -3043,7 +3043,7 @@ fn main() -> Result<()> {
             match spec.template {
                 Some(ref rule) => {
                     let matches = expand_template(&rule)?;
-                    for (mt, mask) in matches {
+                    for (mt, mask) in matches.clone() {
                         let mut genspec = spec.clone();
 
                         genspec.cpuset = Some(mask);
@@ -3060,6 +3060,11 @@ fn main() -> Result<()> {
 
                         // Push the generated layer into the config
                         layer_config.specs.push(genspec);
+                    }
+                    // in the absence of cpusets, have template layers
+                    // behave like non-template layers.
+                    if matches.len() == 0 {
+                        layer_config.specs.push(spec);
                     }
                 }
 
