@@ -467,7 +467,7 @@ We aim to build a friendly and approachable community around sched_ext. You
 can reach us through the following channels:
 
 - github: https://github.com/sched-ext/scx
-- Discord: https://discord.gg/p5KSH7Sk
+- Discord: https://discord.gg/WFG4xG8cpc
 
 We also hold weekly office hours every Tuesday. Please see the #office-hours
 channel on slack for details. To join the slack community, you can use [this
