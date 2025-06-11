@@ -27,7 +27,7 @@ int arena_init(struct arena_init_args *args)
 
 	if (nr_cpu_ids == NR_CPU_IDS_UNINIT) {
 		bpf_printk("uninitialized nr_cpu_ids variable");
-		return -EINVAL;
+		return -ENODEV;
 	}
 
 	/* How many types to store all CPU IDs? */
