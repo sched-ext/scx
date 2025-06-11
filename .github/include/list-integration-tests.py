@@ -9,14 +9,26 @@ import sys
 
 def get_kernel_trailers_from_commits():
     """Get CI-Test-Kernel trailers from commits between current HEAD and base branch."""
-    # In GitHub Actions, GITHUB_BASE_REF contains the target branch name
-    # Default to main branch if not in a PR context
+    # In GitHub Actions, GITHUB_BASE_REF contains the target branch name for PRs
+    # For push events, it's empty, so we need to determine the base differently
     base_ref = os.environ.get("GITHUB_BASE_REF", "main")
     if not base_ref:
         base_ref = "main"
 
     result = subprocess.run(
-        ["git", "log", "--format=%B%n---ENDOFCOMMIT---", f"origin/{base_ref}..HEAD"],
+        ["git", "merge-base", "HEAD", f"origin/{base_ref}"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    merge_base = result.stdout.strip()
+    print(f"Merge base with origin/{base_ref}: {merge_base}", file=sys.stderr)
+
+    log_range = f"{merge_base}..HEAD"
+    print(f"Searching for trailers in commit range: {log_range}", file=sys.stderr)
+
+    result = subprocess.run(
+        ["git", "log", "--format=%B%n---ENDOFCOMMIT---", log_range],
         capture_output=True,
         text=True,
         check=True,
@@ -28,12 +40,18 @@ def get_kernel_trailers_from_commits():
     kernels = set()
 
     commit_messages = result.stdout.split("---ENDOFCOMMIT---")
+    print(
+        f"Found {len([msg for msg in commit_messages if msg.strip()])} commits to search",
+        file=sys.stderr,
+    )
+
     for commit_message in commit_messages:
         commit_message = commit_message.strip()
         if not commit_message:
             continue
 
         lines = commit_message.split("\n")
+        commit_subject = lines[0] if lines else "Unknown commit"
 
         # Start from the last line and work backwards, collecting trailers
         for i in range(len(lines) - 1, -1, -1):
@@ -48,7 +66,12 @@ def get_kernel_trailers_from_commits():
             if line.startswith("CI-Test-Kernel:"):
                 kernel = line.split(":", 1)[1].strip()
                 kernels.add(kernel)
+                print(
+                    f"Found CI-Test-Kernel trailer '{kernel}' in commit: {commit_subject}",
+                    file=sys.stderr,
+                )
 
+    print(f"Total kernels found from trailers: {kernels}", file=sys.stderr)
     return kernels
 
 
